@@ -163,7 +163,7 @@ sim package is `wip`.
 | H7 | CLAUDE.md refresh | todo | after H1-H6 |
 | A1 | Dead-code removal | done @7c887736 | full suite 46/46 PASS, both golden hash sets match; ratchets unchanged (extern=118, game_h=25); arcade PU item was already resolved pre-existing |
 | A2 | Build single-sourcing | done @e7bc521a | wrapper_srcs/cflags.txt + reusable CI workflow + ddraw.dll/def/STRINGS removed + staleness check extracted; build_all verified in worktree AND main repo (byte-identical exe size); CI YAML unverified until next push |
-| A8 | Warning paydown | wip fix-refactor-a8-warnings | |
+| A8 | Warning paydown | done @65995e74 | warnings 261->117 (target classes all 0); -Wpedantic dropped; full suite 46/46 PASS, both golden hash sets match; fixed pre-existing stale missing-field-initializers baseline (unrelated drift, 22->36 actual) |
 | A9 | fe_* headers | todo | |
 | A3 | ddraw_wrapper restructure | todo | after A2 |
 | A5 | Dev modules out of release | todo | after A2; user decision on benchmark |
