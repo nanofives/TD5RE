@@ -245,17 +245,13 @@ static void frontend_update_direction_button_visibility(int dir_btn_idx, int man
 static int frontend_carsel_hold_enabled(void);   /* [#2/#7] TD5RE_CARSEL_HOLD gate (defined below) */
 static int frontend_carsel_hold_repeat(void);    /* hold-to-scroll LEFT/RIGHT auto-repeat (defined below); reused by Quick Race */
 
-/* [#2b/#10 2026-06-16] Cross-module hooks DEFINED in td5_frontend.c (extern'd
- * inline here, mirroring the existing extern-in-.c pattern, so no shared header
- * is touched).
+/* [#2b/#10 2026-06-16] Cross-module hooks DEFINED in td5_frontend.c, declared in
+ * td5_frontend_internal.h (2026-07-09, A9 refactor).
  *   s_postrace_td6_level       — >0 = the post-race table is a TD6 track; this
  *                                FSM sets it, the high-score overlay reads it.
  *   frontend_qr_random_button_on / frontend_qr_roll_selector — the QR randomize
  *                                BUTTON gate + roll action reused by the dedicated
  *                                Randomize buttons (#10). */
-extern int  s_postrace_td6_level;
-extern int  frontend_qr_random_button_on(void);
-extern void frontend_qr_roll_selector(int which);
 
 /* [#10] Dedicated RANDOMIZE button geometry (Car/Track rows). MUST match the
  * identical definitions in td5_frontend.c (which computes the value-text reserve)
@@ -3482,7 +3478,6 @@ static void fe_race_draw_screen_title(const char *text, float left_x, float top_
 
 /* A standard player-slot colour (opaque). */
 static uint32_t mp_slot_color(int slot) {
-    extern const uint32_t k_mp_player_colors[];
     /* [colour propagation 2026-06-23] Reflect each player's CHOSEN identity
      * colour (picked on the profile-setup colour grid, stored in
      * s_mp_player_accent) so the SELECT GAME MODE vote arrows/squares + host
@@ -7828,8 +7823,7 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
      * CAR / TOP SPEED / AVG SPEED / HITS / AIR TIME — is kept. The original has
      * no MP cop-chase results screen, so this is a port-only layout. */
     if (td5_game_mp_cop_chase_active()) {
-        extern const uint32_t k_mp_player_colors[];
-        #define CHASE_CTR(CX, S) (((CX) + sum_slide) * sx - fe_measure_small_text(S) * 0.5f * gsx)
+            #define CHASE_CTR(CX, S) (((CX) + sum_slide) * sx - fe_measure_small_text(S) * 0.5f * gsx)
         /* Column anchors (640x480 canvas px): NAME left-aligned at the title
          * edge; the rest centred. The 3rd column carries the mode value. */
         const float cc_name = 126.0f;

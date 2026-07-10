@@ -21,6 +21,11 @@
 #include "td5_credits.h"                 /* K_CREDIT_MUGSHOT_COUNT */
 #include "../../ddraw_wrapper/src/wrapper.h"   /* ID3D11* handles, g_backend */
 
+/* Per-module public APIs (2026-07-09, A9 refactor): real headers instead of
+ * these modules' declarations living scattered through this shared header. */
+#include "td5_fe_carstats.h"
+#include "td5_fe_devscreens.h"
+
 typedef struct { int width; int height; } BgGalImg;
 typedef struct { const char *label; int cols; int rows; } MpSplitLayout;
 
@@ -88,16 +93,8 @@ void Screen_CupWinners(void);    /* final cup standings / podium                
 void Screen_MpCopRoles(void);    /* cop chase: each player picks cop / suspect    */
 void Screen_MpTeamSelect(void);  /* cup teams: each player picks their team       */
 
-/* ---- CHANGELOG (2026-06-25) ----
- * Scrollable version + changelog screen reached from the main menu (button beside
- * EXIT). Handler + render fn both live in td5_frontend.c. */
-void Screen_Changelog(void);
-
-/* ---- PENDING TO TEST (2026-06-25) ----
- * Dev/QA checklist screen reached from a button at the top of the main menu.
- * Handler + render fn live in td5_frontend.c; the list/state/overlay live in
- * td5_pending.c. */
-void Screen_PendingTest(void);
+/* ---- CHANGELOG (2026-06-25) / PENDING TO TEST (2026-06-25) ----
+ * Screen_Changelog / Screen_PendingTest declared in td5_fe_devscreens.h. */
 
 /* ---- shared texture-page allocations ---- */
 #define SHARED_PAGE_WHITE     899
@@ -327,18 +324,8 @@ enum {
 };
 extern int s_mp_host_menu_open;   /* 1 = host car-options modal up (panes frozen) */
 extern int s_mp_host_menu_sel;    /* highlighted MP_HOST_OPT_*                    */
-/* Speed class of a car by acceleration + top-speed ONLY. Returns 0/1/2 if the car
- * is in the LOW / MID / HIGH class, else -1 (invalid/cop, a dropped extreme, or a
- * car between classes). Cars are ranked by score; the single slowest and fastest
- * are dropped, then each class is K distinct cars (next-slowest / median / next-
- * fastest) with no overlap. K = TD5RE_HOST_TIER_CARS, default max(9, ~15% of the
- * roster). Defined in td5_frontend.c (reuses the cached frontend_carphys_frac stats). */
-int   frontend_carphys_speed_tier(int car);
-/* Normalised position [0,1] of a car in the roster's combined accel+top-speed range
- * (0 = slowest, 1 = fastest); -1 if invalid/cop. For the nearest-centre fallback. */
-float frontend_car_speed_norm(int car);
-/* Band centre (0.20/0.50/0.80) for tier 0/1/2. */
-float frontend_speed_tier_center(int tier);
+/* frontend_carphys_speed_tier / frontend_car_speed_norm / frontend_speed_tier_center
+ * declared in td5_fe_carstats.h (speed-tier classification for host car options). */
 float frontend_update_timed_animation(int max_tick, uint32_t duration_ms);
 int frontend_check_escape(void);
 /* [splitscreen back-confirm 2026-06-24] Universal "confirm before going back"
@@ -450,19 +437,17 @@ void frontend_mp_panel_capped(int cols, float *pane_w, float *row_x0);
 void frontend_mp_setup_render(float sx, float sy);
 void frontend_mp_simul_carsel_render(float sx, float sy);
 
-/* --- carstats seam (td5_fe_carstats.c) --- */
+/* carstats state consumed by td5_fe_carstats.h's functions; devscreens'
+ * shared consumption of td5_frontend.c's own text-rendering primitives.
+ * (Module-owned declarations moved to td5_fe_carstats.h / td5_fe_devscreens.h,
+ * 2026-07-09 A9 refactor.) */
 extern char s_car_spec[17][48];       /* config.nfo field cache (stats sub-screen) */
 extern int  s_car_spec_car;           /* which car index is cached (-1 = none) */
-void frontend_render_car_stats_overlay(float sx, float sy);
-
-/* --- devscreens seam (td5_fe_devscreens.c) --- */
 extern int s_fe_preserve_case;        /* mixed-case text flag for fe_draw_text */
 void  fe_draw_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
 float fe_measure_text(const char *text, float sx, float sy);
 void  frontend_get_button_render_rect(int button_index, float sx, float sy,
                                       float *out_x, float *out_y, float *out_w, float *out_h);
-void  frontend_changelog_render(float sx, float sy);
-void  frontend_pending_render(float sx, float sy);
 int   fe_wrap_text_lines(const char *s, float maxw, float sx, float sy,
                          char lines[][64], int max_lines);
 
@@ -491,12 +476,9 @@ void fe_draw_text_centered(float center_x, float y, const char *text, uint32_t c
 float fe_glyph_sx(float sx, float sy);
 int frontend_ai_ext_id_taken(int ext_id, const int *slot_ext_ids, const int *slot_active, int count);
 void frontend_build_speed_pool(void);
-void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh, const char *f7, const char *f8, int car_ext_id, uint32_t accent, int compact, float frame_scale, float sx, float sy);
 void frontend_draw_screen_title(const char *text, float left_x, float top_y, uint32_t color, float sx, float sy);
 const char *frontend_get_car_display_name(int car_index);
-void frontend_render_physics_stats(int ext_id, float px, float py, float pw, float ph, uint32_t accent, int compact, float sx, float sy);
 uint32_t frontend_rgb_to_bgra(uint32_t c);
-void frontend_speed_band_for_tier(int tier, int *lo, int *hi);
 uint32_t td6_hsv_to_rgb(float h, float s, float v);
 void fe_draw_small_text(float x, float y, const char *text, uint32_t color, float sx, float sy);
 float fe_measure_small_text(const char *text);
@@ -623,7 +605,6 @@ enum {
 const char *td5_raceopts_label(int idx);
 void        td5_raceopts_value(int idx, char *out, size_t out_sz);
 void        td5_raceopts_cycle(int idx, int delta);
-void frontend_load_car_spec_fields(int car_index);
 void frontend_release_surface(int handle);
 void frontend_set_cursor_visible(int visible);
 void mp_simul_load_pane_spec(int p, int car);
@@ -848,10 +829,6 @@ void Screen_LocalizationInit(void);
 void Screen_MainMenu(void);
 void Screen_MusicTestExtras(void);
 void Screen_OptionsHub(void);
-void Screen_UiGuide(void);              /* dev UI style guide (slot 1, td5_fe_devscreens.c) */
-void frontend_uiguide_render(float sx, float sy);
-void Screen_MpGuide(void);              /* dev MP-widgets gallery (slot 44, td5_fe_devscreens.c) */
-void frontend_mpguide_render(float sx, float sy);
 void Screen_RaceTypeCategory(void);
 void Screen_SoundOptions(void);
 void Screen_StartupInit(void);
@@ -906,6 +883,21 @@ extern char s_cs_port_buf[8];     /* GAME PORT inline field buffer (direct host)
 extern int  s_cs_edit;
 extern uint8_t s_slot_ready[6];   /* [S31] per-slot lobby READY latch */
 void frontend_reset_text_input(void);
+
+/* [2026-07-09, A9 refactor] Cross-TU symbols that were re-declared inline-extern
+ * at their call sites instead of living in this header (extern-in-.c lint). */
+void frontend_draw_randomize_icon(float x, float y, float sx, float sy, int focused);          /* td5_fe_race.c */
+void frontend_render_carsel_randomize_icon(float sx, float sy);                                /* td5_fe_race.c */
+void frontend_render_trksel_randomize_icon(float sx, float sy);                                /* td5_fe_race.c */
+extern int s_mp_postrace_menu_mode;    /* 0 = standard menu, 1 = cup-between menu (td5_fe_race.c) */
+float frontend_lobby_swatch_y_offset(float text_scale, float swatch_h);                        /* td5_fe_net.c */
+int   frontend_race_summary_on(void);                                                          /* td5_fe_race.c */
+void  frontend_render_race_summary_overlay(float sx, float sy);                                /* td5_fe_race.c */
+extern int s_postrace_td6_level;       /* >0 = post-race table is a TD6 track (td5_frontend.c) */
+int   frontend_qr_random_button_on(void);                                                      /* td5_frontend.c */
+void  frontend_qr_roll_selector(int which);                                                    /* td5_frontend.c */
+int   frontend_mp_player_pane_cell(int p);                                                     /* td5_fe_race.c */
+int   mp_profiles_enabled(void);                                                               /* td5_fe_race.c */
 
 /* @GENERATED-SYMBOLS@ */
 

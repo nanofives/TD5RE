@@ -5625,10 +5625,6 @@ static float frontend_get_title_render_y(float sy) {
  * drawer used by the Quick Race icons below; the two render wrappers paint the
  * car-/track-SELECT screens' chips and are invoked from the post-button render
  * switch in td5_frontend_render_ui_rects. */
-extern void frontend_draw_randomize_icon(float x, float y, float sx, float sy, int focused);
-extern void frontend_render_carsel_randomize_icon(float sx, float sy);
-extern void frontend_render_trksel_randomize_icon(float sx, float sy);
-
 /* [#10 2026-06-16] Dedicated RANDOMIZE button geometry for the Car/Track rows: a
  * compact button parked at the far-right of the value column (32px row height).
  * MUST match the identical definitions in td5_fe_race.c (which creates the
@@ -6891,7 +6887,6 @@ static void frontend_render_race_type_description(float sx, float sy) {
  * button-create order in Screen_MpPostRace. s_mp_postrace_menu_mode selects the
  * table (0 = standard 6-button menu, 1 = cup-between-races 4-button menu).
  * Port-only feature — no original-binary basis. */
-extern int s_mp_postrace_menu_mode;
 static void frontend_render_mp_post_race_description(float sx, float sy) {
     /* Standard menu (mode 0). Order matches Screen_MpPostRace's 6 buttons:
      * RACE AGAIN / VIEW REPLAY / BACK TO LOBBY / BACK TO CAR SELECTION /
@@ -7735,7 +7730,6 @@ static void frontend_render_mp_lobby_overlay(float sx, float sy) {
          * [#4] Center the swatch on the name's cap-band — fe_draw_text anchors at
          * the glyph cell-top, so a same-y swatch reads too high. Offset helper is
          * defined in td5_fe_net.c (TD5RE_LOBBY_ALIGN). Name text below keeps row_y. */
-        extern float frontend_lobby_swatch_y_offset(float text_scale, float swatch_h);
         fe_draw_quad((float)FE_LOBBY_X * sx,
                      (row_y + frontend_lobby_swatch_y_offset(0.8f, 14.0f)) * sy,
                      16.0f * sx, 14.0f * sy,
@@ -9540,8 +9534,6 @@ void td5_frontend_render_ui_rects(void) {
     case TD5_SCREEN_RACE_RESULTS: {
         /* [#10] all-players summary table (gated TD5RE_RACE_SUMMARY, default on);
          * falls back to the legacy one-car-at-a-time results overlay when off. */
-        extern int  frontend_race_summary_on(void);
-        extern void frontend_render_race_summary_overlay(float sx, float sy);
         if (frontend_race_summary_on()) frontend_render_race_summary_overlay(sx, sy);
         else                            frontend_render_race_results_overlay(sx, sy);
         break;

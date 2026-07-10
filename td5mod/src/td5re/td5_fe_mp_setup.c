@@ -1281,7 +1281,6 @@ void frontend_mp_simul_carsel_render(float sx, float sy) {
          * player parked bottom-right while choosing a screen also picks their car
          * bottom-right. Unclaimed cells draw nothing (this loop only iterates the
          * human players). Identity when the positions feature is off. */
-        extern int frontend_mp_player_pane_cell(int);  /* defined in td5_fe_race.c */
         int cell = frontend_mp_player_pane_cell(p);
         int col = cell % cols, row = cell / cols;
         float px = row_x0 + (float)col * pane_w, py = mp_title_band + (float)row * pane_h;
@@ -1938,7 +1937,6 @@ void frontend_mp_setup_render(float sx, float sy) {
          * frontend_mp_setup_profile_render); reserve its row here and pin OK to
          * the LAST slot so the nav band lines up with the profile overlay. */
         {
-            extern int mp_profiles_enabled(void);   /* defined in td5_fe_race.c */
             int pon = mp_profiles_enabled();
             /* [LANE ASSIST 2026-06-28] Band now carries 6 rows with profiles on
              * (NAME, COLOUR, PROFILE, AUTO/MANUAL, ASSIST, OK) or 5 without (PROFILE

@@ -963,7 +963,6 @@ static void mpguide_draw_profile_pane(float px, float py, float pw, float ph,
 }
 
 void frontend_mpguide_render(float sx, float sy) {
-    extern const uint32_t k_mp_player_colors[];   /* shared MP accent palette (td5_fe_race.c seam) */
     uint32_t now = td5_plat_time_ms();
     uint32_t demo_rgb = k_mp_player_colors[0] & 0x00FFFFFFu;
     int p;
