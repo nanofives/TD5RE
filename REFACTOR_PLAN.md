@@ -165,7 +165,7 @@ sim package is `wip`.
 | A2 | Build single-sourcing | done @e7bc521a | wrapper_srcs/cflags.txt + reusable CI workflow + ddraw.dll/def/STRINGS removed + staleness check extracted; build_all verified in worktree AND main repo (byte-identical exe size); CI YAML unverified until next push |
 | A8 | Warning paydown | done @65995e74 | warnings 261->117 (target classes all 0); -Wpedantic dropped; full suite 46/46 PASS, both golden hash sets match; fixed pre-existing stale missing-field-initializers baseline (unrelated drift, 22->36 actual) |
 | A9 | fe_* headers | done @4f1e5828 | td5_fe_carstats.h + td5_fe_devscreens.h (verified per-function ownership); 15 extern-in-.c folded in; extern_in_c_total 118->103; smoke 12/12 PASS. fe_menu/fe_net/fe_mp_setup/fe_race NOT split (their fns are entangled w/ td5_frontend.c shared state, not clean module APIs) — future package if wanted |
-| A3 | ddraw_wrapper restructure | wip fix-refactor-a3-wrapper | after A2 |
+| A3 | ddraw_wrapper restructure | done @7abd8190 | wrapper.h -> 3 per-interface headers + d3d11_backend.c -> device/pipeline/draw .c files, both split along pre-existing banner boundaries; diffed byte-identical vs original; build_all + wrapper rebuilt from scratch + smoke 12/12 PASS; no live visual screenshot check (smoke races completing at normal frame times used as proxy) |
 | A5 | Dev modules out of release | todo | after A2; user decision on benchmark |
 | A4 | Env-knob prune | todo | SOLO; user batch-approval of fold list |
 | A6 | DAT_ token retirement | todo | SOLO |
