@@ -8,8 +8,8 @@
  * centralises it. Environment variables are fixed for a process run, so callers
  * typically read once into a file-static and cache the result:
  *
- *     static int s_foo = -1;
- *     if (s_foo < 0) s_foo = td5_env_int("TD5RE_FOO", 200, 0, 1000);
+ *     static int s_traffic_max = -1;
+ *     if (s_traffic_max < 0) s_traffic_max = td5_env_int("TD5RE_TRAFFIC_MAX", 6, 0, 12);
  *
  * Helpers return the default when the var is unset or empty. Integer parsing is
  * base-10 (atoi-equivalent — matches the overwhelming majority of call sites and
