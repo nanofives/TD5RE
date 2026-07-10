@@ -162,7 +162,7 @@ sim package is `wip`.
 | H6 | Strays (0-byte gpr, -p dir, .o files) | done @53dc2bd8 | other strays already gone from tree; only td5_config.h placeholder fixed; smoke 12/12 PASS |
 | H7 | CLAUDE.md refresh | todo | after H1-H6 |
 | A1 | Dead-code removal | done @7c887736 | full suite 46/46 PASS, both golden hash sets match; ratchets unchanged (extern=118, game_h=25); arcade PU item was already resolved pre-existing |
-| A2 | Build single-sourcing | wip fix-refactor-a2-buildsource | |
+| A2 | Build single-sourcing | done @e7bc521a | wrapper_srcs/cflags.txt + reusable CI workflow + ddraw.dll/def/STRINGS removed + staleness check extracted; build_all verified in worktree AND main repo (byte-identical exe size); CI YAML unverified until next push |
 | A8 | Warning paydown | todo | |
 | A9 | fe_* headers | todo | |
 | A3 | ddraw_wrapper restructure | todo | after A2 |
