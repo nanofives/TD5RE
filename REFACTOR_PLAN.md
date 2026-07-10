@@ -172,7 +172,7 @@ sim package is `wip`.
 | A10 | Shared helpers (td5_bytes.h, argb8, math) | done @5ced1735 | td5_bytes.h (LE read/write, 6 sites consolidated) + td5_math_util.h (clampi/iabs unify + td5_argb8, 7 dup sites); full suite 46/46 PASS, goldens matched; merged alongside a concurrent /fix session's commit (no file overlap) |
 | A7 | Comment debt (per-module, divisible) | todo | filler; sim modules before their Wave-2 package |
 | S1a | FP_* migration td5_physics.c (+S2 renames) | done @3dc8723f | new shared td5_fp.h (FP_TRUNC/FP_SCALE/FP_ANGLE, reusable by S1b-S1d); mechanically wrapped 99 raw >>8/<<8 sites + 3 angle-wrap `(x>>8)&0xFFF` idioms in td5_physics.c, verified byte-identical operand/operator per site; full suite 46/46 PASS, 5 golden module hashes matched. S2 renames (23 iVarN/local_N decls) NOT done this pass -- left for a follow-up, per S2's own "can ride along" (optional) framing |
-| S1b | FP_* migration td5_physics_suspension.c | todo | sim-exclusive |
+| S1b | FP_* migration td5_physics_suspension.c | wip fix-refactor-s1b-fp-suspension | sim-exclusive |
 | S1c | FP_* migration td5_physics_collision.c (+renames) | todo | sim-exclusive |
 | S1d | FP_* migration td5_track.c | todo | sim-exclusive |
 | S3 | update_player split + physics.c alignment | todo | sim-exclusive; after S1a |
