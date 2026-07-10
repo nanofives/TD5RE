@@ -7153,6 +7153,10 @@ static void frame_render(void)
     /* [TRAFFIC BATTLE 2026-06-28] Per-viewport "WRECKS N" tally. Self-gated:
      * no-op unless the Traffic Destruction battle mode is active. */
     td5_hud_draw_battle_wrecks();
+    /* [CAR BROKE DOWN 2026-07-10] Centred "PRESS TO CONTINUE" prompt on any human
+     * pane whose car is knocked out. Self-gated (no-op when nothing is broken
+     * down / CarDamage off). */
+    td5_hud_draw_brokedown_prompt();
     /* [CAR DAMAGE 2026-06-29 split-screen fix] Per-viewport car-health bar
      * (top-left of each pane). Drawn HERE in the full-screen overlay pass -- NOT
      * in the per-pane status-text loop above -- so the screen-space bar quads map
@@ -7828,7 +7832,12 @@ static int check_race_completion(uint32_t sim_delta) {
             if (g_td5.mp_ai_player_mask & (1u << i)) continue;    /* AI-driven, not a real human */
             if (cop_chase && td5_game_cop_chase_is_suspect(i) &&
                 g_wanted_damage_state[i] <= 0) continue;          /* arrested -> done */
-            if (td5_damage_slot_knocked_out(i)) continue;         /* [CAR DAMAGE] wrecked -> done */
+            /* [CAR BROKE DOWN 2026-07-10] A knocked-out HUMAN no longer auto-
+             * completes. The old rule ("wrecked -> done") is what made a broken-
+             * down player LOSE — the race ended around them. Now the race WAITS:
+             * the player must press recovery (the "PRESS TO CONTINUE" prompt) to
+             * force-recover and finish. AI/traffic knockouts still count as done
+             * in the slot loop below (they can't press to continue). */
             if (s_slot_state[i].companion_1 == 0) { all_humans_done = 0; break; }
         }
 
@@ -7836,10 +7845,13 @@ static int check_race_completion(uint32_t sim_delta) {
             if (s_slot_state[i].state == 3) continue;  /* disabled */
             if (cop_chase && td5_game_cop_chase_is_suspect(i) &&
                 g_wanted_damage_state[i] <= 0) continue;          /* arrested -> done */
-            if (td5_damage_slot_knocked_out(i)) continue;         /* [CAR DAMAGE] wrecked -> done */
+            int is_human = (i < humans) &&
+                           !(g_td5.mp_ai_player_mask & (1u << i));
+            /* [CAR BROKE DOWN 2026-07-10] A knocked-out NON-human (AI/traffic) is
+             * treated as done (it can't recover). A knocked-out HUMAN is NOT — it
+             * blocks completion so the race waits for the CONTINUE press. */
+            if (!is_human && td5_damage_slot_knocked_out(i)) continue;
             if (s_slot_state[i].companion_1 == 0) {     /* not finished */
-                int is_human = (i < humans) &&
-                               !(g_td5.mp_ai_player_mask & (1u << i));
                 /* Unfinished AI (incl. AI-driven players) don't hold up the
                  * results once all real humans are done. */
                 if (!is_human && all_humans_done) continue;

@@ -229,6 +229,15 @@ static int32_t g_difficulty_easy = 0;
 int32_t g_difficulty_hard = 0;
 int32_t g_race_slot_state[TD5_MAX_RACER_SLOTS]; /* 1=human, 0=AI per slot */
 
+/* [CAR BROKE DOWN 2026-07-10] Public read of the per-slot human flag (owns
+ * g_race_slot_state). Lets the HUD show the broke-down prompt only on human
+ * panes without pulling in td5_physics_internal.h. */
+int td5_physics_slot_is_human(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    return g_race_slot_state[slot] == 1;
+}
+
 /* Viewport -> actor-slot map (defined in td5_game.c). Used by the stuck-recovery
  * driver to map a local human player index back to its actor slot, and to read
  * that player's one-shot manual-recovery edge from the input layer. */
@@ -822,11 +831,16 @@ void td5_physics_tick(void)
      * pass 2026-05-13: no paused gate around ResolveVehicleContacts.] */
     td5_physics_resolve_vehicle_contacts();
 
-    /* [STUCK RECOVERY 2026-06-15] After this tick's integration + contact
-     * resolution have settled, run the per-local-human stuck-recovery driver:
-     * manual (R / SELECT) reposition. Deterministic (sim-tick cadence,
-     * replicated/local state); restricted to non-network play for v1. Inert
-     * when TD5RE_STUCK_RECOVERY=0. */
+    /* [CAR BROKE DOWN 2026-07-10] Age the post-recovery ghost window (per slot)
+     * BEFORE the recovery driver, so a ghost armed this tick keeps its full
+     * duration. Tick-based -> net-deterministic. Inert when CarDamage is off. */
+    td5_damage_tick_ghost();
+
+    /* [STUCK RECOVERY 2026-06-15; net-safe rewrite 2026-07-10] After this tick's
+     * integration + contact resolution have settled, run the car-recovery driver:
+     * manual (R / SELECT) reposition. Deterministic (sim-tick cadence; the request
+     * rides the merged control_bits word, so it fires on the same lockstep round
+     * on every peer). Inert when TD5RE_STUCK_RECOVERY=0. */
     td5_physics_update_stuck_recovery();
 }
 

@@ -77,6 +77,19 @@ static int32_t s_last_contact_tick[TD5_MAX_TOTAL_ACTORS];
 static int32_t s_event_peak_mag[TD5_MAX_TOTAL_ACTORS];
 static int     s_contact_gap = 8;   /* ticks of no-contact that end a collision event */
 
+/* ------------------------------------------------- [CAR BROKE DOWN 2026-07-10]
+ * Post-recovery GHOST window. After a broken-down car is force-recovered
+ * (30-spans-back full repair — see td5_physics_recover_player), it is granted a
+ * brief invulnerable, translucent window so the player can get moving again
+ * without being instantly re-wrecked at the cold drop-in spot. Tick-based (30 Hz
+ * sim tick) so it is net-deterministic. In the final s_ghost_blink ticks the car
+ * flickers solid<->translucent so the player sees the protection is about to end,
+ * then returns to fully solid + vulnerable. */
+static int     s_ghost_ticks   = 90;   /* total ghost duration (ticks; 90=3s)   — TD5RE_GHOST_TICKS */
+static int     s_ghost_blink   = 30;   /* trailing blink window (ticks; 30=1s)  — TD5RE_GHOST_BLINK_TICKS */
+static int     s_ghost_alpha   = 96;   /* translucent alpha 0..255 while ghosting — TD5RE_GHOST_ALPHA */
+static int16_t s_ghost_remain[TD5_MAX_TOTAL_ACTORS];  /* >0 = ghosting; counts down each sim tick */
+
 /* Env-knob parse/clamp helpers now live in td5_config.c (shared across modules). */
 
 /* Map the global Game Options toughness/deform LEVELS (toughness: 0=Low,
@@ -124,6 +137,10 @@ int td5_damage_init(void) {
     s_smoke_fire  = td5_env_int  ("TD5RE_DAMAGE_SMOKE_FIRE",    88,      0,    100);
     s_scuff_pct   = td5_env_int  ("TD5RE_DAMAGE_SCUFF",         55,      0,    100);
     s_contact_gap = td5_env_int  ("TD5RE_DAMAGE_CONTACT_GAP",   8,       1,    300);
+    /* [CAR BROKE DOWN 2026-07-10] Post-recovery ghost window. */
+    s_ghost_ticks = td5_env_int  ("TD5RE_GHOST_TICKS",         90,       0,    900);
+    s_ghost_blink = td5_env_int  ("TD5RE_GHOST_BLINK_TICKS",   30,       0,    900);
+    s_ghost_alpha = td5_env_int  ("TD5RE_GHOST_ALPHA",         96,       0,    255);
     apply_levels();   /* seed HP/dent/disp from the saved levels (or env override) */
     TD5_LOG_I(LOG_TAG, "car_damage: init max_hp=%d impact_pct=%d min_imp=%d ko=%d "
               "K=%d dent_ref=%d dent_frac=%d disp_frac=%d radius=%.2f penalty=%d smoke=%d/%d/%d",
@@ -210,6 +227,7 @@ void td5_damage_reset_race(void) {
         s_ko_notified[i] = 0;
         s_last_contact_tick[i] = -1000000;   /* first contact is always a fresh event */
         s_event_peak_mag[i] = 0;
+        s_ghost_remain[i] = 0;               /* [CAR BROKE DOWN] no ghost at race start */
 
         /* Init health ONLY when enabled — when off we never touch the actor
          * padding, so the faithful sim is byte-identical to the original. */
@@ -224,6 +242,43 @@ void td5_damage_reset_race(void) {
     }
     TD5_LOG_I(LOG_TAG, "car_damage: reset_race (enabled=%d, max_hp=%d)",
               enabled, s_max_hp);
+}
+
+/* ------------------------------------------------- [CAR BROKE DOWN 2026-07-10]
+ * Post-recovery ghost window API. All tick-based (30 Hz sim tick) so identical
+ * on every net peer. Inert when CarDamage is off or the knob zeroes the window. */
+void td5_damage_begin_ghost(int slot) {
+    if (!s_inited) td5_damage_init();
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    if (!td5_damage_enabled()) return;         /* feature rides on CarDamage */
+    if (s_ghost_ticks <= 0) return;            /* disabled via knob */
+    s_ghost_remain[slot] = (int16_t)s_ghost_ticks;
+    TD5_LOG_I(LOG_TAG, "ghost: slot=%d begin (%d ticks, %.1fs, alpha=%d)",
+              slot, s_ghost_ticks, s_ghost_ticks / 30.0, s_ghost_alpha);
+}
+
+void td5_damage_tick_ghost(void) {
+    for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) {
+        if (s_ghost_remain[i] > 0 && --s_ghost_remain[i] == 0)
+            TD5_LOG_I(LOG_TAG, "ghost: slot=%d ended (solid + vulnerable again)", i);
+    }
+}
+
+int td5_damage_slot_ghosting(int slot) {
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return 0;
+    return s_ghost_remain[slot] > 0;
+}
+
+int td5_damage_ghost_alpha(int slot) {
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return 255;
+    int r = s_ghost_remain[slot];
+    if (r <= 0) return 255;                    /* not ghosting -> fully solid */
+    /* Trailing blink window: flicker solid<->translucent so the player sees the
+     * protection is about to expire. Toggle every 4 ticks off the deterministic
+     * remaining count; outside the window it's steady translucent. */
+    if (r <= s_ghost_blink && ((r >> 2) & 1) == 0)
+        return 255;                            /* solid flash */
+    return s_ghost_alpha;
 }
 
 /* [RESET-CAR REPAIR 2026-06-29] Fully repair ONE slot mid-race: restore health to
@@ -529,6 +584,11 @@ void td5_damage_on_impact(TD5_Actor *actor, int32_t impact_mag,
     if (!td5_damage_enabled() || !actor) return;
     int slot = (int)actor->slot_index;
     if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+
+    /* [CAR BROKE DOWN 2026-07-10] A freshly force-recovered car is GHOSTED: fully
+     * invulnerable for the ghost window so it can't be knocked out again the
+     * instant it drops back in. Skip health loss AND deformation. */
+    if (s_ghost_remain[slot] > 0) return;
 
     int32_t mag = impact_mag < 0 ? -impact_mag : impact_mag;
     if (mag < s_min_impact) return;            /* resting/grazing contact: ignore */
