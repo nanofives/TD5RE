@@ -241,7 +241,7 @@ the GPU/CPU contention that disrupted this session's attempts). -->
 | C2 | td5_camera.c cleanup | todo | after C1 |
 | C3 | td5_hud.c extern fix + split | todo | |
 | C4 | render_actors_for_view decompose | todo | |
-| C5 | td5_fe_race.c per-screen split | todo | |
+| C5 | td5_fe_race.c per-screen split | wip fix-refactor-c5-carselect | first slice: Screen_CarSelection (872 LOC) + its 2 called MP-simul helpers into a new TU. Pre-claim investigation ranked all 5 named screens by cross-screen coupling -- CarSelection cleanest (28/32 referenced statics used nowhere else; only 4 shared helper fns, no shared mutable state), QuickRaceMenu messiest (100% borrowed, not a good first slice). Verification is screen-walk selftest nav-reachability (fe_race.c is UNGUARDED in the golden-coverage map, no golden tripwire) |
 | C6 | td5_frontend.c split | todo | after C5 |
 | C7 | td5_save.c goto cleanup | todo | after C1 |
 | C8 | td5_sound.c FP + doppler naming | todo | after C1 |
