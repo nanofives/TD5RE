@@ -1643,12 +1643,17 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
 
 /* Pilot trace hooks (pool0 / 0x00404030) */
 
-void td5_physics_update_player(TD5_Actor *actor)
+/* --- Phases 1-4 of td5_physics_update_player: surface probes, surface/gravity,
+ * per-wheel grip, handbrake modifier. Extracted verbatim (S3 code-motion split
+ * -- see REFACTOR_PLAN.md) so the caller's variable scope shrinks; behavior is
+ * byte-identical, only the call boundary changed. */
+static void td5_physics_player_phase_grip(TD5_Actor *actor,
+                                           int32_t grip[4],
+                                           uint8_t *out_surface_center,
+                                           uint8_t out_surface_wheel[4],
+                                           int32_t *out_front_weight,
+                                           int32_t *out_rear_weight)
 {
-    int16_t *phys = get_phys(actor);
-    if (!phys) return;
-
-
     int32_t i;
 
     /* --- 1. Surface type probes (5: chassis + 4 wheels) ---
@@ -1678,7 +1683,6 @@ void td5_physics_update_player(TD5_Actor *actor)
     td5_physics_compute_surface_gravity(actor);
 
     /* --- 3. Per-wheel grip from surface tables, clamped [0x38..0x50] --- */
-    int32_t grip[4];
     int32_t front_weight = (int32_t)PHYS_S(actor, PHYS_FRONT_WEIGHT);
     int32_t rear_weight  = (int32_t)PHYS_S(actor, PHYS_REAR_WEIGHT);
     int32_t total_weight = front_weight + rear_weight;
@@ -1759,6 +1763,27 @@ void td5_physics_update_player(TD5_Actor *actor)
                       hb_mod, g2_pre, grip[2], g3_pre, grip[3]);
         }
     }
+
+    *out_surface_center = surface_center;
+    out_surface_wheel[0] = surface_wheel[0];
+    out_surface_wheel[1] = surface_wheel[1];
+    out_surface_wheel[2] = surface_wheel[2];
+    out_surface_wheel[3] = surface_wheel[3];
+    *out_front_weight = front_weight;
+    *out_rear_weight = rear_weight;
+}
+
+void td5_physics_update_player(TD5_Actor *actor)
+{
+    int16_t *phys = get_phys(actor);
+    if (!phys) return;
+
+    /* --- Phases 1-4 (surface probes, surface/gravity, grip, handbrake) --- */
+    int32_t grip[4];
+    uint8_t surface_center, surface_wheel[4];
+    int32_t front_weight, rear_weight;
+    td5_physics_player_phase_grip(actor, grip, &surface_center, surface_wheel,
+                                   &front_weight, &rear_weight);
 
     /* --- 5. Velocity drag in WORLD frame (confirmed by Ghidra at 0x40409x) ---
      * Original applies drag to linear_velocity_x/z BEFORE body decomposition.
