@@ -750,6 +750,7 @@ int  td5_gameopts_prev_btn(void);              /* < PREV button index, or -1 */
 int  td5_gameopts_next_btn(void);              /* NEXT > button index, or -1 */
 void td5_gameopts_value(int option, char *out, size_t out_sz); /* value string */
 void td5_gameopts_cycle(int option, int delta);/* LEFT/RIGHT cycle an option */
+void td5_gameopts_commit(void);                /* [2026-07-10] s_game_option_* -> g_td5.ini + persist; called from OK AND Back exit */
 void td5_gameopts_build_page(void);            /* (re)create buttons for current page */
 void td5_gameopts_reset_page(void);            /* jump back to page 0 (on screen entry) */
 int  td5_gameopts_page_prev(void);             /* page--; rebuild; 1 if it moved */
