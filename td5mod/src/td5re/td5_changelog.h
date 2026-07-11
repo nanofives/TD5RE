@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 10" },
+    { CL_ITEM,    "FIX: Game Options now save when you leave with Back," },
+    { CL_ITEM,    "  not only with OK - toggling TUTORIAL (or any option)" },
+    { CL_ITEM,    "  off and backing out now sticks instead of reverting" },
     { CL_ITEM,    "NEW: breaking down no longer loses you the race. The" },
     { CL_ITEM,    "  car parks with a CAR BROKE DOWN / PRESS TO CONTINUE" },
     { CL_ITEM,    "  prompt; press recovery to be towed 30 spans back," },

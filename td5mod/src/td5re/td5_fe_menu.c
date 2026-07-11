@@ -1549,41 +1549,11 @@ void Screen_GameOptions(void) {
                 } else if (s_button_index == td5_gameopts_ok_btn()) {
                     /* Sync the committed game options into g_td5.ini (the global the
                      * boot-override at frontend init reads) and write them back to
-                     * td5re.ini so the selection survives a relaunch. The original
-                     * persisted these to Config.td5 only, but the port's td5re.ini
-                     * boot-override masks Config.td5, so the ini is the live config
-                     * layer that must be kept in sync. [PART B 2026-06-02]
-                     * NB: laps is intentionally NOT written here — re-homed to
-                     * Quick Race + Track Selection. [S02 (c) 2026-06-04] */
-                    g_td5.ini.checkpoint_timers = s_game_option_checkpoint_timers;
-                    /* [dynamic-traffic] Persist the full 0..4 volume (5-state row). */
-                    g_td5.ini.traffic           = s_game_option_traffic;
-                    if (g_td5.ini.traffic < 0) g_td5.ini.traffic = 0;
-                    if (g_td5.ini.traffic > TD5_TRAFFIC_VOLUME_COUNT - 1)
-                        g_td5.ini.traffic = TD5_TRAFFIC_VOLUME_COUNT - 1;
-                    g_td5.ini.cops              = s_game_option_cops;
-                    g_td5.ini.difficulty        = s_game_option_difficulty;
-                    g_td5.ini.dynamics          = s_game_option_dynamics;
-                    g_td5.ini.collisions        = s_game_option_collisions;
-                    /* [ITEM CHAOS 2026-07-04] 3-state: 0=OFF 1=CASUAL 2=CHAOS. */
-                    g_td5.ini.powerups          = s_game_option_powerups;
-                    /* [CAR DAMAGE 2026-06-29] Commit the two global damage levels. */
-                    g_td5.ini.car_damage_toughness = s_game_option_car_toughness;
-                    g_td5.ini.car_damage_deform    = s_game_option_car_deform;
-                    /* [DAMAGE 2026-07-04] One "DAMAGE" toggle drives BOTH the master
-                     * car-damage switch AND the HUD damage-bar/wreck sub-toggle:
-                     * ON enables car damage + the bar, OFF disables both. */
-                    g_td5.ini.car_damage           = s_game_option_car_damage ? 1 : 0;
-                    g_td5.ini.car_damage_bar       = s_game_option_car_damage ? 1 : 0;
-                    g_td5.ini.lane_assist          = s_game_option_laneassist ? 1 : 0;
-                    TD5_LOG_I(LOG_TAG, "GameOptions OK: DAMAGE=%d (car_damage=%d bar=%d)",
-                              s_game_option_car_damage, g_td5.ini.car_damage, g_td5.ini.car_damage_bar);
-                    /* [TUTORIAL 2026-06-29] Commit the controller-overlay on/off.
-                     * Preserve a dev "force every race" (2) if it was set;
-                     * otherwise plain on=1 / off=0. */
-                    g_td5.ini.tutorial_overlay = s_game_option_tutorial
-                        ? (g_td5.ini.tutorial_overlay >= 2 ? 2 : 1) : 0;
-                    td5_ini_persist_options();
+                     * td5re.ini so the selection survives a relaunch. The commit is
+                     * shared with the Back/Escape exit path (frontend_central_return_back)
+                     * via td5_gameopts_commit() so leaving EITHER way keeps the change
+                     * — see [GAMEOPTS COMMIT 2026-07-10] in td5_frontend.c. */
+                    td5_gameopts_commit();
                     s_return_screen = TD5_SCREEN_OPTIONS_HUB;
                     s_inner_state = 7;
                 } else if (s_button_index == td5_gameopts_prev_btn()) {

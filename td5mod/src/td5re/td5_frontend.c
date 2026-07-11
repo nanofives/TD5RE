@@ -4017,6 +4017,13 @@ void frontend_back_confirm_tick(void) {
 /* Central-block back action (the existing escape-handler "return to the parent
  * screen" branch, factored so it can run immediately OR deferred via the guard). */
 static void frontend_central_return_back(void) {
+    /* [GAMEOPTS COMMIT 2026-07-10] Leaving Game Options via Back/Escape must save
+     * the toggled option values too — not just the OK button. Without this a
+     * toggle (e.g. TUTORIAL off) was silently discarded on Back and the setting
+     * never took effect. Commit BEFORE navigating away (s_current_screen is still
+     * GAME_OPTIONS here). Idempotent with the OK path's own commit. */
+    if (s_current_screen == TD5_SCREEN_GAME_OPTIONS)
+        td5_gameopts_commit();
     if (s_return_screen >= 0 &&
         s_return_screen < TD5_SCREEN_COUNT &&
         s_return_screen != s_current_screen) {
@@ -6324,6 +6331,45 @@ void td5_gameopts_cycle(int opt, int delta) {
         case GO_LANEASSIST: s_game_option_laneassist ^= 1; break;
         case GO_TUTORIAL:   s_game_option_tutorial ^= 1; break;
     }
+}
+
+/* [GAMEOPTS COMMIT 2026-07-10] Copy the transient s_game_option_* selections
+ * into g_td5.ini (the live config the race-init path reads) and persist them to
+ * td5re.ini. Extracted from Screen_GameOptions' OK branch so it can ALSO run on
+ * the Back/Escape exit path (frontend_central_return_back) — previously ONLY the
+ * OK button committed, so toggling e.g. TUTORIAL off and leaving via Back
+ * silently discarded the change and the setting appeared to "do nothing".
+ * Idempotent: safe to call from either exit path. NB: laps is intentionally NOT
+ * committed here (re-homed to Quick Race + Track Selection). */
+void td5_gameopts_commit(void) {
+    g_td5.ini.checkpoint_timers = s_game_option_checkpoint_timers;
+    /* [dynamic-traffic] Persist the full 0..4 volume (5-state row). */
+    g_td5.ini.traffic           = s_game_option_traffic;
+    if (g_td5.ini.traffic < 0) g_td5.ini.traffic = 0;
+    if (g_td5.ini.traffic > TD5_TRAFFIC_VOLUME_COUNT - 1)
+        g_td5.ini.traffic = TD5_TRAFFIC_VOLUME_COUNT - 1;
+    g_td5.ini.cops              = s_game_option_cops;
+    g_td5.ini.difficulty        = s_game_option_difficulty;
+    g_td5.ini.dynamics          = s_game_option_dynamics;
+    g_td5.ini.collisions        = s_game_option_collisions;
+    /* [ITEM CHAOS 2026-07-04] 3-state: 0=OFF 1=CASUAL 2=CHAOS. */
+    g_td5.ini.powerups          = s_game_option_powerups;
+    /* [CAR DAMAGE 2026-06-29] Commit the two global damage levels. */
+    g_td5.ini.car_damage_toughness = s_game_option_car_toughness;
+    g_td5.ini.car_damage_deform    = s_game_option_car_deform;
+    /* [DAMAGE 2026-07-04] One "DAMAGE" toggle drives BOTH the master car-damage
+     * switch AND the HUD damage-bar/wreck sub-toggle. */
+    g_td5.ini.car_damage           = s_game_option_car_damage ? 1 : 0;
+    g_td5.ini.car_damage_bar       = s_game_option_car_damage ? 1 : 0;
+    g_td5.ini.lane_assist          = s_game_option_laneassist ? 1 : 0;
+    /* [TUTORIAL 2026-06-29] Commit the controller-overlay on/off. Preserve a dev
+     * "force every race" (2) if it was set; otherwise plain on=1 / off=0. */
+    g_td5.ini.tutorial_overlay = s_game_option_tutorial
+        ? (g_td5.ini.tutorial_overlay >= 2 ? 2 : 1) : 0;
+    TD5_LOG_I(LOG_TAG, "GameOptions commit: DAMAGE=%d (car_damage=%d bar=%d) tutorial_overlay=%d",
+              s_game_option_car_damage, g_td5.ini.car_damage, g_td5.ini.car_damage_bar,
+              g_td5.ini.tutorial_overlay);
+    td5_ini_persist_options();
 }
 
 /* ===== RACE OPTIONS modal model (PORT ENHANCEMENT 2026-07-04) ================
