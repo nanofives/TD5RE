@@ -345,6 +345,38 @@ typedef struct {
     int        *target;
 } CliOverride;
 
+/* G4 (REFACTOR_PLAN.md): shared schema for the "Lighting" cluster -- one
+ * entry drives both the INI loader's default+key (td5re_load_config) and
+ * the CLI override name+target (td5_apply_cli_overrides), replacing what
+ * used to be two independently hand-maintained lists for these fields.
+ * Pilot slice for the rest of the config surface; see G4's ledger note. */
+typedef struct {
+    const char *cli_name;
+    const char *ini_section;
+    const char *ini_key;
+    int        *target;
+    int         default_value;
+} TD5_CfgIntEntry;
+
+static const TD5_CfgIntEntry k_lighting_cfg[] = {
+    { "Lighting",       "Lighting", "Enabled",        &g_td5.ini.lighting_enabled, 1 },
+    { "Headlights",     "Lighting", "Headlights",     &g_td5.ini.headlights,       1 },
+    { "DarkMode",       "Lighting", "DarkMode",        &g_td5.ini.light_dark_mode,  0 },
+    { "LightAuto",      "Lighting", "Auto",            &g_td5.ini.lighting_auto,    1 },
+    /* [LIGHT2] lighting rework mode: 0 classic / 1 enhance (default) */
+    { "LightingMode",   "Lighting", "Mode",             &g_td5.ini.lighting2_mode,   1 },
+    /* [LIGHT2 P2] screen-space shadow knobs */
+    { "SunShadows",     "Lighting", "SunShadows",       &g_td5.ini.sun_shadows,      1 },
+    { "ShadowStrength", "Lighting", "ShadowStrength",   &g_td5.ini.shadow_strength, 45 },
+    { "LightOcclusion", "Lighting", "LightOcclusion",   &g_td5.ini.light_occlusion,  1 },
+    /* [LIGHT2 P3] screen-space reflection knobs */
+    { "Reflections",    "Lighting", "Reflections",      &g_td5.ini.reflections,      1 },
+    { "WetRoads",       "Lighting", "WetRoads",         &g_td5.ini.wet_roads,        1 },
+    /* [LIGHT2] street-lamp light emission */
+    { "StreetLights",   "Lighting", "StreetLights",     &g_td5.ini.street_lights,    0 },
+};
+#define K_LIGHTING_CFG_N (sizeof(k_lighting_cfg) / sizeof(k_lighting_cfg[0]))
+
 static int td5_apply_cli_overrides(const char *cmdline,
                                    int *pwidth, int *pheight, int *pwindowed)
 {
@@ -363,18 +395,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "SFXMode",              &g_td5.ini.sfx_mode },
         { "RadioEnabled",         &g_td5.ini.radio_enabled },
         { "RadioVolume",          &g_td5.ini.radio_volume },
-        /* Lighting */
-        { "Lighting",             &g_td5.ini.lighting_enabled },
-        { "Headlights",           &g_td5.ini.headlights },
-        { "DarkMode",             &g_td5.ini.light_dark_mode },
-        { "LightAuto",            &g_td5.ini.lighting_auto },
-        { "LightingMode",         &g_td5.ini.lighting2_mode },
-        { "SunShadows",           &g_td5.ini.sun_shadows },
-        { "ShadowStrength",       &g_td5.ini.shadow_strength },
-        { "LightOcclusion",       &g_td5.ini.light_occlusion },
-        { "Reflections",          &g_td5.ini.reflections },
-        { "WetRoads",             &g_td5.ini.wet_roads },
-        { "StreetLights",         &g_td5.ini.street_lights },
+        /* Lighting fields moved to k_lighting_cfg (checked separately below) */
         /* GameOptions */
         { "Laps",                 &g_td5.ini.laps },
         { "CheckpointTimers",     &g_td5.ini.checkpoint_timers },
@@ -596,6 +617,18 @@ static int td5_apply_cli_overrides(const char *cmdline,
             }
         }
         if (!matched) {
+            for (i = 0; i < K_LIGHTING_CFG_N; ++i) {
+                if (strlen(k_lighting_cfg[i].cli_name) == klen &&
+                    _strnicmp(key, k_lighting_cfg[i].cli_name, klen) == 0) {
+                    *k_lighting_cfg[i].target = val;
+                    dbglog("  CLI override: %s=%d", k_lighting_cfg[i].cli_name, val);
+                    matched = 1;
+                    n_applied++;
+                    break;
+                }
+            }
+        }
+        if (!matched) {
             dbglog("  CLI: unknown key '%.*s' (ignored)", (int)klen, key);
         }
     }
@@ -608,6 +641,9 @@ show_help:
         dbglog("  --Width=N --Height=N --Windowed=N");
         for (i = 0; i < table_n; ++i) {
             dbglog("  --%s=N", table[i].name);
+        }
+        for (i = 0; i < K_LIGHTING_CFG_N; ++i) {
+            dbglog("  --%s=N", k_lighting_cfg[i].cli_name);
         }
     }
     return n_applied;
@@ -798,22 +834,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     td5_ini_str("Audio", "RadioURL", "http://ice1.somafm.com/beatblender-128-mp3",
                 g_td5.ini.radio_url, sizeof(g_td5.ini.radio_url));
 
-    /* Lighting (dynamic light system foundation) */
-    g_td5.ini.lighting_enabled = td5_ini_int("Lighting", "Enabled", 1);
-    g_td5.ini.headlights       = td5_ini_int("Lighting", "Headlights", 1);
-    g_td5.ini.light_dark_mode  = td5_ini_int("Lighting", "DarkMode", 0);
-    g_td5.ini.lighting_auto    = td5_ini_int("Lighting", "Auto", 1);
-    /* [LIGHT2] lighting rework mode: 0 classic / 1 enhance (default) */
-    g_td5.ini.lighting2_mode   = td5_ini_int("Lighting", "Mode", 1);
-    /* [LIGHT2 P2] screen-space shadow knobs */
-    g_td5.ini.sun_shadows      = td5_ini_int("Lighting", "SunShadows", 1);
-    g_td5.ini.shadow_strength  = td5_ini_int("Lighting", "ShadowStrength", 45);
-    g_td5.ini.light_occlusion  = td5_ini_int("Lighting", "LightOcclusion", 1);
-    /* [LIGHT2 P3] screen-space reflection knobs */
-    g_td5.ini.reflections      = td5_ini_int("Lighting", "Reflections", 1);
-    g_td5.ini.wet_roads        = td5_ini_int("Lighting", "WetRoads", 1);
-    /* [LIGHT2] street-lamp light emission */
-    g_td5.ini.street_lights    = td5_ini_int("Lighting", "StreetLights", 0);
+    /* Lighting (dynamic light system foundation) -- schema-driven, see
+     * k_lighting_cfg (shared with the CLI override parser above). */
+    {
+        size_t i;
+        for (i = 0; i < K_LIGHTING_CFG_N; ++i) {
+            *k_lighting_cfg[i].target = td5_ini_int(k_lighting_cfg[i].ini_section,
+                                                     k_lighting_cfg[i].ini_key,
+                                                     k_lighting_cfg[i].default_value);
+        }
+    }
 
     /* Game options */
     g_td5.ini.laps               = td5_ini_int("GameOptions", "Laps", 0);
