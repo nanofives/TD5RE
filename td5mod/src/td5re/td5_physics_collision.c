@@ -14,6 +14,7 @@
  * ======================================================================== */
 
 #include "td5_physics.h"
+#include "td5_fp.h"       /* FP_TRUNC/FP_SCALE/FP_ANGLE 24.8 fixed-point macros */
 #include "td5_ai.h"
 #include "td5_track.h"
 #include "td5_render.h"   /* td5_render_get_vehicle_mesh */
@@ -242,8 +243,8 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
      * to negative values before SAR (asm: `CDQ; AND EDX,0xFFF; ADD EAX,EDX;
      * SAR EAX,0xC`). GCC's plain `>> 12` rounds toward -inf for negatives,
      * producing 1-unit-too-negative results. D4 audit. */
-    int32_t arm_x_int = (actor->world_pos.x - probe_x_fp8) >> 8;
-    int32_t arm_z_int = (actor->world_pos.z - probe_z_fp8) >> 8;
+    int32_t arm_x_int = FP_TRUNC((actor->world_pos.x - probe_x_fp8));
+    int32_t arm_z_int = FP_TRUNC((actor->world_pos.z - probe_z_fp8));
     int64_t iVar9_raw = (int64_t)arm_z_int * sin_w + (int64_t)arm_x_int * cos_w;
     int32_t iVar9 = (int32_t)((iVar9_raw + ((iVar9_raw >> 63) & 0xFFF)) >> 12);
 
@@ -337,13 +338,13 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
          * runtime add-and-shift form, but since iVar6 = -25497168 is
          * negative, we apply (val + 0xFFF) >> 12 explicitly.
          * [CONFIRMED @ 0x00406A86-0x00406ACB] */
-        int32_t iVar6_num = (V2W_INERTIA_K >> 8) * -V2W_NUM_SCALE;  /* -25497168 */
+        int32_t iVar6_num = (FP_TRUNC(V2W_INERTIA_K)) * -V2W_NUM_SCALE;  /* -25497168 */
         int32_t num = (iVar6_num + ((iVar6_num >> 31) & 0xFFF)) >> 12;
 
         /* Denominator = (iVar9^2 + K) >> 8. [CONFIRMED @ 0x00406AAE-0x00406AD2]
          * iVar9^2 + K is always non-negative (K>0, square>=0) so no sign-
          * round needed; matches port's prior code. */
-        int64_t denom64 = ((int64_t)iVar9 * iVar9 + (int64_t)V2W_INERTIA_K) >> 8;
+        int64_t denom64 = FP_TRUNC(((int64_t)iVar9 * iVar9 + (int64_t)V2W_INERTIA_K));
         if (denom64 == 0) denom64 = 1;
         impulse = (int32_t)((int64_t)num * iVar11 / denom64);
 
@@ -648,15 +649,15 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
      * Fix (this commit): match the listing — wrapper now takes raw 24.8 fp pos +
      * raw 24.8 fp yaw accumulators, computes the same deltas-then-shift and
      * raw-then-shift internally. */
-    int32_t delta_world_x = (pos_b_x_fp - pos_a_x_fp) >> 8;
-    int32_t delta_world_z = (pos_b_z_fp - pos_a_z_fp) >> 8;
-    int32_t heading_a = yaw_a_acc >> 8;            /* matches `*param_4 >> 8` */
-    int32_t heading_b = yaw_b_acc >> 8;            /* matches `param_4[1] >> 8` */
+    int32_t delta_world_x = FP_TRUNC((pos_b_x_fp - pos_a_x_fp));
+    int32_t delta_world_z = FP_TRUNC((pos_b_z_fp - pos_a_z_fp));
+    int32_t heading_a = FP_TRUNC(yaw_a_acc);            /* matches `*param_4 >> 8` */
+    int32_t heading_b = FP_TRUNC(yaw_b_acc);            /* matches `param_4[1] >> 8` */
     /* dheading derived from raw accumulator subtract then shift, matching
      * `uVar25 = (uint)(short)((*param_4 - param_4[1]) >> 8)`. The (short) cast
      * means the LOW 16 bits are then treated as int — equivalent in our path
      * because cos_fixed12/sin_fixed12 mask with & 0xFFF internally. */
-    int32_t dheading_raw_shift = (yaw_a_acc - yaw_b_acc) >> 8;
+    int32_t dheading_raw_shift = FP_TRUNC((yaw_a_acc - yaw_b_acc));
 
     /* Pool15 V2V pilot trace — capture inputs at entry. */
     /* Pilot snapshot stores raw 24.8 fp coords for direct comparison with the
@@ -938,7 +939,7 @@ static int obb_corner_test(TD5_Actor *a, TD5_Actor *b,
  * For positive x: equivalent to x >> 8.
  * For negative x not divisible by 256: x >> 8 rounds toward -inf, this rounds toward 0. */
 static inline int32_t v2v_sar8_rz(int32_t x) {
-    return ((x < 0) ? (x + 0xFF) : x) >> 8;
+    return FP_TRUNC(((x < 0) ? (x + 0xFF) : x));
 }
 
 /* Signed round-to-zero divide by 4096 — matches the original's
@@ -1330,7 +1331,7 @@ static void td5_physics_apply_traffic_crash_spin(TD5_Actor *t, int32_t impact_ma
      * Magnitude scales with impact, so harder hits spin faster. */
     int32_t scatter = impact_mag / 4;
     if (scatter < 0x7FFF) scatter = 0x7FFF;            /* floor (orig 0x4082A2-C9) */
-    int16_t spin_ang = (int16_t)(-((scatter >> 8) / 2));  /* -(iVar/2), <= -63 */
+    int16_t spin_ang = (int16_t)(-((FP_TRUNC(scatter)) / 2));  /* -(iVar/2), <= -63 */
     int16_t ang[3] = { spin_ang, spin_ang, spin_ang };
 
     float spin[9];
@@ -1640,7 +1641,7 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
      * symptom of impulse∈[-4..1] was unrelated — it came from obb_corner_test
      * having swapped cardef offsets (fixed in 4e8860e), which made rel_vel
      * collapse to near-zero. */
-    const int64_t NUM_CONST    = (INERTIA_K_64 >> 8) * V2V_NUM_SCALE;
+    const int64_t NUM_CONST    = (FP_TRUNC(INERTIA_K_64)) * V2V_NUM_SCALE;
 
     if (is_side_branch) {
         /* --- SIDE BRANCH (LAB_00407B7F) --- */
@@ -1672,7 +1673,7 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
          * NOTE: impact_mag is derived from this impulse, so the multiplier also
          * scales the heavy-crash scatter/lift and how readily the heavy gate
          * trips — kept modest now so routine rams don't go airborne. */
-        impulse = (int32_t)(((int64_t)impulse * arc_coll_q8) >> 8);
+        impulse = (int32_t)(FP_TRUNC(((int64_t)impulse * arc_coll_q8)));
 
         /* [CONFIRMED @ 0x4079C0 side branch]: XOR sign rejection. */
         if (((cx_B - cx_A) ^ impulse) < 0) {
@@ -1730,7 +1731,7 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         int64_t impulse_raw = (NUM_CONST / denom) * rel_vel;
         impulse = v2v_sar12_rz_64(impulse_raw);
         /* [ARCADE] Boosted horizontal knockback (default 1.4x; see SIDE note). */
-        impulse = (int32_t)(((int64_t)impulse * arc_coll_q8) >> 8);
+        impulse = (int32_t)(FP_TRUNC(((int64_t)impulse * arc_coll_q8)));
 
         if (((cz_B - cz_A) ^ impulse) < 0) {
             rejected = 1;
@@ -2224,9 +2225,9 @@ static void collision_detect_simple(TD5_Actor *a, TD5_Actor *b)
     int32_t radius_b = (int32_t)CDEF_S(b, CDEF_COLLISION_RADIUS);
     int32_t combined = ((radius_a + radius_b) * 3) >> 2;
 
-    int32_t dx = (a->world_pos.x >> 8) - (b->world_pos.x >> 8);
-    int32_t dy = (a->world_pos.y >> 8) - (b->world_pos.y >> 8);
-    int32_t dz = (a->world_pos.z >> 8) - (b->world_pos.z >> 8);
+    int32_t dx = (FP_TRUNC(a->world_pos.x)) - (FP_TRUNC(b->world_pos.x));
+    int32_t dy = (FP_TRUNC(a->world_pos.y)) - (FP_TRUNC(b->world_pos.y));
+    int32_t dz = (FP_TRUNC(a->world_pos.z)) - (FP_TRUNC(b->world_pos.z));
 
     int32_t dist_sq = dx * dx + dy * dy + dz * dz;
     if (dist_sq >= combined * combined) return;
@@ -2382,8 +2383,8 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
 
     /* Initial-state display-unit headings (used only for the diagnostic log
      * below; mirrors the prior heading_a/heading_b labels). */
-    int32_t initial_heading_a = (yaw_a_acc >> 8) & 0xFFF;
-    int32_t initial_heading_b = (yaw_b_acc >> 8) & 0xFFF;
+    int32_t initial_heading_a = FP_ANGLE(yaw_a_acc);
+    int32_t initial_heading_b = FP_ANGLE(yaw_b_acc);
 
     /* Initial OBB test at full (end-of-tick) position.
      * [CONFIRMED @ 0x00408B27-B48]: CollectVehicleCollisionContacts is
@@ -2438,8 +2439,8 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
 
     /* Display-unit heading snapshot for the dispatch path. Updated each
      * iter from yaw_a_acc/yaw_b_acc after the wrapper call. */
-    int32_t test_ha = yaw_a_acc >> 8;
-    int32_t test_hb = yaw_b_acc >> 8;
+    int32_t test_ha = FP_TRUNC(yaw_a_acc);
+    int32_t test_hb = FP_TRUNC(yaw_b_acc);
 
     for (int iter = 0; iter < 7; iter++) {
         /* Per-iter halving [listing 0x00408C0E-0x00408C56]:
@@ -2455,8 +2456,8 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
 
         /* Pass current raw 24.8 accumulators to the wrapper, matching the
          * listing exactly — callee owns the >>8 shift on delta/yaw. */
-        test_ha = yaw_a_acc >> 8;  /* snapshot for dispatch logging */
-        test_hb = yaw_b_acc >> 8;
+        test_ha = FP_TRUNC(yaw_a_acc);  /* snapshot for dispatch logging */
+        test_hb = FP_TRUNC(yaw_b_acc);
 
         memset(corners, 0, sizeof(corners));
         int32_t result = obb_corner_test(a, b,
@@ -2504,8 +2505,8 @@ static void collision_detect_full(TD5_Actor *a, TD5_Actor *b, int idx_a, int idx
      * from the LAST iteration's read instead of from the FINAL post-update
      * accumulator. The original matches because it re-reads local_94/90
      * at the dispatch site after the loop has updated them. */
-    test_ha = yaw_a_acc >> 8;
-    test_hb = yaw_b_acc >> 8;
+    test_ha = FP_TRUNC(yaw_a_acc);
+    test_hb = FP_TRUNC(yaw_b_acc);
 
     /* impactForce = local_84 - 0x10 [listing 0x00408D34 SUB ESI,0x10].
      * Range after 7 iters from 0x80: [-0x10, 0xEF] (no clamp). */
@@ -2638,14 +2639,14 @@ static int32_t v2v_depenetrate_pair(TD5_Actor *a, TD5_Actor *b)
     if (push_depth > ANTITUNNEL_MAX_DEPTH) push_depth = ANTITUNNEL_MAX_DEPTH;
 
     /* World line of centres (display units), pointing A away from B. */
-    int32_t dx = (a->world_pos.x - b->world_pos.x) >> 8;
-    int32_t dz = (a->world_pos.z - b->world_pos.z) >> 8;
+    int32_t dx = FP_TRUNC((a->world_pos.x - b->world_pos.x));
+    int32_t dz = FP_TRUNC((a->world_pos.z - b->world_pos.z));
     int32_t nx, nz;                   /* 12-bit unit direction */
     int32_t len = td5_isqrt(dx * dx + dz * dz);
     if (len < 1) {
         /* Centres coincide -- eject along A's lateral axis as a fallback so we
          * still make progress instead of dividing by zero. */
-        int32_t ha = a->euler_accum.yaw >> 8;
+        int32_t ha = FP_TRUNC(a->euler_accum.yaw);
         nx =  cos_fixed12(ha);
         nz = -sin_fixed12(ha);
     } else {
@@ -2716,7 +2717,7 @@ void td5_physics_resolve_vehicle_contacts(void)
                       "v2v_tick slot0: total=%d span=%d bucket=%d pos=(%d,%d,%d) "
                       "vmode=%d dmg=%d pair_calls=%u aabb_hits=%u",
                       total, seg0, bucket0,
-                      p0->world_pos.x >> 8, p0->world_pos.y >> 8, p0->world_pos.z >> 8,
+                      FP_TRUNC(p0->world_pos.x), FP_TRUNC(p0->world_pos.y), FP_TRUNC(p0->world_pos.z),
                       p0->vehicle_mode, p0->damage_lockout,
                       s_v2v_slot0_pair_count, s_v2v_slot0_obb_enter);
             s_v2v_slot0_pair_count = 0;
@@ -2771,11 +2772,11 @@ void td5_physics_resolve_vehicle_contacts(void)
                 /* Coarse cull: skip far pairs (render-unit centres vs a generous
                  * bound = bounding radii + one tick of both cars' travel). */
                 int32_t trad = (int32_t)CDEF_S(tr, CDEF_COLLISION_RADIUS);
-                int64_t cdx = (int64_t)(rcx >> 8) - (tcx >> 8);
-                int64_t cdz = (int64_t)(rcz >> 8) - (tcz >> 8);
+                int64_t cdx = (int64_t)(FP_TRUNC(rcx)) - (FP_TRUNC(tcx));
+                int64_t cdz = (int64_t)(FP_TRUNC(rcz)) - (FP_TRUNC(tcz));
                 int64_t coarse = (int64_t)prad + trad
-                               + (llabs((int64_t)rvx >> 8) + llabs((int64_t)tvx >> 8))
-                               + (llabs((int64_t)rvz >> 8) + llabs((int64_t)tvz >> 8));
+                               + (llabs((int64_t)FP_TRUNC(rvx)) + llabs((int64_t)FP_TRUNC(tvx)))
+                               + (llabs((int64_t)FP_TRUNC(rvz)) + llabs((int64_t)FP_TRUNC(tvz)));
                 if (cdx * cdx + cdz * cdz > coarse * coarse) continue;
                 /* Precise: REAL oriented-box test at NSUB+1 points along BOTH
                  * cars' paths this tick. A hit at ANY sub-step = the bodies
@@ -2799,10 +2800,10 @@ void td5_physics_resolve_vehicle_contacts(void)
                 if (!hit) {
                     int32_t hw_b, fz_b, rz_b;
                     actor_collision_box(tr, &hw_b, &fz_b, &rz_b);
-                    int64_t p1x = (int64_t)(tcx >> 8) - (rcx >> 8);
-                    int64_t p1z = (int64_t)(tcz >> 8) - (rcz >> 8);
-                    int64_t relvx = (int64_t)(tvx >> 8) - (rvx >> 8);
-                    int64_t relvz = (int64_t)(tvz >> 8) - (rvz >> 8);
+                    int64_t p1x = (int64_t)(FP_TRUNC(tcx)) - (FP_TRUNC(rcx));
+                    int64_t p1z = (int64_t)(FP_TRUNC(tcz)) - (FP_TRUNC(rcz));
+                    int64_t relvx = (int64_t)(FP_TRUNC(tvx)) - (FP_TRUNC(rvx));
+                    int64_t relvz = (int64_t)(FP_TRUNC(tvz)) - (FP_TRUNC(rvz));
                     int64_t p0x = p1x - relvx, p0z = p1z - relvz;
                     int64_t sx = relvx, sz = relvz, cxx, czz;
                     int64_t seg2 = sx * sx + sz * sz;
@@ -2813,7 +2814,7 @@ void td5_physics_resolve_vehicle_contacts(void)
                         else if (tn >= seg2) { cxx = p1x; czz = p1z; }
                         else                 { cxx = p0x + (sx * tn) / seg2; czz = p0z + (sz * tn) / seg2; }
                     }
-                    int64_t lat = (int64_t)((hw_a + hw_b) >> 8);
+                    int64_t lat = (int64_t)(FP_TRUNC((hw_a + hw_b)));
                     if (cxx * cxx + czz * czz <= lat * lat) hit = 1;
                 }
                 if (!hit) continue;
@@ -2840,8 +2841,8 @@ void td5_physics_resolve_vehicle_contacts(void)
             for (int rsl = 0; rsl < base; rsl++) {
                 TD5_Actor *rc = (TD5_Actor *)(g_actor_table_base + (size_t)rsl * TD5_ACTOR_STRIDE);
                 if (!rc->car_definition_ptr || rc->finish_time != 0) continue;
-                int64_t dx = (int64_t)(rc->world_pos.x >> 8) - (tr->world_pos.x >> 8);
-                int64_t dz = (int64_t)(rc->world_pos.z >> 8) - (tr->world_pos.z >> 8);
+                int64_t dx = (int64_t)(FP_TRUNC(rc->world_pos.x)) - (FP_TRUNC(tr->world_pos.x));
+                int64_t dz = (int64_t)(FP_TRUNC(rc->world_pos.z)) - (FP_TRUNC(tr->world_pos.z));
                 int64_t d2 = dx * dx + dz * dz;
                 if (near_r < 0 || d2 < nbest) { near_r = rsl; nbest = d2; }
             }
@@ -2871,10 +2872,10 @@ void td5_physics_resolve_vehicle_contacts(void)
 
         /* Compute AABB from position +/- bounding radius */
         radius = (int32_t)CDEF_S(actor, CDEF_COLLISION_RADIUS);
-        g_actor_aabb[i][0] = (actor->world_pos.x >> 8) - radius;  /* xMin */
-        g_actor_aabb[i][1] = (actor->world_pos.z >> 8) - radius;  /* zMin */
-        g_actor_aabb[i][2] = (actor->world_pos.x >> 8) + radius;  /* xMax */
-        g_actor_aabb[i][3] = (actor->world_pos.z >> 8) + radius;  /* zMax */
+        g_actor_aabb[i][0] = (FP_TRUNC(actor->world_pos.x)) - radius;  /* xMin */
+        g_actor_aabb[i][1] = (FP_TRUNC(actor->world_pos.z)) - radius;  /* zMin */
+        g_actor_aabb[i][2] = (FP_TRUNC(actor->world_pos.x)) + radius;  /* xMax */
+        g_actor_aabb[i][3] = (FP_TRUNC(actor->world_pos.z)) + radius;  /* zMax */
 
         /* Insert into bucket[segment >> 2] linked list */
         int32_t seg = actor->track_span_normalized;
@@ -2955,8 +2956,8 @@ void td5_physics_resolve_vehicle_contacts(void)
                                   "pos_i=(%d,%d) pos_j=(%d,%d) span_i=%d span_j=%d "
                                   "dispatch=%s a[vm=%d wm=%d scr=%d] b[vm=%d wm=%d scr=%d]",
                                   i, j, a->slot_index, b->slot_index,
-                                  a->world_pos.x >> 8, a->world_pos.z >> 8,
-                                  b->world_pos.x >> 8, b->world_pos.z >> 8,
+                                  FP_TRUNC(a->world_pos.x), FP_TRUNC(a->world_pos.z),
+                                  FP_TRUNC(b->world_pos.x), FP_TRUNC(b->world_pos.z),
                                   a->track_span_normalized, b->track_span_normalized,
                                   (a_scripted || b_scripted) ? "SIMPLE" : "FULL",
                                   a->vehicle_mode, a->wheel_contact_bitmask, a_scripted,
@@ -3015,8 +3016,8 @@ void td5_physics_resolve_vehicle_contacts(void)
                 if (a_scripted) continue;
 
                 int32_t rad_a = (int32_t)CDEF_S(a, CDEF_COLLISION_RADIUS);
-                int32_t ax = a->world_pos.x >> 8;
-                int32_t az = a->world_pos.z >> 8;
+                int32_t ax = FP_TRUNC(a->world_pos.x);
+                int32_t az = FP_TRUNC(a->world_pos.z);
 
                 for (int j = i + 1; j < total; j++) {
                     TD5_Actor *b = (TD5_Actor *)(g_actor_table_base + (size_t)j * TD5_ACTOR_STRIDE);
@@ -3028,8 +3029,8 @@ void td5_physics_resolve_vehicle_contacts(void)
 
                     /* Cheap live AABB reject before the OBB test. */
                     int32_t rad_b = (int32_t)CDEF_S(b, CDEF_COLLISION_RADIUS);
-                    int32_t bx = b->world_pos.x >> 8;
-                    int32_t bz = b->world_pos.z >> 8;
+                    int32_t bx = FP_TRUNC(b->world_pos.x);
+                    int32_t bz = FP_TRUNC(b->world_pos.z);
                     int32_t r  = rad_a + rad_b;
                     int32_t ddx = ax - bx; if (ddx < 0) ddx = -ddx;
                     int32_t ddz = az - bz; if (ddz < 0) ddz = -ddz;
@@ -3047,8 +3048,8 @@ void td5_physics_resolve_vehicle_contacts(void)
                         if (round == 0 && pen > max_pre_depth) max_pre_depth = pen;
                         /* a moved -- refresh its cached centre for the rest of
                          * this row so later j see the updated position. */
-                        ax = a->world_pos.x >> 8;
-                        az = a->world_pos.z >> 8;
+                        ax = FP_TRUNC(a->world_pos.x);
+                        az = FP_TRUNC(a->world_pos.z);
                     }
                 }
             }
@@ -3123,8 +3124,8 @@ void td5_physics_resolve_vehicle_contacts(void)
                  * in case a slot is mid-state with a transient non-zero alpha. */
                 if (td5_ai_traffic_dynamic_parked(t) ||
                     td5_ai_traffic_get_draw_alpha(t) == 0) continue;
-                dxp = (player->world_pos.x >> 8) - (tr->world_pos.x >> 8);
-                dzp = (player->world_pos.z >> 8) - (tr->world_pos.z >> 8);
+                dxp = (FP_TRUNC(player->world_pos.x)) - (FP_TRUNC(tr->world_pos.x));
+                dzp = (FP_TRUNC(player->world_pos.z)) - (FP_TRUNC(tr->world_pos.z));
                 rr  = prad + (int32_t)CDEF_S(tr, CDEF_COLLISION_RADIUS);
                 d2  = (int64_t)dxp * dxp + (int64_t)dzp * dzp;
                 if (d2 > (int64_t)rr * rr) continue;   /* not physically overlapping */
