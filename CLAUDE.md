@@ -224,10 +224,19 @@ Key headers: `td5_types.h` (structs, verified against 0x388 actor stride),
 
 - **Address references**: Use Ghidra virtual addresses (e.g., `0x00401234`)
 - **Function naming**: Match Ghidra names; use `td5_<module>_<verb>_<noun>` for new names
-- **Fixed-point**: Coordinates use 24.8 fixed-point. In RE-ported code the
-  blessed style is the original's raw shifts (`>> 8` / `<< 8`) — do NOT
-  convert them to macros; bit-exactness against the original beats style.
-  Use `FP_TO_FLOAT(x)`/`FP_*` macros only in NEW port-only code.
+- **Fixed-point**: Coordinates use 24.8 fixed-point. As of the Wave S1 refactor
+  (2026-07-10), raw shifts (`>> 8` / `<< 8`) are **no longer** the blessed style
+  for the 24.8 truncate/scale idiom — readability now outranks literal
+  Ghidra-shift fidelity, per REFACTOR_PLAN.md's north star. Use the shared
+  `td5_fp.h` macros instead: `FP_TRUNC(x)` (was `(x) >> 8`), `FP_SCALE(x)`
+  (was `(x) << 8`), `FP_ANGLE(x)` (was `((x) >> 8) & 0xFFF`). Each macro is a
+  pure syntactic wrapper — same operator/operand/type — so conversions are
+  bit-identical; verify via golden traces when touching golden-guarded modules.
+  NOT every `>> 8` is this idiom — ARGB color-channel pack/unpack and raw
+  byte-array deserialization also happen to shift by 8 and must stay raw
+  shifts (converting those would be a false positive, not a fixed-point op).
+  `FP_TO_FLOAT(x)` (unrelated, float conversion) stays as-is in existing
+  port-only code (e.g. td5_vfx.c).
 - **Structs**: Defined in `td5_types.h`; verify field offsets against `0x388` actor stride
 - **Calling convention**: `__stdcall` for original functions, `__cdecl` for source port
 - **BGRA**: Original uses BGRA color order (not RGBA)
