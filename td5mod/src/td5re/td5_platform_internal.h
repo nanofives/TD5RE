@@ -39,5 +39,50 @@ extern uint32_t             s_audio_fail_count;
 extern int                  s_audio_active_count;
 extern int                  s_audio_peak_active;
 
+/* Window/timing statics (C9 split, fourth slice) -- td5_platform_win32.c's
+ * td5_platform_win32_init() still seeds these and wires up the WndProc
+ * subclass, but their definitions live in td5_platform_win32_window.c. */
+typedef struct WrapperSurface WrapperSurface;
+
+extern WrapperSurface *s_primary;
+extern int             s_window_w;
+extern int             s_window_h;
+extern int             s_window_bpp;
+extern int             s_fullscreen;
+extern int             s_window_mode;
+extern int             s_chosen_w;
+extern int             s_chosen_h;
+extern WNDPROC          s_original_wndproc;
+
+LRESULT CALLBACK TD5_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+HICON td5_load_app_icon(int cx, int cy);
+
+/* TD5_WndProc's own queues/latches -- read by td5_plat_input_poll() and
+ * friends in td5_platform_win32.c's Input section (not part of this slice). */
+#define TD5_CHAR_QUEUE_SIZE 128
+#define TD5_NAV_QUEUE_SIZE 64
+
+extern uint32_t              s_mouse_click_latch;
+extern volatile unsigned char s_char_queue[TD5_CHAR_QUEUE_SIZE];
+extern volatile int           s_char_q_head;
+extern volatile int           s_char_q_tail;
+extern volatile unsigned char s_nav_queue[TD5_NAV_QUEUE_SIZE];
+extern volatile int           s_nav_q_head;
+extern volatile int           s_nav_q_tail;
+extern volatile int           s_esc_latch;
+extern volatile int           s_devices_dirty;
+
+/* Rendering-backend statics (texture-page cache + per-frame stats) --
+ * td5_plat_present()/td5_plat_present_texture_page() in
+ * td5_platform_win32_window.c read these; they're still owned/written by
+ * td5_platform_win32.c's Rendering Backend section. */
+#define MAX_TEXTURE_PAGES 1024
+
+extern WrapperSurface *s_tex_surfaces[MAX_TEXTURE_PAGES];
+extern DWORD            s_tex_handles[MAX_TEXTURE_PAGES];
+extern int               s_frame_draw_calls;
+extern int               s_frame_vertices;
+extern int               s_frame_indices;
+extern int               s_last_bound_texture_page;
 
 #endif /* TD5_PLATFORM_INTERNAL_H */
