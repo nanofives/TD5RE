@@ -32,6 +32,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "July 11" },
+    { CL_ITEM,    "FIX: roadside fences, foliage and scenery no longer" },
+    { CL_ITEM,    "  render from one side only or lose their textures -" },
+    { CL_ITEM,    "  the banner detector was mistaking double-sided" },
+    { CL_ITEM,    "  fences for signs and culling a face; now off by" },
+    { CL_ITEM,    "  default so they render correctly on every track" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "July 7" },
     { CL_ITEM,    "FIX: police now actually give chase - the pursuit" },
     { CL_ITEM,    "  trigger window is much wider so cops lock on when" },
