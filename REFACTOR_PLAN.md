@@ -179,7 +179,7 @@ sim package is `wip`.
 | S4 | td5_game.c flatten + magic naming | todo | sim-exclusive |
 | S5 | td5_ai.c split + td5_race_events.h | todo | sim-exclusive; ai renames ride along |
 | S6 | td5_track.c parser/runtime split | todo | sim-exclusive; after S1d |
-| S7 | td5_sound event inversion | wip fix-refactor-s7-sound-event-inversion | sim-exclusive |
+| S7 | td5_sound event inversion | done @ccc200f6 | td5_sound.c no longer calls td5_game_advance_sky_rotation() directly -- sets a request flag, consumed once/frame by td5_game.c's sound-tick block via new td5_sound_take_sky_rotation_advance_request(); added the 4 remaining read-only queries it needed to td5_race_state.h (get_view_pan, get_traffic_variant, get_cop_actor_index, is_pause_menu_active) and switched its #include off td5_game.h entirely -- game_h_includers baseline 25->24. Full suite 46/46 PASS, 5 golden hashes matched. No manual listen test (siren/cop-light relative frame ordering unchanged, but not audibly re-confirmed) |
 | C1 | Coverage build-out (camera/sound traces, save/net tests) | todo | prereq for C2/C7/C8 |
 | C2 | td5_camera.c cleanup | todo | after C1 |
 | C3 | td5_hud.c extern fix + split | todo | |
