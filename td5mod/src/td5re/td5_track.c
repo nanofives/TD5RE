@@ -16,6 +16,7 @@
  */
 
 #include "td5_track.h"
+#include "td5_fp.h"       /* FP_TRUNC/FP_SCALE/FP_ANGLE 24.8 fixed-point macros */
 #include "td5_asset.h"
 #include "td5_physics.h"
 #include "td5_ai.h"
@@ -1034,8 +1035,8 @@ static int geo_fork_decide(int next_idx, int br_idx, int32_t pos_x, int32_t pos_
 {
     int g_br, g_mn;
     if (!geo_active()) return 0;
-    g_br = geo_span_contains(br_idx,  pos_x >> 8, pos_z >> 8);
-    g_mn = geo_span_contains(next_idx, pos_x >> 8, pos_z >> 8);
+    g_br = geo_span_contains(br_idx,  FP_TRUNC(pos_x), FP_TRUNC(pos_z));
+    g_mn = geo_span_contains(next_idx, FP_TRUNC(pos_x), FP_TRUNC(pos_z));
     if (g_br >= 0 && g_mn < 0) { *take_branch = 1; return 1; }
     if (g_mn >= 0 && g_br < 0) { *take_branch = 0; return 1; }
     return 0;
@@ -1051,8 +1052,8 @@ static void geo_resolve_walls(TD5_Actor *actor)
     int hint = (int)actor->track_span_raw;
     int pi;
     for (pi = 0; pi < 4; pi++) {
-        int32_t px = probe_block[pi].x >> 8;
-        int32_t pz = probe_block[pi].z >> 8;
+        int32_t px = FP_TRUNC(probe_block[pi].x);
+        int32_t pz = FP_TRUNC(probe_block[pi].z);
         GeoHit h; double dx, dz, mag, rad; int32_t wall_angle, pen;
         if (!geo_locate(px, pz, hint, &h)) continue;
         if (h.inside || h.pushdist <= 0) continue;     /* on the road -> no wall */
@@ -1066,7 +1067,7 @@ static void geo_resolve_walls(TD5_Actor *actor)
          * front wall" bug); its lateral component is ~0 so it cancels here. A
          * genuine side rail is already lateral and survives unchanged. */
         {
-            int32_t yaw12 = ((*(int32_t *)((uint8_t *)actor + 0x1F4)) >> 8) & 0xFFF;
+            int32_t yaw12 = FP_ANGLE((*(int32_t *)((uint8_t *)actor + 0x1F4)));
             double th = (double)yaw12 * (2.0 * 3.14159265358979323846 / 4096.0);
             double fx = sin(th), fz = cos(th);        /* car forward (x,z) */
             double along = dx * fx + dz * fz;          /* longitudinal component */
@@ -1226,8 +1227,8 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
     const int32_t MEDIAN_HALF = 0;     /* physics median off; geometry ridge handles it */
 
     for (int pi = 0; pi < 4; pi++) {
-        int32_t px = probe_block[pi].x >> 8;
-        int32_t pz = probe_block[pi].z >> 8;
+        int32_t px = FP_TRUNC(probe_block[pi].x);
+        int32_t pz = FP_TRUNC(probe_block[pi].z);
         int sub_lane = (int)actor->wheel_probes[pi].sub_lane_index;
 
         int test_left  = (left.ok  && sub_lane < 1);
@@ -1568,8 +1569,8 @@ static void fwd_rev_resolve_contact(TD5_Actor *actor,
      * swaps base/end relative to Forward. */
     const TD5_StripVertex *ref_v = reverse_mode ? end_v : base_v;
 
-    int32_t probe_x = probe_block[pi].x >> 8;
-    int32_t probe_z = probe_block[pi].z >> 8;
+    int32_t probe_x = FP_TRUNC(probe_block[pi].x);
+    int32_t probe_z = FP_TRUNC(probe_block[pi].z);
 
     /* Note the asymmetric decomposition: the Z term subtracts origin_z
      * before ref.z, while the X term subtracts ref.x before origin_x.
@@ -2004,15 +2005,15 @@ void td5_track_init_actor_segment_placement(int16_t *actor_at_0x80, int32_t *out
     /* 0x00445F7C-FB5: out_pos[0] = ((sum_x * 0x100) / 4) + origin_x * 0x100
      * Order matches disasm (vL1, vR1, vL0, vR0). */
     sum = (int)vL1->x + (int)vR1->x + (int)vL0->x + (int)vR0->x;
-    out_pos[0] = ((sum << 8) / 4) + sp->origin_x * 0x100;
+    out_pos[0] = ((FP_SCALE(sum)) / 4) + sp->origin_x * 0x100;
 
     /* 0x00445FBD-FEB: out_pos[1] uses +0x02/+0x08 shorts (y component). */
     sum = (int)vL0->y + (int)vL1->y + (int)vR0->y + (int)vR1->y;
-    out_pos[1] = ((sum << 8) / 4) + sp->origin_y * 0x100;
+    out_pos[1] = ((FP_SCALE(sum)) / 4) + sp->origin_y * 0x100;
 
     /* 0x00445FF4-025: out_pos[2] uses +0x04/+0x0a shorts (z component). */
     sum = (int)vL1->z + (int)vL0->z + (int)vR1->z + (int)vR0->z;
-    out_pos[2] = ((sum << 8) / 4) + sp->origin_z * 0x100;
+    out_pos[2] = ((FP_SCALE(sum)) / 4) + sp->origin_z * 0x100;
 }
 
 /* Public accessor for the span's lane-count nibble used by InitializeRaceSession
@@ -2485,9 +2486,9 @@ static inline void vertex_world_pos(const TD5_StripSpan *sp,
                                      const TD5_StripVertex *v,
                                      int32_t *out_x, int32_t *out_y, int32_t *out_z)
 {
-    *out_x = ((int32_t)sp->origin_x + (int32_t)v->x) << 8;
-    *out_y = ((int32_t)sp->origin_y + (int32_t)v->y) << 8;
-    *out_z = ((int32_t)sp->origin_z + (int32_t)v->z) << 8;
+    *out_x = FP_SCALE(((int32_t)sp->origin_x + (int32_t)v->x));
+    *out_y = FP_SCALE(((int32_t)sp->origin_y + (int32_t)v->y));
+    *out_z = FP_SCALE(((int32_t)sp->origin_z + (int32_t)v->z));
 }
 
 /**
@@ -3654,17 +3655,17 @@ static uint8_t compute_boundary_bits(int span_idx, int sub_lane,
     vr1 = vertex_at(sp->right_vertex_index + right_off + sub_lane + 1);
 
     /* Convert to world-space XZ (24.8 fixed-point) */
-    ox = sp->origin_x << 8;
-    oz = sp->origin_z << 8;
+    ox = FP_SCALE(sp->origin_x);
+    oz = FP_SCALE(sp->origin_z);
 
-    lx0 = ox + ((int32_t)vl0->x << 8);
-    lz0 = oz + ((int32_t)vl0->z << 8);
-    lx1 = ox + ((int32_t)vl1->x << 8);
-    lz1 = oz + ((int32_t)vl1->z << 8);
-    rx0 = ox + ((int32_t)vr0->x << 8);
-    rz0 = oz + ((int32_t)vr0->z << 8);
-    rx1 = ox + ((int32_t)vr1->x << 8);
-    rz1 = oz + ((int32_t)vr1->z << 8);
+    lx0 = ox + ((int32_t)FP_SCALE(vl0->x));
+    lz0 = oz + ((int32_t)FP_SCALE(vl0->z));
+    lx1 = ox + ((int32_t)FP_SCALE(vl1->x));
+    lz1 = oz + ((int32_t)FP_SCALE(vl1->z));
+    rx0 = ox + ((int32_t)FP_SCALE(vr0->x));
+    rz0 = oz + ((int32_t)FP_SCALE(vr0->z));
+    rx1 = ox + ((int32_t)FP_SCALE(vr1->x));
+    rz1 = oz + ((int32_t)FP_SCALE(vr1->z));
 
     /* Select edge mask based on sub-lane position within span.
      * For single-lane spans (sub_lane is both first AND last), AND both
@@ -4057,12 +4058,12 @@ static int64_t compound_cross(const TD5_StripSpan *sp,
     va = vertex_at(v_a_idx);
     vb = vertex_at(v_b_idx);
     if (!va || !vb) return 0;
-    ox = sp->origin_x << 8;
-    oz = sp->origin_z << 8;
-    ax = ox + ((int32_t)va->x << 8);
-    az = oz + ((int32_t)va->z << 8);
-    bx = ox + ((int32_t)vb->x << 8);
-    bz = oz + ((int32_t)vb->z << 8);
+    ox = FP_SCALE(sp->origin_x);
+    oz = FP_SCALE(sp->origin_z);
+    ax = ox + ((int32_t)FP_SCALE(va->x));
+    az = oz + ((int32_t)FP_SCALE(va->z));
+    bx = ox + ((int32_t)FP_SCALE(vb->x));
+    bz = oz + ((int32_t)FP_SCALE(vb->z));
     dx = (int64_t)(bx - ax);
     dz = (int64_t)(bz - az);
     ex = (int64_t)(pos_x - ax);
@@ -4629,7 +4630,7 @@ static void update_position_recursive(int16_t *track_state, int32_t pos_x, int32
         TD5_LOG_W(LOG_TAG,
                   "walker_nonconverge: span=%d sub=%d pos=(%d,%d) — keeping prior state",
                   (int)saved_state[0], (int)((int8_t *)saved_state)[12],
-                  pos_x >> 8, pos_z >> 8);
+                  FP_TRUNC(pos_x), FP_TRUNC(pos_z));
         memcpy(track_state, saved_state, 16);
     }
 }
@@ -4927,8 +4928,8 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
      *   port:  va.y - (dx*unx + dz*unz)/uny
      *   orig:  va.y + ((va.x-local_x)*unx + (va.z-local_z)*unz)/uny
      * with local_x = (pos_x>>8) - origin_x → identical via sign distribution. */
-    dx = (pos_x >> 8) - origin_x - (int32_t)va->x;
-    dz = (pos_z >> 8) - origin_z - (int32_t)va->z;
+    dx = (FP_TRUNC(pos_x)) - origin_x - (int32_t)va->x;
+    dz = (FP_TRUNC(pos_z)) - origin_z - (int32_t)va->z;
 
     height = (int32_t)va->y
            - ((dx * (int32_t)unx + dz * (int32_t)unz) / (int32_t)uny);
@@ -4984,7 +4985,7 @@ static int32_t triangle_height(int va_idx, int vb_idx, int vc_idx,
                        (int32_t)(int16_t)vb_idx,
                        (int32_t)(int16_t)vc_idx);
 
-    return (origin_y + height) << 8;
+    return FP_SCALE((origin_y + height));
 }
 
 /**
@@ -5216,8 +5217,8 @@ static int32_t probe_span_lane_height(const TD5_StripSpan *sp, int sub_lane,
 
     get_quad_vertices(sp, sub_lane, &vl0, &vl1, &vr0, &vr1);
 
-    local_x = (world_x >> 8) - sp->origin_x;
-    local_z = (world_z >> 8) - sp->origin_z;
+    local_x = (FP_TRUNC(world_x)) - sp->origin_x;
+    local_z = (FP_TRUNC(world_z)) - sp->origin_z;
 
     if (sub_lane == 0) {
         /* LEFT EDGE — table 3, rows for sub_lane==0 */
@@ -5243,7 +5244,7 @@ static int32_t probe_span_lane_height(const TD5_StripSpan *sp, int sub_lane,
         default:
             /* Original returns without writing — no triangle pick. */
             if (out_normal) { out_normal[0] = 0; out_normal[1] = 4096; out_normal[2] = 0; }
-            return (int32_t)sp->origin_y << 8;
+            return (int32_t)FP_SCALE(sp->origin_y);
         }
     } else if (sub_lane == max_lane) {
         /* RIGHT EDGE — table 3, rows for sub_lane==lane_count-1 */
@@ -5268,7 +5269,7 @@ static int32_t probe_span_lane_height(const TD5_StripSpan *sp, int sub_lane,
         case 0:
         default:
             if (out_normal) { out_normal[0] = 0; out_normal[1] = 4096; out_normal[2] = 0; }
-            return (int32_t)sp->origin_y << 8;
+            return (int32_t)FP_SCALE(sp->origin_y);
         }
     } else {
         /* INTERIOR — single unconditional path, span_type NOT consulted.
@@ -5619,7 +5620,7 @@ int32_t td5_track_shadow_probe_height(int slot, int node,
          * world-unit gate of 32768 << 8 in 24.8, i.e. one TD6 origin step). */
         int64_t ddx = (int64_t)world_x - (int64_t)sd->last_x;
         int64_t ddz = (int64_t)world_z - (int64_t)sd->last_z;
-        const int64_t leap = (int64_t)32768 << 8;
+        const int64_t leap = (int64_t)FP_SCALE(32768);
         if (ddx > leap || ddx < -leap || ddz > leap || ddz < -leap)
             reseed = 1;
         else {
@@ -5823,7 +5824,7 @@ void td5_track_compute_heading(TD5_Actor *actor)
     heading_normal[2] = (int16_t)dz;
 
     /* Store yaw to euler accumulator at +0x1F4. [CONFIRMED @ 0x00434501] */
-    *(int32_t *)((uint8_t *)actor + 0x1F4) = (angle + 0x800) << 8;
+    *(int32_t *)((uint8_t *)actor + 0x1F4) = FP_SCALE((angle + 0x800));
 }
 
 /* ========================================================================
@@ -5998,8 +5999,8 @@ void td5_track_compute_runtime_heading_normal(TD5_Actor *actor)
      */
     world_x = *(int32_t *)((uint8_t *)actor + 0x1FC);
     world_z = *(int32_t *)((uint8_t *)actor + 0x204);
-    local_x = (world_x >> 8) - sp->origin_x;
-    local_z = (world_z >> 8) - sp->origin_z;
+    local_x = (FP_TRUNC(world_x)) - sp->origin_x;
+    local_z = (FP_TRUNC(world_z)) - sp->origin_z;
 
     have_triangle = 0;
     va = vb = vc = 0;
@@ -6462,8 +6463,8 @@ int64_t td5_track_compute_span_progress(int span_index, const int32_t *actor_pos
     span_len = (int)sqrt((double)(dX * dX + dZ * dZ));
     if (span_len == 0) return 0;
 
-    ax = actor_pos[0] >> 8;  /* strip 24.8 FP to integer world [CONFIRMED @ 0x00434631] */
-    az = actor_pos[2] >> 8;
+    ax = FP_TRUNC(actor_pos[0]);  /* strip 24.8 FP to integer world [CONFIRMED @ 0x00434631] */
+    az = FP_TRUNC(actor_pos[2]);
 
     /* rel pos = actor - span_origin - start_vertex [CONFIRMED @ 0x00434631-0x0043463a] */
     rel_x = ax - (int)sp->origin_x - start_x;
@@ -6472,7 +6473,7 @@ int64_t td5_track_compute_span_progress(int span_index, const int32_t *actor_pos
     dot = rel_z * dZ + rel_x * dX;
 
     /* Two-stage normalisation: (dot/len)<<8 then /len [CONFIRMED @ 0x0043465d] */
-    scaled = (dot / span_len) << 8;
+    scaled = FP_SCALE((dot / span_len));
     return ((int64_t)(scaled % span_len) << 32) | (uint32_t)(scaled / span_len);
 }
 
@@ -6519,9 +6520,9 @@ int32_t td5_track_compute_signed_offset(int span_index, int progress, int route_
 
     /* Signed >>8 with rounding [CONFIRMED @ 0x004346ca-0x004346ed] */
     v = (end_x - start_x) * delta;
-    dX_sc = (v + ((v >> 31) & 0xFF)) >> 8;
+    dX_sc = FP_TRUNC((v + ((v >> 31) & 0xFF)));
     v = (end_z - start_z) * delta;
-    dZ_sc = (v + ((v >> 31) & 0xFF)) >> 8;
+    dZ_sc = FP_TRUNC((v + ((v >> 31) & 0xFF)));
 
     /* sqrt: use double precision to match orig FPU 80-bit truncation
      * (same precision issue as in compute_span_progress). */
@@ -8642,7 +8643,7 @@ void td5_track_td6_props_tick(void)
          * a prop can be shoved a believable distance but never travels through a wall /
          * off the map. Hitting the cap stops it dead. (~1200 world units.) */
         {
-            const int32_t MAXSLIDE = 2000 << 8;   /* 24.8 world units */
+            const int32_t MAXSLIDE = FP_SCALE(2000);   /* 24.8 world units */
             int64_t d2 = (int64_t)pr->ox * pr->ox + (int64_t)pr->oz * pr->oz;
             if (d2 > (int64_t)MAXSLIDE * MAXSLIDE) {
                 float inv = (float)MAXSLIDE / sqrtf((float)d2);
