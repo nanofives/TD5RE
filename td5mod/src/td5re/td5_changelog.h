@@ -43,6 +43,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  now that the camera no longer dips underground, the" },
     { CL_ITEM,    "  cinematic sweep plays during the 3-2-1 like on every" },
     { CL_ITEM,    "  other track" },
+    { CL_ITEM,    "FIX: the race-end wipe (the black bars that close" },
+    { CL_ITEM,    "  in when you DON'T finish first) is now solid" },
+    { CL_ITEM,    "  black instead of see-through - the foliage" },
+    { CL_ITEM,    "  anti-aliasing was forcing it half-transparent" },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 7" },

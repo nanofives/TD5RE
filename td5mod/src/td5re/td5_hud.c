@@ -7732,7 +7732,8 @@ void td5_hud_render(void)
  * Renders black bars that close in from opposite screen edges.
  * progress: 0.0 = no coverage, 255.0 = full screen black.
  * direction: 0 = horizontal (left/right), 1 = vertical (top/bottom).
- * Uses the pre-built FADEWHT fade quads (s_fade_quads[0..1]).
+ * Drawn via the flat (textureless) opaque path — see the FOLIAGE-AA OPACITY
+ * FIX note in the body for why it must NOT use a textured OPAQUE preset.
  *
  * [ARCH-DIVERGENCE: 0x0043E750 SetClipBounds is the orig projection
  *  clip-rect setter, NOT a fade renderer; L5 promotion sweep 2026-05-21]
@@ -7779,35 +7780,40 @@ void td5_hud_draw_race_fade(float progress, int direction)
         x0b = 0.0f; y0b = sh - bar_size;  x1b = sw; y1b = sh;
     }
 
-    /* Draw two opaque black bars directly via platform render.
-     * Cannot use hud_submit_quad — it routes through submit_translucent
-     * which uses alpha blending, making the bars see-through. */
-    if (s_fadewht_atlas) {
-        int ftex = s_fadewht_atlas->texture_page;
-        int tw = 256, th = 256;
-        td5_plat_render_get_texture_dims(ftex, &tw, &th);
-        float fu = ((float)s_fadewht_atlas->atlas_x + 0.5f) / (float)tw;
-        float fv = ((float)s_fadewht_atlas->atlas_y + 0.5f) / (float)th;
-
-        TD5_D3DVertex verts[4];
-        uint16_t indices[6] = { 0, 1, 2, 0, 2, 3 };
-
-        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-        td5_plat_render_bind_texture(ftex);
+    /* Draw two opaque black bars via the flat (textureless) draw path.
+     *
+     * [FOLIAGE-AA OPACITY FIX 2026-07-10] These MUST use
+     * td5_plat_render_draw_tris_flat, NOT the textured td5_plat_render_draw_tris
+     * with TD5_PRESET_OPAQUE_LINEAR + FADEWHT. The textured/opaque path trips the
+     * foliage-AA classifier (Backend_IsFoliageAA in d3d11_backend_pipeline.c):
+     * that fires for any draw with alpha-test ON, blend OFF, and a bound texture
+     * flagged has_alpha — which is exactly OPAQUE_LINEAR + the colour-keyed
+     * FADEWHT atlas page. When it fires, Backend_ApplyStateCache OVERRIDES the
+     * requested opaque blend with BLEND_SRCALPHA_INVSRC (+ the SampleFoliageAA
+     * shader path, alphaRef=0.5), so the "opaque" black bars rendered ~50%
+     * translucent — the race-end transition showed the scene through it (user
+     * report 2026-07-10, "not finishing first"; the 2026-07-04 flush-reorder fix
+     * addressed HUD text stamping over the bars but not the bars' own blend).
+     * The flat path writes vertex colour directly through a 1x1 white texel with
+     * BLEND_OPAQUE, alpha-test off, and bypasses the state cache entirely, so the
+     * classifier never sees it and the bars are guaranteed opaque. No source
+     * texture is needed (white texel * black vertex = black). */
+    {
+        TD5_D3DVertex verts[8];
+        uint16_t indices[12] = { 0, 1, 2, 0, 2, 3,   4, 5, 6, 4, 6, 7 };
 
         /* Bar A */
-        verts[0] = (TD5_D3DVertex){ x0a, y0a, 0.0f, 1.0f, 0xFF000000, 0, fu, fv };
-        verts[1] = (TD5_D3DVertex){ x0a, y1a, 0.0f, 1.0f, 0xFF000000, 0, fu, fv };
-        verts[2] = (TD5_D3DVertex){ x1a, y1a, 0.0f, 1.0f, 0xFF000000, 0, fu, fv };
-        verts[3] = (TD5_D3DVertex){ x1a, y0a, 0.0f, 1.0f, 0xFF000000, 0, fu, fv };
-        td5_plat_render_draw_tris(verts, 4, indices, 6);
-
+        verts[0] = (TD5_D3DVertex){ x0a, y0a, 0.0f, 1.0f, 0xFF000000, 0, 0.0f, 0.0f };
+        verts[1] = (TD5_D3DVertex){ x0a, y1a, 0.0f, 1.0f, 0xFF000000, 0, 0.0f, 0.0f };
+        verts[2] = (TD5_D3DVertex){ x1a, y1a, 0.0f, 1.0f, 0xFF000000, 0, 0.0f, 0.0f };
+        verts[3] = (TD5_D3DVertex){ x1a, y0a, 0.0f, 1.0f, 0xFF000000, 0, 0.0f, 0.0f };
         /* Bar B */
-        verts[0] = (TD5_D3DVertex){ x0b, y0b, 0.0f, 1.0f, 0xFF000000, 0, fu, fv };
-        verts[1] = (TD5_D3DVertex){ x0b, y1b, 0.0f, 1.0f, 0xFF000000, 0, fu, fv };
-        verts[2] = (TD5_D3DVertex){ x1b, y1b, 0.0f, 1.0f, 0xFF000000, 0, fu, fv };
-        verts[3] = (TD5_D3DVertex){ x1b, y0b, 0.0f, 1.0f, 0xFF000000, 0, fu, fv };
-        td5_plat_render_draw_tris(verts, 4, indices, 6);
+        verts[4] = (TD5_D3DVertex){ x0b, y0b, 0.0f, 1.0f, 0xFF000000, 0, 0.0f, 0.0f };
+        verts[5] = (TD5_D3DVertex){ x0b, y1b, 0.0f, 1.0f, 0xFF000000, 0, 0.0f, 0.0f };
+        verts[6] = (TD5_D3DVertex){ x1b, y1b, 0.0f, 1.0f, 0xFF000000, 0, 0.0f, 0.0f };
+        verts[7] = (TD5_D3DVertex){ x1b, y0b, 0.0f, 1.0f, 0xFF000000, 0, 0.0f, 0.0f };
+
+        td5_plat_render_draw_tris_flat(verts, 8, indices, 12);
     }
 }
 
