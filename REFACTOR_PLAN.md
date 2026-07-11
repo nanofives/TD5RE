@@ -180,7 +180,35 @@ sim package is `wip`.
 | S5 | td5_ai.c split + td5_race_events.h | done (partial) @27bb2137 | first slice: extracted the ~4400-line "Traffic System" section into new td5_ai_traffic.c (verbatim, byte-diffed against pre-split content), with td5_ai_internal.h as the private seam (route-state/actor macros, ~20 shared globals made non-static, COP_IDLE enum + SmartCorner/SmartSense structs, cross-boundary functions in both directions). Build+lint clean (game_h_includers unaffected at 24, td5_ai_traffic.c uses td5_race_state.h). One full selftest run completed cleanly: 46/46 PASS, all 5 golden hashes matched (bit-identical sim) -- two retry attempts were disrupted by heavy unrelated system load (concurrent manual_drive session + high CPU from other processes on the box), not a regression; the clean run's golden match is the authoritative signal for this pure code-motion change. NOT done: ai_track/ai_cop/ai_init splits, td5_race_events.h write-API extraction, the td5_ai.c:3133-area FIXME (still just a documented non-bug divergence note), and S2 renames -- re-open as follow-up packages |
 | S6 | td5_track.c parser/runtime split | done (partial) @5b5fcdd1 | first slice: extracted the ~500-line MODELS.DAT parsing section (parse_models_dat/prepare_mesh_resource/dim_additive_billboard_meshes) into new td5_track_parser.c, verbatim (byte-diffed). td5_track_internal.h is the private seam (parser runtime state + heavily-shared s_span_count made non-static, TD5_TrackRawMeshHeader struct, 3 shared helper fns). The plan's `td5_track.c:6239` FIXME investigated -- already a documented, deliberate soft-guard decision, not a real bug, no action needed. Build+lint clean, full suite 46/46 PASS, 5 golden hashes matched (degrade-frame-time failed both this and S5's run minutes apart with the same ~6x curve -- confirmed environmental system load, not a regression). NOT done: resolve_neighbor / other parser fns, the runtime-traversal (update_position_recursive) split -- re-open as follow-up |
 | S7 | td5_sound event inversion | done @ccc200f6 | td5_sound.c no longer calls td5_game_advance_sky_rotation() directly -- sets a request flag, consumed once/frame by td5_game.c's sound-tick block via new td5_sound_take_sky_rotation_advance_request(); added the 4 remaining read-only queries it needed to td5_race_state.h (get_view_pan, get_traffic_variant, get_cop_actor_index, is_pause_menu_active) and switched its #include off td5_game.h entirely -- game_h_includers baseline 25->24. Full suite 46/46 PASS, 5 golden hashes matched. No manual listen test (siren/cop-light relative frame ordering unchanged, but not audibly re-confirmed) |
-| C1 | Coverage build-out (camera/sound traces, save/net tests) | wip fix-refactor-c1-drag-finish | prereq for C2/C7/C8; first slice: drag natural-finish fix |
+| C1 | Coverage build-out (camera/sound traces, save/net tests) | todo (investigated, not shipped) | prereq for C2/C7/C8; drag natural-finish root-caused but fix REVERTED -- see note |
+
+<!-- C1 drag-finish investigation 2026-07-11: root cause of the known-broken
+drag natural-finish scenario IS confirmed -- AutoRace never sets
+g_td5.ini.default_game_type=9 (Drag Race) when selecting the drag track,
+so ConfigureGameTypeFlags never sets g_td5.drag_race_enabled, so the
+drag-length finish-span-shortening logic in td5_game.c never runs, and
+the finish sits at the unreachable full-track default distance. Fixing
+this in st_apply_scenario (force GameType=Drag Race when scenario
+track==19) makes race-drag-solo reach a genuine natural finish. HOWEVER:
+this fix deterministically breaks the golden-moscow/golden-pelton hash
+checks that run LATER in the same suite (same wrong hashes reproduced
+across two full runs, ruling out flakiness) -- isolated via a second test
+that this happens even with natural_finish left at 0 (i.e. merely running
+ONE race with drag_race_enabled=1 corrupts state for LATER races in the
+same process, regardless of how that race ends). ConfigureGameTypeFlags
+resets drag_race_enabled=0 unconditionally at the top of every race init,
+so the leak is NOT that flag directly -- something else set only on the
+drag_race_enabled path (candidates not yet checked: the finish-span
+placement's checkpoint-table mutation at td5_game.c ~4453, or something
+in td5_track_drag_finish_span/td5_game_drag_length_finish_span) isn't
+being fully reset when the NEXT race loads a different track. Per the
+plan's "never re-record goldens to force a pass" rule, the fix was
+REVERTED (worktree discarded, nothing merged) rather than shipped with an
+unexplained golden break. Future session: bisect what td5_game.c global
+differs after a drag_race_enabled=1 race vs a drag_race_enabled=0 race,
+right at the START of the next race's init (before any drag-specific code
+runs) -- that's the actual leak to find and reset. -->
+
 | C2 | td5_camera.c cleanup | todo | after C1 |
 | C3 | td5_hud.c extern fix + split | todo | |
 | C4 | render_actors_for_view decompose | todo | |
