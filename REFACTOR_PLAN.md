@@ -245,7 +245,7 @@ the GPU/CPU contention that disrupted this session's attempts). -->
 | C6 | td5_frontend.c split | todo | after C5 |
 | C7 | td5_save.c goto cleanup | todo | after C1 |
 | C8 | td5_sound.c FP + doppler naming | todo | after C1 |
-| C9 | td5_platform_win32.c split | wip fix-refactor-c9-platform-fs | first slice: filesystem module |
+| C9 | td5_platform_win32.c split | done (partial) @eb6f7ccf | first slice: extracted the "File I/O" + "Human-readable INI config" + "Memory" sections (~236 lines, 22 fns, all already-public) into new td5_platform_win32_fs.c, verbatim (byte-diffed). td5_platform_internal.h is the private seam (only s_hwnd + s_game_heap needed, both now non-static). Build+lint clean (no ratchet change). Full suite 46/46 PASS, both golden hash sets matched. NOT done: window/input, render-preset, audio-device sections -- re-open as follow-up packages |
 | G1 | g_td5 shrink round 1 + config views | todo | |
 | G2 | td5_types.h decomposition | todo | solo on td5_types.h |
 | G3 | td5_game.h migration + extern paydown | todo | after S5, S7 |
