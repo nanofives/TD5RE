@@ -249,4 +249,4 @@ the GPU/CPU contention that disrupted this session's attempts). -->
 | G1 | g_td5 shrink round 1 + config views | todo | |
 | G2 | td5_types.h decomposition | todo | solo on td5_types.h |
 | G3 | td5_game.h migration + extern paydown | todo | after S5, S7 |
-| G4 | Config-system consolidation | todo | |
+| G4 | Config-system consolidation | wip fix-refactor-g4-config | scoped first: CLI table is 120 int-typed CliOverride entries (main.c:352-487) + 7 non-int specials (Width/Height/Windowed/TraceFastForward/TraceModules/TraceStages/InputScript, main.c:528-583) = 127 total (plan's "108" stale); INI loader is a separate ~380-line list (main.c:762-1141); write-back (main.c:250-314) persists only a ~40-key subset; CLI key names often differ from INI section+key (e.g. CLI "Lighting" -> INI [Lighting]"Enabled") so schema needs {cli_name, ini_section, ini_key} not a pair. Real, present duplication (not an S4/A7-style already-solved case). td5re.h is a choke file shared with G1 (still todo, not wip -- no conflict yet, but re-check before merge) |
