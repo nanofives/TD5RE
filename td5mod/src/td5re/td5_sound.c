@@ -25,7 +25,7 @@
 #include "td5_radio.h"   /* internet-radio music backend */
 #include "td5_platform.h"
 #include "td5_asset.h"
-#include "td5_game.h"  /* td5_game_get_player_slot, is_replay_active, etc. */
+#include "td5_race_state.h"  /* td5_game_get_player_slot, is_replay_active, etc. (read-only) */
 #include "td5re.h"
 #include "td5_config.h" /* shared TD5RE_* env-knob helpers */
 #include "td5_vfx.h"
@@ -273,6 +273,11 @@ static int s_tracked_veh_fade_level;   /* Original: g_trackedVehicleAudioFadeLev
 static int s_tracked_veh_actor;        /* Original: DAT_004c380c */
 static int s_siren_active_flag;        /* Original: g_sirenRefreshedThisFrame */
 static int s_siren_refreshed;          /* Original: g_sirenActiveFlag */
+/* [S7 2026-07-10 event inversion] Set instead of calling td5_game_advance_sky_rotation()
+ * directly -- td5_game_tick_sound() consumes it once per frame via
+ * td5_sound_take_sky_rotation_advance_request(), so this module no longer needs
+ * td5_game.h just for this one mutating call. See td5_race_state.h. */
+static int s_sky_rotation_advance_requested;
 
 /* Police/siren positional-audio fix (#15, PORT ENHANCEMENT 2026-06-15).
  *
@@ -875,7 +880,7 @@ void td5_sound_update_vehicle_looping_state(int actor_index)
                 s_tracked_veh_actor     = actor_index;
                 s_tracked_veh_fade_target = TD5_SOUND_SIREN_FADE_FULL;
             }
-            td5_game_advance_sky_rotation();
+            s_sky_rotation_advance_requested = 1;
             s_siren_refreshed   = 1;
             s_siren_active_flag = 1;
         }
@@ -899,6 +904,16 @@ void td5_sound_update_vehicle_looping_state(int actor_index)
         s_engine_state[actor_index * 2] = ENGINE_STATE_STOPPED;
         s_engine_state[actor_index * 2 + 1] = ENGINE_STATE_STOPPED;
     }
+}
+
+/* [S7 2026-07-10 event inversion] Read-and-clear so the caller (td5_game.c,
+ * once per frame) applies the sky-rotation-tracker advance exactly once,
+ * matching the original per-frame td5_game_advance_sky_rotation() call site. */
+int td5_sound_take_sky_rotation_advance_request(void)
+{
+    int req = s_sky_rotation_advance_requested;
+    s_sky_rotation_advance_requested = 0;
+    return req;
 }
 
 /**

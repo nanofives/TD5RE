@@ -7272,6 +7272,13 @@ static void frame_audio_tick(void)
             td5_sound_update_vehicle_looping_state(i);
         }
     }
+    /* [S7 2026-07-10 event inversion] td5_sound_update_vehicle_looping_state()
+     * (the loop above) sets this request instead of calling
+     * td5_game_advance_sky_rotation() directly -- apply it here, once per
+     * frame, same relative order as the original per-actor call site (nothing
+     * reads s_wanted_target_tracker in between). */
+    if (td5_sound_take_sky_rotation_advance_request())
+        td5_game_advance_sky_rotation();
     /* [POLICE rewrite] Drive the cop-chase siren from the nearest actively-
      * chasing traffic cop (gated by the POLICE option), distance-attenuated to
      * the local camera. Cosmetic / post-sim — no netplay effect. Silenced while

@@ -11,11 +11,15 @@
  *     stay in td5_game.c; signatures must match verbatim — C tolerates the
  *     duplicate declaration when both headers meet in one TU).
  *   - READ-ONLY queries only. If a leaf module needs to MUTATE game state
- *     (see td5_ai.c's cop-chase scoring, td5_sound.c's sky-rotation call),
- *     it keeps td5_game.h until that mutation is redesigned — never add a
- *     mutator here.
+ *     (see td5_ai.c's cop-chase scoring), it keeps td5_game.h until that
+ *     mutation is redesigned — never add a mutator here.
  *   - New leaf modules include THIS, not td5_game.h. The structure lint
  *     (scripts/lint_structure.ps1) fails CI on any new td5_game.h includer.
+ *
+ * [S7 2026-07-10] td5_sound.c's one mutating call (the sky-rotation-tracker
+ * advance on the cop siren) is inverted via td5_sound_take_sky_rotation_advance_request()
+ * (see td5_sound.h) instead of calling into td5_game.c directly, so it could
+ * drop td5_game.h for this file's read-only subset.
  */
 
 #ifndef TD5_RACE_STATE_H
@@ -27,12 +31,15 @@
 TD5_Actor *td5_game_get_actor(int slot);
 int  td5_game_get_total_actor_count(void);
 int  td5_game_get_player_slot(int viewport);
+int  td5_game_get_view_pan(int vp);
 
 /* --- Mode queries ------------------------------------------------------- */
 int  td5_game_is_replay_active(void);
 int  td5_game_is_wanted_mode(void);
+int  td5_game_is_pause_menu_active(void);
 int  td5_game_cop_chase_is_cop(int slot);
 int  td5_game_cop_chase_is_suspect(int slot);
+int  td5_game_get_cop_actor_index(void);
 int  td5_game_mp_traffic_fair(void);
 int  td5_game_battle_mode_active(void);
 int  td5_game_drag_mp_active(void);
@@ -40,5 +47,8 @@ int  td5_game_drag_mp_active(void);
 /* --- Drag-strip configuration (read-only) ------------------------------- */
 int  td5_game_drag_field_size(void);
 int  td5_game_drag_length_repeats(void);
+
+/* --- Traffic queries (read-only) ----------------------------------------- */
+int  td5_game_get_traffic_variant(int traffic_index);
 
 #endif /* TD5_RACE_STATE_H */
