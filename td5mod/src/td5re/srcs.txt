@@ -56,5 +56,6 @@ td5_profile.c
 td5_jobs.c
 td5_rcmd.c
 td5_platform_win32.c
+td5_platform_win32_fs.c
 td5_msvc_rand.c
 main.c
