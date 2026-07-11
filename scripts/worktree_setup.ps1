@@ -41,6 +41,7 @@ if ((Test-Path $assetSrc) -and -not (Test-Path $assetDst)) {
     }
     New-Item -ItemType Directory -Path $assetDst -Force | Out-Null
     robocopy $assetSrc $assetDst /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+    $global:LASTEXITCODE = 0   # robocopy's exit codes are bitflags; 0-7 all mean success, not an error
     Write-Host "  +    re\assets (copied, not junctioned)"
 } elseif (Test-Path $assetDst) {
     Write-Host "  ok   re\assets (already present)"
