@@ -49,6 +49,7 @@
 #include "td5_profile.h"
 #include "td5_benchmark.h"
 #include "td5_selftest.h"  /* in-session automated test suite (dev builds) */
+#include "td5_backend_capture.h" /* photo-booth framebuffer read-back API */
 #include "td5_inputscript.h" /* scripted-input harness ([Trace] InputScript) */
 
 int td5_trace_current_sim_tick(void) {
@@ -4962,8 +4963,6 @@ static void td5_game_trace_stage(const char *stage, int ticks_this_frame)
  * raw PNGs into the car's asset dir, then quit so the generator does the next
  * car. re/tools/td6_photobooth.py crops by chroma + stacks the two into
  * carpic0..3.png. Angles/distance are env-tunable (TD5RE_PB_*) for dialing-in. */
-extern void Backend_RequestCapture(void);
-extern int  Backend_GetCapture(unsigned char **px, int *w, int *h);
 extern int  stbi_write_png(const char *f, int w, int h, int comp, const void *data, int stride);
 
 static float pb_env_f(const char *name, float def) {
