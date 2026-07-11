@@ -15,6 +15,7 @@
  * ======================================================================== */
 
 #include "td5_physics.h"
+#include "td5_fp.h"       /* FP_TRUNC/FP_SCALE/FP_ANGLE 24.8 fixed-point macros */
 #include "td5_ai.h"
 #include "td5_track.h"
 #include "td5_render.h"   /* td5_render_get_vehicle_mesh */
@@ -108,7 +109,7 @@ static uint8_t s_prev_grounded_mask[16];
 static inline int32_t sar8_rz(int32_t x) {
     /* Encodes original's CDQ + AND EDX,0xFF + ADD EAX,EDX + SAR EAX,8
      * (round-to-zero signed divide by 256). */
-    return (x + (((int32_t)((uint32_t)x >> 31)) * 0xFF)) >> 8;
+    return FP_TRUNC((x + (((int32_t)((uint32_t)x >> 31)) * 0xFF)));
 }
 
 void apply_damped_suspension_force(TD5_Actor *actor, int32_t lateral, int32_t longitudinal)
@@ -1112,8 +1113,8 @@ static uint32_t traffic_route_heading_delta(int slot)
 
     /* Formula from 0x434040:
      *   -(( ((yaw>>8) - route_angle*0x102C/0x100) - 0x800) & 0xFFF) - 0x800) & 0xFFF */
-    uint32_t yaw12     = (uint32_t)(yaw_accum >> 8) & 0xFFF;
-    uint32_t route12   = ((uint32_t)route_angle * 0x102C) >> 8;
+    uint32_t yaw12     = (uint32_t)FP_ANGLE(yaw_accum);
+    uint32_t route12   = FP_TRUNC(((uint32_t)route_angle * 0x102C));
     uint32_t raw_delta = (yaw12 - route12 - 0x800U) & 0xFFF;
     /* Negate to get heading_delta */
     return (-(int32_t)(((int32_t)raw_delta - 0x800) & 0xFFF)) & 0xFFF;
@@ -1509,8 +1510,8 @@ void process_traffic_segment_edge(TD5_Actor *actor, int slot)
     int32_t orig_z = sp->origin_z;
 
     /* Actor position relative to span origin */
-    int32_t rel_x = (actor->world_pos.x >> 8) - orig_x;
-    int32_t rel_z = (actor->world_pos.z >> 8) - orig_z;
+    int32_t rel_x = (FP_TRUNC(actor->world_pos.x)) - orig_x;
+    int32_t rel_z = (FP_TRUNC(actor->world_pos.z)) - orig_z;
 
     /* Inner edge test: sub_lane < 2  [CONFIRMED @ 0x407394: if (iVar12 < 2)]
      * [FIX 2026-05-26] Orig 0x004073A4-0x004073B0: A=psVar1=right_vertex(+6),
@@ -1663,8 +1664,8 @@ void process_traffic_route_advance(TD5_Actor *actor, int slot)
      * orig uses single-rail-across-full-width, NOT sub_lane indexed. */
 
     /* Actor position relative to wrap span origin */
-    int32_t rel_x = (actor->world_pos.x >> 8) - sp_wrap->origin_x;
-    int32_t rel_z = (actor->world_pos.z >> 8) - sp_wrap->origin_z;
+    int32_t rel_x = (FP_TRUNC(actor->world_pos.x)) - sp_wrap->origin_x;
+    int32_t rel_z = (FP_TRUNC(actor->world_pos.z)) - sp_wrap->origin_z;
 
     /* [TRACE 2026-05-24 traffic-edge-pen-cluster] arm call_id=3 (route-adv) */
     tep_trace_arm("3", slot, (int)actor->track_span_raw,
@@ -1755,8 +1756,8 @@ void process_traffic_forward_checkpoint_pass(TD5_Actor *actor, int slot)
     if (!vl || !vr) return;
 
     /* Actor position relative to sentinel span origin */
-    int32_t rel_x = (actor->world_pos.x >> 8) - sp->origin_x;
-    int32_t rel_z = (actor->world_pos.z >> 8) - sp->origin_z;
+    int32_t rel_x = (FP_TRUNC(actor->world_pos.x)) - sp->origin_x;
+    int32_t rel_z = (FP_TRUNC(actor->world_pos.z)) - sp->origin_z;
 
     /* [TRACE 2026-05-24 traffic-edge-pen-cluster] arm call_id=2 (fwd-cp) */
     tep_trace_arm("2", slot, (int)actor->track_span_raw, sub,
@@ -1841,7 +1842,7 @@ void integrate_traffic_pose(TD5_Actor *actor)
          * 2026-05-26). Use the magnitude so the lift direction matches
          * racers regardless of the sign that compute_envelope chose. */
         if (actor->car_definition_ptr) {
-            int32_t height_offset = (int32_t)CDEF_S(actor, CDEF_HEIGHT_OFFSET) << 8;
+            int32_t height_offset = (int32_t)FP_SCALE(CDEF_S(actor, CDEF_HEIGHT_OFFSET));
             if (height_offset > 0) height_offset = -height_offset;
             ground_y -= height_offset;
         }
@@ -1860,7 +1861,7 @@ void integrate_traffic_pose(TD5_Actor *actor)
         int32_t nz = (int32_t)surface_normal[2];
 
         /* Rotate normal XZ by yaw */
-        int32_t yaw12 = (actor->euler_accum.yaw >> 8) & 0xFFF;
+        int32_t yaw12 = FP_ANGLE(actor->euler_accum.yaw);
         int32_t cy = cos_fixed12(yaw12);
         int32_t sy = sin_fixed12(yaw12);
         int32_t rotated_x = (nx * cy - nz * sy) >> 12;
@@ -1871,14 +1872,14 @@ void integrate_traffic_pose(TD5_Actor *actor)
          * triangle_height produces Y-down normals matching the original
          * (ny < 0 for "up"), so we negate ny to get roll=0 on flat ground. */
         int32_t roll_from_normal = atan2_fixed12(-rotated_z, -ny);
-        int32_t susp_roll_corr = actor->wheel_suspension_pos[1] >> 8;
+        int32_t susp_roll_corr = FP_TRUNC(actor->wheel_suspension_pos[1]);
         actor->display_angles.roll = (int16_t)((roll_from_normal - susp_roll_corr) & 0xFFF);
 
         /* Pitch from surface normal + lateral suspension correction. mag_xz
          * is the sqrt of (rotated_x^2 + ny^2) regardless of ny's sign. */
         int32_t mag_xz = td5_isqrt(rotated_x * rotated_x + ny * ny);
         int32_t pitch_from_normal = atan2_fixed12(rotated_x, mag_xz);
-        int32_t susp_pitch_corr = actor->wheel_suspension_pos[0] >> 8;
+        int32_t susp_pitch_corr = FP_TRUNC(actor->wheel_suspension_pos[0]);
         actor->display_angles.pitch = (int16_t)((pitch_from_normal + susp_pitch_corr) & 0xFFF);
     }
 
@@ -1886,7 +1887,7 @@ void integrate_traffic_pose(TD5_Actor *actor)
      * No 0xFFF mask -- original (0x4063AA-style) truncates via int16 store
      * only; mask flipped sign bit for negative accumulators. Matches the
      * unmasked fix at 5978 for the player/AI integrator path. */
-    actor->display_angles.yaw = (int16_t)(actor->euler_accum.yaw >> 8);
+    actor->display_angles.yaw = (int16_t)(FP_TRUNC(actor->euler_accum.yaw));
 
     /* Keep vertical dynamics zeroed — traffic has no gravity or suspension */
     actor->linear_velocity_y = 0;
@@ -1959,9 +1960,9 @@ void integrate_traffic_pose(TD5_Actor *actor)
             };
             int32_t world[3];
             td5_transform_short_vec3_by_render_matrix_rounded(corner_off, world, matrix);
-            body_pos[i]->x = world[0] << 8;
-            body_pos[i]->y = world[1] << 8;
-            body_pos[i]->z = world[2] << 8;
+            body_pos[i]->x = FP_SCALE(world[0]);
+            body_pos[i]->y = FP_SCALE(world[1]);
+            body_pos[i]->z = FP_SCALE(world[2]);
 
             td5_track_update_probe_position(&actor->body_probes[i],
                                             body_pos[i]->x, body_pos[i]->z);
@@ -2163,9 +2164,9 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
     /* 4. Convert accumulators to display angles. NO 0xFFF mask -- original
      * truncates via int16 store; explicit mask flipped sign bit. Matches
      * 5978 unmasked fix from the precise-port pilot 004063A0. */
-    actor->display_angles.roll  = (int16_t)(actor->euler_accum.roll  >> 8);
-    actor->display_angles.yaw   = (int16_t)(actor->euler_accum.yaw   >> 8);
-    actor->display_angles.pitch = (int16_t)(actor->euler_accum.pitch >> 8);
+    actor->display_angles.roll  = (int16_t)(FP_TRUNC(actor->euler_accum.roll));
+    actor->display_angles.yaw   = (int16_t)(FP_TRUNC(actor->euler_accum.yaw));
+    actor->display_angles.pitch = (int16_t)(FP_TRUNC(actor->euler_accum.pitch));
 
     /* 5. Build rotation matrix from euler angles in FLOAT precision.
      *
@@ -2385,13 +2386,13 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                 if (pitch_abs > ROLL_DAMP_PITCH_MIN && yaw_rate < ROLL_DAMP_YAW_MAX) {
                     int32_t roll_s = (int32_t)new_roll & 0xFFF;        /* 12-bit */
                     if (roll_s > 0x800) roll_s -= 0x1000;              /* -> signed */
-                    roll_s = (roll_s * ROLL_DAMP_KEEP_Q8) >> 8;        /* scale toward 0 */
+                    roll_s = FP_TRUNC((roll_s * ROLL_DAMP_KEEP_Q8));        /* scale toward 0 */
                     new_roll = (int16_t)(roll_s & 0xFFF);
                 }
             }
 
             actor->display_angles.roll = new_roll;
-            actor->euler_accum.roll    = (int32_t)new_roll << 8;
+            actor->euler_accum.roll    = (int32_t)FP_SCALE(new_roll);
         }
 
         /* PITCH axis: written only for full solver OR pitch-only (C variant). */
@@ -2404,7 +2405,7 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                 actor->angular_velocity_pitch = d_pitch;
             }
             actor->display_angles.pitch = new_pitch;
-            actor->euler_accum.pitch    = (int32_t)new_pitch << 8;
+            actor->euler_accum.pitch    = (int32_t)FP_SCALE(new_pitch);
         }
 
         /* Rebuild rotation_matrix from the (possibly partially updated)
@@ -2525,7 +2526,7 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
 
         int32_t href = (int32_t)CDEF_S(actor, CDEF_SUSP_REF_HEIGHT);
         int32_t href_x181 = href * 0xB5;
-        int32_t susp_offset = (href_x181 + ((href_x181 >> 31) & 0xFF)) >> 8;
+        int32_t susp_offset = FP_TRUNC((href_x181 + ((href_x181 >> 31) & 0xFF)));
 
         uint8_t *cd = (uint8_t *)actor->car_definition_ptr;
 
@@ -2541,7 +2542,7 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
             /* Truncate-toward-zero /256 on suspension pos (matches the
              * original's CDQ;AND 0xff;ADD;SAR 8 idiom at 0x00406273). */
             int32_t sp = actor->wheel_suspension_pos[i];
-            int32_t sp_div = (sp + ((sp >> 31) & 0xFF)) >> 8;
+            int32_t sp_div = FP_TRUNC((sp + ((sp >> 31) & 0xFF)));
 
             int16_t body_wy = (int16_t)((int32_t)cwy - sp_div - susp_offset);
 
@@ -2913,9 +2914,9 @@ void update_vehicle_pose_from_physics(TD5_Actor *actor)
      * any external consumer of display_angles (camera, HUD, network) was
      * reading wrong values for negative angles.
      * [D2 — precise-port pilot 004063A0, 2026-05-14] */
-    actor->display_angles.roll  = (int16_t)(actor->euler_accum.roll  >> 8);
-    actor->display_angles.yaw   = (int16_t)(actor->euler_accum.yaw   >> 8);
-    actor->display_angles.pitch = (int16_t)(actor->euler_accum.pitch >> 8);
+    actor->display_angles.roll  = (int16_t)(FP_TRUNC(actor->euler_accum.roll));
+    actor->display_angles.yaw   = (int16_t)(FP_TRUNC(actor->euler_accum.yaw));
+    actor->display_angles.pitch = (int16_t)(FP_TRUNC(actor->euler_accum.pitch));
 
     /* Render position — matches FILD/FMUL/FSTP sequence at 0x004063AA-0x0040641B.
      * (Float scale = 1/256 from [0x0045D5E8].) */
@@ -3383,11 +3384,11 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          *      reference_port_ride_height_offset.md).
          * [CONFIRMED @ 0x00403720 by research agent — ride-height refactor] */
         int32_t sp = actor->wheel_suspension_pos[i];
-        int32_t sp_div = (sp + (int32_t)((uint32_t)(sp >> 31) & 0xFFu)) >> 8;
+        int32_t sp_div = FP_TRUNC((sp + (int32_t)((uint32_t)(sp >> 31) & 0xFFu)));
         int32_t href = (int32_t)CDEF_S(actor, CDEF_SUSP_REF_HEIGHT);
         int32_t href_x181 = href * 0xB5;
         int32_t href_preload =
-            (href_x181 + (int32_t)((uint32_t)(href_x181 >> 31) & 0xFFu)) >> 8;
+            FP_TRUNC((href_x181 + (int32_t)((uint32_t)(href_x181 >> 31) & 0xFFu)));
         wy = (int32_t)(int16_t)(wy - sp_div - href_preload);
 
         /* Faithful port of TransformShortVec3ByRenderMatrixRounded @ 0x0042EB10
@@ -3417,9 +3418,9 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             matrix[11] = actor->render_pos.z;
             int32_t world[3];
             td5_transform_short_vec3_by_render_matrix_rounded(body_off, world, matrix);
-            actor->wheel_contact_pos[i].x = world[0] << 8;
-            actor->wheel_contact_pos[i].y = world[1] << 8;
-            actor->wheel_contact_pos[i].z = world[2] << 8;
+            actor->wheel_contact_pos[i].x = FP_SCALE(world[0]);
+            actor->wheel_contact_pos[i].y = FP_SCALE(world[1]);
+            actor->wheel_contact_pos[i].z = FP_SCALE(world[2]);
 
         }
 
@@ -3791,9 +3792,9 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
             };
             int32_t world[3];
             td5_transform_short_vec3_by_render_matrix_rounded(corner_off, world, matrix);
-            body_pos[i]->x = world[0] << 8;
-            body_pos[i]->y = world[1] << 8;
-            body_pos[i]->z = world[2] << 8;
+            body_pos[i]->x = FP_SCALE(world[0]);
+            body_pos[i]->y = FP_SCALE(world[1]);
+            body_pos[i]->z = FP_SCALE(world[2]);
 
             td5_track_update_probe_position(&actor->body_probes[i],
                                             body_pos[i]->x,
@@ -4023,9 +4024,9 @@ void td5_physics_clamp_attitude(TD5_Actor *actor)
      * Original SAR is signed arithmetic shift right; signed int32 >> 8 in C
      * is arithmetic for the platform we target (i686). The result is
      * truncated to int16 via the `MOV word ptr [ESP+offset], reg` stores. */
-    int16_t delta_roll  = (int16_t)(((int32_t)(actor->euler_accum.roll  - actor->angular_velocity_roll))  >> 8);
-    int16_t delta_yaw   = (int16_t)(((int32_t)(actor->euler_accum.yaw   - actor->angular_velocity_yaw))   >> 8);
-    int16_t delta_pitch = (int16_t)(((int32_t)(actor->euler_accum.pitch - actor->angular_velocity_pitch)) >> 8);
+    int16_t delta_roll  = (int16_t)(FP_TRUNC(((int32_t)(actor->euler_accum.roll  - actor->angular_velocity_roll))));
+    int16_t delta_yaw   = (int16_t)(FP_TRUNC(((int32_t)(actor->euler_accum.yaw   - actor->angular_velocity_yaw))));
+    int16_t delta_pitch = (int16_t)(FP_TRUNC(((int32_t)(actor->euler_accum.pitch - actor->angular_velocity_pitch))));
 
     /* BuildRotationMatrixFromAngles(&local_30, {delta_roll, delta_yaw, delta_pitch})
      * [CALL 0x0042E1E0 at 0x00405CC8].  Original takes a short* with three
