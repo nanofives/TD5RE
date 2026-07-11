@@ -8,6 +8,7 @@ td5_physics_suspension.c
 td5_track.c
 td5_track_registry.c
 td5_ai.c
+td5_ai_traffic.c
 td5_render.c
 td5_render_effects.c
 td5_render_mesh.c
