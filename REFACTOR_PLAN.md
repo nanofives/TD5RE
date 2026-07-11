@@ -179,7 +179,7 @@ sim package is `wip`.
 | S4 | td5_game.c flatten + magic naming | todo | sim-exclusive |
 | S5 | td5_ai.c split + td5_race_events.h | todo | sim-exclusive; ai renames ride along |
 | S6 | td5_track.c parser/runtime split | todo | sim-exclusive; after S1d |
-| S7 | td5_sound event inversion | todo | sim-exclusive |
+| S7 | td5_sound event inversion | wip fix-refactor-s7-sound-event-inversion | sim-exclusive |
 | C1 | Coverage build-out (camera/sound traces, save/net tests) | todo | prereq for C2/C7/C8 |
 | C2 | td5_camera.c cleanup | todo | after C1 |
 | C3 | td5_hud.c extern fix + split | todo | |
