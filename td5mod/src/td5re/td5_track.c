@@ -7035,8 +7035,21 @@ void td5_track_scan_banner_pages(void)
                   g_active_td6_level);
         return;
     }
-    if (!td5_env_flag_on("TD5RE_BANNER_PAIR_CULL")) {
-        TD5_LOG_I("track", "native banner scan: OFF (TD5RE_BANNER_PAIR_CULL=0)");
+    /* [native-banner mis-flag fix 2026-07-11] DEFAULT OFF. The geometry pair
+     * detector cannot reliably tell a localized double-sided SIGN from roadside
+     * fences / guardrails / scenery that also form coincident reverse-wound
+     * panels, so it false-flagged fence & foliage pages (and pages SHARED with
+     * scenery) on native tracks. The one-sided cull then removed the camera-
+     * facing side of those meshes -> "fences render on one side only / missing
+     * textures in a lot of places" on every native track (Edinburgh, etc.). The
+     * pair-count exclusion (TD5RE_BANNER_MAX_PAIRS) only caught the big
+     * structural runs, not small panels or shared pages. Net, this feature broke
+     * far more (scenery everywhere) than it fixed (z-fighting on a handful of
+     * native TD5 overhead banners), so it is now opt-in: set TD5RE_BANNER_PAIR_
+     * CULL=1 to re-enable the geometry scan. TD6 tracks are unaffected — they
+     * keep the hand-authored k_td6_banner_pages one-sided cull. */
+    if (!td5_env_flag_off("TD5RE_BANNER_PAIR_CULL")) {
+        TD5_LOG_I("track", "native banner scan: OFF (default; TD5RE_BANNER_PAIR_CULL=1 to enable)");
         return;
     }
     if (!s_models_blob || s_models_display_list_count <= 0)
