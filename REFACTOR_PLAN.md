@@ -245,7 +245,7 @@ the GPU/CPU contention that disrupted this session's attempts). -->
 | C6 | td5_frontend.c split | todo | after C5 |
 | C7 | td5_save.c goto cleanup | todo | after C1 |
 | C8 | td5_sound.c FP + doppler naming | todo | after C1 |
-| C9 | td5_platform_win32.c split | done (partial) @94d25efc | second slice DONE: extracted Threading + Logging (~355 lines, 21 fns) + their private logging-statics decl block into td5_platform_win32_log.c, reusing the existing td5_platform_internal.h seam (s_hwnd) -- no new header needed, all other moved symbols used only within the extracted range. First slice DONE @eb6f7ccf: File I/O + INI config + Memory into td5_platform_win32_fs.c. Both slices: build+lint clean (pre-existing unrelated td5_ai_traffic.c extern-count note from S5 is not a regression from this work), full suite 46/46 PASS, goldens matched. Left undone: window/input, render-preset, audio-device sections -- larger, more entangled with D3D11 wrapper's g_backend state, expect internal-header work closer to S5/S6 scope |
+| C9 | td5_platform_win32.c split | wip fix-refactor-c9-platform-audio | third slice: audio-device (DirectSound8 + CD Audio MCI + Radio PCM streaming, ~1360 lines). First two slices DONE (filesystem @eb6f7ccf, threading+logging @94d25efc). This slice needs td5_platform_internal.h extended with 13 shared audio statics (td5_platform_win32_init()'s module-reset memset block touches them) -- more coupling than slices 1-2 but still a clean extern-seam, not a restructure |
 | G1 | g_td5 shrink round 1 + config views | todo | |
 | G2 | td5_types.h decomposition | todo | solo on td5_types.h |
 | G3 | td5_game.h migration + extern paydown | todo | after S5, S7 |
