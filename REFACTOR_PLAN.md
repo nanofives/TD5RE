@@ -207,7 +207,36 @@ REVERTED (worktree discarded, nothing merged) rather than shipped with an
 unexplained golden break. Future session: bisect what td5_game.c global
 differs after a drag_race_enabled=1 race vs a drag_race_enabled=0 race,
 right at the START of the next race's init (before any drag-specific code
-runs) -- that's the actual leak to find and reset. -->
+runs) -- that's the actual leak to find and reset.
+
+[2026-07-11 SECOND PASS, same day] Shrank td5_selftest.c's k_races table to
+a fast 2-entry repro [race-drag-solo, race-golden-moscow] to bisect faster
+(22s vs 68-90s). Result reframes the finding: even COMPLETELY UNMODIFIED
+race-drag-solo (fix reverted, stock master behavior) breaks golden-moscow
+when it runs IMMEDIATELY before it with nothing in between. This means the
+leak is NOT specific to the one-line st_apply_scenario fix -- it's a
+PRE-EXISTING statefulness bug in the golden-trace harness/sim that today's
+full 46-step table's specific spacing (4 races run between drag-solo and
+golden-moscow: arcade-tr-cops, ai-slot0, moscow-late1, moscow-late2)
+happens to wash out before golden-moscow runs. The fix likely makes
+whatever this leak is stronger/differently-shaped so it survives past
+those 4 intervening races too. A control experiment (swap drag-solo for
+harmless race-newcastle-circ in the same 2-entry table, to test "does ANY
+race immediately before golden break it") crashed with an unrelated GPU
+driver exception (0xC0000005 in nvwgf2um.dll -- NVIDIA D3D driver, not
+game logic; matches this machine's already-documented GPU/TDR instability
+memory) before yielding a clean answer.
+
+ESCALATED TAKEAWAY: this is bigger than the C1 drag-finish item -- the
+golden-trace regression net has an order-sensitive fragility TODAY that
+just happens not to trip with the current k_races ordering. Any future
+reordering/insertion into that table risks silently breaking or falsely
+un-breaking golden coverage. Worth its own dedicated investigation
+independent of ever landing the drag-finish fix. See
+feedback_c1_drag_finish_reverted_2026-07-11 memory for full bisection
+notes and next steps (dump/diff g_td5.* + relevant statics at race-init
+entry, "ran drag before" vs "never ran drag", ideally on a machine free of
+the GPU/CPU contention that disrupted this session's attempts). -->
 
 | C2 | td5_camera.c cleanup | todo | after C1 |
 | C3 | td5_hud.c extern fix + split | todo | |
