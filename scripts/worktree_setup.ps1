@@ -26,7 +26,12 @@ if ($wt -eq $parent) {
 
 Write-Host "Setting up worktree at $wt"
 
-# 1a. Junction re/assets (read-only game asset trees, safe to junction)
+# 1a. re/assets -- DO NOT JUNCTION (2026-07-10: a junction here let another
+# worktree's teardown cascade-delete the parent's entire re/assets tree
+# TWICE in one session -- same failure class as the td5mod\deps\mingw
+# junction incident below, just hitting a different shared directory).
+# Copy instead: slower to set up (~11.5k files) but the worktree owns its
+# own bytes, so no other worktree's cleanup can ever touch the parent's copy.
 $assetSrc = Join-Path $parent 're\assets'
 $assetDst = Join-Path $wt 're\assets'
 if ((Test-Path $assetSrc) -and -not (Test-Path $assetDst)) {
@@ -34,10 +39,11 @@ if ((Test-Path $assetSrc) -and -not (Test-Path $assetDst)) {
     if (-not (Test-Path $assetParentDir)) {
         New-Item -ItemType Directory -Path $assetParentDir -Force | Out-Null
     }
-    cmd /c "mklink /J `"$assetDst`" `"$assetSrc`"" | Out-Null
-    Write-Host "  +    re\assets (junctioned)"
+    New-Item -ItemType Directory -Path $assetDst -Force | Out-Null
+    robocopy $assetSrc $assetDst /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+    Write-Host "  +    re\assets (copied, not junctioned)"
 } elseif (Test-Path $assetDst) {
-    Write-Host "  ok   re\assets (already linked)"
+    Write-Host "  ok   re\assets (already present)"
 }
 
 # 1b. td5mod\deps — DO NOT JUNCTION. Worktree auto-cleanup follows junctions and
