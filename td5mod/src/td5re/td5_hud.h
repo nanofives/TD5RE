@@ -202,6 +202,9 @@ void td5_hud_draw_arcade_chips(void);
 /* [TRAFFIC BATTLE 2026-06-28] Per-viewport "WRECKS N" indicator. No-op outside
  * the Traffic Destruction battle mode. */
 void td5_hud_draw_battle_wrecks(void);
+/* [CAR BROKE DOWN 2026-07-10] Centred "CAR BROKE DOWN / PRESS <key> TO CONTINUE"
+ * prompt on any human pane whose car is knocked out. No-op otherwise. */
+void td5_hud_draw_brokedown_prompt(void);
 /* [LANE ASSIST] Per-viewport "LANE ASSIST" on/off indicator (+ steering arrow).
  * No-op unless the optional aid is enabled for the pane's player. */
 void td5_hud_draw_laneassist_indicator(void);

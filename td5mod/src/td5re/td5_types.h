@@ -275,6 +275,14 @@ typedef enum TD5_InputBits {
     TD5_INPUT_STEER_RIGHT   = 0x00000002,  /* bit  1 */
     TD5_INPUT_THROTTLE      = 0x00000200,  /* bit  9 */
     TD5_INPUT_BRAKE         = 0x00000400,  /* bit 10 */
+    TD5_INPUT_RECOVER       = 0x00000800,  /* bit 11 — [CAR BROKE DOWN 2026-07-10]
+                                            * PORT-ONLY manual car-recovery request
+                                            * (keyboard R / joystick SELECT). Routed
+                                            * through control_bits like NET_PAUSE so
+                                            * the reposition fires on the SAME lockstep
+                                            * round on every peer (net-deterministic);
+                                            * the sim edge-detects the merged bit. Free
+                                            * bit — no original counterpart. */
     TD5_INPUT_HANDBRAKE     = 0x00100000,  /* bit 20 — original default: Q */
     TD5_INPUT_HORN          = 0x00200000,  /* bit 21 — original default: RCtrl */
     TD5_INPUT_STUNNED       = 0x00200000,  /* same bit triggers state 0x0F */

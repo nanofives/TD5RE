@@ -1011,11 +1011,26 @@ void td5_input_poll_race_session(void)
 
             if (i >= 0 && i < TD5_MAX_HUMAN_PLAYERS) {
                 if (recover_now && !s_recovery_held[i]) {
-                    s_recovery_request[i] = 1;       /* one-shot edge */
+                    s_recovery_request[i] = 1;       /* one-shot edge (legacy local path) */
                     TD5_LOG_I(LOG_TAG, "recovery requested: player=%d", i);
                 }
                 s_recovery_held[i] = (uint8_t)recover_now;
             }
+
+            /* [CAR BROKE DOWN 2026-07-10] Route the recovery request through the
+             * per-slot control_bits word (LEVEL while held) so it rides the same
+             * lockstep merge as every other input bit. The host merges it into the
+             * authoritative per-slot array and pushes it to EVERY peer, so the
+             * deterministic sim (td5_physics_update_stuck_recovery) edge-detects the
+             * MERGED bit and repositions on the identical round on every machine —
+             * no local-only reposition, no desync. `i` is the local player index,
+             * which is exactly how s_control_bits[] is indexed in this poll loop.
+             * When the whole feature is knob-disabled recover_now is always 0, so
+             * the bit is never set and this is a no-op. */
+            if (recover_now)
+                s_control_bits[i] |=  (uint32_t)TD5_INPUT_RECOVER;
+            else
+                s_control_bits[i] &= ~(uint32_t)TD5_INPUT_RECOVER;
         }
     }
 

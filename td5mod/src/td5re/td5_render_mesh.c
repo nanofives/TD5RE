@@ -2378,6 +2378,19 @@ void td5_render_actors_for_view(int view_index)
                 if (actor_fade > 90) actor_fade = 90;
             }
 
+            /* [CAR BROKE DOWN 2026-07-10] A freshly force-recovered car is drawn as
+             * a translucent GHOST for its invulnerability window, flickering solid
+             * in the blink tail so the player sees it ending. td5_damage_ghost_alpha
+             * returns 255 (no-op) when the slot isn't ghosting or CarDamage is off.
+             * Clamps DOWN so an in-progress spawn/despawn fade is never brightened. */
+            {
+                int gha = td5_damage_ghost_alpha(slot);
+                if (gha < 255) {
+                    actor_fade = (actor_fade * gha) / 255;
+                    if (actor_fade < 1) actor_fade = 1;
+                }
+            }
+
             /* Bumper / interior camera own-car skip (orig RenderRaceActorForView
              * @ 0x0040c120, gate @ 0x0040c2a0-0x0040c2af): when this actor IS the
              * view's own slot AND the view's preset mode != 0, the original does

@@ -197,6 +197,10 @@ void td5_camera_set_rear_view(int view, int active);
  * Clears any residual spin left by the CarDamage finish-orbit (knockout) once
  * the car has recovered. No-op on an out-of-range view. */
 void td5_camera_reset_yaw_offset(int view);
+/* [CAR BROKE DOWN 2026-07-10] Begin a render-only chase-camera glide from the
+ * last-emitted pose to the live follow (used when a breakdown recovery teleports
+ * the car 30 spans back). No-op if the view has no prior pose or the knob is 0. */
+void td5_camera_begin_recovery_glide(int view);
 void td5_camera_update_trackside(TD5_Actor *actor, int view_index);
 void td5_camera_update_transition_state(int player, int view_index);
 void td5_camera_update_transition_timer(void);

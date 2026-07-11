@@ -28,6 +28,7 @@
 #include "td5_render.h"
 #include "td5_arcade.h"   /* ARCADE per-viewport power-up chip */
 #include "td5_damage.h"   /* [CAR DAMAGE] player HUD health bar */
+#include "td5_input.h"    /* [CAR BROKE DOWN] recovery-key label per input source */
 #include "td5_laneassist.h" /* lane-assist per-viewport indicator */
 #include "td5_track.h"
 #include "td5_game.h"
@@ -1984,6 +1985,64 @@ void td5_hud_draw_battle_wrecks(void)
         } else {
             td5_hud_queue_text(0, (int)vl->center_x, (int)(vl->vp_int_top + 8.0f + tshift), 1,
                                "WRECKS %d", wrecks);
+        }
+    }
+}
+
+/* ========================================================================
+ * [CAR BROKE DOWN 2026-07-10] "PRESS TO CONTINUE" prompt (SOURCE-PORT FEATURE).
+ *
+ * When a HUMAN pane's car is knocked out (broken down), the race no longer ends
+ * around the player — it waits. This centred prompt tells them to press their
+ * recovery control to force-recover (30 spans back, brief ghost). Shown only for
+ * a knocked-out human pane; disappears the instant the car is recovered (health
+ * restored -> no longer knocked out). Recovery-key label follows the pane's input
+ * source (keyboard R / joystick SELECT). No-op when CarDamage's wreck mechanic is
+ * off (nothing is ever knocked out) or the whole recovery feature is disabled.
+ * ======================================================================== */
+void td5_hud_draw_brokedown_prompt(void)
+{
+    if (!td5_damage_enabled()) return;
+    int views = s_view_count;
+    if (views < 1) views = 1;
+    if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
+
+    /* ~2 Hz gentle pulse on the CONTINUE line so it reads as an active call to
+     * action; time-based (render), display-only. */
+    int on = (((int)(td5_plat_time_ms() / 400)) & 1) == 0;
+
+    for (int v = 0; v < views; v++) {
+        int slot = g_actor_slot_map[v];
+        if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) continue;
+        if (!td5_physics_slot_is_human(slot)) continue;   /* human panes only */
+        if (!td5_damage_slot_knocked_out(slot)) continue; /* only while broken down */
+
+        const TD5_HudViewLayout *vl = &s_view_layout[v];
+        float w = vl->vp_int_right - vl->vp_int_left;
+        if (w < 2.0f) continue;
+
+        /* Recovery key label from this pane's input source (0 = keyboard). */
+        const char *key = (td5_input_get_input_source(v) == 0) ? "R" : "SELECT";
+        char line2[48];
+        snprintf(line2, sizeof line2, "PRESS %s TO CONTINUE", key);
+
+        float cx = vl->center_x;
+        float cy = vl->center_y;
+
+        if (td5_hudfont_ready()) {
+            float ts = (w / 640.0f) * 1.15f;
+            if (hud_dpi_scale_on()) ts *= hud_size_mul();
+            if (ts < 0.55f) ts = 0.55f;
+            if (ts > 1.80f) ts = 1.80f;
+            td5_vui_text_centered(cx, cy - 14.0f * ts, "CAR BROKE DOWN",
+                                  0xFFFF4030u, ts, ts);          /* red */
+            if (on)
+                td5_vui_text_centered(cx, cy + 12.0f * ts, line2,
+                                      0xFFFFFFFFu, ts * 0.8f, ts * 0.8f);  /* white, pulsing */
+        } else {
+            td5_hud_queue_text(0, (int)cx, (int)(cy - 12.0f), 1, "CAR BROKE DOWN");
+            if (on)
+                td5_hud_queue_text(0, (int)cx, (int)(cy + 8.0f), 1, "%s", line2);
         }
     }
 }

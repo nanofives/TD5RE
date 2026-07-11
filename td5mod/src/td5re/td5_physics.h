@@ -121,6 +121,8 @@ void td5_physics_reset_actor_state(TD5_Actor *actor);
  * restricted to non-network play for v1. */
 int  td5_physics_recover_player(int slot);
 void td5_physics_update_stuck_recovery(void);
+/* [CAR BROKE DOWN 2026-07-10] 1 if racer `slot` is a human (g_race_slot_state). */
+int  td5_physics_slot_is_human(int slot);
 void td5_physics_missing_wheel_correction(TD5_Actor *actor);
 void td5_physics_state0f_damping(TD5_Actor *actor);
 

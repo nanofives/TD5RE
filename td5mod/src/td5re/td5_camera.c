@@ -236,6 +236,22 @@ typedef struct {
 static TD5_CamPose s_cam_pose_prev[TD5_MAX_VIEWPORTS];
 static TD5_CamPose s_cam_pose_cur [TD5_MAX_VIEWPORTS];
 static int         s_cam_pose_init[TD5_MAX_VIEWPORTS] = {0};
+
+/* [CAR BROKE DOWN 2026-07-10] Recovery camera glide (render-only). When a broken-
+ * down car is force-recovered 30 spans back, the chase eye would hard-cut to the
+ * new follow position. Instead we EASE it: capture the last-emitted eye/target as
+ * the "from" pose and, over a short wall-clock window, blend from->live so the
+ * camera slides to the restore spot. Render-only (never feeds the sim), so wall-
+ * clock timing and per-viewport state are fine and cannot affect determinism. */
+static int      s_recov_last_valid[TD5_MAX_VIEWPORTS] = {0};
+static int      s_recov_last_eye  [TD5_MAX_VIEWPORTS][3];
+static int      s_recov_last_tgt  [TD5_MAX_VIEWPORTS][3];
+static int      s_recov_glide_on  [TD5_MAX_VIEWPORTS] = {0};
+static int      s_recov_from_eye  [TD5_MAX_VIEWPORTS][3];
+static int      s_recov_from_tgt  [TD5_MAX_VIEWPORTS][3];
+static uint32_t s_recov_glide_t0  [TD5_MAX_VIEWPORTS];
+static int      s_recov_glide_ms   = 600;   /* TD5RE_RECOVERY_CAM_MS */
+static int      s_recov_glide_init = 0;
 static int         s_cam_capture_view = -1;   /* >=0 => sinks also record into s_cam_pose_cur[view] */
 /* g_depthFovFactor is defined above (camera projection FOV). */
 
@@ -2308,6 +2324,31 @@ void td5_camera_apply_view(int view)
         target[2] = cam_lerp_i(P->target[2], C->target[2], f);
     }
 
+    /* [CAR BROKE DOWN 2026-07-10] Recovery camera glide: while active, ease the
+     * eye+target from the captured pre-teleport pose to the live follow so a
+     * 30-spans-back recovery slides the camera in instead of hard-cutting. Then
+     * record the emitted pose so a future glide can start from it. Render-only. */
+    if (s_recov_glide_on[v]) {
+        uint32_t el = td5_plat_time_ms() - s_recov_glide_t0[v];
+        if ((int)el >= s_recov_glide_ms) {
+            s_recov_glide_on[v] = 0;                      /* window done -> live pose */
+        } else {
+            float t = (s_recov_glide_ms > 0) ? (float)el / (float)s_recov_glide_ms : 1.0f;
+            float e = t * t * (3.0f - 2.0f * t);          /* smoothstep ease */
+            for (int k = 0; k < 3; k++) {
+                eye[k]    = s_recov_from_eye[v][k] +
+                            (int)((float)(eye[k]    - s_recov_from_eye[v][k]) * e);
+                target[k] = s_recov_from_tgt[v][k] +
+                            (int)((float)(target[k] - s_recov_from_tgt[v][k]) * e);
+            }
+        }
+    }
+    for (int k = 0; k < 3; k++) {
+        s_recov_last_eye[v][k] = eye[k];
+        s_recov_last_tgt[v][k] = target[k];
+    }
+    s_recov_last_valid[v] = 1;
+
     g_depthFovFactor = cam_lerp_i(P->fov_factor, C->fov_factor, f);
     s_cam_capture_view = -1;          /* build live, not capture */
 
@@ -3843,6 +3884,29 @@ void td5_camera_reset_yaw_offset(int view)
     if (view < 0 || view >= TD5_MAX_VIEWPORTS) return;
     g_camYawOffset[view] = 0;
     TD5_LOG_I(LOG_TAG, "camera: yaw offset reset view=%d (manual recovery repair)", view);
+}
+
+/* [CAR BROKE DOWN 2026-07-10] Start the recovery camera glide for `view`: snapshot
+ * the last-emitted chase eye/target as the "from" pose and open the wall-clock
+ * ease window. If we have no prior pose (view never rendered), do nothing — the
+ * camera simply snaps, same as before. Called from the sim recovery driver only
+ * for the LOCAL viewport showing the recovered slot. Render-only. */
+void td5_camera_begin_recovery_glide(int view)
+{
+    if (!s_recov_glide_init) {
+        s_recov_glide_ms   = td5_env_int("TD5RE_RECOVERY_CAM_MS", 600, 0, 5000);
+        s_recov_glide_init = 1;
+    }
+    if (view < 0 || view >= TD5_MAX_VIEWPORTS) return;
+    if (s_recov_glide_ms <= 0) return;           /* knob-disabled -> hard cut */
+    if (!s_recov_last_valid[view]) return;       /* no prior pose to glide from */
+    for (int k = 0; k < 3; k++) {
+        s_recov_from_eye[view][k] = s_recov_last_eye[view][k];
+        s_recov_from_tgt[view][k] = s_recov_last_tgt[view][k];
+    }
+    s_recov_glide_t0[view] = td5_plat_time_ms();
+    s_recov_glide_on[view] = 1;
+    TD5_LOG_I(LOG_TAG, "camera: recovery glide begin view=%d (%d ms)", view, s_recov_glide_ms);
 }
 
 void td5_camera_update_trackside(TD5_Actor *a, int vi)

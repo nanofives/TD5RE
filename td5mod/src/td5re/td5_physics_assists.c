@@ -106,17 +106,35 @@
  * TD5RE_RECOVERY_REPAIR_PCT. */
 #define TD5_MANUAL_RECOVERY_REPAIR_PCT  20
 
+/* [CAR BROKE DOWN 2026-07-10] A recovery FROM A BREAKDOWN (the car was knocked
+ * out / broken down, not merely stuck) is the punishing "force recovery": the
+ * car is dragged BACK this many spans (default 30 — real position loss) and
+ * fully repaired so it can actually race on. An ordinary "I'm stuck" press keeps
+ * the gentle in-place reset + partial repair above. Both knob-tunable. */
+#define TD5_BREAKDOWN_SPANS_BACK   30
+#define TD5_BREAKDOWN_REPAIR_PCT   100
+
 /* Per-slot manual-recovery cooldown counter (racer slots only; humans are
  * racers). Counts DOWN each live sim tick from the cooldown window to 0; while
  * > 0 a manual recovery request is ignored. Cleared at race init and re-armed to
  * the cooldown window each time a manual recovery fires. */
 static int     s_manual_recovery_cooldown[TD5_MAX_RACER_SLOTS];
 
+/* [CAR BROKE DOWN 2026-07-10] Per-slot rising-edge latch for the merged
+ * TD5_INPUT_RECOVER control bit. The bit is LEVEL (set while the button is
+ * held), so the deterministic sim fires the recovery once per press by edge-
+ * detecting 0->1 here. Indexed by racer slot (the merged control_bits array is
+ * pushed per-slot on every peer), so this works identically over the lockstep
+ * net. Cleared at race init. */
+static uint8_t s_recover_bit_held[TD5_MAX_RACER_SLOTS];
+
 static int     s_recovery_init = 0;
 static int     s_recovery_enabled = 1;     /* TD5RE_STUCK_RECOVERY */
 static int     s_recovery_spans_back = TD5_RECOVERY_DEFAULT_BACK;
 static int     s_recovery_cooldown_ticks = TD5_MANUAL_RECOVERY_COOLDOWN_TICKS;  /* TD5RE_RECOVERY_COOLDOWN_TICKS */
 static int     s_recovery_repair_pct = TD5_MANUAL_RECOVERY_REPAIR_PCT;          /* TD5RE_RECOVERY_REPAIR_PCT */
+static int     s_breakdown_spans_back = TD5_BREAKDOWN_SPANS_BACK;               /* TD5RE_BREAKDOWN_SPANS_BACK */
+static int     s_breakdown_repair_pct = TD5_BREAKDOWN_REPAIR_PCT;               /* TD5RE_BREAKDOWN_REPAIR_PCT */
 
 /* [GENTLE FLIP-RECOVERY 2026-06-21] Forward decls (definitions live just after
  * the stuck-recovery block). For a LOCAL HUMAN, the byte-faithful scripted-
@@ -1650,11 +1668,20 @@ static void recovery_init_knobs(void)
      * sanity clamp [0,100]. */
     s_recovery_repair_pct = td5_env_int("TD5RE_RECOVERY_REPAIR_PCT",
                                         TD5_MANUAL_RECOVERY_REPAIR_PCT, 0, 100);
+    /* [CAR BROKE DOWN 2026-07-10] Breakdown force-recovery: step-back distance
+     * (default 30 spans — real position loss) and repair % (default 100 = full
+     * mechanical repair so the car can race on). Both sanity-clamped. */
+    s_breakdown_spans_back = td5_env_int("TD5RE_BREAKDOWN_SPANS_BACK",
+                                         TD5_BREAKDOWN_SPANS_BACK, 0, 64);
+    s_breakdown_repair_pct = td5_env_int("TD5RE_BREAKDOWN_REPAIR_PCT",
+                                         TD5_BREAKDOWN_REPAIR_PCT, 0, 100);
     s_recovery_init = 1;
-    TD5_LOG_I(LOG_TAG, "Manual recovery: %s spans_back=%d cooldown=%d ticks (%.1fs) repair_pct=%d",
+    TD5_LOG_I(LOG_TAG, "Manual recovery: %s spans_back=%d cooldown=%d ticks (%.1fs) repair_pct=%d "
+              "| breakdown spans_back=%d repair_pct=%d",
               s_recovery_enabled ? "enabled" : "disabled",
               s_recovery_spans_back, s_recovery_cooldown_ticks,
-              s_recovery_cooldown_ticks / 30.0, s_recovery_repair_pct);
+              s_recovery_cooldown_ticks / 30.0, s_recovery_repair_pct,
+              s_breakdown_spans_back, s_breakdown_repair_pct);
 }
 
 /* Recover `slot`'s actor: upright it, kill its motion, re-face it track-forward,
@@ -1695,14 +1722,24 @@ int td5_physics_recover_player(int slot)
     TD5_Actor *actor = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
     if (!actor) return 0;
 
+    /* [CAR BROKE DOWN 2026-07-10] Distinguish a BREAKDOWN recovery (the car is
+     * knocked out / broken down) from an ordinary "I'm stuck" press. Detected
+     * BEFORE any repair, so it reflects the pre-recovery state. A breakdown gets
+     * the punishing force-recovery: step back s_breakdown_spans_back (default 30)
+     * and full repair; an ordinary press keeps the gentle in-place partial. */
+    int from_breakdown = td5_damage_slot_knocked_out(slot) ||
+                         td5_ai_actor_is_broken_down(slot);
+    int spans_back_eff = from_breakdown ? s_breakdown_spans_back : s_recovery_spans_back;
+    int repair_pct_eff = from_breakdown ? s_breakdown_repair_pct : s_recovery_repair_pct;
+
     int cur_span = (int)actor->track_span_raw;
     int tgt_span = cur_span;
 
-    if (s_recovery_spans_back > 0) {
+    if (spans_back_eff > 0) {
         /* ---- LEGACY OPT-IN: step back N spans + re-derive world XZ from track
          * geometry. Off by default (see fix note above). ---- */
         int sub_lane, wx, wy, wz;
-        if (!td5_track_get_recovery_pose(cur_span, s_recovery_spans_back,
+        if (!td5_track_get_recovery_pose(cur_span, spans_back_eff,
                                          &tgt_span, &sub_lane, &wx, &wy, &wz)) {
             TD5_LOG_W(LOG_TAG, "recover_player slot=%d: no recovery pose (cur_span=%d)",
                       slot, cur_span);
@@ -1755,74 +1792,95 @@ int td5_physics_recover_player(int slot)
      * td5_damage_repair_actor_pct), and clear the broken-down flag so a knocked-out
      * racer is no longer treated as wrecked (it would otherwise stay physics-frozen,
      * since health never regenerates on its own). */
-    td5_damage_repair_actor_pct(slot, s_recovery_repair_pct);
+    td5_damage_repair_actor_pct(slot, repair_pct_eff);
     td5_ai_clear_actor_broken_down(slot);
 
+    /* [CAR BROKE DOWN 2026-07-10] A breakdown recovery drops the car in cold at a
+     * fresh spot; grant a brief invulnerable, translucent GHOST window so the
+     * player can get going again without instantly being re-wrecked by traffic /
+     * an AI pile-up / a wall it was dropped near. Tick-based inside td5_damage so
+     * it is net-deterministic. Inert (a no-op) when CarDamage is off. Ordinary
+     * stuck recoveries do NOT ghost. */
+    if (from_breakdown)
+        td5_damage_begin_ghost(slot);
+
     TD5_LOG_I(LOG_TAG,
-              "recover_player: slot=%d cur_span=%d -> span=%d%s pos=(%d,%d,%d) [repaired %d%%]",
+              "recover_player: slot=%d cur_span=%d -> span=%d%s pos=(%d,%d,%d) [repaired %d%%]%s",
               slot, cur_span, tgt_span,
-              (s_recovery_spans_back > 0) ? " (step-back)" : " (in-place)",
+              (spans_back_eff > 0) ? " (step-back)" : " (in-place)",
               actor->world_pos.x, actor->world_pos.y, actor->world_pos.z,
-              s_recovery_repair_pct);
+              repair_pct_eff, from_breakdown ? " [BREAKDOWN force-recovery]" : "");
     return 1;
 }
 
-/* Per-tick driver: run MANUAL (R / SELECT) stuck-recovery for every LOCAL HUMAN
- * player. Called from td5_physics_tick (deterministic sim tick).
+/* Map a racer `slot` to the LOCAL viewport that shows/drives it, or -1 if this
+ * machine has no local pane for it (a remote net peer's car). Mirrors the driver
+ * slot derivation: route-to-driven => driven slot == vp; legacy => the pane's
+ * shown slot g_actorSlotForView[vp]. Used only for per-view LOCAL camera effects
+ * (yaw reset, recovery glide) — the reposition itself is slot-scoped. */
+static int recovery_local_view_for_slot(int slot)
+{
+    int views = g_td5.viewport_count;
+    if (views < 1) views = 1;
+    if (views > TD5_MAX_VIEWPORTS) views = TD5_MAX_VIEWPORTS;
+    int route_to_driven = td5_input_split_btn_route_on();
+    for (int vp = 0; vp < views; vp++) {
+        int s = route_to_driven ? vp : g_actorSlotForView[vp];
+        if (s == slot) return vp;
+    }
+    return -1;
+}
+
+/* Per-tick driver: run MANUAL (R / SELECT) car-recovery for every HUMAN racer.
+ * Called from td5_physics_tick (deterministic sim tick).
  *
- * Local human players occupy viewports 0..viewport_count-1, each mapped to an
- * actor slot via g_actorSlotForView[vp]; that vp index is also the input-layer
- * player index. We only act on slots flagged human (g_race_slot_state==1).
+ * [CAR BROKE DOWN 2026-07-10] NETPLAY-SAFE REWRITE. The recovery request now
+ * rides the per-slot control_bits word (TD5_INPUT_RECOVER, set LEVEL while the
+ * button is held in td5_input.c) — the host merges it and pushes the authoritative
+ * per-slot array to every peer, so the reposition is a PURE FUNCTION of replicated
+ * sim state and fires on the identical lockstep round on every machine. We
+ * therefore iterate ALL racer slots (not just local viewports) and edge-detect
+ * the MERGED bit per slot; the old `if (g_td5.network_active) return;` skip is
+ * gone. Per-VIEW effects (camera yaw reset + recovery glide) still key off the
+ * LOCAL viewport that shows the slot, so a remote peer's recovery never touches
+ * this machine's camera.
  *
- * [AUTO-RECOVERY REMOVED 2026-06-24] There is no automatic stuck detection any
- * more — a car is only ever repositioned when the driver presses recovery, and
- * each manual recovery arms a per-player cooldown (s_recovery_cooldown_ticks,
- * default 150 = 5 s) before another will be honoured.
- *
- * v1 NETPLAY SCOPE: the manual edge is local-only input (not exchanged over the
- * lockstep protocol), so to keep remote peers in sync the whole driver is
- * skipped under an active network session. */
+ * Two recovery flavours:
+ *   - ORDINARY (car merely stuck): gentle in-place partial reset, arms the
+ *     s_recovery_cooldown_ticks cooldown (anti-spam).
+ *   - BREAKDOWN (car knocked out / broken down): the punishing force-recovery —
+ *     30 spans back, full repair, ghost window. NOT cooldown-gated, so the
+ *     "PRESS TO CONTINUE" prompt is honoured immediately. */
 void td5_physics_update_stuck_recovery(void)
 {
     recovery_init_knobs();
     if (!s_recovery_enabled) return;
     if (!g_actor_table_base) return;
-    if (g_td5.network_active) return;   /* v1: local/non-network only */
 
     /* During the start countdown / pause the sim is frozen and recovering makes
-     * no sense, but we still DRAIN the manual edge so a press then doesn't leak
-     * forward and fire the instant the race un-pauses. */
+     * no sense, but we still update the edge latch so a press held across the
+     * pause doesn't fire the instant the race un-pauses. */
     int act = !g_game_paused;
 
-    int views = g_td5.viewport_count;
-    if (views < 1) views = 1;
-    if (views > TD5_MAX_VIEWPORTS) views = TD5_MAX_VIEWPORTS;
+    int nslots = g_traffic_slot_base;
+    if (nslots > TD5_MAX_RACER_SLOTS) nslots = TD5_MAX_RACER_SLOTS;
 
-    int route_to_driven = td5_input_split_btn_route_on();
-    for (int vp = 0; vp < views; vp++) {
-        /* [SPLIT-SCREEN BUTTON ROUTING 2026-06-27] `vp` is the local-player index
-         * (the same index the input layer armed s_recovery_request[] with). Reset the
-         * actor that player DRIVES — actor slot == vp (identity, matching the per-slot
-         * steering loop and the original's gPrimarySelectedSlot/{0,1} map) — NOT
-         * g_actorSlotForView[vp] (the car SHOWN in pane vp). When the MP position
-         * picker permutes panes these differ, and the old code reset the wrong
-         * player's car (sending it to wherever that player was — often the start).
-         * Byte-identical when the pane map is identity (g_actorSlotForView[vp]==vp).
-         * Knob "0" reverts to the legacy pane-index routing. */
-        int slot = route_to_driven ? vp : g_actorSlotForView[vp];
-        if (slot < 0 || slot >= g_traffic_slot_base || slot >= TD5_MAX_RACER_SLOTS)
-            continue;
-        if (g_race_slot_state[slot] != 1)   /* local human racers only */
+    for (int slot = 0; slot < nslots; slot++) {
+        if (g_race_slot_state[slot] != 1)   /* human racers only */
             continue;
 
         TD5_Actor *actor =
             (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
         if (!actor) continue;
 
-        /* ---- MANUAL trigger (edge from input layer, keyed by player index) ----
-         * Always consume the edge so it never leaks across a pause OR a cooldown;
-         * only act on it while the sim is live and the car is still racing. */
-        int manual = td5_input_recovery_requested(vp);
+        /* ---- Rising-edge detect of the merged RECOVER control bit for this slot.
+         * The bit is LEVEL (held); fire once per press on the 0->1 transition.
+         * Update the latch every tick (even paused/finished) so it tracks the
+         * physical button and a held press can't queue up. */
+        uint32_t bits = td5_input_get_control_bits(slot);
+        int held = (bits & (uint32_t)TD5_INPUT_RECOVER) != 0;
+        int edge = held && !s_recover_bit_held[slot];
+        s_recover_bit_held[slot] = (uint8_t)held;
 
         /* Don't recover a car that has already finished the race. */
         if (actor->finish_time != 0) {
@@ -1830,41 +1888,51 @@ void td5_physics_update_stuck_recovery(void)
             continue;
         }
 
-        if (!act) {
-            /* Paused/countdown: defer recovery (edge already drained above);
-             * the cooldown does not tick down while the sim is frozen. */
-            continue;
-        }
+        if (!act)
+            continue;   /* paused/countdown: latch updated above, act on it later */
 
-        /* Count the per-player cooldown down toward 0 on each live sim tick. */
+        /* Count the per-slot ordinary-recovery cooldown down each live sim tick. */
         if (s_manual_recovery_cooldown[slot] > 0)
             s_manual_recovery_cooldown[slot]--;
 
-        if (manual) {
-            if (s_manual_recovery_cooldown[slot] > 0) {
-                /* On cooldown — ignore this press. */
-                TD5_LOG_I(LOG_TAG,
-                          "manual recovery ignored (cooldown): player=%d slot=%d "
-                          "remaining=%d ticks (%.1fs)",
-                          vp, slot, s_manual_recovery_cooldown[slot],
-                          s_manual_recovery_cooldown[slot] / 30.0);
-            } else {
-                TD5_LOG_I(LOG_TAG, "manual recovery: player=%d slot=%d", vp, slot);
-                if (td5_physics_recover_player(slot)) {
-                    s_manual_recovery_cooldown[slot] = s_recovery_cooldown_ticks;
-                    /* [ROTATING-CAM FIX 2026-07-04] A knocked-out car engages the
-                     * CarDamage finish-orbit (cam_finish_orbit_step), which spins
-                     * this viewport's g_camYawOffset every tick. Nothing else clears
-                     * it mid-race, so without this the camera stayed parked at
-                     * whatever angle it had drifted to even after the repair above
-                     * cleared the knockout. `vp` is this player's own camera pane
-                     * (identity-mapped in the common case; see the split-screen
-                     * button-routing note above `slot`'s derivation). */
-                    td5_camera_reset_yaw_offset(vp);
-                }
-            }
+        if (!edge)
+            continue;
+
+        /* Breakdown vs ordinary, captured BEFORE the repair inside recover_player
+         * (which re-checks the same still-unrepaired state). */
+        int broke = td5_damage_slot_knocked_out(slot) ||
+                    td5_ai_actor_is_broken_down(slot);
+
+        /* The cooldown only gates ORDINARY (stuck) recoveries. A broken-down car
+         * showing "PRESS TO CONTINUE" is always allowed to continue at once. */
+        if (!broke && s_manual_recovery_cooldown[slot] > 0) {
+            TD5_LOG_I(LOG_TAG,
+                      "manual recovery ignored (cooldown): slot=%d remaining=%d ticks (%.1fs)",
+                      slot, s_manual_recovery_cooldown[slot],
+                      s_manual_recovery_cooldown[slot] / 30.0);
+            continue;
         }
 
+        TD5_LOG_I(LOG_TAG, "manual recovery: slot=%d%s", slot,
+                  broke ? " [BREAKDOWN -> continue]" : "");
+        if (td5_physics_recover_player(slot)) {
+            if (!broke)
+                s_manual_recovery_cooldown[slot] = s_recovery_cooldown_ticks;
+
+            /* Per-VIEW LOCAL camera effects only if this machine shows the slot. */
+            int view = recovery_local_view_for_slot(slot);
+            if (view >= 0) {
+                /* [ROTATING-CAM FIX 2026-07-04] Clear the finish-orbit yaw the
+                 * knocked-out car spun up (cam_finish_orbit_step) so the chase
+                 * cam doesn't stay parked at a drifted angle after the repair. */
+                td5_camera_reset_yaw_offset(view);
+                /* [CAR BROKE DOWN 2026-07-10] Smoothly glide the chase camera from
+                 * where it was to the new (30-spans-back) follow position instead
+                 * of hard-cutting. Render-only, so it never feeds the sim. */
+                if (broke)
+                    td5_camera_begin_recovery_glide(view);
+            }
+        }
     }
 }
 
@@ -2016,4 +2084,5 @@ void td5_physics_gentle_recovery_coast(TD5_Actor *actor)
 void td5_physics_assists_race_reset(void)
 {
     memset(s_manual_recovery_cooldown, 0, sizeof(s_manual_recovery_cooldown));
+    memset(s_recover_bit_held, 0, sizeof(s_recover_bit_held));   /* [CAR BROKE DOWN] */
 }

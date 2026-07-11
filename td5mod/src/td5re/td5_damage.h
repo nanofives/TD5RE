@@ -97,6 +97,20 @@ void  td5_damage_on_impact(TD5_Actor *actor, int32_t impact_mag,
 void  td5_damage_on_wall_impact(TD5_Actor *actor, int32_t approach_speed,
                                 const TD5_DamageHit *hit);
 
+/* [CAR BROKE DOWN 2026-07-10] Post-recovery GHOST window (invulnerable +
+ * translucent + trailing blink). Begun by the breakdown force-recovery
+ * (td5_physics_recover_player); tick-based so net-deterministic. All inert when
+ * CarDamage is off.
+ *   begin       — arm the window for `slot` (TD5RE_GHOST_TICKS, default 90 = 3s).
+ *   tick        — decrement every slot's window once per sim tick.
+ *   ghosting    — 1 while the window is active (used to skip damage/collision).
+ *   ghost_alpha — 0..255 draw-alpha multiplier for the slot's body (255 = solid);
+ *                 translucent while ghosting, flickering solid in the blink tail. */
+void  td5_damage_begin_ghost(int slot);
+void  td5_damage_tick_ghost(void);
+int   td5_damage_slot_ghosting(int slot);
+int   td5_damage_ghost_alpha(int slot);
+
 /* Remaining health as 0..1 (1 = pristine). Returns -1 when the slot has no
  * actor or has not been initialized this race. */
 float td5_damage_health01(int slot);

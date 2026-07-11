@@ -33,6 +33,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 10" },
+    { CL_ITEM,    "NEW: breaking down no longer loses you the race. The" },
+    { CL_ITEM,    "  car parks with a CAR BROKE DOWN / PRESS TO CONTINUE" },
+    { CL_ITEM,    "  prompt; press recovery to be towed 30 spans back," },
+    { CL_ITEM,    "  fully repaired, with the camera gliding to the new" },
+    { CL_ITEM,    "  spot and a brief invulnerable ghost that blinks out" },
+    { CL_ITEM,    "  (needs CAR DAMAGE on)" },
     { CL_ITEM,    "FIX: Montego Bay's countdown camera fly-in is back -" },
     { CL_ITEM,    "  now that the camera no longer dips underground, the" },
     { CL_ITEM,    "  cinematic sweep plays during the 3-2-1 like on every" },
