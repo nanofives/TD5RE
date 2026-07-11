@@ -89,6 +89,10 @@ void td5_sound_release_race_channels(void);
 
 /* --- Vehicle audio --- */
 void td5_sound_update_vehicle_looping_state(int actor_index);
+/* [S7 2026-07-10 event inversion] Read-and-clear: caller applies the
+ * sky-rotation-tracker advance once per frame instead of td5_sound.c
+ * calling td5_game_advance_sky_rotation() directly (see td5_race_state.h). */
+int  td5_sound_take_sky_rotation_advance_request(void);
 void td5_sound_start_tracked_vehicle_audio(int actor_index);
 void td5_sound_stop_tracked_vehicle_audio(void);
 /* [POLICE rewrite] Per-frame: drive the distance-attenuated siren from the
