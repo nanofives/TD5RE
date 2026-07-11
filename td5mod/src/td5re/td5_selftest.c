@@ -446,18 +446,17 @@ static void st_golden_begin(void)
     g_td5.ini.lane_assist          = 0;
 
     /* [render golden] The render signature is captured from THIS race's frames.
-     * Two things must be pinned for a reproducible frame at a given sim tick:
      *   - overlay OFF: the dev debug overlay draws changing frame-time text into
      *     the composited backbuffer we read back (the suite forces it on at boot).
-     *   - FF=1: under fast-forward the render-frame<->sim-tick cadence is
-     *     wall-clock dependent (that's why st_golden_begin excludes frame-paced
-     *     trace stages), so "the frame at sim tick N" is not reproducible. At 1x
-     *     each render frame advances ~one tick, so capture lands on (or within a
-     *     tick of) the target — the coarse signature + distance threshold absorbs
-     *     the residual +/-1-tick jitter. The SIM trace stays FF-independent, so
-     *     the trace goldens are unaffected. */
+     *   - fast-forward is now DYNAMIC (st_render_capture_tick): the race cruises
+     *     at the suite FF (fast-forwarding the countdown and the gaps between
+     *     capture points) and drops to 1x only in a short runway around each
+     *     capture tick, where the render-frame<->sim-tick cadence must be
+     *     reproducible. The SIM is FF-independent, so the frame AT a given tick
+     *     is identical however we approach it, and the trace goldens are
+     *     unaffected. Seed the cruise value here; the per-frame tick manages it. */
     g_td5.ini.debug_overlay      = 0;
-    g_td5.ini.trace_fast_forward = 1.0f;
+    g_td5.ini.trace_fast_forward = s_ff;
     st_render_reset();
 
     g_td5.ini.race_trace_enabled       = 1;
@@ -721,6 +720,20 @@ static void st_render_compute_sig(const unsigned char *px, int w, int h,
  * frame is readable one frame later (same latency the photo-booth relies on). */
 static void st_render_capture_tick(int rel_tick)
 {
+    /* Dynamic fast-forward: cruise at the suite FF (fast-forwarding the
+     * countdown and the between-capture gaps) but drop to real-time (1x) while a
+     * capture is pending or within a short runway before the next capture tick,
+     * so the frame lands on the target tick deterministically. The runway must
+     * exceed one cruise step (max ticks/frame = FF+8) so a cruise jump can't
+     * skip past the target before we slow down. */
+    if (s_render_pending ||
+        (s_render_cap_idx < ST_RENDER_NCAP &&
+         rel_tick >= k_render_cap_ticks[s_render_cap_idx] - ((int)s_ff + 12))) {
+        g_td5.ini.trace_fast_forward = 1.0f;
+    } else {
+        g_td5.ini.trace_fast_forward = s_ff;   /* cruise */
+    }
+
     if (s_render_pending) {
         unsigned char *px; int w, h;
         if (Backend_GetCapture(&px, &w, &h) && px && w > 0 && h > 0) {
