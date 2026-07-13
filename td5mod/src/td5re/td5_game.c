@@ -93,15 +93,6 @@ int32_t g_actor_best_lap        = 0;
 int32_t g_actor_best_race       = 0;
 void   *g_route_data            = NULL;
 
-extern int   g_cameraTransitionActive;  /* td5_camera.c */
-extern float g_subTickFraction;        /* td5_camera.c -- [0..1) sub-tick interp */
-extern int   g_camWorldPos[TD5_MAX_VIEWPORTS][3];   /* td5_camera.c -- per-viewport camera pos (24.8 fixed) */
-extern float g_cameraPos[3];            /* td5_camera.c -- float camera pos for render */
-extern float g_render_width_f;          /* td5_render.c */
-extern float g_render_height_f;         /* td5_render.c */
-extern int   g_track_is_circuit;        /* td5_track.c */
-extern int   g_track_type_mode;         /* td5_track.c */
-extern uint8_t *g_track_environment_config; /* td5_asset.c -- LEVELINF.DAT buffer (0x4AEE20) */
 
 /* Checkpoint logging now routes through the centralized logger (race.log) */
 
@@ -3223,7 +3214,6 @@ static void init_race_track_resources(void)
      * car is still visible (see td5_camera_update_transition_state). Benchmark
      * trackside cameras (orig also inits them) are left on chase — deferred. */
     if (s_replay_mode) {
-        extern int g_trackType;   /* camera circuit-orbit-override flag */
         int world_x = td5_asset_track_pool_index(g_td5.track_index,
                                                   g_td5.reverse_direction);
         g_trackType = g_track_is_circuit;   /* faithful: circuit forces orbit mode */
@@ -5283,8 +5273,6 @@ static int td5_game_net_sync_frame(int apply_dt_correction) {
  * Render frames that get 0 free-run at monitor rate (g_subTickFraction holds at
  * 1.0, already clamped) while the 30 Hz sim waits for the next lockstep round. */
 static int td5_game_net_try_sync(void) {
-    extern int td5_net_host_frame_nb(uint32_t *control_bits, float *frame_dt);
-    extern int td5_net_client_frame_nb(uint32_t *control_bits, float *frame_dt);
     uint32_t bits[TD5_NET_MAX_PLAYERS];
     int local = td5_net_local_slot();
     int i, r;

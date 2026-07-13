@@ -73,6 +73,8 @@ void td5_camera_snap_smoothing(void);
 extern float g_subTickFraction;
 extern int   g_camWorldPos[TD5_MAX_VIEWPORTS][3];
 extern int   g_cameraTransitionActive;
+extern float g_cameraPos[3];   /* float camera pos for render */
+extern int   g_trackType;      /* circuit orbit-override flag */
 
 /* ========================================================================
  * Camera preset table (7 presets x 16 bytes at 0x463098)
