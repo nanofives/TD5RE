@@ -251,4 +251,8 @@ float td5_cos_12bit(uint32_t angle);
 /* 0x40A6C0: Sin from 12-bit angle (4096 = 360 degrees), returns float */
 float td5_sin_12bit(uint32_t angle);
 
+/* Per-slot near-wall flag set by V2W collision (td5_physics_collision.c),
+ * read cross-module (e.g. the camera's wall-proximity easing). */
+extern int16_t g_actor_near_wall[TD5_MAX_RACER_SLOTS];
+
 #endif /* TD5_PHYSICS_H */
