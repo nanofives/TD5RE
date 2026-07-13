@@ -50,8 +50,6 @@
 #define LOG_TAG "physics"
 
 
-extern void *g_actor_base;
-extern uint8_t *g_actor_table_base;
 
 /* ======== [split] per-slot wheel/pose state (moved verbatim from td5_physics.c) ======== */
 /* [S18] Per-slot consecutive-ticks-over-attitude-limit counter, used ONLY on

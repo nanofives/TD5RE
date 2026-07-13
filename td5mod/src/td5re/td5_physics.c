@@ -72,8 +72,6 @@
 #define LOG_TAG "physics"
 
 
-extern void *g_actor_base;
-extern uint8_t *g_actor_table_base;
 
 /* [P1-B SPLIT step 2, 2026-07-02] OBB_CornerData + the collision fwd decls,
  * the wall collision response and the whole V2V cluster (OBB test, collision
@@ -241,7 +239,6 @@ int td5_physics_slot_is_human(int slot)
 /* Viewport -> actor-slot map (defined in td5_game.c). Used by the stuck-recovery
  * driver to map a local human player index back to its actor slot, and to read
  * that player's one-shot manual-recovery edge from the input layer. */
-extern int g_actorSlotForView[TD5_MAX_VIEWPORTS];
 
 /* [P1-B SPLIT 2026-07-02] The PORT-ONLY assists that lived here (stuck-recovery
  * state, MP/hard catch-up, gearbox mode + manual boost, slope/hill/weight/draft/
@@ -5005,7 +5002,6 @@ void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
      * hull_build_store lives in td5_physics_collision.c; declared here (not in
      * td5_physics_internal.h) because TD5_MeshVertex is a render-layer type. */
     {
-        extern void hull_build_store(int slot, const TD5_MeshVertex *verts, int n);
         hull_build_store(slot, verts, vert_count);
     }
     if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS)
