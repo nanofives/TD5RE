@@ -66,6 +66,22 @@ void td5_camera_finalize_all(void);
    change / resume-from-pause. Render-only; never feeds the sim. */
 void td5_camera_snap_smoothing(void);
 
+/* Camera globals owned by td5_camera.c, read by the HUD/render side.
+ *  g_subTickFraction     - render-frame extrapolation fraction [0,1).
+ *  g_camWorldPos[v]       - finalized per-viewport camera world position.
+ *  g_cameraTransitionActive - pre-race countdown fly-in timer (0 = running). */
+extern float g_subTickFraction;
+extern int   g_camWorldPos[TD5_MAX_VIEWPORTS][3];
+extern int   g_cameraTransitionActive;
+extern float g_cameraPos[3];   /* float camera pos for render */
+extern int   g_trackType;      /* circuit orbit-override flag */
+extern float g_worldToRenderScale;  /* 1/256 world->float scale */
+extern float g_cameraBasis[9];      /* 3x3 camera basis (right/up/forward) */
+extern float g_cameraSecondaryUnscaled[9];  /* unscaled secondary basis (billboards) */
+extern int   g_raceCameraPresetMode[TD5_MAX_VIEWPORTS];  /* per-view preset mode */
+extern int   g_depthFovFactor;  /* projection scale, 0x1000 = identity */
+extern float g_projFovScale;    /* 1/4096 */
+
 /* ========================================================================
  * Camera preset table (7 presets x 16 bytes at 0x463098)
  *

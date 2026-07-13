@@ -40,6 +40,9 @@ void td5_ai_tick(void);
  * @ 0x004bead4). Used by the smoke-spawn gate at td5_render.c that
  * mirrors orig 0x0040C79C: smoke emits only when this is 0. */
 extern int16_t g_wanted_damage_state[TD5_MAX_RACER_SLOTS];
+/* Per-slot cop-chase / wanted timing state (td5_ai.c), read by the HUD. */
+extern int32_t g_cop_siren_warn_tick[TD5_MAX_RACER_SLOTS];
+extern int32_t g_wanted_hit_tick[TD5_MAX_RACER_SLOTS];
 
 /* Returns a pointer to the 128-byte AI physics tuning template (DAT_00473DB0
  * in TD5_d3d.exe). Shared across all AI slots in the original. Used by the

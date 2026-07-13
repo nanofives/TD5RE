@@ -28,6 +28,8 @@
 #include "td5_sound.h"
 #include "td5_trace.h"
 #include "td5_game.h"   /* td5_game_get_wanted_target_slot, td5_game_is_wanted_mode */
+#include "td5_hud.h"    /* g_wanted_msg_timer/index -- chase-event HUD banner */
+#include "td5_net.h"    /* td5_net_is_slot_active -- net-race slot gate */
 #include "td5_arcade.h" /* [2026-07-04] td5_arcade_slot_is_ghost — GHOST can't be
                          * newly acquired as a cop-chase target */
 #include "td5_save.h"   /* td5_save_get_catchup_assist — CATCHUP level (S06) */
@@ -997,8 +999,6 @@ void td5_ai_reset_wanted_state(void) {
 int td5_ai_wanted_cop_hit(int cop_slot, int suspect_slot, int32_t impact_mag) {
     int16_t dec, cur;
     char *actor;
-    extern int g_wanted_msg_timer;   /* td5_hud.c */
-    extern int g_wanted_msg_index;
 
     /* `suspect_slot` is the rammed SUSPECT; `cop_slot` is the COP that rammed it
      * (the caller in td5_physics.c resolves which is which). Crediting the actual
@@ -1035,7 +1035,6 @@ int td5_ai_wanted_cop_hit(int cop_slot, int suspect_slot, int32_t impact_mag) {
     {
         int mp_cop_chase = (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE &&
                             !g_td5.network_active);
-        extern int td5_sound_cop_siren_is_on(int slot);
         if (mp_cop_chase && !td5_sound_cop_siren_is_on(cop_slot)) {
             g_cop_siren_warn_tick[cop_slot] = g_td5.simulation_tick_counter;
             TD5_LOG_I(LOG_TAG,
@@ -1117,7 +1116,6 @@ int td5_ai_wanted_cop_hit(int cop_slot, int suspect_slot, int32_t impact_mag) {
 }
 
 void td5_ai_bind_actor_table(void *actor_base) {
-    extern void *g_route_data;
 
     g_actor_base = (char *)actor_base;
     g_route_state_base = g_route_state_storage;
@@ -2336,7 +2334,6 @@ void td5_ai_init_race_actor_runtime(void) {
      * its controls every tick ("player is AI" on the client). s_slot_state alone
      * (td5_game.c) was NOT enough -- the AI reads THIS array. */
     if (g_td5.network_active) {
-        extern int td5_net_is_slot_active(int slot);
         int k;
         for (k = 0; k < g_traffic_slot_base; k++)
             if (td5_net_is_slot_active(k))
@@ -6200,7 +6197,6 @@ static inline void td5_enc_stop_tracked_audio(void) {
 /* Forward declaration: the deterministic-sim crash-recovery state reset
  * for actor[9]. Original is ResetVehicleActorState @ 0x00405d70.
  * Port: td5_physics.c:td5_physics_reset_actor_state(TD5_Actor *). */
-extern void td5_physics_reset_actor_state(TD5_Actor *actor);
 
 /**
  * UpdateSpecialTrafficEncounter — byte-faithful port of 0x00434DA0.

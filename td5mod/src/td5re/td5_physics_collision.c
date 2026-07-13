@@ -50,8 +50,6 @@
 #define LOG_TAG "physics"
 
 
-extern void *g_actor_base;
-extern uint8_t *g_actor_table_base;
 
 /* ======== [split] OBB typedef + collision fwd decls (moved verbatim from td5_physics.c) ======== */
 /* OBB corner test output: per-corner penetration data */
@@ -488,7 +486,6 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
              * span 224 (high-velocity wall impacts triggering this tail block).
              * Use td5_ai_get_route_state() which already applies the correct
              * stride. */
-            extern int32_t *td5_ai_get_route_state(int slot);
             uint32_t hd = 0;
             {
                 int32_t *rs = td5_ai_get_route_state((int)actor->slot_index);

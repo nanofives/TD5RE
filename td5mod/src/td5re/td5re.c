@@ -113,8 +113,6 @@ int td5re_init(void) {
     g_td5.render_height = (saved_h > 0) ? saved_h : 480;
 
     /* Sync the legacy render dimension globals used by HUD, VFX, etc. */
-    extern float g_render_width_f, g_render_height_f;
-    extern int   g_render_width,   g_render_height;
     g_render_width    = g_td5.render_width;
     g_render_height   = g_td5.render_height;
     g_render_width_f  = (float)g_td5.render_width;

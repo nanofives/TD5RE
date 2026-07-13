@@ -153,6 +153,16 @@ extern int      g_racer_count;
 extern uint32_t g_tick_counter;
 extern int      g_actor_slot_map[TD5_MAX_VIEWPORTS];
 extern void    *g_actor_pool;
+extern uint8_t *g_actor_table_base;   /* gRuntimeSlotActorTable base (0x4AB108) */
+extern int      g_actorSlotForView[TD5_MAX_VIEWPORTS];  /* per-view actor slot */
+extern int      g_actorBaseAddr;      /* legacy actor-table base handle */
+extern void    *g_route_data;         /* loaded LEFT/RIGHT.TRK route blob */
+/* Race-end / render-mode state owned by td5_game.c, read by the HUD. */
+extern int      g_special_render_mode;
+extern int      g_pending_finish_timer;
+extern int      g_race_end_state;
+extern int32_t  g_actor_best_lap;
+extern int32_t  g_actor_best_race;
 
 /* --- Split-screen --- */
 int td5_game_get_player_slot(int viewport);
@@ -303,6 +313,11 @@ int  td5_game_battle_chase_gap(int slot);
 /* 1 while the in-race pause menu is open (audio layer reads this to suspend the
  * cop-chase siren refresh during pause so it re-arms on resume). */
 int  td5_game_is_pause_menu_active(void);
+/* Pause-menu overlay queries consumed by the HUD renderer (td5_hud.c). */
+int  td5_game_pause_endrace_confirm_active(void);
+int  td5_game_pause_action_confirm(void);
+/* Final finishing position of the player (post-race victory HUD). */
+int  td5_game_get_victory_position(void);
 /* 1 during the pre-race countdown, 0 once the race is running. */
 int  td5_game_is_countdown_active(void);
 void td5_game_advance_sky_rotation(void);

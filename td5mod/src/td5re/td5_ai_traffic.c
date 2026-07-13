@@ -3038,8 +3038,6 @@ static int trf_dyn_pick_lane_dir(int slot, int span, int lane_count,
 
 /* [task#8] Branch-corridor enumeration helpers (defined in td5_track.c). Declared
  * in-file (not the shared header) per the same convention as the externs above. */
-extern int td5_track_count_branch_corridors(int main_span);
-extern int td5_track_branch_corridor_span(int main_span, int which);
 
 /* [item#9 2026-06-15] Deliberately pick a MAIN-ring span (within [win_lo..win_hi]
  * ahead of the anchor `ps`) that is PARALLELED by an active branch corridor, so a

@@ -844,6 +844,10 @@ void td5re_shutdown(void);
 /** Run one frame of the main game loop. Returns 0 to continue, 1 to quit. */
 int  td5re_frame(void);
 
+/* Update the cached render dimensions (g_render_* in td5_render.c) after a
+ * window resize; called from the platform layer's WM_SIZE path. */
+void td5re_set_render_dims(int w, int h);
+
 /** Update the always-on FPS counter (call once per frame from the main loop). */
 void td5_game_update_fps_overlay(void);
 

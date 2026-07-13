@@ -36,7 +36,6 @@
 
 static const char *trackside_behavior_name(int btype);
 
-extern int g_replay_mode;
 
 /* Forward declarations for functions defined at end of this file */
 static void BuildCubicSpline3D(int *spline_state, int control_points);
@@ -139,10 +138,6 @@ static int s_flyin_preset_reloaded[TD5_MAX_VIEWPORTS] = {0};
  * water / losing the car around a bend on Montego's geometry. A close
  * preset keeps the eye near enough to the car that this can't happen. */
 static int s_countdown_tight_applied[TD5_MAX_VIEWPORTS] = {0};
-extern int    g_actorSlotForView[TD5_MAX_VIEWPORTS];     /* td5_game.c */
-extern int    g_actorBaseAddr;           /* td5_game.c */
-extern uint8_t *g_actor_table_base;      /* td5_game.c */
-extern int    g_game_type;               /* td5_game.c — g_selectedGameType equivalent */
 int    g_trackType              = 0;
 unsigned char g_actorAliveTable[TD5_MAX_TOTAL_ACTORS] = {0};
 int    g_lookLeftRight[TD5_MAX_VIEWPORTS]       = {0};
@@ -1635,7 +1630,6 @@ after_flyin:
      * Cosmetic / camera-only, so safe in netplay. */
     float wall_zoom = 1.0f;
     {
-        extern int16_t g_actor_near_wall[];
         int wslot = g_actorSlotForView[v];
         if (wslot >= 0 && wslot < TD5_MAX_RACER_SLOTS && g_actor_near_wall[wslot] > 0) {
             wall_zoom = 0.55f;          /* ~45% closer while pinned to a wall */
@@ -2693,7 +2687,6 @@ void UpdateVehicleRelativeCamera(int actor, int view)
     {
         /* DAT_004aaeec is a pointer to some global matrix; in the original this is
            passed as a float* from a fixed address. We use the actor's rotation matrix. */
-        extern float g_renderBasisMatrix[12]; /* 0x4AAEEC points to this */
         /* [FIX 2026-05-24 OVERSIGHT: case_1_2_basis_transform; orig 0x00401C20]
          * Orig UpdateVehicleRelativeCamera calls ConvertFloatVec3ToIntVec3
          * @ 0x0042DB40 (short-clamped), not TransformVector3ByBasis. */

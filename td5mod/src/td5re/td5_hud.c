@@ -31,6 +31,7 @@
 #include "td5_input.h"    /* [CAR BROKE DOWN] recovery-key label per input source */
 #include "td5_laneassist.h" /* lane-assist per-viewport indicator */
 #include "td5_track.h"
+#include "td5_camera.h"
 #include "td5_game.h"
 #include "td5_net.h"      /* [S31] td5_net_get_slot_name for the PAUSED BY overlay */
 #include "td5_save.h"
@@ -1514,13 +1515,9 @@ void td5_hud_draw_pause_overlay(void)
  * pane-local (0..pane_w / 0..pane_h) and we add the pane's screen offset
  * (vp_int_left/top) to land them in the full render target.
  *
- * Camera funcs live in td5_camera.c (no header included here on purpose — see
- * rule: only td5_hud.c is edited; these are forward extern prototypes matching
- * the codebase's inline-extern convention). The render/transform funcs come
- * from td5_render.h (already included).
+ * Camera funcs come from td5_camera.h (included at the top); the render/
+ * transform funcs come from td5_render.h.
  * ======================================================================== */
-extern void td5_camera_apply_view(int view);
-extern void td5_camera_get_basis(float *right, float *up, float *forward);
 
 /* [#23 MP LABEL DISTANCE 2026-06-19] World-unit thresholds for the floating
  * other-player labels, env-tunable so they can be seen from further away and
@@ -1555,7 +1552,6 @@ static void hud_draw_mp_car_labels(void)
 
     /* Sub-tick position interpolation, matching the rendered car body
      * (td5_render.c: world_pos + linear_velocity * g_subTickFraction). */
-    extern float g_subTickFraction;
     float frac = g_subTickFraction;
     if (frac < 0.0f) frac = 0.0f; else if (frac > 1.0f) frac = 1.0f;
 
@@ -1642,7 +1638,6 @@ static void hud_draw_mp_car_labels(void)
              * true distance is angle-independent. g_camWorldPos[v] is the raw
              * 24.8 camera world position for this pane; FP scales to world units
              * to match NEAR_D/FAR_D/CUT_D. */
-            extern int g_camWorldPos[][3];
             int64_t dcx = (int64_t)actor_world_x(slot) - (int64_t)g_camWorldPos[v][0];
             int64_t dcz = (int64_t)actor_world_z(slot) - (int64_t)g_camWorldPos[v][2];
             float dist = sqrtf((float)(dcx * dcx + dcz * dcz)) * FP;
@@ -2209,7 +2204,6 @@ void td5_hud_draw_net_pause_overlay(void)
  * as a sub-prompt of the menu. Port-only feature (no original equivalent). */
 void td5_hud_draw_endrace_confirm(void)
 {
-    extern int td5_game_pause_endrace_confirm_active(void);
     if (!td5_game_pause_endrace_confirm_active()) return;
 
     float sw = g_render_width_f;
@@ -2246,7 +2240,6 @@ void td5_hud_draw_endrace_confirm(void)
  * with the question text swapped per action. Port-only feature. */
 void td5_hud_draw_pause_action_confirm(void)
 {
-    extern int td5_game_pause_action_confirm(void);
     int action = td5_game_pause_action_confirm();
     if (!action) return;
 
@@ -3563,7 +3556,6 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
 {
     /* Skip during special render mode */
     /* g_special_render_mode at 0x466E9C */
-    extern int g_special_render_mode;
     if (g_special_render_mode != 0) return;
 
     s_cur_scale = (float *)&s_view_layout[view_index];
@@ -3699,7 +3691,6 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
      * the ramming cop only, and this draws on that cop's own pane. */
     if (g_td5.wanted_mode_enabled != 0 &&
         g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE && !g_td5.network_active) {
-        extern int32_t g_cop_siren_warn_tick[TD5_MAX_RACER_SLOTS];   /* td5_ai.c */
         int cop = g_actor_slot_map[view_index];
         if (cop >= 0 && cop < TD5_MAX_RACER_SLOTS && td5_game_cop_chase_is_cop(cop)) {
             int dt = g_td5.simulation_tick_counter - g_cop_siren_warn_tick[cop];
@@ -3747,13 +3738,9 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
         }
 
         /* Check for finished race / new best lap indicators */
-        extern int g_pending_finish_timer;
-        extern int g_race_end_state;
 
         if (g_pending_finish_timer == 0 && g_race_end_state == 0) {
             /* Show best lap comparison if applicable */
-            extern int32_t g_actor_best_lap;
-            extern int32_t g_actor_best_race;
             if (g_actor_best_lap != 0) {
                 int bl_ms = ((int)g_actor_best_lap * 100) / 30;
                 td5_hud_queue_text(0,
@@ -4185,15 +4172,9 @@ static int hud_draw_checkpoint_timer_ttf(int view_idx, uint32_t value)
  * restores the full-screen clip + projection centre after this returns.
  * ======================================================================== */
 
-/* [#1 2026-06-15] Branch-corridor enumeration (defined in td5_track.c but not yet
- * declared in td5_track.h). Used by the empty-cell MAP overlay to add the fork
- * corridors to the drawn track outline so branches aren't missing from the map.
- * td5_track_count_branch_corridors(main_span) -> how many parallel branches;
- * td5_track_branch_corridor_span(main_span, which) -> the which-th branch span
- * (0-based, jump-table order), or -1 when out of range / no table. */
-extern int td5_track_count_branch_corridors(int main_span);
-extern int td5_track_branch_corridor_span(int main_span, int which);
-
+/* [#1 2026-06-15] Branch-corridor enumeration (td5_track.h). Used by the
+ * empty-cell MAP overlay to add the fork corridors to the drawn track outline
+ * so branches aren't missing from the map. */
 
 /* ===== SECTION: split-screen filler pane (map/standings) + pending overlay ===== */
 
@@ -5508,8 +5489,7 @@ void td5_hud_render_overlays(float dt)
              * captured but no longer multiplied in (helper re-derives slot from
              * the route_state's own RS_SLOT_INDEX). */
             (void)actor_route_index(actor_slot); /* side-effect: ensure index resolves */
-            extern int32_t *td5_ai_get_route_state(int slot);
-            int32_t *rs_hud = td5_ai_get_route_state(actor_slot);
+            int32_t *rs_hud = td5_ai_get_route_state(actor_slot);  /* td5_ai.h */
             uint32_t heading_delta = rs_hud ? td5_compute_heading_delta(rs_hud) : 0;
 
             /* [FIX 2026-06-05b wrong-way detection — THE real bug]
@@ -5619,7 +5599,6 @@ void td5_hud_render_overlays(float dt)
          * finish-position digit. See hud_countdown_allviews_on(). The level math is
          * the same as tick_race_countdown(): level = timer/0x2800, digit = level+1
          * for level<=2 (i.e. 3/2/1), else 0/hidden. */
-        extern int g_cameraTransitionActive;   /* td5_camera.c countdown timer */
         int indicator_digit = s_indicator_state[v];
         if (hud_countdown_allviews_on() && g_cameraTransitionActive > 0) {
             int cd_level = g_cameraTransitionActive / 0x2800;
@@ -5676,7 +5655,6 @@ void td5_hud_render_overlays(float dt)
         {
             int vplace = td5_game_slot_finish_place(g_actor_slot_map[v]);
             if (vplace <= 0 && v == 0 && g_td5.race_end_fade_state > 0) {
-                extern int td5_game_get_victory_position(void);
                 vplace = td5_game_get_victory_position();
             }
             if (vplace > 0) td5_hud_draw_finish_position(vplace);
@@ -7448,11 +7426,9 @@ void td5_hud_init_pause_menu(int page_index)
     }
 
     /* Select page string table */
-    extern const char **g_pause_page_strings[8]; /* 0x4744B8 */
     s_pause_menu_strings = g_pause_page_strings[page_index];
 
     /* Compute page-dependent half-width */
-    extern const int g_pause_page_sizes[8]; /* 0x474498 */
     float page_size = (float)g_pause_page_sizes[page_index];
     s_pause_half_width = page_size * 0.5f;
     s_pause_quad_count = 0;
@@ -7884,7 +7860,6 @@ void td5_hud_draw_race_fade(float progress, int direction)
  * orig 0x00410ED2). Today's Tier 1 UpdateWantedDamageIndicator port
  * (commit fa1e910) hooked into the dead global, leaving the damage HUD
  * permanently inert in cop chase. Route through the real flag here. */
-extern int16_t  g_wanted_damage_state[TD5_MAX_RACER_SLOTS];
 
 /* Mirrors orig g_wantedDamageHudOverlayCount @ 0x004bf504 — selects the
  * single slot whose damage bar is displayed each frame.
@@ -8111,7 +8086,6 @@ void td5_hud_update_wanted_damage_indicator(int actor_slot)
      * the window the arrow is hidden so it no longer hovers over every suspect at
      * once. Window 0 (TD5RE_COPCHASE_ARROW_TICKS=0) disables the gate. */
     {
-        extern int32_t g_wanted_hit_tick[TD5_MAX_RACER_SLOTS];  /* td5_ai.c */
         int win = td5_copchase_arrow_window_ticks();
         if (win > 0) {
             int dt = g_td5.simulation_tick_counter - g_wanted_hit_tick[actor_slot];
@@ -8172,7 +8146,6 @@ void td5_hud_update_wanted_damage_indicator(int actor_slot)
      * (CONFIRMED 2026-05-31). So the bar scales linearly with resolution: at
      * 640px fVar2=16, at 1280px fVar2=32, etc. The previous port hardcoded 16
      * (640 only), so the bar read too small at higher resolutions. */
-    extern float g_render_width_f;
     /* [COP CHASE STATUS BARS 2026-06-25] Shrink the indicator with camera distance,
      * matched to the MP name labels (NEAR_D/FAR_D), but readable to 2x the label
      * cutoff. `depth` is the view-space distance (1/rhw, world units) from the anchor

@@ -251,12 +251,22 @@ void    td5_physics_gentle_recovery_coast(TD5_Actor *actor);
 
 /* ------------------------------------------------------------------------
  * Collision-TU API consumed by the core (td5_physics_collision.c).
- * hull_build_store(slot, verts, n) is declared at its core call site instead
- * (its TD5_MeshVertex parameter type is not visible from this header).
  * ------------------------------------------------------------------------ */
+void    hull_build_store(int slot, const TD5_MeshVertex *verts, int n);
 int     wreck_immobile_enabled(void);                       /* traffic wreck anchoring knob */
 void    mesh_box_store(int slot, int32_t half_w, int32_t front_z);
 void    td5_physics_hitbox_invalidate(int slot);            /* clear model box + hull for slot */
 int     td5_physics_hull_points(int slot);                  /* 0 when no valid silhouette */
+
+/* Actor-table globals. g_actor_table_base is owned by td5_game.c (declared
+ * identically in td5_game.h); declared here too so the physics TUs can see it
+ * without including td5_game.h (the game_h_includers lint ratchet only allows
+ * that include set to shrink). g_actor_base is NOT in td5_game.h: it currently
+ * has TWO -fcommon-merged tentative definitions with DIFFERENT pointer types
+ * (void* in td5_game.c, char* in td5_ai.c/td5_ai_internal.h) -- a pre-existing
+ * landmine; unifying the owner/type is its own follow-up, so this header keeps
+ * the void* view the physics TUs have always used. */
+extern void    *g_actor_base;
+extern uint8_t *g_actor_table_base;
 
 #endif /* TD5_PHYSICS_INTERNAL_H */

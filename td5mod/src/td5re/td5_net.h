@@ -71,6 +71,9 @@ int  td5_net_get_slot_latency_ms(int slot);     /* -1 = unknown (e.g. self/host)
 /* --- Per-frame sync --- */
 int  td5_net_handle_host_frame(uint32_t *control_bits, float *frame_dt);
 int  td5_net_handle_client_frame(uint32_t *control_bits, float *frame_dt);
+/* Non-blocking frame poll variants used by td5_game.c's net race loop. */
+int  td5_net_host_frame_nb(uint32_t *control_bits, float *frame_dt);
+int  td5_net_client_frame_nb(uint32_t *control_bits, float *frame_dt);
 
 /* --- Session browser --- */
 int  td5_net_enumerate_connections(void);

@@ -359,6 +359,9 @@ int  td5_asset_td6_level_for_slot(int track_index);
  * Reads LEVELINF.DAT DWORD[0] (the byte the race uses for g_td5.track_type),
  * cached per track index. Used by the track-select LAPS-row visibility. */
 int  td5_asset_track_is_circuit(int track_index);
+/* Loaded LEVELINF.DAT buffer for the current track (orig 0x4AEE20); owned by
+ * td5_asset.c, read by td5_game.c for the track-environment config bytes. */
+extern uint8_t *g_track_environment_config;
 /** Per-track grid / start-finish span for a migrated TD6 track, keyed by its
  *  converted level number, or 0 if not a TD6 track. */
 int  td5_asset_td6_start_span_for_level(int level_num);

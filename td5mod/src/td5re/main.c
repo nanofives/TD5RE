@@ -60,26 +60,9 @@ static void dbglog(const char *fmt, ...) {
     td5_plat_log(TD5_LOG_INFO, "main", "%s", buf);
 }
 
-/* ========================================================================
- * External declarations
- *
- * td5_platform_win32_init is not in td5_platform.h (it is Win32-specific).
- * The wrapper object creation functions are in wrapper.h.
- * ======================================================================== */
-
-extern void td5_platform_win32_init(void *ddraw4, void *d3ddevice3,
-                                    void *primary_surface);
-
-/* Sets the process AppUserModelID so the taskbar groups our window under its
- * own button and renders THAT window's TD5 icon. MUST run before any window is
- * created (Backend_CreateDevice), else the taskbar button keeps the
- * process-default identity and shows the generic icon on fresh machines. */
-extern void td5_platform_win32_set_app_id(void);
-
-/* Declares the process DPI-aware so Windows stops bitmap-stretching (and thus
- * blurring/"pixelating") the game on displays scaled above 100%. MUST run at
- * the very top of WinMain, before any window/HMONITOR/HDC exists. */
-extern void td5_platform_win32_enable_dpi_awareness(void);
+/* The Win32 bootstrap entry points (td5_platform_win32_init / _set_app_id /
+ * _enable_dpi_awareness) come from td5_platform.h; the wrapper object
+ * creation functions come from wrapper.h. */
 
 /* ========================================================================
  * Default display configuration

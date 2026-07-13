@@ -47,8 +47,6 @@
 #define LOG_TAG "physics"
 
 
-extern void *g_actor_base;
-extern uint8_t *g_actor_table_base;
 
 /* ======== [split] Engine & Transmission + Surface Normal & Gravity (moved verbatim from td5_physics.c) ======== */
 /* ========================================================================

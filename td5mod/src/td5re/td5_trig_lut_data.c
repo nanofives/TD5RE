@@ -2,6 +2,7 @@
  * Auto-generated from log/orig/pool3_trig_lut_dump.bin */
 /* g_sinCosFloatTable @ 0x00488984 dumped from TD5_d3d.exe runtime */
 #include <stdint.h>
+#include "td5_trig_lut_data.h"
 const uint32_t td5_trig_lut_bits[5120] = {
     0x3f800000u,0x3f7fffecu,0x3f7fffb1u,0x3f7fff4eu,0x3f7ffec4u,0x3f7ffe12u,0x3f7ffd39u,0x3f7ffc38u,
     0x3f7ffb10u,0x3f7ff9c1u,0x3f7ff84au,0x3f7ff6abu,0x3f7ff4e5u,0x3f7ff2f8u,0x3f7ff0e3u,0x3f7feea6u,
