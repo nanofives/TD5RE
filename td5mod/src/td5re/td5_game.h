@@ -153,6 +153,12 @@ extern int      g_racer_count;
 extern uint32_t g_tick_counter;
 extern int      g_actor_slot_map[TD5_MAX_VIEWPORTS];
 extern void    *g_actor_pool;
+/* Race-end / render-mode state owned by td5_game.c, read by the HUD. */
+extern int      g_special_render_mode;
+extern int      g_pending_finish_timer;
+extern int      g_race_end_state;
+extern int32_t  g_actor_best_lap;
+extern int32_t  g_actor_best_race;
 
 /* --- Split-screen --- */
 int td5_game_get_player_slot(int viewport);
