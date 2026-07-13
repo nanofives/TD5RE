@@ -255,4 +255,9 @@ void td5_hud_draw_pending_overlay(void);
 /* Pause-menu font glyph widths — extracted from original binary at 0x4660C8 */
 extern const int8_t g_pause_glyph_widths[256];
 
+/* Cop-chase wanted-message banner state (owned by td5_hud.c). td5_ai.c's
+ * wanted-mode logic arms these to flash HUD messages on chase events. */
+extern int g_wanted_msg_timer;
+extern int g_wanted_msg_index;
+
 #endif /* TD5_HUD_H */
