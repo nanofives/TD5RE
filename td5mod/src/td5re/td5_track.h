@@ -127,6 +127,10 @@ int              td5_track_branch_blacklisted(int span);
 int              td5_track_corridor_count(void);
 int              td5_track_corridor_info(int idx, int *branch_lo, int *branch_hi,
                                          int *main_lo, int *main_hi);
+/* Per-main-span branch query (HUD minimap parallel-branch overlay):
+ * count of parallel branches off `main_span`, and the which-th branch span. */
+int              td5_track_count_branch_corridors(int main_span);
+int              td5_track_branch_corridor_span(int main_span, int which);
 /* Are TD6 branch corridors currently drivable (walker takes/traverses them)? */
 int              td5_track_td6_branches_drivable(void);
 /* TD6 per-lane surface grid (header[6]): class at (span, lateral byte 0..255),

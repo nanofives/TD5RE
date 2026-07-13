@@ -303,6 +303,11 @@ int  td5_game_battle_chase_gap(int slot);
 /* 1 while the in-race pause menu is open (audio layer reads this to suspend the
  * cop-chase siren refresh during pause so it re-arms on resume). */
 int  td5_game_is_pause_menu_active(void);
+/* Pause-menu overlay queries consumed by the HUD renderer (td5_hud.c). */
+int  td5_game_pause_endrace_confirm_active(void);
+int  td5_game_pause_action_confirm(void);
+/* Final finishing position of the player (post-race victory HUD). */
+int  td5_game_get_victory_position(void);
 /* 1 during the pre-race countdown, 0 once the race is running. */
 int  td5_game_is_countdown_active(void);
 void td5_game_advance_sky_rotation(void);
