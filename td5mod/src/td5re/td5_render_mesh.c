@@ -22,6 +22,8 @@
 #include "td5_profile.h"
 #include "td5_track.h"
 #include "td5_game.h"
+#include "td5_input.h"   /* td5_input_is_playback_active */
+#include "td5_sound.h"   /* td5_sound_siren_is_enabled */
 #include "td5_asset.h"
 #include "td5_save.h"
 #include "td5_vfx.h"
@@ -2238,7 +2240,6 @@ void td5_render_actors_for_view(int view_index)
          * is the viewed slot (orig gPrimarySelectedSlot[view]); camera_preset_active
          * is g_raceCameraPresetMode[view] != 0. Consumed by the per-actor skip at
          * the top of the loop below (and the smoke sub-gate further down). */
-        extern int g_raceCameraPresetMode[2];
         int camera_target_slot   = td5_game_get_player_slot(view_index);
         int camera_preset_active = (g_raceCameraPresetMode[view_index & 1] != 0);
 
@@ -2560,8 +2561,6 @@ void td5_render_actors_for_view(int view_index)
              * we apply the offset only to racer slots [0..TD5_MAX_RACER_SLOTS).
              * [CONFIRMED @ 0x40C1C5-0x40C1D7 + 0x40BD20 absence] */
             {
-                extern float g_subTickFraction;
-                extern int td5_input_is_playback_active(void);
                 float frac = g_subTickFraction;
                 /* [SPLIT-SCREEN COUNTDOWN UNDER-GROUND FIX 2026-07-06] Guard the
                  * per-render sub-tick Y extrapolation against a garbage
@@ -2618,7 +2617,6 @@ void td5_render_actors_for_view(int view_index)
                 }
                 mat3x3_mul(s_camera_basis, actor->rotation_matrix.m, view_rot.m);
             } else {
-                extern float g_subTickFraction;
                 float interp_mat[9];
                 short interp[3];
                 float ifrac = g_subTickFraction * (1.0f / 256.0f);
@@ -2815,7 +2813,6 @@ void td5_render_actors_for_view(int view_index)
              * full intensity — the marker's own phase animation supplies the flash.
              * Horn toggles the lights + siren together (as in the original); the
              * toggle persists across pause/resume. */
-            extern int td5_sound_siren_is_enabled(void);
             if (g_td5.wanted_mode_enabled &&
                 slot == td5_game_get_wanted_target_slot() &&
                 td5_sound_siren_is_enabled()) {

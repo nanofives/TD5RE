@@ -67,7 +67,6 @@
 #endif
 #include <string.h>
 
-extern uint32_t g_tick_counter;
 
 /* [P1-C] Constants, pool typedefs, the RenderScratch struct and the s_* field
  * shims moved VERBATIM to td5_render_internal.h (shared with
@@ -772,7 +771,6 @@ static void apply_inspection_camera(void)
      * while the car body slides forward each render frame, producing the
      * speed-dependent "sawtooth" shake the faithful chase camera avoids the
      * same way (td5_camera.c:1236-1295, td5_game.c:3587-3596). */
-    extern float g_subTickFraction;
     float frac = g_subTickFraction;
     /* X/Z: velocity-extrapolate to match the body mesh (keeps the car centred
      * horizontally, lag-free). Y: sub-tick INTERPOLATE between sim ticks rather
@@ -867,7 +865,6 @@ void update_render_camera_from_game(void)
      * Gated by TD5RE_BILLBOARD_TREE_FIX (default ON); set =0 to reproduce the
      * original invisible-tree behaviour for A/B. */
     {
-        extern float g_cameraSecondaryUnscaled[9];   /* td5_camera.c (billboard basis) */
         static int s_bb_fix = -1;      /* -1 unread, 0 off, 1 on */
         if (s_bb_fix < 0) {
             s_bb_fix = td5_env_flag_on("TD5RE_BILLBOARD_TREE_FIX");
@@ -896,7 +893,6 @@ void update_render_camera_from_game(void)
  * and uses the baked camera, so panes don't all inherit the last applied view. */
 void td5_render_bake_camera(void)
 {
-    extern float g_cameraSecondaryUnscaled[9];   /* td5_camera.c (billboard basis) */
     update_render_camera_from_game();
     /* Snapshot the shared camera-secondary basis (used to orient billboards) into
      * this pane's g_rs so the threaded build doesn't read another pane's value. */
@@ -3072,7 +3068,6 @@ void td5_render_update_projection_effect(int slot, TD5_Actor *actor)
     /* Cache the interpolated actor world position in world units.
      * Mode 3 uses this as the sphere-map anchor; modes 1/2 leave anchor unused. */
     {
-        extern float g_subTickFraction;
         const float fp_scale = 1.0f / 256.0f;
         pe->anchor_x = ((float)actor->linear_velocity_x * g_subTickFraction +
                         (float)actor->world_pos.x) * fp_scale;

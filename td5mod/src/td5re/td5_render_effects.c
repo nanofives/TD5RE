@@ -20,6 +20,8 @@
 #include "td5_profile.h"
 #include "td5_track.h"
 #include "td5_game.h"
+#include "td5_input.h"   /* td5_input_is_playback_active */
+#include "td5_hud.h"     /* td5_hud_update_wanted_damage_indicator */
 #include "td5_asset.h"
 #include "td5_save.h"
 #include "td5_vfx.h"
@@ -368,7 +370,6 @@ static void render_vehicle_shadow_quad_legacy(const TD5_Actor *actor)
      * applying the same delta to the shadow corners, the shadow sawtooth-
      * lags behind the car at speed and produces edge flicker as probes jump
      * each sim tick. This mirrors the camera/overlay subtick invariant. */
-    extern float g_subTickFraction;
     const float frac = g_subTickFraction;
     const float inv256 = 1.0f / 256.0f;
     const float interp_dx = (float)actor->linear_velocity_x * frac * inv256;
@@ -809,7 +810,6 @@ static void render_vehicle_shadow_conforming(const TD5_Actor *actor)
 
     /* Per-frame sub-tick shift so the shadow tracks the car smoothly between sim
      * ticks (mirrors the legacy corner interpolation and the car mesh). */
-    extern float g_subTickFraction;
     const float inv256 = 1.0f / 256.0f;
     const float frac   = g_subTickFraction;
     const float dx = (float)actor->linear_velocity_x * frac * inv256;
@@ -1359,7 +1359,6 @@ static void render_vehicle_headlight_flood(const TD5_Actor *actor)
     if (!s_flood_on || !actor) return;
 
     const float inv256 = 1.0f / 256.0f;
-    extern float g_subTickFraction;
     float frac = g_subTickFraction;
     float idx = (float)actor->linear_velocity_x * frac * inv256;
     float idy = (float)actor->linear_velocity_y * frac * inv256;
@@ -1609,7 +1608,6 @@ static const int s_tracked_marker_yaw_offset[TD5_VFX_TRACKED_MARKER_COUNT] = {
  * in render_tracked_actor_marker's caller (td5_render.c:2323). */
 /* td5_game_get_wanted_target_tracker / _slot prototypes live in td5_game.h
  * (already included above via the existing td5_render.c include block). */
-extern void     td5_hud_update_wanted_damage_indicator(int actor_slot);
 
 /* [FIX 2026-05-24 strobe-17call; orig 0x0043cde0]
  * Emit a sprite quad given 4 distinct view-space corner positions
@@ -2506,7 +2504,6 @@ static int wheel_lift_fix_enabled(void) {
  * wheel's body-local frame +Y is UP (see the s_tlift comment), so adding this
  * lifts the traffic wheel to the racer ground convention. */
 static float wheel_body_lift_magnitude(void) {
-    extern int td5_input_is_playback_active(void);
     return td5_input_is_playback_active() ? 18.0f : 36.0f;
 }
 /* [BUG 6 — inner (inboard) wheel face is texture-less]
