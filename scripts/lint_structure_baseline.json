@@ -1,20 +1,17 @@
 {
-  "extern_in_c_total": 46.0,
+  "extern_in_c_total": 31.0,
   "extern_in_c": {
     "main.c": 3,
-    "td5_render_pipeline.c": 3,
-    "td5_physics_suspension.c": 2,
-    "td5_render_mesh.c": 5,
+    "td5re.c": 2,
+    "td5_physics_drivetrain.c": 2,
+    "td5_ai_traffic.c": 3,
     "td5_platform_win32_window.c": 3,
     "td5_game.c": 2,
-    "td5re.c": 2,
-    "td5_ai_traffic.c": 3,
-    "td5_render.c": 5,
-    "td5_physics_collision.c": 3,
-    "td5_physics.c": 4,
     "td5_input.c": 4,
-    "td5_physics_drivetrain.c": 2,
-    "td5_render_effects.c": 5
+    "td5_render_pipeline.c": 3,
+    "td5_physics_suspension.c": 2,
+    "td5_physics_collision.c": 3,
+    "td5_physics.c": 4
   },
   "game_h_includers": [
     "td5_ai.c",
@@ -44,18 +41,18 @@
   ],
   "warnings_total": 117,
   "warnings_per_flag": {
-    "missing-field-initializers": 36,
-    "maybe-uninitialized": 2,
-    "cpp": 1,
-    "stringop-truncation": 15,
-    "sign-compare": 10,
-    "strict-aliasing": 2,
     "cast-function-type": 2,
-    "type-limits": 28,
+    "strict-aliasing": 2,
+    "missing-field-initializers": 36,
     "unknown-pragmas": 4,
+    "cpp": 1,
+    "type-limits": 28,
+    "sign-compare": 10,
     "unused-parameter": 3,
     "overflow": 1,
+    "stringop-truncation": 15,
+    "array-bounds=": 1,
     "format-truncation=": 12,
-    "array-bounds=": 1
+    "maybe-uninitialized": 2
   }
 }

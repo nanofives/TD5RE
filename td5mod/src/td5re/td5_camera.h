@@ -77,6 +77,8 @@ extern float g_cameraPos[3];   /* float camera pos for render */
 extern int   g_trackType;      /* circuit orbit-override flag */
 extern float g_worldToRenderScale;  /* 1/256 world->float scale */
 extern float g_cameraBasis[9];      /* 3x3 camera basis (right/up/forward) */
+extern float g_cameraSecondaryUnscaled[9];  /* unscaled secondary basis (billboards) */
+extern int   g_raceCameraPresetMode[TD5_MAX_VIEWPORTS];  /* per-view preset mode */
 
 /* ========================================================================
  * Camera preset table (7 presets x 16 bytes at 0x463098)
