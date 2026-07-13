@@ -51,6 +51,7 @@
 #include "td5_game.h"
 #include "td5_frontend.h"
 #include "td5_trace.h"
+#include "td5_save.h"
 #include "td5_backend_capture.h"
 
 #define LOG_TAG "selftest"
@@ -1061,6 +1062,45 @@ static void st_degradation_verdicts(void)
     }
 }
 
+/* Save/load round-trip check (C1 coverage build-out): td5_save_write_cup_data
+ * / td5_save_load_cup_data already accept an explicit path "used by the
+ * dev-only roundtrip self-test" per their own doc comments -- this wires
+ * that up. A menu-phase g_td5.game_type is 0 (no race in progress), and
+ * cfgini_write_cup/read_cup treat GameType<=0 as "no continuable cup" by
+ * design (not a bug) -- so the round trip needs a momentarily-nonzero
+ * game_type to actually exercise the serializer/parser instead of hitting
+ * that early-out both times. Temporarily sets game_type to CHAMPIONSHIP,
+ * syncs the cup statics from it, writes to a throwaway temp path (never the
+ * real td5re_cup.ini), reads straight back, and confirms td5_save_is_cup_valid()
+ * agrees the round-tripped file is still valid -- then restores game_type. */
+static void st_saveload_roundtrip_verdict(void)
+{
+    static const char *k_temp_path = "log/selftest_cup_roundtrip.ini";
+    StepRow *r = st_new_row("save-load-roundtrip", 'D');
+    TD5_GameType saved_game_type;
+    int write_ok, valid_after_write, read_ok, valid_after_read;
+
+    if (!r) return;
+
+    saved_game_type = g_td5.game_type;
+    g_td5.game_type = TD5_GAMETYPE_CHAMPIONSHIP;
+    td5_save_sync_cup_from_game(0);
+
+    write_ok          = td5_save_write_cup_data(k_temp_path);
+    valid_after_write = td5_save_is_cup_valid(k_temp_path);
+    read_ok           = td5_save_load_cup_data(k_temp_path);
+    valid_after_read  = td5_save_is_cup_valid(k_temp_path);
+
+    g_td5.game_type = saved_game_type;
+
+    snprintf(r->note, sizeof(r->note),
+             "write=%d valid=%d read=%d valid=%d (GameType=CHAMPIONSHIP)",
+             write_ok, valid_after_write, read_ok, valid_after_read);
+    r->status = (write_ok && valid_after_write && read_ok && valid_after_read)
+                ? ST_PASS : ST_FAIL;
+    if (r->status == ST_FAIL) s_exit_code = 1;
+}
+
 static void st_write_report(void)
 {
     FILE *f;
@@ -1069,6 +1109,7 @@ static void st_write_report(void)
     CreateDirectoryA("log", NULL);
 
     st_degradation_verdicts();
+    st_saveload_roundtrip_verdict();
 
     for (i = 0; i < s_row_count; i++) {
         if (s_rows[i].status == ST_PASS) n_pass++;
