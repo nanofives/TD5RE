@@ -66,6 +66,14 @@ void td5_camera_finalize_all(void);
    change / resume-from-pause. Render-only; never feeds the sim. */
 void td5_camera_snap_smoothing(void);
 
+/* Camera globals owned by td5_camera.c, read by the HUD/render side.
+ *  g_subTickFraction     - render-frame extrapolation fraction [0,1).
+ *  g_camWorldPos[v]       - finalized per-viewport camera world position.
+ *  g_cameraTransitionActive - pre-race countdown fly-in timer (0 = running). */
+extern float g_subTickFraction;
+extern int   g_camWorldPos[TD5_MAX_VIEWPORTS][3];
+extern int   g_cameraTransitionActive;
+
 /* ========================================================================
  * Camera preset table (7 presets x 16 bytes at 0x463098)
  *
