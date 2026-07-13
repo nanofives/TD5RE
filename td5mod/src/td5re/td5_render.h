@@ -358,6 +358,7 @@ void td5_render_radial_pulse(float dt);
 /* --- Render dimension globals (defined in td5_render.c) --- */
 extern float g_render_width_f;
 extern float g_render_height_f;
+extern float g_renderBasisMatrix[12];   /* 3x3 render basis + translation row */
 extern int   g_render_width;
 extern int   g_render_height;
 
