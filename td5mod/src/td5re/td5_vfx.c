@@ -36,17 +36,10 @@
 /* Static.hed sprite lookups now go through td5_asset_find_atlas_entry,
  * which reads the real populated s_atlas_table[] built in td5_asset_init. */
 
-/* Sub-tick interpolation fraction -- set by timing system */
-extern float  g_subTickFraction;   /* 0x4AAF60 -- [0..1) for sub-tick interp */
-
-/* World scale factor -- set by render init */
-extern float  g_worldToRenderScale; /* 0x4749D0 -- 1/256 world->float scale */
-
-/* Track environment config -- loaded from LEVELINF.DAT */
-extern uint8_t *g_track_environment_config; /* 0x4AEE20 -- pointer to LEVELINF.DAT buffer */
-
-/* Actor table base -- runtime slot array set by td5_game/td5_physics */
-extern uint8_t *g_actor_table_base; /* 0x4AB108 -- gRuntimeSlotActorTable */
+/* Cross-module globals (g_subTickFraction, g_worldToRenderScale,
+ * g_track_environment_config, g_actor_table_base, g_cameraBasis) and the
+ * td5_render_* submit helpers now come from their producer headers
+ * (td5_camera.h / td5_asset.h / td5_game.h / td5_render.h), all included above. */
 
 /* ========================================================================
  * Sprite quad template (0xB8 = 184 bytes)
@@ -759,7 +752,6 @@ void td5_vfx_project_particles(int view_index) {
      * by the camera module (td5_camera.c). The older g_renderBasisMatrix
      * declared in td5_render.c is a stale identity and never updated.
      * Row layout: m[0..2]=right, m[3..5]=up, m[6..8]=forward. */
-    extern float g_cameraBasis[9];
 
     float cam_x, cam_y, cam_z;
     td5_camera_get_position(&cam_x, &cam_y, &cam_z);
@@ -891,7 +883,6 @@ static uint16_t      s_fx_smoke_idx[TD5_VFX_PARTICLE_SLOTS_PER_VIEW * 6];
  *   z/far_clip depth, no min/max clamp), different vertex format.
  */
 void td5_vfx_draw_particles(int view_index) {
-    extern void td5_render_submit_translucent_world(uint16_t *quad_data);
     s_current_view_index = view_index;
     int vi = view_index & 1;
     int drawn = 0;
@@ -2104,8 +2095,6 @@ void td5_vfx_render_tire_tracks(void) {
      * z_test off. Marks now share the opaque pass's linear depth (both go
      * through project_vertex), so the depth compare is valid and walls/props
      * occlude them. z_write=0 keeps overlapping trail quads from z-fighting. */
-    extern void td5_render_submit_tire_mark(uint16_t *quad_data);
-    extern void td5_render_set_tire_mark_fx_preset(int on);
 
     static uint32_t s_tt_render_frame = 0;
     int tt_log = ((s_tt_render_frame++ % 60u) == 0u);

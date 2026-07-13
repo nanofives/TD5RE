@@ -344,6 +344,7 @@ void td5_render_submit_translucent_low_ref(uint16_t *quad_data);
 void td5_render_submit_translucent_hud(uint16_t *quad_data);
 void td5_render_submit_translucent_world(uint16_t *quad_data);
 void td5_render_submit_tire_mark(uint16_t *quad_data);
+void td5_render_set_tire_mark_fx_preset(int on);
 /* Active projection parameters (so VFX billboards size/place quads with the
  * SAME focal/center the world geometry uses). */
 float td5_render_get_focal_length(void);
