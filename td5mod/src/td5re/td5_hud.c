@@ -31,6 +31,7 @@
 #include "td5_input.h"    /* [CAR BROKE DOWN] recovery-key label per input source */
 #include "td5_laneassist.h" /* lane-assist per-viewport indicator */
 #include "td5_track.h"
+#include "td5_camera.h"
 #include "td5_game.h"
 #include "td5_net.h"      /* [S31] td5_net_get_slot_name for the PAUSED BY overlay */
 #include "td5_save.h"
@@ -1514,13 +1515,9 @@ void td5_hud_draw_pause_overlay(void)
  * pane-local (0..pane_w / 0..pane_h) and we add the pane's screen offset
  * (vp_int_left/top) to land them in the full render target.
  *
- * Camera funcs live in td5_camera.c (no header included here on purpose — see
- * rule: only td5_hud.c is edited; these are forward extern prototypes matching
- * the codebase's inline-extern convention). The render/transform funcs come
- * from td5_render.h (already included).
+ * Camera funcs come from td5_camera.h (included at the top); the render/
+ * transform funcs come from td5_render.h.
  * ======================================================================== */
-extern void td5_camera_apply_view(int view);
-extern void td5_camera_get_basis(float *right, float *up, float *forward);
 
 /* [#23 MP LABEL DISTANCE 2026-06-19] World-unit thresholds for the floating
  * other-player labels, env-tunable so they can be seen from further away and
@@ -2209,7 +2206,6 @@ void td5_hud_draw_net_pause_overlay(void)
  * as a sub-prompt of the menu. Port-only feature (no original equivalent). */
 void td5_hud_draw_endrace_confirm(void)
 {
-    extern int td5_game_pause_endrace_confirm_active(void);
     if (!td5_game_pause_endrace_confirm_active()) return;
 
     float sw = g_render_width_f;
@@ -2246,7 +2242,6 @@ void td5_hud_draw_endrace_confirm(void)
  * with the question text swapped per action. Port-only feature. */
 void td5_hud_draw_pause_action_confirm(void)
 {
-    extern int td5_game_pause_action_confirm(void);
     int action = td5_game_pause_action_confirm();
     if (!action) return;
 
@@ -4185,15 +4180,9 @@ static int hud_draw_checkpoint_timer_ttf(int view_idx, uint32_t value)
  * restores the full-screen clip + projection centre after this returns.
  * ======================================================================== */
 
-/* [#1 2026-06-15] Branch-corridor enumeration (defined in td5_track.c but not yet
- * declared in td5_track.h). Used by the empty-cell MAP overlay to add the fork
- * corridors to the drawn track outline so branches aren't missing from the map.
- * td5_track_count_branch_corridors(main_span) -> how many parallel branches;
- * td5_track_branch_corridor_span(main_span, which) -> the which-th branch span
- * (0-based, jump-table order), or -1 when out of range / no table. */
-extern int td5_track_count_branch_corridors(int main_span);
-extern int td5_track_branch_corridor_span(int main_span, int which);
-
+/* [#1 2026-06-15] Branch-corridor enumeration (td5_track.h). Used by the
+ * empty-cell MAP overlay to add the fork corridors to the drawn track outline
+ * so branches aren't missing from the map. */
 
 /* ===== SECTION: split-screen filler pane (map/standings) + pending overlay ===== */
 
@@ -5508,8 +5497,7 @@ void td5_hud_render_overlays(float dt)
              * captured but no longer multiplied in (helper re-derives slot from
              * the route_state's own RS_SLOT_INDEX). */
             (void)actor_route_index(actor_slot); /* side-effect: ensure index resolves */
-            extern int32_t *td5_ai_get_route_state(int slot);
-            int32_t *rs_hud = td5_ai_get_route_state(actor_slot);
+            int32_t *rs_hud = td5_ai_get_route_state(actor_slot);  /* td5_ai.h */
             uint32_t heading_delta = rs_hud ? td5_compute_heading_delta(rs_hud) : 0;
 
             /* [FIX 2026-06-05b wrong-way detection — THE real bug]
@@ -5676,7 +5664,6 @@ void td5_hud_render_overlays(float dt)
         {
             int vplace = td5_game_slot_finish_place(g_actor_slot_map[v]);
             if (vplace <= 0 && v == 0 && g_td5.race_end_fade_state > 0) {
-                extern int td5_game_get_victory_position(void);
                 vplace = td5_game_get_victory_position();
             }
             if (vplace > 0) td5_hud_draw_finish_position(vplace);
