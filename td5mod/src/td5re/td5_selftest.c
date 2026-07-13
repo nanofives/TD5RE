@@ -51,6 +51,7 @@
 #include "td5_game.h"
 #include "td5_frontend.h"
 #include "td5_trace.h"
+#include "td5_backend_capture.h"
 
 #define LOG_TAG "selftest"
 
@@ -417,10 +418,15 @@ static const struct { unsigned mask; const char *suffix; } k_golden_mods[] = {
 
 static struct {
     int car_damage, toughness, deform, difficulty, lane_assist;
+    int debug_overlay;                /* [render golden] overlay off during capture */
+    float fast_forward;               /* [render golden] FF pinned to 1 during capture */
 } s_golden_saved;
 static char s_golden_lines[32][96];   /* recorded "<scenario> <mod> <hash>" */
 static int  s_golden_line_count;
 static int  s_golden_ran, s_golden_active;
+
+/* [render golden] fwd — reset per golden race (defined in the render section). */
+static void st_render_reset(void);
 
 /* Pin the sim-relevant ini knobs the scenario columns don't cover, then
  * restart the trace harness so its CSVs reopen fresh for THIS race only. */
@@ -431,11 +437,27 @@ static void st_golden_begin(void)
     s_golden_saved.deform      = g_td5.ini.car_damage_deform;
     s_golden_saved.difficulty  = g_td5.ini.difficulty;
     s_golden_saved.lane_assist = g_td5.ini.lane_assist;
+    s_golden_saved.debug_overlay = g_td5.ini.debug_overlay;
+    s_golden_saved.fast_forward  = g_td5.ini.trace_fast_forward;
     g_td5.ini.car_damage           = 1;
     g_td5.ini.car_damage_toughness = 1;
     g_td5.ini.car_damage_deform    = 1;
     g_td5.ini.difficulty           = 1;
     g_td5.ini.lane_assist          = 0;
+
+    /* [render golden] The render signature is captured from THIS race's frames.
+     *   - overlay OFF: the dev debug overlay draws changing frame-time text into
+     *     the composited backbuffer we read back (the suite forces it on at boot).
+     *   - fast-forward is now DYNAMIC (st_render_capture_tick): the race cruises
+     *     at the suite FF (fast-forwarding the countdown and the gaps between
+     *     capture points) and drops to 1x only in a short runway around each
+     *     capture tick, where the render-frame<->sim-tick cadence must be
+     *     reproducible. The SIM is FF-independent, so the frame AT a given tick
+     *     is identical however we approach it, and the trace goldens are
+     *     unaffected. Seed the cruise value here; the per-frame tick manages it. */
+    g_td5.ini.debug_overlay      = 0;
+    g_td5.ini.trace_fast_forward = s_ff;
+    st_render_reset();
 
     g_td5.ini.race_trace_enabled       = 1;
     g_td5.ini.trace_module_mask        = ST_GOLDEN_MODULES;
@@ -467,6 +489,8 @@ static void st_golden_end(void)
     g_td5.ini.car_damage_deform    = s_golden_saved.deform;
     g_td5.ini.difficulty           = s_golden_saved.difficulty;
     g_td5.ini.lane_assist          = s_golden_saved.lane_assist;
+    g_td5.ini.debug_overlay        = s_golden_saved.debug_overlay;
+    g_td5.ini.trace_fast_forward   = s_golden_saved.fast_forward;
     s_golden_active = 0;
 }
 
@@ -598,6 +622,319 @@ static void st_golden_finish(const RaceScenario *sc)
     } else if (status == ST_PASS) {
         snprintf(note, sizeof(note), "%d module hashes match goldens",
                  ST_GOLDEN_MOD_COUNT);
+    }
+    st_finish_row(r, status, note);
+}
+
+/* ------------------------------------------------------------------------
+ * [RENDER GOLDEN 2026-07-11] Visual-regression net
+ *
+ * The trace golden above is blind to RENDERING — it only hashes SIM state
+ * (pose/motion/track/controls/progress). A bug that renders wrong but leaves
+ * the sim untouched (e.g. a race-end wipe drawn ~50% translucent instead of
+ * opaque, or an overhead banner z-fighting/garbled) sails through it. This
+ * layer closes that gap: for each golden race it reads back the composited
+ * backbuffer at a few fixed sim ticks (via the existing Backend capture path),
+ * reduces each frame to a coarse quantized luma grid, and compares against a
+ * committed signature with a distance threshold.
+ *
+ * It is deliberately a SIGNATURE, not an exact hash: rendering is float +
+ * GPU/driver dependent (unlike the fixed-point sim), so an exact framebuffer
+ * hash would drift across machines and even AA-jitter run-to-run. The coarse
+ * grid + L1/per-cell thresholds ignore that noise while still catching the
+ * gross regressions that actually ship. Like the trace goldens, this is a
+ * LOCAL net (CI has no assets) recorded/updated via TD5RE_TRACE_GOLDEN_UPDATE=1
+ * and committed alongside any intentional visual change.
+ *
+ * Known limitation: a coarse luma grid catches translucency / brightness /
+ * z-fight-garble strongly and gross layout shifts well, but a pure horizontal
+ * mirror of a symmetric element can leave per-cell averages ~unchanged. Finer
+ * detection is future work; the threshold class this targets (recent wipe +
+ * banner bugs) is well covered.
+ * ---------------------------------------------------------------------- */
+
+#define ST_RENDER_GRID   16
+#define ST_RENDER_CELLS  (ST_RENDER_GRID * ST_RENDER_GRID)   /* 256 */
+#define ST_RENDER_HEX    (ST_RENDER_CELLS * 2)               /* 512 hex chars */
+#define ST_RENDER_NCAP   4
+#define ST_RENDER_FILE   "td5mod/src/td5re/render_goldens.txt"
+
+/* Capture points, in sim ticks past race start. All post-countdown (~90-120
+ * ticks) so the pre-race camera fly-in can't leak nondeterminism, and all well
+ * inside the s_race_ticks budget (default 450) with margin for the 1-frame
+ * capture read latency. */
+static const int k_render_cap_ticks[ST_RENDER_NCAP] = { 130, 220, 310, 400 };
+
+static int   s_render_l1_limit;      /* max allowed L1 sum over the grid */
+static int   s_render_cell_limit;    /* max allowed single-cell luma delta */
+static int   s_render_cap_idx;       /* next capture point */
+static int   s_render_pending;       /* a Backend_RequestCapture is in flight */
+static int   s_render_pending_frames;
+static unsigned char s_render_sig[ST_RENDER_NCAP][ST_RENDER_CELLS];
+static int   s_render_got[ST_RENDER_NCAP];
+static char  s_render_lines[16][ST_RENDER_HEX + 64];   /* update-mode buffer */
+static int   s_render_line_count;
+
+static void st_render_reset(void)
+{
+    int i;
+    s_render_cap_idx = 0;
+    s_render_pending = 0;
+    s_render_pending_frames = 0;
+    for (i = 0; i < ST_RENDER_NCAP; i++) s_render_got[i] = 0;
+}
+
+/* Downsample a BGRA framebuffer to a GRID x GRID coarse luma signature.
+ * Resolution-independent: each cell averages the luma over its block of the
+ * source image, so the signature is comparable regardless of window size. */
+static void st_render_compute_sig(const unsigned char *px, int w, int h,
+                                  unsigned char *out)
+{
+    int cy, cx;
+    for (cy = 0; cy < ST_RENDER_GRID; cy++) {
+        int y0 = (int)((long long)cy * h / ST_RENDER_GRID);
+        int y1 = (int)((long long)(cy + 1) * h / ST_RENDER_GRID);
+        if (y1 <= y0) y1 = y0 + 1;
+        for (cx = 0; cx < ST_RENDER_GRID; cx++) {
+            int x0 = (int)((long long)cx * w / ST_RENDER_GRID);
+            int x1 = (int)((long long)(cx + 1) * w / ST_RENDER_GRID);
+            unsigned long long acc = 0, n = 0;
+            int x, y;
+            if (x1 <= x0) x1 = x0 + 1;
+            for (y = y0; y < y1; y++) {
+                const unsigned char *row = px + (size_t)y * w * 4;
+                for (x = x0; x < x1; x++) {
+                    const unsigned char *p = row + (size_t)x * 4;
+                    /* BGRA -> Rec.601 luma */
+                    acc += (unsigned)((p[2] * 77 + p[1] * 150 + p[0] * 29) >> 8);
+                    n++;
+                }
+            }
+            out[cy * ST_RENDER_GRID + cx] = (unsigned char)(n ? acc / n : 0);
+        }
+    }
+}
+
+/* Per-frame, during a golden race's RUNNING window: drive the request/read
+ * handshake. Backend_RequestCapture flags the next Present; the composited
+ * frame is readable one frame later (same latency the photo-booth relies on). */
+static void st_render_capture_tick(int rel_tick)
+{
+    /* Dynamic fast-forward: cruise at the suite FF (fast-forwarding the
+     * countdown and the between-capture gaps) but drop to real-time (1x) while a
+     * capture is pending or within a short runway before the next capture tick,
+     * so the frame lands on the target tick deterministically. The runway must
+     * exceed one cruise step (max ticks/frame = FF+8) so a cruise jump can't
+     * skip past the target before we slow down. */
+    if (s_render_pending ||
+        (s_render_cap_idx < ST_RENDER_NCAP &&
+         rel_tick >= k_render_cap_ticks[s_render_cap_idx] - ((int)s_ff + 12))) {
+        g_td5.ini.trace_fast_forward = 1.0f;
+    } else {
+        g_td5.ini.trace_fast_forward = s_ff;   /* cruise */
+    }
+
+    if (s_render_pending) {
+        unsigned char *px; int w, h;
+        if (Backend_GetCapture(&px, &w, &h) && px && w > 0 && h > 0) {
+            st_render_compute_sig(px, w, h, s_render_sig[s_render_cap_idx]);
+            s_render_got[s_render_cap_idx] = 1;
+            TD5_LOG_I(LOG_TAG, "render cap t%d got %dx%d (after %d frames)",
+                      k_render_cap_ticks[s_render_cap_idx], w, h,
+                      s_render_pending_frames);
+            s_render_pending = 0;
+            s_render_cap_idx++;
+        } else {
+            /* A request is consumed by the next present whether or not the
+             * readback landed on that frame (empty-scene / composite-path
+             * variance), so re-issue every poll until a frame is actually
+             * captured. Give up after a modest window — on a healthy device
+             * the readback lands in 1-2 frames; a longer wait only burns time
+             * when the device is genuinely unable to produce a frame. */
+            Backend_RequestCapture();
+            if (++s_render_pending_frames > 45) {
+                TD5_LOG_W(LOG_TAG, "render cap t%d gave up (no frame in %d)",
+                          k_render_cap_ticks[s_render_cap_idx],
+                          s_render_pending_frames);
+                s_render_pending = 0;
+                s_render_cap_idx++;
+            }
+        }
+        return;
+    }
+    if (s_render_cap_idx < ST_RENDER_NCAP &&
+        rel_tick >= k_render_cap_ticks[s_render_cap_idx]) {
+        Backend_RequestCapture();
+        s_render_pending = 1;
+        s_render_pending_frames = 0;
+    }
+}
+
+static void st_render_sig_to_hex(const unsigned char *sig, char *hex)
+{
+    static const char H[] = "0123456789abcdef";
+    int i;
+    for (i = 0; i < ST_RENDER_CELLS; i++) {
+        hex[i * 2]     = H[sig[i] >> 4];
+        hex[i * 2 + 1] = H[sig[i] & 0xF];
+    }
+    hex[ST_RENDER_HEX] = '\0';
+}
+
+static int st_hexnib(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Look up "<scenario>_t<tick> <hex>" in the render goldens file; decode into
+ * out. Returns 1 = found+valid, 0 = not found / malformed, -1 = no file. */
+static int st_render_lookup(const char *scenario, int tick, unsigned char *out)
+{
+    FILE *f = fopen(ST_RENDER_FILE, "r");
+    char key[80], name[80], hex[ST_RENDER_HEX + 16];
+    char line[ST_RENDER_HEX + 128];
+    int found = 0;
+    if (!f) return -1;
+    snprintf(key, sizeof(key), "%s_t%d", scenario, tick);
+    while (fgets(line, sizeof(line), f)) {
+        int i, ok = 1;
+        if (line[0] == '#') continue;
+        if (sscanf(line, "%79s %535s", name, hex) != 2) continue;
+        if (strcmp(name, key) != 0) continue;
+        if ((int)strlen(hex) < ST_RENDER_HEX) { found = 0; break; }
+        for (i = 0; i < ST_RENDER_CELLS; i++) {
+            int hi = st_hexnib(hex[i * 2]), lo = st_hexnib(hex[i * 2 + 1]);
+            if (hi < 0 || lo < 0) { ok = 0; break; }
+            out[i] = (unsigned char)((hi << 4) | lo);
+        }
+        found = ok;
+        break;
+    }
+    fclose(f);
+    return found;
+}
+
+/* Judge (or, in update mode, record) the frames captured for this golden race
+ * and append a 'V' verdict row. Called from SS_RACE_POST_MENU right after
+ * st_golden_finish, so s_golden_ran already reflects this scenario. */
+static void st_render_golden_finish(const RaceScenario *sc)
+{
+    const char *env = getenv("TD5RE_TRACE_GOLDEN_UPDATE");
+    int update = (env && *env && *env != '0');
+    int i, status = ST_PASS, checked = 0, golden_total = 0, got_any = 0;
+    long long worst_l1 = 0;
+    int worst_cell = 0;
+    char note[120] = "";
+    size_t noff = 0;
+    char rowname[48];
+    unsigned cd[13] = {0};
+    int device_lost;
+    StepRow *r;
+
+    for (i = 0; i < ST_RACE_COUNT; i++) golden_total += k_races[i].trace_golden;
+    for (i = 0; i < ST_RENDER_NCAP; i++) got_any |= s_render_got[i];
+
+    snprintf(rowname, sizeof(rowname), "rgold-%s", sc->name);
+    r = st_new_row(rowname, 'V');
+
+    /* [diag] backend capture-path counters. A run that captured NOTHING while
+     * CreateTexture2D kept failing means the D3D11 device is gone (last_hr
+     * 0x887A0005 = DXGI_ERROR_DEVICE_REMOVED / ...0006 = DEVICE_HUNG) — an
+     * infrastructure failure (GPU lost / TDR), NOT a visual regression, so it
+     * must not FAIL the gate. */
+    Backend_CaptureDebug(cd);
+    TD5_LOG_I(LOG_TAG, "render cap counters: serviced=%u no_swap=%u "
+              "getbuf_fail=%u tex_fail=%u map_fail=%u ok=%u | "
+              "last_hr=0x%08X fmt=%u samples=%u %ux%u bind=0x%X misc=0x%X",
+              cd[0], cd[1], cd[2], cd[3], cd[4], cd[5],
+              cd[6], cd[7], cd[8], cd[9], cd[10], cd[11], cd[12]);
+    device_lost = (!got_any && cd[3] > 0 &&
+                   (cd[6] == 0x887A0005u || cd[6] == 0x887A0006u));
+
+    for (i = 0; i < ST_RENDER_NCAP; i++) {
+        if (!s_render_got[i]) {
+            if (status < ST_WARN) status = ST_WARN;
+            noff += snprintf(note + noff, sizeof(note) - noff,
+                             "t%d:no-frame; ", k_render_cap_ticks[i]);
+            if (noff >= sizeof(note)) noff = sizeof(note) - 1;
+            continue;
+        }
+        if (update) {
+            char hex[ST_RENDER_HEX + 4];
+            st_render_sig_to_hex(s_render_sig[i], hex);
+            if (s_render_line_count < 16)
+                snprintf(s_render_lines[s_render_line_count++],
+                         sizeof(s_render_lines[0]), "%s_t%d %s",
+                         sc->name, k_render_cap_ticks[i], hex);
+            continue;
+        }
+        {
+            unsigned char want[ST_RENDER_CELLS];
+            int lk = st_render_lookup(sc->name, k_render_cap_ticks[i], want);
+            if (lk <= 0) {
+                if (status < ST_WARN) status = ST_WARN;
+                noff += snprintf(note + noff, sizeof(note) - noff,
+                                 "t%d:no-golden; ", k_render_cap_ticks[i]);
+            } else {
+                long long l1 = 0;
+                int mc = 0, c;
+                for (c = 0; c < ST_RENDER_CELLS; c++) {
+                    int d = (int)s_render_sig[i][c] - (int)want[c];
+                    if (d < 0) d = -d;
+                    l1 += d;
+                    if (d > mc) mc = d;
+                }
+                checked++;
+                if (l1 > worst_l1) worst_l1 = l1;
+                if (mc > worst_cell) worst_cell = mc;
+                if (l1 > s_render_l1_limit || mc > s_render_cell_limit) {
+                    status = ST_FAIL;
+                    noff += snprintf(note + noff, sizeof(note) - noff,
+                                     "t%d:L1=%lld cell=%d; ",
+                                     k_render_cap_ticks[i], l1, mc);
+                }
+            }
+            if (noff >= sizeof(note)) noff = sizeof(note) - 1;
+        }
+    }
+
+    if (update) {
+        snprintf(note, sizeof(note), "render sigs recorded (%d/%d scenarios)",
+                 s_golden_ran, golden_total);
+        if (s_golden_ran >= golden_total && s_render_line_count > 0) {
+            FILE *f = fopen(ST_RENDER_FILE, "w");
+            if (f) {
+                fputs("# Render golden signatures -- regenerate with:\n"
+                      "#   TD5RE_TRACE_GOLDEN_UPDATE=1 pwsh scripts/selftest.ps1 -Suite full\n"
+                      "# Commit this file together with any INTENTIONAL visual change.\n"
+                      "# <scenario>_t<relTick> <16x16 luma grid, hex>\n", f);
+                for (i = 0; i < s_render_line_count; i++)
+                    fprintf(f, "%s\n", s_render_lines[i]);
+                fclose(f);
+            } else {
+                snprintf(note, sizeof(note), "cannot write %s", ST_RENDER_FILE);
+                status = ST_FAIL;
+            }
+        }
+    } else if (checked > 0 && status != ST_FAIL) {
+        snprintf(note, sizeof(note),
+                 "%d frames match (worst L1=%lld cell=%d, limit %d/%d)",
+                 checked, worst_l1, worst_cell,
+                 s_render_l1_limit, s_render_cell_limit);
+    } else if (checked == 0 && status == ST_PASS) {
+        status = ST_WARN;
+        snprintf(note, sizeof(note), "no frames captured");
+    }
+    /* Device loss trumps whatever per-point notes accumulated: it is infra, not
+     * a regression — record it plainly and keep the gate non-fatal (WARN). */
+    if (device_lost) {
+        status = ST_WARN;
+        snprintf(note, sizeof(note),
+                 "GPU device lost (hr=0x%08X) - render capture unavailable this "
+                 "run; not a visual regression", cd[6]);
     }
     st_finish_row(r, status, note);
 }
@@ -844,6 +1181,14 @@ void td5_selftest_boot(void)
     s_gdi_growth      = td5_env_int("TD5RE_SELFTEST_GDI_GROWTH", 100, 1, 100000);
     s_handle_growth   = td5_env_int("TD5RE_SELFTEST_HANDLE_GROWTH", 200, 1, 100000);
     s_allow_errors    = td5_env_flag_off("TD5RE_SELFTEST_ALLOW_ERRORS");
+    /* [render golden] distance thresholds over the 16x16 luma grid (256 cells,
+     * 0-255 each). L1 = sum of |per-cell delta|; cell = worst single-cell delta.
+     * Generous enough to absorb GPU/AA/+-1-tick-motion noise, tight enough to
+     * catch gross visual regressions (a translucent race-end wipe shifts whole-
+     * frame luma; z-fight garble spikes cells). Tune via env if a machine's
+     * baseline noise floor is higher. */
+    s_render_l1_limit   = td5_env_int("TD5RE_SELFTEST_RENDER_L1",   4000, 0, 1000000);
+    s_render_cell_limit = td5_env_int("TD5RE_SELFTEST_RENDER_CELL",   64, 0, 255);
     s_race_ticks      = (g_td5.ini.selftest_race_ticks > 0)
                         ? g_td5.ini.selftest_race_ticks : 450;
 
@@ -1055,8 +1400,9 @@ static void st_tick_races(uint32_t now)
                 st_finish_row(row, status, note);
             }
             /* Golden scenario: hash the trace CSVs + append the 'G' verdict
-             * row (also restores the pinned knobs + closes the trace). */
-            if (sc->trace_golden) st_golden_finish(sc);
+             * row (also restores the pinned knobs + closes the trace), then
+             * judge the captured render signatures + append the 'V' row. */
+            if (sc->trace_golden) { st_golden_finish(sc); st_render_golden_finish(sc); }
             st_reset_scenario_fields();
             st_next_step();
         }
@@ -1078,6 +1424,9 @@ static void st_tick_races(uint32_t now)
             st_histo_add(now);
             s_last_sim_tick = tick;
         }
+        /* [render golden] grab the composited frame at fixed sim ticks. */
+        if (sc->trace_golden)
+            st_render_capture_tick(tick - s_race_start_tick);
         if (g_td5.game_state != TD5_GAMESTATE_RACE) {
             /* Natural finish (or knockout): the fade already returned us. */
             s_sub = SS_RACE_WAIT_MENU;
