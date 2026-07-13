@@ -30,6 +30,8 @@
 #include "td5_platform_internal.h"
 #include "td5_config.h"
 #include "td5_rcmd.h"
+#include "td5_render.h"  /* g_render_width/_height(+_f) resize cache */
+#include "td5re.h"       /* td5re_set_render_dims */
 
 /* Pull in the wrapper types and backend access */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -689,9 +691,6 @@ static int plat_resize_native(int width, int height, int bpp, int do_swap_reset)
     /* Sync the source-port render-dim globals (race viewport, HUD layout, VFX
      * projection, debug overlay). */
     {
-        extern float g_render_width_f, g_render_height_f;
-        extern int   g_render_width,   g_render_height;
-        extern void  td5re_set_render_dims(int w, int h);
         g_render_width    = width;
         g_render_height   = height;
         g_render_width_f  = (float)width;

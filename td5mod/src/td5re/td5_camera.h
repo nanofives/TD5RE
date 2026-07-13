@@ -79,6 +79,8 @@ extern float g_worldToRenderScale;  /* 1/256 world->float scale */
 extern float g_cameraBasis[9];      /* 3x3 camera basis (right/up/forward) */
 extern float g_cameraSecondaryUnscaled[9];  /* unscaled secondary basis (billboards) */
 extern int   g_raceCameraPresetMode[TD5_MAX_VIEWPORTS];  /* per-view preset mode */
+extern int   g_depthFovFactor;  /* projection scale, 0x1000 = identity */
+extern float g_projFovScale;    /* 1/4096 */
 
 /* ========================================================================
  * Camera preset table (7 presets x 16 bytes at 0x463098)

@@ -25,6 +25,8 @@
 #include "td5_game.h"
 #include "td5_track.h"   /* td5_track_get_span_lane_world() for drag lane-change steer */
 #include "td5_camera.h"
+#include "td5_render.h"   /* AngleFromVector12 */
+#include "td5_frontend.h" /* td5_frontend_get_player_manual */
 #include "td5_ai.h"
 #include "td5_save.h"
 #include "td5_pending.h"  /* F11 toggles the pending-test overlay */
@@ -35,16 +37,12 @@
 #include "td5_inputscript.h" /* scripted-input harness ([Trace] InputScript) */
 
 /* Defined in td5_game.c */
-extern int    g_actorSlotForView[TD5_MAX_VIEWPORTS];
-extern uint8_t *g_actor_table_base;
 
 /* Defined in td5_render.c (AngleFromVector12 LUT at 0x0040A720) */
-extern int AngleFromVector12(int x, int z);
 
 /* [#2 2026-06-15] Defined in td5_frontend.c. Per-local-player menu transmission:
  * 1 = MANUAL, 0 = AUTO. Lets a MANUAL menu pick actually put the car into manual.
  * (td5_input.c does not include td5_frontend.h, so declare it locally.) */
-extern int td5_frontend_get_player_manual(int player);
 
 #include <string.h>
 #include <stdlib.h>

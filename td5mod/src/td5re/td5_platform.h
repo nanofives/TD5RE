@@ -858,4 +858,16 @@ void td5_plat_heap_stats(unsigned *allocs, unsigned *frees);
  *  TD5RE_WINDOW_TITLE env override names at boot). Safe no-op pre-window. */
 void td5_plat_set_window_title(const char *title);
 
+/* --- Win32-specific bootstrap (defined in td5_platform_win32.c; called only
+ * by main.c's WinMain path -- not part of the portable td5_plat_* surface).
+ *  _set_app_id: sets the process AppUserModelID so the taskbar groups our
+ *    window under its own button with the TD5 icon. MUST run before any
+ *    window is created (Backend_CreateDevice).
+ *  _enable_dpi_awareness: declares the process DPI-aware so Windows stops
+ *    bitmap-stretching (blurring) the game on displays scaled above 100%.
+ *    MUST run at the very top of WinMain, before any window/HMONITOR/HDC. */
+void td5_platform_win32_init(void *ddraw4, void *d3ddevice3, void *primary_surface);
+void td5_platform_win32_set_app_id(void);
+void td5_platform_win32_enable_dpi_awareness(void);
+
 #endif /* TD5_PLATFORM_H */

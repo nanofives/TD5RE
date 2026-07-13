@@ -64,7 +64,7 @@
  * ======================================================================== */
 
 
-#define TD5_TRIG_LUT_SIZE 0x1400  /* 5120, matches original */
+#include "td5_trig_lut_data.h"  /* TD5_TRIG_LUT_SIZE + td5_trig_lut_bits */
 
 static float  s_cosFloatTable[TD5_TRIG_LUT_SIZE];
 static int    s_cosFixedTable[TD5_TRIG_LUT_SIZE];
@@ -84,7 +84,6 @@ static int    s_trig_lut_built = 0;
  *          --extra-script tools/frida_pool3_trig_dump.js
  *   2. python -c "import struct; ..." > td5_trig_lut_data.c (see runbook).
  */
-extern const uint32_t td5_trig_lut_bits[TD5_TRIG_LUT_SIZE];
 
 static void td5_trig_build_lut(void) {
     /* Copy the embedded LUT bytes into the float LUT. The C-level cast via a
@@ -1069,8 +1068,6 @@ void td5_render_set_projection_center(float cx, float cy) {
  * Formula mirrors original: h_len = sqrt(W^2*0.25 + depth^2), etc.
  * [CONFIRMED @ 0x0043E900] */
 void td5_render_recompute_frustum_for_trackside(void) {
-    extern int   g_depthFovFactor; /* camera.c: projection scale, 0x1000=identity */
-    extern float g_projFovScale;   /* camera.c: 1/4096 */
     float depth = s_focal_length * (float)g_depthFovFactor * g_projFovScale;
     float w = (float)s_viewport_width;
     float h = (float)s_viewport_height;
