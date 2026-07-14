@@ -407,11 +407,46 @@ static void td5_plat_dump_frame_png(const char *path) {
     ID3D11Texture2D_Release(bb);
 }
 
+/* [DEVICE-LOST 2026-07-13] The STANDALONE present path (this file) calls
+ * IDXGISwapChain_Present directly on several branches -- NOT through the
+ * wrapper's Backend_CompositeAndPresent -- so its Present HRESULTs were never
+ * checked for device-lost. Races (the crash-prone path) present here. Route
+ * every direct present through this helper so a TDR is caught + latched
+ * (Backend_NoteDeviceRemoved logs GetDeviceRemovedReason to
+ * log/gpu_device_lost.log) instead of cascading into the driver NULL-deref
+ * (0xC0000005) that killed the process. */
+static void plat_present_swapchain(int sync)
+{
+#ifndef TD5RE_RELEASE
+    /* Dev fault injection: TD5RE_FORCE_DEVICE_LOST=N simulates a
+     * DEVICE_REMOVED on present frame N to exercise the survival path with no
+     * real GPU hang. Compiled out of release. */
+    {
+        static int s_fdl_trip = -2;      /* -2 = unread env, -1 = disabled */
+        static unsigned s_fdl_frame = 0;
+        if (s_fdl_trip == -2) {
+            const char *e = getenv("TD5RE_FORCE_DEVICE_LOST");
+            s_fdl_trip = (e && e[0]) ? atoi(e) : -1;
+        }
+        if (s_fdl_trip >= 0 && (int)(s_fdl_frame++) >= s_fdl_trip) {
+            Backend_NoteDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED,
+                                      "td5_plat_present/forced-test");
+            return;
+        }
+    }
+#endif
+    HRESULT hr = IDXGISwapChain_Present(g_backend.swap_chain, sync, 0);
+    if (FAILED(hr)) Backend_NoteDeviceRemoved(hr, "td5_plat_present/Present");
+}
+
 void td5_plat_present(int vsync)
 {
     static int s_present_log_count = 0;
     float fallback_rgba[4] = { 0.20f, 0.32f, 0.46f, 1.0f };
     int empty_scene_fallback = 0;
+
+    /* [DEVICE-LOST] Stop presenting on a removed device (halts the cascade). */
+    if (g_backend.device_removed) return;
 
     /* [S01] effective sync interval = caller's request AND the Display-options
      * VSync toggle (g_backend.vsync). Loading screens pass vsync=0 to stay
@@ -469,7 +504,7 @@ void td5_plat_present(int vsync)
             &g_backend.swap_rtv, NULL);
         ID3D11DeviceContext_ClearRenderTargetView(g_backend.context,
             g_backend.swap_rtv, fallback_rgba);
-        IDXGISwapChain_Present(g_backend.swap_chain, (vsync && g_backend.vsync) ? 1 : 0, 0);
+        plat_present_swapchain((vsync && g_backend.vsync) ? 1 : 0);
         empty_scene_fallback = 1;
     }
 
@@ -493,7 +528,7 @@ void td5_plat_present(int vsync)
             &g_backend.swap_rtv, NULL);
         Backend_DrawFullscreenQuad(g_backend.backbuffer->d3d11_srv);
         Backend_CaptureIfRequested();  /* photo-booth: grab the composited race frame */
-        IDXGISwapChain_Present(g_backend.swap_chain, (vsync && g_backend.vsync) ? 1 : 0, 0);
+        plat_present_swapchain((vsync && g_backend.vsync) ? 1 : 0);
 
         if (g_backend.backbuffer->d3d11_rtv) {
             ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1,
@@ -507,7 +542,7 @@ void td5_plat_present(int vsync)
     if (s_primary && s_primary->vtbl) {
         s_primary->vtbl->Flip(s_primary, NULL, DDFLIP_WAIT);
     } else if (g_backend.swap_chain) {
-        IDXGISwapChain_Present(g_backend.swap_chain, (vsync && g_backend.vsync) ? 1 : 0, 0);
+        plat_present_swapchain((vsync && g_backend.vsync) ? 1 : 0);
     }
 }
 
@@ -528,7 +563,7 @@ void td5_plat_present_texture_page(int page_index, int vsync)
 
     ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1, &g_backend.swap_rtv, NULL);
     Backend_DrawFullscreenQuad(srv);
-    IDXGISwapChain_Present(g_backend.swap_chain, (vsync && g_backend.vsync) ? 1 : 0, 0);
+    plat_present_swapchain((vsync && g_backend.vsync) ? 1 : 0);
 
     if (g_backend.backbuffer && g_backend.backbuffer->d3d11_rtv) {
         ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1,

@@ -143,6 +143,22 @@ int Backend_NoteDeviceRemoved(HRESULT hr, const char *where)
     WRAPPER_LOG("DEVICE LOST at %s: hr=0x%08lX reason=0x%08lX %s -- halting GPU "
                 "submission (was a hard 0xC0000005 crash before this guard)",
                 where ? where : "?", (unsigned long)hr, (unsigned long)reason, rn);
+    /* UNCONDITIONAL crash-safe record: a device-lost is rare + critical, and
+     * WRAPPER_LOG is gated on [Logging] LogWrapper=1 and goes to a separate
+     * wrapper.log the harness doesn't read -- so in a default config the reason
+     * would be lost, defeating the whole point of capturing it. Append one line
+     * to a dedicated file, unbuffered, regardless of any log knob. */
+    {
+        FILE *f = fopen("log\\gpu_device_lost.log", "a");
+        if (!f) f = fopen("gpu_device_lost.log", "a");
+        if (f) {
+            fprintf(f, "DEVICE LOST at %s: hr=0x%08lX GetDeviceRemovedReason="
+                       "0x%08lX %s\n",
+                    where ? where : "?", (unsigned long)hr,
+                    (unsigned long)reason, rn);
+            fclose(f);
+        }
+    }
     g_backend.device_removed = 1;
     return 1;
 }
