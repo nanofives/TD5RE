@@ -1362,20 +1362,24 @@ void UpdateChaseCamera(int actor, int do_track_heading, int view)
 
     /* --- Fly-in counter --- */
     if (*(char *)(actor + 0x379) == 0) {
-        /* Normal mode: ramp up toward threshold */
+        /* Normal mode: ramp up toward threshold. Decrement only once past it
+         * (the counter is capped at the threshold above, so in practice this
+         * branch never fires -- preserved as-is from the original flow). */
         if (g_camFlyInCounter[v] < fly_in_threshold) {
             g_camFlyInCounter[v]++;
         }
         fly_in = g_camFlyInCounter[v];
-        if (fly_in <= fly_in_threshold) goto after_flyin;
+        if (fly_in > fly_in_threshold) {
+            g_camFlyInCounter[v] = fly_in - 1;
+        }
     } else {
-        /* Special mode: decrement toward 6 */
+        /* Special mode: decrement toward 6. */
         fly_in = g_camFlyInCounter[v];
-        if (fly_in < 6) goto after_flyin;
+        if (fly_in >= 6) {
+            g_camFlyInCounter[v] = fly_in - 1;
+        }
     }
-    g_camFlyInCounter[v] = fly_in - 1;
 
-after_flyin:
     current_radius = g_camCurrentRadius[v];
     orbit_visual_angle = g_camYawOffset[v] - FP_TRUNC(g_camOrbitAngleFP[v]);
 
@@ -2827,7 +2831,8 @@ void UpdateRaceCameraTransitionState(int actor, int view)
     {
         int level = g_cameraTransitionActive / 0x2800;
         int new_preset;
-        int force_reload;
+        int force_reload = 0;
+        int do_load = 0;   /* reload the preset only when it actually changed */
         /* In the original binary, this function ran once per sim tick via
            the callback system at 0x429790, so the effective delta was 1.0
            per invocation.  Using g_subTickFraction here caused frame-rate-
@@ -2840,35 +2845,34 @@ void UpdateRaceCameraTransitionState(int actor, int view)
             g_raceCameraPresetId[v] = new_preset;
             g_camOrbitRadiusScale[v] -= (float)(int)(frame_delta * 3584.0f);
 
-            if (g_cameraPrevPresetId[v] == 0x0D) goto store_prev;
-            force_reload = 0;
+            if (g_cameraPrevPresetId[v] != 0x0D) { force_reload = 0; do_load = 1; }
         } else if (level == 1) {
             /* Level 1: preset 12, orbit angle advances by frameDelta * 1024.0 */
             new_preset = 0x0C;
             g_raceCameraPresetId[v] = new_preset;
             g_camOrbitAngleFP[v] += (int)(frame_delta * 1024.0f);
-            if (g_cameraPrevPresetId[v] == 0x0C) goto store_prev;
-            force_reload = 0;
+            if (g_cameraPrevPresetId[v] != 0x0C) { force_reload = 0; do_load = 1; }
         } else if (level == 2) {
             /* Level 2: preset 11, orbit angle advances by frameDelta * 1024.0 */
             new_preset = 0x0B;
             g_raceCameraPresetId[v] = new_preset;
             g_camOrbitAngleFP[v] += (int)(frame_delta * 1024.0f);
-            if (g_cameraPrevPresetId[v] == 0x0B) goto store_prev;
-            force_reload = 0;
+            if (g_cameraPrevPresetId[v] != 0x0B) { force_reload = 0; do_load = 1; }
         } else {
             /* Level 3+: preset 10, orbit angle advances by frameDelta * 256.0 */
             new_preset = 10;
             g_raceCameraPresetId[v] = new_preset;
             g_camOrbitAngleFP[v] += (int)(frame_delta * 256.0f);
-            if (g_cameraPrevPresetId[v] == 10) goto store_prev;
-            force_reload = 1;
+            if (g_cameraPrevPresetId[v] != 10) { force_reload = 1; do_load = 1; }
         }
 
-        LoadCameraPresetForView(actor + 0x208, force_reload, v, 0);
-        g_camYawOffset[v] = 0;
+        /* Reload the preset table only when the preset changed this tick
+         * (was: `goto store_prev` past this block when prev == new). */
+        if (do_load) {
+            LoadCameraPresetForView(actor + 0x208, force_reload, v, 0);
+            g_camYawOffset[v] = 0;
+        }
 
-    store_prev:
         g_cameraPrevPresetId[v] = g_raceCameraPresetId[v];
         {
             static int s_flyin_log_ctr = 0;
