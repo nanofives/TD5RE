@@ -44,6 +44,16 @@ int  td5_plat_pump_messages(void);
 void td5_plat_present(int vsync);
 void td5_plat_present_texture_page(int page_index, int vsync);
 
+/** [diag] Set a short breadcrumb (e.g. self-test step / current scene) recorded
+ *  in the device-lost log if a TDR/device-removal happens, so a GPU hang names
+ *  which scene was on screen. Copied into g_backend.diag_context; NULL clears. */
+void td5_plat_set_diag_context(const char *ctx);
+
+/** [diag] Non-zero once a GPU device-loss (TDR / removal) has been latched.
+ *  All GPU submission is no-op'd afterwards, so callers (e.g. the self-test
+ *  harness) must treat this as a hard failure rather than trust a green run. */
+int td5_plat_device_lost(void);
+
 /** Get current window dimensions. */
 void td5_plat_get_window_size(int *width, int *height);
 
