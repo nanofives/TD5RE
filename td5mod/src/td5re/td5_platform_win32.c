@@ -3146,6 +3146,7 @@ void td5_plat_ff_stop(int device_slot, int slot)
 
 void td5_plat_render_begin_scene(void)
 {
+    if (g_backend.device_removed) return;
     D3D11_VIEWPORT vp;
     FLOAT vp_w, vp_h;
 
@@ -3203,6 +3204,7 @@ void td5_plat_render_begin_scene(void)
 
 void td5_plat_render_end_scene(void)
 {
+    if (g_backend.device_removed) return;
     g_backend.in_scene = 0;
     g_backend.scene_rendered = 1;
 }
@@ -3373,6 +3375,7 @@ void td5_plat_fx_soft_end(void)
 void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
                                 const uint16_t *indices, int index_count)
 {
+    if (g_backend.device_removed) return;
     /* [Phase B render-transform] If this thread is building a pane command list,
      * record the draw (copy geometry) instead of issuing it; replayed live later. */
     if (td5_rcmd_recording()) {
@@ -3454,6 +3457,7 @@ void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
 
 void td5_plat_render_draw_lines(const TD5_D3DVertex *verts, int vert_count)
 {
+    if (g_backend.device_removed) return;
     if (td5_rcmd_recording()) { td5_rcmd_draw_lines(verts, vert_count); return; }
     WrapperRecCtx *rc = g_wrapper_rec;
     ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
@@ -3523,6 +3527,7 @@ void td5_plat_render_draw_lines(const TD5_D3DVertex *verts, int vert_count)
 void td5_plat_render_draw_tris_flat(const TD5_D3DVertex *verts, int vert_count,
                                     const uint16_t *indices, int index_count)
 {
+    if (g_backend.device_removed) return;
     if (td5_rcmd_recording()) { td5_rcmd_draw_tris(verts, vert_count, indices, index_count); return; }
     WrapperRecCtx *rc = g_wrapper_rec;
     ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
@@ -3587,6 +3592,7 @@ void td5_plat_render_draw_tris_flat(const TD5_D3DVertex *verts, int vert_count,
 
 void td5_plat_render_set_preset(TD5_RenderPreset preset)
 {
+    if (g_backend.device_removed) return;
     if (td5_rcmd_recording()) { td5_rcmd_set_preset((int)preset); return; }
     WrapperRecCtx *rc = g_wrapper_rec;
     RenderStateCache *s = rc ? &rc->state : &g_backend.state;
@@ -3939,6 +3945,7 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
 
 void td5_plat_render_bind_texture(int page_index)
 {
+    if (g_backend.device_removed) return;
     if (td5_rcmd_recording()) { td5_rcmd_bind_texture(page_index); return; }
     WrapperRecCtx *rc = g_wrapper_rec;
     ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
@@ -3970,6 +3977,7 @@ void td5_plat_render_bind_texture(int page_index)
 void td5_plat_render_set_fog(int enable, uint32_t color,
                               float start, float end, float density)
 {
+    if (g_backend.device_removed) return;
     if (td5_rcmd_recording()) { td5_rcmd_set_fog(enable, color, start, end, density); return; }
     WrapperRecCtx *rc = g_wrapper_rec;
     RenderStateCache *s = rc ? &rc->state : &g_backend.state;
@@ -3992,6 +4000,7 @@ void td5_plat_render_apply_lights(const float cam_pos[3], const float basis9[9],
                                   const TD5_LightGPU *lights, int light_count,
                                   int occl_steps, float pane_w, float pane_h)
 {
+    if (g_backend.device_removed) return;
     /* Serial/immediate path only — the deferred light pass composites the whole
      * pane at once, so it must run on the main context (not a pane-recording
      * deferred context). */
@@ -4030,6 +4039,7 @@ void td5_plat_render_apply_lights(const float cam_pos[3], const float basis9[9],
 
 void td5_plat_render_set_gbuffer(int on)
 {
+    if (g_backend.device_removed) return;
     /* Serial/immediate path only (same constraint as the light pass). */
     if (td5_rcmd_recording()) return;
     Backend_SetGBufferEnabled(on);
@@ -4043,6 +4053,7 @@ void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
                                   int steps, float max_dist, float thickness,
                                   float start_off, float pane_w, float pane_h)
 {
+    if (g_backend.device_removed) return;
     /* Serial/immediate path only (same constraint as the light pass). */
     if (td5_rcmd_recording()) return;
     if (!sun_dir || strength <= 0.0f || steps <= 0) return;
@@ -4078,6 +4089,7 @@ void td5_plat_render_apply_ssr(const float cam_pos[3], const float basis9[9],
                                float intensity, int steps, float max_dist,
                                float thickness, float pane_w, float pane_h)
 {
+    if (g_backend.device_removed) return;
     /* Serial/immediate path only (same constraint as the light pass). */
     if (td5_rcmd_recording()) return;
     if (!refl8 || intensity <= 0.0f || steps <= 0) return;
@@ -4108,6 +4120,7 @@ void td5_plat_render_apply_ssr(const float cam_pos[3], const float basis9[9],
 int td5_plat_render_upload_texture(int page_index, const void *pixels,
                                     int width, int height, int format)
 {
+    if (g_backend.device_removed) return 0;
     WrapperSurface *surf;
     WrapperTexture *tex;
     DWORD caps, bpp;
@@ -4218,6 +4231,7 @@ void td5_plat_render_get_texture_dims(int page_index, int *w, int *h)
 
 void td5_plat_render_set_viewport(int x, int y, int width, int height)
 {
+    if (g_backend.device_removed) return;
     if (td5_rcmd_recording()) { td5_rcmd_set_viewport(x, y, width, height); return; }
     WrapperRecCtx *wrc = g_wrapper_rec;
     ID3D11DeviceContext *ctx = wrc ? wrc->dc : g_backend.context;
@@ -4240,6 +4254,7 @@ void td5_plat_render_set_viewport(int x, int y, int width, int height)
 
 void td5_plat_render_set_clip_rect(int left, int top, int right, int bottom)
 {
+    if (g_backend.device_removed) return;
     if (td5_rcmd_recording()) { td5_rcmd_set_clip(left, top, right, bottom); return; }
     WrapperRecCtx *wrc = g_wrapper_rec;
     ID3D11DeviceContext *ctx = wrc ? wrc->dc : g_backend.context;
@@ -4286,15 +4301,18 @@ void td5_plat_render_pane_end(void *rc)
 }
 void td5_plat_render_pane_execute(int index)
 {
+    if (g_backend.device_removed) return;
     Backend_RecExecute(index);
 }
 void td5_plat_render_restore_main_rt(void)
 {
+    if (g_backend.device_removed) return;
     Backend_RestoreMainRenderTarget();
 }
 
 void td5_plat_render_clear(uint32_t color)
 {
+    if (g_backend.device_removed) return;
     float rgba[4];
 
     if (!g_backend.context) return;
