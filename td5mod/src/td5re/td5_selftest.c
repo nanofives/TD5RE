@@ -52,6 +52,7 @@
 #include "td5_frontend.h"
 #include "td5_trace.h"
 #include "td5_save.h"
+#include "td5_net.h"
 #include "td5_backend_capture.h"
 
 #define LOG_TAG "selftest"
@@ -1101,6 +1102,75 @@ static void st_saveload_roundtrip_verdict(void)
     if (r->status == ST_FAIL) s_exit_code = 1;
 }
 
+/* Net-loopback check (C1 coverage build-out): promotes the manual two-process
+ * TD5RE_NET_SELFTEST harness into the suite. The suite process hosts a
+ * DIRECT-mode session in-process (same td5_net_* API the MP lobby uses,
+ * including its shutdown->init revive pattern), then spawns a CHILD
+ * td5re.exe with TD5RE_NET_SELFTEST=join in its environment. The child runs
+ * main.c's existing join harness and exits BEFORE Backend_CreateDevice --
+ * no window, no GPU device, so the multi-instance GPU-TDR hazard does not
+ * apply. PASS = the child completes the UDP handshake (player_count >= 2)
+ * within the timeout. Exercises socket bind, session announce, join
+ * handshake and slot assignment end-to-end on 127.0.0.1. */
+static void st_net_loopback_verdict(void)
+{
+    StepRow *r = st_new_row("net-loopback", 'D');
+    PROCESS_INFORMATION pi;
+    STARTUPINFOA si;
+    char exe_path[MAX_PATH];
+    int host_ok = 0, joined = 0, spawn_ok = 0;
+    uint32_t t0;
+
+    if (!r) return;
+
+    /* Fresh net state via the lobby's revive pattern (init is idempotent). */
+    td5_net_shutdown();
+    td5_net_init();
+    td5_net_set_mode(TD5_NET_MODE_DIRECT);
+    host_ok = td5_net_create_session_ex("SelfTest", "Host", 6,
+                                        g_td5.ini.net_game_port,
+                                        0 /* no UPnP for loopback */);
+
+    if (host_ok) {
+        GetModuleFileNameA(NULL, exe_path, sizeof(exe_path));
+        SetEnvironmentVariableA("TD5RE_NET_SELFTEST", "join");
+        SetEnvironmentVariableA("TD5RE_NET_SELFTEST_IP", "127.0.0.1");
+        ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si);
+        ZeroMemory(&pi, sizeof(pi));
+        spawn_ok = CreateProcessA(exe_path, NULL, NULL, NULL, FALSE,
+                                  CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+        /* Un-set immediately so nothing else inherits join mode. */
+        SetEnvironmentVariableA("TD5RE_NET_SELFTEST", NULL);
+        SetEnvironmentVariableA("TD5RE_NET_SELFTEST_IP", NULL);
+
+        if (spawn_ok) {
+            t0 = td5_plat_time_ms();
+            while ((td5_plat_time_ms() - t0) < 15000) {
+                td5_net_tick();
+                if (td5_net_get_player_count() >= 2) { joined = 1; break; }
+                td5_plat_sleep(50);
+            }
+            /* Child self-exits after its own 12 s loop; on our timeout give
+             * it a moment, then kill by OUR OWN handle only (PID-scoped). */
+            if (WaitForSingleObject(pi.hProcess, joined ? 5000 : 1000)
+                == WAIT_TIMEOUT)
+                TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
+    }
+
+    /* Revive a clean idle net state for the rest of shutdown. */
+    td5_net_shutdown();
+    td5_net_init();
+
+    snprintf(r->note, sizeof(r->note),
+             "host=%d spawn=%d handshake=%d (port %d, DIRECT loopback)",
+             host_ok, spawn_ok, joined, g_td5.ini.net_game_port);
+    r->status = (host_ok && spawn_ok && joined) ? ST_PASS : ST_FAIL;
+    if (r->status == ST_FAIL) s_exit_code = 1;
+}
+
 static void st_write_report(void)
 {
     FILE *f;
@@ -1110,6 +1180,7 @@ static void st_write_report(void)
 
     st_degradation_verdicts();
     st_saveload_roundtrip_verdict();
+    st_net_loopback_verdict();
 
     for (i = 0; i < s_row_count; i++) {
         if (s_rows[i].status == ST_PASS) n_pass++;
