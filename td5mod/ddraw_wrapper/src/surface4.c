@@ -682,6 +682,9 @@ static HRESULT __stdcall Surface4_Flip(WrapperSurface *self, WrapperSurface *tar
 
     if (!g_backend.device)
         return DDERR_GENERIC;
+    /* [DEVICE-LOST] Skip present on a removed device (see Backend_NoteDeviceRemoved). */
+    if (g_backend.device_removed)
+        return DD_OK;
 
     /* Enforce windowed mode size/style on every present frame */
     Backend_EnforceWindowSize();
@@ -694,7 +697,11 @@ static HRESULT __stdcall Surface4_Flip(WrapperSurface *self, WrapperSurface *tar
 
     /* Fallback: simple present via swap chain.
      * [S01 2026-06-04] sync interval from the VSync toggle (g_backend.vsync). */
-    IDXGISwapChain_Present(g_backend.swap_chain, g_backend.vsync ? 1 : 0, 0);
+    {
+        HRESULT phr = IDXGISwapChain_Present(g_backend.swap_chain,
+                                             g_backend.vsync ? 1 : 0, 0);
+        if (FAILED(phr)) Backend_NoteDeviceRemoved(phr, "Surface4_Flip/Present");
+    }
     return DD_OK;
 }
 
