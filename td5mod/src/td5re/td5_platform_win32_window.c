@@ -548,6 +548,7 @@ void td5_plat_present(int vsync)
 
 void td5_plat_present_texture_page(int page_index, int vsync)
 {
+    if (g_backend.device_removed) return;
     ID3D11ShaderResourceView *srv = NULL;
 
     if (page_index >= 0 && page_index < MAX_TEXTURE_PAGES) {
