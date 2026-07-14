@@ -62,6 +62,12 @@ static ModuleFile s_modules[] = {
     { TD5_TRACE_MOD_ROTATION, "rotation", "rotation",
       "frame,sim_tick,stage,slot,ang_vel_roll,ang_vel_yaw,ang_vel_pitch,euler_roll,euler_yaw,euler_pitch,disp_roll,disp_yaw,disp_pitch,wcb,scf,vmode,afc,world_y,vel_y",
       "TD5RE_TRACE_ROTATION_PATH", NULL, NULL },
+    { TD5_TRACE_MOD_CAMERA,   "camera",   "camera",
+      "frame,sim_tick,stage,view_index,actor_slot,pose_valid,build_mode,eye_car_locked,preset_mode,eye_x,eye_y,eye_z",
+      "TD5RE_TRACE_CAMERA_PATH",   NULL, NULL },
+    { TD5_TRACE_MOD_SOUND,    "sound",    "sound",
+      "frame,sim_tick,stage,slot,cop_siren,any_siren",
+      "TD5RE_TRACE_SOUND_PATH",    NULL, NULL },
 };
 static const int s_module_count = (int)(sizeof(s_modules) / sizeof(s_modules[0]));
 
@@ -81,6 +87,8 @@ static const struct { unsigned int mod; unsigned int stages; } s_module_stages[]
     { TD5_TRACE_MOD_VIEW,     TD5_TRACE_STG_POST_CAMERA  | TD5_TRACE_STG_FRAME_END },
     { TD5_TRACE_MOD_CALLS,    TD5_TRACE_STG_ALL },
     { TD5_TRACE_MOD_ROTATION, TD5_TRACE_STG_PRE_PHYSICS | TD5_TRACE_STG_POST_PHYSICS },
+    { TD5_TRACE_MOD_CAMERA,   TD5_TRACE_STG_POST_CAMERA },
+    { TD5_TRACE_MOD_SOUND,    TD5_TRACE_STG_POST_AI },
 };
 
 /* -------- runtime state ------------------------------------------------- */
@@ -185,6 +193,8 @@ unsigned int td5_trace_parse_modules(const char *csv)
         { "view",     TD5_TRACE_MOD_VIEW     },
         { "calls",    TD5_TRACE_MOD_CALLS    },
         { "rotation", TD5_TRACE_MOD_ROTATION },
+        { "camera",   TD5_TRACE_MOD_CAMERA   },
+        { "sound",    TD5_TRACE_MOD_SOUND    },
     };
     return parse_csv_mask(csv, tbl, (int)(sizeof(tbl)/sizeof(tbl[0])),
                           TD5_TRACE_MOD_ALL, "module");
@@ -452,6 +462,26 @@ void td5_trace_emit_rotation(uint32_t frame, uint32_t tick, const char *stage,
             (int)r->disp_roll, (int)r->disp_yaw, (int)r->disp_pitch,
             (unsigned)r->wcb, (unsigned)r->scf, (unsigned)r->vmode,
             (unsigned)r->afc, r->world_y, r->vel_y);
+}
+
+void td5_trace_emit_camera(uint32_t frame, uint32_t tick, const char *stage,
+                           const TD5_TraceCameraRow *r)
+{
+    FILE *fp = fp_for(TD5_TRACE_MOD_CAMERA);
+    if (!fp) return;
+    fprintf(fp, "%u,%u,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+            frame, tick, stage, r->view_index, r->actor_slot, r->pose_valid,
+            r->build_mode, r->eye_car_locked, r->preset_mode,
+            r->eye_x, r->eye_y, r->eye_z);
+}
+
+void td5_trace_emit_sound(uint32_t frame, uint32_t tick, const char *stage,
+                          const TD5_TraceSoundRow *r)
+{
+    FILE *fp = fp_for(TD5_TRACE_MOD_SOUND);
+    if (!fp) return;
+    fprintf(fp, "%u,%u,%s,%d,%d,%d\n",
+            frame, tick, stage, r->slot, r->cop_siren, r->any_siren);
 }
 
 /* -------- calls trace --------------------------------------------------- */

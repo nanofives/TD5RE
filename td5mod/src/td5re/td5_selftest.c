@@ -405,7 +405,8 @@ static void st_reset_scenario_fields(void)
 
 #define ST_GOLDEN_MODULES (TD5_TRACE_MOD_POSE | TD5_TRACE_MOD_MOTION | \
                            TD5_TRACE_MOD_TRACK | TD5_TRACE_MOD_CONTROLS | \
-                           TD5_TRACE_MOD_PROGRESS)
+                           TD5_TRACE_MOD_PROGRESS | TD5_TRACE_MOD_CAMERA | \
+                           TD5_TRACE_MOD_SOUND)
 #define ST_GOLDEN_TICKS   300
 #define ST_GOLDEN_FILE    "td5mod/src/td5re/trace_goldens.txt"
 
@@ -415,6 +416,8 @@ static const struct { unsigned mask; const char *suffix; } k_golden_mods[] = {
     { TD5_TRACE_MOD_TRACK,    "track"    },
     { TD5_TRACE_MOD_CONTROLS, "controls" },
     { TD5_TRACE_MOD_PROGRESS, "progress" },
+    { TD5_TRACE_MOD_CAMERA,   "camera"   },
+    { TD5_TRACE_MOD_SOUND,    "sound"    },
 };
 #define ST_GOLDEN_MOD_COUNT ((int)(sizeof(k_golden_mods) / sizeof(k_golden_mods[0])))
 

@@ -78,6 +78,14 @@ extern int   g_trackType;      /* circuit orbit-override flag */
 extern float g_worldToRenderScale;  /* 1/256 world->float scale */
 extern float g_cameraBasis[9];      /* 3x3 camera basis (right/up/forward) */
 extern float g_cameraSecondaryUnscaled[9];  /* unscaled secondary basis (billboards) */
+
+/* Trace/QA query: the per-TICK solved camera pose for `view` (the
+ * s_cam_pose_cur capture from td5_camera_solve_tick_all, i.e. WITHOUT the
+ * per-render-frame subtick extrapolation -- deterministic under a fixed
+ * seed, unlike g_camWorldPos). Fills eye[3] (24.8 FP world) and flags;
+ * returns 0 (all-zero out) when no pose has been solved for the view. */
+int td5_camera_get_tick_pose(int view, int eye[3], int *build_mode,
+                             int *eye_car_locked);
 extern int   g_raceCameraPresetMode[TD5_MAX_VIEWPORTS];  /* per-view preset mode */
 extern int   g_depthFovFactor;  /* projection scale, 0x1000 = identity */
 extern float g_projFovScale;    /* 1/4096 */

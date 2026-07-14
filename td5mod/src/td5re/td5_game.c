@@ -4914,6 +4914,35 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
             td5_trace_emit_view(frame, sim_tick, stage, &r);
         }
     }
+
+    /* Camera rows: the per-TICK solved pose (deterministic; see td5_trace.h) */
+    if (td5_trace_active(TD5_TRACE_MOD_CAMERA, stage_bit)) {
+        for (int vp = 0; vp < g_td5.viewport_count && vp < TD5_MAX_VIEWPORTS; vp++) {
+            TD5_TraceCameraRow r;
+            int eye[3], bm, cl;
+            r.pose_valid     = td5_camera_get_tick_pose(vp, eye, &bm, &cl);
+            r.view_index     = vp;
+            r.actor_slot     = g_actorSlotForView[vp];
+            r.build_mode     = bm;
+            r.eye_car_locked = cl;
+            r.preset_mode    = g_raceCameraPresetMode[vp];
+            r.eye_x = eye[0]; r.eye_y = eye[1]; r.eye_z = eye[2];
+            td5_trace_emit_camera(frame, sim_tick, stage, &r);
+        }
+    }
+
+    /* Sound rows: sim-event-driven siren state per racer slot (deterministic;
+     * frame-paced mixer pitch/volume deliberately excluded -- td5_trace.h) */
+    if (td5_trace_active(TD5_TRACE_MOD_SOUND, stage_bit)) {
+        int any = td5_sound_siren_is_enabled();
+        for (int slot = 0; slot < 6; slot++) {
+            TD5_TraceSoundRow r;
+            r.slot      = slot;
+            r.cop_siren = td5_sound_cop_siren_is_on(slot);
+            r.any_siren = any;
+            td5_trace_emit_sound(frame, sim_tick, stage, &r);
+        }
+    }
 }
 
 /* Map stage strings to bitmask + dispatch. Each call site below the FSM

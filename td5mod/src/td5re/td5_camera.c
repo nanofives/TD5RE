@@ -232,6 +232,23 @@ static TD5_CamPose s_cam_pose_prev[TD5_MAX_VIEWPORTS];
 static TD5_CamPose s_cam_pose_cur [TD5_MAX_VIEWPORTS];
 static int         s_cam_pose_init[TD5_MAX_VIEWPORTS] = {0};
 
+int td5_camera_get_tick_pose(int view, int eye[3], int *build_mode,
+                             int *eye_car_locked)
+{
+    if (view < 0 || view >= TD5_MAX_VIEWPORTS || !s_cam_pose_cur[view].valid) {
+        eye[0] = eye[1] = eye[2] = 0;
+        if (build_mode)      *build_mode = 0;
+        if (eye_car_locked)  *eye_car_locked = 0;
+        return 0;
+    }
+    eye[0] = s_cam_pose_cur[view].eye[0];
+    eye[1] = s_cam_pose_cur[view].eye[1];
+    eye[2] = s_cam_pose_cur[view].eye[2];
+    if (build_mode)     *build_mode     = s_cam_pose_cur[view].build_mode;
+    if (eye_car_locked) *eye_car_locked = s_cam_pose_cur[view].eye_car_locked;
+    return 1;
+}
+
 /* [CAR BROKE DOWN 2026-07-10] Recovery camera glide (render-only). When a broken-
  * down car is force-recovered 30 spans back, the chase eye would hard-cut to the
  * new follow position. Instead we EASE it: capture the last-emitted eye/target as

@@ -37,7 +37,9 @@
 #define TD5_TRACE_MOD_VIEW      0x40
 #define TD5_TRACE_MOD_CALLS     0x80
 #define TD5_TRACE_MOD_ROTATION  0x100
-#define TD5_TRACE_MOD_ALL       0x1FF
+#define TD5_TRACE_MOD_CAMERA    0x200
+#define TD5_TRACE_MOD_SOUND     0x400
+#define TD5_TRACE_MOD_ALL       0x7FF
 
 /* -------- Stage bitmask --------------------------------------------------
  * One bit per emit call site in RunRaceFrame's tick loop. Each module emits
@@ -189,6 +191,25 @@ void td5_trace_emit_view    (uint32_t frame, uint32_t tick, const char *stage,
                              const TD5_TraceViewRow *r);
 void td5_trace_emit_rotation(uint32_t frame, uint32_t tick, const char *stage,
                              const TD5_TraceRotationRow *r);
+
+/* Camera stream: the per-TICK solved pose (td5_camera_get_tick_pose) --
+ * NOT g_camWorldPos, whose subtick extrapolation is render-frame-paced and
+ * therefore nondeterministic across runs. Golden-safe. */
+typedef struct TD5_TraceCameraRow {
+    int view_index, actor_slot, pose_valid, build_mode, eye_car_locked;
+    int preset_mode, eye_x, eye_y, eye_z;
+} TD5_TraceCameraRow;
+void td5_trace_emit_camera(uint32_t frame, uint32_t tick, const char *stage,
+                           const TD5_TraceCameraRow *r);
+
+/* Sound stream: the sim-event-driven deterministic subset only (siren
+ * states). Frame-paced mixer state (pitch/volume/doppler) is deliberately
+ * EXCLUDED -- it varies with render fps and would break golden hashing. */
+typedef struct TD5_TraceSoundRow {
+    int slot, cop_siren, any_siren;
+} TD5_TraceSoundRow;
+void td5_trace_emit_sound(uint32_t frame, uint32_t tick, const char *stage,
+                          const TD5_TraceSoundRow *r);
 
 /* -------- Calls trace (unchanged schema) --------------------------------- */
 #define TD5_TRACE_CALL_MAX_ARGS 8
