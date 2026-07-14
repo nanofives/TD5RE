@@ -21,6 +21,7 @@
 #include "wrapper.h"
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ------------------------------------------------------------------------
  * Photo-booth frame capture: copy the final composited backbuffer to CPU.
@@ -152,10 +153,24 @@ int Backend_NoteDeviceRemoved(HRESULT hr, const char *where)
         FILE *f = fopen("log\\gpu_device_lost.log", "a");
         if (!f) f = fopen("gpu_device_lost.log", "a");
         if (f) {
-            fprintf(f, "DEVICE LOST at %s: hr=0x%08lX GetDeviceRemovedReason="
-                       "0x%08lX %s\n",
-                    where ? where : "?", (unsigned long)hr,
-                    (unsigned long)reason, rn);
+            /* Wall-clock stamp + frame forensics: which frame (present_count),
+             * how big the RT was, whether 3D had been drawn this frame, and the
+             * caller's breadcrumb (self-test step / scene) so the hang is
+             * pinpointed to an exact frame + on-screen scene without needing a
+             * separate timestamped trace. */
+            time_t t = time(NULL);
+            struct tm *lt = localtime(&t);
+            char ts[32] = "??:??:??";
+            if (lt) strftime(ts, sizeof(ts), "%H:%M:%S", lt);
+            fprintf(f, "[%s] DEVICE LOST at %s: hr=0x%08lX GetDeviceRemovedReason="
+                       "0x%08lX %s | frame=present#%lu rt=%dx%d scene_rendered=%d "
+                       "context=\"%s\"\n",
+                    ts, where ? where : "?", (unsigned long)hr,
+                    (unsigned long)reason, rn,
+                    g_backend.present_count,
+                    (int)g_backend.width, (int)g_backend.height,
+                    g_backend.scene_rendered,
+                    g_backend.diag_context[0] ? g_backend.diag_context : "(none)");
             fclose(f);
         }
     }

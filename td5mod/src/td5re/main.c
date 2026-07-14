@@ -77,6 +77,30 @@ static void dbglog(const char *fmt, ...) {
  * WinMain
  * ======================================================================== */
 
+/* Non-interactive run? (selftest / CI / net-loopback child.)
+ *
+ * A modal dialog (crash box, fatal-init box) in a headless run BLOCKS the
+ * process forever -- nobody clicks OK -- so a crashed/failed td5re.exe keeps
+ * running, holding the D3D device, swap chain and display window. The NEXT
+ * launch then collides with the still-alive process (device create fails /
+ * window title clash), which previously looked like "the GPU is in a degraded
+ * state that only a reboot clears". It is not the GPU: it is a leaked process.
+ * In headless runs we therefore suppress every modal and let the process exit
+ * (or TerminateProcess) so its GPU handles are released immediately.
+ *
+ * Keyed off TD5RE_NO_DIALOG, set (a) by scripts/selftest.ps1 and (b) auto by
+ * WinMain when --SelfTest is on the command line, so both CI and a bare
+ * `td5re.exe --SelfTest=1` stay non-interactive without any INI/env prep. */
+static int td5_headless_run(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        cached = (getenv("TD5RE_NO_DIALOG") != NULL)
+              || (getenv("TD5RE_NET_SELFTEST") != NULL);
+    }
+    return cached;
+}
+
 /* Crash handler: logs the faulting address + stack walk before terminating. */
 static LONG WINAPI td5_crash_handler(EXCEPTION_POINTERS *ep)
 {
@@ -134,6 +158,13 @@ static LONG WINAPI td5_crash_handler(EXCEPTION_POINTERS *ep)
             FILE *cf = fopen(crash_path, "w");
             if (cf) { fprintf(cf, "%s\n", crash_msg); fclose(cf); }
         }
+    }
+    /* Headless: do NOT pop a modal (it would wedge the process alive holding
+     * the GPU). Terminate now so the OS releases device/swap-chain/window and
+     * the next launch is clean. Returning from the filter would also unwind,
+     * but TerminateProcess guarantees no atexit/thread hang keeps us alive. */
+    if (td5_headless_run()) {
+        TerminateProcess(GetCurrentProcess(), (UINT)code);
     }
     MessageBoxA(NULL, crash_msg, "TD5RE Crash", MB_OK | MB_ICONERROR);
     return EXCEPTION_EXECUTE_HANDLER;
@@ -757,6 +788,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * Set BEFORE anything else so logging/INI parsing don't inherit defaults. */
     _controlfp(_RC_DOWN | _PC_64, _MCW_RC | _MCW_PC);
 
+    /* A --SelfTest run is non-interactive: mark it headless BEFORE the crash
+     * filter (and any fatal-init dialog) so a crash/failure terminates cleanly
+     * instead of blocking on a modal and leaking the process + its GPU handles.
+     * The child processes we spawn (net loopback) inherit this environment. */
+    if (lpCmdLine && strstr(lpCmdLine, "--SelfTest")) {
+        _putenv("TD5RE_NO_DIALOG=1");
+    }
+
     SetUnhandledExceptionFilter(td5_crash_handler);
 
     /* Claim our taskbar identity BEFORE any window is created (Backend_CreateDevice
@@ -1370,9 +1409,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     dbglog("=== TD5RE Standalone Start ===");
     dbglog("Step 1: Backend_Init...");
     if (!Backend_Init()) {
-        MessageBoxA(NULL, "Backend_Init failed.\n\n"
-                    "Ensure D3D11 is available on this system.",
-                    "TD5RE - Fatal Error", MB_OK | MB_ICONERROR);
+        if (!td5_headless_run())
+            MessageBoxA(NULL, "Backend_Init failed.\n\n"
+                        "Ensure D3D11 is available on this system.",
+                        "TD5RE - Fatal Error", MB_OK | MB_ICONERROR);
         return 1;
     }
 
@@ -1395,9 +1435,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_backend.target_width  = width;
     g_backend.target_height = height;
     if (!Backend_CreateDevice(NULL, width, height, bpp, windowed)) {
-        MessageBoxA(NULL, "Backend_CreateDevice failed.\n\n"
-                    "Could not create D3D11 device and swap chain.",
-                    "TD5RE - Fatal Error", MB_OK | MB_ICONERROR);
+        if (!td5_headless_run())
+            MessageBoxA(NULL, "Backend_CreateDevice failed.\n\n"
+                        "Could not create D3D11 device and swap chain.",
+                        "TD5RE - Fatal Error", MB_OK | MB_ICONERROR);
         Backend_Shutdown();
         return 1;
     }
@@ -1435,8 +1476,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Create WrapperDirectDraw (IDirectDraw4 wrapper) */
     ddraw = WrapperDirectDraw_Create();
     if (!ddraw) {
-        MessageBoxA(NULL, "WrapperDirectDraw_Create failed.",
-                    "TD5RE - Fatal Error", MB_OK | MB_ICONERROR);
+        if (!td5_headless_run())
+            MessageBoxA(NULL, "WrapperDirectDraw_Create failed.",
+                        "TD5RE - Fatal Error", MB_OK | MB_ICONERROR);
         Backend_Shutdown();
         return 1;
     }
@@ -1448,8 +1490,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         (DWORD)g_backend.bpp,
         0x200 /* DDSCAPS_PRIMARYSURFACE */);
     if (!primary) {
-        MessageBoxA(NULL, "WrapperSurface_Create (primary) failed.",
-                    "TD5RE - Fatal Error", MB_OK | MB_ICONERROR);
+        if (!td5_headless_run())
+            MessageBoxA(NULL, "WrapperSurface_Create (primary) failed.",
+                        "TD5RE - Fatal Error", MB_OK | MB_ICONERROR);
         Backend_Shutdown();
         return 1;
     }
@@ -1472,8 +1515,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Create WrapperDevice (IDirect3DDevice3 wrapper) */
     device = WrapperDevice_Create(backbuf ? backbuf : primary);
     if (!device) {
-        MessageBoxA(NULL, "WrapperDevice_Create failed.",
-                    "TD5RE - Fatal Error", MB_OK | MB_ICONERROR);
+        if (!td5_headless_run())
+            MessageBoxA(NULL, "WrapperDevice_Create failed.",
+                        "TD5RE - Fatal Error", MB_OK | MB_ICONERROR);
         Backend_Shutdown();
         return 1;
     }
@@ -1526,9 +1570,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     dbglog("Step 4: Platform init OK (render=%dx%d, skip_intro=%d)", width, height, g_td5.ini.skip_intro);
     dbglog("Step 5: td5re_init (15 modules)...");
     if (!td5re_init()) {
-        MessageBoxA(NULL, "td5re_init failed.\n\n"
-                    "One or more game modules could not initialize.",
-                    "TD5RE - Fatal Error", MB_OK | MB_ICONERROR);
+        if (!td5_headless_run())
+            MessageBoxA(NULL, "td5re_init failed.\n\n"
+                        "One or more game modules could not initialize.",
+                        "TD5RE - Fatal Error", MB_OK | MB_ICONERROR);
         td5re_shutdown();
         Backend_Shutdown();
         return 1;

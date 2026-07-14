@@ -34,6 +34,11 @@ $args = "--SelfTest=1"
 if ($Suite -eq "full") { $args += " --SelfTestSuite=1" }
 
 $env:TD5RE_WINDOW_TITLE = "TD5RE SELFTEST ($Suite)"
+# Non-interactive: suppress crash / fatal-init modals so a failure terminates
+# cleanly instead of blocking on an unclickable dialog (which would leak the
+# process holding the GPU/window and make the next launch collide). Inherited
+# by any child process the game spawns (net loopback). See main.c/td5_headless_run.
+$env:TD5RE_NO_DIALOG = "1"
 Write-Host "Launching $Exe $args (timeout ${TimeoutSec}s)..."
 $p = Start-Process -FilePath $Exe -ArgumentList $args -PassThru
 

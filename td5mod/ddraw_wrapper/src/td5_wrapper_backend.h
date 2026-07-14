@@ -385,6 +385,14 @@ typedef struct {
      * also logs GetDeviceRemovedReason() so the root cause is diagnosable. */
     int                 device_removed;
 
+    /* [diag] TDR/device-lost forensics. present_count is bumped on every
+     * swap-chain Present so the device-lost log can name the frame; diag_context
+     * is a short breadcrumb the caller (e.g. the self-test step runner or the
+     * race loop) sets so a hang names WHICH scene/step was on screen -- these
+     * pinpoint the offending frame without a timestamped log. */
+    unsigned long       present_count;
+    char                diag_context[64];
+
     /* Frontend native-resolution scaling */
     FrontendScale       fe_scale;
 } D3D11Backend;

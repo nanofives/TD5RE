@@ -252,6 +252,7 @@ static int   s_gdi_growth;         /* allowed net GDI-object growth over a serie
 static int   s_handle_growth;      /* allowed net handle growth over a series */
 static int   s_allow_errors;       /* 1 = ERR log lines don't fail a step */
 static int   s_race_ticks;         /* sim ticks per scripted race */
+static int   s_race_warmup_ms;     /* ms at FF=1 at each race start (GPU TDR guard) */
 
 /* ------------------------------------------------------------------------
  * Helpers
@@ -324,6 +325,13 @@ static StepRow *st_new_row(const char *name, char kind)
     memset(r, 0, sizeof(*r));
     snprintf(r->name, sizeof(r->name), "%s", name);
     r->kind = kind;
+    /* [diag] breadcrumb: if a GPU TDR/device-lost happens mid-step, the
+     * device-lost log names this step (see td5_plat_set_diag_context). */
+    {
+        char ctx[64];
+        snprintf(ctx, sizeof(ctx), "selftest step %d:%s", s_row_count - 1, name);
+        td5_plat_set_diag_context(ctx);
+    }
     r->nav_reached = r->nav_navigable = -1;
     return r;
 }
@@ -345,6 +353,15 @@ static void st_finish_row(StepRow *r, int status, const char *note)
     if (r->d_errs > 0 && !s_allow_errors && status < ST_FAIL) {
         status = ST_FAIL;
         if (!note || !note[0]) note = "log errors during step";
+    }
+    /* GPU device loss (TDR / removal) is a hard failure: once latched, every
+     * later frame is rendered blind (guards no-op all submission), so the SIM
+     * keeps producing green sim-goldens while nothing is on screen. Without
+     * this check a device-lost run reports a false 48-PASS. See
+     * log/gpu_device_lost.log for the offending frame/scene. */
+    if (td5_plat_device_lost() && status < ST_FAIL) {
+        status = ST_FAIL;
+        note = "GPU DEVICE LOST (TDR) -- see log/gpu_device_lost.log";
     }
     r->status = status;
     if (note) snprintf(r->note, sizeof(r->note), "%s", note);
@@ -1291,6 +1308,14 @@ void td5_selftest_boot(void)
      * are identical. Frame-time metrics stay comparable because every
      * scenario in a session runs at the same FF. Override: TD5RE_SELFTEST_FF. */
     s_ff              = td5_env_float("TD5RE_SELFTEST_FF", 8.0f, 1.0f, 16.0f);
+    /* [GPU TDR guard] The first heavy race frames create the SSR/shadow render
+     * targets and upload race textures for the (large) window RT. At the 8x
+     * suite FF those cold frames can flush >2s of GPU work into a single
+     * Present and trip the Windows TDR watchdog -> DXGI_ERROR_DEVICE_HUNG
+     * (observed: first race, present-time, rt=2560x1351). Running the first
+     * ~1.5s of every race at FF=1 lets those uploads settle at a safe pace,
+     * then we ramp to the suite FF. Set to 0 to disable (reproduce the hang). */
+    s_race_warmup_ms  = td5_env_int("TD5RE_SELFTEST_RACE_WARMUP_MS", 1500, 0, 10000);
     s_ws_mb_per_rep   = td5_env_int("TD5RE_SELFTEST_LEAK_MB", 24, 1, 1024);
     s_frame_drift_pct = td5_env_int("TD5RE_SELFTEST_FRAME_DRIFT_PCT", 15, 1, 500);
     s_gdi_growth      = td5_env_int("TD5RE_SELFTEST_GDI_GROWTH", 100, 1, 100000);
@@ -1542,6 +1567,17 @@ static void st_tick_races(uint32_t now)
         /* [render golden] grab the composited frame at fixed sim ticks. */
         if (sc->trace_golden)
             st_render_capture_tick(tick - s_race_start_tick);
+        /* [GPU TDR guard] Warm up each race at FF=1 (see s_race_warmup_ms) so
+         * the cold first frames don't slam the GPU past the 2s TDR watchdog,
+         * then ramp to the suite FF. Applied AFTER the capture-tick FF logic so
+         * it wins during the window; captures start well past it (tick >=130 at
+         * 30 Hz vs ~45 ticks in a 1.5s FF=1 warm-up), so there is no conflict. */
+        if (s_race_warmup_ms > 0 &&
+            (int32_t)(now - s_race_start_ms) < s_race_warmup_ms) {
+            g_td5.ini.trace_fast_forward = 1.0f;
+        } else if (!sc->trace_golden) {
+            g_td5.ini.trace_fast_forward = s_ff;
+        }
         if (g_td5.game_state != TD5_GAMESTATE_RACE) {
             /* Natural finish (or knockout): the fade already returned us. */
             s_sub = SS_RACE_WAIT_MENU;

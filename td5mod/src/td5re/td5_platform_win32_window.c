@@ -436,7 +436,19 @@ static void plat_present_swapchain(int sync)
     }
 #endif
     HRESULT hr = IDXGISwapChain_Present(g_backend.swap_chain, sync, 0);
+    g_backend.present_count++;   /* [diag] frame counter for device-lost forensics */
     if (FAILED(hr)) Backend_NoteDeviceRemoved(hr, "td5_plat_present/Present");
+}
+
+void td5_plat_set_diag_context(const char *ctx)
+{
+    if (!ctx) { g_backend.diag_context[0] = '\0'; return; }
+    snprintf(g_backend.diag_context, sizeof(g_backend.diag_context), "%s", ctx);
+}
+
+int td5_plat_device_lost(void)
+{
+    return g_backend.device_removed;
 }
 
 void td5_plat_present(int vsync)
