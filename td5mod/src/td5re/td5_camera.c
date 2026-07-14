@@ -16,6 +16,7 @@
 #include "td5_asset.h"  /* td5_asset_level_number — fly-in per-level blocklist */
 #include "td5_ai.h"     /* td5_compute_heading_delta */
 #include "td5_physics.h" /* td5_physics_get_crash_fx — crash-shake driver (Item #12) */
+#include "td5_fp.h"     /* FP_TRUNC/FP_SCALE — 24.8 fixed-point idiom macros */
 #include "td5re.h"
 #include "td5_config.h"   /* shared TD5RE_* env-knob helpers */
 /* Per-track trackside (replay) camera profile data, extracted from
@@ -339,7 +340,7 @@ static int td5_camera_ground_cam_lift(void)
     static int s_lift = -1;
     if (s_lift < 0) {
         int wu = td5_env_int("TD5RE_GROUND_CAM_LIFT", 150, 0, 100000);  /* ~150 world units */
-        s_lift = wu << 8;                        /* world units -> 24.8 FP */
+        s_lift = FP_SCALE(wu);                    /* world units -> 24.8 FP */
     }
     return s_lift;
 }
@@ -405,7 +406,7 @@ static int td5_camera_crash_shake(void)
  * @30Hz ≈ 0.8s. Matches the "age < 24" recency window in the contract. */
 #define TD5_CRASH_SHAKE_DECAY    24
 /* Peak positional jitter, 24.8 FP world units, at full intensity (~70 wu). */
-#define TD5_CRASH_SHAKE_POS_FP   (70 << 8)
+#define TD5_CRASH_SHAKE_POS_FP   FP_SCALE(70)
 /* Peak angular wobble, 12-bit angle units (0x1000 = full circle); ~3.5 deg. */
 #define TD5_CRASH_SHAKE_ANG      40
 /* Crash magnitude that maps to full-intensity shake. The physics module only
@@ -907,7 +908,7 @@ void LoadCameraPresetForView(int actor, int force_reload, int view, int save_sta
 
     g_camOrbitRadiusScale[view] = radius_f;
     g_camTargetHeight[view]     = height_f;
-    g_camElevationAngleFP[view] = (int)elev << 8;
+    g_camElevationAngleFP[view] = FP_SCALE((int)elev);
 
     /* If force_reload or mode changed, reset interpolation targets */
     if (force_reload != 0 || g_raceCameraPresetMode[view] != (int)mode_val) {
@@ -916,7 +917,7 @@ void LoadCameraPresetForView(int actor, int force_reload, int view, int save_sta
         g_camSmoothedHeight[view] = height_f;
         g_camOrbitAngleFP[view] =
             (g_camRotationSlot[view] * 0x800 + (int)actor_yaw) * 0x100;
-        g_camStoredPitch[view] = (int)elev << 8;
+        g_camStoredPitch[view] = FP_SCALE((int)elev);
     }
 
     g_camPresetChangeFlag[view] = 0;
@@ -1376,7 +1377,7 @@ void UpdateChaseCamera(int actor, int do_track_heading, int view)
 
 after_flyin:
     current_radius = g_camCurrentRadius[v];
-    orbit_visual_angle = g_camYawOffset[v] - (g_camOrbitAngleFP[v] >> 8);
+    orbit_visual_angle = g_camYawOffset[v] - FP_TRUNC(g_camOrbitAngleFP[v]);
 
     g_camRotationSlot[v] = 0;
 
@@ -1419,11 +1420,11 @@ after_flyin:
             }
         }
 
-        g_camOrbitAngleFP[v] += (int)((int)(effective_speed * (int)heading_delta) >> 8);
+        g_camOrbitAngleFP[v] += (int)FP_TRUNC((int)(effective_speed * (int)heading_delta));
     }
 
     /* --- Terrain-following (3-point normal sampling) --- */
-    combined_angle = (unsigned int)((g_camOrbitAngleFP[v] >> 8) +
+    combined_angle = (unsigned int)(FP_TRUNC(g_camOrbitAngleFP[v]) +
                                      g_camRotationSlot[v] * 0x800);
 
     cos_val = CosFixed12bit(combined_angle);
@@ -1548,12 +1549,12 @@ after_flyin:
          * This is the first operand to AngleFromVector12 (z=0x200). */
         int avg_bc = norm_b_y + norm_c_y;
         avg_bc = (avg_bc + ((avg_bc >> 31) & 1)) >> 1;  /* signed /2 round-toward-zero */
-        int pitch_input = -((norm_a_y - avg_bc) >> 8);
+        int pitch_input = -FP_TRUNC(norm_a_y - avg_bc);
 
         /* Match orig roll_input formula at 0x004017F8..0x00401800:
          *   EAX = local_28; EAX -= local_1c; EAX = -(EAX >> 8)
          *   = -((norm_b_y - norm_c_y) >> 8) */
-        int roll_input = -((norm_b_y - norm_c_y) >> 8);
+        int roll_input = -FP_TRUNC(norm_b_y - norm_c_y);
 
         terrain_probe_trace_emit(view, actor,
                                   pos_x, pos_z, combined_angle,
@@ -1636,7 +1637,7 @@ after_flyin:
     }
 
     /* --- Camera look-direction --- */
-    look_angle = (unsigned int)((g_camOrbitAngleFP[v] >> 8) -
+    look_angle = (unsigned int)(FP_TRUNC(g_camOrbitAngleFP[v]) -
                                  (int)*(short *)(actor + 0x20A) +
                                  g_camYawOffset[v]);
 
@@ -1656,11 +1657,11 @@ after_flyin:
 
     {
         short *orient = g_camOrientShort[v];
-        orient[0] = (short)((unsigned int)(int)(SinFloat12bit(look_angle) *
-                    (g_camOrbitRadiusScale[v] * wall_zoom) + 0.5f) >> 8);
-        orient[1] = (short)((unsigned int)g_camElevationAngleFP[v] >> 8);
-        orient[2] = -(short)((unsigned int)(int)(CosFloat12bit(look_angle) *
-                    (g_camOrbitRadiusScale[v] * wall_zoom) + 0.5f) >> 8);
+        orient[0] = (short)FP_TRUNC((unsigned int)(int)(SinFloat12bit(look_angle) *
+                    (g_camOrbitRadiusScale[v] * wall_zoom) + 0.5f));
+        orient[1] = (short)FP_TRUNC((unsigned int)g_camElevationAngleFP[v]);
+        orient[2] = -(short)FP_TRUNC((unsigned int)(int)(CosFloat12bit(look_angle) *
+                    (g_camOrbitRadiusScale[v] * wall_zoom) + 0.5f));
 
         /* Transform through terrain rotation matrix.
          * BuildRotationMatrixFromAngles now uses the same swapped sin/cos
@@ -1839,15 +1840,15 @@ static float td5_camera_raycast_to_wall(int32_t car_x, int32_t car_z,
         int32_t ox = sp->origin_x;
         int32_t oz = sp->origin_z;
 
-        int32_t lLnx = ((int32_t)vL_near->x << 8) + ox;
-        int32_t lLnz = ((int32_t)vL_near->z << 8) + oz;
-        int32_t lLfx = ((int32_t)vL_far->x  << 8) + ox;
-        int32_t lLfz = ((int32_t)vL_far->z  << 8) + oz;
+        int32_t lLnx = FP_SCALE((int32_t)vL_near->x) + ox;
+        int32_t lLnz = FP_SCALE((int32_t)vL_near->z) + oz;
+        int32_t lLfx = FP_SCALE((int32_t)vL_far->x) + ox;
+        int32_t lLfz = FP_SCALE((int32_t)vL_far->z) + oz;
 
-        int32_t lRnx = ((int32_t)vR_near->x << 8) + ox;
-        int32_t lRnz = ((int32_t)vR_near->z << 8) + oz;
-        int32_t lRfx = ((int32_t)vR_far->x  << 8) + ox;
-        int32_t lRfz = ((int32_t)vR_far->z  << 8) + oz;
+        int32_t lRnx = FP_SCALE((int32_t)vR_near->x) + ox;
+        int32_t lRnz = FP_SCALE((int32_t)vR_near->z) + oz;
+        int32_t lRfx = FP_SCALE((int32_t)vR_far->x) + ox;
+        int32_t lRfz = FP_SCALE((int32_t)vR_far->z) + oz;
 
         /* LEFT rail: NW → SW (near-left to far-left) */
         float tL = wall_clip_segments_2d(car_x, car_z, cam_x, cam_z,
@@ -2127,7 +2128,7 @@ static void cam_solve_view(int v)
         TD5_CameraPreset *p = &g_cameraPresets[0];
         g_camOrbitRadiusScale[v] = (float)(int)p->orbit_radius_raw  * g_const256;
         g_camTargetHeight[v]     = (float)(int)p->height_target_raw * g_const256;
-        g_camElevationAngleFP[v] = (int)p->elevation_angle << 8;
+        g_camElevationAngleFP[v] = FP_SCALE((int)p->elevation_angle);
     }
 
     /* [Montego fly-in fix 2026-07-04] Countdown tight-chase one-shot: when the
@@ -2144,7 +2145,7 @@ static void cam_solve_view(int v)
         TD5_CameraPreset *p = &g_cameraPresets[4];
         g_camOrbitRadiusScale[v] = (float)(int)p->orbit_radius_raw  * g_const256;
         g_camTargetHeight[v]     = (float)(int)p->height_target_raw * g_const256;
-        g_camElevationAngleFP[v] = (int)p->elevation_angle << 8;
+        g_camElevationAngleFP[v] = FP_SCALE((int)p->elevation_angle);
     }
 
     float save = g_subTickFraction;
@@ -2537,7 +2538,7 @@ void UpdateTracksideOrbitCamera(int actor, int is_active, int view)
         }
 
         /* Smooth by subTickFraction */
-        orbit_angle_fp = (int)((float)((delta * effective) >> 8) * cam_integ_step() + 0.5f) +
+        orbit_angle_fp = (int)((float)FP_TRUNC(delta * effective) * cam_integ_step() + 0.5f) +
                          g_camOrbitAngleFP[v];
     } else {
         orbit_angle_fp = g_camOrbitAngleFP[v];
@@ -2545,7 +2546,7 @@ void UpdateTracksideOrbitCamera(int actor, int is_active, int view)
 
     /* Compute camera offset */
     radius_scaled = g_worldToRenderScale * g_camOrbitRadiusScale[v];
-    unsigned int vis_angle = (unsigned int)(orbit_angle_fp >> 8);
+    unsigned int vis_angle = (unsigned int)FP_TRUNC(orbit_angle_fp);
 
     /* Look direction for orientation */
     heading = vis_angle - (unsigned int)*(short *)(actor + 0x20A) + g_camYawOffset[v];
@@ -2553,7 +2554,7 @@ void UpdateTracksideOrbitCamera(int actor, int is_active, int view)
     {
         short orient[4];
         orient[0] = (short)(int)(SinFloat12bit(heading) * radius_scaled + 0.5f);
-        orient[1] = (short)((unsigned int)g_camElevationAngleFP[v] >> 8);
+        orient[1] = (short)FP_TRUNC((unsigned int)g_camElevationAngleFP[v]);
         orient[2] = (short)(int)(-(CosFloat12bit(heading) * radius_scaled) + 0.5f);
 
         /* Transform orient through actor's rotation matrix.
@@ -3977,7 +3978,7 @@ void td5_camera_update_transition_state(int p, int vi)
         TD5_CameraPreset *p = &g_cameraPresets[0];
         g_camOrbitRadiusScale[v] = (float)(int)p->orbit_radius_raw * g_const256;
         g_camTargetHeight[v]     = (float)(int)p->height_target_raw * g_const256;
-        g_camElevationAngleFP[v] = (int)p->elevation_angle << 8;
+        g_camElevationAngleFP[v] = FP_SCALE((int)p->elevation_angle);
         TD5_LOG_I(LOG_TAG, "race start view %d: restored chase targets (radius=%.0f height=%.0f, transitionActive=0x%X)",
                   v, g_camOrbitRadiusScale[v], g_camTargetHeight[v], g_cameraTransitionActive);
     }
@@ -4176,9 +4177,9 @@ static void BuildCubicSpline3D(int *spline_state, int control_points) {
 
     /* Compute deltas relative to P1, scaled down by 256 (>>8) */
     for (i = 0; i < 4; i++) {
-        delta[i][0] = (P[i*3+0] - P[3]) >> 8;
-        delta[i][1] = (P[i*3+1] - P[4]) >> 8;
-        delta[i][2] = (P[i*3+2] - P[5]) >> 8;
+        delta[i][0] = FP_TRUNC(P[i*3+0] - P[3]);
+        delta[i][1] = FP_TRUNC(P[i*3+1] - P[4]);
+        delta[i][2] = FP_TRUNC(P[i*3+2] - P[5]);
     }
 
     /* Multiply by Catmull-Rom basis matrix, then divide by 2 */
@@ -4283,7 +4284,7 @@ uint32_t td5_compute_heading_delta(void *route_entry) {
     route_table = (const uint8_t *)(intptr_t)rs[0x00]; /* RS_ROUTE_TABLE_PTR [CONFIRMED @ 0x00434040] */
     if (!route_table) return 0;
     rb   = route_table[(uint16_t)span_norm * 3u + 1u]; /* byte lookup [CONFIRMED @ 0x00434040] */
-    diff = (actor_yaw >> 8) - (int)((rb * 0x102Cu) >> 8u);
+    diff = FP_TRUNC(actor_yaw) - (int)FP_TRUNC(rb * 0x102Cu);
     t    = ((uint32_t)diff - 0x800u) & 0xFFFu;
     t    = (t - 0x800u) & 0xFFFu;
     return (uint32_t)(0u - t);  /* 12-bit negation; formula: -(...) [CONFIRMED @ 0x00434040] */
