@@ -128,6 +128,9 @@ void Backend_CompositeAndPresent(WrapperSurface *rt_surface, RECT *srcRect, RECT
 
     (void)srcRect; (void)dstRect;
     if (!g_backend.swap_chain || !ctx) return;
+    /* [DEVICE-LOST] Once the device is gone, stop feeding it -- issuing more
+     * commands on a removed device is what NULL-derefs inside the driver. */
+    if (g_backend.device_removed) return;
 
     Backend_EnforceWindowSize();
 
@@ -256,8 +259,14 @@ void Backend_CompositeAndPresent(WrapperSurface *rt_surface, RECT *srcRect, RECT
     /* [S01 2026-06-04] sync interval driven by the Display-options VSync toggle
      * (g_backend.vsync; 1=wait-for-vblank, 0=uncapped/tear). Defaults to 1. */
     hr = IDXGISwapChain_Present(g_backend.swap_chain, g_backend.vsync ? 1 : 0, 0);
-    if (FAILED(hr) && s_log_count < 10) {
-        WRAPPER_LOG("CompositeAndPresent: Present FAILED hr=0x%08lX", hr);
+    if (FAILED(hr)) {
+        /* Diagnose + latch device-lost (halts further submission); otherwise
+         * log a bounded number of transient present failures. */
+        if (!Backend_NoteDeviceRemoved(hr, "CompositeAndPresent/Present") &&
+            s_log_count < 10) {
+            s_log_count++;
+            WRAPPER_LOG("CompositeAndPresent: Present FAILED hr=0x%08lX", hr);
+        }
     }
 
     /* Restore game RT (backbuffer, not swap chain) */

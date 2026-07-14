@@ -377,11 +377,26 @@ typedef struct {
     /* Standalone mode: skip all hardcoded address fixups (no original EXE loaded) */
     int                 standalone;
 
+    /* [DEVICE-LOST 2026-07-13] Latched when a GPU call returns a device-
+     * removed/reset/hung HRESULT. Once set, the present/render path no-ops so
+     * we STOP issuing commands on a dead device -- otherwise the driver
+     * eventually NULL-derefs (0xC0000005) and takes the whole process down,
+     * turning a recoverable TDR into a hard crash. Backend_NoteDeviceRemoved()
+     * also logs GetDeviceRemovedReason() so the root cause is diagnosable. */
+    int                 device_removed;
+
     /* Frontend native-resolution scaling */
     FrontendScale       fe_scale;
 } D3D11Backend;
 
 extern D3D11Backend g_backend;
+
+/* [DEVICE-LOST 2026-07-13] If `hr` is a device-removed/reset/hung code, log it
+ * + the GetDeviceRemovedReason() detail (HUNG / REMOVED / RESET /
+ * DRIVER_INTERNAL_ERROR / INVALID_CALL) and latch g_backend.device_removed.
+ * `where` names the call site for the log. Returns 1 if the device is (now)
+ * removed, else 0. Cheap no-op on a healthy SUCCEEDED hr. */
+int Backend_NoteDeviceRemoved(HRESULT hr, const char *where);
 
 /* ========================================================================
  * PNG texture override (png_loader.c)
