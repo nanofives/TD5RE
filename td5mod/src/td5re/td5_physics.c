@@ -2852,13 +2852,17 @@ void td5_physics_update_player(TD5_Actor *actor)
      * along the heading and add it to linear_velocity.
      *
      * Knob TD5RE_SLOPE_DECEL = scalar multiplier on the UPHILL (decelerating)
-     * component (default 2.0 = "stronger than current", which is effectively
-     * zero explicit term). The DOWNHILL (accelerating) component always uses
+     * component. The DOWNHILL (accelerating) component always uses
      * 1.0x so descents stay physically sane and the car never rockets downhill.
-     * "0" disables the whole term (revert to the old emergent-only behaviour). */
+     * "0" disables the whole term (revert to the old emergent-only behaviour).
+     *
+     * [2026-07-18] Default softened 2.0 -> 0.70 (35% of the old strength, i.e.
+     * the uphill decel "debuff" is now 65% LESS effective) — climbing a grade
+     * bled off too much speed before. Override via TD5RE_SLOPE_DECEL to taste;
+     * pre-softening feel is TD5RE_SLOPE_DECEL=2.0. */
     {
         static int   s_slope_init = 0;
-        static float s_slope_mult = 2.0f;   /* uphill decel multiplier (default) */
+        static float s_slope_mult = 0.70f;  /* uphill decel multiplier (default) */
         if (!s_slope_init) {
             const char *e = getenv("TD5RE_SLOPE_DECEL");
             if (e && e[0]) {

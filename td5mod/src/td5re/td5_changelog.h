@@ -38,6 +38,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  was set too high and mistook their bright daytime" },
     { CL_ITEM,    "  skies for dusk; night/dusk tracks (Moscow," },
     { CL_ITEM,    "  Washington) still light up correctly" },
+    { CL_ITEM,    "TUNE: cars hold speed better on uphill climbs - the" },
+    { CL_ITEM,    "  slope slow-down is now much gentler (65% weaker)" },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 11" },
