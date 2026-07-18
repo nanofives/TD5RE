@@ -32,6 +32,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "July 18" },
+    { CL_ITEM,    "TUNE: cars hold speed better on uphill climbs - the" },
+    { CL_ITEM,    "  slope slow-down is now much gentler (65% weaker)" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "July 11" },
     { CL_ITEM,    "FIX: roadside fences, foliage and scenery no longer" },
     { CL_ITEM,    "  render from one side only or lose their textures -" },
