@@ -124,10 +124,16 @@ static void env_probe_init_once(void)
 static int   s_auto_zone_thr     = 80;
 /* Per-track sky-luminance threshold: a track whose average sky brightness is
  * below this reads "dark everywhere" (night/dusk/overcast tracks), so headlights
- * stay on across the whole track regardless of the local zone. Calibrated on the
- * sky-texture averages: Moscow(dark) ~64, Bern(day) ~124 -> 110 flags Moscow and
- * dimmer/dusk tracks while leaving bright daylight (>=~124) off. */
-static int   s_auto_sky_thr      = 110;
+ * stay on across the whole track regardless of the local zone. Re-calibrated
+ * 2026-07-18 against ALL 19 native FORWSKY averages (the old 110 was fit only to
+ * Moscow-vs-Bern and wrongly flagged several bright DAYTIME tracks whose sky
+ * average lands in the 95-117 band -- Montego 95.6 and Tokyo 104.4 ran
+ * headlights all race in broad daylight). The real split is:
+ *   genuinely dark : Washington 35.6, Moscow 63.5   -> lights ON
+ *   bright daylight: Montego 95.6, Tokyo 104.4, SanFran 113.2, ... -> lights OFF
+ * 80 sits at the midpoint of Moscow(63.5) and Montego(95.6), cleanly separating
+ * the two groups. */
+static int   s_auto_sky_thr      = 80;
 /* Hysteresis (scene-luma units) on the dynamic zone term so headlights don't
  * strobe at zone boundaries: once ON they need scene_luma >= thr+hyst to flip OFF.
  * Kept below (open-road - tunnel) so open road always clears (80+15=95 < 106). */
