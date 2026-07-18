@@ -32,6 +32,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "July 18" },
+    { CL_ITEM,    "FIX: headlights no longer switch on in broad daylight" },
+    { CL_ITEM,    "  on Montego Bay and Tokyo - the auto-dark sky test" },
+    { CL_ITEM,    "  was set too high and mistook their bright daytime" },
+    { CL_ITEM,    "  skies for dusk; night/dusk tracks (Moscow," },
+    { CL_ITEM,    "  Washington) still light up correctly" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "July 11" },
     { CL_ITEM,    "FIX: roadside fences, foliage and scenery no longer" },
     { CL_ITEM,    "  render from one side only or lose their textures -" },
