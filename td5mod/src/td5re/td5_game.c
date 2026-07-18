@@ -43,6 +43,7 @@
 #include "td5_vfx.h"
 #include "td5_light.h"    /* [DYNAMIC LIGHTS] per-frame headlight registry */
 #include "td5_arcade.h"   /* ARCADE mode: pickup pads + power-ups */
+#include "td5_replay.h"   /* ghost-state "View Replay" recorder/poser */
 #include "td5_damage.h"   /* [CAR DAMAGE] health reset + knockout completion gate */
 #include "td5_tutorial.h" /* first-race controller-tutorial overlay */
 #include "td5_trace.h"
@@ -4099,6 +4100,17 @@ static void init_race_race_systems(void)
     TD5_LOG_I(LOG_TAG, "InitRace step 12/19: input %s initialized",
               s_replay_mode ? "playback" : "recording");
 
+    /* [GHOST REPLAY 2026-07-18] Arm the full ghost-state recorder/poser in
+     * parallel with the legacy input path. On a NORMAL race we record every
+     * actor's per-tick transform; on a View Replay we pose from that buffer and
+     * disable the sim (see the sub-tick loop in td5_game_run_race_frame). The
+     * actor count is already bound (step 11), and traffic actors get their
+     * cardef/model pointers from td5_ai_init_traffic_actors() below regardless
+     * of replay mode, so posed traffic still renders with a real model.
+     * No-op when TD5RE_GHOST_REPLAY=0 (legacy input re-sim replay). */
+    if (s_replay_mode) td5_replay_begin_playback();
+    else               td5_replay_begin_record();
+
     /* [REPLAY FIX #18 2026-06-15] Replay correctness guard + diagnostic.
      * A View Replay must reproduce the just-driven race bit-for-bit. The two
      * deterministic anchors are restored above — the per-race RNG seed (step 0,
@@ -6530,6 +6542,16 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
          * upstream propagation) show all AI slots with vel=0 at sim_tick=1
          * while the reference had the full post-tick state. */
         td5_game_trace_stage("pre_physics", ticks_this_frame);
+        /* [GHOST REPLAY 2026-07-18] On a View Replay with ghost recording on,
+         * pose every actor straight from the recorded buffer and SKIP the whole
+         * sim (AI, race-end brake, physics, metrics, arcade). Traffic is posed
+         * and made visible manually from its recorded per-tick alpha -- never
+         * spawned by the spawn logic -- so opponents AND traffic reproduce the
+         * driven race exactly and cannot deviate. Otherwise run the normal sim
+         * (this is also the legacy TD5RE_GHOST_REPLAY=0 input re-sim path). */
+        if (td5_game_is_replay_active() && td5_replay_ghost_enabled()) {
+            td5_replay_pose_tick((uint32_t)g_td5.simulation_tick_counter);
+        } else {
         td5_ai_tick();
 
         /* [S26 2026-06-05] Race-end auto-brake for the HUMAN player(s). Once the
@@ -6588,6 +6610,7 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
          * Runs once per genuine race tick AFTER physics (so positions are settled),
          * inside the deterministic sub-tick loop. No-op in SIMULATION mode. */
         td5_arcade_tick();
+        }   /* end normal-sim block (skipped when ghost-replay poses instead) */
 
         td5_game_trace_stage("post_physics", ticks_this_frame);
         td5_game_trace_stage("post_ai", ticks_this_frame);
@@ -6662,6 +6685,15 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
                 }
             }
         }
+
+        /* [GHOST REPLAY 2026-07-18] Snapshot every actor's finalized transform
+         * for this LIVE sub-tick, keyed on simulation_tick_counter (pre-
+         * increment, so the record and pose indices line up). Gated on the
+         * recorder being armed -> only a normal (non-replay) race with ghost
+         * recording enabled records; the pose branch above never reaches here
+         * as a recorder. */
+        if (td5_replay_is_recording())
+            td5_replay_record_tick((uint32_t)g_td5.simulation_tick_counter);
 
         /* --- Per-actor race progression (sub-tick cadence) ---
          *

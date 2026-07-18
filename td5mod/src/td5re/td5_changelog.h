@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 18" },
+    { CL_ITEM,    "FIX: View Replay now matches the race you drove - it" },
+    { CL_ITEM,    "  records the exact path of every car and traffic" },
+    { CL_ITEM,    "  vehicle each tick and plays it straight back, so" },
+    { CL_ITEM,    "  opponents and traffic no longer drift off into a" },
+    { CL_ITEM,    "  different race" },
     { CL_ITEM,    "FIX: headlights no longer switch on in broad daylight" },
     { CL_ITEM,    "  on Montego Bay and Tokyo - the auto-dark sky test" },
     { CL_ITEM,    "  was set too high and mistook their bright daytime" },

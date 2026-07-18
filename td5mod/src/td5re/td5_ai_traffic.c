@@ -2317,6 +2317,24 @@ int td5_ai_traffic_get_draw_alpha(int slot)
     return (int)s_trf_dyn_alpha[slot];
 }
 
+/* [GHOST REPLAY 2026-07-18] Drive a traffic slot's visibility straight from a
+ * recorded draw-alpha. During ghost-state "View Replay" the spawn/fade state
+ * machine (td5_ai_traffic_dynamic_tick) is disabled, so the replay poser calls
+ * this each tick to reproduce exactly which traffic cars were on-road and at
+ * what fade. Only the render/audio alpha + the parked flag matter on playback;
+ * setting s_trf_dyn_state ACTIVE/INACTIVE keeps td5_ai_traffic_dynamic_parked()
+ * and get_draw_alpha() consistent for the render path. */
+void td5_ai_traffic_replay_force(int slot, int alpha)
+{
+    if (slot < g_traffic_slot_base ||
+        slot >= g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS ||
+        slot >= TD5_MAX_TOTAL_ACTORS) return;
+    if (alpha < 0)   alpha = 0;
+    if (alpha > 255) alpha = 255;
+    s_trf_dyn_alpha[slot] = (int16_t)alpha;
+    s_trf_dyn_state[slot] = (alpha > 0) ? TRF_DYN_ACTIVE : TRF_DYN_INACTIVE;
+}
+
 /* [task#12 2026-06-15] A/B knob for the consistent-density fixes (proximity
  * recycle + per-volume retune + VERY HIGH tier). TD5RE_TRAFFIC_DENSITY=0 restores
  * the prior behaviour (corridor-only despawn, old caps/periods); default on.

@@ -151,8 +151,10 @@ comment — regenerate after adding/splitting modules with
 | `td5_physics_drivetrain.c` | Engine, transmission, drive torque, gravity |
 | `td5_physics_suspension.c` | Suspension, wheel contacts, pose integration |
 | `td5_track.c` | Track geometry, segment contacts, strip data |
+| `td5_track_parser.c` | MODELS.DAT parsing (S6 module split, see REFACTOR_PLAN.md) |
 | `td5_track_registry.c` | runtime registry for custom (user-built) tracks. |
 | `td5_ai.c` | AI routing, rubber-banding, traffic, script VM |
+| `td5_ai_traffic.c` | Traffic subsystem (S5 module split, see REFACTOR_PLAN.md) |
 | `td5_render.c` | Scene setup, mesh transform, frustum cull |
 | `td5_render_effects.c` | Per-actor render effects & world billboards |
 | `td5_render_mesh.c` | Scene rendering: meshes, actors, spans, texture cache |
@@ -181,6 +183,7 @@ comment — regenerate after adding/splitting modules with
 | `td5_net.c` | Multiplayer protocol, lockstep sync |
 | `td5_upnp.c` | Minimal UPnP IGD port-mapping client (see td5_upnp.h). |
 | `td5_camera.c` | Chase cam, trackside cam, spline cam, camera transforms |
+| `td5_replay.c` | full ghost-state "View Replay" recorder (PORT-ONLY). |
 | `td5_vfx.c` | Particles, tire tracks, smoke, weather, billboards, taillights |
 | `td5_light.c` | Dynamic light system (foundation) + vehicle headlight emitter |
 | `td5_light2.c` | Lighting rework v2 (P0 infrastructure) |
@@ -199,6 +202,10 @@ comment — regenerate after adding/splitting modules with
 | `td5_jobs.c` | fork/join worker pool (Win32 CONDITION_VARIABLE based). |
 | `td5_rcmd.c` | per-pane CPU render command list. See td5_rcmd.h. |
 | `td5_platform_win32.c` | Win32 platform layer for TD5RE |
+| `td5_platform_win32_fs.c` | Filesystem/memory platform primitives |
+| `td5_platform_win32_log.c` | Threading + multi-file logging platform primitives |
+| `td5_platform_win32_audio.c` | Audio-device platform primitives (DirectSound8, |
+| `td5_platform_win32_window.c` | Window/Display + Timing platform primitives |
 | `td5_msvc_rand.c` | MSVC-compatible rand()/srand() override. |
 | `main.c` | Standalone entry point for TD5RE source port |
 <!-- END MODULE TABLE -->

@@ -38,6 +38,7 @@ td5_pending.c
 td5_net.c
 td5_upnp.c
 td5_camera.c
+td5_replay.c
 td5_vfx.c
 td5_light.c
 td5_light2.c
