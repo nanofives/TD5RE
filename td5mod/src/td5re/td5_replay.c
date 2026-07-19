@@ -39,6 +39,20 @@ typedef struct {
     int16_t           slip_z;               /* +0x342 accumulated_tire_slip_z */
     int16_t           slip_metric;          /* +0x33C current_slip_metric */
     int16_t           traffic_alpha;        /* recorded draw-alpha; -1 = racer/not traffic */
+    /* Track-position block (+0x080..0x08C). Normally produced each tick by the
+     * physics/track walker -- which ghost replay SKIPS -- so it must be recorded
+     * and restored or it freezes on the countdown-end value. The span-keyed
+     * cinematic trackside replay camera (SelectTracksideCameraProfile reads
+     * actor+0x80) then never cuts between shots, and race-order / lap / minimap
+     * read stale span data. */
+    int16_t           track_span_raw;         /* +0x080 span the replay camera keys on */
+    int16_t           track_span_normalized;  /* +0x082 */
+    int16_t           track_span_accumulated; /* +0x084 */
+    int16_t           track_span_high_water;  /* +0x086 race-order sort key */
+    int16_t           track_contact_vertex_A; /* +0x088 */
+    int16_t           track_contact_vertex_B; /* +0x08A */
+    uint8_t           track_sub_lane_index;   /* +0x08C */
+    uint8_t           wheel_display_angles_pad;/* keep the 16-short array 2-aligned */
     int16_t           wheel_display_angles[16]; /* +0x210 (4 wheels x 4 shorts) */
     uint8_t           current_gear;         /* +0x36B */
     uint8_t           brake_flag;           /* +0x36D */
@@ -136,6 +150,14 @@ static void replay_capture_actor(TD5_ReplaySnap *dst, const TD5_Actor *a, int sl
     dst->brake_flag         = a->brake_flag;
     dst->handbrake_flag     = a->handbrake_flag;
     dst->_pad               = 0;
+    dst->track_span_raw         = a->track_span_raw;
+    dst->track_span_normalized  = a->track_span_normalized;
+    dst->track_span_accumulated = a->track_span_accumulated;
+    dst->track_span_high_water  = a->track_span_high_water;
+    dst->track_contact_vertex_A = a->track_contact_vertex_A;
+    dst->track_contact_vertex_B = a->track_contact_vertex_B;
+    dst->track_sub_lane_index   = a->track_sub_lane_index;
+    dst->wheel_display_angles_pad = 0;
     memcpy(dst->wheel_display_angles, a->wheel_display_angles,
            sizeof(dst->wheel_display_angles));
     /* Traffic slots record their exact per-tick draw alpha so fade-in/out and
@@ -187,6 +209,16 @@ static void replay_pose_actor(TD5_Actor *a, const TD5_ReplaySnap *src, int slot)
     a->current_gear       = src->current_gear;
     a->brake_flag         = src->brake_flag;
     a->handbrake_flag     = src->handbrake_flag;
+    /* Restore the track-position block so the span-keyed trackside replay camera
+     * cuts between shots as the recorded car advances, and race-order / lap /
+     * minimap track the played-back run instead of freezing at the grid span. */
+    a->track_span_raw         = src->track_span_raw;
+    a->track_span_normalized  = src->track_span_normalized;
+    a->track_span_accumulated = src->track_span_accumulated;
+    a->track_span_high_water  = src->track_span_high_water;
+    a->track_contact_vertex_A = src->track_contact_vertex_A;
+    a->track_contact_vertex_B = src->track_contact_vertex_B;
+    a->track_sub_lane_index   = src->track_sub_lane_index;
     memcpy(a->wheel_display_angles, src->wheel_display_angles,
            sizeof(a->wheel_display_angles));
     /* Zero all velocities so nothing integrates or extrapolates off the pose. */
