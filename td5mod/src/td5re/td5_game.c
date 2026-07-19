@@ -5865,6 +5865,23 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
                       s_demo_mode ? "menu" : "results");
             td5_game_begin_fade_out(0);
         }
+        /* [GHOST REPLAY END 2026-07-19] A ghost View Replay poses from a fixed
+         * buffer, so it has no natural finish to stop it -- once playback runs
+         * past the last recorded frame td5_replay_pose_tick just freezes on the
+         * final pose. That is very visible for a recording cut short by END RACE
+         * NOW (the car never crossed the line). When playback reaches the end of
+         * the recording, end the replay the same way the ESC abort does (fade out
+         * to results). Not for the attract demo (it loops its own recording) and
+         * only for the ghost path (legacy input re-sim ends via its own buffer
+         * running out + coast-to-finish). */
+        if (!s_replay_abort_pending && g_td5.race_end_fade_state == 0 &&
+            s_replay_mode && !s_demo_mode && td5_replay_ghost_enabled() &&
+            td5_replay_playback_at_end((uint32_t)g_td5.simulation_tick_counter)) {
+            s_replay_abort_pending = 1;
+            TD5_LOG_I(LOG_TAG, "Replay: reached end of recording (%d frames) -> fade out to results",
+                      td5_replay_frame_count());
+            td5_game_begin_fade_out(0);
+        }
         if ((esc_edge || pause_act_edge) && !s_pause_menu_active && !td5_game_is_cinematic_race()) {
             s_pause_menu_active = 1;
             s_pause_menu_cursor = 3;  /* default to CONTINUE. [RADIO + END RACE

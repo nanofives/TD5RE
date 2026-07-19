@@ -85,6 +85,11 @@ int td5_replay_ghost_enabled(void)
 int td5_replay_is_recording(void) { return s_recording; }
 int td5_replay_frame_count(void)  { return s_frame_count; }
 
+int td5_replay_playback_at_end(uint32_t sim_tick)
+{
+    return (s_frame_count > 0) && ((int)sim_tick >= s_frame_count);
+}
+
 /* Grow the frame buffer to hold at least `frames` frames (doubling). Returns 1
  * on success, 0 if allocation failed (recording then freezes). */
 static int replay_reserve(int frames)

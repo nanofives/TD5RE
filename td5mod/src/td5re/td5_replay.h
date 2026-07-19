@@ -67,4 +67,12 @@ int  td5_replay_is_recording(void);
 /* Number of live sub-tick frames captured in the current buffer. */
 int  td5_replay_frame_count(void);
 
+/* 1 once `sim_tick` has reached/passed the last recorded frame, i.e. the replay
+ * has played back everything that was captured. pose_tick clamps (freezes) on
+ * the final pose past this point, so the caller uses this to END the replay
+ * (fade out to results) instead of sitting frozen -- important for recordings
+ * cut short by END RACE NOW, which never reach a natural finish. Always 0 when
+ * nothing was recorded. */
+int  td5_replay_playback_at_end(uint32_t sim_tick);
+
 #endif /* TD5_REPLAY_H */

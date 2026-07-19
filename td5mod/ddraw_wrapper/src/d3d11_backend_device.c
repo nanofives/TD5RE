@@ -168,7 +168,16 @@ int Backend_NoteDeviceRemoved(HRESULT hr, const char *where)
                     ts, where ? where : "?", (unsigned long)hr,
                     (unsigned long)reason, rn,
                     g_backend.present_count,
-                    (int)g_backend.width, (int)g_backend.height,
+                    /* Report the ACTUAL swap-chain / render-target size, the same
+                     * windowed?target:nominal expression Backend_RecreateDevice
+                     * logs. Previously this printed g_backend.width/height (the
+                     * nominal INI window size, e.g. 2560x1351) while the RECOVERED
+                     * line printed the real target size (e.g. 2542x1333 client
+                     * area), which looked like the recovery had SHRUNK the RT. It
+                     * had not -- the swap chain is created at target_* on both the
+                     * first device and the recreate, so the two lines now agree. */
+                    g_backend.windowed ? (int)g_backend.target_width  : (int)g_backend.width,
+                    g_backend.windowed ? (int)g_backend.target_height : (int)g_backend.height,
                     g_backend.scene_rendered,
                     g_backend.diag_context[0] ? g_backend.diag_context : "(none)");
             fclose(f);
