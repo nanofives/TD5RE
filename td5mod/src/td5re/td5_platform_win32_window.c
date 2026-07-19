@@ -431,6 +431,7 @@ static void plat_present_swapchain(int sync)
         if (s_fdl_trip >= 0 && (int)(s_fdl_frame++) >= s_fdl_trip) {
             Backend_NoteDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED,
                                       "td5_plat_present/forced-test");
+            s_fdl_trip = -1;   /* trip once — let recovery bring the device back */
             return;
         }
     }
@@ -451,14 +452,46 @@ int td5_plat_device_lost(void)
     return g_backend.device_removed;
 }
 
+/* [DEVICE-LOST recovery] Try to bring the GPU back after a TDR removed the
+ * device. Rate-limited (recreating a device is expensive and the driver may
+ * need a moment after a TDR) and capped so a permanently dead adapter (physical
+ * removal, driver uninstall) doesn't spin D3D11CreateDevice forever. On success
+ * Backend_RecreateDevice clears g_backend.device_removed and the game's texture
+ * pages are rebuilt from their retained CPU copies. */
+static void plat_try_recover_device(void)
+{
+    static int s_attempts = 0;
+    static int s_cooldown = 0;
+
+    if (!g_backend.device_removed) { s_attempts = 0; s_cooldown = 0; return; }
+    if (s_attempts >= 240) return;              /* give up on a truly dead adapter */
+    if (s_cooldown > 0) { s_cooldown--; return; }
+    s_cooldown = 30;                            /* retry ~every 30 frames */
+    s_attempts++;
+
+    TD5_LOG_W(LOG_TAG, "device lost: recovery attempt %d", s_attempts);
+    if (Backend_RecreateDevice()) {
+        td5_plat_render_recover_textures();
+        TD5_LOG_W(LOG_TAG, "device recovered after %d attempt(s)", s_attempts);
+        s_attempts = 0;
+        s_cooldown = 0;
+    }
+}
+
 void td5_plat_present(int vsync)
 {
     static int s_present_log_count = 0;
     float fallback_rgba[4] = { 0.20f, 0.32f, 0.46f, 1.0f };
     int empty_scene_fallback = 0;
 
-    /* [DEVICE-LOST] Stop presenting on a removed device (halts the cascade). */
-    if (g_backend.device_removed) return;
+    /* [DEVICE-LOST recovery] On a removed device, attempt recovery instead of
+     * presenting a frame that was drawn as no-ops on the dead device. Whether or
+     * not the attempt succeeds this call, skip present; the next frame renders
+     * cleanly on the recovered device (device_removed is cleared on success). */
+    if (g_backend.device_removed) {
+        plat_try_recover_device();
+        return;
+    }
 
     /* [S01] effective sync interval = caller's request AND the Display-options
      * VSync toggle (g_backend.vsync). Loading screens pass vsync=0 to stay

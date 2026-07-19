@@ -4220,6 +4220,33 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
     return 1;
 }
 
+/* [DEVICE-LOST recovery] After Backend_RecreateDevice() bumps the device
+ * generation, every game texture still points at GPU objects from the removed
+ * device. Walk the texture-page registry (which retains each surface's CPU
+ * pixel copy in sys_buffer) plus the main scene render target, rebuild their
+ * D3D11 backing on the new device and re-upload the pixels, then refresh the
+ * cached SRV handle the bind path uses. */
+void td5_plat_render_recover_textures(void)
+{
+    int i, n = 0;
+
+    /* Main scene render target surface is not in the page table; rebuild it so
+     * the next frame has a valid RT/SRV to draw into and blit from. */
+    if (g_backend.backbuffer)
+        WrapperSurface_EnsureDeviceCurrent(g_backend.backbuffer);
+
+    for (i = 0; i < MAX_TEXTURE_PAGES; i++) {
+        WrapperSurface *s = s_tex_surfaces[i];
+        if (!s) continue;
+        WrapperSurface_EnsureDeviceCurrent(s);
+        WrapperSurface_FlushDirty(s);   /* re-upload sys_buffer into fresh texture */
+        /* The bind path caches the raw SRV pointer as the texture handle. */
+        s_tex_handles[i] = (DWORD)(DWORD_PTR)s->d3d11_srv;
+        n++;
+    }
+    TD5_LOG_I(LOG_TAG, "device recovery: rebuilt %d texture pages on new device", n);
+}
+
 void td5_plat_render_get_texture_dims(int page_index, int *w, int *h)
 {
     if (page_index >= 0 && page_index < MAX_TEXTURE_PAGES &&

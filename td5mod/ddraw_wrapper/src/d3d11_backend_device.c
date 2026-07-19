@@ -1294,6 +1294,249 @@ static int Backend_GetDesktopRefreshHz(HWND hwnd)
 }
 
 /* ========================================================================
+ * Backend_InitDeviceResources
+ *
+ * Create render targets, shaders, state objects and dynamic buffers on the
+ * current g_backend.device, then apply the initial pipeline state + state
+ * cache. Shared by Backend_CreateDevice (first-time) and Backend_RecreateDevice
+ * (device-lost recovery) so the two can never drift. Assumes g_backend.device,
+ * g_backend.context and g_backend.swap_chain are already valid.
+ * ======================================================================== */
+static int Backend_InitDeviceResources(int rt_width, int rt_height)
+{
+    if (!Backend_CreateRenderTargets(rt_width, rt_height))
+        return 0;
+    if (!Backend_CreateShaders())
+        return 0;
+    if (!Backend_CreateStateObjects())
+        return 0;
+    if (!Backend_CreateDynamicBuffers())
+        return 0;
+
+    /* Set initial pipeline state */
+    {
+        ID3D11DeviceContext *ctx = g_backend.context;
+        UINT stride = TD5_VERTEX_STRIDE;
+        UINT offset = 0;
+        D3D11_VIEWPORT vp;
+
+        ID3D11DeviceContext_IASetInputLayout(ctx, g_backend.input_layout);
+        ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &g_backend.dynamic_vb, &stride, &offset);
+        ID3D11DeviceContext_IASetIndexBuffer(ctx, g_backend.dynamic_ib, DXGI_FORMAT_R16_UINT, 0);
+
+        ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_pretransformed, NULL, 0);
+        ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &g_backend.cb_viewport);
+
+        ID3D11DeviceContext_PSSetShader(ctx, g_backend.ps_shaders[PS_MODULATE], NULL, 0);
+        ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_backend.cb_fog);
+
+        ID3D11DeviceContext_RSSetState(ctx, g_backend.rs_state);
+        ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &g_backend.swap_rtv, g_backend.depth_dsv);
+        ID3D11DeviceContext_OMSetBlendState(ctx, g_backend.blend_states[BLEND_OPAQUE], NULL, 0xFFFFFFFF);
+        ID3D11DeviceContext_OMSetDepthStencilState(ctx, g_backend.ds_states[DS_Z_ON_WRITE_ON], 0);
+        ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[SAMP_LINEAR_WRAP]);
+
+        vp.TopLeftX = 0; vp.TopLeftY = 0;
+        vp.Width    = (FLOAT)rt_width;
+        vp.Height   = (FLOAT)rt_height;
+        vp.MinDepth = 0.0f;
+        vp.MaxDepth = 1.0f;
+        ID3D11DeviceContext_RSSetViewports(ctx, 1, &vp);
+
+        /* Default scissor rect covers the full render target; the RS state
+         * has ScissorEnable=TRUE so 2D HUD clipping can override it via
+         * RSSetScissorRects without touching rasterizer state. */
+        {
+            D3D11_RECT scissor;
+            scissor.left   = 0;
+            scissor.top    = 0;
+            scissor.right  = (LONG)rt_width;
+            scissor.bottom = (LONG)rt_height;
+            ID3D11DeviceContext_RSSetScissorRects(ctx, 1, &scissor);
+        }
+    }
+
+    /* Initialize state cache */
+    g_backend.state.z_enable = 1;
+    g_backend.state.z_write = 1;
+    g_backend.state.blend_enable = 0;
+    g_backend.state.src_blend = D3D6BLEND_SRCALPHA;
+    g_backend.state.dest_blend = D3D6BLEND_INVSRCALPHA;
+    g_backend.state.texblend_mode = D3DTBLEND_MODULATE;
+    g_backend.state.mag_filter = 2; /* LINEAR */
+    g_backend.state.min_filter = 2;
+    g_backend.state.tex_address_u = 1; /* WRAP */
+    g_backend.state.tex_address_v = 1;
+    g_backend.state.current_blend_idx = BLEND_OPAQUE;
+    g_backend.state.current_ds_idx = DS_Z_ON_WRITE_ON;
+    g_backend.state.current_samp_idx = SAMP_LINEAR_WRAP;
+    g_backend.state.current_ps_idx = PS_MODULATE;
+    g_backend.state.dirty = 0;
+
+    g_backend.current_tex_has_alpha = 1;
+    g_backend.alpha_blend_enabled = 0;
+
+    /* Update viewport constant buffer */
+    Backend_UpdateViewportCB((float)rt_width, (float)rt_height);
+
+    /* Initialize fog CB (disabled by default) */
+    {
+        FogCB fog = {0};
+        fog.fogEnabled = 0;
+        ID3D11DeviceContext_UpdateSubresource(g_backend.context,
+            (ID3D11Resource*)g_backend.cb_fog, 0, NULL, &fog, 0, 0);
+    }
+
+    return 1;
+}
+
+/* ========================================================================
+ * Backend_ReleaseDeviceObjects  (device-lost recovery)
+ *
+ * Release every GPU object that belongs to g_backend.device so the removed
+ * device can be dropped and a fresh one created. Per-surface textures are NOT
+ * touched here — those are rebuilt lazily from sys_buffer on next use, keyed on
+ * g_backend.device_generation. Safe to call on a removed device: COM Release
+ * only drops the process-side refcount, it never touches the GPU.
+ * ======================================================================== */
+#define BK_REL(p) do { if (p) { IUnknown_Release((IUnknown*)(p)); (p) = NULL; } } while (0)
+static void Backend_ReleaseDeviceObjects(void)
+{
+    int i;
+
+    if (g_backend.context)
+        ID3D11DeviceContext_ClearState(g_backend.context);
+
+    /* Render targets (swap RTV, depth, G-buffer, scene-copy) + rec-context pool. */
+    Backend_ReleaseRenderTargets();
+    Backend_RecPoolRelease();
+
+    /* Compositing textures (lazily recreated by Backend_EnsureCompositingTextures). */
+    BK_REL(g_backend.composite_srv);
+    BK_REL(g_backend.composite_staging);
+    BK_REL(g_backend.composite_tex);
+
+    /* Shaders + input layout. */
+    BK_REL(g_backend.vs_pretransformed);
+    BK_REL(g_backend.vs_fullscreen);
+    for (i = 0; i < PS_COUNT; i++) BK_REL(g_backend.ps_shaders[i]);
+    BK_REL(g_backend.ps_composite);
+    BK_REL(g_backend.ps_light);
+    BK_REL(g_backend.ps_shadow);
+    BK_REL(g_backend.ps_ssr);
+    BK_REL(g_backend.input_layout);
+
+    /* State objects. */
+    for (i = 0; i < BLEND_STATE_COUNT; i++) BK_REL(g_backend.blend_states[i]);
+    for (i = 0; i < DS_STATE_COUNT; i++)    BK_REL(g_backend.ds_states[i]);
+    for (i = 0; i < SAMP_STATE_COUNT; i++)  BK_REL(g_backend.sampler_states[i]);
+    BK_REL(g_backend.rs_state);
+    BK_REL(g_backend.rs_state_shadow_decal);
+
+    /* Dynamic + constant buffers. */
+    BK_REL(g_backend.dynamic_vb);
+    BK_REL(g_backend.dynamic_ib);
+    BK_REL(g_backend.cb_viewport);
+    BK_REL(g_backend.cb_fog);
+    BK_REL(g_backend.cb_light);
+    BK_REL(g_backend.cb_shadow);
+    BK_REL(g_backend.cb_ssr);
+
+    /* Swap chain, context, device (device last). */
+    BK_REL(g_backend.swap_chain);
+    BK_REL(g_backend.context);
+    BK_REL(g_backend.device);
+}
+
+/* ========================================================================
+ * Backend_RecreateDevice  (device-lost recovery)
+ * ======================================================================== */
+int Backend_RecreateDevice(void)
+{
+    HRESULT hr;
+    DXGI_SWAP_CHAIN_DESC scd;
+    D3D_FEATURE_LEVEL feature_levels[] = {
+        D3D_FEATURE_LEVEL_11_0,
+        D3D_FEATURE_LEVEL_10_1,
+        D3D_FEATURE_LEVEL_10_0,
+    };
+    D3D_FEATURE_LEVEL achieved_level;
+    HWND device_hwnd;
+    int rt_width  = g_backend.windowed ? g_backend.target_width  : g_backend.width;
+    int rt_height = g_backend.windowed ? g_backend.target_height : g_backend.height;
+
+    WRAPPER_LOG("Backend_RecreateDevice: begin (gen %u -> %u) rt=%dx%d",
+                g_backend.device_generation, g_backend.device_generation + 1,
+                rt_width, rt_height);
+
+    /* Drop all GPU objects tied to the removed device. */
+    Backend_ReleaseDeviceObjects();
+
+    device_hwnd = s_display_hwnd ? s_display_hwnd : g_backend.hwnd;
+
+    ZeroMemory(&scd, sizeof(scd));
+    scd.BufferCount        = 1;
+    scd.BufferDesc.Width   = (UINT)rt_width;
+    scd.BufferDesc.Height  = (UINT)rt_height;
+    scd.BufferDesc.Format  = DXGI_FORMAT_B8G8R8A8_UNORM;
+    {
+        int refresh_hz = Backend_GetDesktopRefreshHz(device_hwnd);
+        scd.BufferDesc.RefreshRate.Numerator   = (UINT)refresh_hz;
+        scd.BufferDesc.RefreshRate.Denominator = 1;
+    }
+    scd.BufferUsage  = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    scd.OutputWindow = device_hwnd;
+    scd.SampleDesc.Count = 1;
+    scd.Windowed     = g_backend.windowed ? TRUE : FALSE;
+    scd.SwapEffect   = DXGI_SWAP_EFFECT_DISCARD;
+
+    hr = D3D11CreateDeviceAndSwapChain(
+        NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0,
+        feature_levels, 3, D3D11_SDK_VERSION, &scd,
+        &g_backend.swap_chain, &g_backend.device,
+        &achieved_level, &g_backend.context);
+    if (FAILED(hr)) {
+        WRAPPER_LOG("Backend_RecreateDevice: CreateDeviceAndSwapChain FAILED hr=0x%08lX "
+                    "(device stays removed, will retry)", (unsigned long)hr);
+        return 0;   /* leave device_removed latched so the caller retries later */
+    }
+
+    if (!Backend_InitDeviceResources(rt_width, rt_height)) {
+        WRAPPER_LOG("Backend_RecreateDevice: InitDeviceResources FAILED — releasing again");
+        Backend_ReleaseDeviceObjects();
+        return 0;
+    }
+
+    /* New device is live. Bump the generation so every surface's stale GPU
+     * backing is rebuilt from sys_buffer on next use, and clear the latch. */
+    g_backend.device_generation++;
+    g_backend.device_removed = 0;
+
+    WRAPPER_LOG("Backend_RecreateDevice: OK device=%p ctx=%p swap=%p gen=%u",
+                g_backend.device, g_backend.context, g_backend.swap_chain,
+                g_backend.device_generation);
+
+    /* Crash-safe forensic breadcrumb mirroring the device-lost record. */
+    {
+        FILE *f = fopen("log\\gpu_device_lost.log", "a");
+        if (!f) f = fopen("gpu_device_lost.log", "a");
+        if (f) {
+            time_t t = time(NULL);
+            struct tm *lt = localtime(&t);
+            char ts[32] = "??:??:??";
+            if (lt) strftime(ts, sizeof(ts), "%H:%M:%S", lt);
+            fprintf(f, "[%s] DEVICE RECOVERED: new device created, generation=%u, "
+                       "rt=%dx%d — rendering resumed\n",
+                    ts, g_backend.device_generation, rt_width, rt_height);
+            fclose(f);
+        }
+    }
+    return 1;
+}
+#undef BK_REL
+
+/* ========================================================================
  * Backend_CreateDevice
  * ======================================================================== */
 
@@ -1431,96 +1674,17 @@ int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed
         WRAPPER_LOG("Backend_CreateDevice: device=%p ctx=%p feature_level=0x%X",
             g_backend.device, g_backend.context, achieved_level);
 
-        /* Create render targets */
-        if (!Backend_CreateRenderTargets(rt_width, rt_height))
+        /* [DEVICE-LOST recovery] First live device = generation 1. Surfaces
+         * created from here on stamp this value; Backend_RecreateDevice bumps it
+         * after a TDR so stale per-surface GPU objects get rebuilt. */
+        if (g_backend.device_generation == 0)
+            g_backend.device_generation = 1;
+
+        /* Create render targets, shaders, state objects, dynamic buffers and
+         * apply the initial pipeline state. Shared with Backend_RecreateDevice
+         * (device-lost recovery) so the two paths can never drift. */
+        if (!Backend_InitDeviceResources(rt_width, rt_height))
             return 0;
-
-        /* Create shaders */
-        if (!Backend_CreateShaders())
-            return 0;
-
-        /* Create state objects */
-        if (!Backend_CreateStateObjects())
-            return 0;
-
-        /* Create dynamic buffers */
-        if (!Backend_CreateDynamicBuffers())
-            return 0;
-
-        /* Set initial pipeline state */
-        {
-            ID3D11DeviceContext *ctx = g_backend.context;
-            UINT stride = TD5_VERTEX_STRIDE;
-            UINT offset = 0;
-            D3D11_VIEWPORT vp;
-
-            ID3D11DeviceContext_IASetInputLayout(ctx, g_backend.input_layout);
-            ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &g_backend.dynamic_vb, &stride, &offset);
-            ID3D11DeviceContext_IASetIndexBuffer(ctx, g_backend.dynamic_ib, DXGI_FORMAT_R16_UINT, 0);
-
-            ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_pretransformed, NULL, 0);
-            ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &g_backend.cb_viewport);
-
-            ID3D11DeviceContext_PSSetShader(ctx, g_backend.ps_shaders[PS_MODULATE], NULL, 0);
-            ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_backend.cb_fog);
-
-            ID3D11DeviceContext_RSSetState(ctx, g_backend.rs_state);
-            ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &g_backend.swap_rtv, g_backend.depth_dsv);
-            ID3D11DeviceContext_OMSetBlendState(ctx, g_backend.blend_states[BLEND_OPAQUE], NULL, 0xFFFFFFFF);
-            ID3D11DeviceContext_OMSetDepthStencilState(ctx, g_backend.ds_states[DS_Z_ON_WRITE_ON], 0);
-            ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[SAMP_LINEAR_WRAP]);
-
-            vp.TopLeftX = 0; vp.TopLeftY = 0;
-            vp.Width    = (FLOAT)rt_width;
-            vp.Height   = (FLOAT)rt_height;
-            vp.MinDepth = 0.0f;
-            vp.MaxDepth = 1.0f;
-            ID3D11DeviceContext_RSSetViewports(ctx, 1, &vp);
-
-            /* Default scissor rect covers the full render target; the RS state
-             * has ScissorEnable=TRUE so 2D HUD clipping can override it via
-             * RSSetScissorRects without touching rasterizer state. */
-            {
-                D3D11_RECT scissor;
-                scissor.left   = 0;
-                scissor.top    = 0;
-                scissor.right  = (LONG)rt_width;
-                scissor.bottom = (LONG)rt_height;
-                ID3D11DeviceContext_RSSetScissorRects(ctx, 1, &scissor);
-            }
-        }
-
-        /* Initialize state cache */
-        g_backend.state.z_enable = 1;
-        g_backend.state.z_write = 1;
-        g_backend.state.blend_enable = 0;
-        g_backend.state.src_blend = D3D6BLEND_SRCALPHA;
-        g_backend.state.dest_blend = D3D6BLEND_INVSRCALPHA;
-        g_backend.state.texblend_mode = D3DTBLEND_MODULATE;
-        g_backend.state.mag_filter = 2; /* LINEAR */
-        g_backend.state.min_filter = 2;
-        g_backend.state.tex_address_u = 1; /* WRAP */
-        g_backend.state.tex_address_v = 1;
-        g_backend.state.current_blend_idx = BLEND_OPAQUE;
-        g_backend.state.current_ds_idx = DS_Z_ON_WRITE_ON;
-        g_backend.state.current_samp_idx = SAMP_LINEAR_WRAP;
-        g_backend.state.current_ps_idx = PS_MODULATE;
-        g_backend.state.dirty = 0;
-
-        g_backend.current_tex_has_alpha = 1;
-        g_backend.alpha_blend_enabled = 0;
-
-        /* Update viewport constant buffer */
-        Backend_UpdateViewportCB((float)rt_width, (float)rt_height);
-
-        /* Initialize fog CB (disabled by default) */
-        {
-            FogCB fog = {0};
-            fog.fogEnabled = 0;
-            ID3D11DeviceContext_UpdateSubresource(g_backend.context,
-                (ID3D11Resource*)g_backend.cb_fog, 0, NULL, &fog, 0, 0);
-        }
 
         /* Initialize frontend scaling */
         g_backend.fe_scale.virtual_w  = width;
