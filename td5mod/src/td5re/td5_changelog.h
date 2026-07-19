@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 19" },
+    { CL_ITEM,    "FIX: frame rate is now capped when VSync is off, so" },
+    { CL_ITEM,    "  menus/results no longer run at tens of thousands of" },
+    { CL_ITEM,    "  FPS and overload the GPU (this prevents the hang" },
+    { CL_ITEM,    "  below). Set TD5RE_FRAME_CAP=0 for uncapped." },
     { CL_ITEM,    "FIX: if the graphics card hangs (a driver TDR) the" },
     { CL_ITEM,    "  game now rebuilds the display and keeps running" },
     { CL_ITEM,    "  instead of freezing on a black screen - seen when" },

@@ -493,6 +493,40 @@ void td5_plat_present(int vsync)
         return;
     }
 
+    /* [FRAME CAP 2026-07-19] When the present is effectively unsynced (VSync off,
+     * or a bypassed present path), pace the frame loop to a sane maximum so the
+     * GPU isn't flooded with tens of thousands of back-to-back submissions per
+     * second. That submission storm — the results/frontend screen was spinning
+     * at ~35k FPS — is what drove the GPU into a TDR (DEVICE_HUNG) at the
+     * race->results transition; capping it prevents the hang the device-lost
+     * recovery path only recovers from. No effect when VSync is on (the vblank
+     * wait already paces). Knob TD5RE_FRAME_CAP=<fps> overrides; 0 = uncapped
+     * (e.g. benchmarking). Default 300 FPS is ~100x below the rate that hung the
+     * GPU and is imperceptible for gameplay and menus. */
+    {
+        static int s_cap_fps = -1;            /* -1 = unread env */
+        static uint64_t s_cap_last_us = 0;
+        if (s_cap_fps < 0) {
+            const char *e = getenv("TD5RE_FRAME_CAP");
+            s_cap_fps = (e && e[0]) ? atoi(e) : 300;
+            if (s_cap_fps < 0) s_cap_fps = 0;
+        }
+        if (s_cap_fps > 0 && !(vsync && g_backend.vsync)) {
+            uint64_t min_dt = 1000000ULL / (uint64_t)s_cap_fps;
+            uint64_t now = td5_plat_time_us();
+            if (s_cap_last_us != 0 && now > s_cap_last_us &&
+                (now - s_cap_last_us) < min_dt) {
+                uint64_t remain = min_dt - (now - s_cap_last_us);
+                /* Sleep the bulk (leave ~1ms) to yield the CPU, then spin the
+                 * remainder — Sleep granularity is ~1ms even with
+                 * timeBeginPeriod(1), too coarse for exact pacing alone. */
+                if (remain > 1500) td5_plat_sleep((uint32_t)((remain - 1000) / 1000));
+                do { now = td5_plat_time_us(); } while (now - s_cap_last_us < min_dt);
+            }
+            s_cap_last_us = now;
+        }
+    }
+
     /* [S01] effective sync interval = caller's request AND the Display-options
      * VSync toggle (g_backend.vsync). Loading screens pass vsync=0 to stay
      * uncapped; race/frontend pass 1 and thus follow the option. */
