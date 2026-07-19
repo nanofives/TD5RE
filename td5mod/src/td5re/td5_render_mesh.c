@@ -1828,6 +1828,23 @@ void td5_render_actors_for_view(int view_index)
     if (((g_active_td6_level >= 8 && g_active_td6_level <= 12) || g_active_td6_level == 22) &&
         view_dist_frac > 0.65f)
         view_dist_frac = 0.65f;
+    /* [REPLAY CAM TDR 2026-07-19] The cinematic trackside/orbit replay cameras
+     * view the track from a distance, so the WHOLE fwd/back span window sits in
+     * frame at once (the chase cam only ever sees a sliver of it edge-on). At a
+     * high VIEW distance that per-frame geometry spiked a single draw past the
+     * GPU's TDR watchdog ("a draw/dispatch ran too long" -> DEVICE_HUNG) during
+     * View Replay. Cap the effective view distance while a ghost replay is
+     * actually showing its trackside cameras -- never during live gameplay (the
+     * chase cam is unaffected) and never when the replay falls back to chase
+     * (trackside_ready()==0). Knob TD5RE_REPLAY_CAM_VIEW_DIST (default 0.65 =
+     * the faithful base; clamp [0.15,1.0]); set 1.0 to disable the cap. */
+    if (g_replay_mode && td5_camera_replay_trackside_ready()) {
+        static float s_replay_cam_vd = -1.0f;
+        if (s_replay_cam_vd < 0.0f)
+            s_replay_cam_vd = td5_env_float("TD5RE_REPLAY_CAM_VIEW_DIST", 0.65f, 0.15f, 1.0f);
+        if (view_dist_frac > s_replay_cam_vd)
+            view_dist_frac = s_replay_cam_vd;
+    }
     float frac_scaled = view_dist_frac * 0.85f + 0.15f;
     int fwd_window  = (int)(frac_scaled * (float)VIEW_DIST_FWD_SPANS);
     int back_window = (int)(frac_scaled * (float)VIEW_DIST_BACK_SPANS);
