@@ -32,6 +32,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "July 19" },
+    { CL_ITEM,    "FIX: if the graphics card hangs (a driver TDR) the" },
+    { CL_ITEM,    "  game now rebuilds the display and keeps running" },
+    { CL_ITEM,    "  instead of freezing on a black screen - seen when" },
+    { CL_ITEM,    "  finishing a race on some tracks (e.g. Montego Bay)" },
+    { CL_BLANK,   "" },
     { CL_DATE,    "July 18" },
     { CL_ITEM,    "FIX: View Replay now matches the race you drove - it" },
     { CL_ITEM,    "  records the exact path of every car and traffic" },

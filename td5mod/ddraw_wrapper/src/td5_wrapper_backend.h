@@ -385,6 +385,13 @@ typedef struct {
      * also logs GetDeviceRemovedReason() so the root cause is diagnosable. */
     int                 device_removed;
 
+    /* [DEVICE-LOST recovery] Bumped every time the D3D11 device is (re)created.
+     * Starts at 1 on first Backend_CreateDevice; each successful
+     * Backend_RecreateDevice() after a TDR increments it. Surfaces carry their
+     * own copy (WrapperSurface.device_generation); a mismatch means the
+     * surface's GPU objects belong to a dead device and must be rebuilt. */
+    unsigned            device_generation;
+
     /* [diag] TDR/device-lost forensics. present_count is bumped on every
      * swap-chain Present so the device-lost log can name the frame; diag_context
      * is a short breadcrumb the caller (e.g. the self-test step runner or the
@@ -405,6 +412,16 @@ extern D3D11Backend g_backend;
  * `where` names the call site for the log. Returns 1 if the device is (now)
  * removed, else 0. Cheap no-op on a healthy SUCCEEDED hr. */
 int Backend_NoteDeviceRemoved(HRESULT hr, const char *where);
+
+/* [DEVICE-LOST recovery] Recreate the D3D11 device + swap chain + all
+ * backend-owned GPU resources (render targets, shaders, state objects, dynamic
+ * buffers, constant buffers) after a TDR left the old device removed. Reuses
+ * the existing display window and the game-established scaling/dimension state
+ * (does NOT re-run window creation or fe_scale setup). On success bumps
+ * g_backend.device_generation and clears g_backend.device_removed; per-surface
+ * GPU textures are rebuilt lazily from sys_buffer on next use. Returns 1 on
+ * success, 0 on failure (device stays removed so the caller can retry). */
+int Backend_RecreateDevice(void);
 
 /* ========================================================================
  * PNG texture override (png_loader.c)

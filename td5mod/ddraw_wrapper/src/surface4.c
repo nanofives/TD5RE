@@ -1285,6 +1285,11 @@ void WrapperSurface_EnsureSysBuffer(WrapperSurface *s)
 void WrapperSurface_FlushDirty(WrapperSurface *s)
 {
     if (!s) return;
+    /* [DEVICE-LOST recovery] If a TDR recreated the device since this surface's
+     * GPU objects were made, rebuild them first (this also sets s->dirty so the
+     * sys_buffer content below is re-uploaded into the fresh texture). */
+    if (s->device_generation != g_backend.device_generation)
+        WrapperSurface_EnsureDeviceCurrent(s);
     if (!s->dirty) return;
     if (!s->sys_buffer) return;
 
@@ -1370,6 +1375,76 @@ void WrapperSurface_FlushDirty(WrapperSurface *s)
     }
 
     s->dirty = 0;
+}
+
+/* [DEVICE-LOST recovery] Rebuild a surface's D3D11 backing on the current
+ * device after a TDR + Backend_RecreateDevice bumped g_backend.device_generation.
+ * Mirrors the GPU-backing branch of WrapperSurface_Create, but keyed off the
+ * surface's stored caps/format so it is idempotent (a former render target is
+ * re-detected by DDSCAPS_3DDEVICE, not by the DDSCAPS_VIDEOMEMORY flag Create
+ * adds afterward, which would otherwise mis-route it to a plain texture). */
+void WrapperSurface_EnsureDeviceCurrent(WrapperSurface *s)
+{
+    if (!s) return;
+    if (!g_backend.device) return;
+    if (s->device_generation == g_backend.device_generation) return;
+
+    /* Drop the GPU objects that belonged to the removed device. Releasing a
+     * dead device's child COM objects is safe — it only drops the process-side
+     * refcount and frees CPU memory; it never touches the GPU. */
+    if (s->d3d11_srv)     { ID3D11ShaderResourceView_Release(s->d3d11_srv);     s->d3d11_srv = NULL; }
+    if (s->d3d11_rtv)     { ID3D11RenderTargetView_Release(s->d3d11_rtv);       s->d3d11_rtv = NULL; }
+    if (s->d3d11_staging) { ID3D11Texture2D_Release(s->d3d11_staging);          s->d3d11_staging = NULL; }
+    if (s->d3d11_texture) { ID3D11Texture2D_Release(s->d3d11_texture);          s->d3d11_texture = NULL; }
+
+    /* Only surfaces that had GPU backing get it back. Z-buffers (backend depth)
+     * and primary surfaces (swap chain) have no per-surface D3D11 resource. */
+    if (!(s->caps & DDSCAPS_SYSTEMMEMORY) &&
+        !(s->caps & DDSCAPS_ZBUFFER) &&
+        !(s->caps & DDSCAPS_PRIMARYSURFACE)) {
+        DXGI_FORMAT fmt = s->dxgi_format ? s->dxgi_format
+            : WrapperSurface_GetDXGIFormat(s->bpp, s->pixel_format.dwFlags, &s->pixel_format);
+        int is_rt = (s->caps & DDSCAPS_OFFSCREENPLAIN) && (s->caps & DDSCAPS_3DDEVICE);
+        D3D11_TEXTURE2D_DESC td;
+        ZeroMemory(&td, sizeof(td));
+        td.Width            = s->width;
+        td.Height           = s->height;
+        td.MipLevels        = 1;
+        td.ArraySize        = 1;
+        td.Format           = fmt;
+        td.SampleDesc.Count = 1;
+        td.Usage            = D3D11_USAGE_DEFAULT;
+        td.BindFlags        = D3D11_BIND_SHADER_RESOURCE |
+                              (is_rt ? D3D11_BIND_RENDER_TARGET : 0);
+        s->dxgi_format = fmt;
+
+        if (SUCCEEDED(ID3D11Device_CreateTexture2D(g_backend.device, &td, NULL, &s->d3d11_texture))) {
+            ID3D11Device_CreateShaderResourceView(g_backend.device,
+                (ID3D11Resource*)s->d3d11_texture, NULL, &s->d3d11_srv);
+            if (is_rt) {
+                D3D11_TEXTURE2D_DESC stg;
+                ID3D11Device_CreateRenderTargetView(g_backend.device,
+                    (ID3D11Resource*)s->d3d11_texture, NULL, &s->d3d11_rtv);
+                ZeroMemory(&stg, sizeof(stg));
+                stg.Width            = s->width;
+                stg.Height           = s->height;
+                stg.MipLevels        = 1;
+                stg.ArraySize        = 1;
+                stg.Format           = fmt;
+                stg.SampleDesc.Count = 1;
+                stg.Usage            = D3D11_USAGE_STAGING;
+                stg.CPUAccessFlags   = D3D11_CPU_ACCESS_WRITE;
+                ID3D11Device_CreateTexture2D(g_backend.device, &stg, NULL, &s->d3d11_staging);
+            }
+        }
+    }
+
+    s->device_generation = g_backend.device_generation;
+    /* Re-upload retained CPU pixels into the fresh texture on the next flush. */
+    if (s->sys_buffer && s->d3d11_texture) s->dirty = 1;
+    WRAPPER_LOG("EnsureDeviceCurrent: rebuilt surf=%p %ux%u gen=%u tex=%p srv=%p rtv=%p",
+                s, s->width, s->height, g_backend.device_generation,
+                s->d3d11_texture, s->d3d11_srv, s->d3d11_rtv);
 }
 
 /**
@@ -1554,6 +1629,10 @@ WrapperSurface* WrapperSurface_Create(DWORD width, DWORD height, DWORD bpp, DWOR
     if (s->d3d11_texture || s->d3d11_rtv) {
         s->caps |= DDSCAPS_VIDEOMEMORY;
     }
+
+    /* [DEVICE-LOST recovery] Stamp the device generation these GPU objects were
+     * created on so a later Backend_RecreateDevice can tell they're stale. */
+    s->device_generation = g_backend.device_generation;
 
     WRAPPER_LOG("WrapperSurface_Create: %p %ux%u %ubpp caps=0x%08x tex=%p srv=%p rtv=%p",
                 s, width, height, bpp, s->caps, s->d3d11_texture, s->d3d11_srv, s->d3d11_rtv);

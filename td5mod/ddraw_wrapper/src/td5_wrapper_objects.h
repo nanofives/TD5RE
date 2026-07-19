@@ -176,6 +176,13 @@ struct WrapperSurface {
     ID3D11Texture2D            *d3d11_staging;  /* Staging texture for Lock/Unlock */
     DXGI_FORMAT                 dxgi_format;    /* DXGI format of the texture */
 
+    /* [DEVICE-LOST recovery] Stamp of the g_backend.device_generation the above
+     * D3D11 objects were created on. When the GPU device is recreated after a
+     * TDR, g_backend.device_generation is bumped; any surface whose stamp is
+     * stale has its GPU backing rebuilt from sys_buffer before next use
+     * (WrapperSurface_EnsureDeviceCurrent). */
+    unsigned                    device_generation;
+
     /* System memory backing (for Lock/Unlock) */
     void               *sys_buffer;
     LONG                pitch;

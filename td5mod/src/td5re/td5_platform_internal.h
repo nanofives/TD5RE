@@ -85,4 +85,9 @@ extern int               s_frame_vertices;
 extern int               s_frame_indices;
 extern int               s_last_bound_texture_page;
 
+/* [DEVICE-LOST recovery] Rebuild every registered texture-page surface on the
+ * freshly recreated device and refresh the cached SRV handles. Called from the
+ * present path (td5_platform_win32_window.c) after Backend_RecreateDevice. */
+void td5_plat_render_recover_textures(void);
+
 #endif /* TD5_PLATFORM_INTERNAL_H */

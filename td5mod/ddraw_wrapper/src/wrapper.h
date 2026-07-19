@@ -105,6 +105,12 @@ WrapperClipper*    WrapperClipper_Create(void);
 DXGI_FORMAT WrapperSurface_GetDXGIFormat(DWORD bpp, DWORD flags, DDPIXELFORMAT_W *pf);
 void        WrapperSurface_EnsureSysBuffer(WrapperSurface *s);
 void        WrapperSurface_FlushDirty(WrapperSurface *s);
+/* [DEVICE-LOST recovery] If the surface's GPU objects were created on an older
+ * device generation (i.e. a TDR + Backend_RecreateDevice happened since), drop
+ * the stale D3D11 texture/SRV/RTV/staging and recreate them on the current
+ * device, then mark the surface dirty so its sys_buffer content re-uploads.
+ * No-op (cheap generation compare) when the surface is already current. */
+void        WrapperSurface_EnsureDeviceCurrent(WrapperSurface *s);
 
 /* Compositing: merge BltFast (2D) and D3D (3D) layers at present time */
 void      Backend_EnsureCompositingTextures(int width, int height);
