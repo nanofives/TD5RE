@@ -110,6 +110,11 @@ int  td5_ai_traffic_dynamic_parked(int slot);
 /* Render/audio fade for `slot`: 0 = hidden/parked, 255 = fully visible.
  * Always 255 for racer slots or when dynamic traffic is off. */
 int  td5_ai_traffic_get_draw_alpha(int slot);
+/* [GHOST REPLAY 2026-07-18] Force a traffic slot's visibility from a recorded
+ * draw-alpha during ghost-state replay, bypassing the spawn/fade state machine
+ * (which is disabled on playback). alpha<=0 -> despawned/invisible, >0 ->
+ * visible at that alpha. No-op for non-traffic slots. See td5_replay.c. */
+void td5_ai_traffic_replay_force(int slot, int alpha);
 /* [PER-VIEWPORT TRAFFIC] 1 when per-viewport traffic partitioning is active this
  * race (each viewport has its own independent traffic partition). [MP TIME TRIAL
  * removed 2026-07-04] The only mode that ever enabled this was split-screen TIME
