@@ -742,9 +742,20 @@ static HRESULT __stdcall Dev3_SetTexture(WrapperDevice *self, DWORD stage, Wrapp
 
     /* Get SRV from WrapperTexture (survives surface destruction) or parent surface */
     {
-        ID3D11ShaderResourceView *srv = tex->d3d11_srv;
-        if (!srv && tex->surface)
+        ID3D11ShaderResourceView *srv;
+        /* [device-lost recovery] If a TDR bumped the device generation, the
+         * cached tex->d3d11_srv / surface->d3d11_srv still point at the removed
+         * device's freed SRV. Bring the parent surface device-current first
+         * (cheap generation early-out in steady state), which rebuilds its SRV
+         * from the retained CPU pixels AND refreshes the linked texture wrapper,
+         * so we never bind a dangling pointer to the driver. */
+        if (tex->surface) {
+            WrapperSurface_EnsureDeviceCurrent(tex->surface);
             srv = tex->surface->d3d11_srv;
+            tex->d3d11_srv = srv;   /* keep the cached copy fresh */
+        } else {
+            srv = tex->d3d11_srv;
+        }
 
         if (s_settex_log < 20) {
             WRAPPER_LOG("  tex->d3d11_srv=%p surf=%p surf->d3d11_srv=%p r5g6b5=%d",

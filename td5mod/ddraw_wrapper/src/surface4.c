@@ -371,11 +371,17 @@ static ULONG __stdcall Surface4_Release(WrapperSurface *self)
          * for rendering, transfer the D3D11 SRV to the WrapperTexture
          * so it survives surface destruction. M2DX releases DirectDraw surfaces
          * after Texture::Load but keeps the WrapperTexture for SetTexture. */
-        if (self->texture_wrapper && self->d3d11_srv) {
-            self->texture_wrapper->d3d11_srv = self->d3d11_srv;
-            ID3D11ShaderResourceView_AddRef(self->d3d11_srv);
-            WRAPPER_LOG("Surface4_Release: transferred d3d11_srv %p to WrapperTexture %p",
-                self->d3d11_srv, self->texture_wrapper);
+        if (self->texture_wrapper) {
+            if (self->d3d11_srv) {
+                self->texture_wrapper->d3d11_srv = self->d3d11_srv;
+                ID3D11ShaderResourceView_AddRef(self->d3d11_srv);
+                WRAPPER_LOG("Surface4_Release: transferred d3d11_srv %p to WrapperTexture %p",
+                    self->d3d11_srv, self->texture_wrapper);
+            }
+            /* The surface is about to be freed — clear the texture's back-pointer
+             * so nothing (e.g. Dev3_SetTexture's device-current guard) dereferences
+             * freed memory. The transferred SRV above keeps the texture usable. */
+            self->texture_wrapper->surface = NULL;
         }
 
         if (self->virtual_lock_buffer) {
@@ -1442,6 +1448,11 @@ void WrapperSurface_EnsureDeviceCurrent(WrapperSurface *s)
     s->device_generation = g_backend.device_generation;
     /* Re-upload retained CPU pixels into the fresh texture on the next flush. */
     if (s->sys_buffer && s->d3d11_texture) s->dirty = 1;
+    /* Keep any linked texture wrapper's cached SRV in sync with the rebuilt
+     * surface SRV. Dev3_SetTexture binds tex->d3d11_srv directly, so a stale
+     * copy left over from the removed device would be a freed pointer handed
+     * to the driver on the first post-recovery draw (NULL-deref in nvwgf2um). */
+    if (s->texture_wrapper) s->texture_wrapper->d3d11_srv = s->d3d11_srv;
     WRAPPER_LOG("EnsureDeviceCurrent: rebuilt surf=%p %ux%u gen=%u tex=%p srv=%p rtv=%p",
                 s, s->width, s->height, g_backend.device_generation,
                 s->d3d11_texture, s->d3d11_srv, s->d3d11_rtv);

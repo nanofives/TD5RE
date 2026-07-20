@@ -1125,6 +1125,7 @@ void Backend_RecPoolRelease(void)
         if (rc->ib)          { ID3D11Buffer_Release(rc->ib);          rc->ib = NULL; }
         if (rc->vb)          { ID3D11Buffer_Release(rc->vb);          rc->vb = NULL; }
         if (rc->dc)          { ID3D11DeviceContext_Release(rc->dc);   rc->dc = NULL; }
+        rc->current_srv = NULL;   /* freed with the device; don't leave a stale bind */
     }
     s_rec_pool_count = 0;
 }
@@ -1407,6 +1408,10 @@ static void Backend_ReleaseDeviceObjects(void)
 
     if (g_backend.context)
         ID3D11DeviceContext_ClearState(g_backend.context);
+
+    /* Drop cached SRV pointers before the objects they name are released, so a
+     * freed pointer can't survive the device-generation bump into a later bind. */
+    g_backend.current_srv = NULL;
 
     /* Render targets (swap RTV, depth, G-buffer, scene-copy) + rec-context pool. */
     Backend_ReleaseRenderTargets();

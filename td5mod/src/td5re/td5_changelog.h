@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "July 20" },
+    { CL_ITEM,    "FIX: recovering from a graphics-card hang (driver TDR)" },
+    { CL_ITEM,    "  no longer crashes on the first frame back - the" },
+    { CL_ITEM,    "  display layer was re-binding a texture from the old," },
+    { CL_ITEM,    "  freed device. Seen after a TDR while exiting the" },
+    { CL_ITEM,    "  attract/demo race. Now rebuilds textures on use." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "July 19" },
     { CL_ITEM,    "FIX: frame rate is now capped when VSync is off, so" },
     { CL_ITEM,    "  menus/results no longer run at tens of thousands of" },
