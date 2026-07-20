@@ -211,6 +211,120 @@ static int frontend_validate_cup_checksum(void) {
     return td5_save_is_cup_valid(NULL);
 }
 
+/* [DEVICE-LOST 2026-07-20] The VectorUI procedural shaders + their constant
+ * buffers are frontend-module statics, NOT part of the wrapper's
+ * Backend_InitDeviceResources, so a device-lost recovery (Backend_RecreateDevice
+ * bumps g_backend.device_generation) does not rebuild them. Left stale, the
+ * cached pointers belong to the freed device and bind as no-ops — selector
+ * arrows / round-rect buttons then draw as blank white quads (the default
+ * textured shader sampling the white page). Rebuild them whenever the device
+ * generation changes. Called from td5_frontend_init_resources (initial build)
+ * AND every frontend UI frame (td5_frontend_render_ui_rects), so a TDR while the
+ * menu is on screen self-heals on the next frame. Idempotent: a no-op once the
+ * shaders exist for the current generation. */
+void frontend_ensure_vui_shaders(void) {
+    static unsigned s_fe_vui_gen = 0;   /* device generation the shaders were built for (0 = none yet) */
+
+    if (!g_td5.ini.vector_ui || !g_backend.device) return;
+
+    if (s_fe_vui_gen != g_backend.device_generation) {
+        int had = (s_ps_msdf || s_ps_roundrect || s_ps_arrow || s_ps_cursor ||
+                   s_ps_gauge || s_rr_cb || s_gauge_cb);
+        /* Releasing a dead device's child objects is CPU-side only (drops the
+         * process refcount); it never touches the GPU. */
+        if (s_ps_msdf)      { ID3D11PixelShader_Release(s_ps_msdf);      s_ps_msdf = NULL; }
+        if (s_ps_roundrect) { ID3D11PixelShader_Release(s_ps_roundrect); s_ps_roundrect = NULL; }
+        if (s_ps_arrow)     { ID3D11PixelShader_Release(s_ps_arrow);     s_ps_arrow = NULL; }
+        if (s_ps_cursor)    { ID3D11PixelShader_Release(s_ps_cursor);    s_ps_cursor = NULL; }
+        if (s_ps_gauge)     { ID3D11PixelShader_Release(s_ps_gauge);     s_ps_gauge = NULL; }
+        if (s_rr_cb)        { ID3D11Buffer_Release(s_rr_cb);             s_rr_cb = NULL; }
+        if (s_gauge_cb)     { ID3D11Buffer_Release(s_gauge_cb);          s_gauge_cb = NULL; }
+        s_fe_vui_gen = g_backend.device_generation;
+        if (had)
+            TD5_LOG_I(LOG_TAG, "VectorUI shaders: rebuilding for device generation %u",
+                      g_backend.device_generation);
+    }
+
+    /* ---- MSDF text pixel shader (shared by HUD/pause/SmallText SDF atlases) ---- */
+    if (!s_ps_msdf) {
+        HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device,
+            g_ps_msdf, sizeof(g_ps_msdf), NULL, &s_ps_msdf);
+        if (FAILED(hr)) {
+            s_ps_msdf = NULL;
+            TD5_LOG_W(LOG_TAG, "MSDF pixel shader create failed hr=0x%08lX",
+                      (unsigned long)hr);
+        }
+    }
+
+    /* ---- Procedural rounded-rect button shader + constant buffer ---- */
+    if (!s_ps_roundrect) {
+        HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device,
+            g_ps_roundrect, sizeof(g_ps_roundrect), NULL, &s_ps_roundrect);
+        if (FAILED(hr)) {
+            s_ps_roundrect = NULL;
+            TD5_LOG_W(LOG_TAG, "roundrect shader create failed hr=0x%08lX", (unsigned long)hr);
+        }
+    }
+    if (s_ps_roundrect && !s_rr_cb) {
+        D3D11_BUFFER_DESC bd;
+        ZeroMemory(&bd, sizeof(bd));
+        bd.ByteWidth = sizeof(FE_RoundRectParams);   /* 96, 16-aligned */
+        bd.Usage = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        HRESULT hr = ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &s_rr_cb);
+        if (FAILED(hr)) {
+            s_rr_cb = NULL;
+            TD5_LOG_W(LOG_TAG, "roundrect cbuffer create failed hr=0x%08lX", (unsigned long)hr);
+        } else {
+            TD5_LOG_I(LOG_TAG, "Procedural roundrect button shader ready (VectorUI)");
+        }
+    }
+
+    /* ---- Selector ◄► arrow shader ---- */
+    if (!s_ps_arrow) {
+        HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device,
+            g_ps_arrow, sizeof(g_ps_arrow), NULL, &s_ps_arrow);
+        if (FAILED(hr)) {
+            s_ps_arrow = NULL;
+            TD5_LOG_W(LOG_TAG, "arrow shader create failed hr=0x%08lX", (unsigned long)hr);
+        }
+    }
+
+    /* ---- Mouse cursor shader ---- */
+    if (!s_ps_cursor) {
+        HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device,
+            g_ps_cursor, sizeof(g_ps_cursor), NULL, &s_ps_cursor);
+        if (FAILED(hr)) {
+            s_ps_cursor = NULL;
+            TD5_LOG_W(LOG_TAG, "cursor shader create failed hr=0x%08lX", (unsigned long)hr);
+        }
+    }
+
+    /* ---- Analog gauge dial shader + constant buffer (in-race HUD) ---- */
+    if (!s_ps_gauge) {
+        HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device,
+            g_ps_gauge, sizeof(g_ps_gauge), NULL, &s_ps_gauge);
+        if (FAILED(hr)) {
+            s_ps_gauge = NULL;
+            TD5_LOG_W(LOG_TAG, "gauge shader create failed hr=0x%08lX", (unsigned long)hr);
+        }
+    }
+    if (s_ps_gauge && !s_gauge_cb) {
+        D3D11_BUFFER_DESC bd;
+        ZeroMemory(&bd, sizeof(bd));
+        bd.ByteWidth = sizeof(FE_GaugeParams);   /* 144, 16-aligned */
+        bd.Usage = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        HRESULT hr = ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &s_gauge_cb);
+        if (FAILED(hr)) {
+            s_gauge_cb = NULL;
+            TD5_LOG_W(LOG_TAG, "gauge cbuffer create failed hr=0x%08lX", (unsigned long)hr);
+        } else {
+            TD5_LOG_I(LOG_TAG, "Procedural gauge dial shader ready (VectorUI)");
+        }
+    }
+}
+
 int td5_frontend_init_resources(void) {
     TD5_LOG_I(LOG_TAG, "InitializeFrontendResourcesAndState");
     frontend_init_font_metrics_default();
@@ -249,58 +363,15 @@ int td5_frontend_init_resources(void) {
      * returns before any MSDF/bitmap path, so the body-text SDF atlas was never
      * sampled. s_msdf_font_page is left at -1 (the TTF is the sole vector path);
      * BodyText_msdf.png + BodyText_msdf.json are deletable. */
-    if (g_td5.ini.vector_ui && !s_ps_msdf && g_backend.device) {
-        HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device,
-            g_ps_msdf, sizeof(g_ps_msdf), NULL, &s_ps_msdf);
-        if (FAILED(hr)) {
-            s_ps_msdf = NULL;
-            TD5_LOG_W(LOG_TAG, "MSDF pixel shader create failed hr=0x%08lX",
-                      (unsigned long)hr);
-        }
-    }
+    /* [DEVICE-LOST 2026-07-20] VectorUI procedural shaders + constant buffers,
+     * extracted so a device-lost recovery can rebuild them on a generation bump
+     * (see frontend_ensure_vui_shaders). Also called per-frame from
+     * td5_frontend_render_ui_rects so a TDR while the menu is up self-heals. */
+    frontend_ensure_vui_shaders();
 
-    /* ---- Procedural rounded-rect button shader + constant buffer (VectorUI) ----
-     * On failure both stay NULL and the button loop falls back to the bitmap
-     * 9-slice path (VectorUI-off only; ButtonBits.png retired). */
+    /* SDF texture atlases below are page-registry textures — device-lost recovery
+     * rebuilds them from sys_buffer, so they only load once here. */
     if (g_td5.ini.vector_ui && g_backend.device) {
-        if (!s_ps_roundrect) {
-            HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device,
-                g_ps_roundrect, sizeof(g_ps_roundrect), NULL, &s_ps_roundrect);
-            if (FAILED(hr)) {
-                s_ps_roundrect = NULL;
-                TD5_LOG_W(LOG_TAG, "roundrect shader create failed hr=0x%08lX", (unsigned long)hr);
-            }
-        }
-        if (s_ps_roundrect && !s_rr_cb) {
-            D3D11_BUFFER_DESC bd;
-            ZeroMemory(&bd, sizeof(bd));
-            bd.ByteWidth = sizeof(FE_RoundRectParams);   /* 96, 16-aligned */
-            bd.Usage = D3D11_USAGE_DEFAULT;
-            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-            HRESULT hr = ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &s_rr_cb);
-            if (FAILED(hr)) {
-                s_rr_cb = NULL;
-                TD5_LOG_W(LOG_TAG, "roundrect cbuffer create failed hr=0x%08lX", (unsigned long)hr);
-            } else {
-                TD5_LOG_I(LOG_TAG, "Procedural roundrect button shader ready (VectorUI)");
-            }
-        }
-        if (!s_ps_arrow) {
-            HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device,
-                g_ps_arrow, sizeof(g_ps_arrow), NULL, &s_ps_arrow);
-            if (FAILED(hr)) {
-                s_ps_arrow = NULL;
-                TD5_LOG_W(LOG_TAG, "arrow shader create failed hr=0x%08lX", (unsigned long)hr);
-            }
-        }
-        if (!s_ps_cursor) {
-            HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device,
-                g_ps_cursor, sizeof(g_ps_cursor), NULL, &s_ps_cursor);
-            if (FAILED(hr)) {
-                s_ps_cursor = NULL;
-                TD5_LOG_W(LOG_TAG, "cursor shader create failed hr=0x%08lX", (unsigned long)hr);
-            }
-        }
         if (s_ps_cursor && s_cursor_msdf_page < 0) {
             void *pixels = NULL;
             int mw = 0, mh = 0;
@@ -311,33 +382,6 @@ int td5_frontend_init_resources(void) {
                 free(pixels);
             } else {
                 TD5_LOG_W(LOG_TAG, "snkmouse_msdf.png not found -- cursor falls back to bitmap");
-            }
-        }
-
-        /* ---- Procedural analog gauge dial shader + constant buffer (VectorUI) ----
-         * Drives the in-race HUD speedometer dial + the added RPM tachometer via
-         * td5_vui_gauge. On failure both stay NULL and the HUD falls back to the
-         * baked GDI dial texture. */
-        if (!s_ps_gauge) {
-            HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device,
-                g_ps_gauge, sizeof(g_ps_gauge), NULL, &s_ps_gauge);
-            if (FAILED(hr)) {
-                s_ps_gauge = NULL;
-                TD5_LOG_W(LOG_TAG, "gauge shader create failed hr=0x%08lX", (unsigned long)hr);
-            }
-        }
-        if (s_ps_gauge && !s_gauge_cb) {
-            D3D11_BUFFER_DESC bd;
-            ZeroMemory(&bd, sizeof(bd));
-            bd.ByteWidth = sizeof(FE_GaugeParams);   /* 144, 16-aligned */
-            bd.Usage = D3D11_USAGE_DEFAULT;
-            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-            HRESULT hr = ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &s_gauge_cb);
-            if (FAILED(hr)) {
-                s_gauge_cb = NULL;
-                TD5_LOG_W(LOG_TAG, "gauge cbuffer create failed hr=0x%08lX", (unsigned long)hr);
-            } else {
-                TD5_LOG_I(LOG_TAG, "Procedural gauge dial shader ready (VectorUI)");
             }
         }
 

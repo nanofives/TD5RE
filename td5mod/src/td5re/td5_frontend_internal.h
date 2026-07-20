@@ -711,6 +711,9 @@ extern ID3D11PixelShader *s_ps_cursor;
 extern ID3D11PixelShader *s_ps_gauge;
 extern ID3D11PixelShader *s_ps_msdf;
 extern ID3D11PixelShader *s_ps_roundrect;
+/* [DEVICE-LOST 2026-07-20] (Re)create the VectorUI procedural shaders + constant
+ * buffers when the D3D device generation changes (TDR recovery). Idempotent. */
+void frontend_ensure_vui_shaders(void);
 extern char s_music_test_now_band[64];
 extern char s_music_test_now_title[64];
 extern char s_music_test_track_label[64];

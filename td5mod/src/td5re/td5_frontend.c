@@ -9402,6 +9402,13 @@ void td5_frontend_render_ui_rects(void) {
     td5_plat_get_window_size(&screen_w, &screen_h);
     if (screen_w <= 0 || screen_h <= 0) return;
 
+    /* [DEVICE-LOST 2026-07-20] Rebuild VectorUI procedural shaders if a device
+     * reset (TDR recovery) bumped the device generation since they were built —
+     * they are not part of the wrapper's recreated resource set, so left stale
+     * they'd bind as no-ops and arrows/buttons would draw as blank white quads.
+     * Cheap (one generation compare) once the shaders exist. */
+    frontend_ensure_vui_shaders();
+
     float sx = (float)screen_w / 640.0f;
     float sy = (float)screen_h / 480.0f;
     float sw = (float)screen_w;
