@@ -5946,11 +5946,21 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
                  * local split-screen MP). */
                 int local_mp = (g_td5.num_human_players > 1);        /* local split-screen MP */
                 int mp_any   = (g_td5.network_active || local_mp);   /* any MP (net or local) */
+                /* [END RACE NOW DEV-ALWAYS 2026-07-20] DEV builds expose END RACE
+                 * NOW in EVERY race (single-player too) so a race can be cut short
+                 * to reach replays + end-of-race routines quickly. RELEASE keeps it
+                 * gated to local split-screen MP. Must match the identical gate in
+                 * td5_hud_init_pause_menu. */
+#ifdef TD5RE_RELEASE
+                int endrace_present = local_mp;
+#else
+                int endrace_present = 1;
+#endif
                 int row_continue = 3;
                 int row_restart  = 4;
-                int row_endrace  = local_mp ? 5 : -1;                 /* -1 = row not present */
-                int row_lobby    = mp_any ? (5 + (local_mp ? 1 : 0)) : -1;
-                int row_quit     = 5 + (local_mp ? 1 : 0) + (mp_any ? 1 : 0);
+                int row_endrace  = endrace_present ? 5 : -1;          /* -1 = row not present */
+                int row_lobby    = mp_any ? (5 + (endrace_present ? 1 : 0)) : -1;
+                int row_quit     = 5 + (endrace_present ? 1 : 0) + (mp_any ? 1 : 0);
                 int row_exit     = row_quit + 1;
                 int pause_rows   = row_exit + 1;
                 /* Freeze cursor movement while a confirmation prompt (END RACE NOW

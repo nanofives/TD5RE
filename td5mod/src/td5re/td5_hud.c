@@ -7483,6 +7483,15 @@ void td5_hud_init_pause_menu(int page_index)
      * (see the build loop below), so the panel shrinks accordingly. */
     int local_mp = (g_td5.num_human_players > 1);
     int pause_mp = (g_td5.network_active || local_mp);
+    /* [END RACE NOW DEV-ALWAYS 2026-07-20] DEV builds show END RACE NOW in every
+     * race (single-player included) to cut a race short for replay/end-of-race
+     * testing; RELEASE keeps it local-split-screen-MP only. Must match the
+     * identical gate in the pause-menu row math in td5_game.c. */
+#ifdef TD5RE_RELEASE
+    int endrace_row = local_mp;
+#else
+    int endrace_row = 1;
+#endif
     {
         float bu = (float)blackbox_e->atlas_x + 0.5f;
         float bv = (float)blackbox_e->atlas_y + 0.5f;
@@ -7494,7 +7503,7 @@ void td5_hud_init_pause_menu(int page_index)
          * fixed 100/116 for the two cases that existed before this gating
          * (single-player=84 now vs 100 before, since END RACE NOW no longer
          * shows there; MP unchanged at 116). */
-        float panel_bottom = 84.0f + 16.0f * ((local_mp ? 1 : 0) + (pause_mp ? 1 : 0));
+        float panel_bottom = 84.0f + 16.0f * ((endrace_row ? 1 : 0) + (pause_mp ? 1 : 0));
         PAUSE_ADD(-s_pause_half_width, -56.0f,
                    s_pause_half_width,  panel_bottom,
                    bu, bv, bu, bv,
@@ -7589,7 +7598,7 @@ void td5_hud_init_pause_menu(int page_index)
          * makes sense when there's more than one local racer sharing this pause
          * menu; single-player and plain network-only (1 local human) races drop
          * the row, same skip-without-advancing-y pattern as BACK TO LOBBY. */
-        if (!local_mp && strcmp(str, "END RACE NOW") == 0) {
+        if (!endrace_row && strcmp(str, "END RACE NOW") == 0) {
             string_offset += 8;
             continue;
         }
