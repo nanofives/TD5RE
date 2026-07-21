@@ -816,6 +816,7 @@ extern int  s_mp_btn_layout;
 extern int  s_mp_btn_missing[2];
 extern int  s_mp_btn_nickname;
 extern int  s_mp_btn_players;
+extern int  s_mp_btn_netmode;/* [NET OPTIONS 2026-07-21] NET MODE (LAN/DIRECT) row */
 extern int  s_mp_btn_port;   /* [NET OPTIONS 2026-07-21] GAME PORT row */
 extern int  s_mp_btn_upnp;   /* [NET OPTIONS 2026-07-21] UPNP toggle row */
 /* [NET OPTIONS 2026-07-21] GAME PORT Enter-to-edit numeric field (impl in

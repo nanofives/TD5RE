@@ -601,6 +601,12 @@ void Screen_ConnectionBrowser(void) {
         frontend_create_button("LAN GAME",  120, 193, 496, 0x20);
         frontend_create_button("DIRECT IP", 120, 257, 496, 0x20);
         frontend_create_button(SNK_BackButTxt, 120, 377, 112, 0x20);
+        /* [NET OPTIONS 2026-07-21] Default the highlight + runtime net mode to the
+         * saved NET MODE preference ([Network]Mode; LAN=row 0, DIRECT IP=row 1),
+         * set on the Multiplayer Options NET MODE row. Choosing a row below
+         * updates the preference (remembered for next time). */
+        td5_net_set_mode(g_td5.ini.net_mode ? TD5_NET_MODE_DIRECT : TD5_NET_MODE_LAN);
+        s_selected_button = g_td5.ini.net_mode ? 1 : 0;
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -630,10 +636,15 @@ void Screen_ConnectionBrowser(void) {
         if (s_input_ready) {
             if (s_button_index == 0) {            /* LAN GAME */
                 td5_net_set_mode(TD5_NET_MODE_LAN);
+                /* [NET OPTIONS 2026-07-21] remember the choice as the preference. */
+                g_td5.ini.net_mode = 0;
+                td5_ini_write_str("Network", "Mode", "0");
                 s_return_screen = TD5_SCREEN_LAN_MENU;
                 s_inner_state = 8;
             } else if (s_button_index == 1) {     /* DIRECT IP */
                 td5_net_set_mode(TD5_NET_MODE_DIRECT);
+                g_td5.ini.net_mode = 1;
+                td5_ini_write_str("Network", "Mode", "1");
                 s_return_screen = TD5_SCREEN_DIRECT_CONNECT;
                 s_inner_state = 8;
             } else if (s_button_index == 2) {     /* BACK */

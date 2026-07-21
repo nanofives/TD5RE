@@ -259,6 +259,7 @@ int  s_mp_btn_players   = -1;
 int  s_mp_btn_layout    = -1;
 int  s_mp_btn_missing[2] = { -1, -1 };
 int  s_mp_btn_nickname  = -1;    /* S10: edit net-play nickname (below split rows) */
+int  s_mp_btn_netmode   = -1;    /* [NET OPTIONS 2026-07-21] NET MODE (LAN/DIRECT) toggle */
 int  s_mp_btn_port      = -1;    /* [NET OPTIONS 2026-07-21] GAME PORT (enter-to-edit) */
 int  s_mp_btn_upnp      = -1;    /* [NET OPTIONS 2026-07-21] UPNP toggle */
 int  s_mp_missing_count = 0;
@@ -6672,6 +6673,11 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
                                      nick, 0xFFFFFFFF);
     }
 
+    /* [NET OPTIONS 2026-07-21] NET MODE = LAN (auto-discovery) / DIRECT IP. */
+    if (s_mp_btn_netmode >= 0 && s_buttons[s_mp_btn_netmode].active) {
+        frontend_draw_value_centered(sx, sy, s_buttons[s_mp_btn_netmode].y + 6,
+                                     g_td5.ini.net_mode ? "DIRECT IP" : "LAN", 0xFFFFFFFF);
+    }
     /* [NET OPTIONS 2026-07-21] GAME PORT = default port (the live edit buffer while
      * the Enter-to-edit numeric field is open), UPNP = ON / OFF. */
     if (s_mp_btn_port >= 0 && s_buttons[s_mp_btn_port].active) {
@@ -9683,8 +9689,9 @@ void td5_frontend_render_ui_rects(void) {
                 fe_draw_option_arrows(s_mp_btn_layout, sx, sy);
             for (int i = 0; i < s_mp_missing_count && i < 2; i++)
                 if (s_mp_btn_missing[i] >= 0) fe_draw_option_arrows(s_mp_btn_missing[i], sx, sy);
-            /* [NET OPTIONS 2026-07-21] UPNP is a ◄► toggle; GAME PORT + NICKNAME
-             * are Enter-to-edit (no arrows). */
+            /* [NET OPTIONS 2026-07-21] NET MODE + UPNP are ◄► toggles; GAME PORT +
+             * NICKNAME are Enter-to-edit (no arrows). */
+            if (s_mp_btn_netmode >= 0) fe_draw_option_arrows(s_mp_btn_netmode, sx, sy);
             if (s_mp_btn_upnp >= 0) fe_draw_option_arrows(s_mp_btn_upnp, sx, sy);
             break;
         case TD5_SCREEN_CAR_SELECTION:

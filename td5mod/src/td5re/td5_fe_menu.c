@@ -1939,7 +1939,7 @@ static void mp_build_buttons(void)
     s_mp_btn_players = s_mp_btn_layout = s_mp_btn_ok = -1;
     s_mp_btn_missing[0] = s_mp_btn_missing[1] = -1;
     s_mp_btn_nickname = -1;
-    s_mp_btn_port = s_mp_btn_upnp = -1;
+    s_mp_btn_netmode = s_mp_btn_port = s_mp_btn_upnp = -1;
 
     /* Rows are NON-selector buttons: the button renderer bakes their label (the
      * ◄► arrows are drawn by the per-screen dispatch, the value by the overlay).
@@ -1973,15 +1973,21 @@ static void mp_build_buttons(void)
     s_mp_btn_nickname = frontend_create_button("NICKNAME", 120, y, 0x100, 0x20);
     y += 44;
     /* [NET OPTIONS 2026-07-21] Net-play defaults surfaced here (were reachable
-     * only on the Create-Session host screen): GAME PORT (Enter-to-edit numeric)
-     * and UPNP port-forward toggle. Back g_td5.ini.net_game_port / net_enable_upnp,
-     * which seed the Create-Session host rows (td5_fe_net.c). */
+     * only on the Create-Session host screen): NET MODE (LAN auto-discovery vs
+     * DIRECT IP), GAME PORT (Enter-to-edit numeric) and UPNP port-forward toggle.
+     * Back g_td5.ini.net_mode / net_game_port / net_enable_upnp — the preference
+     * the Connection Browser defaults to + the Create-Session host rows seed. */
+    s_mp_btn_netmode = frontend_create_button("NET MODE", 120, y, 0x100, 0x20);
+    y += 44;
     s_mp_btn_port = frontend_create_button("GAME PORT", 120, y, 0x100, 0x20);
     y += 44;
     s_mp_btn_upnp = frontend_create_button("UPNP", 120, y, 0x100, 0x20);
     y += 44;
 
-    s_mp_btn_ok = frontend_create_button(SNK_OkButTxt, 200, 377, 0x60, 0x20);
+    /* OK sits at the faithful 377, but drops below the rows when the full
+     * split-screen config (SPLIT LAYOUT + up to 2 DISPLAY cells) pushes the net
+     * rows down past it. */
+    s_mp_btn_ok = frontend_create_button(SNK_OkButTxt, 200, (y > 345) ? y : 377, 0x60, 0x20);
 
     TD5_LOG_I(LOG_TAG,
               "MultiplayerOptions buttons: n=%d optcount=%d missing=%d grid=%dx%d",
@@ -2052,6 +2058,16 @@ void Screen_TwoPlayerOptions(void) {
                 while (v < 0) v += MP_MISSING_CONTENT_COUNT;
                 v %= MP_MISSING_CONTENT_COUNT;
                 s_mp_missing_content[k] = v;
+                frontend_play_sfx(2);
+                s_inner_state = 4;
+            } else if (active_button == s_mp_btn_netmode && delta != 0) {
+                /* [NET OPTIONS 2026-07-21] NET MODE: LAN auto-discovery (0) vs
+                 * DIRECT IP (1). Persist [Network]Mode + apply to the runtime net
+                 * mode now; the Connection Browser defaults to / remembers this. */
+                g_td5.ini.net_mode = g_td5.ini.net_mode ? 0 : 1;
+                td5_ini_write_str("Network", "Mode", g_td5.ini.net_mode ? "1" : "0");
+                td5_net_set_mode(g_td5.ini.net_mode ? TD5_NET_MODE_DIRECT
+                                                    : TD5_NET_MODE_LAN);
                 frontend_play_sfx(2);
                 s_inner_state = 4;
             } else if (active_button == s_mp_btn_upnp && delta != 0) {
