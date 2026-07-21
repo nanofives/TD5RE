@@ -3827,6 +3827,42 @@ void td5_camera_set_preset(int pi)
 {
     s_active_preset = pi;
     memset(s_debug_camera_frame, 0, sizeof(s_debug_camera_frame));
+
+    /* [RACE-START CAMERA RESET 2026-07-21] Re-anchor EVERY viewport's smoothing/
+     * pose filters + clear the recovery-glide state at race init, UNCONDITIONALLY.
+     * Previously the per-pane smoothing re-anchor happened only as a side effect
+     * of LoadCameraPresetForView below, which runs only for panes whose actor
+     * lookup succeeds (v < viewport_count && g_actor_table_base && actor != NULL).
+     * A pane that missed kept the PREVIOUS race's prev-pose, so the new race's
+     * first solve glided prev->cur across a teleport = a start-of-race camera
+     * wobble that recurred per race and per pane in split-screen. The dedicated
+     * all-viewport fixer td5_camera_snap_smoothing() (clears s_camSmoothInit[] +
+     * s_cam_pose_init[]) was only wired to pause-resume, never race start; the
+     * s_recov_* glide arrays were never reset per race at all. Render-only (the
+     * camera never feeds the sim), so this cannot affect physics / AI / replay /
+     * golden traces. TD5RE_CAM_RACE_SNAP=0 reverts to the old actor-conditional
+     * behavior for A/B. */
+    {
+        static int s_race_snap = -1;
+        if (s_race_snap < 0) s_race_snap = td5_env_flag_on("TD5RE_CAM_RACE_SNAP"); /* default ON */
+        if (s_race_snap) {
+            td5_camera_snap_smoothing();   /* all viewports: s_camSmoothInit[]=0, s_cam_pose_init[]=0 */
+            for (int rv = 0; rv < TD5_MAX_VIEWPORTS; rv++) {
+                s_recov_glide_on[rv]   = 0;
+                s_recov_last_valid[rv] = 0;
+                /* Wall-avoid clip ratios are per-frame damped statics that were
+                 * never reset per race; a wall-pinned finish leaks a low ratio
+                 * into the next race's opening (eye starts pulled in, then pumps
+                 * back out) = another start-of-race wobble. 1.0 = no clip. */
+                g_camWallClipRatio[rv]      = 1.0f;
+                g_camWallClipRatioApply[rv] = 1.0f;
+            }
+            TD5_LOG_I(LOG_TAG, "camera race-start snap: re-anchored smoothing + "
+                      "cleared recovery glide + wall-clip for %d viewports",
+                      TD5_MAX_VIEWPORTS);
+        }
+    }
+
     /* [PORT: N-way] reset preset / fly-in state for EVERY viewport (was 0/1). */
     for (int rv = 0; rv < TD5_MAX_VIEWPORTS; rv++) {
         s_flyin_preset_reloaded[rv] = 0;
