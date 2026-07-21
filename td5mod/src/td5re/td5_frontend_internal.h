@@ -782,27 +782,9 @@ extern int             s_game_option_tutorial;        /* [TUTORIAL 2026-06-29] c
 extern int             s_race_difficulty;   /* per-race AI difficulty row on Track Selection (0..2) */
 extern int             s_trksel_dyn_btn;    /* [ARCADE] ARCADE/SIM row index on Track Selection (-1=none) */
 
-/* --- Paginated Game Options model (impl in td5_frontend.c, driven by the
- * Screen_GameOptions FSM in td5_fe_menu.c). Same pagination scheme as the
- * PENDING TO TEST checklist: rows-per-page + < PREV / NEXT > + a page footer.
- * [TUTORIAL 2026-06-29] ------------------------------------------------------*/
-int  td5_gameopts_count(void);                 /* total selectable option rows */
-int  td5_gameopts_page(void);                  /* current 0-based page */
-int  td5_gameopts_pages(void);                 /* page count */
-int  td5_gameopts_row_count(void);             /* visible option rows on this page */
-int  td5_gameopts_row_option(int row);         /* option index for a page row, or -1 */
-int  td5_gameopts_ok_btn(void);                /* button index of OK on this page */
-int  td5_gameopts_prev_btn(void);              /* < PREV button index, or -1 */
-int  td5_gameopts_next_btn(void);              /* NEXT > button index, or -1 */
-void td5_gameopts_value(int option, char *out, size_t out_sz); /* value string */
-void td5_gameopts_cycle(int option, int delta);/* LEFT/RIGHT cycle an option */
-void td5_gameopts_commit(void);                /* [2026-07-10] s_game_option_* -> g_td5.ini + persist; called from OK AND Back exit */
-void td5_gameopts_build_page(void);            /* (re)create buttons for current page */
-void td5_gameopts_reset_page(void);            /* jump back to page 0 (on screen entry) */
-int  td5_gameopts_page_prev(void);             /* page--; rebuild; 1 if it moved */
-int  td5_gameopts_page_next(void);             /* page++; rebuild; 1 if it moved */
-/* [PLAYER NAME 2026-07-02] The PLAYER NAME row (Enter-to-edit, no ◄►). */
-int  td5_gameopts_name_option(void);           /* option index of the name row */
+/* [RACE OPTIONS CONSOLIDATION 2026-07-21] The paginated GAME OPTIONS model was
+ * retired — RACE OPTIONS (td5_raceopts_*, above) is the single game-behaviour
+ * surface. Only the PLAYER NAME editor survives, on the OPTIONS hub row. */
 void td5_playername_edit_begin(void);          /* open the PLAYER NAME text-input editor */
 int  td5_playername_edit_tick(void);           /* 1 when editor closed (ok/esc) */
 extern int             s_sound_option_music_volume;
@@ -869,8 +851,10 @@ void Screen_ControlOptions(void);
 void Screen_ControllerBinding(void);
 void Screen_DisplayOptions(void);
 void Screen_ExtrasGallery(void);
-void Screen_GameOptions(void);
-/* Screen_LanguageSelect / Screen_LegalCopyright RETIRED 2026-07-03 —
+/* Screen_GameOptions RETIRED 2026-07-21 — GAME OPTIONS consolidated into the
+ * dynamic RACE OPTIONS screen; table slot [13] is NULL, set_screen redirects to
+ * the OPTIONS hub.
+ * Screen_LanguageSelect / Screen_LegalCopyright RETIRED 2026-07-03 —
  * table slots [3]/[4] are NULL; set_screen redirects them to MAIN_MENU. */
 void Screen_LocalizationInit(void);
 void Screen_MainMenu(void);

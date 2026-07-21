@@ -1,0 +1,18 @@
+# TD5RE input-script: open the RACE OPTIONS screen from Track Selection.
+# [CONSOLIDATION 2026-07-21] RACE OPTIONS (screen 44) replaced the retired GAME
+# OPTIONS (13): it is the single game-behaviour surface, reached from each mode's
+# track-select via the RACE OPTIONS button, or inserted as a pre-launch step for
+# modes with no track-select (SP/MP drag, faithful SP cup).
+# Run with:  td5re.exe --SkipIntro=1 --StartScreen=21 --InputScript=td5mod/src/td5re/inputscripts/navigate_race_options.txt
+#   Reliable alternative: TD5RE_RACEOPTS_AUTOOPEN=1 auto-opens it once on the
+#   track selector (dev builds), independent of the row layout below.
+
+sync menu
+180  log nav: move focus down to the RACE OPTIONS button
+# Track-select column (hidden rows self-skip): 0 Track, 1 Direction, 2 Laps,
+# 3 RACE OPTIONS, 4 OK, 5 Back. DOWN walks the visible rows to RACE OPTIONS.
+180  key down press
+210  key down press
+240  key down press
+300  key enter press
+480  log arrived at RACE OPTIONS - leaving window open for inspection

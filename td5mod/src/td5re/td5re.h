@@ -605,7 +605,9 @@ typedef struct TD5_GlobalState {
          *                jumps redirect to MainMenu)
          *   5=MainMenu          6=RaceTypeMenu     7=QuickRace
          *   8=ConnectionBrowser 9=SessionPicker   10=CreateSession  11=NetworkLobby
-         *  12=OptionsHub       13=GameOptions     14=ControlOptions 15=SoundOptions
+         *  12=OptionsHub       13=RETIRED (GameOptions removed 2026-07-21 -> RACE
+         *                       OPTIONS; jumps redirect to OptionsHub)
+         *                      14=ControlOptions 15=SoundOptions
          *  16=DisplayOptions   17=TwoPlayerOpts   18=ControllerBinding 19=MusicTest
          *  20=CarSelection     21=TrackSelection  22=ExtrasGallery  23=HighScore
          *  24=RaceResults      25=NameEntry       26=CupFailed      27=CupWon

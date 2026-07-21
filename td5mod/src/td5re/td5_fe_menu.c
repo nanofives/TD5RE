@@ -2,9 +2,9 @@
  * td5_fe_menu.c -- frontend screens: boot flow + main menu + options.
  *
  * Split out of td5_frontend.c (2026-06). Handlers: LocalizationInit[0],
- * AttractModeDemo[2] (UiGuide[1] is in td5_fe_devscreens.c; 3/4 retired),
- * MainMenu[5], RaceTypeCategory[6], OptionsHub[12],
- * GameOptions[13], ControlOptions[14], SoundOptions[15], DisplayOptions[16],
+ * AttractModeDemo[2] (UiGuide[1] is in td5_fe_devscreens.c; 3/4 + 13 retired),
+ * MainMenu[5], RaceTypeCategory[6], OptionsHub[12] (GameOptions[13] retired
+ * 2026-07-21 -> RACE OPTIONS), ControlOptions[14], SoundOptions[15], DisplayOptions[16],
  * TwoPlayerOptions[17], ControllerBinding[18], MusicTestExtras[19],
  * ExtrasGallery[22], StartupInit[28]. Shared frontend state comes from
  * td5_frontend_internal.h; original binary addresses are noted per screen.
@@ -1442,18 +1442,16 @@ void Screen_OptionsHub(void) {
         s_anim_complete = 0;
 
         /* [FIXED 2026-06-01, runtime @0x499c78] rows x=120 y=97 step40 (304-wide); OK (216,377) 96-wide.
-         * [CONSOLIDATION 2026-07-21] PLAYER NAME promoted to its own top row
-         * (Enter-to-edit inline; the current name shows as the row value at x=350
-         * via frontend_render_options_hub_overlay). GAME OPTIONS is now redundant
-         * (every game-behaviour option lives on RACE OPTIONS) and sits at a
-         * temporary bottom slot until it is deleted in the final slice. */
+         * [CONSOLIDATION 2026-07-21] PLAYER NAME is the top row (Enter-to-edit
+         * inline; the current name shows as the row value at x=350 via
+         * frontend_render_options_hub_overlay). GAME OPTIONS was removed — every
+         * game-behaviour option now lives on the dynamic RACE OPTIONS screen. */
         frontend_create_button("PLAYER NAME",              120,  97, 0x130, 0x20); /* 0 */
         frontend_create_button(SNK_ControlOptionsButTxt,   120, 137, 0x130, 0x20); /* 1 */
         frontend_create_button(SNK_SoundOptionsButTxt,     120, 177, 0x130, 0x20); /* 2 */
         frontend_create_button(SNK_GraphicsOptionsButTxt,  120, 217, 0x130, 0x20); /* 3 */
         frontend_create_button(SNK_TwoPlayerOptionsButTxt, 120, 257, 0x130, 0x20); /* 4 */
-        frontend_create_button(SNK_GameOptionsButTxt,      120, 297, 0x130, 0x20); /* 5 (temporary) */
-        frontend_create_button(SNK_OkButTxt,               216, 377, 0x60,  0x20); /* 6 */
+        frontend_create_button(SNK_OkButTxt,               216, 377, 0x60,  0x20); /* 5 */
 
         frontend_begin_timed_animation();
         s_inner_state = 1;
@@ -1490,8 +1488,7 @@ void Screen_OptionsHub(void) {
             case 2: s_return_screen = TD5_SCREEN_SOUND_OPTIONS;      s_inner_state = 7; break;
             case 3: s_return_screen = TD5_SCREEN_DISPLAY_OPTIONS;    s_inner_state = 7; break;
             case 4: s_return_screen = TD5_SCREEN_TWO_PLAYER_OPTIONS; s_inner_state = 7; break;
-            case 5: s_return_screen = TD5_SCREEN_GAME_OPTIONS;       s_inner_state = 7; break; /* temporary */
-            case 6: /* OK -> return to main menu.
+            case 5: /* OK -> return to main menu.
                      * PARITY NOTE (audit 2026-05-30): the original 0x0041D890 OK case
                      * commits the option shadows to live globals here (camera =
                      * collisions^1 @0x41dc8e, dynamics @0x41dc82, traffic/cops, and
@@ -1536,124 +1533,11 @@ void Screen_OptionsHub(void) {
     }
 }
 
-void Screen_GameOptions(void) {
-    switch (s_inner_state) {
-    case 0: /* Init: create option rows + OK */
-        frontend_init_return_screen(TD5_SCREEN_GAME_OPTIONS);
-        TD5_LOG_D(LOG_TAG, "GameOptions: init");
-        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
-        /* [TUTORIAL 2026-06-29] The Game Options list now PAGINATES (same scheme
-         * as the PENDING TO TEST checklist) because it outgrew a single column:
-         * a PLAYER NAME (Enter-to-edit inline), Checkpoint Timers, Traffic, Cops,
-         * Difficulty, 3D Collisions, Power-ups, Car Toughness, Deformation, DAMAGE
-         * (single toggle: car damage + HUD bar), Lane Assist, and TUTORIAL on/off.
-         * The option list, per-page
-         * layout, value/arrow rendering and cycle logic live in the model in
-         * td5_frontend.c (td5_gameopts_*); this screen is just the FSM glue.
-         * Start on page 1 on each entry. */
-        td5_gameopts_reset_page();
-        td5_gameopts_build_page();
-        s_anim_tick = 0;
-        s_inner_state = 1;
-        break;
-
-    case 1: case 2:
-        frontend_present_buffer();
-        s_inner_state++;
-        break;
-
-    case 3: /* Slide-in (~1200ms) */
-        if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
-            s_anim_complete = 1;
-            s_inner_state = 4;
-        }
-        break;
-
-    case 4: /* Draw current values */
-    case 5:
-        /* Render current option values on the panel */
-        s_inner_state = 6;
-        break;
-
-    case 6: /* Interactive: cycle the focused option / OK / page navigation */
-        if (s_input_ready) {
-            int delta = frontend_option_delta();
-            int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
-            int row_count = td5_gameopts_row_count();
-            /* [TUTORIAL 2026-06-29] Paginated model: the current page's option
-             * rows are button indices 0..row_count-1 (all ◄► selectors); OK /
-             * < PREV / NEXT > follow. LEFT/RIGHT on an option row cycles that
-             * option's value via the shared model; the per-option cycle logic
-             * (on/off, 0..2 levels, 5-state traffic) lives in td5_gameopts_cycle. */
-            if (delta != 0 && active_button >= 0 && active_button < row_count) {
-                int opt = td5_gameopts_row_option(active_button);
-                /* [PLAYER NAME 2026-07-02] The name row is Enter-to-edit — no
-                 * L/R cycle and no stray beep (its arrows are skipped too). */
-                if (opt >= 0 && opt != td5_gameopts_name_option()) {
-                    /* Nav beep on any selector-row change, matching the original's
-                     * central arrow handler (DXSound::Play(2) @ 0x0042687c). */
-                    frontend_play_sfx(2);
-                    td5_gameopts_cycle(opt, delta);
-                    s_inner_state = 4;   /* redraw values */
-                }
-            }
-            /* A/Enter activations: OK commits + exits; PREV/NEXT flip the page.
-             * (prev/next btn ids are -1 on a single page, so they never match a
-             * real s_button_index >= 0.) */
-            if (s_button_index >= 0) {
-                if (s_button_index < row_count &&
-                    td5_gameopts_row_option(s_button_index) ==
-                        td5_gameopts_name_option()) {
-                    /* [PLAYER NAME 2026-07-02] Enter on the PLAYER NAME row
-                     * opens the text-input editor (widget drawn in the render
-                     * path; state 10 ticks it until confirm/cancel). */
-                    td5_playername_edit_begin();
-                    s_inner_state = 10;
-                } else if (s_button_index == td5_gameopts_ok_btn()) {
-                    /* Sync the committed game options into g_td5.ini (the global the
-                     * boot-override at frontend init reads) and write them back to
-                     * td5re.ini so the selection survives a relaunch. The commit is
-                     * shared with the Back/Escape exit path (frontend_central_return_back)
-                     * via td5_gameopts_commit() so leaving EITHER way keeps the change
-                     * — see [GAMEOPTS COMMIT 2026-07-10] in td5_frontend.c. */
-                    td5_gameopts_commit();
-                    s_return_screen = TD5_SCREEN_OPTIONS_HUB;
-                    s_inner_state = 7;
-                } else if (s_button_index == td5_gameopts_prev_btn()) {
-                    if (td5_gameopts_page_prev()) frontend_play_sfx(2);
-                    s_inner_state = 4;
-                } else if (s_button_index == td5_gameopts_next_btn()) {
-                    if (td5_gameopts_page_next()) frontend_play_sfx(2);
-                    s_inner_state = 4;
-                }
-            }
-            /* Arrow / page changes reset to state 4 for redraw */
-        }
-        break;
-
-    case 7: /* Prep slide-out */
-        frontend_begin_timed_animation();
-        s_inner_state = 8;
-        break;
-
-    case 8: /* Slide-out (~500ms) */
-        if (frontend_update_timed_animation(16, 267) >= 1.0f) {
-            s_inner_state = 9;
-        }
-        break;
-
-    case 9:
-        td5_frontend_set_screen(TD5_SCREEN_OPTIONS_HUB);
-        break;
-
-    case 10: /* [PLAYER NAME 2026-07-02] Name editor active. The tick handles
-              * keystrokes, ESC-cancel and Enter-commit (commit also persists
-              * the INI key); returns 1 once the editor closed. */
-        if (td5_playername_edit_tick())
-            s_inner_state = 4;   /* redraw values (name may have changed) */
-        break;
-    }
-}
+/* [RACE OPTIONS CONSOLIDATION 2026-07-21] Screen_GameOptions was removed — the
+ * dynamic RACE OPTIONS screen (Screen_RaceOptions, td5_fe_race.c) is the single
+ * game-behaviour surface for every mode, and PLAYER NAME moved to the OPTIONS hub
+ * row. Screen table slot [13] is NULL; set_screen redirects stale jumps to the
+ * OPTIONS hub. */
 
 /* Recompute the player range from the live device count ("hot-swap") and re-seed
  * each player's source from the persisted device index, dropping any index that

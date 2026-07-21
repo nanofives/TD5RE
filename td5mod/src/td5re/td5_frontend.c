@@ -106,7 +106,9 @@ static ScreenFn s_screen_table[TD5_SCREEN_COUNT] = {
     /* [10] */ Screen_CreateSession,
     /* [11] */ Screen_NetworkLobby,
     /* [12] */ Screen_OptionsHub,
-    /* [13] */ Screen_GameOptions,
+    /* [13] */ NULL,   /* RETIRED 2026-07-21 — GAME OPTIONS consolidated into the
+                        * dynamic RACE OPTIONS screen (44); set_screen redirects
+                        * any stale jump to the OPTIONS hub. */
     /* [14] */ Screen_ControlOptions,
     /* [15] */ Screen_SoundOptions,
     /* [16] */ Screen_DisplayOptions,
@@ -4017,13 +4019,8 @@ void frontend_back_confirm_tick(void) {
 /* Central-block back action (the existing escape-handler "return to the parent
  * screen" branch, factored so it can run immediately OR deferred via the guard). */
 static void frontend_central_return_back(void) {
-    /* [GAMEOPTS COMMIT 2026-07-10] Leaving Game Options via Back/Escape must save
-     * the toggled option values too — not just the OK button. Without this a
-     * toggle (e.g. TUTORIAL off) was silently discarded on Back and the setting
-     * never took effect. Commit BEFORE navigating away (s_current_screen is still
-     * GAME_OPTIONS here). Idempotent with the OK path's own commit. */
-    if (s_current_screen == TD5_SCREEN_GAME_OPTIONS)
-        td5_gameopts_commit();
+    /* [RACE OPTIONS CONSOLIDATION 2026-07-21] The GAME OPTIONS Back/Escape commit
+     * hook is gone with the screen; RACE OPTIONS persists on its own exit paths. */
     if (s_return_screen >= 0 &&
         s_return_screen < TD5_SCREEN_COUNT &&
         s_return_screen != s_current_screen) {
@@ -4763,6 +4760,14 @@ void td5_frontend_set_screen(TD5_ScreenIndex index) {
         TD5_LOG_W(LOG_TAG, "set_screen(%d): retired screen — redirecting to "
                   "MAIN_MENU", (int)index);
         index = TD5_SCREEN_MAIN_MENU;
+    }
+    /* [RACE OPTIONS CONSOLIDATION 2026-07-21] GAME OPTIONS (13) retired — its
+     * options moved to the dynamic RACE OPTIONS screen. Redirect stale jumps
+     * (StartScreen, old configs, inputscripts) to the OPTIONS hub. */
+    if (index == TD5_SCREEN_GAME_OPTIONS) {
+        TD5_LOG_W(LOG_TAG, "set_screen(%d): GAME OPTIONS retired — redirecting to "
+                  "OPTIONS_HUB", (int)index);
+        index = TD5_SCREEN_OPTIONS_HUB;
     }
 
     s_previous_screen = previous;
@@ -6148,229 +6153,11 @@ void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
     }
 }
 
-/* ===== Paginated Game Options model (PORT ENHANCEMENT 2026-06-29) ===========
- * The Game Options screen outgrew a single comfortable column (now 11 selector
- * rows + OK). It is paginated with the SAME mechanism as the PENDING TO TEST
- * checklist: a fixed rows-per-page, "< PREV" / "NEXT >" controls, and a
- * "PAGE x / y" footer. Each option row stays a baked-label selector button
- * (gold highlight + ◄► arrows + a value drawn in this overlay pass). The page
- * state, layout, value formatting and cycle logic live here next to the
- * s_game_option_* statics and the value/arrow renderers; td5_fe_menu.c's
- * Screen_GameOptions is a thin FSM that drives this model via the API declared
- * in td5_frontend_internal.h. ===============================================*/
-enum {
-    /* [PLAYER NAME 2026-07-02] First row: the player's display name (Enter to
-     * edit — NOT a ◄► value selector). Shown in race results, prefilled in the
-     * high-score name entry. */
-    GO_PLAYER_NAME = 0,
-    GO_CHECKPOINTS, GO_TRAFFIC, GO_COPS, GO_DIFFICULTY, GO_COLLISIONS,
-    GO_POWERUPS, GO_TOUGHNESS, GO_DEFORM, GO_DAMAGE, GO_LANEASSIST,
-    GO_TUTORIAL, GO_OPTION_COUNT
-};
-
-#define GO_ROWS_PER_PAGE 7
-#define GO_ROW_X    120
-#define GO_ROW_W    0x128
-#define GO_ROW_H    0x20
-#define GO_ROW_Y0   96
-#define GO_ROW_STEP 40
-#define GO_CTL_Y    (GO_ROW_Y0 + GO_ROWS_PER_PAGE * GO_ROW_STEP + 12)   /* 388 */
-#define GO_CTL_W    0x60                                        /* PREV/OK/NEXT width (96) */
-/* [ALIGN 2026-07-04] The < PREV / OK / NEXT > controls sit UNDER the option-row
- * column (x 120..416): PREV flush-left, NEXT flush-right, OK centred between —
- * instead of poking out wider than the rows above. Equal 4px gaps. */
-#define GO_CTL_PREV_X (GO_ROW_X)                                /* 120 = column left  */
-#define GO_CTL_NEXT_X (GO_ROW_X + GO_ROW_W - GO_CTL_W)          /* 320 = column right */
-#define GO_CTL_OK_X   (GO_ROW_X + (GO_ROW_W - GO_CTL_W) / 2)    /* 220 = column centre */
-
-static int s_go_page      = 0;
-static int s_go_pages     = 1;
-static int s_go_row_count = 0;
-static int s_go_ok_btn    = -1;
-static int s_go_prev_btn  = -1;
-static int s_go_next_btn  = -1;
-
-int td5_gameopts_count(void)     { return GO_OPTION_COUNT; }
-int td5_gameopts_page(void)      { return s_go_page; }
-int td5_gameopts_pages(void)     { return s_go_pages; }
-int td5_gameopts_row_count(void) { return s_go_row_count; }
-int td5_gameopts_ok_btn(void)    { return s_go_ok_btn; }
-int td5_gameopts_prev_btn(void)  { return s_go_prev_btn; }
-int td5_gameopts_next_btn(void)  { return s_go_next_btn; }
-void td5_gameopts_reset_page(void) { s_go_page = 0; }
-
-/* Option index for a page row (0..row_count-1), or -1 if out of range. */
-int td5_gameopts_row_option(int row) {
-    int opt;
-    if (row < 0 || row >= s_go_row_count) return -1;
-    opt = s_go_page * GO_ROWS_PER_PAGE + row;
-    return (opt < GO_OPTION_COUNT) ? opt : -1;
-}
-
-static const char *go_label(int opt) {
-    switch (opt) {
-        case GO_PLAYER_NAME: return "PLAYER NAME";
-        case GO_CHECKPOINTS: return SNK_CheckpointTimersButTxt;
-        case GO_TRAFFIC:     return SNK_TrafficButTxt;
-        case GO_COPS:        return SNK_CopsButTxt;       /* orig label: POLICE */
-        case GO_DIFFICULTY:  return SNK_DifficultyButTxt;
-        case GO_COLLISIONS:  return SNK_3dCollisionsButTxt;
-        case GO_POWERUPS:    return "POWER-UPS";
-        case GO_TOUGHNESS:   return "CAR TOUGHNESS";
-        case GO_DEFORM:      return "DEFORMATION";
-        case GO_DAMAGE:      return "DAMAGE";
-        case GO_LANEASSIST:  return "LANE ASSIST";
-        case GO_TUTORIAL:    return "TUTORIAL";
-    }
-    return "";
-}
-
-/* Current value string for an option row, written into out[n]. */
-void td5_gameopts_value(int opt, char *out, size_t n) {
-    static const char *const on_off[]      = { "OFF", "ON" };
-    /* [ITEM CHAOS 2026-07-04] POWER-UPS is a 3-state cycle, not on/off:
-     * OFF (no item boxes) -> CASUAL (current default scatter) -> CHAOS
-     * (Mashed-style: one box per lane, up to 4 wide, at every spawn point). */
-    static const char *const powerups_lv[] = { "OFF", "CASUAL", "CHAOS" };
-    static const char *const traffic_vol[TD5_TRAFFIC_VOLUME_COUNT] =
-        { "OFF", "LOW", "MEDIUM", "HIGH", "VERY HIGH" };
-    static const char *const difficulty[]  = { "EASY", "NORMAL", "HARD" };
-    /* [TOUGHNESS OFF 2026-07-04] 4-state cycle, not a plain 0..2 level: folds
-     * the master damage disable into the level itself (mirrors POWER-UPS'
-     * OFF/CASUAL/CHAOS above) so this row alone can fully disable damage —
-     * see td5_damage_enabled(). */
-    static const char *const toughness_lv[] = { "LOW", "MEDIUM", "HIGH", "OFF" };
-    /* [DEFORM OFF 2026-07-05] Same 4-state pattern as toughness_lv[] above —
-     * OFF disables impact-driven mesh deformation + scuff independently of
-     * CAR TOUGHNESS/health, see td5_damage_deform_enabled(). */
-    static const char *const deform_lv[] = { "LOW", "NORMAL", "HIGH", "OFF" };
-    const char *v = "";
-    int t;
-    switch (opt) {
-        /* [PLAYER NAME 2026-07-02] Show the configured name as typed (case
-         * preserved); "-" when unset. */
-        case GO_PLAYER_NAME:
-            v = g_td5.ini.player_name[0] ? g_td5.ini.player_name : "-";
-            break;
-        case GO_CHECKPOINTS: v = on_off[s_game_option_checkpoint_timers & 1]; break;
-        case GO_TRAFFIC:
-            t = s_game_option_traffic;
-            if (t < 0) t = 0;
-            if (t > TD5_TRAFFIC_VOLUME_COUNT - 1) t = TD5_TRAFFIC_VOLUME_COUNT - 1;
-            v = traffic_vol[t];
-            break;
-        case GO_COPS:        v = on_off[s_game_option_cops & 1]; break;
-        case GO_DIFFICULTY:  v = difficulty[((s_game_option_difficulty % 3) + 3) % 3]; break;
-        case GO_COLLISIONS:  v = on_off[s_game_option_collisions & 1]; break;
-        case GO_POWERUPS:
-            t = s_game_option_powerups;
-            if (t < 0) t = 0;
-            if (t > 2) t = 2;
-            v = powerups_lv[t];
-            break;
-        case GO_TOUGHNESS:
-            t = s_game_option_car_toughness;
-            if (t < 0) t = 0;
-            if (t > 3) t = 3;
-            v = toughness_lv[t];
-            break;
-        case GO_DEFORM:
-            t = s_game_option_car_deform;
-            if (t < 0) t = 0;
-            if (t > 3) t = 3;
-            v = deform_lv[t];
-            break;
-        case GO_DAMAGE:      v = on_off[s_game_option_car_damage & 1]; break;
-        case GO_LANEASSIST:  v = on_off[s_game_option_laneassist & 1]; break;
-        case GO_TUTORIAL:    v = on_off[s_game_option_tutorial & 1]; break;
-    }
-    snprintf(out, n, "%s", v);
-}
-
-/* Cycle one option's state by +/-1 (LEFT/RIGHT). On/off rows flip; level rows
- * wrap 0..2; traffic wraps the 5-state volume. (Mirrors the old hardcoded
- * if/else chain that used to live in Screen_GameOptions.) */
-void td5_gameopts_cycle(int opt, int delta) {
-    if (delta == 0) return;
-    switch (opt) {
-        case GO_PLAYER_NAME: break;   /* Enter-to-edit row: L/R cycles nothing */
-        case GO_CHECKPOINTS: s_game_option_checkpoint_timers ^= 1; break;
-        case GO_TRAFFIC:
-            s_game_option_traffic =
-                ((s_game_option_traffic + delta) % TD5_TRAFFIC_VOLUME_COUNT
-                 + TD5_TRAFFIC_VOLUME_COUNT) % TD5_TRAFFIC_VOLUME_COUNT;
-            break;
-        case GO_COPS: s_game_option_cops ^= 1; break;
-        case GO_DIFFICULTY:
-            s_game_option_difficulty += delta;
-            if (s_game_option_difficulty < 0) s_game_option_difficulty = 2;
-            if (s_game_option_difficulty > 2) s_game_option_difficulty = 0;
-            break;
-        case GO_COLLISIONS: s_game_option_collisions ^= 1; break;
-        case GO_POWERUPS:
-            /* [ITEM CHAOS 2026-07-04] 3-state: OFF(0) -> CASUAL(1) -> CHAOS(2). */
-            s_game_option_powerups += delta;
-            if (s_game_option_powerups < 0) s_game_option_powerups = 2;
-            if (s_game_option_powerups > 2) s_game_option_powerups = 0;
-            break;
-        case GO_TOUGHNESS:
-            /* [TOUGHNESS OFF 2026-07-04] 4-state: LOW(0) -> MEDIUM(1) -> HIGH(2)
-             * -> OFF(3), matching the toughness_lv[] display array above. */
-            s_game_option_car_toughness += delta;
-            if (s_game_option_car_toughness < 0) s_game_option_car_toughness = 3;
-            if (s_game_option_car_toughness > 3) s_game_option_car_toughness = 0;
-            break;
-        case GO_DEFORM:
-            /* [DEFORM OFF 2026-07-05] 4-state: LOW(0) -> NORMAL(1) -> HIGH(2)
-             * -> OFF(3), matching the deform_lv[] display array above. */
-            s_game_option_car_deform += delta;
-            if (s_game_option_car_deform < 0) s_game_option_car_deform = 3;
-            if (s_game_option_car_deform > 3) s_game_option_car_deform = 0;
-            break;
-        case GO_DAMAGE: s_game_option_car_damage ^= 1; break;
-        case GO_LANEASSIST: s_game_option_laneassist ^= 1; break;
-        case GO_TUTORIAL:   s_game_option_tutorial ^= 1; break;
-    }
-}
-
-/* [GAMEOPTS COMMIT 2026-07-10] Copy the transient s_game_option_* selections
- * into g_td5.ini (the live config the race-init path reads) and persist them to
- * td5re.ini. Extracted from Screen_GameOptions' OK branch so it can ALSO run on
- * the Back/Escape exit path (frontend_central_return_back) — previously ONLY the
- * OK button committed, so toggling e.g. TUTORIAL off and leaving via Back
- * silently discarded the change and the setting appeared to "do nothing".
- * Idempotent: safe to call from either exit path. NB: laps is intentionally NOT
- * committed here (re-homed to Quick Race + Track Selection). */
-void td5_gameopts_commit(void) {
-    g_td5.ini.checkpoint_timers = s_game_option_checkpoint_timers;
-    /* [dynamic-traffic] Persist the full 0..4 volume (5-state row). */
-    g_td5.ini.traffic           = s_game_option_traffic;
-    if (g_td5.ini.traffic < 0) g_td5.ini.traffic = 0;
-    if (g_td5.ini.traffic > TD5_TRAFFIC_VOLUME_COUNT - 1)
-        g_td5.ini.traffic = TD5_TRAFFIC_VOLUME_COUNT - 1;
-    g_td5.ini.cops              = s_game_option_cops;
-    g_td5.ini.difficulty        = s_game_option_difficulty;
-    g_td5.ini.dynamics          = s_game_option_dynamics;
-    g_td5.ini.collisions        = s_game_option_collisions;
-    /* [ITEM CHAOS 2026-07-04] 3-state: 0=OFF 1=CASUAL 2=CHAOS. */
-    g_td5.ini.powerups          = s_game_option_powerups;
-    /* [CAR DAMAGE 2026-06-29] Commit the two global damage levels. */
-    g_td5.ini.car_damage_toughness = s_game_option_car_toughness;
-    g_td5.ini.car_damage_deform    = s_game_option_car_deform;
-    /* [DAMAGE 2026-07-04] One "DAMAGE" toggle drives BOTH the master car-damage
-     * switch AND the HUD damage-bar/wreck sub-toggle. */
-    g_td5.ini.car_damage           = s_game_option_car_damage ? 1 : 0;
-    g_td5.ini.car_damage_bar       = s_game_option_car_damage ? 1 : 0;
-    g_td5.ini.lane_assist          = s_game_option_laneassist ? 1 : 0;
-    /* [TUTORIAL 2026-06-29] Commit the controller-overlay on/off. Preserve a dev
-     * "force every race" (2) if it was set; otherwise plain on=1 / off=0. */
-    g_td5.ini.tutorial_overlay = s_game_option_tutorial
-        ? (g_td5.ini.tutorial_overlay >= 2 ? 2 : 1) : 0;
-    TD5_LOG_I(LOG_TAG, "GameOptions commit: DAMAGE=%d (car_damage=%d bar=%d) tutorial_overlay=%d",
-              s_game_option_car_damage, g_td5.ini.car_damage, g_td5.ini.car_damage_bar,
-              g_td5.ini.tutorial_overlay);
-    td5_ini_persist_options();
-}
+/* [RACE OPTIONS CONSOLIDATION 2026-07-21] The paginated GAME OPTIONS model
+ * (GO_* enum, go_label/value/cycle/commit, page state) was deleted: RACE OPTIONS
+ * (td5_raceopts_* below) is now the single game-behaviour surface for every mode.
+ * The PLAYER NAME editor that lived here moved to its own accessor
+ * (td5_playername_edit_*, further down) on the OPTIONS hub. */
 
 /* ===== RACE OPTIONS modal model (PORT ENHANCEMENT 2026-07-04) ================
  * The track-select "RACE OPTIONS" button opens a modal consolidating every
@@ -6655,11 +6442,9 @@ int td5_raceopts_page_next(void) {
  * the high-score prefill must show the name exactly as typed. */
 static char s_playername_edit[16];
 
-int td5_gameopts_name_option(void) { return GO_PLAYER_NAME; }
-
-/* [CONSOLIDATION 2026-07-21] PLAYER NAME editor — moved to the OPTIONS hub row
- * (see Screen_OptionsHub); still driven from Screen_GameOptions until that screen
- * is retired. Self-persists [GameOptions]PlayerName on Enter (ESC discards). */
+/* [CONSOLIDATION 2026-07-21] PLAYER NAME editor — lives on the OPTIONS hub row
+ * (see Screen_OptionsHub). Self-persists [GameOptions]PlayerName on Enter (ESC
+ * discards), so no separate commit plumbing is needed. */
 void td5_playername_edit_begin(void) {
     snprintf(s_playername_edit, sizeof s_playername_edit, "%s", g_td5.ini.player_name);
     frontend_begin_text_input(s_playername_edit, (int)sizeof s_playername_edit);
@@ -6715,57 +6500,6 @@ static void frontend_render_options_hub_overlay(float sx, float sy) {
     s_fe_preserve_case = saved_case;
 }
 
-/* (Re)create the button set for the current page: the page's option rows
- * (baked labels, indices 0..row_count-1) followed by OK, then < PREV / NEXT >
- * when there is more than one page. Called on screen entry and every page
- * change. Mirrors frontend_pending_build_buttons. */
-void td5_gameopts_build_page(void) {
-    int total = GO_OPTION_COUNT;
-    int start, end, r;
-
-    s_go_pages = (total + GO_ROWS_PER_PAGE - 1) / GO_ROWS_PER_PAGE;
-    if (s_go_pages < 1) s_go_pages = 1;
-    if (s_go_page >= s_go_pages) s_go_page = s_go_pages - 1;
-    if (s_go_page < 0) s_go_page = 0;
-
-    frontend_reset_buttons();
-
-    start = s_go_page * GO_ROWS_PER_PAGE;
-    end   = start + GO_ROWS_PER_PAGE;
-    if (end > total) end = total;
-    s_go_row_count = end - start;
-
-    for (r = 0; r < s_go_row_count; r++)
-        frontend_create_button(go_label(start + r), GO_ROW_X,
-                               GO_ROW_Y0 + r * GO_ROW_STEP, GO_ROW_W, GO_ROW_H);
-
-    /* OK / PREV / NEXT aligned under the option-row column (PREV/NEXT only
-     * appear when paging is possible). */
-    s_go_ok_btn = frontend_create_button(SNK_OkButTxt, GO_CTL_OK_X, GO_CTL_Y, GO_CTL_W, GO_ROW_H);
-    if (s_go_pages > 1) {
-        s_go_prev_btn = frontend_create_button("< PREV", GO_CTL_PREV_X, GO_CTL_Y, GO_CTL_W, GO_ROW_H);
-        s_go_next_btn = frontend_create_button("NEXT >", GO_CTL_NEXT_X, GO_CTL_Y, GO_CTL_W, GO_ROW_H);
-    } else {
-        s_go_prev_btn = -1;
-        s_go_next_btn = -1;
-    }
-    s_selected_button = 0;
-    TD5_LOG_I(LOG_TAG, "GameOptions: page %d/%d (%d rows; ok=%d@x%d prev=%d@x%d next=%d@x%d)",
-              s_go_page + 1, s_go_pages, s_go_row_count,
-              s_go_ok_btn, GO_CTL_OK_X,
-              s_go_prev_btn, (s_go_pages > 1) ? GO_CTL_PREV_X : -1,
-              s_go_next_btn, (s_go_pages > 1) ? GO_CTL_NEXT_X : -1);
-}
-
-int td5_gameopts_page_prev(void) {
-    if (s_go_page > 0) { s_go_page--; td5_gameopts_build_page(); return 1; }
-    return 0;
-}
-int td5_gameopts_page_next(void) {
-    if (s_go_page < s_go_pages - 1) { s_go_page++; td5_gameopts_build_page(); return 1; }
-    return 0;
-}
-
 /* Body-font width WITHOUT the toupper fold that fe_measure_text / _width apply.
  * Needed to place the inline PLAYER NAME caret snug against mixed-case glyphs:
  * the caps fold overestimates lowercase widths (caps are wider), which left a
@@ -6788,60 +6522,6 @@ static float fe_measure_text_cased(const char *text, float sx, float sy) {
         w += ((float)s_font_glyph_advance[c - 0x20] + FONT_GLYPH_TRACKING) * gsx;
     }
     return w;
-}
-
-static void frontend_render_game_options_overlay(float sx, float sy) {
-    int start = s_go_page * GO_ROWS_PER_PAGE;
-    int r;
-    if (!s_buttons[0].active) return;
-    if (!s_anim_complete) return;
-    /* Per-page: draw each visible option row's value centred on its button. The
-     * row buttons are indices 0..row_count-1 for the current page. */
-    for (r = 0; r < s_go_row_count; r++) {
-        char val[24];
-        int  opt = start + r;
-        if (opt >= GO_OPTION_COUNT) break;
-        td5_gameopts_value(opt, val, sizeof val);
-        /* [PLAYER NAME 2026-07-04] The name renders in the SAME value font as
-         * every other option row (no more small-font mismatch), with case
-         * preserved so "nanofives" stays lowercase. When the row is being edited
-         * (Enter-to-edit) the field is edited INLINE right here — the live scratch
-         * buffer plus a blinking green caret — instead of a separate pop-up modal
-         * (the modal draw for this screen was removed from the render dispatch). */
-        if (opt == GO_PLAYER_NAME) {
-            int   editing = (s_text_input_state != 0 &&
-                             s_text_input_ctx.buffer == s_playername_edit);
-            const char *shown = editing ? s_playername_edit : (val[0] ? val : "-");
-            float cx = (float)FE_VALUE_CENTER_X * sx;
-            float ty = (float)(s_buttons[r].y + 6) * sy;
-            /* Centre by the TRUE mixed-case width (not the caps-fold measure), so
-             * the caret can sit right after the last glyph. */
-            float half = fe_measure_text_cased(shown, sx, sy) * 0.5f;
-            int   saved_case = s_fe_preserve_case;
-            s_fe_preserve_case = 1;                       /* keep true lowercase */
-            fe_draw_text(cx - half, ty, shown, 0xFFFFFFFF, sx, sy);
-            if (editing &&
-                (((td5_plat_time_ms() - s_text_input_ctx.blink_tick) / 350U) & 1U) == 0U) {
-                /* Blinking green caret snug against the end of the typed text
-                 * (same 350ms clock the old modal used). */
-                float caret_x = cx + half + 1.0f * sx;
-                td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-                fe_draw_quad(caret_x, ty + 6.0f * sy, 2.0f * sx, 16.0f * sy,
-                             0xFF00FF00, -1, 0, 0, 0, 0);
-            }
-            s_fe_preserve_case = saved_case;
-            continue;
-        }
-        frontend_draw_value_centered(sx, sy, s_buttons[r].y + 6, val, 0xFFFFFFFF);
-    }
-    /* "PAGE x / y" footer, centred UNDER the OK button (only when >1 page). */
-    if (s_go_pages > 1) {
-        char buf[24];
-        snprintf(buf, sizeof buf, "PAGE %d / %d", s_go_page + 1, s_go_pages);
-        td5_vui_text_centered((float)(GO_CTL_OK_X + GO_CTL_W / 2) * sx,
-                              (float)(GO_CTL_Y + 28) * sy, buf,
-                              0xFF8890A0u, sx, sy);
-    }
 }
 
 static void frontend_render_display_options_overlay(float sx, float sy) {
@@ -9714,12 +9394,6 @@ void td5_frontend_render_ui_rects(void) {
     case TD5_SCREEN_QUICK_RACE:
         frontend_render_quick_race_overlay(sx, sy);
         break;
-    case TD5_SCREEN_GAME_OPTIONS:
-        /* [PLAYER NAME 2026-07-04] The PLAYER NAME row is now edited INLINE inside
-         * the options list (scratch buffer + caret drawn by the overlay itself) —
-         * no pop-up "ENTER PLAYER NAME" text-input modal on this screen any more. */
-        frontend_render_game_options_overlay(sx, sy);
-        break;
     case TD5_SCREEN_OPTIONS_HUB:
         /* [CONSOLIDATION 2026-07-21] PLAYER NAME row value + inline editor. */
         frontend_render_options_hub_overlay(sx, sy);
@@ -9987,18 +9661,6 @@ void td5_frontend_render_ui_rects(void) {
              * selector too, but at the appended index QR_BTN_PHYSICS (outside the
              * 0..LAPS block) — draw its ◄► arrows explicitly. self-skips if hidden. */
             if (QR_BTN_PHYSICS < s_button_count) fe_draw_option_arrows(QR_BTN_PHYSICS, sx, sy);
-            break;
-        case TD5_SCREEN_GAME_OPTIONS:
-            /* [TUTORIAL 2026-06-29] Paginated: the option rows on the current
-             * page are button indices 0..row_count-1 (all selectors with ◄►);
-             * OK / PREV / NEXT follow and get no arrows.
-             * [PLAYER NAME 2026-07-02] The PLAYER NAME row is Enter-to-edit,
-             * not a L/R value cycle — skip its ◄► (also leaves nav_selector
-             * unset so LEFT/RIGHT move focus off the row normally). */
-            for (int i = 0; i < td5_gameopts_row_count(); i++) {
-                if (td5_gameopts_row_option(i) == GO_PLAYER_NAME) continue;
-                fe_draw_option_arrows(i, sx, sy);
-            }
             break;
         case TD5_SCREEN_CONTROLLER_BINDING:
             /* Draw the action labels+values on top of the (opaque-when-selected)

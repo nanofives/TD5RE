@@ -1068,9 +1068,8 @@ static const SSW_NavStep k_ssw_optshub[]    = { { TD5_SCREEN_MAIN_MENU, 4 } };
 static const SSW_NavStep k_ssw_hiscore[]    = { { TD5_SCREEN_MAIN_MENU, 5 } };
 static const SSW_NavStep k_ssw_mp_lobby[]   = { { TD5_SCREEN_MAIN_MENU, 2 } };
 static const SSW_NavStep k_ssw_changelog[]  = { { TD5_SCREEN_MAIN_MENU, 7 } };
-/* Options hub: 0=Game 1=Control 2=Sound 3=Display 4=TwoPlayer (fe_menu:1573). */
-static const SSW_NavStep k_ssw_game_opts[]  = { { TD5_SCREEN_MAIN_MENU, 4 },
-                                                { TD5_SCREEN_OPTIONS_HUB, 0 } };
+/* Options hub: 0=PlayerName 1=Control 2=Sound 3=Display 4=TwoPlayer.
+ * [CONSOLIDATION 2026-07-21] GAME OPTIONS (formerly hub row 0) retired. */
 static const SSW_NavStep k_ssw_ctrl_opts[]  = { { TD5_SCREEN_MAIN_MENU, 4 },
                                                 { TD5_SCREEN_OPTIONS_HUB, 1 } };
 static const SSW_NavStep k_ssw_sound_opts[] = { { TD5_SCREEN_MAIN_MENU, 4 },
@@ -1107,7 +1106,6 @@ static const SSW_NavStep *startscreen_route(int target, int *out_len)
     case TD5_SCREEN_QUICK_RACE:         SSW_ROUTE(k_ssw_quick_race);
     case TD5_SCREEN_CONNECTION_BROWSER: SSW_ROUTE(k_ssw_browser);
     case TD5_SCREEN_OPTIONS_HUB:        SSW_ROUTE(k_ssw_optshub);
-    case TD5_SCREEN_GAME_OPTIONS:       SSW_ROUTE(k_ssw_game_opts);
     case TD5_SCREEN_CONTROL_OPTIONS:    SSW_ROUTE(k_ssw_ctrl_opts);
     case TD5_SCREEN_SOUND_OPTIONS:      SSW_ROUTE(k_ssw_sound_opts);
     case TD5_SCREEN_DISPLAY_OPTIONS:    SSW_ROUTE(k_ssw_disp_opts);

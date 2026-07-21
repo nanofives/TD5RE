@@ -170,7 +170,10 @@ static const ScreenStep k_screens_full[] = {
     { "scr-race-type",       TD5_SCREEN_RACE_TYPE_MENU,     0 },
     { "scr-quick-race",      TD5_SCREEN_QUICK_RACE,         0 },
     { "scr-options-hub",     TD5_SCREEN_OPTIONS_HUB,        0 },
-    { "scr-game-options",    TD5_SCREEN_GAME_OPTIONS,       0 },
+    /* [CONSOLIDATION 2026-07-21] scr-game-options retired (screen removed);
+     * RACE OPTIONS (44) is the single game-behaviour surface. It builds its row
+     * set from the live mode ctx, so it tolerates context-free entry. */
+    { "scr-race-options",    TD5_SCREEN_RACE_OPTIONS,       0 },
     { "scr-control-options", TD5_SCREEN_CONTROL_OPTIONS,    0 },
     { "scr-sound-options",   TD5_SCREEN_SOUND_OPTIONS,      0 },
     { "scr-display-options", TD5_SCREEN_DISPLAY_OPTIONS,    0 },
