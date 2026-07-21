@@ -600,11 +600,54 @@ void Screen_RaceOptions(void);
  * follow. */
 enum {
     RO_OPPONENTS = 0, RO_TRAFFIC, RO_POLICE, RO_DIFFICULTY, RO_DYNAMICS,
-    RO_CHECKPOINTS, RO_POWERUPS, RO_TOUGHNESS, RO_DEFORM, RO_OPT_COUNT
+    RO_CHECKPOINTS, RO_POWERUPS, RO_TOUGHNESS, RO_DEFORM,
+    /* [RACE OPTIONS CONSOLIDATION 2026-07-21] absorbed from the retired GAME
+     * OPTIONS screen so RACE OPTIONS is the single game-behaviour surface. */
+    RO_COLLISIONS, RO_DAMAGE, RO_LANEASSIST, RO_TUTORIAL, RO_OPT_COUNT
 };
 const char *td5_raceopts_label(int idx);
 void        td5_raceopts_value(int idx, char *out, size_t out_sz);
 void        td5_raceopts_cycle(int idx, int delta);
+
+/* [RACE OPTIONS CONSOLIDATION 2026-07-21] Per-mode availability + pagination.
+ * The dynamic RACE OPTIONS screen shows only the rows a given game mode needs;
+ * this context (built at screen entry) drives td5_raceopts_row_available().
+ * game_type mirrors s_selected_game_type; the mp_mode is g_td5.mp_mode_config.mode. */
+typedef struct {
+    int game_type;      /* s_selected_game_type snapshot */
+    int is_cup;         /* SP or MP cup series */
+    int is_quick_race;  /* s_flow_context == 2 */
+    int is_time_trial;  /* SP time trial */
+    int is_cop_chase;   /* SP or MP cop chase */
+    int is_drag;        /* SP or MP drag */
+    int is_mp;          /* any local/net MP session */
+    int mp_mode;        /* g_td5.mp_mode_config.mode (valid when is_mp) */
+    int is_net;         /* netplay host */
+    int opponents;      /* s_num_ai_opponents snapshot */
+} TD5_RaceOptsCtx;
+
+int  td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *ctx);
+/* Fill `out` (capacity RO_OPT_COUNT) with the RO_* ids available for ctx, in
+ * display order; returns the count. */
+int  td5_raceopts_build_rows(const TD5_RaceOptsCtx *ctx, int *out);
+#define RO_ROWS_PER_PAGE 7
+/* Page model (state lives in td5_frontend.c beside the model). set_ctx snapshots
+ * the mode + builds the filtered list; build_page (re)creates the button set for
+ * the current page; the FSM in td5_fe_race.c and the render dispatch use the
+ * row_option map + the OK/BACK/PREV/NEXT button-id accessors. */
+void td5_raceopts_set_ctx(const TD5_RaceOptsCtx *ctx);
+void td5_raceopts_update_opponents(int opponents);
+void td5_raceopts_build_page(void);
+int  td5_raceopts_page_prev(void);
+int  td5_raceopts_page_next(void);
+int  td5_raceopts_page(void);
+int  td5_raceopts_pages(void);
+int  td5_raceopts_row_count(void);
+int  td5_raceopts_row_option(int row);
+int  td5_raceopts_ok_btn(void);
+int  td5_raceopts_back_btn(void);
+int  td5_raceopts_prev_btn(void);
+int  td5_raceopts_next_btn(void);
 void frontend_release_surface(int handle);
 void frontend_set_cursor_visible(int visible);
 void mp_simul_load_pane_spec(int p, int car);

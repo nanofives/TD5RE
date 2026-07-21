@@ -6393,6 +6393,10 @@ const char *td5_raceopts_label(int idx) {
         case RO_POWERUPS:    return "POWER-UPS";
         case RO_TOUGHNESS:   return "CAR TOUGHNESS";
         case RO_DEFORM:      return "DEFORMATION";
+        case RO_COLLISIONS:  return SNK_3dCollisionsButTxt;
+        case RO_DAMAGE:      return "DAMAGE";
+        case RO_LANEASSIST:  return "LANE ASSIST";
+        case RO_TUTORIAL:    return "TUTORIAL";
     }
     return "";
 }
@@ -6439,6 +6443,11 @@ void td5_raceopts_value(int idx, char *out, size_t out_sz) {
         case RO_DEFORM:
             t = s_game_option_car_deform; if (t < 0) t = 0; if (t > 3) t = 3;
             v = deform_lv[t]; break;
+        /* [RACE OPTIONS CONSOLIDATION 2026-07-21] absorbed GAME OPTIONS rows. */
+        case RO_COLLISIONS:  v = on_off[s_game_option_collisions & 1]; break;
+        case RO_DAMAGE:      v = on_off[s_game_option_car_damage & 1]; break;
+        case RO_LANEASSIST:  v = on_off[s_game_option_laneassist & 1]; break;
+        case RO_TUTORIAL:    v = on_off[s_game_option_tutorial & 1]; break;
     }
     snprintf(out, out_sz, "%s", v);
 }
@@ -6484,7 +6493,156 @@ void td5_raceopts_cycle(int idx, int delta) {
             if (s_game_option_car_deform < 0) s_game_option_car_deform = 3;
             if (s_game_option_car_deform > 3) s_game_option_car_deform = 0;
             break;
+        /* [RACE OPTIONS CONSOLIDATION 2026-07-21] absorbed GAME OPTIONS rows. */
+        case RO_COLLISIONS:  s_game_option_collisions ^= 1; break;
+        case RO_DAMAGE:      s_game_option_car_damage ^= 1; break;
+        case RO_LANEASSIST:  s_game_option_laneassist ^= 1; break;
+        case RO_TUTORIAL:    s_game_option_tutorial ^= 1; break;
     }
+}
+
+/* ===== RACE OPTIONS dynamic availability + pagination (CONSOLIDATION 2026-07-21)
+ * RACE OPTIONS is now the single game-behaviour surface for EVERY mode, so it
+ * shows only the rows a given mode needs (the ad-hoc per-row hides + the
+ * frontend_update_police/difficulty_button_visibility helpers folded in here)
+ * and paginates when >RO_ROWS_PER_PAGE rows are visible. The FSM in
+ * Screen_RaceOptions (td5_fe_race.c) builds the ctx at entry then drives this
+ * model; the render dispatch below maps page buttons back to RO_* ids. Availability
+ * matrix mirrors td5_game.c mode setup (checkpoint TIMERS are single-player
+ * point-to-point only; road power-ups everywhere but drag; LANE ASSIST/TUTORIAL
+ * SP-only). ========================================================= */
+static TD5_RaceOptsCtx s_ro_ctx;
+static int s_ro_rows[RO_OPT_COUNT];   /* filtered available RO_* ids, display order */
+static int s_ro_total     = 0;        /* count across all pages */
+static int s_ro_page      = 0;
+static int s_ro_pages     = 1;
+static int s_ro_row_count = 0;        /* rows on the current page */
+static int s_ro_ok_btn    = -1;
+static int s_ro_back_btn  = -1;
+static int s_ro_prev_btn  = -1;
+static int s_ro_next_btn  = -1;
+
+#define RO_ROW_X    120
+#define RO_ROW_W    224
+#define RO_ROW_H    32
+#define RO_ROW_Y0   96
+#define RO_ROW_STEP 34
+
+int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
+    /* Traffic Battle is an MP sub-mode; cop chase covers SP (game_type 8) and MP. */
+    int tb = c->is_mp && c->mp_mode == TD5_MP_MODE_TRAFFIC_BATTLE;
+    switch (ro) {
+    case RO_OPPONENTS:   /* no AI-count control in drag, cup (cup sets it) or TB */
+        return !(c->is_drag || c->is_cup || tb);
+    case RO_TRAFFIC:     /* drag has its own traffic switch */
+        return !c->is_drag;
+    case RO_POLICE:      /* player IS the pursuit in cop chase; none in drag */
+        return !(c->is_cop_chase || c->is_drag);
+    case RO_DIFFICULTY:  /* AI difficulty: opponent-gated except drag's own 1v1 rule */
+        if (c->is_cup || c->is_quick_race) return 0;
+        if (tb) return 0;
+        if (c->is_mp && c->is_cop_chase) return 0;   /* MP cop chase */
+        if (c->is_drag) return 1;                    /* drag: always shown */
+        return c->opponents > 0;                     /* hidden at 0 opponents */
+    case RO_DYNAMICS:
+        return 1;                                    /* every mode */
+    case RO_CHECKPOINTS: /* checkpoint TIMERS: SP point-to-point only (off in MP,
+                          * cop chase, drag — see td5_game.c ~2380) */
+        return !c->is_mp && !c->is_cop_chase && !c->is_drag;
+    case RO_POWERUPS:    /* road power-ups everywhere but drag */
+        return !c->is_drag;
+    case RO_TOUGHNESS:
+    case RO_DEFORM:
+    case RO_COLLISIONS:
+    case RO_DAMAGE:
+        return 1;                                    /* every mode */
+    case RO_LANEASSIST:  /* SP only (per-player LANE ASSIST lives on the MP profile) */
+    case RO_TUTORIAL:    /* SP only */
+        return !c->is_mp;
+    }
+    return 0;
+}
+
+int td5_raceopts_build_rows(const TD5_RaceOptsCtx *c, int *out) {
+    int i, n = 0;
+    for (i = 0; i < RO_OPT_COUNT; i++)
+        if (td5_raceopts_row_available(i, c)) out[n++] = i;
+    return n;
+}
+
+int td5_raceopts_page(void)      { return s_ro_page; }
+int td5_raceopts_pages(void)     { return s_ro_pages; }
+int td5_raceopts_row_count(void) { return s_ro_row_count; }
+int td5_raceopts_ok_btn(void)    { return s_ro_ok_btn; }
+int td5_raceopts_back_btn(void)  { return s_ro_back_btn; }
+int td5_raceopts_prev_btn(void)  { return s_ro_prev_btn; }
+int td5_raceopts_next_btn(void)  { return s_ro_next_btn; }
+
+/* RO_* id for a current-page row (0..row_count-1), or -1 if out of range. */
+int td5_raceopts_row_option(int row) {
+    int idx;
+    if (row < 0 || row >= s_ro_row_count) return -1;
+    idx = s_ro_page * RO_ROWS_PER_PAGE + row;
+    return (idx < s_ro_total) ? s_ro_rows[idx] : -1;
+}
+
+/* (Re)create the button set for the current page: the page's option rows
+ * (indices 0..row_count-1) then OK, BACK, and < PREV / NEXT > when paged.
+ * Mirrors td5_gameopts_build_page. */
+void td5_raceopts_build_page(void) {
+    int start, end, r;
+    s_ro_pages = (s_ro_total + RO_ROWS_PER_PAGE - 1) / RO_ROWS_PER_PAGE;
+    if (s_ro_pages < 1) s_ro_pages = 1;
+    if (s_ro_page >= s_ro_pages) s_ro_page = s_ro_pages - 1;
+    if (s_ro_page < 0) s_ro_page = 0;
+
+    frontend_reset_buttons();
+
+    start = s_ro_page * RO_ROWS_PER_PAGE;
+    end   = start + RO_ROWS_PER_PAGE;
+    if (end > s_ro_total) end = s_ro_total;
+    s_ro_row_count = end - start;
+
+    for (r = 0; r < s_ro_row_count; r++)
+        frontend_create_button(td5_raceopts_label(s_ro_rows[start + r]),
+                               RO_ROW_X, RO_ROW_Y0 + r * RO_ROW_STEP,
+                               RO_ROW_W, RO_ROW_H);
+
+    s_ro_ok_btn   = frontend_create_button(SNK_OkButTxt,   120, 414,  96, 32);
+    s_ro_back_btn = frontend_create_button(SNK_BackButTxt, 232, 414, 112, 32);
+    if (s_ro_pages > 1) {
+        s_ro_prev_btn = frontend_create_button("< PREV", 120, 380, 96, 32);
+        s_ro_next_btn = frontend_create_button("NEXT >", 248, 380, 96, 32);
+    } else {
+        s_ro_prev_btn = -1;
+        s_ro_next_btn = -1;
+    }
+    s_selected_button = 0;
+    TD5_LOG_I(LOG_TAG, "RaceOpts: page %d/%d (%d/%d rows; ok=%d back=%d prev=%d next=%d)",
+              s_ro_page + 1, s_ro_pages, s_ro_row_count, s_ro_total,
+              s_ro_ok_btn, s_ro_back_btn, s_ro_prev_btn, s_ro_next_btn);
+}
+
+/* Snapshot the mode context + build the filtered row list (page reset to 0). */
+void td5_raceopts_set_ctx(const TD5_RaceOptsCtx *ctx) {
+    s_ro_ctx   = *ctx;
+    s_ro_total = td5_raceopts_build_rows(&s_ro_ctx, s_ro_rows);
+    s_ro_page  = 0;
+}
+
+/* OPPONENTS was cycled: refresh the stored count + rebuild (DIFFICULTY tracks it). */
+void td5_raceopts_update_opponents(int opponents) {
+    s_ro_ctx.opponents = opponents;
+    s_ro_total = td5_raceopts_build_rows(&s_ro_ctx, s_ro_rows);
+}
+
+int td5_raceopts_page_prev(void) {
+    if (s_ro_page > 0) { s_ro_page--; td5_raceopts_build_page(); return 1; }
+    return 0;
+}
+int td5_raceopts_page_next(void) {
+    if (s_ro_page < s_ro_pages - 1) { s_ro_page++; td5_raceopts_build_page(); return 1; }
+    return 0;
 }
 
 /* [PLAYER NAME 2026-07-02] Game Options PLAYER NAME editor. The row is
@@ -7378,13 +7536,17 @@ static void frontend_draw_marker_dot(float cx, float cy, float sx, float sy, int
  * ◄► arrows are drawn in the post-button pass. Row i (0..RO_OPT_COUNT-1) is the
  * RO_* option with id i. */
 static void frontend_render_race_options_overlay(float sx, float sy) {
-    int i;
+    int r, rc;
     if (!s_anim_complete) return;
-    for (i = 0; i < RO_OPT_COUNT && i < s_button_count; i++) {
+    /* [CONSOLIDATION 2026-07-21] Buttons 0..row_count-1 are the current page's
+     * option rows; map each back to its RO_* id for the value string. */
+    rc = td5_raceopts_row_count();
+    for (r = 0; r < rc && r < s_button_count; r++) {
         char vb[16];
-        if (!s_buttons[i].active || s_buttons[i].hidden) continue;
-        td5_raceopts_value(i, vb, sizeof vb);
-        fe_draw_text(350.0f * sx, (float)(s_buttons[i].y + 6) * sy, vb,
+        int opt = td5_raceopts_row_option(r);
+        if (opt < 0 || !s_buttons[r].active || s_buttons[r].hidden) continue;
+        td5_raceopts_value(opt, vb, sizeof vb);
+        fe_draw_text(350.0f * sx, (float)(s_buttons[r].y + 6) * sy, vb,
                      0xFFFFFFFFu, sx * 0.8f, sy * 0.8f);
     }
 }
@@ -9883,9 +10045,10 @@ void td5_frontend_render_ui_rects(void) {
             frontend_render_trksel_randomize_icon(sx, sy);
             break;
         case TD5_SCREEN_RACE_OPTIONS:
-            /* [2026-07-04] ◄► arrows for each option row (self-skip hidden; the
-             * OK/BACK buttons are excluded by the RO_OPT_COUNT bound). */
-            { int ri; for (ri = 0; ri < RO_OPT_COUNT; ri++) fe_draw_option_arrows(ri, sx, sy); }
+            /* [CONSOLIDATION 2026-07-21] ◄► arrows for each current-page option
+             * row; OK/BACK/PREV/NEXT are excluded by the row_count bound. */
+            { int ri, rc = td5_raceopts_row_count();
+              for (ri = 0; ri < rc; ri++) fe_draw_option_arrows(ri, sx, sy); }
             break;
         case TD5_SCREEN_CONTROL_OPTIONS:
             /* [PORT ENHANCEMENT 2026-06] arrows on PLAYER(0) + CONTROLLER SELECTION(1). */

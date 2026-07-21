@@ -240,7 +240,6 @@ static void frontend_mp_position_enter(void);   /* [#8] advance phase 0 -> posit
 static int  frontend_mp_setup_disconnect_check(int n); /* [disconnect-modal] freeze on lost pad */
 static int frontend_track_is_circuit(int track_slot);
 static void frontend_update_laps_button_visibility(int laps_btn_idx);
-static void frontend_update_difficulty_button_visibility(int diff_btn_idx);  /* [R5] hide when 0 opponents */
 static void frontend_update_direction_button_visibility(int dir_btn_idx, int manage_label);
 static int frontend_carsel_hold_enabled(void);   /* [#2/#7] TD5RE_CARSEL_HOLD gate (defined below) */
 static int frontend_carsel_hold_repeat(void);    /* hold-to-scroll LEFT/RIGHT auto-repeat (defined below); reused by Quick Race */
@@ -6567,49 +6566,11 @@ static void frontend_update_laps_button_visibility(int laps_btn_idx) {
     if (!show && s_selected_button == laps_btn_idx) s_selected_button = 0;
 }
 
-/* [R5 2026-06-19] Per-race AI difficulty is meaningless with no AI cars, so HIDE
- * the difficulty row (button 6) whenever the opponent count is 0. Also stays
- * hidden in Quick Race flow (flow_context==2), which already hides it at create
- * time. Called on init and whenever the opponent count changes, so toggling
- * opponents to/from 0 shows/hides the row live. Don't leave nav focus parked on
- * a hidden row. */
-static void frontend_update_difficulty_button_visibility(int diff_btn_idx) {
-    if (diff_btn_idx < 0 || diff_btn_idx >= s_button_count) return;
-    /* Difficulty is opponent-dependent, so hide it when there are 0 opponents,
-     * in Quick Race (flow 2).
-     * [MP COP CHASE 2026-06-24] Also hide it in Cop Chase: the mode is a
-     * human-vs-human pursuit with no AI-difficulty selection on this screen
-     * (mirrors the POLICE row hide). Checks mode directly — wanted_mode_enabled
-     * is only set at race init, so the MP track selector wouldn't see it yet. */
-    int hide = (s_num_ai_opponents <= 0) || (s_flow_context == 2) ||
-               (g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE);
-    s_buttons[diff_btn_idx].hidden   = hide;
-    s_buttons[diff_btn_idx].disabled = hide;
-    TD5_LOG_I(LOG_TAG, "Difficulty row: opponents=%d flow=%d mode=%d -> %s",
-              s_num_ai_opponents, s_flow_context, g_td5.mp_mode_config.mode,
-              hide ? "hidden" : "SHOWN");
-    if (hide && s_selected_button == diff_btn_idx) s_selected_button = 0;
-}
-
-/* [COP-CHASE 2026-06-21] HIDE the POLICE (traffic-cop "encounter") row in Cop
- * Chase game mode: the player IS the pursuer there, and the separate traffic-police
- * system is force-disabled (ConfigureGameTypeFlags case 8 + the InitRaceSchedule
- * guard). Mirrors the Laps/Difficulty row helpers; gated on g_td5.wanted_mode_enabled
- * which ConfigureGameTypeFlags has already set when the track selector opens. */
-static void frontend_update_police_button_visibility(int police_btn_idx) {
-    if (police_btn_idx < 0 || police_btn_idx >= s_button_count) return;
-    /* Hide in cop chase: the player(s) ARE the pursuit, the separate traffic-cop
-     * encounter is force-disabled. wanted_mode_enabled is only set at race init,
-     * so the MP cop-chase flow (mode == COP_CHASE) must be checked directly —
-     * otherwise the row showed on the MP track selector before the race. */
-    int hide = (g_td5.wanted_mode_enabled ||
-                g_td5.mp_mode_config.mode == TD5_MP_MODE_COP_CHASE) ? 1 : 0;
-    s_buttons[police_btn_idx].hidden   = hide;
-    s_buttons[police_btn_idx].disabled = hide;
-    TD5_LOG_I(LOG_TAG, "Police row: wanted_mode=%d -> %s",
-              g_td5.wanted_mode_enabled, hide ? "hidden (cop chase)" : "SHOWN");
-    if (hide && s_selected_button == police_btn_idx) s_selected_button = 0;
-}
+/* [CONSOLIDATION 2026-07-21] frontend_update_difficulty_button_visibility and
+ * frontend_update_police_button_visibility were removed: their per-mode hide
+ * logic (0 opponents / Quick Race / cop chase) now lives in the dynamic RACE
+ * OPTIONS availability matrix (td5_raceopts_row_available, td5_frontend.c), the
+ * only place that consumed them once every option row moved off track-select. */
 
 static void frontend_update_direction_button_visibility(int dir_btn_idx, int manage_label) {
     if (dir_btn_idx < 0 || dir_btn_idx >= s_button_count) return;
@@ -6724,15 +6685,34 @@ static void raceopts_commit_persist(void) {
     g_td5.ini.powerups             = s_game_option_powerups;
     g_td5.ini.car_damage_toughness = s_game_option_car_toughness;
     g_td5.ini.car_damage_deform    = s_game_option_car_deform;
+    /* [RACE OPTIONS CONSOLIDATION 2026-07-21] absorbed the remaining GAME OPTIONS
+     * fields (3D collisions, the single DAMAGE toggle that drives BOTH master
+     * car-damage and the HUD bar/wreck sub-toggle, lane assist, tutorial overlay
+     * — preserving a dev "force every race" (2)). Mirrors td5_gameopts_commit. */
+    g_td5.ini.collisions           = s_game_option_collisions;
+    g_td5.ini.car_damage           = s_game_option_car_damage ? 1 : 0;
+    g_td5.ini.car_damage_bar       = s_game_option_car_damage ? 1 : 0;
+    g_td5.ini.lane_assist          = s_game_option_laneassist ? 1 : 0;
+    g_td5.ini.tutorial_overlay     = s_game_option_tutorial
+        ? (g_td5.ini.tutorial_overlay >= 2 ? 2 : 1) : 0;
+    /* [RACE OPTIONS CONSOLIDATION 2026-07-21] RACE OPTIONS is now the ONLY
+     * difficulty control: the per-race tier the row edits (s_race_difficulty)
+     * becomes authoritative — mirror it into the global option (read by
+     * ConfigureGameTypeFlags for single race) + persist it. The track-select OK
+     * still copies s_race_difficulty into g_td5.difficulty_tier. */
+    s_game_option_difficulty       = s_race_difficulty;
+    g_td5.ini.difficulty           = s_race_difficulty;
     td5_physics_set_dynamics(s_game_option_dynamics);
     td5_ini_persist_options();
     TD5_LOG_I(LOG_TAG,
               "RaceOpts commit: opp=%d traffic=%d cops=%d diff=%d dyn=%d "
-              "cp=%d pu=%d tough=%d deform=%d",
+              "cp=%d pu=%d tough=%d deform=%d coll=%d dmg=%d lane=%d tut=%d",
               s_num_ai_opponents, s_game_option_traffic, s_game_option_cops,
               s_race_difficulty, s_game_option_dynamics,
               s_game_option_checkpoint_timers, s_game_option_powerups,
-              s_game_option_car_toughness, s_game_option_car_deform);
+              s_game_option_car_toughness, s_game_option_car_deform,
+              s_game_option_collisions, s_game_option_car_damage,
+              s_game_option_laneassist, s_game_option_tutorial);
 }
 
 /* Leave RACE OPTIONS: persist, then return to whichever track-select screen
@@ -6744,43 +6724,56 @@ static void raceopts_leave(void) {
     td5_frontend_set_screen((TD5_ScreenIndex)s_raceopts_parent);
 }
 
-/* Button indices on the RACE OPTIONS screen: rows 0..RO_OPT_COUNT-1 are the
- * option selectors (index == RO_* id), then OK, then BACK. */
-#define RO_SCR_OK_BTN    RO_OPT_COUNT
-#define RO_SCR_BACK_BTN  (RO_OPT_COUNT + 1)
+/* Build the RACE OPTIONS mode context from the live frontend state so the model
+ * shows only the rows this mode needs. MP variant discrimination uses
+ * mp_mode_config.mode (the SP menu's s_selected_game_type is not reliably stamped
+ * for MP cop-chase/drag); SP uses s_selected_game_type (TD5_GameType). */
+static void raceopts_build_ctx(TD5_RaceOptsCtx *ctx) {
+    int any_mp = (s_mp_simul || s_network_active);
+    int is_mp  = any_mp || s_mp_flow;
+    int mode   = g_td5.mp_mode_config.mode;
+    memset(ctx, 0, sizeof *ctx);
+    ctx->game_type     = s_selected_game_type;
+    ctx->opponents     = s_num_ai_opponents;
+    ctx->is_mp         = is_mp ? 1 : 0;
+    ctx->mp_mode       = mode;
+    ctx->is_net        = s_network_active ? 1 : 0;
+    ctx->is_quick_race = (s_flow_context == 2) ? 1 : 0;
+    if (is_mp) {
+        ctx->is_cup        = (mode == TD5_MP_MODE_CUP);
+        ctx->is_cop_chase  = (mode == TD5_MP_MODE_COP_CHASE);
+        ctx->is_drag       = (mode == TD5_MP_MODE_DRAG_RACE);
+        ctx->is_time_trial = 0;
+    } else {
+        ctx->is_cup        = (s_selected_game_type >= 1 && s_selected_game_type <= 6);
+        ctx->is_time_trial = (s_selected_game_type == 7);
+        ctx->is_cop_chase  = (s_selected_game_type == 8);
+        ctx->is_drag       = (s_selected_game_type == 9);
+    }
+}
 
 /* Dedicated RACE OPTIONS screen (registered at TD5_SCREEN_RACE_OPTIONS). Reuses
  * the track-select backdrop (inherited via set_screen; excluded from the gallery
- * in td5_frontend.c). The shared title path draws "RACE OPTIONS"; the option
- * values + ◄► arrows are drawn by the td5_frontend.c render dispatch. */
+ * in td5_frontend.c). The shared title path draws "RACE OPTIONS"; the per-page
+ * option values + ◄► arrows are drawn by the td5_frontend.c render dispatch.
+ * [CONSOLIDATION 2026-07-21] Rows + pagination are driven by the dynamic model
+ * (td5_raceopts_* in td5_frontend.c): only the rows this game mode needs are
+ * shown, paginated when >RO_ROWS_PER_PAGE visible. */
 void Screen_RaceOptions(void) {
     switch (s_inner_state) {
-    case 0: { /* init: build option rows + OK/BACK, apply the same gating the
-               * inline rows used */
-        int i, cup = (s_raceopts_parent == TD5_SCREEN_CUP_TRACK_SELECT);
-        frontend_reset_buttons();
-        for (i = 0; i < RO_OPT_COUNT; i++)
-            frontend_create_button(td5_raceopts_label(i), 120, 96 + i * 34, 224, 32);
-        frontend_create_button(SNK_OkButTxt,   120, 414,  96, 32); /* RO_SCR_OK_BTN   */
-        frontend_create_button(SNK_BackButTxt, 232, 414, 112, 32); /* RO_SCR_BACK_BTN */
-        /* POLICE hides in Cop Chase; DIFFICULTY hides at 0 opponents / Quick Race /
-         * Cop Chase (index == RO_* id). */
-        frontend_update_police_button_visibility(RO_POLICE);
-        frontend_update_difficulty_button_visibility(RO_DIFFICULTY);
-        if (cup) {   /* cup sources OPPONENTS + DIFFICULTY from the cup options */
-            s_buttons[RO_OPPONENTS].hidden  = s_buttons[RO_OPPONENTS].disabled  = 1;
-            s_buttons[RO_DIFFICULTY].hidden = s_buttons[RO_DIFFICULTY].disabled = 1;
-        }
+    case 0: { /* init: snapshot the mode ctx, build the filtered first page */
+        TD5_RaceOptsCtx ctx;
+        raceopts_build_ctx(&ctx);
+        td5_raceopts_set_ctx(&ctx);
+        td5_raceopts_build_page();
         frontend_set_cursor_visible(1);
         s_return_screen   = s_raceopts_parent;   /* ESC / central back returns here */
         s_selected_button = 0;
         s_anim_complete   = 0;
         frontend_begin_timed_animation();
         s_inner_state = 1;
-        TD5_LOG_I(LOG_TAG, "RaceOptions: init (parent=%d cup=%d)", s_raceopts_parent, cup);
-        for (i = 0; i < s_button_count; i++)
-            TD5_LOG_I(LOG_TAG, "  ro[%d] '%s' y=%d hidden=%d", i, s_buttons[i].label,
-                      s_buttons[i].y, s_buttons[i].hidden);
+        TD5_LOG_I(LOG_TAG, "RaceOptions: init (parent=%d gt=%d mp=%d mode=%d opp=%d)",
+                  s_raceopts_parent, ctx.game_type, ctx.is_mp, ctx.mp_mode, ctx.opponents);
         break;
     }
     case 1: case 2:
@@ -6796,7 +6789,7 @@ void Screen_RaceOptions(void) {
     case 4: case 5:
         s_inner_state = 6;
         break;
-    case 6: /* interactive: cycle options / OK / BACK */
+    case 6: /* interactive: cycle options / OK / BACK / PREV / NEXT */
         /* ESC / gamepad-B: persist + return. Consumed HERE (screen dispatch runs
          * before the central back handler), which would otherwise navigate without
          * persisting; frontend_check_escape() is single-consume per frame so the
@@ -6806,17 +6799,35 @@ void Screen_RaceOptions(void) {
             break;
         }
         if (s_input_ready) {
-            int delta = frontend_option_delta();
-            int sel = (s_button_index >= 0) ? s_button_index : s_selected_button;
-            if (s_button_index == RO_SCR_OK_BTN || s_button_index == RO_SCR_BACK_BTN) {
-                raceopts_leave();
-            } else if (delta != 0 && sel >= 0 && sel < RO_OPT_COUNT &&
-                       s_buttons[sel].active && !s_buttons[sel].hidden) {
-                td5_raceopts_cycle(sel, delta);
-                frontend_play_sfx(2);
-                /* OPPONENTS gates the per-race DIFFICULTY row live. */
-                if (sel == RO_OPPONENTS)
-                    frontend_update_difficulty_button_visibility(RO_DIFFICULTY);
+            int delta     = frontend_option_delta();
+            int row_count = td5_raceopts_row_count();
+            int active    = (s_button_index >= 0) ? s_button_index : s_selected_button;
+            /* LEFT/RIGHT cycles the focused option row's value. */
+            if (delta != 0 && active >= 0 && active < row_count) {
+                int opt = td5_raceopts_row_option(active);
+                if (opt >= 0) {
+                    td5_raceopts_cycle(opt, delta);
+                    frontend_play_sfx(2);
+                    /* OPPONENTS gates the DIFFICULTY row live — rebuild the list.
+                     * OPPONENTS is always the first row, so focus stays put. */
+                    if (opt == RO_OPPONENTS) {
+                        td5_raceopts_update_opponents(s_num_ai_opponents);
+                        td5_raceopts_build_page();
+                        s_selected_button = active;
+                    }
+                }
+            }
+            /* A/Enter activations: OK/BACK persist + exit; PREV/NEXT flip the page.
+             * (prev/next ids are -1 on a single page, never matching a real index.) */
+            if (s_button_index >= 0) {
+                if (s_button_index == td5_raceopts_ok_btn() ||
+                    s_button_index == td5_raceopts_back_btn()) {
+                    raceopts_leave();
+                } else if (s_button_index == td5_raceopts_prev_btn()) {
+                    if (td5_raceopts_page_prev()) frontend_play_sfx(2);
+                } else if (s_button_index == td5_raceopts_next_btn()) {
+                    if (td5_raceopts_page_next()) frontend_play_sfx(2);
+                }
             }
         }
         break;
