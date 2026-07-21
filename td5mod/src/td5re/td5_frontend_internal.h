@@ -803,8 +803,8 @@ int  td5_gameopts_page_prev(void);             /* page--; rebuild; 1 if it moved
 int  td5_gameopts_page_next(void);             /* page++; rebuild; 1 if it moved */
 /* [PLAYER NAME 2026-07-02] The PLAYER NAME row (Enter-to-edit, no ◄►). */
 int  td5_gameopts_name_option(void);           /* option index of the name row */
-void td5_gameopts_name_edit_begin(void);       /* open the text-input editor */
-int  td5_gameopts_name_edit_tick(void);        /* 1 when editor closed (ok/esc) */
+void td5_playername_edit_begin(void);          /* open the PLAYER NAME text-input editor */
+int  td5_playername_edit_tick(void);           /* 1 when editor closed (ok/esc) */
 extern int             s_sound_option_music_volume;
 extern int             s_sound_option_sfx_mode;
 extern int             s_sound_option_sfx_volume;

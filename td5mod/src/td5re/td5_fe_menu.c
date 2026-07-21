@@ -1441,13 +1441,19 @@ void Screen_OptionsHub(void) {
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         s_anim_complete = 0;
 
-        /* [FIXED 2026-06-01, runtime @0x499c78] rows x=120 y=97 step40 (304-wide); OK (216,377) 96-wide. */
-        frontend_create_button(SNK_GameOptionsButTxt,      120,  97, 0x130, 0x20);
-        frontend_create_button(SNK_ControlOptionsButTxt,   120, 137, 0x130, 0x20);
-        frontend_create_button(SNK_SoundOptionsButTxt,     120, 177, 0x130, 0x20);
-        frontend_create_button(SNK_GraphicsOptionsButTxt,  120, 217, 0x130, 0x20);
-        frontend_create_button(SNK_TwoPlayerOptionsButTxt, 120, 257, 0x130, 0x20);
-        frontend_create_button(SNK_OkButTxt,               216, 377, 0x60,  0x20);
+        /* [FIXED 2026-06-01, runtime @0x499c78] rows x=120 y=97 step40 (304-wide); OK (216,377) 96-wide.
+         * [CONSOLIDATION 2026-07-21] PLAYER NAME promoted to its own top row
+         * (Enter-to-edit inline; the current name shows as the row value at x=350
+         * via frontend_render_options_hub_overlay). GAME OPTIONS is now redundant
+         * (every game-behaviour option lives on RACE OPTIONS) and sits at a
+         * temporary bottom slot until it is deleted in the final slice. */
+        frontend_create_button("PLAYER NAME",              120,  97, 0x130, 0x20); /* 0 */
+        frontend_create_button(SNK_ControlOptionsButTxt,   120, 137, 0x130, 0x20); /* 1 */
+        frontend_create_button(SNK_SoundOptionsButTxt,     120, 177, 0x130, 0x20); /* 2 */
+        frontend_create_button(SNK_GraphicsOptionsButTxt,  120, 217, 0x130, 0x20); /* 3 */
+        frontend_create_button(SNK_TwoPlayerOptionsButTxt, 120, 257, 0x130, 0x20); /* 4 */
+        frontend_create_button(SNK_GameOptionsButTxt,      120, 297, 0x130, 0x20); /* 5 (temporary) */
+        frontend_create_button(SNK_OkButTxt,               216, 377, 0x60,  0x20); /* 6 */
 
         frontend_begin_timed_animation();
         s_inner_state = 1;
@@ -1474,12 +1480,18 @@ void Screen_OptionsHub(void) {
     case 6: /* Interaction */
         if (s_input_ready && s_button_index >= 0) {
             switch (s_button_index) {
-            case 0: s_return_screen = TD5_SCREEN_GAME_OPTIONS;       s_inner_state = 7; break;
+            case 0: /* [CONSOLIDATION 2026-07-21] PLAYER NAME: Enter opens the
+                     * inline text-input editor (drawn by the overlay; state 10
+                     * ticks it until confirm/cancel — self-persists the INI key). */
+                td5_playername_edit_begin();
+                s_inner_state = 10;
+                break;
             case 1: s_return_screen = TD5_SCREEN_CONTROL_OPTIONS;    s_inner_state = 7; break;
             case 2: s_return_screen = TD5_SCREEN_SOUND_OPTIONS;      s_inner_state = 7; break;
             case 3: s_return_screen = TD5_SCREEN_DISPLAY_OPTIONS;    s_inner_state = 7; break;
             case 4: s_return_screen = TD5_SCREEN_TWO_PLAYER_OPTIONS; s_inner_state = 7; break;
-            case 5: /* OK -> return to main menu.
+            case 5: s_return_screen = TD5_SCREEN_GAME_OPTIONS;       s_inner_state = 7; break; /* temporary */
+            case 6: /* OK -> return to main menu.
                      * PARITY NOTE (audit 2026-05-30): the original 0x0041D890 OK case
                      * commits the option shadows to live globals here (camera =
                      * collisions^1 @0x41dc8e, dynamics @0x41dc82, traffic/cops, and
@@ -1513,6 +1525,13 @@ void Screen_OptionsHub(void) {
 
     case 9: /* Exit */
         td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
+        break;
+
+    case 10: /* [CONSOLIDATION 2026-07-21] PLAYER NAME editor active. The tick
+              * handles keystrokes, ESC-cancel and Enter-commit (commit also
+              * persists the INI key); returns 1 once the editor closed. */
+        if (td5_playername_edit_tick())
+            s_inner_state = 6;   /* back to interactive */
         break;
     }
 }
@@ -1588,7 +1607,7 @@ void Screen_GameOptions(void) {
                     /* [PLAYER NAME 2026-07-02] Enter on the PLAYER NAME row
                      * opens the text-input editor (widget drawn in the render
                      * path; state 10 ticks it until confirm/cancel). */
-                    td5_gameopts_name_edit_begin();
+                    td5_playername_edit_begin();
                     s_inner_state = 10;
                 } else if (s_button_index == td5_gameopts_ok_btn()) {
                     /* Sync the committed game options into g_td5.ini (the global the
@@ -1630,7 +1649,7 @@ void Screen_GameOptions(void) {
     case 10: /* [PLAYER NAME 2026-07-02] Name editor active. The tick handles
               * keystrokes, ESC-cancel and Enter-commit (commit also persists
               * the INI key); returns 1 once the editor closed. */
-        if (td5_gameopts_name_edit_tick())
+        if (td5_playername_edit_tick())
             s_inner_state = 4;   /* redraw values (name may have changed) */
         break;
     }

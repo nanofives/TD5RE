@@ -6653,36 +6653,66 @@ int td5_raceopts_page_next(void) {
  * (mirrors the nickname editor, so the name sticks even if the screen is later
  * left via ESC instead of OK). Mixed case is allowed on purpose: results and
  * the high-score prefill must show the name exactly as typed. */
-static char s_go_name_edit[16];
+static char s_playername_edit[16];
 
 int td5_gameopts_name_option(void) { return GO_PLAYER_NAME; }
 
-void td5_gameopts_name_edit_begin(void) {
-    snprintf(s_go_name_edit, sizeof s_go_name_edit, "%s", g_td5.ini.player_name);
-    frontend_begin_text_input(s_go_name_edit, (int)sizeof s_go_name_edit);
+/* [CONSOLIDATION 2026-07-21] PLAYER NAME editor — moved to the OPTIONS hub row
+ * (see Screen_OptionsHub); still driven from Screen_GameOptions until that screen
+ * is retired. Self-persists [GameOptions]PlayerName on Enter (ESC discards). */
+void td5_playername_edit_begin(void) {
+    snprintf(s_playername_edit, sizeof s_playername_edit, "%s", g_td5.ini.player_name);
+    frontend_begin_text_input(s_playername_edit, (int)sizeof s_playername_edit);
     s_text_input_mixed_case = 1;
-    TD5_LOG_I(LOG_TAG, "GameOptions: PLAYER NAME edit begin (current=\"%s\")",
-              g_td5.ini.player_name);
+    TD5_LOG_I(LOG_TAG, "PlayerName: edit begin (current=\"%s\")", g_td5.ini.player_name);
 }
 
-int td5_gameopts_name_edit_tick(void) {
+int td5_playername_edit_tick(void) {
     frontend_handle_text_input_key();
     if (frontend_check_escape()) {               /* ESC = cancel, discard edits */
         frontend_reset_text_input();
-        TD5_LOG_I(LOG_TAG, "GameOptions: PLAYER NAME edit cancelled");
+        TD5_LOG_I(LOG_TAG, "PlayerName: edit cancelled");
         return 1;
     }
     if (frontend_text_input_confirmed()) {
         snprintf(g_td5.ini.player_name, sizeof g_td5.ini.player_name, "%s",
-                 s_go_name_edit);
+                 s_playername_edit);
         td5_ini_write_str("GameOptions", "PlayerName", g_td5.ini.player_name);
         frontend_play_sfx(5);
         frontend_reset_text_input();
-        TD5_LOG_I(LOG_TAG, "GameOptions: PLAYER NAME set to \"%s\"",
-                  g_td5.ini.player_name);
+        TD5_LOG_I(LOG_TAG, "PlayerName: set to \"%s\"", g_td5.ini.player_name);
         return 1;
     }
     return 0;
+}
+
+static float fe_measure_text_cased(const char *text, float sx, float sy);
+
+/* PLAYER NAME row value + inline editor for the OPTIONS hub (button 0). Draws the
+ * current name at x=350; while Enter-to-edit is active, shows the live scratch
+ * buffer + a blinking green caret (same 350ms clock the GAME OPTIONS row used). */
+static void frontend_render_options_hub_overlay(float sx, float sy) {
+    int editing, saved_case;
+    const char *shown;
+    float x, ty;
+    if (!s_anim_complete) return;
+    if (s_button_count < 1 || !s_buttons[0].active) return;
+    editing = (s_text_input_state != 0 && s_text_input_ctx.buffer == s_playername_edit);
+    shown = editing ? s_playername_edit
+                    : (g_td5.ini.player_name[0] ? g_td5.ini.player_name : "-");
+    x  = 350.0f * sx;
+    ty = (float)(s_buttons[0].y + 6) * sy;
+    saved_case = s_fe_preserve_case;
+    s_fe_preserve_case = 1;                       /* keep true lowercase */
+    fe_draw_text(x, ty, shown, 0xFFFFFFFF, sx, sy);
+    if (editing &&
+        (((td5_plat_time_ms() - s_text_input_ctx.blink_tick) / 350U) & 1U) == 0U) {
+        float caret_x = x + fe_measure_text_cased(shown, sx, sy) + 1.0f * sx;
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        fe_draw_quad(caret_x, ty + 6.0f * sy, 2.0f * sx, 16.0f * sy,
+                     0xFF00FF00, -1, 0, 0, 0, 0);
+    }
+    s_fe_preserve_case = saved_case;
 }
 
 /* (Re)create the button set for the current page: the page's option rows
@@ -6780,8 +6810,8 @@ static void frontend_render_game_options_overlay(float sx, float sy) {
          * (the modal draw for this screen was removed from the render dispatch). */
         if (opt == GO_PLAYER_NAME) {
             int   editing = (s_text_input_state != 0 &&
-                             s_text_input_ctx.buffer == s_go_name_edit);
-            const char *shown = editing ? s_go_name_edit : (val[0] ? val : "-");
+                             s_text_input_ctx.buffer == s_playername_edit);
+            const char *shown = editing ? s_playername_edit : (val[0] ? val : "-");
             float cx = (float)FE_VALUE_CENTER_X * sx;
             float ty = (float)(s_buttons[r].y + 6) * sy;
             /* Centre by the TRUE mixed-case width (not the caps-fold measure), so
@@ -9689,6 +9719,10 @@ void td5_frontend_render_ui_rects(void) {
          * the options list (scratch buffer + caret drawn by the overlay itself) —
          * no pop-up "ENTER PLAYER NAME" text-input modal on this screen any more. */
         frontend_render_game_options_overlay(sx, sy);
+        break;
+    case TD5_SCREEN_OPTIONS_HUB:
+        /* [CONSOLIDATION 2026-07-21] PLAYER NAME row value + inline editor. */
+        frontend_render_options_hub_overlay(sx, sy);
         break;
     case TD5_SCREEN_SOUND_OPTIONS:
         frontend_render_sound_options_overlay(sx, sy);
