@@ -256,7 +256,6 @@ int  s_mp_player_cell[TD5_MAX_HUMAN_PLAYERS] = { 0, 1, 2, 3, 4, 5, 6, 7, 8 };
 /* Dynamic button-index bookkeeping for the rebuilt Multiplayer Options rows
  * (the row set changes with the player count, so buttons are rebuilt live). */
 int  s_mp_btn_players   = -1;
-int  s_mp_btn_catchup   = -1;   /* [S05 2026-06-04] CATCHUP toggle row */
 int  s_mp_btn_layout    = -1;
 int  s_mp_btn_missing[2] = { -1, -1 };
 int  s_mp_btn_nickname  = -1;    /* S10: edit net-play nickname (below split rows) */
@@ -1431,13 +1430,14 @@ static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_RACE_TYPE_MENU:
         return (s_inner_state >= 6 && s_inner_state <= 10) ? "SELECT CUP" : "RACE TYPE";
     case TD5_SCREEN_QUICK_RACE:         return "QUICK RACE";
-    case TD5_SCREEN_OPTIONS_HUB:
-    case TD5_SCREEN_GAME_OPTIONS:
-    case TD5_SCREEN_CONTROL_OPTIONS:
-    case TD5_SCREEN_SOUND_OPTIONS:
-    case TD5_SCREEN_DISPLAY_OPTIONS:
-    case TD5_SCREEN_TWO_PLAYER_OPTIONS:
-    case TD5_SCREEN_CONTROLLER_BINDING: return "OPTIONS";
+    /* [OPTIONS TITLES 2026-07-21] Each options sub-screen gets its own header
+     * instead of a shared generic "OPTIONS" (GAME_OPTIONS retired). */
+    case TD5_SCREEN_OPTIONS_HUB:        return "OPTIONS";
+    case TD5_SCREEN_CONTROL_OPTIONS:    return "CONTROL OPTIONS";
+    case TD5_SCREEN_SOUND_OPTIONS:      return "SOUND OPTIONS";
+    case TD5_SCREEN_DISPLAY_OPTIONS:    return "GRAPHICS OPTIONS";
+    case TD5_SCREEN_TWO_PLAYER_OPTIONS: return "MULTIPLAYER OPTIONS";
+    case TD5_SCREEN_CONTROLLER_BINDING: return "CONTROLLER SETUP";
     case TD5_SCREEN_CAR_SELECTION:      return "SELECT CAR";
     case TD5_SCREEN_TRACK_SELECTION:    return "SELECT TRACK";
     case TD5_SCREEN_CUP_TRACK_SELECT:   return "CUP TRACKS";   /* forked cup multi-pick */
@@ -6175,6 +6175,7 @@ const char *td5_raceopts_label(int idx) {
         case RO_TRAFFIC:     return SNK_TrafficButTxt;
         case RO_POLICE:      return SNK_CopsButTxt;        /* label: POLICE */
         case RO_DIFFICULTY:  return SNK_DifficultyButTxt;
+        case RO_CATCHUP:     return SNK_CatchupTxt;        /* [CATCHUP 2026-07-21] MP AI rubber-band */
         case RO_DYNAMICS:    return SNK_DynamicsButTxt;
         case RO_CHECKPOINTS: return SNK_CheckpointTimersButTxt;
         case RO_POWERUPS:    return "POWER-UPS";
@@ -6219,6 +6220,7 @@ void td5_raceopts_value(int idx, char *out, size_t out_sz) {
             v = traffic_vol[t]; break;
         case RO_POLICE:      v = on_off[s_game_option_cops & 1]; break;
         case RO_DIFFICULTY:  v = difficulty[((s_race_difficulty % 3) + 3) % 3]; break;
+        case RO_CATCHUP:     v = on_off[td5_save_get_catchup_assist() > 0 ? 1 : 0]; break;
         case RO_DYNAMICS:    v = dynamics[s_game_option_dynamics & 1]; break;
         case RO_CHECKPOINTS: v = on_off[s_game_option_checkpoint_timers & 1]; break;
         case RO_POWERUPS:
@@ -6259,6 +6261,11 @@ void td5_raceopts_cycle(int idx, int delta) {
             if (s_race_difficulty < 0) s_race_difficulty = 2;
             if (s_race_difficulty > 2) s_race_difficulty = 0;
             break;
+        case RO_CATCHUP: {   /* [CATCHUP 2026-07-21] MP AI rubber-band on/off */
+            int cur = td5_save_get_catchup_assist();
+            td5_save_set_catchup_assist(cur > 0 ? 0 : 1);
+            break;
+        }
         case RO_DYNAMICS:    s_game_option_dynamics ^= 1; break;
         case RO_CHECKPOINTS: s_game_option_checkpoint_timers ^= 1; break;
         case RO_POWERUPS:    /* [ITEM CHAOS] cycle 0=OFF -> 1=CASUAL -> 2=CHAOS */
@@ -6331,6 +6338,8 @@ int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
         if (c->is_mp && c->is_cop_chase) return 0;   /* MP cop chase */
         if (c->is_drag) return 1;                    /* drag: always shown */
         return c->opponents > 0;                     /* hidden at 0 opponents */
+    case RO_CATCHUP:     /* [CATCHUP 2026-07-21] MP-only AI rubber-band assist */
+        return c->is_mp;
     case RO_DYNAMICS:
         return 1;                                    /* every mode */
     case RO_CHECKPOINTS: /* checkpoint TIMERS: SP point-to-point only (off in MP,
@@ -6678,13 +6687,7 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
     snprintf(buf, sizeof buf, "%d", s_num_human_players);
     frontend_draw_value_centered(sx, sy, s_buttons[s_mp_btn_players].y + 6, buf, 0xFFFFFFFF);
 
-    /* [S05 2026-06-04] CATCHUP = ON / OFF (persisted AI rubber-band assist,
-     * read live via td5_save_get_catchup_assist; consumed by S06). */
-    if (s_mp_btn_catchup >= 0 && s_buttons[s_mp_btn_catchup].active) {
-        frontend_draw_value_centered(sx, sy, s_buttons[s_mp_btn_catchup].y + 6,
-                                     td5_save_get_catchup_assist() > 0 ? "ON" : "OFF",
-                                     0xFFFFFFFF);
-    }
+    /* [CATCHUP 2026-07-21] CATCHUP moved to RACE OPTIONS (MP modes). */
 
     /* SPLIT LAYOUT = current layout label */
     if (s_mp_btn_layout >= 0 && s_buttons[s_mp_btn_layout].active) {
@@ -9702,10 +9705,9 @@ void td5_frontend_render_ui_rects(void) {
             break;
         case TD5_SCREEN_TWO_PLAYER_OPTIONS:
             /* [PORT ENHANCEMENT 2026-06] Multiplayer Options ◄►: PLAYERS always,
-             * CATCHUP always (on/off), SPLIT LAYOUT only when >1 layout exists,
-             * plus each DISPLAY row. */
+             * SPLIT LAYOUT only when >1 layout exists, plus each DISPLAY row.
+             * (CATCHUP moved to RACE OPTIONS 2026-07-21.) */
             if (s_mp_btn_players >= 0) fe_draw_option_arrows(s_mp_btn_players, sx, sy);
-            if (s_mp_btn_catchup >= 0) fe_draw_option_arrows(s_mp_btn_catchup, sx, sy);
             if (s_mp_btn_layout >= 0 && s_mp_layout_optcount > 1)
                 fe_draw_option_arrows(s_mp_btn_layout, sx, sy);
             for (int i = 0; i < s_mp_missing_count && i < 2; i++)

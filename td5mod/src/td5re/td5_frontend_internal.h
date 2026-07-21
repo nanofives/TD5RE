@@ -599,7 +599,11 @@ void Screen_RaceOptions(void);
 /* Option ids: screen button i (0..RO_OPT_COUNT-1) maps 1:1 to these; OK + BACK
  * follow. */
 enum {
-    RO_OPPONENTS = 0, RO_TRAFFIC, RO_POLICE, RO_DIFFICULTY, RO_DYNAMICS,
+    RO_OPPONENTS = 0, RO_TRAFFIC, RO_POLICE, RO_DIFFICULTY,
+    /* [CATCHUP 2026-07-21] AI rubber-band assist — MP-only, moved here from the
+     * Multiplayer Options screen so it lives with the other per-race MP options. */
+    RO_CATCHUP,
+    RO_DYNAMICS,
     RO_CHECKPOINTS, RO_POWERUPS, RO_TOUGHNESS, RO_DEFORM,
     /* [RACE OPTIONS CONSOLIDATION 2026-07-21] absorbed from the retired GAME
      * OPTIONS screen so RACE OPTIONS is the single game-behaviour surface. */
@@ -809,7 +813,6 @@ extern int  s_band_cover_surface[5];
 extern int  s_control_options_surface;
 extern int  s_credit_mugshot_surf[K_CREDIT_MUGSHOT_COUNT];
 extern int  s_cup_unlock_tier;
-extern int  s_mp_btn_catchup;
 extern int  s_mp_btn_layout;
 extern int  s_mp_btn_missing[2];
 extern int  s_mp_btn_nickname;

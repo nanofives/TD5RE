@@ -1950,7 +1950,7 @@ static void mp_build_buttons(void)
     s_mp_missing_count = missing;
 
     frontend_reset_buttons();
-    s_mp_btn_players = s_mp_btn_catchup = s_mp_btn_layout = s_mp_btn_ok = -1;
+    s_mp_btn_players = s_mp_btn_layout = s_mp_btn_ok = -1;
     s_mp_btn_missing[0] = s_mp_btn_missing[1] = -1;
     s_mp_btn_nickname = -1;
 
@@ -1961,12 +1961,10 @@ static void mp_build_buttons(void)
     y = 77;
     s_mp_btn_players = frontend_create_button(SNK_MpPlayersButTxt, 120, y, 0x100, 0x20);
     y += 50;
-    /* [S05 2026-06-04] CATCHUP toggle row, between PLAYERS and SPLIT LAYOUT. The
-     * value is the persisted AI rubber-band assist (td5_save get/set_catchup_assist,
-     * default 1 = on); S06's td5_ai_get_catchup_level() consumes it (ON = softened
-     * rubber-band, OFF = no player-distance boost/cut). */
-    s_mp_btn_catchup = frontend_create_button(SNK_CatchupTxt, 120, y, 0x100, 0x20);
-    y += 50;
+    /* [CATCHUP 2026-07-21] The CATCHUP (AI rubber-band assist) row moved to RACE
+     * OPTIONS (shown for MP modes) — it is a per-race option now, sitting with
+     * difficulty/opponents. td5_ai_get_catchup_level() still consumes the same
+     * td5_save catchup_assist byte, so behaviour is unchanged. */
     /* [#9] SPLIT LAYOUT selector + its empty-cell (DISPLAY k) rows are owned by
      * the MP "choose your screen" position screen now; default-on knob skips both
      * (s_mp_btn_layout / s_mp_btn_missing[] stay -1, missing is forced 0 above) so
@@ -2038,14 +2036,6 @@ void Screen_TwoPlayerOptions(void) {
                     s_selected_button = (s_mp_btn_players >= 0) ? s_mp_btn_players : 0;
                     frontend_play_sfx(2);
                 }
-                s_inner_state = 4;
-            } else if (active_button == s_mp_btn_catchup && delta != 0) {
-                /* [S05 2026-06-04] CATCHUP on/off toggle. Either arrow flips it;
-                 * persisted via td5_save (organized td5re_input.ini [Assist]) and
-                 * consumed by S06's td5_ai_get_catchup_level(). 0 = off, 1 = on. */
-                int cur = td5_save_get_catchup_assist();
-                td5_save_set_catchup_assist(cur > 0 ? 0 : 1);
-                frontend_play_sfx(2);
                 s_inner_state = 4;
             } else if (active_button == s_mp_btn_layout && delta != 0 &&
                        s_mp_layout_optcount > 1) {
