@@ -546,7 +546,7 @@ void Screen_PendingTest(void) {
          * to the list underneath. frontend_check_escape() consumes the escape
          * edge here so the central back-handler (td5_frontend.c step 7) can't
          * ALSO fire on the same press and leave the screen entirely -- same
-         * "steal the edge" idiom td5_playername_edit_tick uses for its own
+         * "steal the edge" idiom the nickname editor tick uses for its own
          * sub-mode. Everything else (SUPR, paging, BACK) is swallowed. */
         if (s_pl_modal_open) {
             if ((s_input_ready && s_button_index >= 0) || frontend_check_escape()) {

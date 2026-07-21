@@ -9350,9 +9350,11 @@ void Screen_PostRaceNameEntry(void) {
          * port's explicit prefill is deliberate UX, the options name playing
          * the computer-name role. */
         memset(s_post_race_name, 0, sizeof(s_post_race_name));
-        if (g_td5.ini.player_name[0])
+        /* [NAME MERGE 2026-07-21] Prefill from the single player identity — the
+         * multiplayer nickname (player_name merged into net_nickname). */
+        if (g_td5.ini.net_nickname[0])
             snprintf(s_post_race_name, sizeof(s_post_race_name), "%s",
-                     g_td5.ini.player_name);
+                     g_td5.ini.net_nickname);
         else
             strcpy(s_post_race_name, "PLAYER");
         frontend_begin_text_input(s_post_race_name, (int)sizeof(s_post_race_name));
@@ -9377,9 +9379,9 @@ void Screen_PostRaceNameEntry(void) {
              * deleted name refills from the Game Options PLAYER NAME (or the
              * legacy "PLAYER") so an empty string never reaches the table. */
             if (!s_post_race_name[0]) {
-                if (g_td5.ini.player_name[0])
+                if (g_td5.ini.net_nickname[0])
                     snprintf(s_post_race_name, sizeof(s_post_race_name), "%s",
-                             g_td5.ini.player_name);
+                             g_td5.ini.net_nickname);
                 else
                     strcpy(s_post_race_name, "PLAYER");
                 TD5_LOG_I(LOG_TAG, "PostRaceNameEntry: empty confirm -> \"%s\"",

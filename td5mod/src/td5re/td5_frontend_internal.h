@@ -788,9 +788,8 @@ extern int             s_trksel_dyn_btn;    /* [ARCADE] ARCADE/SIM row index on 
 
 /* [RACE OPTIONS CONSOLIDATION 2026-07-21] The paginated GAME OPTIONS model was
  * retired — RACE OPTIONS (td5_raceopts_*, above) is the single game-behaviour
- * surface. Only the PLAYER NAME editor survives, on the OPTIONS hub row. */
-void td5_playername_edit_begin(void);          /* open the PLAYER NAME text-input editor */
-int  td5_playername_edit_tick(void);           /* 1 when editor closed (ok/esc) */
+ * surface. [NAME MERGE 2026-07-21] The PLAYER NAME editor was also removed — the
+ * single player identity is the multiplayer NICKNAME (Screen_NetNickname). */
 extern int             s_sound_option_music_volume;
 extern int             s_sound_option_sfx_mode;
 extern int             s_sound_option_sfx_volume;

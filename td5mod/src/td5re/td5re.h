@@ -742,13 +742,9 @@ typedef struct TD5_GlobalState {
         int  net_game_port;     /* host UDP game port (default 37050) */
         int  net_enable_upnp;   /* Direct host: open the port via UPnP (default 1) */
         char net_nickname[32];  /* player nickname shown in the lobby roster */
-        /* [PLAYER NAME 2026-07-02] Game Options PLAYER NAME row: the player's
-         * display name for single-player race results and the prefill of the
-         * post-race high-score name entry. 15 chars + NUL to match the
-         * high-score commit, which copies 15 bytes and forces a NUL at +0xF
-         * (ScreenPostRaceNameEntry case 4 @ 0x004140A3-0x004140DD). Empty =
-         * unset (results fall back to "P1", name entry to "PLAYER"). */
-        char player_name[16];
+        /* [NAME MERGE 2026-07-21] player_name retired — the single player identity
+         * is net_nickname (below); single-player results / high-score prefill now
+         * read that. */
         /* [Game] CelebrityNamesAPI: when 1, fetches first names from
          * randomuser.me at startup and applies them to NPC leaderboard slots
          * that still hold original default names (no player score set yet).

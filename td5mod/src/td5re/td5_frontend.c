@@ -581,8 +581,11 @@ const char *frontend_human_display_name(int slot) {
     }
     if (slot >= 0 && slot < TD5_MAX_HUMAN_PLAYERS && s_mp_player_name[slot][0])
         return s_mp_player_name[slot];
-    if (slot == 0 && g_td5.ini.player_name[0])
-        return g_td5.ini.player_name;
+    /* [NAME MERGE 2026-07-21] slot 0 falls back to the single player identity —
+     * the multiplayer nickname (player_name/[GameOptions]PlayerName was merged
+     * into net_nickname). */
+    if (slot == 0 && g_td5.ini.net_nickname[0])
+        return g_td5.ini.net_nickname;
     return NULL;
 }
 
@@ -6156,8 +6159,8 @@ void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
 /* [RACE OPTIONS CONSOLIDATION 2026-07-21] The paginated GAME OPTIONS model
  * (GO_* enum, go_label/value/cycle/commit, page state) was deleted: RACE OPTIONS
  * (td5_raceopts_* below) is now the single game-behaviour surface for every mode.
- * The PLAYER NAME editor that lived here moved to its own accessor
- * (td5_playername_edit_*, further down) on the OPTIONS hub. */
+ * The PLAYER NAME row/editor that lived here was removed in the 2026-07-21 name
+ * merge — the single player identity is the multiplayer NICKNAME. */
 
 /* ===== RACE OPTIONS modal model (PORT ENHANCEMENT 2026-07-04) ================
  * The track-select "RACE OPTIONS" button opens a modal consolidating every
@@ -6441,97 +6444,11 @@ int td5_raceopts_page_next(void) {
     return 0;
 }
 
-/* [PLAYER NAME 2026-07-02] Game Options PLAYER NAME editor. The row is
- * Enter-to-edit: it opens the standard gold text-input widget over the screen
- * (same widget the post-race name entry / net nickname editors use; drawn from
- * the render path). Edits go to a scratch buffer so ESC-cancel discards them;
- * Enter commits to g_td5.ini.player_name and persists the INI key immediately
- * (mirrors the nickname editor, so the name sticks even if the screen is later
- * left via ESC instead of OK). Mixed case is allowed on purpose: results and
- * the high-score prefill must show the name exactly as typed. */
-static char s_playername_edit[16];
-
-/* [CONSOLIDATION 2026-07-21] PLAYER NAME editor — lives on the OPTIONS hub row
- * (see Screen_OptionsHub). Self-persists [GameOptions]PlayerName on Enter (ESC
- * discards), so no separate commit plumbing is needed. */
-void td5_playername_edit_begin(void) {
-    snprintf(s_playername_edit, sizeof s_playername_edit, "%s", g_td5.ini.player_name);
-    frontend_begin_text_input(s_playername_edit, (int)sizeof s_playername_edit);
-    s_text_input_mixed_case = 1;
-    TD5_LOG_I(LOG_TAG, "PlayerName: edit begin (current=\"%s\")", g_td5.ini.player_name);
-}
-
-int td5_playername_edit_tick(void) {
-    frontend_handle_text_input_key();
-    if (frontend_check_escape()) {               /* ESC = cancel, discard edits */
-        frontend_reset_text_input();
-        TD5_LOG_I(LOG_TAG, "PlayerName: edit cancelled");
-        return 1;
-    }
-    if (frontend_text_input_confirmed()) {
-        snprintf(g_td5.ini.player_name, sizeof g_td5.ini.player_name, "%s",
-                 s_playername_edit);
-        td5_ini_write_str("GameOptions", "PlayerName", g_td5.ini.player_name);
-        frontend_play_sfx(5);
-        frontend_reset_text_input();
-        TD5_LOG_I(LOG_TAG, "PlayerName: set to \"%s\"", g_td5.ini.player_name);
-        return 1;
-    }
-    return 0;
-}
-
-static float fe_measure_text_cased(const char *text, float sx, float sy);
-
-/* PLAYER NAME row value + inline editor for the OPTIONS hub (button 0). Draws the
- * current name at x=350; while Enter-to-edit is active, shows the live scratch
- * buffer + a blinking green caret (same 350ms clock the GAME OPTIONS row used). */
-static void frontend_render_options_hub_overlay(float sx, float sy) {
-    int editing, saved_case;
-    const char *shown;
-    float x, ty;
-    if (!s_anim_complete) return;
-    if (s_button_count < 1 || !s_buttons[0].active) return;
-    editing = (s_text_input_state != 0 && s_text_input_ctx.buffer == s_playername_edit);
-    shown = editing ? s_playername_edit
-                    : (g_td5.ini.player_name[0] ? g_td5.ini.player_name : "-");
-    x  = 350.0f * sx;
-    ty = (float)(s_buttons[0].y + 6) * sy;
-    saved_case = s_fe_preserve_case;
-    s_fe_preserve_case = 1;                       /* keep true lowercase */
-    fe_draw_text(x, ty, shown, 0xFFFFFFFF, sx, sy);
-    if (editing &&
-        (((td5_plat_time_ms() - s_text_input_ctx.blink_tick) / 350U) & 1U) == 0U) {
-        float caret_x = x + fe_measure_text_cased(shown, sx, sy) + 1.0f * sx;
-        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-        fe_draw_quad(caret_x, ty + 6.0f * sy, 2.0f * sx, 16.0f * sy,
-                     0xFF00FF00, -1, 0, 0, 0, 0);
-    }
-    s_fe_preserve_case = saved_case;
-}
-
-/* Body-font width WITHOUT the toupper fold that fe_measure_text / _width apply.
- * Needed to place the inline PLAYER NAME caret snug against mixed-case glyphs:
- * the caps fold overestimates lowercase widths (caps are wider), which left a
- * visible gap after the last typed letter. Mirrors fe_measure_text otherwise. */
-static float fe_measure_text_cased(const char *text, float sx, float sy) {
-    float w = 0.0f;
-    float gsx = fe_glyph_sx(sx, sy);
-    if (!text) return 0.0f;
-    if (td5_font_ready()) {
-        const float cap_px = 15.0f * sy;
-        const float hscale = (sx < sy) ? (sx / sy) : 1.0f;
-        const float trkn   = (float)FONT_GLYPH_TRACKING * sy * hscale;
-        for (int i = 0; text[i]; i++)
-            w += td5_font_advance((unsigned char)text[i], cap_px) * hscale + trkn;
-        return w;
-    }
-    for (int i = 0; text[i]; i++) {
-        int c = (unsigned char)text[i];
-        if (c < 32 || c > 127) { w += (14.0f + FONT_GLYPH_TRACKING) * gsx; continue; }
-        w += ((float)s_font_glyph_advance[c - 0x20] + FONT_GLYPH_TRACKING) * gsx;
-    }
-    return w;
-}
+/* [NAME MERGE 2026-07-21] The OPTIONS-hub PLAYER NAME editor + inline-render
+ * overlay (td5_playername_edit_* / frontend_render_options_hub_overlay) and the
+ * mixed-case caret measurer (fe_measure_text_cased) were removed: the single
+ * player identity is the multiplayer NICKNAME (g_td5.ini.net_nickname), edited on
+ * the Multiplayer Options screen via Screen_NetNickname. */
 
 static void frontend_render_display_options_overlay(float sx, float sy) {
     char damping[16];
@@ -9396,10 +9313,6 @@ void td5_frontend_render_ui_rects(void) {
         break;
     case TD5_SCREEN_QUICK_RACE:
         frontend_render_quick_race_overlay(sx, sy);
-        break;
-    case TD5_SCREEN_OPTIONS_HUB:
-        /* [CONSOLIDATION 2026-07-21] PLAYER NAME row value + inline editor. */
-        frontend_render_options_hub_overlay(sx, sy);
         break;
     case TD5_SCREEN_SOUND_OPTIONS:
         frontend_render_sound_options_overlay(sx, sy);
