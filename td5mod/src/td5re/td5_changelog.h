@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 20" },
+    { CL_ITEM,    "FIX: RACE OPTIONS power-ups now offers OFF / CASUAL /" },
+    { CL_ITEM,    "  CHAOS (incl. split-screen setup) - CHAOS was hidden" },
+    { CL_ITEM,    "  behind an OFF/ON-only toggle." },
     { CL_ITEM,    "FIX: recovering from a graphics-card hang (driver TDR)" },
     { CL_ITEM,    "  no longer crashes on the first frame back - the" },
     { CL_ITEM,    "  display layer was re-binding a texture from the old," },

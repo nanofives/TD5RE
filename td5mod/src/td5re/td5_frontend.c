@@ -6411,6 +6411,12 @@ void td5_raceopts_value(int idx, char *out, size_t out_sz) {
      * td5_gameopts_value — see td5_damage_deform_enabled(). */
     static const char *const deform_lv[] = { "LOW", "NORMAL", "HIGH", "OFF" };
     static const char *const dynamics[]    = { "ARCADE", "SIMULATION" };
+    /* [ITEM CHAOS 2026-07-04] Power-ups are 3-state (0=OFF 1=CASUAL 2=CHAOS),
+     * same as td5_gameopts_value's powerups_lv[] and the arcade backend
+     * (td5_arcade.c). The RACE OPTIONS screen — reached from track-select in
+     * both single-player and MP split-screen setup — previously showed only a
+     * 2-state OFF/ON toggle, hiding CHAOS; mirror the full 3-state model here. */
+    static const char *const powerups_lv[] = { "OFF", "CASUAL", "CHAOS" };
     const char *v = "";
     int t;
     switch (idx) {
@@ -6424,7 +6430,9 @@ void td5_raceopts_value(int idx, char *out, size_t out_sz) {
         case RO_DIFFICULTY:  v = difficulty[((s_race_difficulty % 3) + 3) % 3]; break;
         case RO_DYNAMICS:    v = dynamics[s_game_option_dynamics & 1]; break;
         case RO_CHECKPOINTS: v = on_off[s_game_option_checkpoint_timers & 1]; break;
-        case RO_POWERUPS:    v = on_off[s_game_option_powerups & 1]; break;
+        case RO_POWERUPS:
+            t = s_game_option_powerups; if (t < 0) t = 0; if (t > 2) t = 2;
+            v = powerups_lv[t]; break;
         case RO_TOUGHNESS:
             t = s_game_option_car_toughness; if (t < 0) t = 0; if (t > 3) t = 3;
             v = toughness_lv[t]; break;
@@ -6457,7 +6465,13 @@ void td5_raceopts_cycle(int idx, int delta) {
             break;
         case RO_DYNAMICS:    s_game_option_dynamics ^= 1; break;
         case RO_CHECKPOINTS: s_game_option_checkpoint_timers ^= 1; break;
-        case RO_POWERUPS:    s_game_option_powerups ^= 1; break;
+        case RO_POWERUPS:    /* [ITEM CHAOS] cycle 0=OFF -> 1=CASUAL -> 2=CHAOS */
+            s_game_option_powerups += delta;
+            if (s_game_option_powerups < 0) s_game_option_powerups = 2;
+            if (s_game_option_powerups > 2) s_game_option_powerups = 0;
+            TD5_LOG_I(LOG_TAG, "raceopts: POWER-UPS -> %d (0=OFF 1=CASUAL 2=CHAOS)",
+                      s_game_option_powerups);
+            break;
         case RO_TOUGHNESS:
             /* [TOUGHNESS OFF 2026-07-04] LOW(0) -> MEDIUM(1) -> HIGH(2) -> OFF(3). */
             s_game_option_car_toughness += delta;
