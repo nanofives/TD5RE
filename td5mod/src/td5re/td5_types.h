@@ -89,7 +89,7 @@
 #define TD5_MAX_HUMAN_PLAYERS       9       /* up to 9 local split-screen humans */
 #define TD5_MAX_RACER_SLOTS         16      /* humans + AI = total racers */
 #define TD5_MAX_AI_OPPONENTS        (TD5_MAX_RACER_SLOTS - 1)  /* 15 */
-#define TD5_MAX_TRAFFIC_SLOTS       16      /* PORT: raised from 6 — VERY HIGH traffic; extra cars reuse the 6 per-track models */
+#define TD5_MAX_TRAFFIC_SLOTS       64      /* PORT: raised 6->16->32->64 — dynamic per-player cap (each racer anchors up to 16; pool = ceiling of ~4 fully-separated 16-car bubbles); extra cars reuse the 6 per-track models. MUST match TD5_ACTOR_MAX_TOTAL_SLOTS math in re/include/td5_actor_struct.h */
 #define TD5_MAX_TOTAL_ACTORS        (TD5_MAX_RACER_SLOTS + TD5_MAX_TRAFFIC_SLOTS)  /* 32 */
 #define TD5_TRAFFIC_SLOT_BASE       TD5_MAX_RACER_SLOTS  /* first traffic slot (was hardcoded 6) */
 #define TD5_MAX_VIEWPORTS           9       /* up to 9 split-screen viewports (3x3 grid) */

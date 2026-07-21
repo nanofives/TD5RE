@@ -53,6 +53,15 @@
 #include "td5_backend_capture.h" /* photo-booth framebuffer read-back API */
 #include "td5_inputscript.h" /* scripted-input harness ([Trace] InputScript) */
 
+/* [PER-PLAYER TRAFFIC CAP 2026-07-21] The render/per-slot arrays are sized by
+ * TD5_ACTOR_MAX_TOTAL_SLOTS (re/include/td5_actor_struct.h) while the actor pool
+ * and AI/traffic arrays are sized by TD5_MAX_TOTAL_ACTORS (td5_types.h). They are
+ * two independent literals in separate headers; if they ever drift the render
+ * loop over-runs its arrays. Pin them equal here (td5_game.c sees both headers)
+ * so growing the traffic pool can never silently under-size the render arrays. */
+_Static_assert(TD5_ACTOR_MAX_TOTAL_SLOTS == TD5_MAX_TOTAL_ACTORS,
+               "render slot bound (td5_actor_struct.h) must equal actor-pool size (td5_types.h)");
+
 int td5_trace_current_sim_tick(void) {
     return g_td5.simulation_tick_counter;
 }
