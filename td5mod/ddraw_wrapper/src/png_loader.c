@@ -256,6 +256,25 @@ static void PngCache_Store(uint32_t crc, ID3D11ShaderResourceView *srv, int has_
     }
 }
 
+/* [DEVICE-LOST 2026-07-20] Drop every cached override SRV. The SRVs were created
+ * on a device that a TDR recovery is about to replace; keeping them would hand a
+ * freed-device pointer back to the next WrapperTexture::Load "cache hit". Called
+ * from Backend_ReleaseDeviceObjects (before the old device is released, so these
+ * releases are CPU-side refcount drops only). The has_alpha result is a property
+ * of the source pixels, not the device, but it lives in the same entry, so the
+ * next Load simply re-decodes — correct, just not cached across the reset. */
+void PngOverride_InvalidateCache(void)
+{
+    int i;
+    for (i = 0; i < g_png_cache_count; i++) {
+        if (g_png_cache[i].srv) {
+            ID3D11ShaderResourceView_Release(g_png_cache[i].srv);
+            g_png_cache[i].srv = NULL;
+        }
+    }
+    g_png_cache_count = 0;
+}
+
 /* Look up cached has_alpha result by CRC32 (-1 = not cached) */
 static int PngCache_LookupAlpha(uint32_t crc)
 {

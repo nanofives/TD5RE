@@ -429,6 +429,8 @@ int Backend_RecreateDevice(void);
 
 void PngOverride_Init(void);
 void PngOverride_Shutdown(void);
+/* Drop cached override SRVs on device-lost (called from Backend_ReleaseDeviceObjects). */
+void PngOverride_InvalidateCache(void);
 const char *PngOverride_Lookup(DWORD width, DWORD height,
                                const void *pixel_data, LONG pitch);
 int PngOverride_HasAlpha(const char *path);

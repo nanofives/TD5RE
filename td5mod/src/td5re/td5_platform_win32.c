@@ -3254,8 +3254,26 @@ static ID3D11Buffer      *s_fx_cb       = NULL;
 
 static ID3D11PixelShader *fx_ensure_shader(TD5_FxShader which)
 {
+    static unsigned s_fx_gen = 0;   /* device generation these objects were built for */
     int i = (int)which;
     if (i < 0 || i > 3) return NULL;
+
+    /* [DEVICE-LOST 2026-07-20] These procedural FX shaders + the b1 constant
+     * buffer are cached here, outside the wrapper's recreated resource set, so a
+     * device-lost recovery (bumps g_backend.device_generation) leaves them
+     * pointing at the freed device — the next in-race particle/glow draw would
+     * bind dead-device objects. Drop them on a generation change and reset the
+     * per-shader "tried" flags so they recreate on demand. */
+    if (g_backend.device && s_fx_gen != g_backend.device_generation) {
+        int k;
+        for (k = 0; k < 4; k++) {
+            if (s_fx_ps[k]) { ID3D11PixelShader_Release(s_fx_ps[k]); s_fx_ps[k] = NULL; }
+            s_fx_tried[k] = 0;
+        }
+        if (s_fx_cb) { ID3D11Buffer_Release(s_fx_cb); s_fx_cb = NULL; }
+        s_fx_gen = g_backend.device_generation;
+    }
+
     if (s_fx_ps[i]) return s_fx_ps[i];
     if (s_fx_tried[i]) return NULL;   /* already failed once — don't retry every frame */
     s_fx_tried[i] = 1;

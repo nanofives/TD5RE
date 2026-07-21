@@ -314,6 +314,7 @@ int td5_plat_pump_messages(void)
  * -------------------------------------------------------------------------- */
 static ID3D11Texture2D *s_fd_staging = NULL;
 static int s_fd_w = 0, s_fd_h = 0;
+static unsigned s_fd_gen = 0;   /* device generation the staging texture belongs to */
 
 static void td5_png_chunk(FILE *f, const char *type, const unsigned char *data, unsigned len) {
     unsigned char be[4];
@@ -370,7 +371,11 @@ static void td5_plat_dump_frame_png(const char *path) {
     if (!g_backend.swap_chain || !g_backend.device || !g_backend.context || !path) return;
     if (FAILED(IDXGISwapChain_GetBuffer(g_backend.swap_chain, 0, &IID_ID3D11Texture2D, (void**)&bb)) || !bb) return;
     ID3D11Texture2D_GetDesc(bb, &d);
-    if (!s_fd_staging || s_fd_w != (int)d.Width || s_fd_h != (int)d.Height) {
+    /* [DEVICE-LOST 2026-07-20] Also recreate when the device generation changed:
+     * after a TDR recovery a same-resolution staging texture from the old device
+     * would mix a dead-device resource with the new-device context in CopyResource. */
+    if (!s_fd_staging || s_fd_w != (int)d.Width || s_fd_h != (int)d.Height ||
+        s_fd_gen != g_backend.device_generation) {
         D3D11_TEXTURE2D_DESC sd = d;
         if (s_fd_staging) { ID3D11Texture2D_Release(s_fd_staging); s_fd_staging = NULL; }
         sd.Usage = D3D11_USAGE_STAGING; sd.BindFlags = 0;
@@ -379,6 +384,7 @@ static void td5_plat_dump_frame_png(const char *path) {
             ID3D11Texture2D_Release(bb); return;
         }
         s_fd_w = (int)d.Width; s_fd_h = (int)d.Height;
+        s_fd_gen = g_backend.device_generation;
     }
     ID3D11DeviceContext_CopyResource(g_backend.context,
         (ID3D11Resource*)s_fd_staging, (ID3D11Resource*)bb);
