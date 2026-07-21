@@ -35,6 +35,7 @@
 #include "td5_laneassist.h" /* keyboard 'L' toggles the optional lane-assist aid */
 #include "td5_config.h"  /* shared TD5RE_* env-knob accessors */
 #include "td5_inputscript.h" /* scripted-input harness ([Trace] InputScript) */
+#include "td5_net.h"     /* td5_net_is_active/td5_net_local_slot — FFB netplay-vs-local branch */
 
 /* Defined in td5_game.c */
 
@@ -2752,28 +2753,48 @@ void td5_input_ff_shutdown(void)
  * point slot 1 is stopped so it doesn't sit asserted. A crash outranks a gear
  * bump if they coincide. No-op when TD5RE_FORCE_FEEDBACK is off or this player
  * has no FF device. */
-/* [MP FF FIX 2026-06-23] Map a LOCAL player/device index to the ACTOR slot whose
- * car that device should respond to. In single-player and split-screen the local
- * humans occupy actor slots 0..N-1 (g_actorSlotForView is the identity map); in
- * NETPLAY the single local human drives actor slot td5_net_local_slot() — 1+ on a
- * client — surfaced as g_actorSlotForView[0] (td5_game InitRace step 17). The FF
- * consumers previously assumed actor-slot == device-index, so a client's wheel
- * replayed actor-slot-0's pulses (the HOST's collisions/steering): "I feel the
- * vibrations off my opponents in MP". Reading the right actor slot here restores
- * the original's netplay-local-slot FF [CONFIRMED @ 0x0042C470] and also fixes the
- * MP position-select pane permutation. Device-side indices (controller_assignment,
- * td5_plat_ff_*, steer/terrain_effect_started) stay keyed by the device index. */
+/* [MP FF FIX 2026-06-23; split-screen leak fix 2026-07-21] Map a LOCAL
+ * player/device index to the ACTOR slot whose car that device should respond to.
+ * The driven-car binding is IDENTITY: player p DRIVES actor slot p — same as the
+ * per-slot steering loop, view_for_player(), and the original binary
+ * UpdateControllerForceFeedback @0x4288E0 (which indexes device AND actor by the
+ * same player slot, with NO view indirection).
+ *
+ * Two regimes:
+ *   - NETPLAY: there is a single local human whose car is a NON-zero actor slot
+ *     on a client (td5_net_local_slot(), surfaced as g_actorSlotForView[0] at
+ *     td5_game InitRace step 17). Follow that net slot so a client's wheel feels
+ *     its OWN car, not the host's — the "I feel the vibrations off my opponents
+ *     in MP" bug [CONFIRMED @ 0x0042C470].
+ *   - LOCAL play (single + split-screen): identity. The ORIGINAL 2026-06-23 fix
+ *     read g_actorSlotForView[player] (the pane -> displayed-car map) for BOTH
+ *     regimes. That is correct for netplay but WRONG for local split-screen: the
+ *     "CHOOSE YOUR SCREEN" position picker PERMUTES the pane map, so pane p can
+ *     display a car player p does not drive — after a swap, player p's pad
+ *     replayed ANOTHER car's crash/gear/terrain/collision pulses. The pane map
+ *     only governs which PANE shows which car, never who drives what, so it must
+ *     NOT gate FFB. (The button/camera path already handles this via
+ *     view_for_player() inverting the map; the FFB path consumed the raw forward
+ *     map instead.)
+ *
+ * Device-side indices (controller_assignment, td5_plat_ff_*, dev = player) stay
+ * keyed by the device index and are unchanged — only the ACTOR lookup is fixed. */
 static int ff_local_actor_slot(int player)
 {
-    int aslot = player;
-    if (player >= 0 && player < TD5_MAX_VIEWPORTS)
-        aslot = g_actorSlotForView[player];
+    int aslot;
+    if (g_td5.network_active && td5_net_is_active()) {
+        aslot = td5_net_local_slot();   /* netplay: this machine's own car (1+ on a client) */
+    } else {
+        aslot = player;                 /* local play: player p drives actor slot p (identity) */
+    }
     if (aslot < 0 || aslot >= TD5_MAX_RACER_SLOTS)
         aslot = player;   /* defensive: fall back to identity */
+    if (aslot < 0 || aslot >= TD5_MAX_RACER_SLOTS)
+        aslot = 0;        /* last-resort clamp if player itself is out of range */
     if (aslot != player && player >= 0 && player < TD5_MAX_HUMAN_PLAYERS &&
         !s_ff_slot_map_logged[player]) {
         s_ff_slot_map_logged[player] = 1;
-        TD5_LOG_I(LOG_TAG, "FF: local player/device %d follows actor slot %d (non-identity map)",
+        TD5_LOG_I(LOG_TAG, "FF: local player/device %d follows actor slot %d (netplay local slot)",
                   player, aslot);
     }
     return aslot;

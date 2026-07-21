@@ -32,6 +32,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "July 21" },
+    { CL_ITEM,    "FIX: split-screen force feedback now follows your OWN" },
+    { CL_ITEM,    "  car again - after swapping screens your wheel/pad no" },
+    { CL_ITEM,    "  longer rumbles from another player's crashes or gears" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "July 20" },
     { CL_ITEM,    "FIX: RACE OPTIONS power-ups now offers OFF / CASUAL /" },
     { CL_ITEM,    "  CHAOS (incl. split-screen setup) - CHAOS was hidden" },
