@@ -2110,6 +2110,16 @@ static int      s_trf_dyn_cooldown;                       /* ticks to next spawn
 static uint32_t s_trf_dyn_rng;                            /* private LCG state */
 static int      s_trf_dyn_oncoming_pct;                   /* 0..100 from TRAFFIC.BUS mix (diagnostic) */
 static int      s_trf_dyn_seeded;                         /* race_init ran for this race */
+/* [TRAFFIC-BATTLE WRECK DESPAWN 2026-07-20] Per-slot age (ticks) of a wrecked
+ * traffic car. In TRAFFIC BATTLE a wreck is a PERMANENT wreck (ticks=-1) that
+ * keeps its ACTIVE slot and counts toward the cap; if wrecks pile up faster than
+ * the distance corridor retires them (esp. on a circuit) all slots fill with
+ * wrecks, on_road pins at the cap and the spawner is gated off ("traffic stops
+ * spawning partway through a battle"). This counter increments while a slot is
+ * both broken-down and ACTIVE; once it passes the despawn threshold the car is
+ * faded out and its slot returned to the pool. Self-clears when the slot isn't a
+ * live wreck, so a fresh car never inherits a stale age. */
+static int16_t  s_trf_wreck_age[TD5_MAX_TOTAL_ACTORS];
 
 /* ---- [PER-VIEWPORT TRAFFIC 2026-06-22] ----------------------------------------
  * Split-screen TIME TRIAL (removed 2026-07-04): each viewport got its OWN traffic
@@ -2372,6 +2382,23 @@ static int trf_dyn_volume(void)
  * faithful 6; VERY HIGH fills all 16 traffic slots (the extra cars reuse each
  * track's 6 car models + 6 skin pages — normal for traffic) and packs them near
  * the player via the tighter spawn window / faster respawn below. */
+/* [TRAFFIC-BATTLE WRECK DESPAWN 2026-07-20] In traffic battle, auto-retire a
+ * wrecked traffic car after this many ticks (@30Hz) so its slot returns to the
+ * pool and fresh traffic keeps spawning. Default 300 (~10s). Enabled by default;
+ * TD5RE_BATTLE_WRECK_DESPAWN=0 restores the permanent-until-recycled wreck. */
+static int battle_wreck_despawn_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) s = td5_env_flag_on("TD5RE_BATTLE_WRECK_DESPAWN");
+    return s;
+}
+static int battle_wreck_despawn_ticks(void)
+{
+    static int v = -1;
+    if (v < 0) v = td5_env_int("TD5RE_BATTLE_WRECK_DESPAWN_TICKS", 300, 30, 1800);
+    return v;
+}
+
 static int trf_dyn_cap(void)
 {
     static const int k_cap[5] = { 0, 2, 4, 6, 16 };
@@ -3505,6 +3532,7 @@ void td5_ai_traffic_dynamic_tick(void)
 
         case TRF_DYN_ACTIVE: {
             int sp, behind, ahead, ring, is_circuit;
+            int wreck_expired = 0;
             /* Never retire the live cop (mirrors recycle's slot-9 guard
              * @ 0x0043545B). */
             if (slot == 9 && g_encounter_tracked_handle != -1) { on_road++; break; }
@@ -3514,6 +3542,18 @@ void td5_ai_traffic_dynamic_tick(void)
              * human stay alive for them to encounter), or if it somehow ends
              * up far past the race leader. AI racers never retire traffic. */
             sp = (int)(int16_t)ACTOR_I16(a, ACTOR_SPAN_NORMALIZED);
+            /* [TRAFFIC-BATTLE WRECK DESPAWN 2026-07-20] Age a wrecked traffic car
+             * and retire it once past the threshold, regardless of distance — this
+             * is what frees battle slots so fresh traffic keeps coming. A car that
+             * isn't a live wreck resets its age (fresh spawns start at 0). */
+            if (td5_game_battle_mode_active() && battle_wreck_despawn_enabled() &&
+                g_actor_broken_down[slot]) {
+                if (s_trf_wreck_age[slot] < 0x7fff) s_trf_wreck_age[slot]++;
+                if (s_trf_wreck_age[slot] >= (int16_t)battle_wreck_despawn_ticks())
+                    wreck_expired = 1;
+            } else {
+                s_trf_wreck_age[slot] = 0;
+            }
             behind = sp - ai_player_span_trailing();
             ahead  = sp - trf_dyn_race_span_lead();
             ring = td5_track_get_ring_length();
@@ -3585,7 +3625,8 @@ void td5_ai_traffic_dynamic_tick(void)
              * Branches are connected drivable roads, so branch traffic is ordinary
              * traffic handled by the general despawn (behind/ahead/far) below. */
             if (!td5_ai_cop_is_chasing(slot) &&
-                (behind < -g_td5.ini.traffic_dyn_despawn ||
+                (wreck_expired ||
+                behind < -g_td5.ini.traffic_dyn_despawn ||
                 ahead  >  front_keep ||
                 far_from_all ||
                 (g_traffic_recovery_stage[slot] != 0 &&
@@ -3601,11 +3642,12 @@ void td5_ai_traffic_dynamic_tick(void)
                   * rear despawn retires it out of view). */
                  trf_dyn_min_player_dist(sp) > front_keep))) {
                 s_trf_dyn_state[slot] = TRF_DYN_FADE_OUT;
+                s_trf_wreck_age[slot] = 0;
                 TD5_LOG_I(LOG_TAG,
                           "traffic_dyn_despawn: slot=%d behind_trail=%d ahead_lead=%d "
-                          "min_player=%d front_keep=%d far_from_all=%d recovery=%d stuck=%d (fading out)",
+                          "min_player=%d front_keep=%d far_from_all=%d wreck_expired=%d recovery=%d stuck=%d (fading out)",
                           slot, behind, ahead, trf_dyn_min_player_dist(sp),
-                          front_keep, far_from_all, g_traffic_recovery_stage[slot],
+                          front_keep, far_from_all, wreck_expired, g_traffic_recovery_stage[slot],
                           s_traffic_stuck_frames[slot]);
             }
             }   /* eff spawn-window scope */
