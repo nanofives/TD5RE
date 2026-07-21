@@ -43,6 +43,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  stays busy wherever the action is. Traffic pool" },
     { CL_ITEM,    "  raised to 64 (room for ~4 spread-out drivers at full" },
     { CL_ITEM,    "  density). TD5RE_TRAFFIC_PERPLAYER_CAP=0 = old cap." },
+    { CL_ITEM,    "FIX: the chase camera no longer wobbles at the start" },
+    { CL_ITEM,    "  of a race after the first one, especially in multi-" },
+    { CL_ITEM,    "  player split-screen. Camera smoothing is now reset" },
+    { CL_ITEM,    "  for every pane at the start of each race." },
+    { CL_ITEM,    "CHANGE: crash screen-shake no longer rattles constantly" },
+    { CL_ITEM,    "  in a crowded pack - light bumps don't shake, and a" },
+    { CL_ITEM,    "  new shake won't re-trigger until the last one settles." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 20" },

@@ -415,6 +415,23 @@ static int td5_camera_crash_shake(void)
  * the floor; this reference (~4x the acute threshold) gives a usable
  * "big vs huge" gradient above it rather than always saturating. */
 #define TD5_CRASH_SHAKE_MAG_REF  1000000
+/* [CRASH-SHAKE GATE 2026-07-21] In a 5-6 car pack, acute impacts fire almost
+ * every tick and each one resets the shake's age to 0 (td5_physics_get_crash_fx
+ * only reports the LATEST crash per slot), so the shake never decays = a
+ * persistent camera rattle "until the end of the race" (bisect confirmed
+ * crash-shake as the sustained-wobble driver). Two gates keep the big-crash
+ * drama but kill the pack-jostle rattle:
+ *   - MIN_MAG: camera-shake magnitude floor (2x the physics acute threshold
+ *     ~250000), so routine pack bumps don't shake — only genuine hits do.
+ *   - COOLDOWN: after a shake is armed, ignore NEW crashes until the current
+ *     one has fully decayed (DECAY) PLUS this many quiet ticks, so continuous
+ *     contact can't keep re-arming it. The armed event is cached and its decay
+ *     rendered from the cache, immune to age-reset by later impacts.
+ * Both tunable (TD5RE_CRASH_SHAKE_MIN_MAG / _COOLDOWN); the whole gate reverts
+ * with TD5RE_CRASH_SHAKE_GATE=0. */
+#define TD5_CRASH_SHAKE_MIN_MAG  500000
+#define TD5_CRASH_SHAKE_COOLDOWN 18
+#define TD5_CRASH_SHAKE_SLOTS    16
 
 /* Deterministic pseudo-random in [-1,1] from an integer key (sine of a large
  * prime multiple — netplay-safe, no rand()). */
@@ -448,13 +465,49 @@ static int td5_camera_compute_crash_shake(int view, int eye_ofs[3], short ang_of
     int age = 0;
     uint32_t seq = td5_physics_get_crash_fx(slot, &mag, &age);
     if (seq == 0) return 0;                         /* no crash yet */
-    if (age < 0 || age >= TD5_CRASH_SHAKE_DECAY) return 0;  /* stale */
+    if (mag < 0) mag = -mag;
+
+    /* [CRASH-SHAKE GATE 2026-07-21] Magnitude floor + re-trigger cooldown so a
+     * packed race's continuous contact can't produce a persistent rattle. */
+    static int s_cs_gate = -1, s_cs_min = -1, s_cs_cool = -1;
+    if (s_cs_gate < 0) s_cs_gate = td5_env_flag_on("TD5RE_CRASH_SHAKE_GATE");   /* default ON */
+    if (s_cs_min  < 0) s_cs_min  = td5_env_int("TD5RE_CRASH_SHAKE_MIN_MAG",  TD5_CRASH_SHAKE_MIN_MAG,  0, 100000000);
+    if (s_cs_cool < 0) s_cs_cool = td5_env_int("TD5RE_CRASH_SHAKE_COOLDOWN", TD5_CRASH_SHAKE_COOLDOWN, 0, 600);
+
+    if (s_cs_gate) {
+        /* Per-slot cache of the currently-armed crash so its decay is rendered
+         * from a stable event, immune to age-reset by later pack impacts. */
+        static uint32_t s_cs_seq  [TD5_CRASH_SHAKE_SLOTS];
+        static int      s_cs_start[TD5_CRASH_SHAKE_SLOTS];
+        static int      s_cs_mag  [TD5_CRASH_SHAKE_SLOTS];
+        static int      s_cs_init = 0;
+        if (!s_cs_init) { s_cs_init = 1;
+            for (int i = 0; i < TD5_CRASH_SHAKE_SLOTS; i++) { s_cs_seq[i] = 0; s_cs_start[i] = -100000; s_cs_mag[i] = 0; } }
+        if (slot >= TD5_CRASH_SHAKE_SLOTS) return 0;
+
+        int now = (int)g_td5.simulation_tick_counter;
+        /* Arm a NEW crash only above the floor AND once the previous armed shake
+         * has fully decayed + waited out the cooldown gap. */
+        if (seq != s_cs_seq[slot] && mag >= s_cs_min) {
+            int refractory_end = s_cs_start[slot] + TD5_CRASH_SHAKE_DECAY + s_cs_cool;
+            if (now >= refractory_end) {
+                s_cs_seq[slot]   = seq;
+                s_cs_start[slot] = now - age;   /* absolute tick the crash occurred */
+                s_cs_mag[slot]   = mag;
+            }
+        }
+        if (s_cs_seq[slot] == 0) return 0;      /* nothing armed */
+        age = now - s_cs_start[slot];           /* age of the ARMED event */
+        mag = s_cs_mag[slot];
+        seq = s_cs_seq[slot];
+    }
+
+    if (age < 0 || age >= TD5_CRASH_SHAKE_DECAY) return 0;  /* stale / decayed */
 
     /* Linear decay 1.0 -> 0.0 over the decay window. */
     float decay = 1.0f - (float)age / (float)TD5_CRASH_SHAKE_DECAY;
 
     /* Magnitude scale (0..1), saturating at the reference impact. */
-    if (mag < 0) mag = -mag;
     float mscale = (float)mag / (float)TD5_CRASH_SHAKE_MAG_REF;
     if (mscale > 1.0f) mscale = 1.0f;
 
@@ -3827,6 +3880,42 @@ void td5_camera_set_preset(int pi)
 {
     s_active_preset = pi;
     memset(s_debug_camera_frame, 0, sizeof(s_debug_camera_frame));
+
+    /* [RACE-START CAMERA RESET 2026-07-21] Re-anchor EVERY viewport's smoothing/
+     * pose filters + clear the recovery-glide state at race init, UNCONDITIONALLY.
+     * Previously the per-pane smoothing re-anchor happened only as a side effect
+     * of LoadCameraPresetForView below, which runs only for panes whose actor
+     * lookup succeeds (v < viewport_count && g_actor_table_base && actor != NULL).
+     * A pane that missed kept the PREVIOUS race's prev-pose, so the new race's
+     * first solve glided prev->cur across a teleport = a start-of-race camera
+     * wobble that recurred per race and per pane in split-screen. The dedicated
+     * all-viewport fixer td5_camera_snap_smoothing() (clears s_camSmoothInit[] +
+     * s_cam_pose_init[]) was only wired to pause-resume, never race start; the
+     * s_recov_* glide arrays were never reset per race at all. Render-only (the
+     * camera never feeds the sim), so this cannot affect physics / AI / replay /
+     * golden traces. TD5RE_CAM_RACE_SNAP=0 reverts to the old actor-conditional
+     * behavior for A/B. */
+    {
+        static int s_race_snap = -1;
+        if (s_race_snap < 0) s_race_snap = td5_env_flag_on("TD5RE_CAM_RACE_SNAP"); /* default ON */
+        if (s_race_snap) {
+            td5_camera_snap_smoothing();   /* all viewports: s_camSmoothInit[]=0, s_cam_pose_init[]=0 */
+            for (int rv = 0; rv < TD5_MAX_VIEWPORTS; rv++) {
+                s_recov_glide_on[rv]   = 0;
+                s_recov_last_valid[rv] = 0;
+                /* Wall-avoid clip ratios are per-frame damped statics that were
+                 * never reset per race; a wall-pinned finish leaks a low ratio
+                 * into the next race's opening (eye starts pulled in, then pumps
+                 * back out) = another start-of-race wobble. 1.0 = no clip. */
+                g_camWallClipRatio[rv]      = 1.0f;
+                g_camWallClipRatioApply[rv] = 1.0f;
+            }
+            TD5_LOG_I(LOG_TAG, "camera race-start snap: re-anchored smoothing + "
+                      "cleared recovery glide + wall-clip for %d viewports",
+                      TD5_MAX_VIEWPORTS);
+        }
+    }
+
     /* [PORT: N-way] reset preset / fly-in state for EVERY viewport (was 0/1). */
     for (int rv = 0; rv < TD5_MAX_VIEWPORTS; rv++) {
         s_flyin_preset_reloaded[rv] = 0;
