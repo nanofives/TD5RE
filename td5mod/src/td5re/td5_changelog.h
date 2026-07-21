@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 21" },
+    { CL_ITEM,    "FIX: a GPU driver reset (TDR) during a race no longer" },
+    { CL_ITEM,    "  crashes on the way to the results screen - the HUD" },
+    { CL_ITEM,    "  dial and text now rebuild after a device reset" },
     { CL_ITEM,    "FIX: split-screen force feedback now follows your OWN" },
     { CL_ITEM,    "  car again - after swapping screens your wheel/pad no" },
     { CL_ITEM,    "  longer rumbles from another player's crashes or gears" },

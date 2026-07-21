@@ -9020,6 +9020,11 @@ int td5_vui_pausefont_page(void) { return s_pausefont_sdf_page; }
  * when the MSDF shader is unavailable. */
 void td5_vui_msdf_quad(float x, float y, float w, float h, uint32_t color, int page,
                        float u0, float v0, float u1, float v1) {
+    /* [DEVICE-LOST 2026-07-21] Same in-race self-heal as td5_vui_gauge: crisp HUD
+     * text uses s_ps_msdf, which only rebuilds from the frontend loop, so a
+     * mid-race TDR left it dangling. Rebuild before the NULL check (falls back to
+     * a plain textured quad if the rebuild fails). */
+    frontend_ensure_vui_shaders();
     if (page < 0 || !s_ps_msdf) {
         fe_draw_quad(x, y, w, h, color, page, u0, v0, u1, v1);
         return;
@@ -9044,6 +9049,15 @@ int td5_vui_arrow(float x, float y, float w, float h, int dir_right, uint32_t co
 }
 
 void td5_vui_gauge(const TD5_VuiGauge *g) {
+    /* [DEVICE-LOST 2026-07-21] Self-heal on a device-generation bump. This is an
+     * IN-RACE draw (HUD dial); frontend_ensure_vui_shaders() otherwise only runs
+     * from td5_frontend_render_ui_rects (the frontend loop), so a TDR DURING a
+     * race left s_ps_gauge/s_gauge_cb pointing at the freed device and this bound
+     * a dangling shader -> nvwgf2um.dll null-deref (the recurring transition/
+     * results-class crash). Rebuild BEFORE the NULL guard so a failed rebuild
+     * falls through to the early-out. Cheap: one generation compare in steady
+     * state. */
+    frontend_ensure_vui_shaders();
     if (!g || !s_ps_gauge || !s_gauge_cb || !g_backend.context) return;
 
     const float DEG2RAD = 3.14159265358979323846f / 180.0f;
