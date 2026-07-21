@@ -241,6 +241,11 @@ static int  frontend_mp_setup_disconnect_check(int n); /* [disconnect-modal] fre
 static int frontend_track_is_circuit(int track_slot);
 static void frontend_update_laps_button_visibility(int laps_btn_idx);
 static void frontend_update_direction_button_visibility(int dir_btn_idx, int manage_label);
+/* [CONSOLIDATION 2026-07-21] RACE OPTIONS entry (defined below, near the screen).
+ * back_mode: RO_BACK_PARENT returns to the parent; RO_BACK_DRAG_OPPONENT re-enters
+ * the SP-drag opponent car-select pass. */
+enum { RO_BACK_PARENT = 0, RO_BACK_DRAG_OPPONENT };
+static void raceopts_open(int parent_screen, int launch_after, int back_mode);
 static int frontend_carsel_hold_enabled(void);   /* [#2/#7] TD5RE_CARSEL_HOLD gate (defined below) */
 static int frontend_carsel_hold_repeat(void);    /* hold-to-scroll LEFT/RIGHT auto-repeat (defined below); reused by Quick Race */
 
@@ -6453,8 +6458,16 @@ void Screen_CarSelection(void) {
                 }
             }
             TD5_LOG_I(LOG_TAG,
-                      "CarSelect: cup game_type=%d race=%d track=%d -> skip track select, init schedule",
+                      "CarSelect: cup game_type=%d race=%d track=%d -> skip track select",
                       s_selected_game_type, s_race_within_series, s_selected_track);
+            /* [CONSOLIDATION 2026-07-21] The faithful cup has no track-select, so
+             * insert RACE OPTIONS as the pre-launch step — but only BEFORE the
+             * first race (races 2..N advance straight from the results menu and
+             * must not re-prompt). OK launches; BACK returns to car-select. */
+            if (s_race_within_series == 0) {
+                raceopts_open(TD5_SCREEN_CAR_SELECTION, 1, RO_BACK_PARENT);
+                return;
+            }
             frontend_init_race_schedule();
             frontend_init_display_mode_state();
             return;
@@ -6502,10 +6515,13 @@ void Screen_CarSelection(void) {
                 s_selected_car   = s_p1_car;
                 s_selected_paint = s_p1_paint;
                 TD5_LOG_I(LOG_TAG,
-                          "CarSelect: drag-race pass2 OPPONENT car=%d, restored PLAYER car=%d → start race",
+                          "CarSelect: drag-race pass2 OPPONENT car=%d, restored PLAYER car=%d",
                           s_p2_car, s_selected_car);
-                frontend_init_race_schedule();
-                frontend_init_display_mode_state();
+                /* [CONSOLIDATION 2026-07-21] SP drag has no track-select — insert
+                 * RACE OPTIONS as the pre-launch step. OK launches; BACK re-enters
+                 * this opponent pass (RO_BACK_DRAG_OPPONENT). The restored PLAYER
+                 * car/paint survive in the live selector across the overlay. */
+                raceopts_open(TD5_SCREEN_CAR_SELECTION, 1, RO_BACK_DRAG_OPPONENT);
                 return;
             }
         }
@@ -6628,9 +6644,27 @@ static int frontend_cup_track_select_on(void) {
  * label/value/cycle model lives in td5_frontend.c (td5_raceopts_*). No RE basis —
  * a port-only UX consolidation. ============================================ */
 
-/* Which track-select screen opened RACE OPTIONS (21 regular / 43 cup), so OK /
- * BACK / ESC all return to the right one. */
+/* Which screen opened RACE OPTIONS (track-select 21/43, or a car-select for the
+ * pre-launch-step modes), so OK / BACK / ESC return to the right one. */
 static int s_raceopts_parent = TD5_SCREEN_TRACK_SELECTION;
+/* [CONSOLIDATION 2026-07-21] RACE OPTIONS is also inserted as the pre-launch step
+ * for modes with no track-select (SP/MP drag, faithful SP cup). launch_after=1 =>
+ * OK launches the race directly instead of returning to the parent. back_mode
+ * customises BACK (SP drag re-enters the opponent car-select pass).
+ * s_returning_from_raceopts is a transient one-shot the MP-drag TrackSelection
+ * chokepoint consumes to avoid a BACK re-entry loop. */
+static int s_raceopts_launch_after   = 0;
+static int s_raceopts_back_mode      = RO_BACK_PARENT;
+static int s_returning_from_raceopts = 0;
+
+static void raceopts_open(int parent_screen, int launch_after, int back_mode) {
+    s_raceopts_parent         = parent_screen;
+    s_raceopts_launch_after   = launch_after;
+    s_raceopts_back_mode      = back_mode;
+    s_returning_from_raceopts = 0;
+    frontend_play_sfx(3);
+    td5_frontend_set_screen(TD5_SCREEN_RACE_OPTIONS);
+}
 
 /* Build the main track-select column: TRACK / DIRECTION / LAPS / RACE OPTIONS /
  * OK / BACK (+ randomize chip). Used on screen init (case 0) and on return from
@@ -6715,12 +6749,45 @@ static void raceopts_commit_persist(void) {
               s_game_option_laneassist, s_game_option_tutorial);
 }
 
-/* Leave RACE OPTIONS: persist, then return to whichever track-select screen
- * opened it (OK / BACK / ESC all land here — the options are edited live, so
- * there is no cancel/discard). */
-static void raceopts_leave(void) {
+/* Leave RACE OPTIONS via OK. Options are edited live (always persisted). When
+ * opened as a pre-launch step (launch_after) OK launches the race directly;
+ * otherwise it returns to the parent track-select screen. */
+static void raceopts_ok(void) {
     raceopts_commit_persist();
     frontend_play_sfx(5);
+    if (s_raceopts_launch_after) {
+        s_raceopts_launch_after = 0;   /* one-shot */
+        TD5_LOG_I(LOG_TAG, "RaceOpts: OK -> launch race (pre-launch step)");
+        frontend_init_race_schedule();
+        frontend_init_display_mode_state();
+        return;
+    }
+    td5_frontend_set_screen((TD5_ScreenIndex)s_raceopts_parent);
+}
+
+/* Leave RACE OPTIONS via BACK / ESC. Persists (no cancel/discard), then returns
+ * to the parent — except SP drag, where BACK re-enters the opponent car-select
+ * pass (reseeding the cursor from the stored opponent car, like the pass-1->2
+ * seed). Sets the transient s_returning_from_raceopts flag so the MP-drag
+ * TrackSelection chokepoint launches instead of re-opening RACE OPTIONS. */
+static void raceopts_back(void) {
+    int was_launch = s_raceopts_launch_after;   /* pre-launch step? */
+    raceopts_commit_persist();
+    frontend_play_sfx(5);
+    s_raceopts_launch_after = 0;
+    if (s_raceopts_back_mode == RO_BACK_DRAG_OPPONENT) {
+        s_raceopts_back_mode = RO_BACK_PARENT;
+        s_drag_carselect_pass = 1;
+        s_selected_car   = s_p2_car;
+        s_selected_paint = s_p2_paint;
+        TD5_LOG_I(LOG_TAG, "RaceOpts: BACK -> re-enter drag opponent car-select");
+        td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+        return;
+    }
+    /* Arm the TrackSelection chokepoint's re-entry guard ONLY when returning from
+     * a pre-launch step (MP drag) — a plain track-select overlay BACK must not
+     * leave the flag set for a later drag setup to misread. */
+    s_returning_from_raceopts = was_launch ? 1 : 0;
     td5_frontend_set_screen((TD5_ScreenIndex)s_raceopts_parent);
 }
 
@@ -6795,7 +6862,7 @@ void Screen_RaceOptions(void) {
          * persisting; frontend_check_escape() is single-consume per frame so the
          * central handler no-ops afterwards. */
         if (frontend_check_escape()) {
-            raceopts_leave();
+            raceopts_back();
             break;
         }
         if (s_input_ready) {
@@ -6820,9 +6887,10 @@ void Screen_RaceOptions(void) {
             /* A/Enter activations: OK/BACK persist + exit; PREV/NEXT flip the page.
              * (prev/next ids are -1 on a single page, never matching a real index.) */
             if (s_button_index >= 0) {
-                if (s_button_index == td5_raceopts_ok_btn() ||
-                    s_button_index == td5_raceopts_back_btn()) {
-                    raceopts_leave();
+                if (s_button_index == td5_raceopts_ok_btn()) {
+                    raceopts_ok();
+                } else if (s_button_index == td5_raceopts_back_btn()) {
+                    raceopts_back();
                 } else if (s_button_index == td5_raceopts_prev_btn()) {
                     if (td5_raceopts_page_prev()) frontend_play_sfx(2);
                 } else if (s_button_index == td5_raceopts_next_btn()) {
@@ -6853,10 +6921,21 @@ void Screen_TrackSelection(void) {
         if (!cup_mp && g_td5.mp_mode_config.mode == TD5_MP_MODE_DRAG_RACE &&
             (s_mp_simul || s_network_active || s_mp_flow)) {
             s_selected_track = FE_QUICKRACE_DRAG_STRIP_SCHEDULE_INDEX;
-            TD5_LOG_I(LOG_TAG, "TrackSel: MP DRAG RACE -> skip selector, track=%d, launch",
+            /* [CONSOLIDATION 2026-07-21] No track choice in MP drag, so insert RACE
+             * OPTIONS as the pre-launch step. First entry opens it (OK launches);
+             * BACK returns HERE with s_returning_from_raceopts set, which we consume
+             * to launch directly instead of re-opening (no re-entry loop). */
+            if (s_returning_from_raceopts) {
+                s_returning_from_raceopts = 0;
+                TD5_LOG_I(LOG_TAG, "TrackSel: MP DRAG RACE (back from RaceOpts) -> launch, track=%d",
+                          s_selected_track);
+                frontend_init_race_schedule();
+                frontend_init_display_mode_state();
+                return;
+            }
+            TD5_LOG_I(LOG_TAG, "TrackSel: MP DRAG RACE -> RACE OPTIONS pre-launch step, track=%d",
                       s_selected_track);
-            frontend_init_race_schedule();
-            frontend_init_display_mode_state();
+            raceopts_open(TD5_SCREEN_TRACK_SELECTION, 1, RO_BACK_PARENT);
             return;
         }
         /* [CUP TRACK SELECT 2026-06-25] Multiplayer cup with >=2 races: the host
@@ -7011,8 +7090,7 @@ void Screen_TrackSelection(void) {
             const char *e = getenv("TD5RE_RACEOPTS_AUTOOPEN");
             if (!s_ro_autoopened && e && e[0] == '1') {
                 s_ro_autoopened = 1;
-                s_raceopts_parent = (int)td5_frontend_get_screen();
-                td5_frontend_set_screen(TD5_SCREEN_RACE_OPTIONS);
+                raceopts_open((int)td5_frontend_get_screen(), 0, RO_BACK_PARENT);
                 break;
             }
         }
@@ -7123,9 +7201,10 @@ void Screen_TrackSelection(void) {
              * BACK / ESC return here. set_screen resets s_button_index to -1, so
              * the OK/Back/randomize checks below are inert on this frame. */
             if (s_button_index == 3) {
-                s_raceopts_parent = (int)td5_frontend_get_screen();
-                frontend_play_sfx(3);
-                td5_frontend_set_screen(TD5_SCREEN_RACE_OPTIONS);
+                /* Track-select RACE OPTIONS button: open as an overlay step that
+                 * returns here on OK/BACK (no launch — track-select's own OK
+                 * launches). */
+                raceopts_open((int)td5_frontend_get_screen(), 0, RO_BACK_PARENT);
             }
 
             if (s_button_index == 4) { /* OK */
