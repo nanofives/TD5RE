@@ -411,6 +411,15 @@ static int ai_player_span_trailing(void)
  * AND the dynamic spawner's lane-direction / cross-traffic helpers. */
 static int trf_oneway_traffic(void);
 
+/* [PER-PLAYER TRAFFIC CAP 2026-07-21] Forward decls — the dynamic per-player cap
+ * (trf_dyn_cap) clusters racer anchors using the span-distance + spawn-window
+ * helpers, both defined further down. */
+static int  trf_dyn_span_dist(int a, int b);
+static void trf_dyn_effective_spawn_window(int *lo, int *hi);
+static int  trf_perplayer_cap_enabled(void);
+static int  trf_anchor_count(void);
+static int  trf_anchor_span(int i);
+
 void td5_ai_recycle_traffic_actor(void) {
     int       racer_count;
     int       best_slot = 0;
@@ -2399,20 +2408,104 @@ static int battle_wreck_despawn_ticks(void)
     return v;
 }
 
+/* [PER-PLAYER TRAFFIC CAP 2026-07-21] Each racer (human OR AI) anchors its own
+ * traffic "bubble". The on-road cap is no longer a single global number: it is
+ * the per-anchor volume budget times the number of spatially SEPARATE racer
+ * clusters, bounded by the traffic pool (TD5_MAX_TRAFFIC_SLOTS). Racers close
+ * together fall in one cluster and SHARE a single budget; a racer that pulls far
+ * away forms its own cluster and opens a fresh budget — until the pool is
+ * exhausted, at which point separated racers COMPETE for it (a far-ahead racer
+ * "eats into" the others' share). Default ON; TD5RE_TRAFFIC_PERPLAYER_CAP=0
+ * restores the single global cap. */
+static int trf_perplayer_cap_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) s = td5_env_flag_on("TD5RE_TRAFFIC_PERPLAYER_CAP");
+    return s;
+}
+
+/* Number of racer anchors that each get a bubble. Feature ON: every active racer
+ * (humans first, then AI opponents — they occupy the low, contiguous racer
+ * slots). Feature OFF: humans only (legacy). Clamped to the racer region. */
+static int trf_anchor_count(void)
+{
+    int n;
+    if (trf_perplayer_cap_enabled())
+        n = g_td5.num_human_players + g_td5.num_ai_opponents;
+    else
+        n = g_td5.num_human_players;
+    if (n < 1) n = 1;
+    if (n > g_traffic_slot_base) n = g_traffic_slot_base;
+    return n;
+}
+
+static int trf_anchor_span(int i)
+{
+    return (int)(int16_t)ACTOR_I16(actor_ptr(i), ACTOR_SPAN_NORMALIZED);
+}
+
+/* Count spatially separate racer clusters: two anchors join the same cluster
+ * when their span distance is within one bubble radius (front_keep = despawn +
+ * scaled spawn-max), so overlapping bubbles collapse to a single shared budget.
+ * O(n^2) union-find over at most TD5_MAX_RACER_SLOTS anchors. */
+static int trf_dyn_cluster_count(void)
+{
+    int n = trf_anchor_count();
+    int lo, hi, share;
+    int parent[TD5_MAX_RACER_SLOTS];
+    int clusters = 0;
+    if (n <= 1) return 1;
+    trf_dyn_effective_spawn_window(&lo, &hi);
+    /* Share radius: two racers closer than this share one bubble/budget; a gap
+     * wider than this splits them into separate clusters (each opens a new
+     * budget). Defaults to one forward-keep bubble (despawn + scaled spawn-max);
+     * TD5RE_TRAFFIC_SHARE_SPANS overrides. */
+    share = g_td5.ini.traffic_dyn_despawn + hi;
+    {
+        int ov = td5_env_int("TD5RE_TRAFFIC_SHARE_SPANS", 0, 0, 30000);
+        if (ov > 0) share = ov;
+    }
+    for (int i = 0; i < n; i++) parent[i] = i;
+    for (int i = 0; i < n; i++)
+        for (int j = i + 1; j < n; j++) {
+            if (trf_dyn_span_dist(trf_anchor_span(i), trf_anchor_span(j)) <= share) {
+                int ri = i, rj = j;
+                while (parent[ri] != ri) ri = parent[ri];
+                while (parent[rj] != rj) rj = parent[rj];
+                if (ri != rj) parent[ri] = rj;
+            }
+        }
+    for (int i = 0; i < n; i++) {
+        int r = i;
+        while (parent[r] != r) r = parent[r];
+        if (r == i) clusters++;
+    }
+    return clusters < 1 ? 1 : clusters;
+}
+
 static int trf_dyn_cap(void)
 {
     static const int k_cap[5] = { 0, 2, 4, 6, 16 };
     int v = trf_dyn_volume();
-    int cap;
+    int per;
     if (!trf_dyn_density_enabled()) {
         /* legacy 0..3 caps */
         static const int k_old[4] = { 0, 2, 4, 6 };
         int ov = v > 3 ? 3 : v;
-        cap = k_old[ov];
+        per = k_old[ov];
     } else {
-        cap = k_cap[v];
+        per = k_cap[v];
     }
-    return (cap > TD5_MAX_TRAFFIC_SLOTS) ? TD5_MAX_TRAFFIC_SLOTS : cap;
+    if (per > TD5_MAX_TRAFFIC_SLOTS) per = TD5_MAX_TRAFFIC_SLOTS;
+    /* [PER-PLAYER TRAFFIC CAP] scale the per-anchor budget by the number of
+     * separate racer clusters, bounded by the pool. */
+    if (trf_perplayer_cap_enabled()) {
+        long eff = (long)per * trf_dyn_cluster_count();
+        if (eff > TD5_MAX_TRAFFIC_SLOTS) eff = TD5_MAX_TRAFFIC_SLOTS;
+        if (eff < per) eff = per;
+        return (int)eff;
+    }
+    return per;
 }
 
 /* Volume also paces the spawner: Low is sparse, High busy, Very-High relentless.
@@ -2458,7 +2551,11 @@ static int trf_per_viewport_cap(void)
  * plain differences on the normalized span axis. */
 static int trf_dyn_min_player_dist(int span_norm)
 {
-    int humans = g_td5.num_human_players;
+    /* [PER-PLAYER TRAFFIC CAP] distance to the NEAREST anchor. With the feature
+     * on, "anchors" are all active racers (human + AI) so a car near a lone AI
+     * still counts as "kept" and that AI retains its bubble; off = humans only. */
+    int humans = trf_perplayer_cap_enabled() ? trf_anchor_count()
+                                             : g_td5.num_human_players;
     int ring = td5_track_get_ring_length();
     int is_circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
     int best = 0x7FFFFFFF;
@@ -2579,7 +2676,11 @@ static int trf_dyn_cluster_max(void)
  * TD5RE_TRAFFIC_DENSITY + num_human_players > 1. */
 static int trf_dyn_starved_player_span(int radius)
 {
-    int humans = g_td5.num_human_players;
+    /* [PER-PLAYER TRAFFIC CAP] steer a fresh spawn to whichever ANCHOR currently
+     * has the least nearby traffic. Feature on -> all active racers (human + AI)
+     * so AI bubbles get refilled too; off -> humans only (legacy). */
+    int humans = trf_perplayer_cap_enabled() ? trf_anchor_count()
+                                             : g_td5.num_human_players;
     int best_span;
     int best_cnt;
     if (s_trf_scope_slot >= 0)   /* per-viewport: only this viewport's player */
@@ -3181,7 +3282,9 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
              * the front-most-human anchor. The radius matches the far_from_all
              * recycle corridor below (despawn + scaled spawn-max) so "starved" here
              * and "too far to keep" there use the same yardstick. */
-            if (g_td5.num_human_players > 1) {
+            int anchors = trf_perplayer_cap_enabled() ? trf_anchor_count()
+                                                       : g_td5.num_human_players;
+            if (anchors > 1) {
                 int rhi = 0;
                 trf_dyn_effective_spawn_window(NULL, &rhi);
                 ps = trf_dyn_starved_player_span(g_td5.ini.traffic_dyn_despawn + rhi);
@@ -3626,9 +3729,17 @@ void td5_ai_traffic_dynamic_tick(void)
              * traffic handled by the general despawn (behind/ahead/far) below. */
             if (!td5_ai_cop_is_chasing(slot) &&
                 (wreck_expired ||
-                behind < -g_td5.ini.traffic_dyn_despawn ||
+                /* [PER-PLAYER TRAFFIC CAP] with the feature on, the rear bound is
+                 * the trailing-most ANCHOR's bubble edge, not the trailing HUMAN's,
+                 * so a car sitting behind the human but near a trailing AI is kept.
+                 * The union-of-bubbles term (min dist to ANY anchor > front_keep)
+                 * below replaces this legacy trailing-human corridor. */
+                (!trf_perplayer_cap_enabled() &&
+                 behind < -g_td5.ini.traffic_dyn_despawn) ||
                 ahead  >  front_keep ||
                 far_from_all ||
+                (trf_perplayer_cap_enabled() &&
+                 trf_dyn_min_player_dist(sp) > front_keep) ||
                 (g_traffic_recovery_stage[slot] != 0 &&
                  s_traffic_stuck_frames[slot] >= 45 &&
                  /* [traffic-front-despawn 2026-06-29] far enough that the fade is
@@ -3722,6 +3833,27 @@ void td5_ai_traffic_dynamic_tick(void)
             s_trf_scope_slot      = -1;
         }
         return;
+    }
+
+    /* [PER-PLAYER TRAFFIC CAP] Throttled diagnostic: effective cap vs on-road,
+     * number of racer clusters, and anchor count. One line ~every 2s so the
+     * dynamic cap is observable without flooding the log. */
+    if (trf_perplayer_cap_enabled()) {
+        static int s_cap_log = 0;
+        if ((++s_cap_log % 60) == 0) {
+            int na = trf_anchor_count();
+            int smin = 0x7FFFFFFF, smax = -0x7FFFFFFF;
+            for (int i = 0; i < na; i++) {
+                int sp = trf_anchor_span(i);
+                if (sp < smin) smin = sp;
+                if (sp > smax) smax = sp;
+            }
+            TD5_LOG_I(LOG_TAG,
+                      "traffic_perplayer_cap: on_road=%d eff_cap=%d clusters=%d anchors=%d "
+                      "span[min=%d max=%d spread=%d] pool=%d",
+                      on_road, trf_dyn_cap(), trf_dyn_cluster_count(), na,
+                      smin, smax, smax - smin, TD5_MAX_TRAFFIC_SLOTS);
+        }
     }
 
     /* Spawn cadence. Prefer slot 9 (the cop-capable slot) so speeding

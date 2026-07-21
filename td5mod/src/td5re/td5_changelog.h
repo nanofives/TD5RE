@@ -36,6 +36,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "FIX: split-screen force feedback now follows your OWN" },
     { CL_ITEM,    "  car again - after swapping screens your wheel/pad no" },
     { CL_ITEM,    "  longer rumbles from another player's crashes or gears" },
+    { CL_ITEM,    "NEW: traffic density now scales per driver. Each racer" },
+    { CL_ITEM,    "  (you and each AI) supports its own stream of up to 16" },
+    { CL_ITEM,    "  cars; drivers close together share one stream, and a" },
+    { CL_ITEM,    "  driver who breaks away opens their own - so the road" },
+    { CL_ITEM,    "  stays busy wherever the action is. Traffic pool" },
+    { CL_ITEM,    "  raised to 64 (room for ~4 spread-out drivers at full" },
+    { CL_ITEM,    "  density). TD5RE_TRAFFIC_PERPLAYER_CAP=0 = old cap." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 20" },
