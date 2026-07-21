@@ -37,6 +37,7 @@
 #include "td5_profile.h"
 #include "td5_trace.h"
 #include "td5_selftest.h"  /* in-session automated test suite (dev builds) */
+#include "td5_control.h"   /* live-control MCP transport (dev builds) */
 #include "td5_asset.h"
 #include "td5_assetsrc.h"
 #include "td5_render.h"
@@ -508,6 +509,8 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "SelfTest",             &g_td5.ini.selftest_enabled },
         { "SelfTestSuite",        &g_td5.ini.selftest_suite },
         { "SelfTestRaceTicks",    &g_td5.ini.selftest_race_ticks },
+        /* Control (dev builds; td5_control.c) */
+        { "Control",              &g_td5.ini.control_enabled },
         /* Network (S10) */
         { "NetMode",              &g_td5.ini.net_mode },
         { "GamePort",             &g_td5.ini.net_game_port },
@@ -1148,6 +1151,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.selftest_enabled    = td5_ini_int("SelfTest", "Enabled", 0);
     g_td5.ini.selftest_suite      = td5_ini_int("SelfTest", "Suite", 0);
     g_td5.ini.selftest_race_ticks = td5_ini_int("SelfTest", "RaceTicks", 450);
+    /* [Control] live-control MCP transport (dev builds; td5_control.c). Default
+     * OFF so a normal launch never opens a socket; --Control=1 opts in. */
+    g_td5.ini.control_enabled     = td5_ini_int("Control", "Enabled", 0);
     /* Feature flag: experimental ClassifyTrackOffsetClamp pre-loop port.
      * See td5_ai.c:td5_ai_refresh_route_state_slot — closes the lateral_bias
      * cascade that produces the slot-0 steering 2x divergence at sim_tick=1. */
@@ -1295,6 +1301,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.trace_terrain_cam_probe = 0;  /* no terrain camera probe CSV      */
     g_td5.ini.test_cup_roundtrip     = 0;   /* no CupData self-test path         */
     g_td5.ini.selftest_enabled       = 0;   /* no in-session self-test suite    */
+    g_td5.ini.control_enabled        = 0;   /* no live-control command socket   */
 #endif
 
     /* TD5RE divergent CupData self-test. Runs before any backend or
@@ -1314,6 +1321,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * it forces the harness baseline knobs (logging on, SFX muted, SkipIntro,
      * debug overlay) onto the final INI+CLI state. */
     td5_selftest_boot();
+
+    /* Live-control MCP transport (dev builds; inert unless [Control] Enabled=1
+     * / --Control=1). Opens the localhost command socket + listener thread.
+     * Config is final here (INI + CLI + selftest baseline applied). */
+    td5_control_init();
 
     /* Apply log filters now — Backend_Init runs after this and is the heaviest
      * wrapper-log emitter, so silencing here lets the perf A/B reflect startup
@@ -1718,6 +1730,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Join the worker pool before any subsystem it may have touched (render,
      * assets) is torn down, so no in-flight job references freed state. */
     td5_jobs_shutdown();
+    /* Close the live-control socket + join its listener thread before the
+     * game modules it pokes are torn down. No-op unless it was enabled. */
+    td5_control_shutdown();
     td5re_shutdown();
     Backend_Shutdown();
     timeEndPeriod(1);

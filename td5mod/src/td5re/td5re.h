@@ -592,6 +592,11 @@ typedef struct TD5_GlobalState {
         int  selftest_enabled;    /* 1 = run the suite on boot (--SelfTest=1) */
         int  selftest_suite;      /* 0 = smoke (fast subset), 1 = full matrix */
         int  selftest_race_ticks; /* sim ticks per scripted race (default 450 = 15s @30Hz) */
+        /* [Control] — live-control MCP transport (dev builds only). Opt-in
+         * UDP command socket that lets an external process (scripts/td5re_mcp)
+         * drive a running td5re.exe. Default OFF so a normal dev launch never
+         * opens a socket. See td5_control.c. */
+        int  control_enabled;     /* 1 = open the control socket (--Control=1) */
         int  loaded;  /* 1 once INI has been read */
         /* AutoRace: skip frontend, launch race immediately with INI settings */
         int  auto_race;             /* 1 = auto-start race on launch */

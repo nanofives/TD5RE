@@ -52,6 +52,7 @@
 #include "td5_selftest.h"  /* in-session automated test suite (dev builds) */
 #include "td5_backend_capture.h" /* photo-booth framebuffer read-back API */
 #include "td5_inputscript.h" /* scripted-input harness ([Trace] InputScript) */
+#include "td5_control.h"     /* live-control MCP transport (dev builds) */
 
 /* [PER-PLAYER TRAFFIC CAP 2026-07-21] The render/per-slot arrays are sized by
  * TD5_ACTOR_MAX_TOTAL_SLOTS (re/include/td5_actor_struct.h) while the actor pool
@@ -1246,6 +1247,18 @@ int td5_game_tick(void) {
      * Runs before the state switch so it can observe MENU/RACE transitions
      * and re-arm auto_race between scripted scenarios. */
     td5_selftest_tick();
+
+    /* Live-control MCP transport (dev builds; inert unless [Control] Enabled=1).
+     * Drains queued external commands on the main thread — right beside the
+     * self-test director so it observes the same MENU/RACE transitions. */
+    td5_control_tick();
+#ifndef TD5RE_RELEASE
+    /* end_race is inverted (control can't include td5_game.h): perform the
+     * abort here where the mutator is in scope. Guarded because the mutator
+     * itself is compiled out of release. */
+    if (td5_control_take_end_race_request())
+        td5_game_selftest_end_race();
+#endif
 
     /* Poll network subsystem (discovery, connection management) */
     td5_net_tick();
