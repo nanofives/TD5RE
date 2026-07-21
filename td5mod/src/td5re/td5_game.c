@@ -2120,6 +2120,22 @@ static void init_race_modes_and_seed(void)
              * are identical on every peer. Committed to physics below at
              * td5_physics_set_dynamics() before td5_arcade_init_race() reads it. */
             g_td5.ini.dynamics = ncfg_l.dynamics ? 1 : 0;
+            /* [RACE OPTIONS CONSOLIDATION 2026-07-21] Adopt the host's remaining
+             * RACE OPTIONS into the live in-memory config so the sim (power-up
+             * boxes, damage model, collision) matches on every peer. NOT persisted
+             * — the client's own td5re.ini must stay intact (mirrors traffic /
+             * dynamics above). td5_arcade / td5_damage read these g_td5.ini.*
+             * fields at race init; collision is applied via the physics toggle
+             * (mode-forced ramming at COP_CHASE / TRAFFIC_BATTLE below still wins).
+             * LANE ASSIST / TUTORIAL / PLAYER NAME are local-only, not replicated. */
+            g_td5.ini.powerups             = ncfg_l.powerups;
+            g_td5.ini.car_damage_toughness = ncfg_l.car_toughness;
+            g_td5.ini.car_damage_deform    = ncfg_l.car_deform;
+            g_td5.ini.car_damage           = ncfg_l.car_damage ? 1 : 0;
+            g_td5.ini.car_damage_bar       = ncfg_l.car_damage ? 1 : 0;
+            g_td5.ini.collisions           = ncfg_l.collisions ? 1 : 0;
+            g_td5.ini.checkpoint_timers    = ncfg_l.checkpoint_timers ? 1 : 0;
+            td5_physics_set_collisions(g_td5.ini.collisions);
             /* [MP GAME MODES 2026-06-22] Adopt the host's replicated game mode +
              * per-mode options so every peer runs the identical mode. Behaviour
              * gating off this lands per work-package (TT/cup/cop-chase); here we

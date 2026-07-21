@@ -2064,6 +2064,15 @@ void Screen_NetworkLobby(void) {
                  * power-up boxes + 3x collisions (and Traffic Battle boxes) are
                  * identical on every peer. */
                 cfg.dynamics          = g_td5.ini.dynamics ? 1 : 0;
+                /* [RACE OPTIONS CONSOLIDATION 2026-07-21] Replicate the host's
+                 * remaining RACE OPTIONS so the sim (power-ups, damage model,
+                 * collision, checkpoint timers) is identical on every peer. */
+                cfg.powerups          = g_td5.ini.powerups;
+                cfg.car_toughness     = g_td5.ini.car_damage_toughness;
+                cfg.car_deform        = g_td5.ini.car_damage_deform;
+                cfg.car_damage        = g_td5.ini.car_damage ? 1 : 0;
+                cfg.collisions        = g_td5.ini.collisions ? 1 : 0;
+                cfg.checkpoint_timers = g_td5.ini.checkpoint_timers ? 1 : 0;
                 for (slot = 0; slot < 6; slot++) {
                     int col = td5_net_get_slot_td6_color(slot);
                     cfg.car_index[slot]   = 0;

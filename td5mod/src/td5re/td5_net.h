@@ -141,6 +141,20 @@ typedef struct TD5_NetRaceConfig {
      * memcpy already use sizeof(TD5_NetRaceConfig), so growing the struct
      * replicates these fields with no extra wire code). */
     TD5_MpModeConfig mode_config;
+    /* [RACE OPTIONS CONSOLIDATION 2026-07-21] The RACE OPTIONS screen is now the
+     * host's single game-behaviour surface, so the remaining behaviour options it
+     * edits are replicated too (host sets, all peers adopt). All are lockstep-
+     * relevant: power-up box layout/pickups, damage model (toughness/deform/master
+     * switch), V2V/V2W collision, and checkpoint timers must match on every peer
+     * or the sim diverges. Appended (all int32) — copied wholesale by the existing
+     * sizeof(TD5_NetRaceConfig) memcpy, no wire code. LANE ASSIST / TUTORIAL /
+     * PLAYER NAME stay local-only (per-player / cosmetic, not sim state). */
+    int32_t  powerups;            /* 0=OFF 1=CASUAL 2=CHAOS */
+    int32_t  car_toughness;       /* 0=Low 1=Medium 2=High 3=Off */
+    int32_t  car_deform;          /* 0=Low 1=Normal 2=High 3=Off */
+    int32_t  car_damage;          /* master car-damage + HUD bar toggle */
+    int32_t  collisions;          /* 3D collisions on/off */
+    int32_t  checkpoint_timers;   /* checkpoint-timer system on/off */
 } TD5_NetRaceConfig;
 
 void td5_net_set_local_car(int car_index, int paint_index, int td6_color);
