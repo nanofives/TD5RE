@@ -54,6 +54,11 @@ void td5_plat_set_diag_context(const char *ctx);
  *  harness) must treat this as a hard failure rather than trust a green run. */
 int td5_plat_device_lost(void);
 
+/* [crash-diag 2026-07-21] Append GPU forensics (backend snapshot + recent-draw
+ * ring, flagging stale pre-device-reset binds) to `path`. Called from the SEH
+ * crash handler. Safe inside an access-violation handler. */
+void td5_plat_dump_gpu_crash_diag(const char *path);
+
 /** Get current window dimensions. */
 void td5_plat_get_window_size(int *width, int *height);
 

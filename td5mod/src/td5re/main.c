@@ -158,6 +158,12 @@ static LONG WINAPI td5_crash_handler(EXCEPTION_POINTERS *ep)
             FILE *cf = fopen(crash_path, "w");
             if (cf) { fprintf(cf, "%s\n", crash_msg); fclose(cf); }
         }
+        /* [crash-diag 2026-07-21] Append GPU forensics (backend snapshot +
+         * recent-draw ring, flagging any draw that bound a pre-device-reset
+         * resource) so a driver null-deref (nvwgf2um.dll, access=0) shows WHICH
+         * of our draws/resources tripped it -- the device-lost stale-bind class.
+         * Safe here: reads only values from g_backend + our ring. */
+        td5_plat_dump_gpu_crash_diag(crash_path);
     }
     /* Headless: do NOT pop a modal (it would wedge the process alive holding
      * the GPU). Terminate now so the OS releases device/swap-chain/window and

@@ -21,7 +21,82 @@
 #include "wrapper.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <time.h>
+
+/* [DRAW WATCH / crash-diag 2026-07-21] In-memory ring of the most recent draw
+ * submissions. Each record also captures the SRV bound and the device
+ * generation AT DRAW TIME: a recent draw whose gen is BELOW the current
+ * g_backend.device_generation used a resource from a freed device (the stale
+ * bind that null-derefs nvwgf2um.dll) -- the smoking gun for the device-lost
+ * crash class. ALWAYS RECORDED (a handful of memory writes, no disk I/O), so a
+ * crash dump has forensics without any opt-in. Dumped from the SEH crash
+ * handler (Backend_DumpCrashDiag). */
+#define TD5_DRAW_RING 256
+typedef struct {
+    unsigned       vcount, icount;
+    unsigned short prim;
+    unsigned char  indexed;
+    unsigned       gen;         /* g_backend.device_generation at draw time */
+    const void    *srv;         /* g_backend.current_srv at draw time (VALUE only, never deref'd) */
+} TD5DrawRec;
+static TD5DrawRec s_draw_ring[TD5_DRAW_RING];
+static unsigned s_draw_head, s_draw_total, s_draw_max_icount, s_draw_max_vcount;
+
+void Backend_NoteDraw(unsigned prim, unsigned vcount, unsigned icount, int indexed)
+{
+    TD5DrawRec *r = &s_draw_ring[s_draw_head % TD5_DRAW_RING];
+    r->vcount = vcount; r->icount = icount;
+    r->prim = (unsigned short)prim; r->indexed = (unsigned char)indexed;
+    r->gen = g_backend.device_generation;
+    r->srv = (const void *)g_backend.current_srv;
+    s_draw_head++; s_draw_total++;
+    if (icount > s_draw_max_icount) s_draw_max_icount = icount;
+    if (vcount > s_draw_max_vcount) s_draw_max_vcount = vcount;
+}
+
+/* Shared ring writer. `f` is an already-open stream; `tag` labels the dump. */
+static void Backend_WriteDrawRing(FILE *f, const char *tag)
+{
+    unsigned n, i, cur = g_backend.device_generation;
+    if (!f) return;
+    fprintf(f, "==== DRAW WATCH (%s): total_draws=%u max_icount=%u max_vcount=%u cur_gen=%u (last %d) ====\n",
+            tag ? tag : "?", s_draw_total, s_draw_max_icount, s_draw_max_vcount, cur, TD5_DRAW_RING);
+    n = s_draw_total < TD5_DRAW_RING ? s_draw_total : TD5_DRAW_RING;
+    for (i = 0; i < n; i++) {
+        unsigned idx = (s_draw_head - n + i) % TD5_DRAW_RING;
+        TD5DrawRec *r = &s_draw_ring[idx];
+        fprintf(f, "  [%u] %s prim=%u v=%u i=%u gen=%u srv=%p%s\n",
+                i, r->indexed ? "IDX" : "VTX", r->prim, r->vcount, r->icount,
+                r->gen, r->srv, (r->gen < cur) ? "  <-- STALE (pre-reset resource)" : "");
+    }
+}
+
+/* [crash-diag 2026-07-21] Append GPU forensics to the SEH crash file: the live
+ * backend snapshot + the recent-draw ring (with per-draw generation/SRV so a
+ * stale pre-reset bind stands out). Called from the exe's crash handler via
+ * td5_plat_dump_gpu_crash_diag. NOT gated on TD5RE_D3D_DEBUG (a crash is rare
+ * and we always want the forensics). Only reads scalar/ pointer VALUES from
+ * g_backend + our own ring -- never derefs a GPU object -- so it is safe to run
+ * from inside an access-violation handler. */
+void Backend_DumpCrashDiag(const char *path)
+{
+    FILE *f = fopen(path ? path : "log/crash.log", "a");
+    if (!f) return;
+    fprintf(f,
+        "\n---- GPU crash diagnostics ----\n"
+        "  device=%p ctx=%p swap=%p\n"
+        "  device_generation=%u device_removed=%d present_count=%lu\n"
+        "  current_srv=%p current_tex_has_alpha=%d windowed=%d rt=%dx%d target=%dx%d\n"
+        "  diag_context=\"%s\"\n",
+        (void *)g_backend.device, (void *)g_backend.context, (void *)g_backend.swap_chain,
+        g_backend.device_generation, g_backend.device_removed, g_backend.present_count,
+        (void *)g_backend.current_srv, g_backend.current_tex_has_alpha, g_backend.windowed,
+        g_backend.width, g_backend.height, g_backend.target_width, g_backend.target_height,
+        g_backend.diag_context);
+    Backend_WriteDrawRing(f, "SEH crash");
+    fflush(f); fclose(f);
+}
 
 /* ------------------------------------------------------------------------
  * Photo-booth frame capture: copy the final composited backbuffer to CPU.

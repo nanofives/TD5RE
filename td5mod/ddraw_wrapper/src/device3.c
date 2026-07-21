@@ -620,6 +620,7 @@ static HRESULT __stdcall Dev3_DrawPrimitive(WrapperDevice *self,
         }
     }
 
+    Backend_NoteDraw(prim_type, vert_count, 0, 0);   /* [DRAW WATCH] */
     ID3D11DeviceContext_Draw(ctx, vert_count, base_vertex);
     return DD_OK;
 }
@@ -691,6 +692,7 @@ static HRESULT __stdcall Dev3_DrawIndexedPrimitive(WrapperDevice *self,
             g_backend.current_srv, !g_backend.current_tex_has_alpha);
     }
 
+    Backend_NoteDraw(prim_type, vert_count, index_count, 1);   /* [DRAW WATCH] */
     ID3D11DeviceContext_DrawIndexed(ctx, index_count, start_index, (INT)base_vertex);
     return DD_OK;
 }

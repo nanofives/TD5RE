@@ -458,6 +458,14 @@ int td5_plat_device_lost(void)
     return g_backend.device_removed;
 }
 
+/* [crash-diag 2026-07-21] Seam so the exe SEH crash handler (main.c) can append
+ * GPU forensics to crash.log without pulling in wrapper headers. Safe from an
+ * AV handler: reads only VALUES from g_backend + the recent-draw ring. */
+void td5_plat_dump_gpu_crash_diag(const char *path)
+{
+    Backend_DumpCrashDiag(path);
+}
+
 /* [DEVICE-LOST recovery] Try to bring the GPU back after a TDR removed the
  * device. Rate-limited (recreating a device is expensive and the driver may
  * need a moment after a TDR) and capped so a permanently dead adapter (physical

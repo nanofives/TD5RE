@@ -413,6 +413,19 @@ extern D3D11Backend g_backend;
  * removed, else 0. Cheap no-op on a healthy SUCCEEDED hr. */
 int Backend_NoteDeviceRemoved(HRESULT hr, const char *where);
 
+/* [DRAW WATCH] Record one draw submission (counts + bound SRV + device
+ * generation) into the recent-draw ring. ALWAYS records (cheap memory writes)
+ * so the crash dump has forensics even without TD5RE_D3D_DEBUG. Called from the
+ * D3D3 draw entry points. */
+void Backend_NoteDraw(unsigned prim, unsigned vcount, unsigned icount, int indexed);
+
+/* [crash-diag 2026-07-21] Append GPU forensics (live backend snapshot + the
+ * recent-draw ring with per-draw generation/SRV, flagging stale pre-reset
+ * binds) to `path`. Called from the exe SEH crash handler via
+ * td5_plat_dump_gpu_crash_diag. Reads only VALUES from g_backend + the ring
+ * (never derefs a GPU object), so it is safe inside an AV handler. */
+void Backend_DumpCrashDiag(const char *path);
+
 /* [DEVICE-LOST recovery] Recreate the D3D11 device + swap chain + all
  * backend-owned GPU resources (render targets, shaders, state objects, dynamic
  * buffers, constant buffers) after a TDR left the old device removed. Reuses
