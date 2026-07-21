@@ -5426,6 +5426,74 @@ void td5_hud_render_overlays(float dt)
              * SDF (GEARNUMBERS is empty in the asset); otherwise the baked quad. */
             /* Submit gear indicator */
             hud_submit_quad(view_base + GEAR_QUAD_OFF);
+
+            /* [PORT ENHANCEMENT 2026-07-20] Shift-change arrow indicators.
+             * A flashing UP triangle appears just above the dial when engine
+             * revs reach the top of the rev range (default top 10%) prompting
+             * a shift UP; a flashing DOWN triangle appears when revs fall too
+             * low in a forward gear (lugging) prompting a shift DOWN. Only one
+             * shows at a time; drawn per-pane so each split-screen player sees
+             * their own. Active in ALL race modes (drag included). Knobs:
+             *   TD5RE_SHIFT_INDICATOR  1=on (default), 0=off
+             *   TD5RE_SHIFT_UP_PCT     redline fraction for shift-up (default 90)
+             *   TD5RE_SHIFT_DOWN_PCT   low-rev fraction for shift-down (def 25)
+             * Gear byte: 0=R 1=N 2=1st .. 7=6th. Up only in a forward gear
+             * below top gear; down only in 2nd gear (byte 3) or higher. */
+            {
+                static int s_shift_init = 0;
+                static int s_shift_on = 1, s_shift_up_pct = 90, s_shift_dn_pct = 25;
+                if (!s_shift_init) {
+                    s_shift_on     = td5_env_int("TD5RE_SHIFT_INDICATOR", 1, 0, 1);
+                    s_shift_up_pct = td5_env_int("TD5RE_SHIFT_UP_PCT", 90, 50, 100);
+                    s_shift_dn_pct = td5_env_int("TD5RE_SHIFT_DOWN_PCT", 25, 0, 60);
+                    s_shift_init = 1;
+                    TD5_LOG_I(LOG_TAG, "Shift indicator: on=%d up=%d%% down=%d%%",
+                              s_shift_on, s_shift_up_pct, s_shift_dn_pct);
+                }
+                if (s_shift_on && max_rpm > 0) {
+                    int up_thr    = (int)max_rpm * s_shift_up_pct / 100;
+                    int dn_thr    = (int)max_rpm * s_shift_dn_pct / 100;
+                    int want_up   = (gear >= 2 && gear < 7 && engine_speed >= up_thr);
+                    int want_down = (gear >= 3 && engine_speed <= dn_thr);
+                    if (want_up) want_down = 0;   /* mutually exclusive; up wins */
+
+                    /* Blink ~5.5 Hz off a wall-clock timer (same source the
+                     * cop-chase arrow uses). Draw only on the "on" half. */
+                    if ((want_up || want_down) &&
+                        (((td5_plat_time_ms() / 180u) & 1u) == 0u)) {
+                        TD5_AtlasEntry *col = td5_asset_find_atlas_entry(NULL, "COLOURS");
+                        if (col) {
+                            float cu   = (float)col->atlas_x + 0.5f;
+                            float cv   = (float)col->atlas_y + 0.5f;
+                            int   ctex = col->texture_page;
+                            float half   = ssx * 9.0f;          /* half base width */
+                            float ay_top = cy - ssy * 66.0f;    /* just above dial */
+                            float ay_bot = cy - ssy * 52.0f;
+                            const uint32_t UP_COL = 0xFF3CDC3Cu;  /* green: shift up */
+                            const uint32_t DN_COL = 0xFFFF9420u;  /* amber: shift down */
+                            TD5_SpriteQuad q;
+                            if (want_up) {
+                                /* apex up: TL=TR=apex(top,centre); BL/BR=base(bottom) */
+                                hud_build_quad_warped(&q, ctex,
+                                    cx,        ay_top,   /* TL (apex) */
+                                    cx - half, ay_bot,   /* BL */
+                                    cx + half, ay_bot,   /* BR */
+                                    cx,        ay_top,   /* TR (apex) */
+                                    cu, cv, cu, cv, UP_COL, HUD_DEPTH);
+                            } else {
+                                /* apex down: base at top, BL=BR=apex(bottom,centre) */
+                                hud_build_quad_warped(&q, ctex,
+                                    cx - half, ay_top,   /* TL */
+                                    cx,        ay_bot,   /* BL (apex) */
+                                    cx,        ay_bot,   /* BR (apex) */
+                                    cx + half, ay_top,   /* TR */
+                                    cu, cv, cu, cv, DN_COL, HUD_DEPTH);
+                            }
+                            hud_submit_quad(&q);
+                        }
+                    }
+                }
+            }
         }
 
         /* --- Bit 6: Metric digit display ---

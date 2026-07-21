@@ -1366,6 +1366,44 @@ void td5_input_update_player_control(int slot)
         /* ---- Path B: Analog steering ---- */
         int raw_x = (int)(bits & 0x1FF) - TD5_INPUT_JS_AXIS_CENTER;
 
+        /* [PORT ENHANCEMENT 2026-07-20] Analog steering deadzone + range
+         * rescale. A worn / off-centre analog stick (common on the extra pads
+         * pressed into service for 4-5 player split-screen) reports a small
+         * non-zero X axis even with the player's hands OFF the stick, so the
+         * car steers toward one side on its own. We zero any deflection within
+         * +/-DZ of centre to kill that phantom steer, then LINEARLY RESCALE the
+         * remaining [DZ..centre] span back onto [0..centre] so full deflection
+         * still reaches full lock -- no steering range is lost, only the dead
+         * drift band is removed (steering hard off a wall stays fully
+         * responsive). Analog Path B only; digital/keyboard Path A has no
+         * drift. Runs BEFORE the expo curve below so the two stack cleanly.
+         * Knob TD5RE_STEER_DEADZONE (raw axis units out of ~250; 0 = faithful,
+         * no deadzone). This is ON TOP of any platform DirectInput deadzone. */
+        {
+            static int s_steer_dz_init = 0;
+            static int s_steer_dz = 20;
+            if (!s_steer_dz_init) {
+                s_steer_dz = td5_env_int("TD5RE_STEER_DEADZONE", 20, 0,
+                                         TD5_INPUT_JS_AXIS_CENTER - 1);
+                s_steer_dz_init = 1;
+                TD5_LOG_I(LOG_TAG, "Analog steer deadzone: %d raw (of %d)",
+                          s_steer_dz, (int)TD5_INPUT_JS_AXIS_CENTER);
+            }
+            if (s_steer_dz > 0) {
+                int mag = (raw_x < 0) ? -raw_x : raw_x;
+                if (mag <= s_steer_dz) {
+                    raw_x = 0;
+                } else {
+                    int span = TD5_INPUT_JS_AXIS_CENTER - s_steer_dz;
+                    if (span < 1) span = 1;
+                    /* rescale [dz..centre] -> [0..centre], round to nearest */
+                    int scaled = ((mag - s_steer_dz) * TD5_INPUT_JS_AXIS_CENTER
+                                  + span / 2) / span;
+                    raw_x = (raw_x < 0) ? -scaled : scaled;
+                }
+            }
+        }
+
         /* [PORT ENHANCEMENT 2026-06-14 task#15] Non-linear (expo) steering curve.
          * The raw analog stick axis is desensitised in the small/mid range so a
          * gentle stick deflection steers gently, while FULL deflection still

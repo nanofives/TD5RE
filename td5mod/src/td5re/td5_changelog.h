@@ -33,6 +33,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 20" },
+    { CL_ITEM,    "NEW: shift-up (green) and shift-down (amber) arrows now" },
+    { CL_ITEM,    "  flash above the rev dial when it's time to change gear" },
+    { CL_ITEM,    "  - up near the redline, down when the engine is lugging" },
+    { CL_ITEM,    "FIX: analog steering now has a proper centre deadzone so" },
+    { CL_ITEM,    "  a drifting stick no longer steers the car on its own" },
+    { CL_ITEM,    "  (helped extra split-screen pads); full lock is kept" },
     { CL_ITEM,    "FIX: recovering from a graphics-card hang (driver TDR)" },
     { CL_ITEM,    "  no longer crashes on the first frame back - the" },
     { CL_ITEM,    "  display layer was re-binding a texture from the old," },
