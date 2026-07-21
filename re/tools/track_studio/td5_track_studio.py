@@ -34,6 +34,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(TOOLS_DIR))       # .../TD5RE
 VENDOR_DIR = os.path.join(STUDIO_DIR, "vendor")
 
 ASSETS_DIR = os.path.join(REPO_ROOT, "re", "assets")
+LIGHTS_DIR = os.path.join(REPO_ROOT, "td5mod", "src", "td5re", "lights")
 THREE_VER = "0.160.0"
 CDN = f"https://unpkg.com/three@{THREE_VER}"
 ENTRY_ADDONS = ["controls/OrbitControls.js", "loaders/GLTFLoader.js"]  # GLTFLoader for env geometry
@@ -306,7 +307,11 @@ def build_model_glb(level):
         bnd = m["bounding"]            # [radius, cx, cy, cz]
         bmag = abs(bnd[1]) + abs(bnd[3])
         vmax = max((abs(v["pos"][0]) + abs(v["pos"][2]) for v in vs), default=0)
-        ox, oy, oz = (bnd[1], bnd[2], bnd[3]) if (bmag > 100000 and vmax < bmag * 0.5) else (0.0, 0.0, 0.0)
+        # Billboard/prop meshes store LOCAL vertices (extent ~ bounding radius)
+        # and place at bounding centre; structural meshes carry world vertices
+        # (extent ~ centre magnitude). The old bmag > 100000 gate missed props
+        # near the world origin (Moscow glow quads at bmag ~30k piled at 0,0).
+        ox, oy, oz = (bnd[1], bnd[2], bnd[3]) if (bmag > 1000 and vmax < bmag * 0.5) else (0.0, 0.0, 0.0)
         for c in m["commands"]:
             tri, quad, page = c["tri"], c["quad"], c["texture_page_id"]
             P, U = pos_by[page], uv_by[page]
@@ -338,6 +343,68 @@ def build_model_glb(level):
     glb = mesh_tool._pack_glb(gltf, bytes(gb.bin))
     _glb_cache[level] = glb
     return glb
+
+
+# --------------------------------------------------------------------------
+# Lights editor (curated per-level street lights -- td5_lightsrc.c runtime).
+# Reads/writes the TRACKED source files td5mod/src/td5re/lights/, plus the
+# TD5RE_LAMP_FREEZE capture seeds (levelNNN_lights.captured.json).
+# --------------------------------------------------------------------------
+def _lights_path(level, captured=False):
+    suffix = "_lights.captured.json" if captured else "_lights.json"
+    return os.path.join(LIGHTS_DIR, "level%03d%s" % (int(level), suffix))
+
+
+def _load_json(path):
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def get_lights(level):
+    """Curated lights file + captured seed + the level's additive (type-3) pages
+    (suppression candidates -- painted glow halos are additive)."""
+    level = int(level)
+    additive = sorted(p for p, t in _page_types(level).items() if t == 3)
+    return {
+        "lights": _load_json(_lights_path(level)),
+        "captured": _load_json(_lights_path(level, captured=True)),
+        "additive_pages": additive,
+        "path": os.path.relpath(_lights_path(level), REPO_ROOT).replace("\\", "/"),
+    }
+
+
+def save_lights(req):
+    level = int(req.get("level", -1))
+    data = req.get("data")
+    if level <= 0 or not isinstance(data, dict):
+        return False, {"error": "need level + data"}
+    doc = {
+        "_format": "td5_lights",
+        "_version": 1,
+        "level": level,
+        "defaults": data.get("defaults") or
+                    {"range": 2400, "intensity": 1.0, "color": [1.0, 0.82, 0.55]},
+        "lights": [
+            {k: round(float(L[k]), 1) if k != "color" else L[k]
+             for k in ("x", "y", "z", "range", "intensity", "color") if k in L}
+            for L in (data.get("lights") or [])
+            if all(k in L for k in ("x", "y", "z"))
+        ],
+        "emissive_pages": [
+            {"page": int(p["page"]), "suppress": bool(p.get("suppress"))}
+            for p in (data.get("emissive_pages") or []) if "page" in p
+        ],
+    }
+    os.makedirs(LIGHTS_DIR, exist_ok=True)
+    path = _lights_path(level)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(doc, f, indent=2)
+        f.write("\n")
+    return True, {"ok": True, "path": os.path.relpath(path, REPO_ROOT).replace("\\", "/"),
+                  "lights": len(doc["lights"]),
+                  "suppressed": sum(1 for p in doc["emissive_pages"] if p["suppress"])}
 
 
 def do_sample(kind):
@@ -440,6 +507,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(404, {"error": "asset not found"})
             elif p == "/api/model":
                 self._send(200, build_model_glb(q.get("level")), "model/gltf-binary")
+            elif p == "/api/lights":
+                self._send(200, get_lights(q.get("level")))
             else:
                 self._send(404, {"error": "not found"})
         except Exception as e:
@@ -462,6 +531,12 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/loadfile":
             try:
                 ok, res = do_loadfile(req)
+                self._send(200 if ok else 400, res)
+            except Exception as e:
+                self._send(500, {"error": str(e), "trace": traceback.format_exc()})
+        elif self.path == "/api/lights":
+            try:
+                ok, res = save_lights(req)
                 self._send(200 if ok else 400, res)
             except Exception as e:
                 self._send(500, {"error": str(e), "trace": traceback.format_exc()})

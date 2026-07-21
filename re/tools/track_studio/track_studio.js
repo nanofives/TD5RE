@@ -21,6 +21,7 @@ scene.add(new THREE.HemisphereLight(0xffffff, 0x36404f, 1.15));
 const sun = new THREE.DirectionalLight(0xffffff, 1.1); sun.position.set(1, 2, 1); scene.add(sun);
 const root = new THREE.Group(); scene.add(root);   // track geometry, centered on `center`
 const envRoot = new THREE.Group(); scene.add(envRoot);   // imported environment geometry
+const lightsRoot = new THREE.Group(); scene.add(lightsRoot); // curated street-light markers
 const gltfLoader = new GLTFLoader();
 let grid = null;
 
@@ -41,9 +42,9 @@ addEventListener('keydown', (e) => {
   if (inField(e.target)) return;
   const k = e.key.toLowerCase();
   if (k.length === 1 && 'wasdqe'.includes(k)) moveKeys[k] = true;
-  moveKeys.shift = e.shiftKey;
+  moveKeys.shift = e.shiftKey; moveKeys.ctrl = e.ctrlKey;
 });
-addEventListener('keyup', (e) => { const k = e.key.toLowerCase(); if (k.length === 1 && k in moveKeys) moveKeys[k] = false; moveKeys.shift = e.shiftKey; });
+addEventListener('keyup', (e) => { const k = e.key.toLowerCase(); if (k.length === 1 && k in moveKeys) moveKeys[k] = false; moveKeys.shift = e.shiftKey; moveKeys.ctrl = e.ctrlKey; });
 addEventListener('blur', clearMove);
 addEventListener('focusin', (e) => { if (inField(e.target)) clearMove(); });
 function applyWASD() {
@@ -52,7 +53,12 @@ function applyWASD() {
   const fwd = new THREE.Vector3(); camera.getWorldDirection(fwd); fwd.y = 0;
   if (fwd.lengthSq() < 1e-9) fwd.set(0, 0, -1); fwd.normalize();
   const right = new THREE.Vector3().crossVectors(fwd, _up).normalize();
-  const speed = camera.position.distanceTo(controls.target) * 0.018 * (m.shift ? 3 : 1);
+  // Speed scales with the SMALLER of orbit distance and camera height, so
+  // flying low over the scenery (target still far away) doesn't rocket past
+  // it. Ctrl = precision (0.2x), Shift = fast (3x).
+  const ref = Math.min(camera.position.distanceTo(controls.target),
+                       Math.abs(camera.position.y) * 2 + 400);
+  const speed = ref * 0.018 * (m.shift ? 3 : 1) * (m.ctrl ? 0.2 : 1);
   const d = new THREE.Vector3();
   if (m.w) d.add(fwd); if (m.s) d.sub(fwd);
   if (m.d) d.add(right); if (m.a) d.sub(right);
@@ -186,6 +192,7 @@ function rebuild(fit) {
   for (const n of spec.nodes) { c.x += n.x; c.z += n.z; c.y += (n.y || 0); miny = Math.min(miny, n.y || 0); }
   c.multiplyScalar(1 / spec.nodes.length); center.copy(c);
   envRoot.position.set(-center.x, -center.y, -center.z);   // keep env aligned to track
+  lightsRoot.position.copy(envRoot.position);              // lights share raw engine coords
   for (const n of spec.nodes) maxr = Math.max(maxr, Math.hypot(n.x - c.x, n.z - c.z));
 
   // grid sized to the track
@@ -625,6 +632,357 @@ $('loadEnvBtn').onclick = async () => {
     }, (err) => setStatus('GLB parse error: ' + err, 'bad'));
   } catch (e) { setStatus('environment load failed: ' + e, 'bad'); }
 };
+
+// ---------------------------------------------------------------- lights editor
+// Curated street lights (td5mod/src/td5re/lights/levelNNN_lights.json — the
+// td5_lightsrc.c runtime schema). Positions are RAW engine world coordinates
+// (24.8/256 floats, Y-DOWN: smaller y = higher), the same space the env GLB
+// and strip nodes already use, so markers land exactly on the scenery.
+let lightsData = null;        // { defaults, lights[], emissive_pages[] }
+let lightMarkers = [];        // sphere meshes, index-aligned to lightsData.lights
+let selLight = -1, editLights = false, dragLightIdx = -1;
+let additivePages = [];       // suppression candidates for the current level
+
+function lightsDefaults() {
+  return {
+    range: +$('ldRange').value || 2400,
+    intensity: +$('ldIntensity').value || 1.0,
+    color: hexToRgb($('ldColor').value),
+  };
+}
+function hexToRgb(h) {
+  return [parseInt(h.slice(1, 3), 16) / 255, parseInt(h.slice(3, 5), 16) / 255,
+          parseInt(h.slice(5, 7), 16) / 255].map(v => Math.round(v * 100) / 100);
+}
+function rgbToHex(c) {
+  const b = (v) => Math.max(0, Math.min(255, Math.round((v == null ? 1 : v) * 255)))
+    .toString(16).padStart(2, '0');
+  return '#' + b(c && c[0]) + b(c && c[1]) + b(c && c[2]);
+}
+function blankLights() {
+  return { defaults: lightsDefaults(), lights: [], emissive_pages: [] };
+}
+
+function rebuildLights() {
+  while (lightsRoot.children.length) lightsRoot.remove(lightsRoot.children[0]);
+  lightMarkers = [];
+  if (!lightsData) { updateLightPanel(); return; }
+  const rad = 260;
+  lightsData.lights.forEach((L, i) => {
+    const col = L.color ? rgbToHex(L.color) : rgbToHex(lightsData.defaults.color);
+    const m = new THREE.Mesh(new THREE.SphereGeometry(rad, 12, 10),
+      new THREE.MeshBasicMaterial({ color: i === selLight ? 0xffd23a : new THREE.Color(col).getHex() }));
+    m.position.set(L.x, L.y, L.z); m.userData.lightIdx = i;
+    lightsRoot.add(m); lightMarkers.push(m);
+    // range ring on the (engine) ground under the head — draw at the light's own y
+    const rng = L.range || lightsData.defaults.range;
+    const ring = new THREE.Mesh(new THREE.RingGeometry(rng * 0.97, rng, 40),
+      new THREE.MeshBasicMaterial({ color: 0xe2b13a, side: THREE.DoubleSide,
+        transparent: true, opacity: i === selLight ? 0.5 : 0.18 }));
+    ring.rotation.x = -Math.PI / 2; ring.position.set(L.x, L.y, L.z);
+    lightsRoot.add(ring);
+    // drop line: head -> +range*0.25 toward engine-ground (bigger y) as a cue
+    const pts = [new THREE.Vector3(L.x, L.y, L.z), new THREE.Vector3(L.x, L.y + 550, L.z)];
+    lightsRoot.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({ color: 0x8b93a3 })));
+  });
+  lightsRoot.position.set(-center.x, -center.y, -center.z);
+  updateLightPanel();
+}
+
+function updateLightPanel() {
+  const n = lightsData ? lightsData.lights.length : 0;
+  const L = (lightsData && selLight >= 0) ? lightsData.lights[selLight] : null;
+  $('lightInfo').textContent = lightsData
+    ? (L ? `Light ${selLight + 1} / ${n}` : `${n} light(s). Click a marker to select.`)
+    : 'No lights loaded.';
+  $('lX').value = L ? Math.round(L.x) : '';
+  $('lY').value = L ? Math.round(L.y) : '';
+  $('lZ').value = L ? Math.round(L.z) : '';
+  $('lRange').value = L && L.range != null ? L.range : '';
+  $('lIntensity').value = L && L.intensity != null ? L.intensity : '';
+  $('lColor').value = L && L.color ? rgbToHex(L.color) : rgbToHex(lightsData ? lightsData.defaults.color : null);
+  renderGlowPages();
+}
+
+function renderGlowPages() {
+  const el = $('glowPages');
+  if (currentLevel == null) { el.textContent = 'Import a level to list its additive pages.'; return; }
+  // classified candidates first (additive pages + pages already in the file),
+  // then — once the env is loaded — EVERY page the scenery draws, so any
+  // texture (lamp head, neon sign) can be picked as a light-fixture source.
+  const listed = (lightsData ? (lightsData.emissive_pages || []) : []).map(p => p.page);
+  const cand = new Set([...additivePages, ...listed]);
+  const all = envLoaded ? [...envPageSet()].filter(p => !cand.has(p)).sort((a, b) => a - b) : [];
+  const pages = [...cand].sort((a, b) => a - b);
+  if (!pages.length && !all.length) { el.textContent = 'No additive (type-3) pages in this level.'; return; }
+  const sup = new Set((lightsData ? lightsData.emissive_pages : [])
+    .filter(p => p.suppress).map(p => p.page));
+  const cell = (p, dim) => `
+    <span style="display:inline-block;text-align:center;margin:3px">
+      <img src="/api/asset?level=${currentLevel}&name=page_${String(p).padStart(3, '0')}.png"
+           width="48" height="48" data-pick="${p}" title="click: select as fixture source"
+           style="image-rendering:pixelated;cursor:pointer;background:#000;${dim ? 'opacity:.75;' : ''}
+                  border:2px solid ${selectedPages.has(p) ? 'var(--accent)' : 'var(--edge)'}"><br>
+      <span style="font-size:10px">${p}</span>
+      <input type="checkbox" data-page="${p}" ${sup.has(p) ? 'checked' : ''} title="suppress in-game">
+    </span>`;
+  el.innerHTML = pages.map(p => cell(p, false)).join('') +
+    (all.length ? `<div class="hint" style="margin-top:4px">All scenery pages (click one to use
+       it as the fixture source — e.g. the lamp-head glow):</div>
+       <div style="max-height:180px;overflow-y:auto">${all.map(p => cell(p, true)).join('')}</div>` : '');
+  el.querySelectorAll('input[type=checkbox]').forEach(cb => cb.addEventListener('change', () => {
+    if (!lightsData) lightsData = blankLights();
+    const pg = +cb.dataset.page;
+    lightsData.emissive_pages = (lightsData.emissive_pages || []).filter(p => p.page !== pg);
+    lightsData.emissive_pages.push({ page: pg, suppress: cb.checked });
+  }));
+  el.querySelectorAll('img[data-pick]').forEach(img => img.addEventListener('click', () => {
+    const pg = +img.dataset.pick;
+    if (selectedPages.has(pg)) selectedPages.delete(pg); else selectedPages.add(pg);
+    renderGlowPages();
+    if (showGlowFixtures) rebuildGlowMarkers();
+  }));
+}
+
+// ---- glow fixtures: cluster the emissive pages' geometry into per-fixture
+// centroids so lights can be placed ON the painted glow, not just captured
+// pole positions. Works on the loaded env GLB (one merged mesh per page).
+const glowRoot = new THREE.Group(); scene.add(glowRoot);
+let glowClusters = [], showGlowFixtures = false;
+
+function emissivePageSet() {
+  const listed = (lightsData ? (lightsData.emissive_pages || []) : []).map(p => p.page);
+  return new Set([...additivePages, ...listed]);
+}
+// pages the user clicked in the palette — fixture clustering targets THESE
+// when non-empty (pick the lamp-head texture, generate lights from its
+// fixtures), falling back to the emissive set otherwise.
+const selectedPages = new Set();
+function envPageSet() {   // every page the loaded env actually draws
+  const s = new Set();
+  envRoot.traverse((o) => { if (o.isMesh && o.userData && o.userData.page != null) s.add(o.userData.page); });
+  return s;
+}
+function computeGlowClusters() {
+  glowClusters = [];
+  if (!envLoaded) return;
+  const pages = selectedPages.size ? selectedPages : emissivePageSet();
+  const cents = [];   // triangle centroids of all emissive-page meshes (raw engine coords)
+  envRoot.traverse((o) => {
+    if (!o.isMesh || !o.userData || !pages.has(o.userData.page)) return;
+    const pos = o.geometry.getAttribute('position');
+    for (let t = 0; t + 2 < pos.count; t += 3) {
+      cents.push([
+        (pos.getX(t) + pos.getX(t + 1) + pos.getX(t + 2)) / 3,
+        (pos.getY(t) + pos.getY(t + 1) + pos.getY(t + 2)) / 3,
+        (pos.getZ(t) + pos.getZ(t + 1) + pos.getZ(t + 2)) / 3]);
+    }
+  });
+  // greedy clustering: merge centroids within 900 units (a fixture's quadrant
+  // quads sit a few hundred apart; posts are >=1400 apart)
+  const R2 = 900 * 900;
+  for (const c of cents) {
+    let best = null;
+    for (const cl of glowClusters) {
+      const dx = cl.x / cl.n - c[0], dy = cl.y / cl.n - c[1], dz = cl.z / cl.n - c[2];
+      if (dx * dx + dy * dy + dz * dz < R2) { best = cl; break; }
+    }
+    if (best) { best.x += c[0]; best.y += c[1]; best.z += c[2]; best.n++; }
+    else glowClusters.push({ x: c[0], y: c[1], z: c[2], n: 1 });
+  }
+  // finalize to means + tag "near the road" (backdrop glow strings sit 25k+
+  // out — generating lights there would litter the skyline)
+  glowClusters = glowClusters.map(cl => {
+    const x = cl.x / cl.n, y = cl.y / cl.n, z = cl.z / cl.n;
+    let near = false;
+    for (const nd of spec.nodes) {
+      const dx = nd.x - x, dz = nd.z - z, dy = (nd.y || 0) - y;
+      // near = close in XZ AND roughly road level (Moscow's quay glows sit
+      // ~3000 BELOW the embankment — a light there illuminates nothing)
+      if (dx * dx + dz * dz < 8000 * 8000 && Math.abs(dy) < 2500) { near = true; break; }
+    }
+    return { x, y, z, n: cl.n, near };
+  });
+}
+function rebuildGlowMarkers() {
+  while (glowRoot.children.length) glowRoot.remove(glowRoot.children[0]);
+  if (!showGlowFixtures) return;
+  computeGlowClusters();
+  const geo = new THREE.OctahedronGeometry(320);
+  const matNear = new THREE.MeshBasicMaterial({ color: 0x3ad6ff, wireframe: true });
+  const matFar = new THREE.MeshBasicMaterial({ color: 0x555f70, wireframe: true });
+  for (const cl of glowClusters) {
+    const m = new THREE.Mesh(geo, cl.near ? matNear : matFar);
+    m.position.set(cl.x, cl.y, cl.z); glowRoot.add(m);
+  }
+  glowRoot.position.set(-center.x, -center.y, -center.z);
+  const near = glowClusters.filter(c => c.near).length;
+  setStatus(`Glow fixtures: ${glowClusters.length} cluster(s), ${near} near the road (cyan). ` +
+    `Grey = backdrop/off-road (skipped by "+ lights at fixtures").`, 'ok');
+}
+$('glowShowBtn').addEventListener('click', () => {
+  if (!envLoaded) { setStatus('Load environment first (7 · View / textures).', 'warn'); return; }
+  showGlowFixtures = !showGlowFixtures;
+  $('glowShowBtn').textContent = showGlowFixtures ? 'hide glow fixtures' : 'show glow fixtures';
+  rebuildGlowMarkers();
+});
+$('glowGenBtn').addEventListener('click', () => {
+  if (!envLoaded) { setStatus('Load environment first (7 · View / textures).', 'warn'); return; }
+  computeGlowClusters();
+  if (!lightsData) lightsData = blankLights();
+  let added = 0;
+  for (const cl of glowClusters) {
+    if (!cl.near) continue;
+    // dedupe against existing lights (same 650 radius the runtime capture uses)
+    let dup = false;
+    for (const L of lightsData.lights) {
+      const dx = L.x - cl.x, dy = L.y - cl.y, dz = L.z - cl.z;
+      if (dx * dx + dy * dy + dz * dz < 650 * 650) { dup = true; break; }
+    }
+    if (!dup) { lightsData.lights.push({ x: Math.round(cl.x), y: Math.round(cl.y), z: Math.round(cl.z) }); added++; }
+  }
+  selLight = -1; rebuildLights();
+  setStatus(`Added ${added} light(s) at glow fixtures (deduped vs existing).`, 'ok');
+});
+
+// pick / drag / add
+function pickLight(ev) {
+  const r = renderer.domElement.getBoundingClientRect();
+  const m = new THREE.Vector2(((ev.clientX - r.left) / r.width) * 2 - 1,
+                              -((ev.clientY - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(m, camera);
+  const hits = raycaster.intersectObjects(lightMarkers, false);
+  return hits.length ? hits[0].object.userData.lightIdx : -1;
+}
+let lightDownXY = null;   // own copy — the node editor's pointerup nulls downXY before ours runs
+renderer.domElement.addEventListener('pointerdown', (ev) => {
+  if (ev.button !== 0) return;
+  lightDownXY = [ev.clientX, ev.clientY];
+  if (!editLights || !lightsData) return;
+  const idx = pickLight(ev);
+  if (idx >= 0) { dragLightIdx = idx; selLight = idx; controls.enabled = false; rebuildLights(); }
+});
+renderer.domElement.addEventListener('pointermove', (ev) => {
+  if (dragLightIdx < 0) return;
+  const h = groundHit(ev); if (!h) return;
+  const L = lightsData.lights[dragLightIdx];
+  L.x = Math.round(h.x + center.x); L.z = Math.round(h.z + center.z);
+  rebuildLights();
+});
+addEventListener('pointerup', (ev) => {
+  const wasDown = lightDownXY; lightDownXY = null;
+  if (dragLightIdx >= 0) { dragLightIdx = -1; controls.enabled = true; return; }
+  if (!editLights || !lightsData || ev.target !== renderer.domElement) return;
+  const moved = wasDown && Math.hypot(ev.clientX - wasDown[0], ev.clientY - wasDown[1]) > 4;
+  if (moved) return;
+  const idx = pickLight(ev);
+  if (idx >= 0) { selLight = idx; rebuildLights(); }
+  else if (ev.shiftKey) {
+    const h = groundHit(ev); if (!h) return;
+    addLightAt(Math.round(h.x + center.x), Math.round(h.z + center.z));
+  }
+});
+addEventListener('keydown', (e) => {
+  if (inField(e.target)) return;
+  if ((e.key === 'Delete' || e.key === 'Backspace') && editLights && selLight >= 0 && lightsData) {
+    lightsData.lights.splice(selLight, 1);
+    selLight = Math.min(selLight, lightsData.lights.length - 1);
+    rebuildLights();
+  }
+});
+function addLightAt(x, z) {
+  if (!lightsData) lightsData = blankLights();
+  // head height: ~550 above (engine Y-DOWN => minus) the nearest road node
+  let y = -550;
+  if (spec.nodes.length) { const ni = nearestNode({ x, z }); y = (spec.nodes[ni].y || 0) - 550; }
+  lightsData.lights.push({ x, y, z });
+  selLight = lightsData.lights.length - 1;
+  rebuildLights();
+}
+
+// panel events
+const selLightObj = () => (lightsData && selLight >= 0) ? lightsData.lights[selLight] : null;
+for (const [id, key] of [['lX', 'x'], ['lY', 'y'], ['lZ', 'z']])
+  $(id).addEventListener('change', (e) => { const L = selLightObj(); if (L) { L[key] = +e.target.value; rebuildLights(); } });
+$('lRange').addEventListener('change', (e) => {
+  const L = selLightObj(); if (!L) return;
+  if (e.target.value === '') delete L.range; else L.range = +e.target.value;
+  rebuildLights();
+});
+$('lIntensity').addEventListener('change', (e) => {
+  const L = selLightObj(); if (!L) return;
+  if (e.target.value === '') delete L.intensity; else L.intensity = +e.target.value;
+});
+$('lColor').addEventListener('change', (e) => { const L = selLightObj(); if (L) { L.color = hexToRgb(e.target.value); rebuildLights(); } });
+$('lColorClear').addEventListener('click', () => { const L = selLightObj(); if (L) { delete L.color; rebuildLights(); } });
+for (const id of ['ldRange', 'ldIntensity', 'ldColor'])
+  $(id).addEventListener('change', () => { if (lightsData) { lightsData.defaults = lightsDefaults(); rebuildLights(); } });
+$('editLights').addEventListener('change', (e) => { editLights = e.target.checked; if (!editLights) { selLight = -1; rebuildLights(); } });
+$('addLight').addEventListener('click', () => {
+  const t = controls.target;   // drop at the orbit target
+  addLightAt(Math.round(t.x + center.x), Math.round(t.z + center.z));
+});
+$('dupLight').addEventListener('click', () => {
+  const L = selLightObj(); if (!L) return;
+  lightsData.lights.push({ ...L, x: L.x + 1500 });
+  selLight = lightsData.lights.length - 1; rebuildLights();
+});
+$('delLight').addEventListener('click', () => {
+  if (!lightsData || selLight < 0) return;
+  lightsData.lights.splice(selLight, 1);
+  selLight = Math.min(selLight, lightsData.lights.length - 1); rebuildLights();
+});
+$('clearLights').addEventListener('click', () => {
+  if (!lightsData || !lightsData.lights.length) return;
+  const n = lightsData.lights.length;
+  lightsData.lights = []; selLight = -1; rebuildLights();
+  setStatus(`Cleared ${n} light(s) (not saved yet — Save writes the empty/regenerated set).`, 'warn');
+});
+
+function applyLoadedLights(doc, label) {
+  lightsData = {
+    defaults: (doc && doc.defaults) || lightsDefaults(),
+    lights: (doc && doc.lights) || [],
+    emissive_pages: (doc && doc.emissive_pages) || [],
+  };
+  $('ldRange').value = lightsData.defaults.range != null ? lightsData.defaults.range : 2400;
+  $('ldIntensity').value = lightsData.defaults.intensity != null ? lightsData.defaults.intensity : 1.0;
+  $('ldColor').value = rgbToHex(lightsData.defaults.color);
+  selLight = -1; rebuildLights();
+  setStatus(`${label}: ${lightsData.lights.length} light(s).`, 'ok');
+}
+async function fetchLights() {
+  if (currentLevel == null) { setStatus('Import a level first (Lights are per level).', 'warn'); return null; }
+  const d = await (await fetch('/api/lights?level=' + currentLevel)).json();
+  additivePages = d.additive_pages || [];
+  return d;
+}
+$('lightsLoadBtn').addEventListener('click', async () => {
+  try {
+    const d = await fetchLights(); if (!d) return;
+    if (d.lights) applyLoadedLights(d.lights, 'Loaded ' + d.path);
+    else { applyLoadedLights(null, 'No curated file yet — starting empty'); }
+  } catch (e) { setStatus('lights load failed: ' + e, 'bad'); }
+});
+$('lightsSeedBtn').addEventListener('click', async () => {
+  try {
+    const d = await fetchLights(); if (!d) return;
+    if (!d.captured) { setStatus('No captured seed. Run td5re with TD5RE_LAMP_FREEZE=1 first.', 'warn'); return; }
+    applyLoadedLights(d.captured, 'Imported captured seed (review, tune, Save)');
+  } catch (e) { setStatus('seed load failed: ' + e, 'bad'); }
+});
+$('lightsSaveBtn').addEventListener('click', async () => {
+  if (currentLevel == null || !lightsData) { setStatus('Import a level and load/add lights first.', 'warn'); return; }
+  lightsData.defaults = lightsDefaults();
+  try {
+    const r = await fetch('/api/lights', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ level: currentLevel, data: lightsData }) });
+    const d = await r.json();
+    if (!d.ok) { setStatus('save error: ' + (d.error || JSON.stringify(d)), 'bad'); return; }
+    setStatus(`Saved ${d.path} (${d.lights} light(s), ${d.suppressed} suppressed page(s)).\nIn-game: the level now uses curated lights.`, 'ok');
+  } catch (e) { setStatus('save failed: ' + e, 'bad'); }
+});
 
 // ---------------------------------------------------------------- boot
 loadList();

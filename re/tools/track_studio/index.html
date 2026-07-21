@@ -184,6 +184,54 @@ hr{border:none;border-top:1px solid var(--edge);margin:8px 0}
         Textures &amp; skybox are preview-only. Turn off "Edit nodes" to look around freely.</div>
     </div></details>
 
+    <details class="grp"><summary>8 · Lights (street lamps)</summary><div class="body">
+      <div class="hint">Curated per-level street lights (td5mod/src/td5re/lights/).
+        Load env geometry first to place lights against the real scenery.</div>
+      <div class="btnrow">
+        <button class="sm" id="lightsLoadBtn">Load lights</button>
+        <button class="sm" id="lightsSeedBtn">Import captured seed</button>
+      </div>
+      <label class="row"><span>Edit lights</span><input type="checkbox" id="editLights"></label>
+      <div id="lightInfo" class="hint">No lights loaded.</div>
+      <div class="row"><span>Position</span>
+        <div class="xyz">
+          <input type="number" id="lX" step="10" title="x">
+          <input type="number" id="lY" step="10" title="y (engine: smaller = higher)">
+          <input type="number" id="lZ" step="10" title="z">
+        </div></div>
+      <div class="row"><span>Range</span><input type="number" id="lRange" step="100" min="0" placeholder="default"></div>
+      <div class="row"><span>Intensity</span><input type="number" id="lIntensity" step="0.05" min="0" placeholder="default"></div>
+      <div class="row"><span>Colour</span><input type="color" id="lColor" value="#ffd18c">
+        <button class="sm" id="lColorClear" title="use file defaults">default</button></div>
+      <div class="btnrow">
+        <button class="sm" id="addLight">+ light</button>
+        <button class="sm" id="dupLight">duplicate</button>
+        <button class="sm" id="delLight">– delete</button>
+        <button class="sm" id="clearLights">clear ALL</button>
+      </div>
+      <div class="hint">Shift-click ground to drop a light (head height above the
+        nearest road node). Drag a marker to move it. Delete removes it.</div>
+      <hr>
+      <div class="row"><span>Defaults</span>
+        <input type="number" id="ldRange" step="100" value="2400" title="default range">
+        <input type="number" id="ldIntensity" step="0.05" value="1.0" title="default intensity" style="width:64px">
+        <input type="color" id="ldColor" value="#ffd18c" title="default colour"></div>
+      <hr>
+      <div class="hint">Emissive glow pages (additive) — tick <b>suppress</b> to retire the
+        painted circle in-game (the real light replaces it):</div>
+      <div id="glowPages" class="hint">Import a level to list its additive pages.</div>
+      <div class="btnrow">
+        <button class="sm" id="glowShowBtn">show glow fixtures</button>
+        <button class="sm" id="glowGenBtn">+ lights at glow fixtures</button>
+      </div>
+      <div class="hint">Click a texture above to select it as the <b>fixture source</b>
+        (e.g. the lamp-head glow), then "show glow fixtures" / "+ lights at glow
+        fixtures" cluster THAT page's scenery geometry into fixtures (no selection =
+        the emissive candidates). Cyan markers = near the road; grey (backdrop /
+        off-level) are skipped by "+ lights". Env must be loaded first.</div>
+      <button class="primary" id="lightsSaveBtn">Save lights.json ▸</button>
+    </div></details>
+
     <button class="primary" id="buildBtn">Build &amp; register track ▸</button>
     <div id="status">Ready. Import a level or start from a sample, edit, then Build.</div>
   </div>
