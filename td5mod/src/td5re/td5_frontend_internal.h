@@ -816,6 +816,12 @@ extern int  s_mp_btn_layout;
 extern int  s_mp_btn_missing[2];
 extern int  s_mp_btn_nickname;
 extern int  s_mp_btn_players;
+extern int  s_mp_btn_port;   /* [NET OPTIONS 2026-07-21] GAME PORT row */
+extern int  s_mp_btn_upnp;   /* [NET OPTIONS 2026-07-21] UPNP toggle row */
+/* [NET OPTIONS 2026-07-21] GAME PORT Enter-to-edit numeric field (impl in
+ * td5_frontend.c; driven by Screen_TwoPlayerOptions). */
+void td5_mp_port_edit_begin(void);
+int  td5_mp_port_edit_tick(void);   /* 1 when editor closed (ok/esc) */
 extern int  s_mp_layout_optcount;
 extern int  s_mp_layout_sel;
 extern int  s_mp_missing_content[2];

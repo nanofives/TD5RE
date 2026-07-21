@@ -1939,6 +1939,7 @@ static void mp_build_buttons(void)
     s_mp_btn_players = s_mp_btn_layout = s_mp_btn_ok = -1;
     s_mp_btn_missing[0] = s_mp_btn_missing[1] = -1;
     s_mp_btn_nickname = -1;
+    s_mp_btn_port = s_mp_btn_upnp = -1;
 
     /* Rows are NON-selector buttons: the button renderer bakes their label (the
      * ◄► arrows are drawn by the per-screen dispatch, the value by the overlay).
@@ -1946,7 +1947,7 @@ static void mp_build_buttons(void)
      * suppresses its label, which would leave the row blank. */
     y = 77;
     s_mp_btn_players = frontend_create_button(SNK_MpPlayersButTxt, 120, y, 0x100, 0x20);
-    y += 50;
+    y += 44;
     /* [CATCHUP 2026-07-21] The CATCHUP (AI rubber-band assist) row moved to RACE
      * OPTIONS (shown for MP modes) — it is a per-race option now, sitting with
      * difficulty/opponents. td5_ai_get_catchup_level() still consumes the same
@@ -1957,20 +1958,28 @@ static void mp_build_buttons(void)
      * the rows below re-flow up with no gap. TD5RE_MP_OPT_NO_SPLIT=0 restores them. */
     if (!mp_opt_no_split()) {
         s_mp_btn_layout = frontend_create_button(SNK_MpLayoutButTxt, 120, y, 0x100, 0x20);
-        y += 50;
+        y += 44;
     }
     for (int k = 0; k < missing && k < 2; k++) {
         char lbl[24];
         snprintf(lbl, sizeof lbl, "%s %d", SNK_MpDisplayButTxt, k + 1);
         s_mp_btn_missing[k] = frontend_create_button(lbl, 120, y, 0x100, 0x20);
-        y += 50;
+        y += 44;
     }
 
     /* S10: NICKNAME row sits dynamically BELOW the split-layout + missing-cell
      * rows (whose count varies with player count / layout). Pressing it opens
      * the nickname-entry screen; the current nickname is shown as its value. */
     s_mp_btn_nickname = frontend_create_button("NICKNAME", 120, y, 0x100, 0x20);
-    y += 50;
+    y += 44;
+    /* [NET OPTIONS 2026-07-21] Net-play defaults surfaced here (were reachable
+     * only on the Create-Session host screen): GAME PORT (Enter-to-edit numeric)
+     * and UPNP port-forward toggle. Back g_td5.ini.net_game_port / net_enable_upnp,
+     * which seed the Create-Session host rows (td5_fe_net.c). */
+    s_mp_btn_port = frontend_create_button("GAME PORT", 120, y, 0x100, 0x20);
+    y += 44;
+    s_mp_btn_upnp = frontend_create_button("UPNP", 120, y, 0x100, 0x20);
+    y += 44;
 
     s_mp_btn_ok = frontend_create_button(SNK_OkButTxt, 200, 377, 0x60, 0x20);
 
@@ -2045,11 +2054,25 @@ void Screen_TwoPlayerOptions(void) {
                 s_mp_missing_content[k] = v;
                 frontend_play_sfx(2);
                 s_inner_state = 4;
+            } else if (active_button == s_mp_btn_upnp && delta != 0) {
+                /* [NET OPTIONS 2026-07-21] UPNP port-forward on/off (either arrow
+                 * flips it); persisted to [Network]EnableUPnP, seeds the
+                 * Create-Session host row. */
+                g_td5.ini.net_enable_upnp = g_td5.ini.net_enable_upnp ? 0 : 1;
+                td5_ini_write_str("Network", "EnableUPnP",
+                                  g_td5.ini.net_enable_upnp ? "1" : "0");
+                frontend_play_sfx(2);
+                s_inner_state = 4;
             } else if (s_button_index == s_mp_btn_nickname) {
                 /* Open the nickname-entry screen; return here on confirm. */
                 s_nickname_from_mpopts = 1;
                 td5_frontend_set_screen(TD5_SCREEN_NET_NICKNAME);
                 return;
+            } else if (s_button_index == s_mp_btn_port) {
+                /* [NET OPTIONS 2026-07-21] Enter opens the GAME PORT numeric editor
+                 * (drawn in the value overlay; state 9 ticks it to confirm/cancel). */
+                td5_mp_port_edit_begin();
+                s_inner_state = 9;
             } else if (s_button_index == s_mp_btn_ok) {
                 s_inner_state = 7;
             }
@@ -2063,6 +2086,11 @@ void Screen_TwoPlayerOptions(void) {
         if (frontend_update_timed_animation(16, 267) >= 1.0f) {
             td5_frontend_set_screen(TD5_SCREEN_OPTIONS_HUB);
         }
+        break;
+    case 9: /* [NET OPTIONS 2026-07-21] GAME PORT editor active — tick to
+             * confirm (clamp + persist [Network]GamePort) / cancel. */
+        if (td5_mp_port_edit_tick())
+            s_inner_state = 4;   /* redraw values */
         break;
     }
 }

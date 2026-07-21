@@ -259,6 +259,8 @@ int  s_mp_btn_players   = -1;
 int  s_mp_btn_layout    = -1;
 int  s_mp_btn_missing[2] = { -1, -1 };
 int  s_mp_btn_nickname  = -1;    /* S10: edit net-play nickname (below split rows) */
+int  s_mp_btn_port      = -1;    /* [NET OPTIONS 2026-07-21] GAME PORT (enter-to-edit) */
+int  s_mp_btn_upnp      = -1;    /* [NET OPTIONS 2026-07-21] UPNP toggle */
 int  s_mp_missing_count = 0;
 int  s_mp_layout_optcount = 1;
 
@@ -6450,6 +6452,42 @@ int td5_raceopts_page_next(void) {
  * player identity is the multiplayer NICKNAME (g_td5.ini.net_nickname), edited on
  * the Multiplayer Options screen via Screen_NetNickname. */
 
+/* [NET OPTIONS 2026-07-21] GAME PORT editor for the Multiplayer Options screen.
+ * Enter-to-edit numeric field: on confirm the value is clamped to a valid port
+ * (1..65535, else the 37050 default) and written to g_td5.ini.net_game_port +
+ * [Network]GamePort, and s_net_cfg_game_port (the Create-Session host seed) is
+ * kept in sync. The scratch buffer lives here so the Multiplayer Options value
+ * overlay (same file) can render it live while editing. */
+static char s_mp_port_edit[8];
+
+void td5_mp_port_edit_begin(void) {
+    snprintf(s_mp_port_edit, sizeof s_mp_port_edit, "%d", g_td5.ini.net_game_port);
+    frontend_begin_text_input(s_mp_port_edit, (int)sizeof s_mp_port_edit);
+    TD5_LOG_I(LOG_TAG, "MP GAME PORT edit begin (current=%d)", g_td5.ini.net_game_port);
+}
+
+int td5_mp_port_edit_tick(void) {
+    frontend_handle_text_input_key();
+    if (frontend_check_escape()) {               /* ESC = cancel, keep old port */
+        frontend_reset_text_input();
+        return 1;
+    }
+    if (frontend_text_input_confirmed()) {
+        char pb[8];
+        int p = atoi(s_mp_port_edit);
+        if (p < 1 || p > 65535) p = 37050;
+        g_td5.ini.net_game_port = p;
+        s_net_cfg_game_port     = p;
+        snprintf(pb, sizeof pb, "%d", p);
+        td5_ini_write_str("Network", "GamePort", pb);
+        frontend_play_sfx(5);
+        frontend_reset_text_input();
+        TD5_LOG_I(LOG_TAG, "MP GAME PORT set to %d", p);
+        return 1;
+    }
+    return 0;
+}
+
 static void frontend_render_display_options_overlay(float sx, float sy) {
     char damping[16];
     const char *on_off[]     = { "OFF", "ON" };
@@ -6588,8 +6626,9 @@ static void frontend_render_music_test_overlay(float sx, float sy) {
 
 static void frontend_render_two_player_options_overlay(float sx, float sy) {
     /* [PORT ENHANCEMENT 2026-06] Multiplayer Options value column. Draws the
-     * current value for each dynamic row (PLAYERS, CATCHUP, SPLIT LAYOUT,
-     * DISPLAY k) at the standard value-column X, aligned to each row's button Y. */
+     * current value for each dynamic row (PLAYERS, SPLIT LAYOUT, DISPLAY k,
+     * NICKNAME, and [2026-07-21] GAME PORT + UPNP) at the standard value-column X,
+     * aligned to each row's button Y. */
     char buf[16];
 
     if (!s_anim_complete) return;
@@ -6631,6 +6670,25 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
         const char *nick = g_td5.ini.net_nickname[0] ? g_td5.ini.net_nickname : "Player";
         frontend_draw_value_centered(sx, sy, s_buttons[s_mp_btn_nickname].y + 6,
                                      nick, 0xFFFFFFFF);
+    }
+
+    /* [NET OPTIONS 2026-07-21] GAME PORT = default port (the live edit buffer while
+     * the Enter-to-edit numeric field is open), UPNP = ON / OFF. */
+    if (s_mp_btn_port >= 0 && s_buttons[s_mp_btn_port].active) {
+        int editing = (s_text_input_state != 0 &&
+                       s_text_input_ctx.buffer == s_mp_port_edit);
+        const char *pv;
+        if (editing) {
+            pv = s_mp_port_edit;
+        } else {
+            snprintf(buf, sizeof buf, "%d", g_td5.ini.net_game_port);
+            pv = buf;
+        }
+        frontend_draw_value_centered(sx, sy, s_buttons[s_mp_btn_port].y + 6, pv, 0xFFFFFFFF);
+    }
+    if (s_mp_btn_upnp >= 0 && s_buttons[s_mp_btn_upnp].active) {
+        frontend_draw_value_centered(sx, sy, s_buttons[s_mp_btn_upnp].y + 6,
+                                     g_td5.ini.net_enable_upnp ? "ON" : "OFF", 0xFFFFFFFF);
     }
 }
 
@@ -9625,6 +9683,9 @@ void td5_frontend_render_ui_rects(void) {
                 fe_draw_option_arrows(s_mp_btn_layout, sx, sy);
             for (int i = 0; i < s_mp_missing_count && i < 2; i++)
                 if (s_mp_btn_missing[i] >= 0) fe_draw_option_arrows(s_mp_btn_missing[i], sx, sy);
+            /* [NET OPTIONS 2026-07-21] UPNP is a ◄► toggle; GAME PORT + NICKNAME
+             * are Enter-to-edit (no arrows). */
+            if (s_mp_btn_upnp >= 0) fe_draw_option_arrows(s_mp_btn_upnp, sx, sy);
             break;
         case TD5_SCREEN_CAR_SELECTION:
             /* orig CarSelectionScreenStateMachine @0x0040DFC0 case 4 calls
