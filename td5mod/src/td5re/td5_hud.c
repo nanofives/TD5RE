@@ -40,6 +40,7 @@
 #include "td5re.h"
 #include "td5_vectorui.h"   /* resolution-independent VectorUI primitives (SDF gauge, text) */
 #include "td5_font.h"       /* shared native menu TTF glyph cache (pause-menu text) */
+#include "td5_i18n.h"       /* [I18N] TR() runtime string translation */
 #include "td5_pending.h"    /* dev/QA pending-test list for the in-race overlay */
 #include "td5_config.h"     /* shared TD5RE_* env-knob accessors */
 
@@ -1879,14 +1880,14 @@ void td5_hud_draw_arcade_chips(void)
 
         const char *label; uint32_t col;
         switch (effect) {
-        case TD5_PU_NITRO:  label = "NITRO";  col = 0xFF20E0FFu; break;
-        case TD5_PU_GHOST:  label = "GHOST";  col = 0xFFFFFFFFu; break;
-        case TD5_PU_INDESTRUCTIBLE: label = "INDESTRUCTIBLE"; col = 0xFFFF3020u; break;
-        case TD5_PU_HAZARD: label = "HAZARD"; col = 0xFFFFB000u; break;
+        case TD5_PU_NITRO:  label = TR("NITRO");  col = 0xFF20E0FFu; break;
+        case TD5_PU_GHOST:  label = TR("GHOST");  col = 0xFFFFFFFFu; break;
+        case TD5_PU_INDESTRUCTIBLE: label = TR("INDESTRUCTIBLE"); col = 0xFFFF3020u; break;
+        case TD5_PU_HAZARD: label = TR("HAZARD"); col = 0xFFFFB000u; break;
         /* [ARCADE EXPANSION 2026-06-28] new kinds */
-        case TD5_PU_FREEZE: label = "FREEZE"; col = 0xFF80FFF0u; break;
-        case TD5_PU_MAGNET: label = "MAGNET"; col = 0xFFFF40C0u; break;
-        case TD5_PU_REPAIR: label = "REPAIR"; col = 0xFF40FF60u; break;
+        case TD5_PU_FREEZE: label = TR("FREEZE"); col = 0xFF80FFF0u; break;
+        case TD5_PU_MAGNET: label = TR("MAGNET"); col = 0xFFFF40C0u; break;
+        case TD5_PU_REPAIR: label = TR("REPAIR"); col = 0xFF40FF60u; break;
         default: continue;
         }
 
@@ -2746,6 +2747,16 @@ void td5_hud_flush_text(void)
 
 void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
 {
+    /* [I18N] Static-init tables can't hold TR() calls, so refresh a translated
+     * shadow of the position/label table on every race init (the language
+     * can't change mid-race; catalog pointers stay valid until a switch). */
+    static const char *s_tr_position_strings[26];
+    for (int ts = 0; ts < 26; ts++)
+        s_tr_position_strings[ts] = td5_tr(s_default_position_strings[ts]);
+    if (g_position_strings == s_default_position_strings ||
+        g_position_strings == s_tr_position_strings)
+        g_position_strings = s_tr_position_strings;
+
     /* Set string table based on game mode offset */
     s_hud_string_table = g_position_strings + string_table_offset * 13;
     s_is_first_player = (string_table_offset == 0) ? 1 : 0;
@@ -3629,13 +3640,13 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
              * [multi-cop 2026-06-24] is_cop is mask-aware, so every cop pane (not
              * just the primary) shows the cop objective + "YOU ARE THE COP". */
             int wb_is_cop = wb_mp_cop ? td5_game_cop_chase_is_cop(wb_pane_slot) : 1;
-            const char *msg = wb_is_cop ? "CHASE THE SUSPECTS" : "EVADE THE COP";
+            const char *msg = wb_is_cop ? TR("CHASE THE SUSPECTS") : TR("EVADE THE COP");
             /* [MP COP CHASE ROLE 2026-06-24] Explicit per-pane role label so each
              * split-screen player instantly knows whether THEY are the cop or a
              * suspect ("clarify who's cop, who's suspect"). Cop label gold, suspect
              * red; drawn on EVERY pane (the objective banner above already loops per
              * view), so it is no longer P1-only. */
-            const char *role  = wb_is_cop ? "YOU ARE THE COP" : "YOU ARE A SUSPECT";
+            const char *role  = wb_is_cop ? TR("YOU ARE THE COP") : TR("YOU ARE A SUSPECT");
             uint32_t    rcol  = wb_is_cop ? 0xFFFFD23Cu : 0xFFFF5050u;
             float pane_h = vp_bottom - vp_top;
             if (pane_h < 1.0f) pane_h = 480.0f;
@@ -3676,10 +3687,10 @@ void td5_hud_draw_status_text(int player_slot, int view_index)
             float cy = vp_top + pane_h * 0.5f;   /* [2026-06-25] true centre of the pane */
             if (td5_hudfont_ready()) {
                 float sy = s_view_layout[view_index].scale_y;
-                hud_draw_wanted_banner_line(cx, cy, sy * 30.0f, "ARRESTED", 0xFFFF2A2Au);
+                hud_draw_wanted_banner_line(cx, cy, sy * 30.0f, TR("ARRESTED"), 0xFFFF2A2Au);
             } else {
                 s_hud_next_text_scale = 2.6f;
-                td5_hud_queue_text(0, (int)cx, (int)cy, 1, "ARRESTED");
+                td5_hud_queue_text(0, (int)cx, (int)cy, 1, "%s", TR("ARRESTED"));
             }
         }
     }
@@ -5001,7 +5012,7 @@ void td5_hud_render_overlays(float dt)
         float sc  = (ssx < ssy) ? ssx : ssy;
         sc *= hud_size_mul();
         if (sc < 0.05f) sc = 1.0f;
-        const char *cap = s_hud_string_table ? s_hud_string_table[10] : "DEMO MODE";
+        const char *cap = s_hud_string_table ? s_hud_string_table[10] : TR("DEMO MODE");
 
         /* Resolution-independent VectorUI text when available; otherwise fall back
          * to the bitmap glyph queue so the caption still shows with VectorUI off.
@@ -7672,6 +7683,10 @@ void td5_hud_init_pause_menu(int page_index)
         }
 
         int alignment = *(int *)((uint8_t *)s_pause_menu_strings + string_offset + 4);
+        /* [I18N] Translate AFTER the English-keyed gating strcmps above. The
+         * PAUSETXT bitmap atlas + pause SDF font are ASCII-only, so pause-menu
+         * catalog entries deliberately avoid accents ("SALIR AL MENU"). */
+        str = td5_tr(str);
         int len = (int)strlen(str);
 
         if (pause_vec) {

@@ -29,6 +29,7 @@
 #include "td5_credits.h"       /* SNK_CreditsText array + dev mugshot map (Extras scroll) */
 #include "td5_vectorui.h"      /* public VectorUI surface (HUD reuses these primitives) */
 #include "td5_font.h"          /* [S13] runtime TTF glyph cache (native menu text) */
+#include "td5_i18n.h"          /* [I18N] TR() + TD5_TOUPPER (Latin-1 uppercase) */
 #include "td5_version.h"       /* build identity (version / channel / date / git rev) */
 #include "td5_changelog.h"     /* CHANGELOG screen content table (file-static here) */
 #include "td5_pending.h"       /* PENDING TO TEST checklist (list/state/overlay) */
@@ -143,6 +144,8 @@ static ScreenFn s_screen_table[TD5_SCREEN_COUNT] = {
     /* [44] */ Screen_RaceOptions,        /* RACE OPTIONS: consolidated per-race options (2026-07-04) */
     /* [45] */ Screen_MpGuide,            /* dev MP-widgets gallery (2026-07-03; from
                                            * UI GUIDE's MP TOOLS row)                    */
+    /* [46] */ Screen_LanguageOptions,    /* [I18N 2026-07-21] UI-language selector
+                                           * (OPTIONS hub row; td5_fe_menu.c)            */
 };
 
 /* ========================================================================
@@ -1441,6 +1444,7 @@ static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_SOUND_OPTIONS:      return "SOUND OPTIONS";
     case TD5_SCREEN_DISPLAY_OPTIONS:    return "GRAPHICS OPTIONS";
     case TD5_SCREEN_TWO_PLAYER_OPTIONS: return "MULTIPLAYER OPTIONS";
+    case TD5_SCREEN_LANGUAGE_OPTIONS:   return TR("LANGUAGE");
     case TD5_SCREEN_CONTROLLER_BINDING: return "CONTROLLER SETUP";
     case TD5_SCREEN_CAR_SELECTION:      return "SELECT CAR";
     case TD5_SCREEN_TRACK_SELECTION:    return "SELECT TRACK";
@@ -2823,12 +2827,12 @@ float fe_measure_text(const char *text, float sx, float sy) {
         const float hscale = (sx < sy) ? (sx / sy) : 1.0f;
         const float trkn   = (float)FONT_GLYPH_TRACKING * sy * hscale;
         for (int i = 0; text[i]; i++)
-            width += td5_font_advance(toupper((unsigned char)text[i]), cap_px) * hscale + trkn;
+            width += td5_font_advance(TD5_TOUPPER(text[i]), cap_px) * hscale + trkn;
         return width;
     }
 
     for (int i = 0; text[i]; i++) {
-        int c = toupper((unsigned char)text[i]);
+        int c = TD5_TOUPPER(text[i]);
         if (c < 32 || c > 127) {
             width += (14.0f + FONT_GLYPH_TRACKING) * gsx;
             continue;
@@ -2837,6 +2841,20 @@ float fe_measure_text(const char *text, float sx, float sy) {
     }
 
     return width;
+}
+
+/* [I18N 2026-07-21] Shrink-to-fit safety net for translated captions: returns
+ * the horizontal scale factor (<= 1) that makes `text` fit in avail_w at the
+ * given base scale. Floor 0.55 — anything needing less should be SHORTENED in
+ * the catalog instead (see the length-budget comment in es_AR.txt). Draw with
+ * (sx * fit, sy): fe_draw_text condenses width-only when sx < sy. */
+float fe_fit_text_scale(const char *text, float avail_w, float sx, float sy) {
+    float tw = fe_measure_text(text, sx, sy);
+    float f;
+    if (tw <= 0.0f || tw <= avail_w || avail_w <= 0.0f) return 1.0f;
+    f = avail_w / tw;
+    if (f < 0.55f) f = 0.55f;
+    return f;
 }
 
 /* [PORT ENHANCEMENT 2026-06] Greedy word-wrap a string into up to max_lines lines,
@@ -3209,6 +3227,7 @@ static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_SOUND_OPTIONS:
     case TD5_SCREEN_DISPLAY_OPTIONS:
     case TD5_SCREEN_TWO_PLAYER_OPTIONS:
+    case TD5_SCREEN_LANGUAGE_OPTIONS:
         return TD5_SCREEN_OPTIONS_HUB;
 
     case TD5_SCREEN_CONTROLLER_BINDING:
@@ -4229,7 +4248,7 @@ static void frontend_render_text_input(void) {
 
     /* Prompt centered near the top of the button (screen-overridable). */
     fe_draw_text_centered(bx + bw * 0.5f, by + 8.0f * sy,
-                          s_text_input_prompt[0] ? s_text_input_prompt : "ENTER PLAYER NAME",
+                          s_text_input_prompt[0] ? s_text_input_prompt : SNK_EnterPlayerNameButTxt,
                           0xFFFFFFFF, sx, sy);
 
     /* Typed name in the SMALL font, left-aligned at button-local x=0x14=20 [CONFIRMED
@@ -5176,6 +5195,7 @@ int td5_frontend_display_loop(void) {
                      s_current_screen == TD5_SCREEN_SOUND_OPTIONS ||
                      s_current_screen == TD5_SCREEN_DISPLAY_OPTIONS ||
                      s_current_screen == TD5_SCREEN_TWO_PLAYER_OPTIONS ||
+                     s_current_screen == TD5_SCREEN_LANGUAGE_OPTIONS ||
                      s_current_screen == TD5_SCREEN_CONTROLLER_BINDING);
                 /* [splitscreen back-confirm] In split-screen, returning to the
                  * parent screen first raises the "GO BACK?" prompt; otherwise
@@ -5438,6 +5458,7 @@ static int frontend_get_button_anim_state(int *out_mode, int *out_tick, int *out
     case TD5_SCREEN_SOUND_OPTIONS:
     case TD5_SCREEN_DISPLAY_OPTIONS:
     case TD5_SCREEN_TWO_PLAYER_OPTIONS:
+    case TD5_SCREEN_LANGUAGE_OPTIONS:
         if (s_inner_state == 3) { mode = FE_BUTTON_ANIM_IN;  max_tick = 0x27; }
         else if (s_inner_state == 8) { mode = FE_BUTTON_ANIM_OUT; max_tick = 16; }
         break;
@@ -5503,6 +5524,7 @@ static int frontend_screen_has_button_anim(void) {
     case TD5_SCREEN_SOUND_OPTIONS:
     case TD5_SCREEN_DISPLAY_OPTIONS:
     case TD5_SCREEN_TWO_PLAYER_OPTIONS:
+    case TD5_SCREEN_LANGUAGE_OPTIONS:
     case TD5_SCREEN_MUSIC_TEST:
     case TD5_SCREEN_CAR_SELECTION:
     case TD5_SCREEN_TRACK_SELECTION:
@@ -6039,11 +6061,12 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
      * wraps to a second line if it would run off the right edge. Car/Track show
      * the name; Direction shows Forwards/Backwards (only when the row is
      * visible); Players/Opponents show the count; Laps shows value+1. */
-    frontend_draw_qr_value(sx, sy, QR_BTN_CAR,   car_locked   ? "LOCKED" : car_name,   0xFFFFFFFF, rand_reserve);
-    frontend_draw_qr_value(sx, sy, QR_BTN_TRACK, track_locked ? "LOCKED" : track_name, 0xFFFFFFFF, rand_reserve);
+    frontend_draw_qr_value(sx, sy, QR_BTN_CAR,   car_locked   ? SNK_LockedTxt : car_name,   0xFFFFFFFF, rand_reserve);
+    frontend_draw_qr_value(sx, sy, QR_BTN_TRACK, track_locked ? SNK_LockedTxt : track_name, 0xFFFFFFFF, rand_reserve);
     if (!s_buttons[QR_BTN_DIRECTION].hidden) {
         frontend_draw_qr_value(sx, sy, QR_BTN_DIRECTION,
-                               s_track_direction ? "Backwards" : "Forwards", 0xFFFFFFFF, 0);
+                               s_track_direction ? SNK_BackwardsButTxt : SNK_ForwardsButTxt,
+                               0xFFFFFFFF, 0);
     }
     /* Players row is hidden (Quick Race is single-player); only Opponents shown. */
     if (!s_buttons[QR_BTN_PLAYERS].hidden) {
@@ -6197,20 +6220,20 @@ const char *td5_raceopts_label(int idx) {
         case RO_CATCHUP:     return SNK_CatchupTxt;        /* [CATCHUP 2026-07-21] MP AI rubber-band */
         case RO_DYNAMICS:    return SNK_DynamicsButTxt;
         case RO_CHECKPOINTS: return SNK_CheckpointTimersButTxt;
-        case RO_POWERUPS:    return "POWER-UPS";
-        case RO_TOUGHNESS:   return "CAR TOUGHNESS";
-        case RO_DEFORM:      return "DEFORMATION";
+        case RO_POWERUPS:    return TR("POWER-UPS");
+        case RO_TOUGHNESS:   return TR("CAR TOUGHNESS");
+        case RO_DEFORM:      return TR("DEFORMATION");
         case RO_COLLISIONS:  return SNK_3dCollisionsButTxt;
-        case RO_DAMAGE:      return "DAMAGE";
-        case RO_LANEASSIST:  return "LANE ASSIST";
-        case RO_TUTORIAL:    return "TUTORIAL";
+        case RO_DAMAGE:      return TR("DAMAGE");
+        case RO_LANEASSIST:  return TR("LANE ASSIST");
+        case RO_TUTORIAL:    return TR("TUTORIAL");
         /* [QUICK RACE DEBUG 2026-07-21] Quick-Race-exclusive rows. */
-        case RO_PLAYER_AI:     return "PLAYER AI";
-        case RO_AUTO_THROTTLE: return "AUTO-THROTTLE";
-        case RO_AI_SCREENS:    return "AI SCREENS";
-        case RO_SPAN_OFFSET:   return "SPAN OFFSET";
-        case RO_GAME_SPEED:    return "GAME SPEED";
-        case RO_END_CHECKPOINT:return "END AT CHKPT";
+        case RO_PLAYER_AI:     return TR("PLAYER AI");
+        case RO_AUTO_THROTTLE: return TR("AUTO-THROTTLE");
+        case RO_AI_SCREENS:    return TR("AI SCREENS");
+        case RO_SPAN_OFFSET:   return TR("SPAN OFFSET");
+        case RO_GAME_SPEED:    return TR("GAME SPEED");
+        case RO_END_CHECKPOINT:return TR("END AT CHKPT");
     }
     return "";
 }
@@ -6275,11 +6298,13 @@ void td5_raceopts_value(int idx, char *out, size_t out_sz) {
             return;
         }
         case RO_END_CHECKPOINT:
-            if (g_td5.ini.dbg_end_checkpoint <= 0) { snprintf(out, out_sz, "OFF"); }
+            if (g_td5.ini.dbg_end_checkpoint <= 0) { snprintf(out, out_sz, "%s", TR("OFF")); }
             else { snprintf(out, out_sz, "%d", g_td5.ini.dbg_end_checkpoint); }
             return;
     }
-    snprintf(out, out_sz, "%s", v);
+    /* [I18N] enum values translate through the catalog (static-init tables
+     * can't hold TR() calls, so translate at the single output point). */
+    snprintf(out, out_sz, "%s", td5_tr(v));
 }
 
 void td5_raceopts_cycle(int idx, int delta) {
@@ -6527,8 +6552,8 @@ void td5_raceopts_build_page(void) {
     s_ro_ok_btn   = frontend_create_button(SNK_OkButTxt,   RO_ROW_X, RO_OKBACK_Y, RO_CTL_W, RO_ROW_H);
     s_ro_back_btn = frontend_create_button(SNK_BackButTxt, RO_BTN2_X, RO_OKBACK_Y, RO_CTL_W, RO_ROW_H);
     if (s_ro_pages > 1) {
-        s_ro_prev_btn = frontend_create_button("< PREV", RO_ROW_X, RO_PREVNEXT_Y, RO_CTL_W, RO_ROW_H);
-        s_ro_next_btn = frontend_create_button("NEXT >", RO_BTN2_X, RO_PREVNEXT_Y, RO_CTL_W, RO_ROW_H);
+        s_ro_prev_btn = frontend_create_button(TR("< PREV"), RO_ROW_X, RO_PREVNEXT_Y, RO_CTL_W, RO_ROW_H);
+        s_ro_next_btn = frontend_create_button(TR("NEXT >"), RO_BTN2_X, RO_PREVNEXT_Y, RO_CTL_W, RO_ROW_H);
     } else {
         s_ro_prev_btn = -1;
         s_ro_next_btn = -1;
@@ -6621,7 +6646,7 @@ static void frontend_render_display_options_overlay(float sx, float sy) {
     snprintf(damping, sizeof(damping), "%d", s_display_camera_damping);
     /* Rows: 0 Display Mode, 1 VSync, 2 Fogging,
      *       3 Speed Readout, 4 Show FPS, 5 Camera Damping. */
-    frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, win_mode[wm], 0xFFFFFFFF);
+    frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, td5_tr(win_mode[wm]), 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, on_off[s_display_vsync & 1], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[2].y + 6, on_off[s_display_fog_enabled & 1], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[3].y + 6, speed_read[s_display_speed_units & 1], 0xFFFFFFFF);
@@ -6739,7 +6764,7 @@ static void frontend_render_music_test_overlay(float sx, float sy) {
         float y0 = cy - 0x3f * sy;
         float y1 = y0 + 0x28 * sy;
         float y2 = y0 + 0x50 * sy;
-        fe_draw_text_centered(ncx, y0, "NOW PLAYING:", 0xFFCCCCCC, sx, sy);
+        fe_draw_text_centered(ncx, y0, SNK_NowPlayingTxt, 0xFFCCCCCC, sx, sy);
         fe_draw_text_centered(ncx, y1, s_music_test_now_band,  0xFFFFFFFF, sx, sy);
         fe_draw_text_centered(ncx, y2, s_music_test_now_title, 0xFFFFFFFF, sx, sy);
     }
@@ -6798,7 +6823,7 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
     }
     if (s_mp_btn_upnp >= 0 && s_buttons[s_mp_btn_upnp].active) {
         frontend_draw_value_centered(sx, sy, s_buttons[s_mp_btn_upnp].y + 6,
-                                     g_td5.ini.net_enable_upnp ? "ON" : "OFF", 0xFFFFFFFF);
+                                     g_td5.ini.net_enable_upnp ? TR("ON") : TR("OFF"), 0xFFFFFFFF);
     }
 }
 
@@ -6861,7 +6886,7 @@ static void frontend_render_race_type_description(float sx, float sy) {
         float cx   = panel_x + panel_w * 0.5f;
         float ts   = 0.7f;
         if (!dn || !dn[0]) dn = "KEYBOARD";
-        fe_draw_text_centered(cx, 90.0f * sy, "CONTROLLER", 0xFFFFD000, sx*0.8f, sy*0.8f);
+        fe_draw_text_centered(cx, 90.0f * sy, SNK_ControllerTxt, 0xFFFFD000, sx*0.8f, sy*0.8f);
         {
             /* Word-wrap the controller name over up to 3 lines (capped so it
              * stays above the race-type description panel at y~145). */
@@ -6879,8 +6904,8 @@ static void frontend_render_race_type_description(float sx, float sy) {
     if (idx < 0) return;  /* "Back" has no description */
 
     /* Line 0: race-type NAME, big font, centered at Y=0. */
-    fe_draw_text(panel_x + (panel_w - fe_measure_text(k_race_desc[idx][0], sx, sy)) * 0.5f,
-                 panel_y + 2.0f * sy, k_race_desc[idx][0], 0xFFFFFFFF, sx, sy);
+    fe_draw_text(panel_x + (panel_w - fe_measure_text(td5_tr(k_race_desc[idx][0]), sx, sy)) * 0.5f,
+                 panel_y + 2.0f * sy, td5_tr(k_race_desc[idx][0]), 0xFFFFFFFF, sx, sy);
     /* Lines 1..: the description body, drawn in the SMALL font (smalltext) — the original
      * RaceTypeCategoryMenuStateMachine@0x4168b0 word-wraps the description and draws it with
      * DrawFrontendSmallFontStringToSurface@0x424660 (loop @0x416ea1, panel y 0x20→0xb0,
@@ -6889,7 +6914,7 @@ static void frontend_render_race_type_description(float sx, float sy) {
     for (line = 1; line < 13 && k_race_desc[idx][line]; line++) {
         float ly = 32.0f + (float)(line - 1) * 12.0f;
         if (ly >= 176.0f) break;
-        const char *s = k_race_desc[idx][line];
+        const char *s = td5_tr(k_race_desc[idx][line]);
         fe_draw_small_text(panel_x + (panel_w - fe_measure_small_text(s) * fe_glyph_sx(sx, sy)) * 0.5f,
                            panel_y + ly * sy, s, 0xFFFFFFFF, sx, sy);
     }
@@ -6944,12 +6969,12 @@ static void frontend_render_mp_post_race_description(float sx, float sy) {
      * right-hand panel. */
 
     /* Line 0: option NAME (big font, centred at panel top). */
-    fe_draw_text(panel_x + (panel_w - fe_measure_text(tbl[btn][0], sx, sy)) * 0.5f,
-                 panel_y + 2.0f * sy, tbl[btn][0], 0xFFFFFFFF, sx, sy);
+    fe_draw_text(panel_x + (panel_w - fe_measure_text(td5_tr(tbl[btn][0]), sx, sy)) * 0.5f,
+                 panel_y + 2.0f * sy, td5_tr(tbl[btn][0]), 0xFFFFFFFF, sx, sy);
     /* Lines 1..: description body (small font, centred; Y=32 step +12, stop at 176). */
     for (line = 1; line < 11 && tbl[btn][line]; line++) {
         float ly = 32.0f + (float)(line - 1) * 12.0f;
-        const char *s = tbl[btn][line];
+        const char *s = td5_tr(tbl[btn][line]);
         if (ly >= 176.0f) break;
         fe_draw_small_text(panel_x + (panel_w - fe_measure_small_text(s) * fe_glyph_sx(sx, sy)) * 0.5f,
                            panel_y + ly * sy, s, 0xFFFFFFFF, sx, sy);
@@ -6996,7 +7021,7 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
     /* [PORT ENHANCEMENT 2026-06] Multiplayer flow: show whose turn it is to pick. */
     if (s_mp_flow && s_anim_complete) {
         char who[32];
-        snprintf(who, sizeof who, "PLAYER %d - SELECT CAR", s_mp_car_player + 1);
+        snprintf(who, sizeof who, TR("PLAYER %d - SELECT CAR"), s_mp_car_player + 1);
         fe_draw_text_centered(320.0f * sx, 30.0f * sy, who, 0xFFFFD000, sx, sy);
     }
 
@@ -7193,13 +7218,13 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
         if (is_locked) {
             /* [FIXED 2026-06-01] SNK_LockedTxt white (orig), at (86,163)=(cx-0xea, cy-0x77),
              * not red at y=121. */
-            frontend_draw_value_text(sx, sy, 86, 163, "LOCKED", 0xFFFFFFFF);
+            frontend_draw_value_text(sx, sy, 86, 163, SNK_LockedTxt, 0xFFFFFFFF);
         } else if (s_selected_game_type == 2) {
             /* [FIXED 2026-06-01] Beast/Beauty tag for the Era cup (gametype 2), same
              * (86,163) slot as Locked (mutually exclusive). [CONFIRMED @ 0x40DFC0 case0xc:
              * car<8 → Beauty (SNK_BeautyTxt), else Beast (SNK_BeastTxt).] */
             frontend_draw_value_text(sx, sy, 86, 163,
-                                     (actual_car < 8) ? "BEAUTY" : "BEAST", 0xFFFFFFFF);
+                                     (actual_car < 8) ? SNK_BeautyTxt : SNK_BeastTxt, 0xFFFFFFFF);
         }
     }
 }
@@ -7352,7 +7377,7 @@ static void frontend_render_race_options_overlay(float sx, float sy) {
      * PREV/NEXT row) when the row set spans more than one page. */
     if (td5_raceopts_pages() > 1) {
         char pb[24];
-        snprintf(pb, sizeof pb, "PAGE %d / %d",
+        snprintf(pb, sizeof pb, TR("PAGE %d / %d"),
                  td5_raceopts_page() + 1, td5_raceopts_pages());
         fe_draw_text(348.0f * sx, (float)(RO_PREVNEXT_Y + 6) * sy, pb,
                      0xFF8890A0u, sx * 0.8f, sy * 0.8f);
@@ -7379,7 +7404,7 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
         int shown = s_cup_pick_index + 1;
         if (shown < 1) shown = 1;
         if (shown > s_cup_user_count) shown = s_cup_user_count;
-        snprintf(hdr, sizeof hdr, "RACE %d / %d", shown, s_cup_user_count);
+        snprintf(hdr, sizeof hdr, TR("RACE %d / %d"), shown, s_cup_user_count);
         fe_draw_text_centered(492.0f * sx, 50.0f * sy, hdr, 0xFFE0C000, sx, sy);
     }
 
@@ -7478,7 +7503,7 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
         s_track_lock_table[s_selected_track] != 0 &&
         !s_network_active) {
         /* [FIXED 2026-06-01] SNK_LockedTxt renders white (orig), not red. */
-        frontend_draw_value_text(sx, sy, 412, 375, "LOCKED", 0xFFFFFFFF);
+        frontend_draw_value_text(sx, sy, 412, 375, SNK_LockedTxt, 0xFFFFFFFF);
     }
 }
 
@@ -7587,7 +7612,7 @@ static void frontend_render_controller_binding_overlay(float sx, float sy) {
 
     /* The "OPTIONS" Lunatica header now occupies the very top (y~17), so this
      * sub-header sits lower — at the old REMAP ALL height (y=90). */
-    snprintf(hdr, sizeof hdr, "CONTROLLER SETUP - PLAYER %d", s_ctrl_player + 1);
+    snprintf(hdr, sizeof hdr, TR("CONTROLLER SETUP - PLAYER %d"), s_ctrl_player + 1);
     fe_draw_text_centered(320.0f * sx, 90.0f * sy, hdr, 0xFFCCCCCC, sx * 0.75f, sy * 0.75f);
     /* While actively (re)binding, show the press/release prompt at the bottom.
      * The idle "SELECT AN ACTION TO REMAP..." hint line was removed per request. */
@@ -7621,7 +7646,7 @@ static void frontend_render_controller_binding_labels(float sx, float sy) {
         bcx = ((float)s_buttons[j].x + (float)s_buttons[j].w * 0.5f) * sx;
         vx  = ((float)s_buttons[j].x + (float)s_buttons[j].w + 6.0f) * sx;
         by  = ((float)s_buttons[j].y + ((float)s_buttons[j].h - (float)FONT_CELL * ts) * 0.5f) * sy;
-        lab = (j < 10) ? k_ctrl_action_labels[j] : "PAUSE MENU";   /* action 10 = pause */
+        lab = (j < 10) ? td5_tr(k_ctrl_action_labels[j]) : TR("PAUSE MENU");   /* action 10 = pause */
         col = 0xFFFFFFFFu;
         if (s_ctrl_capturing && j == s_ctrl_sel_action) {
             val = s_ctrl_capture_armed ? "PRESS" : "...";
@@ -7638,7 +7663,7 @@ static void frontend_render_controller_binding_labels(float sx, float sy) {
      * slightly smaller font so the long "REMAP ALL" fits its button. */
     {
         int idx;
-        const char *labs[2] = { "REMAP ALL", "OK" };
+        const char *labs[2] = { TR("REMAP ALL"), "OK" };
         float ts2 = 0.78f;
         for (idx = 11; idx <= 12; idx++) {
             float bcx, by;
@@ -7740,10 +7765,10 @@ static void frontend_render_mp_lobby_overlay(float sx, float sy) {
             dev = "AI";
             row_color = 0xFFFFC040u;   /* gold = simulated AI */
         } else if (s_mp_join_device[p] > 0 && td5_plat_input_device_is_lost(s_mp_join_device[p])) {
-            dev = "(DISCONNECTED)";
+            dev = TR("(DISCONNECTED)");
             row_color = 0xFFFF4040u;   /* red highlight for a lost controller */
         } else if (!dev || !dev[0]) {
-            dev = (s_mp_join_device[p] > 0) ? "CONTROLLER" : "KEYBOARD";
+            dev = (s_mp_join_device[p] > 0) ? SNK_ControllerTxt : TR("KEYBOARD");
         }
 
         /* Name + accent: prefer the live working values; fall back to the
@@ -7776,7 +7801,7 @@ static void frontend_render_mp_lobby_overlay(float sx, float sy) {
                      line, row_color, sx*0.8f, sy*0.8f);
     }
     if (s_mp_joined_count == 0)
-        fe_draw_text_centered(320.0f * sx, 150.0f * sy, "( no players yet )", 0xFF888888, sx*0.8f, sy*0.8f);
+        fe_draw_text_centered(320.0f * sx, 150.0f * sy, TR("( no players yet )"), 0xFF888888, sx*0.8f, sy*0.8f);
 
 #ifndef TD5RE_RELEASE
     /* [MP AI TEST PLAYERS 2026-06-25] Dev panel: populate the lobby with simulated
@@ -7789,7 +7814,7 @@ static void frontend_render_mp_lobby_overlay(float sx, float sy) {
                  aic, s_mp_ai_cop_count);
         fe_draw_text_centered(320.0f * sx, 316.0f * sy, dl, 0xFFFFC040u, sx*0.66f, sy*0.66f);
         fe_draw_text_centered(320.0f * sx, 332.0f * sy,
-                              "A = ADD AI    R = REMOVE AI    [ / ] = AI COPS",
+                              TR("A = ADD AI    R = REMOVE AI    [ / ] = AI COPS"),
                               0xFFB0B0B0u, sx*0.60f, sy*0.60f);
     }
 #endif
@@ -7798,7 +7823,7 @@ static void frontend_render_mp_lobby_overlay(float sx, float sy) {
      * (side-by-side button) layout; TD5RE_LOBBY_BUTTONS=0 keeps the old line. */
     if (!relayout)
         fe_draw_text_centered(320.0f * sx, 340.0f * sy,
-                              "ENTER / A = JOIN     SPACE = START     ESC / B = BACK",
+                              TR("ENTER / A = JOIN     SPACE = START     ESC / B = BACK"),
                               0xFF999999, sx*0.62f, sy*0.62f);
 }
 
@@ -7901,14 +7926,18 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
      *   NAME 0x10..0x68  TIME 0x68..0xA8  CAR 0xA8..0xF0  AVG 0xF0..0x138
      *   TOP 0x138..0x180  COLL 0x180..0x1B8  AIR 0x1B8..0x208 */
     float y7 = HS_SF_Y(7);
-    const char *tlabel = (score_type == 2) ? "POINTS" : (score_type == 1) ? "LAP" : "TIME";
-    fe_draw_small_text(HS_SF_CTR(0x10,0x68,"NAME"),  y7, "NAME",  hdr_color, sx, sy);
-    fe_draw_small_text(HS_SF_CTR(0x68,0xa8,tlabel),  y7, tlabel,  hdr_color, sx, sy);
-    fe_draw_small_text(HS_SF_CTR(0xa8,0xf0,"CAR"),   y7, "CAR",   hdr_color, sx, sy);
-    fe_draw_small_text(HS_SF_CTR(0xf0,0x138,"AVG"),  y7, "AVG",   hdr_color, sx, sy);
-    fe_draw_small_text(HS_SF_CTR(0x138,0x180,"TOP"), y7, "TOP",   hdr_color, sx, sy);
-    fe_draw_small_text(HS_SF_CTR(0x180,0x1b8,"COLL"),y7, "COLL",  hdr_color, sx, sy);
-    fe_draw_small_text(HS_SF_CTR(0x1b8,0x208,"AIR"), y7, "AIR",   hdr_color, sx, sy);
+    const char *tlabel = (score_type == 2) ? SNK_PtsTxt : (score_type == 1) ? SNK_LapTxt : SNK_TimeTxt;
+    { /* [I18N] header labels translate; TR once per label (macro measures too) */
+      const char *h_name = TR("NAME"), *h_car = TR("CAR"),  *h_avg = TR("AVG");
+      const char *h_top  = TR("TOP"),  *h_coll = TR("COLL"), *h_air = TR("AIR");
+      fe_draw_small_text(HS_SF_CTR(0x10,0x68,h_name),  y7, h_name, hdr_color, sx, sy);
+      fe_draw_small_text(HS_SF_CTR(0x68,0xa8,tlabel),  y7, tlabel, hdr_color, sx, sy);
+      fe_draw_small_text(HS_SF_CTR(0xa8,0xf0,h_car),   y7, h_car,  hdr_color, sx, sy);
+      fe_draw_small_text(HS_SF_CTR(0xf0,0x138,h_avg),  y7, h_avg,  hdr_color, sx, sy);
+      fe_draw_small_text(HS_SF_CTR(0x138,0x180,h_top), y7, h_top,  hdr_color, sx, sy);
+      fe_draw_small_text(HS_SF_CTR(0x180,0x1b8,h_coll),y7, h_coll, hdr_color, sx, sy);
+      fe_draw_small_text(HS_SF_CTR(0x1b8,0x208,h_air), y7, h_air,  hdr_color, sx, sy);
+    }
 
     /* 5 entry rows at panel-local y = 48,64,80,96,112 (step 16). */
     for (int i = 0; i < 5; i++) {
@@ -8206,7 +8235,7 @@ static void frontend_render_race_results_overlay(float sx, float sy) {
         float y = row_block_y + (float)row_idx * row_step;
 
         /* Left column: localized label. */
-        fe_draw_text(left_col, y, k_results_labels[label_id], lbl_color,
+        fe_draw_text(left_col, y, td5_tr(k_results_labels[label_id]), lbl_color,
                      sx * text_scale, sy * text_scale);
 
         /* Right column: per-slot value derived from accessors. */
@@ -8346,7 +8375,9 @@ static void frontend_render_extras_gallery_overlay(float sx, float sy) {
             cy += FE_CREDITS_PHOTO_H;
         } else {
             if (e[0] && e[0] != ' ' && screen_y > -FE_CREDITS_ROW_H && screen_y < 480.0f)
-                fe_draw_text_centered(text_cx * sx, screen_y * sy, e, 0xFFFFFFFF, sx, sy);
+                /* [I18N] role headers translate via the catalog; names simply
+                 * miss the lookup and pass through untouched. */
+                fe_draw_text_centered(text_cx * sx, screen_y * sy, td5_tr(e), 0xFFFFFFFF, sx, sy);
             cy += FE_CREDITS_ROW_H;
         }
     }
@@ -8390,11 +8421,11 @@ static float fe_measure_text_width(const char *text, float sx, float sy) {
         const float hscale = (sx < sy) ? (sx / sy) : 1.0f;
         const float trkn   = (float)FONT_GLYPH_TRACKING * sy * hscale;
         for (int i = 0; text[i]; i++)
-            w += td5_font_advance(toupper((unsigned char)text[i]), cap_px) * hscale + trkn;
+            w += td5_font_advance(TD5_TOUPPER(text[i]), cap_px) * hscale + trkn;
         return w;
     }
     for (int i = 0; text[i]; i++) {
-        int c = toupper((unsigned char)text[i]);
+        int c = TD5_TOUPPER(text[i]);
         if (c < 32 || c > 127) { w += (14.0f + FONT_GLYPH_TRACKING) * gsx; continue; }
         w += ((float)s_font_glyph_advance[c - 0x20] + FONT_GLYPH_TRACKING) * gsx;
     }
@@ -8435,12 +8466,12 @@ void frontend_draw_screen_title(const char *text, float left_x, float top_y,
     const float trkn     = FE_TITLE_TRACK * sy * hscale;
     float pen = left_x;
     for (int i = 0; text[i]; i++) {                   /* pass 1: rasterise into atlas */
-        td5_glyph g; td5_titlefont_get(toupper((unsigned char)text[i]), cap_px, &g);
+        td5_glyph g; td5_titlefont_get(TD5_TOUPPER(text[i]), cap_px, &g);
     }
     td5_font_flush_uploads();                         /* one GPU upload for new glyphs */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     for (int i = 0; text[i]; i++) {                   /* pass 2: draw (cache hits) */
-        int c = toupper((unsigned char)text[i]);
+        int c = TD5_TOUPPER(text[i]);
         td5_glyph g; td5_titlefont_get(c, cap_px, &g);
         if (g.valid && g.w > 0.0f) {
             float gx = pen + g.xoff * hscale;
@@ -8475,14 +8506,14 @@ void fe_draw_text(float x, float y, const char *text, uint32_t color, float sx, 
         const float hscale   = (sx < sy) ? (sx / sy) : 1.0f;
         const float trkn     = (float)FONT_GLYPH_TRACKING * sy * hscale;
         for (int i = 0; text[i]; i++) {                /* pass 1: rasterise into the atlas */
-            int c = s_fe_preserve_case ? (unsigned char)text[i] : toupper((unsigned char)text[i]);
+            int c = s_fe_preserve_case ? (unsigned char)text[i] : TD5_TOUPPER(text[i]);
             td5_glyph g; td5_font_get(c, cap_px, &g);
         }
         td5_font_flush_uploads();                      /* one GPU upload for any new glyphs */
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
         float ncx = x;
         for (int i = 0; text[i]; i++) {                /* pass 2: draw (cache hits) */
-            int c = s_fe_preserve_case ? (unsigned char)text[i] : toupper((unsigned char)text[i]);
+            int c = s_fe_preserve_case ? (unsigned char)text[i] : TD5_TOUPPER(text[i]);
             td5_glyph g; td5_font_get(c, cap_px, &g);
             if (g.valid && g.w > 0.0f)
                 fe_draw_quad(ncx + g.xoff * hscale, baseline + g.yoff,
@@ -8507,7 +8538,7 @@ void fe_draw_text(float x, float y, const char *text, uint32_t color, float sx, 
     float trk = (float)FONT_GLYPH_TRACKING * gsx;  /* extra cursor tracking (negative = tighter) */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     for (int i = 0; text[i]; i++) {
-        int c = s_fe_preserve_case ? (unsigned char)text[i] : toupper((unsigned char)text[i]);
+        int c = s_fe_preserve_case ? (unsigned char)text[i] : TD5_TOUPPER(text[i]);
         int glyph_index;
         float glyph_advance_px;
         float glyph_advance;
@@ -9135,15 +9166,15 @@ static void frontend_render_cup_failed_overlay(float sx, float sy) {
 
     /* Text lines [CONFIRMED string values from Language/English/Language.dll] */
     /* Line 0: "SORRY" at dialog-relative y=0x00 (0px) */
-    fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, "SORRY",      0xFFFFFFFF, sx, sy);
+    fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, SNK_SorryTxt, 0xFFFFFFFF, sx, sy);
     /* Line 1: "YOU FAILED" at dialog-relative y=0x1c (28px) */
-    fe_draw_text_centered(dlg_cx, dlg_y + 28.0f * sy, "YOU FAILED", 0xFFFFFFFF, sx, sy);
+    fe_draw_text_centered(dlg_cx, dlg_y + 28.0f * sy, SNK_YouFailedTxt, 0xFFFFFFFF, sx, sy);
     /* Line 2: "TO WIN" at dialog-relative y=0x38 (56px) */
-    fe_draw_text_centered(dlg_cx, dlg_y + 56.0f * sy, "TO WIN",     0xFFFFFFFF, sx, sy);
+    fe_draw_text_centered(dlg_cx, dlg_y + 56.0f * sy, SNK_ToWinTxt, 0xFFFFFFFF, sx, sy);
     /* Line 3: race type name at dialog-relative y=0x54 (84px) */
     if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
         fe_draw_text_centered(dlg_cx, dlg_y + 84.0f * sy,
-                              k_cup_type_names[s_selected_game_type], 0xFFFFFFFF, sx, sy);
+                              td5_tr(k_cup_type_names[s_selected_game_type]), 0xFFFFFFFF, sx, sy);
     }
 
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
@@ -9192,21 +9223,21 @@ static void frontend_render_cup_won_overlay(float sx, float sy) {
     /* [FIXED 2026-06-01] byte-exact SNK_ strings: SNK_CongratsTxt="CONGRATULATIONS!",
      * SNK_YouHaveWonTxt="YOU HAVE WON THE" (the cup-type name follows on the next line,
      * e.g. "YOU HAVE WON THE" / "CHAMPIONSHIP"); unlock lines "%d CARS/TRACKS UNLOCKED". */
-    fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, "CONGRATULATIONS!",  0xFFFFFFFF, sx, sy);
-    fe_draw_text_centered(dlg_cx, dlg_y + 56.0f * sy, "YOU HAVE WON THE",  0xFFFFFFFF, sx, sy);
+    fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, SNK_CongratsTxt,     0xFFFFFFFF, sx, sy);
+    fe_draw_text_centered(dlg_cx, dlg_y + 56.0f * sy, SNK_YouHaveWonTxt,   0xFFFFFFFF, sx, sy);
     /* Cup type name at y=0x54=84 [CONFIRMED @ 0x00423B89] */
     if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
         fe_draw_text_centered(dlg_cx, dlg_y + 84.0f * sy,
-                              k_cup_type_names[s_selected_game_type], 0xFFFFFFFF, sx, sy);
+                              td5_tr(k_cup_type_names[s_selected_game_type]), 0xFFFFFFFF, sx, sy);
     }
     /* Car unlock line at y=0x8C=140 [CONFIRMED @ 0x00423BDD] */
     if (s_cup_won_car_count != 0) {
-        snprintf(unlock_buf, sizeof(unlock_buf), "%d CARS UNLOCKED", s_cup_won_car_count);
+        snprintf(unlock_buf, sizeof(unlock_buf), TR("%d CARS UNLOCKED"), s_cup_won_car_count);
         fe_draw_text_centered(dlg_cx, dlg_y + 140.0f * sy, unlock_buf, 0xFFFFFFFF, sx, sy);
     }
     /* Track unlock line at y=0xA8=168 [CONFIRMED @ 0x00423C2D] */
     if (s_cup_won_track_count != 0) {
-        snprintf(unlock_buf, sizeof(unlock_buf), "%d TRACKS UNLOCKED", s_cup_won_track_count);
+        snprintf(unlock_buf, sizeof(unlock_buf), TR("%d TRACKS UNLOCKED"), s_cup_won_track_count);
         fe_draw_text_centered(dlg_cx, dlg_y + 168.0f * sy, unlock_buf, 0xFFFFFFFF, sx, sy);
     }
 
@@ -9237,13 +9268,13 @@ void frontend_render_session_locked_overlay(float sx, float sy) {
 
     /* [2026-06-19] This notice dialog doubles as the net-disconnect screen. */
     if (g_net_disconnect_mode) {
-        fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, "CONNECTION LOST",       0xFFFFFFFF, sx, sy);
+        fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, TR("CONNECTION LOST"),   0xFFFFFFFF, sx, sy);
         fe_draw_text_centered(dlg_cx, dlg_y + 56.0f * sy, g_net_disconnect_reason, 0xFFC0C0C0, sx, sy);
     } else {
         /* "SORRY" at y=0x00 [CONFIRMED Language.dll: SorryTxt = "SORRY"] */
-        fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, "SORRY",          0xFFFFFFFF, sx, sy);
+        fe_draw_text_centered(dlg_cx, dlg_y + 0.0f  * sy, SNK_SorryTxt,     0xFFFFFFFF, sx, sy);
         /* "SESSION LOCKED" at y=0x38=56 [CONFIRMED Language.dll: SeshLockedTxt = "SESSION LOCKED"] */
-        fe_draw_text_centered(dlg_cx, dlg_y + 56.0f * sy, "SESSION LOCKED", 0xFFFFFFFF, sx, sy);
+        fe_draw_text_centered(dlg_cx, dlg_y + 56.0f * sy, SNK_SeshLockedTxt, 0xFFFFFFFF, sx, sy);
     }
 
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
@@ -9267,7 +9298,7 @@ static void frontend_render_network_lobby_overlay(float sx, float sy) {
                          1 /* unselected */, sx, sy);
 
     fe_draw_text((FE_LOBBY_X + 18.0f) * sx, (FE_LOBBY_PANEL_Y + 14.0f) * sy,
-                 "PLAYERS IN LOBBY", 0xFF00FF00, sx, sy);
+                 TR("PLAYERS IN LOBBY"), 0xFF00FF00, sx, sy);
     for (slot = 0; slot < TD5_NET_MAX_PLAYERS; slot++) {
         const char *name;
         const char *tag;
@@ -9278,7 +9309,7 @@ static void frontend_render_network_lobby_overlay(float sx, float sy) {
         tag = (slot == 0) ? " (HOST)" : "";
         lat = td5_net_get_slot_latency_ms(slot);
         if (slot == td5_net_local_slot())
-            snprintf(line, sizeof(line), "%d. %s%s (YOU)", slot + 1, name, tag);
+            snprintf(line, sizeof(line), TR("%d. %s%s (YOU)"), slot + 1, name, tag);
         else if (lat >= 0)
             snprintf(line, sizeof(line), "%d. %s%s   %dms", slot + 1, name, tag, lat);
         else
@@ -9298,7 +9329,7 @@ static void frontend_render_network_lobby_overlay(float sx, float sy) {
         if (slot != 0 && s_slot_ready[slot])
             fe_draw_small_text((FE_LOBBY_X + FE_LOBBY_PANEL_W - 88.0f) * sx,
                                (float)(FE_LOBBY_ROW0_Y + row * FE_LOBBY_ROW_H + 4) * sy,
-                               "READY", 0xFF40FF40u, sx, sy);
+                               SNK_ReadyTxt, 0xFF40FF40u, sx, sy);
         row++;
     }
     /* Host/connect status at the bottom of the panel. */
@@ -9367,7 +9398,7 @@ static void frontend_render_create_session_postpass(float sx, float sy) {
     if (s_current_screen != TD5_SCREEN_CREATE_SESSION) return;
     if (!s_buttons[1].active) return;
     frontend_get_button_render_rect(1, sx, sy, &bx, &by, &bw, &bh);
-    snprintf(buf, sizeof(buf), "MAX PLAYERS: %d", s_lobby_max_players);
+    snprintf(buf, sizeof(buf), TR("MAX PLAYERS: %d"), s_lobby_max_players);
     tw = fe_measure_text(buf, sx, sy);
     fe_draw_text(bx + (bw - tw) * 0.5f, by, buf, 0xFFFFFFFF, sx, sy);
     fe_draw_option_arrows(1, sx, sy);
@@ -9485,7 +9516,7 @@ void td5_frontend_render_ui_rects(void) {
          * The split-screen s_mp_simul gate suppresses the normal title dispatch
          * for this screen, so it is drawn here. The right-side option description
          * (with the buttons in the left column) follows. */
-        frontend_draw_screen_title((s_mp_postrace_menu_mode == 1) ? "CUP - WHAT NEXT?" : "WHAT NEXT?",
+        frontend_draw_screen_title((s_mp_postrace_menu_mode == 1) ? TR("CUP - WHAT NEXT?") : TR("WHAT NEXT?"),
                                    FE_TITLE_LEFT_X * sx, 17.0f * sy, 0xFFE3D708u, sx, sy);
         frontend_render_mp_post_race_description(sx, sy);
         break;
@@ -9528,6 +9559,9 @@ void td5_frontend_render_ui_rects(void) {
         break;
     case TD5_SCREEN_CONTROL_OPTIONS:
         frontend_render_control_options_overlay(sx, sy);
+        break;
+    case TD5_SCREEN_LANGUAGE_OPTIONS:   /* [I18N] language value text */
+        frontend_render_language_options_overlay(sx, sy);
         break;
     case TD5_SCREEN_CONTROLLER_BINDING:
         frontend_render_controller_binding_overlay(sx, sy);
@@ -9671,9 +9705,11 @@ void td5_frontend_render_ui_rects(void) {
              * helper so it matches. */
             fe_draw_button_frame(bx, by, bw, bh, bb_state, sx, sy);
             if (s_buttons[i].label[0] && !s_buttons[i].is_selector) {
-                float tw = fe_measure_text(s_buttons[i].label, sx, sy);
+                /* [I18N] condense long (translated) captions into the frame. */
+                float fit = fe_fit_text_scale(s_buttons[i].label, bw - 24.0f * sx, sx, sy);
+                float tw = fe_measure_text(s_buttons[i].label, sx * fit, sy);
                 uint32_t tc = s_buttons[i].disabled ? 0xFF888888u : 0xFFFFFFFFu;
-                fe_draw_text(bx + (bw - tw) * 0.5f, by, s_buttons[i].label, tc, sx, sy);
+                fe_draw_text(bx + (bw - tw) * 0.5f, by, s_buttons[i].label, tc, sx * fit, sy);
             }
         } else if (s_buttonbits_tex_page >= 0 && s_buttonbits_w > 0 && s_buttonbits_h > 0) {
             /* VectorUI off + ButtonBits available: 9-slice frame (alpha-blended,
@@ -9681,22 +9717,24 @@ void td5_frontend_render_ui_rects(void) {
             fe_draw_button_frame(bx, by, bw, bh, bb_state, sx, sy);
 
             if (s_buttons[i].label[0]) {
-                float text_w = fe_measure_text(s_buttons[i].label, sx, sy);
+                float fit = fe_fit_text_scale(s_buttons[i].label, bw - 24.0f * sx, sx, sy);
+                float text_w = fe_measure_text(s_buttons[i].label, sx * fit, sy);
                 float tx = bx + (bw - text_w) * 0.5f;
                 float ty = by;
                 uint32_t text_color = 0xFFFFFFFF;
                 if (s_buttons[i].disabled) text_color = 0xFF888888;
-                fe_draw_text(tx, ty, s_buttons[i].label, text_color, sx, sy);
+                fe_draw_text(tx, ty, s_buttons[i].label, text_color, sx * fit, sy);
             }
         } else {
             fe_draw_quad(bx, by, bw, bh, bg_color, -1, 0, 0, 1, 1);
             if (s_buttons[i].label[0]) {
-                float text_w = fe_measure_text(s_buttons[i].label, sx, sy);
+                float fit = fe_fit_text_scale(s_buttons[i].label, bw - 24.0f * sx, sx, sy);
+                float text_w = fe_measure_text(s_buttons[i].label, sx * fit, sy);
                 float tx = bx + (bw - text_w) * 0.5f;
                 float ty = by;
                 uint32_t text_color = 0xFFFFFFFF;
                 if (s_buttons[i].disabled) text_color = 0xFF888888;
-                fe_draw_text(tx, ty, s_buttons[i].label, text_color, sx, sy);
+                fe_draw_text(tx, ty, s_buttons[i].label, text_color, sx * fit, sy);
             }
         }
 
@@ -9846,6 +9884,10 @@ void td5_frontend_render_ui_rects(void) {
             fe_draw_option_arrows(0, sx, sy);
             fe_draw_option_arrows(1, sx, sy);
             break;
+        case TD5_SCREEN_LANGUAGE_OPTIONS:
+            /* [I18N] ◄► on the single LANGUAGE selector row. */
+            fe_draw_option_arrows(0, sx, sy);
+            break;
         case TD5_SCREEN_MUSIC_TEST:
             /* orig 0x418460: InitializeFrontendDisplayModeArrows(0,1) — the TRACK
              * selector (button 0) is ◄►-cyclable. This screen was missing from the
@@ -9966,7 +10008,7 @@ void td5_frontend_render_ui_rects(void) {
         title_visible = 0;
 
     if (title_visible) {
-        const char *title_text = frontend_get_title_text_for_screen(s_current_screen);
+        const char *title_text = td5_tr(frontend_get_title_text_for_screen(s_current_screen));
         if (title_text && td5_titlefont_ready()) {
             /* [title font] render the screen header as text in the Lunatica
              * title face, replacing the legacy baked title-strip art. LEFT-ALIGNED
@@ -10004,9 +10046,9 @@ void td5_frontend_render_ui_rects(void) {
             char wb[96];
             int off, k;
             if (ndp == 1)
-                snprintf(wb, sizeof wb, "PLAYER %d CONTROLLER (DISCONNECTED)", dp[0]);
+                snprintf(wb, sizeof wb, TR("PLAYER %d CONTROLLER (DISCONNECTED)"), dp[0]);
             else {
-                off = snprintf(wb, sizeof wb, "CONTROLLER (DISCONNECTED): P%d", dp[0]);
+                off = snprintf(wb, sizeof wb, TR("CONTROLLER (DISCONNECTED): P%d"), dp[0]);
                 for (k = 1; k < ndp && off > 0 && off < (int)sizeof wb - 6; k++)
                     off += snprintf(wb + off, sizeof wb - (size_t)off, ", P%d", dp[k]);
             }

@@ -29,6 +29,7 @@
 #include "td5_credits.h"       /* SNK_CreditsText array + dev mugshot map (Extras scroll) */
 #include "td5_vectorui.h"      /* public VectorUI surface (HUD reuses these primitives) */
 #include "td5_font.h"          /* [S13] runtime TTF glyph cache (native menu text) */
+#include "td5_i18n.h"          /* [I18N] TR() runtime string translation */
 #include "td5_version.h"       /* build identity (version / channel / date / git rev) */
 #include "td5_changelog.h"     /* CHANGELOG screen content table (file-static here) */
 #include "td5_pending.h"       /* PENDING TO TEST checklist (list/state/overlay) */
@@ -576,7 +577,7 @@ void frontend_render_physics_stats(int ext_id, float px, float py, float pw, flo
     for (i = 0; i < CPS_COUNT; i++) {
         float ry  = py + (float)i * rh;
         float tyc = (ry + (rh - capd) * 0.5f) * sy;
-        const char *expl = compact ? NULL : k_cps_explain[i];
+        const char *expl = compact ? NULL : td5_tr(k_cps_explain[i]);
         if (expl) {
             /* [2026-06-26] Two-line label: stat name on top, dim caption beneath.
              * Both sit in the label column (left of barx), so the bar / text value
@@ -584,10 +585,10 @@ void frontend_render_physics_stats(int ext_id, float px, float py, float pw, flo
              * cell-top ry+2 (baseline ry+12), caption cell-top ry+12 at 0.62x so
              * its descenders end ~ry+20, inside the row. */
             float exsx = lsx * 0.62f, exsy = lsy * 0.62f;
-            fe_draw_small_text(px * sx, (ry + 2.0f)  * sy, k_cps_labels[i], 0xFFC8C8C8u, lsx,  lsy);
+            fe_draw_small_text(px * sx, (ry + 2.0f)  * sy, td5_tr(k_cps_labels[i]), 0xFFC8C8C8u, lsx,  lsy);
             fe_draw_small_text(px * sx, (ry + 12.0f) * sy, expl,           0xFF8FA0B4u, exsx, exsy);
         } else {
-            fe_draw_small_text(px * sx, tyc, k_cps_labels[i], 0xFFC8C8C8u, lsx, lsy);
+            fe_draw_small_text(px * sx, tyc, td5_tr(k_cps_labels[i]), 0xFFC8C8C8u, lsx, lsy);
         }
         if (i < CPS_BAR_COUNT) {
             float barh = rh - (compact ? 3.0f : 6.0f);
@@ -808,7 +809,7 @@ void frontend_draw_car_stat_bars(float bx, float by, float bw, float bh,
         float fillw = ((valid_mask >> i) & 1) ? fr[i] * barw : 0.0f;
         if (lblw > 0.0f) {
             float ty = (ry + (rowh - capd) * 0.5f) * sy;
-            fe_draw_small_text((bx + content_l) * sx, ty, labels[i], 0xFFC8C8C8u, lsx, lsy);
+            fe_draw_small_text((bx + content_l) * sx, ty, td5_tr(labels[i]), 0xFFC8C8C8u, lsx, lsy);
         }
         fe_draw_quad(barx * sx, bary * sy, barw * sx, barh * sy, 0xFF101828u, -1, 0, 0, 1, 1);
         if (fillw > 0.0f)

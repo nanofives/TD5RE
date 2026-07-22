@@ -265,6 +265,9 @@ typedef struct TD5_GlobalState {
         int  fog_enabled;
         int  speed_units;
         int  camera_damping;
+        /* UI language (PORT-ONLY i18n, td5_i18n.c): 0=English, 1=Spanish
+         * (es-AR). [Game] Language; set from the LANGUAGE options screen. */
+        int  language;
         /* Enumerated display-mode ordinal (DisplayOptions resolution row).
          * Formerly persisted in Config.td5 (+0xBD); now a [Display] DisplayMode
          * key in td5re.ini. The applied resolution still comes from Width/Height. */

@@ -27,6 +27,7 @@
 #include "td5_inflate.h"
 #include "td5_sound.h"      /* td5_sound_set_paused -- mute race audio while overlay is up */
 #include "td5_tutorial_pad_art.h"
+#include "td5_i18n.h"       /* [I18N] TR() runtime string translation */
 
 #define LOG_TAG "hud"
 #define PAD_TEX_PAGE 990
@@ -252,7 +253,7 @@ static void draw_callout(const CalloutDef *c, const uint32_t *bind)
         pts[0] = b; pts[1] = (Vec2){ b.x, base_y };
         leader(pts, 2);
         arrow_up(b.x, base_y);
-        text_center(b.x, LBL_TOP_Y, c->label, LEAD_WHITE, LBL_SCALE);
+        text_center(b.x, LBL_TOP_Y, td5_tr(c->label), LEAD_WHITE, LBL_SCALE);
     } else if (c->region == REG_B) {
         float lx = c->p0, lane = c->p1;
         int right = (lx >= b.x);
@@ -260,8 +261,8 @@ static void draw_callout(const CalloutDef *c, const uint32_t *bind)
         pts[0]=b; pts[1]=(Vec2){b.x,lane}; pts[2]=(Vec2){basex,lane};
         leader(pts, 3);
         arrow_h(basex, lane, right ? DIR_R : DIR_L);
-        if (right) text_left (lx, lane - LBL_VC, c->label, LEAD_WHITE, LBL_SCALE);
-        else       text_right(lx, lane - LBL_VC, c->label, LEAD_WHITE, LBL_SCALE);
+        if (right) text_left (lx, lane - LBL_VC, td5_tr(c->label), LEAD_WHITE, LBL_SCALE);
+        else       text_right(lx, lane - LBL_VC, td5_tr(c->label), LEAD_WHITE, LBL_SCALE);
     } else {
         /* L/R: at most one bend. Optional vertical 'dip' off the button first
          * (used to drop below the face cluster / split steer & horn), then a
@@ -277,8 +278,8 @@ static void draw_callout(const CalloutDef *c, const uint32_t *bind)
         if (ly != y0) pts[k++] = (Vec2){ basex, ly };
         leader(pts, k);
         arrow_h(basex, ly, left ? DIR_L : DIR_R);
-        if (left) text_right(lx, ly - LBL_VC, c->label, LEAD_WHITE, LBL_SCALE);
-        else      text_left (lx, ly - LBL_VC, c->label, LEAD_WHITE, LBL_SCALE);
+        if (left) text_right(lx, ly - LBL_VC, td5_tr(c->label), LEAD_WHITE, LBL_SCALE);
+        else      text_left (lx, ly - LBL_VC, td5_tr(c->label), LEAD_WHITE, LBL_SCALE);
     }
     start_dot(b);
 }
@@ -322,7 +323,7 @@ static void draw_dismiss_row(void)
     uint32_t amber = (a << 24) | 0x00FFD24Au;
 
     if (s_humans <= 1) {
-        text_center(320, 432, "PRESS ANY BUTTON TO START THE RACE", amber, 0.85f);
+        text_center(320, 432, TR("PRESS ANY BUTTON TO START THE RACE"), amber, 0.85f);
         return;
     }
     int ready = 0;
@@ -356,7 +357,7 @@ void td5_tutorial_draw(void)
 
     /* 50%-opacity sharp rectangle covering most of the screen (no border). */
     td5_vui_quad(rw * 0.035f, rh * 0.03f, rw * 0.93f, rh * 0.94f, 0x80000000u, -1, 0, 0, 0, 0);
-    text_center(320, 48, "Controls", 0xFFFFFFFFu, 1.7f);
+    text_center(320, 48, TR("Controls"), 0xFFFFFFFFu, 1.7f);
     if (s_mode_hint)
         text_center_fit(320, 82, s_mode_hint, 0xFFFFD24Au, 0.62f, 560.0f);
 

@@ -437,7 +437,11 @@ typedef enum TD5_ScreenIndex {
      * rings). Reached from UI GUIDE's [1] MP TOOLS row. Port-only dev tool.
      * (Moved 44→45 in the 2026-07-05 bulk merge — 44 went to RACE OPTIONS.) */
     TD5_SCREEN_MP_GUIDE           = 45,  /* Screen_MpGuide (td5_fe_devscreens.c) */
-    TD5_SCREEN_COUNT               = 46
+    /* [I18N 2026-07-21] UI-language selector under the OPTIONS hub (English /
+     * Spanish es-AR). Port-only — the retired slot 3 (original Language.dll
+     * picker) stays retired; this is a fresh screen driving td5_i18n.c. */
+    TD5_SCREEN_LANGUAGE_OPTIONS   = 46,  /* Screen_LanguageOptions (td5_fe_menu.c) */
+    TD5_SCREEN_COUNT               = 47
 } TD5_ScreenIndex;
 
 /* ========================================================================

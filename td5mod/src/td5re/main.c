@@ -43,6 +43,7 @@
 #include "td5_render.h"
 #include "td5_light.h"    /* [DYNAMIC LIGHTS] master enable / headlights / dark-mode push */
 #include "td5_light2.h"   /* [LIGHT2] lighting rework mode push */
+#include "td5_i18n.h"     /* [I18N] UI-language catalog load at boot */
 
 /* Wrapper backend types and functions */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -328,6 +329,9 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("Game", "CarDamage",    g_td5.ini.car_damage);
     td5_ini_write_int("Game", "CarDamageBar", g_td5.ini.car_damage_bar);
 
+    /* [I18N 2026-07-21] UI language (LANGUAGE options screen). */
+    td5_ini_write_int("Game", "Language",     g_td5.ini.language);
+
     /* TD6 paint color (last selected in the car-select color panel). */
     td5_ini_write_int("CarSelection", "TD6PaintColor",   g_td5.ini.td6_paint_color);
     td5_ini_write_int("CarSelection", "TD6PaintColor2",  g_td5.ini.td6_paint_color2);
@@ -471,6 +475,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "MaxSpan",              &g_td5.ini.max_span },
         { "PhantomPeer",          &g_td5.ini.phantom_peer },
         /* Game */
+        { "Language",             &g_td5.ini.language },
         { "DefaultCar",           &g_td5.ini.default_car },
         { "DefaultTrack",         &g_td5.ini.default_track },
         { "DefaultGameType",      &g_td5.ini.default_game_type },
@@ -886,6 +891,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     if (g_td5.ini.traffic > TD5_TRAFFIC_VOLUME_COUNT - 1)
         g_td5.ini.traffic = TD5_TRAFFIC_VOLUME_COUNT - 1;
     g_td5.ini.cops               = td5_ini_int("GameOptions", "Cops", 1);
+    /* [I18N 2026-07-21] UI language: 0=English (default), 1=Spanish (es-AR).
+     * Applied after CLI overrides below via td5_i18n_set_language(). */
+    g_td5.ini.language           = td5_ini_int("Game", "Language", 0);
     g_td5.ini.difficulty         = td5_ini_int("GameOptions", "Difficulty", 1);
     g_td5.ini.dynamics           = td5_ini_int("GameOptions", "Dynamics", 0);
     g_td5.ini.collisions         = td5_ini_int("GameOptions", "Collisions", 1);
@@ -1213,6 +1221,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         if (n_cli > 0)
             dbglog("=== %d CLI override(s) applied ===", n_cli);
     }
+
+    /* [I18N] Load the UI-language catalog once INI + CLI have settled. A
+     * missing/bad catalog falls back to English (and resets the knob so the
+     * LANGUAGE screen reflects reality). */
+    if (!td5_i18n_set_language(g_td5.ini.language))
+        g_td5.ini.language = td5_i18n_language();
 
     /* [DYNAMIC LIGHTS] Push the finalized (INI + CLI) lighting config into the
      * light registry + renderer. These setters just latch static flags, so

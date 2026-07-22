@@ -22,6 +22,7 @@
 #include "td5_snk_strings.h"
 #include "td5_vectorui.h"
 #include "td5_font.h"
+#include "td5_i18n.h"   /* [I18N] TR() runtime string translation */
 #include "td5_config.h"   /* shared TD5RE_* env-knob accessors */
 
 #define WIN32_LEAN_AND_MEAN
@@ -79,12 +80,12 @@ static char s_net_join_fail_msg[160];
 static void frontend_net_build_join_fail(int nak) {
     const char *why;
     switch (nak) {
-    case 1:  why = "SESSION FULL"; break;
-    case 2:  why = "WRONG PASSWORD"; break;
-    default: why = "HOST UNREACHABLE (NO RESPONSE)"; break;
+    case 1:  why = TR("SESSION FULL"); break;
+    case 2:  why = TR("WRONG PASSWORD"); break;
+    default: why = TR("HOST UNREACHABLE (NO RESPONSE)"); break;
     }
     snprintf(s_net_join_fail_msg, sizeof(s_net_join_fail_msg),
-             "COULD NOT CONNECT: %s", why);
+             TR("COULD NOT CONNECT: %s"), why);
     TD5_LOG_W(LOG_TAG, "join failed: %s", s_net_join_fail_msg);
 }
 
@@ -598,8 +599,8 @@ void Screen_ConnectionBrowser(void) {
         td5_net_init();
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         /* [2026-06-07] Regular main-menu button height (0x20) + BACK left-aligned. */
-        frontend_create_button("LAN GAME",  120, 193, 496, 0x20);
-        frontend_create_button("DIRECT IP", 120, 257, 496, 0x20);
+        frontend_create_button(TR("LAN GAME"),  120, 193, 496, 0x20);
+        frontend_create_button(TR("DIRECT IP"), 120, 257, 496, 0x20);
         frontend_create_button(SNK_BackButTxt, 120, 377, 112, 0x20);
         /* [NET OPTIONS 2026-07-21] Default the highlight + runtime net mode to the
          * saved NET MODE preference ([Network]Mode; LAN=row 0, DIRECT IP=row 1),
@@ -687,7 +688,7 @@ void Screen_NetNickname(void) {
         if (!g_td5.ini.net_nickname[0])
             snprintf(g_td5.ini.net_nickname, sizeof(g_td5.ini.net_nickname), "Player");
         frontend_begin_text_input(g_td5.ini.net_nickname, (int)sizeof(g_td5.ini.net_nickname));
-        frontend_set_text_input_prompt("ENTER YOUR NICKNAME");
+        frontend_set_text_input_prompt(TR("ENTER YOUR NICKNAME"));
         s_inner_state = 1;
         break;
 
@@ -727,8 +728,8 @@ void Screen_LanMenu(void) {
         td5_net_set_mode(TD5_NET_MODE_LAN);
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         /* [2026-06-07] Regular main-menu button height (0x20) + BACK left-aligned. */
-        frontend_create_button("HOST NEW LAN GAME",  120, 193, 496, 0x20);
-        frontend_create_button("DISCOVER LAN GAMES", 120, 257, 496, 0x20);
+        frontend_create_button(TR("HOST NEW LAN GAME"),  120, 193, 496, 0x20);
+        frontend_create_button(TR("DISCOVER LAN GAMES"), 120, 257, 496, 0x20);
         frontend_create_button(SNK_BackButTxt, 120, 377, 112, 0x20);
         s_inner_state = 1;
         break;
@@ -782,8 +783,8 @@ void Screen_DirectConnect(void) {
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         /* [2026-06-07] Regular main-menu button height (0x20) and BACK left-
          * aligned with the action buttons above (x=120) for a consistent look. */
-        frontend_create_button("HOST GAME", 120, 193, 496, 0x20);
-        frontend_create_button("JOIN GAME", 120, 257, 496, 0x20);
+        frontend_create_button(TR("HOST GAME"), 120, 193, 496, 0x20);
+        frontend_create_button(TR("JOIN GAME"), 120, 257, 496, 0x20);
         frontend_create_button(SNK_BackButTxt, 120, 377, 112, 0x20);
         s_inner_state = 1;
         break;
@@ -810,7 +811,7 @@ void Screen_DirectConnect(void) {
         frontend_create_button(SNK_BackButTxt, 278, 289, 112, 0x20);
         frontend_begin_text_input(s_net_direct_ip, (int)sizeof(s_net_direct_ip));
         /* [ITEM 6] Hostnames + DDNS names are accepted, not just dotted IPs. */
-        frontend_set_text_input_prompt("ENTER HOST IP / HOSTNAME [:PORT]");
+        frontend_set_text_input_prompt(TR("ENTER HOST IP / HOSTNAME [:PORT]"));
         s_inner_state = 3;
         break;
 
@@ -832,7 +833,7 @@ void Screen_DirectConnect(void) {
                  * no feedback. Surface it like the timeout/full failures. */
                 TD5_LOG_W(LOG_TAG, "Direct join '%s' failed (bad address)", s_net_direct_ip);
                 snprintf(s_net_join_fail_msg, sizeof(s_net_join_fail_msg),
-                         "COULD NOT CONNECT: INVALID ADDRESS");
+                         TR("COULD NOT CONNECT: INVALID ADDRESS"));
                 s_inner_state = 9;                /* failure message */
             }
             break;
@@ -846,7 +847,7 @@ void Screen_DirectConnect(void) {
         frontend_reset_buttons();
         frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
         frontend_create_button(td5_net_get_status_text(), 80, 193, 480, 0x40);
-        frontend_create_button("CONTINUE", 232, 377, 160, 0x20);
+        frontend_create_button(TR("CONTINUE"), 232, 377, 160, 0x20);
         s_inner_state = 6;
         break;
 
@@ -886,7 +887,7 @@ void Screen_DirectConnect(void) {
         frontend_create_button(SNK_BackButTxt, 278, 289, 112, 0x20);
         s_lobby_password[0] = '\0';
         frontend_begin_text_input(s_lobby_password, (int)sizeof(s_lobby_password));
-        frontend_set_text_input_prompt("PASSWORD REQUIRED");
+        frontend_set_text_input_prompt(TR("PASSWORD REQUIRED"));
         s_inner_state = 8;
         break;
 
@@ -903,7 +904,7 @@ void Screen_DirectConnect(void) {
             } else {
                 /* [ITEM 3] same bad-address feedback on the password re-join. */
                 snprintf(s_net_join_fail_msg, sizeof(s_net_join_fail_msg),
-                         "COULD NOT CONNECT: INVALID ADDRESS");
+                         TR("COULD NOT CONNECT: INVALID ADDRESS"));
                 s_inner_state = 9;
             }
             break;
@@ -964,7 +965,7 @@ static void frontend_net_update_session_list(void) {
             s_buttons[i].disabled = 0;
         } else if (i == 0 && count <= 0) {
             snprintf(s_buttons[i].label, sizeof(s_buttons[i].label),
-                     "(SEARCHING FOR LAN GAMES...)");
+                     TR("(SEARCHING FOR LAN GAMES...)"));
             s_buttons[i].hidden   = 0;
             s_buttons[i].disabled = 1;
         } else {
@@ -1113,7 +1114,7 @@ void Screen_SessionPicker(void) {
         frontend_create_button(SNK_BackButTxt, 278, 289, 112, 0x20);
         s_lobby_password[0] = '\0';
         frontend_begin_text_input(s_lobby_password, (int)sizeof(s_lobby_password));
-        frontend_set_text_input_prompt("PASSWORD REQUIRED");
+        frontend_set_text_input_prompt(TR("PASSWORD REQUIRED"));
         s_inner_state = 9;
         break;
 
@@ -1189,12 +1190,12 @@ void Screen_CreateSession(void) {
              * spatial (frontend_spatial_pick), so visual!=index order is fine.
              * NAME/PASSWORD value text is drawn by the overlay relative to the
              * live button row now, so re-spacing no longer detaches it. */
-            frontend_create_button("SESSION NAME", 120, 148, 224, 0x20);  /* 0 */
+            frontend_create_button(TR(TR("SESSION NAME")), 120, 148, 224, 0x20);  /* 0 */
             {   /* 1: MAX PLAYERS — selector-style (value tracks the button) */
                 int bi = frontend_create_button("", 120, 188, 224, 0x20);
                 if (bi >= 0 && bi < FE_MAX_BUTTONS) s_buttons[bi].is_selector = 1;
             }
-            frontend_create_button("PASSWORD",     120, 228, 224, 0x20);  /* 2 */
+            frontend_create_button(TR("PASSWORD"),     120, 228, 224, 0x20);  /* 2 */
             frontend_create_button("HOST",         120, 348, 160, 0x20);  /* 3 */
             frontend_create_button(SNK_BackButTxt, 120, 388, 112, 0x20);  /* 4 */
             /* 5/6: UPnP toggle + GAME PORT. Plain-label buttons (NOT selectors)
@@ -1202,17 +1203,17 @@ void Screen_CreateSession(void) {
              * selector value renderer in td5_frontend.c only knows MAX PLAYERS.
              * The labels are refreshed each interaction frame (case 2). They sit
              * between PASSWORD and HOST visually (indices stay 5/6). */
-            frontend_create_button("UPNP: ON",     120, 268, 224, 0x20);  /* 5 */
-            frontend_create_button("GAME PORT",    120, 308, 224, 0x20);  /* 6 */
+            frontend_create_button(TR("UPNP: ON"),     120, 268, 224, 0x20);  /* 5 */
+            frontend_create_button(TR("GAME PORT"),    120, 308, 224, 0x20);  /* 6 */
         } else {
-            frontend_create_button("SESSION NAME", 120, 160, 224, 0x20);  /* 0 */
+            frontend_create_button(TR(TR("SESSION NAME")), 120, 160, 224, 0x20);  /* 0 */
             {   /* 1: MAX PLAYERS — selector-style (value + ◄ ► inside the button,
                  * drawn in the post-button pass like the other selector widgets) */
                 int bi = frontend_create_button("", 120, 208, 224, 0x20);
                 if (bi >= 0 && bi < FE_MAX_BUTTONS)
                     s_buttons[bi].is_selector = 1;
             }
-            frontend_create_button("PASSWORD",     120, 256, 224, 0x20);  /* 2 */
+            frontend_create_button(TR("PASSWORD"),     120, 256, 224, 0x20);  /* 2 */
             frontend_create_button("HOST",         120, 320, 160, 0x20);  /* 3 */
             frontend_create_button(SNK_BackButTxt, 120, 377, 112, 0x20);  /* 4 */
         }
@@ -1254,7 +1255,7 @@ void Screen_CreateSession(void) {
          * right by frontend_render_create_session_overlay, like NAME/PASSWORD. */
         if (s_cs_direct && 5 < FE_MAX_BUTTONS && s_buttons[5].active) {
             snprintf(s_buttons[5].label, sizeof(s_buttons[5].label),
-                     "UPNP: %s", s_net_cfg_enable_upnp ? "ON" : "OFF");
+                     TR("UPNP: %s"), s_net_cfg_enable_upnp ? "ON" : "OFF");
         }
         if (s_cs_edit) {
             /* Editing NAME, PASSWORD or GAME PORT: Enter confirms, ESC cancels
@@ -1311,7 +1312,7 @@ void Screen_CreateSession(void) {
             case 0: /* SESSION NAME */
                 frontend_begin_text_input(s_create_session_name,
                                           (int)sizeof(s_create_session_name));
-                frontend_set_text_input_prompt("SESSION NAME");
+                frontend_set_text_input_prompt(TR("SESSION NAME"));
                 s_cs_edit = 1;
                 break;
             case 1: /* MAX PLAYERS: activate = cycle */
@@ -1322,7 +1323,7 @@ void Screen_CreateSession(void) {
             case 2: /* PASSWORD */
                 frontend_begin_text_input(s_lobby_password,
                                           (int)sizeof(s_lobby_password));
-                frontend_set_text_input_prompt("PASSWORD (BLANK = OPEN)");
+                frontend_set_text_input_prompt(TR("PASSWORD (BLANK = OPEN)"));
                 s_cs_edit = 2;
                 break;
             case 3: { /* HOST */
@@ -1381,7 +1382,7 @@ void Screen_CreateSession(void) {
                              s_net_cfg_game_port);
                     frontend_begin_text_input(s_cs_port_buf,
                                               (int)sizeof(s_cs_port_buf));
-                    frontend_set_text_input_prompt("GAME PORT (DEFAULT 37050)");
+                    frontend_set_text_input_prompt(TR("GAME PORT (DEFAULT 37050)"));
                     s_cs_edit = 3;
                 }
                 break;
@@ -1494,13 +1495,13 @@ void Screen_NetworkLobby(void) {
         /* [S31] Button 0: the host STARTS the race; clients toggle READY.
          * Width 180 so SELECT TRACK fits inside the frame. */
         frontend_create_button(frontend_net_is_host() ? SNK_StartButTxt
-                                                      : "READY",
+                                                      : SNK_ReadyTxt,
                                                     430, 110, 180, 0x20); /* 0 */
         frontend_create_button(SNK_ChangeCarButTxt, 430, 150, 180, 0x20); /* 1 CHANGE CAR */
-        frontend_create_button("SELECT TRACK",      430, 190, 180, 0x20); /* 2 SELECT TRACK */
+        frontend_create_button(TR("SELECT TRACK"),      430, 190, 180, 0x20); /* 2 SELECT TRACK */
         /* [NET GAME MODES 2026-07-04] GAME MODE -> the shared MP mode picker
          * (host only). s_mp_net_config routes the mode screens back here. */
-        frontend_create_button("GAME MODE",         430, 230, 180, 0x20); /* 3 GAME MODE */
+        frontend_create_button(TR("GAME MODE"),         430, 230, 180, 0x20); /* 3 GAME MODE */
         frontend_create_button(SNK_ExitButTxt,      430, 270, 180, 0x20); /* 4 EXIT */
         /* [S31] Track + game-mode choices are the host's call (the DXPSTART
          * config overrides any client-side pick anyway) -- hide SELECT TRACK and

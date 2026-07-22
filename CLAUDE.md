@@ -175,6 +175,7 @@ comment — regenerate after adding/splitting modules with
 | `td5_fe_carstats.c` | Car stat bars + physics-derived MORE STATS panel |
 | `td5_fe_devscreens.c` | CHANGELOG + PENDING TO TEST dev screens |
 | `td5_font.c` | runtime TTF glyph cache (stb_truetype). See td5_font.h. |
+| `td5_i18n.c` | runtime string localization (PORT-ONLY). See td5_i18n.h. |
 | `td5_hud.c` | Race HUD, minimap, text rendering, pause menu overlay |
 | `td5_sound.c` | Sound playback, vehicle audio, ambient, CD |
 | `td5_music.c` | Pluggable music-backend seam (see td5_music.h). |
@@ -205,6 +206,7 @@ comment — regenerate after adding/splitting modules with
 | `td5_trace.c` | Modular per-module CSV race-trace emitter |
 | `td5_inputscript.c` | scripted input harness (see td5_inputscript.h) |
 | `td5_selftest.c` | in-session automated test suite (PORT-ONLY, DEV-ONLY) |
+| `td5_control.c` | live-control MCP transport (PORT-ONLY, DEV-ONLY) |
 | `td5_trig_lut_data.c` | baked 12-bit trig LUT data (dumped from the original exe) |
 | `td5_profile.c` | per-phase frame profiler (see td5_profile.h). |
 | `td5_jobs.c` | fork/join worker pool (Win32 CONDITION_VARIABLE based). |

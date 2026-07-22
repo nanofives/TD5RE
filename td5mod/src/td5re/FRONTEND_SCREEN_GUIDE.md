@@ -142,3 +142,14 @@ centred on their row.
 - [ ] Register the render fn in the post-button `switch` in `td5_frontend.c`.
 - [ ] Add the screen enum + table entry + decl (`td5_types.h`,
       `td5_frontend.c` table, `td5_frontend_internal.h`).
+- [ ] **[I18N 2026-07-21]** Wrap every player-facing literal in `TR(...)`
+      (`td5_i18n.h`) and add its es-AR value to
+      `re/assets/frontend/lang/es_AR.txt` (run
+      `python re/tools/gen_i18n_catalog.py` to sync missing keys). Static
+      `const` tables can't hold `TR()` — translate at the draw site with
+      `td5_tr(...)` instead. Screen titles translate automatically via the
+      `frontend_get_title_text_for_screen` chokepoint, but the title string
+      itself needs a catalog entry. The LANGUAGE screen (46,
+      `Screen_LanguageOptions` in `td5_fe_menu.c`) is the selector; labels
+      refresh on screen re-entry (they're copied at `frontend_create_button`
+      time), and `fe_fit_text_scale` condenses over-wide captions.

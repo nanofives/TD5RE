@@ -27,6 +27,7 @@
 #include "td5_credits.h"
 #include "td5_vectorui.h"
 #include "td5_font.h"
+#include "td5_i18n.h"   /* [I18N] TR() + language switch (Screen_LanguageOptions) */
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -1450,7 +1451,9 @@ void Screen_OptionsHub(void) {
         frontend_create_button(SNK_SoundOptionsButTxt,     120, 137, 0x130, 0x20); /* 1 */
         frontend_create_button(SNK_GraphicsOptionsButTxt,  120, 177, 0x130, 0x20); /* 2 */
         frontend_create_button(SNK_TwoPlayerOptionsButTxt, 120, 217, 0x130, 0x20); /* 3 */
-        frontend_create_button(SNK_OkButTxt,               216, 377, 0x60,  0x20); /* 4 */
+        /* [I18N 2026-07-21] UI-language selector sub-screen. */
+        frontend_create_button(TR("LANGUAGE"),             120, 257, 0x130, 0x20); /* 4 */
+        frontend_create_button(SNK_OkButTxt,               216, 377, 0x60,  0x20); /* 5 */
 
         frontend_begin_timed_animation();
         s_inner_state = 1;
@@ -1481,7 +1484,8 @@ void Screen_OptionsHub(void) {
             case 1: s_return_screen = TD5_SCREEN_SOUND_OPTIONS;      s_inner_state = 7; break;
             case 2: s_return_screen = TD5_SCREEN_DISPLAY_OPTIONS;    s_inner_state = 7; break;
             case 3: s_return_screen = TD5_SCREEN_TWO_PLAYER_OPTIONS; s_inner_state = 7; break;
-            case 4: /* OK -> return to main menu.
+            case 4: s_return_screen = TD5_SCREEN_LANGUAGE_OPTIONS;   s_inner_state = 7; break;
+            case 5: /* OK -> return to main menu.
                      * PARITY NOTE (audit 2026-05-30): the original 0x0041D890 OK case
                      * commits the option shadows to live globals here (camera =
                      * collisions^1 @0x41dc8e, dynamics @0x41dc82, traffic/cops, and
@@ -1661,6 +1665,90 @@ void Screen_ControlOptions(void) {
         s_inner_state = 8;
         break;
     case 8: /* Slide-out (~500ms) */
+        if (frontend_update_timed_animation(16, 267) >= 1.0f) {
+            s_inner_state = 9;
+        }
+        break;
+    case 9:
+        td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
+        break;
+    }
+}
+
+/* [I18N 2026-07-21] LANGUAGE options sub-screen: one ◄► selector row cycling
+ * the UI language (ENGLISH / ESPAÑOL (AR), td5_i18n.c) + OK. The switch applies
+ * live: the catalog reloads and this screen's own buttons rebuild in place so
+ * the labels refresh; every other screen re-TR()s its labels on next entry. */
+static void lang_opts_create_buttons(void)
+{
+    frontend_reset_buttons();
+    frontend_create_button(TR("LANGUAGE"), 120,  97, 0x100, 0x20);  /* 0: ◄► selector */
+    frontend_create_button(SNK_OkButTxt,   200, 377, 0x60,  0x20);  /* 1 */
+}
+
+void frontend_render_language_options_overlay(float sx, float sy)
+{
+    if (!s_anim_complete) return;
+    frontend_draw_value_centered(sx, sy, 97 + 6,
+                                 td5_i18n_language_name(td5_i18n_language()),
+                                 0xFFFFFFFF);
+}
+
+void Screen_LanguageOptions(void) {
+    switch (s_inner_state) {
+    case 0:
+        frontend_init_return_screen(TD5_SCREEN_LANGUAGE_OPTIONS);
+        TD5_LOG_D(LOG_TAG, "LanguageOptions: init (lang=%d)", td5_i18n_language());
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        lang_opts_create_buttons();
+        s_anim_complete = 0;
+        frontend_begin_timed_animation();
+        s_inner_state = 1;
+        break;
+    case 1: case 2:
+        frontend_present_buffer();
+        s_inner_state++;
+        break;
+    case 3:
+        if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
+            s_anim_complete = 1;
+            s_inner_state = 4;
+        }
+        break;
+    case 4:
+    case 5:
+        s_inner_state++;
+        break;
+    case 6:
+        if (s_input_ready) {
+            int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
+            int delta = frontend_option_delta();
+            if (active_button == 0 && delta != 0) {
+                int lang = td5_i18n_language() + delta;
+                while (lang < 0) lang += TD5_LANG_COUNT;
+                lang %= TD5_LANG_COUNT;
+                /* A missing/bad catalog falls back to English inside set_language;
+                 * mirror whatever actually stuck into the persisted knob. */
+                td5_i18n_set_language(lang);
+                g_td5.ini.language = td5_i18n_language();
+                td5_ini_persist_options();
+                /* Rebuild this screen's buttons in place so the row caption
+                 * switches language immediately (labels are copied at create). */
+                lang_opts_create_buttons();
+                frontend_play_sfx(2);
+                s_inner_state = 4;
+            } else if (s_button_index == 1) {
+                /* OK → back to the options hub. */
+                s_return_screen = TD5_SCREEN_OPTIONS_HUB;
+                s_inner_state = 7;
+            }
+        }
+        break;
+    case 7:
+        frontend_begin_timed_animation();
+        s_inner_state = 8;
+        break;
+    case 8:
         if (frontend_update_timed_animation(16, 267) >= 1.0f) {
             s_inner_state = 9;
         }
@@ -2110,7 +2198,7 @@ static int ctrl_bind_row_count(void)
 
 static const char *ctrl_bind_row_label(int row)
 {
-    return (row >= 0 && row < 10) ? k_ctrl_action_labels[row] : "?";
+    return (row >= 0 && row < 10) ? td5_tr(k_ctrl_action_labels[row]) : "?";
 }
 
 /* Begin capturing input for the currently-selected action. Capture is two-phase:

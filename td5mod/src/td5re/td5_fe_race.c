@@ -27,6 +27,7 @@
 #include "td5_snk_strings.h"
 #include "td5_vectorui.h"
 #include "td5_font.h"
+#include "td5_i18n.h"   /* [I18N] TR() + TD5_TOUPPER (Latin-1 uppercase) */
 #include "td5_config.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -1077,9 +1078,9 @@ void Screen_QuickRaceMenu(void) {
          * (same as the Track Selection option rows); the ◄► arrows are still drawn
          * by the explicit fe_draw_option_arrows loop in td5_frontend_render_ui_rects. */
         { int bi;
-          frontend_create_button("Car",                 QR_COL_X, QR_ROW_Y(0), QR_BTN_W, 32); /* QR_BTN_CAR */
-          frontend_create_button("Track",               QR_COL_X, QR_ROW_Y(1), QR_BTN_W, 32); /* QR_BTN_TRACK */
-          frontend_create_button("Direction",           QR_COL_X, QR_ROW_Y(2), QR_BTN_W, 32); /* QR_BTN_DIRECTION */
+          frontend_create_button(TR("Car"),             QR_COL_X, QR_ROW_Y(0), QR_BTN_W, 32); /* QR_BTN_CAR */
+          frontend_create_button(TR("Track"),           QR_COL_X, QR_ROW_Y(1), QR_BTN_W, 32); /* QR_BTN_TRACK */
+          frontend_create_button(TR("Direction"),       QR_COL_X, QR_ROW_Y(2), QR_BTN_W, 32); /* QR_BTN_DIRECTION */
           /* [PORT ENHANCEMENT 2026-06] Quick Race is single-player (driven by the
            * active controller); the Players row is hidden — local multiplayer is
            * the main-menu MULTIPLAYER lobby. The row is still CREATED (to keep the
@@ -1092,7 +1093,7 @@ void Screen_QuickRaceMenu(void) {
           if (bi >= 0) { s_buttons[bi].hidden = 1; s_buttons[bi].disabled = 1; }
           /* [S02 (c) 2026-06-04] Circuit laps, re-homed here from Game Options.
            * Mirrors the Track Selection laps row; edits s_game_option_laps. */
-          frontend_create_button("Laps",                QR_COL_X, QR_ROW_Y(4), QR_BTN_W, 32); /* QR_BTN_LAPS */
+          frontend_create_button(TR("Laps"),            QR_COL_X, QR_ROW_Y(4), QR_BTN_W, 32); /* QR_BTN_LAPS */
           /* [2026-06-08] AI Screens (dev/profiling): render the first N AI cars
            * each in their own split-screen pane. Dev-only — the row is created
            * for index stability but hidden+disabled in release builds (the
@@ -1115,9 +1116,9 @@ void Screen_QuickRaceMenu(void) {
         { int bp = frontend_create_button("Player AI", FE_QR_VALUE_X + 24, QR_ROW_Y(3), 134, 32); /* QR_BTN_PLAYERAI */
           int bt = frontend_create_button("Auto-Thr",  FE_QR_VALUE_X + 162, QR_ROW_Y(3), 134, 32); /* QR_BTN_AUTOTHR */
           if (bp >= 0) snprintf(s_buttons[bp].label, sizeof s_buttons[bp].label,
-                                "Player AI: %s", g_td5.ini.player_is_ai ? "ON" : "OFF");
+                                TR("Player AI: %s"), g_td5.ini.player_is_ai ? TR("ON") : TR("OFF"));
           if (bt >= 0) snprintf(s_buttons[bt].label, sizeof s_buttons[bt].label,
-                                "Auto-Thr: %s", g_td5.ini.auto_throttle ? "ON" : "OFF");
+                                TR("Auto-Thr: %s"), g_td5.ini.auto_throttle ? TR("ON") : TR("OFF"));
           /* [QUICK RACE DEBUG 2026-07-21] PLAYER AI + AUTO-THROTTLE moved to RACE
            * OPTIONS (dev) -> hide inline. */
           if (bp >= 0) { s_buttons[bp].hidden = 1; s_buttons[bp].disabled = 1; }
@@ -1147,8 +1148,8 @@ void Screen_QuickRaceMenu(void) {
          * created hidden+disabled and the legacy render-path icon hack runs instead
          * (frontend_qr_random_icon_on auto-suppresses itself in button mode). */
         {
-            int rc = frontend_create_button("Randomize", QR_RAND_BTN_X, QR_ROW_Y(0), QR_RAND_BTN_W, 32); /* QR_BTN_RAND_CAR */
-            int rt = frontend_create_button("Randomize", QR_RAND_BTN_X, QR_ROW_Y(1), QR_RAND_BTN_W, 32); /* QR_BTN_RAND_TRACK */
+            int rc = frontend_create_button(TR("Randomize"), QR_RAND_BTN_X, QR_ROW_Y(0), QR_RAND_BTN_W, 32); /* QR_BTN_RAND_CAR */
+            int rt = frontend_create_button(TR("Randomize"), QR_RAND_BTN_X, QR_ROW_Y(1), QR_RAND_BTN_W, 32); /* QR_BTN_RAND_TRACK */
             if (!frontend_qr_random_button_on()) {
                 if (rc >= 0) { s_buttons[rc].hidden = 1; s_buttons[rc].disabled = 1; }
                 if (rt >= 0) { s_buttons[rt].hidden = 1; s_buttons[rt].disabled = 1; }
@@ -1174,7 +1175,7 @@ void Screen_QuickRaceMenu(void) {
          * quick-race context: opponents / physics / traffic / police / ... plus the
          * dev debug rows (PLAYER AI, AUTO-THROTTLE, AI SCREENS, SPAN OFFSET,
          * GAME SPEED, END AT CHKPT). */
-        frontend_create_button("RACE OPTIONS", QR_COL_X, QR_ROW_Y(5), QR_BTN_W, 32); /* QR_BTN_RACEOPTS */
+        frontend_create_button(SNK_RaceOptionsButTxt, QR_COL_X, QR_ROW_Y(5), QR_BTN_W, 32); /* QR_BTN_RACEOPTS */
 
         /* Reset direction to Forwards on entry (matches TrackSelection); hide the
          * toggle on forward-only/circuit tracks (caption stays "Direction" —
@@ -1316,7 +1317,7 @@ void Screen_QuickRaceMenu(void) {
                 !s_buttons[QR_BTN_PLAYERAI].hidden) {
                 g_td5.ini.player_is_ai = !g_td5.ini.player_is_ai;
                 snprintf(s_buttons[QR_BTN_PLAYERAI].label, sizeof s_buttons[QR_BTN_PLAYERAI].label,
-                         "Player AI: %s", g_td5.ini.player_is_ai ? "ON" : "OFF");
+                         TR("Player AI: %s"), g_td5.ini.player_is_ai ? TR("ON") : TR("OFF"));
                 frontend_play_sfx(2);
                 TD5_LOG_I(LOG_TAG, "QuickRace dev toggle: PlayerIsAI=%d", g_td5.ini.player_is_ai);
             }
@@ -1324,7 +1325,7 @@ void Screen_QuickRaceMenu(void) {
                 !s_buttons[QR_BTN_AUTOTHR].hidden) {
                 g_td5.ini.auto_throttle = !g_td5.ini.auto_throttle;
                 snprintf(s_buttons[QR_BTN_AUTOTHR].label, sizeof s_buttons[QR_BTN_AUTOTHR].label,
-                         "Auto-Thr: %s", g_td5.ini.auto_throttle ? "ON" : "OFF");
+                         TR("Auto-Thr: %s"), g_td5.ini.auto_throttle ? TR("ON") : TR("OFF"));
                 frontend_play_sfx(2);
                 TD5_LOG_I(LOG_TAG, "QuickRace dev toggle: AutoThrottle=%d", g_td5.ini.auto_throttle);
             }
@@ -3764,7 +3765,7 @@ void frontend_mp_mode_vote_render(float sx, float sy) {
 
     /* Standard top-left title (background + button frames are drawn by the
      * shared render; we only overlay content). */
-    fe_race_draw_screen_title("SELECT GAME MODE", MP_TITLE_LEFT_X * sx, MP_TITLE_TOP_Y * sy,
+    fe_race_draw_screen_title(TR("SELECT GAME MODE"), MP_TITLE_LEFT_X * sx, MP_TITLE_TOP_Y * sy,
                               MP_TITLE_GOLD, sx, sy);
 
     /* Host indicator: the gold HOST pill badge + P1 colour swatch + short label, so
@@ -3776,7 +3777,7 @@ void frontend_mp_mode_vote_render(float sx, float sy) {
         float sw_x = (float)MV_BX + bw + 6.0f;
         td5_vui_quad(sw_x * sx, 74.0f * sy, 11.0f * sx, 11.0f * sy, mp_slot_color(0), -1,0,0,1,1);
         td5_vui_text((sw_x + 17.0f) * sx, 72.0f * sy,
-                     "OTHERS PRESS A TO VOTE  -  P1 (HOST) DECIDES", 0xFFC0C8D0u, sx, sy);
+                     TR("OTHERS PRESS A TO VOTE  -  P1 (HOST) DECIDES"), 0xFFC0C8D0u, sx, sy);
     }
 
     for (m = 0; m < TD5_MP_MODE_COUNT; m++) {
@@ -3785,9 +3786,9 @@ void frontend_mp_mode_vote_render(float sx, float sy) {
         int   ring, stack;
         /* Two-line label, block-centred on the button (on top of the frame). */
         td5_vui_text_centered(cx * sx, (byp + 5.0f) * sy,
-                              k_mp_mode_names[m], 0xFFFFFFFFu, sx, sy);
+                              td5_tr(k_mp_mode_names[m]), 0xFFFFFFFFu, sx, sy);
         mp_pos_small_centered(cx * sx, (byp + 29.0f) * sy,
-                              k_mp_mode_desc[m], 0xFFB8C0CCu, sx, sy);
+                              td5_tr(k_mp_mode_desc[m]), 0xFFB8C0CCu, sx, sy);
 
         /* CAST votes: one profile-coloured border ring per player who has locked
          * a vote for this mode. Rings nest outward in player order so several
@@ -4096,7 +4097,7 @@ void Screen_MpModeConfig(void) {
 void frontend_mp_mode_config_render(float sx, float sy) {
     MpCfgOpt opts[MP_CFG_MAX_OPTS];
     int mode = g_td5.mp_mode_config.mode, count, i;
-    const char *name = (mode >= 0 && mode < TD5_MP_MODE_COUNT) ? k_mp_mode_names[mode] : "MODE";
+    const char *name = (mode >= 0 && mode < TD5_MP_MODE_COUNT) ? td5_tr(k_mp_mode_names[mode]) : TR("MODE");
     char title[48], vb[40];
     /* Value column: BLUE selector arrows flank a centred value with enough
      * clearance for the widest cop-chase label ("SUDDEN DEATH"). The old single
@@ -4107,7 +4108,7 @@ void frontend_mp_mode_config_render(float sx, float sy) {
     const float valc  = (val_l + 12.0f + val_r) * 0.5f;        /* value centre  */
 
     /* Title = "<MODE> OPTIONS" (e.g. TIME TRIAL OPTIONS), top-left, #E3D708. */
-    snprintf(title, sizeof title, "%s OPTIONS", name);
+    snprintf(title, sizeof title, TR("%s OPTIONS"), name);
     fe_race_draw_screen_title(title, MP_TITLE_LEFT_X * sx, MP_TITLE_TOP_Y * sy,
                               MP_TITLE_GOLD, sx, sy);
 
@@ -4119,10 +4120,10 @@ void frontend_mp_mode_config_render(float sx, float sy) {
         float ay  = byp + CFG_BH * 0.5f - 7.0f;       /* arrow row-centre */
         int   v = *o->val;
         /* label (left) — never yellow */
-        td5_vui_text(((float)CFG_BX + 16.0f) * sx, ty * sy, o->label, 0xFFE6ECF4u, sx, sy);
+        td5_vui_text(((float)CFG_BX + 16.0f) * sx, ty * sy, td5_tr(o->label), 0xFFE6ECF4u, sx, sy);
         /* value (right) — WHITE, never yellow */
         if (o->enum_labels && v >= 0 && v < o->enum_count)
-            snprintf(vb, sizeof vb, "%s", o->enum_labels[v]);
+            snprintf(vb, sizeof vb, "%s", td5_tr(o->enum_labels[v]));
         else
             snprintf(vb, sizeof vb, "%d", v);
         td5_vui_text_centered(valc * sx, ty * sy, vb, 0xFFFFFFFFu, sx, sy);
@@ -4132,10 +4133,10 @@ void frontend_mp_mode_config_render(float sx, float sy) {
     }
     if (count == 0)
         mp_pos_small_centered(320.0f * sx, 150.0f * sy,
-                              "No options - select CONTINUE", 0xFF98A0B0u, sx, sy);
+                              TR("No options - select CONTINUE"), 0xFF98A0B0u, sx, sy);
 
     if (s_mode_back_confirm)
-        mp_confirm_modal_render(sx, sy, "BACK TO MODE SELECT?");
+        mp_confirm_modal_render(sx, sy, TR("BACK TO MODE SELECT?"));
 }
 
 /* ---- Cup winners / podium (standard frontend look; moved here from
@@ -4189,19 +4190,19 @@ void Screen_MpPostRace(void) {
         s_anim_complete = 0;
 
         if (cup_between) {
-            frontend_create_button("NEXT RACE",    BX, y0 + 0 * step, BW, BH);
-            frontend_create_button("VIEW RESULTS", BX, y0 + 1 * step, BW, BH);
-            frontend_create_button("VIEW REPLAY",  BX, y0 + 2 * step, BW, BH);
-            frontend_create_button("LEAVE CUP",    BX, y0 + 3 * step, BW, BH);
+            frontend_create_button(TR("NEXT RACE"),    BX, y0 + 0 * step, BW, BH);
+            frontend_create_button(TR("VIEW RESULTS"), BX, y0 + 1 * step, BW, BH);
+            frontend_create_button(TR("VIEW REPLAY"),  BX, y0 + 2 * step, BW, BH);
+            frontend_create_button(TR("LEAVE CUP"),    BX, y0 + 3 * step, BW, BH);
         } else {
             /* Labels match the description-panel titles (k_std_desc[i][0] in
              * frontend_render_mp_post_race_description) and fit the 224px column. */
-            frontend_create_button("RACE AGAIN",    BX, y0 + 0 * step, BW, BH);
-            frontend_create_button("VIEW REPLAY",   BX, y0 + 1 * step, BW, BH);
-            frontend_create_button("BACK TO LOBBY", BX, y0 + 2 * step, BW, BH);
-            frontend_create_button("CAR SELECTION", BX, y0 + 3 * step, BW, BH);
-            frontend_create_button("GAME MODE",     BX, y0 + 4 * step, BW, BH);
-            frontend_create_button("MAIN MENU",     BX, y0 + 5 * step, BW, BH);
+            frontend_create_button(TR("RACE AGAIN"),    BX, y0 + 0 * step, BW, BH);
+            frontend_create_button(TR("VIEW REPLAY"),   BX, y0 + 1 * step, BW, BH);
+            frontend_create_button(TR("BACK TO LOBBY"), BX, y0 + 2 * step, BW, BH);
+            frontend_create_button(TR("CAR SELECTION"), BX, y0 + 3 * step, BW, BH);
+            frontend_create_button(TR("GAME MODE"),     BX, y0 + 4 * step, BW, BH);
+            frontend_create_button(TR("MAIN MENU"),     BX, y0 + 5 * step, BW, BH);
         }
         s_selected_button = 0;
         frontend_begin_timed_animation();
@@ -4376,9 +4377,9 @@ void frontend_cup_winners_render(float sx, float sy) {
     char buf[64];
     float y;
 
-    fe_race_draw_screen_title("CUP WINNERS", MP_TITLE_LEFT_X * sx, MP_TITLE_TOP_Y * sy,
+    fe_race_draw_screen_title(TR("CUP WINNERS"), MP_TITLE_LEFT_X * sx, MP_TITLE_TOP_Y * sy,
                               MP_TITLE_GOLD, sx, sy);
-    snprintf(buf, sizeof buf, "FINAL STANDINGS  (%d RACES)", td5_game_mp_cup_race_count());
+    snprintf(buf, sizeof buf, TR("FINAL STANDINGS  (%d RACES)"), td5_game_mp_cup_race_count());
     td5_vui_text_centered(320.0f * sx, 74.0f * sy, buf, 0xFFB0B8C0u, sx, sy);
 
     for (i = 0; i < TD5_MAX_RACER_SLOTS; i++)
@@ -4414,9 +4415,9 @@ void frontend_cup_winners_render(float sx, float sy) {
         if (slot < s_num_human_players) {
             const char *pn = frontend_human_display_name(slot);
             if (pn) snprintf(nm, sizeof nm, "%s", pn);
-            else    snprintf(nm, sizeof nm, "PLAYER %d", slot + 1);
+            else    snprintf(nm, sizeof nm, TR("PLAYER %d"), slot + 1);
         } else {
-            snprintf(nm, sizeof nm, "CPU");
+            snprintf(nm, sizeof nm, "%s", TR("CPU"));
         }
         if (td5_game_mp_cup_team_mode())
             snprintf(buf, sizeof buf, "%d.  %s  (TEAM %d)  -  %d PTS",
@@ -4448,7 +4449,7 @@ void frontend_cup_winners_render(float sx, float sy) {
             if (tm >= 0 && tm < 4) tot[tm] += td5_game_mp_cup_points(order[i]);
         }
         y += 8.0f;
-        td5_vui_text_centered(320.0f * sx, y * sy, "TEAM TOTALS", MP_TITLE_GOLD, sx, sy);
+        td5_vui_text_centered(320.0f * sx, y * sy, TR("TEAM TOTALS"), MP_TITLE_GOLD, sx, sy);
         y += 26.0f;
         for (k = 0; k < 4; k++) {
             if (tot[k] == 0) continue;
@@ -4488,7 +4489,7 @@ static void mp_roleselect_row(float sx, float sy, int p, float y, const char *va
     {
         const char *pn = frontend_human_display_name(p);
         if (pn) snprintf(nb, sizeof nb, "%s", pn);
-        else    snprintf(nb, sizeof nb, "PLAYER %d", p + 1);
+        else    snprintf(nb, sizeof nb, TR("PLAYER %d"), p + 1);
     }
     /* [MP HOST INDICATOR 2026-06-28] Slot 0 is the host (it confirms with OK).
      * Tag its row with the same gold HOST pill badge the splitscreen selectors
@@ -4581,7 +4582,7 @@ void frontend_mp_cop_roles_render(float sx, float sy) {
     float y = 112.0f;
     if (n < 2) n = 2;
     if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
-    fe_race_draw_screen_title("COP CHASE - ROLES", MP_TITLE_LEFT_X * sx, MP_TITLE_TOP_Y * sy,
+    fe_race_draw_screen_title(TR("COP CHASE - ROLES"), MP_TITLE_LEFT_X * sx, MP_TITLE_TOP_Y * sy,
                               MP_TITLE_GOLD, sx, sy);
     mp_pos_small_centered(320.0f * sx, 82.0f * sy,
                           "Each player: LEFT/RIGHT to pick COP or SUSPECT", 0xFFC0C8D0u, sx, sy);
@@ -4706,7 +4707,7 @@ static void mp_team_ai_row(float sx, float sy, int slot, float y, const char *na
     const float bx = 436.0f, bw = 11.0f, bgap = 2.0f, bh = 11.0f;
     float label_x;
     td5_vui_text(150.0f * sx, y * sy, name, mp_slot_color(slot), sx, sy);
-    snprintf(tb, sizeof tb, "TEAM %d", team + 1);
+    snprintf(tb, sizeof tb, TR("TEAM %d"), team + 1);
     td5_vui_text_centered(MP_ROW_VAL_CX * sx, y * sy, tb,
                           hl_team ? 0xFFFFE060u : 0xFFFFFFFFu, sx, sy);
     if (hl_team) {
@@ -4894,14 +4895,14 @@ static void mp_team_roster_render(float sx, float sy, int humans, int ai_count,
         {
             float y = TEAM_ROSTER_BOX_TOP + 6.0f;
             float text_max_w = box_w - 20.0f;
-            fe_draw_small_text((box_x + 8.0f) * sx, y * sy, "TEAMS", 0xFFFFE060u, sx, sy);
+            fe_draw_small_text((box_x + 8.0f) * sx, y * sy, TR("TEAMS"), 0xFFFFE060u, sx, sy);
             y += 16.0f;
 
             for (k = 0; k < teams; k++) {
                 int i;
                 char hdr[16];
                 if (members[k] <= 0) continue;
-                snprintf(hdr, sizeof hdr, "TEAM %d", k + 1);
+                snprintf(hdr, sizeof hdr, TR("TEAM %d"), k + 1);
                 fe_draw_small_text((box_x + 8.0f) * sx, y * sy, hdr, 0xFFC0C8D0u, sx, sy);
                 y += line_h;
                 for (i = 0; i < members[k]; i++) {
@@ -4914,7 +4915,7 @@ static void mp_team_roster_render(float sx, float sy, int humans, int ai_count,
                     } else {
                         nm = frontend_human_display_name(s);
                     }
-                    if (!nm || !nm[0]) { snprintf(pb, sizeof pb, "PLAYER %d", s + 1); nm = pb; }
+                    if (!nm || !nm[0]) { snprintf(pb, sizeof pb, TR("PLAYER %d"), s + 1); nm = pb; }
                     team_roster_fit_name(nm, text_max_w - 6.0f, fit, sizeof fit);
                     fe_draw_small_text((box_x + 14.0f) * sx, y * sy, fit, mp_slot_color(s), sx, sy);
                     y += line_h;
@@ -4944,7 +4945,7 @@ void frontend_mp_team_select_render(float sx, float sy) {
 
     nfields = team_select_build_fields(fields, humans, ai_count);
 
-    fe_race_draw_screen_title("CHOOSE YOUR TEAM", MP_TITLE_LEFT_X * sx, MP_TITLE_TOP_Y * sy,
+    fe_race_draw_screen_title(TR("CHOOSE YOUR TEAM"), MP_TITLE_LEFT_X * sx, MP_TITLE_TOP_Y * sy,
                               MP_TITLE_GOLD, sx, sy);
     mp_pos_small_centered(320.0f * sx, 78.0f * sy,
                           "Each player: LEFT/RIGHT to pick a team", 0xFFC0C8D0u, sx, sy);
@@ -4970,7 +4971,7 @@ void frontend_mp_team_select_render(float sx, float sy) {
             mp_team_ai_row(sx, sy, slot, y, name, team, diff, hl_team, hl_diff);
         } else {
             char tb[16];
-            snprintf(tb, sizeof tb, "TEAM %d", team_select_get_team(slot) + 1);
+            snprintf(tb, sizeof tb, TR("TEAM %d"), team_select_get_team(slot) + 1);
             mp_roleselect_row(sx, sy, slot, y, tb);
         }
         y += pitch;
@@ -5019,12 +5020,12 @@ static void fe_race_draw_screen_title(const char *text, float left_x, float top_
     float pen = left_x;
     int i;
     for (i = 0; text[i]; i++) {                            /* pass 1: rasterise into atlas */
-        td5_glyph g; td5_titlefont_get(toupper((unsigned char)text[i]), cap_px, &g);
+        td5_glyph g; td5_titlefont_get(TD5_TOUPPER(text[i]), cap_px, &g);
         (void)g;
     }
     td5_font_flush_uploads();                              /* one GPU upload for new glyphs */
     for (i = 0; text[i]; i++) {                            /* pass 2: draw (cache hits) */
-        int ch = toupper((unsigned char)text[i]);
+        int ch = TD5_TOUPPER(text[i]);
         td5_glyph g; td5_titlefont_get(ch, cap_px, &g);
         if (g.valid && g.w > 0.0f) {
             float gx = pen + g.xoff * hscale;
@@ -5073,10 +5074,10 @@ void frontend_mp_position_render2(float sx, float sy) {
     /* [#18b] Standard top header (Lunatica face) to match the other menus; fall
      * back to the old plain centred text only if the title font isn't ready. */
     if (td5_titlefont_ready())
-        fe_race_draw_screen_title("CHOOSE YOUR SCREEN", FE_RACE_TITLE_LEFT_X * sx, 17.0f * sy,
+        fe_race_draw_screen_title(TR("CHOOSE YOUR SCREEN"), FE_RACE_TITLE_LEFT_X * sx, 17.0f * sy,
                                   0xFFE3D708u, sx, sy);
     else
-        td5_vui_text_centered(320.0f * sx, 10.0f * sy, "CHOOSE YOUR SCREEN", 0xFFFFE060u, sx, sy);
+        td5_vui_text_centered(320.0f * sx, 10.0f * sy, TR("CHOOSE YOUR SCREEN"), 0xFFFFE060u, sx, sy);
 
     /* Layout grid occupies a centred area below the title, above the footer.
      * [R4 2026-06-19] Drop the grid top to the shared FE_MP_TOP_BAND (85, was 40)
@@ -5137,7 +5138,7 @@ void frontend_mp_position_render2(float sx, float sy) {
                 if (occ == 0)
                     td5_vui_host_badge(px + 6.0f, py + 6.0f, 13.0f, sx, sy);
                 if (s_mp_player_name[occ][0]) snprintf(buf, sizeof buf, "%s", s_mp_player_name[occ]);
-                else                          snprintf(buf, sizeof buf, "PLAYER %d", occ + 1);
+                else                          snprintf(buf, sizeof buf, TR("PLAYER %d"), occ + 1);
                 mp_pos_small_centered(ccx * sx, (py + ch * 0.30f + 26.0f) * sy, buf,
                                         rgb | 0xFF000000u, sx, sy);
                 mp_pos_small_centered(ccx * sx, (py + ch * 0.30f + 40.0f) * sy,
@@ -5170,15 +5171,15 @@ void frontend_mp_position_render2(float sx, float sy) {
          * current layout name is shown inline. */
         if (lcnt > 1)
             snprintf(lbuf, sizeof lbuf,
-                     "D-PAD: MOVE   A: READY   B: BACK   X: LAYOUT [%s]", lname);
+                     TR("D-PAD: MOVE   A: READY   B: BACK   X: LAYOUT [%s]"), lname);
         else
             snprintf(lbuf, sizeof lbuf,
-                     "D-PAD: MOVE   A: READY   B: BACK   LAYOUT: %s", lname);
+                     TR("D-PAD: MOVE   A: READY   B: BACK   LAYOUT: %s"), lname);
         td5_vui_text_centered(320.0f * sx, 422.0f * sy, lbuf, 0xFFFFFFFFu, sx, sy);
         if (missing > 0) {
             int cidx = s_mp_missing_content[0];
             if (cidx < 0 || cidx >= MP_MISSING_CONTENT_COUNT) cidx = 0;
-            snprintf(lbuf, sizeof lbuf, "SELECT: EMPTY-CELL CONTENT [%s]",
+            snprintf(lbuf, sizeof lbuf, TR("SELECT: EMPTY-CELL CONTENT [%s]"),
                      k_mp_missing_content[cidx]);
             mp_pos_small_centered(320.0f * sx, 454.0f * sy, lbuf, 0xFF90C0FFu, sx, sy);
         } else if (all_ready) {
@@ -5279,17 +5280,17 @@ void frontend_mp_setup_disconnect_render(float sx, float sy) {
     /* Dim the whole 640x480 virtual canvas, then the centred reconnect message
      * + one accent-coloured "PLUG IN PLAYER n" line per affected player. */
     td5_vui_quad(0.0f, 0.0f, 640.0f * sx, 480.0f * sy, 0xB8000000u, -1, 0, 0, 1, 1);
-    td5_vui_text_centered(320.0f * sx, 200.0f * sy, "CONTROLLER DISCONNECTED", 0xFFFF5050u, sx, sy);
-    td5_vui_text_centered(320.0f * sx, 224.0f * sy, "RECONNECT TO CONTINUE",   0xFFFFFFFFu, sx, sy);
+    td5_vui_text_centered(320.0f * sx, 200.0f * sy, TR("CONTROLLER DISCONNECTED"), 0xFFFF5050u, sx, sy);
+    td5_vui_text_centered(320.0f * sx, 224.0f * sy, TR("RECONNECT TO CONTINUE"),   0xFFFFFFFFu, sx, sy);
     for (p = 0; p < n; p++) {
         uint32_t rgb;
         if (!(s_mp_disc_mask & (1u << p))) continue;
         rgb = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
         if (!rgb) rgb = 0xC0C0C0u;
         if (s_mp_player_name[p][0])
-            snprintf(buf, sizeof buf, "%s - PLUG IN PLAYER %d", s_mp_player_name[p], p + 1);
+            snprintf(buf, sizeof buf, TR("%s - PLUG IN PLAYER %d"), s_mp_player_name[p], p + 1);
         else
-            snprintf(buf, sizeof buf, "PLUG IN PLAYER %d", p + 1);
+            snprintf(buf, sizeof buf, TR("PLUG IN PLAYER %d"), p + 1);
         mp_pos_small_centered(320.0f * sx, cy * sy, buf, rgb | 0xFF000000u, sx, sy);
         cy += 16.0f;
     }
@@ -5371,13 +5372,13 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
             float ty0 = by + (bh - block_h) * 0.5f;            /* title top */
             float ty1 = ty0 + title_cap + gap_title;           /* sub top   */
             float ty2 = ty1 + small_cap + gap_sub;             /* options top */
-            td5_vui_text_centered(320.0f * sx, ty0 * sy, "LEAVE SETUP?", 0xFFFFE060u, sx, sy);
+            td5_vui_text_centered(320.0f * sx, ty0 * sy, TR("LEAVE SETUP?"), 0xFFFFE060u, sx, sy);
             mp_pos_small_centered(320.0f * sx, ty1 * sy,
                                   "LOSES EVERYONE'S NAMES + COLOURS", 0xFFB0B0B0u, sx, sy);
             mp_pos_small_centered(320.0f * sx, ty2 * sy,
                                   "A = YES, LEAVE     B = NO, STAY", 0xFFFFFFFFu, sx, sy);
         } else {
-            td5_vui_text_centered(320.0f * sx, (by + 12.0f) * sy, "LEAVE SETUP?", 0xFFFFE060u, sx, sy);
+            td5_vui_text_centered(320.0f * sx, (by + 12.0f) * sy, TR("LEAVE SETUP?"), 0xFFFFE060u, sx, sy);
             mp_pos_small_centered(320.0f * sx, (by + 36.0f) * sy,
                                   "LOSES EVERYONE'S NAMES + COLOURS", 0xFFB0B0B0u, sx, sy);
             mp_pos_small_centered(320.0f * sx, (by + 50.0f) * sy,
@@ -5450,7 +5451,7 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                      * so it matches NAME/COLOUR/AUTO-MANUAL/ASSIST/OK pixel-for-
                      * pixel — the old mp_profile_chip_draw replica had drifted
                      * (missing the height-scaled frame + fit-scaled label). */
-                    mp_simul_draw_btn(bx, yy, bw, bh, "PROFILE", focus,
+                    mp_simul_draw_btn(bx, yy, bw, bh, TR("PROFILE"), focus,
                                       rgb | 0xFF000000u, 0, NULL, -1, sx, sy);
                 } else {
                     /* [#6 disabled] legacy steel/amber inline look. */
@@ -5465,7 +5466,7 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                         td5_vui_quad((bx + bw - t) * sx, yy * sy, t * sx, bh * sy, bc, -1, 0, 0, 1, 1);
                     }
                     mp_pos_small_centered(cx * sx, (yy + (bh - 9.0f) * 0.5f) * sy,
-                                          "PROFILE", 0xFFFFFFFFu, sx, sy);
+                                          TR("PROFILE"), 0xFFFFFFFFu, sx, sy);
                 }
             }
 
@@ -5480,11 +5481,12 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                 td5_vui_quad(panx * sx, pany * sy, panw * sx, panh * sy, 0xE00C0C16u, -1, 0, 0, 1, 1);
                 td5_vui_quad(panx * sx, pany * sy, panw * sx, 2.0f * sy, rgb | 0xFF000000u, -1, 0, 0, 1, 1);
 
-                mp_pos_small_centered(cx * sx, (pany + 3.0f) * sy, "PROFILE", 0xFFFFE060u, sx, sy);
+                mp_pos_small_centered(cx * sx, (pany + 3.0f) * sy, TR("PROFILE"), 0xFFFFE060u, sx, sy);
 
                 /* action row: SAVE / LOAD / DELETE */
                 {
                     static const char *acts[MP_PROF_ACT_COUNT] = { "SAVE", "LOAD", "DELETE" };
+                    /* [I18N] translated at the draw below via td5_tr(acts[..]) */
                     float ar_y = pany + 16.0f;
                     float seg = panw / (float)MP_PROF_ACT_COUNT;
                     int a;
@@ -5494,7 +5496,7 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                         td5_vui_quad((axp + 1) * sx, ar_y * sy, (seg - 2) * sx, 13.0f * sy,
                                      on ? 0xD0FFCC33u : 0x60303848u, -1, 0, 0, 1, 1);
                         mp_pos_small_centered((axp + seg * 0.5f) * sx, (ar_y + 2.0f) * sy,
-                                              acts[a], on ? 0xFF101010u : 0xFFD0D0D0u, sx, sy);
+                                              td5_tr(acts[a]), on ? 0xFF101010u : 0xFFD0D0D0u, sx, sy);
                     }
                 }
 
@@ -5842,7 +5844,7 @@ void Screen_CarSelection(void) {
         frontend_create_button(SNK_CarButTxt,   46, 169, 168, 32);
         frontend_create_button(SNK_PaintButTxt, 46, 205, 168, 32);
         frontend_create_button(SNK_ConfigButTxt, 46, 297, 168, 32);
-        frontend_create_button(s_selected_transmission ? "Manual" : "Automatic",
+        frontend_create_button(s_selected_transmission ? TR("Manual") : TR("Automatic"),
                                46, 333, 168, 32);
         frontend_create_button(SNK_OkButTxt,   46, 369,  64, 32);
         if (!s_network_active)
@@ -5880,7 +5882,7 @@ void Screen_CarSelection(void) {
                                                            FE_RAND_ICON_W, FE_RAND_ICON_H);
                 if (s_carsel_rand_btn >= 0) s_buttons[s_carsel_rand_btn].hidden = 1;
             } else {
-                s_carsel_rand_btn = frontend_create_button("Randomize", 46, 133, 168, 32);
+                s_carsel_rand_btn = frontend_create_button(TR("Randomize"), 46, 133, 168, 32);
             }
         }
         frontend_apply_color_panel_layout();   /* fix positions immediately (picker may be open) */
@@ -6082,7 +6084,7 @@ void Screen_CarSelection(void) {
                     s_selected_game_type != 7 && (s_button_index >= 0 || delta != 0)) {
                     s_selected_transmission = !s_selected_transmission;
                     strncpy(s_buttons[3].label,
-                            s_selected_transmission ? "Manual" : "Automatic",
+                            s_selected_transmission ? TR("Manual") : TR("Automatic"),
                             sizeof(s_buttons[3].label) - 1);
                     s_buttons[3].label[sizeof(s_buttons[3].label) - 1] = '\0';
                 }
@@ -6613,7 +6615,7 @@ static void frontend_update_direction_button_visibility(int dir_btn_idx, int man
     if (!has_reverse) {
         s_track_direction = 0;
         if (manage_label) {
-            strncpy(s_buttons[dir_btn_idx].label, "Forwards", sizeof(s_buttons[dir_btn_idx].label) - 1);
+            strncpy(s_buttons[dir_btn_idx].label, SNK_ForwardsButTxt, sizeof(s_buttons[dir_btn_idx].label) - 1);
             s_buttons[dir_btn_idx].label[sizeof(s_buttons[dir_btn_idx].label) - 1] = '\0';
         }
         /* Don't leave the highlight focus parked on the now-hidden button. */
@@ -6695,7 +6697,7 @@ static void trksel_build_main_buttons(void) {
                                                        FE_RAND_ICON_W, FE_RAND_ICON_H);
             if (s_trksel_rand_btn >= 0) s_buttons[s_trksel_rand_btn].hidden = 1;
         } else {
-            s_trksel_rand_btn = frontend_create_button("Randomize", 120, 57, 224, 32);
+            s_trksel_rand_btn = frontend_create_button(TR("Randomize"), 120, 57, 224, 32);
         }
     }
     s_trksel_dyn_btn = -1;   /* DYNAMICS moved onto the RACE OPTIONS screen */
@@ -6703,7 +6705,7 @@ static void trksel_build_main_buttons(void) {
      * Laps hidden on point-to-point tracks) — same helpers, new indices. */
     frontend_update_direction_button_visibility(1, 1);
     if (!s_buttons[1].hidden) {   /* reflect the live direction (rebuild after a toggle) */
-        strncpy(s_buttons[1].label, s_track_direction ? "Backwards" : "Forwards",
+        strncpy(s_buttons[1].label, s_track_direction ? SNK_BackwardsButTxt : SNK_ForwardsButTxt,
                 sizeof(s_buttons[1].label) - 1);
         s_buttons[1].label[sizeof(s_buttons[1].label) - 1] = '\0';
     }
@@ -7191,7 +7193,7 @@ void Screen_TrackSelection(void) {
                 (delta != 0 || s_button_index == 1)) {
                 s_track_direction = !s_track_direction;
                 strncpy(s_buttons[1].label,
-                        s_track_direction ? "Backwards" : "Forwards",
+                        s_track_direction ? SNK_BackwardsButTxt : SNK_ForwardsButTxt,
                         sizeof(s_buttons[1].label) - 1);
                 s_buttons[1].label[sizeof(s_buttons[1].label) - 1] = '\0';
             }
@@ -7904,7 +7906,7 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
     /* [TRAFFIC BATTLE 2026-06-28] In battle mode the HITS column becomes WRECKS
      * (the destroyed-traffic score the sort + win are based on). */
     const int battle = td5_game_battle_mode_active();
-    const char *col_hdr = battle ? "WRECKS" : "HITS";
+    const char *col_hdr = battle ? TR("WRECKS") : TR("HITS");
 
     /* 4:3-locked glyph scale, exactly like frontend_render_high_score_overlay,
      * so centred columns stay centred at any window aspect. */
@@ -7962,13 +7964,15 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
             yc += 16.0f;
 
             /* Column headers. */
-            fe_draw_small_text((cc_name + sum_slide) * sx, yc * sy, "NAME", CC_HDR, sx, sy);
-            fe_draw_small_text(CHASE_CTR(cc_car,  "CAR"),     yc * sy, "CAR",     CC_HDR, sx, sy);
-            fe_draw_small_text(CHASE_CTR(cc_stat, stat_hdr),  yc * sy, stat_hdr,  CC_HDR, sx, sy);
-            fe_draw_small_text(CHASE_CTR(cc_top,  "TOP SPD"), yc * sy, "TOP SPD", CC_HDR, sx, sy);
-            fe_draw_small_text(CHASE_CTR(cc_avg,  "AVG SPD"), yc * sy, "AVG SPD", CC_HDR, sx, sy);
-            fe_draw_small_text(CHASE_CTR(cc_hits, "HITS"),    yc * sy, "HITS",    CC_HDR, sx, sy);
-            fe_draw_small_text(CHASE_CTR(cc_air,  "AIR"),     yc * sy, "AIR",     CC_HDR, sx, sy);
+            { const char *h_name = TR("NAME"), *h_car = TR("CAR"), *h_tsp = TR("TOP SPD");
+              const char *h_asp  = TR("AVG SPD"), *h_hit = TR("HITS"), *h_air = TR("AIR");
+              fe_draw_small_text((cc_name + sum_slide) * sx, yc * sy, h_name, CC_HDR, sx, sy);
+              fe_draw_small_text(CHASE_CTR(cc_car,  h_car),   yc * sy, h_car,    CC_HDR, sx, sy);
+              fe_draw_small_text(CHASE_CTR(cc_stat, stat_hdr),yc * sy, stat_hdr, CC_HDR, sx, sy);
+              fe_draw_small_text(CHASE_CTR(cc_top,  h_tsp),   yc * sy, h_tsp,    CC_HDR, sx, sy);
+              fe_draw_small_text(CHASE_CTR(cc_avg,  h_asp),   yc * sy, h_asp,    CC_HDR, sx, sy);
+              fe_draw_small_text(CHASE_CTR(cc_hits, h_hit),   yc * sy, h_hit,    CC_HDR, sx, sy);
+              fe_draw_small_text(CHASE_CTR(cc_air,  h_air),   yc * sy, h_air,    CC_HDR, sx, sy); }
             /* Header/rows separator. */
             td5_vui_quad((cc_name + sum_slide) * sx, (yc + 9.0f) * sy,
                          (cc_air + 24.0f - cc_name) * sx, 2.0f * sy,
@@ -7977,7 +7981,7 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
 
             if (cnt == 0) {
                 fe_draw_small_text((cc_name + sum_slide) * sx, yc * sy,
-                                   section == 0 ? "(none)" : "(none)", CC_AI, sx, sy);
+                                   section == 0 ? TR("(none)") : TR("(none)"), CC_AI, sx, sy);
                 yc += row_h;
             }
             for (int k = 0; k < cnt; k++) {
@@ -7996,7 +8000,7 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
                     if (pn) snprintf(nb, sizeof(nb), "%s", pn);
                     else    snprintf(nb, sizeof(nb), "P%d", slot + 1);
                 } else {
-                    snprintf(nb, sizeof(nb), "CPU");
+                    snprintf(nb, sizeof(nb), "%s", TR("CPU"));
                 }
                 fe_draw_small_text((cc_name + sum_slide) * sx, y, nb, rc, sx, sy);
 
@@ -8076,18 +8080,21 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
         const uint32_t MAICOL = 0xFFE0E0E0u;  /* light grey = AI (non-highlight)     */
 
         /* NAME header — LEFT-aligned at the title edge (not centred). */
-        fe_draw_small_text((m_name + sum_slide) * sx, mh_mid * sy, "NAME", MHDR, sx, sy);
-        fe_draw_small_text(MP_CTR(m_car,  "CAR"),   mh_mid * sy, "CAR",   MHDR, sx, sy);
-        fe_draw_small_text(MP_CTR(m_time, "TIME"),  mh_mid * sy, "TIME",  MHDR, sx, sy);
-        fe_draw_small_text(MP_CTR(m_top,  "TOP"),   mh_top * sy, "TOP",   MHDR, sx, sy);
-        fe_draw_small_text(MP_CTR(m_top,  "SPEED"), mh_bot * sy, "SPEED", MHDR, sx, sy);
-        fe_draw_small_text(MP_CTR(m_avg,  "AVG"),   mh_top * sy, "AVG",   MHDR, sx, sy);
-        fe_draw_small_text(MP_CTR(m_avg,  "SPEED"), mh_bot * sy, "SPEED", MHDR, sx, sy);
-        fe_draw_small_text(MP_CTR(m_col,  col_hdr), mh_mid * sy, col_hdr, MHDR, sx, sy);
-        fe_draw_small_text(MP_CTR(m_air,  "AIR"),   mh_top * sy, "AIR",   MHDR, sx, sy);
-        fe_draw_small_text(MP_CTR(m_air,  "TIME"),  mh_bot * sy, "TIME",  MHDR, sx, sy);
-        if (mp_cup)
-            fe_draw_small_text(MP_CTR(m_pts, "POINTS"), mh_mid * sy, "POINTS", MHDR, sx, sy);
+        { const char *h_name = TR("NAME"), *h_car = TR("CAR"), *h_time = TR("TIME");
+          const char *h_top = TR("TOP"), *h_speed = TR("SPEED"), *h_avg = TR("AVG");
+          const char *h_air = TR("AIR"), *h_pts = TR("POINTS");
+          fe_draw_small_text((m_name + sum_slide) * sx, mh_mid * sy, h_name, MHDR, sx, sy);
+          fe_draw_small_text(MP_CTR(m_car,  h_car),   mh_mid * sy, h_car,   MHDR, sx, sy);
+          fe_draw_small_text(MP_CTR(m_time, h_time),  mh_mid * sy, h_time,  MHDR, sx, sy);
+          fe_draw_small_text(MP_CTR(m_top,  h_top),   mh_top * sy, h_top,   MHDR, sx, sy);
+          fe_draw_small_text(MP_CTR(m_top,  h_speed), mh_bot * sy, h_speed, MHDR, sx, sy);
+          fe_draw_small_text(MP_CTR(m_avg,  h_avg),   mh_top * sy, h_avg,   MHDR, sx, sy);
+          fe_draw_small_text(MP_CTR(m_avg,  h_speed), mh_bot * sy, h_speed, MHDR, sx, sy);
+          fe_draw_small_text(MP_CTR(m_col,  col_hdr), mh_mid * sy, col_hdr, MHDR, sx, sy);
+          fe_draw_small_text(MP_CTR(m_air,  h_air),   mh_top * sy, h_air,   MHDR, sx, sy);
+          fe_draw_small_text(MP_CTR(m_air,  h_time),  mh_bot * sy, h_time,  MHDR, sx, sy);
+          if (mp_cup)
+              fe_draw_small_text(MP_CTR(m_pts, h_pts), mh_mid * sy, h_pts, MHDR, sx, sy); }
 
         /* Separator between the column headers and the result rows — starts at the
          * end of the decorative title strip, slides in with the table. */
@@ -8120,7 +8127,7 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
                 if (pn) snprintf(buf, sizeof(buf), "%s", pn);
                 else    snprintf(buf, sizeof(buf), "P%d", slot + 1);
             } else {
-                snprintf(buf, sizeof(buf), "CPU");
+                snprintf(buf, sizeof(buf), "%s", TR("CPU"));
             }
             fe_draw_small_text((m_name + sum_slide) * sx, y, buf, row_color, sx, sy);
 
@@ -8212,18 +8219,20 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
     const uint32_t SELF  = 0xFFD9C50Cu;  /* gold/yellow = the local player row  */
     const uint32_t AICOL = 0xFFE0E0E0u;  /* light grey = AI (HS non-highlight)  */
 
-    fe_draw_small_text(SUM_CTR(c_name, "NAME"),       h_mid * sy, "NAME",       HDR, sx, sy);
-    fe_draw_small_text(SUM_CTR(c_time, "TIME"),       h_mid * sy, "TIME",       HDR, sx, sy);
-    fe_draw_small_text(SUM_CTR(c_top,  "TOP"),        h_top * sy, "TOP",        HDR, sx, sy);
-    fe_draw_small_text(SUM_CTR(c_top,  "SPEED"),      h_bot * sy, "SPEED",      HDR, sx, sy);
-    fe_draw_small_text(SUM_CTR(c_avg,  "AVG"),        h_top * sy, "AVG",        HDR, sx, sy);
-    fe_draw_small_text(SUM_CTR(c_avg,  "SPEED"),      h_bot * sy, "SPEED",      HDR, sx, sy);
-    {
-        const char *sp_col_hdr = battle ? "WRECKS" : "COLLISIONS";
+    { const char *hs_name = TR("NAME"), *hs_time = TR("TIME"), *hs_top = TR("TOP");
+      const char *hs_speed = TR("SPEED"), *hs_avg = TR("AVG"), *hs_air = TR("AIR");
+      fe_draw_small_text(SUM_CTR(c_name, hs_name),    h_mid * sy, hs_name,    HDR, sx, sy);
+      fe_draw_small_text(SUM_CTR(c_time, hs_time),    h_mid * sy, hs_time,    HDR, sx, sy);
+      fe_draw_small_text(SUM_CTR(c_top,  hs_top),     h_top * sy, hs_top,     HDR, sx, sy);
+      fe_draw_small_text(SUM_CTR(c_top,  hs_speed),   h_bot * sy, hs_speed,   HDR, sx, sy);
+      fe_draw_small_text(SUM_CTR(c_avg,  hs_avg),     h_top * sy, hs_avg,     HDR, sx, sy);
+      fe_draw_small_text(SUM_CTR(c_avg,  hs_speed),   h_bot * sy, hs_speed,   HDR, sx, sy);
+      {
+        const char *sp_col_hdr = battle ? TR("WRECKS") : TR("COLLISIONS");
         fe_draw_small_text(SUM_CTR(c_col, sp_col_hdr), h_mid * sy, sp_col_hdr, HDR, sx, sy);
-    }
-    fe_draw_small_text(SUM_CTR(c_air,  "AIR"),        h_top * sy, "AIR",        HDR, sx, sy);
-    fe_draw_small_text(SUM_CTR(c_air,  "TIME"),       h_bot * sy, "TIME",       HDR, sx, sy);
+      }
+      fe_draw_small_text(SUM_CTR(c_air,  hs_air),     h_top * sy, hs_air,     HDR, sx, sy);
+      fe_draw_small_text(SUM_CTR(c_air,  hs_time),    h_bot * sy, hs_time,    HDR, sx, sy); }
 
     /* Reference time for DNF pace-estimates: the winner's finish time. */
     int32_t winner_time = 0;

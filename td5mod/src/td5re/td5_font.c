@@ -47,7 +47,8 @@ static stbtt_fontinfo s_primary, s_fallback;
 static int            s_have_fb = 0;
 static unsigned char *s_primary_buf = NULL, *s_fallback_buf = NULL;
 static float          s_cap_primary = 1.0f, s_cap_fallback = 1.0f;
-static uint8_t        s_use_fb[128];        /* 1 = route codepoint to fallback */
+static uint8_t        s_use_fb[256];        /* 1 = route codepoint to fallback
+                                             * [I18N] covers Latin-1 accents too */
 
 /* Secondary HUD face (Rajdhani). Shares the atlas + glyph cache with the menu
  * face — collisions are avoided by tagging the cache key with the face id (see
@@ -102,7 +103,14 @@ static float cap_units(stbtt_fontinfo *fi)
 
 static void pick_font(int cp, stbtt_fontinfo **fi, float *cap)
 {
-    if (cp >= 0 && cp < 128 && s_use_fb[cp] && s_have_fb) {
+    if (cp >= 0 && cp < 256 && s_use_fb[cp] && s_have_fb) {
+        /* Missing or trial-watermarked in the menu face (detect_watermark now
+         * scans the full Latin-1 range, so accents route here too). */
+        *fi = &s_fallback; *cap = s_cap_fallback;
+    } else if (cp >= 256 && s_have_fb &&
+               stbtt_FindGlyphIndex(&s_primary, cp) == 0) {
+        /* [I18N] Out-of-table codepoints fall back per-glyph when truly
+         * missing, same scheme as pick_hud_font. */
         *fi = &s_fallback; *cap = s_cap_fallback;
     } else {
         *fi = &s_primary;  *cap = s_cap_primary;
@@ -120,11 +128,15 @@ static uint64_t fnv1a(const unsigned char *d, int n)
  * single repeated trial-watermark glyph) and route them to the fallback. */
 static void detect_watermark(void)
 {
-    static uint64_t hash[128];
+    /* [I18N 2026-07-21] Range extended 127 -> 256: MontBlanc Trial watermarks
+     * its accented Latin-1 glyphs too (Ñ/Á rendered as the "TRIAL FONT" mark
+     * in the es-AR menus), and those must route to the fallback the same way. */
+    static uint64_t hash[256];
     static unsigned char tmp[96 * 96];
     float scale = 28.0f / s_cap_primary;
-    for (int cp = 33; cp < 127; cp++) {
+    for (int cp = 33; cp < 256; cp++) {
         hash[cp] = 0;
+        if (cp >= 127 && cp < 0xA1) continue;   /* C1 controls: not glyphs */
         if (stbtt_FindGlyphIndex(&s_primary, cp) == 0) { s_use_fb[cp] = 1; continue; }
         int ix0, iy0, ix1, iy1;
         stbtt_GetCodepointBitmapBox(&s_primary, cp, scale, scale, &ix0, &iy0, &ix1, &iy1);
@@ -137,10 +149,10 @@ static void detect_watermark(void)
         hash[cp] = hh;
     }
     /* A watermark glyph maps onto many codepoints -> identical raster repeats. */
-    for (int cp = 33; cp < 127; cp++) {
+    for (int cp = 33; cp < 256; cp++) {
         if (!hash[cp]) continue;
         int n = 0;
-        for (int o = 33; o < 127; o++) if (hash[o] == hash[cp]) n++;
+        for (int o = 33; o < 256; o++) if (hash[o] == hash[cp]) n++;
         if (n >= 3) s_use_fb[cp] = 1;
     }
 }

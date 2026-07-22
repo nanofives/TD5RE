@@ -33,6 +33,7 @@
 #include "td5_credits.h"       /* SNK_CreditsText array + dev mugshot map (Extras scroll) */
 #include "td5_vectorui.h"      /* public VectorUI surface (HUD reuses these primitives) */
 #include "td5_font.h"          /* [S13] runtime TTF glyph cache (native menu text) */
+#include "td5_i18n.h"          /* [I18N] TR() runtime string translation */
 #include "td5_version.h"       /* build identity (version / channel / date / git rev) */
 #include "td5_changelog.h"     /* CHANGELOG screen content table (file-static here) */
 #include "td5_pending.h"       /* PENDING TO TEST checklist (list/state/overlay) */
@@ -1185,16 +1186,16 @@ static void mp_simul_draw_pane_button(int p, int which, float bx, float by,
     uint32_t pcol = ((uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu) | 0xFF000000u;
     switch (which) {
     case MP_BTN_CAR:
-        mp_simul_draw_btn(bx, by, bw, bh, "CAR", focus, pcol, 1, NULL, -1, sx, sy);
+        mp_simul_draw_btn(bx, by, bw, bh, TR("CAR"), focus, pcol, 1, NULL, -1, sx, sy);
         break;
     case MP_BTN_PAINT:
         if (td6 && frontend_car_paintable(car))
-            mp_simul_draw_btn(bx, by, bw, bh, "PAINT", focus, pcol, 1, NULL,
+            mp_simul_draw_btn(bx, by, bw, bh, TR("PAINT"), focus, pcol, 1, NULL,
                               s_mp_player_color[p], sx, sy);
         else if (!td6 && frontend_car_has_paint(car))
-            mp_simul_draw_btn(bx, by, bw, bh, "PAINT", focus, pcol, 1, NULL, -1, sx, sy);
+            mp_simul_draw_btn(bx, by, bw, bh, TR("PAINT"), focus, pcol, 1, NULL, -1, sx, sy);
         else
-            mp_simul_draw_btn(bx, by, bw, bh, "PAINT", focus, pcol, 0, "-", -1, sx, sy);
+            mp_simul_draw_btn(bx, by, bw, bh, TR("PAINT"), focus, pcol, 0, "-", -1, sx, sy);
         break;
     case MP_BTN_OK:
         mp_simul_draw_btn(bx, by, bw, bh, "OK", focus, pcol, 0, NULL, -1, sx, sy);
@@ -1215,7 +1216,7 @@ static void mp_draw_pane_name_banner(int p, float px, float pyr, float pane_w,
     char buf[64];
     uint32_t rgb = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
     if (s_mp_player_name[p][0]) snprintf(buf, sizeof buf, "%s", s_mp_player_name[p]);
-    else                        snprintf(buf, sizeof buf, "PLAYER %d", p + 1);
+    else                        snprintf(buf, sizeof buf, TR("PLAYER %d"), p + 1);
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     fe_draw_quad((px + 3) * sx, (pyr + 3) * sy, (pane_w - 6) * sx, 16.0f * sy,
                  rgb | 0xD0000000u, -1, 0, 0, 1, 1);
@@ -1253,7 +1254,7 @@ void frontend_mp_simul_carsel_render(float sx, float sy) {
      * matching the fe_race overlays so the position-picker/profile chips line up. */
     float pane_w, row_x0 = 0.0f;
     frontend_mp_panel_capped(cols, &pane_w, &row_x0);
-    /* [R1] Reserve a top band for the "SELECT CAR" title so the panes start BELOW
+    /* [R1] Reserve a top band for the TR("SELECT CAR") title so the panes start BELOW
      * it instead of overlapping the title text.
      * [R4 2026-06-19] Raise to the shared FE_MP_TOP_BAND (85) to match every other
      * MP screen — the old 40px let the panes overlap the title + the background
@@ -1272,7 +1273,7 @@ void frontend_mp_simul_carsel_render(float sx, float sy) {
      * while s_mp_simul is set (the grid draws its own per-pane headers), so the
      * screen header is drawn here directly. */
     if (td5_titlefont_ready())
-        frontend_draw_screen_title("SELECT CAR", FE_TITLE_LEFT_X * sx, 17.0f * sy,
+        frontend_draw_screen_title(TR("SELECT CAR"), FE_TITLE_LEFT_X * sx, 17.0f * sy,
                                    0xFFE3D708u, sx, sy);
 
     for (p = 0; p < n; p++) {
@@ -1518,7 +1519,7 @@ void frontend_mp_simul_carsel_render(float sx, float sy) {
     if (s_mp_simul_ready_ms != 0) {
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
         fe_draw_quad(0.0f, 227.0f * sy, 640.0f * sx, 26.0f * sy, 0xC0103018u, -1, 0, 0, 1, 1);
-        fe_draw_text_centered(320.0f * sx, 232.0f * sy, "ALL READY - STARTING...", 0xFFFFFF80u, sx, sy);
+        fe_draw_text_centered(320.0f * sx, 232.0f * sy, TR("ALL READY - STARTING..."), 0xFFFFFF80u, sx, sy);
     }
 
     /* [HOST CAR OPTIONS 2026-06-28] Bottom hint telling the host (slot 0) how to
@@ -1565,7 +1566,7 @@ void frontend_mp_simul_carsel_render(float sx, float sy) {
                 fe_draw_quad((px0 + 8.0f) * sx, ry * sy, (pw - 16.0f) * sx, 24.0f * sy,
                              argb | 0xC0000000u, -1, 0, 0, 1, 1);
             }
-            mp_simul_small_centered_fit(320.0f * sx, (ry + 5.0f) * sy, k_host_opt[r],
+            mp_simul_small_centered_fit(320.0f * sx, (ry + 5.0f) * sy, td5_tr(k_host_opt[r]),
                                         r == s_mp_host_menu_sel ? 0xFFFFFFFFu : 0xFFB8C2D0u,
                                         sx, sy, (pw - 28.0f) * sx);
         }
@@ -1727,7 +1728,7 @@ void frontend_mp_position_render(float sx, float sy) {
      * case). The full-screen 0xC0101018 darkening scrim is removed here too so this
      * fallback can't reintroduce the dim if ever re-pointed. */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    fe_draw_text_centered(320.0f * sx, 10.0f * sy, "CHOOSE YOUR SCREEN", 0xFFFFE060u, sx, sy);
+    fe_draw_text_centered(320.0f * sx, 10.0f * sy, TR("CHOOSE YOUR SCREEN"), 0xFFFFE060u, sx, sy);
 
     /* Layout grid occupies a centred area below the title, above the footer. */
     {
@@ -1767,7 +1768,7 @@ void frontend_mp_position_render(float sx, float sy) {
 
             if (occ >= 0) {
                 if (s_mp_player_name[occ][0]) snprintf(buf, sizeof buf, "%s", s_mp_player_name[occ]);
-                else                          snprintf(buf, sizeof buf, "PLAYER %d", occ + 1);
+                else                          snprintf(buf, sizeof buf, TR("PLAYER %d"), occ + 1);
                 mp_simul_small_centered(ccx * sx, (py + ch * 0.30f + 26.0f) * sy, buf,
                                         rgb | 0xFF000000u, sx, sy);
                 mp_simul_small_centered(ccx * sx, (py + ch * 0.30f + 40.0f) * sy,
@@ -1787,17 +1788,17 @@ void frontend_mp_position_render(float sx, float sy) {
         int lcnt = 1;
         const MpSplitLayout *opts = mp_split_layouts(n, &lcnt);
         char lbuf[64];
-        const char *lname = (opts && s_mp_layout_sel >= 0 && s_mp_layout_sel < lcnt)
-                            ? opts[s_mp_layout_sel].label : "SINGLE";
+        const char *lname = td5_tr((opts && s_mp_layout_sel >= 0 && s_mp_layout_sel < lcnt)
+                            ? opts[s_mp_layout_sel].label : "SINGLE");
         if (lcnt > 1)
-            snprintf(lbuf, sizeof lbuf, "P1 L/R: LAYOUT  [%s]", lname);
+            snprintf(lbuf, sizeof lbuf, TR("P1 L/R: LAYOUT  [%s]"), lname);
         else
-            snprintf(lbuf, sizeof lbuf, "LAYOUT: %s", lname);
+            snprintf(lbuf, sizeof lbuf, TR("LAYOUT: %s"), lname);
         fe_draw_text_centered(320.0f * sx, 426.0f * sy,
-                              "D-PAD: MOVE   A: READY   B: BACK", 0xFFFFFFFFu, sx, sy);
+                              TR("D-PAD: MOVE   A: READY   B: BACK"), 0xFFFFFFFFu, sx, sy);
         mp_simul_small_centered(320.0f * sx, 450.0f * sy, lbuf, 0xFFFFE060u, sx, sy);
         if (all_ready)
-            mp_simul_small_centered(320.0f * sx, 464.0f * sy, "ALL READY - STARTING CARS...",
+            mp_simul_small_centered(320.0f * sx, 464.0f * sy, TR("ALL READY - STARTING CARS..."),
                                     0xFF80FF80u, sx, sy);
     }
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
@@ -1822,7 +1823,7 @@ void frontend_mp_setup_render(float sx, float sy) {
      * overlays (640/3 cap), so the name/colour row lines up underneath them. */
     float pane_w, row_x0 = 0.0f;
     frontend_mp_panel_capped(cols, &pane_w, &row_x0);
-    /* [R1] Reserve a top band for the "PROFILE SELECTION" title so the panes start
+    /* [R1] Reserve a top band for the TR("PROFILE SELECTION") title so the panes start
      * BELOW it instead of overlapping the title text.
      * [R3-2 2026-06-19] The panes were still spanning all the way to y=480, so they
      * reached into the background art's lower text lines and sat tight under the
@@ -1855,7 +1856,7 @@ void frontend_mp_setup_render(float sx, float sy) {
     /* [#18a] Standard top title (Lunatica face) so the setup step matches every
      * other menu's header. */
     if (td5_titlefont_ready())
-        frontend_draw_screen_title("PROFILE SELECTION", FE_TITLE_LEFT_X * sx, 17.0f * sy,
+        frontend_draw_screen_title(TR("PROFILE SELECTION"), FE_TITLE_LEFT_X * sx, 17.0f * sy,
                                    0xFFE3D708u, sx, sy);
 
     for (p = 0; p < n; p++) {
@@ -1952,17 +1953,17 @@ void frontend_mp_setup_render(float sx, float sy) {
             float yy = bsy;
             if (bh < 12.0f) bh = 12.0f;
             if (bh > 26.0f) bh = 26.0f;
-            mp_simul_draw_btn(bx, yy, bw, bh, "NAME", focus == MP_SET_NAME, pcol, 0,
+            mp_simul_draw_btn(bx, yy, bw, bh, TR("NAME"), focus == MP_SET_NAME, pcol, 0,
                               s_mp_player_name[p][0] ? s_mp_player_name[p] : "-", -1, sx, sy);
             yy += bh + 3.0f;
-            mp_simul_draw_btn(bx, yy, bw, bh, "COLOUR", focus == MP_SET_COLOUR, pcol, 0,
+            mp_simul_draw_btn(bx, yy, bw, bh, TR("COLOUR"), focus == MP_SET_COLOUR, pcol, 0,
                               NULL, s_mp_player_accent[p], sx, sy);
             /* PROFILE (slot 2, profiles-on only) is drawn by frontend_mp_setup_profile_render. */
             yy = bsy + (float)trans_slot * (bh + 3.0f);
-            mp_simul_draw_btn(bx, yy, bw, bh, s_mp_player_trans[p] ? "MANUAL" : "AUTOMATIC",
+            mp_simul_draw_btn(bx, yy, bw, bh, s_mp_player_trans[p] ? TR("MANUAL") : TR("AUTOMATIC"),
                               focus == MP_SET_TRANS, pcol, 0, NULL, -1, sx, sy);
             yy += bh + 3.0f;
-            mp_simul_draw_btn(bx, yy, bw, bh, s_mp_player_laneassist[p] ? "ASSIST ON" : "ASSIST OFF",
+            mp_simul_draw_btn(bx, yy, bw, bh, s_mp_player_laneassist[p] ? TR("ASSIST ON") : TR("ASSIST OFF"),
                               focus == MP_SET_LANEASSIST, pcol, 0, NULL, -1, sx, sy);
             yy = bsy + (float)(slots - 1) * (bh + 3.0f);
             mp_simul_draw_btn(bx, yy, bw, bh, "OK", focus == MP_SET_OK, pcol, 0, NULL, -1, sx, sy);
@@ -1972,7 +1973,7 @@ void frontend_mp_setup_render(float sx, float sy) {
     if (s_mp_simul_ready_ms != 0) {
         td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
         fe_draw_quad(0.0f, 227.0f * sy, 640.0f * sx, 26.0f * sy, 0xC0103018u, -1, 0, 0, 1, 1);
-        fe_draw_text_centered(320.0f * sx, 232.0f * sy, "ALL READY - CHOOSE CARS...", 0xFFFFFF80u, sx, sy);
+        fe_draw_text_centered(320.0f * sx, 232.0f * sy, TR("ALL READY - CHOOSE CARS..."), 0xFFFFFF80u, sx, sy);
     }
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }

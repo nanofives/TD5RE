@@ -878,6 +878,13 @@ void Screen_ExtrasGallery(void);
  * the OPTIONS hub.
  * Screen_LanguageSelect / Screen_LegalCopyright RETIRED 2026-07-03 —
  * table slots [3]/[4] are NULL; set_screen redirects them to MAIN_MENU. */
+/* [I18N 2026-07-21] Shrink-to-fit horizontal scale for translated captions
+ * (td5_frontend.c; draw with (sx * fit, sy) to condense width-only). */
+float fe_fit_text_scale(const char *text, float avail_w, float sx, float sy);
+/* [I18N 2026-07-21] UI-language selector screen (td5_fe_menu.c) + its value
+ * overlay (drawn from the pre-button per-screen dispatch in td5_frontend.c). */
+void Screen_LanguageOptions(void);
+void frontend_render_language_options_overlay(float sx, float sy);
 void Screen_LocalizationInit(void);
 void Screen_MainMenu(void);
 void Screen_MusicTestExtras(void);
