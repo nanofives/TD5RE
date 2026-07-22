@@ -47,7 +47,9 @@ def main() -> int:
         try:
             res = subprocess.run([sys.executable, str(script)],
                                  cwd=str(REPO_ROOT), timeout=PER_SCENARIO_TIMEOUT)
-            status = "PASS" if res.returncode == 0 else "FAIL"
+            # exit codes: 0=PASS, 3=CRASH (game faulted, see _lib CRASH_EXIT),
+            # anything else = assertion FAIL.
+            status = {0: "PASS", 3: "CRASH"}.get(res.returncode, "FAIL")
         except subprocess.TimeoutExpired:
             status = "TIMEOUT"
         rows.append((script.stem, status, time.time() - t0))

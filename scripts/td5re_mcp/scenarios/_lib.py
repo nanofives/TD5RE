@@ -32,6 +32,8 @@ GAMETYPE_DRAG_RACE = 9
 STATE_MENU = 1
 STATE_RACE = 2
 
+CRASH_EXIT = 3          # run_all.py maps this to a distinct CRASH status
+
 
 class Scenario:
     """Launch/attach + check-accumulator + teardown for one scenario run."""
@@ -52,9 +54,70 @@ class Scenario:
             self._owns_proc = True
             print(f"[{name}] launched pid={info.get('pid')}")
 
+    # -- crash detection ----------------------------------------------------
+    def _engine_crash_line(self) -> Optional[str]:
+        """Last 'CRASH:' line from THIS launch's engine.log (truncated per
+        launch, so any CRASH line belongs to the current instance)."""
+        log = REPO_ROOT / "log" / "engine.log"
+        try:
+            lines = log.read_text(errors="ignore").splitlines()
+        except OSError:
+            return None
+        for ln in reversed(lines):
+            if "CRASH:" in ln and "code=" in ln:
+                return ln.strip()
+        return None
+
+    def _detect_crash(self) -> Optional[str]:
+        """Crash summary if THIS instance crashed, else None. A CRASH line is
+        definitive; an abnormal (non-zero) process exit corroborates it
+        (TD5RE_NO_DIALOG makes a fault TerminateProcess with the AV code)."""
+        line = self._engine_crash_line()
+        if line:
+            return line
+        if self.proc is not None:
+            rc = self.proc.poll()
+            if rc is not None and rc != 0:
+                return f"process exited abnormally (code 0x{rc & 0xffffffff:08X})"
+        return None
+
+    def _report_crash(self, during: str) -> None:
+        """Report a CRASH (not a silent pass / bare traceback) and snapshot the
+        forensics BEFORE the next launch rotates crash.log away, then exit
+        CRASH_EXIT so run_all classifies it distinctly."""
+        summary = self._detect_crash() or "unknown"
+        print(f"[{self.name}] CRASH during '{during}': {summary}")
+        EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        for src_rel in ("log/crash.log", "log/engine.log"):
+            src = REPO_ROOT / src_rel
+            if not src.exists():
+                continue
+            try:
+                data = src.read_text(errors="ignore")
+                if src.name == "engine.log":        # keep only the tail
+                    data = "\n".join(data.splitlines()[-200:])
+                dst = EVIDENCE_DIR / f"{self.name}_crash_{ts}_{src.name}"
+                dst.write_text(data)
+                print(f"[{self.name}]   saved {dst}")
+            except OSError:
+                pass
+        try:                                        # free the port (PID-scoped)
+            if self.proc is not None and self.proc.poll() is None:
+                self.proc.kill()
+        except Exception:
+            pass
+        self.client.close()
+        sys.exit(CRASH_EXIT)
+
     # -- driving helpers ----------------------------------------------------
     def cmd(self, cmd: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self.client.command(cmd, args)
+        try:
+            return self.client.command(cmd, args)
+        except ControlError:
+            if self._detect_crash():
+                self._report_crash(cmd)
+            raise
 
     def end_race_best_effort(self, menu_timeout: float = 45.0) -> None:
         """Cleanup teardown that never turns a lost socket into a traceback.
@@ -74,6 +137,10 @@ class Scenario:
         try:
             return self.client.command("get_state")
         except ControlError:
+            # A crash surfaces here first (wait_until polls state); report it
+            # promptly instead of silently timing out as a FAIL.
+            if self._detect_crash():
+                self._report_crash("get_state")
             return {"ok": False, "game_state": -1}
 
     def wait_until(self, pred: Callable[[Dict[str, Any]], bool], timeout: float,

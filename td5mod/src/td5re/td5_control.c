@@ -167,6 +167,17 @@ static void cs_apply(const CtrlScenario *s)
     if (s->player_is_ai != CS_UNSET) g_td5.ini.player_is_ai      = s->player_is_ai;
     g_td5.ini.auto_throttle = (s->auto_throttle != CS_UNSET) ? s->auto_throttle : 1;
     g_td5.ini.auto_race = 1;   /* MENU state consumes this next frame */
+
+    /* [CRASH DIAG 2026-07-22] Name the scene in the GPU crash breadcrumb so a
+     * driver fault during an MCP-driven race records diag_context="mcp-race
+     * trk=N gt=M" instead of "(none)" (selftest sets its own per-step context;
+     * MCP races had none). Cosmetic string only; never read by the sim. */
+    {
+        char ctx[64];
+        snprintf(ctx, sizeof(ctx), "mcp-race trk=%d gt=%d",
+                 g_td5.ini.default_track, g_td5.ini.default_game_type);
+        td5_plat_set_diag_context(ctx);
+    }
 }
 
 /* ------------------------------------------------------------------------
@@ -519,6 +530,18 @@ static void ctrl_exec(cJSON *req, cJSON *reply)
         g_td5.quit_requested = 1;   /* main loop exits -> clean shutdown + log flush */
         cJSON_AddBoolToObject(reply, "ok", 1);
         return;
+    }
+
+    if (strcmp(cmd, "force_crash") == 0) {
+        /* DEV-only fault injection: trip the SEH crash handler on the main
+         * thread (null write -> 0xC0000005) so the crash-capture path
+         * (crash.log forensics + the scenario harness's CRASH detection) can
+         * be validated deterministically without waiting for an organic GPU
+         * fault. No reply is sent — the caller sees the socket go silent as
+         * the process crashes, which is exactly the signal under test.
+         * Compiled out of RELEASE with the rest of this module. */
+        *(volatile int *)0 = 0;
+        return;   /* unreachable */
     }
 
     ctrl_err(reply, "unknown cmd");

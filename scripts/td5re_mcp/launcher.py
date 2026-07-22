@@ -7,6 +7,7 @@ Stdlib only.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -19,18 +20,26 @@ GAME_EXE = REPO_ROOT / "td5re.exe"          # DEV build (has the control surface
 
 
 def launch(extra_args: str = "", wait_seconds: float = 20.0,
-           client: Optional[GameClient] = None
+           client: Optional[GameClient] = None, no_dialog: bool = True
            ) -> Tuple[Optional[subprocess.Popen], Dict[str, Any]]:
     """Start td5re.exe --Control=1 --SkipIntro=1 and wait for it to answer
     ping. Returns (proc, info): info carries ok/pid/ping or ok:false+error;
-    proc is None only when the exe was missing."""
+    proc is None only when the exe was missing.
+
+    no_dialog=True (default) sets TD5RE_NO_DIALOG so a crash TERMINATES the
+    process (crash.log is still written first) instead of wedging alive on a
+    modal "TD5RE Crash" box — essential for automated runs, where a blocking
+    dialog would hang the whole suite and no one is there to click OK."""
     if not GAME_EXE.exists():
         return None, {"ok": False,
                       "error": f"{GAME_EXE} not found (build the DEV target first)"}
     argv = [str(GAME_EXE), "--Control=1", "--SkipIntro=1"]
     if extra_args.strip():
         argv += extra_args.split()
-    proc = subprocess.Popen(argv, cwd=str(REPO_ROOT))
+    env = dict(os.environ)
+    if no_dialog:
+        env["TD5RE_NO_DIALOG"] = "1"
+    proc = subprocess.Popen(argv, cwd=str(REPO_ROOT), env=env)
     own_client = client is None
     c = client or GameClient()
     try:

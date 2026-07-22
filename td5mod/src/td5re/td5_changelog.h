@@ -45,6 +45,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  loads without crashing, the game survives a forced" },
     { CL_ITEM,    "  GPU reset, city time trials no longer end instantly," },
     { CL_ITEM,    "  and power-ups stay out of SIMULATION races." },
+    { CL_ITEM,    "DEV: the test harness now catches game crashes instead" },
+    { CL_ITEM,    "  of hiding them - it saves the crash report and marks" },
+    { CL_ITEM,    "  the run CRASHED; GPU crash logs now name the scene." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 21" },
