@@ -75,4 +75,11 @@ int  td5_replay_frame_count(void);
  * nothing was recorded. */
 int  td5_replay_playback_at_end(uint32_t sim_tick);
 
+/* [REPLAY WRECK SMOKE 2026-07-22] Recorded per-actor wreck/damage state for the
+ * frame posed on the current tick, so the render loop can reproduce the wreck
+ * plume + tiered damage smoke that the (skipped) sim would normally drive.
+ * Both return 0 outside a ghost replay / for an out-of-range slot. */
+int  td5_replay_actor_broken(int slot);       /* 1 = broken-down that frame */
+int  td5_replay_actor_smoke_tier(int slot);   /* 0..3 damage smoke tier      */
+
 #endif /* TD5_REPLAY_H */

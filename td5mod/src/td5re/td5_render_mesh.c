@@ -29,6 +29,7 @@
 #include "td5_vfx.h"
 #include "td5_arcade.h"   /* ARCADE power-up pad / hazard world billboards */
 #include "td5_damage.h"   /* [CAR DAMAGE] per-vertex deformation deltas */
+#include "td5_replay.h"   /* [REPLAY SMOKE] recorded wreck/damage-smoke state */
 #include "td5_ai.h"
 #include "td5_light.h"    /* [DYNAMIC LIGHTS] world-space point-light registry */
 #include "td5_light2.h"   /* [LIGHT2] lighting rework mode knob */
@@ -929,6 +930,43 @@ int td5_render_test_mesh_frustum(TD5_MeshHeader *mesh, float *out_depth)
         *out_depth = vz;
 
     return 1;
+}
+
+/* [REPLAY SHADOW 2026-07-22] Does this actor's BODY pass the same view-frustum
+ * test the body loop applies (td5_render_test_mesh_frustum)? The shadow pre-pass
+ * deliberately SKIPS that test ("a ground shadow for a car just past the body-
+ * frustum edge is harmless") -- fine under a chase cam, but the far, wide
+ * trackside cinematic camera used during a View Replay made it read as "shadows
+ * of traffic that isn't on screen" (the recorded car's body is frustum-culled
+ * while its ground shadow still draws). Mirror the body loop's transform build
+ * + frustum test so a REPLAY shadow only draws when the body will. Called only
+ * on g_replay_mode so the intentional near-edge shadow behaviour in normal play
+ * is untouched. Returns 1 (draw the shadow) when data is missing. */
+static int replay_actor_body_in_frustum(const TD5_Actor *a, TD5_MeshHeader *mesh)
+{
+    TD5_Mat3x3 view_rot;
+    TD5_Vec3f  render_pos;
+    float depth;
+    if (!a || !mesh) return 1;
+    /* Replay zeroes all velocities, so the body loop's sub-tick extrapolation is
+     * a no-op -> render position is just world_pos / 256. */
+    render_pos.x = (float)a->world_pos.x * (1.0f / 256.0f);
+    render_pos.y = (float)a->world_pos.y * (1.0f / 256.0f);
+    render_pos.z = (float)a->world_pos.z * (1.0f / 256.0f);
+    if (a->vehicle_mode != 0) {
+        mat3x3_mul(s_camera_basis, a->rotation_matrix.m, view_rot.m);
+    } else {
+        float interp_mat[9];
+        short interp[3];
+        interp[0] = a->display_angles.roll;
+        interp[1] = a->display_angles.yaw;
+        interp[2] = a->display_angles.pitch;
+        BuildRotationMatrixFromAngles(interp_mat, interp);
+        mat3x3_mul(s_camera_basis, interp_mat, view_rot.m);
+    }
+    td5_render_load_rotation(&view_rot);
+    td5_render_load_translation(&render_pos);
+    return td5_render_test_mesh_frustum(mesh, &depth);
 }
 
 /* ---------------------------------------------------------------------------
@@ -2341,6 +2379,13 @@ void td5_render_actors_for_view(int view_index)
                             continue;   /* span-distance cull (mirrors body loop) */
                     }
                 }
+                /* [REPLAY SHADOW 2026-07-22] Suppress the shadow of a recorded
+                 * car whose body the frustum would cull -- the trackside replay
+                 * camera otherwise shows "shadows of traffic that isn't on
+                 * screen". Replay-only (see replay_actor_body_in_frustum). */
+                if (g_replay_mode &&
+                    !replay_actor_body_in_frustum(sa, td5_render_get_vehicle_mesh(slot)))
+                    continue;
                 td5_render_set_actor_draw_alpha(shadow_fade);
                 render_vehicle_shadow_quad(sa);
                 td5_render_set_actor_draw_alpha(255);
@@ -2888,7 +2933,12 @@ void td5_render_actors_for_view(int view_index)
              * a chased racer / the player is also flagged broken-down to END the
              * chase on a hard crash, but the player should NOT smoke for it (that
              * read as "smoke on my own car"). Only traffic/cops get the smoke. */
-            int broken_smoke_ok = !is_racer && td5_ai_actor_is_broken_down(slot);
+            /* [REPLAY SMOKE 2026-07-22] A ghost replay skips the sim, so
+             * g_actor_broken_down[] resets and wrecks stop smoking. Read the
+             * flag recorded per tick during the live race instead. */
+            int broken_smoke_ok = !is_racer &&
+                (g_replay_mode ? td5_replay_actor_broken(slot)
+                               : td5_ai_actor_is_broken_down(slot));
             /* [MP COP CHASE ARREST SMOKE 2026-06-24] A fully-arrested suspect (its
              * wanted damage drained to 0) smokes prominently — the dense roof-lifted
              * WRECK plume — so the busted car visibly reads as caught. The broken-down
@@ -2940,8 +2990,15 @@ void td5_render_actors_for_view(int view_index)
                  * the cop-chase plumes above. No-op when CarDamage is off or the
                  * car is undamaged; vfx_spawn_damage_smoke respects the 100-slot
                  * per-view particle budget. */
-                if (td5_damage_enabled()) {
-                    int dtier = td5_damage_smoke_tier(slot);
+                {
+                    /* [REPLAY SMOKE 2026-07-22] On a ghost replay the hidden
+                     * damage-health meter is reset (sim skipped), so read the
+                     * tier recorded per tick during the live race instead of
+                     * recomputing it. Live play keeps the CarDamage gate. */
+                    int dtier = g_replay_mode
+                                    ? td5_replay_actor_smoke_tier(slot)
+                                    : (td5_damage_enabled()
+                                           ? td5_damage_smoke_tier(slot) : 0);
                     if (dtier > 0)
                         td5_vfx_spawn_damage_smoke(actor, dtier);
                 }

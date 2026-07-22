@@ -9,6 +9,7 @@
 #include "td5_platform.h"       /* TD5_LOG_* */
 #include "td5_race_state.h"     /* td5_game_get_actor, td5_game_get_total_actor_count */
 #include "td5_ai.h"             /* td5_ai_traffic_get_draw_alpha, td5_ai_traffic_replay_force */
+#include "td5_damage.h"         /* td5_damage_smoke_tier (recorded for replay smoke) */
 #include "td5_config.h"         /* td5_env_flag_on */
 #include "td5_replay.h"
 #include "../../../re/include/td5_actor_struct.h"  /* TD5_Actor field layout */
@@ -57,6 +58,13 @@ typedef struct {
     uint8_t           current_gear;         /* +0x36B */
     uint8_t           brake_flag;           /* +0x36D */
     uint8_t           handbrake_flag;       /* +0x36E */
+    /* [REPLAY WRECK SMOKE 2026-07-22] The wreck plume + tiered damage smoke are
+     * driven by live sim state (g_actor_broken_down[] / the hidden damage-health
+     * meter). A ghost replay SKIPS the sim, so that state resets to 0 and broken
+     * cars stop smoking on playback. Record the derived flags per tick and let
+     * the render smoke dispatch read them back during replay. */
+    uint8_t           broken_down;          /* td5_ai_actor_is_broken_down(slot) */
+    uint8_t           damage_tier;          /* td5_damage_smoke_tier(slot) 0..3 */
     uint8_t           _pad;
 } TD5_ReplaySnap;
 
@@ -70,6 +78,25 @@ static int             s_frame_count;       /* frames captured */
 static int             s_frame_capacity;    /* frames allocated */
 static int             s_recording;         /* armed for record this race */
 static int             s_capped_logged;     /* one-shot cap warning */
+
+/* [REPLAY WRECK SMOKE 2026-07-22] The frame posed on the current tick + its
+ * actor count, so td5_replay_actor_broken / _smoke_tier can hand the recorded
+ * wreck/damage state back to the render smoke dispatch (the sim that produces
+ * it live is skipped during a ghost replay). Set each tick in pose_tick. */
+static const TD5_ReplaySnap *s_pose_frame;
+static int                    s_pose_count;
+
+int td5_replay_actor_broken(int slot)
+{
+    if (!s_pose_frame || slot < 0 || slot >= s_pose_count) return 0;
+    return s_pose_frame[slot].broken_down;
+}
+
+int td5_replay_actor_smoke_tier(int slot)
+{
+    if (!s_pose_frame || slot < 0 || slot >= s_pose_count) return 0;
+    return s_pose_frame[slot].damage_tier;
+}
 
 int td5_replay_ghost_enabled(void)
 {
@@ -124,6 +151,8 @@ void td5_replay_begin_record(void)
     s_frame_capacity = 0;
     s_frame_count = 0;
     s_capped_logged = 0;
+    s_pose_frame = NULL;
+    s_pose_count = 0;
     s_recording = 1;
     TD5_LOG_I(LOG_TAG, "recording begin: actors/frame=%d", s_actor_count);
 }
@@ -154,6 +183,8 @@ static void replay_capture_actor(TD5_ReplaySnap *dst, const TD5_Actor *a, int sl
     dst->current_gear       = a->current_gear;
     dst->brake_flag         = a->brake_flag;
     dst->handbrake_flag     = a->handbrake_flag;
+    dst->broken_down        = (uint8_t)(td5_ai_actor_is_broken_down(slot) ? 1 : 0);
+    { int t = td5_damage_smoke_tier(slot); dst->damage_tier = (uint8_t)(t < 0 ? 0 : (t > 3 ? 3 : t)); }
     dst->_pad               = 0;
     dst->track_span_raw         = a->track_span_raw;
     dst->track_span_normalized  = a->track_span_normalized;
@@ -254,6 +285,10 @@ void td5_replay_pose_tick(uint32_t sim_tick)
 
     count = td5_game_get_total_actor_count();
     if (count > s_actor_count) count = s_actor_count;
+    /* Publish this frame so the render smoke dispatch can read the recorded
+     * broken-down / damage-tier state back (see td5_replay_actor_broken). */
+    s_pose_frame = frame;
+    s_pose_count = count;
     for (slot = 0; slot < count; slot++) {
         TD5_Actor *a = td5_game_get_actor(slot);
         if (!a) continue;

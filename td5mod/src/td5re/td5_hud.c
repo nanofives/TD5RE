@@ -8042,6 +8042,9 @@ static float hud_damage_bar_scale(const TD5_HudViewLayout *vl)
 static float hud_top_center_shift_y(int view_index)
 {
     if (!td5_damage_bar_enabled()) return 0.0f;
+    /* [REPLAY 2026-07-22] The bar is suppressed during a View Replay, so
+     * top-centre HUD elements reclaim the space instead of dropping below it. */
+    if (g_replay_mode) return 0.0f;
     if (view_index < 0 || view_index >= MAX_HUD_VIEWS) return 0.0f;
     return 24.0f * hud_damage_bar_scale(&s_view_layout[view_index]);
 }
@@ -8061,6 +8064,7 @@ static void hud_draw_player_damage_bar(int player_slot, int view_index)
      * disabled (see td5_damage_actor_knocked_out), so no bar should show. Global
      * toggle, drawn per pane -> every split-screen player gets the bar or none. */
     if (!td5_damage_bar_enabled()) return;
+    if (g_replay_mode) return;   /* [REPLAY 2026-07-22] no health bar during View Replay */
     if (view_index < 0 || view_index >= MAX_HUD_VIEWS) return;
     float h = td5_damage_health01(player_slot);
     if (h < 0.0f) return;                      /* uninitialized this race */
@@ -8154,6 +8158,7 @@ static void hud_draw_player_damage_bar(int player_slot, int view_index)
 void td5_hud_draw_damage_bars(void)
 {
     if (!td5_damage_bar_enabled()) return;
+    if (g_replay_mode) return;   /* [REPLAY 2026-07-22] no health bar during View Replay */
     int views = s_view_count;
     if (views < 1) views = 1;
     if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
