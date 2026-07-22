@@ -41,7 +41,12 @@ the agent-gate hook; `[local]` prefix forces local when execution is needed.)
 ## The burn-down loop (pending_to_test.csv)
 
 `td5mod/src/td5re/pending_to_test.csv` (`"summary","detail","status"`; rows
-with status `pending`/blank are open). Loop, batch of 10–15 rows per cycle:
+with status `pending`/blank are open). Loop, batch of 10–15 rows per cycle.
+
+The standing full classification lives in [TRIAGE_LEDGER.md](TRIAGE_LEDGER.md)
+(every open row → auto / auto-blocked / manual / covered-by-selftest, plus the
+per-cycle batch order). Read it first each cycle and update the affected rows
+in place rather than re-triaging the whole CSV from scratch.
 
 1. **Triage (worker, read-only).** Classify each open row:
    - `auto` — assertable today via control verbs + get_state/racers[]/logs.

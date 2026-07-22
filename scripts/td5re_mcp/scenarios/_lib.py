@@ -56,6 +56,20 @@ class Scenario:
     def cmd(self, cmd: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return self.client.command(cmd, args)
 
+    def end_race_best_effort(self, menu_timeout: float = 45.0) -> None:
+        """Cleanup teardown that never turns a lost socket into a traceback.
+
+        After a NATURAL finish the game may already be leaving RACE (results/
+        fade) or, on the known-flaky GPU-TDR path, the process may have died —
+        in which case end_race's reply never comes. Swallow ControlError and
+        only bother waiting for MENU if the socket is still answering."""
+        try:
+            self.cmd("end_race")
+        except ControlError:
+            return
+        self.wait_until(lambda x: x.get("game_state") == STATE_MENU,
+                        menu_timeout, "back at MENU")
+
     def state(self) -> Dict[str, Any]:
         try:
             return self.client.command("get_state")

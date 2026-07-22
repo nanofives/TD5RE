@@ -41,6 +41,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "DEV: two new automated test scenarios - police start" },
     { CL_ITEM,    "  chasing speeders (new per-car pursuit readout) and" },
     { CL_ITEM,    "  reverse-direction circuits complete their laps." },
+    { CL_ITEM,    "DEV: four more regression scenarios - Courmayeur" },
+    { CL_ITEM,    "  loads without crashing, the game survives a forced" },
+    { CL_ITEM,    "  GPU reset, city time trials no longer end instantly," },
+    { CL_ITEM,    "  and power-ups stay out of SIMULATION races." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 21" },

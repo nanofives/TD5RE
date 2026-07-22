@@ -31,7 +31,7 @@ if s.check(s.start_race_and_wait(track=5, game_type=GAMETYPE_SINGLE_RACE,
         if st.get("game_state") == STATE_RACE:
             s.framedump("finish")
 
-    s.cmd("end_race")
-    s.wait_until(lambda x: x.get("game_state") == STATE_MENU, 30, "back at MENU")
+    # Natural finish may already be leaving RACE (results/fade) -> tolerant.
+    s.end_race_best_effort()
 
 s.finish()

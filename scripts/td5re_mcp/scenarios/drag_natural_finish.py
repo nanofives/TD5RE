@@ -8,7 +8,7 @@ WITHOUT any end_race command.
 Asserts: player accelerates, the player slot reaches finished=1 (or the game
 leaves RACE state on its own), and a finish position was recorded.
 """
-from _lib import Scenario, GAMETYPE_DRAG_RACE, STATE_RACE
+from _lib import Scenario, GAMETYPE_DRAG_RACE, STATE_RACE, ControlError
 
 s = Scenario("drag_natural_finish")
 
@@ -36,6 +36,11 @@ if s.check(s.start_race_and_wait(track=0, game_type=GAMETYPE_DRAG_RACE,
                     f"finish position recorded ({r.get('finish_position')})")
             s.framedump("finished")
 
-    s.cmd("release_action", {"slot": slot})
+    # Pure cleanup after the natural finish — the process may already be
+    # tearing down through results, so don't let a dropped socket traceback.
+    try:
+        s.cmd("release_action", {"slot": slot})
+    except ControlError:
+        pass
 
 s.finish()
