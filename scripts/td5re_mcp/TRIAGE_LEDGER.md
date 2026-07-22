@@ -70,6 +70,19 @@ grown, so match rows by summary text, not line number.)
   eff_cap when racers rebunch (cap gates SPAWN, not despawn) — assert
   on_road<=pool, not <=eff_cap. Also incidentally survived ~70 actors (one
   clean pass; one run hit the environmental teardown TDR under that load).
+- **Cycle 6 (done, @<this commit>):** 86 (arcade NITRO → `nitro_topspeed.py`)
+  and 158 (cop leash → `cop_leash.py`) — both NO code change:
+  - **86**: NITRO (arcade_effect==1) raises the top-speed cap to 150%
+    (td5_arcade_slot_topspeed_pct). Arcade race, TD5RE_ARCADE_NITRO_FRAMES=600
+    for a long observable window; assert fastest speed UNDER NITRO clearly
+    exceeds the fleet's no-power-up top speed (nitro ~985-993 > baseline ~793,
+    stable). The speed-trail itself is visual (unobservable).
+  - **158**: cop abandons a chase when |gap| > cop_chase_max_gap()
+    (TD5RE_COP_CHASE_GAP, default 110 spans), logging `cop_chase END (too far):
+    ... gap=N` to race.log. Two launches contrast SHORT(30) vs LONG(110): SHORT
+    gives up ~17-19x at gap ~56-60; LONG gives up 1-3x at gap ~111 (== the
+    leash) and stays pursued 52-60% vs 28-36%. Mechanism-driven, big margins.
+  Remaining `auto`: 160 (drag MP — needs MP lobby setup; humans-only, no AI).
   **Reclassified `auto` → `auto-blocked` (the `auto` call was optimistic — the
   claim isn't observable through the current control surface):**
   - **19** frame cap → needs a present-rate / present_count readout in
