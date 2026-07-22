@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import time
 from typing import Any, Dict, Optional
 
 
@@ -78,6 +79,14 @@ class GameClient:
                     # else: stale/mismatched id -> keep reading until timeout
             except socket.timeout as exc:
                 last_exc = exc
+                continue
+            except ConnectionResetError as exc:
+                # Windows: sending to a port with no listener yet returns an
+                # ICMP port-unreachable, surfaced here as WSAECONNRESET (10054).
+                # Happens while the game is still booting (socket not bound).
+                # Treat as "no reply yet" and retry rather than crashing.
+                last_exc = exc
+                time.sleep(0.1)
                 continue
         raise ControlError(
             f"no reply to '{cmd}' after {self.retries + 1} tries "
