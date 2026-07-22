@@ -255,11 +255,9 @@ int  s_mp_missing_content[2] = { 0, 0 };
 int  s_mp_player_cell[TD5_MAX_HUMAN_PLAYERS] = { 0, 1, 2, 3, 4, 5, 6, 7, 8 };
 /* Dynamic button-index bookkeeping for the rebuilt Multiplayer Options rows
  * (the row set changes with the player count, so buttons are rebuilt live). */
-int  s_mp_btn_players   = -1;
 int  s_mp_btn_layout    = -1;
 int  s_mp_btn_missing[2] = { -1, -1 };
 int  s_mp_btn_nickname  = -1;    /* S10: edit net-play nickname (below split rows) */
-int  s_mp_btn_netmode   = -1;    /* [NET OPTIONS 2026-07-21] NET MODE (LAN/DIRECT) toggle */
 int  s_mp_btn_port      = -1;    /* [NET OPTIONS 2026-07-21] GAME PORT (enter-to-edit) */
 int  s_mp_btn_upnp      = -1;    /* [NET OPTIONS 2026-07-21] UPNP toggle */
 int  s_mp_missing_count = 0;
@@ -5169,10 +5167,21 @@ int td5_frontend_display_loop(void) {
             if (s_return_screen >= 0 &&
                 s_return_screen < TD5_SCREEN_COUNT &&
                 s_return_screen != s_current_screen) {
+                /* [OPTIONS BACK 2026-07-21] The options screens never confirm on
+                 * back — they change no in-race state, so the split-screen
+                 * "GO BACK?" prompt is just friction there; navigate immediately. */
+                int is_options_screen =
+                    (s_current_screen == TD5_SCREEN_OPTIONS_HUB ||
+                     s_current_screen == TD5_SCREEN_CONTROL_OPTIONS ||
+                     s_current_screen == TD5_SCREEN_SOUND_OPTIONS ||
+                     s_current_screen == TD5_SCREEN_DISPLAY_OPTIONS ||
+                     s_current_screen == TD5_SCREEN_TWO_PLAYER_OPTIONS ||
+                     s_current_screen == TD5_SCREEN_CONTROLLER_BINDING);
                 /* [splitscreen back-confirm] In split-screen, returning to the
                  * parent screen first raises the "GO BACK?" prompt; otherwise
-                 * (single-player / disabled) it navigates immediately, as before. */
-                if (!frontend_back_confirm_request(frontend_central_return_back))
+                 * (single-player / disabled / options) it navigates immediately. */
+                if (is_options_screen ||
+                    !frontend_back_confirm_request(frontend_central_return_back))
                     frontend_central_return_back();
             } else {
                 frontend_play_sfx(10);   /* nothing to go back to -> reject, no prompt */
@@ -6627,24 +6636,13 @@ static void frontend_render_music_test_overlay(float sx, float sy) {
 
 static void frontend_render_two_player_options_overlay(float sx, float sy) {
     /* [PORT ENHANCEMENT 2026-06] Multiplayer Options value column. Draws the
-     * current value for each dynamic row (PLAYERS, SPLIT LAYOUT, DISPLAY k,
-     * NICKNAME, and [2026-07-21] GAME PORT + UPNP) at the standard value-column X,
-     * aligned to each row's button Y. */
+     * current value for each dynamic row (SPLIT LAYOUT, DISPLAY k, NICKNAME, and
+     * [2026-07-21] GAME PORT + UPNP) at the standard value-column X, aligned to
+     * each row's button Y. ([2026-07-21] PLAYERS + NET MODE + CATCHUP rows were
+     * removed; each row below self-guards, so no shared early-out is needed.) */
     char buf[16];
 
     if (!s_anim_complete) return;
-
-    /* [title font 2026-06] The MULTIPLAYER sub-header was removed — this screen
-     * already shows the shared "OPTIONS" header at the top, so the extra
-     * orange "MULTIPLAYER" line below it was redundant. */
-
-    if (s_mp_btn_players < 0 || !s_buttons[s_mp_btn_players].active) return;
-
-    /* PLAYERS = N */
-    snprintf(buf, sizeof buf, "%d", s_num_human_players);
-    frontend_draw_value_centered(sx, sy, s_buttons[s_mp_btn_players].y + 6, buf, 0xFFFFFFFF);
-
-    /* [CATCHUP 2026-07-21] CATCHUP moved to RACE OPTIONS (MP modes). */
 
     /* SPLIT LAYOUT = current layout label */
     if (s_mp_btn_layout >= 0 && s_buttons[s_mp_btn_layout].active) {
@@ -6673,11 +6671,6 @@ static void frontend_render_two_player_options_overlay(float sx, float sy) {
                                      nick, 0xFFFFFFFF);
     }
 
-    /* [NET OPTIONS 2026-07-21] NET MODE = LAN (auto-discovery) / DIRECT IP. */
-    if (s_mp_btn_netmode >= 0 && s_buttons[s_mp_btn_netmode].active) {
-        frontend_draw_value_centered(sx, sy, s_buttons[s_mp_btn_netmode].y + 6,
-                                     g_td5.ini.net_mode ? "DIRECT IP" : "LAN", 0xFFFFFFFF);
-    }
     /* [NET OPTIONS 2026-07-21] GAME PORT = default port (the live edit buffer while
      * the Enter-to-edit numeric field is open), UPNP = ON / OFF. */
     if (s_mp_btn_port >= 0 && s_buttons[s_mp_btn_port].active) {
@@ -9684,14 +9677,12 @@ void td5_frontend_render_ui_rects(void) {
             /* [PORT ENHANCEMENT 2026-06] Multiplayer Options ◄►: PLAYERS always,
              * SPLIT LAYOUT only when >1 layout exists, plus each DISPLAY row.
              * (CATCHUP moved to RACE OPTIONS 2026-07-21.) */
-            if (s_mp_btn_players >= 0) fe_draw_option_arrows(s_mp_btn_players, sx, sy);
             if (s_mp_btn_layout >= 0 && s_mp_layout_optcount > 1)
                 fe_draw_option_arrows(s_mp_btn_layout, sx, sy);
             for (int i = 0; i < s_mp_missing_count && i < 2; i++)
                 if (s_mp_btn_missing[i] >= 0) fe_draw_option_arrows(s_mp_btn_missing[i], sx, sy);
-            /* [NET OPTIONS 2026-07-21] NET MODE + UPNP are ◄► toggles; GAME PORT +
-             * NICKNAME are Enter-to-edit (no arrows). */
-            if (s_mp_btn_netmode >= 0) fe_draw_option_arrows(s_mp_btn_netmode, sx, sy);
+            /* [NET OPTIONS 2026-07-21] UPNP is a ◄► toggle; GAME PORT + NICKNAME
+             * are Enter-to-edit (no arrows). (PLAYERS + NET MODE rows removed.) */
             if (s_mp_btn_upnp >= 0) fe_draw_option_arrows(s_mp_btn_upnp, sx, sy);
             break;
         case TD5_SCREEN_CAR_SELECTION:

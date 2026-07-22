@@ -1936,22 +1936,19 @@ static void mp_build_buttons(void)
     s_mp_missing_count = missing;
 
     frontend_reset_buttons();
-    s_mp_btn_players = s_mp_btn_layout = s_mp_btn_ok = -1;
+    s_mp_btn_layout = s_mp_btn_ok = -1;
     s_mp_btn_missing[0] = s_mp_btn_missing[1] = -1;
     s_mp_btn_nickname = -1;
-    s_mp_btn_netmode = s_mp_btn_port = s_mp_btn_upnp = -1;
+    s_mp_btn_port = s_mp_btn_upnp = -1;
 
     /* Rows are NON-selector buttons: the button renderer bakes their label (the
      * ◄► arrows are drawn by the per-screen dispatch, the value by the overlay).
      * This matches the Game/Sound/Display Options pattern; a real selector button
-     * suppresses its label, which would leave the row blank. */
+     * suppresses its label, which would leave the row blank.
+     * [2026-07-21] The PLAYERS row was removed (the human count is set by the
+     * press-to-join lobby / CHOOSE YOUR SCREEN flow); CATCHUP moved to RACE
+     * OPTIONS; NET MODE removed (the Connection Browser remembers LAN/DIRECT). */
     y = 77;
-    s_mp_btn_players = frontend_create_button(SNK_MpPlayersButTxt, 120, y, 0x100, 0x20);
-    y += 44;
-    /* [CATCHUP 2026-07-21] The CATCHUP (AI rubber-band assist) row moved to RACE
-     * OPTIONS (shown for MP modes) — it is a per-race option now, sitting with
-     * difficulty/opponents. td5_ai_get_catchup_level() still consumes the same
-     * td5_save catchup_assist byte, so behaviour is unchanged. */
     /* [#9] SPLIT LAYOUT selector + its empty-cell (DISPLAY k) rows are owned by
      * the MP "choose your screen" position screen now; default-on knob skips both
      * (s_mp_btn_layout / s_mp_btn_missing[] stay -1, missing is forced 0 above) so
@@ -1972,13 +1969,10 @@ static void mp_build_buttons(void)
      * the nickname-entry screen; the current nickname is shown as its value. */
     s_mp_btn_nickname = frontend_create_button("NICKNAME", 120, y, 0x100, 0x20);
     y += 44;
-    /* [NET OPTIONS 2026-07-21] Net-play defaults surfaced here (were reachable
-     * only on the Create-Session host screen): NET MODE (LAN auto-discovery vs
-     * DIRECT IP), GAME PORT (Enter-to-edit numeric) and UPNP port-forward toggle.
-     * Back g_td5.ini.net_mode / net_game_port / net_enable_upnp — the preference
-     * the Connection Browser defaults to + the Create-Session host rows seed. */
-    s_mp_btn_netmode = frontend_create_button("NET MODE", 120, y, 0x100, 0x20);
-    y += 44;
+    /* [NET OPTIONS 2026-07-21] Net-play defaults surfaced here (were reachable only
+     * on the Create-Session host screen): GAME PORT (Enter-to-edit numeric) and
+     * UPNP port-forward toggle. Back g_td5.ini.net_game_port / net_enable_upnp —
+     * the Create-Session host rows seed from these. */
     s_mp_btn_port = frontend_create_button("GAME PORT", 120, y, 0x100, 0x20);
     y += 44;
     s_mp_btn_upnp = frontend_create_button("UPNP", 120, y, 0x100, 0x20);
@@ -2024,21 +2018,7 @@ void Screen_TwoPlayerOptions(void) {
             int delta = frontend_option_delta();
             int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
 
-            if (active_button == s_mp_btn_players && delta != 0) {
-                int n = s_num_human_players + delta;
-                if (n < 1) n = 1;
-                if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
-                if (n != s_num_human_players) {
-                    s_num_human_players = n;
-                    if (s_num_ai_opponents > TD5_MAX_RACER_SLOTS - n)
-                        s_num_ai_opponents = TD5_MAX_RACER_SLOTS - n;
-                    s_mp_layout_sel = 0;     /* layout list changed → reset selection */
-                    mp_build_buttons();      /* row set depends on N → rebuild */
-                    s_selected_button = (s_mp_btn_players >= 0) ? s_mp_btn_players : 0;
-                    frontend_play_sfx(2);
-                }
-                s_inner_state = 4;
-            } else if (active_button == s_mp_btn_layout && delta != 0 &&
+            if (active_button == s_mp_btn_layout && delta != 0 &&
                        s_mp_layout_optcount > 1) {
                 int sel = s_mp_layout_sel + delta;
                 while (sel < 0) sel += s_mp_layout_optcount;
@@ -2058,16 +2038,6 @@ void Screen_TwoPlayerOptions(void) {
                 while (v < 0) v += MP_MISSING_CONTENT_COUNT;
                 v %= MP_MISSING_CONTENT_COUNT;
                 s_mp_missing_content[k] = v;
-                frontend_play_sfx(2);
-                s_inner_state = 4;
-            } else if (active_button == s_mp_btn_netmode && delta != 0) {
-                /* [NET OPTIONS 2026-07-21] NET MODE: LAN auto-discovery (0) vs
-                 * DIRECT IP (1). Persist [Network]Mode + apply to the runtime net
-                 * mode now; the Connection Browser defaults to / remembers this. */
-                g_td5.ini.net_mode = g_td5.ini.net_mode ? 0 : 1;
-                td5_ini_write_str("Network", "Mode", g_td5.ini.net_mode ? "1" : "0");
-                td5_net_set_mode(g_td5.ini.net_mode ? TD5_NET_MODE_DIRECT
-                                                    : TD5_NET_MODE_LAN);
                 frontend_play_sfx(2);
                 s_inner_state = 4;
             } else if (active_button == s_mp_btn_upnp && delta != 0) {
