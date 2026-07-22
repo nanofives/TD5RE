@@ -53,6 +53,7 @@
 #include "td5_trace.h"
 #include "td5_pending.h"   /* force the pending overlay off for golden races */
 #include "td5_save.h"
+#include "td5_i18n.h"   /* [I18N] catalog robustness check (st_i18n_verdict) */
 #include "td5_net.h"
 #include "td5_backend_capture.h"
 
@@ -1105,6 +1106,42 @@ static void st_degradation_verdicts(void)
  * syncs the cup statics from it, writes to a throwaway temp path (never the
  * real td5re_cup.ini), reads straight back, and confirms td5_save_is_cup_valid()
  * agrees the round-tripped file is still valid -- then restores game_type. */
+/* [I18N 2026-07-22] Catalog robustness check: the es-AR catalog loads, the
+ * UTF-8 -> Latin-1 sanity entry round-trips through td5_tr, an unknown key
+ * falls back to the input pointer verbatim, and switching back to English
+ * restores identity behavior. The sanity key below is the Latin-1 byte form
+ * of "I18N SELFTEST <inverted-?,accented vowels,N-tilde>?" — exactly what
+ * the loader produces from the catalog's UTF-8 line (do not remove that
+ * line from es_AR.txt). */
+static void st_i18n_verdict(void)
+{
+    static const char k_sanity[] = "I18N SELFTEST \xBF\xC1\xC9\xCD\xD3\xDA\xD1?";
+    static const char k_unknown[] = "I18N-UNKNOWN-KEY-XYZ";
+    StepRow *r = st_new_row("i18n-catalog", 'D');
+    int saved, load_ok, roundtrip, miss_identity, en_identity;
+    const char *tr;
+
+    if (!r) return;
+    saved = td5_i18n_language();
+
+    load_ok = td5_i18n_set_language(TD5_LANG_ES_AR);
+    tr = td5_tr(k_sanity);
+    roundtrip = (tr != NULL && strcmp(tr, k_sanity) == 0);
+    miss_identity = (td5_tr(k_unknown) == k_unknown);
+
+    td5_i18n_set_language(TD5_LANG_ENGLISH);
+    en_identity = (td5_tr(k_sanity) == k_sanity);
+
+    td5_i18n_set_language(saved);
+
+    snprintf(r->note, sizeof(r->note),
+             "es load=%d sanity-roundtrip=%d miss-fallback=%d en-identity=%d",
+             load_ok, roundtrip, miss_identity, en_identity);
+    r->status = (load_ok && roundtrip && miss_identity && en_identity)
+                ? ST_PASS : ST_FAIL;
+    if (r->status == ST_FAIL) s_exit_code = 1;
+}
+
 static void st_saveload_roundtrip_verdict(void)
 {
     static const char *k_temp_path = "log/selftest_cup_roundtrip.ini";
@@ -1210,6 +1247,7 @@ static void st_write_report(void)
     CreateDirectoryA("log", NULL);
 
     st_degradation_verdicts();
+    st_i18n_verdict();
     st_saveload_roundtrip_verdict();
     st_net_loopback_verdict();
 

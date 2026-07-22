@@ -6882,10 +6882,10 @@ static void frontend_render_race_type_description(float sx, float sy) {
      * for single-player, will be the driver). */
     {
         const char *dn = (s_active_menu_device == 0)
-            ? "KEYBOARD" : td5_input_get_device_name(s_active_menu_device);
+            ? TR("KEYBOARD") : td5_input_get_device_name(s_active_menu_device);
         float cx   = panel_x + panel_w * 0.5f;
         float ts   = 0.7f;
-        if (!dn || !dn[0]) dn = "KEYBOARD";
+        if (!dn || !dn[0]) dn = TR("KEYBOARD");
         fe_draw_text_centered(cx, 90.0f * sy, SNK_ControllerTxt, 0xFFFFD000, sx*0.8f, sy*0.8f);
         {
             /* Word-wrap the controller name over up to 3 lines (capped so it
