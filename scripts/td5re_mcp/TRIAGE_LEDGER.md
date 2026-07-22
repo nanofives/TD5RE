@@ -31,13 +31,41 @@ and 2-machine netplay — none observable through the state/log surface.
 - Track menu indices: Moscow 0, Newcastle 5, Courmayeur 7, Tokyo 9,
   Montego 17, TD6 base ≈26.
 
-## Batch order
+## Batch order & progress
 
-- **Cycle 1 (this batch):** drafted + landing now — rows **267, 20+14, 183,
-  191**. Batch-8 remainder for cycle 2: **154, 124, 258+259+260, 168+170**.
-- **covered-by-selftest → flip in bulk:** lines **28, 85, 140, 320**
-  (28 = render-golden wipe-translucency per tested row 24; 85 = tested row
-  316; 140 = tested row 25; 320 = run_all.py suite).
+(Line numbers below are the ORIGINAL triage-time numbers; the CSV has since
+grown, so match rows by summary text, not line number.)
+
+- **Cycle 1 (done, @131f9a86):** rows 267 (courmayeur_loads), 20+14
+  (gpu_device_lost_recovery), 183 (arcade_only_sim), 191 (time_trial_midtrack)
+  → tested. covered-by-selftest flipped: 320 (suite). Left pending on
+  inspection (not actually covered): 28 (render goldens capture mid-race
+  ticks, not the end wipe), 85/140 (partial / drifted cross-ref).
+- **Cycle 2 (done, @aece09be):** 154 (cop_rubberband), 258+259+260
+  (attract_demo), 170 (traffic_battle_solo) → tested. Left pending: 168/169
+  (battle MP split-screen), 169-win (battle WIN conditions) — solo scenario
+  only.
+- **Cycle 3 (done, @<this commit>):** 5 (covered by gpu_device_lost_recovery),
+  54 (split_drag), 81 (damage_toggle), 83 (tutorial_keyboard), 110
+  (retired_screens), 111 (inputscript_drive) → tested.
+  **Reclassified `auto` → `auto-blocked` (the `auto` call was optimistic — the
+  claim isn't observable through the current control surface):**
+  - **19** frame cap → needs a present-rate / present_count readout in
+    get_state; race.log `fps` is a SIM-timing metric (norm_dt), not the render
+    rate the cap paces.
+  - **124** track-walker span warp → needs a per-slot span/progress-continuity
+    readout (race_position is a rank, not a span) + the specific
+    degenerate-quad track.
+  - **247** heavy cars climb slower / **248** power-to-weight accel → need a
+    car mass / accel(power-to-weight) field in get_state to pick "heavy" vs
+    "light" cars; only the internal carstats screen has it today.
+
+## Standing candidates for a get_state extension (would unblock rows)
+
+- `present_count` / render fps  → unblocks 19 (frame cap).
+- per-slot `span`/progress       → unblocks 124 (walker), finish-time rows.
+- cop `speed`/`gap` (traffic)    → unblocks the exact cop catch-up (154 detail).
+- car `mass`/`accel` stat        → unblocks 247/248 (physics comparisons).
 
 ## Full classified ledger
 
