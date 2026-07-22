@@ -454,6 +454,9 @@ static void plat_present_swapchain(int sync)
         }
     }
 #endif
+    /* [crash-diag 2026-07-22] Mark the ring so a fault INSIDE Present shows as
+     * a trailing PRESENT entry (vs a scene draw) in the crash dump. */
+    Backend_NotePresent();
     HRESULT hr = IDXGISwapChain_Present(g_backend.swap_chain, sync, 0);
     g_backend.present_count++;   /* [diag] frame counter for device-lost forensics */
     if (FAILED(hr)) Backend_NoteDeviceRemoved(hr, "td5_plat_present/Present");

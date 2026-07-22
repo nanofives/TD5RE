@@ -48,6 +48,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "DEV: the test harness now catches game crashes instead" },
     { CL_ITEM,    "  of hiding them - it saves the crash report and marks" },
     { CL_ITEM,    "  the run CRASHED; GPU crash logs now name the scene." },
+    { CL_ITEM,    "DEV: GPU crash reports now list the last 256 draws +" },
+    { CL_ITEM,    "  each frame's Present, so a crash points at the exact" },
+    { CL_ITEM,    "  GPU call (a rare driver fault sits in Present, not a" },
+    { CL_ITEM,    "  draw - still under investigation)." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 21" },

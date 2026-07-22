@@ -55,6 +55,26 @@ void Backend_NoteDraw(unsigned prim, unsigned vcount, unsigned icount, int index
     if (vcount > s_draw_max_vcount) s_draw_max_vcount = vcount;
 }
 
+/* Present marker for the crash ring (prim==PRESENT_SENTINEL). Pushed just
+ * before each swap-chain Present so the DRAW WATCH timeline shows where each
+ * frame's flip sat relative to the draws: if the NEWEST ring entry before a
+ * crash is a PRESENT marker, the fault was in the present/flip path (driver),
+ * not a scene draw -- which is exactly the distinction we could not make when
+ * the ring only recorded draws (and, for the port renderer, recorded nothing).
+ * Pure CPU bookkeeping (no GPU/sim state) -> golden-safe. */
+#define TD5_PRESENT_SENTINEL 0xFFFFu
+void Backend_NotePresent(void)
+{
+    TD5DrawRec *r = &s_draw_ring[s_draw_head % TD5_DRAW_RING];
+    r->vcount  = (unsigned)g_backend.present_count;
+    r->icount  = 0;
+    r->prim    = TD5_PRESENT_SENTINEL;
+    r->indexed = 0;
+    r->gen     = g_backend.device_generation;
+    r->srv     = (const void *)g_backend.current_srv;
+    s_draw_head++; s_draw_total++;
+}
+
 /* Shared ring writer. `f` is an already-open stream; `tag` labels the dump. */
 static void Backend_WriteDrawRing(FILE *f, const char *tag)
 {
@@ -66,9 +86,14 @@ static void Backend_WriteDrawRing(FILE *f, const char *tag)
     for (i = 0; i < n; i++) {
         unsigned idx = (s_draw_head - n + i) % TD5_DRAW_RING;
         TD5DrawRec *r = &s_draw_ring[idx];
-        fprintf(f, "  [%u] %s prim=%u v=%u i=%u gen=%u srv=%p%s\n",
-                i, r->indexed ? "IDX" : "VTX", r->prim, r->vcount, r->icount,
-                r->gen, r->srv, (r->gen < cur) ? "  <-- STALE (pre-reset resource)" : "");
+        const char *stale = (r->gen < cur) ? "  <-- STALE (pre-reset resource)" : "";
+        if (r->prim == TD5_PRESENT_SENTINEL)
+            fprintf(f, "  [%u] PRESENT #%u gen=%u srv=%p%s\n",
+                    i, r->vcount, r->gen, r->srv, stale);
+        else
+            fprintf(f, "  [%u] %s prim=%u v=%u i=%u gen=%u srv=%p%s\n",
+                    i, r->indexed ? "IDX" : "VTX", r->prim, r->vcount, r->icount,
+                    r->gen, r->srv, stale);
     }
 }
 

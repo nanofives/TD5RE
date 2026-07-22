@@ -419,6 +419,11 @@ int Backend_NoteDeviceRemoved(HRESULT hr, const char *where);
  * D3D3 draw entry points. */
 void Backend_NoteDraw(unsigned prim, unsigned vcount, unsigned icount, int indexed);
 
+/* [crash-diag 2026-07-22] Push a PRESENT marker into the same ring just before
+ * a swap-chain Present, so the crash dump distinguishes a present/flip-path
+ * fault from a scene-draw fault. Golden-safe (CPU bookkeeping only). */
+void Backend_NotePresent(void);
+
 /* [crash-diag 2026-07-21] Append GPU forensics (live backend snapshot + the
  * recent-draw ring with per-draw generation/SRV, flagging stale pre-reset
  * binds) to `path`. Called from the exe SEH crash handler via

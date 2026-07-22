@@ -3464,11 +3464,14 @@ void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
                 ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[si]);
             }
         }
+        Backend_NoteDraw(4 /*TRIANGLELIST*/, (unsigned)vertex_count,
+                         (unsigned)index_count, 1);   /* [DRAW WATCH] */
         ID3D11DeviceContext_DrawIndexed(ctx, (UINT)index_count, start_index, (INT)base_vertex);
     } else {
         /* Non-indexed draw */
         ID3D11DeviceContext_IASetPrimitiveTopology(ctx,
             D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        Backend_NoteDraw(4 /*TRIANGLELIST*/, (unsigned)vertex_count, 0, 0);  /* [DRAW WATCH] */
         ID3D11DeviceContext_Draw(ctx, (UINT)vertex_count, base_vertex);
     }
 }
@@ -3528,6 +3531,7 @@ void td5_plat_render_draw_lines(const TD5_D3DVertex *verts, int vert_count)
     ID3D11DeviceContext_OMSetBlendState(ctx,
         g_backend.blend_states[BLEND_OPAQUE], NULL, 0xFFFFFFFF);
 
+    Backend_NoteDraw(2 /*LINELIST*/, (unsigned)vert_count, 0, 0);   /* [DRAW WATCH] */
     ID3D11DeviceContext_Draw(ctx, (UINT)vert_count, base_vertex);
 
     /* Invalidate cached state-object indices so the next ApplyStateCache
@@ -3597,6 +3601,8 @@ void td5_plat_render_draw_tris_flat(const TD5_D3DVertex *verts, int vert_count,
     ID3D11DeviceContext_OMSetBlendState(ctx,
         g_backend.blend_states[BLEND_OPAQUE], NULL, 0xFFFFFFFF);
 
+    Backend_NoteDraw(4 /*TRIANGLELIST flat*/, (unsigned)vert_count,
+                     (unsigned)index_count, 1);   /* [DRAW WATCH] */
     ID3D11DeviceContext_DrawIndexed(ctx, (UINT)index_count, start_index, (INT)base_vertex);
 
     st->current_blend_idx = -1;
