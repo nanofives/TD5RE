@@ -48,6 +48,16 @@ grown, so match rows by summary text, not line number.)
 - **Cycle 3 (done, @<this commit>):** 5 (covered by gpu_device_lost_recovery),
   54 (split_drag), 81 (damage_toggle), 83 (tutorial_keyboard), 110
   (retired_screens), 111 (inputscript_drive) → tested.
+- **Cycle 4 (done, @<this commit>):** 140 (tutorial_every_race — race.tutorial
+  true at the start of 3 consecutive races), 153 (damage_no_wreckout —
+  car_damage=0, sustained battering, health never <=0 / no knockout), 166
+  (drag_length — new `race.drag_repeats` get_state field: two launches at
+  TD5RE_DRAG_LENGTH_LEVEL=0 vs 3, SHORT repeats=0 < EPIC repeats=816, no
+  driving needed) → tested. Remaining `auto`: 10 (per-player traffic cap —
+  race.log has an `on_road` counter but no `eff_cap`/`clusters` token, so the
+  cluster claim isn't cleanly log-observable — DEFERRED), 86 (arcade NITRO
+  1.5x — stochastic pickup + multiplier), 158 (cop leash), 160 (drag MP,
+  needs MP setup), 165 (drag longer — same as 166, now covered by drag_repeats).
   **Reclassified `auto` → `auto-blocked` (the `auto` call was optimistic — the
   claim isn't observable through the current control surface):**
   - **19** frame cap → needs a present-rate / present_count readout in

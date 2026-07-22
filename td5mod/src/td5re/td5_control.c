@@ -290,6 +290,14 @@ static void ctrl_exec(cJSON *req, cJSON *reply)
             cJSON_AddBoolToObject(race, "battle",        td5_game_battle_mode_active() ? 1 : 0);
             cJSON_AddBoolToObject(race, "arcade_active", arcade ? 1 : 0);
             cJSON_AddNumberToObject(race, "victory_position", td5_game_get_victory_position());
+            /* Drag-strip config (only meaningful in a drag race) so a scenario
+             * can verify TD5RE_DRAG_LENGTH_LEVEL lengthens the strip WITHOUT
+             * driving to a natural finish: drag_repeats = extra inserted spans
+             * (0 = SHORT, >0 = a longer strip); drag_field = cars on the line. */
+            if (g_td5.ini.default_game_type == 9 || td5_game_drag_mp_active()) {
+                cJSON_AddNumberToObject(race, "drag_repeats", td5_game_drag_length_repeats());
+                cJSON_AddNumberToObject(race, "drag_field",   td5_game_drag_field_size());
+            }
 
             if (racers_wanted) {
                 /* Racer slots only — traffic/scenery actors have no

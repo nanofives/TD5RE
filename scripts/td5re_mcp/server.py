@@ -100,7 +100,9 @@ def get_state(racers: bool = True) -> Dict[str, Any]:
     Top level also carries `present_count` (monotonic swap-chain Present count;
     sample twice over a wall interval for the render rate). While racing the
     `race` object carries countdown/tutorial/wanted_mode/cop_actor/battle/
-    arcade_active/victory_position/num_racers plus (unless racers=False) a
+    arcade_active/victory_position/num_racers (and in a drag race drag_repeats
+    = extra strip spans, drag_field = cars on the line) plus (unless
+    racers=False) a
     `racers` array: per-slot position, lap, speed, span, heaviness (Q8, car
     weight), accel (power-to-weight), progress (monotonic lap*ring+span, for
     warp detection), climb (signed per-tick vertical rate, >0=uphill),
