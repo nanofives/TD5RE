@@ -60,12 +60,31 @@ grown, so match rows by summary text, not line number.)
     car mass / accel(power-to-weight) field in get_state to pick "heavy" vs
     "light" cars; only the internal carstats screen has it today.
 
-## Standing candidates for a get_state extension (would unblock rows)
+## get_state extensions (@<cycle-3 ext commit>) — added + outcomes
 
-- `present_count` / render fps  → unblocks 19 (frame cap).
-- per-slot `span`/progress       → unblocks 124 (walker), finish-time rows.
-- cop `speed`/`gap` (traffic)    → unblocks the exact cop catch-up (154 detail).
-- car `mass`/`accel` stat        → unblocks 247/248 (physics comparisons).
+Added `present_count` (top level) and per-racer `span`, `heaviness` (Q8), and
+`accel` (power-to-weight). Golden-safe (read-only accessors, never called in a
+golden race; full selftest 51/51). Outcomes:
+
+- **`present_count` → row 19 (frame cap) CLOSED.** `frame_cap.py` samples it
+  over a wall interval; measured exactly 40/s at cap 40 (VSync off). This is
+  the only client-observable render rate — race.log `fps` is sim-timing.
+- **`accel` → row 248 (power-to-weight) CLOSED.** `car_accel.py`: two solo
+  drag runs, higher-accel car reaches the target speed in fewer ticks
+  (car0 accel1920=15t vs car8 accel1428=31t). Straight-line drag isolates
+  acceleration (a circuit confounds it with corners; a multi-car drag field
+  confounds it with inactive lanes).
+- **`span` exposed but NOT sufficient for row 124 (walker warp)** — folded
+  span conflates the legit lap-wrap (resets at S/F line, lap counter lags a
+  beat) and branch-corridor folding with a real warp. **Still blocked: needs
+  an UNWRAPPED cumulative-progress readout** (+ the specific degenerate-quad
+  track). `heaviness` is exposed but row 247 (heavy climbs slower) **still
+  needs a known uphill segment / gradient readout** to isolate the climb.
+
+Remaining get_state candidates that would unblock more rows:
+- unwrapped cumulative progress → 124 (walker warp).
+- gradient / known-uphill marker → 247 (heavy climbs slower).
+- cop `speed`/`gap` (traffic slot) → the exact cop catch-up (154 detail).
 
 ## Full classified ledger
 

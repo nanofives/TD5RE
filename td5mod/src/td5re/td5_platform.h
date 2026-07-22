@@ -43,6 +43,12 @@ int  td5_plat_pump_messages(void);
 /** Present the back buffer (flip/swap). */
 void td5_plat_present(int vsync);
 
+/** Monotonic count of swap-chain Presents since launch (g_backend.present_count).
+ *  Sampled twice over a wall interval it yields the render/present RATE, which
+ *  the frame cap (TD5RE_FRAME_CAP) paces — the only client-observable way to
+ *  verify the cap, since the race-timing log's "fps" is a sim-timing metric. */
+uint32_t td5_plat_present_count(void);
+
 /** Request a one-shot swap-chain backbuffer PNG dump at the next present
  *  (same encoder as the TD5RE_FRAMEDUMP env dump — reliable when the window
  *  is occluded/headless, unlike GDI window capture). Main thread only; the

@@ -45,6 +45,11 @@ int  td5_game_mp_traffic_fair(void);
 int  td5_game_battle_mode_active(void);
 int  td5_game_drag_mp_active(void);
 
+/* --- Per-slot car / progress readouts (read-only) ----------------------- */
+int     td5_game_get_slot_span(int slot);         /* live folded track span (progress) */
+int     td5_game_get_slot_heaviness_q8(int slot); /* car heaviness Q8 (higher=heavier) */
+int     td5_game_get_slot_accel(int slot);        /* power-to-weight ACCEL (higher=faster) */
+
 /* --- Race progress / results (read-only) -------------------------------- */
 int     td5_game_get_player_lap(int slot);
 int     td5_game_get_race_order(int pos);         /* slot index at finish position pos */

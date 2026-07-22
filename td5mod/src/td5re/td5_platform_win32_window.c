@@ -473,6 +473,11 @@ int td5_plat_device_lost(void)
     return g_backend.device_removed;
 }
 
+uint32_t td5_plat_present_count(void)
+{
+    return (uint32_t)g_backend.present_count;
+}
+
 /* [crash-diag 2026-07-21] Seam so the exe SEH crash handler (main.c) can append
  * GPU forensics to crash.log without pulling in wrapper headers. Safe from an
  * AV handler: reads only VALUES from g_backend + the recent-draw ring. */

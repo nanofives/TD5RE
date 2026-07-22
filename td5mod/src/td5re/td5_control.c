@@ -262,6 +262,9 @@ static void ctrl_exec(cJSON *req, cJSON *reply)
         cJSON_AddStringToObject(reply, "game_state_name", ctrl_state_name(st));
         cJSON_AddNumberToObject(reply, "screen", (double)td5_frontend_get_screen());
         cJSON_AddBoolToObject(reply, "paused", td5_game_is_pause_menu_active() ? 1 : 0);
+        /* Monotonic present counter (all states): sample twice over a wall
+         * interval to measure the render rate the frame cap paces. */
+        cJSON_AddNumberToObject(reply, "present_count", (double)td5_plat_present_count());
         if (st == TD5_GAMESTATE_RACE) {
             int racers_wanted = 1;
             int num_actors = td5_game_get_total_actor_count();
@@ -305,6 +308,9 @@ static void ctrl_exec(cJSON *req, cJSON *reply)
                     cJSON_AddNumberToObject(r, "lap", td5_game_get_player_lap(slot));
                     cJSON_AddNumberToObject(r, "speed_raw", a->longitudinal_speed);
                     cJSON_AddNumberToObject(r, "speed", FP_TRUNC(a->longitudinal_speed));
+                    cJSON_AddNumberToObject(r, "span", td5_game_get_slot_span(slot));
+                    cJSON_AddNumberToObject(r, "heaviness", td5_game_get_slot_heaviness_q8(slot));
+                    cJSON_AddNumberToObject(r, "accel", td5_game_get_slot_accel(slot));
                     cJSON_AddBoolToObject(r, "finished", td5_game_slot_is_finished(slot) ? 1 : 0);
                     /* Traffic-cop pursuit (single-race cops=1 speeding chase)
                      * — distinct from the wanted/cop-chase MODE role flags. */

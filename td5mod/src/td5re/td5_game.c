@@ -30,6 +30,7 @@
  * Whole path remains gated behind [Render] ThreadedPanes (default 0). */
 #define TD5_MT_PARALLEL_BUILD 1
 #include "../../../re/include/td5_actor_struct.h"
+#include "td5_carparam.h"   /* car mass/accel offsets + td5cp_heaviness_q8 (get_state) */
 #include "td5_camera.h"
 #include "td5_frontend.h"
 #include "td5_laneassist.h"   /* seed each human's lane-assist enable at race start */
@@ -1608,6 +1609,41 @@ int td5_game_get_slot_span(int slot)
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
     TD5_Actor *a = td5_game_get_actor(slot);
     return a ? (int)a->track_span_normalized : 0;
+}
+
+/* Car heaviness (Q8, 0x100 = median; higher = heavier), for physics-comparison
+ * scenarios. car_definition_ptr +0x88 is int16 INVERSE-mass (higher = lighter);
+ * td5cp_heaviness_q8 maps it. 0 if the slot has no car bound. Read-only. */
+int td5_game_get_slot_heaviness_q8(int slot)
+{
+    TD5_Actor *a;
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    a = td5_game_get_actor(slot);
+    if (!a || !a->car_definition_ptr) return 0;
+    {
+        int16_t inv_mass = *(const int16_t *)((const char *)a->car_definition_ptr
+                                              + TD5CP_OFF_COLLISION_MASS);
+        return (int)td5cp_heaviness_q8(inv_mass);
+    }
+}
+
+/* Power-to-weight ACCEL score = drive torque * inverse-mass (mirrors the MORE
+ * STATS ACCEL figure in td5_fe_carstats.c; higher = accelerates harder).
+ * Runtime torque lives at tuning_data_ptr +0x68 (== carparam file 0xF4),
+ * inv_mass at car_definition_ptr +0x88. 0 if no car/tuning bound. Read-only. */
+int td5_game_get_slot_accel(int slot)
+{
+    TD5_Actor *a;
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    a = td5_game_get_actor(slot);
+    if (!a || !a->car_definition_ptr || !a->tuning_data_ptr) return 0;
+    {
+        int16_t inv_mass = *(const int16_t *)((const char *)a->car_definition_ptr
+                                              + TD5CP_OFF_COLLISION_MASS);
+        int16_t torque   = *(const int16_t *)((const char *)a->tuning_data_ptr + 0x68);
+        if (inv_mass <= 0) inv_mass = 1;
+        return (int)((int32_t)torque * (int32_t)inv_mass);
+    }
 }
 
 /* Returns cumulative race timer ticks (30/sec) for lap_index 0,
