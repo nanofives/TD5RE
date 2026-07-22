@@ -6050,8 +6050,12 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
         snprintf(count, sizeof(count), "%d", s_num_human_players);
         frontend_draw_qr_value(sx, sy, QR_BTN_PLAYERS, count, 0xFFFFFFFF, 0);
     }
-    snprintf(count, sizeof(count), "%d", s_num_ai_opponents);
-    frontend_draw_qr_value(sx, sy, QR_BTN_OPPONENTS, count, 0xFFFFFFFF, 0);
+    /* [2026-07-21] Opponents moved to RACE OPTIONS — the inline row is hidden, so
+     * don't draw its stray value ("5") over the empty slot. */
+    if (!s_buttons[QR_BTN_OPPONENTS].hidden) {
+        snprintf(count, sizeof(count), "%d", s_num_ai_opponents);
+        frontend_draw_qr_value(sx, sy, QR_BTN_OPPONENTS, count, 0xFFFFFFFF, 0);
+    }
     /* [S02 (c) 2026-06-04] Circuit laps value (displayed as laps+1, matching the
      * Game Options + Track Selection convention). Hidden on point-to-point tracks
      * (frontend_update_laps_button_visibility) — no laps there. */
@@ -6418,8 +6422,9 @@ int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
     /* Traffic Battle is an MP sub-mode; cop chase covers SP (game_type 8) and MP. */
     int tb = c->is_mp && c->mp_mode == TD5_MP_MODE_TRAFFIC_BATTLE;
     switch (ro) {
-    case RO_OPPONENTS:   /* no AI-count control in drag, cup (cup sets it) or TB */
-        return !(c->is_drag || c->is_cup || tb);
+    case RO_OPPONENTS:   /* no AI-count control in drag, cup (cup sets it), TB, or
+                          * time trial (a solo run against the clock) */
+        return !(c->is_drag || c->is_cup || tb || c->is_time_trial);
     case RO_TRAFFIC:     /* drag has its own traffic switch */
         return !c->is_drag;
     case RO_POLICE:      /* player IS the pursuit in cop chase; none in drag */
@@ -6444,7 +6449,9 @@ int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
     case RO_COLLISIONS:
     case RO_DAMAGE:
         return 1;                                    /* every mode */
-    case RO_LANEASSIST:  /* SP only (per-player LANE ASSIST lives on the MP profile) */
+    case RO_LANEASSIST:  /* SP only (per-player LANE ASSIST lives on the MP profile);
+                          * not on drag (no lane-keeping on a straight strip) */
+        return !c->is_mp && !c->is_drag;
     case RO_TUTORIAL:    /* SP only */
         return !c->is_mp;
     /* [QUICK RACE DEBUG 2026-07-21] Quick-Race-exclusive dev debugging rows —
@@ -6545,13 +6552,19 @@ void td5_raceopts_update_opponents(int opponents) {
     s_ro_total = td5_raceopts_build_rows(&s_ro_ctx, s_ro_rows);
 }
 
+/* [2026-07-21] PREV/NEXT WRAP around the ends (NEXT past the last page returns to
+ * the first, PREV before the first jumps to the last). */
 int td5_raceopts_page_prev(void) {
-    if (s_ro_page > 0) { s_ro_page--; td5_raceopts_build_page(); return 1; }
-    return 0;
+    if (s_ro_pages <= 1) return 0;
+    s_ro_page = (s_ro_page > 0) ? s_ro_page - 1 : s_ro_pages - 1;
+    td5_raceopts_build_page();
+    return 1;
 }
 int td5_raceopts_page_next(void) {
-    if (s_ro_page < s_ro_pages - 1) { s_ro_page++; td5_raceopts_build_page(); return 1; }
-    return 0;
+    if (s_ro_pages <= 1) return 0;
+    s_ro_page = (s_ro_page < s_ro_pages - 1) ? s_ro_page + 1 : 0;
+    td5_raceopts_build_page();
+    return 1;
 }
 
 /* [NAME MERGE 2026-07-21] The OPTIONS-hub PLAYER NAME editor + inline-render
@@ -7334,6 +7347,15 @@ static void frontend_render_race_options_overlay(float sx, float sy) {
         /* [LAYOUT 2026-07-21] value text left-justified at x=348 per guideline. */
         fe_draw_text(348.0f * sx, (float)(s_buttons[r].y + 6) * sy, vb,
                      0xFFFFFFFFu, sx * 0.8f, sy * 0.8f);
+    }
+    /* [2026-07-21] "PAGE x / y" indicator (value column, aligned with the
+     * PREV/NEXT row) when the row set spans more than one page. */
+    if (td5_raceopts_pages() > 1) {
+        char pb[24];
+        snprintf(pb, sizeof pb, "PAGE %d / %d",
+                 td5_raceopts_page() + 1, td5_raceopts_pages());
+        fe_draw_text(348.0f * sx, (float)(RO_PREVNEXT_Y + 6) * sy, pb,
+                     0xFF8890A0u, sx * 0.8f, sy * 0.8f);
     }
 }
 
