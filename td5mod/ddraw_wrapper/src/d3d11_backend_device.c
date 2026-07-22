@@ -19,10 +19,50 @@
  */
 
 #include "wrapper.h"
+#include <d3d11sdklayers.h>   /* ID3D11InfoQueue (opt-in debug-layer drain) */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+
+/* ------------------------------------------------------------------------
+ * [D3D DEBUG 2026-07-19] Opt-in D3D11 debug-layer InfoQueue drain, to diagnose
+ * the recurring nvwgf2um.dll driver null-deref on transition/results screens
+ * (a valid-looking Present/Draw crashes inside the UMD). TD5RE_D3D_DEBUG=1
+ * creates the device with D3D11_CREATE_DEVICE_DEBUG and drains every stored
+ * debug message to log/gpu_d3d_debug.log on each present (fopen+fflush+fclose
+ * per drain so the last messages survive a hard process crash). Inert unless
+ * the env var is set; if the OS debug layer (D3D11*SDKLayers) is missing the
+ * device create falls back to non-debug (see the retry in Backend_CreateDevice).
+ * ------------------------------------------------------------------------ */
+static ID3D11InfoQueue *s_d3d_info_queue = NULL;
+static const GUID TD5_IID_ID3D11InfoQueue =
+    {0x6543dbb6,0x1b48,0x42f5,{0xab,0x82,0xe9,0x7e,0xc7,0x43,0x26,0xf6}};
+
+static void Backend_DumpDrawRing(void);   /* [DRAW WATCH] fwd; defined below */
+
+int Backend_D3DDebugEnabled(void)
+{
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("TD5RE_D3D_DEBUG"); v = (e && e[0] && e[0] != '0') ? 1 : 0; }
+    return v;
+}
+
+/* QI the InfoQueue off the live device (idempotent). Called after every
+ * (re)create. No-op unless TD5RE_D3D_DEBUG is set. */
+static void Backend_SetupD3DDebug(void)
+{
+    if (!Backend_D3DDebugEnabled() || !g_backend.device || s_d3d_info_queue) return;
+    if (SUCCEEDED(ID3D11Device_QueryInterface(g_backend.device,
+            &TD5_IID_ID3D11InfoQueue, (void **)&s_d3d_info_queue)) && s_d3d_info_queue) {
+        ID3D11InfoQueue_ClearStoredMessages(s_d3d_info_queue);
+        {
+            FILE *f = fopen("log/gpu_d3d_debug.log", "a");
+            if (f) { fprintf(f, "==== D3D debug layer attached (gen=%u) ====\n",
+                             g_backend.device_generation); fflush(f); fclose(f); }
+        }
+    }
+}
 
 /* [DRAW WATCH / crash-diag 2026-07-21] In-memory ring of the most recent draw
  * submissions. Each record also captures the SRV bound and the device
@@ -97,6 +137,16 @@ static void Backend_WriteDrawRing(FILE *f, const char *tag)
     }
 }
 
+static void Backend_DumpDrawRing(void)
+{
+    FILE *f;
+    if (!Backend_D3DDebugEnabled()) return;   /* device-hung path stays opt-in */
+    f = fopen("log/gpu_d3d_debug.log", "a");
+    if (!f) return;
+    Backend_WriteDrawRing(f, "device-hung");
+    fflush(f); fclose(f);
+}
+
 /* [crash-diag 2026-07-21] Append GPU forensics to the SEH crash file: the live
  * backend snapshot + the recent-draw ring (with per-draw generation/SRV so a
  * stale pre-reset bind stands out). Called from the exe's crash handler via
@@ -121,6 +171,33 @@ void Backend_DumpCrashDiag(const char *path)
         g_backend.diag_context);
     Backend_WriteDrawRing(f, "SEH crash");
     fflush(f); fclose(f);
+}
+
+void Backend_DrainD3DDebug(const char *where)
+{
+    UINT64 n, i;
+    FILE *f;
+    if (!s_d3d_info_queue) return;
+    n = ID3D11InfoQueue_GetNumStoredMessages(s_d3d_info_queue);
+    if (n == 0) return;
+    f = fopen("log/gpu_d3d_debug.log", "a");
+    for (i = 0; i < n; i++) {
+        SIZE_T len = 0;
+        D3D11_MESSAGE *m;
+        ID3D11InfoQueue_GetMessage(s_d3d_info_queue, i, NULL, &len);
+        if (!len) continue;
+        m = (D3D11_MESSAGE *)malloc(len);
+        if (!m) break;
+        if (SUCCEEDED(ID3D11InfoQueue_GetMessage(s_d3d_info_queue, i, m, &len)) && f) {
+            fprintf(f, "[%s] sev=%d cat=%d id=%d: %.*s\n",
+                    where ? where : "?", (int)m->Severity, (int)m->Category, (int)m->ID,
+                    (int)m->DescriptionByteLength,
+                    m->pDescription ? m->pDescription : "");
+        }
+        free(m);
+    }
+    if (f) { fflush(f); fclose(f); }
+    ID3D11InfoQueue_ClearStoredMessages(s_d3d_info_queue);
 }
 
 /* ------------------------------------------------------------------------
@@ -283,6 +360,9 @@ int Backend_NoteDeviceRemoved(HRESULT hr, const char *where)
             fclose(f);
         }
     }
+    /* [DRAW WATCH] Dump the recent-draw ring so a degenerate/oversized draw that
+     * overran the TDR watchdog stands out. No-op unless TD5RE_D3D_DEBUG=1. */
+    Backend_DumpDrawRing();
     g_backend.device_removed = 1;
     return 1;
 }
@@ -1585,6 +1665,10 @@ int Backend_RecreateDevice(void)
                 g_backend.device_generation, g_backend.device_generation + 1,
                 rt_width, rt_height);
 
+    /* [D3D DEBUG] The old InfoQueue belongs to the device we're about to
+     * release; drop it and re-attach to the new device below. */
+    if (s_d3d_info_queue) { ID3D11InfoQueue_Release(s_d3d_info_queue); s_d3d_info_queue = NULL; }
+
     /* Drop all GPU objects tied to the removed device. */
     Backend_ReleaseDeviceObjects();
 
@@ -1606,11 +1690,25 @@ int Backend_RecreateDevice(void)
     scd.Windowed     = g_backend.windowed ? TRUE : FALSE;
     scd.SwapEffect   = DXGI_SWAP_EFFECT_DISCARD;
 
-    hr = D3D11CreateDeviceAndSwapChain(
-        NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0,
-        feature_levels, 3, D3D11_SDK_VERSION, &scd,
-        &g_backend.swap_chain, &g_backend.device,
-        &achieved_level, &g_backend.context);
+    /* [D3D DEBUG] Enable the debug layer on the RECOVERED device too — the
+     * target crash fires on the post-recovery (gen>=2) device during Present,
+     * so the InfoQueue must be attached to this new device, not just the first
+     * one. If the OS debug layer is missing the create fails; retry clean. */
+    {
+        UINT rc_flags = Backend_D3DDebugEnabled() ? D3D11_CREATE_DEVICE_DEBUG : 0;
+        hr = D3D11CreateDeviceAndSwapChain(
+            NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, rc_flags,
+            feature_levels, 3, D3D11_SDK_VERSION, &scd,
+            &g_backend.swap_chain, &g_backend.device,
+            &achieved_level, &g_backend.context);
+        if (FAILED(hr) && rc_flags) {   /* debug layer absent -> retry without it */
+            hr = D3D11CreateDeviceAndSwapChain(
+                NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0,
+                feature_levels, 3, D3D11_SDK_VERSION, &scd,
+                &g_backend.swap_chain, &g_backend.device,
+                &achieved_level, &g_backend.context);
+        }
+    }
     if (FAILED(hr)) {
         WRAPPER_LOG("Backend_RecreateDevice: CreateDeviceAndSwapChain FAILED hr=0x%08lX "
                     "(device stays removed, will retry)", (unsigned long)hr);
@@ -1627,6 +1725,8 @@ int Backend_RecreateDevice(void)
      * backing is rebuilt from sys_buffer on next use, and clear the latch. */
     g_backend.device_generation++;
     g_backend.device_removed = 0;
+
+    Backend_SetupD3DDebug();   /* [D3D DEBUG] re-attach InfoQueue to new device */
 
     WRAPPER_LOG("Backend_RecreateDevice: OK device=%p ctx=%p swap=%p gen=%u",
                 g_backend.device, g_backend.context, g_backend.swap_chain,
@@ -1687,6 +1787,12 @@ int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed
         g_backend.height = height;
         g_backend.bpp = bpp;
         g_backend.windowed = windowed;
+
+        /* [D3D DEBUG] Opt-in debug layer (TD5RE_D3D_DEBUG=1). If the OS debug
+         * layer isn't installed the create below fails and the retry clears this
+         * flag, so this is safe to request unconditionally when asked. */
+        if (Backend_D3DDebugEnabled())
+            create_flags |= D3D11_CREATE_DEVICE_DEBUG;
 
         /* [foliage AA 2026-07-04] Smooth 2D cutout foliage edges by default.
          * TD5RE_FOLIAGE_AA=0 restores the faithful hard 1-bit cutout. */
@@ -1788,6 +1894,8 @@ int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed
 
         WRAPPER_LOG("Backend_CreateDevice: device=%p ctx=%p feature_level=0x%X",
             g_backend.device, g_backend.context, achieved_level);
+
+        Backend_SetupD3DDebug();   /* [D3D DEBUG] attach InfoQueue if enabled */
 
         /* [DEVICE-LOST recovery] First live device = generation 1. Surfaces
          * created from here on stamp this value; Backend_RecreateDevice bumps it

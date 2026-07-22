@@ -419,6 +419,14 @@ int Backend_NoteDeviceRemoved(HRESULT hr, const char *where);
  * D3D3 draw entry points. */
 void Backend_NoteDraw(unsigned prim, unsigned vcount, unsigned icount, int indexed);
 
+/* [D3D DEBUG 2026-07-19] Opt-in D3D11 debug-layer diagnostics (TD5RE_D3D_DEBUG=1).
+ * Backend_D3DDebugEnabled() reports the env flag (cached). Backend_DrainD3DDebug()
+ * flushes all stored debug-layer messages to log/gpu_d3d_debug.log; call once per
+ * frame (present) so the messages just before a driver crash are on disk. Both
+ * are no-ops unless the env var is set and the OS debug layer is installed. */
+int  Backend_D3DDebugEnabled(void);
+void Backend_DrainD3DDebug(const char *where);
+
 /* [crash-diag 2026-07-22] Push a PRESENT marker into the same ring just before
  * a swap-chain Present, so the crash dump distinguishes a present/flip-path
  * fault from a scene-draw fault. Golden-safe (CPU bookkeeping only). */

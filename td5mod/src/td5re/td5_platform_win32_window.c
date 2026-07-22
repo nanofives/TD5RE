@@ -513,6 +513,12 @@ void td5_plat_present(int vsync)
     float fallback_rgba[4] = { 0.20f, 0.32f, 0.46f, 1.0f };
     int empty_scene_fallback = 0;
 
+    /* [D3D DEBUG 2026-07-19] Flush the debug-layer InfoQueue for the frame just
+     * drawn to log/gpu_d3d_debug.log (crash-safe: fopen+fflush+fclose per drain)
+     * so the messages immediately preceding a driver crash are on disk. No-op
+     * unless TD5RE_D3D_DEBUG=1. */
+    Backend_DrainD3DDebug("present");
+
     /* [DEVICE-LOST recovery] On a removed device, attempt recovery instead of
      * presenting a frame that was drawn as no-ops on the dead device. Whether or
      * not the attempt succeeds this call, skip present; the next frame renders

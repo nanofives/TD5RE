@@ -50,8 +50,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  the run CRASHED; GPU crash logs now name the scene." },
     { CL_ITEM,    "DEV: GPU crash reports now list the last 256 draws +" },
     { CL_ITEM,    "  each frame's Present, so a crash points at the exact" },
-    { CL_ITEM,    "  GPU call (a rare driver fault sits in Present, not a" },
-    { CL_ITEM,    "  draw - still under investigation)." },
+    { CL_ITEM,    "  GPU call. Optional D3D debug layer (TD5RE_D3D_DEBUG=1)" },
+    { CL_ITEM,    "  confirmed the rare crash is a hardware GPU timeout" },
+    { CL_ITEM,    "  (TDR), not a game bug - no invalid graphics calls." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 21" },
