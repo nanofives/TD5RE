@@ -102,7 +102,9 @@ def get_state(racers: bool = True) -> Dict[str, Any]:
     `race` object carries countdown/tutorial/wanted_mode/cop_actor/battle/
     arcade_active/victory_position/num_racers plus (unless racers=False) a
     `racers` array: per-slot position, lap, speed, span, heaviness (Q8, car
-    weight), accel (power-to-weight), finished/finish_position, damage_health/
+    weight), accel (power-to-weight), progress (monotonic lap*ring+span, for
+    warp detection), climb (signed per-tick vertical rate, >0=uphill),
+    finished/finish_position, damage_health/
     damage_accum (once damage init'd), pursued, is_cop/is_suspect (cop-chase
     only) and arcade_effect/arcade_frames (arcade only)."""
     return _cmd("get_state", {"racers": racers})

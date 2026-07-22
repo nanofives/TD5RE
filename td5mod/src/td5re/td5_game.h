@@ -131,6 +131,8 @@ int td5_game_get_player_lap(int slot);
 int td5_game_get_slot_span(int slot);   /* live track_span_normalized (+0x82) for a slot, 0 if none */
 int td5_game_get_slot_heaviness_q8(int slot); /* car heaviness Q8 (0x100=median, higher=heavier), 0 if none */
 int td5_game_get_slot_accel(int slot);        /* power-to-weight ACCEL score (torque*inv_mass), 0 if none */
+int td5_game_get_slot_progress(int slot);     /* monotonic lap*ring+span (warp detect); folded span on P2P */
+int td5_game_get_slot_climb(int slot);        /* signed per-tick climb rate (>0 uphill), 0 if none */
 int32_t td5_game_get_race_timer(int slot, int lap_index);
 
 /* 0x430CF0: Allocate from game heap */

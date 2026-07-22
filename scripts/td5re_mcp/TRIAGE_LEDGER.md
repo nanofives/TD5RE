@@ -74,17 +74,41 @@ golden race; full selftest 51/51). Outcomes:
   (car0 accel1920=15t vs car8 accel1428=31t). Straight-line drag isolates
   acceleration (a circuit confounds it with corners; a multi-car drag field
   confounds it with inactive lanes).
-- **`span` exposed but NOT sufficient for row 124 (walker warp)** — folded
-  span conflates the legit lap-wrap (resets at S/F line, lap counter lags a
-  beat) and branch-corridor folding with a real warp. **Still blocked: needs
-  an UNWRAPPED cumulative-progress readout** (+ the specific degenerate-quad
-  track). `heaviness` is exposed but row 247 (heavy climbs slower) **still
-  needs a known uphill segment / gradient readout** to isolate the climb.
+- **`span` alone was NOT sufficient for row 124 (walker warp)** — folded span
+  conflates the legit lap-wrap (resets at S/F line, lap counter lags a beat)
+  and branch-corridor folding with a real warp. Closed via the wrap-counting
+  approach below.
+
+## get_state extensions (progress + climb) — added + outcomes
+
+Added per-racer `progress` (monotonic `lap*ring + folded span`; folded span on
+P2P/no-track) and `climb` (signed per-tick vertical rate, `>0` = uphill).
+Golden-safe (read-only accessors, never called in a golden race; full selftest
+51/51). Outcomes:
+
+- **row 124 (walker warp) CLOSED** via `walker_no_warp.py`. The warp test is
+  built on the folded `span` + wrap counting (lag-immune): span must climb
+  smoothly and wrap to ~0 exactly once per lap; a real warp = an extra wrap or
+  a mid-range backward jump. Newcastle, AI, 2 laps, 8x FF: ring~627, 2 wraps
+  for 2 laps, 0 mid-range warps. NOTE: `progress` (lap*ring+span) momentarily
+  dips ~one ring at each lap line because the game lap counter increments a
+  tick or two AFTER the span folds — so `progress` is an end-of-race sanity
+  value, not the warp signal.
+- **row 247 (heavy climbs slower) CLOSED** via `heavy_climb.py`. `climb` marks
+  uphill; two solo AI runs on Courmayeur (track 7, alpine) split `speed` by
+  uphill/flat and compare the uphill/flat ratio. Heavier car retains less speed
+  uphill (heaviness 341 → ratio 0.869 vs heaviness 256 → 0.944; stable across
+  runs). The ratio normalises out raw top-speed differences.
 
 Remaining get_state candidates that would unblock more rows:
-- unwrapped cumulative progress → 124 (walker warp).
-- gradient / known-uphill marker → 247 (heavy climbs slower).
 - cop `speed`/`gap` (traffic slot) → the exact cop catch-up (154 detail).
+
+## Scenario robustness
+
+`_lib.Scenario.recover_if_broken(st, slot=0)` — long unattended AI runs tap R
+(DIK_R 0x13, the recover key) when a tracked car's `damage_health` hits 0, so a
+wreck never stalls sampling. Wired into `walker_no_warp` / `heavy_climb`; a
+guarded no-op when damage isn't initialised. Reusable in any sampling loop.
 
 ## Full classified ledger
 

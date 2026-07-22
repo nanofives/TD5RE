@@ -311,6 +311,8 @@ static void ctrl_exec(cJSON *req, cJSON *reply)
                     cJSON_AddNumberToObject(r, "span", td5_game_get_slot_span(slot));
                     cJSON_AddNumberToObject(r, "heaviness", td5_game_get_slot_heaviness_q8(slot));
                     cJSON_AddNumberToObject(r, "accel", td5_game_get_slot_accel(slot));
+                    cJSON_AddNumberToObject(r, "progress", td5_game_get_slot_progress(slot));
+                    cJSON_AddNumberToObject(r, "climb", td5_game_get_slot_climb(slot));
                     cJSON_AddBoolToObject(r, "finished", td5_game_slot_is_finished(slot) ? 1 : 0);
                     /* Traffic-cop pursuit (single-race cops=1 speeding chase)
                      * — distinct from the wanted/cop-chase MODE role flags. */

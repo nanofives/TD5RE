@@ -49,6 +49,8 @@ int  td5_game_drag_mp_active(void);
 int     td5_game_get_slot_span(int slot);         /* live folded track span (progress) */
 int     td5_game_get_slot_heaviness_q8(int slot); /* car heaviness Q8 (higher=heavier) */
 int     td5_game_get_slot_accel(int slot);        /* power-to-weight ACCEL (higher=faster) */
+int     td5_game_get_slot_progress(int slot);     /* monotonic lap*ring+span (warp detect) */
+int     td5_game_get_slot_climb(int slot);        /* signed per-tick climb rate (>0 uphill) */
 
 /* --- Race progress / results (read-only) -------------------------------- */
 int     td5_game_get_player_lap(int slot);

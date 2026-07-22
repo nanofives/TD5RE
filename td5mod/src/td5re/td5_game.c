@@ -1646,6 +1646,40 @@ int td5_game_get_slot_accel(int slot)
     }
 }
 
+/* Monotonic cumulative track progress = lap * ring + folded span. Unlike the
+ * folded track_span_normalized (which resets to ~0 each lap), this keeps
+ * rising, so a real track-walker WARP shows as a mid-lap DROP while the legit
+ * lap-wrap (span resets, lap increments) keeps the product climbing. Circuit
+ * only: on a P2P/checkpoint track the "lap" counter is a checkpoint index and
+ * the ring is a sentinel, so fall back to the folded span. 0 if no actor. */
+int td5_game_get_slot_progress(int slot)
+{
+    TD5_Actor *a;
+    int ring, lap;
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    a = td5_game_get_actor(slot);
+    if (!a) return 0;
+    ring = td5_track_get_ring_length();
+    if (ring <= 0 || ring >= 9000)          /* no track / P2P sentinel */
+        return (int)a->track_span_normalized;
+    lap = td5_game_get_player_lap(slot);
+    if (lap < 0) lap = 0;
+    return lap * ring + (int)a->track_span_normalized;
+}
+
+/* Signed per-tick climb rate (world_pos.y - prev_frame_y_position, 24.8 fixed):
+ * >0 = climbing (uphill), <0 = descending, ~0 = flat/stopped. Same terrain
+ * delta the slope-decel physics reacts to; lets a scenario know WHEN a car is
+ * on an uphill. 0 if no actor. Read-only. */
+int td5_game_get_slot_climb(int slot)
+{
+    TD5_Actor *a;
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    a = td5_game_get_actor(slot);
+    if (!a) return 0;
+    return (int)(a->world_pos.y - a->prev_frame_y_position);
+}
+
 /* Returns cumulative race timer ticks (30/sec) for lap_index 0,
  * or the split time for lap_index 1-9. Used by HUD. */
 int32_t td5_game_get_race_timer(int slot, int lap_index)

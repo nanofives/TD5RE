@@ -193,6 +193,23 @@ class Scenario:
                 return r
         return {}
 
+    def recover_if_broken(self, st: Dict[str, Any], slot: int = 0) -> bool:
+        """Safety net for long unattended runs: if damage is active and this
+        slot's car is knocked out (health <= 0), tap R (DIK_R = 0x13, the
+        reset/recover key) so a broken-down wreck never stalls the scenario.
+        R recovers the player (slot 0) even while AI drives it. No-op when
+        damage isn't initialised (health field absent). Recovery is
+        edge-triggered game-side, so re-tapping across polls is harmless.
+        Call it once per sampling-loop iteration."""
+        health = self.racer(st, slot).get("damage_health")
+        if health is not None and health <= 0:
+            try:
+                self.cmd("tap_key", {"dik": 0x13})     # DIK_R -> recover_player
+            except ControlError:
+                pass
+            return True
+        return False
+
     def framedump(self, tag: str) -> Optional[str]:
         """In-engine backbuffer PNG into log/scenarios/ (evidence)."""
         EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
