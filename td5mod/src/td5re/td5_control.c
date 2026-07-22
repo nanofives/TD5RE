@@ -41,6 +41,7 @@
 #include "td5_damage.h"     /* TD5_DAMAGE_ACTOR_MAGIC (gates damage field reads) */
 #include "td5_arcade.h"     /* power-up queries (read-only) */
 #include "td5_tutorial.h"   /* tutorial-overlay-active query (read-only) */
+#include "td5_ai.h"         /* traffic-cop pursuit query (read-only) */
 #include "../../../re/include/td5_actor_struct.h"   /* full TD5_Actor (position/speed/damage) */
 #include "deps/cjson/cJSON.h"
 
@@ -293,6 +294,9 @@ static void ctrl_exec(cJSON *req, cJSON *reply)
                     cJSON_AddNumberToObject(r, "speed_raw", a->longitudinal_speed);
                     cJSON_AddNumberToObject(r, "speed", FP_TRUNC(a->longitudinal_speed));
                     cJSON_AddBoolToObject(r, "finished", td5_game_slot_is_finished(slot) ? 1 : 0);
+                    /* Traffic-cop pursuit (single-race cops=1 speeding chase)
+                     * — distinct from the wanted/cop-chase MODE role flags. */
+                    cJSON_AddBoolToObject(r, "pursued", td5_ai_actor_is_pursued(slot) ? 1 : 0);
                     cJSON_AddNumberToObject(r, "finish_position", td5_game_get_finish_position(slot));
                     if (a->damage_magic == TD5_DAMAGE_ACTOR_MAGIC) {
                         cJSON_AddNumberToObject(r, "damage_health", a->damage_health);

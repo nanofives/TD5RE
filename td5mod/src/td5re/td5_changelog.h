@@ -32,6 +32,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "July 22" },
+    { CL_ITEM,    "DEV: two new automated test scenarios - police start" },
+    { CL_ITEM,    "  chasing speeders (new per-car pursuit readout) and" },
+    { CL_ITEM,    "  reverse-direction circuits complete their laps." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "July 21" },
     { CL_ITEM,    "NEW: the game speaks Spanish! OPTIONS -> LANGUAGE picks" },
     { CL_ITEM,    "  ENGLISH or ESPANOL (AR) - rioplatense Spanish across" },
