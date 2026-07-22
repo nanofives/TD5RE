@@ -19,14 +19,16 @@ if s.check(s.start_race_and_wait(track=5, game_type=GAMETYPE_SINGLE_RACE,
     slot = s.state().get("race", {}).get("player_slot", 0)
 
     st = s.wait_until(lambda x: s.racer(x, slot).get("lap", 0) >= 1,
-                      120, "player lap counter advances (reverse routing OK)")
+                      120, "player lap counter advances (reverse routing OK)",
+                      recover_slot=slot)
     s.check(st is not None, "lap counter increments in reverse")
 
     # Natural finish: the player crosses the line or the game leaves RACE on
     # its own. NO end_race is sent before this point.
     st = s.wait_until(lambda x: x.get("game_state") != STATE_RACE
                       or s.racer(x, slot).get("finished"),
-                      300, "race reaches a natural finish (full lap count)")
+                      300, "race reaches a natural finish (full lap count)",
+                      recover_slot=slot)
     if s.check(st is not None, "reverse race finishes without warp/stall"):
         if st.get("game_state") == STATE_RACE:
             s.framedump("finish")

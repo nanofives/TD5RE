@@ -31,7 +31,8 @@ if s.check(s.start_race_and_wait(track=0, game_type=GAMETYPE_SINGLE_RACE,
         lambda x: any_effect(x)
         or x.get("game_state") != STATE_RACE
         or x.get("race", {}).get("sim_tick", 0) > start_tick + 600,
-        90, "SIM observation window elapsed (or a power-up leaked)")
+        90, "SIM observation window elapsed (or a power-up leaked)",
+        recover_slot=0)          # keep the field traversing the box lanes
     saw_effect = reached is not None and any_effect(reached)
     if saw_effect:
         s.framedump("leaked_powerup")

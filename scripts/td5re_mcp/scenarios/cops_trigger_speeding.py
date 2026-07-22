@@ -39,11 +39,13 @@ if s.check(s.start_race_and_wait(track=0, game_type=GAMETYPE_SINGLE_RACE,
     st = s.wait_until(lambda x: max((r.get("speed", 0) for r in
                                      x.get("race", {}).get("racers", [])),
                                     default=0) > 300,
-                      60, "some racer reaches chase-triggering pace (>300)")
+                      60, "some racer reaches chase-triggering pace (>300)",
+                      recover_slot=0)
     s.check(st is not None, "field reaches chase-triggering pace")
 
     st = s.wait_until(any_pursued, 180,
-                      "a traffic cop starts pursuing a speeding racer")
+                      "a traffic cop starts pursuing a speeding racer",
+                      recover_slot=0)
     if s.check(st is not None, "speeding past a cop triggers a pursuit"):
         chased = [r["slot"] for r in st["race"]["racers"] if r.get("pursued")]
         print(f"[{s.name}]   info: pursued racer slot(s): {chased}")

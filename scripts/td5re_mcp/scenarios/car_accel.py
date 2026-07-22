@@ -27,7 +27,7 @@ def measure(s, car):
     accel = s.racer(s.state(), slot).get("accel", 0)
     start_tick = s.state().get("race", {}).get("sim_tick", 0)
     st = s.wait_until(lambda x: s.racer(x, slot).get("speed", 0) >= TARGET_SPEED,
-                      40, f"car {car} reaches {TARGET_SPEED}")
+                      40, f"car {car} reaches {TARGET_SPEED}", recover_slot=slot)
     ticks = None
     if st is not None:
         ticks = st.get("race", {}).get("sim_tick", 0) - start_tick

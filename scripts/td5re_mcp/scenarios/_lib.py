@@ -144,11 +144,20 @@ class Scenario:
             return {"ok": False, "game_state": -1}
 
     def wait_until(self, pred: Callable[[Dict[str, Any]], bool], timeout: float,
-                   what: str, poll: float = 0.25) -> Optional[Dict[str, Any]]:
-        """Poll get_state until pred(state) is truthy; None on timeout."""
+                   what: str, poll: float = 0.25,
+                   recover_slot: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """Poll get_state until pred(state) is truthy; None on timeout.
+
+        Pass recover_slot to arm the broken-car safety net on a long
+        progress-dependent wait: each poll taps R if that slot's car is knocked
+        out, so a wreck can't hold the predicate forever (see recover_if_broken).
+        Leave it None for damage/crash scenarios that WANT a broken car to
+        persist."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             st = self.state()
+            if recover_slot is not None:
+                self.recover_if_broken(st, recover_slot)
             try:
                 if pred(st):
                     return st

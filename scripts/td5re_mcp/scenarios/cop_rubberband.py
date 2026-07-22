@@ -35,7 +35,8 @@ if s.check(s.start_race_and_wait(track=0, game_type=GAMETYPE_SINGLE_RACE,
                                  opponents=3, cops=1, traffic=4,
                                  player_is_ai=1, auto_throttle=1),
            "cops-on race launched (AI field, COP_CHASE_AI=1)"):
-    st = s.wait_until(any_pursued, 120, "a cop acquires a (fast, moving) suspect")
+    st = s.wait_until(any_pursued, 120, "a cop acquires a (fast, moving) suspect",
+                      recover_slot=0)
     if s.check(st is not None, "cop acquires a suspect"):
         # What's observable is cop ENGAGEMENT (suspect.pursued), not the cop's
         # own speed. A functioning catch-up/leash keeps cops repeatedly engaged
@@ -47,7 +48,9 @@ if s.check(s.start_race_and_wait(track=0, game_type=GAMETYPE_SINGLE_RACE,
         hits, samples = 0, 15
         for _ in range(samples):
             _t.sleep(1.0)
-            if any_pursued(s.state()):
+            cur = s.state()
+            s.recover_if_broken(cur, 0)        # keep the player in the field
+            if any_pursued(cur):
                 hits += 1
         print(f"[{s.name}]   pursued in {hits}/{samples} samples over ~15s")
         # >=3 distinct engaged seconds robustly clears the acquire-once-then-drop

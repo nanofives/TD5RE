@@ -26,7 +26,7 @@ if s.check(s.start_race_and_wait(track=0, game_type=GAMETYPE_SINGLE_RACE,
     if s.check(st.get("race", {}).get("arcade_active", False),
                "arcade mode reports active"):
         st = s.wait_until(lambda x: slot_with_effect(x) is not None,
-                          120, "any racer picks up a power-up")
+                          120, "any racer picks up a power-up", recover_slot=0)
         if s.check(st is not None, "a power-up effect was acquired"):
             r = slot_with_effect(st)
             slot, effect = r["slot"], r["arcade_effect"]

@@ -26,7 +26,7 @@ if s.check(s.start_race_and_wait(track=0, game_type=GAMETYPE_COP_CHASE,
 
     st = s.wait_until(lambda x: x.get("race", {}).get("wanted_mode")
                       and x.get("race", {}).get("cop_actor", -1) >= 0,
-                      90, "wanted mode + cop assigned")
+                      90, "wanted mode + cop assigned", recover_slot=slot)
     if s.check(st is not None, "wanted mode engages with a cop actor assigned"):
         # NOTE: is_cop/is_suspect are MP ROLE queries (need a cop SLOT among
         # the racers); SP wanted mode uses a separate AI cop actor and reports

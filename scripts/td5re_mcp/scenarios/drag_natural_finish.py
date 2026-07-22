@@ -28,7 +28,7 @@ if s.check(s.start_race_and_wait(track=0, game_type=GAMETYPE_DRAG_RACE,
     # itself leaves RACE. NO end_race is ever sent in this scenario.
     st = s.wait_until(lambda x: x.get("game_state") != STATE_RACE
                       or s.racer(x, slot).get("finished"),
-                      180, "natural drag finish")
+                      180, "natural drag finish", recover_slot=slot)
     if s.check(st is not None, "drag race ends naturally (no end_race sent)"):
         r = s.racer(st, slot)
         if st.get("game_state") == STATE_RACE:
