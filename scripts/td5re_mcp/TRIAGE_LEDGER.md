@@ -53,11 +53,23 @@ grown, so match rows by summary text, not line number.)
   car_damage=0, sustained battering, health never <=0 / no knockout), 166
   (drag_length — new `race.drag_repeats` get_state field: two launches at
   TD5RE_DRAG_LENGTH_LEVEL=0 vs 3, SHORT repeats=0 < EPIC repeats=816, no
-  driving needed) → tested. Remaining `auto`: 10 (per-player traffic cap —
-  race.log has an `on_road` counter but no `eff_cap`/`clusters` token, so the
-  cluster claim isn't cleanly log-observable — DEFERRED), 86 (arcade NITRO
+  driving needed) → tested. Remaining `auto`: 86 (arcade NITRO
   1.5x — stochastic pickup + multiplier), 158 (cop leash), 160 (drag MP,
   needs MP setup), 165 (drag longer — same as 166, now covered by drag_repeats).
+- **Cycle 5 (done, @<this commit>):** 10 (per-player traffic cap →
+  `traffic_perplayer_cap.py`). CORRECTION: the cycle-4 note claimed race.log
+  lacked `eff_cap`/`clusters` tokens — WRONG (a `head`-truncated grep missed
+  it). td5_ai_traffic.c:3851 already emits `traffic_perplayer_cap: on_road=..
+  eff_cap=.. clusters=.. anchors=.. span[..] pool=..` to race.log (LOG_TAG
+  "ai") ~every 2s, gated on the default-ON cap knob. NO code change needed —
+  the scenario parses those lines. Asserts: eff_cap == clamp(per*clusters,
+  [per,pool]) (per=16 at traffic=4, pool=64); clusters/eff_cap/on_road never
+  overflow the pool; and separation (forced via TD5RE_TRAFFIC_SHARE_SPANS=15
+  so the field splits) grows clusters to 5-6 → on_road 64 (past a single
+  16-car bubble). GOTCHA: on_road can transiently exceed a just-lowered
+  eff_cap when racers rebunch (cap gates SPAWN, not despawn) — assert
+  on_road<=pool, not <=eff_cap. Also incidentally survived ~70 actors (one
+  clean pass; one run hit the environmental teardown TDR under that load).
   **Reclassified `auto` → `auto-blocked` (the `auto` call was optimistic — the
   claim isn't observable through the current control surface):**
   - **19** frame cap → needs a present-rate / present_count readout in
