@@ -23,6 +23,8 @@
 #ifndef TD5_CONTROL_H
 #define TD5_CONTROL_H
 
+#include <stdint.h>
+
 #ifndef TD5RE_RELEASE
 
 /* Open the control socket + start the listener thread. No-op unless
@@ -44,12 +46,20 @@ void td5_control_tick(void);
  * this and performs the abort. Returns 1 exactly once per queued request. */
 int td5_control_take_end_race_request(void);
 
+/* Currently-held race action bits for a slot (hold_action/release_action
+ * verbs), OR'd over the polled hardware word in td5_input_poll_race_session
+ * exactly like td5_inputscript_race_bits. Returns 0 when the control server
+ * is disabled or nothing is held — the sim path is unperturbed unless a
+ * client actively holds an action. */
+uint32_t td5_control_race_bits(int slot);
+
 #else /* TD5RE_RELEASE: whole module compiled out */
 
 #define td5_control_init()                  ((void)0)
 #define td5_control_shutdown()              ((void)0)
 #define td5_control_tick()                  ((void)0)
 #define td5_control_take_end_race_request() 0
+#define td5_control_race_bits(slot)         0u
 
 #endif /* TD5RE_RELEASE */
 

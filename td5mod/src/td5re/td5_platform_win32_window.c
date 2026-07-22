@@ -413,6 +413,18 @@ static void td5_plat_dump_frame_png(const char *path) {
     ID3D11Texture2D_Release(bb);
 }
 
+/* Runtime one-shot frame-dump request (live-control `framedump` verb).
+ * Latched on the main thread (td5_control_tick), serviced at the next
+ * present by the same td5_plat_dump_frame_png path as the env dump. */
+static char s_fd_request[300];
+
+void td5_plat_request_frame_dump(const char *path)
+{
+    if (!path || !path[0]) return;
+    strncpy(s_fd_request, path, sizeof(s_fd_request) - 1);
+    s_fd_request[sizeof(s_fd_request) - 1] = '\0';
+}
+
 /* [DEVICE-LOST 2026-07-13] The STANDALONE present path (this file) calls
  * IDXGISwapChain_Present directly on several branches -- NOT through the
  * wrapper's Backend_CompositeAndPresent -- so its Present HRESULTs were never
@@ -571,6 +583,13 @@ void td5_plat_present(int vsync)
                 td5_plat_dump_frame_png(s_fd_path);
             }
         }
+    }
+
+    /* One-shot runtime dump request (live-control `framedump` verb). */
+    if (s_fd_request[0]) {
+        td5_plat_dump_frame_png(s_fd_request);
+        TD5_LOG_I("plat", "frame dumped -> %s", s_fd_request);
+        s_fd_request[0] = '\0';
     }
 
     if (s_present_log_count < 120 && g_backend.scene_rendered) {

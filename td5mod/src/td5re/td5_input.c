@@ -35,6 +35,7 @@
 #include "td5_laneassist.h" /* keyboard 'L' toggles the optional lane-assist aid */
 #include "td5_config.h"  /* shared TD5RE_* env-knob accessors */
 #include "td5_inputscript.h" /* scripted-input harness ([Trace] InputScript) */
+#include "td5_control.h"     /* live-control per-slot action bits (dev-only) */
 #include "td5_net.h"     /* td5_net_is_active/td5_net_local_slot — FFB netplay-vs-local branch */
 
 /* Defined in td5_game.c */
@@ -837,6 +838,12 @@ void td5_input_poll_race_session(void)
          * Inert (one branch) when no script is loaded. */
         if (td5_inputscript_active())
             s_control_bits[i] |= td5_inputscript_race_bits(i);
+
+        /* [CONTROL 2026-07-21] Live-control hold_action bits overlay the same
+         * way (identical downstream paths). Returns 0 whenever the control
+         * server is off or nothing is held; compiled to a constant 0 in
+         * release, so the sim path is untouched unless a client drives it. */
+        s_control_bits[i] |= td5_control_race_bits(i);
 
         /* Bit 28 = auto/manual gearbox toggle.
          * Orig 0x00402E60 derives actor+0x378 = ~(bits >> 28) & 1, then gates

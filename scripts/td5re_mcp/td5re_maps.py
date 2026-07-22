@@ -74,6 +74,19 @@ KEYS: Dict[str, int] = {
 }
 
 
+# --- race action verbs (k_actions[] in td5_inputscript.c) -----------------
+ACTIONS = ("throttle", "brake", "handbrake", "horn", "gearup", "geardown",
+           "camera", "rearview", "left", "right", "pause", "escape")
+
+
+def resolve_action(name: str) -> str:
+    """Validate an action verb name (game side does the bit lookup)."""
+    s = str(name).strip().lower()
+    if s in ACTIONS:
+        return s
+    raise KeyError(f"unknown action '{name}' (known: {', '.join(ACTIONS)})")
+
+
 def resolve_key(name_or_dik) -> int:
     """Accept an int DIK scancode or a friendly name; return the scancode."""
     if isinstance(name_or_dik, int):

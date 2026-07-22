@@ -115,6 +115,11 @@ static uint32_t isc_lookup_action(const char *tok)
     return 0;
 }
 
+uint32_t td5_inputscript_lookup_action(const char *name)
+{
+    return name ? isc_lookup_action(name) : 0;
+}
+
 /* ---- parsing --------------------------------------------------------- */
 
 static int isc_parse_value(const char *tok)

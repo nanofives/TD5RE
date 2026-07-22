@@ -1,5 +1,9 @@
 # TD5RE live-control MCP — testing hand-off (run on claude3)
 
+> **Superseded for day-to-day use** by [TESTING_WORKFLOW.md](TESTING_WORKFLOW.md)
+> (the durable two-account testing loop + scenario library). This file remains
+> as the one-shot v1 bring-up checklist.
+
 This is a self-contained prompt for a **claude3** session (an account that
 **can launch the game**). The implementation is done and builds clean on
 claude2 (DEV + RELEASE, structure-lint ratchets unchanged) but was **never run**
@@ -77,14 +81,29 @@ Anything that misbehaves → add a row to `td5mod/src/td5re/pending_to_test.csv`
 (and note it in the changelog) per the /fix-end logging routine, so the next
 session picks it up.
 
-## Known v1 limitations (candidate follow-ups, not bugs)
+## Known v1 limitations — ALL CLOSED by v2 (2026-07-21)
 
-- `get_state` race info is track/mode/sim_tick/actor-count/player-slot only —
-  no per-racer position/lap/speed yet (would need actor-field plumbing that
-  stays within the `td5_race_state.h` read-only surface).
-- `hold_key`/`tap_key` drive keyboard DIK scancodes (auto-released after N
-  frames); there is no per-slot race-action-bit injection for split-screen
-  players yet.
-- `screenshot()` inherits the desktop-capture "black frame if not visible"
-  gotcha (see `reference_screenshot_capture_black`); prefer the in-engine
-  `TD5RE_FRAMEDUMP=<path>` backbuffer dump for reliable full-color frames.
+- ~~`get_state` race info minimal~~ → now carries `racers[]` (per-slot
+  position/lap/speed/damage/cop-role/arcade fields), `num_racers`,
+  `countdown`, `tutorial`, `wanted_mode`, `cop_actor`, `victory_position`.
+- ~~no per-slot race-action injection~~ → `hold_action`/`release_action`
+  verbs (same OR-overlay contract as td5_inputscript).
+- ~~GDI screenshot black-frame gotcha~~ → `framedump` verb /
+  `screenshot_game()` MCP tool dump the backbuffer in-engine.
+
+## Driving gotchas (learned the hard way)
+
+- The **tutorial overlay re-arms EVERY race** with human slots and freezes
+  the countdown until each human presses a key. Poll `race.tutorial` and
+  `tap_key ENTER` to dismiss (scenarios/_lib.py does this automatically).
+- `race.countdown` reads false for a few frames at race entry BEFORE the
+  countdown arms — wait for `sim_tick > 60` too, not countdown alone.
+- The main thread doesn't drain commands during the blocking track load —
+  expect several seconds of reply timeouts after `start_race`; keep polling.
+- `dynamics=0` is ARCADE, `1` is SIMULATION (td5_arcade.c gates on ==0).
+- `is_cop`/`is_suspect` are MP role queries (need a cop SLOT); SP wanted
+  mode reports `cop_slot=-1` so they stay false — use `wanted_mode` +
+  `cop_actor` there.
+- `sfx_volume`/`music_volume` set via the whitelist are runtime-only: the
+  SAVE layer re-applies its own copy at race transitions. For a persistence
+  probe use `laps` (written to [GameOptions] on clean quit).

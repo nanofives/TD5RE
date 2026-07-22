@@ -11,6 +11,8 @@
  *
  * Verbs (v1): ping, get_state, start_race, end_race, set_screen,
  *   get_param, set_param, list_params, inject_key, tap_key, hold_key, quit.
+ * Verbs (v2): framedump (in-engine backbuffer PNG), hold_action /
+ *   release_action (per-slot race-action bits), richer get_state racers[].
  *
  * The listener thread only recvfrom()s and copies each datagram into a
  * mutex-guarded ring; td5_control_tick() (main thread) parses, executes and
@@ -33,7 +35,13 @@
 #include "td5_platform.h"
 #include "td5_config.h"
 #include "td5_frontend.h"
+#include "td5_inputscript.h"   /* action-name -> TD5_INPUT_* bit lookup */
 #include "td5_race_state.h"
+#include "td5_fp.h"         /* FP_TRUNC — 8.8 speed display truncate */
+#include "td5_damage.h"     /* TD5_DAMAGE_ACTOR_MAGIC (gates damage field reads) */
+#include "td5_arcade.h"     /* power-up queries (read-only) */
+#include "td5_tutorial.h"   /* tutorial-overlay-active query (read-only) */
+#include "../../../re/include/td5_actor_struct.h"   /* full TD5_Actor (position/speed/damage) */
 #include "deps/cjson/cJSON.h"
 
 #define LOG_TAG           "control"
@@ -70,6 +78,26 @@ static int s_end_race_request;
 
 /* hold/tap key auto-release: frames remaining per DIK scancode. */
 static int s_hold_frames[256];
+
+/* [CTRL INPUT FOCUS 2026-07-21] The frontend poll flushes the nav FIFO when
+ * the game window is unfocused, which silently ate control-injected menu keys
+ * on headless/background runs. While any injected key is live (plus a linger
+ * so queued events survive to the next poll), hold the same harness force the
+ * inputscript walker uses so the poll treats the window as active. */
+static int s_input_force_on = 0;
+static int s_input_force_linger = 0;
+static void ctrl_note_injection(void)
+{
+    if (!s_input_force_on) { td5_frontend_harness_force_input(1); s_input_force_on = 1; }
+    s_input_force_linger = 120;
+}
+
+/* Per-slot held race-action bits (hold_action/release_action verbs), OR'd
+ * over the polled hardware word via td5_control_race_bits() — the same
+ * overlay contract as td5_inputscript_race_bits. Per (slot, bit) countdown:
+ * 0 = bit not held, -1 = held until release_action, >0 = frames remaining. */
+static uint32_t s_action_bits[TD5_MAX_RACER_SLOTS];
+static int      s_action_frames[TD5_MAX_RACER_SLOTS][32];
 
 /* ------------------------------------------------------------------------
  * Deferred (post-abort) race launch — a tiny state machine mirroring the
@@ -223,12 +251,65 @@ static void ctrl_exec(cJSON *req, cJSON *reply)
         cJSON_AddNumberToObject(reply, "screen", (double)td5_frontend_get_screen());
         cJSON_AddBoolToObject(reply, "paused", td5_game_is_pause_menu_active() ? 1 : 0);
         if (st == TD5_GAMESTATE_RACE) {
+            int racers_wanted = 1;
+            int num_actors = td5_game_get_total_actor_count();
+            int player_slot = td5_game_get_player_slot(0);
+            int arcade = td5_arcade_mode_active();
             cJSON *race = cJSON_CreateObject();
+            cJSON *v = j_args ? cJSON_GetObjectItemCaseSensitive(j_args, "racers") : NULL;
+            if (v && cJSON_IsBool(v)) racers_wanted = cJSON_IsTrue(v) ? 1 : 0;
+
             cJSON_AddNumberToObject(race, "track",       g_td5.ini.default_track);
             cJSON_AddNumberToObject(race, "game_type",   g_td5.ini.default_game_type);
             cJSON_AddNumberToObject(race, "sim_tick",    g_td5.simulation_tick_counter);
-            cJSON_AddNumberToObject(race, "num_actors",  td5_game_get_total_actor_count());
-            cJSON_AddNumberToObject(race, "player_slot", td5_game_get_player_slot(0));
+            cJSON_AddNumberToObject(race, "num_actors",  num_actors);
+            cJSON_AddNumberToObject(race, "num_racers",  td5_game_get_racer_count());
+            cJSON_AddNumberToObject(race, "player_slot", player_slot);
+            cJSON_AddBoolToObject(race, "countdown",     td5_game_is_countdown_active() ? 1 : 0);
+            /* Tutorial overlay re-arms EVERY race for human slots and holds
+             * the countdown until each human presses a key — drivers must
+             * see it to dismiss it (tap ENTER). */
+            cJSON_AddBoolToObject(race, "tutorial",      td5_tutorial_is_active() ? 1 : 0);
+            cJSON_AddBoolToObject(race, "wanted_mode",   td5_game_is_wanted_mode() ? 1 : 0);
+            cJSON_AddNumberToObject(race, "cop_actor",   td5_game_get_cop_actor_index());
+            cJSON_AddBoolToObject(race, "arcade_active", arcade ? 1 : 0);
+            cJSON_AddNumberToObject(race, "victory_position", td5_game_get_victory_position());
+
+            if (racers_wanted) {
+                /* Racer slots only — traffic/scenery actors have no
+                 * lap/finish metrics and would emit garbage rows. */
+                cJSON *arr = cJSON_CreateArray();
+                int slot;
+                int racer_slots = td5_game_get_racer_count();
+                for (slot = 0; slot < racer_slots; slot++) {
+                    const TD5_Actor *a = td5_game_get_actor(slot);
+                    cJSON *r;
+                    if (!a) continue;
+                    r = cJSON_CreateObject();
+                    cJSON_AddNumberToObject(r, "slot", slot);
+                    cJSON_AddBoolToObject(r, "is_player", slot == player_slot ? 1 : 0);
+                    cJSON_AddNumberToObject(r, "position", a->race_position);
+                    cJSON_AddNumberToObject(r, "lap", td5_game_get_player_lap(slot));
+                    cJSON_AddNumberToObject(r, "speed_raw", a->longitudinal_speed);
+                    cJSON_AddNumberToObject(r, "speed", FP_TRUNC(a->longitudinal_speed));
+                    cJSON_AddBoolToObject(r, "finished", td5_game_slot_is_finished(slot) ? 1 : 0);
+                    cJSON_AddNumberToObject(r, "finish_position", td5_game_get_finish_position(slot));
+                    if (a->damage_magic == TD5_DAMAGE_ACTOR_MAGIC) {
+                        cJSON_AddNumberToObject(r, "damage_health", a->damage_health);
+                        cJSON_AddNumberToObject(r, "damage_accum",  a->damage_accum);
+                    }
+                    if (td5_game_is_wanted_mode()) {
+                        cJSON_AddBoolToObject(r, "is_cop",     td5_game_cop_chase_is_cop(slot) ? 1 : 0);
+                        cJSON_AddBoolToObject(r, "is_suspect", td5_game_cop_chase_is_suspect(slot) ? 1 : 0);
+                    }
+                    if (arcade) {
+                        cJSON_AddNumberToObject(r, "arcade_effect", td5_arcade_active_effect(slot));
+                        cJSON_AddNumberToObject(r, "arcade_frames", td5_arcade_active_frames(slot));
+                    }
+                    cJSON_AddItemToArray(arr, r);
+                }
+                cJSON_AddItemToObject(race, "racers", arr);
+            }
             cJSON_AddItemToObject(reply, "race", race);
         }
         return;
@@ -349,6 +430,7 @@ static void ctrl_exec(cJSON *req, cJSON *reply)
         }
         {
             int dik = jd->valueint;
+            ctrl_note_injection();
             if (strcmp(cmd, "inject_key") == 0) {
                 cJSON *jw = cJSON_GetObjectItemCaseSensitive(j_args, "down");
                 int down = (jw && cJSON_IsBool(jw)) ? (cJSON_IsTrue(jw) ? 1 : 0) : 1;
@@ -365,6 +447,67 @@ static void ctrl_exec(cJSON *req, cJSON *reply)
             }
             cJSON_AddBoolToObject(reply, "ok", 1);
         }
+        return;
+    }
+
+    if (strcmp(cmd, "hold_action") == 0 || strcmp(cmd, "release_action") == 0) {
+        cJSON *js = j_args ? cJSON_GetObjectItemCaseSensitive(j_args, "slot") : NULL;
+        cJSON *ja = j_args ? cJSON_GetObjectItemCaseSensitive(j_args, "action") : NULL;
+        int slot = (js && cJSON_IsNumber(js)) ? js->valueint : 0;
+        const char *name = (ja && cJSON_IsString(ja)) ? ja->valuestring : NULL;
+        int release = (cmd[0] == 'r');
+
+        if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) {
+            ctrl_err(reply, "slot out of range");
+            return;
+        }
+        if (release && !name) {
+            /* release_action with no action = release everything held on slot */
+            s_action_bits[slot] = 0;
+            memset(s_action_frames[slot], 0, sizeof(s_action_frames[slot]));
+            cJSON_AddBoolToObject(reply, "ok", 1);
+            return;
+        }
+        {
+            uint32_t bit = td5_inputscript_lookup_action(name);
+            int idx = 0;
+            if (!bit) {
+                ctrl_err(reply, "unknown action (throttle|brake|handbrake|horn|"
+                                "gearup|geardown|camera|rearview|left|right|pause|escape)");
+                return;
+            }
+            while (!((bit >> idx) & 1u)) idx++;
+            if (release) {
+                s_action_bits[slot] &= ~bit;
+                s_action_frames[slot][idx] = 0;
+            } else {
+                /* frames: default 60, clamp 1..600; 0 = hold until release. */
+                cJSON *jf = cJSON_GetObjectItemCaseSensitive(j_args, "frames");
+                int frames = (jf && cJSON_IsNumber(jf)) ? jf->valueint : 60;
+                if (frames <= 0)  frames = -1;         /* indefinite */
+                if (frames > 600) frames = 600;
+                s_action_bits[slot] |= bit;
+                s_action_frames[slot][idx] = frames;
+            }
+            cJSON_AddBoolToObject(reply, "ok", 1);
+            cJSON_AddNumberToObject(reply, "held_bits", (double)s_action_bits[slot]);
+        }
+        return;
+    }
+
+    if (strcmp(cmd, "framedump") == 0) {
+        /* One-shot in-engine backbuffer PNG at the next present — reliable
+         * even when the window is occluded (unlike GDI window capture). */
+        const char *path = "log/ctrl_frame.png";
+        cJSON *v = j_args ? cJSON_GetObjectItemCaseSensitive(j_args, "path") : NULL;
+        if (v && cJSON_IsString(v) && v->valuestring[0]) path = v->valuestring;
+        if (strstr(path, "..")) {
+            ctrl_err(reply, "path may not contain '..'");
+            return;
+        }
+        td5_plat_request_frame_dump(path);
+        cJSON_AddBoolToObject(reply, "ok", 1);
+        cJSON_AddStringToObject(reply, "path", path);
         return;
     }
 
@@ -550,6 +693,31 @@ void td5_control_tick(void)
                 td5_plat_input_inject_key(k, 0);
     }
 
+    /* Drop the harness input force once no injected key is live and the
+     * linger has drained (see ctrl_note_injection). */
+    if (s_input_force_on) {
+        int k, active = 0;
+        for (k = 0; k < 256; k++)
+            if (s_hold_frames[k] > 0) { active = 1; break; }
+        if (!active && s_input_force_linger > 0) s_input_force_linger--;
+        if (!active && s_input_force_linger == 0) {
+            td5_frontend_harness_force_input(0);
+            s_input_force_on = 0;
+        }
+    }
+
+    /* Auto-release held race actions whose countdown has elapsed
+     * (-1 = held until an explicit release_action). */
+    {
+        int sl, b;
+        for (sl = 0; sl < TD5_MAX_RACER_SLOTS; sl++) {
+            if (!s_action_bits[sl]) continue;
+            for (b = 0; b < 32; b++)
+                if (s_action_frames[sl][b] > 0 && --s_action_frames[sl][b] == 0)
+                    s_action_bits[sl] &= ~(1u << b);
+        }
+    }
+
     /* Drain queued command datagrams (execute + reply on the main thread). */
     for (;;) {
         CtrlMsg m;
@@ -570,6 +738,12 @@ int td5_control_take_end_race_request(void)
     if (!s_end_race_request) return 0;
     s_end_race_request = 0;
     return 1;
+}
+
+uint32_t td5_control_race_bits(int slot)
+{
+    if (!s_enabled || slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    return s_action_bits[slot];
 }
 
 #endif /* !TD5RE_RELEASE */

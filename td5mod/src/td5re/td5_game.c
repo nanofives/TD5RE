@@ -796,6 +796,18 @@ int td5_game_get_total_actor_count(void)
     return total;
 }
 
+/* Number of RACER slots in the current field (player(s) + AI opponents,
+ * excluding traffic/scenery actors). Read-only query for leaf modules
+ * (td5_race_state.h) — the live-control get_state bounds its racers[]
+ * array with this instead of the total actor count. */
+int td5_game_get_racer_count(void)
+{
+    int n = g_racer_count;
+    if (n < 0) return 0;
+    if (n > TD5_MAX_RACER_SLOTS) return TD5_MAX_RACER_SLOTS;
+    return n;
+}
+
 /* Minimap checkpoint-connector accessors. RenderTrackMinimapOverlay @ 0x0043A220
  * reads checkpoint spans from g_raceCheckpointTablePtr (0x4aed88) to draw the
  * connector road quads (Quad3/Quad4). s_active_checkpoint is the byte-faithful

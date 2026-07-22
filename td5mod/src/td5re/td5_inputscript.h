@@ -69,4 +69,9 @@ void td5_inputscript_frame_tick(void);
  * hardware word). 0 when inactive or no held actions. */
 uint32_t td5_inputscript_race_bits(int slot);
 
+/* Resolve an action verb name ("throttle", "brake", "left", ...) to its
+ * TD5_INPUT_* bit, or 0 if unknown. Shared with the live-control module's
+ * hold_action/release_action verbs so both speak the same action names. */
+uint32_t td5_inputscript_lookup_action(const char *name);
+
 #endif /* TD5_INPUTSCRIPT_H */

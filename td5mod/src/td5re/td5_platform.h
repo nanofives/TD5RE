@@ -42,6 +42,13 @@ int  td5_plat_pump_messages(void);
 
 /** Present the back buffer (flip/swap). */
 void td5_plat_present(int vsync);
+
+/** Request a one-shot swap-chain backbuffer PNG dump at the next present
+ *  (same encoder as the TD5RE_FRAMEDUMP env dump — reliable when the window
+ *  is occluded/headless, unlike GDI window capture). Main thread only; the
+ *  path is latched and cleared once written. Used by the live-control
+ *  `framedump` verb. */
+void td5_plat_request_frame_dump(const char *path);
 void td5_plat_present_texture_page(int page_index, int vsync);
 
 /** [diag] Set a short breadcrumb (e.g. self-test step / current scene) recorded

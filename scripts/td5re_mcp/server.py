@@ -28,10 +28,11 @@ from typing import Any, Dict, Optional
 from mcp.server.fastmcp import FastMCP
 
 from game_client import GameClient, ControlError
+import launcher
 import td5re_maps as maps
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-GAME_EXE = REPO_ROOT / "td5re.exe"          # DEV build (has the control surface)
+REPO_ROOT = launcher.REPO_ROOT
+GAME_EXE = launcher.GAME_EXE                # DEV build (has the control surface)
 CAPTURE_PS1 = REPO_ROOT / "tools" / "capture_window.ps1"
 LOG_DIR = REPO_ROOT / "log"
 
@@ -63,22 +64,8 @@ def launch_game(extra_args: str = "", wait_seconds: float = 20.0) -> Dict[str, A
     to answer ping. `extra_args` is appended verbatim (e.g. "--DefaultTrack=5").
     """
     global _proc
-    if not GAME_EXE.exists():
-        return {"ok": False, "error": f"{GAME_EXE} not found (build the DEV target first)"}
-    argv = [str(GAME_EXE), "--Control=1", "--SkipIntro=1"]
-    if extra_args.strip():
-        argv += extra_args.split()
-    _proc = subprocess.Popen(argv, cwd=str(REPO_ROOT))
-    client = _get_client()
-    deadline = time.time() + wait_seconds
-    while time.time() < deadline:
-        if client.is_alive():
-            return {"ok": True, "pid": _proc.pid, "ping": client.ping()}
-        if _proc.poll() is not None:
-            return {"ok": False, "error": f"process exited early (code {_proc.returncode})"}
-        time.sleep(0.3)
-    return {"ok": False, "error": "launched but control socket never answered ping",
-            "pid": _proc.pid}
+    _proc, info = launcher.launch(extra_args, wait_seconds, client=_get_client())
+    return info
 
 
 @mcp.tool()
@@ -86,20 +73,9 @@ def stop_game() -> Dict[str, Any]:
     """Ask the game to quit cleanly (flushes logs); escalate to a PID-scoped
     taskkill only if it does not exit. Never uses /IM (parallel-safe)."""
     global _proc
-    _cmd("quit")
-    if _proc is not None:
-        try:
-            _proc.wait(timeout=8)
-            code = _proc.returncode
-            _proc = None
-            return {"ok": True, "method": "quit", "exit_code": code}
-        except subprocess.TimeoutExpired:
-            subprocess.run(["taskkill", "/PID", str(_proc.pid), "/F"],
-                           capture_output=True)
-            pid = _proc.pid
-            _proc = None
-            return {"ok": True, "method": "taskkill", "pid": pid}
-    return {"ok": True, "method": "quit", "note": "no tracked process handle"}
+    info = launcher.stop(_proc, client=_get_client())
+    _proc = None
+    return info
 
 
 @mcp.tool()
@@ -118,9 +94,15 @@ def game_status() -> Dict[str, Any]:
 
 # --- game control ---------------------------------------------------------
 @mcp.tool()
-def get_state() -> Dict[str, Any]:
-    """Current game_state, screen, paused flag, and race info when racing."""
-    return _cmd("get_state")
+def get_state(racers: bool = True) -> Dict[str, Any]:
+    """Current game_state, screen, paused flag, and race info when racing.
+
+    While racing the reply's `race` object carries countdown/wanted_mode/
+    cop_actor/arcade_active/victory_position plus (unless racers=False) a
+    `racers` array: per-slot position, lap, speed, finished/finish_position,
+    damage_health/damage_accum (once damage init'd), is_cop/is_suspect
+    (cop-chase only) and arcade_effect/arcade_frames (arcade only)."""
+    return _cmd("get_state", {"racers": racers})
 
 
 @mcp.tool()
@@ -212,7 +194,62 @@ def hold_key(key: str, frames: int = 10) -> Dict[str, Any]:
     return _cmd("hold_key", {"dik": dik, "frames": frames})
 
 
+@mcp.tool()
+def hold_action(action: str, slot: int = 0, frames: int = 60) -> Dict[str, Any]:
+    """Hold a race-action bit on a racer slot (throttle|brake|handbrake|horn|
+    gearup|geardown|camera|rearview|left|right|pause|escape). Flows through
+    the same downstream paths as real input, works per split-screen slot and
+    with the window unfocused. frames=0 holds until release_action; otherwise
+    auto-releases after N game frames (max 600)."""
+    try:
+        act = maps.resolve_action(action)
+    except KeyError as exc:
+        return {"ok": False, "error": str(exc)}
+    return _cmd("hold_action", {"slot": slot, "action": act, "frames": frames})
+
+
+@mcp.tool()
+def release_action(slot: int = 0, action: Optional[str] = None) -> Dict[str, Any]:
+    """Release a held race action on a slot; omit `action` to release all."""
+    args: Dict[str, Any] = {"slot": slot}
+    if action is not None:
+        try:
+            args["action"] = maps.resolve_action(action)
+        except KeyError as exc:
+            return {"ok": False, "error": str(exc)}
+    return _cmd("release_action", args)
+
+
 # --- observability --------------------------------------------------------
+@mcp.tool()
+def screenshot_game(out_name: str = "ctrl_frame.png",
+                    wait_seconds: float = 2.0) -> Dict[str, Any]:
+    """In-engine backbuffer PNG via the `framedump` control verb — full-color
+    even when the window is occluded or headless (PREFER this over
+    `screenshot`). Waits for the file to appear/stabilize (dump happens at the
+    game's next present)."""
+    LOG_DIR.mkdir(exist_ok=True)
+    out_path = LOG_DIR / out_name
+    before = out_path.stat().st_mtime_ns if out_path.exists() else None
+    res = _cmd("framedump", {"path": f"log/{out_name}"})
+    if not res.get("ok"):
+        return res
+    deadline = time.time() + wait_seconds
+    last_size = -1
+    while time.time() < deadline:
+        if out_path.exists() and out_path.stat().st_mtime_ns != before:
+            size = out_path.stat().st_size
+            if size > 0 and size == last_size:      # size stable -> fully written
+                return {"ok": True, "path": str(out_path), "bytes": size}
+            last_size = size
+        time.sleep(0.1)
+    if out_path.exists() and out_path.stat().st_mtime_ns != before:
+        return {"ok": True, "path": str(out_path), "bytes": out_path.stat().st_size,
+                "note": "written but size-stability window expired"}
+    return {"ok": False, "error": "framedump acknowledged but no file appeared "
+            "(is the game presenting frames?)"}
+
+
 @mcp.tool()
 def screenshot(out_name: str = "td5re_shot.png") -> Dict[str, Any]:
     """Screenshot the game window by PID via tools/capture_window.ps1.

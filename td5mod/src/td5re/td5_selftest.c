@@ -51,6 +51,7 @@
 #include "td5_game.h"
 #include "td5_frontend.h"
 #include "td5_trace.h"
+#include "td5_pending.h"   /* force the pending overlay off for golden races */
 #include "td5_save.h"
 #include "td5_net.h"
 #include "td5_backend_capture.h"
@@ -979,6 +980,13 @@ static void st_apply_scenario(const RaceScenario *sc)
     if (sc->player_is_ai >= 0) g_td5.ini.player_is_ai    = sc->player_is_ai;
     if (sc->auto_throttle >= 0) g_td5.ini.auto_throttle  = sc->auto_throttle;
     g_td5.ini.trace_fast_forward = s_ff;
+    /* [RGOLD DETERMINISM 2026-07-22] The screen-walk phase's nav walker can
+     * activate the PENDING TEST screen's overlay-toggle row, leaving the
+     * pending overlay ON for every subsequent race — which draws the
+     * pending_to_test.csv rows into the frame and makes the RENDER goldens
+     * depend on the CSV's current content (adding a row broke rgold-pelton
+     * t130 by ~cell 90). Force it off before every race scenario. */
+    td5_pending_set_overlay(0);
     if (sc->trace_golden) st_golden_begin();
 }
 
