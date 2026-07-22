@@ -1078,6 +1078,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Additive span shift for every actor spawn — mirrors the Frida hook on
      * InitializeActorTrackPose (0x00434350). 0 = vanilla grid. */
     g_td5.ini.start_span_offset     = td5_ini_int("Game", "StartSpanOffset", 0);
+    /* [QUICK RACE DEBUG 2026-07-21] Dev "end at checkpoint N" (P2P tracks). 0 = off. */
+    g_td5.ini.dbg_end_checkpoint    = td5_ini_int("Game", "EndCheckpoint", 0);
     g_td5.ini.default_reverse       = td5_ini_int("Game", "DefaultReverse", 0);
     /* [CAR DAMAGE 2026-06-28/29] Global GTA4-style damage. Master now defaults ON
      * (Game Options controls the levels; CarDamage=0 is the faithful-sim escape).

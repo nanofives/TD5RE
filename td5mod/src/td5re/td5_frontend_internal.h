@@ -607,7 +607,15 @@ enum {
     RO_CHECKPOINTS, RO_POWERUPS, RO_TOUGHNESS, RO_DEFORM,
     /* [RACE OPTIONS CONSOLIDATION 2026-07-21] absorbed from the retired GAME
      * OPTIONS screen so RACE OPTIONS is the single game-behaviour surface. */
-    RO_COLLISIONS, RO_DAMAGE, RO_LANEASSIST, RO_TUTORIAL, RO_OPT_COUNT
+    RO_COLLISIONS, RO_DAMAGE, RO_LANEASSIST, RO_TUTORIAL,
+    /* [QUICK RACE DEBUG 2026-07-21] Quick-Race-exclusive rows (is_quick_race).
+     * The first block moved off the Quick Race screen's inline buttons; PLAYER AI
+     * / AUTO-THROTTLE / AI SCREENS / SPAN OFFSET / END CHECKPOINT / GAME SPEED are
+     * dev-only debugging aids (compiled out of RELEASE). END CHECKPOINT is
+     * point-to-point only (no finish checkpoint on circuits). */
+    RO_PLAYER_AI, RO_AUTO_THROTTLE, RO_AI_SCREENS, RO_SPAN_OFFSET,
+    RO_GAME_SPEED, RO_END_CHECKPOINT,
+    RO_OPT_COUNT
 };
 const char *td5_raceopts_label(int idx);
 void        td5_raceopts_value(int idx, char *out, size_t out_sz);
@@ -627,6 +635,7 @@ typedef struct {
     int is_mp;          /* any local/net MP session */
     int mp_mode;        /* g_td5.mp_mode_config.mode (valid when is_mp) */
     int is_net;         /* netplay host */
+    int is_circuit;     /* selected track is a circuit (no finish checkpoint) */
     int opponents;      /* s_num_ai_opponents snapshot */
 } TD5_RaceOptsCtx;
 
@@ -721,6 +730,12 @@ extern int  s_snap_car, s_snap_paint, s_snap_trans, s_snap_config;
  * RANDOMIZE buttons at indices 12/13) so every hard-coded index above stays put.
  * Visible in BOTH dev and release; flips the shared s_game_option_dynamics. */
 #define QR_BTN_PHYSICS    14
+/* [QUICK RACE DEBUG 2026-07-21] RACE OPTIONS button — opens the dynamic RACE
+ * OPTIONS screen with the quick-race context (opponents / physics / traffic /
+ * ... + the dev debug rows). Created LAST (index 15). The old inline OPPONENTS /
+ * PHYSICS / AI SCREENS / PLAYER AI / AUTO-THR / SPAN rows are now created HIDDEN
+ * (index stability) and edited on RACE OPTIONS instead. */
+#define QR_BTN_RACEOPTS   15
 
 /* Quick Race layout: caption buttons in a left column, the selected value in a
  * right column, all rows uniformly spaced.

@@ -6200,6 +6200,13 @@ const char *td5_raceopts_label(int idx) {
         case RO_DAMAGE:      return "DAMAGE";
         case RO_LANEASSIST:  return "LANE ASSIST";
         case RO_TUTORIAL:    return "TUTORIAL";
+        /* [QUICK RACE DEBUG 2026-07-21] Quick-Race-exclusive rows. */
+        case RO_PLAYER_AI:     return "PLAYER AI";
+        case RO_AUTO_THROTTLE: return "AUTO-THROTTLE";
+        case RO_AI_SCREENS:    return "AI SCREENS";
+        case RO_SPAN_OFFSET:   return "SPAN OFFSET";
+        case RO_GAME_SPEED:    return "GAME SPEED";
+        case RO_END_CHECKPOINT:return "END AT CHKPT";
     }
     return "";
 }
@@ -6252,6 +6259,21 @@ void td5_raceopts_value(int idx, char *out, size_t out_sz) {
         case RO_DAMAGE:      v = on_off[s_game_option_car_damage & 1]; break;
         case RO_LANEASSIST:  v = on_off[s_game_option_laneassist & 1]; break;
         case RO_TUTORIAL:    v = on_off[s_game_option_tutorial & 1]; break;
+        /* [QUICK RACE DEBUG 2026-07-21] Quick-Race-exclusive rows. */
+        case RO_PLAYER_AI:     v = on_off[g_td5.ini.player_is_ai & 1]; break;
+        case RO_AUTO_THROTTLE: v = on_off[g_td5.ini.auto_throttle & 1]; break;
+        case RO_AI_SCREENS:    snprintf(out, out_sz, "%d", s_num_spectate_screens); return;
+        case RO_SPAN_OFFSET:   snprintf(out, out_sz, "%d", g_td5.ini.start_span_offset); return;
+        case RO_GAME_SPEED: {
+            float f = g_td5.ini.trace_fast_forward;
+            if (f <= 0.0f) f = 1.0f;
+            snprintf(out, out_sz, "%.2gx", (double)f);
+            return;
+        }
+        case RO_END_CHECKPOINT:
+            if (g_td5.ini.dbg_end_checkpoint <= 0) { snprintf(out, out_sz, "OFF"); }
+            else { snprintf(out, out_sz, "%d", g_td5.ini.dbg_end_checkpoint); }
+            return;
     }
     snprintf(out, out_sz, "%s", v);
 }
@@ -6307,6 +6329,41 @@ void td5_raceopts_cycle(int idx, int delta) {
         case RO_DAMAGE:      s_game_option_car_damage ^= 1; break;
         case RO_LANEASSIST:  s_game_option_laneassist ^= 1; break;
         case RO_TUTORIAL:    s_game_option_tutorial ^= 1; break;
+        /* [QUICK RACE DEBUG 2026-07-21] Quick-Race-exclusive rows. */
+        case RO_PLAYER_AI:     g_td5.ini.player_is_ai ^= 1; break;
+        case RO_AUTO_THROTTLE: g_td5.ini.auto_throttle ^= 1; break;
+        case RO_AI_SCREENS:
+            s_num_spectate_screens += delta;
+            if (s_num_spectate_screens < 0) s_num_spectate_screens = 0;
+            if (s_num_spectate_screens > 6) s_num_spectate_screens = 6;
+            break;
+        case RO_SPAN_OFFSET:
+            g_td5.ini.start_span_offset += delta;
+            if (g_td5.ini.start_span_offset < 0) g_td5.ini.start_span_offset = 0;
+            if (g_td5.ini.start_span_offset > 9999) g_td5.ini.start_span_offset = 9999;
+            break;
+        case RO_GAME_SPEED: {
+            /* Cycle a fixed set of speed multipliers (the [Trace]TraceFastForward
+             * modifier, applied to all play in td5_game). */
+            static const float k_speeds[] = { 0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 8.0f };
+            const int n = (int)(sizeof k_speeds / sizeof k_speeds[0]);
+            float cur = g_td5.ini.trace_fast_forward;
+            int i, idx = 2;   /* default -> 1.0x */
+            if (cur <= 0.0f) cur = 1.0f;
+            for (i = 0; i < n; i++) if (cur <= k_speeds[i] + 0.001f) { idx = i; break; }
+            idx += delta;
+            if (idx < 0) idx = 0;
+            if (idx > n - 1) idx = n - 1;
+            g_td5.ini.trace_fast_forward = k_speeds[idx];
+            break;
+        }
+        case RO_END_CHECKPOINT:
+            /* 0 = OFF (full race); 1..N = force-finish when the player reaches
+             * checkpoint N (point-to-point tracks only). */
+            g_td5.ini.dbg_end_checkpoint += delta;
+            if (g_td5.ini.dbg_end_checkpoint < 0) g_td5.ini.dbg_end_checkpoint = 0;
+            if (g_td5.ini.dbg_end_checkpoint > 63) g_td5.ini.dbg_end_checkpoint = 63;
+            break;
     }
 }
 
@@ -6370,6 +6427,25 @@ int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
     case RO_LANEASSIST:  /* SP only (per-player LANE ASSIST lives on the MP profile) */
     case RO_TUTORIAL:    /* SP only */
         return !c->is_mp;
+    /* [QUICK RACE DEBUG 2026-07-21] Quick-Race-exclusive dev debugging rows —
+     * compiled out of RELEASE (dev-only, like the old inline QR buttons). */
+    case RO_PLAYER_AI:
+    case RO_AUTO_THROTTLE:
+    case RO_AI_SCREENS:
+    case RO_SPAN_OFFSET:
+    case RO_GAME_SPEED:
+#ifdef TD5RE_RELEASE
+        return 0;
+#else
+        return c->is_quick_race;
+#endif
+    case RO_END_CHECKPOINT:   /* dev-only; point-to-point tracks only (no finish
+                               * checkpoint on a circuit) */
+#ifdef TD5RE_RELEASE
+        return 0;
+#else
+        return c->is_quick_race && !c->is_circuit;
+#endif
     }
     return 0;
 }

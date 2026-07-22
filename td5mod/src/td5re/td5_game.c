@@ -8585,6 +8585,17 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
             }
         }
 
+#ifndef TD5RE_RELEASE
+        /* [QUICK RACE DEBUG 2026-07-21] "END AT CHKPT N": on a point-to-point track,
+         * force-finish the whole race the moment the PLAYER (slot 0) reaches
+         * checkpoint N (dev-only Quick Race RACE OPTIONS row; force_finish is
+         * idempotent so calling it each tick past N is safe). */
+        if (slot == 0 && g_td5.ini.dbg_end_checkpoint > 0 && !g_track_is_circuit &&
+            m->checkpoint_index >= g_td5.ini.dbg_end_checkpoint) {
+            td5_game_force_finish_race();
+        }
+#endif
+
         /* Check if all checkpoints passed (skip if checkpoint data not loaded) */
         if (s_active_checkpoint.checkpoint_count > 0 &&
             m->checkpoint_index >= s_active_checkpoint.checkpoint_count) {

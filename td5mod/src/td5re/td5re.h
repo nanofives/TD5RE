@@ -632,6 +632,12 @@ typedef struct TD5_GlobalState {
          * [Game] StartSpanOffset, overridable via --StartSpanOffset=N on the
          * command line. 0 = vanilla grid. */
         int  start_span_offset;
+        /* [QUICK RACE DEBUG 2026-07-21] Dev-only "end at checkpoint N": on a
+         * point-to-point track, force-finish the race the moment the player
+         * reaches checkpoint N (1-based). 0 = OFF (run the full race). Set on the
+         * Quick Race RACE OPTIONS screen (dev builds); read at race tick in
+         * td5_game. INI [Game] EndCheckpoint. */
+        int  dbg_end_checkpoint;
         /* Force AutoRace track direction to backwards (s_track_direction=1).
          * 0 = forwards (default). 1 = backwards, picks STRIPB.DAT/LEFTB.TRK/
          * RIGHTB.TRK/TRAFFICB.BUS in td5_asset_load_level. Only consumed by

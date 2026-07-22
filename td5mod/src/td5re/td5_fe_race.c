@@ -1087,7 +1087,9 @@ void Screen_QuickRaceMenu(void) {
            * the gap. */
           bi = frontend_create_button("Players",             QR_COL_X, QR_ROW_Y(3), QR_BTN_W, 32); /* QR_BTN_PLAYERS */
           if (bi >= 0) { s_buttons[bi].hidden = 1; s_buttons[bi].disabled = 1; }
-          frontend_create_button("Opponents",           QR_COL_X, QR_ROW_Y(3), QR_BTN_W, 32); /* QR_BTN_OPPONENTS */
+          bi = frontend_create_button("Opponents",      QR_COL_X, QR_ROW_Y(3), QR_BTN_W, 32); /* QR_BTN_OPPONENTS */
+          /* [QUICK RACE DEBUG 2026-07-21] Opponents moved to RACE OPTIONS -> hide inline. */
+          if (bi >= 0) { s_buttons[bi].hidden = 1; s_buttons[bi].disabled = 1; }
           /* [S02 (c) 2026-06-04] Circuit laps, re-homed here from Game Options.
            * Mirrors the Track Selection laps row; edits s_game_option_laps. */
           frontend_create_button("Laps",                QR_COL_X, QR_ROW_Y(4), QR_BTN_W, 32); /* QR_BTN_LAPS */
@@ -1098,11 +1100,8 @@ void Screen_QuickRaceMenu(void) {
            * [PHYSICS 2026-06-26] Moved row 5 -> 6: the new Physics (ARCADE/SIM)
            * row took row 5 (right under Laps). */
           bi = frontend_create_button("AI Screens",        QR_COL_X, QR_ROW_Y(6), QR_BTN_W, 32); /* QR_BTN_SPLITSCREENS */
-#ifdef TD5RE_RELEASE
+          /* [QUICK RACE DEBUG 2026-07-21] AI SCREENS moved to RACE OPTIONS (dev) -> hide inline. */
           if (bi >= 0) { s_buttons[bi].hidden = 1; s_buttons[bi].disabled = 1; }
-#else
-          (void)bi;
-#endif
         }
         /* [PHYSICS 2026-06-26] OK/Back moved row 7 -> 8 ("a little lower") so the
          * new Physics row (row 5) + the dev rows (AI Screens 6, Span Offset 7) all
@@ -1119,10 +1118,10 @@ void Screen_QuickRaceMenu(void) {
                                 "Player AI: %s", g_td5.ini.player_is_ai ? "ON" : "OFF");
           if (bt >= 0) snprintf(s_buttons[bt].label, sizeof s_buttons[bt].label,
                                 "Auto-Thr: %s", g_td5.ini.auto_throttle ? "ON" : "OFF");
-#ifdef TD5RE_RELEASE
+          /* [QUICK RACE DEBUG 2026-07-21] PLAYER AI + AUTO-THROTTLE moved to RACE
+           * OPTIONS (dev) -> hide inline. */
           if (bp >= 0) { s_buttons[bp].hidden = 1; s_buttons[bp].disabled = 1; }
           if (bt >= 0) { s_buttons[bt].hidden = 1; s_buttons[bt].disabled = 1; }
-#endif
         }
         /* [2026-06-15 TASK A1] Dev-only "Span Offset" click-to-type button on its
          * OWN row below the "AI Screens" row. Created LAST so QR_BTN_OK/BACK/
@@ -1133,18 +1132,9 @@ void Screen_QuickRaceMenu(void) {
          * widget render path.
          * [PHYSICS 2026-06-26] Moved row 6 -> 7 (Physics took row 5, AI Screens 6). */
         { int bs = frontend_create_button("Span Offset", QR_COL_X, QR_ROW_Y(7), QR_BTN_W, 32); /* QR_BTN_SPAN */
-#ifdef TD5RE_RELEASE
+          /* [QUICK RACE DEBUG 2026-07-21] SPAN OFFSET moved to RACE OPTIONS (dev)
+           * -> hide the inline click-to-type row. */
           if (bs >= 0) { s_buttons[bs].hidden = 1; s_buttons[bs].disabled = 1; }
-#else
-          /* TD5RE_DEV_SPAN_FIELD=0 hides the whole field (button + value/caret); the
-           * value/caret render in td5_frontend.c gates on the same knob. Cached here
-           * (the canonical one-time log lives in frontend_qr_span_field_on). */
-          static int s_qr_span_btn_on = -1;
-          if (s_qr_span_btn_on < 0) {
-              s_qr_span_btn_on = td5_env_flag_on("TD5RE_DEV_SPAN_FIELD");
-          }
-          if (bs >= 0 && !s_qr_span_btn_on) { s_buttons[bs].hidden = 1; s_buttons[bs].disabled = 1; }
-#endif
         }
 
         /* [#10 2026-06-16] Dedicated RANDOMIZE buttons for the Car and Track rows.
@@ -1175,7 +1165,16 @@ void Screen_QuickRaceMenu(void) {
          * Sync the live value from the persisted INI first so the row shows the
          * choice that's actually in effect. */
         s_game_option_dynamics = g_td5.ini.dynamics ? 1 : 0;
-        frontend_create_button("Physics", QR_COL_X, QR_ROW_Y(5), QR_BTN_W, 32); /* QR_BTN_PHYSICS */
+        { int bph = frontend_create_button("Physics", QR_COL_X, QR_ROW_Y(5), QR_BTN_W, 32); /* QR_BTN_PHYSICS */
+          /* [QUICK RACE DEBUG 2026-07-21] Physics moved to RACE OPTIONS -> hide inline. */
+          if (bph >= 0) { s_buttons[bph].hidden = 1; s_buttons[bph].disabled = 1; }
+        }
+        /* [QUICK RACE DEBUG 2026-07-21] RACE OPTIONS entry (created LAST, index
+         * QR_BTN_RACEOPTS=15). Opens the dynamic RACE OPTIONS screen with the
+         * quick-race context: opponents / physics / traffic / police / ... plus the
+         * dev debug rows (PLAYER AI, AUTO-THROTTLE, AI SCREENS, SPAN OFFSET,
+         * GAME SPEED, END AT CHKPT). */
+        frontend_create_button("RACE OPTIONS", QR_COL_X, QR_ROW_Y(5), QR_BTN_W, 32); /* QR_BTN_RACEOPTS */
 
         /* Reset direction to Forwards on entry (matches TrackSelection); hide the
          * toggle on forward-only/circuit tracks (caption stays "Direction" —
@@ -1355,6 +1354,14 @@ void Screen_QuickRaceMenu(void) {
             if (frontend_qr_random_button_on() &&
                 s_button_index == QR_BTN_RAND_TRACK && s_button_count > QR_BTN_RAND_TRACK) {
                 frontend_qr_roll_selector(1);   /* roll TRACK */
+            }
+
+            /* [QUICK RACE DEBUG 2026-07-21] RACE OPTIONS button opens the dynamic
+             * RACE OPTIONS screen (quick-race context); OK/BACK there return to
+             * Quick Race (no launch — Quick Race's own OK launches). */
+            if (s_button_index == QR_BTN_RACEOPTS && s_button_count > QR_BTN_RACEOPTS) {
+                raceopts_open(TD5_SCREEN_QUICK_RACE, 0, RO_BACK_PARENT);
+                return;
             }
 
             if (s_button_index == QR_BTN_OK) {
@@ -6806,6 +6813,9 @@ static void raceopts_build_ctx(TD5_RaceOptsCtx *ctx) {
     ctx->mp_mode       = mode;
     ctx->is_net        = s_network_active ? 1 : 0;
     ctx->is_quick_race = (s_flow_context == 2) ? 1 : 0;
+    /* [QUICK RACE DEBUG 2026-07-21] END AT CHKPT is point-to-point only. Frontend
+     * hint via the LEVELINF circuit flag; the race tick re-guards on g_track_is_circuit. */
+    ctx->is_circuit    = td5_asset_track_is_circuit(s_selected_track) ? 1 : 0;
     if (is_mp) {
         ctx->is_cup        = (mode == TD5_MP_MODE_CUP);
         ctx->is_cop_chase  = (mode == TD5_MP_MODE_COP_CHASE);
