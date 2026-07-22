@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 22" },
+    { CL_ITEM,    "POLISH: Spanish text now renders entirely in the menu" },
+    { CL_ITEM,    "  font - vowel accents are dropped (MENU PRINCIPAL," },
+    { CL_ITEM,    "  GRAFICAS) and the N-with-tilde + inverted ?/! are" },
+    { CL_ITEM,    "  built into the font, so no more mismatched fallback" },
+    { CL_ITEM,    "  typeface on accented characters." },
     { CL_ITEM,    "DEV: two new automated test scenarios - police start" },
     { CL_ITEM,    "  chasing speeders (new per-car pursuit readout) and" },
     { CL_ITEM,    "  reverse-direction circuits complete their laps." },

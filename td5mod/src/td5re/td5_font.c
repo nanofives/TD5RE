@@ -101,6 +101,29 @@ static float cap_units(stbtt_fontinfo *fi)
     return (asc > 0) ? (float)asc * 0.7f : 1.0f;
 }
 
+/* [I18N 2026-07-22] Spanish accent policy: drop the acute accent from vowels and
+ * render the plain base vowel (á→a … Ú→U). The menu font (MontBlanc Trial)
+ * watermarks its accented glyphs anyway, and dropping the accent reads fine in a
+ * stylised game menu. ñ/Ñ and ¿/¡ are NOT folded — they carry meaning and now
+ * have real outlines in menu.ttf (see re/tools/build_es_menu_font.py). Applied at
+ * every codepoint entry point below so draw + measure across all three faces agree. */
+static int fold_accent_cp(int cp)
+{
+    switch (cp) {
+        case 0xE1: return 'a';  /* á */
+        case 0xE9: return 'e';  /* é */
+        case 0xED: return 'i';  /* í */
+        case 0xF3: return 'o';  /* ó */
+        case 0xFA: return 'u';  /* ú */
+        case 0xC1: return 'A';  /* Á */
+        case 0xC9: return 'E';  /* É */
+        case 0xCD: return 'I';  /* Í */
+        case 0xD3: return 'O';  /* Ó */
+        case 0xDA: return 'U';  /* Ú */
+        default:   return cp;
+    }
+}
+
 static void pick_font(int cp, stbtt_fontinfo **fi, float *cap)
 {
     if (cp >= 0 && cp < 256 && s_use_fb[cp] && s_have_fb) {
@@ -287,6 +310,7 @@ void td5_font_get(int cp, float cap_px, td5_glyph *out)
 {
     out->valid = 0;
     if (!td5_font_ready()) return;
+    cp = fold_accent_cp(cp);
     stbtt_fontinfo *fi; float cap;
     pick_font(cp, &fi, &cap);
     font_rasterize(fi, cap, 0, cp, cap_px, out);
@@ -295,6 +319,7 @@ void td5_font_get(int cp, float cap_px, td5_glyph *out)
 float td5_font_advance(int cp, float cap_px)
 {
     if (!td5_font_ready()) return 0.0f;
+    cp = fold_accent_cp(cp);
     stbtt_fontinfo *fi; float cap;
     pick_font(cp, &fi, &cap);
     int adv = 0, lsb = 0;
@@ -341,6 +366,7 @@ void td5_hudfont_get(int cp, float cap_px, td5_glyph *out)
 {
     out->valid = 0;
     if (!td5_hudfont_ready()) return;
+    cp = fold_accent_cp(cp);
     stbtt_fontinfo *fi; float cap;
     pick_hud_font(cp, &fi, &cap);
     font_rasterize(fi, cap, 1, cp, cap_px, out);
@@ -349,6 +375,7 @@ void td5_hudfont_get(int cp, float cap_px, td5_glyph *out)
 float td5_hudfont_advance(int cp, float cap_px)
 {
     if (!td5_hudfont_ready()) return 0.0f;
+    cp = fold_accent_cp(cp);
     stbtt_fontinfo *fi; float cap;
     pick_hud_font(cp, &fi, &cap);
     int adv = 0, lsb = 0;
@@ -395,6 +422,7 @@ void td5_titlefont_get(int cp, float cap_px, td5_glyph *out)
 {
     out->valid = 0;
     if (!td5_titlefont_ready()) return;
+    cp = fold_accent_cp(cp);
     stbtt_fontinfo *fi; float cap;
     pick_title_font(cp, &fi, &cap);
     font_rasterize(fi, cap, 2, cp, cap_px, out);
@@ -403,6 +431,7 @@ void td5_titlefont_get(int cp, float cap_px, td5_glyph *out)
 float td5_titlefont_advance(int cp, float cap_px)
 {
     if (!td5_titlefont_ready()) return 0.0f;
+    cp = fold_accent_cp(cp);
     stbtt_fontinfo *fi; float cap;
     pick_title_font(cp, &fi, &cap);
     int adv = 0, lsb = 0;
