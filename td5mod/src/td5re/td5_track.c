@@ -6848,16 +6848,26 @@ void td5_track_init_traffic_from_queue(void)
 int td5_track_load_routes(const void *left_data, size_t left_size,
                            const void *right_data, size_t right_size)
 {
-    /* Free any existing route data */
-    if (s_route_left) {
-        free(s_route_left);
-        s_route_left = NULL;
-    }
-    if (s_route_right) {
-        free(s_route_right);
-        s_route_right = NULL;
-    }
+    /* [DRAG UAF FIX 2026-07-21] Defer freeing the PREVIOUS race's route buffers
+     * until AFTER the new tables are installed and td5_ai_set_route_tables()'s
+     * refresh has run. Freeing them up front is a use-after-free: the refresh
+     * (td5_ai_refresh_route_state_slot PATH 2b, td5_ai.c:1571) leaves
+     * rs[RS_ROUTE_TABLE_PTR] pointing at the previous race's buffer and
+     * dereferences it at td5_ai.c:1650. On normal levels the freed page stays
+     * mapped (garbage read, no fault), but the drag-extend path mallocs/frees
+     * LARGE buffers that get individually unmapped -> hard fault (0xC0000005)
+     * when two consecutive drag-level loads occur (drag game_type leaking onto
+     * a non-drag track + traffic/cops raising the active-slot count). Building
+     * the new buffers first and freeing the old ones LAST keeps the page mapped
+     * while the premature refresh reads the SAME bytes (free() doesn't zero
+     * memory), so golden traces are byte-identical. */
+    uint8_t *old_left  = s_route_left;
+    uint8_t *old_right = s_route_right;
 
+    /* Detach the globals from the old allocations WITHOUT freeing them yet; the
+     * new buffers are built from scratch below. */
+    s_route_left = NULL;
+    s_route_right = NULL;
     s_route_left_size = 0;
     s_route_right_size = 0;
     td5_ai_set_route_tables(NULL, 0, NULL, 0);
@@ -6865,8 +6875,11 @@ int td5_track_load_routes(const void *left_data, size_t left_size,
     /* Load LEFT.TRK */
     if (left_data && left_size > 0) {
         s_route_left = (uint8_t *)malloc(left_size);
-        if (!s_route_left)
+        if (!s_route_left) {
+            free(old_left);
+            free(old_right);
             return 0;
+        }
         memcpy(s_route_left, left_data, left_size);
         s_route_left_size = left_size;
     }
@@ -6879,6 +6892,8 @@ int td5_track_load_routes(const void *left_data, size_t left_size,
             s_route_left = NULL;
             s_route_left_size = 0;
             td5_ai_set_route_tables(NULL, 0, NULL, 0);
+            free(old_left);
+            free(old_right);
             return 0;
         }
         memcpy(s_route_right, right_data, right_size);
@@ -6924,6 +6939,14 @@ int td5_track_load_routes(const void *left_data, size_t left_size,
 
     td5_ai_set_route_tables(s_route_left, s_route_left_size,
                             s_route_right, s_route_right_size);
+
+    /* [DRAG UAF FIX 2026-07-21] The install + refresh above have finished
+     * reading the previous race's buffers via the stale rs[RS_ROUTE_TABLE_PTR]
+     * (PATH 2b). td5_ai_initialize_runtime re-points every slot's rs ptr at the
+     * NEW tables afterwards, so the old buffers are now unreferenced -> free
+     * them last. free(NULL) is a no-op on the first-ever load. */
+    free(old_left);
+    free(old_right);
 
     TD5_LOG_I(LOG_TAG, "Route data loaded: left=%u bytes right=%u bytes",
               (unsigned int)s_route_left_size, (unsigned int)s_route_right_size);
