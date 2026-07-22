@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 21" },
+    { CL_ITEM,    "FIX: starting a race right after a drag race no longer" },
+    { CL_ITEM,    "  crashes the game (a stale route buffer was freed too" },
+    { CL_ITEM,    "  early and read back during setup)" },
     { CL_ITEM,    "NEW: one RACE OPTIONS screen for every mode. GAME" },
     { CL_ITEM,    "  OPTIONS is gone - every game-behaviour setting" },
     { CL_ITEM,    "  (traffic, police, difficulty, dynamics, checkpoints," },
