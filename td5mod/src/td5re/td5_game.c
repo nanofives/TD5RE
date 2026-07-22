@@ -4117,14 +4117,27 @@ static void init_race_spawn_actors(void)
              * Faithful TD5 tracks keep the geometry yaw byte-identically (the
              * "DO NOT post-process" note below still governs them).
              *
-             * [NATIVE REVERSE CIRCUIT 2026-07-01] Reverse native circuits get the
+             * [NATIVE REVERSE CIRCUIT 2026-07-01] Reverse native CIRCUITS get the
              * SAME correction: the generated reverse strip's per-span vertex
              * layout yields a sheared/diagonal geometry yaw (verified: Newcastle
              * rev slot 0 span 512 geom 855 vs true travel ~772), so re-seed from
              * the reverse route-byte heading (LEFTB/RIGHTB.TRK), with the
              * centreline-tangent fallback. Forward faithful TD5 tracks are still
-             * excluded and keep the byte-faithful geometry yaw. */
-            if (g_active_td6_level > 0 || g_td5.reverse_direction)
+             * excluded and keep the byte-faithful geometry yaw.
+             *
+             * [NATIVE REVERSE P2P EXCLUSION 2026-07-22] Native P2P tracks in
+             * reverse (Edinburgh, Moscow, etc.) use the ORIGINAL game's STRIPB.DAT
+             * whose per-span vertex layout is identical to the forward strip — the
+             * geometry yaw from td5_track_compute_heading is already correct.
+             * Applying the correction to these tracks is harmful: if LEFTB.TRK
+             * route bytes are zero at the spawn spans (e.g. Edinburgh spans 45-119
+             * are all rb=0), the tangent-fallback fires and adds +0x800 to the
+             * already-correct geometry heading, rotating cars 180° to face
+             * backward. [CONFIRMED Edinburgh level016 STRIPB spans 53-119 rb=0,
+             * geom=0x000 (north/correct), tangent-fallback yields 0x800 (south).]
+             * Exclude P2P reverse from the correction; only circuits (generated
+             * STRIPB) and TD6 tracks need it. */
+            if (g_active_td6_level > 0 || (g_td5.reverse_direction && g_track_is_circuit))
                 td5_ai_correct_spawn_heading(slot);
 
             /* DO NOT post-process the geometry-derived yaw.
