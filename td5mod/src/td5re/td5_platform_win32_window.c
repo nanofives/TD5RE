@@ -487,6 +487,14 @@ void td5_plat_dump_gpu_crash_diag(const char *path)
  * removal, driver uninstall) doesn't spin D3D11CreateDevice forever. On success
  * Backend_RecreateDevice clears g_backend.device_removed and the game's texture
  * pages are rebuilt from their retained CPU copies. */
+/* [TDR MITIGATION 2026-07-22] Frames remaining in the post-recovery "ease-in"
+ * window: while >0, td5_plat_present clamps the frame rate hard (<=60) even if
+ * the normal cap is higher/uncapped, so we don't slam a just-recreated (and
+ * still-fragile) driver with a submission burst — the DXGI debug layer's own
+ * advice after a DEVICE_HUNG is to "fallback to less aggressive use of the
+ * display hardware". Set on a successful recover; counts down in present. */
+static int s_recover_ease_frames = 0;
+
 static void plat_try_recover_device(void)
 {
     static int s_attempts = 0;
@@ -501,6 +509,13 @@ static void plat_try_recover_device(void)
     TD5_LOG_W(LOG_TAG, "device lost: recovery attempt %d", s_attempts);
     if (Backend_RecreateDevice()) {
         td5_plat_render_recover_textures();
+        /* [TDR MITIGATION 2026-07-22] Give the freshly-recreated driver a beat
+         * to settle before we resume submitting — a hard 0xC0000005 in Present
+         * on the just-recovered device is the residual crash class, and the GPU
+         * has just come back from a hang. Cheap (only on the rare recovery) and
+         * then ease frame submission back in for ~2s (see s_recover_ease_frames). */
+        td5_plat_sleep(80);
+        s_recover_ease_frames = 120;
         TD5_LOG_W(LOG_TAG, "device recovered after %d attempt(s)", s_attempts);
         s_attempts = 0;
         s_cooldown = 0;
@@ -536,18 +551,29 @@ void td5_plat_present(int vsync)
      * race->results transition; capping it prevents the hang the device-lost
      * recovery path only recovers from. No effect when VSync is on (the vblank
      * wait already paces). Knob TD5RE_FRAME_CAP=<fps> overrides; 0 = uncapped
-     * (e.g. benchmarking). Default 300 FPS is ~100x below the rate that hung the
-     * GPU and is imperceptible for gameplay and menus. */
+     * (e.g. benchmarking). [TDR MITIGATION 2026-07-22] Default lowered 300->144:
+     * the residual crash is a hardware TDR under load (D3D debug layer confirmed
+     * DEVICE_HUNG, no API misuse), and its own guidance is "less aggressive use
+     * of the display hardware"; 144 FPS is still smooth+imperceptible for a 1999
+     * game and roughly halves steady-state GPU submission vs 300. Additionally,
+     * for ~2s after a device recovery the effective cap is clamped to <=60
+     * (s_recover_ease_frames) to ease a still-fragile driver back in. */
     {
         static int s_cap_fps = -1;            /* -1 = unread env */
         static uint64_t s_cap_last_us = 0;
+        int eff_cap;
         if (s_cap_fps < 0) {
             const char *e = getenv("TD5RE_FRAME_CAP");
-            s_cap_fps = (e && e[0]) ? atoi(e) : 300;
+            s_cap_fps = (e && e[0]) ? atoi(e) : 144;
             if (s_cap_fps < 0) s_cap_fps = 0;
         }
-        if (s_cap_fps > 0 && !(vsync && g_backend.vsync)) {
-            uint64_t min_dt = 1000000ULL / (uint64_t)s_cap_fps;
+        eff_cap = s_cap_fps;
+        if (s_recover_ease_frames > 0) {      /* post-recovery ease-in window */
+            s_recover_ease_frames--;
+            if (eff_cap == 0 || eff_cap > 60) eff_cap = 60;
+        }
+        if (eff_cap > 0 && !(vsync && g_backend.vsync)) {
+            uint64_t min_dt = 1000000ULL / (uint64_t)eff_cap;
             uint64_t now = td5_plat_time_us();
             if (s_cap_last_us != 0 && now > s_cap_last_us &&
                 (now - s_cap_last_us) < min_dt) {

@@ -53,6 +53,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  GPU call. Optional D3D debug layer (TD5RE_D3D_DEBUG=1)" },
     { CL_ITEM,    "  confirmed the rare crash is a hardware GPU timeout" },
     { CL_ITEM,    "  (TDR), not a game bug - no invalid graphics calls." },
+    { CL_ITEM,    "FIX: fewer GPU timeout crashes - frame rate cap lowered" },
+    { CL_ITEM,    "  to 144 (VSync off) and the GPU is eased back in gently" },
+    { CL_ITEM,    "  for a moment after a recovery (TD5RE_FRAME_CAP still" },
+    { CL_ITEM,    "  overrides; 0 = uncapped)." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 21" },
