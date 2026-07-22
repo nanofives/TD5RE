@@ -6387,12 +6387,32 @@ static int s_ro_ok_btn    = -1;
 static int s_ro_back_btn  = -1;
 static int s_ro_prev_btn  = -1;
 static int s_ro_next_btn  = -1;
+static int s_ro_per_page  = 7;        /* rows per page — computed from geometry */
 
-#define RO_ROW_X    120
-#define RO_ROW_W    224
-#define RO_ROW_H    32
-#define RO_ROW_Y0   96
-#define RO_ROW_STEP 34
+/* [LAYOUT 2026-07-21] Per FRONTEND_SCREEN_GUIDE: stacked-button pitch = h + 6px,
+ * value text at x=348, nothing below the Y460 content floor. The OK/BACK +
+ * PREV/NEXT control rows are pinned at the bottom (all four the same 96px width);
+ * rows-per-page is computed so the option rows never reach the control area — as
+ * the row set grows per game mode, pages are added instead of overlapping. */
+#define RO_ROW_X       120
+#define RO_ROW_W       224
+#define RO_ROW_H       32
+#define RO_ROW_GAP     6                        /* guideline stacked gap */
+#define RO_ROW_Y0      96
+#define RO_ROW_STEP    (RO_ROW_H + RO_ROW_GAP)  /* 38 */
+#define RO_CTL_W       96                        /* OK / BACK / PREV / NEXT all equal */
+#define RO_CONTENT_FLOOR 460                     /* guideline: nothing below Y460 */
+#define RO_OKBACK_Y    (RO_CONTENT_FLOOR - RO_ROW_H - 4)  /* 424 (bottom 456) */
+#define RO_PREVNEXT_Y  (RO_OKBACK_Y - RO_ROW_STEP)        /* 386 */
+#define RO_BTN2_X      (RO_ROW_X + RO_CTL_W + RO_ROW_GAP) /* 222: 2nd control col */
+
+/* How many option rows fit above the (always-reserved) control area, so the last
+ * row keeps a >=RO_ROW_GAP gap to the PREV/NEXT row and nothing crosses Y460. */
+static int ro_compute_per_page(void) {
+    int per = 0, y = RO_ROW_Y0;
+    while (y + RO_ROW_H <= RO_PREVNEXT_Y - RO_ROW_GAP) { per++; y += RO_ROW_STEP; }
+    return per < 1 ? 1 : per;
+}
 
 int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
     /* Traffic Battle is an MP sub-mode; cop chase covers SP (game_type 8) and MP. */
@@ -6469,7 +6489,7 @@ int td5_raceopts_next_btn(void)  { return s_ro_next_btn; }
 int td5_raceopts_row_option(int row) {
     int idx;
     if (row < 0 || row >= s_ro_row_count) return -1;
-    idx = s_ro_page * RO_ROWS_PER_PAGE + row;
+    idx = s_ro_page * s_ro_per_page + row;
     return (idx < s_ro_total) ? s_ro_rows[idx] : -1;
 }
 
@@ -6478,15 +6498,16 @@ int td5_raceopts_row_option(int row) {
  * Mirrors td5_gameopts_build_page. */
 void td5_raceopts_build_page(void) {
     int start, end, r;
-    s_ro_pages = (s_ro_total + RO_ROWS_PER_PAGE - 1) / RO_ROWS_PER_PAGE;
+    s_ro_per_page = ro_compute_per_page();
+    s_ro_pages = (s_ro_total + s_ro_per_page - 1) / s_ro_per_page;
     if (s_ro_pages < 1) s_ro_pages = 1;
     if (s_ro_page >= s_ro_pages) s_ro_page = s_ro_pages - 1;
     if (s_ro_page < 0) s_ro_page = 0;
 
     frontend_reset_buttons();
 
-    start = s_ro_page * RO_ROWS_PER_PAGE;
-    end   = start + RO_ROWS_PER_PAGE;
+    start = s_ro_page * s_ro_per_page;
+    end   = start + s_ro_per_page;
     if (end > s_ro_total) end = s_ro_total;
     s_ro_row_count = end - start;
 
@@ -6495,11 +6516,12 @@ void td5_raceopts_build_page(void) {
                                RO_ROW_X, RO_ROW_Y0 + r * RO_ROW_STEP,
                                RO_ROW_W, RO_ROW_H);
 
-    s_ro_ok_btn   = frontend_create_button(SNK_OkButTxt,   120, 414,  96, 32);
-    s_ro_back_btn = frontend_create_button(SNK_BackButTxt, 232, 414, 112, 32);
+    /* OK / BACK pinned at the bottom (both RO_CTL_W wide, same as PREV/NEXT). */
+    s_ro_ok_btn   = frontend_create_button(SNK_OkButTxt,   RO_ROW_X, RO_OKBACK_Y, RO_CTL_W, RO_ROW_H);
+    s_ro_back_btn = frontend_create_button(SNK_BackButTxt, RO_BTN2_X, RO_OKBACK_Y, RO_CTL_W, RO_ROW_H);
     if (s_ro_pages > 1) {
-        s_ro_prev_btn = frontend_create_button("< PREV", 120, 380, 96, 32);
-        s_ro_next_btn = frontend_create_button("NEXT >", 248, 380, 96, 32);
+        s_ro_prev_btn = frontend_create_button("< PREV", RO_ROW_X, RO_PREVNEXT_Y, RO_CTL_W, RO_ROW_H);
+        s_ro_next_btn = frontend_create_button("NEXT >", RO_BTN2_X, RO_PREVNEXT_Y, RO_CTL_W, RO_ROW_H);
     } else {
         s_ro_prev_btn = -1;
         s_ro_next_btn = -1;
@@ -7309,7 +7331,8 @@ static void frontend_render_race_options_overlay(float sx, float sy) {
         int opt = td5_raceopts_row_option(r);
         if (opt < 0 || !s_buttons[r].active || s_buttons[r].hidden) continue;
         td5_raceopts_value(opt, vb, sizeof vb);
-        fe_draw_text(350.0f * sx, (float)(s_buttons[r].y + 6) * sy, vb,
+        /* [LAYOUT 2026-07-21] value text left-justified at x=348 per guideline. */
+        fe_draw_text(348.0f * sx, (float)(s_buttons[r].y + 6) * sy, vb,
                      0xFFFFFFFFu, sx * 0.8f, sy * 0.8f);
     }
 }
