@@ -284,6 +284,7 @@ static void ctrl_exec(cJSON *req, cJSON *reply)
             cJSON_AddBoolToObject(race, "tutorial",      td5_tutorial_is_active() ? 1 : 0);
             cJSON_AddBoolToObject(race, "wanted_mode",   td5_game_is_wanted_mode() ? 1 : 0);
             cJSON_AddNumberToObject(race, "cop_actor",   td5_game_get_cop_actor_index());
+            cJSON_AddBoolToObject(race, "battle",        td5_game_battle_mode_active() ? 1 : 0);
             cJSON_AddBoolToObject(race, "arcade_active", arcade ? 1 : 0);
             cJSON_AddNumberToObject(race, "victory_position", td5_game_get_victory_position());
 

@@ -57,6 +57,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  to 144 (VSync off) and the GPU is eased back in gently" },
     { CL_ITEM,    "  for a moment after a recovery (TD5RE_FRAME_CAP still" },
     { CL_ITEM,    "  overrides; 0 = uncapped)." },
+    { CL_ITEM,    "DEV: three more test scenarios - the attract demo fires" },
+    { CL_ITEM,    "  and returns cleanly, solo Traffic Battle composition," },
+    { CL_ITEM,    "  and police keep re-engaging a fast field." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 21" },
