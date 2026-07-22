@@ -62,6 +62,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "CHANGE: crash screen-shake no longer rattles constantly" },
     { CL_ITEM,    "  in a crowded pack - light bumps don't shake, and a" },
     { CL_ITEM,    "  new shake won't re-trigger until the last one settles." },
+    { CL_ITEM,    "DEV: new opt-in live-control socket (--Control=1) lets a" },
+    { CL_ITEM,    "  test tool drive a running game (launch races, jump" },
+    { CL_ITEM,    "  menus, inject input). Off by default; dev builds only." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 20" },

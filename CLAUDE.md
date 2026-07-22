@@ -98,6 +98,14 @@ includers, no new compiler warnings per -W class.
   `TD5RE_TRACE_GOLDEN_UPDATE=1 pwsh scripts/selftest.ps1 -Suite full` (commit
   the file with the change). This is the behavioral regression net; CI can't
   run it (no game assets on runners) — CI gates on the structure lint instead.
+- **Live-control socket** (dev builds): `td5re.exe --Control=1` (or `[Control]
+  Enabled=1`) opens a localhost UDP command socket (`127.0.0.1:37060`,
+  `TD5RE_CONTROL_PORT` override; default OFF) so an external process can drive
+  a running game — launch/abort races, jump screens, get/set whitelisted knobs,
+  inject input, query state. Game side: `td5mod/src/td5re/td5_control.c`
+  (listener thread → ring, drained on the main thread at the top of
+  `td5_game_tick`). Driver: the `td5re` MCP server in `scripts/td5re_mcp/`
+  (or its stdlib `game_client.py` directly). Compiled out of RELEASE.
 
 ## Fast navigation (read this BEFORE grepping the 10k-line modules)
 
@@ -260,6 +268,7 @@ Key headers: `td5_types.h` (structs, verified against 0x388 actor stride),
 | `pyghidra-mcp` | Headless multi-binary Ghidra analysis | Cross-binary call tracing |
 | `radare2` (pending) | Quick binary triage, 26+ tools | Fast analysis without Ghidra startup |
 | `semgrep` | C static analysis (OSS, tools deprecated) | Use Bash semgrep directly |
+| `td5re` | Drive a RUNNING dev td5re.exe (launch/abort races, jump screens, get/set knobs, inject input, screenshot, tail logs) via the live-control socket | Interactive/automated in-game testing — see `scripts/td5re_mcp/` |
 
 **Frida attach:** `attach("TD5.exe")` or `attach("TD5_d3d.exe")` — process must be running.
 **codebase-memory index:** `td5mod/src/td5re` only (deps/mingw crashes the indexer).
