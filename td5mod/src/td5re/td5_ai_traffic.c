@@ -2237,6 +2237,17 @@ static int trf_force_oncoming(void)
     return 0;
 }
 
+/* [TRAFFIC BATTLE EVASIVE 2026-07-23] 1 when the EVASIVE TRAFFIC option is armed:
+ * a battle race with mp_mode_config.battle_evasive set. TD5RE_BATTLE_EVASIVE
+ * overrides either way (1 = on, 0 = off) for headless/knob testing. Reads process
+ * config + replicated mode, so it is lockstep-deterministic across peers. */
+static int trf_battle_evasive_on(void)
+{
+    const char *e = getenv("TD5RE_BATTLE_EVASIVE");
+    if (e && e[0]) return atoi(e) != 0;
+    return td5_game_battle_mode_active() && g_td5.mp_mode_config.battle_evasive;
+}
+
 static int trf_dyn_lane_direction(int lane_count, int lane)
 {
     /* [TRAFFIC BATTLE] Every lane heads oncoming — takes precedence over the
@@ -2304,6 +2315,60 @@ static int trf_dyn_lane_change_blocked(int slot, int lane_count, int cand_lane)
     if (!rs) return 0;
     return trf_dyn_lane_direction(lane_count, cand_lane) !=
            (rs[RS_ROUTE_DIRECTION_POLARITY] & 1);
+}
+
+/* [TRAFFIC BATTLE EVASIVE 2026-07-23] When the EVASIVE TRAFFIC option is on, bias
+ * a traffic car's target sub-lane one step AWAY from the nearest racer so the
+ * stream actively dodges the player — harder to ram. Returns `lane` unchanged
+ * when disabled, single-lane, no racer in range, or the escape lane would be an
+ * opposite-direction / blocked lane. Called once per traffic car per tick at the
+ * lane-choice chokepoint (after the normal chooser), so the car keeps drifting
+ * away as the racer closes in. Deterministic: reads replicated actor state only. */
+static int trf_battle_evade_lane(int slot, int target_span, int lane_count, int lane)
+{
+    int n, s, best_slot = -1, best_dist = 0x7FFFFFFF;
+    int racer_lane, away, cand, range;
+    if (!trf_battle_evasive_on() || lane_count <= 1) return lane;
+    if (lane < 0) lane = 0;
+    if (lane >= lane_count) lane = lane_count - 1;
+
+    /* Nearest racer (humans + AI) by |span - target_span|. Racers occupy slots
+     * [0, g_traffic_slot_base); skip decoration/absent (state 3). */
+    n = g_traffic_slot_base;
+    if (n > g_active_actor_count) n = g_active_actor_count;
+    if (n > TD5_MAX_TOTAL_ACTORS) n = TD5_MAX_TOTAL_ACTORS;
+    for (s = 0; s < n; s++) {
+        char *a = actor_ptr(s);
+        int sp, d;
+        if (!a || g_slot_state[s] == 3) continue;
+        sp = (int)(int16_t)ACTOR_I16(a, ACTOR_SPAN_NORMALIZED);
+        d = sp - target_span;
+        if (d < 0) d = -d;
+        if (d < best_dist) { best_dist = d; best_slot = s; }
+    }
+    /* Only bother dodging a racer close enough to actually threaten a ram. */
+    range = td5_env_int("TD5RE_BATTLE_EVADE_RANGE", 10, 1, 200);
+    if (best_slot < 0 || best_dist > range) return lane;
+
+    racer_lane = (int)ACTOR_U8(actor_ptr(best_slot), ACTOR_SUB_LANE_INDEX);
+    if (racer_lane < 0) racer_lane = 0;
+    if (racer_lane >= lane_count) racer_lane = lane_count - 1;
+
+    /* Step one lane in the direction that increases separation. If the racer is
+     * already in our lane, break toward the farther edge (more room to run). */
+    if (lane < racer_lane)      away = -1;
+    else if (lane > racer_lane) away = +1;
+    else                        away = (racer_lane <= lane_count / 2) ? +1 : -1;
+
+    cand = lane + away;
+    if (cand < 0 || cand >= lane_count) return lane;
+    if (trf_dyn_lane_change_blocked(slot, lane_count, cand)) return lane;
+
+    if ((g_ai_frame_counter % 30u) == 0u)
+        TD5_LOG_I(LOG_TAG,
+                  "trf_battle_evade: slot=%d racer=%d dist=%d lane %d->%d (evasive)",
+                  slot, best_slot, best_dist, lane, cand);
+    return cand;
 }
 
 static uint32_t trf_dyn_rand(void)
@@ -4403,6 +4468,15 @@ void td5_ai_update_traffic_route_plan(int slot) {
                         slot, target_span,
                         td5_track_get_span_lane_count(target_span), target_sub_lane);
                 }
+
+                /* [TRAFFIC BATTLE EVASIVE 2026-07-23] After the normal chooser,
+                 * bias one lane away from the nearest racer when EVASIVE TRAFFIC
+                 * is armed. Independent of the smart/SmartAI gate above so it
+                 * applies whichever chooser ran. Skips branch spans (lane indices
+                 * are unstable there). */
+                target_sub_lane = trf_battle_evade_lane(
+                    slot, target_span,
+                    td5_track_get_span_lane_count(target_span), target_sub_lane);
             }
 
             /* [RIGHT-BRANCH TRAFFIC FIX 2026-06-21] The held branch lane must be

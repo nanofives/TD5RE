@@ -3576,13 +3576,18 @@ static void mp_mode_config_apply_defaults(int mode) {
         c->cop_infect_enabled = 0;              /* [INFECT] off by default */
         break;
     case TD5_MP_MODE_TRAFFIC_BATTLE:
-        /* [TRAFFIC BATTLE 2026-06-28] Seed the spawn cadence + power-up density
-         * from the knobs (the in-race setup re-reads battle_spawn_period if it is
-         * still 0). 30 ticks @30Hz = a fresh traffic car ~every second. */
+        /* [TRAFFIC BATTLE 2026-06-28] Seed the spawn cadence from the knob (the
+         * in-race setup re-reads battle_spawn_period if it is still 0). 30 ticks
+         * @30Hz = a fresh traffic car ~every second. No UI row any more — this is
+         * a fixed internal cadence tunable only via TD5RE_BATTLE_SPAWN_PERIOD. */
         c->battle_spawn_period = td5_env_int("TD5RE_BATTLE_SPAWN_PERIOD", 30, 5, 240);
-        /* default DENSE for a battle */
-        c->battle_powerup_density = td5_env_int("TD5RE_ARCADE_DENSITY", 2, 0, 3);
+        /* [TRAFFIC BATTLE 2026-07-23] Power-ups removed from this mode — no item
+         * boxes / MAGNET; the ram mechanic stands on its own. */
+        c->battle_powerup_density = 0;
         c->battle_win_condition = TD5_BATTLE_WIN_MOST_WRECKS;   /* default */
+        /* [TRAFFIC BATTLE EVASIVE 2026-07-23] Default OFF (harder = opt-in).
+         * TD5RE_BATTLE_EVASIVE forces it on/off for headless/knob testing. */
+        c->battle_evasive = td5_env_flag_off("TD5RE_BATTLE_EVASIVE");
         break;
     case TD5_MP_MODE_DRAG_RACE:
         /* [DRAG RACE 2026-06-30] Default no traffic, MEDIUM distance, no extra
@@ -3836,8 +3841,8 @@ typedef struct {
 
 static const char *const k_cfg_offon[2]  = { "OFF", "ON" };
 static const char *const k_cfg_wincon[3] = { "BUST ALL", "MOST BUSTS", "SUDDEN DEATH" };
-/* [TRAFFIC BATTLE 2026-06-28] power-up density tiers (battle_powerup_density). */
-static const char *const k_cfg_density[4] = { "SPARSE", "NORMAL", "DENSE", "MEGA" };
+/* [TRAFFIC BATTLE 2026-07-23] power-up density tiers (k_cfg_density) removed with
+ * the POWER-UPS option — power-ups no longer exist in Traffic Battle. */
 /* [TRAFFIC BATTLE 2026-06-28] win-condition labels (battle_win_condition). */
 static const char *const k_cfg_battlewin[2] = { "MOST WRECKS", "CHECKPOINTS" };
 /* [DRAG RACE 2026-06-30] distance preset labels (drag_length). */
@@ -3880,13 +3885,15 @@ static int mp_cfg_build(MpCfgOpt *o) {
         o[n].label="INFECT";           o[n].val=&c->cop_infect_enabled;  o[n].min=0;  o[n].max=1;  o[n].step=1; o[n].enum_labels=k_cfg_offon; o[n].enum_count=2; n++;
         break;
     case TD5_MP_MODE_TRAFFIC_BATTLE:
-        /* [TRAFFIC BATTLE 2026-06-28] Win condition + spawn cadence (ticks @30Hz;
-         * lower = denser target stream) + item-box density. MOST WRECKS runs to
-         * the track end; CHECKPOINTS adds a deadline that creeps up the track and
-         * knocks out anyone it passes, so you must keep crashing AND keep moving. */
+        /* [TRAFFIC BATTLE 2026-06-28] Win condition. MOST WRECKS runs to the
+         * track end; CHECKPOINTS adds a deadline that creeps up the track and
+         * knocks out anyone it passes, so you must keep crashing AND keep moving.
+         * [TRAFFIC BATTLE 2026-07-23] SPAWN PERIOD + POWER-UPS options removed:
+         * the spawn cadence is now a fixed internal value and item-box power-ups
+         * are always off in this mode. EVASIVE TRAFFIC is the new difficulty
+         * option — ON makes traffic actively dodge the player (harder to ram). */
         o[n].label="WIN";              o[n].val=&c->battle_win_condition;   o[n].min=0; o[n].max=1;   o[n].step=1; o[n].enum_labels=k_cfg_battlewin; o[n].enum_count=2; n++;
-        o[n].label="SPAWN PERIOD";     o[n].val=&c->battle_spawn_period;    o[n].min=5; o[n].max=120; o[n].step=5; o[n].enum_labels=NULL;            o[n].enum_count=0; n++;
-        o[n].label="POWER-UPS";        o[n].val=&c->battle_powerup_density; o[n].min=0; o[n].max=3;   o[n].step=1; o[n].enum_labels=k_cfg_density;   o[n].enum_count=4; n++;
+        o[n].label="EVASIVE TRAFFIC";  o[n].val=&c->battle_evasive;         o[n].min=0; o[n].max=1;   o[n].step=1; o[n].enum_labels=k_cfg_offon;     o[n].enum_count=2; n++;
         break;
     case TD5_MP_MODE_DRAG_RACE:
         /* [DRAG RACE 2026-06-30] oncoming TRAFFIC on/off, DISTANCE preset, and
