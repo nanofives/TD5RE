@@ -620,6 +620,16 @@ static HRESULT __stdcall Dev3_DrawPrimitive(WrapperDevice *self,
         }
     }
 
+    /* [7-pane GPU crash 2026-07-23] Draw-time safety net: never issue a
+     * sampling draw with a NULL SRV in slot 0 (observed to fault inside the
+     * NVIDIA UMD at Present under very high split-screen draw counts). Catches
+     * any path — including the first draws before any SetTexture — that left
+     * slot 0 unbound. No-op once a real texture is bound. */
+    if (!g_backend.current_srv && g_backend.white_srv) {
+        g_backend.current_srv = g_backend.white_srv;
+        ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &g_backend.white_srv);
+    }
+
     Backend_NoteDraw(prim_type, vert_count, 0, 0);   /* [DRAW WATCH] */
     ID3D11DeviceContext_Draw(ctx, vert_count, base_vertex);
     return DD_OK;
@@ -692,6 +702,15 @@ static HRESULT __stdcall Dev3_DrawIndexedPrimitive(WrapperDevice *self,
             g_backend.current_srv, !g_backend.current_tex_has_alpha);
     }
 
+    /* [7-pane GPU crash 2026-07-23] Draw-time safety net: never issue a
+     * sampling draw with a NULL SRV in slot 0 (observed to fault inside the
+     * NVIDIA UMD at Present under very high split-screen draw counts). No-op
+     * once a real texture is bound. */
+    if (!g_backend.current_srv && g_backend.white_srv) {
+        g_backend.current_srv = g_backend.white_srv;
+        ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &g_backend.white_srv);
+    }
+
     Backend_NoteDraw(prim_type, vert_count, index_count, 1);   /* [DRAW WATCH] */
     ID3D11DeviceContext_DrawIndexed(ctx, index_count, start_index, (INT)base_vertex);
     return DD_OK;
@@ -734,9 +753,15 @@ static HRESULT __stdcall Dev3_SetTexture(WrapperDevice *self, DWORD stage, Wrapp
     if (!tex) {
         if (stage == 0) {
             g_backend.current_tex_has_alpha = 1;
-            g_backend.current_srv = NULL;
-            ID3D11ShaderResourceView *null_srv = NULL;
-            ID3D11DeviceContext_PSSetShaderResources(g_backend.context, 0, 1, &null_srv);
+            /* [7-pane GPU crash 2026-07-23] Never leave PS slot 0 sampling a
+             * NULL SRV. A null-SRV sampling draw was observed to fault inside
+             * the NVIDIA UMD (nvwgf2um.dll) at Present under very high
+             * split-screen draw counts (~2230 draws/frame at 7 panes). Bind the
+             * pre-created 1x1 white texture instead: with PS_MODULATE white*diffuse
+             * == diffuse, i.e. the intended untextured-vertex-color result. */
+            ID3D11ShaderResourceView *fallback = g_backend.white_srv;
+            g_backend.current_srv = fallback;
+            ID3D11DeviceContext_PSSetShaderResources(g_backend.context, 0, 1, &fallback);
             g_backend.state.dirty = 1;
         }
         return DD_OK;
@@ -778,9 +803,12 @@ static HRESULT __stdcall Dev3_SetTexture(WrapperDevice *self, DWORD stage, Wrapp
                     WRAPPER_LOG("  WARNING: blocked RT/SRV hazard! tex=%p srv=%p == backbuffer srv", tex, srv);
                     s_warn++;
                 }
-                /* Bind NULL instead to avoid the hazard */
-                ID3D11ShaderResourceView *null_srv = NULL;
-                ID3D11DeviceContext_PSSetShaderResources(g_backend.context, stage, 1, &null_srv);
+                /* [7-pane GPU crash 2026-07-23] Bind the 1x1 white texture
+                 * instead of NULL: avoids the RT/SRV hazard AND avoids leaving a
+                 * null SRV in slot 0 for a subsequent sampling draw. */
+                ID3D11ShaderResourceView *fallback = g_backend.white_srv;
+                if (stage == 0) g_backend.current_srv = fallback;
+                ID3D11DeviceContext_PSSetShaderResources(g_backend.context, stage, 1, &fallback);
                 return DD_OK;
             }
 
@@ -791,13 +819,21 @@ static HRESULT __stdcall Dev3_SetTexture(WrapperDevice *self, DWORD stage, Wrapp
             }
             ID3D11DeviceContext_PSSetShaderResources(g_backend.context, stage, 1, &srv);
         } else {
-            WRAPPER_LOG("  WARNING: no SRV for texture %p!", tex);
+            /* [7-pane GPU crash 2026-07-23] Texture has no SRV — bind the 1x1
+             * white fallback rather than NULL and keep current_srv consistent,
+             * so no sampling draw is issued with a null slot-0 SRV. */
+            static int s_nosrv_warn = 0;
+            if (s_nosrv_warn < 5) {
+                WRAPPER_LOG("  WARNING: no SRV for texture %p! binding white fallback", tex);
+                s_nosrv_warn++;
+            }
+            ID3D11ShaderResourceView *fallback = g_backend.white_srv;
             if (stage == 0) {
+                g_backend.current_srv = fallback;
                 g_backend.current_tex_has_alpha = 1;
                 g_backend.state.dirty = 1;
             }
-            ID3D11ShaderResourceView *null_srv = NULL;
-            ID3D11DeviceContext_PSSetShaderResources(g_backend.context, stage, 1, &null_srv);
+            ID3D11DeviceContext_PSSetShaderResources(g_backend.context, stage, 1, &fallback);
         }
     }
     return DD_OK;
