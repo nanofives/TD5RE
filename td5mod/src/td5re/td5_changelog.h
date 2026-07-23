@@ -36,6 +36,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "FIX: arcade power-up pickup is now predictable - you" },
     { CL_ITEM,    "  always grab the box you're closest to, and the" },
     { CL_ITEM,    "  reach was tightened so nearby boxes don't overlap." },
+    { CL_ITEM,    "FIX: crash on large split-screen races (7+ players/" },
+    { CL_ITEM,    "  screens) - the graphics driver could fault at frame" },
+    { CL_ITEM,    "  present; untextured draws now use a safe white" },
+    { CL_ITEM,    "  texture so no draw is ever sent with no texture." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 22" },
