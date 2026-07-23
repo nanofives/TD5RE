@@ -539,6 +539,13 @@ static int   s_wrong_way_counter[MAX_HUD_VIEWS]; /* 0x4B0A64 */
 static int   s_prev_span_pos[MAX_HUD_VIEWS];     /* 0x4B1120 */
 static int   s_indicator_state[MAX_HUD_VIEWS];    /* 0x4B11A8 */
 
+/* [SHIFT TIMING 2026-07-23 PORT ENHANCEMENT] Per-view wall-clock timestamp
+ * (ms) of when this pane's car began continuously over-revving in a forward,
+ * upshiftable gear. 0 = not currently over-revving. Used to trigger the
+ * pulsating-red HUD border after the car has been bouncing off the limiter
+ * for TD5RE_OVERREV_WARN_MS. */
+static uint32_t s_overrev_since_ms[MAX_HUD_VIEWS];
+
 /* String table pointer and "is player 1" flag */
 static const char **s_hud_string_table;  /* 0x4B0BF8 */
 static int   s_is_first_player;          /* 0x4B0BF4 */
@@ -2763,6 +2770,9 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
 
     for (int v = 0; v < MAX_HUD_VIEWS; v++)
         s_wrong_way_counter[v] = 0;
+
+    for (int v = 0; v < MAX_HUD_VIEWS; v++)
+        s_overrev_since_ms[v] = 0u;   /* clear over-rev warning state per race */
 
     /* Allocate per-view HUD primitive storage [PORT ENHANCEMENT: N-way split].
      * Each view's flag word + quad block lives at +v*0x894 (orig +0x229*4).
@@ -5439,69 +5449,149 @@ void td5_hud_render_overlays(float dt)
             hud_submit_quad(view_base + GEAR_QUAD_OFF);
 
             /* [PORT ENHANCEMENT 2026-07-20] Shift-change arrow indicators.
-             * A flashing UP triangle appears just above the dial when engine
-             * revs reach the top of the rev range (default top 10%) prompting
-             * a shift UP; a flashing DOWN triangle appears when revs fall too
-             * low in a forward gear (lugging) prompting a shift DOWN. Only one
-             * shows at a time; drawn per-pane so each split-screen player sees
-             * their own. Active in ALL race modes (drag included). Knobs:
+             * A flashing UP triangle appears just above the dial as engine
+             * revs approach and pass the ideal shift point; its COLOUR reads
+             * out the rev band so the player knows WHEN to shift:
+             *   BLUE  (>= TD5RE_SHIFT_BLUE_PCT)  approaching — get ready
+             *   GREEN (>= TD5RE_SHIFT_UP_PCT)    ideal shift-up window
+             *   RED   (>= TD5RE_SHIFT_RED_PCT)   over-revving — shift NOW
+             * A steady AMBER DOWN triangle appears when revs fall too low in a
+             * forward gear (lugging) prompting a shift DOWN. Only one shows at
+             * a time; drawn per-pane so each split-screen player sees their own.
+             * Active in ALL race modes (drag included). If the car keeps over-
+             * revving (red) for TD5RE_OVERREV_WARN_MS a pulsating red border is
+             * drawn around this pane. The colour bands here MATCH the timing
+             * penalty applied at the manual-upshift event in td5_input.c. Knobs:
              *   TD5RE_SHIFT_INDICATOR  1=on (default), 0=off
-             *   TD5RE_SHIFT_UP_PCT     redline fraction for shift-up (default 90)
+             *   TD5RE_SHIFT_BLUE_PCT   redline fraction for "approaching" (78)
+             *   TD5RE_SHIFT_UP_PCT     redline fraction for ideal shift-up (90)
+             *   TD5RE_SHIFT_RED_PCT    redline fraction for over-rev (97)
              *   TD5RE_SHIFT_DOWN_PCT   low-rev fraction for shift-down (def 25)
+             *   TD5RE_OVERREV_WARN_MS  ms of continuous over-rev before the
+             *                          pulsating border shows (default 1500)
              * Gear byte: 0=R 1=N 2=1st .. 7=6th. Up only in a forward gear
              * below top gear; down only in 2nd gear (byte 3) or higher. */
             {
                 static int s_shift_init = 0;
-                static int s_shift_on = 1, s_shift_up_pct = 90, s_shift_dn_pct = 25;
+                static int s_shift_on = 1;
+                static int s_blue_pct = 78, s_green_pct = 90, s_red_pct = 97, s_dn_pct = 25;
+                static int s_overrev_warn_ms = 1500;
                 if (!s_shift_init) {
-                    s_shift_on     = td5_env_int("TD5RE_SHIFT_INDICATOR", 1, 0, 1);
-                    s_shift_up_pct = td5_env_int("TD5RE_SHIFT_UP_PCT", 90, 50, 100);
-                    s_shift_dn_pct = td5_env_int("TD5RE_SHIFT_DOWN_PCT", 25, 0, 60);
+                    s_shift_on    = td5_env_int("TD5RE_SHIFT_INDICATOR", 1, 0, 1);
+                    s_green_pct   = td5_env_int("TD5RE_SHIFT_UP_PCT", 90, 50, 100);
+                    s_blue_pct    = td5_env_int("TD5RE_SHIFT_BLUE_PCT", 78, 40, 99);
+                    s_red_pct     = td5_env_int("TD5RE_SHIFT_RED_PCT", 97, 60, 100);
+                    s_dn_pct      = td5_env_int("TD5RE_SHIFT_DOWN_PCT", 25, 0, 60);
+                    s_overrev_warn_ms = td5_env_int("TD5RE_OVERREV_WARN_MS", 1500, 300, 8000);
+                    /* keep the bands strictly ordered: blue < green < red */
+                    if (s_blue_pct >= s_green_pct) s_blue_pct = s_green_pct - 1;
+                    if (s_red_pct  <= s_green_pct) s_red_pct  = s_green_pct + 1;
                     s_shift_init = 1;
-                    TD5_LOG_I(LOG_TAG, "Shift indicator: on=%d up=%d%% down=%d%%",
-                              s_shift_on, s_shift_up_pct, s_shift_dn_pct);
+                    TD5_LOG_I(LOG_TAG,
+                        "Shift indicator: on=%d blue=%d%% green=%d%% red=%d%% down=%d%% warn=%dms",
+                        s_shift_on, s_blue_pct, s_green_pct, s_red_pct, s_dn_pct, s_overrev_warn_ms);
                 }
-                if (s_shift_on && max_rpm > 0) {
-                    int up_thr    = (int)max_rpm * s_shift_up_pct / 100;
-                    int dn_thr    = (int)max_rpm * s_shift_dn_pct / 100;
-                    int want_up   = (gear >= 2 && gear < 7 && engine_speed >= up_thr);
-                    int want_down = (gear >= 3 && engine_speed <= dn_thr);
+                if (s_shift_on && max_rpm > 0 && v >= 0 && v < MAX_HUD_VIEWS) {
+                    int blue_thr  = (int)max_rpm * s_blue_pct  / 100;
+                    int green_thr = (int)max_rpm * s_green_pct / 100;
+                    int red_thr   = (int)max_rpm * s_red_pct   / 100;
+                    int dn_thr    = (int)max_rpm * s_dn_pct    / 100;
+
+                    int upshiftable = (gear >= 2 && gear < 7);
+                    int want_up     = upshiftable && engine_speed >= blue_thr;
+                    int want_down   = (gear >= 3 && engine_speed <= dn_thr);
                     if (want_up) want_down = 0;   /* mutually exclusive; up wins */
 
-                    /* Blink ~5.5 Hz off a wall-clock timer (same source the
-                     * cop-chase arrow uses). Draw only on the "on" half. */
+                    /* Up-arrow colour reads out the rev band. */
+                    uint32_t up_col;
+                    int overrev = 0;
+                    if (engine_speed >= red_thr) {
+                        up_col  = 0xFFE0202Au;   /* red   — over-revving */
+                        overrev = 1;
+                    } else if (engine_speed >= green_thr) {
+                        up_col  = 0xFF3CDC3Cu;   /* green — ideal shift-up */
+                    } else {
+                        up_col  = 0xFF3C9CFFu;   /* blue  — approaching */
+                    }
+
+                    /* Track continuous over-rev time in a forward, upshiftable
+                     * gear so the pulsating warning only fires when the player
+                     * is genuinely bouncing off the limiter (not in top gear
+                     * or neutral). */
+                    uint32_t now_ms = td5_plat_time_ms();
+                    if (overrev && upshiftable) {
+                        if (s_overrev_since_ms[v] == 0u) s_overrev_since_ms[v] = now_ms;
+                    } else {
+                        s_overrev_since_ms[v] = 0u;
+                    }
+
+                    /* Blink; the red (over-rev) arrow blinks faster to read as
+                     * urgent. Draw the arrow on white so the vertex colour is
+                     * exact (sampling the COLOURS atlas texel rendered black). */
+                    uint32_t blink_div = overrev ? 100u : 180u;
                     if ((want_up || want_down) &&
-                        (((td5_plat_time_ms() / 180u) & 1u) == 0u)) {
-                        TD5_AtlasEntry *col = td5_asset_find_atlas_entry(NULL, "COLOURS");
-                        if (col) {
-                            float cu   = (float)col->atlas_x + 0.5f;
-                            float cv   = (float)col->atlas_y + 0.5f;
-                            int   ctex = col->texture_page;
-                            float half   = ssx * 9.0f;          /* half base width */
-                            float ay_top = cy - ssy * 66.0f;    /* just above dial */
-                            float ay_bot = cy - ssy * 52.0f;
-                            const uint32_t UP_COL = 0xFF3CDC3Cu;  /* green: shift up */
-                            const uint32_t DN_COL = 0xFFFF9420u;  /* amber: shift down */
-                            TD5_SpriteQuad q;
-                            if (want_up) {
-                                /* apex up: TL=TR=apex(top,centre); BL/BR=base(bottom) */
-                                hud_build_quad_warped(&q, ctex,
-                                    cx,        ay_top,   /* TL (apex) */
-                                    cx - half, ay_bot,   /* BL */
-                                    cx + half, ay_bot,   /* BR */
-                                    cx,        ay_top,   /* TR (apex) */
-                                    cu, cv, cu, cv, UP_COL, HUD_DEPTH);
-                            } else {
-                                /* apex down: base at top, BL=BR=apex(bottom,centre) */
-                                hud_build_quad_warped(&q, ctex,
-                                    cx - half, ay_top,   /* TL */
-                                    cx,        ay_bot,   /* BL (apex) */
-                                    cx,        ay_bot,   /* BR (apex) */
-                                    cx + half, ay_top,   /* TR */
-                                    cu, cv, cu, cv, DN_COL, HUD_DEPTH);
-                            }
-                            hud_submit_quad(&q);
+                        (((now_ms / blink_div) & 1u) == 0u)) {
+                        float half   = ssx * 9.0f;          /* half base width */
+                        float ay_top = cy - ssy * 66.0f;    /* just above dial */
+                        float ay_bot = cy - ssy * 52.0f;
+                        const uint32_t DN_COL = 0xFFFF9420u;  /* amber: shift down */
+                        TD5_SpriteQuad q;
+                        if (want_up) {
+                            /* apex up: TL=TR=apex(top,centre); BL/BR=base(bottom) */
+                            hud_build_quad_warped(&q, HUD_WHITE_TEX_PAGE,
+                                cx,        ay_top,   /* TL (apex) */
+                                cx - half, ay_bot,   /* BL */
+                                cx + half, ay_bot,   /* BR */
+                                cx,        ay_top,   /* TR (apex) */
+                                0.0f, 0.0f, 0.0f, 0.0f, up_col, HUD_DEPTH);
+                        } else {
+                            /* apex down: base at top, BL=BR=apex(bottom,centre) */
+                            hud_build_quad_warped(&q, HUD_WHITE_TEX_PAGE,
+                                cx - half, ay_top,   /* TL */
+                                cx,        ay_bot,   /* BL (apex) */
+                                cx,        ay_bot,   /* BR (apex) */
+                                cx + half, ay_top,   /* TR */
+                                0.0f, 0.0f, 0.0f, 0.0f, DN_COL, HUD_DEPTH);
                         }
+                        hud_submit_quad(&q);
+                    }
+
+                    /* Pulsating red border once the car has been over-revving
+                     * continuously for TD5RE_OVERREV_WARN_MS — a loud "you are
+                     * hurting the engine, SHIFT" cue. Four edge bars around the
+                     * pane, alpha pulsing on a ~600ms triangle wave. Drawn on
+                     * the 1x1 white page (alpha-blended like the pause dimmer). */
+                    if (s_overrev_since_ms[v] != 0u &&
+                        (now_ms - s_overrev_since_ms[v]) >= (uint32_t)s_overrev_warn_ms) {
+                        uint32_t ph = now_ms % 600u;
+                        float pulse = (ph < 300u) ? ((float)ph / 300.0f)
+                                                  : (1.0f - (float)(ph - 300u) / 300.0f);
+                        uint32_t alpha = (uint32_t)(60.0f + pulse * 150.0f);  /* 60..210 */
+                        uint32_t bcol  = (alpha << 24) | 0x00E01818u;         /* red */
+                        float L = vl->vp_int_left,  R = vl->vp_int_right;
+                        float T = vl->vp_int_top,   B = vl->vp_int_bottom;
+                        float th = (B - T) * 0.055f;                          /* bar thickness */
+                        TD5_SpriteQuad qb;
+                        /* top */
+                        hud_build_quad_warped(&qb, HUD_WHITE_TEX_PAGE,
+                            L, T, L, T + th, R, T + th, R, T,
+                            0.0f, 0.0f, 0.0f, 0.0f, bcol, HUD_DEPTH);
+                        hud_submit_quad(&qb);
+                        /* bottom */
+                        hud_build_quad_warped(&qb, HUD_WHITE_TEX_PAGE,
+                            L, B - th, L, B, R, B, R, B - th,
+                            0.0f, 0.0f, 0.0f, 0.0f, bcol, HUD_DEPTH);
+                        hud_submit_quad(&qb);
+                        /* left */
+                        hud_build_quad_warped(&qb, HUD_WHITE_TEX_PAGE,
+                            L, T, L, B, L + th, B, L + th, T,
+                            0.0f, 0.0f, 0.0f, 0.0f, bcol, HUD_DEPTH);
+                        hud_submit_quad(&qb);
+                        /* right */
+                        hud_build_quad_warped(&qb, HUD_WHITE_TEX_PAGE,
+                            R - th, T, R - th, B, R, B, R, T,
+                            0.0f, 0.0f, 0.0f, 0.0f, bcol, HUD_DEPTH);
+                        hud_submit_quad(&qb);
                     }
                 }
             }

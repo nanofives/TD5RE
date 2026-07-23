@@ -167,6 +167,17 @@ static uint8_t s_gear[TD5_MAX_RACER_SLOTS];
 /** Gear-change debounce counters (mirrors gPlayerControlBuffer at 0x482FE4). */
 static int32_t s_gear_debounce[TD5_MAX_RACER_SLOTS];
 
+/** [SHIFT TIMING 2026-07-23 PORT ENHANCEMENT] Frames of throttle (accel) cut
+ * remaining after a mistimed too-early manual upshift. While > 0 the player's
+ * forward throttle is scaled down so the car sluggishly recovers — the "bog"
+ * penalty for short-shifting below the green band. Set at the manual gear-up
+ * event; decremented once per input update. Rewards shifting at the right revs
+ * (green) and punishes shifting too early, matching the HUD arrow colours. */
+static int32_t s_shift_penalty_ticks[TD5_MAX_RACER_SLOTS];
+#define TD5_SHIFT_EARLY_CUT_TICKS 30   /* ~0.5s of accel cut (60 Hz input) */
+#define TD5_SHIFT_EARLY_CUT_NUM   60   /* throttle scaled to 60% (40% cut)  */
+#define TD5_SHIFT_EARLY_CUT_DEN  100
+
 /** NOS latch accumulator per-player (mirrors 0x483014). */
 static uint8_t s_nos_latch[TD5_MAX_RACER_SLOTS];
 
@@ -454,6 +465,7 @@ int td5_input_init(void)
     memset(s_reverse_req, 0, sizeof(s_reverse_req));
     memset(s_gear, 0, sizeof(s_gear));
     memset(s_gear_debounce, 0, sizeof(s_gear_debounce));
+    memset(s_shift_penalty_ticks, 0, sizeof(s_shift_penalty_ticks));
     memset(s_nos_latch, 0, sizeof(s_nos_latch));
     memset(s_siren_horn_latch, 0, sizeof(s_siren_horn_latch));
     memset(s_horn_honk_latch, 0, sizeof(s_horn_honk_latch));
@@ -1831,6 +1843,67 @@ void td5_input_update_player_control(int slot)
                                     (unsigned)*((uint8_t *)car_cfg + 0x76));
                             }
                         }
+
+                        /* [SHIFT TIMING 2026-07-23 PORT ENHANCEMENT] Reward a
+                         * well-timed manual upshift and punish a mistimed one,
+                         * using the SAME rev bands the HUD arrow colours show:
+                         *   below green -> too early: bog the revs + start an
+                         *                  accel-cut window (s_shift_penalty_ticks)
+                         *   green band  -> ideal: no penalty
+                         *   red band    -> over-rev "money shift": firm ~6% knock
+                         *                  to longitudinal speed (actor+0x314)
+                         * The revs read here are PRE-shift (engine_speed_accum
+                         * before physics re-derives them for the new gear), so
+                         * the band matches what the player saw on the dial.
+                         * Whole feature gated by TD5RE_SHIFT_TIMING (default ON).
+                         * Knobs mirror the HUD: TD5RE_SHIFT_UP_PCT (green edge),
+                         * TD5RE_SHIFT_RED_PCT (red edge). */
+                        if (car_cfg) {
+                            static int s_st_init = 0, s_st_on = 1;
+                            static int s_st_green = 90, s_st_red = 97;
+                            if (!s_st_init) {
+                                s_st_on    = td5_env_int("TD5RE_SHIFT_TIMING", 1, 0, 1);
+                                s_st_green = td5_env_int("TD5RE_SHIFT_UP_PCT", 90, 50, 100);
+                                s_st_red   = td5_env_int("TD5RE_SHIFT_RED_PCT", 97, 60, 100);
+                                if (s_st_red <= s_st_green) s_st_red = s_st_green + 1;
+                                s_st_init = 1;
+                                TD5_LOG_I(LOG_TAG,
+                                    "Shift-timing: on=%d green=%d%% red=%d%%",
+                                    s_st_on, s_st_green, s_st_red);
+                            }
+                            if (s_st_on) {
+                                int32_t redln = *(int16_t *)((uint8_t *)car_cfg + 0x72);
+                                int32_t rpm   = *(int32_t *)(ab + 0x310);
+                                if (redln > 0) {
+                                    int pct = (int)((int64_t)rpm * 100 / redln);
+                                    if (pct >= s_st_red) {
+                                        /* over-rev money shift: firm ~6% speed knock */
+                                        int32_t *spd = (int32_t *)(ab + 0x314);
+                                        *spd = (int32_t)((int64_t)*spd * 94 / 100);
+                                        TD5_LOG_I(LOG_TAG,
+                                            "shift-timing RED slot=%d pct=%d -> -6%% speed",
+                                            slot, pct);
+                                    } else if (pct < s_st_green) {
+                                        /* too early: bog the revs ~12%% of redline
+                                         * (floored at idle 0x190) + accel-cut window */
+                                        int32_t floor_rpm = 0x190;
+                                        int32_t drop = redln * 12 / 100;
+                                        int32_t bog  = rpm - drop;
+                                        if (bog < floor_rpm) bog = floor_rpm;
+                                        *(int32_t *)(ab + 0x310) = bog;
+                                        s_shift_penalty_ticks[slot] = TD5_SHIFT_EARLY_CUT_TICKS;
+                                        TD5_LOG_I(LOG_TAG,
+                                            "shift-timing EARLY slot=%d pct=%d -> bog rpm %d->%d + %d-tick cut",
+                                            slot, pct, (int)rpm, (int)bog,
+                                            TD5_SHIFT_EARLY_CUT_TICKS);
+                                    } else {
+                                        TD5_LOG_I(LOG_TAG,
+                                            "shift-timing GREEN slot=%d pct=%d (ideal)",
+                                            slot, pct);
+                                    }
+                                }
+                            }
+                        }
                     }
                     /* Write new gear back to actor so physics sees manual shift
                      * [CONFIRMED @ 0x402E60: original writes actor[0x36B]] */
@@ -1954,6 +2027,17 @@ void td5_input_update_player_control(int slot)
             if (!(slot == 0 && g_td5.ini.player_is_ai)) {
                 *(int32_t *)(a + 0x30C) = s_steering_cmd[slot];
             }
+            /* [SHIFT TIMING 2026-07-23] Accel cut after a too-early manual
+             * upshift: scale forward throttle down for the penalty window so
+             * the car bogs and recovers sluggishly. Only cuts positive
+             * (forward) throttle — braking/reverse is untouched. */
+            if (s_shift_penalty_ticks[slot] > 0) {
+                if (s_throttle[slot] > 0) {
+                    s_throttle[slot] = (int16_t)((int32_t)s_throttle[slot]
+                        * TD5_SHIFT_EARLY_CUT_NUM / TD5_SHIFT_EARLY_CUT_DEN);
+                }
+                s_shift_penalty_ticks[slot]--;
+            }
             /* 0x33E: encounter_steering_cmd (int16) — used as throttle by physics */
             *(int16_t *)(a + 0x33E) = s_throttle[slot];
             /* 0x36D: brake_flag (byte) */
@@ -2029,6 +2113,7 @@ void td5_input_reset_buffers(void)
 {
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         s_gear_debounce[i] = 0;
+        s_shift_penalty_ticks[i] = 0;
     }
 }
 
