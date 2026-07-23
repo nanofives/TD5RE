@@ -32,6 +32,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "July 23" },
+    { CL_ITEM,    "FIX: arcade power-up pickup is now predictable - you" },
+    { CL_ITEM,    "  always grab the box you're closest to, and the" },
+    { CL_ITEM,    "  reach was tightened so nearby boxes don't overlap." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "July 22" },
     { CL_ITEM,    "FIX: cars no longer spawn facing backward on Edinburgh" },
     { CL_ITEM,    "  reverse - the heading correction was incorrectly" },

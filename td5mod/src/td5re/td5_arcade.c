@@ -588,9 +588,12 @@ void td5_arcade_tick(void) {
     int racers = racer_count();
     int allow_ai = knob("TD5RE_ARCADE_AI_PICKUPS", 1, 0, 1);
     /* Pickup "hitbox": collect when within this many spans of the box
-     * (longitudinal, back to the original tight 2) AND within this many lanes of
-     * the box's side lane (lateral) — the side placement needs the lane gate. */
-    int pick_win = knob("TD5RE_ARCADE_PICKUP_SPANS", 2, 1, 30);
+     * (longitudinal) AND within this many lanes of the box's side lane
+     * (lateral) — the side placement needs the lane gate. [2026-07-23] Longitudinal
+     * window tightened 2 -> 1 span: with 2, the box was collectable across ~3
+     * spans of track, so in chaos mode (many boxes) it was unpredictable which one
+     * you grabbed. Knob TD5RE_ARCADE_PICKUP_SPANS still overrides. */
+    int pick_win = knob("TD5RE_ARCADE_PICKUP_SPANS", 1, 1, 30);
     int lane_tol = knob("TD5RE_ARCADE_PICKUP_LANES", 1, 0, 8);
 
     /* --- decay per-slot effect timers --- */
@@ -690,6 +693,16 @@ void td5_arcade_tick(void) {
         int aspan = a->track_span_normalized;
         if (aspan < 0) continue;
         int alane = (int)a->track_sub_lane_index;       /* the car's lane this tick */
+        /* [PICKUP DETERMINISM 2026-07-23] In chaos mode several boxes can sit
+         * inside the pickup window at once. Previously the loop called
+         * apply_pickup for EVERY box in range without breaking, so the effect
+         * you ended up with was whichever box came LAST in s_pads[] array order
+         * — arbitrary, hence "unpredictable which one I pick up". Instead: scan
+         * the whole window, then collect only the SINGLE nearest box (smallest
+         * longitudinal distance first, then lateral; deterministic index
+         * tie-break). One box per tick, and always the closest one. */
+        int best = -1;
+        int best_score = 0;
         for (int i = 0; i < s_pad_count; i++) {
             ArcPad *p = &s_pads[i];
             if (!p->active) continue;
@@ -698,13 +711,19 @@ void td5_arcade_tick(void) {
             int ldiff = alane - (int)p->sub_lane;
             if (ldiff < 0) ldiff = -ldiff;
             if (ldiff > lane_tol) continue;             /* not on the box's side — steer over */
-            {
-                apply_pickup(s, p->kind, a);
-                p->active = 0;
-                /* Respawn the box 5 s after pickup. At the fixed 30 Hz sim tick
-                 * that's 150 ticks. */
-                p->respawn = (int16_t)knob("TD5RE_ARCADE_PAD_RESPAWN", 150, 15, 1800);
-            }
+            /* Longitudinal distance dominates; lateral breaks ties within a span. */
+            int score = fdiff * (lane_tol + 1) + ldiff;
+            if (best < 0 || score < best_score) { best = i; best_score = score; }
+        }
+        if (best >= 0) {
+            ArcPad *p = &s_pads[best];
+            apply_pickup(s, p->kind, a);
+            p->active = 0;
+            /* Respawn the box 5 s after pickup. At the fixed 30 Hz sim tick
+             * that's 150 ticks. */
+            p->respawn = (int16_t)knob("TD5RE_ARCADE_PAD_RESPAWN", 150, 15, 1800);
+            TD5_LOG_I(LOG_TAG, "slot=%d picked nearest pad=%d kind=%d score=%d",
+                      s, best, p->kind, best_score);
         }
     }
 
