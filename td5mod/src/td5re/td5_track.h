@@ -413,6 +413,13 @@ void td5_track_resolve_reverse_contacts(TD5_Actor *actor);
  * range disable the boundary handlers for that level. */
 void td5_track_bind_boundary_sentinels(int level_number);
 
+/* [DRAG END WALL 2026-07-23] Pull the drag strip's down-track boundary wall in to
+ * just past the finish (finish_span + runoff braking spans), so a finished car
+ * cannot keep driving through the stadium stands past the end of the race. Call
+ * AFTER td5_track_bind_boundary_sentinels() once the finish span is known; no-op
+ * unless g_td5.drag_race_enabled. */
+void td5_track_set_drag_end_wall(int finish_span, int runoff);
+
 /* --- Traffic --- */
 void td5_track_init_traffic_from_queue(void);
 

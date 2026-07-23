@@ -4606,6 +4606,14 @@ static void init_race_checkpoints(void)
                 TD5_LOG_I(LOG_TAG,
                           "Drag length: finish span %d -> %d (start=%d ring=%d inserted=%d cap=%d)",
                           base_finish, new_finish, start, ring, inserted, cap);
+                /* [DRAG END WALL 2026-07-23] Wall the strip off just past the
+                 * finish so a finished car (e.g. the MP leader still on throttle
+                 * while others race) can't roll forward through the stadium
+                 * stands. bind_boundary_sentinels already pushed the down-track
+                 * wall to the strip end for longer drags; pull it back in now
+                 * that the finish is known. 24 spans of braking run-off matches
+                 * the EPIC inserted-road run-off. */
+                td5_track_set_drag_end_wall(new_finish, 24);
             }
         } else {
             TD5_LOG_W(LOG_TAG, "Track index %d out of range, no checkpoint data", tidx);

@@ -1511,6 +1511,37 @@ void td5_track_bind_boundary_sentinels(int level_number)
               level_number, s_boundary_fwd_sentinel, s_boundary_rev_sentinel);
 }
 
+/* [DRAG END WALL 2026-07-23] Pull the drag strip's DOWN-TRACK boundary wall in to
+ * just past the finish line. bind_boundary_sentinels() pushes that wall out to the
+ * strip end (ring-2) so a LONG/EPIC drag can use the whole strip, but that leaves a
+ * long drivable corridor past the finish for SHORT/MEDIUM distances — a car that has
+ * already finished (e.g. the leader in MP, still under throttle while others race)
+ * keeps rolling forward and drives through the stadium stands at the end of the road.
+ * Called from td5_game.c once the finish span is known (AFTER bind ran, so this
+ * override sticks). finish_span = race finish span; runoff = braking spans allowed
+ * past it. The down-track wall is the HIGHER of the two drag sentinels (fwd is the
+ * upstream back-wall behind the spawn). No-op unless a drag race is active. */
+void td5_track_set_drag_end_wall(int finish_span, int runoff)
+{
+    int ring, cap, wall;
+    if (!g_td5.drag_race_enabled) return;
+    if (finish_span < 0) return;
+    ring = g_td5.track_span_ring_length;
+    cap  = (ring > 4) ? (ring - 2) : finish_span;
+    wall = finish_span + (runoff > 0 ? runoff : 0);
+    if (wall > cap) wall = cap;                 /* never past the strip end */
+    if (wall < finish_span) wall = finish_span; /* always clear the finish line */
+    /* Set the down-track wall (the higher sentinel); leave the upstream back-wall. */
+    if (s_boundary_rev_sentinel >= s_boundary_fwd_sentinel)
+        s_boundary_rev_sentinel = wall;
+    else
+        s_boundary_fwd_sentinel = wall;
+    TD5_LOG_I(LOG_TAG,
+              "drag end wall: finish=%d runoff=%d -> wall=%d (fwd=%d rev=%d ring=%d)",
+              finish_span, runoff, wall,
+              s_boundary_fwd_sentinel, s_boundary_rev_sentinel, ring);
+}
+
 static void fwd_rev_resolve_contact(TD5_Actor *actor,
                                     const TD5_StripSpan *sp,
                                     const TD5_StripVertex *base_v,
