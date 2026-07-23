@@ -600,6 +600,10 @@ void Screen_RaceOptions(void);
  * follow. */
 enum {
     RO_OPPONENTS = 0, RO_TRAFFIC, RO_POLICE, RO_DIFFICULTY,
+    /* [SP DRAG DISTANCE 2026-07-23] Drag-only DISTANCE preset (SHORT/MEDIUM/
+     * LONG/EPIC), matching the MP drag DISTANCE option. Edits g_td5.ini.drag_length
+     * (read by drag_length_level() for SP); MP reads mp_mode_config.drag_length. */
+    RO_DISTANCE,
     /* [CATCHUP 2026-07-21] AI rubber-band assist — MP-only, moved here from the
      * Multiplayer Options screen so it lives with the other per-race MP options. */
     RO_CATCHUP,

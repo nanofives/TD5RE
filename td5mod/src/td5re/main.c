@@ -313,6 +313,9 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("GameOptions", "Dynamics",         g_td5.ini.dynamics);
     td5_ini_write_int("GameOptions", "Collisions",       g_td5.ini.collisions);
     td5_ini_write_int("GameOptions", "Powerups",         g_td5.ini.powerups);
+    /* [SP DRAG DISTANCE 2026-07-23] Persist the SP drag DISTANCE preset so the
+     * RACE OPTIONS choice sticks across launches (loaded in main() as DragLength). */
+    td5_ini_write_int("GameOptions", "DragLength",        g_td5.ini.drag_length);
     td5_ini_write_int("GameOptions", "AutoGearbox",      g_td5.ini.auto_gearbox);
     /* [TUTORIAL 2026-06-29] Controller-overlay on/off (0=off, 1=on every race,
      * 2=dev force) — set by the Game Options TUTORIAL row. */
