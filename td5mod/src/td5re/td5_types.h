@@ -590,6 +590,12 @@ typedef struct TD5_MpModeConfig {
     int32_t drag_traffic;
     int32_t drag_length;
     int32_t drag_extra_lanes;
+    /* [TRAFFIC BATTLE EVASIVE 2026-07-23] Difficulty option (mode ==
+     * TD5_MP_MODE_TRAFFIC_BATTLE). 0 = OFF (traffic drives its normal lines),
+     * 1 = ON (traffic actively steers AWAY from the nearest racer so it dodges
+     * the player, making it harder to ram). Replicated host->clients for
+     * lockstep. Appended at the END for a stable wire layout. */
+    int32_t battle_evasive;
 } TD5_MpModeConfig;
 
 /* ========================================================================

@@ -33,6 +33,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 23" },
+    { CL_ITEM,    "TRAFFIC BATTLE: simpler options + a real challenge." },
+    { CL_ITEM,    "  Spawn Period and Power-Ups options are gone (no more" },
+    { CL_ITEM,    "  item boxes) and a new EVASIVE TRAFFIC toggle makes the" },
+    { CL_ITEM,    "  traffic actively swerve away from you - hard to ram." },
+    { CL_ITEM,    "FIX: starting Traffic Battle no longer runs a Drag Race" },
+    { CL_ITEM,    "  by mistake (a stale game mode was leaking through)." },
     { CL_ITEM,    "NEW: single-player Drag Race now has a DISTANCE option" },
     { CL_ITEM,    "  (SHORT / MEDIUM / LONG / EPIC) on the RACE OPTIONS" },
     { CL_ITEM,    "  screen, just like multiplayer drag - pick how long" },

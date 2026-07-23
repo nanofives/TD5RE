@@ -1692,7 +1692,15 @@ int td5_asset_level_number(int track_index)
      * established mp_mode_config-based check used everywhere else in the
      * codebase for this exact SP-flag-vs-MP-mode gap (see td5_game.c
      * td5_game_drag_mp_active callers). */
-    if (g_td5.game_type == TD5_GAMETYPE_DRAG_RACE || td5_game_drag_mp_active()) {
+    /* [TRAFFIC BATTLE 2026-07-23] FIX: a Traffic Battle wrongly loaded the drag
+     * strip (level030.zip) and ran as a drag race. The battle mode inherits a
+     * stale game_type==9 (DRAG_RACE) through the MP flow (which never re-runs
+     * ConfigureGameTypeFlags), and this level chokepoint keyed the drag strip off
+     * game_type alone. A Traffic Battle must run on its CHOSEN track, so exclude
+     * battle mode here — td5_game_battle_mode_active() reads the replicated
+     * mp_mode_config.mode, which the frontend sets before any level load. */
+    if ((g_td5.game_type == TD5_GAMETYPE_DRAG_RACE || td5_game_drag_mp_active())
+        && !td5_game_battle_mode_active()) {
         TD5_LOG_I(LOG_TAG, "level_number: drag race (game_type=%d mp_drag=%d) -> level030.zip",
                   (int)g_td5.game_type, td5_game_drag_mp_active());
         return 30;

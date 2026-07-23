@@ -2350,12 +2350,14 @@ static void init_race_modes_and_seed(void)
         if (be && (be[0] == '1' || be[0] == 'y' || be[0] == 'Y' ||
                    be[0] == 't' || be[0] == 'T')) {
             g_td5.mp_mode_config.mode = TD5_MP_MODE_TRAFFIC_BATTLE;
-            /* No MP config screen on the SP knob path, so seed the power-up
-             * density here (the MP vote path seeds it in
-             * mp_mode_config_apply_defaults). Default DENSE; TD5RE_ARCADE_DENSITY
-             * overrides at the spacing site anyway. */
-            int d = td5_env_int("TD5RE_ARCADE_DENSITY", 2, 0, 3);
-            g_td5.mp_mode_config.battle_powerup_density = d;
+            /* [TRAFFIC BATTLE 2026-07-23] Power-ups removed from this mode — force
+             * the density to 0 on the SP knob path (the MP vote path zeroes it in
+             * mp_mode_config_apply_defaults). No item boxes / MAGNET. */
+            g_td5.mp_mode_config.battle_powerup_density = 0;
+            /* [TRAFFIC BATTLE EVASIVE 2026-07-23] Seed the EVASIVE TRAFFIC option
+             * here (no MP config screen on this path). Default OFF; set
+             * TD5RE_BATTLE_EVASIVE=1 to make traffic actively dodge the player. */
+            g_td5.mp_mode_config.battle_evasive = td5_env_flag_off("TD5RE_BATTLE_EVASIVE");
             /* SP win-condition override (no MP config screen on this path):
              * TD5RE_BATTLE_WIN=1 -> CHECKPOINTS deadline chaser, 0 -> MOST WRECKS. */
             const char *we = getenv("TD5RE_BATTLE_WIN");
@@ -2379,6 +2381,20 @@ static void init_race_modes_and_seed(void)
         g_td5.wanted_mode_enabled       = 0;     /* not cop chase            */
         g_td5.special_encounter_enabled = 0;     /* cops OFF                 */
         g_td5.drag_race_enabled         = 0;
+        /* [TRAFFIC BATTLE 2026-07-23] FIX: launching Traffic Battle wrongly ran a
+         * DRAG RACE. The MP flow never re-runs ConfigureGameTypeFlags, so a stale
+         * game_type==9 (DRAG_RACE) from a prior selection / DefaultGameType leaks
+         * through: drag-keyed paths (td5_asset.c drag-strip load, td5_game.c drag
+         * placement) gate on g_td5.game_type==TD5_GAMETYPE_DRAG_RACE, not on
+         * drag_race_enabled. Clearing drag_race_enabled above is not enough —
+         * force game_type to SINGLE_RACE too (mirrors the Time-Trial synth). The
+         * battle's own behaviour keys off td5_game_battle_mode_active() (the
+         * replicated mode), so this is safe. */
+        g_td5.game_type                 = TD5_GAMETYPE_SINGLE_RACE;
+        /* [TRAFFIC BATTLE 2026-07-23] Power-ups removed: no arcade item boxes /
+         * MAGNET in this mode. The ram mechanic is collision-based (set below),
+         * so disabling pickups leaves the core gameplay intact. */
+        g_td5.ini.powerups              = 0;
         g_td5.time_trial_enabled        = 0;
         g_td5.traffic_enabled           = 1;     /* traffic ON              */
         /* [TRAFFIC BATTLE 2026-06-28] NO rival racers — it is you (and any other
