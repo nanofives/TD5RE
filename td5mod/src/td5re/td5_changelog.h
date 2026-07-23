@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 23" },
+    { CL_ITEM,    "NEW: single-player Drag Race now has a DISTANCE option" },
+    { CL_ITEM,    "  (SHORT / MEDIUM / LONG / EPIC) on the RACE OPTIONS" },
+    { CL_ITEM,    "  screen, just like multiplayer drag - pick how long" },
+    { CL_ITEM,    "  the strip is before you launch." },
     { CL_ITEM,    "NEW: manual-shift arrows are now colour-coded - blue as" },
     { CL_ITEM,    "  you approach the shift point, green at the ideal revs" },
     { CL_ITEM,    "  to change up, red when you are over-revving. Down" },

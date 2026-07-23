@@ -6217,6 +6217,7 @@ const char *td5_raceopts_label(int idx) {
         case RO_TRAFFIC:     return SNK_TrafficButTxt;
         case RO_POLICE:      return SNK_CopsButTxt;        /* label: POLICE */
         case RO_DIFFICULTY:  return SNK_DifficultyButTxt;
+        case RO_DISTANCE:    return TR("DISTANCE");        /* [SP DRAG DISTANCE 2026-07-23] drag length preset */
         case RO_CATCHUP:     return SNK_CatchupTxt;        /* [CATCHUP 2026-07-21] MP AI rubber-band */
         case RO_DYNAMICS:    return SNK_DynamicsButTxt;
         case RO_CHECKPOINTS: return SNK_CheckpointTimersButTxt;
@@ -6258,10 +6259,16 @@ void td5_raceopts_value(int idx, char *out, size_t out_sz) {
      * both single-player and MP split-screen setup — previously showed only a
      * 2-state OFF/ON toggle, hiding CHAOS; mirror the full 3-state model here. */
     static const char *const powerups_lv[] = { "OFF", "CASUAL", "CHAOS" };
+    /* [SP DRAG DISTANCE 2026-07-23] mirrors k_cfg_draglen[] in td5_fe_race.c
+     * (the MP drag DISTANCE row): 0=SHORT 1=MEDIUM 2=LONG 3=EPIC. */
+    static const char *const draglen_lv[] = { "SHORT", "MEDIUM", "LONG", "EPIC" };
     const char *v = "";
     int t;
     switch (idx) {
         case RO_OPPONENTS:   snprintf(out, out_sz, "%d", s_num_ai_opponents); return;
+        case RO_DISTANCE:
+            t = g_td5.ini.drag_length; if (t < 0) t = 0; if (t > 3) t = 3;
+            v = draglen_lv[t]; break;
         case RO_TRAFFIC:
             t = s_game_option_traffic;
             if (t < 0) t = 0;
@@ -6326,6 +6333,14 @@ void td5_raceopts_cycle(int idx, int delta) {
             s_race_difficulty += delta;
             if (s_race_difficulty < 0) s_race_difficulty = 2;
             if (s_race_difficulty > 2) s_race_difficulty = 0;
+            break;
+        case RO_DISTANCE:    /* [SP DRAG DISTANCE 2026-07-23] drag length preset,
+                              * wraps 0=SHORT..3=EPIC; committed to INI on OK/BACK. */
+            g_td5.ini.drag_length += delta;
+            if (g_td5.ini.drag_length < 0) g_td5.ini.drag_length = 3;
+            if (g_td5.ini.drag_length > 3) g_td5.ini.drag_length = 0;
+            TD5_LOG_I(LOG_TAG, "raceopts: DISTANCE -> %d (0=SHORT 1=MEDIUM 2=LONG 3=EPIC)",
+                      g_td5.ini.drag_length);
             break;
         case RO_CATCHUP: {   /* [CATCHUP 2026-07-21] MP AI rubber-band on/off */
             int cur = td5_save_get_catchup_assist();
@@ -6460,6 +6475,10 @@ int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
         if (c->is_mp && c->is_cop_chase) return 0;   /* MP cop chase */
         if (c->is_drag) return 1;                    /* drag: always shown */
         return c->opponents > 0;                     /* hidden at 0 opponents */
+    case RO_DISTANCE:    /* [SP DRAG DISTANCE 2026-07-23] drag length preset. SP
+                          * reads g_td5.ini.drag_length; MP drag has its own
+                          * DISTANCE row on the MP config screen, so SP-drag only. */
+        return c->is_drag && !c->is_mp;
     case RO_CATCHUP:     /* [CATCHUP 2026-07-21] MP-only AI rubber-band assist */
         return c->is_mp;
     case RO_DYNAMICS:
