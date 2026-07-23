@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 23" },
+    { CL_ITEM,    "FIX: the 'Preset_Test' template car no longer shows up" },
+    { CL_ITEM,    "  in the car list (single-player or multiplayer) - example" },
+    { CL_ITEM,    "  and template custom-car folders are now skipped." },
     { CL_ITEM,    "TRAFFIC BATTLE: simpler options + a real challenge." },
     { CL_ITEM,    "  Spawn Period and Power-Ups options are gone (no more" },
     { CL_ITEM,    "  item boxes) and a new EVASIVE TRAFFIC toggle makes the" },

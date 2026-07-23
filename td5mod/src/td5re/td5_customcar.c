@@ -19,6 +19,20 @@ static char s_zip[TD5_CUSTOM_CAR_MAX][96];  /* "cars/custom_<name>.zip" */
 static int  s_count   = 0;
 static int  s_scanned = 0;
 
+/* Reserved suffixes (after the "custom_" prefix) that mark a folder as an
+ * example/template shipped for authors to copy, not a playable car. These are
+ * skipped by the scan so a template car never appears in the SP/MP car grid. */
+static int customcar_is_template(const char *name)
+{
+    static const char *const reserved[] = {
+        "custom_preset", "custom_template", "custom_example", "custom_sample",
+    };
+    for (size_t i = 0; i < sizeof(reserved) / sizeof(reserved[0]); i++) {
+        if (strcmp(name, reserved[i]) == 0) return 1;
+    }
+    return 0;
+}
+
 static int customcar_has_mesh(const char *dir)
 {
     char p[300];
@@ -50,6 +64,8 @@ int td5_customcar_init(void)
         /* The zip->dir resolver (build_extracted_asset_path) strips at the first
          * '.', so a dotted folder name would not resolve -- skip it. */
         if (strchr(e->d_name, '.')) continue;
+        /* Skip reserved example/template folders (never a playable car). */
+        if (customcar_is_template(e->d_name)) continue;
 
         char dir[256];
         snprintf(dir, sizeof(dir), "re/assets/cars/%s", e->d_name);
