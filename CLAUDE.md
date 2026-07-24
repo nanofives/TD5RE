@@ -166,10 +166,10 @@ comment — regenerate after adding/splitting modules with
 | `td5_physics_drivetrain.c` | Engine, transmission, drive torque, gravity |
 | `td5_physics_suspension.c` | Suspension, wheel contacts, pose integration |
 | `td5_track.c` | Track geometry, segment contacts, strip data |
-| `td5_track_parser.c` | MODELS.DAT parsing (S6 module split, see REFACTOR_PLAN.md) |
+| `td5_track_parser.c` | MODELS.DAT parsing (S6 module split, see docs/plans/REFACTOR_PLAN.md) |
 | `td5_track_registry.c` | runtime registry for custom (user-built) tracks. |
 | `td5_ai.c` | AI routing, rubber-banding, traffic, script VM |
-| `td5_ai_traffic.c` | Traffic subsystem (S5 module split, see REFACTOR_PLAN.md) |
+| `td5_ai_traffic.c` | Traffic subsystem (S5 module split, see docs/plans/REFACTOR_PLAN.md) |
 | `td5_render.c` | Scene setup, mesh transform, frustum cull |
 | `td5_render_effects.c` | Per-actor render effects & world billboards |
 | `td5_render_mesh.c` | Scene rendering: meshes, actors, spans, texture cache |
@@ -251,7 +251,7 @@ Key headers: `td5_types.h` (structs, verified against 0x388 actor stride),
 - **Fixed-point**: Coordinates use 24.8 fixed-point. As of the Wave S1 refactor
   (2026-07-10), raw shifts (`>> 8` / `<< 8`) are **no longer** the blessed style
   for the 24.8 truncate/scale idiom — readability now outranks literal
-  Ghidra-shift fidelity, per REFACTOR_PLAN.md's north star. Use the shared
+  Ghidra-shift fidelity, per docs/plans/REFACTOR_PLAN.md's north star. Use the shared
   `td5_fp.h` macros instead: `FP_TRUNC(x)` (was `(x) >> 8`), `FP_SCALE(x)`
   (was `(x) << 8`), `FP_ANGLE(x)` (was `((x) >> 8) & 0xFFF`). Each macro is a
   pure syntactic wrapper — same operator/operand/type — so conversions are
