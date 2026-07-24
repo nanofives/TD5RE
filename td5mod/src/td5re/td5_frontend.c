@@ -10103,6 +10103,33 @@ void td5_frontend_render_ui_rects(void) {
             td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
         }
     }
+
+#ifndef TD5RE_RELEASE
+    /* [SCREEN-ID BADGE 2026-07-24, dev-only] Bottom-right corner shows the current
+     * frontend screen's TD5_ScreenIndex value (+ its title where one exists) so
+     * feedback can name the exact screen. Drawn last, on top of everything, for
+     * every screen; a dim backing bar keeps it legible over bright backgrounds.
+     * Compiled out of RELEASE. */
+    {
+        char sb[80];
+        const char *nm = frontend_get_title_text_for_screen(s_current_screen);
+        if (nm) snprintf(sb, sizeof sb, "%d %s", (int)s_current_screen, td5_tr(nm));
+        else    snprintf(sb, sizeof sb, "%d", (int)s_current_screen);
+        {
+            float gsx  = sx * 0.7f, gsy = sy * 0.7f; /* glyph scale */
+            float tw   = fe_measure_text(sb, gsx, gsy);   /* screen px */
+            float pad  = 4.0f * sx;
+            float x    = sw - tw - 8.0f * sx;             /* right-anchored (px) */
+            float y    = sh - 20.0f * sy;
+            if (x < pad) x = pad;
+            td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+            fe_draw_quad(x - pad, y - pad, tw + 2.0f * pad, 18.0f * sy + pad,
+                         0xB0000000u, -1, 0, 0, 1, 1);
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+            fe_draw_text(x, y, sb, 0xFFC8C8C8u, gsx, gsy);
+        }
+    }
+#endif /* !TD5RE_RELEASE */
 }
 
 void td5_frontend_flush_sprite_blits(void) {
