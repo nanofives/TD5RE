@@ -23,11 +23,11 @@ Batch file format: see `re/analysis/global_naming/BATCH_TEMPLATE.md`. Supports t
 1. **Validate batches**: confirm each `<batch-path>` exists and has at least one `## Proposals` section. Skip silently and warn the user if a path is missing.
 2. **Backup master**:
    ```bash
-   BACKUP="TD5.rep.bak.$(date +%Y%m%d-%H%M%S)-pre-apply"
-   cp -r TD5.rep "$BACKUP"
+   BACKUP="ghidra/TD5.rep.bak.$(date +%Y%m%d-%H%M%S)-pre-apply"
+   cp -r ghidra/TD5.rep "$BACKUP"
    echo "Backup: $BACKUP"
    ```
-3. **Check master is free**: confirm no `TD5.lock` exists at the repo root (`ls TD5.lock* 2>/dev/null` — empty means available). If a lock exists and the user confirms no Ghidra session is running, it's stale: `rm -f TD5.lock TD5.lock~`.
+3. **Check master is free**: confirm no `TD5.lock` exists in `ghidra/` (`ls ghidra/TD5.lock* 2>/dev/null` — empty means available). If a lock exists and the user confirms no Ghidra session is running, it's stale: `rm -f ghidra/TD5.lock ghidra/TD5.lock~`.
 
 ### Phase 1 — Load Ghidra MCP schemas
 
@@ -42,7 +42,7 @@ This is the **EXCEPTION to the read-only HARD RULE** — master IS the writable 
 
 ```
 project_program_open_existing(
-  project_location="C:/Users/maria/Desktop/Proyectos/TD5RE",
+  project_location="C:/Users/maria/Desktop/Proyectos/TD5RE/ghidra",
   project_name="TD5",
   program_name="TD5_d3d.exe",
   read_only=false
@@ -108,7 +108,7 @@ Sort within the section by address. Skip if no new high-confidence global rename
 2. Regenerate the offline export so other sessions see the new annotations (the pool of clones was retired 2026-07-03; `re/ghidra_export/` is what sessions read now):
    ```bash
    cd C:/Users/maria/Desktop/Proyectos/TD5RE
-   ghidra_12.0.3_PUBLIC/support/analyzeHeadless.bat . TD5 -process TD5_d3d.exe \
+   ghidra/ghidra_12.0.3_PUBLIC/support/analyzeHeadless.bat ghidra TD5 -process TD5_d3d.exe \
      -noanalysis -readOnly -scriptPath scripts -postScript ExportAllDecomp.java
    ```
 3. Confirm `re/ghidra_export/EXPORT_INFO.txt` has fresh counts and 0 decompile failures.
@@ -147,7 +147,7 @@ Run the agent in the foreground (master is single-writer; you can't parallelize)
 
 ## Notes
 
-- This skill uses the same backup convention as the original T1-T5 consolidation: `TD5.rep.bak.<timestamp>-pre-apply/`. Keep these around for a few weeks in case a rename needs to be reverted.
+- This skill uses the same backup convention as the original T1-T5 consolidation: `ghidra/TD5.rep.bak.<timestamp>-pre-apply/`. Keep these around for a few weeks in case a rename needs to be reverted.
 - If a rename produces a conflict ("name already used") that's NOT the same name being re-applied, log both names in the CONSOLIDATION_LOG and let the user triage manually. Do not auto-resolve.
 - Function renames belong in `re/analysis/function_naming/` (parallel directory to `global_naming/`) once that workflow exists. Until then, function-only batches live alongside the globals.
 - The skill does NOT remove old `#define`s from the header. If a rename overwrites an existing rename (existing-name correction), the old `#define` lingers as a duplicate. Either edit by hand or regenerate the full header from Ghidra state in a separate pass.

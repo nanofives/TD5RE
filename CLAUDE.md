@@ -35,9 +35,16 @@ TD5RE/
 │   ├── analysis/         # RE analysis notes
 │   └── sessions/         # RE session logs
 ├── scripts/              # selftest.ps1, ExportAllDecomp.java, deploy/worktree helpers
-├── ghidra_pool/          # TD6_re side project only (TD5 pool slots retired 2026-07-03)
 ├── tools/                # Cloned MCP helper repos, capture_window.ps1, frida CSVs
-└── ghidra_12.0.3_PUBLIC/ # Ghidra installation
+├── docs/                 # Hand-written architecture docs + docs/plans/ (shipped plan docs)
+├── ghidra/               # ALL Ghidra material (2026-07-24 restructure), gitignored:
+│   ├── ghidra_12.0.3_PUBLIC/   # Ghidra installation
+│   ├── TD5.gpr, TD5.rep/       # master TD5_d3d.exe analysis project
+│   ├── TD5_headless.gpr        # headless-session project stub
+│   ├── headless-mcp/           # ghidra-headless-mcp clone (the `ghidra` MCP server)
+│   ├── td6/                    # TD6 Ghidra project (was ghidra_td6/)
+│   └── pool/                   # TD6_re side project (was ghidra_pool/; TD5 pool retired 2026-07-03)
+└── _archive/             # regenerable scratch parked for review (see _archive/MANIFEST.md)
 ```
 
 ## Build commands
@@ -282,7 +289,7 @@ Key headers: `td5_types.h` (structs, verified against 0x388 actor stride),
 most "what did the original do?" questions with zero locking, and facts found there count as confirmed
 decompilation data (`[CONFIRMED @ 0xADDR]`). Live Ghidra is only needed for interactive xref exploration
 or writing annotations. Regenerate the export after annotation work:
-`ghidra_12.0.3_PUBLIC/support/analyzeHeadless.bat . TD5 -process TD5_d3d.exe -noanalysis -readOnly -scriptPath scripts -postScript ExportAllDecomp.java`
+`ghidra/ghidra_12.0.3_PUBLIC/support/analyzeHeadless.bat ghidra TD5 -process TD5_d3d.exe -noanalysis -readOnly -scriptPath scripts -postScript ExportAllDecomp.java`
 
 Also: fixes/features that are **TD5RE-only** (no original counterpart — arcade, lane assist, drag mode,
 selftest, MP extensions, etc.) need **no** original-binary research at all — see the triage step in `/fix`.
@@ -290,14 +297,14 @@ selftest, MP extensions, etc.) need **no** original-binary research at all — s
 ### Live Ghidra (rare — open the master project directly)
 
 The pool of project clones was retired 2026-07-03 (with `re/ghidra_export/` there is no parallel live
-access to arbitrate; `ghidra_pool/` now holds only the `TD6_re` side project). For the rare live session:
+access to arbitrate; `ghidra/pool/` now holds only the `TD6_re` side project). For the rare live session:
 
-`project_program_open_existing(project_location="C:/Users/maria/Desktop/Proyectos/TD5RE", project_name="TD5", program_name="TD5_d3d.exe", read_only=true)`
+`project_program_open_existing(project_location="C:/Users/maria/Desktop/Proyectos/TD5RE/ghidra", project_name="TD5", program_name="TD5_d3d.exe", read_only=true)`
 
 **HARD RULE: `read_only=true` for all research.** `read_only=false` is reserved for `/ghidra-apply`
 (annotation writes; single writer, one at a time), which must regenerate `re/ghidra_export/` afterwards.
 If open fails with LockException and no Ghidra session is actually running, the lock is stale —
-`rm -f TD5.lock TD5.lock~` at the repo root and retry.
+`rm -f ghidra/TD5.lock ghidra/TD5.lock~` and retry.
 
 ## Debug shortcuts (in-race)
 

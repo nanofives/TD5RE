@@ -10,7 +10,7 @@ Usage:
 import subprocess, sys, json
 
 GHIDRA_MCP = r"C:\Users\maria\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\Scripts\ghidra-headless-mcp.EXE"
-GHIDRA_DIR = r"C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra_12.0.3_PUBLIC"
+GHIDRA_DIR = r"C:\Users\maria\Desktop\Proyectos\TD5RE\ghidra\ghidra_12.0.3_PUBLIC"
 
 def call_tool(tool_name, arguments=None, raw=False):
     arguments = arguments or {}

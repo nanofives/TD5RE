@@ -11,10 +11,10 @@
 build/
 build_*/
 _organization/
+# Ghidra install, projects (TD5/TD6), backups & headless-mcp clone — all live
+# under the ghidra/ umbrella as of the 2026-07-24 root restructure.
+ghidra/
 ghidra_*/
-ghidra-headless-mcp/
-TD5.gpr
-TD5.rep/
 TD5_tmp.gpr
 TD5_tmp.rep/
 data/
@@ -103,15 +103,12 @@ scripts/td5_dump/
 # Scratch files
 ck.txt
 step19.txt
-ghidra_pool/
 
 # Build/headless transient outputs
 build_chk*.txt
 build_out.txt
 **/build_chk*.txt
 log/
-TD5_headless.gpr
-TD5_headless.rep/
 
 # Ghidra headless run leftovers
 **/tmp_ghidra/
