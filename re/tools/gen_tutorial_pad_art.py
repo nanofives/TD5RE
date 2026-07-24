@@ -6,8 +6,11 @@ Writes td5mod/src/td5re/td5_tutorial_pad_art.h."""
 import cairosvg, io, zlib, os
 from PIL import Image
 
-SRC = "C:/Users/maria/Desktop/Proyectos/TD5RE/Xbox_Controller.svg"
-OUT = "C:/Users/maria/Desktop/Proyectos/TD5RE/.claude/worktrees/fix-1782691708-502659-29274/td5mod/src/td5re/td5_tutorial_pad_art.h"
+# Paths relative to this script (re/tools/): the SVG lives beside it, the
+# generated header lands in the source tree.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = os.path.join(_HERE, "Xbox_Controller.svg")
+OUT = os.path.join(_HERE, "..", "..", "td5mod", "src", "td5re", "td5_tutorial_pad_art.h")
 W   = 1024  # render width: crisp at the controller's on-screen size
 
 png = cairosvg.svg2png(url=SRC, output_width=W)
