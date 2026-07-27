@@ -32,6 +32,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "July 27" },
+    { CL_ITEM,    "NEW: the TUTORIAL toggle now appears on RACE OPTIONS" },
+    { CL_ITEM,    "  for every mode - multiplayer races included, not just" },
+    { CL_ITEM,    "  single player." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "July 23" },
     { CL_ITEM,    "FIX: the 'Preset_Test' template car no longer shows up" },
     { CL_ITEM,    "  in the car list (single-player or multiplayer) - example" },
