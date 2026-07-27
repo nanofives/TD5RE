@@ -170,6 +170,9 @@ static const ScreenStep k_screens_full[] = {
     /* scr-language / scr-legal removed 2026-07-03 — screens retired (table
      * slots NULL, set_screen redirects to MAIN_MENU). */
     { "scr-race-type",       TD5_SCREEN_RACE_TYPE_MENU,     0 },
+    /* [SELECT CUP PROMOTION 2026-07-27] cup-tier chooser, its own screen now
+     * (shares Screen_RaceTypeCategory, enters the cup sub-menu directly). */
+    { "scr-select-cup",      TD5_SCREEN_SELECT_CUP,         0 },
     { "scr-quick-race",      TD5_SCREEN_QUICK_RACE,         0 },
     { "scr-options-hub",     TD5_SCREEN_OPTIONS_HUB,        0 },
     /* [CONSOLIDATION 2026-07-21] scr-game-options retired (screen removed);

@@ -140,8 +140,27 @@ centred on their row.
 - [ ] Mouse works (it does automatically with standard buttons).
 - [ ] Back = confirm prompt → correct parent screen (lobby for MP setup).
 - [ ] Register the render fn in the post-button `switch` in `td5_frontend.c`.
-- [ ] Add the screen enum + table entry + decl (`td5_types.h`,
-      `td5_frontend.c` table, `td5_frontend_internal.h`).
+- [ ] Add the screen enum + descriptor row + handler decl:
+      - `td5_types.h`: **append** the enum value (never renumber 0..N — those
+        numbers are referenced by `StartScreen`, logs, inputscripts, docs), bump
+        `TD5_SCREEN_COUNT`.
+      - `td5_frontend.c`: add one `s_screens[]` `ScreenDesc` row `{ "NAME",
+        handler }` — `name` is the dev screen-ID badge's identity label for this
+        screen (retired slots use `{ NULL, NULL }`). This is the single source of
+        truth for the badge; it is **separate** from the on-screen header
+        (`frontend_get_title_text_for_screen`), which several self-titling screens
+        deliberately leave `NULL` — do not conflate them, or you'll double-draw a
+        title.
+      - `td5_frontend_internal.h`: handler decl if the body lives in a `td5_fe_*.c`.
+- [ ] **Screens with internal modes** (one table entry that renders several
+      visually distinct layouts off `s_inner_state` / a game-mode / an overlay
+      toggle) must add a `case` to `frontend_screen_substate()` in
+      `td5_frontend.c`, returning a 0-based sub-index (+ optional variant label),
+      so the dev badge reads `N.sub label` instead of one ambiguous number for
+      all the variants. If a variant is really its own navigational screen
+      (own back-target, reached via `set_screen`), promote it to its own enum
+      instead and share the handler body — see `TD5_SCREEN_SELECT_CUP` /
+      `TD5_SCREEN_CUP_TRACK_SELECT` for the shared-handler pattern.
 - [ ] **[I18N 2026-07-21]** Wrap every player-facing literal in `TR(...)`
       (`td5_i18n.h`) and add its es-AR value to
       `re/assets/frontend/lang/es_AR.txt` (run

@@ -81,72 +81,103 @@ static void fe_draw_quad_sheared(float x, float y, float w, float h,
 
 typedef void (*ScreenFn)(void);
 
-/**
- * 30-entry screen dispatch table.
- * Mirrors the original table at 0x4655C4 in the PE image.
- */
-static ScreenFn s_screen_table[TD5_SCREEN_COUNT] = {
-    /* [ 0] */ Screen_LocalizationInit,
-    /* [ 1] */ Screen_UiGuide,        /* REPURPOSED 2026-07-03 — dev UI style
-                                       * guide / widget gallery (was the orig
-                                       * glyph positioner @0x415030, obsolete:
-                                       * port text is TTF/vector). */
-    /* [ 2] */ Screen_AttractModeDemo,
-    /* [ 3] */ NULL,   /* RETIRED 2026-07-03 — Screen_LanguageSelect had zero nav
-                        * edges (orig picks language from the static Language.dll
-                        * import; ScreenLocalizationInit @0x427182 boots straight
-                        * to MAIN_MENU). set_screen redirects retired slots. */
-    /* [ 4] */ NULL,   /* RETIRED 2026-07-03 — Screen_LegalCopyright was only
-                        * reachable FROM the retired language screen; boot legals
-                        * show via td5_fmv_show_legal_screens (INTRO state). */
-    /* [ 5] */ Screen_MainMenu,
-    /* [ 6] */ Screen_RaceTypeCategory,
-    /* [ 7] */ Screen_QuickRaceMenu,
-    /* [ 8] */ Screen_ConnectionBrowser,
-    /* [ 9] */ Screen_SessionPicker,
-    /* [10] */ Screen_CreateSession,
-    /* [11] */ Screen_NetworkLobby,
-    /* [12] */ Screen_OptionsHub,
-    /* [13] */ NULL,   /* RETIRED 2026-07-21 — GAME OPTIONS consolidated into the
-                        * dynamic RACE OPTIONS screen (44); set_screen redirects
-                        * any stale jump to the OPTIONS hub. */
-    /* [14] */ Screen_ControlOptions,
-    /* [15] */ Screen_SoundOptions,
-    /* [16] */ Screen_DisplayOptions,
-    /* [17] */ Screen_TwoPlayerOptions,
-    /* [18] */ Screen_ControllerBinding,
-    /* [19] */ Screen_MusicTestExtras,
-    /* [20] */ Screen_CarSelection,
-    /* [21] */ Screen_TrackSelection,
-    /* [22] */ Screen_ExtrasGallery,
-    /* [23] */ Screen_PostRaceHighScore,
-    /* [24] */ Screen_RaceResults,
-    /* [25] */ Screen_PostRaceNameEntry,
-    /* [26] */ Screen_CupFailed,
-    /* [27] */ Screen_CupWon,
-    /* [28] */ Screen_StartupInit,
-    /* [29] */ Screen_SessionLocked,
-    /* [30] */ Screen_MultiplayerLobby,   /* PORT ENHANCEMENT 2026-06 */
-    /* [31] */ Screen_LanMenu,            /* S10 net-play UX */
-    /* [32] */ Screen_DirectConnect,      /* S10 net-play UX */
-    /* [33] */ Screen_NetNickname,        /* S10 net-play UX */
-    /* [34] */ Screen_MpPosition,         /* MP split-screen position picker (#8) */
-    /* [35] */ Screen_MpModeVote,         /* MP game-mode vote (2026-06-22)       */
-    /* [36] */ Screen_MpModeConfig,       /* MP per-mode options (2026-06-22)     */
-    /* [37] */ Screen_CupWinners,         /* cup final standings/podium (2026-06-22) */
-    /* [38] */ Screen_MpCopRoles,         /* cop/suspect role pick (2026-06-22)      */
-    /* [39] */ Screen_MpTeamSelect,       /* cup team pick (2026-06-22)              */
-    /* [40] */ Screen_MpPostRace,         /* MP split-screen post-race menu (2026-06-25) */
-    /* [41] */ Screen_Changelog,          /* version + changelog viewer (2026-06-25)     */
-    /* [42] */ Screen_PendingTest,        /* dev/QA pending-test checklist (2026-06-25)  */
-    /* [43] */ Screen_TrackSelection,     /* CUP TRACK SELECT: shares the track-select body,
-                                           * runs in multi-pick mode (2026-06-25)        */
-    /* [44] */ Screen_RaceOptions,        /* RACE OPTIONS: consolidated per-race options (2026-07-04) */
-    /* [45] */ Screen_MpGuide,            /* dev MP-widgets gallery (2026-07-03; from
-                                           * UI GUIDE's MP TOOLS row)                    */
-    /* [46] */ Screen_LanguageOptions,    /* [I18N 2026-07-21] UI-language selector
-                                           * (OPTIONS hub row; td5_fe_menu.c)            */
+/* [SCREEN DESCRIPTOR 2026-07-27] Each screen-table row now carries an identity
+ * `name` alongside its `handler`, so the dev screen-ID badge can name every
+ * screen from a single source of truth (previously names lived only in the
+ * partial title switch, leaving ~18 screens as bare numbers on the badge). This
+ * `name` is the BADGE/identity label — it is deliberately DECOUPLED from the
+ * on-screen header (frontend_get_title_text_for_screen): several screens draw
+ * their own title internally, so making the shared title path name them would
+ * double-draw. `name == NULL` marks a retired slot (handler also NULL).
+ * Screens that render several visually distinct layouts from one row (car MORE
+ * STATS overlay, results variants, per-mode MP config, net connect-flow states)
+ * expose a sub-index + label via frontend_screen_substate(); the badge shows
+ * "N.sub label" for those. Mirrors the original table at 0x4655C4. */
+typedef struct { const char *name; ScreenFn handler; } ScreenDesc;
+static const ScreenDesc s_screens[TD5_SCREEN_COUNT] = {
+    /* [ 0] */ { "INIT (LOCALE)",       Screen_LocalizationInit },
+    /* [ 1] */ { "UI GUIDE",            Screen_UiGuide },  /* REPURPOSED 2026-07-03 — dev
+                                       * UI style guide / widget gallery (was the orig glyph
+                                       * positioner @0x415030, obsolete: port text is TTF). */
+    /* [ 2] */ { "ATTRACT MODE",        Screen_AttractModeDemo },
+    /* [ 3] */ { NULL,                  NULL },  /* RETIRED 2026-07-03 — Screen_LanguageSelect
+                                       * had zero nav edges (orig picks language from the
+                                       * static Language.dll import). set_screen redirects. */
+    /* [ 4] */ { NULL,                  NULL },  /* RETIRED 2026-07-03 — Screen_LegalCopyright
+                                       * only reachable FROM the retired language screen; boot
+                                       * legals show via td5_fmv_show_legal_screens (INTRO). */
+    /* [ 5] */ { "MAIN MENU",           Screen_MainMenu },
+    /* [ 6] */ { "RACE TYPE",           Screen_RaceTypeCategory },
+    /* [ 7] */ { "QUICK RACE",          Screen_QuickRaceMenu },
+    /* [ 8] */ { "NET BROWSER",         Screen_ConnectionBrowser },
+    /* [ 9] */ { "NET SESSIONS",        Screen_SessionPicker },
+    /* [10] */ { "NET CREATE",          Screen_CreateSession },
+    /* [11] */ { "NET LOBBY",           Screen_NetworkLobby },
+    /* [12] */ { "OPTIONS",             Screen_OptionsHub },
+    /* [13] */ { NULL,                  NULL },  /* RETIRED 2026-07-21 — GAME OPTIONS folded
+                                       * into the dynamic RACE OPTIONS screen (44); set_screen
+                                       * redirects any stale jump to the OPTIONS hub. */
+    /* [14] */ { "CONTROL OPTIONS",     Screen_ControlOptions },
+    /* [15] */ { "SOUND OPTIONS",       Screen_SoundOptions },
+    /* [16] */ { "GRAPHICS OPTIONS",    Screen_DisplayOptions },
+    /* [17] */ { "MULTIPLAYER OPTIONS", Screen_TwoPlayerOptions },
+    /* [18] */ { "CONTROLLER SETUP",    Screen_ControllerBinding },
+    /* [19] */ { "MUSIC TEST",          Screen_MusicTestExtras },
+    /* [20] */ { "SELECT CAR",          Screen_CarSelection },
+    /* [21] */ { "SELECT TRACK",        Screen_TrackSelection },
+    /* [22] */ { "EXTRAS",              Screen_ExtrasGallery },
+    /* [23] */ { "HIGH SCORES",         Screen_PostRaceHighScore },
+    /* [24] */ { "RESULTS",             Screen_RaceResults },
+    /* [25] */ { "NAME ENTRY",          Screen_PostRaceNameEntry },
+    /* [26] */ { "CUP FAILED",          Screen_CupFailed },
+    /* [27] */ { "CUP WON",             Screen_CupWon },
+    /* [28] */ { "STARTUP INIT",        Screen_StartupInit },
+    /* [29] */ { "NET SESSION LOCKED",  Screen_SessionLocked },
+    /* [30] */ { "MP LOBBY",            Screen_MultiplayerLobby },   /* PORT ENHANCEMENT 2026-06 */
+    /* [31] */ { "LAN GAME",            Screen_LanMenu },            /* S10 net-play UX */
+    /* [32] */ { "DIRECT CONNECT",      Screen_DirectConnect },      /* S10 net-play UX */
+    /* [33] */ { "NET NICKNAME",        Screen_NetNickname },        /* S10 net-play UX */
+    /* [34] */ { "MP POSITION SELECT",  Screen_MpPosition },         /* MP split-screen picker */
+    /* [35] */ { "MP MODE VOTE",        Screen_MpModeVote },         /* MP game-mode vote */
+    /* [36] */ { "MP MODE CONFIG",      Screen_MpModeConfig },       /* MP per-mode options */
+    /* [37] */ { "CUP WINNERS",         Screen_CupWinners },         /* cup final standings/podium */
+    /* [38] */ { "MP COP ROLES",        Screen_MpCopRoles },         /* cop/suspect role pick */
+    /* [39] */ { "MP TEAM SELECT",      Screen_MpTeamSelect },       /* cup team pick */
+    /* [40] */ { "MP POST RACE",        Screen_MpPostRace },         /* MP split-screen post-race */
+    /* [41] */ { "CHANGELOG",           Screen_Changelog },          /* version + changelog viewer */
+    /* [42] */ { "PENDING TO TEST",     Screen_PendingTest },        /* dev/QA pending-test list */
+    /* [43] */ { "CUP TRACKS",          Screen_TrackSelection },     /* shares track-select body,
+                                       * runs in multi-pick mode (2026-06-25) */
+    /* [44] */ { "RACE OPTIONS",        Screen_RaceOptions },        /* consolidated per-race options */
+    /* [45] */ { "MP GUIDE",            Screen_MpGuide },            /* dev MP-widgets gallery */
+    /* [46] */ { "LANGUAGE",            Screen_LanguageOptions },    /* [I18N] UI-language selector */
+    /* [47] */ { "SELECT CUP",          Screen_RaceTypeCategory },   /* [SELECT CUP PROMOTION
+                                       * 2026-07-27] cup-tier chooser; shares the race-type
+                                       * body (enters straight into the cup sub-menu). */
+    /* [SUB-SCREEN PROMOTION 2026-07-27] Shared-handler rows (see the enum note +
+     * frontend_effective_screen): the handler decides the layout from the MP flow
+     * state; s_current_screen is mirrored to these numbers so the badge/title name
+     * them. Behavioural switches map them back to the parent. */
+    /* [48] */ { "MP PROFILE SELECTION", Screen_CarSelection },   /* MP setup phase 0 */
+    /* [49] */ { "MP CAR GRID",          Screen_CarSelection },   /* MP setup phase 1 (car grid) */
+    /* [50] */ { "CUP INTERMISSION",     Screen_MpPostRace },     /* cup-between post-race menu */
 };
+
+/* [SUB-SCREEN PROMOTION 2026-07-27] Map an identity screen number back to the
+ * screen whose handler + per-screen BEHAVIOUR it shares. 48/49 (MP car-select
+ * phases) behave as CAR_SELECTION; 50 (cup intermission) behaves as MP_POST_RACE.
+ * The raw s_current_screen carries the distinct identity for the dev badge and
+ * titles; every per-screen behaviour switch/gate routes through this so the
+ * promoted screens act exactly like their parent. Dispatch is table-driven and
+ * needs no mapping. Identity for all other screens. */
+static TD5_ScreenIndex frontend_effective_screen(TD5_ScreenIndex s) {
+    switch (s) {
+    case TD5_SCREEN_MP_PROFILE_SELECT:
+    case TD5_SCREEN_MP_CAR_GRID:         return TD5_SCREEN_CAR_SELECTION;
+    case TD5_SCREEN_MP_CUP_INTERMISSION: return TD5_SCREEN_MP_POST_RACE;
+    default:                             return s;
+    }
+}
 
 /* ========================================================================
  * Module-level state
@@ -1424,18 +1455,97 @@ float frontend_update_timed_animation(int max_tick, uint32_t duration_ms) {
     return t;
 }
 
+/* [SCREEN-ID BADGE SUB-STATE 2026-07-27] Several screens render more than one
+ * visually distinct layout from a single screen-table entry, selected by
+ * internal state — so the dev screen-ID badge would show one number for what
+ * look like different screens. This resolver centralises that: it returns a
+ * 0-based sub-index (>= 0) and, optionally, a label that names the variant, so
+ * the badge can print "N.sub label". Returns -1 for screens with no internal
+ * modes. Reuses the same state reads the on-screen title logic already uses
+ * (s_inner_state, g_td5.mp_mode_config.mode, cup/chase flags, the MP post-race
+ * layout pick). Dev-only consumer; no gameplay effect. Compiled out of RELEASE
+ * (its sole caller is the dev screen-ID badge) so it never trips
+ * -Wunused-function in stripped builds. */
+#ifndef TD5RE_RELEASE
+static const TD5_RaceOptsCtx *frontend_raceopts_ctx(void);  /* defined near s_ro_ctx */
+static int frontend_screen_substate(TD5_ScreenIndex screen, const char **out_label) {
+    const char *lbl = NULL;
+    int sub = -1;
+    switch (screen) {
+    case TD5_SCREEN_CAR_SELECTION:
+        /* The MP setup phases are now their own screens (MP_PROFILE_SELECT /
+         * MP_CAR_GRID — s_current_screen is mirrored there in the handler), so
+         * screen 20 is only the single-player car select + its MORE STATS overlay
+         * (0x40DFC0 state 0xF). */
+        sub = (s_inner_state == 15) ? 1 : 0;
+        lbl = (s_inner_state == 15) ? "MORE STATS" : "SELECT CAR";
+        break;
+    case TD5_SCREEN_RACE_RESULTS:
+        if (td5_game_mp_cop_chase_active()) { sub = 2; lbl = "CHASE RESULTS"; }
+        else if (td5_game_mp_cup_active() && g_td5.num_human_players >= 2) {
+            sub = 1; lbl = "CUP RESULTS";
+        } else { sub = 0; lbl = "RESULTS"; }
+        break;
+    case TD5_SCREEN_MP_MODE_CONFIG: {
+        int m = g_td5.mp_mode_config.mode;
+        sub = (m >= 0 && m < TD5_MP_MODE_COUNT) ? m : 0;
+        lbl = frontend_mp_mode_name(m);   /* per-mode option panel (td5_fe_race.c) */
+        break;
+    }
+    /* MP_POST_RACE cup-between layout is now its own screen (MP_CUP_INTERMISSION),
+     * so screen 40 is only the standard post-race menu — no sub-state. */
+    case TD5_SCREEN_RACE_OPTIONS: {
+        /* The dynamic RACE OPTIONS screen shows a different row set per game
+         * mode; badge it with the mode so the variants read distinctly. The ctx
+         * (s_ro_ctx) is snapshotted at screen entry (raceopts_build_ctx ->
+         * td5_raceopts_set_ctx) before the first rendered frame, so it is valid
+         * whenever this screen is up. Mode flags are mutually exclusive; net-MP
+         * adds a "NET " label prefix (same sub-index as the local variant). */
+        const TD5_RaceOptsCtx *c = frontend_raceopts_ctx();
+        if (c->is_drag)                                            { sub = 4; lbl = "DRAG OPTIONS"; }
+        else if (c->is_cop_chase)                                  { sub = 3; lbl = "COP CHASE OPTIONS"; }
+        else if (c->is_mp && c->mp_mode == TD5_MP_MODE_TRAFFIC_BATTLE) { sub = 5; lbl = "TRAFFIC BATTLE OPTIONS"; }
+        else if (c->is_cup)                                        { sub = 1; lbl = "CUP OPTIONS"; }
+        else if (c->is_time_trial)                                 { sub = 2; lbl = "TIME TRIAL OPTIONS"; }
+        else if (c->is_quick_race)                                 { sub = 6; lbl = "QUICK RACE OPTIONS"; }
+        else                                                       { sub = 0; lbl = "RACE OPTIONS"; }
+        if (c->is_net && lbl) {
+            static char netbuf[48];
+            snprintf(netbuf, sizeof netbuf, "NET %s", lbl);
+            lbl = netbuf;
+        }
+        break;
+    }
+    /* Net connect-flow screens dispatch host/discover/join/entry sub-screens off
+     * s_inner_state within one handler; expose it as the sub-index so the badge
+     * distinguishes them (label comes from the screen's descriptor name). */
+    case TD5_SCREEN_CONNECTION_BROWSER:
+    case TD5_SCREEN_LAN_MENU:
+    case TD5_SCREEN_DIRECT_CONNECT:
+        sub = s_inner_state;
+        break;
+    default:
+        break;
+    }
+    if (out_label) *out_label = lbl;
+    return sub;
+}
+#endif /* !TD5RE_RELEASE */
+
 /* Human-readable header text drawn at the top of each screen in the Lunatica
  * title face (td5_titlefont). NULL means the screen has no header. Rendered
  * uppercase via the title-draw helper. [2026-06-16] This is the sole title
- * source now — the legacy baked title-strip art (*Text.TGA) was retired. */
+ * source now — the legacy baked title-strip art (*Text.TGA) was retired.
+ * NB this is the ON-SCREEN header source; the dev screen-ID badge names screens
+ * from the descriptor table (s_screens[].name) instead — see the note there. */
 static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
     switch (screen) {
     case TD5_SCREEN_MAIN_MENU:          return "MAIN MENU";
-    /* Race-type menu doubles as the cup chooser: its inner states 6..10 are the
-     * championship "cup sub-menu" (Championship/Era/Challenge/...), where the
-     * header reads SELECT CUP; the top-level race-type list reads RACE TYPE. */
-    case TD5_SCREEN_RACE_TYPE_MENU:
-        return (s_inner_state >= 6 && s_inner_state <= 10) ? "SELECT CUP" : "RACE TYPE";
+    case TD5_SCREEN_RACE_TYPE_MENU:     return "RACE TYPE";
+    /* [SELECT CUP PROMOTION 2026-07-27] The championship cup-tier chooser is now
+     * its own screen (was RACE TYPE's inner states 6..10); it shares the
+     * Screen_RaceTypeCategory body and keeps its "SELECT CUP" header. */
+    case TD5_SCREEN_SELECT_CUP:         return "SELECT CUP";
     case TD5_SCREEN_QUICK_RACE:         return "QUICK RACE";
     /* [OPTIONS TITLES 2026-07-21] Each options sub-screen gets its own header
      * instead of a shared generic "OPTIONS" (GAME_OPTIONS retired). */
@@ -2665,7 +2775,7 @@ static void frontend_render_cursor(void); /* forward decl — impl after draw qu
 /* === Universal transition fades (PORT ENHANCEMENT — S03 2026-06-04) ============
  * Every navigable menu screen should fade OUT (Whoosh = SFX 5) when it is left
  * and fade IN (Crash1 chime = SFX 4) when it settles — INCLUDING screens added
- * to s_screen_table later with no per-screen audio wiring (e.g. the multiplayer
+ * to s_screens later with no per-screen audio wiring (e.g. the multiplayer
  * lobby [30] / future track screens, which today emit no slide SFX at all).
  *
  * Rather than hand-wire all 31 screens, the single transition choke point
@@ -3193,6 +3303,7 @@ int frontend_input_confirm_was_mouse(void) {
 }
 
 static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
+    screen = frontend_effective_screen(screen);   /* promoted sub-screens use their parent's back-target */
     switch (screen) {
     case TD5_SCREEN_ATTRACT_MODE:
     case TD5_SCREEN_EXTRAS_GALLERY:
@@ -4725,7 +4836,7 @@ int ConfigureGameTypeFlags(void) {
 
 /* Returns 1 if the screen should get the universal transition fades (slide-out
  * whoosh on leave, slide-in chime on enter). DEFAULT is 1 so any screen added
- * to s_screen_table — including future ones — inherits the fades with no extra
+ * to s_screens — including future ones — inherits the fades with no extra
  * wiring. Excluded: boot/init/attract/debug screens (not user navigation) and
  * the deliberately-silent end dialogs (CupWon/Failed/SessionLocked), which the
  * earlier frontend-audio audit confirmed should stay silent. See the universal
@@ -4947,7 +5058,7 @@ TD5_ScreenIndex td5_frontend_get_screen(void) {
  *     - Per-screen dispatch via function pointer: orig
  *       (*g_currentScreenFnPtr)() (overwritten with a JMP to
  *       LogicGate_ScreenDispatch by the widescreen patch); port indexes
- *       s_screen_table[s_current_screen] and invokes it. Same 30-entry
+ *       s_screens[s_current_screen].handler and invokes it. Same
  *       dispatch table semantically.
  *     - Race-confirm early-out @ 0x00414C2F: if (g_startRaceConfirmFlag)
  *       return. Port: deferred to end-of-function returning 1
@@ -5104,7 +5215,7 @@ int td5_frontend_display_loop(void) {
      * press as "Enter on a screen with no focused button" and play the locked /
      * rejection sfx (10). Skip it — the grid owns its own input + ESC handling. */
     if (!bc_frozen) {
-        int simul_grid = (s_current_screen == TD5_SCREEN_CAR_SELECTION) &&
+        int simul_grid = (frontend_effective_screen(s_current_screen) == TD5_SCREEN_CAR_SELECTION) &&
                          (s_mp_simul || (s_mp_flow && s_num_human_players >= 2));
         /* The MP position picker (#8) likewise reads each pad directly and creates
          * no s_buttons[]; skip the shared poll so per-player confirm presses don't
@@ -5116,7 +5227,7 @@ int td5_frontend_display_loop(void) {
 
     /* 3. Screen dispatch -- call the active screen's state machine */
     if (!bc_frozen && s_current_screen >= 0 && s_current_screen < TD5_SCREEN_COUNT) {
-        ScreenFn fn = s_screen_table[s_current_screen];
+        ScreenFn fn = s_screens[s_current_screen].handler;
         if (fn) fn();
     }
 #ifndef TD5RE_RELEASE
@@ -5128,7 +5239,7 @@ int td5_frontend_display_loop(void) {
      * so s_fade_chime_emitted reflects any chime the new screen played itself —
      * if it did, drop the armed default (no double). Otherwise fire the default
      * once the screen settles (s_anim_complete) or after a deadline backstop for
-     * screens that never set it. New screens added to s_screen_table inherit the
+     * screens that never set it. New screens added to s_screens inherit the
      * enter chime here with no per-screen wiring. */
     if (s_fade_in_pending) {
         if (s_fade_chime_emitted) {
@@ -5164,7 +5275,7 @@ int td5_frontend_display_loop(void) {
      *    behavior: ESC is ignored during slide-in animations). Skipped while the
      *    split-screen back-confirm prompt owns the frame (bc_frozen). */
     if (!bc_frozen && s_anim_complete &&
-        !(s_mp_simul && s_current_screen == TD5_SCREEN_CAR_SELECTION) &&
+        !(s_mp_simul && frontend_effective_screen(s_current_screen) == TD5_SCREEN_CAR_SELECTION) &&
         s_current_screen != TD5_SCREEN_MP_POSITION &&   /* picker owns its own B/ESC */
         frontend_check_escape()) {
         if (s_current_screen == TD5_SCREEN_MAIN_MENU) {
@@ -5428,7 +5539,7 @@ static int frontend_get_button_anim_state(int *out_mode, int *out_tick, int *out
     int mode = FE_BUTTON_ANIM_NONE;
     int max_tick = 0;
 
-    switch (s_current_screen) {
+    switch (frontend_effective_screen(s_current_screen)) {
     case TD5_SCREEN_MAIN_MENU:
         if (s_inner_state == 3) { mode = FE_BUTTON_ANIM_IN;  max_tick = 0x27; }
         else if (s_inner_state == 9 || s_inner_state == 12) { mode = FE_BUTTON_ANIM_OUT; max_tick = 16; }
@@ -5511,7 +5622,7 @@ static int frontend_get_button_anim_state(int *out_mode, int *out_tick, int *out
 
 /* Returns 1 if the current screen has timed button slide-in/out animations. */
 static int frontend_screen_has_button_anim(void) {
-    switch (s_current_screen) {
+    switch (frontend_effective_screen(s_current_screen)) {
     case TD5_SCREEN_MAIN_MENU:
     case TD5_SCREEN_RACE_TYPE_MENU:
     case TD5_SCREEN_QUICK_RACE:
@@ -6422,6 +6533,12 @@ void td5_raceopts_cycle(int idx, int delta) {
  * point-to-point only; road power-ups everywhere but drag; LANE ASSIST/TUTORIAL
  * SP-only). ========================================================= */
 static TD5_RaceOptsCtx s_ro_ctx;
+#ifndef TD5RE_RELEASE
+/* Dev screen-ID badge accessor for the current RACE OPTIONS mode ctx (forward-
+ * declared up by frontend_screen_substate). Dev-only so it never trips
+ * -Wunused-function in stripped builds. */
+static const TD5_RaceOptsCtx *frontend_raceopts_ctx(void) { return &s_ro_ctx; }
+#endif
 static int s_ro_rows[RO_OPT_COUNT];   /* filtered available RO_* ids, display order */
 static int s_ro_total     = 0;        /* count across all pages */
 static int s_ro_page      = 0;
@@ -9515,14 +9632,14 @@ void td5_frontend_render_ui_rects(void) {
      * skip EXTRAS_GALLERY (fills full viewport), CAR_SELECTION (dark bg, overlays bleed),
      * and TRACK_SELECTION (dedicated dark-blue preview panel, slideshow bleeds through). */
     if (s_current_screen != TD5_SCREEN_EXTRAS_GALLERY &&
-        s_current_screen != TD5_SCREEN_CAR_SELECTION &&
+        frontend_effective_screen(s_current_screen) != TD5_SCREEN_CAR_SELECTION &&
         s_current_screen != TD5_SCREEN_MP_POSITION &&
         s_current_screen != TD5_SCREEN_TRACK_SELECTION &&
         s_current_screen != TD5_SCREEN_CUP_TRACK_SELECT &&
         s_current_screen != TD5_SCREEN_RACE_OPTIONS)   /* [2026-07-04] shares the track-select backdrop */
         frontend_render_bg_gallery(sx, sy);
 
-    switch (s_current_screen) {
+    switch (frontend_effective_screen(s_current_screen)) {
     case TD5_SCREEN_CHANGELOG:
         /* Draw title + scrollable body UNDER the buttons so the BACK button
          * always composites on top. [CHANGELOG 2026-06-25] */
@@ -9793,7 +9910,7 @@ void td5_frontend_render_ui_rects(void) {
     /* Option arrows drawn AFTER buttons so they render on top of the button fill.
      * Original BltFast compositing placed arrows on top of the pre-baked button surface. */
     if (s_anim_complete) {
-        switch (s_current_screen) {
+        switch (frontend_effective_screen(s_current_screen)) {
         case TD5_SCREEN_UI_GUIDE:
             /* Dev UI style guide — POST-button so captions/guides composite
              * over the button fills (a focused row's opaque fill covered them
@@ -10055,7 +10172,7 @@ void td5_frontend_render_ui_rects(void) {
      * on s_mp_flow (set at lobby START, cleared on return to the main menu). */
     if (s_mp_flow &&
         s_current_screen != TD5_SCREEN_MP_LOBBY &&
-        s_current_screen != TD5_SCREEN_CAR_SELECTION &&
+        frontend_effective_screen(s_current_screen) != TD5_SCREEN_CAR_SELECTION &&
         s_current_screen != TD5_SCREEN_MP_POSITION) {
         int dp[TD5_MAX_HUMAN_PLAYERS], ndp = 0, pi;
         for (pi = 0; pi < s_mp_joined_count && pi < TD5_MAX_HUMAN_PLAYERS; pi++) {
@@ -10108,15 +10225,26 @@ void td5_frontend_render_ui_rects(void) {
 
 #ifndef TD5RE_RELEASE
     /* [SCREEN-ID BADGE 2026-07-24, dev-only] Bottom-right corner shows the current
-     * frontend screen's TD5_ScreenIndex value (+ its title where one exists) so
-     * feedback can name the exact screen. Drawn last, on top of everything, for
-     * every screen; a dim backing bar keeps it legible over bright backgrounds.
-     * Compiled out of RELEASE. */
+     * frontend screen's TD5_ScreenIndex value + its identity name (from the
+     * descriptor table s_screens[].name) so feedback can name the exact screen.
+     * [2026-07-27] For screens that render several distinct layouts from one
+     * table entry, frontend_screen_substate() appends ".sub" and a variant label
+     * (e.g. "24.2 CHASE RESULTS", "36.3 COP CHASE", "20.1 MORE STATS"). Drawn
+     * last, on top of everything, for every screen; a dim backing bar keeps it
+     * legible over bright backgrounds. Compiled out of RELEASE. */
     {
         char sb[80];
-        const char *nm = frontend_get_title_text_for_screen(s_current_screen);
-        if (nm) snprintf(sb, sizeof sb, "%d %s", (int)s_current_screen, td5_tr(nm));
-        else    snprintf(sb, sizeof sb, "%d", (int)s_current_screen);
+        const char *nm = s_screens[s_current_screen].name;
+        const char *sublabel = NULL;
+        int sub = frontend_screen_substate(s_current_screen, &sublabel);
+        const char *shown = sublabel ? sublabel : nm;
+        if (sub >= 0)
+            snprintf(sb, sizeof sb, "%d.%d %s", (int)s_current_screen, sub,
+                     shown ? td5_tr(shown) : "");
+        else if (nm)
+            snprintf(sb, sizeof sb, "%d %s", (int)s_current_screen, td5_tr(nm));
+        else
+            snprintf(sb, sizeof sb, "%d", (int)s_current_screen);
         {
             float gsx  = sx * 0.7f, gsy = sy * 0.7f; /* glyph scale */
             float tw   = fe_measure_text(sb, gsx, gsy);   /* screen px */

@@ -441,7 +441,24 @@ typedef enum TD5_ScreenIndex {
      * Spanish es-AR). Port-only — the retired slot 3 (original Language.dll
      * picker) stays retired; this is a fresh screen driving td5_i18n.c. */
     TD5_SCREEN_LANGUAGE_OPTIONS   = 46,  /* Screen_LanguageOptions (td5_fe_menu.c) */
-    TD5_SCREEN_COUNT               = 47
+    /* [SELECT CUP PROMOTION 2026-07-27] The cup-tier chooser was an internal
+     * sub-state (s_inner_state 6..10) of the RACE TYPE menu (6) — a visually
+     * distinct screen that shared screen number 6, so the dev screen-ID badge
+     * could not tell them apart. Promoted to its own screen number, sharing the
+     * Screen_RaceTypeCategory body the way 43 shares Screen_TrackSelection.
+     * APPEND-ONLY: values 0..46 must never be renumbered (StartScreen / logs /
+     * inputscripts / docs reference them); new screens go here at 47+. */
+    TD5_SCREEN_SELECT_CUP         = 47,  /* Screen_RaceTypeCategory (cup sub-menu) */
+    /* [SUB-SCREEN PROMOTION 2026-07-27] Distinct sub-screens that were internal
+     * phases/layouts of another screen, promoted to their own numbers so the dev
+     * badge / titles / StartScreen treat them as first-class. They SHARE their
+     * parent's handler + behaviour (see frontend_effective_screen): 48/49 share
+     * Screen_CarSelection (MP setup phase 0 / phase 1), 50 shares Screen_MpPostRace
+     * (cup-between layout). APPEND-ONLY — never renumber 0..47. */
+    TD5_SCREEN_MP_PROFILE_SELECT  = 48,  /* Screen_CarSelection, MP phase 0 (name/colour setup) */
+    TD5_SCREEN_MP_CAR_GRID        = 49,  /* Screen_CarSelection, MP phase 1 (simultaneous grid) */
+    TD5_SCREEN_MP_CUP_INTERMISSION = 50, /* Screen_MpPostRace, cup-between "what next" layout */
+    TD5_SCREEN_COUNT               = 51
 } TD5_ScreenIndex;
 
 /* ========================================================================

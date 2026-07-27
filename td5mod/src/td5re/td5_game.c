@@ -1095,6 +1095,9 @@ static const SSW_NavStep k_ssw_2p_opts[]    = { { TD5_SCREEN_MAIN_MENU, 4 },
 /* Race type menu: 0=Single Race (→ car selection with game_type=0). */
 static const SSW_NavStep k_ssw_car_sel[]    = { { TD5_SCREEN_MAIN_MENU, 0 },
                                                 { TD5_SCREEN_RACE_TYPE_MENU, 0 } };
+/* [SELECT CUP PROMOTION 2026-07-27] RACE TYPE button 1 = CUP RACE -> SELECT CUP. */
+static const SSW_NavStep k_ssw_select_cup[] = { { TD5_SCREEN_MAIN_MENU, 0 },
+                                                { TD5_SCREEN_RACE_TYPE_MENU, 1 } };
 /* Connection browser: 0=LAN GAME 1=DIRECT IP (td5_fe_net.c:624). */
 static const SSW_NavStep k_ssw_lan_menu[]   = { { TD5_SCREEN_MAIN_MENU, 3 },
                                                 { TD5_SCREEN_CONNECTION_BROWSER, 0 } };
@@ -1117,6 +1120,7 @@ static const SSW_NavStep *startscreen_route(int target, int *out_len)
 {
     switch (target) {
     case TD5_SCREEN_RACE_TYPE_MENU:     SSW_ROUTE(k_ssw_race_type);
+    case TD5_SCREEN_SELECT_CUP:         SSW_ROUTE(k_ssw_select_cup);
     case TD5_SCREEN_QUICK_RACE:         SSW_ROUTE(k_ssw_quick_race);
     case TD5_SCREEN_CONNECTION_BROWSER: SSW_ROUTE(k_ssw_browser);
     case TD5_SCREEN_OPTIONS_HUB:        SSW_ROUTE(k_ssw_optshub);

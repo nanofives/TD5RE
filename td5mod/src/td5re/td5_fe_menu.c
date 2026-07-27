@@ -1187,6 +1187,19 @@ static void frontend_reset_sp_race_carryover(const char *mode_name) {
 }
 
 void Screen_RaceTypeCategory(void) {
+    /* [SELECT CUP PROMOTION 2026-07-27] The championship cup-tier chooser is its
+     * own screen (TD5_SCREEN_SELECT_CUP), sharing this handler body the way
+     * TD5_SCREEN_CUP_TRACK_SELECT (43) shares Screen_TrackSelection. When entered
+     * as SELECT CUP (via the RACE TYPE list's CUP RACE button, or StartScreen=47),
+     * set_screen has already reset s_inner_state to 0 — load the shared MainMenu
+     * backdrop and jump straight into the cup sub-menu init (state 6). The
+     * top-level race-type list (screen 6) never enters states 6..12 anymore. */
+    if (s_current_screen == TD5_SCREEN_SELECT_CUP && s_inner_state == 0) {
+        frontend_init_return_screen(TD5_SCREEN_SELECT_CUP);
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        s_anim_complete = 0;
+        s_inner_state = 6;   /* fall into the cup sub-menu init below */
+    }
     switch (s_inner_state) {
     case 0: /* Init: load MainMenu.tga, create 7 race-type buttons */
         frontend_init_return_screen(TD5_SCREEN_RACE_TYPE_MENU);
@@ -1260,8 +1273,8 @@ void Screen_RaceTypeCategory(void) {
                 s_inner_state = 5;
                 break;
 
-            case 1: /* Cup Race -> enter sub-menu */
-                s_inner_state = 6;
+            case 1: /* Cup Race -> the cup-tier chooser is now its own screen */
+                td5_frontend_set_screen(TD5_SCREEN_SELECT_CUP);
                 break;
 
             case 2: /* Continue Cup */
@@ -1388,8 +1401,8 @@ void Screen_RaceTypeCategory(void) {
                 if (s_cup_unlock_tier >= 2) cup_type = 6;
                 else frontend_play_sfx(10);
                 break;
-            case 6: /* Back to top-level */
-                s_inner_state = 11;
+            case 6: /* Back -> the RACE TYPE list is now a separate screen */
+                td5_frontend_set_screen(TD5_SCREEN_RACE_TYPE_MENU);
                 break;
             }
             if (cup_type >= 0) {
@@ -1417,9 +1430,11 @@ void Screen_RaceTypeCategory(void) {
         s_inner_state = 0x14;
         break;
 
-    case 11: /* Back to top-level: rebuild top buttons */
+    case 11: /* [DEAD since SELECT CUP promotion 2026-07-27] was the in-screen
+              * "back to race-type list" rebuild; BACK now set_screen()s to the
+              * RACE TYPE screen. Kept as a defensive no-op rebuild. */
         frontend_reset_buttons();
-        s_inner_state = 0; /* re-init top menu */
+        s_inner_state = 0;
         break;
 
     /* --- Return transition --- */

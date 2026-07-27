@@ -3424,6 +3424,14 @@ static int mp_game_modes_enabled(void) {
 static const char *const k_mp_mode_names[TD5_MP_MODE_COUNT] = {
     "REGULAR RACE", "CUP", "TRAFFIC BATTLE", "COP CHASE", "DRAG RACE"
 };
+
+/* [SCREEN-ID BADGE 2026-07-27] Display name for an MP game mode, exposed so the
+ * frontend core's dev screen-ID badge can label the per-mode MP MODE CONFIG
+ * screen variants (36.0 REGULAR RACE .. 36.4 DRAG RACE). Returns "MODE" for an
+ * out-of-range index. */
+const char *frontend_mp_mode_name(int mode) {
+    return (mode >= 0 && mode < TD5_MP_MODE_COUNT) ? k_mp_mode_names[mode] : "MODE";
+}
 static const char *const k_mp_mode_desc[TD5_MP_MODE_COUNT] = {
     "Classic race to the finish",
     "Best-of-X series, points by position",
@@ -4190,6 +4198,12 @@ void Screen_MpPostRace(void) {
         const int y0 = 104;
 
         s_mp_postrace_menu_mode = cup_between ? 1 : 0;
+        /* [SUB-SCREEN PROMOTION 2026-07-27] The cup-between "what next" layout is
+         * its own screen (MP_CUP_INTERMISSION); mirror the id so the badge/title
+         * name it. Mirror only (no set_screen) — behavioural code maps it back to
+         * MP_POST_RACE via frontend_effective_screen. */
+        s_current_screen = cup_between ? TD5_SCREEN_MP_CUP_INTERMISSION
+                                       : TD5_SCREEN_MP_POST_RACE;
         s_mp_postrace_choice = -1;
         frontend_init_return_screen(TD5_SCREEN_MP_POST_RACE);
         frontend_reset_buttons();
@@ -5686,6 +5700,13 @@ void Screen_CarSelection(void) {
             if (s_inner_state == 0x20 || s_inner_state == 0x21) frontend_mp_simul_carsel_update();
             else                                                frontend_mp_simul_carsel_init();
         }
+        /* [SUB-SCREEN PROMOTION 2026-07-27] Reflect the active MP setup phase in
+         * the screen id so the dev badge / titles name it (PROFILE SELECTION vs
+         * CAR GRID) as its own screen. Mirror only — no set_screen, so the flow's
+         * state machine is untouched; behavioural code maps these back to
+         * CAR_SELECTION via frontend_effective_screen. */
+        s_current_screen = (s_mp_phase == 0) ? TD5_SCREEN_MP_PROFILE_SELECT
+                                             : TD5_SCREEN_MP_CAR_GRID;
         return;
     }
     s_mp_simul = 0;
