@@ -615,6 +615,17 @@ static uint8_t         s_saved_race_order[TD5_MAX_RACER_SLOTS];
 static int             s_saved_slot_finish_place[TD5_MAX_RACER_SLOTS];
 static int32_t         s_saved_arrest_time[TD5_MAX_RACER_SLOTS];
 static int             s_saved_finish_position_display;
+/* [REPLAY RESULTS STATS 2026-07-27] Several post-race summary columns don't read
+ * s_results/s_metrics: COLLISIONS/AIR TIME come from g_race_metrics[] (wiped by
+ * td5_physics_reset_metrics during the replay's init), and AVG SPEED / HIGHEST
+ * POSITION plus the TOP-SPEED/ARRESTS fallbacks read live actor fields the replay
+ * overwrites. Snapshot those too so the whole table survives the replay. */
+static TD5_RaceMetrics s_saved_race_metrics[TD5_MAX_RACER_SLOTS];
+static int16_t         s_saved_peak_speed[TD5_MAX_RACER_SLOTS];
+static int16_t         s_saved_avg_speed_metric[TD5_MAX_RACER_SLOTS];
+static uint8_t         s_saved_grip_reduction[TD5_MAX_RACER_SLOTS];
+static int32_t         s_saved_special_enc[TD5_MAX_RACER_SLOTS];
+static uint8_t         s_saved_actor_meta_valid[TD5_MAX_RACER_SLOTS];
 
 /* TD5RE_REPLAY_KEEP_RESULTS gate (default ON). Cached + logged once. "0" reverts
  * to the legacy behaviour where a View Replay rebuilds (and pollutes) the
@@ -9030,6 +9041,25 @@ static void capture_replay_results_snapshot(void) {
     memcpy(s_saved_slot_finish_place, s_slot_finish_place, sizeof(s_slot_finish_place));
     memcpy(s_saved_arrest_time,       s_arrest_time,       sizeof(s_arrest_time));
     s_saved_finish_position_display = s_finish_position_display;
+    /* [REPLAY RESULTS STATS 2026-07-27] g_race_metrics[] + the live actor summary
+     * fields the results accessors fall back to (see td5_game_get_result_avg_speed,
+     * _highest_position, _top_speed, _wanted_kills). */
+    memcpy(s_saved_race_metrics, g_race_metrics, sizeof(s_saved_race_metrics));
+    {
+        int si;
+        for (si = 0; si < TD5_MAX_RACER_SLOTS; si++) {
+            TD5_Actor *a = td5_game_get_actor(si);
+            if (a) {
+                s_saved_peak_speed[si]       = a->peak_speed;
+                s_saved_avg_speed_metric[si] = a->average_speed_metric;
+                s_saved_grip_reduction[si]   = a->grip_reduction;
+                s_saved_special_enc[si]      = a->special_encounter_state;
+                s_saved_actor_meta_valid[si] = 1;
+            } else {
+                s_saved_actor_meta_valid[si] = 0;
+            }
+        }
+    }
     s_replay_results_saved = 1;
     TD5_LOG_I(LOG_TAG, "Replay start: captured real race results "
               "(slot0 finished=%d primary=%d, order0=%d)",
@@ -9046,6 +9076,24 @@ static void restore_replay_results_snapshot(void) {
     memcpy(s_slot_finish_place, s_saved_slot_finish_place, sizeof(s_slot_finish_place));
     memcpy(s_arrest_time,       s_saved_arrest_time,       sizeof(s_arrest_time));
     s_finish_position_display = s_saved_finish_position_display;
+    /* [REPLAY RESULTS STATS 2026-07-27] Restore g_race_metrics[] + the live actor
+     * summary fields so the COLLISIONS/AIR TIME/AVG SPEED/HIGHEST POSITION columns
+     * (and the top-speed/arrests fallbacks) show the real race, not the replay. */
+    memcpy(g_race_metrics, s_saved_race_metrics, sizeof(g_race_metrics));
+    {
+        int si;
+        for (si = 0; si < TD5_MAX_RACER_SLOTS; si++) {
+            TD5_Actor *a;
+            if (!s_saved_actor_meta_valid[si]) continue;
+            a = td5_game_get_actor(si);
+            if (a) {
+                a->peak_speed              = s_saved_peak_speed[si];
+                a->average_speed_metric    = s_saved_avg_speed_metric[si];
+                a->grip_reduction          = s_saved_grip_reduction[si];
+                a->special_encounter_state = s_saved_special_enc[si];
+            }
+        }
+    }
     s_replay_results_saved = 0;
     TD5_LOG_I(LOG_TAG, "Replay end: restored real race results "
               "(slot0 finished=%d primary=%d, order0=%d)",
