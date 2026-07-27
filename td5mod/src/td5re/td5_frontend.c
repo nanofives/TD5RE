@@ -6496,8 +6496,10 @@ int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
     case RO_LANEASSIST:  /* SP only (per-player LANE ASSIST lives on the MP profile);
                           * not on drag (no lane-keeping on a straight strip) */
         return !c->is_mp && !c->is_drag;
-    case RO_TUTORIAL:    /* SP only */
-        return !c->is_mp;
+    case RO_TUTORIAL:    /* every mode, SP and MP — the overlay waits on all
+                          * humans (td5_tutorial.c s_humans/s_ready_mask), so it
+                          * belongs on the MP race-options variants too */
+        return 1;
     /* [QUICK RACE DEBUG 2026-07-21] Quick-Race-exclusive dev debugging rows —
      * compiled out of RELEASE (dev-only, like the old inline QR buttons). */
     case RO_PLAYER_AI:
