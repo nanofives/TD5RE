@@ -36,6 +36,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "NEW: the TUTORIAL toggle now appears on RACE OPTIONS" },
     { CL_ITEM,    "  for every mode - multiplayer races included, not just" },
     { CL_ITEM,    "  single player." },
+    { CL_ITEM,    "FIX: Paris (and other city tracks) - the START and" },
+    { CL_ITEM,    "  checkpoint banners no longer sit skewed / floating off" },
+    { CL_ITEM,    "  their posts; the authored placement is used again" },
+    { CL_ITEM,    "FIX: no more headlights on bright daytime tracks - a rain" },
+    { CL_ITEM,    "  flag on a sunny track (Paris) no longer forces them on" },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 23" },

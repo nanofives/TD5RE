@@ -139,6 +139,18 @@ static int   s_auto_sky_thr      = 80;
  * strobe at zone boundaries: once ON they need scene_luma >= thr+hyst to flip OFF.
  * Kept below (open-road - tunnel) so open road always clears (80+15=95 < 106). */
 static int   s_auto_hyst         = 15;
+/* [DAYTIME WEATHER VETO 2026-07-27] Sky-luma at/above which the track counts as
+ * bright DAYLIGHT, so the whole-track RAIN "weather_dark" term is suppressed:
+ * a daytime shower is still daylight and must not force headlights on all race.
+ * This fixes Paris (TD6 lvl 8), whose converted LEVELINF carries weather_type=0
+ * (== rain, which is also the zero-default an un-set field decodes to) while the
+ * sky renders bright (luma ~163): rain forced headlights on a plainly sunny
+ * track. Set well ABOVE s_auto_sky_thr (80): sky in the 80..day-thr band is
+ * genuine dusk/gloom where a rainy track SHOULD keep lights, so the veto only
+ * fires on unambiguously bright skies. Tunnels (the per-zone term) are NOT
+ * vetoed -- a tunnel on a bright track still darkens locally and lights up.
+ * Env: TD5RE_LIGHT_AUTO_DAY (0..255). */
+static int   s_auto_day_thr      = 130;
 static int   s_env_zone_dark[TD5_ACTOR_MAX_TOTAL_SLOTS];   /* latched zone verdict (hysteresis), per actor slot */
 #define AUTO_DIRECT_SCALE 0.25f         /* |vec_world| ~= 4*weight_avg, so /4 to ambient units */
 
@@ -337,12 +349,16 @@ void td5_render_lighting2_frame_begin(void)
 /* [AUTO LIGHTS] Verdict: is the environment around actor SLOT poorly lit (so
  * that car's headlights should auto-enable)? Three independent triggers, OR'd
  * together:
- *   1. weather_dark — RAIN only. Not "any non-clear": TD5's SNOW render path is
- *      gated off (a cut feature), so snow tracks (e.g. Bern) LOOK like bright
- *      sunny days -- forcing their headlights on all race, over the sunlit
- *      stretches too, is wrong. Snow therefore falls through to the sky/zone
- *      terms; only visible rain forces dark on its own. Track-wide (weather is
- *      the same for every car), so this term doesn't vary by slot.
+ *   1. weather_dark — RAIN only, AND only when the sky is not bright daylight.
+ *      Not "any non-clear": TD5's SNOW render path is gated off (a cut feature),
+ *      so snow tracks (e.g. Bern) LOOK like bright sunny days -- forcing their
+ *      headlights on all race, over the sunlit stretches too, is wrong. Snow
+ *      therefore falls through to the sky/zone terms. Rain likewise only forces
+ *      dark on a non-daylight sky (luma < s_auto_day_thr): a bright-sky daytime
+ *      shower (Paris, whose converted LEVELINF reads weather_type=rain yet its
+ *      sky renders at luma ~163) keeps its lights OFF; a genuinely dark/dusk
+ *      rainy track has a low sky luma and still gets lights. Track-wide (weather
+ *      and sky are the same for every car), so this term doesn't vary by slot.
  *   2. zone_dark    — THIS SLOT's own per-zone scene luminance (ambient +
  *                     scaled directional/"sun" budget) is below s_auto_zone_thr.
  *                     This is the DYNAMIC, within-track, PER-CAR trigger: a
@@ -373,13 +389,23 @@ int td5_render_env_is_dark_for_slot(int slot)
         if (es && es[0]) { int v = atoi(es); if (v >= 0 && v <= 255) s_auto_sky_thr = v; }
         const char *eh = getenv("TD5RE_LIGHT_AUTO_HYST");
         if (eh && eh[0]) { int v = atoi(eh); if (v >= 0 && v <= 128) s_auto_hyst = v; }
+        const char *ed = getenv("TD5RE_LIGHT_AUTO_DAY");
+        if (ed && ed[0]) { int v = atoi(ed); if (v >= 0 && v <= 255) s_auto_day_thr = v; }
     }
     env_probe_init_once();
     int idx = (slot >= 0 && slot < TD5_ACTOR_MAX_TOTAL_SLOTS) ? slot : 0;
 
-    /* RAIN only (see header): snow is invisible in TD5 so snow tracks read as
-     * bright daylight and must not force headlights on by weather alone. */
-    int weather_dark = (g_td5.weather == TD5_WEATHER_RAIN);
+    /* Per-track sky baseline (-1 = no sky loaded / unknown -> term disabled). */
+    float sky_luma = td5_render_sky_luma();
+
+    /* [DAYTIME WEATHER VETO] RAIN forces "dark" ONLY when the sky is not clearly
+     * daylight. A bright sky (luma >= s_auto_day_thr) means it is daytime, so a
+     * rain flag must NOT switch headlights on (Paris: bright sky ~163 yet its
+     * LEVELINF weather_type reads rain). Snow is already excluded (invisible in
+     * TD5 -> reads as bright daylight); genuinely dark/dusk rainy tracks have a
+     * sky below the day threshold and keep their weather-forced lights. */
+    int sky_bright = (sky_luma >= 0.0f) && (sky_luma >= (float)s_auto_day_thr);
+    int weather_dark = (g_td5.weather == TD5_WEATHER_RAIN) && !sky_bright;
 
     /* Per-zone scene luminance = ambient + scaled directional (sun) budget,
      * for THIS SLOT (captured in the per-actor render pass, see the "[AUTO
@@ -395,8 +421,7 @@ int td5_render_env_is_dark_for_slot(int slot)
         if (scene_luma <  (float)s_auto_zone_thr)                 s_env_zone_dark[idx] = 1;
     }
 
-    /* Per-track sky baseline (-1 = no sky loaded / unknown -> term disabled). */
-    float sky_luma = td5_render_sky_luma();
+    /* sky_luma fetched above (needed for the daytime weather veto). */
     int sky_dark = (sky_luma >= 0.0f) && (sky_luma < (float)s_auto_sky_thr);
 
     int dark = weather_dark || s_env_zone_dark[idx] || sky_dark;
@@ -404,9 +429,9 @@ int td5_render_env_is_dark_for_slot(int slot)
     static int s_log = 0;
     if (getenv("TD5RE_LIGHT_AUTO_LOG") && (s_log++ % 120) == 0) {
         TD5_LOG_I(LOG_TAG, "auto-lights[slot=%d]: amb=%.0f direct=%.0f scene=%.0f (zone_thr=%d hyst=%d) "
-                  "sky=%.0f (sky_thr=%d) weather=%d zone_dark=%d sky_dark=%d -> dark=%d",
+                  "sky=%.0f (sky_thr=%d day_thr=%d bright=%d) weather=%d zone_dark=%d sky_dark=%d -> dark=%d",
                   idx, (double)s_env_ambient[idx], (double)s_env_direct[idx], (double)scene_luma,
-                  s_auto_zone_thr, s_auto_hyst, (double)sky_luma, s_auto_sky_thr,
+                  s_auto_zone_thr, s_auto_hyst, (double)sky_luma, s_auto_sky_thr, s_auto_day_thr, sky_bright,
                   weather_dark, s_env_zone_dark[idx], sky_dark, dark);
     }
     return dark;
@@ -1097,8 +1122,15 @@ void td5_render_span_display_list(void *display_list_block)
                   s_banner_cull ? "ON" : "OFF", s_banner_cull_keep_pos ? "pos" : "neg",
                   s_banner_cull_revflip, s_native_banner_keep_pos ? "pos" : "neg");
         /* [START-banner align] road-centre re-alignment of TD6 banner gantries.
-         * Default ON; TD5RE_BANNER_ALIGN=0 restores the raw authored position. */
-        s_banner_align = td5_env_flag_on("TD5RE_BANNER_ALIGN");
+         * Default OFF (2026-07-27): the heuristic shifts a gantry's OVERHEAD
+         * panel toward road-centre but leaves its support posts, so on Paris
+         * (lvl 8) it detaches the START panel from its posts into a skewed,
+         * floating quad. Verified on both Paris AND London (lvl 12, the track
+         * this was originally authored for): the raw authored placement reads
+         * cleaner than the re-aligned one on both — align ON pushed London's
+         * "START" right so it read "TART". So the authored position wins; the
+         * knob is kept opt-in. TD5RE_BANNER_ALIGN=1 re-enables it. */
+        s_banner_align = td5_env_flag_off("TD5RE_BANNER_ALIGN");
         TD5_LOG_I(LOG_TAG, "banner align: %s (TD5RE_BANNER_ALIGN)",
                   s_banner_align ? "ON" : "OFF");
     }
