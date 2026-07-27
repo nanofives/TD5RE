@@ -90,6 +90,10 @@ void frontend_mp_position_render(float sx, float sy);  /* its render (in td5_fro
 void Screen_MpModeVote(void);    /* host votes/locks the game mode; others vote   */
 void Screen_MpModeConfig(void);  /* per-mode options (host edits, clients view)   */
 const char *frontend_mp_mode_name(int mode);  /* MP mode display name (dev badge) */
+/* [SUB-SCREEN PROMOTION 2026-07-27] Map a promoted sub-screen id (MP_PROFILE_SELECT/
+ * MP_CAR_GRID -> CAR_SELECTION, MP_CUP_INTERMISSION -> MP_POST_RACE) to the screen
+ * whose handler + behaviour it shares; identity otherwise. Defined in td5_frontend.c. */
+TD5_ScreenIndex frontend_effective_screen(TD5_ScreenIndex s);
 void Screen_CupWinners(void);    /* final cup standings / podium                  */
 void Screen_MpCopRoles(void);    /* cop chase: each player picks cop / suspect    */
 void Screen_MpTeamSelect(void);  /* cup teams: each player picks their team       */

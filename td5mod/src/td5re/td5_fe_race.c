@@ -5704,9 +5704,16 @@ void Screen_CarSelection(void) {
          * the screen id so the dev badge / titles name it (PROFILE SELECTION vs
          * CAR GRID) as its own screen. Mirror only — no set_screen, so the flow's
          * state machine is untouched; behavioural code maps these back to
-         * CAR_SELECTION via frontend_effective_screen. */
-        s_current_screen = (s_mp_phase == 0) ? TD5_SCREEN_MP_PROFILE_SELECT
-                                             : TD5_SCREEN_MP_CAR_GRID;
+         * CAR_SELECTION via frontend_effective_screen.
+         * GUARD: the update calls above (frontend_mp_setup_update / carsel_update)
+         * may have navigated AWAY this frame via set_screen (OK -> position picker
+         * MP_POSITION, or car grid -> track select). Only mirror when we're still
+         * on the car-select family, or we'd clobber that navigation and freeze the
+         * flow on this screen. */
+        if (frontend_effective_screen(s_current_screen) == TD5_SCREEN_CAR_SELECTION) {
+            s_current_screen = (s_mp_phase == 0) ? TD5_SCREEN_MP_PROFILE_SELECT
+                                                 : TD5_SCREEN_MP_CAR_GRID;
+        }
         return;
     }
     s_mp_simul = 0;

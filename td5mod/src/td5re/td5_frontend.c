@@ -169,8 +169,10 @@ static const ScreenDesc s_screens[TD5_SCREEN_COUNT] = {
  * The raw s_current_screen carries the distinct identity for the dev badge and
  * titles; every per-screen behaviour switch/gate routes through this so the
  * promoted screens act exactly like their parent. Dispatch is table-driven and
- * needs no mapping. Identity for all other screens. */
-static TD5_ScreenIndex frontend_effective_screen(TD5_ScreenIndex s) {
+ * needs no mapping. Identity for all other screens. Non-static: the MP flow in
+ * td5_fe_race.c consults it to avoid clobbering a set_screen navigation when it
+ * mirrors s_current_screen for the promoted sub-screens. */
+TD5_ScreenIndex frontend_effective_screen(TD5_ScreenIndex s) {
     switch (s) {
     case TD5_SCREEN_MP_PROFILE_SELECT:
     case TD5_SCREEN_MP_CAR_GRID:         return TD5_SCREEN_CAR_SELECTION;
