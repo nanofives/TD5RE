@@ -97,28 +97,23 @@ static void td5_trig_build_lut(void) {
      * derived from the float LUT by `lrintf(float * 4096.0f)` using FISTP
      * semantics (round-to-nearest-even). Build it here so CosFixed12bit /
      * SinFixed12bit stay byte-faithful to the original's int LUT as well.
-     * Note: doing this via FISTP under PC=64 matches the original because
-     * the source float is already byte-equal. */
-    static const float SCALE_F = 4096.0f;
-    unsigned short saved_cw = 0, new_cw = 0;
-    __asm__ volatile ("fnstcw %0" : "=m" (saved_cw));
-    new_cw = (unsigned short)((saved_cw & 0xfcffu) | 0x0300u);
-    __asm__ volatile ("fldcw %0" : : "m" (new_cw));
-    for (int i = 0; i < TD5_TRIG_LUT_SIZE; i++) {
-        float v = s_cosFloatTable[i];
-        int   out;
-        __asm__ volatile (
-            "flds     %[in]       \n\t"
-            "fmuls    %[scale]    \n\t"
-            "fistpl   %[out]      \n\t"
-            : [out] "=m" (out)
-            : [in] "m" (v),
-              [scale] "m" (SCALE_F)
-            : "st", "memory"
-        );
-        s_cosFixedTable[i] = out;
-    }
-    __asm__ volatile ("fldcw %0" : : "m" (saved_cw));
+     *
+     * This was hand-written x87 (fnstcw/fldcw PC=64 + flds/fmuls/fistpl).
+     * It is now plain C, and the two are BIT-IDENTICAL for all 5120 entries
+     * under BOTH -mfpmath=387 and -mfpmath=sse (verified by direct
+     * table-vs-table comparison, matching FNV hash 364a36a3dee9c686). Why the
+     * equivalence is exact, not incidental:
+     *   - 4096.0f is a power of two, so `v * 4096.0f` is exact in binary FP.
+     *     No rounding happens in the multiply at ANY precision, which is why
+     *     the old PC=64 control-word dance was never load-bearing here.
+     *   - The only rounding is the float->int conversion, and lrintf() uses
+     *     the current rounding mode, which is round-to-nearest-even by
+     *     default — exactly FISTP's default RC (the old code masked PC bits
+     *     0x0300 and left RC untouched).
+     * Removing the asm also unblocks an x86_64 retarget, where the x87 stack
+     * registers this relied on do not exist. */
+    for (int i = 0; i < TD5_TRIG_LUT_SIZE; i++)
+        s_cosFixedTable[i] = (int)lrintf(s_cosFloatTable[i] * 4096.0f);
 
     s_trig_lut_built = 1;
 }
