@@ -41,6 +41,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  their posts; the authored placement is used again" },
     { CL_ITEM,    "FIX: no more headlights on bright daytime tracks - a rain" },
     { CL_ITEM,    "  flag on a sunny track (Paris) no longer forces them on" },
+    { CL_ITEM,    "FIX: View Replay is now smooth at high frame rates -" },
+    { CL_ITEM,    "  cars used to stutter along at 30 fps while the counter" },
+    { CL_ITEM,    "  read much higher; replay motion now matches the FPS." },
+    { CL_ITEM,    "FIX: the race results table no longer loses its stats" },
+    { CL_ITEM,    "  (avg/top speed, collisions, air time, best position)" },
+    { CL_ITEM,    "  after watching a replay." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 23" },

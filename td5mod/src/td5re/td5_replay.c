@@ -228,10 +228,33 @@ void td5_replay_record_tick(uint32_t sim_tick)
         s_frame_count = (int)sim_tick + 1;
 }
 
-/* Pose one actor from a snapshot: write the transform, zero the velocities (so
- * the renderer's sub-tick extrapolation from linear_velocity adds nothing), and
- * restore the cosmetic derived fields. */
-static void replay_pose_actor(TD5_Actor *a, const TD5_ReplaySnap *src, int slot)
+/* Wrap a 12-bit display-angle delta into the shortest signed path [-2048,2047].
+ * display_angles are masked to 0..4095 (full circle 0x1000), so a naive
+ * next-minus-cur across the wrap boundary yields ~+/-4096 instead of the small
+ * true per-tick step. */
+static int replay_wrap_angle_delta(int d)
+{
+    if (d >  2048) d -= 4096;
+    if (d < -2048) d += 4096;
+    return d;
+}
+
+/* Pose one actor from a snapshot `src`. Writes the transform and restores the
+ * cosmetic derived fields.
+ *
+ * [REPLAY SUB-TICK SMOOTHING 2026-07-27] Rather than zeroing the velocities,
+ * reconstruct them from the delta to the NEXT recorded frame (`nxt`, or NULL on
+ * the final frame). The renderer extrapolates the mesh pose per render frame by
+ * `world_pos + linear_velocity * g_subTickFraction` (position) and
+ * `display_angles + angular_velocity * g_subTickFraction/256` (rotation), so
+ * feeding it per-tick deltas makes replay motion as smooth as the live render
+ * fps instead of stepping once per 30 Hz recorded frame. With velocities zeroed
+ * the extrapolation added nothing, so cars visibly stuttered at 30 Hz while the
+ * FPS overlay reported the true (higher) render rate -- the "replay framerate
+ * doesn't match the overlay" report. On the final frame (nxt==NULL) velocities
+ * stay 0 so playback freezes cleanly on the last pose. */
+static void replay_pose_actor(TD5_Actor *a, const TD5_ReplaySnap *src,
+                              const TD5_ReplaySnap *nxt, int slot)
 {
     a->world_pos          = src->world_pos;
     a->render_pos         = src->render_pos;
@@ -257,13 +280,33 @@ static void replay_pose_actor(TD5_Actor *a, const TD5_ReplaySnap *src, int slot)
     a->track_sub_lane_index   = src->track_sub_lane_index;
     memcpy(a->wheel_display_angles, src->wheel_display_angles,
            sizeof(a->wheel_display_angles));
-    /* Zero all velocities so nothing integrates or extrapolates off the pose. */
-    a->angular_velocity_roll  = 0;
-    a->angular_velocity_yaw   = 0;
-    a->angular_velocity_pitch = 0;
-    a->linear_velocity_x = 0;
-    a->linear_velocity_y = 0;
-    a->linear_velocity_z = 0;
+    /* Reconstruct per-tick velocities from the delta to the next recorded frame
+     * so the renderer's sub-tick extrapolation smooths playback (see the header
+     * comment). No `nxt` (final frame) => zero => the pose freezes exactly. */
+    if (nxt) {
+        /* Position: linear_velocity is the per-tick world_pos (24.8) step the
+         * renderer adds as `world_pos + linear_velocity * frac`. */
+        a->linear_velocity_x = nxt->world_pos.x - src->world_pos.x;
+        a->linear_velocity_y = nxt->world_pos.y - src->world_pos.y;
+        a->linear_velocity_z = nxt->world_pos.z - src->world_pos.z;
+        /* Rotation: the renderer adds `angular_velocity * frac/256` to the
+         * 12-bit display_angles, so angular_velocity == per-tick display-angle
+         * step * 256. Wrap the delta to the shortest signed path so a car
+         * crossing the 4095->0 boundary doesn't spin for one tick. */
+        a->angular_velocity_roll  = replay_wrap_angle_delta(
+            nxt->display_angles.roll  - src->display_angles.roll)  * 256;
+        a->angular_velocity_yaw   = replay_wrap_angle_delta(
+            nxt->display_angles.yaw   - src->display_angles.yaw)   * 256;
+        a->angular_velocity_pitch = replay_wrap_angle_delta(
+            nxt->display_angles.pitch - src->display_angles.pitch) * 256;
+    } else {
+        a->angular_velocity_roll  = 0;
+        a->angular_velocity_yaw   = 0;
+        a->angular_velocity_pitch = 0;
+        a->linear_velocity_x = 0;
+        a->linear_velocity_y = 0;
+        a->linear_velocity_z = 0;
+    }
     /* Manually drive traffic visibility from the recorded alpha instead of the
      * (now-disabled) spawn/fade state machine. */
     if (slot >= g_traffic_slot_base && src->traffic_alpha >= 0)
@@ -274,6 +317,7 @@ void td5_replay_pose_tick(uint32_t sim_tick)
 {
     int slot, count;
     const TD5_ReplaySnap *frame;
+    const TD5_ReplaySnap *next_frame;   /* NULL on the final recorded frame */
     int idx;
     if (s_frame_count <= 0 || !s_buf) return;
 
@@ -282,6 +326,12 @@ void td5_replay_pose_tick(uint32_t sim_tick)
     idx = (int)sim_tick;
     if (idx >= s_frame_count) idx = s_frame_count - 1;
     frame = s_buf + (size_t)idx * (size_t)s_actor_count;
+    /* The next frame supplies the per-tick velocity deltas the renderer uses to
+     * smooth sub-tick motion (see replay_pose_actor). None past the last frame,
+     * so playback freezes on the final pose. */
+    next_frame = (idx + 1 < s_frame_count)
+                     ? s_buf + (size_t)(idx + 1) * (size_t)s_actor_count
+                     : NULL;
 
     count = td5_game_get_total_actor_count();
     if (count > s_actor_count) count = s_actor_count;
@@ -292,6 +342,6 @@ void td5_replay_pose_tick(uint32_t sim_tick)
     for (slot = 0; slot < count; slot++) {
         TD5_Actor *a = td5_game_get_actor(slot);
         if (!a) continue;
-        replay_pose_actor(a, &frame[slot], slot);
+        replay_pose_actor(a, &frame[slot], next_frame ? &next_frame[slot] : NULL, slot);
     }
 }
