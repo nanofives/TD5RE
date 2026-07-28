@@ -26,6 +26,25 @@
 
 #define RS_ROUTE_TABLE_PTR        0x00
 #define RS_ROUTE_TABLE_SELECTOR   0x03
+
+/* [x64 Stage 2] RS_ROUTE_TABLE_PTR stores a small HANDLE, not a pointer --
+ * the route-state array is int32_t (mirroring the original's DAT layout) so a
+ * real pointer cannot live there on x86_64. Resolve with td5_ai_route_table()
+ * (td5_ai.h). Handle 0 = none, so existing `!= 0` / `= 0` sites are unchanged.
+ *
+ * NOTE: the handle is stored INDEPENDENTLY of RS_ROUTE_TABLE_SELECTOR and the
+ * two are ALLOWED TO DISAGREE (PATH 2b sets selector=0 but leaves the handle
+ * alone). Do not fold them together -- see the comment block at PATH 1/2a/2b
+ * in td5_ai.c; deriving one from the other re-introduces a fixed bug. */
+enum {
+    ROUTE_TABLE_NONE  = 0,
+    ROUTE_TABLE_LEFT  = 1,   /* g_route_tables[0] */
+    ROUTE_TABLE_RIGHT = 2,   /* g_route_tables[1] */
+    ROUTE_TABLE_COUNT
+};
+
+/* selector (0/1) -> handle */
+#define ROUTE_TABLE_HANDLE(sel)  ((int32_t)((sel) + 1))
 #define RS_DEFAULT_THROTTLE       0x04
 #define RS_TRACK_OFFSET_BIAS      0x09
 #define RS_LEFT_BOUNDARY_A        0x0E

@@ -1098,7 +1098,7 @@ void td5_ai_init_traffic_actors(void) {
                 remapped_span = (int16_t)queue_span;
                 rs[RS_ROUTE_TABLE_SELECTOR] = 0;
                 if (g_route_tables[0])
-                    rs[RS_ROUTE_TABLE_PTR] = (int32_t)(intptr_t)g_route_tables[0];
+                    rs[RS_ROUTE_TABLE_PTR] = ROUTE_TABLE_LEFT;
                 TD5_LOG_I(LOG_TAG,
                           "init_remap_MISS: slot=%d queue_span=%d sub_lane=%d "
                           "lane_count=%d -> main-road fallback (was origin-strand)",
@@ -1215,7 +1215,7 @@ void td5_ai_init_traffic_actors(void) {
 
                 {
                     const uint8_t *rb =
-                        (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+                        td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
                     if (rb && span_norm >= 0) {
                         route_byte = (int)rb[(size_t)(unsigned)span_norm * 3u];
                     }
@@ -4123,7 +4123,7 @@ void td5_ai_update_traffic_route_plan(int slot) {
     ref_actor = actor_ptr(ref_slot);
 
     {
-        const uint8_t *rb = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+        const uint8_t *rb = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
         int16_t ref_span_norm = ACTOR_I16(ref_actor, ACTOR_SPAN_NORMALIZED);
         if (rb && ref_span_norm >= 0) {
             route_byte_val = (int32_t)rb[(size_t)(unsigned)ref_span_norm * 3u + 1u];

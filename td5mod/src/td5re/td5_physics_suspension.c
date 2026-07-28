@@ -1092,7 +1092,8 @@ static uint32_t traffic_route_heading_delta(int slot)
     int32_t *rs = td5_ai_get_route_state(slot);
     if (!rs) return 0;
 
-    const uint8_t *route_table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR_PHYS];
+    /* [x64 Stage 2] slot 0x00 holds a route-table HANDLE, not a pointer. */
+    const uint8_t *route_table = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR_PHYS]);
     if (!route_table) return 0;
 
     char *actor = (char *)((uint8_t *)td5_track_get_span(0) - 0x80);  /* not used directly */

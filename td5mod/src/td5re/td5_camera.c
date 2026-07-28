@@ -4374,7 +4374,8 @@ uint32_t td5_compute_heading_delta(void *route_entry) {
             (size_t)(unsigned int)slot * 0x388u;
     actor_yaw  = *(int32_t *)(actor + 0x1F4); /* yaw accumulator [CONFIRMED @ 0x00434040] */
     span_norm  = *(int16_t *)(actor + 0x82);  /* span_normalized [CONFIRMED @ 0x00434040] */
-    route_table = (const uint8_t *)(intptr_t)rs[0x00]; /* RS_ROUTE_TABLE_PTR [CONFIRMED @ 0x00434040] */
+    /* [x64 Stage 2] slot 0x00 holds a route-table HANDLE, not a pointer. */
+    route_table = td5_ai_route_table(rs[0x00]); /* RS_ROUTE_TABLE_PTR [CONFIRMED @ 0x00434040] */
     if (!route_table) return 0;
     rb   = route_table[(uint16_t)span_norm * 3u + 1u]; /* byte lookup [CONFIRMED @ 0x00434040] */
     diff = FP_TRUNC(actor_yaw) - (int)FP_TRUNC(rb * 0x102Cu);

@@ -50,6 +50,35 @@ char    *g_actor_base;           /* 0x4AB108 */
 const uint8_t *g_route_tables[2];
 size_t         g_route_table_sizes[2];
 
+/* ------------------------------------------------------------------------
+ * Route-table HANDLES (x64 Stage 2)
+ *
+ * RS_ROUTE_TABLE_PTR used to hold a truncated pointer to g_route_tables[N].
+ * The route-state array is int32_t (it mirrors the original's DAT layout,
+ * stride 0x47 dwords) so a real pointer cannot live there on x86_64. A small
+ * handle can, and every peer/self comparison becomes an honest integer
+ * compare instead of a compare between two truncated addresses.
+ *
+ * Handle 0 stays "none", so existing `!= 0` tests and `= 0` resets are
+ * unchanged. Handles are 1-based over g_route_tables[].
+ *
+ * IMPORTANT: the handle is stored INDEPENDENTLY of RS_ROUTE_TABLE_SELECTOR
+ * and they are ALLOWED TO DISAGREE. PATH 2b in ProcessActorRouteState sets
+ * selector=0 while deliberately leaving the table handle UNCHANGED. Deriving
+ * the table from the selector re-introduces a fixed bug (slot 0 loses
+ * RIGHT.TRK, hdelta misses its trigger window, the recovery script never
+ * fires) -- see the comment block at PATH 1/2a/2b below. Do not "simplify"
+ * this by folding the two slots together.
+ * ------------------------------------------------------------------------ */
+/* ROUTE_TABLE_* handle values + ROUTE_TABLE_HANDLE() live in
+ * td5_ai_internal.h so td5_ai_traffic.c shares them. */
+const uint8_t *td5_ai_route_table(int32_t handle)
+{
+    if (handle <= ROUTE_TABLE_NONE || handle >= ROUTE_TABLE_COUNT)
+        return NULL;
+    return g_route_tables[handle - 1];
+}
+
 static int32_t  g_route_state_storage[TD5_MAX_TOTAL_ACTORS * RS_STRIDE_DWORDS];
 
 /* Public accessor used by td5_physics.c */
@@ -140,6 +169,52 @@ static const int32_t g_script_program_d[] = {
 
 /* Initial recovery script (0x473CC8): stop, auto-select, terminate */
 static const int32_t g_script_init_recovery[] = { 8, 9, 0 };
+
+/* ------------------------------------------------------------------------
+ * Script-program HANDLES (x64 Stage 2)
+ *
+ * RS_SCRIPT_BASE_PTR is a slot in the int32_t route-state array, whose layout
+ * mirrors the original's DAT block. It used to hold a truncated POINTER to one
+ * of the banks above. That is a latent bug even on i686 and a guaranteed
+ * behaviour break on x86_64: the rotation below compared a sign-extended
+ * 32-bit slot against full-width pointers, so on x64 no branch could ever
+ * match and the program rotation would silently stop -- no crash, just wrong
+ * AI. Storing a small handle instead keeps the slot int32_t (so the RS stride
+ * 0x47 and the original-mirroring layout are untouched) and makes every
+ * compare an integer compare.
+ *
+ * Handle 0 stays "none" so the existing `!= 0` / `= 0` tests keep working
+ * unchanged. Order is arbitrary but must stay stable: it is persisted only in
+ * memory, never serialized (RS slots are not traced -- see td5_trace.c -- and
+ * diff_replay_frames.py already buckets them process-local/impl-divergent).
+ * ------------------------------------------------------------------------ */
+enum {
+    SCRIPT_PROG_NONE = 0,
+    SCRIPT_PROG_A,
+    SCRIPT_PROG_B,
+    SCRIPT_PROG_C,
+    SCRIPT_PROG_D,
+    SCRIPT_PROG_INIT_RECOVERY,
+    SCRIPT_PROG_COUNT
+};
+
+static const int32_t *const g_script_programs[SCRIPT_PROG_COUNT] = {
+    NULL,                       /* SCRIPT_PROG_NONE */
+    g_script_program_a,
+    g_script_program_b,
+    g_script_program_c,
+    g_script_program_d,
+    g_script_init_recovery
+};
+
+/* Handle -> program bank. Returns NULL for NONE or any out-of-range value
+ * (defensive: the slot is zeroed on reset and by opcode 0). */
+static const int32_t *script_program_from_handle(int32_t handle)
+{
+    if (handle <= SCRIPT_PROG_NONE || handle >= SCRIPT_PROG_COUNT)
+        return NULL;
+    return g_script_programs[handle];
+}
 
 /* Current script bank index per-actor for round-robin */
 static int g_script_bank_index[TD5_MAX_TOTAL_ACTORS];
@@ -676,7 +751,7 @@ static int ai_route_byte(const uint8_t *table, int span, int k) {
 }
 
 static int32_t ai_route_heading_for_actor(const int32_t *rs, const char *actor) {
-    const uint8_t *rb = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+    const uint8_t *rb = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
     int16_t sp = ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
     if (rb && sp >= 0) {
         return (((int)ai_route_byte(rb, sp, 1) * 0x102C) >> 8) & 0xFFF;
@@ -1172,7 +1247,7 @@ void td5_ai_correct_spawn_heading(int slot) {
     span = ACTOR_I16(actor, ACTOR_SPAN_RAW);
     if (span < 0) return;
 
-    route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+    route_bytes = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
     rb = ai_route_byte(route_bytes, span, 1);
 
     if (route_bytes && rb >= 4) {
@@ -1438,7 +1513,7 @@ static int td5_ai_classify_track_offset_clamp(int slot, int track_offset_bias) {
         if (route_byte_idx < 0) route_byte_idx = 0;
     }
     {
-        const uint8_t *self_table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+        const uint8_t *self_table = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
         if (self_table == g_route_tables[0]) {
             sample_span = route_byte_idx;  /* LEFT route — use simple-wrap */
         } else {
@@ -1453,7 +1528,7 @@ static int td5_ai_classify_track_offset_clamp(int slot, int track_offset_bias) {
      *   route_byte = *piVar1[iVar4 * 3]    ← simple-wrap idx, NOT sample_span
      *   SampleTrackTargetPoint(sample_span=iVar5, route_byte, ...) */
     {
-        const uint8_t *table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+        const uint8_t *table = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
         if (!table) return 0;
         route_byte = ai_route_byte(table, route_byte_idx, 0);
         if (!td5_track_sample_target_point(sample_span, route_byte,
@@ -1481,7 +1556,7 @@ static int td5_ai_classify_track_offset_clamp(int slot, int track_offset_bias) {
      * scratch — equivalent to our cached route_byte_idx since span_norm didn't
      * change in between. */
     {
-        const uint8_t *table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+        const uint8_t *table = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
         route_byte = ai_route_byte(table, route_byte_idx, 0);
         if (!td5_track_sample_target_point(sample_span, route_byte,
                                            &target_x, &target_z,
@@ -1563,11 +1638,11 @@ static void td5_ai_refresh_route_state_slot(int slot) {
             /* PATH 1: span_raw > total → selector=1, ptr=RIGHT
              * [orig 0x436ab4 CMP EAX,ECX / JLE 0x436adb — fall-through on >]. */
             rs[RS_ROUTE_TABLE_SELECTOR] = 1;
-            rs[RS_ROUTE_TABLE_PTR] = (int32_t)(intptr_t)g_route_tables[1];
+            rs[RS_ROUTE_TABLE_PTR] = ROUTE_TABLE_RIGHT;
         } else if (td5_track_route_junction_path2a_match(span_norm_val)) {
             /* PATH 2a: junction match → selector=0, ptr=LEFT */
             rs[RS_ROUTE_TABLE_SELECTOR] = 0;
-            rs[RS_ROUTE_TABLE_PTR] = (int32_t)(intptr_t)g_route_tables[0];
+            rs[RS_ROUTE_TABLE_PTR] = ROUTE_TABLE_LEFT;
         } else {
             /* PATH 2b: default → selector=0, ptr UNCHANGED */
             rs[RS_ROUTE_TABLE_SELECTOR] = 0;
@@ -1579,7 +1654,7 @@ static void td5_ai_refresh_route_state_slot(int slot) {
      * branches read rs[RS_ROUTE_TABLE_SELECTOR] directly. To keep downstream
      * code byte-equivalent we still cache route_table = the resolved ptr, but
      * we read from rs (not g_route_tables) so PATH 2b's preserved ptr wins. */
-    route_table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+    route_table = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
     /* For route_count, prefer the size that matches the actual ptr. If the
      * stored ptr equals g_route_tables[1] use selector=1's size; otherwise
      * use selector=0's size (covers PATH 2b where ptr keeps initial value). */
@@ -1785,7 +1860,7 @@ static void td5_ai_refresh_route_state_slot(int slot) {
             int classify = td5_ai_classify_track_offset_clamp_v2(
                 slot, rs[RS_TRACK_OFFSET_BIAS]);
             int16_t *cardef = (int16_t *)(intptr_t)ACTOR_I32(actor, ACTOR_CAR_DEF_PTR);
-            const uint8_t *table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+            const uint8_t *table = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
             int route_byte_now = 0;
             if (table && span_norm_i >= 0) {
                 route_byte_now = ai_route_byte(table, span_norm_i, 0);
@@ -1840,7 +1915,7 @@ static void td5_ai_refresh_route_state_slot(int slot) {
          * [CONFIRMED @ 0x00436DA9-0x00436E50] */
         {
             const uint8_t *self_table =
-                (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+                td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
             int slot_is_racer = (slot < g_traffic_slot_base);
             int slot_is_encounter_9 =
                 (slot == 9 && g_encounter_tracked_handle != -1);
@@ -2280,7 +2355,7 @@ void td5_ai_init_race_actor_runtime(void) {
             }
         }
         rs[RS_ROUTE_TABLE_SELECTOR] = selector;
-        rs[RS_ROUTE_TABLE_PTR] = (int32_t)(intptr_t)g_route_tables[selector];
+        rs[RS_ROUTE_TABLE_PTR] = ROUTE_TABLE_HANDLE(selector);
         g_last_logged_opcode[i] = -1;
     }
 
@@ -3027,7 +3102,7 @@ int td5_ai_update_route_threshold(int slot) {
      * (threshold=0xFF) maps to the bias-fallback exit in original. */
     int32_t threshold;
     {
-        const uint8_t *route_table = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+        const uint8_t *route_table = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
         size_t rt_sz = (route_table == g_route_tables[1]) ? g_route_table_sizes[1]
                                                           : g_route_table_sizes[0];
         if (route_table && span >= 0 &&
@@ -3169,13 +3244,13 @@ static int td5_ai_classify_track_offset_clamp_v2(int param_1, int param_2) {
     int iVar4;
     int local_c[3] = {0, 0, 0};
     int64_t lVar7;
-    const uint8_t *route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+    const uint8_t *route_bytes = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
     int16_t *self_cd;
     int walker_matched = 0;
 
     /* Secondary-route walker remap: ONLY on secondary, ONLY once.
      * On primary (rs[0] == g_route_tables[0]) skip the walker entirely. */
-    if (rs[RS_ROUTE_TABLE_PTR] != (int32_t)(intptr_t)g_route_tables[0]) {
+    if (rs[RS_ROUTE_TABLE_PTR] != ROUTE_TABLE_LEFT) {
         int iVar5_pre = iVar3 + 4;
         if (g_strip_span_count > 0 && g_strip_span_count <= iVar5_pre) {
             iVar5_pre = (iVar3 - g_strip_span_count) + 4;
@@ -3289,15 +3364,15 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
 
             /* Cross-route swap [CONFIRMED @ 0x0043385C-0x0043388A] */
             if (route_state_ptr[RS_ROUTE_TABLE_PTR] != peer_rs[RS_ROUTE_TABLE_PTR]) {
-                if (route_state_ptr[RS_ROUTE_TABLE_PTR] == (int32_t)(intptr_t)g_route_tables[0]) {
+                if (route_state_ptr[RS_ROUTE_TABLE_PTR] == ROUTE_TABLE_LEFT) {
                     /* On primary: rs[0x0F]→rs[9], ptr ← g_activeRouteTablePtrB_right
                      *   [g_activeRouteTablePtrB_right = g_route_tables[1] / RIGHT route] */
                     route_state_ptr[RS_TRACK_OFFSET_BIAS] = route_state_ptr[RS_LEFT_BOUNDARY_B];
-                    route_state_ptr[RS_ROUTE_TABLE_PTR]   = (int32_t)(intptr_t)g_route_tables[1];
+                    route_state_ptr[RS_ROUTE_TABLE_PTR]   = ROUTE_TABLE_RIGHT;
                 } else {
                     /* On secondary (or other): rs[0x0E]→rs[9], ptr ← g_activeRouteTablePtrA_left */
                     route_state_ptr[RS_TRACK_OFFSET_BIAS] = route_state_ptr[RS_LEFT_BOUNDARY_A];
-                    route_state_ptr[RS_ROUTE_TABLE_PTR]   = (int32_t)(intptr_t)g_route_tables[0];
+                    route_state_ptr[RS_ROUTE_TABLE_PTR]   = ROUTE_TABLE_LEFT;
                 }
             }
             /* Bounds writeback [original 0x00433887-0x004338A8].
@@ -3311,7 +3386,7 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
              * comment ("rs[0x14]←rs[0x10]") was wrong; Ghidra mislabeled the
              * dst indices. Aligning find_offset_peer with the bias-clamp
              * direction keeps both writers consistent. */
-            if (route_state_ptr[RS_ROUTE_TABLE_PTR] == (int32_t)(intptr_t)g_route_tables[1]) {
+            if (route_state_ptr[RS_ROUTE_TABLE_PTR] == ROUTE_TABLE_RIGHT) {
                 route_state_ptr[RS_ACTIVE_UPPER_BOUND] = route_state_ptr[RS_RIGHT_EXTENT_A];
                 route_state_ptr[RS_ACTIVE_LOWER_BOUND] = route_state_ptr[RS_RIGHT_EXTENT_B];
             } else {
@@ -3328,11 +3403,11 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
 
             if (classify_result == 1) {
                 int32_t signed_off = td5_track_compute_signed_offset(
-                    (int)peer_field80, 0x100, (int)(uint8_t)((const uint8_t *)(intptr_t)peer_rs[RS_ROUTE_TABLE_PTR])[(size_t)peer_field82 * 3u]);
+                    (int)peer_field80, 0x100, (int)(uint8_t)(td5_ai_route_table(peer_rs[RS_ROUTE_TABLE_PTR]))[(size_t)peer_field82 * 3u]);
                 classify = (int32_t)peer_cd[0] + signed_off - 0x20;
             } else if (classify_result == 2) {
                 int32_t signed_off = td5_track_compute_signed_offset(
-                    (int)peer_field80, 0, (int)(uint8_t)((const uint8_t *)(intptr_t)peer_rs[RS_ROUTE_TABLE_PTR])[(size_t)peer_field82 * 3u]);
+                    (int)peer_field80, 0, (int)(uint8_t)(td5_ai_route_table(peer_rs[RS_ROUTE_TABLE_PTR]))[(size_t)peer_field82 * 3u]);
                 classify = (int32_t)peer_cd[4] + signed_off - 0x20;
             } else {
                 classify = route_state_ptr[RS_TRACK_OFFSET_BIAS];
@@ -3439,16 +3514,16 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
 
             /* Cross-route inline swap [CONFIRMED @ 0x00433ADF-0x00433B0B] */
             if (route_state_ptr[RS_ROUTE_TABLE_PTR] != peer_rs[RS_ROUTE_TABLE_PTR]) {
-                if (route_state_ptr[RS_ROUTE_TABLE_PTR] == (int32_t)(intptr_t)g_route_tables[0]) {
+                if (route_state_ptr[RS_ROUTE_TABLE_PTR] == ROUTE_TABLE_LEFT) {
                     route_state_ptr[RS_TRACK_OFFSET_BIAS] = route_state_ptr[RS_LEFT_BOUNDARY_B];
-                    route_state_ptr[RS_ROUTE_TABLE_PTR]   = (int32_t)(intptr_t)g_route_tables[1];
+                    route_state_ptr[RS_ROUTE_TABLE_PTR]   = ROUTE_TABLE_RIGHT;
                 } else {
                     route_state_ptr[RS_TRACK_OFFSET_BIAS] = route_state_ptr[RS_LEFT_BOUNDARY_A];
-                    route_state_ptr[RS_ROUTE_TABLE_PTR]   = (int32_t)(intptr_t)g_route_tables[0];
+                    route_state_ptr[RS_ROUTE_TABLE_PTR]   = ROUTE_TABLE_LEFT;
                 }
             }
             /* Pass-2 same direction as Pass-1 (see comment above). */
-            if (route_state_ptr[RS_ROUTE_TABLE_PTR] == (int32_t)(intptr_t)g_route_tables[1]) {
+            if (route_state_ptr[RS_ROUTE_TABLE_PTR] == ROUTE_TABLE_RIGHT) {
                 route_state_ptr[RS_ACTIVE_UPPER_BOUND] = route_state_ptr[RS_RIGHT_EXTENT_A];
                 route_state_ptr[RS_ACTIVE_LOWER_BOUND] = route_state_ptr[RS_RIGHT_EXTENT_B];
             } else {
@@ -3467,12 +3542,12 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
             if (!peer_cd) continue;
 
             if (classify_result == 1) {
-                int peer_route_byte = (int)(uint8_t)((const uint8_t *)(intptr_t)peer_rs[RS_ROUTE_TABLE_PTR])[(size_t)peer_field82 * 3u];
+                int peer_route_byte = (int)(uint8_t)(td5_ai_route_table(peer_rs[RS_ROUTE_TABLE_PTR]))[(size_t)peer_field82 * 3u];
                 int32_t signed_off = td5_track_compute_signed_offset(
                     (int)peer_field80, 0x100, peer_route_byte);
                 classify = (int32_t)peer_cd[0] + signed_off - 0x20;
             } else if (classify_result == 2) {
-                int peer_route_byte = (int)(uint8_t)((const uint8_t *)(intptr_t)peer_rs[RS_ROUTE_TABLE_PTR])[(size_t)peer_field82 * 3u];
+                int peer_route_byte = (int)(uint8_t)(td5_ai_route_table(peer_rs[RS_ROUTE_TABLE_PTR]))[(size_t)peer_field82 * 3u];
                 int32_t signed_off = td5_track_compute_signed_offset(
                     (int)peer_field80, 0, peer_route_byte);
                 classify = (int32_t)peer_cd[4] + signed_off - 0x20;
@@ -3934,7 +4009,7 @@ void td5_ai_seed_actor_track_progress_offset(int slot)
      * [Frida-confirmed 2026-05-11: 36 init-phase ComputeSignedTrackOffset
      * calls all pass route_byte=106 regardless of span_raw {277..292};
      * port's per-span route_byte 75-79 was the bug.] */
-    const uint8_t *route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+    const uint8_t *route_bytes = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
     int route_byte = 0;
     if (route_bytes) {
         route_byte = (int)route_bytes[0];
@@ -4001,21 +4076,21 @@ int td5_ai_advance_track_script(int *rs) {
     /* ==== 1. Countdown decrement + program rotation [orig prologue] ==== */
     rs[RS_SCRIPT_COUNTDOWN]--;
     if (rs[RS_SCRIPT_COUNTDOWN] < 0) {
-        intptr_t cur = (intptr_t)rs[RS_SCRIPT_BASE_PTR];
-        intptr_t next = cur;
-        if (cur == (intptr_t)g_script_program_a) {
-            next = (intptr_t)g_script_program_b;
-        } else if (cur == (intptr_t)g_script_program_b) {
-            next = (intptr_t)g_script_program_a;
-        } else if (cur == (intptr_t)g_script_program_c) {
-            next = (intptr_t)g_script_program_d;
-        } else if (cur == (intptr_t)g_script_program_d) {
-            next = (intptr_t)g_script_program_c;
+        int32_t cur = rs[RS_SCRIPT_BASE_PTR];
+        int32_t next = cur;
+        if (cur == SCRIPT_PROG_A) {
+            next = SCRIPT_PROG_B;
+        } else if (cur == SCRIPT_PROG_B) {
+            next = SCRIPT_PROG_A;
+        } else if (cur == SCRIPT_PROG_C) {
+            next = SCRIPT_PROG_D;
+        } else if (cur == SCRIPT_PROG_D) {
+            next = SCRIPT_PROG_C;
         }
         /* Other base_ptr values (uninitialized / DAT_00473cc8 initial
          * recovery) leave base/ip alone — only countdown resets. */
         if (next != cur) {
-            rs[RS_SCRIPT_BASE_PTR] = (int32_t)next;
+            rs[RS_SCRIPT_BASE_PTR] = next;
             rs[RS_SCRIPT_IP]       = 0;
         }
         rs[RS_SCRIPT_COUNTDOWN] = 0x96;
@@ -4148,7 +4223,7 @@ int td5_ai_advance_track_script(int *rs) {
     }
 
     /* ==== 5. Opcode switch ==== */
-    const int32_t *base = (const int32_t *)(intptr_t)rs[RS_SCRIPT_BASE_PTR];
+    const int32_t *base = script_program_from_handle(rs[RS_SCRIPT_BASE_PTR]);
     if (!base) return 1;
     int ip = rs[RS_SCRIPT_IP];
     int32_t opcode = base[ip];
@@ -4241,29 +4316,29 @@ int td5_ai_advance_track_script(int *rs) {
         }
         int8_t sub_lane = (int8_t)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX);
 
-        const int32_t *sel = g_script_program_d;
+        int32_t sel = SCRIPT_PROG_D;
         int chosen = 0;
         if (hd9 > 0x900 && hd9 < 0xF00 && sub_lane <= strip_half) {
-            sel = g_script_program_a;
+            sel = SCRIPT_PROG_A;
             chosen = 1;
         }
         if (!chosen && hd9 > 0x6FF) {
             if (strip_half < sub_lane) {
-                sel = g_script_program_b;
+                sel = SCRIPT_PROG_B;
                 chosen = 1;
             } else if (hd9 > 0x700) {
-                sel = g_script_program_d;
+                sel = SCRIPT_PROG_D;
                 chosen = 1;
             }
         }
         if (!chosen) {
             if (hd9 > 0xFF && strip_half <= sub_lane) {
-                sel = g_script_program_c;
+                sel = SCRIPT_PROG_C;
             } else {
-                sel = g_script_program_d;
+                sel = SCRIPT_PROG_D;
             }
         }
-        rs[RS_SCRIPT_BASE_PTR] = (int32_t)(intptr_t)sel;
+        rs[RS_SCRIPT_BASE_PTR] = sel;
         rs[RS_SCRIPT_IP] = 0;
         return 0;
     }
@@ -5065,7 +5140,7 @@ static void td5_ai_smart_lane_bias(int slot) {
 
     double u_base = 0.5;
     {
-        const uint8_t *rt = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+        const uint8_t *rt = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
         if (rt) {
             int rb = (int)rt[(size_t)(unsigned)look_span * 3u];
             u_base = (double)rb / 256.0;
@@ -5740,7 +5815,7 @@ void td5_ai_update_track_behavior(int slot) {
                 int64_t prog64 = td5_track_compute_span_progress(span_raw, pos_vec);
                 int progress = (int)(int32_t)(uint32_t)(prog64 & 0xFFFFFFFFu);
                 rs[RS_TRACK_PROGRESS] = progress;
-                const uint8_t *route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+                const uint8_t *route_bytes = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
                 int route_byte = 0;
                 if (route_bytes && span_norm >= 0) {
                     route_byte = ai_route_byte(route_bytes, span_norm, 0);
@@ -5804,7 +5879,7 @@ void td5_ai_update_track_behavior(int slot) {
                  * and crashed AdvanceActorTrackScript's `mov (%edx,%ebp,4),%eax`
                  * with EBP=ip=0x5194D8, walking off into the .rdata texture
                  * table at 0x49D1A4. Reverted to ip=0 to match port semantics. */
-                rs[RS_SCRIPT_BASE_PTR] = (int32_t)(intptr_t)g_script_init_recovery;
+                rs[RS_SCRIPT_BASE_PTR] = SCRIPT_PROG_INIT_RECOVERY;
                 rs[RS_SCRIPT_IP]       = 0;
                 return;
             }
@@ -5887,7 +5962,7 @@ void td5_ai_update_track_behavior(int slot) {
                 enum { TD5_ADAPTIVE_LOOKAHEAD_TRIGGER = 200,
                        TD5_ADAPTIVE_LOOKAHEAD_RELEASE = 600,
                        TD5_ADAPTIVE_LOOKAHEAD_MAX_EXTEND = 6 };
-                const uint8_t *rt_probe = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+                const uint8_t *rt_probe = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
                 int probe_rb = 128;
                 if (rt_probe) probe_rb = (int)rt_probe[(size_t)(unsigned)lin_span * 3u];
                 int32_t actor_x_chk = ACTOR_I32(actor, ACTOR_WORLD_POS_X);
@@ -5957,7 +6032,7 @@ void td5_ai_update_track_behavior(int slot) {
                  * lane interpolation is read from the unremapped table. Using
                  * target_span here aimed the AI at the wrong lane offset on
                  * junction spans. */
-                const uint8_t *route_bytes = (const uint8_t *)(intptr_t)rs[RS_ROUTE_TABLE_PTR];
+                const uint8_t *route_bytes = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
                 if (route_bytes) {
                     route_byte = (int)route_bytes[(size_t)(unsigned)lin_span * 3u];
                 }
