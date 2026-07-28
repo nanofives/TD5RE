@@ -48,13 +48,26 @@
 #define SAR_RZ_12(x)  (((int32_t)(x) + (((int32_t)(x) >> 31) & 0xFFF))  >> 12)
 #define SAR_RZ_15(x)  (((int32_t)(x) + (((int32_t)(x) >> 31) & 0x7FFF)) >> 15)
 
-/* Force a float expression to round to float32 precision via an x87 FSTP-to-
- * memory + reload. Mirrors orig 0x0042E1E0's intermediate-product spill
- * pattern: each `FMUL ...; FSTP [esp+N]; FLD [esp+N]; FMUL ...` truncates
- * the 80-bit FPU register to a 32-bit memory slot before the next operand
- * arrives. Plain `volatile float` is NOT enough on i686 + MinGW x87 (GCC
- * PR323) — GCC keeps the intermediate at 80 bit on the FPU stack. The
- * explicit inline asm forces the spill exactly where orig does. */
+/* Force a float expression to round to float32 precision. Mirrors orig
+ * 0x0042E1E0's intermediate-product spill pattern: each
+ * `FMUL ...; FSTP [esp+N]; FLD [esp+N]; FMUL ...` truncates the 80-bit FPU
+ * register to a 32-bit memory slot before the next operand arrives.
+ *
+ * Under SSE2 float math (-mfpmath=sse, the port's setting since x64 Stage 1,
+ * and the ONLY option on x86_64) every float operation already produces a
+ * float32 result, so the rounding this macro exists to force happens
+ * inherently and the cast is sufficient. NOTE this does NOT make the port
+ * match the original everywhere: orig kept UNSPILLED intermediates at 80 bit,
+ * whereas SSE2 rounds them all. The spilled sites agree; the surrounding
+ * arithmetic legitimately differs, which is why the goldens moved.
+ *
+ * The x87 path is kept for a non-SSE2 i686 build, where a plain cast is NOT
+ * enough (GCC PR323 keeps the intermediate at 80 bit on the FPU stack) and
+ * the explicit spill is required. It compiles out entirely on x86_64, where
+ * the "t" (x87 stack-top) constraint does not exist. */
+#if defined(__SSE2_MATH__)
+#define TD5_F32_SPILL(expr) ((float)(expr))
+#else
 #define TD5_F32_SPILL(expr) ({                          \
     float _td5_spill_v = (expr);                         \
     float _td5_spill_t;                                  \
@@ -65,6 +78,7 @@
         : "st");                                         \
     _td5_spill_t;                                        \
 })
+#endif
 
 /* ------------------------------------------------------------------------
  * Tuning data access helpers

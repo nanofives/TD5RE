@@ -15,6 +15,14 @@
 -Wextra
 -DWIN32
 -m32
+# FP semantics (x64 Stage 1): i686 GCC defaults to x87, whose 80-bit
+# intermediates the sim used to depend on (see TD5_F32_SPILL). x86_64 has no
+# x87 path at all, so the port moves to SSE2 float math HERE, while still
+# 32-bit, to isolate the arithmetic change from the later retarget. This
+# rounds every float intermediate to float32 and DOES change sim results ->
+# trace goldens were re-recorded in step with this flag.
+-msse2
+-mfpmath=sse
 -DTD5_INFLATE_USE_ZLIB
 # Hard-error classes (2026-07-06): these indicate real bugs in i686 C, never
 # style. The tree is clean of all four; -Werror keeps it that way.

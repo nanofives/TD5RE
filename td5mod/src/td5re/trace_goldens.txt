@@ -2,17 +2,17 @@
 #   TD5RE_TRACE_GOLDEN_UPDATE=1 pwsh scripts/selftest.ps1 -Suite full
 # Commit this file together with any INTENTIONAL sim change.
 # <scenario> <module> <fnv1a64 of trace rows, frame column stripped>
-race-golden-moscow pose 7cdf42f645bace29
-race-golden-moscow motion 8f4858c269f24bf2
+race-golden-moscow pose 215205f0f002bc19
+race-golden-moscow motion 844c82e7dfcc87bd
 race-golden-moscow track 14ce6ebae6ee9b0b
 race-golden-moscow controls 224c23490898c884
 race-golden-moscow progress 600bc82383b08b84
-race-golden-moscow camera 4dfcea7634b03f63
+race-golden-moscow camera d8d481cceb7676a2
 race-golden-moscow sound 2360ce13c0d10c25
 race-golden-pelton pose f6bc6caf61c307bb
-race-golden-pelton motion 4e77770d84edf7ab
+race-golden-pelton motion da2620eb26006423
 race-golden-pelton track 3b9273ab8e26df1d
 race-golden-pelton controls 1ae23b0d92b30237
 race-golden-pelton progress 1184a63dfa9077fc
-race-golden-pelton camera 6210615fdcdea954
+race-golden-pelton camera 9caa062b77ece8df
 race-golden-pelton sound 2360ce13c0d10c25
