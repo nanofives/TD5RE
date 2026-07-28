@@ -663,6 +663,10 @@ typedef struct TD5_StripSpan {
     int32_t  origin_z;              /* +0x14 */
 } TD5_StripSpan;
 #pragma pack(pop)
+/* On-disk STRIP.DAT layout: cast in place from the archive buffer
+ * (td5_ai_traffic.c). Size is a file-format contract, not an implementation
+ * detail. */
+_Static_assert(sizeof(TD5_StripSpan) == 24, "TD5_StripSpan must stay 24 bytes (STRIP.DAT record)");
 
 /** STRIP.DAT vertex (6 bytes: 3 x int16) */
 #pragma pack(push, 1)
@@ -670,6 +674,7 @@ typedef struct TD5_StripVertex {
     int16_t x, y, z;
 } TD5_StripVertex;
 #pragma pack(pop)
+_Static_assert(sizeof(TD5_StripVertex) == 6, "TD5_StripVertex must stay 6 bytes (STRIP.DAT record)");
 
 /** Track probe state (16 bytes, per-wheel or per-body-corner) */
 typedef struct TD5_TrackProbe {
@@ -706,6 +711,17 @@ typedef struct TD5_MeshHeader {
     uint32_t vertices_offset;       /* relocated to pointer */
     uint32_t normals_offset;        /* relocated to pointer */
 } TD5_MeshHeader;
+/* DUAL ROLE -- this struct is BOTH an on-disk PRR mirror (cast in place from
+ * the archive buffer: td5_track_parser.c, td5_asset.c) AND a runtime object
+ * whose three *_offset fields are rebased in place into absolute pointers.
+ * Those two roles must be split before either can change independently; until
+ * then the size below is a file-format contract and the offsets are what the
+ * rebase writes through. See docs on the x64 retarget -- widening these fields
+ * to hold real pointers changes the on-disk cast size and breaks parsing. */
+_Static_assert(sizeof(TD5_MeshHeader) == 0x38, "TD5_MeshHeader must stay 0x38 bytes (PRR on-disk header)");
+_Static_assert(offsetof(TD5_MeshHeader, commands_offset) == 0x2C, "TD5_MeshHeader.commands_offset drifted");
+_Static_assert(offsetof(TD5_MeshHeader, vertices_offset) == 0x30, "TD5_MeshHeader.vertices_offset drifted");
+_Static_assert(offsetof(TD5_MeshHeader, normals_offset)  == 0x34, "TD5_MeshHeader.normals_offset drifted");
 
 /** Primitive command (16 bytes) */
 typedef struct TD5_PrimitiveCmd {
@@ -716,6 +732,10 @@ typedef struct TD5_PrimitiveCmd {
     uint16_t quad_count;
     uint32_t vertex_data_ptr;
 } TD5_PrimitiveCmd;
+/* Same dual role as TD5_MeshHeader: vertex_data_ptr is a file offset on disk
+ * and an absolute pointer at runtime (written by td5_render_mesh.c/td5_track.c). */
+_Static_assert(sizeof(TD5_PrimitiveCmd) == 16, "TD5_PrimitiveCmd must stay 16 bytes (PRR on-disk record)");
+_Static_assert(offsetof(TD5_PrimitiveCmd, vertex_data_ptr) == 0x0C, "TD5_PrimitiveCmd.vertex_data_ptr drifted");
 
 /** Mesh vertex (44 bytes, 0x2C stride) */
 typedef struct TD5_MeshVertex {
@@ -831,13 +851,22 @@ typedef struct TD5_NetFrame {
     uint8_t  _reserved[92];
 } TD5_NetFrame;
 
-/** DXPROSTER message (52 bytes) */
+/** DXPROSTER message (56 bytes on wire) */
 typedef struct TD5_NetRoster {
     uint32_t msg_type;              /* always 8 */
     uint32_t player_ids[6];
     uint32_t active_flags[6];
     uint32_t host_id;
 } TD5_NetRoster;
+
+/* WIRE CONTRACT -- both structs are cast in place from received packet buffers
+ * (td5_net.c) and sent by sizeof(). Every member is fixed-width with no
+ * pointers, so the layouts are identical on 32- and 64-bit builds; these
+ * asserts keep it that way, since neither struct is inside a pack(1) region
+ * and the property is currently unenforced. A member added here silently
+ * changes the protocol. */
+_Static_assert(sizeof(TD5_NetFrame)  == 128, "TD5_NetFrame is a wire format -- size must not change");
+_Static_assert(sizeof(TD5_NetRoster) == 56,  "TD5_NetRoster is a wire format -- size must not change");
 
 /* ========================================================================
  * Utility: Integer square root (for tire slip circle)

@@ -156,6 +156,11 @@ typedef struct TD5_NetRaceConfig {
     int32_t  collisions;          /* 3D collisions on/off */
     int32_t  checkpoint_timers;   /* checkpoint-timer system on/off */
 } TD5_NetRaceConfig;
+/* WIRE CONTRACT -- host->client race setup, exchanged by whole-struct memcpy
+ * of sizeof(TD5_NetRaceConfig). All-int32 layout by design (see note above),
+ * so it is identical on 32- and 64-bit builds. Adding a member changes the
+ * protocol; bump this number deliberately and in step with both endpoints. */
+_Static_assert(sizeof(TD5_NetRaceConfig) == 428, "TD5_NetRaceConfig is a wire format -- size must not change");
 
 void td5_net_set_local_car(int car_index, int paint_index, int td6_color);
 int  td5_net_get_slot_td6_color(int slot);
