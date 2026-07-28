@@ -160,7 +160,8 @@ extern int      g_actor_slot_map[TD5_MAX_VIEWPORTS];
 extern void    *g_actor_pool;
 extern uint8_t *g_actor_table_base;   /* gRuntimeSlotActorTable base (0x4AB108) */
 extern int      g_actorSlotForView[TD5_MAX_VIEWPORTS];  /* per-view actor slot */
-extern int      g_actorBaseAddr;      /* legacy actor-table base handle */
+/* [x64 Stage 2] g_actorBaseAddr removed (was: legacy actor-table base handle,
+ * an `int` holding a truncated pointer). Use g_actor_table_base instead. */
 extern void    *g_route_data;         /* loaded LEFT/RIGHT.TRK route blob */
 /* Race-end / render-mode state owned by td5_game.c, read by the HUD. */
 extern int      g_special_render_mode;

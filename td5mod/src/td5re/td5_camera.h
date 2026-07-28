@@ -147,23 +147,23 @@ typedef struct TD5_TracksideProfile {
  *  @param view         viewport index (0 or 1)
  *  @param save_state   nonzero to persist preset ID into packed save bytes
  */
-void LoadCameraPresetForView(int actor, int force_reload, int view, int save_state);
+void LoadCameraPresetForView(uint8_t *actor, int force_reload, int view, int save_state);
 
 /** Main chase camera update. (0x401590)
  *  @param actor           pointer to actor struct
  *  @param do_track_heading  1 = update orbit angle tracking vehicle heading
  *  @param view            viewport index
  */
-void UpdateChaseCamera(int actor, int do_track_heading, int view);
+void UpdateChaseCamera(uint8_t *actor, int do_track_heading, int view);
 
 /** Orbit camera around a vehicle (trackside replay mode). (0x401950) */
-void UpdateTracksideOrbitCamera(int actor, int is_active, int view);
+void UpdateTracksideOrbitCamera(uint8_t *actor, int is_active, int view);
 
 /** Vehicle-relative camera (bumper/in-car). (0x401C20) */
-void UpdateVehicleRelativeCamera(int actor, int view);
+void UpdateVehicleRelativeCamera(uint8_t *actor, int view);
 
 /** Race camera transition state machine. (0x401E10) */
-void UpdateRaceCameraTransitionState(int actor, int view);
+void UpdateRaceCameraTransitionState(uint8_t *actor, int view);
 
 /** Reset camera selection state. (0x402000)
  *  @param clear_or_restore  0=restore from packed save, nonzero=reset to defaults
@@ -174,19 +174,19 @@ void ResetRaceCameraSelectionState(int clear_or_restore);
 void InitializeTracksideCameraProfiles(void);
 
 /** Select appropriate trackside camera profile based on vehicle span. (0x402200) */
-void SelectTracksideCameraProfile(int actor, int view);
+void SelectTracksideCameraProfile(uint8_t *actor, int view);
 
 /** Master trackside camera dispatcher. (0x402480) */
-void UpdateTracksideCamera(int actor, int view);
+void UpdateTracksideCamera(uint8_t *actor, int view);
 
 /** Static trackside camera with look-at target. (0x402950) */
-void UpdateStaticTracksideCamera(int actor, int view);
+void UpdateStaticTracksideCamera(uint8_t *actor, int view);
 
 /** Cache vehicle orientation angles into per-view state. (0x402A80) */
-void CacheVehicleCameraAngles(int actor, int view);
+void CacheVehicleCameraAngles(uint8_t *actor, int view);
 
 /** Spline-based trackside camera. (0x402AD0) */
-void UpdateSplineTracksideCamera(int actor, int view, int spline_type);
+void UpdateSplineTracksideCamera(uint8_t *actor, int view, int spline_type);
 
 /** Cycle the camera preset for a view. (0x402E00)
  *  @return  the wrap count (preset / 7)

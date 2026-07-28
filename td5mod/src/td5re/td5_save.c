@@ -151,6 +151,32 @@ _Static_assert(sizeof(TD5_ConfigBuffer) == TD5_CONFIG_FILE_SIZE,
 #define TD5_CUP_SCHEDULE_DWORDS    0x1E  /* 30 dwords = 120 bytes */
 #define TD5_CUP_RESULTS_DWORDS     0x1E  /* 30 dwords = 120 bytes */
 #define TD5_CUP_ACTOR_DWORDS       0xC5C /* 3164 dwords = 12656 bytes */
+
+/* [x64 Stage 2] ON-DISK actor stride for the legacy binary cup snapshot.
+ *
+ * This is deliberately a FROZEN LITERAL and must NOT become sizeof(TD5_Actor)
+ * or TD5_ACTOR_STRIDE. They happen to be equal on i686, which is exactly the
+ * trap: on x86_64 the in-memory actor grows to 0x398 (four void* at
+ * +0x1B0..+0x1BC gain 16 bytes total), while this file-format stride cannot
+ * change without invalidating existing saves.
+ *
+ * Scope: legacy binary CupData.td5 only. The LIVE cup format is text INI and
+ * cfgini_write_cup() explicitly does NOT store the per-actor snapshot, so this
+ * path is one-shot import/export of a retired format.
+ *
+ * OPEN for x64 (see docs/plans/X64_STAGE2_POINTER_WIDENING.md): the memcpys
+ * below copy TD5_ACTOR_SAVE_STRIDE bytes to/from a LIVE actor. Once the actor
+ * grows, that silently drops its tail. Decide then whether to truncate
+ * (acceptable for a retired format) or field-map. Do not "fix" it by widening
+ * this constant. */
+#define TD5_ACTOR_SAVE_STRIDE      0x388
+
+/* The snapshot field is a whole number of on-disk actor slots. NOTE: the
+ * comment on actor_state below claims "6 slots"; the arithmetic says 14
+ * (12656 / 0x388 == 14). The count is not asserted here because only the
+ * divisibility is load-bearing for the packing loops. */
+_Static_assert((TD5_CUP_ACTOR_DWORDS * 4u) % TD5_ACTOR_SAVE_STRIDE == 0,
+               "cup actor_state must hold a whole number of on-disk actor slots");
 #define TD5_CUP_SLOT_STATE_DWORDS  6     /* 6 x 4 bytes = 24 bytes */
 
 #pragma pack(push, 1)
@@ -170,7 +196,9 @@ typedef struct TD5_CupDataBuffer {
     /* 0x000C */ uint32_t crc32;
     /* 0x0010 */ uint32_t race_schedule[TD5_CUP_SCHEDULE_DWORDS];           /* 120 bytes */
     /* 0x0088 */ uint32_t race_results[TD5_CUP_RESULTS_DWORDS];            /* 120 bytes */
-    /* 0x0100 */ uint32_t actor_state[TD5_CUP_ACTOR_DWORDS];               /* 12656 bytes -- 6 slots x 0x388 */
+    /* 0x0100 */ uint32_t actor_state[TD5_CUP_ACTOR_DWORDS];               /* 12656 bytes == 14 x TD5_ACTOR_SAVE_STRIDE
+                                                                            * (was documented as "6 slots"; 6 x 0x388
+                                                                            * is 5424, so that comment was wrong) */
     /* 0x3270 */ uint32_t slot_state[TD5_CUP_SLOT_STATE_DWORDS];           /* 24 bytes */
     /* 0x3288 */ uint32_t masters_schedule_base;
     /* 0x328C */ uint32_t p2_cup_schedule_index;                                   /* VERIFIED: 0x48F310, addr calc 0x493E38-0x490BAC=0x328C */
@@ -1596,7 +1624,7 @@ static int cup_deserialize_from_buffer(void)
         s_overlay_present = 1;
         /* Defensive pointer-slot scrub for racer slots 0..5. */
         for (int slot = 0; slot < TD5_CUPDATA_OVERLAY_NUM_SLOTS; slot++) {
-            uint8_t *a = (uint8_t *)s_actor_table + (size_t)slot * 0x388;
+            uint8_t *a = (uint8_t *)s_actor_table + (size_t)slot * TD5_ACTOR_SAVE_STRIDE;
             write_le32(a + 0x1B0, 0);
             write_le32(a + 0x1B8, 0);
             write_le32(a + 0x1BC, 0);
@@ -1783,8 +1811,8 @@ void td5_save_sync_cup_from_game(int race_within_series)
         for (i = 0; i < total && i < 14; i++) {
             TD5_Actor *a = td5_game_get_actor(i);
             if (a) {
-                memcpy((uint8_t *)s_actor_table + (size_t)i * 0x388,
-                       a, 0x388);
+                memcpy((uint8_t *)s_actor_table + (size_t)i * TD5_ACTOR_SAVE_STRIDE,
+                       a, TD5_ACTOR_SAVE_STRIDE);
             }
         }
     }
@@ -1838,8 +1866,8 @@ int td5_save_sync_cup_to_game(int *out_race_within_series)
         for (i = 0; i < total && i < 14; i++) {
             TD5_Actor *a = td5_game_get_actor(i);
             if (a) {
-                memcpy(a, (uint8_t *)s_actor_table + (size_t)i * 0x388,
-                       0x388);
+                memcpy(a, (uint8_t *)s_actor_table + (size_t)i * TD5_ACTOR_SAVE_STRIDE,
+                       TD5_ACTOR_SAVE_STRIDE);
             }
         }
     }
@@ -3235,7 +3263,7 @@ int td5_save_test_cup_roundtrip(void)
 
     memset(s_actor_table, 0, sizeof(s_actor_table));
     for (int slot = 0; slot < 6; slot++) {
-        uint8_t *a = (uint8_t *)s_actor_table + (size_t)slot * 0x388;
+        uint8_t *a = (uint8_t *)s_actor_table + (size_t)slot * TD5_ACTOR_SAVE_STRIDE;
         write_le32(a + 0x1B0, 0xDEADBEEF);
         write_le32(a + 0x1B8, 0xCAFEBABE);
         write_le32(a + 0x1BC, 0xF00DD00D);
@@ -3292,7 +3320,7 @@ int td5_save_test_cup_roundtrip(void)
     /* Verify defensive pointer-slot scrub for slots 0..5. */
     for (int slot = 0; slot < 6; slot++) {
         const uint8_t *a = (const uint8_t *)s_actor_table +
-                           (size_t)slot * 0x388;
+                           (size_t)slot * TD5_ACTOR_SAVE_STRIDE;
         uint32_t p1B0 = read_le32(a + 0x1B0);
         uint32_t p1B8 = read_le32(a + 0x1B8);
         uint32_t p1BC = read_le32(a + 0x1BC);

@@ -942,7 +942,7 @@ void td5_input_poll_race_session(void)
                 }
                 if (actor) {
                     LoadCameraPresetForView(
-                        (int)((uint8_t *)actor + 0x208), 0, cam_view, 1);
+                        (uint8_t *)actor + 0x208, 0, cam_view, 1);
                 }
             }
             s_camera_cooldown[i] = TD5_INPUT_CAMERA_COOLDOWN;
@@ -1171,7 +1171,7 @@ post_poll:
                      * (Same transition rationale as the camera-button branch
                      * above.) */
                     LoadCameraPresetForView(
-                        (int)((uint8_t *)actor + 0x208), 0, i, 1);
+                        (uint8_t *)actor + 0x208, 0, i, 1);
                 }
             }
             s_camera_cooldown[i] = TD5_INPUT_CAMERA_COOLDOWN;

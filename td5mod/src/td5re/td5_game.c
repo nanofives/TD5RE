@@ -78,7 +78,9 @@ int td5_trace_current_sim_tick(void) {
  * ======================================================================== */
 
 int     g_actorSlotForView[TD5_MAX_VIEWPORTS] = {0};
-int     g_actorBaseAddr         = 0;
+/* [x64 Stage 2] g_actorBaseAddr deleted -- it was an `int` holding a truncated
+ * pointer to the actor table, redundant with the correctly-typed
+ * g_actor_table_base / g_actor_base / g_actor_pool set beside it below. */
 void   *g_actor_pool            = NULL;
 void   *g_actor_base            = NULL;
 uint8_t *g_actor_table_base     = NULL;
@@ -3468,7 +3470,6 @@ static void init_race_spawn_actors(void)
                   g_td5.num_human_players, g_td5.num_ai_opponents);
 
         memset(s_actor_memory, 0, sizeof(s_actor_memory));
-        g_actorBaseAddr = (int)(uintptr_t)s_actor_memory;
         g_actor_pool = s_actor_memory;
         g_actor_base = s_actor_memory;
         g_actor_table_base = s_actor_memory;

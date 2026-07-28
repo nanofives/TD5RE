@@ -16,3 +16,10 @@ race-golden-pelton controls 1ae23b0d92b30237
 race-golden-pelton progress 1184a63dfa9077fc
 race-golden-pelton camera 9caa062b77ece8df
 race-golden-pelton sound 2360ce13c0d10c25
+race-golden-drag pose a249d64eed28254a
+race-golden-drag motion 788498a99fe7f252
+race-golden-drag track a74dc8adc1434d5d
+race-golden-drag controls 9bb4c2fedf4eb702
+race-golden-drag progress 9ca1f88ad9c649ce
+race-golden-drag camera 8d6a52c443f0ac69
+race-golden-drag sound 2360ce13c0d10c25

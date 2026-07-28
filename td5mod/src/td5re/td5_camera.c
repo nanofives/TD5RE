@@ -124,8 +124,11 @@ int    g_tracksideTimer[TD5_MAX_VIEWPORTS]           = {0};
 unsigned int g_tracksideYawOffset[TD5_MAX_VIEWPORTS] = {0};
 
 /* --- Track geometry tables --- */
-int    g_spanTable      = 0;
-int    g_vertexTable    = 0;
+/* [x64 Stage 2] were `int` holding truncated pointers; the call sites do real
+ * address arithmetic (`base + idx*0x18`) and then dereference, so on x86_64 an
+ * int base is a wild pointer. Typed pointers keep the same arithmetic. */
+const uint8_t *g_spanTable   = NULL;
+const uint8_t *g_vertexTable = NULL;
 
 /* --- Race state (camera-owned) --- */
 int    g_cameraTransitionActive = 0xA000;
@@ -611,13 +614,13 @@ static const short s_splineTemplates[6][8] = {
  * case 3 static, case 6 spline; UpdateStaticTracksideCamera / SelectTrackside-
  * CameraProfile) can index them. Without this the case-0 path NULL-derefs
  * (movzwl 0x4(%edx),%eax with edx=0) the first time the post-race or replay
- * cinematic switches to trackside view. Stored as integer so the existing
- * `base + idx*0x18` arithmetic in the call sites is unchanged. */
+ * cinematic switches to trackside view. Stored as typed pointers (x64 Stage 2);
+ * the `base + idx*0x18` arithmetic at the call sites is unchanged. */
 void td5_camera_bind_track_geometry(const void *span_base,
                                     const void *vertex_base)
 {
-    g_spanTable   = (int)(intptr_t)span_base;
-    g_vertexTable = (int)(intptr_t)vertex_base;
+    g_spanTable   = (const uint8_t *)span_base;
+    g_vertexTable = (const uint8_t *)vertex_base;
 }
 
 /* ========================================================================
@@ -934,7 +937,7 @@ void OrientCameraTowardTarget(int *target_pos, unsigned int yaw_offset)
  * camera state. Preset index is taken from g_raceCameraPresetId[view].
  * ======================================================================== */
 
-void LoadCameraPresetForView(int actor, int force_reload, int view, int save_state)
+void LoadCameraPresetForView(uint8_t *actor, int force_reload, int view, int save_state)
 {
     int preset_idx = g_raceCameraPresetId[view];
     TD5_CameraPreset *p = &g_cameraPresets[preset_idx];
@@ -1084,7 +1087,7 @@ static void terrain_probe_trace_ensure_open(void)
  * are the post-shift, post-negate raw operands to AngleFromVector12.
  *
  * Matches columns from tools/_probes/terrain_probe_capture.js. */
-static void terrain_probe_trace_emit(int view, int actor_addr,
+static void terrain_probe_trace_emit(int view, const uint8_t *actor_addr,
                                      int pos_x, int pos_z,
                                      unsigned int combined_angle,
                                      int point_ax, int point_az,
@@ -1392,7 +1395,7 @@ static int td5_camera_flyin_enabled(void)
     return 1;
 }
 
-void UpdateChaseCamera(int actor, int do_track_heading, int view)
+void UpdateChaseCamera(uint8_t *actor, int do_track_heading, int view)
 {
     int fly_in_threshold = g_flyInThreshold;
     int v = view;
@@ -2214,13 +2217,13 @@ static void cam_solve_view(int v)
         /* Race-start fly-in — now advances once per TICK (was per frame/viewport).
          * [Montego fly-in fix 2026-07-04] Disabled by default — see
          * td5_camera_flyin_enabled() above. TD5RE_FLYIN_ENABLED=1 restores it. */
-        UpdateChaseCamera((int)actor, 1, v);
-        UpdateRaceCameraTransitionState((int)actor, v);
+        UpdateChaseCamera((uint8_t *)actor, 1, v);
+        UpdateRaceCameraTransitionState((uint8_t *)actor, v);
         td5_camera_finalize_chase_pos(actor, v);
         eye_lock = 1; tgt_lock = 1;
     } else if (g_replay_mode && td5_camera_replay_trackside_ready()) {
-        SelectTracksideCameraProfile((int)actor, v);
-        UpdateTracksideCamera((int)actor, v);
+        SelectTracksideCameraProfile((uint8_t *)actor, v);
+        UpdateTracksideCamera((uint8_t *)actor, v);
         eye_lock = 0; tgt_lock = 1;     /* trackside eye is world-fixed; look-at tracks car */
         /* [ITEM #18 camera] Keep the cinematic trackside eye above the road
          * surface (one-sided raise). The captured eye lives in C->eye; the
@@ -2232,11 +2235,11 @@ static void cam_solve_view(int v)
         if (C->build_mode == 0)
             td5_camera_replay_eye_floor_clamp((uintptr_t)actor, v, C->eye);
     } else if (g_raceCameraPresetMode[v] != 0 && !g_td5.paused) {
-        UpdateVehicleRelativeCamera((int)actor, v);   /* bumper / in-car (euler basis) */
+        UpdateVehicleRelativeCamera((uint8_t *)actor, v);   /* bumper / in-car (euler basis) */
         eye_lock = 1; tgt_lock = 1;
     } else {
         cam_finish_orbit_step(v, actor);   /* [CAR DAMAGE] end-of-race damage orbit */
-        UpdateChaseCamera((int)actor, 1, v);
+        UpdateChaseCamera((uint8_t *)actor, 1, v);
         td5_camera_finalize_chase_pos(actor, v);
         eye_lock = 1; tgt_lock = 1;
     }
@@ -2571,7 +2574,7 @@ void td5_camera_apply_view(int view)
  *       Final state is correct; recommend cleanup pass to remove cruft.
  * ======================================================================== */
 
-void UpdateTracksideOrbitCamera(int actor, int is_active, int view)
+void UpdateTracksideOrbitCamera(uint8_t *actor, int is_active, int view)
 {
     int orbit_angle_fp;
     int v = view;
@@ -2718,7 +2721,7 @@ void UpdateTracksideOrbitCamera(int actor, int is_active, int view)
  *   visual-only — divergence does not enter the sim cascade.
  * ======================================================================== */
 
-void UpdateVehicleRelativeCamera(int actor, int view)
+void UpdateVehicleRelativeCamera(uint8_t *actor, int view)
 {
     int v = view;
     short *cached = g_camCachedAngles[v];
@@ -2833,7 +2836,7 @@ void UpdateVehicleRelativeCamera(int actor, int view)
  *   constants.
  * ======================================================================== */
 
-void UpdateRaceCameraTransitionState(int actor, int view)
+void UpdateRaceCameraTransitionState(uint8_t *actor, int view)
 {
     int v = view;
     int actor_idx = *(unsigned char *)(actor + 0x375);
@@ -2979,12 +2982,20 @@ void ResetRaceCameraSelectionState(int clear_or_restore)
         g_raceCameraPresetMode[0] = 0;
     }
 
-    /* Reload presets for both views */
+    /* Reload presets for both views.
+     *
+     * [x64 Stage 2] BUGFIX: these two passed `(char *)&g_actorBaseAddr + slot*0x388`
+     * -- the ADDRESS OF the global handle variable, not the actor table it names.
+     * That is a wild pointer. It has been harmless only because
+     * LoadCameraPresetForView dereferences the actor solely when force_reload != 0
+     * or the preset mode changed, and both calls here pass force_reload = 0.
+     * Now uses the correctly-typed actor-table base (g_actor_table_base, set
+     * alongside g_actorBaseAddr in td5_game.c). */
     LoadCameraPresetForView(
-        (int)((char *)&g_actorBaseAddr + g_actorSlotForView[0] * 0x388),
+        g_actor_table_base + (size_t)g_actorSlotForView[0] * TD5_ACTOR_STRIDE,
         0, 0, 0);
     LoadCameraPresetForView(
-        (int)((char *)&g_actorBaseAddr + g_actorSlotForView[1] * 0x388),
+        g_actor_table_base + (size_t)g_actorSlotForView[1] * TD5_ACTOR_STRIDE,
         0, 1, 0);
 }
 
@@ -3011,7 +3022,7 @@ void ResetRaceCameraSelectionState(int clear_or_restore)
 void InitializeTracksideCameraProfiles(void)
 {
     int count = 0;
-    int span_addr, vtx_addr;
+    const uint8_t *span_addr, *vtx_addr;
     int anchor_span, span_ofs;
 
     g_cameraProfileIndex[0] = 0;
@@ -3134,7 +3145,7 @@ int td5_camera_replay_trackside_ready(void)
  *     - prof stride = 0x10 (orig) = 8 shorts (port array) — same
  * ======================================================================== */
 
-void SelectTracksideCameraProfile(int actor, int view)
+void SelectTracksideCameraProfile(uint8_t *actor, int view)
 {
     int v = view;
     int prev_profile = g_cameraProfileIndex[v];
@@ -3160,7 +3171,7 @@ void SelectTracksideCameraProfile(int actor, int view)
         short *prof = g_tracksideCameraProfiles + g_cameraProfileIndex[v] * 8;
         unsigned short anchor = (unsigned short)prof[3];
         unsigned int ofs      = (unsigned int)(unsigned short)prof[4];
-        int span_addr, vtx_addr;
+        const uint8_t *span_addr, *vtx_addr;
 
         g_camAnchorSpan[v] = (unsigned int)anchor;
 
@@ -3269,10 +3280,10 @@ void SelectTracksideCameraProfile(int actor, int view)
  *   SelectTracksideCameraProfile; in fact neither orig nor port writes it.
  * ======================================================================== */
 
-void UpdateStaticTracksideCamera(int actor, int view)
+void UpdateStaticTracksideCamera(uint8_t *actor, int view)
 {
     int v = view;
-    int span_addr, vtx_addr;
+    const uint8_t *span_addr, *vtx_addr;
     int target[3];
 
     span_addr = g_spanTable + g_camAnchorSpan[v] * 0x18;
@@ -3313,7 +3324,7 @@ void UpdateStaticTracksideCamera(int actor, int view)
  *   verified against Ghidra decomp.
  * ======================================================================== */
 
-void CacheVehicleCameraAngles(int actor, int view)
+void CacheVehicleCameraAngles(uint8_t *actor, int view)
 {
     g_camCachedAngles[view][0] = *(short *)(actor + 0x208) + 0x800;
     g_camCachedAngles[view][1] = 0x800 - *(short *)(actor + 0x20A);
@@ -3359,7 +3370,7 @@ void CacheVehicleCameraAngles(int actor, int view)
  *   delta direct, not VertOffset).
  * ======================================================================== */
 
-void UpdateSplineTracksideCamera(int actor, int view, int spline_type)
+void UpdateSplineTracksideCamera(uint8_t *actor, int view, int spline_type)
 {
     int v = view;
     const short *tmpl;
@@ -3383,8 +3394,8 @@ void UpdateSplineTracksideCamera(int actor, int view, int spline_type)
         int ofs_delta  = (int)tmpl[i * 2 + 1];
         int span_idx   = span_delta + g_camAnchorSpan[v];
         int ofs        = ofs_delta + g_camTrackSpanOfs[v];
-        int sa         = g_spanTable + span_idx * 0x18;
-        int va         = g_vertexTable;
+        const uint8_t *sa = g_spanTable + span_idx * 0x18;
+        const uint8_t *va = g_vertexTable;
         int vidx       = (unsigned short)*(short *)(sa + 4) + ofs;
 
         control_points[i * 3 + 0] =
@@ -3467,7 +3478,7 @@ void UpdateSplineTracksideCamera(int actor, int view, int spline_type)
  *     port-side name (verify alias is OK).
  * ======================================================================== */
 
-void UpdateTracksideCamera(int actor, int view)
+void UpdateTracksideCamera(uint8_t *actor, int view)
 {
     int v = view;
     int btype = g_camBehaviorType[v];
@@ -3479,8 +3490,8 @@ void UpdateTracksideCamera(int actor, int view)
     switch (btype) {
     case 0: {
         /* Static with dynamic FOV */
-        int span_addr = g_spanTable + g_camAnchorSpan[v] * 0x18;
-        int vtx_base  = g_vertexTable + (unsigned short)*(short *)(span_addr + 4) * 6;
+        const uint8_t *span_addr = g_spanTable + g_camAnchorSpan[v] * 0x18;
+        const uint8_t *vtx_base  = g_vertexTable + (unsigned short)*(short *)(span_addr + 4) * 6;
         int target[3];
         int dist_scaled, proj_scale;
 
@@ -3572,40 +3583,40 @@ void UpdateTracksideCamera(int actor, int view)
     }
 
     case 3:
-        UpdateStaticTracksideCamera(actor, v);
+        UpdateStaticTracksideCamera((uint8_t *)actor, v);
         break;
 
     case 4:
         g_camYawOffset[v] += 8;
-        UpdateTracksideOrbitCamera(actor, 1, v);
+        UpdateTracksideOrbitCamera((uint8_t *)actor, 1, v);
         break;
 
     case 5:
         g_camYawOffset[v] -= 8;
-        UpdateTracksideOrbitCamera(actor, 1, v);
+        UpdateTracksideOrbitCamera((uint8_t *)actor, 1, v);
         break;
 
     case 6:
-        UpdateSplineTracksideCamera(actor, v, g_camSplineNodeCount[v]);
+        UpdateSplineTracksideCamera((uint8_t *)actor, v, g_camSplineNodeCount[v]);
         break;
 
     case 7:
-        UpdateVehicleRelativeCamera(actor, v);
+        UpdateVehicleRelativeCamera((uint8_t *)actor, v);
         break;
 
     case 8:
         g_camYawOffset[v] = 0x800;
-        UpdateVehicleRelativeCamera(actor, v);
+        UpdateVehicleRelativeCamera((uint8_t *)actor, v);
         break;
 
     case 9:
         g_camYawOffset[v] = 0x800;
-        UpdateTracksideOrbitCamera(actor, 1, v);
+        UpdateTracksideOrbitCamera((uint8_t *)actor, 1, v);
         break;
 
     case 10:
         g_camYawOffset[v] = 0;
-        UpdateTracksideOrbitCamera(actor, 1, v);
+        UpdateTracksideOrbitCamera((uint8_t *)actor, 1, v);
         break;
 
     default:
@@ -3818,12 +3829,12 @@ void td5_camera_cache_angles(void)
     for (int v = 0; v < view_count; v++) {
         TD5_Actor *actor = camera_actor_for_view(v);
         if (!actor) continue;
-        CacheVehicleCameraAngles((int)actor, v);
+        CacheVehicleCameraAngles((uint8_t *)actor, v);
     }
 }
 
 /* Phase 2: run the chase camera AFTER physics has updated actor pose.
-   Matches UpdateChaseCamera(actor,1,view) near the tail of RunRaceFrame's
+   Matches UpdateChaseCamera((uint8_t *)actor,1,view) near the tail of RunRaceFrame's
    sim-tick loop (0x0042B580, after UpdateRaceActors/ResolveVehicleContacts/
    UpdateRaceOrder). Reading post-physics actor angles against the
    pre-physics cached angles is what makes the orbit smoothing and the
@@ -3854,7 +3865,7 @@ void td5_camera_update_chase_all(void)
             continue;
 
         cam_finish_orbit_step(v, actor);   /* [CAR DAMAGE] end-of-race damage orbit (legacy path) */
-        UpdateChaseCamera((int)actor, 1, v);
+        UpdateChaseCamera((uint8_t *)actor, 1, v);
     }
 }
 
@@ -3873,7 +3884,7 @@ void td5_camera_tick(void)
 
 void td5_camera_update_chase(TD5_Actor *a, int p, int vi)
 {
-    UpdateChaseCamera((int)a, p, vi);
+    UpdateChaseCamera((uint8_t *)a, p, vi);
 }
 
 void td5_camera_set_preset(int pi)
@@ -3959,7 +3970,7 @@ void td5_camera_set_preset(int pi)
             }
 
             if (actor) {
-                LoadCameraPresetForView((int)((uint8_t *)actor + 0x208), 1, v, 0);
+                LoadCameraPresetForView(((uint8_t *)actor + 0x208), 1, v, 0);
             }
         }
     }
@@ -4015,7 +4026,7 @@ void td5_camera_begin_recovery_glide(int view)
 
 void td5_camera_update_trackside(TD5_Actor *a, int vi)
 {
-    UpdateTracksideCamera((int)a, vi);
+    UpdateTracksideCamera((uint8_t *)a, vi);
 }
 
 void td5_camera_update_transition_state(int p, int vi)
@@ -4084,7 +4095,7 @@ void td5_camera_update_transition_state(int p, int vi)
      * tick_race_countdown() in td5_game.c, so skipping here is purely a
      * camera-state concern. */
     if (g_cameraTransitionActive > 0 && !s_flyin_preset_reloaded[v]) {
-        UpdateRaceCameraTransitionState((int)actor, vi);
+        UpdateRaceCameraTransitionState((uint8_t *)actor, vi);
         /* [PORT: N-way split] Re-pin THIS view's fly-in camera too. Like the
          * chase path below, td5_camera_update_chase_all() leaves only the LAST
          * view's camera in the active g_cameraPos/g_cameraBasis, so during the
@@ -4110,8 +4121,8 @@ void td5_camera_update_transition_state(int p, int vi)
     if (g_replay_mode && td5_camera_replay_trackside_ready()) {
         TD5_LOG_D(LOG_TAG, "transition view %d: path=trackside(replay) actor_slot=%d",
                   vi, g_actorSlotForView[vi]);
-        SelectTracksideCameraProfile((int)actor, vi);
-        UpdateTracksideCamera((int)actor, vi);
+        SelectTracksideCameraProfile((uint8_t *)actor, vi);
+        UpdateTracksideCamera((uint8_t *)actor, vi);
 
         /* [ITEM #18 camera] Legacy per-frame path: the trackside eye is in
          * g_camWorldPos[vi] and the basis was already built from it. Raise the
@@ -4145,7 +4156,7 @@ void td5_camera_update_transition_state(int p, int vi)
          * path below so the played-back car stays on screen. */
         int mode = g_raceCameraPresetMode[v];
         if (mode != 0 && !g_td5.paused) {
-            UpdateVehicleRelativeCamera((int)actor, vi);
+            UpdateVehicleRelativeCamera((uint8_t *)actor, vi);
         }
         /* Chase (mode 0) updated per-sim-tick in td5_camera_update_chase_all(). */
     } else {
@@ -4175,7 +4186,7 @@ void td5_camera_update_transition_state(int p, int vi)
              * player cycles to it with the view button during the race. */
             TD5_LOG_I(LOG_TAG, "transition view %d: path=bumper actor_slot=%d mode=%d",
                       vi, g_actorSlotForView[vi], mode);
-            UpdateVehicleRelativeCamera((int)actor, vi);
+            UpdateVehicleRelativeCamera((uint8_t *)actor, vi);
         } else {
             /* [PORT: N-way split] Re-pin THIS view's chase camera into the
              * active g_cameraPos/g_cameraBasis before the viewport renders.
@@ -4202,7 +4213,7 @@ void td5_camera_update_transition_timer(void)
 
 void td5_camera_cache_vehicle_angles(TD5_Actor *a, int vi)
 {
-    CacheVehicleCameraAngles((int)a, vi);
+    CacheVehicleCameraAngles((uint8_t *)a, vi);
 }
 
 void td5_camera_get_position(float *x, float *y, float *z)
@@ -4343,9 +4354,12 @@ static void RecomputeTracksideProjectionScale(void) {
  * [CONFIRMED @ 0x0040A260] */
 static void UpdateCameraTransitionHudIndicator(int view, int actor_index) {
     char *actor;
-    if (g_actorBaseAddr == 0) return;
-    actor = (char *)(uintptr_t)(uint32_t)g_actorBaseAddr +
-            (size_t)(unsigned int)actor_index * 0x388u;
+    /* [x64 Stage 2] was g_actorBaseAddr, an `int` holding a truncated pointer
+     * (round-tripped through (uint32_t), so the top half was dropped outright
+     * on x64). g_actor_table_base is the same allocation, correctly typed. */
+    if (!g_actor_table_base) return;
+    actor = (char *)g_actor_table_base +
+            (size_t)(unsigned int)actor_index * TD5_ACTOR_STRIDE;
     if (g_td5.game_type == TD5_GAMETYPE_SINGLE_RACE) {
         td5_hud_set_indicator_state(view, (int)*(uint8_t *)(actor + 0x383) + 2);
     } else {
@@ -4368,10 +4382,11 @@ uint32_t td5_compute_heading_delta(void *route_entry) {
     uint32_t rb, t;
     int diff;
 
-    if (!rs || !g_actorBaseAddr) return 0;
+    /* [x64 Stage 2] see note above: g_actorBaseAddr was a truncated-pointer int. */
+    if (!rs || !g_actor_table_base) return 0;
     slot = rs[0x35];   /* RS_SLOT_INDEX [CONFIRMED @ 0x00434040] */
-    actor = (char *)(uintptr_t)(uint32_t)g_actorBaseAddr +
-            (size_t)(unsigned int)slot * 0x388u;
+    actor = (char *)g_actor_table_base +
+            (size_t)(unsigned int)slot * TD5_ACTOR_STRIDE;
     actor_yaw  = *(int32_t *)(actor + 0x1F4); /* yaw accumulator [CONFIRMED @ 0x00434040] */
     span_norm  = *(int16_t *)(actor + 0x82);  /* span_normalized [CONFIRMED @ 0x00434040] */
     /* [x64 Stage 2] slot 0x00 holds a route-table HANDLE, not a pointer. */

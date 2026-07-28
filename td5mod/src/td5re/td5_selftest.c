@@ -151,6 +151,15 @@ static const RaceScenario k_races[] = {
      * layout must stay last / leak-free). */
     { "race-golden-moscow",   0,  0,  0,  1,  2,  0,  2,  5, -1,  1,  0, 0, 0, 1 },
     { "race-golden-pelton",  26,  0,  0,  1,  2,  0,  2,  5, -1,  1,  0, 0, 0, 1 },
+    /* [x64 Stage 2] DRAG golden. Neither golden above is a drag race, which
+     * left the drag/gantry render path unguarded -- and that path builds its
+     * display list DIFFERENTLY (td5_render.c synthesizes a 1-entry block on
+     * the stack rather than reading one from the models blob). A change to the
+     * display-list slot representation can therefore break drag rendering while
+     * both existing goldens stay green. Same pinned knobs as the two above,
+     * except opponents=0: drag runs SOLO (a full AutoRace grid parks 5 cars
+     * against the extended-strip walls -- see race-drag-solo above). */
+    { "race-golden-drag",    19,  0,  0,  1,  2,  0,  2,  0, -1,  1,  0, 0, 0, 1 },
     { "race-spectate3",       0, -1,  0, -1, -1, -1, -1, -2,  3, -1, -1, 0, 0 },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))

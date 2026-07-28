@@ -13,6 +13,10 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "td5_types.h"
+/* [x64 Stage 2] full TD5_Actor layout, so the raw ACTOR_* byte offsets below
+ * can be cross-checked against the real struct with _Static_assert.
+ * NOTE: td5_types.h MUST precede this (the actor header guards on it). */
+#include "../../../re/include/td5_actor_struct.h"
 
 /* ========================================================================
  * Route State access macros
@@ -104,6 +108,53 @@ enum {
 #define ACTOR_PROBE_FR_BASE       0x09C
 #define ACTOR_PROBE_RL_BASE       0x0A8
 #define ACTOR_PROBE_RR_BASE       0x0B4
+
+/* ------------------------------------------------------------------------
+ * Cross-check the raw offsets above against the real struct (x64 Stage 2).
+ *
+ * td5_ai.c / td5_ai_traffic.c address the actor as a raw byte blob via
+ * actor_ptr() + these constants, and never included the typed header -- so
+ * the constants were UNGUARDED DUPLICATES of the layout in
+ * re/include/td5_actor_struct.h. If a field moved, they went stale silently
+ * and the AI would read the wrong bytes.
+ *
+ * These asserts cost nothing at runtime (no codegen at all) and turn that
+ * class of bug into a compile error. They matter most for the x86_64
+ * retarget: the four void* at +0x1B0..+0x1BC grow, shifting EVERYTHING from
+ * +0x1B0 onward by 16 bytes. Every constant below at or after 0x1B0 will then
+ * fail here -- which is exactly the worklist you want, delivered by the
+ * compiler instead of by debugging wrong AI behaviour.
+ * ------------------------------------------------------------------------ */
+_Static_assert(ACTOR_STRIDE == sizeof(TD5_Actor), "ACTOR_STRIDE drifted from sizeof(TD5_Actor)");
+
+/* safe under x64 (all below +0x1B0) */
+_Static_assert(ACTOR_SPAN_RAW        == offsetof(TD5_Actor, track_span_raw),        "ACTOR_SPAN_RAW drifted");
+_Static_assert(ACTOR_SPAN_NORMALIZED == offsetof(TD5_Actor, track_span_normalized), "ACTOR_SPAN_NORMALIZED drifted");
+_Static_assert(ACTOR_SPAN_ACCUM      == offsetof(TD5_Actor, track_span_accumulated),"ACTOR_SPAN_ACCUM drifted");
+_Static_assert(ACTOR_SUB_LANE_INDEX  == offsetof(TD5_Actor, track_sub_lane_index),  "ACTOR_SUB_LANE_INDEX drifted");
+_Static_assert(ACTOR_PROBE_FL_BASE   == offsetof(TD5_Actor, probe_FL),              "ACTOR_PROBE_FL_BASE drifted");
+_Static_assert(ACTOR_PROBE_FR_BASE   == offsetof(TD5_Actor, probe_FR),              "ACTOR_PROBE_FR_BASE drifted");
+_Static_assert(ACTOR_PROBE_RL_BASE   == offsetof(TD5_Actor, probe_RL),              "ACTOR_PROBE_RL_BASE drifted");
+_Static_assert(ACTOR_PROBE_RR_BASE   == offsetof(TD5_Actor, probe_RR),              "ACTOR_PROBE_RR_BASE drifted");
+
+/* AT OR AFTER +0x1B0 -- these SHIFT on x86_64 (pointer growth) */
+_Static_assert(ACTOR_CAR_DEF_PTR         == offsetof(TD5_Actor, car_definition_ptr),      "ACTOR_CAR_DEF_PTR drifted");
+_Static_assert(ACTOR_LIN_VEL_X           == offsetof(TD5_Actor, linear_velocity_x),       "ACTOR_LIN_VEL_X drifted");
+_Static_assert(ACTOR_LIN_VEL_Z           == offsetof(TD5_Actor, linear_velocity_z),       "ACTOR_LIN_VEL_Z drifted");
+_Static_assert(ACTOR_YAW_ACCUM           == offsetof(TD5_Actor, euler_accum) + 4,         "ACTOR_YAW_ACCUM drifted (yaw = euler_accum + 4)");
+_Static_assert(ACTOR_WORLD_POS_X         == offsetof(TD5_Actor, world_pos),               "ACTOR_WORLD_POS_X drifted");
+_Static_assert(ACTOR_WORLD_POS_Z         == offsetof(TD5_Actor, world_pos) + 8,           "ACTOR_WORLD_POS_Z drifted (z = world_pos + 8)");
+_Static_assert(ACTOR_STEERING_CMD        == offsetof(TD5_Actor, steering_command),        "ACTOR_STEERING_CMD drifted");
+_Static_assert(ACTOR_LONGITUDINAL_SPEED  == offsetof(TD5_Actor, longitudinal_speed),      "ACTOR_LONGITUDINAL_SPEED drifted");
+_Static_assert(ACTOR_REAR_AXLE_SLIP      == offsetof(TD5_Actor, rear_axle_slip_excess),   "ACTOR_REAR_AXLE_SLIP drifted");
+_Static_assert(ACTOR_STEERING_RAMP_ACCUM == offsetof(TD5_Actor, steering_ramp_accumulator),"ACTOR_STEERING_RAMP_ACCUM drifted");
+_Static_assert(ACTOR_ENCOUNTER_STEER     == offsetof(TD5_Actor, encounter_steering_cmd),  "ACTOR_ENCOUNTER_STEER drifted");
+_Static_assert(ACTOR_BRAKE_FLAG          == offsetof(TD5_Actor, brake_flag),              "ACTOR_BRAKE_FLAG drifted");
+_Static_assert(ACTOR_THROTTLE_STATE      == offsetof(TD5_Actor, throttle_state),          "ACTOR_THROTTLE_STATE drifted");
+_Static_assert(ACTOR_SLOT_INDEX          == offsetof(TD5_Actor, slot_index),              "ACTOR_SLOT_INDEX drifted");
+_Static_assert(ACTOR_VEHICLE_MODE        == offsetof(TD5_Actor, vehicle_mode),            "ACTOR_VEHICLE_MODE drifted");
+_Static_assert(ACTOR_TRACK_CONTACT_FLAG  == offsetof(TD5_Actor, track_contact_flag),      "ACTOR_TRACK_CONTACT_FLAG drifted");
+_Static_assert(ACTOR_ENCOUNTER_STATE     == offsetof(TD5_Actor, special_encounter_state), "ACTOR_ENCOUNTER_STATE drifted");
 
 /* ========================================================================
  * Helper accessors (cast through char* arithmetic) -- shared state, defined
