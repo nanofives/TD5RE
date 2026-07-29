@@ -125,10 +125,41 @@ goldens probably would not either, since neither golden scenario is a drag race.
 
    Verified: suite 55/55, all three trace goldens green (`race-golden-drag` included — it exists
    for exactly this path), `rgold-race-golden-drag` worst L1=65 vs a 4000 limit.
-2. Runtime header array + parse-time conversion; consumers still read the old fields.
-3. Repoint the 34 header consumers, then the 16 `vertex_data_ptr` sites (needs the
-   `PrimDispatchFn` signature change for the 8 dispatch handlers with no mesh in scope).
-4. Revisit the ~13 validity heuristics — the `< 0x10000` tri-state and the bit-0 DERIVED tag.
+2. ✅ **DONE `a4cc8233`** — `TD5_MeshHeader` carries real pointers. The three `uint32_t *_offset`
+   fields became `commands` / `vertices` / `normals`, and **the RENAME is the load-bearing half**:
+   retyping alone catches nothing, since `(T *)(uintptr_t)field` compiles the same whether `field`
+   is an integer or a pointer. Renaming turned every use into a hard error — **73 across 8
+   modules** — so the compiler produced the worklist.
+
+   Layout is UNCHANGED on i686 (`reserved_28` → `runtime_flags` at the same +0x28; three 4-byte
+   pointers still at 0x2C/0x30/0x34), so the change is inert there and the goldens prove it — the
+   dev binary even comes out the same size. Disk vs runtime is now explicit:
+   `TD5_MESH_DISK_SIZE` (frozen 0x38) for every check against file data, and
+   `td5_mesh_disk_link()` / `td5_mesh_disk_set_link()` to read/write the link words by byte offset
+   in the raw record. The rebase used to read the offset *through the field it then overwrote* —
+   only correct while the two layouts coincide. The DERIVED-normals tag moved out of bit 0 of the
+   pointer into `runtime_flags`; only 2 of its readers ever masked it.
+
+   ⚠️ **This does NOT finish x64 for meshes** and should not be read as such. The runtime struct
+   grows to 0x48 on x86_64 while the on-disk record stays 0x38, so the remaining in-place casts
+   over file data are still wrong there at RUNTIME, silently. What it buys: the truncation is now
+   confined to ONE conversion point instead of 73 sites, which is what makes a parse-time copy
+   tractable. x64 trial after: 45/67 clean, **zero non-actor errors**.
+
+3. ⬜ `vertex_data_ptr` (`TD5_PrimitiveCmd` +0x0C). **The plan's approach here is REFUTED.** It
+   said to pass the mesh down via a `PrimDispatchFn` signature change — but
+   `td5_render_mesh.c:3334` dispatches DEFERRED translucent records as
+   `s_dispatch_table[opcode](cmd, NULL)`, where `entry->record` is a bare `TD5_PrimitiveCmd *` and
+   **there is no mesh in scope at all** (confirmed: 0 of 6 handlers have one). You cannot pass a
+   mesh that no longer exists, so `vertex_data_ptr` on a queued command must stay self-contained —
+   which rules out converting it to a mesh-relative offset. Candidate fix: have
+   `TranslucentBatchEntry` carry the RESOLVED vertex pointer beside the command, which frees
+   `vertex_data_ptr` to become an offset everywhere else. Unverified.
+
+4. 🔄 Validity heuristics — the bit-0 DERIVED tag is **done** (increment 2). The `< 0x10000`
+   tri-state survives, now as an explicit unrelocated-offset tripwire on the header pointers; the
+   `vertex_data_ptr` tri-state (`td5_render_mesh.c:1499-1508`, `td5_track.c` ×3) is blocked behind
+   increment 3.
 
 **Testing gap to close first:** no golden scenario is a drag race, so the drag/gantry path is
 unguarded. Consider adding one before increment 1, or accept manual verification for it.
