@@ -243,7 +243,7 @@ static TD5_FFState          s_ff[TD5_PLAT_MAX_JS_SLOTS];
 #define TD5_SHARED_FONT_PAGE 898
 WrapperSurface  *s_tex_surfaces[MAX_TEXTURE_PAGES];
 static WrapperTexture  *s_tex_wrappers[MAX_TEXTURE_PAGES];
-DWORD            s_tex_handles[MAX_TEXTURE_PAGES];
+ID3D11ShaderResourceView *s_tex_srvs[MAX_TEXTURE_PAGES];
 static uint16_t         s_tex_widths[MAX_TEXTURE_PAGES];
 static uint16_t         s_tex_heights[MAX_TEXTURE_PAGES];
 int              s_frame_draw_calls = 0;
@@ -492,7 +492,7 @@ void td5_platform_win32_init(void *ddraw4, void *d3ddevice3, void *primary_surfa
     memset(s_keyboard, 0, sizeof(s_keyboard));
     memset(s_tex_surfaces, 0, sizeof(s_tex_surfaces));
     memset(s_tex_wrappers, 0, sizeof(s_tex_wrappers));
-    memset(s_tex_handles, 0, sizeof(s_tex_handles));
+    memset(s_tex_srvs, 0, sizeof(s_tex_srvs));
     memset(s_tex_widths, 0, sizeof(s_tex_widths));
     memset(s_tex_heights, 0, sizeof(s_tex_heights));
     memset(s_ds_buffers, 0, sizeof(s_ds_buffers));
@@ -4006,9 +4006,12 @@ void td5_plat_render_bind_texture(int page_index)
     ID3D11ShaderResourceView *srv = NULL;
 
     if (page_index >= 0 && page_index < MAX_TEXTURE_PAGES) {
-        /* Use the texture handle (SRV pointer) if available */
-        if (s_tex_handles[page_index]) {
-            srv = (ID3D11ShaderResourceView *)(DWORD_PTR)s_tex_handles[page_index];
+        /* [x64 Stage 3] Straight pointer read. This used to cast a 32-bit
+         * DWORD handle back to an SRV, which truncated on x86_64 and handed
+         * a garbage pointer to PSSetShaderResources below -- the first x64
+         * crash. The fallback branch already did the right thing. */
+        if (s_tex_srvs[page_index]) {
+            srv = s_tex_srvs[page_index];
         } else if (s_tex_surfaces[page_index] && s_tex_surfaces[page_index]->d3d11_srv) {
             srv = s_tex_surfaces[page_index]->d3d11_srv;
         }
@@ -4196,7 +4199,7 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
         }
         s_tex_surfaces[page_index]->vtbl->Release(s_tex_surfaces[page_index]);
         s_tex_surfaces[page_index] = NULL;
-        s_tex_handles[page_index] = 0;
+        s_tex_srvs[page_index] = NULL;   /* owned by the surface just released */
     }
 
     /* Create new texture surface */
@@ -4259,9 +4262,21 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
     }
 
     {
-        DWORD handle = 0;
-        tex->vtbl->GetHandle(tex, s_d3ddevice3, &handle);
-        s_tex_handles[page_index] = handle;
+        /* [x64 Stage 3] Store the SRV directly instead of the DWORD handle
+         * GetHandle returns -- that handle is the SRV pointer squeezed into 32
+         * bits, which truncates on x86_64 and later gets cast back into a
+         * garbage pointer at bind time.
+         *
+         * GetHandle is STILL CALLED, for its side effect only: it AddRefs the
+         * SRV, and that reference is deliberately never released, keeping the
+         * SRV alive if the owning surface is destroyed (see the transfer in
+         * surface4.c Surface4_Release). Skipping the call would quietly change
+         * that lifetime, so the refcounting is left exactly as it was and only
+         * the storage is fixed. The returned handle itself is now unused. */
+        DWORD unused_handle = 0;
+        tex->vtbl->GetHandle(tex, s_d3ddevice3, &unused_handle);
+        (void)unused_handle;
+        s_tex_srvs[page_index] = surf->d3d11_srv;
     }
 
     s_tex_surfaces[page_index] = surf;
@@ -4294,8 +4309,8 @@ void td5_plat_render_recover_textures(void)
         if (!s) continue;
         WrapperSurface_EnsureDeviceCurrent(s);
         WrapperSurface_FlushDirty(s);   /* re-upload sys_buffer into fresh texture */
-        /* The bind path caches the raw SRV pointer as the texture handle. */
-        s_tex_handles[i] = (DWORD)(DWORD_PTR)s->d3d11_srv;
+        /* The bind path caches the SRV; refresh it for the recreated device. */
+        s_tex_srvs[i] = s->d3d11_srv;
         n++;
     }
     TD5_LOG_I(LOG_TAG, "device recovery: rebuilt %d texture pages on new device", n);

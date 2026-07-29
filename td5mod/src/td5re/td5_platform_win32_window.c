@@ -810,8 +810,9 @@ void td5_plat_present_texture_page(int page_index, int vsync)
     ID3D11ShaderResourceView *srv = NULL;
 
     if (page_index >= 0 && page_index < MAX_TEXTURE_PAGES) {
-        if (s_tex_handles[page_index]) {
-            srv = (ID3D11ShaderResourceView *)(DWORD_PTR)s_tex_handles[page_index];
+        /* [x64 Stage 3] Straight pointer read -- see td5_plat_render_bind_texture. */
+        if (s_tex_srvs[page_index]) {
+            srv = s_tex_srvs[page_index];
         } else if (s_tex_surfaces[page_index] && s_tex_surfaces[page_index]->d3d11_srv) {
             srv = s_tex_surfaces[page_index]->d3d11_srv;
         }

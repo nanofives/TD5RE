@@ -79,7 +79,23 @@ extern volatile int           s_devices_dirty;
 #define MAX_TEXTURE_PAGES 1024
 
 extern WrapperSurface *s_tex_surfaces[MAX_TEXTURE_PAGES];
-extern DWORD            s_tex_handles[MAX_TEXTURE_PAGES];
+/* [x64 Stage 3] Was `DWORD s_tex_handles[]`, holding the opaque 32-bit handle
+ * from IDirect3DTexture2::GetHandle -- which the wrapper implements by stuffing
+ * an ID3D11ShaderResourceView* into it. Casting that back to a pointer TRUNCATES
+ * on x86_64 and hands a garbage SRV to PSSetShaderResources; that was the first
+ * x64 crash (fault inside d3d11.dll, current_srv = a low-4GB value).
+ *
+ * The handle was redundant anyway: the port already keeps the owning surface in
+ * s_tex_surfaces[], and the bind path's own fallback branch read
+ * ->d3d11_srv from it. So the SRV is now stored directly, with no round trip
+ * through a 32-bit handle. Not a borrowed reference: it is owned by the surface
+ * in s_tex_surfaces[], and cleared alongside it.
+ *
+ * Declared via the struct tag rather than the d3d11.h typedef so the modules
+ * that include this header WITHOUT d3d11.h (fs / log / audio) still compile;
+ * the tag is the same type d3d11.h typedefs, so the .c definitions match. */
+struct ID3D11ShaderResourceView;
+extern struct ID3D11ShaderResourceView *s_tex_srvs[MAX_TEXTURE_PAGES];
 extern int               s_frame_draw_calls;
 extern int               s_frame_vertices;
 extern int               s_frame_indices;
