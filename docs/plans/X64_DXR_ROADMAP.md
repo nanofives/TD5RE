@@ -123,7 +123,7 @@ Remaining, all build-side except the last:
 | **`td5re_x64.exe` LINKS** | ✅ 3,361,159 bytes, `pei-x86-64` |
 | Run it | ⬜ **never executed — expected to misbehave, see below** |
 | Mesh runtime casts — MODELS.DAT blob | ✅ `12c9f822` runtime mesh table |
-| Mesh runtime casts — ASSET meshes | ⬜ vehicle/traffic/cop, `sky.prr`, TD6 transcode — same defect |
+| Mesh runtime casts — ASSET meshes | ✅ `1eeaf787` — **no mesh is cast in place anywhere now** |
 
 ### ⚠️ Correction: "zlib is not a blocker" was half right
 
