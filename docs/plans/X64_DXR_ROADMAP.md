@@ -121,9 +121,44 @@ Remaining, all build-side except the last:
 | Win32 / D3D11 import libs (`-ld3d11 -ldxgi -ldsound …`) | ✅ ship with the x64 MinGW-w64 toolchain |
 | `ddraw_wrapper` x64 build | ✅ `fe2c40ca` |
 | **`td5re_x64.exe` LINKS** | ✅ 3,361,159 bytes, `pei-x86-64` |
-| Run it | ⬜ **never executed — expected to misbehave, see below** |
+| Run it | 🔄 **RUN 2026-07-29 — crashes in `d3d11.dll` before the first draw; root cause found** |
 | Mesh runtime casts — MODELS.DAT blob | ✅ `12c9f822` runtime mesh table |
 | Mesh runtime casts — ASSET meshes | ✅ `1eeaf787` — **no mesh is cast in place anywhere now** |
+
+### First x64 run: the D3D3 texture HANDLE is 32-bit by API definition
+
+`td5re_x64.exe --SelfTest=1` reaches D3D11 resource setup and faults inside `d3d11.dll` with
+`present_count=0, total_draws=0` — i.e. before any draw, and NOT in the mesh path.
+
+The dump is unambiguous: `current_srv=0x00000000D1F7BAE8` and the faulting address `0xD1F7BBC8`
+are both low-4GB values, while every genuine x64 allocation in the same dump looks like
+`0x0000015DCC2A…`. A truncated pointer, handed to D3D11.
+
+**Root cause — `td5mod/ddraw_wrapper/src/texture2.c:100`:**
+
+```c
+*handle = (DWORD)(DWORD_PTR)self->surface->d3d11_srv;
+```
+
+`IDirect3DTexture2::GetHandle` returns an opaque **32-bit `DWORD`** by API definition; the game
+passes it back through `SetRenderState(D3DRENDERSTATE_TEXTUREHANDLE, …)` and the wrapper recovers
+it with `(ID3D11ShaderResourceView *)(DWORD_PTR)handle`. Storing a pointer in that handle is the
+wrapper's documented design (see the file header) and is perfectly correct in 32-bit. On x86_64 it
+truncates.
+
+This class is invisible to everything used so far: the cast is EXPLICIT, so
+`-Werror=int-conversion` says nothing (a screen of the whole wrapper for the pointer-truncation
+classes returns clean), and it cannot fail on i686 because pointers fit. The trial compile never
+covered the wrapper either — `wrapper_cflags.txt` carries none of the `-Werror=` classes.
+
+**Fix shape (not yet implemented):** replace the pointer-in-handle with a real handle — a small
+integer index into a table of SRV pointers. Exactly the pattern Stage 2 step 1 used for the AI
+route/script slots, and for the same reason: an API-mandated 32-bit slot cannot hold a 64-bit
+pointer, so it must hold an ID instead. Note `GetHandle` currently `AddRef`s the SRV, so the table
+owns that reference and needs a release path.
+
+⚠️ Worth screening the rest of the wrapper for the same shape: any `DWORD`/`ULONG` that carries a
+COM pointer across the emulated D3D3/DDraw API boundary.
 
 ### ⚠️ Correction: "zlib is not a blocker" was half right
 
