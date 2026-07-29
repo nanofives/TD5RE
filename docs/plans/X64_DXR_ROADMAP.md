@@ -134,7 +134,46 @@ The dump is unambiguous: `current_srv=0x00000000D1F7BAE8` and the faulting addre
 are both low-4GB values, while every genuine x64 allocation in the same dump looks like
 `0x0000015DCC2A…`. A truncated pointer, handed to D3D11.
 
-⚠️ **RETRACTED (same day): `texture2.c:100` is NOT the cause.** This section first named
+## ✅ FIXED `7c4f9f03` — it WAS the SRV truncation; the consumer is in the PORT
+
+The retraction below was itself wrong, and the sequence is worth keeping in full because the
+mistake and the correction are both instructive.
+
+`texture2.c:100` truncates an `ID3D11ShaderResourceView *` into the opaque 32-bit `DWORD` that
+`IDirect3DTexture2::GetHandle` returns by API definition. The consumer is **not in the wrapper** —
+which is why searching the wrapper found none and prompted the retraction — it is in the **port**:
+
+| link | site |
+|---|---|
+| producer truncates | `texture2.c:100` |
+| 32-bit storage | `td5_platform_internal.h` — `DWORD s_tex_handles[1024]` |
+| filled from GetHandle | `td5_platform_win32.c:~4264` |
+| **second** truncation | `:~4298` (device-recovery path) |
+| cast back to pointer | `:~4011` |
+| → `current_srv` | `:~4018` |
+| → `PSSetShaderResources` | `:~4021` ⇒ **fault** |
+| duplicate consumer | `td5_platform_win32_window.c:813` |
+
+Matches the dump exactly: `current_srv = 0x00000000D1F7BAE8` against real allocations of
+`0x0000015DCC2A…`.
+
+**What actually found it was bisection, not inspection** — one-shot breadcrumbs showing
+`ApplyStateCache` never entered, then `begin_scene` completing in full, then `draw_tris` never
+entered, leaving precisely the window `bind_texture` occupies.
+
+**The fix is smaller than the SRV table first proposed.** The handle was redundant: the port
+already owns the surface in `s_tex_surfaces[]` and the bind path's own fallback already read
+`->d3d11_srv` from it. The array is retyped to hold the SRV directly. `GetHandle` is still called
+for its side effect only — it `AddRef`s and that reference is never released, keeping the SRV alive
+if the owning surface dies (`Surface4_Release`); dropping the call would have silently changed that
+lifetime.
+
+**Result: x64 now boots the frontend, renders `present_count=342` frames and starts a race**,
+then faults in our OWN code at `td5re_x64.exe+0x3BEBE` — a different, later problem.
+
+---
+
+⚠️ **RETRACTED (same day), and then UN-retracted above.** This section first named
 
 ```c
 *handle = (DWORD)(DWORD_PTR)self->surface->d3d11_srv;   /* texture2.c:100 */
