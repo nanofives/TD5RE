@@ -112,6 +112,24 @@ static LONG WINAPI td5_crash_handler(EXCEPTION_POINTERS *ep)
     void *addr = ep->ExceptionRecord->ExceptionAddress;
     void *fault_addr = (ep->ExceptionRecord->NumberParameters >= 2)
         ? (void *)ep->ExceptionRecord->ExceptionInformation[1] : NULL;
+    /* [x64 Stage 2] CONTEXT register names are arch-specific (Eax.. vs Rax..).
+     * Found by a trial x86_64 compile: these were 10 of the only 10 non-assert
+     * errors in the whole port. */
+#ifdef _WIN64
+    pos += snprintf(crash_msg + pos, sizeof(crash_msg) - pos,
+        "CRASH: code=0x%08lX at RIP=%p access=%p\n"
+        "  RAX=0x%016llX RBX=0x%016llX RCX=0x%016llX RDX=0x%016llX\n"
+        "  RSI=0x%016llX RDI=0x%016llX RBP=0x%016llX RSP=0x%016llX\n",
+        code, addr, fault_addr,
+        (unsigned long long)ep->ContextRecord->Rax,
+        (unsigned long long)ep->ContextRecord->Rbx,
+        (unsigned long long)ep->ContextRecord->Rcx,
+        (unsigned long long)ep->ContextRecord->Rdx,
+        (unsigned long long)ep->ContextRecord->Rsi,
+        (unsigned long long)ep->ContextRecord->Rdi,
+        (unsigned long long)ep->ContextRecord->Rbp,
+        (unsigned long long)ep->ContextRecord->Rsp);
+#else
     pos += snprintf(crash_msg + pos, sizeof(crash_msg) - pos,
         "CRASH: code=0x%08lX at EIP=%p access=%p\n"
         "  EAX=0x%08lX EBX=0x%08lX ECX=0x%08lX EDX=0x%08lX\n"
@@ -125,15 +143,36 @@ static LONG WINAPI td5_crash_handler(EXCEPTION_POINTERS *ep)
         (unsigned long)ep->ContextRecord->Edi,
         (unsigned long)ep->ContextRecord->Ebp,
         (unsigned long)ep->ContextRecord->Esp);
-    /* Walk stack frames via EBP chain */
+#endif
+    /* Walk stack frames via the frame-pointer chain.
+     *
+     * [x64 Stage 2] Retyped DWORD -> ULONG_PTR: the chain stores return
+     * ADDRESSES, which are 8 bytes on x86_64, so DWORD truncated them.
+     * CAVEAT: on x86_64 this walk is best-effort. Frame-pointer omission is
+     * the norm there (RBP is a general register unless the function needs a
+     * frame), so the chain is often absent and the loop simply stops early.
+     * The real fix for x64 is RtlVirtualUnwind / the .pdata unwind tables;
+     * kept as-is for now because the register dump above is the load-bearing
+     * part of this handler and the chain is a bonus. */
     {
-        DWORD *ebp = (DWORD *)(uintptr_t)ep->ContextRecord->Ebp;
-        DWORD eip = (DWORD)(uintptr_t)ep->ContextRecord->Eip;
-        pos += snprintf(crash_msg + pos, sizeof(crash_msg) - pos, "  Stack: %08lX", (unsigned long)eip);
-        for (int i = 0; i < 16 && ebp && !IsBadReadPtr(ebp, 8); i++) {
-            DWORD ret = ebp[1];
-            pos += snprintf(crash_msg + pos, sizeof(crash_msg) - pos, " <- %08lX", (unsigned long)ret);
-            ebp = (DWORD *)(uintptr_t)ebp[0];
+        ULONG_PTR *fp;
+        ULONG_PTR ip;
+#ifdef _WIN64
+        fp = (ULONG_PTR *)(uintptr_t)ep->ContextRecord->Rbp;
+        ip = (ULONG_PTR)ep->ContextRecord->Rip;
+#else
+        fp = (ULONG_PTR *)(uintptr_t)ep->ContextRecord->Ebp;
+        ip = (ULONG_PTR)ep->ContextRecord->Eip;
+#endif
+        pos += snprintf(crash_msg + pos, sizeof(crash_msg) - pos,
+                        "  Stack: %0*llX", (int)(sizeof(ULONG_PTR) * 2),
+                        (unsigned long long)ip);
+        for (int i = 0; i < 16 && fp && !IsBadReadPtr(fp, sizeof(ULONG_PTR) * 2); i++) {
+            ULONG_PTR ret = fp[1];
+            pos += snprintf(crash_msg + pos, sizeof(crash_msg) - pos,
+                            " <- %0*llX", (int)(sizeof(ULONG_PTR) * 2),
+                            (unsigned long long)ret);
+            fp = (ULONG_PTR *)(uintptr_t)fp[0];
         }
         pos += snprintf(crash_msg + pos, sizeof(crash_msg) - pos, "\n");
     }
