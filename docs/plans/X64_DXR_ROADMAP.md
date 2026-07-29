@@ -69,7 +69,7 @@ arithmetic, so **goldens must stay GREEN throughout** — they are the proof the
 | `g_spanTable` / `g_vertexTable` retype | ⬜ |
 | Mesh headers — **option C** (split disk/runtime) | ⬜ the bulk, ~63 sites |
 | `offsetof` sweep + `TD5_ACTOR_STRIDE = sizeof` | ⬜ |
-| `td5_save.c` on-disk stride | ⬜ **needs a product decision** |
+| `td5_save.c` on-disk stride | ✅ field-mapped — "truncate" rested on a false premise |
 
 What is NOT a problem, contrary to first impressions: saves (text INI), netplay (all-fixed-width
 wire structs — 32- and 64-bit clients interoperate), replay (pointer-free, memory-only),
@@ -115,9 +115,31 @@ of Stage 2.
 
 **It looks CODE-RELATED, not ambient GPU state** (corrected later the same day — the first read
 blamed session-long hardware degradation, which was wrong). The support is locality: a null
-dereference at a FIXED instruction, in a FIXED scenario, within a NARROW frame window,
-reproducing across branches and resolutions. Thermal/driver decay does not land on one
-instruction every time.
+dereference at a FIXED instruction, reproducing across branches and resolutions. Thermal/driver
+decay does not land on one instruction every time.
+
+⚠️ **Corrected 2026-07-28 by n=4.** Two thirds of that locality argument does not survive
+measurement. The scenario is NOT fixed and the frame window is NOT narrow:
+
+| run | outcome | scenario | present | `device_generation` |
+|---|---|---|---|---|
+| 1 | clean 55/55 | — | — | — |
+| 2 | crash | `race-newcastle-circ` | 5208 | 7 |
+| 3 | crash | `race-moscow-base` | 3285 | 2 |
+| 4 | crash | `race-moscow-rep2` | 4062 | 3 |
+
+Three DIFFERENT scenarios and a 3285–5208 present spread. Only the instruction offset (`0x25CBE1`)
+is actually invariant. So "`race-moscow-base` is what selects the fault" is **refuted** — it was an
+artefact of it being the first heavy scenario the suite reaches, i.e. sampling bias, and a bisect
+by scenario knob would have chased nothing.
+
+`device_generation` 7 / 2 / 3 is the more useful signal: each fatal crash is the END of a
+TDR-recovery sequence (6, 1 and 2 prior recoveries), so how far a run gets is a function of how
+many recoveries it survives. That reframes the target from "which scenario triggers it" to "why
+recovery is not durable" — and connects it to the device-lost recovery leak parked below.
+
+Lowering resolution raises the completion rate: 4 of 5 full-suite runs completed at 960x507 or
+1280x676, versus repeated failures earlier. Still a mitigation, not a fix.
 
 Established:
 - **Not invalid API usage.** A full run under `TD5RE_D3D_DEBUG=1` produced ZERO

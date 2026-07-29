@@ -17,7 +17,12 @@
 #include "td5re.h"
 #include "td5_game.h"
 #include "td5_config.h"  /* shared TD5RE_* env-knob helpers */
+/* Full TD5_Actor: the cup snapshot field map needs offsetof on it, not just
+ * the forward decl. Must follow td5_types.h (pulled in via td5re.h above) --
+ * the actor header guards its own typedefs on it. */
+#include "../../../re/include/td5_actor_struct.h"
 #include <string.h>
+#include <stddef.h> /* offsetof: the cup snapshot actor field map */
 #include <stdio.h>  /* remove() in td5_save_test_cup_roundtrip */
 #include <stdarg.h> /* vsnprintf in the INI text builder */
 #include <stdlib.h> /* strtol when parsing comma-separated INI lists */
@@ -164,11 +169,14 @@ _Static_assert(sizeof(TD5_ConfigBuffer) == TD5_CONFIG_FILE_SIZE,
  * cfgini_write_cup() explicitly does NOT store the per-actor snapshot, so this
  * path is one-shot import/export of a retired format.
  *
- * OPEN for x64 (see docs/plans/X64_STAGE2_POINTER_WIDENING.md): the memcpys
- * below copy TD5_ACTOR_SAVE_STRIDE bytes to/from a LIVE actor. Once the actor
- * grows, that silently drops its tail. Decide then whether to truncate
- * (acceptable for a retired format) or field-map. Do not "fix" it by widening
- * this constant. */
+ * RESOLVED for x64 (2026-07-28): FIELD-MAPPED, see actor_save_pack/unpack
+ * below. The previously-documented "truncate" option was rejected on a false
+ * premise -- freezing the stride does NOT preserve existing saves, because the
+ * 16-byte growth is INTERIOR (at +0x1B0), not a tail. A 0x388-byte blit of an
+ * x86_64 actor is a DIFFERENT layout that merely has the same size, so legacy
+ * files would deserialize into shifted garbage while the same-build round-trip
+ * self-test kept passing -- a silent failure. Field-mapping is the only option
+ * that delivers the compatibility the stride exists for. */
 #define TD5_ACTOR_SAVE_STRIDE      0x388
 
 /* The snapshot field is a whole number of on-disk actor slots. NOTE: the
@@ -178,6 +186,91 @@ _Static_assert(sizeof(TD5_ConfigBuffer) == TD5_CONFIG_FILE_SIZE,
 _Static_assert((TD5_CUP_ACTOR_DWORDS * 4u) % TD5_ACTOR_SAVE_STRIDE == 0,
                "cup actor_state must hold a whole number of on-disk actor slots");
 #define TD5_CUP_SLOT_STATE_DWORDS  6     /* 6 x 4 bytes = 24 bytes */
+
+/* ------------------------------------------------------------------------
+ * Legacy cup snapshot <-> live actor field map  [x64 Stage 2]
+ *
+ * The on-disk record is the ORIGINAL i686 TD5_Actor image: 0x388 bytes. The
+ * live struct is that same layout on i686, but on x86_64 the four void* at
+ * +0x1B0..+0x1BC widen 16 -> 32 bytes, shifting everything after them by 0x10.
+ *
+ * That single interior gap is the WHOLE difference, so the map is three
+ * regions rather than a per-field enumeration of ~900 bytes:
+ *
+ *   region      disk            live (i686)       live (x86_64)
+ *   head        [0, 0x1B0)      same              same
+ *   ptr block   16 bytes        0x1B0..0x1C0      0x1B0..0x1D0
+ *   tail        [0x1C0, 0x388)  0x1C0..0x388      0x1D0..0x398   (len 0x1C8)
+ *
+ * The POINTER BLOCK IS NOT SERIALIZED, in either direction. Those are
+ * process-local addresses, meaningless across a save/load boundary by
+ * construction; LoadRaceVehicleAssets + InitializeRaceActor (FUN_0042F140)
+ * re-fill them on race re-init, and +0x1B4 is documented dead-vestigial
+ * (re/include/td5_actor_struct.h:365). Writing zeros also makes the on-disk
+ * bytes deterministic, where the old raw blit leaked whatever the allocator
+ * happened to hand out -- so two saves of identical game state now compare
+ * equal.
+ *
+ * NOTE this is the one intentional behaviour change: the old code scrubbed
+ * those slots only on the extended-overlay path (see cup_deserialize_from_
+ * buffer), leaving the LEGACY path to restore dangling pointers into live
+ * actors. Unconditional zeroing is what that scrub's own comment says it
+ * wants; it just never covered every path.
+ *
+ * On i686 the shift is zero, so pack/unpack move exactly the same bytes the
+ * old memcpy did, minus the pointer scrub above. That is deliberate: the
+ * change must be inert on the current 32-bit build so the goldens and the
+ * save-load-roundtrip self-test prove it, and only take effect at x64.
+ * ------------------------------------------------------------------------ */
+#define TD5_ACTOR_SAVE_PTR_BLOCK_OFF  0x1B0u   /* disk + live: same start */
+#define TD5_ACTOR_SAVE_PTR_BLOCK_LEN  0x10u    /* 4 x 4 bytes ON DISK */
+#define TD5_ACTOR_SAVE_TAIL_DISK_OFF  0x1C0u   /* first byte after the i686 block */
+#define TD5_ACTOR_SAVE_TAIL_LEN       0x1C8u
+
+/* The live tail begins at the field immediately following the pointer block.
+ * Deriving it via offsetof rather than a literal is what makes this correct on
+ * BOTH arches without an #ifdef. */
+#define TD5_ACTOR_LIVE_TAIL_OFF   offsetof(TD5_Actor, angular_velocity_roll)
+
+_Static_assert(TD5_ACTOR_SAVE_PTR_BLOCK_OFF + TD5_ACTOR_SAVE_PTR_BLOCK_LEN ==
+               TD5_ACTOR_SAVE_TAIL_DISK_OFF,
+               "on-disk pointer block must abut the tail");
+_Static_assert(TD5_ACTOR_SAVE_TAIL_DISK_OFF + TD5_ACTOR_SAVE_TAIL_LEN ==
+               TD5_ACTOR_SAVE_STRIDE,
+               "head + ptr block + tail must exactly cover the on-disk record");
+_Static_assert(TD5_ACTOR_LIVE_TAIL_OFF + TD5_ACTOR_SAVE_TAIL_LEN ==
+               sizeof(TD5_Actor),
+               "live tail must reach exactly the end of TD5_Actor -- if this "
+               "fires, a field was added/resized OUTSIDE the +0x1B0 pointer "
+               "block and the three-region map above no longer describes the "
+               "struct");
+_Static_assert(TD5_ACTOR_LIVE_TAIL_OFF >= TD5_ACTOR_SAVE_TAIL_DISK_OFF,
+               "live layout may only grow relative to the on-disk one");
+
+/* Live actor -> on-disk record. dst must have TD5_ACTOR_SAVE_STRIDE bytes. */
+static void actor_save_pack(uint8_t *dst, const TD5_Actor *a)
+{
+    const uint8_t *src = (const uint8_t *)a;
+    memcpy(dst, src, TD5_ACTOR_SAVE_PTR_BLOCK_OFF);
+    memset(dst + TD5_ACTOR_SAVE_PTR_BLOCK_OFF, 0, TD5_ACTOR_SAVE_PTR_BLOCK_LEN);
+    memcpy(dst + TD5_ACTOR_SAVE_TAIL_DISK_OFF,
+           src + TD5_ACTOR_LIVE_TAIL_OFF,
+           TD5_ACTOR_SAVE_TAIL_LEN);
+}
+
+/* On-disk record -> live actor. src must have TD5_ACTOR_SAVE_STRIDE bytes. */
+static void actor_save_unpack(TD5_Actor *a, const uint8_t *src)
+{
+    uint8_t *dst = (uint8_t *)a;
+    memcpy(dst, src, TD5_ACTOR_SAVE_PTR_BLOCK_OFF);
+    /* Zero the LIVE block, whose width is arch-dependent -- not the on-disk
+     * 16. This is the scrub the overlay path used to do by hand. */
+    memset(dst + TD5_ACTOR_SAVE_PTR_BLOCK_OFF, 0,
+           (size_t)TD5_ACTOR_LIVE_TAIL_OFF - TD5_ACTOR_SAVE_PTR_BLOCK_OFF);
+    memcpy(dst + TD5_ACTOR_LIVE_TAIL_OFF,
+           src + TD5_ACTOR_SAVE_TAIL_DISK_OFF,
+           TD5_ACTOR_SAVE_TAIL_LEN);
+}
 
 #pragma pack(push, 1)
 typedef struct TD5_CupDataBuffer {
@@ -1803,7 +1896,8 @@ void td5_save_sync_cup_from_game(int race_within_series)
      * in the source port yet -- leave as-is (previously serialized value
      * or 0 on first save). */
 
-    /* Actor snapshot: copy raw bytes from game module actor table. */
+    /* Actor snapshot: field-map the live actors into on-disk records (the two
+     * layouts differ on x86_64 -- see actor_save_pack). */
     {
         int total = td5_game_get_total_actor_count();
         int i;
@@ -1811,8 +1905,8 @@ void td5_save_sync_cup_from_game(int race_within_series)
         for (i = 0; i < total && i < 14; i++) {
             TD5_Actor *a = td5_game_get_actor(i);
             if (a) {
-                memcpy((uint8_t *)s_actor_table + (size_t)i * TD5_ACTOR_SAVE_STRIDE,
-                       a, TD5_ACTOR_SAVE_STRIDE);
+                actor_save_pack((uint8_t *)s_actor_table +
+                                    (size_t)i * TD5_ACTOR_SAVE_STRIDE, a);
             }
         }
     }
@@ -1859,15 +1953,17 @@ int td5_save_sync_cup_to_game(int *out_race_within_series)
                   g_td5.ai_car_indices[5]);
     }
 
-    /* Restore actor data to game module actor table. */
+    /* Restore actor data to game module actor table. Field-mapped, and the
+     * pointer block lands zeroed regardless of which format the file was in --
+     * the legacy path used to restore dangling pointers here. */
     {
         int total = td5_game_get_total_actor_count();
         int i;
         for (i = 0; i < total && i < 14; i++) {
             TD5_Actor *a = td5_game_get_actor(i);
             if (a) {
-                memcpy(a, (uint8_t *)s_actor_table + (size_t)i * TD5_ACTOR_SAVE_STRIDE,
-                       TD5_ACTOR_SAVE_STRIDE);
+                actor_save_unpack(a, (const uint8_t *)s_actor_table +
+                                         (size_t)i * TD5_ACTOR_SAVE_STRIDE);
             }
         }
     }

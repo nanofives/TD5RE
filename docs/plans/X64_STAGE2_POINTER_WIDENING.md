@@ -176,7 +176,7 @@ blocks golden verification.
 | 4 | Actor stride | 60 | MECHANICAL (except save) |
 | 5 | Actor field offsets | 476 macro + ad-hoc (count uncertain) | MECHANICAL via `offsetof` |
 | 6 | `int` globals | 3 globals, ~16 sites | Mixed |
-| 7 | `td5_save.c` serialization stride | 6 | **DESIGN — needs a product decision** |
+| 7 | `td5_save.c` serialization stride | 6 | ✅ DONE — field-mapped |
 | 8 | Wrapper M2DX patch | 2 | Non-issue — `#ifdef` out |
 
 ## Two bugs that exist TODAY (fix regardless of x64)
@@ -211,16 +211,42 @@ blocks golden verification.
    constants are correct.
 7. **`td5_save.c` stride** — see open question below.
 
-## Open question requiring a decision
+## RESOLVED: `td5_save.c` stride — field-mapped (2026-07-28)
 
-**`td5_save.c` hardcodes `0x388` as an ON-DISK stride** (`:1599, 1786, 1841, 3238, 3295`, and
-`:173` `actor_state[]` sized "12656 = 6 slots x 0x388"). Under x64 `sizeof(TD5_Actor)` grows to
-0x398 (four `void*` at +0x1B0..+0x1BC gain 16 bytes total), so the persisted layout would change.
+**The "truncate vs field-map" framing rested on a false premise.** Truncating was described as
+"acceptable for a retired format", on the assumption that a frozen 0x388 stride preserves existing
+saves. It does not: **the 16-byte growth is INTERIOR, at +0x1B0 — not a tail.** A 0x388-byte blit
+of an x86_64 actor is a *different layout that merely has the same size*, so legacy `CupData.td5`
+files would deserialize into shifted garbage. Worse, the same-build round-trip self-test would keep
+passing throughout, because it saves and loads with the identical wrong layout. Silent failure.
 
-Note this only matters if that path still writes actor state — the live cup format is text INI and
-`cfgini_write_cup()` (`td5_save.c:2717-2724`) explicitly does NOT store the per-actor snapshot. If
-the binary path is legacy-import-only, the fix is simply a serialization stride constant frozen at
-0x388, decoupled from `sizeof`. **Confirm before touching.**
+Field-mapping is therefore the only option that delivers the compatibility the frozen stride exists
+for. Implemented as `actor_save_pack` / `actor_save_unpack`, and it is **three regions, not a
+per-field enumeration of ~900 bytes**, because the single interior gap is the whole difference:
+
+| region | disk | live (i686) | live (x86_64) |
+|---|---|---|---|
+| head | `[0, 0x1B0)` | same | same |
+| pointer block | 16 bytes | `0x1B0..0x1C0` | `0x1B0..0x1D0` |
+| tail | `[0x1C0, 0x388)` | `0x1C0..0x388` | `0x1D0..0x398` |
+
+Tail length is `0x1C8` on BOTH arches (`0x388-0x1C0 == 0x398-0x1D0`). The live tail offset is
+derived via `offsetof(TD5_Actor, angular_velocity_roll)`, which is what makes one body correct on
+both arches with no `#ifdef`.
+
+**The pointer block is not serialized in either direction.** Those are process-local addresses,
+meaningless across a save/load boundary by construction; `InitializeRaceActor` re-fills them and
++0x1B4 is documented dead-vestigial. This is the one intentional behaviour change: the old code
+scrubbed those slots only on the extended-overlay path, leaving the LEGACY path to restore dangling
+pointers into live actors — exactly what that scrub's own comment says it wants to prevent.
+
+Verified two ways, neither of them an argument:
+- **x86_64**: compiling `td5_save.c` alone for `-m64` produced 19 assertion failures, ALL from
+  `td5_actor_struct.h` (the known root cause) and **zero from `td5_save.c`** — so the new asserts,
+  including `TD5_ACTOR_LIVE_TAIL_OFF + 0x1C8 == sizeof(TD5_Actor)` (`0x1D0 + 0x1C8 == 0x398`), hold
+  under the grown layout.
+- **i686**: full suite 55/55 PASS, `save-load-roundtrip` green and all three trace goldens matching
+  — the change is inert on the current build, which is why the goldens can prove it.
 
 ## Verification
 
