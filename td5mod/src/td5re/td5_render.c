@@ -1108,7 +1108,7 @@ int td6_mesh_uses_banner_page(const TD5_MeshHeader *mesh)
     if (g_active_td6_level <= 0) return 0;
     n = mesh->command_count;
     if (n <= 0 || n > 512) return 0;
-    cmds = (const TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
+    cmds = mesh->commands;
     if (!cmds) return 0;
     for (c = 0; c < n; c++)
         if (td6_is_banner_page(cmds[c].texture_page_id))
@@ -2135,7 +2135,7 @@ void td5_render_transform_mesh_vertices(TD5_MeshHeader *mesh)
 
     const float *m = s_render_transform.m;
     int count = mesh->total_vertex_count;
-    TD5_MeshVertex *src = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+    TD5_MeshVertex *src = mesh->vertices;
     if (!src || count <= 0) return;
 
     /* [Phase B parallel-build] Copy the mesh's vertices into this pane's
@@ -3145,21 +3145,20 @@ void render_vehicle_reflection_overlay(TD5_MeshHeader *mesh, int slot)
     /* [parallel-build] Operate on the pane workspace copy (the body render
      * just transformed this mesh, so the workspace holds it): the lighting/UV
      * overrides below must not touch the SHARED blob. */
-    verts = rs_vtx_rebase((void *)(uintptr_t)mesh->vertices_offset);
+    verts = rs_vtx_rebase(mesh->vertices);
     vert_count = mesh->total_vertex_count;
     if (!verts || vert_count <= 0) return;
 
     /* Mode dispatch happens inside apply_mesh_projection_effect based on
      * this slot's pe->sub_mode (1=planar, 2=yaw-UV, 3=world-anchor). Mode 3
-     * reads normals[] from mesh->normals_offset, so the helper now takes the
-     * whole mesh header. */
+     * reads mesh->normals, so the helper takes the whole mesh header. */
     td5_render_apply_mesh_projection_effect(mesh, slot);
 
     /* Render the mesh with the environs texture and translucent blend.
      * Original uses a separate mesh with command_count=1, but we
      * iterate the full command list, overriding each command's texture
      * page to the environs page. */
-    cmds = (TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
+    cmds = mesh->commands;
     cmd_count = mesh->command_count;
     if (!cmds || cmd_count <= 0) return;
 
@@ -3589,14 +3588,14 @@ TD5_MeshHeader *td5_render_drag_gantry(void)
      * else means this isn't the drag strip — don't grab it. */
     if (m->bounding_center_z < -150000.0f || m->bounding_center_z > -134000.0f) return NULL;
     if (m != s_drag_gantry_mesh) {
-        const TD5_PrimitiveCmd *cmds = (const TD5_PrimitiveCmd *)(uintptr_t)m->commands_offset;
+        const TD5_PrimitiveCmd *cmds = m->commands;
         int nc = m->command_count, c;
         float minz = 1e30f, maxz = -1e30f;
         if (cmds && td5_track_is_valid_mesh_ptr((void *)cmds) && nc > 0 && nc <= 4096) {
             for (c = 0; c < nc; c++) {
                 int nv = cmds[c].triangle_count * 3 + cmds[c].quad_count * 4, v;
                 TD5_MeshVertex *vp = (TD5_MeshVertex *)(uintptr_t)cmds[c].vertex_data_ptr;
-                if (!vp) vp = (TD5_MeshVertex *)(uintptr_t)m->vertices_offset;
+                if (!vp) vp = m->vertices;
                 if (!vp || !td5_track_is_valid_mesh_ptr(vp) || nv < 1 || nv > 8192) continue;
                 for (v = 0; v < nv; v++) {
                     float z = vp[v].pos_z;
@@ -3684,14 +3683,14 @@ static int td5_render_drag_road_texture_page(void)
         if (!e || e->count < 1 || !e->meshes) continue;
         m = e->meshes[0];
         if (!m || !td5_track_is_valid_mesh_ptr(m)) continue;
-        cmds = (const TD5_PrimitiveCmd *)(uintptr_t)m->commands_offset;
+        cmds = m->commands;
         nc = m->command_count;
         if (!cmds || !td5_track_is_valid_mesh_ptr((void *)cmds) || nc < 1 || nc > 4096) continue;
         for (c = 0; c < nc; c++) {
             int nv = cmds[c].triangle_count * 3 + cmds[c].quad_count * 4, v;
             TD5_MeshVertex *vp = (TD5_MeshVertex *)(uintptr_t)cmds[c].vertex_data_ptr;
             float minx = 1e30f, maxx = -1e30f, miny = 1e30f, maxy = -1e30f, xr, yr;
-            if (!vp) vp = (TD5_MeshVertex *)(uintptr_t)m->vertices_offset;
+            if (!vp) vp = m->vertices;
             if (!vp || !td5_track_is_valid_mesh_ptr(vp) || nv < 3 || nv > 8192) continue;
             for (v = 0; v < nv; v++) {
                 float x = (float)vp[v].pos_x, y = (float)vp[v].pos_y;

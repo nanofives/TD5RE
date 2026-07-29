@@ -3258,7 +3258,7 @@ void td5_render_load_sky(const char *path)
                     s_sky_mesh = (TD5_MeshHeader *)buf;
                     td5_track_prepare_mesh_resource(s_sky_mesh);
                     /* Patch command texture page to sky TGA page */
-                    TD5_PrimitiveCmd *cmds = (TD5_PrimitiveCmd *)(uintptr_t)s_sky_mesh->commands_offset;
+                    TD5_PrimitiveCmd *cmds = s_sky_mesh->commands;
                     for (int c = 0; c < s_sky_mesh->command_count; c++)
                         cmds[c].texture_page_id = (int16_t)SKY_TEXTURE_PAGE;
                     TD5_LOG_I(RENDER_LOG_TAG,

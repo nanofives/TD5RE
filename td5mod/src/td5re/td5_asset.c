@@ -3365,10 +3365,15 @@ static void *td5_asset_transcode_td6_mesh(const void *src_data, int src_size,
     h->origin_x           = ox;
     h->origin_y           = oy;
     h->origin_z           = oz;
-    h->reserved_28        = 0;
-    h->commands_offset    = out_cmds_off;
-    h->vertices_offset    = out_verts_off;
-    h->normals_offset     = out_norms_off;
+    h->runtime_flags      = 0;
+    /* [x64 Stage 2] This emitter BUILDS an on-disk PRR record: the three link
+     * words must be FILE OFFSETS at their on-disk positions, because the caller
+     * subsequently runs td5_track_prepare_mesh_resource over this buffer to
+     * rebase them. Assigning through the runtime pointer fields would store a
+     * pointer-typed value that the rebase would then treat as an offset. */
+    td5_mesh_disk_set_link(h, TD5_MESH_DISK_OFF_COMMANDS, out_cmds_off);
+    td5_mesh_disk_set_link(h, TD5_MESH_DISK_OFF_VERTICES, out_verts_off);
+    td5_mesh_disk_set_link(h, TD5_MESH_DISK_OFF_NORMALS,  out_norms_off);
 
     TD5_PrimitiveCmd *ocmd = (TD5_PrimitiveCmd *)(out + out_cmds_off);
     ocmd->dispatch_type   = 0;
@@ -3820,8 +3825,8 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
          * usual 7 — an index-based patch handles it, a page_id==7 check does
          * not (body would render with track texture 36 instead of carskin0). */
         mesh->texture_page_id = (int16_t)skin_page;
-        TD5_PrimitiveCmd *cmds = (TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
-        TD5_MeshVertex *base_verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+        TD5_PrimitiveCmd *cmds = mesh->commands;
+        TD5_MeshVertex *base_verts = mesh->vertices;
         int vert_cursor = 0;
         for (int c = 0; c < mesh->command_count; c++) {
             int vert_count = cmds[c].triangle_count * 3 + cmds[c].quad_count * 4;
@@ -3959,7 +3964,7 @@ int td5_asset_load_traffic_model(int model_index, int slot)
      * page. Traffic cars use a single skin texture (no separate hub/body)
      * so we replace every command's texture_page_id unconditionally. */
     mesh->texture_page_id = (int16_t)skin_page;
-    TD5_PrimitiveCmd *cmds = (TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
+    TD5_PrimitiveCmd *cmds = mesh->commands;
     for (int c = 0; c < mesh->command_count; c++) {
         cmds[c].texture_page_id = (int16_t)skin_page;
     }
@@ -4019,7 +4024,7 @@ TD5_MeshHeader *td5_asset_load_cop_mesh(int model_index)
                   model_index);
 
     mesh->texture_page_id = (int16_t)TD5_COP_TEXTURE_PAGE;
-    TD5_PrimitiveCmd *cmds = (TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
+    TD5_PrimitiveCmd *cmds = mesh->commands;
     for (int c = 0; c < mesh->command_count; c++)
         cmds[c].texture_page_id = (int16_t)TD5_COP_TEXTURE_PAGE;
 

@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>  /* memcpy: the on-disk mesh link accessors below */
 
 /* ========================================================================
  * Fixed-Point Math
@@ -693,7 +694,34 @@ typedef struct TD5_TrackProbe {
  * Mesh Resource Structures (PRR format)
  * ======================================================================== */
 
-/** Mesh resource header (>= 0x38 bytes) */
+/* Size of the PRR mesh header ON DISK. A FROZEN LITERAL -- it is a file-format
+ * contract and must NOT be written as sizeof(TD5_MeshHeader). The two are equal
+ * on i686, which is exactly the trap: on x86_64 the runtime struct below grows
+ * (its three pointers widen) while the on-disk record does not. Every size
+ * check against file data uses this; only genuinely-runtime sizing uses sizeof.
+ * The authority on the on-disk layout is re/tools/mesh_tool.py. */
+#define TD5_MESH_DISK_SIZE  0x38u
+
+/** Mesh resource header -- RUNTIME form (on disk: TD5_MESH_DISK_SIZE bytes).
+ *
+ * [x64 Stage 2] The last three fields used to be `uint32_t *_offset`, holding a
+ * file offset when read and an absolute pointer after td5_track_prepare_mesh_
+ * resource rebased them IN PLACE. That truncation is the 64-bit-hostile part,
+ * and it is the class the compiler cannot see: stuffing a pointer into a
+ * uint32_t is valid C on x86_64 and fails silently above 4 GB.
+ *
+ * They are now real pointers AND renamed. The rename is the load-bearing half:
+ * retyping alone catches nothing, because `(T *)(uintptr_t)field` compiles
+ * identically whether `field` is an integer or a pointer. Renaming turns every
+ * one of the ~30 read sites into a hard error, so the compiler hands over the
+ * worklist instead of it being found by debugging wrong geometry.
+ *
+ * ON i686 THE LAYOUT IS UNCHANGED: reserved_28 becomes runtime_flags at the
+ * same +0x28, and three 4-byte pointers still sit at 0x2C/0x30/0x34. So this
+ * is inert on the current build -- which is what lets the golden traces prove
+ * it. On x86_64 the struct grows and in-place casts over file data must go
+ * through an explicit conversion instead (the remaining part of increment 2).
+ */
 typedef struct TD5_MeshHeader {
     int16_t  render_type;
     int16_t  texture_page_id;
@@ -706,22 +734,68 @@ typedef struct TD5_MeshHeader {
     float    origin_x;
     float    origin_y;
     float    origin_z;
-    uint32_t reserved_28;
-    uint32_t commands_offset;       /* relocated to pointer */
-    uint32_t vertices_offset;       /* relocated to pointer */
-    uint32_t normals_offset;        /* relocated to pointer */
+    /* Was `reserved_28`, unused on disk -- now carries runtime-only bits. This
+     * is where the DERIVED-normals flag lives, so that it is no longer smuggled
+     * in bit 0 of a pointer (a trick that only worked because the pointer was
+     * an integer, and that every non-tag-aware reader silently mis-saw). */
+    uint32_t runtime_flags;
+    struct TD5_PrimitiveCmd *commands;   /* was commands_offset  @ +0x2C */
+    struct TD5_MeshVertex   *vertices;   /* was vertices_offset  @ +0x30 */
+    struct TD5_VertexNormal *normals;    /* was normals_offset   @ +0x34 */
 } TD5_MeshHeader;
-/* DUAL ROLE -- this struct is BOTH an on-disk PRR mirror (cast in place from
- * the archive buffer: td5_track_parser.c, td5_asset.c) AND a runtime object
- * whose three *_offset fields are rebased in place into absolute pointers.
- * Those two roles must be split before either can change independently; until
- * then the size below is a file-format contract and the offsets are what the
- * rebase writes through. See docs on the x64 retarget -- widening these fields
- * to hold real pointers changes the on-disk cast size and breaks parsing. */
-_Static_assert(sizeof(TD5_MeshHeader) == 0x38, "TD5_MeshHeader must stay 0x38 bytes (PRR on-disk header)");
-_Static_assert(offsetof(TD5_MeshHeader, commands_offset) == 0x2C, "TD5_MeshHeader.commands_offset drifted");
-_Static_assert(offsetof(TD5_MeshHeader, vertices_offset) == 0x30, "TD5_MeshHeader.vertices_offset drifted");
-_Static_assert(offsetof(TD5_MeshHeader, normals_offset)  == 0x34, "TD5_MeshHeader.normals_offset drifted");
+
+/* runtime_flags bits */
+#define TD5_MESH_NORMALS_DERIVED  0x1u   /* `normals` was synthesised by
+                                          * td5_track_derive_missing_normals and
+                                          * is owned by s_derived_norms, NOT by
+                                          * the models blob. */
+
+/* The on-disk contract, asserted only where the runtime struct still mirrors it
+ * byte-for-byte. On x86_64 the runtime struct legitimately diverges; the disk
+ * side is pinned by TD5_MESH_DISK_SIZE instead. */
+#if UINTPTR_MAX == 0xFFFFFFFFu
+_Static_assert(sizeof(TD5_MeshHeader) == TD5_MESH_DISK_SIZE,
+               "TD5_MeshHeader must still mirror the PRR on-disk header on 32-bit");
+_Static_assert(offsetof(TD5_MeshHeader, commands) == 0x2C, "TD5_MeshHeader.commands drifted");
+_Static_assert(offsetof(TD5_MeshHeader, vertices) == 0x30, "TD5_MeshHeader.vertices drifted");
+_Static_assert(offsetof(TD5_MeshHeader, normals)  == 0x34, "TD5_MeshHeader.normals drifted");
+#endif
+_Static_assert(offsetof(TD5_MeshHeader, runtime_flags) == 0x28,
+               "runtime_flags must stay where reserved_28 was");
+
+/* Byte offsets of the three link fields IN THE ON-DISK RECORD. Fixed by the
+ * file format, independent of the runtime struct. */
+#define TD5_MESH_DISK_OFF_COMMANDS  0x2Cu
+#define TD5_MESH_DISK_OFF_VERTICES  0x30u
+#define TD5_MESH_DISK_OFF_NORMALS   0x34u
+
+/* Read one on-disk link word from a mesh record that was cast in place over
+ * file data.
+ *
+ * Why this exists: before the retype, the rebase read the offset straight out
+ * of `mesh->commands_offset` -- the same storage it then overwrote with the
+ * pointer. That works only while the runtime struct and the disk record have
+ * identical layout, i.e. only on i686. Reading the RAW RECORD by byte offset is
+ * correct on both, and keeps the truncation confined to parse time.
+ *
+ * memcpy rather than a cast: the record is at an arbitrary offset inside the
+ * models blob, so it is not guaranteed to be 4-byte aligned. */
+static inline uint32_t td5_mesh_disk_link(const void *record, unsigned field_off)
+{
+    uint32_t v;
+    memcpy(&v, (const uint8_t *)record + field_off, sizeof v);
+    return v;
+}
+
+/* Write one on-disk link word. Used by emitters that BUILD a PRR record (the
+ * TD6 transcoder) -- they must lay down file offsets at the on-disk positions,
+ * not assign through the runtime pointer fields, because the record they are
+ * writing is later handed to td5_track_prepare_mesh_resource to be rebased. */
+static inline void td5_mesh_disk_set_link(void *record, unsigned field_off,
+                                          uint32_t value)
+{
+    memcpy((uint8_t *)record + field_off, &value, sizeof value);
+}
 
 /* [x64 Stage 2] RUNTIME span display list -- "a count, then that many meshes".
  *

@@ -458,7 +458,7 @@ static void apply_deform(int slot, int32_t impact_mag, const TD5_DamageHit *hit)
     TD5_MeshHeader *mesh = td5_render_get_vehicle_mesh(slot);
     if (!mesh) return;
     int count = mesh->total_vertex_count;
-    const TD5_MeshVertex *verts = (const TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+    const TD5_MeshVertex *verts = mesh->vertices;
     if (!verts || count <= 0) return;
 
     DamageSlot *ds = &s_slot[slot];

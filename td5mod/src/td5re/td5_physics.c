@@ -4955,7 +4955,7 @@ void td5_physics_compute_suspension_envelope(TD5_Actor *actor, int slot)
      * other here is byte-equivalent for IEEE-754 32-bit float comparisons. --- */
     float max_x = 0.0f, max_y = 0.0f, max_z = 0.0f, min_y = 0.0f;
     int vert_count = mesh->total_vertex_count;
-    TD5_MeshVertex *verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+    TD5_MeshVertex *verts = mesh->vertices;
 
     for (int i = 0; i < vert_count; i++) {
         float vx = verts[i].pos_x;

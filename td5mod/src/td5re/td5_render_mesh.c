@@ -544,16 +544,19 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
     int count = mesh->total_vertex_count;
     /* [parallel-build] lighting writes target the pane workspace copy (the
      * blob is read-only in the render path); normals stay blob (read-only).
-     * [LIGHT2 P1] bit 0 of normals_offset tags a DERIVED flat-normal stream
+     * [LIGHT2 P1] TD5_MESH_NORMALS_DERIVED tags a DERIVED flat-normal stream
      * (td5_track_derive_missing_normals): those meshes feed the G-buffer only
-     * — their artist-baked vertex lighting is left exactly as loaded. */
-    TD5_MeshVertex *verts   = rs_vtx_rebase((void *)(uintptr_t)mesh->vertices_offset);
-    uintptr_t nraw          = (uintptr_t)mesh->normals_offset;
-    int norms_derived       = (int)(nraw & 1u);
-    TD5_VertexNormal *norms = (TD5_VertexNormal *)(nraw & ~(uintptr_t)1);
+     * — their artist-baked vertex lighting is left exactly as loaded.
+     * [x64 Stage 2] That tag used to be smuggled in bit 0 of normals_offset,
+     * which only worked while the pointer was an integer -- and every reader
+     * that did NOT mask it saw a mis-aligned pointer. It now lives in
+     * runtime_flags, so the pointer is just a pointer. */
+    TD5_MeshVertex *verts   = rs_vtx_rebase(mesh->vertices);
+    int norms_derived       = (mesh->runtime_flags & TD5_MESH_NORMALS_DERIVED) != 0;
+    TD5_VertexNormal *norms = mesh->normals;
     /* Blob (read-only original) — read the un-modulated baked grey from here so
      * the per-frame zone modulation never compounds on the workspace copy. */
-    TD5_MeshVertex *vb = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+    TD5_MeshVertex *vb = mesh->vertices;
     if (!verts || !norms || count <= 0) return;
 
     /* Paint tint (TD6 cars). 0/white => the original luminance-index path below
@@ -1177,26 +1180,29 @@ void td5_render_span_display_list(const TD5_SpanDisplayList *display_list_block)
         if (mesh->total_vertex_count <= 0 || mesh->total_vertex_count > 131072) {
             s_debug_reject_counts++; continue;
         }
-        if (!mesh->commands_offset || !mesh->vertices_offset) {
+        if (!mesh->commands || !mesh->vertices) {
             s_debug_reject_offsets++; continue;
         }
-        if ((uintptr_t)mesh->commands_offset < 0x10000u) {
+        /* Still an UNRELOCATED-offset tripwire, not a pointer range check: a
+         * small value here means the disk offset was never converted. Kept as
+         * an explicit guard because the parser silently zeroes bad slots. */
+        if ((uintptr_t)mesh->commands < 0x10000u) {
             s_debug_reject_offsets++; continue;
         }
-        if ((uintptr_t)mesh->vertices_offset < 0x10000u) {
+        if ((uintptr_t)mesh->vertices < 0x10000u) {
             s_debug_reject_offsets++; continue;
         }
 
         /* Validate commands and vertices pointers are within models blob
          * OR valid heap memory (strip-generated display lists use calloc). */
-        if (!td5_track_is_ptr_in_blob((void *)(uintptr_t)mesh->commands_offset,
+        if (!td5_track_is_ptr_in_blob(mesh->commands,
                 (size_t)mesh->command_count * sizeof(TD5_PrimitiveCmd)) &&
-            !td5_track_is_valid_mesh_ptr((void *)(uintptr_t)mesh->commands_offset)) {
+            !td5_track_is_valid_mesh_ptr(mesh->commands)) {
             s_debug_reject_blob++; continue;
         }
-        if (!td5_track_is_ptr_in_blob((void *)(uintptr_t)mesh->vertices_offset,
+        if (!td5_track_is_ptr_in_blob(mesh->vertices,
                 (size_t)mesh->total_vertex_count * sizeof(TD5_MeshVertex)) &&
-            !td5_track_is_valid_mesh_ptr((void *)(uintptr_t)mesh->vertices_offset)) {
+            !td5_track_is_valid_mesh_ptr(mesh->vertices)) {
             s_debug_reject_blob++; continue;
         }
         s_debug_accept++;
@@ -1460,8 +1466,8 @@ void td5_render_prepared_mesh(TD5_MeshHeader *mesh)
     s_debug_prepared_mesh_calls++;
 
     int cmd_count = mesh->command_count;
-    TD5_PrimitiveCmd *cmds = (TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
-    TD5_MeshVertex *base_verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+    TD5_PrimitiveCmd *cmds = mesh->commands;
+    TD5_MeshVertex *base_verts = mesh->vertices;
     if (!cmds || !base_verts || cmd_count <= 0) return;
     if (cmd_count > 4096 || mesh->total_vertex_count > 65536) return;
 
@@ -3710,9 +3716,10 @@ void td5_render_apply_mesh_projection_effect(TD5_MeshHeader *mesh, int slot)
 
     /* [parallel-build] proj_u/proj_v writes target the pane workspace copy
      * (mode 3 also READS view_x/view_y, which only exist there).
-     * [LIGHT2 P1] mask the derived-normals tag (bit 0). */
-    verts      = rs_vtx_rebase((void *)(uintptr_t)mesh->vertices_offset);
-    normals    = (TD5_VertexNormal *)((uintptr_t)mesh->normals_offset & ~(uintptr_t)1);
+     * [x64 Stage 2] The derived-normals tag moved out of bit 0 of the pointer
+     * into runtime_flags, so no masking is needed here any more. */
+    verts      = rs_vtx_rebase(mesh->vertices);
+    normals    = mesh->normals;
     vert_count = mesh->total_vertex_count;
     if (!verts || vert_count <= 0) return;
 

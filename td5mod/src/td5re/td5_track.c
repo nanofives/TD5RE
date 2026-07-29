@@ -410,9 +410,12 @@ static int build_placeholder_display_lists(void)
     fallback->mesh.origin_x = 0.0f;
     fallback->mesh.origin_y = 0.0f;
     fallback->mesh.origin_z = 0.0f;
-    fallback->mesh.commands_offset = (uint32_t)(uintptr_t)&fallback->cmd;
-    fallback->mesh.vertices_offset = (uint32_t)(uintptr_t)&fallback->verts[0];
-    fallback->mesh.normals_offset = (uint32_t)(uintptr_t)&fallback->norms[0];
+    /* Built directly in runtime form -- this mesh never goes through the
+     * disk->runtime rebase, so it holds real pointers from the start. */
+    fallback->mesh.commands = &fallback->cmd;
+    fallback->mesh.vertices = &fallback->verts[0];
+    fallback->mesh.normals  = &fallback->norms[0];
+    fallback->mesh.runtime_flags = 0;   /* normals are authored here, not derived */
 
     fallback->cmd.dispatch_type = 3;
     fallback->cmd.texture_page_id = TRACK_FALLBACK_TEXTURE_PAGE;
@@ -2924,9 +2927,10 @@ static TD5_SpanDisplayList *build_span_strip_display_list(int span_index)
     mesh->texture_page_id = TRACK_FALLBACK_TEXTURE_PAGE;
     mesh->command_count = command_count;
     mesh->total_vertex_count = vertex_count;
-    mesh->commands_offset = (uint32_t)(uintptr_t)cmds;
-    mesh->vertices_offset = (uint32_t)(uintptr_t)verts;
-    mesh->normals_offset = 0;
+    mesh->commands = cmds;
+    mesh->vertices = verts;
+    mesh->normals  = NULL;
+    mesh->runtime_flags = 0;
 
     min_x = min_y = min_z =  1.0e30f;
     max_x = max_y = max_z = -1.0e30f;
@@ -7254,16 +7258,16 @@ void td5_track_scan_banner_pages(void)
 
             if (mesh_ptr_val == 0) continue;
             mesh = (TD5_MeshHeader *)(uintptr_t)mesh_ptr_val;
-            if (!td5_track_is_ptr_in_blob(mesh, sizeof(TD5_MeshHeader))) continue;
-            if (mesh->commands_offset == 0 || mesh->vertices_offset == 0) continue;
+            if (!td5_track_is_ptr_in_blob(mesh, TD5_MESH_DISK_SIZE)) continue;
+            if (!mesh->commands || !mesh->vertices) continue;
             /* Billboard meshes (tag 1/2) are camera-facing sprites, never signs. */
             if (mesh->texture_page_id == 1 || mesh->texture_page_id == 2) continue;
             count = mesh->total_vertex_count;
             cmd_count = mesh->command_count;
             if (count <= 0 || count > 65536 || cmd_count <= 0 || cmd_count > 4096) continue;
 
-            cmds = (const TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
-            base_verts = (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+            cmds = mesh->commands;
+            base_verts = mesh->vertices;
             if ((uintptr_t)cmds < 0x10000u || (uintptr_t)base_verts < 0x10000u) continue;
             if (!td5_track_is_ptr_in_blob(cmds, (size_t)cmd_count * sizeof(TD5_PrimitiveCmd))) continue;
             if (!td5_track_is_ptr_in_blob(base_verts, (size_t)count * sizeof(TD5_MeshVertex))) continue;
@@ -7483,13 +7487,13 @@ void td5_track_register_lamp_lights(void)
                     uint32_t mp = *(const uint32_t *)(bb + 4 + j * 4);
                     if (mp == 0) continue;
                     TD5_MeshHeader *m = (TD5_MeshHeader *)(uintptr_t)mp;
-                    if (!td5_track_is_ptr_in_blob(m, sizeof(TD5_MeshHeader)))
+                    if (!td5_track_is_ptr_in_blob(m, TD5_MESH_DISK_SIZE))
                         continue;
-                    if (m->commands_offset == 0 || m->vertices_offset == 0) continue;
+                    if (!m->commands || !m->vertices) continue;
                     int cnt = m->total_vertex_count, cc = m->command_count;
                     if (cnt <= 0 || cnt > 65536 || cc <= 0 || cc > 4096) continue;
-                    TD5_MeshVertex *bv = (TD5_MeshVertex *)(uintptr_t)m->vertices_offset;
-                    const TD5_PrimitiveCmd *cd = (const TD5_PrimitiveCmd *)(uintptr_t)m->commands_offset;
+                    TD5_MeshVertex *bv = m->vertices;
+                    const TD5_PrimitiveCmd *cd = m->commands;
                     if ((uintptr_t)bv < 0x10000u || (uintptr_t)cd < 0x10000u) continue;
                     float ox = m->origin_x / 256.0f, oy = m->origin_y / 256.0f,
                           oz = m->origin_z / 256.0f;
@@ -7647,29 +7651,29 @@ void td5_track_derive_missing_normals(void)
             if (mesh_ptr_val == 0) continue;
 
             TD5_MeshHeader *mesh = (TD5_MeshHeader *)(uintptr_t)mesh_ptr_val;
-            if (!td5_track_is_ptr_in_blob(mesh, sizeof(TD5_MeshHeader)))
+            if (!td5_track_is_ptr_in_blob(mesh, TD5_MESH_DISK_SIZE))
                 continue;
 
             /* Stale tag from a previous pass over a cached blob: the memory
              * was just freed above — reset and re-derive. */
-            if (mesh->normals_offset & 1u)
-                mesh->normals_offset = 0;
+            if (mesh->runtime_flags & TD5_MESH_NORMALS_DERIVED) {
+                mesh->runtime_flags &= ~TD5_MESH_NORMALS_DERIVED;
+                mesh->normals = NULL;
+            }
 
-            if (mesh->normals_offset != 0) { skipped_have++; continue; }
+            if (mesh->normals) { skipped_have++; continue; }
             /* Billboard meshes (tag 1/2) are camera-facing sprites — skip. */
             if (mesh->texture_page_id == 1 || mesh->texture_page_id == 2)
                 continue;
-            if (mesh->commands_offset == 0 || mesh->vertices_offset == 0)
+            if (!mesh->commands || !mesh->vertices)
                 continue;
             int count = mesh->total_vertex_count;
             int cmd_count = mesh->command_count;
             if (count <= 0 || count > 65536 || cmd_count <= 0 || cmd_count > 4096)
                 continue;
 
-            TD5_MeshVertex *base_verts =
-                (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
-            TD5_PrimitiveCmd *cmds =
-                (TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
+            TD5_MeshVertex *base_verts = mesh->vertices;
+            TD5_PrimitiveCmd *cmds = mesh->commands;
             if ((uintptr_t)base_verts < 0x10000u || (uintptr_t)cmds < 0x10000u)
                 continue;
 
@@ -7732,8 +7736,12 @@ void td5_track_derive_missing_normals(void)
                 }
             }
 
-            /* Publish with the DERIVED tag in bit 0. */
-            mesh->normals_offset = (uint32_t)((uintptr_t)nn | 1u);
+            /* Publish. [x64 Stage 2] The DERIVED tag used to ride in bit 0 of
+             * the pointer, which meant every reader that did not mask it saw a
+             * mis-aligned address. It is now a runtime_flags bit, so the
+             * pointer is just a pointer. */
+            mesh->normals = nn;
+            mesh->runtime_flags |= TD5_MESH_NORMALS_DERIVED;
             derived_meshes++;
         }
     }

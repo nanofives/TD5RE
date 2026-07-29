@@ -296,8 +296,10 @@ int td5_track_parse_models_dat(const void *data, size_t size)
             {
                 uintptr_t mesh_abs = (uintptr_t)mesh;
                 uintptr_t blob_end = (uintptr_t)s_models_blob + s_models_blob_size;
-                uint32_t cmd_off = mesh->commands_offset;
-                uint32_t vtx_off = mesh->vertices_offset;
+                /* PRE-relocation: these are still on-disk offsets, so read the
+                 * raw record rather than the (not yet populated) pointers. */
+                uint32_t cmd_off = td5_mesh_disk_link(mesh, TD5_MESH_DISK_OFF_COMMANDS);
+                uint32_t vtx_off = td5_mesh_disk_link(mesh, TD5_MESH_DISK_OFF_VERTICES);
 
                 if (cmd_off != 0 && mesh_abs + cmd_off >= blob_end) {
                     *slot = 0;
@@ -337,13 +339,13 @@ int td5_track_parse_models_dat(const void *data, size_t size)
                     if (s_post_fail_log < 10) {
                         TD5_LOG_W("track",
                             "post-reloc fail: dl=%d j=%d ptr=0x%08X in_blob=%d "
-                            "cmds=%d verts=%d cmd_off=0x%08X vtx_off=0x%08X",
+                            "cmds=%d verts=%d cmd_ptr=%p vtx_ptr=%p",
                             dl, (int)j, (unsigned)ptr_val,
-                            td5_track_is_ptr_in_blob(m, sizeof(TD5_MeshHeader)),
+                            td5_track_is_ptr_in_blob(m, TD5_MESH_DISK_SIZE),
                             ((uintptr_t)m >= 0x10000u) ? m->command_count : -1,
                             ((uintptr_t)m >= 0x10000u) ? m->total_vertex_count : -1,
-                            ((uintptr_t)m >= 0x10000u) ? m->commands_offset : 0,
-                            ((uintptr_t)m >= 0x10000u) ? m->vertices_offset : 0);
+                            ((uintptr_t)m >= 0x10000u) ? (void *)m->commands : NULL,
+                            ((uintptr_t)m >= 0x10000u) ? (void *)m->vertices : NULL);
                         s_post_fail_log++;
                     }
                     *(uint32_t *)(blk + 4 + j * 4) = 0;
@@ -445,17 +447,32 @@ void td5_track_prepare_mesh_resource(TD5_MeshHeader *mesh)
 
     base = (uint8_t *)mesh;
 
-    /* Relocate offsets to absolute pointers.
-     * The original stores these as uint32 offsets relative to the mesh
-     * header start. We convert them to pointers (stored back as uint32
-     * for the original 32-bit engine). In the source port we store them
-     * as uintptr_t-compatible values. */
-    if (mesh->commands_offset != 0)
-        mesh->commands_offset = (uint32_t)(uintptr_t)(base + mesh->commands_offset);
-    if (mesh->vertices_offset != 0)
-        mesh->vertices_offset = (uint32_t)(uintptr_t)(base + mesh->vertices_offset);
-    if (mesh->normals_offset != 0)
-        mesh->normals_offset = (uint32_t)(uintptr_t)(base + mesh->normals_offset);
+    /* Disk -> runtime conversion. The original stores these as uint32 offsets
+     * relative to the mesh header start; the runtime form is real pointers.
+     *
+     * [x64 Stage 2] The three link words are read from the RAW RECORD by byte
+     * offset, not through the struct fields they are about to become. Reading
+     * them through the fields worked only because the runtime struct and the
+     * on-disk record have identical layout on i686 -- an accident that does not
+     * survive the pointer widening. (The old comment here claimed the port
+     * stored these "as uintptr_t-compatible values"; they were uint32_t. That
+     * comment was the bug, written down.)
+     *
+     * All three are read BEFORE any is written: each write lands on the very
+     * bytes a later read would have used. */
+    {
+        uint32_t cmd_off = td5_mesh_disk_link(base, TD5_MESH_DISK_OFF_COMMANDS);
+        uint32_t vtx_off = td5_mesh_disk_link(base, TD5_MESH_DISK_OFF_VERTICES);
+        uint32_t nrm_off = td5_mesh_disk_link(base, TD5_MESH_DISK_OFF_NORMALS);
+
+        mesh->commands = cmd_off ? (TD5_PrimitiveCmd *)(void *)(base + cmd_off) : NULL;
+        mesh->vertices = vtx_off ? (TD5_MeshVertex   *)(void *)(base + vtx_off) : NULL;
+        mesh->normals  = nrm_off ? (TD5_VertexNormal *)(void *)(base + nrm_off) : NULL;
+        /* On-disk records never carry runtime bits (the field was `reserved_28`
+         * and is zero in the asset data), but clear it explicitly so a DERIVED
+         * tag can never be inherited from file bytes. */
+        mesh->runtime_flags = 0;
+    }
 
     /* Note: per-vertex diffuse dim for additive billboards lives in a
      * separate post-pass (td5_track_dim_additive_billboard_meshes) called
@@ -499,7 +516,7 @@ void td5_track_dim_additive_billboard_meshes(void)
                 continue;
             if (mesh->texture_page_id != 1 && mesh->texture_page_id != 2)
                 continue;
-            if (mesh->commands_offset == 0 || mesh->vertices_offset == 0)
+            if (!mesh->commands || !mesh->vertices)
                 continue;
             if (mesh->command_count <= 0 || mesh->total_vertex_count <= 0)
                 continue;
@@ -510,8 +527,7 @@ void td5_track_dim_additive_billboard_meshes(void)
 
             /* Check the first command's texture page — if not type-3 we
              * leave the mesh alone (that's a tree/sign, not a light). */
-            const TD5_PrimitiveCmd *cmd0 =
-                (const TD5_PrimitiveCmd *)(uintptr_t)mesh->commands_offset;
+            const TD5_PrimitiveCmd *cmd0 = mesh->commands;
             if (td5_asset_get_page_transparency(cmd0->texture_page_id) != 3)
                 continue;
 
@@ -520,8 +536,7 @@ void td5_track_dim_additive_billboard_meshes(void)
              * 31%) still read slightly too bright on a 32bpp
              * framebuffer; scaling by 3/8 → ~0x3C (60, 24%) lands in the
              * CRT-era additive perceptual range. */
-            TD5_MeshVertex *bb_v =
-                (TD5_MeshVertex *)(uintptr_t)mesh->vertices_offset;
+            TD5_MeshVertex *bb_v = mesh->vertices;
             for (int vi = 0; vi < mesh->total_vertex_count; vi++) {
                 uint32_t c = bb_v[vi].lighting;
                 uint32_t a = c & 0xFF000000u;
