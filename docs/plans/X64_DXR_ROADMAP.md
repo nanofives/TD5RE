@@ -67,7 +67,7 @@ arithmetic, so **goldens must stay GREEN throughout** — they are the proof the
 | Camera `int actor` API (10 sigs + 30 call sites) | ⬜ |
 | Delete redundant `g_actorBaseAddr` | ⬜ cheapest win |
 | `g_spanTable` / `g_vertexTable` retype | ⬜ |
-| Mesh headers — **option C** (split disk/runtime) | ⬜ the bulk, ~63 sites |
+| Mesh headers — **option C** (split disk/runtime) | 🔄 increment 1 done `f48b2e11` |
 | `offsetof` sweep + `TD5_ACTOR_STRIDE = sizeof` | ⬜ |
 | `td5_save.c` on-disk stride | ✅ field-mapped — "truncate" rested on a false premise |
 

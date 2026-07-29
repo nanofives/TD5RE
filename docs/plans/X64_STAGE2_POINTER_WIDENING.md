@@ -100,9 +100,31 @@ goldens probably would not either, since neither golden scenario is a drag race.
 
 ### Revised increments
 
-1. **Change what a display-list block IS** — a small struct carrying real `TD5_MeshHeader *`
-   rather than a `uint32_t[]` of truncated pointers. Update `td5_render_span_display_list`, all
-   three reader idioms, and every producer INCLUDING the synthesized one.
+1. ✅ **DONE `f48b2e11`** — **Change what a display-list block IS**: `TD5_SpanDisplayList
+   {count, TD5_MeshHeader **meshes}` (`td5_types.h`) instead of a `uint32_t[]` of truncated
+   pointers. The blob KEEPS its `uint32_t` layout — it cannot change, because MODELS.DAT format
+   autodetection (`td5_track_parser.c:99-100/152-157`) uses "first DWORD in [1,256]" as the
+   DEFINITION of a valid block — so truncation is now confined to parse time.
+
+   **The surface was bigger than this plan recorded. There are FIVE idioms, not three**, and a
+   grep for the documented `4 + j*4` shape finds neither of the two that were missing:
+   - **bare `+4` first-entry reads** — `td5_track.c:404` (pre-relocation, an OFFSET) and
+     `:2464-2465` (post-relocation, a POINTER). No `j`, so the documented grep misses them.
+   - **`TD5_FallbackDisplayList`** (`td5_track.c:220`) — a C struct whose first two fields ARE a
+     one-entry block, handed out as `void *`. A third representation the plan never mentioned.
+
+   Three constraints that would each have caused a silent regression:
+   - **Blocks are deduped by POINTER** (`s_submitted[]`, the munich-gantry-double-submit fix) and
+     the drag tiling loops reuse the SAME block as an immutable template while mutating a global
+     z-offset ⇒ blocks must be stable cached objects, never per-call temporaries.
+   - **Generated blocks fuse header and payload in ONE allocation** (`free_display_lists` frees
+     them with a single `free()`), and the payload offset was a baked `sizeof(uint32_t) * 2` —
+     now derived, or it silently mis-places the mesh when the header changes width.
+   - **Build the runtime table AFTER the post-relocation sweep**, which is still zeroing bad
+     slots; building inside the relocation loop captures meshes the renderer then rejects.
+
+   Verified: suite 55/55, all three trace goldens green (`race-golden-drag` included — it exists
+   for exactly this path), `rgold-race-golden-drag` worst L1=65 vs a 4000 limit.
 2. Runtime header array + parse-time conversion; consumers still read the old fields.
 3. Repoint the 34 header consumers, then the 16 `vertex_data_ptr` sites (needs the
    `PrimDispatchFn` signature change for the 8 dispatch handlers with no mesh in scope).
