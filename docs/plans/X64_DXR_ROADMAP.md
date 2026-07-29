@@ -122,7 +122,8 @@ Remaining, all build-side except the last:
 | `ddraw_wrapper` x64 build | ✅ `fe2c40ca` |
 | **`td5re_x64.exe` LINKS** | ✅ 3,361,159 bytes, `pei-x86-64` |
 | Run it | ⬜ **never executed — expected to misbehave, see below** |
-| Mesh runtime casts | ⬜ the one SOURCE item left — silent, not a compile error (see Stage 2 increment 2) |
+| Mesh runtime casts — MODELS.DAT blob | ✅ `12c9f822` runtime mesh table |
+| Mesh runtime casts — ASSET meshes | ⬜ vehicle/traffic/cop, `sky.prr`, TD6 transcode — same defect |
 
 ### ⚠️ Correction: "zlib is not a blocker" was half right
 

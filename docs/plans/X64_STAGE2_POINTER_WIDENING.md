@@ -156,6 +156,21 @@ goldens probably would not either, since neither golden scenario is a drag race.
    `TranslucentBatchEntry` carry the RESOLVED vertex pointer beside the command, which frees
    `vertex_data_ptr` to become an offset everywhere else. Unverified.
 
+3b. ✅ **DONE `12c9f822`** — MODELS.DAT meshes are COPIED into a runtime table instead of being
+   cast in place and rebased inside the blob. In-place only works while the struct matches the
+   0x38 record; on x86_64 it is 0x48 and `commands` lands at +0x30, writing over the NEXT record.
+   Deduplicated by source offset because mesh POINTERS are compared for identity in several
+   places. Also removes the other truncation site: the display-list slot keeps a blob-relative
+   OFFSET rather than `(uint32_t)(uintptr_t)mesh`, so the blob is never written to at all.
+
+   The four blob-walking passes keep PER-SLOT iteration deliberately — the additive-billboard
+   pass mutates vertex colours, so a per-mesh walk would silently stop double-dimming a mesh
+   referenced twice. Not inert (binary +922 bytes), so the goldens are the whole proof: 55/55.
+
+   ⬜ **Still outstanding:** the ASSET mesh paths (vehicle/traffic/cop, `sky.prr`, TD6 transcode
+   output) are still cast in place over their own buffers and rebased via
+   `td5_track_prepare_mesh_resource`. Same x86_64 defect, independent of the models blob.
+
 4. 🔄 Validity heuristics — the bit-0 DERIVED tag is **done** (increment 2). The `< 0x10000`
    tri-state survives, now as an explicit unrelocated-offset tripwire on the header pointers; the
    `vertex_data_ptr` tri-state (`td5_render_mesh.c:1499-1508`, `td5_track.c` ×3) is blocked behind
