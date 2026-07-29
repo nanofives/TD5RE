@@ -3294,7 +3294,7 @@ static float td6_rd_f32(const uint8_t *p, int off)
 }
 
 /* Returns a newly-malloc'd TD5-format mesh (file-relative offsets, ready for
- * td5_track_prepare_mesh_resource) transcoded from a TD6 render_type 0x104
+ * td5_track_wrap_disk_mesh) transcoded from a TD6 render_type 0x104
  * himodel, or NULL if src is not TD6 format / is malformed. *out_size is set
  * on success. Caller owns the returned buffer. */
 static void *td5_asset_transcode_td6_mesh(const void *src_data, int src_size,
@@ -3368,9 +3368,9 @@ static void *td5_asset_transcode_td6_mesh(const void *src_data, int src_size,
     h->runtime_flags      = 0;
     /* [x64 Stage 2] This emitter BUILDS an on-disk PRR record: the three link
      * words must be FILE OFFSETS at their on-disk positions, because the caller
-     * subsequently runs td5_track_prepare_mesh_resource over this buffer to
-     * rebase them. Assigning through the runtime pointer fields would store a
-     * pointer-typed value that the rebase would then treat as an offset. */
+     * subsequently wraps this buffer via td5_track_wrap_disk_mesh, which reads
+     * them as offsets. Assigning through the runtime pointer fields would store
+     * a pointer-typed value that the conversion would then treat as an offset. */
     td5_mesh_disk_set_link(h, TD5_MESH_DISK_OFF_COMMANDS, out_cmds_off);
     td5_mesh_disk_set_link(h, TD5_MESH_DISK_OFF_VERTICES, out_verts_off);
     td5_mesh_disk_set_link(h, TD5_MESH_DISK_OFF_NORMALS,  out_norms_off);
@@ -3674,11 +3674,17 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
         }
     }
 
-    /* The buffer is kept alive -- the render system holds a pointer to it. */
+    /* The buffer is kept alive -- the render system holds a pointer to it.
+     * [x64 Stage 3] Wrapped so the head is a RUNTIME header followed by the
+     * file bytes, instead of casting the file bytes to a runtime struct and
+     * rebasing them in place (wrong on x86_64, where the struct is larger than
+     * the 0x38 record). Still one allocation, so the free path is unchanged. */
+    mesh_data = td5_track_wrap_disk_mesh(mesh_data, (size_t)mesh_size);
+    if (!mesh_data) {
+        TD5_LOG_W(LOG_TAG, "vehicle slot=%d car=%d: mesh wrap failed", slot, car_index);
+        return 0;
+    }
     TD5_MeshHeader *mesh = (TD5_MeshHeader *)mesh_data;
-
-    /* Relocate internal offsets (commands, vertices, normals) to absolute ptrs */
-    td5_track_prepare_mesh_resource(mesh);
 
     /* Vehicle mesh data is in integer-coord float space, same as
      * MODELS.DAT and the camera/render coordinate system.
@@ -3939,8 +3945,14 @@ int td5_asset_load_traffic_model(int model_index, int slot)
         return 0;
     }
 
+    /* [x64 Stage 3] See the vehicle path: runtime header wrapped around the
+     * file bytes, still one allocation. */
+    mesh_data = td5_track_wrap_disk_mesh(mesh_data, (size_t)mesh_size);
+    if (!mesh_data) {
+        TD5_LOG_W(LOG_TAG, "traffic slot=%d: mesh wrap failed", slot);
+        return 0;
+    }
     TD5_MeshHeader *mesh = (TD5_MeshHeader *)mesh_data;
-    td5_track_prepare_mesh_resource(mesh);
 
     /* --- Load skin texture + patch primitive page IDs -------------------- */
     /* Traffic slots live in [6..11]; subtract 6 so we get a 0..5 index into
@@ -4012,8 +4024,15 @@ TD5_MeshHeader *td5_asset_load_cop_mesh(int model_index)
         return NULL;
     }
 
+    /* [x64 Stage 3] See the vehicle path. The cop mesh is CACHED across races
+     * and freed via this same pointer, so keeping it to one allocation matters
+     * here too. */
+    mesh_data = td5_track_wrap_disk_mesh(mesh_data, (size_t)mesh_size);
+    if (!mesh_data) {
+        TD5_LOG_W(LOG_TAG, "cop mesh: model%d.prr wrap failed", model_index);
+        return NULL;
+    }
     TD5_MeshHeader *mesh = (TD5_MeshHeader *)mesh_data;
-    td5_track_prepare_mesh_resource(mesh);
 
     char png_path[256];
     int skin_ok = 0;

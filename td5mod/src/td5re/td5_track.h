@@ -203,7 +203,16 @@ const TD5_SpanDisplayList *td5_track_get_display_list_entry(int entry_index);
 
 /* --- MODELS.DAT --- */
 int  td5_track_parse_models_dat(const void *data, size_t size);
-void td5_track_prepare_mesh_resource(TD5_MeshHeader *mesh);
+/* [x64 Stage 3] Convert an ON-DISK PRR mesh record into a runtime header.
+ * `record` must outlive `dst`: the command/vertex/normal streams still live
+ * inside it. Replaces the old in-place rebase, which was only correct while
+ * sizeof(TD5_MeshHeader) matched the 0x38 on-disk record. */
+void  td5_track_mesh_from_disk(TD5_MeshHeader *dst, const void *record);
+/* Wrap a PRR file buffer (mesh record at offset 0) into ONE allocation laid out
+ * as [runtime TD5_MeshHeader][original file bytes], so callers keep their
+ * single-free lifetime. TAKES OWNERSHIP of buf (freed on success and failure).
+ * Returns the allocation, whose head is a valid TD5_MeshHeader*, or NULL. */
+void *td5_track_wrap_disk_mesh(void *buf, size_t size);
 
 /* Halve per-vertex diffuse of billboard meshes that draw through a
  * type-3 (additive) texture page. Call AFTER td5_asset_load_track_textures

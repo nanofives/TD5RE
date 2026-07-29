@@ -3252,11 +3252,18 @@ void td5_render_load_sky(const char *path)
             fseek(f, 0, SEEK_END);
             long sz = ftell(f);
             fseek(f, 0, SEEK_SET);
-            if (sz >= (long)sizeof(TD5_MeshHeader)) {
+            /* The bound is the ON-DISK record size, not sizeof(TD5_MeshHeader):
+             * the runtime struct is larger on x86_64, and a valid sky.prr
+             * smaller than the runtime struct would be rejected. */
+            if (sz >= (long)TD5_MESH_DISK_SIZE) {
                 void *buf = malloc((size_t)sz);
                 if (buf && (long)fread(buf, 1, (size_t)sz, f) == sz) {
-                    s_sky_mesh = (TD5_MeshHeader *)buf;
-                    td5_track_prepare_mesh_resource(s_sky_mesh);
+                    /* [x64 Stage 3] Wrapped: runtime header + the file bytes in
+                     * one allocation, instead of rebasing the file bytes in
+                     * place. Takes ownership of buf. */
+                    s_sky_mesh = (TD5_MeshHeader *)td5_track_wrap_disk_mesh(buf, (size_t)sz);
+                    buf = NULL;
+                    if (!s_sky_mesh) { fclose(f); return; }
                     /* Patch command texture page to sky TGA page */
                     TD5_PrimitiveCmd *cmds = s_sky_mesh->commands;
                     for (int c = 0; c < s_sky_mesh->command_count; c++)

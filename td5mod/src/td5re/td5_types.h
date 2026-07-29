@@ -794,7 +794,8 @@ static inline uint32_t td5_mesh_disk_link(const void *record, unsigned field_off
 /* Write one on-disk link word. Used by emitters that BUILD a PRR record (the
  * TD6 transcoder) -- they must lay down file offsets at the on-disk positions,
  * not assign through the runtime pointer fields, because the record they are
- * writing is later handed to td5_track_prepare_mesh_resource to be rebased. */
+ * writing is later converted by td5_track_mesh_from_disk, which reads them as
+ * offsets. */
 static inline void td5_mesh_disk_set_link(void *record, unsigned field_off,
                                           uint32_t value)
 {

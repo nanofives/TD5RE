@@ -464,41 +464,41 @@ int td5_track_parse_models_dat(const void *data, size_t size)
  * passes are intentional D3D3->D3D11 / immediate->software-transform
  * architectural simplifications, not bugs.
  */
-void td5_track_prepare_mesh_resource(TD5_MeshHeader *mesh)
+void td5_track_mesh_from_disk(TD5_MeshHeader *dst, const void *record)
 {
-    uint8_t *base;
+    const uint8_t *rec = (const uint8_t *)record;
+    uint32_t cmd_off, vtx_off, nrm_off;
 
-    if (!mesh)
+    if (!dst || !rec)
         return;
 
-    base = (uint8_t *)mesh;
-
-    /* Disk -> runtime conversion. The original stores these as uint32 offsets
-     * relative to the mesh header start; the runtime form is real pointers.
+    /* Disk -> runtime conversion. The original stores the three links as uint32
+     * offsets relative to the mesh header start; the runtime form is real
+     * pointers.
      *
-     * [x64 Stage 2] The three link words are read from the RAW RECORD by byte
-     * offset, not through the struct fields they are about to become. Reading
-     * them through the fields worked only because the runtime struct and the
-     * on-disk record have identical layout on i686 -- an accident that does not
-     * survive the pointer widening. (The old comment here claimed the port
-     * stored these "as uintptr_t-compatible values"; they were uint32_t. That
-     * comment was the bug, written down.)
+     * [x64 Stage 3] This used to rebase IN PLACE, with `dst` and `record` being
+     * the same memory. That is correct only while sizeof(TD5_MeshHeader) equals
+     * the 0x38 on-disk record -- on x86_64 the struct is 0x48 and `commands`
+     * lands at +0x30, so an in-place write would land on the file bytes the
+     * later reads still need, and on whatever follows the record.
      *
-     * All three are read BEFORE any is written: each write lands on the very
-     * bytes a later read would have used. */
-    {
-        uint32_t cmd_off = td5_mesh_disk_link(base, TD5_MESH_DISK_OFF_COMMANDS);
-        uint32_t vtx_off = td5_mesh_disk_link(base, TD5_MESH_DISK_OFF_VERTICES);
-        uint32_t nrm_off = td5_mesh_disk_link(base, TD5_MESH_DISK_OFF_NORMALS);
+     * Splitting source from destination makes that impossible to get wrong, and
+     * removes the old "read all three before writing any" ordering hazard.
+     * Region 1 (everything up to the links) is byte-identical in both layouts.
+     */
+    memcpy(dst, rec, TD5_MESH_DISK_OFF_COMMANDS);
 
-        mesh->commands = cmd_off ? (TD5_PrimitiveCmd *)(void *)(base + cmd_off) : NULL;
-        mesh->vertices = vtx_off ? (TD5_MeshVertex   *)(void *)(base + vtx_off) : NULL;
-        mesh->normals  = nrm_off ? (TD5_VertexNormal *)(void *)(base + nrm_off) : NULL;
-        /* On-disk records never carry runtime bits (the field was `reserved_28`
-         * and is zero in the asset data), but clear it explicitly so a DERIVED
-         * tag can never be inherited from file bytes. */
-        mesh->runtime_flags = 0;
-    }
+    cmd_off = td5_mesh_disk_link(rec, TD5_MESH_DISK_OFF_COMMANDS);
+    vtx_off = td5_mesh_disk_link(rec, TD5_MESH_DISK_OFF_VERTICES);
+    nrm_off = td5_mesh_disk_link(rec, TD5_MESH_DISK_OFF_NORMALS);
+
+    dst->commands = cmd_off ? (TD5_PrimitiveCmd *)(void *)(rec + cmd_off) : NULL;
+    dst->vertices = vtx_off ? (TD5_MeshVertex   *)(void *)(rec + vtx_off) : NULL;
+    dst->normals  = nrm_off ? (TD5_VertexNormal *)(void *)(rec + nrm_off) : NULL;
+    /* On-disk records never carry runtime bits (the field was `reserved_28` and
+     * is zero in the asset data), but clear it explicitly so a DERIVED tag can
+     * never be inherited from file bytes. */
+    dst->runtime_flags = 0;
 
     /* Note: per-vertex diffuse dim for additive billboards lives in a
      * separate post-pass (td5_track_dim_additive_billboard_meshes) called
@@ -506,6 +506,40 @@ void td5_track_prepare_mesh_resource(TD5_MeshHeader *mesh)
      * table is still empty and we can't tell which billboard tags (1/2)
      * correspond to real lights (type-3 page) vs normal trees/signs
      * (type-1 alpha-keyed). Dimming all of them would wash out trees. */
+}
+
+void *td5_track_wrap_disk_mesh(void *buf, size_t size)
+{
+    /* Single-allocation wrapper for the ASSET mesh paths (vehicle / traffic /
+     * cop / sky), each of which reads a PRR file whose mesh record sits at
+     * offset 0 and then keeps the buffer alive because the command and vertex
+     * streams live inside it.
+     *
+     * Layout: [ runtime TD5_MeshHeader ][ the original file bytes ]
+     *
+     * Keeping it to ONE allocation is deliberate: every caller frees its buffer
+     * with a single free() and some cache the pointer (the cop mesh) or hand it
+     * to the renderer (vehicles). A separately-allocated header would have
+     * meant touching every one of those lifetimes, which is exactly the kind of
+     * incidental churn that turns a mechanical fix into a leak hunt.
+     *
+     * Takes ownership of `buf`: it is freed here on both success and failure,
+     * so callers never double-free. Returns the new allocation, whose head is a
+     * valid TD5_MeshHeader*, or NULL. */
+    uint8_t *out;
+
+    if (!buf) return NULL;
+    if (size < TD5_MESH_DISK_SIZE) { free(buf); return NULL; }
+
+    out = (uint8_t *)malloc(sizeof(TD5_MeshHeader) + size);
+    if (!out) { free(buf); return NULL; }
+
+    memcpy(out + sizeof(TD5_MeshHeader), buf, size);
+    free(buf);
+
+    td5_track_mesh_from_disk((TD5_MeshHeader *)(void *)out,
+                             out + sizeof(TD5_MeshHeader));
+    return out;
 }
 
 void td5_track_dim_additive_billboard_meshes(void)
