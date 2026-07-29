@@ -134,31 +134,45 @@ The dump is unambiguous: `current_srv=0x00000000D1F7BAE8` and the faulting addre
 are both low-4GB values, while every genuine x64 allocation in the same dump looks like
 `0x0000015DCC2A…`. A truncated pointer, handed to D3D11.
 
-**Root cause — `td5mod/ddraw_wrapper/src/texture2.c:100`:**
+⚠️ **RETRACTED (same day): `texture2.c:100` is NOT the cause.** This section first named
 
 ```c
-*handle = (DWORD)(DWORD_PTR)self->surface->d3d11_srv;
+*handle = (DWORD)(DWORD_PTR)self->surface->d3d11_srv;   /* texture2.c:100 */
 ```
 
-`IDirect3DTexture2::GetHandle` returns an opaque **32-bit `DWORD`** by API definition; the game
-passes it back through `SetRenderState(D3DRENDERSTATE_TEXTUREHANDLE, …)` and the wrapper recovers
-it with `(ID3D11ShaderResourceView *)(DWORD_PTR)handle`. Storing a pointer in that handle is the
-wrapper's documented design (see the file header) and is perfectly correct in 32-bit. On x86_64 it
-truncates.
+as the root cause — `IDirect3DTexture2::GetHandle` returns an opaque 32-bit `DWORD` by API
+definition, and stuffing an SRV pointer in it does truncate on x86_64. That part is true, and it
+IS a real latent bug worth fixing.
 
-This class is invisible to everything used so far: the cast is EXPLICIT, so
-`-Werror=int-conversion` says nothing (a screen of the whole wrapper for the pointer-truncation
-classes returns clean), and it cannot fail on i686 because pointers fit. The trial compile never
-covered the wrapper either — `wrapper_cflags.txt` carries none of the `-Werror=` classes.
+But it cannot be this crash: **the handle has no consumer.** `Dev3_SetRenderState` has no
+`TEXTUREHANDLE` case (it falls to `default:` and logs "unhandled type"), texture binding goes
+through the pointer-typed `Dev3_SetTexture(WrapperTexture *)`, and the only
+`(ID3D11ShaderResourceView *)(DWORD_PTR)handle` in the tree is a COMMENT at `texture2.c:83`. The
+value is produced and discarded.
 
-**Fix shape (not yet implemented):** replace the pointer-in-handle with a real handle — a small
-integer index into a table of SRV pointers. Exactly the pattern Stage 2 step 1 used for the AI
-route/script slots, and for the same reason: an API-mandated 32-bit slot cannot hold a 64-bit
-pointer, so it must hold an ID instead. Note `GetHandle` currently `AddRef`s the SRV, so the table
-owns that reference and needs a release path.
+The mistake is worth naming: a plausible site, a matching symptom (a low-4GB value in
+`current_srv`), and no check that the value was ever read back. Exactly the failure mode this
+branch has been careful about in delegated reports.
 
-⚠️ Worth screening the rest of the wrapper for the same shape: any `DWORD`/`ULONG` that carries a
-COM pointer across the emulated D3D3/DDraw API boundary.
+**What is actually established:**
+- The x64 build gets a long way: audio buffers, texture uploads (pages 888-892, 900), DirectInput,
+  FF, and `Viewport set: 1920x1009` all succeed. The fault is immediately after, at the start of
+  rendering, with `present_count=0 / total_draws=0`.
+- It faults INSIDE `d3d11.dll` (+0x15D700), not in our code.
+- `current_srv` and the faulting address are low-4GB values while real allocations in the same
+  dump are `0x0000015D…`, so a bad/garbage pointer does reach D3D11 — origin unknown.
+
+**Next diagnostic, in order:** run the x64 build under `TD5RE_D3D_DEBUG=1` for validation-layer
+messages (the 32-bit build has that path already); capture `WRAPPER_LOG` output, which is more
+granular than `engine.log` and is NOT captured in standalone runs today; and only then look for
+the producer of the bad pointer. Do NOT bisect by guessing at truncation sites — that is what went
+wrong above.
+
+**Still worth doing independently:** replace the pointer-in-handle at `texture2.c:100` with a small
+integer index into an SRV table (the pattern Stage 2 step 1 used for the AI route/script slots),
+and screen the wrapper for other `DWORD`/`ULONG` fields carrying COM pointers across the emulated
+D3D3/DDraw boundary. Latent, not urgent. Note `GetHandle` `AddRef`s today, so a table would own
+that reference.
 
 ### ⚠️ Correction: "zlib is not a blocker" was half right
 
