@@ -32,7 +32,7 @@ sequenced so the goldens stay usable as the correctness net.
 | **1a** | x87 trig LUT → `lrintf` | ✅ `4b732465` — bit-identical, goldens green |
 | **1b** | SSE2 float math + portable `TD5_F32_SPILL` | ✅ `323ffb8c` — **merge-gated** |
 | **2** | Pointer widening (still 32-bit) | 🔄 step 1 done `9aee8c3a` |
-| **3** | Flip `-m32` → `-m64` | 🔄 **source side DONE — 67/67 compile clean** |
+| **3** | Flip `-m32` → `-m64` | 🔄 **BUILDS AND LINKS — `td5re_x64.exe`; never run** |
 | **4** | DXR renderer (D3D11On12 vs D3D12 — decide then) | ⬜ unreachable until 3 lands |
 
 ### Stage 1a — bit-identical, no behaviour change
@@ -119,8 +119,27 @@ Remaining, all build-side except the last:
 | `Makefile` + CI updated in step | ✅ `db16dd37` — see the trap below |
 | **zlib** | ✅ NOT a blocker — see below |
 | Win32 / D3D11 import libs (`-ld3d11 -ldxgi -ldsound …`) | ✅ ship with the x64 MinGW-w64 toolchain |
-| **`ddraw_wrapper` x64 build** | ⬜ **the only thing now blocking an x64 link** |
+| `ddraw_wrapper` x64 build | ✅ `fe2c40ca` |
+| **`td5re_x64.exe` LINKS** | ✅ 3,361,159 bytes, `pei-x86-64` |
+| Run it | ⬜ **never executed — expected to misbehave, see below** |
 | Mesh runtime casts | ⬜ the one SOURCE item left — silent, not a compile error (see Stage 2 increment 2) |
+
+### ⚠️ Correction: "zlib is not a blocker" was half right
+
+Recorded here earlier on the strength of `td5_inflate.c` alone. That define,
+`TD5_INFLATE_USE_ZLIB`, only selects the DEFLATE **decoder**. There is a SECOND, independent
+dependency: the frame-dump PNG encoder in `td5_platform_win32_window.c` **compresses**, via
+`crc32` / `compressBound` / `compress2`. The x64 link failed on exactly those three symbols after
+the wrapper was fixed. Dropping the inflate define does NOT free the build of zlib.
+
+Resolved without a 64-bit zlib: that module now carries a self-contained fallback (table-driven
+crc32, adler32, and a `compress2` emitting STORED deflate blocks — a valid encoding, so the PNG
+stays spec-conformant at the cost of size). i686 keeps real zlib via `-DTD5_PNG_USE_ZLIB`.
+Framedump was kept rather than compiled out because it is the only reliable screenshot path —
+desktop capture of the D3D11 swapchain comes back black.
+
+**Unverified:** the fallback encoder compiles only into the x64 build and has never run. Check its
+output against a real PNG decoder before trusting framedump there.
 
 Architecture is chosen with the `TD5RE_ARCH` env var, not an argument:
 `build_standalone.bat`'s contract is "any unrecognised first argument means dev" (the `/fix` and
