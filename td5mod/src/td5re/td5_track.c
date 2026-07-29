@@ -245,9 +245,13 @@ _Static_assert(offsetof(TD5_FallbackDisplayList, dl) == 0,
 /* TD5_TrackRawMeshHeader now in td5_track_internal.h */
 
 static void free_models_runtime_lists(void);
+static void free_models_mesh_table(void);
 
 void free_models_dat_runtime(void)
 {
+    /* Runtime mesh headers point INTO the blob (their command/vertex streams
+     * still live there), so they must die with it. */
+    free_models_mesh_table();
     /* [x64 Stage 2] The runtime blocks point INTO the blob, so they must die
      * with it -- otherwise the getters hand out dangling meshes on the next
      * level load. */
@@ -288,6 +292,98 @@ void free_models_dat_runtime(void)
  * One flat backing array holds every entry's pointers, so this is two
  * allocations total rather than two per entry, and each block's address is
  * stable for the level's lifetime (required: blocks are deduped by pointer). */
+/* [x64 Stage 3] RUNTIME MESH TABLE.
+ *
+ * MODELS.DAT mesh records used to be cast in place out of the blob and rebased
+ * THERE -- the runtime object and the file bytes were the same memory. That
+ * only works while sizeof(TD5_MeshHeader) equals the 0x38 on-disk record, i.e.
+ * only on i686. On x86_64 the struct is 0x48 and `commands` sits at +0x30, so
+ * an in-place rebase would write 8 bytes over the NEXT record's data and read
+ * back garbage -- silently, with no diagnostic.
+ *
+ * So each distinct blob mesh is now COPIED once into a runtime header here, and
+ * the blob keeps its file bytes untouched. Conversion mirrors the same
+ * three-region shape used by the cup-save field map: the first 0x2C bytes are
+ * identical in both layouts and copy straight across; the three link words are
+ * read from the raw record and rebased into real pointers; runtime_flags is
+ * cleared (the on-disk field was `reserved_28`).
+ *
+ * DEDUPLICATED BY SOURCE OFFSET, which is load-bearing: several display-list
+ * slots legitimately reference the same mesh, and a lot of code compares mesh
+ * POINTERS for identity (s_drag_gantry_mesh, DamageSlot.mesh, the render
+ * dedup). Allocating per-slot would silently break all of them.
+ */
+static TD5_MeshHeader *s_models_mesh = NULL;      /* runtime headers          */
+static uint32_t       *s_models_mesh_src = NULL;  /* blob offset each came from */
+static int             s_models_mesh_count = 0;
+static int             s_models_mesh_cap = 0;
+
+static void free_models_mesh_table(void)
+{
+    free(s_models_mesh);
+    s_models_mesh = NULL;
+    free(s_models_mesh_src);
+    s_models_mesh_src = NULL;
+    s_models_mesh_count = 0;
+    s_models_mesh_cap = 0;
+}
+
+/* Convert (or return the existing) runtime header for the mesh record at
+ * blob_off. Returns NULL only on allocation failure. */
+TD5_MeshHeader *td5_track_runtime_mesh_for(uint32_t blob_off)
+{
+    const uint8_t *rec;
+    TD5_MeshHeader *dst;
+    uint32_t cmd_off, vtx_off, nrm_off;
+    int i;
+
+    if (!s_models_blob || blob_off == 0) return NULL;
+    if ((size_t)blob_off + TD5_MESH_DISK_SIZE > s_models_blob_size) return NULL;
+
+    for (i = 0; i < s_models_mesh_count; i++)
+        if (s_models_mesh_src[i] == blob_off)
+            return &s_models_mesh[i];
+
+    if (s_models_mesh_count == s_models_mesh_cap) {
+        int ncap = s_models_mesh_cap ? s_models_mesh_cap * 2 : 256;
+        TD5_MeshHeader *nm = (TD5_MeshHeader *)realloc(s_models_mesh,
+                                (size_t)ncap * sizeof(*nm));
+        uint32_t *ns = (uint32_t *)realloc(s_models_mesh_src,
+                                (size_t)ncap * sizeof(*ns));
+        if (nm) s_models_mesh = nm;
+        if (ns) s_models_mesh_src = ns;
+        if (!nm || !ns) return NULL;
+        s_models_mesh_cap = ncap;
+    }
+
+    rec = s_models_blob + blob_off;
+    dst = &s_models_mesh[s_models_mesh_count];
+
+    /* Region 1: everything up to the link words is byte-identical on both
+     * arches (render_type .. reserved_28/runtime_flags). */
+    memcpy(dst, rec, TD5_MESH_DISK_OFF_COMMANDS);
+
+    /* Region 2: the three links, rebased off the RECORD's own address, which is
+     * what the on-disk offsets are relative to. */
+    cmd_off = td5_mesh_disk_link(rec, TD5_MESH_DISK_OFF_COMMANDS);
+    vtx_off = td5_mesh_disk_link(rec, TD5_MESH_DISK_OFF_VERTICES);
+    nrm_off = td5_mesh_disk_link(rec, TD5_MESH_DISK_OFF_NORMALS);
+    dst->commands = cmd_off ? (TD5_PrimitiveCmd *)(void *)(rec + cmd_off) : NULL;
+    dst->vertices = vtx_off ? (TD5_MeshVertex   *)(void *)(rec + vtx_off) : NULL;
+    dst->normals  = nrm_off ? (TD5_VertexNormal *)(void *)(rec + nrm_off) : NULL;
+    dst->runtime_flags = 0;   /* never inherit runtime bits from file data */
+
+    s_models_mesh_src[s_models_mesh_count] = blob_off;
+    s_models_mesh_count++;
+    return dst;
+}
+
+int td5_track_runtime_mesh_count(void) { return s_models_mesh_count; }
+TD5_MeshHeader *td5_track_runtime_mesh_at(int i)
+{
+    return (i >= 0 && i < s_models_mesh_count) ? &s_models_mesh[i] : NULL;
+}
+
 static void free_models_runtime_lists(void)
 {
     free(s_models_dl);
@@ -331,11 +427,11 @@ int td5_track_build_models_runtime_lists(void)
     }
     s_models_dl_count = s_models_display_list_count;
 
-    /* Pass 2: hand each block its slice of the backing array and widen the
-     * blob's truncated words into real pointers. On i686 this is the identity
-     * conversion, which is what makes the change inert here and lets the
-     * goldens prove it; on x86_64 the blob word is the lossy part and this is
-     * where the real pointer has to come from instead (increment 2). */
+    /* Pass 2: hand each block its slice of the backing array and resolve each
+     * slot. [x64 Stage 3] The slot holds a blob OFFSET (its on-disk meaning),
+     * and the pointer comes from the runtime mesh table -- so nothing is
+     * truncated on either arch. It previously widened a truncated pointer word,
+     * which only worked while pointers fit in 32 bits. */
     for (dl = 0; dl < s_models_display_list_count; dl++) {
         const uint8_t *block_base;
         uint32_t sub_count, j;
@@ -348,10 +444,10 @@ int td5_track_build_models_runtime_lists(void)
         s_models_dl[dl].count  = sub_count;
         s_models_dl[dl].meshes = s_models_dl_meshes + cursor;
         for (j = 0; j < sub_count; j++) {
-            uint32_t ptr_val = *(const uint32_t *)(const void *)
+            uint32_t rec_off = *(const uint32_t *)(const void *)
                                    (block_base + 4 + j * 4);
             s_models_dl_meshes[cursor + j] =
-                (TD5_MeshHeader *)(uintptr_t)ptr_val;
+                rec_off ? td5_track_runtime_mesh_for(rec_off) : NULL;
         }
         cursor += sub_count;
     }
@@ -2577,11 +2673,12 @@ void rebuild_span_display_list_mapping(void)
             if (cnt_a == 0 || cnt_b == 0)
                 break;
 
-            /* Slot now holds an absolute pointer after relocation */
-            mesh_a = (const TD5_MeshHeader *)(uintptr_t)(*(const uint32_t *)(blk_a + 4));
-            mesh_b = (const TD5_MeshHeader *)(uintptr_t)(*(const uint32_t *)(blk_b + 4));
-            if (!mesh_a || !mesh_b ||
-                (uintptr_t)mesh_a < 0x10000u || (uintptr_t)mesh_b < 0x10000u)
+            /* [x64 Stage 3] The slot holds a blob OFFSET; resolve it through the
+             * runtime mesh table. This is the bare `+4` first-entry idiom -- it
+             * carries no `j`, so a grep for the usual `4 + j*4` shape misses it. */
+            mesh_a = td5_track_runtime_mesh_for(*(const uint32_t *)(blk_a + 4));
+            mesh_b = td5_track_runtime_mesh_for(*(const uint32_t *)(blk_b + 4));
+            if (!mesh_a || !mesh_b)
                 break;
 
             ax = mesh_a->bounding_center_x + mesh_a->origin_x;
@@ -7257,8 +7354,8 @@ void td5_track_scan_banner_pages(void)
             int count, cmd_count, cursor, c;
 
             if (mesh_ptr_val == 0) continue;
-            mesh = (TD5_MeshHeader *)(uintptr_t)mesh_ptr_val;
-            if (!td5_track_is_ptr_in_blob(mesh, TD5_MESH_DISK_SIZE)) continue;
+            mesh = td5_track_runtime_mesh_for(mesh_ptr_val);
+            if (!mesh) continue;
             if (!mesh->commands || !mesh->vertices) continue;
             /* Billboard meshes (tag 1/2) are camera-facing sprites, never signs. */
             if (mesh->texture_page_id == 1 || mesh->texture_page_id == 2) continue;
@@ -7486,8 +7583,8 @@ void td5_track_register_lamp_lights(void)
                 for (uint32_t j = 0; j < sc; j++) {
                     uint32_t mp = *(const uint32_t *)(bb + 4 + j * 4);
                     if (mp == 0) continue;
-                    TD5_MeshHeader *m = (TD5_MeshHeader *)(uintptr_t)mp;
-                    if (!td5_track_is_ptr_in_blob(m, TD5_MESH_DISK_SIZE))
+                    TD5_MeshHeader *m = td5_track_runtime_mesh_for(mp);
+                    if (!m)
                         continue;
                     if (!m->commands || !m->vertices) continue;
                     int cnt = m->total_vertex_count, cc = m->command_count;
@@ -7650,8 +7747,8 @@ void td5_track_derive_missing_normals(void)
             uint32_t mesh_ptr_val = *(const uint32_t *)(block_base + 4 + j * 4);
             if (mesh_ptr_val == 0) continue;
 
-            TD5_MeshHeader *mesh = (TD5_MeshHeader *)(uintptr_t)mesh_ptr_val;
-            if (!td5_track_is_ptr_in_blob(mesh, TD5_MESH_DISK_SIZE))
+            TD5_MeshHeader *mesh = td5_track_runtime_mesh_for(mesh_ptr_val);
+            if (!mesh)
                 continue;
 
             /* Stale tag from a previous pass over a cached blob: the memory

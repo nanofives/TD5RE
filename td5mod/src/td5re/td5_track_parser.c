@@ -257,24 +257,70 @@ int td5_track_parse_models_dat(const void *data, size_t size)
 
             if (mesh_off == 0) continue;
 
-            /* Convert relative offset to absolute pointer.
+            /* Resolve the record's position in the blob.
              * Try block-relative first, then blob-relative for offsets
              * that exceed the block boundary (some MODELS.DAT entries
-             * store global blob offsets instead of block-local offsets). */
+             * store global blob offsets instead of block-local offsets).
+             *
+             * [x64 Stage 3] The slot is NORMALISED to a blob-relative offset
+             * rather than overwritten with a pointer. It used to hold
+             * `(uint32_t)(uintptr_t)mesh`, which truncates on x86_64; an offset
+             * is the field's on-disk meaning and is valid on both arches. Real
+             * pointers now live only in the runtime mesh table.
+             *
+             * Bounds use TD5_MESH_DISK_SIZE, not sizeof(TD5_MeshHeader): what
+             * must fit in the blob is the ON-DISK record, and the runtime
+             * struct is larger on x86_64. */
+            uint32_t rec_off;
+            const uint8_t *rec;
             TD5_MeshHeader *mesh;
-            if (mesh_off < block_size && mesh_off + sizeof(TD5_MeshHeader) <= block_size) {
-                mesh = (TD5_MeshHeader *)(block_base + mesh_off);
+            if (mesh_off < block_size && mesh_off + TD5_MESH_DISK_SIZE <= block_size) {
+                rec_off = (uint32_t)((size_t)(block_base - s_models_blob) + mesh_off);
             } else if (mesh_off < s_models_blob_size &&
-                       mesh_off + sizeof(TD5_MeshHeader) <= s_models_blob_size) {
-                mesh = (TD5_MeshHeader *)(s_models_blob + mesh_off);
+                       mesh_off + TD5_MESH_DISK_SIZE <= s_models_blob_size) {
+                rec_off = mesh_off;
             } else {
                 *slot = 0;
                 continue;
             }
-            *slot = (uint32_t)(uintptr_t)mesh;
+            if ((size_t)rec_off + TD5_MESH_DISK_SIZE > s_models_blob_size) {
+                *slot = 0;
+                continue;
+            }
+            rec = s_models_blob + rec_off;
+            *slot = rec_off;
 
-            /* Validate mesh fields before relocation.
-             * Allow command_count==0 or vertex_count==0 — the original game
+            /* Validate the record's link words BEFORE materialising it. These
+             * are still on-disk offsets relative to the record start; a wild
+             * commands/vertices offset is the most common crash vector for
+             * tracks with unusual MODELS.DAT. */
+            {
+                uintptr_t rec_abs  = (uintptr_t)rec;
+                uintptr_t blob_end = (uintptr_t)s_models_blob + s_models_blob_size;
+                uint32_t cmd_off = td5_mesh_disk_link(rec, TD5_MESH_DISK_OFF_COMMANDS);
+                uint32_t vtx_off = td5_mesh_disk_link(rec, TD5_MESH_DISK_OFF_VERTICES);
+
+                if (cmd_off != 0 && rec_abs + cmd_off >= blob_end) {
+                    *slot = 0;
+                    continue;
+                }
+                if (vtx_off != 0 && rec_abs + vtx_off >= blob_end) {
+                    *slot = 0;
+                    continue;
+                }
+            }
+
+            /* Materialise the runtime header (copy + rebase). This REPLACES the
+             * old in-place td5_track_prepare_mesh_resource call: rebasing inside
+             * the blob writes pointer-width values over file bytes, which is
+             * correct only while the runtime struct matches the 0x38 record. */
+            mesh = td5_track_runtime_mesh_for(rec_off);
+            if (!mesh) {
+                *slot = 0;
+                continue;
+            }
+
+            /* Allow command_count==0 or vertex_count==0 — the original game
              * has placeholder/empty meshes that the renderer simply skips. */
             if (mesh->command_count < 0 || mesh->command_count > 4096 ||
                 mesh->total_vertex_count < 0 || mesh->total_vertex_count > 65536) {
@@ -288,31 +334,6 @@ int td5_track_parse_models_dat(const void *data, size_t size)
                 *slot = 0;
                 continue;
             }
-
-            /* Validate internal offsets stay within the models blob before
-             * relocating.  A wild commands_offset or vertices_offset is the
-             * most common crash vector for tracks with unusual MODELS.DAT.
-             * Offsets are relative to the mesh header start. */
-            {
-                uintptr_t mesh_abs = (uintptr_t)mesh;
-                uintptr_t blob_end = (uintptr_t)s_models_blob + s_models_blob_size;
-                /* PRE-relocation: these are still on-disk offsets, so read the
-                 * raw record rather than the (not yet populated) pointers. */
-                uint32_t cmd_off = td5_mesh_disk_link(mesh, TD5_MESH_DISK_OFF_COMMANDS);
-                uint32_t vtx_off = td5_mesh_disk_link(mesh, TD5_MESH_DISK_OFF_VERTICES);
-
-                if (cmd_off != 0 && mesh_abs + cmd_off >= blob_end) {
-                    *slot = 0;
-                    continue;
-                }
-                if (vtx_off != 0 && mesh_abs + vtx_off >= blob_end) {
-                    *slot = 0;
-                    continue;
-                }
-            }
-
-            /* Relocate commands/vertices/normals offsets within mesh */
-            td5_track_prepare_mesh_resource(mesh);
         }
     }
 
@@ -328,24 +349,29 @@ int td5_track_parse_models_dat(const void *data, size_t size)
             uint32_t sc = *(uint32_t *)blk;
             if (sc == 0 || sc > 256) { bad_blocks++; continue; }
             for (uint32_t j = 0; j < sc; j++) {
-                uint32_t ptr_val = *(uint32_t *)(blk + 4 + j * 4);
-                if (ptr_val == 0) continue;
-                TD5_MeshHeader *m = (TD5_MeshHeader *)(uintptr_t)ptr_val;
-                if ((uintptr_t)m < 0x10000u ||
-                    !td5_track_is_ptr_in_blob(m, sizeof(TD5_MeshHeader)) ||
+                /* [x64 Stage 3] The slot is a blob OFFSET now, not a truncated
+                 * pointer, so "is it in the blob" is a range check on the
+                 * offset and the mesh itself is looked up in the runtime table
+                 * (which is where the real pointers live). */
+                uint32_t rec_off = *(uint32_t *)(blk + 4 + j * 4);
+                TD5_MeshHeader *m;
+                if (rec_off == 0) continue;
+                m = ((size_t)rec_off + TD5_MESH_DISK_SIZE <= s_models_blob_size)
+                    ? td5_track_runtime_mesh_for(rec_off) : NULL;
+                if (!m ||
                     m->command_count < 0 || m->command_count > 4096 ||
                     m->total_vertex_count < 0 || m->total_vertex_count > 65536) {
                     static int s_post_fail_log = 0;
                     if (s_post_fail_log < 10) {
                         TD5_LOG_W("track",
-                            "post-reloc fail: dl=%d j=%d ptr=0x%08X in_blob=%d "
+                            "post-reloc fail: dl=%d j=%d rec_off=0x%08X in_blob=%d "
                             "cmds=%d verts=%d cmd_ptr=%p vtx_ptr=%p",
-                            dl, (int)j, (unsigned)ptr_val,
-                            td5_track_is_ptr_in_blob(m, TD5_MESH_DISK_SIZE),
-                            ((uintptr_t)m >= 0x10000u) ? m->command_count : -1,
-                            ((uintptr_t)m >= 0x10000u) ? m->total_vertex_count : -1,
-                            ((uintptr_t)m >= 0x10000u) ? (void *)m->commands : NULL,
-                            ((uintptr_t)m >= 0x10000u) ? (void *)m->vertices : NULL);
+                            dl, (int)j, (unsigned)rec_off,
+                            (int)((size_t)rec_off + TD5_MESH_DISK_SIZE <= s_models_blob_size),
+                            m ? m->command_count : -1,
+                            m ? m->total_vertex_count : -1,
+                            m ? (void *)m->commands : NULL,
+                            m ? (void *)m->vertices : NULL);
                         s_post_fail_log++;
                     }
                     *(uint32_t *)(blk + 4 + j * 4) = 0;
@@ -511,8 +537,13 @@ void td5_track_dim_additive_billboard_meshes(void)
             uint32_t mesh_ptr_val = *(const uint32_t *)(block_base + 4 + j * 4);
             if (mesh_ptr_val == 0) continue;
 
-            TD5_MeshHeader *mesh = (TD5_MeshHeader *)(uintptr_t)mesh_ptr_val;
-            if (!td5_track_is_ptr_in_blob(mesh, sizeof(TD5_MeshHeader)))
+            /* [x64 Stage 3] Slot is a blob offset; the header lives in the
+             * runtime table. Iteration stays PER-SLOT: this pass mutates vertex
+             * colours, so switching to a per-mesh walk would silently stop
+             * double-dimming a mesh referenced by two slots -- a behaviour
+             * change the render goldens would (rightly) flag. */
+            TD5_MeshHeader *mesh = td5_track_runtime_mesh_for(mesh_ptr_val);
+            if (!mesh)
                 continue;
             if (mesh->texture_page_id != 1 && mesh->texture_page_id != 2)
                 continue;

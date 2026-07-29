@@ -68,4 +68,13 @@ void free_models_dat_runtime(void);
  * failure, in which case the getters return NULL and the caller falls back. */
 int  td5_track_build_models_runtime_lists(void);
 
+/* [x64 Stage 3] Runtime mesh table. MODELS.DAT records are COPIED out of the
+ * blob into runtime headers rather than cast in place -- the two layouts differ
+ * on x86_64 (0x48 vs the 0x38 on-disk record), so an in-place rebase would
+ * write over neighbouring blob data. Deduplicated by source offset, because a
+ * lot of code compares mesh POINTERS for identity. */
+TD5_MeshHeader *td5_track_runtime_mesh_for(uint32_t blob_off);
+int             td5_track_runtime_mesh_count(void);
+TD5_MeshHeader *td5_track_runtime_mesh_at(int index);
+
 #endif /* TD5_TRACK_INTERNAL_H */
