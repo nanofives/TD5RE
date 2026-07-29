@@ -3144,13 +3144,25 @@ void td5_plat_ff_stop(int device_slot, int slot)
  * g_backend state and the WrapperDevice/WrapperSurface functions.
  * ======================================================================== */
 
+/* [x64 Stage 3] One-shot breadcrumb, port-side twin of the wrapper's
+ * WRAPPER_ONCE. Logs the first time a call site is reached, then costs a
+ * predictable branch. Used to bisect the x86_64 first-frame crash, which lands
+ * inside d3d11.dll after "Viewport set" and before the wrapper's draw path is
+ * ever entered -- per-call logging there is too noisy to read and slow enough
+ * to change the timing being measured. */
+#define TD5_PLAT_ONCE(label) \
+    do { static int once_ = 0; if (!once_) { once_ = 1; \
+         TD5_LOG_I(LOG_TAG, "ONCE: %s", label); } } while (0)
+
 void td5_plat_render_begin_scene(void)
 {
     if (g_backend.device_removed) return;
     D3D11_VIEWPORT vp;
     FLOAT vp_w, vp_h;
 
+    TD5_PLAT_ONCE("begin_scene enter");
     if (!g_backend.device || !g_backend.context) return;
+    TD5_PLAT_ONCE("begin_scene have device+ctx");
 
     vp_w = (FLOAT)((g_backend.backbuffer && g_backend.backbuffer->width)
         ? g_backend.backbuffer->width
@@ -3162,9 +3174,11 @@ void td5_plat_render_begin_scene(void)
     /* Bind backbuffer as render target so draw calls land on the surface
      * that Backend_CompositeAndPresent reads, not the swap chain. */
     if (g_backend.backbuffer && g_backend.backbuffer->d3d11_rtv) {
+        TD5_PLAT_ONCE("begin_scene -> OMSetRenderTargets");
         ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1,
             &g_backend.backbuffer->d3d11_rtv, g_backend.depth_dsv);
     }
+    TD5_PLAT_ONCE("begin_scene RT bound");
 
     /* Reassert a valid viewport every scene. The loading screen can render
      * before gameplay code configures a viewport explicitly. */
@@ -3174,8 +3188,11 @@ void td5_plat_render_begin_scene(void)
     vp.Height   = vp_h;
     vp.MinDepth = 0.0f;
     vp.MaxDepth = 1.0f;
+    TD5_PLAT_ONCE("begin_scene -> RSSetViewports");
     ID3D11DeviceContext_RSSetViewports(g_backend.context, 1, &vp);
+    TD5_PLAT_ONCE("begin_scene -> UpdateViewportCB");
     Backend_UpdateViewportCB(vp_w, vp_h);
+    TD5_PLAT_ONCE("begin_scene viewport done");
 
     /* Reset scissor rect to the full render target at scene start so any
      * HUD-set sub-rect from the previous frame doesn't leak into this one. */
@@ -3185,14 +3202,18 @@ void td5_plat_render_begin_scene(void)
         scissor.top    = 0;
         scissor.right  = (LONG)vp_w;
         scissor.bottom = (LONG)vp_h;
+        TD5_PLAT_ONCE("begin_scene -> RSSetScissorRects");
         ID3D11DeviceContext_RSSetScissorRects(g_backend.context, 1, &scissor);
     }
+    TD5_PLAT_ONCE("begin_scene scissor done");
 
     /* Clear depth buffer */
     if (g_backend.depth_dsv) {
+        TD5_PLAT_ONCE("begin_scene -> ClearDepthStencilView");
         ID3D11DeviceContext_ClearDepthStencilView(g_backend.context,
             g_backend.depth_dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
     }
+    TD5_PLAT_ONCE("begin_scene EXIT");
 
     g_backend.in_scene = 1;
     g_backend.scene_rendered = 0;
@@ -3413,6 +3434,7 @@ void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
     UINT base_vertex = 0, start_index = 0;
     int  has_idx;
 
+    TD5_PLAT_ONCE("draw_tris enter");
     if (!ctx || !verts || vertex_count <= 0) return;
 
     has_idx = (indices && index_count > 0);
@@ -3427,19 +3449,27 @@ void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
      * WRITE_DISCARD — the latter serialized the CPU on the GPU once the per-frame
      * draw count climbed (split-screen). base_vertex/start_index address the
      * appended slice; the VB/IB stay bound at byte offset 0. */
+    TD5_PLAT_ONCE("draw_tris -> StreamUpload");
     if (!Backend_StreamUpload(verts, (UINT)vertex_count, stride,
                               has_idx ? (const void *)indices : NULL,
                               has_idx ? (UINT)index_count : 0,
                               &base_vertex, &start_index))
         return;
+    TD5_PLAT_ONCE("draw_tris StreamUpload done");
 
     /* Bind VB, input layout, shaders */
+    TD5_PLAT_ONCE("draw_tris -> IASetVertexBuffers");
     ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &vb,
                                            &stride, &offset);
+    TD5_PLAT_ONCE("draw_tris -> IASetInputLayout");
     ID3D11DeviceContext_IASetInputLayout(ctx, g_backend.input_layout);
+    TD5_PLAT_ONCE("draw_tris -> VSSetShader");
     ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_pretransformed, NULL, 0);
+    TD5_PLAT_ONCE("draw_tris -> VSSetConstantBuffers");
     ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &cbvp);
+    TD5_PLAT_ONCE("draw_tris -> PSSetConstantBuffers");
     ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &cbfog);
+    TD5_PLAT_ONCE("draw_tris binds done");
 
     /* Apply render state cache -> D3D11 state objects */
     Backend_ApplyStateCache();
