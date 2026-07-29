@@ -162,11 +162,26 @@ branch has been careful about in delegated reports.
 - `current_srv` and the faulting address are low-4GB values while real allocations in the same
   dump are `0x0000015D…`, so a bad/garbage pointer does reach D3D11 — origin unknown.
 
-**Next diagnostic, in order:** run the x64 build under `TD5RE_D3D_DEBUG=1` for validation-layer
-messages (the 32-bit build has that path already); capture `WRAPPER_LOG` output, which is more
-granular than `engine.log` and is NOT captured in standalone runs today; and only then look for
-the producer of the bad pointer. Do NOT bisect by guessing at truncation sites — that is what went
-wrong above.
+**`TD5RE_D3D_DEBUG=1` run (2026-07-29) — inconclusive, and worth knowing why.**
+
+The failure CHANGES under the debug layer: instead of the access violation in `d3d11.dll`, the
+process raises exception `0x0000087D` from `KERNELBASE.dll` (RIP consistent with `RaiseException`;
+`RDI` holds the same `0x87D`, and the exit code 2173 is that value in decimal). Deliberately NOT
+interpreting that code further — a guess here is what went wrong above.
+
+**No validation messages were captured.** The drain exists — `Backend_SetupD3DDebug` QIs an
+`ID3D11InfoQueue` off the live device (`d3d11_backend_device.c:29-53`) — but it reports through
+`WRAPPER_LOG`, which is NOT captured in standalone runs. So the run did not deliver the diagnostic
+it was for. **Closing that capture gap is the prerequisite for the next attempt**, not an optional
+extra: without it, the debug layer is running blind.
+
+Note the device create falls back to non-debug if the OS debug layer (`D3D11*SDKLayers`, the
+"Graphics Tools" optional feature) is absent — so a silent absence of messages is ALSO consistent
+with the layer never having been active. That ambiguity is itself resolved by capturing
+`WRAPPER_LOG`, which logs which path was taken.
+
+**Then**, and only then, look for the producer of the bad pointer. Do NOT bisect by guessing at
+truncation sites — that is what went wrong above.
 
 **Still worth doing independently:** replace the pointer-in-handle at `texture2.c:100` with a small
 integer index into an SRV table (the pattern Stage 2 step 1 used for the AI route/script slots),
