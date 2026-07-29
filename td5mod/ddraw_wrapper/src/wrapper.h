@@ -61,6 +61,19 @@ void wrapper_log(const char *fmt, ...);
 #define WRAPPER_STUB(name) \
     WRAPPER_LOG("STUB: %s", name); return S_OK
 
+/* [x64 Stage 3] One-shot breadcrumb: logs the FIRST time each call site is
+ * reached, then costs a predictable-branch test forever after.
+ *
+ * Purpose: locating a hard crash by "last breadcrumb printed" without the 870 KB
+ * of per-call spam that ordinary WRAPPER_LOG produces in the draw path -- the
+ * x64 build dies during first-frame setup, and per-call logging there is both
+ * too noisy to read and slow enough to change the timing.
+ *
+ * The log is unbuffered (see wrapper_log), so the last line written IS the last
+ * point reached, even on a hard fault. */
+#define WRAPPER_ONCE(label) \
+    do { static int once_ = 0; if (!once_) { once_ = 1; WRAPPER_LOG("ONCE: %s", label); } } while (0)
+
 /* ========================================================================
  * Forward declarations for our COM objects
  * ======================================================================== */

@@ -172,7 +172,9 @@ void Backend_ApplyStateCache(void)
     RenderStateCache *s = rc ? &rc->state : &g_backend.state;
     ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
 
+    WRAPPER_ONCE("ApplyStateCache enter");
     if (!s->dirty) return;
+    WRAPPER_ONCE("ApplyStateCache dirty");
 
     /* [foliage AA] Cutout foliage (color-key alpha test on a transparent-source
      * texture) is rendered via the shader's manual reconstruction (FogCB's
@@ -209,9 +211,11 @@ void Backend_ApplyStateCache(void)
         }
         if (bi != s->current_blend_idx) {
             s->current_blend_idx = bi;
+            WRAPPER_ONCE("ApplyStateCache OMSetBlendState");
             ID3D11DeviceContext_OMSetBlendState(ctx, g_backend.blend_states[bi], NULL, 0xFFFFFFFF);
         }
     }
+    WRAPPER_ONCE("ApplyStateCache blend done");
 
     /* Depth-stencil state */
     {
@@ -226,9 +230,11 @@ void Backend_ApplyStateCache(void)
 
         if (di != s->current_ds_idx) {
             s->current_ds_idx = di;
+            WRAPPER_ONCE("ApplyStateCache OMSetDepthStencilState");
             ID3D11DeviceContext_OMSetDepthStencilState(ctx, g_backend.ds_states[di], 0);
         }
     }
+    WRAPPER_ONCE("ApplyStateCache depth done");
 
     /* Rasterizer state — default vs shadow-decal (polygon offset for shadows). */
     {
@@ -238,9 +244,11 @@ void Backend_ApplyStateCache(void)
             ID3D11RasterizerState *target = ri ?
                 g_backend.rs_state_shadow_decal :
                 g_backend.rs_state;
+            WRAPPER_ONCE("ApplyStateCache RSSetState");
             ID3D11DeviceContext_RSSetState(ctx, target);
         }
     }
+    WRAPPER_ONCE("ApplyStateCache raster done");
 
     /* Sampler state */
     {
@@ -263,12 +271,16 @@ void Backend_ApplyStateCache(void)
 
         if (si != s->current_samp_idx) {
             s->current_samp_idx = si;
+            WRAPPER_ONCE("ApplyStateCache PSSetSamplers");
             ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[si]);
         }
     }
+    WRAPPER_ONCE("ApplyStateCache sampler done");
 
     /* Pixel shader */
+    WRAPPER_ONCE("ApplyStateCache -> SelectPixelShader");
     Backend_SelectPixelShader();
+    WRAPPER_ONCE("ApplyStateCache SelectPixelShader done");
 
     /* [lighting rework P0] Bind/unbind the G-buffer as RT1 to match the shader
      * promotion in Backend_SelectPixelShader (same predicate). Immediate
