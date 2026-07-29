@@ -25,13 +25,55 @@ REM ---------------------------------------------------------------------------
 set VARIANT=dev
 if /I "%~1"=="release" set VARIANT=release
 
-set GCC=..\..\deps\mingw\mingw32\bin\gcc.exe
-set AR=..\..\deps\mingw\mingw32\bin\ar.exe
-set WINDRES=..\..\deps\mingw\mingw32\bin\windres.exe
+REM ---------------------------------------------------------------------------
+REM Architecture selection (x64 Stage 3)
+REM
+REM Selected by the TD5RE_ARCH environment variable, NOT an argument: this
+REM script's contract is "any unrecognised first argument means dev" (the /fix
+REM and /end skills pass a PID), so an arch argument could not be told apart
+REM from that and would silently mis-build.
+REM
+REM   set TD5RE_ARCH=x86_64  &  build_standalone.bat      -> 64-bit
+REM   (unset, or anything else)                           -> 32-bit, the default
+REM
+REM i686 remains the SHIPPING target. The 64-bit path exists because DXR is
+REM unavailable to 32-bit processes (measured; see docs/plans/X64_DXR_ROADMAP.md).
+REM Object dirs are arch-suffixed so the two never share a stale .o cache --
+REM the same reason DEV and RELEASE are already separated.
+REM ---------------------------------------------------------------------------
+set ARCH=i686
+if /I "%TD5RE_ARCH%"=="x86_64" set ARCH=x86_64
+if /I "%TD5RE_ARCH%"=="x64" set ARCH=x86_64
+
+if "%ARCH%"=="x86_64" goto :arch_x64
+
+REM --- i686 (default, shipping) ---
+set TOOLPREFIX=..\..\deps\mingw\mingw32\bin
+set ZLIB_INC=..\..\deps\mingw\mingw32\i686-w64-mingw32\include
+set WINDRES_TARGET=pe-i386
+set ARCHLDFLAG=-m32
+set BUILDSUFFIX=
+goto :arch_done
+
+:arch_x64
+REM --- x86_64 (retarget) ---
+REM No ZLIB_INC: this build has no zlib dependency (see cflags_x86_64.txt), but
+REM the -I is harmless and kept pointing at the i686 headers because zlib's two
+REM headers are arch-neutral -- so a build that DOES opt back into zlib still
+REM finds them.
+set TOOLPREFIX=..\..\deps\mingw64\mingw64\bin
+set ZLIB_INC=..\..\deps\mingw\mingw32\i686-w64-mingw32\include
+set WINDRES_TARGET=pe-x86-64
+set ARCHLDFLAG=-m64
+set BUILDSUFFIX=_x64
+
+:arch_done
+set GCC=%TOOLPREFIX%\gcc.exe
+set AR=%TOOLPREFIX%\ar.exe
+set WINDRES=%TOOLPREFIX%\windres.exe
 set SRCDIR=.
 set WRAPPER_SRCDIR=..\..\ddraw_wrapper\src
 set WRAPPER_BUILDDIR=..\..\ddraw_wrapper\build
-set ZLIB_INC=..\..\deps\mingw\mingw32\i686-w64-mingw32\include
 set PROJECT_ROOT=..\..\..
 
 REM ---------------------------------------------------------------------------
@@ -58,7 +100,21 @@ if not defined CFLAGS_COMMON (
     echo ERROR: cflags.txt missing or empty at %~dp0cflags.txt
     exit /b 1
 )
-set CFLAGS_BASE=!CFLAGS_COMMON! -I%SRCDIR% -I%WRAPPER_SRCDIR% -I%ZLIB_INC%
+REM Arch-specific flags (-m32/-m64 and friends) live in cflags_<arch>.txt and
+REM are read IN ADDITION to the arch-neutral cflags.txt above. Missing file =
+REM hard error: silently building for the wrong architecture is the exact
+REM failure this split exists to prevent.
+if not exist "%~dp0cflags_%ARCH%.txt" (
+    echo ERROR: cflags_%ARCH%.txt missing at %~dp0cflags_%ARCH%.txt
+    exit /b 1
+)
+set "CFLAGS_ARCH="
+for /f "usebackq eol=# delims=" %%L in ("%~dp0cflags_%ARCH%.txt") do set "CFLAGS_ARCH=!CFLAGS_ARCH! %%L"
+if not defined CFLAGS_ARCH (
+    echo ERROR: cflags_%ARCH%.txt contains no flags
+    exit /b 1
+)
+set CFLAGS_BASE=!CFLAGS_COMMON! !CFLAGS_ARCH! -I%SRCDIR% -I%WRAPPER_SRCDIR% -I%ZLIB_INC%
 
 REM System link libraries -- SINGLE SOURCE OF TRUTH: link_libs.txt (shared with
 REM build.yml, release.yml and td5mod\Makefile so the lib list cannot drift).
@@ -68,15 +124,25 @@ if not defined LINK_LIBS (
     echo ERROR: link_libs.txt missing or empty at %~dp0link_libs.txt
     exit /b 1
 )
+REM Arch-specific libs. Unlike cflags_<arch>.txt this may legitimately be EMPTY
+REM (x86_64 needs no extra libs), so only the FILE is required, not its content.
+if not exist "%~dp0link_libs_%ARCH%.txt" (
+    echo ERROR: link_libs_%ARCH%.txt missing at %~dp0link_libs_%ARCH%.txt
+    exit /b 1
+)
+for /f "usebackq eol=# delims=" %%L in ("%~dp0link_libs_%ARCH%.txt") do set "LINK_LIBS=!LINK_LIBS! %%L"
 
 REM Per-variant configuration (goto-based, NOT parenthesized blocks, so comments
 REM containing parentheses cannot corrupt the batch parser).
 if /I "%VARIANT%"=="release" goto :cfg_release
 
 REM --- DEV: full debug affordances ---
-set BUILDDIR=build
-set EXE=td5re.exe
-set MAPFILE=td5re.map
+set BUILDDIR=build!BUILDSUFFIX!
+REM Arch suffix on the EXE too, not just the object dir: the x64 build must not
+REM overwrite the shipping 32-bit td5re.exe in the project root. The suffix is
+REM empty for i686, so the shipping name is unchanged.
+set EXE=td5re!BUILDSUFFIX!.exe
+set MAPFILE=td5re!BUILDSUFFIX!.map
 set TD5RE_SRCS=!TD5RE_SRCS_COMMON!
 set CFLAGS=!CFLAGS_BASE!
 set EXTRA_LDFLAGS=
@@ -86,9 +152,9 @@ goto :cfg_done
 REM --- RELEASE: define TD5RE_RELEASE so dev affordances (trace knobs, debug
 REM     overlays, net selftest) compile out / hard-disable, then strip the
 REM     symbol table. ---
-set BUILDDIR=build_release
-set EXE=td5re_release.exe
-set MAPFILE=td5re_release.map
+set BUILDDIR=build_release!BUILDSUFFIX!
+set EXE=td5re_release!BUILDSUFFIX!.exe
+set MAPFILE=td5re_release!BUILDSUFFIX!.map
 set TD5RE_SRCS=!TD5RE_SRCS_COMMON!
 REM Strip the symbol table (-s). We intentionally do NOT use
 REM -ffunction-sections/--gc-sections: per-function section padding bloated the
@@ -148,7 +214,7 @@ if not exist %SRCDIR%\td5re.ico (
 del !BUILDDIR!\td5re_res.o 2>nul
 REM --include-dir %SRCDIR% makes the relative "td5re.ico" reference in td5re.rc
 REM resolve deterministically regardless of windres' working directory.
-"%WINDRES%" -F pe-i386 --include-dir %SRCDIR% -i %SRCDIR%\td5re.rc -o !BUILDDIR!\td5re_res.o
+"%WINDRES%" -F %WINDRES_TARGET% --include-dir %SRCDIR% -i %SRCDIR%\td5re.rc -o !BUILDDIR!\td5re_res.o
 if errorlevel 1 (
     echo ERROR: windres failed -- app icon would be missing, aborting build
     goto :fail
@@ -185,7 +251,7 @@ REM use -ffunction-sections/--gc-sections -- see the variant config above: it
 REM bloated the binary by ~1 MB while reclaiming only small dead code.
 REM ---------------------------------------------------------------------------
 echo Linking !EXE!...
-"%GCC%" -m32 -mwindows -static -o !BUILDDIR!\!EXE! ^
+"%GCC%" %ARCHLDFLAG% -mwindows -static -o !BUILDDIR!\!EXE! ^
     !BUILDDIR!\main.o !RESOBJ! ^
     -L!BUILDDIR! -Wl,--whole-archive -ltd5re -Wl,--no-whole-archive ^
     -L%WRAPPER_BUILDDIR% -lddraw_wrapper ^

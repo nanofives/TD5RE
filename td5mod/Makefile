@@ -69,7 +69,14 @@ WRAPPER_OBJS := $(addprefix $(WRAPPER_BUILD)/,$(WRAPPER_SRCS:.c=.o))
 # Common flags -- SINGLE SOURCE OF TRUTH: src/td5re/cflags.txt (shared with
 # build_standalone.bat + the CI workflows). $(filter -%,...) keeps only flag
 # tokens, dropping comment words and blanks. Path-dependent -I dirs appended.
+#
+# [x64 Stage 3] cflags.txt is now ARCH-NEUTRAL; the arch flags (-m32 etc.) live
+# in cflags_$(ARCH).txt and MUST be read as well or this would build for the
+# host architecture instead. This Makefile targets i686 only -- the 64-bit path
+# is driven by build_standalone.bat with TD5RE_ARCH=x86_64.
+ARCH := i686
 TD5RE_CFLAGS   := $(filter -%,$(file < $(TD5RE_SRC)/cflags.txt)) \
+                  $(filter -%,$(file < $(TD5RE_SRC)/cflags_$(ARCH).txt)) \
                   -I$(TD5RE_SRC) -I$(WRAPPER_SRC) -I$(ZLIB_INC)
 
 # SINGLE SOURCE OF TRUTH: ddraw_wrapper/wrapper_cflags.txt, shared with
@@ -81,7 +88,8 @@ $(WRAPPER_BUILD)/png_loader.o: WRAPPER_CFLAGS += -Wno-unused-function
 
 # System link libs -- SINGLE SOURCE OF TRUTH: src/td5re/link_libs.txt
 # (shared with build_standalone.bat + the CI workflows).
-LINK_LIBS := $(filter -l%,$(file < $(TD5RE_SRC)/link_libs.txt))
+LINK_LIBS := $(filter -l%,$(file < $(TD5RE_SRC)/link_libs.txt)) \
+             $(filter -l%,$(file < $(TD5RE_SRC)/link_libs_$(ARCH).txt))
 
 LINK_FLAGS := -m32 -mwindows -static \
               -Wl,--enable-stdcall-fixup \

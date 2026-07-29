@@ -1,0 +1,13 @@
+# x86_64-only system link libraries. Read IN ADDITION to link_libs.txt.
+#
+# Deliberately EMPTY. Every lib the port links (-ld3d11, -ldxgi, -ldsound,
+# -lmfplat, ...) ships as an import lib with the x86_64 MinGW-w64 toolchain, so
+# nothing extra is required.
+#
+# Notably absent: -lz. The x86_64 toolchain ships no libz.a, which looks like a
+# blocker until you read td5_inflate.c -- it has three DEFLATE paths and the
+# third is a self-contained embedded tinfl decompressor, documented as the
+# source port's default. Omitting -DTD5_INFLATE_USE_ZLIB selects it, so the x64
+# build simply has no zlib dependency. The file exists (rather than being
+# skipped) so every consumer can read cflags_$ARCH/link_libs_$ARCH
+# unconditionally and a missing file always means a real mistake.

@@ -87,7 +87,11 @@ jobs:
 
           WRAPPER_SRCDIR=../../ddraw_wrapper/src
           WRAPPER_BUILDDIR=../../ddraw_wrapper/build
-          CFLAGS="$(tr -d '\r' < cflags.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ') -I. -I$WRAPPER_SRCDIR"
+          # [x64 Stage 3] cflags.txt is ARCH-NEUTRAL; the arch flags (-m32 etc.)
+          # live in cflags_$ARCH.txt and MUST be read as well, or this builds
+          # for the runner's host architecture instead. CI targets i686 only.
+          ARCH=i686
+          CFLAGS="$(tr -d '\r' < cflags.txt cflags_$ARCH.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ') -I. -I$WRAPPER_SRCDIR"
           if [ "${{ inputs.release }}" = "true" ]; then
             CFLAGS="$CFLAGS -DTD5RE_RELEASE -DNDEBUG"
           fi
@@ -115,7 +119,7 @@ jobs:
           ARCHIVE_OBJS=$(ls build/*.o | grep -v '/main\.o' | grep -v '_res\.o')
           ar rcs build/libtd5re.a $ARCHIVE_OBJS
 
-          LIBS=$(tr -d '\r' < link_libs.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ')
+          LIBS=$(tr -d '\r' < link_libs.txt link_libs_$ARCH.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ')
           EXTRA_LDFLAGS=""
           if [ "${{ inputs.release }}" = "true" ]; then
             EXTRA_LDFLAGS="-s"

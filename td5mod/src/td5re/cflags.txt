@@ -3,6 +3,11 @@
 # release.yml (same pattern as srcs.txt). One flag per line, # comments.
 # Path-dependent -I include dirs and variant defines (-DTD5RE_RELEASE
 # -DNDEBUG) stay in each build path — everything else lives here.
+#
+# ARCH-NEUTRAL ONLY (x64 Stage 3). Anything that differs between i686 and
+# x86_64 lives in cflags_i686.txt / cflags_x86_64.txt, which every consumer
+# reads IN ADDITION to this file. Putting an arch flag here would silently
+# build the wrong target for whichever consumer forgot it.
 # -Wpedantic dropped (2026-07-09, A8 warning paydown): its 33 warnings here
 # were all pure ISO-C-strictness noise — 16 "braced-groups within
 # expressions" from a GNU statement-expression macro, 17 function-pointer
@@ -14,16 +19,6 @@
 -Wall
 -Wextra
 -DWIN32
--m32
-# FP semantics (x64 Stage 1): i686 GCC defaults to x87, whose 80-bit
-# intermediates the sim used to depend on (see TD5_F32_SPILL). x86_64 has no
-# x87 path at all, so the port moves to SSE2 float math HERE, while still
-# 32-bit, to isolate the arithmetic change from the later retarget. This
-# rounds every float intermediate to float32 and DOES change sim results ->
-# trace goldens were re-recorded in step with this flag.
--msse2
--mfpmath=sse
--DTD5_INFLATE_USE_ZLIB
 # Hard-error classes (2026-07-06): these indicate real bugs in i686 C, never
 # style. The tree is clean of all four; -Werror keeps it that way.
 -Werror=implicit-function-declaration

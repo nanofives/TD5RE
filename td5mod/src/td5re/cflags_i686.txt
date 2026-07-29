@@ -1,0 +1,24 @@
+# i686 (32-bit) compile flags — the SHIPPING target.
+#
+# Read IN ADDITION to cflags.txt by build_standalone.bat, td5mod/Makefile and
+# the CI workflows. Split out in x64 Stage 3 so the arch-specific flags live in
+# exactly one place per architecture; see cflags_x86_64.txt for the other half.
+# One flag per line, # comments.
+-m32
+# FP semantics (x64 Stage 1): i686 GCC defaults to x87, whose 80-bit
+# intermediates the sim used to depend on (see TD5_F32_SPILL). x86_64 has no
+# x87 path at all, so the port moves to SSE2 float math HERE, while still
+# 32-bit, to isolate the arithmetic change from the later retarget. This
+# rounds every float intermediate to float32 and DOES change sim results ->
+# trace goldens were re-recorded in step with this flag.
+#
+# These two are i686-ONLY: on x86_64 SSE2 is mandated by the ABI and both flags
+# are redundant (-mfpmath=sse is already the default, and there is no x87 to
+# opt out of).
+-msse2
+-mfpmath=sse
+# Use the bundled i686 libz for DEFLATE. i686-only because the x86_64 toolchain
+# ships no libz.a -- x64 falls back to the self-contained tinfl decompressor
+# already embedded in td5_inflate.c (its documented default path), so no
+# external zlib is needed there. Pairs with -lz in link_libs_i686.txt.
+-DTD5_INFLATE_USE_ZLIB
