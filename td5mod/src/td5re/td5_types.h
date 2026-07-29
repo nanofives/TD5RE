@@ -75,7 +75,11 @@
  * Actor / Race Constants
  * ======================================================================== */
 
-#define TD5_ACTOR_STRIDE            0x388   /* 904 bytes per actor */
+/* [x64 Stage 2] TD5_ACTOR_STRIDE moved to re/include/td5_actor_struct.h, where
+ * it is defined AFTER the struct as sizeof(TD5_Actor) so runtime striding
+ * tracks the real layout. It cannot live here: TD5_Actor is not in scope, and a
+ * frozen 0x388 silently under-strides the pool once the actor grows on x86_64.
+ * Include td5_actor_struct.h (after this header) if you need it. */
 
 /* ------------------------------------------------------------------------
  * TD5RE multi-player extension (PORT-ONLY — deliberately NON-faithful).

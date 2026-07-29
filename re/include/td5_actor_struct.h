@@ -30,7 +30,13 @@
  * Constants
  * ====================================================================== */
 
-#define TD5_ACTOR_STRIDE            0x388       /* 904 bytes per actor */
+/* The ORIGINAL binary's actor stride. Documentation of the RE target, and the
+ * value every offset in this header was derived against -- NOT a runtime
+ * stride. [x64 Stage 2] TD5_ACTOR_STRIDE is defined below as sizeof(TD5_Actor)
+ * so runtime striding tracks the real struct: on x86_64 the four void* at
+ * +0x1B0 widen and the actor grows to 0x398, while this constant stays 0x388.
+ * They are equal on i686, which is exactly the trap. */
+#define TD5_ACTOR_STRIDE_ORIG       0x388       /* 904 bytes per actor */
 #define TD5_ACTOR_MAX_RACER_SLOTS   6
 #define TD5_ACTOR_MAX_TRAFFIC_SLOTS 6
 #define TD5_ACTOR_MAX_TOTAL_SLOTS   80          /* PORT: render/per-slot array bound — MUST equal TD5_MAX_TOTAL_ACTORS (TD5_MAX_RACER_SLOTS 16 + TD5_MAX_TRAFFIC_SLOTS 64) in td5mod/src/td5re/td5_types.h. Static-asserted equal in td5_game.c. (orig 6+6=12) */
@@ -683,10 +689,24 @@ _Static_assert(sizeof(TD5_Vec3_Fixed) == 0x0C, "TD5_Vec3_Fixed must stay 12 byte
 _Static_assert(sizeof(TD5_DisplayAngles) == 0x06, "TD5_DisplayAngles must stay 6 bytes");
 _Static_assert(sizeof(TD5_EulerAccum) == 0x0C, "TD5_EulerAccum must stay 12 bytes");
 _Static_assert(sizeof(TD5_TrackProbeState) == 0x10, "TD5_TrackProbeState must stay 16 bytes");
-_Static_assert(sizeof(TD5_Actor) == TD5_ACTOR_STRIDE, "TD5_Actor size drifted from 0x388");
-/* +0x270 wheel_contact_delta: stored as uint8_t[32] (logical int16_t[4][4]) to
- * avoid a strict-aliasing-induced codegen change (see comment at field). */
-_Static_assert(offsetof(TD5_Actor, wheel_contact_delta) == 0x270, "TD5_Actor.wheel_contact_delta offset drifted");
+/* [x64 Stage 2] The RUNTIME stride. Everything that walks the actor pool uses
+ * this, so striding tracks the real struct on both architectures. Deliberately
+ * NOT TD5_ACTOR_STRIDE_ORIG, which is the original binary's 0x388. */
+#define TD5_ACTOR_STRIDE  sizeof(TD5_Actor)
+
+/* ---- Layout tripwires -------------------------------------------------
+ * These pin fields at the ORIGINAL binary's offsets. Splitting them at +0x1B0
+ * is not arbitrary: the four void* at +0x1B0..+0x1BC are the ONLY thing that
+ * widens on x86_64, so every field below that boundary keeps its original
+ * offset on both architectures while everything above it shifts by 16.
+ *
+ * That boundary was confirmed mechanically, not argued -- a trial x86_64
+ * compile fired 19 of these and NOT ONE of the ones below +0x1B0. So the group
+ * below stays unconditional and keeps catching accidental reordering on both
+ * arches; only the group above it is 32-bit-only, where it still guards the
+ * shipping build. */
+
+/* Arch-invariant: entirely below the +0x1B0 pointer block. */
 _Static_assert(offsetof(TD5_Actor, body_probes) == 0x000, "TD5_Actor.body_probes offset drifted");
 _Static_assert(offsetof(TD5_Actor, wheel_probes) == 0x040, "TD5_Actor.wheel_probes offset drifted");
 _Static_assert(offsetof(TD5_Actor, track_span_raw) == 0x080, "TD5_Actor.track_span_raw offset drifted");
@@ -697,6 +717,15 @@ _Static_assert(offsetof(TD5_Actor, rotation_matrix) == 0x120, "TD5_Actor.rotatio
 _Static_assert(offsetof(TD5_Actor, saved_render_pos) == 0x174, "TD5_Actor.saved_render_pos offset drifted");
 _Static_assert(offsetof(TD5_Actor, collision_spin_matrix) == 0x180, "TD5_Actor.collision_spin_matrix offset drifted");
 _Static_assert(offsetof(TD5_Actor, collision_spin_translation) == 0x1A4, "TD5_Actor.collision_spin_translation offset drifted");
+
+/* At or above the pointer block: these shift by 16 bytes on x86_64, which is
+ * correct and expected, so they are asserted only where the struct still
+ * mirrors the original binary byte-for-byte. */
+#if UINTPTR_MAX == 0xFFFFFFFFu
+_Static_assert(sizeof(TD5_Actor) == TD5_ACTOR_STRIDE_ORIG, "TD5_Actor size drifted from 0x388");
+/* +0x270 wheel_contact_delta: stored as uint8_t[32] (logical int16_t[4][4]) to
+ * avoid a strict-aliasing-induced codegen change (see comment at field). */
+_Static_assert(offsetof(TD5_Actor, wheel_contact_delta) == 0x270, "TD5_Actor.wheel_contact_delta offset drifted");
 _Static_assert(offsetof(TD5_Actor, actor_aux_ptr_1B4) == 0x1B4, "TD5_Actor.actor_aux_ptr_1B4 offset drifted");
 _Static_assert(offsetof(TD5_Actor, light_zone_index) == 0x377, "TD5_Actor.light_zone_index offset drifted");
 _Static_assert(offsetof(TD5_Actor, damage_health) == 0x1D8, "TD5_Actor.damage_health offset drifted");
@@ -714,6 +743,17 @@ _Static_assert(offsetof(TD5_Actor, track_contact_flag) == 0x37B, "TD5_Actor.trac
 _Static_assert(offsetof(TD5_Actor, wheel_contact_bitmask) == 0x37C, "TD5_Actor.wheel_contact_bitmask offset drifted");
 _Static_assert(offsetof(TD5_Actor, damage_lockout) == 0x37D, "TD5_Actor.damage_lockout offset drifted");
 _Static_assert(offsetof(TD5_Actor, race_position) == 0x383, "TD5_Actor.race_position offset drifted");
+#endif
+
+/* Arch-invariant RELATIVE invariants: these encode real structural contracts
+ * (block sizes / adjacency) rather than absolute positions, so they hold on
+ * both arches and keep guarding the fields the block above had to give up. */
+_Static_assert(offsetof(TD5_Actor, euler_accum) - offsetof(TD5_Actor, damage_health) == 0x18,
+               "damage block must stay 24 bytes");
+_Static_assert(offsetof(TD5_Actor, display_angles) - offsetof(TD5_Actor, world_pos) == 0x0C,
+               "display_angles must follow world_pos by 12 bytes");
+_Static_assert(offsetof(TD5_Actor, race_position) + 1 == sizeof(TD5_Actor) - 4,
+               "race_position must stay in the actor's trailing byte block");
 
 /* ======================================================================
  * Race Slot State Table

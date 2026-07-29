@@ -80,81 +80,94 @@ enum {
  * Actor runtime access macros (stride 0xE2 dwords = 0x388 bytes)
  * ======================================================================== */
 
-#define ACTOR_STRIDE              0x388
+/* [x64 Stage 2] DERIVED from the struct, not hand-written hex.
+ *
+ * These were duplicates of the layout in re/include/td5_actor_struct.h, kept
+ * honest by the cross-check asserts below. Deriving them via offsetof makes the
+ * drift STRUCTURALLY IMPOSSIBLE rather than merely detected: on x86_64 the four
+ * void* at +0x1B0..+0x1BC widen and shift everything above them by 16 bytes,
+ * and every constant here now follows automatically.
+ *
+ * The comment on each line is the ORIGINAL binary's offset -- the RE record
+ * these were derived from, and still the value on i686. It is documentation
+ * now, not the source of truth. The 476 macro-based raw accesses that route
+ * through actor_ptr() need no change once these are correct. */
+#define ACTOR_STRIDE              sizeof(TD5_Actor)
 
-#define ACTOR_SPAN_RAW            0x080
-#define ACTOR_SPAN_NORMALIZED     0x082
-#define ACTOR_SPAN_ACCUM          0x084
-#define ACTOR_SUB_LANE_INDEX      0x08C
-#define ACTOR_CAR_DEF_PTR         0x1B8
-#define ACTOR_YAW_ACCUM           0x1F4
-#define ACTOR_STEERING_CMD        0x30C
-#define ACTOR_LONGITUDINAL_SPEED  0x314
-#define ACTOR_REAR_AXLE_SLIP      0x320
-#define ACTOR_STEERING_RAMP_ACCUM 0x33A
-#define ACTOR_LIN_VEL_X           0x1CC
-#define ACTOR_LIN_VEL_Z           0x1D4
-#define ACTOR_WORLD_POS_X         0x1FC
-#define ACTOR_WORLD_POS_Z         0x204
-#define ACTOR_ENCOUNTER_STEER     0x33E
-#define ACTOR_BRAKE_FLAG          0x36D
-#define ACTOR_THROTTLE_STATE      0x36F
-#define ACTOR_SLOT_INDEX          0x375
-#define ACTOR_VEHICLE_MODE        0x379
-#define ACTOR_TRACK_CONTACT_FLAG  0x37B
-#define ACTOR_ENCOUNTER_STATE     0x384
+#define ACTOR_SPAN_RAW            offsetof(TD5_Actor, track_span_raw)          /* 0x080 */
+#define ACTOR_SPAN_NORMALIZED     offsetof(TD5_Actor, track_span_normalized)   /* 0x082 */
+#define ACTOR_SPAN_ACCUM          offsetof(TD5_Actor, track_span_accumulated)  /* 0x084 */
+#define ACTOR_SUB_LANE_INDEX      offsetof(TD5_Actor, track_sub_lane_index)    /* 0x08C */
+#define ACTOR_CAR_DEF_PTR         offsetof(TD5_Actor, car_definition_ptr)      /* 0x1B8 */
+#define ACTOR_YAW_ACCUM          (offsetof(TD5_Actor, euler_accum) + 4)        /* 0x1F4 */
+#define ACTOR_STEERING_CMD        offsetof(TD5_Actor, steering_command)        /* 0x30C */
+#define ACTOR_LONGITUDINAL_SPEED  offsetof(TD5_Actor, longitudinal_speed)      /* 0x314 */
+#define ACTOR_REAR_AXLE_SLIP      offsetof(TD5_Actor, rear_axle_slip_excess)   /* 0x320 */
+#define ACTOR_STEERING_RAMP_ACCUM offsetof(TD5_Actor, steering_ramp_accumulator) /* 0x33A */
+#define ACTOR_LIN_VEL_X           offsetof(TD5_Actor, linear_velocity_x)       /* 0x1CC */
+#define ACTOR_LIN_VEL_Z           offsetof(TD5_Actor, linear_velocity_z)       /* 0x1D4 */
+#define ACTOR_WORLD_POS_X         offsetof(TD5_Actor, world_pos)               /* 0x1FC */
+#define ACTOR_WORLD_POS_Z        (offsetof(TD5_Actor, world_pos) + 8)          /* 0x204 */
+#define ACTOR_ENCOUNTER_STEER     offsetof(TD5_Actor, encounter_steering_cmd)  /* 0x33E */
+#define ACTOR_BRAKE_FLAG          offsetof(TD5_Actor, brake_flag)              /* 0x36D */
+#define ACTOR_THROTTLE_STATE      offsetof(TD5_Actor, throttle_state)          /* 0x36F */
+#define ACTOR_SLOT_INDEX          offsetof(TD5_Actor, slot_index)              /* 0x375 */
+#define ACTOR_VEHICLE_MODE        offsetof(TD5_Actor, vehicle_mode)            /* 0x379 */
+#define ACTOR_TRACK_CONTACT_FLAG  offsetof(TD5_Actor, track_contact_flag)      /* 0x37B */
+#define ACTOR_ENCOUNTER_STATE     offsetof(TD5_Actor, special_encounter_state) /* 0x384 */
 
-#define ACTOR_PROBE_FL_BASE       0x090
-#define ACTOR_PROBE_FR_BASE       0x09C
-#define ACTOR_PROBE_RL_BASE       0x0A8
-#define ACTOR_PROBE_RR_BASE       0x0B4
+#define ACTOR_PROBE_FL_BASE       offsetof(TD5_Actor, probe_FL)                /* 0x090 */
+#define ACTOR_PROBE_FR_BASE       offsetof(TD5_Actor, probe_FR)                /* 0x09C */
+#define ACTOR_PROBE_RL_BASE       offsetof(TD5_Actor, probe_RL)                /* 0x0A8 */
+#define ACTOR_PROBE_RR_BASE       offsetof(TD5_Actor, probe_RR)                /* 0x0B4 */
 
 /* ------------------------------------------------------------------------
- * Cross-check the raw offsets above against the real struct (x64 Stage 2).
+ * Verify the derived constants against the ORIGINAL binary's offsets.
  *
  * td5_ai.c / td5_ai_traffic.c address the actor as a raw byte blob via
- * actor_ptr() + these constants, and never included the typed header -- so
- * the constants were UNGUARDED DUPLICATES of the layout in
- * re/include/td5_actor_struct.h. If a field moved, they went stale silently
- * and the AI would read the wrong bytes.
+ * actor_ptr() + these constants, and never included the typed header -- so the
+ * constants used to be UNGUARDED DUPLICATES of the layout in
+ * re/include/td5_actor_struct.h, going stale silently if a field moved.
  *
- * These asserts cost nothing at runtime (no codegen at all) and turn that
- * class of bug into a compile error. They matter most for the x86_64
- * retarget: the four void* at +0x1B0..+0x1BC grow, shifting EVERYTHING from
- * +0x1B0 onward by 16 bytes. Every constant below at or after 0x1B0 will then
- * fail here -- which is exactly the worklist you want, delivered by the
- * compiler instead of by debugging wrong AI behaviour.
+ * [x64 Stage 2] They are now DERIVED via offsetof, so that drift is impossible
+ * by construction and the old "constant == offsetof(...)" asserts became
+ * tautologies. What is still worth checking is the RE record itself: that the
+ * struct really does reproduce the original binary's layout. That only holds
+ * on i686 -- on x86_64 the four void* at +0x1B0..+0x1BC widen and shift
+ * everything above them by 16 bytes, by design.
+ *
+ * So these now pin the constants to the hex the RE work established, on the
+ * build where that is meaningful. Zero runtime cost, as before.
  * ------------------------------------------------------------------------ */
-_Static_assert(ACTOR_STRIDE == sizeof(TD5_Actor), "ACTOR_STRIDE drifted from sizeof(TD5_Actor)");
+#if UINTPTR_MAX == 0xFFFFFFFFu
+_Static_assert(ACTOR_STRIDE == TD5_ACTOR_STRIDE_ORIG, "actor stride drifted from the original 0x388");
 
-/* safe under x64 (all below +0x1B0) */
-_Static_assert(ACTOR_SPAN_RAW        == offsetof(TD5_Actor, track_span_raw),        "ACTOR_SPAN_RAW drifted");
-_Static_assert(ACTOR_SPAN_NORMALIZED == offsetof(TD5_Actor, track_span_normalized), "ACTOR_SPAN_NORMALIZED drifted");
-_Static_assert(ACTOR_SPAN_ACCUM      == offsetof(TD5_Actor, track_span_accumulated),"ACTOR_SPAN_ACCUM drifted");
-_Static_assert(ACTOR_SUB_LANE_INDEX  == offsetof(TD5_Actor, track_sub_lane_index),  "ACTOR_SUB_LANE_INDEX drifted");
-_Static_assert(ACTOR_PROBE_FL_BASE   == offsetof(TD5_Actor, probe_FL),              "ACTOR_PROBE_FL_BASE drifted");
-_Static_assert(ACTOR_PROBE_FR_BASE   == offsetof(TD5_Actor, probe_FR),              "ACTOR_PROBE_FR_BASE drifted");
-_Static_assert(ACTOR_PROBE_RL_BASE   == offsetof(TD5_Actor, probe_RL),              "ACTOR_PROBE_RL_BASE drifted");
-_Static_assert(ACTOR_PROBE_RR_BASE   == offsetof(TD5_Actor, probe_RR),              "ACTOR_PROBE_RR_BASE drifted");
-
-/* AT OR AFTER +0x1B0 -- these SHIFT on x86_64 (pointer growth) */
-_Static_assert(ACTOR_CAR_DEF_PTR         == offsetof(TD5_Actor, car_definition_ptr),      "ACTOR_CAR_DEF_PTR drifted");
-_Static_assert(ACTOR_LIN_VEL_X           == offsetof(TD5_Actor, linear_velocity_x),       "ACTOR_LIN_VEL_X drifted");
-_Static_assert(ACTOR_LIN_VEL_Z           == offsetof(TD5_Actor, linear_velocity_z),       "ACTOR_LIN_VEL_Z drifted");
-_Static_assert(ACTOR_YAW_ACCUM           == offsetof(TD5_Actor, euler_accum) + 4,         "ACTOR_YAW_ACCUM drifted (yaw = euler_accum + 4)");
-_Static_assert(ACTOR_WORLD_POS_X         == offsetof(TD5_Actor, world_pos),               "ACTOR_WORLD_POS_X drifted");
-_Static_assert(ACTOR_WORLD_POS_Z         == offsetof(TD5_Actor, world_pos) + 8,           "ACTOR_WORLD_POS_Z drifted (z = world_pos + 8)");
-_Static_assert(ACTOR_STEERING_CMD        == offsetof(TD5_Actor, steering_command),        "ACTOR_STEERING_CMD drifted");
-_Static_assert(ACTOR_LONGITUDINAL_SPEED  == offsetof(TD5_Actor, longitudinal_speed),      "ACTOR_LONGITUDINAL_SPEED drifted");
-_Static_assert(ACTOR_REAR_AXLE_SLIP      == offsetof(TD5_Actor, rear_axle_slip_excess),   "ACTOR_REAR_AXLE_SLIP drifted");
-_Static_assert(ACTOR_STEERING_RAMP_ACCUM == offsetof(TD5_Actor, steering_ramp_accumulator),"ACTOR_STEERING_RAMP_ACCUM drifted");
-_Static_assert(ACTOR_ENCOUNTER_STEER     == offsetof(TD5_Actor, encounter_steering_cmd),  "ACTOR_ENCOUNTER_STEER drifted");
-_Static_assert(ACTOR_BRAKE_FLAG          == offsetof(TD5_Actor, brake_flag),              "ACTOR_BRAKE_FLAG drifted");
-_Static_assert(ACTOR_THROTTLE_STATE      == offsetof(TD5_Actor, throttle_state),          "ACTOR_THROTTLE_STATE drifted");
-_Static_assert(ACTOR_SLOT_INDEX          == offsetof(TD5_Actor, slot_index),              "ACTOR_SLOT_INDEX drifted");
-_Static_assert(ACTOR_VEHICLE_MODE        == offsetof(TD5_Actor, vehicle_mode),            "ACTOR_VEHICLE_MODE drifted");
-_Static_assert(ACTOR_TRACK_CONTACT_FLAG  == offsetof(TD5_Actor, track_contact_flag),      "ACTOR_TRACK_CONTACT_FLAG drifted");
-_Static_assert(ACTOR_ENCOUNTER_STATE     == offsetof(TD5_Actor, special_encounter_state), "ACTOR_ENCOUNTER_STATE drifted");
+_Static_assert(ACTOR_SPAN_RAW            == 0x080, "ACTOR_SPAN_RAW drifted from the original");
+_Static_assert(ACTOR_SPAN_NORMALIZED     == 0x082, "ACTOR_SPAN_NORMALIZED drifted from the original");
+_Static_assert(ACTOR_SPAN_ACCUM          == 0x084, "ACTOR_SPAN_ACCUM drifted from the original");
+_Static_assert(ACTOR_SUB_LANE_INDEX      == 0x08C, "ACTOR_SUB_LANE_INDEX drifted from the original");
+_Static_assert(ACTOR_PROBE_FL_BASE       == 0x090, "ACTOR_PROBE_FL_BASE drifted from the original");
+_Static_assert(ACTOR_PROBE_FR_BASE       == 0x09C, "ACTOR_PROBE_FR_BASE drifted from the original");
+_Static_assert(ACTOR_PROBE_RL_BASE       == 0x0A8, "ACTOR_PROBE_RL_BASE drifted from the original");
+_Static_assert(ACTOR_PROBE_RR_BASE       == 0x0B4, "ACTOR_PROBE_RR_BASE drifted from the original");
+_Static_assert(ACTOR_CAR_DEF_PTR         == 0x1B8, "ACTOR_CAR_DEF_PTR drifted from the original");
+_Static_assert(ACTOR_LIN_VEL_X           == 0x1CC, "ACTOR_LIN_VEL_X drifted from the original");
+_Static_assert(ACTOR_LIN_VEL_Z           == 0x1D4, "ACTOR_LIN_VEL_Z drifted from the original");
+_Static_assert(ACTOR_YAW_ACCUM           == 0x1F4, "ACTOR_YAW_ACCUM drifted from the original");
+_Static_assert(ACTOR_WORLD_POS_X         == 0x1FC, "ACTOR_WORLD_POS_X drifted from the original");
+_Static_assert(ACTOR_WORLD_POS_Z         == 0x204, "ACTOR_WORLD_POS_Z drifted from the original");
+_Static_assert(ACTOR_STEERING_CMD        == 0x30C, "ACTOR_STEERING_CMD drifted from the original");
+_Static_assert(ACTOR_LONGITUDINAL_SPEED  == 0x314, "ACTOR_LONGITUDINAL_SPEED drifted from the original");
+_Static_assert(ACTOR_REAR_AXLE_SLIP      == 0x320, "ACTOR_REAR_AXLE_SLIP drifted from the original");
+_Static_assert(ACTOR_STEERING_RAMP_ACCUM == 0x33A, "ACTOR_STEERING_RAMP_ACCUM drifted from the original");
+_Static_assert(ACTOR_ENCOUNTER_STEER     == 0x33E, "ACTOR_ENCOUNTER_STEER drifted from the original");
+_Static_assert(ACTOR_BRAKE_FLAG          == 0x36D, "ACTOR_BRAKE_FLAG drifted from the original");
+_Static_assert(ACTOR_THROTTLE_STATE      == 0x36F, "ACTOR_THROTTLE_STATE drifted from the original");
+_Static_assert(ACTOR_SLOT_INDEX          == 0x375, "ACTOR_SLOT_INDEX drifted from the original");
+_Static_assert(ACTOR_VEHICLE_MODE        == 0x379, "ACTOR_VEHICLE_MODE drifted from the original");
+_Static_assert(ACTOR_TRACK_CONTACT_FLAG  == 0x37B, "ACTOR_TRACK_CONTACT_FLAG drifted from the original");
+_Static_assert(ACTOR_ENCOUNTER_STATE     == 0x384, "ACTOR_ENCOUNTER_STATE drifted from the original");
+#endif
 
 /* ========================================================================
  * Helper accessors (cast through char* arithmetic) -- shared state, defined

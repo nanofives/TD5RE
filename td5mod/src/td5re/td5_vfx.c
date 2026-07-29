@@ -20,6 +20,8 @@
 #include "td5_game.h"
 #include "td5_platform.h"
 #include "td5re.h"
+/* TD5_ACTOR_STRIDE: now sizeof(TD5_Actor), so the struct must be in scope. */
+#include "../../../re/include/td5_actor_struct.h"
 #include "td5_config.h"   /* shared TD5RE_* env-knob helpers */
 
 #include <stdbool.h>

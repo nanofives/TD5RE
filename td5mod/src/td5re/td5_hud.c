@@ -38,6 +38,8 @@
 #include "td5_physics.h"
 #include "td5_ai.h"
 #include "td5re.h"
+/* TD5_ACTOR_STRIDE: now sizeof(TD5_Actor), so the struct must be in scope. */
+#include "../../../re/include/td5_actor_struct.h"
 #include "td5_vectorui.h"   /* resolution-independent VectorUI primitives (SDF gauge, text) */
 #include "td5_font.h"       /* shared native menu TTF glyph cache (pause-menu text) */
 #include "td5_i18n.h"       /* [I18N] TR() runtime string translation */
