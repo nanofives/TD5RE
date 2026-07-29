@@ -358,6 +358,12 @@ int td5_track_parse_models_dat(const void *data, size_t size)
         }
     }
 
+    /* [x64 Stage 2] Widen the blob's truncated mesh words into a runtime block
+     * table. Must run AFTER the post-relocation sweep above, which is still
+     * zeroing bad slots -- building earlier would capture meshes that sweep
+     * then rejects, leaving the runtime and blob views disagreeing. */
+    td5_track_build_models_runtime_lists();
+
     if (s_models_display_list_count > 0 && s_span_count > 0)
         rebuild_span_display_list_mapping();
 

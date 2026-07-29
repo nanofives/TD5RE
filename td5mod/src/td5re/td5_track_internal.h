@@ -61,5 +61,11 @@ int  get_display_list_first_mesh_header(int index,
                                         const TD5_TrackRawMeshHeader **out_mesh);
 void rebuild_span_display_list_mapping(void);
 void free_models_dat_runtime(void);
+/* [x64 Stage 2] Build the runtime TD5_SpanDisplayList for every blob-resident
+ * MODELS.DAT entry. Call ONCE, AFTER relocation and after the post-relocation
+ * validation sweep -- that sweep still zeroes slots, so building earlier would
+ * capture meshes the renderer would have rejected. Returns 0 on allocation
+ * failure, in which case the getters return NULL and the caller falls back. */
+int  td5_track_build_models_runtime_lists(void);
 
 #endif /* TD5_TRACK_INTERNAL_H */

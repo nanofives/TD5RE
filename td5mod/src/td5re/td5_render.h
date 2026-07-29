@@ -188,7 +188,7 @@ int  td5_render_is_sphere_visible(float cx, float cy, float cz, float radius);
 int  td5_render_test_mesh_frustum(TD5_MeshHeader *mesh, float *out_depth);
 
 /* --- Mesh rendering --- */
-void td5_render_span_display_list(void *display_list_block);
+void td5_render_span_display_list(const TD5_SpanDisplayList *display_list_block);
 void td5_render_prepared_mesh(TD5_MeshHeader *mesh);
 void td5_render_actors_for_view(int view_index);
 void td5_render_set_vehicle_mesh(int slot, TD5_MeshHeader *mesh);

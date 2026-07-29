@@ -1150,13 +1150,15 @@ int td6_banner_roadcenter_x(float ref_x, float ref_z, float *out_rx)
  * ("STA" at X=-2750 and "ART" at X=+2750, combined centre 0); the whole gantry
  * must shift by ONE common delta (road_centre - group_centre) or the halves
  * collapse onto each other. Falls back to my_x for a single-mesh gantry. */
-float td6_banner_group_center_x(uint32_t *block, int count,
+float td6_banner_group_center_x(const TD5_SpanDisplayList *block, int count,
                                        float my_z, float my_x)
 {
     float sum = 0.0f;
     int nb = 0, j;
+    if (!block || !block->meshes) return my_x;
+    if (count > (int)block->count) count = (int)block->count;
     for (j = 0; j < count; j++) {
-        TD5_MeshHeader *m = (TD5_MeshHeader *)(uintptr_t)block[j + 1];
+        TD5_MeshHeader *m = block->meshes[j];
         float dz;
         if (!m || (uintptr_t)m < 0x100000u || !td5_track_is_valid_mesh_ptr(m))
             continue;
@@ -3578,13 +3580,10 @@ static int ribbon_clip_near(const TD5_RibbonCamV *tri, float nearz, TD5_RibbonCa
  * mesh pointer + centroid; recomputes if MODELS.DAT reloads (pointer changes). */
 TD5_MeshHeader *td5_render_drag_gantry(void)
 {
-    void *e = td5_track_get_display_list_entry(26);
-    uint32_t *b;
+    const TD5_SpanDisplayList *e = td5_track_get_display_list_entry(26);
     TD5_MeshHeader *m;
-    if (!e) return NULL;
-    b = (uint32_t *)e;
-    if ((int)b[0] < 1) return NULL;
-    m = (TD5_MeshHeader *)(uintptr_t)b[1];
+    if (!e || e->count < 1 || !e->meshes) return NULL;
+    m = e->meshes[0];
     if (!m || !td5_track_is_valid_mesh_ptr(m)) return NULL;
     /* Sanity: only level030's gantry sits in the original-finish Z band. Anything
      * else means this isn't the drag strip — don't grab it. */
@@ -3622,7 +3621,13 @@ void td5_render_drag_finish_line(void)   /* extern: mesh TU calls it (seam heade
     TD5_MeshHeader *g;
     int fspan, lanes, fx, fy, fz;
     float finish_z;
-    uint32_t fake[2];
+    /* [x64 Stage 2] The synthesized one-entry block. This producer is why the
+     * block TYPE had to become the interface: it has no display-list/slot
+     * identity, so the side-table design considered earlier could not represent
+     * it at all, and would have silently rendered nothing here. Expressing it
+     * is now trivial -- a block is just a count and a mesh array. */
+    TD5_MeshHeader *fake_slot;
+    TD5_SpanDisplayList fake;
 
     if (!g_td5.drag_race_enabled) return;
     g = td5_render_drag_gantry();
@@ -3638,10 +3643,11 @@ void td5_render_drag_finish_line(void)   /* extern: mesh TU calls it (seam heade
     if (!td5_track_get_span_lane_world(fspan, lanes / 2, &fx, &fy, &fz)) return;
     finish_z = (float)fz / 256.0f;
 
-    fake[0] = 1;
-    fake[1] = (uint32_t)(uintptr_t)g;            /* 1-entry block: just the gantry */
+    fake_slot    = g;                            /* 1-entry block: just the gantry */
+    fake.count   = 1;
+    fake.meshes  = &fake_slot;
     s_dl_z_offset = finish_z - s_drag_gantry_z;  /* slide it to the real finish */
-    td5_render_span_display_list((void *)fake);
+    td5_render_span_display_list(&fake);
     s_dl_z_offset = 0.0f;
 
     {
@@ -3671,15 +3677,12 @@ static int td5_render_drag_road_texture_page(void)
     if (s_drag_road_tex_page != -2) return s_drag_road_tex_page;
     s_drag_road_tex_page = -1;
     for (dl = 0; dl <= 35; dl++) {
-        void *e = td5_track_get_display_list_entry(dl);
-        uint32_t *b;
+        const TD5_SpanDisplayList *e = td5_track_get_display_list_entry(dl);
         TD5_MeshHeader *m;
         const TD5_PrimitiveCmd *cmds;
         int nc, c;
-        if (!e) continue;
-        b = (uint32_t *)e;
-        if ((int)b[0] < 1) continue;
-        m = (TD5_MeshHeader *)(uintptr_t)b[1];
+        if (!e || e->count < 1 || !e->meshes) continue;
+        m = e->meshes[0];
         if (!m || !td5_track_is_valid_mesh_ptr(m)) continue;
         cmds = (const TD5_PrimitiveCmd *)(uintptr_t)m->commands_offset;
         nc = m->command_count;

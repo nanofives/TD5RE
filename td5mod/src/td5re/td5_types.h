@@ -723,6 +723,37 @@ _Static_assert(offsetof(TD5_MeshHeader, commands_offset) == 0x2C, "TD5_MeshHeade
 _Static_assert(offsetof(TD5_MeshHeader, vertices_offset) == 0x30, "TD5_MeshHeader.vertices_offset drifted");
 _Static_assert(offsetof(TD5_MeshHeader, normals_offset)  == 0x34, "TD5_MeshHeader.normals_offset drifted");
 
+/* [x64 Stage 2] RUNTIME span display list -- "a count, then that many meshes".
+ *
+ * On disk (and in the MODELS.DAT blob) a display-list block is a uint32_t[]:
+ * element 0 is the count, then one word per mesh holding a byte offset that
+ * relocation rewrites IN PLACE into a truncated pointer. That truncation is
+ * the 64-bit-hostile part -- on x86_64 a TD5_MeshHeader* does not fit in a
+ * uint32_t, and storing one there is valid C that fails SILENTLY above 4 GB.
+ * The compiler cannot find that class of bug, which is why the drag golden
+ * (td5_selftest.c, "race-golden-drag") exists to guard this path.
+ *
+ * The blob keeps its uint32_t layout -- it genuinely cannot change, because
+ * td5_track_parser.c's MODELS.DAT format autodetection uses "first DWORD in
+ * [1,256]" as the DEFINITION of a valid block. Truncation is therefore
+ * confined to parse time, and everything downstream uses this struct.
+ *
+ * The block type is deliberately a real INTERFACE, not an implementation
+ * detail. An earlier attempt used a side table keyed by (display-list, slot)
+ * and had to be abandoned: td5_render.c synthesizes a one-entry block on the
+ * STACK for the drag finish gantry, which has no such identity, so that design
+ * could not represent it and would have silently rendered nothing there.
+ *
+ * IDENTITY IS LOAD-BEARING. td5_render_mesh.c dedups submitted blocks by
+ * POINTER (s_submitted[], the munich-gantry-double-submit fix), and the drag
+ * tiling loops re-invoke the renderer on the SAME block as an immutable
+ * template while mutating a global z-offset. Blocks handed out by the getters
+ * must be stable cached objects -- never freshly built temporaries. */
+typedef struct TD5_SpanDisplayList {
+    uint32_t          count;    /* number of entries in meshes[] */
+    TD5_MeshHeader  **meshes;   /* count real pointers; entries may be NULL */
+} TD5_SpanDisplayList;
+
 /** Primitive command (16 bytes) */
 typedef struct TD5_PrimitiveCmd {
     int16_t  dispatch_type;

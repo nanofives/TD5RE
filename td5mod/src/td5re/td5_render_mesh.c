@@ -1045,15 +1045,17 @@ static int td6_reverse_banner_page(int page)
 
 /* --- Mesh Rendering --- */
 
-void td5_render_span_display_list(void *display_list_block)
+void td5_render_span_display_list(const TD5_SpanDisplayList *display_list_block)
 {
     /*
      * RenderTrackSpanDisplayList (0x431270):
      * Core track world renderer. Iterates sub-meshes in a display list block.
      *
-     * Block layout:
-     *   [0] = sub_mesh_count
-     *   [1..N] = pointers to MeshResourceHeader (relocated by ParseModelsDat)
+     * [x64 Stage 2] The block is now a TD5_SpanDisplayList carrying real
+     * TD5_MeshHeader pointers. It used to be a uint32_t[] -- {count, then
+     * truncated pointers} -- read straight out of the MODELS.DAT blob. The
+     * blob still stores it that way (its layout cannot change; the format
+     * autodetection keys on it), but the truncation is confined to parse time.
      */
     static int s_debug_reject_ptr = 0;
     static int s_debug_reject_counts = 0;
@@ -1084,10 +1086,11 @@ void td5_render_span_display_list(void *display_list_block)
 
     if (!display_list_block) return;
 
-    uint32_t *block = (uint32_t *)display_list_block;
-    int count = (int)block[0];
+    const TD5_SpanDisplayList *block = display_list_block;
+    int count = (int)block->count;
     s_debug_dl_calls++;
     if (count <= 0 || count > 256) return; /* sanity */
+    if (!block->meshes) return;
 
     TD5_LOG_D(LOG_TAG,
               "span display list: block=%p mesh_range=[0,%d)",
@@ -1162,7 +1165,7 @@ void td5_render_span_display_list(void *display_list_block)
     }
 
     for (int i = 0; i < count; i++) {
-        TD5_MeshHeader *mesh = (TD5_MeshHeader *)(uintptr_t)block[i + 1];
+        TD5_MeshHeader *mesh = block->meshes[i];
         if (!mesh || (uintptr_t)mesh < 0x100000u || !td5_track_is_valid_mesh_ptr(mesh)) {
             s_debug_reject_ptr++; continue;
         }
@@ -1598,13 +1601,10 @@ void td5_render_set_cop_mesh(TD5_MeshHeader *mesh) { s_cop_mesh = mesh; }
  * the 24.8 world coord / 256). Returns 1 on success. */
 static int td5_render_dl_first_bcz(int idx, float *out_z)
 {
-    void *e = td5_track_get_display_list_entry(idx);
-    uint32_t *b;
+    const TD5_SpanDisplayList *e = td5_track_get_display_list_entry(idx);
     TD5_MeshHeader *m;
-    if (!e) return 0;
-    b = (uint32_t *)e;
-    if ((int)b[0] < 1) return 0;
-    m = (TD5_MeshHeader *)(uintptr_t)b[1];
+    if (!e || e->count < 1 || !e->meshes) return 0;
+    m = e->meshes[0];
     if (!m || !td5_track_is_valid_mesh_ptr(m)) return 0;
     *out_z = m->bounding_center_z;
     return 1;
@@ -1620,8 +1620,7 @@ static int td5_render_dl_first_bcz(int idx, float *out_z)
  * s_dl_z_offset) draws only the 2-3 copies near the camera. Drag-only. */
 void td5_render_drag_stadium_extension(void)
 {
-    void *tmpl, *cap;
-    uint32_t *b;
+    const TD5_SpanDisplayList *tmpl, *cap;
     TD5_MeshHeader *m;
     float tz, step, stride, T, seam_z, last_T, cap_z = 0.0f;
     /* [DRAG DISTANCE 2026-06-30] End the stadium near the CHOSEN finish, not always
@@ -1664,10 +1663,8 @@ void td5_render_drag_stadium_extension(void)
     if (!g_td5.drag_race_enabled) return;
 
     tmpl = td5_track_get_display_list_entry(18);  /* clean mid-stadium block */
-    if (!tmpl) return;
-    b = (uint32_t *)tmpl;
-    if ((int)b[0] < 1) return;
-    m = (TD5_MeshHeader *)(uintptr_t)b[1];
+    if (!tmpl || tmpl->count < 1 || !tmpl->meshes) return;
+    m = tmpl->meshes[0];
     if (!m || !td5_track_is_valid_mesh_ptr(m)) return;
     tz = m->bounding_center_z;
 
@@ -1721,7 +1718,7 @@ void td5_render_drag_stadium_extension(void)
      * EXACTLY. Gated on s_drag_gantry_mesh (gantry identified => being suppressed) so
      * there is no 1-frame double-draw before the suppress kicks in. */
     if (s_drag_gantry_mesh) {
-        void *adj = td5_track_get_display_list_entry(27);
+        const TD5_SpanDisplayList *adj = td5_track_get_display_list_entry(27);
         float z25 = 0.0f, z27 = 0.0f;
         if (adj && td5_render_dl_first_bcz(25, &z25) && td5_render_dl_first_bcz(27, &z27)) {
             float f; int nf = 0;
@@ -1739,9 +1736,8 @@ void td5_render_drag_stadium_extension(void)
      * block past it — so the enclosure closes with no gap regardless of step. */
     cap = td5_track_get_display_list_entry(35);
     if (cap) {
-        uint32_t *cb = (uint32_t *)cap;
-        if ((int)cb[0] >= 1) {
-            TD5_MeshHeader *cm = (TD5_MeshHeader *)(uintptr_t)cb[1];
+        if (cap->count >= 1 && cap->meshes) {
+            TD5_MeshHeader *cm = cap->meshes[0];
             if (cm && td5_track_is_valid_mesh_ptr(cm)) {
                 cap_z = last_T - stride;
                 s_dl_z_offset = cap_z - cm->bounding_center_z;
@@ -2178,7 +2174,7 @@ void td5_render_actors_for_view(int view_index)
          * It is per-frame-per-pane state by design -> plain stack local
          * (16KB, fine for both the main thread and the job-pool workers). */
         #define TD5_RENDER_SUBMITTED_CAP 4096
-        const void *s_submitted[TD5_RENDER_SUBMITTED_CAP];
+        const TD5_SpanDisplayList *s_submitted[TD5_RENDER_SUBMITTED_CAP];
         int submitted_count = 0;
 
         /* [DRAG LENGTHEN] MODELS.DAT entries past the insertion point are baked at
@@ -2212,7 +2208,8 @@ void td5_render_actors_for_view(int view_index)
                 }
             }
 
-            void *display_list = td5_track_get_display_list_entry(entry_idx);
+            const TD5_SpanDisplayList *display_list =
+                td5_track_get_display_list_entry(entry_idx);
             if (!display_list)
                 continue;
 
@@ -2250,7 +2247,8 @@ void td5_render_actors_for_view(int view_index)
             if (blo < ring)         blo = ring;
             if (bhi >= total_spans) bhi = total_spans - 1;
             for (int span_index = blo; span_index <= bhi; span_index++) {
-                void *display_list = td5_track_get_display_list(span_index);
+                const TD5_SpanDisplayList *display_list =
+                    td5_track_get_display_list(span_index);
                 if (!display_list)
                     continue;
                 int dup = 0;

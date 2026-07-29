@@ -187,10 +187,18 @@ int              s_models_display_list_count = 0;
 static int             *s_span_display_list_indices = NULL;
 
 /** Display list table (parallel to span array, built during load) */
-static void           **s_display_lists = NULL;
-static void            *s_fallback_display_list = NULL;
+static TD5_SpanDisplayList **s_display_lists = NULL;
+static TD5_SpanDisplayList  *s_fallback_display_list = NULL;
 static int              s_display_lists_are_generated_meshes = 0;
 static int              s_display_list_count = 0;
+
+/** [x64 Stage 2] Runtime blocks for the blob-resident MODELS.DAT display
+ *  lists, one per entry, parallel to s_models_entry_offsets. Built ONCE after
+ *  relocation (see td5_track_build_models_runtime_lists) so each entry keeps a
+ *  stable address -- the render walk dedups blocks by pointer identity. */
+static TD5_SpanDisplayList *s_models_dl = NULL;
+static TD5_MeshHeader     **s_models_dl_meshes = NULL;   /* one flat backing array */
+static int                  s_models_dl_count = 0;
 
 /** Route tables (LEFT.TRK / RIGHT.TRK) -- byte arrays, 3 bytes per span */
 static uint8_t         *s_route_left = NULL;
@@ -217,19 +225,34 @@ static int              s_strip_metadata[4];
  */
 #define TRACK_FALLBACK_TEXTURE_PAGE 0
 
+/* [x64 Stage 2] The first member IS the display-list block, so a
+ * TD5_FallbackDisplayList* and its TD5_SpanDisplayList* are interchangeable --
+ * which is what lets this be handed out by the getters. It must stay first.
+ * Previously the first two words were a hand-rolled {count, truncated ptr}
+ * block; this is the same thing with a real pointer and a name. */
 typedef struct TD5_FallbackDisplayList {
-    uint32_t          sub_mesh_count;
-    uint32_t          mesh_ptr;
-    TD5_MeshHeader    mesh;
-    TD5_PrimitiveCmd  cmd;
-    TD5_MeshVertex    verts[4];
-    TD5_VertexNormal  norms[4];
+    TD5_SpanDisplayList dl;
+    TD5_MeshHeader     *mesh_slot;   /* dl.meshes points at this one-entry array */
+    TD5_MeshHeader      mesh;
+    TD5_PrimitiveCmd    cmd;
+    TD5_MeshVertex      verts[4];
+    TD5_VertexNormal    norms[4];
 } TD5_FallbackDisplayList;
+_Static_assert(offsetof(TD5_FallbackDisplayList, dl) == 0,
+               "the block must be the first member -- the getters hand out "
+               "the struct pointer as a TD5_SpanDisplayList *");
 
 /* TD5_TrackRawMeshHeader now in td5_track_internal.h */
 
+static void free_models_runtime_lists(void);
+
 void free_models_dat_runtime(void)
 {
+    /* [x64 Stage 2] The runtime blocks point INTO the blob, so they must die
+     * with it -- otherwise the getters hand out dangling meshes on the next
+     * level load. */
+    free_models_runtime_lists();
+
     if (s_models_blob) {
         free(s_models_blob);
         s_models_blob = NULL;
@@ -252,6 +275,91 @@ void free_models_dat_runtime(void)
     s_models_display_list_count = 0;
     s_model_count = 0;
     memset(s_models, 0, sizeof(s_models));
+}
+
+/* [x64 Stage 2] Runtime blocks for the blob-resident MODELS.DAT entries.
+ *
+ * Built in ONE pass after relocation, reading the blob's now-final uint32_t
+ * slots. Building here rather than inside the relocation loop is deliberate:
+ * the post-relocation validation sweep in td5_track_parser.c still zeroes bad
+ * slots afterwards, so an earlier build would capture meshes the renderer
+ * would then have rejected -- and the two views would disagree.
+ *
+ * One flat backing array holds every entry's pointers, so this is two
+ * allocations total rather than two per entry, and each block's address is
+ * stable for the level's lifetime (required: blocks are deduped by pointer). */
+static void free_models_runtime_lists(void)
+{
+    free(s_models_dl);
+    s_models_dl = NULL;
+    free(s_models_dl_meshes);
+    s_models_dl_meshes = NULL;
+    s_models_dl_count = 0;
+}
+
+int td5_track_build_models_runtime_lists(void)
+{
+    size_t total_slots = 0;
+    size_t cursor = 0;
+    int dl;
+
+    free_models_runtime_lists();
+
+    if (!s_models_blob || !s_models_entry_offsets || s_models_display_list_count <= 0)
+        return 0;
+
+    /* Pass 1: total entry count, using the same validity rules the blob
+     * readers use, so the runtime view matches the blob view exactly. */
+    for (dl = 0; dl < s_models_display_list_count; dl++) {
+        uint32_t sub_count;
+        if (s_models_entry_offsets[dl] == 0) continue;
+        sub_count = *(const uint32_t *)(const void *)
+                        (s_models_blob + s_models_entry_offsets[dl]);
+        if (sub_count == 0 || sub_count > 256) continue;
+        total_slots += sub_count;
+    }
+    if (total_slots == 0)
+        return 0;
+
+    s_models_dl = (TD5_SpanDisplayList *)calloc(
+        (size_t)s_models_display_list_count, sizeof(*s_models_dl));
+    s_models_dl_meshes = (TD5_MeshHeader **)calloc(
+        total_slots, sizeof(*s_models_dl_meshes));
+    if (!s_models_dl || !s_models_dl_meshes) {
+        free_models_runtime_lists();
+        return 0;
+    }
+    s_models_dl_count = s_models_display_list_count;
+
+    /* Pass 2: hand each block its slice of the backing array and widen the
+     * blob's truncated words into real pointers. On i686 this is the identity
+     * conversion, which is what makes the change inert here and lets the
+     * goldens prove it; on x86_64 the blob word is the lossy part and this is
+     * where the real pointer has to come from instead (increment 2). */
+    for (dl = 0; dl < s_models_display_list_count; dl++) {
+        const uint8_t *block_base;
+        uint32_t sub_count, j;
+
+        if (s_models_entry_offsets[dl] == 0) continue;
+        block_base = s_models_blob + s_models_entry_offsets[dl];
+        sub_count = *(const uint32_t *)(const void *)block_base;
+        if (sub_count == 0 || sub_count > 256) continue;
+
+        s_models_dl[dl].count  = sub_count;
+        s_models_dl[dl].meshes = s_models_dl_meshes + cursor;
+        for (j = 0; j < sub_count; j++) {
+            uint32_t ptr_val = *(const uint32_t *)(const void *)
+                                   (block_base + 4 + j * 4);
+            s_models_dl_meshes[cursor + j] =
+                (TD5_MeshHeader *)(uintptr_t)ptr_val;
+        }
+        cursor += sub_count;
+    }
+
+    TD5_LOG_I("track",
+              "runtime display lists: %d blocks, %u mesh slots",
+              s_models_dl_count, (unsigned)total_slots);
+    return 1;
 }
 
 static void free_display_lists(void)
@@ -288,8 +396,9 @@ static int build_placeholder_display_lists(void)
     if (!fallback)
         return 0;
 
-    fallback->sub_mesh_count = 1;
-    fallback->mesh_ptr = (uint32_t)(uintptr_t)&fallback->mesh;
+    fallback->mesh_slot   = &fallback->mesh;
+    fallback->dl.count    = 1;
+    fallback->dl.meshes   = &fallback->mesh_slot;
     fallback->mesh.render_type = 0;
     fallback->mesh.texture_page_id = TRACK_FALLBACK_TEXTURE_PAGE;
     fallback->mesh.command_count = 1;
@@ -333,8 +442,13 @@ static int build_placeholder_display_lists(void)
         fallback->norms[i].visible_flag = 1;
     }
 
-    s_fallback_display_list = fallback;
-    s_display_lists = (void **)calloc((size_t)list_count, sizeof(void *));
+    /* The block is the struct's first member, so this alias is exact -- see the
+     * _Static_assert on TD5_FallbackDisplayList. free_display_lists() frees it
+     * through this pointer, which is why the cast must stay a plain alias and
+     * not a copy. */
+    s_fallback_display_list = &fallback->dl;
+    s_display_lists = (TD5_SpanDisplayList **)calloc((size_t)list_count,
+                                                     sizeof(*s_display_lists));
     if (!s_display_lists) {
         free(s_fallback_display_list);
         s_fallback_display_list = NULL;
@@ -2744,7 +2858,12 @@ int td5_track_td6_road_band(int span_index, int lane_count, int *out_lo, int *ou
     return (best_lo > 0 || best_hi < lane_count - 1);
 }
 
-static void *build_span_strip_display_list(int span_index)
+/* Byte size of a generated block's header: the block struct followed by its
+ * one-entry mesh-pointer array, with the array's own alignment respected. */
+#define TRACK_GEN_DL_HEADER_BYTES \
+    (sizeof(TD5_SpanDisplayList) + sizeof(TD5_MeshHeader *))
+
+static TD5_SpanDisplayList *build_span_strip_display_list(int span_index)
 {
     const TD5_StripSpan *sp;
     int lane_count;
@@ -2752,7 +2871,8 @@ static void *build_span_strip_display_list(int span_index)
     int vertex_count;
     size_t bytes;
     uint8_t *mem;
-    uint32_t *header;
+    TD5_SpanDisplayList *header;
+    TD5_MeshHeader **mesh_slot;
     TD5_MeshHeader *mesh;
     TD5_PrimitiveCmd *cmds;
     TD5_MeshVertex *verts;
@@ -2774,7 +2894,13 @@ static void *build_span_strip_display_list(int span_index)
 
     command_count = lane_count;
     vertex_count = lane_count * 4;
-    bytes = sizeof(uint32_t) * 2
+    /* [x64 Stage 2] Header + payload stay ONE allocation (free_display_lists
+     * frees each block with a single free()), but the header is now the block
+     * struct plus its one-entry mesh array rather than two bare uint32_t.
+     * The payload offset is derived from those sizes -- it used to be a baked
+     * `sizeof(uint32_t) * 2`, which would have silently mis-placed the mesh
+     * the moment the header changed width. */
+    bytes = TRACK_GEN_DL_HEADER_BYTES
           + sizeof(TD5_MeshHeader)
           + sizeof(TD5_PrimitiveCmd) * (size_t)command_count
           + sizeof(TD5_MeshVertex) * (size_t)vertex_count
@@ -2784,13 +2910,15 @@ static void *build_span_strip_display_list(int span_index)
     if (!mem)
         return NULL;
 
-    header = (uint32_t *)mem;
-    mesh = (TD5_MeshHeader *)(mem + sizeof(uint32_t) * 2);
+    header = (TD5_SpanDisplayList *)(void *)mem;
+    mesh_slot = (TD5_MeshHeader **)(void *)(mem + sizeof(TD5_SpanDisplayList));
+    mesh = (TD5_MeshHeader *)(void *)(mem + TRACK_GEN_DL_HEADER_BYTES);
     cmds = (TD5_PrimitiveCmd *)((uint8_t *)mesh + sizeof(*mesh));
     verts = (TD5_MeshVertex *)((uint8_t *)cmds + sizeof(*cmds) * (size_t)command_count);
 
-    header[0] = 1;
-    header[1] = (uint32_t)(uintptr_t)mesh;
+    *mesh_slot = mesh;
+    header->count = 1;
+    header->meshes = mesh_slot;
 
     mesh->render_type = 0;
     mesh->texture_page_id = TRACK_FALLBACK_TEXTURE_PAGE;
@@ -2866,12 +2994,12 @@ static void *build_span_strip_display_list(int span_index)
     if (mesh->bounding_radius < 0.1f)
         mesh->bounding_radius = 0.1f;
 
-    return mem;
+    return header;
 }
 
 static int build_strip_display_lists(void)
 {
-    void **lists;
+    TD5_SpanDisplayList **lists;
     int built = 0;
 
     if (!s_span_array || !s_vertex_table || s_span_count <= 0)
@@ -2879,7 +3007,7 @@ static int build_strip_display_lists(void)
 
     free_display_lists();
 
-    lists = (void **)calloc((size_t)s_span_count, sizeof(void *));
+    lists = (TD5_SpanDisplayList **)calloc((size_t)s_span_count, sizeof(*lists));
     if (!lists)
         return build_placeholder_display_lists();
 
@@ -8487,16 +8615,18 @@ const void *td5_track_get_models_display_list_raw(int index, size_t *size_out)
  * Returns NULL when the entry is outside the MODELS.DAT range (caller
  * should skip without falling back, mirroring orig's behavior).
  */
-void *td5_track_get_display_list_entry(int entry_index)
+const TD5_SpanDisplayList *td5_track_get_display_list_entry(int entry_index)
 {
-    if (!s_models_blob || !s_models_entry_offsets || s_models_display_list_count <= 0)
+    if (!s_models_dl || s_models_dl_count <= 0)
         return NULL;
-    if (entry_index < 0 || entry_index >= s_models_display_list_count)
+    if (entry_index < 0 || entry_index >= s_models_dl_count)
         return NULL;
-    uint32_t off = s_models_entry_offsets[entry_index];
-    if (off == 0)
+    /* An entry with no blob offset, or one whose count failed validation,
+     * was left zeroed by the builder -- same "no geometry here" answer the
+     * old `off == 0` test gave. */
+    if (s_models_dl[entry_index].count == 0)
         return NULL;
-    return s_models_blob + off;
+    return &s_models_dl[entry_index];
 }
 
 /**
@@ -8514,7 +8644,7 @@ void *td5_track_get_display_list_entry(int entry_index)
  * span-indexed entrypoint remains for the STRIP fallback / branch-span
  * path (orig has no fallback — separate cleanup work item).
  */
-void *td5_track_get_display_list(int span_index)
+const TD5_SpanDisplayList *td5_track_get_display_list(int span_index)
 {
     /* Prefer real MODELS.DAT display lists when available.
      * Original render loop (0x42baf4) converts span_index to display list
@@ -8532,8 +8662,7 @@ void *td5_track_get_display_list(int span_index)
      * before the >>2.  Without the mirror, reverse renders MODELS.DAT
      * geometry from forward span_index>>2, which can be ~1.5M world units
      * away from the player and gets frustum-culled (Sydney-reverse 0/256). */
-    if (s_models_blob && s_models_entry_offsets &&
-        s_models_display_list_count > 0 && span_index >= 0) {
+    if (s_models_dl && s_models_dl_count > 0 && span_index >= 0) {
         int eff_index = span_index;
         /* Reverse-direction mirror operates on the main-road ring length
          * (g_trackTotalSpanCount in the original = STRIP/STRIPB header[1]),
@@ -8545,10 +8674,9 @@ void *td5_track_get_display_list(int span_index)
         if (g_td5.reverse_direction && ring > 0 && span_index < ring)
             eff_index = ring - 1 - span_index;
         int dl_index = eff_index >> 2;  /* ~4 spans per display list block */
-        if (dl_index >= 0 && dl_index < s_models_display_list_count) {
-            uint32_t off = s_models_entry_offsets[dl_index];
-            if (off != 0)
-                return s_models_blob + off;
+        if (dl_index >= 0 && dl_index < s_models_dl_count) {
+            if (s_models_dl[dl_index].count != 0)
+                return &s_models_dl[dl_index];
         }
         /* Don't return NULL here — branch spans (>= ring_length) may have
          * dl_index outside the MODELS.DAT range. Fall through to STRIP.DAT

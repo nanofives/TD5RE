@@ -471,7 +471,7 @@ int debug_line_project(float wx, float wy, float wz, uint32_t argb,
 void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
                              int tex_page);
 /* TD6 banner sibling-group screen-center X (banner align helper, core). */
-float td6_banner_group_center_x(uint32_t *block, int count,
+float td6_banner_group_center_x(const TD5_SpanDisplayList *block, int count,
                                 float my_z, float my_x);
 /* Daylight lighting override (mesh TU; track-lighting fallback calls it). */
 void td5_render_set_override_daylight(void);
