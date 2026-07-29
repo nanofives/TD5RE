@@ -1492,7 +1492,7 @@ static int td5_ai_classify_track_offset_clamp(int slot, int track_offset_bias) {
     rs    = route_state(slot);
     actor = actor_ptr(slot);
     span_norm = (int)(int16_t)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
-    cardef = (int16_t *)(intptr_t)ACTOR_I32(actor, ACTOR_CAR_DEF_PTR);
+    cardef = (int16_t *)ACTOR_PTR(actor, ACTOR_CAR_DEF_PTR);
     if (!cardef) {
         return 0;
     }
@@ -1859,7 +1859,7 @@ static void td5_ai_refresh_route_state_slot(int slot) {
         {
             int classify = td5_ai_classify_track_offset_clamp_v2(
                 slot, rs[RS_TRACK_OFFSET_BIAS]);
-            int16_t *cardef = (int16_t *)(intptr_t)ACTOR_I32(actor, ACTOR_CAR_DEF_PTR);
+            int16_t *cardef = (int16_t *)ACTOR_PTR(actor, ACTOR_CAR_DEF_PTR);
             const uint8_t *table = td5_ai_route_table(rs[RS_ROUTE_TABLE_PTR]);
             int route_byte_now = 0;
             if (table && span_norm_i >= 0) {
@@ -3282,7 +3282,7 @@ static int td5_ai_classify_track_offset_clamp_v2(int param_1, int param_2) {
         iVar4 = (iVar3 - g_strip_span_count) + 4;
     }
 
-    self_cd = (int16_t *)(intptr_t)ACTOR_I32(self, ACTOR_CAR_DEF_PTR);
+    self_cd = (int16_t *)ACTOR_PTR(self, ACTOR_CAR_DEF_PTR);
     if (!route_bytes || !self_cd) return 0;
 
     /* SampleTrackTargetPoint(iVar5, route_bytes[iVar4*3], local_c,
@@ -3396,7 +3396,7 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
 
             classify_result = td5_ai_classify_track_offset_clamp(i, route_state_ptr[RS_TRACK_OFFSET_BIAS]);
 
-            peer_cd = (int16_t *)(intptr_t)ACTOR_I32(self, ACTOR_CAR_DEF_PTR);
+            peer_cd = (int16_t *)ACTOR_PTR(self, ACTOR_CAR_DEF_PTR);
             if (!peer_cd) continue;
             offset_a = (int32_t)peer_cd[0];      /* cardef+0x00 */
             offset_b = (int32_t)peer_cd[4];      /* cardef+0x08 */
@@ -3452,7 +3452,7 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
              *   EAX = (ECX*8 - ECX) << 4 + ECX = ECX*0x71 → then SHL 3 → ECX*0x388
              *   EBX = *(DWORD*)(EAX*8 + 0x4ab2c0) = actor[ECX].field_0x1b8 = self_cd
              * I.e. uses SELF's cardef. */
-            cd_for_dir = (int16_t *)(intptr_t)ACTOR_I32(self, ACTOR_CAR_DEF_PTR);
+            cd_for_dir = (int16_t *)ACTOR_PTR(self, ACTOR_CAR_DEF_PTR);
             if (cd_for_dir) {
                 int32_t cd_lo = (int32_t)cd_for_dir[0]; /* cardef+0x00 */
                 int32_t cd_hi = (int32_t)cd_for_dir[4]; /* cardef+0x08 */
@@ -3538,7 +3538,7 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
              * See memory/reference_v1_v2_classify_clamp_fix_2026-05-21.md. */
             classify_result = td5_ai_classify_track_offset_clamp_v2(i, route_state_ptr[RS_TRACK_OFFSET_BIAS]);
 
-            peer_cd = (int16_t *)(intptr_t)ACTOR_I32(self, ACTOR_CAR_DEF_PTR);
+            peer_cd = (int16_t *)ACTOR_PTR(self, ACTOR_CAR_DEF_PTR);
             if (!peer_cd) continue;
 
             if (classify_result == 1) {
@@ -3580,7 +3580,7 @@ int td5_ai_find_offset_peer(int *route_state_ptr) {
             int32_t mid_hi = bp_rs[RS_ACTIVE_UPPER_BOUND];
             int32_t mid_sum = mid_hi + mid_lo;
             int32_t mid = mid_sum >> 1;
-            int16_t *cd_for_dir = (int16_t *)(intptr_t)ACTOR_I32(self, ACTOR_CAR_DEF_PTR);
+            int16_t *cd_for_dir = (int16_t *)ACTOR_PTR(self, ACTOR_CAR_DEF_PTR);
             int32_t val_r, val_l, abs_r, abs_l;
 
             if (cd_for_dir) {
@@ -3728,7 +3728,10 @@ static int td5_ai_setup_phantom_peer_for_solo0(int32_t *self_rs) {
     if (self_rs[RS_SLOT_INDEX] != 0) return -1;
 
     char *self_actor = actor_ptr(0);
-    int32_t self_cd = ACTOR_I32(self_actor, ACTOR_CAR_DEF_PTR);
+    /* [x64 Stage 3] car_definition_ptr is a POINTER field: read it at pointer
+     * width, not as int32. Only truth-tested and copied here, so the type is
+     * the whole change. */
+    void *self_cd = ACTOR_PTR(self_actor, ACTOR_CAR_DEF_PTR);
     if (!self_cd) return -1;  /* not yet initialized; no peer */
 
     /* Phantom slot: prefer slot 1; if SoloAISlot=1, use slot 2 so the user's
@@ -3780,7 +3783,7 @@ static int td5_ai_setup_phantom_peer_for_solo0(int32_t *self_rs) {
      * classify_v2 reads peer's CAR_DEF_PTR — use self's. */
     ACTOR_I16(phantom_actor, ACTOR_SPAN_NORMALIZED) = (int16_t)phantom_span_norm;
     ACTOR_I16(phantom_actor, ACTOR_SPAN_RAW)        = (int16_t)phantom_span_raw;
-    ACTOR_I32(phantom_actor, ACTOR_CAR_DEF_PTR)     = self_cd;
+    ACTOR_PTR(phantom_actor, ACTOR_CAR_DEF_PTR)     = self_cd;
 
     /* SUB_LANE_INDEX — set to self's sub_lane so the phantom appears
      * "co-lane" with self. The peer-found branch's direction logic:
@@ -4569,7 +4572,7 @@ static int smart_span_gap(int from_span, int to_span, int span_count) {
     }
     a = actor_ptr(i);
     if (!a) return 0;
-    if (ACTOR_I32(a, ACTOR_CAR_DEF_PTR) == 0) return 0;   /* never spawned */
+    if (!ACTOR_PTR(a, ACTOR_CAR_DEF_PTR)) return 0;   /* never spawned */
     return 1;
 }
 

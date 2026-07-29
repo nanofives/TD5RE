@@ -189,6 +189,14 @@ static inline char *actor_ptr(int slot) {
 
 #define ACTOR_I16(base, off)  (*(int16_t *)((base) + (off)))
 #define ACTOR_I32(base, off)  (*(int32_t *)((base) + (off)))
+/* [x64 Stage 3] POINTER-WIDTH actor field access. The AI addresses the actor as
+ * a raw byte blob, so a pointer field read through ACTOR_I32 silently takes
+ * only its low half -- fine on i686 where they are the same width, garbage on
+ * x86_64. That is exactly how the second x64 crash happened: car_definition_ptr
+ * (a void*) was read with ACTOR_I32 and dereferenced, and the compiler cannot
+ * object because the cast to a pointer is explicit. Use this for every actor
+ * field that is a pointer. */
+#define ACTOR_PTR(base, off)  (*(void **)(void *)((base) + (off)))
 #define ACTOR_U8(base, off)   (*(uint8_t *)((base) + (off)))
 #define ACTOR_I8(base, off)   (*(int8_t  *)((base) + (off)))
 
