@@ -543,7 +543,28 @@ HRESULT WINAPI DirectDrawEnumerateExA(LPDDENUMCALLBACKEXA callback, void *ctx, D
 static LONG WINAPI CrashHandler(EXCEPTION_POINTERS *ep)
 {
     if (ep && ep->ExceptionRecord && ep->ContextRecord) {
-        DWORD esp = ep->ContextRecord->Esp;
+        /* [x64 Stage 3] CONTEXT register names are arch-specific (Eax.. vs
+         * Rax..). Same split already applied to the port's own handler in
+         * main.c; this is the wrapper's copy. */
+        ULONG_PTR sp;
+#ifdef _WIN64
+        sp = (ULONG_PTR)ep->ContextRecord->Rsp;
+        WRAPPER_LOG("!!! CRASH: code=0x%08X addr=%p RIP=%p",
+                    (unsigned)ep->ExceptionRecord->ExceptionCode,
+                    ep->ExceptionRecord->ExceptionAddress,
+                    (void *)(ULONG_PTR)ep->ContextRecord->Rip);
+        WRAPPER_LOG("    RAX=%016llX RBX=%016llX RCX=%016llX RDX=%016llX",
+                    (unsigned long long)ep->ContextRecord->Rax,
+                    (unsigned long long)ep->ContextRecord->Rbx,
+                    (unsigned long long)ep->ContextRecord->Rcx,
+                    (unsigned long long)ep->ContextRecord->Rdx);
+        WRAPPER_LOG("    RSP=%016llX RBP=%016llX RSI=%016llX RDI=%016llX",
+                    (unsigned long long)ep->ContextRecord->Rsp,
+                    (unsigned long long)ep->ContextRecord->Rbp,
+                    (unsigned long long)ep->ContextRecord->Rsi,
+                    (unsigned long long)ep->ContextRecord->Rdi);
+#else
+        sp = (ULONG_PTR)ep->ContextRecord->Esp;
         WRAPPER_LOG("!!! CRASH: code=0x%08X addr=0x%08X EIP=0x%08X",
                     (unsigned)ep->ExceptionRecord->ExceptionCode,
                     (unsigned)(DWORD_PTR)ep->ExceptionRecord->ExceptionAddress,
@@ -554,14 +575,20 @@ static LONG WINAPI CrashHandler(EXCEPTION_POINTERS *ep)
         WRAPPER_LOG("    ESP=%08X EBP=%08X ESI=%08X EDI=%08X",
                     (unsigned)ep->ContextRecord->Esp, (unsigned)ep->ContextRecord->Ebp,
                     (unsigned)ep->ContextRecord->Esi, (unsigned)ep->ContextRecord->Edi);
-        /* Dump stack — look for return addresses in EXE (0x40xxxx) and M2DX (0x100xxxxx) */
+#endif
+        /* Dump stack — look for return addresses in EXE (0x40xxxx) and M2DX
+         * (0x100xxxxx). Slots are pointer-width: DWORD truncated them on x64. */
         {
-            DWORD *stk = (DWORD*)esp;
+            ULONG_PTR *stk = (ULONG_PTR *)sp;
             int i;
-            WRAPPER_LOG("    Stack dump (ESP=%08X):", esp);
+            WRAPPER_LOG("    Stack dump (SP=%p):", (void *)sp);
             for (i = 0; i < 32; i += 4) {
-                WRAPPER_LOG("      [+%02X] %08X %08X %08X %08X",
-                    i*4, stk[i], stk[i+1], stk[i+2], stk[i+3]);
+                WRAPPER_LOG("      [+%02X] %0*llX %0*llX %0*llX %0*llX",
+                    (unsigned)(i * sizeof(ULONG_PTR)),
+                    (int)(sizeof(ULONG_PTR) * 2), (unsigned long long)stk[i],
+                    (int)(sizeof(ULONG_PTR) * 2), (unsigned long long)stk[i+1],
+                    (int)(sizeof(ULONG_PTR) * 2), (unsigned long long)stk[i+2],
+                    (int)(sizeof(ULONG_PTR) * 2), (unsigned long long)stk[i+3]);
             }
         }
     }

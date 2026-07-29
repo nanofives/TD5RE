@@ -24,7 +24,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <zlib.h>   /* frame-dump PNG encoder (dev tool, see td5_plat_dump_frame_png) */
+/* Frame-dump PNG encoder (dev tool, see td5_plat_dump_frame_png).
+ *
+ * [x64 Stage 3] This is a SECOND, independent zlib dependency -- COMPRESSION,
+ * unrelated to TD5_INFLATE_USE_ZLIB which only selects the DEFLATE decoder in
+ * td5_inflate.c. It is easy to miss: dropping the inflate define does not free
+ * the build of zlib, and the link fails on crc32/compressBound/compress2.
+ *
+ * The x86_64 toolchain ships no libz.a, so that build uses the self-contained
+ * fallback below. Framedump is kept working rather than compiled out because it
+ * is the ONLY reliable screenshot path (desktop capture of the D3D11 swapchain
+ * comes back black). */
+#ifdef TD5_PNG_USE_ZLIB
+#include <zlib.h>
+#endif
 
 #include "td5_platform.h"
 #include "td5_platform_internal.h"
@@ -315,6 +328,99 @@ int td5_plat_pump_messages(void)
 static ID3D11Texture2D *s_fd_staging = NULL;
 static int s_fd_w = 0, s_fd_h = 0;
 static unsigned s_fd_gen = 0;   /* device generation the staging texture belongs to */
+
+#ifndef TD5_PNG_USE_ZLIB
+/* ---- zlib-free PNG support (x64 Stage 3) -------------------------------
+ * Only three zlib entry points are used here, and all three are small enough
+ * to supply directly rather than take a dependency on a 64-bit zlib build.
+ *
+ * The deflate stream is written as STORED (uncompressed) blocks, which is a
+ * valid deflate encoding, so the output is a spec-conformant PNG that any
+ * viewer reads. It trades file size for having no dependency at all -- correct
+ * for a dev-only frame dump, and cheap in CPU (the frame path already costs a
+ * GPU readback and a file write).
+ * ------------------------------------------------------------------------ */
+typedef unsigned long uLong;
+typedef unsigned long uLongf;
+typedef unsigned char Bytef;
+
+static uLong crc32(uLong crc, const Bytef *buf, unsigned len)
+{
+    static uLong tbl[256];
+    static int built = 0;
+    if (!built) {
+        unsigned i, k;
+        for (i = 0; i < 256; i++) {
+            uLong c = i;
+            for (k = 0; k < 8; k++)
+                c = (c & 1) ? (0xEDB88320UL ^ (c >> 1)) : (c >> 1);
+            tbl[i] = c;
+        }
+        built = 1;
+    }
+    /* zlib's chaining convention: the running value is kept in finalised form,
+     * so invert on entry and exit. crc32(0, ...) therefore starts correctly. */
+    crc ^= 0xFFFFFFFFUL;
+    while (len--)
+        crc = tbl[(crc ^ *buf++) & 0xFF] ^ (crc >> 8);
+    return (crc ^ 0xFFFFFFFFUL) & 0xFFFFFFFFUL;
+}
+
+static uLong png_adler32(const unsigned char *d, unsigned long n)
+{
+    unsigned long a = 1, b = 0;
+    while (n--) {
+        a += *d++; if (a >= 65521UL) a -= 65521UL;
+        b += a;    if (b >= 65521UL) b -= 65521UL;
+    }
+    return (b << 16) | a;
+}
+
+#define PNG_STORE_MAX 65535UL   /* max payload of one stored deflate block */
+
+static uLong compressBound(uLong n)
+{
+    /* 2-byte zlib header + 5 bytes per stored block + payload + 4-byte adler */
+    return 2 + 5 * ((n + PNG_STORE_MAX - 1) / PNG_STORE_MAX + 1) + n + 4;
+}
+
+#define Z_OK 0
+static int compress2(unsigned char *out, uLongf *outlen,
+                     const unsigned char *in, uLong inlen, int level)
+{
+    const unsigned char *src = in;      /* keep the base: adler is over INPUT */
+    unsigned char *p = out;
+    uLong left = inlen;
+    uLong adler;
+    (void)level;                 /* stored blocks: no compression level */
+    if (*outlen < compressBound(inlen)) return -1;
+
+    *p++ = 0x78;                 /* CMF: deflate, 32K window                */
+    *p++ = 0x01;                 /* FLG: no dict, check bits make %31 == 0  */
+    do {
+        uLong n = (left > PNG_STORE_MAX) ? PNG_STORE_MAX : left;
+        int final = (left - n) == 0;
+        *p++ = (unsigned char)(final ? 1 : 0);        /* BFINAL, BTYPE=00 */
+        *p++ = (unsigned char)(n & 0xFF);             /* LEN  (little-endian) */
+        *p++ = (unsigned char)((n >> 8) & 0xFF);
+        *p++ = (unsigned char)(~n & 0xFF);            /* NLEN (ones complement) */
+        *p++ = (unsigned char)((~n >> 8) & 0xFF);
+        if (n) { memcpy(p, in, n); p += n; in += n; }
+        left -= n;
+    } while (left);              /* do/while: a zero-length input still needs
+                                  * one final empty block for a valid stream */
+
+    /* zlib trailer: adler32 of the UNCOMPRESSED data, big-endian. */
+    adler = png_adler32(src, inlen);
+    *p++ = (unsigned char)((adler >> 24) & 0xFF);
+    *p++ = (unsigned char)((adler >> 16) & 0xFF);
+    *p++ = (unsigned char)((adler >>  8) & 0xFF);
+    *p++ = (unsigned char)( adler        & 0xFF);
+
+    *outlen = (uLongf)(p - out);
+    return Z_OK;
+}
+#endif /* !TD5_PNG_USE_ZLIB */
 
 static void td5_png_chunk(FILE *f, const char *type, const unsigned char *data, unsigned len) {
     unsigned char be[4];

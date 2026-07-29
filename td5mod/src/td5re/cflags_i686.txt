@@ -22,3 +22,10 @@
 # already embedded in td5_inflate.c (its documented default path), so no
 # external zlib is needed there. Pairs with -lz in link_libs_i686.txt.
 -DTD5_INFLATE_USE_ZLIB
+# SECOND, independent zlib use: the frame-dump PNG encoder in
+# td5_platform_win32_window.c compresses (crc32/compressBound/compress2), which
+# TD5_INFLATE_USE_ZLIB above does NOT cover -- that one only selects the DEFLATE
+# decoder. Easy to miss: dropping the inflate define alone still fails to link.
+# Without this define the module uses its own zlib-free encoder (stored deflate
+# blocks), which is what the x86_64 build does.
+-DTD5_PNG_USE_ZLIB

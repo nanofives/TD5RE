@@ -73,7 +73,11 @@ set AR=%TOOLPREFIX%\ar.exe
 set WINDRES=%TOOLPREFIX%\windres.exe
 set SRCDIR=.
 set WRAPPER_SRCDIR=..\..\ddraw_wrapper\src
-set WRAPPER_BUILDDIR=..\..\ddraw_wrapper\build
+REM Arch-matched wrapper archive: ddraw_wrapper\build.bat uses the SAME suffix.
+REM Linking the i686 .a into a 64-bit exe fails with a bare "cannot find
+REM -lddraw_wrapper", which reads like a missing build rather than an arch
+REM mismatch -- so the paths are kept deliberately parallel.
+set WRAPPER_BUILDDIR=..\..\ddraw_wrapper\build%BUILDSUFFIX%
 set PROJECT_ROOT=..\..\..
 
 REM ---------------------------------------------------------------------------
