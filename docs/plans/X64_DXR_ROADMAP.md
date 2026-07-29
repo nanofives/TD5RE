@@ -32,7 +32,7 @@ sequenced so the goldens stay usable as the correctness net.
 | **1a** | x87 trig LUT → `lrintf` | ✅ `4b732465` — bit-identical, goldens green |
 | **1b** | SSE2 float math + portable `TD5_F32_SPILL` | ✅ `323ffb8c` — **merge-gated** |
 | **2** | Pointer widening (still 32-bit) | 🔄 step 1 done `9aee8c3a` |
-| **3** | Flip `-m32` → `-m64` | ⬜ ~half a day, build-side only |
+| **3** | Flip `-m32` → `-m64` | 🔄 **source side DONE — 67/67 compile clean** |
 | **4** | DXR renderer (D3D11On12 vs D3D12 — decide then) | ⬜ unreachable until 3 lands |
 
 ### Stage 1a — bit-identical, no behaviour change
@@ -68,7 +68,7 @@ arithmetic, so **goldens must stay GREEN throughout** — they are the proof the
 | Delete redundant `g_actorBaseAddr` | ⬜ cheapest win |
 | `g_spanTable` / `g_vertexTable` retype | ⬜ |
 | Mesh headers — **option C** (split disk/runtime) | 🔄 increments 1-2 done `f48b2e11`, `a4cc8233` |
-| `offsetof` sweep + `TD5_ACTOR_STRIDE = sizeof` | ⬜ |
+| `offsetof` sweep + `TD5_ACTOR_STRIDE = sizeof` | ✅ `63e9af66` — **cleared all 435** |
 | `td5_save.c` on-disk stride | ✅ field-mapped — "truncate" rested on a false premise |
 
 What is NOT a problem, contrary to first impressions: saves (text INI), netplay (all-fixed-width
@@ -103,6 +103,35 @@ side is one root fix plus fallout.
 
 Rerun with `scratchpad/x64_trial.ps1` after each Stage 2 step to watch the list shrink. It runs
 nothing, so it is immune to the `nvwgf2um.dll` fault that blocks golden verification.
+
+## Stage 3 — what is actually left (2026-07-29)
+
+**The source side is done: 67/67 modules compile clean on x86_64**, down from 445 errors. Zero
+diagnostics of any class. The `offsetof` sweep (`63e9af66`) cleared all 435 actor-layout
+assertions in one go, and it was the real prerequisite — flipping `-m64` before it would simply
+have reproduced them.
+
+Remaining, all build-side except the last:
+
+| Item | State |
+|---|---|
+| `cflags.txt` hardcodes `-m32 -msse2 -mfpmath=sse` | needs an arch switch (x86_64 mandates SSE2, so the FP flags just drop) |
+| `build_standalone.bat` / `Makefile` / CI arch plumbing | single-source files already exist; add the variant |
+| **zlib** | **NOT a blocker — see below** |
+| Win32 / D3D11 import libs (`-ld3d11 -ldxgi -ldsound …`) | ship with the x64 MinGW-w64 toolchain |
+| `ddraw_wrapper` x64 build | own `wrapper_srcs.txt` / `wrapper_cflags.txt`; not yet trial-compiled |
+| Mesh runtime casts | the one SOURCE item left — silent, not a compile error (see Stage 2 increment 2) |
+
+**zlib turned out not to be a problem.** The x64 toolchain ships no `libz.a`, which looks like a
+blocker until you read `td5_inflate.c`: it has three paths, and option 3 is a **self-contained
+embedded tinfl decompressor** documented as the source port's default. Dropping
+`-DTD5_INFLATE_USE_ZLIB` gives a zlib-free build with no external dependency. Decompression is
+deterministic, so this should be inert — but it IS a real code-path change and the goldens should
+confirm it, since a different inflate would show up as differing asset bytes.
+
+⚠️ Compile-clean is not run-clean. The mesh in-place casts over file data still assume the runtime
+struct mirrors the 0x38 disk record, which stops being true on x86_64 — and that fails silently at
+runtime with no diagnostic. An x64 build will link and start long before it renders correctly.
 
 ## The blocker
 
