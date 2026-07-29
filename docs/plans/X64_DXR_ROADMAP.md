@@ -115,12 +115,33 @@ Remaining, all build-side except the last:
 
 | Item | State |
 |---|---|
-| `cflags.txt` hardcodes `-m32 -msse2 -mfpmath=sse` | needs an arch switch (x86_64 mandates SSE2, so the FP flags just drop) |
-| `build_standalone.bat` / `Makefile` / CI arch plumbing | single-source files already exist; add the variant |
-| **zlib** | **NOT a blocker — see below** |
-| Win32 / D3D11 import libs (`-ld3d11 -ldxgi -ldsound …`) | ship with the x64 MinGW-w64 toolchain |
-| `ddraw_wrapper` x64 build | own `wrapper_srcs.txt` / `wrapper_cflags.txt`; not yet trial-compiled |
-| Mesh runtime casts | the one SOURCE item left — silent, not a compile error (see Stage 2 increment 2) |
+| Arch switch in `cflags` / `link_libs` / build scripts | ✅ `db16dd37` |
+| `Makefile` + CI updated in step | ✅ `db16dd37` — see the trap below |
+| **zlib** | ✅ NOT a blocker — see below |
+| Win32 / D3D11 import libs (`-ld3d11 -ldxgi -ldsound …`) | ✅ ship with the x64 MinGW-w64 toolchain |
+| **`ddraw_wrapper` x64 build** | ⬜ **the only thing now blocking an x64 link** |
+| Mesh runtime casts | ⬜ the one SOURCE item left — silent, not a compile error (see Stage 2 increment 2) |
+
+Architecture is chosen with the `TD5RE_ARCH` env var, not an argument:
+`build_standalone.bat`'s contract is "any unrecognised first argument means dev" (the `/fix` and
+`/end` skills pass a PID), so an arch argument could not be told apart from that. Object dirs and
+exe names are arch-suffixed (`build_x64/`, `td5re_x64.exe`) so the 64-bit build can never share a
+stale `.o` cache with — or overwrite — the shipping 32-bit binary.
+
+⚠️ **The trap in this split, worth remembering:** the Makefile and CI take their COMPILE flags from
+`cflags.txt`. Removing `-m32` from it without updating them would have left them building for the
+runner's host architecture while still passing `-m32` at link — a confusing failure at best, quietly
+wrong output at worst. All three consumers must move together; that is why `cflags.txt` now says
+ARCH-NEUTRAL ONLY at the top.
+
+**Measured state of the x64 build:** `TD5RE_ARCH=x86_64` compiles all 67 modules, emits a
+`pe-x86-64` resource and builds `libtd5re.a` — 68 objects, `objdump` reporting *file format
+pe-x86-64, architecture i386:x86-64*. Real x86_64 code, not a compile-only check. It then fails at
+exactly ONE point, `cannot find -lddraw_wrapper`, because the D3D11 wrapper is still a prebuilt
+i686 static lib. Nothing else is missing from the link.
+
+i686 is unaffected: dev byte-identical in size (3,532,080), release unchanged (2,457,088), suite
+55/55 PASS.
 
 **zlib turned out not to be a problem.** The x64 toolchain ships no `libz.a`, which looks like a
 blocker until you read `td5_inflate.c`: it has three paths, and option 3 is a **self-contained
