@@ -169,16 +169,26 @@ process raises exception `0x0000087D` from `KERNELBASE.dll` (RIP consistent with
 `RDI` holds the same `0x87D`, and the exit code 2173 is that value in decimal). Deliberately NOT
 interpreting that code further — a guess here is what went wrong above.
 
-**No validation messages were captured.** The drain exists — `Backend_SetupD3DDebug` QIs an
-`ID3D11InfoQueue` off the live device (`d3d11_backend_device.c:29-53`) — but it reports through
-`WRAPPER_LOG`, which is NOT captured in standalone runs. So the run did not deliver the diagnostic
-it was for. **Closing that capture gap is the prerequisite for the next attempt**, not an optional
-extra: without it, the debug layer is running blind.
+**`WRAPPER_LOG` capture was never broken — it is a KNOB.** `main.c:1400` gates it on
+`log_enabled && log_wrapper`, and `td5re.ini` ships `[Logging] Wrapper = 0`. Pass `--LogWrapper=1`
+(no INI edit, no code change) and `log/wrapper.log` appears. Worth writing down so nobody "fixes"
+this in code next time.
 
-Note the device create falls back to non-debug if the OS debug layer (`D3D11*SDKLayers`, the
-"Graphics Tools" optional feature) is absent — so a silent absence of messages is ALSO consistent
-with the layer never having been active. That ambiguity is itself resolved by capturing
-`WRAPPER_LOG`, which logs which path was taken.
+**With capture on, the answer is unambiguous: the debug layer NEVER ACTIVATED.**
+`Backend_CreateDevice` succeeds at `feature_level=0xB000`, and the log contains not one
+debug-layer / `InfoQueue` / SDKLayers line. That is the documented fallback: the OS debug layer
+ships with the Windows **"Graphics Tools" optional feature**, and without it the create silently
+falls back to a non-debug device.
+
+So BOTH `TD5RE_D3D_DEBUG=1` runs were blind, and "no validation messages" meant *layer absent*,
+not *no errors*. **Install "Graphics Tools" before trusting any future debug-layer run.**
+
+Also confirmed from `wrapper.log`: the `texture2.c:100` truncation is real and visible —
+`d3d11_srv 00000221CC4B2A00` is handed out as `handle 0xCC4B2A00`. Still consumer-less, so still
+not the crash; see the retraction above.
+
+Last wrapper operation before the fault is texture creation / `GetHandle`; the crash follows at
+viewport / render start.
 
 **Then**, and only then, look for the producer of the bad pointer. Do NOT bisect by guessing at
 truncation sites — that is what went wrong above.
