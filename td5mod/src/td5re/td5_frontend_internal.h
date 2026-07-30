@@ -19,7 +19,7 @@
 
 #include "td5_types.h"
 #include "td5_credits.h"                 /* K_CREDIT_MUGSHOT_COUNT */
-#include "../../ddraw_wrapper/src/wrapper.h"   /* ID3D11* handles, g_backend */
+#include "../../ddraw_wrapper/src/wrapper.h"   /* Backend_* API + opaque handles, g_backend */
 
 /* Per-module public APIs (2026-07-09, A9 refactor): real headers instead of
  * these modules' declarations living scattered through this shared header. */
@@ -775,13 +775,13 @@ extern int  s_snap_car, s_snap_paint, s_snap_trans, s_snap_config;
 const MpSplitLayout *mp_split_layouts(int n, int *count);
 extern BgGalImg s_bg_gallery[5];
 extern FE_DrawCmd s_draw_queue[FE_MAX_DRAW_CMDS];
-extern ID3D11Buffer      *s_gauge_cb;
-extern ID3D11Buffer      *s_rr_cb;
-extern ID3D11PixelShader *s_ps_arrow;
-extern ID3D11PixelShader *s_ps_cursor;
-extern ID3D11PixelShader *s_ps_gauge;
-extern ID3D11PixelShader *s_ps_msdf;
-extern ID3D11PixelShader *s_ps_roundrect;
+extern BackendConstBuffer *s_gauge_cb;
+extern BackendConstBuffer *s_rr_cb;
+extern BackendPixelShader *s_ps_arrow;
+extern BackendPixelShader *s_ps_cursor;
+extern BackendPixelShader *s_ps_gauge;
+extern BackendPixelShader *s_ps_msdf;
+extern BackendPixelShader *s_ps_roundrect;
 /* [DEVICE-LOST 2026-07-20] (Re)create the VectorUI procedural shaders + constant
  * buffers when the D3D device generation changes (TDR recovery). Idempotent. */
 void frontend_ensure_vui_shaders(void);

@@ -23,6 +23,11 @@
 /* Opaque handle -- body defined only inside the active backend .c file. */
 typedef struct BackendTexture BackendTexture;
 
+/* Opaque handles for the port's vector-UI renderer (game-owned pixel shaders +
+ * constant buffers). Bodies live in the active backend's private header. */
+typedef struct BackendPixelShader BackendPixelShader;
+typedef struct BackendConstBuffer BackendConstBuffer;
+
 /* Create a GPU texture. Always SHADER_RESOURCE-bindable; adds RENDER_TARGET
  * when is_rt, and a CPU-write STAGING sibling when needs_staging (the RT
  * upload path used one). Refcount starts at 1; stamps the current device

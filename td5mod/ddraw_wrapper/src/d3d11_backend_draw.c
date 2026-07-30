@@ -104,6 +104,95 @@ void Backend_SetViewport(float x, float y, float w, float h, float min_z, float 
     vp.MinDepth = min_z; vp.MaxDepth = max_z;
     ID3D11DeviceContext_RSSetViewports(g_backend.context, 1, &vp);
 }
+
+/* ---- Vector-UI renderer backend API (see wrapper.h) -------------------- */
+
+BackendPixelShader *Backend_CreatePixelShader(const void *bytecode, size_t len)
+{
+    BackendPixelShader *h;
+    if (!g_backend.device || !bytecode) return NULL;
+    h = (BackendPixelShader*)calloc(1, sizeof(*h));
+    if (!h) return NULL;
+    if (FAILED(ID3D11Device_CreatePixelShader(g_backend.device, bytecode, len, NULL, &h->ps))) {
+        free(h);
+        return NULL;
+    }
+    return h;
+}
+
+void Backend_ReleasePixelShader(BackendPixelShader *h)
+{
+    if (!h) return;
+    if (h->ps) ID3D11PixelShader_Release(h->ps);
+    free(h);
+}
+
+BackendConstBuffer *Backend_CreateConstBuffer(size_t size)
+{
+    BackendConstBuffer *h;
+    D3D11_BUFFER_DESC bd;
+    if (!g_backend.device) return NULL;
+    h = (BackendConstBuffer*)calloc(1, sizeof(*h));
+    if (!h) return NULL;
+    ZeroMemory(&bd, sizeof(bd));
+    bd.ByteWidth = (UINT)size;
+    bd.Usage = D3D11_USAGE_DEFAULT;
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    if (FAILED(ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &h->cb))) {
+        free(h);
+        return NULL;
+    }
+    return h;
+}
+
+void Backend_ReleaseConstBuffer(BackendConstBuffer *h)
+{
+    if (!h) return;
+    if (h->cb) ID3D11Buffer_Release(h->cb);
+    free(h);
+}
+
+void Backend_UpdateConstBuffer(BackendConstBuffer *h, const void *data, size_t size)
+{
+    (void)size;
+    if (h && h->cb && g_backend.context)
+        ID3D11DeviceContext_UpdateSubresource(g_backend.context,
+            (ID3D11Resource*)h->cb, 0, NULL, data, 0, 0);
+}
+
+void Backend_BindConstBuffer(UINT slot, BackendConstBuffer *h)
+{
+    if (h && h->cb && g_backend.context)
+        ID3D11DeviceContext_PSSetConstantBuffers(g_backend.context, slot, 1, &h->cb);
+}
+
+void Backend_SetBuiltinPixelShader(int ps_idx)
+{
+    if (g_backend.context && ps_idx >= 0 && ps_idx < PS_COUNT)
+        ID3D11DeviceContext_PSSetShader(g_backend.context, g_backend.ps_shaders[ps_idx], NULL, 0);
+}
+
+void Backend_BindSampler(UINT slot, int sampler_idx)
+{
+    if (g_backend.context && sampler_idx >= 0 && sampler_idx < SAMP_STATE_COUNT)
+        ID3D11DeviceContext_PSSetSamplers(g_backend.context, slot, 1,
+            &g_backend.sampler_states[sampler_idx]);
+}
+
+void Backend_ForceBlendState(int blend_idx)
+{
+    if (g_backend.context && blend_idx >= 0 && blend_idx < BLEND_STATE_COUNT &&
+        g_backend.blend_states[blend_idx]) {
+        ID3D11DeviceContext_OMSetBlendState(g_backend.context,
+            g_backend.blend_states[blend_idx], NULL, 0xFFFFFFFF);
+        g_backend.state.current_blend_idx = blend_idx;
+    }
+}
+
+void *Backend_PixelShaderRaw(BackendPixelShader *h)
+{
+    return h ? (void*)h->ps : NULL;
+}
 #include <stdlib.h>
 #include <string.h>
 #include <dxgi1_3.h>

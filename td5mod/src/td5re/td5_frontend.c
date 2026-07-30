@@ -1107,7 +1107,7 @@ int s_font_page = -1;
  * smoothstep) with a LINEAR_CLAMP sampler so it stays crisp at any resolution.
  * Gated by [Frontend] VectorUI; -1/NULL => fall back to the bitmap path. */
 int s_msdf_font_page = -1;
-ID3D11PixelShader *s_ps_msdf = NULL;
+BackendPixelShader *s_ps_msdf = NULL;
 
 /* In-race HUD font SDF (VectorUI): a distance-field version of the original
  * tpage5 FONT glyphs at the SAME 256x256 layout, so the HUD keeps its original
@@ -1123,11 +1123,11 @@ int s_pausefont_sdf_page = -1;
  * ps_roundrect evaluates an analytic rounded-rect SDF per pixel (crisp glow at
  * any resolution); s_rr_cb feeds it per-button geometry/colour via constant
  * buffer register b1. Must match cbuffer RoundRectParams in ps_roundrect.hlsl. */
-ID3D11PixelShader *s_ps_roundrect = NULL;
-ID3D11PixelShader *s_ps_arrow = NULL;   /* selector ◄► triangle SDF */
-ID3D11PixelShader *s_ps_cursor = NULL;  /* mouse pointer (SDF: white outline + purple fill) */
+BackendPixelShader *s_ps_roundrect = NULL;
+BackendPixelShader *s_ps_arrow = NULL;   /* selector ◄► triangle SDF */
+BackendPixelShader *s_ps_cursor = NULL;  /* mouse pointer (SDF: white outline + purple fill) */
 int s_cursor_msdf_page = -1;
-ID3D11Buffer      *s_rr_cb = NULL;
+BackendConstBuffer *s_rr_cb = NULL;
 
 /* Procedural analog gauge dial (in-race HUD speedo + tach) — VectorUI only.
  * ps_gauge evaluates an analytic dial SDF (face disc + outer ring + radial
@@ -1135,8 +1135,8 @@ ID3D11Buffer      *s_rr_cb = NULL;
  * + colours via constant-buffer register b1. Owned here (with the other
  * VectorUI shaders) and exposed to the HUD via td5_vui_gauge (td5_vectorui.h).
  * Must match cbuffer GaugeParams in ps_gauge.hlsl. */
-ID3D11PixelShader *s_ps_gauge = NULL;
-ID3D11Buffer      *s_gauge_cb = NULL;
+BackendPixelShader *s_ps_gauge = NULL;
+BackendConstBuffer *s_gauge_cb = NULL;
 /* When set, fe_draw_text preserves the input case instead of forcing upper-case.
  * BodyText.tga DOES contain lowercase glyphs (rows 6-9, ascii 0x61+), so mixed-case
  * strings (e.g. high-score player names "Frank"/"Jeffrey") render correctly. Scoped:
@@ -1667,11 +1667,7 @@ void fe_draw_surface_rect(int handle, float x, float y, float w, float h, uint32
      * The state cache may believe the blend is already SRCALPHA_INVSRC from a
      * prior frame and skip OMSetBlendState. Force-set both to guarantee
      * correct transparency for every color-keyed surface draw. */
-    if (g_backend.context && g_backend.blend_states[BLEND_SRCALPHA_INVSRC]) {
-        ID3D11DeviceContext_OMSetBlendState(g_backend.context,
-            g_backend.blend_states[BLEND_SRCALPHA_INVSRC], NULL, 0xFFFFFFFF);
-        g_backend.state.current_blend_idx = BLEND_SRCALPHA_INVSRC;
-    }
+    Backend_ForceBlendState(BLEND_SRCALPHA_INVSRC);
     Backend_UpdateFogCB();
     fe_draw_quad(x, y, w, h, color, s_surfaces[slot].tex_page, 0, 0, 1, 1);
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
@@ -2249,11 +2245,7 @@ static void fe_draw_surface_rect_uv(int handle, float x, float y, float w, float
     int slot = handle - 1;
     if (slot < 0 || slot >= FE_MAX_SURFACES || !s_surfaces[slot].in_use) return;
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    if (g_backend.context && g_backend.blend_states[BLEND_SRCALPHA_INVSRC]) {
-        ID3D11DeviceContext_OMSetBlendState(g_backend.context,
-            g_backend.blend_states[BLEND_SRCALPHA_INVSRC], NULL, 0xFFFFFFFF);
-        g_backend.state.current_blend_idx = BLEND_SRCALPHA_INVSRC;
-    }
+    Backend_ForceBlendState(BLEND_SRCALPHA_INVSRC);
     Backend_UpdateFogCB();
     fe_draw_quad(x, y, w, h, color, s_surfaces[slot].tex_page, u0, v0, u1, v1);
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
@@ -2828,7 +2820,7 @@ static void fe_draw_cursor_proc(float sx, float sy) {
     float x  = (float)s_mouse_x * sx;
     float y  = (float)s_mouse_y * sy;
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    td5_plat_render_set_ps_override((void *)s_ps_cursor, SAMP_LINEAR_CLAMP);
+    td5_plat_render_set_ps_override(Backend_PixelShaderRaw(s_ps_cursor), SAMP_LINEAR_CLAMP);
     fe_draw_quad(x, y, cw, ch, 0xFFFFFFFF, s_cursor_msdf_page, 0.0f, 0.0f, 1.0f, 1.0f);
     td5_plat_render_clear_ps_override();
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
@@ -8840,11 +8832,10 @@ static int fe_draw_roundrect(float x, float y, float w, float h,
     td5_argb_to_rgb_f(rp.inner, inner_argb); rp.inner[3] = 1.0f;
     td5_argb_to_rgb_f(rp.outer, outer_argb); rp.outer[3] = 1.0f;
     td5_argb_to_rgb_f(rp.fill,  fill_argb);  rp.fill[3]  = fill_alpha;
-    ID3D11DeviceContext_UpdateSubresource(g_backend.context,
-        (ID3D11Resource *)s_rr_cb, 0, NULL, &rp, 0, 0);
-    ID3D11DeviceContext_PSSetConstantBuffers(g_backend.context, 1, 1, &s_rr_cb);
+    Backend_UpdateConstBuffer(s_rr_cb, &rp, sizeof(rp));
+    Backend_BindConstBuffer(1, s_rr_cb);
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    td5_plat_render_set_ps_override((void *)s_ps_roundrect, SAMP_LINEAR_CLAMP);
+    td5_plat_render_set_ps_override(Backend_PixelShaderRaw(s_ps_roundrect), SAMP_LINEAR_CLAMP);
     fe_draw_quad(x, y, w, h, 0xFFFFFFFF, s_white_tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
     td5_plat_render_clear_ps_override();
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
@@ -8862,11 +8853,10 @@ int fe_draw_arrow_proc(float x, float y, float w, float h,
     rp.size_px[0] = w;  rp.size_px[1] = h;
     rp.border[0] = dir_right ? 1.0f : 0.0f;
     td5_argb_to_rgb_f(rp.mid, color);  rp.mid[3] = 1.0f;
-    ID3D11DeviceContext_UpdateSubresource(g_backend.context,
-        (ID3D11Resource *)s_rr_cb, 0, NULL, &rp, 0, 0);
-    ID3D11DeviceContext_PSSetConstantBuffers(g_backend.context, 1, 1, &s_rr_cb);
+    Backend_UpdateConstBuffer(s_rr_cb, &rp, sizeof(rp));
+    Backend_BindConstBuffer(1, s_rr_cb);
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    td5_plat_render_set_ps_override((void *)s_ps_arrow, SAMP_LINEAR_CLAMP);
+    td5_plat_render_set_ps_override(Backend_PixelShaderRaw(s_ps_arrow), SAMP_LINEAR_CLAMP);
     fe_draw_quad(x, y, w, h, 0xFFFFFFFF, s_white_tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
     td5_plat_render_clear_ps_override();
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
@@ -9039,11 +9029,10 @@ void fe_draw_quad(float x, float y, float w, float h,
         verts[v].diffuse = color;
     }
     td5_plat_render_bind_texture(tex_page >= 0 ? tex_page : s_white_tex_page);
-    ID3D11DeviceContext_PSSetShader(g_backend.context,
-        g_backend.ps_shaders[g_backend.state.texblend_mode == 5 ? 1 : 0], NULL, 0);
+    Backend_SetBuiltinPixelShader(g_backend.state.texblend_mode == 5 ? 1 : 0);
     {
         int si = (g_backend.state.mag_filter >= 2) ? SAMP_LINEAR_WRAP : SAMP_POINT_WRAP;
-        ID3D11DeviceContext_PSSetSamplers(g_backend.context, 0, 1, &g_backend.sampler_states[si]);
+        Backend_BindSampler(0, si);
     }
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 }
@@ -9072,11 +9061,10 @@ static void fe_draw_quad_sheared(float x, float y, float w, float h,
         verts[v].diffuse = color;
     }
     td5_plat_render_bind_texture(tex_page >= 0 ? tex_page : s_white_tex_page);
-    ID3D11DeviceContext_PSSetShader(g_backend.context,
-        g_backend.ps_shaders[g_backend.state.texblend_mode == 5 ? 1 : 0], NULL, 0);
+    Backend_SetBuiltinPixelShader(g_backend.state.texblend_mode == 5 ? 1 : 0);
     {
         int si = (g_backend.state.mag_filter >= 2) ? SAMP_LINEAR_WRAP : SAMP_POINT_WRAP;
-        ID3D11DeviceContext_PSSetSamplers(g_backend.context, 0, 1, &g_backend.sampler_states[si]);
+        Backend_BindSampler(0, si);
     }
     td5_plat_render_draw_tris(verts, 4, indices, 6);
 }
@@ -9171,7 +9159,7 @@ void td5_vui_msdf_quad(float x, float y, float w, float h, uint32_t color, int p
         return;
     }
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-    td5_plat_render_set_ps_override((void *)s_ps_msdf, SAMP_LINEAR_CLAMP);
+    td5_plat_render_set_ps_override(Backend_PixelShaderRaw(s_ps_msdf), SAMP_LINEAR_CLAMP);
     fe_draw_quad(x, y, w, h, color, page, u0, v0, u1, v1);
     td5_plat_render_clear_ps_override();
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
@@ -9234,14 +9222,13 @@ void td5_vui_gauge(const TD5_VuiGauge *g) {
     td5_argb_to_rgba_f(gp.red,   g->redline_color);
     td5_argb_to_rgba_f(gp.pivot, g->pivot_color);
 
-    ID3D11DeviceContext_UpdateSubresource(g_backend.context,
-        (ID3D11Resource *)s_gauge_cb, 0, NULL, &gp, 0, 0);
-    ID3D11DeviceContext_PSSetConstantBuffers(g_backend.context, 1, 1, &s_gauge_cb);
+    Backend_UpdateConstBuffer(s_gauge_cb, &gp, sizeof(gp));
+    Backend_BindConstBuffer(1, s_gauge_cb);
     /* HUD translucent preset (alpha_ref=1) so the semi-transparent dial face and
      * the anti-aliased ring/tick/redline edges all blend (the 0x80 cutoff of the
      * plain TRANSLUCENT preset would punch out low-alpha pixels). */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR_HUD);
-    td5_plat_render_set_ps_override((void *)s_ps_gauge, SAMP_LINEAR_CLAMP);
+    td5_plat_render_set_ps_override(Backend_PixelShaderRaw(s_ps_gauge), SAMP_LINEAR_CLAMP);
     fe_draw_quad(x0, y0, box, box, 0xFFFFFFFF, s_white_tex_page, 0.0f, 0.0f, 1.0f, 1.0f);
     td5_plat_render_clear_ps_override();
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);

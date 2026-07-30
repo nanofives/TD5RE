@@ -164,6 +164,24 @@ void      Backend_DrawIndexedPrimitive(DWORD prim_type, UINT stride,
 void      Backend_SetViewport(float x, float y, float w, float h,
                               float min_z, float max_z);
 
+/* ---- Vector-UI renderer backend API (td5_frontend.c / td5_fe_menu.c) ------
+ * The port draws its procedural SDF menu/HUD widgets with game-owned pixel
+ * shaders + constant buffers. These wrap the D3D11 objects behind opaque
+ * handles so the game-layer UI code holds no ID3D11 types. All NULL-safe. */
+BackendPixelShader *Backend_CreatePixelShader(const void *bytecode, size_t len);
+void  Backend_ReleasePixelShader(BackendPixelShader *ps);
+BackendConstBuffer *Backend_CreateConstBuffer(size_t size);
+void  Backend_ReleaseConstBuffer(BackendConstBuffer *cb);
+void  Backend_UpdateConstBuffer(BackendConstBuffer *cb, const void *data, size_t size);
+void  Backend_BindConstBuffer(UINT slot, BackendConstBuffer *cb);      /* PS slot */
+void  Backend_SetBuiltinPixelShader(int ps_idx);   /* g_backend.ps_shaders[idx] */
+void  Backend_BindSampler(UINT slot, int sampler_idx);       /* SAMP_* index */
+void  Backend_ForceBlendState(int blend_idx);      /* bind + update cache idx */
+/* [TRANSITIONAL] raw underlying shader for td5_plat_render_set_ps_override,
+ * whose void* is still an ID3D11PixelShader* until the platform renderer is
+ * fenced. Deleted with that fence. */
+void *Backend_PixelShaderRaw(BackendPixelShader *ps);
+
 /* Windowed mode: display window management */
 void Backend_EnforceWindowSize(void);
 HWND Backend_GetDisplayWindow(void);

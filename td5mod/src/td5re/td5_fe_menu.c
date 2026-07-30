@@ -233,13 +233,13 @@ void frontend_ensure_vui_shaders(void) {
                    s_ps_gauge || s_rr_cb || s_gauge_cb);
         /* Releasing a dead device's child objects is CPU-side only (drops the
          * process refcount); it never touches the GPU. */
-        if (s_ps_msdf)      { ID3D11PixelShader_Release(s_ps_msdf);      s_ps_msdf = NULL; }
-        if (s_ps_roundrect) { ID3D11PixelShader_Release(s_ps_roundrect); s_ps_roundrect = NULL; }
-        if (s_ps_arrow)     { ID3D11PixelShader_Release(s_ps_arrow);     s_ps_arrow = NULL; }
-        if (s_ps_cursor)    { ID3D11PixelShader_Release(s_ps_cursor);    s_ps_cursor = NULL; }
-        if (s_ps_gauge)     { ID3D11PixelShader_Release(s_ps_gauge);     s_ps_gauge = NULL; }
-        if (s_rr_cb)        { ID3D11Buffer_Release(s_rr_cb);             s_rr_cb = NULL; }
-        if (s_gauge_cb)     { ID3D11Buffer_Release(s_gauge_cb);          s_gauge_cb = NULL; }
+        Backend_ReleasePixelShader(s_ps_msdf);      s_ps_msdf = NULL;
+        Backend_ReleasePixelShader(s_ps_roundrect); s_ps_roundrect = NULL;
+        Backend_ReleasePixelShader(s_ps_arrow);     s_ps_arrow = NULL;
+        Backend_ReleasePixelShader(s_ps_cursor);    s_ps_cursor = NULL;
+        Backend_ReleasePixelShader(s_ps_gauge);     s_ps_gauge = NULL;
+        Backend_ReleaseConstBuffer(s_rr_cb);        s_rr_cb = NULL;
+        Backend_ReleaseConstBuffer(s_gauge_cb);     s_gauge_cb = NULL;
         s_fe_vui_gen = g_backend.device_generation;
         if (had)
             TD5_LOG_I(LOG_TAG, "VectorUI shaders: rebuilding for device generation %u",
@@ -248,81 +248,51 @@ void frontend_ensure_vui_shaders(void) {
 
     /* ---- MSDF text pixel shader (shared by HUD/pause/SmallText SDF atlases) ---- */
     if (!s_ps_msdf) {
-        HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device,
-            g_ps_msdf, sizeof(g_ps_msdf), NULL, &s_ps_msdf);
-        if (FAILED(hr)) {
-            s_ps_msdf = NULL;
-            TD5_LOG_W(LOG_TAG, "MSDF pixel shader create failed hr=0x%08lX",
-                      (unsigned long)hr);
-        }
+        s_ps_msdf = Backend_CreatePixelShader(g_ps_msdf, sizeof(g_ps_msdf));
+        if (!s_ps_msdf)
+            TD5_LOG_W(LOG_TAG, "MSDF pixel shader create failed");
     }
 
     /* ---- Procedural rounded-rect button shader + constant buffer ---- */
     if (!s_ps_roundrect) {
-        HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device,
-            g_ps_roundrect, sizeof(g_ps_roundrect), NULL, &s_ps_roundrect);
-        if (FAILED(hr)) {
-            s_ps_roundrect = NULL;
-            TD5_LOG_W(LOG_TAG, "roundrect shader create failed hr=0x%08lX", (unsigned long)hr);
-        }
+        s_ps_roundrect = Backend_CreatePixelShader(g_ps_roundrect, sizeof(g_ps_roundrect));
+        if (!s_ps_roundrect)
+            TD5_LOG_W(LOG_TAG, "roundrect shader create failed");
     }
     if (s_ps_roundrect && !s_rr_cb) {
-        D3D11_BUFFER_DESC bd;
-        ZeroMemory(&bd, sizeof(bd));
-        bd.ByteWidth = sizeof(FE_RoundRectParams);   /* 96, 16-aligned */
-        bd.Usage = D3D11_USAGE_DEFAULT;
-        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        HRESULT hr = ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &s_rr_cb);
-        if (FAILED(hr)) {
-            s_rr_cb = NULL;
-            TD5_LOG_W(LOG_TAG, "roundrect cbuffer create failed hr=0x%08lX", (unsigned long)hr);
-        } else {
+        s_rr_cb = Backend_CreateConstBuffer(sizeof(FE_RoundRectParams));   /* 96, 16-aligned */
+        if (!s_rr_cb)
+            TD5_LOG_W(LOG_TAG, "roundrect cbuffer create failed");
+        else
             TD5_LOG_I(LOG_TAG, "Procedural roundrect button shader ready (VectorUI)");
-        }
     }
 
     /* ---- Selector ◄► arrow shader ---- */
     if (!s_ps_arrow) {
-        HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device,
-            g_ps_arrow, sizeof(g_ps_arrow), NULL, &s_ps_arrow);
-        if (FAILED(hr)) {
-            s_ps_arrow = NULL;
-            TD5_LOG_W(LOG_TAG, "arrow shader create failed hr=0x%08lX", (unsigned long)hr);
-        }
+        s_ps_arrow = Backend_CreatePixelShader(g_ps_arrow, sizeof(g_ps_arrow));
+        if (!s_ps_arrow)
+            TD5_LOG_W(LOG_TAG, "arrow shader create failed");
     }
 
     /* ---- Mouse cursor shader ---- */
     if (!s_ps_cursor) {
-        HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device,
-            g_ps_cursor, sizeof(g_ps_cursor), NULL, &s_ps_cursor);
-        if (FAILED(hr)) {
-            s_ps_cursor = NULL;
-            TD5_LOG_W(LOG_TAG, "cursor shader create failed hr=0x%08lX", (unsigned long)hr);
-        }
+        s_ps_cursor = Backend_CreatePixelShader(g_ps_cursor, sizeof(g_ps_cursor));
+        if (!s_ps_cursor)
+            TD5_LOG_W(LOG_TAG, "cursor shader create failed");
     }
 
     /* ---- Analog gauge dial shader + constant buffer (in-race HUD) ---- */
     if (!s_ps_gauge) {
-        HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device,
-            g_ps_gauge, sizeof(g_ps_gauge), NULL, &s_ps_gauge);
-        if (FAILED(hr)) {
-            s_ps_gauge = NULL;
-            TD5_LOG_W(LOG_TAG, "gauge shader create failed hr=0x%08lX", (unsigned long)hr);
-        }
+        s_ps_gauge = Backend_CreatePixelShader(g_ps_gauge, sizeof(g_ps_gauge));
+        if (!s_ps_gauge)
+            TD5_LOG_W(LOG_TAG, "gauge shader create failed");
     }
     if (s_ps_gauge && !s_gauge_cb) {
-        D3D11_BUFFER_DESC bd;
-        ZeroMemory(&bd, sizeof(bd));
-        bd.ByteWidth = sizeof(FE_GaugeParams);   /* 144, 16-aligned */
-        bd.Usage = D3D11_USAGE_DEFAULT;
-        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        HRESULT hr = ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &s_gauge_cb);
-        if (FAILED(hr)) {
-            s_gauge_cb = NULL;
-            TD5_LOG_W(LOG_TAG, "gauge cbuffer create failed hr=0x%08lX", (unsigned long)hr);
-        } else {
+        s_gauge_cb = Backend_CreateConstBuffer(sizeof(FE_GaugeParams));   /* 144, 16-aligned */
+        if (!s_gauge_cb)
+            TD5_LOG_W(LOG_TAG, "gauge cbuffer create failed");
+        else
             TD5_LOG_I(LOG_TAG, "Procedural gauge dial shader ready (VectorUI)");
-        }
     }
 }
 

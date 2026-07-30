@@ -27,6 +27,12 @@ struct BackendTexture {
     LONG                        ref_count;
 };
 
+/* Bodies of the opaque game-UI handles (td5_backend_texture.h). Used by the
+ * port's vector-UI renderer (td5_frontend.c/td5_fe_menu.c) through the
+ * Backend_*PixelShader/*ConstBuffer API so those files hold no ID3D11 types. */
+struct BackendPixelShader { ID3D11PixelShader *ps; };
+struct BackendConstBuffer { ID3D11Buffer *cb; };
+
 /* Reach a surface's GPU objects through its opaque handle (NULL-safe). These
  * replace the old direct `surface->d3d11_srv/rtv/texture` member reads in the
  * backend render code. */
