@@ -103,22 +103,6 @@ struct WrapperDevice {
 };
 
 /* ========================================================================
- * Helper: D3D6 primitive type → D3D11 topology
- * ======================================================================== */
-
-static D3D11_PRIMITIVE_TOPOLOGY MapTopology(DWORD d3d6_prim)
-{
-    switch (d3d6_prim) {
-    case D3DPT_POINTLIST:     return D3D11_PRIMITIVE_TOPOLOGY_POINTLIST;
-    case D3DPT_LINELIST:      return D3D11_PRIMITIVE_TOPOLOGY_LINELIST;
-    case D3DPT_LINESTRIP:     return D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP;
-    case D3DPT_TRIANGLELIST:  return D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-    case D3DPT_TRIANGLESTRIP: return D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
-    default:                  return D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-    }
-}
-
-/* ========================================================================
  * Vtable methods — IUnknown
  * ======================================================================== */
 
@@ -560,16 +544,12 @@ static HRESULT __stdcall Dev3_MultiplyTransform(WrapperDevice *self, DWORD type,
 static HRESULT __stdcall Dev3_DrawPrimitive(WrapperDevice *self,
     DWORD prim_type, DWORD fvf, void *verts, DWORD vert_count, DWORD flags)
 {
-    ID3D11DeviceContext *ctx = g_backend.context;
-    UINT stride;
-    UINT offset = 0;
+    UINT stride = TD5_VERTEX_STRIDE;
     UINT base_vertex = 0;
     (void)self; (void)fvf; (void)flags;
 
-    if (!ctx || !verts || vert_count == 0)
+    if (!g_backend.context || !verts || vert_count == 0)
         return DDERR_GENERIC;
-
-    stride = TD5_VERTEX_STRIDE;
 
     /* Scale pre-transformed vertex X/Y from game space to native RT space */
     if (g_backend.vertex_scale_x != 1.0f || g_backend.vertex_scale_y != 1.0f) {
@@ -589,43 +569,21 @@ static HRESULT __stdcall Dev3_DrawPrimitive(WrapperDevice *self,
         return DDERR_GENERIC;
 
     s_frame_draws++;
+    Backend_DrawPrimitive(prim_type, stride, base_vertex, vert_count);
 
-    /* Bind VB and set topology */
-    ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &g_backend.dynamic_vb, &stride, &offset);
-    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, MapTopology(prim_type));
-
-    /* Ensure correct input layout and VS are bound */
-    ID3D11DeviceContext_IASetInputLayout(ctx, g_backend.input_layout);
-    ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_pretransformed, NULL, 0);
-
-    /* Apply cached render state → D3D11 state objects */
-    Backend_ApplyStateCache();
-
-    /* Log primitive types to detect triangle fan usage */
+    /* Log primitive types to detect triangle fan usage (state resolved by the
+     * draw call above). */
     {
         static int s_draw_log = 0;
         static int s_prim_counts[8] = {0};
         if (prim_type < 8) s_prim_counts[prim_type]++;
         if (s_draw_log < 10) {
-            WRAPPER_LOG("DrawPrimitive: verts=%u type=%u srv=%p z=%d blend=%d",
-                vert_count, prim_type, g_backend.current_srv,
+            WRAPPER_LOG("DrawPrimitive: verts=%u type=%u z=%d blend=%d",
+                vert_count, prim_type,
                 g_backend.state.z_enable, g_backend.state.blend_enable);
             s_draw_log++;
         }
     }
-
-    /* [7-pane GPU crash 2026-07-23] Draw-time safety net: never issue a
-     * sampling draw with a NULL SRV in slot 0 (observed to fault inside the
-     * NVIDIA UMD at Present under very high split-screen draw counts). Catches
-     * any path — including the first draws before any SetTexture — that left
-     * slot 0 unbound. No-op once a real texture is bound. */
-    if (!g_backend.current_srv && g_backend.white_srv) {
-        g_backend.current_srv = g_backend.white_srv;
-        ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &g_backend.white_srv);
-    }
-
-    Backend_NoteDraw(prim_type, vert_count, 0, 0);   /* [DRAW WATCH] */
-    ID3D11DeviceContext_Draw(ctx, vert_count, base_vertex);
     return DD_OK;
 }
 
@@ -634,13 +592,11 @@ static HRESULT __stdcall Dev3_DrawIndexedPrimitive(WrapperDevice *self,
     DWORD prim_type, DWORD fvf, void *verts, DWORD vert_count,
     WORD *indices, DWORD index_count, DWORD flags)
 {
-    ID3D11DeviceContext *ctx = g_backend.context;
     UINT stride = TD5_VERTEX_STRIDE;
-    UINT offset = 0;
     UINT base_vertex = 0, start_index = 0;
     (void)self; (void)fvf; (void)flags;
 
-    if (!ctx || !verts || !indices || vert_count == 0 || index_count == 0)
+    if (!g_backend.context || !verts || !indices || vert_count == 0 || index_count == 0)
         return DDERR_GENERIC;
 
     /* Scale pre-transformed vertex X/Y */
@@ -666,16 +622,10 @@ static HRESULT __stdcall Dev3_DrawIndexedPrimitive(WrapperDevice *self,
     if (prim_type < 8) s_frame_prim_types[prim_type]++;
     if (prim_type == D3DPT_TRIANGLEFAN) s_frame_fan_verts += vert_count;
 
-    /* Bind buffers */
-    ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &g_backend.dynamic_vb, &stride, &offset);
-    ID3D11DeviceContext_IASetIndexBuffer(ctx, g_backend.dynamic_ib, DXGI_FORMAT_R16_UINT, 0);
-    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, MapTopology(prim_type));
-    ID3D11DeviceContext_IASetInputLayout(ctx, g_backend.input_layout);
-    ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_pretransformed, NULL, 0);
+    Backend_DrawIndexedPrimitive(prim_type, stride, base_vertex,
+                                 start_index, index_count, vert_count);
 
-    Backend_ApplyStateCache();
-
-    /* Count blend/shader stats AFTER state cache applied */
+    /* Count blend/shader stats (state cache resolved by the draw call above) */
     if (g_backend.state.blend_enable) s_frame_blend_on++;
     else s_frame_blend_off++;
     if (g_backend.state.current_ps_idx == PS_LUMINANCE_ALPHA) s_frame_ps_lum++;
@@ -688,25 +638,13 @@ static HRESULT __stdcall Dev3_DrawIndexedPrimitive(WrapperDevice *self,
         float v_0 = v0[7]; /* offset 28/4 = 7 */
         DWORD diff = *(DWORD*)((BYTE*)verts + 16);
         WRAPPER_LOG("  DIP[%d]: type=%u verts=%u idx=%u blend=%d ps=%d z=%d "
-            "pos=(%.1f,%.1f,%.4f,%.4f) diff=%08X uv=(%.3f,%.3f) srv=%p r5g6b5=%d",
+            "pos=(%.1f,%.1f,%.4f,%.4f) diff=%08X uv=(%.3f,%.3f) r5g6b5=%d",
             s_frame_idx_draws, prim_type, vert_count, index_count,
             g_backend.state.blend_enable, g_backend.state.current_ps_idx,
             g_backend.state.z_enable,
             v0[0], v0[1], v0[2], v0[3], diff, u0, v_0,
-            g_backend.current_srv, !g_backend.current_tex_has_alpha);
+            !g_backend.current_tex_has_alpha);
     }
-
-    /* [7-pane GPU crash 2026-07-23] Draw-time safety net: never issue a
-     * sampling draw with a NULL SRV in slot 0 (observed to fault inside the
-     * NVIDIA UMD at Present under very high split-screen draw counts). No-op
-     * once a real texture is bound. */
-    if (!g_backend.current_srv && g_backend.white_srv) {
-        g_backend.current_srv = g_backend.white_srv;
-        ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &g_backend.white_srv);
-    }
-
-    Backend_NoteDraw(prim_type, vert_count, index_count, 1);   /* [DRAW WATCH] */
-    ID3D11DeviceContext_DrawIndexed(ctx, index_count, start_index, (INT)base_vertex);
     return DD_OK;
 }
 

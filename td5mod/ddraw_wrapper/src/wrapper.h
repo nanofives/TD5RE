@@ -149,6 +149,21 @@ void Backend_SurfaceBindRenderTarget(WrapperSurface *s);
 void      Backend_ClearBackbuffer(const float *rgba);
 void      Backend_ClearDepth(float z);
 
+/* Draw submission for the D3D6 entry points (device3.c). Each binds the
+ * pretransformed pipeline (VB[/IB]/topology/input-layout/VS from the appended
+ * ring slice), resolves the render-state cache, guarantees a non-null slot-0
+ * SRV, notes the draw, and issues it -- so device3.c holds no ID3D11 draw calls.
+ * `prim_type` is the D3D6 D3DPT_* primitive type; `stride` is the vertex stride.
+ * No-op without a device. */
+void      Backend_DrawPrimitive(DWORD prim_type, UINT stride,
+                                UINT base_vertex, UINT vert_count);
+void      Backend_DrawIndexedPrimitive(DWORD prim_type, UINT stride,
+                                UINT base_vertex, UINT start_index,
+                                UINT index_count, UINT vert_count);
+/* Set the rasterizer viewport (viewport3.c). No-op without a device. */
+void      Backend_SetViewport(float x, float y, float w, float h,
+                              float min_z, float max_z);
+
 /* Windowed mode: display window management */
 void Backend_EnforceWindowSize(void);
 HWND Backend_GetDisplayWindow(void);

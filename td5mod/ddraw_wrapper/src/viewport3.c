@@ -198,24 +198,20 @@ static HRESULT STDMETHODCALLTYPE Viewport_SetViewport2(WrapperViewport *self, D3
      * the viewport to cover the full RT. This happens because M2DX stores
      * its own resolution internally and the game reads from there. */
     if (g_backend.context) {
-        D3D11_VIEWPORT vp11;
-        vp11.TopLeftX = (FLOAT)vp->dwX;
-        vp11.TopLeftY = (FLOAT)vp->dwY;
-        vp11.Width    = (FLOAT)vp->dwWidth;
-        vp11.Height   = (FLOAT)vp->dwHeight;
-        vp11.MinDepth = vp->dvMinZ;
-        vp11.MaxDepth = vp->dvMaxZ;
+        FLOAT vx = (FLOAT)vp->dwX,     vy = (FLOAT)vp->dwY;
+        FLOAT vw = (FLOAT)vp->dwWidth, vh = (FLOAT)vp->dwHeight;
+        FLOAT minz = vp->dvMinZ,       maxz = vp->dvMaxZ;
 
         /* Override to RT dimensions if game passes undersized viewport */
-        if (g_backend.backbuffer && vp11.Width < (FLOAT)g_backend.width) {
+        if (g_backend.backbuffer && vw < (FLOAT)g_backend.width) {
             WRAPPER_LOG("Viewport::SetViewport2: overriding %.0fx%.0f -> %dx%d (native RT)",
-                        vp11.Width, vp11.Height, g_backend.width, g_backend.height);
-            vp11.Width  = (FLOAT)g_backend.width;
-            vp11.Height = (FLOAT)g_backend.height;
+                        vw, vh, g_backend.width, g_backend.height);
+            vw = (FLOAT)g_backend.width;
+            vh = (FLOAT)g_backend.height;
         }
 
-        ID3D11DeviceContext_RSSetViewports(g_backend.context, 1, &vp11);
-        Backend_UpdateViewportCB(vp11.Width, vp11.Height);
+        Backend_SetViewport(vx, vy, vw, vh, minz, maxz);
+        Backend_UpdateViewportCB(vw, vh);
     }
 
     return DD_OK;

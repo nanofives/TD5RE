@@ -31,6 +31,79 @@ void Backend_ClearDepth(float z)
         ID3D11DeviceContext_ClearDepthStencilView(g_backend.context,
             g_backend.depth_dsv, D3D11_CLEAR_DEPTH, z, 0);
 }
+
+/* D3D6 primitive type -> D3D11 topology (moved out of device3.c). */
+static D3D11_PRIMITIVE_TOPOLOGY bt_map_topology(DWORD d3d6_prim)
+{
+    switch (d3d6_prim) {
+    case D3DPT_POINTLIST:     return D3D11_PRIMITIVE_TOPOLOGY_POINTLIST;
+    case D3DPT_LINELIST:      return D3D11_PRIMITIVE_TOPOLOGY_LINELIST;
+    case D3DPT_LINESTRIP:     return D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP;
+    case D3DPT_TRIANGLELIST:  return D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+    case D3DPT_TRIANGLESTRIP: return D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
+    default:                  return D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+    }
+}
+
+/* Never leave PS slot 0 sampling a NULL SRV (observed to fault inside the NVIDIA
+ * UMD at Present under very high split-screen draw counts). Bind the 1x1 white
+ * texture instead -- with PS_MODULATE white*diffuse == diffuse. */
+static void bt_guard_slot0_srv(ID3D11DeviceContext *ctx)
+{
+    if (!g_backend.current_srv && g_backend.white_srv) {
+        g_backend.current_srv = g_backend.white_srv;
+        ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &g_backend.white_srv);
+    }
+}
+
+void Backend_DrawPrimitive(DWORD prim_type, UINT stride,
+                           UINT base_vertex, UINT vert_count)
+{
+    ID3D11DeviceContext *ctx = g_backend.context;
+    UINT offset = 0;
+    if (!ctx) return;
+
+    ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &g_backend.dynamic_vb, &stride, &offset);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, bt_map_topology(prim_type));
+    ID3D11DeviceContext_IASetInputLayout(ctx, g_backend.input_layout);
+    ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_pretransformed, NULL, 0);
+
+    Backend_ApplyStateCache();
+    bt_guard_slot0_srv(ctx);
+
+    Backend_NoteDraw(prim_type, vert_count, 0, 0);   /* [DRAW WATCH] */
+    ID3D11DeviceContext_Draw(ctx, vert_count, base_vertex);
+}
+
+void Backend_DrawIndexedPrimitive(DWORD prim_type, UINT stride, UINT base_vertex,
+                                  UINT start_index, UINT index_count, UINT vert_count)
+{
+    ID3D11DeviceContext *ctx = g_backend.context;
+    UINT offset = 0;
+    if (!ctx) return;
+
+    ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &g_backend.dynamic_vb, &stride, &offset);
+    ID3D11DeviceContext_IASetIndexBuffer(ctx, g_backend.dynamic_ib, DXGI_FORMAT_R16_UINT, 0);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, bt_map_topology(prim_type));
+    ID3D11DeviceContext_IASetInputLayout(ctx, g_backend.input_layout);
+    ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_pretransformed, NULL, 0);
+
+    Backend_ApplyStateCache();
+    bt_guard_slot0_srv(ctx);
+
+    Backend_NoteDraw(prim_type, vert_count, index_count, 1);   /* [DRAW WATCH] */
+    ID3D11DeviceContext_DrawIndexed(ctx, index_count, start_index, (INT)base_vertex);
+}
+
+void Backend_SetViewport(float x, float y, float w, float h, float min_z, float max_z)
+{
+    D3D11_VIEWPORT vp;
+    if (!g_backend.context) return;
+    vp.TopLeftX = x; vp.TopLeftY = y;
+    vp.Width = w; vp.Height = h;
+    vp.MinDepth = min_z; vp.MaxDepth = max_z;
+    ID3D11DeviceContext_RSSetViewports(g_backend.context, 1, &vp);
+}
 #include <stdlib.h>
 #include <string.h>
 #include <dxgi1_3.h>
