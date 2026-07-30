@@ -25,3 +25,8 @@
 -Werror=return-type
 -Werror=int-conversion
 -Werror=incompatible-pointer-types
+# x64 memory hunt (2026-07-30): force the raw-CRT allocation logger's macro
+# shim into every TU. Resolves via the -I of the td5re source dir that every
+# consumer already passes. Inert unless TD5RE_ALLOC_LOG=<MB threshold> is set;
+# macros compile out of RELEASE. See td5_alloc_log.h.
+-include td5_alloc_log.h
