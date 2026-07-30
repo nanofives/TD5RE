@@ -12,19 +12,7 @@
  */
 
 #include "wrapper.h"
-
-/* Body of the opaque handle -- visible only inside this backend translation
- * unit. Consumers see `BackendTexture` as an incomplete type. */
-struct BackendTexture {
-    ID3D11Texture2D            *tex;      /* GPU texture (NULL for adopted-SRV) */
-    ID3D11ShaderResourceView   *srv;      /* SRV for shader sampling */
-    ID3D11RenderTargetView     *rtv;      /* RTV (render targets only)         */
-    ID3D11Texture2D            *staging;  /* CPU-write staging (RT upload)      */
-    DXGI_FORMAT                 format;
-    DWORD                       width, height;
-    unsigned                    device_generation;
-    LONG                        ref_count;
-};
+#include "d3d11_backend_priv.h"   /* struct BackendTexture body + bt_* accessors */
 
 /* ---- internal helpers -------------------------------------------------- */
 
@@ -120,14 +108,33 @@ int Backend_TextureHasRTV(const BackendTexture *bt)
     return bt && bt->rtv != NULL;
 }
 
+/* ---- transitional surface accessors (game-layer page renderer) --------- */
+
+ID3D11ShaderResourceView *Backend_SurfaceGetSRV(WrapperSurface *s)
+{
+    return (s && s->bt) ? s->bt->srv : NULL;
+}
+
+int Backend_SurfaceHasRTV(WrapperSurface *s)
+{
+    return (s && s->bt && s->bt->rtv) ? 1 : 0;
+}
+
+void Backend_SurfaceBindRenderTarget(WrapperSurface *s)
+{
+    Backend_TextureBindRenderTarget(s ? s->bt : NULL);
+}
+
 /* ---- binding ----------------------------------------------------------- */
 
-void Backend_TextureBind(BackendTexture *bt)
+int Backend_TextureBind(BackendTexture *bt, UINT stage)
 {
-    ID3D11ShaderResourceView *srv = (bt && bt->srv) ? bt->srv : g_backend.white_srv;
-    g_backend.current_srv = srv;
+    int bound = (bt && bt->srv) ? 1 : 0;
+    ID3D11ShaderResourceView *srv = bound ? bt->srv : g_backend.white_srv;
+    if (stage == 0) g_backend.current_srv = srv;
     if (g_backend.context)
-        ID3D11DeviceContext_PSSetShaderResources(g_backend.context, 0, 1, &srv);
+        ID3D11DeviceContext_PSSetShaderResources(g_backend.context, stage, 1, &srv);
+    return bound;
 }
 
 void Backend_TextureBindRenderTarget(BackendTexture *bt)
@@ -322,7 +329,9 @@ int Backend_TextureLoad(BackendTexture **pbt, DWORD dst_w, DWORD dst_h,
     DWORD copy_width, copy_height, y;
     BackendTexture *dst = pbt ? *pbt : NULL;
 
-    if (out_r5g6b5_source) *out_r5g6b5_source = 0;
+    /* out_r5g6b5_source is left untouched on the 32bpp/CopyResource paths (the
+     * old Texture::Load did not reassign it there) -- the caller seeds it with
+     * the texture's current value. */
 
     /* --- PNG override + dump (only R5G6B5 16-bit sources) --- */
     if (src_pixels && src_w > 0 && src_h > 0 && src_bpp == 16) {
@@ -335,7 +344,7 @@ int Backend_TextureLoad(BackendTexture **pbt, DWORD dst_w, DWORD dst_h,
                 if (nbt) {
                     if (dst) Backend_TextureRelease(dst);
                     *pbt = nbt;
-                    if (out_r5g6b5_source) *out_r5g6b5_source = 0;
+                    if (out_r5g6b5_source) *out_r5g6b5_source = 0;  /* PNG = direct A8, no r5g6b5 */
                     return 1;
                 }
             }

@@ -741,14 +741,14 @@ void td5_plat_present(int vsync)
 
     if (s_present_log_count < 120 && g_backend.scene_rendered) {
         TD5_LOG_I("plat",
-                  "present: scene=%d draws=%d verts=%d indices=%d tex=%d backbuffer_rtv=%p backbuffer_srv=%p swap_rtv=%p",
+                  "present: scene=%d draws=%d verts=%d indices=%d tex=%d backbuffer_bt=%p backbuffer_srv=%p swap_rtv=%p",
                   g_backend.scene_rendered,
                   s_frame_draw_calls,
                   s_frame_vertices,
                   s_frame_indices,
                   s_last_bound_texture_page,
-                  g_backend.backbuffer ? g_backend.backbuffer->d3d11_rtv : NULL,
-                  g_backend.backbuffer ? g_backend.backbuffer->d3d11_srv : NULL,
+                  (void*)(g_backend.backbuffer ? g_backend.backbuffer->bt : NULL),
+                  Backend_SurfaceGetSRV(g_backend.backbuffer),
                   g_backend.swap_rtv);
         s_present_log_count++;
     }
@@ -768,10 +768,7 @@ void td5_plat_present(int vsync)
     }
 
     if (empty_scene_fallback) {
-        if (g_backend.backbuffer && g_backend.backbuffer->d3d11_rtv) {
-            ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1,
-                &g_backend.backbuffer->d3d11_rtv, g_backend.depth_dsv);
-        }
+        Backend_SurfaceBindRenderTarget(g_backend.backbuffer);
         return;
     }
 
@@ -781,18 +778,15 @@ void td5_plat_present(int vsync)
      * still under reconstruction. */
     if (g_backend.standalone && g_backend.scene_rendered &&
         g_backend.context && g_backend.swap_chain && g_backend.swap_rtv &&
-        g_backend.backbuffer && g_backend.backbuffer->d3d11_srv) {
+        Backend_SurfaceGetSRV(g_backend.backbuffer)) {
         ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 0, NULL, NULL);
         ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1,
             &g_backend.swap_rtv, NULL);
-        Backend_DrawFullscreenQuad(g_backend.backbuffer->d3d11_srv);
+        Backend_DrawFullscreenQuad(Backend_SurfaceGetSRV(g_backend.backbuffer));
         Backend_CaptureIfRequested();  /* photo-booth: grab the composited race frame */
         plat_present_swapchain((vsync && g_backend.vsync) ? 1 : 0);
 
-        if (g_backend.backbuffer->d3d11_rtv) {
-            ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1,
-                &g_backend.backbuffer->d3d11_rtv, g_backend.depth_dsv);
-        }
+        Backend_SurfaceBindRenderTarget(g_backend.backbuffer);
         return;
     }
 
@@ -814,8 +808,8 @@ void td5_plat_present_texture_page(int page_index, int vsync)
         /* [x64 Stage 3] Straight pointer read -- see td5_plat_render_bind_texture. */
         if (s_tex_srvs[page_index]) {
             srv = s_tex_srvs[page_index];
-        } else if (s_tex_surfaces[page_index] && s_tex_surfaces[page_index]->d3d11_srv) {
-            srv = s_tex_surfaces[page_index]->d3d11_srv;
+        } else if (Backend_SurfaceGetSRV(s_tex_surfaces[page_index])) {
+            srv = Backend_SurfaceGetSRV(s_tex_surfaces[page_index]);
         }
     }
 
@@ -826,10 +820,7 @@ void td5_plat_present_texture_page(int page_index, int vsync)
     Backend_DrawFullscreenQuad(srv);
     plat_present_swapchain((vsync && g_backend.vsync) ? 1 : 0);
 
-    if (g_backend.backbuffer && g_backend.backbuffer->d3d11_rtv) {
-        ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1,
-            &g_backend.backbuffer->d3d11_rtv, g_backend.depth_dsv);
-    }
+    Backend_SurfaceBindRenderTarget(g_backend.backbuffer);
 }
 
 void td5_plat_get_window_size(int *width, int *height)

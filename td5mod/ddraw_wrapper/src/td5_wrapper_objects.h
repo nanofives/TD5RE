@@ -169,11 +169,10 @@ struct WrapperSurface {
     DWORD               caps;       /* DDSCAPS flags */
     DDPIXELFORMAT_W     pixel_format;
 
-    /* D3D11 backing */
-    ID3D11Texture2D            *d3d11_texture;  /* GPU texture */
-    ID3D11ShaderResourceView   *d3d11_srv;      /* SRV (for shader sampling) */
-    ID3D11RenderTargetView     *d3d11_rtv;      /* RTV (for render targets only) */
-    ID3D11Texture2D            *d3d11_staging;  /* Staging texture for Lock/Unlock */
+    /* GPU backing -- opaque backend handle (D3D11 or D3D12). Replaces the old
+     * raw ID3D11 texture/SRV/RTV/staging quartet so this shared COM file is
+     * backend-agnostic (D3D12 port Phase 0). */
+    BackendTexture             *bt;
     DXGI_FORMAT                 dxgi_format;    /* DXGI format of the texture */
 
     /* [DEVICE-LOST recovery] Stamp of the g_backend.device_generation the above
@@ -242,7 +241,7 @@ struct WrapperTexture {
     WrapperTextureVtbl *vtbl;
     LONG                ref_count;
     WrapperSurface     *surface;
-    ID3D11ShaderResourceView *d3d11_srv;  /* Survives surface destruction */
+    BackendTexture     *bt;   /* opaque GPU handle; survives surface destruction */
     int                 r5g6b5_source; /* 1 = data was R5G6B5 (needs luminance alpha) */
 };
 

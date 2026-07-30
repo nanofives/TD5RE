@@ -364,7 +364,7 @@ static HRESULT __stdcall DD4_CreateSurface(WrapperDirectDraw *self, DDSURFACEDES
          * the pixel shader handles their transparency at render time. */
         if (bpp == 16 && (desc->dwFlags & DDSD_PIXELFORMAT) &&
             (desc->ddpfPixelFormat.dwFlags & DDPF_ALPHAPIXELS) &&
-            tex->d3d11_texture && g_backend.device) {
+            Backend_TextureIsValid(tex->bt) && g_backend.device) {
             /* All textures are now B8G8R8A8_UNORM — no format recreation needed.
              * The 16-bit A1R5G5B5 source data will be converted to 32-bit in
              * Texture_Load's upload path. Just ensure the texture exists. */

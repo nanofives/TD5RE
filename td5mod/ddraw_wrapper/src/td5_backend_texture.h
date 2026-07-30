@@ -59,9 +59,12 @@ int Backend_TextureLoad(BackendTexture **pbt, DWORD dst_w, DWORD dst_h,
                         int src_has_alpha, int has_colorkey, DWORD colorkey_low,
                         BackendTexture *src_bt, int *out_r5g6b5_source);
 
-/* Bind `bt` as the sampled texture (pixel-shader SRV slot 0). NULL binds the
- * backend's 1x1 white fallback. */
-void Backend_TextureBind(BackendTexture *bt);
+/* Bind `bt` as the sampled texture at pixel-shader SRV slot `stage`. NULL (or a
+ * handle without an SRV) binds the backend's 1x1 white fallback. Updates
+ * g_backend.current_srv only when stage==0 (matches the old Dev3_SetTexture
+ * semantics). Returns 1 if a real texture SRV was bound, 0 if the white
+ * fallback was used. */
+int Backend_TextureBind(BackendTexture *bt, UINT stage);
 
 /* Bind `bt` as the sole render target (+ the backend depth DSV), matching the
  * OMSetRenderTargets the RT-surface creation path used to issue. */

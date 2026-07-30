@@ -11,6 +11,26 @@
  */
 
 #include "wrapper.h"
+#include "d3d11_backend_priv.h"   /* BackendTexture body + bt_* surface accessors */
+
+/* Backend-agnostic frame clears (see wrapper.h). Used by the shared COM files
+ * so they issue no ID3D11 clear calls directly. */
+void Backend_ClearBackbuffer(const float *rgba)
+{
+    ID3D11RenderTargetView *rtv = bt_rtv(g_backend.backbuffer);
+    if (!g_backend.context) return;
+    if (rtv)
+        ID3D11DeviceContext_ClearRenderTargetView(g_backend.context, rtv, rgba);
+    else if (g_backend.swap_rtv)
+        ID3D11DeviceContext_ClearRenderTargetView(g_backend.context, g_backend.swap_rtv, rgba);
+}
+
+void Backend_ClearDepth(float z)
+{
+    if (g_backend.context && g_backend.depth_dsv)
+        ID3D11DeviceContext_ClearDepthStencilView(g_backend.context,
+            g_backend.depth_dsv, D3D11_CLEAR_DEPTH, z, 0);
+}
 #include <stdlib.h>
 #include <string.h>
 #include <dxgi1_3.h>
@@ -191,7 +211,7 @@ void Backend_CompositeAndPresent(WrapperSurface *rt_surface, RECT *srcRect, RECT
      *
      * Even if no BltFast wrote this frame (dirty=0), we must NOT FlushDirty
      * because that would overwrite the 3D scene with stale sys_buffer data. */
-    if (g_backend.scene_rendered && rt_surface && rt_surface->d3d11_srv) {
+    if (g_backend.scene_rendered && rt_surface && bt_srv(rt_surface)) {
 
         /* Upload BltFast overlay to a SECOND composite texture with color-key alpha
          * (only if BltFast wrote this frame; skip if no HUD content) */
@@ -205,14 +225,14 @@ void Backend_CompositeAndPresent(WrapperSurface *rt_surface, RECT *srcRect, RECT
         if (g_backend.composite_tex) {
             ID3D11DeviceContext_CopyResource(ctx,
                 (ID3D11Resource*)g_backend.composite_tex,
-                (ID3D11Resource*)rt_surface->d3d11_texture);
+                (ID3D11Resource*)bt_tex(rt_surface));
         }
 
         /* Bind swap chain as render target */
         ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &g_backend.swap_rtv, NULL);
 
         /* Layer 1: draw 3D scene (opaque) from the COPY */
-        Backend_DrawFullscreenQuad(g_backend.composite_srv ? g_backend.composite_srv : rt_surface->d3d11_srv);
+        Backend_DrawFullscreenQuad(g_backend.composite_srv ? g_backend.composite_srv : bt_srv(rt_surface));
 
         /* DrawFullscreenQuad changes VS/PS/InputLayout/Sampler — invalidate
          * all cached indices so next ApplyStateCache actually re-sets them. */
@@ -268,7 +288,7 @@ void Backend_CompositeAndPresent(WrapperSurface *rt_surface, RECT *srcRect, RECT
                 s_log_count, g_backend.scene_rendered,
                 rt_surface ? rt_surface->dirty : -1,
                 (rt_surface && rt_surface->dirty && rt_surface->sys_buffer) ? 1 : 0,
-                rt_surface ? rt_surface->d3d11_srv : NULL);
+                rt_surface ? bt_srv(rt_surface) : NULL);
             s_log_count++;
         }
 
@@ -286,16 +306,16 @@ void Backend_CompositeAndPresent(WrapperSurface *rt_surface, RECT *srcRect, RECT
             WRAPPER_LOG("CompositeAndPresent[%d]: SINGLE-LAYER scene=%d dirty=%d rt_srv=%p",
                 s_log_count, g_backend.scene_rendered,
                 rt_surface ? rt_surface->dirty : -1,
-                rt_surface ? rt_surface->d3d11_srv : NULL);
+                rt_surface ? bt_srv(rt_surface) : NULL);
             s_log_count++;
         }
 
         if (rt_surface && rt_surface->dirty)
             WrapperSurface_FlushDirty(rt_surface);
 
-        if (rt_surface && rt_surface->d3d11_srv) {
+        if (rt_surface && bt_srv(rt_surface)) {
             ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &g_backend.swap_rtv, NULL);
-            Backend_DrawFullscreenQuad(rt_surface->d3d11_srv);
+            Backend_DrawFullscreenQuad(bt_srv(rt_surface));
         }
         /* Do NOT clear scene_rendered here either — same reason as TWO-LAYER path */
     }
@@ -320,9 +340,11 @@ void Backend_CompositeAndPresent(WrapperSurface *rt_surface, RECT *srcRect, RECT
     Backend_MaybeTrim();
 
     /* Restore game RT (backbuffer, not swap chain) */
-    if (g_backend.backbuffer && g_backend.backbuffer->d3d11_rtv) {
-        ID3D11DeviceContext_OMSetRenderTargets(ctx, 1,
-            &g_backend.backbuffer->d3d11_rtv, g_backend.depth_dsv);
+    {
+        ID3D11RenderTargetView *bb_rtv = bt_rtv(g_backend.backbuffer);
+        if (bb_rtv) {
+            ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &bb_rtv, g_backend.depth_dsv);
+        }
     }
     g_backend.gbuffer_bound = 0;   /* RT juggling above dropped RT1 */
 }

@@ -372,15 +372,22 @@ static ULONG __stdcall Surface4_Release(WrapperSurface *self)
          * so it survives surface destruction. M2DX releases DirectDraw surfaces
          * after Texture::Load but keeps the WrapperTexture for SetTexture. */
         if (self->texture_wrapper) {
-            if (self->d3d11_srv) {
-                self->texture_wrapper->d3d11_srv = self->d3d11_srv;
-                ID3D11ShaderResourceView_AddRef(self->d3d11_srv);
-                WRAPPER_LOG("Surface4_Release: transferred d3d11_srv %p to WrapperTexture %p",
-                    self->d3d11_srv, self->texture_wrapper);
+            /* Hand the GPU handle to the texture wrapper so it survives this
+             * surface. M2DX releases DirectDraw surfaces after Texture::Load but
+             * keeps the WrapperTexture for SetTexture. Only adopt (AddRef) when
+             * the wrapper does not already hold this exact handle -- otherwise
+             * we leak a ref on every surface teardown. */
+            if (self->bt && self->texture_wrapper->bt != self->bt) {
+                if (self->texture_wrapper->bt)
+                    Backend_TextureRelease(self->texture_wrapper->bt);
+                self->texture_wrapper->bt = self->bt;
+                Backend_TextureAddRef(self->bt);
+                WRAPPER_LOG("Surface4_Release: transferred bt %p to WrapperTexture %p",
+                    (void*)self->bt, self->texture_wrapper);
             }
             /* The surface is about to be freed — clear the texture's back-pointer
              * so nothing (e.g. Dev3_SetTexture's device-current guard) dereferences
-             * freed memory. The transferred SRV above keeps the texture usable. */
+             * freed memory. The transferred handle above keeps the texture usable. */
             self->texture_wrapper->surface = NULL;
         }
 
@@ -392,22 +399,8 @@ static ULONG __stdcall Surface4_Release(WrapperSurface *self)
             free(self->sys_buffer);
             self->sys_buffer = NULL;
         }
-        if (self->d3d11_staging) {
-            ID3D11Texture2D_Release(self->d3d11_staging);
-            self->d3d11_staging = NULL;
-        }
-        if (self->d3d11_rtv) {
-            ID3D11RenderTargetView_Release(self->d3d11_rtv);
-            self->d3d11_rtv = NULL;
-        }
-        if (self->d3d11_srv) {
-            ID3D11ShaderResourceView_Release(self->d3d11_srv);
-            self->d3d11_srv = NULL;
-        }
-        if (self->d3d11_texture) {
-            ID3D11Texture2D_Release(self->d3d11_texture);
-            self->d3d11_texture = NULL;
-        }
+        Backend_TextureRelease(self->bt);
+        self->bt = NULL;
         free(self);
         return 0;
     }
@@ -640,7 +633,7 @@ static HRESULT __stdcall Surface4_BltFast(WrapperSurface *self, DWORD x, DWORD y
      * At present time, its sys_buffer is composited as the background layer
      * underneath D3D render target content.
      * Only track surfaces that are NOT the D3D render target and match its dimensions.
-     * RT surfaces have d3d11_staging — exclude them. */
+     * RT surfaces carry DDSCAPS_3DDEVICE — exclude them. */
     {
         WrapperSurface *rt = g_backend.backbuffer;
         if (rt && self != rt && !(self->caps & DDSCAPS_3DDEVICE) &&
@@ -1320,62 +1313,9 @@ void WrapperSurface_FlushDirty(WrapperSurface *s)
      * positioning. Background TGAs stay at 640x480 pixel content in the
      * native-res surface; the present quad with POINT filter upscales. */
 
-    if (s->d3d11_texture && s->sys_buffer && g_backend.context) {
-        if (s->bpp == 16 && s->dxgi_format == DXGI_FORMAT_B8G8R8A8_UNORM) {
-            /* Convert R5G6B5 16bpp sys_buffer → B8G8R8A8 32bpp for upload */
-            DWORD row32 = s->width * 4;
-            BYTE *buf32 = (BYTE*)malloc(row32 * s->height);
-            if (buf32) {
-                DWORD y;
-                for (y = 0; y < s->height; y++) {
-                    uint16_t *src16 = (uint16_t*)((BYTE*)s->sys_buffer + y * s->pitch);
-                    uint32_t *dst32 = (uint32_t*)(buf32 + y * row32);
-                    DWORD x;
-                    for (x = 0; x < s->width; x++) {
-                        uint16_t c = src16[x];
-                        uint32_t r = ((c >> 11) & 0x1F) * 255 / 31;
-                        uint32_t g = ((c >> 5)  & 0x3F) * 255 / 63;
-                        uint32_t b = ((c)       & 0x1F) * 255 / 31;
-                        dst32[x] = 0xFF000000 | (r << 16) | (g << 8) | b;
-                    }
-                }
-                ID3D11DeviceContext_UpdateSubresource(g_backend.context,
-                    (ID3D11Resource*)s->d3d11_texture, 0, NULL,
-                    buf32, row32, 0);
-                free(buf32);
-            }
-        } else {
-            /* Use staging texture for reliable upload (respects GPU row pitch alignment) */
-            D3D11_TEXTURE2D_DESC td;
-            ID3D11Texture2D *staging = NULL;
-            ZeroMemory(&td, sizeof(td));
-            td.Width = s->width;
-            td.Height = s->height;
-            td.MipLevels = 1;
-            td.ArraySize = 1;
-            td.Format = s->dxgi_format;
-            td.SampleDesc.Count = 1;
-            td.Usage = D3D11_USAGE_STAGING;
-            td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-            if (SUCCEEDED(ID3D11Device_CreateTexture2D(g_backend.device, &td, NULL, &staging)) && staging) {
-                D3D11_MAPPED_SUBRESOURCE mapped;
-                if (SUCCEEDED(ID3D11DeviceContext_Map(g_backend.context,
-                        (ID3D11Resource*)staging, 0, D3D11_MAP_WRITE, 0, &mapped))) {
-                    DWORD bpp_bytes = s->bpp / 8;
-                    DWORD row_bytes = s->width * bpp_bytes;
-                    DWORD y;
-                    for (y = 0; y < s->height; y++) {
-                        CopyMemory((BYTE*)mapped.pData + y * mapped.RowPitch,
-                                   (BYTE*)s->sys_buffer + y * s->pitch,
-                                   row_bytes);
-                    }
-                    ID3D11DeviceContext_Unmap(g_backend.context, (ID3D11Resource*)staging, 0);
-                    ID3D11DeviceContext_CopyResource(g_backend.context,
-                        (ID3D11Resource*)s->d3d11_texture, (ID3D11Resource*)staging);
-                }
-                ID3D11Texture2D_Release(staging);
-            }
-        }
+    if (s->bt && s->sys_buffer) {
+        Backend_TextureUpload(s->bt, s->sys_buffer, s->pitch,
+                              s->width, s->height, s->bpp);
         WRAPPER_LOG("FlushDirty: upload surf=%p %ux%u pitch=%d fmt=%d",
             s, s->width, s->height, s->pitch, s->dxgi_format);
     }
@@ -1395,67 +1335,28 @@ void WrapperSurface_EnsureDeviceCurrent(WrapperSurface *s)
     if (!g_backend.device) return;
     if (s->device_generation == g_backend.device_generation) return;
 
-    /* Drop the GPU objects that belonged to the removed device. Releasing a
-     * dead device's child COM objects is safe — it only drops the process-side
-     * refcount and frees CPU memory; it never touches the GPU. */
-    if (s->d3d11_srv)     { ID3D11ShaderResourceView_Release(s->d3d11_srv);     s->d3d11_srv = NULL; }
-    if (s->d3d11_rtv)     { ID3D11RenderTargetView_Release(s->d3d11_rtv);       s->d3d11_rtv = NULL; }
-    if (s->d3d11_staging) { ID3D11Texture2D_Release(s->d3d11_staging);          s->d3d11_staging = NULL; }
-    if (s->d3d11_texture) { ID3D11Texture2D_Release(s->d3d11_texture);          s->d3d11_texture = NULL; }
-
     /* Only surfaces that had GPU backing get it back. Z-buffers (backend depth)
-     * and primary surfaces (swap chain) have no per-surface D3D11 resource. */
-    if (!(s->caps & DDSCAPS_SYSTEMMEMORY) &&
+     * and primary surfaces (swap chain) have no per-surface handle. The backend
+     * drops the dead-device objects and recreates them on the current device. */
+    if (s->bt &&
+        !(s->caps & DDSCAPS_SYSTEMMEMORY) &&
         !(s->caps & DDSCAPS_ZBUFFER) &&
         !(s->caps & DDSCAPS_PRIMARYSURFACE)) {
         DXGI_FORMAT fmt = s->dxgi_format ? s->dxgi_format
             : WrapperSurface_GetDXGIFormat(s->bpp, s->pixel_format.dwFlags, &s->pixel_format);
         int is_rt = (s->caps & DDSCAPS_OFFSCREENPLAIN) && (s->caps & DDSCAPS_3DDEVICE);
-        D3D11_TEXTURE2D_DESC td;
-        ZeroMemory(&td, sizeof(td));
-        td.Width            = s->width;
-        td.Height           = s->height;
-        td.MipLevels        = 1;
-        td.ArraySize        = 1;
-        td.Format           = fmt;
-        td.SampleDesc.Count = 1;
-        td.Usage            = D3D11_USAGE_DEFAULT;
-        td.BindFlags        = D3D11_BIND_SHADER_RESOURCE |
-                              (is_rt ? D3D11_BIND_RENDER_TARGET : 0);
         s->dxgi_format = fmt;
-
-        if (SUCCEEDED(ID3D11Device_CreateTexture2D(g_backend.device, &td, NULL, &s->d3d11_texture))) {
-            ID3D11Device_CreateShaderResourceView(g_backend.device,
-                (ID3D11Resource*)s->d3d11_texture, NULL, &s->d3d11_srv);
-            if (is_rt) {
-                D3D11_TEXTURE2D_DESC stg;
-                ID3D11Device_CreateRenderTargetView(g_backend.device,
-                    (ID3D11Resource*)s->d3d11_texture, NULL, &s->d3d11_rtv);
-                ZeroMemory(&stg, sizeof(stg));
-                stg.Width            = s->width;
-                stg.Height           = s->height;
-                stg.MipLevels        = 1;
-                stg.ArraySize        = 1;
-                stg.Format           = fmt;
-                stg.SampleDesc.Count = 1;
-                stg.Usage            = D3D11_USAGE_STAGING;
-                stg.CPUAccessFlags   = D3D11_CPU_ACCESS_WRITE;
-                ID3D11Device_CreateTexture2D(g_backend.device, &stg, NULL, &s->d3d11_staging);
-            }
-        }
+        Backend_TextureEnsureCurrent(s->bt, s->width, s->height, fmt, is_rt, is_rt);
     }
 
     s->device_generation = g_backend.device_generation;
     /* Re-upload retained CPU pixels into the fresh texture on the next flush. */
-    if (s->sys_buffer && s->d3d11_texture) s->dirty = 1;
-    /* Keep any linked texture wrapper's cached SRV in sync with the rebuilt
-     * surface SRV. Dev3_SetTexture binds tex->d3d11_srv directly, so a stale
-     * copy left over from the removed device would be a freed pointer handed
-     * to the driver on the first post-recovery draw (NULL-deref in nvwgf2um). */
-    if (s->texture_wrapper) s->texture_wrapper->d3d11_srv = s->d3d11_srv;
-    WRAPPER_LOG("EnsureDeviceCurrent: rebuilt surf=%p %ux%u gen=%u tex=%p srv=%p rtv=%p",
-                s, s->width, s->height, g_backend.device_generation,
-                s->d3d11_texture, s->d3d11_srv, s->d3d11_rtv);
+    if (s->sys_buffer && s->bt) s->dirty = 1;
+    /* Keep any linked texture wrapper's cached handle in sync with the rebuilt
+     * surface handle (Dev3_SetTexture may bind tex->bt directly). */
+    if (s->texture_wrapper) s->texture_wrapper->bt = s->bt;
+    WRAPPER_LOG("EnsureDeviceCurrent: rebuilt surf=%p %ux%u gen=%u bt=%p",
+                s, s->width, s->height, g_backend.device_generation, (void*)s->bt);
 }
 
 /**
@@ -1537,107 +1438,37 @@ WrapperSurface* WrapperSurface_Create(DWORD width, DWORD height, DWORD bpp, DWOR
         }
     }
 
-    /* Create D3D11 backing if we have a device and this is a vidmem surface */
+    /* Create GPU backing if we have a device and this is a vidmem surface */
     if (g_backend.device && !(caps & DDSCAPS_SYSTEMMEMORY)) {
         DXGI_FORMAT fmt = WrapperSurface_GetDXGIFormat(bpp, s->pixel_format.dwFlags, &s->pixel_format);
         s->dxgi_format = fmt;
 
         if (caps & DDSCAPS_ZBUFFER) {
-            /* Z-buffer: depth is managed by the backend (depth_dsv).
-             * No per-surface D3D11 resource needed. */
+            /* Z-buffer: depth is managed by the backend (depth_dsv). No handle. */
             WRAPPER_LOG("WrapperSurface_Create: Z-buffer (depth managed by backend)");
         } else if ((caps & DDSCAPS_TEXTURE) || (caps & DDSCAPS_VIDEOMEMORY)) {
-            /* Texture or video-memory surface: create texture + SRV */
-            D3D11_TEXTURE2D_DESC td;
-            ZeroMemory(&td, sizeof(td));
-            td.Width            = width;
-            td.Height           = height;
-            td.MipLevels        = 1;
-            td.ArraySize        = 1;
-            td.Format           = fmt;
-            td.SampleDesc.Count = 1;
-            td.Usage            = D3D11_USAGE_DEFAULT;
-            td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
-
-            HRESULT hr = ID3D11Device_CreateTexture2D(g_backend.device,
-                &td, NULL, &s->d3d11_texture);
-            if (SUCCEEDED(hr)) {
-                ID3D11Device_CreateShaderResourceView(g_backend.device,
-                    (ID3D11Resource*)s->d3d11_texture, NULL, &s->d3d11_srv);
-            }
+            /* Texture or video-memory surface: SRV texture. */
+            s->bt = Backend_TextureCreate(width, height, fmt, 0, 0);
         } else if (caps & DDSCAPS_OFFSCREENPLAIN) {
             if (caps & DDSCAPS_3DDEVICE) {
-                /* Render target surface: D3D renders to this.
-                 * Create texture + SRV + RTV, and set as render target. */
-                D3D11_TEXTURE2D_DESC td;
-                ZeroMemory(&td, sizeof(td));
-                td.Width            = width;
-                td.Height           = height;
-                td.MipLevels        = 1;
-                td.ArraySize        = 1;
-                td.Format           = fmt;
-                td.SampleDesc.Count = 1;
-                td.Usage            = D3D11_USAGE_DEFAULT;
-                td.BindFlags        = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-
-                HRESULT hr = ID3D11Device_CreateTexture2D(g_backend.device,
-                    &td, NULL, &s->d3d11_texture);
-                if (SUCCEEDED(hr)) {
-                    ID3D11Device_CreateShaderResourceView(g_backend.device,
-                        (ID3D11Resource*)s->d3d11_texture, NULL, &s->d3d11_srv);
-                    ID3D11Device_CreateRenderTargetView(g_backend.device,
-                        (ID3D11Resource*)s->d3d11_texture, NULL, &s->d3d11_rtv);
-
-                    /* Create a staging texture for CPU upload (FlushDirty) */
-                    {
-                        D3D11_TEXTURE2D_DESC stg;
-                        ZeroMemory(&stg, sizeof(stg));
-                        stg.Width            = width;
-                        stg.Height           = height;
-                        stg.MipLevels        = 1;
-                        stg.ArraySize        = 1;
-                        stg.Format           = fmt;
-                        stg.SampleDesc.Count = 1;
-                        stg.Usage            = D3D11_USAGE_STAGING;
-                        stg.CPUAccessFlags   = D3D11_CPU_ACCESS_WRITE;
-                        ID3D11Device_CreateTexture2D(g_backend.device,
-                            &stg, NULL, &s->d3d11_staging);
-                    }
-
-                    /* Set as the device render target */
-                    ID3D11DeviceContext_OMSetRenderTargets(g_backend.context,
-                        1, &s->d3d11_rtv, g_backend.depth_dsv);
-                    WRAPPER_LOG("WrapperSurface_Create: set as D3D11 RT + SRV + staging");
-                }
+                /* Render target surface: D3D renders to this. SRV + RTV + a
+                 * staging sibling for CPU upload, then bind as the device RT. */
+                s->bt = Backend_TextureCreate(width, height, fmt, 1, 1);
+                Backend_TextureBindRenderTarget(s->bt);
+                WRAPPER_LOG("WrapperSurface_Create: set as RT + SRV + staging");
             } else {
-                /* Plain offscreen surface — create a default texture for GPU use */
-                D3D11_TEXTURE2D_DESC td;
-                ZeroMemory(&td, sizeof(td));
-                td.Width            = width;
-                td.Height           = height;
-                td.MipLevels        = 1;
-                td.ArraySize        = 1;
-                td.Format           = fmt;
-                td.SampleDesc.Count = 1;
-                td.Usage            = D3D11_USAGE_DEFAULT;
-                td.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
-
-                HRESULT hr = ID3D11Device_CreateTexture2D(g_backend.device,
-                    &td, NULL, &s->d3d11_texture);
-                if (SUCCEEDED(hr)) {
-                    ID3D11Device_CreateShaderResourceView(g_backend.device,
-                        (ID3D11Resource*)s->d3d11_texture, NULL, &s->d3d11_srv);
-                }
+                /* Plain offscreen surface — default SRV texture for GPU use. */
+                s->bt = Backend_TextureCreate(width, height, fmt, 0, 0);
             }
         } else if (caps & DDSCAPS_PRIMARYSURFACE) {
-            /* Primary surface: no D3D11 backing — swap chain managed by backend */
+            /* Primary surface: no per-surface backing — swap chain managed by backend */
             WRAPPER_LOG("WrapperSurface_Create: primary surface (swap chain managed by backend)");
         }
     }
 
     /* If we created D3D11 backing, mark the surface as video memory.
      * M2DX checks this flag to determine if the render target is in VRAM. */
-    if (s->d3d11_texture || s->d3d11_rtv) {
+    if (Backend_TextureIsValid(s->bt)) {
         s->caps |= DDSCAPS_VIDEOMEMORY;
     }
 
@@ -1645,8 +1476,8 @@ WrapperSurface* WrapperSurface_Create(DWORD width, DWORD height, DWORD bpp, DWOR
      * created on so a later Backend_RecreateDevice can tell they're stale. */
     s->device_generation = g_backend.device_generation;
 
-    WRAPPER_LOG("WrapperSurface_Create: %p %ux%u %ubpp caps=0x%08x tex=%p srv=%p rtv=%p",
-                s, width, height, bpp, s->caps, s->d3d11_texture, s->d3d11_srv, s->d3d11_rtv);
+    WRAPPER_LOG("WrapperSurface_Create: %p %ux%u %ubpp caps=0x%08x bt=%p",
+                s, width, height, bpp, s->caps, (void*)s->bt);
 
     return s;
 }

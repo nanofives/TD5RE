@@ -86,10 +86,10 @@ typedef struct WrapperViewport       WrapperViewport;
 typedef struct WrapperTexture        WrapperTexture;
 typedef struct WrapperClipper        WrapperClipper;
 
+#include "td5_backend_texture.h"   /* opaque BackendTexture (referenced by objects.h) */
 #include "td5_wrapper_backend.h"
 #include "td5_wrapper_ddraw_types.h"
 #include "td5_wrapper_objects.h"
-#include "td5_backend_texture.h"
 
 /* ========================================================================
  * COM interface function prototypes
@@ -132,6 +132,22 @@ void      Backend_CompositeAndPresent(WrapperSurface *rt_surface, RECT *srcRect,
 
 /* Fullscreen quad rendering (for present blit and compositing) */
 void      Backend_DrawFullscreenQuad(ID3D11ShaderResourceView *srv);
+
+/* [D3D12 port Phase 0 — TRANSITIONAL] Raw SRV of a surface's GPU handle, for the
+ * not-yet-fenced game-layer page renderer (td5_platform_win32*.c). Leaks the
+ * D3D11 type on purpose; deleted once that renderer moves onto BackendTexture in
+ * a later Phase 0 sub-step. NULL-safe (returns NULL). */
+ID3D11ShaderResourceView *Backend_SurfaceGetSRV(WrapperSurface *s);
+int  Backend_SurfaceHasRTV(WrapperSurface *s);
+void Backend_SurfaceBindRenderTarget(WrapperSurface *s);
+
+/* Backend-agnostic frame clears used by the shared COM files (device3 BeginScene,
+ * viewport3 Clear). Backend_ClearBackbuffer clears the game render-target
+ * (backbuffer texture RTV, or the swap-chain RTV as a fallback) to `rgba`
+ * (4 floats, RGBA order). Backend_ClearDepth clears the backend depth buffer to
+ * `z`. Both no-op without a device/target. */
+void      Backend_ClearBackbuffer(const float *rgba);
+void      Backend_ClearDepth(float z);
 
 /* Windowed mode: display window management */
 void Backend_EnforceWindowSize(void);

@@ -262,13 +262,10 @@ static HRESULT STDMETHODCALLTYPE Viewport_Clear2(WrapperViewport *self, DWORD co
         /* Clear the backbuffer RTV (where 3D draws go), not the swap chain.
          * BeginScene also clears the backbuffer, but M2DX calls Viewport::Clear
          * separately and the game expects the actual render target to be cleared. */
-        if (g_backend.backbuffer && g_backend.backbuffer->d3d11_rtv)
-            ID3D11DeviceContext_ClearRenderTargetView(g_backend.context, g_backend.backbuffer->d3d11_rtv, clearColor);
-        else if (g_backend.swap_rtv)
-            ID3D11DeviceContext_ClearRenderTargetView(g_backend.context, g_backend.swap_rtv, clearColor);
+        Backend_ClearBackbuffer(clearColor);
     }
-    if ((flags & 2) && g_backend.depth_dsv) {  /* D3DCLEAR_ZBUFFER */
-        ID3D11DeviceContext_ClearDepthStencilView(g_backend.context, g_backend.depth_dsv, D3D11_CLEAR_DEPTH, z, 0);
+    if (flags & 2) {  /* D3DCLEAR_ZBUFFER */
+        Backend_ClearDepth(z);
     }
 
     return DD_OK;

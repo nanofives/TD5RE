@@ -315,16 +315,12 @@ static HRESULT __stdcall Dev3_BeginScene(WrapperDevice *self)
     }
 
     /* Z-buffer clear (we bypassed M2DX's viewport Clear) */
-    if (g_backend.depth_dsv) {
-        ID3D11DeviceContext_ClearDepthStencilView(g_backend.context,
-            g_backend.depth_dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
-    }
+    Backend_ClearDepth(1.0f);
 
     /* Clear backbuffer RT to opaque black */
-    if (g_backend.backbuffer && g_backend.backbuffer->d3d11_rtv) {
+    {
         float black[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-        ID3D11DeviceContext_ClearRenderTargetView(g_backend.context,
-            g_backend.backbuffer->d3d11_rtv, black);
+        Backend_ClearBackbuffer(black);
     }
 
     /* Upload BltFast content to RT before D3D renders on top */
@@ -380,10 +376,8 @@ static HRESULT __stdcall Dev3_SetRenderTarget(WrapperDevice *self, WrapperSurfac
     (void)flags;
     self->render_target = target;
 
-    if (g_backend.context && target && target->d3d11_rtv) {
-        ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1,
-            &target->d3d11_rtv, g_backend.depth_dsv);
-    }
+    if (target)
+        Backend_TextureBindRenderTarget(target->bt);
     return DD_OK;
 }
 
@@ -759,81 +753,59 @@ static HRESULT __stdcall Dev3_SetTexture(WrapperDevice *self, DWORD stage, Wrapp
              * split-screen draw counts (~2230 draws/frame at 7 panes). Bind the
              * pre-created 1x1 white texture instead: with PS_MODULATE white*diffuse
              * == diffuse, i.e. the intended untextured-vertex-color result. */
-            ID3D11ShaderResourceView *fallback = g_backend.white_srv;
-            g_backend.current_srv = fallback;
-            ID3D11DeviceContext_PSSetShaderResources(g_backend.context, 0, 1, &fallback);
+            Backend_TextureBind(NULL, 0);   /* bind 1x1 white fallback */
             g_backend.state.dirty = 1;
         }
         return DD_OK;
     }
 
-    /* Get SRV from WrapperTexture (survives surface destruction) or parent surface */
+    /* Resolve the texture's backend handle (cached copy survives surface
+     * destruction) or the parent surface's live handle. */
     {
-        ID3D11ShaderResourceView *srv;
+        BackendTexture *btx;
         /* [device-lost recovery] If a TDR bumped the device generation, the
-         * cached tex->d3d11_srv / surface->d3d11_srv still point at the removed
-         * device's freed SRV. Bring the parent surface device-current first
-         * (cheap generation early-out in steady state), which rebuilds its SRV
-         * from the retained CPU pixels AND refreshes the linked texture wrapper,
-         * so we never bind a dangling pointer to the driver. */
+         * cached handle's GPU objects belong to the removed device. Bring the
+         * parent surface device-current first (cheap generation early-out in
+         * steady state), which rebuilds its GPU backing from the retained CPU
+         * pixels, so we never bind a dangling resource to the driver. */
         if (tex->surface) {
             WrapperSurface_EnsureDeviceCurrent(tex->surface);
-            srv = tex->surface->d3d11_srv;
-            tex->d3d11_srv = srv;   /* keep the cached copy fresh */
+            btx = tex->surface->bt;
+            tex->bt = btx;   /* keep the cached copy fresh */
         } else {
-            srv = tex->d3d11_srv;
+            btx = tex->bt;
         }
 
         if (s_settex_log < 20) {
-            WRAPPER_LOG("  tex->d3d11_srv=%p surf=%p surf->d3d11_srv=%p r5g6b5=%d",
-                tex->d3d11_srv, tex->surface,
-                tex->surface ? tex->surface->d3d11_srv : NULL,
+            WRAPPER_LOG("  tex bt=%p surf=%p surf_bt=%p r5g6b5=%d",
+                (void*)tex->bt, tex->surface,
+                (void*)(tex->surface ? tex->surface->bt : NULL),
                 tex->r5g6b5_source);
             s_settex_log++;
         }
 
-        if (srv) {
-            /* CRITICAL: prevent binding the backbuffer's own SRV as a texture.
-             * D3D11 detects this RT/SRV conflict and automatically UNBINDS the RTV,
-             * causing all subsequent draws to produce no output. This happens when
-             * surface reuse causes a WrapperTexture's SRV to point to the backbuffer. */
-            if (g_backend.backbuffer && srv == g_backend.backbuffer->d3d11_srv) {
-                static int s_warn = 0;
-                if (s_warn < 5) {
-                    WRAPPER_LOG("  WARNING: blocked RT/SRV hazard! tex=%p srv=%p == backbuffer srv", tex, srv);
-                    s_warn++;
-                }
-                /* [7-pane GPU crash 2026-07-23] Bind the 1x1 white texture
-                 * instead of NULL: avoids the RT/SRV hazard AND avoids leaving a
-                 * null SRV in slot 0 for a subsequent sampling draw. */
-                ID3D11ShaderResourceView *fallback = g_backend.white_srv;
-                if (stage == 0) g_backend.current_srv = fallback;
-                ID3D11DeviceContext_PSSetShaderResources(g_backend.context, stage, 1, &fallback);
-                return DD_OK;
+        /* CRITICAL: never bind the backbuffer's own texture as an SRV -- D3D
+         * detects the RT/SRV conflict and auto-unbinds the RTV, blanking all
+         * subsequent draws. Bind the 1x1 white texture instead. */
+        if (btx && g_backend.backbuffer && btx == g_backend.backbuffer->bt) {
+            static int s_warn = 0;
+            if (s_warn < 5) {
+                WRAPPER_LOG("  WARNING: blocked RT/SRV hazard! tex=%p == backbuffer", tex);
+                s_warn++;
             }
+            Backend_TextureBind(NULL, stage);
+            return DD_OK;
+        }
 
+        {
+            /* Bind btx at `stage` (white fallback if it has no SRV). Matches the
+             * old per-branch behaviour: current_srv/has_alpha/dirty update only
+             * for stage 0. */
+            int bound = Backend_TextureBind(btx, stage);
             if (stage == 0) {
-                g_backend.current_srv = srv;
-                g_backend.current_tex_has_alpha = !tex->r5g6b5_source;
+                g_backend.current_tex_has_alpha = bound ? !tex->r5g6b5_source : 1;
                 g_backend.state.dirty = 1;
             }
-            ID3D11DeviceContext_PSSetShaderResources(g_backend.context, stage, 1, &srv);
-        } else {
-            /* [7-pane GPU crash 2026-07-23] Texture has no SRV — bind the 1x1
-             * white fallback rather than NULL and keep current_srv consistent,
-             * so no sampling draw is issued with a null slot-0 SRV. */
-            static int s_nosrv_warn = 0;
-            if (s_nosrv_warn < 5) {
-                WRAPPER_LOG("  WARNING: no SRV for texture %p! binding white fallback", tex);
-                s_nosrv_warn++;
-            }
-            ID3D11ShaderResourceView *fallback = g_backend.white_srv;
-            if (stage == 0) {
-                g_backend.current_srv = fallback;
-                g_backend.current_tex_has_alpha = 1;
-                g_backend.state.dirty = 1;
-            }
-            ID3D11DeviceContext_PSSetShaderResources(g_backend.context, stage, 1, &fallback);
         }
     }
     return DD_OK;

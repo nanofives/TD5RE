@@ -3172,10 +3172,9 @@ void td5_plat_render_begin_scene(void)
 
     /* Bind backbuffer as render target so draw calls land on the surface
      * that Backend_CompositeAndPresent reads, not the swap chain. */
-    if (g_backend.backbuffer && g_backend.backbuffer->d3d11_rtv) {
+    if (Backend_SurfaceHasRTV(g_backend.backbuffer)) {
         TD5_PLAT_ONCE("begin_scene -> OMSetRenderTargets");
-        ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1,
-            &g_backend.backbuffer->d3d11_rtv, g_backend.depth_dsv);
+        Backend_SurfaceBindRenderTarget(g_backend.backbuffer);
     }
     TD5_PLAT_ONCE("begin_scene RT bound");
 
@@ -4056,8 +4055,8 @@ void td5_plat_render_bind_texture(int page_index)
          * crash. The fallback branch already did the right thing. */
         if (s_tex_srvs[page_index]) {
             srv = s_tex_srvs[page_index];
-        } else if (s_tex_surfaces[page_index] && s_tex_surfaces[page_index]->d3d11_srv) {
-            srv = s_tex_surfaces[page_index]->d3d11_srv;
+        } else if (s_tex_surfaces[page_index] && Backend_SurfaceGetSRV(s_tex_surfaces[page_index])) {
+            srv = Backend_SurfaceGetSRV(s_tex_surfaces[page_index]);
         }
     }
 
@@ -4329,7 +4328,7 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
         tex_page_fill_sys_buffer(surf, pixels, width, height, bpp, page_index);
         surf->dirty = 1;
         WrapperSurface_FlushDirty(surf);
-        s_tex_srvs[page_index] = surf->d3d11_srv;   /* refreshed if device was recreated */
+        s_tex_srvs[page_index] = Backend_SurfaceGetSRV(surf);   /* refreshed if device was recreated */
         return 1;
     }
 
@@ -4378,7 +4377,7 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
         DWORD unused_handle = 0;
         tex->vtbl->GetHandle(tex, s_d3ddevice3, &unused_handle);
         (void)unused_handle;
-        s_tex_srvs[page_index] = surf->d3d11_srv;
+        s_tex_srvs[page_index] = Backend_SurfaceGetSRV(surf);
     }
 
     s_tex_surfaces[page_index] = surf;
@@ -4412,7 +4411,7 @@ void td5_plat_render_recover_textures(void)
         WrapperSurface_EnsureDeviceCurrent(s);
         WrapperSurface_FlushDirty(s);   /* re-upload sys_buffer into fresh texture */
         /* The bind path caches the SRV; refresh it for the recreated device. */
-        s_tex_srvs[i] = s->d3d11_srv;
+        s_tex_srvs[i] = Backend_SurfaceGetSRV(s);
         n++;
     }
     TD5_LOG_I(LOG_TAG, "device recovery: rebuilt %d texture pages on new device", n);
@@ -4519,14 +4518,8 @@ void td5_plat_render_clear(uint32_t color)
     td5_argb_to_rgb_f(rgba, color);
     rgba[3] = 1.0f;
 
-    /* Clear backbuffer RTV */
-    if (g_backend.backbuffer && g_backend.backbuffer->d3d11_rtv) {
-        ID3D11DeviceContext_ClearRenderTargetView(g_backend.context,
-            g_backend.backbuffer->d3d11_rtv, rgba);
-    } else if (g_backend.swap_rtv) {
-        ID3D11DeviceContext_ClearRenderTargetView(g_backend.context,
-            g_backend.swap_rtv, rgba);
-    }
+    /* Clear backbuffer RTV (backend picks backbuffer texture RTV or swap RTV) */
+    Backend_ClearBackbuffer(rgba);
 
     /* Clear depth buffer */
     if (g_backend.depth_dsv) {

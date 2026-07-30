@@ -17,6 +17,7 @@
  */
 
 #include "wrapper.h"
+#include "d3d11_backend_priv.h"   /* BackendTexture body + bt_* surface accessors */
 #include <stdlib.h>
 #include <string.h>
 
@@ -288,10 +289,10 @@ void Backend_ApplyStateCache(void)
     if (!rc) {
         int want = (g_backend.gbuffer_enabled && g_backend.gbuffer_rtv &&
                     s->z_write && !s->blend_enable && !foliage_aa &&
-                    g_backend.backbuffer && g_backend.backbuffer->d3d11_rtv) ? 1 : 0;
+                    g_backend.backbuffer && bt_rtv(g_backend.backbuffer)) ? 1 : 0;
         if (want != g_backend.gbuffer_bound) {
             ID3D11RenderTargetView *rtvs[2];
-            rtvs[0] = g_backend.backbuffer->d3d11_rtv;
+            rtvs[0] = bt_rtv(g_backend.backbuffer);
             rtvs[1] = want ? g_backend.gbuffer_rtv : NULL;
             ID3D11DeviceContext_OMSetRenderTargets(ctx, want ? 2 : 1, rtvs,
                                                    g_backend.depth_dsv);
@@ -459,8 +460,8 @@ void Backend_ApplyShadowPass(const ShadowCB *cb)
 
     if (!ctx || !cb) return;
     if (!g_backend.ps_shadow || !g_backend.cb_shadow || !g_backend.depth_srv) return;
-    if (!g_backend.backbuffer || !g_backend.backbuffer->d3d11_rtv) return;
-    rtv = g_backend.backbuffer->d3d11_rtv;
+    if (!g_backend.backbuffer || !bt_rtv(g_backend.backbuffer)) return;
+    rtv = bt_rtv(g_backend.backbuffer);
 
     ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource*)g_backend.cb_shadow,
                                           0, NULL, cb, 0, 0);
@@ -510,8 +511,8 @@ static int Backend_SceneCopyEnsure(void)
     HRESULT hr;
     D3D11_TEXTURE2D_DESC td;
 
-    if (!g_backend.backbuffer || !g_backend.backbuffer->d3d11_texture) return 0;
-    ID3D11Texture2D_GetDesc(g_backend.backbuffer->d3d11_texture, &td);
+    if (!g_backend.backbuffer || !bt_tex(g_backend.backbuffer)) return 0;
+    ID3D11Texture2D_GetDesc(bt_tex(g_backend.backbuffer), &td);
     if (g_backend.scene_copy_tex &&
         g_backend.scene_copy_w == (int)td.Width &&
         g_backend.scene_copy_h == (int)td.Height)
@@ -554,13 +555,13 @@ void Backend_ApplySSRPass(const SSRCB *cb)
     if (!ctx || !cb) return;
     if (!g_backend.ps_ssr || !g_backend.cb_ssr || !g_backend.depth_srv) return;
     if (!g_backend.gbuffer_srv) return;   /* SSR needs per-pixel normals */
-    if (!g_backend.backbuffer || !g_backend.backbuffer->d3d11_rtv) return;
+    if (!g_backend.backbuffer || !bt_rtv(g_backend.backbuffer)) return;
     if (!Backend_SceneCopyEnsure()) return;
-    rtv = g_backend.backbuffer->d3d11_rtv;
+    rtv = bt_rtv(g_backend.backbuffer);
 
     ID3D11DeviceContext_CopyResource(ctx,
         (ID3D11Resource*)g_backend.scene_copy_tex,
-        (ID3D11Resource*)g_backend.backbuffer->d3d11_texture);
+        (ID3D11Resource*)bt_tex(g_backend.backbuffer));
 
     ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource*)g_backend.cb_ssr,
                                           0, NULL, cb, 0, 0);
@@ -619,8 +620,8 @@ void Backend_ApplyLightPass(const LightCB *cb)
 
     if (!ctx || !cb) return;
     if (!g_backend.ps_light || !g_backend.cb_light || !g_backend.depth_srv) return;
-    if (!g_backend.backbuffer || !g_backend.backbuffer->d3d11_rtv) return;
-    rtv = g_backend.backbuffer->d3d11_rtv;
+    if (!g_backend.backbuffer || !bt_rtv(g_backend.backbuffer)) return;
+    rtv = bt_rtv(g_backend.backbuffer);
 
     /* Upload camera + light array. */
     ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource*)g_backend.cb_light,
