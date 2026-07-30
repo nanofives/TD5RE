@@ -39,7 +39,7 @@ static const char *trackside_behavior_name(int btype);
 
 
 /* Forward declarations for functions defined at end of this file */
-static void BuildCubicSpline3D(int *spline_state, int control_points);
+static void BuildCubicSpline3D(int *spline_state, const int *control_points);
 static void EvaluateCubicSpline3D(int *out_pos, int *spline_state, int t);
 static void RecomputeTracksideProjectionScale(void);
 static void UpdateCameraTransitionHudIndicator(int view, int actor_index);
@@ -3408,7 +3408,9 @@ void UpdateSplineTracksideCamera(uint8_t *actor, int view, int spline_type)
     }
 
     /* Build and evaluate cubic spline */
-    BuildCubicSpline3D(g_camSplineState[v], (int)control_points);
+    /* [x64] pointer-typed now -- the original passed the control-point array
+     * through an int parameter (0x441F90), which truncates 64-bit pointers. */
+    BuildCubicSpline3D(g_camSplineState[v], control_points);
     EvaluateCubicSpline3D(g_camWorldPos[v], g_camSplineState[v], g_camSplineParam[v]);
 
     /* Target = vehicle pos + velocity * subTickFraction */
@@ -4235,7 +4237,7 @@ void td5_camera_get_basis(float *right, float *up, float *forward)
  * Spline Functions (migrated from td5re_stubs.c)
  * ======================================================================== */
 
-static void BuildCubicSpline3D(int *spline_state, int control_points) {
+static void BuildCubicSpline3D(int *spline_state, const int *control_points) {
     /*
      * Catmull-Rom spline builder (0x441F90).
      * Input: 4 control points at control_points, each 3 ints (X,Y,Z in 8.8 fixed).
@@ -4268,7 +4270,7 @@ static void BuildCubicSpline3D(int *spline_state, int control_points) {
      *   Orig reads DAT_00474bc0 (16 int constants in .rdata). Port inlines.
      *   Semantically identical.
      */
-    int *P = (int *)(intptr_t)control_points;
+    const int *P = control_points;
     int delta[4][3];
     int i;
 

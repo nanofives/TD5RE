@@ -30,20 +30,19 @@
     "td5_vfx.c",
     "td5re.c"
   ],
-  "warnings_total": 117,
+  "warnings_total": 84,
   "warnings_per_flag": {
-    "sign-compare": 10,
-    "array-bounds=": 1,
-    "stringop-truncation": 15,
-    "type-limits": 28,
-    "unused-parameter": 3,
-    "cpp": 1,
-    "format-truncation=": 12,
-    "unknown-pragmas": 4,
-    "missing-field-initializers": 36,
-    "maybe-uninitialized": 2,
-    "strict-aliasing": 2,
+    "format-truncation=": 14,
     "cast-function-type": 2,
-    "overflow": 1
+    "overflow": 1,
+    "strict-aliasing": 2,
+    "array-bounds=": 1,
+    "unused-parameter": 3,
+    "type-limits": 28,
+    "sign-compare": 10,
+    "maybe-uninitialized": 2,
+    "unknown-pragmas": 4,
+    "cpp": 1,
+    "stringop-truncation": 16
   }
 }

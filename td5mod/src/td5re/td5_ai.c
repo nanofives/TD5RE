@@ -637,9 +637,6 @@ int16_t  s_traffic_escape_lane_ttl[TD5_MAX_TOTAL_ACTORS];/* ticks the lane bias 
 
 static void ai_update_single_racer(int slot);
 static void ai_update_single_traffic(int slot);
-/* [R3-10] used by traffic_escape_pick_side, which is defined before it. */
-static int traffic_lane_is_clear(int self_slot, int self_span,
-                                 int target_lane, int polarity);
 
 uint8_t *td5_ai_get_physics_template(void) {
     return g_ai_physics_template;

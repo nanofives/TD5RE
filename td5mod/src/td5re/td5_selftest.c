@@ -132,15 +132,15 @@ typedef struct {
  * leak into any row another verdict depends on. */
 static const RaceScenario k_races[] = {
     /* name                 trk car rev dyn  tr cop lap  opp spec pia at nat grp gld ply */
-    { "race-moscow-base",     0, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 1 },
-    { "race-moscow-rep2",     0, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 1 },
-    { "race-moscow-rep3",     0, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 1 },
-    { "race-newcastle-circ",  5, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 0 },
-    { "race-moscow-reverse",  0, -1,  1, -1, -1, -1, -1, -2, -1, -1, -1, 0, 0 },
+    { "race-moscow-base",     0, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 1,  0, 0 },
+    { "race-moscow-rep2",     0, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 1,  0, 0 },
+    { "race-moscow-rep3",     0, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 1,  0, 0 },
+    { "race-newcastle-circ",  5, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 0,  0, 0 },
+    { "race-moscow-reverse",  0, -1,  1, -1, -1, -1, -1, -2, -1, -1, -1, 0, 0,  0, 0 },
     /* ---- end of smoke tier ---- */
-    { "race-td6-pelton",     26, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 0 },
-    { "race-td6-paris",      32, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 0 },
-    { "race-keswick",        10, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 0 },
+    { "race-td6-pelton",     26, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 0,  0, 0 },
+    { "race-td6-paris",      32, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 0,  0, 0 },
+    { "race-keswick",        10, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 0,  0, 0 },
     /* Drag runs SOLO (opponents=0): the real drag lobby never fields AI, and
      * a full AutoRace grid parks 5 cars against the extended-strip walls
      * (bogus wall-contact storm — see the wall_reject sampler in td5_track).
@@ -148,11 +148,11 @@ static const RaceScenario k_races[] = {
      * fires under AutoRace (300 s timeout; the lobby-config path presumably
      * seeds the finish/extension globals the INI path doesn't) — so this
      * runs on the tick budget like the other scenarios until that's fixed. */
-    { "race-drag-solo",      19, -1,  0, -1, -1, -1, -1,  0, -1, -1, -1, 0, 0 },
-    { "race-arcade-tr-cops",  2, -1,  0,  0,  1,  1, -1, -2, -1, -1, -1, 0, 0 },
-    { "race-ai-slot0",        0, -1,  0, -1, -1, -1, -1, -2, -1,  1,  0, 0, 0 },
-    { "race-moscow-late1",    0, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 1 },
-    { "race-moscow-late2",    0, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 1 },
+    { "race-drag-solo",      19, -1,  0, -1, -1, -1, -1,  0, -1, -1, -1, 0, 0,  0, 0 },
+    { "race-arcade-tr-cops",  2, -1,  0,  0,  1,  1, -1, -2, -1, -1, -1, 0, 0,  0, 0 },
+    { "race-ai-slot0",        0, -1,  0, -1, -1, -1, -1, -2, -1,  1,  0, 0, 0,  0, 0 },
+    { "race-moscow-late1",    0, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 1,  0, 0 },
+    { "race-moscow-late2",    0, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 1,  0, 0 },
     /* [TRACE GOLDEN 2026-07-06] Deterministic sim-regression net: fixed
      * RaceTrace seed (0x1A2B3C4D) + every sim-relevant knob pinned (the
      * columns here + st_golden_begin for ini knobs the columns don't cover),
@@ -188,7 +188,7 @@ static const RaceScenario k_races[] = {
      * players=2 is the last column (see the struct comment). Same pinned knobs
      * as the goldens above. */
     { "race-golden-split",    0,  0,  0,  1,  2,  0,  2,  5, -1,  1,  0, 0, 0, 1, 2 },
-    { "race-spectate3",       0, -1,  0, -1, -1, -1, -1, -2,  3, -1, -1, 0, 0 },
+    { "race-spectate3",       0, -1,  0, -1, -1, -1, -1, -2,  3, -1, -1, 0, 0,  0, 0 },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
 #define ST_SMOKE_RACES 5
@@ -203,38 +203,38 @@ typedef struct {
 } ScreenStep;
 
 static const ScreenStep k_screens_full[] = {
-    { "scr-main-menu",       TD5_SCREEN_MAIN_MENU,          0 },
+    { "scr-main-menu",       TD5_SCREEN_MAIN_MENU,          0, 0 },
     /* scr-language / scr-legal removed 2026-07-03 — screens retired (table
      * slots NULL, set_screen redirects to MAIN_MENU). */
-    { "scr-race-type",       TD5_SCREEN_RACE_TYPE_MENU,     0 },
+    { "scr-race-type",       TD5_SCREEN_RACE_TYPE_MENU,     0, 0 },
     /* [SELECT CUP PROMOTION 2026-07-27] cup-tier chooser, its own screen now
      * (shares Screen_RaceTypeCategory, enters the cup sub-menu directly). */
-    { "scr-select-cup",      TD5_SCREEN_SELECT_CUP,         0 },
-    { "scr-quick-race",      TD5_SCREEN_QUICK_RACE,         0 },
-    { "scr-options-hub",     TD5_SCREEN_OPTIONS_HUB,        0 },
+    { "scr-select-cup",      TD5_SCREEN_SELECT_CUP,         0, 0 },
+    { "scr-quick-race",      TD5_SCREEN_QUICK_RACE,         0, 0 },
+    { "scr-options-hub",     TD5_SCREEN_OPTIONS_HUB,        0, 0 },
     /* [CONSOLIDATION 2026-07-21] scr-game-options retired (screen removed);
      * RACE OPTIONS (44) is the single game-behaviour surface. It builds its row
      * set from the live mode ctx, so it tolerates context-free entry. */
-    { "scr-race-options",    TD5_SCREEN_RACE_OPTIONS,       0 },
-    { "scr-control-options", TD5_SCREEN_CONTROL_OPTIONS,    0 },
-    { "scr-sound-options",   TD5_SCREEN_SOUND_OPTIONS,      0 },
-    { "scr-display-options", TD5_SCREEN_DISPLAY_OPTIONS,    0 },
-    { "scr-two-player-opts", TD5_SCREEN_TWO_PLAYER_OPTIONS, 0 },
-    { "scr-ctrl-binding",    TD5_SCREEN_CONTROLLER_BINDING, 0 },
-    { "scr-music-test",      TD5_SCREEN_MUSIC_TEST,         0 },
-    { "scr-car-select",      TD5_SCREEN_CAR_SELECTION,      0 },
-    { "scr-track-select",    TD5_SCREEN_TRACK_SELECTION,    0 },
-    { "scr-extras-gallery",  TD5_SCREEN_EXTRAS_GALLERY,     0 },
-    { "scr-high-score",      TD5_SCREEN_HIGH_SCORE,         1 },
-    { "scr-race-results",    TD5_SCREEN_RACE_RESULTS,       1 },
-    { "scr-name-entry",      TD5_SCREEN_NAME_ENTRY,         1 },
+    { "scr-race-options",    TD5_SCREEN_RACE_OPTIONS,       0, 0 },
+    { "scr-control-options", TD5_SCREEN_CONTROL_OPTIONS,    0, 0 },
+    { "scr-sound-options",   TD5_SCREEN_SOUND_OPTIONS,      0, 0 },
+    { "scr-display-options", TD5_SCREEN_DISPLAY_OPTIONS,    0, 0 },
+    { "scr-two-player-opts", TD5_SCREEN_TWO_PLAYER_OPTIONS, 0, 0 },
+    { "scr-ctrl-binding",    TD5_SCREEN_CONTROLLER_BINDING, 0, 0 },
+    { "scr-music-test",      TD5_SCREEN_MUSIC_TEST,         0, 0 },
+    { "scr-car-select",      TD5_SCREEN_CAR_SELECTION,      0, 0 },
+    { "scr-track-select",    TD5_SCREEN_TRACK_SELECTION,    0, 0 },
+    { "scr-extras-gallery",  TD5_SCREEN_EXTRAS_GALLERY,     0, 0 },
+    { "scr-high-score",      TD5_SCREEN_HIGH_SCORE,         1, 0 },
+    { "scr-race-results",    TD5_SCREEN_RACE_RESULTS,       1, 0 },
+    { "scr-name-entry",      TD5_SCREEN_NAME_ENTRY,         1, 0 },
     { "scr-cup-failed",      TD5_SCREEN_CUP_FAILED,         1, 1 },
     { "scr-cup-won",         TD5_SCREEN_CUP_WON,            1, 1 },
-    { "scr-mp-lobby",        TD5_SCREEN_MP_LOBBY,           0 },
-    { "scr-changelog",       TD5_SCREEN_CHANGELOG,          0 },
-    { "scr-pending-test",    TD5_SCREEN_PENDING_TEST,       0 },
-    { "scr-ui-guide",        TD5_SCREEN_UI_GUIDE,           0 },
-    { "scr-mp-guide",        TD5_SCREEN_MP_GUIDE,           0 },
+    { "scr-mp-lobby",        TD5_SCREEN_MP_LOBBY,           0, 0 },
+    { "scr-changelog",       TD5_SCREEN_CHANGELOG,          0, 0 },
+    { "scr-pending-test",    TD5_SCREEN_PENDING_TEST,       0, 0 },
+    { "scr-ui-guide",        TD5_SCREEN_UI_GUIDE,           0, 0 },
+    { "scr-mp-guide",        TD5_SCREEN_MP_GUIDE,           0, 0 },
 };
 #define ST_SCREEN_COUNT_FULL ((int)(sizeof(k_screens_full) / sizeof(k_screens_full[0])))
 #define ST_SMOKE_SCREENS 3   /* main menu, language, legal — plus races cover results */
