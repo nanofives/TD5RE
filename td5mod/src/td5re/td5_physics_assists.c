@@ -494,7 +494,7 @@ int32_t td5_physics_mp_catchup_ts_mult(int slot)
  * same flag the same way. Null-safe (treats NULL as automatic). */
 int td5_physics_actor_is_manual_gearbox(const TD5_Actor *actor)
 {
-    return actor && *((const uint8_t *)actor + 0x378) == 0;
+    return actor && TD5_ACTOR_AT(actor)->throttle_input_active == 0;
 }
 
 /* TD5RE_MANUAL_GEARBOX (env, cached once) DEFAULT 1 (ON). When OFF ("0"/"n"/"f")

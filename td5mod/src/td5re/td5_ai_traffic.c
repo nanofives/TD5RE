@@ -729,18 +729,18 @@ void td5_ai_recycle_traffic_actor(void) {
     {
         char *aa = actor_ptr(best_slot);
         if (aa) {
-            *(int32_t *)(aa + 0x314) = 0;
-            *(int32_t *)(aa + 0x30C) = 0;
-            *(int8_t  *)(aa + 0x379) = 0;
-            *(int32_t *)(aa + 0x1F0) = 0;
-            *(int32_t *)(aa + 0x1F8) = 0;
-            *(int32_t *)(aa + 0x1C0) = 0;
-            *(int32_t *)(aa + 0x1C4) = 0;
-            *(int32_t *)(aa + 0x1C8) = 0;
-            *(int32_t *)(aa + 0x1CC) = 0;
-            *(int32_t *)(aa + 0x1D0) = 0;
-            *(int32_t *)(aa + 0x1D4) = 0;
-            *(int16_t *)(aa + 0x338) = 0;
+            ACTOR_I32(aa, ACTOR_LONGITUDINAL_SPEED) = 0;
+            ACTOR_I32(aa, ACTOR_STEERING_CMD)       = 0;
+            ACTOR_U8 (aa, ACTOR_VEHICLE_MODE)       = 0;
+            ACTOR_I32(aa, ACTOR_ROLL_ACCUM)         = 0;
+            ACTOR_I32(aa, ACTOR_PITCH_ACCUM)        = 0;
+            ACTOR_I32(aa, ACTOR_ANG_VEL_ROLL)       = 0;
+            ACTOR_I32(aa, ACTOR_ANG_VEL_YAW)        = 0;
+            ACTOR_I32(aa, ACTOR_ANG_VEL_PITCH)      = 0;
+            ACTOR_I32(aa, ACTOR_LIN_VEL_X)          = 0;
+            ACTOR_I32(aa, ACTOR_LIN_VEL_Y)          = 0;
+            ACTOR_I32(aa, ACTOR_LIN_VEL_Z)          = 0;
+            ACTOR_I16(aa, ACTOR_FRAME_COUNTER)      = 0;
         }
         /* route_state byte-direct writes match the original's
          * `[uVar11 + literal]` style. */
@@ -1207,7 +1207,7 @@ void td5_ai_init_traffic_actors(void) {
                 int32_t progress;
                 int route_byte = 0;
                 pos[0] = ACTOR_I32(a, ACTOR_WORLD_POS_X);
-                pos[1] = *(int32_t *)(a + 0x200);
+                pos[1] = TD5_ACTOR_AT(a)->world_pos.y;
                 pos[2] = ACTOR_I32(a, ACTOR_WORLD_POS_Z);
                 prog64 = td5_track_compute_span_progress(span_raw, pos);
                 progress = (int32_t)(uint32_t)(prog64 & 0xFFFFFFFF);
@@ -1251,7 +1251,7 @@ void td5_ai_init_traffic_actors(void) {
                   (int)ACTOR_U8(a, ACTOR_SUB_LANE_INDEX),
                   polarity_bit, (int)rs[RS_ROUTE_TABLE_SELECTOR],
                   ACTOR_I32(a, ACTOR_WORLD_POS_X),
-                  *(int32_t *)(a + 0x200),
+                  TD5_ACTOR_AT(a)->world_pos.y,
                   ACTOR_I32(a, ACTOR_WORLD_POS_Z));
 
         /* 0x00435c8b-ca5: advance queue pointer, slot, local_c, racer_cap reload */
@@ -2292,7 +2292,7 @@ static int trf_dyn_race_span_lead(void)
         int sp;
         if (!a) continue;
         if (g_slot_state[s] == 3) continue;          /* decoration / absent */
-        memcpy(&cdef, a + 0x1B8, sizeof(cdef));      /* car_definition_ptr */
+        memcpy(&cdef, &((const TD5_Actor *)a)->car_definition_ptr, sizeof(cdef));      /* car_definition_ptr */
         if (!cdef) continue;
         sp = (int)(int16_t)ACTOR_I16(a, ACTOR_SPAN_NORMALIZED);
         if (sp > best) best = sp;
@@ -3037,18 +3037,18 @@ static void trf_dyn_place(int slot, int span, int lane, int polarity)
     td5_track_normalize_actor_wrap((TD5_Actor *)a);
 
     /* Shared post-placement state zero (mirrors recycle LAB_0043588D). */
-    *(int32_t *)(a + 0x314) = 0;
-    *(int32_t *)(a + 0x30C) = 0;
-    *(int8_t  *)(a + 0x379) = 0;
-    *(int32_t *)(a + 0x1F0) = 0;
-    *(int32_t *)(a + 0x1F8) = 0;
-    *(int32_t *)(a + 0x1C0) = 0;
-    *(int32_t *)(a + 0x1C4) = 0;
-    *(int32_t *)(a + 0x1C8) = 0;
-    *(int32_t *)(a + 0x1CC) = 0;
-    *(int32_t *)(a + 0x1D0) = 0;
-    *(int32_t *)(a + 0x1D4) = 0;
-    *(int16_t *)(a + 0x338) = 0;
+    ACTOR_I32(a, ACTOR_LONGITUDINAL_SPEED) = 0;
+    ACTOR_I32(a, ACTOR_STEERING_CMD)       = 0;
+    ACTOR_U8 (a, ACTOR_VEHICLE_MODE)       = 0;
+    ACTOR_I32(a, ACTOR_ROLL_ACCUM)         = 0;
+    ACTOR_I32(a, ACTOR_PITCH_ACCUM)        = 0;
+    ACTOR_I32(a, ACTOR_ANG_VEL_ROLL)       = 0;
+    ACTOR_I32(a, ACTOR_ANG_VEL_YAW)        = 0;
+    ACTOR_I32(a, ACTOR_ANG_VEL_PITCH)      = 0;
+    ACTOR_I32(a, ACTOR_LIN_VEL_X)          = 0;
+    ACTOR_I32(a, ACTOR_LIN_VEL_Y)          = 0;
+    ACTOR_I32(a, ACTOR_LIN_VEL_Z)          = 0;
+    ACTOR_I16(a, ACTOR_FRAME_COUNTER)      = 0;
     *(int32_t *)(rsb + 0x88) = 0;
     *(int32_t *)(rsb + 0xF0) = 0;
     *(int32_t *)(rsb + 0x7C) = -1;
@@ -3840,13 +3840,13 @@ void td5_ai_traffic_dynamic_tick(void)
                  * lock, so a future ordinary spawn here isn't born a cop. */
                 if (g_cop_is_cop[slot]) cop_release(slot);
                 /* Park: freeze all motion so the hidden actor stays put. */
-                *(int32_t *)(a + 0x314) = 0;   /* longitudinal speed */
-                *(int32_t *)(a + 0x1C0) = 0;
-                *(int32_t *)(a + 0x1C4) = 0;
-                *(int32_t *)(a + 0x1C8) = 0;
-                *(int32_t *)(a + 0x1CC) = 0;   /* lin vel x */
-                *(int32_t *)(a + 0x1D0) = 0;
-                *(int32_t *)(a + 0x1D4) = 0;   /* lin vel z */
+                ACTOR_I32(a, ACTOR_LONGITUDINAL_SPEED) = 0;
+                ACTOR_I32(a, ACTOR_ANG_VEL_ROLL)       = 0;
+                ACTOR_I32(a, ACTOR_ANG_VEL_YAW)        = 0;
+                ACTOR_I32(a, ACTOR_ANG_VEL_PITCH)      = 0;
+                ACTOR_I32(a, ACTOR_LIN_VEL_X)          = 0;
+                ACTOR_I32(a, ACTOR_LIN_VEL_Y)          = 0;
+                ACTOR_I32(a, ACTOR_LIN_VEL_Z)          = 0;
                 ACTOR_U8(a, ACTOR_BRAKE_FLAG) = 1;
             } else {
                 on_road++;

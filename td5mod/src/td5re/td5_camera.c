@@ -1105,10 +1105,10 @@ static void terrain_probe_trace_emit(int view, const uint8_t *actor_addr,
      * actor base, and td5_pilot_trace_004370A0.h:47 for the typed field).
      * Frida side derives slot from g_raceActors base; we mirror via the
      * actor's own +0x375 since the port uses heap-allocated actors. */
-    int actor_slot = actor_addr ? (int)*(unsigned char *)(actor_addr + 0x375) : -1;
+    int actor_slot = actor_addr ? (int)TD5_ACTOR_AT(actor_addr)->slot_index : -1;
     int actor_span = actor_addr ? (int)*(short *)(actor_addr + 0x80) : -1;
     int actor_sub  = actor_addr ? (int)*(signed char *)(actor_addr + 0x8C) : -1;
-    int actor_pos_y = actor_addr ? *(int *)(actor_addr + 0x200) : 0;
+    int actor_pos_y = actor_addr ? TD5_ACTOR_AT(actor_addr)->world_pos.y : 0;
 
     fprintf(s_terrain_probe_trace_fp,
         "%u,%d,%d,%d,%d,%d,%d,%d,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
@@ -1148,7 +1148,7 @@ void td5_camera_snap_smoothing(void)
  * race). finalize_chase_pos interpolates prev->cur by g_subTickFraction. */
 static void td5_camera_snapshot_spring(uintptr_t actor, int v)
 {
-    int pos_y = *(int *)(actor + 0x200);
+    int pos_y = TD5_ACTOR_AT(actor)->world_pos.y;
 
     if (!s_camSmoothInit[v]) {
         s_camSmoothInit[v] = 1;
@@ -1220,7 +1220,7 @@ static int td5_camera_probe_ground_floor(uintptr_t actor, int cam_x, int cam_z,
 {
     TD5_TrackProbeState probe;
     int car_span = (int)(*(short *)(actor + 0x80));
-    int car_y    = *(int *)(actor + 0x200);
+    int car_y    = TD5_ACTOR_AT(actor)->world_pos.y;
 
     memset(&probe, 0, sizeof(probe));
     probe.span_index     = (int16_t)car_span;
@@ -1417,7 +1417,7 @@ void UpdateChaseCamera(uint8_t *actor, int do_track_heading, int view)
     float magnitude;
 
     /* --- Fly-in counter --- */
-    if (*(char *)(actor + 0x379) == 0) {
+    if (TD5_ACTOR_AT(actor)->vehicle_mode == 0) {
         /* Normal mode: ramp up toward threshold. Decrement only once past it
          * (the counter is capped at the threshold above, so in practice this
          * branch never fires -- preserved as-is from the original flow). */
@@ -1455,7 +1455,7 @@ void UpdateChaseCamera(uint8_t *actor, int do_track_heading, int view)
         unsigned int heading_delta;
         int abs_delta, speed, effective_speed;
 
-        heading_delta = ((unsigned int)*(short *)(actor + 0x20A) * 0x100 -
+        heading_delta = ((unsigned int)TD5_ACTOR_AT(actor)->display_angles.yaw * 0x100 -
                          g_camOrbitAngleFP[v]) & 0xFFFFF;
         if (heading_delta > 0x7FFFF) {
             heading_delta -= 0x100000;
@@ -1490,8 +1490,8 @@ void UpdateChaseCamera(uint8_t *actor, int do_track_heading, int view)
     cos_val = CosFixed12bit(combined_angle);
     sin_val = SinFixed12bit(combined_angle);
 
-    pos_x = *(int *)(actor + 0x1FC);
-    pos_z = *(int *)(actor + 0x204);
+    pos_x = TD5_ACTOR_AT(actor)->world_pos.x;
+    pos_z = TD5_ACTOR_AT(actor)->world_pos.z;
 
     /* Point A: forward-right */
     point_ax = pos_x + sin_val * 0x20;
@@ -1698,7 +1698,7 @@ void UpdateChaseCamera(uint8_t *actor, int do_track_heading, int view)
 
     /* --- Camera look-direction --- */
     look_angle = (unsigned int)(FP_TRUNC(g_camOrbitAngleFP[v]) -
-                                 (int)*(short *)(actor + 0x20A) +
+                                 (int)TD5_ACTOR_AT(actor)->display_angles.yaw +
                                  g_camYawOffset[v]);
 
     /* [#10 NEAR-WALL ZOOM 2026-06-19] Pull the chase camera in while this view's
@@ -1957,15 +1957,15 @@ void td5_camera_finalize_chase_pos(TD5_Actor *actor_p, int view)
 
     int target[3];
 
-    int pos_x = *(int *)(actor + 0x1FC);
-    int pos_y = *(int *)(actor + 0x200);
-    int pos_z = *(int *)(actor + 0x204);
+    int pos_x = TD5_ACTOR_AT(actor)->world_pos.x;
+    int pos_y = TD5_ACTOR_AT(actor)->world_pos.y;
+    int pos_z = TD5_ACTOR_AT(actor)->world_pos.z;
 
     /* Velocity extrapolation — matches td5_render.c:1530-1537 and the
      * UpdateTracksideOrbitCamera pattern at td5_camera.c:834-846. */
-    int vel_x_interp = (int)((float)*(int *)(actor + 0x1CC) * g_subTickFraction + 0.5f);
-    int vel_y_interp = (int)((float)*(int *)(actor + 0x1D0) * g_subTickFraction + 0.5f);
-    int vel_z_interp = (int)((float)*(int *)(actor + 0x1D4) * g_subTickFraction + 0.5f);
+    int vel_x_interp = (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_x * g_subTickFraction + 0.5f);
+    int vel_y_interp = (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_y * g_subTickFraction + 0.5f);
+    int vel_z_interp = (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_z * g_subTickFraction + 0.5f);
 
     /* [PORT ENHANCEMENT — sub-tick smoothing of the chase-spring output]
      * Rationale, producer, and the prev/cur snapshot arrays are documented at
@@ -2077,7 +2077,7 @@ void td5_camera_finalize_chase_pos(TD5_Actor *actor_p, int view)
      * never triggers on flat road). See td5_camera_probe_ground_floor above. */
 
     /* [PORT ENHANCEMENT — invisible-car (vehicle_mode != 0) ground floor] */
-    if (*(char *)(actor + 0x379) != 0) {
+    if (TD5_ACTOR_AT(actor)->vehicle_mode != 0) {
         int floor_y;
         if (td5_camera_probe_ground_floor(actor, g_camWorldPos[v][0],
                                           g_camWorldPos[v][2], &floor_y) &&
@@ -2517,7 +2517,7 @@ void td5_camera_apply_view(int view)
                 /* Small tolerance (~8 wu) for legitimate near-level dips;
                  * only the genuinely-at-or-below-car case trips this. */
                 if (eye[1] < car_y - 0x800) {
-                    int heading = -(int)*(short *)((uintptr_t)ca + 0x20A);
+                    int heading = -(int)TD5_ACTOR_AT(ca)->display_angles.yaw;
                     float back_dist = 0x28000;   /* ~400 wu — short enough to stay clear of roadside terrain */
                     int fx = ca->world_pos.x + (int)(SinFloat12bit(heading) * back_dist + 0.5f);
                     int fz = ca->world_pos.z - (int)(CosFloat12bit((unsigned int)heading) * back_dist + 0.5f);
@@ -2584,7 +2584,7 @@ void UpdateTracksideOrbitCamera(uint8_t *actor, int is_active, int view)
     int target[3];
 
     /* Update orbit angle if active and alive */
-    if (*(char *)(actor + 0x379) == 0 && is_active != 0) {
+    if (TD5_ACTOR_AT(actor)->vehicle_mode == 0 && is_active != 0) {
         int delta = g_camHeadingDelta20[v];
         int abs_d = ((delta >> 0x0B) ^ (delta >> 0x1F)) - (delta >> 0x1F);
         int speed = abs_d + 5;
@@ -2609,7 +2609,7 @@ void UpdateTracksideOrbitCamera(uint8_t *actor, int is_active, int view)
     unsigned int vis_angle = (unsigned int)FP_TRUNC(orbit_angle_fp);
 
     /* Look direction for orientation */
-    heading = vis_angle - (unsigned int)*(short *)(actor + 0x20A) + g_camYawOffset[v];
+    heading = vis_angle - (unsigned int)TD5_ACTOR_AT(actor)->display_angles.yaw + g_camYawOffset[v];
 
     {
         short orient[4];
@@ -2648,24 +2648,24 @@ void UpdateTracksideOrbitCamera(uint8_t *actor, int is_active, int view)
         g_camOrbitOffset[v][2] = (int)(-(CosFloat12bit(orbit_vis) * radius) + 0.5f);
 
         /* Camera world pos = vehicle pos + orbit offset + velocity interpolation */
-        g_camWorldPos[v][0] = *(int *)(actor + 0x1FC) + g_camOrbitOffset[v][0];
-        g_camWorldPos[v][1] = g_camOrbitOffset[v][1] + *(int *)(actor + 0x200);
-        g_camWorldPos[v][2] = *(int *)(actor + 0x204) + g_camOrbitOffset[v][2];
+        g_camWorldPos[v][0] = TD5_ACTOR_AT(actor)->world_pos.x + g_camOrbitOffset[v][0];
+        g_camWorldPos[v][1] = g_camOrbitOffset[v][1] + TD5_ACTOR_AT(actor)->world_pos.y;
+        g_camWorldPos[v][2] = TD5_ACTOR_AT(actor)->world_pos.z + g_camOrbitOffset[v][2];
 
         /* Add velocity * subTickFraction */
-        vel_x_interp = (int)((float)*(int *)(actor + 0x1CC) * g_subTickFraction + 0.5f);
+        vel_x_interp = (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_x * g_subTickFraction + 0.5f);
         g_camWorldPos[v][0] += vel_x_interp;
 
-        vel_y_interp = (int)((float)*(int *)(actor + 0x1D0) * g_subTickFraction + 0.5f);
+        vel_y_interp = (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_y * g_subTickFraction + 0.5f);
         g_camWorldPos[v][1] += vel_y_interp;
 
-        vel_z_interp = (int)((float)*(int *)(actor + 0x1D4) * g_subTickFraction + 0.5f);
+        vel_z_interp = (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_z * g_subTickFraction + 0.5f);
         g_camWorldPos[v][2] += vel_z_interp;
 
         /* Target = vehicle pos + smoothed height + velocity interpolation */
-        target[0] = *(int *)(actor + 0x1FC) + vel_x_interp;
-        target[1] = *(int *)(actor + 0x200) + smoothed_h + vel_y_interp;
-        target[2] = *(int *)(actor + 0x204) + vel_z_interp;
+        target[0] = TD5_ACTOR_AT(actor)->world_pos.x + vel_x_interp;
+        target[1] = TD5_ACTOR_AT(actor)->world_pos.y + smoothed_h + vel_y_interp;
+        target[2] = TD5_ACTOR_AT(actor)->world_pos.z + vel_z_interp;
 
         SetCameraWorldPosition(g_camWorldPos[v]);
         OrientCameraTowardTarget(target, g_tracksideYawOffset[v]);
@@ -2731,9 +2731,9 @@ void UpdateVehicleRelativeCamera(uint8_t *actor, int view)
     int cam_pos[3];
 
     /* Target angles from vehicle (with 180-degree offset for chase view) */
-    target_pitch = *(short *)(actor + 0x208) + 0x800;
-    target_yaw   = 0x800 - *(short *)(actor + 0x20A);
-    target_roll  = -*(short *)(actor + 0x20C);
+    target_pitch = TD5_ACTOR_AT(actor)->display_angles.roll + 0x800;
+    target_yaw   = 0x800 - TD5_ACTOR_AT(actor)->display_angles.yaw;
+    target_roll  = -TD5_ACTOR_AT(actor)->display_angles.pitch;
 
     /* Smooth pitch toward target via shortest-path wrapping */
     {
@@ -2772,12 +2772,12 @@ void UpdateVehicleRelativeCamera(uint8_t *actor, int view)
     }
 
     /* Scale offset and add vehicle position + velocity interpolation */
-    cam_pos[0] = cam_pos[0] * 0x100 + *(int *)(actor + 0x1FC) +
-                 (int)((float)*(int *)(actor + 0x1CC) * g_subTickFraction + 0.5f);
-    cam_pos[1] = cam_pos[1] * 0x100 + *(int *)(actor + 0x200) +
-                 (int)((float)*(int *)(actor + 0x1D0) * g_subTickFraction + 0.5f);
-    cam_pos[2] = cam_pos[2] * 0x100 + *(int *)(actor + 0x204) +
-                 (int)((float)*(int *)(actor + 0x1D4) * g_subTickFraction + 0.5f);
+    cam_pos[0] = cam_pos[0] * 0x100 + TD5_ACTOR_AT(actor)->world_pos.x +
+                 (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_x * g_subTickFraction + 0.5f);
+    cam_pos[1] = cam_pos[1] * 0x100 + TD5_ACTOR_AT(actor)->world_pos.y +
+                 (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_y * g_subTickFraction + 0.5f);
+    cam_pos[2] = cam_pos[2] * 0x100 + TD5_ACTOR_AT(actor)->world_pos.z +
+                 (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_z * g_subTickFraction + 0.5f);
 
     SetCameraWorldPosition(cam_pos);
 
@@ -2839,7 +2839,7 @@ void UpdateVehicleRelativeCamera(uint8_t *actor, int view)
 void UpdateRaceCameraTransitionState(uint8_t *actor, int view)
 {
     int v = view;
-    int actor_idx = *(unsigned char *)(actor + 0x375);
+    int actor_idx = TD5_ACTOR_AT(actor)->slot_index;
 
     /* [#11 (a)/(b) FIX 2026-06-16 — slot 8/9 fly-in OOB] g_actorAliveTable is a
      * flat per-slot byte table sized [TD5_MAX_TOTAL_ACTORS] (32). The original
@@ -2925,7 +2925,7 @@ void UpdateRaceCameraTransitionState(uint8_t *actor, int view)
         /* Reload the preset table only when the preset changed this tick
          * (was: `goto store_prev` past this block when prev == new). */
         if (do_load) {
-            LoadCameraPresetForView(actor + 0x208, force_reload, v, 0);
+            LoadCameraPresetForView((uint8_t *)&TD5_ACTOR_AT(actor)->display_angles, force_reload, v, 0);
             g_camYawOffset[v] = 0;
         }
 
@@ -3300,12 +3300,12 @@ void UpdateStaticTracksideCamera(uint8_t *actor, int view)
     g_camWorldPos[v][2] = g_camAnchorZ[v];
 
     /* Target = vehicle pos + velocity * subTickFraction */
-    target[0] = *(int *)(actor + 0x1FC) +
-                (int)((float)*(int *)(actor + 0x1CC) * g_subTickFraction + 0.5f);
-    target[1] = *(int *)(actor + 0x200) +
-                (int)((float)*(int *)(actor + 0x1D0) * g_subTickFraction + 0.5f);
-    target[2] = *(int *)(actor + 0x204) +
-                (int)((float)*(int *)(actor + 0x1D4) * g_subTickFraction + 0.5f);
+    target[0] = TD5_ACTOR_AT(actor)->world_pos.x +
+                (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_x * g_subTickFraction + 0.5f);
+    target[1] = TD5_ACTOR_AT(actor)->world_pos.y +
+                (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_y * g_subTickFraction + 0.5f);
+    target[2] = TD5_ACTOR_AT(actor)->world_pos.z +
+                (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_z * g_subTickFraction + 0.5f);
 
     SetCameraWorldPosition(g_camWorldPos[v]);
     OrientCameraTowardTarget(target, g_tracksideYawOffset[v]);
@@ -3326,9 +3326,9 @@ void UpdateStaticTracksideCamera(uint8_t *actor, int view)
 
 void CacheVehicleCameraAngles(uint8_t *actor, int view)
 {
-    g_camCachedAngles[view][0] = *(short *)(actor + 0x208) + 0x800;
-    g_camCachedAngles[view][1] = 0x800 - *(short *)(actor + 0x20A);
-    g_camCachedAngles[view][2] = -*(short *)(actor + 0x20C);
+    g_camCachedAngles[view][0] = TD5_ACTOR_AT(actor)->display_angles.roll + 0x800;
+    g_camCachedAngles[view][1] = 0x800 - TD5_ACTOR_AT(actor)->display_angles.yaw;
+    g_camCachedAngles[view][2] = -TD5_ACTOR_AT(actor)->display_angles.pitch;
 }
 
 /* ========================================================================
@@ -3412,12 +3412,12 @@ void UpdateSplineTracksideCamera(uint8_t *actor, int view, int spline_type)
     EvaluateCubicSpline3D(g_camWorldPos[v], g_camSplineState[v], g_camSplineParam[v]);
 
     /* Target = vehicle pos + velocity * subTickFraction */
-    target[0] = *(int *)(actor + 0x1FC) +
-                (int)((float)*(int *)(actor + 0x1CC) * g_subTickFraction + 0.5f);
-    target[1] = *(int *)(actor + 0x200) +
-                (int)((float)*(int *)(actor + 0x1D0) * g_subTickFraction + 0.5f);
-    target[2] = *(int *)(actor + 0x204) +
-                (int)((float)*(int *)(actor + 0x1D4) * g_subTickFraction + 0.5f);
+    target[0] = TD5_ACTOR_AT(actor)->world_pos.x +
+                (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_x * g_subTickFraction + 0.5f);
+    target[1] = TD5_ACTOR_AT(actor)->world_pos.y +
+                (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_y * g_subTickFraction + 0.5f);
+    target[2] = TD5_ACTOR_AT(actor)->world_pos.z +
+                (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_z * g_subTickFraction + 0.5f);
 
     SetCameraWorldPosition(g_camWorldPos[v]);
     OrientCameraTowardTarget(target, g_tracksideYawOffset[v]);
@@ -3501,12 +3501,12 @@ void UpdateTracksideCamera(uint8_t *actor, int view)
             g_camHeightParam[v] + *(int *)(span_addr + 0x10)) * 0x100;
         g_camWorldPos[v][2] = g_camAnchorZ[v];
 
-        target[0] = *(int *)(actor + 0x1FC) +
-                    (int)((float)*(int *)(actor + 0x1CC) * g_subTickFraction + 0.5f);
-        target[1] = *(int *)(actor + 0x200) +
-                    (int)((float)*(int *)(actor + 0x1D0) * g_subTickFraction + 0.5f);
-        target[2] = *(int *)(actor + 0x204) +
-                    (int)((float)*(int *)(actor + 0x1D4) * g_subTickFraction + 0.5f);
+        target[0] = TD5_ACTOR_AT(actor)->world_pos.x +
+                    (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_x * g_subTickFraction + 0.5f);
+        target[1] = TD5_ACTOR_AT(actor)->world_pos.y +
+                    (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_y * g_subTickFraction + 0.5f);
+        target[2] = TD5_ACTOR_AT(actor)->world_pos.z +
+                    (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_z * g_subTickFraction + 0.5f);
 
         SetCameraWorldPosition(g_camWorldPos[v]);
         OrientCameraTowardTarget(target, g_tracksideYawOffset[v]);
@@ -3532,9 +3532,9 @@ void UpdateTracksideCamera(uint8_t *actor, int view)
     case 1:
     case 2: {
         /* Vehicle-relative with smoothed angles (same code as cases 1,2 in original) */
-        short target_pitch = *(short *)(actor + 0x208) + 0x800;
-        short target_yaw   = 0x800 - *(short *)(actor + 0x20A);
-        short target_roll  = -*(short *)(actor + 0x20C);
+        short target_pitch = TD5_ACTOR_AT(actor)->display_angles.roll + 0x800;
+        short target_yaw   = 0x800 - TD5_ACTOR_AT(actor)->display_angles.yaw;
+        short target_roll  = -TD5_ACTOR_AT(actor)->display_angles.pitch;
         short *cached = g_camCachedAngles[v];
         short cam_angles[3];
         int *cam_world;
@@ -3567,13 +3567,13 @@ void UpdateTracksideCamera(uint8_t *actor, int view)
          * TransformVector3ByBasis variant. */
         ConvertFloatVec3ToIntVec3((float *)(actor + 0x120), &g_camOffsetVec[v][0], cam_world);
 
-        cam_world[0] = cam_world[0] * 0x100 + *(int *)(actor + 0x1FC);
-        cam_world[1] = *(int *)(actor + 0x200) + cam_world[1] * 0x100;
-        cam_world[2] = cam_world[2] * 0x100 + *(int *)(actor + 0x204);
+        cam_world[0] = cam_world[0] * 0x100 + TD5_ACTOR_AT(actor)->world_pos.x;
+        cam_world[1] = TD5_ACTOR_AT(actor)->world_pos.y + cam_world[1] * 0x100;
+        cam_world[2] = cam_world[2] * 0x100 + TD5_ACTOR_AT(actor)->world_pos.z;
 
-        cam_world[0] += (int)((float)*(int *)(actor + 0x1CC) * g_subTickFraction + 0.5f);
-        cam_world[1] += (int)((float)*(int *)(actor + 0x1D0) * g_subTickFraction + 0.5f);
-        cam_world[2] += (int)((float)*(int *)(actor + 0x1D4) * g_subTickFraction + 0.5f);
+        cam_world[0] += (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_x * g_subTickFraction + 0.5f);
+        cam_world[1] += (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_y * g_subTickFraction + 0.5f);
+        cam_world[2] += (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_z * g_subTickFraction + 0.5f);
 
         SetCameraWorldPosition(cam_world);
         BuildCameraBasisFromAngles(cam_angles);
@@ -3970,7 +3970,7 @@ void td5_camera_set_preset(int pi)
             }
 
             if (actor) {
-                LoadCameraPresetForView(((uint8_t *)actor + 0x208), 1, v, 0);
+                LoadCameraPresetForView((uint8_t *)&TD5_ACTOR_AT(actor)->display_angles, 1, v, 0);
             }
         }
     }
@@ -4141,12 +4141,12 @@ void td5_camera_update_transition_state(int p, int vi)
                                                   g_camWorldPos[vi])) {
                 uintptr_t ap = (uintptr_t)actor;
                 int car_target[3];
-                car_target[0] = *(int *)(ap + 0x1FC) +
-                    (int)((float)*(int *)(ap + 0x1CC) * g_subTickFraction + 0.5f);
-                car_target[1] = *(int *)(ap + 0x200) +
-                    (int)((float)*(int *)(ap + 0x1D0) * g_subTickFraction + 0.5f);
-                car_target[2] = *(int *)(ap + 0x204) +
-                    (int)((float)*(int *)(ap + 0x1D4) * g_subTickFraction + 0.5f);
+                car_target[0] = TD5_ACTOR_AT(ap)->world_pos.x +
+                    (int)((float)TD5_ACTOR_AT(ap)->linear_velocity_x * g_subTickFraction + 0.5f);
+                car_target[1] = TD5_ACTOR_AT(ap)->world_pos.y +
+                    (int)((float)TD5_ACTOR_AT(ap)->linear_velocity_y * g_subTickFraction + 0.5f);
+                car_target[2] = TD5_ACTOR_AT(ap)->world_pos.z +
+                    (int)((float)TD5_ACTOR_AT(ap)->linear_velocity_z * g_subTickFraction + 0.5f);
                 SetCameraWorldPosition(g_camWorldPos[vi]);
                 OrientCameraTowardTarget(car_target, g_tracksideYawOffset[vi]);
             }
@@ -4361,7 +4361,7 @@ static void UpdateCameraTransitionHudIndicator(int view, int actor_index) {
     actor = (char *)g_actor_table_base +
             (size_t)(unsigned int)actor_index * TD5_ACTOR_STRIDE;
     if (g_td5.game_type == TD5_GAMETYPE_SINGLE_RACE) {
-        td5_hud_set_indicator_state(view, (int)*(uint8_t *)(actor + 0x383) + 2);
+        td5_hud_set_indicator_state(view, (int)TD5_ACTOR_AT(actor)->race_position + 2);
     } else {
         td5_hud_set_indicator_state(view, 0);
     }
@@ -4387,7 +4387,7 @@ uint32_t td5_compute_heading_delta(void *route_entry) {
     slot = rs[0x35];   /* RS_SLOT_INDEX [CONFIRMED @ 0x00434040] */
     actor = (char *)g_actor_table_base +
             (size_t)(unsigned int)slot * TD5_ACTOR_STRIDE;
-    actor_yaw  = *(int32_t *)(actor + 0x1F4); /* yaw accumulator [CONFIRMED @ 0x00434040] */
+    actor_yaw  = TD5_ACTOR_AT(actor)->euler_accum.yaw; /* yaw accumulator [CONFIRMED @ 0x00434040] */
     span_norm  = *(int16_t *)(actor + 0x82);  /* span_normalized [CONFIRMED @ 0x00434040] */
     /* [x64 Stage 2] slot 0x00 holds a route-table HANDLE, not a pointer. */
     route_table = td5_ai_route_table(rs[0x00]); /* RS_ROUTE_TABLE_PTR [CONFIRMED @ 0x00434040] */

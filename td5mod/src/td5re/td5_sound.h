@@ -109,6 +109,16 @@ int  td5_sound_cop_siren_is_on(int slot);  /* query ONE cop's siren state (arres
  * non-cop car. actor_index is the race-vehicle slot 0..5. */
 void td5_sound_play_horn(int actor_index);
 void td5_sound_update_audio_mix(void);
+/* Engine voice pool (PORT-ONLY). The mixer owns only
+ * TD5_SOUND_MAX_RACE_VEHICLES * TD5_SOUND_CHANNELS_PER_VEHICLE slots before the
+ * ambient range begins, so a >6-car field cannot give every racer its own
+ * channels. These let the caller decide WHICH racers hold the pool. */
+int  td5_sound_racer_has_voice(int racer);
+int  td5_sound_voice_pool_size(void);
+void td5_sound_release_racer_voice(int racer);
+int  td5_sound_voice_holds_car(int racer, const char *car_zip);
+/* `vehicle_index` is a RACER slot; claims/reuses a voice. Returns 0 (quietly)
+ * when the pool is full — that racer stays silent. */
 int  td5_sound_load_vehicle_bank(const char *car_dir, int vehicle_index, int is_reverb_vehicle);
 
 /* --- Ambient --- */

@@ -1530,8 +1530,16 @@ void td5_render_prepared_mesh(TD5_MeshHeader *mesh)
              * fields); out-of-range pointers pass through unchanged. The
              * per-pane texture override serves the reflection overlay, which
              * previously patched the SHARED blob command list in place. */
-            TD5_PrimitiveCmd patched = *cmd;
-            patched.vertex_data_ptr = (uint32_t)(uintptr_t)rs_vtx_rebase(cmd_verts);
+            /* [x64 Stage 3] The resolved vertex address is carried in a runtime
+             * TD5_PrimitiveCmdRT rather than stuffed back into the disk
+             * record's 32-bit vertex_data_ptr, which truncated on x86_64. The
+             * resolution above is unchanged, so this is inert on i686. */
+            TD5_PrimitiveCmdRT patched;
+            patched.dispatch_type   = cmd->dispatch_type;
+            patched.texture_page_id = cmd->texture_page_id;
+            patched.triangle_count  = cmd->triangle_count;
+            patched.quad_count      = cmd->quad_count;
+            patched.vertices        = rs_vtx_rebase(cmd_verts);
             if (g_rs->tex_page_override >= 0)
                 patched.texture_page_id = (int16_t)g_rs->tex_page_override;
             else if (s_td6_banner_remap_active)
@@ -3334,10 +3342,29 @@ void td5_render_flush_translucent(void)
     while (curr >= 0) {
         TranslucentBatchEntry *entry = &s_translucent_pool[curr];
         if (entry->record) {
-            TD5_PrimitiveCmd *cmd = (TD5_PrimitiveCmd *)entry->record;
+            /* [x64 Stage 3] This branch is UNREACHABLE today:
+             * td5_render_queue_translucent_batch is the only writer of
+             * entry->record and the only place s_translucent_head becomes
+             * non-negative, and it has NO CALLERS (td5_vfx.c documents at
+             * :869/:1434 why its paths deliberately bypass it). So the head
+             * is always -1 and this loop body never runs.
+             *
+             * It is kept compiling rather than deleted because it mirrors the
+             * original's FlushQueuedTranslucentPrimitives (0x431340). The
+             * queued record is a bare on-disk TD5_PrimitiveCmd with no mesh in
+             * scope, so vertex resolution here can only use the record's own
+             * field -- which is exactly why a queued command must stay
+             * self-contained and could never become a mesh-relative offset. */
+            const TD5_PrimitiveCmd *cmd = (const TD5_PrimitiveCmd *)entry->record;
             int opcode = cmd->dispatch_type;
             if (opcode >= 0 && opcode <= 6) {
-                s_dispatch_table[opcode](cmd, NULL);
+                TD5_PrimitiveCmdRT rt;
+                rt.dispatch_type   = cmd->dispatch_type;
+                rt.texture_page_id = cmd->texture_page_id;
+                rt.triangle_count  = cmd->triangle_count;
+                rt.quad_count      = cmd->quad_count;
+                rt.vertices        = (TD5_MeshVertex *)(uintptr_t)cmd->vertex_data_ptr;
+                s_dispatch_table[opcode](&rt, NULL);
             }
         }
         curr = entry->next;

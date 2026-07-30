@@ -114,6 +114,16 @@ typedef struct {
     int trace_golden;     /* 1 = golden-trace scenario: fixed-seed RaceTrace on,
                            * per-tick CSVs hashed vs trace_goldens.txt (table
                            * rows omitting the field default to 0) */
+    int players;          /* 0 = base/single, N>=2 = N local humans (split
+                           * screen). td5_frontend.c:3246 turns humans>=2 into
+                           * an N-way split for the harness, so this is the only
+                           * knob needed to reach the split-screen paths.
+                           *
+                           * DELIBERATELY LAST in the struct: the table below
+                           * uses positional initializers, so inserting a field
+                           * mid-struct would silently shift every scenario's
+                           * knobs by one. Appending means omitted rows get 0,
+                           * which is exactly "single screen". */
 } RaceScenario;
 
 /* Order matters: smoke = first ST_SMOKE_RACES entries; the late Moscow
@@ -121,7 +131,7 @@ typedef struct {
  * the spectate scenario runs LAST so its split-screen pane layout can't
  * leak into any row another verdict depends on. */
 static const RaceScenario k_races[] = {
-    /* name                 trk car rev dyn  tr cop lap  opp spec pia at nat grp */
+    /* name                 trk car rev dyn  tr cop lap  opp spec pia at nat grp gld ply */
     { "race-moscow-base",     0, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 1 },
     { "race-moscow-rep2",     0, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 1 },
     { "race-moscow-rep3",     0, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 1 },
@@ -149,8 +159,8 @@ static const RaceScenario k_races[] = {
      * AI-driven player, per-tick trace CSVs hashed vs trace_goldens.txt.
      * One TD5 track + one TD6 conversion. Kept BEFORE spectate3 (its pane
      * layout must stay last / leak-free). */
-    { "race-golden-moscow",   0,  0,  0,  1,  2,  0,  2,  5, -1,  1,  0, 0, 0, 1 },
-    { "race-golden-pelton",  26,  0,  0,  1,  2,  0,  2,  5, -1,  1,  0, 0, 0, 1 },
+    { "race-golden-moscow",   0,  0,  0,  1,  2,  0,  2,  5, -1,  1,  0, 0, 0, 1, 0 },
+    { "race-golden-pelton",  26,  0,  0,  1,  2,  0,  2,  5, -1,  1,  0, 0, 0, 1, 0 },
     /* [x64 Stage 2] DRAG golden. Neither golden above is a drag race, which
      * left the drag/gantry render path unguarded -- and that path builds its
      * display list DIFFERENTLY (td5_render.c synthesizes a 1-entry block on
@@ -159,7 +169,25 @@ static const RaceScenario k_races[] = {
      * both existing goldens stay green. Same pinned knobs as the two above,
      * except opponents=0: drag runs SOLO (a full AutoRace grid parks 5 cars
      * against the extended-strip walls -- see race-drag-solo above). */
-    { "race-golden-drag",    19,  0,  0,  1,  2,  0,  2,  0, -1,  1,  0, 0, 0, 1 },
+    { "race-golden-drag",    19,  0,  0,  1,  2,  0,  2,  0, -1,  1,  0, 0, 0, 1, 0 },
+    /* [SPLIT GOLDEN 2026-07-29] Two-pane golden. No other golden runs split
+     * screen, which left every per-pane path unguarded -- and that is a path
+     * with a REPEATED bug history: FFB routed by pane map instead of driven-car
+     * identity, per-pane camera wobble, and the pane-map-vs-driven-car
+     * confusion generally. The `camera` and `view` trace modules record
+     * per-view state, so a two-pane golden covers exactly what those bugs
+     * touched.
+     *
+     * NOT guarded by this: td5_game_update_split_screen_balance(). Its only
+     * outputs, g_steer_scale_p1/p2, have NO reader anywhere in the tree (not
+     * even a header decl), so the function is dead code and produces no
+     * observable effect for any golden to pin. Wiring it up is a separate
+     * decision -- the original applies these weights through
+     * UpdatePlayerVehicleControlState under bit 0x200.
+     *
+     * players=2 is the last column (see the struct comment). Same pinned knobs
+     * as the goldens above. */
+    { "race-golden-split",    0,  0,  0,  1,  2,  0,  2,  5, -1,  1,  0, 0, 0, 1, 2 },
     { "race-spectate3",       0, -1,  0, -1, -1, -1, -1, -2,  3, -1, -1, 0, 0 },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
@@ -990,6 +1018,18 @@ static void st_apply_scenario(const RaceScenario *sc)
     if (sc->laps       >= 0) g_td5.ini.laps              = sc->laps;
     if (sc->opponents  >= -1) g_td5.ini.default_opponents = sc->opponents;
     if (sc->spectate   >= 0) g_td5.ini.spectate_screens  = sc->spectate;
+    /* Local-human count, and the pane state it implies. split_screen_mode is
+     * RUNTIME state the frontend normally owns, so it survives a race and would
+     * otherwise leak into whatever scenario ran next -- the same hazard that
+     * forced race-spectate3 to be pinned last. Forcing it here makes every
+     * scenario start from a known pane layout, so table ORDER stops mattering
+     * for this knob. */
+    if (sc->players >= 2) {
+        g_td5.ini.default_players = sc->players;
+    } else {
+        g_td5.ini.default_players = s_base.players;
+        g_td5.split_screen_mode   = 0;
+    }
     if (sc->player_is_ai >= 0) g_td5.ini.player_is_ai    = sc->player_is_ai;
     if (sc->auto_throttle >= 0) g_td5.ini.auto_throttle  = sc->auto_throttle;
     g_td5.ini.trace_fast_forward = s_ff;

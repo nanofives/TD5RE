@@ -205,7 +205,7 @@ void td5_light_emit_vehicle_headlights(void)
          * synthetic mount if car_def / the hardpoint is unavailable. */
         const uint8_t *ap = (const uint8_t *)a;
         void *car_def = NULL;
-        memcpy(&car_def, ap + 0x1B8, sizeof(void *));
+        memcpy(&car_def, &((const TD5_Actor *)ap)->car_definition_ptr, sizeof(void *));
 
         int16_t hp0[3] = { 150, 0, 200 }, hp1[3] = { -150, 0, 200 };
         if (car_def) {

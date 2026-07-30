@@ -23,3 +23,10 @@ race-golden-drag controls 9bb4c2fedf4eb702
 race-golden-drag progress 9ca1f88ad9c649ce
 race-golden-drag camera 8d6a52c443f0ac69
 race-golden-drag sound 2360ce13c0d10c25
+race-golden-split pose 0ceb415be0ecebc3
+race-golden-split motion 4efd8348258f1c1d
+race-golden-split track 01a72f393e3b187b
+race-golden-split controls 38775fe40f72971f
+race-golden-split progress 3dc2d802fee2d976
+race-golden-split camera d42bf9078c6cf4d5
+race-golden-split sound 2360ce13c0d10c25

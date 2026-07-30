@@ -1461,12 +1461,12 @@ void td5_vfx_render_ambient_streaks(TD5_Actor *actor, float sim_budget,
     uint8_t *ap = (uint8_t *)actor;
     int32_t vel_x, vel_y, vel_z;
     int32_t pos_x, pos_y, pos_z;
-    memcpy(&vel_x, ap + 0x1CC, 4);
-    memcpy(&vel_y, ap + 0x1D0, 4);
-    memcpy(&vel_z, ap + 0x1D4, 4);
-    memcpy(&pos_x, ap + 0x1FC, 4);
-    memcpy(&pos_y, ap + 0x200, 4);
-    memcpy(&pos_z, ap + 0x204, 4);
+    memcpy(&vel_x, &actor->linear_velocity_x, 4);
+    memcpy(&vel_y, &actor->linear_velocity_y, 4);
+    memcpy(&vel_z, &actor->linear_velocity_z, 4);
+    memcpy(&pos_x, &actor->world_pos.x, 4);
+    memcpy(&pos_y, &TD5_ACTOR_AT(ap)->world_pos.y, 4);
+    memcpy(&pos_z, &TD5_ACTOR_AT(ap)->world_pos.z, 4);
 
     float sub_tick = g_subTickFraction;
 
@@ -1922,7 +1922,7 @@ void td5_vfx_update_tire_tracks(void) {
         if (g_actor_table_base) {
             int32_t lspd = 0;
             uint8_t *ap = g_actor_table_base + (size_t)desc->actor_slot * TD5_ACTOR_STRIDE;
-            memcpy(&lspd, ap + 0x314, 4);
+            memcpy(&lspd, &TD5_ACTOR_AT(ap)->longitudinal_speed, 4);
             int32_t abs_lspd = (lspd < 0) ? -lspd : lspd;
             speedClass = abs_lspd >> 0xF;
             if (speedClass < 1) speedClass = 1;
@@ -2414,10 +2414,11 @@ void td5_vfx_update_tire_track_emitters(TD5_Actor *actor, int view_index) {
 
     uint8_t *ap = (uint8_t *)actor;
 
-    /* Read speed values from actor struct */
-    int32_t rear_speed, front_speed;
-    memcpy(&rear_speed,  ap + 0x31C, 4); /* front_axle_slip_excess */
-    memcpy(&front_speed, ap + 0x320, 4); /* rear_axle_slip_excess */
+    /* Read speed values from actor struct. NOTE the deliberate cross-naming:
+     * rear_speed carries the FRONT axle's slip and vice versa — preserved
+     * from the original's usage of these two fields in this dispatcher. */
+    int32_t rear_speed  = TD5_ACTOR_AT(ap)->front_axle_slip_excess;
+    int32_t front_speed = TD5_ACTOR_AT(ap)->rear_axle_slip_excess;
 
     /* DIAG 2026-05-28 (tire-mark root-cause hunt): one-line dispatcher-entry
      * trace. Answers in a single run: does the dispatcher run? is tuning_ptr
@@ -2427,21 +2428,24 @@ void td5_vfx_update_tire_track_emitters(TD5_Actor *actor, int view_index) {
     {
         static uint32_t s_disp_log = 0;
         if ((s_disp_log++ % 30u) == 0u) {
-            void *tp_dbg = NULL; memcpy(&tp_dbg, ap + 0x1BC, sizeof(void *));
+            void *tp_dbg = NULL; memcpy(&tp_dbg, &actor->tuning_data_ptr, sizeof(void *));
             int16_t dt_dbg = -1;
             if (tp_dbg) memcpy(&dt_dbg, (uint8_t *)tp_dbg + 0x76, 2);
-            uint8_t slot_dbg = *(ap + 0x375);
+            uint8_t slot_dbg = TD5_ACTOR_AT(ap)->slot_index;
             int descidx_w2 = 2 + (int)slot_dbg * 4;
             TD5_LOG_I(LOG_TAG,
                 "dispatch ENTER: view=%d tuning=%p drivetrain=%d cf=0x%X "
                 "wid=%02X,%02X,%02X,%02X rear_sp=%d front_sp=%d "
                 "slot_index=%u desc_idx(w2)=%d descN=%d vmode=%u dmg=0x%X",
-                view_index, tp_dbg, (int)dt_dbg, *(ap + 0x376),
-                *(ap + 0x371), *(ap + 0x372), *(ap + 0x373), *(ap + 0x374),
+                view_index, tp_dbg, (int)dt_dbg, TD5_ACTOR_AT(ap)->surface_contact_flags,
+                TD5_ACTOR_AT(ap)->tire_track_emitter_FL,
+                TD5_ACTOR_AT(ap)->tire_track_emitter_FR,
+                TD5_ACTOR_AT(ap)->tire_track_emitter_RL,
+                TD5_ACTOR_AT(ap)->tire_track_emitter_RR,
                 rear_speed, front_speed,
                 (unsigned)slot_dbg, descidx_w2,
                 (int)(sizeof(s_emitter_descs)/sizeof(s_emitter_descs[0])),
-                (unsigned)*(ap + 0x379), (unsigned)*(ap + 0x37C));
+                (unsigned)TD5_ACTOR_AT(ap)->vehicle_mode, (unsigned)TD5_ACTOR_AT(ap)->wheel_contact_bitmask);
         }
     }
 
@@ -2452,13 +2456,13 @@ void td5_vfx_update_tire_track_emitters(TD5_Actor *actor, int view_index) {
     /* Read drivetrain type from tuning data: *(short*)(tuning_ptr + 0x76)
      * 1=RWD, 2=FWD, 3=AWD */
     void *tuning_ptr;
-    memcpy(&tuning_ptr, ap + 0x1BC, sizeof(void *));
+    memcpy(&tuning_ptr, &actor->tuning_data_ptr, sizeof(void *));
     if (!tuning_ptr) return;
 
     int16_t drivetrain;
     memcpy(&drivetrain, (uint8_t *)tuning_ptr + 0x76, sizeof(int16_t));
 
-    uint8_t contact_flags = *(ap + 0x376);
+    uint8_t contact_flags = TD5_ACTOR_AT(ap)->surface_contact_flags;
 
     switch (drivetrain) {
     case 1: /* RWD: rear tire effects only */
@@ -2558,9 +2562,8 @@ static void vfx_spawn_smoke_at_position(TD5_Actor *actor, float wx, float wy,
          *   X/Z = copied from actor velocity at +0x1CC / +0x1D4 (24.8 fixed) */
         int32_t actor_vx = 0, actor_vz = 0;
         if (actor) {
-            uint8_t *ap = (uint8_t *)actor;
-            memcpy(&actor_vx, ap + 0x1CC, 4);
-            memcpy(&actor_vz, ap + 0x1D4, 4);
+            memcpy(&actor_vx, &actor->linear_velocity_x, 4);
+            memcpy(&actor_vz, &actor->linear_velocity_z, 4);
         }
         PSLOT_WR32(slot, PSLOT_VEL_X, actor_vx);
         PSLOT_WR32(slot, PSLOT_VEL_Y, s_smoke_vel_y);
@@ -2633,37 +2636,40 @@ static void vfx_update_rear_tire_effects(TD5_Actor *actor, uint8_t contact_flags
         static uint32_t s_rear_log_frame = 0;
         if ((s_rear_log_frame++ % 30u) == 0u) {
             int16_t ls_dbg;
-            memcpy(&ls_dbg, ap + 0x33C, sizeof(int16_t));
+            memcpy(&ls_dbg, &TD5_ACTOR_AT(ap)->current_slip_metric, sizeof(int16_t));
             int32_t lspd_dbg, vlat_dbg;
-            memcpy(&lspd_dbg, ap + 0x314, 4);
-            memcpy(&vlat_dbg, ap + 0x318, 4);
-            int16_t thr_dbg = *(int16_t *)(ap + 0x33E);
-            uint8_t scf_dbg = *(ap + 0x376);
+            memcpy(&lspd_dbg, &TD5_ACTOR_AT(ap)->longitudinal_speed, 4);
+            memcpy(&vlat_dbg, &TD5_ACTOR_AT(ap)->lateral_speed, 4);
+            int16_t thr_dbg = TD5_ACTOR_AT(ap)->encounter_steering_cmd;
+            uint8_t scf_dbg = TD5_ACTOR_AT(ap)->surface_contact_flags;
             int32_t rpm_dbg;
-            memcpy(&rpm_dbg, ap + 0x310, 4);
-            uint8_t gear_dbg = *(ap + 0x364);
+            memcpy(&rpm_dbg, &TD5_ACTOR_AT(ap)->engine_speed_accum, 4);
+            /* [FIX 2026-07-29] Was reading +0x364, inside `_pad_362[9]` --
+             * reserved padding the struct documents as DEAD-VESTIGIAL with zero
+             * corroborated accesses. Diagnostic only, but it logged noise. */
+            uint8_t gear_dbg = TD5_ACTOR_AT(ap)->current_gear;
             TD5_LOG_I(LOG_TAG, "rear_tire: scf=0x%X ls=%d thr=%d rpm=%d gear=%d lspd=%d vlat=%d",
                       scf_dbg, ls_dbg, thr_dbg, rpm_dbg, gear_dbg, lspd_dbg, vlat_dbg);
         }
     }
 
     /* Allocate emitters for wheels 2 and 3 if not already active */
-    uint8_t slot_index = *(ap + 0x375);
+    uint8_t slot_index = TD5_ACTOR_AT(ap)->slot_index;
 
     for (int w = 2; w <= 3; w++) {
-        if (*(ap + 0x371 + w) == 0xFF) {
+        if ((&TD5_ACTOR_AT(ap)->tire_track_emitter_FL)[w] == 0xFF) {
             int result = vfx_acquire_tire_track_emitter(
                 w, (int)slot_index, w, 0x37, 0x1A); /* orig width=0x1A confirmed via Ghidra audit */
             if (result >= 0) {
                 vfx_set_emitter_anchor_from_wheel(actor, w, result);
             }
-            *(ap + 0x371 + w) = (uint8_t)(result & 0xFF);
+            (&actor->tire_track_emitter_FL)[w] = (uint8_t)(result & 0xFF);
         }
     }
 
     /* Smoke spawn: probability proportional to lateral slip */
     int16_t lateral_slip;
-    memcpy(&lateral_slip, ap + 0x33C, sizeof(int16_t));
+    memcpy(&lateral_slip, &TD5_ACTOR_AT(ap)->current_slip_metric, sizeof(int16_t));
 
     int r = rand() % 50;
     if (r < (int)lateral_slip / 2) {
@@ -2691,7 +2697,7 @@ static void vfx_update_rear_tire_effects(TD5_Actor *actor, uint8_t contact_flags
     uint8_t intensity = (uint8_t)((uint16_t)lateral_slip >> 2);
 
     for (int w = 2; w <= 3; w++) {
-        uint8_t emitter_id = *(ap + 0x371 + w);
+        uint8_t emitter_id = (&TD5_ACTOR_AT(ap)->tire_track_emitter_FL)[w];
         if (emitter_id != 0xFF) {
             int desc_idx = w + (int)slot_index * 4;
             if (desc_idx < (int)(sizeof(s_emitter_descs) / sizeof(s_emitter_descs[0]))) {
@@ -2701,10 +2707,10 @@ static void vfx_update_rear_tire_effects(TD5_Actor *actor, uint8_t contact_flags
     }
 
     /* Surface reduction: halve intensity on hard surfaces */
-    uint8_t surface = *(ap + 0x370);
+    uint8_t surface = TD5_ACTOR_AT(ap)->surface_type_chassis;
     if (vfx_is_hard_surface(surface)) {
         for (int w = 2; w <= 3; w++) {
-            uint8_t emitter_id = *(ap + 0x371 + w);
+            uint8_t emitter_id = (&TD5_ACTOR_AT(ap)->tire_track_emitter_FL)[w];
             if (emitter_id != 0xFF) {
                 int desc_idx = w + (int)slot_index * 4;
                 if (desc_idx < (int)(sizeof(s_emitter_descs) / sizeof(s_emitter_descs[0]))) {
@@ -2732,23 +2738,23 @@ static void vfx_update_front_tire_effects(TD5_Actor *actor, uint8_t contact_flag
     if ((contact_flags & 2) == 0) return; /* no front contact */
 
     uint8_t *ap = (uint8_t *)actor;
-    uint8_t slot_index = *(ap + 0x375);
+    uint8_t slot_index = TD5_ACTOR_AT(ap)->slot_index;
 
     /* Allocate emitters for wheels 0 and 1 */
     for (int w = 0; w <= 1; w++) {
-        if (*(ap + 0x371 + w) == 0xFF) {
+        if ((&TD5_ACTOR_AT(ap)->tire_track_emitter_FL)[w] == 0xFF) {
             int result = vfx_acquire_tire_track_emitter(
                 w, (int)slot_index, w, 0x37, 0x1A); /* orig width=0x1A confirmed via Ghidra audit */
             if (result >= 0) {
                 vfx_set_emitter_anchor_from_wheel(actor, w, result);
             }
-            *(ap + 0x371 + w) = (uint8_t)(result & 0xFF);
+            (&actor->tire_track_emitter_FL)[w] = (uint8_t)(result & 0xFF);
         }
     }
 
     /* Smoke spawn (same probability logic as rear) */
     int16_t lateral_slip;
-    memcpy(&lateral_slip, ap + 0x33C, sizeof(int16_t));
+    memcpy(&lateral_slip, &TD5_ACTOR_AT(ap)->current_slip_metric, sizeof(int16_t));
 
     int r = rand() % 50;
     if (r < (int)lateral_slip / 2) {
@@ -2772,7 +2778,7 @@ static void vfx_update_front_tire_effects(TD5_Actor *actor, uint8_t contact_flag
     uint8_t intensity = (uint8_t)((uint16_t)lateral_slip >> 2);
 
     for (int w = 0; w <= 1; w++) {
-        uint8_t emitter_id = *(ap + 0x371 + w);
+        uint8_t emitter_id = (&TD5_ACTOR_AT(ap)->tire_track_emitter_FL)[w];
         if (emitter_id != 0xFF) {
             int desc_idx = w + (int)slot_index * 4;
             if (desc_idx < (int)(sizeof(s_emitter_descs) / sizeof(s_emitter_descs[0]))) {
@@ -2782,10 +2788,10 @@ static void vfx_update_front_tire_effects(TD5_Actor *actor, uint8_t contact_flag
     }
 
     /* Surface reduction on hard surfaces */
-    uint8_t surface = *(ap + 0x370);
+    uint8_t surface = TD5_ACTOR_AT(ap)->surface_type_chassis;
     if (vfx_is_hard_surface(surface)) {
         for (int w = 0; w <= 1; w++) {
-            uint8_t emitter_id = *(ap + 0x371 + w);
+            uint8_t emitter_id = (&TD5_ACTOR_AT(ap)->tire_track_emitter_FL)[w];
             if (emitter_id != 0xFF) {
                 int desc_idx = w + (int)slot_index * 4;
                 if (desc_idx < (int)(sizeof(s_emitter_descs) / sizeof(s_emitter_descs[0]))) {
@@ -2824,41 +2830,41 @@ static void vfx_update_front_tire_effects(TD5_Actor *actor, uint8_t contact_flag
  */
 static void vfx_update_front_wheel_sound_effects(TD5_Actor *actor, int speed) {
     uint8_t *ap = (uint8_t *)actor;
-    uint8_t slot_index = *(ap + 0x375);
-    uint8_t surface = *(ap + 0x370);
+    uint8_t slot_index = TD5_ACTOR_AT(ap)->slot_index;
+    uint8_t surface = TD5_ACTOR_AT(ap)->surface_type_chassis;
 
     for (int w = 0; w <= 1; w++) {
         if (speed < 0x3A99) {
             /* Below threshold: release emitter */
-            if (*(ap + 0x379) != 0 ||              /* airborne */
-                (*(ap + 0x376) & 2) == 0 ||        /* no front contact */
-                ((1 << w) & *(ap + 0x37C)) != 0) { /* wheel not grounded */
-                uint8_t emitter_id = *(ap + 0x371 + w);
+            if (TD5_ACTOR_AT(ap)->vehicle_mode != 0 ||              /* airborne */
+                (TD5_ACTOR_AT(ap)->surface_contact_flags & 2) == 0 ||        /* no front contact */
+                ((1 << w) & TD5_ACTOR_AT(ap)->wheel_contact_bitmask) != 0) { /* wheel not grounded */
+                uint8_t emitter_id = (&TD5_ACTOR_AT(ap)->tire_track_emitter_FL)[w];
                 if (emitter_id != 0xFF) {
                     int desc_idx = w + (int)slot_index * 4;
                     if (desc_idx < (int)(sizeof(s_emitter_descs)/sizeof(s_emitter_descs[0]))) {
                         s_emitter_descs[desc_idx].active = 0;
                     }
                     /* Pool slot stays alive — render fn ages it out over 600 ticks */
-                    *(ap + 0x371 + w) = 0xFF;
+                    (&actor->tire_track_emitter_FL)[w] = 0xFF;
                 }
             }
             continue;
         }
 
         /* Guard checks for release */
-        if (*(ap + 0x379) != 0) { /* airborne */
-            uint8_t emitter_id = *(ap + 0x371 + w);
+        if (TD5_ACTOR_AT(ap)->vehicle_mode != 0) { /* airborne */
+            uint8_t emitter_id = (&TD5_ACTOR_AT(ap)->tire_track_emitter_FL)[w];
             if (emitter_id != 0xFF) {
                 int desc_idx = w + (int)slot_index * 4;
                 if (desc_idx < (int)(sizeof(s_emitter_descs)/sizeof(s_emitter_descs[0])))
                     s_emitter_descs[desc_idx].active = 0;
-                *(ap + 0x371 + w) = 0xFF;
+                (&actor->tire_track_emitter_FL)[w] = 0xFF;
             }
             continue;
         }
-        if ((*(ap + 0x376) & 2) != 0 ||
-            ((1 << w) & *(ap + 0x37C)) != 0) {
+        if ((TD5_ACTOR_AT(ap)->surface_contact_flags & 2) != 0 ||
+            ((1 << w) & TD5_ACTOR_AT(ap)->wheel_contact_bitmask) != 0) {
             /* Not on surface or wheel airborne */
             continue;
         }
@@ -2883,13 +2889,13 @@ static void vfx_update_front_wheel_sound_effects(TD5_Actor *actor, int speed) {
         }
 
         /* Allocate emitter if not active */
-        if (*(ap + 0x371 + w) == 0xFF) {
+        if ((&TD5_ACTOR_AT(ap)->tire_track_emitter_FL)[w] == 0xFF) {
             int result = vfx_acquire_tire_track_emitter(
                 w, (int)slot_index, w, 0x28, 0x1A); /* orig width=0x1A confirmed via Ghidra audit */
             if (result >= 0) {
                 vfx_set_emitter_anchor_from_wheel(actor, w, result);
             }
-            *(ap + 0x371 + w) = (uint8_t)(result & 0xFF);
+            (&actor->tire_track_emitter_FL)[w] = (uint8_t)(result & 0xFF);
         }
 
         /* Set intensity: (excess + rounding) >> 11 */
@@ -2901,7 +2907,7 @@ static void vfx_update_front_wheel_sound_effects(TD5_Actor *actor, int speed) {
         }
 
         /* Write intensity to emitter descriptor */
-        uint8_t emitter_id = *(ap + 0x371 + w);
+        uint8_t emitter_id = (&TD5_ACTOR_AT(ap)->tire_track_emitter_FL)[w];
         if (emitter_id != 0xFF) {
             int desc_idx = w + (int)slot_index * 4;
             if (desc_idx < (int)(sizeof(s_emitter_descs)/sizeof(s_emitter_descs[0]))) {
@@ -2928,40 +2934,40 @@ static void vfx_update_front_wheel_sound_effects(TD5_Actor *actor, int speed) {
  */
 static void vfx_update_rear_wheel_sound_effects(TD5_Actor *actor, int speed) {
     uint8_t *ap = (uint8_t *)actor;
-    uint8_t slot_index = *(ap + 0x375);
-    uint8_t surface = *(ap + 0x370);
+    uint8_t slot_index = TD5_ACTOR_AT(ap)->slot_index;
+    uint8_t surface = TD5_ACTOR_AT(ap)->surface_type_chassis;
 
     for (int w = 2; w <= 3; w++) {
         if (speed < 0x2711) {
             /* Below threshold: release emitter */
-            if (*(ap + 0x379) != 0 ||
-                (*(ap + 0x376) & 1) == 0 ||
-                ((1 << w) & *(ap + 0x37C)) != 0) {
-                uint8_t emitter_id = *(ap + 0x371 + w);
+            if (TD5_ACTOR_AT(ap)->vehicle_mode != 0 ||
+                (TD5_ACTOR_AT(ap)->surface_contact_flags & 1) == 0 ||
+                ((1 << w) & TD5_ACTOR_AT(ap)->wheel_contact_bitmask) != 0) {
+                uint8_t emitter_id = (&TD5_ACTOR_AT(ap)->tire_track_emitter_FL)[w];
                 if (emitter_id != 0xFF) {
                     int desc_idx = w + (int)slot_index * 4;
                     if (desc_idx < (int)(sizeof(s_emitter_descs)/sizeof(s_emitter_descs[0]))) {
                         s_emitter_descs[desc_idx].active = 0;
                     }
                     /* Pool slot stays alive — render fn ages it out over 600 ticks */
-                    *(ap + 0x371 + w) = 0xFF;
+                    (&actor->tire_track_emitter_FL)[w] = 0xFF;
                 }
             }
             continue;
         }
 
-        if (*(ap + 0x379) != 0) {
-            uint8_t emitter_id = *(ap + 0x371 + w);
+        if (TD5_ACTOR_AT(ap)->vehicle_mode != 0) {
+            uint8_t emitter_id = (&TD5_ACTOR_AT(ap)->tire_track_emitter_FL)[w];
             if (emitter_id != 0xFF) {
                 int desc_idx = w + (int)slot_index * 4;
                 if (desc_idx < (int)(sizeof(s_emitter_descs)/sizeof(s_emitter_descs[0])))
                     s_emitter_descs[desc_idx].active = 0;
-                *(ap + 0x371 + w) = 0xFF;
+                (&actor->tire_track_emitter_FL)[w] = 0xFF;
             }
             continue;
         }
-        if ((*(ap + 0x376) & 1) != 0 ||
-            ((1 << w) & *(ap + 0x37C)) != 0) {
+        if ((TD5_ACTOR_AT(ap)->surface_contact_flags & 1) != 0 ||
+            ((1 << w) & TD5_ACTOR_AT(ap)->wheel_contact_bitmask) != 0) {
             continue;
         }
 
@@ -2981,13 +2987,13 @@ static void vfx_update_rear_wheel_sound_effects(TD5_Actor *actor, int speed) {
             vfx_spawn_smoke_at_position(actor, fwx, fwy, fwz, 1, s_current_view_index);
         }
 
-        if (*(ap + 0x371 + w) == 0xFF) {
+        if ((&TD5_ACTOR_AT(ap)->tire_track_emitter_FL)[w] == 0xFF) {
             int result = vfx_acquire_tire_track_emitter(
                 w, (int)slot_index, w, 0x37, 0x1A); /* orig width=0x1A confirmed via Ghidra audit */
             if (result >= 0) {
                 vfx_set_emitter_anchor_from_wheel(actor, w, result);
             }
-            *(ap + 0x371 + w) = (uint8_t)(result & 0xFF);
+            (&actor->tire_track_emitter_FL)[w] = (uint8_t)(result & 0xFF);
         }
 
         uint8_t track_intensity = (uint8_t)(excess >> 11);
@@ -2995,7 +3001,7 @@ static void vfx_update_rear_wheel_sound_effects(TD5_Actor *actor, int speed) {
             track_intensity >>= 1;
         }
 
-        uint8_t emitter_id = *(ap + 0x371 + w);
+        uint8_t emitter_id = (&TD5_ACTOR_AT(ap)->tire_track_emitter_FL)[w];
         if (emitter_id != 0xFF) {
             int desc_idx = w + (int)slot_index * 4;
             if (desc_idx < (int)(sizeof(s_emitter_descs)/sizeof(s_emitter_descs[0]))) {
@@ -3035,11 +3041,11 @@ void td5_vfx_spawn_rear_wheel_smoke(TD5_Actor *actor, int view_index) {
      * During a launch burnout, scf is set and +0x314 holds the CRGT
      * engine-derived speed (high) even while the body is barely moving,
      * so this fires exactly during the wheelspin window. */
-    uint8_t scf = *(ap + 0x376);
+    uint8_t scf = TD5_ACTOR_AT(ap)->surface_contact_flags;
     if (scf == 0) return;
 
     void *tuning_ptr;
-    memcpy(&tuning_ptr, ap + 0x1BC, sizeof(void *));
+    memcpy(&tuning_ptr, &actor->tuning_data_ptr, sizeof(void *));
     if (!tuning_ptr) return;
     int16_t drivetrain;
     memcpy(&drivetrain, (uint8_t *)tuning_ptr + 0x76, sizeof(int16_t));
@@ -3048,7 +3054,7 @@ void td5_vfx_spawn_rear_wheel_smoke(TD5_Actor *actor, int view_index) {
     /* Speed-proportional probability gate (from SpawnVehicleSmokePuffFromHardpoint):
      * rand() % 1000 < speed/200 */
     int32_t speed;
-    memcpy(&speed, ap + 0x314, 4); /* longitudinal_speed */
+    memcpy(&speed, &TD5_ACTOR_AT(ap)->longitudinal_speed, 4); /* longitudinal_speed */
     if (speed == 0) return;
     int abs_speed = (speed < 0) ? -speed : speed;
 
@@ -3106,7 +3112,7 @@ void td5_vfx_spawn_smoke(TD5_Actor *actor) {
      * killed the smoke exactly when it should appear (over a disabled suspect),
      * making the effect "completely missing" vs the original. Gate removed. */
     int32_t speed;
-    memcpy(&speed, ap + 0x314, 4);
+    memcpy(&speed, &TD5_ACTOR_AT(ap)->longitudinal_speed, 4);
     int abs_speed = (speed < 0) ? -speed : speed;
 
     /* Read world position — orig 0x00429CF0 receives `actor+0x1FC` as param_2
@@ -3116,9 +3122,9 @@ void td5_vfx_spawn_smoke(TD5_Actor *actor) {
      * by the body mesh from chase cameras. [CONFIRMED via Ghidra decomp of
      * 0x00429CF0 + callers 0x0040BD20 and 0x0040C120]. */
     int32_t pos_x, pos_y, pos_z;
-    memcpy(&pos_x, ap + 0x1FC, 4);
-    memcpy(&pos_y, ap + 0x200, 4);
-    memcpy(&pos_z, ap + 0x204, 4);
+    memcpy(&pos_x, &actor->world_pos.x, 4);
+    memcpy(&pos_y, &TD5_ACTOR_AT(ap)->world_pos.y, 4);
+    memcpy(&pos_z, &TD5_ACTOR_AT(ap)->world_pos.z, 4);
 
     float mid_x = (float)pos_x * FP_TO_FLOAT;
     float mid_y = (float)pos_y * FP_TO_FLOAT;
@@ -3158,9 +3164,9 @@ void td5_vfx_spawn_wreck_smoke(TD5_Actor *actor) {
 
     uint8_t *ap = (uint8_t *)actor;
     int32_t pos_x, pos_y, pos_z;
-    memcpy(&pos_x, ap + 0x1FC, 4);
-    memcpy(&pos_y, ap + 0x200, 4);
-    memcpy(&pos_z, ap + 0x204, 4);
+    memcpy(&pos_x, &actor->world_pos.x, 4);
+    memcpy(&pos_y, &TD5_ACTOR_AT(ap)->world_pos.y, 4);
+    memcpy(&pos_z, &TD5_ACTOR_AT(ap)->world_pos.z, 4);
 
     float mid_x = (float)pos_x * FP_TO_FLOAT;
     float mid_y = (float)pos_y * FP_TO_FLOAT + roof_lift;   /* lift to the roofline */
@@ -3203,9 +3209,9 @@ void td5_vfx_spawn_damage_smoke(TD5_Actor *actor, int tier) {
 
     uint8_t *ap = (uint8_t *)actor;
     int32_t pos_x, pos_y, pos_z;
-    memcpy(&pos_x, ap + 0x1FC, 4);
-    memcpy(&pos_y, ap + 0x200, 4);
-    memcpy(&pos_z, ap + 0x204, 4);
+    memcpy(&pos_x, &actor->world_pos.x, 4);
+    memcpy(&pos_y, &TD5_ACTOR_AT(ap)->world_pos.y, 4);
+    memcpy(&pos_z, &TD5_ACTOR_AT(ap)->world_pos.z, 4);
     float mid_x = (float)pos_x * FP_TO_FLOAT;
     float mid_y = (float)pos_y * FP_TO_FLOAT + 18.0f;   /* near the roofline */
     float mid_z = (float)pos_z * FP_TO_FLOAT;
@@ -3337,12 +3343,11 @@ static void td5_vfx_spawn_smoke_puff_at_point(TD5_Actor *actor,
      * The (x + (x>>31 & 0xFFF)) >> 12 pattern is C's signed-shift round-toward-zero
      * mirror of orig's IDIV-by-power-of-2; port uses the same expression so
      * the cycle-accurate negative path matches. */
-    uint8_t *ap = (uint8_t *)actor;
     int32_t yaw_raw;
     int32_t actor_vx, actor_vz;
-    memcpy(&yaw_raw,  ap + 0x1F4, 4);
-    memcpy(&actor_vx, ap + 0x1CC, 4);
-    memcpy(&actor_vz, ap + 0x1D4, 4);
+    memcpy(&yaw_raw,  &actor->euler_accum.yaw, 4);
+    memcpy(&actor_vx, &actor->linear_velocity_x, 4);
+    memcpy(&actor_vz, &actor->linear_velocity_z, 4);
     int yaw12 = (int)((yaw_raw >> 8) + 0x800);
     int cos_v = CosFixed12bit((unsigned)yaw12);
     int sin_v = SinFixed12bit(yaw12);
@@ -3423,8 +3428,8 @@ void td5_vfx_spawn_random_smoke_puff(TD5_Actor *actor, int view_index)
     /* Read gate fields [CONFIRMED @ 0x00401378-0x00401396] */
     int32_t engine;
     int16_t throttle16;
-    memcpy(&engine,     ap + 0x310, 4);
-    memcpy(&throttle16, ap + 0x33E, 2);
+    memcpy(&engine,     &TD5_ACTOR_AT(ap)->engine_speed_accum, 4);
+    memcpy(&throttle16, &TD5_ACTOR_AT(ap)->encounter_steering_cmd, 2);
 
     if (engine >= 0xFA0) return;       /* 4000 */
     if ((int)throttle16 <= 0xC8) return; /* 200 */
@@ -3585,7 +3590,7 @@ void td5_vfx_render_taillights(int actor_index) {
     uint8_t *ap = g_actor_table_base + actor_index * TD5_ACTOR_STRIDE;
 
     /* Read brake_flag at +0x36D — nonzero = braking */
-    brake_active = (*(ap + 0x36D) != 0 || *(ap + 0x36E) != 0) ? 1 : 0; /* [2026-06-02] handbrake lights brakes too */
+    brake_active = (TD5_ACTOR_AT(ap)->brake_flag != 0 || TD5_ACTOR_AT(ap)->handbrake_flag != 0) ? 1 : 0; /* [2026-06-02] handbrake lights brakes too */
 
     if (brake_active) {
         if (brightness < 0x80) {  /* cap at 128 [CONFIRMED @ 0x401204] */

@@ -420,7 +420,7 @@ static int copchase_ai_speed_pct(void) {
  * per-car tuning value, so non-cops are byte-identical. The actor's own slot
  * index lives at +0x375. */
 int32_t phys_top_speed_rating(TD5_Actor *actor) {
-    int slot = (int)((const uint8_t *)actor)[0x375];   /* ACTOR_SLOT_INDEX */
+    int slot = (int)actor->slot_index;
     if (td5_ai_cop_is_chasing(slot)) return 0x7FFF;    /* effectively uncapped */
     int32_t rating = (int32_t)PHYS_S(actor, PHYS_TOP_SPEED);
     /* Slow the SUSPECT(s) so a Cop Chase is winnable. The cop keeps full speed;
@@ -1196,7 +1196,7 @@ void td5_physics_update_vehicle_actor(TD5_Actor *actor)
      * g_gamePaused (both are 1 during countdown, 0 during the race), so this
      * gate uses !g_game_paused. [Audit D4 — added 2026-05-14.] */
     if (!g_game_paused && actor->finish_time == 0) {
-        uint16_t *tc = (uint16_t *)((uint8_t *)actor + 0x34C);
+        uint16_t *tc = (uint16_t *)&actor->timing_frame_counter;
         if (*tc < 0xFFFF) (*tc)++;
         if (*tc != 0) {
             actor->average_speed_metric =
@@ -3195,12 +3195,12 @@ void td5_physics_update_ai(TD5_Actor *actor)
         char *_a = (char *)actor;
         TD5_TRACE_CALL_ENTER("ai_dynamics",
             (int32_t)actor->slot_index,
-            *(int32_t *)(_a + 0x30C),                       /* steering_cmd */
-            *(int32_t *)(_a + 0x1F4),                       /* yaw_accum */
-            *(int32_t *)(_a + 0x314),                       /* longitudinal_speed */
-            (int32_t)*(int16_t *)(_a + 0x33E),              /* encounter_steer */
-            (int32_t)*(uint8_t *)(_a + 0x36F),              /* throttle_state */
-            (int32_t)*(uint8_t *)(_a + 0x36D),              /* brake_flag */
+            ((const TD5_Actor *)_a)->steering_command,
+            ((const TD5_Actor *)_a)->euler_accum.yaw,
+            ((const TD5_Actor *)_a)->longitudinal_speed,
+            (int32_t)((const TD5_Actor *)_a)->encounter_steering_cmd,
+            (int32_t)((const TD5_Actor *)_a)->throttle_state,
+            (int32_t)((const TD5_Actor *)_a)->brake_flag,
             (int32_t)*(uint8_t *)(_a + 0x08C));             /* sub_lane_index */
     }
 
@@ -3987,8 +3987,7 @@ static inline int32_t mwvc_sar_rz(int32_t x, int n) {
 
 void td5_physics_missing_wheel_correction(TD5_Actor *actor)
 {
-    uint8_t *ap = (uint8_t *)actor;
-    uint32_t mask = (uint32_t)*(uint8_t *)(ap + 0x37C);   /* zero-extended BL */
+    uint32_t mask = (uint32_t)actor->wheel_contact_bitmask;  /* zero-extended BL */
 
     /* [0x403EBE..EC1] CMP EBX,0xF / JA 0x00403ED2 -- masks > 0xF take the
      * default body. For mask in 0..0xF, dispatch via the 16-byte index
@@ -4014,11 +4013,11 @@ void td5_physics_missing_wheel_correction(TD5_Actor *actor)
      * loop. The port stores them as locals; the original publishes them
      * to DAT_004830XX but those are not read by any other function in
      * the static call graph (verified: only this function writes them). */
-    int16_t *wcn_p = (int16_t *)(ap + 0x230);   /* DAT_00483024: wheel_contact_normals base */
+    int16_t *wcn_p = &actor->wheel_contact_normals[0][0];  /* DAT_00483024 */
     uint32_t i_idx = 0;                          /* DAT_00483028: wheel index counter */
     int32_t  sum   = 0;                          /* g_missingWheelVelocityScratch: accumulator (EAX) */
     int32_t  cnt   = 0;                          /* DAT_00483038: missing-wheel count (EDI) */
-    int16_t *hn_p  = (int16_t *)(ap + 0x290);   /* DAT_00483044: heading_normal base */
+    int16_t *hn_p  = (int16_t *)&actor->heading_normal;      /* DAT_00483044 */
 
     /* [0x403F03..F33] Loop: for each of 4 wheels, if its bit is clear in
      * the mask, add wcn[i+1] (the second int16 at offset +2) to sum and
@@ -4043,7 +4042,7 @@ void td5_physics_missing_wheel_correction(TD5_Actor *actor)
     /* [0x403F51..F8D] Cos/Sin of display_angles.yaw (int16 @ +0x20A).
      * Both calls take the same MOVSX-promoted argument. Original then
      * stores results to DAT_00483034 (cos) and DAT_0048303C/ECX (sin). */
-    int32_t yaw = (int32_t)*(int16_t *)(ap + 0x20A);
+    int32_t yaw = (int32_t)actor->display_angles.yaw;
     int32_t cos_v = cos_fixed12(yaw);               /* CALL 0x0040A6E0 */
     int32_t sin_v = sin_fixed12(yaw);               /* CALL 0x0040A700 */
 
@@ -4057,9 +4056,8 @@ void td5_physics_missing_wheel_correction(TD5_Actor *actor)
      * CDQ/AND 0xFF/ADD/SAR 8 idiom in the listing. Note ordering: cos
      * pairs with linear_velocity_x (the first int32 at [EDI]), sin with
      * linear_velocity_z (the third int32 at [EDI+8]). */
-    int32_t *vel = (int32_t *)(ap + 0x1CC);         /* DAT_00483040 */
-    int32_t vx_h = mwvc_sar_rz(vel[0], 8);          /* (lin_vel_x rounded) >> 8 */
-    int32_t vz_h = mwvc_sar_rz(vel[2], 8);          /* (lin_vel_z rounded) >> 8 */
+    int32_t vx_h = mwvc_sar_rz(actor->linear_velocity_x, 8); /* (lin_vel_x rounded) >> 8 */
+    int32_t vz_h = mwvc_sar_rz(actor->linear_velocity_z, 8); /* (lin_vel_z rounded) >> 8 */
     int32_t proj = vx_h * cos_v - vz_h * sin_v;
     int32_t proj_clamped = mwvc_sar_rz(proj, 12);   /* CDQ/AND 0xFFF/ADD/SAR 12 */
 
@@ -4076,8 +4074,8 @@ void td5_physics_missing_wheel_correction(TD5_Actor *actor)
     prod <<= 2;                                      /* SHL EAX, 0x2 */
     int32_t correction = mwvc_sar_rz(prod, 8);       /* CDQ/AND 0xFF/ADD/SAR 8 */
 
-    /* [0x0040400A] *(int32_t *)(actor + 0x1C8) -= correction. */
-    *(int32_t *)(ap + 0x1C8) -= correction;
+    /* [0x0040400A] TD5_ACTOR_AT(actor)->angular_velocity_pitch -= correction. */
+    actor->angular_velocity_pitch -= correction;
 }
 
 /* ========================================================================
@@ -4280,7 +4278,7 @@ void td5_physics_init_vehicle_runtime(void)
          * positive throttle resumes. For slot 0 with PlayerIsAI=0, the human
          * input path overwrites 0x378 each tick, so this init is a no-op. */
         if (slot < TD5_MAX_RACER_SLOTS) {
-            *((uint8_t *)actor + 0x378) = 1;
+            actor->throttle_input_active = 1;
         }
 
         /* Traffic-only: force cdef+0x88 (mass) to 0x20 regardless of what
@@ -4455,9 +4453,9 @@ void td5_physics_init_vehicle_runtime(void)
                          * [CONFIRMED @ ~0x42F54F]: *(int32*)(actor+0x324) +=
                          * (pacing * race_points + rounding) >> 9 */
                         {
-                            int32_t pacing = *(int32_t *)((uint8_t *)actor + 0x324);
+                            int32_t pacing = actor->cached_car_suspension_travel;
                             int32_t pm = pacing * race_points;
-                            *(int32_t *)((uint8_t *)actor + 0x324) =
+                            actor->cached_car_suspension_travel =
                                 pacing + ((pm + ((pm >> 31) & 0x1FF)) >> 9);
                         }
                     }

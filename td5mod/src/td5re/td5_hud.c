@@ -865,13 +865,13 @@ static inline void *actor_ptr(int slot)
 static inline uint8_t actor_race_position(int slot)
 {
     uint8_t *a = (uint8_t *)actor_ptr(slot);
-    return a[0x383]; /* race position byte */
+    return TD5_ACTOR_AT(a)->race_position; /* race position byte */
 }
 
 static inline uint8_t actor_gear(int slot)
 {
     uint8_t *a = (uint8_t *)actor_ptr(slot);
-    return a[0x36B]; /* current gear */
+    return TD5_ACTOR_AT(a)->current_gear; /* current gear */
 }
 
 /* engine_speed_accum: smoothed RPM counter, drives the tachometer needle.
@@ -879,7 +879,7 @@ static inline uint8_t actor_gear(int slot)
 static inline int32_t actor_engine_speed(int slot)
 {
     uint8_t *a = (uint8_t *)actor_ptr(slot);
-    return *(int32_t *)(a + 0x310); /* engine_speed_accum */
+    return TD5_ACTOR_AT(a)->engine_speed_accum; /* engine_speed_accum */
 }
 
 /* max_rpm from carparam+0x72: raw integer engine redline (e.g. 6000).
@@ -887,7 +887,7 @@ static inline int32_t actor_engine_speed(int slot)
 static inline int16_t actor_max_rpm(int slot)
 {
     uint8_t *a = (uint8_t *)actor_ptr(slot);
-    void *tuning = *(void **)(a + 0x1BC);
+    void *tuning = ((const TD5_Actor *)a)->tuning_data_ptr;
     if (!tuning) return 6000;
     return *(int16_t *)((uint8_t *)tuning + 0x72);
 }
@@ -904,19 +904,19 @@ static inline int16_t actor_span_index(int slot)
 static inline int32_t actor_world_x(int slot)
 {
     uint8_t *a = (uint8_t *)actor_ptr(slot);
-    return *(int32_t *)(a + 0x1FC);
+    return TD5_ACTOR_AT(a)->world_pos.x;
 }
 
 static inline int32_t actor_world_z(int slot)
 {
     uint8_t *a = (uint8_t *)actor_ptr(slot);
-    return *(int32_t *)(a + 0x204);
+    return TD5_ACTOR_AT(a)->world_pos.z;
 }
 
 static inline int32_t actor_heading(int slot)
 {
     uint8_t *a = (uint8_t *)actor_ptr(slot);
-    return *(int32_t *)(a + 0x1F4);
+    return TD5_ACTOR_AT(a)->euler_accum.yaw;
 }
 
 static inline uint16_t actor_lap_time(int slot, int lap_index)
@@ -930,13 +930,13 @@ static inline uint16_t actor_lap_time(int slot, int lap_index)
 static inline uint16_t actor_pending_finish_hi(int slot)
 {
     uint8_t *a = (uint8_t *)actor_ptr(slot);
-    return (uint16_t)(*(uint16_t *)(a + 0x344) >> 8);
+    return (uint16_t)(TD5_ACTOR_AT(a)->pending_finish_timer >> 8);
 }
 
 static inline uint8_t actor_route_index(int slot)
 {
     uint8_t *a = (uint8_t *)actor_ptr(slot);
-    return a[0x375];
+    return TD5_ACTOR_AT(a)->slot_index;
 }
 
 /* ========================================================================
@@ -1631,10 +1631,10 @@ static void hud_draw_mp_car_labels(void)
             if (!s_hud_id_accent[slot]) continue;  /* not a human MP identity */
 
             uint8_t *a = (uint8_t *)actor_ptr(slot);
-            int32_t vx = *(int32_t *)(a + 0x1CC);   /* linear_velocity_x */
-            int32_t vz = *(int32_t *)(a + 0x1D4);   /* linear_velocity_z */
+            int32_t vx = TD5_ACTOR_AT(a)->linear_velocity_x;   /* linear_velocity_x */
+            int32_t vz = TD5_ACTOR_AT(a)->linear_velocity_z;   /* linear_velocity_z */
             float wx = ((float)actor_world_x(slot) + (float)vx * frac) * FP;
-            float wy = ((float)(*(int32_t *)(a + 0x200)) + DROP_WS) * FP; /* below wheels, Y down = +Y */
+            float wy = ((float)(TD5_ACTOR_AT(a)->world_pos.y) + DROP_WS) * FP; /* below wheels, Y down = +Y */
             float wz = ((float)actor_world_z(slot) + (float)vz * frac) * FP;
 
             float sx, sy, sz, rhw;
@@ -5324,9 +5324,9 @@ void td5_hud_render_overlays(float dt)
              * and drops to 0 when throttle is released, even though the car is
              * still moving. Instead, project world velocity onto heading. */
             uint8_t *_actor_a = (uint8_t *)actor_ptr(actor_slot);
-            int32_t vx = *(int32_t *)(_actor_a + 0x1CC);  /* linear_velocity_x */
-            int32_t vz = *(int32_t *)(_actor_a + 0x1D4);  /* linear_velocity_z */
-            int32_t heading_accum = *(int32_t *)(_actor_a + 0x1F4); /* euler_accum.yaw */
+            int32_t vx = TD5_ACTOR_AT(_actor_a)->linear_velocity_x;  /* linear_velocity_x */
+            int32_t vz = TD5_ACTOR_AT(_actor_a)->linear_velocity_z;  /* linear_velocity_z */
+            int32_t heading_accum = TD5_ACTOR_AT(_actor_a)->euler_accum.yaw; /* euler_accum.yaw */
             int32_t h12 = (heading_accum >> 8) & 0xFFF;
             double hrad = (double)h12 * (2.0 * 3.14159265358979323846 / 4096.0);
             int32_t sin_h = (int32_t)(sin(hrad) * 4096.0);
@@ -5904,17 +5904,17 @@ void td5_hud_render_overlays(float dt)
         const int dbg_dy = 14;
 
         /* World position (24.8 fixed-point -> float) */
-        int32_t wx = *(int32_t *)(dbg_a + 0x1FC);
-        int32_t wy = *(int32_t *)(dbg_a + 0x200);
-        int32_t wz = *(int32_t *)(dbg_a + 0x204);
+        int32_t wx = TD5_ACTOR_AT(dbg_a)->world_pos.x;
+        int32_t wy = TD5_ACTOR_AT(dbg_a)->world_pos.y;
+        int32_t wz = TD5_ACTOR_AT(dbg_a)->world_pos.z;
         td5_hud_queue_text(0, 8, dbg_y, 0, "POS: %.1f %.1f %.1f",
                            (float)wx / 256.0f, (float)wy / 256.0f, (float)wz / 256.0f);
         dbg_y += dbg_dy;
 
         /* Euler angles: yaw(heading), pitch, roll — 20-bit accum, display as degrees */
-        int32_t yaw_acc   = *(int32_t *)(dbg_a + 0x1F4);
-        int32_t pitch_acc = *(int32_t *)(dbg_a + 0x1F8);
-        int32_t roll_acc  = *(int32_t *)(dbg_a + 0x1F0);
+        int32_t yaw_acc   = TD5_ACTOR_AT(dbg_a)->euler_accum.yaw;
+        int32_t pitch_acc = TD5_ACTOR_AT(dbg_a)->euler_accum.pitch;
+        int32_t roll_acc  = TD5_ACTOR_AT(dbg_a)->euler_accum.roll;
         float yaw_deg   = (float)((yaw_acc >> 8) & 0xFFF) * (360.0f / 4096.0f);
         float pitch_deg = (float)((pitch_acc >> 8) & 0xFFF) * (360.0f / 4096.0f);
         float roll_deg  = (float)((roll_acc >> 8) & 0xFFF) * (360.0f / 4096.0f);
@@ -5928,7 +5928,7 @@ void td5_hud_render_overlays(float dt)
          * so gap = render_wheel_y - ground_y; positive => that wheel floats
          * above the road. Pins which wheels lift on slopes per orientation. */
         {
-            float wpy = (float)(*(int32_t *)(dbg_a + 0x200)) / 256.0f;
+            float wpy = (float)(TD5_ACTOR_AT(dbg_a)->world_pos.y) / 256.0f;
             /* body->world Y = ROW 1 of rotation matrix: m[3],m[4],m[5]
              * (+0x12C/+0x130/+0x134). Matches the actual wheel render
              * (mat3x4 out[1]) and orig 0x0042E2E0. Was reading COL 1
@@ -5938,9 +5938,9 @@ void td5_hud_render_overlays(float dt)
             float m5 = *(float *)(dbg_a + 0x134);
             int gap[4];
             for (int w = 0; w < 4; w++) {
-                int16_t wx = *(int16_t *)(dbg_a + 0x210 + w*8 + 0);
-                int16_t wy = *(int16_t *)(dbg_a + 0x210 + w*8 + 2);
-                int16_t wz = *(int16_t *)(dbg_a + 0x210 + w*8 + 4);
+                int16_t wx = TD5_ACTOR_AT(dbg_a)->wheel_display_angles[w][0];
+                int16_t wy = TD5_ACTOR_AT(dbg_a)->wheel_display_angles[w][1];
+                int16_t wz = TD5_ACTOR_AT(dbg_a)->wheel_display_angles[w][2];
                 float rot_y    = m3*(float)wx + m4*(float)wy + m5*(float)wz;
                 float render_y = wpy + rot_y;
                 float ground_y = (float)(*(int32_t *)(dbg_a + 0xF0 + w*12 + 4)) / 256.0f;
@@ -5953,38 +5953,38 @@ void td5_hud_render_overlays(float dt)
         }
 
         /* Speed: longitudinal + lateral (body-frame, 8.8 fp) */
-        int32_t long_spd = *(int32_t *)(dbg_a + 0x314);
-        int32_t lat_spd  = *(int32_t *)(dbg_a + 0x318);
+        int32_t long_spd = TD5_ACTOR_AT(dbg_a)->longitudinal_speed;
+        int32_t lat_spd  = TD5_ACTOR_AT(dbg_a)->lateral_speed;
         td5_hud_queue_text(0, 8, dbg_y, 0, "SPD: fwd=%d  lat=%d",
                            long_spd >> 8, lat_spd >> 8);
         dbg_y += dbg_dy;
 
         /* Engine RPM + gear */
-        int32_t rpm = *(int32_t *)(dbg_a + 0x310);
-        uint8_t gear = dbg_a[0x36B];
+        int32_t rpm = TD5_ACTOR_AT(dbg_a)->engine_speed_accum;
+        uint8_t gear = TD5_ACTOR_AT(dbg_a)->current_gear;
         td5_hud_queue_text(0, 8, dbg_y, 0, "RPM: %d  GEAR: %d", rpm, (int)gear);
         dbg_y += dbg_dy;
 
         /* Steering command + brake flag + handbrake flag */
-        int32_t steer = *(int32_t *)(dbg_a + 0x30C);
-        uint8_t brake = dbg_a[0x36D];
-        uint8_t hbrake = dbg_a[0x36E];
+        int32_t steer = TD5_ACTOR_AT(dbg_a)->steering_command;
+        uint8_t brake = TD5_ACTOR_AT(dbg_a)->brake_flag;
+        uint8_t hbrake = TD5_ACTOR_AT(dbg_a)->handbrake_flag;
         td5_hud_queue_text(0, 8, dbg_y, 0, "STEER: %d  BRAKE: %s  HBRAKE: %s",
                            steer, brake ? "ON" : "OFF", hbrake ? "ON" : "OFF");
         dbg_y += dbg_dy;
 
         /* Suspension: roll (center) and pitch (wheel[0]) positions */
-        int32_t susp_roll  = *(int32_t *)(dbg_a + 0x2CC);
-        int32_t susp_pitch = *(int32_t *)(dbg_a + 0x2DC);
+        int32_t susp_roll  = TD5_ACTOR_AT(dbg_a)->center_suspension_pos;
+        int32_t susp_pitch = TD5_ACTOR_AT(dbg_a)->wheel_suspension_pos[0];
         td5_hud_queue_text(0, 8, dbg_y, 0, "SUSP: roll=%d  pitch=%d",
                            susp_roll, susp_pitch);
         dbg_y += dbg_dy;
 
         /* Collision / contact state */
-        uint8_t wall_flag    = dbg_a[0x37B];  /* track_contact_flag: 0=none, 1=wall, 2=edge */
-        uint8_t veh_mode     = dbg_a[0x379];  /* vehicle_mode: 0=normal, 1=recovery */
-        uint8_t wheel_contact = dbg_a[0x37C]; /* wheel airborne mask THIS tick (NEW) */
-        uint8_t dmg_lockout   = dbg_a[0x37D]; /* wheel airborne mask PREV tick (OLD snapshot) */
+        uint8_t wall_flag    = TD5_ACTOR_AT(dbg_a)->track_contact_flag;  /* track_contact_flag: 0=none, 1=wall, 2=edge */
+        uint8_t veh_mode     = TD5_ACTOR_AT(dbg_a)->vehicle_mode;  /* vehicle_mode: 0=normal, 1=recovery */
+        uint8_t wheel_contact = TD5_ACTOR_AT(dbg_a)->wheel_contact_bitmask; /* wheel airborne mask THIS tick (NEW) */
+        uint8_t dmg_lockout   = TD5_ACTOR_AT(dbg_a)->damage_lockout; /* wheel airborne mask PREV tick (OLD snapshot) */
 
         const char *wall_str = "NONE";
         if (wall_flag == 1) wall_str = "WALL";

@@ -775,6 +775,10 @@ static uint32_t td5_game_normalized_dt_to_accum(float dt_normalized);
 static float td5_game_normalized_dt_to_seconds(float dt_normalized);
 void td5_game_update_split_screen_balance(void);
 
+/* Per-racer car archive, cached at InitRace so the engine voice pool can reload
+ * a bank mid-race without re-deriving the TD6-player-override logic. */
+static char s_racer_car_zip[TD5_MAX_RACER_SLOTS][260];
+
 TD5_Actor *td5_game_get_actor(int slot)
 {
     int total = td5_game_get_total_actor_count();
@@ -3166,7 +3170,40 @@ static void init_race_level_and_assets(void)
                                       : td5_asset_get_car_zip_path(car_for_slot);
             if (car_zip) {
                 int is_human = (i < g_td5.num_human_players);
-                td5_sound_load_vehicle_bank(car_zip, i, is_human ? 1 : 0);
+                /* The sound module tops out at TD5_SOUND_MAX_RACE_VEHICLES (6)
+                 * while this loop runs to TD5_MAX_RACER_SLOTS (16, raised by
+                 * the port for N-way split). Calling it for slot >= 6 returned
+                 * 0 and logged an ERROR every race that actually fielded a 7th
+                 * racer -- e.g. 2 local humans + 5 opponents, which is what the
+                 * race-golden-split scenario surfaced.
+                 *
+                 * Skipping is not a behaviour change: the call already did
+                 * nothing for those slots. The limitation IS real -- racers 6+
+                 * get no engine/horn bank and stay silent -- so say it once
+                 * rather than erroring per race, and rather than raising the
+                 * sound cap, which is NOT a constant bump: s_reverb_flag[6],
+                 * s_gear_state[6], td5_sound_set_gear_state's `>= 6` bound and
+                 * a `v < 6` loop are all hardcoded, so widening the constant
+                 * alone would overflow them. */
+                /* Remember each racer's archive so the voice pool can reload a
+                 * bank later without re-deriving the TD6-override logic. */
+                strncpy(s_racer_car_zip[i], car_zip,
+                        sizeof(s_racer_car_zip[0]) - 1);
+                s_racer_car_zip[i][sizeof(s_racer_car_zip[0]) - 1] = '\0';
+                /* Claims one of the engine voices. Returns 0 once the pool is
+                 * full, which is normal for a >6-car field and no longer an
+                 * error: td5_game_update_engine_voices() reassigns the pool to
+                 * whichever cars are actually near a listener. */
+                if (!td5_sound_load_vehicle_bank(car_zip, i, is_human ? 1 : 0)) {
+                    static int s_voice_pool_noted = 0;
+                    if (!s_voice_pool_noted) {
+                        s_voice_pool_noted = 1;
+                        TD5_LOG_I(LOG_TAG,
+                                  "engine voice pool full at %d; remaining "
+                                  "racers get voices by proximity",
+                                  td5_sound_voice_pool_size());
+                    }
+                }
             }
 
             TD5_LOG_I(LOG_TAG, "InitRace step 5/19: vehicle asset loaded slot=%d car_index=%d",
@@ -4121,15 +4158,16 @@ static void init_race_spawn_actors(void)
              * Y: set to 0xC0000000 matching the original binary (0x405D70).
              * The physics reset below runs IntegratePose which should snap
              * Y to the ground surface via wheel contact averaging. */
-            *(int32_t *)(actor + 0x1FC) = world_x;
-            *(int32_t *)(actor + 0x200) = (int32_t)0xC0000000;
-            *(int32_t *)(actor + 0x204) = world_z;
+            TD5_Actor *ta = (TD5_Actor *)actor;
+            ta->world_pos.x = world_x;
+            ta->world_pos.y = (int32_t)0xC0000000;
+            ta->world_pos.z = world_z;
 
-            actor[0x375] = (uint8_t)slot;
+            ta->slot_index = (uint8_t)slot;
             /* Wheel emitter IDs (+0x371..+0x374): 0xFF = "no emitter acquired yet".
              * VFX acquisition check fires only when value == 0xFF; actors start
              * zeroed (memset above), so must be explicitly primed here. */
-            memset(actor + 0x371, 0xFF, 4);
+            memset(&ta->tire_track_emitter_FL, 0xFF, 4);
             /* track_contact_flag (+0x37B) intentionally NOT set here.
              * Original (0x434350) never touches it during init — it is a
              * per-frame wall-contact flag set by wall_response() and cleared
@@ -4230,9 +4268,9 @@ static void init_race_spawn_actors(void)
             TD5_LOG_I(LOG_TAG,
                       "Actor spawn: slot=%d span=%d pos=(%d,%d,%d) state=%d lane=%d",
                       slot, span_index,
-                      *(int32_t *)(actor + 0x1FC),
-                      *(int32_t *)(actor + 0x200),
-                      *(int32_t *)(actor + 0x204),
+                      ta->world_pos.x,
+                      ta->world_pos.y,
+                      ta->world_pos.z,
                       s_slot_state[slot].state,
                       sub_lane);
         }
@@ -4996,28 +5034,28 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
             if (td5_trace_active(TD5_TRACE_MOD_POSE, stage_bit)) {
                 TD5_TracePoseRow r;
                 r.slot       = i;
-                r.world_x    = *(int32_t *)(a + 0x1FC);
-                r.world_y    = *(int32_t *)(a + 0x200);
-                r.world_z    = *(int32_t *)(a + 0x204);
-                r.ang_roll   = *(int32_t *)(a + 0x1C0);
-                r.ang_yaw    = *(int32_t *)(a + 0x1C4);
-                r.ang_pitch  = *(int32_t *)(a + 0x1C8);
-                r.disp_roll  = *(int16_t *)(a + 0x208);
-                r.disp_yaw   = *(int16_t *)(a + 0x20A);
-                r.disp_pitch = *(int16_t *)(a + 0x20C);
+                r.world_x    = actor->world_pos.x;
+                r.world_y    = actor->world_pos.y;
+                r.world_z    = actor->world_pos.z;
+                r.ang_roll   = actor->angular_velocity_roll;
+                r.ang_yaw    = actor->angular_velocity_yaw;
+                r.ang_pitch  = actor->angular_velocity_pitch;
+                r.disp_roll  = actor->display_angles.roll;
+                r.disp_yaw   = actor->display_angles.yaw;
+                r.disp_pitch = actor->display_angles.pitch;
                 td5_trace_emit_pose(frame, sim_tick, stage, &r);
             }
 
             if (td5_trace_active(TD5_TRACE_MOD_MOTION, stage_bit)) {
                 TD5_TraceMotionRow r;
                 r.slot       = i;
-                r.vel_x      = *(int32_t *)(a + 0x1CC);
-                r.vel_y      = *(int32_t *)(a + 0x1D0);
-                r.vel_z      = *(int32_t *)(a + 0x1D4);
-                r.long_speed = *(int32_t *)(a + 0x314);
-                r.lat_speed  = *(int32_t *)(a + 0x318);
-                r.front_slip = *(int32_t *)(a + 0x31C);
-                r.rear_slip  = *(int32_t *)(a + 0x320);
+                r.vel_x      = actor->linear_velocity_x;
+                r.vel_y      = actor->linear_velocity_y;
+                r.vel_z      = actor->linear_velocity_z;
+                r.long_speed = actor->longitudinal_speed;
+                r.lat_speed  = actor->lateral_speed;
+                r.front_slip = actor->front_axle_slip_excess;
+                r.rear_slip  = actor->rear_axle_slip_excess;
                 td5_trace_emit_motion(frame, sim_tick, stage, &r);
             }
 
@@ -5028,8 +5066,8 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
                 r.span_norm          = *(int16_t *)(a + 0x082);
                 r.span_accum         = *(int16_t *)(a + 0x084);
                 r.span_high          = *(int16_t *)(a + 0x086);
-                r.track_contact_flag = *(uint8_t *)(a + 0x37B);
-                r.wheel_contact_mask = *(uint8_t *)(a + 0x37D);
+                r.track_contact_flag = actor->track_contact_flag;
+                r.wheel_contact_mask = actor->damage_lockout;
                 td5_trace_emit_track(frame, sim_tick, stage, &r);
             }
 
@@ -5037,42 +5075,42 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
                 TD5_TraceControlsRow r;
                 r.slot         = i;
                 r.slot_state   = s_slot_state[i].state;
-                r.steering_cmd = *(int32_t *)(a + 0x30C);
-                r.engine_speed = *(int32_t *)(a + 0x310);
-                r.current_gear = *(uint8_t *)(a + 0x36B);
-                r.vehicle_mode = *(uint8_t *)(a + 0x379);
+                r.steering_cmd = actor->steering_command;
+                r.engine_speed = actor->engine_speed_accum;
+                r.current_gear = actor->current_gear;
+                r.vehicle_mode = actor->vehicle_mode;
                 td5_trace_emit_controls(frame, sim_tick, stage, &r);
             }
 
             if (td5_trace_active(TD5_TRACE_MOD_ROTATION, stage_bit)) {
                 TD5_TraceRotationRow r;
                 r.slot          = i;
-                r.ang_vel_roll  = *(int32_t *)(a + 0x1C0);
-                r.ang_vel_yaw   = *(int32_t *)(a + 0x1C4);
-                r.ang_vel_pitch = *(int32_t *)(a + 0x1C8);
-                r.euler_roll    = *(int32_t *)(a + 0x1F0);
-                r.euler_yaw     = *(int32_t *)(a + 0x1F4);
-                r.euler_pitch   = *(int32_t *)(a + 0x1F8);
-                r.disp_roll     = *(int16_t *)(a + 0x208);
-                r.disp_yaw      = *(int16_t *)(a + 0x20A);
-                r.disp_pitch    = *(int16_t *)(a + 0x20C);
+                r.ang_vel_roll  = actor->angular_velocity_roll;
+                r.ang_vel_yaw   = actor->angular_velocity_yaw;
+                r.ang_vel_pitch = actor->angular_velocity_pitch;
+                r.euler_roll    = actor->euler_accum.roll;
+                r.euler_yaw     = actor->euler_accum.yaw;
+                r.euler_pitch   = actor->euler_accum.pitch;
+                r.disp_roll     = actor->display_angles.roll;
+                r.disp_yaw      = actor->display_angles.yaw;
+                r.disp_pitch    = actor->display_angles.pitch;
                 /* +0x37C is NEW airborne mask post-D2 fix; +0x37D is OLD/prev. */
-                r.wcb           = *(uint8_t *)(a + 0x37C);
-                r.scf           = *(uint8_t *)(a + 0x376);
-                r.vmode         = *(uint8_t *)(a + 0x379);
-                r.afc           = *(uint16_t *)(a + 0x360);
-                r.world_y       = *(int32_t *)(a + 0x200);
-                r.vel_y         = *(int32_t *)(a + 0x1D0);
+                r.wcb           = actor->wheel_contact_bitmask;
+                r.scf           = actor->surface_contact_flags;
+                r.vmode         = actor->vehicle_mode;
+                r.afc           = actor->airborne_frame_counter;
+                r.world_y       = actor->world_pos.y;
+                r.vel_y         = actor->linear_velocity_y;
                 td5_trace_emit_rotation(frame, sim_tick, stage, &r);
             }
 
             if (td5_trace_active(TD5_TRACE_MOD_PROGRESS, stage_bit)) {
                 TD5_TraceProgressRow r;
                 r.slot                     = i;
-                r.race_position            = *(uint8_t *)(a + 0x383);
-                r.finish_time              = *(int32_t *)(a + 0x328);
-                r.accum_distance           = *(int32_t *)(a + 0x32C);
-                r.pending_finish_timer     = *(uint16_t *)(a + 0x344);
+                r.race_position            = TD5_ACTOR_AT(a)->race_position;
+                r.finish_time              = actor->finish_time;
+                r.accum_distance           = actor->accumulated_distance;
+                r.pending_finish_timer     = actor->pending_finish_timer;
                 r.metric_checkpoint_index  = s_metrics[i].checkpoint_index;
                 r.metric_checkpoint_mask   = s_metrics[i].checkpoint_bitmask;
                 r.metric_normalized_span   = s_metrics[i].normalized_span;
@@ -6783,11 +6821,10 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
                     s_slot_state[fb].companion_1 == 0) continue;  /* still racing */
                 TD5_Actor *fa = td5_game_get_actor(fb);
                 if (!fa) continue;
-                uint8_t *fp = (uint8_t *)fa;
-                *(int32_t *)(fp + 0x30C) = 0;   /* steering_command centred */
-                *(int16_t *)(fp + 0x33E) = 0;   /* throttle off */
-                fp[0x36D] = 1;                  /* brake_flag on (byte boolean) */
-                fp[0x36E] = 0;                  /* handbrake off */
+                fa->steering_command       = 0;   /* steering centred */
+                fa->encounter_steering_cmd = 0;   /* throttle off */
+                fa->brake_flag             = 1;   /* brake on (byte boolean) */
+                fa->handbrake_flag         = 0;   /* handbrake off */
             }
         }
 
@@ -6995,6 +7032,18 @@ static void frame_render(void)
 {
     /* ---- Split-screen steering balance ---- */
     td5_game_update_split_screen_balance();
+
+    /* [VOICE POOL] Reassign engine voices toward the nearest cars. Throttled:
+     * a steal can reload a car's WAVs from its zip, so evaluating every tick
+     * would risk a mid-race hitch for no audible benefit. No-op for fields that
+     * fit the 6-voice pool, i.e. every stock race. */
+    {
+        static int s_voice_eval_tick = 0;
+        if (++s_voice_eval_tick >= 30) {
+            s_voice_eval_tick = 0;
+            td5_game_update_engine_voices();
+        }
+    }
 
     /* ---- Rendering pipeline ---- */
 
@@ -7506,11 +7555,19 @@ static void frame_audio_tick(void)
         if (s_slot_state[i].state == 3) continue;
         TD5_Actor *actor_snd = td5_game_get_actor(i);
         if (!actor_snd) continue;
-        uint8_t *a = (uint8_t *)actor_snd;
 
-        /* Gear state (offset 0x224) -- used for engine/horn volume table lookup */
-        int gear = *(int32_t *)(a + 0x224);
-        td5_sound_set_gear_state(i, gear);
+        /* Engaged gear -- gates the +0x400 engine-volume boost and indexes
+         * s_horn_vol_by_gear[0..5] in td5_sound.c.
+         *
+         * [FIX 2026-07-29] This used to read an int32 at +0x224, which lands
+         * mid-`wheel_display_angles[4][4]` (an int16 array spanning
+         * 0x210-0x22F) and is not a gear field at all. There is NO +0x224
+         * actor access anywhere in the original decompilation, and the audio
+         * mixer (UpdateVehicleAudioMix @ 0x00440b00) reads no gear field --
+         * this feed is a port addition, so the offset was invented. The result
+         * was garbage that the consumer's [0,5] clamp mostly forced to 0,
+         * pinning horn volume to the first table entry. Wrong on i686 too. */
+        td5_sound_set_gear_state(i, (int)actor_snd->current_gear);
     }
 
     for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
@@ -7593,14 +7650,13 @@ int td5_game_run_race_frame(void) {
         {
             TD5_Actor *actor0 = td5_game_get_actor(0);
             if (actor0) {
-                uint8_t *a0 = (uint8_t *)actor0;
                 TD5_LOG_D(LOG_TAG,
                           "Race actor0: pos=(%d,%d,%d) speed=%d gear=%d",
-                          *(int32_t *)(a0 + 0x1CC),
-                          *(int32_t *)(a0 + 0x1D0),
-                          *(int32_t *)(a0 + 0x1D4),
-                          *(int32_t *)(a0 + 0x208),
-                          *(int32_t *)(a0 + 0x224));
+                          actor0->linear_velocity_x,
+                          actor0->linear_velocity_y,
+                          actor0->linear_velocity_z,
+                          actor0->display_angles.roll,
+                          (int)actor0->current_gear);
             }
         }
     }
@@ -10798,6 +10854,95 @@ int g_steer_scale_p2 = 0x100;
 
 #define SPLIT_STEER_MAX_ADJUSTMENT  0x40  /* max boost/nerf (25%) */
 
+/* ============================================================
+ * Engine voice pool assignment (PORT-ONLY)
+ *
+ * The mixer has 6 engine voices (3 channels each) before the ambient slot
+ * range begins, but the port raised TD5_MAX_RACER_SLOTS to 16. Rather than
+ * re-laying out the whole slot table (16 x 3 = 48 exceeds even the 44-slot
+ * BASE range), the voices go to the cars that matter: every local human, then
+ * the nearest remaining racers.
+ *
+ * Cost control: reassigning a voice may reload that car's WAVs, so this runs on
+ * a throttle and steals at most ONE voice per evaluation. Swapping between two
+ * cars of the same model is free (td5_sound_voice_holds_car).
+ *
+ * No-op when the field fits the pool, which is every stock 6-car race — so it
+ * cannot perturb the existing scenarios or the `sound` trace golden.
+ * ============================================================ */
+void td5_game_update_engine_voices(void)
+{
+    int pool  = td5_sound_voice_pool_size();
+    int count = g_racer_count;
+    if (count > TD5_MAX_RACER_SLOTS) count = TD5_MAX_RACER_SLOTS;
+    if (count <= pool) return;            /* identity assignment already holds */
+
+    int  want[TD5_MAX_RACER_SLOTS];
+    int  want_n = 0;
+    long long best[TD5_MAX_RACER_SLOTS];
+    int  humans = g_td5.num_human_players;
+    if (humans > count) humans = count;
+
+    /* Local humans always hold a voice. */
+    for (int i = 0; i < humans && want_n < pool; i++) want[want_n++] = i;
+
+    /* Everyone else ranked by squared distance to the NEAREST listener, so a
+     * car close to either pane in split screen counts as close. */
+    for (int i = 0; i < count; i++) {
+        best[i] = -1;
+        if (i < humans) continue;
+        TD5_Actor *a = td5_game_get_actor(i);
+        if (!a || s_slot_state[i].state == 3) continue;
+        long long nearest = -1;
+        for (int v = 0; v < TD5_MAX_VIEWPORTS; v++) {
+            long long dx = (long long)a->world_pos.x - (long long)g_camWorldPos[v][0];
+            long long dz = (long long)a->world_pos.z - (long long)g_camWorldPos[v][2];
+            long long d2 = dx * dx + dz * dz;
+            if (nearest < 0 || d2 < nearest) nearest = d2;
+        }
+        best[i] = nearest;
+    }
+
+    /* Repeated min-scan for the remaining budget: pool is 6, so this is cheaper
+     * and far clearer than a real sort. */
+    while (want_n < pool) {
+        int pick = -1;
+        for (int i = humans; i < count; i++) {
+            if (best[i] < 0) continue;
+            if (pick < 0 || best[i] < best[pick]) pick = i;
+        }
+        if (pick < 0) break;
+        want[want_n++] = pick;
+        best[pick] = -1;
+    }
+
+    /* A wanted racer without a voice takes one from a voiced racer that is NOT
+     * wanted. One steal per call bounds the worst case to a single zip read. */
+    for (int w = 0; w < want_n; w++) {
+        int racer = want[w];
+        if (td5_sound_racer_has_voice(racer)) continue;
+
+        int victim = -1;
+        for (int i = 0; i < count && victim < 0; i++) {
+            if (!td5_sound_racer_has_voice(i)) continue;
+            int wanted = 0;
+            for (int k = 0; k < want_n; k++) if (want[k] == i) { wanted = 1; break; }
+            if (!wanted) victim = i;
+        }
+        if (victim < 0) return;                  /* every voice is already wanted */
+
+        int same_car = td5_sound_voice_holds_car(victim, s_racer_car_zip[racer]);
+        td5_sound_release_racer_voice(victim);
+        if (s_racer_car_zip[racer][0]) {
+            td5_sound_load_vehicle_bank(s_racer_car_zip[racer], racer,
+                                        (racer < g_td5.num_human_players) ? 1 : 0);
+        }
+        TD5_LOG_I(LOG_TAG, "engine voice: racer %d -> racer %d%s",
+                  victim, racer, same_car ? " (same car, no reload)" : "");
+        return;                                  /* one steal per evaluation */
+    }
+}
+
 void td5_game_update_split_screen_balance(void)
 {
     int pos1, pos2;
@@ -10818,9 +10963,26 @@ void td5_game_update_split_screen_balance(void)
         return;
     }
 
-    /* Read normalized span (track position) from actor struct at +0x1E4 */
-    pos1 = *(int32_t *)((uint8_t *)a1 + 0x1E4);
-    pos2 = *(int32_t *)((uint8_t *)a2 + 0x1E4);
+    /* Track progress per player, as int16 at +0x084.
+     *
+     * [FIX 2026-07-29] This used to read an int32 at +0x1E4, which is
+     * `_pad_1E4[12]` -- RESERVED PADDING. It was wrong on i686 too, not just
+     * on x86_64, so the steering balance was driven by whatever happened to sit
+     * in that gap.
+     *
+     * The original (UpdatePlayerSteeringWeightBalance @ 0x004036b0) reads
+     * `(int)(short)` off two actors 0x388 apart -- i.e. the same field in two
+     * consecutive slots. Resolving Ghidra's mis-typed
+     * `g_raceParticlePoolBase[0x200]/[0x20e]` against the actor pool base
+     * (g_actorRuntimeState @ 0x004ab108) gives 0x004AB18C-0x004AB108 = +0x084
+     * and 0x40C == 0x388+0x84 -- so both reads are `track_span_accumulated`,
+     * 16-bit. Note the field is BELOW 0x1B0, so it never needed the x64 shift;
+     * the offset was simply wrong.
+     *
+     * Kept the port's g_actorSlotForView[] pane mapping rather than the
+     * original's hardcoded slots 0/1, so this follows the actual driven cars. */
+    pos1 = a1->track_span_accumulated;
+    pos2 = a2->track_span_accumulated;
 
     delta = abs(pos2 - pos1) * 2;
     if (delta > SPLIT_STEER_MAX_ADJUSTMENT)

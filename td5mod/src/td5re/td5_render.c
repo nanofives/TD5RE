@@ -414,12 +414,12 @@ const int s_vehicle_reflection_overlay_enabled = 0;
  * Forward Declarations (dispatch handlers)
  * ======================================================================== */
 
-static void dispatch_tristrip(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
-static void dispatch_projected_tri(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
-static void dispatch_projected_quad(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
-static void dispatch_billboard(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
-static void dispatch_tristrip_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
-static void dispatch_quad_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
+static void dispatch_tristrip(const TD5_PrimitiveCmdRT *cmd, TD5_MeshVertex *base_verts);
+static void dispatch_projected_tri(const TD5_PrimitiveCmdRT *cmd, TD5_MeshVertex *base_verts);
+static void dispatch_projected_quad(const TD5_PrimitiveCmdRT *cmd, TD5_MeshVertex *base_verts);
+static void dispatch_billboard(const TD5_PrimitiveCmdRT *cmd, TD5_MeshVertex *base_verts);
+static void dispatch_tristrip_direct(const TD5_PrimitiveCmdRT *cmd, TD5_MeshVertex *base_verts);
+static void dispatch_quad_direct(const TD5_PrimitiveCmdRT *cmd, TD5_MeshVertex *base_verts);
 
 /* Vehicle shadow + wheel billboard + brake light + reflection rendering */
 /* [P1-C SPLIT step 1, 2026-07-02] shadow/wheel/brake-light/headlight/marker
@@ -1557,12 +1557,12 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
  *   clip_and_submit_polygon; the four globals are eliminated. Same per-tri
  *   strip-of-triangles + per-quad-strip semantics.
  */
-static void dispatch_tristrip(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts)
+static void dispatch_tristrip(const TD5_PrimitiveCmdRT *cmd, TD5_MeshVertex *base_verts)
 {
     int tex_page = cmd->texture_page_id;
     int tri_count = cmd->triangle_count;
     int quad_count = cmd->quad_count;
-    TD5_MeshVertex *verts = (TD5_MeshVertex *)(uintptr_t)cmd->vertex_data_ptr;
+    TD5_MeshVertex *verts = cmd->vertices;
     if (!verts) verts = base_verts;
 
     /* Process triangles (3 verts each) */
@@ -1591,10 +1591,10 @@ static void dispatch_tristrip(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts)
  *   port passes (verts, 3, tex_page) explicitly into clip_and_submit_polygon.
  *   Same vertex source and texture-page semantics.
  */
-static void dispatch_projected_tri(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts)
+static void dispatch_projected_tri(const TD5_PrimitiveCmdRT *cmd, TD5_MeshVertex *base_verts)
 {
     int tex_page = cmd->texture_page_id;
-    TD5_MeshVertex *verts = (TD5_MeshVertex *)(uintptr_t)cmd->vertex_data_ptr;
+    TD5_MeshVertex *verts = cmd->vertices;
     if (!verts) verts = base_verts;
 
     clip_and_submit_polygon(verts, 3, tex_page);
@@ -1613,10 +1613,10 @@ static void dispatch_projected_tri(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_v
  *   eliminating the global-write step. Same vertex source, same vert count,
  *   same texture-page semantics.
  */
-static void dispatch_projected_quad(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts)
+static void dispatch_projected_quad(const TD5_PrimitiveCmdRT *cmd, TD5_MeshVertex *base_verts)
 {
     int tex_page = cmd->texture_page_id;
-    TD5_MeshVertex *verts = (TD5_MeshVertex *)(uintptr_t)cmd->vertex_data_ptr;
+    TD5_MeshVertex *verts = cmd->vertices;
     if (!verts) verts = base_verts;
 
     clip_and_submit_polygon(verts, 4, tex_page);
@@ -1629,14 +1629,14 @@ static void dispatch_projected_quad(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_
  * 4096-bucket depth sort array using inverse Z as key.
  * Triangles use stride 0x84, quads use stride 0xB0.
  */
-static void dispatch_billboard(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts)
+static void dispatch_billboard(const TD5_PrimitiveCmdRT *cmd, TD5_MeshVertex *base_verts)
 {
     (void)base_verts;
 
     int tri_count  = cmd->triangle_count;
     int quad_count = cmd->quad_count;
     int tex_page   = cmd->texture_page_id;
-    uint8_t *data  = (uint8_t *)(uintptr_t)cmd->vertex_data_ptr;
+    uint8_t *data  = (uint8_t *)cmd->vertices;
     if (!data) return;
 
     /* Insert quads (0x84 stride, type 3) into depth buckets */
@@ -1676,12 +1676,12 @@ static void dispatch_billboard(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts
  *   through clip_and_submit_polygon (immediate raster), bypassing depth-sort
  *   — caused z-order glitches in HUD overlays / lens flares.
  */
-static void dispatch_tristrip_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts)
+static void dispatch_tristrip_direct(const TD5_PrimitiveCmdRT *cmd, TD5_MeshVertex *base_verts)
 {
     int tex_page = cmd->texture_page_id;
     int tri_count = cmd->triangle_count;
     int quad_count = cmd->quad_count;
-    TD5_MeshVertex *verts = (TD5_MeshVertex *)(uintptr_t)cmd->vertex_data_ptr;
+    TD5_MeshVertex *verts = cmd->vertices;
     if (!verts) verts = base_verts;
 
     /* Iterate strip primitives, route each through depth-sort bucket queue */
@@ -1719,10 +1719,10 @@ static void dispatch_tristrip_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base
  *   back-to-front ordering for correct alpha blending). Prior port routed
  *   through clip_and_submit_polygon (immediate raster).
  */
-static void dispatch_quad_direct(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts)
+static void dispatch_quad_direct(const TD5_PrimitiveCmdRT *cmd, TD5_MeshVertex *base_verts)
 {
     int tex_page = cmd->texture_page_id;
-    TD5_MeshVertex *verts = (TD5_MeshVertex *)(uintptr_t)cmd->vertex_data_ptr;
+    TD5_MeshVertex *verts = cmd->vertices;
     if (!verts) verts = base_verts;
 
     float avg_z = (verts[0].view_z + verts[1].view_z + verts[2].view_z + verts[3].view_z) * 0.25f;

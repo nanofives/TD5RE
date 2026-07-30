@@ -240,7 +240,7 @@ static int s_horn_state[12];
  * Per-vehicle reverb flag (non-zero = use Reverb.wav instead of Rev.wav).
  * Original: g_vehicleSoundBankReverbModeByActor.
  */
-static int s_reverb_flag[6];
+static int s_reverb_flag[TD5_SOUND_MAX_RACE_VEHICLES];
 
 /** Index of actor using Reverb.wav. Original: g_reverbVehicleActorIndex. */
 static int s_reverb_actor_index;
@@ -263,7 +263,105 @@ static int32_t *s_active_listener_pos;
 static int32_t *s_active_listener_vel;
 
 /** Per-vehicle gear state (for horn volume table). Original: g_perSlotActiveLightZoneTexturePage. */
-static int s_gear_state[6];
+static int s_gear_state[TD5_SOUND_MAX_RACE_VEHICLES];
+
+/* ------------------------------------------------------------------------
+ * Engine VOICE POOL (PORT-ONLY)
+ *
+ * The mixer slot map is fixed (td5_sound.h): vehicles own slots 0..17, i.e.
+ * TD5_SOUND_MAX_RACE_VEHICLES (6) x TD5_SOUND_CHANNELS_PER_VEHICLE (3), with
+ * ambient starting immediately after at 18. The port raised
+ * TD5_MAX_RACER_SLOTS 6 -> 16 for N-way split, so a full field has more cars
+ * than the table has vehicle slots -- 16 x 3 = 48 would not merely overflow
+ * the vehicle range, it exceeds the entire 44-slot BASE table.
+ *
+ * So the 6 vehicle slots are a VOICE POOL, assigned to the most relevant
+ * racers rather than hardwired to racer 0..5. Racers without a voice are
+ * silent, which is what already happened to slots 6+ -- the difference is
+ * that now the NEAREST cars get the voices instead of always the lowest slot
+ * indices.
+ *
+ * s_voice_racer[v] = racer slot that voice v renders, or -1 if free.
+ * Assignment is IDENTITY while the field is <= 6, so every existing scenario
+ * behaves exactly as before -- that is what keeps the `sound` trace golden
+ * inert, and it means this cannot regress single-screen play.
+ * ------------------------------------------------------------------------ */
+static int  s_voice_racer[TD5_SOUND_MAX_RACE_VEHICLES];
+/* Car archive each voice currently holds, so a reassignment only pays for a
+ * WAV reload when the CAR actually differs. AI fields commonly reuse a few
+ * models, so most steals are free. */
+static char s_voice_zip[TD5_SOUND_MAX_RACE_VEHICLES][260];
+
+/* One-shot: has this race already done the "clear all audio state" pass?
+ * Replaces the old `vehicle_index == 0` test, which is no longer a safe proxy
+ * for "first load of the race" now that voices can be reassigned. */
+static int s_bank_race_cleared;
+
+/* Voice currently rendering `racer`, or -1. Small linear scan over 6. */
+static int voice_for_racer(int racer)
+{
+    if (racer < 0) return -1;
+    for (int v = 0; v < TD5_SOUND_MAX_RACE_VEHICLES; v++) {
+        if (s_voice_racer[v] == racer) return v;
+    }
+    return -1;
+}
+
+int td5_sound_racer_has_voice(int racer)
+{
+    return voice_for_racer(racer) >= 0;
+}
+
+/* Usable voices. TD5RE_ENGINE_VOICES caps the pool BELOW the hardware limit so
+ * the reassignment path is reachable in a stock 6-car race — otherwise it only
+ * runs in fields larger than the pool, which the normal race config cannot
+ * produce (humans+opponents tops out at 6, and the 16-racer branch needs zero
+ * humans, which DefaultPlayers cannot express). Default = full pool, so this is
+ * inert unless set. */
+int td5_sound_voice_pool_size(void)
+{
+    static int s_pool = -1;
+    if (s_pool < 0) {
+        s_pool = td5_env_int("TD5RE_ENGINE_VOICES",
+                             TD5_SOUND_MAX_RACE_VEHICLES,
+                             1, TD5_SOUND_MAX_RACE_VEHICLES);
+    }
+    return s_pool;
+}
+
+/* Release the voice serving `racer` so the pool can hand it to someone else.
+ * Silences its three channels first — otherwise a looping Drive.wav keeps
+ * playing under the next car until that car's bank overwrites the buffers. */
+void td5_sound_release_racer_voice(int racer)
+{
+    int voice = voice_for_racer(racer);
+    if (voice < 0) return;
+
+    int base_slot = voice * TD5_SOUND_CHANNELS_PER_VEHICLE;
+    for (int c = 0; c < TD5_SOUND_CHANNELS_PER_VEHICLE; c++) {
+        slot_stop(base_slot + c);
+    }
+    s_engine_state[voice * 2]        = ENGINE_STATE_STOPPED;
+    s_engine_state[voice * 2 + 1]    = ENGINE_STATE_STOPPED;
+    s_tracked_audio_state[voice * 2] = ENGINE_STATE_STOPPED;
+    s_horn_state[voice * 2]          = 0;
+    s_horn_state[voice * 2 + 1]      = 0;
+    s_gear_state[voice]              = 0;
+    s_reverb_flag[voice]             = 0;
+    s_voice_racer[voice]             = -1;
+    /* Keep s_voice_zip: it records which car's WAVs are still resident, so a
+     * later assignment of the SAME car can skip the reload entirely. */
+}
+
+/* Does the voice pool already hold this car's WAVs for `racer`? Lets the caller
+ * skip a mid-race zip read when swapping between same-model cars, which is the
+ * common case in an AI field. */
+int td5_sound_voice_holds_car(int racer, const char *car_zip)
+{
+    int voice = voice_for_racer(racer);
+    if (voice < 0 || !car_zip) return 0;
+    return strcmp(s_voice_zip[voice], car_zip) == 0;
+}
 
 /** Tracked vehicle (siren) state. */
 static int s_tracked_veh_active;       /* Original: DAT_004c37d0 (viewport 0) */
@@ -527,6 +625,15 @@ int td5_sound_init_race_resources(void)
     memset(s_gear_state, 0, sizeof(s_gear_state));
     memset(s_last_crash_seq, 0, sizeof(s_last_crash_seq));  /* [ITEM #12] crash-SFX edge */
 
+    /* [VOICE POOL] Free every voice and re-arm the one-shot state clear.
+     * Voices are claimed as banks load, so identity assignment falls out
+     * naturally for a <=6 field (racer i loads into voice i). */
+    for (int v = 0; v < TD5_SOUND_MAX_RACE_VEHICLES; v++) {
+        s_voice_racer[v] = -1;
+        s_voice_zip[v][0] = '\0';
+    }
+    s_bank_race_cleared = 0;
+
     s_reverb_actor_index    = 0;
     s_tracked_veh_active    = 0;
     s_tracked_veh_active_p2 = 0;
@@ -613,13 +720,17 @@ void td5_sound_release_race_channels(void)
  * LoadVehicleSoundBank (0x441A80).
  *
  * Loads the three per-vehicle WAVs (Drive.wav, Rev.wav/Reverb.wav, Horn.wav)
- * from the car's sound ZIP into consecutive slots [vehicle*3 .. vehicle*3+2].
+ * from the car's sound ZIP into the three slots owned by the engine VOICE this
+ * racer is assigned, i.e. [voice*3 .. voice*3+2].
  *
- * When vehicle_index == 0, all audio state arrays are zeroed (first vehicle
- * initialization clears the slate).
+ * On the first bank load of a race, all audio state arrays are zeroed. That is
+ * keyed off a one-shot flag, NOT off the index — voices are reassignable, so
+ * "index 0" no longer implies "first load".
  *
  * @param car_dir       Path to the car's ZIP archive containing WAVs.
- * @param vehicle_index Vehicle slot 0-5.
+ * @param vehicle_index RACER slot (0..TD5_MAX_RACER_SLOTS-1), not a mixer slot.
+ *                      Returns 0 without logging if the voice pool is full —
+ *                      that racer is simply silent.
  * @param is_reverb_vehicle Non-zero to load Reverb.wav instead of Rev.wav
  *                          (set for the local player's own vehicle).
  * @return 1 on success.
@@ -638,13 +749,47 @@ void td5_sound_release_race_channels(void)
 int td5_sound_load_vehicle_bank(const char *car_dir, int vehicle_index,
                                 int is_reverb_vehicle)
 {
-    if (vehicle_index < 0 || vehicle_index >= TD5_SOUND_MAX_RACE_VEHICLES) {
-        TD5_LOG_E(LOG_TAG, "vehicle_index %d out of range", vehicle_index);
+    /* [VOICE POOL] `vehicle_index` is a RACER slot (0..TD5_MAX_RACER_SLOTS-1),
+     * NOT a mixer slot. Resolve it to one of the 6 engine voices: reuse the
+     * voice already serving this racer, otherwise claim a free one.
+     *
+     * A field larger than the pool simply leaves the late racers voiceless —
+     * the same outcome as before, except td5_sound_assign_engine_voices() can
+     * now hand those voices to whichever cars are actually near the listener.
+     * Returning 0 here is a normal "no voice available", not an error, so it no
+     * longer logs one per race (that ERROR was what race-golden-split caught). */
+    if (vehicle_index < 0 || vehicle_index >= TD5_MAX_RACER_SLOTS) {
+        TD5_LOG_E(LOG_TAG, "racer index %d out of range", vehicle_index);
         return 0;
     }
+    int voice = voice_for_racer(vehicle_index);
+    if (voice < 0) {
+        /* Claim within the USABLE pool, not the hardware limit — otherwise a
+         * capped pool would still hand out every voice at init and the steal
+         * path would stay unreachable. */
+        int pool = td5_sound_voice_pool_size();
+        for (int v = 0; v < pool; v++) {
+            if (s_voice_racer[v] < 0) { voice = v; break; }
+        }
+    }
+    if (voice < 0) return 0;   /* pool full — this racer is silent for now */
+    s_voice_racer[voice] = vehicle_index;
+    if (car_dir) {
+        strncpy(s_voice_zip[voice], car_dir, sizeof(s_voice_zip[0]) - 1);
+        s_voice_zip[voice][sizeof(s_voice_zip[0]) - 1] = '\0';
+    } else {
+        s_voice_zip[voice][0] = '\0';
+    }
 
-    /* On first vehicle load, clear all audio state arrays */
-    if (vehicle_index == 0) {
+    /* On first vehicle load OF A RACE, clear all audio state arrays.
+     *
+     * [VOICE POOL] This used to key off `vehicle_index == 0`, which was fine
+     * only while voice 0 was loaded exactly once per race. Voices are now
+     * reassignable, so a mid-race steal into voice 0 would have wiped EVERY
+     * voice's engine/horn state and the tracked-vehicle fade -- silencing the
+     * whole field. Key it off a one-shot race flag instead. */
+    if (!s_bank_race_cleared) {
+        s_bank_race_cleared = 1;
         memset(s_engine_state, 0, sizeof(s_engine_state));
         memset(s_horn_state, 0, sizeof(s_horn_state));
         memset(s_traffic_engine_state, 0, sizeof(s_traffic_engine_state));
@@ -656,17 +801,17 @@ int td5_sound_load_vehicle_bank(const char *car_dir, int vehicle_index,
         s_tracked_veh_active      = 0;
     }
 
-    int base_slot = vehicle_index * TD5_SOUND_CHANNELS_PER_VEHICLE;
+    int base_slot = voice * TD5_SOUND_CHANNELS_PER_VEHICLE;
 
     /* Initialize per-vehicle state to "stopped" */
-    s_engine_state[vehicle_index * 2]     = ENGINE_STATE_STOPPED; /* P1 */
-    s_engine_state[vehicle_index * 2 + 1] = ENGINE_STATE_STOPPED; /* P2 */
-    s_tracked_audio_state[vehicle_index * 2] = ENGINE_STATE_STOPPED;
+    s_engine_state[voice * 2]     = ENGINE_STATE_STOPPED; /* P1 */
+    s_engine_state[voice * 2 + 1] = ENGINE_STATE_STOPPED; /* P2 */
+    s_tracked_audio_state[voice * 2] = ENGINE_STATE_STOPPED;
 
     /* Set reverb flag for this vehicle */
-    s_reverb_flag[vehicle_index] = is_reverb_vehicle;
+    s_reverb_flag[voice] = is_reverb_vehicle;
     if (is_reverb_vehicle) {
-        s_reverb_actor_index = vehicle_index;
+        s_reverb_actor_index = voice;
     }
 
     /* Load Drive.wav into slot base+0 (looping, 2 duplicates) */
@@ -849,7 +994,14 @@ void td5_sound_update_ambient(void)
  */
 void td5_sound_update_vehicle_looping_state(int actor_index)
 {
-    int base_slot = actor_index * 3;
+    /* [VOICE POOL] actor_index stays a RACER slot for the logical tests below
+     * (the cop comparison is racer identity, not a mixer slot), but every SLOT
+     * address has to come from the voice serving it. A racer with no voice has
+     * no channels to drive, so there is nothing to update. Identity holds for
+     * fields of <=6, which is why this is inert for existing scenarios. */
+    int voice = voice_for_racer(actor_index);
+    if (voice < 0) return;
+    int base_slot = voice * 3;
 
     /* Check if wanted mode is active and this is the cop */
     if (td5_game_is_wanted_mode() && actor_index == td5_game_get_cop_actor_index()) {
@@ -901,8 +1053,8 @@ void td5_sound_update_vehicle_looping_state(int actor_index)
      * owned loop is left alone. */
     if (!slot_has_voice(base_slot) &&
         !slot_has_voice(base_slot + 1)) {
-        s_engine_state[actor_index * 2] = ENGINE_STATE_STOPPED;
-        s_engine_state[actor_index * 2 + 1] = ENGINE_STATE_STOPPED;
+        s_engine_state[voice * 2] = ENGINE_STATE_STOPPED;
+        s_engine_state[voice * 2 + 1] = ENGINE_STATE_STOPPED;
     }
 }
 
@@ -1068,13 +1220,14 @@ int td5_sound_cop_siren_is_on(int slot)
  */
 void td5_sound_play_horn(int actor_index)
 {
-    if (actor_index < 0 || actor_index >= TD5_SOUND_MAX_RACE_VEHICLES) {
-        return;
-    }
-    s_horn_state[actor_index * 2]     = 1;  /* viewport pass 0 */
-    s_horn_state[actor_index * 2 + 1] = 1;  /* viewport pass 1 */
-    TD5_LOG_I(LOG_TAG, "horn honk: vehicle slot=%d (Horn.wav slot=%d)",
-              actor_index, actor_index * 3 + 2);
+    /* [VOICE POOL] actor_index is a RACER slot; the horn lives in the slots of
+     * whichever voice serves it. A voiceless racer honks silently. */
+    int voice = voice_for_racer(actor_index);
+    if (voice < 0) return;
+    s_horn_state[voice * 2]     = 1;  /* viewport pass 0 */
+    s_horn_state[voice * 2 + 1] = 1;  /* viewport pass 1 */
+    TD5_LOG_I(LOG_TAG, "horn honk: racer=%d voice=%d (Horn.wav slot=%d)",
+              actor_index, voice, voice * 3 + 2);
 }
 
 /* ========================================================================
@@ -1382,7 +1535,7 @@ void td5_sound_update_audio_mix(void)
                  * input is forced to max (0x7fff) BEFORE the /3 scale -- so the
                  * screech is loudest exactly when the tyre marks appear. Order
                  * matters: scf-override first, then the tumble-zero below. */
-                if (*((const uint8_t *)actor + 0x376) != 0) {
+                if (TD5_ACTOR_AT(actor)->surface_contact_flags != 0) {
                     slip_max = 0x7fff;
                 }
                 /* Tumbling (all wheels airborne, +0x37C == 0x0F) silences it. */
@@ -1460,7 +1613,7 @@ void td5_sound_update_audio_mix(void)
                  * stops the tracked siren channel (DXSound::Stop on the +0x14 slot)
                  * if it is playing and skips the play/modify. Active slots run the
                  * normal play-or-modify path. */
-                const uint8_t *id_tag = (const uint8_t *)actor + 0x371;
+                const uint8_t *id_tag = &TD5_ACTOR_AT(actor)->tire_track_emitter_FL;
                 int veh_dead = (id_tag[0] == 0xFF && id_tag[1] == 0xFF &&
                                 id_tag[2] == 0xFF && id_tag[3] == 0xFF);
                 /* Original plays slot 0x13 then Modify/Stops 0x14 — in its M2DX
@@ -2317,8 +2470,12 @@ void td5_sound_set_skid_intensity(int viewport, int intensity)
 
 void td5_sound_set_gear_state(int vehicle, int gear)
 {
-    if (vehicle < 0 || vehicle >= 6) return;
-    s_gear_state[vehicle] = gear;
+    /* [VOICE POOL] `vehicle` is a RACER slot; gear drives the engine/horn
+     * volume of the voice rendering it. The hardcoded 6 here was a latent trap:
+     * it silently dropped racers 6+ rather than mapping them. */
+    int voice = voice_for_racer(vehicle);
+    if (voice < 0) return;
+    s_gear_state[voice] = gear;
 }
 
 void td5_sound_set_race_end(int ended)

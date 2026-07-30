@@ -856,6 +856,27 @@ typedef struct TD5_MeshVertex {
     float    proj_u, proj_v;                /* secondary/projection UV */
 } TD5_MeshVertex;
 
+/* Runtime-only twin of TD5_PrimitiveCmd, carrying a REAL vertex pointer.
+ *
+ * [x64 Stage 3] TD5_PrimitiveCmd is a 16-byte on-disk PRR record, so its
+ * `vertex_data_ptr` is a uint32_t. At runtime the renderer resolves that field
+ * to an actual vertex address and used to stuff it BACK into the same 32-bit
+ * slot -- which truncates on x86_64 and faults the moment a handler
+ * dereferences it (observed in clip_and_submit_polygon, RAX = a low-4GB value
+ * with the 0x2C TD5_MeshVertex stride).
+ *
+ * Splitting the runtime form out keeps the disk record frozen while giving the
+ * dispatch handlers a pointer of the right width. The resolution logic in
+ * prepare_mesh is UNCHANGED -- this type only changes how the already-resolved
+ * pointer is carried across the call, so it is inert on i686. */
+typedef struct TD5_PrimitiveCmdRT {
+    int16_t          dispatch_type;
+    int16_t          texture_page_id;
+    uint16_t         triangle_count;
+    uint16_t         quad_count;
+    struct TD5_MeshVertex *vertices;   /* resolved; NULL => use base_verts */
+} TD5_PrimitiveCmdRT;
+
 /** Vertex normal (16 bytes) */
 typedef struct TD5_VertexNormal {
     float    nx, ny, nz;

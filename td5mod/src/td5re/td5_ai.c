@@ -4256,7 +4256,7 @@ int td5_ai_advance_track_script(int *rs) {
         rs[RS_SCRIPT_FIELD_3E] = 0;
         rs[RS_SCRIPT_FIELD_43] = 0;
         ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
-        ACTOR_I32(actor, 0x1C4) = 0; /* angular_velocity_yaw */
+        ACTOR_I32(actor, ACTOR_ANG_VEL_YAW) = 0;
         return 1;
     }
 
@@ -5749,9 +5749,9 @@ void td5_ai_update_track_behavior(int slot) {
               slot,
               ACTOR_I32(actor, ACTOR_YAW_ACCUM),
               ACTOR_I32(actor, ACTOR_STEERING_CMD),
-              ACTOR_I32(actor, 0x1FC),
-              ACTOR_I32(actor, 0x204),
-              ACTOR_I32(actor, 0x314),
+              ACTOR_I32(actor, offsetof(TD5_Actor, world_pos.x)),
+              ACTOR_I32(actor, offsetof(TD5_Actor, world_pos.z)),
+              ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED),
               rs[RS_LEFT_DEVIATION], rs[RS_RIGHT_DEVIATION]);
 
     /* No countdown pre-seed: the original at 0x00434FE0 has NO countdown
@@ -6927,11 +6927,11 @@ static void ai_update_single_racer(int slot) {
              * Port previously skipped these; the cluster is faithful to the
              * listing's unconditional path (both branches above fall through
              * to it via JMP 0x00436EE5). */
-            ACTOR_U8(actor, 0x371) = 0xff;
-            ACTOR_U8(actor, 0x372) = 0xff;
-            ACTOR_U8(actor, 0x373) = 0xff;
-            ACTOR_U8(actor, 0x374) = 0xff;
-            ACTOR_U8(actor, 0x376) = 0x00;
+            ACTOR_U8(actor, offsetof(TD5_Actor, tire_track_emitter_FL)) = 0xff;
+            ACTOR_U8(actor, offsetof(TD5_Actor, tire_track_emitter_FR)) = 0xff;
+            ACTOR_U8(actor, offsetof(TD5_Actor, tire_track_emitter_RL)) = 0xff;
+            ACTOR_U8(actor, offsetof(TD5_Actor, tire_track_emitter_RR)) = 0xff;
+            ACTOR_U8(actor, offsetof(TD5_Actor, surface_contact_flags)) = 0x00;
         }
         break;
     }

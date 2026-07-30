@@ -221,6 +221,9 @@ void td5_game_selftest_end_race(void);
 
 /* --- Split-Screen Steering Balance (0x4036B0) --- */
 void td5_game_update_split_screen_balance(void);
+/* Reassign the 6 engine voices toward local humans + the nearest racers.
+ * No-op unless the field exceeds the voice pool. */
+void td5_game_update_engine_voices(void);
 
 /* --- Wanted-mode / replay / traffic accessors (0x40A2B0 region) --- */
 int  td5_game_is_replay_active(void);

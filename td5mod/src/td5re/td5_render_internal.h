@@ -499,7 +499,7 @@ extern int s_actor_draw_alpha;
 #define TD6_CAR_ZFIX_PULL_VIEWZ   (3.0f)   /* toward-camera, view-z units        */
 #define ENVMAP_TEXTURE_PAGE_BASE 990
 #define ENVMAP_MAX_PAGES         4
-typedef void (*PrimDispatchFn)(TD5_PrimitiveCmd *cmd, TD5_MeshVertex *base_verts);
+typedef void (*PrimDispatchFn)(const TD5_PrimitiveCmdRT *cmd, TD5_MeshVertex *base_verts);
 extern const PrimDispatchFn s_dispatch_table[7];
 
 typedef struct {

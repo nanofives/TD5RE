@@ -104,8 +104,15 @@ enum {
 #define ACTOR_LONGITUDINAL_SPEED  offsetof(TD5_Actor, longitudinal_speed)      /* 0x314 */
 #define ACTOR_REAR_AXLE_SLIP      offsetof(TD5_Actor, rear_axle_slip_excess)   /* 0x320 */
 #define ACTOR_STEERING_RAMP_ACCUM offsetof(TD5_Actor, steering_ramp_accumulator) /* 0x33A */
+#define ACTOR_ANG_VEL_ROLL        offsetof(TD5_Actor, angular_velocity_roll)   /* 0x1C0 */
+#define ACTOR_ANG_VEL_YAW         offsetof(TD5_Actor, angular_velocity_yaw)    /* 0x1C4 */
+#define ACTOR_ANG_VEL_PITCH       offsetof(TD5_Actor, angular_velocity_pitch)  /* 0x1C8 */
 #define ACTOR_LIN_VEL_X           offsetof(TD5_Actor, linear_velocity_x)       /* 0x1CC */
+#define ACTOR_LIN_VEL_Y           offsetof(TD5_Actor, linear_velocity_y)       /* 0x1D0 */
 #define ACTOR_LIN_VEL_Z           offsetof(TD5_Actor, linear_velocity_z)       /* 0x1D4 */
+#define ACTOR_ROLL_ACCUM         (offsetof(TD5_Actor, euler_accum) + 0)        /* 0x1F0 */
+#define ACTOR_PITCH_ACCUM        (offsetof(TD5_Actor, euler_accum) + 8)        /* 0x1F8 */
+#define ACTOR_FRAME_COUNTER       offsetof(TD5_Actor, frame_counter)           /* 0x338 */
 #define ACTOR_WORLD_POS_X         offsetof(TD5_Actor, world_pos)               /* 0x1FC */
 #define ACTOR_WORLD_POS_Z        (offsetof(TD5_Actor, world_pos) + 8)          /* 0x204 */
 #define ACTOR_ENCOUNTER_STEER     offsetof(TD5_Actor, encounter_steering_cmd)  /* 0x33E */
@@ -151,9 +158,16 @@ _Static_assert(ACTOR_PROBE_FR_BASE       == 0x09C, "ACTOR_PROBE_FR_BASE drifted 
 _Static_assert(ACTOR_PROBE_RL_BASE       == 0x0A8, "ACTOR_PROBE_RL_BASE drifted from the original");
 _Static_assert(ACTOR_PROBE_RR_BASE       == 0x0B4, "ACTOR_PROBE_RR_BASE drifted from the original");
 _Static_assert(ACTOR_CAR_DEF_PTR         == 0x1B8, "ACTOR_CAR_DEF_PTR drifted from the original");
+_Static_assert(ACTOR_ANG_VEL_ROLL        == 0x1C0, "ACTOR_ANG_VEL_ROLL drifted from the original");
+_Static_assert(ACTOR_ANG_VEL_YAW         == 0x1C4, "ACTOR_ANG_VEL_YAW drifted from the original");
+_Static_assert(ACTOR_ANG_VEL_PITCH       == 0x1C8, "ACTOR_ANG_VEL_PITCH drifted from the original");
 _Static_assert(ACTOR_LIN_VEL_X           == 0x1CC, "ACTOR_LIN_VEL_X drifted from the original");
+_Static_assert(ACTOR_LIN_VEL_Y           == 0x1D0, "ACTOR_LIN_VEL_Y drifted from the original");
 _Static_assert(ACTOR_LIN_VEL_Z           == 0x1D4, "ACTOR_LIN_VEL_Z drifted from the original");
+_Static_assert(ACTOR_ROLL_ACCUM          == 0x1F0, "ACTOR_ROLL_ACCUM drifted from the original");
 _Static_assert(ACTOR_YAW_ACCUM           == 0x1F4, "ACTOR_YAW_ACCUM drifted from the original");
+_Static_assert(ACTOR_PITCH_ACCUM         == 0x1F8, "ACTOR_PITCH_ACCUM drifted from the original");
+_Static_assert(ACTOR_FRAME_COUNTER       == 0x338, "ACTOR_FRAME_COUNTER drifted from the original");
 _Static_assert(ACTOR_WORLD_POS_X         == 0x1FC, "ACTOR_WORLD_POS_X drifted from the original");
 _Static_assert(ACTOR_WORLD_POS_Z         == 0x204, "ACTOR_WORLD_POS_Z drifted from the original");
 _Static_assert(ACTOR_STEERING_CMD        == 0x30C, "ACTOR_STEERING_CMD drifted from the original");

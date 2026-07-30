@@ -1204,7 +1204,7 @@ void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
      * foot brake. The throttle+handbrake power-slide deviation clears brake_flag so
      * the drive path runs for the donut, which left the lights dark; the original
      * handbrake sets brake_flag=1 (lights on), so include handbrake_flag here. */
-    int braking = (*(ap + 0x36D) != 0 || *(ap + 0x36E) != 0);
+    int braking = (TD5_ACTOR_AT(ap)->brake_flag != 0 || TD5_ACTOR_AT(ap)->handbrake_flag != 0);
 
     /* Brightness ramp / decay */
     uint8_t bright = s_brake_brightness[slot];
@@ -1219,7 +1219,7 @@ void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
 
     /* Car definition pointer at actor+0x1B8 */
     void *car_def = NULL;
-    memcpy(&car_def, ap + 0x1B8, sizeof(void *));
+    memcpy(&car_def, &((const TD5_Actor *)ap)->car_definition_ptr, sizeof(void *));
     if (!car_def) return;
 
     const float *m = s_render_transform.m;
@@ -1495,7 +1495,7 @@ void render_vehicle_headlights(const TD5_Actor *actor, int slot)
 
     const uint8_t *ap = (const uint8_t *)actor;
     void *car_def = NULL;
-    memcpy(&car_def, ap + 0x1B8, sizeof(void *));
+    memcpy(&car_def, &((const TD5_Actor *)ap)->car_definition_ptr, sizeof(void *));
     if (!car_def) return;
 
     /* Rear lamp hardpoints (int16[3] model space); front = mirror of Z. */

@@ -944,7 +944,7 @@ void td5_input_poll_race_session(void)
                 }
                 if (actor) {
                     LoadCameraPresetForView(
-                        (uint8_t *)actor + 0x208, 0, cam_view, 1);
+                        (uint8_t *)&actor->display_angles, 0, cam_view, 1);
                 }
             }
             s_camera_cooldown[i] = TD5_INPUT_CAMERA_COOLDOWN;
@@ -1173,7 +1173,7 @@ post_poll:
                      * (Same transition rationale as the camera-button branch
                      * above.) */
                     LoadCameraPresetForView(
-                        (uint8_t *)actor + 0x208, 0, i, 1);
+                        (uint8_t *)&actor->display_angles, 0, i, 1);
                 }
             }
             s_camera_cooldown[i] = TD5_INPUT_CAMERA_COOLDOWN;
@@ -1233,10 +1233,10 @@ void td5_input_update_player_control(int slot)
         if (actor) {
             uint8_t *abytes = (uint8_t *)actor;
             /* +0x314 = longitudinal_speed (int32, signed 24.8 FP) */
-            int32_t raw_speed = *(int32_t *)(abytes + 0x314);
+            int32_t raw_speed = TD5_ACTOR_AT(abytes)->longitudinal_speed;
             speed = (raw_speed < 0 ? -raw_speed : raw_speed) >> 8;
             /* +0x31C = front_axle_slip_excess (int32), written by player physics each tick */
-            speed_sq = *(int32_t *)(abytes + 0x31C) >> 8;
+            speed_sq = TD5_ACTOR_AT(abytes)->front_axle_slip_excess >> 8;
             vehicle_stopped = (speed < 100) ? 1 : 0;
         }
         /* Per-slot encounter latch [CONFIRMED @ 0x00403180].
@@ -1294,16 +1294,16 @@ void td5_input_update_player_control(int slot)
         TD5_Actor *actor = td5_game_get_actor(slot);
         if (actor) {
             uint8_t *abytes = (uint8_t *)actor;
-            int32_t vx = (*(int32_t *)(abytes + 0x1cc)) >> 8;
-            int32_t vz = (*(int32_t *)(abytes + 0x1d4)) >> 8;
+            int32_t vx = (TD5_ACTOR_AT(abytes)->linear_velocity_x) >> 8;
+            int32_t vz = (TD5_ACTOR_AT(abytes)->linear_velocity_z) >> 8;
             int32_t motion_angle = AngleFromVector12((int)vx, (int)vz);
-            int32_t yaw_h = (*(int32_t *)(abytes + 0x1f4)) >> 8;
+            int32_t yaw_h = (TD5_ACTOR_AT(abytes)->euler_accum.yaw) >> 8;
             int32_t angle_diff = ((motion_angle - yaw_h) - 0x800) & 0xFFF;
             angle_diff -= 0x800;  /* signed 12-bit, -0x800..+0x7FF */
-            int32_t rear_slip = (*(int32_t *)(abytes + 0x31c)) >> 8;
+            int32_t rear_slip = (TD5_ACTOR_AT(abytes)->front_axle_slip_excess) >> 8;
             (void)rear_slip;  /* gate is on +0x320 in orig, not +0x31C */
-            int32_t rear_slip_x = (*(int32_t *)(abytes + 0x320));
-            int32_t speed_long  = (*(int32_t *)(abytes + 0x314));
+            int32_t rear_slip_x = (TD5_ACTOR_AT(abytes)->rear_axle_slip_excess);
+            int32_t speed_long  = (TD5_ACTOR_AT(abytes)->longitudinal_speed);
             int32_t abs_long = speed_long < 0 ? -speed_long : speed_long;
             if (rear_slip_x < 0x800) {
                 int64_t prod = (int64_t)abs_long * (int64_t)angle_diff;
@@ -1504,7 +1504,7 @@ void td5_input_update_player_control(int slot)
                 s_throttle[slot] = 0;
                 s_brake[slot] = 0;
                 s_reverse_req[slot] = 0;
-                if (a_actor) ((uint8_t *)a_actor)[0x36F] = 1;
+                if (a_actor) a_actor->throttle_state = 1;
             } else if (raw_y >= TD5_INPUT_ANALOG_Y_DEADZONE) {
                 /* Positive Y = brake/reverse, proportional to how far past the
                  * deadzone. The reverse latch mirrors the digital BRAKE path
@@ -1519,16 +1519,16 @@ void td5_input_update_player_control(int slot)
                 if (t > 0x100) t = 0x100;
                 if (a_actor) {
                     uint8_t *ab2 = (uint8_t *)a_actor;
-                    throttle_st  = ab2[0x36F];
-                    auto_gearbox = ab2[0x378];
-                    sflags       = ab2[0x376];
+                    throttle_st  = TD5_ACTOR_AT(ab2)->throttle_state;
+                    auto_gearbox = TD5_ACTOR_AT(ab2)->throttle_input_active;
+                    sflags       = TD5_ACTOR_AT(ab2)->surface_contact_flags;
                 }
                 if (auto_gearbox != 0 && throttle_st == 1 && speed < 10 && sflags == 0)
                     throttle_st = 0;                 /* -> reverse */
                 s_brake[slot]    = throttle_st;      /* 1=brake, 0=reverse (no brake light) */
                 s_throttle[slot] = (int16_t)(-t);    /* proportional negative = brake/reverse force */
                 s_reverse_req[slot] = 0;
-                if (a_actor) ((uint8_t *)a_actor)[0x36F] = throttle_st;
+                if (a_actor) a_actor->throttle_state = throttle_st;
             } else {
                 /* Negative Y = accelerate, proportional. Reset throttle_state to
                  * forward (mirror the digital no-brake branch). */
@@ -1538,7 +1538,7 @@ void td5_input_update_player_control(int slot)
                 s_throttle[slot] = (int16_t)t;     /* 0..0x100 forward (0x100 = full) */
                 s_brake[slot] = 0;
                 s_reverse_req[slot] = 0;
-                if (a_actor) ((uint8_t *)a_actor)[0x36F] = 1;
+                if (a_actor) a_actor->throttle_state = 1;
             }
         }
     } else {
@@ -1566,9 +1566,9 @@ void td5_input_update_player_control(int slot)
                 uint8_t sflags = 0;
                 if (a_actor) {
                     uint8_t *ab = (uint8_t *)a_actor;
-                    throttle_st = ab[0x36F];
-                    auto_gearbox = ab[0x378];
-                    sflags = ab[0x376];
+                    throttle_st = TD5_ACTOR_AT(ab)->throttle_state;
+                    auto_gearbox = TD5_ACTOR_AT(ab)->throttle_input_active;
+                    sflags = TD5_ACTOR_AT(ab)->surface_contact_flags;
                 }
 
                 /* Reverse transition [CONFIRMED @ 0x4032A0-0x4032BC]:
@@ -1589,7 +1589,7 @@ void td5_input_update_player_control(int slot)
 
                 /* Write throttle_state back immediately */
                 if (a_actor) {
-                    ((uint8_t *)a_actor)[0x36F] = throttle_st;
+                    a_actor->throttle_state = throttle_st;
                 }
             }
         } else {
@@ -1599,7 +1599,7 @@ void td5_input_update_player_control(int slot)
             {
                 TD5_Actor *a_actor = td5_game_get_actor(slot);
                 if (a_actor) {
-                    ((uint8_t *)a_actor)[0x36F] = 1;  /* reset to forward */
+                    a_actor->throttle_state = 1;  /* reset to forward */
                 }
             }
 
@@ -1710,7 +1710,7 @@ void td5_input_update_player_control(int slot)
         }
         s_reverse_req[slot] = 0;
         s_handbrake[slot]   = 0;
-        if (a_actor) ((uint8_t *)a_actor)[0x36F] = 1;  /* forward gear — never reverse */
+        if (a_actor) a_actor->throttle_state = 1;  /* forward gear — never reverse */
         TD5_LOG_I(LOG_TAG, "police_pullover: slot=%d speed=%d stop_thresh=%d brake=%d",
                   slot, speed, (int)(COP_STOP_SPEED >> 8), (int)s_brake[slot]);
     }
@@ -1790,10 +1790,10 @@ void td5_input_update_player_control(int slot)
              * the live actor so physics auto-gear updates are visible here. */
             {
                 TD5_Actor *a_gear = td5_game_get_actor(slot);
-                uint8_t max_gear = a_gear ? ((uint8_t *)a_gear)[0x36C] : 8u;
+                uint8_t max_gear = a_gear ? a_gear->max_gear_index : 8u;
                 if (max_gear == 0) max_gear = 8u;  /* guard: uninitialized actor */
                 /* Sync current gear from live actor [CONFIRMED @ 0x402E60] */
-                if (a_gear) s_gear[slot] = ((uint8_t *)a_gear)[0x36B];
+                if (a_gear) s_gear[slot] = a_gear->current_gear;
                 if (s_gear[slot] < (uint8_t)(max_gear - 1u)) {
                     s_gear[slot]++;
                     TD5_LOG_I(LOG_TAG, "gear up: slot=%d gear=%d max=%d",
@@ -1809,19 +1809,18 @@ void td5_input_update_player_control(int slot)
                         static const int32_t k_gear_shift_lut[8] = {
                             0, 0, 256, 192, 128, 64, 32, 16
                         };
-                        uint8_t *ab = (uint8_t *)a_gear;
-                        void *car_cfg = (void *)(uintptr_t)*(uint32_t *)(ab + 0x1BC);
+                        void *car_cfg = a_gear->tuning_data_ptr;
                         if (car_cfg) {
-                            int spd_val = *(int16_t *)(ab + 0x33E);
+                            int spd_val = a_gear->encounter_steering_cmd;
                             int rpm_s   = *(int16_t *)((uint8_t *)car_cfg + 0x68);
                             int g       = (int)(s_gear[slot] & 7u);
                             int v = spd_val * rpm_s * 26;
                             v = ((v + (v >> 31 & 0xFF)) >> 8) * k_gear_shift_lut[g];
                             v = (v + (v >> 31 & 0xFF)) >> 8;
-                            *(int32_t *)(ab + 0x2EC) += v;
-                            *(int32_t *)(ab + 0x2F0) += v;
-                            *(int32_t *)(ab + 0x2F4) -= v;
-                            *(int32_t *)(ab + 0x2F8) -= v;
+                            a_gear->wheel_spring_dv[0] += v;
+                            a_gear->wheel_spring_dv[1] += v;
+                            a_gear->wheel_spring_dv[2] -= v;
+                            a_gear->wheel_spring_dv[3] -= v;
                         }
 
                         /* Gear-2 auto-gearbox check [CONFIRMED @ FUN_00402E60]:
@@ -1834,14 +1833,14 @@ void td5_input_update_player_control(int slot)
                         if (s_gear[slot] == 2 && car_cfg) {
                             int t = *(int16_t *)((uint8_t *)car_cfg + 0x72) * 3;
                             if (((t + (t >> 31 & 3)) >> 2) <
-                                *(int32_t *)((uint8_t *)a_gear + 0x310))
+                                a_gear->engine_speed_accum)
                             {
-                                ((uint8_t *)a_gear)[0x376] =
+                                a_gear->surface_contact_flags =
                                     *((uint8_t *)car_cfg + 0x76);
                                 TD5_LOG_I(LOG_TAG,
                                     "gear2 autogear: slot=%d rpm=%d flag=0x%02X",
                                     slot,
-                                    *(int32_t *)((uint8_t *)a_gear + 0x310),
+                                    a_gear->engine_speed_accum,
                                     (unsigned)*((uint8_t *)car_cfg + 0x76));
                             }
                         }
@@ -1875,13 +1874,13 @@ void td5_input_update_player_control(int slot)
                             }
                             if (s_st_on) {
                                 int32_t redln = *(int16_t *)((uint8_t *)car_cfg + 0x72);
-                                int32_t rpm   = *(int32_t *)(ab + 0x310);
+                                int32_t rpm   = a_gear->engine_speed_accum;
                                 if (redln > 0) {
                                     int pct = (int)((int64_t)rpm * 100 / redln);
                                     if (pct >= s_st_red) {
                                         /* over-rev money shift: firm ~6% speed knock */
-                                        int32_t *spd = (int32_t *)(ab + 0x314);
-                                        *spd = (int32_t)((int64_t)*spd * 94 / 100);
+                                        a_gear->longitudinal_speed = (int32_t)
+                                            ((int64_t)a_gear->longitudinal_speed * 94 / 100);
                                         TD5_LOG_I(LOG_TAG,
                                             "shift-timing RED slot=%d pct=%d -> -6%% speed",
                                             slot, pct);
@@ -1892,7 +1891,7 @@ void td5_input_update_player_control(int slot)
                                         int32_t drop = redln * 12 / 100;
                                         int32_t bog  = rpm - drop;
                                         if (bog < floor_rpm) bog = floor_rpm;
-                                        *(int32_t *)(ab + 0x310) = bog;
+                                        a_gear->engine_speed_accum = bog;
                                         s_shift_penalty_ticks[slot] = TD5_SHIFT_EARLY_CUT_TICKS;
                                         TD5_LOG_I(LOG_TAG,
                                             "shift-timing EARLY slot=%d pct=%d -> bog rpm %d->%d + %d-tick cut",
@@ -1909,7 +1908,7 @@ void td5_input_update_player_control(int slot)
                     }
                     /* Write new gear back to actor so physics sees manual shift
                      * [CONFIRMED @ 0x402E60: original writes actor[0x36B]] */
-                    if (a_gear) ((uint8_t *)a_gear)[0x36B] = s_gear[slot];
+                    if (a_gear) a_gear->current_gear = s_gear[slot];
                 }
             }
             s_gear_debounce[slot] = TD5_INPUT_GEAR_DEBOUNCE;
@@ -1919,13 +1918,13 @@ void td5_input_update_player_control(int slot)
         if (bits & 0x800000u) {
             TD5_Actor *a_gdn = td5_game_get_actor(slot);
             /* Sync current gear from live actor before down-shift check */
-            if (a_gdn) s_gear[slot] = ((uint8_t *)a_gdn)[0x36B];
+            if (a_gdn) s_gear[slot] = a_gdn->current_gear;
             if (s_gear[slot] > 0) {
                 /* Downshift RPM protection would go here --
                  * checks if RPM would exceed redline.
                  * Deferred to physics module. */
                 s_gear[slot]--;
-                if (a_gdn) ((uint8_t *)a_gdn)[0x36B] = s_gear[slot];
+                if (a_gdn) a_gdn->current_gear = s_gear[slot];
             }
             s_gear_debounce[slot] = TD5_INPUT_GEAR_DEBOUNCE;
         }
@@ -2027,7 +2026,7 @@ void td5_input_update_player_control(int slot)
             }
 
             if (!(slot == 0 && g_td5.ini.player_is_ai)) {
-                *(int32_t *)(a + 0x30C) = s_steering_cmd[slot];
+                actor->steering_command = s_steering_cmd[slot];
             }
             /* [SHIFT TIMING 2026-07-23] Accel cut after a too-early manual
              * upshift: scale forward throttle down for the penalty window so
@@ -2040,20 +2039,19 @@ void td5_input_update_player_control(int slot)
                 }
                 s_shift_penalty_ticks[slot]--;
             }
-            /* 0x33E: encounter_steering_cmd (int16) — used as throttle by physics */
-            *(int16_t *)(a + 0x33E) = s_throttle[slot];
-            /* 0x36D: brake_flag (byte) */
-            a[0x36D] = s_brake[slot];
+            /* encounter_steering_cmd (int16) — used as throttle by physics */
+            actor->encounter_steering_cmd = s_throttle[slot];
+            actor->brake_flag = s_brake[slot];
             /* 0x36E: handbrake_flag (byte) — was missing; without it physics
              * never sees the Q-key handbrake input, so rear-wheel grip
              * reduction in td5_physics_update_player (tuning+0x7A) never
              * fires and no drift-induced tire marks appear. */
-            a[0x36E] = s_handbrake[slot];
+            actor->handbrake_flag = s_handbrake[slot];
             /* 0x378: auto gearbox flag [CONFIRMED @ original input path]
              * Original: actor+0x378 = ~(bits >> 28) & 1
              * bit 28 clear = normal driving → auto_gearbox = 1
              * bit 28 set   = stunned       → auto_gearbox = 0 */
-            a[0x378] = (uint8_t)((~(bits >> 28)) & 1);
+            actor->throttle_input_active = (uint8_t)((~(bits >> 28)) & 1);
         }
     }
 
@@ -2063,7 +2061,7 @@ void td5_input_update_player_control(int slot)
             uint8_t actor_hb = 0;
             {
                 TD5_Actor *a_dbg = td5_game_get_actor(0);
-                if (a_dbg) actor_hb = ((uint8_t *)a_dbg)[0x36E];
+                if (a_dbg) actor_hb = a_dbg->handbrake_flag;
             }
             TD5_LOG_I(LOG_TAG,
                       "Player control p0: steer=%d thr=%d brake=%u hb=%u actor_hb=%u bits=0x%08X",
@@ -3127,7 +3125,7 @@ void td5_input_ff_update_player(int player)
     int lateral_force = 0;
     if (g_actor_table_base) {
         uint8_t *actor = g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE;
-        lateral_force = *(int32_t *)(actor + 0x318); /* lat_speed */
+        lateral_force = TD5_ACTOR_AT(actor)->lateral_speed; /* lat_speed */
     }
 
     if (lateral_force < 0) {

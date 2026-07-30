@@ -1261,7 +1261,7 @@ static void geo_resolve_walls(TD5_Actor *actor)
          * front wall" bug); its lateral component is ~0 so it cancels here. A
          * genuine side rail is already lateral and survives unchanged. */
         {
-            int32_t yaw12 = FP_ANGLE((*(int32_t *)((uint8_t *)actor + 0x1F4)));
+            int32_t yaw12 = FP_ANGLE((TD5_ACTOR_AT(actor)->euler_accum.yaw));
             double th = (double)yaw12 * (2.0 * 3.14159265358979323846 / 4096.0);
             double fx = sin(th), fz = cos(th);        /* car forward (x,z) */
             double along = dx * fx + dz * fz;          /* longitudinal component */
@@ -3085,6 +3085,13 @@ static TD5_SpanDisplayList *build_span_strip_display_list(int span_index)
         cmds[lane].dispatch_type = TD5_DISPATCH_PROJECTED_QUAD;
         cmds[lane].texture_page_id = TRACK_FALLBACK_TEXTURE_PAGE;
         cmds[lane].quad_count = 1;
+        /* DELIBERATELY LEFT TRUNCATING -- do not "fix" this to 0 or widen it.
+         * vertex_data_ptr is the frozen 16-byte PRR disk record's 32-bit slot,
+         * and this heap pointer FAILS td5_track_is_ptr_in_blob() in
+         * prepare_mesh (strict blob-range check), so the command falls to the
+         * `continue;` branch and is SKIPPED -- on every arch, truncated or
+         * not. Storing 0 instead would flip it from skipped to rendered
+         * (0 == "sequential cursor") and move the render goldens. */
         cmds[lane].vertex_data_ptr = (uint32_t)(uintptr_t)&verts[base];
     }
 
@@ -4936,8 +4943,8 @@ void td5_track_update_actor_position(TD5_Actor *actor)
     track_state = (int16_t *)((uint8_t *)actor + 0x80);
 
     /* World position in 24.8 fixed-point */
-    pos_x = *(int32_t *)((uint8_t *)actor + 0x1FC); /* world_pos.x */
-    pos_z = *(int32_t *)((uint8_t *)actor + 0x204); /* world_pos.z */
+    pos_x = TD5_ACTOR_AT(actor)->world_pos.x; /* world_pos.x */
+    pos_z = TD5_ACTOR_AT(actor)->world_pos.z; /* world_pos.z */
 
     /* Chassis walker: single-pass per call (single_step=1) — matches original
      * 0x004440F0 which has NO outer loop, every case returns immediately.
@@ -6033,7 +6040,7 @@ void td5_track_compute_heading(TD5_Actor *actor)
          * `AngleFromVector12(slot, slot)` instead of the previous
          * `dx=0, dz=1` port-only fabrication.
          * [CONFIRMED @ 0x0043448C-94 disassembly in pilot pool14 session.] */
-        int slot_id = (int)((const uint8_t *)actor)[0x375];
+        int slot_id = (int)TD5_ACTOR_AT(actor)->slot_index;
         dx = (int32_t)slot_id;
         dz = (int32_t)slot_id;
         break;
@@ -6059,13 +6066,13 @@ void td5_track_compute_heading(TD5_Actor *actor)
               (angle + 0x800) & 0xFFF);
 
     /* Write heading to actor's heading_normal at +0x290 (as int16[3]) */
-    heading_normal = (int16_t *)((uint8_t *)actor + 0x290);
+    heading_normal = (int16_t *)&actor->heading_normal;
     heading_normal[0] = (int16_t)dx;
     heading_normal[1] = 0;
     heading_normal[2] = (int16_t)dz;
 
     /* Store yaw to euler accumulator at +0x1F4. [CONFIRMED @ 0x00434501] */
-    *(int32_t *)((uint8_t *)actor + 0x1F4) = FP_SCALE((angle + 0x800));
+    actor->euler_accum.yaw = FP_SCALE((angle + 0x800));
 }
 
 /* ========================================================================
@@ -6185,7 +6192,7 @@ void td5_track_compute_runtime_heading_normal(TD5_Actor *actor)
         return;
 
     track_state = (int16_t *)((uint8_t *)actor + 0x80);
-    out_normal  = (int16_t *)((uint8_t *)actor + 0x290);
+    out_normal  = (int16_t *)&actor->heading_normal;
 
     /* [00445b94..00445b9b]
      *   EDX = MOVSX word[ESI]          ; span_idx (signed 16 → 32)
@@ -6238,8 +6245,8 @@ void td5_track_compute_runtime_heading_normal(TD5_Actor *actor)
      *   ESI = (world_x >> 8) - origin_x   ; local_x
      *   EDI = (world_z >> 8) - origin_z   ; local_z
      */
-    world_x = *(int32_t *)((uint8_t *)actor + 0x1FC);
-    world_z = *(int32_t *)((uint8_t *)actor + 0x204);
+    world_x = TD5_ACTOR_AT(actor)->world_pos.x;
+    world_z = TD5_ACTOR_AT(actor)->world_pos.z;
     local_x = (FP_TRUNC(world_x)) - sp->origin_x;
     local_z = (FP_TRUNC(world_z)) - sp->origin_z;
 

@@ -755,6 +755,22 @@ _Static_assert(offsetof(TD5_Actor, display_angles) - offsetof(TD5_Actor, world_p
 _Static_assert(offsetof(TD5_Actor, race_position) + 1 == sizeof(TD5_Actor) - 4,
                "race_position must stay in the actor's trailing byte block");
 
+/* Read an actor field through a byte-pointer or uintptr_t base.
+ *
+ * [x64 Stage 3] Several modules carry the actor as `uint8_t *` or `uintptr_t`
+ * and used to reach fields with hardcoded hex offsets. Those are correct on
+ * i686 and SILENTLY WRONG on x86_64: the four void* at +0x1B0 widen from 16 to
+ * 32 bytes, so every field at or above 0x1B0 shifts by +0x10. The compiler
+ * cannot catch it -- the arithmetic is valid C either way.
+ *
+ * This accessor keeps those call sites readable while making the offset come
+ * from the struct, so it is right on both arches by construction. The
+ * uintptr_t hop lets one macro serve both base flavours. Read-only on purpose:
+ * mutations should go through a properly typed TD5_Actor *.
+ */
+#define TD5_ACTOR_AT(base) \
+    ((const TD5_Actor *)(const void *)(uintptr_t)(base))
+
 /* ======================================================================
  * Race Slot State Table
  *

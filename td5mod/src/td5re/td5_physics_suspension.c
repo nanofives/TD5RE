@@ -830,9 +830,9 @@ void td5_physics_update_suspension_response(TD5_Actor *actor)
     int32_t cnt_active   = 0;   /* local_4c — non-locked wheels */
     int32_t cnt_grounded = 0;   /* local_58 — wheels also grounded prev tick */
 
-    const int16_t *arms = (const int16_t *)((const uint8_t *)actor + 0x210);
-    const int16_t *wcv  = (const int16_t *)((const uint8_t *)actor + 0x250);
-    const int16_t *wfdh = (const int16_t *)((const uint8_t *)actor + 0x270);
+    const int16_t *arms = (const int16_t *)&actor->wheel_display_angles[0][0];
+    const int16_t *wcv  = (const int16_t *)&actor->wheel_contact_velocities[0][0];
+    const int16_t *wfdh = (const int16_t *)(const void *)&actor->wheel_contact_delta[0];
 
     for (int i = 0; i < 4; i++) {
         const uint8_t bit = (uint8_t)(1u << i);
@@ -1108,7 +1108,7 @@ static uint32_t traffic_route_heading_delta(int slot)
     int16_t span_normalized = *(int16_t *)(ref_actor + 0x082);  /* track_span_normalized */
     if (span_normalized < 0) span_normalized = 0;
     uint8_t route_angle = route_table[(int)span_normalized * 3 + 1];
-    int32_t yaw_accum   = *(int32_t *)(ref_actor + 0x1F4);      /* euler_accum.yaw */
+    int32_t yaw_accum   = ((const TD5_Actor *)ref_actor)->euler_accum.yaw;
 
     /* Formula from 0x434040:
      *   -(( ((yaw>>8) - route_angle*0x102C/0x100) - 0x800) & 0xFFF) - 0x800) & 0xFFF */
@@ -2572,7 +2572,7 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
             /* Write to wheel_contact_normals[i] at +0x230 + i*8 (4-short
              * stride, 4th short is padding / unused in the original). */
             {
-                int16_t *wcn = (int16_t *)((uint8_t *)actor + 0x230 + i * 8);
+                int16_t *wcn = (int16_t *)&actor->wheel_contact_normals[i][0];
                 wcn[0] = rot_v3[0];
                 wcn[1] = rot_v3[1];
                 wcn[2] = rot_v3[2];
@@ -2663,7 +2663,7 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                 static int s_wg_div = 0;
                 if ((s_wg_div++ % 15) == 0) {
                     uint8_t *ab = (uint8_t *)actor;
-                    float wpy = (float)(*(int32_t *)(ab + 0x200)) / 256.0f;
+                    float wpy = (float)actor->world_pos.y / 256.0f;
                     /* body->world Y uses ROW 1 of the rotation matrix
                      * (m[3],m[4],m[5] @ +0x12C/+0x130/+0x134) — matching the
                      * actual wheel render (mat3x4 out[1]) and orig
@@ -2675,9 +2675,9 @@ void td5_physics_integrate_pose(TD5_Actor *actor)
                     float m5f = *(float *)(ab + 0x134);
                     int g[4];
                     for (int wq = 0; wq < 4; wq++) {
-                        int16_t wxx = *(int16_t *)(ab + 0x210 + wq*8 + 0);
-                        int16_t wyy = *(int16_t *)(ab + 0x210 + wq*8 + 2);
-                        int16_t wzz = *(int16_t *)(ab + 0x210 + wq*8 + 4);
+                        int16_t wxx = actor->wheel_display_angles[wq][0];
+                        int16_t wyy = actor->wheel_display_angles[wq][1];
+                        int16_t wzz = actor->wheel_display_angles[wq][2];
                         float roty = m3f*(float)wxx + m4f*(float)wyy + m5f*(float)wzz;
                         float ry   = wpy + roty;
                         float gy   = (float)(*(int32_t *)(ab + 0xF0 + wq*12 + 4)) / 256.0f;
@@ -3630,7 +3630,7 @@ void td5_physics_refresh_wheel_contacts(TD5_Actor *actor)
          * starts producing phantom impulses again, the gate's history is in
          * git (search for "countdown guard" in `td5_physics.c`). */
         {
-            int16_t *g270 = (int16_t *)((uint8_t *)actor + 0x270 + i * 8);
+            int16_t *g270 = (int16_t *)(void *)&actor->wheel_contact_delta[i * 8];
             if (s_prev_wheel_valid[slot]) {
                 int32_t dx = actor->wheel_contact_pos[i].x - s_prev_wheel_tx[slot][i];
                 int32_t dy = actor->wheel_contact_pos[i].y - s_prev_wheel_ty[slot][i];
