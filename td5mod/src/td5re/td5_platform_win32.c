@@ -3161,7 +3161,7 @@ void td5_plat_render_begin_scene(void)
     if (g_backend.device_removed) return;
     int vp_w, vp_h;
 
-    if (!g_backend.device || !g_backend.context) return;
+    if (!Backend_HasDevice() || !Backend_HasContext()) return;
 
     vp_w = (int)((g_backend.backbuffer && g_backend.backbuffer->width)
         ? g_backend.backbuffer->width
@@ -3257,7 +3257,7 @@ static BackendPixelShader *fx_ensure_shader(TD5_FxShader which)
      * pointing at the freed device — the next in-race particle/glow draw would
      * bind dead-device objects. Drop them on a generation change and reset the
      * per-shader "tried" flags so they recreate on demand. */
-    if (g_backend.device && s_fx_gen != g_backend.device_generation) {
+    if (Backend_HasDevice() && s_fx_gen != g_backend.device_generation) {
         int k;
         for (k = 0; k < 4; k++) {
             Backend_ReleasePixelShader(s_fx_ps[k]); s_fx_ps[k] = NULL;
@@ -3271,7 +3271,7 @@ static BackendPixelShader *fx_ensure_shader(TD5_FxShader which)
     if (s_fx_tried[i]) return NULL;   /* already failed once — don't retry every frame */
     s_fx_tried[i] = 1;
 
-    if (!g_backend.device) return NULL;
+    if (!Backend_HasDevice()) return NULL;
 
     const BYTE *code = NULL;
     SIZE_T      size = 0;
@@ -3306,7 +3306,7 @@ static BackendPixelShader *fx_ensure_shader(TD5_FxShader which)
 
 int td5_plat_fx_begin(TD5_FxShader which, float time_seconds, float p0)
 {
-    if (!g_backend.context) return 0;
+    if (!Backend_HasContext()) return 0;
 
     BackendPixelShader *ps = fx_ensure_shader(which);
     if (!ps || !s_fx_cb) return 0;
@@ -4007,7 +4007,7 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
 
     if (page_index < 0 || page_index >= MAX_TEXTURE_PAGES) return 0;
     if (!pixels || width <= 0 || height <= 0) return 0;
-    if (!g_backend.device) return 0;
+    if (!Backend_HasDevice()) return 0;
 
     /* Determine bpp from format: 0 = R5G6B5 (16-bit), 1 = A1R5G5B5 (16-bit),
      * 2 = A8R8G8B8 (32-bit) */
@@ -4223,7 +4223,7 @@ void td5_plat_render_clear(uint32_t color)
     if (g_backend.device_removed) return;
     float rgba[4];
 
-    if (!g_backend.context) return;
+    if (!Backend_HasContext()) return;
 
     /* Extract ARGB components to float RGBA */
     td5_argb_to_rgb_f(rgba, color);

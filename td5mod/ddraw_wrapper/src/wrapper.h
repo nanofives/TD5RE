@@ -214,6 +214,11 @@ void Backend_PlatBindTextureSRV(WrapperRecCtx *rc, void *srv);
  * NULL on failure). */
 int  Backend_SwapChainReady(void);
 int  Backend_HasSwapChain(void);
+/* Backend-agnostic readiness checks so the shared/game files don't null-check
+ * the D3D11-typed g_backend.device/context directly (lets a D3D12 backend report
+ * its own readiness). */
+int  Backend_HasDevice(void);
+int  Backend_HasContext(void);
 void Backend_BindSwapChainRT(void);
 void Backend_ClearSwapChainRT(const float *rgba);
 void Backend_UnbindRenderTargets(void);

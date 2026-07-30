@@ -206,6 +206,16 @@ int Backend_HasSwapChain(void)
     return g_backend.swap_chain != NULL;
 }
 
+int Backend_HasDevice(void)
+{
+    return g_backend.device != NULL;
+}
+
+int Backend_HasContext(void)
+{
+    return g_backend.context != NULL;
+}
+
 void Backend_BindSwapChainRT(void)
 {
     if (g_backend.context && g_backend.swap_rtv)

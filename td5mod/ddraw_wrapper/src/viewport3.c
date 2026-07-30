@@ -197,7 +197,7 @@ static HRESULT STDMETHODCALLTYPE Viewport_SetViewport2(WrapperViewport *self, D3
      * old 640x480 internal resolution but our RT is at native res, override
      * the viewport to cover the full RT. This happens because M2DX stores
      * its own resolution internally and the game reads from there. */
-    if (g_backend.context) {
+    if (Backend_HasContext()) {
         FLOAT vx = (FLOAT)vp->dwX,     vy = (FLOAT)vp->dwY;
         FLOAT vw = (FLOAT)vp->dwWidth, vh = (FLOAT)vp->dwHeight;
         FLOAT minz = vp->dvMinZ,       maxz = vp->dvMaxZ;
@@ -243,7 +243,7 @@ static HRESULT STDMETHODCALLTYPE Viewport_Clear2(WrapperViewport *self, DWORD co
     WRAPPER_LOG("Viewport::Clear2: count=%lu flags=0x%08lX color=0x%08lX z=%.3f stencil=%lu",
                 count, flags, color, z, stencil);
 
-    if (!g_backend.context) {
+    if (!Backend_HasContext()) {
         WRAPPER_LOG("Viewport::Clear2: no device context!");
         return DDERR_GENERIC;
     }

@@ -8817,7 +8817,7 @@ static int fe_draw_roundrect(float x, float y, float w, float h,
                              float border_side, float border_topbot,
                              uint32_t mid_argb, uint32_t inner_argb, uint32_t outer_argb,
                              uint32_t fill_argb, float fill_alpha) {
-    if (!s_ps_roundrect || !s_rr_cb || !g_backend.context) return 0;
+    if (!s_ps_roundrect || !s_rr_cb || !Backend_HasContext()) return 0;
     FE_RoundRectParams rp;
     float rmax = 0.5f * (w < h ? w : h);
     if (r_large > rmax) r_large = rmax;
@@ -8847,7 +8847,7 @@ static int fe_draw_roundrect(float x, float y, float w, float h,
  * the b1 constant buffer. Returns 0 if unavailable (caller falls back). */
 int fe_draw_arrow_proc(float x, float y, float w, float h,
                               int dir_right, uint32_t color) {
-    if (!s_ps_arrow || !s_rr_cb || !g_backend.context) return 0;
+    if (!s_ps_arrow || !s_rr_cb || !Backend_HasContext()) return 0;
     FE_RoundRectParams rp;
     memset(&rp, 0, sizeof(rp));
     rp.size_px[0] = w;  rp.size_px[1] = h;
@@ -9187,7 +9187,7 @@ void td5_vui_gauge(const TD5_VuiGauge *g) {
      * falls through to the early-out. Cheap: one generation compare in steady
      * state. */
     frontend_ensure_vui_shaders();
-    if (!g || !s_ps_gauge || !s_gauge_cb || !g_backend.context) return;
+    if (!g || !s_ps_gauge || !s_gauge_cb || !Backend_HasContext()) return;
 
     const float DEG2RAD = 3.14159265358979323846f / 180.0f;
     const float m   = g->radius * 0.06f + 2.0f; /* AA margin + rim headroom (px) */

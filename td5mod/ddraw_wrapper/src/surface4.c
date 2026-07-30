@@ -464,7 +464,7 @@ static HRESULT __stdcall Surface4_Blt(WrapperSurface *self, RECT *dst,
     /* Source blit */
     if (src) {
         /* Present path: Blt to primary surface. */
-        if (self == g_backend.primary && g_backend.device) {
+        if (self == g_backend.primary && Backend_HasDevice()) {
             Backend_CompositeAndPresent(src, srcRect, dst);
             return DD_OK;
         }
@@ -679,7 +679,7 @@ static HRESULT __stdcall Surface4_Flip(WrapperSurface *self, WrapperSurface *tar
 {
     WRAPPER_LOG("Surface4_Flip: self=%p target=%p flags=0x%08x", self, target, flags);
 
-    if (!g_backend.device)
+    if (!Backend_HasDevice())
         return DDERR_GENERIC;
     /* [DEVICE-LOST] Skip present on a removed device (see Backend_NoteDeviceRemoved). */
     if (g_backend.device_removed)
@@ -1328,7 +1328,7 @@ void WrapperSurface_FlushDirty(WrapperSurface *s)
 void WrapperSurface_EnsureDeviceCurrent(WrapperSurface *s)
 {
     if (!s) return;
-    if (!g_backend.device) return;
+    if (!Backend_HasDevice()) return;
     if (s->device_generation == g_backend.device_generation) return;
 
     /* Only surfaces that had GPU backing get it back. Z-buffers (backend depth)
@@ -1435,7 +1435,7 @@ WrapperSurface* WrapperSurface_Create(DWORD width, DWORD height, DWORD bpp, DWOR
     }
 
     /* Create GPU backing if we have a device and this is a vidmem surface */
-    if (g_backend.device && !(caps & DDSCAPS_SYSTEMMEMORY)) {
+    if (Backend_HasDevice() && !(caps & DDSCAPS_SYSTEMMEMORY)) {
         DXGI_FORMAT fmt = WrapperSurface_GetDXGIFormat(bpp, s->pixel_format.dwFlags, &s->pixel_format);
         s->dxgi_format = fmt;
 

@@ -406,7 +406,7 @@ BackendTexture *PngOverride_LoadToTexture(const char *path)
     BackendTexture *bt;
     uint32_t path_crc;
 
-    if (!g_backend.device) return NULL;
+    if (!Backend_HasDevice()) return NULL;
 
     /* Check cache first (use path CRC as key since same CRC = same texture) */
     path_crc = compute_crc32(path, strlen(path));

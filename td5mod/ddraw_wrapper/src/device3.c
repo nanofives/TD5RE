@@ -228,7 +228,7 @@ static int s_frame_fan_verts = 0;  /* total verts in fan draws */
 static HRESULT __stdcall Dev3_BeginScene(WrapperDevice *self)
 {
     (void)self;
-    if (!g_backend.device) return DDERR_GENERIC;
+    if (!Backend_HasDevice()) return DDERR_GENERIC;
 
     /* Log previous frame's draw stats (skip hardcoded address reads in standalone) */
     if (!g_backend.standalone && s_frame_num > 0 && s_frame_num <= 50) {
@@ -406,7 +406,7 @@ static HRESULT __stdcall Dev3_SetRenderState(WrapperDevice *self, DWORD type, DW
     RenderStateCache *s = &g_backend.state;
     (void)self;
 
-    if (!g_backend.device) return DDERR_GENERIC;
+    if (!Backend_HasDevice()) return DDERR_GENERIC;
 
     switch (type) {
 
@@ -548,7 +548,7 @@ static HRESULT __stdcall Dev3_DrawPrimitive(WrapperDevice *self,
     UINT base_vertex = 0;
     (void)self; (void)fvf; (void)flags;
 
-    if (!g_backend.context || !verts || vert_count == 0)
+    if (!Backend_HasContext() || !verts || vert_count == 0)
         return DDERR_GENERIC;
 
     /* Scale pre-transformed vertex X/Y from game space to native RT space */
@@ -596,7 +596,7 @@ static HRESULT __stdcall Dev3_DrawIndexedPrimitive(WrapperDevice *self,
     UINT base_vertex = 0, start_index = 0;
     (void)self; (void)fvf; (void)flags;
 
-    if (!g_backend.context || !verts || !indices || vert_count == 0 || index_count == 0)
+    if (!Backend_HasContext() || !verts || !indices || vert_count == 0 || index_count == 0)
         return DDERR_GENERIC;
 
     /* Scale pre-transformed vertex X/Y */
@@ -676,7 +676,7 @@ static int s_settex_log = 0;
 static HRESULT __stdcall Dev3_SetTexture(WrapperDevice *self, DWORD stage, WrapperTexture *tex)
 {
     (void)self;
-    if (!g_backend.context) return DDERR_GENERIC;
+    if (!Backend_HasContext()) return DDERR_GENERIC;
 
     s_frame_settex++;
     if (s_settex_log < 20)
@@ -758,7 +758,7 @@ static HRESULT __stdcall Dev3_SetTextureStageState(WrapperDevice *self,
     DWORD stage, DWORD type, DWORD value)
 {
     (void)self; (void)stage;
-    if (!g_backend.device) return DDERR_GENERIC;
+    if (!Backend_HasDevice()) return DDERR_GENERIC;
 
     switch (type) {
     case D3DTSS6_MAGFILTER:

@@ -226,7 +226,7 @@ static int frontend_validate_cup_checksum(void) {
 void frontend_ensure_vui_shaders(void) {
     static unsigned s_fe_vui_gen = 0;   /* device generation the shaders were built for (0 = none yet) */
 
-    if (!g_td5.ini.vector_ui || !g_backend.device) return;
+    if (!g_td5.ini.vector_ui || !Backend_HasDevice()) return;
 
     if (s_fe_vui_gen != g_backend.device_generation) {
         int had = (s_ps_msdf || s_ps_roundrect || s_ps_arrow || s_ps_cursor ||
@@ -342,7 +342,7 @@ int td5_frontend_init_resources(void) {
 
     /* SDF texture atlases below are page-registry textures — device-lost recovery
      * rebuilds them from sys_buffer, so they only load once here. */
-    if (g_td5.ini.vector_ui && g_backend.device) {
+    if (g_td5.ini.vector_ui && Backend_HasDevice()) {
         if (s_ps_cursor && s_cursor_msdf_page < 0) {
             void *pixels = NULL;
             int mw = 0, mh = 0;
