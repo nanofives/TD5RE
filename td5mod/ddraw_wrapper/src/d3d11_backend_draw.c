@@ -194,6 +194,38 @@ void *Backend_PixelShaderRaw(BackendPixelShader *h)
     return h ? (void*)h->ps : NULL;
 }
 
+/* ---- platform viewport/scissor/texture-bind (see wrapper.h) ----------- */
+
+void Backend_PlatSetViewport(WrapperRecCtx *rc, int x, int y, int w, int h)
+{
+    ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
+    D3D11_VIEWPORT vp;
+    if (!ctx) return;
+    vp.TopLeftX = (FLOAT)x; vp.TopLeftY = (FLOAT)y;
+    vp.Width = (FLOAT)w; vp.Height = (FLOAT)h;
+    vp.MinDepth = 0.0f; vp.MaxDepth = 1.0f;
+    ID3D11DeviceContext_RSSetViewports(ctx, 1, &vp);
+}
+
+void Backend_PlatSetScissor(WrapperRecCtx *rc, int left, int top, int right, int bottom)
+{
+    ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
+    D3D11_RECT sc;
+    if (!ctx) return;
+    sc.left = left; sc.top = top; sc.right = right; sc.bottom = bottom;
+    ID3D11DeviceContext_RSSetScissorRects(ctx, 1, &sc);
+}
+
+void Backend_PlatBindTextureSRV(WrapperRecCtx *rc, void *srv_raw)
+{
+    ID3D11ShaderResourceView *srv = (ID3D11ShaderResourceView *)srv_raw;
+    ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
+    if (rc) rc->current_srv = srv; else g_backend.current_srv = srv;
+    if (ctx)
+        ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &srv);   /* srv may be NULL */
+    if (rc) rc->state.dirty = 1; else g_backend.state.dirty = 1;
+}
+
 /* ---- platform-renderer draw entry points (see wrapper.h) -------------- */
 
 void Backend_PlatDrawTris(WrapperRecCtx *rc, const void *verts, int vert_count,

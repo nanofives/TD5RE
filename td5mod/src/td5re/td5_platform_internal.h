@@ -94,8 +94,7 @@ extern WrapperSurface *s_tex_surfaces[MAX_TEXTURE_PAGES];
  * Declared via the struct tag rather than the d3d11.h typedef so the modules
  * that include this header WITHOUT d3d11.h (fs / log / audio) still compile;
  * the tag is the same type d3d11.h typedefs, so the .c definitions match. */
-struct ID3D11ShaderResourceView;
-extern struct ID3D11ShaderResourceView *s_tex_srvs[MAX_TEXTURE_PAGES];
+extern void *s_tex_srvs[MAX_TEXTURE_PAGES];   /* opaque raw backend SRV (transitional) */
 extern int               s_frame_draw_calls;
 extern int               s_frame_vertices;
 extern int               s_frame_indices;

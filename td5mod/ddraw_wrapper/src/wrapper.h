@@ -196,6 +196,15 @@ void Backend_PlatDrawTris(WrapperRecCtx *rc, const void *verts, int vert_count,
 void Backend_PlatDrawWhite(WrapperRecCtx *rc, const void *verts, int vert_count,
                            const void *indices, int index_count, int is_lines);
 
+/* Platform viewport/scissor/texture-bind (rc-aware). Backend_PlatSetViewport
+ * sets a 0..1-depth viewport; Backend_PlatSetScissor sets the scissor rect;
+ * Backend_PlatBindTextureSRV binds `srv` (a raw backend SRV, TRANSITIONAL void*)
+ * at PS slot 0 (NULL binds nothing sampled), updates current_srv + marks the
+ * state cache dirty. `rc` is the opaque deferred bundle or NULL for immediate. */
+void Backend_PlatSetViewport(WrapperRecCtx *rc, int x, int y, int w, int h);
+void Backend_PlatSetScissor(WrapperRecCtx *rc, int left, int top, int right, int bottom);
+void Backend_PlatBindTextureSRV(WrapperRecCtx *rc, void *srv);
+
 /* Soft-particle depth binding (smoke): swap the bound depth target to the
  * read-only DSV and expose scene depth as PS resource t1, so a shader can
  * sample depth while the hardware z-test still runs. Begin returns 1 if the

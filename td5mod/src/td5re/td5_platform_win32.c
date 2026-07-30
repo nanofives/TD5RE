@@ -242,7 +242,10 @@ static TD5_FFState          s_ff[TD5_PLAT_MAX_JS_SLOTS];
 #define TD5_SHARED_FONT_PAGE 898
 WrapperSurface  *s_tex_surfaces[MAX_TEXTURE_PAGES];
 static WrapperTexture  *s_tex_wrappers[MAX_TEXTURE_PAGES];
-ID3D11ShaderResourceView *s_tex_srvs[MAX_TEXTURE_PAGES];
+/* Per-page cached GPU texture SRV, stored opaquely (raw backend SRV pointer,
+ * TRANSITIONAL) so this file stays D3D11-type-free; bound via
+ * Backend_PlatBindTextureSRV. */
+void *s_tex_srvs[MAX_TEXTURE_PAGES];
 static uint16_t         s_tex_widths[MAX_TEXTURE_PAGES];
 static uint16_t         s_tex_heights[MAX_TEXTURE_PAGES];
 int              s_frame_draw_calls = 0;
@@ -3156,62 +3159,33 @@ void td5_plat_ff_stop(int device_slot, int slot)
 void td5_plat_render_begin_scene(void)
 {
     if (g_backend.device_removed) return;
-    D3D11_VIEWPORT vp;
-    FLOAT vp_w, vp_h;
+    int vp_w, vp_h;
 
-    TD5_PLAT_ONCE("begin_scene enter");
     if (!g_backend.device || !g_backend.context) return;
-    TD5_PLAT_ONCE("begin_scene have device+ctx");
 
-    vp_w = (FLOAT)((g_backend.backbuffer && g_backend.backbuffer->width)
+    vp_w = (int)((g_backend.backbuffer && g_backend.backbuffer->width)
         ? g_backend.backbuffer->width
         : g_backend.width);
-    vp_h = (FLOAT)((g_backend.backbuffer && g_backend.backbuffer->height)
+    vp_h = (int)((g_backend.backbuffer && g_backend.backbuffer->height)
         ? g_backend.backbuffer->height
         : g_backend.height);
 
     /* Bind backbuffer as render target so draw calls land on the surface
      * that Backend_CompositeAndPresent reads, not the swap chain. */
-    if (Backend_SurfaceHasRTV(g_backend.backbuffer)) {
-        TD5_PLAT_ONCE("begin_scene -> OMSetRenderTargets");
+    if (Backend_SurfaceHasRTV(g_backend.backbuffer))
         Backend_SurfaceBindRenderTarget(g_backend.backbuffer);
-    }
-    TD5_PLAT_ONCE("begin_scene RT bound");
 
     /* Reassert a valid viewport every scene. The loading screen can render
      * before gameplay code configures a viewport explicitly. */
-    vp.TopLeftX = 0.0f;
-    vp.TopLeftY = 0.0f;
-    vp.Width    = vp_w;
-    vp.Height   = vp_h;
-    vp.MinDepth = 0.0f;
-    vp.MaxDepth = 1.0f;
-    TD5_PLAT_ONCE("begin_scene -> RSSetViewports");
-    ID3D11DeviceContext_RSSetViewports(g_backend.context, 1, &vp);
-    TD5_PLAT_ONCE("begin_scene -> UpdateViewportCB");
-    Backend_UpdateViewportCB(vp_w, vp_h);
-    TD5_PLAT_ONCE("begin_scene viewport done");
+    Backend_PlatSetViewport(NULL, 0, 0, vp_w, vp_h);
+    Backend_UpdateViewportCB((float)vp_w, (float)vp_h);
 
     /* Reset scissor rect to the full render target at scene start so any
      * HUD-set sub-rect from the previous frame doesn't leak into this one. */
-    {
-        D3D11_RECT scissor;
-        scissor.left   = 0;
-        scissor.top    = 0;
-        scissor.right  = (LONG)vp_w;
-        scissor.bottom = (LONG)vp_h;
-        TD5_PLAT_ONCE("begin_scene -> RSSetScissorRects");
-        ID3D11DeviceContext_RSSetScissorRects(g_backend.context, 1, &scissor);
-    }
-    TD5_PLAT_ONCE("begin_scene scissor done");
+    Backend_PlatSetScissor(NULL, 0, 0, vp_w, vp_h);
 
     /* Clear depth buffer */
-    if (g_backend.depth_dsv) {
-        TD5_PLAT_ONCE("begin_scene -> ClearDepthStencilView");
-        ID3D11DeviceContext_ClearDepthStencilView(g_backend.context,
-            g_backend.depth_dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
-    }
-    TD5_PLAT_ONCE("begin_scene EXIT");
+    Backend_ClearDepth(1.0f);
 
     g_backend.in_scene = 1;
     g_backend.scene_rendered = 0;
@@ -3816,34 +3790,18 @@ void td5_plat_render_bind_texture(int page_index)
 {
     if (g_backend.device_removed) return;
     if (td5_rcmd_recording()) { td5_rcmd_bind_texture(page_index); return; }
-    WrapperRecCtx *rc = g_wrapper_rec;
-    ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
-    ID3D11ShaderResourceView *srv = NULL;
+    void *srv = NULL;
 
     if (page_index >= 0 && page_index < MAX_TEXTURE_PAGES) {
-        /* [x64 Stage 3] Straight pointer read. This used to cast a 32-bit
-         * DWORD handle back to an SRV, which truncated on x86_64 and handed
-         * a garbage pointer to PSSetShaderResources below -- the first x64
-         * crash. The fallback branch already did the right thing. */
-        if (s_tex_srvs[page_index]) {
+        /* Prefer the cached page SRV; else the surface's live handle. */
+        if (s_tex_srvs[page_index])
             srv = s_tex_srvs[page_index];
-        } else if (s_tex_surfaces[page_index] && Backend_SurfaceGetSRV(s_tex_surfaces[page_index])) {
+        else if (s_tex_surfaces[page_index])
             srv = Backend_SurfaceGetSRV(s_tex_surfaces[page_index]);
-        }
     }
 
-    if (rc) rc->current_srv = srv;
-    else    g_backend.current_srv = srv;
-    if (!rc) s_last_bound_texture_page = page_index;  /* immediate-path hint only */
-    if (ctx && srv) {
-        ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &srv);
-    } else if (ctx) {
-        ID3D11ShaderResourceView *null_srv = NULL;
-        ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &null_srv);
-    }
-
-    if (rc) rc->state.dirty = 1;
-    else    g_backend.state.dirty = 1;
+    if (!g_wrapper_rec) s_last_bound_texture_page = page_index;  /* immediate-path hint only */
+    Backend_PlatBindTextureSRV(g_wrapper_rec, srv);
 }
 
 void td5_plat_render_set_fog(int enable, uint32_t color,
@@ -4203,19 +4161,8 @@ void td5_plat_render_set_viewport(int x, int y, int width, int height)
     if (g_backend.device_removed) return;
     if (td5_rcmd_recording()) { td5_rcmd_set_viewport(x, y, width, height); return; }
     WrapperRecCtx *wrc = g_wrapper_rec;
-    ID3D11DeviceContext *ctx = wrc ? wrc->dc : g_backend.context;
-    D3D11_VIEWPORT vp;
 
-    if (!ctx) return;
-
-    vp.TopLeftX = (FLOAT)x;
-    vp.TopLeftY = (FLOAT)y;
-    vp.Width    = (FLOAT)width;
-    vp.Height   = (FLOAT)height;
-    vp.MinDepth = 0.0f;
-    vp.MaxDepth = 1.0f;
-
-    ID3D11DeviceContext_RSSetViewports(ctx, 1, &vp);
+    Backend_PlatSetViewport(wrc, x, y, width, height);
     Backend_UpdateViewportCB((float)width, (float)height);
     /* INFO log only on the main thread (logger is not thread-safe). */
     if (!wrc) TD5_LOG_I(LOG_TAG, "Viewport set: x=%d y=%d w=%d h=%d", x, y, width, height);
@@ -4226,10 +4173,6 @@ void td5_plat_render_set_clip_rect(int left, int top, int right, int bottom)
     if (g_backend.device_removed) return;
     if (td5_rcmd_recording()) { td5_rcmd_set_clip(left, top, right, bottom); return; }
     WrapperRecCtx *wrc = g_wrapper_rec;
-    ID3D11DeviceContext *ctx = wrc ? wrc->dc : g_backend.context;
-    D3D11_RECT rc;
-
-    if (!ctx) return;
 
     /* Clamp to render target dimensions so we never set an invalid rect. */
     int rt_w = (g_backend.backbuffer && g_backend.backbuffer->width)
@@ -4246,11 +4189,7 @@ void td5_plat_render_set_clip_rect(int left, int top, int right, int bottom)
     if (right  < left)       right  = left;
     if (bottom < top)        bottom = top;
 
-    rc.left   = left;
-    rc.top    = top;
-    rc.right  = right;
-    rc.bottom = bottom;
-    ID3D11DeviceContext_RSSetScissorRects(ctx, 1, &rc);
+    Backend_PlatSetScissor(wrc, left, top, right, bottom);
 }
 
 /* [Phase B Stage 2b] Thin platform wrappers over the wrapper's deferred-context
@@ -4294,10 +4233,7 @@ void td5_plat_render_clear(uint32_t color)
     Backend_ClearBackbuffer(rgba);
 
     /* Clear depth buffer */
-    if (g_backend.depth_dsv) {
-        ID3D11DeviceContext_ClearDepthStencilView(g_backend.context,
-            g_backend.depth_dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
-    }
+    Backend_ClearDepth(1.0f);
     TD5_LOG_D(LOG_TAG, "Render clear: color=0x%08X", (unsigned int)color);
 }
 
