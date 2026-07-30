@@ -514,7 +514,6 @@ void Backend_CaptureIfRequested(void)
  * ======================================================================== */
 
 static HWND s_display_hwnd = NULL;
-static HWND s_dinput_hwnd_storage = NULL;  /* Static storage for DInput hwnd patch */
 static volatile int s_window_focused = 1;  /* 1 = focused, 0 = unfocused (pause game) */
 
 static LRESULT CALLBACK DisplayWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -625,36 +624,6 @@ HWND Backend_GetDisplayWindow(void)
     return s_display_hwnd;
 }
 
-void Backend_UpdateMousePosition(void)
-{
-    HMODULE m2dx;
-    POINT pt;
-    int gx, gy;
-    BYTE *base;
-
-    if (!g_backend.windowed || !s_display_hwnd)
-        return;
-
-    m2dx = GetModuleHandleA("M2DX.dll");
-    if (!m2dx) return;
-
-    GetCursorPos(&pt);
-    ScreenToClient(s_display_hwnd, &pt);
-
-    gx = pt.x * g_backend.width / g_backend.target_width;
-    gy = pt.y * g_backend.height / g_backend.target_height;
-
-    if (gx < 0) gx = 0;
-    if (gx >= g_backend.width) gx = g_backend.width - 1;
-    if (gy < 0) gy = 0;
-    if (gy >= g_backend.height) gy = g_backend.height - 1;
-
-    base = (BYTE*)m2dx;
-    *(int*)(base + 0x61BD0) = gx;
-    *(int*)(base + 0x61BD4) = gy;
-    *(int*)0x00498710 = 1;
-}
-
 void Backend_EnforceWindowSize(void)
 {
     MSG msg;
@@ -689,7 +658,6 @@ void Backend_EnforceWindowSize(void)
         /* Only confine cursor and update mouse when our window is actually
          * the foreground window AND focused. Skip when debugger has focus. */
         if (s_window_focused && GetForegroundWindow() == s_display_hwnd) {
-            Backend_UpdateMousePosition();
             RECT clip;
             GetClientRect(s_display_hwnd, &clip);
             MapWindowPoints(s_display_hwnd, NULL, (POINT*)&clip, 2);
@@ -698,100 +666,6 @@ void Backend_EnforceWindowSize(void)
             ClipCursor(NULL);
         }
     }
-}
-
-/* ========================================================================
- * M2DX.dll patches for windowed mode
- * (Input, cooperative level, window management)
- * ======================================================================== */
-
-static void Backend_ApplyM2DXPatches(HWND display_hwnd, HWND game_hwnd)
-{
-    HMODULE m2dx = GetModuleHandleA("M2DX.dll");
-    if (!m2dx) return;
-
-    BYTE *base = (BYTE*)m2dx;
-    DWORD old_protect;
-
-    s_dinput_hwnd_storage = display_hwnd;
-
-    /* Keyboard coop flags: 0x06 -> 0x0A (NONEXCLUSIVE|BACKGROUND) */
-    if (VirtualProtect(base + 0x95A3, 1, PAGE_EXECUTE_READWRITE, &old_protect)) {
-        *(base + 0x95A3) = 0x0A;
-        VirtualProtect(base + 0x95A3, 1, old_protect, &old_protect);
-    }
-    /* Keyboard hwnd operand */
-    if (VirtualProtect(base + 0x9597, 4, PAGE_EXECUTE_READWRITE, &old_protect)) {
-        *(DWORD*)(base + 0x9597) = (DWORD)(uintptr_t)&s_dinput_hwnd_storage;
-        VirtualProtect(base + 0x9597, 4, old_protect, &old_protect);
-    }
-    /* Mouse coop flags: 0x05 -> 0x0A */
-    if (VirtualProtect(base + 0x9609, 1, PAGE_EXECUTE_READWRITE, &old_protect)) {
-        *(base + 0x9609) = 0x0A;
-        VirtualProtect(base + 0x9609, 1, old_protect, &old_protect);
-    }
-    /* Mouse hwnd operand */
-    if (VirtualProtect(base + 0x95FD, 4, PAGE_EXECUTE_READWRITE, &old_protect)) {
-        *(DWORD*)(base + 0x95FD) = (DWORD)(uintptr_t)&s_dinput_hwnd_storage;
-        VirtualProtect(base + 0x95FD, 4, old_protect, &old_protect);
-    }
-
-    /* NOP 6 position-write instructions in GetMouse (keep button write intact) */
-    {
-        struct { int offset; int len; } nops[] = {
-            { 0x9853, 5 }, { 0x9858, 6 }, { 0x9874, 5 },
-            { 0x988D, 6 }, { 0x98A5, 6 }, { 0x98BD, 6 },
-        };
-        int i;
-        for (i = 0; i < 6; i++) {
-            BYTE *p = base + nops[i].offset;
-            if (VirtualProtect(p, nops[i].len, PAGE_EXECUTE_READWRITE, &old_protect)) {
-                int j;
-                for (j = 0; j < nops[i].len; j++) p[j] = 0x90;
-                VirtualProtect(p, nops[i].len, old_protect, &old_protect);
-            }
-        }
-    }
-
-    /* Patch GetMaxTextures → return 100 immediately */
-    if (VirtualProtect(base + 0x1D40, 6, PAGE_EXECUTE_READWRITE, &old_protect)) {
-        base[0x1D40] = 0xB8; base[0x1D41] = 0x64; base[0x1D42] = 0x00;
-        base[0x1D43] = 0x00; base[0x1D44] = 0x00; base[0x1D45] = 0xC3;
-        VirtualProtect(base + 0x1D40, 6, old_protect, &old_protect);
-    }
-
-    /* Patch mouse-active-this-frame flag init 0→1 */
-    {
-        BYTE *imm = (BYTE*)0x414C3C;
-        DWORD op;
-        if (VirtualProtect(imm, 1, PAGE_EXECUTE_READWRITE, &op)) {
-            *imm = 0x01;
-            VirtualProtect(imm, 1, op, &op);
-        }
-    }
-
-    /* Disable FPS overlay (uses overlay surfaces + GetDC which would crash) */
-    {
-        DWORD *pFpsOverlay = (DWORD*)(base + 0x32728);
-        DWORD old2;
-        if (VirtualProtect(pFpsOverlay, 4, PAGE_READWRITE, &old2)) {
-            *pFpsOverlay = 0;
-            VirtualProtect(pFpsOverlay, 4, old2, &old2);
-        }
-    }
-
-    /* Bypass viewport Clear in DXD3D::BeginScene (we do Z-clear ourselves) */
-    if (VirtualProtect(base + 0x1611, 5, PAGE_EXECUTE_READWRITE, &old_protect)) {
-        base[0x1611] = 0xEB;  /* JMP rel8 */
-        base[0x1612] = 0x67;  /* +0x67 → skip to CalculateFrameRate */
-        base[0x1613] = 0x90;
-        base[0x1614] = 0x90;
-        base[0x1615] = 0x90;
-        VirtualProtect(base + 0x1611, 5, old_protect, &old_protect);
-    }
-
-    /* Note: HandleRenderWindowResize is patched early in Backend_Init (ddraw_main.c) */
-    WRAPPER_LOG("Backend_ApplyM2DXPatches: all patches applied");
 }
 
 /* ========================================================================
@@ -1937,7 +1811,6 @@ int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed
             if (s_display_hwnd) {
                 device_hwnd = s_display_hwnd;
                 ShowWindow(hwnd, SW_HIDE);
-                Backend_ApplyM2DXPatches(s_display_hwnd, hwnd);
             }
         }
 

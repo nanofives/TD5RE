@@ -134,7 +134,6 @@ void      Backend_DrawFullscreenQuad(ID3D11ShaderResourceView *srv);
 
 /* Windowed mode: display window management */
 void Backend_EnforceWindowSize(void);
-void Backend_UpdateMousePosition(void);
 HWND Backend_GetDisplayWindow(void);
 
 /* Photo-booth frame capture (offline car-preview generation). RequestCapture

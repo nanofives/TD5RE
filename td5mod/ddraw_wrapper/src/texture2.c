@@ -78,10 +78,22 @@ static HRESULT STDMETHODCALLTYPE Texture_PaletteChanged(WrapperTexture *self, DW
 /* ========================================================================
  * IDirect3DTexture2::GetHandle - CRITICAL
  *
- * Returns the ID3D11ShaderResourceView pointer cast to DWORD. The game will
- * pass this handle back via SetRenderState(D3DRENDERSTATE_TEXTUREHANDLE, handle),
- * and we recover the pointer via (ID3D11ShaderResourceView*)(DWORD_PTR)handle.
+ * The D3D3 API defines the handle as an opaque 32-bit DWORD. It used to be
+ * the ID3D11ShaderResourceView pointer cast to DWORD, recovered by a matching
+ * cast in SetRenderState(D3DRENDERSTATE_TEXTUREHANDLE) -- a pattern that
+ * truncates on x86_64 (this exact truncation was the first x64 crash, via a
+ * copy of the handle the PORT kept and cast back; see td5_platform_win32.c).
+ * No caller maps the handle back to a pointer anymore -- the port binds
+ * through the surface's typed d3d11_srv -- so the handle is now a plain
+ * opaque token that cannot masquerade as a pointer on any arch.
+ *
+ * The AddRef side effect is load-bearing and callers rely on it: the port
+ * calls GetHandle purely so the SRV outlives its owning surface (M2DX
+ * released surfaces after Load but kept rendering from the handle; the port
+ * inherits that lifetime, see Surface4_Release).
  * ======================================================================== */
+
+static DWORD s_next_texture_handle = 1;
 
 static HRESULT STDMETHODCALLTYPE Texture_GetHandle(WrapperTexture *self, WrapperDevice *device, DWORD *handle)
 {
@@ -92,13 +104,10 @@ static HRESULT STDMETHODCALLTYPE Texture_GetHandle(WrapperTexture *self, Wrapper
     if (!handle) return E_POINTER;
 
     if (self->surface && self->surface->d3d11_srv) {
-        /* AddRef the SRV so it survives surface destruction.
-         * M2DX releases the DirectDraw surface after Load, but keeps the
-         * texture handle for rendering. Without AddRef, the SRV
-         * is freed when the surface is destroyed -> dangling handle. */
+        /* AddRef the SRV so it survives surface destruction (see above). */
         ID3D11ShaderResourceView_AddRef(self->surface->d3d11_srv);
-        *handle = (DWORD)(DWORD_PTR)self->surface->d3d11_srv;
-        WRAPPER_LOG("Texture::GetHandle: returning d3d11_srv %p as handle 0x%08lX (AddRef'd)",
+        *handle = s_next_texture_handle++;
+        WRAPPER_LOG("Texture::GetHandle: srv %p AddRef'd, opaque handle 0x%08lX",
                     self->surface->d3d11_srv, *handle);
     } else {
         *handle = 0;
