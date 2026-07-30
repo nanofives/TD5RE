@@ -13,6 +13,54 @@
 #include "wrapper.h"
 #include <stdlib.h>
 #include <string.h>
+#include <dxgi1_3.h>
+
+/* [x64 memory hunt 2026-07-30] TD5RE_DXGI_TRIM=N calls IDXGIDevice3::Trim()
+ * every N presents (unset/0 = off). The x64 NVIDIA UMD retains ~48 idle 16 MB
+ * system-memory pool chunks (~768 MB committed-but-untouched private bytes;
+ * the i686 UMD keeps only ~4 — measured via VirtualQueryEx region dumps at
+ * one frontend screen). Trim() is the documented request to release exactly
+ * such internal idle pools. Local IID so no dxguid link dependency. */
+static const GUID s_IID_IDXGIDevice3 =
+    {0x6007896c, 0x3244, 0x4afd, {0xbf, 0x18, 0xa6, 0xd3, 0xbe, 0xda, 0x50, 0x23}};
+
+void Backend_MaybeTrim(void)
+{
+    static int s_every = -2;               /* -2 = env not read yet */
+    static unsigned s_present_count;
+    IDXGIDevice3 *dev3 = NULL;
+
+    if (s_every == -2) {
+        const char *e = getenv("TD5RE_DXGI_TRIM");
+        s_every = (e && e[0]) ? atoi(e) : 0;
+    }
+    if (s_every <= 0) return;
+    if (++s_present_count % (unsigned)s_every) return;
+
+    if (g_backend.device &&
+        SUCCEEDED(ID3D11Device_QueryInterface(g_backend.device,
+                                              &s_IID_IDXGIDevice3, (void **)&dev3))) {
+        static int s_logged;
+        IDXGIDevice3_Trim(dev3);
+        IDXGIDevice3_Release(dev3);
+        if (!s_logged) {
+            FILE *f;
+            s_logged = 1;
+            /* Own one-shot file: WRAPPER_LOG is disabled in standalone runs,
+             * and "did Trim actually fire?" must be verifiable. */
+            f = fopen("log/trim.log", "a");
+            if (f) { fprintf(f, "IDXGIDevice3::Trim FIRED (every %d presents)\n", s_every); fclose(f); }
+        }
+    } else {
+        static int s_logged_fail;
+        if (!s_logged_fail) {
+            FILE *f;
+            s_logged_fail = 1;
+            f = fopen("log/trim.log", "a");
+            if (f) { fprintf(f, "QI(IDXGIDevice3) FAILED - Trim unavailable\n"); fclose(f); }
+        }
+    }
+}
 
 /* ========================================================================
  * Compositing: merge BltFast (2D) and D3D (3D) layers at present
@@ -268,6 +316,8 @@ void Backend_CompositeAndPresent(WrapperSurface *rt_surface, RECT *srcRect, RECT
             WRAPPER_LOG("CompositeAndPresent: Present FAILED hr=0x%08lX", hr);
         }
     }
+
+    Backend_MaybeTrim();
 
     /* Restore game RT (backbuffer, not swap chain) */
     if (g_backend.backbuffer && g_backend.backbuffer->d3d11_rtv) {

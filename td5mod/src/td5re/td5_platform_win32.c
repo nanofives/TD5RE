@@ -4174,6 +4174,56 @@ void td5_plat_render_apply_ssr(const float cam_pos[3], const float basis9[9],
     Backend_ApplySSRPass(&cb);
 }
 
+/* Fill a texture-page surface's sys_buffer from caller pixels. 32-bit pages
+ * are an identity BGRA copy except the shared font page, which re-applies the
+ * original black colorkey (see the comment at the call site history). */
+static void tex_page_fill_sys_buffer(WrapperSurface *surf, const void *pixels,
+                                     int width, int height, DWORD bpp,
+                                     int page_index)
+{
+    size_t row_bytes = (size_t)width * (bpp / 8);
+    size_t total = row_bytes * (size_t)height;
+    if (bpp == 32) {
+        const uint8_t *src32 = (const uint8_t *)pixels;
+        uint8_t *dst32 = (uint8_t *)surf->sys_buffer;
+        size_t pixel_count = (size_t)width * (size_t)height;
+        int apply_font_colorkey = 0;
+
+        /* BodyText.tga is decoded from RGB data into opaque BGRA before it
+         * reaches this upload path. Restore the original black colorkey
+         * behavior here so the font background stays transparent. */
+        if (page_index == TD5_SHARED_FONT_PAGE) {
+            apply_font_colorkey = 1;
+            for (size_t i = 0; i < pixel_count; i++) {
+                if (src32[i * 4 + 3] != 0xFF) {
+                    apply_font_colorkey = 0;
+                    break;
+                }
+            }
+        }
+
+        if (!apply_font_colorkey) {
+            /* The decoder already produced BGRA, so this is an identity copy
+             * for every non-font page — a memcpy instead of a per-pixel loop
+             * (the loop was costing ~1.8M iterations per 1632x1120 carpic). */
+            memcpy(dst32, src32, total);
+        } else {
+            for (size_t i = 0; i < pixel_count; i++) {
+                uint8_t b = src32[i * 4 + 0];
+                uint8_t g = src32[i * 4 + 1];
+                uint8_t r = src32[i * 4 + 2];
+                unsigned a = (((unsigned)r + g + b) < 16u) ? 0u : 255u;
+                dst32[i * 4 + 0] = b;
+                dst32[i * 4 + 1] = g;
+                dst32[i * 4 + 2] = r;
+                dst32[i * 4 + 3] = (uint8_t)a;
+            }
+        }
+    } else {
+        memcpy(surf->sys_buffer, pixels, total);
+    }
+}
+
 int td5_plat_render_upload_texture(int page_index, const void *pixels,
                                     int width, int height, int format)
 {
@@ -4190,6 +4240,54 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
      * 2 = A8R8G8B8 (32-bit) */
     bpp = (format == 2) ? 32 : 16;
     caps = DDSCAPS_TEXTURE | DDSCAPS_VIDEOMEMORY;
+
+#ifndef TD5RE_RELEASE
+    /* [x64 memory hunt 2026-07-30] With TD5RE_ALLOC_LOG set, record every big
+     * texture-page upload: on x64 the NVIDIA UMD retains a full-size committed
+     * sysmem shadow per large DEFAULT texture (measured: 48 x 16 MB untouched
+     * = the ~800 MB private-bytes gap vs i686), so the page inventory here is
+     * the attribution for those regions. */
+    if (getenv("TD5RE_ALLOC_LOG") &&
+        (long long)width * height * (bpp / 8) >= 4 * 1024 * 1024) {
+        FILE *f = fopen("log/bigtex.log", "a");
+        if (f) {
+            fprintf(f, "page=%d %dx%d bpp=%lu (%lld MB)\n", page_index, width, height,
+                    (unsigned long)bpp,
+                    (long long)width * height * (bpp / 8) / (1024 * 1024));
+            fclose(f);
+        }
+    }
+#endif
+
+    /* [x64 memory hunt 2026-07-30] IN-PLACE update fast path: when the page
+     * already has a live surface with identical dimensions/format, refresh its
+     * sys_buffer and re-upload into the SAME D3D11 texture instead of
+     * destroying and recreating it. Recreation churn is what ballooned x64
+     * private bytes: the 2048x2048 runtime font atlas re-uploads on every
+     * glyph-cache flush (46x during one frontend boot), and the x64 NVIDIA
+     * UMD retains a full-size committed sysmem shadow of every dead large
+     * DEFAULT texture (measured: 48 x 16 MB committed-but-untouched regions =
+     * the ~800 MB private-bytes gap vs i686, whose UMD retains ~4; not
+     * released by IDXGIDevice3::Trim). Updating in place creates no new
+     * driver allocation at all. */
+    /* TD5RE_TEX_INPLACE=0 forces the historic destroy+recreate path (A/B
+     * kill-switch; default ON). */
+    static int s_inplace = -1;
+    if (s_inplace < 0) {
+        const char *e = getenv("TD5RE_TEX_INPLACE");
+        s_inplace = (e && e[0] == '0') ? 0 : 1;
+    }
+    surf = s_tex_surfaces[page_index];
+    if (s_inplace && surf && surf->sys_buffer && s_tex_wrappers[page_index] &&
+        surf->width == (DWORD)width && surf->height == (DWORD)height &&
+        surf->bpp == bpp) {
+        WrapperSurface_EnsureDeviceCurrent(surf);   /* TDR-recovery safe */
+        tex_page_fill_sys_buffer(surf, pixels, width, height, bpp, page_index);
+        surf->dirty = 1;
+        WrapperSurface_FlushDirty(surf);
+        s_tex_srvs[page_index] = surf->d3d11_srv;   /* refreshed if device was recreated */
+        return 1;
+    }
 
     /* Release old surface if any */
     if (s_tex_surfaces[page_index]) {
@@ -4209,47 +4307,7 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
     /* Upload pixel data via sys_buffer -> UpdateSubresource */
     WrapperSurface_EnsureSysBuffer(surf);
     if (surf->sys_buffer) {
-        size_t row_bytes = (size_t)width * (bpp / 8);
-        size_t total = row_bytes * (size_t)height;
-        if (format == 2) {
-            const uint8_t *src32 = (const uint8_t *)pixels;
-            uint8_t *dst32 = (uint8_t *)surf->sys_buffer;
-            size_t pixel_count = (size_t)width * (size_t)height;
-            int apply_font_colorkey = 0;
-
-            /* BodyText.tga is decoded from RGB data into opaque BGRA before it
-             * reaches this upload path. Restore the original black colorkey
-             * behavior here so the font background stays transparent. */
-            if (page_index == TD5_SHARED_FONT_PAGE) {
-                apply_font_colorkey = 1;
-                for (size_t i = 0; i < pixel_count; i++) {
-                    if (src32[i * 4 + 3] != 0xFF) {
-                        apply_font_colorkey = 0;
-                        break;
-                    }
-                }
-            }
-
-            if (!apply_font_colorkey) {
-                /* The decoder already produced BGRA, so this is an identity copy
-                 * for every non-font page — a memcpy instead of a per-pixel loop
-                 * (the loop was costing ~1.8M iterations per 1632x1120 carpic). */
-                memcpy(dst32, src32, total);
-            } else {
-                for (size_t i = 0; i < pixel_count; i++) {
-                    uint8_t b = src32[i * 4 + 0];
-                    uint8_t g = src32[i * 4 + 1];
-                    uint8_t r = src32[i * 4 + 2];
-                    unsigned a = (((unsigned)r + g + b) < 16u) ? 0u : 255u;
-                    dst32[i * 4 + 0] = b;
-                    dst32[i * 4 + 1] = g;
-                    dst32[i * 4 + 2] = r;
-                    dst32[i * 4 + 3] = (uint8_t)a;
-                }
-            }
-        } else {
-            memcpy(surf->sys_buffer, pixels, total);
-        }
+        tex_page_fill_sys_buffer(surf, pixels, width, height, bpp, page_index);
         surf->dirty = 1;
         WrapperSurface_FlushDirty(surf);
     }

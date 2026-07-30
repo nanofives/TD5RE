@@ -432,6 +432,11 @@ void Backend_DrainD3DDebug(const char *where);
  * fault from a scene-draw fault. Golden-safe (CPU bookkeeping only). */
 void Backend_NotePresent(void);
 
+/* [x64 memory hunt 2026-07-30] TD5RE_DXGI_TRIM=N: call IDXGIDevice3::Trim()
+ * every N presents (unset/0 = off) to ask the driver to release idle internal
+ * pools. Call from every present path; no-op when the knob is unset. */
+void Backend_MaybeTrim(void);
+
 /* [crash-diag 2026-07-21] Append GPU forensics (live backend snapshot + the
  * recent-draw ring with per-draw generation/SRV, flagging stale pre-reset
  * binds) to `path`. Called from the exe SEH crash handler via
