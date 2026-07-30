@@ -182,6 +182,20 @@ void  Backend_ForceBlendState(int blend_idx);      /* bind + update cache idx */
  * fenced. Deleted with that fence. */
 void *Backend_PixelShaderRaw(BackendPixelShader *ps);
 
+/* Platform-renderer draw entry points (td5_platform_win32.c). Each does the
+ * StreamUpload + pretransformed-pipeline bind + state resolve + draw so the
+ * platform layer holds no ID3D11 calls. `rc` is the (opaque) deferred pane-record
+ * bundle or NULL for the immediate context. Backend_PlatDrawTris honours a
+ * ps_override (raw backend shader) + sampler index, else the texblend-selected
+ * builtin PS. Backend_PlatDrawWhite draws PS_MODULATE*white (fog/alpha off, fixed
+ * DS/blend) for debug lines (is_lines=1, non-indexed) and flat-colour ribbons
+ * (is_lines=0, indexed), and invalidates the state cache afterward. */
+void Backend_PlatDrawTris(WrapperRecCtx *rc, const void *verts, int vert_count,
+                          const void *indices, int index_count,
+                          void *ps_override, int ps_override_samp);
+void Backend_PlatDrawWhite(WrapperRecCtx *rc, const void *verts, int vert_count,
+                           const void *indices, int index_count, int is_lines);
+
 /* Soft-particle depth binding (smoke): swap the bound depth target to the
  * read-only DSV and expose scene depth as PS resource t1, so a shader can
  * sample depth while the hardware z-test still runs. Begin returns 1 if the

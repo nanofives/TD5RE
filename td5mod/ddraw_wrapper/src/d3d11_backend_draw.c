@@ -194,6 +194,124 @@ void *Backend_PixelShaderRaw(BackendPixelShader *h)
     return h ? (void*)h->ps : NULL;
 }
 
+/* ---- platform-renderer draw entry points (see wrapper.h) -------------- */
+
+void Backend_PlatDrawTris(WrapperRecCtx *rc, const void *verts, int vert_count,
+                          const void *indices, int index_count,
+                          void *ps_override, int ps_override_samp)
+{
+    ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
+    ID3D11Buffer *vb    = rc ? rc->vb : g_backend.dynamic_vb;
+    ID3D11Buffer *ib    = rc ? rc->ib : g_backend.dynamic_ib;
+    ID3D11Buffer *cbvp  = rc ? rc->cb_viewport : g_backend.cb_viewport;
+    ID3D11Buffer *cbfog = rc ? rc->cb_fog : g_backend.cb_fog;
+    RenderStateCache *st = rc ? &rc->state : &g_backend.state;
+    UINT stride = TD5_VERTEX_STRIDE, offset = 0, base_vertex = 0, start_index = 0;
+    int has_idx = (indices && index_count > 0);
+
+    if (!ctx || !verts || vert_count <= 0) return;
+    if (!Backend_StreamUpload(verts, (UINT)vert_count, stride,
+                              has_idx ? indices : NULL, has_idx ? (UINT)index_count : 0,
+                              &base_vertex, &start_index))
+        return;
+
+    ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &vb, &stride, &offset);
+    ID3D11DeviceContext_IASetInputLayout(ctx, g_backend.input_layout);
+    ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_pretransformed, NULL, 0);
+    ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &cbvp);
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &cbfog);
+
+    Backend_ApplyStateCache();
+
+    if (has_idx) {
+        ID3D11DeviceContext_IASetIndexBuffer(ctx, ib, DXGI_FORMAT_R16_UINT, 0);
+        ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        /* Force correct PS + sampler before every draw (honour MSDF override) */
+        if (ps_override) {
+            ID3D11DeviceContext_PSSetShader(ctx, (ID3D11PixelShader *)ps_override, NULL, 0);
+            ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[ps_override_samp]);
+        } else {
+            ID3D11DeviceContext_PSSetShader(ctx,
+                g_backend.ps_shaders[st->texblend_mode == 5 ? 1 : 0], NULL, 0);
+            {
+                int si = (st->mag_filter >= 2) ? SAMP_LINEAR_WRAP : SAMP_POINT_WRAP;
+                ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[si]);
+            }
+        }
+        Backend_NoteDraw(4, (unsigned)vert_count, (unsigned)index_count, 1);
+        ID3D11DeviceContext_DrawIndexed(ctx, (UINT)index_count, start_index, (INT)base_vertex);
+    } else {
+        ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        Backend_NoteDraw(4, (unsigned)vert_count, 0, 0);
+        ID3D11DeviceContext_Draw(ctx, (UINT)vert_count, base_vertex);
+    }
+}
+
+void Backend_PlatDrawWhite(WrapperRecCtx *rc, const void *verts, int vert_count,
+                           const void *indices, int index_count, int is_lines)
+{
+    ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
+    ID3D11Buffer *vb    = rc ? rc->vb : g_backend.dynamic_vb;
+    ID3D11Buffer *ib    = rc ? rc->ib : g_backend.dynamic_ib;
+    ID3D11Buffer *cbvp  = rc ? rc->cb_viewport : g_backend.cb_viewport;
+    ID3D11Buffer *cbfog = rc ? rc->cb_fog : g_backend.cb_fog;
+    RenderStateCache *st = rc ? &rc->state : &g_backend.state;
+    UINT stride = TD5_VERTEX_STRIDE, offset = 0, base_vertex = 0, start_index = 0;
+    int has_idx = (!is_lines && indices && index_count > 0);
+
+    if (!ctx || !verts || !g_backend.white_srv) return;
+    if (!Backend_StreamUpload(verts, (UINT)vert_count, stride,
+                              has_idx ? indices : NULL, has_idx ? (UINT)index_count : 0,
+                              &base_vertex, has_idx ? &start_index : NULL))
+        return;
+
+    ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &vb, &stride, &offset);
+    ID3D11DeviceContext_IASetInputLayout(ctx, g_backend.input_layout);
+    if (has_idx)
+        ID3D11DeviceContext_IASetIndexBuffer(ctx, ib, DXGI_FORMAT_R16_UINT, 0);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx,
+        is_lines ? D3D11_PRIMITIVE_TOPOLOGY_LINELIST : D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_pretransformed, NULL, 0);
+    ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &cbvp);
+
+    /* PS_MODULATE * white texel = vertex colour. Fog + alpha test off via a
+     * fresh fog CB bounded to this draw. */
+    ID3D11DeviceContext_PSSetShader(ctx, g_backend.ps_shaders[PS_MODULATE], NULL, 0);
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &g_backend.white_srv);
+    ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[SAMP_POINT_CLAMP]);
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &cbfog);
+    {
+        FogCB fog = {0};
+        fog.fogEnabled = 0;
+        fog.alphaTestEnabled = 0;
+        fog.alphaRef = 0.0f;
+        ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource*)cbfog, 0, NULL, &fog, 0, 0);
+    }
+
+    ID3D11DeviceContext_RSSetState(ctx, g_backend.rs_state);
+    /* Z test on (occlude correctly), Z write off (don't poison depth). */
+    ID3D11DeviceContext_OMSetDepthStencilState(ctx, g_backend.ds_states[DS_Z_ON_WRITE_OFF], 0);
+    ID3D11DeviceContext_OMSetBlendState(ctx, g_backend.blend_states[BLEND_OPAQUE], NULL, 0xFFFFFFFF);
+
+    if (has_idx) {
+        Backend_NoteDraw(4, (unsigned)vert_count, (unsigned)index_count, 1);
+        ID3D11DeviceContext_DrawIndexed(ctx, (UINT)index_count, start_index, (INT)base_vertex);
+    } else {
+        Backend_NoteDraw(2, (unsigned)vert_count, 0, 0);
+        ID3D11DeviceContext_Draw(ctx, (UINT)vert_count, base_vertex);
+    }
+
+    /* Invalidate cached state-object indices so the next ApplyStateCache re-binds. */
+    st->current_blend_idx = -1;
+    st->current_ds_idx    = -1;
+    st->current_samp_idx  = -1;
+    st->current_ps_idx    = -1;
+    st->dirty = 1;
+    /* Force texture rebind on next draw — current_srv was overwritten with white. */
+    if (rc) rc->current_srv = NULL; else g_backend.current_srv = NULL;
+}
+
 /* ---- soft-particle depth binding (see wrapper.h) ---------------------- */
 
 static ID3D11RenderTargetView *s_soft_saved_rtv = NULL;

@@ -3424,23 +3424,7 @@ void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
         td5_rcmd_draw_tris(verts, vertex_count, indices, index_count);
         return;
     }
-    /* [Phase B Stage 2] route to the thread-local pane bundle when recording. */
-    WrapperRecCtx *rc = g_wrapper_rec;
-    ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
-    ID3D11Buffer *vb    = rc ? rc->vb : g_backend.dynamic_vb;
-    ID3D11Buffer *ib    = rc ? rc->ib : g_backend.dynamic_ib;
-    ID3D11Buffer *cbvp  = rc ? rc->cb_viewport : g_backend.cb_viewport;
-    ID3D11Buffer *cbfog = rc ? rc->cb_fog : g_backend.cb_fog;
-    RenderStateCache *st = rc ? &rc->state : &g_backend.state;
-    UINT stride = TD5_VERTEX_STRIDE; /* 32 bytes */
-    UINT offset = 0;
-    UINT base_vertex = 0, start_index = 0;
-    int  has_idx;
-
-    TD5_PLAT_ONCE("draw_tris enter");
-    if (!ctx || !verts || vertex_count <= 0) return;
-
-    has_idx = (indices && index_count > 0);
+    if (!verts || vertex_count <= 0) return;
 
 #ifndef TD5RE_RELEASE
     draw_extent_log(verts, vertex_count, s_last_bound_texture_page);
@@ -3448,139 +3432,21 @@ void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
 
     s_frame_draw_calls++;
     s_frame_vertices += vertex_count;
-    if (has_idx)
+    if (indices && index_count > 0)
         s_frame_indices += index_count;
 
-    /* [2026-06-08 streaming-ring] Append verts (+ indices) to the dynamic ring
-     * with WRITE_NO_OVERWRITE (DISCARD only on wrap) instead of a per-draw
-     * WRITE_DISCARD — the latter serialized the CPU on the GPU once the per-frame
-     * draw count climbed (split-screen). base_vertex/start_index address the
-     * appended slice; the VB/IB stay bound at byte offset 0. */
-    TD5_PLAT_ONCE("draw_tris -> StreamUpload");
-    if (!Backend_StreamUpload(verts, (UINT)vertex_count, stride,
-                              has_idx ? (const void *)indices : NULL,
-                              has_idx ? (UINT)index_count : 0,
-                              &base_vertex, &start_index))
-        return;
-    TD5_PLAT_ONCE("draw_tris StreamUpload done");
-
-    /* Bind VB, input layout, shaders */
-    TD5_PLAT_ONCE("draw_tris -> IASetVertexBuffers");
-    ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &vb,
-                                           &stride, &offset);
-    TD5_PLAT_ONCE("draw_tris -> IASetInputLayout");
-    ID3D11DeviceContext_IASetInputLayout(ctx, g_backend.input_layout);
-    TD5_PLAT_ONCE("draw_tris -> VSSetShader");
-    ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_pretransformed, NULL, 0);
-    TD5_PLAT_ONCE("draw_tris -> VSSetConstantBuffers");
-    ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &cbvp);
-    TD5_PLAT_ONCE("draw_tris -> PSSetConstantBuffers");
-    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &cbfog);
-    TD5_PLAT_ONCE("draw_tris binds done");
-
-    /* Apply render state cache -> D3D11 state objects */
-    Backend_ApplyStateCache();
-
-    if (has_idx) {
-        /* Indexed draw */
-        ID3D11DeviceContext_IASetIndexBuffer(ctx, ib,
-                                              DXGI_FORMAT_R16_UINT, 0);
-        ID3D11DeviceContext_IASetPrimitiveTopology(ctx,
-            D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        /* Force correct PS and sampler before every draw (honor MSDF override) */
-        if (s_render_ps_override) {
-            ID3D11DeviceContext_PSSetShader(ctx,
-                (ID3D11PixelShader *)s_render_ps_override, NULL, 0);
-            ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1,
-                &g_backend.sampler_states[s_render_ps_override_samp]);
-        } else {
-            ID3D11DeviceContext_PSSetShader(ctx,
-                g_backend.ps_shaders[st->texblend_mode == 5 ? 1 : 0], NULL, 0);
-            {
-                int si = (st->mag_filter >= 2) ? SAMP_LINEAR_WRAP : SAMP_POINT_WRAP;
-                ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[si]);
-            }
-        }
-        Backend_NoteDraw(4 /*TRIANGLELIST*/, (unsigned)vertex_count,
-                         (unsigned)index_count, 1);   /* [DRAW WATCH] */
-        ID3D11DeviceContext_DrawIndexed(ctx, (UINT)index_count, start_index, (INT)base_vertex);
-    } else {
-        /* Non-indexed draw */
-        ID3D11DeviceContext_IASetPrimitiveTopology(ctx,
-            D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        Backend_NoteDraw(4 /*TRIANGLELIST*/, (unsigned)vertex_count, 0, 0);  /* [DRAW WATCH] */
-        ID3D11DeviceContext_Draw(ctx, (UINT)vertex_count, base_vertex);
-    }
+    Backend_PlatDrawTris(g_wrapper_rec, verts, vertex_count,
+                         indices, index_count,
+                         s_render_ps_override, s_render_ps_override_samp);
 }
 
 void td5_plat_render_draw_lines(const TD5_D3DVertex *verts, int vert_count)
 {
     if (g_backend.device_removed) return;
     if (td5_rcmd_recording()) { td5_rcmd_draw_lines(verts, vert_count); return; }
-    WrapperRecCtx *rc = g_wrapper_rec;
-    ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
-    ID3D11Buffer *vb    = rc ? rc->vb : g_backend.dynamic_vb;
-    ID3D11Buffer *cbvp  = rc ? rc->cb_viewport : g_backend.cb_viewport;
-    ID3D11Buffer *cbfog = rc ? rc->cb_fog : g_backend.cb_fog;
-    RenderStateCache *st = rc ? &rc->state : &g_backend.state;
-    UINT stride = TD5_VERTEX_STRIDE;
-    UINT offset = 0;
-    UINT base_vertex = 0;
-
-    if (!ctx || !verts || vert_count < 2) return;
-    if (!g_backend.white_srv) return;
-
-    /* [2026-06-08 streaming-ring] Append to the dynamic ring (DISCARD only on
-     * wrap) instead of a per-call WRITE_DISCARD; draw from base_vertex. */
-    if (!Backend_StreamUpload(verts, (UINT)vert_count, stride, NULL, 0,
-                              &base_vertex, NULL))
-        return;
-
-    ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &vb,
-                                           &stride, &offset);
-    ID3D11DeviceContext_IASetInputLayout(ctx, g_backend.input_layout);
-    ID3D11DeviceContext_IASetPrimitiveTopology(ctx,
-        D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
-
-    ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_pretransformed, NULL, 0);
-    ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &cbvp);
-
-    /* PS_MODULATE * white texel = vertex color. Disable fog and alpha test
-     * via a fresh fog CB upload bounded to this draw. */
-    ID3D11DeviceContext_PSSetShader(ctx, g_backend.ps_shaders[PS_MODULATE], NULL, 0);
-    ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &g_backend.white_srv);
-    ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[SAMP_POINT_CLAMP]);
-    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &cbfog);
-    {
-        FogCB fog = {0};
-        fog.fogEnabled = 0;
-        fog.alphaTestEnabled = 0;
-        fog.alphaRef = 0.0f;
-        ID3D11DeviceContext_UpdateSubresource(ctx,
-            (ID3D11Resource*)cbfog, 0, NULL, &fog, 0, 0);
-    }
-
-    ID3D11DeviceContext_RSSetState(ctx, g_backend.rs_state);
-    /* Z test on (so lines occlude correctly), Z write off (don't poison depth
-     * for subsequent overlays), no blend. */
-    ID3D11DeviceContext_OMSetDepthStencilState(ctx,
-        g_backend.ds_states[DS_Z_ON_WRITE_OFF], 0);
-    ID3D11DeviceContext_OMSetBlendState(ctx,
-        g_backend.blend_states[BLEND_OPAQUE], NULL, 0xFFFFFFFF);
-
-    Backend_NoteDraw(2 /*LINELIST*/, (unsigned)vert_count, 0, 0);   /* [DRAW WATCH] */
-    ID3D11DeviceContext_Draw(ctx, (UINT)vert_count, base_vertex);
-
-    /* Invalidate cached state-object indices so the next ApplyStateCache
-     * actually re-binds (current_* values must mismatch what we just set). */
-    st->current_blend_idx = -1;
-    st->current_ds_idx    = -1;
-    st->current_samp_idx  = -1;
-    st->current_ps_idx    = -1;
-    st->dirty = 1;
-    /* Force texture rebind on next draw — current_srv was overwritten with white. */
-    if (rc) rc->current_srv = NULL; else g_backend.current_srv = NULL;
-    if (!rc) s_last_bound_texture_page = -1;
+    if (!verts || vert_count < 2) return;
+    Backend_PlatDrawWhite(g_wrapper_rec, verts, vert_count, NULL, 0, 1 /* lines */);
+    if (!g_wrapper_rec) s_last_bound_texture_page = -1;
 }
 
 void td5_plat_render_draw_tris_flat(const TD5_D3DVertex *verts, int vert_count,
@@ -3588,67 +3454,9 @@ void td5_plat_render_draw_tris_flat(const TD5_D3DVertex *verts, int vert_count,
 {
     if (g_backend.device_removed) return;
     if (td5_rcmd_recording()) { td5_rcmd_draw_tris(verts, vert_count, indices, index_count); return; }
-    WrapperRecCtx *rc = g_wrapper_rec;
-    ID3D11DeviceContext *ctx = rc ? rc->dc : g_backend.context;
-    ID3D11Buffer *vb    = rc ? rc->vb : g_backend.dynamic_vb;
-    ID3D11Buffer *ib    = rc ? rc->ib : g_backend.dynamic_ib;
-    ID3D11Buffer *cbvp  = rc ? rc->cb_viewport : g_backend.cb_viewport;
-    ID3D11Buffer *cbfog = rc ? rc->cb_fog : g_backend.cb_fog;
-    RenderStateCache *st = rc ? &rc->state : &g_backend.state;
-    UINT stride = TD5_VERTEX_STRIDE;
-    UINT offset = 0;
-    UINT base_vertex = 0, start_index = 0;
-
-    if (!ctx || !verts || vert_count < 3 || !indices || index_count < 3) return;
-    if (!g_backend.white_srv) return;
-
-    if (!Backend_StreamUpload(verts, (UINT)vert_count, stride,
-                              (const void *)indices, (UINT)index_count,
-                              &base_vertex, &start_index))
-        return;
-
-    ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &vb, &stride, &offset);
-    ID3D11DeviceContext_IASetInputLayout(ctx, g_backend.input_layout);
-    ID3D11DeviceContext_IASetIndexBuffer(ctx, ib, DXGI_FORMAT_R16_UINT, 0);
-    ID3D11DeviceContext_IASetPrimitiveTopology(ctx,
-        D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
-    ID3D11DeviceContext_VSSetShader(ctx, g_backend.vs_pretransformed, NULL, 0);
-    ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &cbvp);
-
-    /* PS_MODULATE * white texel = vertex color (flat shaded, no source texture). */
-    ID3D11DeviceContext_PSSetShader(ctx, g_backend.ps_shaders[PS_MODULATE], NULL, 0);
-    ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &g_backend.white_srv);
-    ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_backend.sampler_states[SAMP_POINT_CLAMP]);
-    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &cbfog);
-    {
-        FogCB fog = {0};
-        fog.fogEnabled = 0;
-        fog.alphaTestEnabled = 0;
-        fog.alphaRef = 0.0f;
-        ID3D11DeviceContext_UpdateSubresource(ctx,
-            (ID3D11Resource*)cbfog, 0, NULL, &fog, 0, 0);
-    }
-
-    ID3D11DeviceContext_RSSetState(ctx, g_backend.rs_state);
-    /* Z test on (road occludes against sky / itself), Z write off (a flat-color
-     * ribbon needs no depth ordering; later opaque actors still draw on top). */
-    ID3D11DeviceContext_OMSetDepthStencilState(ctx,
-        g_backend.ds_states[DS_Z_ON_WRITE_OFF], 0);
-    ID3D11DeviceContext_OMSetBlendState(ctx,
-        g_backend.blend_states[BLEND_OPAQUE], NULL, 0xFFFFFFFF);
-
-    Backend_NoteDraw(4 /*TRIANGLELIST flat*/, (unsigned)vert_count,
-                     (unsigned)index_count, 1);   /* [DRAW WATCH] */
-    ID3D11DeviceContext_DrawIndexed(ctx, (UINT)index_count, start_index, (INT)base_vertex);
-
-    st->current_blend_idx = -1;
-    st->current_ds_idx    = -1;
-    st->current_samp_idx  = -1;
-    st->current_ps_idx    = -1;
-    st->dirty = 1;
-    if (rc) rc->current_srv = NULL; else g_backend.current_srv = NULL;
-    if (!rc) s_last_bound_texture_page = -1;
+    if (!verts || vert_count < 3 || !indices || index_count < 3) return;
+    Backend_PlatDrawWhite(g_wrapper_rec, verts, vert_count, indices, index_count, 0 /* tris */);
+    if (!g_wrapper_rec) s_last_bound_texture_page = -1;
 }
 
 void td5_plat_render_set_preset(TD5_RenderPreset preset)
