@@ -7,6 +7,7 @@
 # now unified across every build path: it was previously missing from CI
 # builds while every local build (.bat/Makefile) had it.
 -c
+-m64
 -O2
 -Wall
 -DWIN32

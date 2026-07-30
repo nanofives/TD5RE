@@ -23,7 +23,6 @@
 #include <string.h>
 #include <stdarg.h>
 #include <malloc.h>
-#include <zlib.h>   /* frame-dump PNG encoder (dev tool, see td5_plat_dump_frame_png) */
 #include <math.h>
 
 #include "td5_platform.h"

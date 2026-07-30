@@ -14,8 +14,8 @@
 -ldinput8
 -ldsound
 -ldxguid
-# -lz is ARCH-SPECIFIC -> link_libs_i686.txt (the x86_64 toolchain ships no
-# libz.a; that build uses td5_inflate.c's embedded tinfl instead).
+# Notably absent: -lz. The x86_64 toolchain ships no libz.a; the port has no
+# zlib dependency (embedded tinfl decoder + zlib-free PNG encoder).
 -lws2_32
 -lmfplat
 -lmfreadwrite

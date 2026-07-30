@@ -4,23 +4,30 @@
 # Path-dependent -I include dirs and variant defines (-DTD5RE_RELEASE
 # -DNDEBUG) stay in each build path — everything else lives here.
 #
-# ARCH-NEUTRAL ONLY (x64 Stage 3). Anything that differs between i686 and
-# x86_64 lives in cflags_i686.txt / cflags_x86_64.txt, which every consumer
-# reads IN ADDITION to this file. Putting an arch flag here would silently
-# build the wrong target for whichever consumer forgot it.
+# x86_64 ONLY since the i686 retirement (2026-07-30): the cflags_<arch>.txt
+# split collapsed back into this one file. -m64 is pinned explicitly so a
+# mis-set toolchain fails loudly instead of silently building the host arch.
+# NOT here, and intentionally so:
+#   -msse2 / -mfpmath=sse : mandated by the x86_64 ABI, redundant.
+#   -DTD5_INFLATE_USE_ZLIB / -DTD5_PNG_USE_ZLIB: the x86_64 toolchain ships no
+#       libz.a. td5_inflate.c falls back to its embedded tinfl decompressor
+#       (its documented default) and the frame-dump PNG encoder uses its own
+#       zlib-free stored-deflate path (output verified against a real decoder
+#       2026-07-30). No zlib dependency exists anymore.
 # -Wpedantic dropped (2026-07-09, A8 warning paydown): its 33 warnings here
 # were all pure ISO-C-strictness noise — 16 "braced-groups within
 # expressions" from a GNU statement-expression macro, 17 function-pointer
 # <-> object-pointer casts for GetProcAddress-style dynamic loading — not
 # real bugs, unlike the four -Werror classes below.
 -c
+-m64
 -O2
 -fwrapv
 -Wall
 -Wextra
 -DWIN32
-# Hard-error classes (2026-07-06): these indicate real bugs in i686 C, never
-# style. The tree is clean of all four; -Werror keeps it that way.
+# Hard-error classes (2026-07-06): these indicate real bugs, never style.
+# The tree is clean of all four; -Werror keeps it that way.
 -Werror=implicit-function-declaration
 -Werror=return-type
 -Werror=int-conversion

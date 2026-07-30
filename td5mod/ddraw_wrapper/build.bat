@@ -4,40 +4,23 @@ setlocal enabledelayedexpansion
 REM Change to script directory so relative paths work
 cd /d "%~dp0"
 
-REM [2026-06-04] Toolchain is at td5mod\deps\mingw. From this script's dir
+REM [2026-06-04] Toolchain is at td5mod\deps. From this script's dir
 REM (td5mod\ddraw_wrapper) that is ONE level up, not two — the old ..\..\deps
 REM pointed at a nonexistent TD5RE\deps and broke every wrapper rebuild.
-REM ---------------------------------------------------------------------------
-REM Architecture selection (x64 Stage 3) -- mirrors build_standalone.bat exactly:
-REM chosen by the TD5RE_ARCH env var, output dir arch-suffixed so the 64-bit
-REM archive can never overwrite the shipping 32-bit libddraw_wrapper.a.
 REM
-REM   set TD5RE_ARCH=x86_64  &  build.bat   -> build_x64\libddraw_wrapper.a
-REM   (unset)                               -> build\libddraw_wrapper.a
-REM
-REM wrapper_cflags.txt is already arch-NEUTRAL (it carries no -m32; the i686
-REM toolchain defaults to 32-bit and the Makefile/CI append -m32 themselves), so
-REM only the toolchain and output dir change here.
-REM ---------------------------------------------------------------------------
-set ARCH=i686
-if /I "%TD5RE_ARCH%"=="x86_64" set ARCH=x86_64
-if /I "%TD5RE_ARCH%"=="x64" set ARCH=x86_64
-
-if "%ARCH%"=="x86_64" goto :arch_x64
-set TOOLPREFIX=..\deps\mingw\mingw32\bin
-set ARCHCFLAG=-m32
-set BUILDSUFFIX=
-goto :arch_done
-:arch_x64
+REM x86_64 ONLY since the i686 retirement (2026-07-30) -- mirrors
+REM build_standalone.bat: one arch, plain output dir, -m64 lives in
+REM wrapper_cflags.txt alongside the other shared flags.
+if /I "%TD5RE_ARCH%"=="i686" (
+    echo ERROR: i686 was retired 2026-07-30 -- toolchain parked in _archive\.
+    exit /b 1
+)
 set TOOLPREFIX=..\deps\mingw64\mingw64\bin
-set ARCHCFLAG=-m64
-set BUILDSUFFIX=_x64
-:arch_done
 
 set GCC=%TOOLPREFIX%\gcc.exe
 set AR=%TOOLPREFIX%\ar.exe
 set SRCDIR=src
-set OUTDIR=build%BUILDSUFFIX%
+set OUTDIR=build
 
 echo === D3D11 Wrapper Build ===
 
@@ -71,10 +54,6 @@ if not defined WRAPPER_CFLAGS (
     echo ERROR: wrapper_cflags.txt missing or empty at %~dp0wrapper_cflags.txt
     goto :fail
 )
-REM Pin the target explicitly rather than relying on the toolchain default, so a
-REM mis-set TOOLPREFIX fails loudly instead of silently producing the wrong arch.
-set "WRAPPER_CFLAGS=!WRAPPER_CFLAGS! %ARCHCFLAG%"
-
 set ARCHIVE_OBJS=
 for %%F in (!WRAPPER_SRCS!) do (
     echo Compiling %%F...

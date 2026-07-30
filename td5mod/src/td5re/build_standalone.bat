@@ -26,58 +26,33 @@ set VARIANT=dev
 if /I "%~1"=="release" set VARIANT=release
 
 REM ---------------------------------------------------------------------------
-REM Architecture selection (x64 Stage 3)
+REM Architecture: x86_64 ONLY (i686 retired 2026-07-30)
 REM
-REM Selected by the TD5RE_ARCH environment variable, NOT an argument: this
-REM script's contract is "any unrecognised first argument means dev" (the /fix
-REM and /end skills pass a PID), so an arch argument could not be told apart
-REM from that and would silently mis-build.
+REM The port shipped 32-bit until the x64 retarget (branch x64-stage1-sse2)
+REM reached full parity: 67/67 modules, suite green, all 8 golden checks
+REM bit-identical to the last i686 build. DXR requires a 64-bit process
+REM (measured; see docs/plans/X64_DXR_ROADMAP.md), so x86_64 is now the ONE
+REM shipping target and produces the plain exe names (td5re.exe /
+REM td5re_release.exe). The i686 toolchain is parked in _archive\ and the last
+REM 32-bit-buildable tree is tagged in git history.
 REM
-REM   set TD5RE_ARCH=x86_64  &  build_standalone.bat      -> 64-bit
-REM   (unset, or anything else)                           -> 32-bit, the default
-REM
-REM i686 remains the SHIPPING target. The 64-bit path exists because DXR is
-REM unavailable to 32-bit processes (measured; see docs/plans/X64_DXR_ROADMAP.md).
-REM Object dirs are arch-suffixed so the two never share a stale .o cache --
-REM the same reason DEV and RELEASE are already separated.
+REM TD5RE_ARCH is no longer honoured -- fail loudly if someone asks for i686
+REM rather than silently building 64-bit under a 32-bit label.
 REM ---------------------------------------------------------------------------
-set ARCH=i686
-if /I "%TD5RE_ARCH%"=="x86_64" set ARCH=x86_64
-if /I "%TD5RE_ARCH%"=="x64" set ARCH=x86_64
-
-if "%ARCH%"=="x86_64" goto :arch_x64
-
-REM --- i686 (default, shipping) ---
-set TOOLPREFIX=..\..\deps\mingw\mingw32\bin
-set ZLIB_INC=..\..\deps\mingw\mingw32\i686-w64-mingw32\include
-set WINDRES_TARGET=pe-i386
-set ARCHLDFLAG=-m32
-set BUILDSUFFIX=
-goto :arch_done
-
-:arch_x64
-REM --- x86_64 (retarget) ---
-REM No ZLIB_INC: this build has no zlib dependency (see cflags_x86_64.txt), but
-REM the -I is harmless and kept pointing at the i686 headers because zlib's two
-REM headers are arch-neutral -- so a build that DOES opt back into zlib still
-REM finds them.
+if /I "%TD5RE_ARCH%"=="i686" (
+    echo ERROR: i686 was retired 2026-07-30 -- toolchain parked in _archive\,
+    echo        last 32-bit tree available in git history.
+    exit /b 1
+)
 set TOOLPREFIX=..\..\deps\mingw64\mingw64\bin
-set ZLIB_INC=..\..\deps\mingw\mingw32\i686-w64-mingw32\include
 set WINDRES_TARGET=pe-x86-64
 set ARCHLDFLAG=-m64
-set BUILDSUFFIX=_x64
-
-:arch_done
 set GCC=%TOOLPREFIX%\gcc.exe
 set AR=%TOOLPREFIX%\ar.exe
 set WINDRES=%TOOLPREFIX%\windres.exe
 set SRCDIR=.
 set WRAPPER_SRCDIR=..\..\ddraw_wrapper\src
-REM Arch-matched wrapper archive: ddraw_wrapper\build.bat uses the SAME suffix.
-REM Linking the i686 .a into a 64-bit exe fails with a bare "cannot find
-REM -lddraw_wrapper", which reads like a missing build rather than an arch
-REM mismatch -- so the paths are kept deliberately parallel.
-set WRAPPER_BUILDDIR=..\..\ddraw_wrapper\build%BUILDSUFFIX%
+set WRAPPER_BUILDDIR=..\..\ddraw_wrapper\build
 set PROJECT_ROOT=..\..\..
 
 REM ---------------------------------------------------------------------------
@@ -97,28 +72,16 @@ if not defined TD5RE_SRCS_COMMON (
 
 REM Shared compiler flags -- SINGLE SOURCE OF TRUTH: cflags.txt (same pattern
 REM as srcs.txt; build.yml, release.yml and td5mod\Makefile read the SAME file).
-REM Only the path-dependent -I include dirs are appended here.
+REM Arch flags (-m64) live there too since the i686 retirement collapsed the
+REM cflags/cflags_<arch> split back into one file. Only the path-dependent -I
+REM include dirs are appended here.
 set "CFLAGS_COMMON="
 for /f "usebackq eol=# delims=" %%L in ("%~dp0cflags.txt") do set "CFLAGS_COMMON=!CFLAGS_COMMON! %%L"
 if not defined CFLAGS_COMMON (
     echo ERROR: cflags.txt missing or empty at %~dp0cflags.txt
     exit /b 1
 )
-REM Arch-specific flags (-m32/-m64 and friends) live in cflags_<arch>.txt and
-REM are read IN ADDITION to the arch-neutral cflags.txt above. Missing file =
-REM hard error: silently building for the wrong architecture is the exact
-REM failure this split exists to prevent.
-if not exist "%~dp0cflags_%ARCH%.txt" (
-    echo ERROR: cflags_%ARCH%.txt missing at %~dp0cflags_%ARCH%.txt
-    exit /b 1
-)
-set "CFLAGS_ARCH="
-for /f "usebackq eol=# delims=" %%L in ("%~dp0cflags_%ARCH%.txt") do set "CFLAGS_ARCH=!CFLAGS_ARCH! %%L"
-if not defined CFLAGS_ARCH (
-    echo ERROR: cflags_%ARCH%.txt contains no flags
-    exit /b 1
-)
-set CFLAGS_BASE=!CFLAGS_COMMON! !CFLAGS_ARCH! -I%SRCDIR% -I%WRAPPER_SRCDIR% -I%ZLIB_INC%
+set CFLAGS_BASE=!CFLAGS_COMMON! -I%SRCDIR% -I%WRAPPER_SRCDIR%
 
 REM System link libraries -- SINGLE SOURCE OF TRUTH: link_libs.txt (shared with
 REM build.yml, release.yml and td5mod\Makefile so the lib list cannot drift).
@@ -128,25 +91,15 @@ if not defined LINK_LIBS (
     echo ERROR: link_libs.txt missing or empty at %~dp0link_libs.txt
     exit /b 1
 )
-REM Arch-specific libs. Unlike cflags_<arch>.txt this may legitimately be EMPTY
-REM (x86_64 needs no extra libs), so only the FILE is required, not its content.
-if not exist "%~dp0link_libs_%ARCH%.txt" (
-    echo ERROR: link_libs_%ARCH%.txt missing at %~dp0link_libs_%ARCH%.txt
-    exit /b 1
-)
-for /f "usebackq eol=# delims=" %%L in ("%~dp0link_libs_%ARCH%.txt") do set "LINK_LIBS=!LINK_LIBS! %%L"
 
 REM Per-variant configuration (goto-based, NOT parenthesized blocks, so comments
 REM containing parentheses cannot corrupt the batch parser).
 if /I "%VARIANT%"=="release" goto :cfg_release
 
 REM --- DEV: full debug affordances ---
-set BUILDDIR=build!BUILDSUFFIX!
-REM Arch suffix on the EXE too, not just the object dir: the x64 build must not
-REM overwrite the shipping 32-bit td5re.exe in the project root. The suffix is
-REM empty for i686, so the shipping name is unchanged.
-set EXE=td5re!BUILDSUFFIX!.exe
-set MAPFILE=td5re!BUILDSUFFIX!.map
+set BUILDDIR=build
+set EXE=td5re.exe
+set MAPFILE=td5re.map
 set TD5RE_SRCS=!TD5RE_SRCS_COMMON!
 set CFLAGS=!CFLAGS_BASE!
 set EXTRA_LDFLAGS=
@@ -156,9 +109,9 @@ goto :cfg_done
 REM --- RELEASE: define TD5RE_RELEASE so dev affordances (trace knobs, debug
 REM     overlays, net selftest) compile out / hard-disable, then strip the
 REM     symbol table. ---
-set BUILDDIR=build_release!BUILDSUFFIX!
-set EXE=td5re_release!BUILDSUFFIX!.exe
-set MAPFILE=td5re_release!BUILDSUFFIX!.map
+set BUILDDIR=build_release
+set EXE=td5re_release.exe
+set MAPFILE=td5re_release.map
 set TD5RE_SRCS=!TD5RE_SRCS_COMMON!
 REM Strip the symbol table (-s). We intentionally do NOT use
 REM -ffunction-sections/--gc-sections: per-function section padding bloated the

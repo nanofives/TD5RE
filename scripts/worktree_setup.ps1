@@ -51,22 +51,33 @@ if ((Test-Path $assetSrc) -and -not (Test-Path $assetDst)) {
 # DELETES the parent's mingw toolchain (twice in one session, 2026-05-16).
 # Instead: patch the worktree's build_standalone.bat to point at the parent's
 # absolute mingw path. No junction = no cleanup-cascade = parent's deps safe.
+# [2026-07-30 i686 retirement] toolchain is now deps\mingw64; the wrapper's
+# build.bat needs the same treatment (its relative path is one level shallower).
+$parentMingw64 = Join-Path $parent 'td5mod\deps\mingw64\mingw64\bin'
 $buildBat = Join-Path $wt 'td5mod\src\td5re\build_standalone.bat'
 if (Test-Path $buildBat) {
     $batContent = Get-Content $buildBat -Raw
-    $parentMingw = (Join-Path $parent 'td5mod\deps\mingw\mingw32\bin').Replace('\','\')
-    $parentZlibInc = (Join-Path $parent 'td5mod\deps\mingw\mingw32\i686-w64-mingw32\include')
-    if ($batContent -match '\.\.\\\.\.\\deps\\mingw\\mingw32\\bin') {
+    if ($batContent -match '\.\.\\\.\.\\deps\\mingw64\\mingw64\\bin') {
         $newContent = $batContent `
-            -replace '\.\.\\\.\.\\deps\\mingw\\mingw32\\bin', $parentMingw `
-            -replace '\.\.\\\.\.\\deps\\mingw\\mingw32\\i686-w64-mingw32\\include', $parentZlibInc
+            -replace '\.\.\\\.\.\\deps\\mingw64\\mingw64\\bin', $parentMingw64
         Set-Content -Path $buildBat -Value $newContent -NoNewline
-        Write-Host "  +    build_standalone.bat (patched to use parent's mingw at $parentMingw)"
+        Write-Host "  +    build_standalone.bat (patched to use parent's mingw64 at $parentMingw64)"
     } else {
         Write-Host "  ok   build_standalone.bat (already absolute or different pattern)"
     }
 } else {
     Write-Host "  miss td5mod\src\td5re\build_standalone.bat (not in worktree?)"
+}
+$wrapBat = Join-Path $wt 'td5mod\ddraw_wrapper\build.bat'
+if (Test-Path $wrapBat) {
+    $wrapContent = Get-Content $wrapBat -Raw
+    if ($wrapContent -match '\.\.\\deps\\mingw64\\mingw64\\bin') {
+        $wrapContent = $wrapContent -replace '\.\.\\deps\\mingw64\\mingw64\\bin', $parentMingw64
+        Set-Content -Path $wrapBat -Value $wrapContent -NoNewline
+        Write-Host "  +    ddraw_wrapper\build.bat (patched to use parent's mingw64)"
+    } else {
+        Write-Host "  ok   ddraw_wrapper\build.bat (already absolute or different pattern)"
+    }
 }
 
 # 2. Copy gitignored tools/ scripts the harness needs

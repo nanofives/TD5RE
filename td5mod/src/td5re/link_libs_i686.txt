@@ -1,4 +1,0 @@
-# i686-only system link libraries. Read IN ADDITION to link_libs.txt.
-# Pairs with -DTD5_INFLATE_USE_ZLIB in cflags_i686.txt: the bundled 32-bit
-# toolchain ships libz.a, so the DEFLATE path links against real zlib.
--lz

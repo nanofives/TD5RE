@@ -211,7 +211,7 @@ PORT_RVA_SYMBOLS = {
     "PORT_RVA_SIM_TICK":     "_g_tick_counter",
     "PORT_RVA_PAUSED":       "_g_game_paused",
 }
-NM_EXE = PROJECT_ROOT / "td5mod" / "deps" / "mingw" / "mingw32" / "bin" / "nm.exe"
+NM_EXE = PROJECT_ROOT / "td5mod" / "deps" / "mingw64" / "mingw64" / "bin" / "nm.exe"
 IMAGE_BASE = 0x00400000
 
 

@@ -27,7 +27,7 @@ TD5RE/
 ├── td5mod/
 │   ├── src/td5re/        # Source port modules (~58 .c files, see generated table below)
 │   ├── ddraw_wrapper/    # DirectDraw → D3D11 translation layer (static lib)
-│   └── deps/mingw/       # Bundled MinGW-w64 i686 toolchain
+│   └── deps/mingw64/     # Bundled MinGW-w64 x86_64 toolchain (i686 retired 2026-07-30, parked in _archive/)
 ├── re/                   # RE analysis, extracted assets, tools
 │   ├── assets/           # All game data — pre-extracted PNGs, DATs, WAVs, meshes (runtime asset directory)
 │   ├── ghidra_export/    # FULL decompilation as greppable text (functions/, symbols.csv, structs.h) — check BEFORE live Ghidra
@@ -55,6 +55,10 @@ build_all.bat                 :: canonical — refresh ddraw_wrapper lib if stal
 build_standalone.bat          :: DEV only     -> td5re.exe
 build_standalone.bat release  :: RELEASE only -> td5re_release.exe (-DTD5RE_RELEASE -DNDEBUG, stripped)
 ```
+
+Both exes are **x86_64** (i686 retired 2026-07-30; toolchain parked in `_archive/`,
+last 32-bit tree in git history). The port has **no zlib dependency** — embedded
+tinfl DEFLATE decoder + zlib-free PNG encoder.
 
 Both exes deploy to the project root. Object dirs are `build\` (dev) and
 `build_release\` — separate so differing `-D` flags never share a stale .o cache.
@@ -166,10 +170,10 @@ comment — regenerate after adding/splitting modules with
 | `td5_physics_drivetrain.c` | Engine, transmission, drive torque, gravity |
 | `td5_physics_suspension.c` | Suspension, wheel contacts, pose integration |
 | `td5_track.c` | Track geometry, segment contacts, strip data |
-| `td5_track_parser.c` | MODELS.DAT parsing (S6 module split, see docs/plans/REFACTOR_PLAN.md) |
+| `td5_track_parser.c` | MODELS.DAT parsing (S6 module split, see REFACTOR_PLAN.md) |
 | `td5_track_registry.c` | runtime registry for custom (user-built) tracks. |
 | `td5_ai.c` | AI routing, rubber-banding, traffic, script VM |
-| `td5_ai_traffic.c` | Traffic subsystem (S5 module split, see docs/plans/REFACTOR_PLAN.md) |
+| `td5_ai_traffic.c` | Traffic subsystem (S5 module split, see REFACTOR_PLAN.md) |
 | `td5_render.c` | Scene setup, mesh transform, frustum cull |
 | `td5_render_effects.c` | Per-actor render effects & world billboards |
 | `td5_render_mesh.c` | Scene rendering: meshes, actors, spans, texture cache |
@@ -195,6 +199,7 @@ comment — regenerate after adding/splitting modules with
 | `td5_inflate.c` | DEFLATE decompressor bridge |
 | `td5_save.c` | Config/cup save/load with XOR encryption |
 | `td5_config.c` | shared TD5RE_* environment-knob accessors. See td5_config.h. |
+| `td5_alloc_log.c` | raw-CRT allocation logger. See td5_alloc_log.h. |
 | `td5_pending.c` | Dev/QA "pending to test" checklist + in-game overlay. |
 | `td5_net.c` | Multiplayer protocol, lockstep sync |
 | `td5_upnp.c` | Minimal UPnP IGD port-mapping client (see td5_upnp.h). |
@@ -343,3 +348,7 @@ pwsh -NoProfile -File "C:\Users\maria\Desktop\Proyectos\.claude\skills\repo-flee
 
 **Keep local** (`[local]` prefix or in-session): anything needing Ghidra/x64dbg/frida MCP, builds,
 running the game/dev harness, semgrep, edits/writes, git mutations.
+
+
+## Happy info pane
+Keep `.happy/project-info.json` (the Happy right-sidebar Project Info pane) current: whenever a standing, glance-worthy fact for this folder changes (status, counts, key dates/names), proactively overwrite that JSON and bump `updatedAt`. Shape: `{ title, updatedAt, sections:[{ heading, fields:[{ label, value, kind }] }] }`, kind = text|number|date|list.

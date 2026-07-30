@@ -24,7 +24,7 @@ on:
 
 jobs:
   build:
-    name: Build (MinGW i686)
+    name: Build (MinGW x86_64)
     runs-on: windows-latest
 
     defaults:
@@ -34,14 +34,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up MSYS2 (MinGW i686)
+      # x86_64 ONLY since the i686 retirement (2026-07-30). No zlib: the port
+      # uses its embedded tinfl decoder + zlib-free PNG encoder.
+      - name: Set up MSYS2 (MinGW x86_64)
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW32
+          msystem: MINGW64
           update: false
           install: >-
-            mingw-w64-i686-gcc
-            mingw-w64-i686-zlib
+            mingw-w64-x86_64-gcc
 
       # -----------------------------------------------------------------------
       # ddraw_wrapper — D3D11 translation layer, built as a static archive
@@ -54,7 +55,7 @@ jobs:
         run: |
           cd td5mod/ddraw_wrapper
           mkdir -p build
-          CFLAGS="$(tr -d '\r' < wrapper_cflags.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ') -m32"
+          CFLAGS="$(tr -d '\r' < wrapper_cflags.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ')"
           SRCS=$(tr -d '\r' < wrapper_srcs.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ')
 
           ARCHIVE_OBJS=""
@@ -87,11 +88,9 @@ jobs:
 
           WRAPPER_SRCDIR=../../ddraw_wrapper/src
           WRAPPER_BUILDDIR=../../ddraw_wrapper/build
-          # [x64 Stage 3] cflags.txt is ARCH-NEUTRAL; the arch flags (-m32 etc.)
-          # live in cflags_$ARCH.txt and MUST be read as well, or this builds
-          # for the runner's host architecture instead. CI targets i686 only.
-          ARCH=i686
-          CFLAGS="$(tr -d '\r' < cflags.txt cflags_$ARCH.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ') -I. -I$WRAPPER_SRCDIR"
+          # -m64 lives in cflags.txt: x86_64 is the only arch since the i686
+          # retirement (2026-07-30).
+          CFLAGS="$(tr -d '\r' < cflags.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ') -I. -I$WRAPPER_SRCDIR"
           if [ "${{ inputs.release }}" = "true" ]; then
             CFLAGS="$CFLAGS -DTD5RE_RELEASE -DNDEBUG"
           fi
@@ -108,7 +107,7 @@ jobs:
           done
 
           # Resource (icon) — non-fatal if windres fails
-          if windres -F pe-i386 -i td5re.rc -o build/td5re_res.o 2>/dev/null; then
+          if windres -F pe-x86-64 -i td5re.rc -o build/td5re_res.o 2>/dev/null; then
             RES_OBJ="build/td5re_res.o"
           else
             echo "WARNING: windres failed, icon will not be embedded"
@@ -119,12 +118,12 @@ jobs:
           ARCHIVE_OBJS=$(ls build/*.o | grep -v '/main\.o' | grep -v '_res\.o')
           ar rcs build/libtd5re.a $ARCHIVE_OBJS
 
-          LIBS=$(tr -d '\r' < link_libs.txt link_libs_$ARCH.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ')
+          LIBS=$(tr -d '\r' < link_libs.txt | grep -vE '^[[:space:]]*(#|$)' | tr '\n' ' ')
           EXTRA_LDFLAGS=""
           if [ "${{ inputs.release }}" = "true" ]; then
             EXTRA_LDFLAGS="-s"
           fi
-          gcc -m32 -mwindows -static $EXTRA_LDFLAGS -o build/td5re.exe \
+          gcc -m64 -mwindows -static $EXTRA_LDFLAGS -o build/td5re.exe \
             build/main.o $RES_OBJ \
             -Lbuild -Wl,--whole-archive -ltd5re -Wl,--no-whole-archive \
             -L"$WRAPPER_BUILDDIR" -lddraw_wrapper \

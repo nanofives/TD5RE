@@ -17,13 +17,19 @@
 #
 # Usage:
 #   pwsh -NoProfile -File scripts/selftest_pristine.ps1 [-Suite full] [-Width N -Height N]
+#   pwsh -NoProfile -File scripts/selftest_pristine.ps1 -Exe .\other.exe   # alternate build
+#
+# -Exe forwards to selftest.ps1 (kept from the x64-retarget era, when the
+# 32- and 64-bit exes shared one td5re.ini and both needed the pristine-INI
+# treatment; td5re.exe IS the x86_64 build since the 2026-07-30 retirement).
 
 param(
     [ValidateSet("smoke", "full")]
     [string]$Suite = "full",
     [int]$Width = 1280,
     [int]$Height = 676,
-    [int]$TimeoutSec = 1200
+    [int]$TimeoutSec = 1200,
+    [string]$Exe = ".\td5re.exe"
 )
 
 $ErrorActionPreference = "Stop"
@@ -51,7 +57,7 @@ try {
     Set-Content $ini $text -NoNewline
     Write-Host "pristine INI staged at ${Width}x${Height}"
 
-    & pwsh -NoProfile -File "$root\scripts\selftest.ps1" -Suite $Suite -TimeoutSec $TimeoutSec
+    & pwsh -NoProfile -File "$root\scripts\selftest.ps1" -Suite $Suite -TimeoutSec $TimeoutSec -Exe $Exe
     $code = $LASTEXITCODE
 }
 finally {

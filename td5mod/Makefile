@@ -11,7 +11,7 @@
 #   make rebuild    — clean + all
 #
 # Invoke from td5mod/ via mingw32-make. Windows-native make is required —
-# the bundled toolchain ships td5mod/deps/mingw/mingw32/bin/mingw32-make.exe.
+# the bundled toolchain ships td5mod/deps/mingw64/mingw64/bin/mingw32-make.exe.
 #
 # This Makefile does not replace the .bat scripts; they remain authoritative.
 # It shares the module list with them via src/td5re/srcs.txt. Builds the DEV
@@ -21,7 +21,7 @@
 # Toolchain
 # ---------------------------------------------------------------------------
 
-MINGW_BIN := deps/mingw/mingw32/bin
+MINGW_BIN := deps/mingw64/mingw64/bin
 GCC       := $(MINGW_BIN)/gcc.exe
 AR        := $(MINGW_BIN)/ar.exe
 WINDRES   := $(MINGW_BIN)/windres.exe
@@ -35,7 +35,6 @@ TD5RE_BUILD   := $(TD5RE_SRC)/build
 WRAPPER_DIR   := ddraw_wrapper
 WRAPPER_SRC   := $(WRAPPER_DIR)/src
 WRAPPER_BUILD := $(WRAPPER_DIR)/build
-ZLIB_INC      := deps/mingw/mingw32/i686-w64-mingw32/include
 
 PROJECT_ROOT  := ..
 
@@ -69,29 +68,23 @@ WRAPPER_OBJS := $(addprefix $(WRAPPER_BUILD)/,$(WRAPPER_SRCS:.c=.o))
 # Common flags -- SINGLE SOURCE OF TRUTH: src/td5re/cflags.txt (shared with
 # build_standalone.bat + the CI workflows). $(filter -%,...) keeps only flag
 # tokens, dropping comment words and blanks. Path-dependent -I dirs appended.
-#
-# [x64 Stage 3] cflags.txt is now ARCH-NEUTRAL; the arch flags (-m32 etc.) live
-# in cflags_$(ARCH).txt and MUST be read as well or this would build for the
-# host architecture instead. This Makefile targets i686 only -- the 64-bit path
-# is driven by build_standalone.bat with TD5RE_ARCH=x86_64.
-ARCH := i686
+# -m64 lives in cflags.txt itself: x86_64 is the ONLY arch since the i686
+# retirement (2026-07-30).
 TD5RE_CFLAGS   := $(filter -%,$(file < $(TD5RE_SRC)/cflags.txt)) \
-                  $(filter -%,$(file < $(TD5RE_SRC)/cflags_$(ARCH).txt)) \
-                  -I$(TD5RE_SRC) -I$(WRAPPER_SRC) -I$(ZLIB_INC)
+                  -I$(TD5RE_SRC) -I$(WRAPPER_SRC)
 
 # SINGLE SOURCE OF TRUTH: ddraw_wrapper/wrapper_cflags.txt, shared with
 # build.bat + the CI workflows.
-WRAPPER_CFLAGS := $(filter -%,$(file < $(WRAPPER_DIR)/wrapper_cflags.txt)) -m32
+WRAPPER_CFLAGS := $(filter -%,$(file < $(WRAPPER_DIR)/wrapper_cflags.txt))
 
 # png_loader.c additionally needs -Wno-unused-function per build.bat.
 $(WRAPPER_BUILD)/png_loader.o: WRAPPER_CFLAGS += -Wno-unused-function
 
 # System link libs -- SINGLE SOURCE OF TRUTH: src/td5re/link_libs.txt
 # (shared with build_standalone.bat + the CI workflows).
-LINK_LIBS := $(filter -l%,$(file < $(TD5RE_SRC)/link_libs.txt)) \
-             $(filter -l%,$(file < $(TD5RE_SRC)/link_libs_$(ARCH).txt))
+LINK_LIBS := $(filter -l%,$(file < $(TD5RE_SRC)/link_libs.txt))
 
-LINK_FLAGS := -m32 -mwindows -static \
+LINK_FLAGS := -m64 -mwindows -static \
               -Wl,--enable-stdcall-fixup \
               -Wl,--allow-multiple-definition
 
@@ -137,7 +130,7 @@ $(TD5RE_BUILD)/libtd5re.a: $(TD5RE_LIB_OBJS)
 
 # --- td5re resource (icon) ---
 $(TD5RE_BUILD)/td5re_res.o: $(TD5RE_SRC)/td5re.rc | dirs
-	"$(WINDRES)" -F pe-i386 -i $< -o $@
+	"$(WINDRES)" -F pe-x86-64 -i $< -o $@
 
 # --- td5re executable ---
 $(TD5RE_BUILD)/td5re.exe: $(TD5RE_BUILD)/main.o $(TD5RE_BUILD)/libtd5re.a \
