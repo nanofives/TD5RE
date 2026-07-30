@@ -182,6 +182,14 @@ void  Backend_ForceBlendState(int blend_idx);      /* bind + update cache idx */
  * fenced. Deleted with that fence. */
 void *Backend_PixelShaderRaw(BackendPixelShader *ps);
 
+/* Soft-particle depth binding (smoke): swap the bound depth target to the
+ * read-only DSV and expose scene depth as PS resource t1, so a shader can
+ * sample depth while the hardware z-test still runs. Begin returns 1 if the
+ * soft-particle resources exist (0 = unavailable). End restores the writable
+ * depth target + original RTV. */
+int  Backend_BindSceneDepthReadonly(void);
+void Backend_UnbindSceneDepthReadonly(void);
+
 /* Windowed mode: display window management */
 void Backend_EnforceWindowSize(void);
 HWND Backend_GetDisplayWindow(void);

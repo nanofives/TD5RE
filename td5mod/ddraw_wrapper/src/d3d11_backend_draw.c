@@ -193,6 +193,48 @@ void *Backend_PixelShaderRaw(BackendPixelShader *h)
 {
     return h ? (void*)h->ps : NULL;
 }
+
+/* ---- soft-particle depth binding (see wrapper.h) ---------------------- */
+
+static ID3D11RenderTargetView *s_soft_saved_rtv = NULL;
+static ID3D11DepthStencilView *s_soft_saved_dsv = NULL;
+static int                     s_soft_active     = 0;
+
+int Backend_BindSceneDepthReadonly(void)
+{
+    ID3D11DeviceContext *ctx = g_backend.context;
+    if (!ctx || !g_backend.depth_srv || !g_backend.depth_dsv_readonly) return 0;
+
+    /* Save the currently bound RTV + DSV (AddRef'd) so we can restore them. */
+    s_soft_saved_rtv = NULL;
+    s_soft_saved_dsv = NULL;
+    ID3D11DeviceContext_OMGetRenderTargets(ctx, 1, &s_soft_saved_rtv, &s_soft_saved_dsv);
+
+    /* Same colour target, but the READ-ONLY depth view (so depth can also be an
+     * SRV), plus the depth SRV at t1 for the smoke shader. */
+    ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &s_soft_saved_rtv, g_backend.depth_dsv_readonly);
+    ID3D11DeviceContext_PSSetShaderResources(ctx, 1, 1, &g_backend.depth_srv);
+    s_soft_active = 1;
+    return 1;
+}
+
+void Backend_UnbindSceneDepthReadonly(void)
+{
+    ID3D11DeviceContext *ctx = g_backend.context;
+    if (!ctx || !s_soft_active) return;
+    s_soft_active = 0;
+
+    /* Unbind t1 (avoids a read/write hazard when depth is next a writable
+     * target), then restore the original RTV + writable DSV. */
+    {
+        ID3D11ShaderResourceView *null_srv = NULL;
+        ID3D11DeviceContext_PSSetShaderResources(ctx, 1, 1, &null_srv);
+    }
+    ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &s_soft_saved_rtv, s_soft_saved_dsv);
+
+    if (s_soft_saved_rtv) { ID3D11RenderTargetView_Release(s_soft_saved_rtv); s_soft_saved_rtv = NULL; }
+    if (s_soft_saved_dsv) { ID3D11DepthStencilView_Release(s_soft_saved_dsv); s_soft_saved_dsv = NULL; }
+}
 #include <stdlib.h>
 #include <string.h>
 #include <dxgi1_3.h>

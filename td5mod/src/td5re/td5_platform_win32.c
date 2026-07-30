@@ -3267,11 +3267,11 @@ typedef struct FxParamsCB {
     float p2;
 } FxParamsCB;
 
-static ID3D11PixelShader *s_fx_ps[4]   = { NULL, NULL, NULL, NULL };
-static int                s_fx_tried[4] = { 0, 0, 0, 0 };
-static ID3D11Buffer      *s_fx_cb       = NULL;
+static BackendPixelShader *s_fx_ps[4]   = { NULL, NULL, NULL, NULL };
+static int                 s_fx_tried[4] = { 0, 0, 0, 0 };
+static BackendConstBuffer *s_fx_cb       = NULL;
 
-static ID3D11PixelShader *fx_ensure_shader(TD5_FxShader which)
+static BackendPixelShader *fx_ensure_shader(TD5_FxShader which)
 {
     static unsigned s_fx_gen = 0;   /* device generation these objects were built for */
     int i = (int)which;
@@ -3286,10 +3286,10 @@ static ID3D11PixelShader *fx_ensure_shader(TD5_FxShader which)
     if (g_backend.device && s_fx_gen != g_backend.device_generation) {
         int k;
         for (k = 0; k < 4; k++) {
-            if (s_fx_ps[k]) { ID3D11PixelShader_Release(s_fx_ps[k]); s_fx_ps[k] = NULL; }
+            Backend_ReleasePixelShader(s_fx_ps[k]); s_fx_ps[k] = NULL;
             s_fx_tried[k] = 0;
         }
-        if (s_fx_cb) { ID3D11Buffer_Release(s_fx_cb); s_fx_cb = NULL; }
+        Backend_ReleaseConstBuffer(s_fx_cb); s_fx_cb = NULL;
         s_fx_gen = g_backend.device_generation;
     }
 
@@ -3310,24 +3310,17 @@ static ID3D11PixelShader *fx_ensure_shader(TD5_FxShader which)
     default: return NULL;
     }
 
-    HRESULT hr = ID3D11Device_CreatePixelShader(g_backend.device, code, size, NULL, &s_fx_ps[i]);
-    if (FAILED(hr)) {
-        s_fx_ps[i] = NULL;
-        TD5_LOG_W(LOG_TAG, "fx shader '%s' create failed hr=0x%08lX", name, (unsigned long)hr);
+    s_fx_ps[i] = Backend_CreatePixelShader(code, size);
+    if (!s_fx_ps[i]) {
+        TD5_LOG_W(LOG_TAG, "fx shader '%s' create failed", name);
         return NULL;
     }
 
     if (!s_fx_cb) {
-        D3D11_BUFFER_DESC bd;
-        memset(&bd, 0, sizeof(bd));
-        bd.ByteWidth = sizeof(FxParamsCB);   /* 16 bytes, 16-aligned */
-        bd.Usage     = D3D11_USAGE_DEFAULT;
-        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        HRESULT hcb = ID3D11Device_CreateBuffer(g_backend.device, &bd, NULL, &s_fx_cb);
-        if (FAILED(hcb)) {
-            s_fx_cb = NULL;
-            TD5_LOG_W(LOG_TAG, "fx cbuffer create failed hr=0x%08lX", (unsigned long)hcb);
-            ID3D11PixelShader_Release(s_fx_ps[i]);
+        s_fx_cb = Backend_CreateConstBuffer(sizeof(FxParamsCB));   /* 16 bytes, 16-aligned */
+        if (!s_fx_cb) {
+            TD5_LOG_W(LOG_TAG, "fx cbuffer create failed");
+            Backend_ReleasePixelShader(s_fx_ps[i]);
             s_fx_ps[i] = NULL;
             return NULL;
         }
@@ -3339,10 +3332,9 @@ static ID3D11PixelShader *fx_ensure_shader(TD5_FxShader which)
 
 int td5_plat_fx_begin(TD5_FxShader which, float time_seconds, float p0)
 {
-    ID3D11DeviceContext *ctx = g_backend.context;
-    if (!ctx) return 0;
+    if (!g_backend.context) return 0;
 
-    ID3D11PixelShader *ps = fx_ensure_shader(which);
+    BackendPixelShader *ps = fx_ensure_shader(which);
     if (!ps || !s_fx_cb) return 0;
 
     FxParamsCB cb;
@@ -3350,12 +3342,12 @@ int td5_plat_fx_begin(TD5_FxShader which, float time_seconds, float p0)
     cb.p0   = p0;
     cb.p1   = 0.0f;
     cb.p2   = 0.0f;
-    ID3D11DeviceContext_UpdateSubresource(ctx, (ID3D11Resource *)s_fx_cb, 0, NULL, &cb, 0, 0);
+    Backend_UpdateConstBuffer(s_fx_cb, &cb, sizeof(cb));
     /* b1 is never touched by td5_plat_render_draw_tris (it binds b0/fog only),
      * so this binding survives every draw inside the begin/end bracket. */
-    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 1, 1, &s_fx_cb);
+    Backend_BindConstBuffer(1, s_fx_cb);
 
-    td5_plat_render_set_ps_override((void *)ps, SAMP_LINEAR_CLAMP);
+    td5_plat_render_set_ps_override(Backend_PixelShaderRaw(ps), SAMP_LINEAR_CLAMP);
     return 1;
 }
 
@@ -3371,42 +3363,14 @@ void td5_plat_fx_end(void)
  * resources exist (the caller passes that as the smoke shader's soft flag and
  * MUST call td5_plat_fx_soft_end() after the draw to restore the writable depth
  * target). Returns 0 (soft disabled) if the backend couldn't create them. */
-static ID3D11RenderTargetView *s_soft_saved_rtv = NULL;
-static ID3D11DepthStencilView *s_soft_saved_dsv = NULL;
-static int                     s_soft_active     = 0;
-
 int td5_plat_fx_soft_begin(void)
 {
-    ID3D11DeviceContext *ctx = g_backend.context;
-    if (!ctx || !g_backend.depth_srv || !g_backend.depth_dsv_readonly) return 0;
-
-    /* Save the currently bound RTV + DSV (AddRef'd) so we can restore them. */
-    s_soft_saved_rtv = NULL;
-    s_soft_saved_dsv = NULL;
-    ID3D11DeviceContext_OMGetRenderTargets(ctx, 1, &s_soft_saved_rtv, &s_soft_saved_dsv);
-
-    /* Same colour target, but the READ-ONLY depth view (so depth can also be an
-     * SRV), plus the depth SRV at t1 for the smoke shader. */
-    ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &s_soft_saved_rtv, g_backend.depth_dsv_readonly);
-    ID3D11DeviceContext_PSSetShaderResources(ctx, 1, 1, &g_backend.depth_srv);
-    s_soft_active = 1;
-    return 1;
+    return Backend_BindSceneDepthReadonly();
 }
 
 void td5_plat_fx_soft_end(void)
 {
-    ID3D11DeviceContext *ctx = g_backend.context;
-    if (!ctx || !s_soft_active) return;
-    s_soft_active = 0;
-
-    /* Unbind t1 (avoids a read/write hazard when the depth is next a writable
-     * target), then restore the original RTV + writable DSV. */
-    ID3D11ShaderResourceView *null_srv = NULL;
-    ID3D11DeviceContext_PSSetShaderResources(ctx, 1, 1, &null_srv);
-    ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &s_soft_saved_rtv, s_soft_saved_dsv);
-
-    if (s_soft_saved_rtv) { ID3D11RenderTargetView_Release(s_soft_saved_rtv); s_soft_saved_rtv = NULL; }
-    if (s_soft_saved_dsv) { ID3D11DepthStencilView_Release(s_soft_saved_dsv); s_soft_saved_dsv = NULL; }
+    Backend_UnbindSceneDepthReadonly();
 }
 
 #ifndef TD5RE_RELEASE
