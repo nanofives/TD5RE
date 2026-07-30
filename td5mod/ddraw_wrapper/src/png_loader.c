@@ -63,7 +63,7 @@ static PngIndex g_png_index = {0, 0, NULL};
 
 typedef struct {
     uint32_t crc32;         /* Texture CRC (same as index entry) */
-    ID3D11ShaderResourceView *srv;
+    BackendTexture *bt;     /* opaque GPU handle (was raw ID3D11 SRV) */
     int      has_alpha;     /* -1=unknown, 0=no, 1=yes */
 } PngCacheEntry;
 
@@ -231,26 +231,26 @@ const char *PngOverride_Lookup(DWORD width, DWORD height,
  * PNG texture cache helpers
  * ======================================================================== */
 
-/* Look up cached SRV by CRC32, return with AddRef if found */
-static ID3D11ShaderResourceView *PngCache_Lookup(uint32_t crc)
+/* Look up cached handle by CRC32, return with AddRef if found */
+static BackendTexture *PngCache_Lookup(uint32_t crc)
 {
     int i;
     for (i = 0; i < g_png_cache_count; i++) {
-        if (g_png_cache[i].crc32 == crc && g_png_cache[i].srv) {
-            ID3D11ShaderResourceView_AddRef(g_png_cache[i].srv);
-            return g_png_cache[i].srv;
+        if (g_png_cache[i].crc32 == crc && g_png_cache[i].bt) {
+            Backend_TextureAddRef(g_png_cache[i].bt);
+            return g_png_cache[i].bt;
         }
     }
     return NULL;
 }
 
-/* Store SRV in cache (AddRefs internally) */
-static void PngCache_Store(uint32_t crc, ID3D11ShaderResourceView *srv, int has_alpha)
+/* Store handle in cache (AddRefs internally) */
+static void PngCache_Store(uint32_t crc, BackendTexture *bt, int has_alpha)
 {
     if (g_png_cache_count < PNG_CACHE_MAX) {
-        ID3D11ShaderResourceView_AddRef(srv);
+        Backend_TextureAddRef(bt);
         g_png_cache[g_png_cache_count].crc32 = crc;
-        g_png_cache[g_png_cache_count].srv = srv;
+        g_png_cache[g_png_cache_count].bt = bt;
         g_png_cache[g_png_cache_count].has_alpha = has_alpha;
         g_png_cache_count++;
     }
@@ -267,10 +267,8 @@ void PngOverride_InvalidateCache(void)
 {
     int i;
     for (i = 0; i < g_png_cache_count; i++) {
-        if (g_png_cache[i].srv) {
-            ID3D11ShaderResourceView_Release(g_png_cache[i].srv);
-            g_png_cache[i].srv = NULL;
-        }
+        Backend_TextureRelease(g_png_cache[i].bt);
+        g_png_cache[i].bt = NULL;
     }
     g_png_cache_count = 0;
 }
@@ -335,7 +333,7 @@ int PngOverride_HasAlpha(const char *path)
     /* Cache the result for future calls */
     if (g_png_cache_count < PNG_CACHE_MAX) {
         g_png_cache[g_png_cache_count].crc32 = path_crc;
-        g_png_cache[g_png_cache_count].srv = NULL;
+        g_png_cache[g_png_cache_count].bt = NULL;
         g_png_cache[g_png_cache_count].has_alpha = has_alpha;
         g_png_cache_count++;
     }
@@ -398,28 +396,24 @@ int PngOverride_WriteToSurface(const char *path, DWORD width, DWORD height,
     return 1;
 }
 
-ID3D11ShaderResourceView *PngOverride_LoadToTexture(const char *path)
+BackendTexture *PngOverride_LoadToTexture(const char *path)
 {
     FILE *f;
     long file_size;
     unsigned char *file_data;
     int img_w, img_h, img_channels;
     unsigned char *pixels;
-    D3D11_TEXTURE2D_DESC td;
-    D3D11_SUBRESOURCE_DATA init;
-    ID3D11Texture2D *tex = NULL;
-    ID3D11ShaderResourceView *srv = NULL;
-    HRESULT hr;
+    BackendTexture *bt;
     uint32_t path_crc;
 
     if (!g_backend.device) return NULL;
 
     /* Check cache first (use path CRC as key since same CRC = same texture) */
     path_crc = compute_crc32(path, strlen(path));
-    srv = PngCache_Lookup(path_crc);
-    if (srv) {
+    bt = PngCache_Lookup(path_crc);
+    if (bt) {
         WRAPPER_LOG("PngOverride: cache hit for %s", path);
-        return srv;
+        return bt;
     }
 
     f = fopen(path, "rb");
@@ -448,52 +442,27 @@ ID3D11ShaderResourceView *PngOverride_LoadToTexture(const char *path)
         return NULL;
     }
 
-    /* Create B8G8R8A8 texture -- this function is only called for PNGs with alpha */
-    ZeroMemory(&td, sizeof(td));
-    td.Width = img_w;
-    td.Height = img_h;
-    td.MipLevels = 1;
-    td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    td.SampleDesc.Count = 1;
-    td.Usage = D3D11_USAGE_DEFAULT;
-    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-
-    /* stb_image gives RGBA, but D3D11 wants BGRA for B8G8R8A8_UNORM */
+    /* stb_image gives RGBA; the GPU texture is B8G8R8A8 -- swap R<->B in place. */
     {
         int i;
         for (i = 0; i < img_w * img_h; i++) {
             unsigned char *p = pixels + i * 4;
-            unsigned char tmp = p[0]; p[0] = p[2]; p[2] = tmp;  /* swap R<->B */
+            unsigned char tmp = p[0]; p[0] = p[2]; p[2] = tmp;
         }
     }
 
-    init.pSysMem = pixels;
-    init.SysMemPitch = img_w * 4;
-    init.SysMemSlicePitch = 0;
-
-    hr = ID3D11Device_CreateTexture2D(g_backend.device, &td, &init, &tex);
-    if (SUCCEEDED(hr)) {
-        hr = ID3D11Device_CreateShaderResourceView(g_backend.device,
-                                                    (ID3D11Resource *)tex,
-                                                    NULL, &srv);
-        if (FAILED(hr)) {
-            WRAPPER_LOG("PngOverride: CreateShaderResourceView failed hr=0x%08lX", hr);
-            srv = NULL;
-        }
-        /* The SRV holds a ref to the texture, so release our ref */
-        ID3D11Texture2D_Release(tex);
-    } else {
-        WRAPPER_LOG("PngOverride: CreateTexture2D B8G8R8A8 failed hr=0x%08lX", hr);
-    }
-
+    /* Only called for PNGs with alpha. */
+    bt = Backend_TextureFromBGRA(pixels, img_w, img_h);
     stbi_image_free(pixels);
-    if (srv) {
-        PngCache_Store(path_crc, srv, 1);  /* Alpha PNGs always have alpha */
+
+    if (bt) {
+        PngCache_Store(path_crc, bt, 1);  /* Alpha PNGs always have alpha */
         WRAPPER_LOG("PngOverride: loaded %s (%dx%d) [cached, total=%d]",
                     path, img_w, img_h, g_png_cache_count);
+    } else {
+        WRAPPER_LOG("PngOverride: GPU texture create failed for %s", path);
     }
-    return srv;
+    return bt;
 }
 
 /* ========================================================================

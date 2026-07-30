@@ -472,7 +472,7 @@ const char *PngOverride_Lookup(DWORD width, DWORD height,
 int PngOverride_HasAlpha(const char *path);
 int PngOverride_WriteToSurface(const char *path, DWORD width, DWORD height,
                                void *pixel_data, LONG pitch);
-ID3D11ShaderResourceView *PngOverride_LoadToTexture(const char *path);
+BackendTexture *PngOverride_LoadToTexture(const char *path);
 void PngOverride_DumpTexture(DWORD width, DWORD height,
                              const void *pixel_data, LONG pitch,
                              uint32_t crc);

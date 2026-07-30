@@ -85,6 +85,11 @@ void Backend_TextureClearRT(BackendTexture *bt, const float *rgba);
 void Backend_TextureEnsureCurrent(BackendTexture *bt, DWORD w, DWORD h,
                                   DXGI_FORMAT fmt, int is_rt, int needs_staging);
 
+/* Create a B8G8R8A8 texture (+SRV) from CPU BGRA pixels (tight w*4 pitch).
+ * Used by the PNG-override loader so png_loader.c holds no graphics-API types.
+ * Refcount 1; NULL on failure. */
+BackendTexture *Backend_TextureFromBGRA(const void *pixels, int w, int h);
+
 /* Adopt a raw backend-native texture object as a BackendTexture (used by the
  * PNG-override path, which decodes straight to a GPU texture). Backend-private
  * detail lives behind the void*; only the active backend calls this. Returns a

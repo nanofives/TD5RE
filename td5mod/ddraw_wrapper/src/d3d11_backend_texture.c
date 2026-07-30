@@ -263,6 +263,39 @@ void Backend_TextureEnsureCurrent(BackendTexture *bt, DWORD w, DWORD h,
     bt->device_generation = g_backend.device_generation;
 }
 
+/* ---- create from CPU BGRA pixels (PNG override loader) ----------------- */
+
+BackendTexture *Backend_TextureFromBGRA(const void *pixels, int w, int h)
+{
+    D3D11_TEXTURE2D_DESC td;
+    D3D11_SUBRESOURCE_DATA init;
+    ID3D11Texture2D *tex = NULL;
+    BackendTexture *bt;
+
+    if (!g_backend.device || !pixels || w <= 0 || h <= 0) return NULL;
+
+    ZeroMemory(&td, sizeof(td));
+    td.Width = (UINT)w; td.Height = (UINT)h; td.MipLevels = 1; td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    init.pSysMem = pixels; init.SysMemPitch = (UINT)w * 4; init.SysMemSlicePitch = 0;
+
+    if (FAILED(ID3D11Device_CreateTexture2D(g_backend.device, &td, &init, &tex)))
+        return NULL;
+    bt = bt_alloc();
+    if (!bt) { ID3D11Texture2D_Release(tex); return NULL; }
+    bt->tex = tex;
+    if (FAILED(ID3D11Device_CreateShaderResourceView(g_backend.device,
+            (ID3D11Resource*)tex, NULL, &bt->srv))) {
+        Backend_TextureRelease(bt);
+        return NULL;
+    }
+    bt->format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    bt->width = (DWORD)w; bt->height = (DWORD)h;
+    bt->device_generation = g_backend.device_generation;
+    return bt;
+}
+
 /* ---- adopt a raw SRV (PNG override path) ------------------------------- */
 
 BackendTexture *Backend_TextureAdopt(void *native_srv)
@@ -338,15 +371,12 @@ int Backend_TextureLoad(BackendTexture **pbt, DWORD dst_w, DWORD dst_h,
         PngOverride_DumpTexture(src_w, src_h, src_pixels, src_pitch, 0);
         const char *png_path = PngOverride_Lookup(src_w, src_h, src_pixels, src_pitch);
         if (png_path) {
-            ID3D11ShaderResourceView *png_srv = PngOverride_LoadToTexture(png_path);
-            if (png_srv) {
-                BackendTexture *nbt = Backend_TextureAdopt(png_srv);
-                if (nbt) {
-                    if (dst) Backend_TextureRelease(dst);
-                    *pbt = nbt;
-                    if (out_r5g6b5_source) *out_r5g6b5_source = 0;  /* PNG = direct A8, no r5g6b5 */
-                    return 1;
-                }
+            BackendTexture *nbt = PngOverride_LoadToTexture(png_path);   /* returns a handle */
+            if (nbt) {
+                if (dst) Backend_TextureRelease(dst);
+                *pbt = nbt;
+                if (out_r5g6b5_source) *out_r5g6b5_source = 0;  /* PNG = direct A8, no r5g6b5 */
+                return 1;
             }
         }
     }
