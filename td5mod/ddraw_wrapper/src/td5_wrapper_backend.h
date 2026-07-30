@@ -419,6 +419,11 @@ int Backend_NoteDeviceRemoved(HRESULT hr, const char *where);
  * D3D3 draw entry points. */
 void Backend_NoteDraw(unsigned prim, unsigned vcount, unsigned icount, int indexed);
 
+/* [TDR-diag 2026-07-30] Screen-extent + NaN scan of a vertex upload; feeds the
+ * per-present FRAME HISTORY dumped with the draw ring (device-hung + SEH
+ * crash paths). Called by Backend_StreamUpload for every batch. */
+void Backend_NoteVerts(const void *verts, unsigned vert_count, unsigned stride);
+
 /* [D3D DEBUG 2026-07-19] Opt-in D3D11 debug-layer diagnostics (TD5RE_D3D_DEBUG=1).
  * Backend_D3DDebugEnabled() reports the env flag (cached). Backend_DrainD3DDebug()
  * flushes all stored debug-layer messages to log/gpu_d3d_debug.log; call once per

@@ -20,6 +20,7 @@
 
 #include "wrapper.h"
 #include <d3d11sdklayers.h>   /* ID3D11InfoQueue (opt-in debug-layer drain) */
+#include <dxgi1_4.h>          /* IDXGIAdapter3::QueryVideoMemoryInfo (TDR-diag) */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -83,9 +84,45 @@ typedef struct {
 static TD5DrawRec s_draw_ring[TD5_DRAW_RING];
 static unsigned s_draw_head, s_draw_total, s_draw_max_icount, s_draw_max_vcount;
 
+/* [TDR-diag 2026-07-30] Per-present frame stats, ALWAYS recorded (a few adds
+ * per draw + a min/max scan per vertex upload). The device-hung ring alone
+ * cannot answer "was the hung frame pathological?" — it only holds the last
+ * 256 draws. This history holds, for each of the last 16 presents: draw count,
+ * vertex count, the min/max screen-space X/Y of every submitted vertex, and a
+ * NaN counter — a degenerate/huge quad (the classic 2 s-rasterization TDR
+ * shape) shows up here as an absurd extent or a NaN. Dumped with the ring. */
+#define TD5_FRAME_HIST 16
+typedef struct {
+    unsigned draws, verts, present;
+    float min_x, max_x, min_y, max_y;
+    unsigned nan_verts;
+    unsigned vram_mb, vram_budget_mb;   /* local segment usage vs OS budget */
+} TD5FrameStat;
+static TD5FrameStat s_frame_hist[TD5_FRAME_HIST];
+static unsigned s_frame_hist_head;
+static TD5FrameStat s_cur_frame = { 0, 0, 0, 1e30f, -1e30f, 1e30f, -1e30f, 0 };
+
+void Backend_NoteVerts(const void *verts, unsigned vert_count, unsigned stride)
+{
+    const unsigned char *p = (const unsigned char *)verts;
+    unsigned i;
+    if (!p || stride < 8) return;
+    for (i = 0; i < vert_count; i++, p += stride) {
+        float x = ((const float *)(const void *)p)[0];
+        float y = ((const float *)(const void *)p)[1];
+        if (x != x || y != y) { s_cur_frame.nan_verts++; continue; }
+        if (x < s_cur_frame.min_x) s_cur_frame.min_x = x;
+        if (x > s_cur_frame.max_x) s_cur_frame.max_x = x;
+        if (y < s_cur_frame.min_y) s_cur_frame.min_y = y;
+        if (y > s_cur_frame.max_y) s_cur_frame.max_y = y;
+    }
+}
+
 void Backend_NoteDraw(unsigned prim, unsigned vcount, unsigned icount, int indexed)
 {
     TD5DrawRec *r = &s_draw_ring[s_draw_head % TD5_DRAW_RING];
+    s_cur_frame.draws++;
+    s_cur_frame.verts += vcount;
     r->vcount = vcount; r->icount = icount;
     r->prim = (unsigned short)prim; r->indexed = (unsigned char)indexed;
     r->gen = g_backend.device_generation;
@@ -113,6 +150,51 @@ void Backend_NotePresent(void)
     r->gen     = g_backend.device_generation;
     r->srv     = (const void *)g_backend.current_srv;
     s_draw_head++; s_draw_total++;
+
+    /* [TDR-diag] VRAM usage vs OS budget: an eviction storm (usage over
+     * budget) can stall the GPU past the 2 s watchdog with a perfectly
+     * ordinary draw stream — exactly the signature the FRAME HISTORY shows.
+     * IDXGIAdapter3 is cached per device generation. */
+    {
+        static const GUID k_IID_IDXGIDevice =
+            {0x54ec77fa, 0x1377, 0x44e6, {0x8c, 0x32, 0x88, 0xfd, 0x5f, 0x44, 0xc8, 0x4c}};
+        static const GUID k_IID_IDXGIAdapter3 =
+            {0x645967a4, 0x1392, 0x4310, {0xa7, 0x98, 0x80, 0x53, 0xce, 0x3e, 0x93, 0xfd}};
+        static IDXGIAdapter3 *s_adapter3;
+        static unsigned s_adapter3_gen = ~0u;
+        if (s_adapter3_gen != g_backend.device_generation) {
+            IDXGIDevice *dxdev = NULL;
+            if (s_adapter3) { IDXGIAdapter3_Release(s_adapter3); s_adapter3 = NULL; }
+            s_adapter3_gen = g_backend.device_generation;
+            if (g_backend.device &&
+                SUCCEEDED(ID3D11Device_QueryInterface(g_backend.device,
+                              &k_IID_IDXGIDevice, (void **)&dxdev))) {
+                IDXGIAdapter *ad = NULL;
+                if (SUCCEEDED(IDXGIDevice_GetAdapter(dxdev, &ad))) {
+                    IDXGIAdapter_QueryInterface(ad, &k_IID_IDXGIAdapter3,
+                                                (void **)&s_adapter3);
+                    IDXGIAdapter_Release(ad);
+                }
+                IDXGIDevice_Release(dxdev);
+            }
+        }
+        if (s_adapter3) {
+            DXGI_QUERY_VIDEO_MEMORY_INFO vmi;
+            if (SUCCEEDED(IDXGIAdapter3_QueryVideoMemoryInfo(s_adapter3, 0,
+                              DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &vmi))) {
+                s_cur_frame.vram_mb        = (unsigned)(vmi.CurrentUsage >> 20);
+                s_cur_frame.vram_budget_mb = (unsigned)(vmi.Budget >> 20);
+            }
+        }
+    }
+
+    /* [TDR-diag] close out this present's frame stats into the history. */
+    s_cur_frame.present = (unsigned)g_backend.present_count;
+    s_frame_hist[s_frame_hist_head++ % TD5_FRAME_HIST] = s_cur_frame;
+    s_cur_frame.draws = 0; s_cur_frame.verts = 0; s_cur_frame.present = 0;
+    s_cur_frame.min_x = 1e30f; s_cur_frame.max_x = -1e30f;
+    s_cur_frame.min_y = 1e30f; s_cur_frame.max_y = -1e30f;
+    s_cur_frame.nan_verts = 0;
 }
 
 /* Shared ring writer. `f` is an already-open stream; `tag` labels the dump. */
@@ -122,6 +204,26 @@ static void Backend_WriteDrawRing(FILE *f, const char *tag)
     if (!f) return;
     fprintf(f, "==== DRAW WATCH (%s): total_draws=%u max_icount=%u max_vcount=%u cur_gen=%u (last %d) ====\n",
             tag ? tag : "?", s_draw_total, s_draw_max_icount, s_draw_max_vcount, cur, TD5_DRAW_RING);
+    /* [TDR-diag] per-present history first: was the (about-to-)hang frame
+     * pathological in draw count, vertex count, extent, or NaNs? */
+    {
+        unsigned hn = s_frame_hist_head < TD5_FRAME_HIST ? s_frame_hist_head
+                                                         : TD5_FRAME_HIST;
+        unsigned hi;
+        fprintf(f, "==== FRAME HISTORY (oldest->newest; in-flight frame last) ====\n");
+        for (hi = 0; hi < hn; hi++) {
+            const TD5FrameStat *s =
+                &s_frame_hist[(s_frame_hist_head - hn + hi) % TD5_FRAME_HIST];
+            fprintf(f, "  present#%u draws=%u verts=%u x[%.0f..%.0f] y[%.0f..%.0f] nan=%u vram=%u/%uMB\n",
+                    s->present, s->draws, s->verts,
+                    s->min_x, s->max_x, s->min_y, s->max_y, s->nan_verts,
+                    s->vram_mb, s->vram_budget_mb);
+        }
+        fprintf(f, "  (in-flight) draws=%u verts=%u x[%.0f..%.0f] y[%.0f..%.0f] nan=%u\n",
+                s_cur_frame.draws, s_cur_frame.verts,
+                s_cur_frame.min_x, s_cur_frame.max_x,
+                s_cur_frame.min_y, s_cur_frame.max_y, s_cur_frame.nan_verts);
+    }
     n = s_draw_total < TD5_DRAW_RING ? s_draw_total : TD5_DRAW_RING;
     for (i = 0; i < n; i++) {
         unsigned idx = (s_draw_head - n + i) % TD5_DRAW_RING;
@@ -1116,6 +1218,9 @@ int Backend_StreamUpload(const void *verts, UINT vert_count, UINT stride,
     if (!ctx || !verts || vert_count == 0 || stride == 0) return 0;
     vbytes = vert_count * stride;
     if (vbytes > vb_size) return 0;   /* single batch too big */
+
+    /* [TDR-diag] screen-extent + NaN scan of every submitted vertex. */
+    Backend_NoteVerts(verts, vert_count, stride);
 
     /* Vertices: DISCARD on wrap / first append, else NO_OVERWRITE append. Same
      * streaming ring for the immediate AND deferred paths: NO_OVERWRITE versions

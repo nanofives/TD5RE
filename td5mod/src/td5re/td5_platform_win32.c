@@ -3411,6 +3411,47 @@ void td5_plat_fx_soft_end(void)
     if (s_soft_saved_dsv) { ID3D11DepthStencilView_Release(s_soft_saved_dsv); s_soft_saved_dsv = NULL; }
 }
 
+#ifndef TD5RE_RELEASE
+/* [TDR-diag 2026-07-30] TD5RE_DRAW_EXTENT_LOG=N (px): log every draw batch
+ * whose screen-space extent exceeds N pixels, with the bound texture page —
+ * attribution for the +-30k px monster quads the FRAME HISTORY exposed at
+ * race-moscow (screen is only 960 px wide). Bounded to 2000 lines/run. */
+static void draw_extent_log(const TD5_D3DVertex *verts, int n, int page)
+{
+    static int s_thr = -2;
+    static int s_lines;
+    float mnx = 1e30f, mxx = -1e30f, mny = 1e30f, mxy = -1e30f;
+    int i, wi = 0;
+    float worst = 0.0f;
+    if (s_thr == -2) {
+        const char *e = getenv("TD5RE_DRAW_EXTENT_LOG");
+        s_thr = (e && e[0]) ? atoi(e) : 0;
+    }
+    if (s_thr <= 0 || s_lines >= 2000) return;
+    for (i = 0; i < n; i++) {
+        float ax = verts[i].screen_x, ay = verts[i].screen_y;
+        float m = (ax < 0 ? -ax : ax) > (ay < 0 ? -ay : ay)
+                      ? (ax < 0 ? -ax : ax) : (ay < 0 ? -ay : ay);
+        if (ax < mnx) mnx = ax;
+        if (ax > mxx) mxx = ax;
+        if (ay < mny) mny = ay;
+        if (ay > mxy) mxy = ay;
+        if (m > worst) { worst = m; wi = i; }
+    }
+    if (mxx - mnx < (float)s_thr && mxy - mny < (float)s_thr) return;
+    {
+        FILE *f = fopen("log/draw_extent.log", "a");
+        if (!f) return;
+        s_lines++;
+        fprintf(f, "page=%d vc=%d x[%.0f..%.0f] y[%.0f..%.0f] worst=(%.1f,%.1f,z=%.4f,rhw=%.6f)\n",
+                page, n, mnx, mxx, mny, mxy,
+                verts[wi].screen_x, verts[wi].screen_y,
+                verts[wi].depth_z, verts[wi].rhw);
+        fclose(f);
+    }
+}
+#endif
+
 void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
                                 const uint16_t *indices, int index_count)
 {
@@ -3438,6 +3479,10 @@ void td5_plat_render_draw_tris(const TD5_D3DVertex *verts, int vertex_count,
     if (!ctx || !verts || vertex_count <= 0) return;
 
     has_idx = (indices && index_count > 0);
+
+#ifndef TD5RE_RELEASE
+    draw_extent_log(verts, vertex_count, s_last_bound_texture_page);
+#endif
 
     s_frame_draw_calls++;
     s_frame_vertices += vertex_count;
