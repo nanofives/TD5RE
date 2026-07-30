@@ -696,11 +696,7 @@ static HRESULT __stdcall Surface4_Flip(WrapperSurface *self, WrapperSurface *tar
 
     /* Fallback: simple present via swap chain.
      * [S01 2026-06-04] sync interval from the VSync toggle (g_backend.vsync). */
-    {
-        HRESULT phr = IDXGISwapChain_Present(g_backend.swap_chain,
-                                             g_backend.vsync ? 1 : 0, 0);
-        if (FAILED(phr)) Backend_NoteDeviceRemoved(phr, "Surface4_Flip/Present");
-    }
+    Backend_PresentSwapChain(g_backend.vsync ? 1 : 0);
     return DD_OK;
 }
 
