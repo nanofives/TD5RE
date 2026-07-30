@@ -325,9 +325,8 @@ int td5_plat_pump_messages(void)
  * reliable visual ground-truth loop for frontend faithfulness work. Enabled by
  * setting env var TD5RE_FRAMEDUMP=<path>; the path is (re)written every 30 frames.
  * -------------------------------------------------------------------------- */
-static ID3D11Texture2D *s_fd_staging = NULL;
-static int s_fd_w = 0, s_fd_h = 0;
-static unsigned s_fd_gen = 0;   /* device generation the staging texture belongs to */
+/* Backbuffer readback (staging texture) lives in the backend now
+ * (Backend_CaptureBackbufferRGBA). */
 
 #ifndef TD5_PNG_USE_ZLIB
 /* ---- zlib-free PNG support (x64 Stage 3) -------------------------------
@@ -471,52 +470,14 @@ static int td5_write_png_rgba(const char *path, const unsigned char *rgba, int w
 }
 
 static void td5_plat_dump_frame_png(const char *path) {
-    ID3D11Texture2D *bb = NULL;
-    D3D11_TEXTURE2D_DESC d;
-    D3D11_MAPPED_SUBRESOURCE m;
-    if (!g_backend.swap_chain || !g_backend.device || !g_backend.context || !path) return;
-    if (FAILED(IDXGISwapChain_GetBuffer(g_backend.swap_chain, 0, &IID_ID3D11Texture2D, (void**)&bb)) || !bb) return;
-    ID3D11Texture2D_GetDesc(bb, &d);
-    /* [DEVICE-LOST 2026-07-20] Also recreate when the device generation changed:
-     * after a TDR recovery a same-resolution staging texture from the old device
-     * would mix a dead-device resource with the new-device context in CopyResource. */
-    if (!s_fd_staging || s_fd_w != (int)d.Width || s_fd_h != (int)d.Height ||
-        s_fd_gen != g_backend.device_generation) {
-        D3D11_TEXTURE2D_DESC sd = d;
-        if (s_fd_staging) { ID3D11Texture2D_Release(s_fd_staging); s_fd_staging = NULL; }
-        sd.Usage = D3D11_USAGE_STAGING; sd.BindFlags = 0;
-        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ; sd.MiscFlags = 0;
-        if (FAILED(ID3D11Device_CreateTexture2D(g_backend.device,&sd,NULL,&s_fd_staging))) {
-            ID3D11Texture2D_Release(bb); return;
-        }
-        s_fd_w = (int)d.Width; s_fd_h = (int)d.Height;
-        s_fd_gen = g_backend.device_generation;
+    int w = 0, h = 0;
+    unsigned char *rgba;
+    if (!path) return;
+    rgba = Backend_CaptureBackbufferRGBA(&w, &h);   /* RGBA readback of the backbuffer */
+    if (rgba) {
+        td5_write_png_rgba(path, rgba, w, h);
+        free(rgba);
     }
-    ID3D11DeviceContext_CopyResource(g_backend.context,
-        (ID3D11Resource*)s_fd_staging, (ID3D11Resource*)bb);
-    if (SUCCEEDED(ID3D11DeviceContext_Map(g_backend.context,
-            (ID3D11Resource*)s_fd_staging, 0, D3D11_MAP_READ, 0, &m))) {
-        int w=(int)d.Width, h=(int)d.Height, x, yy;
-        int bgra = (d.Format==DXGI_FORMAT_B8G8R8A8_UNORM ||
-                    d.Format==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
-        unsigned char *rgba = (unsigned char*)malloc((size_t)w*h*4);
-        if (rgba) {
-            for (yy=0;yy<h;yy++){
-                const unsigned char *src=(const unsigned char*)m.pData + (size_t)yy*m.RowPitch;
-                unsigned char *dst=rgba+(size_t)yy*w*4;
-                for (x=0;x<w;x++){
-                    unsigned char c0=src[x*4+0],c1=src[x*4+1],c2=src[x*4+2];
-                    if (bgra){ dst[x*4+0]=c2; dst[x*4+1]=c1; dst[x*4+2]=c0; } /* BGRA->RGBA */
-                    else     { dst[x*4+0]=c0; dst[x*4+1]=c1; dst[x*4+2]=c2; }
-                    dst[x*4+3]=255;
-                }
-            }
-            td5_write_png_rgba(path,rgba,w,h);
-            free(rgba);
-        }
-        ID3D11DeviceContext_Unmap(g_backend.context,(ID3D11Resource*)s_fd_staging,0);
-    }
-    ID3D11Texture2D_Release(bb);
 }
 
 /* Runtime one-shot frame-dump request (live-control `framedump` verb).
@@ -560,13 +521,7 @@ static void plat_present_swapchain(int sync)
         }
     }
 #endif
-    /* [crash-diag 2026-07-22] Mark the ring so a fault INSIDE Present shows as
-     * a trailing PRESENT entry (vs a scene draw) in the crash dump. */
-    Backend_NotePresent();
-    HRESULT hr = IDXGISwapChain_Present(g_backend.swap_chain, sync, 0);
-    g_backend.present_count++;   /* [diag] frame counter for device-lost forensics */
-    if (FAILED(hr)) Backend_NoteDeviceRemoved(hr, "td5_plat_present/Present");
-    Backend_MaybeTrim();
+    Backend_PresentSwapChain(sync);
 }
 
 void td5_plat_set_diag_context(const char *ctx)
@@ -757,12 +712,9 @@ void td5_plat_present(int vsync)
      * higher-level world rendering is still stubbed. When that happens,
      * bypass the wrapper flip/composite path and clear the swap chain
      * directly so the window proves it is still rendering live frames. */
-    if (g_backend.scene_rendered && s_frame_draw_calls == 0 &&
-        g_backend.context && g_backend.swap_rtv && g_backend.swap_chain) {
-        ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1,
-            &g_backend.swap_rtv, NULL);
-        ID3D11DeviceContext_ClearRenderTargetView(g_backend.context,
-            g_backend.swap_rtv, fallback_rgba);
+    if (g_backend.scene_rendered && s_frame_draw_calls == 0 && Backend_SwapChainReady()) {
+        Backend_BindSwapChainRT();
+        Backend_ClearSwapChainRT(fallback_rgba);
         plat_present_swapchain((vsync && g_backend.vsync) ? 1 : 0);
         empty_scene_fallback = 1;
     }
@@ -776,13 +728,11 @@ void td5_plat_present(int vsync)
      * present path. Blit the backbuffer SRV straight to the swap chain so
      * standalone scene draws remain visible while wrapper compositing is
      * still under reconstruction. */
-    if (g_backend.standalone && g_backend.scene_rendered &&
-        g_backend.context && g_backend.swap_chain && g_backend.swap_rtv &&
+    if (g_backend.standalone && g_backend.scene_rendered && Backend_SwapChainReady() &&
         Backend_SurfaceGetSRV(g_backend.backbuffer)) {
-        ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 0, NULL, NULL);
-        ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1,
-            &g_backend.swap_rtv, NULL);
-        Backend_DrawFullscreenQuad(Backend_SurfaceGetSRV(g_backend.backbuffer));
+        Backend_UnbindRenderTargets();
+        Backend_BindSwapChainRT();
+        Backend_DrawFullscreenQuadRaw(Backend_SurfaceGetSRV(g_backend.backbuffer));
         Backend_CaptureIfRequested();  /* photo-booth: grab the composited race frame */
         plat_present_swapchain((vsync && g_backend.vsync) ? 1 : 0);
 
@@ -794,7 +744,7 @@ void td5_plat_present(int vsync)
      * Backend_CompositeAndPresent inside the wrapper */
     if (s_primary && s_primary->vtbl) {
         s_primary->vtbl->Flip(s_primary, NULL, DDFLIP_WAIT);
-    } else if (g_backend.swap_chain) {
+    } else if (Backend_HasSwapChain()) {
         plat_present_swapchain((vsync && g_backend.vsync) ? 1 : 0);
     }
 }
@@ -802,22 +752,19 @@ void td5_plat_present(int vsync)
 void td5_plat_present_texture_page(int page_index, int vsync)
 {
     if (g_backend.device_removed) return;
-    ID3D11ShaderResourceView *srv = NULL;
+    void *srv = NULL;
 
     if (page_index >= 0 && page_index < MAX_TEXTURE_PAGES) {
-        /* [x64 Stage 3] Straight pointer read -- see td5_plat_render_bind_texture. */
-        if (s_tex_srvs[page_index]) {
+        if (s_tex_srvs[page_index])
             srv = s_tex_srvs[page_index];
-        } else if (Backend_SurfaceGetSRV(s_tex_surfaces[page_index])) {
+        else
             srv = Backend_SurfaceGetSRV(s_tex_surfaces[page_index]);
-        }
     }
 
-    if (!g_backend.context || !g_backend.swap_chain || !g_backend.swap_rtv || !srv)
-        return;
+    if (!Backend_SwapChainReady() || !srv) return;
 
-    ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1, &g_backend.swap_rtv, NULL);
-    Backend_DrawFullscreenQuad(srv);
+    Backend_BindSwapChainRT();
+    Backend_DrawFullscreenQuadRaw(srv);
     plat_present_swapchain((vsync && g_backend.vsync) ? 1 : 0);
 
     Backend_SurfaceBindRenderTarget(g_backend.backbuffer);

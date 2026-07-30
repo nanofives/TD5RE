@@ -194,6 +194,115 @@ void *Backend_PixelShaderRaw(BackendPixelShader *h)
     return h ? (void*)h->ps : NULL;
 }
 
+/* ---- window/present helpers (see wrapper.h) --------------------------- */
+
+int Backend_SwapChainReady(void)
+{
+    return g_backend.context && g_backend.swap_chain && g_backend.swap_rtv;
+}
+
+int Backend_HasSwapChain(void)
+{
+    return g_backend.swap_chain != NULL;
+}
+
+void Backend_BindSwapChainRT(void)
+{
+    if (g_backend.context && g_backend.swap_rtv)
+        ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 1, &g_backend.swap_rtv, NULL);
+}
+
+void Backend_ClearSwapChainRT(const float *rgba)
+{
+    if (g_backend.context && g_backend.swap_rtv)
+        ID3D11DeviceContext_ClearRenderTargetView(g_backend.context, g_backend.swap_rtv, rgba);
+}
+
+void Backend_UnbindRenderTargets(void)
+{
+    if (g_backend.context)
+        ID3D11DeviceContext_OMSetRenderTargets(g_backend.context, 0, NULL, NULL);
+}
+
+void Backend_DrawFullscreenQuadRaw(void *srv)
+{
+    Backend_DrawFullscreenQuad((ID3D11ShaderResourceView *)srv);
+}
+
+void Backend_PresentSwapChain(int sync)
+{
+    HRESULT hr;
+    if (!g_backend.swap_chain) return;
+    /* [crash-diag] mark the ring so a fault INSIDE Present shows as a trailing
+     * PRESENT entry (vs a scene draw) in the crash dump. */
+    Backend_NotePresent();
+    hr = IDXGISwapChain_Present(g_backend.swap_chain, sync, 0);
+    g_backend.present_count++;   /* [diag] frame counter for device-lost forensics */
+    if (FAILED(hr)) Backend_NoteDeviceRemoved(hr, "td5_plat_present/Present");
+    Backend_MaybeTrim();
+}
+
+/* Framedump backbuffer readback (dev). Cached staging texture lives here. */
+static ID3D11Texture2D *s_fd_staging = NULL;
+static int              s_fd_w = 0, s_fd_h = 0;
+static unsigned         s_fd_gen = 0;
+
+unsigned char *Backend_CaptureBackbufferRGBA(int *out_w, int *out_h)
+{
+    ID3D11Texture2D *bb = NULL;
+    D3D11_TEXTURE2D_DESC d;
+    D3D11_MAPPED_SUBRESOURCE m;
+    unsigned char *rgba = NULL;
+
+    if (!g_backend.swap_chain || !g_backend.device || !g_backend.context) return NULL;
+    if (FAILED(IDXGISwapChain_GetBuffer(g_backend.swap_chain, 0, &IID_ID3D11Texture2D, (void**)&bb)) || !bb)
+        return NULL;
+    ID3D11Texture2D_GetDesc(bb, &d);
+
+    /* Recreate the staging texture on size or device-generation change (a
+     * dead-device staging resource + new-device context would corrupt Copy). */
+    if (!s_fd_staging || s_fd_w != (int)d.Width || s_fd_h != (int)d.Height ||
+        s_fd_gen != g_backend.device_generation) {
+        D3D11_TEXTURE2D_DESC sd = d;
+        if (s_fd_staging) { ID3D11Texture2D_Release(s_fd_staging); s_fd_staging = NULL; }
+        sd.Usage = D3D11_USAGE_STAGING; sd.BindFlags = 0;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ; sd.MiscFlags = 0;
+        if (FAILED(ID3D11Device_CreateTexture2D(g_backend.device, &sd, NULL, &s_fd_staging))) {
+            ID3D11Texture2D_Release(bb);
+            return NULL;
+        }
+        s_fd_w = (int)d.Width; s_fd_h = (int)d.Height;
+        s_fd_gen = g_backend.device_generation;
+    }
+
+    ID3D11DeviceContext_CopyResource(g_backend.context,
+        (ID3D11Resource*)s_fd_staging, (ID3D11Resource*)bb);
+    if (SUCCEEDED(ID3D11DeviceContext_Map(g_backend.context,
+            (ID3D11Resource*)s_fd_staging, 0, D3D11_MAP_READ, 0, &m))) {
+        int w = (int)d.Width, h = (int)d.Height, x, yy;
+        int bgra = (d.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                    d.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB);
+        rgba = (unsigned char*)malloc((size_t)w*h*4);
+        if (rgba) {
+            for (yy = 0; yy < h; yy++) {
+                const unsigned char *src = (const unsigned char*)m.pData + (size_t)yy*m.RowPitch;
+                unsigned char *dst = rgba + (size_t)yy*w*4;
+                for (x = 0; x < w; x++) {
+                    unsigned char c0 = src[x*4+0], c1 = src[x*4+1], c2 = src[x*4+2];
+                    if (bgra) { dst[x*4+0] = c2; dst[x*4+1] = c1; dst[x*4+2] = c0; }
+                    else      { dst[x*4+0] = c0; dst[x*4+1] = c1; dst[x*4+2] = c2; }
+                    dst[x*4+3] = 255;
+                }
+            }
+            if (out_w) *out_w = w;
+            if (out_h) *out_h = h;
+        }
+        ID3D11DeviceContext_Unmap(g_backend.context, (ID3D11Resource*)s_fd_staging, 0);
+    }
+    ID3D11Texture2D_Release(bb);
+    return rgba;
+}
+
 /* ---- platform viewport/scissor/texture-bind (see wrapper.h) ----------- */
 
 void Backend_PlatSetViewport(WrapperRecCtx *rc, int x, int y, int w, int h)

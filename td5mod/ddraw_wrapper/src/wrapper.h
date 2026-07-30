@@ -205,6 +205,22 @@ void Backend_PlatSetViewport(WrapperRecCtx *rc, int x, int y, int w, int h);
 void Backend_PlatSetScissor(WrapperRecCtx *rc, int left, int top, int right, int bottom);
 void Backend_PlatBindTextureSRV(WrapperRecCtx *rc, void *srv);
 
+/* Window/present backend helpers (td5_platform_win32_window.c) so that file
+ * holds no ID3D11/DXGI. SwapChainReady = context && swap_chain && swap_rtv;
+ * HasSwapChain = swap_chain present. Bind/Clear/Unbind operate on the swap-chain
+ * RTV. DrawFullscreenQuadRaw blits a raw (transitional void*) SRV. PresentSwapChain
+ * does the NotePresent + Present + present-count + device-lost latch + trim.
+ * CaptureBackbufferRGBA reads back the current backbuffer as RGBA (caller frees;
+ * NULL on failure). */
+int  Backend_SwapChainReady(void);
+int  Backend_HasSwapChain(void);
+void Backend_BindSwapChainRT(void);
+void Backend_ClearSwapChainRT(const float *rgba);
+void Backend_UnbindRenderTargets(void);
+void Backend_DrawFullscreenQuadRaw(void *srv);
+void Backend_PresentSwapChain(int sync);
+unsigned char *Backend_CaptureBackbufferRGBA(int *out_w, int *out_h);
+
 /* Soft-particle depth binding (smoke): swap the bound depth target to the
  * read-only DSV and expose scene depth as PS resource t1, so a shader can
  * sample depth while the hardware z-test still runs. Begin returns 1 if the
