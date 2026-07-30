@@ -89,6 +89,7 @@ typedef struct WrapperClipper        WrapperClipper;
 #include "td5_wrapper_backend.h"
 #include "td5_wrapper_ddraw_types.h"
 #include "td5_wrapper_objects.h"
+#include "td5_backend_texture.h"
 
 /* ========================================================================
  * COM interface function prototypes
