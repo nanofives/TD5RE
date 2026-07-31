@@ -73,6 +73,8 @@ static D3D12State g_d3d12;
 #include "shaders/ps_modulate_alpha_g_bytes_50.h"
 #include "shaders/ps_composite_bytes_50.h"     /* present-time fullscreen blit */
 #include "shaders/ps_shadow_bytes_50.h"        /* screen-space sun-shadow pass  */
+#include "shaders/ps_light_bytes_50.h"         /* deferred dynamic-light pass   */
+#include "shaders/ps_ssr_bytes_50.h"           /* screen-space reflections pass */
 
 #ifndef TD5_VERTEX_STRIDE
 #define TD5_VERTEX_STRIDE 32   /* XYZRHW: float4 pos + BGRA diffuse + BGRA specular + float2 uv */
@@ -168,6 +170,7 @@ static ID3D12RootSignature *s_pass_root_sig;
 typedef struct { const void *ps; int blend; ID3D12PipelineState *pso; } PassPSO;
 static PassPSO s_pass_pso[8];
 static int     s_pass_pso_count;
+static BackendTexture *s_scene_copy;   /* SSR: CopyResource of the scene color (t2) */
 
 /* Current draw state (selected into the next PSO / bindings). */
 static int              s_cur_ps    = PS_MODULATE;
@@ -1528,6 +1531,7 @@ static void d3d12_render_core_shutdown(void)
     if (s_pass_root_sig) { ID3D12RootSignature_Release(s_pass_root_sig); s_pass_root_sig = NULL; }
     if (s_white_tex)   { if (s_white_tex->res) ID3D12Resource_Release(s_white_tex->res); free(s_white_tex); s_white_tex = NULL; }
     if (s_black_tex)   { if (s_black_tex->res) ID3D12Resource_Release(s_black_tex->res); free(s_black_tex); s_black_tex = NULL; }
+    if (s_scene_copy)  { if (s_scene_copy->res) ID3D12Resource_Release(s_scene_copy->res); free(s_scene_copy); s_scene_copy = NULL; }
     if (s_copy_list)   { ID3D12GraphicsCommandList_Release(s_copy_list); s_copy_list = NULL; }
     if (s_copy_alloc)  { ID3D12CommandAllocator_Release(s_copy_alloc); s_copy_alloc = NULL; }
     if (s_viewport_cb) { if (s_viewport_cb->res) ID3D12Resource_Release(s_viewport_cb->res); free(s_viewport_cb); s_viewport_cb = NULL; }
@@ -1871,8 +1875,54 @@ unsigned char *Backend_CaptureBackbufferRGBA(int *out_w, int *out_h)
  *  library link so the window/clear/present skeleton runs.
  * ======================================================================== */
 
-void Backend_ApplyLightPass(const LightCB *cb) { (void)cb; }
-void Backend_ApplySSRPass(const SSRCB *cb) { (void)cb; }
+/* Deferred dynamic lights: additive fullscreen pass reconstructing world pos
+ * from depth (t0) and accumulating each light's contribution. t1 (gbuffer
+ * normals) is the zero placeholder -> N.L falls back to legacy (matches the
+ * port's empty gbuffer on the PlatDrawTris path). Runs over the active pane's
+ * viewport/scissor. BLEND_ONE_ONE (additive). */
+void Backend_ApplyLightPass(const LightCB *cb)
+{
+    UINT srvs[1];
+    if (!cb) return;
+    srvs[0] = s_depth_srv_slot;
+    d3d12_fullscreen_pass(g_ps_light_50, sizeof(g_ps_light_50), BLEND_ONE_ONE,
+                          cb, sizeof(LightCB), srvs, 1);
+}
+/* Screen-space reflections: copy the current scene color to s_scene_copy, then
+ * an alpha-blended fullscreen pass that marches reflections in screen space
+ * (depth t0, gbuffer t1=zero, scene copy t2). BLEND_SRCALPHA_INVSRC. */
+void Backend_ApplySSRPass(const SSRCB *cb)
+{
+    ID3D12GraphicsCommandList *cl = g_d3d12.list;
+    UINT fi, srvs[3];
+    if (!cb || !g_d3d12.device || g_backend.device_removed) return;
+    if (!g_d3d12.frame_open) d3d12_frame_begin();
+    fi = g_d3d12.frame_index;
+
+    /* Ensure the scene-copy texture matches the backbuffer. */
+    if (!s_scene_copy || s_scene_copy->w != (UINT)g_backend.width ||
+        s_scene_copy->h != (UINT)g_backend.height) {
+        if (s_scene_copy) { if (s_scene_copy->res) d3d12_retire(s_scene_copy->res); free(s_scene_copy); s_scene_copy = NULL; }
+        s_scene_copy = d3d12_tex_create((UINT)g_backend.width, (UINT)g_backend.height,
+                                        DXGI_FORMAT_B8G8R8A8_UNORM, 0);
+        if (!s_scene_copy) return;
+    }
+
+    /* Copy swapchain backbuffer -> scene_copy (reflections read the pre-SSR scene). */
+    d3d12_resource_barrier(g_d3d12.backbuffers[fi], D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    if (s_scene_copy->rstate != D3D12_RESOURCE_STATE_COPY_DEST)
+        d3d12_resource_barrier(s_scene_copy->res, s_scene_copy->rstate, D3D12_RESOURCE_STATE_COPY_DEST);
+    ID3D12GraphicsCommandList_CopyResource(cl, s_scene_copy->res, g_d3d12.backbuffers[fi]);
+    d3d12_resource_barrier(s_scene_copy->res, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    s_scene_copy->rstate = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    d3d12_resource_barrier(g_d3d12.backbuffers[fi], D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+    srvs[0] = s_depth_srv_slot;
+    srvs[1] = s_black_tex ? s_black_tex->srv_slot : s_depth_srv_slot;
+    srvs[2] = s_scene_copy->srv_slot;
+    d3d12_fullscreen_pass(g_ps_ssr_50, sizeof(g_ps_ssr_50), BLEND_SRCALPHA_INVSRC,
+                          cb, sizeof(SSRCB), srvs, 3);
+}
 /* Screen-space ray-marched sun shadow: multiplicative fullscreen pass that
  * reconstructs world pos from scene depth (t0) and darkens shadowed pixels.
  * t1 (gbuffer) is the depth SRV placeholder for now -- the gbuffer is not yet
