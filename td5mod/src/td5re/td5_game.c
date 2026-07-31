@@ -10298,6 +10298,11 @@ void td5_game_show_legal_screens(void) {
  * Image index = rand() % 20 (seeded from session seed chain).
  * ======================================================================== */
 
+/* Frames to hold the pre-race splash (see the loop below): ~0.6s at 16ms/frame.
+ * Also covers the D3D12 first-frame upload-residency gap that blacked out a
+ * single one-shot present. */
+#define FE_LOADSCREEN_FRAMES 36
+
 static void display_loading_screen_tga(void) {
     char png_path[128];
     int index = rand() % 20;
@@ -10341,16 +10346,25 @@ static void display_loading_screen_tga(void) {
         verts[3].diffuse = 0xFFFFFFFF; verts[3].specular = 0;
         verts[3].tex_u = 0.0f;    verts[3].tex_v = 1.0f;
 
-        td5_plat_render_clear(0x00000000);
         td5_plat_render_upload_texture(0, pixels, img_w, img_h, 2);
-        td5_plat_render_begin_scene();
-        td5_plat_render_set_viewport(0, 0, screen_w, screen_h);
-        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-        td5_plat_render_bind_texture(0);
-        td5_plat_render_draw_tris(verts, 4, indices, 6);
-        td5_plat_render_end_scene();
-        td5_plat_present(0);
-        td5_plat_present_texture_page(0, 0);
+        /* [D3D12 2026-07-31] Present the splash across MULTIPLE frames, not once.
+         * The D3D12 backend uploads page 0 and samples it in the same present, but
+         * the upload copy isn't GPU-resident on that first frame -> the one-shot
+         * present sampled BLACK and the splash never showed (R10). Re-drawing it
+         * over ~0.6s both guarantees residency (frame 2+ samples the real texels)
+         * AND gives the splash a visible dwell, matching the original which held
+         * the image for the duration of the (here near-instant) track load. */
+        for (int loop = 0; loop < FE_LOADSCREEN_FRAMES; loop++) {
+            td5_plat_render_clear(0x00000000);
+            td5_plat_render_begin_scene();
+            td5_plat_render_set_viewport(0, 0, screen_w, screen_h);
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+            td5_plat_render_bind_texture(0);
+            td5_plat_render_draw_tris(verts, 4, indices, 6);
+            td5_plat_render_end_scene();
+            td5_plat_present(0);
+            td5_plat_sleep(16);
+        }
         free(pixels);
     }
 }
