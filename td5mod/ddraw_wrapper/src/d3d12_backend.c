@@ -71,6 +71,7 @@ static D3D12State g_d3d12;
 #include "shaders/ps_luminance_alpha_bytes_50.h"
 #include "shaders/ps_modulate_g_bytes_50.h"
 #include "shaders/ps_modulate_alpha_g_bytes_50.h"
+#include "shaders/ps_composite_bytes_50.h"     /* present-time fullscreen blit */
 
 #ifndef TD5_VERTEX_STRIDE
 #define TD5_VERTEX_STRIDE 32   /* XYZRHW: float4 pos + BGRA diffuse + BGRA specular + float2 uv */
@@ -143,6 +144,10 @@ static BackendPixelShader s_builtin_ps[PS_COUNT];
 /* Persistent viewport + fog constant buffers (b0 VS / b0 PS). */
 static BackendConstBuffer *s_viewport_cb;
 static BackendConstBuffer *s_fog_cb;
+
+/* Present-time fullscreen blit PSO (vs_fullscreen + ps_composite, no input
+ * layout -- SV_VertexID triangle). Composites a surface texture to the swapchain. */
+static ID3D12PipelineState *s_fsquad_pso;
 
 /* Current draw state (selected into the next PSO / bindings). */
 static int              s_cur_ps    = PS_MODULATE;
@@ -603,6 +608,43 @@ static void d3d12_bind_and_draw(D3D_PRIMITIVE_TOPOLOGY topo, int topo_type,
     }
 }
 
+/* Composite a source texture over the whole current RT (present-time blit).
+ * `src` must be in PIXEL_SHADER_RESOURCE state (surfaces are, post-upload). */
+static void d3d12_fullscreen_blit(BackendTexture *src)
+{
+    ID3D12GraphicsCommandList *cl = g_d3d12.list;
+    ID3D12DescriptorHeap *heaps[2];
+    D3D12_VIEWPORT vp;
+    D3D12_RECT sc;
+    UINT slot;
+
+    if (!src || !src->res || !s_fsquad_pso) return;
+
+    heaps[0] = s_srv_ring; heaps[1] = s_sampler_heap;
+    ID3D12GraphicsCommandList_SetDescriptorHeaps(cl, 2, heaps);
+    ID3D12GraphicsCommandList_SetGraphicsRootSignature(cl, s_root_sig);
+    ID3D12GraphicsCommandList_SetPipelineState(cl, s_fsquad_pso);
+    ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(cl, 0, ID3D12Resource_GetGPUVirtualAddress(s_viewport_cb->res));
+    ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(cl, 1, ID3D12Resource_GetGPUVirtualAddress(s_fog_cb->res));
+
+    slot = s_srv_ring_next++;
+    if (s_srv_ring_next >= s_srv_ring_cap) s_srv_ring_next = 0;
+    ID3D12Device_CopyDescriptorsSimple(g_d3d12.device, 1,
+        cpu_handle(s_srv_ring, slot, s_srv_stage_size),
+        cpu_handle(s_srv_stage, src->srv_slot, s_srv_stage_size),
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(cl, 2, gpu_handle(s_srv_ring, slot, s_srv_stage_size));
+    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(cl, 3, gpu_handle(s_sampler_heap, SAMP_POINT_CLAMP, s_sampler_size));
+
+    vp.TopLeftX = 0.0f; vp.TopLeftY = 0.0f; vp.Width = (float)g_backend.width; vp.Height = (float)g_backend.height;
+    vp.MinDepth = 0.0f; vp.MaxDepth = 1.0f;
+    sc.left = 0; sc.top = 0; sc.right = g_backend.width; sc.bottom = g_backend.height;
+    ID3D12GraphicsCommandList_RSSetViewports(cl, 1, &vp);
+    ID3D12GraphicsCommandList_RSSetScissorRects(cl, 1, &sc);
+    ID3D12GraphicsCommandList_IASetPrimitiveTopology(cl, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D12GraphicsCommandList_DrawInstanced(cl, 3, 1, 0, 0);
+}
+
 static BackendConstBuffer *d3d12_cb_create(UINT size)
 {
     BackendConstBuffer *cb;
@@ -747,6 +789,14 @@ static void d3d12_tex_upload(BackendTexture *bt, const void *px, UINT bytes_per_
 
 /* ---- render-core init / teardown --------------------------------------- */
 
+/* Flushed init-diagnostic sink (WRAPPER_LOG is not captured in the standalone
+ * exe, so root-sig serialize errors etc. would otherwise be invisible). */
+static void d3d12_diag(const char *fmt, ...)
+{
+    FILE *f = fopen("log/d3d12_init.log", "a");
+    if (f) { va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap); fputc('\n', f); fflush(f); fclose(f); }
+}
+
 static int d3d12_create_root_sig(void)
 {
     D3D12_DESCRIPTOR_RANGE srv_range, samp_range;
@@ -789,8 +839,9 @@ static int d3d12_create_root_sig(void)
 
     hr = D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err);
     if (FAILED(hr)) {
-        WRAPPER_LOG("D3D12 SerializeRootSignature 0x%08lX %s", hr,
-                    err ? (const char *)ID3D10Blob_GetBufferPointer(err) : "");
+        d3d12_diag("SerializeRootSignature 0x%08lX: %s", hr,
+                   err ? (const char *)ID3D10Blob_GetBufferPointer(err) : "(no blob)");
+        WRAPPER_LOG("D3D12 SerializeRootSignature 0x%08lX", hr);
         if (err) ID3D10Blob_Release(err);
         return 0;
     }
@@ -799,7 +850,8 @@ static int d3d12_create_root_sig(void)
             &IID_ID3D12RootSignature, (void **)&s_root_sig);
     ID3D10Blob_Release(sig);
     if (err) ID3D10Blob_Release(err);
-    if (FAILED(hr)) { WRAPPER_LOG("D3D12 CreateRootSignature 0x%08lX", hr); return 0; }
+    if (FAILED(hr)) { d3d12_diag("CreateRootSignature 0x%08lX", hr); return 0; }
+    d3d12_diag("root sig OK");
     return 1;
 }
 
@@ -942,6 +994,29 @@ static int d3d12_render_core_init(int width, int height)
      * against the debug layer at init (before any frame). */
     if (!d3d12_get_pso(0, PS_MODULATE, BLEND_SRCALPHA_INVSRC, DS_Z_OFF_WRITE_OFF, 0, 0)) return 0;
 
+    /* Present-time fullscreen blit PSO (no input layout; SV_VertexID triangle). */
+    {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pd;
+        ZeroMemory(&pd, sizeof(pd));
+        pd.pRootSignature = s_root_sig;
+        pd.VS.pShaderBytecode = g_vs_fullscreen_50; pd.VS.BytecodeLength = sizeof(g_vs_fullscreen_50);
+        pd.PS.pShaderBytecode = g_ps_composite_50;  pd.PS.BytecodeLength = sizeof(g_ps_composite_50);
+        d3d12_fill_blend(BLEND_OPAQUE, &pd.BlendState);
+        d3d12_fill_ds(DS_Z_OFF_WRITE_OFF, &pd.DepthStencilState);
+        d3d12_fill_raster(0, &pd.RasterizerState);
+        pd.SampleMask = 0xFFFFFFFFu;
+        pd.InputLayout.NumElements = 0;   /* fullscreen triangle from SV_VertexID */
+        pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_B8G8R8A8_UNORM;
+        pd.DSVFormat = DXGI_FORMAT_D32_FLOAT; pd.SampleDesc.Count = 1;
+        if (FAILED(ID3D12Device_CreateGraphicsPipelineState(g_d3d12.device, &pd,
+                &IID_ID3D12PipelineState, (void **)&s_fsquad_pso))) {
+            WRAPPER_LOG("D3D12 fsquad PSO create FAILED");
+            return 0;
+        }
+    }
+
+    d3d12_diag("render_core_init OK (samplers+heaps+upload+white+PSOs)");
     WRAPPER_LOG("D3D12 render core: root sig + %d samplers + heaps + %uMB upload ring x%d + warm PSO OK",
                 SAMP_STATE_COUNT, D3D12_UPLOAD_RING_BYTES >> 20, D3D12_FRAME_COUNT);
     return 1;
@@ -950,6 +1025,7 @@ static int d3d12_render_core_init(int width, int height)
 static void d3d12_render_core_shutdown(void)
 {
     int i;
+    if (s_fsquad_pso)  { ID3D12PipelineState_Release(s_fsquad_pso); s_fsquad_pso = NULL; }
     if (s_white_tex)   { if (s_white_tex->res) ID3D12Resource_Release(s_white_tex->res); free(s_white_tex); s_white_tex = NULL; }
     if (s_copy_list)   { ID3D12GraphicsCommandList_Release(s_copy_list); s_copy_list = NULL; }
     if (s_copy_alloc)  { ID3D12CommandAllocator_Release(s_copy_alloc); s_copy_alloc = NULL; }
@@ -967,6 +1043,54 @@ static void d3d12_render_core_shutdown(void)
     if (s_root_sig)      { ID3D12RootSignature_Release(s_root_sig); s_root_sig = NULL; }
 }
 
+/* ---- display window (standalone passes hwnd=NULL -> backend owns it) ---- */
+
+static HWND s_display_hwnd;
+
+static LRESULT CALLBACK D3D12DisplayWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_SETCURSOR && LOWORD(lp) == HTCLIENT) { SetCursor(NULL); return TRUE; }
+    return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+static HWND d3d12_create_display_window(int client_w, int client_h)
+{
+    WNDCLASSEXA wc;
+    DWORD style = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE;
+    RECT wr = { 0, 0, client_w, client_h };
+    int scr_w, scr_h, x, y;
+    HWND hwnd;
+    static char title_buf[256];
+    const char *title = "Test Drive 5";
+    DWORD n;
+
+    ZeroMemory(&wc, sizeof(wc));
+    wc.cbSize        = sizeof(wc);
+    wc.style         = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc   = D3D12DisplayWindowProc;
+    wc.hInstance     = GetModuleHandleA(NULL);
+    wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    wc.lpszClassName = "TD5_D3D12_Display";
+    RegisterClassExA(&wc);
+
+    AdjustWindowRect(&wr, style, FALSE);
+    scr_w = GetSystemMetrics(SM_CXSCREEN);
+    scr_h = GetSystemMetrics(SM_CYSCREEN);
+    x = (scr_w - (wr.right - wr.left)) / 2;
+    y = (scr_h - (wr.bottom - wr.top)) / 2;
+
+    n = GetEnvironmentVariableA("TD5RE_WINDOW_TITLE", title_buf, sizeof(title_buf));
+    if (n > 0 && n < sizeof(title_buf)) title = title_buf;
+
+    hwnd = CreateWindowExA(0, "TD5_D3D12_Display", title, style, x, y,
+                           wr.right - wr.left, wr.bottom - wr.top,
+                           NULL, NULL, GetModuleHandleA(NULL), NULL);
+    if (hwnd) { ShowWindow(hwnd, SW_SHOW); UpdateWindow(hwnd); }
+    else WRAPPER_LOG("D3D12 create_display_window FAILED");
+    return hwnd;
+}
+
 /* ---- device lifecycle -------------------------------------------------- */
 
 int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed)
@@ -980,6 +1104,15 @@ int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed
     HRESULT hr;
 
     ZeroMemory(&g_d3d12, sizeof(g_d3d12));
+
+    /* Standalone (main.c) passes hwnd=NULL: the backend owns the display window,
+     * exactly like the D3D11 backend. Without this, CreateSwapChainForHwnd(NULL)
+     * fails and CreateDevice returns 0 (-> MessageBox + exit). */
+    if (!hwnd && windowed) {
+        if (!s_display_hwnd) s_display_hwnd = d3d12_create_display_window(width, height);
+        hwnd = s_display_hwnd;
+    }
+    if (!hwnd) { d3d12_diag("CreateDevice: no window (hwnd NULL, windowed=%d)", windowed); return 0; }
 
     /* Debug layer + DRED under TD5RE_D3D_DEBUG. */
     if (Backend_D3DDebugEnabled()) {
@@ -1158,13 +1291,28 @@ void Backend_ClearDepth(float z)
 }
 
 void Backend_PresentSwapChain(int sync)          { d3d12_frame_present(sync); }
+
+/* Present-time composite. Frontend (2D, scene_rendered==0): flush the primary
+ * surface's CPU sys_buffer to its GPU texture and blit it to the swapchain.
+ * Race (3D, scene_rendered==1): DrawPrimitive already rendered to the swapchain
+ * in this Phase-2 bring-up, so present as-is. (Render-to-surface + the two-layer
+ * HUD-overlay composite land with Phase-3 offscreen surfaces.) */
 void Backend_CompositeAndPresent(WrapperSurface *rt, RECT *s, RECT *d)
 {
-    (void)rt; (void)s; (void)d;
+    (void)s; (void)d;
+    if (!g_d3d12.device || !g_d3d12.swapchain || g_backend.device_removed) return;
+    if (!g_d3d12.frame_open) d3d12_frame_begin();
+
+    if (rt && !g_backend.scene_rendered) {
+        if (rt->dirty) WrapperSurface_FlushDirty(rt);   /* sys_buffer -> rt->bt (BGRA) */
+        if (rt->bt) d3d12_fullscreen_blit(rt->bt);
+    }
+
+    Backend_CaptureIfRequested();
     d3d12_frame_present(g_backend.vsync ? 1 : 0);
 }
 
-HWND Backend_GetDisplayWindow(void) { return g_backend.hwnd; }
+HWND Backend_GetDisplayWindow(void) { return s_display_hwnd ? s_display_hwnd : g_backend.hwnd; }
 
 /* Framedump / render-golden capture: read back the current backbuffer as a
  * freshly-malloc'd RGBA8 buffer (caller frees), matching the D3D11
@@ -1461,10 +1609,31 @@ void Backend_TextureRelease(BackendTexture *bt)
         free(bt);
     }
 }
-void Backend_TextureUpload(BackendTexture *bt, const void *sys, LONG p, DWORD w, DWORD h, DWORD bpp)
+void Backend_TextureUpload(BackendTexture *bt, const void *sys, LONG src_pitch, DWORD w, DWORD h, DWORD src_bpp)
 {
-    (void)w; (void)h;
-    if (bt && sys) d3d12_tex_upload(bt, sys, (UINT)bpp, (UINT)p);
+    if (!bt || !bt->res || !sys) return;
+
+    if (src_bpp == 16 && bt->fmt == DXGI_FORMAT_B8G8R8A8_UNORM) {
+        /* Convert R5G6B5 -> B8G8R8A8 (opaque) then upload (matches D3D11). */
+        DWORD row32 = w * 4u, y, x;
+        unsigned char *buf = (unsigned char *)malloc((size_t)row32 * h);
+        if (!buf) return;
+        for (y = 0; y < h; y++) {
+            const uint16_t *s16 = (const uint16_t *)((const unsigned char *)sys + (size_t)y * src_pitch);
+            uint32_t       *d32 = (uint32_t *)(buf + (size_t)y * row32);
+            for (x = 0; x < w; x++) {
+                uint16_t c = s16[x];
+                uint32_t r = ((c >> 11) & 0x1F) * 255u / 31u;
+                uint32_t g = ((c >>  5) & 0x3F) * 255u / 63u;
+                uint32_t b = ( c        & 0x1F) * 255u / 31u;
+                d32[x] = 0xFF000000u | (r << 16) | (g << 8) | b;
+            }
+        }
+        d3d12_tex_upload(bt, buf, 4, row32);
+        free(buf);
+    } else {
+        d3d12_tex_upload(bt, sys, src_bpp / 8u, (UINT)src_pitch);
+    }
 }
 void Backend_UnbindRenderTargets(void) { }
 void Backend_UnbindSceneDepthReadonly(void) { }
