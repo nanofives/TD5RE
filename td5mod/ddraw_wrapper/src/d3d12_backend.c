@@ -26,7 +26,16 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 
-#define D3D12_FRAME_COUNT 2
+/* Swapchain backbuffer count. 3 (triple-buffered flip-discard) instead of the
+ * 2-buffer minimum: with only 2 buffers a frame-time hitch on a frontend screen
+ * change (the new screen's FSM re-inits its button pool + layout) makes the
+ * Present cadence irregular and, with no vsync, the monitor can flash a stale
+ * buffer for one refresh -> the "blink between screens" (R11). A third buffer
+ * gives DXGI slack to hide that. All per-frame arrays (allocators, backbuffers,
+ * fence_values, upload ring, RTV heap) and the swapchain/ResizeBuffers count
+ * scale off this macro; the single DIRECT queue serialises the shared depth
+ * buffer so buffer count doesn't add a depth hazard. */
+#define D3D12_FRAME_COUNT 3
 
 typedef struct {
     ID3D12Device              *device;
@@ -1838,7 +1847,7 @@ int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed
     hr = ID3D12Device_CreateCommandQueue(g_d3d12.device, &qd, &IID_ID3D12CommandQueue, (void **)&g_d3d12.queue);
     if (FAILED(hr)) { WRAPPER_LOG("D3D12: CreateCommandQueue 0x%08lX", hr); goto fail; }
 
-    /* Flip-discard swapchain, BufferCount=2, B8G8R8A8 (forced change from the
+    /* Flip-discard swapchain, BufferCount=D3D12_FRAME_COUNT, B8G8R8A8 (forced change from the
      * D3D11 BufferCount=1/DISCARD -- harmless because the game never renders to
      * the swapchain directly in the finished port; skeleton clears it). */
     ZeroMemory(&scd, sizeof(scd));
