@@ -72,6 +72,7 @@ static D3D12State g_d3d12;
 #include "shaders/ps_modulate_g_bytes_50.h"
 #include "shaders/ps_modulate_alpha_g_bytes_50.h"
 #include "shaders/ps_composite_bytes_50.h"     /* present-time fullscreen blit */
+#include "shaders/ps_shadow_bytes_50.h"        /* screen-space sun-shadow pass  */
 
 #ifndef TD5_VERTEX_STRIDE
 #define TD5_VERTEX_STRIDE 32   /* XYZRHW: float4 pos + BGRA diffuse + BGRA specular + float2 uv */
@@ -159,6 +160,15 @@ static BackendConstBuffer *s_fog_cb;
  * layout -- SV_VertexID triangle). Composites a surface texture to the swapchain. */
 static ID3D12PipelineState *s_fsquad_pso;
 
+/* Offscreen screen-space passes (shadow/light/SSR): their own root signature
+ * (root CBV b0 + SRV table t0-t2 + static point-clamp sampler s0) and a tiny
+ * PSO cache keyed by {PS bytecode, blend}. All are vs_fullscreen SV_VertexID
+ * triangles rendering color-only (no DS) onto the swapchain with a pass blend. */
+static ID3D12RootSignature *s_pass_root_sig;
+typedef struct { const void *ps; int blend; ID3D12PipelineState *pso; } PassPSO;
+static PassPSO s_pass_pso[8];
+static int     s_pass_pso_count;
+
 /* Current draw state (selected into the next PSO / bindings). */
 static int              s_cur_ps    = PS_MODULATE;
 static int              s_cur_vs    = 0;              /* 0 = pretransformed      */
@@ -174,6 +184,7 @@ static ID3D12GraphicsCommandList *s_copy_list;
 /* 1x1 white texture: default SRV (stage slot 0) for untextured draws
  * (PS_MODULATE * white == vertex colour). */
 static BackendTexture  *s_white_tex;
+static BackendTexture  *s_black_tex;   /* 1x1 zero: gbuffer/scene-copy placeholder for passes */
 
 /* forward decls (definitions below the device lifecycle) */
 static D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle(ID3D12DescriptorHeap *h, UINT idx, UINT size);
@@ -865,6 +876,183 @@ static void d3d12_fullscreen_blit(BackendTexture *src)
     s_last_topo = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 }
 
+/* ---- offscreen screen-space passes (shadow/light/SSR) ------------------- */
+
+static int d3d12_create_pass_root_sig(void)
+{
+    D3D12_DESCRIPTOR_RANGE srv_range;
+    D3D12_ROOT_PARAMETER params[2];
+    D3D12_STATIC_SAMPLER_DESC samp;
+    D3D12_ROOT_SIGNATURE_DESC rsd;
+    ID3D10Blob *sig = NULL, *err = NULL;
+    HRESULT hr;
+
+    ZeroMemory(&srv_range, sizeof(srv_range));
+    srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srv_range.NumDescriptors = 3; srv_range.BaseShaderRegister = 0;   /* t0-t2 */
+    srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    ZeroMemory(params, sizeof(params));
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;              /* b0 pass CB */
+    params[0].Descriptor.ShaderRegister = 0;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; /* t0-t2 */
+    params[1].DescriptorTable.NumDescriptorRanges = 1;
+    params[1].DescriptorTable.pDescriptorRanges = &srv_range;
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    ZeroMemory(&samp, sizeof(samp));
+    samp.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+    samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samp.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    samp.MaxLOD = D3D12_FLOAT32_MAX;
+    samp.ShaderRegister = 0; samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    ZeroMemory(&rsd, sizeof(rsd));
+    rsd.NumParameters = 2; rsd.pParameters = params;
+    rsd.NumStaticSamplers = 1; rsd.pStaticSamplers = &samp;
+    rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS;
+
+    hr = D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err);
+    if (FAILED(hr)) {
+        d3d12_diag("pass rootsig serialize 0x%08lX: %s", hr,
+                   err ? (const char *)ID3D10Blob_GetBufferPointer(err) : "(no blob)");
+        if (err) ID3D10Blob_Release(err);
+        return 0;
+    }
+    hr = ID3D12Device_CreateRootSignature(g_d3d12.device, 0,
+            ID3D10Blob_GetBufferPointer(sig), ID3D10Blob_GetBufferSize(sig),
+            &IID_ID3D12RootSignature, (void **)&s_pass_root_sig);
+    ID3D10Blob_Release(sig);
+    if (err) ID3D10Blob_Release(err);
+    if (FAILED(hr)) { d3d12_diag("pass rootsig create 0x%08lX", hr); return 0; }
+    d3d12_diag("pass root sig OK");
+    return 1;
+}
+
+static ID3D12PipelineState *d3d12_get_pass_pso(const void *ps, SIZE_T ps_len, int blend)
+{
+    int i;
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd;
+    ID3D12PipelineState *pso = NULL;
+    for (i = 0; i < s_pass_pso_count; i++)
+        if (s_pass_pso[i].ps == ps && s_pass_pso[i].blend == blend) return s_pass_pso[i].pso;
+    if (s_pass_pso_count >= (int)(sizeof(s_pass_pso)/sizeof(s_pass_pso[0]))) return NULL;
+    ZeroMemory(&pd, sizeof(pd));
+    pd.pRootSignature = s_pass_root_sig;
+    pd.VS.pShaderBytecode = g_vs_fullscreen_50; pd.VS.BytecodeLength = sizeof(g_vs_fullscreen_50);
+    pd.PS.pShaderBytecode = ps; pd.PS.BytecodeLength = ps_len;
+    d3d12_fill_blend(blend, &pd.BlendState);
+    d3d12_fill_ds(DS_Z_OFF_WRITE_OFF, &pd.DepthStencilState);
+    d3d12_fill_raster(0, &pd.RasterizerState);
+    pd.SampleMask = 0xFFFFFFFFu;
+    pd.InputLayout.NumElements = 0;
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_B8G8R8A8_UNORM;
+    pd.DSVFormat = DXGI_FORMAT_UNKNOWN;   /* color-only, no depth bound */
+    pd.SampleDesc.Count = 1;
+    if (FAILED(ID3D12Device_CreateGraphicsPipelineState(g_d3d12.device, &pd,
+            &IID_ID3D12PipelineState, (void **)&pso))) {
+        d3d12_diag("pass PSO create FAILED (blend=%d)", blend);
+        return NULL;
+    }
+    s_pass_pso[s_pass_pso_count].ps = ps;
+    s_pass_pso[s_pass_pso_count].blend = blend;
+    s_pass_pso[s_pass_pso_count].pso = pso;
+    s_pass_pso_count++;
+    return pso;
+}
+
+/* Bump-allocate a 256-aligned constant-buffer slice from the current frame's
+ * upload ring and copy `data` into it. Safe: the ring slot is recycled only
+ * after its frame's fence completes. Returns the GPU VA (0 on overflow). */
+static D3D12_GPU_VIRTUAL_ADDRESS d3d12_ring_cb(const void *data, UINT size)
+{
+    UINT fi = g_d3d12.frame_index, cur;
+    UINT asz = (size + 255u) & ~255u;
+    if (!s_upload_cpu[fi]) return 0;
+    cur = (s_upload_off[fi] + 255u) & ~255u;
+    if ((UINT64)cur + asz > D3D12_UPLOAD_RING_BYTES) { WRAPPER_LOG("D3D12 CB ring overflow"); return 0; }
+    memcpy(s_upload_cpu[fi] + cur, data, size);
+    s_upload_off[fi] = cur + asz;
+    return s_upload_gpu[fi] + cur;
+}
+
+/* Run one full-screen deferred pass: sample scene depth (t0) + gbuffer (t1) +
+ * scene-copy (t2) [placeholders where a resource doesn't exist yet], blend the
+ * PS output onto the current swapchain RT. srv_slots[] are STAGING-heap slots;
+ * missing ones are padded with the depth slot (shaders .Load, ignore). */
+static void d3d12_fullscreen_pass(const void *ps, SIZE_T ps_len, int blend,
+                                  const void *cbdata, UINT cbsize,
+                                  const UINT *srv_slots, int nsrv)
+{
+    ID3D12GraphicsCommandList *cl = g_d3d12.list;
+    ID3D12PipelineState *pso;
+    ID3D12DescriptorHeap *heaps[2];
+    D3D12_GPU_VIRTUAL_ADDRESS cbva;
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv;
+    UINT ring0, i, fi;
+    if (!g_d3d12.device || !s_pass_root_sig || !s_depth_tex || g_backend.device_removed) return;
+    if (!g_d3d12.frame_open) d3d12_frame_begin();
+    d3d12_flush_uploads();
+    pso = d3d12_get_pass_pso(ps, ps_len, blend);
+    if (!pso) return;
+    cbva = d3d12_ring_cb(cbdata, cbsize);
+    if (!cbva) return;
+    fi = g_d3d12.frame_index;
+
+    /* Depth -> PIXEL_SHADER_RESOURCE so the pass can sample it. */
+    if (s_depth_state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) {
+        d3d12_resource_barrier(s_depth_tex, s_depth_state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        s_depth_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
+
+    /* Color-only RT (no DSV -- depth is a shader input this pass). */
+    rtv = d3d12_rtv_handle(fi);
+    ID3D12GraphicsCommandList_OMSetRenderTargets(cl, 1, &rtv, FALSE, NULL);
+
+    heaps[0] = s_srv_ring; heaps[1] = s_sampler_heap;
+    ID3D12GraphicsCommandList_SetDescriptorHeaps(cl, 2, heaps);
+    ID3D12GraphicsCommandList_SetGraphicsRootSignature(cl, s_pass_root_sig);
+    ID3D12GraphicsCommandList_SetPipelineState(cl, pso);
+    ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(cl, 0, cbva);
+
+    /* Copy the 3 SRVs into contiguous ring slots (pad missing with depth). */
+    ring0 = s_srv_ring_next;
+    if (ring0 + 3 >= s_srv_ring_cap) ring0 = 0;
+    for (i = 0; i < 3; i++) {
+        /* Pad missing SRVs with the ZERO texture (matches d3d11's cleared
+         * gbuffer/absent scene-copy), NOT depth -- depth as "normal/matid"
+         * garbage makes the shadow shader over-darken. */
+        UINT src = (i < (UINT)nsrv) ? srv_slots[i] : (s_black_tex ? s_black_tex->srv_slot : s_depth_srv_slot);
+        ID3D12Device_CopyDescriptorsSimple(g_d3d12.device, 1,
+            cpu_handle(s_srv_ring, ring0 + i, s_srv_stage_size),
+            cpu_handle(s_srv_stage, src, s_srv_stage_size),
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    }
+    s_srv_ring_next = ring0 + 3;
+    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(cl, 1, gpu_handle(s_srv_ring, ring0, s_srv_stage_size));
+
+    ID3D12GraphicsCommandList_RSSetViewports(cl, 1, &s_cur_vp);
+    ID3D12GraphicsCommandList_RSSetScissorRects(cl, 1, &s_cur_scissor);
+    ID3D12GraphicsCommandList_IASetPrimitiveTopology(cl, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D12GraphicsCommandList_DrawInstanced(cl, 3, 1, 0, 0);
+
+    /* Restore: depth back to writable, RT with DSV for subsequent world/VFX. */
+    if (s_depth_state != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
+        d3d12_resource_barrier(s_depth_tex, s_depth_state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        s_depth_state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    }
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE dsv = cpu_handle(s_dsv_heap, 0, s_dsv_size);
+        ID3D12GraphicsCommandList_OMSetRenderTargets(cl, 1, &rtv, FALSE, &dsv);
+    }
+    /* We changed root sig + PSO + RT -> invalidate the main draw path's cache. */
+    s_frame_static_bound = 0;
+    s_last_pso  = NULL;
+    s_last_topo = (D3D_PRIMITIVE_TOPOLOGY)-1;
+}
+
 static BackendConstBuffer *d3d12_cb_create(UINT size)
 {
     BackendConstBuffer *cb;
@@ -1164,6 +1352,7 @@ static int d3d12_render_core_init(int width, int height)
     UINT i;
 
     if (!d3d12_create_root_sig()) return 0;
+    if (!d3d12_create_pass_root_sig()) return 0;
 
     /* Shader-visible SAMPLER heap (4 samplers). */
     ZeroMemory(&hd, sizeof(hd));
@@ -1288,6 +1477,12 @@ static int d3d12_render_core_init(int width, int height)
     s_white_tex = d3d12_tex_create(1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, 0);
     if (!s_white_tex) return 0;
     { unsigned int wp = 0xFFFFFFFFu; d3d12_tex_upload(s_white_tex, &wp, 4, 4); }
+    /* 1x1 zero texture: the offscreen passes bind it at t1/t2 until the real
+     * gbuffer/scene-copy exist, mirroring d3d11's gbuffer cleared-to-0 (matid 0
+     * = legacy fallback) so the shaders take the same path. */
+    s_black_tex = d3d12_tex_create(1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, 0);
+    if (!s_black_tex) return 0;
+    { unsigned int bp = 0x00000000u; d3d12_tex_upload(s_black_tex, &bp, 4, 4); }
     d3d12_flush_uploads();
 
     /* Warm-up PSO: exercises get_pso + validates root-sig/shader/layout wiring
@@ -1328,7 +1523,11 @@ static void d3d12_render_core_shutdown(void)
     d3d12_flush_uploads();
     free(s_up_staging); s_up_staging = NULL; s_up_cap = 0;
     if (s_fsquad_pso)  { ID3D12PipelineState_Release(s_fsquad_pso); s_fsquad_pso = NULL; }
+    for (i = 0; i < s_pass_pso_count; i++) if (s_pass_pso[i].pso) ID3D12PipelineState_Release(s_pass_pso[i].pso);
+    s_pass_pso_count = 0;
+    if (s_pass_root_sig) { ID3D12RootSignature_Release(s_pass_root_sig); s_pass_root_sig = NULL; }
     if (s_white_tex)   { if (s_white_tex->res) ID3D12Resource_Release(s_white_tex->res); free(s_white_tex); s_white_tex = NULL; }
+    if (s_black_tex)   { if (s_black_tex->res) ID3D12Resource_Release(s_black_tex->res); free(s_black_tex); s_black_tex = NULL; }
     if (s_copy_list)   { ID3D12GraphicsCommandList_Release(s_copy_list); s_copy_list = NULL; }
     if (s_copy_alloc)  { ID3D12CommandAllocator_Release(s_copy_alloc); s_copy_alloc = NULL; }
     if (s_viewport_cb) { if (s_viewport_cb->res) ID3D12Resource_Release(s_viewport_cb->res); free(s_viewport_cb); s_viewport_cb = NULL; }
@@ -1674,7 +1873,19 @@ unsigned char *Backend_CaptureBackbufferRGBA(int *out_w, int *out_h)
 
 void Backend_ApplyLightPass(const LightCB *cb) { (void)cb; }
 void Backend_ApplySSRPass(const SSRCB *cb) { (void)cb; }
-void Backend_ApplyShadowPass(const ShadowCB *cb) { (void)cb; }
+/* Screen-space ray-marched sun shadow: multiplicative fullscreen pass that
+ * reconstructs world pos from scene depth (t0) and darkens shadowed pixels.
+ * t1 (gbuffer) is the depth SRV placeholder for now -- the gbuffer is not yet
+ * populated (Phase 4 later), which matches the port's largely-empty gbuffer on
+ * the PlatDrawTris path. BLEND_MULT so out = dst*src. */
+void Backend_ApplyShadowPass(const ShadowCB *cb)
+{
+    UINT srvs[1];
+    if (!cb) return;
+    srvs[0] = s_depth_srv_slot;
+    d3d12_fullscreen_pass(g_ps_shadow_50, sizeof(g_ps_shadow_50), BLEND_MULT,
+                          cb, sizeof(ShadowCB), srvs, 1);
+}
 void Backend_ApplyStateCache(void) { }
 /* b1 (SDF/FX) is the only game-bound CB slot; b0 VS/PS are backend-owned
  * (viewport/fog) and bound directly by the draw path. */
