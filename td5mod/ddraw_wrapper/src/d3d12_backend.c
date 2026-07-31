@@ -619,7 +619,13 @@ static void d3d12_store_capture(const D3D12_PLACED_SUBRESOURCE_FOOTPRINT *fp)
 {
     unsigned char *mapped = NULL;
     UINT w = fp->Footprint.Width, h = fp->Footprint.Height, y, x;
-    D3D12_RANGE rr; rr.Begin = 0; rr.End = (SIZE_T)fp->Footprint.RowPitch * h;
+    /* Read range = the actual placed-footprint size (RowPitch*(h-1) + last-row
+     * unpadded bytes), which is what the readback buffer was sized to via
+     * GetCopyableFootprints. RowPitch*h overruns it by the row-pad of the last
+     * row whenever w*4 isn't 256-aligned (e.g. 1534-wide windows) -> Map returns
+     * E_INVALIDARG and the framedump silently produces nothing. */
+    D3D12_RANGE rr; rr.Begin = 0;
+    rr.End = (SIZE_T)fp->Footprint.RowPitch * (h - 1) + (SIZE_T)w * 4;
     if (FAILED(ID3D12Resource_Map(g_d3d12.readback, 0, &rr, (void **)&mapped)) || !mapped) return;
     if (s_cap_w != w || s_cap_h != h) { free(s_cap_buf); s_cap_buf = (unsigned char *)malloc((size_t)w*h*4); s_cap_w=w; s_cap_h=h; }
     if (s_cap_buf) {
