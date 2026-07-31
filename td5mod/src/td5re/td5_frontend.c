@@ -2874,6 +2874,16 @@ static void frontend_render_cursor(void) {
  *   end-scene + Present(1). The software-vs-hardware distinction is meaningless under D3D11
  *   so both callsites collapse to this one helper. */
 void frontend_present_buffer(void) {
+    /* [R11 2026-07-31] The screen state machines call this to "present the current
+     * screen" between transition steps WITHOUT drawing anything that frame, relying
+     * on the old D3D11 non-flip swapchain PERSISTING the previous frame. On the
+     * D3D12 flip-discard chain the backbuffer is undefined each frame (frame_begin
+     * clears it black + the legacy blit path DrawFullscreenQuadRaw is a stub), so
+     * these presented a BLACK frame -> the one-frame black blink on EVERY screen
+     * change. Render the current screen HERE before presenting so real content is
+     * shown (mirrors the main frontend loop's render+present order). */
+    td5_frontend_render_ui_rects();
+    frontend_render_cursor();
     td5_plat_render_end_scene();
     td5_plat_present(1);
 }
