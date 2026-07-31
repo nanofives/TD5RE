@@ -276,13 +276,133 @@ int Backend_D3DDebugEnabled(void)
     return cached;
 }
 
-void Backend_NotePresent(void) { }
+/* ---- frame forensics (crash/TDR post-mortem, ported from d3d11 backend) ----
+ * A 256-deep draw ring + a 16-present history, dumped on a device-hung debug
+ * event and appended to the SEH crash file. Pure CPU bookkeeping (no GPU state)
+ * -> golden-safe. The per-vertex extent/NaN scan (NoteVerts) is the only costly
+ * part, so on D3D12 it is gated on the debug flag; the cheap draw-ring +
+ * per-present counters are always on. */
+#define TD5_DRAW_RING 256
+typedef struct {
+    unsigned       vcount, icount;
+    unsigned short prim;
+    unsigned char  indexed;
+    unsigned       gen;
+    const void    *srv;
+} TD5DrawRec;
+static TD5DrawRec s_draw_ring[TD5_DRAW_RING];
+static unsigned s_draw_head, s_draw_total, s_draw_max_icount, s_draw_max_vcount;
+
+#define TD5_FRAME_HIST 16
+typedef struct {
+    unsigned draws, verts, present;
+    float min_x, max_x, min_y, max_y;
+    unsigned nan_verts;
+} TD5FrameStat;
+static TD5FrameStat s_frame_hist[TD5_FRAME_HIST];
+static unsigned s_frame_hist_head;
+static TD5FrameStat s_cur_frame = { 0, 0, 0, 1e30f, -1e30f, 1e30f, -1e30f, 0 };
+#define TD5_PRESENT_SENTINEL 0xFFFFu
+
+void Backend_NoteVerts(const void *verts, unsigned vert_count, unsigned stride)
+{
+    const unsigned char *p = (const unsigned char *)verts;
+    unsigned i;
+    /* Costly (scans every vertex) -> only when hunting a TDR. */
+    if (!Backend_D3DDebugEnabled() || !p || stride < 8) return;
+    for (i = 0; i < vert_count; i++, p += stride) {
+        float x = ((const float *)(const void *)p)[0];
+        float y = ((const float *)(const void *)p)[1];
+        if (x != x || y != y) { s_cur_frame.nan_verts++; continue; }
+        if (x < s_cur_frame.min_x) s_cur_frame.min_x = x;
+        if (x > s_cur_frame.max_x) s_cur_frame.max_x = x;
+        if (y < s_cur_frame.min_y) s_cur_frame.min_y = y;
+        if (y > s_cur_frame.max_y) s_cur_frame.max_y = y;
+    }
+}
+
+void Backend_NoteDraw(unsigned prim, unsigned vcount, unsigned icount, int indexed)
+{
+    TD5DrawRec *r = &s_draw_ring[s_draw_head % TD5_DRAW_RING];
+    s_cur_frame.draws++;
+    s_cur_frame.verts += vcount;
+    r->vcount = vcount; r->icount = icount;
+    r->prim = (unsigned short)prim; r->indexed = (unsigned char)indexed;
+    r->gen = g_backend.device_generation;
+    r->srv = (const void *)s_cur_tex;
+    s_draw_head++; s_draw_total++;
+    if (icount > s_draw_max_icount) s_draw_max_icount = icount;
+    if (vcount > s_draw_max_vcount) s_draw_max_vcount = vcount;
+}
+
+void Backend_NotePresent(void)
+{
+    TD5DrawRec *r = &s_draw_ring[s_draw_head % TD5_DRAW_RING];
+    r->vcount  = (unsigned)g_backend.present_count;
+    r->icount  = 0;
+    r->prim    = TD5_PRESENT_SENTINEL;
+    r->indexed = 0;
+    r->gen     = g_backend.device_generation;
+    r->srv     = (const void *)s_cur_tex;
+    s_draw_head++; s_draw_total++;
+
+    s_cur_frame.present = (unsigned)g_backend.present_count;
+    s_frame_hist[s_frame_hist_head++ % TD5_FRAME_HIST] = s_cur_frame;
+    s_cur_frame.draws = 0; s_cur_frame.verts = 0; s_cur_frame.present = 0;
+    s_cur_frame.min_x = 1e30f; s_cur_frame.max_x = -1e30f;
+    s_cur_frame.min_y = 1e30f; s_cur_frame.max_y = -1e30f;
+    s_cur_frame.nan_verts = 0;
+}
+
+/* Shared ring writer. `f` is an already-open stream; `tag` labels the dump. */
+static void d3d12_write_draw_ring(FILE *f, const char *tag)
+{
+    unsigned n, i, cur = g_backend.device_generation;
+    if (!f) return;
+    fprintf(f, "==== DRAW WATCH (%s): total_draws=%u max_icount=%u max_vcount=%u cur_gen=%u (last %d) ====\n",
+            tag ? tag : "?", s_draw_total, s_draw_max_icount, s_draw_max_vcount, cur, TD5_DRAW_RING);
+    {
+        unsigned hn = s_frame_hist_head < TD5_FRAME_HIST ? s_frame_hist_head : TD5_FRAME_HIST;
+        unsigned hi;
+        fprintf(f, "==== FRAME HISTORY (oldest->newest; in-flight frame last) ====\n");
+        for (hi = 0; hi < hn; hi++) {
+            const TD5FrameStat *s = &s_frame_hist[(s_frame_hist_head - hn + hi) % TD5_FRAME_HIST];
+            fprintf(f, "  present#%u draws=%u verts=%u x[%.0f..%.0f] y[%.0f..%.0f] nan=%u\n",
+                    s->present, s->draws, s->verts, s->min_x, s->max_x, s->min_y, s->max_y, s->nan_verts);
+        }
+        fprintf(f, "  (in-flight) draws=%u verts=%u x[%.0f..%.0f] y[%.0f..%.0f] nan=%u\n",
+                s_cur_frame.draws, s_cur_frame.verts, s_cur_frame.min_x, s_cur_frame.max_x,
+                s_cur_frame.min_y, s_cur_frame.max_y, s_cur_frame.nan_verts);
+    }
+    n = s_draw_total < TD5_DRAW_RING ? s_draw_total : TD5_DRAW_RING;
+    for (i = 0; i < n; i++) {
+        unsigned idx = (s_draw_head - n + i) % TD5_DRAW_RING;
+        TD5DrawRec *r = &s_draw_ring[idx];
+        const char *stale = (r->gen < cur) ? "  <-- STALE (pre-reset resource)" : "";
+        if (r->prim == TD5_PRESENT_SENTINEL)
+            fprintf(f, "  [%u] PRESENT #%u gen=%u srv=%p%s\n", i, r->vcount, r->gen, r->srv, stale);
+        else
+            fprintf(f, "  [%u] %s prim=%u v=%u i=%u gen=%u srv=%p%s\n",
+                    i, r->indexed ? "IDX" : "VTX", r->prim, r->vcount, r->icount, r->gen, r->srv, stale);
+    }
+}
 
 int Backend_NoteDeviceRemoved(HRESULT hr, const char *where)
 {
     if (FAILED(hr)) {
         g_backend.device_removed = 1;
         WRAPPER_LOG("D3D12 DEVICE REMOVED at %s: hr=0x%08lX", where ? where : "?", hr);
+        /* Dump the draw ring + frame history for the TDR post-mortem (opt-in). */
+        if (Backend_D3DDebugEnabled()) {
+            FILE *f = fopen("log/gpu_d3d_debug.log", "a");
+            if (f) {
+                HRESULT rr = (g_d3d12.device ? ID3D12Device_GetDeviceRemovedReason(g_d3d12.device) : hr);
+                fprintf(f, "==== D3D12 DEVICE REMOVED at %s hr=0x%08lX removed_reason=0x%08lX ====\n",
+                        where ? where : "?", hr, rr);
+                d3d12_write_draw_ring(f, "device-removed");
+                fflush(f); fclose(f);
+            }
+        }
     }
     return g_backend.device_removed;
 }
@@ -820,6 +940,8 @@ static void d3d12_bind_and_draw(D3D_PRIMITIVE_TOPOLOGY topo, int topo_type,
     } else {
         ID3D12GraphicsCommandList_DrawInstanced(cl, count, 1, base_vertex, 0);
     }
+    /* Crash-ring bookkeeping (all draw paths funnel here). */
+    Backend_NoteDraw((unsigned)topo_type, count, indexed ? count : 0, indexed);
 }
 
 /* Composite a source texture over the whole current RT (present-time blit).
@@ -2015,7 +2137,6 @@ void Backend_DrawPrimitive(DWORD prim, UINT stride, UINT base_vertex, UINT vert_
     topo = d3d12_map_topo(prim, &tt);
     d3d12_bind_and_draw(topo, tt, d3d12_sel_blend(s), d3d12_sel_ds(s), s->polygon_offset ? 1 : 0,
                         d3d12_sel_ps(s), d3d12_sel_samp(s), stride, 0, base_vertex, 0, vert_count);
-    Backend_NoteDraw(prim, vert_count, 0, 0);
 }
 void Backend_DrawIndexedPrimitive(DWORD prim, UINT stride, UINT base_vertex, UINT start_index, UINT index_count, UINT vert_count)
 {
@@ -2027,16 +2148,32 @@ void Backend_DrawIndexedPrimitive(DWORD prim, UINT stride, UINT base_vertex, UIN
     topo = d3d12_map_topo(prim, &tt);
     d3d12_bind_and_draw(topo, tt, d3d12_sel_blend(s), d3d12_sel_ds(s), s->polygon_offset ? 1 : 0,
                         d3d12_sel_ps(s), d3d12_sel_samp(s), stride, 1, base_vertex, start_index, index_count);
-    Backend_NoteDraw(prim, vert_count, index_count, 1);
 }
-void Backend_DumpCrashDiag(const char *path) { (void)path; }
+/* Append GPU forensics to the SEH crash file (from the exe's crash handler).
+ * NOT gated on debug -- a crash is rare and we always want it. Reads only
+ * scalar/pointer VALUES, never derefs a GPU object -> safe in a fault handler. */
+void Backend_DumpCrashDiag(const char *path)
+{
+    FILE *f = fopen(path ? path : "log/crash.log", "a");
+    if (!f) return;
+    fprintf(f,
+        "\n---- D3D12 GPU crash diagnostics ----\n"
+        "  device=%p queue=%p swapchain=%p\n"
+        "  device_generation=%u device_removed=%d present_count=%lu\n"
+        "  cur_tex=%p windowed=%d rt=%dx%d frame_index=%u\n"
+        "  diag_context=\"%s\"\n",
+        (void *)g_d3d12.device, (void *)g_d3d12.queue, (void *)g_d3d12.swapchain,
+        g_backend.device_generation, g_backend.device_removed, g_backend.present_count,
+        (void *)s_cur_tex, g_backend.windowed, g_backend.width, g_backend.height,
+        g_d3d12.frame_index, g_backend.diag_context);
+    d3d12_write_draw_ring(f, "SEH crash");
+    fflush(f); fclose(f);
+}
 void Backend_EnforceWindowSize(void) { }
 void Backend_EnsureCompositingTextures(int w, int h) { (void)w; (void)h; }
 void Backend_ForceBlendState(int blend_idx) { (void)blend_idx; }
 int  Backend_GetCapture(unsigned char **px, int *w, int *h) { (void)px;(void)w;(void)h; return 0; }
 void Backend_MaybeTrim(void) { }
-void Backend_NoteDraw(unsigned prim, unsigned vc, unsigned ic, int indexed) { (void)prim;(void)vc;(void)ic;(void)indexed; }
-void Backend_NoteVerts(const void *v, unsigned vc, unsigned s) { (void)v;(void)vc;(void)s; }
 void *Backend_PixelShaderRaw(BackendPixelShader *ps) { return ps; }
 /* The port's real render path: td5_platform_win32.c records TD5_D3DVertex (the
  * 32-byte XYZRHW layout) + an optional override pixel shader (BackendPixelShader*)
@@ -2163,6 +2300,7 @@ int Backend_StreamUpload(const void *verts, UINT vc, UINT stride, const void *in
     UINT fi = g_d3d12.frame_index;
     UINT cur, vbytes, voff;
     if (!s_upload_cpu[fi] || !verts || vc == 0 || stride == 0) return 0;
+    Backend_NoteVerts(verts, vc, stride);   /* crash-ring extent/NaN scan (debug-gated) */
     vbytes = vc * stride;
     cur = (s_upload_off[fi] + stride - 1) / stride * stride;   /* stride-align -> integer base_vertex */
     if ((UINT64)cur + vbytes > D3D12_UPLOAD_RING_BYTES) { WRAPPER_LOG("D3D12 VB ring overflow"); return 0; }
