@@ -231,8 +231,25 @@ REM ---------------------------------------------------------------------------
 REM Deploy to project root
 REM ---------------------------------------------------------------------------
 echo Deploying to project root...
+REM Force a CLEAN overwrite of the root exe. A running instance memory-maps and
+REM LOCKS the exe, so copy fails and the root stays STALE -- delete first so a
+REM stale exe can never be silently kept, and fail LOUDLY (not a quiet skip).
+if exist %PROJECT_ROOT%\!EXE! del /Q %PROJECT_ROOT%\!EXE! >nul 2>&1
 copy /Y !BUILDDIR!\!EXE! %PROJECT_ROOT%\!EXE! >nul
-if errorlevel 1 goto :fail
+if errorlevel 1 (
+    echo.
+    echo *** DEPLOY FAILED: cannot write %PROJECT_ROOT%\!EXE!
+    echo *** The game is almost certainly STILL RUNNING and locking the exe.
+    echo *** Close td5re.exe / td5re_release.exe and rebuild.
+    goto :fail
+)
+REM Sanity: confirm the root exe now matches the freshly-linked build output.
+for %%A in (!BUILDDIR!\!EXE!) do set "SRCSZ=%%~zA"
+for %%B in (%PROJECT_ROOT%\!EXE!) do set "DSTSZ=%%~zB"
+if not "!SRCSZ!"=="!DSTSZ!" (
+    echo *** DEPLOY MISMATCH: root exe size !DSTSZ! != build !SRCSZ! -- stale/partial copy.
+    goto :fail
+)
 
 echo.
 for %%F in (%PROJECT_ROOT%\!EXE!) do echo === BUILD OK [!VARIANT!]: %%~fF (%%~zF bytes) ===
