@@ -1637,17 +1637,29 @@ void Backend_PlatBindTextureSRV(WrapperRecCtx *rc, void *srv)
 }
 void Backend_PlatDrawTris(WrapperRecCtx *rc, const void *v, int vc, const void *idx, int ic, void *pso, int ss)
 {
-    UINT bv = 0, si = 0;
+    /* Resolve blend/depth-stencil/raster from g_backend.state -- populated by
+     * td5_plat_render_set_preset (rc/g_wrapper_rec is NULL in this backend, so
+     * presets always land in g_backend.state). This is the D3D11
+     * Backend_ApplyStateCache equivalent: without it the 3D world would draw
+     * with fixed Z-OFF UI state and rely on draw order instead of depth test. */
+    const RenderStateCache *s = &g_backend.state;
     BackendPixelShader *ps = (BackendPixelShader *)pso;
-    int ps_id = ps ? ps->id : PS_MODULATE;
+    /* PS + sampler: honour the MSDF/SDF override; otherwise mirror d3d11's
+     * PlatDrawTris (ps = texblend_mode==5 ? PS_MODULATE_ALPHA : PS_MODULATE;
+     * samp = mag_filter>=2 ? LINEAR_WRAP : POINT_WRAP). */
+    int ps_id = ps ? ps->id
+                   : (s->texblend_mode == 5 ? PS_MODULATE_ALPHA : PS_MODULATE);
+    int samp  = ps ? ((ss >= 0 && ss < SAMP_STATE_COUNT) ? ss : SAMP_LINEAR_CLAMP)
+                   : (s->mag_filter >= 2 ? SAMP_LINEAR_WRAP : SAMP_POINT_WRAP);
+    UINT bv = 0, si = 0;
     int indexed = (idx && ic > 0);
     (void)rc;
     if (!g_d3d12.device || !v || vc <= 0) return;
     if (!Backend_StreamUpload(v, (UINT)vc, TD5_VERTEX_STRIDE, indexed ? idx : NULL, indexed ? (UINT)ic : 0, &bv, &si))
         return;
     d3d12_bind_and_draw(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, 0,
-                        BLEND_SRCALPHA_INVSRC, DS_Z_OFF_WRITE_OFF, 0, ps_id,
-                        (ss >= 0 && ss < SAMP_STATE_COUNT) ? ss : SAMP_LINEAR_CLAMP,
+                        d3d12_sel_blend(s), d3d12_sel_ds(s), s->polygon_offset ? 1 : 0,
+                        ps_id, samp,
                         TD5_VERTEX_STRIDE, indexed, bv, si, indexed ? (UINT)ic : (UINT)vc);
 }
 void Backend_PlatDrawWhite(WrapperRecCtx *rc, const void *v, int vc, const void *idx, int ic, int lines)
@@ -1660,8 +1672,10 @@ void Backend_PlatDrawWhite(WrapperRecCtx *rc, const void *v, int vc, const void 
     if (!Backend_StreamUpload(v, (UINT)vc, TD5_VERTEX_STRIDE, indexed ? idx : NULL, indexed ? (UINT)ic : 0, &bv, &si))
         return;
     save = s_cur_tex; s_cur_tex = NULL;   /* PS_MODULATE * white == vertex colour */
+    /* Match d3d11 PlatDrawWhite: opaque blend, Z-test on / Z-write off (occlude
+     * correctly without poisoning depth), raster 0, point-clamp sampler. */
     d3d12_bind_and_draw(lines ? D3D_PRIMITIVE_TOPOLOGY_LINELIST : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, lines ? 1 : 0,
-                        BLEND_SRCALPHA_INVSRC, DS_Z_OFF_WRITE_OFF, 0, PS_MODULATE, SAMP_POINT_CLAMP,
+                        BLEND_OPAQUE, DS_Z_ON_WRITE_OFF, 0, PS_MODULATE, SAMP_POINT_CLAMP,
                         TD5_VERTEX_STRIDE, indexed, bv, si, indexed ? (UINT)ic : (UINT)vc);
     s_cur_tex = save;
 }
