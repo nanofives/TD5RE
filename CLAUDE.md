@@ -4,9 +4,9 @@
 
 Reverse engineering project and clean-room C source port of **Test Drive 5** (Pitbull Syndicate / Accolade, 1999), derived from a full Ghidra decompilation of `TD5_d3d.exe` (822 functions analyzed, 864 named).
 
-Build target: **td5re.exe** — standalone source-port executable (D3D11 backend, no original DLLs needed).
+Build target: **td5re.exe** — standalone source-port executable (D3D12 backend, no original DLLs needed).
 
-The original binary is a Win32 x86 DirectDraw/Direct3D 3 game. The source port replaces the DDraw layer with a D3D11 wrapper (`ddraw_wrapper/`).
+The original binary is a Win32 x86 DirectDraw/Direct3D 3 game. The source port replaces the DDraw layer with a D3D12 wrapper (`ddraw_wrapper/`). (The original D3D11 backend was retired at the 2026-07-31 cutover; see docs/plans/D3D12_PORT_PLAN.md.)
 
 ## Directory layout
 
@@ -26,7 +26,7 @@ TD5RE/
 │   └── movie/            # FMV files
 ├── td5mod/
 │   ├── src/td5re/        # Source port modules (~58 .c files, see generated table below)
-│   ├── ddraw_wrapper/    # DirectDraw → D3D11 translation layer (static lib)
+│   ├── ddraw_wrapper/    # DirectDraw → D3D12 translation layer (static lib)
 │   └── deps/mingw64/     # Bundled MinGW-w64 x86_64 toolchain (i686 retired 2026-07-30, parked in _archive/)
 ├── re/                   # RE analysis, extracted assets, tools
 │   ├── assets/           # All game data — pre-extracted PNGs, DATs, WAVs, meshes (runtime asset directory)
@@ -62,7 +62,7 @@ tinfl DEFLATE decoder + zlib-free PNG encoder.
 
 Both exes deploy to the project root. Object dirs are `build\` (dev) and
 `build_release\` — separate so differing `-D` flags never share a stale .o cache.
-The D3D11 wrapper is a prebuilt static lib at `td5mod/ddraw_wrapper/build/libddraw_wrapper.a`;
+The D3D12 wrapper is a prebuilt static lib at `td5mod/ddraw_wrapper/build/libddraw_wrapper.a`;
 `build_all.bat` rebuilds it automatically when `ddraw_wrapper/src` is newer
 (standalone wrapper rebuild: `td5mod/ddraw_wrapper/build.bat`).
 
@@ -72,7 +72,7 @@ DEV vs RELEASE: same module list; `TD5RE_RELEASE` compiles out dev affordances
 Single-source build config (never hand-edit a per-build copy): module list in
 `srcs.txt`, compile flags in `cflags.txt`, system libs in `link_libs.txt` —
 all three read by build_standalone.bat, td5mod/Makefile and the CI workflows.
-The D3D11 wrapper has its own pair, `ddraw_wrapper/wrapper_srcs.txt` +
+The D3D12 wrapper has its own pair, `ddraw_wrapper/wrapper_srcs.txt` +
 `wrapper_cflags.txt`, read by `ddraw_wrapper/build.bat`, td5mod/Makefile and
 the CI workflows the same way. `build.yml` and `release.yml` both call the
 same reusable workflow (`.github/workflows/_build-td5re.yml`, `dev`/`release`
@@ -145,7 +145,7 @@ small file instead of a fan-out over ~145k LOC:
 | Track geometry, span contacts, position walker | `td5_track.c` (SECTION anchors: contact resolvers, walker) |
 | Game modes (cop chase, arcade, drag, battle, cup) | `td5_game.c` mode config + `td5_arcade.c`/`td5_damage.c`; read-only queries: `td5_race_state.h` |
 | Netplay, lockstep, desync | `td5_net.c` + `td5_msvc_rand.c` (determinism); restart/seed: `td5_game.c` pause path |
-| Texture/blend/z render states, foliage AA | `ddraw_wrapper/src/d3d11_backend_pipeline.c` (state cache; `Backend_IsFoliageAA`) |
+| Texture/blend/z render states, foliage AA | `ddraw_wrapper/src/d3d12_backend.c` (state cache; `Backend_IsFoliageAA`) |
 | Mesh draw, culling, banners, billboards | `td5_render*.c` |
 | Asset loading (zips, TGA, levels, cars) | `td5_asset.c` (+ `td5_assetsrc.c` pack-on-load) |
 | Sound / music / internet radio | `td5_sound.c` / `td5_music.c` / `td5_radio.c` |

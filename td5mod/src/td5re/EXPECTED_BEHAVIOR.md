@@ -35,7 +35,7 @@ Port-side work that changed behavior since the original version of this map:
 
 | Step | Original | Expected in Port | Log Tag |
 |------|----------|-----------------|---------|
-| 1. Window creation | 640x480 DirectDraw window | D3D11 window (windowed or fullscreen) | platform |
+| 1. Window creation | 640x480 DirectDraw window | D3D12 window (windowed or fullscreen) | platform |
 | 2. Module init | 15 modules initialized in order | Same order: asset,save,input,sound,render,track,physics,ai,camera,vfx,hud,frontend,net,fmv,game | td5re |
 | 3. Config load | Config.td5 loaded, XOR decrypted, CRC validated | INI files (td5re.ini + td5re_input/progress/cup.ini); legacy Config.td5/CupData.td5 imported once then renamed *.migrated | save |
 | 4. Frontend init | Load font atlas, cursor, button textures from frontend.zip | Same | frontend |
@@ -125,7 +125,7 @@ Port-side work that changed behavior since the original version of this map:
 
 | Area | Original | Port |
 |------|----------|------|
-| Graphics API | DirectDraw/Direct3D retained mode | D3D11 via wrapper |
+| Graphics API | DirectDraw/Direct3D retained mode | D3D12 via wrapper |
 | Video codec | EA TGQ | MFPlay (MP4/AVI) |
 | Network | DirectPlay | Winsock2 UDP |
 | Resolution | 640x480x16 default | 640x480x32 (windowed) |

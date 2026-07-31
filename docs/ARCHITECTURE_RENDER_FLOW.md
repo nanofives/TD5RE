@@ -1,6 +1,13 @@
 # TD5RE Render Flow — End to End
 
-How a race frame gets from simulation to the screen. The port keeps the original game's **software T&L** design: all vertex transform, lighting, clipping, and projection happen on the CPU in `td5_render.c`; the GPU only rasterizes pre-transformed XYZRHW vertices (FVF 0x1C4, 32-byte stride) submitted through the DDraw→D3D11 wrapper (`td5mod/ddraw_wrapper/`). Every claim below cites the source file/function it was read from in this worktree.
+> **Backend note (2026-07-31 cutover):** the GPU backend is now **D3D12**
+> (`ddraw_wrapper/src/d3d12_backend.c`). The original D3D11 backend was retired;
+> see `docs/plans/D3D12_PORT_PLAN.md`. The frame flow / software-T&L design below
+> is backend-agnostic and unchanged, but any "D3D11" wording or
+> `d3d11_backend_*.c` references in the detailed sections are historical — the
+> equivalent lives in `d3d12_backend.c` behind the identical `Backend_*` API.
+
+How a race frame gets from simulation to the screen. The port keeps the original game's **software T&L** design: all vertex transform, lighting, clipping, and projection happen on the CPU in `td5_render.c`; the GPU only rasterizes pre-transformed XYZRHW vertices (FVF 0x1C4, 32-byte stride) submitted through the DDraw→D3D12 wrapper (`td5mod/ddraw_wrapper/`). Every claim below cites the source file/function it was read from in this worktree.
 
 ## 1. Frame flow: fixed 30 Hz sim, per-frame render
 
