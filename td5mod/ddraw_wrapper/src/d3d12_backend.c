@@ -118,8 +118,11 @@ static ID3D12DescriptorHeap *s_srv_ring;         /* shader-visible SRV ring     
 static UINT                  s_srv_ring_cap;
 static UINT                  s_srv_ring_next;
 
-static ID3D12DescriptorHeap *s_dsv_heap;         /* 1 DSV for the scene depth   */
-static ID3D12Resource       *s_depth_tex;
+static ID3D12DescriptorHeap *s_dsv_heap;         /* 2 DSVs: [0] writable, [1] read-only */
+static UINT                  s_dsv_size;          /* DSV descriptor increment size */
+static ID3D12Resource       *s_depth_tex;        /* R32_TYPELESS: DSV (D32) + SRV (R32) */
+static UINT                  s_depth_srv_slot;    /* staging-heap slot of the R32_FLOAT depth SRV */
+static D3D12_RESOURCE_STATES s_depth_state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
 
 static ID3D12DescriptorHeap *s_tex_rtv_heap;     /* RTVs for render-target texs */
 static UINT                  s_tex_rtv_size;
@@ -399,7 +402,7 @@ static void d3d12_frame_begin(void)
 
     {
         D3D12_CPU_DESCRIPTOR_HANDLE rtv = d3d12_rtv_handle(idx);
-        D3D12_CPU_DESCRIPTOR_HANDLE dsv = cpu_handle(s_dsv_heap, 0, 1);
+        D3D12_CPU_DESCRIPTOR_HANDLE dsv = cpu_handle(s_dsv_heap, 0, s_dsv_size);
         static const float s_black[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
         ID3D12GraphicsCommandList_OMSetRenderTargets(g_d3d12.list, 1, &rtv, FALSE, s_dsv_heap ? &dsv : NULL);
         /* Flip-discard leaves the backbuffer undefined each frame; clear it so
@@ -1195,28 +1198,46 @@ static int d3d12_render_core_init(int width, int height)
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     if (FAILED(ID3D12Device_CreateDescriptorHeap(g_d3d12.device, &hd, &IID_ID3D12DescriptorHeap, (void **)&s_tex_rtv_heap))) return 0;
 
-    /* Scene depth buffer (D32_FLOAT) + DSV. */
+    /* Scene depth buffer: R32_TYPELESS so it can be both a depth target (D32
+     * DSV) AND sampled as an SRV (R32_FLOAT) by the offscreen passes / soft
+     * particles. Two DSVs: [0] writable, [1] read-only (bind alongside the depth
+     * SRV for depth-aware effects without a write hazard). */
     {
         D3D12_HEAP_PROPERTIES hp;
         D3D12_RESOURCE_DESC   td;
         D3D12_CLEAR_VALUE     cv;
         D3D12_DEPTH_STENCIL_VIEW_DESC dvd;
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvd;
         ZeroMemory(&hp, sizeof(hp)); hp.Type = D3D12_HEAP_TYPE_DEFAULT;
         ZeroMemory(&td, sizeof(td));
         td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         td.Width = (UINT64)width; td.Height = (UINT)height; td.DepthOrArraySize = 1; td.MipLevels = 1;
-        td.Format = DXGI_FORMAT_D32_FLOAT; td.SampleDesc.Count = 1;
-        td.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        td.Format = DXGI_FORMAT_R32_TYPELESS; td.SampleDesc.Count = 1;
+        td.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;  /* SRV allowed (no DENY flag) */
         ZeroMemory(&cv, sizeof(cv)); cv.Format = DXGI_FORMAT_D32_FLOAT; cv.DepthStencil.Depth = 1.0f;
         hr = ID3D12Device_CreateCommittedResource(g_d3d12.device, &hp, D3D12_HEAP_FLAG_NONE, &td,
                 D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv, &IID_ID3D12Resource, (void **)&s_depth_tex);
-        if (FAILED(hr)) return 0;
+        if (FAILED(hr)) { d3d12_diag("depth R32_TYPELESS CreateCommittedResource 0x%08lX", hr); return 0; }
+        s_depth_state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        s_dsv_size = ID3D12Device_GetDescriptorHandleIncrementSize(g_d3d12.device, D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
         ZeroMemory(&hd, sizeof(hd));
-        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; hd.NumDescriptors = 1;
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; hd.NumDescriptors = 2;
         hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
         if (FAILED(ID3D12Device_CreateDescriptorHeap(g_d3d12.device, &hd, &IID_ID3D12DescriptorHeap, (void **)&s_dsv_heap))) return 0;
         ZeroMemory(&dvd, sizeof(dvd)); dvd.Format = DXGI_FORMAT_D32_FLOAT; dvd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-        ID3D12Device_CreateDepthStencilView(g_d3d12.device, s_depth_tex, &dvd, cpu_handle(s_dsv_heap, 0, 1));
+        ID3D12Device_CreateDepthStencilView(g_d3d12.device, s_depth_tex, &dvd, cpu_handle(s_dsv_heap, 0, s_dsv_size));
+        dvd.Flags = D3D12_DSV_FLAG_READ_ONLY_DEPTH;   /* [1] read-only DSV */
+        ID3D12Device_CreateDepthStencilView(g_d3d12.device, s_depth_tex, &dvd, cpu_handle(s_dsv_heap, 1, s_dsv_size));
+        /* R32_FLOAT SRV in the CPU staging heap (copied into the ring when a pass
+         * binds it), permanent slot. */
+        s_depth_srv_slot = s_srv_stage_next++;
+        ZeroMemory(&srvd, sizeof(srvd));
+        srvd.Format = DXGI_FORMAT_R32_FLOAT;
+        srvd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvd.Texture2D.MipLevels = 1;
+        ID3D12Device_CreateShaderResourceView(g_d3d12.device, s_depth_tex, &srvd,
+            cpu_handle(s_srv_stage, s_depth_srv_slot, s_srv_stage_size));
     }
 
     /* Per-frame persistent-mapped UPLOAD ring. */
@@ -1587,7 +1608,7 @@ void Backend_ClearDepth(float z)
 {
     if (!g_d3d12.device || !s_dsv_heap) return;
     d3d12_frame_begin();
-    ID3D12GraphicsCommandList_ClearDepthStencilView(g_d3d12.list, cpu_handle(s_dsv_heap, 0, 1),
+    ID3D12GraphicsCommandList_ClearDepthStencilView(g_d3d12.list, cpu_handle(s_dsv_heap, 0, s_dsv_size),
         D3D12_CLEAR_FLAG_DEPTH, z, 0, 0, NULL);
 }
 
