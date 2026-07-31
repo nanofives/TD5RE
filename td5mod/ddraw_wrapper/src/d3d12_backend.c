@@ -86,6 +86,7 @@ struct BackendConstBuffer {
     ID3D12Resource *res;    /* UPLOAD-heap, persistent-mapped, 256-aligned */
     void           *mapped;
     UINT            size;   /* 256-aligned byte size                       */
+    D3D12_GPU_VIRTUAL_ADDRESS gpu_va; /* last Update's per-frame ring slice (b1 anti-alias) */
 };
 struct BackendPixelShader {
     const void *bc;
@@ -913,8 +914,14 @@ static void d3d12_bind_and_draw(D3D_PRIMITIVE_TOPOLOGY topo, int topo_type,
         s_frame_static_bound = 1;
     }
     if (pso != s_last_pso) { ID3D12GraphicsCommandList_SetPipelineState(cl, pso); s_last_pso = pso; }
-    if (s_cur_cb1 && s_cur_cb1->res)
-        ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(cl, 4, ID3D12Resource_GetGPUVirtualAddress(s_cur_cb1->res));
+    if (s_cur_cb1) {
+        /* Prefer the per-update ring slice (distinct b1 params per shape); fall
+         * back to the persistent buffer for CBs never routed through the ring. */
+        D3D12_GPU_VIRTUAL_ADDRESS cb1va = s_cur_cb1->gpu_va ? s_cur_cb1->gpu_va
+            : (s_cur_cb1->res ? ID3D12Resource_GetGPUVirtualAddress(s_cur_cb1->res) : 0);
+        if (cb1va)
+            ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(cl, 4, cb1va);
+    }
 
     /* SRV table: copy the bound texture's staging SRV into a fresh ring slot. */
     slot = s_srv_ring_next++;
@@ -2547,7 +2554,20 @@ void Backend_UnbindRenderTargets(void) { }
 void Backend_UnbindSceneDepthReadonly(void) { }
 void Backend_UpdateConstBuffer(BackendConstBuffer *cb, const void *data, size_t size)
 {
-    if (cb && cb->mapped && data) memcpy(cb->mapped, data, size > cb->size ? cb->size : size);
+    UINT n;
+    if (!cb || !data) return;
+    n = (UINT)(size > cb->size ? cb->size : size);
+    /* Also memcpy into the persistent buffer so CBs bound via ->res (fog/viewport)
+     * keep working. */
+    if (cb->mapped) memcpy(cb->mapped, data, n);
+    /* Anti-alias the b1 SDF path: allocate a FRESH per-frame upload-ring slice per
+     * update so multiple frontend shapes (roundrect/arrow/gauge selection etc.)
+     * drawn this frame each get DISTINCT b1 params. Without this every shape read
+     * the last Update's data (D3D11 got a versioned copy per UpdateSubresource;
+     * the flip-model D3D12 needs distinct memory per draw). Ensure the frame is
+     * open first so the ring is reset before we bump-allocate. */
+    if (!g_d3d12.frame_open) d3d12_frame_begin();
+    cb->gpu_va = d3d12_ring_cb(data, n);
 }
 
 /* Fold g_backend.state (populated by the shared device3.c) into the FogCB.
