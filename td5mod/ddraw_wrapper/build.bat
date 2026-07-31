@@ -22,23 +22,10 @@ set AR=%TOOLPREFIX%\ar.exe
 set SRCDIR=src
 set OUTDIR=build
 
-REM [D3D12 port P0.6] Backend selector. Arg 1 (or TD5RE_BACKEND) picks the GPU
-REM backend: d3d11 (default) or d3d12. The backend is baked into the archive
-REM filename (libddraw_wrapper_<backend>.a) so a stale copy fails to LINK, not
-REM to run. The d3d11 path is UNCHANGED (also still emits the plain
-REM libddraw_wrapper.a that build_standalone.bat + CI link by default), so this
-REM does not touch the default build or the CI workflow. For d3d12 the shared
-REM COM files (wrapper_srcs.txt) are compiled MINUS the d3d11_backend_*.c files,
-REM PLUS wrapper_srcs_d3d12.txt.
-set "BACKEND=%~1"
-if "%BACKEND%"=="" set "BACKEND=%TD5RE_BACKEND%"
-if "%BACKEND%"=="" set "BACKEND=d3d11"
-if /I not "%BACKEND%"=="d3d11" if /I not "%BACKEND%"=="d3d12" (
-    echo ERROR: unknown backend "%BACKEND%" ^(expected d3d11 or d3d12^)
-    goto :fail
-)
-
-echo === Wrapper Build [backend=%BACKEND%] ===
+REM GPU backend: D3D12 (the D3D11 backend was retired at the 2026-07-31 cutover).
+REM The module list in wrapper_srcs.txt includes d3d12_backend.c; the archive is
+REM the plain libddraw_wrapper.a that build_standalone.bat + CI link.
+echo === Wrapper Build [D3D12] ===
 
 if not exist %OUTDIR% mkdir %OUTDIR%
 
@@ -58,20 +45,7 @@ REM png_loader.c additionally needs -Wno-unused-function (kept here, not in
 REM the shared flags file, since it's a single-file exception).
 REM ---------------------------------------------------------------------------
 set "WRAPPER_SRCS="
-for /f "usebackq eol=# delims=" %%L in ("%~dp0wrapper_srcs.txt") do (
-    set "SL=%%L"
-    REM For the d3d12 build, drop the d3d11 backend engine files (d3d11_backend_*.c).
-    if /I "%BACKEND%"=="d3d12" if "!SL:~0,13!"=="d3d11_backend" set "SL="
-    if defined SL set "WRAPPER_SRCS=!WRAPPER_SRCS! !SL!"
-)
-REM Append the d3d12 backend engine files for the d3d12 build.
-if /I "%BACKEND%"=="d3d12" (
-    if not exist "%~dp0wrapper_srcs_d3d12.txt" (
-        echo ERROR: d3d12 backend requires wrapper_srcs_d3d12.txt ^(not yet created^)
-        goto :fail
-    )
-    for /f "usebackq eol=# delims=" %%L in ("%~dp0wrapper_srcs_d3d12.txt") do set "WRAPPER_SRCS=!WRAPPER_SRCS! %%L"
-)
+for /f "usebackq eol=# delims=" %%L in ("%~dp0wrapper_srcs.txt") do set "WRAPPER_SRCS=!WRAPPER_SRCS! %%L"
 if not defined WRAPPER_SRCS (
     echo ERROR: wrapper_srcs.txt missing or empty at %~dp0wrapper_srcs.txt
     goto :fail
@@ -100,16 +74,13 @@ REM [2026-06-04] build_standalone.bat links the wrapper as a PREBUILT static lib
 REM (-L build -lddraw_wrapper); it does NOT compile the wrapper itself. So this
 REM .a MUST be (re)produced here whenever the wrapper objects change, or td5re's
 REM link fails with "undefined reference" (e.g. S01's Backend_SetExclusiveFullscreen).
-echo Creating libddraw_wrapper_%BACKEND%.a...
-if exist %OUTDIR%\libddraw_wrapper_%BACKEND%.a del %OUTDIR%\libddraw_wrapper_%BACKEND%.a
-"%AR%" rcs %OUTDIR%\libddraw_wrapper_%BACKEND%.a !ARCHIVE_OBJS!
+echo Creating libddraw_wrapper.a...
+if exist %OUTDIR%\libddraw_wrapper.a del %OUTDIR%\libddraw_wrapper.a
+"%AR%" rcs %OUTDIR%\libddraw_wrapper.a !ARCHIVE_OBJS!
 if errorlevel 1 goto :fail
-REM Default (d3d11) also emits the plain libddraw_wrapper.a that the default
-REM build_standalone.bat + CI link path expects -- keeps them unchanged.
-if /I "%BACKEND%"=="d3d11" copy /y %OUTDIR%\libddraw_wrapper_d3d11.a %OUTDIR%\libddraw_wrapper.a >nul
 
 echo.
-echo === BUILD OK: %OUTDIR%\libddraw_wrapper_%BACKEND%.a ===
+echo === BUILD OK: %OUTDIR%\libddraw_wrapper.a ===
 goto :done
 
 :fail

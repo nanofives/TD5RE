@@ -26,17 +26,11 @@ set VARIANT=dev
 if /I "%~1"=="release" set VARIANT=release
 
 REM ---------------------------------------------------------------------------
-REM [D3D12 port] GPU backend selector (TD5RE_BACKEND=d3d11|d3d12, default d3d11).
-REM d3d11 is UNCHANGED (links libddraw_wrapper.a). d3d12 links
-REM libddraw_wrapper_d3d12.a, swaps -ld3d11 -> -ld3d12 in the system libs, and
-REM emits a SEPARATE exe (td5re[_release]_d3d12.exe) in build_d3d12\ so it never
-REM clobbers the shipping d3d11 build. Build the wrapper first with
-REM `ddraw_wrapper\build.bat d3d12`.
+REM GPU backend: D3D12 (the D3D11 backend was retired at the 2026-07-31 cutover).
+REM Links the prebuilt libddraw_wrapper.a (built from wrapper_srcs.txt, which now
+REM lists d3d12_backend.c) + -ld3d12 (from link_libs.txt).
 REM ---------------------------------------------------------------------------
-set "BACKEND=%TD5RE_BACKEND%"
-if "%BACKEND%"=="" set "BACKEND=d3d11"
 set "WRAP_LIB=ddraw_wrapper"
-if /I "%BACKEND%"=="d3d12" set "WRAP_LIB=ddraw_wrapper_d3d12"
 
 REM ---------------------------------------------------------------------------
 REM Architecture: x86_64 ONLY (i686 retired 2026-07-30)
@@ -133,15 +127,6 @@ set CFLAGS=!CFLAGS_BASE! -DTD5RE_RELEASE -DNDEBUG
 set EXTRA_LDFLAGS=-s
 
 :cfg_done
-
-REM [D3D12 port] d3d12 backend -> separate exe + build dir (never clobber the
-REM shipping d3d11 build) and swap the D3D system lib (-ld3d11 -> -ld3d12).
-if /I "%BACKEND%"=="d3d12" (
-    set "EXE=!EXE:.exe=_d3d12.exe!"
-    set "MAPFILE=!MAPFILE:.map=_d3d12.map!"
-    set "BUILDDIR=!BUILDDIR!_d3d12"
-    set "LINK_LIBS=!LINK_LIBS:-ld3d11=-ld3d12!"
-)
 
 REM Verify compiler
 "%GCC%" --version >nul 2>&1

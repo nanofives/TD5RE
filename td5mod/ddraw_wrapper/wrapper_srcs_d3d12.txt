@@ -1,5 +1,0 @@
-# ddraw_wrapper D3D12 backend engine modules -- SINGLE SOURCE OF TRUTH for the
-# d3d12 build variant (build.bat d3d12). Compiled IN PLACE OF the d3d11_backend_*.c
-# files (which build.bat filters out for d3d12) alongside the shared COM files
-# from wrapper_srcs.txt. One module per line, # comments. Grows over Phases 1-5.
-d3d12_backend.c
