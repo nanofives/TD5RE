@@ -50,6 +50,108 @@ typedef struct {
 
 static D3D12State g_d3d12;
 
+/* ======================================================================== *
+ *  RENDER CORE (Phase 2) -- root signature, PSO cache, upload ring, and
+ *  descriptor heaps that back the shared Backend_* draw API on D3D12.
+ *
+ *  Integration seam: the shared COM layer (device3.c) folds the game's D3D6
+ *  render state into g_backend.state (RenderStateCache) exactly as it does for
+ *  D3D11; the d3d12 draw path reads that cache to select a cached PSO + sampler
+ *  + the viewport/fog root CBVs. One root signature is shared by every draw:
+ *    b0 (VERTEX)  = ViewportCB      b0 (PIXEL) = FogCB
+ *    t0 table     = bound texture   s0 table   = selected sampler
+ *    b1 (PIXEL)   = SDF/FX CB (roundrect/gauge/arrow/cursor/msdf/fx uploads)
+ * ======================================================================== */
+
+#include "shaders/vs_pretransformed_bytes_50.h"
+#include "shaders/vs_fullscreen_bytes_50.h"
+#include "shaders/ps_modulate_bytes_50.h"
+#include "shaders/ps_modulate_alpha_bytes_50.h"
+#include "shaders/ps_decal_bytes_50.h"
+#include "shaders/ps_luminance_alpha_bytes_50.h"
+#include "shaders/ps_modulate_g_bytes_50.h"
+#include "shaders/ps_modulate_alpha_g_bytes_50.h"
+
+#ifndef TD5_VERTEX_STRIDE
+#define TD5_VERTEX_STRIDE 32   /* XYZRHW: float4 pos + BGRA diffuse + BGRA specular + float2 uv */
+#endif
+
+/* --- opaque handle bodies (d3d12-private; the d3d11 bodies in
+ * d3d11_backend_priv.h carry ID3D11 members and are not usable here) --- */
+struct BackendConstBuffer {
+    ID3D12Resource *res;    /* UPLOAD-heap, persistent-mapped, 256-aligned */
+    void           *mapped;
+    UINT            size;   /* 256-aligned byte size                       */
+};
+struct BackendPixelShader {
+    const void *bc;
+    SIZE_T      len;
+};
+struct BackendTexture {
+    ID3D12Resource       *res;      /* DEFAULT-heap texture (NULL until created) */
+    ID3D12Resource       *upload;   /* persistent UPLOAD staging (dynamic path)  */
+    UINT                  srv_slot; /* permanent slot in s_srv_stage             */
+    UINT                  rtv_slot; /* slot in s_tex_rtv_heap (has_rtv only)     */
+    DXGI_FORMAT           fmt;
+    UINT                  w, h;
+    D3D12_RESOURCE_STATES rstate;
+    int                   has_rtv;
+    int                   valid;
+    LONG                  ref;
+    UINT                  gen;
+};
+
+/* --- render-core globals --- */
+static ID3D12RootSignature  *s_root_sig;
+
+static ID3D12DescriptorHeap *s_sampler_heap;     /* shader-visible, 4 samplers  */
+static UINT                  s_sampler_size;
+
+static ID3D12DescriptorHeap *s_srv_stage;        /* CPU heap: 1 SRV per texture */
+static UINT                  s_srv_stage_size;
+static UINT                  s_srv_stage_cap;
+static UINT                  s_srv_stage_next;
+
+static ID3D12DescriptorHeap *s_srv_ring;         /* shader-visible SRV ring     */
+static UINT                  s_srv_ring_cap;
+static UINT                  s_srv_ring_next;
+
+static ID3D12DescriptorHeap *s_dsv_heap;         /* 1 DSV for the scene depth   */
+static ID3D12Resource       *s_depth_tex;
+
+static ID3D12DescriptorHeap *s_tex_rtv_heap;     /* RTVs for render-target texs */
+static UINT                  s_tex_rtv_size;
+static UINT                  s_tex_rtv_cap;
+static UINT                  s_tex_rtv_next;
+
+/* Per-frame-in-flight persistent-mapped UPLOAD ring (VB/IB/CB bump allocator). */
+#define D3D12_UPLOAD_RING_BYTES (32u * 1024u * 1024u)
+static ID3D12Resource       *s_upload[D3D12_FRAME_COUNT];
+static unsigned char        *s_upload_cpu[D3D12_FRAME_COUNT];
+static UINT64                 s_upload_gpu[D3D12_FRAME_COUNT];   /* GPU VA base */
+static UINT                   s_upload_off[D3D12_FRAME_COUNT];   /* bump cursor */
+
+/* PSO cache: keyed on {vs, ps, blend, ds, raster, topology-type}. */
+typedef struct { UINT64 key; ID3D12PipelineState *pso; } PSOEntry;
+#define D3D12_PSO_CACHE_MAX 256
+static PSOEntry s_pso_cache[D3D12_PSO_CACHE_MAX];
+static int      s_pso_count;
+
+/* Builtin pixel shaders indexed by PS_* (SM5.0 bytecode blobs). */
+static BackendPixelShader s_builtin_ps[PS_COUNT];
+
+/* Persistent viewport + fog constant buffers (b0 VS / b0 PS). */
+static BackendConstBuffer *s_viewport_cb;
+static BackendConstBuffer *s_fog_cb;
+
+/* Current draw state (selected into the next PSO / bindings). */
+static int              s_cur_ps    = PS_MODULATE;
+static int              s_cur_vs    = 0;              /* 0 = pretransformed      */
+static BackendTexture  *s_cur_tex;
+static BackendConstBuffer *s_cur_cb1;                 /* b1 SDF/FX (per-draw)    */
+static D3D12_VIEWPORT   s_cur_vp;
+static D3D12_RECT       s_cur_scissor;
+
 /* ---- plumbing that lived in the filtered-out d3d11 backend files -------- *
  * g_wrapper_rec (deferred pane-record thread-local; the d3d12 backend does not
  * use deferred contexts, so it stays NULL) + the WrapperClipper COM stub +
@@ -236,6 +338,387 @@ static void d3d12_frame_present(int sync)
     d3d12_wait_frame(g_d3d12.frame_index);
 }
 
+/* ---- descriptor-handle helpers (aggregate-return -> raw vtable) --------- */
+
+static D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle(ID3D12DescriptorHeap *h, UINT idx, UINT size)
+{
+    D3D12_CPU_DESCRIPTOR_HANDLE c;
+    h->lpVtbl->GetCPUDescriptorHandleForHeapStart(h, &c);
+    c.ptr += (SIZE_T)idx * size;
+    return c;
+}
+static D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle(ID3D12DescriptorHeap *h, UINT idx, UINT size)
+{
+    D3D12_GPU_DESCRIPTOR_HANDLE g;
+    h->lpVtbl->GetGPUDescriptorHandleForHeapStart(h, &g);
+    g.ptr += (UINT64)idx * size;
+    return g;
+}
+
+/* ---- render-state -> D3D12 pipeline descriptors (verbatim from the D3D11
+ *      state-object descs in d3d11_backend_device.c so raster output matches) */
+
+static const D3D12_INPUT_ELEMENT_DESC s_input_layout[4] = {
+    { "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    { "COLOR",    0, DXGI_FORMAT_B8G8R8A8_UNORM,      0, 16, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    { "COLOR",    1, DXGI_FORMAT_B8G8R8A8_UNORM,      0, 20, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+    { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,        0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+};
+
+static void d3d12_fill_blend(int idx, D3D12_BLEND_DESC *bd)
+{
+    D3D12_RENDER_TARGET_BLEND_DESC *rt = &bd->RenderTarget[0];
+    ZeroMemory(bd, sizeof(*bd));
+    rt->RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    rt->BlendOp       = D3D12_BLEND_OP_ADD;
+    rt->BlendOpAlpha  = D3D12_BLEND_OP_ADD;
+    rt->SrcBlendAlpha = D3D12_BLEND_ONE;
+    rt->DestBlendAlpha= D3D12_BLEND_INV_SRC_ALPHA;
+    switch (idx) {
+    case BLEND_OPAQUE:
+        rt->BlendEnable = FALSE; return;
+    case BLEND_SRCALPHA_INVSRC:
+        rt->BlendEnable=TRUE; rt->SrcBlend=D3D12_BLEND_SRC_ALPHA; rt->DestBlend=D3D12_BLEND_INV_SRC_ALPHA;
+        rt->SrcBlendAlpha=D3D12_BLEND_ONE; rt->DestBlendAlpha=D3D12_BLEND_INV_SRC_ALPHA; return;
+    case BLEND_SRCALPHA_ONE:
+        rt->BlendEnable=TRUE; rt->SrcBlend=D3D12_BLEND_SRC_ALPHA; rt->DestBlend=D3D12_BLEND_ONE;
+        rt->SrcBlendAlpha=D3D12_BLEND_ONE; rt->DestBlendAlpha=D3D12_BLEND_ONE; return;
+    case BLEND_ONE_ONE:
+        rt->BlendEnable=TRUE; rt->SrcBlend=D3D12_BLEND_ONE; rt->DestBlend=D3D12_BLEND_ONE;
+        rt->SrcBlendAlpha=D3D12_BLEND_ONE; rt->DestBlendAlpha=D3D12_BLEND_ONE; return;
+    case BLEND_SRCALPHA_SRCALPHA:
+        rt->BlendEnable=TRUE; rt->SrcBlend=D3D12_BLEND_SRC_ALPHA; rt->DestBlend=D3D12_BLEND_SRC_ALPHA;
+        rt->SrcBlendAlpha=D3D12_BLEND_ONE; rt->DestBlendAlpha=D3D12_BLEND_SRC_ALPHA; return;
+    case BLEND_INVSRC_INVSRC:
+        rt->BlendEnable=TRUE; rt->SrcBlend=D3D12_BLEND_INV_SRC_ALPHA; rt->DestBlend=D3D12_BLEND_INV_SRC_ALPHA;
+        rt->SrcBlendAlpha=D3D12_BLEND_ONE; rt->DestBlendAlpha=D3D12_BLEND_INV_SRC_ALPHA; return;
+    case BLEND_MULT:
+        rt->BlendEnable=TRUE; rt->SrcBlend=D3D12_BLEND_ZERO; rt->DestBlend=D3D12_BLEND_SRC_COLOR;
+        rt->SrcBlendAlpha=D3D12_BLEND_ZERO; rt->DestBlendAlpha=D3D12_BLEND_ONE; return;
+    default:
+        rt->BlendEnable=FALSE; return;
+    }
+}
+
+static void d3d12_fill_ds(int idx, D3D12_DEPTH_STENCIL_DESC *dd)
+{
+    ZeroMemory(dd, sizeof(*dd));
+    dd->DepthFunc    = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    dd->StencilEnable= FALSE;
+    switch (idx) {
+    case DS_Z_ON_WRITE_ON:         dd->DepthEnable=TRUE;  dd->DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;  break;
+    case DS_Z_ON_WRITE_OFF:        dd->DepthEnable=TRUE;  dd->DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO; break;
+    case DS_Z_OFF_WRITE_OFF:       dd->DepthEnable=FALSE; dd->DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO; break;
+    case DS_Z_OFF_WRITE_ON:        dd->DepthEnable=FALSE; dd->DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;  break;
+    case DS_Z_ON_WRITE_ON_ALWAYS:  dd->DepthEnable=TRUE;  dd->DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;  dd->DepthFunc=D3D12_COMPARISON_FUNC_ALWAYS; break;
+    case DS_Z_ON_WRITE_OFF_ALWAYS: dd->DepthEnable=TRUE;  dd->DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO; dd->DepthFunc=D3D12_COMPARISON_FUNC_ALWAYS; break;
+    default:                       dd->DepthEnable=TRUE;  dd->DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;  break;
+    }
+}
+
+static void d3d12_fill_raster(int idx, D3D12_RASTERIZER_DESC *rd)
+{
+    ZeroMemory(rd, sizeof(*rd));
+    rd->FillMode = D3D12_FILL_MODE_SOLID;
+    rd->CullMode = D3D12_CULL_MODE_NONE;
+    rd->DepthClipEnable = FALSE;   /* legacy XYZRHW never clipped on Z */
+    if (idx == 1) { rd->DepthBias = -500; rd->SlopeScaledDepthBias = -1.5f; }  /* shadow decal */
+}
+
+/* ---- PSO cache --------------------------------------------------------- */
+
+static void d3d12_resolve_ps(int ps_id, const void **bc, SIZE_T *len)
+{
+    if (ps_id >= 0 && ps_id < PS_COUNT) { *bc = s_builtin_ps[ps_id].bc; *len = s_builtin_ps[ps_id].len; }
+    else { *bc = s_builtin_ps[PS_MODULATE].bc; *len = s_builtin_ps[PS_MODULATE].len; }
+}
+
+/* topo_type: 0=triangle, 1=line */
+static ID3D12PipelineState *d3d12_get_pso(int vs_idx, int ps_id, int blend, int ds, int raster, int topo_type)
+{
+    UINT64 key;
+    int i;
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd;
+    ID3D12PipelineState *pso = NULL;
+    const void *vbc, *pbc; SIZE_T vlen, plen;
+    HRESULT hr;
+
+    key = ((UINT64)(vs_idx & 0xF)) | ((UINT64)(ps_id & 0x3F) << 4) | ((UINT64)(blend & 0xF) << 10)
+        | ((UINT64)(ds & 0xF) << 14) | ((UINT64)(raster & 0x3) << 18) | ((UINT64)(topo_type & 0x3) << 20);
+    for (i = 0; i < s_pso_count; i++) if (s_pso_cache[i].key == key) return s_pso_cache[i].pso;
+    if (s_pso_count >= D3D12_PSO_CACHE_MAX) { WRAPPER_LOG("D3D12 PSO cache full"); return NULL; }
+
+    vbc = (vs_idx == 1) ? (const void *)g_vs_fullscreen_50 : (const void *)g_vs_pretransformed_50;
+    vlen= (vs_idx == 1) ? sizeof(g_vs_fullscreen_50) : sizeof(g_vs_pretransformed_50);
+    d3d12_resolve_ps(ps_id, &pbc, &plen);
+
+    ZeroMemory(&pd, sizeof(pd));
+    pd.pRootSignature = s_root_sig;
+    pd.VS.pShaderBytecode = vbc; pd.VS.BytecodeLength = vlen;
+    pd.PS.pShaderBytecode = pbc; pd.PS.BytecodeLength = plen;
+    d3d12_fill_blend(blend, &pd.BlendState);
+    d3d12_fill_ds(ds, &pd.DepthStencilState);
+    d3d12_fill_raster(raster, &pd.RasterizerState);
+    pd.SampleMask = 0xFFFFFFFFu;
+    pd.InputLayout.pInputElementDescs = s_input_layout;
+    pd.InputLayout.NumElements = 4;
+    pd.PrimitiveTopologyType = topo_type == 1 ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE
+                                              : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.NumRenderTargets = 1;
+    pd.RTVFormats[0] = DXGI_FORMAT_B8G8R8A8_UNORM;
+    pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+    pd.SampleDesc.Count = 1;
+
+    hr = ID3D12Device_CreateGraphicsPipelineState(g_d3d12.device, &pd, &IID_ID3D12PipelineState, (void **)&pso);
+    if (FAILED(hr) || !pso) { WRAPPER_LOG("D3D12 CreateGraphicsPipelineState (ps=%d blend=%d ds=%d) 0x%08lX", ps_id, blend, ds, hr); return NULL; }
+    s_pso_cache[s_pso_count].key = key;
+    s_pso_cache[s_pso_count].pso = pso;
+    s_pso_count++;
+    return pso;
+}
+
+/* ---- upload ring + const buffers --------------------------------------- */
+
+/* Bump-allocate `size` bytes (aligned) from the current frame's upload ring;
+ * returns the GPU VA and copies `src` in when non-NULL. 0 on overflow. */
+static UINT64 d3d12_upload(const void *src, UINT size, UINT align, UINT *out_off)
+{
+    UINT idx = g_d3d12.frame_index;
+    UINT off = (s_upload_off[idx] + (align - 1)) & ~(align - 1);
+    if (off + size > D3D12_UPLOAD_RING_BYTES) { WRAPPER_LOG("D3D12 upload ring overflow"); return 0; }
+    if (src) memcpy(s_upload_cpu[idx] + off, src, size);
+    s_upload_off[idx] = off + size;
+    if (out_off) *out_off = off;
+    return s_upload_gpu[idx] + off;
+}
+
+static BackendConstBuffer *d3d12_cb_create(UINT size)
+{
+    BackendConstBuffer *cb;
+    D3D12_HEAP_PROPERTIES hp;
+    D3D12_RESOURCE_DESC bd;
+    HRESULT hr;
+    UINT asz = (size + 255u) & ~255u;
+
+    cb = (BackendConstBuffer *)calloc(1, sizeof(*cb));
+    if (!cb) return NULL;
+    ZeroMemory(&hp, sizeof(hp)); hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+    ZeroMemory(&bd, sizeof(bd));
+    bd.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width=asz; bd.Height=1; bd.DepthOrArraySize=1;
+    bd.MipLevels=1; bd.Format=DXGI_FORMAT_UNKNOWN; bd.SampleDesc.Count=1; bd.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    hr = ID3D12Device_CreateCommittedResource(g_d3d12.device, &hp, D3D12_HEAP_FLAG_NONE, &bd,
+            D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, (void **)&cb->res);
+    if (FAILED(hr)) { free(cb); return NULL; }
+    { D3D12_RANGE r; r.Begin=0; r.End=0; ID3D12Resource_Map(cb->res, 0, &r, &cb->mapped); }
+    cb->size = asz;
+    return cb;
+}
+
+/* ---- render-core init / teardown --------------------------------------- */
+
+static int d3d12_create_root_sig(void)
+{
+    D3D12_DESCRIPTOR_RANGE srv_range, samp_range;
+    D3D12_ROOT_PARAMETER params[5];
+    D3D12_ROOT_SIGNATURE_DESC rsd;
+    ID3D10Blob *sig = NULL, *err = NULL;
+    HRESULT hr;
+
+    ZeroMemory(&srv_range, sizeof(srv_range));
+    srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srv_range.NumDescriptors = 1; srv_range.BaseShaderRegister = 0;
+    srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    ZeroMemory(&samp_range, sizeof(samp_range));
+    samp_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+    samp_range.NumDescriptors = 1; samp_range.BaseShaderRegister = 0;
+    samp_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    ZeroMemory(params, sizeof(params));
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;              /* b0 VS: viewport */
+    params[0].Descriptor.ShaderRegister = 0;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;              /* b0 PS: fog */
+    params[1].Descriptor.ShaderRegister = 0;
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; /* t0 PS: texture */
+    params[2].DescriptorTable.NumDescriptorRanges = 1;
+    params[2].DescriptorTable.pDescriptorRanges = &srv_range;
+    params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; /* s0 PS: sampler */
+    params[3].DescriptorTable.NumDescriptorRanges = 1;
+    params[3].DescriptorTable.pDescriptorRanges = &samp_range;
+    params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    params[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;              /* b1 PS: SDF/FX */
+    params[4].Descriptor.ShaderRegister = 1;
+    params[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    ZeroMemory(&rsd, sizeof(rsd));
+    rsd.NumParameters = 5; rsd.pParameters = params;
+    rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    hr = D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err);
+    if (FAILED(hr)) {
+        WRAPPER_LOG("D3D12 SerializeRootSignature 0x%08lX %s", hr,
+                    err ? (const char *)ID3D10Blob_GetBufferPointer(err) : "");
+        if (err) ID3D10Blob_Release(err);
+        return 0;
+    }
+    hr = ID3D12Device_CreateRootSignature(g_d3d12.device, 0,
+            ID3D10Blob_GetBufferPointer(sig), ID3D10Blob_GetBufferSize(sig),
+            &IID_ID3D12RootSignature, (void **)&s_root_sig);
+    ID3D10Blob_Release(sig);
+    if (err) ID3D10Blob_Release(err);
+    if (FAILED(hr)) { WRAPPER_LOG("D3D12 CreateRootSignature 0x%08lX", hr); return 0; }
+    return 1;
+}
+
+static void d3d12_create_samplers(void)
+{
+    D3D12_SAMPLER_DESC sd;
+    int i;
+    static const struct { D3D12_FILTER f; D3D12_TEXTURE_ADDRESS_MODE a; } tbl[SAMP_STATE_COUNT] = {
+        { D3D12_FILTER_MIN_MAG_MIP_POINT,  D3D12_TEXTURE_ADDRESS_MODE_WRAP  }, /* SAMP_POINT_WRAP  */
+        { D3D12_FILTER_MIN_MAG_MIP_POINT,  D3D12_TEXTURE_ADDRESS_MODE_CLAMP }, /* SAMP_POINT_CLAMP */
+        { D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_WRAP  }, /* SAMP_LINEAR_WRAP */
+        { D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP }, /* SAMP_LINEAR_CLAMP*/
+    };
+    for (i = 0; i < SAMP_STATE_COUNT; i++) {
+        ZeroMemory(&sd, sizeof(sd));
+        sd.Filter = tbl[i].f;
+        sd.AddressU = sd.AddressV = sd.AddressW = tbl[i].a;
+        sd.MaxAnisotropy = 1;
+        sd.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+        sd.MinLOD = 0.0f; sd.MaxLOD = D3D12_FLOAT32_MAX;
+        ID3D12Device_CreateSampler(g_d3d12.device, &sd, cpu_handle(s_sampler_heap, i, s_sampler_size));
+    }
+}
+
+static int d3d12_render_core_init(int width, int height)
+{
+    D3D12_DESCRIPTOR_HEAP_DESC hd;
+    HRESULT hr;
+    UINT i;
+
+    if (!d3d12_create_root_sig()) return 0;
+
+    /* Shader-visible SAMPLER heap (4 samplers). */
+    ZeroMemory(&hd, sizeof(hd));
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER; hd.NumDescriptors = SAMP_STATE_COUNT;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(ID3D12Device_CreateDescriptorHeap(g_d3d12.device, &hd, &IID_ID3D12DescriptorHeap, (void **)&s_sampler_heap))) return 0;
+    s_sampler_size = ID3D12Device_GetDescriptorHandleIncrementSize(g_d3d12.device, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+    d3d12_create_samplers();
+
+    s_srv_stage_size = ID3D12Device_GetDescriptorHandleIncrementSize(g_d3d12.device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    /* CPU-only staging SRV heap (one permanent slot per texture). */
+    s_srv_stage_cap = 8192;
+    ZeroMemory(&hd, sizeof(hd));
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors = s_srv_stage_cap;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    if (FAILED(ID3D12Device_CreateDescriptorHeap(g_d3d12.device, &hd, &IID_ID3D12DescriptorHeap, (void **)&s_srv_stage))) return 0;
+    s_srv_stage_next = 1;   /* slot 0 reserved for a null/white default */
+
+    /* Shader-visible SRV ring (one slot per textured draw, wraps per frame). */
+    s_srv_ring_cap = 16384;
+    ZeroMemory(&hd, sizeof(hd));
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors = s_srv_ring_cap;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(ID3D12Device_CreateDescriptorHeap(g_d3d12.device, &hd, &IID_ID3D12DescriptorHeap, (void **)&s_srv_ring))) return 0;
+
+    /* RTV heap for render-target textures (surfaces / G-buffer). */
+    s_tex_rtv_size = g_d3d12.rtv_size;
+    s_tex_rtv_cap = 256;
+    ZeroMemory(&hd, sizeof(hd));
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; hd.NumDescriptors = s_tex_rtv_cap;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    if (FAILED(ID3D12Device_CreateDescriptorHeap(g_d3d12.device, &hd, &IID_ID3D12DescriptorHeap, (void **)&s_tex_rtv_heap))) return 0;
+
+    /* Scene depth buffer (D32_FLOAT) + DSV. */
+    {
+        D3D12_HEAP_PROPERTIES hp;
+        D3D12_RESOURCE_DESC   td;
+        D3D12_CLEAR_VALUE     cv;
+        D3D12_DEPTH_STENCIL_VIEW_DESC dvd;
+        ZeroMemory(&hp, sizeof(hp)); hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        ZeroMemory(&td, sizeof(td));
+        td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        td.Width = (UINT64)width; td.Height = (UINT)height; td.DepthOrArraySize = 1; td.MipLevels = 1;
+        td.Format = DXGI_FORMAT_D32_FLOAT; td.SampleDesc.Count = 1;
+        td.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        ZeroMemory(&cv, sizeof(cv)); cv.Format = DXGI_FORMAT_D32_FLOAT; cv.DepthStencil.Depth = 1.0f;
+        hr = ID3D12Device_CreateCommittedResource(g_d3d12.device, &hp, D3D12_HEAP_FLAG_NONE, &td,
+                D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv, &IID_ID3D12Resource, (void **)&s_depth_tex);
+        if (FAILED(hr)) return 0;
+        ZeroMemory(&hd, sizeof(hd));
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; hd.NumDescriptors = 1;
+        hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        if (FAILED(ID3D12Device_CreateDescriptorHeap(g_d3d12.device, &hd, &IID_ID3D12DescriptorHeap, (void **)&s_dsv_heap))) return 0;
+        ZeroMemory(&dvd, sizeof(dvd)); dvd.Format = DXGI_FORMAT_D32_FLOAT; dvd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+        ID3D12Device_CreateDepthStencilView(g_d3d12.device, s_depth_tex, &dvd, cpu_handle(s_dsv_heap, 0, 1));
+    }
+
+    /* Per-frame persistent-mapped UPLOAD ring. */
+    for (i = 0; i < D3D12_FRAME_COUNT; i++) {
+        D3D12_HEAP_PROPERTIES hp;
+        D3D12_RESOURCE_DESC   bd;
+        void *p = NULL;
+        ZeroMemory(&hp, sizeof(hp)); hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+        ZeroMemory(&bd, sizeof(bd));
+        bd.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width=D3D12_UPLOAD_RING_BYTES; bd.Height=1;
+        bd.DepthOrArraySize=1; bd.MipLevels=1; bd.Format=DXGI_FORMAT_UNKNOWN; bd.SampleDesc.Count=1;
+        bd.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        hr = ID3D12Device_CreateCommittedResource(g_d3d12.device, &hp, D3D12_HEAP_FLAG_NONE, &bd,
+                D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, (void **)&s_upload[i]);
+        if (FAILED(hr)) return 0;
+        { D3D12_RANGE r; r.Begin=0; r.End=0; ID3D12Resource_Map(s_upload[i], 0, &r, &p); }
+        s_upload_cpu[i] = (unsigned char *)p;
+        s_upload_gpu[i] = ID3D12Resource_GetGPUVirtualAddress(s_upload[i]);
+        s_upload_off[i] = 0;
+    }
+
+    /* Builtin PS bytecode table. */
+    s_builtin_ps[PS_MODULATE].bc        = g_ps_modulate_50;        s_builtin_ps[PS_MODULATE].len        = sizeof(g_ps_modulate_50);
+    s_builtin_ps[PS_MODULATE_ALPHA].bc  = g_ps_modulate_alpha_50;  s_builtin_ps[PS_MODULATE_ALPHA].len  = sizeof(g_ps_modulate_alpha_50);
+    s_builtin_ps[PS_DECAL].bc           = g_ps_decal_50;           s_builtin_ps[PS_DECAL].len           = sizeof(g_ps_decal_50);
+    s_builtin_ps[PS_LUMINANCE_ALPHA].bc = g_ps_luminance_alpha_50; s_builtin_ps[PS_LUMINANCE_ALPHA].len = sizeof(g_ps_luminance_alpha_50);
+    s_builtin_ps[PS_MODULATE_G].bc      = g_ps_modulate_g_50;      s_builtin_ps[PS_MODULATE_G].len      = sizeof(g_ps_modulate_g_50);
+    s_builtin_ps[PS_MODULATE_ALPHA_G].bc= g_ps_modulate_alpha_g_50;s_builtin_ps[PS_MODULATE_ALPHA_G].len= sizeof(g_ps_modulate_alpha_g_50);
+
+    /* Persistent viewport (b0 VS) + fog (b0 PS) const buffers. */
+    s_viewport_cb = d3d12_cb_create(sizeof(ViewportCB));
+    s_fog_cb      = d3d12_cb_create(sizeof(FogCB));
+    if (!s_viewport_cb || !s_fog_cb) return 0;
+    { ViewportCB vp; ZeroMemory(&vp,sizeof(vp)); vp.viewportWidth=(float)width; vp.viewportHeight=(float)height;
+      memcpy(s_viewport_cb->mapped, &vp, sizeof(vp)); }
+    { FogCB fog; ZeroMemory(&fog,sizeof(fog)); memcpy(s_fog_cb->mapped, &fog, sizeof(fog)); }
+
+    /* Warm-up PSO: exercises get_pso + validates root-sig/shader/layout wiring
+     * against the debug layer at init (before any frame). */
+    if (!d3d12_get_pso(0, PS_MODULATE, BLEND_SRCALPHA_INVSRC, DS_Z_OFF_WRITE_OFF, 0, 0)) return 0;
+
+    WRAPPER_LOG("D3D12 render core: root sig + %d samplers + heaps + %uMB upload ring x%d + warm PSO OK",
+                SAMP_STATE_COUNT, D3D12_UPLOAD_RING_BYTES >> 20, D3D12_FRAME_COUNT);
+    return 1;
+}
+
+static void d3d12_render_core_shutdown(void)
+{
+    int i;
+    if (s_viewport_cb) { if (s_viewport_cb->res) ID3D12Resource_Release(s_viewport_cb->res); free(s_viewport_cb); s_viewport_cb = NULL; }
+    if (s_fog_cb)      { if (s_fog_cb->res)      ID3D12Resource_Release(s_fog_cb->res);      free(s_fog_cb);      s_fog_cb = NULL; }
+    for (i = 0; i < s_pso_count; i++) if (s_pso_cache[i].pso) ID3D12PipelineState_Release(s_pso_cache[i].pso);
+    s_pso_count = 0;
+    for (i = 0; i < D3D12_FRAME_COUNT; i++) if (s_upload[i]) { ID3D12Resource_Release(s_upload[i]); s_upload[i] = NULL; s_upload_cpu[i] = NULL; }
+    if (s_depth_tex)     { ID3D12Resource_Release(s_depth_tex); s_depth_tex = NULL; }
+    if (s_dsv_heap)      { ID3D12DescriptorHeap_Release(s_dsv_heap); s_dsv_heap = NULL; }
+    if (s_tex_rtv_heap)  { ID3D12DescriptorHeap_Release(s_tex_rtv_heap); s_tex_rtv_heap = NULL; }
+    if (s_srv_ring)      { ID3D12DescriptorHeap_Release(s_srv_ring); s_srv_ring = NULL; }
+    if (s_srv_stage)     { ID3D12DescriptorHeap_Release(s_srv_stage); s_srv_stage = NULL; }
+    if (s_sampler_heap)  { ID3D12DescriptorHeap_Release(s_sampler_heap); s_sampler_heap = NULL; }
+    if (s_root_sig)      { ID3D12RootSignature_Release(s_root_sig); s_root_sig = NULL; }
+}
+
 /* ---- device lifecycle -------------------------------------------------- */
 
 int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed)
@@ -340,6 +823,18 @@ int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed
     if (FAILED(hr)) { WRAPPER_LOG("D3D12: CreateFence 0x%08lX", hr); goto fail; }
     g_d3d12.fence_event = CreateEventA(NULL, FALSE, FALSE, NULL);
 
+    /* Phase 2 render core: root sig, PSO cache, upload ring, descriptor heaps. */
+    {
+        int rc_ok = d3d12_render_core_init(width, height);
+        Backend_DrainD3DDebug(rc_ok ? "render_core_init_ok" : "render_core_init_FAIL");
+        if (!rc_ok) {
+            WRAPPER_LOG("D3D12: render core init FAILED");
+            IDXGIFactory4_Release(factory);
+            Backend_Shutdown();
+            return 0;
+        }
+    }
+
     IDXGIFactory4_Release(factory);
 
     /* Publish backend-agnostic state to the shared g_backend view. */
@@ -366,6 +861,7 @@ void Backend_Shutdown(void)
 {
     UINT i;
     d3d12_wait_idle();
+    d3d12_render_core_shutdown();
     if (g_d3d12.list)     ID3D12GraphicsCommandList_Release(g_d3d12.list);
     for (i = 0; i < D3D12_FRAME_COUNT; i++) {
         if (g_d3d12.backbuffers[i]) ID3D12Resource_Release(g_d3d12.backbuffers[i]);
@@ -538,13 +1034,57 @@ void Backend_ApplyLightPass(const LightCB *cb) { (void)cb; }
 void Backend_ApplySSRPass(const SSRCB *cb) { (void)cb; }
 void Backend_ApplyShadowPass(const ShadowCB *cb) { (void)cb; }
 void Backend_ApplyStateCache(void) { }
-void Backend_BindConstBuffer(UINT slot, BackendConstBuffer *cb) { (void)slot; (void)cb; }
+/* b1 (SDF/FX) is the only game-bound CB slot; b0 VS/PS are backend-owned
+ * (viewport/fog) and bound directly by the draw path. */
+void Backend_BindConstBuffer(UINT slot, BackendConstBuffer *cb) { if (slot == 1) s_cur_cb1 = cb; }
 void Backend_BindSampler(UINT slot, int sampler_idx) { (void)slot; (void)sampler_idx; }
 int  Backend_BindSceneDepthReadonly(void) { return 0; }
 void Backend_CaptureIfRequested(void) { }
-BackendConstBuffer *Backend_CreateConstBuffer(size_t size) { (void)size; return NULL; }
-BackendPixelShader *Backend_CreatePixelShader(const void *bytecode, size_t len) { (void)bytecode; (void)len; return NULL; }
-void Backend_DrainD3DDebug(const char *where) { (void)where; }
+BackendConstBuffer *Backend_CreateConstBuffer(size_t size) { return d3d12_cb_create((UINT)size); }
+
+/* Copy the bytecode: PSOs referencing it are built lazily, so it must outlive
+ * the caller's buffer. */
+BackendPixelShader *Backend_CreatePixelShader(const void *bytecode, size_t len)
+{
+    BackendPixelShader *ps;
+    void *copy;
+    if (!bytecode || !len) return NULL;
+    ps = (BackendPixelShader *)calloc(1, sizeof(*ps));
+    if (!ps) return NULL;
+    copy = malloc(len);
+    if (!copy) { free(ps); return NULL; }
+    memcpy(copy, bytecode, len);
+    ps->bc = copy; ps->len = (SIZE_T)len;
+    return ps;
+}
+/* Drain the D3D12 debug-layer InfoQueue to a flushed log file. This is the
+ * interim headless verification net during render-core bring-up: validation
+ * errors (bad barriers, root-sig/PSO mismatches, ...) land in log/d3d12_debug.log
+ * immediately (fflush), surviving a force-kill unlike the buffered engine log. */
+void Backend_DrainD3DDebug(const char *where)
+{
+    UINT64 n, i;
+    FILE *f;
+    if (!g_d3d12.info_queue) return;
+    n = ID3D12InfoQueue_GetNumStoredMessages(g_d3d12.info_queue);
+    if (!n) return;
+    f = fopen("log/d3d12_debug.log", "a");
+    for (i = 0; i < n; i++) {
+        SIZE_T len = 0;
+        D3D12_MESSAGE *m;
+        ID3D12InfoQueue_GetMessage(g_d3d12.info_queue, i, NULL, &len);
+        if (!len) continue;
+        m = (D3D12_MESSAGE *)malloc(len);
+        if (m && SUCCEEDED(ID3D12InfoQueue_GetMessage(g_d3d12.info_queue, i, m, &len)) && f) {
+            fprintf(f, "[%s][sev=%d id=%d] %.*s\n", where ? where : "-",
+                    (int)m->Severity, (int)m->ID,
+                    (int)m->DescriptionByteLength, m->pDescription ? m->pDescription : "");
+        }
+        free(m);
+    }
+    if (f) { fflush(f); fclose(f); }
+    ID3D12InfoQueue_ClearStoredMessages(g_d3d12.info_queue);
+}
 void Backend_DrawFullscreenQuad(ID3D11ShaderResourceView *srv) { (void)srv; }
 void Backend_DrawFullscreenQuadRaw(void *srv) { (void)srv; }
 void Backend_DrawIndexedPrimitive(DWORD p, UINT s, UINT bv, UINT si, UINT ic, UINT vc) { (void)p;(void)s;(void)bv;(void)si;(void)ic;(void)vc; }
@@ -557,7 +1097,7 @@ int  Backend_GetCapture(unsigned char **px, int *w, int *h) { (void)px;(void)w;(
 void Backend_MaybeTrim(void) { }
 void Backend_NoteDraw(unsigned prim, unsigned vc, unsigned ic, int indexed) { (void)prim;(void)vc;(void)ic;(void)indexed; }
 void Backend_NoteVerts(const void *v, unsigned vc, unsigned s) { (void)v;(void)vc;(void)s; }
-void *Backend_PixelShaderRaw(BackendPixelShader *ps) { (void)ps; return NULL; }
+void *Backend_PixelShaderRaw(BackendPixelShader *ps) { return ps; }
 void Backend_PlatBindTextureSRV(WrapperRecCtx *rc, void *srv) { (void)rc;(void)srv; }
 void Backend_PlatDrawTris(WrapperRecCtx *rc, const void *v, int vc, const void *idx, int ic, void *pso, int ss) { (void)rc;(void)v;(void)vc;(void)idx;(void)ic;(void)pso;(void)ss; }
 void Backend_PlatDrawWhite(WrapperRecCtx *rc, const void *v, int vc, const void *idx, int ic, int lines) { (void)rc;(void)v;(void)vc;(void)idx;(void)ic;(void)lines; }
@@ -569,13 +1109,13 @@ void Backend_RecExecute(int i) { (void)i; }
 int  Backend_RecPoolEnsure(int c) { (void)c; return 0; }
 void Backend_RecPoolRelease(void) { }
 int  Backend_RecreateDevice(void) { return 0; }
-void Backend_ReleaseConstBuffer(BackendConstBuffer *cb) { (void)cb; }
-void Backend_ReleasePixelShader(BackendPixelShader *ps) { (void)ps; }
+void Backend_ReleaseConstBuffer(BackendConstBuffer *cb) { if (cb) { if (cb->res) ID3D12Resource_Release(cb->res); free(cb); } }
+void Backend_ReleasePixelShader(BackendPixelShader *ps) { if (ps) { free((void *)ps->bc); free(ps); } }
 void Backend_RequestCapture(void) { }
 int  Backend_Reset(int w, int h, int bpp, int windowed) { (void)w;(void)h;(void)bpp;(void)windowed; return 1; }
 void Backend_RestoreMainRenderTarget(void) { }
-void Backend_SelectPixelShader(void) { }
-void Backend_SetBuiltinPixelShader(int ps_idx) { (void)ps_idx; }
+void Backend_SelectPixelShader(void) { }  /* PS chosen at draw time from g_backend.state */
+void Backend_SetBuiltinPixelShader(int ps_idx) { if (ps_idx >= 0 && ps_idx < PS_COUNT) s_cur_ps = ps_idx; }
 int  Backend_SetExclusiveFullscreen(int enable) { (void)enable; return 1; }
 void Backend_SetGBufferEnabled(int on) { (void)on; }
 void Backend_SetViewport(float x, float y, float w, float h, float mn, float mx) { (void)x;(void)y;(void)w;(void)h;(void)mn;(void)mx; }
@@ -598,6 +1138,37 @@ void Backend_TextureRelease(BackendTexture *bt) { (void)bt; }
 void Backend_TextureUpload(BackendTexture *bt, const void *sys, LONG p, DWORD w, DWORD h, DWORD bpp) { (void)bt;(void)sys;(void)p;(void)w;(void)h;(void)bpp; }
 void Backend_UnbindRenderTargets(void) { }
 void Backend_UnbindSceneDepthReadonly(void) { }
-void Backend_UpdateConstBuffer(BackendConstBuffer *cb, const void *data, size_t size) { (void)cb;(void)data;(void)size; }
-void Backend_UpdateFogCB(void) { }
-void Backend_UpdateViewportCB(float w, float h) { (void)w;(void)h; }
+void Backend_UpdateConstBuffer(BackendConstBuffer *cb, const void *data, size_t size)
+{
+    if (cb && cb->mapped && data) memcpy(cb->mapped, data, size > cb->size ? cb->size : size);
+}
+
+/* Fold g_backend.state (populated by the shared device3.c) into the FogCB.
+ * (foliageAA is set per-draw by the foliage path; left 0 here.) */
+void Backend_UpdateFogCB(void)
+{
+    FogCB fog;
+    const RenderStateCache *st = &g_backend.state;
+    if (!s_fog_cb) return;
+    ZeroMemory(&fog, sizeof(fog));
+    fog.fogEnabled = st->fog_enable;
+    if (st->fog_enable) {
+        DWORD c = st->fog_color;
+        fog.fogColor[0] = ((c >> 16) & 0xFF) / 255.0f;
+        fog.fogColor[1] = ((c >>  8) & 0xFF) / 255.0f;
+        fog.fogColor[2] = ( c        & 0xFF) / 255.0f;
+        fog.fogStart = st->fog_start; fog.fogEnd = st->fog_end; fog.fogDensity = st->fog_density;
+    }
+    fog.alphaTestEnabled = st->alpha_test_enable;
+    fog.alphaRef = (float)st->alpha_ref / 255.0f;
+    memcpy(s_fog_cb->mapped, &fog, sizeof(fog));
+}
+
+void Backend_UpdateViewportCB(float w, float h)
+{
+    ViewportCB vp;
+    if (!s_viewport_cb) return;
+    ZeroMemory(&vp, sizeof(vp));
+    vp.viewportWidth = w; vp.viewportHeight = h;
+    memcpy(s_viewport_cb->mapped, &vp, sizeof(vp));
+}
