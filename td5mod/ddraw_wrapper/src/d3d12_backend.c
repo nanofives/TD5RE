@@ -326,7 +326,8 @@ typedef struct { IUnknown *res; UINT64 fence; } D3D12Retired;
 static D3D12Retired *s_retire;
 static int s_retire_count, s_retire_cap;
 
-static void d3d12_retire(void *res)
+/* Retire a resource to be freed once the GPU passes the given fence value. */
+static void d3d12_retire_at(void *res, UINT64 fence)
 {
     if (!res) return;
     /* No device/queue yet (early teardown) -> release immediately. */
@@ -338,9 +339,13 @@ static void d3d12_retire(void *res)
         s_retire = n; s_retire_cap = nc;
     }
     s_retire[s_retire_count].res   = (IUnknown *)res;
-    s_retire[s_retire_count].fence = s_fence_val + 1;  /* value the current frame will signal */
+    s_retire[s_retire_count].fence = fence;
     s_retire_count++;
 }
+
+/* Default: retire behind the value the current in-flight frame will signal at
+ * its next present (s_fence_val + 1, since d3d12_signal pre-increments). */
+static void d3d12_retire(void *res) { d3d12_retire_at(res, s_fence_val + 1); }
 
 /* Free everything the GPU has finished with. Call once per frame. */
 static void d3d12_drain_retired(void)
@@ -368,6 +373,15 @@ static void d3d12_flush_retired(void)
     s_retire_count = 0;
     free(s_retire); s_retire = NULL; s_retire_cap = 0;
 }
+
+/* Per-command-list binding cache (D3D11 ApplyStateCache equivalent): the
+ * descriptor heaps / root signature / frame-CBVs are invariant across a frame's
+ * draws, and PSO/topology usually repeat -- setting them every draw was pure
+ * per-draw CPU overhead. Bind the invariants once and skip redundant switches.
+ * Reset by d3d12_frame_begin (fresh command list). */
+static int                    s_frame_static_bound;   /* heaps+rootsig+b0/b1 CBVs set this frame */
+static ID3D12PipelineState   *s_last_pso;
+static D3D_PRIMITIVE_TOPOLOGY  s_last_topo = (D3D_PRIMITIVE_TOPOLOGY)-1;
 
 /* Open the command list for the current backbuffer and bind it as the RT. */
 static void d3d12_frame_begin(void)
@@ -401,6 +415,10 @@ static void d3d12_frame_begin(void)
     s_cur_vp.MinDepth = 0.0f; s_cur_vp.MaxDepth = 1.0f;
     s_cur_scissor.left = 0; s_cur_scissor.top = 0;
     s_cur_scissor.right = g_backend.width; s_cur_scissor.bottom = g_backend.height;
+    /* Fresh command list -> invalidate the per-draw binding cache. */
+    s_frame_static_bound = 0;
+    s_last_pso  = NULL;
+    s_last_topo = (D3D_PRIMITIVE_TOPOLOGY)-1;
     g_d3d12.frame_open = 1;
 }
 
@@ -746,12 +764,18 @@ static void d3d12_bind_and_draw(D3D_PRIMITIVE_TOPOLOGY topo, int topo_type,
     pso = d3d12_get_pso(s_cur_vs, ps, blend, ds, raster, topo_type);
     if (!pso) return;
 
-    heaps[0] = s_srv_ring; heaps[1] = s_sampler_heap;
-    ID3D12GraphicsCommandList_SetDescriptorHeaps(cl, 2, heaps);
-    ID3D12GraphicsCommandList_SetGraphicsRootSignature(cl, s_root_sig);
-    ID3D12GraphicsCommandList_SetPipelineState(cl, pso);
-    ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(cl, 0, ID3D12Resource_GetGPUVirtualAddress(s_viewport_cb->res));
-    ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(cl, 1, ID3D12Resource_GetGPUVirtualAddress(s_fog_cb->res));
+    /* Invariant across the frame's draws -> bind once (heaps + root sig + the
+     * b0/b1 CBVs, whose GPU-VA is fixed; their CONTENTS are updated in place via
+     * the mapped upload CB). */
+    if (!s_frame_static_bound) {
+        heaps[0] = s_srv_ring; heaps[1] = s_sampler_heap;
+        ID3D12GraphicsCommandList_SetDescriptorHeaps(cl, 2, heaps);
+        ID3D12GraphicsCommandList_SetGraphicsRootSignature(cl, s_root_sig);
+        ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(cl, 0, ID3D12Resource_GetGPUVirtualAddress(s_viewport_cb->res));
+        ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(cl, 1, ID3D12Resource_GetGPUVirtualAddress(s_fog_cb->res));
+        s_frame_static_bound = 1;
+    }
+    if (pso != s_last_pso) { ID3D12GraphicsCommandList_SetPipelineState(cl, pso); s_last_pso = pso; }
     if (s_cur_cb1 && s_cur_cb1->res)
         ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(cl, 4, ID3D12Resource_GetGPUVirtualAddress(s_cur_cb1->res));
 
@@ -765,7 +789,7 @@ static void d3d12_bind_and_draw(D3D_PRIMITIVE_TOPOLOGY topo, int topo_type,
     ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(cl, 2, gpu_handle(s_srv_ring, slot, s_srv_stage_size));
     ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(cl, 3, gpu_handle(s_sampler_heap, samp, s_sampler_size));
 
-    ID3D12GraphicsCommandList_IASetPrimitiveTopology(cl, topo);
+    if (topo != s_last_topo) { ID3D12GraphicsCommandList_IASetPrimitiveTopology(cl, topo); s_last_topo = topo; }
     vbv.BufferLocation = s_upload_gpu[fi]; vbv.SizeInBytes = D3D12_UPLOAD_RING_BYTES; vbv.StrideInBytes = stride;
     ID3D12GraphicsCommandList_IASetVertexBuffers(cl, 0, 1, &vbv);
     ID3D12GraphicsCommandList_RSSetViewports(cl, 1, &s_cur_vp);
@@ -831,6 +855,11 @@ static void d3d12_fullscreen_blit(BackendTexture *src)
     ID3D12GraphicsCommandList_RSSetScissorRects(cl, 1, &sc);
     ID3D12GraphicsCommandList_IASetPrimitiveTopology(cl, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ID3D12GraphicsCommandList_DrawInstanced(cl, 3, 1, 0, 0);
+    /* This path set PSO + topology directly -> invalidate the bind cache so any
+     * later bind_and_draw on this list rebinds them (heaps/rootsig/CBVs were
+     * re-set identically above, so s_frame_static_bound stays valid). */
+    s_last_pso  = s_fsquad_pso;
+    s_last_topo = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 }
 
 static BackendConstBuffer *d3d12_cb_create(UINT size)
@@ -866,10 +895,16 @@ static int              s_copy_open;
 static ID3D12Resource **s_up_staging;
 static int              s_up_count, s_up_cap;
 static UINT64           s_up_bytes;
+static UINT64           s_copy_fence;   /* fence value of the last submitted copy batch */
 
 static void d3d12_copy_ensure(void)
 {
     if (!s_copy_open) {
+        /* Reusing the copy allocator requires its prior batch to be GPU-done.
+         * We no longer wait_idle per flush (see below), so gate the reset on the
+         * prior copy's fence -- almost always already passed (render work ran in
+         * between), so this is a no-op stall in steady state. */
+        if (s_copy_fence) d3d12_wait_value(s_copy_fence);
         ID3D12CommandAllocator_Reset(s_copy_alloc);
         ID3D12GraphicsCommandList_Reset(s_copy_list, s_copy_alloc, NULL);
         s_copy_open = 1;
@@ -883,8 +918,15 @@ static void d3d12_flush_uploads(void)
     ID3D12GraphicsCommandList_Close(s_copy_list);
     lists[0] = (ID3D12CommandList *)s_copy_list;
     ID3D12CommandQueue_ExecuteCommandLists(g_d3d12.queue, 1, lists);
-    d3d12_wait_idle();
-    for (i = 0; i < s_up_count; i++) if (s_up_staging[i]) ID3D12Resource_Release(s_up_staging[i]);
+    /* The copy runs on the same DIRECT queue and is submitted BEFORE the render
+     * list that reads the texture, so the copy is complete before any draw
+     * sampling it -- no CPU wait_idle is needed for correctness (that full stall
+     * per upload was the ~2x frame-time cost vs d3d11). The staging buffers only
+     * need to outlive the copy: retire them behind the copy's fence and drain
+     * them when the GPU passes it. */
+    s_copy_fence = d3d12_signal();
+    for (i = 0; i < s_up_count; i++)
+        if (s_up_staging[i]) d3d12_retire_at(s_up_staging[i], s_copy_fence);
     s_up_count = 0; s_up_bytes = 0; s_copy_open = 0;
 }
 static void d3d12_up_track(ID3D12Resource *st, UINT64 bytes)
@@ -1498,8 +1540,9 @@ void Backend_Shutdown(void)
 {
     UINT i;
     d3d12_wait_idle();
-    d3d12_flush_retired();   /* GPU idle -> every deferred resource is safe to free */
-    d3d12_render_core_shutdown();
+    d3d12_render_core_shutdown();  /* its final flush_uploads may retire staging + signal */
+    d3d12_wait_idle();             /* ensure that last copy fence is passed */
+    d3d12_flush_retired();         /* GPU idle -> every deferred resource is safe to free */
     if (g_d3d12.list)     ID3D12GraphicsCommandList_Release(g_d3d12.list);
     for (i = 0; i < D3D12_FRAME_COUNT; i++) {
         if (g_d3d12.backbuffers[i]) ID3D12Resource_Release(g_d3d12.backbuffers[i]);
