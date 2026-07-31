@@ -1295,6 +1295,23 @@ int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed
     }
     if (!hwnd) { d3d12_diag("CreateDevice: no window (hwnd NULL, windowed=%d)", windowed); return 0; }
 
+    /* Match the D3D11 backend: size the render to the window's ACTUAL client
+     * rect. AdjustWindowRect + a caption bar can push the outer window past the
+     * screen, so Windows clamps it and the real client area ends up smaller
+     * than the requested (INI) resolution. D3D11 renders to that clamped client
+     * (GetClientRect); we must too, or the swapchain is larger than the window
+     * (DXGI downscales on present) and framedumps disagree by the clamp delta. */
+    if (windowed) {
+        RECT crc;
+        if (GetClientRect(hwnd, &crc) && crc.right > 0 && crc.bottom > 0) {
+            if ((int)crc.right != width || (int)crc.bottom != height)
+                d3d12_diag("CreateDevice: client rect %ldx%ld (requested %dx%d) -> using client",
+                           crc.right, crc.bottom, width, height);
+            width  = (int)crc.right;
+            height = (int)crc.bottom;
+        }
+    }
+
     /* Debug layer + DRED under TD5RE_D3D_DEBUG. */
     if (Backend_D3DDebugEnabled()) {
         if (SUCCEEDED(D3D12GetDebugInterface(&IID_ID3D12Debug, (void **)&g_d3d12.debug)))
