@@ -87,6 +87,7 @@ struct BackendConstBuffer {
 struct BackendPixelShader {
     const void *bc;
     SIZE_T      len;
+    int         id;    /* >= PS_COUNT: index into s_custom_ps for PSO cache keys */
 };
 struct BackendTexture {
     ID3D12Resource       *res;      /* DEFAULT-heap texture (NULL until created) */
@@ -140,6 +141,12 @@ static int      s_pso_count;
 
 /* Builtin pixel shaders indexed by PS_* (SM5.0 bytecode blobs). */
 static BackendPixelShader s_builtin_ps[PS_COUNT];
+
+/* Custom pixel shaders (SDF/vector UI, from Backend_CreatePixelShader), keyed by
+ * id = PS_COUNT + index so d3d12_get_pso can cache their PSOs. */
+#define D3D12_CUSTOM_PS_MAX 48
+static BackendPixelShader *s_custom_ps[D3D12_CUSTOM_PS_MAX];
+static int                 s_custom_ps_count;
 
 /* Persistent viewport + fog constant buffers (b0 VS / b0 PS). */
 static BackendConstBuffer *s_viewport_cb;
@@ -323,7 +330,14 @@ static void d3d12_frame_begin(void)
     {
         D3D12_CPU_DESCRIPTOR_HANDLE rtv = d3d12_rtv_handle(idx);
         D3D12_CPU_DESCRIPTOR_HANDLE dsv = cpu_handle(s_dsv_heap, 0, 1);
+        static const float s_black[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
         ID3D12GraphicsCommandList_OMSetRenderTargets(g_d3d12.list, 1, &rtv, FALSE, s_dsv_heap ? &dsv : NULL);
+        /* Flip-discard leaves the backbuffer undefined each frame; clear it so
+         * the port's Rec/Plat draws land on a clean slate (the game does not
+         * always issue Backend_ClearBackbuffer per frame). */
+        ID3D12GraphicsCommandList_ClearRenderTargetView(g_d3d12.list, rtv, s_black, 0, NULL);
+        if (s_dsv_heap)
+            ID3D12GraphicsCommandList_ClearDepthStencilView(g_d3d12.list, dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, NULL);
     }
     /* Default full-RT viewport + scissor (overridden per pane by SetViewport). */
     s_cur_vp.TopLeftX = 0.0f; s_cur_vp.TopLeftY = 0.0f;
@@ -547,8 +561,14 @@ static void d3d12_fill_raster(int idx, D3D12_RASTERIZER_DESC *rd)
 
 static void d3d12_resolve_ps(int ps_id, const void **bc, SIZE_T *len)
 {
-    if (ps_id >= 0 && ps_id < PS_COUNT) { *bc = s_builtin_ps[ps_id].bc; *len = s_builtin_ps[ps_id].len; }
-    else { *bc = s_builtin_ps[PS_MODULATE].bc; *len = s_builtin_ps[PS_MODULATE].len; }
+    if (ps_id >= 0 && ps_id < PS_COUNT) { *bc = s_builtin_ps[ps_id].bc; *len = s_builtin_ps[ps_id].len; return; }
+    {
+        int ci = ps_id - PS_COUNT;
+        if (ci >= 0 && ci < s_custom_ps_count && s_custom_ps[ci]) {
+            *bc = s_custom_ps[ci]->bc; *len = s_custom_ps[ci]->len; return;
+        }
+    }
+    *bc = s_builtin_ps[PS_MODULATE].bc; *len = s_builtin_ps[PS_MODULATE].len;
 }
 
 /* topo_type: 0=triangle, 1=line */
@@ -1472,12 +1492,12 @@ void Backend_CompositeAndPresent(WrapperSurface *rt, RECT *s, RECT *d)
             s_dbg_draws, s_dbg_clears, (void*)s_cur_tex); }
         s_cc++;
     }
-    /* Blit the render-target surface (frontend content composed there via
-     * Texture::Load / surface blits, or the 3D scene) to the swapchain. Matches
-     * the D3D11 backend, which blits rt->bt in BOTH the single- and two-layer
-     * paths (scene_rendered only gates the extra HUD-overlay layer). */
-    if (rt && rt->bt && rt->bt->res) {
-        if (rt->dirty) WrapperSurface_FlushDirty(rt);   /* sys_buffer -> rt->bt (BGRA) */
+    /* The port renders every pane straight to the swapchain via the Rec/Plat
+     * draw path (Backend_PlatDrawTris) -- there is no offscreen game RT to blit
+     * here (unlike the D3D11 wrapper-DLL flow). Present what was drawn. A
+     * dirty 2D BltFast surface (rare) is still composited over it. */
+    if (rt && rt->bt && rt->bt->res && rt->dirty) {
+        WrapperSurface_FlushDirty(rt);
         d3d12_fullscreen_blit(rt->bt);
     }
 
@@ -1537,6 +1557,11 @@ BackendPixelShader *Backend_CreatePixelShader(const void *bytecode, size_t len)
     if (!copy) { free(ps); return NULL; }
     memcpy(copy, bytecode, len);
     ps->bc = copy; ps->len = (SIZE_T)len;
+    ps->id = PS_MODULATE;   /* fallback if the registry is full */
+    if (s_custom_ps_count < D3D12_CUSTOM_PS_MAX) {
+        ps->id = PS_COUNT + s_custom_ps_count;
+        s_custom_ps[s_custom_ps_count++] = ps;
+    }
     return ps;
 }
 /* Drain the D3D12 debug-layer InfoQueue to a flushed log file. This is the
@@ -1601,9 +1626,45 @@ void Backend_MaybeTrim(void) { }
 void Backend_NoteDraw(unsigned prim, unsigned vc, unsigned ic, int indexed) { (void)prim;(void)vc;(void)ic;(void)indexed; }
 void Backend_NoteVerts(const void *v, unsigned vc, unsigned s) { (void)v;(void)vc;(void)s; }
 void *Backend_PixelShaderRaw(BackendPixelShader *ps) { return ps; }
-void Backend_PlatBindTextureSRV(WrapperRecCtx *rc, void *srv) { (void)rc;(void)srv; }
-void Backend_PlatDrawTris(WrapperRecCtx *rc, const void *v, int vc, const void *idx, int ic, void *pso, int ss) { (void)rc;(void)v;(void)vc;(void)idx;(void)ic;(void)pso;(void)ss; }
-void Backend_PlatDrawWhite(WrapperRecCtx *rc, const void *v, int vc, const void *idx, int ic, int lines) { (void)rc;(void)v;(void)vc;(void)idx;(void)ic;(void)lines; }
+/* The port's real render path: td5_platform_win32.c records TD5_D3DVertex (the
+ * 32-byte XYZRHW layout) + an optional override pixel shader (BackendPixelShader*)
+ * + a sampler index, and binds textures by BackendTexture*. Route straight through
+ * the draw core (immediate; the deferred-context/pane machinery is bypassed). */
+void Backend_PlatBindTextureSRV(WrapperRecCtx *rc, void *srv)
+{
+    (void)rc;
+    s_cur_tex = (BackendTexture *)srv;   /* our SurfaceGetSRV / page cache returns BackendTexture* */
+}
+void Backend_PlatDrawTris(WrapperRecCtx *rc, const void *v, int vc, const void *idx, int ic, void *pso, int ss)
+{
+    UINT bv = 0, si = 0;
+    BackendPixelShader *ps = (BackendPixelShader *)pso;
+    int ps_id = ps ? ps->id : PS_MODULATE;
+    int indexed = (idx && ic > 0);
+    (void)rc;
+    if (!g_d3d12.device || !v || vc <= 0) return;
+    if (!Backend_StreamUpload(v, (UINT)vc, TD5_VERTEX_STRIDE, indexed ? idx : NULL, indexed ? (UINT)ic : 0, &bv, &si))
+        return;
+    d3d12_bind_and_draw(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, 0,
+                        BLEND_SRCALPHA_INVSRC, DS_Z_OFF_WRITE_OFF, 0, ps_id,
+                        (ss >= 0 && ss < SAMP_STATE_COUNT) ? ss : SAMP_LINEAR_CLAMP,
+                        TD5_VERTEX_STRIDE, indexed, bv, si, indexed ? (UINT)ic : (UINT)vc);
+}
+void Backend_PlatDrawWhite(WrapperRecCtx *rc, const void *v, int vc, const void *idx, int ic, int lines)
+{
+    UINT bv = 0, si = 0;
+    BackendTexture *save;
+    int indexed = (idx && ic > 0);
+    (void)rc;
+    if (!g_d3d12.device || !v || vc <= 0) return;
+    if (!Backend_StreamUpload(v, (UINT)vc, TD5_VERTEX_STRIDE, indexed ? idx : NULL, indexed ? (UINT)ic : 0, &bv, &si))
+        return;
+    save = s_cur_tex; s_cur_tex = NULL;   /* PS_MODULATE * white == vertex colour */
+    d3d12_bind_and_draw(lines ? D3D_PRIMITIVE_TOPOLOGY_LINELIST : D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, lines ? 1 : 0,
+                        BLEND_SRCALPHA_INVSRC, DS_Z_OFF_WRITE_OFF, 0, PS_MODULATE, SAMP_POINT_CLAMP,
+                        TD5_VERTEX_STRIDE, indexed, bv, si, indexed ? (UINT)ic : (UINT)vc);
+    s_cur_tex = save;
+}
 void Backend_PlatSetScissor(WrapperRecCtx *rc, int l, int t, int r, int b)
 {
     (void)rc;
@@ -1662,7 +1723,9 @@ int Backend_StreamUpload(const void *verts, UINT vc, UINT stride, const void *in
     return 1;
 }
 void Backend_SurfaceBindRenderTarget(WrapperSurface *s) { (void)s; }
-ID3D11ShaderResourceView *Backend_SurfaceGetSRV(WrapperSurface *s) { (void)s; return NULL; }
+/* The port treats the returned handle as an opaque texture token and passes it
+ * back to Backend_PlatBindTextureSRV, so return the surface's BackendTexture*. */
+ID3D11ShaderResourceView *Backend_SurfaceGetSRV(WrapperSurface *s) { return s ? (ID3D11ShaderResourceView *)s->bt : NULL; }
 int  Backend_SurfaceHasRTV(WrapperSurface *s) { (void)s; return 0; }
 void Backend_TextureAddRef(BackendTexture *bt) { if (bt) InterlockedIncrement(&bt->ref); }
 BackendTexture *Backend_TextureAdopt(void *n) { (void)n; return NULL; }  /* n/a: no external ID3D11 texture on d3d12 */
