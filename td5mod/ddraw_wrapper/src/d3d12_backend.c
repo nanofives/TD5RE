@@ -313,6 +313,62 @@ static void d3d12_wait_idle(void)
     d3d12_wait_value(d3d12_signal());
 }
 
+/* ---- deferred deletion queue ------------------------------------------------
+ * D3D11 releases resources immediately; on D3D12 a resource may still be
+ * referenced by a command list that is queued but not yet complete on the GPU,
+ * so freeing it now is a GPU use-after-free (corruption / device-removed).
+ * Instead, any RUNTIME release routes here with the fence value the current
+ * in-flight frame will signal at its next present (s_fence_val + 1, since
+ * d3d12_signal pre-increments); the resource is Release()d only once the GPU
+ * has passed that value. Drained every frame. This is also the foundation for
+ * the Phase 5 recreation-leak fix (everything lands on one list). */
+typedef struct { IUnknown *res; UINT64 fence; } D3D12Retired;
+static D3D12Retired *s_retire;
+static int s_retire_count, s_retire_cap;
+
+static void d3d12_retire(void *res)
+{
+    if (!res) return;
+    /* No device/queue yet (early teardown) -> release immediately. */
+    if (!g_d3d12.fence) { IUnknown_Release((IUnknown *)res); return; }
+    if (s_retire_count == s_retire_cap) {
+        int nc = s_retire_cap ? s_retire_cap * 2 : 64;
+        D3D12Retired *n = (D3D12Retired *)realloc(s_retire, (size_t)nc * sizeof(*n));
+        if (!n) { IUnknown_Release((IUnknown *)res); return; }  /* OOM: free now (leak-safe) */
+        s_retire = n; s_retire_cap = nc;
+    }
+    s_retire[s_retire_count].res   = (IUnknown *)res;
+    s_retire[s_retire_count].fence = s_fence_val + 1;  /* value the current frame will signal */
+    s_retire_count++;
+}
+
+/* Free everything the GPU has finished with. Call once per frame. */
+static void d3d12_drain_retired(void)
+{
+    UINT64 done;
+    int i = 0;
+    if (!g_d3d12.fence || s_retire_count == 0) return;
+    done = ID3D12Fence_GetCompletedValue(g_d3d12.fence);
+    while (i < s_retire_count) {
+        if (s_retire[i].fence <= done) {
+            IUnknown_Release(s_retire[i].res);
+            s_retire[i] = s_retire[--s_retire_count];   /* swap-remove */
+        } else {
+            i++;
+        }
+    }
+}
+
+/* Force-drain at shutdown/device-loss: the caller has already waited idle, so
+ * every fence is satisfied -- release the lot unconditionally. */
+static void d3d12_flush_retired(void)
+{
+    int i;
+    for (i = 0; i < s_retire_count; i++) IUnknown_Release(s_retire[i].res);
+    s_retire_count = 0;
+    free(s_retire); s_retire = NULL; s_retire_cap = 0;
+}
+
 /* Open the command list for the current backbuffer and bind it as the RT. */
 static void d3d12_frame_begin(void)
 {
@@ -467,6 +523,8 @@ static void d3d12_frame_present(int sync)
 
     /* Capture copy is now GPU-complete (waited on idx's fence above). */
     if (s_cap_pending_fp) { d3d12_wait_value(g_d3d12.fence_values[idx]); d3d12_store_capture(s_cap_pending_fp); s_cap_pending_fp = NULL; }
+    /* Free resources whose referencing frame the GPU has now passed. */
+    d3d12_drain_retired();
     if (diag) { d3d12_diag("present[%d] done, next idx=%u", s_pdiag, g_d3d12.frame_index); s_pdiag++; }
 }
 
@@ -1440,6 +1498,7 @@ void Backend_Shutdown(void)
 {
     UINT i;
     d3d12_wait_idle();
+    d3d12_flush_retired();   /* GPU idle -> every deferred resource is safe to free */
     d3d12_render_core_shutdown();
     if (g_d3d12.list)     ID3D12GraphicsCommandList_Release(g_d3d12.list);
     for (i = 0; i < D3D12_FRAME_COUNT; i++) {
@@ -1876,7 +1935,10 @@ void Backend_TextureRelease(BackendTexture *bt)
     if (!bt) return;
     if (InterlockedDecrement(&bt->ref) <= 0) {
         if (bt == s_cur_tex) s_cur_tex = NULL;
-        if (bt->res) ID3D12Resource_Release(bt->res);
+        /* Defer the GPU resource free until the in-flight frame that may still
+         * reference this texture (e.g. the mid-frame recreate path) completes.
+         * The CPU-side struct is safe to free now -- nothing on the GPU touches it. */
+        if (bt->res) d3d12_retire(bt->res);
         free(bt);
     }
 }
