@@ -794,6 +794,13 @@ void td5_plat_render_set_gbuffer(int on);
 /** Upload a texture page to the GPU. Returns 0 on failure. */
 int td5_plat_render_upload_texture(int page_index, const void *pixels, int width, int height, int format);
 
+/** Flush pending texture uploads and BLOCK until they are GPU-resident. Call
+ *  after a one-shot / on-entry upload (loading screen, frontend background) that
+ *  will be sampled the same frame, so it doesn't read black on that first frame
+ *  (D3D12 first-frame residency; the frontend-screen blink). Sub-ms stall; do
+ *  NOT use on the per-frame texture path. No-op on backends that don't need it. */
+void td5_plat_render_flush_uploads(void);
+
 /** Query the dimensions of an uploaded texture page.
  *  w and h are only written if the page has valid dimensions;
  *  caller should initialize them to a sensible fallback before calling. */

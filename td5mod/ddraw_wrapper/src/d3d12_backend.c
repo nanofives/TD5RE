@@ -26,16 +26,7 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 
-/* Swapchain backbuffer count. 3 (triple-buffered flip-discard) instead of the
- * 2-buffer minimum: with only 2 buffers a frame-time hitch on a frontend screen
- * change (the new screen's FSM re-inits its button pool + layout) makes the
- * Present cadence irregular and, with no vsync, the monitor can flash a stale
- * buffer for one refresh -> the "blink between screens" (R11). A third buffer
- * gives DXGI slack to hide that. All per-frame arrays (allocators, backbuffers,
- * fence_values, upload ring, RTV heap) and the swapchain/ResizeBuffers count
- * scale off this macro; the single DIRECT queue serialises the shared depth
- * buffer so buffer count doesn't add a depth hazard. */
-#define D3D12_FRAME_COUNT 3
+#define D3D12_FRAME_COUNT 2
 
 typedef struct {
     ID3D12Device              *device;
@@ -1276,6 +1267,22 @@ static void d3d12_flush_uploads(void)
     for (i = 0; i < s_up_count; i++)
         if (s_up_staging[i]) d3d12_retire_at(s_up_staging[i], s_copy_fence);
     s_up_count = 0; s_up_bytes = 0; s_copy_open = 0;
+}
+
+/* Submit any pending texture-upload copy batch AND block until the GPU has
+ * finished it, so the just-uploaded texture is guaranteed resident before the
+ * next draw samples it. The normal path defers the copy to the next draw's
+ * flush and relies on same-queue ordering -- but empirically a texture uploaded
+ * and sampled in the SAME present frame still reads black on that first frame
+ * (the pre-race splash R10; the frontend background flash R11). Callers use this
+ * ONLY for one-shot / on-entry uploads (loading screen, frontend backgrounds)
+ * where the sub-millisecond stall is invisible; the per-frame texture path must
+ * NOT use it (that stall was the ~2x frame-time cost vs d3d11). */
+void Backend_FlushUploadsSync(void)
+{
+    if (!g_d3d12.device) return;
+    d3d12_flush_uploads();
+    if (s_copy_fence) d3d12_wait_value(s_copy_fence);
 }
 static void d3d12_up_track(ID3D12Resource *st, UINT64 bytes)
 {

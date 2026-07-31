@@ -249,6 +249,7 @@ void Backend_CaptureIfRequested(void);  /* call before every Present */
 void Backend_ApplyStateCache(void);  /* Bind D3D11 state objects from cache */
 void Backend_SelectPixelShader(void); /* Choose PS based on texblend + alpha + tex format */
 void Backend_UpdateFogCB(void);      /* Upload fog constant buffer */
+void Backend_FlushUploadsSync(void); /* Flush + WAIT texture uploads (one-shot/on-entry residency) */
 void Backend_UpdateViewportCB(float w, float h); /* Upload viewport constant buffer */
 
 /* Deferred dynamic-light pass: upload `cb` (camera + light array), then draw a

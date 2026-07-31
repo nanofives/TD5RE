@@ -1769,6 +1769,14 @@ int frontend_load_tga_ck(const char *name, const char *archive, TD5_ColorKeyMode
                 s_surfaces[old_slot].in_use = 0;
             }
             s_background_surface = handle;
+            /* [R11] A freshly-uploaded background is sampled on the SAME entry
+             * frame it's loaded; on D3D12 its upload copy isn't GPU-resident yet,
+             * so the full-canvas BG quad reads black -> a one-frame BLACK BLINK
+             * between screens (the entry-clear paints black underneath). Force the
+             * upload resident now so the first draw shows the real background.
+             * Only on the cache-miss path (a genuine new upload) + only for
+             * backgrounds, so the sub-ms stall is invisible. */
+            td5_plat_render_flush_uploads();
         }
         TD5_LOG_I(LOG_TAG, "LoadTGA OK: %s → slot=%d page=%d %dx%d", bare_name, slot, page, w, h);
         return handle;

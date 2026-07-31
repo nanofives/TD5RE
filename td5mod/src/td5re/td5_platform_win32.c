@@ -4120,6 +4120,14 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
     return 1;
 }
 
+/* Flush + wait pending texture uploads so they are GPU-resident before the next
+ * draw (see td5_platform.h). Thin pass-through to the backend. */
+void td5_plat_render_flush_uploads(void)
+{
+    if (g_backend.device_removed) return;
+    Backend_FlushUploadsSync();
+}
+
 /* [DEVICE-LOST recovery] After Backend_RecreateDevice() bumps the device
  * generation, every game texture still points at GPU objects from the removed
  * device. Walk the texture-page registry (which retains each surface's CPU
