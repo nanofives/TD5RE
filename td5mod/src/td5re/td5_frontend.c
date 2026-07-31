@@ -6362,6 +6362,47 @@ const char *td5_raceopts_label(int idx) {
     return "";
 }
 
+/* [R9 2026-07-31] SPAN OFFSET numeric text entry ("Enter-to-type") on RACE OPTIONS.
+ * The row is normally arrow-cycled (+-1 per press), impractical for large offsets;
+ * pressing Enter on it now opens a digit field so the value can be typed directly
+ * -- restoring the old Quick-Race span-field behaviour that was lost when the row
+ * moved to RACE OPTIONS (arrows-only). Mirrors the MP GAME PORT editor. The scratch
+ * buffer lives here so td5_raceopts_value() can render the live-typed value. */
+static char s_ro_span_buf[8];
+static int  s_ro_span_editing;
+
+int td5_raceopts_span_editing(void) { return s_ro_span_editing; }
+
+void td5_raceopts_span_edit_begin(void) {
+    snprintf(s_ro_span_buf, sizeof s_ro_span_buf, "%d", g_td5.ini.start_span_offset);
+    frontend_begin_text_input(s_ro_span_buf, (int)sizeof s_ro_span_buf);
+    s_ro_span_editing = 1;
+    TD5_LOG_I(LOG_TAG, "RACE OPTIONS SPAN OFFSET edit begin (current=%d)", g_td5.ini.start_span_offset);
+}
+
+/* Drive the field. Returns 1 while it is active so the caller swallows all other
+ * RACE OPTIONS input that frame (no nav/cycle while typing). */
+int td5_raceopts_span_edit_tick(void) {
+    if (!s_ro_span_editing) return 0;
+    frontend_handle_text_input_key();
+    if (frontend_check_escape()) {              /* ESC = cancel, keep old value */
+        s_ro_span_editing = 0;
+        frontend_reset_text_input();
+        return 1;
+    }
+    if (frontend_text_input_confirmed()) {      /* Enter = commit */
+        int v = atoi(s_ro_span_buf);
+        if (v < 0)    v = 0;
+        if (v > 9999) v = 9999;
+        g_td5.ini.start_span_offset = v;
+        s_ro_span_editing = 0;
+        frontend_reset_text_input();
+        frontend_play_sfx(5);
+        TD5_LOG_I(LOG_TAG, "RACE OPTIONS SPAN OFFSET set to %d", v);
+    }
+    return 1;
+}
+
 void td5_raceopts_value(int idx, char *out, size_t out_sz) {
     static const char *const on_off[]      = { "OFF", "ON" };
     static const char *const traffic_vol[TD5_TRAFFIC_VOLUME_COUNT] =
@@ -6420,7 +6461,10 @@ void td5_raceopts_value(int idx, char *out, size_t out_sz) {
         case RO_PLAYER_AI:     v = on_off[g_td5.ini.player_is_ai & 1]; break;
         case RO_AUTO_THROTTLE: v = on_off[g_td5.ini.auto_throttle & 1]; break;
         case RO_AI_SCREENS:    snprintf(out, out_sz, "%d", s_num_spectate_screens); return;
-        case RO_SPAN_OFFSET:   snprintf(out, out_sz, "%d", g_td5.ini.start_span_offset); return;
+        case RO_SPAN_OFFSET:
+            if (s_ro_span_editing) snprintf(out, out_sz, "%s_", s_ro_span_buf);  /* live digits + caret */
+            else                   snprintf(out, out_sz, "%d", g_td5.ini.start_span_offset);
+            return;
         case RO_GAME_SPEED: {
             float f = g_td5.ini.trace_fast_forward;
             if (f <= 0.0f) f = 1.0f;

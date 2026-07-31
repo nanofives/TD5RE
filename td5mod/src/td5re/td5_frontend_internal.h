@@ -629,6 +629,10 @@ enum {
 const char *td5_raceopts_label(int idx);
 void        td5_raceopts_value(int idx, char *out, size_t out_sz);
 void        td5_raceopts_cycle(int idx, int delta);
+/* [R9] SPAN OFFSET Enter-to-type numeric field (RACE OPTIONS). */
+void        td5_raceopts_span_edit_begin(void);
+int         td5_raceopts_span_edit_tick(void);   /* 1 while active -> caller swallows input */
+int         td5_raceopts_span_editing(void);
 
 /* [RACE OPTIONS CONSOLIDATION 2026-07-21] Per-mode availability + pagination.
  * The dynamic RACE OPTIONS screen shows only the rows a given game mode needs;

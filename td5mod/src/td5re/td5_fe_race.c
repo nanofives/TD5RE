@@ -6904,6 +6904,11 @@ void Screen_RaceOptions(void) {
         s_inner_state = 6;
         break;
     case 6: /* interactive: cycle options / OK / BACK / PREV / NEXT */
+        /* [R9] While the SPAN OFFSET numeric field is open, digits/backspace/Enter/
+         * ESC drive it and ALL other RACE OPTIONS input (nav, cycle, OK/BACK) is
+         * swallowed so typing isn't disrupted. */
+        if (td5_raceopts_span_edit_tick())
+            break;
         /* ESC / gamepad-B: persist + return. Consumed HERE (screen dispatch runs
          * before the central back handler), which would otherwise navigate without
          * persisting; frontend_check_escape() is single-consume per frame so the
@@ -6934,6 +6939,12 @@ void Screen_RaceOptions(void) {
             /* A/Enter activations: OK/BACK persist + exit; PREV/NEXT flip the page.
              * (prev/next ids are -1 on a single page, never matching a real index.) */
             if (s_button_index >= 0) {
+                /* [R9] Enter on the SPAN OFFSET row opens the numeric text editor
+                 * (type a big offset directly instead of +-1 arrow cycling). */
+                if (s_button_index < row_count &&
+                    td5_raceopts_row_option(s_button_index) == RO_SPAN_OFFSET) {
+                    td5_raceopts_span_edit_begin();
+                } else
                 if (s_button_index == td5_raceopts_ok_btn()) {
                     raceopts_ok();
                 } else if (s_button_index == td5_raceopts_back_btn()) {
