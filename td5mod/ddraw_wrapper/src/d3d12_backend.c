@@ -152,6 +152,18 @@ static BackendConstBuffer *s_cur_cb1;                 /* b1 SDF/FX (per-draw)   
 static D3D12_VIEWPORT   s_cur_vp;
 static D3D12_RECT       s_cur_scissor;
 
+/* Dedicated one-shot copy list (texture uploads outside the frame list). */
+static ID3D12CommandAllocator    *s_copy_alloc;
+static ID3D12GraphicsCommandList *s_copy_list;
+
+/* 1x1 white texture: default SRV (stage slot 0) for untextured draws
+ * (PS_MODULATE * white == vertex colour). */
+static BackendTexture  *s_white_tex;
+
+/* forward decls (definitions below the device lifecycle) */
+static D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle(ID3D12DescriptorHeap *h, UINT idx, UINT size);
+static D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle(ID3D12DescriptorHeap *h, UINT idx, UINT size);
+
 /* ---- plumbing that lived in the filtered-out d3d11 backend files -------- *
  * g_wrapper_rec (deferred pane-record thread-local; the d3d12 backend does not
  * use deferred contexts, so it stays NULL) + the WrapperClipper COM stub +
@@ -290,14 +302,22 @@ static void d3d12_frame_begin(void)
 
     ID3D12CommandAllocator_Reset(g_d3d12.allocators[idx]);
     ID3D12GraphicsCommandList_Reset(g_d3d12.list, g_d3d12.allocators[idx], NULL);
+    s_upload_off[idx] = 0;   /* recycle this slot's upload ring (GPU done via fence) */
 
     d3d12_resource_barrier(g_d3d12.backbuffers[idx],
         D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
     {
         D3D12_CPU_DESCRIPTOR_HANDLE rtv = d3d12_rtv_handle(idx);
-        ID3D12GraphicsCommandList_OMSetRenderTargets(g_d3d12.list, 1, &rtv, FALSE, NULL);
+        D3D12_CPU_DESCRIPTOR_HANDLE dsv = cpu_handle(s_dsv_heap, 0, 1);
+        ID3D12GraphicsCommandList_OMSetRenderTargets(g_d3d12.list, 1, &rtv, FALSE, s_dsv_heap ? &dsv : NULL);
     }
+    /* Default full-RT viewport + scissor (overridden per pane by SetViewport). */
+    s_cur_vp.TopLeftX = 0.0f; s_cur_vp.TopLeftY = 0.0f;
+    s_cur_vp.Width = (float)g_backend.width; s_cur_vp.Height = (float)g_backend.height;
+    s_cur_vp.MinDepth = 0.0f; s_cur_vp.MaxDepth = 1.0f;
+    s_cur_scissor.left = 0; s_cur_scissor.top = 0;
+    s_cur_scissor.right = g_backend.width; s_cur_scissor.bottom = g_backend.height;
     g_d3d12.frame_open = 1;
 }
 
@@ -479,17 +499,108 @@ static ID3D12PipelineState *d3d12_get_pso(int vs_idx, int ps_id, int blend, int 
 
 /* ---- upload ring + const buffers --------------------------------------- */
 
-/* Bump-allocate `size` bytes (aligned) from the current frame's upload ring;
- * returns the GPU VA and copies `src` in when non-NULL. 0 on overflow. */
-static UINT64 d3d12_upload(const void *src, UINT size, UINT align, UINT *out_off)
+/* --- render-state -> index selection (replicated from Backend_ApplyStateCache
+ *     / Backend_SelectPixelShader; foliage-AA + G-buffer promotion deferred to
+ *     Phase 4 -- the frontend uses neither). --- */
+
+static int d3d12_sel_blend(const RenderStateCache *s)
 {
-    UINT idx = g_d3d12.frame_index;
-    UINT off = (s_upload_off[idx] + (align - 1)) & ~(align - 1);
-    if (off + size > D3D12_UPLOAD_RING_BYTES) { WRAPPER_LOG("D3D12 upload ring overflow"); return 0; }
-    if (src) memcpy(s_upload_cpu[idx] + off, src, size);
-    s_upload_off[idx] = off + size;
-    if (out_off) *out_off = off;
-    return s_upload_gpu[idx] + off;
+    if (!s->blend_enable) return BLEND_OPAQUE;
+    if (s->src_blend==D3D6BLEND_SRCALPHA    && s->dest_blend==D3D6BLEND_INVSRCALPHA) return BLEND_SRCALPHA_INVSRC;
+    if (s->src_blend==D3D6BLEND_SRCALPHA    && s->dest_blend==D3D6BLEND_ONE)         return BLEND_SRCALPHA_ONE;
+    if (s->src_blend==D3D6BLEND_ONE         && s->dest_blend==D3D6BLEND_ONE)         return BLEND_ONE_ONE;
+    if (s->src_blend==D3D6BLEND_SRCALPHA    && s->dest_blend==D3D6BLEND_SRCALPHA)    return BLEND_SRCALPHA_SRCALPHA;
+    if (s->src_blend==D3D6BLEND_INVSRCALPHA && s->dest_blend==D3D6BLEND_INVSRCALPHA) return BLEND_INVSRC_INVSRC;
+    return BLEND_SRCALPHA_INVSRC;
+}
+static int d3d12_sel_ds(const RenderStateCache *s)
+{
+    if (!s->z_enable && !s->z_write) return DS_Z_OFF_WRITE_OFF;
+    if (!s->z_enable &&  s->z_write) return DS_Z_OFF_WRITE_ON;
+    if (s->z_func == 1) return s->z_write ? DS_Z_ON_WRITE_ON_ALWAYS : DS_Z_ON_WRITE_OFF_ALWAYS;
+    if (s->z_enable && s->z_write) return DS_Z_ON_WRITE_ON;
+    return DS_Z_ON_WRITE_OFF;
+}
+static int d3d12_sel_samp(const RenderStateCache *s)
+{
+    int linear = (s->mag_filter >= 2 || s->min_filter >= 2);
+    int clamp  = (s->tex_address_u == 3 || s->tex_address_v == 3);
+    if (linear && clamp) return SAMP_LINEAR_CLAMP;
+    if (linear)          return SAMP_LINEAR_WRAP;
+    if (clamp)           return SAMP_POINT_CLAMP;
+    return SAMP_POINT_WRAP;
+}
+static int d3d12_sel_ps(const RenderStateCache *s)
+{
+    switch (s->texblend_mode) {
+    case D3DTBLEND_DECAL:         return PS_DECAL;
+    case D3DTBLEND_MODULATEALPHA: return PS_MODULATE_ALPHA;
+    default:                      return PS_MODULATE;
+    }
+}
+static D3D_PRIMITIVE_TOPOLOGY d3d12_map_topo(DWORD prim, int *topo_type)
+{
+    switch (prim) {
+    case D3DPT_POINTLIST:     *topo_type = 2; return D3D_PRIMITIVE_TOPOLOGY_POINTLIST;
+    case D3DPT_LINELIST:      *topo_type = 1; return D3D_PRIMITIVE_TOPOLOGY_LINELIST;
+    case D3DPT_LINESTRIP:     *topo_type = 1; return D3D_PRIMITIVE_TOPOLOGY_LINESTRIP;
+    case D3DPT_TRIANGLESTRIP: *topo_type = 0; return D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
+    default:                  *topo_type = 0; return D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+    }
+}
+
+/* Bind the full pipeline for one draw from the current state + stream cursor,
+ * then issue Draw/DrawIndexed. Everything is (re)bound each draw -- D3D12 keeps
+ * no cross-call state and the cost is trivial at frontend/HUD draw counts. */
+static void d3d12_bind_and_draw(D3D_PRIMITIVE_TOPOLOGY topo, int topo_type,
+                                int blend, int ds, int raster, int ps, int samp,
+                                UINT stride, int indexed, UINT base_vertex, UINT start_index, UINT count)
+{
+    ID3D12GraphicsCommandList *cl = g_d3d12.list;
+    ID3D12PipelineState *pso;
+    ID3D12DescriptorHeap *heaps[2];
+    BackendTexture *tex = s_cur_tex ? s_cur_tex : s_white_tex;
+    UINT slot, fi = g_d3d12.frame_index;
+    D3D12_VERTEX_BUFFER_VIEW vbv;
+
+    if (!g_d3d12.frame_open) d3d12_frame_begin();
+    if (!tex) return;
+    pso = d3d12_get_pso(s_cur_vs, ps, blend, ds, raster, topo_type);
+    if (!pso) return;
+
+    heaps[0] = s_srv_ring; heaps[1] = s_sampler_heap;
+    ID3D12GraphicsCommandList_SetDescriptorHeaps(cl, 2, heaps);
+    ID3D12GraphicsCommandList_SetGraphicsRootSignature(cl, s_root_sig);
+    ID3D12GraphicsCommandList_SetPipelineState(cl, pso);
+    ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(cl, 0, ID3D12Resource_GetGPUVirtualAddress(s_viewport_cb->res));
+    ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(cl, 1, ID3D12Resource_GetGPUVirtualAddress(s_fog_cb->res));
+    if (s_cur_cb1 && s_cur_cb1->res)
+        ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(cl, 4, ID3D12Resource_GetGPUVirtualAddress(s_cur_cb1->res));
+
+    /* SRV table: copy the bound texture's staging SRV into a fresh ring slot. */
+    slot = s_srv_ring_next++;
+    if (s_srv_ring_next >= s_srv_ring_cap) s_srv_ring_next = 0;
+    ID3D12Device_CopyDescriptorsSimple(g_d3d12.device, 1,
+        cpu_handle(s_srv_ring, slot, s_srv_stage_size),
+        cpu_handle(s_srv_stage, tex->srv_slot, s_srv_stage_size),
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(cl, 2, gpu_handle(s_srv_ring, slot, s_srv_stage_size));
+    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(cl, 3, gpu_handle(s_sampler_heap, samp, s_sampler_size));
+
+    ID3D12GraphicsCommandList_IASetPrimitiveTopology(cl, topo);
+    vbv.BufferLocation = s_upload_gpu[fi]; vbv.SizeInBytes = D3D12_UPLOAD_RING_BYTES; vbv.StrideInBytes = stride;
+    ID3D12GraphicsCommandList_IASetVertexBuffers(cl, 0, 1, &vbv);
+    ID3D12GraphicsCommandList_RSSetViewports(cl, 1, &s_cur_vp);
+    ID3D12GraphicsCommandList_RSSetScissorRects(cl, 1, &s_cur_scissor);
+
+    if (indexed) {
+        D3D12_INDEX_BUFFER_VIEW ibv;
+        ibv.BufferLocation = s_upload_gpu[fi]; ibv.SizeInBytes = D3D12_UPLOAD_RING_BYTES; ibv.Format = DXGI_FORMAT_R16_UINT;
+        ID3D12GraphicsCommandList_IASetIndexBuffer(cl, &ibv);
+        ID3D12GraphicsCommandList_DrawIndexedInstanced(cl, count, 1, start_index, (INT)base_vertex, 0);
+    } else {
+        ID3D12GraphicsCommandList_DrawInstanced(cl, count, 1, base_vertex, 0);
+    }
 }
 
 static BackendConstBuffer *d3d12_cb_create(UINT size)
@@ -512,6 +623,126 @@ static BackendConstBuffer *d3d12_cb_create(UINT size)
     { D3D12_RANGE r; r.Begin=0; r.End=0; ID3D12Resource_Map(cb->res, 0, &r, &cb->mapped); }
     cb->size = asz;
     return cb;
+}
+
+/* ---- textures ---------------------------------------------------------- */
+
+static ID3D12GraphicsCommandList *d3d12_copy_begin(void)
+{
+    ID3D12CommandAllocator_Reset(s_copy_alloc);
+    ID3D12GraphicsCommandList_Reset(s_copy_list, s_copy_alloc, NULL);
+    return s_copy_list;
+}
+static void d3d12_copy_flush(void)
+{
+    ID3D12CommandList *lists[1];
+    ID3D12GraphicsCommandList_Close(s_copy_list);
+    lists[0] = (ID3D12CommandList *)s_copy_list;
+    ID3D12CommandQueue_ExecuteCommandLists(g_d3d12.queue, 1, lists);
+    d3d12_wait_idle();
+}
+
+/* Create a DEFAULT-heap 2D texture + its SRV in the staging heap (permanent
+ * per-texture slot). rt=1 also allocates an RTV slot. Starts life in
+ * PIXEL_SHADER_RESOURCE (or RENDER_TARGET) so the first bind needs no barrier. */
+static BackendTexture *d3d12_tex_create(UINT w, UINT h, DXGI_FORMAT fmt, int rt)
+{
+    BackendTexture *bt;
+    D3D12_HEAP_PROPERTIES hp;
+    D3D12_RESOURCE_DESC   td;
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvd;
+    D3D12_RESOURCE_STATES init_state;
+    HRESULT hr;
+
+    if (!g_d3d12.device || w == 0 || h == 0) return NULL;
+    bt = (BackendTexture *)calloc(1, sizeof(*bt));
+    if (!bt) return NULL;
+
+    ZeroMemory(&hp, sizeof(hp)); hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    ZeroMemory(&td, sizeof(td));
+    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width = w; td.Height = h; td.DepthOrArraySize = 1; td.MipLevels = 1;
+    td.Format = fmt; td.SampleDesc.Count = 1;
+    td.Flags = rt ? D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET : D3D12_RESOURCE_FLAG_NONE;
+    init_state = rt ? D3D12_RESOURCE_STATE_RENDER_TARGET : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    hr = ID3D12Device_CreateCommittedResource(g_d3d12.device, &hp, D3D12_HEAP_FLAG_NONE, &td,
+            init_state, NULL, &IID_ID3D12Resource, (void **)&bt->res);
+    if (FAILED(hr)) { free(bt); return NULL; }
+
+    bt->fmt = fmt; bt->w = w; bt->h = h; bt->rstate = init_state;
+    bt->has_rtv = rt; bt->valid = 1; bt->ref = 1; bt->gen = g_backend.device_generation;
+
+    if (s_srv_stage_next >= s_srv_stage_cap) { WRAPPER_LOG("D3D12 SRV stage heap full"); s_srv_stage_next = 1; }
+    bt->srv_slot = s_srv_stage_next++;
+    ZeroMemory(&srvd, sizeof(srvd));
+    srvd.Format = fmt; srvd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvd.Texture2D.MipLevels = 1;
+    ID3D12Device_CreateShaderResourceView(g_d3d12.device, bt->res, &srvd,
+        cpu_handle(s_srv_stage, bt->srv_slot, s_srv_stage_size));
+
+    if (rt) {
+        if (s_tex_rtv_next >= s_tex_rtv_cap) { WRAPPER_LOG("D3D12 tex RTV heap full"); s_tex_rtv_next = 0; }
+        bt->rtv_slot = s_tex_rtv_next++;
+        ID3D12Device_CreateRenderTargetView(g_d3d12.device, bt->res, NULL,
+            cpu_handle(s_tex_rtv_heap, bt->rtv_slot, s_tex_rtv_size));
+    }
+    return bt;
+}
+
+/* Upload tightly/`src_pitch`-packed pixels into a DEFAULT texture via a staging
+ * UPLOAD buffer + CopyTextureRegion on the one-shot copy list. */
+static void d3d12_tex_upload(BackendTexture *bt, const void *px, UINT bytes_per_px, UINT src_pitch)
+{
+    D3D12_RESOURCE_DESC td;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp;
+    UINT num_rows = 0; UINT64 row_bytes = 0, total = 0;
+    ID3D12Resource *staging = NULL;
+    D3D12_HEAP_PROPERTIES hp;
+    D3D12_RESOURCE_DESC bd;
+    unsigned char *map = NULL;
+    UINT y;
+    HRESULT hr;
+
+    if (!bt || !bt->res || !px) return;
+    bt->res->lpVtbl->GetDesc(bt->res, &td);
+    ID3D12Device_GetCopyableFootprints(g_d3d12.device, &td, 0, 1, 0, &fp, &num_rows, &row_bytes, &total);
+
+    ZeroMemory(&hp, sizeof(hp)); hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+    ZeroMemory(&bd, sizeof(bd));
+    bd.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width=total; bd.Height=1; bd.DepthOrArraySize=1;
+    bd.MipLevels=1; bd.Format=DXGI_FORMAT_UNKNOWN; bd.SampleDesc.Count=1; bd.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    hr = ID3D12Device_CreateCommittedResource(g_d3d12.device, &hp, D3D12_HEAP_FLAG_NONE, &bd,
+            D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, (void **)&staging);
+    if (FAILED(hr)) { WRAPPER_LOG("D3D12 tex staging alloc 0x%08lX", hr); return; }
+
+    { D3D12_RANGE r; r.Begin=0; r.End=0; ID3D12Resource_Map(staging, 0, &r, (void **)&map); }
+    if (map) {
+        UINT copy = (UINT)(row_bytes < src_pitch ? row_bytes : src_pitch);
+        for (y = 0; y < bt->h; y++)
+            memcpy(map + (size_t)y * fp.Footprint.RowPitch,
+                   (const unsigned char *)px + (size_t)y * src_pitch, copy);
+        ID3D12Resource_Unmap(staging, 0, NULL);
+    }
+    (void)bytes_per_px;
+
+    {
+        ID3D12GraphicsCommandList *cl = d3d12_copy_begin();
+        D3D12_TEXTURE_COPY_LOCATION dst, src;
+        D3D12_RESOURCE_BARRIER b;
+        ZeroMemory(&dst, sizeof(dst)); dst.pResource=bt->res; dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex=0;
+        ZeroMemory(&src, sizeof(src)); src.pResource=staging; src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; src.PlacedFootprint=fp;
+        ZeroMemory(&b, sizeof(b)); b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource=bt->res; b.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore=bt->rstate; b.Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_DEST;
+        ID3D12GraphicsCommandList_ResourceBarrier(cl, 1, &b);
+        ID3D12GraphicsCommandList_CopyTextureRegion(cl, &dst, 0, 0, 0, &src, NULL);
+        b.Transition.StateBefore=D3D12_RESOURCE_STATE_COPY_DEST; b.Transition.StateAfter=D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        ID3D12GraphicsCommandList_ResourceBarrier(cl, 1, &b);
+        d3d12_copy_flush();
+        bt->rstate = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
+    ID3D12Resource_Release(staging);
 }
 
 /* ---- render-core init / teardown --------------------------------------- */
@@ -677,6 +908,13 @@ static int d3d12_render_core_init(int width, int height)
         s_upload_off[i] = 0;
     }
 
+    /* One-shot copy command list (texture uploads, closed until used). */
+    if (FAILED(ID3D12Device_CreateCommandAllocator(g_d3d12.device, D3D12_COMMAND_LIST_TYPE_DIRECT,
+            &IID_ID3D12CommandAllocator, (void **)&s_copy_alloc))) return 0;
+    if (FAILED(ID3D12Device_CreateCommandList(g_d3d12.device, 0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+            s_copy_alloc, NULL, &IID_ID3D12GraphicsCommandList, (void **)&s_copy_list))) return 0;
+    ID3D12GraphicsCommandList_Close(s_copy_list);
+
     /* Builtin PS bytecode table. */
     s_builtin_ps[PS_MODULATE].bc        = g_ps_modulate_50;        s_builtin_ps[PS_MODULATE].len        = sizeof(g_ps_modulate_50);
     s_builtin_ps[PS_MODULATE_ALPHA].bc  = g_ps_modulate_alpha_50;  s_builtin_ps[PS_MODULATE_ALPHA].len  = sizeof(g_ps_modulate_alpha_50);
@@ -693,6 +931,13 @@ static int d3d12_render_core_init(int width, int height)
       memcpy(s_viewport_cb->mapped, &vp, sizeof(vp)); }
     { FogCB fog; ZeroMemory(&fog,sizeof(fog)); memcpy(s_fog_cb->mapped, &fog, sizeof(fog)); }
 
+    /* 1x1 white default texture (also validates the whole texture upload path
+     * -- CreateCommittedResource + staging + CopyTextureRegion + barriers + SRV
+     * -- against the debug layer at init). */
+    s_white_tex = d3d12_tex_create(1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, 0);
+    if (!s_white_tex) return 0;
+    { unsigned int wp = 0xFFFFFFFFu; d3d12_tex_upload(s_white_tex, &wp, 4, 4); }
+
     /* Warm-up PSO: exercises get_pso + validates root-sig/shader/layout wiring
      * against the debug layer at init (before any frame). */
     if (!d3d12_get_pso(0, PS_MODULATE, BLEND_SRCALPHA_INVSRC, DS_Z_OFF_WRITE_OFF, 0, 0)) return 0;
@@ -705,6 +950,9 @@ static int d3d12_render_core_init(int width, int height)
 static void d3d12_render_core_shutdown(void)
 {
     int i;
+    if (s_white_tex)   { if (s_white_tex->res) ID3D12Resource_Release(s_white_tex->res); free(s_white_tex); s_white_tex = NULL; }
+    if (s_copy_list)   { ID3D12GraphicsCommandList_Release(s_copy_list); s_copy_list = NULL; }
+    if (s_copy_alloc)  { ID3D12CommandAllocator_Release(s_copy_alloc); s_copy_alloc = NULL; }
     if (s_viewport_cb) { if (s_viewport_cb->res) ID3D12Resource_Release(s_viewport_cb->res); free(s_viewport_cb); s_viewport_cb = NULL; }
     if (s_fog_cb)      { if (s_fog_cb->res)      ID3D12Resource_Release(s_fog_cb->res);      free(s_fog_cb);      s_fog_cb = NULL; }
     for (i = 0; i < s_pso_count; i++) if (s_pso_cache[i].pso) ID3D12PipelineState_Release(s_pso_cache[i].pso);
@@ -901,7 +1149,13 @@ void Backend_ClearBackbuffer(const float *rgba)
 
 void Backend_ClearSwapChainRT(const float *rgba) { Backend_ClearBackbuffer(rgba); }
 void Backend_BindSwapChainRT(void)               { d3d12_frame_begin(); }
-void Backend_ClearDepth(float z)                 { (void)z; /* no depth buffer in the skeleton yet */ }
+void Backend_ClearDepth(float z)
+{
+    if (!g_d3d12.device || !s_dsv_heap) return;
+    d3d12_frame_begin();
+    ID3D12GraphicsCommandList_ClearDepthStencilView(g_d3d12.list, cpu_handle(s_dsv_heap, 0, 1),
+        D3D12_CLEAR_FLAG_DEPTH, z, 0, 0, NULL);
+}
 
 void Backend_PresentSwapChain(int sync)          { d3d12_frame_present(sync); }
 void Backend_CompositeAndPresent(WrapperSurface *rt, RECT *s, RECT *d)
@@ -1087,8 +1341,29 @@ void Backend_DrainD3DDebug(const char *where)
 }
 void Backend_DrawFullscreenQuad(ID3D11ShaderResourceView *srv) { (void)srv; }
 void Backend_DrawFullscreenQuadRaw(void *srv) { (void)srv; }
-void Backend_DrawIndexedPrimitive(DWORD p, UINT s, UINT bv, UINT si, UINT ic, UINT vc) { (void)p;(void)s;(void)bv;(void)si;(void)ic;(void)vc; }
-void Backend_DrawPrimitive(DWORD p, UINT s, UINT bv, UINT vc) { (void)p;(void)s;(void)bv;(void)vc; }
+void Backend_DrawPrimitive(DWORD prim, UINT stride, UINT base_vertex, UINT vert_count)
+{
+    const RenderStateCache *s = &g_backend.state;
+    int tt; D3D_PRIMITIVE_TOPOLOGY topo;
+    if (!g_d3d12.device) return;
+    Backend_UpdateFogCB();   /* per-draw alpha-test/fog */
+    topo = d3d12_map_topo(prim, &tt);
+    d3d12_bind_and_draw(topo, tt, d3d12_sel_blend(s), d3d12_sel_ds(s), s->polygon_offset ? 1 : 0,
+                        d3d12_sel_ps(s), d3d12_sel_samp(s), stride, 0, base_vertex, 0, vert_count);
+    Backend_NoteDraw(prim, vert_count, 0, 0);
+}
+void Backend_DrawIndexedPrimitive(DWORD prim, UINT stride, UINT base_vertex, UINT start_index, UINT index_count, UINT vert_count)
+{
+    const RenderStateCache *s = &g_backend.state;
+    int tt; D3D_PRIMITIVE_TOPOLOGY topo;
+    (void)vert_count;
+    if (!g_d3d12.device) return;
+    Backend_UpdateFogCB();
+    topo = d3d12_map_topo(prim, &tt);
+    d3d12_bind_and_draw(topo, tt, d3d12_sel_blend(s), d3d12_sel_ds(s), s->polygon_offset ? 1 : 0,
+                        d3d12_sel_ps(s), d3d12_sel_samp(s), stride, 1, base_vertex, start_index, index_count);
+    Backend_NoteDraw(prim, vert_count, index_count, 1);
+}
 void Backend_DumpCrashDiag(const char *path) { (void)path; }
 void Backend_EnforceWindowSize(void) { }
 void Backend_EnsureCompositingTextures(int w, int h) { (void)w; (void)h; }
@@ -1101,8 +1376,18 @@ void *Backend_PixelShaderRaw(BackendPixelShader *ps) { return ps; }
 void Backend_PlatBindTextureSRV(WrapperRecCtx *rc, void *srv) { (void)rc;(void)srv; }
 void Backend_PlatDrawTris(WrapperRecCtx *rc, const void *v, int vc, const void *idx, int ic, void *pso, int ss) { (void)rc;(void)v;(void)vc;(void)idx;(void)ic;(void)pso;(void)ss; }
 void Backend_PlatDrawWhite(WrapperRecCtx *rc, const void *v, int vc, const void *idx, int ic, int lines) { (void)rc;(void)v;(void)vc;(void)idx;(void)ic;(void)lines; }
-void Backend_PlatSetScissor(WrapperRecCtx *rc, int l, int t, int r, int b) { (void)rc;(void)l;(void)t;(void)r;(void)b; }
-void Backend_PlatSetViewport(WrapperRecCtx *rc, int x, int y, int w, int h) { (void)rc;(void)x;(void)y;(void)w;(void)h; }
+void Backend_PlatSetScissor(WrapperRecCtx *rc, int l, int t, int r, int b)
+{
+    (void)rc;
+    s_cur_scissor.left = l; s_cur_scissor.top = t; s_cur_scissor.right = r; s_cur_scissor.bottom = b;
+}
+void Backend_PlatSetViewport(WrapperRecCtx *rc, int x, int y, int w, int h)
+{
+    (void)rc;
+    s_cur_vp.TopLeftX = (float)x; s_cur_vp.TopLeftY = (float)y;
+    s_cur_vp.Width = (float)w; s_cur_vp.Height = (float)h; s_cur_vp.MinDepth = 0.0f; s_cur_vp.MaxDepth = 1.0f;
+    s_cur_scissor.left = x; s_cur_scissor.top = y; s_cur_scissor.right = x + w; s_cur_scissor.bottom = y + h;
+}
 WrapperRecCtx *Backend_RecBegin(int i, int x, int y, int w, int h) { (void)i;(void)x;(void)y;(void)w;(void)h; return NULL; }
 void Backend_RecEnd(WrapperRecCtx *rc) { (void)rc; }
 void Backend_RecExecute(int i) { (void)i; }
@@ -1118,24 +1403,69 @@ void Backend_SelectPixelShader(void) { }  /* PS chosen at draw time from g_backe
 void Backend_SetBuiltinPixelShader(int ps_idx) { if (ps_idx >= 0 && ps_idx < PS_COUNT) s_cur_ps = ps_idx; }
 int  Backend_SetExclusiveFullscreen(int enable) { (void)enable; return 1; }
 void Backend_SetGBufferEnabled(int on) { (void)on; }
-void Backend_SetViewport(float x, float y, float w, float h, float mn, float mx) { (void)x;(void)y;(void)w;(void)h;(void)mn;(void)mx; }
-int  Backend_StreamUpload(const void *v, UINT vc, UINT s, const void *idx, UINT ic, UINT *obv, UINT *osi) { (void)v;(void)vc;(void)s;(void)idx;(void)ic; if(obv)*obv=0; if(osi)*osi=0; return 0; }
+void Backend_SetViewport(float x, float y, float w, float h, float mn, float mx)
+{
+    s_cur_vp.TopLeftX = x; s_cur_vp.TopLeftY = y; s_cur_vp.Width = w; s_cur_vp.Height = h;
+    s_cur_vp.MinDepth = mn; s_cur_vp.MaxDepth = mx;
+}
+
+/* Stream verts (+optional u16 indices) into the current frame's upload ring;
+ * returns base_vertex / start_index for the VBV/IBV bound at ring base 0. */
+int Backend_StreamUpload(const void *verts, UINT vc, UINT stride, const void *indices, UINT ic, UINT *obv, UINT *osi)
+{
+    UINT fi = g_d3d12.frame_index;
+    UINT cur, vbytes, voff;
+    if (!s_upload_cpu[fi] || !verts || vc == 0 || stride == 0) return 0;
+    vbytes = vc * stride;
+    cur = (s_upload_off[fi] + stride - 1) / stride * stride;   /* stride-align -> integer base_vertex */
+    if ((UINT64)cur + vbytes > D3D12_UPLOAD_RING_BYTES) { WRAPPER_LOG("D3D12 VB ring overflow"); return 0; }
+    memcpy(s_upload_cpu[fi] + cur, verts, vbytes);
+    voff = cur; cur += vbytes;
+    if (obv) *obv = voff / stride;
+    if (indices && ic) {
+        UINT ibytes = ic * 2u, ioff;
+        cur = (cur + 1u) & ~1u;                                /* 2-align R16 indices */
+        if ((UINT64)cur + ibytes > D3D12_UPLOAD_RING_BYTES) { WRAPPER_LOG("D3D12 IB ring overflow"); return 0; }
+        memcpy(s_upload_cpu[fi] + cur, indices, ibytes);
+        ioff = cur; cur += ibytes;
+        if (osi) *osi = ioff / 2u;
+    }
+    s_upload_off[fi] = cur;
+    return 1;
+}
 void Backend_SurfaceBindRenderTarget(WrapperSurface *s) { (void)s; }
 ID3D11ShaderResourceView *Backend_SurfaceGetSRV(WrapperSurface *s) { (void)s; return NULL; }
 int  Backend_SurfaceHasRTV(WrapperSurface *s) { (void)s; return 0; }
-void Backend_TextureAddRef(BackendTexture *bt) { (void)bt; }
-BackendTexture *Backend_TextureAdopt(void *n) { (void)n; return NULL; }
-int  Backend_TextureBind(BackendTexture *bt, UINT stage) { (void)bt;(void)stage; return 0; }
-void Backend_TextureBindRenderTarget(BackendTexture *bt) { (void)bt; }
-void Backend_TextureClearRT(BackendTexture *bt, const float *rgba) { (void)bt;(void)rgba; }
-BackendTexture *Backend_TextureCreate(DWORD w, DWORD h, DXGI_FORMAT f, int rt, int st) { (void)w;(void)h;(void)f;(void)rt;(void)st; return NULL; }
-void Backend_TextureEnsureCurrent(BackendTexture *bt, DWORD w, DWORD h, DXGI_FORMAT f, int rt, int st) { (void)bt;(void)w;(void)h;(void)f;(void)rt;(void)st; }
-BackendTexture *Backend_TextureFromBGRA(const void *px, int w, int h) { (void)px;(void)w;(void)h; return NULL; }
-int  Backend_TextureHasRTV(const BackendTexture *bt) { (void)bt; return 0; }
-int  Backend_TextureIsValid(const BackendTexture *bt) { (void)bt; return 0; }
+void Backend_TextureAddRef(BackendTexture *bt) { if (bt) InterlockedIncrement(&bt->ref); }
+BackendTexture *Backend_TextureAdopt(void *n) { (void)n; return NULL; }  /* n/a: no external ID3D11 texture on d3d12 */
+int  Backend_TextureBind(BackendTexture *bt, UINT stage) { (void)stage; s_cur_tex = bt; return 1; }
+void Backend_TextureBindRenderTarget(BackendTexture *bt) { (void)bt; /* Phase 3 (offscreen surfaces) */ }
+void Backend_TextureClearRT(BackendTexture *bt, const float *rgba) { (void)bt;(void)rgba; /* Phase 3 */ }
+BackendTexture *Backend_TextureCreate(DWORD w, DWORD h, DXGI_FORMAT f, int rt, int st) { (void)st; return d3d12_tex_create((UINT)w, (UINT)h, f, rt); }
+void Backend_TextureEnsureCurrent(BackendTexture *bt, DWORD w, DWORD h, DXGI_FORMAT f, int rt, int st) { (void)bt;(void)w;(void)h;(void)f;(void)rt;(void)st; /* Phase 3 (surface resize) */ }
+BackendTexture *Backend_TextureFromBGRA(const void *px, int w, int h)
+{
+    BackendTexture *bt = d3d12_tex_create((UINT)w, (UINT)h, DXGI_FORMAT_B8G8R8A8_UNORM, 0);
+    if (bt && px) d3d12_tex_upload(bt, px, 4, (UINT)w * 4u);
+    return bt;
+}
+int  Backend_TextureHasRTV(const BackendTexture *bt) { return bt && bt->has_rtv; }
+int  Backend_TextureIsValid(const BackendTexture *bt) { return bt && bt->valid && bt->res != NULL; }
 int  Backend_TextureLoad(BackendTexture **pbt, DWORD dw, DWORD dh, DXGI_FORMAT df, const void *sp, LONG spitch, DWORD sw, DWORD sh, DWORD sbpp, int sha, int hck, DWORD ck, BackendTexture *sbt, int *r5) { (void)pbt;(void)dw;(void)dh;(void)df;(void)sp;(void)spitch;(void)sw;(void)sh;(void)sbpp;(void)sha;(void)hck;(void)ck;(void)sbt; if(r5)*r5=0; return 0; }
-void Backend_TextureRelease(BackendTexture *bt) { (void)bt; }
-void Backend_TextureUpload(BackendTexture *bt, const void *sys, LONG p, DWORD w, DWORD h, DWORD bpp) { (void)bt;(void)sys;(void)p;(void)w;(void)h;(void)bpp; }
+void Backend_TextureRelease(BackendTexture *bt)
+{
+    if (!bt) return;
+    if (InterlockedDecrement(&bt->ref) <= 0) {
+        if (bt == s_cur_tex) s_cur_tex = NULL;
+        if (bt->res) ID3D12Resource_Release(bt->res);
+        free(bt);
+    }
+}
+void Backend_TextureUpload(BackendTexture *bt, const void *sys, LONG p, DWORD w, DWORD h, DWORD bpp)
+{
+    (void)w; (void)h;
+    if (bt && sys) d3d12_tex_upload(bt, sys, (UINT)bpp, (UINT)p);
+}
 void Backend_UnbindRenderTargets(void) { }
 void Backend_UnbindSceneDepthReadonly(void) { }
 void Backend_UpdateConstBuffer(BackendConstBuffer *cb, const void *data, size_t size)
