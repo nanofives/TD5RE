@@ -334,6 +334,78 @@ static void d3d12_frame_begin(void)
     g_d3d12.frame_open = 1;
 }
 
+/* ---- framedump capture (must happen BEFORE the flip; flip-discard recycles
+ *      the presented buffer, so a post-Present readback is undefined) -------- */
+static int            s_cap_on = -1;
+static unsigned char *s_cap_buf;
+static UINT           s_cap_w, s_cap_h;
+static D3D12_PLACED_SUBRESOURCE_FOOTPRINT *s_cap_pending_fp;
+static unsigned       s_dbg_draws, s_dbg_clears;   /* bring-up instrumentation */
+
+static int d3d12_capture_active(void)
+{
+    if (s_cap_on < 0) {
+        const char *e = getenv("TD5RE_FRAMEDUMP");
+        const char *r = getenv("TD5RE_D3D12_CAPTURE");
+        s_cap_on = ((e && e[0]) || (r && r[0])) ? 1 : 0;
+    }
+    return s_cap_on;
+}
+
+/* Record backbuffer[idx] (in RENDER_TARGET) -> readback + leave it in PRESENT,
+ * on the still-open frame list. Fills fp; returns 1 if recorded. */
+static int d3d12_record_capture(UINT idx, D3D12_PLACED_SUBRESOURCE_FOOTPRINT *fp)
+{
+    ID3D12Resource *bb = g_d3d12.backbuffers[idx];
+    D3D12_RESOURCE_DESC rd;
+    UINT num_rows = 0; UINT64 row_bytes = 0, total = 0;
+    D3D12_TEXTURE_COPY_LOCATION dst, src;
+    D3D12_RESOURCE_BARRIER b;
+
+    bb->lpVtbl->GetDesc(bb, &rd);
+    ID3D12Device_GetCopyableFootprints(g_d3d12.device, &rd, 0, 1, 0, fp, &num_rows, &row_bytes, &total);
+    if (!g_d3d12.readback || g_d3d12.readback_size < total) {
+        D3D12_HEAP_PROPERTIES hp; D3D12_RESOURCE_DESC bd;
+        if (g_d3d12.readback) { ID3D12Resource_Release(g_d3d12.readback); g_d3d12.readback = NULL; }
+        ZeroMemory(&hp, sizeof(hp)); hp.Type = D3D12_HEAP_TYPE_READBACK;
+        ZeroMemory(&bd, sizeof(bd));
+        bd.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width=total; bd.Height=1; bd.DepthOrArraySize=1;
+        bd.MipLevels=1; bd.Format=DXGI_FORMAT_UNKNOWN; bd.SampleDesc.Count=1; bd.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(ID3D12Device_CreateCommittedResource(g_d3d12.device, &hp, D3D12_HEAP_FLAG_NONE, &bd,
+                D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource, (void **)&g_d3d12.readback)))
+            return 0;
+        g_d3d12.readback_size = total;
+    }
+    ZeroMemory(&b, sizeof(b)); b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource=bb; b.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.StateBefore=D3D12_RESOURCE_STATE_RENDER_TARGET; b.Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_SOURCE;
+    ID3D12GraphicsCommandList_ResourceBarrier(g_d3d12.list, 1, &b);
+    ZeroMemory(&dst, sizeof(dst)); dst.pResource=g_d3d12.readback; dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint=*fp;
+    ZeroMemory(&src, sizeof(src)); src.pResource=bb; src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex=0;
+    ID3D12GraphicsCommandList_CopyTextureRegion(g_d3d12.list, &dst, 0, 0, 0, &src, NULL);
+    b.Transition.StateBefore=D3D12_RESOURCE_STATE_COPY_SOURCE; b.Transition.StateAfter=D3D12_RESOURCE_STATE_PRESENT;
+    ID3D12GraphicsCommandList_ResourceBarrier(g_d3d12.list, 1, &b);
+    return 1;
+}
+
+/* Map the readback (copy already GPU-complete) + convert BGRA->RGBA into s_cap_buf. */
+static void d3d12_store_capture(const D3D12_PLACED_SUBRESOURCE_FOOTPRINT *fp)
+{
+    unsigned char *mapped = NULL;
+    UINT w = fp->Footprint.Width, h = fp->Footprint.Height, y, x;
+    D3D12_RANGE rr; rr.Begin = 0; rr.End = (SIZE_T)fp->Footprint.RowPitch * h;
+    if (FAILED(ID3D12Resource_Map(g_d3d12.readback, 0, &rr, (void **)&mapped)) || !mapped) return;
+    if (s_cap_w != w || s_cap_h != h) { free(s_cap_buf); s_cap_buf = (unsigned char *)malloc((size_t)w*h*4); s_cap_w=w; s_cap_h=h; }
+    if (s_cap_buf) {
+        for (y = 0; y < h; y++) {
+            const unsigned char *s = mapped + (size_t)y * fp->Footprint.RowPitch;
+            unsigned char *d = s_cap_buf + (size_t)y * w * 4;
+            for (x = 0; x < w; x++) { d[x*4+0]=s[x*4+2]; d[x*4+1]=s[x*4+1]; d[x*4+2]=s[x*4+0]; d[x*4+3]=s[x*4+3]; }
+        }
+    }
+    { D3D12_RANGE wr; wr.Begin=0; wr.End=0; ID3D12Resource_Unmap(g_d3d12.readback, 0, &wr); }
+}
+
 /* Close + execute the current frame and Present. */
 static void d3d12_frame_present(int sync)
 {
@@ -346,8 +418,16 @@ static void d3d12_frame_present(int sync)
 
     if (!g_d3d12.frame_open) d3d12_frame_begin();  /* ensure something to present */
 
-    d3d12_resource_barrier(g_d3d12.backbuffers[idx],
-        D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+    /* Framedump capture (dev): copy this frame BEFORE the flip, else read it back
+     * after present + wait. Otherwise plain RT->PRESENT. */
+    {
+        static D3D12_PLACED_SUBRESOURCE_FOOTPRINT s_fp;
+        int cap = d3d12_capture_active() ? d3d12_record_capture(idx, &s_fp) : 0;
+        if (!cap)
+            d3d12_resource_barrier(g_d3d12.backbuffers[idx],
+                D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+        s_cap_pending_fp = cap ? &s_fp : NULL;
+    }
 
     ID3D12GraphicsCommandList_Close(g_d3d12.list);
     {
@@ -370,6 +450,9 @@ static void d3d12_frame_present(int sync)
     g_d3d12.fence_values[idx] = d3d12_signal();
     g_d3d12.frame_index = IDXGISwapChain3_GetCurrentBackBufferIndex(g_d3d12.swapchain);
     d3d12_wait_value(g_d3d12.fence_values[g_d3d12.frame_index]);
+
+    /* Capture copy is now GPU-complete (waited on idx's fence above). */
+    if (s_cap_pending_fp) { d3d12_wait_value(g_d3d12.fence_values[idx]); d3d12_store_capture(s_cap_pending_fp); s_cap_pending_fp = NULL; }
     if (diag) { d3d12_diag("present[%d] done, next idx=%u", s_pdiag, g_d3d12.frame_index); s_pdiag++; }
 }
 
@@ -580,6 +663,7 @@ static void d3d12_bind_and_draw(D3D_PRIMITIVE_TOPOLOGY topo, int topo_type,
 
     if (!g_d3d12.frame_open) d3d12_frame_begin();
     if (!tex) return;
+    s_dbg_draws++;
     d3d12_flush_uploads();   /* make any pending texture uploads GPU-resident first */
     pso = d3d12_get_pso(s_cur_vs, ps, blend, ds, raster, topo_type);
     if (!pso) return;
@@ -1317,6 +1401,7 @@ int Backend_SwapChainReady(void){ return g_d3d12.device && g_d3d12.swapchain && 
 void Backend_ClearBackbuffer(const float *rgba)
 {
     if (!g_d3d12.device) return;
+    s_dbg_clears++;
     d3d12_frame_begin();
     {
         D3D12_CPU_DESCRIPTOR_HANDLE rtv = d3d12_rtv_handle(g_d3d12.frame_index);
@@ -1348,9 +1433,11 @@ void Backend_CompositeAndPresent(WrapperSurface *rt, RECT *s, RECT *d)
     if (!g_d3d12.frame_open) d3d12_frame_begin();
 
     {
-        static int s_cdiag = 0;
-        if (s_cdiag < 4) { d3d12_diag("composite[%d] rt=%p bt=%p dirty=%d scene=%d",
-            s_cdiag++, (void*)rt, rt?(void*)rt->bt:NULL, rt?rt->dirty:-1, g_backend.scene_rendered); }
+        static int s_cc = 0;
+        if ((s_cc % 120) == 0) { d3d12_diag("composite[%d] rt=%p bt=%p dirty=%d scene=%d draws=%u clears=%u srv=%p",
+            s_cc, (void*)rt, rt?(void*)rt->bt:NULL, rt?rt->dirty:-1, g_backend.scene_rendered,
+            s_dbg_draws, s_dbg_clears, (void*)s_cur_tex); }
+        s_cc++;
     }
     if (rt && !g_backend.scene_rendered) {
         if (rt->dirty) WrapperSurface_FlushDirty(rt);   /* sys_buffer -> rt->bt (BGRA) */
@@ -1363,116 +1450,23 @@ void Backend_CompositeAndPresent(WrapperSurface *rt, RECT *s, RECT *d)
 
 HWND Backend_GetDisplayWindow(void) { return s_display_hwnd ? s_display_hwnd : g_backend.hwnd; }
 
-/* Framedump / render-golden capture: read back the current backbuffer as a
- * freshly-malloc'd RGBA8 buffer (caller frees), matching the D3D11
- * Backend_CaptureBackbufferRGBA contract.
- *
- * D3D12 flip-discard makes a *post*-present readback unreliable (the presented
- * surface is recycled), so this captures the in-flight frame synchronously: it
- * copies the backbuffer (which holds this frame's rendered content while the
- * frame command list is open) into a READBACK-heap buffer on that same list,
- * flushes to the GPU, waits, and maps. The frame is left in PRESENT state with
- * frame_open=0, so the game's subsequent Present begins a fresh frame cleanly.
- * (Cost: the captured frame itself is not shown -- acceptable for a periodic
- * dev framedump / A-B capture; the next frame presents normally.) */
+/* Framedump / render-golden capture: return the most recent PRE-FLIP frame
+ * captured by d3d12_frame_present (flip-discard makes a post-present readback
+ * undefined). Requires TD5RE_FRAMEDUMP / TD5RE_D3D12_CAPTURE to be set so the
+ * per-present capture is armed. Freshly malloc'd RGBA8, caller frees. */
 unsigned char *Backend_CaptureBackbufferRGBA(int *out_w, int *out_h)
 {
-    UINT idx, y, x;
-    ID3D12Resource *bb;
-    D3D12_RESOURCE_DESC rd;
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp;
-    UINT num_rows = 0;
-    UINT64 row_bytes = 0, total = 0;
-    unsigned char *out, *mapped = NULL;
-    UINT w, h;
-    HRESULT hr;
-
-    if (!g_d3d12.device) return NULL;
-
-    /* Ensure the backbuffer holds a rendered (or at least cleared) frame. */
-    if (!g_d3d12.frame_open) d3d12_frame_begin();
-    idx = g_d3d12.frame_index;
-    bb  = g_d3d12.backbuffers[idx];
-
-    /* GetDesc is an aggregate-return method -> call the raw vtable with out-param
-     * (same mingw/WIDL reason as d3d12_rtv_handle). */
-    bb->lpVtbl->GetDesc(bb, &rd);
-    w = (UINT)rd.Width;
-    h = rd.Height;
-
-    ID3D12Device_GetCopyableFootprints(g_d3d12.device, &rd, 0, 1, 0,
-                                       &fp, &num_rows, &row_bytes, &total);
-
-    /* (Re)allocate the READBACK buffer if it is missing or too small. */
-    if (!g_d3d12.readback || g_d3d12.readback_size < total) {
-        D3D12_HEAP_PROPERTIES hp;
-        D3D12_RESOURCE_DESC   bd;
-        if (g_d3d12.readback) { ID3D12Resource_Release(g_d3d12.readback); g_d3d12.readback = NULL; }
-        ZeroMemory(&hp, sizeof(hp));
-        hp.Type = D3D12_HEAP_TYPE_READBACK;
-        ZeroMemory(&bd, sizeof(bd));
-        bd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
-        bd.Width            = total;
-        bd.Height           = 1;
-        bd.DepthOrArraySize = 1;
-        bd.MipLevels        = 1;
-        bd.Format           = DXGI_FORMAT_UNKNOWN;
-        bd.SampleDesc.Count = 1;
-        bd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        hr = ID3D12Device_CreateCommittedResource(g_d3d12.device, &hp, D3D12_HEAP_FLAG_NONE,
-                &bd, D3D12_RESOURCE_STATE_COPY_DEST, NULL,
-                &IID_ID3D12Resource, (void **)&g_d3d12.readback);
-        if (FAILED(hr)) { WRAPPER_LOG("D3D12 capture: readback alloc 0x%08lX", hr); return NULL; }
-        g_d3d12.readback_size = total;
+    unsigned char *out;
+    if (!s_cap_buf || s_cap_w == 0 || s_cap_h == 0) {
+        if (!d3d12_capture_active())
+            WRAPPER_LOG("D3D12 capture: set TD5RE_FRAMEDUMP/TD5RE_D3D12_CAPTURE to arm per-present capture");
+        return NULL;
     }
-
-    /* Record BB -> readback copy on the open frame list, then flush. */
-    d3d12_resource_barrier(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    {
-        D3D12_TEXTURE_COPY_LOCATION dst, src;
-        ZeroMemory(&dst, sizeof(dst));
-        dst.pResource       = g_d3d12.readback;
-        dst.Type            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        dst.PlacedFootprint = fp;
-        ZeroMemory(&src, sizeof(src));
-        src.pResource        = bb;
-        src.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        src.SubresourceIndex = 0;
-        ID3D12GraphicsCommandList_CopyTextureRegion(g_d3d12.list, &dst, 0, 0, 0, &src, NULL);
-    }
-    d3d12_resource_barrier(bb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
-
-    ID3D12GraphicsCommandList_Close(g_d3d12.list);
-    {
-        ID3D12CommandList *lists[1];
-        lists[0] = (ID3D12CommandList *)g_d3d12.list;
-        ID3D12CommandQueue_ExecuteCommandLists(g_d3d12.queue, 1, lists);
-    }
-    g_d3d12.frame_open = 0;
-    d3d12_wait_idle();
-
-    /* Map + convert BGRA -> RGBA row by row (source pitch is 256-aligned). */
-    {
-        D3D12_RANGE rr; rr.Begin = 0; rr.End = (SIZE_T)total;
-        hr = ID3D12Resource_Map(g_d3d12.readback, 0, &rr, (void **)&mapped);
-        if (FAILED(hr) || !mapped) { WRAPPER_LOG("D3D12 capture: Map 0x%08lX", hr); return NULL; }
-    }
-    out = (unsigned char *)malloc((size_t)w * h * 4);
-    if (!out) { ID3D12Resource_Unmap(g_d3d12.readback, 0, NULL); return NULL; }
-    for (y = 0; y < h; y++) {
-        const unsigned char *srow = mapped + (size_t)y * fp.Footprint.RowPitch;
-        unsigned char       *drow = out   + (size_t)y * w * 4;
-        for (x = 0; x < w; x++) {
-            drow[x*4+0] = srow[x*4+2];  /* R <- B */
-            drow[x*4+1] = srow[x*4+1];  /* G      */
-            drow[x*4+2] = srow[x*4+0];  /* B <- R */
-            drow[x*4+3] = srow[x*4+3];  /* A      */
-        }
-    }
-    { D3D12_RANGE wr; wr.Begin = 0; wr.End = 0; ID3D12Resource_Unmap(g_d3d12.readback, 0, &wr); }
-
-    if (out_w) *out_w = (int)w;
-    if (out_h) *out_h = (int)h;
+    out = (unsigned char *)malloc((size_t)s_cap_w * s_cap_h * 4);
+    if (!out) return NULL;
+    memcpy(out, s_cap_buf, (size_t)s_cap_w * s_cap_h * 4);
+    if (out_w) *out_w = (int)s_cap_w;
+    if (out_h) *out_h = (int)s_cap_h;
     return out;
 }
 
