@@ -168,6 +168,8 @@ static BackendTexture  *s_white_tex;
 /* forward decls (definitions below the device lifecycle) */
 static D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle(ID3D12DescriptorHeap *h, UINT idx, UINT size);
 static D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle(ID3D12DescriptorHeap *h, UINT idx, UINT size);
+static void d3d12_flush_uploads(void);
+static void d3d12_diag(const char *fmt, ...);
 
 /* ---- plumbing that lived in the filtered-out d3d11 backend files -------- *
  * g_wrapper_rec (deferred pane-record thread-local; the d3d12 backend does not
@@ -276,26 +278,32 @@ static void d3d12_resource_barrier(ID3D12Resource *res,
     ID3D12GraphicsCommandList_ResourceBarrier(g_d3d12.list, 1, &b);
 }
 
-/* Block until the GPU has finished up to the fence value we last signalled for
- * the given frame slot. */
-static void d3d12_wait_frame(UINT slot)
+/* Single monotonic fence counter shared by present + copy/upload waits.
+ * (The earlier per-slot ++fence_values[frame_index] scheme corrupted the values
+ * when d3d12_wait_idle -- called by flush_uploads mid-frame -- and present both
+ * bumped the same slot, hanging the 2nd present's wait_frame.) */
+static UINT64 s_fence_val;
+
+static void d3d12_wait_value(UINT64 v)
 {
-    UINT64 want = g_d3d12.fence_values[slot];
-    if (ID3D12Fence_GetCompletedValue(g_d3d12.fence) < want) {
-        ID3D12Fence_SetEventOnCompletion(g_d3d12.fence, want, g_d3d12.fence_event);
+    if (ID3D12Fence_GetCompletedValue(g_d3d12.fence) < v) {
+        ID3D12Fence_SetEventOnCompletion(g_d3d12.fence, v, g_d3d12.fence_event);
         WaitForSingleObject(g_d3d12.fence_event, INFINITE);
     }
+}
+
+/* Queue a signal of the next monotonic value and return it. */
+static UINT64 d3d12_signal(void)
+{
+    UINT64 v = ++s_fence_val;
+    ID3D12CommandQueue_Signal(g_d3d12.queue, g_d3d12.fence, v);
+    return v;
 }
 
 static void d3d12_wait_idle(void)
 {
     if (!g_d3d12.queue || !g_d3d12.fence) return;
-    UINT64 v = ++g_d3d12.fence_values[g_d3d12.frame_index];
-    ID3D12CommandQueue_Signal(g_d3d12.queue, g_d3d12.fence, v);
-    if (ID3D12Fence_GetCompletedValue(g_d3d12.fence) < v) {
-        ID3D12Fence_SetEventOnCompletion(g_d3d12.fence, v, g_d3d12.fence_event);
-        WaitForSingleObject(g_d3d12.fence_event, INFINITE);
-    }
+    d3d12_wait_value(d3d12_signal());
 }
 
 /* Open the command list for the current backbuffer and bind it as the RT. */
@@ -331,7 +339,10 @@ static void d3d12_frame_present(int sync)
 {
     UINT idx = g_d3d12.frame_index;
     HRESULT hr;
+    static int s_pdiag = 0;
+    int diag = (s_pdiag < 4);
     if (!g_d3d12.device || !g_d3d12.swapchain) return;
+    if (diag) { d3d12_diag("present[%d] enter idx=%u open=%d", s_pdiag, idx, g_d3d12.frame_open); }
 
     if (!g_d3d12.frame_open) d3d12_frame_begin();  /* ensure something to present */
 
@@ -347,20 +358,19 @@ static void d3d12_frame_present(int sync)
     g_d3d12.frame_open = 0;
 
     Backend_NotePresent();
+    if (diag) d3d12_diag("present[%d] pre-Present", s_pdiag);
     hr = IDXGISwapChain3_Present(g_d3d12.swapchain, sync ? 1 : 0, 0);
     g_backend.present_count++;
     if (FAILED(hr)) { Backend_NoteDeviceRemoved(hr, "d3d12_frame_present/Present"); return; }
+    if (diag) d3d12_diag("present[%d] post-Present hr=0x%08lX", s_pdiag, hr);
 
-    /* Signal the fence for this slot, then advance to the next backbuffer and
-     * wait for its previous work to finish (2 frames in flight). */
-    {
-        UINT64 v = ++g_d3d12.fence_values[idx];
-        ID3D12CommandQueue_Signal(g_d3d12.queue, g_d3d12.fence, v);
-    }
+    /* Record the fence value that marks end-of-work for the slot we just
+     * submitted, advance to the next backbuffer, and wait for THAT slot's prior
+     * frame to finish before we reuse its allocator/upload ring (2 in flight). */
+    g_d3d12.fence_values[idx] = d3d12_signal();
     g_d3d12.frame_index = IDXGISwapChain3_GetCurrentBackBufferIndex(g_d3d12.swapchain);
-    /* Carry the fence target forward so d3d12_wait_frame guards the slot. */
-    g_d3d12.fence_values[g_d3d12.frame_index] = g_d3d12.fence_values[g_d3d12.frame_index];
-    d3d12_wait_frame(g_d3d12.frame_index);
+    d3d12_wait_value(g_d3d12.fence_values[g_d3d12.frame_index]);
+    if (diag) { d3d12_diag("present[%d] done, next idx=%u", s_pdiag, g_d3d12.frame_index); s_pdiag++; }
 }
 
 /* ---- descriptor-handle helpers (aggregate-return -> raw vtable) --------- */
@@ -570,6 +580,7 @@ static void d3d12_bind_and_draw(D3D_PRIMITIVE_TOPOLOGY topo, int topo_type,
 
     if (!g_d3d12.frame_open) d3d12_frame_begin();
     if (!tex) return;
+    d3d12_flush_uploads();   /* make any pending texture uploads GPU-resident first */
     pso = d3d12_get_pso(s_cur_vs, ps, blend, ds, raster, topo_type);
     if (!pso) return;
 
@@ -619,6 +630,7 @@ static void d3d12_fullscreen_blit(BackendTexture *src)
     UINT slot;
 
     if (!src || !src->res || !s_fsquad_pso) return;
+    d3d12_flush_uploads();   /* the surface texture was just FlushDirty'd -> make it resident */
 
     heaps[0] = s_srv_ring; heaps[1] = s_sampler_heap;
     ID3D12GraphicsCommandList_SetDescriptorHeaps(cl, 2, heaps);
@@ -669,19 +681,45 @@ static BackendConstBuffer *d3d12_cb_create(UINT size)
 
 /* ---- textures ---------------------------------------------------------- */
 
-static ID3D12GraphicsCommandList *d3d12_copy_begin(void)
+/* Batched texture uploader: record every texture copy on ONE persistent copy
+ * list and keep its staging buffers alive; flush (execute + single wait + free
+ * staging) is deferred to just-before-use (draw/blit) or a size threshold,
+ * instead of a full GPU stall per texture -- otherwise frontend asset load,
+ * which uploads hundreds of textures, crawls at <1 fps. */
+static int              s_copy_open;
+static ID3D12Resource **s_up_staging;
+static int              s_up_count, s_up_cap;
+static UINT64           s_up_bytes;
+
+static void d3d12_copy_ensure(void)
 {
-    ID3D12CommandAllocator_Reset(s_copy_alloc);
-    ID3D12GraphicsCommandList_Reset(s_copy_list, s_copy_alloc, NULL);
-    return s_copy_list;
+    if (!s_copy_open) {
+        ID3D12CommandAllocator_Reset(s_copy_alloc);
+        ID3D12GraphicsCommandList_Reset(s_copy_list, s_copy_alloc, NULL);
+        s_copy_open = 1;
+    }
 }
-static void d3d12_copy_flush(void)
+static void d3d12_flush_uploads(void)
 {
+    int i;
     ID3D12CommandList *lists[1];
+    if (!s_copy_open) return;
     ID3D12GraphicsCommandList_Close(s_copy_list);
     lists[0] = (ID3D12CommandList *)s_copy_list;
     ID3D12CommandQueue_ExecuteCommandLists(g_d3d12.queue, 1, lists);
     d3d12_wait_idle();
+    for (i = 0; i < s_up_count; i++) if (s_up_staging[i]) ID3D12Resource_Release(s_up_staging[i]);
+    s_up_count = 0; s_up_bytes = 0; s_copy_open = 0;
+}
+static void d3d12_up_track(ID3D12Resource *st, UINT64 bytes)
+{
+    if (s_up_count >= s_up_cap) {
+        int nc = s_up_cap ? s_up_cap * 2 : 128;
+        ID3D12Resource **n = (ID3D12Resource **)realloc(s_up_staging, (size_t)nc * sizeof(*n));
+        if (!n) { ID3D12Resource_Release(st); return; }  /* drop (leak-safe) on OOM */
+        s_up_staging = n; s_up_cap = nc;
+    }
+    s_up_staging[s_up_count++] = st; s_up_bytes += bytes;
 }
 
 /* Create a DEFAULT-heap 2D texture + its SRV in the staging heap (permanent
@@ -769,9 +807,11 @@ static void d3d12_tex_upload(BackendTexture *bt, const void *px, UINT bytes_per_
     (void)bytes_per_px;
 
     {
-        ID3D12GraphicsCommandList *cl = d3d12_copy_begin();
+        ID3D12GraphicsCommandList *cl;
         D3D12_TEXTURE_COPY_LOCATION dst, src;
         D3D12_RESOURCE_BARRIER b;
+        d3d12_copy_ensure();
+        cl = s_copy_list;
         ZeroMemory(&dst, sizeof(dst)); dst.pResource=bt->res; dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex=0;
         ZeroMemory(&src, sizeof(src)); src.pResource=staging; src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; src.PlacedFootprint=fp;
         ZeroMemory(&b, sizeof(b)); b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -781,10 +821,11 @@ static void d3d12_tex_upload(BackendTexture *bt, const void *px, UINT bytes_per_
         ID3D12GraphicsCommandList_CopyTextureRegion(cl, &dst, 0, 0, 0, &src, NULL);
         b.Transition.StateBefore=D3D12_RESOURCE_STATE_COPY_DEST; b.Transition.StateAfter=D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         ID3D12GraphicsCommandList_ResourceBarrier(cl, 1, &b);
-        d3d12_copy_flush();
-        bt->rstate = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        bt->rstate = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;   /* effective after flush */
+        d3d12_up_track(staging, total);                            /* keep staging alive until flush */
     }
-    ID3D12Resource_Release(staging);
+    /* Bound the batch so staging memory doesn't grow without limit during load. */
+    if (s_up_count >= 128 || s_up_bytes > (96ull << 20)) d3d12_flush_uploads();
 }
 
 /* ---- render-core init / teardown --------------------------------------- */
@@ -989,6 +1030,7 @@ static int d3d12_render_core_init(int width, int height)
     s_white_tex = d3d12_tex_create(1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, 0);
     if (!s_white_tex) return 0;
     { unsigned int wp = 0xFFFFFFFFu; d3d12_tex_upload(s_white_tex, &wp, 4, 4); }
+    d3d12_flush_uploads();
 
     /* Warm-up PSO: exercises get_pso + validates root-sig/shader/layout wiring
      * against the debug layer at init (before any frame). */
@@ -1025,6 +1067,8 @@ static int d3d12_render_core_init(int width, int height)
 static void d3d12_render_core_shutdown(void)
 {
     int i;
+    d3d12_flush_uploads();
+    free(s_up_staging); s_up_staging = NULL; s_up_cap = 0;
     if (s_fsquad_pso)  { ID3D12PipelineState_Release(s_fsquad_pso); s_fsquad_pso = NULL; }
     if (s_white_tex)   { if (s_white_tex->res) ID3D12Resource_Release(s_white_tex->res); free(s_white_tex); s_white_tex = NULL; }
     if (s_copy_list)   { ID3D12GraphicsCommandList_Release(s_copy_list); s_copy_list = NULL; }
@@ -1303,6 +1347,11 @@ void Backend_CompositeAndPresent(WrapperSurface *rt, RECT *s, RECT *d)
     if (!g_d3d12.device || !g_d3d12.swapchain || g_backend.device_removed) return;
     if (!g_d3d12.frame_open) d3d12_frame_begin();
 
+    {
+        static int s_cdiag = 0;
+        if (s_cdiag < 4) { d3d12_diag("composite[%d] rt=%p bt=%p dirty=%d scene=%d",
+            s_cdiag++, (void*)rt, rt?(void*)rt->bt:NULL, rt?rt->dirty:-1, g_backend.scene_rendered); }
+    }
     if (rt && !g_backend.scene_rendered) {
         if (rt->dirty) WrapperSurface_FlushDirty(rt);   /* sys_buffer -> rt->bt (BGRA) */
         if (rt->bt) d3d12_fullscreen_blit(rt->bt);
