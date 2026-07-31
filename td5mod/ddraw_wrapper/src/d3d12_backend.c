@@ -905,19 +905,29 @@ static void d3d12_bind_and_draw(D3D_PRIMITIVE_TOPOLOGY topo, int topo_type,
     if (!tex) return;
     s_dbg_draws++;
     d3d12_flush_uploads();   /* make any pending texture uploads GPU-resident first */
+    /* Fold the CURRENT render state into a FRESH per-draw FogCB ring slice, so
+     * every draw's alpha-test/fog params are distinct (see Backend_UpdateFogCB).
+     * The Plat draw path doesn't call this itself; doing it here covers all four
+     * bind_and_draw callers uniformly. */
+    Backend_UpdateFogCB();
     pso = d3d12_get_pso(s_cur_vs, ps, blend, ds, raster, topo_type);
     if (!pso) return;
 
     /* Invariant across the frame's draws -> bind once (heaps + root sig + the
-     * b0/b1 CBVs, whose GPU-VA is fixed; their CONTENTS are updated in place via
-     * the mapped upload CB). */
+     * viewport CBV b0-vertex, constant per frame). The FogCB (b0 pixel) is bound
+     * PER DRAW below from its per-draw ring slice -- binding it once would alias
+     * every draw to the frame's last-written fog/alpha-test params. */
     if (!s_frame_static_bound) {
         heaps[0] = s_srv_ring; heaps[1] = s_sampler_heap;
         ID3D12GraphicsCommandList_SetDescriptorHeaps(cl, 2, heaps);
         ID3D12GraphicsCommandList_SetGraphicsRootSignature(cl, s_root_sig);
         ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(cl, 0, ID3D12Resource_GetGPUVirtualAddress(s_viewport_cb->res));
-        ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(cl, 1, ID3D12Resource_GetGPUVirtualAddress(s_fog_cb->res));
         s_frame_static_bound = 1;
+    }
+    {   /* per-draw FogCB (b0 pixel): prefer the ring slice, fall back to ->res */
+        D3D12_GPU_VIRTUAL_ADDRESS fogva = s_fog_cb->gpu_va ? s_fog_cb->gpu_va
+            : ID3D12Resource_GetGPUVirtualAddress(s_fog_cb->res);
+        ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(cl, 1, fogva);
     }
     if (pso != s_last_pso) { ID3D12GraphicsCommandList_SetPipelineState(cl, pso); s_last_pso = pso; }
     if (s_cur_cb1) {
@@ -2166,8 +2176,7 @@ void Backend_DrawPrimitive(DWORD prim, UINT stride, UINT base_vertex, UINT vert_
     const RenderStateCache *s = &g_backend.state;
     int tt; D3D_PRIMITIVE_TOPOLOGY topo;
     if (!g_d3d12.device) return;
-    Backend_UpdateFogCB();   /* per-draw alpha-test/fog */
-    topo = d3d12_map_topo(prim, &tt);
+    topo = d3d12_map_topo(prim, &tt);   /* FogCB refreshed per-draw inside bind_and_draw */
     d3d12_bind_and_draw(topo, tt, d3d12_sel_blend(s), d3d12_sel_ds(s), s->polygon_offset ? 1 : 0,
                         d3d12_sel_ps(s), d3d12_sel_samp(s), stride, 0, base_vertex, 0, vert_count);
 }
@@ -2177,8 +2186,7 @@ void Backend_DrawIndexedPrimitive(DWORD prim, UINT stride, UINT base_vertex, UIN
     int tt; D3D_PRIMITIVE_TOPOLOGY topo;
     (void)vert_count;
     if (!g_d3d12.device) return;
-    Backend_UpdateFogCB();
-    topo = d3d12_map_topo(prim, &tt);
+    topo = d3d12_map_topo(prim, &tt);   /* FogCB refreshed per-draw inside bind_and_draw */
     d3d12_bind_and_draw(topo, tt, d3d12_sel_blend(s), d3d12_sel_ds(s), s->polygon_offset ? 1 : 0,
                         d3d12_sel_ps(s), d3d12_sel_samp(s), stride, 1, base_vertex, start_index, index_count);
 }
@@ -2594,7 +2602,13 @@ void Backend_UpdateFogCB(void)
     }
     fog.alphaTestEnabled = st->alpha_test_enable;
     fog.alphaRef = (float)st->alpha_ref / 255.0f;
-    memcpy(s_fog_cb->mapped, &fog, sizeof(fog));
+    memcpy(s_fog_cb->mapped, &fog, sizeof(fog));   /* persistent copy -> ->res fallback + fullscreen passes */
+    /* Per-draw ring slice so each draw's alpha-test/fog params are DISTINCT.
+     * The FogCB (b0 pixel) was bound once per frame to the persistent ->res, so
+     * every draw read the frame's LAST-written params -> a later draw's higher
+     * alphaRef discarded earlier translucent HUD (the minimap green grid, LED
+     * off-segments). Same flip-model aliasing the b1 SDF CB hit; same cure. */
+    s_fog_cb->gpu_va = g_d3d12.frame_open ? d3d12_ring_cb(&fog, sizeof(fog)) : 0;
 }
 
 void Backend_UpdateViewportCB(float w, float h)
