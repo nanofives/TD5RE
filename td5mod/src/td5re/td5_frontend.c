@@ -9601,11 +9601,17 @@ void td5_frontend_render_ui_rects(void) {
      * OR for the first few frames after a screen entry — to flush any stale
      * RACE frame out of every flip-model swapchain buffer before relying on the
      * BG quad's persistence. Without the latter, the race bleeds through the
-     * results/menu screen at race end (semi-transparent transition). The BG quad
-     * below repaints over this clear in the same frame, so a full-canvas BG shows
-     * no black flash. */
-    if (!has_full_bg || s_fe_entry_clear_frames > 0) {
-        td5_plat_render_clear(has_full_bg ? 0xFF000000u : 0xFF101020u);
+     * results/menu screen at race end (semi-transparent transition).
+     * [R11 2026-07-31] When a full-canvas BG IS loaded, DON'T force the black
+     * entry-clear: it was meant to flush stale RACE frames from the flip-model
+     * buffers, but the opaque full-canvas BG quad already repaints every pixel
+     * each frame and flushes them over the same window -- and on a menu->menu
+     * transition (no race to flush) the black clear on a frame where the incoming
+     * BG isn't drawn yet is exactly the one-frame BLACK BLINK between screens.
+     * So only entry-clear (to the dim panel colour, never black) when there is NO
+     * full-canvas BG to cover the buffer. */
+    if (!has_full_bg) {
+        td5_plat_render_clear(0xFF101020u);
     }
     if (s_fe_entry_clear_frames > 0) s_fe_entry_clear_frames--;
     td5_plat_render_begin_scene();
