@@ -505,18 +505,24 @@ static void plat_present_swapchain(int sync)
 #ifndef TD5RE_RELEASE
     /* Dev fault injection: TD5RE_FORCE_DEVICE_LOST=N simulates a
      * DEVICE_REMOVED on present frame N to exercise the survival path with no
-     * real GPU hang. Compiled out of release. */
+     * real GPU hang. TD5RE_FORCE_DEVICE_LOST_PERIOD=P re-arms every P frames
+     * afterward (leak-soak: exercise N recreations in one process). Compiled
+     * out of release. */
     {
         static int s_fdl_trip = -2;      /* -2 = unread env, -1 = disabled */
+        static int s_fdl_period = 0;     /* 0 = one-shot */
         static unsigned s_fdl_frame = 0;
         if (s_fdl_trip == -2) {
             const char *e = getenv("TD5RE_FORCE_DEVICE_LOST");
+            const char *p = getenv("TD5RE_FORCE_DEVICE_LOST_PERIOD");
             s_fdl_trip = (e && e[0]) ? atoi(e) : -1;
+            s_fdl_period = (p && p[0]) ? atoi(p) : 0;
         }
         if (s_fdl_trip >= 0 && (int)(s_fdl_frame++) >= s_fdl_trip) {
             Backend_NoteDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED,
                                       "td5_plat_present/forced-test");
-            s_fdl_trip = -1;   /* trip once — let recovery bring the device back */
+            /* Re-arm periodically, else one-shot. */
+            s_fdl_trip = (s_fdl_period > 0) ? (int)s_fdl_frame + s_fdl_period : -1;
             return;
         }
     }
