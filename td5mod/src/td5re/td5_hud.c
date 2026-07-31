@@ -7774,7 +7774,13 @@ void td5_hud_init_pause_menu(int page_index)
             continue;
         }
 
-        int alignment = *(int *)((uint8_t *)s_pause_menu_strings + string_offset + 4);
+        /* Alignment is the pointer slot right after the string. Read it as an
+         * ARRAY ELEMENT, not raw base+offset+4 bytes: the old `+4` assumed 4-byte
+         * pointers and on the x64 build read the (zero) high half of a pointer, so
+         * every row came back alignment 0 = left-justified (the align-2 rows
+         * CONTINUE/RESTART/QUIT/EXIT stopped centring). string_offset/4 indexes the
+         * string element; +1 is its alignment; both scale with sizeof(ptr). */
+        int alignment = (int)(intptr_t)s_pause_menu_strings[string_offset / 4 + 1];
         /* [I18N] Translate AFTER the English-keyed gating strcmps above. The
          * PAUSETXT bitmap atlas + pause SDF font are ASCII-only, so pause-menu
          * catalog entries deliberately avoid accents ("SALIR AL MENU"). */
