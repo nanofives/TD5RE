@@ -4,6 +4,12 @@ setlocal
 set FXC="C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x86\fxc.exe"
 set OPTS=/nologo /O2
 
+REM DXR shader compiler (DXIL). The x64 dxc from the same Win10 SDK; ships
+REM dxil.dll alongside so lib_6_3 blobs are signed (unsigned DXIL is rejected by
+REM CreateStateObject). If you relocate the SDK, drop a dxc release into
+REM ..\..\tools\dxc\ and repoint DXC here.
+set DXC="C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\dxc.exe"
+
 echo Compiling shaders...
 
 %FXC% %OPTS% /T vs_4_0 /E main /Fh vs_pretransformed_bytes.h /Vn g_vs_pretransformed vs_pretransformed.hlsl
@@ -111,5 +117,16 @@ for %%S in (ps_modulate ps_modulate_alpha ps_modulate_g ps_modulate_alpha_g ps_d
     if errorlevel 1 (echo FAILED: %%S ^(sm5^) && exit /b 1)
 )
 echo   SM5.0 variants OK
+
+REM ===========================================================================
+REM [RT lighting] DXR shader library -> DXIL. ONE lib_6_3 blob containing every
+REM ray-tracing entry point (rgen_smoke in Phase 0; rgen_debug/shadow/refl +
+REM miss/chit/anyhit added by later phases), emitted as a BYTE array header
+REM (g_rt_pipeline) that d3d12_dxr.c #includes. dxc requires <windows.h> types;
+REM the header is pure data (no MinGW linking implications).
+REM ===========================================================================
+%DXC% -nologo -T lib_6_3 -Fh rt_pipeline_bytes.h -Vn g_rt_pipeline rt_pipeline.hlsl
+if errorlevel 1 (echo FAILED: rt_pipeline ^(dxil lib_6_3^) && exit /b 1)
+echo   rt_pipeline (DXIL lib_6_3) OK
 
 echo All shaders compiled successfully.

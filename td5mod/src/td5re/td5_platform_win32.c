@@ -3875,6 +3875,12 @@ void td5_plat_render_set_gbuffer(int on)
     Backend_SetGBufferEnabled(on);
 }
 
+/* [RT lighting] DXR capability passthrough. */
+int td5_plat_rt_available(void)
+{
+    return Backend_RTAvailable();
+}
+
 void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
                                   float focal, float center_x, float center_y,
                                   float vp_x, float vp_y,

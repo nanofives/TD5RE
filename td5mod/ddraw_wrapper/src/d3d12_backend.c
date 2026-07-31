@@ -25,11 +25,14 @@
 #include "wrapper.h"          /* g_backend, Backend typedefs, Win32 */
 #include <d3d12.h>
 #include <dxgi1_6.h>
+#include "d3d12_backend_priv.h"   /* DXR module seam (d3d12_dxr.c) */
 
 #define D3D12_FRAME_COUNT 2
 
 typedef struct {
     ID3D12Device              *device;
+    ID3D12Device5             *device5;      /* DXR (NULL when unavailable)      */
+    ID3D12GraphicsCommandList4*list4;        /* DXR interface of `list`          */
     ID3D12CommandQueue        *queue;
     IDXGISwapChain3           *swapchain;
     ID3D12CommandAllocator    *allocators[D3D12_FRAME_COUNT];
@@ -652,6 +655,11 @@ static void d3d12_frame_present(int sync)
     if (diag) { d3d12_diag("present[%d] enter idx=%u open=%d", s_pdiag, idx, g_d3d12.frame_open); }
 
     if (!g_d3d12.frame_open) d3d12_frame_begin();  /* ensure something to present */
+
+    /* RT smoke (Phase 0): overwrite the frame with the DispatchRays gradient.
+     * Gated by TD5RE_RT_SMOKE; proves the DXR pipeline end to end via framedump. */
+    if (g_d3d12.device5 && d3d12_dxr_smoke_enabled())
+        d3d12_dxr_smoke_blit();
 
     /* Framedump capture (dev): copy this frame BEFORE the flip, else read it back
      * after present + wait. Otherwise plain RT->PRESENT. */
@@ -1865,6 +1873,26 @@ int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed
     if (Backend_D3DDebugEnabled())
         ID3D12Device_QueryInterface(g_d3d12.device, &IID_ID3D12InfoQueue, (void **)&g_d3d12.info_queue);
 
+    /* DXR capability (ray-traced lighting HIGH). Query OPTIONS5 tier, and only
+     * if >= 1.0 QI ID3D12Device5. TD5RE_RT_DISABLE=1 forces caps off entirely.
+     * device5 stays NULL on lack of DXR -> every RT entry point no-ops. */
+    {
+        const char *dis = getenv("TD5RE_RT_DISABLE");
+        int rt_disabled = (dis && dis[0] && dis[0] != '0');
+        if (!rt_disabled) {
+            D3D12_FEATURE_DATA_D3D12_OPTIONS5 o5;
+            ZeroMemory(&o5, sizeof(o5));
+            if (SUCCEEDED(ID3D12Device_CheckFeatureSupport(g_d3d12.device, D3D12_FEATURE_D3D12_OPTIONS5, &o5, sizeof(o5)))
+                && o5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_0) {
+                if (FAILED(ID3D12Device_QueryInterface(g_d3d12.device, &IID_ID3D12Device5, (void **)&g_d3d12.device5)))
+                    g_d3d12.device5 = NULL;
+            }
+            d3d12_diag("DXR: tier=%d device5=%p", (int)o5.RaytracingTier, (void *)g_d3d12.device5);
+        } else {
+            d3d12_diag("DXR: disabled by TD5RE_RT_DISABLE");
+        }
+    }
+
     /* Direct command queue. */
     ZeroMemory(&qd, sizeof(qd));
     qd.Type  = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -1920,6 +1948,13 @@ int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed
     if (FAILED(hr)) { WRAPPER_LOG("D3D12: CreateCommandList 0x%08lX", hr); goto fail; }
     ID3D12GraphicsCommandList_Close(g_d3d12.list);
 
+    /* DXR command-list interface (only if the device supports DXR). */
+    if (g_d3d12.device5) {
+        if (FAILED(ID3D12GraphicsCommandList_QueryInterface(g_d3d12.list, &IID_ID3D12GraphicsCommandList4, (void **)&g_d3d12.list4)))
+            g_d3d12.list4 = NULL;
+    }
+    d3d12_dxr_on_device(g_d3d12.device5, g_d3d12.list4);
+
     /* Fence + event. */
     hr = ID3D12Device_CreateFence(g_d3d12.device, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence, (void **)&g_d3d12.fence);
     if (FAILED(hr)) { WRAPPER_LOG("D3D12: CreateFence 0x%08lX", hr); goto fail; }
@@ -1969,10 +2004,13 @@ static void d3d12_release_all(int wait_gpu)
 {
     UINT i;
     if (wait_gpu) d3d12_wait_idle();
+    d3d12_dxr_shutdown();          /* release all DXR objects before the device  */
     d3d12_render_core_shutdown();  /* its final flush_uploads may retire staging + signal */
     if (wait_gpu) d3d12_wait_idle();  /* ensure that last copy fence is passed */
     d3d12_flush_retired();         /* free every deferred resource (no live refs) */
+    if (g_d3d12.list4)    ID3D12GraphicsCommandList4_Release(g_d3d12.list4);
     if (g_d3d12.list)     ID3D12GraphicsCommandList_Release(g_d3d12.list);
+    if (g_d3d12.device5)  ID3D12Device5_Release(g_d3d12.device5);
     for (i = 0; i < D3D12_FRAME_COUNT; i++) {
         if (g_d3d12.backbuffers[i]) ID3D12Resource_Release(g_d3d12.backbuffers[i]);
         if (g_d3d12.allocators[i])  ID3D12CommandAllocator_Release(g_d3d12.allocators[i]);
@@ -2059,6 +2097,40 @@ void Backend_CompositeAndPresent(WrapperSurface *rt, RECT *s, RECT *d)
 }
 
 HWND Backend_GetDisplayWindow(void) { return s_display_hwnd ? s_display_hwnd : g_backend.hwnd; }
+
+/* ---- DXR seam (d3d12_backend_priv.h): expose the minimal frame environment +
+ *      helpers the RT module needs, without exporting the static g_d3d12. ----- */
+
+int Backend_RTAvailable(void) { return g_d3d12.device5 != NULL; }
+
+void d3d12_priv_env(d3d12_dxr_env *out)
+{
+    if (!out) return;
+    ZeroMemory(out, sizeof(*out));
+    out->device5     = g_d3d12.device5;
+    out->list        = g_d3d12.list;
+    out->list4       = g_d3d12.list4;
+    out->frame_index = g_d3d12.frame_index;
+    out->frame_open  = g_d3d12.frame_open;
+    out->width       = g_backend.width;
+    out->height      = g_backend.height;
+    if (g_d3d12.frame_index < D3D12_FRAME_COUNT)
+        out->backbuffer = g_d3d12.backbuffers[g_d3d12.frame_index];
+    out->rtv = d3d12_rtv_handle(g_d3d12.frame_index);
+}
+
+void d3d12_priv_frame_begin(void) { d3d12_frame_begin(); }
+void d3d12_priv_retire(void *res) { d3d12_retire(res); }
+D3D12_GPU_VIRTUAL_ADDRESS d3d12_priv_ring_cb(const void *data, UINT size) { return d3d12_ring_cb(data, size); }
+
+void d3d12_priv_fullscreen_shaders(const void **vs, SIZE_T *vs_len,
+                                   const void **ps, SIZE_T *ps_len)
+{
+    if (vs)     *vs     = g_vs_fullscreen_50;
+    if (vs_len) *vs_len = sizeof(g_vs_fullscreen_50);
+    if (ps)     *ps     = g_ps_composite_50;
+    if (ps_len) *ps_len = sizeof(g_ps_composite_50);
+}
 
 /* Framedump / render-golden capture: return the most recent PRE-FLIP frame
  * captured by d3d12_frame_present (flip-discard makes a post-present readback

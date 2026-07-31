@@ -12,4 +12,5 @@ device3.c
 viewport3.c
 texture2.c
 d3d12_backend.c
+d3d12_dxr.c
 png_loader.c

@@ -11,7 +11,7 @@ plumbing (SBT, state object, root signatures) is decided once, up front.
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| 0 | DXR foundation (dxc, Device5, smoke dispatch) | ⬜ not started |
+| 0 | DXR foundation (dxc, Device5, smoke dispatch) | ✅ done (branch rt-lighting) |
 | 1 | World-space geometry feed + BLAS/TLAS + debug view | ⬜ |
 | 2a | G-buffer MRT wiring in D3D12 | ⬜ |
 | 2b | RT shadows (sun + dynamic lights), blob-shadow kill | ⬜ |
@@ -20,6 +20,52 @@ plumbing (SBT, state object, root signatures) is decided once, up front.
 
 Append an **as-built note** under this table after each phase (deviations, measurements,
 gotchas found).
+
+### As-built — Phase 0 (2026-07-31, branch `rt-lighting`)
+
+**Preconditions verified:** dxc.exe present at `Windows Kits\10\bin\10.0.26100.0\x64\`
+(dxc 1.8, dxil.dll alongside → signed DXIL); bundled MinGW `d3d12.h` declares
+`ID3D12Device5`, `ID3D12GraphicsCommandList4`, `D3D12_DISPATCH_RAYS_DESC`,
+`BuildRaytracingAccelerationStructure`, OPTIONS5, `CreateStateObject`,
+`SetPipelineState1`; IIDs `IID_ID3D12Device5` / `IID_ID3D12GraphicsCommandList4` /
+`IID_ID3D12StateObject` / `IID_ID3D12StateObjectProperties` are all defined in
+`libdxguid.a` (already in `link_libs.txt`) → **no local `DEFINE_GUID` needed**.
+
+**Built:** `rt_pipeline.hlsl` (`rgen_smoke` only) → DXIL via a new dxc `lib_6_3`
+step in `compile_shaders.bat`, emitted as `const unsigned char g_rt_pipeline[]`
+(compiles clean under MinGW). New `d3d12_dxr.c` (wrapper-internal DXR module) +
+`d3d12_backend_priv.h` (accessor seam — no exported globals). Backend now QIs
+`ID3D12Device5` (after an OPTIONS5 tier≥1.0 check, gated by `TD5RE_RT_DISABLE`) and
+`ID3D12GraphicsCommandList4`; both may be NULL → every RT entry point no-ops.
+Game side: `td5_rt.c/.h` (capability + activation predicates) +
+`td5_plat_rt_available` bridge + `Backend_RTAvailable`.
+
+**Frozen bits implemented:** global RS = b0 CBV + u0 UAV table + static LINEAR-wrap
+sampler; state object = DXIL_LIBRARY + SHADER_CONFIG{32,8} + PIPELINE_CONFIG{depth 1}
++ GLOBAL_ROOT_SIGNATURE; SBT = one committed UPLOAD buffer, one 32-byte raygen
+record at offset 0; owned shader-visible CBV/SRV/UAV heap (8 slots: [0]=output UAV,
+[1]=blit SRV). `SetPipelineState1` + `DispatchRays` over the full frame.
+
+**Deviations:** (1) smoke output UAV texture is `R8G8B8A8_UNORM` (typed-UAV safe;
+BGRA8 typed UAV stores are not guaranteed) → the gradient's channels are swapped
+when blitted to the BGRA backbuffer; cosmetic only, gradient still proves the path.
+(2) The smoke blit is triggered inside the wrapper present path (gated by
+`TD5RE_RT_SMOKE`) rather than driven by the game — keeps Phase 0 self-contained; the
+capability plumbing (`Backend_RTAvailable`→`td5_plat_rt_available`→`td5_rt_available`)
+is still wired for later phases. (3) The blit reuses the backend's fullscreen VS +
+composite PS via `d3d12_priv_fullscreen_shaders()` (external-linkage arrays live in
+one TU); dxr owns its own tiny blit RS + PSO + heap (never touches the backend heap).
+
+**Gate results:** `build_all.bat` clean (dev + release), lint OK
+(extern_in_c=3/baseline 3, no new warnings); selftest smoke **15/15 PASS**; golden
+traces **54 PASS / 0 FAIL** (7 module hashes match on moscow/pelton/drag/split);
+`TD5RE_RT_SMOKE=1` framedump = correct UV gradient; `TD5RE_RT_DISABLE=1` = normal
+MAIN MENU (smoke no-ops, `device5` NULL); D3D12 debug layer clean (empty
+`d3d12_debug.log`). **Gotcha:** golden traces first FAILed on moscow/pelton/split
+because the working-tree `td5re.ini` carried the user's uncommitted `Difficulty=2→1`
+(+ DragLength/CarDamage) edits — a false-fail; restoring the committed ini for the
+run gave 54/0. Always `git checkout td5re.ini` (or diff) before trusting a golden
+FAIL. drag PASSed throughout (its golden config is Difficulty-independent).
 
 ## Handoff prompt (what launched this execution)
 

@@ -791,6 +791,10 @@ void td5_plat_render_apply_ssr(const float cam_pos[3], const float basis9[9],
  * race frame BEFORE the world pass. */
 void td5_plat_render_set_gbuffer(int on);
 
+/* [RT lighting] 1 when the backend reports DirectX Raytracing available
+ * (Backend_RTAvailable). The game gates LIGHTING QUALITY: HIGH on this. */
+int td5_plat_rt_available(void);
+
 /** Upload a texture page to the GPU. Returns 0 on failure. */
 int td5_plat_render_upload_texture(int page_index, const void *pixels, int width, int height, int format);
 

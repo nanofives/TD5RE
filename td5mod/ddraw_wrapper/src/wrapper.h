@@ -273,6 +273,12 @@ void Backend_ApplyShadowPass(const ShadowCB *cb);
  * translucent VFX/HUD. No-op if ps_ssr/depth_srv/gbuffer_srv are NULL. */
 void Backend_ApplySSRPass(const SSRCB *cb);
 
+/* [RT lighting] 1 when the device supports DirectX Raytracing (Device5 QI'd,
+ * OPTIONS5 tier >= 1.0, TD5RE_RT_DISABLE not set). 0 after device-lost until the
+ * device is recreated + re-queried. The game gates LIGHTING QUALITY: HIGH on
+ * this (auto-fallback to LOW when 0). See RT_LIGHTING_PLAN.md. */
+int Backend_RTAvailable(void);
+
 /* [lighting rework P0] Per-frame G-buffer gate. on=1: (re)create the G-buffer
  * at render-target size if needed, clear it (matid 0 = "no data"), and let the
  * per-draw state machinery bind it as RT1 + swap in the ps_*_g MRT shader
