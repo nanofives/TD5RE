@@ -1685,6 +1685,38 @@ static LRESULT CALLBACK D3D12DisplayWindowProc(HWND hwnd, UINT msg, WPARAM wp, L
         if (GetClientRect(hwnd, &rc) && rc.right > 0 && rc.bottom > 0)
             Backend_Reset((int)rc.right, (int)rc.bottom, g_backend.bpp, g_backend.windowed);
     }
+    /* Alt+Enter -> toggle BORDERLESS fullscreen. D3D11 let DXGI auto-handle
+     * Alt+Enter (exclusive fullscreen); we set DXGI_MWA_NO_ALT_ENTER, so drive a
+     * borderless toggle ourselves: style change + SetWindowPos to the monitor
+     * rect fires WM_SIZE -> Backend_Reset resizes the swapchain to match. */
+    if (msg == WM_SYSKEYDOWN && wp == VK_RETURN && !(lp & (1 << 30)) /* ignore autorepeat */) {
+        static int  s_borderless = 0;
+        static RECT s_saved_rect;
+        static LONG s_saved_style;
+        if (!s_borderless) {
+            MONITORINFO mi; HMONITOR mon;
+            GetWindowRect(hwnd, &s_saved_rect);
+            s_saved_style = GetWindowLongA(hwnd, GWL_STYLE);
+            mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            mi.cbSize = sizeof(mi);
+            if (GetMonitorInfoA(mon, &mi)) {
+                SetWindowLongA(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+                SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                             mi.rcMonitor.right - mi.rcMonitor.left,
+                             mi.rcMonitor.bottom - mi.rcMonitor.top,
+                             SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+                s_borderless = 1;
+            }
+        } else {
+            SetWindowLongA(hwnd, GWL_STYLE, s_saved_style);
+            SetWindowPos(hwnd, HWND_NOTOPMOST, s_saved_rect.left, s_saved_rect.top,
+                         s_saved_rect.right - s_saved_rect.left,
+                         s_saved_rect.bottom - s_saved_rect.top,
+                         SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+            s_borderless = 0;
+        }
+        return 0;
+    }
     return DefWindowProcA(hwnd, msg, wp, lp);
 }
 
