@@ -94,4 +94,22 @@ echo   ps_fx_decal OK
 if errorlevel 1 (echo FAILED: ps_fx_glow && exit /b 1)
 echo   ps_fx_glow OK
 
+REM ===========================================================================
+REM [D3D12 port] SM 5.0 variants for the D3D12 backend (DXBC <= SM5.1; no DXC/
+REM DXIL needed for raster parity). SEPARATE arrays (g_<name>_50 in
+REM <name>_bytes_50.h) so the D3D11 SM4.0 shaders above stay byte-for-byte
+REM untouched. Compiled from the SAME HLSL -- SM4->5 is a no-op transform
+REM (verified: identical instruction counts). The D3D12 backend includes the
+REM _50 headers; the D3D11 backend ignores them.
+REM ===========================================================================
+for %%S in (vs_pretransformed vs_fullscreen) do (
+    %FXC% %OPTS% /T vs_5_0 /E main /Fh %%S_bytes_50.h /Vn g_%%S_50 %%S.hlsl
+    if errorlevel 1 (echo FAILED: %%S ^(sm5^) && exit /b 1)
+)
+for %%S in (ps_modulate ps_modulate_alpha ps_modulate_g ps_modulate_alpha_g ps_decal ps_luminance_alpha ps_composite ps_light ps_shadow ps_ssr ps_msdf ps_roundrect ps_arrow ps_cursor ps_gauge ps_fx_smoke ps_fx_rain ps_fx_decal ps_fx_glow) do (
+    %FXC% %OPTS% /T ps_5_0 /E main /Fh %%S_bytes_50.h /Vn g_%%S_50 %%S.hlsl
+    if errorlevel 1 (echo FAILED: %%S ^(sm5^) && exit /b 1)
+)
+echo   SM5.0 variants OK
+
 echo All shaders compiled successfully.
