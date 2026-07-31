@@ -1684,6 +1684,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                 g_td5.track_index = f5_track;
                 dbglog("DEBUG: F5 pressed -- race start on track_index=%d", f5_track);
             }
+            /* Alt+Enter -> toggle windowed <-> borderless fullscreen, via the
+             * SAME platform path as the Graphics Options menu (the authoritative
+             * window-mode mechanism -- a swap-chain-side toggle fights the game's
+             * per-frame mode enforcement). Handled here (not dispatched) so no
+             * WM_SYSCHAR is generated -> no Windows "ding". */
+            if (msg.message == WM_SYSKEYDOWN && msg.wParam == VK_RETURN
+                    && !(msg.lParam & (1 << 30)) /* ignore key autorepeat */) {
+                int nm = (td5_plat_get_window_mode() == 2) ? 1 : 2;
+                g_td5.ini.window_mode = nm;
+                td5_plat_set_window_mode(nm);
+                continue;
+            }
             TranslateMessage(&msg);
             DispatchMessageA(&msg);
         }
