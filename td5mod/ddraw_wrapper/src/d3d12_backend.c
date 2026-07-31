@@ -557,6 +557,9 @@ static void d3d12_frame_begin(void)
     s_frame_static_bound = 0;
     s_last_pso  = NULL;
     s_last_topo = (D3D_PRIMITIVE_TOPOLOGY)-1;
+    /* A gpu_va from the PREVIOUS frame points into that frame's ring slot ->
+     * drop it; the draw path re-allocs from the persistent copy on first use. */
+    if (s_viewport_cb) s_viewport_cb->gpu_va = 0;
     g_d3d12.frame_open = 1;
 }
 
@@ -887,6 +890,8 @@ static D3D_PRIMITIVE_TOPOLOGY d3d12_map_topo(DWORD prim, int *topo_type)
     }
 }
 
+static D3D12_GPU_VIRTUAL_ADDRESS d3d12_ring_cb(const void *data, UINT size);
+
 /* Bind the full pipeline for one draw from the current state + stream cursor,
  * then issue Draw/DrawIndexed. Everything is (re)bound each draw -- D3D12 keeps
  * no cross-call state and the cost is trivial at frontend/HUD draw counts. */
@@ -913,16 +918,29 @@ static void d3d12_bind_and_draw(D3D_PRIMITIVE_TOPOLOGY topo, int topo_type,
     pso = d3d12_get_pso(s_cur_vs, ps, blend, ds, raster, topo_type);
     if (!pso) return;
 
-    /* Invariant across the frame's draws -> bind once (heaps + root sig + the
-     * viewport CBV b0-vertex, constant per frame). The FogCB (b0 pixel) is bound
-     * PER DRAW below from its per-draw ring slice -- binding it once would alias
-     * every draw to the frame's last-written fog/alpha-test params. */
+    /* Invariant across the frame's draws -> bind once (heaps + root sig). The
+     * FogCB (b0 pixel) is bound PER DRAW below from its per-draw ring slice --
+     * binding it once would alias every draw to the frame's last-written
+     * fog/alpha-test params. */
     if (!s_frame_static_bound) {
         heaps[0] = s_srv_ring; heaps[1] = s_sampler_heap;
         ID3D12GraphicsCommandList_SetDescriptorHeaps(cl, 2, heaps);
         ID3D12GraphicsCommandList_SetGraphicsRootSignature(cl, s_root_sig);
-        ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(cl, 0, ID3D12Resource_GetGPUVirtualAddress(s_viewport_cb->res));
         s_frame_static_bound = 1;
+    }
+    {   /* per-draw ViewportCB (b0 vertex): NOT constant per frame -- split-screen
+         * updates it per pane (960px) between full-screen passes (1920px), and a
+         * bind-once persistent buffer makes every draw read the frame's LAST
+         * write at execute time (same flip-model aliasing the FogCB/b1 SDF CBs
+         * hit; same cure). A 0 gpu_va means the update landed before the frame
+         * opened -> ring-alloc a slice from the persistent copy now. */
+        D3D12_GPU_VIRTUAL_ADDRESS vpva = s_viewport_cb->gpu_va;
+        if (!vpva) {
+            vpva = d3d12_ring_cb(s_viewport_cb->mapped, sizeof(ViewportCB));
+            if (vpva) s_viewport_cb->gpu_va = vpva;
+            else      vpva = ID3D12Resource_GetGPUVirtualAddress(s_viewport_cb->res);
+        }
+        ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(cl, 0, vpva);
     }
     {   /* per-draw FogCB (b0 pixel): prefer the ring slice, fall back to ->res */
         D3D12_GPU_VIRTUAL_ADDRESS fogva = s_fog_cb->gpu_va ? s_fog_cb->gpu_va
@@ -2633,5 +2651,11 @@ void Backend_UpdateViewportCB(float w, float h)
     if (!s_viewport_cb) return;
     ZeroMemory(&vp, sizeof(vp));
     vp.viewportWidth = w; vp.viewportHeight = h;
-    memcpy(s_viewport_cb->mapped, &vp, sizeof(vp));
+    memcpy(s_viewport_cb->mapped, &vp, sizeof(vp));   /* persistent copy -> ->res fallback */
+    /* Per-update ring slice so draws recorded between updates keep THIS value.
+     * Split-screen writes 1920 / 960 / 960 within one frame; with only the
+     * persistent buffer every draw read the last write (960) at execute time,
+     * shearing the full-screen backdrop passes. 0 = frame not open yet; the
+     * draw path lazily ring-allocs from the persistent copy. */
+    s_viewport_cb->gpu_va = g_d3d12.frame_open ? d3d12_ring_cb(&vp, sizeof(vp)) : 0;
 }
