@@ -48,6 +48,60 @@ typedef struct {
 
 static D3D12State g_d3d12;
 
+/* ---- plumbing that lived in the filtered-out d3d11 backend files -------- *
+ * g_wrapper_rec (deferred pane-record thread-local; the d3d12 backend does not
+ * use deferred contexts, so it stays NULL) + the WrapperClipper COM stub +
+ * Backend_CaptureDebug (d3d11 photo-capture, n/a here). Backend-agnostic;
+ * duplicated for the d3d12 lib -- becomes canonical when d3d11 is deleted in
+ * Phase 6. */
+__thread WrapperRecCtx *g_wrapper_rec = NULL;
+
+void Backend_CaptureDebug(unsigned *out) { (void)out; }
+
+typedef struct WrapperClipperVtbl WrapperClipperVtbl;
+struct WrapperClipperVtbl {
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(WrapperClipper *self, REFIID riid, void **ppv);
+    ULONG   (STDMETHODCALLTYPE *AddRef)(WrapperClipper *self);
+    ULONG   (STDMETHODCALLTYPE *Release)(WrapperClipper *self);
+    HRESULT (STDMETHODCALLTYPE *GetClipList)(WrapperClipper *self, RECT *rect, void *rgndata, DWORD *size);
+    HRESULT (STDMETHODCALLTYPE *GetHWnd)(WrapperClipper *self, HWND *hwnd);
+    HRESULT (STDMETHODCALLTYPE *Initialize)(WrapperClipper *self, void *ddraw, DWORD flags);
+    HRESULT (STDMETHODCALLTYPE *IsClipListChanged)(WrapperClipper *self, BOOL *changed);
+    HRESULT (STDMETHODCALLTYPE *SetClipList)(WrapperClipper *self, void *rgndata, DWORD flags);
+    HRESULT (STDMETHODCALLTYPE *SetHWnd)(WrapperClipper *self, DWORD flags, HWND hwnd);
+};
+static HRESULT STDMETHODCALLTYPE Clipper_QueryInterface(WrapperClipper *self, REFIID riid, void **ppv)
+{ (void)riid; if (!ppv) return E_POINTER; *ppv = self; InterlockedIncrement(&self->ref_count); return S_OK; }
+static ULONG STDMETHODCALLTYPE Clipper_AddRef(WrapperClipper *self)
+{ return (ULONG)InterlockedIncrement(&self->ref_count); }
+static ULONG STDMETHODCALLTYPE Clipper_Release(WrapperClipper *self)
+{ LONG ref = InterlockedDecrement(&self->ref_count); if (ref <= 0) { HeapFree(GetProcessHeap(), 0, self); return 0; } return (ULONG)ref; }
+static HRESULT STDMETHODCALLTYPE Clipper_GetClipList(WrapperClipper *self, RECT *rect, void *rgndata, DWORD *size)
+{ (void)self;(void)rect;(void)rgndata;(void)size; WRAPPER_STUB("Clipper::GetClipList"); }
+static HRESULT STDMETHODCALLTYPE Clipper_GetHWnd(WrapperClipper *self, HWND *hwnd)
+{ if (!hwnd) return E_POINTER; *hwnd = self->hwnd; return DD_OK; }
+static HRESULT STDMETHODCALLTYPE Clipper_Initialize(WrapperClipper *self, void *ddraw, DWORD flags)
+{ (void)self;(void)ddraw;(void)flags; WRAPPER_STUB("Clipper::Initialize"); }
+static HRESULT STDMETHODCALLTYPE Clipper_IsClipListChanged(WrapperClipper *self, BOOL *changed)
+{ (void)self; if (changed) *changed = FALSE; return DD_OK; }
+static HRESULT STDMETHODCALLTYPE Clipper_SetClipList(WrapperClipper *self, void *rgndata, DWORD flags)
+{ (void)self;(void)rgndata;(void)flags; WRAPPER_STUB("Clipper::SetClipList"); }
+static HRESULT STDMETHODCALLTYPE Clipper_SetHWnd(WrapperClipper *self, DWORD flags, HWND hwnd)
+{ (void)flags; self->hwnd = hwnd; return DD_OK; }
+static WrapperClipperVtbl s_clipper_vtbl = {
+    Clipper_QueryInterface, Clipper_AddRef, Clipper_Release, Clipper_GetClipList,
+    Clipper_GetHWnd, Clipper_Initialize, Clipper_IsClipListChanged, Clipper_SetClipList, Clipper_SetHWnd,
+};
+WrapperClipper* WrapperClipper_Create(void)
+{
+    WrapperClipper *clip = (WrapperClipper*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(WrapperClipper));
+    if (!clip) return NULL;
+    clip->vtbl = (void*)&s_clipper_vtbl;
+    clip->ref_count = 1;
+    clip->hwnd = NULL;
+    return clip;
+}
+
 /* ---- helpers ----------------------------------------------------------- */
 
 static D3D12_CPU_DESCRIPTOR_HANDLE d3d12_rtv_handle(UINT i)
@@ -208,8 +262,10 @@ int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed
         }
     }
 
-    hr = CreateDXGIFactory2(Backend_D3DDebugEnabled() ? DXGI_CREATE_FACTORY_DEBUG : 0,
-                            &IID_IDXGIFactory4, (void **)&factory);
+    /* NB: do NOT pass DXGI_CREATE_FACTORY_DEBUG -- it requires the DXGI debug
+     * layer (dxgidebug.dll), absent on some hosts, and fails factory creation.
+     * The D3D12 debug layer (EnableDebugLayer above) provides the validation. */
+    hr = CreateDXGIFactory2(0, &IID_IDXGIFactory4, (void **)&factory);
     if (FAILED(hr)) { WRAPPER_LOG("D3D12: CreateDXGIFactory2 0x%08lX", hr); return 0; }
 
     hr = D3D12CreateDevice(NULL, D3D_FEATURE_LEVEL_11_0, &IID_ID3D12Device, (void **)&g_d3d12.device);
