@@ -716,6 +716,20 @@ static void d3d12_fullscreen_blit(BackendTexture *src)
     if (!src || !src->res || !s_fsquad_pso) return;
     d3d12_flush_uploads();   /* the surface texture was just FlushDirty'd -> make it resident */
 
+    /* The source may be a render-target surface left in RENDER_TARGET state;
+     * it must be PIXEL_SHADER_RESOURCE to sample. Transition on the frame list. */
+    if (src->rstate != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) {
+        D3D12_RESOURCE_BARRIER tb;
+        ZeroMemory(&tb, sizeof(tb));
+        tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        tb.Transition.pResource = src->res;
+        tb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        tb.Transition.StateBefore = src->rstate;
+        tb.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        ID3D12GraphicsCommandList_ResourceBarrier(cl, 1, &tb);
+        src->rstate = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
+
     heaps[0] = s_srv_ring; heaps[1] = s_sampler_heap;
     ID3D12GraphicsCommandList_SetDescriptorHeaps(cl, 2, heaps);
     ID3D12GraphicsCommandList_SetGraphicsRootSignature(cl, s_root_sig);
@@ -913,6 +927,25 @@ static void d3d12_tex_upload(BackendTexture *bt, const void *px, UINT bytes_per_
 }
 
 /* ---- render-core init / teardown --------------------------------------- */
+
+/* Reuse *pbt if it already matches w/h/fmt (just re-upload); else create a fresh
+ * texture, release the old, and swap it in. `pixels` are tightly packed in `fmt`
+ * at `pitch` bytes/row (already converted -- raw upload, no format handling). */
+static void d3d12_bt_recreate_from_init(BackendTexture **pbt, UINT w, UINT h,
+                                        DXGI_FORMAT fmt, const void *pixels, UINT pitch)
+{
+    BackendTexture *dst = pbt ? *pbt : NULL;
+    if (dst && dst->res && dst->w == w && dst->h == h && dst->fmt == fmt) {
+        d3d12_tex_upload(dst, pixels, 4, pitch);   /* reuse: no descriptor-slot churn */
+        return;
+    }
+    {
+        BackendTexture *nbt = d3d12_tex_create(w, h, fmt, 0);
+        if (!nbt) return;
+        d3d12_tex_upload(nbt, pixels, 4, pitch);
+        if (pbt) { if (dst) Backend_TextureRelease(dst); *pbt = nbt; }
+    }
+}
 
 /* Flushed init-diagnostic sink (WRAPPER_LOG is not captured in the standalone
  * exe, so root-sig serialize errors etc. would otherwise be invisible). */
@@ -1439,9 +1472,13 @@ void Backend_CompositeAndPresent(WrapperSurface *rt, RECT *s, RECT *d)
             s_dbg_draws, s_dbg_clears, (void*)s_cur_tex); }
         s_cc++;
     }
-    if (rt && !g_backend.scene_rendered) {
+    /* Blit the render-target surface (frontend content composed there via
+     * Texture::Load / surface blits, or the 3D scene) to the swapchain. Matches
+     * the D3D11 backend, which blits rt->bt in BOTH the single- and two-layer
+     * paths (scene_rendered only gates the extra HUD-overlay layer). */
+    if (rt && rt->bt && rt->bt->res) {
         if (rt->dirty) WrapperSurface_FlushDirty(rt);   /* sys_buffer -> rt->bt (BGRA) */
-        if (rt->bt) d3d12_fullscreen_blit(rt->bt);
+        d3d12_fullscreen_blit(rt->bt);
     }
 
     Backend_CaptureIfRequested();
@@ -1642,7 +1679,104 @@ BackendTexture *Backend_TextureFromBGRA(const void *px, int w, int h)
 }
 int  Backend_TextureHasRTV(const BackendTexture *bt) { return bt && bt->has_rtv; }
 int  Backend_TextureIsValid(const BackendTexture *bt) { return bt && bt->valid && bt->res != NULL; }
-int  Backend_TextureLoad(BackendTexture **pbt, DWORD dw, DWORD dh, DXGI_FORMAT df, const void *sp, LONG spitch, DWORD sw, DWORD sh, DWORD sbpp, int sha, int hck, DWORD ck, BackendTexture *sbt, int *r5) { (void)pbt;(void)dw;(void)dh;(void)df;(void)sp;(void)spitch;(void)sw;(void)sh;(void)sbpp;(void)sha;(void)hck;(void)ck;(void)sbt; if(r5)*r5=0; return 0; }
+/* Decode M2DX source pixels (TGA/palette, 16 or 32 bpp) into the destination
+ * GPU texture as B8G8R8A8 (all wrapper surfaces are forced to BGRA8), replicating
+ * the D3D11 Backend_TextureLoad: A1R5G5B5-vs-R5G6B5 auto-detection, colorkey ->
+ * alpha=0, 32bpp direct. Falls back to a GPU copy from src_bt when there are no
+ * CPU pixels. (PNG-override path deferred.) */
+int Backend_TextureLoad(BackendTexture **pbt, DWORD dst_w, DWORD dst_h, DXGI_FORMAT dst_fmt,
+                        const void *src_pixels, LONG src_pitch, DWORD src_w, DWORD src_h, DWORD src_bpp,
+                        int src_has_alpha, int has_colorkey, DWORD colorkey_low,
+                        BackendTexture *src_bt, int *out_r5)
+{
+    DWORD copy_w, copy_h, y, x, row32;
+    BackendTexture *dst = pbt ? *pbt : NULL;
+    unsigned char *buf;
+    (void)dst_fmt;
+    if (!g_d3d12.device) return 0;
+
+    if (src_pixels && src_w > 0 && src_h > 0) {
+        const unsigned char *sp = (const unsigned char *)src_pixels;
+        copy_w = dst_w < src_w ? dst_w : src_w;
+        copy_h = dst_h < src_h ? dst_h : src_h;
+        row32  = dst_w * 4u;
+        buf = (unsigned char *)calloc((size_t)row32 * dst_h, 1);
+        if (!buf) return 0;
+
+        if (src_bpp == 16) {
+            int is_a1 = 0;
+            if (src_has_alpha) {
+                const uint16_t *s = (const uint16_t *)sp;
+                DWORD total = copy_w * copy_h, limit = total < 4096 ? total : 4096, i;
+                DWORD nonzero = 0, bit15c = 0, bright = 0;
+                for (i = 0; i < limit; i++) {
+                    uint16_t px = s[i];
+                    if (px) { nonzero++;
+                        if (!(px & 0x8000)) { bit15c++;
+                            if (((px>>10)&0x1F) + ((px>>5)&0x1F) + (px&0x1F) > 10) bright++; } }
+                }
+                is_a1 = !(nonzero > 16 && bit15c * 100 > nonzero && bright > bit15c / 4);
+            }
+            for (y = 0; y < copy_h; y++) {
+                const uint16_t *s16 = (const uint16_t *)(sp + (size_t)y * src_pitch);
+                uint32_t *d32 = (uint32_t *)(buf + (size_t)y * row32);
+                if (is_a1) {
+                    for (x = 0; x < copy_w; x++) {
+                        uint16_t c = s16[x];
+                        uint32_t a = (c & 0x8000) ? 0xFF000000u : 0u;
+                        uint32_t r = ((c>>10)&0x1F)*255u/31u, g = ((c>>5)&0x1F)*255u/31u, b = (c&0x1F)*255u/31u;
+                        d32[x] = a | (r<<16) | (g<<8) | b;
+                    }
+                    if (out_r5) *out_r5 = 0;
+                } else {
+                    int use_ck = has_colorkey; uint16_t ck = (uint16_t)(colorkey_low & 0xFFFF);
+                    for (x = 0; x < copy_w; x++) {
+                        uint16_t c = s16[x];
+                        uint32_t r = ((c>>11)&0x1F)*255u/31u, g = ((c>>5)&0x3F)*255u/63u, b = (c&0x1F)*255u/31u;
+                        uint32_t a = (use_ck && c == ck) ? 0u : 0xFF000000u;
+                        d32[x] = a | (r<<16) | (g<<8) | b;
+                    }
+                    if (out_r5) *out_r5 = use_ck ? 0 : 1;
+                }
+            }
+        } else {
+            /* 32bpp source -> tight BGRA rows. */
+            for (y = 0; y < copy_h; y++)
+                memcpy(buf + (size_t)y * row32, sp + (size_t)y * src_pitch, (size_t)copy_w * 4);
+        }
+        d3d12_bt_recreate_from_init(pbt, dst_w, dst_h, DXGI_FORMAT_B8G8R8A8_UNORM, buf, row32);
+        free(buf);
+        return 1;
+    }
+
+    /* No CPU pixels: GPU copy from src_bt (surface->surface blit), same size. */
+    if (src_bt && src_bt->res && src_bt->w == dst_w && src_bt->h == dst_h) {
+        BackendTexture *nd = (dst && dst->res && dst->w == dst_w && dst->h == dst_h)
+                             ? dst : d3d12_tex_create(dst_w, dst_h, DXGI_FORMAT_B8G8R8A8_UNORM, 0);
+        D3D12_RESOURCE_BARRIER b[2];
+        ID3D12GraphicsCommandList *cl;
+        if (!nd) return 0;
+        d3d12_copy_ensure(); cl = s_copy_list;
+        ZeroMemory(b, sizeof(b));
+        b[0].Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; b[0].Transition.pResource=src_bt->res;
+        b[0].Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b[0].Transition.StateBefore=src_bt->rstate; b[0].Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_SOURCE;
+        b[1].Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; b[1].Transition.pResource=nd->res;
+        b[1].Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b[1].Transition.StateBefore=nd->rstate; b[1].Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_DEST;
+        ID3D12GraphicsCommandList_ResourceBarrier(cl, 2, b);
+        ID3D12GraphicsCommandList_CopyResource(cl, nd->res, src_bt->res);
+        b[0].Transition.StateBefore=D3D12_RESOURCE_STATE_COPY_SOURCE; b[0].Transition.StateAfter=D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        b[1].Transition.StateBefore=D3D12_RESOURCE_STATE_COPY_DEST;   b[1].Transition.StateAfter=D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        ID3D12GraphicsCommandList_ResourceBarrier(cl, 2, b);
+        src_bt->rstate = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        nd->rstate = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        if (nd != dst && pbt) { if (dst) Backend_TextureRelease(dst); *pbt = nd; }
+        return 1;
+    }
+    if (out_r5) *out_r5 = 0;
+    return 0;
+}
 void Backend_TextureRelease(BackendTexture *bt)
 {
     if (!bt) return;
