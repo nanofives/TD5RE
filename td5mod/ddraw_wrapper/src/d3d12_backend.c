@@ -1760,13 +1760,19 @@ fail:
     return 0;
 }
 
-void Backend_Shutdown(void)
+/* Release EVERY D3D12 object (device-level + render-core + deferred queue) and
+ * zero g_d3d12. `wait_gpu` waits for idle first (clean shutdown); pass 0 when
+ * the device is REMOVED -- its fence will never signal, so a wait would hang.
+ * Frees the whole deferred-deletion list unconditionally afterward (the GPU is
+ * either idle or dead, so nothing can still reference the resources) -- this is
+ * what fixes the per-recreation leak. */
+static void d3d12_release_all(int wait_gpu)
 {
     UINT i;
-    d3d12_wait_idle();
+    if (wait_gpu) d3d12_wait_idle();
     d3d12_render_core_shutdown();  /* its final flush_uploads may retire staging + signal */
-    d3d12_wait_idle();             /* ensure that last copy fence is passed */
-    d3d12_flush_retired();         /* GPU idle -> every deferred resource is safe to free */
+    if (wait_gpu) d3d12_wait_idle();  /* ensure that last copy fence is passed */
+    d3d12_flush_retired();         /* free every deferred resource (no live refs) */
     if (g_d3d12.list)     ID3D12GraphicsCommandList_Release(g_d3d12.list);
     for (i = 0; i < D3D12_FRAME_COUNT; i++) {
         if (g_d3d12.backbuffers[i]) ID3D12Resource_Release(g_d3d12.backbuffers[i]);
@@ -1783,6 +1789,11 @@ void Backend_Shutdown(void)
     if (g_d3d12.debug)      ID3D12Debug_Release(g_d3d12.debug);
     ZeroMemory(&g_d3d12, sizeof(g_d3d12));
     g_backend.swap_chain = NULL;
+}
+
+void Backend_Shutdown(void)
+{
+    d3d12_release_all(1);
 }
 
 /* ---- readiness --------------------------------------------------------- */
@@ -2097,7 +2108,39 @@ void Backend_RecEnd(WrapperRecCtx *rc) { (void)rc; }
 void Backend_RecExecute(int i) { (void)i; }
 int  Backend_RecPoolEnsure(int c) { (void)c; return 0; }
 void Backend_RecPoolRelease(void) { }
-int  Backend_RecreateDevice(void) { return 0; }
+/* Recover from a removed device (TDR/hang): tear down every GPU object WITHOUT
+ * waiting on the dead fence, recreate the device/swapchain/render-core on the
+ * SAME window, and bump device_generation so the backend-agnostic surface/
+ * texture rebuild machinery re-uploads on next use. Leak-free: d3d12_release_all
+ * frees the whole deferred-deletion list. */
+int Backend_RecreateDevice(void)
+{
+    int  w = g_backend.width, h = g_backend.height, bpp = g_backend.bpp, windowed = g_backend.windowed;
+    UINT gen = g_backend.device_generation;
+    HWND hwnd = s_display_hwnd;   /* reuse the existing window */
+    /* A forced-test loss (TD5RE_FORCE_DEVICE_LOST) latches device_removed while
+     * the GPU device is still ALIVE -> wait for idle so we release cleanly. A
+     * real TDR/removal -> GetDeviceRemovedReason != S_OK -> skip the wait (the
+     * dead fence never signals). */
+    int alive = (g_d3d12.device &&
+                 ID3D12Device_GetDeviceRemovedReason(g_d3d12.device) == S_OK);
+    WRAPPER_LOG("D3D12 RecreateDevice: begin (gen %u -> %u) %dx%d alive=%d", gen, gen + 1, w, h, alive);
+
+    d3d12_release_all(alive);
+    /* The new device's fence restarts at completed-value 0, so our monotonic
+     * counters MUST reset or the first wait_value(old-high) would hang forever. */
+    s_fence_val  = 0;
+    s_copy_fence = 0;
+
+    if (!Backend_CreateDevice(hwnd, w, h, bpp, windowed)) {
+        WRAPPER_LOG("D3D12 RecreateDevice: CreateDevice FAILED");
+        return 0;
+    }
+    g_backend.device_generation = gen + 1;
+    g_backend.device_removed    = 0;
+    WRAPPER_LOG("D3D12 RecreateDevice: OK (gen=%u)", gen + 1);
+    return 1;
+}
 void Backend_ReleaseConstBuffer(BackendConstBuffer *cb) { if (cb) { if (cb->res) ID3D12Resource_Release(cb->res); free(cb); } }
 void Backend_ReleasePixelShader(BackendPixelShader *ps) { if (ps) { free((void *)ps->bc); free(ps); } }
 void Backend_RequestCapture(void) { }
