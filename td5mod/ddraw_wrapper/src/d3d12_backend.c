@@ -2330,6 +2330,21 @@ int Backend_Reset(int w, int h, int bpp, int windowed)
     if (!d3d12_create_depth(w, h)) return 0;   /* SSR scene_copy auto-resizes on next use */
 
     g_backend.width = (unsigned)w; g_backend.height = (unsigned)h; g_backend.windowed = windowed;
+    /* Keep the game's render dims in lockstep with the swapchain, so the frontend
+     * (laid out against fe_scale) and the 3D viewport fill the new size instead
+     * of rendering at the old size in a resized surface. Mirrors plat_resize_native
+     * -- done here too so resize is correct via ANY path into Backend_Reset. */
+    g_backend.target_width = w; g_backend.target_height = h;
+    g_backend.fe_scale.native_w = w; g_backend.fe_scale.native_h = h;
+    if (g_backend.fe_scale.virtual_w > 0 && g_backend.fe_scale.virtual_h > 0 &&
+        w > g_backend.fe_scale.virtual_w && h > g_backend.fe_scale.virtual_h) {
+        g_backend.fe_scale.scale_x = (float)w / (float)g_backend.fe_scale.virtual_w;
+        g_backend.fe_scale.scale_y = (float)h / (float)g_backend.fe_scale.virtual_h;
+        g_backend.fe_scale.enabled = 1;
+    } else {
+        g_backend.fe_scale.scale_x = 1.0f; g_backend.fe_scale.scale_y = 1.0f;
+        g_backend.fe_scale.enabled = 0;
+    }
     s_cur_vp.TopLeftX = 0.0f; s_cur_vp.TopLeftY = 0.0f;
     s_cur_vp.Width = (float)w; s_cur_vp.Height = (float)h; s_cur_vp.MinDepth = 0.0f; s_cur_vp.MaxDepth = 1.0f;
     s_cur_scissor.left = 0; s_cur_scissor.top = 0; s_cur_scissor.right = w; s_cur_scissor.bottom = h;
