@@ -16,7 +16,7 @@ plumbing (SBT, state object, root signatures) is decided once, up front.
 | 2a | G-buffer MRT wiring in D3D12 | ✅ done |
 | 2b | RT shadows (sun + dynamic lights), blob-shadow kill | ✅ done (denoise/soak owed) |
 | 3 | RT reflections with textured hit shading | ✅ core done (blowout was a framedump alpha artifact); bindless/CUTOUT texture refinement DEFERRED (see note) |
-| 4 | Menu row, INI, runtime switch, fallback, release | 🚧 config @3f16ea47 + menu @7ba7bba5 DONE; robustness verifications owed (soak/device-lost/split-screen HIGH) |
+| 4 | Menu row, INI, runtime switch, fallback, release | ✅ config @3f16ea47 + menu @7ba7bba5 + persist @7617d24a; split-screen HIGH + device-lost drill VERIFIED; 30-min soak + literal mid-race toggle owed |
 
 Append an **as-built note** under this table after each phase (deviations, measurements,
 gotchas found).
@@ -293,11 +293,34 @@ Release build boots clean with RT compiled in (shared srcs); `--AutoRace` is a
 dev-only affordance so a headless RT-in-release race framedump isn't available —
 the path is identical to the dev build verified above.
 
-**OWED (Phase 4 robustness verifications — not code, checks):** mid-race MCP
-LOW↔HIGH toggle both directions, split-screen race in HIGH, device-lost drill
-(`TD5RE_FORCE_DEVICE_LOST` → RTGeneration bump re-feeds the AS), 30-min soak (no
-TDR, VRAM stable), INI round-trip (HIGH → quit → `Quality=1` persisted → relaunch
-HIGH), full RT-in-release visual via manual race entry.
+### As-built — Phase 4 robustness verifications (2026-08-01, @7617d24a)
+
+- **Split-screen HIGH:** `--AutoRace --DefaultPlayers=2 --OtherPlayersAI=1 --Quality=1`
+  framedump — both panes render RT correctly (per-pane shadow/light/SSR), opaque, no
+  pane-origin artifacts.
+- **Device-lost drill:** `TD5RE_FORCE_DEVICE_LOST=1` + `--Quality=1` — process survives
+  (alive at 28 s, presents `hr=0x0`), `log/d3d12_init.log` shows `[dxr] pipeline init
+  OK` *after* the forced loss, and the post-recovery framedump renders RT correctly.
+  `d3d12_dxr_shutdown` tears down everything (meshes/pools/scratch/TLAS/masks/PSOs/heap,
+  registry zeroed) + bumps `generation`; `td5_rt_frame` re-feeds on the bump.
+- **INI round-trip BUG FIXED (@7617d24a):** `td5_ini_persist_options()` writes each
+  `[Lighting]` key by hand and was missing `Quality` — the menu toggle set
+  `g_td5.ini.lighting_quality` but never persisted it (lost on relaunch). Added the
+  write; read path (`k_lighting_cfg`) + seed already verified. Round-trip now complete.
+- **Intermittent env-GPU TDR (0xC0000005):** one smoke run crashed with an access
+  violation in Present, clean on retry (15/15) — the documented pre-existing race-moscow
+  env GPU/TDR, NOT RT (a persist-only change can't cause a GPU AV). ⚠️ **Decision flag
+  for the user:** HIGH is now the DEFAULT when a DXR device is present (per plan §1),
+  so every default race runs RT — if the intermittent TDR proves more frequent under
+  RT load, consider defaulting `[Lighting] Quality=0` (opt-in HIGH) instead.
+
+**STILL OWED (long / interactive checks, not implementation):** 30-min soak (no TDR,
+VRAM stable), literal mid-race LOW↔HIGH toggle via the control socket (the runtime
+switch *mechanism* is verified by the `--Quality=1` vs `=0` A/B — `Backend_RTSetMode`
+re-branches every frame; GRAPHICS OPTIONS is frontend-only so the realistic switch is
+menu→race with no exe restart), full RT-in-release visual via manual race entry
+(`--AutoRace` is dev-only). Plus the DEFERRED bindless textured reflections + P2b
+denoise/knobs.
 
 ## Handoff prompt (what launched this execution)
 
