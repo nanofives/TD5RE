@@ -16,7 +16,7 @@ plumbing (SBT, state object, root signatures) is decided once, up front.
 | 2a | G-buffer MRT wiring in D3D12 | ✅ done |
 | 2b | RT shadows (sun + dynamic lights), blob-shadow kill | ✅ done (denoise/soak owed) |
 | 3 | RT reflections with textured hit shading | ✅ core done (blowout was a framedump alpha artifact); bindless/CUTOUT texture refinement DEFERRED (see note) |
-| 4 | Menu row, INI, runtime switch, fallback, release | 🚧 WIP — config/activation done @3f16ea47; menu row + i18n + release verify owed |
+| 4 | Menu row, INI, runtime switch, fallback, release | 🚧 config @3f16ea47 + menu @7ba7bba5 DONE; robustness verifications owed (soak/device-lost/split-screen HIGH) |
 
 Append an **as-built note** under this table after each phase (deviations, measurements,
 gotchas found).
@@ -266,11 +266,38 @@ the INI. `td5_rt_set_quality()` already exists for the menu's instant runtime
 toggle. **Verified:** `--Quality=1` engages RT (TD5RE_RT_MASK dispatch runs) with no
 env / no LightingMode; `--Quality=0` = LOW; build_all clean (dev+release, lint 3/3);
 full suite exit 0, golden hashes match with RT **default-on** (HIGH is now the
-default when a DXR device is present, per plan §1). **OWED (Phase 4 remainder):** the
-LIGHTING QUALITY menu row on Screen_DisplayOptions (6-touchpoint recipe) + LOW/HIGH
-overlay + arrows-gap fix + es_AR i18n (CALIDAD DE ILUMINACIÓN / BAJA / ALTA), greyed
-row when DXR absent, mid-race MCP toggle check, device-lost drill, 30-min soak,
-release-build HIGH smoke.
+default when a DXR device is present, per plan §1).
+
+### As-built — Phase 4 menu row (2026-08-01, @7ba7bba5)
+
+"LIGHTING QUALITY: LOW/HIGH" selector on Screen_DisplayOptions (GRAPHICS OPTIONS),
+row 6, OK shifted to row 7 (8 buttons). Six touchpoints: button create + label
+(`td5_fe_menu.c` case 0 + `frontend_refresh_display_option_labels`), L/R input case
+(toggles `s_display_lighting_quality`, applies LIVE via `td5_rt_set_quality` →
+instant no-restart LOW↔HIGH), OK persist to `[Lighting] Quality`, LOW/HIGH value
+overlay (`frontend_render_display_options_overlay`, `td5_tr` → BAJO/ALTO via the
+existing es_AR catalog keys — the label stays English like every sibling row, which
+the button-draw path renders un-translated), arrow dispatch, backing static
+(`s_display_lighting_quality` in `td5_frontend.c` + extern in
+`td5_frontend_internal.h` — no new extern-in-.c) + INI seed on entry. **i18n note:**
+`LOW`/`HIGH` already map to `BAJO`/`ALTO` in `es_AR.txt` (shared keys); no catalog
+edit needed (BAJA/ALTA feminine wasn't used to avoid a duplicate-key split).
+**Arrows-gap fix:** the display-options arrow loop was `i <= 3`, leaving Show FPS +
+Camera Damping arrow-less despite being L/R-live — now `0..5` always + row 6 only
+when `td5_rt_available()`. **DXR-absent:** row inert — greyed LOW, no arrows, L/R
+denied with the locked cue `frontend_play_sfx(10)`. **Verified via framedump:**
+GRAPHICS OPTIONS shows the row = HIGH with arrows (all rows now have arrows);
+`TD5RE_RT_DISABLE=1` shows greyed LOW, no arrows. build_all clean (dev+release, lint
+3/3), full suite exit 0 with `scr-display-options` nav PASS + golden hashes match.
+Release build boots clean with RT compiled in (shared srcs); `--AutoRace` is a
+dev-only affordance so a headless RT-in-release race framedump isn't available —
+the path is identical to the dev build verified above.
+
+**OWED (Phase 4 robustness verifications — not code, checks):** mid-race MCP
+LOW↔HIGH toggle both directions, split-screen race in HIGH, device-lost drill
+(`TD5RE_FORCE_DEVICE_LOST` → RTGeneration bump re-feeds the AS), 30-min soak (no
+TDR, VRAM stable), INI round-trip (HIGH → quit → `Quality=1` persisted → relaunch
+HIGH), full RT-in-release visual via manual race entry.
 
 ## Handoff prompt (what launched this execution)
 
