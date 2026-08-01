@@ -3976,6 +3976,10 @@ void td5_plat_render_apply_ssr(const float cam_pos[3], const float basis9[9],
     cb.params[3] = pane_w;
     cb.params2[0] = pane_h;
     cb.params2[1] = intensity;
+    /* [P3 diag] TD5RE_RT_REFLDIAG=1 -> rgen_refl writes {base, matid/8, up} to
+     * reflcol instead of tracing (view with TD5RE_RT_REFLDBG opaque blit). */
+    { static int d = -1; if (d < 0) { const char *e = getenv("TD5RE_RT_REFLDIAG"); d = (e && e[0]) ? atoi(e) : 0; }
+      cb.params2[2] = (float)d; }
     for (int i = 0; i < 4; i++) { cb.reflA[i] = refl8[i]; cb.reflB[i] = refl8[4 + i]; }
 
     Backend_ApplySSRPass(&cb);

@@ -167,7 +167,12 @@ void td5_rt_level_build(void)
             for (c = 0; c < 4; c++) {
                 verts[nv + c].pos[0] = q[c][0]; verts[nv + c].pos[1] = q[c][1]; verts[nv + c].pos[2] = q[c][2];
                 verts[nv + c].uv[0] = 0.0f; verts[nv + c].uv[1] = 0.0f;
-                verts[nv + c].color = 0xFFFFFFFFu;
+                /* [P3] Road lane quads carry no texture/UV in the feed, so the
+                 * reflection hit shading (chit_refl) uses vertex color directly.
+                 * A representative dark-asphalt gray, NOT white: white here made
+                 * every reflective surface (which mostly reflects the road) wash
+                 * near-white -- the Phase 3 blowout. Kept opaque (A=0xFF). */
+                verts[nv + c].color = 0xFF4A4A4Au;
             }
             /* ring nearL,farL,farR,nearR -> (0,1,2)+(0,2,3). */
             idx[ni+0]=(unsigned short)(nv+0); idx[ni+1]=(unsigned short)(nv+1); idx[ni+2]=(unsigned short)(nv+2);

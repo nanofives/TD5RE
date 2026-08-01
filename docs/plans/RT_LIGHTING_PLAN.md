@@ -15,7 +15,7 @@ plumbing (SBT, state object, root signatures) is decided once, up front.
 | 1 | World-space geometry feed + BLAS/TLAS + debug view | ✅ done — **alignment gate PASSED** |
 | 2a | G-buffer MRT wiring in D3D12 | ✅ done |
 | 2b | RT shadows (sun + dynamic lights), blob-shadow kill | ✅ done (denoise/soak owed) |
-| 3 | RT reflections with textured hit shading | 🚧 WIP — pipeline built + runs; reflectivity blowout bug OPEN |
+| 3 | RT reflections with textured hit shading | 🚧 WIP — blowout FIXED (was a framedump alpha artifact); textured/bindless refinement owed |
 | 4 | Menu row, INI, runtime switch, fallback, release | ⬜ |
 
 Append an **as-built note** under this table after each phase (deviations, measurements,
@@ -203,18 +203,43 @@ table (UAV u0-u3, SRV t0-t5); state object/SBT grew `rgen_refl` (raygen 4). `d3d
 + the shared 3-mode `dxr_lighting_pass`. **Note:** `GeometryIndex()` needs SM6.5 (lib_6_3
 lacks it) — used `InstanceID()` alone since the Phase-1 feed is one range per mesh.
 
-**OPEN BUG (gate):** the reflection washes the frame near-white. `TD5RE_RT_REFLDBG=1`
-(opaque reflcol blit) shows `reflcol` white on far more than the car bodies. Two suspected
-causes to chase next: (1) the raster G-buffer marks the **road/terrain** as CARBODY matid
-via `s_light_basis_has_rot` (td5_render.c:1204) → most of the scene reads reflective; (2)
-the composite weight is over-scaled — `w = base*(0.25+0.75*fresnel)*params2.y`; the real
-frame is ~90% white implying `w≈0.9`, i.e. `params2.y` (SSR master intensity) is being read
-too high or from the wrong SSRCB offset. Next steps: visualize matid (write `base` to
-reflcol), verify the SSRCB `params2.y`/reflA/reflB offsets vs the C build in
-`td5_render_apply_ssr_pass`, and clamp/authoring-gate which matids reflect. Also OWED:
-bindless per-page textures (chit currently uses vertex color), CUTOUT anyhit, chit sun
-shadow ray. Repro: `--AutoRace=1 --SkipIntro=1 --DefaultTrack=5 --LightingMode=2
---Reflections=1` + `TD5RE_RT=1` (`TD5RE_RT_REFLDBG=1` for the raw reflcol).
+### As-built — Phase 3 blowout resolution (2026-08-01)
+
+**The "reflectivity blowout" was NOT a rendering bug — it was a framedump alpha
+artifact.** Both prior suspected causes were wrong: (1) the road/terrain does NOT
+read CARBODY — `s_light_basis_has_rot` is set only for track spans (NULL rot →
+matid by page) and actor vehicles (rot → CARBODY), correctly; (2) the composite
+weight is fine — the SSRCB is passed as the *same C struct* to the RT path, so
+`params2.y`/`reflA`/`reflB` offsets can't drift, and the real reflectivity LUT
+values are tiny (the earlier note misread the `TD5_MaterialParams` columns:
+`.reflectivity` is field **[2]**, not [0] — actual DEFAULT=**0.00**, GLASS=0.40,
+CARBODY=0.30, so roads/buildings correctly don't reflect). Instrumented via a new
+env-gated `TD5RE_RT_REFLDIAG` (1=classifier base/matid/up, 2=weight `w`, 3=raw
+reflected color, fed through the reserved `SSRCB.params2.z`): pixel-stats on the
+full-res dumps proved `w≈0` frame-wide and `meanR` normal (~55-160), i.e. the RGB
+scene was **correct all along**. The apparent "near-white wash" was the PNG viewer
+rendering **alpha≈0**: the SSR RT composite blended its Fresnel weight `w` into the
+backbuffer *alpha* (`SrcBlendAlpha=ONE, DestBlendAlpha=ZERO`), which the swapchain
+ignores on present (screen correct) but a captured framedump shows as transparent.
+
+**Fix:** composites now preserve destination alpha (`SrcBlendAlpha=ZERO,
+DestBlendAlpha=ONE`) in `dxr_make_composite_pso` → framedumps are opaque and match
+the on-screen frame. Also gave the RT track lane quads a dark-asphalt reflected
+color (`0xFF4A4A4A`, was white) so car-body reflections of the road read gray, not
+white (`td5_rt.c`). **Verified:** build_all clean (dev+release, no new warnings,
+lint 3/3), selftest smoke 15/15, full suite exit 0 with golden module hashes
+matching (moscow/pelton/drag/split, sim byte-identical), framedump of
+`--AutoRace --DefaultTrack=5 --LightingMode=2 --Reflections=1` + `TD5RE_RT=1` shows
+the full-colour Moscow scene with a subtle car-paint reflection, opaque, no magenta.
+LOW unaffected (RT-only paths + env-gated diag). Committed d3d12(RT-P3).
+
+**Still OWED for the gate (textured reflections):** bindless per-page textures
+(chit_refl currently uses interpolated vertex color, not the hit texture), CUTOUT
+any-hit, and a chit sun-shadow ray. Repro / diag knobs: `TD5RE_RT_REFLDBG=1` (opaque
+reflcol blit), `TD5RE_RT_REFLDIAG=1|2|3` (classifier / weight / reflected color).
+GOTCHA for future verification: **framedump PNGs carry the backbuffer alpha** — flatten
+alpha to opaque before eyeballing, or read RGB channels directly (downscale-preview
+composites transparent-over-white and lies).
 
 ## Handoff prompt (what launched this execution)
 

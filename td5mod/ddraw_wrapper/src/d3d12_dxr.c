@@ -1086,7 +1086,14 @@ static ID3D12PipelineState *dxr_make_composite_pso(const void *ps, SIZE_T ps_len
     else if (additive == 0) { rt->SrcBlend = D3D12_BLEND_DEST_COLOR; rt->DestBlend = D3D12_BLEND_ZERO; }       /* MULT     */
     else if (additive == 3) { rt->SrcBlend = D3D12_BLEND_SRC_ALPHA;  rt->DestBlend = D3D12_BLEND_INV_SRC_ALPHA; } /* refl alpha */
     rt->BlendOp = D3D12_BLEND_OP_ADD;
-    rt->SrcBlendAlpha = D3D12_BLEND_ONE; rt->DestBlendAlpha = D3D12_BLEND_ZERO; rt->BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    /* Preserve the destination (backbuffer) alpha: out.a = dst.a. The scene
+     * arrives opaque (a=1); the reflection shader emits its Fresnel weight in
+     * alpha as the COLOR src-blend factor, but that must NOT be written back to
+     * the backbuffer alpha -- doing so left the frame with a~0, which the
+     * swapchain ignores on present (screen is correct) but a captured framedump
+     * PNG renders as transparent -> a phantom "near-white washout". Keeping dst
+     * alpha makes framedump-based verification match what the player sees. */
+    rt->SrcBlendAlpha = D3D12_BLEND_ZERO; rt->DestBlendAlpha = D3D12_BLEND_ONE; rt->BlendOpAlpha = D3D12_BLEND_OP_ADD;
     rt->RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     pd.SampleMask = 0xFFFFFFFFu;
     pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;

@@ -197,13 +197,18 @@ void rgen_refl()
     float base = rt_reflectivity(matid);
     float3 N = normalize(gb.rgb * 2.0f - 1.0f);
     if (matid == 1 && -N.y > 0.6f) base += sr_misc.w * saturate((-N.y - 0.6f) / 0.4f);  /* wet road */
-    if (base < 0.01f) return;   /* early-out: most pixels don't reflect (perf save) */
+    int dg = (int)(sr_params2.z + 0.5f);
+    /* [P3 diag] dg1: R=base reflectivity, G=matid/8, B=up. */
+    if (dg == 1) { g_reflcol[fp] = float4(base, (float)matid / 8.0f, saturate(-N.y), 1.0f); return; }
+    if (base < 0.01f && dg == 0) return;   /* early-out: most pixels don't reflect (perf save) */
 
     float3 world = rt_world_from_depth(D, float2(lpx), sr_camPosFocal, sr_rightCx, sr_upCy, sr_fwdDepthScale, sr_misc.x);
     float3 V = normalize(world - sr_camPosFocal.xyz);
     float ndv = saturate(dot(-V, N));
     float w = base * (0.25f + 0.75f * pow(1.0f - ndv, 3.0f)) * sr_params2.y;   /* Fresnel * intensity */
-    if (w < 0.02f) return;
+    /* [P3 diag] dg2: weight w as grayscale (params2.y intensity check). */
+    if (dg == 2) { g_reflcol[fp] = float4(w, w, w, 1.0f); return; }
+    if (w < 0.02f && dg == 0) return;
 
     float3 R = reflect(V, N);
     float dist = length(world - sr_camPosFocal.xyz);
@@ -212,5 +217,7 @@ void rgen_refl()
     ray.Direction = R; ray.TMin = 1.0f; ray.TMax = sr_params.y;   /* max reflect dist */
     RayPayload pl; pl.color = float3(0.02f, 0.02f, 0.12f); pl.t = -1.0f;
     TraceRay(g_tlas, RAY_FLAG_NONE, 0xFF, /*hitGroup*/0, /*mult*/0, /*miss*/1, ray, pl);
+    /* [P3 diag] dg3: raw reflected color. */
+    if (dg == 3) { g_reflcol[fp] = float4(pl.color, 1.0f); return; }
     g_reflcol[fp] = float4(pl.color, w);
 }
