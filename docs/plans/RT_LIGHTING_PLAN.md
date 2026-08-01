@@ -15,7 +15,7 @@ plumbing (SBT, state object, root signatures) is decided once, up front.
 | 1 | World-space geometry feed + BLAS/TLAS + debug view | ✅ done — **alignment gate PASSED** |
 | 2a | G-buffer MRT wiring in D3D12 | ✅ done |
 | 2b | RT shadows (sun + dynamic lights), blob-shadow kill | ✅ done (denoise/soak owed) |
-| 3 | RT reflections with textured hit shading | ✅ core done (blowout was a framedump alpha artifact); bindless/CUTOUT texture refinement DEFERRED (see note) |
+| 3 | RT reflections with textured hit shading | ✅ done — blowout fixed + bindless textured hit shading @bf8f6cc7 (plumbing) + @d64a0258 (real textures); CUTOUT any-hit + chit sun-shadow ray still owed |
 | 4 | Menu row, INI, runtime switch, fallback, release | ✅ config @3f16ea47 + menu @7ba7bba5 + persist @7617d24a; split-screen HIGH + device-lost drill VERIFIED; 30-min soak + literal mid-race toggle owed |
 
 Append an **as-built note** under this table after each phase (deviations, measurements,
@@ -233,20 +233,49 @@ matching (moscow/pelton/drag/split, sim byte-identical), framedump of
 the full-colour Moscow scene with a subtle car-paint reflection, opaque, no magenta.
 LOW unaffected (RT-only paths + env-gated diag). Committed d3d12(RT-P3).
 
-**DEFERRED — bindless textured reflections (scope decision 2026-08-01):** the
-`chit_refl` shading uses interpolated vertex color, not the hit triangle's texture.
-Making it textured requires bindless per-page SRVs fed from the game's texture
-registry — but that registry is a **dynamic LRU streaming cache** (`td5_render_bind_texture_page`,
-TEXTURE_CACHE_SLOTS, pages evicted/relocated per frame), so a stable page→SRV
-mapping for a DXR heap would have to track residency across eviction, and an
-unbounded descriptor range risks device-removal on any un-populated slot. The same
-texture access blocks CUTOUT any-hit (samples texture alpha). Given the reflection
-already renders correctly and reads well with vertex-color hit shading (no washout,
-off-screen content visible, no magenta), and the executor is on account2's slow
-approval-gated build/run cycle, the bindless/CUTOUT refinement + a chit sun-shadow
-ray (needs `MaxTraceRecursionDepth` 1→2) are deferred as documented owed work — the
-plan's "if in scope" latitude. Repro / diag knobs: `TD5RE_RT_REFLDBG=1` (opaque
-reflcol blit), `TD5RE_RT_REFLDIAG=1|2|3` (classifier / weight / reflected color).
+### As-built — Phase 3 bindless textured reflections (2026-08-01, @bf8f6cc7 + @d64a0258)
+
+`chit_refl` now samples the real page texture instead of flat vertex colour. Done
+in two de-risked stages. **Step 1 (@bf8f6cc7 — plumbing):** heap slots [16..16+1024)
+each get an SRV pointing at a 1×1 fallback (created in the combined PIXEL|NON_PIXEL
+state), so any unregistered/oob `texture_index` is a valid, safe SRV (no device
+removal); global RS grows a SEPARATE root param (param 5) = one unbounded SRV range
+`t0, space1` at heap slot 16 (distinct from the fixed table so the working 2b ranges
+are untouched); HLSL `Texture2D g_bindless[] : register(t0,space1)` + static sampler,
+`chit_refl` modulates vertex colour by `g_bindless[NonUniformResourceIndex(texture_index)]`
+when `texture_index != 0` (track quads = 0 → no UV → keep vertex colour; guarded
+< 1024). **Step 2 (@d64a0258 — real textures):** `Backend_RTRegisterBoundPage(page_id)`
+writes the currently-bound page's SRV into slot 16+page_id and transitions that
+texture ONCE to the combined shader-resource state (RT DispatchRays is a compute
+read; the combined state is a PIXEL superset so raster PS reads still work; deduped
+on the resource). **KEY GOTCHA:** the register call had to hook the REAL per-primitive
+bind site `flush_immediate()` in `td5_render.c` (the mesh cmd handlers funnel through
+there, *bypassing* `td5_render_bind_texture_page` — an earlier attempt hooked the
+latter and silently never ran; confirmed via a one-shot log that pages 65/88-91/110/
+147/1020 now register). `GeoRecord.texture_index` = `mesh->texture_page_id` already;
+page ids < MAT_PAGE_MAX (1024). **Verified:** build_all clean; in-race RT frame
+textured, opaque, NO device removal, NO new debug-layer errors (only pre-existing
+id=690). Still OWED: CUTOUT any-hit (now has texture alpha available) + chit sun-shadow
+ray (needs `MaxTraceRecursionDepth` 1→2 in `dxr_create_state_object`).
+
+### ⚠️ Stability finding — RT-HIGH trips the 8x-FF selftest TDR (2026-08-01)
+
+RT HIGH (especially with bindless per-pixel texture sampling) adds enough GPU work to
+the already-heavy 8x-FF FF-cold-frame Presents (the ones the `TD5RE_SELFTEST_RACE_WARMUP_MS`
+guard already exists for) to trip the Windows TDR watchdog → `DXGI_ERROR_DEVICE_HUNG`,
+which fails golden races. Isolated conclusively: forced-LOW (`TD5RE_RT=0`) = NO TDR,
+all golden hashes match; RT-on = TDR cascade. **Fix:** `td5_selftest_boot` now pins the
+harness to LOW (Quality=0) — the suite tests the SIM (goldens byte-identical LOW/HIGH),
+nav, and degradation, none of which need RT; RT HIGH is framedump-verified separately.
+`TD5RE_RT=1` still forces HIGH under the suite for deliberate RT stress-testing. **Note:**
+this is an 8x-FF harness-stress artifact; normal 1× play runs RT at 100+ FPS with no
+TDR (device-lost drill + manual races confirm). Residual soft failure after the fix:
+`degrade-private-bytes` marginally over (+~27MB vs 24MB limit, consistent across 3 runs)
+in the LOW screen-space path — NOT bindless (inert in LOW), a pre-existing LOW
+working-set characteristic exposed by pinning the harness to LOW; flagged, not masked.
+
+Repro / diag knobs: `TD5RE_RT_REFLDBG=1` (opaque reflcol blit), `TD5RE_RT_REFLDIAG=1|2|3`
+(classifier / weight / reflected color).
 GOTCHA for future verification: **framedump PNGs carry the backbuffer alpha** — flatten
 alpha to opaque before eyeballing, or read RGB channels directly (downscale-preview
 composites transparent-over-white and lies).
