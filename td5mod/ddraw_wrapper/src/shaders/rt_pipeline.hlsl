@@ -98,7 +98,18 @@ void chit_refl(inout RayPayload p, in BuiltInTriangleIntersectionAttributes attr
         col *= tex;
     }
     float3 N = normalize(mul((float3x3)ObjectToWorld3x4(), cross(p1 - p0, p2 - p0)));
-    p.color = col * (0.35f + 0.65f * saturate(abs(N.y)));
+    float shade = 0.35f + 0.65f * saturate(abs(N.y));
+    /* [P3] Sun shadow ray from the reflection hit point: reflected geometry (a car
+     * reflected on another car's paint, the road under a car) now receives sun
+     * shadows. Gated by sr_sun.w (SSRCB) so it costs nothing when the sun pass is
+     * off / below the horizon. Depth 2 (rgen_refl -> chit_refl -> this ray). */
+    if (sr_sun.w > 0.5f) {
+        float3 wpos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+        float3 so = wpos + N * (16.0f + RayTCurrent() * 0.004f);   /* normal-offset bias */
+        float vis = rt_shadow_ray(so, normalize(sr_sun.xyz), 1.0f, sr_params.y);
+        shade *= (vis > 0.5f) ? 1.0f : 0.45f;   /* in shadow -> darken, not black */
+    }
+    p.color = col * shade;
     p.t = RayTCurrent();
 }
 

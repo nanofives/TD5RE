@@ -319,13 +319,35 @@ void td5_render_apply_ssr_pass(int vp_x, int vp_y)
     float cam[3] = { s_camera_pos[0], s_camera_pos[1], s_camera_pos[2] };
     float depth_scale = 1.0f / DEPTH_NORMALIZE_INV;   /* 195000 */
 
+    /* [P3] Scene sun dir (strongest enabled directional zone slot) for the RT
+     * reflection's sun shadow ray -- same derivation + Y-flip as the shadow pass;
+     * disabled when there's no sun (tunnel) or it's below the horizon. */
+    float sun[3] = { 0.0f, 0.0f, 0.0f };
+    int sun_shadow = 0;
+    if (td5_light2_sun_shadows()) {
+        float best_mag2 = 0.0f;
+        for (int s = 0; s < 3; s++) {
+            if (!s_tl_contrib[s].enabled) continue;
+            const float *v = s_tl_contrib[s].vec_world;
+            float m2 = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
+            if (m2 > best_mag2) { best_mag2 = m2; sun[0]=v[0]; sun[1]=v[1]; sun[2]=v[2]; }
+        }
+        if (best_mag2 > 1.0f) {
+            float mag = sqrtf(best_mag2);
+            sun[0]/=mag; sun[1]/=mag; sun[2]/=mag;
+            sun[1] = -sun[1];                       /* zone dirs are Y-flipped vs position space */
+            if (sun[1] < -0.05f) sun_shadow = 1;    /* sun above the horizon */
+        }
+    }
+
     td5_plat_render_apply_ssr(cam, basis9,
                               s_focal_length, s_center_x, s_center_y,
                               (float)vp_x, (float)vp_y,
                               depth_scale, NEAR_DEPTH_OFFSET,
                               refl8, wet, s_intensity,
                               s_steps, s_dist, s_thick,
-                              (float)s_viewport_width, (float)s_viewport_height);
+                              (float)s_viewport_width, (float)s_viewport_height,
+                              sun, sun_shadow);
 }
 
 /* [LIGHT2 P0] Per-frame gate for the G-buffer feed. Call once per rendered

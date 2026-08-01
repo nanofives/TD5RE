@@ -81,6 +81,7 @@ cbuffer SSRCB : register(b3)
     float4 sr_params2;   /* x paneH, y intensity                        */
     float4 sr_reflA;     /* reflectivity matid 0-3                      */
     float4 sr_reflB;     /* reflectivity matid 4-7                      */
+    float4 sr_sun;       /* xyz surface->light dir (unit); w shadow-ray enable */
 };
 
 /* Reflection / debug ray payload (<= 32 bytes). */

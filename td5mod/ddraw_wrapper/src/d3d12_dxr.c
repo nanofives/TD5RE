@@ -408,7 +408,7 @@ static int dxr_create_state_object(void)
 
     shcfg.MaxPayloadSizeInBytes   = 32;   /* frozen (plan sec.4) */
     shcfg.MaxAttributeSizeInBytes = 8;
-    pcfg.MaxTraceRecursionDepth   = 1;    /* Phase 1: raygen->1 ray (raised to 2 in P2b/P3) */
+    pcfg.MaxTraceRecursionDepth   = 2;    /* rgen_refl -> chit_refl -> sun shadow ray (P3) */
     grs.pGlobalRootSignature      = g_dxr.global_rs;
 
     ZeroMemory(so, sizeof(so));

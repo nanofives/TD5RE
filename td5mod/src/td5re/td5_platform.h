@@ -782,7 +782,8 @@ void td5_plat_render_apply_ssr(const float cam_pos[3], const float basis9[9],
                                float depth_scale, float depth_bias,
                                const float refl8[8], float wet_boost,
                                float intensity, int steps, float max_dist,
-                               float thickness, float pane_w, float pane_h);
+                               float thickness, float pane_w, float pane_h,
+                               const float sun_dir[3], int sun_shadow);
 
 /* [LIGHTING REWORK P0] Per-frame G-buffer gate. on=1: the backend clears the
  * normal+material G-buffer and writes it from z-writing opaque draws (COLOR1

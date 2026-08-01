@@ -3952,7 +3952,8 @@ void td5_plat_render_apply_ssr(const float cam_pos[3], const float basis9[9],
                                float depth_scale, float depth_bias,
                                const float refl8[8], float wet_boost,
                                float intensity, int steps, float max_dist,
-                               float thickness, float pane_w, float pane_h)
+                               float thickness, float pane_w, float pane_h,
+                               const float sun_dir[3], int sun_shadow)
 {
     if (g_backend.device_removed) return;
     /* Serial/immediate path only (same constraint as the light pass). */
@@ -3982,6 +3983,13 @@ void td5_plat_render_apply_ssr(const float cam_pos[3], const float basis9[9],
     { static int d = -1; if (d < 0) { const char *e = getenv("TD5RE_RT_REFLDIAG"); d = (e && e[0]) ? atoi(e) : 0; }
       cb.params2[2] = (float)d; }
     for (int i = 0; i < 4; i++) { cb.reflA[i] = refl8[i]; cb.reflB[i] = refl8[4 + i]; }
+    /* [P3] sun dir + shadow-ray enable for chit_refl's sun shadow ray. */
+    if (sun_dir && sun_shadow) {
+        cb.sun[0] = sun_dir[0]; cb.sun[1] = sun_dir[1]; cb.sun[2] = sun_dir[2];
+        cb.sun[3] = 1.0f;
+    } else {
+        cb.sun[3] = 0.0f;
+    }
 
     Backend_ApplySSRPass(&cb);
 }

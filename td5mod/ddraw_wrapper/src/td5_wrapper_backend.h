@@ -213,6 +213,9 @@ typedef struct {
     float params2[4];        /* x = pane H, y = master intensity, zw reserved */
     float reflA[4];          /* base reflectivity, material ids 0..3         */
     float reflB[4];          /* base reflectivity, material ids 4..7         */
+    float sun[4];            /* [P3] xyz = surface->light dir (unit); w = shadow-ray
+                              * enable (0/1). chit_refl casts a sun shadow ray so
+                              * reflected geometry receives sun shadows.          */
 } SSRCB;
 
 /* ========================================================================
