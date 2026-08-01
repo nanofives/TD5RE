@@ -193,11 +193,21 @@ static ID3D12GraphicsCommandList *s_copy_list;
 static BackendTexture  *s_white_tex;
 static BackendTexture  *s_black_tex;   /* 1x1 zero: gbuffer/scene-copy placeholder for passes */
 
+/* [RT lighting P2a] G-buffer MRT: R8G8B8A8 normal (24b) + material id (8b),
+ * written to SV_Target1 by the ps_*_g variants for z-writing opaque draws while
+ * enabled. Produced here; the LOW deferred passes keep the placeholder (LOW
+ * pixel-identical) -- consumption is gated behind HIGH in Phase 2b. */
+static BackendTexture  *s_gbuffer_tex;
+static int              s_gbuffer_enabled;   /* game requested it (per frame)     */
+static int              s_gbuf_bound;        /* RT1 currently bound (reset/frame)  */
+
 /* forward decls (definitions below the device lifecycle) */
 static D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle(ID3D12DescriptorHeap *h, UINT idx, UINT size);
 static D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle(ID3D12DescriptorHeap *h, UINT idx, UINT size);
 static void d3d12_flush_uploads(void);
 static void d3d12_diag(const char *fmt, ...);
+static void d3d12_fullscreen_blit(BackendTexture *src);
+static int  d3d12_gbuf_debug(void);
 
 /* ---- plumbing that lived in the filtered-out d3d11 backend files -------- *
  * g_wrapper_rec (deferred pane-record thread-local; the d3d12 backend does not
@@ -585,6 +595,7 @@ static void d3d12_frame_begin(void)
     s_frame_static_bound = 0;
     s_last_pso  = NULL;
     s_last_topo = (D3D_PRIMITIVE_TOPOLOGY)-1;
+    s_gbuf_bound = 0;   /* single-RT bound above; MRT rebinds on the first world draw */
     /* A gpu_va from the PREVIOUS frame points into that frame's ring slot ->
      * drop it; the draw path re-allocs from the persistent copy on first use. */
     if (s_viewport_cb) s_viewport_cb->gpu_va = 0;
@@ -685,6 +696,17 @@ static void d3d12_frame_present(int sync)
      * Gated by TD5RE_RT_SMOKE; proves the DXR pipeline end to end via framedump. */
     if (g_d3d12.device5 && d3d12_dxr_smoke_enabled())
         d3d12_dxr_smoke_blit();
+
+    /* G-buffer debug (Phase 2a, TD5RE_RT_GBUF_DEBUG): blit the normal+matid
+     * target over the frame to verify production. Transition RT->SRV, blit, and
+     * leave it in SRV (next frame's SetGBufferEnabled transitions back to RT). */
+    if (s_gbuffer_tex && d3d12_gbuf_debug()) {
+        if (s_gbuffer_tex->rstate != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) {
+            d3d12_resource_barrier(s_gbuffer_tex->res, s_gbuffer_tex->rstate, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            s_gbuffer_tex->rstate = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        }
+        d3d12_fullscreen_blit(s_gbuffer_tex);
+    }
 
     /* Framedump capture (dev): copy this frame BEFORE the flip, else read it back
      * after present + wait. Otherwise plain RT->PRESENT. */
@@ -827,8 +849,8 @@ static void d3d12_resolve_ps(int ps_id, const void **bc, SIZE_T *len)
     *bc = s_builtin_ps[PS_MODULATE].bc; *len = s_builtin_ps[PS_MODULATE].len;
 }
 
-/* topo_type: 0=triangle, 1=line */
-static ID3D12PipelineState *d3d12_get_pso(int vs_idx, int ps_id, int blend, int ds, int raster, int topo_type)
+/* topo_type: 0=triangle, 1=line. gbuf: 1 -> MRT (RT1 = R8G8B8A8 gbuffer). */
+static ID3D12PipelineState *d3d12_get_pso(int vs_idx, int ps_id, int blend, int ds, int raster, int topo_type, int gbuf)
 {
     UINT64 key;
     int i;
@@ -838,7 +860,8 @@ static ID3D12PipelineState *d3d12_get_pso(int vs_idx, int ps_id, int blend, int 
     HRESULT hr;
 
     key = ((UINT64)(vs_idx & 0xF)) | ((UINT64)(ps_id & 0x3F) << 4) | ((UINT64)(blend & 0xF) << 10)
-        | ((UINT64)(ds & 0xF) << 14) | ((UINT64)(raster & 0x3) << 18) | ((UINT64)(topo_type & 0x3) << 20);
+        | ((UINT64)(ds & 0xF) << 14) | ((UINT64)(raster & 0x3) << 18) | ((UINT64)(topo_type & 0x3) << 20)
+        | ((UINT64)(gbuf & 0x1) << 22);
     for (i = 0; i < s_pso_count; i++) if (s_pso_cache[i].key == key) return s_pso_cache[i].pso;
     if (s_pso_count >= D3D12_PSO_CACHE_MAX) { WRAPPER_LOG("D3D12 PSO cache full"); return NULL; }
 
@@ -858,13 +881,14 @@ static ID3D12PipelineState *d3d12_get_pso(int vs_idx, int ps_id, int blend, int 
     pd.InputLayout.NumElements = 4;
     pd.PrimitiveTopologyType = topo_type == 1 ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE
                                               : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    pd.NumRenderTargets = 1;
+    pd.NumRenderTargets = gbuf ? 2 : 1;
     pd.RTVFormats[0] = DXGI_FORMAT_B8G8R8A8_UNORM;
+    if (gbuf) pd.RTVFormats[1] = DXGI_FORMAT_R8G8B8A8_UNORM;   /* gbuffer normal+matid */
     pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     pd.SampleDesc.Count = 1;
 
     hr = ID3D12Device_CreateGraphicsPipelineState(g_d3d12.device, &pd, &IID_ID3D12PipelineState, (void **)&pso);
-    if (FAILED(hr) || !pso) { WRAPPER_LOG("D3D12 CreateGraphicsPipelineState (ps=%d blend=%d ds=%d) 0x%08lX", ps_id, blend, ds, hr); return NULL; }
+    if (FAILED(hr) || !pso) { WRAPPER_LOG("D3D12 CreateGraphicsPipelineState (ps=%d blend=%d ds=%d gbuf=%d) 0x%08lX", ps_id, blend, ds, gbuf, hr); return NULL; }
     s_pso_cache[s_pso_count].key = key;
     s_pso_cache[s_pso_count].pso = pso;
     s_pso_count++;
@@ -948,7 +972,30 @@ static void d3d12_bind_and_draw(D3D_PRIMITIVE_TOPOLOGY topo, int topo_type,
      * The Plat draw path doesn't call this itself; doing it here covers all four
      * bind_and_draw callers uniformly. */
     Backend_UpdateFogCB();
-    pso = d3d12_get_pso(s_cur_vs, ps, blend, ds, raster, topo_type);
+
+    /* [RT lighting P2a] G-buffer MRT: z-writing opaque draws (which carry a
+     * packed world normal + material id in COLOR1) write SV_Target1 into the
+     * gbuffer via the _g PS variants. Same predicate as the D3D11 backend
+     * (z_write ON, blend OFF). foliage-AA is dormant on D3D12 so the _g SV_Target0
+     * output is byte-identical to the non-_g PS -> visible frame unchanged. */
+    {
+        int gbuf_want = s_gbuffer_enabled && s_gbuffer_tex &&
+            (ds == DS_Z_ON_WRITE_ON || ds == DS_Z_OFF_WRITE_ON || ds == DS_Z_ON_WRITE_ON_ALWAYS) &&
+            blend == BLEND_OPAQUE;
+        if (gbuf_want != s_gbuf_bound) {
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvs[2];
+            D3D12_CPU_DESCRIPTOR_HANDLE dsvh = cpu_handle(s_dsv_heap, 0, s_dsv_size);
+            rtvs[0] = d3d12_rtv_handle(fi);
+            rtvs[1] = gbuf_want ? cpu_handle(s_tex_rtv_heap, s_gbuffer_tex->rtv_slot, s_tex_rtv_size) : rtvs[0];
+            ID3D12GraphicsCommandList_OMSetRenderTargets(cl, gbuf_want ? 2 : 1, rtvs, FALSE, s_dsv_heap ? &dsvh : NULL);
+            s_gbuf_bound = gbuf_want;
+        }
+        if (gbuf_want) {
+            if (ps == PS_MODULATE)            ps = PS_MODULATE_G;
+            else if (ps == PS_MODULATE_ALPHA) ps = PS_MODULATE_ALPHA_G;
+        }
+        pso = d3d12_get_pso(s_cur_vs, ps, blend, ds, raster, topo_type, gbuf_want);
+    }
     if (!pso) return;
 
     /* Invariant across the frame's draws -> bind once (heaps + root sig). The
@@ -1250,6 +1297,7 @@ static void d3d12_fullscreen_pass(const void *ps, SIZE_T ps_len, int blend,
     s_frame_static_bound = 0;
     s_last_pso  = NULL;
     s_last_topo = (D3D_PRIMITIVE_TOPOLOGY)-1;
+    s_gbuf_bound = 0;   /* restored single-RT above; a later world draw rebinds MRT */
 }
 
 static BackendConstBuffer *d3d12_cb_create(UINT size)
@@ -1369,8 +1417,13 @@ static BackendTexture *d3d12_tex_create(UINT w, UINT h, DXGI_FORMAT fmt, int rt)
     td.Format = fmt; td.SampleDesc.Count = 1;
     td.Flags = rt ? D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET : D3D12_RESOURCE_FLAG_NONE;
     init_state = rt ? D3D12_RESOURCE_STATE_RENDER_TARGET : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    hr = ID3D12Device_CreateCommittedResource(g_d3d12.device, &hp, D3D12_HEAP_FLAG_NONE, &td,
-            init_state, NULL, &IID_ID3D12Resource, (void **)&bt->res);
+    {
+        /* RT textures (e.g. the G-buffer) get a matching optimized clear value so
+         * ClearRenderTargetView to {0,0,0,0} isn't flagged as a slow path (id=820). */
+        D3D12_CLEAR_VALUE cv; ZeroMemory(&cv, sizeof(cv)); cv.Format = fmt;
+        hr = ID3D12Device_CreateCommittedResource(g_d3d12.device, &hp, D3D12_HEAP_FLAG_NONE, &td,
+                init_state, rt ? &cv : NULL, &IID_ID3D12Resource, (void **)&bt->res);
+    }
     if (FAILED(hr)) { free(bt); return NULL; }
 
     bt->fmt = fmt; bt->w = w; bt->h = h; bt->rstate = init_state;
@@ -1702,7 +1755,7 @@ static int d3d12_render_core_init(int width, int height)
 
     /* Warm-up PSO: exercises get_pso + validates root-sig/shader/layout wiring
      * against the debug layer at init (before any frame). */
-    if (!d3d12_get_pso(0, PS_MODULATE, BLEND_SRCALPHA_INVSRC, DS_Z_OFF_WRITE_OFF, 0, 0)) return 0;
+    if (!d3d12_get_pso(0, PS_MODULATE, BLEND_SRCALPHA_INVSRC, DS_Z_OFF_WRITE_OFF, 0, 0, 0)) return 0;
 
     /* Present-time fullscreen blit PSO (no input layout; SV_VertexID triangle). */
     {
@@ -1743,6 +1796,7 @@ static void d3d12_render_core_shutdown(void)
     if (s_pass_root_sig) { ID3D12RootSignature_Release(s_pass_root_sig); s_pass_root_sig = NULL; }
     if (s_white_tex)   { if (s_white_tex->res) ID3D12Resource_Release(s_white_tex->res); free(s_white_tex); s_white_tex = NULL; }
     if (s_black_tex)   { if (s_black_tex->res) ID3D12Resource_Release(s_black_tex->res); free(s_black_tex); s_black_tex = NULL; }
+    if (s_gbuffer_tex) { if (s_gbuffer_tex->res) ID3D12Resource_Release(s_gbuffer_tex->res); free(s_gbuffer_tex); s_gbuffer_tex = NULL; s_gbuffer_enabled = 0; s_gbuf_bound = 0; }
     if (s_scene_copy)  { if (s_scene_copy->res) ID3D12Resource_Release(s_scene_copy->res); free(s_scene_copy); s_scene_copy = NULL; }
     if (s_copy_list)   { ID3D12GraphicsCommandList_Release(s_copy_list); s_copy_list = NULL; }
     if (s_copy_alloc)  { ID3D12CommandAllocator_Release(s_copy_alloc); s_copy_alloc = NULL; }
@@ -2507,7 +2561,49 @@ void Backend_RestoreMainRenderTarget(void) { }
 void Backend_SelectPixelShader(void) { }  /* PS chosen at draw time from g_backend.state */
 void Backend_SetBuiltinPixelShader(int ps_idx) { if (ps_idx >= 0 && ps_idx < PS_COUNT) s_cur_ps = ps_idx; }
 int  Backend_SetExclusiveFullscreen(int enable) { (void)enable; return 1; }
-void Backend_SetGBufferEnabled(int on) { (void)on; }
+/* [RT lighting P2a] Per-frame G-buffer gate. on=1: (re)create the R8G8B8A8
+ * normal+matid target at render size, clear it to 0 (matid 0 = no data), and
+ * arm production (z-writing opaque draws bind it as RT1 + use the ps_*_g
+ * variants). on=0: stop. Called once per rendered race frame BEFORE the world
+ * pass. LOW keeps the placeholder in the deferred passes (pixel-identical);
+ * consumption is wired in Phase 2b. */
+void Backend_SetGBufferEnabled(int on)
+{
+    if (!g_d3d12.device || g_backend.device_removed) { s_gbuffer_enabled = 0; return; }
+    if (!on) { s_gbuffer_enabled = 0; return; }
+
+    {
+        UINT w = (UINT)g_backend.width, h = (UINT)g_backend.height;
+        if (s_gbuffer_tex && (s_gbuffer_tex->w != w || s_gbuffer_tex->h != h)) {
+            if (s_gbuffer_tex->res) d3d12_retire(s_gbuffer_tex->res);
+            free(s_gbuffer_tex); s_gbuffer_tex = NULL;
+        }
+        if (!s_gbuffer_tex) s_gbuffer_tex = d3d12_tex_create(w, h, DXGI_FORMAT_R8G8B8A8_UNORM, 1);
+        if (!s_gbuffer_tex) { s_gbuffer_enabled = 0; return; }
+    }
+    /* Clear to 0 for this frame (needs the frame open + RT state; the debug blit
+     * or a prior frame may have left it in PIXEL_SHADER_RESOURCE). */
+    if (!g_d3d12.frame_open) d3d12_frame_begin();
+    if (s_gbuffer_tex->rstate != D3D12_RESOURCE_STATE_RENDER_TARGET) {
+        d3d12_resource_barrier(s_gbuffer_tex->res, s_gbuffer_tex->rstate, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        s_gbuffer_tex->rstate = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    }
+    {
+        static const float z[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        ID3D12GraphicsCommandList_ClearRenderTargetView(g_d3d12.list,
+            cpu_handle(s_tex_rtv_heap, s_gbuffer_tex->rtv_slot, s_tex_rtv_size), z, 0, NULL);
+    }
+    s_gbuffer_enabled = 1;
+}
+
+/* Debug (TD5RE_RT_GBUF_DEBUG): blit the G-buffer over the frame to verify normals
+ * are being written. Returns 1 if armed (cached). */
+static int d3d12_gbuf_debug(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("TD5RE_RT_GBUF_DEBUG"); on = (e && e[0] && e[0] != '0') ? 1 : 0; }
+    return on;
+}
 void Backend_SetViewport(float x, float y, float w, float h, float mn, float mx)
 {
     s_cur_vp.TopLeftX = x; s_cur_vp.TopLeftY = y; s_cur_vp.Width = w; s_cur_vp.Height = h;

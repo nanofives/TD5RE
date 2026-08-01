@@ -13,7 +13,7 @@ plumbing (SBT, state object, root signatures) is decided once, up front.
 |-------|-------------|--------|
 | 0 | DXR foundation (dxc, Device5, smoke dispatch) | ✅ done (branch rt-lighting) |
 | 1 | World-space geometry feed + BLAS/TLAS + debug view | ✅ done — **alignment gate PASSED** |
-| 2a | G-buffer MRT wiring in D3D12 | ⬜ |
+| 2a | G-buffer MRT wiring in D3D12 | ✅ done |
 | 2b | RT shadows (sun + dynamic lights), blob-shadow kill | ⬜ |
 | 3 | RT reflections with textured hit shading | ⬜ |
 | 4 | Menu row, INI, runtime switch, fallback, release | ⬜ |
@@ -123,6 +123,34 @@ Repro overlay: `td5re.exe --AutoRace=1 --SkipIntro=1 --DefaultTrack=5 --RaceTrac
 --AutoRaceReady=1` with `TD5RE_RT_DEBUGVIEW=1 TD5RE_FRAMEDUMP=<png>` (add
 `TD5RE_RT_ONLYCARS=1` to isolate cars, `TD5RE_RT_DIAG=1` for the feed dump →
 `log/rt_diag.log`).
+
+### As-built — Phase 2a (2026-07-31, branch `rt-lighting`)
+
+**Done + verified:** G-buffer MRT produced in the D3D12 backend. `d3d12_get_pso` gained
+a gbuffer key-bit (bit 22) → `NumRenderTargets=2`, `RTVFormats[1]=R8G8B8A8`.
+`Backend_SetGBufferEnabled` creates the R8G8B8A8 target (via `d3d12_tex_create(...,1)` —
+both RTV + SRV) at render size and clears it to 0 (matid 0). `d3d12_bind_and_draw`
+mirrors the D3D11 predicate (z-write ON, blend OFF) to bind the gbuffer as RT1 and
+promote `PS_MODULATE`→`PS_MODULATE_G` / `PS_MODULATE_ALPHA`→`PS_MODULATE_ALPHA_G`;
+`s_gbuf_bound` tracks the RT1 bind (reset in frame_begin + after each fullscreen pass).
+
+**G-buffer verified correct** (via `TD5RE_RT_GBUF_DEBUG=1` blit + pixel sampling at
+`--LightingMode=2`): flat road = `R128 G1 B128` (normal up), vertical wall = `R254 G128
+B128` (facing +X), sky = `0,0,0,0` (cleared, not z-write opaque), matid in alpha
+(A=5 = car body). Encoding matches the COLOR1 pack in `td5_render.c`/`td5_render_mesh.c`.
+
+**LOW pixel-identical:** foliage-AA is dormant on D3D12 (`foliageAA` never set non-zero),
+so `SampleTex==tex.Sample` and the `_g` `SV_Target0` output is byte-identical to the
+non-`_g` PS — producing the G-buffer never changes the visible frame. The LOW deferred
+passes **keep the placeholder** (`s_black_tex` at t1); real-G-buffer *consumption* is
+gated to HIGH in Phase 2b. Default LightingMode=0 → gbuffer off → identical code path.
+Verified: default LOW framedump = normal race scene; goldens 54/0; build+lint clean.
+
+**Deviation from the plan's "replace the placeholder" step:** deferred passes keep the
+placeholder in Phase 2a (per the plan's own LOW-identical caveat) — the gbuffer SRV is
+produced + available; Phase 2b wires HIGH-gated consumption. **Debug-layer fix:** RT
+textures now get a `{0,0,0,0}` optimized clear value in `d3d12_tex_create` (killed the
+id=820 slow-clear perf warning). Debug-layer clean with the gbuffer producing.
 
 ## Handoff prompt (what launched this execution)
 
