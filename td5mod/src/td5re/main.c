@@ -342,6 +342,7 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("Lighting", "Reflections",    g_td5.ini.reflections);
     td5_ini_write_int("Lighting", "WetRoads",       g_td5.ini.wet_roads);
     td5_ini_write_int("Lighting", "StreetLights",   g_td5.ini.street_lights);
+    td5_ini_write_int("Lighting", "Quality",        g_td5.ini.lighting_quality);  /* [RT] LOW/HIGH */
 
     /* Game options */
     td5_ini_write_int("GameOptions", "Laps",             g_td5.ini.laps);
