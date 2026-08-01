@@ -14,6 +14,7 @@
  * ======================================================================== */
 
 #include "td5_render.h"
+#include "td5_rt.h"
 #include "td5_camera.h"
 #include "td5_platform.h"
 #include "td5_rcmd.h"   /* Phase B render-transform: per-pane CPU command recording */
@@ -1119,6 +1120,10 @@ void render_td6_props(const TD5_Actor *ref)
  * env knob TD5RE_SHADOW_RAYCAST=0 is set. */
 void render_vehicle_shadow_quad(const TD5_Actor *actor)
 {
+    /* [RT lighting HIGH] the car BLAS occludes the sun rays at road pixels, so
+     * the RT sun shadow IS the real contact shadow -- drop the blob. */
+    if (td5_rt_active())
+        return;
     if (shadow_raycast_enabled())
         render_vehicle_shadow_conforming(actor);
     else

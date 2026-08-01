@@ -24,6 +24,8 @@
 #include <d3d12.h>
 #include "d3d12_backend_priv.h"
 #include "shaders/rt_pipeline_bytes.h"   /* const unsigned char g_rt_pipeline[] */
+#include "shaders/ps_shadow_rt_bytes_50.h"  /* MULT sun-shadow composite (this TU only) */
+#include "shaders/ps_light_rt_bytes_50.h"   /* additive light composite  (this TU only) */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,12 +45,19 @@ static void dxr_log(const char *fmt, ...)
 /* Shader-visible heap slots (fixed):
  *   0 = output UAV (u0)      1 = TLAS SRV (t0)      2 = blit SRV
  *   3 = VB pool SRV (t, P3)  4 = IB pool SRV (t, P3)  [16..] bindless (P3) */
+/* Heap: UAV range u0-u2 (slots 0..2) + SRV range t0-t2 (slots 3..5) form the
+ * global RS descriptor table; blit/composite SRVs live past it. */
 #define DXR_HEAP_SLOTS        4096
-#define DXR_SLOT_OUTPUT_UAV   0
-#define DXR_SLOT_TLAS_SRV     1
-#define DXR_SLOT_BLIT_SRV     2
-#define DXR_SLOT_VB_SRV       3
-#define DXR_SLOT_IB_SRV       4
+#define DXR_SLOT_OUTPUT_UAV   0   /* u0 debug/smoke   */
+#define DXR_SLOT_SUNVIS_UAV   1   /* u1 sun shade     */
+#define DXR_SLOT_LIGHTCOL_UAV 2   /* u2 light color   */
+#define DXR_SLOT_TLAS_SRV     3   /* t0 TLAS          */
+#define DXR_SLOT_DEPTH_SRV    4   /* t1 depth R32F    */
+#define DXR_SLOT_GBUF_SRV     5   /* t2 gbuffer       */
+#define DXR_SLOT_BLIT_SRV     6   /* debug output blit */
+#define DXR_SLOT_SUNVIS_SRV   7   /* shadow composite  */
+#define DXR_SLOT_LIGHTCOL_SRV 8   /* light composite   */
+#define DXR_SLOT_TABLE_BASE   0   /* table 0 gpu handle = slot 0 */
 
 #define DXR_SHADER_ID_SIZE   D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES   /* 32       */
 #define DXR_REGION_ALIGN     D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT /* 64  */
@@ -61,7 +70,9 @@ static void dxr_log(const char *fmt, ...)
  * Hitgroup: [0]="hg". */
 #define DXR_RAYGEN_SMOKE      0
 #define DXR_RAYGEN_DEBUG      1
-#define DXR_RAYGEN_COUNT      4      /* reserve smoke/debug/shadow/refl */
+#define DXR_RAYGEN_SHADOW     2
+#define DXR_RAYGEN_LIGHT      3
+#define DXR_RAYGEN_COUNT      4
 #define DXR_MISS_SHADOW       0
 #define DXR_MISS_REFL         1
 #define DXR_MISS_COUNT        2
@@ -111,7 +122,16 @@ typedef struct {
 
     /* Blit (UAV -> backbuffer) -- dxr-owned so we never touch the backend heap. */
     ID3D12RootSignature        *blit_rs;
-    ID3D12PipelineState        *blit_pso;
+    ID3D12PipelineState        *blit_pso;         /* opaque (debug view)          */
+
+    /* P2b: sun-shadow + dynamic-light masks (UAV write + SRV composite) + the
+     * MULT/additive composite PSOs (share blit_rs). */
+    ID3D12Resource             *sunvis;           /* R32_FLOAT                    */
+    ID3D12Resource             *lightcol;         /* R16G16B16A16_FLOAT           */
+    UINT                        mask_w, mask_h;
+    D3D12_RESOURCE_STATES       sunvis_state, lightcol_state;
+    ID3D12PipelineState        *shadow_pso;       /* ps_shadow_rt, MULT           */
+    ID3D12PipelineState        *light_pso;        /* ps_light_rt, additive        */
 
     /* Output UAV texture (swapchain-sized). */
     ID3D12Resource             *output;
@@ -241,30 +261,36 @@ int d3d12_dxr_smoke_enabled(void)
 static int dxr_create_global_rs(void)
 {
     D3D12_DESCRIPTOR_RANGE ranges[2];
-    D3D12_ROOT_PARAMETER params[2];
+    D3D12_ROOT_PARAMETER params[4];
     D3D12_STATIC_SAMPLER_DESC samp;
     D3D12_ROOT_SIGNATURE_DESC rsd;
     ID3D10Blob *sig = NULL, *err = NULL;
     HRESULT hr;
 
-    /* Fixed descriptor table 0: [u0 output UAV][t0 TLAS SRV], mapped to
-     * contiguous heap slots DXR_SLOT_OUTPUT_UAV, DXR_SLOT_TLAS_SRV. */
+    /* Fixed descriptor table 0: UAV range u0-u2 (heap slots 0..2) + SRV range
+     * t0-t2 (heap slots 3..5): output/sunvis/lightcol UAVs, TLAS/depth/gbuffer. */
     ZeroMemory(ranges, sizeof(ranges));
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    ranges[0].NumDescriptors = 1; ranges[0].BaseShaderRegister = 0;   /* u0 */
+    ranges[0].NumDescriptors = 3; ranges[0].BaseShaderRegister = 0;   /* u0-u2 */
     ranges[0].OffsetInDescriptorsFromTableStart = 0;
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[1].NumDescriptors = 1; ranges[1].BaseShaderRegister = 0;   /* t0 (TLAS) */
-    ranges[1].OffsetInDescriptorsFromTableStart = 1;
+    ranges[1].NumDescriptors = 3; ranges[1].BaseShaderRegister = 0;   /* t0-t2 */
+    ranges[1].OffsetInDescriptorsFromTableStart = 3;
 
     ZeroMemory(params, sizeof(params));
-    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;   /* b0 per-dispatch */
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;   /* b0 debug view   */
     params[0].Descriptor.ShaderRegister = 0;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[1].DescriptorTable.NumDescriptorRanges = 2;
-    params[1].DescriptorTable.pDescriptorRanges = ranges;
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;   /* b1 ShadowCB     */
+    params[1].Descriptor.ShaderRegister = 1;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;   /* b2 LightCB      */
+    params[2].Descriptor.ShaderRegister = 2;
+    params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[3].DescriptorTable.NumDescriptorRanges = 2;
+    params[3].DescriptorTable.pDescriptorRanges = ranges;
+    params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     ZeroMemory(&samp, sizeof(samp));
     samp.Filter   = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -275,7 +301,7 @@ static int dxr_create_global_rs(void)
     samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     ZeroMemory(&rsd, sizeof(rsd));
-    rsd.NumParameters = 2; rsd.pParameters = params;
+    rsd.NumParameters = 4; rsd.pParameters = params;
     rsd.NumStaticSamplers = 1; rsd.pStaticSamplers = &samp;
     rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;   /* DXR global RS: no DENY flags */
 
@@ -298,7 +324,7 @@ static int dxr_create_global_rs(void)
 static int dxr_create_state_object(void)
 {
     D3D12_DXIL_LIBRARY_DESC lib;
-    D3D12_EXPORT_DESC        exports[5];
+    D3D12_EXPORT_DESC        exports[7];
     D3D12_HIT_GROUP_DESC     hg;
     D3D12_RAYTRACING_SHADER_CONFIG   shcfg;
     D3D12_RAYTRACING_PIPELINE_CONFIG pcfg;
@@ -313,10 +339,12 @@ static int dxr_create_state_object(void)
     exports[2].Name = L"chit_refl";
     exports[3].Name = L"miss_shadow";
     exports[4].Name = L"miss_refl";
+    exports[5].Name = L"rgen_shadow";
+    exports[6].Name = L"rgen_light";
     ZeroMemory(&lib, sizeof(lib));
     lib.DXILLibrary.pShaderBytecode = g_rt_pipeline;
     lib.DXILLibrary.BytecodeLength  = sizeof(g_rt_pipeline);
-    lib.NumExports = 5; lib.pExports = exports;
+    lib.NumExports = 7; lib.pExports = exports;
 
     /* One hit group "hg" (plan sec.4). Phase 1: closest-hit only; anyhit_cutout
      * added in Phase 3. */
@@ -379,8 +407,10 @@ static int dxr_create_sbt(void)
     if (mapped) {
         memset(mapped, 0, DXR_SBT_BYTES);
         /* Raygen region: 64-strided so each record's StartAddress is 64-aligned. */
-        ok &= dxr_sbt_put(mapped, props, DXR_SBT_RAYGEN_OFF + (UINT)DXR_RAYGEN_SMOKE * DXR_SBT_RAYGEN_STRIDE, L"rgen_smoke");
-        ok &= dxr_sbt_put(mapped, props, DXR_SBT_RAYGEN_OFF + (UINT)DXR_RAYGEN_DEBUG * DXR_SBT_RAYGEN_STRIDE, L"rgen_debug");
+        ok &= dxr_sbt_put(mapped, props, DXR_SBT_RAYGEN_OFF + (UINT)DXR_RAYGEN_SMOKE  * DXR_SBT_RAYGEN_STRIDE, L"rgen_smoke");
+        ok &= dxr_sbt_put(mapped, props, DXR_SBT_RAYGEN_OFF + (UINT)DXR_RAYGEN_DEBUG  * DXR_SBT_RAYGEN_STRIDE, L"rgen_debug");
+        ok &= dxr_sbt_put(mapped, props, DXR_SBT_RAYGEN_OFF + (UINT)DXR_RAYGEN_SHADOW * DXR_SBT_RAYGEN_STRIDE, L"rgen_shadow");
+        ok &= dxr_sbt_put(mapped, props, DXR_SBT_RAYGEN_OFF + (UINT)DXR_RAYGEN_LIGHT  * DXR_SBT_RAYGEN_STRIDE, L"rgen_light");
         /* Miss region: [0]=miss_shadow, [1]=miss_refl. */
         ok &= dxr_sbt_put(mapped, props, DXR_SBT_MISS_OFF + 0 * DXR_SHADER_ID_SIZE, L"miss_shadow");
         ok &= dxr_sbt_put(mapped, props, DXR_SBT_MISS_OFF + 1 * DXR_SHADER_ID_SIZE, L"miss_refl");
@@ -896,6 +926,185 @@ void Backend_RTSetView(const float cam_pos[3], const float basis9[9],
     g_dxr.have_view = 1;
 }
 
+/* ---- P2b: RT sun-shadow + dynamic-light passes ---------------------------- */
+
+static ID3D12Resource *dxr_uav_texture(int w, int h, DXGI_FORMAT fmt)
+{
+    D3D12_HEAP_PROPERTIES hp; D3D12_RESOURCE_DESC rd; ID3D12Resource *r = NULL;
+    ZeroMemory(&hp, sizeof(hp)); hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    ZeroMemory(&rd, sizeof(rd));
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; rd.Width = (UINT64)w; rd.Height = (UINT)h;
+    rd.DepthOrArraySize = 1; rd.MipLevels = 1; rd.Format = fmt; rd.SampleDesc.Count = 1;
+    rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (FAILED(ID3D12Device_CreateCommittedResource((ID3D12Device *)g_dxr.device5, &hp, D3D12_HEAP_FLAG_NONE, &rd,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, NULL, &IID_ID3D12Resource, (void **)&r)))
+        return NULL;
+    return r;
+}
+
+/* (Re)create the sun-visibility + light-color mask textures + their UAV/SRV. */
+static int dxr_ensure_masks(int w, int h)
+{
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uav;
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv;
+    if (g_dxr.sunvis && g_dxr.lightcol && g_dxr.mask_w == (UINT)w && g_dxr.mask_h == (UINT)h) return 1;
+    if (g_dxr.sunvis)   { d3d12_priv_retire(g_dxr.sunvis);   g_dxr.sunvis = NULL; }
+    if (g_dxr.lightcol) { d3d12_priv_retire(g_dxr.lightcol); g_dxr.lightcol = NULL; }
+    g_dxr.sunvis   = dxr_uav_texture(w, h, DXGI_FORMAT_R32_FLOAT);
+    g_dxr.lightcol = dxr_uav_texture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    if (!g_dxr.sunvis || !g_dxr.lightcol) { dxr_log("mask alloc FAILED"); return 0; }
+    g_dxr.mask_w = (UINT)w; g_dxr.mask_h = (UINT)h;
+    g_dxr.sunvis_state = g_dxr.lightcol_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+    ZeroMemory(&uav, sizeof(uav)); uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    uav.Format = DXGI_FORMAT_R32_FLOAT;
+    ID3D12Device_CreateUnorderedAccessView((ID3D12Device *)g_dxr.device5, g_dxr.sunvis, NULL, &uav, dxr_cpu(g_dxr.heap, DXR_SLOT_SUNVIS_UAV));
+    uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    ID3D12Device_CreateUnorderedAccessView((ID3D12Device *)g_dxr.device5, g_dxr.lightcol, NULL, &uav, dxr_cpu(g_dxr.heap, DXR_SLOT_LIGHTCOL_UAV));
+
+    ZeroMemory(&srv, sizeof(srv)); srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; srv.Texture2D.MipLevels = 1;
+    srv.Format = DXGI_FORMAT_R32_FLOAT;
+    ID3D12Device_CreateShaderResourceView((ID3D12Device *)g_dxr.device5, g_dxr.sunvis, &srv, dxr_cpu(g_dxr.heap, DXR_SLOT_SUNVIS_SRV));
+    srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    ID3D12Device_CreateShaderResourceView((ID3D12Device *)g_dxr.device5, g_dxr.lightcol, &srv, dxr_cpu(g_dxr.heap, DXR_SLOT_LIGHTCOL_SRV));
+    return 1;
+}
+
+static ID3D12PipelineState *dxr_make_composite_pso(const void *ps, SIZE_T ps_len, int additive)
+{
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd; ID3D12PipelineState *pso = NULL;
+    const void *vs = NULL, *cps = NULL; SIZE_T vs_len = 0, cps_len = 0;
+    D3D12_RENDER_TARGET_BLEND_DESC *rt;
+    d3d12_priv_fullscreen_shaders(&vs, &vs_len, &cps, &cps_len);
+    ZeroMemory(&pd, sizeof(pd));
+    pd.pRootSignature = g_dxr.blit_rs;
+    pd.VS.pShaderBytecode = vs; pd.VS.BytecodeLength = vs_len;
+    pd.PS.pShaderBytecode = ps; pd.PS.BytecodeLength = ps_len;
+    rt = &pd.BlendState.RenderTarget[0];
+    rt->BlendEnable = (additive != 2);   /* 2 = opaque debug (raw mask) */
+    if (additive == 1)      { rt->SrcBlend = D3D12_BLEND_ONE;        rt->DestBlend = D3D12_BLEND_ONE; }   /* additive */
+    else if (additive == 0) { rt->SrcBlend = D3D12_BLEND_DEST_COLOR; rt->DestBlend = D3D12_BLEND_ZERO; }  /* MULT     */
+    rt->BlendOp = D3D12_BLEND_OP_ADD;
+    rt->SrcBlendAlpha = D3D12_BLEND_ONE; rt->DestBlendAlpha = D3D12_BLEND_ZERO; rt->BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    rt->RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pd.SampleMask = 0xFFFFFFFFu;
+    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pd.RasterizerState.DepthClipEnable = TRUE;
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_B8G8R8A8_UNORM;
+    pd.DSVFormat = DXGI_FORMAT_UNKNOWN; pd.SampleDesc.Count = 1;
+    if (FAILED(ID3D12Device_CreateGraphicsPipelineState((ID3D12Device *)g_dxr.device5, &pd,
+            &IID_ID3D12PipelineState, (void **)&pso))) { dxr_log("composite PSO FAILED (add=%d)", additive); return NULL; }
+    return pso;
+}
+
+/* Shared shadow/light pass: dispatch the raygen against the TLAS (reading depth +
+ * G-buffer), then composite the mask over the pane. cb is the game's ShadowCB (b1)
+ * or LightCB (b2). Returns 1 if it ran (caller skips the LOW march). */
+static int dxr_lighting_pass(const void *cb, UINT cb_size, int is_light)
+{
+    d3d12_dxr_env e; d3d12_dxr_scene scene;
+    ID3D12GraphicsCommandList  *cl; ID3D12GraphicsCommandList4 *cl4;
+    ID3D12DescriptorHeap *heaps[1];
+    D3D12_GPU_VIRTUAL_ADDRESS cbva;
+    D3D12_DISPATCH_RAYS_DESC d;
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvd;
+    D3D12_VIEWPORT vp; D3D12_RECT sc;
+    const float *f = (const float *)cb;
+    int paneX, paneY, paneW, paneH; UINT raygen;
+    ID3D12Resource *mask; D3D12_RESOURCE_STATES *mask_state; UINT mask_srv; ID3D12PipelineState *comp;
+
+    d3d12_priv_env(&e);
+    if (g_dxr.disabled || !e.device5 || !e.list4 || !e.frame_open || !g_dxr.tlas_valid) return 0;
+    g_dxr.device5 = e.device5; g_dxr.list4 = e.list4;
+    if (!dxr_ensure_init() || !dxr_ensure_masks(e.width, e.height)) return 0;
+    if (is_light) { if (!g_dxr.light_pso)  g_dxr.light_pso  = dxr_make_composite_pso(g_ps_light_rt_50,  sizeof(g_ps_light_rt_50),  1); comp = g_dxr.light_pso; }
+    else          { if (!g_dxr.shadow_pso) g_dxr.shadow_pso = dxr_make_composite_pso(g_ps_shadow_rt_50, sizeof(g_ps_shadow_rt_50), 0); comp = g_dxr.shadow_pso; }
+    /* Debug: opaque grayscale mask (TD5RE_RT_MASK) -- shadow pass only. */
+    { static int dbg = -1; static ID3D12PipelineState *s_dbgpso;
+      if (dbg < 0) { const char *e = getenv("TD5RE_RT_MASK"); dbg = (e && e[0] && e[0] != '0') ? 1 : 0; }
+      if (dbg && !is_light) {
+          if (!s_dbgpso) s_dbgpso = dxr_make_composite_pso(g_ps_shadow_rt_50, sizeof(g_ps_shadow_rt_50), 2);
+          if (s_dbgpso) comp = s_dbgpso;
+      } }
+    if (!comp) return 0;
+    if (!d3d12_priv_scene_inputs(&scene)) return 0;   /* needs depth + gbuffer; transitions them */
+    cl = e.list; cl4 = e.list4;
+
+    /* depth SRV (R32_FLOAT) t1 / gbuffer SRV (R8G8B8A8) t2 into the DXR heap. */
+    ZeroMemory(&srvd, sizeof(srvd)); srvd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; srvd.Texture2D.MipLevels = 1;
+    srvd.Format = DXGI_FORMAT_R32_FLOAT;
+    ID3D12Device_CreateShaderResourceView((ID3D12Device *)g_dxr.device5, scene.depth, &srvd, dxr_cpu(g_dxr.heap, DXR_SLOT_DEPTH_SRV));
+    srvd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    ID3D12Device_CreateShaderResourceView((ID3D12Device *)g_dxr.device5, scene.gbuffer, &srvd, dxr_cpu(g_dxr.heap, DXR_SLOT_GBUF_SRV));
+
+    /* Pane rect from the CB. Shadow: vpX/Y=misc.y/z (idx16,17), paneW=params.w(27), paneH=params2.x(28).
+     * Light: vpX/Y=misc.z/w (idx18,19), paneW=ext.y(21), paneH=ext.z(22). */
+    if (is_light) { paneX = (int)f[18]; paneY = (int)f[19]; paneW = (int)f[21]; paneH = (int)f[22]; }
+    else          { paneX = (int)f[17]; paneY = (int)f[18]; paneW = (int)f[27]; paneH = (int)f[28]; }
+    if (paneW <= 0 || paneH <= 0) { paneX = 0; paneY = 0; paneW = e.width; paneH = e.height; }
+
+    cbva = d3d12_priv_ring_cb(cb, cb_size);
+    if (!cbva) { d3d12_priv_restore_scene_inputs(); return 0; }
+
+    mask       = is_light ? g_dxr.lightcol : g_dxr.sunvis;
+    mask_state = is_light ? &g_dxr.lightcol_state : &g_dxr.sunvis_state;
+    mask_srv   = is_light ? DXR_SLOT_LIGHTCOL_SRV : DXR_SLOT_SUNVIS_SRV;
+    if (*mask_state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+        dxr_barrier(cl, mask, *mask_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        *mask_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    }
+
+    heaps[0] = g_dxr.heap;
+    ID3D12GraphicsCommandList_SetDescriptorHeaps(cl, 1, heaps);
+    ID3D12GraphicsCommandList_SetComputeRootSignature(cl, g_dxr.global_rs);
+    ID3D12GraphicsCommandList4_SetPipelineState1(cl4, g_dxr.so);
+    ID3D12GraphicsCommandList_SetComputeRootConstantBufferView(cl, is_light ? 2 : 1, cbva);  /* b2 light / b1 shadow */
+    ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(cl, 3, dxr_gpu(g_dxr.heap, DXR_SLOT_TABLE_BASE));
+
+    raygen = is_light ? DXR_RAYGEN_LIGHT : DXR_RAYGEN_SHADOW;
+    ZeroMemory(&d, sizeof(d));
+    d.RayGenerationShaderRecord.StartAddress = g_dxr.sbt_va + DXR_SBT_RAYGEN_OFF + (UINT64)raygen * DXR_SBT_RAYGEN_STRIDE;
+    d.RayGenerationShaderRecord.SizeInBytes  = DXR_SHADER_ID_SIZE;
+    d.MissShaderTable.StartAddress  = g_dxr.sbt_va + DXR_SBT_MISS_OFF;
+    d.MissShaderTable.SizeInBytes   = (UINT64)DXR_MISS_COUNT * DXR_SHADER_ID_SIZE;
+    d.MissShaderTable.StrideInBytes = DXR_SHADER_ID_SIZE;
+    d.HitGroupTable.StartAddress    = g_dxr.sbt_va + DXR_SBT_HITGROUP_OFF;
+    d.HitGroupTable.SizeInBytes     = (UINT64)DXR_HITGROUP_COUNT * DXR_SHADER_ID_SIZE;
+    d.HitGroupTable.StrideInBytes   = DXR_SHADER_ID_SIZE;
+    d.Width = (UINT)paneW; d.Height = (UINT)paneH; d.Depth = 1;
+    ID3D12GraphicsCommandList4_DispatchRays(cl4, &d);
+    dxr_uav_barrier(cl, mask);
+    Backend_NoteRTMark(is_light ? "dispatch_light" : "dispatch_shadow");
+
+    d3d12_priv_restore_scene_inputs();
+    dxr_barrier(cl, mask, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    *mask_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+    /* Composite over the pane (color-only RT; MULT for shadow, additive for light). */
+    ID3D12GraphicsCommandList_OMSetRenderTargets(cl, 1, &e.rtv, FALSE, NULL);
+    ID3D12GraphicsCommandList_SetDescriptorHeaps(cl, 1, heaps);
+    ID3D12GraphicsCommandList_SetGraphicsRootSignature(cl, g_dxr.blit_rs);
+    ID3D12GraphicsCommandList_SetPipelineState(cl, comp);
+    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(cl, 0, dxr_gpu(g_dxr.heap, mask_srv));
+    vp.TopLeftX = (float)paneX; vp.TopLeftY = (float)paneY; vp.Width = (float)paneW; vp.Height = (float)paneH;
+    vp.MinDepth = 0.0f; vp.MaxDepth = 1.0f;
+    sc.left = paneX; sc.top = paneY; sc.right = paneX + paneW; sc.bottom = paneY + paneH;
+    ID3D12GraphicsCommandList_RSSetViewports(cl, 1, &vp);
+    ID3D12GraphicsCommandList_RSSetScissorRects(cl, 1, &sc);
+    ID3D12GraphicsCommandList_IASetPrimitiveTopology(cl, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D12GraphicsCommandList_DrawInstanced(cl, 3, 1, 0, 0);
+
+    d3d12_priv_end_rt_pass();   /* restore RTV+DSV + invalidate backend draw cache */
+    return 1;
+}
+
+int d3d12_dxr_shadow_pass(const ShadowCB *cb) { return cb ? dxr_lighting_pass(cb, sizeof(ShadowCB), 0) : 0; }
+int d3d12_dxr_light_pass(const LightCB *cb)   { return cb ? dxr_lighting_pass(cb, sizeof(LightCB), 1)  : 0; }
+
 void Backend_RTDebugView(void)
 {
     d3d12_dxr_env e;
@@ -927,8 +1136,8 @@ void Backend_RTDebugView(void)
     ID3D12GraphicsCommandList_SetDescriptorHeaps(cl, 1, heaps);
     ID3D12GraphicsCommandList_SetComputeRootSignature(cl, g_dxr.global_rs);
     ID3D12GraphicsCommandList4_SetPipelineState1(cl4, g_dxr.so);
-    ID3D12GraphicsCommandList_SetComputeRootConstantBufferView(cl, 0, cbva);
-    ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(cl, 1, dxr_gpu(g_dxr.heap, DXR_SLOT_OUTPUT_UAV));
+    ID3D12GraphicsCommandList_SetComputeRootConstantBufferView(cl, 0, cbva);   /* b0 view */
+    ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(cl, 3, dxr_gpu(g_dxr.heap, DXR_SLOT_TABLE_BASE));
 
     ZeroMemory(&d, sizeof(d));
     d.RayGenerationShaderRecord.StartAddress = g_dxr.sbt_va + DXR_SBT_RAYGEN_OFF + (UINT64)DXR_RAYGEN_DEBUG * DXR_SBT_RAYGEN_STRIDE;
@@ -1013,8 +1222,8 @@ void d3d12_dxr_smoke_blit(void)
     ID3D12GraphicsCommandList4_SetPipelineState1(cl4, g_dxr.so);
     /* param 0 = b0 CBV (unused by rgen_smoke, but the RS declares it: bind the
      * SBT VA as a harmless valid CBV so the root arg is initialized). */
-    ID3D12GraphicsCommandList_SetComputeRootConstantBufferView(cl, 0, g_dxr.sbt_va);
-    ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(cl, 1, dxr_gpu(g_dxr.heap, 0));
+    ID3D12GraphicsCommandList_SetComputeRootConstantBufferView(cl, 0, g_dxr.sbt_va);   /* b0 (unused) */
+    ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(cl, 3, dxr_gpu(g_dxr.heap, DXR_SLOT_TABLE_BASE));
 
     ZeroMemory(&d, sizeof(d));
     d.RayGenerationShaderRecord.StartAddress = g_dxr.sbt_va + DXR_SBT_RAYGEN_OFF;
@@ -1069,6 +1278,11 @@ void d3d12_dxr_shutdown(void)
     g_dxr.tlas_parity = 0; g_dxr.tlas_valid = 0;
     g_dxr.scene_open = 0; g_dxr.scene_inst = NULL; g_dxr.scene_count = 0;
 
+    if (g_dxr.sunvis)    { ID3D12Resource_Release(g_dxr.sunvis);       g_dxr.sunvis = NULL; }
+    if (g_dxr.lightcol)  { ID3D12Resource_Release(g_dxr.lightcol);     g_dxr.lightcol = NULL; }
+    if (g_dxr.shadow_pso){ ID3D12PipelineState_Release(g_dxr.shadow_pso); g_dxr.shadow_pso = NULL; }
+    if (g_dxr.light_pso) { ID3D12PipelineState_Release(g_dxr.light_pso);  g_dxr.light_pso = NULL; }
+    g_dxr.mask_w = g_dxr.mask_h = 0;
     if (g_dxr.output)    { ID3D12Resource_Release(g_dxr.output);       g_dxr.output = NULL; }
     if (g_dxr.blit_pso)  { ID3D12PipelineState_Release(g_dxr.blit_pso);g_dxr.blit_pso = NULL; }
     if (g_dxr.blit_rs)   { ID3D12RootSignature_Release(g_dxr.blit_rs); g_dxr.blit_rs = NULL; }

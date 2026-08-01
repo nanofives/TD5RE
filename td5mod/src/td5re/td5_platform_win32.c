@@ -3907,6 +3907,7 @@ void td5_plat_rt_set_view(const float cam_pos[3], const float basis9[9],
 }
 void td5_plat_rt_debug_view(void) { Backend_RTDebugView(); }
 unsigned td5_plat_rt_generation(void) { return Backend_RTGeneration(); }
+void td5_plat_rt_set_mode(int high) { Backend_RTSetMode(high); }
 
 void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
                                   float focal, float center_x, float center_y,

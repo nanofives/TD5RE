@@ -33,6 +33,23 @@ typedef struct {
 
 /* Fill `out` with the current frame environment (see above). */
 void  d3d12_priv_env(d3d12_dxr_env *out);
+
+/* [P2b] Scene inputs for RT shadows: the depth buffer + G-buffer resources and
+ * their SRV descriptor formats, so the DXR module can create SRVs of them into
+ * its own heap. Also transitions them to NON_PIXEL_SHADER_RESOURCE for a compute/
+ * DXR read (call d3d12_priv_restore_scene_inputs after the dispatch). depth is
+ * R32_FLOAT, gbuffer is R8G8B8A8_UNORM. Either may be NULL (returns 0). */
+typedef struct {
+    ID3D12Resource *depth;      /* s_depth_tex (read as R32_FLOAT)  */
+    ID3D12Resource *gbuffer;    /* s_gbuffer_tex->res (R8G8B8A8)    */
+} d3d12_dxr_scene;
+int   d3d12_priv_scene_inputs(d3d12_dxr_scene *out);   /* 1 if both present + transitioned */
+void  d3d12_priv_restore_scene_inputs(void);           /* depth->DEPTH_WRITE, gbuffer->RT */
+
+/* Call after an RT composite draw: rebind the backbuffer RTV + DSV for the
+ * subsequent world/VFX draws and invalidate the backend's per-draw bind cache
+ * (root sig / PSO / topology / gbuffer-RT) which the composite disturbed. */
+void  d3d12_priv_end_rt_pass(void);
 /* Ensure the frame command list is open (mirrors d3d12_frame_begin). */
 void  d3d12_priv_frame_begin(void);
 /* Deferred-release a COM resource once the in-flight frame's fence passes
@@ -64,5 +81,13 @@ int   d3d12_dxr_available(void);
 void  d3d12_dxr_smoke_blit(void);
 /* 1 if TD5RE_RT_SMOKE is set (cached). */
 int   d3d12_dxr_smoke_enabled(void);
+
+/* [P2b] RT sun-shadow / dynamic-light passes. Each reads the SAME ShadowCB /
+ * LightCB the game already builds (camera reconstruction + sun / lights),
+ * dispatches a raygen against the TLAS reading depth+G-buffer, and composites
+ * the result over the pane (MULT for shadow, additive for light). Return 1 if
+ * the RT pass ran (caller skips the LOW march), 0 to fall back. */
+int   d3d12_dxr_shadow_pass(const ShadowCB *cb);
+int   d3d12_dxr_light_pass(const LightCB *cb);
 
 #endif /* D3D12_BACKEND_PRIV_H */

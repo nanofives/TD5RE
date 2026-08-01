@@ -316,6 +316,11 @@ unsigned Backend_RTGeneration(void);
  * post-mortem shows which RT operation was in flight. */
 void Backend_NoteRTMark(const char *tag);
 
+/* [RT lighting P2b] HIGH mode: the deferred shadow/light passes run the RT
+ * dispatch + composite instead of the screen-space march. Set per frame by the
+ * game (= td5_rt_active()). No-op when DXR is unavailable. */
+void Backend_RTSetMode(int high);
+
 /* Per-frame RT view constants (camera + sun) for the primary/debug ray. cam_pos
  * is FLOAT world space; basis9 is row-major {right,up,fwd}; focal/center match
  * the raster projection (see td5_render.c debug_line_project). sun is a world

@@ -19,11 +19,7 @@
  *   static sampler s0  : LINEAR wrap
  */
 
-#include "rt_common.hlsli"
-
-/* Fixed descriptor table 0 (global root signature): u0 output, t0 TLAS. */
-RWTexture2D<float4>        g_output : register(u0);
-RaytracingAccelerationStructure g_tlas : register(t0);
+#include "rt_common.hlsli"   /* resources, CBs, payloads, reconstruction helpers */
 
 [shader("raygeneration")]
 void rgen_smoke()
@@ -99,4 +95,75 @@ void miss_refl(inout RayPayload p)
 {
     p.color = float3(0.02f, 0.02f, 0.12f);
     p.t = -1.0f;
+}
+
+/* ----- Phase 2b: RT sun shadows (b1 ShadowCB) ------------------------------ *
+ * One sun shadow ray per pixel, cone-jittered. Writes shade (1=lit,
+ * 1-strength=full shadow) to g_sunvis at the full-frame pixel; the MULT
+ * composite (ps_shadow_rt) darkens the scene by it. */
+[shader("raygeneration")]
+void rgen_shadow()
+{
+    uint2 lpx = DispatchRaysIndex().xy;                       /* pane-local pixel   */
+    int2  fp  = int2((int)sh_misc.y, (int)sh_misc.z) + int2(lpx); /* full-frame pixel */
+    float D = g_depth.Load(int3(fp, 0));
+    float4 gb = g_gbuf.Load(int3(fp, 0));
+    if (D >= 0.99999f || gb.a < 0.001f) { g_sunvis[fp] = 1.0f; return; }  /* sky / no gbuffer = lit */
+
+    float3 world = rt_world_from_depth(D, float2(lpx), sh_camPosFocal, sh_rightCx, sh_upCy, sh_fwdDepthScale, sh_misc.x);
+    float3 N = rt_gbuf_normal(gb);
+    /* normal-offset bias, distance-scaled (24.8-quantized geometry -> acne). */
+    float dist = length(world - sh_camPosFocal.xyz);
+    float3 origin = world + N * (16.0f + dist * 0.004f);
+
+    float3 L = normalize(sh_sun.xyz);
+    float3 up0 = abs(L.y) < 0.99f ? float3(0,1,0) : float3(1,0,0);
+    float3 T = normalize(cross(up0, L));
+    float3 Bv = cross(L, T);
+    float ang = rt_hash12(float2(fp)) * 6.2831853f;
+    float3 dir = normalize(L + (cos(ang) * T + sin(ang) * Bv) * 0.012f);  /* ~0.7deg cone */
+
+    float vis = rt_shadow_ray(origin, dir, 1.0f, sh_sun.w);
+    g_sunvis[fp] = 1.0f - sh_misc.w * (1.0f - vis);
+}
+
+/* ----- Phase 2b: RT dynamic-light occlusion (b2 LightCB) ------------------- *
+ * Per pixel, accumulate each enabled light's contribution (attenuation + cone +
+ * soft-wrap Lambert) gated by a shadow ray toward the light. Writes additive rgb
+ * to g_lightcol; the additive composite (ps_light_rt) adds it to the scene. */
+[shader("raygeneration")]
+void rgen_light()
+{
+    uint2 lpx = DispatchRaysIndex().xy;
+    int2  fp  = int2((int)li_misc.z, (int)li_misc.w) + int2(lpx);   /* vpX/vpY at misc.z/.w */
+    float D = g_depth.Load(int3(fp, 0));
+    if (D >= 0.99999f) { g_lightcol[fp] = float4(0,0,0,0); return; }
+
+    float3 world = rt_world_from_depth(D, float2(lpx), li_camPosFocal, li_rightCx, li_upCy, li_fwdDepthScale, li_misc.x);
+    float4 gb = g_gbuf.Load(int3(fp, 0));
+    bool hasN = gb.a > 0.001f;
+    float3 N = rt_gbuf_normal(gb);
+    int count = (int)li_misc.y;
+
+    float3 accum = float3(0,0,0);
+    for (int k = 0; k < count && k < RT_LIGHT_MAX; k++)
+    {
+        float4 P  = li_lights[k*3+0];   /* pos.xyz + range   */
+        float4 C  = li_lights[k*3+1];   /* rgb + intensity   */
+        float4 Dc = li_lights[k*3+2];   /* dir.xyz + coneCos */
+        float3 toL = P.xyz - world;
+        float d = length(toL);
+        if (d >= P.w || d < 1e-3f) continue;
+        float3 Ld = toL / d;
+        float atten = 1.0f - d / P.w; atten *= atten;
+        float cone = 1.0f;
+        if (Dc.w > -0.5f) { float cd = dot(-Ld, Dc.xyz); cone = saturate((cd - Dc.w) / (1.0f - Dc.w)); cone *= cone; }
+        float ndotl = hasN ? saturate(dot(N, Ld)) * 0.85f + 0.15f : 1.0f;
+        float w = C.w * atten * cone * ndotl;
+        if (w < 0.003f) continue;
+        float3 origin = world + (hasN ? N : Ld) * (8.0f + d * 0.004f);
+        float vis = rt_shadow_ray(origin, Ld, 1.0f, d - 4.0f);
+        accum += C.rgb * (w * (vis > 0.5f ? 1.0f : 0.15f));
+    }
+    g_lightcol[fp] = float4(accum, 1.0f);
 }

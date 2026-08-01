@@ -351,8 +351,11 @@ void td5_rt_frame(int vp, int pane_x, int pane_y, int pane_w, int pane_h)
     }
 
     /* TLAS is world-space and shared across panes: build once per frame (vp 0). */
-    if (vp == 0)
+    if (vp == 0) {
         rt_build_tlas();
+        /* HIGH mode: the deferred shadow/light passes run the RT composite. */
+        td5_plat_rt_set_mode(td5_rt_active());
+    }
 
     /* Per-pane camera view. td5_camera_get_position returns FLOAT world units
      * already (same ~136180 scale as track verts and world_pos/256) -- do NOT

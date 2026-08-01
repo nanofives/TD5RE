@@ -14,7 +14,7 @@ plumbing (SBT, state object, root signatures) is decided once, up front.
 | 0 | DXR foundation (dxc, Device5, smoke dispatch) | ✅ done (branch rt-lighting) |
 | 1 | World-space geometry feed + BLAS/TLAS + debug view | ✅ done — **alignment gate PASSED** |
 | 2a | G-buffer MRT wiring in D3D12 | ✅ done |
-| 2b | RT shadows (sun + dynamic lights), blob-shadow kill | ⬜ |
+| 2b | RT shadows (sun + dynamic lights), blob-shadow kill | ✅ done (denoise/soak owed) |
 | 3 | RT reflections with textured hit shading | ⬜ |
 | 4 | Menu row, INI, runtime switch, fallback, release | ⬜ |
 
@@ -151,6 +151,40 @@ placeholder in Phase 2a (per the plan's own LOW-identical caveat) — the gbuffe
 produced + available; Phase 2b wires HIGH-gated consumption. **Debug-layer fix:** RT
 textures now get a `{0,0,0,0}` optimized clear value in `d3d12_tex_create` (killed the
 id=820 slow-clear perf warning). Debug-layer clean with the gbuffer producing.
+
+### As-built — Phase 2b (2026-07-31, branch `rt-lighting`)
+
+**Done + verified:** RT sun shadows + dynamic-light occlusion running in HIGH mode
+(`TD5RE_RT=1` + `--LightingMode=2` for the G-buffer/pass-callers). Clean integration:
+`Backend_ApplyShadowPass`/`LightPass` branch on `Backend_RTSetMode(td5_rt_active())` and
+call `d3d12_dxr_shadow_pass`/`light_pass`, which **reuse the game's existing ShadowCB/
+LightCB** (the same camera-reconstruction fields, byte-identical layout) as the raygen's
+b1/b2 root CBV — no new CB plumbing. `rgen_shadow` (cone-jittered sun ray) writes a
+`sunvis` R32F mask; `rgen_light` (attenuation + cone + soft-wrap Lambert, K shadow rays)
+writes a `lightcol` RGBA16F mask; composited via dxr-owned MULT / additive blits
+(`ps_shadow_rt` / `ps_light_rt`, fxc SM5.0) over the pane. Depth (R32F) + G-buffer SRVs
+created into the DXR heap; a priv accessor (`d3d12_priv_scene_inputs`/`_restore`/
+`_end_rt_pass`) exposes + transitions them and restores the backend RT/DSV + draw cache.
+
+**Global RS restructured:** b0 (debug view) + b1 (ShadowCB) + b2 (LightCB) root CBVs +
+descriptor table (UAV u0-u2 output/sunvis/lightcol, SRV t0-t2 TLAS/depth/gbuffer) +
+static sampler. Heap slots renumbered (0-8). State object + SBT grew to include
+`rgen_shadow` (raygen 2) + `rgen_light` (raygen 3), 64-strided records.
+
+**Blob-shadow kill:** `render_vehicle_shadow_quad` early-returns when `td5_rt_active()`.
+
+**Verified:** `TD5RE_RT_MASK=1` opaque mask blit confirms correct occlusion — cars gray
+(self-shadow + sun-blocking), road/sky white (lit), cast-shadow regions on the road from
+cars/buildings; blob gone. No crash, D3D12 debug-layer clean (0 non-690), goldens 54/0
+(RT off by default → LOW march unchanged, sim byte-identical), build+lint clean (dev +
+release). Env knobs: `TD5RE_RT` (HIGH), `TD5RE_RT_MASK` (mask viz).
+
+**OWED (Phase 2b refinements, not gating the commit):** (1) depth-aware 5x5 denoise
+(`ps_rt_blur.hlsl`) — currently the cone-jitter leaves mild noise; (2) perf measurement
+(≤2 ms target) + 10-min TDR soak; (3) night-headlight-occlusion + tunnel visual checks
+(light pass built + runs, not yet visually confirmed); (4) `TD5RE_RT_BIAS`/`_RAYS`/
+`_MAXLIGHTS` knobs (currently baked constants; car self-shadow bias may want tuning).
+Interim activation is `TD5RE_RT=1`; the `[Lighting] Quality` INI row is Phase 4.
 
 ## Handoff prompt (what launched this execution)
 

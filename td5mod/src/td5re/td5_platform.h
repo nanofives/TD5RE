@@ -812,6 +812,8 @@ void td5_plat_rt_set_view(const float cam_pos[3], const float basis9[9],
                           const float sun_dir[3]);
 void td5_plat_rt_debug_view(void);
 unsigned td5_plat_rt_generation(void);
+/* [P2b] HIGH mode: deferred shadow/light passes run the RT dispatch+composite. */
+void td5_plat_rt_set_mode(int high);
 
 /** Upload a texture page to the GPU. Returns 0 on failure. */
 int td5_plat_render_upload_texture(int page_index, const void *pixels, int width, int height, int format);

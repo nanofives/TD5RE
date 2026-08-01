@@ -201,6 +201,11 @@ static BackendTexture  *s_gbuffer_tex;
 static int              s_gbuffer_enabled;   /* game requested it (per frame)     */
 static int              s_gbuf_bound;        /* RT1 currently bound (reset/frame)  */
 
+/* [RT lighting P2b] HIGH mode: the deferred shadow/light passes run the RT
+ * dispatch + composite instead of the screen-space march. Set per frame by the
+ * game via Backend_RTSetMode(td5_rt_active()). */
+static int              s_rt_mode;
+
 /* forward decls (definitions below the device lifecycle) */
 static D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle(ID3D12DescriptorHeap *h, UINT idx, UINT size);
 static D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle(ID3D12DescriptorHeap *h, UINT idx, UINT size);
@@ -2211,6 +2216,50 @@ void d3d12_priv_fullscreen_shaders(const void **vs, SIZE_T *vs_len,
     if (ps_len) *ps_len = sizeof(g_ps_composite_50);
 }
 
+/* [P2b] Expose depth + gbuffer to the DXR module + transition them for a DXR
+ * read (NON_PIXEL_SHADER_RESOURCE). Restore returns them to their render states. */
+int d3d12_priv_scene_inputs(d3d12_dxr_scene *out)
+{
+    if (!out) return 0;
+    out->depth = s_depth_tex;
+    out->gbuffer = (s_gbuffer_tex && s_gbuffer_enabled) ? s_gbuffer_tex->res : NULL;
+    if (!out->depth || !out->gbuffer || !g_d3d12.frame_open) return 0;
+    if (s_depth_state != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) {
+        d3d12_resource_barrier(s_depth_tex, s_depth_state, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        s_depth_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    }
+    if (s_gbuffer_tex->rstate != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) {
+        d3d12_resource_barrier(s_gbuffer_tex->res, s_gbuffer_tex->rstate, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        s_gbuffer_tex->rstate = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    }
+    return 1;
+}
+
+void d3d12_priv_end_rt_pass(void)
+{
+    ID3D12GraphicsCommandList *cl = g_d3d12.list;
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = d3d12_rtv_handle(g_d3d12.frame_index);
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv = cpu_handle(s_dsv_heap, 0, s_dsv_size);
+    ID3D12GraphicsCommandList_OMSetRenderTargets(cl, 1, &rtv, FALSE, s_dsv_heap ? &dsv : NULL);
+    /* The composite changed root sig + PSO + RT -> invalidate the main draw cache. */
+    s_frame_static_bound = 0;
+    s_last_pso  = NULL;
+    s_last_topo = (D3D_PRIMITIVE_TOPOLOGY)-1;
+    s_gbuf_bound = 0;
+}
+
+void d3d12_priv_restore_scene_inputs(void)
+{
+    if (s_depth_tex && s_depth_state != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
+        d3d12_resource_barrier(s_depth_tex, s_depth_state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        s_depth_state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    }
+    if (s_gbuffer_tex && s_gbuffer_tex->rstate != D3D12_RESOURCE_STATE_RENDER_TARGET) {
+        d3d12_resource_barrier(s_gbuffer_tex->res, s_gbuffer_tex->rstate, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        s_gbuffer_tex->rstate = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    }
+}
+
 /* Framedump / render-golden capture: return the most recent PRE-FLIP frame
  * captured by d3d12_frame_present (flip-discard makes a post-present readback
  * undefined). Requires TD5RE_FRAMEDUMP / TD5RE_D3D12_CAPTURE to be set so the
@@ -2241,10 +2290,14 @@ unsigned char *Backend_CaptureBackbufferRGBA(int *out_w, int *out_h)
  * normals) is the zero placeholder -> N.L falls back to legacy (matches the
  * port's empty gbuffer on the PlatDrawTris path). Runs over the active pane's
  * viewport/scissor. BLEND_ONE_ONE (additive). */
+/* [RT lighting P2b] HIGH-mode flag, set per frame by the game. */
+void Backend_RTSetMode(int high) { s_rt_mode = (high && g_d3d12.device5) ? 1 : 0; }
+
 void Backend_ApplyLightPass(const LightCB *cb)
 {
     UINT srvs[1];
     if (!cb) return;
+    if (s_rt_mode && d3d12_dxr_light_pass(cb)) return;   /* RT occlusion composite */
     srvs[0] = s_depth_srv_slot;
     d3d12_fullscreen_pass(g_ps_light_50, sizeof(g_ps_light_50), BLEND_ONE_ONE,
                           cb, sizeof(LightCB), srvs, 1);
@@ -2293,6 +2346,7 @@ void Backend_ApplyShadowPass(const ShadowCB *cb)
 {
     UINT srvs[1];
     if (!cb) return;
+    if (s_rt_mode && d3d12_dxr_shadow_pass(cb)) return;   /* RT sun-shadow composite */
     srvs[0] = s_depth_srv_slot;
     d3d12_fullscreen_pass(g_ps_shadow_50, sizeof(g_ps_shadow_50), BLEND_MULT,
                           cb, sizeof(ShadowCB), srvs, 1);

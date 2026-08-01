@@ -112,7 +112,7 @@ for %%S in (vs_pretransformed vs_fullscreen) do (
     %FXC% %OPTS% /T vs_5_0 /E main /Fh %%S_bytes_50.h /Vn g_%%S_50 %%S.hlsl
     if errorlevel 1 (echo FAILED: %%S ^(sm5^) && exit /b 1)
 )
-for %%S in (ps_modulate ps_modulate_alpha ps_modulate_g ps_modulate_alpha_g ps_decal ps_luminance_alpha ps_composite ps_light ps_shadow ps_ssr ps_msdf ps_roundrect ps_arrow ps_cursor ps_gauge ps_fx_smoke ps_fx_rain ps_fx_decal ps_fx_glow) do (
+for %%S in (ps_modulate ps_modulate_alpha ps_modulate_g ps_modulate_alpha_g ps_decal ps_luminance_alpha ps_composite ps_light ps_shadow ps_ssr ps_shadow_rt ps_light_rt ps_msdf ps_roundrect ps_arrow ps_cursor ps_gauge ps_fx_smoke ps_fx_rain ps_fx_decal ps_fx_glow) do (
     %FXC% %OPTS% /T ps_5_0 /E main /Fh %%S_bytes_50.h /Vn g_%%S_50 %%S.hlsl
     if errorlevel 1 (echo FAILED: %%S ^(sm5^) && exit /b 1)
 )
