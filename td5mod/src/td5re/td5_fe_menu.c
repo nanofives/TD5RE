@@ -28,6 +28,7 @@
 #include "td5_vectorui.h"
 #include "td5_font.h"
 #include "td5_i18n.h"   /* [I18N] TR() + language switch (Screen_LanguageOptions) */
+#include "td5_rt.h"     /* [RT] LIGHTING QUALITY row: available/set_quality */
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -189,7 +190,8 @@ static void frontend_refresh_display_option_labels(void) {
     frontend_set_button_label(3, "Speed Readout");
     frontend_set_button_label(4, "Show FPS");
     frontend_set_button_label(5, "Camera Damping");
-    frontend_set_button_label(6, "OK");
+    frontend_set_button_label(6, "LIGHTING QUALITY");   /* [RT] LOW/HIGH */
+    frontend_set_button_label(7, "OK");
 }
 
 /* Load continue cup data: read + decrypt + restore game state. */
@@ -1865,7 +1867,8 @@ void Screen_DisplayOptions(void) {
         frontend_create_button(SNK_SpeedReadoutButTxt,  120, 217, 0x120, 0x20); /* Speed Readout */
         frontend_create_button(SNK_SpeedReadoutButTxt,  120, 257, 0x120, 0x20); /* Show FPS */
         frontend_create_button(SNK_CameraDampingButTxt, 120, 297, 0x120, 0x20); /* Camera Damping */
-        frontend_create_button(SNK_OkButTxt,            200, 377, 0x60,  0x20); /* OK */
+        frontend_create_button(SNK_CameraDampingButTxt, 120, 337, 0x120, 0x20); /* Lighting Quality [RT] */
+        frontend_create_button(SNK_OkButTxt,            200, 377, 0x60,  0x20); /* OK (row 7) */
         frontend_refresh_display_option_labels();
         s_anim_tick = 0;
         s_inner_state = 1;
@@ -1929,16 +1932,31 @@ void Screen_DisplayOptions(void) {
                 if (s_display_camera_damping < 0) s_display_camera_damping = 0;
                 if (s_display_camera_damping > 9) s_display_camera_damping = 9;
                 changed = 1;
-            } else if (s_button_index == 6) {
+            } else if (active_button == 6 && delta != 0) {
+                /* Row 6 — LIGHTING QUALITY: LOW(0) <-> HIGH(1). Inert on a non-DXR
+                 * device (deny with the standard blip). Applied LIVE via
+                 * td5_rt_set_quality so an in-race pause->options toggle switches
+                 * LOW<->HIGH on the next frame with no restart. */
+                if (td5_rt_available()) {
+                    s_display_lighting_quality = !s_display_lighting_quality;
+                    g_td5.ini.lighting_quality = s_display_lighting_quality;
+                    td5_rt_set_quality(s_display_lighting_quality);
+                    changed = 1;
+                } else {
+                    frontend_play_sfx(10);  /* locked/error cue: no DXR device */
+                }
+            } else if (s_button_index == 7) {
                 /* OK — persist every display option to td5re.ini. Resolution +
                  * window-mode/vsync already applied live; this writes them (plus
-                 * fog / units / damping / W,H) so they survive a relaunch. */
-                g_td5.ini.window_mode    = s_display_window_mode;
-                g_td5.ini.vsync          = s_display_vsync;
-                g_td5.ini.show_fps       = s_display_show_fps;
-                g_td5.ini.fog_enabled    = s_display_fog_enabled;
-                g_td5.ini.speed_units    = s_display_speed_units;
-                g_td5.ini.camera_damping = s_display_camera_damping;
+                 * fog / units / damping / lighting quality / W,H) so they survive a
+                 * relaunch. */
+                g_td5.ini.window_mode      = s_display_window_mode;
+                g_td5.ini.vsync            = s_display_vsync;
+                g_td5.ini.show_fps         = s_display_show_fps;
+                g_td5.ini.fog_enabled      = s_display_fog_enabled;
+                g_td5.ini.speed_units      = s_display_speed_units;
+                g_td5.ini.camera_damping   = s_display_camera_damping;
+                g_td5.ini.lighting_quality = s_display_lighting_quality;
                 td5_save_set_speed_units(s_display_speed_units);
                 td5_ini_persist_options();
                 s_inner_state = 7;

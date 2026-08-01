@@ -797,6 +797,7 @@ extern int             s_display_camera_damping;
 extern int             s_display_fog_enabled;
 extern int             s_display_mode_count;
 extern int             s_display_mode_index;
+extern int             s_display_lighting_quality;   /* [RT] LOW(0)/HIGH(1) */
 extern int             s_display_show_fps;
 extern int             s_display_speed_units;
 extern int             s_display_vsync;

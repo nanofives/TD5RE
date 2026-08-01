@@ -30,6 +30,7 @@
 #include "td5_vectorui.h"      /* public VectorUI surface (HUD reuses these primitives) */
 #include "td5_font.h"          /* [S13] runtime TTF glyph cache (native menu text) */
 #include "td5_i18n.h"          /* [I18N] TR() + TD5_TOUPPER (Latin-1 uppercase) */
+#include "td5_rt.h"            /* [RT] LIGHTING QUALITY row: td5_rt_available() */
 #include "td5_version.h"       /* build identity (version / channel / date / git rev) */
 #include "td5_changelog.h"     /* CHANGELOG screen content table (file-static here) */
 #include "td5_pending.h"       /* PENDING TO TEST checklist (list/state/overlay) */
@@ -789,6 +790,10 @@ int             s_display_camera_damping = 5;
 int             s_display_window_mode = 1;
 int             s_display_vsync       = 1;
 int             s_display_show_fps    = 1;
+/* [RT] LIGHTING QUALITY row: 0 = LOW (screen-space), 1 = HIGH (ray traced).
+ * Mirrored from g_td5.ini.lighting_quality on entry; on a non-DXR device the row
+ * is inert and always reads LOW (td5_rt_available() gate). */
+int             s_display_lighting_quality = 1;
 int             s_game_option_laps = 0;
 int             s_game_option_checkpoint_timers = 1;
 int             s_game_option_traffic = 1;
@@ -6839,13 +6844,22 @@ static void frontend_render_display_options_overlay(float sx, float sy) {
     if (wm < 0 || wm > 2) wm = 1;
     snprintf(damping, sizeof(damping), "%d", s_display_camera_damping);
     /* Rows: 0 Display Mode, 1 VSync, 2 Fogging,
-     *       3 Speed Readout, 4 Show FPS, 5 Camera Damping. */
+     *       3 Speed Readout, 4 Show FPS, 5 Camera Damping, 6 Lighting Quality. */
     frontend_draw_value_centered(sx, sy, s_buttons[0].y + 6, td5_tr(win_mode[wm]), 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[1].y + 6, on_off[s_display_vsync & 1], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[2].y + 6, on_off[s_display_fog_enabled & 1], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[3].y + 6, speed_read[s_display_speed_units & 1], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[4].y + 6, on_off[s_display_show_fps & 1], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[5].y + 6, damping, 0xFFFFFFFF);
+    /* [RT] Row 6 — LIGHTING QUALITY. On a non-DXR device the row is inert and
+     * reads LOW in a greyed colour (matches the disabled-row convention). */
+    {
+        const char *lq[] = { "LOW", "HIGH" };
+        int avail = td5_rt_available();
+        int q = avail ? (s_display_lighting_quality & 1) : 0;
+        frontend_draw_value_centered(sx, sy, s_buttons[6].y + 6, td5_tr(lq[q]),
+                                     avail ? 0xFFFFFFFF : 0xFF808080);
+    }
 }
 
 static void frontend_render_sound_options_overlay(float sx, float sy) {
@@ -9995,7 +10009,13 @@ void td5_frontend_render_ui_rects(void) {
             frontend_render_controller_binding_labels(sx, sy);
             break;
         case TD5_SCREEN_DISPLAY_OPTIONS:
-            for (int i = 0; i <= 3; i++) fe_draw_option_arrows(i, sx, sy);
+            /* Rows 0-5 are all selector rows (Display Mode, VSync, Fogging, Speed
+             * Readout, Show FPS, Camera Damping) — the old `i <= 3` bound left
+             * Show FPS + Camera Damping without ◄► arrows despite being L/R-live.
+             * Row 6 = LIGHTING QUALITY: arrows only when a DXR device is present
+             * (else the row is inert and reads a greyed LOW). Row 7 = OK. */
+            for (int i = 0; i <= 5; i++) fe_draw_option_arrows(i, sx, sy);
+            if (td5_rt_available()) fe_draw_option_arrows(6, sx, sy);
             break;
         case TD5_SCREEN_SOUND_OPTIONS:
             for (int i = 0; i <= 2; i++) fe_draw_option_arrows(i, sx, sy);
@@ -10484,6 +10504,7 @@ int td5_frontend_init(void) {
         td5_save_set_speed_units(g_td5.ini.speed_units);
         s_display_camera_damping    = g_td5.ini.camera_damping;
         td5_save_set_camera_damping(g_td5.ini.camera_damping);
+        s_display_lighting_quality  = g_td5.ini.lighting_quality;  /* [RT] LOW/HIGH */
         td5_save_set_display_mode(g_td5.ini.display_mode);
         s_sound_option_sfx_volume   = g_td5.ini.sfx_volume;
         s_sound_option_music_volume = g_td5.ini.music_volume;
