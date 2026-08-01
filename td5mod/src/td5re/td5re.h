@@ -306,6 +306,10 @@ typedef struct TD5_GlobalState {
         int  reflections;       /* [LIGHT2 P3] 1 = SSR (car paint/glass/wet roads, default) */
         int  wet_roads;         /* [LIGHT2 P3] 1 = rain makes roads reflective (default) */
         int  street_lights;     /* [LIGHT2] 1 = lamp fixtures emit real light when dark (default) */
+        int  lighting_quality;  /* [RT] LIGHTING QUALITY: 0 = LOW (screen-space stack),
+                                 * 1 = HIGH (ray-traced shadows/lights/reflections when a
+                                 * DXR device is present; auto-falls-back to LOW otherwise).
+                                 * Default 1. See docs/plans/RT_LIGHTING_PLAN.md. */
         /* Game options */
         int  laps;
         int  checkpoint_timers;

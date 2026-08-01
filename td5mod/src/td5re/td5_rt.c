@@ -13,6 +13,7 @@
  * by 1/256; actor render_pos is already world_pos/256.
  */
 #include "td5_rt.h"
+#include "td5re.h"          /* g_td5 (INI: lighting_quality, lighting_enabled) */
 #include "td5_platform.h"
 #include "td5_config.h"
 #include "td5_types.h"
@@ -43,13 +44,21 @@ static void rt_diag(const char *fmt, ...)
     if (f) { va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap); fputc('\n', f); fflush(f); fclose(f); }
 }
 
-/* -1 = unread (seed from env on first query). 0 = LOW, 1 = HIGH. */
+/* -1 = unread (seed on first query). 0 = LOW, 1 = HIGH. Sourced from the
+ * [Lighting] Quality INI key (g_td5.ini.lighting_quality); the TD5RE_RT env knob
+ * is a dev A/B override that wins when set. td5_rt_set_quality (menu toggle)
+ * overwrites it at runtime for an instant LOW<->HIGH switch. */
 static int s_quality_high = -1;
 
 static int rt_quality_seed(void)
 {
-    if (s_quality_high < 0)
-        s_quality_high = td5_env_int("TD5RE_RT", 0, 0, 1);
+    if (s_quality_high < 0) {
+        const char *e = getenv("TD5RE_RT");
+        if (e && e[0])
+            s_quality_high = atoi(e) ? 1 : 0;           /* dev override */
+        else
+            s_quality_high = g_td5.ini.lighting_quality ? 1 : 0;
+    }
     return s_quality_high;
 }
 
@@ -70,11 +79,13 @@ void td5_rt_set_quality(int high)
 
 int td5_rt_active(void)
 {
-    if (!td5_rt_available()) return 0;
-    if (!rt_quality_seed())  return 0;
-    /* "in a race, not frontend/FMV, lighting enabled" is refined in Phase 2b
-     * where td5_rt_active() first gates an actual dispatch. Phase 0/1 have no
-     * caller of active(), so availability + quality is a safe predicate. */
+    if (!td5_rt_available()) return 0;    /* no DXR device -> auto-fallback to LOW */
+    if (!rt_quality_seed())  return 0;    /* LIGHTING QUALITY = LOW               */
+    if (!g_td5.ini.lighting_enabled) return 0;  /* [Lighting] Enabled master gate */
+    /* "in a race, not frontend/FMV" is guaranteed by the sole caller: td5_rt_frame
+     * runs only from the in-race per-pane deferred site, and the RT passes it
+     * arms (shadow/light/SSR) are dispatched only during race rendering -- so the
+     * feed + dispatch are naturally dormant in the frontend and during FMV. */
     return 1;
 }
 

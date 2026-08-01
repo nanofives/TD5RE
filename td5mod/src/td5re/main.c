@@ -440,6 +440,10 @@ static const TD5_CfgIntEntry k_lighting_cfg[] = {
     { "WetRoads",       "Lighting", "WetRoads",         &g_td5.ini.wet_roads,        1 },
     /* [LIGHT2] street-lamp light emission */
     { "StreetLights",   "Lighting", "StreetLights",     &g_td5.ini.street_lights,    0 },
+    /* [RT] LIGHTING QUALITY: 0 = LOW (screen-space), 1 = HIGH (ray traced when DXR
+     * present; td5_rt_active() gates on availability so HIGH auto-runs as LOW on a
+     * non-DXR device without rewriting the INI). Default HIGH. */
+    { "Quality",        "Lighting", "Quality",          &g_td5.ini.lighting_quality, 1 },
 };
 #define K_LIGHTING_CFG_N (sizeof(k_lighting_cfg) / sizeof(k_lighting_cfg[0]))
 
