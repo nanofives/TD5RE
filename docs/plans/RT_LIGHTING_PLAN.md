@@ -15,7 +15,7 @@ plumbing (SBT, state object, root signatures) is decided once, up front.
 | 1 | World-space geometry feed + BLAS/TLAS + debug view | ✅ done — **alignment gate PASSED** |
 | 2a | G-buffer MRT wiring in D3D12 | ✅ done |
 | 2b | RT shadows (sun + dynamic lights), blob-shadow kill | ✅ done (denoise/soak owed) |
-| 3 | RT reflections with textured hit shading | ✅ done — blowout fixed + bindless textured hit shading @bf8f6cc7 (plumbing) + @d64a0258 (real textures); CUTOUT any-hit + chit sun-shadow ray still owed |
+| 3 | RT reflections with textured hit shading | ✅ done — blowout fix + bindless textured hit shading (@bf8f6cc7/@d64a0258) + chit sun-shadow ray (@b9845ab2); CUTOUT any-hit N/A (no cutout geometry fed) |
 | 4 | Menu row, INI, runtime switch, fallback, release | ✅ config @3f16ea47 + menu @7ba7bba5 + persist @7617d24a; split-screen HIGH + device-lost drill VERIFIED; 30-min soak + literal mid-race toggle owed |
 
 Append an **as-built note** under this table after each phase (deviations, measurements,
@@ -269,10 +269,34 @@ harness to LOW (Quality=0) — the suite tests the SIM (goldens byte-identical L
 nav, and degradation, none of which need RT; RT HIGH is framedump-verified separately.
 `TD5RE_RT=1` still forces HIGH under the suite for deliberate RT stress-testing. **Note:**
 this is an 8x-FF harness-stress artifact; normal 1× play runs RT at 100+ FPS with no
-TDR (device-lost drill + manual races confirm). Residual soft failure after the fix:
-`degrade-private-bytes` marginally over (+~27MB vs 24MB limit, consistent across 3 runs)
-in the LOW screen-space path — NOT bindless (inert in LOW), a pre-existing LOW
-working-set characteristic exposed by pinning the harness to LOW; flagged, not masked.
+TDR (device-lost drill + manual races confirm).
+
+### As-built — degrade-private-bytes ROOT-CAUSED + FIXED (2026-08-01, @02ed37ef)
+
+The `degrade-private-bytes` failure I first flagged as "pre-existing LOW path" was
+actually **the RT AS feed running in LOW**. Isolated it: DXR-disabled runs are flat
+(−136 KB) with a ~290 MB lower baseline; the feed-in-LOW growth is *variable* 4–28 MB
+(straddles the 24 MB limit — which is why it passed some runs, failed others). Root
+cause: plan §1.2 fed the ASes whenever DXR was *available* (so LOW↔HIGH was instant),
+so every LOW frame allocated + grew ~270 MB of VB/IB/BLAS pools for nothing. **Fix:**
+gate the feed (`td5_rt_level_build` + `td5_rt_frame`) on `td5_rt_active()` (Quality=HIGH);
+LOW builds no ASes, LOW→HIGH lazily rebuilds over a frame or two (brief warm-up, deferred
+passes fall back to screen-space meanwhile), HIGH→LOW frees them. Verified: full suite
+(LOW) degrade now **+2 MB** (was +26-28), baseline 408 MB (was ~755), hashes match. The
+"instant switch" of plan 4.3 is now a brief lazy-build warm-up — an accepted trade for
+270 MB. (Mid-race LOW→HIGH lazy build is code-verified; a literal in-race toggle test is owed.)
+
+### As-built — chit sun-shadow ray (2026-08-01, @b9845ab2)
+
+`chit_refl` casts a sun shadow ray from the reflection hit point (depth 2), so reflected
+geometry receives sun shadows (0.45× when blocked). SSRCB grew a `sun` field (xyz dir + w
+enable); the game derives the scene sun exactly like the shadow pass (strongest directional
+zone slot + position-space Y-flip), disabled when there's no sun / below horizon. Verified:
+build_all clean, HIGH framedump renders correctly, no device removal, debug-clean (recursion
+depth 2 accepted), goldens match. **CUTOUT any-hit: N/A** — the TLAS holds only road quads
+(no UV) + opaque car bodies; there's no alpha-tested cutout geometry (fences/foliage) fed to
+RT for `anyhit_cutout` to act on, and feeding world scenery to give it a job would re-introduce
+the LOW-memory growth just fixed. Deferred with rationale, not written as dead code.
 
 Repro / diag knobs: `TD5RE_RT_REFLDBG=1` (opaque reflcol blit), `TD5RE_RT_REFLDIAG=1|2|3`
 (classifier / weight / reflected color).
