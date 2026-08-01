@@ -12,7 +12,7 @@ plumbing (SBT, state object, root signatures) is decided once, up front.
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 0 | DXR foundation (dxc, Device5, smoke dispatch) | ✅ done (branch rt-lighting) |
-| 1 | World-space geometry feed + BLAS/TLAS + debug view | 🚧 WIP — infra done + sim-safe; **alignment gate OPEN** |
+| 1 | World-space geometry feed + BLAS/TLAS + debug view | ✅ done — **alignment gate PASSED** |
 | 2a | G-buffer MRT wiring in D3D12 | ⬜ |
 | 2b | RT shadows (sun + dynamic lights), blob-shadow kill | ⬜ |
 | 3 | RT reflections with textured hit shading | ⬜ |
@@ -98,23 +98,31 @@ scratch now create + track COMMON; (b) each RayGenerationShaderRecord must be 64
 projection inverse are all **correct** — the RT track ribbon follows the road's curve,
 perspective, and vanishing point exactly.
 
-**GATE OPEN — three geometry-completeness bugs to fix before Phase 2:**
-1. **Track strip laterally offset / incomplete** — the road ribbon sits ~1-2 lanes LEFT
-   of where the cars drive and doesn't cover the full visible road. Per-lane emission via
-   `get_quad_vertices` (span-type offsets + `lane_count` from byte +0x03) widened it and
-   killed most stray tris but the lateral placement still doesn't match. Next: reconcile
-   the strip lane vertex semantics against how the road DISPLAY LIST is actually built
-   (`build_strip_display_lists` in td5_track.c) — the rendered road may use a different
-   vertex set than the collision strip walker.
-2. **One stray large triangle** remains on the right (a specific span_type's quad).
-3. **Actor car meshes not appearing** — `rt_build_actor_mesh` (opcodes 0-3, quads->2 tris,
-   `render_pos`+`rotation_matrix` instance) builds handles but no car silhouette overlays
-   the cars. Debug whether the mesh builds (nidx>0), the instance transform, and whether
-   object-space verts need the mesh origin offset.
+**GATE PASSED** (2026-07-31). The `TD5RE_RT_DEBUGVIEW=1` overlay now aligns with the
+raster: the road strip covers the full road under both cars and recedes to the vanishing
+point; the player car (green) and AI car (tan) silhouettes sit exactly on the raster cars
+at correct position/size/orientation; horizon aligns. build+lint clean, goldens 54/0,
+debug-layer clean, no TDR.
 
-Do NOT start Phase 2 until `TD5RE_RT_DEBUGVIEW=1` overlays align (road under the cars,
-cars visible). Repro: `td5re.exe --AutoRace=1 --SkipIntro=1 --DefaultTrack=5 --RaceTrace=1
---AutoRaceReady=1` with `TD5RE_RT_DEBUGVIEW=1 TD5RE_FRAMEDUMP=<png>`.
+**Root causes found (via a `TD5RE_RT_DIAG` feed dump — kept, env-gated):**
+1. **Camera scale (the big one).** `td5_camera_get_position` returns **FLOAT world units**
+   (~136180), NOT 24.8 — the earlier survey claim was wrong. Dividing by 256 put the
+   camera at ~(539,-84,-339), ~135k units from the scene; the track (a huge ground plane)
+   still filled the lower screen and fooled the eye, but the cars (±300-unit boxes) were
+   sub-pixel specks. Fix: **do not divide the camera position by 256** (track verts,
+   `world_pos/256`, and the camera are all the same ~136180 float-world scale).
+2. **Actor Y garbage.** `render_pos.y` is NOT populated at the `td5_rt_frame` point
+   (`-4194310` for every actor; `.x/.z` were fine). Fix: instance from `world_pos` (24.8,
+   authoritative) `/256` for all three axes.
+3. **Track lanes + strays.** Emit **one quad per lane** (`lane_count` = strip byte +0x03
+   low nibble) via the new span-type-aware `td5_track_get_lane_quad_world`
+   (`get_quad_vertices`), and **reject implausibly large quads** (any-axis extent > 12000)
+   to drop the junction-span +1-vertex strays.
+
+Repro overlay: `td5re.exe --AutoRace=1 --SkipIntro=1 --DefaultTrack=5 --RaceTrace=1
+--AutoRaceReady=1` with `TD5RE_RT_DEBUGVIEW=1 TD5RE_FRAMEDUMP=<png>` (add
+`TD5RE_RT_ONLYCARS=1` to isolate cars, `TD5RE_RT_DIAG=1` for the feed dump →
+`log/rt_diag.log`).
 
 ## Handoff prompt (what launched this execution)
 

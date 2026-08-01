@@ -25,6 +25,23 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdarg.h>
+
+/* One-shot diagnostic (TD5RE_RT_DIAG=1): dump feed stats to log/rt_diag.log. */
+static int rt_diag_on(void)
+{
+    static int v = -1;
+    if (v < 0) v = td5_env_int("TD5RE_RT_DIAG", 0, 0, 1);
+    return v;
+}
+static void rt_diag(const char *fmt, ...)
+{
+    FILE *f;
+    if (!rt_diag_on()) return;
+    f = fopen("log/rt_diag.log", "a");
+    if (f) { va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap); fputc('\n', f); fflush(f); fclose(f); }
+}
 
 /* -1 = unread (seed from env on first query). 0 = LOW, 1 = HIGH. */
 static int s_quality_high = -1;
@@ -136,8 +153,16 @@ void td5_rt_level_build(void)
         int lc = td5_track_get_span_lane_count(s);
         if (lc < 1) lc = 1;
         for (lane = 0; lane < lc; lane++) {
-            float q[4][3]; int c;
+            float q[4][3]; int c, k;
+            float mn[3], mx[3];
             if (!td5_track_get_lane_quad_world(s, lane, q)) continue;
+            /* Reject implausibly large quads: some span types (junctions) yield a
+             * +1 vertex that belongs to a different run, producing a stray tri
+             * shooting off into the sky. Legit lane quads are a few thousand
+             * units at most; drop anything an order of magnitude larger. */
+            for (k = 0; k < 3; k++) { mn[k] = mx[k] = q[0][k]; }
+            for (c = 1; c < 4; c++) for (k = 0; k < 3; k++) { if (q[c][k] < mn[k]) mn[k] = q[c][k]; if (q[c][k] > mx[k]) mx[k] = q[c][k]; }
+            if (mx[0]-mn[0] > 12000.0f || mx[1]-mn[1] > 12000.0f || mx[2]-mn[2] > 12000.0f) continue;
             if (nv + 4 > RT_CHUNK_VERT_BUDGET) { rt_track_flush(verts, nv, idx, ni); nv = 0; ni = 0; }
             for (c = 0; c < 4; c++) {
                 verts[nv + c].pos[0] = q[c][0]; verts[nv + c].pos[1] = q[c][1]; verts[nv + c].pos[2] = q[c][2];
@@ -153,6 +178,21 @@ void td5_rt_level_build(void)
     }
     rt_track_flush(verts, nv, idx, ni);
     free(verts); free(idx);
+
+    if (rt_diag_on()) {
+        float q[4][3];
+        int lc0 = td5_track_get_span_lane_count(0);
+        rt_diag("LEVEL_BUILD spans=%d chunks=%d", span_count, s_track_chunk_count);
+        if (td5_track_get_lane_quad_world(110, 0, q))
+            rt_diag("  span110 lane0 quad: nL(%.0f,%.0f,%.0f) fL(%.0f,%.0f,%.0f) fR(%.0f,%.0f,%.0f) nR(%.0f,%.0f,%.0f) lanes(sp0)=%d",
+                    q[0][0],q[0][1],q[0][2], q[1][0],q[1][1],q[1][2], q[2][0],q[2][1],q[2][2], q[3][0],q[3][1],q[3][2], lc0);
+        {
+            int lc = td5_track_get_span_lane_count(110), L;
+            for (L = 0; L < lc; L++)
+                if (td5_track_get_lane_quad_world(110, L, q))
+                    rt_diag("  span110 lane%d: nL.x=%.0f nR.x=%.0f  nL.z=%.0f nR.z=%.0f", L, q[0][0], q[3][0], q[0][2], q[3][2]);
+        }
+    }
 }
 
 void td5_rt_level_unload(void)
@@ -224,6 +264,12 @@ static int rt_build_actor_mesh(const TD5_MeshHeader *mesh)
         range.texture_id = (unsigned)mesh->texture_page_id; range.matid_flags = 0;
         handle = td5_plat_rt_mesh_create(verts, (unsigned)nv, idx, (unsigned)nidx, &range, 1);
     }
+    if (rt_diag_on()) {
+        float mn[3]={1e30f,1e30f,1e30f}, mx[3]={-1e30f,-1e30f,-1e30f}; int vi,k;
+        for (vi=0; vi<nv; vi++) for (k=0;k<3;k++){ if(verts[vi].pos[k]<mn[k])mn[k]=verts[vi].pos[k]; if(verts[vi].pos[k]>mx[k])mx[k]=verts[vi].pos[k]; }
+        rt_diag("  ACTOR_MESH cmds=%d nv=%d nidx=%d handle=%d bbox x[%.0f,%.0f] y[%.0f,%.0f] z[%.0f,%.0f]",
+                mesh->command_count, nv, nidx, handle, mn[0],mx[0],mn[1],mx[1],mn[2],mx[2]);
+    }
     free(verts); free(idx);
     return handle;
 }
@@ -247,11 +293,14 @@ static int rt_actor_mesh_handle(const TD5_MeshHeader *mesh)
 static void rt_build_tlas(void)
 {
     static const float identity[12] = { 1,0,0,0, 0,1,0,0, 0,0,1,0 };
+    static int s_diag_frames = 0;
+    int diag_this = rt_diag_on() && (s_diag_frames++ < 1);
     int i, slot, total;
 
     td5_plat_rt_scene_begin();
-    for (i = 0; i < s_track_chunk_count; i++)
-        if (s_track_handles[i]) td5_plat_rt_scene_instance(s_track_handles[i], identity, 0);
+    if (!td5_env_int("TD5RE_RT_ONLYCARS", 0, 0, 1))
+        for (i = 0; i < s_track_chunk_count; i++)
+            if (s_track_handles[i]) td5_plat_rt_scene_instance(s_track_handles[i], identity, 0);
 
     total = td5_game_get_total_actor_count();
     for (slot = 0; slot < total; slot++) {
@@ -267,13 +316,25 @@ static void rt_build_tlas(void)
 
         h = rt_actor_mesh_handle(mesh);
         if (!h) continue;
-        /* model->world 3x4 (row-major): [ rotation_matrix | render_pos ]. */
-        m[0]=actor->rotation_matrix.m[0]; m[1]=actor->rotation_matrix.m[1]; m[2]=actor->rotation_matrix.m[2];  m[3]=actor->render_pos.x;
-        m[4]=actor->rotation_matrix.m[3]; m[5]=actor->rotation_matrix.m[4]; m[6]=actor->rotation_matrix.m[5];  m[7]=actor->render_pos.y;
-        m[8]=actor->rotation_matrix.m[6]; m[9]=actor->rotation_matrix.m[7]; m[10]=actor->rotation_matrix.m[8]; m[11]=actor->render_pos.z;
+        /* model->world 3x4 (row-major): [ rotation_matrix | world_pos/256 ].
+         * world_pos (24.8 fixed) is the authoritative position for all three
+         * axes; render_pos.y is not populated at this point in the frame. */
+        {
+            float px = (float)actor->world_pos.x * RT_INV256;
+            float py = (float)actor->world_pos.y * RT_INV256;
+            float pz = (float)actor->world_pos.z * RT_INV256;
+            m[0]=actor->rotation_matrix.m[0]; m[1]=actor->rotation_matrix.m[1]; m[2]=actor->rotation_matrix.m[2];  m[3]=px;
+            m[4]=actor->rotation_matrix.m[3]; m[5]=actor->rotation_matrix.m[4]; m[6]=actor->rotation_matrix.m[5];  m[7]=py;
+            m[8]=actor->rotation_matrix.m[6]; m[9]=actor->rotation_matrix.m[7]; m[10]=actor->rotation_matrix.m[8]; m[11]=pz;
+        }
         td5_plat_rt_scene_instance(h, m, 0);
+        if (diag_this)
+            rt_diag("  INSTANCE slot=%d h=%d world/256=(%.0f,%.0f,%.0f) rot0=%.3f rot4=%.3f rot8=%.3f",
+                    slot, h, (float)actor->world_pos.x*RT_INV256, (float)actor->world_pos.y*RT_INV256, (float)actor->world_pos.z*RT_INV256,
+                    actor->rotation_matrix.m[0], actor->rotation_matrix.m[4], actor->rotation_matrix.m[8]);
     }
     td5_plat_rt_scene_end();
+    if (diag_this) rt_diag("TLAS built: track_chunks=%d total_actors=%d", s_track_chunk_count, td5_game_get_total_actor_count());
 }
 
 void td5_rt_frame(int vp, int pane_x, int pane_y, int pane_w, int pane_h)
@@ -293,10 +354,12 @@ void td5_rt_frame(int vp, int pane_x, int pane_y, int pane_w, int pane_h)
     if (vp == 0)
         rt_build_tlas();
 
-    /* Per-pane camera view (float world units; camera pos is 24.8 -> /256). */
+    /* Per-pane camera view. td5_camera_get_position returns FLOAT world units
+     * already (same ~136180 scale as track verts and world_pos/256) -- do NOT
+     * divide by 256 (verified via diag: /256 placed the camera 256x too close
+     * to the origin, ~135k units from the scene). */
     td5_camera_get_position(&cam[0], &cam[1], &cam[2]);
     td5_camera_get_basis(right, up, fwd);
-    cam[0] *= RT_INV256; cam[1] *= RT_INV256; cam[2] *= RT_INV256;
     basis9[0]=right[0]; basis9[1]=right[1]; basis9[2]=right[2];
     basis9[3]=up[0];    basis9[4]=up[1];    basis9[5]=up[2];
     basis9[6]=fwd[0];   basis9[7]=fwd[1];   basis9[8]=fwd[2];
@@ -304,6 +367,10 @@ void td5_rt_frame(int vp, int pane_x, int pane_y, int pane_w, int pane_h)
                          td5_render_get_focal_length(),
                          td5_render_get_center_x(), td5_render_get_center_y(),
                          pane_x, pane_y, pane_w, pane_h, NULL);
+    { static int camlog=0; if (rt_diag_on() && camlog<1){camlog=1;
+        rt_diag("CAM pos=(%.0f,%.0f,%.0f) right=(%.2f,%.2f,%.2f) fwd=(%.2f,%.2f,%.2f) focal=%.1f center=(%.0f,%.0f)",
+            cam[0],cam[1],cam[2], basis9[0],basis9[1],basis9[2], basis9[6],basis9[7],basis9[8],
+            td5_render_get_focal_length(), td5_render_get_center_x(), td5_render_get_center_y()); } }
 
     if (rt_debugview_enabled())
         td5_plat_rt_debug_view();
