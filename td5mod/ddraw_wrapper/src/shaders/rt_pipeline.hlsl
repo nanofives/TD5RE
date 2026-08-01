@@ -157,11 +157,14 @@ void rgen_shadow()
      * rotations of the ~0.7deg cone, averaged. More samples -> smoother penumbra +
      * denoised sunvis (the single-ray cone jitter left mild grain). */
     int K = max(1, (int)(sh_params2.z + 0.5f));
+    /* [RT2 P1] sh_params2.w = cone-spread scale (0 -> 1 = default ~0.7deg).
+     * OVERCAST widens it (e.g. 5x) for a soft, directionless penumbra. */
+    float coneScale = sh_params2.w > 0.0001f ? sh_params2.w : 1.0f;
     float base = rt_hash12(float2(fp)) * 6.2831853f;
     float visSum = 0.0f;
     for (int k = 0; k < K; k++) {
         float ang = base + (6.2831853f * (float)k) / (float)K;
-        float3 dir = normalize(L + (cos(ang) * T + sin(ang) * Bv) * 0.012f);
+        float3 dir = normalize(L + (cos(ang) * T + sin(ang) * Bv) * (0.012f * coneScale));
         visSum += rt_shadow_ray(origin, dir, 1.0f, sh_sun.w);
     }
     float vis = visSum / (float)K;

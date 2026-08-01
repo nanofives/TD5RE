@@ -53,7 +53,7 @@ cbuffer ShadowCB : register(b1)
     float4 sh_misc;           /* x depthBias, y vpX, z vpY, w strength */
     float4 sh_sun;            /* xyz surface->light dir, w max dist  */
     float4 sh_params;         /* x steps, y thickness, z startOff, w paneW */
-    float4 sh_params2;        /* x paneH                     */
+    float4 sh_params2;        /* x paneH, y biasScale, z RAYS, w coneScale */
 };
 
 /* ---- b2: LightCB (mirror of C LightCB) ------------------------------------ */

@@ -3916,7 +3916,8 @@ void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
                                   float depth_scale, float depth_bias,
                                   const float sun_dir[3], float strength,
                                   int steps, float max_dist, float thickness,
-                                  float start_off, float pane_w, float pane_h)
+                                  float start_off, float pane_w, float pane_h,
+                                  float cone_scale)
 {
     if (g_backend.device_removed) return;
     /* Serial/immediate path only (same constraint as the light pass). */
@@ -3954,6 +3955,10 @@ void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
           if (s_rays < 1) s_rays = 1; if (s_rays > 16) s_rays = 16; }
       cb.params2[1] = s_bias;
       cb.params2[2] = (float)s_rays; }
+    /* [RT2 P1] params2.w = RT sun-shadow cone-spread scale (1 = default ~0.7deg;
+     * OVERCAST widens it for a soft, directionless penumbra). RT-only: the LOW
+     * screen-space shadow shader reads only params2.x. */
+    cb.params2[3] = (cone_scale > 0.0f) ? cone_scale : 1.0f;
 
     Backend_ApplyShadowPass(&cb);
 }

@@ -7380,6 +7380,13 @@ static void frame_render(void)
         if (!td5_render_photobooth_active())
             td5_render_apply_ssr_pass(s_viewports[vp].x, s_viewports[vp].y);
 
+        /* [RT2 P1] Sun disc: after the opaque world has filled the depth buffer
+         * (so buildings/terrain occlude it) and after the deferred passes (so it
+         * sits over the final lit sky), before translucent VFX + HUD. No-op
+         * unless SUNNY + HIGH. */
+        if (!td5_render_photobooth_active())
+            td5_render_draw_sun_disc();
+
         /* VFX: tire tracks, particles */
         if (!td5_render_photobooth_active()) {
             td5_vfx_render_tire_tracks();

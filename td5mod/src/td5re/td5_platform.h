@@ -766,7 +766,8 @@ void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
                                   float depth_scale, float depth_bias,
                                   const float sun_dir[3], float strength,
                                   int steps, float max_dist, float thickness,
-                                  float start_off, float pane_w, float pane_h);
+                                  float start_off, float pane_w, float pane_h,
+                                  float cone_scale);
 
 /* [LIGHTING REWORK P3] Screen-space reflections over the CURRENT viewport:
  * reflective materials (per-id reflectivity in refl8[0..7], + wet_boost on

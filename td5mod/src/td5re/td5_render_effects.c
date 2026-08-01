@@ -3205,6 +3205,200 @@ static float           s_sky_luma = -1.0f;
 /* [AUTO LIGHTS] Track sky-brightness baseline; -1 when no sky is loaded. */
 float td5_render_sky_luma(void) { return s_sky_luma; }
 
+/* ================= [RT2 P1] Sky sun probe =================================
+ * At sky-load time we classify the panorama (NIGHT / SUNNY / OVERCAST) and,
+ * for SUNNY, recover an image-derived sun direction. The classifier mirrors
+ * re/tools/sky_probe.py EXACTLY (same thresholds, sky-band restriction and
+ * blue-saturation test) — that harness is the tuning surface and its recorded
+ * table is the Phase-1 deliverable. KEY REALITY (see as-built): TD5 sky
+ * panoramas almost never contain a resolvable sun disc — the brightest region
+ * is cloud highlights or the bright water/skyline BELOW the horizon. So the
+ * peak/centroid search is restricted to the sky band (top HORIZON of the
+ * image), and SUNNY is reserved for either a tight bright break OR a saturated
+ * deep-blue sky; everything cloud-dominated stays OVERCAST (soft shadows). */
+static int   s_sky_sun_class = TD5_SKY_NIGHT;
+static float s_sky_sun_uv[2] = { 0.5f, 0.25f };   /* image UV of the sky peak  */
+static float s_sky_sun_rgb[3] = { 255.0f, 255.0f, 255.0f };
+static float s_sky_sun_dir[3] = { 0.0f, -1.0f, 0.0f }; /* position space, +Y dn */
+static int   s_sky_sun_dir_valid = 0;
+
+/* Probe knobs (dev A/B; mirror the sky_probe.py flags). Cached once. */
+static float sky_probe_ratio(void)
+{ static float v=-1; if(v<0){const char*e=getenv("TD5RE_SUN_RATIO"); v=(e&&e[0])?(float)atof(e):1.8f;} return v; }
+static float sky_probe_peak(void)
+{ static float v=-1; if(v<0){const char*e=getenv("TD5RE_SUN_PEAK"); v=(e&&e[0])?(float)atof(e):200.0f;} return v; }
+
+#define SKY_PROBE_HORIZON  0.55f
+#define SKY_PROBE_AREA     0.20f
+#define SKY_PROBE_SAT      0.18f
+#define SKY_PROBE_BLUE     0.55f
+
+/* Classify the BGRA32 sky pixels. Sets s_sky_sun_class / _uv / _rgb. The dome
+ * direction (s_sky_sun_dir) is resolved separately once the mesh is available. */
+static void sky_probe_classify(const uint8_t *bgra, int w, int h)
+{
+    s_sky_sun_class = TD5_SKY_NIGHT;
+    s_sky_sun_dir_valid = 0;
+    if (!bgra || w <= 0 || h <= 0) return;
+
+    /* Box-downsample to <=128 on the long edge (kills single-pixel speculars),
+     * keeping per-cell mean RGB so the saturation/blue tests have colour. */
+    int md = (w > h) ? w : h, f = 1;
+    while (md / f > 128) f++;
+    int dw = w / f, dh = h / f;
+    if (dw < 1) dw = 1; if (dh < 1) dh = 1;
+    float *cr = (float *)malloc((size_t)dw * dh * sizeof(float));
+    float *cg = (float *)malloc((size_t)dw * dh * sizeof(float));
+    float *cb = (float *)malloc((size_t)dw * dh * sizeof(float));
+    if (!cr || !cg || !cb) { free(cr); free(cg); free(cb); return; }
+    for (int dy = 0; dy < dh; dy++) {
+        for (int dx = 0; dx < dw; dx++) {
+            double ar = 0, ag = 0, ab = 0; int n = 0;
+            for (int yy = 0; yy < f; yy++) {
+                int sy = dy * f + yy; if (sy >= h) break;
+                for (int xx = 0; xx < f; xx++) {
+                    int sx = dx * f + xx; if (sx >= w) break;
+                    const uint8_t *p = bgra + ((size_t)sy * w + sx) * 4;
+                    ab += p[0]; ag += p[1]; ar += p[2]; n++;   /* BGRA */
+                }
+            }
+            int c = dy * dw + dx;
+            cb[c] = (float)(ab / (n ? n : 1));
+            cg[c] = (float)(ag / (n ? n : 1));
+            cr[c] = (float)(ar / (n ? n : 1));
+        }
+    }
+
+    /* Whole-image mean luma (== engine s_sky_luma baseline). */
+    double lacc = 0.0; int ncell = dw * dh;
+    for (int c = 0; c < ncell; c++) lacc += (cr[c] + cg[c] + cb[c]) / 3.0;
+    float Lmean = (float)(lacc / (ncell ? ncell : 1));
+
+    /* Sky band = top HORIZON rows. Peak + centroid + colour stats live here. */
+    int band = (int)(dh * SKY_PROBE_HORIZON); if (band < 1) band = 1;
+    float Lpeak = 0.0f;
+    for (int y = 0; y < band; y++) for (int x = 0; x < dw; x++) {
+        int c = y * dw + x; float l = (cr[c] + cg[c] + cb[c]) / 3.0f;
+        if (l > Lpeak) Lpeak = l;
+    }
+    double su = 0, sv = 0, sw = 0, sr = 0, sg = 0, sb = 0; long pk = 0;
+    double sat_acc = 0; long blue = 0, bandn = 0;
+    for (int y = 0; y < band; y++) for (int x = 0; x < dw; x++) {
+        int c = y * dw + x; float R = cr[c], G = cg[c], B = cb[c];
+        float l = (R + G + B) / 3.0f;
+        float mx = R > G ? (R > B ? R : B) : (G > B ? G : B);
+        float mn = R < G ? (R < B ? R : B) : (G < B ? G : B);
+        sat_acc += (mx > 1.0f) ? (mx - mn) / mx : 0.0f;
+        if (B >= R && B >= G) blue++;
+        bandn++;
+        if (l >= 0.90f * Lpeak) {
+            su += (double)x * l; sv += (double)y * l; sw += l;
+            sr += R; sg += G; sb += B; pk++;
+        }
+    }
+    float area = bandn ? (float)pk / (float)bandn : 1.0f;
+    float sky_sat = bandn ? (float)(sat_acc / bandn) : 0.0f;
+    float blue_frac = bandn ? (float)blue / (float)bandn : 0.0f;
+    if (sw > 0.0) {
+        s_sky_sun_uv[0] = (float)(su / sw) / (float)(dw > 1 ? dw - 1 : 1);
+        s_sky_sun_uv[1] = (float)(sv / sw) / (float)(dh > 1 ? dh - 1 : 1);
+        s_sky_sun_rgb[0] = (float)(sr / pk);   /* stored RGB (not BGR) */
+        s_sky_sun_rgb[1] = (float)(sg / pk);
+        s_sky_sun_rgb[2] = (float)(sb / pk);
+    }
+    free(cr); free(cg); free(cb);
+
+    float night_thr = 80.0f;  /* == s_auto_sky_thr in td5_render_mesh.c */
+    float ratio = Lpeak / (Lmean > 1.0f ? Lmean : 1.0f);
+    int tight = (ratio >= sky_probe_ratio() && Lpeak >= sky_probe_peak() && area < SKY_PROBE_AREA);
+    int clear_blue = (blue_frac >= SKY_PROBE_BLUE && sky_sat >= SKY_PROBE_SAT && Lmean >= night_thr);
+    if (Lmean < night_thr)          s_sky_sun_class = TD5_SKY_NIGHT;
+    else if (tight || clear_blue)   s_sky_sun_class = TD5_SKY_SUNNY;
+    else                            s_sky_sun_class = TD5_SKY_OVERCAST;
+
+    TD5_LOG_I(RENDER_LOG_TAG,
+        "sky probe: class=%s mean=%.1f peak=%.1f ratio=%.2f sat=%.2f blue=%.2f "
+        "area=%.2f uv=(%.3f,%.3f) why=%s",
+        s_sky_sun_class == TD5_SKY_SUNNY ? "SUNNY" :
+        (s_sky_sun_class == TD5_SKY_OVERCAST ? "OVERCAST" : "NIGHT"),
+        (double)Lmean, (double)Lpeak, (double)ratio, (double)sky_sat,
+        (double)blue_frac, (double)area,
+        (double)s_sky_sun_uv[0], (double)s_sky_sun_uv[1],
+        tight ? "tight" : (clear_blue ? "blue" : "-"));
+}
+
+/* Resolve the sky peak UV to a world/position-space sun direction via the dome
+ * mesh: the FORWSKY panorama IS the dome texture, so the dome vertex whose UV is
+ * nearest the peak sits exactly where the bright sky renders. Its normalized
+ * model position is the sun direction. The .prr dome is drawn with identity
+ * model rotation (camera basis only; s_sky_rotation_angle is NOT applied to
+ * this path), so model X/Z == world X/Z. VERIFIED in-engine (Maui sky vertex at
+ * a v~0.22 sky UV has pos_y = +0.55): the dome is authored +Y-UP (art / "toward
+ * the sky" convention, same as the zone light dirs), while the shadow march
+ * runs in POSITION space (+Y DOWN). So flip Y — exactly the flip the zone sun
+ * gets — to make it a drop-in for the shadow pass's post-flip zone sun. */
+static void sky_probe_resolve_dir(void)
+{
+    s_sky_sun_dir_valid = 0;
+    if (s_sky_sun_class != TD5_SKY_SUNNY || !s_sky_mesh || !s_sky_mesh->vertices)
+        return;
+    const TD5_MeshVertex *vtx = s_sky_mesh->vertices;
+    int nv = s_sky_mesh->total_vertex_count;
+    float bestd = 1e30f; int besti = -1;
+    for (int i = 0; i < nv; i++) {
+        float du = vtx[i].tex_u - s_sky_sun_uv[0];
+        float dv = vtx[i].tex_v - s_sky_sun_uv[1];
+        float d = du * du + dv * dv;
+        if (d < bestd) { bestd = d; besti = i; }
+    }
+    if (besti < 0) return;
+    float px = vtx[besti].pos_x, py = vtx[besti].pos_y, pz = vtx[besti].pos_z;
+    float m = sqrtf(px * px + py * py + pz * pz);
+    if (m < 1e-3f) return;
+    /* +Y-up dome -> +Y-down position space: flip Y. */
+    float dx = px / m, dy = -py / m, dz = pz / m;
+    /* Elevation clamp: a clear sky's BRIGHTEST sky-band region is usually the
+     * horizon glow, not an elevated disc, so the centroid frequently resolves
+     * AT or BELOW the horizon. But SUNNY means the sun is up somewhere — so keep
+     * the centroid's AZIMUTH (its horizontal bearing IS a meaningful "toward the
+     * bright side of the sky") and lift the elevation to a low sun. Result:
+     * every sunny track gets a grounded directional sun + a visible near-horizon
+     * disc + long dramatic shadows. Genuinely high suns (a resolved bright
+     * break) keep their elevation. TD5RE_SUN_MIN_ELEV (default 0.15 ~ 8.6deg). */
+    static float s_min_elev = -1.0f;
+    if (s_min_elev < 0.0f) {
+        const char *e = getenv("TD5RE_SUN_MIN_ELEV");
+        s_min_elev = (e && e[0]) ? (float)atof(e) : 0.15f;
+        if (s_min_elev < 0.05f) s_min_elev = 0.05f;
+        if (s_min_elev > 0.95f) s_min_elev = 0.95f;
+    }
+    if (dy > -s_min_elev) {
+        float hl = sqrtf(dx * dx + dz * dz);
+        if (hl < 1e-4f) { dx = 0.0f; dz = -1.0f; hl = 1.0f; }
+        float horiz = sqrtf(1.0f - s_min_elev * s_min_elev);
+        dx = dx / hl * horiz; dz = dz / hl * horiz; dy = -s_min_elev;
+    }
+    s_sky_sun_dir[0] = dx; s_sky_sun_dir[1] = dy; s_sky_sun_dir[2] = dz;
+    s_sky_sun_dir_valid = 1;
+    TD5_LOG_I(RENDER_LOG_TAG,
+        "sky sun dir=(%.3f,%.3f,%.3f) uvdist=%.3f valid=%d",
+        (double)s_sky_sun_dir[0], (double)s_sky_sun_dir[1], (double)s_sky_sun_dir[2],
+        (double)sqrtf(bestd), s_sky_sun_dir_valid);
+}
+
+int td5_render_sky_sun(float dir[3], float rgb[3])
+{
+    if (s_sky_sun_class == TD5_SKY_SUNNY && s_sky_sun_dir_valid) {
+        if (dir) { dir[0] = s_sky_sun_dir[0]; dir[1] = s_sky_sun_dir[1]; dir[2] = s_sky_sun_dir[2]; }
+        if (rgb) { rgb[0] = s_sky_sun_rgb[0]; rgb[1] = s_sky_sun_rgb[1]; rgb[2] = s_sky_sun_rgb[2]; }
+        return TD5_SKY_SUNNY;
+    }
+    /* SUNNY-but-unresolved falls back to OVERCAST (soft shadows) so a track is
+     * never left shadowless just because the dome lookup failed. */
+    if (s_sky_sun_class == TD5_SKY_NIGHT) return TD5_SKY_NIGHT;
+    return TD5_SKY_OVERCAST;
+}
+
 void td5_render_load_sky(const char *path)
 {
     void *pixels = NULL;
@@ -3242,6 +3436,8 @@ void td5_render_load_sky(const char *path)
                 }
             }
         }
+        /* [RT2 P1] Sun classification off the same CPU pixels. */
+        sky_probe_classify((const uint8_t *)pixels, w, h);
         free(pixels);
     } else {
         TD5_LOG_W(RENDER_LOG_TAG, "sky not found: %s", path);
@@ -3283,6 +3479,11 @@ void td5_render_load_sky(const char *path)
             fclose(f);
         }
     }
+
+    /* [RT2 P1] With both the classification and the dome mesh in hand, resolve
+     * the SUNNY sun direction (runs every load: the class is per-track, the
+     * mesh is loaded once and reused). */
+    sky_probe_resolve_dir();
 }
 
 void td5_render_draw_sky(void)
@@ -3404,6 +3605,83 @@ void td5_render_draw_sky(void)
         td5_plat_render_draw_tris(verts, 4, indices, 6);
         s_scene_has_renderer_geometry = 1;
     }
+}
+
+/* [RT2 P1] One additive-glow quad, camera-facing, at a world point. Self-
+ * contained (the headlamp-glow recipe): proc-FX radial glow when available, else
+ * the 1x1 white page (899) as an additive square. `depth` is the normalized
+ * depth to write per vertex so the quad z-tests against the scene (occluded by
+ * closer geometry, visible over open sky). */
+static void sun_disc_quad(float vx, float vy, float vz, float half_px,
+                          float depth, uint32_t color, int glow_fx)
+{
+    float cx = -vx * s_focal_length + s_center_x;   /* vx already /vz (view/z)  */
+    float cy = -vy * s_focal_length + s_center_y;
+    float h  = half_px;
+    TD5_D3DVertex v[4];
+    v[0].screen_x=cx-h; v[0].screen_y=cy-h; v[0].depth_z=depth; v[0].rhw=1.0f; v[0].diffuse=color; v[0].specular=0; v[0].tex_u=0.0f; v[0].tex_v=0.0f;
+    v[1].screen_x=cx-h; v[1].screen_y=cy+h; v[1].depth_z=depth; v[1].rhw=1.0f; v[1].diffuse=color; v[1].specular=0; v[1].tex_u=0.0f; v[1].tex_v=1.0f;
+    v[2].screen_x=cx+h; v[2].screen_y=cy-h; v[2].depth_z=depth; v[2].rhw=1.0f; v[2].diffuse=color; v[2].specular=0; v[2].tex_u=1.0f; v[2].tex_v=0.0f;
+    v[3].screen_x=cx+h; v[3].screen_y=cy+h; v[3].depth_z=depth; v[3].rhw=1.0f; v[3].diffuse=color; v[3].specular=0; v[3].tex_u=1.0f; v[3].tex_v=1.0f;
+    uint16_t idx[6] = { 0, 1, 2, 1, 3, 2 };
+    flush_immediate_internal();
+    td5_plat_render_set_preset(TD5_PRESET_ADDITIVE_GLOW);
+    if (!glow_fx) td5_plat_render_bind_texture(899);   /* 1x1 white fallback */
+    td5_plat_render_draw_tris(v, 4, idx, 6);
+    (void)vz;
+}
+
+/* [RT2 P1] Sun disc + glare. SUNNY + HIGH only. Camera-facing additive glow at
+ * the probed sun direction, drawn AFTER the world with a scene-depth test so
+ * buildings/terrain correctly occlude it and it shows only over open sky. It
+ * shares s_sky_sun_dir with the shadow pass, so disc and shadows can never
+ * disagree. Note (as-built): TD5 sky panoramas rarely put the sun in a chase-cam
+ * frame, so the disc is often off-frame or occluded — that is correct, not a
+ * bug. Gated TD5RE_SUN_DISC (default on); TD5RE_SUN_DISC_SIZE = angular radius
+ * fraction; TD5RE_SUN_DISC_DBG=1 draws it close+centred (verification aid). */
+void td5_render_draw_sun_disc(void)
+{
+    if (!td5_rt_active()) return;                       /* HIGH only */
+    if (s_sky_sun_class != TD5_SKY_SUNNY || !s_sky_sun_dir_valid) return;
+    static int   s_disc_on = -1, s_disc_dbg = -1;
+    static float s_disc_sz = -1.0f;
+    if (s_disc_on < 0) {
+        const char *e = getenv("TD5RE_SUN_DISC");      s_disc_on = (e && e[0]) ? atoi(e) : 1;
+        const char *z = getenv("TD5RE_SUN_DISC_SIZE"); s_disc_sz = (z && z[0]) ? (float)atof(z) : 0.03f;
+        const char *d = getenv("TD5RE_SUN_DISC_DBG");  s_disc_dbg = (d && d[0]) ? atoi(d) : 0;
+        if (s_disc_sz <= 0.0f) s_disc_sz = 0.03f;
+    }
+    if (!s_disc_on) return;
+
+    float dir[3] = { s_sky_sun_dir[0], s_sky_sun_dir[1], s_sky_sun_dir[2] };
+    float D = 100000.0f, depth = 0.999f;   /* far, behind all world geometry */
+    if (s_disc_dbg) {
+        /* aim down camera-forward + place CLOSE and unoccluded (depth ~near) so
+         * the primitive is proven regardless of sun bearing / geometry. */
+        dir[0] = s_camera_basis[6]; dir[1] = s_camera_basis[7]; dir[2] = s_camera_basis[8];
+        D = 500.0f; depth = 0.02f;
+    }
+    float rx = dir[0] * D, ry = dir[1] * D, rz = dir[2] * D;  /* world = cam + dir*D, minus cam */
+    float vx = rx*s_camera_basis[0] + ry*s_camera_basis[1] + rz*s_camera_basis[2];
+    float vy = rx*s_camera_basis[3] + ry*s_camera_basis[4] + rz*s_camera_basis[5];
+    float vz = rx*s_camera_basis[6] + ry*s_camera_basis[7] + rz*s_camera_basis[8];
+    if (vz <= s_near_clip) return;                      /* sun behind camera */
+    float invz = 1.0f / vz;
+    vx *= invz; vy *= invz;                              /* view/z for projection */
+
+    int R = (int)s_sky_sun_rgb[0], G = (int)s_sky_sun_rgb[1], B = (int)s_sky_sun_rgb[2];
+    if (R > 255) R = 255; if (G > 255) G = 255; if (B > 255) B = 255;
+    uint32_t core  = 0xFF000000u | ((uint32_t)R << 16) | ((uint32_t)G << 8) | (uint32_t)B;
+    uint32_t glare = 0x60000000u | ((uint32_t)R << 16) | ((uint32_t)G << 8) | (uint32_t)B;
+
+    /* Angular radius -> screen pixels: half = tan(radius) * focal. s_disc_sz is
+     * ~tan(radius). Independent of D (view/z projection already applied). */
+    float half_px = s_disc_sz * s_focal_length;
+    int glow_fx = (td5_vfx_proc_enabled() && td5_plat_fx_begin(TD5_FX_GLOW, 0.0f, 1.0f));
+    sun_disc_quad(vx, vy, vz, half_px * 2.6f, depth, glare, glow_fx);  /* outer glare */
+    sun_disc_quad(vx, vy, vz, half_px,        depth, core,  glow_fx);  /* core disc   */
+    if (glow_fx) td5_plat_fx_end();
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
 void td5_render_advance_sky_rotation(void)

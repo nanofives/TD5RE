@@ -16,6 +16,7 @@
  * ======================================================================== */
 
 #include "td5_render.h"
+#include "td5_rt.h"      /* [RT2 P1] td5_rt_active() gates the probe sun override */
 #include "td5_camera.h"
 #include "td5_platform.h"
 #include "td5_rcmd.h"   /* Phase B render-transform: per-pane CPU command recording */
@@ -222,34 +223,94 @@ void td5_render_apply_light_pass(int vp_x, int vp_y)
  * ambient-only zones (tunnels) cast nothing. Call AFTER the opaque world,
  * BEFORE td5_render_apply_light_pass (headlight pools must not be darkened).
  * March tuning env knobs (dev): TD5RE_SHADOW_STEPS / _DIST / _THICK. */
-void td5_render_apply_shadow_pass(int vp_x, int vp_y)
-{
-    if (!td5_light2_active() || !td5_light2_sun_shadows()) return;
+/* [RT2 P1] TD5RE_SUN_PROBE dev toggle (default on). 0 = ignore the image sun,
+ * fall back to the zone-derived sun in HIGH (matches pre-RT2 behaviour). */
+static int sun_probe_enabled(void)
+{ static int v = -1; if (v < 0) { const char *e = getenv("TD5RE_SUN_PROBE"); v = (e && e[0]) ? atoi(e) : 1; } return v; }
 
-    /* Strongest enabled directional slot = the scene's sun. */
-    float best_mag2 = 0.0f;
-    float sun[3] = { 0.0f, 0.0f, 0.0f };
+/* [RT2 P1] Unified scene-sun derivation shared by the shadow and SSR passes.
+ * Fills sun[3] (unit, POSITION space +Y down, toward the sun) and *out_dom (the
+ * directional-dominance strength scale, 0..1). Returns the class:
+ *   0 = no sun (tunnel / below horizon)  -> caller returns
+ *   TD5_SKY_SUNNY(1)    = crisp shadows
+ *   TD5_SKY_OVERCAST(2) = soft shadows (caller widens the cone + caps strength)
+ * The zone-table sun is the base (strongest directional slot, Y-flipped). In
+ * HIGH with the probe on, a SUNNY image swaps in the image sun (which is already
+ * position-space — no extra flip), and an OVERCAST image keeps the zone sun but
+ * is flagged so the caller softens it. NIGHT / probe-off / LOW keep the zone
+ * sun verbatim (LOW is thus byte-identical). */
+static int td5_render_scene_sun(float sun[3], float *out_dom)
+{
+    float best_mag2 = 0.0f, zsun[3] = { 0.0f, 0.0f, 0.0f };
     for (int s = 0; s < 3; s++) {
         if (!s_tl_contrib[s].enabled) continue;
         const float *v = s_tl_contrib[s].vec_world;
         float m2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
-        if (m2 > best_mag2) { best_mag2 = m2; sun[0] = v[0]; sun[1] = v[1]; sun[2] = v[2]; }
+        if (m2 > best_mag2) { best_mag2 = m2; zsun[0] = v[0]; zsun[1] = v[1]; zsun[2] = v[2]; }
     }
-    if (best_mag2 <= 1.0f) return;               /* no directional light (tunnel) */
-    float mag = sqrtf(best_mag2);
-    sun[0] /= mag; sun[1] /= mag; sun[2] /= mag;
-    /* [Y-CONVENTION] Zone dirs live in the original's Y-flipped lighting
-     * convention (+Y = toward the sky); the shadow march happens in POSITION
-     * space (world +Y is DOWN) — flip so rays leave the ground upward. */
-    sun[1] = -sun[1];
-    if (sun[1] >= -0.05f) return;                /* sun at/below horizon — skip */
+    int   zone_valid = 0;
+    float zone_dom = 0.0f;
+    if (best_mag2 > 1.0f) {
+        float mag = sqrtf(best_mag2);
+        zsun[0] /= mag; zsun[1] /= mag; zsun[2] /= mag;
+        zsun[1] = -zsun[1];                       /* zone Y-flip -> position space */
+        if (zsun[1] < -0.05f) {
+            zone_valid = 1;
+            float dir_lum = mag * 0.25f;
+            float amb     = s_ambient_intensity > 0.0f ? s_ambient_intensity : 1.0f;
+            zone_dom = dir_lum / (dir_lum + amb);
+        }
+    }
 
-    /* Directional dominance: how much of the zone's lighting is the sun vs
-     * flat ambient. |vec_world| ~ 4*intensity (dir_shorts ~4096 / 1024). */
-    float dir_lum = mag * 0.25f;
-    float amb     = s_ambient_intensity > 0.0f ? s_ambient_intensity : 1.0f;
-    float dom     = dir_lum / (dir_lum + amb);
+    if (td5_rt_active() && sun_probe_enabled()) {
+        float pdir[3], prgb[3];
+        int cls = td5_render_sky_sun(pdir, prgb);
+        if (cls == TD5_SKY_SUNNY && pdir[1] < -0.05f) {
+            sun[0] = pdir[0]; sun[1] = pdir[1]; sun[2] = pdir[2];
+            /* image sun is authoritative -> crisp; keep the zone's dominance if
+             * strong, else a healthy default so a weak-zone sunny track still
+             * grounds objects. */
+            *out_dom = zone_valid ? (zone_dom > 0.75f ? zone_dom : 0.75f) : 0.9f;
+            return TD5_SKY_SUNNY;
+        }
+        if (cls == TD5_SKY_OVERCAST && zone_valid) {
+            sun[0] = zsun[0]; sun[1] = zsun[1]; sun[2] = zsun[2];
+            *out_dom = zone_dom;
+            return TD5_SKY_OVERCAST;
+        }
+        /* NIGHT or unresolved -> fall through to the zone sun. */
+    }
+
+    if (zone_valid) {
+        sun[0] = zsun[0]; sun[1] = zsun[1]; sun[2] = zsun[2];
+        *out_dom = zone_dom;
+        return TD5_SKY_SUNNY;
+    }
+    return 0;
+}
+
+/* [RT2 P1] Overcast softening knobs (HIGH-only; RT shadow shader reads params2.w
+ * for the cone widen, and the game caps strength here). */
+static float sun_overcast_cone(void)
+{ static float v = -1; if (v < 0) { const char *e = getenv("TD5RE_SUN_OVERCAST_CONE"); v = (e && e[0]) ? (float)atof(e) : 5.0f; if (v < 1.0f) v = 1.0f; } return v; }
+static float sun_overcast_strength(void)
+{ static float v = -1; if (v < 0) { const char *e = getenv("TD5RE_SUN_OVERCAST_STRENGTH"); v = (e && e[0]) ? (float)atof(e) : 0.5f; } return v; }
+
+void td5_render_apply_shadow_pass(int vp_x, int vp_y)
+{
+    if (!td5_light2_active() || !td5_light2_sun_shadows()) return;
+
+    float sun[3] = { 0.0f, 0.0f, 0.0f }, dom = 0.0f;
+    int sky_cls = td5_render_scene_sun(sun, &dom);
+    if (!sky_cls) return;                        /* no directional light (tunnel) */
+
     float strength = ((float)td5_light2_shadow_strength() / 100.0f) * dom;
+    float cone_scale = 1.0f;                      /* params2.w: 1 = default ~0.7deg */
+    if (sky_cls == TD5_SKY_OVERCAST) {
+        cone_scale = sun_overcast_cone();         /* wide penumbra */
+        float cap = sun_overcast_strength();
+        if (strength > cap) strength = cap;       /* soft, low-contrast */
+    }
     if (strength <= 0.01f) return;
 
     /* March tuning (env-overridable for look iteration). */
@@ -277,7 +338,8 @@ void td5_render_apply_shadow_pass(int vp_x, int vp_y)
                                  depth_scale, NEAR_DEPTH_OFFSET,
                                  sun, strength,
                                  s_steps, s_dist, s_thick, 8.0f,
-                                 (float)s_viewport_width, (float)s_viewport_height);
+                                 (float)s_viewport_width, (float)s_viewport_height,
+                                 cone_scale);
 }
 
 /* [LIGHT2 P3] Screen-space reflections for the CURRENT viewport. Reflective
@@ -319,25 +381,14 @@ void td5_render_apply_ssr_pass(int vp_x, int vp_y)
     float cam[3] = { s_camera_pos[0], s_camera_pos[1], s_camera_pos[2] };
     float depth_scale = 1.0f / DEPTH_NORMALIZE_INV;   /* 195000 */
 
-    /* [P3] Scene sun dir (strongest enabled directional zone slot) for the RT
-     * reflection's sun shadow ray -- same derivation + Y-flip as the shadow pass;
+    /* [P3] Scene sun dir for the RT reflection's sun shadow ray -- SAME unified
+     * derivation as the shadow pass (probe sun in HIGH+SUNNY, else zone sun);
      * disabled when there's no sun (tunnel) or it's below the horizon. */
     float sun[3] = { 0.0f, 0.0f, 0.0f };
     int sun_shadow = 0;
     if (td5_light2_sun_shadows()) {
-        float best_mag2 = 0.0f;
-        for (int s = 0; s < 3; s++) {
-            if (!s_tl_contrib[s].enabled) continue;
-            const float *v = s_tl_contrib[s].vec_world;
-            float m2 = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
-            if (m2 > best_mag2) { best_mag2 = m2; sun[0]=v[0]; sun[1]=v[1]; sun[2]=v[2]; }
-        }
-        if (best_mag2 > 1.0f) {
-            float mag = sqrtf(best_mag2);
-            sun[0]/=mag; sun[1]/=mag; sun[2]/=mag;
-            sun[1] = -sun[1];                       /* zone dirs are Y-flipped vs position space */
-            if (sun[1] < -0.05f) sun_shadow = 1;    /* sun above the horizon */
-        }
+        float dom = 0.0f;
+        if (td5_render_scene_sun(sun, &dom) != 0) sun_shadow = 1;
     }
 
     td5_plat_render_apply_ssr(cam, basis9,

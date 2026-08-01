@@ -332,6 +332,20 @@ void td5_render_draw_sky(void);
  * none. Per-track brightness baseline for the auto-headlight verdict. */
 float td5_render_sky_luma(void);
 
+/* [RT2 P1] Image-derived sun classification, probed from the sky texture at
+ * load (see re/tools/sky_probe.py for the offline tuning harness / threshold
+ * table). */
+enum { TD5_SKY_NIGHT = 0, TD5_SKY_SUNNY = 1, TD5_SKY_OVERCAST = 2 };
+/* Returns the class. When SUNNY (and a sun direction was resolved off the dome
+ * mesh), fills dir[3] (unit; POSITION/ray space, +Y DOWN, pointing TOWARD the
+ * sun — a drop-in for the shadow pass's post-Y-flip zone sun) and rgb[3] (0..255
+ * sun tint). dir/rgb are left untouched for NIGHT/OVERCAST or if unresolved
+ * (return value TD5_SKY_OVERCAST is then used by callers as "soft shadows"). */
+int td5_render_sky_sun(float dir[3], float rgb[3]);
+/* Draw the sun disc (SUNNY + HIGH only); called from the sky phase after the
+ * dome, before the world. No-op otherwise. */
+void td5_render_draw_sun_disc(void);
+
 /* --- Billboard animation --- */
 void td5_render_advance_billboard_anims(void);
 
