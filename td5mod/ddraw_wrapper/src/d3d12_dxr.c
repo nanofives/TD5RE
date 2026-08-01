@@ -64,6 +64,13 @@ static void dxr_log(const char *fmt, ...)
 #define DXR_SLOT_GEO_SRV      12  /* t5 GeoRecord      */
 #define DXR_SLOT_REFLCOL_SRV  13  /* reflection composite */
 #define DXR_SLOT_TABLE_BASE   0   /* table 0 gpu handle = slot 0 */
+/* P3 bindless per-page textures: heap slots [16 .. 16+DXR_BINDLESS_MAX) hold one
+ * SRV per texture page (indexed by page id = GeoRecord.texture_index). A 1x1
+ * magenta fallback fills every slot at init so any unregistered index samples
+ * safely (no device removal); registration overwrites a slot with the real page
+ * texture. Page ids are < MAT_PAGE_MAX (1024). Unbounded SRV range t0,space1. */
+#define DXR_BINDLESS_BASE     16
+#define DXR_BINDLESS_MAX      1024
 
 #define DXR_SHADER_ID_SIZE   D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES   /* 32       */
 #define DXR_REGION_ALIGN     D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT /* 64  */
@@ -148,6 +155,11 @@ typedef struct {
     ID3D12Resource             *geo_buf;          /* UPLOAD, GeoRecord[DXR_MAX_MESHES] */
     void                       *geo_mapped;
     int                         p3_srvs_ready;    /* vb/ib/geo SRVs created        */
+
+    /* P3 bindless textures: 1x1 magenta fallback + per-page real-texture SRVs. */
+    ID3D12Resource             *tex_fallback;     /* 1x1 magenta (owned)          */
+    int                         bindless_ready;   /* fallback SRVs filled          */
+    const void                 *bindless_res[DXR_BINDLESS_MAX]; /* last resource per slot (dedup) */
 
     /* Output UAV texture (swapchain-sized). */
     ID3D12Resource             *output;
@@ -277,7 +289,8 @@ int d3d12_dxr_smoke_enabled(void)
 static int dxr_create_global_rs(void)
 {
     D3D12_DESCRIPTOR_RANGE ranges[4];
-    D3D12_ROOT_PARAMETER params[5];
+    D3D12_DESCRIPTOR_RANGE bindless_range;
+    D3D12_ROOT_PARAMETER params[6];
     D3D12_STATIC_SAMPLER_DESC samp;
     D3D12_ROOT_SIGNATURE_DESC rsd;
     ID3D10Blob *sig = NULL, *err = NULL;
@@ -316,6 +329,20 @@ static int dxr_create_global_rs(void)
     params[4].DescriptorTable.NumDescriptorRanges = 4;
     params[4].DescriptorTable.pDescriptorRanges = ranges;
     params[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    /* [P3] bindless per-page textures: a SEPARATE root table (param 5) holding one
+     * unbounded SRV range (t0, space1) based at heap slot DXR_BINDLESS_BASE. Kept
+     * distinct from the fixed table above so the working 2b shadow/light ranges are
+     * untouched. chit_refl is the only shader that references it. */
+    ZeroMemory(&bindless_range, sizeof(bindless_range));
+    bindless_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    bindless_range.NumDescriptors = (UINT)-1;              /* unbounded            */
+    bindless_range.BaseShaderRegister = 0;                 /* t0                   */
+    bindless_range.RegisterSpace = 1;                      /* space1               */
+    bindless_range.OffsetInDescriptorsFromTableStart = 0;  /* table base = slot 16 */
+    params[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[5].DescriptorTable.NumDescriptorRanges = 1;
+    params[5].DescriptorTable.pDescriptorRanges = &bindless_range;
+    params[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     ZeroMemory(&samp, sizeof(samp));
     samp.Filter   = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -326,7 +353,7 @@ static int dxr_create_global_rs(void)
     samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     ZeroMemory(&rsd, sizeof(rsd));
-    rsd.NumParameters = 5; rsd.pParameters = params;
+    rsd.NumParameters = 6; rsd.pParameters = params;
     rsd.NumStaticSamplers = 1; rsd.pStaticSamplers = &samp;
     rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;   /* DXR global RS: no DENY flags */
 
@@ -461,6 +488,48 @@ static int dxr_create_heap(void)
             &IID_ID3D12DescriptorHeap, (void **)&g_dxr.heap))) { dxr_log("CreateDescriptorHeap FAILED"); return 0; }
     g_dxr.heap_inc = ID3D12Device_GetDescriptorHandleIncrementSize((ID3D12Device *)g_dxr.device5,
                         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    return 1;
+}
+
+/* P3 bindless: create the 1x1 fallback texture and point EVERY bindless slot
+ * [16..16+MAX) at it, so an unregistered texture_index (or a retired page) is
+ * always a valid SRV -- sampling it is safe (no device removal), a benign flat
+ * colour in a reflection. Registration later overwrites individual slots with the
+ * real page textures. Created directly in the combined PIXEL|NON_PIXEL shader-
+ * resource state (RT DispatchRays is a compute read) with undefined contents --
+ * safe to sample; a real magenta upload is Step 2's registration machinery. */
+static int dxr_fill_bindless_fallback(void)
+{
+    D3D12_HEAP_PROPERTIES hp; D3D12_RESOURCE_DESC td;
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvd;
+    D3D12_CPU_DESCRIPTOR_HANDLE h;
+    UINT i;
+    const D3D12_RESOURCE_STATES rd =
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+    if (!g_dxr.tex_fallback) {
+        ZeroMemory(&hp, sizeof(hp)); hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        ZeroMemory(&td, sizeof(td));
+        td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        td.Width = 1; td.Height = 1; td.DepthOrArraySize = 1; td.MipLevels = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1;
+        if (FAILED(ID3D12Device_CreateCommittedResource((ID3D12Device *)g_dxr.device5, &hp,
+                D3D12_HEAP_FLAG_NONE, &td, rd, NULL,
+                &IID_ID3D12Resource, (void **)&g_dxr.tex_fallback))) {
+            dxr_log("bindless fallback tex FAILED"); return 0;
+        }
+    }
+    ZeroMemory(&srvd, sizeof(srvd));
+    srvd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    srvd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvd.Texture2D.MipLevels = 1;
+    for (i = 0; i < DXR_BINDLESS_MAX; i++) {
+        h = dxr_cpu(g_dxr.heap, DXR_BINDLESS_BASE + i);
+        ID3D12Device_CreateShaderResourceView((ID3D12Device *)g_dxr.device5, g_dxr.tex_fallback, &srvd, h);
+        g_dxr.bindless_res[i] = g_dxr.tex_fallback;
+    }
+    g_dxr.bindless_ready = 1;
     return 1;
 }
 
@@ -1185,6 +1254,9 @@ static int dxr_lighting_pass(const void *cb, UINT cb_size, int mode)
     ID3D12GraphicsCommandList4_SetPipelineState1(cl4, g_dxr.so);
     ID3D12GraphicsCommandList_SetComputeRootConstantBufferView(cl, cb_param, cbva);  /* b1 shadow / b2 light / b3 ssr */
     ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(cl, 4, dxr_gpu(g_dxr.heap, DXR_SLOT_TABLE_BASE));
+    /* [P3] bindless texture table (param 5) -> heap slot 16. Bound for every pass
+     * (only chit_refl references it; harmless for shadow/light). */
+    ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(cl, 5, dxr_gpu(g_dxr.heap, DXR_BINDLESS_BASE));
     ZeroMemory(&d, sizeof(d));
     d.RayGenerationShaderRecord.StartAddress = g_dxr.sbt_va + DXR_SBT_RAYGEN_OFF + (UINT64)raygen * DXR_SBT_RAYGEN_STRIDE;
     d.RayGenerationShaderRecord.SizeInBytes  = DXR_SHADER_ID_SIZE;
@@ -1297,6 +1369,7 @@ static int dxr_ensure_init(void)
     if (!g_dxr.device5) return 0;
     if (!dxr_create_heap())        goto fail;
     dxr_write_null_tlas_srv(DXR_SLOT_TLAS_SRV);   /* valid descriptor before any TLAS */
+    if (!dxr_fill_bindless_fallback()) goto fail; /* [P3] valid SRV in every bindless slot */
     if (!dxr_create_global_rs())   goto fail;
     if (!dxr_create_state_object())goto fail;
     if (!dxr_create_sbt())         goto fail;
@@ -1405,6 +1478,9 @@ void d3d12_dxr_shutdown(void)
     if (g_dxr.light_pso) { ID3D12PipelineState_Release(g_dxr.light_pso);  g_dxr.light_pso = NULL; }
     if (g_dxr.refl_pso)  { ID3D12PipelineState_Release(g_dxr.refl_pso);   g_dxr.refl_pso = NULL; }
     if (g_dxr.geo_buf)   { ID3D12Resource_Release(g_dxr.geo_buf); g_dxr.geo_buf = NULL; g_dxr.geo_mapped = NULL; }
+    if (g_dxr.tex_fallback) { ID3D12Resource_Release(g_dxr.tex_fallback); g_dxr.tex_fallback = NULL; }
+    g_dxr.bindless_ready = 0;
+    ZeroMemory(g_dxr.bindless_res, sizeof(g_dxr.bindless_res));
     g_dxr.p3_srvs_ready = 0;
     g_dxr.mask_w = g_dxr.mask_h = 0;
     if (g_dxr.output)    { ID3D12Resource_Release(g_dxr.output);       g_dxr.output = NULL; }

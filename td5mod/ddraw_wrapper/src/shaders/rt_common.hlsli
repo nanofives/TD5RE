@@ -24,6 +24,13 @@ ByteAddressBuffer               g_ib       : register(t4);  /* P3 index pool (u1
 struct GeoRecord { uint vb_byte_off; uint ib_byte_off; uint texture_index; uint matid; };
 StructuredBuffer<GeoRecord>     g_geo      : register(t5);
 
+/* P3 bindless per-page textures (classic unbounded range, NOT SM6.6 heap). One
+ * SRV per texture page id at g_bindless[page_id]; index 0 = "no texture" (track
+ * lane quads, which have no UV) -> chit keeps vertex colour. Unregistered ids
+ * resolve to the 1x1 fallback (safe). Separate root table param, register space 1. */
+Texture2D<float4>               g_bindless[] : register(t0, space1);
+SamplerState                    g_samp     : register(s0);   /* static LINEAR wrap */
+
 /* ---- b0: debug primary-ray view CB (Phase 1) ------------------------------ */
 cbuffer RTViewCB : register(b0)
 {

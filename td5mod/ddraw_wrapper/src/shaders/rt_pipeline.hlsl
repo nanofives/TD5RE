@@ -86,6 +86,17 @@ void chit_refl(inout RayPayload p, in BuiltInTriangleIntersectionAttributes attr
     float3 c2 = rt_vertex_color(rec.vb_byte_off, idx.z);
     float3 bw = float3(1.0f - attr.barycentrics.x - attr.barycentrics.y, attr.barycentrics.x, attr.barycentrics.y);
     float3 col = c0 * bw.x + c1 * bw.y + c2 * bw.z;
+    /* [P3] Textured hit shading: sample the hit page's texture (bindless) and
+     * modulate the interpolated vertex colour. texture_index 0 = "no texture"
+     * (track lane quads have no UV) -> keep the flat vertex colour. */
+    if (rec.texture_index != 0u && rec.texture_index < 1024u) {   /* only filled slots */
+        float2 uv0 = rt_vertex_uv(rec.vb_byte_off, idx.x);
+        float2 uv1 = rt_vertex_uv(rec.vb_byte_off, idx.y);
+        float2 uv2 = rt_vertex_uv(rec.vb_byte_off, idx.z);
+        float2 uv  = uv0 * bw.x + uv1 * bw.y + uv2 * bw.z;
+        float3 tex = g_bindless[NonUniformResourceIndex(rec.texture_index)].SampleLevel(g_samp, uv, 0).rgb;
+        col *= tex;
+    }
     float3 N = normalize(mul((float3x3)ObjectToWorld3x4(), cross(p1 - p0, p2 - p0)));
     p.color = col * (0.35f + 0.65f * saturate(abs(N.y)));
     p.t = RayTCurrent();
