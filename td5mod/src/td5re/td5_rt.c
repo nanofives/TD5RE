@@ -145,7 +145,10 @@ void td5_rt_level_build(void)
     TD5_RTVertex  *verts;
     unsigned short *idx;
 
-    if (!td5_rt_available()) return;
+    /* [P3 memory] Only feed when RT is ACTIVE (Quality=HIGH). The level-load hook
+     * calls this unconditionally; in LOW it must not build the ASes (td5_rt_frame
+     * lazily rebuilds on a later LOW->HIGH switch). See td5_rt_frame. */
+    if (!td5_rt_active()) return;
     rt_destroy_meshes();
     s_rt_generation = td5_plat_rt_generation();
 
@@ -358,19 +361,36 @@ void td5_rt_frame(int vp, int pane_x, int pane_y, int pane_w, int pane_h)
     float cam[3], right[3], up[3], fwd[3], basis9[9];
     unsigned gen;
 
-    if (!td5_rt_available()) return;   /* build ASes whenever DXR is present (plan 1.2) */
+    if (!td5_rt_available()) return;
 
-    /* Device-lost: meshes were destroyed with the old device -> re-feed. */
+    /* [P3 memory] Gate the whole AS feed on ACTIVE (Quality=HIGH), not merely
+     * availability. Plan §1.2 originally fed whenever DXR was present so a
+     * LOW<->HIGH switch was instant, but that made every LOW frame pay the full
+     * RT cost -- ~270 MB of VB/IB/BLAS pools plus per-track growth (confirmed the
+     * sole cause of the selftest degrade-private-bytes growth: DXR-disabled runs
+     * are flat). Trade-off: a LOW->HIGH switch now lazily rebuilds the ASes over a
+     * frame or two (a brief warm-up during which the deferred passes fall back to
+     * the screen-space stack) instead of being instant -- worth 270 MB. */
+    if (!td5_rt_active()) {
+        if (vp == 0) {
+            td5_plat_rt_set_mode(0);
+            if (s_track_chunk_count > 0) td5_rt_level_unload();  /* HIGH->LOW: reclaim BLAS/meshes */
+        }
+        return;
+    }
+
+    /* Lazy (re)build: on the first HIGH frame (LOW->HIGH switch or HIGH-at-level-
+     * load), or after a device-lost generation bump, (re)feed the track from the
+     * still-loaded span table. */
     gen = td5_plat_rt_generation();
-    if (gen != s_rt_generation) {
-        td5_rt_level_build();   /* rebuilds track from the still-loaded span table */
+    if (gen != s_rt_generation || s_track_chunk_count == 0) {
+        td5_rt_level_build();
     }
 
     /* TLAS is world-space and shared across panes: build once per frame (vp 0). */
     if (vp == 0) {
         rt_build_tlas();
-        /* HIGH mode: the deferred shadow/light passes run the RT composite. */
-        td5_plat_rt_set_mode(td5_rt_active());
+        td5_plat_rt_set_mode(1);   /* HIGH: deferred passes run the RT composite */
     }
 
     /* Per-pane camera view. td5_camera_get_position returns FLOAT world units
