@@ -3942,6 +3942,18 @@ void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
     cb.params[2] = start_off;
     cb.params[3] = pane_w;
     cb.params2[0] = pane_h;
+    /* [P2b knobs] RT-only (ignored by the LOW screen-space shadow shader, which
+     * reads only params2.x): params2.y = TD5RE_RT_BIAS normal-offset scale (car
+     * self-shadow acne tuning), params2.z = TD5RE_RT_RAYS sun shadow samples
+     * (soft-shadow denoise; default 4). */
+    { static float s_bias = -1.0f; static int s_rays = -1;
+      if (s_rays < 0) { const char *e;
+          s_bias = ((e = getenv("TD5RE_RT_BIAS")) && e[0]) ? (float)atof(e) : 1.0f;
+          s_rays = ((e = getenv("TD5RE_RT_RAYS")) && e[0]) ? atoi(e) : 4;
+          if (s_bias < 0.0f) s_bias = 0.0f;
+          if (s_rays < 1) s_rays = 1; if (s_rays > 16) s_rays = 16; }
+      cb.params2[1] = s_bias;
+      cb.params2[2] = (float)s_rays; }
 
     Backend_ApplyShadowPass(&cb);
 }

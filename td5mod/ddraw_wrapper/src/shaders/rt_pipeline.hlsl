@@ -143,18 +143,28 @@ void rgen_shadow()
 
     float3 world = rt_world_from_depth(D, float2(lpx), sh_camPosFocal, sh_rightCx, sh_upCy, sh_fwdDepthScale, sh_misc.x);
     float3 N = rt_gbuf_normal(gb);
-    /* normal-offset bias, distance-scaled (24.8-quantized geometry -> acne). */
+    /* normal-offset bias, distance-scaled (24.8-quantized geometry -> acne).
+     * sh_params2.y = TD5RE_RT_BIAS scale (car self-shadow tuning; 0 -> default 1). */
     float dist = length(world - sh_camPosFocal.xyz);
-    float3 origin = world + N * (16.0f + dist * 0.004f);
+    float biasScale = sh_params2.y > 0.0001f ? sh_params2.y : 1.0f;
+    float3 origin = world + N * ((16.0f + dist * 0.004f) * biasScale);
 
     float3 L = normalize(sh_sun.xyz);
     float3 up0 = abs(L.y) < 0.99f ? float3(0,1,0) : float3(1,0,0);
     float3 T = normalize(cross(up0, L));
     float3 Bv = cross(L, T);
-    float ang = rt_hash12(float2(fp)) * 6.2831853f;
-    float3 dir = normalize(L + (cos(ang) * T + sin(ang) * Bv) * 0.012f);  /* ~0.7deg cone */
-
-    float vis = rt_shadow_ray(origin, dir, 1.0f, sh_sun.w);
+    /* Multi-sample the cone (sh_params2.z = TD5RE_RT_RAYS, 0 -> 1): K stratified
+     * rotations of the ~0.7deg cone, averaged. More samples -> smoother penumbra +
+     * denoised sunvis (the single-ray cone jitter left mild grain). */
+    int K = max(1, (int)(sh_params2.z + 0.5f));
+    float base = rt_hash12(float2(fp)) * 6.2831853f;
+    float visSum = 0.0f;
+    for (int k = 0; k < K; k++) {
+        float ang = base + (6.2831853f * (float)k) / (float)K;
+        float3 dir = normalize(L + (cos(ang) * T + sin(ang) * Bv) * 0.012f);
+        visSum += rt_shadow_ray(origin, dir, 1.0f, sh_sun.w);
+    }
+    float vis = visSum / (float)K;
     g_sunvis[fp] = 1.0f - sh_misc.w * (1.0f - vis);
 }
 
