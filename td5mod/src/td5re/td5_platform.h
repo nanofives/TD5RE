@@ -795,6 +795,24 @@ void td5_plat_render_set_gbuffer(int on);
  * (Backend_RTAvailable). The game gates LIGHTING QUALITY: HIGH on this. */
 int td5_plat_rt_available(void);
 
+/* [RT lighting Phase 1] World-space geometry feed bridges (front the wrapper's
+ * Backend_RT* API). These layouts mirror BackendRTVertex/BackendRTRange. */
+typedef struct { float pos[3]; float uv[2]; unsigned color; } TD5_RTVertex;      /* 24 B */
+typedef struct { unsigned first_index, index_count, texture_id, matid_flags; } TD5_RTRange;
+int  td5_plat_rt_mesh_create(const TD5_RTVertex *verts, unsigned nverts,
+                             const unsigned short *idx, unsigned nidx,
+                             const TD5_RTRange *ranges, unsigned nranges);
+void td5_plat_rt_mesh_destroy(int handle);
+void td5_plat_rt_scene_begin(void);
+void td5_plat_rt_scene_instance(int mesh, const float m3x4[12], unsigned flags);
+void td5_plat_rt_scene_end(void);
+void td5_plat_rt_set_view(const float cam_pos[3], const float basis9[9],
+                          float focal, float center_x, float center_y,
+                          int pane_x, int pane_y, int pane_w, int pane_h,
+                          const float sun_dir[3]);
+void td5_plat_rt_debug_view(void);
+unsigned td5_plat_rt_generation(void);
+
 /** Upload a texture page to the GPU. Returns 0 on failure. */
 int td5_plat_render_upload_texture(int page_index, const void *pixels, int width, int height, int format);
 

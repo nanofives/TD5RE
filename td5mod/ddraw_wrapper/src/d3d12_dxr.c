@@ -40,10 +40,59 @@ static void dxr_log(const char *fmt, ...)
 
 /* ---- module state ---------------------------------------------------------- */
 
-#define DXR_HEAP_SLOTS       8      /* Phase 0: [0]=output UAV, [1]=output SRV   */
-#define DXR_SBT_RAYGEN_OFF   0
+/* Shader-visible heap slots (fixed):
+ *   0 = output UAV (u0)      1 = TLAS SRV (t0)      2 = blit SRV
+ *   3 = VB pool SRV (t, P3)  4 = IB pool SRV (t, P3)  [16..] bindless (P3) */
+#define DXR_HEAP_SLOTS        4096
+#define DXR_SLOT_OUTPUT_UAV   0
+#define DXR_SLOT_TLAS_SRV     1
+#define DXR_SLOT_BLIT_SRV     2
+#define DXR_SLOT_VB_SRV       3
+#define DXR_SLOT_IB_SRV       4
+
 #define DXR_SHADER_ID_SIZE   D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES   /* 32       */
-#define DXR_SBT_BYTES        256    /* one 64-aligned region is plenty for P0    */
+#define DXR_REGION_ALIGN     D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT /* 64  */
+
+/* SBT layout (plan sec.4): [raygen | miss | hitgroup]. Each REGION start is
+ * 64-aligned. The single RayGenerationShaderRecord passed to DispatchRays must
+ * ALSO be 64-aligned, so raygen records are strided by 64 (miss/hitgroup records
+ * use the 32-byte record stride within their tables). Raygen slots: [0]=smoke,
+ * [1]=debug (reserved [2]=shadow, [3]=refl). Miss: [0]=miss_shadow, [1]=miss_refl.
+ * Hitgroup: [0]="hg". */
+#define DXR_RAYGEN_SMOKE      0
+#define DXR_RAYGEN_DEBUG      1
+#define DXR_RAYGEN_COUNT      4      /* reserve smoke/debug/shadow/refl */
+#define DXR_MISS_SHADOW       0
+#define DXR_MISS_REFL         1
+#define DXR_MISS_COUNT        2
+#define DXR_HITGROUP_COUNT    1
+
+#define DXR_SBT_RAYGEN_STRIDE 64     /* each raygen record 64-aligned (dispatch req) */
+#define DXR_SBT_RAYGEN_OFF    0
+#define DXR_SBT_MISS_OFF      256    /* 4 raygen slots * 64 = 256 (64-aligned)       */
+#define DXR_SBT_HITGROUP_OFF  320    /* miss region (2*32=64) rounds to 64 -> 320    */
+#define DXR_SBT_BYTES         512
+
+/* Max instances the TLAS is sized for (plan: capacity 128 up front). */
+#define DXR_MAX_INSTANCES     128
+/* TDR guard: BLAS triangles built per frame during the warmup window. */
+#define DXR_BLAS_TRIS_PER_FRAME 500000
+#define DXR_MAX_MESHES        512
+
+typedef struct {
+    ID3D12Resource *blas;          /* result buffer (owned)                     */
+    D3D12_GPU_VIRTUAL_ADDRESS blas_va;
+    ID3D12Resource *staging;       /* UPLOAD staging for VB+IB (retired after copy) */
+    UINT   vb_offset, ib_offset;   /* byte offsets into the pools               */
+    UINT   vb_bytes,  ib_bytes;    /* staging copy sizes                        */
+    UINT   nverts, nidx;
+    UINT   nranges;
+    BackendRTRange *ranges;        /* nranges entries (malloc'd copy)           */
+    UINT   tri_count;
+    int    used;                   /* slot occupied                             */
+    int    built;                  /* BLAS built (else pending)                 */
+    int    needs_copy;             /* VB/IB not yet copied into the pools        */
+} DxrMesh;
 
 typedef struct {
     ID3D12Device5              *device5;    /* cached from the backend (not owned) */
@@ -70,9 +119,54 @@ typedef struct {
     D3D12_RESOURCE_STATES       out_state;
 
     int                         smoke;      /* TD5RE_RT_SMOKE latched (-1 = unread) */
+    int                         debugview;  /* TD5RE_RT_DEBUGVIEW latched (-1)      */
+
+    /* ---- Phase 1: acceleration structures ---- */
+    unsigned                    generation; /* bumped on device recreation         */
+
+    /* Pooled VB/IB (DEFAULT ByteAddressBuffers; grown geometrically). */
+    ID3D12Resource             *vb_pool, *ib_pool;
+    UINT                        vb_cap, ib_cap;    /* bytes                        */
+    UINT                        vb_used, ib_used;
+    D3D12_RESOURCE_STATES       vb_state, ib_state;
+
+    /* Shared growable BLAS scratch. */
+    ID3D12Resource             *blas_scratch;
+    UINT64                      blas_scratch_cap;
+
+    /* Mesh registry (handle = index+1). */
+    DxrMesh                     meshes[DXR_MAX_MESHES];
+
+    /* TLAS (double-buffered result + per-frame instance-desc upload + scratch). */
+    ID3D12Resource             *tlas[2];
+    UINT64                      tlas_cap;          /* result bytes per buffer      */
+    ID3D12Resource             *tlas_scratch;
+    UINT64                      tlas_scratch_cap;
+    ID3D12Resource             *inst_upload[2];    /* D3D12_RAYTRACING_INSTANCE_DESC[] */
+    int                         tlas_parity;       /* 0/1                          */
+    int                         tlas_valid;        /* a TLAS has been built         */
+
+    /* Scene assembly (Backend_RTSceneBegin..End). */
+    D3D12_RAYTRACING_INSTANCE_DESC *scene_inst;    /* points into inst_upload[cur] */
+    UINT                        scene_count;
+    int                         scene_open;
+
+    /* Per-frame view constants (mirror of rt_common.hlsli RTViewCB). */
+    struct {
+        float camPos[3];   float focal;
+        float right[3];    float centerX;
+        float up[3];       float centerY;
+        float fwd[3];      float rayTMin;
+        float sunDir[3];   float rayTMax;
+        float paneOrigin[2];
+        float paneSize[2];
+    } view;
+    int                         have_view;
 } DxrState;
 
 static DxrState g_dxr = { 0 };
+
+static int dxr_ensure_init(void);   /* forward: used by the AS feed below */
 
 /* ---- descriptor-handle helpers (aggregate-return -> explicit out-param) ----- */
 
@@ -146,26 +240,30 @@ int d3d12_dxr_smoke_enabled(void)
 
 static int dxr_create_global_rs(void)
 {
-    D3D12_DESCRIPTOR_RANGE uav_range;
+    D3D12_DESCRIPTOR_RANGE ranges[2];
     D3D12_ROOT_PARAMETER params[2];
     D3D12_STATIC_SAMPLER_DESC samp;
     D3D12_ROOT_SIGNATURE_DESC rsd;
     ID3D10Blob *sig = NULL, *err = NULL;
     HRESULT hr;
 
-    ZeroMemory(&uav_range, sizeof(uav_range));
-    uav_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    uav_range.NumDescriptors = 1;                 /* u0 output (Phase 0)          */
-    uav_range.BaseShaderRegister = 0;
-    uav_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    /* Fixed descriptor table 0: [u0 output UAV][t0 TLAS SRV], mapped to
+     * contiguous heap slots DXR_SLOT_OUTPUT_UAV, DXR_SLOT_TLAS_SRV. */
+    ZeroMemory(ranges, sizeof(ranges));
+    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    ranges[0].NumDescriptors = 1; ranges[0].BaseShaderRegister = 0;   /* u0 */
+    ranges[0].OffsetInDescriptorsFromTableStart = 0;
+    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[1].NumDescriptors = 1; ranges[1].BaseShaderRegister = 0;   /* t0 (TLAS) */
+    ranges[1].OffsetInDescriptorsFromTableStart = 1;
 
     ZeroMemory(params, sizeof(params));
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;   /* b0 per-dispatch */
     params[0].Descriptor.ShaderRegister = 0;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[1].DescriptorTable.NumDescriptorRanges = 1;
-    params[1].DescriptorTable.pDescriptorRanges = &uav_range;
+    params[1].DescriptorTable.NumDescriptorRanges = 2;
+    params[1].DescriptorTable.pDescriptorRanges = ranges;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     ZeroMemory(&samp, sizeof(samp));
@@ -200,38 +298,60 @@ static int dxr_create_global_rs(void)
 static int dxr_create_state_object(void)
 {
     D3D12_DXIL_LIBRARY_DESC lib;
-    D3D12_EXPORT_DESC        exports[1];
+    D3D12_EXPORT_DESC        exports[5];
+    D3D12_HIT_GROUP_DESC     hg;
     D3D12_RAYTRACING_SHADER_CONFIG   shcfg;
     D3D12_RAYTRACING_PIPELINE_CONFIG pcfg;
     D3D12_GLOBAL_ROOT_SIGNATURE      grs;
-    D3D12_STATE_SUBOBJECT so[4];
+    D3D12_STATE_SUBOBJECT so[5];
     D3D12_STATE_OBJECT_DESC sod;
     HRESULT hr;
 
     ZeroMemory(exports, sizeof(exports));
     exports[0].Name = L"rgen_smoke";
+    exports[1].Name = L"rgen_debug";
+    exports[2].Name = L"chit_refl";
+    exports[3].Name = L"miss_shadow";
+    exports[4].Name = L"miss_refl";
     ZeroMemory(&lib, sizeof(lib));
     lib.DXILLibrary.pShaderBytecode = g_rt_pipeline;
     lib.DXILLibrary.BytecodeLength  = sizeof(g_rt_pipeline);
-    lib.NumExports = 1; lib.pExports = exports;
+    lib.NumExports = 5; lib.pExports = exports;
+
+    /* One hit group "hg" (plan sec.4). Phase 1: closest-hit only; anyhit_cutout
+     * added in Phase 3. */
+    ZeroMemory(&hg, sizeof(hg));
+    hg.HitGroupExport = L"hg";
+    hg.Type = D3D12_HIT_GROUP_TYPE_TRIANGLES;
+    hg.ClosestHitShaderImport = L"chit_refl";
 
     shcfg.MaxPayloadSizeInBytes   = 32;   /* frozen (plan sec.4) */
     shcfg.MaxAttributeSizeInBytes = 8;
-    pcfg.MaxTraceRecursionDepth   = 1;    /* Phase 0: no TraceRay */
+    pcfg.MaxTraceRecursionDepth   = 1;    /* Phase 1: raygen->1 ray (raised to 2 in P2b/P3) */
     grs.pGlobalRootSignature      = g_dxr.global_rs;
 
     ZeroMemory(so, sizeof(so));
     so[0].Type = D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY;              so[0].pDesc = &lib;
-    so[1].Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_SHADER_CONFIG;  so[1].pDesc = &shcfg;
-    so[2].Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG;so[2].pDesc = &pcfg;
-    so[3].Type = D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE;     so[3].pDesc = &grs;
+    so[1].Type = D3D12_STATE_SUBOBJECT_TYPE_HIT_GROUP;                 so[1].pDesc = &hg;
+    so[2].Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_SHADER_CONFIG;  so[2].pDesc = &shcfg;
+    so[3].Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG;so[3].pDesc = &pcfg;
+    so[4].Type = D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE;     so[4].pDesc = &grs;
 
     ZeroMemory(&sod, sizeof(sod));
     sod.Type = D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE;
-    sod.NumSubobjects = 4; sod.pSubobjects = so;
+    sod.NumSubobjects = 5; sod.pSubobjects = so;
 
     hr = ID3D12Device5_CreateStateObject(g_dxr.device5, &sod, &IID_ID3D12StateObject, (void **)&g_dxr.so);
     if (FAILED(hr)) { dxr_log("CreateStateObject 0x%08lX", hr); return 0; }
+    return 1;
+}
+
+static int dxr_sbt_put(void *base, ID3D12StateObjectProperties *props,
+                       UINT off, const wchar_t *name)
+{
+    const void *id = ID3D12StateObjectProperties_GetShaderIdentifier(props, name);
+    if (!id) { dxr_log("GetShaderIdentifier NULL for a record"); return 0; }
+    memcpy((unsigned char *)base + off, id, DXR_SHADER_ID_SIZE);
     return 1;
 }
 
@@ -240,14 +360,12 @@ static int dxr_create_sbt(void)
     ID3D12StateObjectProperties *props = NULL;
     D3D12_HEAP_PROPERTIES hp;
     D3D12_RESOURCE_DESC   bd;
-    const void *id;
     void  *mapped = NULL;
+    int ok = 1;
     HRESULT hr;
 
     hr = ID3D12StateObject_QueryInterface(g_dxr.so, &IID_ID3D12StateObjectProperties, (void **)&props);
     if (FAILED(hr) || !props) { dxr_log("QI StateObjectProperties 0x%08lX", hr); return 0; }
-    id = ID3D12StateObjectProperties_GetShaderIdentifier(props, L"rgen_smoke");
-    if (!id) { dxr_log("GetShaderIdentifier(rgen_smoke) NULL"); ID3D12StateObjectProperties_Release(props); return 0; }
 
     ZeroMemory(&hp, sizeof(hp)); hp.Type = D3D12_HEAP_TYPE_UPLOAD;
     ZeroMemory(&bd, sizeof(bd));
@@ -260,12 +378,19 @@ static int dxr_create_sbt(void)
     { D3D12_RANGE r; r.Begin = 0; r.End = 0; ID3D12Resource_Map(g_dxr.sbt, 0, &r, &mapped); }
     if (mapped) {
         memset(mapped, 0, DXR_SBT_BYTES);
-        memcpy((unsigned char *)mapped + DXR_SBT_RAYGEN_OFF, id, DXR_SHADER_ID_SIZE);
+        /* Raygen region: 64-strided so each record's StartAddress is 64-aligned. */
+        ok &= dxr_sbt_put(mapped, props, DXR_SBT_RAYGEN_OFF + (UINT)DXR_RAYGEN_SMOKE * DXR_SBT_RAYGEN_STRIDE, L"rgen_smoke");
+        ok &= dxr_sbt_put(mapped, props, DXR_SBT_RAYGEN_OFF + (UINT)DXR_RAYGEN_DEBUG * DXR_SBT_RAYGEN_STRIDE, L"rgen_debug");
+        /* Miss region: [0]=miss_shadow, [1]=miss_refl. */
+        ok &= dxr_sbt_put(mapped, props, DXR_SBT_MISS_OFF + 0 * DXR_SHADER_ID_SIZE, L"miss_shadow");
+        ok &= dxr_sbt_put(mapped, props, DXR_SBT_MISS_OFF + 1 * DXR_SHADER_ID_SIZE, L"miss_refl");
+        /* Hitgroup region: [0]="hg". */
+        ok &= dxr_sbt_put(mapped, props, DXR_SBT_HITGROUP_OFF, L"hg");
         { D3D12_RANGE wr; wr.Begin = 0; wr.End = DXR_SBT_BYTES; ID3D12Resource_Unmap(g_dxr.sbt, 0, &wr); }
-    }
+    } else ok = 0;
     g_dxr.sbt_va = ID3D12Resource_GetGPUVirtualAddress(g_dxr.sbt);
     ID3D12StateObjectProperties_Release(props);
-    return 1;
+    return ok;
 }
 
 static int dxr_create_heap(void)
@@ -336,6 +461,16 @@ static int dxr_create_blit(void)
     pd.pRootSignature = g_dxr.blit_rs;
     pd.VS.pShaderBytecode = vs; pd.VS.BytecodeLength = vs_len;
     pd.PS.pShaderBytecode = ps; pd.PS.BytecodeLength = ps_len;
+    /* Alpha-blend the blit so the debug view (raygen writes alpha 0.65 on hit,
+     * 0 on miss) overlays the RT geometry on the raster scene. For the smoke
+     * test the output alpha is 1.0 -> fully opaque, so this is harmless there. */
+    pd.BlendState.RenderTarget[0].BlendEnable    = TRUE;
+    pd.BlendState.RenderTarget[0].SrcBlend       = D3D12_BLEND_SRC_ALPHA;
+    pd.BlendState.RenderTarget[0].DestBlend      = D3D12_BLEND_INV_SRC_ALPHA;
+    pd.BlendState.RenderTarget[0].BlendOp        = D3D12_BLEND_OP_ADD;
+    pd.BlendState.RenderTarget[0].SrcBlendAlpha  = D3D12_BLEND_ONE;
+    pd.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    pd.BlendState.RenderTarget[0].BlendOpAlpha   = D3D12_BLEND_OP_ADD;
     pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     pd.SampleMask = 0xFFFFFFFFu;
     pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
@@ -378,7 +513,7 @@ static int dxr_ensure_output(int w, int h)
     uav.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
     ID3D12Device_CreateUnorderedAccessView((ID3D12Device *)g_dxr.device5, g_dxr.output, NULL, &uav,
-            dxr_cpu(g_dxr.heap, 0));   /* slot 0 = u0 */
+            dxr_cpu(g_dxr.heap, DXR_SLOT_OUTPUT_UAV));
 
     ZeroMemory(&srv, sizeof(srv));
     srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -386,8 +521,445 @@ static int dxr_ensure_output(int w, int h)
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Texture2D.MipLevels = 1;
     ID3D12Device_CreateShaderResourceView((ID3D12Device *)g_dxr.device5, g_dxr.output, &srv,
-            dxr_cpu(g_dxr.heap, 1));   /* slot 1 = blit SRV */
+            dxr_cpu(g_dxr.heap, DXR_SLOT_BLIT_SRV));
     return 1;
+}
+
+/* ---- Phase 1: acceleration structures ------------------------------------- */
+
+#define DXR_VB_POOL_BYTES (128u * 1024u * 1024u)
+#define DXR_IB_POOL_BYTES ( 48u * 1024u * 1024u)
+
+static ID3D12Resource *dxr_default_buffer(UINT64 size, D3D12_RESOURCE_STATES state,
+                                          D3D12_RESOURCE_FLAGS flags)
+{
+    D3D12_HEAP_PROPERTIES hp;
+    D3D12_RESOURCE_DESC   bd;
+    ID3D12Resource *res = NULL;
+    ZeroMemory(&hp, sizeof(hp)); hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    ZeroMemory(&bd, sizeof(bd));
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = size; bd.Height = 1;
+    bd.DepthOrArraySize = 1; bd.MipLevels = 1; bd.Format = DXGI_FORMAT_UNKNOWN;
+    bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR; bd.Flags = flags;
+    if (FAILED(ID3D12Device_CreateCommittedResource((ID3D12Device *)g_dxr.device5, &hp,
+            D3D12_HEAP_FLAG_NONE, &bd, state, NULL, &IID_ID3D12Resource, (void **)&res)))
+        return NULL;
+    return res;
+}
+
+/* Write a null TLAS SRV into a heap slot (keeps the shared descriptor table
+ * valid before any TLAS exists, e.g. the smoke path which never reads it). */
+static void dxr_write_null_tlas_srv(UINT slot)
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv;
+    ZeroMemory(&srv, sizeof(srv));
+    srv.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.RaytracingAccelerationStructure.Location = 0;   /* null AS */
+    ID3D12Device_CreateShaderResourceView((ID3D12Device *)g_dxr.device5, NULL, &srv, dxr_cpu(g_dxr.heap, slot));
+}
+
+static void dxr_refresh_tlas_srv(ID3D12Resource *tlas)
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv;
+    ZeroMemory(&srv, sizeof(srv));
+    srv.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.RaytracingAccelerationStructure.Location = ID3D12Resource_GetGPUVirtualAddress(tlas);
+    ID3D12Device_CreateShaderResourceView((ID3D12Device *)g_dxr.device5, NULL, &srv, dxr_cpu(g_dxr.heap, DXR_SLOT_TLAS_SRV));
+}
+
+static int dxr_ensure_pools(void)
+{
+    if (g_dxr.vb_pool && g_dxr.ib_pool) return 1;
+    /* D3D12 creates all buffers effectively in COMMON regardless of the
+     * requested initial state (debug-layer info 1328), so create + track as
+     * COMMON; the copy path then explicitly transitions COMMON->COPY_DEST->
+     * NON_PIXEL_SHADER_RESOURCE (the AS-build input state). Pre-sized to the
+     * documented budget (Phase 1 has no geometric growth -- see as-built note). */
+    g_dxr.vb_pool = dxr_default_buffer(DXR_VB_POOL_BYTES, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_FLAG_NONE);
+    g_dxr.ib_pool = dxr_default_buffer(DXR_IB_POOL_BYTES, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_FLAG_NONE);
+    if (!g_dxr.vb_pool || !g_dxr.ib_pool) { dxr_log("pool alloc FAILED"); return 0; }
+    g_dxr.vb_cap = DXR_VB_POOL_BYTES; g_dxr.ib_cap = DXR_IB_POOL_BYTES;
+    g_dxr.vb_used = g_dxr.ib_used = 0;
+    g_dxr.vb_state = g_dxr.ib_state = D3D12_RESOURCE_STATE_COMMON;
+    return 1;
+}
+
+static void dxr_free_mesh(DxrMesh *m)
+{
+    if (m->blas)    { d3d12_priv_retire(m->blas); m->blas = NULL; }
+    if (m->staging) { d3d12_priv_retire(m->staging); m->staging = NULL; }
+    free(m->ranges); m->ranges = NULL;
+    ZeroMemory(m, sizeof(*m));
+}
+
+int Backend_RTMeshCreate(const BackendRTVertex *verts, unsigned nverts,
+                         const unsigned short *idx, unsigned nidx,
+                         const BackendRTRange *ranges, unsigned nranges)
+{
+    int slot = -1; UINT i;
+    UINT vb_bytes, ib_bytes, vb_off, ib_off;
+    D3D12_HEAP_PROPERTIES hp; D3D12_RESOURCE_DESC bd;
+    ID3D12Resource *staging = NULL; unsigned char *map = NULL;
+    DxrMesh *m;
+
+    if (!g_dxr.device5 || g_dxr.disabled) return 0;
+    if (!verts || !idx || !ranges || nverts == 0 || nidx == 0 || nranges == 0) return 0;
+    if (nidx % 3) return 0;
+    if (!g_dxr.inited && !dxr_ensure_init()) return 0;
+    if (!dxr_ensure_pools()) return 0;
+
+    for (i = 0; i < DXR_MAX_MESHES; i++) if (!g_dxr.meshes[i].used) { slot = (int)i; break; }
+    if (slot < 0) { dxr_log("mesh registry full"); return 0; }
+
+    vb_bytes = nverts * (UINT)sizeof(BackendRTVertex);
+    ib_bytes = nidx * 2u;
+    vb_off = (g_dxr.vb_used + 15u) & ~15u;
+    ib_off = (g_dxr.ib_used + 3u)  & ~3u;
+    if ((UINT64)vb_off + vb_bytes > g_dxr.vb_cap || (UINT64)ib_off + ib_bytes > g_dxr.ib_cap) {
+        dxr_log("pool overflow (vb %u/%u ib %u/%u) -- mesh dropped",
+                vb_off + vb_bytes, g_dxr.vb_cap, ib_off + ib_bytes, g_dxr.ib_cap);
+        return 0;
+    }
+
+    /* Staging UPLOAD buffer: [verts | indices], copied into the pools at build. */
+    ZeroMemory(&hp, sizeof(hp)); hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+    ZeroMemory(&bd, sizeof(bd));
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = vb_bytes + ib_bytes; bd.Height = 1;
+    bd.DepthOrArraySize = 1; bd.MipLevels = 1; bd.Format = DXGI_FORMAT_UNKNOWN;
+    bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (FAILED(ID3D12Device_CreateCommittedResource((ID3D12Device *)g_dxr.device5, &hp, D3D12_HEAP_FLAG_NONE, &bd,
+            D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, (void **)&staging))) {
+        dxr_log("mesh staging alloc FAILED"); return 0;
+    }
+    { D3D12_RANGE r; r.Begin = 0; r.End = 0; ID3D12Resource_Map(staging, 0, &r, (void **)&map); }
+    if (!map) { ID3D12Resource_Release(staging); return 0; }
+    memcpy(map, verts, vb_bytes);
+    memcpy(map + vb_bytes, idx, ib_bytes);
+    { D3D12_RANGE wr; wr.Begin = 0; wr.End = vb_bytes + ib_bytes; ID3D12Resource_Unmap(staging, 0, &wr); }
+
+    m = &g_dxr.meshes[slot];
+    ZeroMemory(m, sizeof(*m));
+    m->ranges = (BackendRTRange *)malloc((size_t)nranges * sizeof(BackendRTRange));
+    if (!m->ranges) { ID3D12Resource_Release(staging); return 0; }
+    memcpy(m->ranges, ranges, (size_t)nranges * sizeof(BackendRTRange));
+    m->staging = staging;
+    m->vb_offset = vb_off; m->ib_offset = ib_off;
+    m->vb_bytes = vb_bytes; m->ib_bytes = ib_bytes;
+    m->nverts = nverts; m->nidx = nidx; m->nranges = nranges;
+    m->tri_count = nidx / 3;
+    m->used = 1; m->built = 0; m->needs_copy = 1;
+
+    g_dxr.vb_used = vb_off + vb_bytes;
+    g_dxr.ib_used = ib_off + ib_bytes;
+    return slot + 1;   /* handle */
+}
+
+void Backend_RTMeshDestroy(int handle)
+{
+    if (handle <= 0 || handle > DXR_MAX_MESHES) return;
+    if (!g_dxr.meshes[handle - 1].used) return;
+    dxr_free_mesh(&g_dxr.meshes[handle - 1]);
+}
+
+/* Copy staged meshes into the pools + build BLASes (chunked by tri budget).
+ * Called from Backend_RTSceneEnd inside the open frame. */
+static void dxr_build_pending(ID3D12GraphicsCommandList *cl, ID3D12GraphicsCommandList4 *cl4)
+{
+    UINT i;
+    int any_copy = 0;
+    UINT budget = DXR_BLAS_TRIS_PER_FRAME;
+
+    if (!dxr_ensure_pools()) return;
+
+    /* --- Phase A: copy all staged meshes into the pools (cheap). --- */
+    for (i = 0; i < DXR_MAX_MESHES; i++) if (g_dxr.meshes[i].used && g_dxr.meshes[i].needs_copy) { any_copy = 1; break; }
+    if (any_copy) {
+        dxr_barrier(cl, g_dxr.vb_pool, g_dxr.vb_state, D3D12_RESOURCE_STATE_COPY_DEST);
+        dxr_barrier(cl, g_dxr.ib_pool, g_dxr.ib_state, D3D12_RESOURCE_STATE_COPY_DEST);
+        g_dxr.vb_state = g_dxr.ib_state = D3D12_RESOURCE_STATE_COPY_DEST;
+        for (i = 0; i < DXR_MAX_MESHES; i++) {
+            DxrMesh *m = &g_dxr.meshes[i];
+            if (!m->used || !m->needs_copy || !m->staging) continue;
+            ID3D12GraphicsCommandList_CopyBufferRegion(cl, g_dxr.vb_pool, m->vb_offset, m->staging, 0, m->vb_bytes);
+            ID3D12GraphicsCommandList_CopyBufferRegion(cl, g_dxr.ib_pool, m->ib_offset, m->staging, m->vb_bytes, m->ib_bytes);
+            d3d12_priv_retire(m->staging);   /* freed after this frame's GPU work */
+            m->staging = NULL; m->needs_copy = 0;
+        }
+        dxr_barrier(cl, g_dxr.vb_pool, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        dxr_barrier(cl, g_dxr.ib_pool, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        g_dxr.vb_state = g_dxr.ib_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    }
+
+    /* --- Phase B: build BLASes for unbuilt meshes, within the tri budget. --- */
+    for (i = 0; i < DXR_MAX_MESHES; i++) {
+        DxrMesh *m = &g_dxr.meshes[i];
+        D3D12_RAYTRACING_GEOMETRY_DESC *geo;
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs;
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO pi;
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build;
+        D3D12_GPU_VIRTUAL_ADDRESS vb_va, ib_va;
+        UINT r;
+        if (!m->used || m->built || m->needs_copy) continue;
+        if (budget != DXR_BLAS_TRIS_PER_FRAME && m->tri_count > budget) continue; /* leave big ones for next frame if some built */
+
+        geo = (D3D12_RAYTRACING_GEOMETRY_DESC *)calloc(m->nranges, sizeof(*geo));
+        if (!geo) continue;
+        vb_va = ID3D12Resource_GetGPUVirtualAddress(g_dxr.vb_pool) + m->vb_offset;
+        ib_va = ID3D12Resource_GetGPUVirtualAddress(g_dxr.ib_pool) + m->ib_offset;
+        for (r = 0; r < m->nranges; r++) {
+            geo[r].Type  = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+            geo[r].Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;   /* CUTOUT revisited in P3 */
+            geo[r].Triangles.VertexBuffer.StartAddress  = vb_va;   /* pos at offset 0 */
+            geo[r].Triangles.VertexBuffer.StrideInBytes = sizeof(BackendRTVertex);
+            geo[r].Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+            geo[r].Triangles.VertexCount  = m->nverts;
+            geo[r].Triangles.IndexBuffer  = ib_va + (UINT64)m->ranges[r].first_index * 2u;
+            geo[r].Triangles.IndexFormat  = DXGI_FORMAT_R16_UINT;
+            geo[r].Triangles.IndexCount   = m->ranges[r].index_count;
+        }
+        ZeroMemory(&inputs, sizeof(inputs));
+        inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        inputs.NumDescs = m->nranges;
+        inputs.pGeometryDescs = geo;
+
+        ZeroMemory(&pi, sizeof(pi));
+        ID3D12Device5_GetRaytracingAccelerationStructurePrebuildInfo(g_dxr.device5, &inputs, &pi);
+        if (pi.ResultDataMaxSizeInBytes == 0) { free(geo); continue; }
+
+        /* Shared growable scratch. */
+        if (g_dxr.blas_scratch_cap < pi.ScratchDataSizeInBytes) {
+            if (g_dxr.blas_scratch) d3d12_priv_retire(g_dxr.blas_scratch);
+            /* Scratch: created COMMON (buffers ignore initial state) and
+             * common-promoted to UAV on the build's use. */
+            g_dxr.blas_scratch = dxr_default_buffer(pi.ScratchDataSizeInBytes,
+                    D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+            g_dxr.blas_scratch_cap = g_dxr.blas_scratch ? pi.ScratchDataSizeInBytes : 0;
+        }
+        m->blas = dxr_default_buffer(pi.ResultDataMaxSizeInBytes,
+                    D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        if (!m->blas || !g_dxr.blas_scratch) { if (m->blas){d3d12_priv_retire(m->blas);m->blas=NULL;} free(geo); continue; }
+        m->blas_va = ID3D12Resource_GetGPUVirtualAddress(m->blas);
+
+        ZeroMemory(&build, sizeof(build));
+        build.DestAccelerationStructureData    = m->blas_va;
+        build.Inputs                           = inputs;
+        build.ScratchAccelerationStructureData = ID3D12Resource_GetGPUVirtualAddress(g_dxr.blas_scratch);
+        ID3D12GraphicsCommandList4_BuildRaytracingAccelerationStructure(cl4, &build, 0, NULL);
+        dxr_uav_barrier(cl, m->blas);
+        dxr_uav_barrier(cl, g_dxr.blas_scratch);   /* shared scratch reuse fence */
+        free(geo);
+
+        m->built = 1;
+        if (m->tri_count >= budget) budget = 0; else budget -= m->tri_count;
+        /* RTMARK crumb for crash.log forensics. */
+        Backend_NoteRTMark("blas_build");
+        if (budget == 0) break;
+    }
+}
+
+/* ---- TLAS assembly -------------------------------------------------------- */
+
+void Backend_RTSceneBegin(void)
+{
+    d3d12_dxr_env e;
+    int cur;
+    if (!g_dxr.device5 || g_dxr.disabled) return;
+    if (!g_dxr.inited && !dxr_ensure_init()) return;
+    d3d12_priv_env(&e);
+    if (!e.frame_open) return;
+    cur = g_dxr.tlas_parity;
+
+    /* Per-frame instance-desc upload (double-buffered). */
+    if (!g_dxr.inst_upload[cur]) {
+        D3D12_HEAP_PROPERTIES hp; D3D12_RESOURCE_DESC bd;
+        ZeroMemory(&hp, sizeof(hp)); hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+        ZeroMemory(&bd, sizeof(bd));
+        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bd.Width = (UINT64)DXR_MAX_INSTANCES * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+        bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1; bd.Format = DXGI_FORMAT_UNKNOWN;
+        bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(ID3D12Device_CreateCommittedResource((ID3D12Device *)g_dxr.device5, &hp, D3D12_HEAP_FLAG_NONE, &bd,
+                D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, (void **)&g_dxr.inst_upload[cur]))) {
+            dxr_log("inst upload alloc FAILED"); g_dxr.scene_open = 0; return;
+        }
+    }
+    { D3D12_RANGE r; r.Begin = 0; r.End = 0; ID3D12Resource_Map(g_dxr.inst_upload[cur], 0, &r, (void **)&g_dxr.scene_inst); }
+    g_dxr.scene_count = 0;
+    g_dxr.scene_open = (g_dxr.scene_inst != NULL);
+}
+
+void Backend_RTSceneInstance(int mesh, const float m3x4[12], unsigned flags)
+{
+    D3D12_RAYTRACING_INSTANCE_DESC *d;
+    DxrMesh *m;
+    (void)flags;
+    if (!g_dxr.scene_open || g_dxr.scene_count >= DXR_MAX_INSTANCES) return;
+    if (mesh <= 0 || mesh > DXR_MAX_MESHES) return;
+    m = &g_dxr.meshes[mesh - 1];
+    if (!m->used || !m->built) return;   /* skip meshes whose BLAS isn't ready */
+
+    d = &g_dxr.scene_inst[g_dxr.scene_count];
+    memcpy(d->Transform, m3x4, 12 * sizeof(float));   /* row-major 3x4 */
+    d->InstanceID = 0;                                 /* GeoRecord base (Phase 3) */
+    d->InstanceMask = 0xFF;
+    d->InstanceContributionToHitGroupIndex = 0;        /* single hit group */
+    d->Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
+    d->AccelerationStructure = m->blas_va;
+    g_dxr.scene_count++;
+}
+
+void Backend_RTSceneEnd(void)
+{
+    d3d12_dxr_env e;
+    ID3D12GraphicsCommandList  *cl;
+    ID3D12GraphicsCommandList4 *cl4;
+    int cur;
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs;
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO pi;
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build;
+
+    if (!g_dxr.scene_open) return;
+    d3d12_priv_env(&e);
+    if (!e.frame_open || !e.list || !e.list4) { g_dxr.scene_open = 0; return; }
+    cl = e.list; cl4 = e.list4; cur = g_dxr.tlas_parity;
+    if (g_dxr.inst_upload[cur]) { D3D12_RANGE wr; wr.Begin = 0; wr.End = g_dxr.scene_count * sizeof(D3D12_RAYTRACING_INSTANCE_DESC); ID3D12Resource_Unmap(g_dxr.inst_upload[cur], 0, &wr); }
+    g_dxr.scene_inst = NULL;
+
+    /* Build BLASes that are still pending (chunked) before the TLAS references them. */
+    dxr_build_pending(cl, cl4);
+
+    /* TLAS sized for DXR_MAX_INSTANCES up front. */
+    ZeroMemory(&inputs, sizeof(inputs));
+    inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+    inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+    inputs.NumDescs = g_dxr.scene_count;
+    inputs.InstanceDescs = ID3D12Resource_GetGPUVirtualAddress(g_dxr.inst_upload[cur]);
+
+    if (!g_dxr.tlas[cur]) {
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS cap = inputs;
+        cap.NumDescs = DXR_MAX_INSTANCES;
+        ZeroMemory(&pi, sizeof(pi));
+        ID3D12Device5_GetRaytracingAccelerationStructurePrebuildInfo(g_dxr.device5, &cap, &pi);
+        g_dxr.tlas[cur] = dxr_default_buffer(pi.ResultDataMaxSizeInBytes,
+                D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        if (g_dxr.tlas_scratch_cap < pi.ScratchDataSizeInBytes) {
+            if (g_dxr.tlas_scratch) d3d12_priv_retire(g_dxr.tlas_scratch);
+            g_dxr.tlas_scratch = dxr_default_buffer(pi.ScratchDataSizeInBytes,
+                    D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+            g_dxr.tlas_scratch_cap = g_dxr.tlas_scratch ? pi.ScratchDataSizeInBytes : 0;
+        }
+        if (!g_dxr.tlas[cur] || !g_dxr.tlas_scratch) { dxr_log("TLAS alloc FAILED"); g_dxr.scene_open = 0; return; }
+    }
+
+    ZeroMemory(&build, sizeof(build));
+    build.DestAccelerationStructureData    = ID3D12Resource_GetGPUVirtualAddress(g_dxr.tlas[cur]);
+    build.Inputs                           = inputs;
+    build.ScratchAccelerationStructureData = ID3D12Resource_GetGPUVirtualAddress(g_dxr.tlas_scratch);
+    ID3D12GraphicsCommandList4_BuildRaytracingAccelerationStructure(cl4, &build, 0, NULL);
+    dxr_uav_barrier(cl, g_dxr.tlas[cur]);
+    dxr_refresh_tlas_srv(g_dxr.tlas[cur]);
+    Backend_NoteRTMark("tlas_build");
+
+    g_dxr.tlas_valid = 1;
+    g_dxr.tlas_parity ^= 1;   /* double-buffer for the next frame */
+    g_dxr.scene_open = 0;
+}
+
+unsigned Backend_RTGeneration(void) { return g_dxr.generation; }
+
+void Backend_RTSetView(const float cam_pos[3], const float basis9[9],
+                       float focal, float center_x, float center_y,
+                       int pane_x, int pane_y, int pane_w, int pane_h,
+                       const float sun_dir[3])
+{
+    int i;
+    if (!cam_pos || !basis9) return;
+    for (i = 0; i < 3; i++) {
+        g_dxr.view.camPos[i] = cam_pos[i];
+        g_dxr.view.right[i]  = basis9[0 + i];
+        g_dxr.view.up[i]     = basis9[3 + i];
+        g_dxr.view.fwd[i]    = basis9[6 + i];
+        g_dxr.view.sunDir[i] = sun_dir ? sun_dir[i] : 0.0f;
+    }
+    g_dxr.view.focal   = focal;
+    g_dxr.view.centerX = center_x;
+    g_dxr.view.centerY = center_y;
+    g_dxr.view.rayTMin = 0.5f;
+    g_dxr.view.rayTMax = 1.0e7f;
+    g_dxr.view.paneOrigin[0] = (float)pane_x; g_dxr.view.paneOrigin[1] = (float)pane_y;
+    g_dxr.view.paneSize[0]   = (float)pane_w; g_dxr.view.paneSize[1]   = (float)pane_h;
+    g_dxr.have_view = 1;
+}
+
+void Backend_RTDebugView(void)
+{
+    d3d12_dxr_env e;
+    ID3D12GraphicsCommandList  *cl;
+    ID3D12GraphicsCommandList4 *cl4;
+    ID3D12DescriptorHeap *heaps[1];
+    D3D12_GPU_VIRTUAL_ADDRESS cbva;
+    D3D12_DISPATCH_RAYS_DESC d;
+    D3D12_VIEWPORT vp; D3D12_RECT sc;
+    int pw, ph;
+
+    d3d12_priv_env(&e);
+    if (g_dxr.disabled || !e.device5 || !e.list4 || !e.frame_open) return;
+    if (!g_dxr.tlas_valid || !g_dxr.have_view) return;
+    g_dxr.device5 = e.device5; g_dxr.list4 = e.list4;
+    if (!dxr_ensure_init() || !dxr_ensure_output(e.width, e.height)) return;
+    cl = e.list; cl4 = e.list4;
+    pw = (int)g_dxr.view.paneSize[0]; ph = (int)g_dxr.view.paneSize[1];
+    if (pw <= 0 || ph <= 0) { pw = e.width; ph = e.height; }
+
+    cbva = d3d12_priv_ring_cb(&g_dxr.view, (UINT)sizeof(g_dxr.view));
+    if (!cbva) return;
+
+    if (g_dxr.out_state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+        dxr_barrier(cl, g_dxr.output, g_dxr.out_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        g_dxr.out_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    }
+    heaps[0] = g_dxr.heap;
+    ID3D12GraphicsCommandList_SetDescriptorHeaps(cl, 1, heaps);
+    ID3D12GraphicsCommandList_SetComputeRootSignature(cl, g_dxr.global_rs);
+    ID3D12GraphicsCommandList4_SetPipelineState1(cl4, g_dxr.so);
+    ID3D12GraphicsCommandList_SetComputeRootConstantBufferView(cl, 0, cbva);
+    ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(cl, 1, dxr_gpu(g_dxr.heap, DXR_SLOT_OUTPUT_UAV));
+
+    ZeroMemory(&d, sizeof(d));
+    d.RayGenerationShaderRecord.StartAddress = g_dxr.sbt_va + DXR_SBT_RAYGEN_OFF + (UINT64)DXR_RAYGEN_DEBUG * DXR_SBT_RAYGEN_STRIDE;
+    d.RayGenerationShaderRecord.SizeInBytes  = DXR_SHADER_ID_SIZE;
+    d.MissShaderTable.StartAddress  = g_dxr.sbt_va + DXR_SBT_MISS_OFF;
+    d.MissShaderTable.SizeInBytes   = (UINT64)DXR_MISS_COUNT * DXR_SHADER_ID_SIZE;
+    d.MissShaderTable.StrideInBytes = DXR_SHADER_ID_SIZE;
+    d.HitGroupTable.StartAddress    = g_dxr.sbt_va + DXR_SBT_HITGROUP_OFF;
+    d.HitGroupTable.SizeInBytes     = (UINT64)DXR_HITGROUP_COUNT * DXR_SHADER_ID_SIZE;
+    d.HitGroupTable.StrideInBytes   = DXR_SHADER_ID_SIZE;
+    d.Width = (UINT)pw; d.Height = (UINT)ph; d.Depth = 1;
+    ID3D12GraphicsCommandList4_DispatchRays(cl4, &d);
+    dxr_uav_barrier(cl, g_dxr.output);
+    Backend_NoteRTMark("dispatch_debug");
+
+    /* Blit the output over the pane rect. */
+    dxr_barrier(cl, g_dxr.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    g_dxr.out_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    ID3D12GraphicsCommandList_OMSetRenderTargets(cl, 1, &e.rtv, FALSE, NULL);
+    ID3D12GraphicsCommandList_SetDescriptorHeaps(cl, 1, heaps);
+    ID3D12GraphicsCommandList_SetGraphicsRootSignature(cl, g_dxr.blit_rs);
+    ID3D12GraphicsCommandList_SetPipelineState(cl, g_dxr.blit_pso);
+    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(cl, 0, dxr_gpu(g_dxr.heap, DXR_SLOT_BLIT_SRV));
+    vp.TopLeftX = g_dxr.view.paneOrigin[0]; vp.TopLeftY = g_dxr.view.paneOrigin[1];
+    vp.Width = (float)pw; vp.Height = (float)ph; vp.MinDepth = 0.0f; vp.MaxDepth = 1.0f;
+    sc.left = (LONG)g_dxr.view.paneOrigin[0]; sc.top = (LONG)g_dxr.view.paneOrigin[1];
+    sc.right = sc.left + pw; sc.bottom = sc.top + ph;
+    ID3D12GraphicsCommandList_RSSetViewports(cl, 1, &vp);
+    ID3D12GraphicsCommandList_RSSetScissorRects(cl, 1, &sc);
+    ID3D12GraphicsCommandList_IASetPrimitiveTopology(cl, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D12GraphicsCommandList_DrawInstanced(cl, 3, 1, 0, 0);
 }
 
 static int dxr_ensure_init(void)
@@ -395,6 +967,7 @@ static int dxr_ensure_init(void)
     if (g_dxr.inited) return 1;
     if (!g_dxr.device5) return 0;
     if (!dxr_create_heap())        goto fail;
+    dxr_write_null_tlas_srv(DXR_SLOT_TLAS_SRV);   /* valid descriptor before any TLAS */
     if (!dxr_create_global_rs())   goto fail;
     if (!dxr_create_state_object())goto fail;
     if (!dxr_create_sbt())         goto fail;
@@ -460,7 +1033,7 @@ void d3d12_dxr_smoke_blit(void)
     ID3D12GraphicsCommandList_SetDescriptorHeaps(cl, 1, heaps);
     ID3D12GraphicsCommandList_SetGraphicsRootSignature(cl, g_dxr.blit_rs);
     ID3D12GraphicsCommandList_SetPipelineState(cl, g_dxr.blit_pso);
-    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(cl, 0, dxr_gpu(g_dxr.heap, 1));
+    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(cl, 0, dxr_gpu(g_dxr.heap, DXR_SLOT_BLIT_SRV));
     vp.TopLeftX = 0.0f; vp.TopLeftY = 0.0f; vp.Width = (float)e.width; vp.Height = (float)e.height;
     vp.MinDepth = 0.0f; vp.MaxDepth = 1.0f;
     sc.left = 0; sc.top = 0; sc.right = e.width; sc.bottom = e.height;
@@ -474,6 +1047,28 @@ void d3d12_dxr_smoke_blit(void)
 
 void d3d12_dxr_shutdown(void)
 {
+    int i;
+    /* Meshes + pools + scratch (device-lost drill: everything torn down here). */
+    for (i = 0; i < DXR_MAX_MESHES; i++) {
+        DxrMesh *m = &g_dxr.meshes[i];
+        if (m->blas)    { ID3D12Resource_Release(m->blas); m->blas = NULL; }
+        if (m->staging) { ID3D12Resource_Release(m->staging); m->staging = NULL; }
+        free(m->ranges); m->ranges = NULL;
+        ZeroMemory(m, sizeof(*m));
+    }
+    for (i = 0; i < 2; i++) {
+        if (g_dxr.tlas[i])        { ID3D12Resource_Release(g_dxr.tlas[i]);        g_dxr.tlas[i] = NULL; }
+        if (g_dxr.inst_upload[i]) { ID3D12Resource_Release(g_dxr.inst_upload[i]); g_dxr.inst_upload[i] = NULL; }
+    }
+    if (g_dxr.tlas_scratch) { ID3D12Resource_Release(g_dxr.tlas_scratch); g_dxr.tlas_scratch = NULL; }
+    if (g_dxr.blas_scratch) { ID3D12Resource_Release(g_dxr.blas_scratch); g_dxr.blas_scratch = NULL; }
+    if (g_dxr.vb_pool)      { ID3D12Resource_Release(g_dxr.vb_pool);      g_dxr.vb_pool = NULL; }
+    if (g_dxr.ib_pool)      { ID3D12Resource_Release(g_dxr.ib_pool);      g_dxr.ib_pool = NULL; }
+    g_dxr.vb_cap = g_dxr.ib_cap = g_dxr.vb_used = g_dxr.ib_used = 0;
+    g_dxr.blas_scratch_cap = g_dxr.tlas_scratch_cap = g_dxr.tlas_cap = 0;
+    g_dxr.tlas_parity = 0; g_dxr.tlas_valid = 0;
+    g_dxr.scene_open = 0; g_dxr.scene_inst = NULL; g_dxr.scene_count = 0;
+
     if (g_dxr.output)    { ID3D12Resource_Release(g_dxr.output);       g_dxr.output = NULL; }
     if (g_dxr.blit_pso)  { ID3D12PipelineState_Release(g_dxr.blit_pso);g_dxr.blit_pso = NULL; }
     if (g_dxr.blit_rs)   { ID3D12RootSignature_Release(g_dxr.blit_rs); g_dxr.blit_rs = NULL; }
@@ -484,5 +1079,6 @@ void d3d12_dxr_shutdown(void)
     g_dxr.out_w = g_dxr.out_h = 0;
     g_dxr.sbt_va = 0;
     g_dxr.inited = 0;
+    g_dxr.generation++;   /* device-lost: game re-feeds meshes (handles now stale) */
     /* device5/list4 are backend-owned; do not release here. */
 }

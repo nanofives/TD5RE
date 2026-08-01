@@ -12,7 +12,7 @@ plumbing (SBT, state object, root signatures) is decided once, up front.
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 0 | DXR foundation (dxc, Device5, smoke dispatch) | ✅ done (branch rt-lighting) |
-| 1 | World-space geometry feed + BLAS/TLAS + debug view | ⬜ |
+| 1 | World-space geometry feed + BLAS/TLAS + debug view | 🚧 WIP — infra done + sim-safe; **alignment gate OPEN** |
 | 2a | G-buffer MRT wiring in D3D12 | ⬜ |
 | 2b | RT shadows (sun + dynamic lights), blob-shadow kill | ⬜ |
 | 3 | RT reflections with textured hit shading | ⬜ |
@@ -66,6 +66,55 @@ because the working-tree `td5re.ini` carried the user's uncommitted `Difficulty=
 (+ DragLength/CarDamage) edits — a false-fail; restoring the committed ini for the
 run gave 54/0. Always `git checkout td5re.ini` (or diff) before trusting a golden
 FAIL. drag PASSed throughout (its golden config is Difficulty-independent).
+
+### As-built — Phase 1 (2026-07-31, branch `rt-lighting`, WIP — ALIGNMENT GATE OPEN)
+
+**Done + verified:** Full feed/AS/debug-view infrastructure builds clean (dev+release),
+lint OK, **golden traces 54 PASS / 0 FAIL** (the always-on feed — gated on
+`td5_rt_available()` per plan §1.2 — is strictly read-only over span/actor state, so
+the sim is byte-identical; 7 module hashes match on moscow/pelton/drag/split), no
+TDR/crash across the full race matrix, and **the RT code is D3D12-debug-layer clean**
+(the ~727 pre-existing `id=690` PSO/root-sig warnings in the deferred passes reproduce
+with `TD5RE_RT_DISABLE=1` and are NOT from RT).
+
+Built: feed API `Backend_RTMesh*`/`RTScene*`/`RTSetView`/`RTDebugView`/`RTGeneration`;
+`d3d12_dxr.c` grew ~900 lines — pooled DEFAULT VB/IB (128/48 MB, bump-allocated),
+per-mesh UPLOAD staging → pool copy + chunked BLAS build (≤500k tris/frame) in
+`Backend_RTSceneEnd`, double-buffered TLAS (cap 128 instances, PREFER_FAST_BUILD),
+null-TLAS-SRV so the smoke path stays valid, `RTMARK:*` crumbs in the crash ring
+(`Backend_NoteRTMark`), device-lost generation counter. State object grew to the frozen
+set (rgen_smoke/debug, chit_refl, miss_shadow/refl, hit group "hg"); SBT reworked to the
+frozen layout. Game `td5_rt.c`: track walk (per-lane quads via new
+`td5_track_get_lane_quad_world`) + actor-mesh cache + per-frame TLAS + camera view;
+hooked at `td5_track_load_strip` (level build) and the `td5_game.c` per-pane deferred
+site (`td5_rt_frame`). Debug view is an **alpha overlay** (raygen writes 0.65a on hit)
+so one framedump shows RT geometry blended over the raster — a direct alignment check.
+
+**Debug-layer fixes made:** (a) buffers are always created in COMMON (info 1328) — pools/
+scratch now create + track COMMON; (b) each RayGenerationShaderRecord must be 64-aligned
+(error 1161) — raygen records are strided by 64 (miss/hitgroup keep 32).
+
+**What the overlay proves:** camera math, /256 world-unit scale, depth, and the
+projection inverse are all **correct** — the RT track ribbon follows the road's curve,
+perspective, and vanishing point exactly.
+
+**GATE OPEN — three geometry-completeness bugs to fix before Phase 2:**
+1. **Track strip laterally offset / incomplete** — the road ribbon sits ~1-2 lanes LEFT
+   of where the cars drive and doesn't cover the full visible road. Per-lane emission via
+   `get_quad_vertices` (span-type offsets + `lane_count` from byte +0x03) widened it and
+   killed most stray tris but the lateral placement still doesn't match. Next: reconcile
+   the strip lane vertex semantics against how the road DISPLAY LIST is actually built
+   (`build_strip_display_lists` in td5_track.c) — the rendered road may use a different
+   vertex set than the collision strip walker.
+2. **One stray large triangle** remains on the right (a specific span_type's quad).
+3. **Actor car meshes not appearing** — `rt_build_actor_mesh` (opcodes 0-3, quads->2 tris,
+   `render_pos`+`rotation_matrix` instance) builds handles but no car silhouette overlays
+   the cars. Debug whether the mesh builds (nidx>0), the instance transform, and whether
+   object-space verts need the mesh origin offset.
+
+Do NOT start Phase 2 until `TD5RE_RT_DEBUGVIEW=1` overlays align (road under the cars,
+cars visible). Repro: `td5re.exe --AutoRace=1 --SkipIntro=1 --DefaultTrack=5 --RaceTrace=1
+--AutoRaceReady=1` with `TD5RE_RT_DEBUGVIEW=1 TD5RE_FRAMEDUMP=<png>`.
 
 ## Handoff prompt (what launched this execution)
 

@@ -339,6 +339,23 @@ void Backend_NoteDraw(unsigned prim, unsigned vcount, unsigned icount, int index
     if (vcount > s_draw_max_vcount) s_draw_max_vcount = vcount;
 }
 
+/* RT work crumbs (RTMARK:*) for the TDR post-mortem: a small ring of the last
+ * RT operations in flight, dumped alongside the draw watch in crash.log. */
+#define TD5_RTMARK_RING 32
+typedef struct { char tag[24]; unsigned present, gen; } TD5RTMark;
+static TD5RTMark s_rtmark_ring[TD5_RTMARK_RING];
+static unsigned  s_rtmark_head, s_rtmark_total;
+
+void Backend_NoteRTMark(const char *tag)
+{
+    TD5RTMark *m = &s_rtmark_ring[s_rtmark_head % TD5_RTMARK_RING];
+    if (tag) { strncpy(m->tag, tag, sizeof(m->tag) - 1); m->tag[sizeof(m->tag) - 1] = 0; }
+    else m->tag[0] = 0;
+    m->present = (unsigned)g_backend.present_count;
+    m->gen     = g_backend.device_generation;
+    s_rtmark_head++; s_rtmark_total++;
+}
+
 void Backend_NotePresent(void)
 {
     TD5DrawRec *r = &s_draw_ring[s_draw_head % TD5_DRAW_RING];
@@ -388,6 +405,14 @@ static void d3d12_write_draw_ring(FILE *f, const char *tag)
         else
             fprintf(f, "  [%u] %s prim=%u v=%u i=%u gen=%u srv=%p%s\n",
                     i, r->indexed ? "IDX" : "VTX", r->prim, r->vcount, r->icount, r->gen, r->srv, stale);
+    }
+    if (s_rtmark_total) {
+        unsigned rn = s_rtmark_total < TD5_RTMARK_RING ? s_rtmark_total : TD5_RTMARK_RING;
+        fprintf(f, "==== RTMARK WATCH (last %u RT ops in flight) ====\n", rn);
+        for (i = 0; i < rn; i++) {
+            const TD5RTMark *m = &s_rtmark_ring[(s_rtmark_head - rn + i) % TD5_RTMARK_RING];
+            fprintf(f, "  [%u] RTMARK:%s present#%u gen=%u\n", i, m->tag, m->present, m->gen);
+        }
     }
 }
 

@@ -25,6 +25,7 @@
 #include "td5_platform.h"
 #include "td5_render.h"
 #include "td5_camera.h"
+#include "td5_rt.h"
 #include "td5_trace.h"
 #include "../../../re/include/td5_actor_struct.h"
 #include "td5re.h"
@@ -2822,6 +2823,32 @@ static void get_quad_vertices(const TD5_StripSpan *sp, int sub_lane,
     *vr1 = ri + 1;
 }
 
+/* [RT lighting] World-space corners of one lane quad, ring-ordered
+ * {vl0, vl1, vr1, vr0} (near-left, far-left, far-right, near-right), in FLOAT
+ * world units (origin + vertex). Uses the same span-type-aware vertex layout
+ * as the renderer/collision (get_quad_vertices). Returns 1, or 0 if unusable.
+ * Fed to the ray-tracer's track BLAS (td5_rt.c). */
+int td5_track_get_lane_quad_world(int span_index, int sub_lane, float out[4][3])
+{
+    const TD5_StripSpan *sp;
+    int vl0, vl1, vr0, vr1;
+    TD5_StripVertex *v[4];
+    int i;
+    if (!s_span_array || !s_vertex_table ||
+        span_index < 0 || span_index >= s_span_count) return 0;
+    sp = &s_span_array[span_index];
+    get_quad_vertices(sp, sub_lane, &vl0, &vl1, &vr0, &vr1);
+    if (vl0 < 0 || vl1 < 0 || vr0 < 0 || vr1 < 0) return 0;
+    v[0] = vertex_at(vl0); v[1] = vertex_at(vl1); v[2] = vertex_at(vr1); v[3] = vertex_at(vr0);
+    for (i = 0; i < 4; i++) {
+        if (!v[i]) return 0;
+        out[i][0] = (float)((int32_t)sp->origin_x + (int32_t)v[i]->x);
+        out[i][1] = (float)((int32_t)sp->origin_y + (int32_t)v[i]->y);
+        out[i][2] = (float)((int32_t)sp->origin_z + (int32_t)v[i]->z);
+    }
+    return 1;
+}
+
 static uint32_t color_from_surface_attr(uint8_t attr, int lane_index, int lane_count)
 {
     static const uint32_t k_surface_palette[16] = {
@@ -3659,6 +3686,10 @@ int td5_track_load_strip(const void *data, size_t size)
                   type_counts[6], type_counts[7], type_counts[8],
                   type_counts[9], type_counts[10], type_counts[11]);
     }
+
+    /* [RT lighting] Build the ray-tracing track geometry now that the span
+     * table is finalized (no-op unless DXR is available). */
+    td5_rt_level_build();
 
     return 1;
 }

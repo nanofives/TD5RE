@@ -279,6 +279,57 @@ void Backend_ApplySSRPass(const SSRCB *cb);
  * this (auto-fallback to LOW when 0). See RT_LIGHTING_PLAN.md. */
 int Backend_RTAvailable(void);
 
+/* [RT lighting Phase 1] World-space geometry feed for the acceleration
+ * structures. All calls are no-ops when RT is unavailable. Coordinates are
+ * game world space in FLOAT (24.8 fixed / 256.0, +Y down preserved, no axis
+ * flips) so raster reconstruction and rays share one convention. */
+typedef struct {                         /* 24 bytes, pos at offset 0 */
+    float    pos[3];                     /* world-space (track) / object-space (mesh) */
+    float    uv[2];                      /* primary UV (stored for Phase 3 hit shading) */
+    unsigned color;                      /* packed vertex color (Phase 3)              */
+} BackendRTVertex;
+typedef struct {                         /* one BLAS geometry per range */
+    unsigned first_index;                /* first index into the mesh's index buffer */
+    unsigned index_count;                /* multiple of 3                             */
+    unsigned texture_id;                 /* wrapper texture handle/key (opaque, P3)   */
+    unsigned matid_flags;                /* material id + flags (opaque until P2/P3)   */
+} BackendRTRange;
+
+/* Create a retained RT mesh (builds a BLAS lazily on first scene use). Returns a
+ * handle > 0, or 0 on failure / RT unavailable. idx are 16-bit into verts. */
+int  Backend_RTMeshCreate(const BackendRTVertex *verts, unsigned nverts,
+                          const unsigned short *idx, unsigned nidx,
+                          const BackendRTRange *ranges, unsigned nranges);
+void Backend_RTMeshDestroy(int handle);
+
+/* Per-frame TLAS assembly. Begin, add each visible instance (row-major 3x4
+ * world transform; translation in m[3],m[7],m[11]), End builds the TLAS. */
+void Backend_RTSceneBegin(void);
+void Backend_RTSceneInstance(int mesh, const float m3x4[12], unsigned flags);
+void Backend_RTSceneEnd(void);
+
+/* AS generation counter: bumped on device recreation so the game re-feeds mesh
+ * handles (they were destroyed with the old device). */
+unsigned Backend_RTGeneration(void);
+
+/* Push an RT work crumb (RTMARK:<tag>) to the crash-forensics ring so a TDR
+ * post-mortem shows which RT operation was in flight. */
+void Backend_NoteRTMark(const char *tag);
+
+/* Per-frame RT view constants (camera + sun) for the primary/debug ray. cam_pos
+ * is FLOAT world space; basis9 is row-major {right,up,fwd}; focal/center match
+ * the raster projection (see td5_render.c debug_line_project). sun is a world
+ * direction. pane_* select the sub-rect for split-screen dispatch. */
+void Backend_RTSetView(const float cam_pos[3], const float basis9[9],
+                       float focal, float center_x, float center_y,
+                       int pane_x, int pane_y, int pane_w, int pane_h,
+                       const float sun_dir[3]);
+
+/* Debug primary-ray view (TD5RE_RT_DEBUGVIEW): DispatchRays a per-pixel camera
+ * ray against the TLAS and blit hitT / instance-hash false color over the pane.
+ * The Phase 1 alignment gate compares this to a raster framedump. */
+void Backend_RTDebugView(void);
+
 /* [lighting rework P0] Per-frame G-buffer gate. on=1: (re)create the G-buffer
  * at render-target size if needed, clear it (matid 0 = "no data"), and let the
  * per-draw state machinery bind it as RT1 + swap in the ps_*_g MRT shader

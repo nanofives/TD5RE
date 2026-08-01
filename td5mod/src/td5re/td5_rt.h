@@ -25,4 +25,19 @@ int td5_rt_active(void);
 void td5_rt_set_quality(int high);
 int  td5_rt_quality_high(void);
 
+/* [Phase 1] Build the track acceleration geometry from the (finalized) strip
+ * span table. Call once at level-load completion; safe no-op when RT is
+ * unavailable. Idempotent (destroys prior track meshes first). */
+void td5_rt_level_build(void);
+
+/* [Phase 1] Destroy all RT meshes (track + cached actor meshes) at level unload. */
+void td5_rt_level_unload(void);
+
+/* [Phase 1] Per-pane RT frame driver. Called once per viewport `vp` from the
+ * render loop BEFORE the deferred passes, with the pane rect. On vp==0 it
+ * (re)builds the TLAS from the track + active actors; every pane it uploads the
+ * pane camera view. When TD5RE_RT_DEBUGVIEW is set it dispatches the primary-ray
+ * debug view over the pane. No-op when RT is unavailable. */
+void td5_rt_frame(int vp, int pane_x, int pane_y, int pane_w, int pane_h);
+
 #endif /* TD5_RT_H */

@@ -3881,6 +3881,33 @@ int td5_plat_rt_available(void)
     return Backend_RTAvailable();
 }
 
+/* [RT lighting Phase 1] Geometry-feed bridges. TD5_RTVertex/TD5_RTRange mirror
+ * BackendRTVertex/BackendRTRange byte-for-byte, so the casts are safe. */
+int td5_plat_rt_mesh_create(const TD5_RTVertex *verts, unsigned nverts,
+                            const unsigned short *idx, unsigned nidx,
+                            const TD5_RTRange *ranges, unsigned nranges)
+{
+    return Backend_RTMeshCreate((const BackendRTVertex *)verts, nverts, idx, nidx,
+                                (const BackendRTRange *)ranges, nranges);
+}
+void td5_plat_rt_mesh_destroy(int handle) { Backend_RTMeshDestroy(handle); }
+void td5_plat_rt_scene_begin(void) { Backend_RTSceneBegin(); }
+void td5_plat_rt_scene_instance(int mesh, const float m3x4[12], unsigned flags)
+{
+    Backend_RTSceneInstance(mesh, m3x4, flags);
+}
+void td5_plat_rt_scene_end(void) { Backend_RTSceneEnd(); }
+void td5_plat_rt_set_view(const float cam_pos[3], const float basis9[9],
+                          float focal, float center_x, float center_y,
+                          int pane_x, int pane_y, int pane_w, int pane_h,
+                          const float sun_dir[3])
+{
+    Backend_RTSetView(cam_pos, basis9, focal, center_x, center_y,
+                      pane_x, pane_y, pane_w, pane_h, sun_dir);
+}
+void td5_plat_rt_debug_view(void) { Backend_RTDebugView(); }
+unsigned td5_plat_rt_generation(void) { return Backend_RTGeneration(); }
+
 void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
                                   float focal, float center_x, float center_y,
                                   float vp_x, float vp_y,

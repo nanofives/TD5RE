@@ -30,6 +30,9 @@
 /* --- Actor roster (read-only) ------------------------------------------ */
 TD5_Actor *td5_game_get_actor(int slot);
 int  td5_game_get_total_actor_count(void);
+/* Racer slot lifecycle state (3 = inactive/empty grid slot). Also declared in
+ * td5_game.h; mirrored here so read-only consumers avoid the heavy game header. */
+int  td5_game_get_slot_state(int slot);
 int  td5_game_get_racer_count(void);
 int  td5_game_get_player_slot(int viewport);
 int  td5_game_get_view_pan(int vp);

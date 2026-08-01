@@ -164,6 +164,9 @@ int              td5_track_td6_broken_count(void);   /* diag: # of smashed props
 /* World-float ground Y at prop i's anchor span (stable; fallback if no strip). */
 float            td5_track_td6_prop_ground_y(int prop_index, float fallback);
 int              td5_track_get_span_lane_count(int span_index);
+/* [RT lighting] World-space corners of one lane quad (ring order nearL, farL,
+ * farR, nearR), FLOAT world units. Returns 0 if unusable. See td5_track.c. */
+int              td5_track_get_lane_quad_world(int span_index, int sub_lane, float out[4][3]);
 /* Per-lane surface type for a span (reuses surface_type_for_span_lane).
  * Returns the surface byte: 0x00-0x0F = main-road surface (low nibble of
  * surface_attribute), 0x10-0x1F = alternate/off-road surface (high nibble |

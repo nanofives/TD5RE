@@ -10,6 +10,7 @@
 
 #include "td5_game.h"
 #include "td5_track.h"
+#include "td5_rt.h"
 #include "td5_track_registry.h"
 #include "td5_fmv.h"
 #include "td5_sound.h"
@@ -7352,6 +7353,14 @@ static void frame_render(void)
          * after track + actors, before translucent VFX (single-view path). */
         if (!td5_render_photobooth_active())
             render_td6_props(td5_game_get_actor(g_actorSlotForView[vp]));
+
+        /* [RT lighting] Feed world-space geometry + build the TLAS (once, vp 0)
+         * and upload this pane's camera view, BEFORE the deferred passes. When
+         * TD5RE_RT_DEBUGVIEW is set it dispatches the primary-ray debug view over
+         * the pane. No-op unless DXR is available. */
+        if (!td5_render_photobooth_active())
+            td5_rt_frame(vp, s_viewports[vp].x, s_viewports[vp].y,
+                         s_viewports[vp].w, s_viewports[vp].h);
 
         /* [LIGHT2 P2] Sun-shadow pass FIRST (multiplicative darkening of the
          * opaque world), then the additive light pass — this order keeps
