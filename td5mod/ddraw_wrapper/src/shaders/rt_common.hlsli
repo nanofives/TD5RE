@@ -12,9 +12,17 @@
 RWTexture2D<float4>             g_output   : register(u0);  /* debug/smoke gradient   */
 RWTexture2D<float>              g_sunvis   : register(u1);  /* P2b sun shade (1=lit)  */
 RWTexture2D<float4>             g_lightcol : register(u2);  /* P2b additive light rgb */
+RWTexture2D<float4>             g_reflcol  : register(u3);  /* P3 reflection rgb + weight.a */
 RaytracingAccelerationStructure g_tlas     : register(t0);
 Texture2D<float>                g_depth    : register(t1);  /* scene depth (R32F)     */
 Texture2D<float4>               g_gbuf     : register(t2);  /* normal(rgb*2-1)+matid/255.a */
+ByteAddressBuffer               g_vb       : register(t3);  /* P3 vertex pool (BackendRTVertex 24B) */
+ByteAddressBuffer               g_ib       : register(t4);  /* P3 index pool (u16)    */
+
+/* P3 GeoRecord: one per (mesh,range) -- byte offsets into the pools + texture +
+ * material. InstanceID() = the mesh's first GeoRecord index. */
+struct GeoRecord { uint vb_byte_off; uint ib_byte_off; uint texture_index; uint matid; };
+StructuredBuffer<GeoRecord>     g_geo      : register(t5);
 
 /* ---- b0: debug primary-ray view CB (Phase 1) ------------------------------ */
 cbuffer RTViewCB : register(b0)
@@ -52,6 +60,20 @@ cbuffer LightCB : register(b2)
     float4 li_misc;           /* x depthBias, y count, z vpX, w vpY */
     float4 li_ext;            /* x occlSteps, y paneW, z paneH      */
     float4 li_lights[RT_LIGHT_MAX * 3];  /* k*3+0 pos+range, +1 rgb+intensity, +2 dir+coneCos */
+};
+
+/* ---- b3: SSRCB (mirror of C SSRCB) ---------------------------------------- */
+cbuffer SSRCB : register(b3)
+{
+    float4 sr_camPosFocal;
+    float4 sr_rightCx;
+    float4 sr_upCy;
+    float4 sr_fwdDepthScale;
+    float4 sr_misc;      /* x depthBias, y vpX, z vpY, w wet-road boost */
+    float4 sr_params;    /* x steps, y maxDist, z thickness, w paneW    */
+    float4 sr_params2;   /* x paneH, y intensity                        */
+    float4 sr_reflA;     /* reflectivity matid 0-3                      */
+    float4 sr_reflB;     /* reflectivity matid 4-7                      */
 };
 
 /* Reflection / debug ray payload (<= 32 bytes). */
@@ -93,6 +115,31 @@ float rt_shadow_ray(float3 origin, float3 dir, float tmin, float tmax)
              RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
              0xFF, /*hitGroup*/0, /*mult*/0, /*miss*/0, ray, p);
     return (float)p.visible;
+}
+
+/* ---- P3 vertex fetch (BackendRTVertex: pos@0, uv@12, color@20; 24 bytes) --- */
+uint3 rt_load_tri_indices(uint ib_byte_off, uint prim)
+{
+    uint b = ib_byte_off + prim * 6;            /* 3 u16 indices             */
+    uint a = b & ~3u;                           /* 4-byte-aligned dword base */
+    uint2 raw = uint2(g_ib.Load(a), g_ib.Load(a + 4));
+    if ((b - a) == 0u) return uint3(raw.x & 0xffffu, raw.x >> 16, raw.y & 0xffffu);
+    else               return uint3(raw.x >> 16,     raw.y & 0xffffu, raw.y >> 16);
+}
+float3 rt_vertex_pos(uint vb_byte_off, uint idx)   { return asfloat(g_vb.Load3(vb_byte_off + idx * 24u + 0u)); }
+float2 rt_vertex_uv(uint vb_byte_off, uint idx)    { return asfloat(g_vb.Load2(vb_byte_off + idx * 24u + 12u)); }
+float3 rt_vertex_color(uint vb_byte_off, uint idx)             /* packed BGRA -> rgb */
+{
+    uint c = g_vb.Load(vb_byte_off + idx * 24u + 20u);
+    return float3((c >> 16) & 0xffu, (c >> 8) & 0xffu, c & 0xffu) / 255.0f;
+}
+
+/* Base reflectivity for a material id from the SSR LUT (matid 0-3 reflA, 4-7 reflB). */
+float rt_reflectivity(int matid)
+{
+    if (matid < 4) return sr_reflA[matid];
+    if (matid < 8) return sr_reflB[matid - 4];
+    return 0.0f;
 }
 
 /* Build the world-space primary ray direction for a pane-local pixel (debug). */

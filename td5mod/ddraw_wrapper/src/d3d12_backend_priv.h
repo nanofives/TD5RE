@@ -89,5 +89,6 @@ int   d3d12_dxr_smoke_enabled(void);
  * the RT pass ran (caller skips the LOW march), 0 to fall back. */
 int   d3d12_dxr_shadow_pass(const ShadowCB *cb);
 int   d3d12_dxr_light_pass(const LightCB *cb);
+int   d3d12_dxr_ssr_pass(const SSRCB *cb);   /* P3: RT reflections */
 
 #endif /* D3D12_BACKEND_PRIV_H */

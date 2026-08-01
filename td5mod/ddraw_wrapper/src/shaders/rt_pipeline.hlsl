@@ -69,16 +69,25 @@ void rgen_debug()
 [shader("closesthit")]
 void chit_refl(inout RayPayload p, in BuiltInTriangleIntersectionAttributes attr)
 {
-    /* (index+1) so instance 0 (the track) is not black; floor the brightness so
-     * every hit reads clearly against the dark-blue miss. A mild facing cue from
-     * the barycentrics adds surface definition. */
-    uint h = (InstanceIndex() + 1u) * 2654435761u;
-    float3 c = float3(((h >> 16) & 255) / 255.0f,
-                      ((h >> 8)  & 255) / 255.0f,
-                      ( h        & 255) / 255.0f);
-    c = 0.30f + 0.70f * c;
-    float bary = 0.75f + 0.25f * (attr.barycentrics.x + attr.barycentrics.y);
-    p.color = c * bary;
+    /* Phase 3: fetch the hit triangle from the VB/IB pools via the GeoRecord,
+     * interpolate vertex color by barycentrics, shade with a two-sided up-facing
+     * term (world normal = object normal * the rigid instance transform). Used by
+     * both the reflection raygen and the debug view. (Textured shading + a sun
+     * shadow ray are owed refinements.) */
+    /* One range per mesh (Phase 1 feed) -> GeoRecord index = InstanceID().
+     * (GeometryIndex() would need SM6.5; not available in lib_6_3.) */
+    GeoRecord rec = g_geo[InstanceID()];
+    uint3 idx = rt_load_tri_indices(rec.ib_byte_off, PrimitiveIndex());
+    float3 p0 = rt_vertex_pos(rec.vb_byte_off, idx.x);
+    float3 p1 = rt_vertex_pos(rec.vb_byte_off, idx.y);
+    float3 p2 = rt_vertex_pos(rec.vb_byte_off, idx.z);
+    float3 c0 = rt_vertex_color(rec.vb_byte_off, idx.x);
+    float3 c1 = rt_vertex_color(rec.vb_byte_off, idx.y);
+    float3 c2 = rt_vertex_color(rec.vb_byte_off, idx.z);
+    float3 bw = float3(1.0f - attr.barycentrics.x - attr.barycentrics.y, attr.barycentrics.x, attr.barycentrics.y);
+    float3 col = c0 * bw.x + c1 * bw.y + c2 * bw.z;
+    float3 N = normalize(mul((float3x3)ObjectToWorld3x4(), cross(p1 - p0, p2 - p0)));
+    p.color = col * (0.35f + 0.65f * saturate(abs(N.y)));
     p.t = RayTCurrent();
 }
 
@@ -166,4 +175,42 @@ void rgen_light()
         accum += C.rgb * (w * (vis > 0.5f ? 1.0f : 0.15f));
     }
     g_lightcol[fp] = float4(accum, 1.0f);
+}
+
+/* ----- Phase 3: RT reflections (b3 SSRCB) ---------------------------------- *
+ * On reflective pixels (per-material reflectivity from the G-buffer matid +
+ * wet-road boost), reflect the view dir and trace one ray through the hit group;
+ * write the reflected color + a Fresnel*reflectivity weight to g_reflcol. The
+ * composite (ps_ssr_rt) alpha-blends it onto the scene. Off-screen geometry is
+ * visible in the reflection -- the RT win over the screen-space march. */
+[shader("raygeneration")]
+void rgen_refl()
+{
+    uint2 lpx = DispatchRaysIndex().xy;
+    int2  fp  = int2((int)sr_misc.y, (int)sr_misc.z) + int2(lpx);
+    g_reflcol[fp] = float4(0,0,0,0);
+    float D = g_depth.Load(int3(fp, 0));
+    float4 gb = g_gbuf.Load(int3(fp, 0));
+    if (D >= 0.99999f || gb.a < 0.001f) return;
+
+    int matid = (int)(gb.a * 255.0f + 0.5f);
+    float base = rt_reflectivity(matid);
+    float3 N = normalize(gb.rgb * 2.0f - 1.0f);
+    if (matid == 1 && -N.y > 0.6f) base += sr_misc.w * saturate((-N.y - 0.6f) / 0.4f);  /* wet road */
+    if (base < 0.01f) return;   /* early-out: most pixels don't reflect (perf save) */
+
+    float3 world = rt_world_from_depth(D, float2(lpx), sr_camPosFocal, sr_rightCx, sr_upCy, sr_fwdDepthScale, sr_misc.x);
+    float3 V = normalize(world - sr_camPosFocal.xyz);
+    float ndv = saturate(dot(-V, N));
+    float w = base * (0.25f + 0.75f * pow(1.0f - ndv, 3.0f)) * sr_params2.y;   /* Fresnel * intensity */
+    if (w < 0.02f) return;
+
+    float3 R = reflect(V, N);
+    float dist = length(world - sr_camPosFocal.xyz);
+    RayDesc ray;
+    ray.Origin = world + N * (16.0f + dist * 0.004f);
+    ray.Direction = R; ray.TMin = 1.0f; ray.TMax = sr_params.y;   /* max reflect dist */
+    RayPayload pl; pl.color = float3(0.02f, 0.02f, 0.12f); pl.t = -1.0f;
+    TraceRay(g_tlas, RAY_FLAG_NONE, 0xFF, /*hitGroup*/0, /*mult*/0, /*miss*/1, ray, pl);
+    g_reflcol[fp] = float4(pl.color, w);
 }

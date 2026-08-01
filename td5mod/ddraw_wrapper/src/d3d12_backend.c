@@ -2310,6 +2310,7 @@ void Backend_ApplySSRPass(const SSRCB *cb)
     ID3D12GraphicsCommandList *cl = g_d3d12.list;
     UINT fi, srvs[3];
     if (!cb || !g_d3d12.device || g_backend.device_removed) return;
+    if (s_rt_mode && d3d12_dxr_ssr_pass(cb)) return;   /* RT reflection composite */
     if (!g_d3d12.frame_open) d3d12_frame_begin();
     fi = g_d3d12.frame_index;
 

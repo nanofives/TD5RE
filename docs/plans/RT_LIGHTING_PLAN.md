@@ -15,7 +15,7 @@ plumbing (SBT, state object, root signatures) is decided once, up front.
 | 1 | World-space geometry feed + BLAS/TLAS + debug view | ✅ done — **alignment gate PASSED** |
 | 2a | G-buffer MRT wiring in D3D12 | ✅ done |
 | 2b | RT shadows (sun + dynamic lights), blob-shadow kill | ✅ done (denoise/soak owed) |
-| 3 | RT reflections with textured hit shading | ⬜ |
+| 3 | RT reflections with textured hit shading | 🚧 WIP — pipeline built + runs; reflectivity blowout bug OPEN |
 | 4 | Menu row, INI, runtime switch, fallback, release | ⬜ |
 
 Append an **as-built note** under this table after each phase (deviations, measurements,
@@ -185,6 +185,36 @@ release). Env knobs: `TD5RE_RT` (HIGH), `TD5RE_RT_MASK` (mask viz).
 (light pass built + runs, not yet visually confirmed); (4) `TD5RE_RT_BIAS`/`_RAYS`/
 `_MAXLIGHTS` knobs (currently baked constants; car self-shadow bias may want tuning).
 Interim activation is `TD5RE_RT=1`; the `[Lighting] Quality` INI row is Phase 4.
+
+### As-built — Phase 3 (2026-08-01, branch `rt-lighting`, WIP — REFLECTIVITY BLOWOUT OPEN)
+
+**Built + verified-safe:** the full RT reflection pipeline compiles and runs; build+lint
+clean (dev+release), **goldens 54/0** (RS restructure is render-only, sim byte-identical),
+2b shadows/lights intact (verified with `--Reflections=0`). Reflections are gated behind
+`--Reflections=1` + `TD5RE_RT=1` so the default path + Phase 2b are unaffected.
+
+Implemented: GeoRecord StructuredBuffer (mesh-indexed, `InstanceID()`), VB/IB pool
+ByteAddressBuffer SRVs + `t3-t5`, closest-hit `chit_refl` vertex fetch (u16 index unpack,
+BackendRTVertex pos/uv/color at 0/12/20, barycentric interp, geo-normal shading via
+`ObjectToWorld3x4`), `rgen_refl` (G-buffer matid → SSR reflectivity LUT reflA/reflB +
+wet-road boost, Fresnel gate, reflect + TraceRay), `ps_ssr_rt` composite (SRCALPHA_INVSRC)
+branched in `Backend_ApplySSRPass` on `s_rt_mode`. Global RS grew to b0-b3 + a 4-range
+table (UAV u0-u3, SRV t0-t5); state object/SBT grew `rgen_refl` (raygen 4). `d3d12_dxr_ssr_pass`
++ the shared 3-mode `dxr_lighting_pass`. **Note:** `GeometryIndex()` needs SM6.5 (lib_6_3
+lacks it) — used `InstanceID()` alone since the Phase-1 feed is one range per mesh.
+
+**OPEN BUG (gate):** the reflection washes the frame near-white. `TD5RE_RT_REFLDBG=1`
+(opaque reflcol blit) shows `reflcol` white on far more than the car bodies. Two suspected
+causes to chase next: (1) the raster G-buffer marks the **road/terrain** as CARBODY matid
+via `s_light_basis_has_rot` (td5_render.c:1204) → most of the scene reads reflective; (2)
+the composite weight is over-scaled — `w = base*(0.25+0.75*fresnel)*params2.y`; the real
+frame is ~90% white implying `w≈0.9`, i.e. `params2.y` (SSR master intensity) is being read
+too high or from the wrong SSRCB offset. Next steps: visualize matid (write `base` to
+reflcol), verify the SSRCB `params2.y`/reflA/reflB offsets vs the C build in
+`td5_render_apply_ssr_pass`, and clamp/authoring-gate which matids reflect. Also OWED:
+bindless per-page textures (chit currently uses vertex color), CUTOUT anyhit, chit sun
+shadow ray. Repro: `--AutoRace=1 --SkipIntro=1 --DefaultTrack=5 --LightingMode=2
+--Reflections=1` + `TD5RE_RT=1` (`TD5RE_RT_REFLDBG=1` for the raw reflcol).
 
 ## Handoff prompt (what launched this execution)
 
