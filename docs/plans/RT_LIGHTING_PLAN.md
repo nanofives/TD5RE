@@ -15,8 +15,8 @@ plumbing (SBT, state object, root signatures) is decided once, up front.
 | 1 | World-space geometry feed + BLAS/TLAS + debug view | ✅ done — **alignment gate PASSED** |
 | 2a | G-buffer MRT wiring in D3D12 | ✅ done |
 | 2b | RT shadows (sun + dynamic lights), blob-shadow kill | ✅ done (denoise/soak owed) |
-| 3 | RT reflections with textured hit shading | 🚧 WIP — blowout FIXED (was a framedump alpha artifact); textured/bindless refinement owed |
-| 4 | Menu row, INI, runtime switch, fallback, release | ⬜ |
+| 3 | RT reflections with textured hit shading | ✅ core done (blowout was a framedump alpha artifact); bindless/CUTOUT texture refinement DEFERRED (see note) |
+| 4 | Menu row, INI, runtime switch, fallback, release | 🚧 WIP — config/activation done @3f16ea47; menu row + i18n + release verify owed |
 
 Append an **as-built note** under this table after each phase (deviations, measurements,
 gotchas found).
@@ -233,13 +233,44 @@ matching (moscow/pelton/drag/split, sim byte-identical), framedump of
 the full-colour Moscow scene with a subtle car-paint reflection, opaque, no magenta.
 LOW unaffected (RT-only paths + env-gated diag). Committed d3d12(RT-P3).
 
-**Still OWED for the gate (textured reflections):** bindless per-page textures
-(chit_refl currently uses interpolated vertex color, not the hit texture), CUTOUT
-any-hit, and a chit sun-shadow ray. Repro / diag knobs: `TD5RE_RT_REFLDBG=1` (opaque
+**DEFERRED — bindless textured reflections (scope decision 2026-08-01):** the
+`chit_refl` shading uses interpolated vertex color, not the hit triangle's texture.
+Making it textured requires bindless per-page SRVs fed from the game's texture
+registry — but that registry is a **dynamic LRU streaming cache** (`td5_render_bind_texture_page`,
+TEXTURE_CACHE_SLOTS, pages evicted/relocated per frame), so a stable page→SRV
+mapping for a DXR heap would have to track residency across eviction, and an
+unbounded descriptor range risks device-removal on any un-populated slot. The same
+texture access blocks CUTOUT any-hit (samples texture alpha). Given the reflection
+already renders correctly and reads well with vertex-color hit shading (no washout,
+off-screen content visible, no magenta), and the executor is on account2's slow
+approval-gated build/run cycle, the bindless/CUTOUT refinement + a chit sun-shadow
+ray (needs `MaxTraceRecursionDepth` 1→2) are deferred as documented owed work — the
+plan's "if in scope" latitude. Repro / diag knobs: `TD5RE_RT_REFLDBG=1` (opaque
 reflcol blit), `TD5RE_RT_REFLDIAG=1|2|3` (classifier / weight / reflected color).
 GOTCHA for future verification: **framedump PNGs carry the backbuffer alpha** — flatten
 alpha to opaque before eyeballing, or read RGB channels directly (downscale-preview
 composites transparent-over-white and lies).
+
+### As-built — Phase 4 config/activation (2026-08-01, @3f16ea47)
+
+HIGH is now driven by a persisted `[Lighting] Quality=0|1` key (main.c `k_lighting_cfg`,
+default 1) + `--Quality=N`, replacing the `TD5RE_RT` dev env var (which still
+overrides for A/B). **Key simplification found:** HIGH needs no explicit
+`--LightingMode=2` — `td5_light2_active()` is `mode>=ENHANCE(1)` and the default
+`LightingMode=1` already produces the G-buffer and calls the deferred shadow/light/
+SSR passes (the shipped LOW stack); RT only swaps the shader impl via
+`Backend_RTSetMode(td5_rt_active())`. `td5_rt_active()` = `available && quality &&
+[Lighting] Enabled` (in-race/!FMV guaranteed by the sole in-race caller
+`td5_rt_frame`); non-DXR device → `available` false → silently LOW without rewriting
+the INI. `td5_rt_set_quality()` already exists for the menu's instant runtime
+toggle. **Verified:** `--Quality=1` engages RT (TD5RE_RT_MASK dispatch runs) with no
+env / no LightingMode; `--Quality=0` = LOW; build_all clean (dev+release, lint 3/3);
+full suite exit 0, golden hashes match with RT **default-on** (HIGH is now the
+default when a DXR device is present, per plan §1). **OWED (Phase 4 remainder):** the
+LIGHTING QUALITY menu row on Screen_DisplayOptions (6-touchpoint recipe) + LOW/HIGH
+overlay + arrows-gap fix + es_AR i18n (CALIDAD DE ILUMINACIÓN / BAJA / ALTA), greyed
+row when DXR absent, mid-race MCP toggle check, device-lost drill, 30-min soak,
+release-build HIGH smoke.
 
 ## Handoff prompt (what launched this execution)
 
