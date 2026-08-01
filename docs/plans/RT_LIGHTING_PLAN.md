@@ -14,7 +14,7 @@ plumbing (SBT, state object, root signatures) is decided once, up front.
 | 0 | DXR foundation (dxc, Device5, smoke dispatch) | ✅ done (branch rt-lighting) |
 | 1 | World-space geometry feed + BLAS/TLAS + debug view | ✅ done — **alignment gate PASSED** |
 | 2a | G-buffer MRT wiring in D3D12 | ✅ done |
-| 2b | RT shadows (sun + dynamic lights), blob-shadow kill | ✅ done (denoise/soak owed) |
+| 2b | RT shadows (sun + dynamic lights), blob-shadow kill | ✅ done + soft-shadow denoise (multi-sample) + TD5RE_RT_RAYS/_BIAS @daa34041; soak + night/tunnel visual owed |
 | 3 | RT reflections with textured hit shading | ✅ done — blowout fix + bindless textured hit shading (@bf8f6cc7/@d64a0258) + chit sun-shadow ray (@b9845ab2); CUTOUT any-hit N/A (no cutout geometry fed) |
 | 4 | Menu row, INI, runtime switch, fallback, release | ✅ config @3f16ea47 + menu @7ba7bba5 + persist @7617d24a; split-screen HIGH + device-lost drill VERIFIED; 30-min soak + literal mid-race toggle owed |
 
@@ -297,6 +297,21 @@ depth 2 accepted), goldens match. **CUTOUT any-hit: N/A** — the TLAS holds onl
 (no UV) + opaque car bodies; there's no alpha-tested cutout geometry (fences/foliage) fed to
 RT for `anyhit_cutout` to act on, and feeding world scenery to give it a job would re-introduce
 the LOW-memory growth just fixed. Deferred with rationale, not written as dead code.
+
+### As-built — sun-shadow denoise + P2b knobs (2026-08-01, @daa34041)
+
+The single cone-jittered sun shadow ray left mild grain in the sunvis mask (visible under
+`TD5RE_RT_MASK`). `rgen_shadow` now averages **K stratified cone samples** (K = `sh_params2.z`
+= `TD5RE_RT_RAYS`, default 4) → smooth soft-shadow penumbra, grain gone (framedump-confirmed
+markedly smoother). This doubles as the plan's "depth-aware denoise" (sampling at the source
+is simpler + lower-risk than a separate `ps_rt_blur` pass, and needs no new RT/RS). Also
+exposed `TD5RE_RT_BIAS` (`sh_params2.y`) to scale the normal-offset shadow bias for car
+self-shadow acne tuning. Both are RT-only CB fields the LOW screen-space shadow shader
+ignores (reads only `params2.x`). Cost is near-free — shadow rays are cheap occlusion tests;
+normal HIGH race runs 172 FPS with 4 samples, no device removal, debug-clean. **`TD5RE_RT_MAXLIGHTS`
+intentionally skipped:** clamping the shared light count would change the LOW deferred-light
+path (breaking LOW-identical), so it'd need RT-only shader plumbing for a knob whose value is
+marginal (the light pass already caps at `RT_LIGHT_MAX`=32).
 
 Repro / diag knobs: `TD5RE_RT_REFLDBG=1` (opaque reflcol blit), `TD5RE_RT_REFLDIAG=1|2|3`
 (classifier / weight / reflected color).
