@@ -321,6 +321,12 @@ void Backend_NoteRTMark(const char *tag);
  * game (= td5_rt_active()). No-op when DXR is unavailable. */
 void Backend_RTSetMode(int high);
 
+/* [RT lighting P3] Register the currently-bound texture page into the DXR
+ * bindless table (index = game page id) so reflection hits sample the real
+ * texture. Called from the game's texture-page bind while RT is active; a no-op
+ * otherwise. Transitions the texture to a shader-readable state for the RT read. */
+void Backend_RTRegisterBoundPage(unsigned page_id);
+
 /* Per-frame RT view constants (camera + sun) for the primary/debug ray. cam_pos
  * is FLOAT world space; basis9 is row-major {right,up,fwd}; focal/center match
  * the raster projection (see td5_render.c debug_line_project). sun is a world

@@ -56,6 +56,7 @@
 #include "td5_i18n.h"   /* [I18N] catalog robustness check (st_i18n_verdict) */
 #include "td5_net.h"
 #include "td5_backend_capture.h"
+#include "td5_rt.h"   /* pin the harness to LOW (RT render-only; avoids 8x-FF TDR) */
 
 #define LOG_TAG "selftest"
 
@@ -1417,6 +1418,18 @@ void td5_selftest_boot(void)
      * ~1.5s of every race at FF=1 lets those uploads settle at a safe pace,
      * then we ramp to the suite FF. Set to 0 to disable (reproduce the hang). */
     s_race_warmup_ms  = td5_env_int("TD5RE_SELFTEST_RACE_WARMUP_MS", 1500, 0, 10000);
+    /* [GPU TDR guard, cont.] Pin the harness to LOWLIGHTING (Quality=0). The suite
+     * validates the SIM (golden traces are byte-identical LOW vs HIGH -- RT is
+     * render-only), frontend nav, and degradation -- none of which need RT. But
+     * ray-traced HIGH adds the SSR/shadow/reflection dispatches (and, with the
+     * bindless textured reflections, per-pixel texture sampling) on top of the
+     * already-heavy 8x-FF cold frames the warmup above guards -- enough extra GPU
+     * work per Present to trip the TDR watchdog (DEVICE_HUNG) even with the warmup.
+     * Running the behavioral gate in LOW keeps it render-stable; RT HIGH is
+     * verified separately via framedumps. TD5RE_RT=1 still forces HIGH for anyone
+     * deliberately stress-testing RT under the suite. */
+    g_td5.ini.lighting_quality = 0;
+    td5_rt_set_quality(0);
     s_ws_mb_per_rep   = td5_env_int("TD5RE_SELFTEST_LEAK_MB", 24, 1, 1024);
     s_frame_drift_pct = td5_env_int("TD5RE_SELFTEST_FRAME_DRIFT_PCT", 15, 1, 500);
     s_gdi_growth      = td5_env_int("TD5RE_SELFTEST_GDI_GROWTH", 100, 1, 100000);

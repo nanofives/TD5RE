@@ -814,6 +814,9 @@ void td5_plat_rt_debug_view(void);
 unsigned td5_plat_rt_generation(void);
 /* [P2b] HIGH mode: deferred shadow/light passes run the RT dispatch+composite. */
 void td5_plat_rt_set_mode(int high);
+/* [P3] Register the just-bound texture page into the RT bindless table (index =
+ * page id) so reflection hits sample the real texture. No-op when RT inactive. */
+void td5_plat_rt_register_page(unsigned page_id);
 
 /** Upload a texture page to the GPU. Returns 0 on failure. */
 int td5_plat_render_upload_texture(int page_index, const void *pixels, int width, int height, int format);

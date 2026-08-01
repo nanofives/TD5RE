@@ -533,6 +533,28 @@ static int dxr_fill_bindless_fallback(void)
     return 1;
 }
 
+/* [P3] Register a page's real texture into the bindless heap at slot
+ * BINDLESS_BASE+index (index = game page id). Overwrites the fallback for that
+ * slot; deduped on the resource pointer so re-binding the same page each frame is
+ * a cheap no-op. `res` must already be in a shader-readable state (the backend
+ * transitions it to PIXEL|NON_PIXEL before calling). Safe if RT isn't inited yet
+ * (skips). */
+void d3d12_dxr_register_texture(unsigned index, ID3D12Resource *res, DXGI_FORMAT fmt)
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvd;
+    if (!g_dxr.bindless_ready || !g_dxr.device5 || !res) return;
+    if (index == 0u || index >= DXR_BINDLESS_MAX) return;   /* 0 = "no texture" */
+    if (g_dxr.bindless_res[index] == (const void *)res) return;   /* dedup */
+    ZeroMemory(&srvd, sizeof(srvd));
+    srvd.Format = fmt; srvd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvd.Texture2D.MipLevels = 1;
+    ID3D12Device_CreateShaderResourceView((ID3D12Device *)g_dxr.device5, res, &srvd,
+        dxr_cpu(g_dxr.heap, DXR_BINDLESS_BASE + index));
+    g_dxr.bindless_res[index] = (const void *)res;
+    { static int n = 0; if (n < 8) { n++; dxr_log("bindless register page %u (res %p)", index, (void *)res); } }
+}
+
 static int dxr_create_blit(void)
 {
     D3D12_DESCRIPTOR_RANGE srv_range;

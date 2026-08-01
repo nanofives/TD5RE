@@ -2293,6 +2293,28 @@ unsigned char *Backend_CaptureBackbufferRGBA(int *out_w, int *out_h)
 /* [RT lighting P2b] HIGH-mode flag, set per frame by the game. */
 void Backend_RTSetMode(int high) { s_rt_mode = (high && g_d3d12.device5) ? 1 : 0; }
 
+/* [P3] Register the currently-bound page texture (s_cur_tex) into the DXR
+ * bindless heap at slot `page_id`, so reflection hits on that page sample the
+ * real texture. Called from the game's texture-page bind (which knows the page
+ * id) only while RT is active. The texture must be readable by the RT dispatch
+ * (a compute read) -- transition it ONCE to the combined PIXEL|NON_PIXEL
+ * shader-resource state and leave it there (a superset of PIXEL, so subsequent
+ * raster PS reads still work; static textures are never re-transitioned). The
+ * DXR side dedups on the resource so this is cheap after the first bind. */
+void Backend_RTRegisterBoundPage(unsigned page_id)
+{
+    BackendTexture *bt = s_cur_tex;
+    const D3D12_RESOURCE_STATES rd =
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    if (!s_rt_mode || !g_d3d12.device5 || g_backend.device_removed) return;
+    if (!bt || !bt->valid || !bt->res) return;
+    if (g_d3d12.frame_open && bt->rstate != rd) {
+        d3d12_resource_barrier(bt->res, bt->rstate, rd);
+        bt->rstate = rd;
+    }
+    d3d12_dxr_register_texture(page_id, bt->res, bt->fmt);
+}
+
 void Backend_ApplyLightPass(const LightCB *cb)
 {
     UINT srvs[1];

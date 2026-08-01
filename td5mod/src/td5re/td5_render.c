@@ -50,6 +50,7 @@
 #include "td5_ai.h"
 #include "td5_light.h"    /* [DYNAMIC LIGHTS] world-space point-light registry */
 #include "td5_light2.h"   /* [LIGHT2] lighting rework mode knob */
+#include "td5_rt.h"       /* [RT P3] bindless page-texture registration */
 #include "td5_material.h" /* [LIGHT2] texture-page -> material id */
 #include "td5_config.h"   /* shared TD5RE_* env-knob accessors */
 #include "td5re.h"
@@ -690,6 +691,12 @@ void flush_immediate_internal(void)
     if (s_current_texture_page >= 0) {
         td5_render_apply_page_blend_preset(s_current_texture_page);
         td5_plat_render_bind_texture(s_current_texture_page);
+        /* [RT P3] This is the real per-primitive bind site (the mesh cmd handlers
+         * funnel through here, bypassing td5_render_bind_texture_page). Mirror the
+         * bound page into the bindless reflection table so a reflection hit on
+         * this page samples the real texture. Deduped wrapper-side -> cheap. */
+        if (td5_rt_active())
+            td5_plat_rt_register_page((unsigned)s_current_texture_page);
     }
 
     /* Submit triangles */
