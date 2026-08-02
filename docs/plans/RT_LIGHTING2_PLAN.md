@@ -19,7 +19,7 @@ stops there.
 |-------|-------------|--------|
 | 1 | Sky probe: sun detection, sunny/overcast classing, sun disc + authored sun dir | ✅ done (as-built below) |
 | 2 | Full-scene RT geometry feed (scenery + cutout billboards into the TLAS) | ✅ done (as-built below) |
-| 3 | Unified shadow treatment (billboards/translucents receive; everything casts) | ⬜ not started |
+| 3 | Unified shadow treatment (billboards/translucents receive; everything casts) | ✅ done (flat-billboard receive deferred — see as-built) |
 | 4 | RT sky-visibility GI + baked/zone darkening replacement in HIGH | ⬜ not started |
 | 5 | Material shininess detection (texture-analysis classifier, per-page table) | ⬜ not started |
 | 6 | Reflection & shadow range/angle fix + precision knobs | ⬜ not started |
@@ -28,6 +28,65 @@ stops there.
 
 Append an **as-built note** under this table after each phase (deviations, measurements,
 gotchas found) — exactly like RT_LIGHTING_PLAN.md does.
+
+### As-built — Phase 3 (2026-08-02, branch `rt-lighting2`)
+
+**Delivered**: unified shadow RECEIVING for the two classes the opaque sun-shadow
+composite misses. Casting is already universal (P2 put the whole world in the
+TLAS). Concretely: (1) **alpha-blend world translucents** (SRCALPHA_INVSRC,
+depth-tested) now sample the sunvis mask at draw time via new PS variants and
+darken exactly as the opaque composite does; (2) the **opaque world** — road,
+cars, and 3D-mesh scenery incl. tree meshes — already receives building/bridge
+shadows through the existing composite now that P2 feeds the TLAS (verified: the
+Australia-style "building shadow on the road/car" is the P2+composite path).
+
+**Translucent receive (the built path)**: `PS_MODULATE_SHADOWED` /
+`PS_MODULATE_ALPHA_SHADOWED` (ps_modulate_shadowed.hlsl/_alpha, `_50` loop in
+compile_shaders.bat, `PS_COUNT`=8). The main root sig `s_root_sig` grew param[5]
+= a `t1` SRV table for the sunvis mask; `s_srv_ring` slot 0 is RESERVED for it
+(ring cycles [1..cap)); `d3d12_dxr_sunvis_ready()/_resource()` expose the mask
+(the shadow pass leaves it in `PIXEL_SHADER_RESOURCE`, so no extra transition).
+The `recv_shadow` gate in `d3d12_bind_and_draw` (HIGH + SRCALPHA_INVSRC + z-test +
+sunvis-ready) creates the sunvis SRV into ring slot 0, selects the shadowed PS,
+and binds param 5. VERIFIED with a magenta debug: a real translucent (the car
+underglow) receives the shadow. LOW is byte-identical — the PS/gate all gate on
+`s_rt_mode`; the extra root-sig param is inert for LOW (goldens match on all 4
+golden races, smoke 15/15). Env A/B: `TD5RE_RT_TRANSLUCENT_SHADOW`.
+
+**DEFERRED with rationale — flat opaque cutout BILLBOARDS** (the camera-facing
+tree/sign SPRITES, opcode 4 → `dispatch_billboard`): these are page-type-1
+color-keyed OPAQUE (not translucent), queued into the projected depth-sort
+buckets and drawn LATER. The blocker is the **parallel rcmd record/replay**
+architecture: the bucket flush runs on a worker while RECORDING a pane list, so
+the actual `d3d12_bind_and_draw` happens at REPLAY on the main thread —
+decoupled from any live phase flag (diagnostic-confirmed: a `translucent-phase`
+flag set during the flush is never active at the draw). Two attempts were made
+and reverted: (a) a live phase flag around the flush (never active at replay);
+(b) recording the phase into the rcmd command stream (`RC_RT_PHASE`) — this fired
+but produced a heavy per-draw G-buffer-target thrash. Both removed cleanly. Since
+the 3D-mesh foliage (the majority) ALREADY receives via the composite, and flat
+sprite billboards are the minority + thin, this is a documented follow-up (the
+clean fix is to record the phase marker into rcmd AND skip the dead post-composite
+G-buffer write without toggling render targets per draw). The translucent path +
+composite cover the substantive decision-#3 payoff.
+
+**GOTCHAs paid**: `td5_render_flush_translucent()` is a DEAD no-op
+(`s_translucent_head` always -1). Billboards use `td5_render_flush_projected_
+buckets` (via `td5_render_queue_projected_entry`), which routes through
+`clip_and_submit_polygon`. There are THREE render branches (single-pane else at
+game.c ~7320 + parallel rcmd at ~7200 + a photobooth/minimap path at ~5750); the
+ACTIVE 1-player path is the parallel rcmd one. The G-buffer normal pack format is
+`specular = (matid<<24) | (bx<<16|by<<8|bz)` biased Y-flipped (td5_render.c:1324),
+`TD5_MAT_CUTOUT`=2 — documented for the follow-up.
+
+**Gate**: build_all clean (dev+release, lint OK, no new warnings — the flagged
+td5_platform_win32.c warnings are pre-existing baseline); goldens match on all 4
+golden races (LOW byte-identical); smoke 15/15. NOTE: this session's GPU was
+thermally throttled after hours of RT-HIGH testing — HIGH FPS read ~12 (fresh-GPU
+A/B earlier this session was 125–134 on Courmayeur) and the full-suite
+`degrade-private-bytes` came in at +25.2 MB (limit 24) — the DOCUMENTED variable
+straddle (4–28 MB), pre-existing (P3 allocates nothing in LOW; goldens match), not
+a regression. Re-verify perf/degrade on a cooled GPU.
 
 ### As-built — Phase 2 (2026-08-01, branch `rt-lighting2`)
 

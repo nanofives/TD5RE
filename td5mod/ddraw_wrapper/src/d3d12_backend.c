@@ -74,6 +74,8 @@ static D3D12State g_d3d12;
 #include "shaders/ps_luminance_alpha_bytes_50.h"
 #include "shaders/ps_modulate_g_bytes_50.h"
 #include "shaders/ps_modulate_alpha_g_bytes_50.h"
+#include "shaders/ps_modulate_shadowed_bytes_50.h"        /* [RT2-P3] receive sun shadow */
+#include "shaders/ps_modulate_alpha_shadowed_bytes_50.h"
 #include "shaders/ps_composite_bytes_50.h"     /* present-time fullscreen blit */
 #include "shaders/ps_shadow_bytes_50.h"        /* screen-space sun-shadow pass  */
 #include "shaders/ps_light_bytes_50.h"         /* deferred dynamic-light pass   */
@@ -200,6 +202,7 @@ static BackendTexture  *s_black_tex;   /* 1x1 zero: gbuffer/scene-copy placehold
 static BackendTexture  *s_gbuffer_tex;
 static int              s_gbuffer_enabled;   /* game requested it (per frame)     */
 static int              s_gbuf_bound;        /* RT1 currently bound (reset/frame)  */
+static ID3D12Resource  *s_sunvis_srv_res;    /* [RT2-P3] mask whose SRV is in ring slot 0 */
 
 /* [RT lighting P2b] HIGH mode: the deferred shadow/light passes run the RT
  * dispatch + composite instead of the screen-space march. Set per frame by the
@@ -967,6 +970,7 @@ static void d3d12_bind_and_draw(D3D_PRIMITIVE_TOPOLOGY topo, int topo_type,
     BackendTexture *tex = s_cur_tex ? s_cur_tex : s_white_tex;
     UINT slot, fi = g_d3d12.frame_index;
     D3D12_VERTEX_BUFFER_VIEW vbv;
+    int recv_shadow = 0;   /* [RT2-P3] this draw samples the sun-visibility mask */
 
     if (!g_d3d12.frame_open) d3d12_frame_begin();
     if (!tex) return;
@@ -987,6 +991,39 @@ static void d3d12_bind_and_draw(D3D_PRIMITIVE_TOPOLOGY topo, int topo_type,
         int gbuf_want = s_gbuffer_enabled && s_gbuffer_tex &&
             (ds == DS_Z_ON_WRITE_ON || ds == DS_Z_OFF_WRITE_ON || ds == DS_Z_ON_WRITE_ON_ALWAYS) &&
             blend == BLEND_OPAQUE;
+
+        /* [RT2-P3] Alpha-blend world translucents (SRCALPHA_INVSRC, depth-tested)
+         * RECEIVE the sun shadow at DRAW time: they draw after the opaque shadow
+         * composite so they'd otherwise miss it. The shadowed PS multiplies the
+         * same sunvis mask the composite applies to the opaque scene. HIGH only,
+         * and only when the shadow pass produced a mask this frame. Additive light
+         * sources (SRCALPHA_ONE) and z-off HUD are excluded. Opaque cutout foliage
+         * that renders as 3D mesh geometry already receives via the composite
+         * (P2 put the world in the TLAS); flat opaque cutout billboards drawn in
+         * the parallel rcmd-replay path are a documented follow-up (as-built). */
+        static int s_recv_on = -1;   /* TD5RE_RT_TRANSLUCENT_SHADOW A/B (default on) */
+        if (s_recv_on < 0) { const char *e = getenv("TD5RE_RT_TRANSLUCENT_SHADOW"); s_recv_on = (e && e[0]) ? atoi(e) : 1; }
+        if (s_recv_on && s_rt_mode && !gbuf_want && d3d12_dxr_sunvis_ready() &&
+            (ds == DS_Z_ON_WRITE_OFF || ds == DS_Z_ON_WRITE_ON) &&
+            (ps == PS_MODULATE || ps == PS_MODULATE_ALPHA) &&
+            blend == BLEND_SRCALPHA_INVSRC) {
+            ID3D12Resource *sv = d3d12_dxr_sunvis_resource();
+            if (sv) {
+                if (sv != s_sunvis_srv_res) {   /* (re)create SRV in reserved ring slot 0 */
+                    D3D12_SHADER_RESOURCE_VIEW_DESC srv; ZeroMemory(&srv, sizeof(srv));
+                    srv.Format = DXGI_FORMAT_R32_FLOAT;
+                    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                    srv.Texture2D.MipLevels = 1;
+                    ID3D12Device_CreateShaderResourceView(g_d3d12.device, sv, &srv,
+                        cpu_handle(s_srv_ring, 0, s_srv_stage_size));
+                    s_sunvis_srv_res = sv;
+                }
+                recv_shadow = 1;
+                ps = (ps == PS_MODULATE) ? PS_MODULATE_SHADOWED : PS_MODULATE_ALPHA_SHADOWED;
+            }
+        }
+
         if (gbuf_want != s_gbuf_bound) {
             D3D12_CPU_DESCRIPTOR_HANDLE rtvs[2];
             D3D12_CPU_DESCRIPTOR_HANDLE dsvh = cpu_handle(s_dsv_heap, 0, s_dsv_size);
@@ -1044,13 +1081,15 @@ static void d3d12_bind_and_draw(D3D_PRIMITIVE_TOPOLOGY topo, int topo_type,
 
     /* SRV table: copy the bound texture's staging SRV into a fresh ring slot. */
     slot = s_srv_ring_next++;
-    if (s_srv_ring_next >= s_srv_ring_cap) s_srv_ring_next = 0;
+    if (s_srv_ring_next >= s_srv_ring_cap) s_srv_ring_next = 1;   /* [RT2-P3] skip reserved slot 0 */
     ID3D12Device_CopyDescriptorsSimple(g_d3d12.device, 1,
         cpu_handle(s_srv_ring, slot, s_srv_stage_size),
         cpu_handle(s_srv_stage, tex->srv_slot, s_srv_stage_size),
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(cl, 2, gpu_handle(s_srv_ring, slot, s_srv_stage_size));
     ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(cl, 3, gpu_handle(s_sampler_heap, samp, s_sampler_size));
+    if (recv_shadow)   /* [RT2-P3] t1 = sunvis mask in reserved ring slot 0 */
+        ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(cl, 5, gpu_handle(s_srv_ring, 0, s_srv_stage_size));
 
     if (topo != s_last_topo) { ID3D12GraphicsCommandList_IASetPrimitiveTopology(cl, topo); s_last_topo = topo; }
     vbv.BufferLocation = s_upload_gpu[fi]; vbv.SizeInBytes = D3D12_UPLOAD_RING_BYTES; vbv.StrideInBytes = stride;
@@ -1105,7 +1144,7 @@ static void d3d12_fullscreen_blit(BackendTexture *src)
     ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(cl, 1, ID3D12Resource_GetGPUVirtualAddress(s_fog_cb->res));
 
     slot = s_srv_ring_next++;
-    if (s_srv_ring_next >= s_srv_ring_cap) s_srv_ring_next = 0;
+    if (s_srv_ring_next >= s_srv_ring_cap) s_srv_ring_next = 1;   /* [RT2-P3] skip reserved slot 0 */
     ID3D12Device_CopyDescriptorsSimple(g_d3d12.device, 1,
         cpu_handle(s_srv_ring, slot, s_srv_stage_size),
         cpu_handle(s_srv_stage, src->srv_slot, s_srv_stage_size),
@@ -1270,7 +1309,7 @@ static void d3d12_fullscreen_pass(const void *ps, SIZE_T ps_len, int blend,
 
     /* Copy the 3 SRVs into contiguous ring slots (pad missing with depth). */
     ring0 = s_srv_ring_next;
-    if (ring0 + 3 >= s_srv_ring_cap) ring0 = 0;
+    if (ring0 + 3 >= s_srv_ring_cap) ring0 = 1;   /* [RT2-P3] skip reserved slot 0 */
     for (i = 0; i < 3; i++) {
         /* Pad missing SRVs with the ZERO texture (matches d3d11's cleared
          * gbuffer/absent scene-copy), NOT depth -- depth as "normal/matid"
@@ -1541,8 +1580,8 @@ static void d3d12_diag(const char *fmt, ...)
 
 static int d3d12_create_root_sig(void)
 {
-    D3D12_DESCRIPTOR_RANGE srv_range, samp_range;
-    D3D12_ROOT_PARAMETER params[5];
+    D3D12_DESCRIPTOR_RANGE srv_range, samp_range, sunvis_range;
+    D3D12_ROOT_PARAMETER params[6];
     D3D12_ROOT_SIGNATURE_DESC rsd;
     ID3D10Blob *sig = NULL, *err = NULL;
     HRESULT hr;
@@ -1551,6 +1590,10 @@ static int d3d12_create_root_sig(void)
     srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     srv_range.NumDescriptors = 1; srv_range.BaseShaderRegister = 0;
     srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    ZeroMemory(&sunvis_range, sizeof(sunvis_range));   /* [RT2-P3] t1 sun-shadow mask */
+    sunvis_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    sunvis_range.NumDescriptors = 1; sunvis_range.BaseShaderRegister = 1;
+    sunvis_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
     ZeroMemory(&samp_range, sizeof(samp_range));
     samp_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
     samp_range.NumDescriptors = 1; samp_range.BaseShaderRegister = 0;
@@ -1574,9 +1617,13 @@ static int d3d12_create_root_sig(void)
     params[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;              /* b1 PS: SDF/FX */
     params[4].Descriptor.ShaderRegister = 1;
     params[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    params[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; /* [RT2-P3] t1 PS: sunvis */
+    params[5].DescriptorTable.NumDescriptorRanges = 1;
+    params[5].DescriptorTable.pDescriptorRanges = &sunvis_range;
+    params[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     ZeroMemory(&rsd, sizeof(rsd));
-    rsd.NumParameters = 5; rsd.pParameters = params;
+    rsd.NumParameters = 6; rsd.pParameters = params;
     rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
     hr = D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err);
@@ -1684,8 +1731,11 @@ static int d3d12_render_core_init(int width, int height)
     if (FAILED(ID3D12Device_CreateDescriptorHeap(g_d3d12.device, &hd, &IID_ID3D12DescriptorHeap, (void **)&s_srv_stage))) return 0;
     s_srv_stage_next = 1;   /* slot 0 reserved for a null/white default */
 
-    /* Shader-visible SRV ring (one slot per textured draw, wraps per frame). */
+    /* Shader-visible SRV ring (one slot per textured draw, wraps per frame).
+     * [RT2-P3] Slot 0 is RESERVED for the RT sun-visibility SRV (t1); the ring
+     * cycles [1..cap) so it never clobbers it. */
     s_srv_ring_cap = 16384;
+    s_srv_ring_next = 1;
     ZeroMemory(&hd, sizeof(hd));
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; hd.NumDescriptors = s_srv_ring_cap;
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
@@ -1735,6 +1785,8 @@ static int d3d12_render_core_init(int width, int height)
     s_builtin_ps[PS_LUMINANCE_ALPHA].bc = g_ps_luminance_alpha_50; s_builtin_ps[PS_LUMINANCE_ALPHA].len = sizeof(g_ps_luminance_alpha_50);
     s_builtin_ps[PS_MODULATE_G].bc      = g_ps_modulate_g_50;      s_builtin_ps[PS_MODULATE_G].len      = sizeof(g_ps_modulate_g_50);
     s_builtin_ps[PS_MODULATE_ALPHA_G].bc= g_ps_modulate_alpha_g_50;s_builtin_ps[PS_MODULATE_ALPHA_G].len= sizeof(g_ps_modulate_alpha_g_50);
+    s_builtin_ps[PS_MODULATE_SHADOWED].bc       = g_ps_modulate_shadowed_50;       s_builtin_ps[PS_MODULATE_SHADOWED].len       = sizeof(g_ps_modulate_shadowed_50);
+    s_builtin_ps[PS_MODULATE_ALPHA_SHADOWED].bc = g_ps_modulate_alpha_shadowed_50; s_builtin_ps[PS_MODULATE_ALPHA_SHADOWED].len = sizeof(g_ps_modulate_alpha_shadowed_50);
 
     /* Persistent viewport (b0 VS) + fog (b0 PS) const buffers. */
     s_viewport_cb = d3d12_cb_create(sizeof(ViewportCB));

@@ -77,7 +77,13 @@ typedef struct {
  * active (Backend_SetGBufferEnabled). */
 #define PS_MODULATE_G            4
 #define PS_MODULATE_ALPHA_G      5
-#define PS_COUNT                 6
+/* [RT2-P3] Shadow-receiving variants: same colour math + fog/alpha-test, then
+ * *= the RT sun-visibility mask (t1). Auto-selected for HIGH world alpha-blend
+ * (SRCALPHA_INVSRC, depth-tested) draws so billboard trees/signs receive the
+ * building/bridge shadows the opaque scene already gets. */
+#define PS_MODULATE_SHADOWED     6
+#define PS_MODULATE_ALPHA_SHADOWED 7
+#define PS_COUNT                 8
 
 typedef struct {
     /* D3D6 render state values (as received from game) */

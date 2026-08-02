@@ -1331,6 +1331,18 @@ static int dxr_lighting_pass(const void *cb, UINT cb_size, int mode)
 }
 
 int d3d12_dxr_shadow_pass(const ShadowCB *cb) { return cb ? dxr_lighting_pass(cb, sizeof(ShadowCB), 0) : 0; }
+
+/* [RT2-P3] Expose the sun-visibility mask for the translucent shadow-receive
+ * path. The shadow pass leaves it in PIXEL_SHADER_RESOURCE state (dxr_lighting_
+ * pass), so translucent draws later in the frame can sample it directly. Ready
+ * only when the shadow pass ran this frame (state == PSR) so the backend never
+ * binds a UAV-state mask. Returns NULL / 0 otherwise. */
+ID3D12Resource *d3d12_dxr_sunvis_resource(void) { return g_dxr.sunvis; }
+int d3d12_dxr_sunvis_ready(void)
+{
+    return g_dxr.sunvis != NULL &&
+           g_dxr.sunvis_state == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+}
 int d3d12_dxr_light_pass(const LightCB *cb)   { return cb ? dxr_lighting_pass(cb, sizeof(LightCB), 1)  : 0; }
 int d3d12_dxr_ssr_pass(const SSRCB *cb)       { return cb ? dxr_lighting_pass(cb, sizeof(SSRCB), 2)    : 0; }
 
