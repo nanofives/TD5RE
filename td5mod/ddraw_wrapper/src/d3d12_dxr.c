@@ -98,11 +98,18 @@ static void dxr_log(const char *fmt, ...)
 #define DXR_SBT_HITGROUP_OFF  384    /* miss region (2*32=64) rounds to 64 -> 384    */
 #define DXR_SBT_BYTES         512
 
-/* Max instances the TLAS is sized for (plan: capacity 128 up front). */
-#define DXR_MAX_INSTANCES     128
+/* Max instances the TLAS is sized for. [RT2-P2] raised 128 -> 2048 for the
+ * full-scene feed: a dense track (Moscow) has ~1600 MODELS.DAT scenery meshes +
+ * billboards. TLAS build stays sub-ms at 2k (double-buffered, PREFER_FAST_BUILD).
+ * Instance-desc + GeoRecord buffers scale with this but are tiny (64B / 16B). */
+#define DXR_MAX_INSTANCES     2048
 /* TDR guard: BLAS triangles built per frame during the warmup window. */
 #define DXR_BLAS_TRIS_PER_FRAME 500000
-#define DXR_MAX_MESHES        512
+/* [RT2-P2] raised 512 -> 2048: one BLAS per scenery mesh + track chunks + actors. */
+#define DXR_MAX_MESHES        2048
+/* [RT2-P2] matid_flags bit: this range is alpha-tested cutout geometry -> build
+ * its BLAS geometry NON-opaque so anyhit_cutout runs (mirror in td5_rt.c). */
+#define DXR_MATID_CUTOUT      0x100u
 
 typedef struct {
     ID3D12Resource *blas;          /* result buffer (owned)                     */
@@ -376,7 +383,7 @@ static int dxr_create_global_rs(void)
 static int dxr_create_state_object(void)
 {
     D3D12_DXIL_LIBRARY_DESC lib;
-    D3D12_EXPORT_DESC        exports[8];
+    D3D12_EXPORT_DESC        exports[9];
     D3D12_HIT_GROUP_DESC     hg;
     D3D12_RAYTRACING_SHADER_CONFIG   shcfg;
     D3D12_RAYTRACING_PIPELINE_CONFIG pcfg;
@@ -394,17 +401,20 @@ static int dxr_create_state_object(void)
     exports[5].Name = L"rgen_shadow";
     exports[6].Name = L"rgen_light";
     exports[7].Name = L"rgen_refl";
+    exports[8].Name = L"anyhit_cutout";
     ZeroMemory(&lib, sizeof(lib));
     lib.DXILLibrary.pShaderBytecode = g_rt_pipeline;
     lib.DXILLibrary.BytecodeLength  = sizeof(g_rt_pipeline);
-    lib.NumExports = 8; lib.pExports = exports;
+    lib.NumExports = 9; lib.pExports = exports;
 
-    /* One hit group "hg" (plan sec.4). Phase 1: closest-hit only; anyhit_cutout
-     * added in Phase 3. */
+    /* One hit group "hg" (plan sec.4): closest-hit chit_refl + [RT2-P2]
+     * anyhit_cutout (alpha-tests cutout billboards/foliage; a no-op on OPAQUE
+     * geometry, which never invokes anyhit). */
     ZeroMemory(&hg, sizeof(hg));
     hg.HitGroupExport = L"hg";
     hg.Type = D3D12_HIT_GROUP_TYPE_TRIANGLES;
     hg.ClosestHitShaderImport = L"chit_refl";
+    hg.AnyHitShaderImport = L"anyhit_cutout";
 
     shcfg.MaxPayloadSizeInBytes   = 32;   /* frozen (plan sec.4) */
     shcfg.MaxAttributeSizeInBytes = 8;
@@ -892,7 +902,12 @@ static void dxr_build_pending(ID3D12GraphicsCommandList *cl, ID3D12GraphicsComma
         ib_va = ID3D12Resource_GetGPUVirtualAddress(g_dxr.ib_pool) + m->ib_offset;
         for (r = 0; r < m->nranges; r++) {
             geo[r].Type  = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-            geo[r].Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;   /* CUTOUT revisited in P3 */
+            /* [RT2-P2] CUTOUT ranges build NON-opaque so anyhit_cutout runs the
+             * alpha test; everything else stays OPAQUE (fast early-accept path,
+             * esp. shadow rays). */
+            geo[r].Flags = (m->ranges[r].matid_flags & DXR_MATID_CUTOUT)
+                         ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE
+                         : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
             geo[r].Triangles.VertexBuffer.StartAddress  = vb_va;   /* pos at offset 0 */
             geo[r].Triangles.VertexBuffer.StrideInBytes = sizeof(BackendRTVertex);
             geo[r].Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;

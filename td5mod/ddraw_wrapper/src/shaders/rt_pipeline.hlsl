@@ -113,6 +113,35 @@ void chit_refl(inout RayPayload p, in BuiltInTriangleIntersectionAttributes attr
     p.t = RayTCurrent();
 }
 
+/* [RT2-P2] Hit group "hg" any-hit: alpha-test cutout geometry (billboard trees/
+ * signs, foliage). Only NON-opaque BLAS geometry (matid CUTOUT) invokes this;
+ * opaque scenery keeps the fast early-accept path. Samples the hit page's alpha
+ * at the barycentric UV and IgnoreHit()s transparent texels, so tree canopies
+ * cast leaf-shaped shadows and reflect with holes instead of as solid quads.
+ * Runs for BOTH shadow rays (they don't force-opaque) and reflection/primary
+ * rays -> one test serves casting and hit shading. */
+[shader("anyhit")]
+void anyhit_cutout(inout RayPayload p, in BuiltInTriangleIntersectionAttributes attr)
+{
+    GeoRecord rec = g_geo[InstanceID()];
+    if (rec.texture_index == 0u || rec.texture_index >= 1024u) return;   /* no page -> accept */
+    uint3 idx = rt_load_tri_indices(rec.ib_byte_off, PrimitiveIndex());
+    float2 uv0 = rt_vertex_uv(rec.vb_byte_off, idx.x);
+    float2 uv1 = rt_vertex_uv(rec.vb_byte_off, idx.y);
+    float2 uv2 = rt_vertex_uv(rec.vb_byte_off, idx.z);
+    float3 bw = float3(1.0f - attr.barycentrics.x - attr.barycentrics.y, attr.barycentrics.x, attr.barycentrics.y);
+    float2 uv = uv0 * bw.x + uv1 * bw.y + uv2 * bw.z;
+    float a = g_bindless[NonUniformResourceIndex(rec.texture_index)].SampleLevel(g_samp, uv, 0).a;
+    if (a < 0.5f) IgnoreHit();
+}
+/* NOTE: shadow rays (rt_shadow_ray) use ShadowPayload and reflection/primary
+ * rays use RayPayload, but a hit group has exactly ONE any-hit. anyhit_cutout
+ * declares RayPayload yet NEVER reads or writes `p` (only IgnoreHit()/accept),
+ * so the payload is inert bytes for both ray types and the mismatch is harmless
+ * (both fit MaxPayloadSizeInBytes=32). Shadow rays keep RAY_FLAG_SKIP_CLOSEST_
+ * HIT_SHADER (no CH) but do NOT force-opaque, so this any-hit still runs and
+ * cutout geometry casts alpha-shaped shadows. */
+
 /* Miss record 0: shadow rays (Phase 2b). Unblocked path -> visible. */
 [shader("miss")]
 void miss_shadow(inout ShadowPayload p)

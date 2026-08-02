@@ -18,7 +18,7 @@ stops there.
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 1 | Sky probe: sun detection, sunny/overcast classing, sun disc + authored sun dir | ✅ done (as-built below) |
-| 2 | Full-scene RT geometry feed (scenery + cutout billboards into the TLAS) | ⬜ not started |
+| 2 | Full-scene RT geometry feed (scenery + cutout billboards into the TLAS) | ✅ done (as-built below) |
 | 3 | Unified shadow treatment (billboards/translucents receive; everything casts) | ⬜ not started |
 | 4 | RT sky-visibility GI + baked/zone darkening replacement in HIGH | ⬜ not started |
 | 5 | Material shininess detection (texture-analysis classifier, per-page table) | ⬜ not started |
@@ -28,6 +28,90 @@ stops there.
 
 Append an **as-built note** under this table after each phase (deviations, measurements,
 gotchas found) — exactly like RT_LIGHTING_PLAN.md does.
+
+### As-built — Phase 2 (2026-08-01, branch `rt-lighting2`)
+
+**Delivered**: the TLAS is now the whole visible world. Every MODELS.DAT display-
+list scenery mesh (buildings/walls/bridges/terrain) is a static world BLAS, and
+billboard-tag meshes (trees/signs) are cutout crossed quads; `anyhit_cutout` is
+activated end-to-end. TLAS instance cap 128 -> 2048. Verified on Moscow (the
+heaviest track): **1610 scenery meshes fed** (885 solid + 725 billboards), 0
+dropped, 0 pool overflow, renders at **89 FPS** (Courmayeur 128 FPS); no crash,
+no TDR across ~7 HIGH races + the device-lost drill.
+
+**GEOMETRY-SOURCE ODYSSEY (the hard part — 5 rebuild/GPU cycles).** Getting the
+world geometry required peeling several layers; recorded so the next feed change
+doesn't repay it:
+1. `td5_track_get_models_display_list_count()` is **TD6-only** (returns 0 on TD5
+   tracks like Moscow) — do not bound a TD5 enumeration by it.
+2. `td5_track_get_display_list(span)` returns **STRIP road blocks** whose
+   per-command `vertex_data_ptr` is a **truncated x64 pointer** (uint32_t on-disk
+   field) the renderer itself skips — NOT the geometry. The real buildings come
+   from `td5_track_get_display_list_entry(entry_idx)` over `[0, (ring+3)>>2)`
+   (`ring = td5_track_get_ring_length()`), the renderer's main-walk source.
+3. Scenery meshes are **authored in WORLD space** (drawn identity) so they feed
+   like the road lanes (identity instance) — BUT `rt_build_actor_mesh`'s
+   sequential-vertex assumption fails: their commands carry **per-command vertex
+   bases** in the blob. New `rt_build_scenery_mesh` collects each command's
+   vertices (validated via `td5_track_is_ptr_in_blob` — a truncated ptr that
+   passes a looser `is_valid_mesh_ptr` check faulted at 0xC0000005; blob-bounds
+   only, matching the renderer) and indexes into its own buffer. Topology is
+   `tri_count` tris + `quad_count` quads per command for EVERY opcode (opcode =
+   render state, not topology).
+4. **TIMING (the final blocker)**: the `td5_rt_level_build` hook runs from the
+   track loader BEFORE MODELS.DAT is parsed, and the lazy re-feed is skipped once
+   the road lane-quads set `s_track_chunk_count>0`. So the scenery feed is now
+   done from `td5_rt_frame` on the first HIGH frame (`s_scenery_fed` one-shot,
+   reset on device-lost/unload), by which point InitRace step 7 has built the
+   display lists.
+
+**Cutout**: `matid_flags` bit `0x100` (DXR_MATID_CUTOUT / RT_MATID_CUTOUT) flags
+alpha-test ranges; the wrapper builds those BLAS geometries NON-opaque so the new
+`anyhit_cutout` runs (samples the bindless page alpha at the barycentric UV,
+`IgnoreHit()` < 0.5). Everything else stays OPAQUE (fast early-accept, esp. shadow
+rays). **DXR gotcha**: a hit group has ONE any-hit but shadow rays use
+`ShadowPayload` and reflection rays `RayPayload` — `anyhit_cutout` declares
+`RayPayload` but never touches `p` (only IgnoreHit/accept), so the payload is
+inert for both and the mismatch is harmless (CreateStateObject succeeds, pipeline
+inits OK, verified). Shadow rays keep `SKIP_CLOSEST_HIT_SHADER` but do NOT
+force-opaque, so cutout billboards cast alpha-shaped shadows.
+
+**Budget/caps**: `DXR_MAX_INSTANCES` 128->2048 and `DXR_MAX_MESHES` 512->2048
+(deviation from the plan's 1024 — Moscow alone is 1610 scenery meshes; the
+instance-desc/GeoRecord/DxrMesh arrays scale but are KB-scale, TLAS build stays
+sub-ms). Game-side `RT_MAX_SCENERY=1900`. Moscow feed fits the existing 128 MB VB
+/ 48 MB IB pools with NO overflow, so pools were NOT grown. One BLAS per mesh
+(GeoRecord is per-BLAS: one texture + matid), identity-instanced.
+
+**Feed table** (TD5RE_RT_DIAG): Moscow = 698 display-list entries -> 1610 unique
+meshes (885 solid + 725 billboard) -> 1610 BLAS + 2 road chunks + ~12 actors ≈
+1624 TLAS instances. Perf: normal HIGH race 89 FPS (Moscow) / 128 FPS
+(Courmayeur) vs pre-P2 ~126 / ~145 — the full-scene shadow/refl cost, still very
+playable. Knobs: `TD5RE_RT_SCENERY` (default 1), `TD5RE_RT_BILLBOARDS` (default 1),
+`TD5RE_RT_DIAG` (feed stats).
+
+**Files**: `d3d12_dxr.c` (caps, anyhit export + hit group, CUTOUT geo flag),
+`rt_pipeline.hlsl` (anyhit_cutout body), `td5_rt.c` (scenery+billboard feed,
+rt_build_scenery_mesh, frame-time gating).
+
+**Gate**: build_all clean (dev+release, lint 3/3, no new warnings); full selftest
+golden hashes match on all 4 golden races, degrade-private-bytes PASS (LOW feeds
+nothing — gated on td5_rt_active); smoke 15/15 clean; DXR pipeline inits OK with
+the anyhit state object; device-lost drill: process survives + scenery **re-fed**
+(handles=1610) + pipeline re-inits, no crash; Moscow/Courmayeur HIGH framedumps
+show the full world rendering correctly (no corruption). The full-suite trailing
+0xC0000005 is the documented intermittent race-moscow env-GPU TDR (smoke clean +
+LOW byte-identical => not a regression).
+
+**OWED (long/finicky, not implementation)**: the 10-min Moscow soak (spot-checked:
+~7 clean HIGH races incl. device-lost, no TDR/VRAM growth observed, but the
+literal 10-min run is owed); a `TD5RE_RT_DEBUGVIEW` framedump that lands mid-race
+(AutoRace cycles race->results->car-select so the single-frame dump kept catching
+the car-select splash; the RASTER race render was verified correct instead — same
+TLAS). **Deferrals with rationale**: meshes >65535 verts are skipped (u16 index
+limit; `big_skipped` — none on Moscow); per-mesh single texture page (GeoRecord is
+per-BLAS — a mixed-page mesh reflects its header page, as the actor feed already
+does); billboards use bounding-centre/radius crossed quads (not per-leaf).
 
 ### As-built — Phase 1 (2026-08-01, branch `rt-lighting2`)
 
