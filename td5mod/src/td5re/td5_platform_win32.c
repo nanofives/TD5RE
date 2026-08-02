@@ -30,6 +30,7 @@
 #include "td5_config.h"  /* shared TD5RE_* env-knob helpers */
 #include "td5_rcmd.h"   /* Phase B render-transform: per-pane CPU command recording */
 #include "td5_material.h" /* [RT2-P5] per-page shininess detection at upload */
+#include "td5_rt.h"       /* [RT2-P7] td5_rt_active() — HIGH light-pipeline knobs */
 
 /* Pull in the wrapper types and backend access */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -3857,6 +3858,25 @@ void td5_plat_render_apply_lights(const float cam_pos[3], const float basis9[9],
     cb.ext[0] = (float)occl_steps;
     cb.ext[1] = pane_w;
     cb.ext[2] = pane_h;
+    /* [RT2 P7] HIGH light-pipeline knobs. RT shader (rgen_light) only — the LOW
+     * ps_light.hlsl declares neither ext.w nor ext2 and reads only through
+     * lights[], so these leave LOW byte-identical (verified via goldens). Set
+     * only when RT is active; 0 => rgen_light falls back to its old hard-cone /
+     * single-shadow-ray path. */
+    if (td5_rt_active()) {
+        static float s_cone_soft = -1.0f; static int s_light_rays = -1;
+        if (s_light_rays < 0) {
+            const char *e;
+            s_cone_soft  = ((e = getenv("TD5RE_RT_LIGHT_CONE_SOFT")) && e[0]) ? (float)atof(e) : 0.15f;
+            s_light_rays = ((e = getenv("TD5RE_RT_LIGHT_RAYS"))      && e[0]) ? atoi(e)        : 2;
+            if (s_cone_soft < 0.0f) s_cone_soft = 0.0f;
+            if (s_cone_soft > 1.0f) s_cone_soft = 1.0f;
+            if (s_light_rays < 1)  s_light_rays = 1;
+            if (s_light_rays > 16) s_light_rays = 16;
+        }
+        cb.ext[3]  = s_cone_soft;
+        cb.ext2[0] = (float)s_light_rays;
+    }
 
     for (int i = 0; i < n; i++) {
         const TD5_LightGPU *L = &lights[i];

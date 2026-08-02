@@ -23,11 +23,78 @@ stops there.
 | 4 | RT sky-visibility GI + baked/zone darkening replacement in HIGH | ✅ done (visual A/B owed on a healthy GPU — see as-built) |
 | 5 | Material shininess detection (texture-analysis classifier, per-page table) | ✅ done (water→WATER-class RT feed; per-page continuous refl is CSV-only — see as-built) |
 | 6 | Reflection & shadow range/angle fix + precision knobs | ✅ done (range caps lifted in HIGH; half-res lever reserved for P8; view-indep A/B owed — see as-built) |
-| 7 | HIGH light pipeline: headlights, street lights, sun as realistic RT lights | ⬜ not started |
+| 7 | HIGH light pipeline: headlights, street lights, sun as realistic RT lights | ✅ done (soft headlights + street-lamps-on in HIGH; sun warm-tint deferred; night A/B owed — see as-built) |
 | 8 | LIGHTING OPTIONS screen: per-feature rows, INI, defaults, release gates | ⬜ not started |
 
 Append an **as-built note** under this table after each phase (deviations, measurements,
 gotchas found) — exactly like RT_LIGHTING_PLAN.md does.
+
+### As-built — Phase 7 (2026-08-02, branch `rt-lighting2`)
+
+**Delivered**: the HIGH rendering of the existing light registry is upgraded — soft
+headlight penumbra + smooth projector cone, and city street lamps default ON in HIGH
+with real occlusion. LOW's light system stays byte-identical. The registry itself
+(`td5_light.c` emitters/hardpoints/auto-on) is unchanged — this is a rendering
+upgrade only.
+
+**1. Headlights / all RT point lights (`rgen_light`, rt_pipeline.hlsl):**
+- **K soft shadow samples**: the single shadow ray → K stratified rays jittered in a
+  small disc around the light dir (tangent basis + golden-angle rotations, `PEN=0.02`
+  source-size proxy), averaged. The old path was a binary `vis>0.5 ? 1.0 : 0.15` step;
+  now `lerp(0.15, 1, mean_vis)` → graduated penumbra edges on the light pool.
+  **K=1 reproduces the old result exactly** (single ray → mean is 0 or 1 → lerp gives
+  0.15 or 1.0). K = `li_ext2.x` from `TD5RE_RT_LIGHT_RAYS` (default 2).
+- **Smooth projector cone**: the hard `saturate((cd-coneCos)/(1-coneCos))²` edge → a
+  `smoothstep(outer, inner, cd)` feathered rim with a full-bright core, where
+  `inner = outer + (1-outer)*soft`, `soft = li_ext.w` from `TD5RE_RT_LIGHT_CONE_SOFT`
+  (default 0.15). `soft=0` falls back to the exact legacy falloff.
+
+**CB plumbing (the ps_light.hlsl-safe part):** both knobs ride the **LightCB**, which
+is *shared* by the forbidden LOW `ps_light.hlsl` (b0) and the RT `rgen_light` (b2).
+Added `li_ext.w` (was a memset-0 free slot) + a **new `li_ext2` float4 APPENDED AFTER
+`li_lights[]`** — so the shared prefix through `lights[]` is byte-identical and
+ps_light.hlsl (which declares no `ext2` and reads only through `lights[]`) is
+untouched, no edit. The C `LightCB` (td5_wrapper_backend.h) + rt_common.hlsli cbuffer
+grow by one float4 (still inside the 256-byte CB bucket; `d3d12_priv_ring_cb` uploads
+`sizeof` generically). CPU (`td5_plat_render_apply_lights`) fills the two fields
+**only when `td5_rt_active()`** — so in LOW they stay 0 and `rgen_light` isn't even the
+active shader; LOW is byte-identical (goldens confirm).
+
+**2. Street lamps default ON in HIGH (`td5_light.c` `td5_light_emit_street_lamps`):**
+the emit gate `!s_street_lights` → `!(s_street_lights || td5_rt_active())`. In HIGH the
+city lamp pools now register (they get real RT occlusion — a car under a lamp casts a
+lamp shadow); LOW keeps `s_street_lights` (default OFF) so **no lamps enter the LOW
+registry → byte-identical**. The existing dark-only gate (`s_env_dark`), 3-D nearest-N
+budget, and shared `TD5_LIGHT_MAX=32` cap all still apply. Log confirms the lamp
+registry activates in a HIGH run.
+
+**3. Sun (partial — honest scope):** the "sunny = crisper, overcast = flat" behavior
+is **already delivered by P1** — the shadow pass classifies the sky and feeds a tight
+~0.7° cone for SUNNY vs a wide penumbra + capped strength for OVERCAST
+(`sun_overcast_cone`/`_strength`). What's **deferred**: a warm sun *color* tint of the
+scene. The sun-shadow composite (`ps_shadow_rt`) is currently CB-less (samples only the
+`sunvis` texture); adding a sun-color uniform means a new composite CB + root-sig
+binding — real churn for a subtle polish. Deferred to P8 (a natural "warm sun" toggle
+alongside the options rows) rather than risk the composite path here. Noted as owed.
+
+**Editable-shader discipline**: touched only `rt_pipeline.hlsl` + `rt_common.hlsli`
+(RT path). Did **not** touch the forbidden `ps_shadow.hlsl` / `ps_light.hlsl` /
+`ps_ssr.hlsl`.
+
+**Gates**: build_all clean (dev+release), **no new warnings** in touched files
+(rt_pipeline recompiled DXIL lib_6_3 OK; lint extern 3/3, game_h 24/24). Full selftest:
+**all 4 golden races' hashes MATCH** (LOW byte-identical — proves the shared-LightCB tail
+append + street-lamp HIGH gate don't perturb LOW), screen+race matrix PASS,
+degrade-frame-time -0.5% (GPU healthy). Lone FAIL = documented `degrade-private-bytes
++26.6 MB` straddle (4–28 MB, pre-existing; RT-gated code allocs nothing in LOW). HIGH RT
+exercised: **no crash over a 40 s night run**, street-lamp registry active per log.
+
+**Owed (honest)**: the *visual* night A/B — headlight beams as soft-edged pools on the
+road with occlusion, and city lamp pools where a car casts a lamp shadow. The AutoRace
+framedump kept landing on the car-select carousel (documented boot-timing friction —
+caught it at 40 s again); the `--Control=1` MCP socket at a chosen night viewpoint is
+the right capture tool and is owed, same class as the P3/P4/P5/P6 owed visuals. Not
+faked. Warm sun-color tint also deferred to P8 (see item 3).
 
 ### As-built — Phase 6 (2026-08-02, branch `rt-lighting2`)
 

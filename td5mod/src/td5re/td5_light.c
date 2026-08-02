@@ -17,6 +17,7 @@
 #include "td5_race_state.h"  /* [LAYERING 2026-07-06] read-only race queries (was td5_game.h) */
 #include "td5_light.h"
 #include "td5_platform.h"
+#include "td5_rt.h"          /* [RT2 P7] td5_rt_active() — HIGH street-lamp default */
 
 #define LOG_TAG "render"   /* routes to engine.log */
 
@@ -341,7 +342,13 @@ static int   s_lamp_budget     = 10;       /* TD5RE_LAMP_COUNT      nearest-N pr
 
 void td5_light_emit_street_lamps(void)
 {
-    if (!s_enabled || !s_street_lights || s_lamp_count <= 0) return;
+    /* [RT2 P7] HIGH default-ON: with ray-traced lighting the city lamp pools get
+     * real occlusion (a car under a lamp casts a lamp shadow), so street lamps
+     * default ON in HIGH. LOW keeps s_street_lights (default OFF) untouched —
+     * no lamps enter the registry in LOW, so the LOW light system is byte-
+     * identical. (The dark-only + nearest-N budget gates below still apply.) */
+    int want_lamps = s_street_lights || td5_rt_active();
+    if (!s_enabled || !want_lamps || s_lamp_count <= 0) return;
     /* Same verdict as auto headlights: lamps light up in rain/dusk/dark zones
      * and stay off in bright daylight. */
     if (!s_env_dark) return;

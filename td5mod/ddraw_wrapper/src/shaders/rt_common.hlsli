@@ -66,8 +66,9 @@ cbuffer LightCB : register(b2)
     float4 li_upCy;
     float4 li_fwdDepthScale;
     float4 li_misc;           /* x depthBias, y count, z vpX, w vpY */
-    float4 li_ext;            /* x occlSteps, y paneW, z paneH      */
+    float4 li_ext;            /* x occlSteps, y paneW, z paneH, w coneSoft [RT2 P7] */
     float4 li_lights[RT_LIGHT_MAX * 3];  /* k*3+0 pos+range, +1 rgb+intensity, +2 dir+coneCos */
+    float4 li_ext2;           /* [RT2 P7] x = light shadow-ray samples K (soft penumbra) */
 };
 
 /* ---- b3: SSRCB (mirror of C SSRCB) ---------------------------------------- */

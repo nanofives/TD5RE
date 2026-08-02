@@ -274,13 +274,46 @@ void rgen_light()
         float3 Ld = toL / d;
         float atten = 1.0f - d / P.w; atten *= atten;
         float cone = 1.0f;
-        if (Dc.w > -0.5f) { float cd = dot(-Ld, Dc.xyz); cone = saturate((cd - Dc.w) / (1.0f - Dc.w)); cone *= cone; }
+        if (Dc.w > -0.5f) {
+            float cd = dot(-Ld, Dc.xyz);
+            float outer = Dc.w;
+            /* [RT2 P7] li_ext.w = cone softness (0 -> legacy hard-edge falloff).
+             * >0 -> smooth projector beam: full-bright core, feathered rim. */
+            float soft = li_ext.w;
+            if (soft > 1e-4f) {
+                float inner = outer + (1.0f - outer) * soft;
+                cone = smoothstep(outer, inner, cd);
+            } else {
+                cone = saturate((cd - outer) / (1.0f - outer)); cone *= cone;
+            }
+        }
         float ndotl = hasN ? saturate(dot(N, Ld)) * 0.85f + 0.15f : 1.0f;
         float w = C.w * atten * cone * ndotl;
         if (w < 0.003f) continue;
         float3 origin = world + (hasN ? N : Ld) * (8.0f + d * 0.004f);
-        float vis = rt_shadow_ray(origin, Ld, 1.0f, d - 4.0f);
-        accum += C.rgb * (w * (vis > 0.5f ? 1.0f : 0.15f));
+        /* [RT2 P7] K stratified shadow rays jittered around the light dir for a
+         * soft penumbra (K = li_ext2.x; 0/absent -> 1 = legacy single ray). K=1
+         * reproduces the old binary 1.0/0.15 step exactly (single ray -> vsum is
+         * 0 or 1 -> lerp gives 0.15 or 1.0); K>1 averages -> graduated edges. */
+        int Klr = (int)(li_ext2.x + 0.5f); if (Klr < 1) Klr = 1;
+        float vsum;
+        if (Klr <= 1) {
+            vsum = rt_shadow_ray(origin, Ld, 1.0f, d - 4.0f);
+        } else {
+            float3 up0 = abs(Ld.y) < 0.99f ? float3(0,1,0) : float3(1,0,0);
+            float3 T  = normalize(cross(up0, Ld));
+            float3 Bv = cross(Ld, T);
+            float baseA = rt_hash12(float2(fp)) * 6.2831853f;
+            const float PEN = 0.02f;   /* penumbra half-angle jitter (source-size proxy) */
+            vsum = 0.0f;
+            for (int s = 0; s < Klr; s++) {
+                float a = baseA + (6.2831853f * (float)s) / (float)Klr;
+                float3 jd = normalize(Ld + (cos(a) * T + sin(a) * Bv) * PEN);
+                vsum += rt_shadow_ray(origin, jd, 1.0f, d - 4.0f);
+            }
+            vsum /= (float)Klr;
+        }
+        accum += C.rgb * (w * lerp(0.15f, 1.0f, vsum));
     }
     g_lightcol[fp] = float4(accum, 1.0f);
 }

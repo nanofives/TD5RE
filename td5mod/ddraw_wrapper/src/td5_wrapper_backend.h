@@ -191,8 +191,12 @@ typedef struct {
     float upCy[4];           /* xyz = camera up,      w = viewport center Y  */
     float fwdDepthScale[4];  /* xyz = camera forward, w = depth scale        */
     float misc[4];           /* x = depth bias, y = count, z = vpX, w = vpY  */
-    float ext[4];            /* [P2] x = occlusion steps (0=off), y = pane W, z = pane H */
+    float ext[4];            /* [P2] x = occlusion steps (0=off), y = pane W, z = pane H, [RT2 P7] w = cone softness (RT only) */
     float lights[LIGHT_MAX_GPU * 3][4];
+    /* [RT2 P7] RT-only tail — APPENDED AFTER lights so the shared prefix stays
+     * byte-identical for ps_light.hlsl (LOW), which declares no ext2 and reads
+     * only through lights[]. x = light shadow-ray samples K (soft penumbra). */
+    float ext2[4];
 } LightCB;
 
 /* [P2] Screen-space ray-marched sun-shadow pass constant buffer (mirrors
