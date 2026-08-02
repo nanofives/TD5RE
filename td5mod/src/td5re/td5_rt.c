@@ -79,6 +79,73 @@ void td5_rt_set_quality(int high)
     s_quality_high = high ? 1 : 0;
 }
 
+/* [RT2 P8] Translate the LIGHTING OPTIONS INI tiers (g_td5.ini.rt_*) onto the
+ * TD5RE_RT_* env knobs the RT passes already read. Called once at startup AFTER
+ * the INI loads (main.c). An env var the user set explicitly is preserved (the
+ * dev A/B override wins) — we only fill a knob the env doesn't already define.
+ * Defaults are all HIGHEST, so a fresh INI yields the full-quality RT look.
+ * HIGH-only effect: LOW never reads these. */
+static void rt_setenv_if_unset(const char *key, const char *val)
+{
+    const char *cur = getenv(key);
+    if (cur && cur[0]) return;                 /* explicit env override wins */
+    _putenv_s(key, val);
+}
+
+void td5_rt_apply_lighting_options(void)
+{
+    char buf[32];
+
+    /* SHADOW QUALITY -> sun-shadow sample count (P2b denoise): 1 / 4 / 8. */
+    snprintf(buf, sizeof(buf), "%d", g_td5.ini.rt_shadow_rays);
+    rt_setenv_if_unset("TD5RE_RT_RAYS", buf);
+
+    /* REFLECTION RANGE -> RT reflection ray TMax (P6): NEAR=SSR horizon,
+     * FAR=50000, UNLIMITED=1e7. */
+    rt_setenv_if_unset("TD5RE_RT_REFL_DIST",
+        (g_td5.ini.rt_reflection_rng <= 0) ? "4000" :
+        (g_td5.ini.rt_reflection_rng == 1) ? "50000" : "10000000");
+
+    /* GLOBAL ILLUMINATION -> GI enable + ray count (P4). OFF disables the GI
+     * pass, which re-arms the analytic zone dark-mode fallback in HIGH (see the
+     * darkener gate in td5_render_mesh.c). LOW=2 rays, HIGH=4. */
+    rt_setenv_if_unset("TD5RE_RT_GI", g_td5.ini.rt_gi_quality > 0 ? "1" : "0");
+    if (g_td5.ini.rt_gi_quality > 0) {
+        snprintf(buf, sizeof(buf), "%d", g_td5.ini.rt_gi_quality >= 2 ? 4 : 2);
+        rt_setenv_if_unset("TD5RE_RT_GI_RAYS", buf);
+    }
+
+    /* LIGHTS -> P7 soft headlight penumbra + smooth projector cone. BASIC =
+     * legacy (1 ray, hard cone); REALISTIC = soft (2 rays, feathered). */
+    if (g_td5.ini.rt_light_quality > 0) {
+        rt_setenv_if_unset("TD5RE_RT_LIGHT_RAYS", "2");
+        rt_setenv_if_unset("TD5RE_RT_LIGHT_CONE_SOFT", "0.15");
+    } else {
+        rt_setenv_if_unset("TD5RE_RT_LIGHT_RAYS", "1");
+        rt_setenv_if_unset("TD5RE_RT_LIGHT_CONE_SOFT", "0");
+    }
+
+    /* SUN & SKY -> AUTO = image-probe sun + disc (P1); CLASSIC = no disc.
+     * (Full zone-sun-instead-of-image-sun override is a documented residual.) */
+    rt_setenv_if_unset("TD5RE_SUN_DISC", g_td5.ini.rt_sun_probe > 0 ? "1" : "0");
+
+    /* REFLECTIONS OFF -> disable the reflection pass entirely (mirrors the
+     * existing [Lighting]Reflections toggle). HALF/FULL both dispatch full-res
+     * today (the half-res path is the P6.3 residual). */
+    if (g_td5.ini.rt_reflection_q <= 0) g_td5.ini.reflections = 0;
+
+    /* rt_shadow_res (HALF/FULL) is a documented residual — the half-res dispatch
+     * (P6.3) isn't wired yet; FULL is always used. The INI key persists so the
+     * row goes live for free once the mechanism lands. */
+
+    rt_diag("P8 lighting options applied: rays=%d refl_rng=%d gi=%d light_q=%d "
+            "sun_probe=%d refl_q=%d shadow_res=%d",
+            g_td5.ini.rt_shadow_rays, g_td5.ini.rt_reflection_rng,
+            g_td5.ini.rt_gi_quality, g_td5.ini.rt_light_quality,
+            g_td5.ini.rt_sun_probe, g_td5.ini.rt_reflection_q,
+            g_td5.ini.rt_shadow_res);
+}
+
 int td5_rt_active(void)
 {
     if (!td5_rt_available()) return 0;    /* no DXR device -> auto-fallback to LOW */

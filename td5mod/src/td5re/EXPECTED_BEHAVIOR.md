@@ -190,3 +190,23 @@ the port rule, and the acceptance criteria.
   tool for isolating one AI or building minimal repros. Release builds force `-1`.
 - **Full reference + the two-slot-state-table gotcha**: see
   `QUICKRACE_PLAYER_SETUP.md` (same dir).
+
+## RT lighting (LOW vs HIGH) + LIGHTING OPTIONS screen [RT2 P8]
+
+- **`[Lighting] Quality` = LOW (0)** keeps the classic screen-space stack
+  (byte-identical to pre-RT). **HIGH (1, default when a DXR device is present)**
+  runs the ray-traced shadow / GI / reflection / light passes. On a non-DXR
+  machine HIGH auto-falls-back to LOW (`td5_rt_active()` gate) — no INI rewrite.
+- **LIGHTING OPTIONS** (GRAPHICS OPTIONS → "LIGHTING OPTIONS →", screen 51):
+  per-feature tiers, all defaulting to the **highest** — SHADOW QUALITY
+  (1/4/8 rays), SHADOW DETAIL (HALF/FULL), REFLECTIONS (OFF/HALF/FULL),
+  REFLECTION RANGE (NEAR/FAR/UNLIMITED), GLOBAL ILLUMINATION (OFF/LOW/HIGH),
+  SUN & SKY (CLASSIC/AUTO), LIGHTS (BASIC/REALISTIC). Rows 1–7 are HIGH-only and
+  appear greyed/inert at LOW; row 0 (LIGHTING QUALITY) is always live when DXR
+  exists. All persist to `[Lighting]` and map onto the `TD5RE_RT_*` env knobs
+  (an explicitly-set env still wins, for A/B). Most tier changes take effect on
+  the next race (the RT passes cache their env read); LIGHTING QUALITY applies
+  live. Residuals (see docs/plans/RT_LIGHTING2_PLAN.md P8 as-built): the
+  half-res dispatch (SHADOW DETAIL HALF / REFLECTIONS HALF) currently renders
+  FULL, and SUN & SKY CLASSIC only drops the sun disc (full zone-sun override
+  pending).

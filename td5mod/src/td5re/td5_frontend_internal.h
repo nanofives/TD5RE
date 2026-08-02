@@ -899,6 +899,9 @@ float fe_fit_text_scale(const char *text, float avail_w, float sx, float sy);
  * overlay (drawn from the pre-button per-screen dispatch in td5_frontend.c). */
 void Screen_LanguageOptions(void);
 void frontend_render_language_options_overlay(float sx, float sy);
+/* [RT2 P8] LIGHTING OPTIONS sub-screen (td5_fe_menu.c) + its per-row value overlay. */
+void Screen_LightingOptions(void);
+void frontend_render_lighting_options_overlay(float sx, float sy);
 void Screen_LocalizationInit(void);
 void Screen_MainMenu(void);
 void Screen_MusicTestExtras(void);

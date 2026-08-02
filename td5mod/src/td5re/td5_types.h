@@ -463,7 +463,8 @@ typedef enum TD5_ScreenIndex {
     TD5_SCREEN_MP_PROFILE_SELECT  = 48,  /* Screen_CarSelection, MP phase 0 (name/colour setup) */
     TD5_SCREEN_MP_CAR_GRID        = 49,  /* Screen_CarSelection, MP phase 1 (simultaneous grid) */
     TD5_SCREEN_MP_CUP_INTERMISSION = 50, /* Screen_MpPostRace, cup-between "what next" layout */
-    TD5_SCREEN_COUNT               = 51
+    TD5_SCREEN_LIGHTING_OPTIONS   = 51,  /* [RT2 P8] Screen_LightingOptions (td5_fe_menu.c) */
+    TD5_SCREEN_COUNT               = 52
 } TD5_ScreenIndex;
 
 /* ========================================================================

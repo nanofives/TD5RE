@@ -24,10 +24,79 @@ stops there.
 | 5 | Material shininess detection (texture-analysis classifier, per-page table) | ✅ done (water→WATER-class RT feed; per-page continuous refl is CSV-only — see as-built) |
 | 6 | Reflection & shadow range/angle fix + precision knobs | ✅ done (range caps lifted in HIGH; half-res lever reserved for P8; view-indep A/B owed — see as-built) |
 | 7 | HIGH light pipeline: headlights, street lights, sun as realistic RT lights | ✅ done (soft headlights + street-lamps-on in HIGH; sun warm-tint deferred; night A/B owed — see as-built) |
-| 8 | LIGHTING OPTIONS screen: per-feature rows, INI, defaults, release gates | ⬜ not started |
+| 8 | LIGHTING OPTIONS screen: per-feature rows, INI, defaults, release gates | ✅ done (8-row screen + INI dual-persist, defaults=highest; half-res/warm-sun residuals — see as-built) |
 
 Append an **as-built note** under this table after each phase (deviations, measurements,
 gotchas found) — exactly like RT_LIGHTING_PLAN.md does.
+
+### As-built — Phase 8 (2026-08-02, branch `rt-lighting2`) — FINAL
+
+**Delivered**: a new **LIGHTING OPTIONS** frontend sub-screen (screen 51) exposing every
+RT feature as an independently-tunable, INI-persisted tier — all defaulting to the
+highest (user decision #6) — plus the INI schema unification. **Visually verified**
+(`--StartScreen=51` framedump `log/rt2p8_lighting_options.png`, also shared): 8 ◄►
+rows render with values LIGHTING QUALITY=HIGH, SHADOW QUALITY=HIGH, SHADOW DETAIL=FULL,
+REFLECTIONS=FULL, REFLECTION RANGE=UNLIMITED, GLOBAL ILLUM.=HIGH, SUN & SKY=AUTO,
+LIGHTS=REALISTIC, + OK, badge "51 LIGHTING". This is the loop's closure.
+
+**8.1 The screen** (`td5_fe_menu.c` `Screen_LightingOptions` + helpers). Reached from
+GRAPHICS OPTIONS (screen 16) row 6, which changed from the old LIGHTING QUALITY toggle
+to a **"LIGHTING OPTIONS ->" nav row** (QUALITY moved inside as row 0). Adding the
+screen touched the full 12-site new-screen pattern the LANGUAGE_OPTIONS (46) precedent
+uses — mapped up front by a read-only worker survey: enum + `TD5_SCREEN_COUNT` 51→52
+(`td5_types.h`), 2 prototypes (`td5_frontend_internal.h`), `s_screens[51]` row, title
+case, parent-of (BACK → GRAPHICS OPTIONS), is-options-screen, 2 button-anim switches,
+value-overlay dispatch, arrow dispatch (all 8 rows), and the handler. **Gotcha found +
+fixed**: the GRAPHICS OPTIONS slide-out terminal *hardcoded* `set_screen(OPTIONS_HUB)`
+— it ignored `s_return_screen`, so the new nav row would have been swallowed; switched
+it to honor `s_return_screen` (OK-path now sets HUB explicitly; `init_return_screen`
+defaults it, so BACK is safe). Row 0 is live whenever a DXR device exists; rows 1–7 are
+HIGH-only and render greyed (`0xFF6A6A6A`)/inert at LOW (a blip on L/R).
+
+**8.2 INI schema** (`main.c` + `td5re.h` + `td5_rt.c`). 7 new `[Lighting]` int fields
+(`ShadowRays` 8, `ShadowRes` 1, `ReflectionQuality` 2, `ReflectionRange` 2, `GIQuality`
+2, `SunProbe` 1, `LightQuality` 1 — all highest) added to **both** `k_lighting_cfg[]`
+(INI load + CLI `--Key=N` + `--Help`) **and** `td5_ini_persist_options()`
+(write-back) — grep-verified 2×each so the documented Quality round-trip persist bug
+can't recur. `td5_rt_apply_lighting_options()` (called once at startup after INI+CLI
+settle) maps each tier onto the `TD5RE_RT_*` env knob the RT passes already read, only
+filling a knob the env doesn't already define (explicit env wins, for A/B). Mappings:
+SHADOW QUALITY→`TD5RE_RT_RAYS` 1/4/8; REFLECTION RANGE→`TD5RE_RT_REFL_DIST`
+4000/50000/1e7; GI→`TD5RE_RT_GI`(+`_GI_RAYS` 2/4); LIGHTS→`TD5RE_RT_LIGHT_RAYS`+
+`_CONE_SOFT`; SUN&SKY→`TD5RE_SUN_DISC`; REFLECTIONS OFF→disables the reflection pass.
+
+**8.3 Release & closure**: RELEASE build compiles the screen + knobs (`build_all`
+builds `td5re_release.exe` clean). Docs updated: `FRONTEND_SCREEN_GUIDE.md` (screen 51
+entry) + `EXPECTED_BEHAVIOR.md` (LOW-vs-HIGH + the options + residuals). No new module
+(functions added to existing files) → no module-table regen.
+
+**Residuals (honest, documented — INI keys exist + default highest so default behavior
+is fully correct; only non-default tiers are partial):**
+- **Half-res dispatch** (SHADOW DETAIL HALF / REFLECTIONS HALF): the `dxr_lighting_pass`
+  dispatch is full-res only; HALF currently renders FULL. This is the P6.3 mechanism,
+  deferred here too because it touches the shared dispatch used by every RT mask. The
+  INI key + row are live for free once the mechanism lands.
+- **SUN & SKY CLASSIC**: drops the sun disc; the full "zone sun instead of image sun"
+  override (P7.3 warm-sun-tint sibling) still wants a `ps_shadow_rt` composite CB.
+- **Live-apply**: env-cached RT knobs take effect on the **next race** (LIGHTING QUALITY
+  applies live via `td5_rt_set_quality`). A full round-trip (set→OK→relaunch→verify) is
+  the persistence guarantee; mid-race live re-read of the tier knobs is a follow-up.
+
+**Gates**: build_all clean dev+release, **no new warnings** (lint extern 3/3, game_h
+24/24 — the new screen added no new `extern`/`td5_game.h` includers). Full selftest:
+**screen-walk 1–24 PASS** (GRAPHICS OPTIONS with the new nav row loads fine),
+race matrix PASS, **all 4 golden races' hashes MATCH** (LOW byte-identical — the whole
+schema is HIGH-gated/env-fill), degrade-frame-time -0.2% (GPU healthy). Lone FAIL =
+documented `degrade-private-bytes +24.9 MB` straddle. New screen renders correct
+(framedump above).
+
+**Consolidated owed visual A/Bs across the branch** (none block completion — capture
+opportunistically via the `--Control=1` socket at the right viewpoint): P3 flat-billboard
+shadow receive, P4 GI under bridges, P5 water-reflection, P6 off-screen-caster
+view-independence, P7 night headlight/lamp pools, P7.3 warm sun tint. The RT correctness
+of each is code-verified + no-crash-exercised; only the *photographic* A/B is owed (the
+AutoRace framedump lands on the car-select carousel; menu screens like P8's capture
+cleanly, which is why P8's is done).
 
 ### As-built — Phase 7 (2026-08-02, branch `rt-lighting2`)
 
