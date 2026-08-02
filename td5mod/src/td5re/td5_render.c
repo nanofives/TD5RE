@@ -1909,12 +1909,22 @@ void td5_render_begin_scene(void)
     s_debug_scene_draw_calls = 0;
     s_debug_span_meshes_submitted = 0;
 
-    TD5_LOG_D(LOG_TAG,
-              "begin scene: frame=%u reset tris=%d binds=%d draws=%d",
-              (unsigned int)g_tick_counter,
-              s_debug_flush_submitted_tris,
-              s_debug_texture_bind_calls,
-              s_debug_scene_draw_calls);
+    /* [perf/log-hygiene] Per-frame — silent unless TD5RE_TRACE_RENDER=1 (see
+     * render_trace_on in td5_render_mesh.c; this was per-frame [DBG] spam). */
+    {
+        static int s_trace_render = -1;
+        if (s_trace_render < 0) {
+            const char *e = getenv("TD5RE_TRACE_RENDER");
+            s_trace_render = (e && e[0] && e[0] != '0') ? 1 : 0;
+        }
+        if (s_trace_render)
+            TD5_LOG_D(LOG_TAG,
+                      "begin scene: frame=%u reset tris=%d binds=%d draws=%d",
+                      (unsigned int)g_tick_counter,
+                      s_debug_flush_submitted_tris,
+                      s_debug_texture_bind_calls,
+                      s_debug_scene_draw_calls);
+    }
 }
 
 /* [ARCH-DIVERGENCE: D3D3 EndScene -> D3D11 platform-abstracted end-frame; L5 sweep 2026-05-21]

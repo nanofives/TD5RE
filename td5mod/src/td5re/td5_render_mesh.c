@@ -51,6 +51,18 @@
 #endif
 #include <string.h>
 
+/* [perf/log-hygiene] Per-frame render tracing (span display lists, per-vehicle
+ * submit, projection, bucket flush) is OFF unless TD5RE_TRACE_RENDER=1. These
+ * fire dozens-to-hundreds of times per frame; with [Logging] Enabled=1 the
+ * unconditional lines flooded engine.log to ~1 GB and the synchronous per-frame
+ * disk I/O stalled the frame loop (measured 287 MB / 50 s in-race). Cached. */
+static int render_trace_on(void)
+{
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("TD5RE_TRACE_RENDER"); v = (e && e[0] && e[0] != '0') ? 1 : 0; }
+    return v;
+}
+
 /* ======== [split] scene/mesh region (moved verbatim from td5_render.c) ======== */
 /* ====================== DYNAMIC POINT LIGHTS (port extension) =============
  * The original engine lit vertices with only 3 DIRECTIONAL contributions + a
@@ -1245,9 +1257,10 @@ void td5_render_span_display_list(const TD5_SpanDisplayList *display_list_block)
     if (count <= 0 || count > 256) return; /* sanity */
     if (!block->meshes) return;
 
-    TD5_LOG_D(LOG_TAG,
-              "span display list: block=%p mesh_range=[0,%d)",
-              display_list_block, count);
+    if (render_trace_on())
+        TD5_LOG_D(LOG_TAG,
+                  "span display list: block=%p mesh_range=[0,%d)",
+                  display_list_block, count);
 
     /* [reverse banners] enable START<->FINISH + numbered banner-page swap for
      * this level-geometry pass only (cleared after the loop so vehicles/props
@@ -3200,11 +3213,12 @@ void td5_render_actors_for_view(int view_index)
 
             actor_render_count++;
 
-            TD5_LOG_D(LOG_TAG,
-                      "vehicle render: view=%d slot=%d pos=(%.2f, %.2f, %.2f) mesh=%p",
-                      view_index, slot,
-                      render_pos.x, render_pos.y, render_pos.z,
-                      (void *)mesh);
+            if (render_trace_on())
+                TD5_LOG_D(LOG_TAG,
+                          "vehicle render: view=%d slot=%d pos=(%.2f, %.2f, %.2f) mesh=%p",
+                          view_index, slot,
+                          render_pos.x, render_pos.y, render_pos.z,
+                          (void *)mesh);
         }
 
         /* Per-view tire-track emitter dispatch (UpdateTireTrackEmitters
@@ -3367,9 +3381,10 @@ void td5_render_configure_projection(int width, int height)
     {
         float half_fov_rad = atanf(((float)width * 0.5f) / s_focal_length);
         float fov_deg = half_fov_rad * (360.0f / 3.14159265358979323846f);
-        TD5_LOG_I(LOG_TAG,
-                  "projection configured: %dx%d focal=%.1f near=%.1f far=%.1f far_cull=%.1f fov=%.2f",
-                  width, height, s_focal_length, s_near_clip, s_far_clip, s_far_cull, fov_deg);
+        if (render_trace_on())
+            TD5_LOG_I(LOG_TAG,
+                      "projection configured: %dx%d focal=%.1f near=%.1f far=%.1f far_cull=%.1f fov=%.2f",
+                      width, height, s_focal_length, s_near_clip, s_far_clip, s_far_cull, fov_deg);
     }
 
     /* Dump accumulated cull stats every 5 frames. Stats reflect the
@@ -3631,9 +3646,10 @@ void td5_render_flush_projected_buckets(void)
     /* Flush any remaining vertices */
     flush_immediate_internal();
 
-    TD5_LOG_D(LOG_TAG,
-              "projected buckets flushed: entries=%d",
-              flushed_entries);
+    if (render_trace_on())
+        TD5_LOG_D(LOG_TAG,
+                  "projected buckets flushed: entries=%d",
+                  flushed_entries);
 
     /* Reset depth buckets for next frame */
     for (int i = 0; i < DEPTH_BUCKET_COUNT; i++) {
