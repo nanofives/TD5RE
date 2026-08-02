@@ -3738,7 +3738,18 @@ void td5_render_apply_page_blend_preset(int page_id)
     if (s_actor_draw_alpha < 255 && p != TD5_PRESET_ADDITIVE)
         p = TD5_PRESET_VEHICLE_FADE;
     td5_plat_render_set_preset(p);
-    TD5_LOG_D(LOG_TAG, "page_blend_preset: page=%d type=%d preset=%d", page_id, t, (int)p);
+    /* [perf/log-hygiene] Called once per drawn page every frame — silent unless
+     * TD5RE_TRACE_BLEND=1 (was an unconditional [DBG] emitting ~20+ lines/frame,
+     * a major contributor to the 1 GB log + per-frame disk-I/O frame stall). */
+    {
+        static int s_trace_blend = -1;
+        if (s_trace_blend < 0) {
+            const char *e = getenv("TD5RE_TRACE_BLEND");
+            s_trace_blend = (e && e[0] && e[0] != '0') ? 1 : 0;
+        }
+        if (s_trace_blend)
+            TD5_LOG_D(LOG_TAG, "page_blend_preset: page=%d type=%d preset=%d", page_id, t, (int)p);
+    }
 }
 
 int td5_render_bind_texture_page(int page_id)
