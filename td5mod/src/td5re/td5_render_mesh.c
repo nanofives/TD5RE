@@ -342,6 +342,43 @@ void td5_render_apply_shadow_pass(int vp_x, int vp_y)
                                  cone_scale);
 }
 
+/* [RT2 P4] Sky-visibility GI: ray-traced ambient occlusion toward the sky makes
+ * outdoor areas bright and covered areas (under bridges/tunnels/canyons) dark —
+ * from actual geometry. HIGH-only (td5_rt_active). Multiplicative composite runs
+ * immediately after the sun-shadow composite. Knobs TD5RE_RT_GI_RAYS(4)/_DIST
+ * (6000)/_FLOOR(0.45); TD5RE_RT_GI=0 disables. */
+void td5_render_apply_gi_pass(int vp_x, int vp_y)
+{
+    static int   s_gi_on = -1, s_gi_rays = -1;
+    static float s_gi_dist = -1.0f, s_gi_floor = -1.0f;
+    float basis9[9], cam[3], depth_scale;
+    int i;
+    if (!td5_rt_active()) return;                 /* HIGH-only; no LOW fallback */
+    if (s_gi_on < 0) {
+        const char *e;
+        s_gi_on    = ((e = getenv("TD5RE_RT_GI"))       && e[0]) ? atoi(e)        : 1;
+        s_gi_rays  = ((e = getenv("TD5RE_RT_GI_RAYS"))  && e[0]) ? atoi(e)        : 4;
+        s_gi_dist  = ((e = getenv("TD5RE_RT_GI_DIST"))  && e[0]) ? (float)atof(e) : 6000.0f;
+        s_gi_floor = ((e = getenv("TD5RE_RT_GI_FLOOR")) && e[0]) ? (float)atof(e) : 0.45f;
+        if (s_gi_rays < 1)  s_gi_rays = 1;
+        if (s_gi_rays > 16) s_gi_rays = 16;
+        if (s_gi_floor < 0.0f) s_gi_floor = 0.0f;
+        if (s_gi_floor > 1.0f) s_gi_floor = 1.0f;
+        TD5_LOG_I(LOG_TAG, "light2: GI pass rays=%d dist=%.0f floor=%.2f on=%d",
+                  s_gi_rays, (double)s_gi_dist, (double)s_gi_floor, s_gi_on);
+    }
+    if (!s_gi_on) return;
+    for (i = 0; i < 9; i++) basis9[i] = s_camera_basis[i];
+    cam[0] = s_camera_pos[0]; cam[1] = s_camera_pos[1]; cam[2] = s_camera_pos[2];
+    depth_scale = 1.0f / DEPTH_NORMALIZE_INV;
+    td5_plat_render_apply_gi(cam, basis9,
+                             s_focal_length, s_center_x, s_center_y,
+                             (float)vp_x, (float)vp_y,
+                             depth_scale, NEAR_DEPTH_OFFSET,
+                             (float)s_viewport_width, (float)s_viewport_height,
+                             s_gi_rays, s_gi_dist, s_gi_floor);
+}
+
 /* [LIGHT2 P3] Screen-space reflections for the CURRENT viewport. Reflective
  * materials (car paint, glass — per-id reflectivity from td5_material) mirror
  * the already lit + shadowed scene; up-facing road pixels gain reflectivity
@@ -680,7 +717,13 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
     light_read_dark_knobs();
     LightModelPt lm[TD5_LIGHT_MAX];
     int nlights = light_build_model_list(mesh, lm, TD5_LIGHT_MAX);
-    int dark = s_light_dark_mode;
+    /* [RT2 P4] In HIGH the sky-visibility GI mask darkens ACTORS under bridges/
+     * tunnels from actual geometry (per-pixel, soft edges), so retire the analytic
+     * zone dark-mode dimming for cars (slot>=0) — this is the Australia-bridge fix.
+     * The synthetic 3-dir diffuse + paint tint + damage scuff all stay; only the
+     * dark-mode dim is skipped. Track/scenery (slot<0) keeps its behaviour. LOW is
+     * unchanged (td5_rt_active() is false). */
+    int dark = s_light_dark_mode && !(slot >= 0 && td5_rt_active());
     int floor_lum = dark ? s_dark_floor : TD5_LIGHTING_MIN;
 
     /* [LIGHT2 P0] Mode>=1 extras: (a) pack each vertex's WORLD normal into the

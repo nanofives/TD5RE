@@ -769,6 +769,14 @@ void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
                                   float start_off, float pane_w, float pane_h,
                                   float cone_scale);
 
+/* [RT2 P4] Sky-visibility GI pass for the CURRENT viewport (HIGH-only). */
+void td5_plat_render_apply_gi(const float cam_pos[3], const float basis9[9],
+                              float focal, float center_x, float center_y,
+                              float vp_x, float vp_y,
+                              float depth_scale, float depth_bias,
+                              float pane_w, float pane_h,
+                              int rays, float dist, float floorv);
+
 /* [LIGHTING REWORK P3] Screen-space reflections over the CURRENT viewport:
  * reflective materials (per-id reflectivity in refl8[0..7], + wet_boost on
  * up-facing DEFAULT-material pixels) mirror the already lit + shadowed scene

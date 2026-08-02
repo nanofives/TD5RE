@@ -2426,6 +2426,14 @@ void Backend_ApplyShadowPass(const ShadowCB *cb)
     d3d12_fullscreen_pass(g_ps_shadow_50, sizeof(g_ps_shadow_50), BLEND_MULT,
                           cb, sizeof(ShadowCB), srvs, 1);
 }
+
+/* [P4] Sky-visibility GI: HIGH-only (no LOW screen-space fallback). The game
+ * packs AO params into a ShadowCB (reusing its camera-reconstruction layout). */
+void Backend_ApplyGIPass(const ShadowCB *cb)
+{
+    if (!cb || !s_rt_mode) return;
+    d3d12_dxr_gi_pass(cb);
+}
 void Backend_ApplyStateCache(void) { }
 /* b1 (SDF/FX) is the only game-bound CB slot; b0 VS/PS are backend-owned
  * (viewport/fog) and bound directly by the draw path. */

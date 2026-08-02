@@ -3963,6 +3963,35 @@ void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
     Backend_ApplyShadowPass(&cb);
 }
 
+/* [P4] Sky-visibility GI pass. Reuses the ShadowCB layout (camera reconstruction
+ * + pane rect); packs the AO params into spare slots read by rgen_ao: K =
+ * params2.z, TMax = sun.w, floor = misc.w. HIGH-only (Backend_ApplyGIPass no-ops
+ * in LOW); the depth/G-buffer are the same the shadow pass consumes. */
+void td5_plat_render_apply_gi(const float cam_pos[3], const float basis9[9],
+                              float focal, float center_x, float center_y,
+                              float vp_x, float vp_y,
+                              float depth_scale, float depth_bias,
+                              float pane_w, float pane_h,
+                              int rays, float dist, float floorv)
+{
+    ShadowCB cb;
+    if (g_backend.device_removed) return;
+    if (td5_rcmd_recording()) return;
+    memset(&cb, 0, sizeof(cb));
+    cb.camPosFocal[0] = cam_pos[0]; cb.camPosFocal[1] = cam_pos[1]; cb.camPosFocal[2] = cam_pos[2];
+    cb.camPosFocal[3] = focal;
+    cb.rightCx[0] = basis9[0]; cb.rightCx[1] = basis9[1]; cb.rightCx[2] = basis9[2]; cb.rightCx[3] = center_x;
+    cb.upCy[0]    = basis9[3]; cb.upCy[1]    = basis9[4]; cb.upCy[2]    = basis9[5]; cb.upCy[3]    = center_y;
+    cb.fwdDepthScale[0] = basis9[6]; cb.fwdDepthScale[1] = basis9[7]; cb.fwdDepthScale[2] = basis9[8];
+    cb.fwdDepthScale[3] = depth_scale;
+    cb.misc[0] = depth_bias; cb.misc[1] = vp_x; cb.misc[2] = vp_y; cb.misc[3] = floorv;  /* misc.w = floor */
+    cb.sun[3]  = dist;                                                                    /* sun.w  = TMax  */
+    cb.params[3]  = pane_w;                                                               /* pane rect      */
+    cb.params2[0] = pane_h;
+    cb.params2[2] = (float)(rays < 1 ? 1 : (rays > 16 ? 16 : rays));                      /* params2.z = K  */
+    Backend_ApplyGIPass(&cb);
+}
+
 void td5_plat_render_apply_ssr(const float cam_pos[3], const float basis9[9],
                                float focal, float center_x, float center_y,
                                float vp_x, float vp_y,

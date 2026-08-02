@@ -7368,6 +7368,12 @@ static void frame_render(void)
         if (!td5_render_photobooth_active())
             td5_render_apply_shadow_pass(s_viewports[vp].x, s_viewports[vp].y);
 
+        /* [RT2 P4] Sky-visibility GI: multiplicative, right after the sun-shadow
+         * composite and BEFORE the additive lights (so headlight pools aren't
+         * GI-darkened). HIGH-only. */
+        if (!td5_render_photobooth_active())
+            td5_render_apply_gi_pass(s_viewports[vp].x, s_viewports[vp].y);
+
         /* [DEFERRED LIGHTS] Screen-space dynamic-light pass: now that the opaque
          * world (track + actors + props) has filled the depth buffer for this
          * pane, add the headlight/light contribution per pixel before the

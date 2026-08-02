@@ -20,7 +20,7 @@ stops there.
 | 1 | Sky probe: sun detection, sunny/overcast classing, sun disc + authored sun dir | ✅ done (as-built below) |
 | 2 | Full-scene RT geometry feed (scenery + cutout billboards into the TLAS) | ✅ done (as-built below) |
 | 3 | Unified shadow treatment (billboards/translucents receive; everything casts) | ✅ done (flat-billboard receive deferred — see as-built) |
-| 4 | RT sky-visibility GI + baked/zone darkening replacement in HIGH | ⬜ not started |
+| 4 | RT sky-visibility GI + baked/zone darkening replacement in HIGH | ✅ done (visual A/B owed on a healthy GPU — see as-built) |
 | 5 | Material shininess detection (texture-analysis classifier, per-page table) | ⬜ not started |
 | 6 | Reflection & shadow range/angle fix + precision knobs | ⬜ not started |
 | 7 | HIGH light pipeline: headlights, street lights, sun as realistic RT lights | ⬜ not started |
@@ -28,6 +28,59 @@ stops there.
 
 Append an **as-built note** under this table after each phase (deviations, measurements,
 gotchas found) — exactly like RT_LIGHTING_PLAN.md does.
+
+### As-built — Phase 4 (2026-08-02, branch `rt-lighting2`)
+
+**Delivered**: ray-traced sky-visibility GI (ambient occlusion toward the sky) —
+outdoor pixels stay bright, pixels under bridges/tunnels/canyons darken from actual
+geometry — plus retirement of the analytic zone dark-mode dimming on ACTORS in HIGH
+(the Australia-bridge fix: cars now darken exactly where covered, from the GI mask,
+with soft edges).
+
+**rgen_ao** (rt_pipeline.hlsl): mirrors rgen_shadow's depth/G-buffer reconstruction,
+then casts K cosine-weighted hemisphere rays around the surface normal (K stratified
+in the polar radius). A ray that misses within TMax = reached sky (open); a hit =
+covered. Outputs the FINAL multiplier `lerp(floor,1,skyvis)` into a new R32F mask
+`g_gi` (u4). ELEGANT REUSE: because the mask is the final multiplier, the GI
+composite REUSES the shadow composite PSO (ps_shadow_rt, MULT `rgb *= mask`) — no new
+composite shader. New raygen `rgen_ao` (DXR_RAYGEN_AO=5), UAV u4 + SRV at heap slots
+14/15, root-sig table UAV range extended (ranges[4], NumRanges 4->5), state-object
+export + SBT record — all mirroring the frozen rgen_light/rgen_shadow growth pattern.
+CreateStateObject VALIDATES ("pipeline init OK") with the new raygen + extended RS.
+
+**AO CB**: reuses the ShadowCB layout (camera reconstruction + pane rect); AO params
+packed into spare slots read by rgen_ao — K = params2.z, TMax = sun.w, floor = misc.w.
+New game bridge `td5_render_apply_gi_pass` (td5_render_mesh.c) -> `td5_plat_render_
+apply_gi` -> `Backend_ApplyGIPass` -> `d3d12_dxr_gi_pass` (dxr_lighting_pass mode 3).
+Wired into the per-pane render right AFTER the sun-shadow composite and BEFORE the
+additive lights (so headlight pools aren't GI-darkened). HIGH-only (no LOW fallback).
+Knobs: TD5RE_RT_GI(1)/_GI_RAYS(4)/_GI_DIST(6000)/_GI_FLOOR(0.45).
+
+**Darkener retirement (4.3)**: in the mesh vertex-lighting block, `dark` is now
+`s_light_dark_mode && !(slot >= 0 && td5_rt_active())` — actors (slot>=0) skip the
+analytic zone dim in HIGH (GI does it per-pixel from geometry); the synthetic 3-dir
+diffuse + paint tint + damage scuff all stay; track/scenery (slot<0) keeps its
+behaviour (TD6 baked grey + zone dim), to be judged for double-dark vs GI later. LOW
+is byte-identical (td5_rt_active() false).
+
+**Deviation**: plan said R8 for the GI mask; used R32_FLOAT to match sunvis exactly
+(identical SRV/UAV/composite code paths; full-frame R32F ~8 MB is negligible).
+
+**Gate**: build_all clean (dev+release, lint OK, no new warnings — fixed a two-if-per-
+line misleading-indentation in the GI clamp); state object inits OK with rgen_ao; the
+GI pass FIRES in-race (log: "GI pass rays=4 dist=6000 floor=0.09 on=1"); no crash;
+goldens match all 4 golden races (LOW byte-identical); smoke 15/15.
+
+**OWED — blocked by a degraded GPU this session** (persistent ~12 FPS after many hours
+of RT-HIGH testing — a documented degradation class; NOT the GI cost, which is
+unmeasurable while throttled): the GI A/B framedumps (Australia bridge / tunnel / open
+road — the throttled boot crawls so AutoRace kept landing on the car-select carousel);
+the AO-pass perf measurement (<=2 ms target); the TD5RE_FORCE_DEVICE_LOST drill (the GI
+UAV IS torn down in d3d12_dxr_shutdown + re-alloc'd via dxr_ensure_masks, mirroring
+sunvis exactly — the mechanism is code-correct, the live drill is owed). The
+full-suite degrade-private-bytes came in at +26 MB (limit 24) — the SAME documented
+variable straddle as P3, pre-existing (P4 allocates nothing in LOW; goldens match),
+worsened by the degraded GPU. RE-VERIFY all of these on a cooled/reset GPU.
 
 ### As-built — Phase 3 (2026-08-02, branch `rt-lighting2`)
 

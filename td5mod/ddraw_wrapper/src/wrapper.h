@@ -265,6 +265,7 @@ void Backend_ApplyLightPass(const LightCB *cb);
  * world, BEFORE Backend_ApplyLightPass (so additive lights are not darkened).
  * No-op if depth_srv/ps_shadow are NULL. */
 void Backend_ApplyShadowPass(const ShadowCB *cb);
+void Backend_ApplyGIPass(const ShadowCB *cb);   /* [P4] sky-visibility GI (HIGH-only) */
 
 /* [P3] Screen-space reflections: fullscreen ALPHA-BLENDED draw over the
  * CURRENT viewport that reflects the (already lit + shadowed) scene on

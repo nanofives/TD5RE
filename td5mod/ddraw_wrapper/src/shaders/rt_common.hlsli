@@ -13,6 +13,7 @@ RWTexture2D<float4>             g_output   : register(u0);  /* debug/smoke gradi
 RWTexture2D<float>              g_sunvis   : register(u1);  /* P2b sun shade (1=lit)  */
 RWTexture2D<float4>             g_lightcol : register(u2);  /* P2b additive light rgb */
 RWTexture2D<float4>             g_reflcol  : register(u3);  /* P3 reflection rgb + weight.a */
+RWTexture2D<float>              g_gi       : register(u4);  /* P4 sky-visibility (final multiplier) */
 RaytracingAccelerationStructure g_tlas     : register(t0);
 Texture2D<float>                g_depth    : register(t1);  /* scene depth (R32F)     */
 Texture2D<float4>               g_gbuf     : register(t2);  /* normal(rgb*2-1)+matid/255.a */

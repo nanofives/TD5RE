@@ -108,6 +108,7 @@ void td5_render_apply_light_pass(int vp_x, int vp_y);
  * Call once per viewport after the opaque world, BEFORE
  * td5_render_apply_light_pass (additive light pools must not be darkened). */
 void td5_render_apply_shadow_pass(int vp_x, int vp_y);
+void td5_render_apply_gi_pass(int vp_x, int vp_y);   /* [RT2 P4] sky-visibility GI */
 
 /* [LIGHT2 P3] Screen-space reflections for the current viewport. Call once
  * per viewport AFTER td5_render_apply_light_pass (reflections mirror the lit

@@ -200,6 +200,50 @@ void rgen_shadow()
     g_sunvis[fp] = 1.0f - sh_misc.w * (1.0f - vis);
 }
 
+/* ----- [P4] Sky-visibility GI (b1 ShadowCB layout, camera reconstruct) ------ *
+ * Per pixel: reconstruct world+normal from depth/G-buffer (same as rgen_shadow),
+ * cast K cosine-weighted hemisphere rays around the surface normal. A ray that
+ * REACHES the sky (misses within TMax) = open; one that hits geometry = covered.
+ * Outputs the FINAL multiplier lerp(floor,1,skyvis) into g_gi (R32F) so the MULT
+ * composite (ps_shadow_rt) just multiplies -- outdoor pixels stay bright, pixels
+ * under a bridge/tunnel darken toward the floor, from real geometry. Medium TMax
+ * (a bridge deck occludes; a far mountain shouldn't). AO CB packs: K = params2.z,
+ * TMax = sun.w, floor = misc.w. */
+[shader("raygeneration")]
+void rgen_ao()
+{
+    uint2 lpx = DispatchRaysIndex().xy;
+    int2  fp  = int2((int)sh_misc.y, (int)sh_misc.z) + int2(lpx);
+    float D = g_depth.Load(int3(fp, 0));
+    float4 gb = g_gbuf.Load(int3(fp, 0));
+    if (D >= 0.99999f || gb.a < 0.001f) { g_gi[fp] = 1.0f; return; }   /* sky = fully open */
+
+    float3 world = rt_world_from_depth(D, float2(lpx), sh_camPosFocal, sh_rightCx, sh_upCy, sh_fwdDepthScale, sh_misc.x);
+    float3 N = rt_gbuf_normal(gb);
+    float dist = length(world - sh_camPosFocal.xyz);
+    float3 origin = world + N * (16.0f + dist * 0.004f);   /* normal-offset bias */
+
+    int   K      = max(1, (int)(sh_params2.z + 0.5f));
+    float tmax   = sh_sun.w   > 1.0f    ? sh_sun.w   : 6000.0f;
+    float floorv = sh_misc.w  > 0.0001f ? sh_misc.w  : 0.45f;
+
+    /* cosine-weighted hemisphere around N; stratified in the polar coord. */
+    float3 up0 = abs(N.y) < 0.99f ? float3(0,1,0) : float3(1,0,0);
+    float3 T = normalize(cross(up0, N));
+    float3 Bv = cross(N, T);
+    float visSum = 0.0f;
+    for (int k = 0; k < K; k++) {
+        float u1 = ((float)k + 0.5f) / (float)K;                       /* stratified radius */
+        float u2 = rt_hash12(float2(fp) + (float)(k + 1));             /* random azimuth    */
+        float r  = sqrt(u1);
+        float ang = 6.2831853f * u2;
+        float3 dir = normalize(T * (r * cos(ang)) + Bv * (r * sin(ang)) + N * sqrt(saturate(1.0f - u1)));
+        visSum += rt_shadow_ray(origin, dir, 1.0f, tmax);             /* 1 = reached sky   */
+    }
+    float skyvis = visSum / (float)K;
+    g_gi[fp] = lerp(floorv, 1.0f, skyvis);
+}
+
 /* ----- Phase 2b: RT dynamic-light occlusion (b2 LightCB) ------------------- *
  * Per pixel, accumulate each enabled light's contribution (attenuation + cone +
  * soft-wrap Lambert) gated by a shadow ray toward the light. Writes additive rgb
