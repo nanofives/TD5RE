@@ -26,7 +26,10 @@ enum {
     TD5_MAT_GLASS    = 3,   /* translucent-blend pages                       */
     TD5_MAT_GLOW     = 4,   /* additive pages (street-light halos etc.)      */
     TD5_MAT_CARBODY  = 5,   /* [P3] vehicle bodies (rotated-basis meshes)    */
-    TD5_MAT_COUNT    = 6
+    TD5_MAT_WATER    = 6,   /* [RT2-P5] opaque page whose pixels read as     */
+                            /* water / wet gloss (detected from decoded texels;*/
+                            /* reflective, HIGH-only upgrade of DEFAULT)     */
+    TD5_MAT_COUNT    = 7
 };
 
 /* Per-material lighting response. Consumed by the GPU passes from P1 on;
@@ -49,5 +52,25 @@ const TD5_MaterialParams *td5_material_params(int id);
 /* Drop the page->id cache (call when texture pages are (re)loaded so a page
  * reused by a different track/car re-classifies). */
 void td5_material_reset_cache(void);
+
+/* [RT2-P5] Shininess detection. Called once per page at upload time with the
+ * decoded texels (format matches td5_plat_render_upload_texture: 0=R5G6B5,
+ * 1=A1R5G5B5, 2=A8R8G8B8/BGRA). Computes per-page reflectivity + shine from
+ * the pixel distribution and, for opaque pages that read as water/wet gloss,
+ * arms a HIGH-only material-id upgrade (DEFAULT -> WATER) so RT reflections
+ * pick them up without touching the G-buffer format. Pure CPU; LOW rendering
+ * is unaffected because the upgrade is gated on td5_rt_active(). */
+void td5_material_classify_page(int page, const void *pixels,
+                                int width, int height, int format);
+
+/* [RT2-P5] Detected per-page reflectivity / specular sharpness (0..1). Valid
+ * after classify; 0 for unclassified or non-32-bit pages. */
+float td5_material_page_reflectivity(int page);
+float td5_material_page_shine(int page);
+
+/* [RT2-P5] Dev diagnostic: write log/material_pages.csv (one row per classified
+ * page: stats + verdict). No-op unless TD5RE_MAT_DUMP is set. THE deliverable
+ * for tuning the classifier thresholds. */
+void td5_material_dump_csv(void);
 
 #endif /* TD5_MATERIAL_H */

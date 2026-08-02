@@ -29,6 +29,7 @@
 #include "td5_platform_internal.h"
 #include "td5_config.h"  /* shared TD5RE_* env-knob helpers */
 #include "td5_rcmd.h"   /* Phase B render-transform: per-pane CPU command recording */
+#include "td5_material.h" /* [RT2-P5] per-page shininess detection at upload */
 
 /* Pull in the wrapper types and backend access */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -4101,6 +4102,12 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
     if (page_index < 0 || page_index >= MAX_TEXTURE_PAGES) return 0;
     if (!pixels || width <= 0 || height <= 0) return 0;
     if (!Backend_HasDevice()) return 0;
+
+    /* [RT2-P5] Detect per-page shininess from the decoded texels. One pass per
+     * page (cheap; strided sampling). Feeds the HIGH-only material-id upgrade
+     * for RT reflections — see td5_material.c. Pure CPU, LOW rendering
+     * unaffected. */
+    td5_material_classify_page(page_index, pixels, width, height, format);
 
     /* Determine bpp from format: 0 = R5G6B5 (16-bit), 1 = A1R5G5B5 (16-bit),
      * 2 = A8R8G8B8 (32-bit) */

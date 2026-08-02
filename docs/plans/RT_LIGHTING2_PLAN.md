@@ -21,13 +21,78 @@ stops there.
 | 2 | Full-scene RT geometry feed (scenery + cutout billboards into the TLAS) | ✅ done (as-built below) |
 | 3 | Unified shadow treatment (billboards/translucents receive; everything casts) | ✅ done (flat-billboard receive deferred — see as-built) |
 | 4 | RT sky-visibility GI + baked/zone darkening replacement in HIGH | ✅ done (visual A/B owed on a healthy GPU — see as-built) |
-| 5 | Material shininess detection (texture-analysis classifier, per-page table) | ⬜ not started |
+| 5 | Material shininess detection (texture-analysis classifier, per-page table) | ✅ done (water→WATER-class RT feed; per-page continuous refl is CSV-only — see as-built) |
 | 6 | Reflection & shadow range/angle fix + precision knobs | ⬜ not started |
 | 7 | HIGH light pipeline: headlights, street lights, sun as realistic RT lights | ⬜ not started |
 | 8 | LIGHTING OPTIONS screen: per-feature rows, INI, defaults, release gates | ⬜ not started |
 
 Append an **as-built note** under this table after each phase (deviations, measurements,
 gotchas found) — exactly like RT_LIGHTING_PLAN.md does.
+
+### As-built — Phase 5 (2026-08-02, branch `rt-lighting2`)
+
+**Delivered**: a load-time per-page **shininess detector** that reads the decoded
+texels once per texture page and, for opaque pages whose pixels read as water / wet
+gloss, arms a **HIGH-only material-id upgrade** (`DEFAULT → new TD5_MAT_WATER`) so RT
+reflections pick them up. Plus the `TD5RE_MAT_DUMP` CSV deliverable for threshold
+tuning.
+
+**Where**:
+- `td5_material.c` / `.h` — new `TD5_MAT_WATER` (id 6, `COUNT` 6→7; append-only, no
+  exhaustive switch anywhere — verified). `k_params[WATER] = {spec .70, rough .15,
+  refl .55, emis 0}`. New `td5_material_classify_page(page, pixels, w, h, format)`
+  computes per-page stats (mean RGB, saturation, luma, **luma variance**, blue-dominant
+  fraction, near-black fraction) over strided-sampled texels (≤4096 samples/page, cheap).
+  Water gate: `bluefrac ≥ .45 && var ≤ .045 && luma∈[.08,.62] && sat ≥ .12 && transp ≤ 0`.
+  Arms `s_page_water[page]`. Every threshold is an env knob
+  (`TD5RE_MAT_WATER_BLUE/_VAR/_LUMA_LO/_LUMA_HI/_SAT/_REFL`, `TD5RE_MAT_SHINE_VAR`).
+- The upgrade lives in `td5_material_id_for_page`:
+  `if (base == DEFAULT && s_page_water[page] && td5_rt_active()) return WATER;`.
+  **This is the whole LOW-byte-identical story**: the upgrade is gated on
+  `td5_rt_active()`, so LOW (`Quality=0`) always returns the exact P0
+  transparency-class id → goldens match on all 4 races (verified). The classifier
+  still *runs* in LOW (at upload) but only writes to side arrays; it changes no
+  LOW rendering and allocates nothing (the CSV row buffer is `calloc`'d only under
+  `TD5RE_MAT_DUMP`).
+- Hook: `td5_plat_render_upload_texture` (the single universal upload choke) calls
+  `td5_material_classify_page` once per page with the pixels in hand — one site,
+  every page, exactly once. `td5_platform_win32.c`.
+
+**RT feed = the WATER class, not per-page floats.** The G-buffer carries only a
+material id (bits 31..24 of specular), not a page id. So the feed is the binary
+water→WATER upgrade flowing through the *existing* `matid → reflA/reflB` LUT:
+`td5_render_apply_ssr_pass` builds `refl8[0..COUNT)`, now includes `WATER=.55` at
+index 6, platform packs it into `sr_reflB.z`, and `rt_reflectivity(6)` (rt_common.hlsli,
+already handles ids 0..7) returns it — **zero shader edits, no G-buffer format change,
+no touch of the forbidden ps_ssr/ps_shadow/ps_light shaders**. The per-page *continuous*
+`s_page_refl`/`s_page_shine` (0..255) would need a page id in the G-buffer to feed
+(rejected as too invasive for the LOW-identical gate); they remain the **detection
+output** — exposed via `td5_material_page_reflectivity/_shine()` and dumped to CSV,
+but not wired into rendering. Honest scope: shininess is *detected* per-page, *fed*
+per-class.
+
+**CSV deliverable** (`TD5RE_MAT_DUMP=1` → `log/material_pages.csv`, rewritten each
+classify so it survives a mid-run kill): one row per seen page with all stats + the
+water verdict + base material id. Moscow (track 5, HIGH) run: **163 pages classified,
+2 armed WATER** (pages 87 & 108 — opaque `transp=0`, `base=DEFAULT`, bluefrac 1.00/0.65,
+var 0.0002/0.018 = ultra-flat blue → exactly the intended target; the runtime
+`id==DEFAULT` gate confirms they upgrade). No false arming of alpha-test/additive
+pages (those aren't DEFAULT, so even a mis-armed one can't upgrade — belt-and-braces).
+
+**Gates**: `build_all.bat` clean, **no new warnings** (td5_material.c compiles silent;
+lint extern 3/3, game_h 24/24). Full selftest: screen walk 1–24 PASS, race matrix
+25–50 PASS, **all 4 golden races' 7-module hashes MATCH** (LOW byte-identical),
+degrade-frame-time +0.1% (GPU healthy this run), degrade GDI/handles/heap PASS. The
+lone FAIL is `degrade-private-bytes +25.7 MB` = the **documented pre-existing straddle**
+(4–28 MB; my code allocs nothing in LOW; goldens matching proves LOW is untouched).
+HIGH RT exercised via two 30 s+ Moscow AutoRaces + a framedump — DXR path live
+(bindless pages registering), **no crash**.
+
+**Owed (honest)**: a *visible* water-reflection A/B framedump. The AutoRace framedump
+landed on the car-select carousel (documented boot-timing friction — race hadn't
+started at 32 s), and Moscow's race-start viewpoint may not even frame a water surface.
+Needs an in-race capture with water in view (same owed-visual class as P3/P4). Not
+faked.
 
 ### As-built — Phase 4 (2026-08-02, branch `rt-lighting2`)
 
