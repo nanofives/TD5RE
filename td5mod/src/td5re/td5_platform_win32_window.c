@@ -581,20 +581,37 @@ static int recover_max_attempts(void)
     static int v = -1;
     if (v < 0) {
         const char *e = getenv("TD5RE_DEVICE_LOST_MAX_TRIES");
-        v = (e && e[0]) ? atoi(e) : 40;
+        v = (e && e[0]) ? atoi(e) : 15;   /* ~15 tries x ~1s = ~15s of real wait */
         if (v < 1)   v = 1;
         if (v > 240) v = 240;
     }
     return v;
 }
 
+/* Wall-clock spacing between recreate attempts. A GPU TDR takes the driver
+ * ~2-5 s to fully reset; retrying on a *frame* counter is useless because a
+ * device-lost frame doesn't present (the loop free-spins, so 30 "frames" is
+ * microseconds and all attempts elapse before the driver is back). Space them
+ * on the real clock instead. Knob TD5RE_DEVICE_LOST_RETRY_MS. */
+static unsigned recover_retry_ms(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_DEVICE_LOST_RETRY_MS");
+        v = (e && e[0]) ? atoi(e) : 1000;
+        if (v < 100)   v = 100;
+        if (v > 10000) v = 10000;
+    }
+    return (unsigned)v;
+}
+
 static void plat_try_recover_device(void)
 {
-    static int s_attempts   = 0;
-    static int s_cooldown   = 0;
-    static int s_gave_up    = 0;   /* terminal action fires exactly once */
+    static int      s_attempts    = 0;
+    static uint64_t s_next_try_ms = 0;
+    static int      s_gave_up     = 0;   /* terminal action fires exactly once */
 
-    if (!g_backend.device_removed) { s_attempts = 0; s_cooldown = 0; return; }
+    if (!g_backend.device_removed) { s_attempts = 0; s_next_try_ms = 0; s_gave_up = 0; return; }
 
     /* [DEVICE-LOST terminal] Out of attempts: the adapter is wedged and won't
      * come back in-process. Rather than sit on the last frame FOREVER (no
@@ -624,8 +641,15 @@ static void plat_try_recover_device(void)
         return;
     }
 
-    if (s_cooldown > 0) { s_cooldown--; return; }
-    s_cooldown = 30;                            /* retry ~every 30 frames */
+    /* Wall-clock pacing: wait recover_retry_ms() between attempts (sleep a beat
+     * so we don't burn a core busy-spinning while the driver resets). First
+     * attempt fires immediately. */
+    {
+        uint64_t now = td5_plat_time_ms();
+        if (s_next_try_ms == 0) s_next_try_ms = now;   /* first try: now */
+        if (now < s_next_try_ms) { td5_plat_sleep(32); return; }
+        s_next_try_ms = now + recover_retry_ms();
+    }
     s_attempts++;
 
     TD5_LOG_W(LOG_TAG, "device lost: recovery attempt %d/%d", s_attempts, recover_max_attempts());
@@ -650,8 +674,8 @@ static void plat_try_recover_device(void)
                 "(re-enable in Graphics Options -> Lighting Options)");
         }
         TD5_LOG_W(LOG_TAG, "device recovered after %d attempt(s)", s_attempts);
-        s_attempts = 0;
-        s_cooldown = 0;
+        s_attempts    = 0;
+        s_next_try_ms = 0;
     }
 }
 

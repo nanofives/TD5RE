@@ -353,6 +353,7 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("Lighting", "GIQuality",         g_td5.ini.rt_gi_quality);
     td5_ini_write_int("Lighting", "SunProbe",          g_td5.ini.rt_sun_probe);
     td5_ini_write_int("Lighting", "LightQuality",      g_td5.ini.rt_light_quality);
+    td5_ini_write_int("Lighting", "LightOptVersion",   g_td5.ini.rt_opt_version);
 
     /* Game options */
     td5_ini_write_int("GameOptions", "Laps",             g_td5.ini.laps);
@@ -458,13 +459,19 @@ static const TD5_CfgIntEntry k_lighting_cfg[] = {
     /* [RT2 P8] LIGHTING OPTIONS per-feature tiers — defaults = HIGHEST tier
      * (user decision #6). Mapped onto TD5RE_RT_* env knobs at load in
      * td5_rt_apply_lighting_options(); env explicitly set still overrides. */
-    { "ShadowRays",       "Lighting", "ShadowRays",       &g_td5.ini.rt_shadow_rays,    8 },
+    /* [TDR-safe defaults 2026-08-02] The initial "all-max" defaults produced
+     * multi-second RT frames at high res (2560x1351) and tripped the Windows
+     * TDR watchdog. New defaults are a modest, TDR-safe RT look (2 sun-shadow
+     * rays + probe + realistic lights; GI + reflections OFF, bounded range) —
+     * everything is still tunable UP per-feature in LIGHTING OPTIONS. */
+    { "ShadowRays",       "Lighting", "ShadowRays",       &g_td5.ini.rt_shadow_rays,    2 },
     { "ShadowRes",        "Lighting", "ShadowRes",        &g_td5.ini.rt_shadow_res,     1 },
-    { "ReflectionQuality","Lighting", "ReflectionQuality",&g_td5.ini.rt_reflection_q,   2 },
-    { "ReflectionRange",  "Lighting", "ReflectionRange",  &g_td5.ini.rt_reflection_rng, 2 },
-    { "GIQuality",        "Lighting", "GIQuality",        &g_td5.ini.rt_gi_quality,     2 },
+    { "ReflectionQuality","Lighting", "ReflectionQuality",&g_td5.ini.rt_reflection_q,   0 },
+    { "ReflectionRange",  "Lighting", "ReflectionRange",  &g_td5.ini.rt_reflection_rng, 1 },
+    { "GIQuality",        "Lighting", "GIQuality",        &g_td5.ini.rt_gi_quality,     0 },
     { "SunProbe",         "Lighting", "SunProbe",         &g_td5.ini.rt_sun_probe,      1 },
     { "LightQuality",     "Lighting", "LightQuality",     &g_td5.ini.rt_light_quality,  1 },
+    { "LightOptVersion",  "Lighting", "LightOptVersion",  &g_td5.ini.rt_opt_version,    0 },
 };
 #define K_LIGHTING_CFG_N (sizeof(k_lighting_cfg) / sizeof(k_lighting_cfg[0]))
 
@@ -945,6 +952,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                                                      k_lighting_cfg[i].ini_key,
                                                      k_lighting_cfg[i].default_value);
         }
+    }
+
+    /* [TDR-safe reset 2026-08-02] The first LIGHTING OPTIONS release shipped
+     * all-max defaults that TDR'd the GPU at high res (multi-second RT frames ->
+     * device reset). Any INI written before this fix carries those max values
+     * (ShadowRays=8, GIQuality=2, ReflectionRange=2/UNLIMITED, ...). Reset the
+     * per-feature RT tiers to the TDR-safe defaults ONCE — keyed on the schema
+     * version so a user's later deliberate choices are preserved. */
+    #define RT_OPT_VERSION_CURRENT 1
+    if (g_td5.ini.rt_opt_version < RT_OPT_VERSION_CURRENT) {
+        g_td5.ini.rt_shadow_rays    = 2;
+        g_td5.ini.rt_shadow_res     = 1;
+        g_td5.ini.rt_reflection_q   = 0;
+        g_td5.ini.rt_reflection_rng = 1;
+        g_td5.ini.rt_gi_quality     = 0;
+        g_td5.ini.rt_sun_probe      = 1;
+        g_td5.ini.rt_light_quality  = 1;
+        g_td5.ini.rt_opt_version    = RT_OPT_VERSION_CURRENT;
+        td5_ini_persist_options();   /* stick the safe values so it fires once */
+        dbglog("[Lighting] RT options reset to TDR-safe defaults (opt version -> %d)",
+               RT_OPT_VERSION_CURRENT);
     }
 
     /* Game options */

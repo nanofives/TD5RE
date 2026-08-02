@@ -322,6 +322,10 @@ typedef struct TD5_GlobalState {
         int  rt_gi_quality;     /* GLOBAL ILLUMINATION: 0 OFF / 1 LOW(2) / 2 HIGH(4) rays       */
         int  rt_sun_probe;      /* SUN & SKY: 0 CLASSIC (zone sun, no disc) / 1 AUTO (probe)    */
         int  rt_light_quality;  /* LIGHTS: 0 BASIC / 1 REALISTIC (P7 soft lights + street lamps)*/
+        int  rt_opt_version;    /* [TDR-safe] LIGHTING OPTIONS schema version. When an INI
+                                 * predates the current version its RT tiers are reset to the
+                                 * TDR-safe defaults once (the initial all-max defaults hung
+                                 * the GPU at high res). See main.c RT_OPT_VERSION_CURRENT. */
         /* Game options */
         int  laps;
         int  checkpoint_timers;
