@@ -332,12 +332,29 @@ void td5_render_apply_shadow_pass(int vp_x, int vp_y)
     float cam[3] = { s_camera_pos[0], s_camera_pos[1], s_camera_pos[2] };
     float depth_scale = 1.0f / DEPTH_NORMALIZE_INV;   /* 195000 */
 
+    /* [RT2 P6] Range de-hardcode. The 2500-unit s_dist is a LOW screen-space
+     * MARCH horizon (ps_shadow.hlsl walks the depth buffer that far). RT sun
+     * shadows are view-independent ray casts toward the (directional) sun and
+     * must reach ANY occluder — a bridge 20k units ahead should shadow. So in
+     * HIGH lift the shadow-ray TMax (sh_sun.w) to effectively infinite; LOW
+     * keeps s_dist byte-identical. Knob TD5RE_RT_SHADOW_DIST (default 1e7). */
+    float shadow_dist = s_dist;
+    if (td5_rt_active()) {
+        static float s_rt_shadow_dist = -1.0f;
+        if (s_rt_shadow_dist < 0.0f) {
+            const char *e = getenv("TD5RE_RT_SHADOW_DIST");
+            s_rt_shadow_dist = (e && e[0]) ? (float)atof(e) : 1.0e7f;
+            if (s_rt_shadow_dist < s_dist) s_rt_shadow_dist = s_dist;
+        }
+        shadow_dist = s_rt_shadow_dist;
+    }
+
     td5_plat_render_apply_shadow(cam, basis9,
                                  s_focal_length, s_center_x, s_center_y,
                                  (float)vp_x, (float)vp_y,
                                  depth_scale, NEAR_DEPTH_OFFSET,
                                  sun, strength,
-                                 s_steps, s_dist, s_thick, 8.0f,
+                                 s_steps, shadow_dist, s_thick, 8.0f,
                                  (float)s_viewport_width, (float)s_viewport_height,
                                  cone_scale);
 }
@@ -418,6 +435,23 @@ void td5_render_apply_ssr_pass(int vp_x, int vp_y)
     float cam[3] = { s_camera_pos[0], s_camera_pos[1], s_camera_pos[2] };
     float depth_scale = 1.0f / DEPTH_NORMALIZE_INV;   /* 195000 */
 
+    /* [RT2 P6] Range de-hardcode. s_dist (TD5RE_SSR_DIST, 4000) is the LOW
+     * screen-space MARCH horizon — it stays 4000 in LOW (that IS "low quality"
+     * now). The RT reflection ray (sr_params.y TMax, rt_pipeline.hlsl:325) is
+     * view-independent and should reach beyond the far plane, so in HIGH lift
+     * it to TD5RE_RT_REFL_DIST (default 50000 = unlimited in practice). Ray
+     * count stays 1 (the precision lever is Phase 8's half-res dispatch). */
+    float refl_dist = s_dist;
+    if (td5_rt_active()) {
+        static float s_rt_refl_dist = -1.0f;
+        if (s_rt_refl_dist < 0.0f) {
+            const char *e = getenv("TD5RE_RT_REFL_DIST");
+            s_rt_refl_dist = (e && e[0]) ? (float)atof(e) : 50000.0f;
+            if (s_rt_refl_dist < s_dist) s_rt_refl_dist = s_dist;
+        }
+        refl_dist = s_rt_refl_dist;
+    }
+
     /* [P3] Scene sun dir for the RT reflection's sun shadow ray -- SAME unified
      * derivation as the shadow pass (probe sun in HIGH+SUNNY, else zone sun);
      * disabled when there's no sun (tunnel) or it's below the horizon. */
@@ -433,7 +467,7 @@ void td5_render_apply_ssr_pass(int vp_x, int vp_y)
                               (float)vp_x, (float)vp_y,
                               depth_scale, NEAR_DEPTH_OFFSET,
                               refl8, wet, s_intensity,
-                              s_steps, s_dist, s_thick,
+                              s_steps, refl_dist, s_thick,
                               (float)s_viewport_width, (float)s_viewport_height,
                               sun, sun_shadow);
 }

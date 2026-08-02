@@ -22,12 +22,70 @@ stops there.
 | 3 | Unified shadow treatment (billboards/translucents receive; everything casts) | ✅ done (flat-billboard receive deferred — see as-built) |
 | 4 | RT sky-visibility GI + baked/zone darkening replacement in HIGH | ✅ done (visual A/B owed on a healthy GPU — see as-built) |
 | 5 | Material shininess detection (texture-analysis classifier, per-page table) | ✅ done (water→WATER-class RT feed; per-page continuous refl is CSV-only — see as-built) |
-| 6 | Reflection & shadow range/angle fix + precision knobs | ⬜ not started |
+| 6 | Reflection & shadow range/angle fix + precision knobs | ✅ done (range caps lifted in HIGH; half-res lever reserved for P8; view-indep A/B owed — see as-built) |
 | 7 | HIGH light pipeline: headlights, street lights, sun as realistic RT lights | ⬜ not started |
 | 8 | LIGHTING OPTIONS screen: per-feature rows, INI, defaults, release gates | ⬜ not started |
 
 Append an **as-built note** under this table after each phase (deviations, measurements,
 gotchas found) — exactly like RT_LIGHTING_PLAN.md does.
+
+### As-built — Phase 6 (2026-08-02, branch `rt-lighting2`)
+
+**Delivered**: the two legacy near-distance caps that limited RT shadows/reflections
+are lifted in HIGH (they were screen-space MARCH horizons wrongly shared with the
+view-independent RT rays); each is now a knob defaulting to "no visible limit". LOW
+keeps its march horizons byte-identical.
+
+**The two caps (root-caused via the CB path, verified line-by-line):**
+- **Shadow ray TMax** = `sh_sun.w` (ShadowCB b1) → `rgen_shadow` line 197
+  `rt_shadow_ray(origin, dir, 1.0, sh_sun.w)`. It was fed `TD5RE_SHADOW_DIST`
+  **2500** — i.e. the RT sun-shadow ray only reached 2500 units, so a bridge 20k
+  ahead cast no shadow. Now in HIGH it's `TD5RE_RT_SHADOW_DIST` (**default 1e7** ≈
+  infinite; correct for a directional sun — a pixel is shadowed if any occluder
+  lies along the ray). LOW's `ps_shadow.hlsl` screen-space march keeps 2500.
+- **Reflection ray TMax** = `sr_params.y` (SSRCB b3) → `rgen_refl` line 325
+  `ray.TMax = sr_params.y`. It was fed `TD5RE_SSR_DIST` **4000** (the LOW SSR march
+  horizon). Now in HIGH it's `TD5RE_RT_REFL_DIST` (**default 50000** = beyond the far
+  plane, unlimited in practice); the reflection's own internal sun-shadow ray (line
+  109, same `sr_params.y`) rides along. Ray count stays **1** (precision is P8's
+  half-res lever, not multi-ray). LOW's `ps_ssr.hlsl` march keeps its 4000 horizon —
+  that IS "low quality" now.
+
+**Where**: `td5_render_mesh.c` — `td5_render_apply_shadow_pass` and
+`td5_render_apply_ssr_pass` each compute the distance CPU-side and pass the large RT
+value **only when `td5_rt_active()`**, else the historic march value. That single gate
+is the whole LOW-byte-identical story: no shader edits, no CB layout change, LOW
+render untouched (goldens match on all 4 races). Both knobs are clamped `>= s_dist`
+so a mis-set can't shorten the march. Zero touch of ps_shadow/ps_light/ps_ssr.
+
+**Half-res precision lever (P6.3) — reserved for Phase 8, not landed here.** The RT
+reflection/AO/shadow all dispatch through the *unified* `dxr_lighting_pass`
+(d3d12_dxr.c) at full `paneW × paneH` into full-res masks; a half-res refl dispatch
+means a half-size UAV + a depth-aware upsample in the shared composite PS — a change
+to the path used by *every* RT mask, for a lever whose default is FULL (no default
+behavior change). The plan itself scopes half-res as "the lever **Phase 8** exposes";
+wiring the option row + INI in P8 is the natural place to land the dispatch mechanism
+with it. Deferring avoids risking the whole RT pass for a default-off feature. Noted
+as a P8 sub-task.
+
+**View-independence closure**: this de-hardcode IS the fix for the original
+screen-space-limit complaint (off-screen geometry couldn't cast/reflect). RT is
+inherently view-independent (rays hit the TLAS regardless of what's on screen) and
+after P2 the TLAS is scene-complete, so lifting the artificial TMax caps is the last
+piece. Verified by **code** (TMax values demonstrably lifted, RT-gated) and a no-crash
+46 s HIGH Moscow run (DXR live). **Owed (honest)**: the *visual* A/B pair — a distant
+caster (bridge ~20k ahead) shadowing, and a camera angled so the caster/reflector is
+OFF-screen yet its shadow/reflection still renders. The AutoRace framedump kept landing
+on the car-select carousel (documented boot-timing friction — the race hadn't started
+by 46 s); a controlled in-race capture (via the `--Control=1` MCP socket at a chosen
+viewpoint) is the right tool and is owed, same class as the P3/P4/P5 owed visuals. Not
+faked.
+
+**Gates**: build_all clean, **no new warnings** (lint extern 3/3, game_h 24/24). Full
+selftest: **all 4 golden races' hashes MATCH** (LOW byte-identical — proves the RT-gated
+changes don't touch LOW), screen walk + race matrix PASS, degrade-frame-time -0.3%
+(GPU healthy). Lone FAIL = documented `degrade-private-bytes +25.4 MB` straddle
+(4–28 MB, pre-existing; RT-gated code allocs nothing in LOW).
 
 ### As-built — Phase 5 (2026-08-02, branch `rt-lighting2`)
 
