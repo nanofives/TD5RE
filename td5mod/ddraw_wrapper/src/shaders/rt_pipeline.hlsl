@@ -186,6 +186,12 @@ void rgen_shadow()
     if (dbgLvl == 2) { g_sunvis[fp] = saturate(abs(world.x) / 262144.0f); return; }
     if (dbgLvl == 3) { g_sunvis[fp] = saturate(abs(world.y) /  65536.0f); return; }
     if (dbgLvl == 4) { g_sunvis[fp] = saturate(abs(world.z) / 262144.0f); return; }
+    /* [shadow debug] G-buffer normal check: 5 = validity (|raw normal|, 1=good
+     * 0=zero/bad -> acne), 6/7/8 = encoded normal x/y/z (0.5 = zero component). */
+    if (dbgLvl == 5) { g_sunvis[fp] = saturate(length(gb.rgb * 2.0f - 1.0f)); return; }
+    if (dbgLvl == 6) { g_sunvis[fp] = gb.r; return; }
+    if (dbgLvl == 7) { g_sunvis[fp] = gb.g; return; }
+    if (dbgLvl == 8) { g_sunvis[fp] = gb.b; return; }
     float3 N = rt_gbuf_normal(gb);
     /* normal-offset bias, distance-scaled (24.8-quantized geometry -> acne).
      * sh_params2.y = TD5RE_RT_BIAS scale (car self-shadow tuning; 0 -> default 1). */
