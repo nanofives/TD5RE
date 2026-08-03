@@ -1,8 +1,45 @@
-# RT sun-shadows: "objects don't cast onto the road" — diagnosis & open bug
+# RT sun-shadows: "objects don't cast onto the road" — SOLVED
 
-_Status: **OPEN** (previously unsolved — see the CSM-shadow history). Root cause
-narrowed but not fully cracked. Written 2026-08-03 after a long diagnostic session
-on branch `rt-lighting2`. Reusable debug tooling is committed; use it to continue._
+_Status: **FIXED 2026-08-03** on branch `rt-lighting2`. Root cause = the RT sun
+direction's **Y sign** was in the wrong vertical frame for the ray cast. One-line
+fix in `td5_render_apply_shadow_pass` / `td5_render_apply_ssr_pass`
+(`td5_render_mesh.c`): `if (td5_rt_active()) sun[1] = -sun[1];`._
+
+## ROOT CAUSE (the actual bug)
+
+The unified scene sun (`td5_render_scene_sun`) is derived in the game's **+Y-DOWN**
+world/zone convention (it even ends with a `zsun[1] = -zsun[1]` "zone Y-flip", and
+the image-sun probe accepts a sun only when `pdir.y < -0.05`, i.e. sun.y negative =
+above the horizon). Natural Australia sun = `(0.416, -0.552, -0.723)`.
+
+The RT shadow pass, however, casts its rays in the **depth-RECONSTRUCTED** world
+space (`rt_world_from_depth`), which is **+Y-UP**. Proven in-race: the chase camera
+sits at a LARGER y (6470) than the car it looks down on (5870), and the level-3
+world.y readout puts the road at ~5870 with **buildings ABOVE at larger y**.
+
+So with the raw sun the shadow ray headed `y = -0.552` = **below the horizon, into
+the ground** — it never reached the sky or any occluder, and the road was never
+shadowed. Flipping `sun.y` into the reconstruction frame (RT path only; the LOW
+screen-space shadow shader keeps the untouched sun) makes buildings/car/scenery
+cast correct sun shadows onto the road. Verified: forcing `sun.y` positive
+(`TD5RE_RT_SUN` during diagnosis) produced correct canyon shadows; the committed
+fix reproduces this with the natural sun (right-side buildings cast a clean shadow
+band across the road on Australia/track 2).
+
+### How the earlier "prime hypothesis" was ruled out
+The scenery-TLAS-position theory below was **disproven**: instrumenting the feed
+showed every one of the 966 solid scenery meshes has `mesh->origin == 0` and its
+vertices already sit at the world-space `bounding_center` (`nz_origin=0`), a
+`SCENE_CENSUS` confirmed all 1752 instances (incl. all scenery) are in the shadow
+TLAS, depth reconstruction is fully correct (world.x/.y both validated), and a
+downward reachability probe hit the road quad. The geometry was always right; only
+the sun's vertical sign was wrong.
+
+---
+
+_Below: the original diagnostic write-up that narrowed (but mis-attributed) the bug,
+kept for the debug-tooling reference. The "prime hypothesis" section is superseded
+by the ROOT CAUSE above._
 
 ## Symptom (user report)
 

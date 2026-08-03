@@ -32,6 +32,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 3" },
+    { CL_ITEM,    "FIX (HIGH lighting): buildings, cars and roadside" },
+    { CL_ITEM,    "  structures now cast real sun shadows onto the road." },
+    { CL_ITEM,    "  The ray-traced sun was aimed below the horizon, so" },
+    { CL_ITEM,    "  nothing ever shadowed the road; it now points at the" },
+    { CL_ITEM,    "  sun and occluders drop proper shadows." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "July 27" },
     { CL_ITEM,    "NEW: the TUTORIAL toggle now appears on RACE OPTIONS" },
     { CL_ITEM,    "  for every mode - multiplayer races included, not just" },

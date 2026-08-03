@@ -314,6 +314,17 @@ void td5_render_apply_shadow_pass(int vp_x, int vp_y)
 
     float sun[3] = { 0.0f, 0.0f, 0.0f }, dom = 0.0f;
     int sky_cls = td5_render_scene_sun(sun, &dom);
+    /* [ROAD-CAST SHADOW FIX 2026-08-03] The unified scene sun (td5_render_scene_sun)
+     * is derived in the game's +Y-DOWN world/zone convention (sun.y < 0 = above the
+     * horizon). The RT shadow pass, however, casts rays in the DEPTH-RECONSTRUCTED
+     * world space (rt_world_from_depth), which is +Y-UP (verified in-race: the chase
+     * camera sits at a LARGER y than the car it looks down on, and world.y readouts
+     * put the road at ~5870 with buildings ABOVE at larger y). With the raw sun the
+     * ray heads BELOW the horizon, into the ground, so it never reaches the sky or
+     * any occluder and the road is never shadowed (the long-standing "objects don't
+     * cast onto the road" bug). Flip Y into the reconstruction frame for the RT ray
+     * cast only; the LOW screen-space shadow shader keeps the untouched sun. */
+    if (td5_rt_active()) sun[1] = -sun[1];
     /* [shadow diag] One-shot: capture exactly why (or whether) sun shadows run —
      * sky classification, sun direction (a near-vertical Y => overhead sun =>
      * shadows collapse under objects), dominance and resulting strength.
@@ -488,6 +499,11 @@ void td5_render_apply_ssr_pass(int vp_x, int vp_y)
     if (td5_light2_sun_shadows()) {
         float dom = 0.0f;
         if (td5_render_scene_sun(sun, &dom) != 0) sun_shadow = 1;
+        /* [ROAD-CAST SHADOW FIX 2026-08-03] Match the shadow pass: the RT reflection
+         * sun shadow ray casts in +Y-UP reconstruction space, but the unified sun is
+         * +Y-DOWN. Flip Y so reflected surfaces receive correctly-oriented sun
+         * shadows too (see td5_render_apply_shadow_pass for the full rationale). */
+        if (sun_shadow && td5_rt_active()) sun[1] = -sun[1];
     }
 
     td5_plat_render_apply_ssr(cam, basis9,
