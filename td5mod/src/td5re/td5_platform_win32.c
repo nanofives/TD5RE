@@ -3960,6 +3960,17 @@ void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
     cb.sun[0] = sun_dir[0]; cb.sun[1] = sun_dir[1]; cb.sun[2] = sun_dir[2];
     cb.sun[3] = max_dist;
     cb.params[0] = (float)steps;
+    /* [shadow debug] TD5RE_RT_SHADOW_DEBUG negates params[0] (steps, unused by
+     * the RT rgen_shadow path) as a debug flag -> rgen_shadow tints no-G-buffer
+     * ground grey so the composite reveals whether the road even has coverage. */
+    {
+        static int s_sdbg = -1;
+        if (s_sdbg < 0) {
+            const char *e = getenv("TD5RE_RT_SHADOW_DEBUG");
+            s_sdbg = (e && e[0] && e[0] != '0') ? 1 : 0;
+        }
+        if (s_sdbg) cb.params[0] = -1.0f;
+    }
     cb.params[1] = thickness;
     cb.params[2] = start_off;
     cb.params[3] = pane_w;

@@ -168,7 +168,14 @@ void rgen_shadow()
     int2  fp  = int2((int)sh_misc.y, (int)sh_misc.z) + int2(lpx); /* full-frame pixel */
     float D = g_depth.Load(int3(fp, 0));
     float4 gb = g_gbuf.Load(int3(fp, 0));
-    if (D >= 0.99999f || gb.a < 0.001f) { g_sunvis[fp] = 1.0f; return; }  /* sky / no gbuffer = lit */
+    /* [shadow debug] sh_params.x < 0 (set by TD5RE_RT_SHADOW_DEBUG) tints the
+     * NO-G-buffer ground 0.5 (grey) so the mult composite reveals coverage:
+     * grey road = never shadowed because it wrote no G-buffer (root cause #1);
+     * bright road = covered but the shadow ray missed the occluder (#2); dark
+     * bands = shadows actually landing. Sky stays bright. */
+    bool sdbg = sh_params.x < 0.0f;
+    if (D >= 0.99999f)   { g_sunvis[fp] = 1.0f; return; }                /* sky = lit    */
+    if (gb.a < 0.001f)   { g_sunvis[fp] = sdbg ? 0.5f : 1.0f; return; }  /* no gbuffer   */
 
     float3 world = rt_world_from_depth(D, float2(lpx), sh_camPosFocal, sh_rightCx, sh_upCy, sh_fwdDepthScale, sh_misc.x);
     float3 N = rt_gbuf_normal(gb);
@@ -197,6 +204,11 @@ void rgen_shadow()
         visSum += rt_shadow_ray(origin, dir, 1.0f, sh_sun.w);
     }
     float vis = visSum / (float)K;
+    /* [shadow debug] full-contrast raw visibility: covered+shadowed -> ~0 (black
+     * band on the road where the ray hit an occluder), covered+lit -> 1 (white).
+     * If the road stays uniformly white, the shadow rays are missing the fed
+     * geometry (occluder mis-placed in the TLAS); black bands = shadows land. */
+    if (sdbg) { g_sunvis[fp] = vis; return; }
     g_sunvis[fp] = 1.0f - sh_misc.w * (1.0f - vis);
 }
 

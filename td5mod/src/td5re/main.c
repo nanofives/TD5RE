@@ -960,7 +960,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * (ShadowRays=8, GIQuality=2, ReflectionRange=2/UNLIMITED, ...). Reset the
      * per-feature RT tiers to the TDR-safe defaults ONCE — keyed on the schema
      * version so a user's later deliberate choices are preserved. */
-    #define RT_OPT_VERSION_CURRENT 1
+    /* v3 (2026-08-02): GI back to OFF by default — GI LOW tripped a TDR on the
+     * test GPU (confounded by cumulative degradation, but a TDR-on-launch
+     * default is unacceptable). GI stays an opt-in via LIGHTING OPTIONS; revisit
+     * the default once it's validated stable on a fresh GPU. */
+    #define RT_OPT_VERSION_CURRENT 3
     if (g_td5.ini.rt_opt_version < RT_OPT_VERSION_CURRENT) {
         g_td5.ini.rt_shadow_rays    = 2;
         g_td5.ini.rt_shadow_res     = 1;

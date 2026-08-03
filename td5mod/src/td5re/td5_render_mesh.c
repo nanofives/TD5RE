@@ -314,6 +314,22 @@ void td5_render_apply_shadow_pass(int vp_x, int vp_y)
 
     float sun[3] = { 0.0f, 0.0f, 0.0f }, dom = 0.0f;
     int sky_cls = td5_render_scene_sun(sun, &dom);
+    /* [shadow diag] One-shot: capture exactly why (or whether) sun shadows run —
+     * sky classification, sun direction (a near-vertical Y => overhead sun =>
+     * shadows collapse under objects), dominance and resulting strength.
+     * TD5RE_RT_DIAG=1. */
+    {
+        static int s_sd_logged = 0;
+        if (!s_sd_logged && getenv("TD5RE_RT_DIAG")) {
+            s_sd_logged = 1;
+            TD5_LOG_I(LOG_TAG,
+                "[shadowdiag] rt_active=%d light2=%d sun_shadows=%d sky_cls=%d "
+                "sun=(%.3f,%.3f,%.3f) dom=%.3f strength_raw=%.3f",
+                td5_rt_active(), td5_light2_active(), td5_light2_sun_shadows(),
+                sky_cls, sun[0], sun[1], sun[2], dom,
+                ((float)td5_light2_shadow_strength() / 100.0f) * dom);
+        }
+    }
     if (!sky_cls) return;                        /* no directional light (tunnel) */
 
     float strength = ((float)td5_light2_shadow_strength() / 100.0f) * dom;
