@@ -97,9 +97,14 @@ static void dxr_log(const char *fmt, ...)
 
 #define DXR_SBT_RAYGEN_STRIDE 64     /* each raygen record 64-aligned (dispatch req) */
 #define DXR_SBT_RAYGEN_OFF    0
-#define DXR_SBT_MISS_OFF      320    /* 5 raygen slots * 64 = 320 (64-aligned)       */
-#define DXR_SBT_HITGROUP_OFF  384    /* miss region (2*32=64) rounds to 64 -> 384    */
-#define DXR_SBT_BYTES         512
+/* [GI HANG FIX 2026-08-02] There are 6 raygens (SMOKE,DEBUG,SHADOW,LIGHT,REFL,AO)
+ * -> the raygen region is 6*64=384 bytes. The miss table MUST start after it.
+ * It was 320 (stale "5 raygen slots"), which collided with the AO raygen slot
+ * (5*64=320): miss_shadow overwrote rgen_ao's shader id, so DispatchRays(AO)
+ * read a miss identifier as its raygen record and hung the GPU. GI never worked. */
+#define DXR_SBT_MISS_OFF      384    /* 6 raygen slots * 64 = 384 (64-aligned)       */
+#define DXR_SBT_HITGROUP_OFF  448    /* miss region (2*32=64) -> 384+64 = 448        */
+#define DXR_SBT_BYTES         512    /* hitgroup (1*32) -> 480, rounded to 512       */
 
 /* Max instances the TLAS is sized for. [RT2-P2] raised 128 -> 2048 for the
  * full-scene feed: a dense track (Moscow) has ~1600 MODELS.DAT scenery meshes +

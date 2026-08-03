@@ -468,7 +468,7 @@ static const TD5_CfgIntEntry k_lighting_cfg[] = {
     { "ShadowRes",        "Lighting", "ShadowRes",        &g_td5.ini.rt_shadow_res,     1 },
     { "ReflectionQuality","Lighting", "ReflectionQuality",&g_td5.ini.rt_reflection_q,   0 },
     { "ReflectionRange",  "Lighting", "ReflectionRange",  &g_td5.ini.rt_reflection_rng, 1 },
-    { "GIQuality",        "Lighting", "GIQuality",        &g_td5.ini.rt_gi_quality,     0 },
+    { "GIQuality",        "Lighting", "GIQuality",        &g_td5.ini.rt_gi_quality,     1 },
     { "SunProbe",         "Lighting", "SunProbe",         &g_td5.ini.rt_sun_probe,      1 },
     { "LightQuality",     "Lighting", "LightQuality",     &g_td5.ini.rt_light_quality,  1 },
     { "LightOptVersion",  "Lighting", "LightOptVersion",  &g_td5.ini.rt_opt_version,    0 },
@@ -960,17 +960,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * (ShadowRays=8, GIQuality=2, ReflectionRange=2/UNLIMITED, ...). Reset the
      * per-feature RT tiers to the TDR-safe defaults ONCE — keyed on the schema
      * version so a user's later deliberate choices are preserved. */
-    /* v3 (2026-08-02): GI back to OFF by default — GI LOW tripped a TDR on the
-     * test GPU (confounded by cumulative degradation, but a TDR-on-launch
-     * default is unacceptable). GI stays an opt-in via LIGHTING OPTIONS; revisit
-     * the default once it's validated stable on a fresh GPU. */
-    #define RT_OPT_VERSION_CURRENT 3
+    /* v4 (2026-08-02): GI back ON at LOW. The earlier GI TDRs were NOT cost —
+     * they were the SBT collision bug (rgen_ao's shader id overwritten by
+     * miss_shadow -> DispatchRays(AO) hung the GPU; fixed in d3d12_dxr.c). With
+     * that fixed GI LOW runs ~100fps stable and restores the RT sky-visibility
+     * look (replaces the legacy zone-darkening). */
+    #define RT_OPT_VERSION_CURRENT 4
     if (g_td5.ini.rt_opt_version < RT_OPT_VERSION_CURRENT) {
         g_td5.ini.rt_shadow_rays    = 2;
         g_td5.ini.rt_shadow_res     = 1;
         g_td5.ini.rt_reflection_q   = 0;
         g_td5.ini.rt_reflection_rng = 1;
-        g_td5.ini.rt_gi_quality     = 0;
+        g_td5.ini.rt_gi_quality     = 1;
         g_td5.ini.rt_sun_probe      = 1;
         g_td5.ini.rt_light_quality  = 1;
         g_td5.ini.rt_opt_version    = RT_OPT_VERSION_CURRENT;
