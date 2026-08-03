@@ -175,6 +175,7 @@ int td5_rt_active(void)
 static int      s_track_handles[RT_MAX_TRACK_CHUNKS];
 static int      s_track_chunk_count;
 static int      s_scenery_handles[RT_MAX_SCENERY];
+static unsigned char s_scenery_mask[RT_MAX_SCENERY];  /* [road-cast] per-mesh TLAS InstanceMask */
 static int      s_scenery_count;
 static int      s_scenery_fed;             /* one-shot: MODELS ready by frame 1 */
 
@@ -427,7 +428,8 @@ static unsigned rt_scenery_matid(const TD5_MeshHeader *mesh)
  * terrain extract correctly. Vertices are already WORLD space -> identity
  * instance. Topology is tri_count tris + quad_count quads per command for every
  * opcode (opcode selects render state, not topology). Returns a mesh handle. */
-static int rt_build_scenery_mesh(const TD5_MeshHeader *mesh, unsigned matid_flags)
+static int rt_build_scenery_mesh(const TD5_MeshHeader *mesh, unsigned matid_flags,
+                                 unsigned char *out_mask)
 {
     int c, nvo, nidx, cap_v, cap_i, cursor, handle;
     const TD5_MeshVertex   *base = mesh->vertices;
@@ -435,7 +437,9 @@ static int rt_build_scenery_mesh(const TD5_MeshHeader *mesh, unsigned matid_flag
     TD5_RTVertex   *verts;
     unsigned short *idx;
     TD5_RTRange range;
+    float bbmin[3] = { 1e30f, 1e30f, 1e30f }, bbmax[3] = { -1e30f, -1e30f, -1e30f };
 
+    if (out_mask) *out_mask = 0xFFu;
     if (!cmds || mesh->command_count <= 0) return 0;
 
     /* Output verts = sum of each command's consumed verts (they live in the
@@ -482,9 +486,13 @@ static int rt_build_scenery_mesh(const TD5_MeshHeader *mesh, unsigned matid_flag
         if (nvo + need > cap_v) break;                     /* safety */
         vbase = nvo;
         for (j = 0; j < need; j++) {
-            verts[nvo].pos[0] = cv[j].pos_x; verts[nvo].pos[1] = cv[j].pos_y; verts[nvo].pos[2] = cv[j].pos_z;
+            float px = cv[j].pos_x, py = cv[j].pos_y, pz = cv[j].pos_z;
+            verts[nvo].pos[0] = px; verts[nvo].pos[1] = py; verts[nvo].pos[2] = pz;
             verts[nvo].uv[0] = cv[j].tex_u;  verts[nvo].uv[1] = cv[j].tex_v;
             verts[nvo].color = cv[j].lighting;
+            if (px < bbmin[0]) bbmin[0] = px; if (px > bbmax[0]) bbmax[0] = px;
+            if (py < bbmin[1]) bbmin[1] = py; if (py > bbmax[1]) bbmax[1] = py;
+            if (pz < bbmin[2]) bbmin[2] = pz; if (pz > bbmax[2]) bbmax[2] = pz;
             nvo++;
         }
         for (t = 0; t < tris; t++) {
@@ -506,6 +514,21 @@ static int rt_build_scenery_mesh(const TD5_MeshHeader *mesh, unsigned matid_flag
         range.first_index = 0; range.index_count = (unsigned)nidx;
         range.texture_id = (unsigned)mesh->texture_page_id; range.matid_flags = matid_flags;
         handle = td5_plat_rt_mesh_create(verts, (unsigned)nvo, idx, (unsigned)nidx, &range, 1);
+    }
+    /* [ROAD-CAST FIX 2026-08-03] Classify a horizontal SLAB (road / ground / kerb):
+     * vertical (Y) extent small vs BOTH horizontal extents. A flat surface is a
+     * shadow RECEIVER, not a meaningful sun-shadow caster, and per-span road/ground
+     * slabs were the source of the alternating near-camera self/cross-shadow
+     * stripes (proven: TD5RE_RT_ONLYCARS, which drops all world casters, clears
+     * them). Feed such meshes with InstanceMask bit 0 cleared (0xFE) so shadow rays
+     * (mask 0x01) skip them; walls/buildings/posts (tall) keep 0xFF and cast.
+     * TD5RE_RT_FLATSHADOW=1 restores flat meshes as casters (A/B). */
+    if (out_mask && handle) {
+        static int s_flatshadow = -1;
+        if (s_flatshadow < 0) s_flatshadow = td5_env_int("TD5RE_RT_FLATSHADOW", 0, 0, 1);
+        float hx = bbmax[0]-bbmin[0], hy = bbmax[1]-bbmin[1], hz = bbmax[2]-bbmin[2];
+        int flat = (hx > 200.0f && hz > 200.0f && hy < 0.25f*hx && hy < 0.25f*hz);
+        if (flat && !s_flatshadow) *out_mask = 0xFEu;   /* not a sun-shadow caster */
     }
     free(verts); free(idx);
     return handle;
@@ -549,7 +572,8 @@ static int rt_feed_billboard(const TD5_MeshHeader *mesh)
     range.texture_id  = (unsigned)page;
     range.matid_flags = td5_material_id_for_page(page) | RT_MATID_CUTOUT;
     h = td5_plat_rt_mesh_create(v, 8, idx, 12, &range, 1);
-    if (h) s_scenery_handles[s_scenery_count++] = h;
+    if (h) { s_scenery_mask[s_scenery_count] = 0xFFu;   /* billboards cast (cutout leaf shadows) */
+             s_scenery_handles[s_scenery_count++] = h; }
     return h != 0;
 }
 
@@ -606,8 +630,10 @@ static void rt_feed_world_scenery(void)
             } else if (mesh->total_vertex_count > 65535) {
                 big++;                                 /* u16 index limit; skip (rare) */
             } else {
-                int h = rt_build_scenery_mesh(mesh, rt_scenery_matid(mesh));
-                if (h) { s_scenery_handles[s_scenery_count++] = h; solid++; }
+                unsigned char smask = 0xFFu;
+                int h = rt_build_scenery_mesh(mesh, rt_scenery_matid(mesh), &smask);
+                if (h) { s_scenery_mask[s_scenery_count] = smask;
+                         s_scenery_handles[s_scenery_count++] = h; solid++; }
             }
         }
     }
@@ -626,11 +652,19 @@ static void rt_build_tlas(void)
 
     td5_plat_rt_scene_begin();
     if (!td5_env_int("TD5RE_RT_ONLYCARS", 0, 0, 1)) {
+        /* [ROAD-CAST FIX 2026-08-03] The synthetic per-span road lane quads are
+         * fed with InstanceMask 0xFE (bit 0 = "sun-shadow caster" CLEARED): a flat
+         * road is a shadow RECEIVER, not an occluder, and these per-span quads
+         * sit fractionally off the reconstructed road surface, so as sun-shadow
+         * occluders they only produced alternating per-span self-shadow stripes
+         * right in front of the camera. They stay visible to reflection/primary
+         * rays (0xFF) so the road still reflects. Walls/buildings/props/cars keep
+         * the default 0xFF and cast onto the road normally. */
         for (i = 0; i < s_track_chunk_count; i++)
-            if (s_track_handles[i]) td5_plat_rt_scene_instance(s_track_handles[i], identity, 0);
+            if (s_track_handles[i]) td5_plat_rt_scene_instance(s_track_handles[i], identity, 0xFEu);
         /* [RT2-P2] Static world scenery + billboards (world-space verts -> identity). */
         for (i = 0; i < s_scenery_count; i++)
-            if (s_scenery_handles[i]) td5_plat_rt_scene_instance(s_scenery_handles[i], identity, 0);
+            if (s_scenery_handles[i]) td5_plat_rt_scene_instance(s_scenery_handles[i], identity, s_scenery_mask[i]);
     }
 
     total = td5_game_get_total_actor_count();

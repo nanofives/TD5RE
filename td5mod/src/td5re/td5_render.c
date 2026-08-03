@@ -486,7 +486,7 @@ static int project_vertex(float vx, float vy, float vz,
     float inv_z = 1.0f / vz;
     *sx  = vx * s_focal_length * inv_z + s_center_x;
     *sy  = vy * s_focal_length * inv_z + s_center_y;
-    *sz  = vz * (1.0f / s_far_clip);  /* normalized depth [0..1] (0x00473bcc) */
+    *sz  = td5_depth_persp(vz);  /* perspective-correct normalized depth [0..1] */
     *rhw = inv_z;
     return 1;
 }
@@ -1315,7 +1315,7 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
             dvz = floorf(dvz / TD6_CAR_ZFIX_SNAP_VIEWZ + 0.5f) * TD6_CAR_ZFIX_SNAP_VIEWZ
                   - zfix;
         }
-        clipped[i].depth_z  = (dvz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
+        clipped[i].depth_z  = td5_depth_persp(dvz);
         clipped[i].rhw      = inv_z;
         clipped[i].diffuse  = out_color[i];
         /* [LIGHT2] COLOR1 = material id (bits 31..24) + packed world normal
@@ -2874,6 +2874,19 @@ static void tl_apply_case0(const TD5_LightZone *zone)
  */
 void td5_render_apply_track_lighting(int slot, TD5_Actor *actor)
 {
+    /* [A/B PROOF 2026-08-03] TD5RE_NO_CAR_ZONELIGHT=1 neutralises the per-track
+     * vehicle light-zone system (ApplyTrackLightingForVehicleSegment): the car
+     * gets a fixed flat daylight basis everywhere instead of the span-selected
+     * zone's directional weight + ambient. If the Australia start-bridge car
+     * darkening disappears with this on, that zone system (Sydney zone 125, dir
+     * weight 64 vs 96 elsewhere) is the cause. Dev-only A/B toggle, default OFF. */
+    {
+        static int s_no_car_zonelight = -1;
+        if (s_no_car_zonelight < 0)
+            s_no_car_zonelight = td5_env_int("TD5RE_NO_CAR_ZONELIGHT", 0, 0, 1);
+        if (s_no_car_zonelight) { td5_render_set_override_daylight(); return; }
+    }
+
     /* [TD6 CAR LIGHTING — track-scoped] Migrated TD6 tracks have no real light
      * zones; without this they borrow the TD5 level-number's zone table, whose
      * tunnel/dark zones darken the car as if it were in a tunnel (seen on the
@@ -3481,7 +3494,7 @@ int debug_line_project(float wx, float wy, float wz, uint32_t argb,
     float inv_z = 1.0f / vz;
     out->screen_x = -vx * s_focal_length * inv_z + s_center_x;
     out->screen_y = -vy * s_focal_length * inv_z + s_center_y;
-    out->depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV; /* matches track polys */
+    out->depth_z  = td5_depth_persp(vz); /* matches track polys */
     out->rhw      = inv_z;
     out->diffuse  = argb;   /* 0xAARRGGBB → B8G8R8A8_UNORM diffuse (white SRV modulate) */
     out->specular = 0;
@@ -3548,7 +3561,7 @@ static void ribbon_cam_to_vertex(TD5_RibbonCamV v, uint32_t argb, TD5_D3DVertex 
     float inv_z = 1.0f / v.vz;
     out->screen_x = -v.vx * s_focal_length * inv_z + s_center_x;
     out->screen_y = -v.vy * s_focal_length * inv_z + s_center_y;
-    out->depth_z  = (v.vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
+    out->depth_z  = td5_depth_persp(v.vz);
     out->rhw      = inv_z;
     out->diffuse  = argb;
     out->specular = 0;

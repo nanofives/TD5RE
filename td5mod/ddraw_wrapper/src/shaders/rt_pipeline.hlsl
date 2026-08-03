@@ -192,14 +192,30 @@ void rgen_shadow()
     if (dbgLvl == 6) { g_sunvis[fp] = gb.r; return; }
     if (dbgLvl == 7) { g_sunvis[fp] = gb.g; return; }
     if (dbgLvl == 8) { g_sunvis[fp] = gb.b; return; }
-    float3 N = rt_gbuf_normal(gb);
-    /* normal-offset bias, distance-scaled (24.8-quantized geometry -> acne).
-     * sh_params2.y = TD5RE_RT_BIAS scale (car self-shadow tuning; 0 -> default 1). */
+    float3 L = normalize(sh_sun.xyz);
+    /* [ROAD-CAST FIX 2026-08-03] Offset the shadow-ray origin along the SUN
+     * direction L, NOT the surface normal. The G-buffer normal's SIGN is
+     * unreliable in the ray frame (the +Y lighting-vs-position convention split),
+     * so a normal-offset bias pushed the road origin BELOW its own surface and
+     * the up-toward-sun ray re-hit the road/track quads -> the whole road
+     * self-shadowed. (Proven with TD5RE_RT_ONLYCARS=1: dropping track+scenery
+     * from the TLAS turned the road fully lit, so the black was self-hit on world
+     * geometry, not real occlusion; an 8x bias bump didn't help because it just
+     * deepened the wrong-side offset.) L points toward the sun by construction,
+     * so a step along it always lifts the origin off the receiver toward the lit
+     * side; only genuine occluders between the surface and the sun then block it.
+     * sh_params2.y = TD5RE_RT_BIAS scale. */
     float dist = length(world - sh_camPosFocal.xyz);
     float biasScale = sh_params2.y > 0.0001f ? sh_params2.y : 1.0f;
-    float3 origin = world + N * ((16.0f + dist * 0.004f) * biasScale);
+    /* [ROAD-CAST FIX 2026-08-03] Near-field constant raised 16 -> 64: at the
+     * shortest camera distances the per-span road quads meet the sun ray at a
+     * grazing angle, and a 16-unit lift was too small to clear the receiver's
+     * own (and the adjacent span's) quad -> alternating black stripes per span
+     * right in front of the camera. 64 clears it while staying far below car /
+     * road-feature scale (no peter-panning; the car contact shadow stays tight).
+     * The distance term (far-field) is unchanged. TD5RE_RT_BIAS scales both. */
+    float3 origin = world + L * ((64.0f + dist * 0.004f) * biasScale);
 
-    float3 L = normalize(sh_sun.xyz);
     float3 up0 = abs(L.y) < 0.99f ? float3(0,1,0) : float3(1,0,0);
     float3 T = normalize(cross(up0, L));
     float3 Bv = cross(L, T);

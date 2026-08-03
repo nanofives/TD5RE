@@ -38,6 +38,13 @@ struct PS_INPUT
     float2 uv  : TEXCOORD0;
 };
 
+/* [PERSPECTIVE DEPTH 2026-08-03] recover linear view-Z from perspective depth. */
+float depth_to_viewz(float d, float depthScale, float depthBias)
+{
+    float A = (depthBias + depthScale) / depthScale;
+    return depthBias * A / (A - d);
+}
+
 float4 main(PS_INPUT input) : SV_TARGET
 {
     int2 px = int2(input.pos.xy);
@@ -65,7 +72,7 @@ float4 main(PS_INPUT input) : SV_TARGET
     float paneH      = params2.x;
 
     /* Reconstruct world position + view direction. */
-    float vz = D * depthScale + depthBias;
+    float vz = depth_to_viewz(D, depthScale, depthBias);
     float sx = input.pos.x - vpX;
     float sy = input.pos.y - vpY;
     float vx = -(sx - rightCx.w) * vz / focal;
@@ -134,7 +141,7 @@ float4 main(PS_INPUT input) : SV_TARGET
         float sceneD = depthTex.Load(int3(sp, 0)).r;
         if (sceneD >= 0.99999)
             continue;                               /* sky along the ray */
-        float sceneVz = sceneD * depthScale + depthBias;
+        float sceneVz = depth_to_viewz(sceneD, depthScale, depthBias);
 
         /* Distance-scaled bias (same acne control as the shadow passes). */
         float dz = pvz - sceneVz;

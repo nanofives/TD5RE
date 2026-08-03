@@ -82,6 +82,28 @@ void BuildRotationMatrixFromAngles(float *out, short *angles);
 #define DEFAULT_FAR_CULL     195000.0f
 #define NEAR_DEPTH_OFFSET    64.0f                /* orig 0x0045d6c0 */
 #define DEPTH_NORMALIZE_INV  (1.0f / 195000.0f)   /* was orig 1/65479; extended to far-cull */
+
+/* [PERSPECTIVE DEPTH 2026-08-03] Perspective-correct normalized depth.
+ *
+ * The old normalized depth (vz-NEAR)/RANGE is LINEAR in view-Z, which is NOT
+ * linear in screen space -- so once the rasterizer interpolates it across a
+ * triangle, the depth (and any world position reconstructed from it) is wrong in
+ * the triangle INTERIOR, worst for big near-camera quads (the per-span road).
+ * That produced the per-span "bouncy" RT shadow edge on straight walls.
+ *
+ * depth = A*(1 - NEAR/vz) IS linear in 1/vz, hence linear in screen space, so
+ * hardware interpolation + shader reconstruction (depth_to_viewz) are exact
+ * everywhere. Maps vz=NEAR->0 and vz=FAR->1 just like the old mapping, and
+ * keeps the same near=small / far=large sense so the LESS z-test is unchanged.
+ * ALL depth writers (world polys, VFX) must use this so the depth buffer is one
+ * consistent space for z-testing + reconstruction. */
+#define TD5_DEPTH_RANGE  (1.0f / DEPTH_NORMALIZE_INV)                          /* 195000 (far-near) */
+#define TD5_DEPTH_A      ((NEAR_DEPTH_OFFSET + TD5_DEPTH_RANGE) / TD5_DEPTH_RANGE) /* far/range */
+static inline float td5_depth_persp(float vz)
+{
+    /* vz is guarded > near clip by every caller; NEAR/vz is finite. */
+    return TD5_DEPTH_A * (1.0f - NEAR_DEPTH_OFFSET / vz);
+}
 #define TIRE_DECAL_BIAS      40.0f                /* tire-mark decal pull toward camera (view units); 40 clears z-fight speckle on bumpy cobblestone while the car (far closer) still occludes */
 
 /** Billboard depth sort stride sizes (bytes) */

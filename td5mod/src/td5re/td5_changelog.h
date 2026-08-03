@@ -38,6 +38,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  The ray-traced sun was aimed below the horizon, so" },
     { CL_ITEM,    "  nothing ever shadowed the road; it now points at the" },
     { CL_ITEM,    "  sun and occluders drop proper shadows." },
+    { CL_ITEM,    "FIX: road shadows are clean - no more per-span dark" },
+    { CL_ITEM,    "  stripes or wavy/bouncy edges near the camera (depth" },
+    { CL_ITEM,    "  is now reconstructed perspective-correctly; flat road" },
+    { CL_ITEM,    "  no longer self-shadows)." },
+    { CL_ITEM,    "NEW: widescreen field-of-view cap keeps the horizontal" },
+    { CL_ITEM,    "  view from stretching at the screen edges (TD5RE_HFOV_" },
+    { CL_ITEM,    "  MAX, default 90 deg)." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 27" },

@@ -91,6 +91,18 @@ struct RayPayload { float3 color; float t; };
 /* Shadow ray payload: miss_shadow sets visible=1; a hit leaves it 0. */
 struct ShadowPayload { uint visible; };
 
+/* [PERSPECTIVE DEPTH 2026-08-03] Inverse of the CPU td5_depth_persp(): recover
+ * linear view-Z from the perspective-correct normalized depth. depthScale = RANGE
+ * (far-near, 195000), depthBias = NEAR (64), A = far/range = (near+range)/range.
+ * Exact everywhere now that the stored depth is screen-linear (the old
+ * D*scale+bias assumed a linear-view-Z depth that was NOT screen-linear, so it
+ * mis-reconstructed triangle interiors -> the per-span bouncy shadow edge). */
+float depth_to_viewz(float d, float depthScale, float depthBias)
+{
+    float A = (depthBias + depthScale) / depthScale;
+    return depthBias * A / (A - d);
+}
+
 /* World position from scene depth D at pane-local pixel `pp`, using the shared
  * camera reconstruction (matches ps_shadow.hlsl / ps_light.hlsl exactly). */
 float3 rt_world_from_depth(float D, float2 pp,
@@ -98,7 +110,7 @@ float3 rt_world_from_depth(float D, float2 pp,
                            float4 fwdDepthScale, float depthBias)
 {
     float focal = camPosFocal.w;
-    float vz = D * fwdDepthScale.w + depthBias;
+    float vz = depth_to_viewz(D, fwdDepthScale.w, depthBias);
     float vx = -(pp.x - rightCx.w) * vz / focal;
     float vy = -(pp.y - upCy.w)    * vz / focal;
     return camPosFocal.xyz + vx * rightCx.xyz + vy * upCy.xyz + vz * fwdDepthScale.xyz;
@@ -116,14 +128,23 @@ float rt_hash12(float2 p)
 }
 
 /* Cast an occlusion (shadow) ray; returns 1 if UNBLOCKED (visible), 0 if hit.
- * ACCEPT_FIRST_HIT + SKIP_CLOSEST_HIT so no CH runs; miss index 0 (miss_shadow). */
+ * ACCEPT_FIRST_HIT + SKIP_CLOSEST_HIT so no CH runs; miss index 0 (miss_shadow).
+ * [ROAD-CAST FIX 2026-08-03] InstanceInclusionMask 0x01 = sun-shadow CASTERS only.
+ * The flat synthetic road lane quads are fed with bit 0 cleared (0xFE) so they
+ * never self-shadow (the per-span near-camera stripe acne); walls/buildings/props/
+ * cars keep bit 0 set (0xFF) and cast normally. Reflection/primary rays still
+ * trace 0xFF and see the road. */
 float rt_shadow_ray(float3 origin, float3 dir, float tmin, float tmax)
 {
     RayDesc ray; ray.Origin = origin; ray.Direction = dir; ray.TMin = tmin; ray.TMax = tmax;
     ShadowPayload p; p.visible = 0;
+    /* [ROAD-CAST diag 2026-08-03] back-face cull (now that the shader actually
+     * recompiles): if the per-span wall stripes are self-shadow acne (ray clips
+     * the back of the wall's own triangle), this removes them. */
     TraceRay(g_tlas,
-             RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
-             0xFF, /*hitGroup*/0, /*mult*/0, /*miss*/0, ray, p);
+             RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
+             | RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+             0x01, /*hitGroup*/0, /*mult*/0, /*miss*/0, ray, p);
     return (float)p.visible;
 }
 

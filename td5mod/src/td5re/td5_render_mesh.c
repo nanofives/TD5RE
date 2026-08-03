@@ -781,6 +781,19 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
     }
     int prelit = (s_td6_vlight && slot < 0);
 
+    /* [RT flat-base dev knob 2026-08-03] TD5RE_RT_FLATBASE=1 (HIGH/RT only):
+     * disable the original engine's per-vertex CPU shading on WORLD geometry
+     * (track + scenery, slot < 0) -- the 3-directional diffuse + ambient floor
+     * + per-area zone colour/ambient that shades every face -- and emit a flat
+     * full-bright albedo instead, so the RT shadow / GI / light passes become the
+     * SOLE source of shading. Removes the double-darkening (baked face shading
+     * multiplied again by the RT shadow) while iterating on RT lighting. The
+     * G-buffer normal pack above still runs (RT needs it); cars (slot >= 0) keep
+     * their shading. Default OFF; gated by td5_rt_active() so LOW is untouched. */
+    static int s_flat_base = -1;
+    if (s_flat_base < 0) s_flat_base = td5_env_int("TD5RE_RT_FLATBASE", 0, 0, 1);
+    int flat_base = s_flat_base && slot < 0 && td5_rt_active();
+
     /* [CAR DAMAGE 2026-06-28] Per-vertex damage "scuff": darken the diffuse on
      * struck panels so dents read as scuffed/scorched (a cheap texture-damage
      * look in the software lighting pass). NULL / 0 when no damage or off. */
@@ -881,6 +894,14 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
          * were never lit by the port before either). */
         if (norms_derived)
             continue;
+
+        /* [RT flat-base] Flat full-bright albedo -> RT is the only shading.
+         * Luminance index 0xFF (alpha 0) maps through the flush colour-LUT to the
+         * brightest gray, i.e. the texture at full modulation. */
+        if (flat_base) {
+            verts[i].lighting = TD5_LIGHTING_MAX;
+            continue;
+        }
 
         if (prelit && (vb[i].lighting & 0xFF000000u) != 0u) {
             uint32_t c = vb[i].lighting;          /* keep the #13 baked TD6 grey... */
@@ -3351,6 +3372,31 @@ void td5_render_configure_projection(int width, int height)
      * The old width*0.5625 locked the horizontal FOV, so widening the window
      * shrank the vertical FOV and pushed the car's shadow off the bottom. */
     s_focal_length = (float)height * 0.75f;
+
+    /* [FOV DISTORTION FIX 2026-08-03] Cap the HORIZONTAL FOV. Vertical-lock
+     * (focal = height*0.75) keeps the vertical framing on a widescreen window but
+     * lets the horizontal FOV widen without bound -- at 2560x1351 it reaches
+     * ~103 deg, whose extreme wide-angle rectilinear stretch is what distorts
+     * near-camera geometry + projected shadows at the screen edges (both the
+     * raster pipeline and RT, which reconstructs from the SAME s_focal_length).
+     * Raising the focal to whatever a horizontal-FOV cap requires narrows the
+     * horizontal view (and shrinks the vertical a little) so the edges stay
+     * rectilinear-sane. No-op at <= the cap (so 4:3 is byte-identical to the
+     * vertical-lock focal). Knob TD5RE_HFOV_MAX (degrees, default 90; set high
+     * e.g. 180 to disable the cap and restore pure Hor+). */
+    {
+        static float s_hfov_max = -1.0f;
+        if (s_hfov_max < 0.0f) {
+            const char *e = getenv("TD5RE_HFOV_MAX");
+            s_hfov_max = (e && e[0]) ? (float)atof(e) : 90.0f;
+            if (s_hfov_max < 40.0f)  s_hfov_max = 40.0f;
+            if (s_hfov_max > 175.0f) s_hfov_max = 175.0f;
+        }
+        float half_hfov_rad = s_hfov_max * 0.5f * (3.14159265358979323846f / 180.0f);
+        float min_focal = ((float)width * 0.5f) / tanf(half_hfov_rad);
+        if (s_focal_length < min_focal) s_focal_length = min_focal;
+    }
+
     s_inv_focal    = 1.0f / s_focal_length;
 
     /* Near/far clip.

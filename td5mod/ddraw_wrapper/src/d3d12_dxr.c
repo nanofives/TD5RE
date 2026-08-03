@@ -1010,7 +1010,6 @@ void Backend_RTSceneInstance(int mesh, const float m3x4[12], unsigned flags)
 {
     D3D12_RAYTRACING_INSTANCE_DESC *d;
     DxrMesh *m;
-    (void)flags;
     if (!g_dxr.scene_open || g_dxr.scene_count >= DXR_MAX_INSTANCES) return;
     if (mesh <= 0 || mesh > DXR_MAX_MESHES) return;
     m = &g_dxr.meshes[mesh - 1];
@@ -1019,7 +1018,14 @@ void Backend_RTSceneInstance(int mesh, const float m3x4[12], unsigned flags)
     d = &g_dxr.scene_inst[g_dxr.scene_count];
     memcpy(d->Transform, m3x4, 12 * sizeof(float));   /* row-major 3x4 */
     d->InstanceID = (UINT)(mesh - 1);                  /* P3: GeoRecord index = mesh slot */
-    d->InstanceMask = 0xFF;
+    /* [ROAD-CAST FIX 2026-08-03] `flags` = the TLAS InstanceMask (0 -> 0xFF for
+     * back-compat). Bit 0 (0x01) = "sun-shadow caster"; the sun-shadow ray traces
+     * with InstanceInclusionMask 0x01, so an instance fed with bit 0 CLEARED is
+     * invisible to shadow rays but still seen by reflection/primary rays (which
+     * trace 0xFF). Used to drop the flat synthetic road lane quads from shadow
+     * casting -- they only caused per-span self-shadow acne, and a road is a
+     * shadow RECEIVER (G-buffer pixel), not an occluder. */
+    d->InstanceMask = flags ? (UINT8)flags : 0xFF;
     d->InstanceContributionToHitGroupIndex = 0;        /* single hit group */
     d->Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
     d->AccelerationStructure = m->blas_va;

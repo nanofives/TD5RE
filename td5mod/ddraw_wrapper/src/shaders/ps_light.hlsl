@@ -48,6 +48,13 @@ struct PS_INPUT
     float2 uv  : TEXCOORD0;
 };
 
+/* [PERSPECTIVE DEPTH 2026-08-03] recover linear view-Z from perspective depth. */
+float depth_to_viewz(float d, float depthScale, float depthBias)
+{
+    float A = (depthBias + depthScale) / depthScale;
+    return depthBias * A / (A - d);
+}
+
 float4 main(PS_INPUT input) : SV_TARGET
 {
     int2 px = int2(input.pos.xy);
@@ -62,7 +69,7 @@ float4 main(PS_INPUT input) : SV_TARGET
     float depthBias  = misc.x;
     int   count      = (int)misc.y;
 
-    float vz = D * depthScale + depthBias;
+    float vz = depth_to_viewz(D, depthScale, depthBias);
     float sx = input.pos.x - misc.z;             /* pane-relative pixel coords */
     float sy = input.pos.y - misc.w;
     float vx = -(sx - rightCx.w) * vz / focal;
@@ -161,7 +168,7 @@ float4 main(PS_INPUT input) : SV_TARGET
                     break;
                 float sd = depthTex.Load(int3(int(psx + misc.z), int(psy + misc.w), 0)).r;
                 if (sd >= 0.99999) continue;
-                float svz = sd * depthScale + depthBias;
+                float svz = depth_to_viewz(sd, depthScale, depthBias);
                 float dz = pvz - svz;
                 if (dz > 8.0 + 0.04 * t && dz < 500.0)
                 {

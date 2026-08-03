@@ -112,6 +112,21 @@ struct PS_INPUT
  * D3D6 table fog uses the Z value from pre-transformed vertices as the
  * fog distance, with linear interpolation between fogStart and fogEnd.
  */
+/* [PERSPECTIVE DEPTH 2026-08-03] The vertex `depth` (TEXCOORD1) is now the
+ * perspective-correct normalized depth (td5_depth_persp), not the old linear
+ * (vz-NEAR)/RANGE. Fog is authored in the OLD linear-normalized space (fogStart/
+ * fogEnd are linear [0,1]), so convert back before the lerp to keep fog visually
+ * identical. NEAR/RANGE mirror the C constants NEAR_DEPTH_OFFSET / (1/DEPTH_
+ * NORMALIZE_INV). */
+#define TD5_DEPTH_NEAR   64.0
+#define TD5_DEPTH_RANGE  195000.0
+float td5_persp_depth_to_linear(float d)
+{
+    float A  = (TD5_DEPTH_NEAR + TD5_DEPTH_RANGE) / TD5_DEPTH_RANGE;
+    float vz = TD5_DEPTH_NEAR * A / (A - d);          /* inverse of td5_depth_persp */
+    return (vz - TD5_DEPTH_NEAR) / TD5_DEPTH_RANGE;   /* old linear normalized depth */
+}
+
 float4 ApplyFogAndAlphaTest(float4 color, float depth)
 {
     /* Alpha test: discard pixels below threshold (replaces D3D6 fixed-function alpha test).
@@ -122,8 +137,10 @@ float4 ApplyFogAndAlphaTest(float4 color, float depth)
 
     if (fogEnabled)
     {
-        /* Linear fog: factor = (end - z) / (end - start), clamped [0,1] */
-        float fogFactor = saturate((fogEnd - depth) / (fogEnd - fogStart));
+        /* Linear fog in the authored linear-depth space (convert from the new
+         * perspective depth first): factor = (end - z) / (end - start). */
+        float linDepth  = td5_persp_depth_to_linear(depth);
+        float fogFactor = saturate((fogEnd - linDepth) / (fogEnd - fogStart));
         color.rgb = lerp(fogColor.rgb, color.rgb, fogFactor);
     }
     return color;
