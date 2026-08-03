@@ -173,11 +173,19 @@ void rgen_shadow()
      * grey road = never shadowed because it wrote no G-buffer (root cause #1);
      * bright road = covered but the shadow ray missed the occluder (#2); dark
      * bands = shadows actually landing. Sky stays bright. */
-    bool sdbg = sh_params.x < 0.0f;
+    /* debug level: 1=raw vis, 2/3/4 = reconstructed world .x/.y/.z readout */
+    int dbgLvl = sh_params.x < 0.0f ? (int)(-sh_params.x + 0.5f) : 0;
+    bool sdbg = dbgLvl > 0;
     if (D >= 0.99999f)   { g_sunvis[fp] = 1.0f; return; }                /* sky = lit    */
     if (gb.a < 0.001f)   { g_sunvis[fp] = sdbg ? 0.5f : 1.0f; return; }  /* no gbuffer   */
 
     float3 world = rt_world_from_depth(D, float2(lpx), sh_camPosFocal, sh_rightCx, sh_upCy, sh_fwdDepthScale, sh_misc.x);
+    /* [shadow debug] reconstructed world-pos readout: sample the pixel under the
+     * car and decode value*scale, compare to the HUD car POS. Mismatch => the
+     * road's depth reconstruction is in a different frame than the geometry. */
+    if (dbgLvl == 2) { g_sunvis[fp] = saturate(abs(world.x) / 262144.0f); return; }
+    if (dbgLvl == 3) { g_sunvis[fp] = saturate(abs(world.y) /  65536.0f); return; }
+    if (dbgLvl == 4) { g_sunvis[fp] = saturate(abs(world.z) / 262144.0f); return; }
     float3 N = rt_gbuf_normal(gb);
     /* normal-offset bias, distance-scaled (24.8-quantized geometry -> acne).
      * sh_params2.y = TD5RE_RT_BIAS scale (car self-shadow tuning; 0 -> default 1). */
@@ -208,7 +216,7 @@ void rgen_shadow()
      * band on the road where the ray hit an occluder), covered+lit -> 1 (white).
      * If the road stays uniformly white, the shadow rays are missing the fed
      * geometry (occluder mis-placed in the TLAS); black bands = shadows land. */
-    if (sdbg) { g_sunvis[fp] = vis; return; }
+    if (dbgLvl == 1) { g_sunvis[fp] = vis; return; }
     g_sunvis[fp] = 1.0f - sh_misc.w * (1.0f - vis);
 }
 

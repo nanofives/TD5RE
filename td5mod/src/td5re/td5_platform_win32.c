@@ -3964,12 +3964,12 @@ void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
      * the RT rgen_shadow path) as a debug flag -> rgen_shadow tints no-G-buffer
      * ground grey so the composite reveals whether the road even has coverage. */
     {
-        static int s_sdbg = -1;
-        if (s_sdbg < 0) {
+        static int s_sdbg = -2;
+        if (s_sdbg == -2) {
             const char *e = getenv("TD5RE_RT_SHADOW_DEBUG");
-            s_sdbg = (e && e[0] && e[0] != '0') ? 1 : 0;
+            s_sdbg = (e && e[0]) ? atoi(e) : 0;   /* 1=raw vis, 2=world.x, 3=world.y, 4=world.z */
         }
-        if (s_sdbg) cb.params[0] = -1.0f;
+        if (s_sdbg > 0) cb.params[0] = -(float)s_sdbg;   /* negative magnitude = debug level */
     }
     cb.params[1] = thickness;
     cb.params[2] = start_off;
