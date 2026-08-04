@@ -2307,6 +2307,219 @@ void td5_camera_solve_tick_all(void)
         cam_solve_view(v);
 }
 
+/* ========================================================================
+ * [FREE CAMERA 2026-08-04] Dev-only free-roam ("fly") camera.
+ *
+ * A pure render-side override: while active it takes over pane 0's camera and
+ * writes g_cameraPos / g_cameraBasis directly through the same two primitives
+ * every camera mode uses (SetCameraWorldPosition + OrientCameraTowardTarget),
+ * so the renderer needs no special-casing. It NEVER touches the sim (physics /
+ * AI / replay), so determinism and golden traces are unaffected by design.
+ *
+ * Driven once per render frame from td5_camera_apply_view (view 0). Because the
+ * sim is paused while flying, the per-tick pose solver is frozen — so we
+ * integrate our own motion on WALL-CLOCK time (td5_plat_time_ms), not the
+ * frozen g_subTickFraction. All inputs are absolute-state reads (stick axes,
+ * key state, A/B buttons) so they work regardless of the paused sim's own
+ * input poll (mouse *delta* would be split between the two polls, so we look
+ * with the arrow keys / right stick instead of the mouse).
+ *
+ * Controls:
+ *   Keyboard: WASD move, arrows look, E/Q up/down, Shift boost, Esc exit.
+ *   Gamepad:  left stick move, right stick look, A/B up/down, X boost,
+ *             Start exit.  (Esc/Start exit is handled in td5_game.c.)
+ * Tuning: TD5RE_FREECAM_SPEED (world-units/sec), _LOOK (rad/sec for key/stick
+ *         look), _BOOST (speed multiplier while boosting).
+ * ======================================================================== */
+#ifndef TD5RE_RELEASE
+
+#define FREECAM_PITCH_LIMIT   1.4835f   /* ~85 deg — keep horiz_len non-zero    */
+#define FREECAM_LOOK_DIST_WU  100.0f    /* look-at target this far ahead of eye */
+#define FREECAM_STICK_DEAD    0.18f     /* analog dead-zone (normalized)        */
+
+static int      s_freecam_active = 0;
+static double   s_freecam_eye[3] = {0,0,0};   /* eye in 24.8 world units (double for smooth accumulation) */
+static float    s_freecam_yaw    = 0.0f;      /* radians, yaw about world +Y */
+static float    s_freecam_pitch  = 0.0f;      /* radians, +up                */
+static uint32_t s_freecam_last_ms = 0;
+
+/* Normalize a raw [-250..+250] analog axis to [-1..+1] with a dead-zone. */
+static float freecam_axis(int raw)
+{
+    float v = (float)raw / 250.0f;   /* axis span is [-250..+250] (TD5_PLAT_JS_AXIS_CENTER=0xFA) */
+    if (v >  1.0f) v =  1.0f;
+    if (v < -1.0f) v = -1.0f;
+    if (v > -FREECAM_STICK_DEAD && v < FREECAM_STICK_DEAD) return 0.0f;
+    return v;
+}
+
+int td5_camera_freecam_active(void) { return s_freecam_active; }
+
+void td5_camera_freecam_enter(void)
+{
+    const int v = 0;
+    TD5_CamPose *C = &s_cam_pose_cur[v];
+    int eye[3], look[3];
+
+    /* Seed the eye from the EXACT current render position (g_cameraPos is the
+     * float render eye written by the last apply_view), converted back to 24.8
+     * world units. This is mode-agnostic and avoids any pose-vs-render offset,
+     * so entering never nudges the viewpoint. */
+    if (g_worldToRenderScale > 0.0f) {
+        eye[0] = (int)(g_cameraPos[0] / g_worldToRenderScale);
+        eye[1] = (int)(g_cameraPos[1] / g_worldToRenderScale);
+        eye[2] = (int)(g_cameraPos[2] / g_worldToRenderScale);
+    } else if (C->valid) {
+        eye[0] = C->eye[0]; eye[1] = C->eye[1]; eye[2] = C->eye[2];
+    } else {
+        eye[0] = g_camWorldPos[v][0]; eye[1] = g_camWorldPos[v][1]; eye[2] = g_camWorldPos[v][2];
+    }
+    /* Seed the initial look direction so entering doesn't snap the view:
+     * prefer the followed car, then the mode's look-at target, else straight
+     * ahead down +Z. */
+    if (C->valid && C->anchor_valid) {
+        look[0] = C->anchor[0]; look[1] = C->anchor[1]; look[2] = C->anchor[2];
+    } else if (C->valid && C->build_mode == 0) {
+        look[0] = C->target[0]; look[1] = C->target[1]; look[2] = C->target[2];
+    } else {
+        look[0] = eye[0]; look[1] = eye[1]; look[2] = eye[2] + 0x10000;
+    }
+
+    s_freecam_eye[0] = (double)eye[0];
+    s_freecam_eye[1] = (double)eye[1];
+    s_freecam_eye[2] = (double)eye[2];
+
+    {
+        float dx = (float)(look[0] - eye[0]);
+        float dy = (float)(look[1] - eye[1]);
+        float dz = (float)(look[2] - eye[2]);
+        float horiz = sqrtf(dx * dx + dz * dz);
+        s_freecam_yaw   = atan2f(dx, dz);
+        s_freecam_pitch = (horiz > 0.0001f) ? atan2f(dy, horiz) : 0.0f;
+        if (s_freecam_pitch >  FREECAM_PITCH_LIMIT) s_freecam_pitch =  FREECAM_PITCH_LIMIT;
+        if (s_freecam_pitch < -FREECAM_PITCH_LIMIT) s_freecam_pitch = -FREECAM_PITCH_LIMIT;
+    }
+
+    s_freecam_last_ms = td5_plat_time_ms();
+    s_freecam_active  = 1;
+    TD5_LOG_I(LOG_TAG, "Free camera: ENTER eye=(%d,%d,%d) yaw=%.2f pitch=%.2f",
+              eye[0], eye[1], eye[2], (double)s_freecam_yaw, (double)s_freecam_pitch);
+}
+
+void td5_camera_freecam_exit(void)
+{
+    if (!s_freecam_active) return;
+    s_freecam_active = 0;
+    /* Re-anchor the chase smoothing so the resumed pose doesn't glide from the
+     * fly position across to the car on the first frame back. */
+    td5_camera_snap_smoothing();
+    TD5_LOG_I(LOG_TAG, "Free camera: EXIT");
+}
+
+void td5_camera_freecam_apply(void)
+{
+    if (!s_freecam_active) return;
+
+    /* --- wall-clock dt (sub-tick fraction is frozen while paused) --- */
+    uint32_t now = td5_plat_time_ms();
+    float dt = (float)(now - s_freecam_last_ms) * 0.001f;
+    s_freecam_last_ms = now;
+    if (dt < 0.0f)  dt = 0.0f;
+    if (dt > 0.100f) dt = 0.100f;   /* clamp long stalls (alt-tab, breakpoints) */
+
+    /* --- tunables (read once) --- */
+    static float s_speed = -1.0f, s_look = -1.0f, s_boost = -1.0f, s_strafe = -1.0f, s_mouse = -1.0f;
+    if (s_speed  < 0.0f) s_speed  = td5_env_float("TD5RE_FREECAM_SPEED",  320.0f,  5.0f, 20000.0f);
+    if (s_look   < 0.0f) s_look   = td5_env_float("TD5RE_FREECAM_LOOK",   2.2f,    0.1f, 20.0f);
+    if (s_boost  < 0.0f) s_boost  = td5_env_float("TD5RE_FREECAM_BOOST",  4.0f,    1.0f, 100.0f);
+    if (s_strafe < 0.0f) s_strafe = td5_env_float("TD5RE_FREECAM_STRAFE", 2.2f,    0.1f, 50.0f);   /* left/right speed multiplier */
+    if (s_mouse  < 0.0f) s_mouse  = td5_env_float("TD5RE_FREECAM_MOUSE",  0.005f,  0.0001f, 1.0f); /* middle-drag orbit, rad/pixel */
+
+    /* --- input (all absolute-state reads; this poll also refreshes s_keyboard) --- */
+    TD5_InputState in;
+    td5_plat_input_poll(0, &in);
+
+    float mv_fwd = 0.0f, mv_right = 0.0f, mv_up = 0.0f;   /* [-1..+1]-ish */
+    float rate_yaw = 0.0f, rate_pitch = 0.0f;             /* [-1..+1]-ish */
+    int   boost = 0;
+
+    /* Keyboard (DIK scancodes). */
+    if (td5_plat_input_key_pressed(0x11)) mv_fwd   += 1.0f;   /* W */
+    if (td5_plat_input_key_pressed(0x1F)) mv_fwd   -= 1.0f;   /* S */
+    if (td5_plat_input_key_pressed(0x20)) mv_right -= 1.0f;   /* D (inverted per request) */
+    if (td5_plat_input_key_pressed(0x1E)) mv_right += 1.0f;   /* A (inverted per request) */
+    if (td5_plat_input_key_pressed(0x12)) mv_up    += 1.0f;   /* E */
+    if (td5_plat_input_key_pressed(0x10)) mv_up    -= 1.0f;   /* Q */
+    if (td5_plat_input_key_pressed(0xC8)) rate_pitch += 1.0f; /* Up    */
+    if (td5_plat_input_key_pressed(0xD0)) rate_pitch -= 1.0f; /* Down  */
+    if (td5_plat_input_key_pressed(0xCB)) rate_yaw   -= 1.0f; /* Left  */
+    if (td5_plat_input_key_pressed(0xCD)) rate_yaw   += 1.0f; /* Right */
+    if (td5_plat_input_key_pressed(0x2A) || td5_plat_input_key_pressed(0x36)) boost = 1; /* Shift */
+
+    /* Gamepad: left stick move, right stick look. Stick "up" is a LOW axis
+     * value (below centre) => negative normalized, so forward/pitch-up negate.
+     * Strafe negated to match the inverted keyboard A/D. */
+    mv_right   += -freecam_axis(in.analog_x);
+    mv_fwd     += -freecam_axis(in.analog_y);
+    rate_yaw   += freecam_axis(in.analog_rx);
+    rate_pitch += -freecam_axis(in.analog_ry);
+
+    {
+        uint32_t nav = td5_plat_input_joystick_nav(0);
+        if (nav & 0x10) mv_up += 1.0f;   /* A = ascend  */
+        if (nav & 0x20) mv_up -= 1.0f;   /* B = descend */
+        if (nav & 0x80) boost = 1;       /* X = boost   */
+    }
+
+    /* --- integrate look: key/stick rate (per-second) + middle-drag orbit --- */
+    s_freecam_yaw   += rate_yaw   * s_look * dt;
+    s_freecam_pitch += rate_pitch * s_look * dt;
+    /* Hold MIDDLE mouse button and move to orbit the view. mouse_dx/dy are
+     * per-frame deltas (not rates), so they apply directly — and because the
+     * race input poll is suppressed while flying, this poll gets the full delta.
+     * Bit 2 (0x4) of mouse_buttons is the middle button (see td5_plat_input_poll). */
+    if (in.mouse_buttons & 0x4) {
+        s_freecam_yaw   -= (float)in.mouse_dx * s_mouse;   /* orbit L/R inverted per request */
+        s_freecam_pitch -= (float)in.mouse_dy * s_mouse;
+    }
+    if (s_freecam_pitch >  FREECAM_PITCH_LIMIT) s_freecam_pitch =  FREECAM_PITCH_LIMIT;
+    if (s_freecam_pitch < -FREECAM_PITCH_LIMIT) s_freecam_pitch = -FREECAM_PITCH_LIMIT;
+
+    /* --- basis vectors (world, Y-up) --- */
+    float cy = cosf(s_freecam_yaw),   sy = sinf(s_freecam_yaw);
+    float cp = cosf(s_freecam_pitch), sp = sinf(s_freecam_pitch);
+    float fwd[3]   = { sy * cp, sp, cy * cp };
+    float right[3] = { cy,      0.0f, -sy };   /* horizontal, perpendicular to fwd */
+
+    /* --- integrate position (24.8 world units) --- */
+    float speed = s_speed * (boost ? s_boost : 1.0f);
+    float step  = speed * dt * 256.0f;         /* world-units/sec -> 24.8 units this frame */
+    for (int i = 0; i < 3; i++) {
+        float up_i = (i == 1) ? 1.0f : 0.0f;
+        s_freecam_eye[i] += (double)((fwd[i] * mv_fwd
+                                      + right[i] * mv_right * s_strafe   /* faster left/right per request */
+                                      + up_i * mv_up) * step);
+    }
+
+    /* --- write the camera (same primitives every mode uses) --- */
+    int eye[3] = { (int)s_freecam_eye[0], (int)s_freecam_eye[1], (int)s_freecam_eye[2] };
+    float look_dist = FREECAM_LOOK_DIST_WU * 256.0f;
+    int tgt[3] = {
+        (int)(s_freecam_eye[0] + (double)(fwd[0] * look_dist)),
+        (int)(s_freecam_eye[1] + (double)(fwd[1] * look_dist)),
+        (int)(s_freecam_eye[2] + (double)(fwd[2] * look_dist)),
+    };
+    SetCameraWorldPosition(eye);
+    OrientCameraTowardTarget(tgt, 0);   /* -> FinalizeCameraProjectionMatrices */
+}
+
+#else  /* TD5RE_RELEASE — inert stubs, feature compiled out */
+int  td5_camera_freecam_active(void) { return 0; }
+void td5_camera_freecam_enter(void)  {}
+void td5_camera_freecam_exit(void)   {}
+void td5_camera_freecam_apply(void)  {}
+#endif /* TD5RE_RELEASE */
+
 /* Per-render-frame, per-viewport: interpolate the solved pose and re-pin the
  * car-locked components to the body-mesh extrapolation, then build the basis. */
 void td5_camera_apply_view(int view)
@@ -2314,6 +2527,11 @@ void td5_camera_apply_view(int view)
     if (!td5_camera_use_new_pipeline()) { td5_camera_update_transition_state(view, view); return; }
     int v = view;
     if (v < 0 || v >= TD5_MAX_VIEWPORTS) return;
+#ifndef TD5RE_RELEASE
+    /* [FREE CAMERA] Dev free-roam takes over pane 0 while active. Other panes
+     * fall through to the (frozen, sim-paused) normal pipeline. */
+    if (v == 0 && s_freecam_active) { td5_camera_freecam_apply(); return; }
+#endif
     TD5_CamPose *C = &s_cam_pose_cur[v];
     if (!C->valid) return;
     TD5_CamPose *P = s_cam_pose_init[v] ? &s_cam_pose_prev[v] : C;

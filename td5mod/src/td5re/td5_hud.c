@@ -422,6 +422,7 @@ static const char *s_eng_pause_strings[] = {
     "SOUND",          (const char *)(intptr_t)0,
     "RADIO",          (const char *)(intptr_t)0,
     "CONTINUE",       (const char *)(intptr_t)2,
+    "FREE CAMERA",    (const char *)(intptr_t)2,   /* [FREE CAMERA 2026-08-04] DEV-only row (skipped in RELEASE) */
     "RESTART RACE",   (const char *)(intptr_t)2,
     "END RACE NOW",   (const char *)(intptr_t)2,   /* [END RACE NOW 2026-06-30] force-finish */
     "BACK TO LOBBY",  (const char *)(intptr_t)2,
@@ -5775,6 +5776,12 @@ void td5_hud_render_overlays(float dt)
             int cd_level = g_cameraTransitionActive / 0x2800;
             indicator_digit = (cd_level <= 2) ? (cd_level + 1) : 0;
         }
+#ifndef TD5RE_RELEASE
+        /* [FREE CAMERA 2026-08-04] Hide the 3/2/1 start countdown digit while
+         * flying the free-roam camera — the sim is frozen, so the digit would
+         * just sit on screen cluttering the inspection view. */
+        if (td5_camera_freecam_active()) indicator_digit = 0;
+#endif
         if (indicator_digit >= 1 && indicator_digit <= 9 && s_numbers_atlas) {
             int digit_val = indicator_digit;
 
@@ -7660,8 +7667,10 @@ void td5_hud_init_pause_menu(int page_index)
      * identical gate in the pause-menu row math in td5_game.c. */
 #ifdef TD5RE_RELEASE
     int endrace_row = local_mp;
+    int freecam_row = 0;   /* [FREE CAMERA] dev-only — never shown in RELEASE */
 #else
     int endrace_row = 1;
+    int freecam_row = 1;   /* [FREE CAMERA] dev builds always expose the row */
 #endif
     {
         float bu = (float)blackbox_e->atlas_x + 0.5f;
@@ -7674,7 +7683,7 @@ void td5_hud_init_pause_menu(int page_index)
          * fixed 100/116 for the two cases that existed before this gating
          * (single-player=84 now vs 100 before, since END RACE NOW no longer
          * shows there; MP unchanged at 116). */
-        float panel_bottom = 84.0f + 16.0f * ((endrace_row ? 1 : 0) + (pause_mp ? 1 : 0));
+        float panel_bottom = 84.0f + 16.0f * ((endrace_row ? 1 : 0) + (pause_mp ? 1 : 0) + (freecam_row ? 1 : 0));
         PAUSE_ADD(-s_pause_half_width, -56.0f,
                    s_pause_half_width,  panel_bottom,
                    bu, bv, bu, bv,
@@ -7770,6 +7779,13 @@ void td5_hud_init_pause_menu(int page_index)
          * menu; single-player and plain network-only (1 local human) races drop
          * the row, same skip-without-advancing-y pattern as BACK TO LOBBY. */
         if (!endrace_row && strcmp(str, "END RACE NOW") == 0) {
+            string_offset += 8;
+            continue;
+        }
+
+        /* [FREE CAMERA 2026-08-04] Dev-only free-roam row — omit in RELEASE
+         * (same skip-without-advancing-y pattern as the gated rows above). */
+        if (!freecam_row && strcmp(str, "FREE CAMERA") == 0) {
             string_offset += 8;
             continue;
         }

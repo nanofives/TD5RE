@@ -5994,7 +5994,12 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
                 int nb = td5_game_net_try_sync();
                 if (nb <= 0) break;   /* 0 = round pending (interpolate); -1 = failed (fade armed) */
             }
-        } else {
+        } else if (!td5_camera_freecam_active()) {
+            /* [FREE CAMERA 2026-08-04] While free-roam is active the sim is frozen
+             * and the fly cam owns input — skip the race poll so it doesn't drain
+             * the DI mouse *delta* (middle-click orbit) out from under the cam's
+             * own once-per-render-frame poll. Keyboard/pad reads are absolute
+             * state and unaffected; the fly cam's poll keeps s_keyboard fresh. */
             td5_input_poll_race_session();
         }
 
@@ -6082,6 +6087,41 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
             TD5_LOG_I(LOG_TAG, "Replay: reached end of recording (%d frames) -> fade out to results",
                       td5_replay_frame_count());
             td5_game_begin_fade_out(0);
+        }
+        /* [FREE CAMERA 2026-08-04] Esc (fresh keyboard) or Start (fresh pad read)
+         * exits free-roam back to the pause menu. The race input poll is skipped
+         * while flying, so pause_act's control bits are stale — read the pad
+         * directly here instead. Reopen the menu inline (seeding nav + muting
+         * audio exactly like the open path below) and consume the edge so the
+         * open block doesn't re-toggle. Dev-only: freecam_active() is a hard 0 in
+         * RELEASE, so this whole block folds away there. */
+        if (td5_camera_freecam_active()) {
+            static int s_prev_freecam_start = 0;
+            uint32_t fnav = 0;
+            int hp = g_td5.num_human_players;
+            if (hp < 1) hp = 1;
+            if (hp > TD5_MAX_HUMAN_PLAYERS) hp = TD5_MAX_HUMAN_PLAYERS;
+            for (int pi = 0; pi < hp; pi++) fnav |= td5_plat_input_joystick_nav(pi);
+            int start_now = (fnav & 0x40) ? 1 : 0;   /* Start/Menu, added to nav for this */
+            if (esc_edge || (start_now && !s_prev_freecam_start)) {
+                td5_camera_freecam_exit();
+                s_pause_menu_active = 1;
+                s_pause_menu_cursor = 3;   /* CONTINUE */
+                /* Seed nav edge-state from held inputs so a held move key/stick
+                 * can't auto-navigate the reopened menu on frame 1 (BUGFIX #15). */
+                s_prev_up    = (td5_plat_input_key_pressed(0xC8) || (fnav & 0x04)) ? 1 : 0;
+                s_prev_down  = (td5_plat_input_key_pressed(0xD0) || (fnav & 0x08)) ? 1 : 0;
+                s_prev_left  = (td5_plat_input_key_pressed(0xCB) || (fnav & 0x01)) ? 1 : 0;
+                s_prev_right = (td5_plat_input_key_pressed(0xCD) || (fnav & 0x02)) ? 1 : 0;
+                s_prev_enter = (td5_plat_input_key_pressed(0x1C) || (fnav & 0x10)) ? 1 : 0;
+                s_prev_jb    = (fnav & 0x20) ? 1 : 0;
+                td5_sound_set_sfx_muted(1);
+                td5_sound_cd_stop();
+                td5_sound_set_paused(1);
+                td5_input_ff_stop();
+                TD5_LOG_I(LOG_TAG, "Free camera: exit -> pause menu reopened");
+            }
+            s_prev_freecam_start = start_now;
         }
         if ((esc_edge || pause_act_edge) && !s_pause_menu_active && !td5_game_is_cinematic_race()) {
             s_pause_menu_active = 1;
@@ -6180,14 +6220,23 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
                  * td5_hud_init_pause_menu. */
 #ifdef TD5RE_RELEASE
                 int endrace_present = local_mp;
+                int freecam_present = 0;   /* [FREE CAMERA] dev-only */
 #else
                 int endrace_present = 1;
+                int freecam_present = 1;
 #endif
+                /* [FREE CAMERA 2026-08-04] FREE CAMERA sits directly under
+                 * CONTINUE (dev builds only) — see the matching string-table
+                 * order + skip in td5_hud_init_pause_menu. It's an action row,
+                 * so the slider gate (cursor < 3) is unaffected; every action
+                 * row below it shifts down by fc. */
+                int fc = freecam_present ? 1 : 0;
                 int row_continue = 3;
-                int row_restart  = 4;
-                int row_endrace  = endrace_present ? 5 : -1;          /* -1 = row not present */
-                int row_lobby    = mp_any ? (5 + (endrace_present ? 1 : 0)) : -1;
-                int row_quit     = 5 + (endrace_present ? 1 : 0) + (mp_any ? 1 : 0);
+                int row_freecam  = freecam_present ? 4 : -1;          /* -1 = row not present */
+                int row_restart  = 4 + fc;
+                int row_endrace  = endrace_present ? (5 + fc) : -1;   /* -1 = row not present */
+                int row_lobby    = mp_any ? (5 + fc + (endrace_present ? 1 : 0)) : -1;
+                int row_quit     = 5 + fc + (endrace_present ? 1 : 0) + (mp_any ? 1 : 0);
                 int row_exit     = row_quit + 1;
                 int pause_rows   = row_exit + 1;
                 /* Freeze cursor movement while a confirmation prompt (END RACE NOW
@@ -6275,6 +6324,16 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
                     } else if (s_pause_menu_cursor == row_continue) {
                         /* CONTINUE — close the menu, resume the race. */
                         s_pause_menu_active = 0;
+                    } else if (row_freecam >= 0 && s_pause_menu_cursor == row_freecam) {
+                        /* [FREE CAMERA 2026-08-04] Close the pause menu but KEEP
+                         * the sim paused (don't clear g_td5.paused), and hand
+                         * pane 0's camera to the free-roam fly cam. Start/Esc
+                         * later exits back to this menu (see the interception at
+                         * the top of the pause-toggle block). Dev builds only —
+                         * row_freecam is -1 in RELEASE so this is unreachable. */
+                        s_pause_menu_active = 0;
+                        td5_camera_freecam_enter();
+                        TD5_LOG_I(LOG_TAG, "Pause menu: FREE CAMERA selected -> free-roam (sim stays paused)");
                     } else if (row_endrace >= 0 && s_pause_menu_cursor == row_endrace) {
                         /* [END RACE NOW 2026-06-30][GATED 2026-07-02] Arm the
                          * confirmation prompt (don't end yet). A second ENTER
@@ -6389,6 +6448,14 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
                  * radio stays muted on the pause menu (mirrors the SFX preview on
                  * the SOUND row). */
                 td5_plat_radio_set_playing(s_pause_menu_cursor == 2 ? 1 : 0);
+            } else if (pause_menu_was_active && td5_camera_freecam_active()) {
+                /* [FREE CAMERA 2026-08-04] Menu closed INTO free-roam: keep the
+                 * race silent while flying (no engine/skid SFX, no music). The
+                 * sim is frozen anyway; audio resumes when free-roam exits back
+                 * to the menu and the user hits CONTINUE. */
+                td5_sound_set_sfx_muted(1);
+                td5_sound_set_paused(1);
+                td5_plat_radio_set_playing(0);
             } else if (pause_menu_was_active) {
                 td5_sound_set_sfx_muted(0);
                 td5_sound_set_paused(0);  /* [item 24] resume audio + restore music volume */
@@ -6440,6 +6507,20 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
          * per-viewport reconnect modal is drawn in the HUD render path. The input
          * poll at the top of the loop keeps running so reconnect is detected. */
         if (s_disconnect_pause_active) {
+            g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
+            ticks_this_frame++;
+            td5_game_trace_stage("pause_menu", ticks_this_frame);
+            continue;
+        }
+
+        /* [FREE CAMERA 2026-08-04] Free-roam closes the pause menu but the sim
+         * must STAY frozen — the menu's own freeze keys on s_pause_menu_active
+         * (cleared on enter), so without this the field would resume moving
+         * under the fly cam. Drain a tick exactly like the pause-menu / disconnect
+         * freeze above (skip physics + AI). Input keeps being polled at the top
+         * of the loop, so the Start/Esc exit still fires. Dev-only: active() is a
+         * hard 0 in RELEASE. */
+        if (td5_camera_freecam_active()) {
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
             td5_game_trace_stage("pause_menu", ticks_this_frame);
