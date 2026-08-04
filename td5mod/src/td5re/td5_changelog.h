@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 4" },
+    { CL_ITEM,    "FIX: cars default to AUTOMATIC again; the car-select" },
+    { CL_ITEM,    "  Manual/Automatic toggle is now what actually drives" },
+    { CL_ITEM,    "  the gearbox (no longer force-overridden by the INI)." },
     { CL_ITEM,    "NEW (HIGH lighting): per-part car reflections. Car" },
     { CL_ITEM,    "  glass/windows mirror the scene while the painted" },
     { CL_ITEM,    "  body stays solid (was see-through) and lights don't" },

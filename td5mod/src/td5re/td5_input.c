@@ -876,11 +876,17 @@ void td5_input_poll_race_session(void)
          * (i < s_active_players), so the AI opponent in drag is unaffected.
          * Otherwise honor the [GameOptions] AutoGearbox INI key.
          *
-         * [#2 2026-06-15] The car-select MANUAL/AUTOMATIC toggle now also drives
-         * this: if THIS player picked MANUAL in the menu, set the manual bit even
-         * when AutoGearbox=1 (per-player in split-screen via
-         * td5_frontend_get_player_manual). Gated by TD5RE_MANUAL_GEARBOX (default
-         * ON; "0" reverts to the legacy auto_gearbox/drag-only behaviour). */
+         * [#2 2026-06-15] The car-select MANUAL/AUTOMATIC toggle drives this: the
+         * per-player menu pick (td5_frontend_get_player_manual, per-player in
+         * split-screen) is the authoritative source. Gated by TD5RE_MANUAL_GEARBOX
+         * (default ON; "0" reverts to the legacy auto_gearbox/drag-only behaviour).
+         *
+         * [#2 2026-08-04] The menu toggle is now authoritative over [GameOptions]
+         * AutoGearbox: that INI key only SEEDS the menu's initial value (see
+         * td5_frontend.c init points) and no longer force-overrides the pick. The
+         * old `!auto_gearbox` OR-term forced MANUAL whenever AutoGearbox=0 even when
+         * the menu showed "Automatic". Drag race still hard-forces manual. When the
+         * manual layer is disabled (env "0") the legacy INI/drag-only path stands. */
         {
             static int s_manual_gearbox = -1;
             if (s_manual_gearbox < 0) {
@@ -889,8 +895,9 @@ void td5_input_poll_race_session(void)
                 TD5_LOG_I(LOG_TAG, "menu manual gearbox (#2) %s (TD5RE_MANUAL_GEARBOX=%s)",
                           s_manual_gearbox ? "ENABLED" : "disabled", e ? e : "default");
             }
-            int want_manual = !g_td5.ini.auto_gearbox || g_td5.drag_race_enabled ||
-                              (s_manual_gearbox && td5_frontend_get_player_manual(i));
+            int want_manual = s_manual_gearbox
+                ? (g_td5.drag_race_enabled || td5_frontend_get_player_manual(i))
+                : (!g_td5.ini.auto_gearbox || g_td5.drag_race_enabled);
             if (want_manual)
                 s_control_bits[i] |=  0x10000000u;   /* manual (gear keys honored) */
             else

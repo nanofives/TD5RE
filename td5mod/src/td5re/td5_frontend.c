@@ -3198,7 +3198,9 @@ void td5_frontend_auto_race_setup(void) {
     s_selected_track     = g_td5.ini.default_track;
     s_selected_game_type = g_td5.ini.default_game_type;
     s_selected_paint     = 0;
-    s_selected_transmission = 0;
+    /* Seed the menu toggle from [GameOptions] AutoGearbox (1=auto->0, 0=manual->1);
+       the menu is authoritative thereafter (td5_input.c). */
+    s_selected_transmission = g_td5.ini.auto_gearbox ? 0 : 1;
     s_track_direction    = g_td5.ini.default_reverse ? 1 : 0;
     g_td5.reverse_direction = s_track_direction;
     TD5_LOG_I(LOG_TAG, "AutoRace: track_direction=%s (DefaultReverse=%d)",
@@ -10479,7 +10481,10 @@ int td5_frontend_init(void) {
     /* s_paint_active persists across car-select entries (e.g. returning from a
      * race) so a chosen colour stays applied; it starts 0 (neutral) only at
      * launch and is set when the player first confirms a paint colour. */
-    s_selected_transmission = 0;
+    /* Seed the menu toggle from [GameOptions] AutoGearbox (1=auto->0, 0=manual->1);
+       the menu is authoritative thereafter (td5_input.c). Default AUTO when the
+       INI has not loaded. */
+    s_selected_transmission = (g_td5.ini.loaded && !g_td5.ini.auto_gearbox) ? 1 : 0;
     s_selected_track = g_td5.ini.loaded ? g_td5.ini.default_track : 0;
     s_track_direction = 0;
     s_network_active = 0;
