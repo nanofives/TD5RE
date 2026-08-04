@@ -35,6 +35,7 @@ int       td5_rcmd_recording(void);       /* 1 if this thread is recording      
  * thread isn't recording (callers gate on td5_rcmd_recording()). */
 void td5_rcmd_set_preset(int preset);
 void td5_rcmd_set_fog(int enable, uint32_t color, float start, float end, float density);
+void td5_rcmd_set_car_sun(float gain);  /* [CAR SUN] per-draw sunlit-car brighten gain */
 void td5_rcmd_bind_texture(int slot);   /* direct page->GPU bind (no cache) */
 void td5_rcmd_bind_page(int page);      /* cache-managed bind, resolved at replay */
 void td5_rcmd_set_viewport(int x, int y, int w, int h);

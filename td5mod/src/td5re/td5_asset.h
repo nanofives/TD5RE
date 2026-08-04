@@ -406,6 +406,11 @@ typedef enum {
 int td5_asset_load_png_texture(int page_index, const char *png_path,
                                TD5_ColorKeyMode colorkey);
 
+/* [CAR REFL] Load a car skin with the offline material-mask matid baked into its
+ * alpha (carmatmask0.png). See td5_asset.c. */
+int td5_asset_load_vehicle_skin_matid(int page_index, const char *skin_path,
+                                      const char *matmask_path);
+
 /**
  * Load a PNG texture into a caller-owned pixel buffer (BGRA32, GPU-ready).
  * Applies color keying in-place. Caller must free *pixels_out with free().

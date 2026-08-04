@@ -259,6 +259,10 @@ void Backend_UpdateViewportCB(float w, float h); /* Upload viewport constant buf
  * a viewport, before translucent VFX/HUD). No-op if depth_srv/ps_light are NULL. */
 void Backend_ApplyLightPass(const LightCB *cb);
 
+/* [CAR SUN] Set the per-draw sunlit-car brighten gain (folded into the next
+ * draws' FogCB). Raise before a car-body draw, clear (0) after. */
+void Backend_SetCarSun(float gain);
+
 /* [P2] Screen-space ray-marched sun-shadow pass: fullscreen MULTIPLICATIVE
  * draw over the CURRENT viewport that darkens pixels whose path to the sun is
  * blocked by on-screen geometry (depth-buffer march). Run AFTER the opaque

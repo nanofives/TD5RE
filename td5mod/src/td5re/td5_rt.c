@@ -24,6 +24,7 @@
 #include "td5_camera.h"
 #include "td5_race_state.h"
 #include "td5_ai.h"
+#include "td5_input.h"      /* td5_input_is_playback_active (chassis-lift parity) */
 #include "../../../re/include/td5_actor_struct.h"
 
 #include <stdlib.h>
@@ -523,12 +524,22 @@ static int rt_build_scenery_mesh(const TD5_MeshHeader *mesh, unsigned matid_flag
      * them). Feed such meshes with InstanceMask bit 0 cleared (0xFE) so shadow rays
      * (mask 0x01) skip them; walls/buildings/posts (tall) keep 0xFF and cast.
      * TD5RE_RT_FLATSHADOW=1 restores flat meshes as casters (A/B). */
+    /* [2026-08-03] Default: flat scenery meshes DO cast now. The per-span
+     * self-shadow stripe this exclusion originally suppressed was really the
+     * screen-linear (non-perspective) depth reconstruction bug — fixed by the
+     * perspective-depth work + shadow back-face cull. With that fixed, excluding
+     * "flat" meshes only mis-fired on real wall/kerb chunks whose bbox happens to
+     * be long+wide+low (a wide-based barrier along the road), so some road spans
+     * lost their wall shadow. Set TD5RE_RT_FLATSHADOW=0 to restore the old
+     * flat-slab exclusion (heuristic below) for A/B. */
     if (out_mask && handle) {
         static int s_flatshadow = -1;
-        if (s_flatshadow < 0) s_flatshadow = td5_env_int("TD5RE_RT_FLATSHADOW", 0, 0, 1);
-        float hx = bbmax[0]-bbmin[0], hy = bbmax[1]-bbmin[1], hz = bbmax[2]-bbmin[2];
-        int flat = (hx > 200.0f && hz > 200.0f && hy < 0.25f*hx && hy < 0.25f*hz);
-        if (flat && !s_flatshadow) *out_mask = 0xFEu;   /* not a sun-shadow caster */
+        if (s_flatshadow < 0) s_flatshadow = td5_env_int("TD5RE_RT_FLATSHADOW", 1, 0, 1);
+        if (!s_flatshadow) {
+            float hx = bbmax[0]-bbmin[0], hy = bbmax[1]-bbmin[1], hz = bbmax[2]-bbmin[2];
+            int flat = (hx > 200.0f && hz > 200.0f && hy < 0.25f*hx && hy < 0.25f*hz);
+            if (flat) *out_mask = 0xFEu;   /* not a sun-shadow caster */
+        }
     }
     free(verts); free(idx);
     return handle;
@@ -681,13 +692,34 @@ static void rt_build_tlas(void)
 
         h = rt_actor_mesh_handle(mesh);
         if (!h) continue;
-        /* model->world 3x4 (row-major): [ rotation_matrix | world_pos/256 ].
-         * world_pos (24.8 fixed) is the authoritative position for all three
-         * axes; render_pos.y is not populated at this point in the frame. */
+        /* model->world 3x4 (row-major): [ rotation_matrix | translation/256 ].
+         *
+         * [SHADOW SYNC 2026-08-03] Match the SUB-TICK-EXTRAPOLATED pose the body
+         * mesh is RASTERISED at (td5_render_mesh.c ~2902):
+         *   render = world_pos + linear_velocity * g_subTickFraction   (per axis)
+         * plus the racer chassis height lift. Feeding the raw world_pos here made
+         * the shadow OCCLUDER trail the visible car by velocity*subtick — the car
+         * shadow "falling behind then syncing after a few frames" at speed. The
+         * same |vy| clamp as the render path guards a cold-spawn garbage vertical
+         * speed. Rotation stays the physics attitude (rotation_matrix), unchanged. */
         {
-            float px = (float)actor->world_pos.x * RT_INV256;
-            float py = (float)actor->world_pos.y * RT_INV256;
-            float pz = (float)actor->world_pos.z * RT_INV256;
+            float frac = g_subTickFraction;
+            int   vy_raw = actor->linear_velocity_y;
+            float vy_extrap = (vy_raw > 0x40000 || vy_raw < -0x40000)
+                                  ? 0.0f : (float)vy_raw * frac;
+            float ix = (float)actor->world_pos.x + (float)actor->linear_velocity_x * frac;
+            float iy = (float)actor->world_pos.y + vy_extrap;
+            float iz = (float)actor->world_pos.z + (float)actor->linear_velocity_z * frac;
+            /* Racer chassis lift (g_trackHeightBaseOffset << 8): -36 normally,
+             * -18 under replay playback. Traffic (slot >= base) skips it, matching
+             * the render path's racer-only gate. */
+            if (slot < g_traffic_slot_base) {
+                int hbo = td5_input_is_playback_active() ? -18 : -36;
+                iy -= (float)(hbo << 8);
+            }
+            float px = ix * RT_INV256;
+            float py = iy * RT_INV256;
+            float pz = iz * RT_INV256;
             m[0]=actor->rotation_matrix.m[0]; m[1]=actor->rotation_matrix.m[1]; m[2]=actor->rotation_matrix.m[2];  m[3]=px;
             m[4]=actor->rotation_matrix.m[3]; m[5]=actor->rotation_matrix.m[4]; m[6]=actor->rotation_matrix.m[5];  m[7]=py;
             m[8]=actor->rotation_matrix.m[6]; m[9]=actor->rotation_matrix.m[7]; m[10]=actor->rotation_matrix.m[8]; m[11]=pz;

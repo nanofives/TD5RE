@@ -179,6 +179,10 @@ typedef struct {
                               * alpha-weighted manual reconstruction in
                               * SampleFoliageAA (ps_common.hlsli) instead of
                               * texMap.Sample(); 0.0 = normal sampling. */
+    float   carSun[4];      /* [CAR SUN 2026-08-03] w = sunlit-car brighten gain
+                              * (per-draw; >0 only for car-body draws under RT).
+                              * xyz reserved for a future sun-direction N·L gate.
+                              * ps_modulate_g does color.rgb *= (1 + w). */
 } FogCB;
 
 /* Deferred dynamic-light pass constant buffer (mirrors ps_light.hlsl LightCB).

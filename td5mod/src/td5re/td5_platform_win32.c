@@ -3896,6 +3896,17 @@ void td5_plat_render_set_gbuffer(int on)
     Backend_SetGBufferEnabled(on);
 }
 
+void td5_plat_render_set_car_sun(float gain)
+{
+    if (g_backend.device_removed) return;
+    /* Deferred pane path: record so the gain replays IN ORDER with the car's
+     * draw (a bare backend global would be read at replay time — after the game
+     * already reset it — leaving race-frame car draws unbrightened; the immediate
+     * first frame worked, deferred race frames did not). */
+    if (td5_rcmd_recording()) { td5_rcmd_set_car_sun(gain); return; }
+    Backend_SetCarSun(gain);
+}
+
 /* [RT lighting] DXR capability passthrough. */
 int td5_plat_rt_available(void)
 {

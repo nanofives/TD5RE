@@ -104,6 +104,20 @@ static inline float td5_depth_persp(float vz)
     /* vz is guarded > near clip by every caller; NEAR/vz is finite. */
     return TD5_DEPTH_A * (1.0f - NEAR_DEPTH_OFFSET / vz);
 }
+/* [PERSPECTIVE DEPTH 2026-08-03] Perspective depth with a toward-camera bias.
+ * The pre-perspective-depth code expressed coplanar z-fight bias as a fixed
+ * NORMALIZED-depth subtraction "- N*DEPTH_NORMALIZE_INV", which was really a
+ * pull of N VIEW-Z units in the old LINEAR depth space. In perspective depth a
+ * fixed normalized subtraction is no longer a fixed view-z pull, so the bias
+ * must be applied to vz BEFORE encoding: pull the surface pull_vz units toward
+ * the camera, then encode. Monotonic, so the LESS/LEQUAL z-test sense is kept;
+ * clamp so the biased vz never crosses the near plane. */
+static inline float td5_depth_persp_pull(float vz, float pull_vz)
+{
+    float v = vz - pull_vz;
+    if (v < 1.0f) v = 1.0f;
+    return td5_depth_persp(v);
+}
 #define TIRE_DECAL_BIAS      40.0f                /* tire-mark decal pull toward camera (view units); 40 clears z-fight speckle on bumpy cobblestone while the car (far closer) still occludes */
 
 /** Billboard depth sort stride sizes (bytes) */

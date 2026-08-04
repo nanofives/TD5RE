@@ -440,8 +440,7 @@ static void render_vehicle_shadow_quad_legacy(const TD5_Actor *actor)
          * road can't z-fight the shadow. The nudge is far below the car-body
          * gap, so it never reaches the car (no over-car). Bias affects depth
          * compare only, NOT screen projection (computed from raw vz above). */
-        verts[i].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV
-                            - SHADOW_DEPTH_Z_BIAS;
+        verts[i].depth_z  = td5_depth_persp_pull(vz, SHADOW_PULL_VIEWZ);
         verts[i].rhw      = inv_z;
         /* white — alpha comes from texture, scaled by the actor fade
          * ([dynamic-traffic]; 255 = identity, MODULATEALPHA preset). */
@@ -823,9 +822,12 @@ static void render_vehicle_shadow_conforming(const TD5_Actor *actor)
      * (angle-dependent shimmer). Anti-flicker raises the pull to ~6 view-z, still
      * an order of magnitude below the car-body depth gap (tens of view-z) so it
      * can never reach the body. =0 keeps the historical SHADOW_DEPTH_Z_BIAS. */
-    const float shadow_depth_bias = shadow_antiflicker_enabled()
-        ? (6.0f * DEPTH_NORMALIZE_INV)
-        : SHADOW_DEPTH_Z_BIAS;
+    /* Toward-camera pull in VIEW-Z units (perspective-depth aware, see
+     * td5_depth_persp_pull). Anti-flicker uses ~6 view-z, else the historical
+     * SHADOW_PULL_VIEWZ. */
+    const float shadow_pull_vz = shadow_antiflicker_enabled()
+        ? 6.0f
+        : SHADOW_PULL_VIEWZ;
 
     TD5_D3DVertex verts[SHADOW_GRID_NODES];
     for (int n = 0; n < SHADOW_GRID_NODES; n++) {
@@ -855,7 +857,7 @@ static void render_vehicle_shadow_conforming(const TD5_Actor *actor)
         float inv_z = 1.0f / vz;
         verts[n].screen_x = -vx * s_focal_length * inv_z + s_center_x;
         verts[n].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-        verts[n].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV - shadow_depth_bias;
+        verts[n].depth_z  = td5_depth_persp_pull(vz, shadow_pull_vz);
         verts[n].rhw      = inv_z;
         /* black RGB + soft alpha (BGRA), scaled by the actor fade
          * ([dynamic-traffic]; identity when no fade is active). */
@@ -1081,7 +1083,7 @@ void render_td6_props(const TD5_Actor *ref)
             if (sh > 255) sh = 255;
             vb[v].screen_x = -vx *s_focal_length*invz + s_center_x;
             vb[v].screen_y = -vyv*s_focal_length*invz + s_center_y;
-            vb[v].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
+            vb[v].depth_z  = td5_depth_persp(vz);
             vb[v].rhw      = invz;
             vb[v].diffuse  = 0xFF000000u | ((uint32_t)sh<<16) | ((uint32_t)sh<<8) | (uint32_t)sh;
             vb[v].specular = 0;
@@ -1278,7 +1280,7 @@ void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
          * brake's depth is directly comparable to the body depth buffer now that
          * the brake is z-tested (LEQUAL). Minus a small toward-camera pull so the
          * flat billboard reliably wins against its own angled rear surface. */
-        float depth = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV - BRAKE_DEPTH_BIAS;
+        float depth = td5_depth_persp_pull(vz, BRAKE_PULL_VIEWZ);
 
         /* Screen-space half-size: perspective-scale the billboard */
         float h = half_size * s_focal_length * inv_z;
@@ -1440,7 +1442,7 @@ static void render_vehicle_headlight_flood(const TD5_Actor *actor)
             float inv_z = 1.0f/vz;
             verts[n].screen_x = -vx*s_focal_length*inv_z + s_center_x;
             verts[n].screen_y = -vy*s_focal_length*inv_z + s_center_y;
-            verts[n].depth_z  = (vz-NEAR_DEPTH_OFFSET)*DEPTH_NORMALIZE_INV - s_flood_zbias*DEPTH_NORMALIZE_INV;
+            verts[n].depth_z  = td5_depth_persp_pull(vz, s_flood_zbias);
             verts[n].rhw = inv_z; verts[n].diffuse = col; verts[n].specular = 0;
             verts[n].tex_u = 0.0f; verts[n].tex_v = 0.0f;
         }
@@ -1530,7 +1532,7 @@ void render_vehicle_headlights(const TD5_Actor *actor, int slot)
         float inv_z = 1.0f / vz;
         float cx = -vx * s_focal_length * inv_z + s_center_x;
         float cy = -vy * s_focal_length * inv_z + s_center_y;
-        float depth = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV - BRAKE_DEPTH_BIAS;
+        float depth = td5_depth_persp_pull(vz, BRAKE_PULL_VIEWZ);
         float h = half_size * s_focal_length * inv_z;
 
         TD5_D3DVertex v[4];
@@ -1635,7 +1637,7 @@ static void tracked_marker_emit_quad_world(const float corners_world_xy[4][2],
     if (glow_fx) { u0 = 0.0f; v0 = 0.0f; u1 = 1.0f; v1 = 1.0f; }
 
     float inv_z = 1.0f / shared_world_z;
-    float depth = shared_world_z * (1.0f / s_far_clip);
+    float depth = td5_depth_persp(shared_world_z);
 
     /* Project each corner using the same focal/center convention as the
      * single-center path above (mirrors td5_render_project). */
@@ -2580,7 +2582,7 @@ static int wheel_project(const float *m, float wx, float wy, float wz,
     float iz = 1.0f / vz;
     out->screen_x = -vx * s_focal_length * iz + s_center_x;
     out->screen_y = -vy * s_focal_length * iz + s_center_y;
-    out->depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
+    out->depth_z  = td5_depth_persp(vz);
     out->rhw      = iz;
     out->diffuse  = col;
     out->specular = 0;
@@ -2997,7 +2999,7 @@ void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 float inv_z = 1.0f / vz;
                 verts[i].screen_x = -vx * s_focal_length * inv_z + s_center_x;
                 verts[i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-                verts[i].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
+                verts[i].depth_z  = td5_depth_persp(vz);
                 verts[i].rhw      = inv_z;
                 verts[i].diffuse  = 0xFFFFFFFFu;
                 verts[i].specular = 0;
@@ -3019,7 +3021,7 @@ void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 float inv_z = 1.0f / vz;
                 verts[9+i].screen_x = -vx * s_focal_length * inv_z + s_center_x;
                 verts[9+i].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-                verts[9+i].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
+                verts[9+i].depth_z  = td5_depth_persp(vz);
                 verts[9+i].rhw      = inv_z;
                 verts[9+i].diffuse  = 0xFFFFFFFFu;
                 verts[9+i].specular = 0;
@@ -3120,7 +3122,7 @@ void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                     float inv_z = 1.0f / vz;
                     hub[0].screen_x = -vx * s_focal_length * inv_z + s_center_x;
                     hub[0].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-                    hub[0].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
+                    hub[0].depth_z  = td5_depth_persp(vz);
                     hub[0].rhw      = inv_z;
                     hub[0].diffuse  = 0xFFFFFFFFu;
                     hub[0].specular = 0;
@@ -3151,7 +3153,7 @@ void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot)
                 float inv_z = 1.0f / vz;
                 hub[1+c].screen_x = -vx * s_focal_length * inv_z + s_center_x;
                 hub[1+c].screen_y = -vy * s_focal_length * inv_z + s_center_y;
-                hub[1+c].depth_z  = (vz - NEAR_DEPTH_OFFSET) * DEPTH_NORMALIZE_INV;
+                hub[1+c].depth_z  = td5_depth_persp(vz);
                 hub[1+c].rhw      = inv_z;
                 hub[1+c].diffuse  = 0xFFFFFFFFu;
                 hub[1+c].specular = 0;

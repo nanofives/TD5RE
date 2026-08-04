@@ -2874,17 +2874,22 @@ static void tl_apply_case0(const TD5_LightZone *zone)
  */
 void td5_render_apply_track_lighting(int slot, TD5_Actor *actor)
 {
-    /* [A/B PROOF 2026-08-03] TD5RE_NO_CAR_ZONELIGHT=1 neutralises the per-track
-     * vehicle light-zone system (ApplyTrackLightingForVehicleSegment): the car
-     * gets a fixed flat daylight basis everywhere instead of the span-selected
-     * zone's directional weight + ambient. If the Australia start-bridge car
-     * darkening disappears with this on, that zone system (Sydney zone 125, dir
-     * weight 64 vs 96 elsewhere) is the cause. Dev-only A/B toggle, default OFF. */
+    /* TD5RE_NO_CAR_ZONELIGHT neutralises the per-track vehicle light-zone system
+     * (ApplyTrackLightingForVehicleSegment): the car gets a fixed flat daylight
+     * basis everywhere instead of the span-selected zone's directional weight +
+     * ambient. The zone system (e.g. Sydney zone 125, dir weight 64 vs 96) is
+     * what darkens the car under the Australia start-bridge and other zones.
+     *
+     * [2026-08-03] Default ON, but EFFECTIVE ONLY under RT (td5_rt_active): RT's
+     * per-pixel shadow/GI already darkens the car from real geometry, so the
+     * baked analytic zone dimming double-darkens and is what RT replaces. LOW
+     * keeps the byte-faithful zone path untouched (goldens unaffected).
+     * TD5RE_NO_CAR_ZONELIGHT=0 forces the baked zone lighting back under RT. */
     {
         static int s_no_car_zonelight = -1;
         if (s_no_car_zonelight < 0)
-            s_no_car_zonelight = td5_env_int("TD5RE_NO_CAR_ZONELIGHT", 0, 0, 1);
-        if (s_no_car_zonelight) { td5_render_set_override_daylight(); return; }
+            s_no_car_zonelight = td5_env_int("TD5RE_NO_CAR_ZONELIGHT", 1, 0, 1);
+        if (s_no_car_zonelight && td5_rt_active()) { td5_render_set_override_daylight(); return; }
     }
 
     /* [TD6 CAR LIGHTING — track-scoped] Migrated TD6 tracks have no real light

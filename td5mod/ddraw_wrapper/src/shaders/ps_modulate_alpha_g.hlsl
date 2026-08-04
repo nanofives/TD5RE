@@ -16,12 +16,19 @@ struct PS_OUTPUT
 PS_OUTPUT main(PS_INPUT input)
 {
     float4 tex = texMap.Sample(samplerState, input.uv);
+    /* [CAR REFL 2026-08-04] Per-texel car matid baked into the skin alpha — see
+     * ps_modulate_g. Force color.a = 1 on car draws so the tiny matid value in
+     * alpha never alpha-test-discards the (opaque) body. */
+    bool  isCar    = ((int)(input.specular.a * 255.0 + 0.5) == 5);
+    float carMatid = tex.a;
+
     float4 color;
     color.rgb = tex.rgb * input.diffuse.rgb;
-    color.a   = tex.a   * input.diffuse.a;
+    color.a   = isCar ? 1.0 : (tex.a * input.diffuse.a);
 
     PS_OUTPUT o;
     o.color = ApplyFogAndAlphaTest(color, input.depth);
     o.gbuf  = input.specular;
+    if (isCar) o.gbuf.a = carMatid;
     return o;
 }

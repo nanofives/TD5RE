@@ -239,7 +239,14 @@ void rgen_shadow()
      * If the road stays uniformly white, the shadow rays are missing the fed
      * geometry (occluder mis-placed in the TLAS); black bands = shadows land. */
     if (dbgLvl == 1) { g_sunvis[fp] = vis; return; }
-    g_sunvis[fp] = 1.0f - sh_misc.w * (1.0f - vis);
+    float shade = 1.0f - sh_misc.w * (1.0f - vis);
+    /* [CAR SUN] Overbright the sunlit car body (matid CARBODY=5). shade > 1 is a
+     * BRIGHTEN under the unclamped MULT composite. vis keeps shadowed panels dark;
+     * the (0.5 + 0.5*N·L) term lets sun-facing panels pop while the rest still
+     * lifts a little. World/road (matid != 5) is left at shade <= 1. */
+    /* Car sunlit BRIGHTENING is done additively in rgen_light (the mult composite
+     * here clamps to [0,1] on the UNORM target, so it can only darken). */
+    g_sunvis[fp] = shade;
 }
 
 /* ----- [P4] Sky-visibility GI (b1 ShadowCB layout, camera reconstruct) ------ *
@@ -357,6 +364,24 @@ void rgen_light()
         }
         accum += C.rgb * (w * lerp(0.15f, 1.0f, vsum));
     }
+
+    /* [CAR SUN 2026-08-03] ADDITIVE sunlit boost for car bodywork (matid CARBODY=5).
+     * The car luminance is capped at its texture (0xFF modulate) and the MULT sun
+     * composite can only darken (UNORM clamp), so the only way to make the car read
+     * BRIGHTER in open sun is to ADD light here (ps_light_rt is ONE/ONE). li_ext2.yzw
+     * packs the (Y-flipped, reconstruction-frame) sun dir SCALED by the gain, so
+     * gain = length and the unit dir = sg/gain (0 length => feature off). A sun
+     * shadow ray gates it (shadowed panels get nothing); N·L makes the sun-facing
+     * side pop. Warm-white tint. Non-car pixels are untouched (accum stays as-is). */
+    /* [CAR SUN 2026-08-03] Sunlit-car boost. Stored in g_lightcol.a as a scalar
+     * MULTIPLY factor (NOT added to the light rgb): the ps_car_sun_rt composite
+     * blends dst*(1+boost), a HUE-PRESERVING brighten of the car's own paint
+     * (dark blue -> brighter blue), which the earlier flat-additive term could
+     * not do (it veiled toward white — no albedo in the G-buffer to tint by).
+     * li_ext2.yzw packs the POSITION-space (+Y down, same frame as the G-buffer
+     * normal) sun dir * gain, so gain = length, unit dir = sg/gain. Gated by
+     * sun-facing N·L (a broad diffuse lift) plus a specular glint. Car only
+     * (matid CARBODY=5). */
     g_lightcol[fp] = float4(accum, 1.0f);
 }
 

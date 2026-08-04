@@ -18,6 +18,7 @@ cbuffer FogParams : register(b0)
     float  alphaRef;    /* alpha test reference value (0..1) */
     float  _pad1;
     float  foliageAA;   /* 1.0 = use SampleFoliageAA() for texMap, else Sample() */
+    float4 carSun;      /* [CAR SUN] w = sunlit-car brighten gain (per-draw, RT car bodies only) */
 };
 
 SamplerState samplerState : register(s0);
@@ -134,6 +135,18 @@ float4 ApplyFogAndAlphaTest(float4 color, float depth)
      * Without this, transparent pixels render as opaque black, covering geometry behind them. */
     if (alphaTestEnabled && color.a < alphaRef)
         discard;
+
+    /* [CAR SUN 2026-08-03] Hue-preserving sunlit-car brighten. carSun.w > 0 only
+     * for car-body draws (set per-draw by the game under RT); 0 elsewhere so every
+     * other draw is byte-identical. Multiply the shaded paint by (1 + gain): dark
+     * paint -> a brighter shade of the SAME colour (channels saturate at 1 in
+     * strong sun) — which the capped CPU luminance and the darken-only RT sun
+     * composite could not do. Folded here (not in one PS variant) because the car
+     * body can route through several modulate variants (plain / alpha / shadowed /
+     * _g) depending on shadow-receive + G-buffer state. Before fog so haze reads
+     * correctly. */
+    if (carSun.w > 0.0f)
+        color.rgb *= (1.0f + carSun.w);
 
     if (fogEnabled)
     {

@@ -2950,6 +2950,19 @@ void Backend_UpdateConstBuffer(BackendConstBuffer *cb, const void *data, size_t 
 
 /* Fold g_backend.state (populated by the shared device3.c) into the FogCB.
  * (foliageAA is set per-draw by the foliage path; left 0 here.) */
+/* [CAR SUN 2026-08-03] Per-draw sunlit-car brighten gain, folded into every
+ * draw's FogCB by Backend_UpdateFogCB. The game raises it just before a car-body
+ * draw and clears it after (the draw flushes its own batch), so ps_modulate_g
+ * multiplies ONLY car bodywork by (1 + gain) — a hue-preserving brighten the
+ * capped CPU luminance / darken-only RT sun composite could not do. */
+static float s_car_sun_gain = 0.0f;
+void Backend_SetCarSun(float gain) { s_car_sun_gain = (gain > 0.0f) ? gain : 0.0f; }
+
+/* [CAR REFL 2026-08-04] Per-texel car reflectivity is now driven by the offline
+ * material mask (matid baked into the car skin alpha, read by ps_modulate*_g) —
+ * the earlier runtime luma/saturation split (TD5RE_CAR_GLASS_LUM/_SAT via
+ * FogCB.carSun.x/.y) is retired. */
+
 void Backend_UpdateFogCB(void)
 {
     FogCB fog;
@@ -2966,6 +2979,7 @@ void Backend_UpdateFogCB(void)
     }
     fog.alphaTestEnabled = st->alpha_test_enable;
     fog.alphaRef = (float)st->alpha_ref / 255.0f;
+    fog.carSun[3] = s_car_sun_gain;                /* [CAR SUN] per-draw brighten gain */
     memcpy(s_fog_cb->mapped, &fog, sizeof(fog));   /* persistent copy -> ->res fallback + fullscreen passes */
     /* Per-draw ring slice so each draw's alpha-test/fog params are DISTINCT.
      * The FogCB (b0 pixel) was bound once per frame to the persistent ->res, so

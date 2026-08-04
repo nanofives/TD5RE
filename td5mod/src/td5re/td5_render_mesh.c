@@ -240,6 +240,22 @@ void td5_render_apply_light_pass(int vp_x, int vp_y)
 static int sun_probe_enabled(void)
 { static int v = -1; if (v < 0) { const char *e = getenv("TD5RE_SUN_PROBE"); v = (e && e[0]) ? atoi(e) : 1; } return v; }
 
+/* [CAR SUN 2026-08-03] Sunlit-car brighten gain (car bodywork *= 1+gain in
+ * ApplyFogAndAlphaTest). PARKED 2026-08-04: default 0 (off) while we pursue the
+ * per-texel reflection approach instead; the machinery stays behind the knob.
+ * TD5RE_RT_CAR_SUN > 0 re-enables. */
+static float td5_render_car_sun_gain(void)
+{
+    static float v = -1.0f;
+    if (v < 0.0f) {
+        const char *e = getenv("TD5RE_RT_CAR_SUN");
+        v = (e && e[0]) ? (float)atof(e) : 0.0f;
+        if (v < 0.0f) v = 0.0f;
+        if (v > 4.0f) v = 4.0f;
+    }
+    return v;
+}
+
 /* [RT2 P1] Unified scene-sun derivation shared by the shadow and SSR passes.
  * Fills sun[3] (unit, POSITION space +Y down, toward the sun) and *out_dom (the
  * directional-dominance strength scale, 0..1). Returns the class:
@@ -412,7 +428,11 @@ void td5_render_apply_gi_pass(int vp_x, int vp_y)
     if (!td5_rt_active()) return;                 /* HIGH-only; no LOW fallback */
     if (s_gi_on < 0) {
         const char *e;
-        s_gi_on    = ((e = getenv("TD5RE_RT_GI"))       && e[0]) ? atoi(e)        : 1;
+        /* [2026-08-03] Default OFF: with flat-base world albedo the sky-vis AO
+         * multiplied most of the track down toward the 0.45 floor (only open-sky
+         * spots stayed bright) — read as unwanted global dimming. TD5RE_RT_GI=1
+         * re-enables (tune TD5RE_RT_GI_FLOOR up / _DIST down if used). */
+        s_gi_on    = ((e = getenv("TD5RE_RT_GI"))       && e[0]) ? atoi(e)        : 0;
         s_gi_rays  = ((e = getenv("TD5RE_RT_GI_RAYS"))  && e[0]) ? atoi(e)        : 4;
         s_gi_dist  = ((e = getenv("TD5RE_RT_GI_DIST"))  && e[0]) ? (float)atof(e) : 6000.0f;
         s_gi_floor = ((e = getenv("TD5RE_RT_GI_FLOOR")) && e[0]) ? (float)atof(e) : 0.45f;
@@ -789,9 +809,15 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
      * SOLE source of shading. Removes the double-darkening (baked face shading
      * multiplied again by the RT shadow) while iterating on RT lighting. The
      * G-buffer normal pack above still runs (RT needs it); cars (slot >= 0) keep
-     * their shading. Default OFF; gated by td5_rt_active() so LOW is untouched. */
+     * their shading.
+     *
+     * [2026-08-03] Default is now ON under RT: the baked per-area zone shading
+     * (the "below-tree / bridge" dimming) double-darkens against the RT shadow/
+     * GI and is exactly what RT is meant to replace, so world geometry gets a
+     * flat albedo and RT is the sole shader. TD5RE_RT_FLATBASE=0 forces the old
+     * baked shading back for A/B. Gated by td5_rt_active() so LOW is untouched. */
     static int s_flat_base = -1;
-    if (s_flat_base < 0) s_flat_base = td5_env_int("TD5RE_RT_FLATBASE", 0, 0, 1);
+    if (s_flat_base < 0) s_flat_base = td5_env_int("TD5RE_RT_FLATBASE", 1, 0, 1);
     int flat_base = s_flat_base && slot < 0 && td5_rt_active();
 
     /* [CAR DAMAGE 2026-06-28] Per-vertex damage "scuff": darken the diffuse on
@@ -3052,7 +3078,17 @@ void td5_render_actors_for_view(int view_index)
             int td6_zfix = (slot >= 0 && slot < TD5_ACTOR_MAX_TOTAL_SLOTS &&
                             s_vehicle_is_td6[slot] && td6_car_zfix_enabled());
             if (td6_zfix) s_td6_car_zbias = TD6_CAR_ZFIX_PULL_VIEWZ;
+            /* [CAR SUN 2026-08-03] Brighten sunlit bodywork under RT. The car's
+             * CPU luminance is capped at its texture and the RT sun composite only
+             * darkens, so a per-draw multiply in ps_modulate_g is the reliable way
+             * to make the car read brighter (hue-preserving). Racer bodies only
+             * (slot < g_traffic_slot_base); the prepared-mesh draw flushes its own
+             * batch so the gain can't leak into other geometry. TD5RE_RT_CAR_SUN
+             * scales it (0 = off). */
+            int car_sun = (slot >= 0 && slot < g_traffic_slot_base && td5_rt_active());
+            if (car_sun) td5_plat_render_set_car_sun(td5_render_car_sun_gain());
             td5_render_prepared_mesh(mesh);
+            if (car_sun) td5_plat_render_set_car_sun(0.0f);
             if (td6_zfix) s_td6_car_zbias = 0.0f;
             td5_render_set_actor_draw_alpha(255);
             td5_render_set_actor_effect_tint(0);          /* [ARCADE] clear silhouette glow */

@@ -801,6 +801,10 @@ void td5_plat_render_apply_ssr(const float cam_pos[3], const float basis9[9],
  * race frame BEFORE the world pass. */
 void td5_plat_render_set_gbuffer(int on);
 
+/* [CAR SUN] Per-draw sunlit-car brighten gain. Raise (>0) just before a car-body
+ * mesh draw and clear (0) right after, so only car bodywork is brightened. */
+void td5_plat_render_set_car_sun(float gain);
+
 /* [RT lighting] 1 when the backend reports DirectX Raytracing available
  * (Backend_RTAvailable). The game gates LIGHTING QUALITY: HIGH on this. */
 int td5_plat_rt_available(void);
