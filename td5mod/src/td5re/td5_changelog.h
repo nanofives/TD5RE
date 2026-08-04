@@ -35,8 +35,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_DATE,    "August 4" },
     { CL_ITEM,    "NEW (dev builds): a FREE CAMERA option on the pause menu" },
     { CL_ITEM,    "  lets you fly around the frozen scene and look from any" },
-    { CL_ITEM,    "  angle. WASD / left stick move, arrows / right stick look," },
-    { CL_ITEM,    "  E-Q or A-B up/down, Shift/X boost; Esc or Start to exit." },
+    { CL_ITEM,    "  angle - the race stays paused and silent while you do." },
+    { CL_ITEM,    "  WASD / left stick move, arrows / right stick look, hold" },
+    { CL_ITEM,    "  MIDDLE-CLICK and drag to orbit, E-Q or A-B up/down," },
+    { CL_ITEM,    "  Shift/X boost; Esc or Start returns to the pause menu." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "July 27" },

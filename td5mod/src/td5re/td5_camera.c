@@ -2428,10 +2428,12 @@ void td5_camera_freecam_apply(void)
     if (dt > 0.100f) dt = 0.100f;   /* clamp long stalls (alt-tab, breakpoints) */
 
     /* --- tunables (read once) --- */
-    static float s_speed = -1.0f, s_look = -1.0f, s_boost = -1.0f;
-    if (s_speed < 0.0f) s_speed = td5_env_float("TD5RE_FREECAM_SPEED", 320.0f, 5.0f, 20000.0f);
-    if (s_look  < 0.0f) s_look  = td5_env_float("TD5RE_FREECAM_LOOK",  2.2f,  0.1f, 20.0f);
-    if (s_boost < 0.0f) s_boost = td5_env_float("TD5RE_FREECAM_BOOST", 4.0f,  1.0f, 100.0f);
+    static float s_speed = -1.0f, s_look = -1.0f, s_boost = -1.0f, s_strafe = -1.0f, s_mouse = -1.0f;
+    if (s_speed  < 0.0f) s_speed  = td5_env_float("TD5RE_FREECAM_SPEED",  320.0f,  5.0f, 20000.0f);
+    if (s_look   < 0.0f) s_look   = td5_env_float("TD5RE_FREECAM_LOOK",   2.2f,    0.1f, 20.0f);
+    if (s_boost  < 0.0f) s_boost  = td5_env_float("TD5RE_FREECAM_BOOST",  4.0f,    1.0f, 100.0f);
+    if (s_strafe < 0.0f) s_strafe = td5_env_float("TD5RE_FREECAM_STRAFE", 2.2f,    0.1f, 50.0f);   /* left/right speed multiplier */
+    if (s_mouse  < 0.0f) s_mouse  = td5_env_float("TD5RE_FREECAM_MOUSE",  0.005f,  0.0001f, 1.0f); /* middle-drag orbit, rad/pixel */
 
     /* --- input (all absolute-state reads; this poll also refreshes s_keyboard) --- */
     TD5_InputState in;
@@ -2444,8 +2446,8 @@ void td5_camera_freecam_apply(void)
     /* Keyboard (DIK scancodes). */
     if (td5_plat_input_key_pressed(0x11)) mv_fwd   += 1.0f;   /* W */
     if (td5_plat_input_key_pressed(0x1F)) mv_fwd   -= 1.0f;   /* S */
-    if (td5_plat_input_key_pressed(0x20)) mv_right += 1.0f;   /* D */
-    if (td5_plat_input_key_pressed(0x1E)) mv_right -= 1.0f;   /* A */
+    if (td5_plat_input_key_pressed(0x20)) mv_right -= 1.0f;   /* D (inverted per request) */
+    if (td5_plat_input_key_pressed(0x1E)) mv_right += 1.0f;   /* A (inverted per request) */
     if (td5_plat_input_key_pressed(0x12)) mv_up    += 1.0f;   /* E */
     if (td5_plat_input_key_pressed(0x10)) mv_up    -= 1.0f;   /* Q */
     if (td5_plat_input_key_pressed(0xC8)) rate_pitch += 1.0f; /* Up    */
@@ -2455,8 +2457,9 @@ void td5_camera_freecam_apply(void)
     if (td5_plat_input_key_pressed(0x2A) || td5_plat_input_key_pressed(0x36)) boost = 1; /* Shift */
 
     /* Gamepad: left stick move, right stick look. Stick "up" is a LOW axis
-     * value (below centre) => negative normalized, so forward/pitch-up negate. */
-    mv_right   += freecam_axis(in.analog_x);
+     * value (below centre) => negative normalized, so forward/pitch-up negate.
+     * Strafe negated to match the inverted keyboard A/D. */
+    mv_right   += -freecam_axis(in.analog_x);
     mv_fwd     += -freecam_axis(in.analog_y);
     rate_yaw   += freecam_axis(in.analog_rx);
     rate_pitch += -freecam_axis(in.analog_ry);
@@ -2468,9 +2471,17 @@ void td5_camera_freecam_apply(void)
         if (nav & 0x80) boost = 1;       /* X = boost   */
     }
 
-    /* --- integrate look --- */
+    /* --- integrate look: key/stick rate (per-second) + middle-drag orbit --- */
     s_freecam_yaw   += rate_yaw   * s_look * dt;
     s_freecam_pitch += rate_pitch * s_look * dt;
+    /* Hold MIDDLE mouse button and move to orbit the view. mouse_dx/dy are
+     * per-frame deltas (not rates), so they apply directly — and because the
+     * race input poll is suppressed while flying, this poll gets the full delta.
+     * Bit 2 (0x4) of mouse_buttons is the middle button (see td5_plat_input_poll). */
+    if (in.mouse_buttons & 0x4) {
+        s_freecam_yaw   -= (float)in.mouse_dx * s_mouse;   /* orbit L/R inverted per request */
+        s_freecam_pitch -= (float)in.mouse_dy * s_mouse;
+    }
     if (s_freecam_pitch >  FREECAM_PITCH_LIMIT) s_freecam_pitch =  FREECAM_PITCH_LIMIT;
     if (s_freecam_pitch < -FREECAM_PITCH_LIMIT) s_freecam_pitch = -FREECAM_PITCH_LIMIT;
 
@@ -2485,7 +2496,9 @@ void td5_camera_freecam_apply(void)
     float step  = speed * dt * 256.0f;         /* world-units/sec -> 24.8 units this frame */
     for (int i = 0; i < 3; i++) {
         float up_i = (i == 1) ? 1.0f : 0.0f;
-        s_freecam_eye[i] += (double)((fwd[i] * mv_fwd + right[i] * mv_right + up_i * mv_up) * step);
+        s_freecam_eye[i] += (double)((fwd[i] * mv_fwd
+                                      + right[i] * mv_right * s_strafe   /* faster left/right per request */
+                                      + up_i * mv_up) * step);
     }
 
     /* --- write the camera (same primitives every mode uses) --- */

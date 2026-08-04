@@ -5776,6 +5776,12 @@ void td5_hud_render_overlays(float dt)
             int cd_level = g_cameraTransitionActive / 0x2800;
             indicator_digit = (cd_level <= 2) ? (cd_level + 1) : 0;
         }
+#ifndef TD5RE_RELEASE
+        /* [FREE CAMERA 2026-08-04] Hide the 3/2/1 start countdown digit while
+         * flying the free-roam camera — the sim is frozen, so the digit would
+         * just sit on screen cluttering the inspection view. */
+        if (td5_camera_freecam_active()) indicator_digit = 0;
+#endif
         if (indicator_digit >= 1 && indicator_digit <= 9 && s_numbers_atlas) {
             int digit_val = indicator_digit;
 

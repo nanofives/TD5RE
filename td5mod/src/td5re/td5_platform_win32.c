@@ -2232,6 +2232,7 @@ uint32_t td5_plat_input_joystick_nav(int device_slot)
     if (js.rgbButtons[0] & 0x80) db |= 0x10;         /* A = confirm/select */
     if (js.rgbButtons[1] & 0x80) db |= 0x20;         /* B = back/cancel    */
     if (js.rgbButtons[2] & 0x80) db |= 0x80;         /* [#15] X = delete (name entry) */
+    if (js.rgbButtons[7] & 0x80) db |= 0x40;         /* [FREE CAMERA] Start/Menu (fresh, sim-independent exit) */
     return db;
 }
 
