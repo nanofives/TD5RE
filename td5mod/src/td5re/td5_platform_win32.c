@@ -955,6 +955,13 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
             out->buttons  = jbits;
             out->analog_x = (int16_t)((int)ax_x - TD5_PLAT_JS_AXIS_CENTER);
             out->analog_y = (int16_t)((int)ax_y - TD5_PLAT_JS_AXIS_CENTER);
+            /* [FREE CAMERA 2026-08-04] Right stick, raw lRx/lRy re-centred to
+             * [-250..+250] like the left stick above (the DIPROP_RANGE covers
+             * every axis, DIPH_DEVICE). Read straight from the device — the
+             * legacy GetJS path never used the right stick, so there's nothing
+             * to preserve. Consumed only by the dev free-roam camera. */
+            out->analog_rx = (int16_t)((int)js.lRx - TD5_PLAT_JS_AXIS_CENTER);
+            out->analog_ry = (int16_t)((int)js.lRy - TD5_PLAT_JS_AXIS_CENTER);
         }
     }
 }

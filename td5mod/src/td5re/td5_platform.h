@@ -198,6 +198,12 @@ typedef struct TD5_InputState {
     uint32_t buttons;           /* TD5_InputBits bitmask */
     int16_t  analog_x;          /* steering axis, -32768..+32767 */
     int16_t  analog_y;          /* throttle/brake axis */
+    /* [FREE CAMERA 2026-08-04] Right-stick axes, same [-250..+250] calibration
+     * as analog_x/y (the DIPROP_RANGE is set DIPH_DEVICE so every axis shares
+     * it). Only the dev free-roam camera reads these; the sim ignores them, so
+     * this is a pure additive field (no behavioral change to any race path). */
+    int16_t  analog_rx;         /* right-stick X (look yaw)   */
+    int16_t  analog_ry;         /* right-stick Y (look pitch) */
     int16_t  mouse_dx;          /* mouse delta X */
     int16_t  mouse_dy;          /* mouse delta Y */
     uint32_t mouse_buttons;     /* mouse button bitmask */

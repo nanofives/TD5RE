@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 4" },
+    { CL_ITEM,    "NEW (dev builds): a FREE CAMERA option on the pause menu" },
+    { CL_ITEM,    "  lets you fly around the frozen scene and look from any" },
+    { CL_ITEM,    "  angle. WASD / left stick move, arrows / right stick look," },
+    { CL_ITEM,    "  E-Q or A-B up/down, Shift/X boost; Esc or Start to exit." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "July 27" },
     { CL_ITEM,    "NEW: the TUTORIAL toggle now appears on RACE OPTIONS" },
     { CL_ITEM,    "  for every mode - multiplayer races included, not just" },

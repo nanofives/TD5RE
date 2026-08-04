@@ -66,6 +66,21 @@ void td5_camera_finalize_all(void);
    change / resume-from-pause. Render-only; never feeds the sim. */
 void td5_camera_snap_smoothing(void);
 
+/* ------------------------------------------------------------------------
+ * [FREE CAMERA 2026-08-04] Dev-only free-roam ("fly") camera. Selected from
+ * the pause menu (dev builds only); overrides pane 0's camera while the sim
+ * stays paused so you can fly around and inspect the frozen scene. Never feeds
+ * the sim (determinism/replay-safe). Fully compiled out of RELEASE (the bodies
+ * are inert stubs there; the pause-menu row that reaches them is also gated).
+ *  - enter:  seed the fly pose from the current live camera and take over.
+ *  - exit:   hand control back to the normal camera pipeline.
+ *  - active: 1 while flying (pause code keeps the sim frozen and skips the menu).
+ *  - apply:  per-render-frame input + integration + camera write (view 0). */
+void td5_camera_freecam_enter(void);
+void td5_camera_freecam_exit(void);
+int  td5_camera_freecam_active(void);
+void td5_camera_freecam_apply(void);
+
 /* Camera globals owned by td5_camera.c, read by the HUD/render side.
  *  g_subTickFraction     - render-frame extrapolation fraction [0,1).
  *  g_camWorldPos[v]       - finalized per-viewport camera world position.
