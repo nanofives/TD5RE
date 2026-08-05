@@ -1813,20 +1813,31 @@ int td5_physics_recover_player(int slot)
     return 1;
 }
 
-/* Map a racer `slot` to the LOCAL viewport that shows/drives it, or -1 if this
- * machine has no local pane for it (a remote net peer's car). Mirrors the driver
- * slot derivation: route-to-driven => driven slot == vp; legacy => the pane's
- * shown slot g_actorSlotForView[vp]. Used only for per-view LOCAL camera effects
- * (yaw reset, recovery glide) — the reposition itself is slot-scoped. */
+/* Map a racer `slot` to the LOCAL viewport that DISPLAYS it, or -1 if this
+ * machine has no local pane showing it (a remote net peer's car).
+ *
+ * These are per-view LOCAL camera effects (yaw reset, recovery glide), so the
+ * target pane is the one that SHOWS the car — always g_actorSlotForView[vp] ==
+ * slot — exactly like the camera-change / rear-view buttons (view_for_player in
+ * td5_input.c). The reposition itself is slot-scoped and handled by the caller.
+ *
+ * [SPLIT-SCREEN RESTORE-CAM FIX 2026-08-05] Previously this keyed off the
+ * TD5RE_SPLIT_BTN_ROUTE knob with the ternary INVERTED relative to
+ * view_for_player: with routing ON (the default) it used the identity pane
+ * (vp == slot) instead of the display mapping. When the MP position picker
+ * permutes panes (g_actorSlotForView[vp] != vp) the SELECT-restore yaw reset
+ * then hit the WRONG pane, so the pane actually showing the recovered car kept
+ * the finish-orbit yaw and the camera stayed rotated — pressing the front-view
+ * button (which uses view_for_player) reset the right pane and "fixed" it.
+ * Display truth is independent of the button-routing knob, so search
+ * g_actorSlotForView unconditionally. */
 static int recovery_local_view_for_slot(int slot)
 {
     int views = g_td5.viewport_count;
     if (views < 1) views = 1;
     if (views > TD5_MAX_VIEWPORTS) views = TD5_MAX_VIEWPORTS;
-    int route_to_driven = td5_input_split_btn_route_on();
     for (int vp = 0; vp < views; vp++) {
-        int s = route_to_driven ? vp : g_actorSlotForView[vp];
-        if (s == slot) return vp;
+        if (g_actorSlotForView[vp] == slot) return vp;
     }
     return -1;
 }
@@ -1921,6 +1932,9 @@ void td5_physics_update_stuck_recovery(void)
 
             /* Per-VIEW LOCAL camera effects only if this machine shows the slot. */
             int view = recovery_local_view_for_slot(slot);
+            TD5_LOG_I(LOG_TAG, "recovery cam view resolve: slot=%d -> pane=%d "
+                      "(shownSlot[pane]=%d)", slot, view,
+                      (view >= 0) ? g_actorSlotForView[view] : -1);
             if (view >= 0) {
                 /* [ROTATING-CAM FIX 2026-07-04] Clear the finish-orbit yaw the
                  * knocked-out car spun up (cam_finish_orbit_step) so the chase
