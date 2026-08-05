@@ -2480,6 +2480,14 @@ static int battle_wreck_despawn_ticks(void)
     if (v < 0) v = td5_env_int("TD5RE_BATTLE_WRECK_DESPAWN_TICKS", 300, 30, 1800);
     return v;
 }
+/* [TRAFFIC BATTLE 2026-08-05] In battle, retire a car once it has fallen this many
+ * spans BEHIND the trailing-most player — passed traffic despawns promptly so the
+ * freed slot re-spawns fresh ahead of the field instead of trailing off behind.
+ * This fires regardless of the per-player-cap rear-corridor gating. Default 50. */
+static int battle_despawn_behind(void)
+{
+    return td5_env_int("TD5RE_BATTLE_DESPAWN_BEHIND", 50, 1, 100000);
+}
 
 /* [PER-PLAYER TRAFFIC CAP 2026-07-21] Each racer (human OR AI) anchors its own
  * traffic "bubble". The on-road cap is no longer a single global number: it is
@@ -2860,6 +2868,16 @@ static int trf_battle_hwm_anchor_span(int radius, int *out_ok)
     if (best_slot < 0) return 0;           /* nobody progressing -> no spawn */
     *out_ok = 1;
     return trf_battle_hwm_span(best_slot);
+}
+
+/* [TRAFFIC BATTLE HWM] Public read of a racer's cumulative furthest-progress mark
+ * (lap*ring+span, lap-aware) or -1 if out of range. Consumed by the physics-layer
+ * anti-reverse corrector so it shares this module's single high-water source of
+ * truth. Valid while battle traffic is ticking (battle forces dynamic traffic on). */
+int td5_ai_traffic_battle_hwm(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return -1;
+    return s_trf_battle_hwm[slot];
 }
 
 /* [task#8 2026-06-14] A/B knob for spawning ambient traffic on branch corridors
@@ -3919,6 +3937,11 @@ void td5_ai_traffic_dynamic_tick(void)
                  * below replaces this legacy trailing-human corridor. */
                 (!trf_perplayer_cap_enabled() &&
                  behind < -g_td5.ini.traffic_dyn_despawn) ||
+                /* [TRAFFIC BATTLE] Passed traffic despawns 50 spans behind the
+                 * trailing-most player (fires even with the per-player cap on, whose
+                 * union-of-bubbles rear bound is otherwise ~115+ spans). */
+                (td5_game_battle_mode_active() &&
+                 behind < -battle_despawn_behind()) ||
                 ahead  >  front_keep ||
                 far_from_all ||
                 (trf_perplayer_cap_enabled() &&

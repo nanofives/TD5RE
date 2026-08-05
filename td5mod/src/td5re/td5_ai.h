@@ -138,6 +138,8 @@ int  td5_ai_traffic_slot_owner_vp(int slot);
 int  td5_ai_traffic_pair_blocked(int slot_a, int slot_b);
 /* Once-per-sim-tick driver (called from td5_ai_pre_tick). */
 void td5_ai_traffic_dynamic_tick(void);
+/* [TRAFFIC BATTLE HWM] Racer's cumulative furthest-progress mark, or -1. */
+int  td5_ai_traffic_battle_hwm(int slot);
 /* Race-start seeding (called from td5_ai_init_traffic_actors). */
 void td5_ai_traffic_dynamic_race_init(void);
 

@@ -1831,6 +1831,94 @@ static int recovery_local_view_for_slot(int slot)
     return -1;
 }
 
+/* ========================================================================
+ * [TRAFFIC BATTLE ANTI-REVERSE 2026-08-05]
+ * In TRAFFIC BATTLE, a human who drives BACKWARD past their furthest-reached point
+ * is snapped forward onto the track at that high-water span with all motion
+ * cancelled — you cannot make backward progress to farm oncoming traffic. Uses the
+ * SAME lap-aware cumulative high-water mark as the spawn anchor
+ * (td5_ai_traffic_battle_hwm vs td5_game_get_slot_progress) so it is circuit-safe
+ * and matches exactly where traffic stops spawning. Placement reuses the byte-
+ * faithful spawn primitive (td5_track_init_actor_segment_placement -> on-road lane
+ * point), then reset_actor_state (zeroes velocity) + compute_heading, so the car is
+ * never dropped into wall geometry (unlike a raw step-back re-derive). Deterministic:
+ * a pure function of replicated span/HWM state, iterates ALL racer slots ->
+ * lockstep-safe. Gated on TD5RE_BATTLE_ANTIREVERSE (default ON). Broken-down /
+ * finished cars are left to the normal recovery path. ======================== */
+static int s_battle_ar_init     = 0;
+static int s_battle_ar_on       = 1;
+static int s_battle_ar_slack    = 4;    /* spans of backslide tolerated before a snap */
+static int s_battle_ar_cd_ticks = 8;    /* min ticks between snaps per slot           */
+static int s_battle_ar_cd[TD5_MAX_RACER_SLOTS];
+
+static void battle_ar_init_knobs(void)
+{
+    if (s_battle_ar_init) return;
+    s_battle_ar_init     = 1;
+    s_battle_ar_on       = td5_env_flag_on("TD5RE_BATTLE_ANTIREVERSE");
+    s_battle_ar_slack    = td5_env_int("TD5RE_BATTLE_ANTIREVERSE_SLACK", 4, 0, 100000);
+    s_battle_ar_cd_ticks = td5_env_int("TD5RE_BATTLE_ANTIREVERSE_CD", 8, 0, 300);
+    TD5_LOG_I(LOG_TAG, "battle_antireverse knobs: on=%d slack=%d cd=%d",
+              s_battle_ar_on, s_battle_ar_slack, s_battle_ar_cd_ticks);
+}
+
+void td5_physics_battle_antireverse_tick(void)
+{
+    battle_ar_init_knobs();
+    if (!s_battle_ar_on) return;
+    if (g_game_paused) return;
+    if (!g_actor_table_base) return;
+    if (!td5_game_battle_mode_active()) return;
+
+    int ring   = td5_track_get_ring_length();
+    int nslots = g_traffic_slot_base;
+    if (nslots > TD5_MAX_RACER_SLOTS) nslots = TD5_MAX_RACER_SLOTS;
+
+    for (int slot = 0; slot < nslots; slot++) {
+        if (g_race_slot_state[slot] != 1) continue;       /* humans only            */
+        if (s_battle_ar_cd[slot] > 0) { s_battle_ar_cd[slot]--; continue; }
+
+        TD5_Actor *actor =
+            (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+        if (!actor) continue;
+        if (actor->finish_time != 0) continue;            /* finished: leave alone  */
+        if (td5_damage_slot_knocked_out(slot) ||
+            td5_ai_actor_is_broken_down(slot)) continue;  /* breakdown owns recovery */
+
+        int hwm = td5_ai_traffic_battle_hwm(slot);        /* cumulative furthest     */
+        if (hwm < 0) continue;
+        int cur = td5_game_get_slot_progress(slot);       /* cumulative current      */
+        if (hwm - cur <= s_battle_ar_slack) continue;     /* still at/near furthest  */
+
+        /* Fold the high-water mark to a placeable span (circuit) or use it directly
+         * (P2P, where progress already equals the span). */
+        int tgt = (ring > 0 && ring < 9000) ? (hwm % ring) : hwm;
+        if (ring > 0 && tgt < 0) tgt += ring;
+
+        /* Snap onto the track at the furthest span (keep current sub-lane), zero all
+         * motion, realign heading forward — same on-road placement as traffic spawn. */
+        actor->track_span_raw = (int16_t)tgt;
+        td5_track_init_actor_segment_placement(&actor->track_span_raw,
+                                               &actor->world_pos.x);
+        td5_track_compute_heading(actor);
+        if (g_active_td6_level > 0)
+            td5_ai_correct_spawn_heading(slot);
+        td5_physics_reset_actor_state(actor);
+        actor->track_span_raw         = (int16_t)tgt;
+        actor->track_span_accumulated = (int16_t)tgt;
+        actor->track_span_high_water  = (int16_t)tgt;
+        actor->brake_flag         = 0;
+        actor->handbrake_flag     = 0;
+        actor->throttle_state     = 1;   /* forward */
+        actor->track_contact_flag = 0;
+
+        s_battle_ar_cd[slot] = s_battle_ar_cd_ticks;
+        TD5_LOG_I(LOG_TAG,
+                  "battle_antireverse: slot=%d snapped forward to furthest span=%d "
+                  "(was %d spans behind mark)", slot, tgt, hwm - cur);
+    }
+}
+
 /* Per-tick driver: run MANUAL (R / SELECT) car-recovery for every HUMAN racer.
  * Called from td5_physics_tick (deterministic sim tick).
  *
