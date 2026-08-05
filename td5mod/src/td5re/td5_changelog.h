@@ -41,6 +41,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  the car backwards - it now continues in place." },
     { CL_ITEM,    "FIX: pressing SELECT to un-stick a car that did NOT" },
     { CL_ITEM,    "  break down no longer secretly repairs its damage." },
+    { CL_ITEM,    "FIX: no more brief crash pop-up when quitting the game" },
+    { CL_ITEM,    "  (harmless Windows audio/GPU teardown race silenced)." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 4" },
