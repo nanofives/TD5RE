@@ -3907,6 +3907,14 @@ void td5_plat_render_set_car_sun(float gain)
     Backend_SetCarSun(gain);
 }
 
+void td5_plat_render_set_car_sun_dir(const float dir[3])
+{
+    if (g_backend.device_removed) return;
+    /* Frame-global (same sun for every car draw this frame), set on the main thread
+     * before the world pass / rcmd replay, so NOT recorded per-command. */
+    Backend_SetCarSunDir(dir[0], dir[1], dir[2]);
+}
+
 /* [RT lighting] DXR capability passthrough. */
 int td5_plat_rt_available(void)
 {
@@ -3988,12 +3996,14 @@ void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
     cb.params2[0] = pane_h;
     /* [P2b knobs] RT-only (ignored by the LOW screen-space shadow shader, which
      * reads only params2.x): params2.y = TD5RE_RT_BIAS normal-offset scale (car
-     * self-shadow acne tuning), params2.z = TD5RE_RT_RAYS sun shadow samples
-     * (soft-shadow denoise; default 4). */
+     * self-shadow acne tuning), params2.z = TD5RE_RT_RAYS sun shadow samples.
+     * The edge-aware bilateral DENOISE composite (TD5RE_RT_DENOISE, backend side)
+     * cleans the low-sample grain, so this stays cheap; fallback default 2 matches
+     * the fresh-INI SHADOW QUALITY (only used if TD5RE_RT_RAYS is wholly unset). */
     { static float s_bias = -1.0f; static int s_rays = -1;
       if (s_rays < 0) { const char *e;
           s_bias = ((e = getenv("TD5RE_RT_BIAS")) && e[0]) ? (float)atof(e) : 1.0f;
-          s_rays = ((e = getenv("TD5RE_RT_RAYS")) && e[0]) ? atoi(e) : 4;
+          s_rays = ((e = getenv("TD5RE_RT_RAYS")) && e[0]) ? atoi(e) : 2;
           if (s_bias < 0.0f) s_bias = 0.0f;
           if (s_rays < 1) s_rays = 1; if (s_rays > 16) s_rays = 16; }
       cb.params2[1] = s_bias;
@@ -4071,6 +4081,11 @@ void td5_plat_render_apply_ssr(const float cam_pos[3], const float basis9[9],
      * reflcol instead of tracing (view with TD5RE_RT_REFLDBG opaque blit). */
     { static int d = -1; if (d < 0) { const char *e = getenv("TD5RE_RT_REFLDIAG"); d = (e && e[0]) ? atoi(e) : 0; }
       cb.params2[2] = (float)d; }
+    /* [CAR SUN GLINT 2026-08-04] live intensity multiplier for the car sun-glint
+     * in rgen_refl (sr_params2.w). Default 4.0 = strong, obvious hotspot on the
+     * sun-facing bodywork/glass; 0 disables. TD5RE_RT_CAR_GLINT overrides. */
+    { static float gg = -1.0f; if (gg < 0.0f) { const char *e = getenv("TD5RE_RT_CAR_GLINT"); gg = (e && e[0]) ? (float)atof(e) : 1.0f; if (gg < 0.0f) gg = 0.0f; }   /* subtle glossy sun/sky sparkle on the sun-aligned base */
+      cb.params2[3] = gg; }
     for (int i = 0; i < 4; i++) { cb.reflA[i] = refl8[i]; cb.reflB[i] = refl8[4 + i]; }
     /* [P3] sun dir + shadow-ray enable for chit_refl's sun shadow ray. */
     if (sun_dir && sun_shadow) {

@@ -241,15 +241,20 @@ static int sun_probe_enabled(void)
 { static int v = -1; if (v < 0) { const char *e = getenv("TD5RE_SUN_PROBE"); v = (e && e[0]) ? atoi(e) : 1; } return v; }
 
 /* [CAR SUN 2026-08-03] Sunlit-car brighten gain (car bodywork *= 1+gain in
- * ApplyFogAndAlphaTest). PARKED 2026-08-04: default 0 (off) while we pursue the
- * per-texel reflection approach instead; the machinery stays behind the knob.
- * TD5RE_RT_CAR_SUN > 0 re-enables. */
+ * ApplyFogAndAlphaTest). 2026-08-04: default ON in DEV (0.35) so the car reads
+ * brighter under open sun — the RT sun-shadow mult composite still darkens the
+ * shadowed panels afterward, so the sunlit side pops. RELEASE defaults OFF (0)
+ * until the look is signed off; TD5RE_RT_CAR_SUN overrides either way. */
 static float td5_render_car_sun_gain(void)
 {
     static float v = -1.0f;
     if (v < 0.0f) {
         const char *e = getenv("TD5RE_RT_CAR_SUN");
+#ifdef TD5RE_RELEASE
         v = (e && e[0]) ? (float)atof(e) : 0.0f;
+#else
+        v = (e && e[0]) ? (float)atof(e) : 0.0f;    /* filter dropped; sun-aligned base lighting instead */
+#endif
         if (v < 0.0f) v = 0.0f;
         if (v > 4.0f) v = 4.0f;
     }
@@ -267,6 +272,26 @@ static float td5_render_car_sun_gain(void)
  * position-space — no extra flip), and an OVERCAST image keeps the zone sun but
  * is flagged so the caller softens it. NIGHT / probe-off / LOW keep the zone
  * sun verbatim (LOW is thus byte-identical). */
+/* [SUN TEST 2026-08-04] TD5RE_SUN_ELEVATE (0..1): blend the scene sun toward
+ * straight overhead (+Y-down zenith = (0,-1,0)) so a test can raise the sun and
+ * check it lights the whole car top. 0 = untouched. Applied to every valid-sun
+ * output so shadows / glint / reflection / brighten all move together. */
+static void sun_elevate(float sun[3])
+{
+    static float e = -1.0f;
+    if (e < 0.0f) {
+        const char *s = getenv("TD5RE_SUN_ELEVATE");
+        e = (s && s[0]) ? (float)atof(s) : 0.0f;
+        if (e < 0.0f) e = 0.0f; if (e > 1.0f) e = 1.0f;
+    }
+    if (e <= 0.0f) return;
+    sun[0] *= (1.0f - e);
+    sun[1]  = sun[1] * (1.0f - e) + (-1.0f) * e;   /* up = -Y */
+    sun[2] *= (1.0f - e);
+    float m = sqrtf(sun[0]*sun[0] + sun[1]*sun[1] + sun[2]*sun[2]);
+    if (m > 1e-6f) { sun[0] /= m; sun[1] /= m; sun[2] /= m; }
+}
+
 static int td5_render_scene_sun(float sun[3], float *out_dom)
 {
     float best_mag2 = 0.0f, zsun[3] = { 0.0f, 0.0f, 0.0f };
@@ -299,11 +324,13 @@ static int td5_render_scene_sun(float sun[3], float *out_dom)
              * strong, else a healthy default so a weak-zone sunny track still
              * grounds objects. */
             *out_dom = zone_valid ? (zone_dom > 0.75f ? zone_dom : 0.75f) : 0.9f;
+            sun_elevate(sun);
             return TD5_SKY_SUNNY;
         }
         if (cls == TD5_SKY_OVERCAST && zone_valid) {
             sun[0] = zsun[0]; sun[1] = zsun[1]; sun[2] = zsun[2];
             *out_dom = zone_dom;
+            sun_elevate(sun);
             return TD5_SKY_OVERCAST;
         }
         /* NIGHT or unresolved -> fall through to the zone sun. */
@@ -312,6 +339,7 @@ static int td5_render_scene_sun(float sun[3], float *out_dom)
     if (zone_valid) {
         sun[0] = zsun[0]; sun[1] = zsun[1]; sun[2] = zsun[2];
         *out_dom = zone_dom;
+        sun_elevate(sun);
         return TD5_SKY_SUNNY;
     }
     return 0;
@@ -547,6 +575,15 @@ void td5_render_lighting2_frame_begin(void)
     static int s_logged = 0;
     int on = td5_light2_active() ? 1 : 0;
     td5_plat_render_set_gbuffer(on);
+    /* [CAR SUN 2026-08-04] Publish this frame's scene sun (+Y-down, UN-flipped —
+     * matches the packed COLOR1 normal) so the directional car brighten in
+     * ps_modulate*_g can do N.L. Zero when there's no sun (tunnel/night) => the car
+     * sits at base colour there instead of a flat all-over lift. */
+    {
+        float sun[3] = { 0.0f, 0.0f, 0.0f }, dom = 0.0f;
+        if (!on || td5_render_scene_sun(sun, &dom) == 0) { sun[0] = sun[1] = sun[2] = 0.0f; }
+        td5_plat_render_set_car_sun_dir(sun);
+    }
     if (!s_logged) {
         s_logged = 1;
         TD5_LOG_I(LOG_TAG, "light2: frame gate first run, mode=%d gbuffer=%d",
@@ -1048,10 +1085,48 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
  * on g_td5.ini.override_track_zip, so faithful tracks never call this. */
 void td5_render_set_override_daylight(void)
 {
-    s_light_dirs[0] =   0.0f; s_light_dirs[1] = 120.0f; s_light_dirs[2] =   0.0f; /* top   */
+    /* [CAR SUN 2026-08-04] The car's flat "daylight" studio basis. Ambient + a
+     * strong top light; capped ~0.88 which reads DIM in strong sun. Made tunable
+     * to find the right sunlit level: TD5RE_CAR_DAY_AMB (ambient, def 104) and
+     * TD5RE_CAR_DAY_DIR (top-light weight, def 120). */
+    static float amb = -1.0f, dir = -1.0f;
+    if (amb < 0.0f) {
+        const char *ea = getenv("TD5RE_CAR_DAY_AMB"); amb = (ea && ea[0]) ? (float)atof(ea) : 104.0f;
+        const char *ed = getenv("TD5RE_CAR_DAY_DIR"); dir = (ed && ed[0]) ? (float)atof(ed) : 120.0f;
+    }
+    s_light_dirs[0] =   0.0f; s_light_dirs[1] =  dir;  s_light_dirs[2] =   0.0f; /* top   */
     s_light_dirs[3] =  70.0f; s_light_dirs[4] =  45.0f; s_light_dirs[5] =  45.0f; /* fr-rt */
     s_light_dirs[6] = -55.0f; s_light_dirs[7] =  45.0f; s_light_dirs[8] = -55.0f; /* bk-lf */
-    s_ambient_intensity = 104.0f;   /* 0x68 base so even unlit faces stay visible */
+    s_ambient_intensity = amb;   /* 0x68 base so even unlit faces stay visible */
+}
+
+/* [CAR SUN 2026-08-04] Sun-ALIGNED car base lighting. The dominant directional is
+ * the REAL scene sun (world dir -> the car's model frame via its rotation matrix,
+ * same transform as tl_commit_to_render_globals), so the sunlit side is genuinely
+ * bright and moves with the sun as the car turns, and a brighter sky ambient keeps
+ * the shaded side lit but darker. Replaces the flat studio 3-point override that
+ * capped the car dim & sun-independent (the "dimmed chassis"). Knobs:
+ * TD5RE_CAR_SUN_DIR (sun weight, def 175), TD5RE_CAR_SUN_AMB (sky ambient, def 120).
+ * No sun (tunnel/night) -> falls back to the flat daylight basis. */
+void td5_render_set_override_sunlit(const float *rot_m)
+{
+    static float sunW = -1.0f, ambV = -1.0f;
+    if (sunW < 0.0f) {
+        const char *ew = getenv("TD5RE_CAR_SUN_DIR"); sunW = (ew && ew[0]) ? (float)atof(ew) : 175.0f;
+        const char *ea = getenv("TD5RE_CAR_SUN_AMB"); ambV = (ea && ea[0]) ? (float)atof(ea) : 120.0f;
+    }
+    float sun[3] = { 0.0f, 0.0f, 0.0f }, dom = 0.0f;
+    if (!rot_m || td5_render_scene_sun(sun, &dom) == 0) { td5_render_set_override_daylight(); return; }
+    /* scene sun is +Y-down position space; world space un-flips Y (reverse the zone flip). */
+    float sw0 = sun[0], sw1 = -sun[1], sw2 = sun[2];
+    /* world -> model: project onto the columns of the actor rotation matrix. */
+    float lx = sw0 * rot_m[0] + sw1 * rot_m[3] + sw2 * rot_m[6];
+    float ly = sw0 * rot_m[1] + sw1 * rot_m[4] + sw2 * rot_m[7];
+    float lz = sw0 * rot_m[2] + sw1 * rot_m[5] + sw2 * rot_m[8];
+    s_light_dirs[0] = lx * sunW; s_light_dirs[1] = ly * sunW; s_light_dirs[2] = lz * sunW; /* sun */
+    s_light_dirs[3] = 0.0f; s_light_dirs[4] = 0.0f; s_light_dirs[5] = 0.0f;
+    s_light_dirs[6] = 0.0f; s_light_dirs[7] = 0.0f; s_light_dirs[8] = 0.0f;
+    s_ambient_intensity = ambV;
 }
 
 /* --- Frustum Culling --- */

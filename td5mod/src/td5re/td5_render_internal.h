@@ -511,6 +511,9 @@ float td6_banner_group_center_x(const TD5_SpanDisplayList *block, int count,
                                 float my_z, float my_x);
 /* Daylight lighting override (mesh TU; track-lighting fallback calls it). */
 void td5_render_set_override_daylight(void);
+/* [CAR SUN] Sun-aligned car lighting: dominant light = real scene sun in the car's
+ * model frame (pass actor->rotation_matrix.m). Falls back to daylight if no sun. */
+void td5_render_set_override_sunlit(const float *rot_m);
 /* Flush the pending immediate batch (per-actor alpha changes need it). */
 void flush_immediate_internal(void);
 /* Fallback collision-ribbon road + relocated drag finish gantry: defined in

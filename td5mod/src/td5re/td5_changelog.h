@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 4" },
+    { CL_ITEM,    "NEW (HIGH lighting): RT shadow/GI/reflection denoiser." },
+    { CL_ITEM,    "  Edge-aware a-trous filter clears the ray-traced grain" },
+    { CL_ITEM,    "  on walls/cars, and world-locked jitter stops the" },
+    { CL_ITEM,    "  pattern crawling when moving. Knobs: TD5RE_RT_DENOISE" },
+    { CL_ITEM,    "  (iterations) / TD5RE_RT_DENOISE_EDGE (edge sharpness)." },
     { CL_ITEM,    "FIX: cars default to AUTOMATIC again; the car-select" },
     { CL_ITEM,    "  Manual/Automatic toggle is now what actually drives" },
     { CL_ITEM,    "  the gearbox (no longer force-overridden by the INI)." },

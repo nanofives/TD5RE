@@ -262,6 +262,9 @@ void Backend_ApplyLightPass(const LightCB *cb);
 /* [CAR SUN] Set the per-draw sunlit-car brighten gain (folded into the next
  * draws' FogCB). Raise before a car-body draw, clear (0) after. */
 void Backend_SetCarSun(float gain);
+/* [CAR SUN] Set the frame-global unit sun direction (+Y-down world) used by the
+ * directional car brighten (N.L in ps_modulate*_g). Set once per frame. */
+void Backend_SetCarSunDir(float x, float y, float z);
 
 /* [P2] Screen-space ray-marched sun-shadow pass: fullscreen MULTIPLICATIVE
  * draw over the CURRENT viewport that darkens pixels whose path to the sun is

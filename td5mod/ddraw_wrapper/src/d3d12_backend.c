@@ -2957,6 +2957,11 @@ void Backend_UpdateConstBuffer(BackendConstBuffer *cb, const void *data, size_t 
  * capped CPU luminance / darken-only RT sun composite could not do. */
 static float s_car_sun_gain = 0.0f;
 void Backend_SetCarSun(float gain) { s_car_sun_gain = (gain > 0.0f) ? gain : 0.0f; }
+/* [CAR SUN 2026-08-04] Frame-global unit sun dir (+Y-down world, same frame as the
+ * packed COLOR1 normal), set once per frame; ps_modulate*_g uses N.L with it to make
+ * the car brighten DIRECTIONAL (sun-facing panels only). Zero => no directional lift. */
+static float s_car_sun_dir[3] = { 0.0f, 0.0f, 0.0f };
+void Backend_SetCarSunDir(float x, float y, float z) { s_car_sun_dir[0] = x; s_car_sun_dir[1] = y; s_car_sun_dir[2] = z; }
 
 /* [CAR REFL 2026-08-04] Per-texel car reflectivity is now driven by the offline
  * material mask (matid baked into the car skin alpha, read by ps_modulate*_g) —
@@ -2979,6 +2984,9 @@ void Backend_UpdateFogCB(void)
     }
     fog.alphaTestEnabled = st->alpha_test_enable;
     fog.alphaRef = (float)st->alpha_ref / 255.0f;
+    fog.carSun[0] = s_car_sun_dir[0];              /* [CAR SUN] frame sun dir (N.L) */
+    fog.carSun[1] = s_car_sun_dir[1];
+    fog.carSun[2] = s_car_sun_dir[2];
     fog.carSun[3] = s_car_sun_gain;                /* [CAR SUN] per-draw brighten gain */
     memcpy(s_fog_cb->mapped, &fog, sizeof(fog));   /* persistent copy -> ->res fallback + fullscreen passes */
     /* Per-draw ring slice so each draw's alpha-test/fog params are DISTINCT.

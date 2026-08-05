@@ -118,6 +118,14 @@ for %%S in (ps_modulate ps_modulate_alpha ps_modulate_g ps_modulate_alpha_g ps_m
 )
 echo   SM5.0 variants OK
 
+REM --- Compute shaders (D3D12 backend): RT à-trous denoise (R32F + RGBA16F) ---
+%FXC% %OPTS% /T cs_5_0 /E main /Fh cs_shadow_atrous_bytes_50.h /Vn g_cs_shadow_atrous_50 cs_shadow_atrous.hlsl
+if errorlevel 1 (echo FAILED: cs_shadow_atrous ^(cs5^) && exit /b 1)
+echo   cs_shadow_atrous OK
+%FXC% %OPTS% /T cs_5_0 /E main /Fh cs_color_atrous_bytes_50.h /Vn g_cs_color_atrous_50 cs_color_atrous.hlsl
+if errorlevel 1 (echo FAILED: cs_color_atrous ^(cs5^) && exit /b 1)
+echo   cs_color_atrous OK
+
 REM ===========================================================================
 REM [RT lighting] DXR shader library -> DXIL. ONE lib_6_3 blob containing every
 REM ray-tracing entry point (rgen_smoke in Phase 0; rgen_debug/shadow/refl +

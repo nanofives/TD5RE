@@ -136,17 +136,11 @@ float4 ApplyFogAndAlphaTest(float4 color, float depth)
     if (alphaTestEnabled && color.a < alphaRef)
         discard;
 
-    /* [CAR SUN 2026-08-03] Hue-preserving sunlit-car brighten. carSun.w > 0 only
-     * for car-body draws (set per-draw by the game under RT); 0 elsewhere so every
-     * other draw is byte-identical. Multiply the shaded paint by (1 + gain): dark
-     * paint -> a brighter shade of the SAME colour (channels saturate at 1 in
-     * strong sun) — which the capped CPU luminance and the darken-only RT sun
-     * composite could not do. Folded here (not in one PS variant) because the car
-     * body can route through several modulate variants (plain / alpha / shadowed /
-     * _g) depending on shadow-receive + G-buffer state. Before fog so haze reads
-     * correctly. */
-    if (carSun.w > 0.0f)
-        color.rgb *= (1.0f + carSun.w);
+    /* [CAR SUN 2026-08-04] The sunlit-car brighten is now DIRECTIONAL (N.L against
+     * the sun) and applied in ps_modulate_g / ps_modulate_alpha_g, where the packed
+     * world normal is available — so the car brightens only where the sun actually
+     * hits it. (The old uniform (1+gain) multiply lived here but read as a flat lift
+     * with no sun cue.) Non-car draws set carSun.w=0 and are byte-identical. */
 
     if (fogEnabled)
     {

@@ -149,11 +149,27 @@ void miss_shadow(inout ShadowPayload p)
     p.visible = 1;
 }
 
-/* Miss record 1: reflection / primary-ray sky. Phase 3 feeds real sky/fog. */
+/* Miss record 1: reflection / primary-ray SKY. A reflected ray that escapes to
+ * the sky returns a bright sky gradient + a sun disc, so reflective car glass and
+ * paint MIRROR the sun/sky — real "sunlight on the car", not a paint filter. The
+ * ray dir is +Y-down world (up = -Y), same frame as the G-buffer normal, so the
+ * sun is the UN-flipped SSR sun (sr_sun is Y-flipped for the TLAS shadow ray).
+ * [CAR SUN 2026-08-04] */
 [shader("miss")]
 void miss_refl(inout RayPayload p)
 {
-    p.color = float3(0.02f, 0.02f, 0.12f);
+    float3 dir = normalize(WorldRayDirection());
+    float  up  = saturate(-dir.y);                          /* 1 at zenith, 0 at horizon */
+    float3 horizon = float3(0.72f, 0.80f, 0.92f);           /* pale warm-white haze      */
+    float3 zenith  = float3(0.18f, 0.38f, 0.78f);           /* saturated sky blue        */
+    float3 sky = lerp(horizon, zenith, up * up);
+    /* Sun disc + halo where the reflected ray points at the sun. */
+    float3 sunDir = float3(sr_sun.x, -sr_sun.y, sr_sun.z);
+    float  sd   = dot(dir, sunDir);
+    float  disc = smoothstep(0.9993f, 0.99985f, sd);        /* crisp disc  */
+    float  halo = pow(saturate(sd), 350.0f);                /* soft bloom  */
+    sky += float3(1.0f, 0.96f, 0.86f) * (disc * 1.6f + halo * 0.5f);   /* toned down (was 8/2 = blowout) */
+    p.color = sky;
     p.t = -1.0f;
 }
 
@@ -226,7 +242,7 @@ void rgen_shadow()
     /* [RT2 P1] sh_params2.w = cone-spread scale (0 -> 1 = default ~0.7deg).
      * OVERCAST widens it (e.g. 5x) for a soft, directionless penumbra. */
     float coneScale = sh_params2.w > 0.0001f ? sh_params2.w : 1.0f;
-    float base = rt_hash12(float2(fp)) * 6.2831853f;
+    float base = rt_hash_world(world, 0.0f) * 6.2831853f;   /* [MOTION-STABLE] world-locked jitter */
     float visSum = 0.0f;
     for (int k = 0; k < K; k++) {
         float ang = base + (6.2831853f * (float)k) / (float)K;
@@ -283,7 +299,7 @@ void rgen_ao()
     float visSum = 0.0f;
     for (int k = 0; k < K; k++) {
         float u1 = ((float)k + 0.5f) / (float)K;                       /* stratified radius */
-        float u2 = rt_hash12(float2(fp) + (float)(k + 1));             /* random azimuth    */
+        float u2 = rt_hash_world(world, (float)(k + 1));               /* [MOTION-STABLE] world-locked azimuth */
         float r  = sqrt(u1);
         float ang = 6.2831853f * u2;
         float3 dir = normalize(T * (r * cos(ang)) + Bv * (r * sin(ang)) + N * sqrt(saturate(1.0f - u1)));
@@ -352,7 +368,7 @@ void rgen_light()
             float3 up0 = abs(Ld.y) < 0.99f ? float3(0,1,0) : float3(1,0,0);
             float3 T  = normalize(cross(up0, Ld));
             float3 Bv = cross(Ld, T);
-            float baseA = rt_hash12(float2(fp)) * 6.2831853f;
+            float baseA = rt_hash_world(world, 0.0f) * 6.2831853f;   /* [MOTION-STABLE] world-locked jitter */
             const float PEN = 0.02f;   /* penumbra half-angle jitter (source-size proxy) */
             vsum = 0.0f;
             for (int s = 0; s < Klr; s++) {
@@ -401,14 +417,32 @@ void rgen_refl()
     float4 gb = g_gbuf.Load(int3(fp, 0));
     if (D >= 0.99999f || gb.a < 0.001f) return;
 
-    int matid = (int)(gb.a * 255.0f + 0.5f);
+    /* [CAR SUN GLINT 2026-08-04] The car's per-texel matid is packed with bit
+     * 0x40 set (ps_modulate_g); strip it for the reflectivity LUT and keep the
+     * flag so the sun-specular glint below fires on the CAR ONLY. */
+    int raw = (int)(gb.a * 255.0f + 0.5f);
+    bool isCar = (raw & 0x40) != 0;
+    int matid = raw & 0x3F;
     float base = rt_reflectivity(matid);
     float3 N = normalize(gb.rgb * 2.0f - 1.0f);
-    if (matid == 1 && -N.y > 0.6f) base += sr_misc.w * saturate((-N.y - 0.6f) / 0.4f);  /* wet road */
+    if (matid == 1 && !isCar && -N.y > 0.6f) base += sr_misc.w * saturate((-N.y - 0.6f) / 0.4f);  /* wet road */
+    /* [CAR SUN 2026-08-04] Give car paint & glass real gloss so they MIRROR the
+     * bright sky + sun disc (miss_refl) — "sunlight reflected through the chassis
+     * and windows". Body = moderate clearcoat, glass = strong mirror, lights matte. */
+    if (isCar) {
+        if (matid == 3)      base = max(base, 0.40f);   /* windows  */
+        else if (matid != 4) base = max(base, 0.15f);   /* bodywork */
+    }
     int dg = (int)(sr_params2.z + 0.5f);
+    /* [CAR SUN GLINT diag] dg5: green where the G-buffer has geometry, +blue where
+     * the pixel is a detected car (isCar). Confirms the car reaches the RT pass. */
+    if (dg == 5) { g_reflcol[fp] = float4(0.0f, (gb.a > 0.001f) ? 1.0f : 0.0f, isCar ? 1.0f : 0.0f, 1.0f); return; }
+    /* [CAR SUN GLINT diag] dg6: N.L vs sr_sun over ALL geometry — green=sun-facing
+     * (N.L>0, can glint), red=facing away. Validates the sun vector sign. */
+    if (dg == 6) { float3 Ls = float3(sr_sun.x, -sr_sun.y, sr_sun.z); float nl = dot(N, Ls); g_reflcol[fp] = float4(saturate(-nl), saturate(nl), 0.0f, (gb.a > 0.001f) ? 1.0f : 0.0f); return; }
     /* [P3 diag] dg1: R=base reflectivity, G=matid/8, B=up. */
     if (dg == 1) { g_reflcol[fp] = float4(base, (float)matid / 8.0f, saturate(-N.y), 1.0f); return; }
-    if (base < 0.01f && dg == 0) return;   /* early-out: most pixels don't reflect (perf save) */
+    if (base < 0.01f && !isCar && dg == 0) return;   /* early-out: most pixels don't reflect (perf save; car keeps going for the glint) */
 
     float3 world = rt_world_from_depth(D, float2(lpx), sr_camPosFocal, sr_rightCx, sr_upCy, sr_fwdDepthScale, sr_misc.x);
     float3 V = normalize(world - sr_camPosFocal.xyz);
@@ -416,16 +450,70 @@ void rgen_refl()
     float w = base * (0.25f + 0.75f * pow(1.0f - ndv, 3.0f)) * sr_params2.y;   /* Fresnel * intensity */
     /* [P3 diag] dg2: weight w as grayscale (params2.y intensity check). */
     if (dg == 2) { g_reflcol[fp] = float4(w, w, w, 1.0f); return; }
-    if (w < 0.02f && dg == 0) return;
+    if (w < 0.02f && !isCar && dg == 0) return;
 
-    float3 R = reflect(V, N);
     float dist = length(world - sr_camPosFocal.xyz);
-    RayDesc ray;
-    ray.Origin = world + N * (16.0f + dist * 0.004f);
-    ray.Direction = R; ray.TMin = 1.0f; ray.TMax = sr_params.y;   /* max reflect dist */
+
+    /* Environment reflection (unchanged): trace only when it actually contributes. */
     RayPayload pl; pl.color = float3(0.02f, 0.02f, 0.12f); pl.t = -1.0f;
-    TraceRay(g_tlas, RAY_FLAG_NONE, 0xFF, /*hitGroup*/0, /*mult*/0, /*miss*/1, ray, pl);
+    if (w >= 0.02f) {
+        float3 R = reflect(V, N);
+        RayDesc ray;
+        ray.Origin = world + N * (16.0f + dist * 0.004f);
+        ray.Direction = R; ray.TMin = 1.0f; ray.TMax = sr_params.y;   /* max reflect dist */
+        TraceRay(g_tlas, RAY_FLAG_NONE, 0xFF, /*hitGroup*/0, /*mult*/0, /*miss*/1, ray, pl);
+    } else {
+        w = 0.0f;   /* no meaningful env reflection on this pixel */
+    }
+    /* [CAR SUN 2026-08-04] Even sky sheen on the whole car: glass/roof that reflect
+     * the dark ground behind the car still read as glossy-sunlit (not dead black),
+     * so the effect isn't confined to the sun-facing fenders. Lift the reflected
+     * colour to a dim sky floor and guarantee a little reflection weight. */
+    if (isCar) {
+        pl.color = max(pl.color, float3(0.20f, 0.32f, 0.52f));
+        w = max(w, 0.14f);
+    }
     /* [P3 diag] dg3: raw reflected color. */
     if (dg == 3) { g_reflcol[fp] = float4(pl.color, 1.0f); return; }
-    g_reflcol[fp] = float4(pl.color, w);
+
+    /* [CAR SUN GLINT 2026-08-04] Blinn-Phong sun highlight on car bodywork &
+     * glass so the sun visibly reflects off the paint and windows. sr_sun.xyz is
+     * the unit surface->sun dir (position space, +Y down — same frame as N);
+     * sr_sun.w>0 enables a sun shadow ray so glints don't appear on self-shadowed
+     * panels. Glass = sharp/strong mirror glint, body = broad/medium, lights
+     * (matid 4) = none. Warm-white. Non-car pixels never enter here. */
+    float3 glint = float3(0,0,0); float glintA = 0.0f;
+    if (isCar && matid != 4 && sr_sun.w > 0.5f) {
+        /* [Y-FRAME 2026-08-04] sr_sun is Y-flipped for the TLAS shadow ray
+         * (td5_render_mesh.c:531), but the G-buffer normal N (and V) are +Y-down
+         * world. Un-flip Y for the N.L / half-vector dots; keep sr_sun for the ray. */
+        float3 Lshade = float3(sr_sun.x, -sr_sun.y, sr_sun.z);
+        float3 Lray   = sr_sun.xyz;
+        float ndl = dot(N, Lshade);
+        if (ndl > 0.0f) {
+            float3 so = world + N * (16.0f + dist * 0.004f);
+            float sv = rt_shadow_ray(so, Lray, 1.0f, 60000.0f);
+            if (sv > 0.0f) {
+                float3 H = normalize(Lshade - V);      /* -V = surface->camera */
+                float ndh = saturate(dot(N, H));
+                /* sr_params2.w = TD5RE_RT_CAR_GLINT live multiplier (0/absent -> 1). */
+                float gg = sr_params2.w > 0.0001f ? sr_params2.w : 1.0f;
+                float shin = (matid == 3) ? 60.0f : 14.0f;          /* glass sharp, body soft-broad */
+                float gint = ((matid == 3) ? 2.2f : 0.9f) * gg;     /* softer body (was streaky) */
+                float spec = pow(ndh, shin) * gint * ndl * sv;
+                spec = spec / (1.0f + 0.7f * spec);            /* soft highlight rolloff -> glow, not a hard streak */
+                glint  = float3(1.0f, 0.95f, 0.85f) * spec;    /* pre-multiplied (rgb*specA) */
+                glintA = saturate(spec);
+            }
+        }
+    }
+
+    /* Compose glint OVER env-reflection as a single non-premultiplied "over"
+     * (the composite does out = rgb*a + dst*(1-a)). Reduces to the plain
+     * reflection when glintA==0, and to a pure white spot when w==0. */
+    float aOut = glintA + w * (1.0f - glintA);
+    float3 cPremul = glint + pl.color * w * (1.0f - glintA);
+    float3 cOut = cPremul / max(aOut, 1e-4f);
+    if (aOut < 0.001f && dg == 0) return;
+    g_reflcol[fp] = float4(cOut, aOut);
 }

@@ -2889,7 +2889,12 @@ void td5_render_apply_track_lighting(int slot, TD5_Actor *actor)
         static int s_no_car_zonelight = -1;
         if (s_no_car_zonelight < 0)
             s_no_car_zonelight = td5_env_int("TD5RE_NO_CAR_ZONELIGHT", 1, 0, 1);
-        if (s_no_car_zonelight && td5_rt_active()) { td5_render_set_override_daylight(); return; }
+        if (s_no_car_zonelight && td5_rt_active()) {
+            /* [CAR SUN 2026-08-04] Sun-ALIGNED base lighting (bright side follows the
+             * real sun) instead of the flat studio daylight that read dim. */
+            td5_render_set_override_sunlit(actor ? actor->rotation_matrix.m : NULL);
+            return;
+        }
     }
 
     /* [TD6 CAR LIGHTING — track-scoped] Migrated TD6 tracks have no real light

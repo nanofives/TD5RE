@@ -34,9 +34,26 @@ PS_OUTPUT main(PS_INPUT input)
     color.rgb = tex.rgb * input.diffuse.rgb;
     color.a   = isCar ? 1.0 : tex.a;
 
+    /* [CAR SUN 2026-08-04] Directional sunlit brighten: lift the sun-FACING
+     * bodywork by (1 + gain*N.L). carSun.xyz = unit +Y-down sun dir (same frame as
+     * the packed COLOR1 normal); carSun.w = gain (car draws only, 0 elsewhere).
+     * Panels facing away from the sun keep their base colour, so the car visibly
+     * brightens where the sun hits it. Before fog so haze still reads. */
+    if (carSun.w > 0.0)
+    {
+        float3 nrm = normalize(input.specular.rgb * 2.0 - 1.0);
+        float  nl  = saturate(dot(nrm, carSun.xyz));
+        color.rgb *= (1.0 + carSun.w * nl);
+    }
+
     PS_OUTPUT o;
     o.color = ApplyFogAndAlphaTest(color, input.depth);
     o.gbuf  = input.specular;
-    if (isCar) o.gbuf.a = carMatid;
+    /* [CAR SUN GLINT 2026-08-04] Route the per-texel matid (1=body,3=glass,
+     * 4=lights) into the G-buffer AND flag the pixel as car with bit 0x40 so the
+     * RT reflection pass can add a sun-specular glint to the car ONLY (its body
+     * matid==1 otherwise aliases world roads). The low bits (& 0x3F) still drive
+     * the shared reflectivity LUT, so environment reflections are unchanged. */
+    if (isCar) { int m = (int)(carMatid * 255.0 + 0.5); o.gbuf.a = (float)((m & 0x3F) | 0x40) / 255.0; }
     return o;
 }

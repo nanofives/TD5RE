@@ -25,6 +25,8 @@
 #include "d3d12_backend_priv.h"
 #include "shaders/rt_pipeline_bytes.h"   /* const unsigned char g_rt_pipeline[] */
 #include "shaders/ps_shadow_rt_bytes_50.h"  /* MULT sun-shadow composite (this TU only) */
+#include "shaders/cs_shadow_atrous_bytes_50.h" /* edge-aware à-trous denoise, R32F (shadow/GI) */
+#include "shaders/cs_color_atrous_bytes_50.h"  /* edge-aware à-trous denoise, RGBA16F (light/refl) */
 #include "shaders/ps_light_rt_bytes_50.h"   /* additive light composite  (this TU only) */
 #include "shaders/ps_ssr_rt_bytes_50.h"     /* reflection composite      (this TU only) */
 
@@ -73,6 +75,15 @@ static void dxr_log(const char *fmt, ...)
  * texture. Page ids are < MAT_PAGE_MAX (1024). Unbounded SRV range t0,space1. */
 #define DXR_BINDLESS_BASE     16
 #define DXR_BINDLESS_MAX      1024
+/* à-trous denoise ping-pong scratch (past the bindless range 16..1039). */
+#define DXR_SLOT_SUNVIS2_UAV   1040
+#define DXR_SLOT_SUNVIS2_SRV   1041
+#define DXR_SLOT_GI2_UAV       1042
+#define DXR_SLOT_GI2_SRV       1043
+#define DXR_SLOT_LIGHTCOL2_UAV 1044
+#define DXR_SLOT_LIGHTCOL2_SRV 1045
+#define DXR_SLOT_REFLCOL2_UAV  1046
+#define DXR_SLOT_REFLCOL2_SRV  1047
 
 #define DXR_SHADER_ID_SIZE   D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES   /* 32       */
 #define DXR_REGION_ALIGN     D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT /* 64  */
@@ -160,6 +171,18 @@ typedef struct {
     UINT                        mask_w, mask_h;
     D3D12_RESOURCE_STATES       sunvis_state, lightcol_state;
     ID3D12PipelineState        *shadow_pso;       /* ps_shadow_rt, MULT           */
+    /* Edge-aware à-trous sun-shadow denoise (TD5RE_RT_DENOISE>0). COMPUTE pass:
+     * root sig binds src mask SRV(t0) + depth/gbuf SRV(t1-t2) + dst mask UAV(u0) +
+     * DenoiseCB(b0); cs_shadow_atrous PSO. Ping-pongs sunvis <-> sunvis2 (scratch
+     * R32F). sunvis_final = buffer holding the denoised result this frame. */
+    ID3D12RootSignature        *denoise_rs;
+    ID3D12PipelineState        *denoise_pso;       /* cs_shadow_atrous  R32F  (shadow, GI) */
+    ID3D12PipelineState        *denoise_color_pso; /* cs_color_atrous   RGBA16F (light, refl) */
+    ID3D12Resource             *sunvis2;          /* R32_FLOAT à-trous ping-pong scratch */
+    D3D12_RESOURCE_STATES       sunvis2_state;
+    ID3D12Resource             *sunvis_final;     /* sunvis or sunvis2 (denoised)  */
+    ID3D12Resource             *gi2, *lightcol2, *reflcol2;   /* à-trous scratch partners */
+    D3D12_RESOURCE_STATES       gi2_state, lightcol2_state, reflcol2_state;
     ID3D12PipelineState        *light_pso;        /* ps_light_rt, additive        */
     /* [P4] sky-visibility GI mask: rgen_ao writes the FINAL multiplier
      * lerp(floor,1,gi), composited MULT via the shared shadow_pso. */
@@ -1137,18 +1160,30 @@ static int dxr_ensure_masks(int w, int h)
 {
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav;
     D3D12_SHADER_RESOURCE_VIEW_DESC srv;
-    if (g_dxr.sunvis && g_dxr.lightcol && g_dxr.reflcol && g_dxr.gi && g_dxr.mask_w == (UINT)w && g_dxr.mask_h == (UINT)h) return 1;
-    if (g_dxr.sunvis)   { d3d12_priv_retire(g_dxr.sunvis);   g_dxr.sunvis = NULL; }
-    if (g_dxr.lightcol) { d3d12_priv_retire(g_dxr.lightcol); g_dxr.lightcol = NULL; }
-    if (g_dxr.reflcol)  { d3d12_priv_retire(g_dxr.reflcol);  g_dxr.reflcol = NULL; }
-    if (g_dxr.gi)       { d3d12_priv_retire(g_dxr.gi);       g_dxr.gi = NULL; }
+    if (g_dxr.sunvis && g_dxr.sunvis2 && g_dxr.gi2 && g_dxr.lightcol2 && g_dxr.reflcol2 &&
+        g_dxr.lightcol && g_dxr.reflcol && g_dxr.gi && g_dxr.mask_w == (UINT)w && g_dxr.mask_h == (UINT)h) return 1;
+    if (g_dxr.sunvis)    { d3d12_priv_retire(g_dxr.sunvis);    g_dxr.sunvis = NULL; }
+    if (g_dxr.sunvis2)   { d3d12_priv_retire(g_dxr.sunvis2);   g_dxr.sunvis2 = NULL; }
+    if (g_dxr.lightcol)  { d3d12_priv_retire(g_dxr.lightcol);  g_dxr.lightcol = NULL; }
+    if (g_dxr.lightcol2) { d3d12_priv_retire(g_dxr.lightcol2); g_dxr.lightcol2 = NULL; }
+    if (g_dxr.reflcol)   { d3d12_priv_retire(g_dxr.reflcol);   g_dxr.reflcol = NULL; }
+    if (g_dxr.reflcol2)  { d3d12_priv_retire(g_dxr.reflcol2);  g_dxr.reflcol2 = NULL; }
+    if (g_dxr.gi)        { d3d12_priv_retire(g_dxr.gi);        g_dxr.gi = NULL; }
+    if (g_dxr.gi2)       { d3d12_priv_retire(g_dxr.gi2);       g_dxr.gi2 = NULL; }
     g_dxr.sunvis   = dxr_uav_texture(w, h, DXGI_FORMAT_R32_FLOAT);
+    g_dxr.sunvis2  = dxr_uav_texture(w, h, DXGI_FORMAT_R32_FLOAT);              /* à-trous scratch */
     g_dxr.lightcol = dxr_uav_texture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    g_dxr.lightcol2= dxr_uav_texture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
     g_dxr.reflcol  = dxr_uav_texture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
-    g_dxr.gi       = dxr_uav_texture(w, h, DXGI_FORMAT_R32_FLOAT);   /* [P4] */
-    if (!g_dxr.sunvis || !g_dxr.lightcol || !g_dxr.reflcol || !g_dxr.gi) { dxr_log("mask alloc FAILED"); return 0; }
+    g_dxr.reflcol2 = dxr_uav_texture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    g_dxr.gi       = dxr_uav_texture(w, h, DXGI_FORMAT_R32_FLOAT);             /* [P4] */
+    g_dxr.gi2      = dxr_uav_texture(w, h, DXGI_FORMAT_R32_FLOAT);
+    if (!g_dxr.sunvis || !g_dxr.sunvis2 || !g_dxr.lightcol || !g_dxr.lightcol2 ||
+        !g_dxr.reflcol || !g_dxr.reflcol2 || !g_dxr.gi || !g_dxr.gi2) { dxr_log("mask alloc FAILED"); return 0; }
     g_dxr.mask_w = (UINT)w; g_dxr.mask_h = (UINT)h;
-    g_dxr.sunvis_state = g_dxr.lightcol_state = g_dxr.reflcol_state = g_dxr.gi_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    g_dxr.sunvis_state = g_dxr.sunvis2_state = g_dxr.lightcol_state = g_dxr.lightcol2_state =
+        g_dxr.reflcol_state = g_dxr.reflcol2_state = g_dxr.gi_state = g_dxr.gi2_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    g_dxr.sunvis_final = g_dxr.sunvis;
 
     ZeroMemory(&uav, sizeof(uav)); uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
     uav.Format = DXGI_FORMAT_R32_FLOAT;
@@ -1160,6 +1195,11 @@ static int dxr_ensure_masks(int w, int h)
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; srv.Texture2D.MipLevels = 1;
     srv.Format = DXGI_FORMAT_R32_FLOAT;
     ID3D12Device_CreateShaderResourceView((ID3D12Device *)g_dxr.device5, g_dxr.sunvis, &srv, dxr_cpu(g_dxr.heap, DXR_SLOT_SUNVIS_SRV));
+    /* à-trous scratch: R32F UAV + SRV (ping-pong partner of sunvis). */
+    uav.Format = DXGI_FORMAT_R32_FLOAT;
+    ID3D12Device_CreateUnorderedAccessView((ID3D12Device *)g_dxr.device5, g_dxr.sunvis2, NULL, &uav, dxr_cpu(g_dxr.heap, DXR_SLOT_SUNVIS2_UAV));
+    srv.Format = DXGI_FORMAT_R32_FLOAT;
+    ID3D12Device_CreateShaderResourceView((ID3D12Device *)g_dxr.device5, g_dxr.sunvis2, &srv, dxr_cpu(g_dxr.heap, DXR_SLOT_SUNVIS2_SRV));
     srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     ID3D12Device_CreateShaderResourceView((ID3D12Device *)g_dxr.device5, g_dxr.lightcol, &srv, dxr_cpu(g_dxr.heap, DXR_SLOT_LIGHTCOL_SRV));
 
@@ -1172,6 +1212,20 @@ static int dxr_ensure_masks(int w, int h)
     ID3D12Device_CreateUnorderedAccessView((ID3D12Device *)g_dxr.device5, g_dxr.gi, NULL, &uav, dxr_cpu(g_dxr.heap, DXR_SLOT_GI_UAV));
     srv.Format = DXGI_FORMAT_R32_FLOAT;
     ID3D12Device_CreateShaderResourceView((ID3D12Device *)g_dxr.device5, g_dxr.gi, &srv, dxr_cpu(g_dxr.heap, DXR_SLOT_GI_SRV));
+
+    /* à-trous scratch partners for GI (R32F) + light/reflection (RGBA16F). */
+    uav.Format = DXGI_FORMAT_R32_FLOAT;
+    ID3D12Device_CreateUnorderedAccessView((ID3D12Device *)g_dxr.device5, g_dxr.gi2, NULL, &uav, dxr_cpu(g_dxr.heap, DXR_SLOT_GI2_UAV));
+    srv.Format = DXGI_FORMAT_R32_FLOAT;
+    ID3D12Device_CreateShaderResourceView((ID3D12Device *)g_dxr.device5, g_dxr.gi2, &srv, dxr_cpu(g_dxr.heap, DXR_SLOT_GI2_SRV));
+    uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    ID3D12Device_CreateUnorderedAccessView((ID3D12Device *)g_dxr.device5, g_dxr.lightcol2, NULL, &uav, dxr_cpu(g_dxr.heap, DXR_SLOT_LIGHTCOL2_UAV));
+    srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    ID3D12Device_CreateShaderResourceView((ID3D12Device *)g_dxr.device5, g_dxr.lightcol2, &srv, dxr_cpu(g_dxr.heap, DXR_SLOT_LIGHTCOL2_SRV));
+    uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    ID3D12Device_CreateUnorderedAccessView((ID3D12Device *)g_dxr.device5, g_dxr.reflcol2, NULL, &uav, dxr_cpu(g_dxr.heap, DXR_SLOT_REFLCOL2_UAV));
+    srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    ID3D12Device_CreateShaderResourceView((ID3D12Device *)g_dxr.device5, g_dxr.reflcol2, &srv, dxr_cpu(g_dxr.heap, DXR_SLOT_REFLCOL2_SRV));
     return 1;
 }
 
@@ -1241,6 +1295,155 @@ static ID3D12PipelineState *dxr_make_composite_pso(const void *ps, SIZE_T ps_len
     if (FAILED(ID3D12Device_CreateGraphicsPipelineState((ID3D12Device *)g_dxr.device5, &pd,
             &IID_ID3D12PipelineState, (void **)&pso))) { dxr_log("composite PSO FAILED (add=%d)", additive); return NULL; }
     return pso;
+}
+
+/* ---- Sun-shadow denoise (edge-aware à-trous, COMPUTE) --------------------- *
+ * Multi-iteration edge-aware bilateral filter run on the sunvis UAV BEFORE the
+ * composite, to kill the cone-jitter grain (heaviest on OVERCAST, whose 5x-wide
+ * cone leaves blotches on cars / guardrails that a single pass can't reach). Done
+ * as a compute pass: sunvis is already a UAV, and depth/gbuf are already left in
+ * the compute-read state by d3d12_priv_scene_inputs, so this needs no RTV heap
+ * and no extra resource transitions. Ping-pongs sunvis <-> a scratch R32F UAV for
+ * N iterations at doubling à-trous step (1,2,4,...); the final buffer feeds the
+ * plain MULT composite. Gated by TD5RE_RT_DENOISE (iterations, 0=off);
+ * TD5RE_RT_DENOISE_EDGE (default 1.0) trades grain-kill vs edge sharpness. */
+typedef struct { float rect[4]; float params[4]; } DxrDenoiseCB; /* rect=paneXYWH; params={step,radius,depthSigma,normalPow} */
+
+/* Cached knobs: iterations (0=off, clamped 0..4), edge = normal/depth sharpness. */
+static int   dxr_denoise_iters(void)
+{ static int v = -1; if (v < 0) { const char *e = getenv("TD5RE_RT_DENOISE"); v = (e && e[0]) ? atoi(e) : 2; if (v < 0) v = 0; if (v > 4) v = 4; } return v; }
+static float dxr_denoise_edge(void)
+{ static float v = -1.0f; if (v < 0.0f) { const char *e = getenv("TD5RE_RT_DENOISE_EDGE"); v = (e && e[0]) ? (float)atof(e) : 1.0f; if (v < 0.05f) v = 0.05f; } return v; }
+
+/* Build the compute root sig + both PSOs (R32F mask + RGBA16F color) once.
+ * Returns 1 when the R32F PSO is ready (color PSO is best-effort). */
+static int dxr_ensure_denoise_psos(void)
+{
+    D3D12_DESCRIPTOR_RANGE   r_mask, r_scene, r_dst;
+    D3D12_ROOT_PARAMETER     params[4];
+    D3D12_ROOT_SIGNATURE_DESC rsd;
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pd;
+    ID3D10Blob *sig = NULL, *err = NULL; HRESULT hr;
+
+    if (g_dxr.denoise_pso && g_dxr.denoise_color_pso) return 1;
+
+    if (!g_dxr.denoise_rs) {
+        ZeroMemory(&r_mask, sizeof(r_mask));
+        r_mask.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        r_mask.NumDescriptors = 1; r_mask.BaseShaderRegister = 0;   /* t0 src mask */
+        r_mask.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        ZeroMemory(&r_scene, sizeof(r_scene));
+        r_scene.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        r_scene.NumDescriptors = 2; r_scene.BaseShaderRegister = 1; /* t1 depth, t2 gbuf */
+        r_scene.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        ZeroMemory(&r_dst, sizeof(r_dst));
+        r_dst.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        r_dst.NumDescriptors = 1; r_dst.BaseShaderRegister = 0;     /* u0 dst mask */
+        r_dst.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+        ZeroMemory(params, sizeof(params));
+        params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[0].DescriptorTable.NumDescriptorRanges = 1;
+        params[0].DescriptorTable.pDescriptorRanges = &r_mask;
+        params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[1].DescriptorTable.NumDescriptorRanges = 1;
+        params[1].DescriptorTable.pDescriptorRanges = &r_scene;
+        params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[2].DescriptorTable.NumDescriptorRanges = 1;
+        params[2].DescriptorTable.pDescriptorRanges = &r_dst;
+        params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;    /* b0 DenoiseCB */
+        params[3].Descriptor.ShaderRegister = 0;
+        params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+        ZeroMemory(&rsd, sizeof(rsd));
+        rsd.NumParameters = 4; rsd.pParameters = params;
+        rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+
+        hr = D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err);
+        if (FAILED(hr)) {
+            dxr_log("denoise rootsig serialize 0x%08lX: %s", hr,
+                    err ? (const char *)ID3D10Blob_GetBufferPointer(err) : "(no blob)");
+            if (err) ID3D10Blob_Release(err);
+            return 0;
+        }
+        hr = ID3D12Device_CreateRootSignature((ID3D12Device *)g_dxr.device5, 0,
+                ID3D10Blob_GetBufferPointer(sig), ID3D10Blob_GetBufferSize(sig),
+                &IID_ID3D12RootSignature, (void **)&g_dxr.denoise_rs);
+        ID3D10Blob_Release(sig);
+        if (err) ID3D10Blob_Release(err);
+        if (FAILED(hr)) { dxr_log("denoise rootsig create 0x%08lX", hr); return 0; }
+    }
+
+    if (!g_dxr.denoise_pso) {
+        ZeroMemory(&pd, sizeof(pd));
+        pd.pRootSignature = g_dxr.denoise_rs;
+        pd.CS.pShaderBytecode = g_cs_shadow_atrous_50; pd.CS.BytecodeLength = sizeof(g_cs_shadow_atrous_50);
+        if (FAILED(ID3D12Device_CreateComputePipelineState((ID3D12Device *)g_dxr.device5, &pd,
+                &IID_ID3D12PipelineState, (void **)&g_dxr.denoise_pso))) { dxr_log("denoise R32 CS PSO FAILED"); return 0; }
+    }
+    if (!g_dxr.denoise_color_pso) {   /* RGBA16F variant (light/reflection masks); best-effort */
+        ZeroMemory(&pd, sizeof(pd));
+        pd.pRootSignature = g_dxr.denoise_rs;
+        pd.CS.pShaderBytecode = g_cs_color_atrous_50; pd.CS.BytecodeLength = sizeof(g_cs_color_atrous_50);
+        if (FAILED(ID3D12Device_CreateComputePipelineState((ID3D12Device *)g_dxr.device5, &pd,
+                &IID_ID3D12PipelineState, (void **)&g_dxr.denoise_color_pso))) { dxr_log("denoise COLOR CS PSO FAILED"); }
+    }
+    return g_dxr.denoise_pso != NULL;
+}
+
+/* Run N à-trous iterations over ANY RT mask (ping-pong buf0<->buf1). Called after
+ * the pass' DispatchRays UAV barrier, before restore_scene_inputs -- depth/gbuf
+ * are still compute-readable and the mask is UAV. Tracked states keep the
+ * transitions correct across frames regardless of final-buffer parity. Returns the
+ * SRV heap slot of the FINAL denoised buffer (for the composite) and writes it to
+ * *final_out. On any failure returns srv0 (undenoised passthrough). */
+static UINT dxr_denoise_mask(ID3D12GraphicsCommandList *cl,
+                             int paneX, int paneY, int paneW, int paneH, int iters,
+                             ID3D12PipelineState *pso,
+                             ID3D12Resource *buf0, D3D12_RESOURCE_STATES *s0, UINT uav0, UINT srv0,
+                             ID3D12Resource *buf1, D3D12_RESOURCE_STATES *s1, UINT uav1, UINT srv1,
+                             ID3D12Resource **final_out)
+{
+    ID3D12Resource *bufs[2];   D3D12_RESOURCE_STATES *st[2];
+    UINT uav_slot[2], srv_slot[2];   int i;
+    float edge = dxr_denoise_edge();
+    if (iters <= 0 || !buf1 || !pso) { if (final_out) *final_out = buf0; return srv0; }
+    bufs[0] = buf0; st[0] = s0; uav_slot[0] = uav0; srv_slot[0] = srv0;
+    bufs[1] = buf1; st[1] = s1; uav_slot[1] = uav1; srv_slot[1] = srv1;
+
+    ID3D12GraphicsCommandList_SetComputeRootSignature(cl, g_dxr.denoise_rs);
+    ID3D12GraphicsCommandList_SetPipelineState(cl, pso);
+
+    for (i = 0; i < iters; i++) {
+        int src = i & 1, dst = (i & 1) ^ 1;   /* 0->1,1->0,... : reads the raw mask first */
+        DxrDenoiseCB dcb; D3D12_GPU_VIRTUAL_ADDRESS cbva;
+        if (*st[src] != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) {
+            dxr_barrier(cl, bufs[src], *st[src], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            *st[src] = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        }
+        if (*st[dst] != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+            dxr_barrier(cl, bufs[dst], *st[dst], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            *st[dst] = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
+        dcb.rect[0] = (float)paneX; dcb.rect[1] = (float)paneY; dcb.rect[2] = (float)paneW; dcb.rect[3] = (float)paneH;
+        dcb.params[0] = (float)(1 << i);       /* à-trous step: 1,2,4,...           */
+        dcb.params[1] = 2.0f;                  /* radius (taps/side) -> 5-tap kernel */
+        dcb.params[2] = 3.0f / edge;           /* planar-depth tolerance mult (smaller = sharper) */
+        dcb.params[3] = 8.0f * edge;           /* normal power (gentle -> curves smooth) */
+        cbva = d3d12_priv_ring_cb(&dcb, (UINT)sizeof(dcb));
+        if (!cbva) { if (final_out) *final_out = bufs[src]; return srv_slot[src]; }   /* bail: newest */
+        ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(cl, 0, dxr_gpu(g_dxr.heap, srv_slot[src]));
+        ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(cl, 1, dxr_gpu(g_dxr.heap, DXR_SLOT_DEPTH_SRV));
+        ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(cl, 2, dxr_gpu(g_dxr.heap, uav_slot[dst]));
+        ID3D12GraphicsCommandList_SetComputeRootConstantBufferView(cl, 3, cbva);
+        ID3D12GraphicsCommandList_Dispatch(cl, (UINT)((paneW + 7) / 8), (UINT)((paneH + 7) / 8), 1);
+        dxr_uav_barrier(cl, bufs[dst]);
+    }
+    if (final_out) *final_out = bufs[iters & 1];   /* dst of the last iteration (UAV) */
+    return srv_slot[iters & 1];
 }
 
 /* Shared shadow/light pass: dispatch the raygen against the TLAS (reading depth +
@@ -1344,9 +1547,46 @@ static int dxr_lighting_pass(const void *cb, UINT cb_size, int mode)
     dxr_uav_barrier(cl, mask);
     Backend_NoteRTMark(mode == 2 ? "dispatch_refl" : mode == 1 ? "dispatch_light" : "dispatch_shadow");
 
+    /* [denoise] Edge-aware à-trous over the just-written mask, while depth/gbuf are
+     * still compute-readable (before restore). Applies to every jittered pass:
+     * shadow + GI (R32F), dynamic-light + reflection (RGBA16F). Redirect the
+     * composite to whichever ping-pong buffer holds the denoised result. */
+    {
+        int iters = dxr_denoise_iters();
+        if (iters > 0 && dxr_ensure_denoise_psos()) {
+            ID3D12Resource *final = mask;
+            switch (mode) {
+            case 0: mask_srv = dxr_denoise_mask(cl, paneX,paneY,paneW,paneH, iters, g_dxr.denoise_pso,
+                        g_dxr.sunvis,  &g_dxr.sunvis_state,  DXR_SLOT_SUNVIS_UAV,  DXR_SLOT_SUNVIS_SRV,
+                        g_dxr.sunvis2, &g_dxr.sunvis2_state, DXR_SLOT_SUNVIS2_UAV, DXR_SLOT_SUNVIS2_SRV, &final);
+                    g_dxr.sunvis_final = final;
+                    mask_state = (final == g_dxr.sunvis2) ? &g_dxr.sunvis2_state : &g_dxr.sunvis_state; break;
+            case 3: mask_srv = dxr_denoise_mask(cl, paneX,paneY,paneW,paneH, iters, g_dxr.denoise_pso,
+                        g_dxr.gi,  &g_dxr.gi_state,  DXR_SLOT_GI_UAV,  DXR_SLOT_GI_SRV,
+                        g_dxr.gi2, &g_dxr.gi2_state, DXR_SLOT_GI2_UAV, DXR_SLOT_GI2_SRV, &final);
+                    mask_state = (final == g_dxr.gi2) ? &g_dxr.gi2_state : &g_dxr.gi_state; break;
+            case 1: if (g_dxr.denoise_color_pso) {
+                        mask_srv = dxr_denoise_mask(cl, paneX,paneY,paneW,paneH, iters, g_dxr.denoise_color_pso,
+                            g_dxr.lightcol,  &g_dxr.lightcol_state,  DXR_SLOT_LIGHTCOL_UAV,  DXR_SLOT_LIGHTCOL_SRV,
+                            g_dxr.lightcol2, &g_dxr.lightcol2_state, DXR_SLOT_LIGHTCOL2_UAV, DXR_SLOT_LIGHTCOL2_SRV, &final);
+                        mask_state = (final == g_dxr.lightcol2) ? &g_dxr.lightcol2_state : &g_dxr.lightcol_state; } break;
+            case 2: if (g_dxr.denoise_color_pso) {
+                        mask_srv = dxr_denoise_mask(cl, paneX,paneY,paneW,paneH, iters, g_dxr.denoise_color_pso,
+                            g_dxr.reflcol,  &g_dxr.reflcol_state,  DXR_SLOT_REFLCOL_UAV,  DXR_SLOT_REFLCOL_SRV,
+                            g_dxr.reflcol2, &g_dxr.reflcol2_state, DXR_SLOT_REFLCOL2_UAV, DXR_SLOT_REFLCOL2_SRV, &final);
+                        mask_state = (final == g_dxr.reflcol2) ? &g_dxr.reflcol2_state : &g_dxr.reflcol_state; } break;
+            }
+            mask = final;
+        } else if (mode == 0) {
+            g_dxr.sunvis_final = g_dxr.sunvis;
+        }
+    }
+
     d3d12_priv_restore_scene_inputs();
-    dxr_barrier(cl, mask, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    *mask_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    if (*mask_state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) {
+        dxr_barrier(cl, mask, *mask_state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        *mask_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
 
     /* Composite over the pane (color-only RT; MULT for shadow, additive for light). */
     ID3D12GraphicsCommandList_OMSetRenderTargets(cl, 1, &e.rtv, FALSE, NULL);
@@ -1377,11 +1617,14 @@ int d3d12_dxr_gi_pass(const ShadowCB *cb) { return cb ? dxr_lighting_pass(cb, si
  * pass), so translucent draws later in the frame can sample it directly. Ready
  * only when the shadow pass ran this frame (state == PSR) so the backend never
  * binds a UAV-state mask. Returns NULL / 0 otherwise. */
-ID3D12Resource *d3d12_dxr_sunvis_resource(void) { return g_dxr.sunvis; }
+/* sunvis_final = the denoised result (sunvis or the à-trous scratch sunvis2);
+ * falls back to sunvis when denoise is off. */
+ID3D12Resource *d3d12_dxr_sunvis_resource(void) { return g_dxr.sunvis_final ? g_dxr.sunvis_final : g_dxr.sunvis; }
 int d3d12_dxr_sunvis_ready(void)
 {
-    return g_dxr.sunvis != NULL &&
-           g_dxr.sunvis_state == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    ID3D12Resource *r = g_dxr.sunvis_final ? g_dxr.sunvis_final : g_dxr.sunvis;
+    D3D12_RESOURCE_STATES s = (r == g_dxr.sunvis2) ? g_dxr.sunvis2_state : g_dxr.sunvis_state;
+    return r != NULL && s == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 }
 int d3d12_dxr_light_pass(const LightCB *cb)   { return cb ? dxr_lighting_pass(cb, sizeof(LightCB), 1)  : 0; }
 int d3d12_dxr_ssr_pass(const SSRCB *cb)       { return cb ? dxr_lighting_pass(cb, sizeof(SSRCB), 2)    : 0; }
@@ -1561,10 +1804,18 @@ void d3d12_dxr_shutdown(void)
     g_dxr.scene_open = 0; g_dxr.scene_inst = NULL; g_dxr.scene_count = 0;
 
     if (g_dxr.sunvis)    { ID3D12Resource_Release(g_dxr.sunvis);       g_dxr.sunvis = NULL; }
+    if (g_dxr.sunvis2)   { ID3D12Resource_Release(g_dxr.sunvis2);      g_dxr.sunvis2 = NULL; }
+    g_dxr.sunvis_final = NULL;
     if (g_dxr.lightcol)  { ID3D12Resource_Release(g_dxr.lightcol);     g_dxr.lightcol = NULL; }
+    if (g_dxr.lightcol2) { ID3D12Resource_Release(g_dxr.lightcol2);    g_dxr.lightcol2 = NULL; }
     if (g_dxr.reflcol)   { ID3D12Resource_Release(g_dxr.reflcol);      g_dxr.reflcol = NULL; }
+    if (g_dxr.reflcol2)  { ID3D12Resource_Release(g_dxr.reflcol2);     g_dxr.reflcol2 = NULL; }
     if (g_dxr.gi)        { ID3D12Resource_Release(g_dxr.gi);           g_dxr.gi = NULL; }
+    if (g_dxr.gi2)       { ID3D12Resource_Release(g_dxr.gi2);          g_dxr.gi2 = NULL; }
     if (g_dxr.shadow_pso){ ID3D12PipelineState_Release(g_dxr.shadow_pso); g_dxr.shadow_pso = NULL; }
+    if (g_dxr.denoise_pso){ ID3D12PipelineState_Release(g_dxr.denoise_pso); g_dxr.denoise_pso = NULL; }
+    if (g_dxr.denoise_color_pso){ ID3D12PipelineState_Release(g_dxr.denoise_color_pso); g_dxr.denoise_color_pso = NULL; }
+    if (g_dxr.denoise_rs) { ID3D12RootSignature_Release(g_dxr.denoise_rs); g_dxr.denoise_rs = NULL; }
     if (g_dxr.light_pso) { ID3D12PipelineState_Release(g_dxr.light_pso);  g_dxr.light_pso = NULL; }
     if (g_dxr.refl_pso)  { ID3D12PipelineState_Release(g_dxr.refl_pso);   g_dxr.refl_pso = NULL; }
     if (g_dxr.geo_buf)   { ID3D12Resource_Release(g_dxr.geo_buf); g_dxr.geo_buf = NULL; g_dxr.geo_mapped = NULL; }

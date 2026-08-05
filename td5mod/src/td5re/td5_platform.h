@@ -804,6 +804,9 @@ void td5_plat_render_set_gbuffer(int on);
 /* [CAR SUN] Per-draw sunlit-car brighten gain. Raise (>0) just before a car-body
  * mesh draw and clear (0) right after, so only car bodywork is brightened. */
 void td5_plat_render_set_car_sun(float gain);
+/* [CAR SUN] Set the frame-global unit sun direction (+Y-down world) for the
+ * directional car brighten. Call once per frame on the main thread. */
+void td5_plat_render_set_car_sun_dir(const float dir[3]);
 
 /* [RT lighting] 1 when the backend reports DirectX Raytracing available
  * (Backend_RTAvailable). The game gates LIGHTING QUALITY: HIGH on this. */
