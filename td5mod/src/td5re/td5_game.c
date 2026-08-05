@@ -312,6 +312,13 @@ void   *g_route_data            = NULL;
 #define TD5_COUNTDOWN_INIT    0xA000
 #define TD5_COUNTDOWN_DECR    0x100
 #define TD5_COUNTDOWN_LEVEL_DIV 0x2800
+/* [RESUME COUNTDOWN 2026-08-05] PORT-ONLY (no original equivalent). A brief
+ * 3-2-1 shown in every pane after CONTINUE before the split-screen field
+ * unfreezes, so all seated players re-orient before control returns. 15 sim
+ * ticks per digit at 30 Hz = 0.5 s/digit (3 digits ~= 1.5 s) -- deliberately
+ * quicker than the race-start countdown. Local split-screen MP only. */
+#define TD5_RESUME_COUNTDOWN_TICKS_PER_DIGIT 15
+#define TD5_RESUME_COUNTDOWN_TICKS (TD5_RESUME_COUNTDOWN_TICKS_PER_DIGIT * 3)
 
 /* ========================================================================
  * Module-private state
@@ -661,6 +668,15 @@ static uint32_t s_saved_race_seed;
 static int      s_replay_abort_pending; /* 1 = ESC pressed during replay → exit to results */
 static int      s_race_countdown_ticks;
 static int      s_race_countdown_state;
+/* [RESUME COUNTDOWN 2026-08-05] Split-screen MP resume 3-2-1 (see
+ * TD5_RESUME_COUNTDOWN_TICKS). s_resume_countdown_ticks>0 keeps the field
+ * frozen while tick_resume_countdown() drives the per-pane HUD digit. */
+static int      s_resume_countdown_ticks;
+static int      s_resume_countdown_state;   /* last digit pushed to the HUD */
+/* [PAUSED-BY INDICATOR 2026-08-05] 0-based player slot that opened the
+ * currently-active local pause menu, for the "PLAYER N PAUSED" label above the
+ * shared split-screen pause panel. -1 = unknown. Only surfaced when >1 human. */
+static int      s_pause_local_slot = -1;
 static int      s_pause_menu_active;
 static int      s_pause_menu_cursor;   /* [S31][END RACE NOW 2026-06-30][GATED 2026-07-02]
                                         * 0=VIEW 1=SOUND 2=RADIO 3=CONTINUE 4=RESTART.
@@ -779,6 +795,7 @@ static void adjust_checkpoint_timers(int slot);
 static void display_loading_screen_tga(void);
 static void reset_race_countdown(void);
 static void tick_race_countdown(void);
+static void tick_resume_countdown(void);   /* [RESUME COUNTDOWN 2026-08-05] */
 static const char *td5_game_state_name(TD5_GameState state);
 static uint32_t td5_game_normalized_dt_to_accum(float dt_normalized);
 static float td5_game_normalized_dt_to_seconds(float dt_normalized);
@@ -4873,6 +4890,9 @@ int td5_game_init_race_session(void) {
      * g_xz_freeze / td5_physics_set_xz_freeze kept around but no longer
      * driven — slated for cleanup. */
     s_pause_menu_active = 0;       /* clear stale pause menu from previous race */
+    s_resume_countdown_ticks = 0;  /* [RESUME COUNTDOWN 2026-08-05] no stale 3-2-1 */
+    s_resume_countdown_state = 0;
+    s_pause_local_slot = -1;       /* [PAUSED-BY 2026-08-05] no stale opener */
     /* [S27] Clear controller-disconnect state for the new race. */
     s_disconnect_pause_active  = 0;
     s_player_disconnected_mask = 0;
@@ -6044,12 +6064,13 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
          * word. It only opens/continues — it never triggers the ESC exit-to-results
          * or the cinematic abort (those stay ESC-only). */
         int pause_act_now = 0;
+        int pause_act_player = -1;   /* [PAUSED-BY 2026-08-05] which pad fired PAUSE */
         {
             int hp = g_td5.num_human_players;
             if (hp < 1) hp = 1;
             if (hp > TD5_MAX_HUMAN_PLAYERS) hp = TD5_MAX_HUMAN_PLAYERS;
             for (int pi = 0; pi < hp; pi++)
-                if (td5_input_get_control_bits(pi) & TD5_INPUT_PAUSE) { pause_act_now = 1; break; }
+                if (td5_input_get_control_bits(pi) & TD5_INPUT_PAUSE) { pause_act_now = 1; pause_act_player = pi; break; }
         }
         int pause_act_edge = (pause_act_now && !s_prev_pause_act);
         s_prev_pause_act = pause_act_now;
@@ -6134,6 +6155,17 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
         }
         if ((esc_edge || pause_act_edge) && !s_pause_menu_active && !td5_game_is_cinematic_race()) {
             s_pause_menu_active = 1;
+            /* [PAUSED-BY INDICATOR 2026-08-05] Attribute the pause to the pad
+             * that fired it; keyboard ESC (no pad bit) is pane 0. Surfaced only
+             * in split-screen MP by td5_game_pause_local_slot(). */
+            s_pause_local_slot = (pause_act_player >= 0) ? pause_act_player : 0;
+            /* [RESUME COUNTDOWN 2026-08-05] Re-pausing during a resume 3-2-1
+             * cancels it (the panel draws over the digit anyway). */
+            if (s_resume_countdown_ticks > 0) {
+                s_resume_countdown_ticks = 0;
+                s_resume_countdown_state = 0;
+                set_countdown_indicator_state(0);
+            }
             s_pause_menu_cursor = 3;  /* default to CONTINUE. [RADIO + END RACE
                                        * NOW 2026-06-30] A RADIO slider sits at
                                        * row 2 and END RACE NOW is an action row:
@@ -6472,6 +6504,20 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
                     td5_sound_cd_play(g_td5.track_index % 10 + 1);  /* same call as InitRace step 16 */
                     TD5_LOG_I(LOG_TAG, "Pause resumed -> music restarted (track=%d)",
                               g_td5.track_index % 10 + 1);
+                    /* [RESUME COUNTDOWN 2026-08-05] Local split-screen MP: hold
+                     * the field frozen for a brief 3-2-1 (drawn in every pane)
+                     * before control returns. Any genuine resume path reaches
+                     * here (CONTINUE / ESC / pad-B); the exit/restart/quit paths
+                     * are excluded by the guard above. Net races keep their own
+                     * lockstep pause sync, and a start-countdown must not be
+                     * clobbered, so both are excluded. */
+                    if (g_td5.num_human_players > 1 && !g_td5.network_active &&
+                        s_race_countdown_state == 0 && g_cameraTransitionActive == 0) {
+                        s_resume_countdown_ticks = TD5_RESUME_COUNTDOWN_TICKS;
+                        s_resume_countdown_state = 0;
+                        TD5_LOG_I(LOG_TAG, "Resume countdown armed (%d ticks, %d/digit)",
+                                  TD5_RESUME_COUNTDOWN_TICKS, TD5_RESUME_COUNTDOWN_TICKS_PER_DIGIT);
+                    }
                 }
                 /* Pause menu just closed: re-anchor the chase-camera smoothing
                  * so the first resumed frame doesn't glide across the gap (esp.
@@ -6530,6 +6576,20 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
          * of the loop, so the Start/Esc exit still fires. Dev-only: active() is a
          * hard 0 in RELEASE. */
         if (td5_camera_freecam_active()) {
+            g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
+            ticks_this_frame++;
+            td5_game_trace_stage("pause_menu", ticks_this_frame);
+            continue;
+        }
+
+        /* [RESUME COUNTDOWN 2026-08-05] Split-screen MP: after the pause menu
+         * closes, hold the field fully frozen (skip physics + AI, like the
+         * disconnect/freecam freezes above) for a brief 3-2-1 shown in every
+         * pane, then GO. Drives the same per-pane HUD digit as the race-start
+         * countdown; g_td5.paused stays 0 so this never enters the start-
+         * countdown sub-tick below. */
+        if (s_resume_countdown_ticks > 0) {
+            tick_resume_countdown();
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
             td5_game_trace_stage("pause_menu", ticks_this_frame);
@@ -7599,6 +7659,9 @@ static void frame_render(void)
      * fade below is the leaving-transition wipe and intentionally stays on top.) */
     if (s_pause_menu_active) {
         td5_hud_draw_pause_overlay();
+        /* [PAUSED-BY INDICATOR 2026-08-05] "PLAYER N PAUSED" above the shared
+         * split-screen pause panel. Self-gated (local >1-human only). */
+        td5_hud_draw_pause_paused_by();
         /* [END RACE NOW 2026-06-30] Force-finish YES/NO confirmation, drawn on
          * top of the pause panel. Self-gated: no-op unless the prompt is armed. */
         td5_hud_draw_endrace_confirm();
@@ -7830,6 +7893,44 @@ static void reset_race_countdown(void)
     s_race_countdown_state   = 0;   /* hide indicator until level 2 is reached */
     set_countdown_indicator_state(0);
     TD5_LOG_I(LOG_TAG, "Race countdown reset: timer=0x%X", g_cameraTransitionActive);
+}
+
+/* [RESUME COUNTDOWN 2026-08-05] PORT-ONLY. Called once per drained sim tick
+ * while a split-screen MP resume 3-2-1 is up (armed on a genuine pause resume).
+ * Pushes the current digit to every pane via the shared countdown indicator and
+ * decrements; when the last tick elapses it hides the digit and lets the caller
+ * stop freezing the field (s_resume_countdown_ticks reaches 0). g_td5.paused is
+ * left untouched (0 mid-race) so the race-start countdown path is never entered. */
+static void tick_resume_countdown(void)
+{
+    int t = s_resume_countdown_ticks;   /* > 0 guaranteed by the caller's guard */
+    /* PER_DIGIT ticks each for 3, 2, 1 (e.g. 45..31->3, 30..16->2, 15..1->1). */
+    int digit = (t > 2 * TD5_RESUME_COUNTDOWN_TICKS_PER_DIGIT) ? 3
+              : (t >     TD5_RESUME_COUNTDOWN_TICKS_PER_DIGIT) ? 2
+              : 1;
+    if (digit != s_resume_countdown_state) {
+        s_resume_countdown_state = digit;
+        set_countdown_indicator_state(digit);
+        TD5_LOG_I(LOG_TAG, "Resume countdown: %d (ticks=%d)", digit, t);
+    }
+    s_resume_countdown_ticks = t - 1;
+    if (s_resume_countdown_ticks == 0) {
+        set_countdown_indicator_state(0);
+        s_resume_countdown_state = 0;
+        TD5_LOG_I(LOG_TAG, "Resume countdown: GO (field unfrozen)");
+    }
+}
+
+/* [PAUSED-BY INDICATOR 2026-08-05] The 0-based player slot that opened the
+ * active local pause menu, or -1 when there is nothing meaningful to show
+ * (no menu, single human, or a network race — those use the net PAUSED BY
+ * overlay). The HUD renders "PLAYER N PAUSED" above the shared pause panel. */
+int td5_game_pause_local_slot(void)
+{
+    if (!s_pause_menu_active) return -1;
+    if (g_td5.network_active)  return -1;
+    if (g_td5.num_human_players <= 1) return -1;
+    return s_pause_local_slot;
 }
 
 /* [CONFIRMED @ 0x0040a490 UpdateRaceCameraTransitionTimer; L5 promotion

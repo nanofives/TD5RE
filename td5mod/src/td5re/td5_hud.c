@@ -2225,6 +2225,31 @@ void td5_hud_draw_net_pause_overlay(void)
                           0xFFFFC050u, ts * 0.7f, ts * 0.7f);
 }
 
+/* [PAUSED-BY INDICATOR 2026-08-05] Local split-screen MP: label above the
+ * shared, screen-centred pause panel naming which player opened the menu, so
+ * the other seated players know who to hand the pad to. Self-gated: no-op
+ * unless td5_game_pause_local_slot() returns a real slot (>1 human, local,
+ * menu up). Uses the same screen-centre + pause scale as the panel so it
+ * tracks the panel at any window size. PORT-ONLY. */
+void td5_hud_draw_pause_paused_by(void)
+{
+    int slot = td5_game_pause_local_slot();
+    if (slot < 0) return;
+
+    float cx, cy;
+    hud_screen_center(&cx, &cy);
+    float ps = hud_pause_scale();
+
+    char buf[32];
+    snprintf(buf, sizeof buf, "PLAYER %d PAUSED", slot + 1);
+
+    /* The BLACKBOX panel spans roughly y=[-56..56]*ps around cy (see
+     * td5_hud_init_pause_menu); sit the label a little above its top edge. */
+    float y  = cy - 74.0f * ps;
+    float ts = 0.8f * ps;
+    td5_vui_text_centered(cx, y, buf, 0xFF66FF66u, ts, ts);   /* green, matches PLAYER labels */
+}
+
 /* [END RACE NOW 2026-06-30] Confirmation modal for the pause-menu force-finish.
  * Self-gated: draws nothing unless td5_game has armed the prompt (the player
  * highlighted END RACE NOW and pressed confirm once). Mirrors the frontend
