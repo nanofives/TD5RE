@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 5" },
+    { CL_ITEM,    "TRAFFIC BATTLE: no more farming traffic by reversing -" },
+    { CL_ITEM,    "  cars only spawn ahead of how far you've actually got," },
+    { CL_ITEM,    "  so driving backwards stops feeding you fresh targets" },
+    { CL_ITEM,    "  until you push past your furthest point again." },
+    { CL_ITEM,    "TRAFFIC BATTLE: once the first player finishes the race" },
+    { CL_ITEM,    "  a 60s countdown ends the battle - no more crawling to" },
+    { CL_ITEM,    "  farm wrecks forever (on-screen ENDS m:ss clock)." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 4" },
     { CL_ITEM,    "NEW (HIGH lighting): sun-aligned car lighting - the" },
     { CL_ITEM,    "  car's lit side now follows the real sun (was a flat" },

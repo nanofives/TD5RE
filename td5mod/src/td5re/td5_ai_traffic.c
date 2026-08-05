@@ -2119,6 +2119,14 @@ static int      s_trf_dyn_cooldown;                       /* ticks to next spawn
 static uint32_t s_trf_dyn_rng;                            /* private LCG state */
 static int      s_trf_dyn_oncoming_pct;                   /* 0..100 from TRAFFIC.BUS mix (diagnostic) */
 static int      s_trf_dyn_seeded;                         /* race_init ran for this race */
+/* [TRAFFIC BATTLE HWM 2026-08-05] Per-racer FURTHEST-progress high-water mark
+ * (cumulative lap*ring+span via td5_game_get_slot_progress, so it survives circuit
+ * lap-wrap). In TRAFFIC BATTLE, live-spawn anchors read this instead of the racer's
+ * CURRENT span: reversing lowers current progress but not the mark, so a player who
+ * drives backwards gets no fresh traffic until they push PAST their own furthest
+ * point — killing the reverse-to-farm-spawns exploit. Zeroed at race init, updated
+ * at the top of each dynamic tick. Racer slots [0, g_traffic_slot_base) only. */
+static int      s_trf_battle_hwm[TD5_MAX_RACER_SLOTS];
 /* [TRAFFIC-BATTLE WRECK DESPAWN 2026-07-20] Per-slot age (ticks) of a wrecked
  * traffic car. In TRAFFIC BATTLE a wreck is a PERMANENT wreck (ticks=-1) that
  * keeps its ACTIVE slot and counts toward the cap; if wrecks pile up faster than
@@ -2767,6 +2775,93 @@ static int trf_dyn_starved_player_span(int radius)
     return best_span;
 }
 
+/* ========================================================================
+ * [TRAFFIC BATTLE HWM 2026-08-05] High-water-mark spawn anchoring (battle mode).
+ *
+ * In TRAFFIC BATTLE, live spawns anchor on each racer's FURTHEST-reached track
+ * position (s_trf_battle_hwm), not their current span. A player driving forward
+ * has current==mark, so behaviour is unchanged. A player who reverses drops BELOW
+ * their mark and (a) is skipped as a spawn anchor and (b) has their window parked
+ * ahead of them — so they see no new traffic until they climb back past the mark.
+ * This removes the "reverse to keep re-triggering nearby spawns" farm without
+ * touching the faithful legacy recycle path (ai_player_span_lead et al.).
+ * ======================================================================== */
+
+/* Tolerance (spans of cumulative progress) a racer may sit below its mark before
+ * it counts as "reversing/parked" and stops earning traffic. A few spans absorbs
+ * the normal jitter from collisions bumping a car slightly backwards. */
+static int trf_battle_hwm_slack(void)
+{
+    return td5_env_int("TD5RE_BATTLE_HWM_SLACK", 6, 0, 100000);
+}
+
+/* Fold a racer's cumulative high-water mark back to a placeable [0,ring) span
+ * (circuit) or return it directly (P2P, where progress already equals the span).
+ * Falls back to the live span if the mark is not yet valid. */
+static int trf_battle_hwm_span(int slot)
+{
+    int hwm, ring;
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS)
+        return 0;
+    hwm  = s_trf_battle_hwm[slot];
+    ring = td5_track_get_ring_length();
+    if (ring > 0 && ring < 9000) {          /* circuit: unfold to a single-lap span */
+        int f = hwm % ring;
+        if (f < 0) f += ring;
+        return f;
+    }
+    return hwm;                             /* P2P: progress IS the folded span */
+}
+
+/* 1 while racer `slot` is at/near its furthest point (earning traffic); 0 once it
+ * has dropped more than the slack below its mark (reversing/parked -> no spawns). */
+static int trf_battle_slot_progressing(int slot)
+{
+    int prog;
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 1;
+    prog = td5_game_get_slot_progress(slot);
+    return (s_trf_battle_hwm[slot] - prog) <= trf_battle_hwm_slack();
+}
+
+/* Battle-mode live-spawn anchor span. Picks the anchor player the same way
+ * trf_dyn_starved_player_span does (fewest nearby cars; tie -> lower mark), but
+ * ONLY among players who are progressing, and returns that player's HIGH-WATER-MARK
+ * span. *out_ok is set to 0 when every local racer is reversing/parked, so the
+ * caller places no traffic at all this tick. */
+static int trf_battle_hwm_anchor_span(int radius, int *out_ok)
+{
+    int lim = trf_perplayer_cap_enabled() ? trf_anchor_count()
+                                           : g_td5.num_human_players;
+    int best_slot = -1, best_cnt = 0, s;
+
+    *out_ok = 0;
+
+    if (s_trf_scope_slot >= 0) {            /* per-viewport (split-screen pane) */
+        if (!trf_battle_slot_progressing(s_trf_scope_slot)) return 0;
+        *out_ok = 1;
+        return trf_battle_hwm_span(s_trf_scope_slot);
+    }
+
+    if (lim < 1) lim = 1;
+    if (lim > g_traffic_slot_base)  lim = g_traffic_slot_base;
+    if (lim > TD5_MAX_RACER_SLOTS)  lim = TD5_MAX_RACER_SLOTS;
+
+    for (s = 0; s < lim; s++) {
+        int sp, cnt;
+        if (!trf_battle_slot_progressing(s)) continue;   /* reversing/parked -> skip */
+        sp  = trf_battle_hwm_span(s);
+        cnt = trf_dyn_count_traffic_near(sp, radius);
+        if (best_slot < 0 || cnt < best_cnt ||
+            (cnt == best_cnt && sp < trf_battle_hwm_span(best_slot))) {
+            best_slot = s;
+            best_cnt  = cnt;
+        }
+    }
+    if (best_slot < 0) return 0;           /* nobody progressing -> no spawn */
+    *out_ok = 1;
+    return trf_battle_hwm_span(best_slot);
+}
+
 /* [task#8 2026-06-14] A/B knob for spawning ambient traffic on branch corridors
  * (both sides of a fork), not just the main/right route. TD5RE_TRAFFIC_BRANCHES=0
  * restores the prior main-ring-only spawn (TD6 branches stay empty). Default on.
@@ -3338,6 +3433,16 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
         int ps;
         if (anchor >= 0)
             ps = anchor;
+        else if (td5_game_battle_mode_active()) {
+            /* [TRAFFIC BATTLE HWM] Anchor on the progressing player's furthest
+             * point. If every local racer is reversing/parked, place nothing this
+             * tick (the exploit's whole point was to keep spawns coming while going
+             * backwards). */
+            int rhi = 0, ok = 0;
+            trf_dyn_effective_spawn_window(NULL, &rhi);
+            ps = trf_battle_hwm_anchor_span(g_td5.ini.traffic_dyn_despawn + rhi, &ok);
+            if (!ok) return 0;
+        }
         else if (trf_dyn_density_enabled()) {
             /* [item#10 2026-06-15] In a multi-human race, anchor on whichever human
              * currently has the LEAST nearby traffic (tie -> trailing player), so
@@ -3530,6 +3635,7 @@ void td5_ai_traffic_dynamic_race_init(void)
 
     memset(s_trf_dyn_state, TRF_DYN_INACTIVE, sizeof(s_trf_dyn_state));
     memset(s_trf_dyn_alpha, 0, sizeof(s_trf_dyn_alpha));
+    memset(s_trf_battle_hwm, 0, sizeof(s_trf_battle_hwm));   /* [TRAFFIC BATTLE HWM] */
     s_trf_dyn_rng      = 0x54443552u ^ ((uint32_t)g_td5.track_index * 2654435761u);
     s_trf_dyn_cooldown = 0;
     s_trf_dyn_seeded   = 1;
@@ -3682,6 +3788,18 @@ void td5_ai_traffic_dynamic_tick(void)
 
     fade_step = 255 / g_td5.ini.traffic_dyn_fade_ticks;
     if (fade_step < 1) fade_step = 1;
+
+    /* [TRAFFIC BATTLE HWM] Advance each racer's furthest-progress mark BEFORE the
+     * spawn cadence runs this tick, so a forward-moving player's anchor tracks them
+     * with zero lag while a reversing player's anchor stays parked at their mark. */
+    if (td5_game_battle_mode_active()) {
+        int rn = g_traffic_slot_base;
+        if (rn > TD5_MAX_RACER_SLOTS) rn = TD5_MAX_RACER_SLOTS;
+        for (int rs = 0; rs < rn; rs++) {
+            int prog = td5_game_get_slot_progress(rs);
+            if (prog > s_trf_battle_hwm[rs]) s_trf_battle_hwm[rs] = prog;
+        }
+    }
 
     for (int slot = t_base; slot < t_end; slot++) {
         char *a = actor_ptr(slot);

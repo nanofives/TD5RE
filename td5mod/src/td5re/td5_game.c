@@ -597,6 +597,13 @@ static int      s_battle_chase_active;
 static int32_t  s_battle_chase_span;          /* 24.8 fixed track span of the deadline */
 static int      s_battle_chase_caught[TD5_MAX_RACER_SLOTS];
 
+/* [TRAFFIC BATTLE FINISH TIMER 2026-08-05] Once the FIRST racer finishes the race,
+ * everyone else gets a fixed countdown (TD5RE_BATTLE_FINISH_SECS, default 60s)
+ * before the battle is force-ended and standings lock (most wrecks wins). Stops
+ * players deliberately crawling to farm wrecks long after the leader is home.
+ * Sim-tick based so it stays lockstep-deterministic in netplay. -1 = unarmed. */
+static int32_t  s_battle_finish_ticks_left = -1;
+
 /* [REPLAY RESULTS PRESERVE 2026-06-27] A "View Replay" re-enters the race via
  * g_td5.race_requested -> init_race_session, which WIPES the live race-results
  * display state (s_results / s_metrics / s_slot_state / ...) so the recorded run
@@ -752,6 +759,7 @@ static int      s_pause_action_confirm; /* [PAUSE CONFIRM 2026-07-02] 0=none, el
 
 static int  check_race_completion(uint32_t sim_delta);
 static void battle_chase_tick(void);                  /* [TRAFFIC BATTLE checkpoints] */
+static void battle_finish_timer_tick(void);           /* [TRAFFIC BATTLE FINISH TIMER] */
 static void build_results_table(void);
 static void reset_results_table(void);
 static void capture_replay_results_snapshot(void);   /* [REPLAY RESULTS PRESERVE] */
@@ -2155,6 +2163,7 @@ static void init_race_modes_and_seed(void)
     s_battle_chase_active = 0;
     s_battle_chase_span   = INT32_MIN;
     memset(s_battle_chase_caught, 0, sizeof(s_battle_chase_caught));
+    s_battle_finish_ticks_left = -1;   /* [TRAFFIC BATTLE FINISH TIMER] disarm */
 
     /* [LANE ASSIST 2026-06-28] Seed each local human's lane-assist enable from
      * their menu choice (SP: Game Options [Input] LaneAssist; MP: the per-player
@@ -7059,6 +7068,10 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
              * fixed sim tick (frame-rate-independent + lockstep-safe). No-op
              * unless the CHECKPOINTS win condition armed it. */
             battle_chase_tick();
+            /* [TRAFFIC BATTLE FINISH TIMER] Advance the first-finisher countdown
+             * on the same fixed-tick cadence (lockstep-safe). No-op until a racer
+             * finishes / outside battle mode. */
+            battle_finish_timer_tick();
         }
 
         /* --- Consume one tick --- */
@@ -10829,6 +10842,77 @@ int td5_game_battle_chase_gap(int slot) {
     int ring = td5_track_get_span_count();
     if (ring < 1) ring = 1;
     return battle_racer_progress(slot, ring) - (s_battle_chase_span >> 8);
+}
+
+/* ========================================================================
+ * [TRAFFIC BATTLE FINISH TIMER 2026-08-05] First-finisher countdown.
+ *
+ * The moment any racer completes the race, arm a fixed countdown; when it elapses,
+ * force every still-racing slot finished so the normal race-completion latch fires
+ * and the battle ends (winner = most wrecks). Works in solo and split-screen, any
+ * battle win condition. Sim-tick driven (lockstep-safe). Complements the CHECKPOINTS
+ * chaser, which anchors on the SLOWEST car; this one triggers off the FASTEST.
+ * ======================================================================== */
+static int battle_finish_secs(void) {
+    return td5_env_int("TD5RE_BATTLE_FINISH_SECS", 60, 0, 3600);   /* 0 = disabled */
+}
+
+static void battle_finish_timer_tick(void) {
+    int base, i, secs;
+    if (!td5_game_battle_mode_active()) return;
+    secs = battle_finish_secs();
+    if (secs <= 0) return;                         /* knob-disabled */
+    if (s_battle_finish_ticks_left == 0) return;   /* already fired this race */
+
+    base = g_traffic_slot_base;
+    if (base < 1) base = 1;
+    if (base > TD5_MAX_RACER_SLOTS) base = TD5_MAX_RACER_SLOTS;
+
+    /* Arm on the first finisher. */
+    if (s_battle_finish_ticks_left < 0) {
+        for (i = 0; i < base; i++) {
+            if (s_slot_state[i].state == 3) continue;
+            if (s_metrics[i].post_finish_metric_base != 0) {   /* someone home */
+                s_battle_finish_ticks_left = secs * 30;        /* 30 Hz sim */
+                TD5_LOG_I(LOG_TAG,
+                          "battle_finish_timer: armed %ds (first racer finished)", secs);
+                return;
+            }
+        }
+        return;
+    }
+
+    if (--s_battle_finish_ticks_left > 0) return;
+
+    /* Deadline reached: force every still-racing slot finished so the completion
+     * latch counts it (mirrors the chaser's finish-marking + the finish flag the
+     * latch actually reads). */
+    TD5_LOG_I(LOG_TAG, "battle_finish_timer: countdown elapsed — ending battle");
+    for (i = 0; i < base; i++) {
+        int32_t t;
+        if (s_slot_state[i].state == 3) continue;
+        if (s_metrics[i].post_finish_metric_base != 0) continue;   /* already done */
+        t = s_metrics[i].cumulative_timer;
+        s_metrics[i].post_finish_metric_base = (t > 0) ? t : 1;
+        s_slot_state[i].companion_1 = 1;                           /* completion latch reads this */
+        if (s_slot_finish_place[i] == 0) {
+            int placed = 0, j;
+            for (j = 0; j < base; j++)
+                if (s_metrics[j].post_finish_metric_base != 0) placed++;
+            s_slot_finish_place[i] = placed;                       /* includes self -> 1-based */
+        }
+        {
+            TD5_Actor *a = td5_game_get_actor(i);
+            if (a) a->finish_time = s_metrics[i].post_finish_metric_base;
+        }
+    }
+}
+
+/* Whole seconds left on the first-finisher countdown, or -1 when unarmed/disabled
+ * (HUD reads this to show the "race ends in" clock). */
+int td5_game_battle_finish_secs_left(void) {
+    if (s_battle_finish_ticks_left <= 0) return -1;
+    return (s_battle_finish_ticks_left + 29) / 30;   /* ceil to whole seconds */
 }
 
 /* [MP GAME MODES: COP CHASE 2026-06-22] Effective cop slot for cop-chase /
