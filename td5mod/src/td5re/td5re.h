@@ -310,6 +310,22 @@ typedef struct TD5_GlobalState {
                                  * 1 = HIGH (ray-traced shadows/lights/reflections when a
                                  * DXR device is present; auto-falls-back to LOW otherwise).
                                  * Default 1. See docs/plans/RT_LIGHTING_PLAN.md. */
+        /* [RT2 P8] LIGHTING OPTIONS sub-screen — per-feature RT tiers, all
+         * default HIGHEST (user decision #6). Applied at config load by mapping
+         * each tier onto the TD5RE_RT_* env knob the RT passes already read
+         * (env explicitly set still wins, for A/B). HIGH-only effect — LOW
+         * ignores them. See docs/plans/RT_LIGHTING2_PLAN.md Phase 8. */
+        int  rt_shadow_rays;    /* SHADOW QUALITY: 1 LOW / 4 MED / 8 HIGH  (->TD5RE_RT_RAYS)   */
+        int  rt_shadow_res;     /* SHADOW RESOLUTION: 0 HALF / 1 FULL       (dispatch res)      */
+        int  rt_reflection_q;   /* REFLECTIONS: 0 OFF / 1 HALF / 2 FULL     (res tier + enable) */
+        int  rt_reflection_rng; /* REFLECTION RANGE: 0 NEAR / 1 FAR / 2 UNLIMITED (TMax tiers)  */
+        int  rt_gi_quality;     /* GLOBAL ILLUMINATION: 0 OFF / 1 LOW(2) / 2 HIGH(4) rays       */
+        int  rt_sun_probe;      /* SUN & SKY: 0 CLASSIC (zone sun, no disc) / 1 AUTO (probe)    */
+        int  rt_light_quality;  /* LIGHTS: 0 BASIC / 1 REALISTIC (P7 soft lights + street lamps)*/
+        int  rt_opt_version;    /* [TDR-safe] LIGHTING OPTIONS schema version. When an INI
+                                 * predates the current version its RT tiers are reset to the
+                                 * TDR-safe defaults once (the initial all-max defaults hung
+                                 * the GPU at high res). See main.c RT_OPT_VERSION_CURRENT. */
         /* Game options */
         int  laps;
         int  checkpoint_timers;

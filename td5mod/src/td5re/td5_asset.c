@@ -2076,6 +2076,41 @@ int td5_asset_load_png_texture(int page_index, const char *png_path,
     return ok;
 }
 
+/* [CAR REFL 2026-08-04] Load a car skin and bake the offline material-mask matid
+ * (carmatmask0.png, matid replicated R=G=B) into the skin's ALPHA channel. The
+ * car G-buffer pixel shader then reads tex.a as a per-texel material id to pick
+ * reflectivity per part (glass = mirror, body = subtle, lights = none) with NO
+ * second texture binding. Falls back to a plain load if the mask is absent or a
+ * size mismatch. skin alpha is otherwise unused on opaque car bodies. */
+int td5_asset_load_vehicle_skin_matid(int page_index, const char *skin_path,
+                                      const char *matmask_path)
+{
+    void *pixels = NULL; int w = 0, h = 0;
+    int ok, baked = 0;
+    if (!td5_asset_load_png_to_buffer(skin_path, TD5_COLORKEY_NONE, &pixels, &w, &h))
+        return 0;
+    if (matmask_path && matmask_path[0]) {
+        void *mask = NULL; int mw = 0, mh = 0;
+        if (td5_asset_decode_png_rgba32(matmask_path, &mask, &mw, &mh)) {
+            if (mw == w && mh == h) {
+                uint8_t *sp = (uint8_t *)pixels;         /* BGRA */
+                const uint8_t *mp = (const uint8_t *)mask;
+                int i, n = w * h;
+                for (i = 0; i < n; i++)
+                    sp[i * 4 + 3] = mp[i * 4 + 0];       /* skin.alpha = matid */
+                baked = 1;
+            }
+            stbi_image_free(mask);
+        }
+    }
+    ok = td5_plat_render_upload_texture(page_index, pixels, w, h, 2);
+    stbi_image_free(pixels);
+    if (ok)
+        TD5_LOG_D(LOG_TAG, "car skin+matid: %s (matmask %s) → page %d (%dx%d)",
+                  skin_path, baked ? "baked" : "MISSING", page_index, w, h);
+    return ok;
+}
+
 int td5_asset_resolve_png_path(const char *entry_name, const char *archive,
                                char *out_path, size_t out_size)
 {
@@ -3786,8 +3821,17 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
                                       slot, paint_rgb, paint_rgb2, paint_pat);
                     }
                 }
-                if (!skin_ok)
-                    skin_ok = td5_asset_load_png_texture(skin_page, png_skin, TD5_COLORKEY_NONE);
+                if (!skin_ok) {
+                    /* [CAR REFL 2026-08-04] Non-TD6 (pre-painted) skins: bake the
+                     * offline material-mask matid into the skin alpha so the car
+                     * shader gets per-texel reflectivity. Plain load if no mask. */
+                    char png_matmask[256];
+                    if (td5_asset_resolve_png_path("carmatmask0.png", zip_path,
+                                                   png_matmask, sizeof(png_matmask)))
+                        skin_ok = td5_asset_load_vehicle_skin_matid(skin_page, png_skin, png_matmask);
+                    if (!skin_ok)
+                        skin_ok = td5_asset_load_png_texture(skin_page, png_skin, TD5_COLORKEY_NONE);
+                }
             }
             if (!skin_ok)
                 TD5_LOG_W(LOG_TAG, "vehicle slot=%d: %s PNG not found in %s", slot, skin_tga, zip_path);

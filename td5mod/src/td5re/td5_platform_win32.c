@@ -29,6 +29,8 @@
 #include "td5_platform_internal.h"
 #include "td5_config.h"  /* shared TD5RE_* env-knob helpers */
 #include "td5_rcmd.h"   /* Phase B render-transform: per-pane CPU command recording */
+#include "td5_material.h" /* [RT2-P5] per-page shininess detection at upload */
+#include "td5_rt.h"       /* [RT2-P7] td5_rt_active() — HIGH light-pipeline knobs */
 
 /* Pull in the wrapper types and backend access */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -3864,6 +3866,25 @@ void td5_plat_render_apply_lights(const float cam_pos[3], const float basis9[9],
     cb.ext[0] = (float)occl_steps;
     cb.ext[1] = pane_w;
     cb.ext[2] = pane_h;
+    /* [RT2 P7] HIGH light-pipeline knobs. RT shader (rgen_light) only — the LOW
+     * ps_light.hlsl declares neither ext.w nor ext2 and reads only through
+     * lights[], so these leave LOW byte-identical (verified via goldens). Set
+     * only when RT is active; 0 => rgen_light falls back to its old hard-cone /
+     * single-shadow-ray path. */
+    if (td5_rt_active()) {
+        static float s_cone_soft = -1.0f; static int s_light_rays = -1;
+        if (s_light_rays < 0) {
+            const char *e;
+            s_cone_soft  = ((e = getenv("TD5RE_RT_LIGHT_CONE_SOFT")) && e[0]) ? (float)atof(e) : 0.15f;
+            s_light_rays = ((e = getenv("TD5RE_RT_LIGHT_RAYS"))      && e[0]) ? atoi(e)        : 2;
+            if (s_cone_soft < 0.0f) s_cone_soft = 0.0f;
+            if (s_cone_soft > 1.0f) s_cone_soft = 1.0f;
+            if (s_light_rays < 1)  s_light_rays = 1;
+            if (s_light_rays > 16) s_light_rays = 16;
+        }
+        cb.ext[3]  = s_cone_soft;
+        cb.ext2[0] = (float)s_light_rays;
+    }
 
     for (int i = 0; i < n; i++) {
         const TD5_LightGPU *L = &lights[i];
@@ -3881,6 +3902,25 @@ void td5_plat_render_set_gbuffer(int on)
     /* Serial/immediate path only (same constraint as the light pass). */
     if (td5_rcmd_recording()) return;
     Backend_SetGBufferEnabled(on);
+}
+
+void td5_plat_render_set_car_sun(float gain)
+{
+    if (g_backend.device_removed) return;
+    /* Deferred pane path: record so the gain replays IN ORDER with the car's
+     * draw (a bare backend global would be read at replay time — after the game
+     * already reset it — leaving race-frame car draws unbrightened; the immediate
+     * first frame worked, deferred race frames did not). */
+    if (td5_rcmd_recording()) { td5_rcmd_set_car_sun(gain); return; }
+    Backend_SetCarSun(gain);
+}
+
+void td5_plat_render_set_car_sun_dir(const float dir[3])
+{
+    if (g_backend.device_removed) return;
+    /* Frame-global (same sun for every car draw this frame), set on the main thread
+     * before the world pass / rcmd replay, so NOT recorded per-command. */
+    Backend_SetCarSunDir(dir[0], dir[1], dir[2]);
 }
 
 /* [RT lighting] DXR capability passthrough. */
@@ -3924,7 +3964,8 @@ void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
                                   float depth_scale, float depth_bias,
                                   const float sun_dir[3], float strength,
                                   int steps, float max_dist, float thickness,
-                                  float start_off, float pane_w, float pane_h)
+                                  float start_off, float pane_w, float pane_h,
+                                  float cone_scale)
 {
     if (g_backend.device_removed) return;
     /* Serial/immediate path only (same constraint as the light pass). */
@@ -3946,24 +3987,70 @@ void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
     cb.sun[0] = sun_dir[0]; cb.sun[1] = sun_dir[1]; cb.sun[2] = sun_dir[2];
     cb.sun[3] = max_dist;
     cb.params[0] = (float)steps;
+    /* [shadow debug] TD5RE_RT_SHADOW_DEBUG negates params[0] (steps, unused by
+     * the RT rgen_shadow path) as a debug flag -> rgen_shadow tints no-G-buffer
+     * ground grey so the composite reveals whether the road even has coverage. */
+    {
+        static int s_sdbg = -2;
+        if (s_sdbg == -2) {
+            const char *e = getenv("TD5RE_RT_SHADOW_DEBUG");
+            s_sdbg = (e && e[0]) ? atoi(e) : 0;   /* 1=raw vis, 2=world.x, 3=world.y, 4=world.z */
+        }
+        if (s_sdbg > 0) cb.params[0] = -(float)s_sdbg;   /* negative magnitude = debug level */
+    }
     cb.params[1] = thickness;
     cb.params[2] = start_off;
     cb.params[3] = pane_w;
     cb.params2[0] = pane_h;
     /* [P2b knobs] RT-only (ignored by the LOW screen-space shadow shader, which
      * reads only params2.x): params2.y = TD5RE_RT_BIAS normal-offset scale (car
-     * self-shadow acne tuning), params2.z = TD5RE_RT_RAYS sun shadow samples
-     * (soft-shadow denoise; default 4). */
+     * self-shadow acne tuning), params2.z = TD5RE_RT_RAYS sun shadow samples.
+     * The edge-aware bilateral DENOISE composite (TD5RE_RT_DENOISE, backend side)
+     * cleans the low-sample grain, so this stays cheap; fallback default 2 matches
+     * the fresh-INI SHADOW QUALITY (only used if TD5RE_RT_RAYS is wholly unset). */
     { static float s_bias = -1.0f; static int s_rays = -1;
       if (s_rays < 0) { const char *e;
           s_bias = ((e = getenv("TD5RE_RT_BIAS")) && e[0]) ? (float)atof(e) : 1.0f;
-          s_rays = ((e = getenv("TD5RE_RT_RAYS")) && e[0]) ? atoi(e) : 4;
+          s_rays = ((e = getenv("TD5RE_RT_RAYS")) && e[0]) ? atoi(e) : 2;
           if (s_bias < 0.0f) s_bias = 0.0f;
           if (s_rays < 1) s_rays = 1; if (s_rays > 16) s_rays = 16; }
       cb.params2[1] = s_bias;
       cb.params2[2] = (float)s_rays; }
+    /* [RT2 P1] params2.w = RT sun-shadow cone-spread scale (1 = default ~0.7deg;
+     * OVERCAST widens it for a soft, directionless penumbra). RT-only: the LOW
+     * screen-space shadow shader reads only params2.x. */
+    cb.params2[3] = (cone_scale > 0.0f) ? cone_scale : 1.0f;
 
     Backend_ApplyShadowPass(&cb);
+}
+
+/* [P4] Sky-visibility GI pass. Reuses the ShadowCB layout (camera reconstruction
+ * + pane rect); packs the AO params into spare slots read by rgen_ao: K =
+ * params2.z, TMax = sun.w, floor = misc.w. HIGH-only (Backend_ApplyGIPass no-ops
+ * in LOW); the depth/G-buffer are the same the shadow pass consumes. */
+void td5_plat_render_apply_gi(const float cam_pos[3], const float basis9[9],
+                              float focal, float center_x, float center_y,
+                              float vp_x, float vp_y,
+                              float depth_scale, float depth_bias,
+                              float pane_w, float pane_h,
+                              int rays, float dist, float floorv)
+{
+    ShadowCB cb;
+    if (g_backend.device_removed) return;
+    if (td5_rcmd_recording()) return;
+    memset(&cb, 0, sizeof(cb));
+    cb.camPosFocal[0] = cam_pos[0]; cb.camPosFocal[1] = cam_pos[1]; cb.camPosFocal[2] = cam_pos[2];
+    cb.camPosFocal[3] = focal;
+    cb.rightCx[0] = basis9[0]; cb.rightCx[1] = basis9[1]; cb.rightCx[2] = basis9[2]; cb.rightCx[3] = center_x;
+    cb.upCy[0]    = basis9[3]; cb.upCy[1]    = basis9[4]; cb.upCy[2]    = basis9[5]; cb.upCy[3]    = center_y;
+    cb.fwdDepthScale[0] = basis9[6]; cb.fwdDepthScale[1] = basis9[7]; cb.fwdDepthScale[2] = basis9[8];
+    cb.fwdDepthScale[3] = depth_scale;
+    cb.misc[0] = depth_bias; cb.misc[1] = vp_x; cb.misc[2] = vp_y; cb.misc[3] = floorv;  /* misc.w = floor */
+    cb.sun[3]  = dist;                                                                    /* sun.w  = TMax  */
+    cb.params[3]  = pane_w;                                                               /* pane rect      */
+    cb.params2[0] = pane_h;
+    cb.params2[2] = (float)(rays < 1 ? 1 : (rays > 16 ? 16 : rays));                      /* params2.z = K  */
+    Backend_ApplyGIPass(&cb);
 }
 
 void td5_plat_render_apply_ssr(const float cam_pos[3], const float basis9[9],
@@ -4002,6 +4089,11 @@ void td5_plat_render_apply_ssr(const float cam_pos[3], const float basis9[9],
      * reflcol instead of tracing (view with TD5RE_RT_REFLDBG opaque blit). */
     { static int d = -1; if (d < 0) { const char *e = getenv("TD5RE_RT_REFLDIAG"); d = (e && e[0]) ? atoi(e) : 0; }
       cb.params2[2] = (float)d; }
+    /* [CAR SUN GLINT 2026-08-04] live intensity multiplier for the car sun-glint
+     * in rgen_refl (sr_params2.w). Default 4.0 = strong, obvious hotspot on the
+     * sun-facing bodywork/glass; 0 disables. TD5RE_RT_CAR_GLINT overrides. */
+    { static float gg = -1.0f; if (gg < 0.0f) { const char *e = getenv("TD5RE_RT_CAR_GLINT"); gg = (e && e[0]) ? (float)atof(e) : 1.0f; if (gg < 0.0f) gg = 0.0f; }   /* subtle glossy sun/sky sparkle on the sun-aligned base */
+      cb.params2[3] = gg; }
     for (int i = 0; i < 4; i++) { cb.reflA[i] = refl8[i]; cb.reflB[i] = refl8[4 + i]; }
     /* [P3] sun dir + shadow-ray enable for chit_refl's sun shadow ray. */
     if (sun_dir && sun_shadow) {
@@ -4075,6 +4167,12 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
     if (page_index < 0 || page_index >= MAX_TEXTURE_PAGES) return 0;
     if (!pixels || width <= 0 || height <= 0) return 0;
     if (!Backend_HasDevice()) return 0;
+
+    /* [RT2-P5] Detect per-page shininess from the decoded texels. One pass per
+     * page (cheap; strided sampling). Feeds the HIGH-only material-id upgrade
+     * for RT reflections — see td5_material.c. Pure CPU, LOW rendering
+     * unaffected. */
+    td5_material_classify_page(page_index, pixels, width, height, format);
 
     /* Determine bpp from format: 0 = R5G6B5 (16-bit), 1 = A1R5G5B5 (16-bit),
      * 2 = A8R8G8B8 (32-bit) */

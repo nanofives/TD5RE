@@ -963,10 +963,13 @@ void td5_render_submit_translucent_world(uint16_t *quad_data) {
         int base = 2 + i * 7;
         verts[i].screen_x = fdata[base + 0];
         verts[i].screen_y = fdata[base + 1];
-        /* Fold in the -64 NEAR_DEPTH_OFFSET that the opaque pass applies
-         * (line 824) but the shared project_vertex (line 498) omits, so smoke
-         * ties exactly with coplanar opaque geometry under the LEQUAL test. */
-        verts[i].depth_z  = fdata[base + 2] - NEAR_DEPTH_OFFSET * DEPTH_NORMALIZE_INV;
+        /* [PERSPECTIVE DEPTH 2026-08-03] project_vertex now emits the SAME
+         * perspective depth (td5_depth_persp, which already folds in the -64
+         * near offset) as the opaque pass, so smoke's projected depth already
+         * ties exactly with coplanar opaque geometry under LEQUAL — the old
+         * "-64*INV" compensation (project_vertex used to omit the offset) would
+         * now be a spurious double-subtract. */
+        verts[i].depth_z  = fdata[base + 2];
         verts[i].rhw      = fdata[base + 3];
         verts[i].diffuse  = *(uint32_t *)&fdata[base + 4];
         verts[i].specular = 0;
@@ -1010,15 +1013,15 @@ void td5_render_submit_tire_mark(uint16_t *quad_data) {
         int base = 2 + i * 7;
         verts[i].screen_x = fdata[base + 0];
         verts[i].screen_y = fdata[base + 1];
-        /* [FIX 2026-06-02 tire-through-car] Put the decal in the SAME depth space
-         * as the opaque road/car (which write (vz-NEAR_DEPTH_OFFSET)*INV) and add a
-         * small extra bias toward the camera so the mark wins the coplanar road
-         * without z-fighting, while the car body (genuinely much closer) still
-         * occludes it. The raw projected sz (fdata[base+2]) omitted the -64 the
-         * opaque pass applies, so marks were depth-inconsistent and showed through
-         * the car. */
-        verts[i].depth_z  = fdata[base + 2]
-                            - (NEAR_DEPTH_OFFSET + TIRE_DECAL_BIAS) * DEPTH_NORMALIZE_INV;
+        /* [FIX 2026-06-02 tire-through-car; PERSPECTIVE DEPTH 2026-08-03] The
+         * decal shares the opaque road/car depth space: project_vertex now emits
+         * td5_depth_persp (same as the opaque pass, near offset already folded
+         * in), so fdata[base+2] already ties the road. Subtract only the small
+         * TIRE_DECAL_BIAS toward-camera nudge so the mark wins the coplanar road
+         * without z-fighting; the car body (far closer) still occludes it. The
+         * old extra "-64" cancelled project_vertex's former missing offset and is
+         * no longer needed (would double-pull). */
+        verts[i].depth_z  = fdata[base + 2] - TIRE_DECAL_BIAS * DEPTH_NORMALIZE_INV;
         verts[i].rhw      = fdata[base + 3];
         verts[i].diffuse  = *(uint32_t *)&fdata[base + 4];
         verts[i].specular = 0;

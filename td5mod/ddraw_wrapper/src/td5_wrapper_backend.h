@@ -77,7 +77,13 @@ typedef struct {
  * active (Backend_SetGBufferEnabled). */
 #define PS_MODULATE_G            4
 #define PS_MODULATE_ALPHA_G      5
-#define PS_COUNT                 6
+/* [RT2-P3] Shadow-receiving variants: same colour math + fog/alpha-test, then
+ * *= the RT sun-visibility mask (t1). Auto-selected for HIGH world alpha-blend
+ * (SRCALPHA_INVSRC, depth-tested) draws so billboard trees/signs receive the
+ * building/bridge shadows the opaque scene already gets. */
+#define PS_MODULATE_SHADOWED     6
+#define PS_MODULATE_ALPHA_SHADOWED 7
+#define PS_COUNT                 8
 
 typedef struct {
     /* D3D6 render state values (as received from game) */
@@ -173,6 +179,10 @@ typedef struct {
                               * alpha-weighted manual reconstruction in
                               * SampleFoliageAA (ps_common.hlsli) instead of
                               * texMap.Sample(); 0.0 = normal sampling. */
+    float   carSun[4];      /* [CAR SUN 2026-08-03] w = sunlit-car brighten gain
+                              * (per-draw; >0 only for car-body draws under RT).
+                              * xyz reserved for a future sun-direction N·L gate.
+                              * ps_modulate_g does color.rgb *= (1 + w). */
 } FogCB;
 
 /* Deferred dynamic-light pass constant buffer (mirrors ps_light.hlsl LightCB).
@@ -185,8 +195,12 @@ typedef struct {
     float upCy[4];           /* xyz = camera up,      w = viewport center Y  */
     float fwdDepthScale[4];  /* xyz = camera forward, w = depth scale        */
     float misc[4];           /* x = depth bias, y = count, z = vpX, w = vpY  */
-    float ext[4];            /* [P2] x = occlusion steps (0=off), y = pane W, z = pane H */
+    float ext[4];            /* [P2] x = occlusion steps (0=off), y = pane W, z = pane H, [RT2 P7] w = cone softness (RT only) */
     float lights[LIGHT_MAX_GPU * 3][4];
+    /* [RT2 P7] RT-only tail — APPENDED AFTER lights so the shared prefix stays
+     * byte-identical for ps_light.hlsl (LOW), which declares no ext2 and reads
+     * only through lights[]. x = light shadow-ray samples K (soft penumbra). */
+    float ext2[4];
 } LightCB;
 
 /* [P2] Screen-space ray-marched sun-shadow pass constant buffer (mirrors

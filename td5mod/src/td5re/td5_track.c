@@ -2023,10 +2023,21 @@ int td5_track_get_span_lane_world(int span_index, int sub_lane,
         if (out_y) *out_y = (sum_y * 0x100) / 4 + sp->origin_y * 0x100;
         if (out_z) *out_z = (sum_z * 0x100) / 4 + sp->origin_z * 0x100;
     }
-    TD5_LOG_I(LOG_TAG,
-              "span_lane_world: span=%d lane=%d world=(%d,%d,%d) [24.8 FP]",
-              span_index, sub_lane,
-              out_x ? *out_x : 0, out_y ? *out_y : 0, out_z ? *out_z : 0);
+    /* [perf/log-hygiene] This fires per-lane every frame — silent unless
+     * TD5RE_TRACE_SPANS=1 (was an unconditional [INF] that flooded the log to
+     * ~1 GB and stalled the frame loop with per-frame disk I/O). */
+    {
+        static int s_trace_spans = -1;
+        if (s_trace_spans < 0) {
+            const char *e = getenv("TD5RE_TRACE_SPANS");
+            s_trace_spans = (e && e[0] && e[0] != '0') ? 1 : 0;
+        }
+        if (s_trace_spans)
+            TD5_LOG_I(LOG_TAG,
+                      "span_lane_world: span=%d lane=%d world=(%d,%d,%d) [24.8 FP]",
+                      span_index, sub_lane,
+                      out_x ? *out_x : 0, out_y ? *out_y : 0, out_z ? *out_z : 0);
+    }
     return 1;
 }
 

@@ -162,6 +162,7 @@ static const ScreenDesc s_screens[TD5_SCREEN_COUNT] = {
     /* [48] */ { "MP PROFILE SELECTION", Screen_CarSelection },   /* MP setup phase 0 */
     /* [49] */ { "MP CAR GRID",          Screen_CarSelection },   /* MP setup phase 1 (car grid) */
     /* [50] */ { "CUP INTERMISSION",     Screen_MpPostRace },     /* cup-between post-race menu */
+    /* [51] */ { "LIGHTING",             Screen_LightingOptions },/* [RT2 P8] RT lighting per-feature options */
 };
 
 /* [SUB-SCREEN PROMOTION 2026-07-27] Map an identity screen number back to the
@@ -1562,6 +1563,7 @@ static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_DISPLAY_OPTIONS:    return "GRAPHICS OPTIONS";
     case TD5_SCREEN_TWO_PLAYER_OPTIONS: return "MULTIPLAYER OPTIONS";
     case TD5_SCREEN_LANGUAGE_OPTIONS:   return TR("LANGUAGE");
+    case TD5_SCREEN_LIGHTING_OPTIONS:   return "LIGHTING OPTIONS";
     case TD5_SCREEN_CONTROLLER_BINDING: return "CONTROLLER SETUP";
     case TD5_SCREEN_CAR_SELECTION:      return "SELECT CAR";
     case TD5_SCREEN_TRACK_SELECTION:    return "SELECT TRACK";
@@ -3196,7 +3198,9 @@ void td5_frontend_auto_race_setup(void) {
     s_selected_track     = g_td5.ini.default_track;
     s_selected_game_type = g_td5.ini.default_game_type;
     s_selected_paint     = 0;
-    s_selected_transmission = 0;
+    /* Seed the menu toggle from [GameOptions] AutoGearbox (1=auto->0, 0=manual->1);
+       the menu is authoritative thereafter (td5_input.c). */
+    s_selected_transmission = g_td5.ini.auto_gearbox ? 0 : 1;
     s_track_direction    = g_td5.ini.default_reverse ? 1 : 0;
     g_td5.reverse_direction = s_track_direction;
     TD5_LOG_I(LOG_TAG, "AutoRace: track_direction=%s (DefaultReverse=%d)",
@@ -3357,6 +3361,8 @@ static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_TWO_PLAYER_OPTIONS:
     case TD5_SCREEN_LANGUAGE_OPTIONS:
         return TD5_SCREEN_OPTIONS_HUB;
+    case TD5_SCREEN_LIGHTING_OPTIONS:   /* [RT2 P8] entered from GRAPHICS OPTIONS -> BACK there */
+        return TD5_SCREEN_DISPLAY_OPTIONS;
 
     case TD5_SCREEN_CONTROLLER_BINDING:
         return TD5_SCREEN_CONTROL_OPTIONS;
@@ -5324,6 +5330,7 @@ int td5_frontend_display_loop(void) {
                      s_current_screen == TD5_SCREEN_DISPLAY_OPTIONS ||
                      s_current_screen == TD5_SCREEN_TWO_PLAYER_OPTIONS ||
                      s_current_screen == TD5_SCREEN_LANGUAGE_OPTIONS ||
+                     s_current_screen == TD5_SCREEN_LIGHTING_OPTIONS ||
                      s_current_screen == TD5_SCREEN_CONTROLLER_BINDING);
                 /* [splitscreen back-confirm] In split-screen, returning to the
                  * parent screen first raises the "GO BACK?" prompt; otherwise
@@ -5587,6 +5594,7 @@ static int frontend_get_button_anim_state(int *out_mode, int *out_tick, int *out
     case TD5_SCREEN_DISPLAY_OPTIONS:
     case TD5_SCREEN_TWO_PLAYER_OPTIONS:
     case TD5_SCREEN_LANGUAGE_OPTIONS:
+    case TD5_SCREEN_LIGHTING_OPTIONS:
         if (s_inner_state == 3) { mode = FE_BUTTON_ANIM_IN;  max_tick = 0x27; }
         else if (s_inner_state == 8) { mode = FE_BUTTON_ANIM_OUT; max_tick = 16; }
         break;
@@ -5653,6 +5661,7 @@ static int frontend_screen_has_button_anim(void) {
     case TD5_SCREEN_DISPLAY_OPTIONS:
     case TD5_SCREEN_TWO_PLAYER_OPTIONS:
     case TD5_SCREEN_LANGUAGE_OPTIONS:
+    case TD5_SCREEN_LIGHTING_OPTIONS:
     case TD5_SCREEN_MUSIC_TEST:
     case TD5_SCREEN_CAR_SELECTION:
     case TD5_SCREEN_TRACK_SELECTION:
@@ -6851,15 +6860,8 @@ static void frontend_render_display_options_overlay(float sx, float sy) {
     frontend_draw_value_centered(sx, sy, s_buttons[3].y + 6, speed_read[s_display_speed_units & 1], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[4].y + 6, on_off[s_display_show_fps & 1], 0xFFFFFFFF);
     frontend_draw_value_centered(sx, sy, s_buttons[5].y + 6, damping, 0xFFFFFFFF);
-    /* [RT] Row 6 — LIGHTING QUALITY. On a non-DXR device the row is inert and
-     * reads LOW in a greyed colour (matches the disabled-row convention). */
-    {
-        const char *lq[] = { "LOW", "HIGH" };
-        int avail = td5_rt_available();
-        int q = avail ? (s_display_lighting_quality & 1) : 0;
-        frontend_draw_value_centered(sx, sy, s_buttons[6].y + 6, td5_tr(lq[q]),
-                                     avail ? 0xFFFFFFFF : 0xFF808080);
-    }
+    /* [RT2 P8] Row 6 is now the "LIGHTING OPTIONS ->" navigation row (opens the
+     * per-feature sub-screen); it carries no ◄► value. */
 }
 
 static void frontend_render_sound_options_overlay(float sx, float sy) {
@@ -9772,6 +9774,9 @@ void td5_frontend_render_ui_rects(void) {
     case TD5_SCREEN_LANGUAGE_OPTIONS:   /* [I18N] language value text */
         frontend_render_language_options_overlay(sx, sy);
         break;
+    case TD5_SCREEN_LIGHTING_OPTIONS:   /* [RT2 P8] per-row tier value text */
+        frontend_render_lighting_options_overlay(sx, sy);
+        break;
     case TD5_SCREEN_CONTROLLER_BINDING:
         frontend_render_controller_binding_overlay(sx, sy);
         break;
@@ -10010,12 +10015,9 @@ void td5_frontend_render_ui_rects(void) {
             break;
         case TD5_SCREEN_DISPLAY_OPTIONS:
             /* Rows 0-5 are all selector rows (Display Mode, VSync, Fogging, Speed
-             * Readout, Show FPS, Camera Damping) — the old `i <= 3` bound left
-             * Show FPS + Camera Damping without ◄► arrows despite being L/R-live.
-             * Row 6 = LIGHTING QUALITY: arrows only when a DXR device is present
-             * (else the row is inert and reads a greyed LOW). Row 7 = OK. */
+             * Readout, Show FPS, Camera Damping). [RT2 P8] Row 6 = LIGHTING
+             * OPTIONS -> (navigation, no ◄►); Row 7 = OK. */
             for (int i = 0; i <= 5; i++) fe_draw_option_arrows(i, sx, sy);
-            if (td5_rt_available()) fe_draw_option_arrows(6, sx, sy);
             break;
         case TD5_SCREEN_SOUND_OPTIONS:
             for (int i = 0; i <= 2; i++) fe_draw_option_arrows(i, sx, sy);
@@ -10102,6 +10104,10 @@ void td5_frontend_render_ui_rects(void) {
         case TD5_SCREEN_LANGUAGE_OPTIONS:
             /* [I18N] ◄► on the single LANGUAGE selector row. */
             fe_draw_option_arrows(0, sx, sy);
+            break;
+        case TD5_SCREEN_LIGHTING_OPTIONS:
+            /* [RT2 P8] ◄► on all 8 selector rows (0..7); OK (row 8) has none. */
+            for (int lo_r = 0; lo_r < 8; lo_r++) fe_draw_option_arrows(lo_r, sx, sy);
             break;
         case TD5_SCREEN_MUSIC_TEST:
             /* orig 0x418460: InitializeFrontendDisplayModeArrows(0,1) — the TRACK
@@ -10475,7 +10481,10 @@ int td5_frontend_init(void) {
     /* s_paint_active persists across car-select entries (e.g. returning from a
      * race) so a chosen colour stays applied; it starts 0 (neutral) only at
      * launch and is set when the player first confirms a paint colour. */
-    s_selected_transmission = 0;
+    /* Seed the menu toggle from [GameOptions] AutoGearbox (1=auto->0, 0=manual->1);
+       the menu is authoritative thereafter (td5_input.c). Default AUTO when the
+       INI has not loaded. */
+    s_selected_transmission = (g_td5.ini.loaded && !g_td5.ini.auto_gearbox) ? 1 : 0;
     s_selected_track = g_td5.ini.loaded ? g_td5.ini.default_track : 0;
     s_track_direction = 0;
     s_network_active = 0;

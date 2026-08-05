@@ -42,6 +42,7 @@
 #include "td5_assetsrc.h"
 #include "td5_render.h"
 #include "td5_light.h"    /* [DYNAMIC LIGHTS] master enable / headlights / dark-mode push */
+#include "td5_rt.h"       /* [RT2 P8] td5_rt_apply_lighting_options() */
 #include "td5_light2.h"   /* [LIGHT2] lighting rework mode push */
 #include "td5_i18n.h"     /* [I18N] UI-language catalog load at boot */
 
@@ -343,6 +344,16 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("Lighting", "WetRoads",       g_td5.ini.wet_roads);
     td5_ini_write_int("Lighting", "StreetLights",   g_td5.ini.street_lights);
     td5_ini_write_int("Lighting", "Quality",        g_td5.ini.lighting_quality);  /* [RT] LOW/HIGH */
+    /* [RT2 P8] LIGHTING OPTIONS per-feature tiers — MUST mirror k_lighting_cfg
+     * (dual-site: the Quality round-trip persist bug must not repeat). */
+    td5_ini_write_int("Lighting", "ShadowRays",        g_td5.ini.rt_shadow_rays);
+    td5_ini_write_int("Lighting", "ShadowRes",         g_td5.ini.rt_shadow_res);
+    td5_ini_write_int("Lighting", "ReflectionQuality", g_td5.ini.rt_reflection_q);
+    td5_ini_write_int("Lighting", "ReflectionRange",   g_td5.ini.rt_reflection_rng);
+    td5_ini_write_int("Lighting", "GIQuality",         g_td5.ini.rt_gi_quality);
+    td5_ini_write_int("Lighting", "SunProbe",          g_td5.ini.rt_sun_probe);
+    td5_ini_write_int("Lighting", "LightQuality",      g_td5.ini.rt_light_quality);
+    td5_ini_write_int("Lighting", "LightOptVersion",   g_td5.ini.rt_opt_version);
 
     /* Game options */
     td5_ini_write_int("GameOptions", "Laps",             g_td5.ini.laps);
@@ -445,6 +456,22 @@ static const TD5_CfgIntEntry k_lighting_cfg[] = {
      * present; td5_rt_active() gates on availability so HIGH auto-runs as LOW on a
      * non-DXR device without rewriting the INI). Default HIGH. */
     { "Quality",        "Lighting", "Quality",          &g_td5.ini.lighting_quality, 1 },
+    /* [RT2 P8] LIGHTING OPTIONS per-feature tiers — defaults = HIGHEST tier
+     * (user decision #6). Mapped onto TD5RE_RT_* env knobs at load in
+     * td5_rt_apply_lighting_options(); env explicitly set still overrides. */
+    /* [TDR-safe defaults 2026-08-02] The initial "all-max" defaults produced
+     * multi-second RT frames at high res (2560x1351) and tripped the Windows
+     * TDR watchdog. New defaults are a modest, TDR-safe RT look (2 sun-shadow
+     * rays + probe + realistic lights; GI + reflections OFF, bounded range) —
+     * everything is still tunable UP per-feature in LIGHTING OPTIONS. */
+    { "ShadowRays",       "Lighting", "ShadowRays",       &g_td5.ini.rt_shadow_rays,    2 },
+    { "ShadowRes",        "Lighting", "ShadowRes",        &g_td5.ini.rt_shadow_res,     1 },
+    { "ReflectionQuality","Lighting", "ReflectionQuality",&g_td5.ini.rt_reflection_q,   0 },
+    { "ReflectionRange",  "Lighting", "ReflectionRange",  &g_td5.ini.rt_reflection_rng, 1 },
+    { "GIQuality",        "Lighting", "GIQuality",        &g_td5.ini.rt_gi_quality,     1 },
+    { "SunProbe",         "Lighting", "SunProbe",         &g_td5.ini.rt_sun_probe,      1 },
+    { "LightQuality",     "Lighting", "LightQuality",     &g_td5.ini.rt_light_quality,  1 },
+    { "LightOptVersion",  "Lighting", "LightOptVersion",  &g_td5.ini.rt_opt_version,    0 },
 };
 #define K_LIGHTING_CFG_N (sizeof(k_lighting_cfg) / sizeof(k_lighting_cfg[0]))
 
@@ -927,6 +954,32 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         }
     }
 
+    /* [TDR-safe reset 2026-08-02] The first LIGHTING OPTIONS release shipped
+     * all-max defaults that TDR'd the GPU at high res (multi-second RT frames ->
+     * device reset). Any INI written before this fix carries those max values
+     * (ShadowRays=8, GIQuality=2, ReflectionRange=2/UNLIMITED, ...). Reset the
+     * per-feature RT tiers to the TDR-safe defaults ONCE — keyed on the schema
+     * version so a user's later deliberate choices are preserved. */
+    /* v4 (2026-08-02): GI back ON at LOW. The earlier GI TDRs were NOT cost —
+     * they were the SBT collision bug (rgen_ao's shader id overwritten by
+     * miss_shadow -> DispatchRays(AO) hung the GPU; fixed in d3d12_dxr.c). With
+     * that fixed GI LOW runs ~100fps stable and restores the RT sky-visibility
+     * look (replaces the legacy zone-darkening). */
+    #define RT_OPT_VERSION_CURRENT 4
+    if (g_td5.ini.rt_opt_version < RT_OPT_VERSION_CURRENT) {
+        g_td5.ini.rt_shadow_rays    = 2;
+        g_td5.ini.rt_shadow_res     = 1;
+        g_td5.ini.rt_reflection_q   = 0;
+        g_td5.ini.rt_reflection_rng = 1;
+        g_td5.ini.rt_gi_quality     = 1;
+        g_td5.ini.rt_sun_probe      = 1;
+        g_td5.ini.rt_light_quality  = 1;
+        g_td5.ini.rt_opt_version    = RT_OPT_VERSION_CURRENT;
+        td5_ini_persist_options();   /* stick the safe values so it fires once */
+        dbglog("[Lighting] RT options reset to TDR-safe defaults (opt version -> %d)",
+               RT_OPT_VERSION_CURRENT);
+    }
+
     /* Game options */
     g_td5.ini.laps               = td5_ini_int("GameOptions", "Laps", 0);
     g_td5.ini.checkpoint_timers  = td5_ini_int("GameOptions", "CheckpointTimers", 1);
@@ -1274,6 +1327,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * LANGUAGE screen reflects reality). */
     if (!td5_i18n_set_language(g_td5.ini.language))
         g_td5.ini.language = td5_i18n_language();
+
+    /* [RT2 P8] Map the finalized LIGHTING OPTIONS tiers onto the TD5RE_RT_* env
+     * knobs the RT passes read (env explicitly set still wins). Must run after
+     * INI + CLI settle and before the first race frame. */
+    td5_rt_apply_lighting_options();
 
     /* [DYNAMIC LIGHTS] Push the finalized (INI + CLI) lighting config into the
      * light registry + renderer. These setters just latch static flags, so

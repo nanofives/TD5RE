@@ -42,6 +42,14 @@ struct PS_INPUT
     float2 uv  : TEXCOORD0;
 };
 
+/* [PERSPECTIVE DEPTH 2026-08-03] recover linear view-Z from the perspective-
+ * correct normalized depth (inverse of CPU td5_depth_persp). */
+float depth_to_viewz(float d, float depthScale, float depthBias)
+{
+    float A = (depthBias + depthScale) / depthScale;
+    return depthBias * A / (A - d);
+}
+
 float4 main(PS_INPUT input) : SV_TARGET
 {
     int2 px = int2(input.pos.xy);
@@ -61,7 +69,7 @@ float4 main(PS_INPUT input) : SV_TARGET
     float paneH      = params2.x;
 
     /* Reconstruct this pixel's world position (same math as ps_light). */
-    float vz = D * depthScale + depthBias;
+    float vz = depth_to_viewz(D, depthScale, depthBias);
     float sx = input.pos.x - vpX;
     float sy = input.pos.y - vpY;
     float vx = -(sx - rightCx.w) * vz / focal;
@@ -117,7 +125,7 @@ float4 main(PS_INPUT input) : SV_TARGET
         float sceneD  = depthTex.Load(int3(sp, 0)).r;
         if (sceneD >= 0.99999)
             continue;                      /* sky along the ray — unoccluded */
-        float sceneVz = sceneD * depthScale + depthBias;
+        float sceneVz = depth_to_viewz(sceneD, depthScale, depthBias);
 
         /* Occluded when the scene surface at this screen point is NEARER than
          * the ray sample (with a bias), but within the thickness window (so a

@@ -112,11 +112,19 @@ for %%S in (vs_pretransformed vs_fullscreen) do (
     %FXC% %OPTS% /T vs_5_0 /E main /Fh %%S_bytes_50.h /Vn g_%%S_50 %%S.hlsl
     if errorlevel 1 (echo FAILED: %%S ^(sm5^) && exit /b 1)
 )
-for %%S in (ps_modulate ps_modulate_alpha ps_modulate_g ps_modulate_alpha_g ps_decal ps_luminance_alpha ps_composite ps_light ps_shadow ps_ssr ps_shadow_rt ps_light_rt ps_ssr_rt ps_msdf ps_roundrect ps_arrow ps_cursor ps_gauge ps_fx_smoke ps_fx_rain ps_fx_decal ps_fx_glow) do (
+for %%S in (ps_modulate ps_modulate_alpha ps_modulate_g ps_modulate_alpha_g ps_modulate_shadowed ps_modulate_alpha_shadowed ps_decal ps_luminance_alpha ps_composite ps_light ps_shadow ps_ssr ps_shadow_rt ps_light_rt ps_ssr_rt ps_msdf ps_roundrect ps_arrow ps_cursor ps_gauge ps_fx_smoke ps_fx_rain ps_fx_decal ps_fx_glow) do (
     %FXC% %OPTS% /T ps_5_0 /E main /Fh %%S_bytes_50.h /Vn g_%%S_50 %%S.hlsl
     if errorlevel 1 (echo FAILED: %%S ^(sm5^) && exit /b 1)
 )
 echo   SM5.0 variants OK
+
+REM --- Compute shaders (D3D12 backend): RT à-trous denoise (R32F + RGBA16F) ---
+%FXC% %OPTS% /T cs_5_0 /E main /Fh cs_shadow_atrous_bytes_50.h /Vn g_cs_shadow_atrous_50 cs_shadow_atrous.hlsl
+if errorlevel 1 (echo FAILED: cs_shadow_atrous ^(cs5^) && exit /b 1)
+echo   cs_shadow_atrous OK
+%FXC% %OPTS% /T cs_5_0 /E main /Fh cs_color_atrous_bytes_50.h /Vn g_cs_color_atrous_50 cs_color_atrous.hlsl
+if errorlevel 1 (echo FAILED: cs_color_atrous ^(cs5^) && exit /b 1)
+echo   cs_color_atrous OK
 
 REM ===========================================================================
 REM [RT lighting] DXR shader library -> DXIL. ONE lib_6_3 blob containing every

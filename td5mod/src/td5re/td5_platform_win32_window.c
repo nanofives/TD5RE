@@ -44,7 +44,8 @@
 #include "td5_config.h"
 #include "td5_rcmd.h"
 #include "td5_render.h"  /* g_render_width/_height(+_f) resize cache */
-#include "td5re.h"       /* td5re_set_render_dims */
+#include "td5re.h"       /* td5re_set_render_dims, g_td5 (selftest/control flags) */
+#include "td5_rt.h"       /* [DEVICE-LOST] force LOW on recovery to avoid re-TDR */
 
 /* Pull in the wrapper types and backend access */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -568,18 +569,90 @@ void td5_plat_dump_gpu_crash_diag(const char *path)
  * display hardware". Set on a successful recover; counts down in present. */
 static int s_recover_ease_frames = 0;
 
+/* [DEVICE-LOST recovery] Attempt cap. Was 240 — but each failed attempt does a
+ * full release+recreate, so 240 of them on a wedged adapter is a long, pointless
+ * thrash on a frozen screen. A hard TDR that can be recovered in-process comes
+ * back within a handful of tries; if it hasn't by ~40 the adapter needs an OS/
+ * driver reset (process restart / reboot) that in-process recovery can't force.
+ * Fail fast, then take a terminal action instead of freezing forever. Knob
+ * TD5RE_DEVICE_LOST_MAX_TRIES (dev A/B). */
+static int recover_max_attempts(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_DEVICE_LOST_MAX_TRIES");
+        v = (e && e[0]) ? atoi(e) : 15;   /* ~15 tries x ~1s = ~15s of real wait */
+        if (v < 1)   v = 1;
+        if (v > 240) v = 240;
+    }
+    return v;
+}
+
+/* Wall-clock spacing between recreate attempts. A GPU TDR takes the driver
+ * ~2-5 s to fully reset; retrying on a *frame* counter is useless because a
+ * device-lost frame doesn't present (the loop free-spins, so 30 "frames" is
+ * microseconds and all attempts elapse before the driver is back). Space them
+ * on the real clock instead. Knob TD5RE_DEVICE_LOST_RETRY_MS. */
+static unsigned recover_retry_ms(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_DEVICE_LOST_RETRY_MS");
+        v = (e && e[0]) ? atoi(e) : 1000;
+        if (v < 100)   v = 100;
+        if (v > 10000) v = 10000;
+    }
+    return (unsigned)v;
+}
+
 static void plat_try_recover_device(void)
 {
-    static int s_attempts = 0;
-    static int s_cooldown = 0;
+    static int      s_attempts    = 0;
+    static uint64_t s_next_try_ms = 0;
+    static int      s_gave_up     = 0;   /* terminal action fires exactly once */
 
-    if (!g_backend.device_removed) { s_attempts = 0; s_cooldown = 0; return; }
-    if (s_attempts >= 240) return;              /* give up on a truly dead adapter */
-    if (s_cooldown > 0) { s_cooldown--; return; }
-    s_cooldown = 30;                            /* retry ~every 30 frames */
+    if (!g_backend.device_removed) { s_attempts = 0; s_next_try_ms = 0; s_gave_up = 0; return; }
+
+    /* [DEVICE-LOST terminal] Out of attempts: the adapter is wedged and won't
+     * come back in-process. Rather than sit on the last frame FOREVER (no
+     * present, no quit, no message — the "0 FPS freeze"), fail gracefully:
+     * log fatal, tell the user (unless automated), and request a normal window
+     * close so shutdown flushes logs cleanly. Fires once. */
+    if (s_attempts >= recover_max_attempts()) {
+        if (!s_gave_up) {
+            s_gave_up = 1;
+            TD5_LOG_E(LOG_TAG,
+                "device lost: UNRECOVERABLE after %d attempts (adapter wedged / hard TDR). "
+                "Closing cleanly — please restart the game; if it persists, reboot and/or "
+                "lower LIGHTING QUALITY (Graphics Options -> Lighting Options).", s_attempts);
+            /* Skip the modal dialog under selftest/control automation (it would
+             * block the harness); those runs are killed by the driver anyway. */
+            if (!g_td5.ini.selftest_enabled && !g_td5.ini.control_enabled)
+                MessageBoxA(s_hwnd,
+                    "The graphics device was lost and could not be recovered "
+                    "(GPU reset / TDR).\n\n"
+                    "The game will now close. Please restart it. If this keeps "
+                    "happening, reboot and/or lower LIGHTING QUALITY under "
+                    "Graphics Options -> Lighting Options.",
+                    "TD5RE - graphics device lost",
+                    MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+            if (s_hwnd) PostMessageA(s_hwnd, WM_CLOSE, 0, 0);
+        }
+        return;
+    }
+
+    /* Wall-clock pacing: wait recover_retry_ms() between attempts (sleep a beat
+     * so we don't burn a core busy-spinning while the driver resets). First
+     * attempt fires immediately. */
+    {
+        uint64_t now = td5_plat_time_ms();
+        if (s_next_try_ms == 0) s_next_try_ms = now;   /* first try: now */
+        if (now < s_next_try_ms) { td5_plat_sleep(32); return; }
+        s_next_try_ms = now + recover_retry_ms();
+    }
     s_attempts++;
 
-    TD5_LOG_W(LOG_TAG, "device lost: recovery attempt %d", s_attempts);
+    TD5_LOG_W(LOG_TAG, "device lost: recovery attempt %d/%d", s_attempts, recover_max_attempts());
     if (Backend_RecreateDevice()) {
         td5_plat_render_recover_textures();
         /* [TDR MITIGATION 2026-07-22] Give the freshly-recreated driver a beat
@@ -589,9 +662,20 @@ static void plat_try_recover_device(void)
          * then ease frame submission back in for ~2s (see s_recover_ease_frames). */
         td5_plat_sleep(80);
         s_recover_ease_frames = 120;
+        /* [DEVICE-LOST re-TDR guard] The heavy RT load is what hung the GPU;
+         * the recreated driver is fragile. Drop LIGHTING QUALITY to LOW so the
+         * next frame doesn't immediately re-TDR the just-recovered device into
+         * a recover->re-hang loop. The user re-enables HIGH in LIGHTING OPTIONS
+         * (or after a restart). No-op if already LOW. */
+        if (td5_rt_quality_high()) {
+            td5_rt_set_quality(0);
+            TD5_LOG_W(LOG_TAG,
+                "device recovered: LIGHTING QUALITY forced to LOW to avoid re-hang "
+                "(re-enable in Graphics Options -> Lighting Options)");
+        }
         TD5_LOG_W(LOG_TAG, "device recovered after %d attempt(s)", s_attempts);
-        s_attempts = 0;
-        s_cooldown = 0;
+        s_attempts    = 0;
+        s_next_try_ms = 0;
     }
 }
 

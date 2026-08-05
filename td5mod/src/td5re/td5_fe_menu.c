@@ -190,7 +190,7 @@ static void frontend_refresh_display_option_labels(void) {
     frontend_set_button_label(3, "Speed Readout");
     frontend_set_button_label(4, "Show FPS");
     frontend_set_button_label(5, "Camera Damping");
-    frontend_set_button_label(6, "LIGHTING QUALITY");   /* [RT] LOW/HIGH */
+    frontend_set_button_label(6, "LIGHTING OPTIONS");   /* [RT2 P8] -> sub-screen */
     frontend_set_button_label(7, "OK");
 }
 
@@ -1746,6 +1746,178 @@ void Screen_LanguageOptions(void) {
     }
 }
 
+/* ========================================================================
+ * [RT2 P8] LIGHTING OPTIONS sub-screen — per-feature RT tiers (see
+ * docs/plans/RT_LIGHTING2_PLAN.md Phase 8). Reached from the GRAPHICS OPTIONS
+ * "LIGHTING OPTIONS ->" row; BACK returns there. 8 ◄► selector rows + OK.
+ * Row 0 (LIGHTING QUALITY) is the master and is live even at LOW (greyed only
+ * when no DXR device); rows 1..7 are HIGH-only features, greyed/inert at LOW.
+ * L/R writes g_td5.ini.rt_* + persists; the tier->env-knob mapping is applied
+ * by td5_rt_apply_lighting_options() (env-cached knobs take effect next race).
+ * ==================================================================== */
+#define LO_BASE_Y 74
+#define LO_STEP_Y 36
+#define LO_ROWS   8
+
+static const char *const k_lo_labels[LO_ROWS] = {
+    "LIGHTING QUALITY", "SHADOW QUALITY", "SHADOW DETAIL", "REFLECTIONS",
+    "REFLECTION RANGE", "GLOBAL ILLUM.",  "SUN & SKY",     "LIGHTS"
+};
+static const char *const k_lo_lowhigh[] = { "LOW", "HIGH" };
+static const char *const k_lo_shadowq[] = { "LOW", "MEDIUM", "HIGH" };
+static const int         k_lo_shadow_rays[] = { 1, 4, 8 };
+static const char *const k_lo_halffull[] = { "HALF", "FULL" };
+static const char *const k_lo_refl[]    = { "OFF", "HALF", "FULL" };
+static const char *const k_lo_range[]   = { "NEAR", "FAR", "UNLIMITED" };
+static const char *const k_lo_gi[]      = { "OFF", "LOW", "HIGH" };
+static const char *const k_lo_sun[]     = { "CLASSIC", "AUTO" };
+static const char *const k_lo_lights[]  = { "BASIC", "REALISTIC" };
+
+static const char *const *lo_row_opts(int row, int *count)
+{
+    switch (row) {
+    case 0: *count = 2; return k_lo_lowhigh;
+    case 1: *count = 3; return k_lo_shadowq;
+    case 2: *count = 2; return k_lo_halffull;
+    case 3: *count = 3; return k_lo_refl;
+    case 4: *count = 3; return k_lo_range;
+    case 5: *count = 3; return k_lo_gi;
+    case 6: *count = 2; return k_lo_sun;
+    case 7: *count = 2; return k_lo_lights;
+    }
+    *count = 0; return NULL;
+}
+
+static int lo_row_index(int row)
+{
+    switch (row) {
+    case 0: return g_td5.ini.lighting_quality ? 1 : 0;
+    case 1: { int r = g_td5.ini.rt_shadow_rays; return r <= 1 ? 0 : (r <= 4 ? 1 : 2); }
+    case 2: return g_td5.ini.rt_shadow_res ? 1 : 0;
+    case 3: return g_td5.ini.rt_reflection_q;
+    case 4: return g_td5.ini.rt_reflection_rng;
+    case 5: return g_td5.ini.rt_gi_quality;
+    case 6: return g_td5.ini.rt_sun_probe ? 1 : 0;
+    case 7: return g_td5.ini.rt_light_quality ? 1 : 0;
+    }
+    return 0;
+}
+
+/* Row 0 is the LIGHTING QUALITY master (live whenever a DXR device exists);
+ * rows 1..7 are HIGH-only features, inert (greyed) unless RT is actually
+ * running. */
+static int lo_row_active(int row)
+{
+    if (row == 0) return td5_rt_available();
+    return td5_rt_active();
+}
+
+static void lo_row_apply(int row, int delta)
+{
+    int cnt; lo_row_opts(row, &cnt);
+    if (cnt <= 0) return;
+    int idx = lo_row_index(row) + delta;
+    while (idx < 0) idx += cnt;
+    idx %= cnt;
+    switch (row) {
+    case 0: g_td5.ini.lighting_quality = idx; td5_rt_set_quality(idx); break;
+    case 1: g_td5.ini.rt_shadow_rays   = k_lo_shadow_rays[idx];        break;
+    case 2: g_td5.ini.rt_shadow_res    = idx;                          break;
+    case 3: g_td5.ini.rt_reflection_q  = idx;                          break;
+    case 4: g_td5.ini.rt_reflection_rng= idx;                          break;
+    case 5: g_td5.ini.rt_gi_quality    = idx;                          break;
+    case 6: g_td5.ini.rt_sun_probe     = idx;                          break;
+    case 7: g_td5.ini.rt_light_quality = idx;                          break;
+    }
+}
+
+static void lighting_opts_create_buttons(void)
+{
+    frontend_reset_buttons();
+    for (int r = 0; r < LO_ROWS; r++)
+        frontend_create_button(k_lo_labels[r], 120, LO_BASE_Y + LO_STEP_Y * r, 0x130, 0x20);
+    frontend_create_button(SNK_OkButTxt, 200, LO_BASE_Y + LO_STEP_Y * LO_ROWS, 0x60, 0x20); /* row 8 = OK */
+}
+
+void frontend_render_lighting_options_overlay(float sx, float sy)
+{
+    if (!s_anim_complete) return;
+    for (int r = 0; r < LO_ROWS; r++) {
+        int cnt; const char *const *opts = lo_row_opts(r, &cnt);
+        if (!opts) continue;
+        unsigned col = lo_row_active(r) ? 0xFFFFFFFF : 0xFF6A6A6A;  /* grey = inert (LOW / no DXR) */
+        frontend_draw_value_centered(sx, sy, LO_BASE_Y + LO_STEP_Y * r + 6,
+                                     opts[lo_row_index(r)], col);
+    }
+}
+
+void Screen_LightingOptions(void) {
+    switch (s_inner_state) {
+    case 0:
+        frontend_init_return_screen(TD5_SCREEN_LIGHTING_OPTIONS);
+        TD5_LOG_D(LOG_TAG, "LightingOptions: init (quality=%d dxr=%d)",
+                  g_td5.ini.lighting_quality, td5_rt_available());
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        lighting_opts_create_buttons();
+        s_anim_complete = 0;
+        frontend_begin_timed_animation();
+        s_inner_state = 1;
+        break;
+    case 1: case 2:
+        frontend_present_buffer();
+        s_inner_state++;
+        break;
+    case 3:
+        if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
+            s_anim_complete = 1;
+            s_inner_state = 4;
+        }
+        break;
+    case 4:
+    case 5:
+        s_inner_state++;
+        break;
+    case 6:
+        if (s_input_ready) {
+            int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
+            int delta = frontend_option_delta();
+            if (active_button >= 0 && active_button < LO_ROWS && delta != 0) {
+                if (active_button == 0 && !td5_rt_available()) {
+                    frontend_play_sfx(10);          /* locked: no DXR device */
+                } else if (lo_row_active(active_button)) {
+                    lo_row_apply(active_button, delta);
+                    td5_ini_persist_options();
+                    /* Best-effort live re-map; env-cached RT knobs apply on the
+                     * next race, QUALITY (row 0) applies immediately. */
+                    td5_rt_apply_lighting_options();
+                    frontend_play_sfx(2);
+                    s_inner_state = 4;
+                } else {
+                    frontend_play_sfx(10);          /* HIGH-only row inert at LOW */
+                }
+            } else if (s_button_index == LO_ROWS) {
+                /* OK -> persist + back to GRAPHICS OPTIONS. */
+                td5_ini_persist_options();
+                s_return_screen = TD5_SCREEN_DISPLAY_OPTIONS;
+                s_inner_state = 7;
+            }
+        }
+        break;
+    case 7:
+        frontend_begin_timed_animation();
+        s_inner_state = 8;
+        break;
+    case 8:
+        if (frontend_update_timed_animation(16, 267) >= 1.0f) {
+            s_inner_state = 9;
+        }
+        break;
+    case 9:
+        td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
+        break;
+    }
+}
+
 void Screen_SoundOptions(void) {
     switch (s_inner_state) {
     case 0:
@@ -1932,19 +2104,15 @@ void Screen_DisplayOptions(void) {
                 if (s_display_camera_damping < 0) s_display_camera_damping = 0;
                 if (s_display_camera_damping > 9) s_display_camera_damping = 9;
                 changed = 1;
-            } else if (active_button == 6 && delta != 0) {
-                /* Row 6 — LIGHTING QUALITY: LOW(0) <-> HIGH(1). Inert on a non-DXR
-                 * device (deny with the standard blip). Applied LIVE via
-                 * td5_rt_set_quality so an in-race pause->options toggle switches
-                 * LOW<->HIGH on the next frame with no restart. */
-                if (td5_rt_available()) {
-                    s_display_lighting_quality = !s_display_lighting_quality;
-                    g_td5.ini.lighting_quality = s_display_lighting_quality;
-                    td5_rt_set_quality(s_display_lighting_quality);
-                    changed = 1;
-                } else {
-                    frontend_play_sfx(10);  /* locked/error cue: no DXR device */
-                }
+            } else if (s_button_index == 6) {
+                /* [RT2 P8] Row 6 — LIGHTING OPTIONS: a navigation row (not a
+                 * selector). Enter opens the per-feature LIGHTING OPTIONS
+                 * sub-screen (LIGHTING QUALITY moved inside as row 0). Persist
+                 * the display options first so nothing is lost on the hop. */
+                td5_ini_persist_options();
+                s_return_screen = TD5_SCREEN_LIGHTING_OPTIONS;
+                s_inner_state = 7;
+                break;
             } else if (s_button_index == 7) {
                 /* OK — persist every display option to td5re.ini. Resolution +
                  * window-mode/vsync already applied live; this writes them (plus
@@ -1956,9 +2124,11 @@ void Screen_DisplayOptions(void) {
                 g_td5.ini.fog_enabled      = s_display_fog_enabled;
                 g_td5.ini.speed_units      = s_display_speed_units;
                 g_td5.ini.camera_damping   = s_display_camera_damping;
-                g_td5.ini.lighting_quality = s_display_lighting_quality;
+                /* [RT2 P8] LIGHTING QUALITY moved to the LIGHTING OPTIONS
+                 * sub-screen (row 6 nav) — no longer written here. */
                 td5_save_set_speed_units(s_display_speed_units);
                 td5_ini_persist_options();
+                s_return_screen = TD5_SCREEN_OPTIONS_HUB;
                 s_inner_state = 7;
                 break;
             }
@@ -1979,7 +2149,9 @@ void Screen_DisplayOptions(void) {
         break;
     case 8: /* Slide-out (~500ms) */
         if (frontend_update_timed_animation(16, 267) >= 1.0f) {
-            td5_frontend_set_screen(TD5_SCREEN_OPTIONS_HUB);
+            /* [RT2 P8] honor s_return_screen so the LIGHTING OPTIONS row (6)
+             * can hop to its sub-screen; OK (row 7) sets it to OPTIONS_HUB. */
+            td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
         }
         break;
     }

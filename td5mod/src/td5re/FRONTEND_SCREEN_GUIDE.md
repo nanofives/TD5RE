@@ -172,3 +172,19 @@ centred on their row.
       `Screen_LanguageOptions` in `td5_fe_menu.c`) is the selector; labels
       refresh on screen re-entry (they're copied at `frontend_create_button`
       time), and `fe_fit_text_scale` condenses over-wide captions.
+
+- **[RT2 P8] LIGHTING OPTIONS (screen 51, `Screen_LightingOptions` in
+  `td5_fe_menu.c`)** — the RT-lighting per-feature sub-screen, reached from the
+  **GRAPHICS OPTIONS** (16) row 6 "LIGHTING OPTIONS ->" (which replaced the old
+  LIGHTING QUALITY toggle; QUALITY is now row 0 here). 8 ◄► selector rows —
+  LIGHTING QUALITY, SHADOW QUALITY, SHADOW DETAIL, REFLECTIONS, REFLECTION
+  RANGE, GLOBAL ILLUM., SUN & SKY, LIGHTS — each defaulting to its highest
+  tier, persisted to `[Lighting]` INI keys (`ShadowRays`/`ShadowRes`/
+  `ReflectionQuality`/`ReflectionRange`/`GIQuality`/`SunProbe`/`LightQuality` +
+  the existing `Quality`). Row 0 is live whenever a DXR device exists; rows 1–7
+  are HIGH-only and render greyed/inert at LOW. Tiers map onto the `TD5RE_RT_*`
+  env knobs via `td5_rt_apply_lighting_options()` (env override still wins). BACK
+  returns to GRAPHICS OPTIONS. Adding this screen touched the 12 standard
+  new-screen sites (enum + `TD5_SCREEN_COUNT`, `s_screens[]`, title, parent-of,
+  is-options, 2 button-anim switches, value-overlay + arrow dispatch,
+  prototypes, handler, and the GRAPHICS-OPTIONS nav row).

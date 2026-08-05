@@ -772,7 +772,16 @@ void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
                                   float depth_scale, float depth_bias,
                                   const float sun_dir[3], float strength,
                                   int steps, float max_dist, float thickness,
-                                  float start_off, float pane_w, float pane_h);
+                                  float start_off, float pane_w, float pane_h,
+                                  float cone_scale);
+
+/* [RT2 P4] Sky-visibility GI pass for the CURRENT viewport (HIGH-only). */
+void td5_plat_render_apply_gi(const float cam_pos[3], const float basis9[9],
+                              float focal, float center_x, float center_y,
+                              float vp_x, float vp_y,
+                              float depth_scale, float depth_bias,
+                              float pane_w, float pane_h,
+                              int rays, float dist, float floorv);
 
 /* [LIGHTING REWORK P3] Screen-space reflections over the CURRENT viewport:
  * reflective materials (per-id reflectivity in refl8[0..7], + wet_boost on
@@ -797,6 +806,13 @@ void td5_plat_render_apply_ssr(const float cam_pos[3], const float basis9[9],
  * proper N.L. on=0: G-buffer off (classic behavior). Call once per rendered
  * race frame BEFORE the world pass. */
 void td5_plat_render_set_gbuffer(int on);
+
+/* [CAR SUN] Per-draw sunlit-car brighten gain. Raise (>0) just before a car-body
+ * mesh draw and clear (0) right after, so only car bodywork is brightened. */
+void td5_plat_render_set_car_sun(float gain);
+/* [CAR SUN] Set the frame-global unit sun direction (+Y-down world) for the
+ * directional car brighten. Call once per frame on the main thread. */
+void td5_plat_render_set_car_sun_dir(const float dir[3]);
 
 /* [RT lighting] 1 when the backend reports DirectX Raytracing available
  * (Backend_RTAvailable). The game gates LIGHTING QUALITY: HIGH on this. */

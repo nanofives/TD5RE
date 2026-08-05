@@ -23,6 +23,11 @@ int td5_rt_active(void);
 /* Set the requested quality (0 = LOW, 1 = HIGH). Menu/INI drive this (Phase 4);
  * until then it is env-seeded (TD5RE_RT). Ignored upward when RT unavailable. */
 void td5_rt_set_quality(int high);
+
+/* [RT2 P8] Map the LIGHTING OPTIONS INI tiers (g_td5.ini.rt_*) onto the
+ * TD5RE_RT_* env knobs the RT passes read. Call once at startup after the INI
+ * loads (and best-effort after a menu change). An explicitly-set env wins. */
+void td5_rt_apply_lighting_options(void);
 int  td5_rt_quality_high(void);
 
 /* [Phase 1] Build the track acceleration geometry from the (finalized) strip

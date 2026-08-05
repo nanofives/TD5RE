@@ -13,6 +13,7 @@ RWTexture2D<float4>             g_output   : register(u0);  /* debug/smoke gradi
 RWTexture2D<float>              g_sunvis   : register(u1);  /* P2b sun shade (1=lit)  */
 RWTexture2D<float4>             g_lightcol : register(u2);  /* P2b additive light rgb */
 RWTexture2D<float4>             g_reflcol  : register(u3);  /* P3 reflection rgb + weight.a */
+RWTexture2D<float>              g_gi       : register(u4);  /* P4 sky-visibility (final multiplier) */
 RaytracingAccelerationStructure g_tlas     : register(t0);
 Texture2D<float>                g_depth    : register(t1);  /* scene depth (R32F)     */
 Texture2D<float4>               g_gbuf     : register(t2);  /* normal(rgb*2-1)+matid/255.a */
@@ -53,7 +54,7 @@ cbuffer ShadowCB : register(b1)
     float4 sh_misc;           /* x depthBias, y vpX, z vpY, w strength */
     float4 sh_sun;            /* xyz surface->light dir, w max dist  */
     float4 sh_params;         /* x steps, y thickness, z startOff, w paneW */
-    float4 sh_params2;        /* x paneH                     */
+    float4 sh_params2;        /* x paneH, y biasScale, z RAYS, w coneScale */
 };
 
 /* ---- b2: LightCB (mirror of C LightCB) ------------------------------------ */
@@ -65,8 +66,9 @@ cbuffer LightCB : register(b2)
     float4 li_upCy;
     float4 li_fwdDepthScale;
     float4 li_misc;           /* x depthBias, y count, z vpX, w vpY */
-    float4 li_ext;            /* x occlSteps, y paneW, z paneH      */
+    float4 li_ext;            /* x occlSteps, y paneW, z paneH, w coneSoft [RT2 P7] */
     float4 li_lights[RT_LIGHT_MAX * 3];  /* k*3+0 pos+range, +1 rgb+intensity, +2 dir+coneCos */
+    float4 li_ext2;           /* [RT2 P7] x = light shadow-ray samples K (soft penumbra) */
 };
 
 /* ---- b3: SSRCB (mirror of C SSRCB) ---------------------------------------- */
@@ -89,6 +91,18 @@ struct RayPayload { float3 color; float t; };
 /* Shadow ray payload: miss_shadow sets visible=1; a hit leaves it 0. */
 struct ShadowPayload { uint visible; };
 
+/* [PERSPECTIVE DEPTH 2026-08-03] Inverse of the CPU td5_depth_persp(): recover
+ * linear view-Z from the perspective-correct normalized depth. depthScale = RANGE
+ * (far-near, 195000), depthBias = NEAR (64), A = far/range = (near+range)/range.
+ * Exact everywhere now that the stored depth is screen-linear (the old
+ * D*scale+bias assumed a linear-view-Z depth that was NOT screen-linear, so it
+ * mis-reconstructed triangle interiors -> the per-span bouncy shadow edge). */
+float depth_to_viewz(float d, float depthScale, float depthBias)
+{
+    float A = (depthBias + depthScale) / depthScale;
+    return depthBias * A / (A - d);
+}
+
 /* World position from scene depth D at pane-local pixel `pp`, using the shared
  * camera reconstruction (matches ps_shadow.hlsl / ps_light.hlsl exactly). */
 float3 rt_world_from_depth(float D, float2 pp,
@@ -96,7 +110,7 @@ float3 rt_world_from_depth(float D, float2 pp,
                            float4 fwdDepthScale, float depthBias)
 {
     float focal = camPosFocal.w;
-    float vz = D * fwdDepthScale.w + depthBias;
+    float vz = depth_to_viewz(D, fwdDepthScale.w, depthBias);
     float vx = -(pp.x - rightCx.w) * vz / focal;
     float vy = -(pp.y - upCy.w)    * vz / focal;
     return camPosFocal.xyz + vx * rightCx.xyz + vy * upCy.xyz + vz * fwdDepthScale.xyz;
@@ -113,15 +127,50 @@ float rt_hash12(float2 p)
     return frac((p3.x + p3.y) * p3.z);
 }
 
+float rt_hash13(float3 p)
+{
+    float3 p3 = frac(p * 0.1031f);
+    p3 += dot(p3, p3.zyx + 31.32f);
+    return frac((p3.x + p3.y) * p3.z);
+}
+
+/* [MOTION-STABLE JITTER] Hashing the SCREEN pixel (rt_hash12(fp)) locks the ray
+ * jitter to the screen, so as the camera moves a surface point slides across the
+ * fixed noise field and its shadow/GI value flickers frame-to-frame -> a crawling
+ * pattern only visible IN MOTION (invisible in a still frame). Hashing a
+ * grid-quantized WORLD position instead makes the jitter stick to the surface:
+ * a given point keeps its value as the camera moves, so the temporal crawl goes
+ * away. RT_NOISE_CELL trades stability (bigger = steadier, blockier) vs per-pixel
+ * variety (smaller = finer, but distant depth precision can re-introduce flicker);
+ * the à-trous denoiser then smooths whatever spatial blockiness remains. k
+ * decorrelates multiple samples per pixel. */
+#ifndef RT_NOISE_CELL
+#define RT_NOISE_CELL 16.0f
+#endif
+float rt_hash_world(float3 world, float k)
+{
+    float3 c = floor(world / RT_NOISE_CELL) + k * float3(1.7f, 2.3f, 3.1f);
+    return rt_hash13(c);
+}
+
 /* Cast an occlusion (shadow) ray; returns 1 if UNBLOCKED (visible), 0 if hit.
- * ACCEPT_FIRST_HIT + SKIP_CLOSEST_HIT so no CH runs; miss index 0 (miss_shadow). */
+ * ACCEPT_FIRST_HIT + SKIP_CLOSEST_HIT so no CH runs; miss index 0 (miss_shadow).
+ * [ROAD-CAST FIX 2026-08-03] InstanceInclusionMask 0x01 = sun-shadow CASTERS only.
+ * The flat synthetic road lane quads are fed with bit 0 cleared (0xFE) so they
+ * never self-shadow (the per-span near-camera stripe acne); walls/buildings/props/
+ * cars keep bit 0 set (0xFF) and cast normally. Reflection/primary rays still
+ * trace 0xFF and see the road. */
 float rt_shadow_ray(float3 origin, float3 dir, float tmin, float tmax)
 {
     RayDesc ray; ray.Origin = origin; ray.Direction = dir; ray.TMin = tmin; ray.TMax = tmax;
     ShadowPayload p; p.visible = 0;
+    /* [ROAD-CAST diag 2026-08-03] back-face cull (now that the shader actually
+     * recompiles): if the per-span wall stripes are self-shadow acne (ray clips
+     * the back of the wall's own triangle), this removes them. */
     TraceRay(g_tlas,
-             RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
-             0xFF, /*hitGroup*/0, /*mult*/0, /*miss*/0, ray, p);
+             RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
+             | RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+             0x01, /*hitGroup*/0, /*mult*/0, /*miss*/0, ray, p);
     return (float)p.visible;
 }
 

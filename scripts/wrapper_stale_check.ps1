@@ -1,7 +1,7 @@
 # wrapper_stale_check.ps1
 #
 # Exit 0 if td5mod/ddraw_wrapper's prebuilt libddraw_wrapper.a is up to date,
-# exit 1 if it's missing or older than any wrapper source file (.c/.h/.hlsl).
+# exit 1 if it's missing or older than any wrapper source file (.c/.h/.hlsl/.hlsli).
 # Extracted from build_all.bat's inline one-liner [2026-06-04] for readability;
 # same check, unchanged behavior.
 #
@@ -17,7 +17,7 @@ if (-not (Test-Path $lib)) {
     exit 1
 }
 
-$newestSource = Get-ChildItem (Join-Path $WrapperDir 'src') -Recurse -Include *.c, *.h, *.hlsl -ErrorAction SilentlyContinue |
+$newestSource = Get-ChildItem (Join-Path $WrapperDir 'src') -Recurse -Include *.c, *.h, *.hlsl, *.hlsli -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
 

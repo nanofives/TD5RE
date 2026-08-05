@@ -16,6 +16,7 @@
  * ======================================================================== */
 
 #include "td5_render.h"
+#include "td5_rt.h"      /* [RT2 P1] td5_rt_active() gates the probe sun override */
 #include "td5_camera.h"
 #include "td5_platform.h"
 #include "td5_rcmd.h"   /* Phase B render-transform: per-pane CPU command recording */
@@ -49,6 +50,18 @@
 #define M_PI 3.14159265358979323846
 #endif
 #include <string.h>
+
+/* [perf/log-hygiene] Per-frame render tracing (span display lists, per-vehicle
+ * submit, projection, bucket flush) is OFF unless TD5RE_TRACE_RENDER=1. These
+ * fire dozens-to-hundreds of times per frame; with [Logging] Enabled=1 the
+ * unconditional lines flooded engine.log to ~1 GB and the synchronous per-frame
+ * disk I/O stalled the frame loop (measured 287 MB / 50 s in-race). Cached. */
+static int render_trace_on(void)
+{
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("TD5RE_TRACE_RENDER"); v = (e && e[0] && e[0] != '0') ? 1 : 0; }
+    return v;
+}
 
 /* ======== [split] scene/mesh region (moved verbatim from td5_render.c) ======== */
 /* ====================== DYNAMIC POINT LIGHTS (port extension) =============
@@ -222,34 +235,165 @@ void td5_render_apply_light_pass(int vp_x, int vp_y)
  * ambient-only zones (tunnels) cast nothing. Call AFTER the opaque world,
  * BEFORE td5_render_apply_light_pass (headlight pools must not be darkened).
  * March tuning env knobs (dev): TD5RE_SHADOW_STEPS / _DIST / _THICK. */
-void td5_render_apply_shadow_pass(int vp_x, int vp_y)
-{
-    if (!td5_light2_active() || !td5_light2_sun_shadows()) return;
+/* [RT2 P1] TD5RE_SUN_PROBE dev toggle (default on). 0 = ignore the image sun,
+ * fall back to the zone-derived sun in HIGH (matches pre-RT2 behaviour). */
+static int sun_probe_enabled(void)
+{ static int v = -1; if (v < 0) { const char *e = getenv("TD5RE_SUN_PROBE"); v = (e && e[0]) ? atoi(e) : 1; } return v; }
 
-    /* Strongest enabled directional slot = the scene's sun. */
-    float best_mag2 = 0.0f;
-    float sun[3] = { 0.0f, 0.0f, 0.0f };
+/* [CAR SUN 2026-08-03] Sunlit-car brighten gain (car bodywork *= 1+gain in
+ * ApplyFogAndAlphaTest). 2026-08-04: default ON in DEV (0.35) so the car reads
+ * brighter under open sun — the RT sun-shadow mult composite still darkens the
+ * shadowed panels afterward, so the sunlit side pops. RELEASE defaults OFF (0)
+ * until the look is signed off; TD5RE_RT_CAR_SUN overrides either way. */
+static float td5_render_car_sun_gain(void)
+{
+    static float v = -1.0f;
+    if (v < 0.0f) {
+        const char *e = getenv("TD5RE_RT_CAR_SUN");
+#ifdef TD5RE_RELEASE
+        v = (e && e[0]) ? (float)atof(e) : 0.0f;
+#else
+        v = (e && e[0]) ? (float)atof(e) : 0.0f;    /* filter dropped; sun-aligned base lighting instead */
+#endif
+        if (v < 0.0f) v = 0.0f;
+        if (v > 4.0f) v = 4.0f;
+    }
+    return v;
+}
+
+/* [RT2 P1] Unified scene-sun derivation shared by the shadow and SSR passes.
+ * Fills sun[3] (unit, POSITION space +Y down, toward the sun) and *out_dom (the
+ * directional-dominance strength scale, 0..1). Returns the class:
+ *   0 = no sun (tunnel / below horizon)  -> caller returns
+ *   TD5_SKY_SUNNY(1)    = crisp shadows
+ *   TD5_SKY_OVERCAST(2) = soft shadows (caller widens the cone + caps strength)
+ * The zone-table sun is the base (strongest directional slot, Y-flipped). In
+ * HIGH with the probe on, a SUNNY image swaps in the image sun (which is already
+ * position-space — no extra flip), and an OVERCAST image keeps the zone sun but
+ * is flagged so the caller softens it. NIGHT / probe-off / LOW keep the zone
+ * sun verbatim (LOW is thus byte-identical). */
+/* [SUN TEST 2026-08-04] TD5RE_SUN_ELEVATE (0..1): blend the scene sun toward
+ * straight overhead (+Y-down zenith = (0,-1,0)) so a test can raise the sun and
+ * check it lights the whole car top. 0 = untouched. Applied to every valid-sun
+ * output so shadows / glint / reflection / brighten all move together. */
+static void sun_elevate(float sun[3])
+{
+    static float e = -1.0f;
+    if (e < 0.0f) {
+        const char *s = getenv("TD5RE_SUN_ELEVATE");
+        e = (s && s[0]) ? (float)atof(s) : 0.0f;
+        if (e < 0.0f) e = 0.0f; if (e > 1.0f) e = 1.0f;
+    }
+    if (e <= 0.0f) return;
+    sun[0] *= (1.0f - e);
+    sun[1]  = sun[1] * (1.0f - e) + (-1.0f) * e;   /* up = -Y */
+    sun[2] *= (1.0f - e);
+    float m = sqrtf(sun[0]*sun[0] + sun[1]*sun[1] + sun[2]*sun[2]);
+    if (m > 1e-6f) { sun[0] /= m; sun[1] /= m; sun[2] /= m; }
+}
+
+static int td5_render_scene_sun(float sun[3], float *out_dom)
+{
+    float best_mag2 = 0.0f, zsun[3] = { 0.0f, 0.0f, 0.0f };
     for (int s = 0; s < 3; s++) {
         if (!s_tl_contrib[s].enabled) continue;
         const float *v = s_tl_contrib[s].vec_world;
         float m2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
-        if (m2 > best_mag2) { best_mag2 = m2; sun[0] = v[0]; sun[1] = v[1]; sun[2] = v[2]; }
+        if (m2 > best_mag2) { best_mag2 = m2; zsun[0] = v[0]; zsun[1] = v[1]; zsun[2] = v[2]; }
     }
-    if (best_mag2 <= 1.0f) return;               /* no directional light (tunnel) */
-    float mag = sqrtf(best_mag2);
-    sun[0] /= mag; sun[1] /= mag; sun[2] /= mag;
-    /* [Y-CONVENTION] Zone dirs live in the original's Y-flipped lighting
-     * convention (+Y = toward the sky); the shadow march happens in POSITION
-     * space (world +Y is DOWN) — flip so rays leave the ground upward. */
-    sun[1] = -sun[1];
-    if (sun[1] >= -0.05f) return;                /* sun at/below horizon — skip */
+    int   zone_valid = 0;
+    float zone_dom = 0.0f;
+    if (best_mag2 > 1.0f) {
+        float mag = sqrtf(best_mag2);
+        zsun[0] /= mag; zsun[1] /= mag; zsun[2] /= mag;
+        zsun[1] = -zsun[1];                       /* zone Y-flip -> position space */
+        if (zsun[1] < -0.05f) {
+            zone_valid = 1;
+            float dir_lum = mag * 0.25f;
+            float amb     = s_ambient_intensity > 0.0f ? s_ambient_intensity : 1.0f;
+            zone_dom = dir_lum / (dir_lum + amb);
+        }
+    }
 
-    /* Directional dominance: how much of the zone's lighting is the sun vs
-     * flat ambient. |vec_world| ~ 4*intensity (dir_shorts ~4096 / 1024). */
-    float dir_lum = mag * 0.25f;
-    float amb     = s_ambient_intensity > 0.0f ? s_ambient_intensity : 1.0f;
-    float dom     = dir_lum / (dir_lum + amb);
+    if (td5_rt_active() && sun_probe_enabled()) {
+        float pdir[3], prgb[3];
+        int cls = td5_render_sky_sun(pdir, prgb);
+        if (cls == TD5_SKY_SUNNY && pdir[1] < -0.05f) {
+            sun[0] = pdir[0]; sun[1] = pdir[1]; sun[2] = pdir[2];
+            /* image sun is authoritative -> crisp; keep the zone's dominance if
+             * strong, else a healthy default so a weak-zone sunny track still
+             * grounds objects. */
+            *out_dom = zone_valid ? (zone_dom > 0.75f ? zone_dom : 0.75f) : 0.9f;
+            sun_elevate(sun);
+            return TD5_SKY_SUNNY;
+        }
+        if (cls == TD5_SKY_OVERCAST && zone_valid) {
+            sun[0] = zsun[0]; sun[1] = zsun[1]; sun[2] = zsun[2];
+            *out_dom = zone_dom;
+            sun_elevate(sun);
+            return TD5_SKY_OVERCAST;
+        }
+        /* NIGHT or unresolved -> fall through to the zone sun. */
+    }
+
+    if (zone_valid) {
+        sun[0] = zsun[0]; sun[1] = zsun[1]; sun[2] = zsun[2];
+        *out_dom = zone_dom;
+        sun_elevate(sun);
+        return TD5_SKY_SUNNY;
+    }
+    return 0;
+}
+
+/* [RT2 P1] Overcast softening knobs (HIGH-only; RT shadow shader reads params2.w
+ * for the cone widen, and the game caps strength here). */
+static float sun_overcast_cone(void)
+{ static float v = -1; if (v < 0) { const char *e = getenv("TD5RE_SUN_OVERCAST_CONE"); v = (e && e[0]) ? (float)atof(e) : 5.0f; if (v < 1.0f) v = 1.0f; } return v; }
+static float sun_overcast_strength(void)
+{ static float v = -1; if (v < 0) { const char *e = getenv("TD5RE_SUN_OVERCAST_STRENGTH"); v = (e && e[0]) ? (float)atof(e) : 0.5f; } return v; }
+
+void td5_render_apply_shadow_pass(int vp_x, int vp_y)
+{
+    if (!td5_light2_active() || !td5_light2_sun_shadows()) return;
+
+    float sun[3] = { 0.0f, 0.0f, 0.0f }, dom = 0.0f;
+    int sky_cls = td5_render_scene_sun(sun, &dom);
+    /* [ROAD-CAST SHADOW FIX 2026-08-03] The unified scene sun (td5_render_scene_sun)
+     * is derived in the game's +Y-DOWN world/zone convention (sun.y < 0 = above the
+     * horizon). The RT shadow pass, however, casts rays in the DEPTH-RECONSTRUCTED
+     * world space (rt_world_from_depth), which is +Y-UP (verified in-race: the chase
+     * camera sits at a LARGER y than the car it looks down on, and world.y readouts
+     * put the road at ~5870 with buildings ABOVE at larger y). With the raw sun the
+     * ray heads BELOW the horizon, into the ground, so it never reaches the sky or
+     * any occluder and the road is never shadowed (the long-standing "objects don't
+     * cast onto the road" bug). Flip Y into the reconstruction frame for the RT ray
+     * cast only; the LOW screen-space shadow shader keeps the untouched sun. */
+    if (td5_rt_active()) sun[1] = -sun[1];
+    /* [shadow diag] One-shot: capture exactly why (or whether) sun shadows run —
+     * sky classification, sun direction (a near-vertical Y => overhead sun =>
+     * shadows collapse under objects), dominance and resulting strength.
+     * TD5RE_RT_DIAG=1. */
+    {
+        static int s_sd_logged = 0;
+        if (!s_sd_logged && getenv("TD5RE_RT_DIAG")) {
+            s_sd_logged = 1;
+            TD5_LOG_I(LOG_TAG,
+                "[shadowdiag] rt_active=%d light2=%d sun_shadows=%d sky_cls=%d "
+                "sun=(%.3f,%.3f,%.3f) dom=%.3f strength_raw=%.3f",
+                td5_rt_active(), td5_light2_active(), td5_light2_sun_shadows(),
+                sky_cls, sun[0], sun[1], sun[2], dom,
+                ((float)td5_light2_shadow_strength() / 100.0f) * dom);
+        }
+    }
+    if (!sky_cls) return;                        /* no directional light (tunnel) */
+
     float strength = ((float)td5_light2_shadow_strength() / 100.0f) * dom;
+    float cone_scale = 1.0f;                      /* params2.w: 1 = default ~0.7deg */
+    if (sky_cls == TD5_SKY_OVERCAST) {
+        cone_scale = sun_overcast_cone();         /* wide penumbra */
+        float cap = sun_overcast_strength();
+        if (strength > cap) strength = cap;       /* soft, low-contrast */
+    }
     if (strength <= 0.01f) return;
 
     /* March tuning (env-overridable for look iteration). */
@@ -271,13 +415,72 @@ void td5_render_apply_shadow_pass(int vp_x, int vp_y)
     float cam[3] = { s_camera_pos[0], s_camera_pos[1], s_camera_pos[2] };
     float depth_scale = 1.0f / DEPTH_NORMALIZE_INV;   /* 195000 */
 
+    /* [RT2 P6] Range de-hardcode. The 2500-unit s_dist is a LOW screen-space
+     * MARCH horizon (ps_shadow.hlsl walks the depth buffer that far). RT sun
+     * shadows are view-independent ray casts toward the (directional) sun and
+     * must reach ANY occluder — a bridge 20k units ahead should shadow. So in
+     * HIGH lift the shadow-ray TMax (sh_sun.w) to effectively infinite; LOW
+     * keeps s_dist byte-identical. Knob TD5RE_RT_SHADOW_DIST (default 1e7). */
+    float shadow_dist = s_dist;
+    if (td5_rt_active()) {
+        static float s_rt_shadow_dist = -1.0f;
+        if (s_rt_shadow_dist < 0.0f) {
+            const char *e = getenv("TD5RE_RT_SHADOW_DIST");
+            s_rt_shadow_dist = (e && e[0]) ? (float)atof(e) : 1.0e7f;
+            if (s_rt_shadow_dist < s_dist) s_rt_shadow_dist = s_dist;
+        }
+        shadow_dist = s_rt_shadow_dist;
+    }
+
     td5_plat_render_apply_shadow(cam, basis9,
                                  s_focal_length, s_center_x, s_center_y,
                                  (float)vp_x, (float)vp_y,
                                  depth_scale, NEAR_DEPTH_OFFSET,
                                  sun, strength,
-                                 s_steps, s_dist, s_thick, 8.0f,
-                                 (float)s_viewport_width, (float)s_viewport_height);
+                                 s_steps, shadow_dist, s_thick, 8.0f,
+                                 (float)s_viewport_width, (float)s_viewport_height,
+                                 cone_scale);
+}
+
+/* [RT2 P4] Sky-visibility GI: ray-traced ambient occlusion toward the sky makes
+ * outdoor areas bright and covered areas (under bridges/tunnels/canyons) dark —
+ * from actual geometry. HIGH-only (td5_rt_active). Multiplicative composite runs
+ * immediately after the sun-shadow composite. Knobs TD5RE_RT_GI_RAYS(4)/_DIST
+ * (6000)/_FLOOR(0.45); TD5RE_RT_GI=0 disables. */
+void td5_render_apply_gi_pass(int vp_x, int vp_y)
+{
+    static int   s_gi_on = -1, s_gi_rays = -1;
+    static float s_gi_dist = -1.0f, s_gi_floor = -1.0f;
+    float basis9[9], cam[3], depth_scale;
+    int i;
+    if (!td5_rt_active()) return;                 /* HIGH-only; no LOW fallback */
+    if (s_gi_on < 0) {
+        const char *e;
+        /* [2026-08-03] Default OFF: with flat-base world albedo the sky-vis AO
+         * multiplied most of the track down toward the 0.45 floor (only open-sky
+         * spots stayed bright) — read as unwanted global dimming. TD5RE_RT_GI=1
+         * re-enables (tune TD5RE_RT_GI_FLOOR up / _DIST down if used). */
+        s_gi_on    = ((e = getenv("TD5RE_RT_GI"))       && e[0]) ? atoi(e)        : 0;
+        s_gi_rays  = ((e = getenv("TD5RE_RT_GI_RAYS"))  && e[0]) ? atoi(e)        : 4;
+        s_gi_dist  = ((e = getenv("TD5RE_RT_GI_DIST"))  && e[0]) ? (float)atof(e) : 6000.0f;
+        s_gi_floor = ((e = getenv("TD5RE_RT_GI_FLOOR")) && e[0]) ? (float)atof(e) : 0.45f;
+        if (s_gi_rays < 1)  s_gi_rays = 1;
+        if (s_gi_rays > 16) s_gi_rays = 16;
+        if (s_gi_floor < 0.0f) s_gi_floor = 0.0f;
+        if (s_gi_floor > 1.0f) s_gi_floor = 1.0f;
+        TD5_LOG_I(LOG_TAG, "light2: GI pass rays=%d dist=%.0f floor=%.2f on=%d",
+                  s_gi_rays, (double)s_gi_dist, (double)s_gi_floor, s_gi_on);
+    }
+    if (!s_gi_on) return;
+    for (i = 0; i < 9; i++) basis9[i] = s_camera_basis[i];
+    cam[0] = s_camera_pos[0]; cam[1] = s_camera_pos[1]; cam[2] = s_camera_pos[2];
+    depth_scale = 1.0f / DEPTH_NORMALIZE_INV;
+    td5_plat_render_apply_gi(cam, basis9,
+                             s_focal_length, s_center_x, s_center_y,
+                             (float)vp_x, (float)vp_y,
+                             depth_scale, NEAR_DEPTH_OFFSET,
+                             (float)s_viewport_width, (float)s_viewport_height,
+                             s_gi_rays, s_gi_dist, s_gi_floor);
 }
 
 /* [LIGHT2 P3] Screen-space reflections for the CURRENT viewport. Reflective
@@ -319,25 +522,36 @@ void td5_render_apply_ssr_pass(int vp_x, int vp_y)
     float cam[3] = { s_camera_pos[0], s_camera_pos[1], s_camera_pos[2] };
     float depth_scale = 1.0f / DEPTH_NORMALIZE_INV;   /* 195000 */
 
-    /* [P3] Scene sun dir (strongest enabled directional zone slot) for the RT
-     * reflection's sun shadow ray -- same derivation + Y-flip as the shadow pass;
+    /* [RT2 P6] Range de-hardcode. s_dist (TD5RE_SSR_DIST, 4000) is the LOW
+     * screen-space MARCH horizon — it stays 4000 in LOW (that IS "low quality"
+     * now). The RT reflection ray (sr_params.y TMax, rt_pipeline.hlsl:325) is
+     * view-independent and should reach beyond the far plane, so in HIGH lift
+     * it to TD5RE_RT_REFL_DIST (default 50000 = unlimited in practice). Ray
+     * count stays 1 (the precision lever is Phase 8's half-res dispatch). */
+    float refl_dist = s_dist;
+    if (td5_rt_active()) {
+        static float s_rt_refl_dist = -1.0f;
+        if (s_rt_refl_dist < 0.0f) {
+            const char *e = getenv("TD5RE_RT_REFL_DIST");
+            s_rt_refl_dist = (e && e[0]) ? (float)atof(e) : 50000.0f;
+            if (s_rt_refl_dist < s_dist) s_rt_refl_dist = s_dist;
+        }
+        refl_dist = s_rt_refl_dist;
+    }
+
+    /* [P3] Scene sun dir for the RT reflection's sun shadow ray -- SAME unified
+     * derivation as the shadow pass (probe sun in HIGH+SUNNY, else zone sun);
      * disabled when there's no sun (tunnel) or it's below the horizon. */
     float sun[3] = { 0.0f, 0.0f, 0.0f };
     int sun_shadow = 0;
     if (td5_light2_sun_shadows()) {
-        float best_mag2 = 0.0f;
-        for (int s = 0; s < 3; s++) {
-            if (!s_tl_contrib[s].enabled) continue;
-            const float *v = s_tl_contrib[s].vec_world;
-            float m2 = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
-            if (m2 > best_mag2) { best_mag2 = m2; sun[0]=v[0]; sun[1]=v[1]; sun[2]=v[2]; }
-        }
-        if (best_mag2 > 1.0f) {
-            float mag = sqrtf(best_mag2);
-            sun[0]/=mag; sun[1]/=mag; sun[2]/=mag;
-            sun[1] = -sun[1];                       /* zone dirs are Y-flipped vs position space */
-            if (sun[1] < -0.05f) sun_shadow = 1;    /* sun above the horizon */
-        }
+        float dom = 0.0f;
+        if (td5_render_scene_sun(sun, &dom) != 0) sun_shadow = 1;
+        /* [ROAD-CAST SHADOW FIX 2026-08-03] Match the shadow pass: the RT reflection
+         * sun shadow ray casts in +Y-UP reconstruction space, but the unified sun is
+         * +Y-DOWN. Flip Y so reflected surfaces receive correctly-oriented sun
+         * shadows too (see td5_render_apply_shadow_pass for the full rationale). */
+        if (sun_shadow && td5_rt_active()) sun[1] = -sun[1];
     }
 
     td5_plat_render_apply_ssr(cam, basis9,
@@ -345,7 +559,7 @@ void td5_render_apply_ssr_pass(int vp_x, int vp_y)
                               (float)vp_x, (float)vp_y,
                               depth_scale, NEAR_DEPTH_OFFSET,
                               refl8, wet, s_intensity,
-                              s_steps, s_dist, s_thick,
+                              s_steps, refl_dist, s_thick,
                               (float)s_viewport_width, (float)s_viewport_height,
                               sun, sun_shadow);
 }
@@ -361,6 +575,15 @@ void td5_render_lighting2_frame_begin(void)
     static int s_logged = 0;
     int on = td5_light2_active() ? 1 : 0;
     td5_plat_render_set_gbuffer(on);
+    /* [CAR SUN 2026-08-04] Publish this frame's scene sun (+Y-down, UN-flipped —
+     * matches the packed COLOR1 normal) so the directional car brighten in
+     * ps_modulate*_g can do N.L. Zero when there's no sun (tunnel/night) => the car
+     * sits at base colour there instead of a flat all-over lift. */
+    {
+        float sun[3] = { 0.0f, 0.0f, 0.0f }, dom = 0.0f;
+        if (!on || td5_render_scene_sun(sun, &dom) == 0) { sun[0] = sun[1] = sun[2] = 0.0f; }
+        td5_plat_render_set_car_sun_dir(sun);
+    }
     if (!s_logged) {
         s_logged = 1;
         TD5_LOG_I(LOG_TAG, "light2: frame gate first run, mode=%d gbuffer=%d",
@@ -615,6 +838,25 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
     }
     int prelit = (s_td6_vlight && slot < 0);
 
+    /* [RT flat-base dev knob 2026-08-03] TD5RE_RT_FLATBASE=1 (HIGH/RT only):
+     * disable the original engine's per-vertex CPU shading on WORLD geometry
+     * (track + scenery, slot < 0) -- the 3-directional diffuse + ambient floor
+     * + per-area zone colour/ambient that shades every face -- and emit a flat
+     * full-bright albedo instead, so the RT shadow / GI / light passes become the
+     * SOLE source of shading. Removes the double-darkening (baked face shading
+     * multiplied again by the RT shadow) while iterating on RT lighting. The
+     * G-buffer normal pack above still runs (RT needs it); cars (slot >= 0) keep
+     * their shading.
+     *
+     * [2026-08-03] Default is now ON under RT: the baked per-area zone shading
+     * (the "below-tree / bridge" dimming) double-darkens against the RT shadow/
+     * GI and is exactly what RT is meant to replace, so world geometry gets a
+     * flat albedo and RT is the sole shader. TD5RE_RT_FLATBASE=0 forces the old
+     * baked shading back for A/B. Gated by td5_rt_active() so LOW is untouched. */
+    static int s_flat_base = -1;
+    if (s_flat_base < 0) s_flat_base = td5_env_int("TD5RE_RT_FLATBASE", 1, 0, 1);
+    int flat_base = s_flat_base && slot < 0 && td5_rt_active();
+
     /* [CAR DAMAGE 2026-06-28] Per-vertex damage "scuff": darken the diffuse on
      * struck panels so dents read as scuffed/scorched (a cheap texture-damage
      * look in the software lighting pass). NULL / 0 when no damage or off. */
@@ -629,7 +871,13 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
     light_read_dark_knobs();
     LightModelPt lm[TD5_LIGHT_MAX];
     int nlights = light_build_model_list(mesh, lm, TD5_LIGHT_MAX);
-    int dark = s_light_dark_mode;
+    /* [RT2 P4] In HIGH the sky-visibility GI mask darkens ACTORS under bridges/
+     * tunnels from actual geometry (per-pixel, soft edges), so retire the analytic
+     * zone dark-mode dimming for cars (slot>=0) — this is the Australia-bridge fix.
+     * The synthetic 3-dir diffuse + paint tint + damage scuff all stay; only the
+     * dark-mode dim is skipped. Track/scenery (slot<0) keeps its behaviour. LOW is
+     * unchanged (td5_rt_active() is false). */
+    int dark = s_light_dark_mode && !(slot >= 0 && td5_rt_active());
     int floor_lum = dark ? s_dark_floor : TD5_LIGHTING_MIN;
 
     /* [LIGHT2 P0] Mode>=1 extras: (a) pack each vertex's WORLD normal into the
@@ -709,6 +957,14 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
          * were never lit by the port before either). */
         if (norms_derived)
             continue;
+
+        /* [RT flat-base] Flat full-bright albedo -> RT is the only shading.
+         * Luminance index 0xFF (alpha 0) maps through the flush colour-LUT to the
+         * brightest gray, i.e. the texture at full modulation. */
+        if (flat_base) {
+            verts[i].lighting = TD5_LIGHTING_MAX;
+            continue;
+        }
 
         if (prelit && (vb[i].lighting & 0xFF000000u) != 0u) {
             uint32_t c = vb[i].lighting;          /* keep the #13 baked TD6 grey... */
@@ -829,10 +1085,48 @@ void td5_render_compute_vertex_lighting(TD5_MeshHeader *mesh, int slot)
  * on g_td5.ini.override_track_zip, so faithful tracks never call this. */
 void td5_render_set_override_daylight(void)
 {
-    s_light_dirs[0] =   0.0f; s_light_dirs[1] = 120.0f; s_light_dirs[2] =   0.0f; /* top   */
+    /* [CAR SUN 2026-08-04] The car's flat "daylight" studio basis. Ambient + a
+     * strong top light; capped ~0.88 which reads DIM in strong sun. Made tunable
+     * to find the right sunlit level: TD5RE_CAR_DAY_AMB (ambient, def 104) and
+     * TD5RE_CAR_DAY_DIR (top-light weight, def 120). */
+    static float amb = -1.0f, dir = -1.0f;
+    if (amb < 0.0f) {
+        const char *ea = getenv("TD5RE_CAR_DAY_AMB"); amb = (ea && ea[0]) ? (float)atof(ea) : 104.0f;
+        const char *ed = getenv("TD5RE_CAR_DAY_DIR"); dir = (ed && ed[0]) ? (float)atof(ed) : 120.0f;
+    }
+    s_light_dirs[0] =   0.0f; s_light_dirs[1] =  dir;  s_light_dirs[2] =   0.0f; /* top   */
     s_light_dirs[3] =  70.0f; s_light_dirs[4] =  45.0f; s_light_dirs[5] =  45.0f; /* fr-rt */
     s_light_dirs[6] = -55.0f; s_light_dirs[7] =  45.0f; s_light_dirs[8] = -55.0f; /* bk-lf */
-    s_ambient_intensity = 104.0f;   /* 0x68 base so even unlit faces stay visible */
+    s_ambient_intensity = amb;   /* 0x68 base so even unlit faces stay visible */
+}
+
+/* [CAR SUN 2026-08-04] Sun-ALIGNED car base lighting. The dominant directional is
+ * the REAL scene sun (world dir -> the car's model frame via its rotation matrix,
+ * same transform as tl_commit_to_render_globals), so the sunlit side is genuinely
+ * bright and moves with the sun as the car turns, and a brighter sky ambient keeps
+ * the shaded side lit but darker. Replaces the flat studio 3-point override that
+ * capped the car dim & sun-independent (the "dimmed chassis"). Knobs:
+ * TD5RE_CAR_SUN_DIR (sun weight, def 175), TD5RE_CAR_SUN_AMB (sky ambient, def 120).
+ * No sun (tunnel/night) -> falls back to the flat daylight basis. */
+void td5_render_set_override_sunlit(const float *rot_m)
+{
+    static float sunW = -1.0f, ambV = -1.0f;
+    if (sunW < 0.0f) {
+        const char *ew = getenv("TD5RE_CAR_SUN_DIR"); sunW = (ew && ew[0]) ? (float)atof(ew) : 175.0f;
+        const char *ea = getenv("TD5RE_CAR_SUN_AMB"); ambV = (ea && ea[0]) ? (float)atof(ea) : 120.0f;
+    }
+    float sun[3] = { 0.0f, 0.0f, 0.0f }, dom = 0.0f;
+    if (!rot_m || td5_render_scene_sun(sun, &dom) == 0) { td5_render_set_override_daylight(); return; }
+    /* scene sun is +Y-down position space; world space un-flips Y (reverse the zone flip). */
+    float sw0 = sun[0], sw1 = -sun[1], sw2 = sun[2];
+    /* world -> model: project onto the columns of the actor rotation matrix. */
+    float lx = sw0 * rot_m[0] + sw1 * rot_m[3] + sw2 * rot_m[6];
+    float ly = sw0 * rot_m[1] + sw1 * rot_m[4] + sw2 * rot_m[7];
+    float lz = sw0 * rot_m[2] + sw1 * rot_m[5] + sw2 * rot_m[8];
+    s_light_dirs[0] = lx * sunW; s_light_dirs[1] = ly * sunW; s_light_dirs[2] = lz * sunW; /* sun */
+    s_light_dirs[3] = 0.0f; s_light_dirs[4] = 0.0f; s_light_dirs[5] = 0.0f;
+    s_light_dirs[6] = 0.0f; s_light_dirs[7] = 0.0f; s_light_dirs[8] = 0.0f;
+    s_ambient_intensity = ambV;
 }
 
 /* --- Frustum Culling --- */
@@ -1117,9 +1411,10 @@ void td5_render_span_display_list(const TD5_SpanDisplayList *display_list_block)
     if (count <= 0 || count > 256) return; /* sanity */
     if (!block->meshes) return;
 
-    TD5_LOG_D(LOG_TAG,
-              "span display list: block=%p mesh_range=[0,%d)",
-              display_list_block, count);
+    if (render_trace_on())
+        TD5_LOG_D(LOG_TAG,
+                  "span display list: block=%p mesh_range=[0,%d)",
+                  display_list_block, count);
 
     /* [reverse banners] enable START<->FINISH + numbered banner-page swap for
      * this level-geometry pass only (cleared after the loop so vehicles/props
@@ -2858,7 +3153,17 @@ void td5_render_actors_for_view(int view_index)
             int td6_zfix = (slot >= 0 && slot < TD5_ACTOR_MAX_TOTAL_SLOTS &&
                             s_vehicle_is_td6[slot] && td6_car_zfix_enabled());
             if (td6_zfix) s_td6_car_zbias = TD6_CAR_ZFIX_PULL_VIEWZ;
+            /* [CAR SUN 2026-08-03] Brighten sunlit bodywork under RT. The car's
+             * CPU luminance is capped at its texture and the RT sun composite only
+             * darkens, so a per-draw multiply in ps_modulate_g is the reliable way
+             * to make the car read brighter (hue-preserving). Racer bodies only
+             * (slot < g_traffic_slot_base); the prepared-mesh draw flushes its own
+             * batch so the gain can't leak into other geometry. TD5RE_RT_CAR_SUN
+             * scales it (0 = off). */
+            int car_sun = (slot >= 0 && slot < g_traffic_slot_base && td5_rt_active());
+            if (car_sun) td5_plat_render_set_car_sun(td5_render_car_sun_gain());
             td5_render_prepared_mesh(mesh);
+            if (car_sun) td5_plat_render_set_car_sun(0.0f);
             if (td6_zfix) s_td6_car_zbias = 0.0f;
             td5_render_set_actor_draw_alpha(255);
             td5_render_set_actor_effect_tint(0);          /* [ARCADE] clear silhouette glow */
@@ -3072,11 +3377,12 @@ void td5_render_actors_for_view(int view_index)
 
             actor_render_count++;
 
-            TD5_LOG_D(LOG_TAG,
-                      "vehicle render: view=%d slot=%d pos=(%.2f, %.2f, %.2f) mesh=%p",
-                      view_index, slot,
-                      render_pos.x, render_pos.y, render_pos.z,
-                      (void *)mesh);
+            if (render_trace_on())
+                TD5_LOG_D(LOG_TAG,
+                          "vehicle render: view=%d slot=%d pos=(%.2f, %.2f, %.2f) mesh=%p",
+                          view_index, slot,
+                          render_pos.x, render_pos.y, render_pos.z,
+                          (void *)mesh);
         }
 
         /* Per-view tire-track emitter dispatch (UpdateTireTrackEmitters
@@ -3177,6 +3483,31 @@ void td5_render_configure_projection(int width, int height)
      * The old width*0.5625 locked the horizontal FOV, so widening the window
      * shrank the vertical FOV and pushed the car's shadow off the bottom. */
     s_focal_length = (float)height * 0.75f;
+
+    /* [FOV DISTORTION FIX 2026-08-03] Cap the HORIZONTAL FOV. Vertical-lock
+     * (focal = height*0.75) keeps the vertical framing on a widescreen window but
+     * lets the horizontal FOV widen without bound -- at 2560x1351 it reaches
+     * ~103 deg, whose extreme wide-angle rectilinear stretch is what distorts
+     * near-camera geometry + projected shadows at the screen edges (both the
+     * raster pipeline and RT, which reconstructs from the SAME s_focal_length).
+     * Raising the focal to whatever a horizontal-FOV cap requires narrows the
+     * horizontal view (and shrinks the vertical a little) so the edges stay
+     * rectilinear-sane. No-op at <= the cap (so 4:3 is byte-identical to the
+     * vertical-lock focal). Knob TD5RE_HFOV_MAX (degrees, default 90; set high
+     * e.g. 180 to disable the cap and restore pure Hor+). */
+    {
+        static float s_hfov_max = -1.0f;
+        if (s_hfov_max < 0.0f) {
+            const char *e = getenv("TD5RE_HFOV_MAX");
+            s_hfov_max = (e && e[0]) ? (float)atof(e) : 90.0f;
+            if (s_hfov_max < 40.0f)  s_hfov_max = 40.0f;
+            if (s_hfov_max > 175.0f) s_hfov_max = 175.0f;
+        }
+        float half_hfov_rad = s_hfov_max * 0.5f * (3.14159265358979323846f / 180.0f);
+        float min_focal = ((float)width * 0.5f) / tanf(half_hfov_rad);
+        if (s_focal_length < min_focal) s_focal_length = min_focal;
+    }
+
     s_inv_focal    = 1.0f / s_focal_length;
 
     /* Near/far clip.
@@ -3239,9 +3570,10 @@ void td5_render_configure_projection(int width, int height)
     {
         float half_fov_rad = atanf(((float)width * 0.5f) / s_focal_length);
         float fov_deg = half_fov_rad * (360.0f / 3.14159265358979323846f);
-        TD5_LOG_I(LOG_TAG,
-                  "projection configured: %dx%d focal=%.1f near=%.1f far=%.1f far_cull=%.1f fov=%.2f",
-                  width, height, s_focal_length, s_near_clip, s_far_clip, s_far_cull, fov_deg);
+        if (render_trace_on())
+            TD5_LOG_I(LOG_TAG,
+                      "projection configured: %dx%d focal=%.1f near=%.1f far=%.1f far_cull=%.1f fov=%.2f",
+                      width, height, s_focal_length, s_near_clip, s_far_clip, s_far_cull, fov_deg);
     }
 
     /* Dump accumulated cull stats every 5 frames. Stats reflect the
@@ -3503,9 +3835,10 @@ void td5_render_flush_projected_buckets(void)
     /* Flush any remaining vertices */
     flush_immediate_internal();
 
-    TD5_LOG_D(LOG_TAG,
-              "projected buckets flushed: entries=%d",
-              flushed_entries);
+    if (render_trace_on())
+        TD5_LOG_D(LOG_TAG,
+                  "projected buckets flushed: entries=%d",
+                  flushed_entries);
 
     /* Reset depth buckets for next frame */
     for (int i = 0; i < DEPTH_BUCKET_COUNT; i++) {
@@ -3610,7 +3943,18 @@ void td5_render_apply_page_blend_preset(int page_id)
     if (s_actor_draw_alpha < 255 && p != TD5_PRESET_ADDITIVE)
         p = TD5_PRESET_VEHICLE_FADE;
     td5_plat_render_set_preset(p);
-    TD5_LOG_D(LOG_TAG, "page_blend_preset: page=%d type=%d preset=%d", page_id, t, (int)p);
+    /* [perf/log-hygiene] Called once per drawn page every frame — silent unless
+     * TD5RE_TRACE_BLEND=1 (was an unconditional [DBG] emitting ~20+ lines/frame,
+     * a major contributor to the 1 GB log + per-frame disk-I/O frame stall). */
+    {
+        static int s_trace_blend = -1;
+        if (s_trace_blend < 0) {
+            const char *e = getenv("TD5RE_TRACE_BLEND");
+            s_trace_blend = (e && e[0] && e[0] != '0') ? 1 : 0;
+        }
+        if (s_trace_blend)
+            TD5_LOG_D(LOG_TAG, "page_blend_preset: page=%d type=%d preset=%d", page_id, t, (int)p);
+    }
 }
 
 int td5_render_bind_texture_page(int page_id)

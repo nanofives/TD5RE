@@ -90,6 +90,11 @@ int   d3d12_dxr_smoke_enabled(void);
 int   d3d12_dxr_shadow_pass(const ShadowCB *cb);
 int   d3d12_dxr_light_pass(const LightCB *cb);
 int   d3d12_dxr_ssr_pass(const SSRCB *cb);   /* P3: RT reflections */
+int   d3d12_dxr_gi_pass(const ShadowCB *cb); /* [P4] sky-visibility GI */
+
+/* [RT2-P3] Sun-visibility mask for the translucent shadow-receive path. */
+struct ID3D12Resource *d3d12_dxr_sunvis_resource(void);
+int   d3d12_dxr_sunvis_ready(void);          /* 1 = allocated + in PSR state this frame */
 
 /* [P3] Bindless: write a page's SRV into the bindless heap slot (index = page
  * id). Deduped on the resource; res must be in a shader-readable state. */

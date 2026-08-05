@@ -7,7 +7,7 @@
 
 typedef enum {
     RC_PRESET, RC_FOG, RC_BIND_TEX, RC_BIND_PAGE,
-    RC_VIEWPORT, RC_CLIP, RC_DRAW_TRIS, RC_DRAW_LINES
+    RC_VIEWPORT, RC_CLIP, RC_DRAW_TRIS, RC_DRAW_LINES, RC_CAR_SUN
 } RCType;
 
 typedef struct {
@@ -70,6 +70,9 @@ void td5_rcmd_set_preset(int preset)
 void td5_rcmd_set_fog(int enable, uint32_t color, float start, float end, float density)
 { RCmd *c = push_cmd(t_active); if (c) { c->type = RC_FOG; c->a = enable; c->u = color; c->f0 = start; c->f1 = end; c->f2 = density; } }
 
+void td5_rcmd_set_car_sun(float gain)
+{ RCmd *c = push_cmd(t_active); if (c) { c->type = RC_CAR_SUN; c->f0 = gain; } }
+
 void td5_rcmd_bind_texture(int slot)
 { RCmd *c = push_cmd(t_active); if (c) { c->type = RC_BIND_TEX; c->a = slot; } }
 
@@ -122,6 +125,7 @@ void td5_rcmd_replay(RCmdList *l)
         switch (c->type) {
         case RC_PRESET:    td5_plat_render_set_preset((TD5_RenderPreset)c->a); break;
         case RC_FOG:       td5_plat_render_set_fog(c->a, c->u, c->f0, c->f1, c->f2); break;
+        case RC_CAR_SUN:   td5_plat_render_set_car_sun(c->f0); break;
         case RC_BIND_TEX:  td5_plat_render_bind_texture(c->a); break;
         case RC_BIND_PAGE: td5_render_bind_texture_page(c->a); break;
         case RC_VIEWPORT:  td5_plat_render_set_viewport(c->a, c->b, c->c, c->d); break;

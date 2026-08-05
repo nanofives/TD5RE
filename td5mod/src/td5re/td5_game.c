@@ -7449,6 +7449,12 @@ static void frame_render(void)
         if (!td5_render_photobooth_active())
             td5_render_apply_shadow_pass(s_viewports[vp].x, s_viewports[vp].y);
 
+        /* [RT2 P4] Sky-visibility GI: multiplicative, right after the sun-shadow
+         * composite and BEFORE the additive lights (so headlight pools aren't
+         * GI-darkened). HIGH-only. */
+        if (!td5_render_photobooth_active())
+            td5_render_apply_gi_pass(s_viewports[vp].x, s_viewports[vp].y);
+
         /* [DEFERRED LIGHTS] Screen-space dynamic-light pass: now that the opaque
          * world (track + actors + props) has filled the depth buffer for this
          * pane, add the headlight/light contribution per pixel before the
@@ -7460,6 +7466,13 @@ static void frame_render(void)
          * they mirror the lit + shadowed scene (car paint, glass, wet roads). */
         if (!td5_render_photobooth_active())
             td5_render_apply_ssr_pass(s_viewports[vp].x, s_viewports[vp].y);
+
+        /* [RT2 P1] Sun disc: after the opaque world has filled the depth buffer
+         * (so buildings/terrain occlude it) and after the deferred passes (so it
+         * sits over the final lit sky), before translucent VFX + HUD. No-op
+         * unless SUNNY + HIGH. */
+        if (!td5_render_photobooth_active())
+            td5_render_draw_sun_disc();
 
         /* VFX: tire tracks, particles */
         if (!td5_render_photobooth_active()) {
