@@ -107,11 +107,14 @@
 #define TD5_MANUAL_RECOVERY_REPAIR_PCT  20
 
 /* [CAR BROKE DOWN 2026-07-10] A recovery FROM A BREAKDOWN (the car was knocked
- * out / broken down, not merely stuck) is the punishing "force recovery": the
- * car is dragged BACK this many spans (default 30 — real position loss) and
- * fully repaired so it can actually race on. An ordinary "I'm stuck" press keeps
- * the gentle in-place reset + partial repair above. Both knob-tunable. */
-#define TD5_BREAKDOWN_SPANS_BACK   30
+ * out / broken down, not merely stuck) fully repairs the car so it can actually
+ * race on, and grants the brief invulnerable ghost window.
+ *
+ * [BREAKDOWN IN-PLACE 2026-08-05] Default step-back is now 0 (recover in place),
+ * same as the ordinary stuck-recovery — the old 30-span drag-back read as a
+ * jarring backwards TELEPORT with no clear benefit. Set TD5RE_BREAKDOWN_SPANS_BACK
+ * to a positive value to restore a positional penalty. */
+#define TD5_BREAKDOWN_SPANS_BACK   0
 #define TD5_BREAKDOWN_REPAIR_PCT   100
 
 /* Per-slot manual-recovery cooldown counter (racer slots only; humans are
@@ -1786,13 +1789,19 @@ int td5_physics_recover_player(int slot)
     actor->throttle_state = 1;      /* +0x36F: forward */
     actor->track_contact_flag = 0;  /* +0x37B: V2W contact */
 
-    /* [RESET-CAR REPAIR PARTIAL 2026-07-04] Partially recover the car: restore
-     * s_recovery_repair_pct% of max health and clear the knockout state (port-only
-     * damage feature — inert when CarDamage is off; dents are left in place — see
-     * td5_damage_repair_actor_pct), and clear the broken-down flag so a knocked-out
-     * racer is no longer treated as wrecked (it would otherwise stay physics-frozen,
-     * since health never regenerates on its own). */
-    td5_damage_repair_actor_pct(slot, repair_pct_eff);
+    /* [RESET-CAR REPAIR PARTIAL 2026-07-04] Restore health + clear the knockout
+     * state (port-only damage feature — inert when CarDamage is off; dents are left
+     * in place — see td5_damage_repair_actor_pct).
+     *
+     * [STUCK-RECOVERY NO-REPAIR 2026-08-05] Only a BREAKDOWN recovery repairs now.
+     * An ordinary "I'm stuck" SELECT press must NOT refill the health bar — that
+     * was an unwanted free heal on a car that merely got stuck. A stuck car isn't
+     * knocked out, so there's no knockout to clear on that path either. The
+     * broken-down flag is still cleared unconditionally below (a no-op unless the
+     * car was actually broken down) so a knocked-out racer isn't left physics-
+     * frozen (health never regenerates on its own). */
+    if (from_breakdown)
+        td5_damage_repair_actor_pct(slot, repair_pct_eff);
     td5_ai_clear_actor_broken_down(slot);
 
     /* [CAR BROKE DOWN 2026-07-10] A breakdown recovery drops the car in cold at a

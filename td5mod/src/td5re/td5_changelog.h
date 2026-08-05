@@ -37,6 +37,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  press SELECT to continue, the camera now snaps back" },
     { CL_ITEM,    "  behind that car every time - no more staying rotated" },
     { CL_ITEM,    "  until you tap the view button." },
+    { CL_ITEM,    "FIX: recovering from a breakdown no longer teleports" },
+    { CL_ITEM,    "  the car backwards - it now continues in place." },
+    { CL_ITEM,    "FIX: pressing SELECT to un-stick a car that did NOT" },
+    { CL_ITEM,    "  break down no longer secretly repairs its damage." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 4" },
