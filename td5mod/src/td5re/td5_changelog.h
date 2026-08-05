@@ -32,6 +32,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 5" },
+    { CL_ITEM,    "FIX: restoring a car (SELECT/R) no longer flings you" },
+    { CL_ITEM,    "  back near the start of the track. A knocked-out car" },
+    { CL_ITEM,    "  now resets where it stands, just like a stuck one." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 4" },
     { CL_ITEM,    "NEW (HIGH lighting): sun-aligned car lighting - the" },
     { CL_ITEM,    "  car's lit side now follows the real sun (was a flat" },
