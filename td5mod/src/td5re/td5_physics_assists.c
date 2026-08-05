@@ -107,11 +107,22 @@
 #define TD5_MANUAL_RECOVERY_REPAIR_PCT  20
 
 /* [CAR BROKE DOWN 2026-07-10] A recovery FROM A BREAKDOWN (the car was knocked
- * out / broken down, not merely stuck) is the punishing "force recovery": the
- * car is dragged BACK this many spans (default 30 — real position loss) and
- * fully repaired so it can actually race on. An ordinary "I'm stuck" press keeps
- * the gentle in-place reset + partial repair above. Both knob-tunable. */
-#define TD5_BREAKDOWN_SPANS_BACK   30
+ * out / broken down, not merely stuck) is FULLY repaired so it can actually race
+ * on, and gets a brief ghost window (see td5_damage_begin_ghost) so it isn't
+ * instantly re-wrecked. An ordinary "I'm stuck" press keeps the partial repair
+ * above. Both knob-tunable.
+ *
+ * [BREAKDOWN IN-PLACE 2026-08-05] Placement default changed 30 -> 0 (in-place).
+ * The old 30-span step-back was the punishing "real position loss" idea, but in
+ * 6-player MP (frequent knockouts) it made SELECT/restore silently teleport the
+ * car ~30 spans back — and near the start (point-to-point) or the start/finish
+ * (circuit wrap) it resolved to ~span 0, i.e. "almost the beginning of the
+ * track". This is the exact failure mode the in-place-reset notes above warn
+ * about. Restore now always resets the car IN PLACE (a few spans at most),
+ * matching the ordinary-stuck flavour; the ONLY difference a breakdown keeps is
+ * the full repair + ghost window. The old behaviour is still opt-in via
+ * TD5RE_BREAKDOWN_SPANS_BACK=30. */
+#define TD5_BREAKDOWN_SPANS_BACK   0
 #define TD5_BREAKDOWN_REPAIR_PCT   100
 
 /* Per-slot manual-recovery cooldown counter (racer slots only; humans are
@@ -1668,8 +1679,9 @@ static void recovery_init_knobs(void)
      * sanity clamp [0,100]. */
     s_recovery_repair_pct = td5_env_int("TD5RE_RECOVERY_REPAIR_PCT",
                                         TD5_MANUAL_RECOVERY_REPAIR_PCT, 0, 100);
-    /* [CAR BROKE DOWN 2026-07-10] Breakdown force-recovery: step-back distance
-     * (default 30 spans — real position loss) and repair % (default 100 = full
+    /* [CAR BROKE DOWN 2026-07-10; in-place 2026-08-05] Breakdown recovery:
+     * step-back distance (default 0 = in-place; TD5RE_BREAKDOWN_SPANS_BACK=30
+     * restores the old punishing step-back) and repair % (default 100 = full
      * mechanical repair so the car can race on). Both sanity-clamped. */
     s_breakdown_spans_back = td5_env_int("TD5RE_BREAKDOWN_SPANS_BACK",
                                          TD5_BREAKDOWN_SPANS_BACK, 0, 64);
@@ -1848,9 +1860,9 @@ static int recovery_local_view_for_slot(int slot)
  * Two recovery flavours:
  *   - ORDINARY (car merely stuck): gentle in-place partial reset, arms the
  *     s_recovery_cooldown_ticks cooldown (anti-spam).
- *   - BREAKDOWN (car knocked out / broken down): the punishing force-recovery —
- *     30 spans back, full repair, ghost window. NOT cooldown-gated, so the
- *     "PRESS TO CONTINUE" prompt is honoured immediately. */
+ *   - BREAKDOWN (car knocked out / broken down): in-place reset (as of
+ *     2026-08-05; was 30 spans back), full repair, ghost window. NOT
+ *     cooldown-gated, so the "PRESS TO CONTINUE" prompt is honoured immediately. */
 void td5_physics_update_stuck_recovery(void)
 {
     recovery_init_knobs();
