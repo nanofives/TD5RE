@@ -1845,21 +1845,25 @@ static int recovery_local_view_for_slot(int slot)
  * a pure function of replicated span/HWM state, iterates ALL racer slots ->
  * lockstep-safe. Gated on TD5RE_BATTLE_ANTIREVERSE (default ON). Broken-down /
  * finished cars are left to the normal recovery path. ======================== */
-static int s_battle_ar_init     = 0;
-static int s_battle_ar_on       = 1;
-static int s_battle_ar_slack    = 4;    /* spans of backslide tolerated before a snap */
-static int s_battle_ar_cd_ticks = 8;    /* min ticks between snaps per slot           */
-static int s_battle_ar_cd[TD5_MAX_RACER_SLOTS];
+static int s_battle_ar_init   = 0;
+static int s_battle_ar_on      = 1;
+static int s_battle_ar_slack   = 4;      /* spans below the mark that counts as "behind"     */
+static int s_battle_ar_ticks   = 150;    /* sustained-reverse time before auto-restore (5s)   */
+static int s_battle_ar_rev[TD5_MAX_RACER_SLOTS];       /* consecutive ticks going backward     */
+static int s_battle_ar_prev[TD5_MAX_RACER_SLOTS];      /* previous-tick cumulative progress     */
 
 static void battle_ar_init_knobs(void)
 {
     if (s_battle_ar_init) return;
-    s_battle_ar_init     = 1;
-    s_battle_ar_on       = td5_env_flag_on("TD5RE_BATTLE_ANTIREVERSE");
-    s_battle_ar_slack    = td5_env_int("TD5RE_BATTLE_ANTIREVERSE_SLACK", 4, 0, 100000);
-    s_battle_ar_cd_ticks = td5_env_int("TD5RE_BATTLE_ANTIREVERSE_CD", 8, 0, 300);
-    TD5_LOG_I(LOG_TAG, "battle_antireverse knobs: on=%d slack=%d cd=%d",
-              s_battle_ar_on, s_battle_ar_slack, s_battle_ar_cd_ticks);
+    s_battle_ar_init = 1;
+    s_battle_ar_on    = td5_env_flag_on("TD5RE_BATTLE_ANTIREVERSE");
+    s_battle_ar_slack = td5_env_int("TD5RE_BATTLE_ANTIREVERSE_SLACK", 4, 0, 100000);
+    /* Seconds of sustained backward driving before the car is auto-restored to its
+     * furthest point. Gives players room to reverse/U-turn/dodge; only a persistent
+     * wrong-way run trips it. Default 5s. */
+    s_battle_ar_ticks = td5_env_int("TD5RE_BATTLE_ANTIREVERSE_SECS", 5, 0, 120) * 30;
+    TD5_LOG_I(LOG_TAG, "battle_antireverse knobs: on=%d slack=%d restore_after=%d ticks",
+              s_battle_ar_on, s_battle_ar_slack, s_battle_ar_ticks);
 }
 
 void td5_physics_battle_antireverse_tick(void)
@@ -1876,19 +1880,34 @@ void td5_physics_battle_antireverse_tick(void)
 
     for (int slot = 0; slot < nslots; slot++) {
         if (g_race_slot_state[slot] != 1) continue;       /* humans only            */
-        if (s_battle_ar_cd[slot] > 0) { s_battle_ar_cd[slot]--; continue; }
 
         TD5_Actor *actor =
             (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
-        if (!actor) continue;
-        if (actor->finish_time != 0) continue;            /* finished: leave alone  */
-        if (td5_damage_slot_knocked_out(slot) ||
-            td5_ai_actor_is_broken_down(slot)) continue;  /* breakdown owns recovery */
+        if (!actor) { s_battle_ar_rev[slot] = 0; continue; }
+        if (actor->finish_time != 0 ||                    /* finished: leave alone  */
+            td5_damage_slot_knocked_out(slot) ||
+            td5_ai_actor_is_broken_down(slot)) {          /* breakdown owns recovery */
+            s_battle_ar_rev[slot] = 0;
+            continue;
+        }
 
         int hwm = td5_ai_traffic_battle_hwm(slot);        /* cumulative furthest     */
-        if (hwm < 0) continue;
         int cur = td5_game_get_slot_progress(slot);       /* cumulative current      */
-        if (hwm - cur <= s_battle_ar_slack) continue;     /* still at/near furthest  */
+        int prev = s_battle_ar_prev[slot];
+        s_battle_ar_prev[slot] = cur;
+        if (hwm < 0) { s_battle_ar_rev[slot] = 0; continue; }
+
+        /* Accumulate time spent going backward. Reset the counter the moment the
+         * player is back at/near their furthest point OR is making forward progress
+         * (recovering on their own) — only a SUSTAINED wrong-way run trips the
+         * restore, so ordinary reversing / U-turns / dodging are left alone. */
+        if (hwm - cur <= s_battle_ar_slack || cur > prev) {
+            s_battle_ar_rev[slot] = 0;
+            continue;
+        }
+        if (++s_battle_ar_rev[slot] < s_battle_ar_ticks)  /* not backward long enough */
+            continue;
+        s_battle_ar_rev[slot] = 0;
 
         /* Fold the high-water mark to a placeable span (circuit) or use it directly
          * (P2P, where progress already equals the span). */
@@ -1912,10 +1931,10 @@ void td5_physics_battle_antireverse_tick(void)
         actor->throttle_state     = 1;   /* forward */
         actor->track_contact_flag = 0;
 
-        s_battle_ar_cd[slot] = s_battle_ar_cd_ticks;
         TD5_LOG_I(LOG_TAG,
-                  "battle_antireverse: slot=%d snapped forward to furthest span=%d "
-                  "(was %d spans behind mark)", slot, tgt, hwm - cur);
+                  "battle_antireverse: slot=%d drove backward %ds -> restored to "
+                  "furthest span=%d (%d spans behind mark)",
+                  slot, s_battle_ar_ticks / 30, tgt, hwm - cur);
     }
 }
 

@@ -37,7 +37,7 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  cars only spawn ahead of how far you've actually got," },
     { CL_ITEM,    "  so driving backwards stops feeding you fresh targets" },
     { CL_ITEM,    "  until you push past your furthest point again." },
-    { CL_ITEM,    "TRAFFIC BATTLE: try to drive backwards and you're now" },
+    { CL_ITEM,    "TRAFFIC BATTLE: drive the wrong way for ~5s and you're" },
     { CL_ITEM,    "  returned to your furthest point on the track." },
     { CL_ITEM,    "TRAFFIC BATTLE: traffic you've passed clears out once" },
     { CL_ITEM,    "  it's ~50 track-lengths behind you." },
