@@ -242,14 +242,24 @@ void rgen_shadow()
     /* [RT2 P1] sh_params2.w = cone-spread scale (0 -> 1 = default ~0.7deg).
      * OVERCAST widens it (e.g. 5x) for a soft, directionless penumbra. */
     float coneScale = sh_params2.w > 0.0001f ? sh_params2.w : 1.0f;
-    float base = rt_hash_world(world, 0.0f) * 6.2831853f;   /* [MOTION-STABLE] world-locked jitter */
+    /* [CAR PIXELATION FIX 2026-08-05] Detect car pixels via the G-buffer alpha
+     * isCar tag (bit 0x40, packed by ps_modulate_g.hlsl). Give the car body a
+     * FINER jitter cell (so the coarse 16-unit world blocks that read as the
+     * pixelated rear-panel pattern become fine grain the denoiser can smooth)
+     * AND more cone samples (a smoother self-shadow penumbra straight out of the
+     * trace, before denoise). Road/world keep the coarse, cheap path. */
+    int  rawA  = (int)(gb.a * 255.0f + 0.5f);
+    bool isCar = (rawA & 0x40) != 0;
+    float jitterCell = isCar ? RT_CAR_NOISE_CELL : RT_NOISE_CELL;
+    int  Kc = isCar ? max(K, 6) : K;
+    float base = rt_hash_world_cell(world, 0.0f, jitterCell) * 6.2831853f;  /* [MOTION-STABLE] world-locked jitter */
     float visSum = 0.0f;
-    for (int k = 0; k < K; k++) {
-        float ang = base + (6.2831853f * (float)k) / (float)K;
+    for (int k = 0; k < Kc; k++) {
+        float ang = base + (6.2831853f * (float)k) / (float)Kc;
         float3 dir = normalize(L + (cos(ang) * T + sin(ang) * Bv) * (0.012f * coneScale));
         visSum += rt_shadow_ray(origin, dir, 1.0f, sh_sun.w);
     }
-    float vis = visSum / (float)K;
+    float vis = visSum / (float)Kc;
     /* [shadow debug] full-contrast raw visibility: covered+shadowed -> ~0 (black
      * band on the road where the ray hit an occluder), covered+lit -> 1 (white).
      * If the road stays uniformly white, the shadow rays are missing the fed
@@ -292,20 +302,28 @@ void rgen_ao()
     float tmax   = sh_sun.w   > 1.0f    ? sh_sun.w   : 6000.0f;
     float floorv = sh_misc.w  > 0.0001f ? sh_misc.w  : 0.45f;
 
+    /* [CAR PIXELATION FIX 2026-08-05] Same treatment as rgen_shadow: cars get a
+     * FINER azimuth-jitter cell + more hemisphere rays so the sky-vis AO on the
+     * curved body is fine grain the denoiser smooths, not coarse 16-unit blocks
+     * that read as the grey blotches on the rear panels. Road/world unchanged. */
+    int  rawA  = (int)(gb.a * 255.0f + 0.5f);
+    bool isCar = (rawA & 0x40) != 0;
+    float jitterCell = isCar ? RT_CAR_NOISE_CELL : RT_NOISE_CELL;
+    int  Kc = isCar ? max(K, 6) : K;
     /* cosine-weighted hemisphere around N; stratified in the polar coord. */
     float3 up0 = abs(N.y) < 0.99f ? float3(0,1,0) : float3(1,0,0);
     float3 T = normalize(cross(up0, N));
     float3 Bv = cross(N, T);
     float visSum = 0.0f;
-    for (int k = 0; k < K; k++) {
-        float u1 = ((float)k + 0.5f) / (float)K;                       /* stratified radius */
-        float u2 = rt_hash_world(world, (float)(k + 1));               /* [MOTION-STABLE] world-locked azimuth */
+    for (int k = 0; k < Kc; k++) {
+        float u1 = ((float)k + 0.5f) / (float)Kc;                      /* stratified radius */
+        float u2 = rt_hash_world_cell(world, (float)(k + 1), jitterCell); /* [MOTION-STABLE] world-locked azimuth */
         float r  = sqrt(u1);
         float ang = 6.2831853f * u2;
         float3 dir = normalize(T * (r * cos(ang)) + Bv * (r * sin(ang)) + N * sqrt(saturate(1.0f - u1)));
         visSum += rt_shadow_ray(origin, dir, 1.0f, tmax);             /* 1 = reached sky   */
     }
-    float skyvis = visSum / (float)K;
+    float skyvis = visSum / (float)Kc;
     g_gi[fp] = lerp(floorv, 1.0f, skyvis);
 }
 

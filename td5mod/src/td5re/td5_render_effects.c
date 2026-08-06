@@ -1122,9 +1122,17 @@ void render_td6_props(const TD5_Actor *ref)
  * env knob TD5RE_SHADOW_RAYCAST=0 is set. */
 void render_vehicle_shadow_quad(const TD5_Actor *actor)
 {
-    /* [RT lighting HIGH] the car BLAS occludes the sun rays at road pixels, so
-     * the RT sun shadow IS the real contact shadow -- drop the blob. */
-    if (td5_rt_active())
+    /* [CAR SHADOW 2026-08-06] The soft terrain-conforming blob is now the car's
+     * grounding shadow in ALL lighting. The RT sun-shadow CAST by the car body
+     * BLAS was retired for cars (td5_rt.c feeds actors InstanceMask 0xFE, bit-0
+     * cleared, so sun-shadow rays skip them) because on-hardware it lagged the
+     * car at speed, glitched, doubled up with this blob in sunlight, and — being
+     * the body mesh only — never included the wheels. The blob tracks the car
+     * exactly (wheel-probe footprint), covers the whole contact patch incl. the
+     * wheels, and works in dark / night / tunnel just as well as in bright sun.
+     * TD5RE_RT_CAR_CAST=1 restores the old RT car-cast (and drops the blob under
+     * RT) for A/B. */
+    if (td5_rt_active() && td5_rt_car_cast_shadow())
         return;
     if (shadow_raycast_enabled())
         render_vehicle_shadow_conforming(actor);

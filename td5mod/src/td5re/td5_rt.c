@@ -70,6 +70,15 @@ int td5_rt_available(void)
     return td5_plat_rt_available();
 }
 
+/* [CAR SHADOW 2026-08-06] see td5_rt.h. Default OFF: cars are grounded by the
+ * soft blob (td5_render_effects.c), not the laggy/wheel-less RT car cast. */
+int td5_rt_car_cast_shadow(void)
+{
+    static int s_on = -1;
+    if (s_on < 0) s_on = td5_env_flag_on("TD5RE_RT_CAR_CAST");
+    return s_on;
+}
+
 int td5_rt_quality_high(void)
 {
     return rt_quality_seed();
@@ -724,7 +733,13 @@ static void rt_build_tlas(void)
             m[4]=actor->rotation_matrix.m[3]; m[5]=actor->rotation_matrix.m[4]; m[6]=actor->rotation_matrix.m[5];  m[7]=py;
             m[8]=actor->rotation_matrix.m[6]; m[9]=actor->rotation_matrix.m[7]; m[10]=actor->rotation_matrix.m[8]; m[11]=pz;
         }
-        td5_plat_rt_scene_instance(h, m, 0);
+        /* [CAR SHADOW 2026-08-06] Default: feed cars with the sun-shadow caster
+         * bit (0x01) CLEARED (0xFE) so shadow rays (InstanceInclusionMask 0x01)
+         * skip them — the soft blob grounds the car instead (no lag/glitch, has
+         * wheels, works in the dark). Reflection/GI/primary rays trace 0xFF, so
+         * 0xFE still lets cars reflect + occlude GI. TD5RE_RT_CAR_CAST=1 -> 0
+         * (wrapper remaps 0 -> 0xFF) restores the old body-BLAS sun-shadow cast. */
+        td5_plat_rt_scene_instance(h, m, td5_rt_car_cast_shadow() ? 0u : 0xFEu);
         if (diag_this)
             rt_diag("  INSTANCE slot=%d h=%d world/256=(%.0f,%.0f,%.0f) rot0=%.3f rot4=%.3f rot8=%.3f",
                     slot, h, (float)actor->world_pos.x*RT_INV256, (float)actor->world_pos.y*RT_INV256, (float)actor->world_pos.z*RT_INV256,
