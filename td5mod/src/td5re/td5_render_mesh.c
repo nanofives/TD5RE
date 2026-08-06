@@ -352,6 +352,72 @@ static float sun_overcast_cone(void)
 static float sun_overcast_strength(void)
 { static float v = -1; if (v < 0) { const char *e = getenv("TD5RE_SUN_OVERCAST_STRENGTH"); v = (e && e[0]) ? (float)atof(e) : 0.5f; } return v; }
 
+/* [DARK-SHADOW FLOOR 2026-08-05] Minimum RT sun-shadow strength. In dark /
+ * evening / overcast scenes the directional dominance (dir_lum/(dir_lum+amb))
+ * collapses toward 0 and the shadow pass used to bail entirely (strength <=
+ * 0.01), so cars in a darker setting had NO grounding shadow at all under RT
+ * (the legacy contact blob is also dropped when RT is active — see
+ * render_vehicle_shadow_quad). Floor the strength so a soft directional contact
+ * shadow always survives when there IS a sun direction (sky_cls != 0). Knob
+ * TD5RE_RT_SHADOW_MIN (0..1; 0 restores the old hard cutoff). */
+static float shadow_min_strength(void)
+{
+    static float v = -1.0f;
+    if (v < 0.0f) {
+        const char *e = getenv("TD5RE_RT_SHADOW_MIN");
+        v = (e && e[0]) ? (float)atof(e) : 0.15f;
+        if (v < 0.0f) v = 0.0f;
+        if (v > 1.0f) v = 1.0f;
+    }
+    return v;
+}
+
+/* Resolve the RT sun-shadow strength for the current scene, applying the same
+ * overcast cap + dark floor as the live shadow pass. Shared by the shadow pass
+ * itself and by the contact-blob fallback query below so the two agree. */
+static float shadow_resolve_strength(int sky_cls, float dom)
+{
+    float strength = ((float)td5_light2_shadow_strength() / 100.0f) * dom;
+    if (sky_cls == TD5_SKY_OVERCAST) {
+        float cap = sun_overcast_strength();
+        if (strength > cap) strength = cap;
+    }
+    float smin = shadow_min_strength();
+    if (strength < smin) strength = smin;
+    return strength;
+}
+
+/* [DARK-SHADOW / CONTACT-BLOB 2026-08-05] Does the RT sun-shadow pass actually
+ * ground cars this frame? True only when RT is active, sun shadows are enabled,
+ * AND there is a directional light above the horizon (sky_cls != 0) whose
+ * (floored) strength is visible. When this is FALSE — true night / tunnel with
+ * no sun direction — the RT sun shadow cannot produce a contact shadow, so the
+ * legacy soft blob is drawn as the fallback (render_vehicle_shadow_quad). When
+ * TRUE the RT sun shadow IS the contact shadow and the blob is dropped to avoid
+ * a doubled shadow. Cached per sim tick (scene sun is frame-stable). Knob
+ * TD5RE_RT_CAR_BLOB_ALWAYS=1 forces the blob regardless (keep both shadows). */
+int td5_render_rt_sun_grounds_cars(void)
+{
+    static int s_blob_always = -1;
+    if (s_blob_always < 0)
+        s_blob_always = td5_env_flag_on("TD5RE_RT_CAR_BLOB_ALWAYS");
+    if (s_blob_always) return 0;   /* force the blob -> RT never "grounds" */
+
+    static uint32_t s_tick = 0xFFFFFFFFu;
+    static int      s_val  = 0;
+    uint32_t t = (uint32_t)g_td5.simulation_tick_counter;
+    if (t == s_tick) return s_val;
+    s_tick = t;
+    s_val  = 0;
+    if (td5_rt_active() && td5_light2_active() && td5_light2_sun_shadows()) {
+        float sun[3] = { 0.0f, 0.0f, 0.0f }, dom = 0.0f;
+        int sky_cls = td5_render_scene_sun(sun, &dom);
+        if (sky_cls)
+            s_val = (shadow_resolve_strength(sky_cls, dom) > 0.01f);
+    }
+    return s_val;
+}
+
 void td5_render_apply_shadow_pass(int vp_x, int vp_y)
 {
     if (!td5_light2_active() || !td5_light2_sun_shadows()) return;
@@ -387,14 +453,14 @@ void td5_render_apply_shadow_pass(int vp_x, int vp_y)
     }
     if (!sky_cls) return;                        /* no directional light (tunnel) */
 
-    float strength = ((float)td5_light2_shadow_strength() / 100.0f) * dom;
     float cone_scale = 1.0f;                      /* params2.w: 1 = default ~0.7deg */
-    if (sky_cls == TD5_SKY_OVERCAST) {
+    if (sky_cls == TD5_SKY_OVERCAST)
         cone_scale = sun_overcast_cone();         /* wide penumbra */
-        float cap = sun_overcast_strength();
-        if (strength > cap) strength = cap;       /* soft, low-contrast */
-    }
-    if (strength <= 0.01f) return;
+    /* [DARK-SHADOW FLOOR 2026-08-05] Shared resolver: overcast cap + dark floor,
+     * so a weak-directional (evening/overcast) scene keeps a soft contact shadow
+     * under cars instead of collapsing to nothing. */
+    float strength = shadow_resolve_strength(sky_cls, dom);
+    if (strength <= 0.01f) return;                /* only if TD5RE_RT_SHADOW_MIN=0 */
 
     /* March tuning (env-overridable for look iteration). */
     static float s_dist = -1.0f, s_thick = -1.0f;

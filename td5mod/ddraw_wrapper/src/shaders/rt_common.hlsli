@@ -147,10 +147,24 @@ float rt_hash13(float3 p)
 #ifndef RT_NOISE_CELL
 #define RT_NOISE_CELL 16.0f
 #endif
+/* [CAR PIXELATION FIX 2026-08-05] A car is a small, curved object; the 16-unit
+ * world cell projects to coarse blocks across the bodywork, so the self-shadow
+ * penumbra (heavy under the wide OVERCAST cone) reads as a blocky/pixelated
+ * pattern on the rear panels. Use a much finer cell on CAR pixels so the jitter
+ * becomes fine grain the à-trous denoiser can smooth into a clean penumbra,
+ * instead of large stable blocks it can't. Road/world keep the coarse cell for
+ * distant depth-precision stability. */
+#ifndef RT_CAR_NOISE_CELL
+#define RT_CAR_NOISE_CELL 2.0f
+#endif
+float rt_hash_world_cell(float3 world, float k, float cell)
+{
+    float3 c = floor(world / cell) + k * float3(1.7f, 2.3f, 3.1f);
+    return rt_hash13(c);
+}
 float rt_hash_world(float3 world, float k)
 {
-    float3 c = floor(world / RT_NOISE_CELL) + k * float3(1.7f, 2.3f, 3.1f);
-    return rt_hash13(c);
+    return rt_hash_world_cell(world, k, RT_NOISE_CELL);
 }
 
 /* Cast an occlusion (shadow) ray; returns 1 if UNBLOCKED (visible), 0 if hit.

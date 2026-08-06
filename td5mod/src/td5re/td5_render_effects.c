@@ -1123,8 +1123,14 @@ void render_td6_props(const TD5_Actor *ref)
 void render_vehicle_shadow_quad(const TD5_Actor *actor)
 {
     /* [RT lighting HIGH] the car BLAS occludes the sun rays at road pixels, so
-     * the RT sun shadow IS the real contact shadow -- drop the blob. */
-    if (td5_rt_active())
+     * the RT sun shadow IS the real contact shadow -- drop the blob to avoid a
+     * doubled shadow.
+     * [DARK-SHADOW / CONTACT-BLOB 2026-08-05] BUT only when the RT sun shadow
+     * actually grounds cars this frame. In a dark / night / tunnel scene with no
+     * sun direction the RT sun pass produces no contact shadow at all, so fall
+     * through and draw the soft blob — cars stay grounded in darker settings
+     * instead of looking pasted-on. (TD5RE_RT_CAR_BLOB_ALWAYS forces the blob.) */
+    if (td5_rt_active() && td5_render_rt_sun_grounds_cars())
         return;
     if (shadow_raycast_enabled())
         render_vehicle_shadow_conforming(actor);

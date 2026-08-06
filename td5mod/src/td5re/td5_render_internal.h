@@ -619,6 +619,12 @@ static inline TD5_MeshVertex *rs_vtx_rebase(void *p)
  * td5_render.h.
  * ------------------------------------------------------------------------ */
 void render_vehicle_shadow_quad(const TD5_Actor *actor);
+
+/* [DARK-SHADOW / CONTACT-BLOB 2026-08-05] 1 when the RT sun-shadow pass grounds
+ * cars this frame (RT active + a sun direction above the horizon); 0 in true
+ * night/tunnel or when RT is off, so render_vehicle_shadow_quad draws the soft
+ * contact blob as the fallback. Defined in td5_render_mesh.c. */
+int td5_render_rt_sun_grounds_cars(void);
 void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot);
 void render_vehicle_wheels_unified(TD5_Actor *actor, int slot);  /* wheel overhaul */
 int  wheel_overhaul_enabled(void);
