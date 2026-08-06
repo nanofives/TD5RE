@@ -319,6 +319,9 @@ int  td5_game_drag_mp_active(void);
 int  td5_game_battle_chase_active(void);
 /* Spans a racer slot is ahead of the creeping deadline (negative = caught). */
 int  td5_game_battle_chase_gap(int slot);
+/* [TRAFFIC BATTLE FINISH TIMER] Whole seconds left on the first-finisher countdown,
+ * or -1 when unarmed/disabled. */
+int  td5_game_battle_finish_secs_left(void);
 /* 1 while the in-race pause menu is open (audio layer reads this to suspend the
  * cop-chase siren refresh during pause so it re-arms on resume). */
 int  td5_game_is_pause_menu_active(void);

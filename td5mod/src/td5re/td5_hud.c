@@ -1988,9 +1988,27 @@ void td5_hud_draw_battle_wrecks(void)
                 td5_vui_text_centered(vl->center_x, vl->vp_int_top + 8.0f + tshift + 18.0f * ts,
                                       gb, gc, ts * 0.85f, ts * 0.85f);
             }
+            /* [TRAFFIC BATTLE FINISH TIMER] Once someone finishes, everyone sees
+             * the countdown to the battle end (turns red in the last 10 s). Stacks
+             * below the CHECKPOINTS deadline line when both are showing. */
+            int fsecs = td5_game_battle_finish_secs_left();
+            if (fsecs >= 0) {
+                float yoff = 8.0f + tshift + 18.0f * ts +
+                             (td5_game_battle_chase_active() ? 18.0f * ts : 0.0f);
+                char fb[24];
+                uint32_t fc = (fsecs <= 10) ? 0xFFFF3030u : 0xFFFFD040u;
+                snprintf(fb, sizeof fb, "ENDS %d:%02d", fsecs / 60, fsecs % 60);
+                td5_vui_text_centered(vl->center_x, vl->vp_int_top + yoff,
+                                      fb, fc, ts * 0.85f, ts * 0.85f);
+            }
         } else {
             td5_hud_queue_text(0, (int)vl->center_x, (int)(vl->vp_int_top + 8.0f + tshift), 1,
                                "WRECKS %d", wrecks);
+            int fsecs = td5_game_battle_finish_secs_left();
+            if (fsecs >= 0)
+                td5_hud_queue_text(0, (int)vl->center_x,
+                                   (int)(vl->vp_int_top + 22.0f + tshift), 1,
+                                   "ENDS %d:%02d", fsecs / 60, fsecs % 60);
         }
     }
 }
