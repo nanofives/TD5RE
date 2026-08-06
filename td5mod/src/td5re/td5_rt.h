@@ -20,6 +20,12 @@ int td5_rt_available(void);
  * enabled. LOW behaves byte-identically to master, so this must be 0 there. */
 int td5_rt_active(void);
 
+/* [CAR SHADOW 2026-08-06] 0 (default) = cars do NOT cast the RT sun shadow (fed
+ * to the TLAS with the sun-shadow caster bit cleared) and are grounded by the
+ * soft terrain-conforming blob instead; 1 = restore the old RT car-cast (car
+ * body BLAS casts the sun shadow, blob dropped). Env TD5RE_RT_CAR_CAST. */
+int td5_rt_car_cast_shadow(void);
+
 /* Set the requested quality (0 = LOW, 1 = HIGH). Menu/INI drive this (Phase 4);
  * until then it is env-seeded (TD5RE_RT). Ignored upward when RT unavailable. */
 void td5_rt_set_quality(int high);
