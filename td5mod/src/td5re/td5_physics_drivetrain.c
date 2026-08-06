@@ -625,6 +625,29 @@ static int32_t td5_physics_gear1_accel_q8(TD5_Actor *actor)
     return bq + (int32_t)(((int64_t)(cq - bq) * (spd - lo)) / (hi - lo));
 }
 
+/* [ENGINE BRAKING 2026-08-05 PORT ENHANCEMENT] Loads + caches the manual-only
+ * "wrong gear" engine-braking knobs; returns 1 when the feature is enabled.
+ * See the two call sites in td5_physics_compute_drive_torque. Defaults: ON,
+ * over-rev brake 6%/tick of the OVER-SPEED EXCESS (bleeds toward the gear's
+ * redline-limited max, not to zero), reverse-while-rolling-forward brake
+ * 6%/tick of forward speed. The whole feature is additionally gated on manual gearbox at
+ * each call site, so automatic / AI cars — and the auto slot-0 golden races —
+ * never engine-brake and stay byte-identical. */
+static int td5_physics_engine_brake_cfg(int *ebpct, int *wgpct)
+{
+    static int inited = 0, on = 1, eb = 6, wg = 6;
+    if (!inited) {
+        inited = 1;
+        on = td5_env_int("TD5RE_ENGINE_BRAKING", 1, 0, 1);
+        eb = td5_env_int("TD5RE_ENGINE_BRAKE_PCT", 6, 0, 100);
+        wg = td5_env_int("TD5RE_WRONGGEAR_BRAKE_PCT", 6, 0, 100);
+        TD5_LOG_I(LOG_TAG, "engine braking: %s overrev=%d%%/tick wronggear=%d%%/tick (manual only)",
+                  on ? "ON" : "OFF", eb, wg);
+    }
+    *ebpct = eb; *wgpct = wg;
+    return on;
+}
+
 int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
 {
     /* Entry trace hook (pure-leaf function; no state to snapshot at exit). */
@@ -636,9 +659,26 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
 
     uint8_t  gear_u8 = actor->current_gear;
 
-    /* Neutral (gear == 1) — original CMP BL,0x1 / JZ RET_ZERO at 0x0042F03B-45. */
+    /* Neutral (gear == 1) — original CMP BL,0x1 / JZ RET_ZERO at 0x0042F03B-45.
+     * Decision (2026-08-05): N stays pure coast — no drive AND no engine brake. */
     if (gear_u8 == 0x01) {
         return 0;
+    }
+
+    /* [ENGINE BRAKING 2026-08-05 PORT ENHANCEMENT] Reverse selected while the car
+     * is still rolling FORWARD is a wrong gear -> brake hard (engine fights the
+     * motion) instead of coasting; once forward motion stops the normal reverse
+     * drive resumes. Manual gearbox only -> auto/AI and the golden races skip it
+     * and stay byte-identical. Returns a negative contribution the caller adds to
+     * longitudinal_speed via the wheel_drive distribution. */
+    {
+        int ebp, wgp;
+        if (td5_physics_engine_brake_cfg(&ebp, &wgp)
+            && gear_u8 == 0x00
+            && actor->longitudinal_speed > 0
+            && td5_physics_actor_is_manual_gearbox(actor)) {
+            return -(int32_t)((int64_t)actor->longitudinal_speed * wgp / 100);
+        }
     }
 
     int32_t rpm = actor->engine_speed_accum;
@@ -681,6 +721,40 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
      * The compare is signed (JLE), so rpm > redline-50 → return 0. */
     int32_t redline = (int32_t)PHYS_S(actor, PHYS_REDLINE_RPM);
     if (rpm > redline - 50) {
+        /* [ENGINE BRAKING 2026-08-05 PORT ENHANCEMENT] Over the limiter the
+         * original returns no drive (rev limiter). For a MANUAL driver in a
+         * forward gear, if the car is travelling FASTER than this gear's
+         * redline-limited max speed (e.g. just after a DOWNSHIFT into too low a
+         * gear), engine-brake the EXCESS down to that gear's max instead of
+         * coasting — the car settles at "the fastest this gear allows", it does
+         * not drag to a stop. Braking the excess (not the whole speed) also
+         * means it eases off as the target is reached. Applies on OR off
+         * throttle (you physically can't out-rev the limiter). Manual-only, so
+         * auto/AI and the golden races take the plain `return 0` and stay
+         * byte-identical.
+         *
+         * gear_max = speed at which this gear hits redline, inverting the engine
+         * -speed model (td5_physics_update_engine_speed): rpm = ((|spd>>8| *
+         * gear_ratio * 45) >> 12) + 400, clamped to redline. So
+         *   |spd>>8|_at_redline = (redline-400)*4096 / (gear_ratio*45). */
+        int ebp, wgp;
+        if (td5_physics_engine_brake_cfg(&ebp, &wgp)
+            && gear_u8 >= 0x02
+            && actor->longitudinal_speed > 0
+            && td5_physics_actor_is_manual_gearbox(actor)) {
+            int32_t gr = (int32_t)PHYS_S(actor, PHYS_GEAR_RATIO_BASE + (int32_t)gear_u8 * 2);
+            if (gr < 0) gr = -gr;
+            int32_t gear_max = 0;
+            if (gr > 0 && redline > 400) {
+                int64_t s8 = ((int64_t)(redline - 400) * 4096) / ((int64_t)gr * 45);
+                if (s8 < 0) s8 = 0;
+                gear_max = (int32_t)(s8 << 8);
+            }
+            int32_t excess = actor->longitudinal_speed - gear_max;
+            if (excess > 0) {
+                return -(int32_t)((int64_t)excess * ebp / 100);
+            }
+        }
         return 0;
     }
 
