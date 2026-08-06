@@ -893,6 +893,26 @@ static inline int16_t actor_max_rpm(int slot)
     return *(int16_t *)((uint8_t *)tuning + 0x72);
 }
 
+/* [SHIFT TIMING 2026-08-05] Per-gear tuned shift RPM from carparam: the auto
+ * box's upshift threshold (phys+0x3E+gear*2) and downshift threshold
+ * (phys+0x4E+gear*2), matching td5_physics_auto_gear_select. Gear byte:
+ * 2=1st .. 7=6th. Returns 0 when unavailable so callers fall back to the flat
+ * %-of-redline model. */
+static inline int32_t actor_gear_upshift_rpm(int slot, int gear)
+{
+    uint8_t *a = (uint8_t *)actor_ptr(slot);
+    void *tuning = ((const TD5_Actor *)a)->tuning_data_ptr;
+    if (!tuning || gear < 0 || gear > 8) return 0;
+    return *(int16_t *)((uint8_t *)tuning + 0x3E + gear * 2);
+}
+static inline int32_t actor_gear_downshift_rpm(int slot, int gear)
+{
+    uint8_t *a = (uint8_t *)actor_ptr(slot);
+    void *tuning = ((const TD5_Actor *)a)->tuning_data_ptr;
+    if (!tuning || gear < 0 || gear > 8) return 0;
+    return *(int16_t *)((uint8_t *)tuning + 0x4E + gear * 2);
+}
+
 static inline int16_t actor_span_index(int slot)
 {
     /* track_state[0] at +0x80 is the actively-updated span index
@@ -5538,10 +5558,37 @@ void td5_hud_render_overlays(float dt)
                         s_shift_on, s_blue_pct, s_green_pct, s_red_pct, s_dn_pct, s_overrev_warn_ms);
                 }
                 if (s_shift_on && max_rpm > 0 && v >= 0 && v < MAX_HUD_VIEWS) {
-                    int blue_thr  = (int)max_rpm * s_blue_pct  / 100;
-                    int green_thr = (int)max_rpm * s_green_pct / 100;
-                    int red_thr   = (int)max_rpm * s_red_pct   / 100;
-                    int dn_thr    = (int)max_rpm * s_dn_pct    / 100;
+                    /* [SHIFT TIMING 2026-08-05] The GREEN "ideal shift-up" band
+                     * now tracks the car's OWN tuned per-gear upshift RPM
+                     * (carparam phys+0x3E+gear*2) instead of a flat % of
+                     * redline, so the ideal point is right for each gear (low
+                     * gears whose tuned shift RPM sits below 90%-redline no
+                     * longer feel "too short"). BLUE (approaching) and RED
+                     * (over-rev) keep their proportional offset around GREEN so
+                     * the *_PCT knobs still express the approach / over-rev
+                     * margins. DOWN uses the tuned downshift RPM. Falls back to
+                     * the flat %-of-redline model when the carparam threshold is
+                     * missing or degenerate (<=0 or >= redline). */
+                    int blue_thr, green_thr, red_thr, dn_thr;
+                    {
+                        int up_rpm = (gear >= 2 && gear <= 7)
+                                   ? actor_gear_upshift_rpm(actor_slot, gear) : 0;
+                        int dn_rpm = (gear >= 2 && gear <= 7)
+                                   ? actor_gear_downshift_rpm(actor_slot, gear) : 0;
+                        if (up_rpm > 0 && up_rpm < (int)max_rpm && s_green_pct > 0) {
+                            green_thr = up_rpm;
+                            blue_thr  = green_thr * s_blue_pct / s_green_pct;
+                            red_thr   = green_thr * s_red_pct  / s_green_pct;
+                            if (red_thr >= (int)max_rpm) red_thr = (int)max_rpm;
+                            if (red_thr <= green_thr)    red_thr = green_thr + 1;
+                        } else {
+                            blue_thr  = (int)max_rpm * s_blue_pct  / 100;
+                            green_thr = (int)max_rpm * s_green_pct / 100;
+                            red_thr   = (int)max_rpm * s_red_pct   / 100;
+                        }
+                        dn_thr = (dn_rpm > 0 && dn_rpm < (int)max_rpm)
+                               ? dn_rpm : ((int)max_rpm * s_dn_pct / 100);
+                    }
 
                     int upshiftable = (gear >= 2 && gear < 7);
                     int want_up     = upshiftable && engine_speed >= blue_thr;
@@ -5628,14 +5675,19 @@ void td5_hud_render_overlays(float dt)
                             L, B - th, L, B, R, B, R, B - th,
                             0.0f, 0.0f, 0.0f, 0.0f, bcol, HUD_DEPTH);
                         hud_submit_quad(&qb);
-                        /* left */
+                        /* left — inset vertically to [T+th, B-th] so it butts
+                         * against (does not overlap) the top/bottom bars. The
+                         * old full-height left/right bars double-covered all
+                         * four corners; with alpha blend the corners composited
+                         * at ~2x alpha and pulsed brighter ("shown double").
+                         * Each corner is now covered by exactly one bar. */
                         hud_build_quad_warped(&qb, HUD_WHITE_TEX_PAGE,
-                            L, T, L, B, L + th, B, L + th, T,
+                            L, T + th, L, B - th, L + th, B - th, L + th, T + th,
                             0.0f, 0.0f, 0.0f, 0.0f, bcol, HUD_DEPTH);
                         hud_submit_quad(&qb);
-                        /* right */
+                        /* right — inset vertically to [T+th, B-th] (see left) */
                         hud_build_quad_warped(&qb, HUD_WHITE_TEX_PAGE,
-                            R - th, T, R - th, B, R, B, R, T,
+                            R - th, T + th, R - th, B - th, R, B - th, R, T + th,
                             0.0f, 0.0f, 0.0f, 0.0f, bcol, HUD_DEPTH);
                         hud_submit_quad(&qb);
                     }

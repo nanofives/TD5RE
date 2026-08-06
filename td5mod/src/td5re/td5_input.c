@@ -1883,15 +1883,38 @@ void td5_input_update_player_control(int slot)
                                 int32_t redln = *(int16_t *)((uint8_t *)car_cfg + 0x72);
                                 int32_t rpm   = a_gear->engine_speed_accum;
                                 if (redln > 0) {
-                                    int pct = (int)((int64_t)rpm * 100 / redln);
-                                    if (pct >= s_st_red) {
+                                    /* [SHIFT TIMING 2026-08-05] Green edge = the
+                                     * car's tuned upshift RPM for the gear just
+                                     * LEFT (carparam+0x3E+gear*2), so the penalty
+                                     * bands line up with the per-gear HUD arrow
+                                     * (no more "first gears feel too short"). Red
+                                     * edge scales proportionally by RED/GREEN.
+                                     * Falls back to flat %-of-redline when the
+                                     * per-gear value is unusable. s_gear[slot]
+                                     * was just incremented, so the pre-shift gear
+                                     * is s_gear[slot]-1. */
+                                    int old_gear = (int)s_gear[slot] - 1;
+                                    int32_t up_rpm = (old_gear >= 2 && old_gear <= 7)
+                                        ? *(int16_t *)((uint8_t *)car_cfg + 0x3E + old_gear * 2)
+                                        : 0;
+                                    int32_t green_rpm, red_rpm;
+                                    if (up_rpm > 0 && up_rpm < redln && s_st_green > 0) {
+                                        green_rpm = up_rpm;
+                                        red_rpm   = (int32_t)((int64_t)up_rpm * s_st_red / s_st_green);
+                                        if (red_rpm >= redln)      red_rpm = redln;
+                                        if (red_rpm <= green_rpm)  red_rpm = green_rpm + 1;
+                                    } else {
+                                        green_rpm = (int32_t)((int64_t)redln * s_st_green / 100);
+                                        red_rpm   = (int32_t)((int64_t)redln * s_st_red   / 100);
+                                    }
+                                    if (rpm >= red_rpm) {
                                         /* over-rev money shift: firm ~6% speed knock */
                                         a_gear->longitudinal_speed = (int32_t)
                                             ((int64_t)a_gear->longitudinal_speed * 94 / 100);
                                         TD5_LOG_I(LOG_TAG,
-                                            "shift-timing RED slot=%d pct=%d -> -6%% speed",
-                                            slot, pct);
-                                    } else if (pct < s_st_green) {
+                                            "shift-timing RED slot=%d rpm=%d red=%d -> -6%% speed",
+                                            slot, (int)rpm, (int)red_rpm);
+                                    } else if (rpm < green_rpm) {
                                         /* too early: bog the revs ~12%% of redline
                                          * (floored at idle 0x190) + accel-cut window */
                                         int32_t floor_rpm = 0x190;
@@ -1901,13 +1924,13 @@ void td5_input_update_player_control(int slot)
                                         a_gear->engine_speed_accum = bog;
                                         s_shift_penalty_ticks[slot] = TD5_SHIFT_EARLY_CUT_TICKS;
                                         TD5_LOG_I(LOG_TAG,
-                                            "shift-timing EARLY slot=%d pct=%d -> bog rpm %d->%d + %d-tick cut",
-                                            slot, pct, (int)rpm, (int)bog,
+                                            "shift-timing EARLY slot=%d rpm=%d green=%d -> bog %d->%d + %d-tick cut",
+                                            slot, (int)rpm, (int)green_rpm, (int)rpm, (int)bog,
                                             TD5_SHIFT_EARLY_CUT_TICKS);
                                     } else {
                                         TD5_LOG_I(LOG_TAG,
-                                            "shift-timing GREEN slot=%d pct=%d (ideal)",
-                                            slot, pct);
+                                            "shift-timing GREEN slot=%d rpm=%d green=%d red=%d (ideal)",
+                                            slot, (int)rpm, (int)green_rpm, (int)red_rpm);
                                     }
                                 }
                             }
