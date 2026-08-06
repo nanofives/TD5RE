@@ -6498,25 +6498,36 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
                 td5_sound_set_paused(1);
                 td5_plat_radio_set_playing(0);
             } else if (pause_menu_was_active) {
-                td5_sound_set_sfx_muted(0);
-                td5_sound_set_paused(0);  /* [item 24] resume audio + restore music volume */
-                if (!s_pause_exit_pending && !s_pause_restart_pending && !g_td5.quit_requested) {
-                    td5_sound_cd_play(g_td5.track_index % 10 + 1);  /* same call as InitRace step 16 */
-                    TD5_LOG_I(LOG_TAG, "Pause resumed -> music restarted (track=%d)",
-                              g_td5.track_index % 10 + 1);
-                    /* [RESUME COUNTDOWN 2026-08-05] Local split-screen MP: hold
-                     * the field frozen for a brief 3-2-1 (drawn in every pane)
-                     * before control returns. Any genuine resume path reaches
-                     * here (CONTINUE / ESC / pad-B); the exit/restart/quit paths
-                     * are excluded by the guard above. Net races keep their own
-                     * lockstep pause sync, and a start-countdown must not be
-                     * clobbered, so both are excluded. */
-                    if (g_td5.num_human_players > 1 && !g_td5.network_active &&
-                        s_race_countdown_state == 0 && g_cameraTransitionActive == 0) {
-                        s_resume_countdown_ticks = TD5_RESUME_COUNTDOWN_TICKS;
-                        s_resume_countdown_state = 0;
-                        TD5_LOG_I(LOG_TAG, "Resume countdown armed (%d ticks, %d/digit)",
-                                  TD5_RESUME_COUNTDOWN_TICKS, TD5_RESUME_COUNTDOWN_TICKS_PER_DIGIT);
+                /* [RESUME COUNTDOWN 2026-08-05] Local split-screen MP: on a
+                 * genuine resume (CONTINUE / ESC / pad-B — not exit/restart/quit,
+                 * which set the *_pending flags below), hold the field frozen and
+                 * SILENT for a brief 3-2-1 shown in every pane, then restore audio
+                 * + music and unfreeze at GO (tick_resume_countdown). Net races
+                 * keep their own lockstep pause sync, and a live start-countdown
+                 * must not be clobbered, so both are excluded. */
+                int resume_gameplay =
+                    (!s_pause_exit_pending && !s_pause_restart_pending && !g_td5.quit_requested);
+                int arm_resume_cd = (resume_gameplay &&
+                                     g_td5.num_human_players > 1 && !g_td5.network_active &&
+                                     s_race_countdown_state == 0 && g_cameraTransitionActive == 0);
+                if (arm_resume_cd) {
+                    /* Keep it as silent + frozen as the open pause menu was; the
+                     * countdown's GO re-enables SFX, un-pauses audio and restarts
+                     * the in-race music (same calls the immediate-resume path below
+                     * makes now). */
+                    s_resume_countdown_ticks = TD5_RESUME_COUNTDOWN_TICKS;
+                    s_resume_countdown_state = 0;
+                    td5_sound_set_sfx_muted(1);
+                    td5_sound_set_paused(1);
+                    TD5_LOG_I(LOG_TAG, "Resume countdown armed (%d ticks, %d/digit; audio held until GO)",
+                              TD5_RESUME_COUNTDOWN_TICKS, TD5_RESUME_COUNTDOWN_TICKS_PER_DIGIT);
+                } else {
+                    td5_sound_set_sfx_muted(0);
+                    td5_sound_set_paused(0);  /* [item 24] resume audio + restore music volume */
+                    if (resume_gameplay) {
+                        td5_sound_cd_play(g_td5.track_index % 10 + 1);  /* same call as InitRace step 16 */
+                        TD5_LOG_I(LOG_TAG, "Pause resumed -> music restarted (track=%d)",
+                                  g_td5.track_index % 10 + 1);
                     }
                 }
                 /* Pause menu just closed: re-anchor the chase-camera smoothing
@@ -7152,8 +7163,14 @@ static void frame_interpolate(int net_lockstep, int ticks_this_frame)
      * Original (0x0042b709): fraction is NOT recomputed when paused.
      * [S31] A net-synced REMOTE pause freezes it too -- otherwise the
      * non-pausing machine's body extrapolation + camera kept gliding on a
-     * frozen sim ("pause screen on the other computer isn't fully frozen"). */
-    if (!s_pause_menu_active && !(net_lockstep && s_net_pause_round)) {
+     * frozen sim ("pause screen on the other computer isn't fully frozen").
+     * [RESUME COUNTDOWN 2026-08-05] The split-screen resume 3-2-1 freezes the
+     * field via its own sub-tick `continue`, but the menu is already closed
+     * (s_pause_menu_active==0) so without this guard the body-mesh velocity
+     * extrapolation + camera keep gliding under the countdown -- exactly the
+     * "not completely frozen" glide. Hold the fraction here until GO. */
+    if (!s_pause_menu_active && !(net_lockstep && s_net_pause_round) &&
+        s_resume_countdown_ticks == 0) {
         g_subTickFraction = (float)g_td5.sim_time_accumulator / (float)TD5_TICK_ACCUMULATOR_ONE;
         if (g_subTickFraction < 0.0f) g_subTickFraction = 0.0f;
         if (g_subTickFraction > 1.0f) g_subTickFraction = 1.0f;
@@ -7917,7 +7934,12 @@ static void tick_resume_countdown(void)
     if (s_resume_countdown_ticks == 0) {
         set_countdown_indicator_state(0);
         s_resume_countdown_state = 0;
-        TD5_LOG_I(LOG_TAG, "Resume countdown: GO (field unfrozen)");
+        /* GO: bring audio + music back exactly like the immediate-resume path
+         * (the arm site deferred these so the 3-2-1 plays over a silent field). */
+        td5_sound_set_sfx_muted(0);
+        td5_sound_set_paused(0);
+        td5_sound_cd_play(g_td5.track_index % 10 + 1);
+        TD5_LOG_I(LOG_TAG, "Resume countdown: GO (field + audio unfrozen)");
     }
 }
 
