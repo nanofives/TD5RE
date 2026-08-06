@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 5" },
+    { CL_ITEM,    "NEW (split-screen): the pause menu now shows which" },
+    { CL_ITEM,    "  player paused (PLAYER N PAUSED), and resuming plays" },
+    { CL_ITEM,    "  a quick 3-2-1 in every pane before the race unfreezes." },
     { CL_ITEM,    "TRAFFIC BATTLE: no more farming traffic by reversing -" },
     { CL_ITEM,    "  cars only spawn ahead of how far you've actually got," },
     { CL_ITEM,    "  so driving backwards stops feeding you fresh targets" },

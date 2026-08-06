@@ -184,6 +184,9 @@ void td5_hud_draw_pause_overlay(void);
  * required player's controller is currently missing. */
 void td5_hud_draw_disconnect_overlays(void);
 void td5_hud_draw_net_pause_overlay(void);
+/* [PAUSED-BY INDICATOR 2026-08-05] "PLAYER N PAUSED" label above the shared
+ * split-screen pause panel. No-op outside local >1-human pause. PORT-ONLY. */
+void td5_hud_draw_pause_paused_by(void);
 /* [END RACE NOW 2026-06-30] Pause-menu force-finish confirmation modal. No-op
  * unless td5_game has armed the prompt (any player selecting END RACE NOW). */
 void td5_hud_draw_endrace_confirm(void);

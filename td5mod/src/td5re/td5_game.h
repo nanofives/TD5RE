@@ -181,6 +181,11 @@ int td5_game_is_split_screen(void);
 int td5_game_device_disconnect_active(void);
 int td5_game_player_disconnected(int player);
 int td5_game_net_remote_pause_slot(void);
+/* [PAUSED-BY INDICATOR 2026-08-05] 0-based player slot that opened the active
+ * local (split-screen) pause menu, or -1 when nothing meaningful to show
+ * (no menu / single human / network race). Drives the "PLAYER N PAUSED" HUD
+ * label above the shared pause panel. PORT-ONLY. */
+int td5_game_pause_local_slot(void);
 #ifndef TD5RE_RELEASE
 void td5_game_debug_toggle_sim_device_loss(int player);  /* F9 dev test hook */
 #endif
