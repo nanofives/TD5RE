@@ -104,6 +104,19 @@ static int td5_headless_run(void)
     return cached;
 }
 
+/* [EXIT-CRASH DIALOG SUPPRESS 2026-08-05] Set to 1 at the start of Step 7
+ * shutdown. As the process exits, Windows system DLLs (Media Foundation's
+ * RTWorkQ, the D3D12 runtime/driver) can fault on their OWN background /
+ * work-queue threads while their platform is torn down (MFShutdown, device
+ * release) — a harmless teardown race the unhandled-exception filter would
+ * otherwise surface as a scary "TD5RE Crash" modal. While this is set the
+ * filter still writes crash.log (diagnostics preserved) but suppresses the
+ * dialog: a faulting BACKGROUND thread is parked so the main thread finishes
+ * its orderly shutdown and ExitProcess reaps it; a main-thread fault (can't be
+ * parked) terminates quietly. In-game (non-shutdown) crashes are unaffected. */
+static volatile LONG s_shutting_down  = 0;
+static DWORD         s_main_thread_id = 0;
+
 /* Crash handler: logs the faulting address + stack walk before terminating. */
 static LONG WINAPI td5_crash_handler(EXCEPTION_POINTERS *ep)
 {
@@ -206,6 +219,24 @@ static LONG WINAPI td5_crash_handler(EXCEPTION_POINTERS *ep)
          * of our draws/resources tripped it -- the device-lost stale-bind class.
          * Safe here: reads only values from g_backend + our ring. */
         td5_plat_dump_gpu_crash_diag(crash_path);
+    }
+    /* [EXIT-CRASH DIALOG SUPPRESS 2026-08-05] A fault that lands DURING process-
+     * exit teardown is (almost always) a Windows system-DLL work-queue/driver
+     * thread racing our shutdown (e.g. RTWorkQ.DLL from the internet-radio /
+     * FMV Media Foundation teardown, or D3D12Core.dll from the device release).
+     * The forensics are already in crash.log above; don't surface the scary
+     * modal for a process that is already on its way out. */
+    if (s_shutting_down) {
+        if (GetCurrentThreadId() != s_main_thread_id) {
+            /* Background teardown thread: park it so the MAIN thread can finish
+             * its orderly module shutdown uninterrupted; ExitProcess reaps us.
+             * We don't join these system threads, so parking can't deadlock the
+             * main thread's shutdown (which continues past this fault). */
+            for (;;) SleepEx(INFINITE, FALSE);
+        }
+        /* Main-thread teardown fault: can't park (that would hang the exit).
+         * Shutdown is essentially complete by now — terminate quietly, no dialog. */
+        TerminateProcess(GetCurrentProcess(), 0);
     }
     /* Headless: do NOT pop a modal (it would wedge the process alive holding
      * the GPU). Terminate now so the OS releases device/swap-chain/window and
@@ -883,6 +914,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         _putenv("TD5RE_NO_DIALOG=1");
     }
 
+    s_main_thread_id = GetCurrentThreadId();   /* for the exit-crash dialog suppressor */
     SetUnhandledExceptionFilter(td5_crash_handler);
 
     /* Claim our taskbar identity BEFORE any window is created (Backend_CreateDevice
@@ -1860,6 +1892,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* ---------------------------------------------------------------
      * Step 7: Shutdown
      * --------------------------------------------------------------- */
+    /* [EXIT-CRASH DIALOG SUPPRESS 2026-08-05] From here on, a fault on a system-
+     * DLL teardown thread (MF RTWorkQ / D3D12) is a harmless exit race — tell the
+     * crash filter to log it but not pop the "TD5RE Crash" modal. */
+    InterlockedExchange(&s_shutting_down, 1);
     /* Join the worker pool before any subsystem it may have touched (render,
      * assets) is torn down, so no in-flight job references freed state. */
     td5_jobs_shutdown();
