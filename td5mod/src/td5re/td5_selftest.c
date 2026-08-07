@@ -42,6 +42,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 #include "td5re.h"
 #include "td5_types.h"
@@ -57,6 +58,8 @@
 #include "td5_net.h"
 #include "td5_backend_capture.h"
 #include "td5_rt.h"   /* pin the harness to LOW (RT render-only; avoids 8x-FF TDR) */
+#include "td5_race_state.h"                       /* read-only actor roster + progress queries */
+#include "../../../re/include/td5_actor_struct.h" /* full TD5_Actor (world_pos, velocity, airborne) */
 
 #define LOG_TAG "selftest"
 
@@ -97,6 +100,16 @@ static int      s_row_count;
  * Scenario tables
  * ---------------------------------------------------------------------- */
 
+/* [NEW SUITE 2026-08-07] Run depth: how far each scenario is driven before we
+ * judge it. Most rows only need to reach green + settle (setup/spawn sanity +
+ * option-took-effect); a few must see the cars MOVE; exactly one runs to a real
+ * finish. Shorter depth = more deterministic + far cheaper session. */
+typedef enum {
+    ST_DEPTH_COUNTDOWN   = 0,  /* run to GAMESTATE_RACE + a short settle, then end */
+    ST_DEPTH_RUN_5S      = 1,  /* run ~5 sim-seconds of racing */
+    ST_DEPTH_RUN_FINISH  = 2   /* run to the real finish / forced end-checkpoint */
+} StDepth;
+
 /* -1 (or -2 where -1 is meaningful) = keep the boot-time base value. */
 typedef struct {
     const char *name;
@@ -125,71 +138,114 @@ typedef struct {
                            * mid-struct would silently shift every scenario's
                            * knobs by one. Appending means omitted rows get 0,
                            * which is exactly "single screen". */
+
+    /* [NEW SUITE 2026-08-07] Per-scenario option overrides + run depth. All the
+     * ints below use -1 = keep the boot base value, else an absolute game value
+     * (st_apply_scenario applies each only when >= 0). The true CONSTANTS for
+     * this suite (police ON, 3D-collisions ON, toughness OFF, deformation HIGH,
+     * tutorial OFF, sfx muted) are pinned once at boot, NOT per row. */
+    int game_type;         /* -1 base, else TD5_GameType (0 single race, 9 drag) */
+    int difficulty;        /* -1 base, 0 easy / 1 hard */
+    int checkpoint_timers; /* -1 base, 0 off / 1 on */
+    int powerups;          /* -1 base, 0 off / 1 casual / 2 chaos */
+    int car_damage;        /* -1 base, 0 off / 1 on */
+    int lane_assist;       /* -1 base, 0 off / 1 on */
+    int auto_gearbox;      /* -1 base, 1 automatic / 0 manual */
+    int span_offset;       /* -1 base(0), else start-span offset */
+    int end_checkpoint;    /* 0 = none, N = force-finish at checkpoint N (RUN_FINISH) */
+    int ff;                /* 0 = suite FF, else per-scenario fast-forward multiplier */
+    int depth;             /* StDepth */
 } RaceScenario;
 
-/* Order matters: smoke = first ST_SMOKE_RACES entries; the late Moscow
- * repeats close the degradation loop AFTER the varied middle of the matrix;
- * the spectate scenario runs LAST so its split-screen pane layout can't
- * leak into any row another verdict depends on. */
+/* [NEW SUITE 2026-08-07] Deterministic breakage-detector matrix (replaces the
+ * old golden/degradation matrix). Every row runs with the fixed CRT seed pinned
+ * (selftest_deterministic) so traffic/AI RNG is reproducible, and is judged by
+ * the invariant damage-checker (st_invariants_*) rather than golden hashes —
+ * robust to intentional physics/AI tuning. Combos are a curated covering array:
+ * every race-option VALUE appears >=1 (most value-pairs too), tracks/cars/game
+ * modes distributed across the rows. `depth` keeps the session short: most rows
+ * only reach the countdown, a few run ~5s, exactly one runs to a real finish.
+ *
+ * Suite CONSTANTS (pinned at boot, NOT per-row): police ON, 3D-collisions ON,
+ * car toughness OFF, deformation HIGH, tutorial OFF, SFX muted.
+ *
+ * Fields omitted from a row default to 0; st_apply_scenario only APPLIES the
+ * option ints when >= 0 (so -1 = keep base). Smoke tier = first ST_SMOKE_RACES.
+ *
+ * DEFERRED to increment 2 (need new engine plumbing, not yet wired): MP-mode
+ * split-screen rows (mp_mode_config bypass), TD5 no-paint / TD6 non-default
+ * colour, and the frontend enter-via-button + MP-lobby-workflow scenarios. */
 static const RaceScenario k_races[] = {
-    /* name                 trk car rev dyn  tr cop lap  opp spec pia at nat grp gld ply */
-    { "race-moscow-base",     0, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 1,  0, 0 },
-    { "race-moscow-rep2",     0, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 1,  0, 0 },
-    { "race-moscow-rep3",     0, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 1,  0, 0 },
-    { "race-newcastle-circ",  5, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 0,  0, 0 },
-    { "race-moscow-reverse",  0, -1,  1, -1, -1, -1, -1, -2, -1, -1, -1, 0, 0,  0, 0 },
-    /* ---- end of smoke tier ---- */
-    { "race-td6-pelton",     26, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 0,  0, 0 },
-    { "race-td6-paris",      32, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 0,  0, 0 },
-    { "race-keswick",        10, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 0,  0, 0 },
-    /* Drag runs SOLO (opponents=0): the real drag lobby never fields AI, and
-     * a full AutoRace grid parks 5 cars against the extended-strip walls
-     * (bogus wall-contact storm — see the wall_reject sampler in td5_track).
-     * KNOWN ISSUE (selftest finding 2026-07-02): a natural drag finish never
-     * fires under AutoRace (300 s timeout; the lobby-config path presumably
-     * seeds the finish/extension globals the INI path doesn't) — so this
-     * runs on the tick budget like the other scenarios until that's fixed. */
-    { "race-drag-solo",      19, -1,  0, -1, -1, -1, -1,  0, -1, -1, -1, 0, 0,  0, 0 },
-    { "race-arcade-tr-cops",  2, -1,  0,  0,  1,  1, -1, -2, -1, -1, -1, 0, 0,  0, 0 },
-    { "race-ai-slot0",        0, -1,  0, -1, -1, -1, -1, -2, -1,  1,  0, 0, 0,  0, 0 },
-    { "race-moscow-late1",    0, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 1,  0, 0 },
-    { "race-moscow-late2",    0, -1,  0, -1, -1, -1, -1, -2, -1, -1, -1, 0, 1,  0, 0 },
-    /* [TRACE GOLDEN 2026-07-06] Deterministic sim-regression net: fixed
-     * RaceTrace seed (0x1A2B3C4D) + every sim-relevant knob pinned (the
-     * columns here + st_golden_begin for ini knobs the columns don't cover),
-     * AI-driven player, per-tick trace CSVs hashed vs trace_goldens.txt.
-     * One TD5 track + one TD6 conversion. Kept BEFORE spectate3 (its pane
-     * layout must stay last / leak-free). */
-    { "race-golden-moscow",   0,  0,  0,  1,  2,  0,  2,  5, -1,  1,  0, 0, 0, 1, 0 },
-    { "race-golden-pelton",  26,  0,  0,  1,  2,  0,  2,  5, -1,  1,  0, 0, 0, 1, 0 },
-    /* [x64 Stage 2] DRAG golden. Neither golden above is a drag race, which
-     * left the drag/gantry render path unguarded -- and that path builds its
-     * display list DIFFERENTLY (td5_render.c synthesizes a 1-entry block on
-     * the stack rather than reading one from the models blob). A change to the
-     * display-list slot representation can therefore break drag rendering while
-     * both existing goldens stay green. Same pinned knobs as the two above,
-     * except opponents=0: drag runs SOLO (a full AutoRace grid parks 5 cars
-     * against the extended-strip walls -- see race-drag-solo above). */
-    { "race-golden-drag",    19,  0,  0,  1,  2,  0,  2,  0, -1,  1,  0, 0, 0, 1, 0 },
-    /* [SPLIT GOLDEN 2026-07-29] Two-pane golden. No other golden runs split
-     * screen, which left every per-pane path unguarded -- and that is a path
-     * with a REPEATED bug history: FFB routed by pane map instead of driven-car
-     * identity, per-pane camera wobble, and the pane-map-vs-driven-car
-     * confusion generally. The `camera` and `view` trace modules record
-     * per-view state, so a two-pane golden covers exactly what those bugs
-     * touched.
-     *
-     * NOT guarded by this: td5_game_update_split_screen_balance(). Its only
-     * outputs, g_steer_scale_p1/p2, have NO reader anywhere in the tree (not
-     * even a header decl), so the function is dead code and produces no
-     * observable effect for any golden to pin. Wiring it up is a separate
-     * decision -- the original applies these weights through
-     * UpdatePlayerVehicleControlState under bit 0x200.
-     *
-     * players=2 is the last column (see the struct comment). Same pinned knobs
-     * as the goldens above. */
-    { "race-golden-split",    0,  0,  0,  1,  2,  0,  2,  5, -1,  1,  0, 0, 0, 1, 2 },
-    { "race-spectate3",       0, -1,  0, -1, -1, -1, -1, -2,  3, -1, -1, 0, 0,  0, 0 },
+    /* ---- Block 1: SP race-option covering array (game_type single race) ---- */
+    { .name="race-r1-baseline-min",  .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
+      .dynamics=0, .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .depth=ST_DEPTH_RUN_5S },
+    { .name="race-r2-stress-max",    .track=5,  .car=-1, .game_type=0, .player_is_ai=1,
+      .reverse=1, .dynamics=1, .traffic=4, .opponents=9, .difficulty=1,
+      .checkpoint_timers=1, .powerups=2, .car_damage=1, .lane_assist=0,
+      .auto_gearbox=0, .depth=ST_DEPTH_RUN_5S },
+    { .name="race-r3-td6-p2p",       .track=32, .car=-1, .game_type=0, .player_is_ai=1,
+      .reverse=1, .dynamics=1, .traffic=0, .opponents=5, .difficulty=1,
+      .checkpoint_timers=1, .powerups=0, .car_damage=1, .lane_assist=0,
+      .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN },
+    { .name="race-r4-td6-circuit",   .track=26, .car=-1, .game_type=0, .player_is_ai=1,
+      .dynamics=0, .traffic=4, .opponents=5, .difficulty=0, .checkpoint_timers=0,
+      .powerups=2, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .depth=ST_DEPTH_RUN_5S },
+    { .name="race-r5-crowded-grid",  .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
+      .dynamics=0, .traffic=0, .opponents=9, .difficulty=1, .checkpoint_timers=1,
+      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .depth=ST_DEPTH_COUNTDOWN },
+    { .name="race-r6-circuit-mix",   .track=5,  .car=-1, .game_type=0, .player_is_ai=1,
+      .reverse=1, .dynamics=1, .traffic=4, .opponents=1, .difficulty=0,
+      .checkpoint_timers=0, .powerups=2, .car_damage=1, .lane_assist=0,
+      .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN },
+    /* Lane assist is a HUMAN steering aid — meaningless on an AI car and it
+     * fights a reversed line. So this row is the ONLY human-driven one
+     * (player_is_ai=0): AutoThrottle drives the gas, lane assist does the
+     * steering, forwards, long enough to actually steer (RUN_5S). Still fully
+     * deterministic under the pinned seed. */
+    { .name="race-r7-lane-assist",   .track=1,  .car=-1, .game_type=0, .player_is_ai=0,
+      .dynamics=1, .traffic=0, .opponents=5, .difficulty=1, .checkpoint_timers=1,
+      .powerups=0, .car_damage=0, .lane_assist=1, .auto_gearbox=0,
+      .depth=ST_DEPTH_RUN_5S },
+    { .name="race-r8-drag",          .track=19, .car=-1, .game_type=9, .player_is_ai=1,
+      .dynamics=0, .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=0,
+      .depth=ST_DEPTH_RUN_5S },
+
+    /* ---- Block 3: game overrides ---- */
+    { .name="ovr-span-offset-500",   .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
+      .dynamics=0, .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .span_offset=500, .depth=ST_DEPTH_COUNTDOWN },
+    { .name="ovr-span-offset-1000",  .track=32, .car=-1, .game_type=0, .player_is_ai=1,
+      .dynamics=0, .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .span_offset=1000, .depth=ST_DEPTH_COUNTDOWN },
+    /* Speed sweep — physics is fixed-timestep, so 1x/2x/4x must all pass the
+     * same invariants; a difference means fast-forward perturbs the sim. */
+    { .name="ovr-speed-1x",          .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
+      .dynamics=0, .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .ff=1, .depth=ST_DEPTH_RUN_5S },
+    { .name="ovr-speed-2x",          .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
+      .dynamics=0, .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .ff=2, .depth=ST_DEPTH_RUN_5S },
+    { .name="ovr-speed-4x",          .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
+      .dynamics=0, .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .ff=4, .depth=ST_DEPTH_RUN_5S },
+    /* Edinburgh ("Scotland"): no opponents/traffic, run to the first checkpoint
+     * and confirm the race actually ENDS + the results screen renders. Forced
+     * finish at checkpoint 1 (end_checkpoint) so we don't depend on a full-lap
+     * natural finish firing under AutoRace. Runs LAST. */
+    { .name="ovr-edinburgh-finish",  .track=1,  .car=-1, .game_type=0, .player_is_ai=1,
+      .dynamics=0, .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=1,
+      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .natural_finish=1, .end_checkpoint=1, .depth=ST_DEPTH_RUN_FINISH },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
 #define ST_SMOKE_RACES 5
@@ -297,8 +353,11 @@ static int   s_frame_drift_pct;    /* allowed avg-frame-ms drift, % */
 static int   s_gdi_growth;         /* allowed net GDI-object growth over a series */
 static int   s_handle_growth;      /* allowed net handle growth over a series */
 static int   s_allow_errors;       /* 1 = ERR log lines don't fail a step */
-static int   s_race_ticks;         /* sim ticks per scripted race */
+static int   s_race_ticks;         /* sim ticks per scripted race (COUNTDOWN/base fallback) */
+static int   s_race_budget;        /* [NEW SUITE] tick budget for the CURRENT scenario (by depth) */
 static int   s_race_warmup_ms;     /* ms at FF=1 at each race start (GPU TDR guard) */
+static float s_scenario_ff;        /* [NEW SUITE] fast-forward for the CURRENT scenario
+                                    * (per-row .ff override, else the suite s_ff) */
 
 /* ------------------------------------------------------------------------
  * Helpers
@@ -451,6 +510,139 @@ static void st_reset_scenario_fields(void)
     g_td5.ini.player_is_ai      = s_base.player_is_ai;
     g_td5.ini.auto_throttle     = s_base.auto_throttle;
     g_td5.ini.trace_fast_forward = s_base.fast_forward;
+    /* [NEW SUITE] Only-sometimes-set overrides must not leak into the next row. */
+    g_td5.ini.start_span_offset  = 0;
+    g_td5.ini.dbg_end_checkpoint = 0;
+}
+
+/* ------------------------------------------------------------------------
+ * [NEW SUITE 2026-08-07] Invariant damage checker
+ *
+ * The pass/fail gate for the deterministic matrix. Instead of hashing traces
+ * (which every intentional physics/AI tuning change would break), we assert
+ * per sim-tick that no actor entered an "irreparably damaged" state:
+ *   - position teleported outside a sane world box (fall-through / garbage),
+ *   - linear velocity or body speed blew up,
+ *   - a car is stuck permanently airborne (launched off the map),
+ *   - (moving depths only) the driven car made zero track progress.
+ * A crash / GPU device-loss is already a hard FAIL via st_finish_row. Thresholds
+ * are deliberately generous — catch catastrophic states, not marginal ones — and
+ * env-tunable (TD5RE_SELFTEST_INV_*). World pos + velocities are 24.8 fixed
+ * point, longitudinal_speed is 8.8; the caps are in those raw units. */
+#define ST_INV_MAX_SLOTS 16
+static struct {
+    int  active, samples, worst;              /* worst = ST_PASS/WARN/FAIL */
+    char desc[100];
+    int  prog0[ST_INV_MAX_SLOTS];             /* first-sample progress per slot */
+    int  progN[ST_INV_MAX_SLOTS];             /* latest progress per slot */
+    int  seen[ST_INV_MAX_SLOTS];
+    int  px[ST_INV_MAX_SLOTS], py[ST_INV_MAX_SLOTS], pz[ST_INV_MAX_SLOTS];
+    int  haspos[ST_INV_MAX_SLOTS];            /* prev world_pos captured yet? */
+} s_inv;
+/* s_inv_max_world = coarse overflow guard (only catches int32-range garbage);
+ * s_inv_max_jump = the real teleport detector (per-sample position delta cap —
+ * tracks legitimately sit far from origin, but a car never MOVES that far in the
+ * few sim ticks between samples). */
+static int s_inv_max_world, s_inv_max_jump, s_inv_max_vel, s_inv_max_speed, s_inv_max_air;
+
+static void st_inv_flag(int level, const char *fmt, ...)
+{
+    va_list ap;
+    if (level <= s_inv.worst) return;         /* keep the first/worst description */
+    s_inv.worst = level;
+    va_start(ap, fmt);
+    vsnprintf(s_inv.desc, sizeof(s_inv.desc), fmt, ap);
+    va_end(ap);
+    TD5_LOG_W(LOG_TAG, "invariant: %s", s_inv.desc);
+}
+
+static void st_inv_reset(void)
+{
+    memset(&s_inv, 0, sizeof(s_inv));
+    s_inv.active = 1;
+    s_inv.worst  = ST_PASS;
+}
+
+static void st_inv_sample(void)
+{
+    int n, slot;
+    if (!s_inv.active) return;
+    n = td5_game_get_total_actor_count();
+    if (n > ST_INV_MAX_SLOTS) n = ST_INV_MAX_SLOTS;
+    for (slot = 0; slot < n; slot++) {
+        TD5_Actor *a;
+        long long px, py, pz, vx, vy, vz;
+        int prog;
+        if (td5_game_get_slot_state(slot) == 3) continue;   /* empty grid slot */
+        a = td5_game_get_actor(slot);
+        if (!a) continue;
+        px = a->world_pos.x; py = a->world_pos.y; pz = a->world_pos.z;
+        /* Coarse overflow guard (int32-range garbage only — tracks legitimately
+         * sit far from origin, so this is intentionally huge). */
+        if (llabs(px) > s_inv_max_world || llabs(py) > s_inv_max_world ||
+            llabs(pz) > s_inv_max_world)
+            st_inv_flag(ST_FAIL, "slot%d pos overflow (%lld,%lld,%lld)",
+                        slot, px, py, pz);
+        /* Teleport / fall-through: a car never MOVES more than s_inv_max_jump
+         * between samples. First sample just seeds prev. */
+        if (s_inv.haspos[slot]) {
+            long long dx = px - s_inv.px[slot];
+            long long dy = py - s_inv.py[slot];
+            long long dz = pz - s_inv.pz[slot];
+            if (llabs(dx) > s_inv_max_jump || llabs(dy) > s_inv_max_jump ||
+                llabs(dz) > s_inv_max_jump)
+                st_inv_flag(ST_FAIL, "slot%d teleport dx=%lld dy=%lld dz=%lld",
+                            slot, dx, dy, dz);
+        }
+        s_inv.px[slot] = (int)px; s_inv.py[slot] = (int)py; s_inv.pz[slot] = (int)pz;
+        s_inv.haspos[slot] = 1;
+        vx = a->linear_velocity_x; vy = a->linear_velocity_y; vz = a->linear_velocity_z;
+        if (llabs(vx) > s_inv_max_vel || llabs(vy) > s_inv_max_vel ||
+            llabs(vz) > s_inv_max_vel)
+            st_inv_flag(ST_FAIL, "slot%d velocity blowup (%lld,%lld,%lld)",
+                        slot, vx, vy, vz);
+        if (llabs((long long)a->longitudinal_speed) > s_inv_max_speed)
+            st_inv_flag(ST_FAIL, "slot%d speed insane %d", slot, a->longitudinal_speed);
+        if ((int)a->airborne_frame_counter > s_inv_max_air)
+            st_inv_flag(ST_FAIL, "slot%d airborne %d frames (launched)",
+                        slot, (int)a->airborne_frame_counter);
+        prog = td5_game_get_slot_progress(slot);
+        if (!s_inv.seen[slot]) { s_inv.seen[slot] = 1; s_inv.prog0[slot] = prog; }
+        s_inv.progN[slot] = prog;
+    }
+    s_inv.samples++;
+}
+
+/* Fold the invariant verdict into (status,note) at race teardown. For moving
+ * depths, add a conservative "driven car never progressed" stuck WARN. */
+static int st_inv_result(int depth, char *note, size_t nsz)
+{
+    int status = s_inv.active ? s_inv.worst : ST_PASS;
+    if (s_inv.active && status < ST_WARN && depth >= ST_DEPTH_RUN_5S &&
+        s_inv.seen[0] && !td5_game_slot_is_finished(0) &&
+        s_inv.progN[0] == s_inv.prog0[0]) {
+        status = ST_WARN;
+        snprintf(s_inv.desc, sizeof(s_inv.desc), "slot0 made no track progress");
+    }
+    if (status == ST_PASS)
+        snprintf(note, nsz, "invariants ok (%d samples)", s_inv.samples);
+    else
+        snprintf(note, nsz, "DAMAGE: %s", s_inv.desc);
+    s_inv.active = 0;
+    return status;
+}
+
+/* Depth -> sim-tick budget for a non-natural-finish scenario. */
+static int st_depth_ticks(int depth)
+{
+    switch (depth) {
+    case ST_DEPTH_COUNTDOWN:
+        return td5_env_int("TD5RE_SELFTEST_COUNTDOWN_TICKS", 120, 30, 4000);
+    case ST_DEPTH_RUN_5S:
+        return td5_env_int("TD5RE_SELFTEST_RUN5S_TICKS", 300, 60, 8000);
+    default:
+        return s_race_ticks;   /* RUN_FINISH uses natural_finish + long leash */
+    }
 }
 
 /* ------------------------------------------------------------------------
@@ -1015,8 +1207,9 @@ static void st_apply_scenario(const RaceScenario *sc)
     if (sc->car        >= 0) g_td5.ini.default_car       = sc->car;
     if (sc->dynamics   >= 0) g_td5.ini.dynamics          = sc->dynamics;
     if (sc->traffic    >= 0) g_td5.ini.traffic           = sc->traffic;
-    if (sc->cops       >= 0) g_td5.ini.cops              = sc->cops;
-    if (sc->laps       >= 0) g_td5.ini.laps              = sc->laps;
+    /* [NEW SUITE] cops + laps are NOT applied per row: rows omit them (=0),
+     * which would otherwise force police OFF / 0 laps. Police is a suite
+     * constant pinned ON at boot; laps stays at the track's base value. */
     if (sc->opponents  >= -1) g_td5.ini.default_opponents = sc->opponents;
     if (sc->spectate   >= 0) g_td5.ini.spectate_screens  = sc->spectate;
     /* Local-human count, and the pane state it implies. split_screen_mode is
@@ -1032,8 +1225,20 @@ static void st_apply_scenario(const RaceScenario *sc)
         g_td5.split_screen_mode   = 0;
     }
     if (sc->player_is_ai >= 0) g_td5.ini.player_is_ai    = sc->player_is_ai;
-    if (sc->auto_throttle >= 0) g_td5.ini.auto_throttle  = sc->auto_throttle;
-    g_td5.ini.trace_fast_forward = s_ff;
+    /* auto_throttle stays ON (boot pin, the synthetic slot-0 driver); rows omit
+     * it so applying per-row would zero it. */
+    /* [NEW SUITE] per-scenario option overrides (>=0 = apply, else keep base). */
+    if (sc->game_type         >= 0) g_td5.ini.default_game_type = sc->game_type;
+    if (sc->difficulty        >= 0) g_td5.ini.difficulty        = sc->difficulty;
+    if (sc->checkpoint_timers >= 0) g_td5.ini.checkpoint_timers = sc->checkpoint_timers;
+    if (sc->powerups          >= 0) g_td5.ini.powerups          = sc->powerups;
+    if (sc->car_damage        >= 0) g_td5.ini.car_damage        = sc->car_damage;
+    if (sc->lane_assist       >= 0) g_td5.ini.lane_assist       = sc->lane_assist;
+    if (sc->auto_gearbox      >= 0) g_td5.ini.auto_gearbox      = sc->auto_gearbox;
+    if (sc->span_offset       >= 0) g_td5.ini.start_span_offset = sc->span_offset;
+    if (sc->end_checkpoint    >  0) g_td5.ini.dbg_end_checkpoint = sc->end_checkpoint;
+    s_scenario_ff = (sc->ff > 0) ? (float)sc->ff : s_ff;
+    g_td5.ini.trace_fast_forward = s_scenario_ff;
     /* [RGOLD DETERMINISM 2026-07-22] The screen-walk phase's nav walker can
      * activate the PENDING TEST screen's overlay-toggle row, leaving the
      * pending overlay ON for every subsequent race — which draws the
@@ -1383,9 +1588,24 @@ void td5_selftest_boot(void)
     g_td5.ini.debug_overlay  = 1;
     g_td5.ini.auto_throttle  = 1;      /* slot-0 synthetic driver */
     g_td5.ini.tutorial_overlay = 0;    /* would block on "press to start" w/ a pad */
+    /* [NEW SUITE 2026-08-07] Suite CONSTANTS — pinned once here, never per row:
+     * police ON, 3D-collisions ON, car toughness OFF (3), deformation HIGH (2).
+     * Captured into s_base below so st_reset_scenario_fields keeps them. Damage
+     * on/off, lane assist, difficulty, timers, powerups, gearbox vary per row. */
+    g_td5.ini.cops                 = 1;
+    g_td5.ini.collisions           = 1;
+    g_td5.ini.car_damage_toughness = 3;
+    g_td5.ini.car_damage_deform    = 2;
     g_td5.ini.auto_race      = 0;      /* the director owns race launches */
     g_td5.ini.player_is_ai   = 0;
     g_td5.ini.race_trace_enabled = 0;  /* no CSV trace; the suite has its own report */
+    /* [SELFTEST DETERMINISM] Pin the CRT race seed (0x1A2B3C4D) for every race
+     * init so traffic/AI RNG reproduces run-to-run — the invariant damage
+     * checker + auto-isolate depend on "same config -> same run". Independent
+     * of race_trace_enabled (no CSV overhead). Disable to A/B against RNG:
+     * TD5RE_SELFTEST_DETERMINISTIC=0. */
+    g_td5.ini.selftest_deterministic =
+        td5_env_int("TD5RE_SELFTEST_DETERMINISTIC", 1, 0, 1);
     g_td5.ini.start_screen   = TD5_SCREEN_MAIN_MENU;  /* boot straight to the menu */
     _putenv("TD5RE_NAV_SELFTEST=1");   /* per-screen nav reachability check */
 
@@ -1410,6 +1630,7 @@ void td5_selftest_boot(void)
      * are identical. Frame-time metrics stay comparable because every
      * scenario in a session runs at the same FF. Override: TD5RE_SELFTEST_FF. */
     s_ff              = td5_env_float("TD5RE_SELFTEST_FF", 8.0f, 1.0f, 16.0f);
+    s_scenario_ff     = s_ff;   /* per-scenario .ff override refines this in apply */
     /* [GPU TDR guard] The first heavy race frames create the SSR/shadow render
      * targets and upload race textures for the (large) window RT. At the 8x
      * suite FF those cold frames can flush >2s of GPU work into a single
@@ -1435,6 +1656,13 @@ void td5_selftest_boot(void)
     s_gdi_growth      = td5_env_int("TD5RE_SELFTEST_GDI_GROWTH", 100, 1, 100000);
     s_handle_growth   = td5_env_int("TD5RE_SELFTEST_HANDLE_GROWTH", 200, 1, 100000);
     s_allow_errors    = td5_env_flag_off("TD5RE_SELFTEST_ALLOW_ERRORS");
+    /* [NEW SUITE] invariant damage thresholds (raw fixed-point units; generous
+     * so only catastrophic states trip them). world/vel are 24.8, speed 8.8. */
+    s_inv_max_world = td5_env_int("TD5RE_SELFTEST_INV_WORLD", 0x40000000, 0x100000, 2000000000);
+    s_inv_max_jump  = td5_env_int("TD5RE_SELFTEST_INV_JUMP",  0x01000000, 0x10000, 2000000000);
+    s_inv_max_vel   = td5_env_int("TD5RE_SELFTEST_INV_VEL",   0x00800000, 0x1000,  2000000000);
+    s_inv_max_speed = td5_env_int("TD5RE_SELFTEST_INV_SPEED", 0x00400000, 0x1000,  2000000000);
+    s_inv_max_air   = td5_env_int("TD5RE_SELFTEST_INV_AIR",   450, 10, 100000);
     /* [render golden] distance thresholds over the 16x16 luma grid (256 cells,
      * 0-255 each). L1 = sum of |per-cell delta|; cell = worst single-cell delta.
      * Generous enough to absorb GPU/AA/+-1-tick-motion noise, tight enough to
@@ -1605,11 +1833,13 @@ static void st_tick_races(uint32_t now)
             s_race_start_tick = g_td5.simulation_tick_counter;
             s_last_sim_tick   = s_race_start_tick;
             st_histo_reset();
+            st_inv_reset();                          /* [NEW SUITE] arm damage checker */
+            s_race_budget = st_depth_ticks(sc->depth);
             /* Running budget: tick target at 30 Hz / ff, plus countdown and
              * fade margins. Natural finishes get a much longer leash. */
             s_step_deadline_ms = now + (sc->natural_finish
                 ? 300000u
-                : (uint32_t)((float)s_race_ticks / 30.0f / s_ff) * 1000u + 90000u);
+                : (uint32_t)((float)s_race_budget / 30.0f / s_scenario_ff) * 1000u + 90000u);
         } else if ((int32_t)(now - s_step_deadline_ms) >= 0) {
             st_finish_row(row, ST_FAIL, "race never started (timeout)");
             g_td5.ini.auto_race = 0;
@@ -1640,16 +1870,25 @@ static void st_tick_races(uint32_t now)
             int status = ST_PASS;
             if (row) {
                 float avg, p95; unsigned mx;
+                int invstatus;
                 st_histo_stats(&avg, &p95, &mx);
                 row->frames    = s_histo_n;
                 row->avg_ms    = avg;
                 row->p95_ms    = p95;
                 row->max_ms    = mx;
                 row->sim_ticks = s_last_sim_tick - s_race_start_tick;
-                if (sc->natural_finish &&
-                    td5_frontend_get_screen() == TD5_SCREEN_RACE_RESULTS) {
-                    snprintf(note, sizeof(note), "finished -> results screen ok");
-                    td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+                /* [NEW SUITE] the invariant checker is the primary verdict. */
+                invstatus = st_inv_result(sc->depth, note, sizeof(note));
+                if (invstatus > status) status = invstatus;
+                /* RUN_FINISH rows must actually reach the results screen. */
+                if (sc->natural_finish) {
+                    if (td5_frontend_get_screen() == TD5_SCREEN_RACE_RESULTS) {
+                        td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+                    } else if (status < ST_FAIL) {
+                        status = ST_FAIL;
+                        snprintf(note, sizeof(note),
+                                 "natural finish did not reach results screen");
+                    }
                 }
                 st_finish_row(row, status, note);
             }
@@ -1676,6 +1915,7 @@ static void st_tick_races(uint32_t now)
         int tick = g_td5.simulation_tick_counter;
         if (tick != s_last_sim_tick) {          /* sim is advancing */
             st_histo_add(now);
+            st_inv_sample();                    /* [NEW SUITE] per-tick damage check */
             s_last_sim_tick = tick;
         }
         /* [render golden] grab the composited frame at fixed sim ticks. */
@@ -1690,13 +1930,13 @@ static void st_tick_races(uint32_t now)
             (int32_t)(now - s_race_start_ms) < s_race_warmup_ms) {
             g_td5.ini.trace_fast_forward = 1.0f;
         } else if (!sc->trace_golden) {
-            g_td5.ini.trace_fast_forward = s_ff;
+            g_td5.ini.trace_fast_forward = s_scenario_ff;
         }
         if (g_td5.game_state != TD5_GAMESTATE_RACE) {
             /* Natural finish (or knockout): the fade already returned us. */
             s_sub = SS_RACE_WAIT_MENU;
         } else if (!sc->natural_finish &&
-                   tick - s_race_start_tick >= s_race_ticks) {
+                   tick - s_race_start_tick >= s_race_budget) {
             td5_game_selftest_end_race();
             s_step_deadline_ms = now + 30000u;
             s_sub = SS_RACE_WAIT_MENU;

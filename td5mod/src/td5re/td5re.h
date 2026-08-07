@@ -615,6 +615,11 @@ typedef struct TD5_GlobalState {
         int  selftest_enabled;    /* 1 = run the suite on boot (--SelfTest=1) */
         int  selftest_suite;      /* 0 = smoke (fast subset), 1 = full matrix */
         int  selftest_race_ticks; /* sim ticks per scripted race (default 450 = 15s @30Hz) */
+        int  selftest_deterministic; /* 1 = pin the CRT race seed (0x1A2B3C4D) for EVERY
+                                      * race init, independent of race_trace_enabled, so
+                                      * traffic/AI RNG is reproducible run-to-run without
+                                      * the CSV-trace overhead. Set by the selftest boot;
+                                      * the invariant checker relies on it. */
         /* [Control] — live-control MCP transport (dev builds only). Opt-in
          * UDP command socket that lets an external process (scripts/td5re_mcp)
          * drive a running td5re.exe. Default OFF so a normal dev launch never
