@@ -410,6 +410,9 @@ static int   s_handle_growth;      /* allowed net handle growth over a series */
 static int   s_allow_errors;       /* 1 = ERR log lines don't fail a step */
 static int   s_race_ticks;         /* sim ticks per scripted race (COUNTDOWN/base fallback) */
 static int   s_race_budget;        /* [NEW SUITE] tick budget for the CURRENT scenario (by depth) */
+static int   s_start_delay_ms;     /* [NEW SUITE] dwell on the first menu before phases (recording) */
+static uint32_t s_first_menu_ms;   /* when the main menu first went live */
+static int   s_first_menu_seen;
 static int   s_race_warmup_ms;     /* ms at FF=1 at each race start (GPU TDR guard) */
 static float s_scenario_ff;        /* [NEW SUITE] fast-forward for the CURRENT scenario
                                     * (per-row .ff override, else the suite s_ff) */
@@ -599,12 +602,23 @@ static struct {
     int  seen[ST_INV_MAX_SLOTS];
     int  px[ST_INV_MAX_SLOTS], py[ST_INV_MAX_SLOTS], pz[ST_INV_MAX_SLOTS];
     int  haspos[ST_INV_MAX_SLOTS];            /* prev world_pos captured yet? */
+    /* [CHUNK 1 telemetry] per-scenario peaks — recorded even on PASS so we can
+     * SEE severity of "cars fly / jump / don't stay on the road" that the
+     * generous FAIL thresholds don't trip, and per-slot progress to spot an
+     * AI that never accelerates / a car spawned off-track. */
+    int       peak_air;                       /* max airborne_frame_counter (any slot) */
+    long long peak_speed;                     /* max |longitudinal_speed| raw (8.8) */
+    long long peak_jump;                      /* max per-sample |pos delta| raw (24.8) */
 } s_inv;
 /* s_inv_max_world = coarse overflow guard (only catches int32-range garbage);
  * s_inv_max_jump = the real teleport detector (per-sample position delta cap —
  * tracks legitimately sit far from origin, but a car never MOVES that far in the
  * few sim ticks between samples). */
 static int s_inv_max_world, s_inv_max_jump, s_inv_max_vel, s_inv_max_speed, s_inv_max_air;
+/* WARN tier (display units): well below the FAIL caps, above normal peaks, so the
+ * suite FLAGS misbehaving-but-not-catastrophic runs (cop-chase launches, the
+ * FF=2x sim perturbation) instead of silently passing. */
+static int s_inv_warn_speed, s_inv_warn_jump;
 
 static void st_inv_flag(int level, const char *fmt, ...)
 {
@@ -650,6 +664,10 @@ static void st_inv_sample(void)
             long long dx = px - s_inv.px[slot];
             long long dy = py - s_inv.py[slot];
             long long dz = pz - s_inv.pz[slot];
+            long long mj = llabs(dx);
+            if (llabs(dy) > mj) mj = llabs(dy);
+            if (llabs(dz) > mj) mj = llabs(dz);
+            if (mj > s_inv.peak_jump) s_inv.peak_jump = mj;
             if (llabs(dx) > s_inv_max_jump || llabs(dy) > s_inv_max_jump ||
                 llabs(dz) > s_inv_max_jump)
                 st_inv_flag(ST_FAIL, "slot%d teleport dx=%lld dy=%lld dz=%lld",
@@ -662,8 +680,12 @@ static void st_inv_sample(void)
             llabs(vz) > s_inv_max_vel)
             st_inv_flag(ST_FAIL, "slot%d velocity blowup (%lld,%lld,%lld)",
                         slot, vx, vy, vz);
+        { long long sp = llabs((long long)a->longitudinal_speed);
+          if (sp > s_inv.peak_speed) s_inv.peak_speed = sp; }
         if (llabs((long long)a->longitudinal_speed) > s_inv_max_speed)
             st_inv_flag(ST_FAIL, "slot%d speed insane %d", slot, a->longitudinal_speed);
+        if ((int)a->airborne_frame_counter > s_inv.peak_air)
+            s_inv.peak_air = (int)a->airborne_frame_counter;
         if ((int)a->airborne_frame_counter > s_inv_max_air)
             st_inv_flag(ST_FAIL, "slot%d airborne %d frames (launched)",
                         slot, (int)a->airborne_frame_counter);
@@ -679,16 +701,45 @@ static void st_inv_sample(void)
 static int st_inv_result(int depth, char *note, size_t nsz)
 {
     int status = s_inv.active ? s_inv.worst : ST_PASS;
-    if (s_inv.active && status < ST_WARN && depth >= ST_DEPTH_RUN_5S &&
-        s_inv.seen[0] && !td5_game_slot_is_finished(0) &&
-        s_inv.progN[0] == s_inv.prog0[0]) {
-        status = ST_WARN;
-        snprintf(s_inv.desc, sizeof(s_inv.desc), "slot0 made no track progress");
+    int i, moved = 0, active = 0, stuck = 0;
+    char tele[84];
+    for (i = 0; i < ST_INV_MAX_SLOTS; i++) {
+        if (!s_inv.seen[i]) continue;
+        active++;
+        if (s_inv.progN[i] != s_inv.prog0[i]) moved++;
+        else if (!td5_game_slot_is_finished(i)) stuck++;
     }
+    /* Moving depths: a racing car that never advanced is a stuck / no-accel /
+     * spawned-off-track signal (catches AI-not-accelerating + off-track spawn).
+     * WARN not FAIL — a legitimately-last car can crawl — so it never masks a
+     * real DAMAGE verdict. */
+    if (s_inv.active && status < ST_WARN && s_inv.samples >= 30 && stuck > 0) {
+        status = ST_WARN;
+        snprintf(s_inv.desc, sizeof(s_inv.desc), "%d/%d slots no progress", stuck, active);
+    }
+    /* Above-normal (but not catastrophic) speed / position-jump -> WARN. Catches
+     * cars launching in cop chase + the FF=2x sim perturbation. */
+    if (s_inv.active && status < ST_WARN && (s_inv.peak_speed >> 8) > s_inv_warn_speed) {
+        status = ST_WARN;
+        snprintf(s_inv.desc, sizeof(s_inv.desc), "peak speed %lld > %d",
+                 (long long)(s_inv.peak_speed >> 8), s_inv_warn_speed);
+    }
+    if (s_inv.active && status < ST_WARN && (s_inv.peak_jump >> 8) > s_inv_warn_jump) {
+        status = ST_WARN;
+        snprintf(s_inv.desc, sizeof(s_inv.desc), "peak jump %lld > %d",
+                 (long long)(s_inv.peak_jump >> 8), s_inv_warn_jump);
+    }
+    /* Telemetry, recorded even on PASS: peak airborne frames, peak body speed
+     * and peak per-tick position jump (both truncated 24.8/8.8 -> display), and
+     * how many active cars actually moved. This quantifies "cars fly/jump" the
+     * generous FAIL thresholds don't trip. */
+    snprintf(tele, sizeof(tele), "air=%d spd=%lld jmp=%lld prog=%d/%d",
+             s_inv.peak_air, (long long)(s_inv.peak_speed >> 8),
+             (long long)(s_inv.peak_jump >> 8), moved, active);
     if (status == ST_PASS)
-        snprintf(note, nsz, "invariants ok (%d samples)", s_inv.samples);
+        snprintf(note, nsz, "ok (%d samp) %s", s_inv.samples, tele);
     else
-        snprintf(note, nsz, "DAMAGE: %s", s_inv.desc);
+        snprintf(note, nsz, "%s [%s]", s_inv.desc, tele);
     s_inv.active = 0;
     return status;
 }
@@ -1817,6 +1868,11 @@ void td5_selftest_boot(void)
     s_inv_max_vel   = td5_env_int("TD5RE_SELFTEST_INV_VEL",   0x00800000, 0x1000,  2000000000);
     s_inv_max_speed = td5_env_int("TD5RE_SELFTEST_INV_SPEED", 0x00400000, 0x1000,  2000000000);
     s_inv_max_air   = td5_env_int("TD5RE_SELFTEST_INV_AIR",   450, 10, 100000);
+    s_inv_warn_speed = td5_env_int("TD5RE_SELFTEST_WARN_SPEED", 1200, 0, 2000000000);
+    s_inv_warn_jump  = td5_env_int("TD5RE_SELFTEST_WARN_JUMP",  8000, 0, 2000000000);
+    /* [NEW SUITE] optional dwell on the first menu before phases start, so a
+     * screen recorder can be armed. Default 0 = start immediately. */
+    s_start_delay_ms = td5_env_int("TD5RE_SELFTEST_START_DELAY_MS", 0, 0, 60000);
     /* [render golden] distance thresholds over the 16x16 luma grid (256 cells,
      * 0-255 each). L1 = sum of |per-cell delta|; cell = worst single-cell delta.
      * Generous enough to absorb GPU/AA/+-1-tick-motion noise, tight enough to
@@ -2129,14 +2185,25 @@ void td5_selftest_tick(void)
 
     switch (s_phase) {
     case PH_WAIT_FIRST_MENU:
-        /* StartScreen=MAIN_MENU boot: wait until the frontend is live. */
+        /* StartScreen=MAIN_MENU boot: wait until the frontend is live, then
+         * optionally dwell (TD5RE_SELFTEST_START_DELAY_MS) so a recorder can be
+         * armed before the phases start. */
         if (g_td5.game_state == TD5_GAMESTATE_MENU &&
             td5_frontend_get_screen() == TD5_SCREEN_MAIN_MENU) {
-            TD5_LOG_I(LOG_TAG, "frontend live after %u ms — starting phases",
-                      now - s_suite_start_ms);
-            s_phase = (s_n_screens > 0) ? PH_SCREENS : PH_RACES;
-            s_step = 0;
-            s_sub = SS_ENTER;
+            if (!s_first_menu_seen) {
+                s_first_menu_seen = 1;
+                s_first_menu_ms   = now;
+                if (s_start_delay_ms > 0)
+                    TD5_LOG_I(LOG_TAG, "start delay: dwelling %d ms on main menu",
+                              s_start_delay_ms);
+            }
+            if ((int32_t)(now - s_first_menu_ms) >= s_start_delay_ms) {
+                TD5_LOG_I(LOG_TAG, "frontend live after %u ms — starting phases",
+                          now - s_suite_start_ms);
+                s_phase = (s_n_screens > 0) ? PH_SCREENS : PH_RACES;
+                s_step = 0;
+                s_sub = SS_ENTER;
+            }
         }
         break;
 
