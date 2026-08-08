@@ -841,6 +841,15 @@ void td5_plat_rt_set_mode(int high);
  * page id) so reflection hits sample the real texture. No-op when RT inactive. */
 void td5_plat_rt_register_page(unsigned page_id);
 
+/* [RT WARMUP 2026-08-08] Loading-screen pre-warm bridges (front the wrapper's
+ * Backend_RTWarmup* API). warmup_begin creates all RT pipeline objects + forces
+ * driver residency; warmup_step records one bounded BLAS chunk; warmup_pending
+ * returns meshes still needing a build (0 = warm). Begin/Step MUST run inside an
+ * open frame. All no-op when RT is unavailable. */
+void td5_plat_rt_warmup_begin(void);
+void td5_plat_rt_warmup_step(void);
+int  td5_plat_rt_warmup_pending(void);
+
 /** Upload a texture page to the GPU. Returns 0 on failure. */
 int td5_plat_render_upload_texture(int page_index, const void *pixels, int width, int height, int format);
 

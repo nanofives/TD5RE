@@ -749,6 +749,32 @@ static void rt_build_tlas(void)
     if (diag_this) rt_diag("TLAS built: track_chunks=%d total_actors=%d", s_track_chunk_count, td5_game_get_total_actor_count());
 }
 
+int td5_rt_warmup_prepare(void)
+{
+    /* [RT WARMUP 2026-08-08] Called at the END of InitRace (MODELS.DAT fully
+     * parsed, actors spawned) to move the first-HIGH-frame RT cost onto the
+     * loading screen. Normally the ~1600-mesh scenery feed + the resulting BLAS
+     * build wave happen on the first race frame (see td5_rt_frame: the level_build
+     * hook runs too early, before MODELS is ready), which stacked with the first-
+     * DispatchRays driver compile and TDR'd slower GPUs (RTX 3070 froze after one
+     * non-RT frame). Do that feed NOW so td5_rt_frame's lazy feed is a no-op, and
+     * report that a warmup pump is needed so the caller can drain the BLAS wave in
+     * watchdog-safe per-frame chunks while the loading splash is shown.
+     * Returns 1 when RT is HIGH-active (caller should run the warmup pump), else 0
+     * (LOW / unavailable -> nothing to warm). */
+    if (!td5_rt_active()) return 0;
+    /* Track lane quads: normally built at the MODELS.DAT-parse hook; ensure they
+     * exist here in case that hook ran before RT went active. */
+    if (s_track_chunk_count == 0)
+        td5_rt_level_build();
+    /* Full-scene scenery feed -- the wave that otherwise hits race frame 1. */
+    if (!s_scenery_fed) {
+        rt_feed_world_scenery();
+        s_scenery_fed = 1;
+    }
+    return 1;
+}
+
 void td5_rt_frame(int vp, int pane_x, int pane_y, int pane_w, int pane_h)
 {
     float cam[3], right[3], up[3], fwd[3], basis9[9];

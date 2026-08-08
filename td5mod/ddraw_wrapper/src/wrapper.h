@@ -320,6 +320,26 @@ void Backend_RTSceneEnd(void);
  * handles (they were destroyed with the old device). */
 unsigned Backend_RTGeneration(void);
 
+/* [RT WARMUP 2026-08-08] Loading-screen pre-warm so the FIRST race frame never
+ * pays the RT first-frame cost stack that TDR'd slower GPUs (e.g. RTX 3070 froze
+ * after one non-RT frame): the state-object / composite / denoise PSO creates,
+ * the big first-DispatchRays driver compile, and the full BLAS build wave for the
+ * ~1600 scenery meshes -- all of which currently land together on race frame 1.
+ *   Backend_RTWarmupBegin: create every pipeline object (state object, SBT, heap,
+ *     blit + shadow/light/refl composite PSOs, denoise PSOs, mask + output UAV
+ *     textures) and force RT-pipeline driver residency with one throwaway
+ *     DispatchRays (smoke raygen: no TraceRay, needs no TLAS/scene inputs).
+ *   Backend_RTWarmupStep: record ONE bounded BLAS build chunk into the current
+ *     frame's list (same watchdog-safe budget the race uses; here it runs on an
+ *     otherwise-idle GPU). Call once per pumped loading-screen frame.
+ *   Backend_RTWarmupPending: count of meshes still needing a VB/IB copy or a BLAS
+ *     build (0 = fully warm -> stop pumping).
+ * All three no-op when RT is unavailable/disabled. Begin/Step MUST be called
+ * inside an OPEN frame (between begin_scene and end_scene/present). */
+void Backend_RTWarmupBegin(void);
+void Backend_RTWarmupStep(void);
+int  Backend_RTWarmupPending(void);
+
 /* Push an RT work crumb (RTMARK:<tag>) to the crash-forensics ring so a TDR
  * post-mortem shows which RT operation was in flight. */
 void Backend_NoteRTMark(const char *tag);

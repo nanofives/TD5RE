@@ -124,6 +124,11 @@ static void dxr_log(const char *fmt, ...)
 #define DXR_MAX_INSTANCES     2048
 /* TDR guard: BLAS triangles built per frame during the warmup window. */
 #define DXR_BLAS_TRIS_PER_FRAME 500000
+/* [RT WARMUP 2026-08-08] Extra cap on BLAS COUNT per loading-screen warmup frame
+ * (see g_dxr.blas_build_cap). Dense tracks are ~1600 small meshes well under the
+ * tri budget; capping the count spreads them over ~6-7 fence-throttled frames so
+ * no single warmup submit can approach the TDR watchdog on a slow GPU. */
+#define DXR_WARMUP_MESHES_PER_FRAME 256
 /* [RT2-P2] raised 512 -> 2048: one BLAS per scenery mesh + track chunks + actors. */
 #define DXR_MAX_MESHES        2048
 /* [RT2-P2] matid_flags bit: this range is alpha-tested cutout geometry -> build
@@ -223,6 +228,14 @@ typedef struct {
     /* Shared growable BLAS scratch. */
     ID3D12Resource             *blas_scratch;
     UINT64                      blas_scratch_cap;
+
+    /* [RT WARMUP 2026-08-08] Extra per-call cap on the NUMBER of BLASes built in
+     * one dxr_build_pending call (0 = unlimited = race behavior, tri-budget only).
+     * The loading-screen warmup sets this so a dense track's whole scenery set
+     * (Moscow ~1600 meshes, well under the 500k-tri/frame budget) is spread over
+     * several fence-throttled frames instead of one big submit -- keeps each
+     * warmup frame trivially under the TDR watchdog even on a slow GPU. */
+    UINT                        blas_build_cap;
 
     /* Mesh registry (handle = index+1). */
     DxrMesh                     meshes[DXR_MAX_MESHES];
@@ -902,6 +915,7 @@ static void dxr_build_pending(ID3D12GraphicsCommandList *cl, ID3D12GraphicsComma
     UINT i;
     int any_copy = 0;
     UINT budget = DXR_BLAS_TRIS_PER_FRAME;
+    UINT built_this_call = 0;
 
     if (!dxr_ensure_pools()) return;
 
@@ -924,9 +938,11 @@ static void dxr_build_pending(ID3D12GraphicsCommandList *cl, ID3D12GraphicsComma
         g_dxr.vb_state = g_dxr.ib_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     }
 
-    /* --- Phase B: build BLASes for unbuilt meshes, within the tri budget. --- */
+    /* --- Phase B: build BLASes for unbuilt meshes, within the tri budget
+     * (and, during warmup, within the per-call mesh-count cap). --- */
     for (i = 0; i < DXR_MAX_MESHES; i++) {
         DxrMesh *m = &g_dxr.meshes[i];
+        if (g_dxr.blas_build_cap && built_this_call >= g_dxr.blas_build_cap) break;
         D3D12_RAYTRACING_GEOMETRY_DESC *geo;
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs;
         D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO pi;
@@ -991,6 +1007,7 @@ static void dxr_build_pending(ID3D12GraphicsCommandList *cl, ID3D12GraphicsComma
         free(geo);
 
         m->built = 1;
+        built_this_call++;
         if (m->tri_count >= budget) budget = 0; else budget -= m->tri_count;
         /* RTMARK crumb for crash.log forensics. */
         Backend_NoteRTMark("blas_build");
@@ -1628,6 +1645,100 @@ int d3d12_dxr_sunvis_ready(void)
 }
 int d3d12_dxr_light_pass(const LightCB *cb)   { return cb ? dxr_lighting_pass(cb, sizeof(LightCB), 1)  : 0; }
 int d3d12_dxr_ssr_pass(const SSRCB *cb)       { return cb ? dxr_lighting_pass(cb, sizeof(SSRCB), 2)    : 0; }
+
+/* ---- RT loading-screen warmup (2026-08-08) -------------------------------- *
+ * See the wrapper.h header comment. Front-loads every first-frame RT cost onto
+ * the loading screen so the first race frame is cheap. Prevents the frame-1 TDR
+ * seen on slower GPUs (RTX 3070). */
+
+int Backend_RTWarmupPending(void)
+{
+    UINT i; int n = 0;
+    if (g_dxr.disabled || !g_dxr.device5) return 0;
+    for (i = 0; i < DXR_MAX_MESHES; i++) {
+        const DxrMesh *m = &g_dxr.meshes[i];
+        if (m->used && (!m->built || m->needs_copy)) n++;
+    }
+    return n;
+}
+
+void Backend_RTWarmupBegin(void)
+{
+    d3d12_dxr_env e;
+    ID3D12GraphicsCommandList  *cl;
+    ID3D12GraphicsCommandList4 *cl4;
+    ID3D12DescriptorHeap *heaps[1];
+    D3D12_DISPATCH_RAYS_DESC d;
+
+    d3d12_priv_env(&e);
+    if (g_dxr.disabled || !e.device5 || !e.list4 || !e.frame_open) return;
+    g_dxr.device5 = e.device5; g_dxr.list4 = e.list4;
+
+    /* Pipeline objects: state object, SBT, heap, blit PSO, bindless fallback. */
+    if (!dxr_ensure_init()) return;
+
+    /* Mask + output UAV textures (swapchain-sized) so the first lighting frame
+     * doesn't allocate them. */
+    dxr_ensure_output(e.width, e.height);
+    dxr_ensure_masks(e.width, e.height);
+
+    /* Every composite PSO the deferred passes lazily create on their first frame
+     * (shadow=MULT, GI reuses shadow, light=additive, reflection=src-alpha). PSO
+     * creation only needs the device + root sig + shader bytecode -- no render
+     * context -- so it is safe to force here. */
+    if (!g_dxr.shadow_pso) g_dxr.shadow_pso = dxr_make_composite_pso(g_ps_shadow_rt_50, sizeof(g_ps_shadow_rt_50), 0);
+    if (!g_dxr.light_pso)  g_dxr.light_pso  = dxr_make_composite_pso(g_ps_light_rt_50,  sizeof(g_ps_light_rt_50),  1);
+    if (!g_dxr.refl_pso)   g_dxr.refl_pso   = dxr_make_composite_pso(g_ps_ssr_rt_50,    sizeof(g_ps_ssr_rt_50),    3);
+    dxr_ensure_p3_srvs();       /* reflection VB/IB/GeoRecord SRVs */
+    dxr_ensure_denoise_psos();  /* à-trous compute PSOs (best-effort) */
+
+    /* Force RT-pipeline DRIVER RESIDENCY now: the first DispatchRays against the
+     * state object is where the driver finalizes/pages the RT shaders, a stall
+     * that (stacked on frame 1's BLAS wave) blew the TDR watchdog on the 3070.
+     * Dispatch the smoke raygen (rgen record 0 -- issues no TraceRay, needs no
+     * TLAS or scene inputs) at a tiny 8x8 tile into the output UAV; result is
+     * discarded. Mirrors d3d12_dxr_smoke_blit's dispatch minus the blit. */
+    cl = e.list; cl4 = e.list4;
+    if (g_dxr.output && g_dxr.so && g_dxr.sbt_va) {
+        if (g_dxr.out_state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+            dxr_barrier(cl, g_dxr.output, g_dxr.out_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            g_dxr.out_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
+        heaps[0] = g_dxr.heap;
+        ID3D12GraphicsCommandList_SetDescriptorHeaps(cl, 1, heaps);
+        ID3D12GraphicsCommandList_SetComputeRootSignature(cl, g_dxr.global_rs);
+        ID3D12GraphicsCommandList4_SetPipelineState1(cl4, g_dxr.so);
+        ID3D12GraphicsCommandList_SetComputeRootConstantBufferView(cl, 0, g_dxr.sbt_va); /* b0 (unused by smoke) */
+        ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(cl, 4, dxr_gpu(g_dxr.heap, DXR_SLOT_TABLE_BASE));
+        ZeroMemory(&d, sizeof(d));
+        d.RayGenerationShaderRecord.StartAddress = g_dxr.sbt_va + DXR_SBT_RAYGEN_OFF; /* rgen_smoke */
+        d.RayGenerationShaderRecord.SizeInBytes  = DXR_SHADER_ID_SIZE;
+        d.Width = 8; d.Height = 8; d.Depth = 1;
+        ID3D12GraphicsCommandList4_DispatchRays(cl4, &d);
+        dxr_uav_barrier(cl, g_dxr.output);
+    }
+    Backend_NoteRTMark("rt_warmup_begin");
+    dxr_log("warmup begin: pipeline + PSOs + residency dispatch ready");
+}
+
+void Backend_RTWarmupStep(void)
+{
+    d3d12_dxr_env e;
+    d3d12_priv_env(&e);
+    if (g_dxr.disabled || !e.device5 || !e.list || !e.list4 || !e.frame_open) return;
+    if (!g_dxr.inited) return;
+    /* One bounded BLAS build chunk (copy staged VB/IB + build BLASes) into the
+     * current frame's list. The race path caps only by tri budget (500k/frame),
+     * but a dense track's scenery is many SMALL meshes whose total is under that
+     * budget -- so it would all build in one submit. Cap the mesh COUNT per warmup
+     * frame too, so the wave spreads over several fence-throttled loading frames
+     * and each frame's GPU work stays trivially under the TDR watchdog even on a
+     * slow card. Restored to 0 (unlimited) after, so the race path is unchanged. */
+    g_dxr.blas_build_cap = DXR_WARMUP_MESHES_PER_FRAME;
+    dxr_build_pending(e.list, e.list4);
+    g_dxr.blas_build_cap = 0;
+    Backend_NoteRTMark("rt_warmup_step");
+}
 
 void Backend_RTDebugView(void)
 {

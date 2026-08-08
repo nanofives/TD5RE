@@ -793,6 +793,7 @@ static void accumulate_speed_bonus(int slot);
 static void decay_ultimate_timer(int slot);
 static void adjust_checkpoint_timers(int slot);
 static void display_loading_screen_tga(void);
+static void rt_warmup_loading_pump(void);   /* [RT WARMUP 2026-08-08] */
 static void reset_race_countdown(void);
 static void tick_race_countdown(void);
 static void tick_resume_countdown(void);   /* [RESUME COUNTDOWN 2026-08-05] */
@@ -4952,6 +4953,14 @@ int td5_game_init_race_session(void) {
 
     TD5_LOG_I(LOG_TAG, "InitializeRaceSession: complete (%d actors)",
               g_td5.total_actor_count);
+
+    /* [RT WARMUP 2026-08-08] Pre-warm ray tracing on the loading screen so the
+     * first race frame never pays the full RT first-frame cost stack (scenery
+     * feed + BLAS wave + pipeline compile) that TDR-froze the renderer on slower
+     * GPUs (RTX 3070). No-op in LOW / when RT is unavailable. Runs here -- after
+     * the sim/camera are seeded but before the countdown -- so it cannot perturb
+     * the deterministic simulation, and the loading splash stays on screen. */
+    rt_warmup_loading_pump();
 
     /* [PORT 2026-06] Arm the first-race controller-tutorial overlay. Self-gated:
      * no-op unless enabled by config and the race is a normal local human race
@@ -10542,9 +10551,16 @@ void td5_game_show_legal_screens(void) {
  * single one-shot present. */
 #define FE_LOADSCREEN_FRAMES 36
 
+/* [RT WARMUP 2026-08-08] The random splash index chosen at the step-1 loading
+ * screen, cached so the end-of-InitRace RT warmup pump can redraw the SAME image
+ * WITHOUT calling rand() again (a second rand() here would consume the seed chain
+ * and desync golden traces). */
+static int s_loadscreen_index = 0;
+
 static void display_loading_screen_tga(void) {
     char png_path[128];
     int index = rand() % 20;
+    s_loadscreen_index = index;
     void *pixels = NULL;
     int img_w = 0, img_h = 0;
 
@@ -10606,6 +10622,94 @@ static void display_loading_screen_tga(void) {
         }
         free(pixels);
     }
+}
+
+/* ========================================================================
+ * RT loading-screen warmup pump  [RT WARMUP 2026-08-08]
+ *
+ * Front-loads every first-race-frame ray-tracing cost onto the loading screen so
+ * the first race frame is cheap. Without this, race frame 1 stacked: the ~1600
+ * MODELS.DAT scenery mesh feed (deferred to frame 1 in td5_rt_frame), the whole
+ * BLAS build wave, the composite/denoise PSO creates, and the first-DispatchRays
+ * driver compile -- which blew the 2s GPU TDR watchdog on slower cards (RTX 3070:
+ * one non-RT frame, then a frozen renderer while audio kept playing).
+ *
+ * td5_rt_warmup_prepare() performs the deferred scenery feed now (MODELS is parsed
+ * by end of InitRace) and returns whether RT HIGH is active. We then pump loading
+ * frames, each recording ONE bounded BLAS chunk (watchdog-safe) via
+ * td5_plat_rt_warmup_step(), plus a one-time pipeline+residency prep on frame 0,
+ * until the wrapper reports nothing pending. The loading splash is redrawn each
+ * frame so the pump reads as normal loading, not a freeze. No-op in LOW / when RT
+ * is unavailable -- byte-identical to before there. Runs after the sim is set up
+ * but before the countdown, so it cannot perturb the deterministic sim.
+ * ======================================================================== */
+#define RT_WARMUP_MAX_FRAMES 600   /* safety cap; typical drain is ~10-20 chunks */
+
+static void rt_warmup_loading_pump(void) {
+    char png_path[128];
+    void *pixels = NULL;
+    int img_w = 0, img_h = 0;
+    int screen_w = 0, screen_h = 0;
+    int guard, start_ms, pending;
+    TD5_D3DVertex verts[4];
+    uint16_t indices[6] = {0,1,2, 0,2,3};
+
+    TD5_LOG_I(LOG_TAG, "RT warmup: gate available=%d quality_high=%d lighting_enabled=%d",
+              td5_rt_available(), td5_rt_quality_high(), g_td5.ini.lighting_enabled);
+    /* Do the deferred full-scene feed + decide if there's anything to warm. */
+    if (!td5_rt_warmup_prepare()) return;   /* LOW / RT unavailable -> nothing to do */
+
+    td5_plat_get_window_size(&screen_w, &screen_h);
+    {
+        float sw = (float)screen_w, sh = (float)screen_h;
+        verts[0].screen_x = 0.0f; verts[0].screen_y = 0.0f; verts[0].depth_z = 0.0f; verts[0].rhw = 1.0f;
+        verts[0].diffuse = 0xFFFFFFFF; verts[0].specular = 0; verts[0].tex_u = 0.0f; verts[0].tex_v = 0.0f;
+        verts[1].screen_x = sw;   verts[1].screen_y = 0.0f; verts[1].depth_z = 0.0f; verts[1].rhw = 1.0f;
+        verts[1].diffuse = 0xFFFFFFFF; verts[1].specular = 0; verts[1].tex_u = 1.0f; verts[1].tex_v = 0.0f;
+        verts[2].screen_x = sw;   verts[2].screen_y = sh;   verts[2].depth_z = 0.0f; verts[2].rhw = 1.0f;
+        verts[2].diffuse = 0xFFFFFFFF; verts[2].specular = 0; verts[2].tex_u = 1.0f; verts[2].tex_v = 1.0f;
+        verts[3].screen_x = 0.0f; verts[3].screen_y = sh;   verts[3].depth_z = 0.0f; verts[3].rhw = 1.0f;
+        verts[3].diffuse = 0xFFFFFFFF; verts[3].specular = 0; verts[3].tex_u = 0.0f; verts[3].tex_v = 1.0f;
+    }
+
+    /* Reuse the SAME splash image as step 1 (no extra rand() -- see comment on
+     * s_loadscreen_index). A missing PNG is non-fatal: still warm up, blank. */
+    snprintf(png_path, sizeof(png_path), "re/assets/loading/load%02d.png", s_loadscreen_index);
+    if (!td5_asset_load_png_to_buffer(png_path, TD5_COLORKEY_NONE, &pixels, &img_w, &img_h))
+        pixels = NULL;
+    if (pixels)
+        td5_plat_render_upload_texture(0, pixels, img_w, img_h, 2);
+
+    TD5_LOG_I(LOG_TAG, "RT warmup: draining BLAS wave on loading screen (pending=%d)",
+              td5_plat_rt_warmup_pending());
+    start_ms = td5_plat_time_ms();
+
+    for (guard = 0; guard < RT_WARMUP_MAX_FRAMES; guard++) {
+        td5_plat_render_clear(0x00000000);
+        td5_plat_render_begin_scene();
+        td5_plat_render_set_viewport(0, 0, screen_w, screen_h);
+        if (pixels) {
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+            td5_plat_render_bind_texture(0);
+            td5_plat_render_draw_tris(verts, 4, indices, 6);
+        }
+        /* Frame 0: create pipeline objects + force RT-pipeline driver residency.
+         * Every frame: record one bounded BLAS chunk. Both must run inside the
+         * open frame (between begin_scene and end_scene). */
+        if (guard == 0)
+            td5_plat_rt_warmup_begin();
+        td5_plat_rt_warmup_step();
+        td5_plat_render_end_scene();
+        td5_plat_present(0);   /* per-frame fence throttles queued BLAS work */
+
+        pending = td5_plat_rt_warmup_pending();
+        if (pending <= 0)
+            break;
+    }
+
+    if (pixels) free(pixels);
+    TD5_LOG_I(LOG_TAG, "RT warmup: done in %d frame(s), %d ms (pending=%d)",
+              guard + 1, td5_plat_time_ms() - start_ms, td5_plat_rt_warmup_pending());
 }
 
 /* ========================================================================

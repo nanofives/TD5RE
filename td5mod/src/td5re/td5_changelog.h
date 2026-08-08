@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 8" },
+    { CL_ITEM,    "FIX (ray tracing): ray tracing is now warmed up on the" },
+    { CL_ITEM,    "  loading screen instead of on the first race frame, so" },
+    { CL_ITEM,    "  slower cards (e.g. RTX 3070) no longer freeze the" },
+    { CL_ITEM,    "  renderer on the first frame with RT lighting on." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 5" },
     { CL_ITEM,    "NEW (manual gearbox): engine braking - holding the" },
     { CL_ITEM,    "  wrong (too-low) gear at high revs now slows you, and" },
