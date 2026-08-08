@@ -44,6 +44,14 @@ void td5_rt_level_build(void);
 /* [Phase 1] Destroy all RT meshes (track + cached actor meshes) at level unload. */
 void td5_rt_level_unload(void);
 
+/* [RT WARMUP 2026-08-08] Front-load the first-HIGH-frame RT cost onto the loading
+ * screen. Call once at the END of InitRace (MODELS.DAT parsed, actors spawned):
+ * it performs the full-scene mesh feed that td5_rt_frame otherwise defers to race
+ * frame 1 and marks it done. Returns 1 when RT is HIGH-active and the caller
+ * should pump the loading-screen BLAS-drain warmup (td5_plat_rt_warmup_*), 0 when
+ * RT is LOW/unavailable (nothing to warm). */
+int td5_rt_warmup_prepare(void);
+
 /* [Phase 1] Per-pane RT frame driver. Called once per viewport `vp` from the
  * render loop BEFORE the deferred passes, with the pane rect. On vp==0 it
  * (re)builds the TLAS from the track + active actors; every pane it uploads the
