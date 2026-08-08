@@ -2496,6 +2496,11 @@ static int frontend_rows_overlap(int a, int b) {
 static int frontend_nav_vertical(int direction) {
     int current, target;
     if (direction == 0) return 0;
+    /* [CHUNK 5] The main-menu EXIT confirm is MODAL: while the YES/NO dialog is
+     * up, block vertical focus moves so focus can't escape back onto the menu
+     * column (YES<->NO horizontal nav still works). Mirrors the s_color_panel
+     * modal gate. */
+    if (frontend_exit_confirm_active()) return 0;
     current = frontend_resolve_selected_button();
     if (current < 0) return 0;
     target = frontend_spatial_pick(0, direction);

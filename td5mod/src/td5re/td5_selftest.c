@@ -333,7 +333,6 @@ static const ScreenStep k_screens_full[] = {
     { "scr-display-options", TD5_SCREEN_DISPLAY_OPTIONS,    0, 0 },
     { "scr-two-player-opts", TD5_SCREEN_TWO_PLAYER_OPTIONS, 0, 0 },
     { "scr-ctrl-binding",    TD5_SCREEN_CONTROLLER_BINDING, 0, 0 },
-    { "scr-music-test",      TD5_SCREEN_MUSIC_TEST,         0, 0 },
     { "scr-car-select",      TD5_SCREEN_CAR_SELECTION,      0, 0 },
     { "scr-track-select",    TD5_SCREEN_TRACK_SELECTION,    0, 0 },
     { "scr-extras-gallery",  TD5_SCREEN_EXTRAS_GALLERY,     0, 0 },
