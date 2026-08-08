@@ -153,6 +153,10 @@ typedef struct {
     int auto_gearbox;      /* -1 base, 1 automatic / 0 manual */
     int span_offset;       /* -1 base(0), else start-span offset */
     int end_checkpoint;    /* 0 = none, N = force-finish at checkpoint N (RUN_FINISH) */
+    int paint;             /* -1 base, else TD5 paint-scheme index */
+    int td6_color;         /* -1 base(stock), else 0xRRGGBB TD6 body colour */
+    int mp_mode;           /* -1 off, else TD5_MpGameMode (MP split-screen launch) */
+    int mp_ai_players;     /* 0 off, else # AI-driven player panes (1 human + N AI) */
     int ff;                /* 0 = suite FF, else per-scenario fast-forward multiplier */
     int depth;             /* StDepth */
 } RaceScenario;
@@ -185,18 +189,18 @@ static const RaceScenario k_races[] = {
       .reverse=1, .dynamics=1, .traffic=4, .opponents=9, .difficulty=1,
       .checkpoint_timers=1, .powerups=2, .car_damage=1, .lane_assist=0,
       .auto_gearbox=0, .depth=ST_DEPTH_RUN_5S },
-    { .name="race-r3-td6-p2p",       .track=32, .car=-1, .game_type=0, .player_is_ai=1,
+    { .name="race-r3-td6-recolour",  .track=32, .car=-1, .game_type=0, .player_is_ai=1,
       .reverse=1, .dynamics=1, .traffic=0, .opponents=5, .difficulty=1,
       .checkpoint_timers=1, .powerups=0, .car_damage=1, .lane_assist=0,
-      .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN },
+      .auto_gearbox=1, .td6_color=0xE01010, .depth=ST_DEPTH_COUNTDOWN },
     { .name="race-r4-td6-circuit",   .track=26, .car=-1, .game_type=0, .player_is_ai=1,
       .dynamics=0, .traffic=4, .opponents=5, .difficulty=0, .checkpoint_timers=0,
       .powerups=2, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .depth=ST_DEPTH_RUN_5S },
-    { .name="race-r5-crowded-grid",  .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
+    { .name="race-r5-paint-variant", .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
       .dynamics=0, .traffic=0, .opponents=9, .difficulty=1, .checkpoint_timers=1,
       .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
-      .depth=ST_DEPTH_COUNTDOWN },
+      .paint=1, .depth=ST_DEPTH_COUNTDOWN },
     { .name="race-r6-circuit-mix",   .track=5,  .car=-1, .game_type=0, .player_is_ai=1,
       .reverse=1, .dynamics=1, .traffic=4, .opponents=1, .difficulty=0,
       .checkpoint_timers=0, .powerups=2, .car_damage=1, .lane_assist=0,
@@ -214,6 +218,57 @@ static const RaceScenario k_races[] = {
       .dynamics=0, .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
       .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=0,
       .depth=ST_DEPTH_RUN_5S },
+
+    /* ---- Block 2: MP-mode split-screen (1 human + N AI panes, N=1/4/8 -> 2/5/9
+     * total). mp_mode drives the MP game mode; mp_ai_players makes AI-driven
+     * panes. Mostly COUNTDOWN (confirm N-pane split + roster + mode setup spawn
+     * sane, no crash); the mode-mechanic rows run RUN_5S. TD5_MpGameMode:
+     * RACE=0 CUP=1 TRAFFIC_BATTLE=2 COP_CHASE=3 DRAG_RACE=4. ---- */
+    { .name="mp-race-2p",   .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .dynamics=0,
+      .traffic=0, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+      .lane_assist=0, .auto_gearbox=1, .mp_mode=0, .mp_ai_players=1, .depth=ST_DEPTH_COUNTDOWN },
+    { .name="mp-race-5p",   .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .dynamics=0,
+      .traffic=0, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+      .lane_assist=0, .auto_gearbox=1, .mp_mode=0, .mp_ai_players=4, .depth=ST_DEPTH_COUNTDOWN },
+    { .name="mp-race-9p",   .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .dynamics=0,
+      .traffic=0, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+      .lane_assist=0, .auto_gearbox=1, .mp_mode=0, .mp_ai_players=8, .depth=ST_DEPTH_COUNTDOWN },
+    { .name="mp-cup-2p",    .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .dynamics=0,
+      .traffic=0, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+      .lane_assist=0, .auto_gearbox=1, .mp_mode=1, .mp_ai_players=1, .depth=ST_DEPTH_COUNTDOWN },
+    { .name="mp-cup-5p",    .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .dynamics=0,
+      .traffic=0, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+      .lane_assist=0, .auto_gearbox=1, .mp_mode=1, .mp_ai_players=4, .depth=ST_DEPTH_COUNTDOWN },
+    { .name="mp-cup-9p",    .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .dynamics=0,
+      .traffic=0, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+      .lane_assist=0, .auto_gearbox=1, .mp_mode=1, .mp_ai_players=8, .depth=ST_DEPTH_COUNTDOWN },
+    { .name="mp-battle-2p", .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .dynamics=0,
+      .traffic=2, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+      .lane_assist=0, .auto_gearbox=1, .mp_mode=2, .mp_ai_players=1, .depth=ST_DEPTH_COUNTDOWN },
+    { .name="mp-battle-5p", .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .dynamics=0,
+      .traffic=2, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+      .lane_assist=0, .auto_gearbox=1, .mp_mode=2, .mp_ai_players=4, .depth=ST_DEPTH_COUNTDOWN },
+    { .name="mp-battle-9p", .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .dynamics=0,
+      .traffic=2, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+      .lane_assist=0, .auto_gearbox=1, .mp_mode=2, .mp_ai_players=8, .depth=ST_DEPTH_RUN_5S },
+    { .name="mp-cop-2p",    .track=0,  .car=-1, .game_type=8, .player_is_ai=1, .dynamics=0,
+      .traffic=1, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+      .lane_assist=0, .auto_gearbox=1, .mp_mode=3, .mp_ai_players=1, .depth=ST_DEPTH_COUNTDOWN },
+    { .name="mp-cop-5p",    .track=0,  .car=-1, .game_type=8, .player_is_ai=1, .dynamics=0,
+      .traffic=1, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+      .lane_assist=0, .auto_gearbox=1, .mp_mode=3, .mp_ai_players=4, .depth=ST_DEPTH_RUN_5S },
+    { .name="mp-cop-9p",    .track=0,  .car=-1, .game_type=8, .player_is_ai=1, .dynamics=0,
+      .traffic=1, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+      .lane_assist=0, .auto_gearbox=1, .mp_mode=3, .mp_ai_players=8, .depth=ST_DEPTH_COUNTDOWN },
+    { .name="mp-drag-2p",   .track=19, .car=-1, .game_type=9, .player_is_ai=1, .dynamics=0,
+      .traffic=0, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+      .lane_assist=0, .auto_gearbox=1, .mp_mode=4, .mp_ai_players=1, .depth=ST_DEPTH_COUNTDOWN },
+    { .name="mp-drag-5p",   .track=19, .car=-1, .game_type=9, .player_is_ai=1, .dynamics=0,
+      .traffic=0, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+      .lane_assist=0, .auto_gearbox=1, .mp_mode=4, .mp_ai_players=4, .depth=ST_DEPTH_COUNTDOWN },
+    { .name="mp-drag-9p",   .track=19, .car=-1, .game_type=9, .player_is_ai=1, .dynamics=0,
+      .traffic=0, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+      .lane_assist=0, .auto_gearbox=1, .mp_mode=4, .mp_ai_players=8, .depth=ST_DEPTH_COUNTDOWN },
 
     /* ---- Block 3: game overrides ---- */
     { .name="ovr-span-offset-500",   .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
@@ -513,6 +568,12 @@ static void st_reset_scenario_fields(void)
     /* [NEW SUITE] Only-sometimes-set overrides must not leak into the next row. */
     g_td5.ini.start_span_offset  = 0;
     g_td5.ini.dbg_end_checkpoint = 0;
+    g_td5.ini.default_paint      = -1;
+    g_td5.ini.td6_paint_color    = -1;
+    g_td5.ini.td6_paint_color2   = -1;
+    g_td5.ini.td6_paint_pattern  = 0;
+    g_td5.ini.mp_mode            = -1;
+    g_td5.ini.mp_ai_players      = 0;
 }
 
 /* ------------------------------------------------------------------------
@@ -643,6 +704,65 @@ static int st_depth_ticks(int depth)
     default:
         return s_race_ticks;   /* RUN_FINISH uses natural_finish + long leash */
     }
+}
+
+/* ------------------------------------------------------------------------
+ * [NEW SUITE 2026-08-07] Auto-isolate on damage
+ *
+ * A packed combo row varies many options at once, so a DAMAGE verdict doesn't
+ * say WHICH option broke it. When a MAIN row trips a damage invariant, we
+ * enqueue single-axis isolation variants — the baseline (k_races[0]) with just
+ * one of the failed row's differing knobs applied — plus one "geometry" variant
+ * (baseline options on the failed track/car). These run AFTER the main pass; the
+ * one(s) that also FAIL name the culprit. Isolation rows never spawn more
+ * isolation (no recursion). Bounded by ST_MAX_ISO. */
+#define ST_MAX_ISO 32
+static RaceScenario s_iso[ST_MAX_ISO];
+static char         s_iso_name[ST_MAX_ISO][48];
+static int          s_iso_count;
+
+static const RaceScenario *st_race_at(int step)
+{
+    return (step < s_n_races) ? &k_races[step] : &s_iso[step - s_n_races];
+}
+
+static void st_iso_push(const RaceScenario *v, const char *bad, const char *axis)
+{
+    if (s_iso_count >= ST_MAX_ISO) return;
+    snprintf(s_iso_name[s_iso_count], sizeof(s_iso_name[0]), "iso-%.18s-%s", bad, axis);
+    s_iso[s_iso_count] = *v;
+    s_iso[s_iso_count].name  = s_iso_name[s_iso_count];
+    s_iso[s_iso_count].depth = ST_DEPTH_RUN_5S;   /* need motion to reproduce damage */
+    s_iso_count++;
+}
+
+/* Enqueue single-axis isolation variants for a failed MAIN row. */
+static void st_enqueue_isolation(const RaceScenario *bad)
+{
+    const RaceScenario base = k_races[0];   /* R1 baseline-min (all-min) */
+    RaceScenario v;
+    /* geometry: baseline options on the failed track/car/mode/direction */
+    v = base;
+    v.track = bad->track; v.car = bad->car; v.game_type = bad->game_type;
+    v.reverse = bad->reverse;
+    st_iso_push(&v, bad->name, "geometry");
+    /* one variant per differing toggle */
+    #define ISO_AXIS(field, label) do { \
+        if (bad->field != base.field) { v = base; v.field = bad->field; \
+            st_iso_push(&v, bad->name, label); } } while (0)
+    ISO_AXIS(dynamics,          "dyn");
+    ISO_AXIS(traffic,           "traffic");
+    ISO_AXIS(difficulty,        "diff");
+    ISO_AXIS(checkpoint_timers, "timers");
+    ISO_AXIS(powerups,          "pups");
+    ISO_AXIS(car_damage,        "dmg");
+    ISO_AXIS(lane_assist,       "lane");
+    ISO_AXIS(auto_gearbox,      "gbx");
+    ISO_AXIS(opponents,         "opp");
+    ISO_AXIS(reverse,           "rev");
+    #undef ISO_AXIS
+    TD5_LOG_I(LOG_TAG, "auto-isolate: %s DAMAGE -> queued %d isolation variants",
+              bad->name, s_iso_count);
 }
 
 /* ------------------------------------------------------------------------
@@ -1237,6 +1357,12 @@ static void st_apply_scenario(const RaceScenario *sc)
     if (sc->auto_gearbox      >= 0) g_td5.ini.auto_gearbox      = sc->auto_gearbox;
     if (sc->span_offset       >= 0) g_td5.ini.start_span_offset = sc->span_offset;
     if (sc->end_checkpoint    >  0) g_td5.ini.dbg_end_checkpoint = sc->end_checkpoint;
+    if (sc->paint             >= 0) g_td5.ini.default_paint      = sc->paint;
+    if (sc->td6_color         >= 0) { g_td5.ini.td6_paint_color   = sc->td6_color;
+                                      g_td5.ini.td6_paint_color2  = sc->td6_color;
+                                      g_td5.ini.td6_paint_pattern = 0; }
+    if (sc->mp_mode           >= 0) g_td5.ini.mp_mode            = sc->mp_mode;
+    if (sc->mp_ai_players     >  0) g_td5.ini.mp_ai_players      = sc->mp_ai_players;
     s_scenario_ff = (sc->ff > 0) ? (float)sc->ff : s_ff;
     g_td5.ini.trace_fast_forward = s_scenario_ff;
     /* [RGOLD DETERMINISM 2026-07-22] The screen-walk phase's nav walker can
@@ -1371,6 +1497,33 @@ static void st_degradation_verdicts(void)
  * of "I18N SELFTEST <inverted-?,accented vowels,N-tilde>?" — exactly what
  * the loader produces from the catalog's UTF-8 line (do not remove that
  * line from es_AR.txt). */
+/* [NEW SUITE 2026-08-07] MP lobby -> roster workflow verdict. Seeds the lobby
+ * the way the real MP flow does (1 human + N AI players, each its own pane) via
+ * the canonical simul-preview helper, verifies the roster counts, then resets.
+ * Runs in the report phase so the s_mp_flow/two-player state it sets can't leak
+ * into a race. Covers "MP workflow from lobby to the roster"; per-screen button
+ * navigation itself is exercised by the nav-reachability selftest each screen. */
+extern void frontend_mp_simul_preview_setup(int n);
+extern int  frontend_mp_ai_player_count(void);
+extern int  frontend_mp_human_count(void);
+extern void frontend_mp_ai_players_reset(void);
+static void st_mp_lobby_verdict(void)
+{
+    StepRow *r = st_new_row("mp-lobby-workflow", 'D');
+    const int want_ai = 4;                 /* 1 human + 4 AI = a 5-pane lobby */
+    int humans, ai;
+    if (!r) return;
+    frontend_mp_ai_players_reset();
+    frontend_mp_simul_preview_setup(1 + want_ai);
+    humans = frontend_mp_human_count();
+    ai     = frontend_mp_ai_player_count();
+    frontend_mp_ai_players_reset();
+    snprintf(r->note, sizeof(r->note),
+             "seeded 1 human + %d AI -> humans=%d ai=%d", want_ai, humans, ai);
+    r->status = (humans >= 1 && ai == want_ai) ? ST_PASS : ST_FAIL;
+    if (r->status == ST_FAIL) s_exit_code = 1;
+}
+
 static void st_i18n_verdict(void)
 {
     static const char k_sanity[] = "I18N SELFTEST \xBF\xC1\xC9\xCD\xD3\xDA\xD1?";
@@ -1508,6 +1661,7 @@ static void st_write_report(void)
     st_i18n_verdict();
     st_saveload_roundtrip_verdict();
     st_net_loopback_verdict();
+    st_mp_lobby_verdict();
 
     for (i = 0; i < s_row_count; i++) {
         if (s_rows[i].status == ST_PASS) n_pass++;
@@ -1717,7 +1871,7 @@ static void st_next_step(void)
         s_phase = PH_RACES;
         s_step = 0;
     }
-    if (s_phase == PH_RACES && s_step >= s_n_races) {
+    if (s_phase == PH_RACES && s_step >= s_n_races + s_iso_count) {
         s_phase = PH_REPORT;
     }
 }
@@ -1807,7 +1961,7 @@ static void st_tick_screens(uint32_t now)
 
 static void st_tick_races(uint32_t now)
 {
-    const RaceScenario *sc = &k_races[s_step];
+    const RaceScenario *sc = st_race_at(s_step);
     StepRow *row = (s_row_count > 0 &&
                     s_rows[s_row_count - 1].kind == 'R' &&
                     strcmp(s_rows[s_row_count - 1].name, sc->name) == 0)
@@ -1890,6 +2044,11 @@ static void st_tick_races(uint32_t now)
                                  "natural finish did not reach results screen");
                     }
                 }
+                /* [NEW SUITE] a MAIN packed row that took invariant damage
+                 * gets single-axis isolation variants queued after the pass to
+                 * pinpoint the culprit option (isolation rows never recurse). */
+                if (invstatus == ST_FAIL && s_step < s_n_races)
+                    st_enqueue_isolation(sc);
                 st_finish_row(row, status, note);
             }
             /* Golden scenario: hash the trace CSVs + append the 'G' verdict

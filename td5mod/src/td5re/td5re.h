@@ -529,6 +529,9 @@ typedef struct TD5_GlobalState {
         int  default_opponents;   /* AutoRace AI-opponent count override; -1 = full grid (5) */
         int  circuit_minimap;     /* 1 = draw the in-race minimap on circuit tracks too (port enhancement; orig disabled it). 0 = faithful (no minimap on circuits) */
         int  default_players;     /* AutoRace local-human count override (N-way split test); -1 = schedule default */
+        int  default_paint;       /* [NEW SUITE] AutoRace TD5 paint-scheme index override; -1 = default (0). PORT-ONLY test knob. */
+        int  mp_mode;             /* [NEW SUITE] AutoRace MP-mode override (TD5_MpGameMode); -1 = off (leave RACE). PORT-ONLY test knob. */
+        int  mp_ai_players;       /* [NEW SUITE] AutoRace: # of AI-driven split-screen player panes (1 human + N AI); 0 = off. PORT-ONLY test knob. */
         int  spectate_screens;    /* AutoRace AI-spectator split-screen count (dev profiling); 0 = off. See g_td5.num_spectate_screens */
         int  threaded_panes;      /* [Render] ThreadedPanes: 1 = build split-screen panes (>2) on worker threads via per-pane CPU command lists. Dev-only (release clamps to 0). */
         /* TD6 track migration (Phase 1): when > 0, td5_asset_level_number()
