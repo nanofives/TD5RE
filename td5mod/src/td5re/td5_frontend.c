@@ -3283,6 +3283,11 @@ void td5_frontend_auto_race_setup(void) {
             int p;
             if (total > TD5_MAX_HUMAN_PLAYERS) total = TD5_MAX_HUMAN_PLAYERS;
             if (total > TD5_MAX_VIEWPORTS)     total = TD5_MAX_VIEWPORTS;
+            /* [CHUNK 2 fix] Drag mode physically supports at most 8 lanes
+             * (TD5RE_DRAG_LANE_MAX); a 9th pane has no lane and the core routes
+             * it to the parked "decoration" spawn at the strip head (off the
+             * start grid). Clamp so no drag racer spawns off-track. */
+            if (g_td5.ini.mp_mode == TD5_MP_MODE_DRAG_RACE && total > 8) total = 8;
             g_td5.num_human_players = total;
             g_td5.num_ai_opponents  = 0;
             g_td5.split_screen_mode = 1;
