@@ -447,6 +447,15 @@ void td5_arcade_init_race(void) {
     if (start_span >= s_ring) start_span = 0;     /* track shorter than offset */
     int usable = s_ring - start_span;
     if (usable < 1) usable = s_ring;
+    /* [CHUNK 3 fix] On a CIRCUIT the ring wraps (start span == finish span), so
+     * boxes spread toward s_ring-1 land immediately BEFORE the start/finish line
+     * -- i.e. right at the spawn point (seen on Pelton). Reserve the same start
+     * gap at the END too: drivable band becomes [start_span, s_ring-start_span).
+     * Point-to-point is unchanged (its finish is a hard end, not the spawn). */
+    if (g_td5.track_type == TD5_TRACK_CIRCUIT) {
+        int u2 = s_ring - 2 * start_span;
+        if (u2 >= 1) usable = u2;
+    }
 
     /* Frequency scales with the number of HUMAN players: 1 human -> ~SPACING_MAX
      * (300) spans between boxes, falling toward SPACING_MIN (100) as humans are
@@ -535,9 +544,24 @@ void td5_arcade_init_race(void) {
          * mode's 1-2 boxes. Spawn-point spacing/frequency along the ring is
          * unchanged — this only changes how many boxes land at each point. */
         if (g_td5.ini.powerups == 2) {   /* [ITEM CHAOS] 0=OFF 1=CASUAL 2=CHAOS */
-            int nlanes = lanes; if (nlanes > 4) nlanes = 4;
-            for (int ln = 0; ln < nlanes && s_pad_count < ARC_MAX_PADS; ln++)
+            /* [CHUNK 3 fix] Dynamic: one box in every DRIVABLE lane at this span
+             * (skip grass/verge/slow lanes that would only slow the car), so the
+             * chaos row matches the full-speed lane count -- instead of a fixed
+             * min(lanes,4) that dropped boxes onto the verge. */
+            int placed = 0;
+            for (int ln = 0; ln < lanes && s_pad_count < ARC_MAX_PADS; ln++) {
+                if (td5_track_surface_is_slow(td5_track_get_span_lane_surface(span, ln)))
+                    continue;
                 arc_emit_box(span, ln, lanes, lift, &rng);
+                placed++;
+            }
+            /* Fallback: if surface data classified every lane slow/unknown, keep
+             * the old fixed spread so the span still gets boxes. */
+            if (placed == 0) {
+                int nlanes = lanes; if (nlanes > 4) nlanes = 4;
+                for (int ln = 0; ln < nlanes && s_pad_count < ARC_MAX_PADS; ln++)
+                    arc_emit_box(span, ln, lanes, lift, &rng);
+            }
         } else if (make_dbl && s_pad_count + 2 <= ARC_MAX_PADS) {
             arc_emit_box(span, left_lane,  lanes, lift, &rng);     /* left  shoulder */
             arc_emit_box(span, right_lane, lanes, lift, &rng);     /* right shoulder */
