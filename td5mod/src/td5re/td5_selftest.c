@@ -157,6 +157,7 @@ typedef struct {
     int td6_color;         /* -1 base(stock), else 0xRRGGBB TD6 body colour */
     int mp_mode;           /* -1 off, else TD5_MpGameMode (MP split-screen launch) */
     int mp_ai_players;     /* 0 off, else # AI-driven player panes (1 human + N AI) */
+    int rt;                /* 0 = suite default (LOW), 1 = force RT HIGH for this row */
     int ff;                /* 0 = suite FF, else per-scenario fast-forward multiplier */
     int depth;             /* StDepth */
 } RaceScenario;
@@ -301,6 +302,16 @@ static const RaceScenario k_races[] = {
       .dynamics=0, .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=1,
       .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .natural_finish=1, .end_checkpoint=1, .depth=ST_DEPTH_RUN_FINISH },
+
+    /* [CHUNK 8] RT coverage: force RT HIGH (only if the GPU supports DXR) on the
+     * Sydney reference track. Runs at FF=1 (real-time) so the RT SSR/shadow
+     * dispatches don't slam the TDR watchdog like 8x cold frames would -- the
+     * exact reason the rest of the suite is pinned LOW. Runs LAST so any RT
+     * device instability can't bleed into the other rows. */
+    { .name="rt-sydney",             .track=2,  .car=-1, .game_type=0, .player_is_ai=1,
+      .dynamics=0, .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .rt=1, .ff=1, .depth=ST_DEPTH_RUN_5S },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
 #define ST_SMOKE_RACES 5
@@ -576,6 +587,8 @@ static void st_reset_scenario_fields(void)
     g_td5.ini.td6_paint_pattern  = 0;
     g_td5.ini.mp_mode            = -1;
     g_td5.ini.mp_ai_players      = 0;
+    g_td5.ini.lighting_quality   = 0;   /* [CHUNK 8] back to the suite's LOW default */
+    td5_rt_set_quality(0);
 }
 
 /* ------------------------------------------------------------------------
@@ -1416,6 +1429,17 @@ static void st_apply_scenario(const RaceScenario *sc)
                                       g_td5.ini.td6_paint_pattern = 0; }
     if (sc->mp_mode           >= 0) g_td5.ini.mp_mode            = sc->mp_mode;
     if (sc->mp_ai_players     >  0) g_td5.ini.mp_ai_players      = sc->mp_ai_players;
+    /* [CHUNK 8] RT coverage: the suite pins LOW at boot (8x-FF cold RT frames
+     * TDR). An rt row forces RT HIGH -- only when the GPU actually supports it
+     * -- and MUST run at a safe FF (see the rt row's .ff=1) so it doesn't trip
+     * the watchdog. st_reset_scenario_fields restores LOW after. */
+    if (sc->rt && td5_rt_available()) {
+        g_td5.ini.lighting_quality = 1;
+        td5_rt_set_quality(1);
+    } else {
+        g_td5.ini.lighting_quality = 0;
+        td5_rt_set_quality(0);
+    }
     s_scenario_ff = (sc->ff > 0) ? (float)sc->ff : s_ff;
     g_td5.ini.trace_fast_forward = s_scenario_ff;
     /* [RGOLD DETERMINISM 2026-07-22] The screen-walk phase's nav walker can
