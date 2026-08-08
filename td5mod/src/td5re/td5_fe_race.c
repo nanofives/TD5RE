@@ -232,7 +232,7 @@ static void mp_setup_name_backspace(int p);
 static int mp_repeat_fire(int p, uint32_t held, uint32_t edge, uint32_t now);
 /* [MP GAME MODES 2026-06-22] */
 static int  mp_game_modes_enabled(void);              /* env TD5RE_MP_GAME_MODES (default ON) */
-static void mp_mode_config_apply_defaults(int mode);  /* reset per-mode options to defaults  */
+void mp_mode_config_apply_defaults(int mode);  /* [CHUNK 6] non-static: called from td5_frontend.c hook */
 void frontend_mp_mode_vote_render(float sx, float sy);   /* dispatched from td5_frontend.c */
 void frontend_mp_mode_config_render(float sx, float sy);
 static void frontend_mp_setup_init(void);
@@ -3548,7 +3548,11 @@ static void mp_host_input(int *move, int *hdelta, int *confirm, int *back) {
 }
 
 /* Reset the per-mode option block to sane defaults when a mode is locked. */
-static void mp_mode_config_apply_defaults(int mode) {
+/* [CHUNK 6] Non-static so the AutoRace MP-mode hook (td5_frontend.c) can seed
+ * the same per-mode defaults the lobby uses -- most importantly the cop-chase
+ * suspect_head_start, whose absence left the AI cop spawning inside the suspect
+ * stack (starts alongside + floors throttle into overlapping cars -> launch). */
+void mp_mode_config_apply_defaults(int mode) {
     TD5_MpModeConfig *c = &g_td5.mp_mode_config;
     c->mode = mode;
     switch (mode) {

@@ -3282,6 +3282,11 @@ void td5_frontend_auto_race_setup(void) {
      * launches an MP-mode split-screen race with 1 human + N AI-driven panes,
      * bypassing the lobby. No-op unless [Game] MpMode >= 0. */
     if (g_td5.ini.mp_mode >= 0) {
+        /* [CHUNK 6] Seed the per-mode defaults the lobby normally applies (cop
+         * suspect_head_start, cop_is_ai, cup/battle knobs) so a hook-launched
+         * cop chase gives the AI cop its start setback -- without this it
+         * spawned inside the suspect stack and launched cars at high counts. */
+        mp_mode_config_apply_defaults(g_td5.ini.mp_mode);
         g_td5.mp_mode_config.mode = g_td5.ini.mp_mode;
         if (g_td5.ini.mp_ai_players > 0) {
             int total = 1 + g_td5.ini.mp_ai_players;   /* slot 0 human + N AI panes */

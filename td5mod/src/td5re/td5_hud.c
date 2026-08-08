@@ -3591,7 +3591,7 @@ static void hud_draw_copchase_arrest_strip(int view_index)
         for (int i = 0; i < ncop; i++) {
             char nm[12];
             if (s_hud_id_name[cops[i]][0]) snprintf(nm, sizeof nm, "%s", s_hud_id_name[cops[i]]);
-            else                           snprintf(nm, sizeof nm, "COP%d", cops[i] + 1);
+            else                           snprintf(nm, sizeof nm, "COP%d", i + 1);  /* [CHUNK 6] sequential cop ordinal, not the raw racer-slot index (was "COP10") */
             s_hud_next_text_scale = copchase_hud_text_scale();
             td5_hud_queue_text(0, (int)vl->center_x,
                                (int)(vl->vp_int_top + 6.0f + tshift + (float)i * 16.0f), 1,
