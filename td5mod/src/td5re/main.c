@@ -587,6 +587,9 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "DefaultOpponents",     &g_td5.ini.default_opponents },
         { "CircuitMinimap",       &g_td5.ini.circuit_minimap },
         { "DefaultPlayers",       &g_td5.ini.default_players },
+        { "DefaultPaint",         &g_td5.ini.default_paint },
+        { "MpMode",               &g_td5.ini.mp_mode },
+        { "MpAiPlayers",          &g_td5.ini.mp_ai_players },
         { "SpectateScreens",      &g_td5.ini.spectate_screens },
         { "ThreadedPanes",        &g_td5.ini.threaded_panes },
         { "OverrideTrackZip",     &g_td5.ini.override_track_zip },
@@ -1154,6 +1157,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.default_opponents = td5_ini_int("Game", "DefaultOpponents", -1); /* -1 = full grid */
     g_td5.ini.circuit_minimap   = td5_ini_int("Game", "CircuitMinimap", 1);    /* 1 = minimap on circuit tracks too */
     g_td5.ini.default_players   = td5_ini_int("Game", "DefaultPlayers", -1);   /* -1 = schedule default; >=2 = N-way split */
+    /* [NEW SUITE] AutoRace paint/MP-mode overrides. mp_mode DEFAULTS TO -1 (off)
+     * -- critical: the AutoRace hook fires on mp_mode>=0, so a 0 default (struct
+     * zero-init) would wrongly trigger it on every normal AutoRace. */
+    g_td5.ini.default_paint     = td5_ini_int("Game", "DefaultPaint", -1);     /* -1 = default TD5 paint (0) */
+    g_td5.ini.mp_mode           = td5_ini_int("Game", "MpMode", -1);           /* -1 = off; else TD5_MpGameMode */
+    g_td5.ini.mp_ai_players     = td5_ini_int("Game", "MpAiPlayers", 0);       /* 0 = off; else # AI player panes */
     g_td5.ini.spectate_screens  = td5_ini_int("Game", "SpectateScreens", 0);   /* 0 = off; N = N AI cars in their own pane (dev profiling) */
     g_td5.ini.threaded_panes    = td5_ini_int("Render", "ThreadedPanes", 0);   /* 1 = record split-screen panes (>2) on worker threads (deferred contexts) */
     g_td5.ini.override_track_zip = td5_ini_int("Game", "OverrideTrackZip", 0);  /* 0 = faithful; >0 = TD6 level NNN */
