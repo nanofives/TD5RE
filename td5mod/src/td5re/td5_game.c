@@ -4115,21 +4115,10 @@ static void init_race_spawn_actors(void)
                  * its own lane next to them). */
                 int grid_n = td5_game_mp_cop_chase_field();
                 if (grid_n < 1) grid_n = 1;
-                if (grid_n <= lanes) {
+                if (grid_n <= lanes)
                     sub_lane = lane_lo + (lanes - grid_n) / 2 + effective_slot;  /* centred, distinct */
-                } else {
-                    /* [CHUNK 2 fix] More racers than lanes: reuse the lane modulo,
-                     * but stagger each overflow ROW down-track so two cars never
-                     * spawn at the SAME (span, lane, Y). Coincident spawns were
-                     * launched airborne by the collision solver's penetration
-                     * impulse (cop-chase 5/9 players: peak speed ~3x, jump 21715). */
-                    int row = effective_slot / lanes;
-                    int gap = td5_env_int("TD5RE_COP_STACK_GAP", 4, 1, 64);
-                    sub_lane = lane_lo + (effective_slot % lanes);
-                    span_index -= row * gap;    /* rows behind the start line */
-                    actor_span -= row * gap;
-                    if (span_index < 1) span_index = 1;
-                }
+                else
+                    sub_lane = lane_lo + (effective_slot % lanes);              /* reuse when out */
                 if (sub_lane < lane_lo) sub_lane = lane_lo;
                 if (sub_lane > lane_hi) sub_lane = lane_hi;
             }
