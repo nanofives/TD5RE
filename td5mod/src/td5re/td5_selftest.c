@@ -608,6 +608,7 @@ static struct {
     int       peak_air;                       /* max airborne_frame_counter (any slot) */
     long long peak_speed;                     /* max |longitudinal_speed| raw (8.8) */
     long long peak_jump;                      /* max per-sample |pos delta| raw (24.8) */
+    int       peak_span;                      /* max driven-slot folded track span (drag-trim check) */
 } s_inv;
 /* s_inv_max_world = coarse overflow guard (only catches int32-range garbage);
  * s_inv_max_jump = the real teleport detector (per-sample position delta cap —
@@ -692,6 +693,8 @@ static void st_inv_sample(void)
         if (!s_inv.seen[slot]) { s_inv.seen[slot] = 1; s_inv.prog0[slot] = prog; }
         s_inv.progN[slot] = prog;
     }
+    { int s0 = td5_game_get_slot_span(0);   /* driven-slot span (drag-trim check) */
+      if (s0 > s_inv.peak_span) s_inv.peak_span = s0; }
     s_inv.samples++;
 }
 
@@ -732,9 +735,9 @@ static int st_inv_result(int depth, char *note, size_t nsz)
      * and peak per-tick position jump (both truncated 24.8/8.8 -> display), and
      * how many active cars actually moved. This quantifies "cars fly/jump" the
      * generous FAIL thresholds don't trip. */
-    snprintf(tele, sizeof(tele), "air=%d spd=%lld jmp=%lld prog=%d/%d",
+    snprintf(tele, sizeof(tele), "air=%d spd=%lld jmp=%lld prog=%d/%d span=%d",
              s_inv.peak_air, (long long)(s_inv.peak_speed >> 8),
-             (long long)(s_inv.peak_jump >> 8), moved, active);
+             (long long)(s_inv.peak_jump >> 8), moved, active, s_inv.peak_span);
     if (status == ST_PASS)
         snprintf(note, nsz, "ok (%d samp) %s", s_inv.samples, tele);
     else
