@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 9" },
+    { CL_ITEM,    "FIX (arcade power-ups): item boxes on some tracks (e.g." },
+    { CL_ITEM,    "  Newcastle) spawned high in the air / off the map - a" },
+    { CL_ITEM,    "  unit bug placed centre-lane boxes at 256x their" },
+    { CL_ITEM,    "  position. They now sit just over the road as intended." },
     { CL_ITEM,    "FIX (split-screen): top/bottom (and 3-strip) panes were" },
     { CL_ITEM,    "  zoomed in too far - the wide-window FOV cap misfired on" },
     { CL_ITEM,    "  the ultra-wide panes. They now match the full-screen" },

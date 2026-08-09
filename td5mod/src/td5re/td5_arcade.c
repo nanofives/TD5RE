@@ -328,11 +328,18 @@ static int arc_emit_box(int span, int sub, int lanes, int lift, uint32_t *rng) {
         int lx, ly, lz;
         if (td5_track_get_span_lane_world(span, sub, &lx, &ly, &lz)) {
             x = lx / 256; y = ly / 256; z = lz / 256;   /* 24.8 fixed -> render units */
-        } else if (!td5_track_get_span_center_world(span, &x, &y, &z)) {
+        } else if (td5_track_get_span_center_world(span, &x, &y, &z)) {
+            /* [AIR-SPAWN FIX 2026-08-09] center-world returns the SAME 24.8-fixed
+             * units as lane-world, so it MUST be /256 too. Without it the box lands
+             * at 256x its position -- way up in the air / off in space (Newcastle,
+             * whose single-lane spans fall through to this center path). */
+            x /= 256; y /= 256; z /= 256;
+        } else {
             return 0;
         }
     } else {
         if (!td5_track_get_span_center_world(span, &x, &y, &z)) return 0;
+        x /= 256; y /= 256; z /= 256;   /* [AIR-SPAWN FIX] 24.8 fixed -> render units */
         sub = lanes / 2;
     }
     ArcPad *p = &s_pads[s_pad_count];
