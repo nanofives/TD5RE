@@ -1017,6 +1017,16 @@ int s_banner_cull_revflip  = -1; /* [#9] auto-flip kept side in reverse (env TD5
 int s_native_banner_keep_pos = 1; /* [NATIVE BANNERS] kept winding sign for detected native pages (env TD5RE_NATIVE_BANNER_FLIP) */
 int s_banner_align         = -1; /* [START-banner align] -1 uninit; 0 off; 1 on (env TD5RE_BANNER_ALIGN) */
 int s_banner_align_log     = 0;  /* throttle the per-mesh align log */
+/* [DRAG BANNER] The drag finish gantry (dl26) bundles a double-sided FINISH text
+ * panel: with CullMode=NONE the front face ("FINISH") and its mirror-wound back
+ * face ("HSINIF") rasterise onto the same pixels -> garbled/doubled red text. The
+ * native-banner geometry scan that would one-side-cull it is OFF by default (it
+ * false-flagged fences/foliage on native tracks) and the gantry shares texture
+ * pages with the stadium, so page-flagging is unsafe. Instead we cull one winding
+ * MESH-SCOPED (only while dispatching s_drag_gantry_mesh), which never touches any
+ * shared-page stadium/fence geometry. */
+int s_drag_gantry_cull     = 0;  /* set per-mesh in the span walk */
+int s_drag_gantry_keep_pos = -1; /* -1 uninit; kept winding sign (env TD5RE_DRAG_GANTRY_FLIP) */
 /* [START-banner align] Pending world-space X shift applied by
  * td5_render_transform_mesh_vertices to OVERHEAD banner verts only (pos_y above
  * the threshold), so the gantry's ground start-plaza (pos_y~0) is NOT dragged
@@ -1439,6 +1449,20 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
          * td6_is_banner_page returns 0 there. */
         int is_td6_banner    = td6_is_banner_page(tex_page);
         int is_native_banner = !is_td6_banner && td5_track_is_native_banner_page(tex_page);
+        /* [DRAG BANNER] Mesh-scoped one-sided cull for the drag finish gantry. We
+         * approach it head-on, so the readable (camera-facing) winding is kept and
+         * the mirror-wound back face is dropped -- de-garbling the FINISH text
+         * without needing the shared-page-unsafe native-banner scan. Scoped to the
+         * gantry mesh only (s_drag_gantry_cull), so no other geometry is affected. */
+        if (s_level_pass_active && s_drag_gantry_cull) {
+            if (s_drag_gantry_keep_pos < 0)
+                s_drag_gantry_keep_pos = td5_env_flag_off("TD5RE_DRAG_GANTRY_FLIP") ? 1 : 0;
+            int facing_away = s_drag_gantry_keep_pos ? (cross < 0.0f) : (cross > 0.0f);
+            if (facing_away) {
+                s_debug_clip_backface_rejects++;
+                return;
+            }
+        }
         if (s_level_pass_active && s_banner_cull && (is_td6_banner || is_native_banner)) {
             /* [#9 2026-06-19] Auto-flip the kept (camera-facing) winding sign in
              * reverse — each panel's screen winding flips when driven backward,

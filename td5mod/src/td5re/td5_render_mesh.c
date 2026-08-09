@@ -1560,6 +1560,12 @@ void td5_render_span_display_list(const TD5_SpanDisplayList *display_list_block)
         if (g_td5.drag_race_enabled && s_dl_z_offset == 0.0f && mesh == s_drag_gantry_mesh)
             continue;
 
+        /* [DRAG BANNER] One-sided cull the drag FINISH gantry (dl26): a double-sided
+         * road-spanning panel whose mirror-wound back face garbles the "FINISH" text
+         * under CullMode=NONE. Per-mesh so it never leaks onto neighbouring stadium/
+         * fence geometry that shares its texture pages. */
+        s_drag_gantry_cull = (g_td5.drag_race_enabled && mesh == s_drag_gantry_mesh) ? 1 : 0;
+
         /* [#20 HK reverse] DELIBERATE DEVIATION (user-requested): remove the building
          * standing in the Hong Kong REVERSE racing line (models entry 509 sub 8/10/11,
          * matched by EXACT bounding centre). Each of those submeshes spans from road
@@ -1738,6 +1744,7 @@ void td5_render_span_display_list(const TD5_SpanDisplayList *display_list_block)
     s_level_pass_active = 0;        /* [banners] one-sided cull off outside level geometry */
     s_banner_vshift_x = 0.0f;       /* [START-banner align] never leak into sky/car/other mesh transforms */
     s_drag_road_scale = 1.0f;       /* [DRAG WIDE ROAD] never leak the lateral widen into car/sky/HUD */
+    s_drag_gantry_cull = 0;         /* [DRAG BANNER] one-sided cull is gantry-mesh only */
 
     if ((s_debug_dl_calls % 500) == 1) {
         TD5_LOG_I(LOG_TAG,

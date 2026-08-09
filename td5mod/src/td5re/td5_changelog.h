@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 9" },
+    { CL_ITEM,    "FIX (drag): the FINISH-line banner no longer shows" },
+    { CL_ITEM,    "  garbled/doubled text - the gantry's double-sided" },
+    { CL_ITEM,    "  panel now draws one side only, so FINISH reads" },
+    { CL_ITEM,    "  cleanly instead of overlaid with its mirror." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 5" },
     { CL_ITEM,    "NEW (manual gearbox): engine braking - holding the" },
     { CL_ITEM,    "  wrong (too-low) gear at high revs now slows you, and" },
