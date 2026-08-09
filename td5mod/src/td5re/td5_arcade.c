@@ -538,13 +538,32 @@ void td5_arcade_init_race(void) {
         rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;       /* roll for double */
         int make_dbl = (dbl_pct > 0) && (lanes > 1) && ((int)(rng % 100u) < dbl_pct);
 
-        /* Shoulder lanes, inset one lane toward centre. Clamp into [0,lanes-1]
-         * and collapse to the centre lane if the inset would make them cross. */
-        int left_lane  = lane_inset;
-        int right_lane = lanes - 1 - lane_inset;
-        if (left_lane  > lanes - 1) left_lane  = lanes - 1;
-        if (right_lane < 0)         right_lane = 0;
-        if (left_lane  > right_lane) left_lane = right_lane = lanes / 2;
+        /* Shoulder lanes for the alternating single-box placement. Pick the
+         * outermost DRIVABLE lanes (skip verge/slow lanes so boxes never land on
+         * grass), then optionally inset toward centre -- but ONLY on a wide band.
+         * [LANE-SPREAD FIX 2026-08-09] The old code always inset by lane_inset and
+         * collapsed left/right onto ONE centre lane whenever they crossed. On a
+         * 2-lane road (most of Newcastle) that put EVERY box in the same lane and
+         * defeated the left/right alternation. Keeping the outer drivable lanes on
+         * a 2-3 lane road makes the alternation actually use BOTH lanes. */
+        int lo = 0, hi = lanes - 1;
+        {
+            int a = -1, b = -1;
+            for (int ln = 0; ln < lanes; ln++) {
+                if (td5_track_surface_is_slow(td5_track_get_span_lane_surface(span, ln)))
+                    continue;
+                if (a < 0) a = ln;
+                b = ln;
+            }
+            if (a >= 0) { lo = a; hi = b; }   /* fall back to [0,lanes-1] if none */
+        }
+        int left_lane  = lo;
+        int right_lane = hi;
+        if (hi - lo >= 3) {                    /* wide band: pull off the very edge */
+            left_lane  = lo + lane_inset;
+            right_lane = hi - lane_inset;
+        }
+        if (left_lane > right_lane) left_lane = right_lane = (lo + hi) / 2;
 
         /* [ITEM CHAOS 2026-07-04] Mashed-style: ONE box in EVERY lane at this
          * spawn point (up to 4 wide on a 4-lane span), instead of the regular
