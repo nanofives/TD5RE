@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 9" },
+    { CL_ITEM,    "FIX (split-screen): top/bottom (and 3-strip) panes were" },
+    { CL_ITEM,    "  zoomed in too far - the wide-window FOV cap misfired on" },
+    { CL_ITEM,    "  the ultra-wide panes. They now match the full-screen" },
+    { CL_ITEM,    "  vertical framing and just show a wider view." },
     { CL_ITEM,    "FIX (drag): the START and FINISH banners no longer" },
     { CL_ITEM,    "  show garbled/doubled text - both signs drew their" },
     { CL_ITEM,    "  front + a mirrored back panel at once; now only the" },

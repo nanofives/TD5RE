@@ -3504,15 +3504,28 @@ void td5_render_configure_projection(int width, int height)
      * e.g. 180 to disable the cap and restore pure Hor+). */
     {
         static float s_hfov_max = -1.0f;
+        static int   s_hfov_explicit = 0;
         if (s_hfov_max < 0.0f) {
             const char *e = getenv("TD5RE_HFOV_MAX");
-            s_hfov_max = (e && e[0]) ? (float)atof(e) : 90.0f;
+            s_hfov_explicit = (e && e[0]) ? 1 : 0;
+            s_hfov_max = s_hfov_explicit ? (float)atof(e) : 90.0f;
             if (s_hfov_max < 40.0f)  s_hfov_max = 40.0f;
             if (s_hfov_max > 175.0f) s_hfov_max = 175.0f;
         }
-        float half_hfov_rad = s_hfov_max * 0.5f * (3.14159265358979323846f / 180.0f);
-        float min_focal = ((float)width * 0.5f) / tanf(half_hfov_rad);
-        if (s_focal_length < min_focal) s_focal_length = min_focal;
+        /* [SPLIT FOV 2026-08-09] Skip the H-FOV cap for split-screen PANES. A top/
+         * bottom (or 3-strip) pane is intentionally ultra-wide (>= ~2.67:1), and the
+         * 90-deg cap forces the focal far up there -> vertical FOV cropped to ~41 deg,
+         * i.e. the "too zoomed" split view. Letting split panes run pure vertical-lock
+         * (Hor+) keeps their vertical framing identical to full-screen and just widens
+         * horizontally -- the expected split look. Full-screen still caps (protects
+         * ultra-wide MONITORS); an explicit TD5RE_HFOV_MAX override still applies
+         * everywhere. (Only ultra-wide horizontal panes actually hit the cap anyway;
+         * 2x2 / left-right panes are <= 90 deg and are unaffected either way.) */
+        if (s_hfov_explicit || g_td5.split_screen_mode == 0) {
+            float half_hfov_rad = s_hfov_max * 0.5f * (3.14159265358979323846f / 180.0f);
+            float min_focal = ((float)width * 0.5f) / tanf(half_hfov_rad);
+            if (s_focal_length < min_focal) s_focal_length = min_focal;
+        }
     }
 
     s_inv_focal    = 1.0f / s_focal_length;
