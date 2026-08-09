@@ -10557,6 +10557,19 @@ void td5_game_show_legal_screens(void) {
  * and desync golden traces). */
 static int s_loadscreen_index = 0;
 
+/* [SPLASH PAGE FIX 2026-08-09] Dedicated GPU texture page for the pre-race
+ * loading splash (a car splash-art image). It MUST NOT be page 0: page 0 is a
+ * real level texture (tex_000) and the track fallback page
+ * (TRACK_FALLBACK_TEXTURE_PAGE, td5_track.c). The RT warmup pump re-uploads the
+ * splash AFTER the real level textures load (rt_warmup_loading_pump runs at the
+ * end of InitRace, after td5_asset_load_race_texture_pages) and never restored
+ * page 0 -- so under RT HIGH every track primitive that samples page 0 showed
+ * the leftover car splash-art in the middle of the track. Mirror the FMV
+ * scratch-page pattern (FMV_SCRATCH_TEXTURE_PAGE 599) and keep page 0 clean.
+ * 598 is free: below the static atlas (700+), car (800+), frontend (900+) and
+ * sky/fallback (1020/1021) ranges, adjacent to the FMV scratch. */
+#define LOADSCREEN_SCRATCH_TEXTURE_PAGE 598
+
 static void display_loading_screen_tga(void) {
     char png_path[128];
     int index = rand() % 20;
@@ -10601,7 +10614,7 @@ static void display_loading_screen_tga(void) {
         verts[3].diffuse = 0xFFFFFFFF; verts[3].specular = 0;
         verts[3].tex_u = 0.0f;    verts[3].tex_v = 1.0f;
 
-        td5_plat_render_upload_texture(0, pixels, img_w, img_h, 2);
+        td5_plat_render_upload_texture(LOADSCREEN_SCRATCH_TEXTURE_PAGE, pixels, img_w, img_h, 2);
         /* [D3D12 2026-07-31] Present the splash across MULTIPLE frames, not once.
          * The D3D12 backend uploads page 0 and samples it in the same present, but
          * the upload copy isn't GPU-resident on that first frame -> the one-shot
@@ -10614,7 +10627,7 @@ static void display_loading_screen_tga(void) {
             td5_plat_render_begin_scene();
             td5_plat_render_set_viewport(0, 0, screen_w, screen_h);
             td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-            td5_plat_render_bind_texture(0);
+            td5_plat_render_bind_texture(LOADSCREEN_SCRATCH_TEXTURE_PAGE);
             td5_plat_render_draw_tris(verts, 4, indices, 6);
             td5_plat_render_end_scene();
             td5_plat_present(0);
@@ -10678,7 +10691,7 @@ static void rt_warmup_loading_pump(void) {
     if (!td5_asset_load_png_to_buffer(png_path, TD5_COLORKEY_NONE, &pixels, &img_w, &img_h))
         pixels = NULL;
     if (pixels)
-        td5_plat_render_upload_texture(0, pixels, img_w, img_h, 2);
+        td5_plat_render_upload_texture(LOADSCREEN_SCRATCH_TEXTURE_PAGE, pixels, img_w, img_h, 2);
 
     TD5_LOG_I(LOG_TAG, "RT warmup: draining BLAS wave on loading screen (pending=%d)",
               td5_plat_rt_warmup_pending());
@@ -10690,7 +10703,7 @@ static void rt_warmup_loading_pump(void) {
         td5_plat_render_set_viewport(0, 0, screen_w, screen_h);
         if (pixels) {
             td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-            td5_plat_render_bind_texture(0);
+            td5_plat_render_bind_texture(LOADSCREEN_SCRATCH_TEXTURE_PAGE);
             td5_plat_render_draw_tris(verts, 4, indices, 6);
         }
         /* Frame 0: create pipeline objects + force RT-pipeline driver residency.
