@@ -33,10 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 9" },
-    { CL_ITEM,    "FIX (drag): the FINISH-line banner no longer shows" },
-    { CL_ITEM,    "  garbled/doubled text - the gantry's double-sided" },
-    { CL_ITEM,    "  panel now draws one side only, so FINISH reads" },
-    { CL_ITEM,    "  cleanly instead of overlaid with its mirror." },
+    { CL_ITEM,    "FIX (drag): the START and FINISH banners no longer" },
+    { CL_ITEM,    "  show garbled/doubled text - both signs drew their" },
+    { CL_ITEM,    "  front + a mirrored back panel at once; now only the" },
+    { CL_ITEM,    "  camera-facing side draws, so both read cleanly." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 5" },

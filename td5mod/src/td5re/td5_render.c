@@ -1449,12 +1449,18 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
          * td6_is_banner_page returns 0 there. */
         int is_td6_banner    = td6_is_banner_page(tex_page);
         int is_native_banner = !is_td6_banner && td5_track_is_native_banner_page(tex_page);
-        /* [DRAG BANNER] Mesh-scoped one-sided cull for the drag finish gantry. We
-         * approach it head-on, so the readable (camera-facing) winding is kept and
-         * the mirror-wound back face is dropped -- de-garbling the FINISH text
-         * without needing the shared-page-unsafe native-banner scan. Scoped to the
-         * gantry mesh only (s_drag_gantry_cull), so no other geometry is affected. */
-        if (s_level_pass_active && s_drag_gantry_cull) {
+        /* [DRAG BANNER] One-sided cull for the drag START + FINISH banners, both of
+         * which draw front + mirror-wound back panels under CullMode=NONE (garbled/
+         * doubled text). Keep the camera-facing winding, drop the back.
+         *   - FINISH gantry (dl26): MESH-scoped (s_drag_gantry_cull) -- the whole mesh
+         *     is banner, and it shares texture pages with the stadium so we can't key
+         *     on the page.
+         *   - START sign: embedded in the shared dl3 entrance mesh, but its two faces
+         *     live on banner-EXCLUSIVE pages 71 ("START" front) + 72 (mirror back),
+         *     so we key on those pages -- safe, since no stadium geometry uses them. */
+        int is_drag_start_banner = g_td5.drag_race_enabled &&
+                                   (tex_page == 71 || tex_page == 72);
+        if (s_level_pass_active && (s_drag_gantry_cull || is_drag_start_banner)) {
             if (s_drag_gantry_keep_pos < 0)
                 s_drag_gantry_keep_pos = td5_env_flag_off("TD5RE_DRAG_GANTRY_FLIP") ? 1 : 0;
             int facing_away = s_drag_gantry_keep_pos ? (cross < 0.0f) : (cross > 0.0f);
