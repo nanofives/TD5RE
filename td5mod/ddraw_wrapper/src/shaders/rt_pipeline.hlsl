@@ -443,7 +443,12 @@ void rgen_refl()
     int matid = raw & 0x3F;
     float base = rt_reflectivity(matid);
     float3 N = normalize(gb.rgb * 2.0f - 1.0f);
-    if (matid == 1 && !isCar && -N.y > 0.6f) base += sr_misc.w * saturate((-N.y - 0.6f) / 0.4f);  /* wet road */
+    /* [RT-NIGHT 2026-08-10] Wet-road sheen: gate on the WETROAD matid (7), NOT
+     * every up-facing DEFAULT(1) pixel. Only pages classified as road/pavement
+     * (td5_material.c) upgrade to WETROAD in HIGH, so grass/dirt/terrain (which
+     * stay DEFAULT, reflectivity 0) no longer mirror. sr_misc.w is fed tiny in
+     * HIGH (~0.06) so this is a faint Fresnel-weighted damp sheen, not a mirror. */
+    if (matid == 7 && !isCar && -N.y > 0.6f) base += sr_misc.w * saturate((-N.y - 0.6f) / 0.4f);  /* wet road (selective) */
     /* [CAR SUN 2026-08-04] Give car paint & glass real gloss so they MIRROR the
      * bright sky + sun disc (miss_refl) — "sunlight reflected through the chassis
      * and windows". Body = moderate clearcoat, glass = strong mirror, lights matte. */

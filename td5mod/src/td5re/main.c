@@ -493,11 +493,13 @@ static const TD5_CfgIntEntry k_lighting_cfg[] = {
     /* [TDR-safe defaults 2026-08-02] The initial "all-max" defaults produced
      * multi-second RT frames at high res (2560x1351) and tripped the Windows
      * TDR watchdog. New defaults are a modest, TDR-safe RT look (2 sun-shadow
-     * rays + probe + realistic lights; GI + reflections OFF, bounded range) —
-     * everything is still tunable UP per-feature in LIGHTING OPTIONS. */
+     * rays + probe + realistic lights; GI on; reflections ON at bounded FAR
+     * range — the TDR culprit was UNLIMITED reflection range, not the pass
+     * itself, so glass/paint reflect out of the box while staying TDR-safe) —
+     * everything is still tunable per-feature in LIGHTING OPTIONS. */
     { "ShadowRays",       "Lighting", "ShadowRays",       &g_td5.ini.rt_shadow_rays,    2 },
     { "ShadowRes",        "Lighting", "ShadowRes",        &g_td5.ini.rt_shadow_res,     1 },
-    { "ReflectionQuality","Lighting", "ReflectionQuality",&g_td5.ini.rt_reflection_q,   0 },
+    { "ReflectionQuality","Lighting", "ReflectionQuality",&g_td5.ini.rt_reflection_q,   2 },
     { "ReflectionRange",  "Lighting", "ReflectionRange",  &g_td5.ini.rt_reflection_rng, 1 },
     { "GIQuality",        "Lighting", "GIQuality",        &g_td5.ini.rt_gi_quality,     1 },
     { "SunProbe",         "Lighting", "SunProbe",         &g_td5.ini.rt_sun_probe,      1 },
@@ -1000,12 +1002,24 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * miss_shadow -> DispatchRays(AO) hung the GPU; fixed in d3d12_dxr.c). With
      * that fixed GI LOW runs ~100fps stable and restores the RT sky-visibility
      * look (replaces the legacy zone-darkening). */
-    #define RT_OPT_VERSION_CURRENT 4
+    /* v5 (2026-08-10): reflections back ON by default (FULL) at the bounded FAR
+     * range (50000, NOT the UNLIMITED 1e7 that caused the original TDR). Car
+     * chassis/glass now mirror the sky/scene out of the box; earlier defaults
+     * left ReflectionQuality=0, which forced g_td5.ini.reflections=0 and
+     * skipped the whole SSR/RT reflection pass. Range stays FAR = TDR-safe. */
+    #define RT_OPT_VERSION_CURRENT 5
     if (g_td5.ini.rt_opt_version < RT_OPT_VERSION_CURRENT) {
         g_td5.ini.rt_shadow_rays    = 2;
         g_td5.ini.rt_shadow_res     = 1;
-        g_td5.ini.rt_reflection_q   = 0;
-        g_td5.ini.rt_reflection_rng = 1;
+        g_td5.ini.rt_reflection_q   = 2;   /* FULL — pass ON (bounded FAR range below) */
+        g_td5.ini.rt_reflection_rng = 1;   /* FAR (50000) — TDR-safe, not UNLIMITED */
+        /* The tier→bool mapping (td5_rt_apply_lighting_options) only forces the
+         * legacy [Lighting]Reflections bool OFF when the tier is 0; it never turns
+         * it back ON. Migrating users carry Reflections=0 persisted from the
+         * tier-0 era, so the tier bump alone wouldn't re-enable the pass — flip
+         * the bool here too (one-time, keyed on the version; a later manual OFF
+         * in LIGHTING OPTIONS still sticks because v5 won't fire again). */
+        g_td5.ini.reflections       = 1;
         g_td5.ini.rt_gi_quality     = 1;
         g_td5.ini.rt_sun_probe      = 1;
         g_td5.ini.rt_light_quality  = 1;
