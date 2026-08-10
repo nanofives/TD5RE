@@ -299,6 +299,8 @@ extern int  s_mp_ai_cop_count;                        /* cop chase: # AI players
 int  frontend_mp_slot_is_ai(int p);
 int  frontend_mp_ai_player_count(void);
 int  frontend_mp_human_count(void);
+int  frontend_exit_confirm_active(void);   /* [CHUNK 5] modal EXIT confirm gate */
+void mp_mode_config_apply_defaults(int mode); /* [CHUNK 6] seed per-mode MP defaults */
 int  frontend_mp_ai_cop_count(void);
 const char *frontend_mp_ai_pool_name(int idx);   /* [CUP TEAM SELECT] display name for a cup AI opponent */
 int  frontend_mp_add_ai_player(void);

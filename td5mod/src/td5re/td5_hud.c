@@ -3591,7 +3591,7 @@ static void hud_draw_copchase_arrest_strip(int view_index)
         for (int i = 0; i < ncop; i++) {
             char nm[12];
             if (s_hud_id_name[cops[i]][0]) snprintf(nm, sizeof nm, "%s", s_hud_id_name[cops[i]]);
-            else                           snprintf(nm, sizeof nm, "COP%d", cops[i] + 1);
+            else                           snprintf(nm, sizeof nm, "COP%d", i + 1);  /* [CHUNK 6] sequential cop ordinal, not the raw racer-slot index (was "COP10") */
             s_hud_next_text_scale = copchase_hud_text_scale();
             td5_hud_queue_text(0, (int)vl->center_x,
                                (int)(vl->vp_int_top + 6.0f + tshift + (float)i * 16.0f), 1,
@@ -7084,11 +7084,22 @@ void td5_hud_render_minimap(int actor_slot)
             /* start_span = ((player_span/24) - 6) * 24 — 144 spans behind the
              * player, same formula as the P2P path [orig @ 0x43A372-0x43A3B7]. */
             int start = (center / 24 - 6) * 24;
-            /* [#6 2026-06-15] Same extended forward window as the P2P walk
-             * (mm_walk_quads; 72 with the look-ahead knob on, 48 off, clamped to
-             * MINIMAP_SEG_MAX). The break-at-a-lap guard below still bounds this to
-             * one ring, so a small ring is never over-walked. */
-            for (int i = 0; i < mm_walk_quads; i++) {   /* orig was while < 0x30 */
+            /* [2026-08-09] Walk the WHOLE ring, not a fixed 48/72-quad window.
+             * On a big circuit (Newcastle, ring=634) a 72-quad window only reaches
+             * ~432 spans, so far-but-visible parts of the loop — e.g. the road
+             * that passes UNDER the start/finish bridge — were never walked and the
+             * line "finished abruptly" mid-rectangle. The per-quad AABB cull inside
+             * minimap_emit_road_quad already drops everything outside the minimap
+             * rectangle, so covering the full ring shows exactly what's visible and
+             * no more. The break-at-a-lap guard still terminates after one ring;
+             * near/far index the span pool via modulo, so a large count can't
+             * overflow any array. (P2P keeps its mm_walk_quads window — its strip
+             * doesn't loop, and widening it risks redrawing the disconnected
+             * post-finish tail.) */
+            int mm_ring_quads = ring / 6 + 2;           /* enough to cover one lap */
+            if (!hud_knob_on("TD5RE_MINIMAP_FULLRING"))  /* =0 restores the old window */
+                mm_ring_quads = mm_walk_quads;
+            for (int i = 0; i < mm_ring_quads; i++) {
                 int near_raw = start + i * 6;           /* advance ~6 spans / quad */
                 if (near_raw - start >= ring) break;    /* covered a full lap; stop */
                 int far_raw  = near_raw + 5;

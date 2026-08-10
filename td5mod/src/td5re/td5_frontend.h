@@ -106,6 +106,12 @@ int  td5_frontend_selftest_button_count(void);
  * which screen it ran on, how many navigable buttons it reached vs total.
  * *screen = -1 if it has not run yet. Any out-param may be NULL. */
 void td5_frontend_selftest_nav_result(int *screen, int *reached, int *navigable);
+/* --- MP-lobby seeding the selftest MP-mode rows drive (defined in the frontend;
+ * exposed here so td5_selftest.c doesn't inline-extern them). --- */
+void frontend_mp_simul_preview_setup(int n);
+int  frontend_mp_ai_player_count(void);
+int  frontend_mp_human_count(void);
+void frontend_mp_ai_players_reset(void);
 #endif
 
 #endif /* TD5_FRONTEND_H */

@@ -797,7 +797,12 @@ void td5_plat_input_poll(int slot, TD5_InputState *out)
          * =gear) are intentionally dropped — keeping a second hardcoded key alive
          * after a rebind is exactly the bug being fixed. */
         {
-            const uint8_t *kb = s_kb_bindings[(slot == 0) ? 0 : 1];
+            /* [CHUNK 5] Split-keyboard MP retired: only ONE keyboard is allowed
+             * (a 2nd local player must use a controller — enforced in
+             * ctrl_opts_cycle_device), and it always uses the single DEFAULT
+             * binding set. The old per-slot WASD row (s_kb_bindings[1]) is no
+             * longer selected. */
+            const uint8_t *kb = s_kb_bindings[0];
             if (K_DOWN(kb[0])) bits |= TD5_INPUT_STEER_LEFT;
             if (K_DOWN(kb[1])) bits |= TD5_INPUT_STEER_RIGHT;
             if (K_DOWN(kb[2])) bits |= TD5_INPUT_THROTTLE;

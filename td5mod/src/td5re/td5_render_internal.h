@@ -587,6 +587,8 @@ extern float s_banner_vshift_x;
 extern float s_drag_road_scale;
 extern float s_dl_z_offset;
 extern TD5_MeshHeader *s_drag_gantry_mesh;
+extern int s_drag_gantry_cull;       /* [DRAG BANNER] one-sided cull active for the drag gantry mesh only */
+extern int s_drag_gantry_keep_pos;   /* [DRAG BANNER] kept winding sign for the drag gantry (env TD5RE_DRAG_GANTRY_FLIP) */
 extern const float *s_deform_dx;
 extern const float *s_deform_dy;
 extern const float *s_deform_dz;

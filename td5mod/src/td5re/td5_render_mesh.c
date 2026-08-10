@@ -1560,6 +1560,12 @@ void td5_render_span_display_list(const TD5_SpanDisplayList *display_list_block)
         if (g_td5.drag_race_enabled && s_dl_z_offset == 0.0f && mesh == s_drag_gantry_mesh)
             continue;
 
+        /* [DRAG BANNER] One-sided cull the drag FINISH gantry (dl26): a double-sided
+         * road-spanning panel whose mirror-wound back face garbles the "FINISH" text
+         * under CullMode=NONE. Per-mesh so it never leaks onto neighbouring stadium/
+         * fence geometry that shares its texture pages. */
+        s_drag_gantry_cull = (g_td5.drag_race_enabled && mesh == s_drag_gantry_mesh) ? 1 : 0;
+
         /* [#20 HK reverse] DELIBERATE DEVIATION (user-requested): remove the building
          * standing in the Hong Kong REVERSE racing line (models entry 509 sub 8/10/11,
          * matched by EXACT bounding centre). Each of those submeshes spans from road
@@ -1738,6 +1744,7 @@ void td5_render_span_display_list(const TD5_SpanDisplayList *display_list_block)
     s_level_pass_active = 0;        /* [banners] one-sided cull off outside level geometry */
     s_banner_vshift_x = 0.0f;       /* [START-banner align] never leak into sky/car/other mesh transforms */
     s_drag_road_scale = 1.0f;       /* [DRAG WIDE ROAD] never leak the lateral widen into car/sky/HUD */
+    s_drag_gantry_cull = 0;         /* [DRAG BANNER] one-sided cull is gantry-mesh only */
 
     if ((s_debug_dl_calls % 500) == 1) {
         TD5_LOG_I(LOG_TAG,
@@ -3497,15 +3504,28 @@ void td5_render_configure_projection(int width, int height)
      * e.g. 180 to disable the cap and restore pure Hor+). */
     {
         static float s_hfov_max = -1.0f;
+        static int   s_hfov_explicit = 0;
         if (s_hfov_max < 0.0f) {
             const char *e = getenv("TD5RE_HFOV_MAX");
-            s_hfov_max = (e && e[0]) ? (float)atof(e) : 90.0f;
+            s_hfov_explicit = (e && e[0]) ? 1 : 0;
+            s_hfov_max = s_hfov_explicit ? (float)atof(e) : 90.0f;
             if (s_hfov_max < 40.0f)  s_hfov_max = 40.0f;
             if (s_hfov_max > 175.0f) s_hfov_max = 175.0f;
         }
-        float half_hfov_rad = s_hfov_max * 0.5f * (3.14159265358979323846f / 180.0f);
-        float min_focal = ((float)width * 0.5f) / tanf(half_hfov_rad);
-        if (s_focal_length < min_focal) s_focal_length = min_focal;
+        /* [SPLIT FOV 2026-08-09] Skip the H-FOV cap for split-screen PANES. A top/
+         * bottom (or 3-strip) pane is intentionally ultra-wide (>= ~2.67:1), and the
+         * 90-deg cap forces the focal far up there -> vertical FOV cropped to ~41 deg,
+         * i.e. the "too zoomed" split view. Letting split panes run pure vertical-lock
+         * (Hor+) keeps their vertical framing identical to full-screen and just widens
+         * horizontally -- the expected split look. Full-screen still caps (protects
+         * ultra-wide MONITORS); an explicit TD5RE_HFOV_MAX override still applies
+         * everywhere. (Only ultra-wide horizontal panes actually hit the cap anyway;
+         * 2x2 / left-right panes are <= 90 deg and are unaffected either way.) */
+        if (s_hfov_explicit || g_td5.split_screen_mode == 0) {
+            float half_hfov_rad = s_hfov_max * 0.5f * (3.14159265358979323846f / 180.0f);
+            float min_focal = ((float)width * 0.5f) / tanf(half_hfov_rad);
+            if (s_focal_length < min_focal) s_focal_length = min_focal;
+        }
     }
 
     s_inv_focal    = 1.0f / s_focal_length;

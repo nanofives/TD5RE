@@ -328,11 +328,18 @@ static int arc_emit_box(int span, int sub, int lanes, int lift, uint32_t *rng) {
         int lx, ly, lz;
         if (td5_track_get_span_lane_world(span, sub, &lx, &ly, &lz)) {
             x = lx / 256; y = ly / 256; z = lz / 256;   /* 24.8 fixed -> render units */
-        } else if (!td5_track_get_span_center_world(span, &x, &y, &z)) {
+        } else if (td5_track_get_span_center_world(span, &x, &y, &z)) {
+            /* [AIR-SPAWN FIX 2026-08-09] center-world returns the SAME 24.8-fixed
+             * units as lane-world, so it MUST be /256 too. Without it the box lands
+             * at 256x its position -- way up in the air / off in space (Newcastle,
+             * whose single-lane spans fall through to this center path). */
+            x /= 256; y /= 256; z /= 256;
+        } else {
             return 0;
         }
     } else {
         if (!td5_track_get_span_center_world(span, &x, &y, &z)) return 0;
+        x /= 256; y /= 256; z /= 256;   /* [AIR-SPAWN FIX] 24.8 fixed -> render units */
         sub = lanes / 2;
     }
     ArcPad *p = &s_pads[s_pad_count];
@@ -447,6 +454,15 @@ void td5_arcade_init_race(void) {
     if (start_span >= s_ring) start_span = 0;     /* track shorter than offset */
     int usable = s_ring - start_span;
     if (usable < 1) usable = s_ring;
+    /* [CHUNK 3 fix] On a CIRCUIT the ring wraps (start span == finish span), so
+     * boxes spread toward s_ring-1 land immediately BEFORE the start/finish line
+     * -- i.e. right at the spawn point (seen on Pelton). Reserve the same start
+     * gap at the END too: drivable band becomes [start_span, s_ring-start_span).
+     * Point-to-point is unchanged (its finish is a hard end, not the spawn). */
+    if (g_td5.track_type == TD5_TRACK_CIRCUIT) {
+        int u2 = s_ring - 2 * start_span;
+        if (u2 >= 1) usable = u2;
+    }
 
     /* Frequency scales with the number of HUMAN players: 1 human -> ~SPACING_MAX
      * (300) spans between boxes, falling toward SPACING_MIN (100) as humans are
@@ -493,21 +509,6 @@ void td5_arcade_init_race(void) {
     int auto_lift = (int)(((int64_t)s_box_half * 11) / 10);
     int lift = knob("TD5RE_ARCADE_PAD_LIFT", auto_lift, 0, 200000);
 
-    /* Single boxes alternate left/right shoulder; side=0 forces centre (legacy). */
-    int side = knob("TD5RE_ARCADE_SIDE", 1, 0, 1);
-
-    /* [2026-06-28] Pull the shoulder boxes one lane in toward the centreline (per
-     * "one lane closer to the center"). 0 restores the original outer-edge
-     * placement. The chosen lanes are clamped per-span below so the two sides
-     * never cross on a narrow road. */
-    int lane_inset = knob("TD5RE_ARCADE_LANE_INSET", 1, 0, 8);
-
-    /* With >4 HUMAN players, each spawn point has a growing chance to hold TWO
-     * boxes — one on the left-most lane, one on the right-most — so a crowded
-     * field still has enough to grab. 25% at 5 humans, +15% per extra human. */
-    int dbl_pct = (num_h > 4) ? (25 + (num_h - 5) * 15) : 0;
-    if (dbl_pct > 90) dbl_pct = 90;
-
     /* Random kind per box, netplay-deterministic (private xorshift off the
      * REPLICATED per-race seed; no shared CRT rand on the sim path). */
     uint32_t rng = td5_game_get_race_seed() ^ 0x1B0CA9E5u;
@@ -519,32 +520,32 @@ void td5_arcade_init_race(void) {
         int lanes = td5_track_get_span_lane_count(span);
         if (lanes < 1) lanes = 1;
 
-        rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;       /* roll for double */
-        int make_dbl = (dbl_pct > 0) && (lanes > 1) && ((int)(rng % 100u) < dbl_pct);
-
-        /* Shoulder lanes, inset one lane toward centre. Clamp into [0,lanes-1]
-         * and collapse to the centre lane if the inset would make them cross. */
-        int left_lane  = lane_inset;
-        int right_lane = lanes - 1 - lane_inset;
-        if (left_lane  > lanes - 1) left_lane  = lanes - 1;
-        if (right_lane < 0)         right_lane = 0;
-        if (left_lane  > right_lane) left_lane = right_lane = lanes / 2;
-
-        /* [ITEM CHAOS 2026-07-04] Mashed-style: ONE box in EVERY lane at this
-         * spawn point (up to 4 wide on a 4-lane span), instead of the regular
-         * mode's 1-2 boxes. Spawn-point spacing/frequency along the ring is
-         * unchanged — this only changes how many boxes land at each point. */
-        if (g_td5.ini.powerups == 2) {   /* [ITEM CHAOS] 0=OFF 1=CASUAL 2=CHAOS */
-            int nlanes = lanes; if (nlanes > 4) nlanes = 4;
-            for (int ln = 0; ln < nlanes && s_pad_count < ARC_MAX_PADS; ln++)
-                arc_emit_box(span, ln, lanes, lift, &rng);
-        } else if (make_dbl && s_pad_count + 2 <= ARC_MAX_PADS) {
-            arc_emit_box(span, left_lane,  lanes, lift, &rng);     /* left  shoulder */
-            arc_emit_box(span, right_lane, lanes, lift, &rng);     /* right shoulder */
-        } else if (side && lanes > 1) {
-            arc_emit_box(span, (i & 1) ? right_lane : left_lane, lanes, lift, &rng);
-        } else {
-            arc_emit_box(span, -1, lanes, lift, &rng);            /* centre */
+        /* [BOTH-LANES 2026-08-09] Place ONE box in EVERY DRIVABLE lane at this
+         * spawn point (skip verge/grass/slow lanes) so a box is reachable whichever
+         * lane you're in -- for CASUAL (1) and CHAOS (2) alike. This replaces the
+         * old casual "1 box, alternating left/right shoulder" placement, which on a
+         * 2-lane road put only one lane's box at each point (you had to swerve to
+         * grab it -- the "power-ups only in one lane on Newcastle" report). The
+         * spawn-point spacing/frequency along the ring is unchanged; only the
+         * per-point lane fill changes. */
+        int placed = 0;
+        for (int ln = 0; ln < lanes && s_pad_count < ARC_MAX_PADS; ln++) {
+            if (td5_track_surface_is_slow(td5_track_get_span_lane_surface(span, ln)))
+                continue;
+            arc_emit_box(span, ln, lanes, lift, &rng);
+            placed++;
+        }
+        /* Fallback: surface data classified every lane slow/unknown, or the span
+         * is single-lane -> keep the span populated (centre for 1 lane, else the
+         * first up-to-4 lanes). */
+        if (placed == 0) {
+            if (lanes <= 1) {
+                arc_emit_box(span, -1, lanes, lift, &rng);       /* centre */
+            } else {
+                int nlanes = lanes; if (nlanes > 4) nlanes = 4;
+                for (int ln = 0; ln < nlanes && s_pad_count < ARC_MAX_PADS; ln++)
+                    arc_emit_box(span, ln, lanes, lift, &rng);
+            }
         }
     }
 
@@ -553,8 +554,8 @@ void td5_arcade_init_race(void) {
     {
         TD5_Actor *p0 = td5_game_get_actor(0);
         TD5_LOG_I(LOG_TAG,
-                  "init: ARCADE on — ring=%d pads=%d humans=%d spacing=%d dbl%%=%d powerups_mode=%d pad0=(%d,%d,%d) player/256=(%d,%d,%d)",
-                  s_ring, s_pad_count, num_h, spacing, dbl_pct, g_td5.ini.powerups,
+                  "init: ARCADE on — ring=%d pads=%d humans=%d spacing=%d powerups_mode=%d pad0=(%d,%d,%d) player/256=(%d,%d,%d)",
+                  s_ring, s_pad_count, num_h, spacing, g_td5.ini.powerups,
                   s_pad_count ? s_pads[0].x : 0,
                   s_pad_count ? s_pads[0].y : 0,
                   s_pad_count ? s_pads[0].z : 0,
@@ -594,7 +595,13 @@ void td5_arcade_tick(void) {
      * spans of track, so in chaos mode (many boxes) it was unpredictable which one
      * you grabbed. Knob TD5RE_ARCADE_PICKUP_SPANS still overrides. */
     int pick_win = knob("TD5RE_ARCADE_PICKUP_SPANS", 1, 1, 30);
-    int lane_tol = knob("TD5RE_ARCADE_PICKUP_LANES", 1, 0, 8);
+    /* [2026-08-09] Lane tolerance default 1 -> 0. Now that a box sits in EVERY
+     * drivable lane at each spawn point, you should collect the box in YOUR lane
+     * (the one you can see and drive into), not a neighbour's. With tol=1 you also
+     * grabbed the box one lane over -- which slid past at the screen edge, so it
+     * read as "picking up an invisible power-up". Exact-lane pickup keeps you
+     * collecting only what's in front of you. Knob TD5RE_ARCADE_PICKUP_LANES. */
+    int lane_tol = knob("TD5RE_ARCADE_PICKUP_LANES", 0, 0, 8);
 
     /* --- decay per-slot effect timers --- */
     for (int s = 0; s < racers; s++) {

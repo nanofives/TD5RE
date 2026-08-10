@@ -2496,6 +2496,11 @@ static int frontend_rows_overlap(int a, int b) {
 static int frontend_nav_vertical(int direction) {
     int current, target;
     if (direction == 0) return 0;
+    /* [CHUNK 5] The main-menu EXIT confirm is MODAL: while the YES/NO dialog is
+     * up, block vertical focus moves so focus can't escape back onto the menu
+     * column (YES<->NO horizontal nav still works). Mirrors the s_color_panel
+     * modal gate. */
+    if (frontend_exit_confirm_active()) return 0;
     current = frontend_resolve_selected_button();
     if (current < 0) return 0;
     target = frontend_spatial_pick(0, direction);
@@ -3197,7 +3202,8 @@ void td5_frontend_auto_race_setup(void) {
     s_selected_car       = g_td5.ini.default_car;
     s_selected_track     = g_td5.ini.default_track;
     s_selected_game_type = g_td5.ini.default_game_type;
-    s_selected_paint     = 0;
+    /* [NEW SUITE] paint-scheme override for the selftest (default -1 -> 0). */
+    s_selected_paint     = (g_td5.ini.default_paint >= 0) ? g_td5.ini.default_paint : 0;
     /* Seed the menu toggle from [GameOptions] AutoGearbox (1=auto->0, 0=manual->1);
        the menu is authoritative thereafter (td5_input.c). */
     s_selected_transmission = g_td5.ini.auto_gearbox ? 0 : 1;
@@ -3267,6 +3273,41 @@ void td5_frontend_auto_race_setup(void) {
         TD5_LOG_I(LOG_TAG,
                   "AutoRace: player override -> %d humans + %d AI (split=%d)",
                   humans, opp, g_td5.split_screen_mode);
+    }
+
+    /* [NEW SUITE 2026-08-07] AutoRace MP-mode override (PORT-ONLY test knob).
+     * The lobby normally sets mp_mode_config.mode + the AI-player-pane mask, but
+     * the AutoRace path zeroes s_two_player_mode (killing the mask build) and
+     * never touches the mode. This block runs AFTER that, so it deterministically
+     * launches an MP-mode split-screen race with 1 human + N AI-driven panes,
+     * bypassing the lobby. No-op unless [Game] MpMode >= 0. */
+    if (g_td5.ini.mp_mode >= 0) {
+        /* [CHUNK 6] Seed the per-mode defaults the lobby normally applies (cop
+         * suspect_head_start, cop_is_ai, cup/battle knobs) so a hook-launched
+         * cop chase gives the AI cop its start setback -- without this it
+         * spawned inside the suspect stack and launched cars at high counts. */
+        mp_mode_config_apply_defaults(g_td5.ini.mp_mode);
+        g_td5.mp_mode_config.mode = g_td5.ini.mp_mode;
+        if (g_td5.ini.mp_ai_players > 0) {
+            int total = 1 + g_td5.ini.mp_ai_players;   /* slot 0 human + N AI panes */
+            int p;
+            if (total > TD5_MAX_HUMAN_PLAYERS) total = TD5_MAX_HUMAN_PLAYERS;
+            if (total > TD5_MAX_VIEWPORTS)     total = TD5_MAX_VIEWPORTS;
+            /* [CHUNK 2 fix] Drag mode physically supports at most 8 lanes
+             * (TD5RE_DRAG_LANE_MAX); a 9th pane has no lane and the core routes
+             * it to the parked "decoration" spawn at the strip head (off the
+             * start grid). Clamp so no drag racer spawns off-track. */
+            if (g_td5.ini.mp_mode == TD5_MP_MODE_DRAG_RACE && total > 8) total = 8;
+            g_td5.num_human_players = total;
+            g_td5.num_ai_opponents  = 0;
+            g_td5.split_screen_mode = 1;
+            g_td5.mp_ai_player_mask = 0;
+            for (p = 1; p < total; p++) g_td5.mp_ai_player_mask |= (1u << p);
+        }
+        TD5_LOG_I(LOG_TAG,
+                  "AutoRace: MP override -> mode=%d humans=%d ai_mask=0x%X split=%d",
+                  g_td5.mp_mode_config.mode, g_td5.num_human_players,
+                  g_td5.mp_ai_player_mask, g_td5.split_screen_mode);
     }
 
     /* [2026-06-08] AutoRace AI-spectator split-screen override (dev profiling).

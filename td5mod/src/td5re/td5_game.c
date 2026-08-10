@@ -2607,7 +2607,12 @@ static void init_race_modes_and_seed(void)
                  * value (takes precedence over the trace fixed seed). */
                 session_seed = ncfg.rng_seed;
                 TD5_LOG_I(LOG_TAG, "InitRace step 0/19: NET seed=0x%08X", session_seed);
-            } else if (g_td5.ini.race_trace_enabled) {
+            } else if (g_td5.ini.race_trace_enabled ||
+                       g_td5.ini.selftest_deterministic) {
+                /* [SELFTEST DETERMINISM] The selftest suite pins the same fixed
+                 * seed as the trace path so traffic/AI RNG is reproducible
+                 * run-to-run (invariant checks + auto-isolate rely on it),
+                 * without needing race_trace_enabled's CSV overhead. */
                 session_seed = (uint32_t)0x1A2B3C4D;
             } else {
                 session_seed = (uint32_t)GetTickCount();

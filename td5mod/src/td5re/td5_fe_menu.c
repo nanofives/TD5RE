@@ -99,6 +99,14 @@ static int  s_exit_confirm_yes_idx = -1;
 
 static int  s_exit_confirm_no_idx  = -1;
 
+/* [CHUNK 5] True while the main-menu EXIT YES/NO confirm dialog is up. Read by
+ * frontend_nav_vertical (td5_frontend.c) to make the confirm MODAL — vertical
+ * focus moves are suppressed so focus can't escape to the menu column. */
+int frontend_exit_confirm_active(void)
+{
+    return s_exit_confirm_yes_idx >= 0;
+}
+
 /*
  * Fade overlay color (RGB only, alpha is driven by s_fade_progress).
  * [CONFIRMED @ 0x411750 InitFrontendFadeColor]: original stores
@@ -1565,7 +1573,13 @@ static void ctrl_opts_cycle_device(int delta)
         src += delta;
         if (src < 0) src = dev_count - 1;
         if (src >= dev_count) src = 0;
-        if (src == 0) break;                       /* keyboard: always OK / shareable */
+        if (src == 0) {
+            /* [CHUNK 5] Split-keyboard MP retired: only ONE keyboard, on
+             * player 1. Players >=2 must use a controller, so skip past the
+             * keyboard entry when they cycle devices. */
+            if (s_ctrl_opts_player == 0) break;    /* keyboard: player 1 only */
+            continue;                              /* P2+: keep cycling to a controller */
+        }
         for (p = 0; p < s_ctrl_opts_max_players; p++) {
             if (p == s_ctrl_opts_player) continue;
             if (td5_input_get_input_source(p) == src) { taken = 1; break; }
@@ -1938,8 +1952,8 @@ void Screen_SoundOptions(void) {
          *   SFX Volume 97, Music Volume 137, Music Test 217, OK 297. */
         frontend_create_button(SNK_SfxVolumeButTxt,   120,  97, 0x100, 0x20);  /* btn 0 */
         frontend_create_button(SNK_MusicVolumeButTxt, 120, 137, 0x100, 0x20);  /* btn 1 */
-        frontend_create_button(SNK_MusicTestButTxt,   120, 217, 0x100, 0x20);  /* btn 2 */
-        frontend_create_button(SNK_OkButTxt,          200, 297, 0x60,  0x20);  /* btn 3 */
+        /* [CHUNK 5] MUSIC TEST screen removed (no use); OK reflows up to btn 2. */
+        frontend_create_button(SNK_OkButTxt,          200, 217, 0x60,  0x20);  /* btn 2 */
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -1981,10 +1995,7 @@ void Screen_SoundOptions(void) {
                 }
                 frontend_play_sfx(2);
                 s_inner_state = 4;
-            } else if (s_button_index == 2) { /* Music Test */
-                s_return_screen = TD5_SCREEN_MUSIC_TEST;
-                s_inner_state = 7;
-            } else if (s_button_index == 3) { /* OK */
+            } else if (s_button_index == 2) { /* OK */
                 /* Persist sound options to td5re.ini so they survive a relaunch
                  * (see PART B note in Screen_GameOptions). Volume changes already
                  * applied live via td5_save_set_*; sync the committed values into

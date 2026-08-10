@@ -1745,11 +1745,14 @@ void td5_track_set_drag_end_wall(int finish_span, int runoff)
     wall = finish_span + (runoff > 0 ? runoff : 0);
     if (wall > cap) wall = cap;                 /* never past the strip end */
     if (wall < finish_span) wall = finish_span; /* always clear the finish line */
-    /* Set the down-track wall (the higher sentinel); leave the upstream back-wall. */
-    if (s_boundary_rev_sentinel >= s_boundary_fwd_sentinel)
-        s_boundary_rev_sentinel = wall;
-    else
-        s_boundary_fwd_sentinel = wall;
+    /* [CHUNK 4 fix] Drag is always driven FORWARD, and the forward boundary
+     * resolver reads s_boundary_fwd_sentinel (see td5_track.c ~1851). The old
+     * "write whichever sentinel is higher" heuristic could land the finish wall
+     * in s_boundary_rev_sentinel — which the forward resolver never consults —
+     * so on the SP SHORT layout cars rolled straight past the finish (~span 170)
+     * into dead strip. Put the down-track finish wall in the FORWARD sentinel
+     * explicitly; the rev sentinel stays the upstream back-wall. */
+    s_boundary_fwd_sentinel = wall;
     TD5_LOG_I(LOG_TAG,
               "drag end wall: finish=%d runoff=%d -> wall=%d (fwd=%d rev=%d ring=%d)",
               finish_span, runoff, wall,

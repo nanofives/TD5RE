@@ -631,7 +631,10 @@ void frontend_init_race_schedule(void) {
          * between client and server"). The fixed-trace seed masked this in
          * the headless A/B runs by overriding both sides identically. */
         srand(net_cfg.rng_seed);
-    } else if (g_td5.ini.race_trace_enabled) {
+    } else if (g_td5.ini.race_trace_enabled || g_td5.ini.selftest_deterministic) {
+        /* [SELFTEST DETERMINISM] Same fixed-seed, zero-preamble-burn path as the
+         * trace hook so the AI-car fill is reproducible run-to-run under the
+         * selftest suite (no Frida capture to match — just self-consistency). */
         /* Under race_trace_enabled the Frida quickrace hook calls
          * _srand(0x1A2B3C4D) IMMEDIATELY before InitializeRaceSeriesSchedule()
          * with zero preamble rand() calls between them (hook bypasses

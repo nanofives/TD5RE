@@ -2430,9 +2430,18 @@ void td5_ai_init_race_actor_runtime(void) {
      * those slots have no spawned actor, so the drive command lands on
      * uninitialized memory. */
     if (g_td5.drag_race_enabled) {
-        for (int k = 2; k < g_traffic_slot_base; k++)
+        /* [CHUNK 2 fix] Keep g_slot_state active for EVERY drag racer, not a
+         * hardcoded 2. This table is separate from td5_game.c's s_slot_state,
+         * which uses td5_game_drag_active_racers() (td5_game.c:2759); the old
+         * `k=2` here disabled every drag racer past slot 1 in the AI table, so
+         * MP drag AI-player slots got no synthetic throttle and never launched
+         * (and slot 1 vs slot 0 diverged). Mirror the game table's count. */
+        int keep = td5_game_drag_active_racers();
+        if (keep < 2) keep = 2;
+        for (int k = keep; k < g_traffic_slot_base; k++)
             g_slot_state[k] = 3;
-        TD5_LOG_I(LOG_TAG, "drag_race: g_slot_state[2..5] = 3 (inactive)");
+        TD5_LOG_I(LOG_TAG, "drag_race: g_slot_state[%d..] = 3 (inactive, active=%d)",
+                  keep, keep);
     }
 
     /* Solo mode synth (Time Trial mapped to gt=0 — see ConfigureGameTypeFlags
@@ -2480,6 +2489,26 @@ void td5_ai_init_race_actor_runtime(void) {
      *
      * Template field offsets:  +0x2C grip (short), +0x68 steer (short).
      */
+    /* [DEGRADATION FIX 2026-08-09] The block below scales g_ai_physics_template
+     * IN PLACE (drive-torque +0x68 x1.406, grip +0x2C x1.172, then a tier/mode
+     * factor) every race init. The template is a persistent file-scope static
+     * that is otherwise NEVER reset, so those multipliers COMPOUND across races:
+     * race 1 ~x1.4, race 2 ~x2.0, race 3 ~x2.8 -> AI drive torque balloons and
+     * cars over-accelerate (longitudinal_speed ~2040 vs ~640) -- the "cars fly on
+     * repeated races" degradation (1st race clean, every repeat worse). Restore
+     * the pristine template (snapshot once, before any scaling) at the top of
+     * every race init so the scaling always starts from base. */
+    {
+        static uint8_t s_ai_template_pristine[sizeof(g_ai_physics_template)];
+        static int     s_ai_template_saved = 0;
+        if (!s_ai_template_saved) {
+            memcpy(s_ai_template_pristine, g_ai_physics_template,
+                   sizeof(s_ai_template_pristine));
+            s_ai_template_saved = 1;
+        }
+        memcpy(g_ai_physics_template, s_ai_template_pristine,
+               sizeof(g_ai_physics_template));
+    }
     {
         int16_t *steer = (int16_t *)(g_ai_physics_template + 0x68);
         int16_t *grip  = (int16_t *)(g_ai_physics_template + 0x2C);

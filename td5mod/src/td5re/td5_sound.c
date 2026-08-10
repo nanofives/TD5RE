@@ -640,6 +640,18 @@ int td5_sound_init_race_resources(void)
     s_tracked_veh_fade_target = 0;
     s_tracked_veh_fade_level  = 0;
     s_tracked_veh_actor     = 0;
+    /* [CHUNK 6 fix] A cop-chase siren LOOP from the previous race can still be
+     * playing here if the fade->release path hasn't run yet (seen persisting
+     * into the next MP cop-chase race). Clearing s_siren_active_flag below
+     * without stopping the voice strands the loop -- the mixer's fade-stop only
+     * acts on an active-but-not-refreshed flag, so a flag-cleared loop can never
+     * be stopped and drones on. Stop the siren channels (base 0x14-0x16 + their
+     * dup-range mirrors) first; slot_stop only stops the voice, leaving music /
+     * the silent keepalive untouched. */
+    for (int sr = 0x14; sr <= 0x16; sr++) {
+        slot_stop(sr);
+        slot_stop(sr + TD5_SOUND_DUP_OFFSET);
+    }
     s_siren_active_flag     = 0;
     s_siren_refreshed       = 0;
     s_siren_user_enabled    = 0;   /* siren starts off; press horn to re-toggle */
