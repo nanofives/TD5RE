@@ -261,7 +261,8 @@ void td5_light_emit_vehicle_headlights(void)
 
 #define TD5_LAMP_MAX 4096
 
-static float s_lamp_pos[TD5_LAMP_MAX][3];
+static float   s_lamp_pos[TD5_LAMP_MAX][3];
+static uint8_t s_lamp_tunnel[TD5_LAMP_MAX];  /* 1 = tunnel wall lamp: cool-white, tighter range, always-on (bypasses s_env_dark) */
 static int   s_lamp_count     = 0;
 static int   s_street_lights  = 0;   /* OFF by default: parked pending a lamp look-dev session */
 
@@ -276,10 +277,11 @@ void td5_light_lamps_add(float x, float y, float z)
     s_lamp_pos[s_lamp_count][0] = x;
     s_lamp_pos[s_lamp_count][1] = y;
     s_lamp_pos[s_lamp_count][2] = z;
+    s_lamp_tunnel[s_lamp_count] = 0;
     s_lamp_count++;
 }
 
-void td5_light_lamps_capture(float x, float y, float z)
+static void td5_light_lamps_capture_impl(float x, float y, float z, int tunnel)
 {
     /* Dedupe: the same halo is captured every frame it is on screen, and the
      * big soft glows are assembled from 2-4 quadrant quads whose centers sit
@@ -292,13 +294,29 @@ void td5_light_lamps_capture(float x, float y, float z)
         if (dx * dx + dy * dy + dz * dz < 650.0f * 650.0f)
             return;
     }
+    int idx = s_lamp_count;
     td5_light_lamps_add(x, y, z);
+    if (s_lamp_count > idx)              /* add() may no-op at the cap */
+        s_lamp_tunnel[idx] = tunnel ? 1 : 0;
     static int s_cap_log = 0;
     if (s_cap_log < 8) {
         s_cap_log++;
-        TD5_LOG_I(LOG_TAG, "lamp capture[%d]: (%.0f,%.0f,%.0f)",
-                  s_lamp_count - 1, x, y, z);
+        TD5_LOG_I(LOG_TAG, "lamp capture[%d]%s: (%.0f,%.0f,%.0f)",
+                  s_lamp_count - 1, tunnel ? " tunnel" : "", x, y, z);
     }
+}
+
+void td5_light_lamps_capture(float x, float y, float z)
+{
+    td5_light_lamps_capture_impl(x, y, z, 0);
+}
+
+/* Tunnel wall "fake-light" patches (e.g. Keswick pages 152/153) → real
+ * cool-white point lights. Same shared registry as street lamps, but tagged so
+ * the emitter gives them a tighter, cool tint and skips the dark-env gate. */
+void td5_light_lamps_capture_tunnel(float x, float y, float z)
+{
+    td5_light_lamps_capture_impl(x, y, z, 1);
 }
 
 /* ---- Content-classified glow pages (per level) --------------------------
@@ -339,6 +357,8 @@ static int   s_lamp_knobs_read = 0;
 static float s_lamp_range      = 2400.0f;  /* TD5RE_LAMP_RANGE      pool radius (world units) */
 static float s_lamp_intensity  = 1.00f;    /* TD5RE_LAMP_INTENSITY  peak added light 0..1     */
 static int   s_lamp_budget     = 10;       /* TD5RE_LAMP_COUNT      nearest-N promoted/frame  */
+static float s_tlamp_range     = 1200.0f;  /* TD5RE_TUNNEL_LAMP_RANGE     tighter than sodium */
+static float s_tlamp_intensity = 1.00f;    /* TD5RE_TUNNEL_LAMP_INTENSITY                     */
 
 void td5_light_emit_street_lamps(void)
 {
@@ -349,14 +369,20 @@ void td5_light_emit_street_lamps(void)
      * identical. (The dark-only + nearest-N budget gates below still apply.) */
     int want_lamps = s_street_lights || td5_rt_active();
     if (!s_enabled || !want_lamps || s_lamp_count <= 0) return;
-    /* Same verdict as auto headlights: lamps light up in rain/dusk/dark zones
-     * and stay off in bright daylight. */
-    if (!s_env_dark) return;
+    /* Street lamps follow the auto-headlight verdict: on in rain/dusk/dark
+     * zones, off in bright daylight. Tunnel lamps live INSIDE a tunnel, so they
+     * ignore the sky-based dark probe — if any are registered we keep going and
+     * emit only those when the env reads bright. */
+    int any_tunnel = 0;
+    for (int i = 0; i < s_lamp_count; i++) if (s_lamp_tunnel[i]) { any_tunnel = 1; break; }
+    if (!s_env_dark && !any_tunnel) return;
 
     if (!s_lamp_knobs_read) {
         s_lamp_knobs_read = 1;
-        s_lamp_range     = env_f("TD5RE_LAMP_RANGE",     s_lamp_range);
-        s_lamp_intensity = env_f("TD5RE_LAMP_INTENSITY", s_lamp_intensity);
+        s_lamp_range      = env_f("TD5RE_LAMP_RANGE",     s_lamp_range);
+        s_lamp_intensity  = env_f("TD5RE_LAMP_INTENSITY", s_lamp_intensity);
+        s_tlamp_range     = env_f("TD5RE_TUNNEL_LAMP_RANGE",     s_tlamp_range);
+        s_tlamp_intensity = env_f("TD5RE_TUNNEL_LAMP_INTENSITY", s_tlamp_intensity);
         {
             const char *e = getenv("TD5RE_LAMP_COUNT");
             if (e && e[0]) { int v = atoi(e); if (v >= 0 && v <= TD5_LIGHT_MAX) s_lamp_budget = v; }
@@ -384,6 +410,9 @@ void td5_light_emit_street_lamps(void)
     int   nbest = 0;
     float cutoff2 = (s_lamp_range * 6.0f) * (s_lamp_range * 6.0f);
     for (int i = 0; i < s_lamp_count; i++) {
+        /* In bright daylight only tunnel lamps emit (street lamps gated off);
+         * don't let daylight street lamps consume the nearest-N budget. */
+        if (!s_env_dark && !s_lamp_tunnel[i]) continue;
         float dx = s_lamp_pos[i][0] - px;
         float dy = s_lamp_pos[i][1] - py;
         float dz = s_lamp_pos[i][2] - pz;
@@ -403,11 +432,18 @@ void td5_light_emit_street_lamps(void)
     }
 
     for (int k = 0; k < nbest; k++) {
-        const float *L = s_lamp_pos[best_idx[k]];
-        /* Warm sodium-vapor tint. */
-        td5_light_add_point(L[0], L[1], L[2],
-                            s_lamp_range, s_lamp_intensity,
-                            1.0f, 0.82f, 0.55f);
+        int li = best_idx[k];
+        const float *L = s_lamp_pos[li];
+        if (s_lamp_tunnel[li])
+            /* Cool-white fixture, tighter pool — reads as a tunnel lamp. */
+            td5_light_add_point(L[0], L[1], L[2],
+                                s_tlamp_range, s_tlamp_intensity,
+                                0.90f, 0.95f, 1.00f);
+        else
+            /* Warm sodium-vapor tint. */
+            td5_light_add_point(L[0], L[1], L[2],
+                                s_lamp_range, s_lamp_intensity,
+                                1.0f, 0.82f, 0.55f);
     }
 
     static int s_lamp_logged = 0;

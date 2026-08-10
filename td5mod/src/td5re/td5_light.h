@@ -126,6 +126,10 @@ void td5_light_lamps_add(float x, float y, float z);  /* track load: register  *
  * actually draws — its view-space verts give the exact world position, which
  * sidesteps the display-list placement folds that defeat static extraction. */
 void td5_light_lamps_capture(float x, float y, float z);
+/* Like lamps_capture, but tags the lamp as a TUNNEL wall fixture: the emitter
+ * gives it a cool-white tint + tighter range and skips the dark-env gate (a
+ * tunnel is dark regardless of the sky probe). Keswick pages 152/153. */
+void td5_light_lamps_capture_tunnel(float x, float y, float z);
 /* Select the current level's content-classified glow-page list (generated
  * offline into td5_lamp_pages.inc); the capture gate tests pages against it. */
 void td5_light_lamps_set_level(int level);
