@@ -32,6 +32,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 10" },
+    { CL_ITEM,    "FIX (trees): foliage sprites (e.g. the big Keswick" },
+    { CL_ITEM,    "  roadside trees) no longer show blocky black borders" },
+    { CL_ITEM,    "  around their edges - the 2D tree/fence edge smoothing" },
+    { CL_ITEM,    "  is back on, so cutout outlines are anti-aliased again" },
+    { CL_ITEM,    "  instead of hard-cut blocky silhouettes." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 9" },
     { CL_ITEM,    "FIX (minimap): on big circuits (e.g. Newcastle) the road" },
     { CL_ITEM,    "  no longer cuts off mid-map - the mini-map now walks the" },

@@ -1953,6 +1953,22 @@ int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed
 
     ZeroMemory(&g_d3d12, sizeof(g_d3d12));
 
+    /* [foliage AA 2026-08-10] Re-enable the 2D foliage/cutout edge-AA path on the
+     * D3D12 backend (it shipped on the retired D3D11 backend @91e51a6f and was
+     * left dormant across the port). Without it, colour-keyed trees/fences draw
+     * through the plain sampler + hard alphaRef discard, so their silhouette is a
+     * blocky, hard-cut edge — on Keswick the near-black tree canopies read as
+     * blocky BLACK borders against the bright sky. When enabled, Backend_UpdateFogCB
+     * routes exactly the colour-key cutout draws (alpha test on + a texture that
+     * actually has alpha) through SampleFoliageAA (alpha-weighted manual bilinear
+     * reconstruction -> smooth 0..1 edge ramp), softening the border. Opaque
+     * sky/road/car-body draws have no alpha / no alpha-test and are untouched.
+     * TD5RE_FOLIAGE_AA=0 restores the faithful hard cutout. */
+    {
+        const char *e = getenv("TD5RE_FOLIAGE_AA");
+        g_backend.foliage_aa_enabled = (e && e[0]) ? (atoi(e) != 0) : 1;
+    }
+
     /* Standalone (main.c) passes hwnd=NULL: the backend owns the display window,
      * exactly like the D3D11 backend. Without this, CreateSwapChainForHwnd(NULL)
      * fails and CreateDevice returns 0 (-> MessageBox + exit). */
@@ -2984,6 +3000,25 @@ void Backend_UpdateFogCB(void)
     }
     fog.alphaTestEnabled = st->alpha_test_enable;
     fog.alphaRef = (float)st->alpha_ref / 255.0f;
+    /* [foliage AA 2026-08-10] Route the 2D foliage/fence/sign cutout draws through
+     * SampleFoliageAA (alpha-weighted manual bilinear reconstruction -> smooth 0..1
+     * alpha edge ramp), re-enabling the edge-AA that shipped on the retired D3D11
+     * backend (@91e51a6f) and went dormant across the port. Without it these cutouts
+     * draw with a hard-cut, blocky silhouette — on Keswick the near-black tree
+     * canopies read as blocky BLACK borders against the bright sky.
+     *
+     * Discriminator: the game draws foliage via TD5_PRESET_TRANSLUCENT_ANISO, which
+     * is the ONLY preset that raises alpha_ref to 0x80 (every other colour-key draw
+     * uses the default 0x01) and pairs it with SRCALPHA/INVSRCALPHA blend + z-write
+     * off. Measured on Keswick: this signature matches ~5.6k draws/run and NOTHING
+     * else (the D3D11 gate's current_tex_has_alpha is unusable here — the game's
+     * textures are all flagged r5g6b5_source, so it is 0 for every draw). Opaque
+     * sky/road/car/HUD draws don't match and keep foliageAA=0 (byte-identical). */
+    fog.foliageAA = (g_backend.foliage_aa_enabled &&
+                     st->alpha_test_enable &&
+                     st->blend_enable &&
+                     !st->z_write &&
+                     st->alpha_ref == 0x80) ? 1.0f : 0.0f;
     fog.carSun[0] = s_car_sun_dir[0];              /* [CAR SUN] frame sun dir (N.L) */
     fog.carSun[1] = s_car_sun_dir[1];
     fog.carSun[2] = s_car_sun_dir[2];
