@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 9" },
+    { CL_ITEM,    "FIX (minimap): on big circuits (e.g. Newcastle) the road" },
+    { CL_ITEM,    "  no longer cuts off mid-map - the mini-map now walks the" },
+    { CL_ITEM,    "  whole lap so far parts of the loop that are still on" },
+    { CL_ITEM,    "  screen (like the road under the start bridge) draw fully" },
+    { CL_ITEM,    "  instead of ending abruptly." },
     { CL_ITEM,    "FIX (arcade power-ups): item boxes on some tracks (e.g." },
     { CL_ITEM,    "  Newcastle) spawned high in the air / off the map - a" },
     { CL_ITEM,    "  unit bug placed centre-lane boxes at 256x their" },
