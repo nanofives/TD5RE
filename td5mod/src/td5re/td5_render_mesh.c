@@ -90,6 +90,29 @@ static int   s_light_dark_mode  = 0;
 static int   s_dark_knobs_read  = 0;
 static float s_dark_scale       = 0.50f;   /* ambient/directional dim under dark mode */
 static int   s_dark_floor       = 0x2A;     /* clamp floor: distant geometry stays dim, not black */
+
+/* [foliage AA type-1 billboards 2026-08-10] When set, td5_render_apply_page_blend_preset
+ * promotes a TYPE-1 (colour-key, normally drawn OPAQUE_LINEAR = hard-cut) page to
+ * TRANSLUCENT_ANISO, giving it SRCALPHA blend + alpha_ref 0x80 — which the wrapper's
+ * foliageAA gate then edge-anti-aliases (SampleFoliageAA). It is set ONLY around
+ * billboard (tree/sign) draws, so ordinary type-1 WORLD geometry (walls, chain-link
+ * track meshes, ground detail) keeps its faithful hard cutout. On Keswick the big
+ * near-field trees are type-1 pages, so the committed type-2 gate never touched them.
+ * __thread: parallel pane recording (td5_jobs) must not race on it; the bit is carried
+ * through the rcmd RC_BIND_PAGE command (c->b) so it survives record -> replay.
+ * Toggle: TD5RE_FOLIAGE_AA_BILLBOARD (default 1; =0 restores the hard cutout). Note the
+ * wrapper TD5RE_FOLIAGE_AA must also be on (default) for the AA to render. */
+static __thread int s_bb_foliage_aa = 0;
+void td5_render_set_billboard_aa(int on) { s_bb_foliage_aa = on ? 1 : 0; }
+static int foliage_billboard_aa_enabled(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_FOLIAGE_AA_BILLBOARD");
+        v = (e && e[0]) ? (atoi(e) != 0) : 1;
+    }
+    return v;
+}
 /* [car look] Saturation of the authored zone COLOUR applied to VEHICLE bodies in
  * the Mode>=1 colored path: 1.0 = full authored colour, 0.0 = neutral grey (the
  * original averaged zone light to grey, so 0 == the faithful car look). Warm-lit
@@ -1716,7 +1739,17 @@ void td5_render_span_display_list(const TD5_SpanDisplayList *display_list_block)
                 g_rs->tex_page_override = 899; /* SHARED_PAGE_WHITE: 1x1 opaque white */
             }
 
+            /* [foliage AA] Mark this billboard so its type-1 cutout pages promote to
+             * TRANSLUCENT_ANISO (blend + alpha_ref 0x80) and get wrapper edge-AA.
+             * Scoped to the billboard draw only; restored right after so no world
+             * geometry is affected. */
+            int bb_prev_aa = s_bb_foliage_aa;
+            if (foliage_billboard_aa_enabled())
+                s_bb_foliage_aa = 1;
+
             td5_render_prepared_mesh(mesh);
+
+            s_bb_foliage_aa = bb_prev_aa;
 
             if (s_bb_debug_solid)
                 g_rs->tex_page_override = bb_dbg_restore_override;
@@ -3955,6 +3988,11 @@ void td5_render_apply_page_blend_preset(int page_id)
     if (s_in_sky_draw)           return; /* preserve caller's SKY preset */
     if (t == 3)      p = TD5_PRESET_ADDITIVE;
     else if (t == 2) p = TD5_PRESET_TRANSLUCENT_ANISO;
+    /* [foliage AA] A type-1 cutout page drawn as a BILLBOARD (tree/sign) promotes to
+     * the same blended/AA preset as type 2, so its hard-cut silhouette gets wrapper
+     * edge-AA. Non-billboard type-1 world geometry (s_bb_foliage_aa==0) stays
+     * OPAQUE_LINEAR — faithful hard cutout, unchanged. */
+    else if (t == 1 && s_bb_foliage_aa) p = TD5_PRESET_TRANSLUCENT_ANISO;
     else             p = TD5_PRESET_OPAQUE_LINEAR;
     /* [dynamic-traffic] A fading car body must alpha-blend regardless of page
      * type. Additive pages keep ONE/ONE (the fade is folded into their RGB by
@@ -3997,7 +4035,7 @@ int td5_render_bind_texture_page(int page_id)
     if (td5_rcmd_recording()) {
         s_previous_texture_page = s_current_texture_page;
         s_current_texture_page  = page_id;
-        td5_rcmd_bind_page(page_id);
+        td5_rcmd_bind_page(page_id, s_bb_foliage_aa);   /* carry foliage-AA billboard bit to replay */
         return 1;
     }
 

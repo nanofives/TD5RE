@@ -76,8 +76,8 @@ void td5_rcmd_set_car_sun(float gain)
 void td5_rcmd_bind_texture(int slot)
 { RCmd *c = push_cmd(t_active); if (c) { c->type = RC_BIND_TEX; c->a = slot; } }
 
-void td5_rcmd_bind_page(int page)
-{ RCmd *c = push_cmd(t_active); if (c) { c->type = RC_BIND_PAGE; c->a = page; } }
+void td5_rcmd_bind_page(int page, int foliage_aa)
+{ RCmd *c = push_cmd(t_active); if (c) { c->type = RC_BIND_PAGE; c->a = page; c->b = foliage_aa; } }
 
 void td5_rcmd_set_viewport(int x, int y, int w, int h)
 { RCmd *c = push_cmd(t_active); if (c) { c->type = RC_VIEWPORT; c->a = x; c->b = y; c->c = w; c->d = h; } }
@@ -127,7 +127,13 @@ void td5_rcmd_replay(RCmdList *l)
         case RC_FOG:       td5_plat_render_set_fog(c->a, c->u, c->f0, c->f1, c->f2); break;
         case RC_CAR_SUN:   td5_plat_render_set_car_sun(c->f0); break;
         case RC_BIND_TEX:  td5_plat_render_bind_texture(c->a); break;
-        case RC_BIND_PAGE: td5_render_bind_texture_page(c->a); break;
+        case RC_BIND_PAGE:
+            /* Re-establish the foliage-AA billboard bit for this bind so the deferred
+             * blend-preset selection matches what the recording pass intended. */
+            td5_render_set_billboard_aa(c->b);
+            td5_render_bind_texture_page(c->a);
+            td5_render_set_billboard_aa(0);
+            break;
         case RC_VIEWPORT:  td5_plat_render_set_viewport(c->a, c->b, c->c, c->d); break;
         case RC_CLIP:      td5_plat_render_set_clip_rect(c->a, c->b, c->c, c->d); break;
         case RC_DRAW_TRIS:

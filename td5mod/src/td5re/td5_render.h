@@ -282,6 +282,10 @@ void td5_render_log_pane_proj(int vp);   /* [diag] log per-pane projection input
 void td5_render_reset_texture_cache(void);
 void td5_render_advance_texture_ages(void);
 int  td5_render_bind_texture_page(int page_id);
+/* [foliage AA] Set the "current draw is a foliage billboard" bit consumed by
+ * td5_render_apply_page_blend_preset (promotes type-1 cutout pages to the blended
+ * AA preset). Called by the rcmd replay to re-establish the bit per RC_BIND_PAGE. */
+void td5_render_set_billboard_aa(int on);
 
 /* --- Vehicle Projection Effect / Chrome Reflection (0x43DEC0) --- */
 int  td5_render_load_environs_textures(int level_number);

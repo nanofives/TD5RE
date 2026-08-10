@@ -33,11 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 10" },
-    { CL_ITEM,    "FIX (trees): foliage sprites (e.g. the big Keswick" },
-    { CL_ITEM,    "  roadside trees) no longer show blocky black borders" },
-    { CL_ITEM,    "  around their edges - the 2D tree/fence edge smoothing" },
-    { CL_ITEM,    "  is back on, so cutout outlines are anti-aliased again" },
-    { CL_ITEM,    "  instead of hard-cut blocky silhouettes." },
+    { CL_ITEM,    "FIX (trees): roadside tree/sign billboards (e.g. the big" },
+    { CL_ITEM,    "  Keswick trees) no longer show hard blocky black borders" },
+    { CL_ITEM,    "  around their edges - 2D cutout edge smoothing is back on" },
+    { CL_ITEM,    "  for both blended and color-key foliage sprites, so their" },
+    { CL_ITEM,    "  outlines are anti-aliased instead of chunky silhouettes." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 9" },
