@@ -110,6 +110,15 @@ struct BackendTexture {
     int                   valid;
     LONG                  ref;
     UINT                  gen;
+    /* [SF FENCE MIPS 2026-08-10] coverage-preserving mipmaps for track cutout
+     * pages. want_mips is set (via Backend_TextureRequestMips) by the platform
+     * layer only for alpha-keyed race pages (transparency type 1/2); the upload
+     * path then builds + uploads a full mip chain. mip_levels tracks the current
+     * MipLevels of res (0/1 = single). mip_alpha_ref is the alpha_ref the page
+     * draws with, used as the coverage-preservation target. */
+    int                   want_mips;
+    UINT                  mip_levels;
+    int                   mip_alpha_ref;
 };
 
 /* --- render-core globals --- */
@@ -1549,6 +1558,212 @@ static void d3d12_tex_upload(BackendTexture *bt, const void *px, UINT bytes_per_
     if (s_up_count >= 128 || s_up_bytes > (96ull << 20)) d3d12_flush_uploads();
 }
 
+/* ---- [SF FENCE MIPS 2026-08-10] coverage-preserving mipmaps for track cutout
+ * pages -------------------------------------------------------------------
+ * Track alpha-keyed pages (transparency type 1/2 — fences, foliage, signs) are
+ * 64x64 and tile across large walls. With a single mip level the fine chain-link
+ * mesh minifies into a moire "checkerboard" and its 1-bit alpha edge aliases into
+ * a jagged cutout (the SF Pier-39 fence). A box-filtered mip chain with
+ * COVERAGE-PRESERVED alpha fixes both: RGB stops moireing, and the fraction of
+ * texels passing the alpha test stays constant with distance so the fence neither
+ * dissolves nor thickens. Opaque/HUD/car pages are never routed here (gated at the
+ * platform call site by page index + transparency type). All contained to the
+ * backend, keyed off bt->want_mips. */
+
+#define D3D12_MAX_MIPS 16
+
+/* Full mip-chain length for a w x h texture. */
+static UINT d3d12_mip_count(UINT w, UINT h)
+{
+    UINT n = 1, m = (w > h) ? w : h;
+    while (m > 1) { m >>= 1; n++; }
+    return n;
+}
+
+/* fraction (0..1) of texels whose alpha >= ref, over a BGRA8 buffer of n texels. */
+static double d3d12_mip_coverage(const uint8_t *bgra, size_t n, int ref)
+{
+    size_t pass = 0, i;
+    for (i = 0; i < n; i++) if (bgra[i * 4 + 3] >= ref) pass++;
+    return n ? (double)pass / (double)n : 0.0;
+}
+
+/* Box-downsample a BGRA8 level (sw x sh) into dst (dw x dh, halved, min 1).
+ * Alpha is a plain 2x2 average (preserves coverage); RGB is ALPHA-WEIGHTED
+ * (sum(rgb*a)/sum(a)) so transparent color-keyed texels — which carry BLACK RGB
+ * on type-2 pages (no alpha-bleed) — don't drag the wire color toward black at
+ * coarse mips. Falls back to a plain RGB average when the 2x2 quad is fully
+ * transparent. Odd dims clamp the far tap. */
+static void d3d12_mip_box_down(const uint8_t *src, UINT sw, UINT sh,
+                               uint8_t *dst, UINT dw, UINT dh)
+{
+    UINT x, y, c;
+    for (y = 0; y < dh; y++) {
+        UINT y0 = y * 2, y1 = (y * 2 + 1 < sh) ? y * 2 + 1 : y0;
+        for (x = 0; x < dw; x++) {
+            UINT x0 = x * 2, x1 = (x * 2 + 1 < sw) ? x * 2 + 1 : x0;
+            const uint8_t *t[4];
+            uint8_t *o = dst + ((size_t)y * dw + x) * 4;
+            UINT k, asum, wsum;
+            t[0] = src + ((size_t)y0 * sw + x0) * 4;
+            t[1] = src + ((size_t)y0 * sw + x1) * 4;
+            t[2] = src + ((size_t)y1 * sw + x0) * 4;
+            t[3] = src + ((size_t)y1 * sw + x1) * 4;
+            asum = (UINT)t[0][3] + t[1][3] + t[2][3] + t[3][3];
+            o[3] = (uint8_t)((asum + 2) >> 2);                 /* plain alpha avg */
+            wsum = asum ? asum : 4u;                           /* weight by alpha */
+            for (c = 0; c < 3; c++) {
+                UINT acc = 0;
+                if (asum) for (k = 0; k < 4; k++) acc += (UINT)t[k][c] * t[k][3];
+                else      for (k = 0; k < 4; k++) acc += (UINT)t[k][c];
+                o[c] = (uint8_t)((acc + wsum / 2) / wsum);
+            }
+        }
+    }
+}
+
+/* Rescale a mip's alpha in-place so fraction(alpha>=ref) matches `target`
+ * (Castano alpha-coverage preservation). Binary-searches a uniform alpha scale. */
+static void d3d12_mip_preserve_coverage(uint8_t *bgra, size_t n, int ref, double target)
+{
+    double lo = 0.0, hi = 4.0, scale = 1.0;
+    int it;
+    size_t i;
+    if (target <= 0.0 || n == 0) return;
+    for (it = 0; it < 12; it++) {
+        double mid = 0.5 * (lo + hi), cov;
+        size_t pass = 0;
+        for (i = 0; i < n; i++) {
+            int a = (int)(bgra[i * 4 + 3] * mid + 0.5);
+            if (a >= ref) pass++;
+        }
+        cov = (double)pass / (double)n;
+        if (cov < target) lo = mid; else hi = mid;
+        scale = mid;
+    }
+    if (scale > 0.999 && scale < 1.001) return;   /* no-op (e.g. near-opaque type-1) */
+    for (i = 0; i < n; i++) {
+        int a = (int)(bgra[i * 4 + 3] * scale + 0.5);
+        bgra[i * 4 + 3] = (uint8_t)(a > 255 ? 255 : a);
+    }
+}
+
+/* Recreate bt->res as a MipLevels=n texture (same fmt/size), rebuilding the SRV
+ * in the SAME srv_slot so the surface's cached bt pointer/SRV descriptor stay
+ * valid. Returns 1 on success. */
+static int d3d12_tex_make_mipped(BackendTexture *bt, UINT n)
+{
+    D3D12_HEAP_PROPERTIES hp; D3D12_RESOURCE_DESC td;
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvd; HRESULT hr; ID3D12Resource *nr = NULL;
+    if (!bt || n < 1 || !g_d3d12.device) return 0;
+    ZeroMemory(&hp, sizeof(hp)); hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    ZeroMemory(&td, sizeof(td));
+    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width = bt->w; td.Height = bt->h; td.DepthOrArraySize = 1; td.MipLevels = (UINT16)n;
+    td.Format = bt->fmt; td.SampleDesc.Count = 1;
+    td.Flags = D3D12_RESOURCE_FLAG_NONE;
+    hr = ID3D12Device_CreateCommittedResource(g_d3d12.device, &hp, D3D12_HEAP_FLAG_NONE, &td,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, NULL, &IID_ID3D12Resource, (void **)&nr);
+    if (FAILED(hr)) { WRAPPER_LOG("D3D12 mip tex create 0x%08lX", hr); return 0; }
+    if (bt->res) ID3D12Resource_Release(bt->res);
+    bt->res = nr;
+    bt->rstate = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    bt->mip_levels = n;
+    ZeroMemory(&srvd, sizeof(srvd));
+    srvd.Format = bt->fmt; srvd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvd.Texture2D.MipLevels = n;
+    ID3D12Device_CreateShaderResourceView(g_d3d12.device, bt->res, &srvd,
+        cpu_handle(s_srv_stage, bt->srv_slot, s_srv_stage_size));
+    return 1;
+}
+
+/* Upload a full BGRA8 mip chain (levels[0..n-1], level0 = bt->w x bt->h) across
+ * all n subresources of bt->res, via one UPLOAD staging buffer + n copies. Same
+ * copy-list/barrier pattern as d3d12_tex_upload, one barrier over ALL subs. */
+static void d3d12_tex_upload_chain(BackendTexture *bt, uint8_t **levels, UINT n)
+{
+    D3D12_RESOURCE_DESC td;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp[D3D12_MAX_MIPS];
+    UINT rows[D3D12_MAX_MIPS]; UINT64 rowbytes[D3D12_MAX_MIPS], total = 0;
+    ID3D12Resource *staging = NULL; D3D12_HEAP_PROPERTIES hp; D3D12_RESOURCE_DESC bd;
+    unsigned char *map = NULL; HRESULT hr; UINT i;
+    if (!bt || !bt->res || n == 0 || n > D3D12_MAX_MIPS) return;
+    bt->res->lpVtbl->GetDesc(bt->res, &td);
+    ID3D12Device_GetCopyableFootprints(g_d3d12.device, &td, 0, n, 0, fp, rows, rowbytes, &total);
+    ZeroMemory(&hp, sizeof(hp)); hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+    ZeroMemory(&bd, sizeof(bd));
+    bd.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width=total; bd.Height=1; bd.DepthOrArraySize=1;
+    bd.MipLevels=1; bd.Format=DXGI_FORMAT_UNKNOWN; bd.SampleDesc.Count=1; bd.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    hr = ID3D12Device_CreateCommittedResource(g_d3d12.device, &hp, D3D12_HEAP_FLAG_NONE, &bd,
+            D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, (void **)&staging);
+    if (FAILED(hr)) { WRAPPER_LOG("D3D12 mip staging alloc 0x%08lX", hr); return; }
+    { D3D12_RANGE r; r.Begin=0; r.End=0; ID3D12Resource_Map(staging, 0, &r, (void **)&map); }
+    if (map) {
+        for (i = 0; i < n; i++) {
+            UINT lw = bt->w >> i, lh = bt->h >> i, y, src_pitch;
+            if (lw == 0) lw = 1; if (lh == 0) lh = 1;
+            src_pitch = lw * 4u;
+            for (y = 0; y < lh; y++)
+                memcpy(map + fp[i].Offset + (size_t)y * fp[i].Footprint.RowPitch,
+                       levels[i] + (size_t)y * src_pitch,
+                       (size_t)((rowbytes[i] < src_pitch) ? rowbytes[i] : src_pitch));
+        }
+        ID3D12Resource_Unmap(staging, 0, NULL);
+    }
+    {
+        ID3D12GraphicsCommandList *cl; D3D12_TEXTURE_COPY_LOCATION dst, src; D3D12_RESOURCE_BARRIER b;
+        d3d12_copy_ensure(); cl = s_copy_list;
+        ZeroMemory(&b, sizeof(b)); b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource=bt->res; b.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore=bt->rstate; b.Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_DEST;
+        ID3D12GraphicsCommandList_ResourceBarrier(cl, 1, &b);
+        for (i = 0; i < n; i++) {
+            ZeroMemory(&dst, sizeof(dst)); dst.pResource=bt->res; dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex=i;
+            ZeroMemory(&src, sizeof(src)); src.pResource=staging; src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; src.PlacedFootprint=fp[i];
+            ID3D12GraphicsCommandList_CopyTextureRegion(cl, &dst, 0, 0, 0, &src, NULL);
+        }
+        b.Transition.StateBefore=D3D12_RESOURCE_STATE_COPY_DEST; b.Transition.StateAfter=D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        ID3D12GraphicsCommandList_ResourceBarrier(cl, 1, &b);
+        bt->rstate = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        d3d12_up_track(staging, total);
+    }
+    if (s_up_count >= 128 || s_up_bytes > (96ull << 20)) d3d12_flush_uploads();
+}
+
+/* Build + upload a coverage-preserving mip chain for a track cutout page from a
+ * tightly-packed BGRA8 level-0 image (bt->w x bt->h). Recreates bt->res as mipped
+ * on first use. Falls back to a plain single-level upload on any failure. */
+static void d3d12_tex_upload_mipped(BackendTexture *bt, const uint8_t *bgra0)
+{
+    UINT n, i; uint8_t *levels[D3D12_MAX_MIPS]; double target; size_t l0n; int ref;
+    if (!bt || !bgra0) return;
+    if (bt->w < 2 || bt->h < 2) { d3d12_tex_upload(bt, bgra0, 4, bt->w * 4u); return; }
+    n = d3d12_mip_count(bt->w, bt->h);
+    if (n > D3D12_MAX_MIPS) n = D3D12_MAX_MIPS;
+    if (bt->mip_levels < n && !d3d12_tex_make_mipped(bt, n)) {
+        d3d12_tex_upload(bt, bgra0, 4, bt->w * 4u); return;
+    }
+    ref = (bt->mip_alpha_ref > 0) ? bt->mip_alpha_ref : 0x80;
+    l0n = (size_t)bt->w * bt->h;
+    levels[0] = (uint8_t *)malloc(l0n * 4);
+    if (!levels[0]) return;
+    memcpy(levels[0], bgra0, l0n * 4);
+    target = d3d12_mip_coverage(levels[0], l0n, ref);
+    for (i = 1; i < n; i++) {
+        UINT pw = bt->w >> (i - 1), ph = bt->h >> (i - 1);
+        UINT lw = bt->w >> i, lh = bt->h >> i;
+        if (pw == 0) pw = 1; if (ph == 0) ph = 1;
+        if (lw == 0) lw = 1; if (lh == 0) lh = 1;
+        levels[i] = (uint8_t *)malloc((size_t)lw * lh * 4);
+        if (!levels[i]) { UINT k; for (k = 0; k < i; k++) free(levels[k]); return; }
+        d3d12_mip_box_down(levels[i - 1], pw, ph, levels[i], lw, lh);
+        d3d12_mip_preserve_coverage(levels[i], (size_t)lw * lh, ref, target);
+    }
+    d3d12_tex_upload_chain(bt, levels, n);
+    for (i = 0; i < n; i++) free(levels[i]);
+}
+
 /* ---- render-core init / teardown --------------------------------------- */
 
 /* Reuse *pbt if it already matches w/h/fmt (just re-upload); else create a fresh
@@ -2922,11 +3137,40 @@ void Backend_TextureUpload(BackendTexture *bt, const void *sys, LONG src_pitch, 
                 d32[x] = 0xFF000000u | (r << 16) | (g << 8) | b;
             }
         }
-        d3d12_tex_upload(bt, buf, 4, row32);
+        d3d12_tex_upload(bt, buf, 4, row32);   /* 16bpp path is opaque -> never mipped */
         free(buf);
+    } else if (bt->want_mips && src_bpp == 32 && bt->fmt == DXGI_FORMAT_B8G8R8A8_UNORM &&
+               (UINT)w == bt->w && (UINT)h == bt->h) {
+        /* [SF FENCE MIPS] track alpha-keyed page: build + upload a coverage-
+         * preserving mip chain from the tightly-packed BGRA8 level 0. */
+        if (src_pitch == (LONG)(w * 4u)) {
+            d3d12_tex_upload_mipped(bt, (const uint8_t *)sys);
+        } else {
+            DWORD row32 = w * 4u, y; uint8_t *buf = (uint8_t *)malloc((size_t)row32 * h);
+            if (buf) {
+                for (y = 0; y < h; y++)
+                    memcpy(buf + (size_t)y * row32, (const unsigned char *)sys + (size_t)y * src_pitch, row32);
+                d3d12_tex_upload_mipped(bt, buf);
+                free(buf);
+            } else {
+                d3d12_tex_upload(bt, sys, 4, (UINT)src_pitch);
+            }
+        }
     } else {
         d3d12_tex_upload(bt, sys, src_bpp / 8u, (UINT)src_pitch);
     }
+}
+
+/* [SF FENCE MIPS 2026-08-10] Flag a texture for coverage-preserving mipmaps and
+ * record the alpha_ref its page draws with (type 2 = 0x80, type 1 = 1). Called by
+ * the platform layer only for track alpha-keyed race pages; the next upload
+ * (first load, in-place refresh, or device-lost re-flush) builds the mip chain.
+ * No-op idempotent when already set. */
+void Backend_TextureRequestMips(BackendTexture *bt, int alpha_ref)
+{
+    if (!bt) return;
+    bt->want_mips = 1;
+    bt->mip_alpha_ref = (alpha_ref > 0) ? alpha_ref : 0x80;
 }
 void Backend_UnbindRenderTargets(void) { }
 void Backend_UnbindSceneDepthReadonly(void) { }

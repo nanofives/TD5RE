@@ -3055,8 +3055,15 @@ int td5_asset_load_race_texture_pages(void)
             tpage_result_t *r = &results[i];
             if (!r->pixels)
                 continue;
-            td5_plat_render_upload_texture(r->page, r->pixels, r->w, r->h, 2);
+            /* [SF FENCE MIPS 2026-08-10] Register the page transparency type
+             * BEFORE the GPU upload: td5_plat_render_upload_texture reads it
+             * (td5_asset_get_page_transparency) to decide whether to build a
+             * coverage-preserving mip chain for alpha-keyed track pages (type
+             * 1/2). Registering after the upload left the type stale (-1) at
+             * upload time, so the mip path never fired. Order-independent for
+             * every other reader (the value is only consumed later at draw). */
             td5_asset_set_page_transparency(r->page, r->type);
+            td5_plat_render_upload_texture(r->page, r->pixels, r->w, r->h, 2);
             if (r->type == 1 && r->keyed_pixels > 0) {
                 TD5_LOG_I(LOG_TAG,
                           "race tpage %d: type=1 keyed_pixels=%d/4096 (RGB zeroed)",

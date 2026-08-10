@@ -37,6 +37,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  no longer shows garbled/mirrored text - it drew its" },
     { CL_ITEM,    "  front and a reversed back panel at the same spot; now" },
     { CL_ITEM,    "  only the front face draws, so it reads a clean 'START'." },
+    { CL_ITEM,    "FIX (tracks): chain-link fences & alpha-cutout signs no" },
+    { CL_ITEM,    "  longer shimmer into a checkerboard with a jagged top" },
+    { CL_ITEM,    "  edge at distance (e.g. the San Francisco fence) - they" },
+    { CL_ITEM,    "  now get smooth mipmaps that keep the mesh see-through." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 9" },
