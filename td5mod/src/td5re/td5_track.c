@@ -7323,6 +7323,11 @@ static const struct { short level, page; } k_native_banner_pages[] = {
      * page is ALSO one the geometry scan's structural-run exclusion un-flags, so
      * it must be listed here to be culled at all. Keep-side needs flipping to
      * show the front "START" face (see k_native_banner_flip_pages). */ {1, 338},
+    /* Blue Ridge (native level 17 = level017.zip; frontend DefaultTrack=3) START
+     * gantry banner — same double-sided/CULL_NONE bleed. Scan flags exactly
+     * page 156 here (fence page 228 excluded as a structural run). Default
+     * keep-side reads forward "START" — NO flip needed (verified by framedump,
+     * unlike Keswick). */ {17, 156},
 };
 
 int td5_track_is_native_banner_page(int page)
