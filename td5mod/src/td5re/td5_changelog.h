@@ -41,6 +41,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  longer shimmer into a checkerboard with a jagged top" },
     { CL_ITEM,    "  edge at distance (e.g. the San Francisco fence) - they" },
     { CL_ITEM,    "  now get smooth mipmaps that keep the mesh see-through." },
+    { CL_ITEM,    "FIX (trees): roadside tree/sign billboards (e.g. the big" },
+    { CL_ITEM,    "  Keswick trees) no longer show hard blocky black borders" },
+    { CL_ITEM,    "  around their edges - 2D cutout edge smoothing is back on" },
+    { CL_ITEM,    "  for both blended and color-key foliage sprites, so their" },
+    { CL_ITEM,    "  outlines are anti-aliased instead of chunky silhouettes." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 9" },
