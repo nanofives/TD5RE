@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 10" },
+    { CL_ITEM,    "FIX (Keswick): the overhead START banner no longer" },
+    { CL_ITEM,    "  shows garbled/mirrored text - it drew its front and a" },
+    { CL_ITEM,    "  reversed back panel at the same spot; now only the" },
+    { CL_ITEM,    "  front face draws, so it reads a clean 'START'." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 9" },
     { CL_ITEM,    "FIX (minimap): on big circuits (e.g. Newcastle) the road" },
     { CL_ITEM,    "  no longer cuts off mid-map - the mini-map now walks the" },

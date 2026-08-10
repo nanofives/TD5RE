@@ -1090,6 +1090,9 @@ static int td6_is_banner_page(int page)
  * flipping one would cull BOTH (the cull test is independent per page). */
 static const struct { short level, page; } k_native_banner_flip_pages[] = {
     /* Bern (native level 3) START gantry */ {3, 499}, {3, 500},
+    /* Keswick (native level 1) START gantry — single page 338, default sign
+     * keeps the reverse-wound (mirrored "TRATS") face; flip keeps the front
+     * "START". Only the one page; the front and back quads share it. */ {1, 338},
 };
 
 static int native_banner_page_needs_flip(int page)
