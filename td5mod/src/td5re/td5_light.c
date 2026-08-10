@@ -359,6 +359,13 @@ static float s_lamp_intensity  = 1.00f;    /* TD5RE_LAMP_INTENSITY  peak added l
 static int   s_lamp_budget     = 10;       /* TD5RE_LAMP_COUNT      nearest-N promoted/frame  */
 static float s_tlamp_range     = 1200.0f;  /* TD5RE_TUNNEL_LAMP_RANGE     tighter than sodium */
 static float s_tlamp_intensity = 1.00f;    /* TD5RE_TUNNEL_LAMP_INTENSITY                     */
+/* TD5RE_TUNNEL_LAMP_COUNT: SAFETY CAP on how many tunnel wall lamps promote to
+ * real point lights per frame (nearest-first). Measured cost on a fast GPU is
+ * ~0 ms for 8 lamps, but each real light still adds per-light work in the RT
+ * light pass, so on a GPU-bound card fewer is cheaper. Default 3 (was
+ * effectively ~8, all in-range patches); set high (e.g. 32) to restore the
+ * uncapped look. Independent of the street-lamp TD5RE_LAMP_COUNT budget. */
+static int   s_tlamp_budget    = 3;
 
 void td5_light_emit_street_lamps(void)
 {
@@ -387,8 +394,12 @@ void td5_light_emit_street_lamps(void)
             const char *e = getenv("TD5RE_LAMP_COUNT");
             if (e && e[0]) { int v = atoi(e); if (v >= 0 && v <= TD5_LIGHT_MAX) s_lamp_budget = v; }
         }
-        TD5_LOG_I(LOG_TAG, "street lamps: %d registered, range=%.0f intensity=%.2f budget=%d",
-                  s_lamp_count, (double)s_lamp_range, (double)s_lamp_intensity, s_lamp_budget);
+        {
+            const char *e = getenv("TD5RE_TUNNEL_LAMP_COUNT");
+            if (e && e[0]) { int v = atoi(e); if (v >= 0 && v <= TD5_LIGHT_MAX) s_tlamp_budget = v; }
+        }
+        TD5_LOG_I(LOG_TAG, "street lamps: %d registered, range=%.0f intensity=%.2f budget=%d tunnel_budget=%d",
+                  s_lamp_count, (double)s_lamp_range, (double)s_lamp_intensity, s_lamp_budget, s_tlamp_budget);
     }
     if (s_lamp_budget <= 0 || s_lamp_intensity <= 0.0f) return;
 
@@ -431,19 +442,25 @@ void td5_light_emit_street_lamps(void)
         best_d2[j] = d2; best_idx[j] = i;
     }
 
+    int tunnel_emitted = 0;   /* SAFETY CAP: nearest s_tlamp_budget tunnel lamps only */
     for (int k = 0; k < nbest; k++) {
         int li = best_idx[k];
         const float *L = s_lamp_pos[li];
-        if (s_lamp_tunnel[li])
+        if (s_lamp_tunnel[li]) {
+            /* best_idx is distance-sorted, so this keeps the NEAREST N tunnel
+             * lamps and drops farther ones (per-light RT-pass work headroom). */
+            if (tunnel_emitted >= s_tlamp_budget) continue;
+            tunnel_emitted++;
             /* Cool-white fixture, tighter pool — reads as a tunnel lamp. */
             td5_light_add_point(L[0], L[1], L[2],
                                 s_tlamp_range, s_tlamp_intensity,
                                 0.90f, 0.95f, 1.00f);
-        else
+        } else {
             /* Warm sodium-vapor tint. */
             td5_light_add_point(L[0], L[1], L[2],
                                 s_lamp_range, s_lamp_intensity,
                                 1.0f, 0.82f, 0.55f);
+        }
     }
 
     static int s_lamp_logged = 0;

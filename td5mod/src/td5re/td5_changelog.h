@@ -62,6 +62,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "FIX (night lighting): the dot/speckle noise on the" },
     { CL_ITEM,    "  headlight-lit road and on the car at night is smoothed" },
     { CL_ITEM,    "  away (stronger ray-traced-light denoise)." },
+    { CL_ITEM,    "NEW (Keswick tunnel): the painted 'fake-light' lamp" },
+    { CL_ITEM,    "  patches on the tunnel walls now cast REAL cool-white" },
+    { CL_ITEM,    "  point lights (RT/HIGH). Tunnel-only; other tracks" },
+    { CL_ITEM,    "  unchanged." },
+    { CL_ITEM,    "  Knob TD5RE_TUNNEL_LAMP_COUNT caps how many light up" },
+    { CL_ITEM,    "  (default 3 nearest; set higher to restore all). Cost" },
+    { CL_ITEM,    "  measured ~0ms; the cap is headroom for slower GPUs." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 9" },
