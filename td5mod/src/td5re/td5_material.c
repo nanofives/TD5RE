@@ -40,6 +40,10 @@ static const TD5_MaterialParams k_params[TD5_MAT_COUNT] = {
     /* GLOW    */ { 0.00f, 1.00f, 0.00f, 1.00f },
     /* CARBODY */ { 0.50f, 0.30f, 0.30f, 0.00f },
     /* WATER   */ { 0.70f, 0.15f, 0.55f, 0.00f },
+    /* WETROAD */ { 0.10f, 0.85f, 0.00f, 0.00f },   /* dry = matte like DEFAULT; the
+                                                     * very-faint wet sheen is added
+                                                     * by the shader wet boost, gated
+                                                     * on this matid, only in rain. */
 };
 
 /* ----------------------------------------------------------------------------
@@ -49,6 +53,7 @@ static const TD5_MaterialParams k_params[TD5_MAT_COUNT] = {
 static uint8_t s_page_refl[MAT_PAGE_MAX];    /* 0..255 reflectivity weight     */
 static uint8_t s_page_shine[MAT_PAGE_MAX];   /* 0..255 specular sharpness       */
 static uint8_t s_page_water[MAT_PAGE_MAX];   /* 1 = opaque page reads as water  */
+static uint8_t s_page_wetroad[MAT_PAGE_MAX]; /* 1 = opaque page reads as road/pavement (wet-reflective) */
 static uint8_t s_page_seen[MAT_PAGE_MAX];    /* 1 = classify ran (for CSV dump) */
 
 /* Cached CSV row stats (only populated when TD5RE_MAT_DUMP is set). */
@@ -56,7 +61,8 @@ typedef struct {
     int   w, h, fmt;
     float meanR, meanG, meanB;
     float sat, luma, var, bluefrac, blackfrac;
-    uint8_t verdict;   /* the s_page_water arming decision */
+    uint8_t verdict;    /* the s_page_water arming decision   */
+    uint8_t verdict_wr; /* the s_page_wetroad arming decision */
 } MatRow;
 static MatRow *s_rows = NULL;   /* [MAT_PAGE_MAX] lazily alloc'd when dumping */
 
@@ -69,6 +75,17 @@ static float s_w_luma_hi  = 0.62f;   /* TD5RE_MAT_WATER_LUMA_HI */
 static float s_w_sat_min  = 0.12f;   /* TD5RE_MAT_WATER_SAT    min mean saturation */
 static float s_w_refl     = 0.55f;   /* TD5RE_MAT_WATER_REFL   armed reflectivity */
 static float s_shine_var  = 0.06f;   /* TD5RE_MAT_SHINE_VAR    var below -> shiny */
+
+/* [RT-NIGHT 2026-08-10] Wet-road / pavement classifier thresholds. A page arms
+ * s_page_wetroad when it reads as an unsaturated grey paved surface (asphalt /
+ * concrete): low saturation, mid-dark luma, not green-dominant (grass) and not
+ * blue-dominant (water/sky), and not extremely noisy (foliage/gravel). Every
+ * threshold is an env knob for tuning against log/material_pages.csv. */
+static float s_wr_sat_max = 0.22f;   /* TD5RE_MAT_ROAD_SAT     max mean saturation (grey) */
+static float s_wr_luma_lo = 0.10f;   /* TD5RE_MAT_ROAD_LUMA_LO */
+static float s_wr_luma_hi = 0.60f;   /* TD5RE_MAT_ROAD_LUMA_HI */
+static float s_wr_var_max = 0.055f;  /* TD5RE_MAT_ROAD_VAR     max luma variance (paved, not gravel/leaf) */
+static float s_wr_green   = 0.03f;   /* TD5RE_MAT_ROAD_GREEN   reject if meanG exceeds R & B by this (grass) */
 
 static float knob(const char *name, float dflt)
 {
@@ -87,6 +104,11 @@ static void mat_knobs_ensure(void)
     s_w_sat_min  = knob("TD5RE_MAT_WATER_SAT",     s_w_sat_min);
     s_w_refl     = knob("TD5RE_MAT_WATER_REFL",    s_w_refl);
     s_shine_var  = knob("TD5RE_MAT_SHINE_VAR",     s_shine_var);
+    s_wr_sat_max = knob("TD5RE_MAT_ROAD_SAT",      s_wr_sat_max);
+    s_wr_luma_lo = knob("TD5RE_MAT_ROAD_LUMA_LO",  s_wr_luma_lo);
+    s_wr_luma_hi = knob("TD5RE_MAT_ROAD_LUMA_HI",  s_wr_luma_hi);
+    s_wr_var_max = knob("TD5RE_MAT_ROAD_VAR",      s_wr_var_max);
+    s_wr_green   = knob("TD5RE_MAT_ROAD_GREEN",    s_wr_green);
 }
 
 static void mat_cache_ensure(void)
@@ -131,8 +153,14 @@ uint8_t td5_material_id_for_page(int page)
      * water/wet gloss becomes reflective for the RT passes. Gated on
      * td5_rt_active() so LOW keeps the exact P0 mapping (byte-identical gate).
      * Only DEFAULT is eligible — CUTOUT/GLASS/GLOW keep their own response. */
-    if (id == TD5_MAT_DEFAULT && s_page_water[page] && td5_rt_active())
-        return TD5_MAT_WATER;
+    if (id == TD5_MAT_DEFAULT && td5_rt_active()) {
+        if (s_page_water[page])   return TD5_MAT_WATER;
+        /* [RT-NIGHT 2026-08-10] Road/pavement pages become WETROAD so ONLY they
+         * pick up the faint wet-weather reflection in the RT pass; grass/dirt/
+         * terrain stay DEFAULT (reflectivity 0). HIGH-only, so LOW keeps the P0
+         * mapping (the LOW screen-space wet boost still keys on DEFAULT). */
+        if (s_page_wetroad[page]) return TD5_MAT_WETROAD;
+    }
 
     return id;
 }
@@ -146,10 +174,11 @@ const TD5_MaterialParams *td5_material_params(int id)
 void td5_material_reset_cache(void)
 {
     s_cache_init = 0;
-    memset(s_page_refl,  0, sizeof(s_page_refl));
-    memset(s_page_shine, 0, sizeof(s_page_shine));
-    memset(s_page_water, 0, sizeof(s_page_water));
-    memset(s_page_seen,  0, sizeof(s_page_seen));
+    memset(s_page_refl,    0, sizeof(s_page_refl));
+    memset(s_page_shine,   0, sizeof(s_page_shine));
+    memset(s_page_water,   0, sizeof(s_page_water));
+    memset(s_page_wetroad, 0, sizeof(s_page_wetroad));
+    memset(s_page_seen,    0, sizeof(s_page_seen));
     TD5_LOG_I(LOG_TAG, "material: page cache reset");
 }
 
@@ -188,10 +217,11 @@ void td5_material_classify_page(int page, const void *pixels,
     /* Only 32-bit BGRA (format 2) carries reliable colour for detection; 16-bit
      * pages (roads are rarely 16-bit) are marked seen but left at 0. */
     if (format != 2) {
-        s_page_refl[page]  = 0;
-        s_page_shine[page] = 0;
-        s_page_water[page] = 0;
-        s_page_seen[page]  = 1;
+        s_page_refl[page]    = 0;
+        s_page_shine[page]   = 0;
+        s_page_water[page]   = 0;
+        s_page_wetroad[page] = 0;
+        s_page_seen[page]    = 1;
         return;
     }
 
@@ -238,6 +268,21 @@ void td5_material_classify_page(int page, const void *pixels,
                    (sat   >= s_w_sat_min) &&
                    (td5_asset_get_page_transparency(page) <= 0);
 
+    /* [RT-NIGHT 2026-08-10] Wet-road / pavement: an unsaturated grey paved
+     * surface (asphalt/concrete) -- low mean saturation, mid-dark luma, not
+     * green-dominant (excludes grass/verge), not extremely noisy (excludes
+     * gravel/foliage). Water wins if both match. Opaque pages only. This is the
+     * SELECTIVE replacement for the old "every up-facing DEFAULT pixel is wet"
+     * blanket that mirrored the whole ground. */
+    int green_dom = (meanG > meanR + s_wr_green) && (meanG > meanB + s_wr_green);
+    int is_wetroad = !is_water &&
+                     (sat  <= s_wr_sat_max) &&
+                     (var  <= s_wr_var_max) &&
+                     (luma >= s_wr_luma_lo && luma <= s_wr_luma_hi) &&
+                     (bluef < s_w_bluefrac) &&
+                     !green_dom &&
+                     (td5_asset_get_page_transparency(page) <= 0);
+
     /* Reflectivity: water gets the armed weight; other smooth surfaces get a
      * mild sheen scaled by how flat (low-variance) they are; noisy textures
      * (asphalt gravel, foliage) stay matte. */
@@ -252,10 +297,11 @@ void td5_material_classify_page(int page, const void *pixels,
     /* Shine (specular sharpness): smoother -> sharper highlight. */
     float shine = (var < s_shine_var) ? (1.0f - var / s_shine_var) : 0.0f;
 
-    s_page_refl[page]  = clamp_u8(refl);
-    s_page_shine[page] = clamp_u8(shine);
-    s_page_water[page] = (uint8_t)(is_water ? 1 : 0);
-    s_page_seen[page]  = 1;
+    s_page_refl[page]    = clamp_u8(refl);
+    s_page_shine[page]   = clamp_u8(shine);
+    s_page_water[page]   = (uint8_t)(is_water ? 1 : 0);
+    s_page_wetroad[page] = (uint8_t)(is_wetroad ? 1 : 0);
+    s_page_seen[page]    = 1;
 
     /* Stash full stats for the CSV deliverable (dev only). */
     if (getenv("TD5RE_MAT_DUMP")) {
@@ -267,6 +313,7 @@ void td5_material_classify_page(int page, const void *pixels,
             row->sat = sat; row->luma = luma; row->var = var;
             row->bluefrac = bluef; row->blackfrac = blackf;
             row->verdict = s_page_water[page];
+            row->verdict_wr = s_page_wetroad[page];
         }
         td5_material_dump_csv();
     }
@@ -280,19 +327,19 @@ void td5_material_dump_csv(void)
     if (!f) return;
 
     fprintf(f, "page,w,h,fmt,transp,base_mat,meanR,meanG,meanB,sat,luma,var,"
-               "bluefrac,blackfrac,shine,refl,water\n");
+               "bluefrac,blackfrac,shine,refl,water,wetroad\n");
     for (int p = 0; p < MAT_PAGE_MAX; p++) {
         if (!s_page_seen[p]) continue;
         const MatRow *r = &s_rows[p];
         fprintf(f,
-            "%d,%d,%d,%d,%d,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.4f,%.3f,%.3f,%.3f,%.3f,%d\n",
+            "%d,%d,%d,%d,%d,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.4f,%.3f,%.3f,%.3f,%.3f,%d,%d\n",
             p, r->w, r->h, r->fmt,
             td5_asset_get_page_transparency(p), (unsigned)mat_base_id(p),
             r->meanR, r->meanG, r->meanB, r->sat, r->luma, r->var,
             r->bluefrac, r->blackfrac,
             s_page_shine[p] * (1.0f / 255.0f),
             s_page_refl[p]  * (1.0f / 255.0f),
-            (int)s_page_water[p]);
+            (int)s_page_water[p], (int)s_page_wetroad[p]);
     }
     fclose(f);
 }

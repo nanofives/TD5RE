@@ -29,7 +29,13 @@ enum {
     TD5_MAT_WATER    = 6,   /* [RT2-P5] opaque page whose pixels read as     */
                             /* water / wet gloss (detected from decoded texels;*/
                             /* reflective, HIGH-only upgrade of DEFAULT)     */
-    TD5_MAT_COUNT    = 7
+    TD5_MAT_WETROAD  = 7,   /* [RT-NIGHT 2026-08-10] opaque page classified as */
+                            /* road/pavement (grey, low-sat, not foliage).     */
+                            /* Dry reflectivity 0 (= DEFAULT); gains only a    */
+                            /* VERY FAINT Fresnel wet sheen in rain, HIGH-only.*/
+                            /* Selectivity: only these pages get the wet boost */
+                            /* -- grass/dirt/terrain stay matte DEFAULT.       */
+    TD5_MAT_COUNT    = 8
 };
 
 /* Per-material lighting response. Consumed by the GPU passes from P1 on;

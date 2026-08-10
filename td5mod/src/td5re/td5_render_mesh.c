@@ -498,10 +498,17 @@ void td5_render_apply_ssr_pass(int vp_x, int vp_y)
         refl8[i] = (i < TD5_MAT_COUNT) ? td5_material_params(i)->reflectivity : 0.0f;
     refl8[TD5_MAT_NONE] = 0.0f;   /* sentinel never reflects */
 
-    /* Wet roads: any non-clear weather makes up-facing DEFAULT-material
-     * pixels reflective. */
+    /* Wet roads: non-clear weather adds a reflection boost.
+     * [RT-NIGHT 2026-08-10] SELECTIVITY + STRENGTH rework. Previously HIGH RT
+     * applied 0.35 to EVERY up-facing DEFAULT pixel (matid==1) -> the whole
+     * ground (road, grass, dirt, terrain) mirrored, which looked wrong. In HIGH
+     * the boost is now (a) tiny (very faint damp sheen, Fresnel-weighted) and
+     * (b) gated in the shader on the WETROAD matid, which only road/pavement
+     * pages classify into (td5_material.c) -- grass/dirt/terrain stay matte.
+     * LOW (screen-space ps_ssr.hlsl, still keyed on DEFAULT) keeps the historic
+     * 0.35 so the LOW look is byte-identical (that IS "low quality"). */
     float wet = (td5_light2_wet_roads() && g_td5.weather != TD5_WEATHER_CLEAR)
-              ? 0.35f : 0.0f;
+              ? (td5_rt_active() ? 0.06f : 0.35f) : 0.0f;
 
     static float s_dist = -1.0f, s_thick = -1.0f, s_intensity = -1.0f;
     static int   s_steps = -1;
