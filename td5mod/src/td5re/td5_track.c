@@ -7306,6 +7306,30 @@ static int      s_native_banner_page_count = 0;
  * un-flag structural runs so guardrails stay two-sided. */
 static uint16_t s_native_banner_pair_count[TD5_BANNER_PAGE_MAX];
 
+/* [HAND-AUTHORED NATIVE BANNER PAGES 2026-08-10] Curated per-level list of the
+ * texture pages that carry a localized double-sided overhead SIGN on a native
+ * TD5 track (level = td5_asset_level_number() zip numbering, NOT the frontend
+ * track index). The general geometry pair-scan below RELIABLY detects these,
+ * but it is default-OFF (TD5RE_BANNER_PAIR_CULL) because it also false-flags
+ * fences/guardrails on other native tracks. So the pages here are one-sided-
+ * culled ALWAYS (applied before the scan's default-off early-return) — precise,
+ * with no false positives. Each entry was verified by running the geometry scan
+ * on that track (race.log "native banner pages: N", after fence pages are
+ * excluded) plus an A/B framedump of the sign reading crisp vs mirrored.
+ * Extend one row per newly-verified track/page. */
+static const struct { short level, page; } k_native_banner_pages[] = {
+    /* Keswick (native level 1) START gantry banner — a segmented double-sided
+     * cloth (page 338, ~8 coincident pairs) that z-fought under CULL_NONE. Its
+     * page is ALSO one the geometry scan's structural-run exclusion un-flags, so
+     * it must be listed here to be culled at all. Keep-side needs flipping to
+     * show the front "START" face (see k_native_banner_flip_pages). */ {1, 338},
+    /* Blue Ridge (native level 17 = level017.zip; frontend DefaultTrack=3) START
+     * gantry banner — same double-sided/CULL_NONE bleed. Scan flags exactly
+     * page 156 here (fence page 228 excluded as a structural run). Default
+     * keep-side reads forward "START" — NO flip needed (verified by framedump,
+     * unlike Keswick). */ {17, 156},
+};
+
 int td5_track_is_native_banner_page(int page)
 {
     if (page < 0 || page >= TD5_BANNER_PAGE_MAX) return 0;
@@ -7344,6 +7368,29 @@ static int banner_vlt(int64_t ax, int64_t ay, int64_t az,
     return az < bz;
 }
 
+/* [HAND-AUTHORED NATIVE BANNER PAGES 2026-08-10] Flag the curated per-level sign
+ * pages (k_native_banner_pages) for the current native track. Applied ALWAYS,
+ * independent of the geometry scan: once before the TD5RE_BANNER_PAIR_CULL
+ * early-return (so it works with the scan default-OFF), and once more after the
+ * scan's structural-run un-flag pass (so a hand-authored page that the scan
+ * would otherwise un-flag as a "barrier run" stays flagged when the scan is on).
+ * Returns how many pages it flagged. */
+static int native_banner_apply_hardcoded(void)
+{
+    int lvl = td5_asset_level_number(g_td5.track_index);
+    int n = 0;
+    size_t i;
+    for (i = 0; i < sizeof(k_native_banner_pages) / sizeof(k_native_banner_pages[0]); i++) {
+        if (k_native_banner_pages[i].level == lvl) {
+            native_banner_flag_page(k_native_banner_pages[i].page);
+            TD5_LOG_I("track", "native banner: hand-authored page=%d flagged (level %d)",
+                      k_native_banner_pages[i].page, lvl);
+            n++;
+        }
+    }
+    return n;
+}
+
 void td5_track_scan_banner_pages(void)
 {
     /* per-mesh coincident-primitive hash, reused across meshes via a
@@ -7370,6 +7417,14 @@ void td5_track_scan_banner_pages(void)
                   g_active_td6_level);
         return;
     }
+
+    /* [HAND-AUTHORED NATIVE BANNER PAGES 2026-08-10] Flag the curated per-level
+     * sign pages FIRST — always, regardless of the TD5RE_BANNER_PAIR_CULL knob
+     * below — so e.g. Keswick's START gantry (level 1 page 338) is one-sided-
+     * culled even with the geometry scan default-OFF. Precise, no fence false-
+     * positives. Re-applied after the scan's un-flag pass below. */
+    native_banner_apply_hardcoded();
+
     /* [native-banner mis-flag fix 2026-07-11] DEFAULT OFF. The geometry pair
      * detector cannot reliably tell a localized double-sided SIGN from roadside
      * fences / guardrails / scenery that also form coincident reverse-wound
@@ -7384,7 +7439,8 @@ void td5_track_scan_banner_pages(void)
      * CULL=1 to re-enable the geometry scan. TD6 tracks are unaffected — they
      * keep the hand-authored k_td6_banner_pages one-sided cull. */
     if (!td5_env_flag_off("TD5RE_BANNER_PAIR_CULL")) {
-        TD5_LOG_I("track", "native banner scan: OFF (default; TD5RE_BANNER_PAIR_CULL=1 to enable)");
+        TD5_LOG_I("track", "native banner scan: geometry pass OFF (default; hand-authored "
+                  "pages still applied; TD5RE_BANNER_PAIR_CULL=1 to enable geometry scan)");
         return;
     }
     if (!s_models_blob || s_models_display_list_count <= 0)
@@ -7564,6 +7620,11 @@ void td5_track_scan_banner_pages(void)
             }
         }
     }
+
+    /* Re-assert the curated pages: the exclusion pass above would otherwise
+     * un-flag a hand-authored page that happens to be a high-pair-count run
+     * (Keswick's segmented START cloth on page 338 measures ~8 pairs). */
+    native_banner_apply_hardcoded();
 
     TD5_LOG_I("track",
         "native banner scan: %d meshes, %d double-sided pairs, %d banner pages flagged",
