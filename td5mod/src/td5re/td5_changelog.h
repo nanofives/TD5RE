@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 10" },
+    { CL_ITEM,    "REFLECTIONS are ON by default again - car chassis and" },
+    { CL_ITEM,    "  windows now mirror the sky and scene out of the box" },
+    { CL_ITEM,    "  (bounded range, so no GPU stutter). Still tunable in" },
+    { CL_ITEM,    "  GRAPHICS -> LIGHTING OPTIONS." },
+    { CL_ITEM,    "FIX (night lighting): the dot/speckle noise on the" },
+    { CL_ITEM,    "  headlight-lit road and on the car at night is smoothed" },
+    { CL_ITEM,    "  away (stronger ray-traced-light denoise)." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 9" },
     { CL_ITEM,    "FIX (minimap): on big circuits (e.g. Newcastle) the road" },
     { CL_ITEM,    "  no longer cuts off mid-map - the mini-map now walks the" },

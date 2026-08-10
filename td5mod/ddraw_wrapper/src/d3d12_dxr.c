@@ -1326,9 +1326,17 @@ static ID3D12PipelineState *dxr_make_composite_pso(const void *ps, SIZE_T ps_len
  * TD5RE_RT_DENOISE_EDGE (default 1.0) trades grain-kill vs edge sharpness. */
 typedef struct { float rect[4]; float params[4]; } DxrDenoiseCB; /* rect=paneXYWH; params={step,radius,depthSigma,normalPow} */
 
-/* Cached knobs: iterations (0=off, clamped 0..4), edge = normal/depth sharpness. */
+/* Cached knobs: iterations (0=off, clamped 0..4), edge = normal/depth sharpness.
+ * [NIGHT SPECKLE 2026-08-10] Default 2 -> 3. At night the headlight-lit road and
+ * the car body are lit almost entirely by the jittered RT passes (sun-shadow, GI,
+ * dynamic light), so their under-sampled grain reads as heavy dot/speckle noise
+ * against the dark ambient (invisible in daylight, where the base scene swamps
+ * it). One more a-trous iteration doubles the smoothing footprint (compute-only,
+ * ~sub-ms, no extra rays -> TDR-neutral) and clears the residual speckle the
+ * 2-iter default left on the car + light pools. The reflection mask is capped at
+ * 2 iters at the call site so glossy car reflections don't over-soften. */
 static int   dxr_denoise_iters(void)
-{ static int v = -1; if (v < 0) { const char *e = getenv("TD5RE_RT_DENOISE"); v = (e && e[0]) ? atoi(e) : 2; if (v < 0) v = 0; if (v > 4) v = 4; } return v; }
+{ static int v = -1; if (v < 0) { const char *e = getenv("TD5RE_RT_DENOISE"); v = (e && e[0]) ? atoi(e) : 3; if (v < 0) v = 0; if (v > 4) v = 4; } return v; }
 static float dxr_denoise_edge(void)
 { static float v = -1.0f; if (v < 0.0f) { const char *e = getenv("TD5RE_RT_DENOISE_EDGE"); v = (e && e[0]) ? (float)atof(e) : 1.0f; if (v < 0.05f) v = 0.05f; } return v; }
 
@@ -1588,7 +1596,13 @@ static int dxr_lighting_pass(const void *cb, UINT cb_size, int mode)
                             g_dxr.lightcol2, &g_dxr.lightcol2_state, DXR_SLOT_LIGHTCOL2_UAV, DXR_SLOT_LIGHTCOL2_SRV, &final);
                         mask_state = (final == g_dxr.lightcol2) ? &g_dxr.lightcol2_state : &g_dxr.lightcol_state; } break;
             case 2: if (g_dxr.denoise_color_pso) {
-                        mask_srv = dxr_denoise_mask(cl, paneX,paneY,paneW,paneH, iters, g_dxr.denoise_color_pso,
+                        /* [NIGHT SPECKLE 2026-08-10] Cap reflection denoise at 2
+                         * iters: the wider footprint that de-speckles shadow/GI/
+                         * light would over-soften a glossy car reflection into a
+                         * smear. Reflections carry only 1 ray but are a sharp
+                         * mirror signal, not stochastic grain. */
+                        int refl_iters = iters > 2 ? 2 : iters;
+                        mask_srv = dxr_denoise_mask(cl, paneX,paneY,paneW,paneH, refl_iters, g_dxr.denoise_color_pso,
                             g_dxr.reflcol,  &g_dxr.reflcol_state,  DXR_SLOT_REFLCOL_UAV,  DXR_SLOT_REFLCOL_SRV,
                             g_dxr.reflcol2, &g_dxr.reflcol2_state, DXR_SLOT_REFLCOL2_UAV, DXR_SLOT_REFLCOL2_SRV, &final);
                         mask_state = (final == g_dxr.reflcol2) ? &g_dxr.reflcol2_state : &g_dxr.reflcol_state; } break;
