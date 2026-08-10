@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 10" },
+    { CL_ITEM,    "FIX (tracks): chain-link fences & alpha-cutout signs no" },
+    { CL_ITEM,    "  longer shimmer into a checkerboard with a jagged top" },
+    { CL_ITEM,    "  edge at distance (e.g. the San Francisco fence) - they" },
+    { CL_ITEM,    "  now get smooth mipmaps that keep the mesh see-through." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 9" },
     { CL_ITEM,    "FIX (minimap): on big circuits (e.g. Newcastle) the road" },
     { CL_ITEM,    "  no longer cuts off mid-map - the mini-map now walks the" },

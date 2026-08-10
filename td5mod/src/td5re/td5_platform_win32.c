@@ -31,6 +31,7 @@
 #include "td5_rcmd.h"   /* Phase B render-transform: per-pane CPU command recording */
 #include "td5_material.h" /* [RT2-P5] per-page shininess detection at upload */
 #include "td5_rt.h"       /* [RT2-P7] td5_rt_active() — HIGH light-pipeline knobs */
+#include "td5_asset.h"    /* [SF FENCE MIPS] td5_asset_get_page_transparency() at upload */
 
 /* Pull in the wrapper types and backend access */
 #include "../../ddraw_wrapper/src/wrapper.h"
@@ -4187,6 +4188,31 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
     bpp = (format == 2) ? 32 : 16;
     caps = DDSCAPS_TEXTURE | DDSCAPS_VIDEOMEMORY;
 
+    /* [SF FENCE MIPS 2026-08-10] Coverage-preserving mipmaps for track alpha-keyed
+     * pages (fences/foliage/signs). Gate strictly: only race/track pages (index
+     * below the static-atlas base 700 — excludes HUD atlas 700+, car 800+, traffic
+     * 820+, fallback 1021), only 32bpp BGRA cutout pages, only transparency type 1
+     * (alpha-keyed, draws at OPAQUE_LINEAR alpha_ref=1) or 2 (color-key, draws at
+     * TRANSLUCENT_ANISO alpha_ref=0x80). Font/HUD/car textures are never mipped.
+     * TD5RE_TRACK_MIPS=0 disables (A/B kill-switch; default ON). */
+    int want_track_mips = 0, mip_ref = 0x80;
+    {
+        static int s_track_mips = -1;
+        if (s_track_mips < 0) {
+            const char *e = getenv("TD5RE_TRACK_MIPS");
+            s_track_mips = (e && e[0] == '0') ? 0 : 1;
+        }
+        if (s_track_mips && format == 2 && page_index >= 0 && page_index < 700) {
+            int t = td5_asset_get_page_transparency(page_index);
+            if (t == 1)      { want_track_mips = 1; mip_ref = 1;    }
+            else if (t == 2) { want_track_mips = 1; mip_ref = 0x80; }
+        }
+        if (want_track_mips)
+            TD5_LOG_I(LOG_TAG, "track mips: page=%d %dx%d type=%d ref=%d",
+                      page_index, width, height,
+                      td5_asset_get_page_transparency(page_index), mip_ref);
+    }
+
 #ifndef TD5RE_RELEASE
     /* [x64 memory hunt 2026-07-30] With TD5RE_ALLOC_LOG set, record every big
      * texture-page upload: on x64 the NVIDIA UMD retains a full-size committed
@@ -4228,6 +4254,7 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
         surf->width == (DWORD)width && surf->height == (DWORD)height &&
         surf->bpp == bpp) {
         WrapperSurface_EnsureDeviceCurrent(surf);   /* TDR-recovery safe */
+        if (want_track_mips) Backend_TextureRequestMips(surf->bt, mip_ref);   /* [SF FENCE MIPS] */
         tex_page_fill_sys_buffer(surf, pixels, width, height, bpp, page_index);
         surf->dirty = 1;
         WrapperSurface_FlushDirty(surf);
@@ -4249,6 +4276,7 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
     /* Create new texture surface */
     surf = WrapperSurface_Create((DWORD)width, (DWORD)height, bpp, caps);
     if (!surf) return 0;
+    if (want_track_mips) Backend_TextureRequestMips(surf->bt, mip_ref);   /* [SF FENCE MIPS] */
 
     /* Upload pixel data via sys_buffer -> UpdateSubresource */
     WrapperSurface_EnsureSysBuffer(surf);

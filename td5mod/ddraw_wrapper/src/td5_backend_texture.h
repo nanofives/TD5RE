@@ -50,6 +50,14 @@ void Backend_TextureRelease(BackendTexture *bt);
 void Backend_TextureUpload(BackendTexture *bt, const void *sys, LONG src_pitch,
                            DWORD w, DWORD h, DWORD src_bpp);
 
+/* [SF FENCE MIPS 2026-08-10] Flag a texture for coverage-preserving mipmaps and
+ * record the alpha_ref its page draws with (type 2 = 0x80, type 1 = 1). Called by
+ * the platform layer only for track alpha-keyed race pages (transparency type
+ * 1/2, page index < static-atlas base). The next Backend_TextureUpload (first
+ * load, in-place refresh, or device-lost re-flush) builds + uploads the chain.
+ * Idempotent. No-op on the D3D11 backend. */
+void Backend_TextureRequestMips(BackendTexture *bt, int alpha_ref);
+
 /* The full IDirect3DTexture2::Load upload. Handles the PNG override, the
  * 16bpp->B8G8R8A8 path (A1R5G5B5-vs-R5G6B5 detection + colorkey->alpha bake),
  * the 16bpp->16bpp path, the 32bpp direct path, and the GPU->GPU copy fallback.
