@@ -1420,7 +1420,7 @@ static void st_apply_scenario(const RaceScenario *sc)
     if (sc->powerups          >= 0) g_td5.ini.powerups          = sc->powerups;
     if (sc->car_damage        >= 0) g_td5.ini.car_damage        = sc->car_damage;
     if (sc->lane_assist       >= 0) g_td5.ini.lane_assist       = sc->lane_assist;
-    if (sc->auto_gearbox      >= 0) g_td5.ini.auto_gearbox      = sc->auto_gearbox;
+    if (sc->auto_gearbox      >= 0) td5_frontend_set_default_manual(sc->auto_gearbox ? 0 : 1);
     if (sc->span_offset       >= 0) g_td5.ini.start_span_offset = sc->span_offset;
     if (sc->end_checkpoint    >  0) g_td5.ini.dbg_end_checkpoint = sc->end_checkpoint;
     if (sc->paint             >= 0) g_td5.ini.default_paint      = sc->paint;

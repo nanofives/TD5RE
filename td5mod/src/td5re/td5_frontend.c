@@ -736,6 +736,12 @@ int  s_selected_car;             /* g_quickRaceSelectedTrackId / DAT_0048f364 */
 int  s_selected_paint;           /* g_carSelectPaintSchemeTransient / g_player1SelectedPaintScheme */
 int  s_selected_config;          /* g_player1SelectedWheelScheme            */
 int  s_selected_transmission;    /* g_carSelectManualTransmissionToggle / g_player1ManualTransmission */
+/* [GEARBOX INI REMOVAL 2026-08-10] Default transmission the car-select toggle
+ * seeds to each entry: 1=Manual, 0=Auto. Replaces the old [GameOptions]AutoGearbox
+ * INI key — NOT persisted, NOT INI/CLI settable. Gameplay stays at Auto (0); the
+ * selftest sets it per-scenario via td5_frontend_set_default_manual(). */
+static int s_default_manual = 0;
+void td5_frontend_set_default_manual(int manual) { s_default_manual = manual ? 1 : 0; }
 int  s_p2_car;                   /* DAT_00463e08            */
 
 
@@ -3204,9 +3210,10 @@ void td5_frontend_auto_race_setup(void) {
     s_selected_game_type = g_td5.ini.default_game_type;
     /* [NEW SUITE] paint-scheme override for the selftest (default -1 -> 0). */
     s_selected_paint     = (g_td5.ini.default_paint >= 0) ? g_td5.ini.default_paint : 0;
-    /* Seed the menu toggle from [GameOptions] AutoGearbox (1=auto->0, 0=manual->1);
-       the menu is authoritative thereafter (td5_input.c). */
-    s_selected_transmission = g_td5.ini.auto_gearbox ? 0 : 1;
+    /* [GEARBOX INI REMOVAL 2026-08-10] Seed the menu toggle from the internal
+       default (Auto unless the selftest overrode it); the menu is authoritative
+       thereafter (td5_input.c). */
+    s_selected_transmission = s_default_manual;
     s_track_direction    = g_td5.ini.default_reverse ? 1 : 0;
     g_td5.reverse_direction = s_track_direction;
     TD5_LOG_I(LOG_TAG, "AutoRace: track_direction=%s (DefaultReverse=%d)",
@@ -10522,10 +10529,10 @@ int td5_frontend_init(void) {
     /* s_paint_active persists across car-select entries (e.g. returning from a
      * race) so a chosen colour stays applied; it starts 0 (neutral) only at
      * launch and is set when the player first confirms a paint colour. */
-    /* Seed the menu toggle from [GameOptions] AutoGearbox (1=auto->0, 0=manual->1);
-       the menu is authoritative thereafter (td5_input.c). Default AUTO when the
-       INI has not loaded. */
-    s_selected_transmission = (g_td5.ini.loaded && !g_td5.ini.auto_gearbox) ? 1 : 0;
+    /* [GEARBOX INI REMOVAL 2026-08-10] The transmission is now a car-select-only
+       choice (no INI key). Default AUTO every time you enter the grid; the menu
+       toggle is authoritative thereafter (td5_input.c). */
+    s_selected_transmission = s_default_manual;
     s_selected_track = g_td5.ini.loaded ? g_td5.ini.default_track : 0;
     s_track_direction = 0;
     s_network_active = 0;

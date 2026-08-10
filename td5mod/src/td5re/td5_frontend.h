@@ -86,6 +86,10 @@ int  td5_frontend_mp_view_actor_slot(int cell);
  * Used by td5_input.c to put a car into manual when the menu selects it
  * (MP uses s_mp_player_trans[player]; single-player uses s_selected_transmission). --- */
 int  td5_frontend_get_player_manual(int player);
+/* [GEARBOX INI REMOVAL 2026-08-10] Set the DEFAULT transmission the car-select
+ * toggle seeds to (1=Manual, 0=Auto). Not persisted / not INI-backed — used by
+ * the selftest to exercise manual/auto; gameplay leaves it at the Auto default. */
+void td5_frontend_set_default_manual(int manual);
 
 /* --- Per-local-player LANE ASSIST choice: 1 = on, 0 = off. MP: car-select grid
  * per-player; single-player: [Input] LaneAssist (Game Options). Read at race

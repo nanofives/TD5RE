@@ -874,19 +874,16 @@ void td5_input_poll_race_session(void)
          * 0x0042c51e OR bit28 -> 0x00402e97 actor+0x378=0 -> 0x00404529 auto-gear
          * call skipped]. This loop only iterates active human players
          * (i < s_active_players), so the AI opponent in drag is unaffected.
-         * Otherwise honor the [GameOptions] AutoGearbox INI key.
+         * Otherwise honor the car-select MANUAL/AUTOMATIC toggle.
          *
-         * [#2 2026-06-15] The car-select MANUAL/AUTOMATIC toggle drives this: the
-         * per-player menu pick (td5_frontend_get_player_manual, per-player in
-         * split-screen) is the authoritative source. Gated by TD5RE_MANUAL_GEARBOX
-         * (default ON; "0" reverts to the legacy auto_gearbox/drag-only behaviour).
+         * [#2 2026-06-15 / 2026-08-04] The per-player menu pick
+         * (td5_frontend_get_player_manual, per-player in split-screen) is the
+         * authoritative source. Gated by TD5RE_MANUAL_GEARBOX (default ON; "0"
+         * disables the manual layer -> auto unless drag).
          *
-         * [#2 2026-08-04] The menu toggle is now authoritative over [GameOptions]
-         * AutoGearbox: that INI key only SEEDS the menu's initial value (see
-         * td5_frontend.c init points) and no longer force-overrides the pick. The
-         * old `!auto_gearbox` OR-term forced MANUAL whenever AutoGearbox=0 even when
-         * the menu showed "Automatic". Drag race still hard-forces manual. When the
-         * manual layer is disabled (env "0") the legacy INI/drag-only path stands. */
+         * [GEARBOX INI REMOVAL 2026-08-10] The old [GameOptions]AutoGearbox INI key
+         * was removed — transmission is a car-select-only choice now (default Auto,
+         * not persisted). Drag race still hard-forces manual. */
         {
             static int s_manual_gearbox = -1;
             if (s_manual_gearbox < 0) {
@@ -897,7 +894,7 @@ void td5_input_poll_race_session(void)
             }
             int want_manual = s_manual_gearbox
                 ? (g_td5.drag_race_enabled || td5_frontend_get_player_manual(i))
-                : (!g_td5.ini.auto_gearbox || g_td5.drag_race_enabled);
+                : g_td5.drag_race_enabled;   /* [GEARBOX INI REMOVAL 2026-08-10] AutoGearbox INI gone; menu pick authoritative, legacy env-off = auto unless drag */
             if (want_manual)
                 s_control_bits[i] |=  0x10000000u;   /* manual (gear keys honored) */
             else
@@ -3227,7 +3224,7 @@ void td5_input_ff_update_player(int player)
         if (td5_physics_at_redline(slot)) {
             /* [FF redline manual-gate fix 2026-06-16] Gate on the AUTHORITATIVE
              * manual control bit (28), computed this same poll from the gearbox
-             * selection (auto_gearbox INI / drag / per-player menu MANUAL pick),
+             * selection (drag / per-player car-select MANUAL pick),
              * NOT the actor +0x378 byte: that byte is dual-used as
              * throttle_input_active, so it can read "auto" while flooring in manual
              * (and the reverse), leaking the rev-limiter buzz into AUTOMATIC. Bit

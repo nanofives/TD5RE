@@ -398,7 +398,6 @@ void td5_ini_persist_options(void)
     /* [SP DRAG DISTANCE 2026-07-23] Persist the SP drag DISTANCE preset so the
      * RACE OPTIONS choice sticks across launches (loaded in main() as DragLength). */
     td5_ini_write_int("GameOptions", "DragLength",        g_td5.ini.drag_length);
-    td5_ini_write_int("GameOptions", "AutoGearbox",      g_td5.ini.auto_gearbox);
     /* [TUTORIAL 2026-06-29] Controller-overlay on/off (0=off, 1=on every race,
      * 2=dev force) — set by the Game Options TUTORIAL row. */
     td5_ini_write_int("GameOptions", "TutorialOverlay",  g_td5.ini.tutorial_overlay);
@@ -425,12 +424,12 @@ void td5_ini_persist_options(void)
     td5_plat_log(TD5_LOG_INFO, "main",
                  "td5re.ini options persisted (in-game change write-back): "
                  "fog=%d units=%d cam=%d sfx=%d mus=%d sfxmode=%d laps=%d "
-                 "chk=%d traf=%d cops=%d diff=%d dyn=%d coll=%d gearbox=%d",
+                 "chk=%d traf=%d cops=%d diff=%d dyn=%d coll=%d",
                  g_td5.ini.fog_enabled, g_td5.ini.speed_units, g_td5.ini.camera_damping,
                  g_td5.ini.sfx_volume, g_td5.ini.music_volume, g_td5.ini.sfx_mode,
                  g_td5.ini.laps, g_td5.ini.checkpoint_timers, g_td5.ini.traffic,
                  g_td5.ini.cops, g_td5.ini.difficulty, g_td5.ini.dynamics,
-                 g_td5.ini.collisions, g_td5.ini.auto_gearbox);
+                 g_td5.ini.collisions);
 }
 
 /* ------------------------------------------------------------------------
@@ -536,7 +535,6 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "Dynamics",             &g_td5.ini.dynamics },
         { "Collisions",           &g_td5.ini.collisions },
         { "Powerups",             &g_td5.ini.powerups },
-        { "AutoGearbox",          &g_td5.ini.auto_gearbox },
         { "LaneAssist",           &g_td5.ini.lane_assist },
         { "RearImpactResponse",   &g_td5.ini.rear_impact_response },
         { "AntiTunnel",           &g_td5.ini.anti_tunnel },
@@ -1051,7 +1049,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.powerups           = td5_ini_int("GameOptions", "Powerups", 1);
     if (g_td5.ini.powerups < 0) g_td5.ini.powerups = 0;
     if (g_td5.ini.powerups > 2) g_td5.ini.powerups = 2;
-    g_td5.ini.auto_gearbox       = td5_ini_int("GameOptions", "AutoGearbox", 1);
     /* [NAME MERGE 2026-07-21] [GameOptions]PlayerName retired — the single player
      * identity is [Network]Nickname (parsed below into net_nickname), used for
      * results / high-score prefill as well as the net lobby. */
@@ -1525,10 +1522,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     dbglog("  [Audio]   SFXVolume=%d MusicVolume=%d SFXMode=%d Radio=%d RadioVol=%d url=%s",
            g_td5.ini.sfx_volume, g_td5.ini.music_volume, g_td5.ini.sfx_mode,
            g_td5.ini.radio_enabled, g_td5.ini.radio_volume, g_td5.ini.radio_url);
-    dbglog("  [GameOpt] Laps=%d Timers=%d Traffic=%d Cops=%d Diff=%d Dyn=%d Coll=%d AutoGB=%d PlayerIsAI=%d",
+    dbglog("  [GameOpt] Laps=%d Timers=%d Traffic=%d Cops=%d Diff=%d Dyn=%d Coll=%d PlayerIsAI=%d",
            g_td5.ini.laps, g_td5.ini.checkpoint_timers, g_td5.ini.traffic,
            g_td5.ini.cops, g_td5.ini.difficulty, g_td5.ini.dynamics, g_td5.ini.collisions,
-           g_td5.ini.auto_gearbox, g_td5.ini.player_is_ai);
+           g_td5.ini.player_is_ai);
     dbglog("  [Game]    Car=%d Track=%d GameType=%d SkipIntro=%d DebugOverlay=%d AutoRace=%d StartScreen=%d StartSpanOffset=%d",
            g_td5.ini.default_car, g_td5.ini.default_track, g_td5.ini.default_game_type,
            g_td5.ini.skip_intro, g_td5.ini.debug_overlay, g_td5.ini.auto_race,

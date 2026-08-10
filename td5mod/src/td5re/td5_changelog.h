@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 10" },
+    { CL_ITEM,    "CHANGE (transmission): the AUTO/MANUAL gearbox is now chosen" },
+    { CL_ITEM,    "  ONLY on the car-select screen (defaults to Automatic each" },
+    { CL_ITEM,    "  time). The old td5re.ini AutoGearbox setting is gone, so a" },
+    { CL_ITEM,    "  stale config value can't force Manual behind your back." },
     { CL_ITEM,    "FIX (Keswick + Blue Ridge): the overhead START banner" },
     { CL_ITEM,    "  no longer shows garbled/mirrored text - it drew its" },
     { CL_ITEM,    "  front and a reversed back panel at the same spot; now" },

@@ -343,12 +343,6 @@ typedef struct TD5_GlobalState {
          * unchanged). Was a plain on/off bool before 2026-07-04; 0/1 values
          * from an old INI still mean OFF/CASUAL, so this is backward-compatible. */
         int  powerups;
-        /* AutoGearbox: 1 = automatic transmission (default; gear up/down keys
-         * ignored), 0 = manual. Drives input bit 28 → actor+0x378 which orig
-         * UpdatePlayerVehicleControlState @ 0x00402E60 gates the gear-shift
-         * block on. The orig defaults to auto; in port the menu toggle is
-         * not wired, so this INI key is the only way to switch to manual. */
-        int  auto_gearbox;
         /* LaneAssist (port-only accessibility aid, 2026-06-28): per-session
          * default enable (0 = off, the default; 1 = on) for the optional
          * lane-assist steering aid — a gentle, capped nudge toward the nearest

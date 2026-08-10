@@ -491,13 +491,11 @@ int32_t td5_physics_mp_catchup_ts_mult(int slot)
  * earlier "+0x378 may be the wrong flag" worry was unfounded: there is no other
  * per-actor manual/auto field, and +0x378 carries the mode every tick.
  *
- * ⚠ KNOWN MENU-SIDE BUG (cross-file, NOT fixable here — see report): the
- * frontend car-select "Automatic / Manual" toggle writes only s_selected_
- * transmission (display + MP persistence) and NEVER reaches the input layer.
- * td5_input.c keys control-bit 28 off g_td5.ini.auto_gearbox (the INI key) only,
- * so picking "Manual" in the menu does nothing — the car stays in whatever
- * AutoGearbox= says (default 1 = automatic) and therefore auto-shifts. The
- * physics gate below is correct; the wiring fix belongs in td5_input.c.
+ * [GEARBOX 2026-08-10] The car-select "Automatic / Manual" toggle IS wired to the
+ * sim: td5_input.c keys control-bit 28 off td5_frontend_get_player_manual() (the
+ * menu pick), which sets +0x378. The old [GameOptions]AutoGearbox INI key was
+ * removed 2026-08-10 — transmission is now a car-select-only choice (default Auto,
+ * not persisted). The physics gate below reads +0x378 and is unaffected.
  * ======================================================================== */
 
 /* TRUE when the actor is in MANUAL gearbox mode (byte +0x378 == 0). Single
