@@ -416,6 +416,22 @@ void rgen_light()
      * normal) sun dir * gain, so gain = length, unit dir = sg/gain. Gated by
      * sun-facing N·L (a broad diffuse lift) plus a specular glint. Car only
      * (matid CARBODY=5). */
+    /* [CAR OVER-LIGHT FIX 2026-08-11] The car's accumulated point light is added
+     * (ONE/ONE) with no roll-off, so a close warm lamp saturates every channel to
+     * 1 -> the car reads pure WHITE. For car pixels only, soft-cap the magnitude
+     * to RT_CAR_LIGHT_SOFT while preserving the COLOUR RATIO, so the warm lamp
+     * gives a warm highlight instead of blowing the body white. Road/walls (non-
+     * car) keep the full additive term. */
+    {
+        int carA = (int)(gb.a * 255.0f + 0.5f);
+        if ((carA & 0x40) != 0) {
+            float m = max(accum.r, max(accum.g, accum.b));
+            if (m > 1e-4f) {
+                float mt = m / (1.0f + m / RT_CAR_LIGHT_SOFT);   /* soft knee -> ceiling */
+                accum *= mt / m;                                 /* preserve hue, cap magnitude */
+            }
+        }
+    }
     g_lightcol[fp] = float4(accum, 1.0f);
 }
 
