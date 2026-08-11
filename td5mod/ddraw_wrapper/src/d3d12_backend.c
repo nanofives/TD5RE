@@ -691,7 +691,11 @@ static void d3d12_store_capture(const D3D12_PLACED_SUBRESOURCE_FOOTPRINT *fp)
         for (y = 0; y < h; y++) {
             const unsigned char *s = mapped + (size_t)y * fp->Footprint.RowPitch;
             unsigned char *d = s_cap_buf + (size_t)y * w * 4;
-            for (x = 0; x < w; x++) { d[x*4+0]=s[x*4+2]; d[x*4+1]=s[x*4+1]; d[x*4+2]=s[x*4+0]; d[x*4+3]=s[x*4+3]; }
+            /* [FRAMEDUMP OPAQUE 2026-08-11] Force alpha=255. The backbuffer alpha
+             * channel is a byproduct of blended draws (fences/foliage) and is NOT
+             * used on screen (swapchain presents opaque), but a saved RGBA PNG shows
+             * it as see-through in image viewers. Screenshots should be fully opaque. */
+            for (x = 0; x < w; x++) { d[x*4+0]=s[x*4+2]; d[x*4+1]=s[x*4+1]; d[x*4+2]=s[x*4+0]; d[x*4+3]=0xFF; }
         }
     }
     { D3D12_RANGE wr; wr.Begin=0; wr.End=0; ID3D12Resource_Unmap(g_d3d12.readback, 0, &wr); }
