@@ -2964,6 +2964,78 @@ static void tpage_decode_one(int i, void *vctx)
     r->keyed_pixels = keyed_pixel_count;
 }
 
+/* [tunnel lights Stage 2] Retexture the Keswick tunnel's baked "fake-light"
+ * patches to PLAIN so only the real emitted lamps light the scene. Scoped to
+ * level001 (Keswick) + the pages identified by the tint pass: walls 152/153/155
+ * and road-edge strips 166/167/174/175. Removes the baked glow (caps bright
+ * texels to just above the page's dark base) and the warm cast (desaturates +
+ * pulls toward a neutralised base), keeping the underlying concrete/asphalt
+ * detail. In-place on the decoded BGRA before upload. Toggle: TD5RE_TUNNEL_PLAIN=0
+ * (default on); TD5RE_TUNNEL_PLAIN_STRENGTH tunes the blend (0..1, default 0.75).
+ * No-op on every other level (page ids are per-level). */
+static void td5_tunnel_plainify_page(int level_number, int page,
+                                     void *pixels, int w, int h)
+{
+    if (level_number != 1 || !pixels || w <= 0 || h <= 0) return;
+    switch (page) {
+        case 152: case 153: case 155:                 /* wall glow panels */
+        case 166: case 167: case 174: case 175:       /* road-edge warm strips */
+            break;
+        default: return;
+    }
+    static int s_on = -1;
+    if (s_on < 0) { const char *e = getenv("TD5RE_TUNNEL_PLAIN"); s_on = (e && e[0] == '0') ? 0 : 1; }
+    if (!s_on) return;
+    static float s_str = -1.0f;
+    if (s_str < 0.0f) {
+        const char *e = getenv("TD5RE_TUNNEL_PLAIN_STRENGTH");
+        s_str = (e && e[0]) ? (float)atof(e) : 0.75f;
+        if (s_str < 0.0f) s_str = 0.0f; else if (s_str > 1.0f) s_str = 1.0f;
+    }
+
+    uint8_t *px = (uint8_t *)pixels;   /* BGRA */
+    long total = (long)w * h;
+    long stride = total > 4096 ? total / 4096 : 1;
+
+    /* Dark base = mean colour of texels at/below the page's mean luma. */
+    double sumL = 0.0; long n = 0;
+    for (long i = 0; i < total; i += stride) {
+        const uint8_t *p = px + i * 4;
+        sumL += 0.114 * p[0] + 0.587 * p[1] + 0.299 * p[2]; n++;
+    }
+    double meanL = n ? sumL / n : 0.0;
+    double bB = 0, bG = 0, bR = 0; long bn = 0;
+    for (long i = 0; i < total; i += stride) {
+        const uint8_t *p = px + i * 4;
+        double l = 0.114 * p[0] + 0.587 * p[1] + 0.299 * p[2];
+        if (l <= meanL) { bB += p[0]; bG += p[1]; bR += p[2]; bn++; }
+    }
+    if (!bn) return;
+    double baseB = bB / bn, baseG = bG / bn, baseR = bR / bn;
+    double baseL = 0.114 * baseB + 0.587 * baseG + 0.299 * baseR;
+    baseB = baseB * 0.4 + baseL * 0.6;      /* neutralise the base's warm cast */
+    baseG = baseG * 0.4 + baseL * 0.6;
+    baseR = baseR * 0.4 + baseL * 0.6;
+    double capL = baseL * 1.30 + 6.0;       /* clamp glow to just above base */
+
+    for (long i = 0; i < total; i++) {
+        uint8_t *p = px + i * 4;
+        double B = p[0], G = p[1], R = p[2];
+        double l = 0.114 * B + 0.587 * G + 0.299 * R;
+        if (l > capL && l > 1.0) { double k = capL / l; B *= k; G *= k; R *= k; }
+        double g = 0.114 * B + 0.587 * G + 0.299 * R;   /* grey for desaturation */
+        double s = s_str;
+        B = B * (1.0 - s) + (g * 0.5 + baseB * 0.5) * s;
+        G = G * (1.0 - s) + (g * 0.5 + baseG * 0.5) * s;
+        R = R * (1.0 - s) + (g * 0.5 + baseR * 0.5) * s;
+        p[0] = (uint8_t)(B < 0 ? 0 : B > 255 ? 255 : B);
+        p[1] = (uint8_t)(G < 0 ? 0 : G > 255 ? 255 : G);
+        p[2] = (uint8_t)(R < 0 ? 0 : R > 255 ? 255 : R);
+    }
+    TD5_LOG_I(LOG_TAG, "tunnel plainify: page=%d base=(%d,%d,%d) capL=%.0f str=%.2f",
+              page, (int)baseB, (int)baseG, (int)baseR, capL, (double)s_str);
+}
+
 int td5_asset_load_race_texture_pages(void)
 {
     /*
@@ -3055,13 +3127,25 @@ int td5_asset_load_race_texture_pages(void)
             tpage_result_t *r = &results[i];
             if (!r->pixels)
                 continue;
-            /* [SF FENCE MIPS 2026-08-10] Register the page transparency type
-             * BEFORE the GPU upload: td5_plat_render_upload_texture reads it
-             * (td5_asset_get_page_transparency) to decide whether to build a
-             * coverage-preserving mip chain for alpha-keyed track pages (type
-             * 1/2). Registering after the upload left the type stale (-1) at
-             * upload time, so the mip path never fired. Order-independent for
-             * every other reader (the value is only consumed later at draw). */
+            /* Order here is load-bearing on BOTH counts, so keep the three
+             * calls in this sequence:
+             *
+             * 1. [TUNNEL PLAINIFY] rewrites the page's PIXELS (knocks the baked
+             *    glow out of the Keswick tunnel patches), so it has to run
+             *    before the bytes are handed to the GPU -- and before the mip
+             *    chain is built from them, or the mips would carry the glow the
+             *    level-0 image no longer has.
+             * 2. [SF FENCE MIPS 2026-08-10] Register the page transparency type
+             *    BEFORE the GPU upload: td5_plat_render_upload_texture reads it
+             *    (td5_asset_get_page_transparency) to decide whether to build a
+             *    coverage-preserving mip chain for alpha-keyed track pages (type
+             *    1/2). Registering after the upload left the type stale (-1) at
+             *    upload time, so the mip path never fired. Order-independent for
+             *    every other reader (the value is only consumed later at draw).
+             * 3. Upload ONCE. The tunnel work originally uploaded straight after
+             *    plainify, which predates the type-before-upload reorder; keeping
+             *    both would have uploaded every page twice. */
+            td5_tunnel_plainify_page(level_number, r->page, r->pixels, r->w, r->h);
             td5_asset_set_page_transparency(r->page, r->type);
             td5_plat_render_upload_texture(r->page, r->pixels, r->w, r->h, 2);
             if (r->type == 1 && r->keyed_pixels > 0) {
