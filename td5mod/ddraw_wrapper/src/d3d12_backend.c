@@ -1622,15 +1622,29 @@ static void d3d12_mip_box_down(const uint8_t *src, UINT sw, UINT sh,
     }
 }
 
-/* Rescale a mip's alpha in-place so fraction(alpha>=ref) matches `target`
- * (Castano alpha-coverage preservation). Binary-searches a uniform alpha scale. */
+/* Rescale a mip's alpha in-place so fraction(alpha>=ref) is >= `target`, by
+ * BOOSTING alpha (Castano alpha-coverage preservation). Binary-searches a
+ * uniform alpha scale in [1, cap].
+ *
+ * [KESWICK REGRESSION FIX 2026-08-10] The scale is clamped to >= 1.0 — coverage
+ * preservation may only ADD coverage to compensate for a coarser mip losing it,
+ * never REMOVE it. The original allowed scale < 1 (search from lo=0), which for
+ * type-1 pages (draw alpha_ref=1) was actively harmful: box-filtering naturally
+ * GROWS coverage at ref=1 (blur spreads a thin wire's alpha over more texels), so
+ * the search tried to shrink it back down to the level-0 target — and on the
+ * discrete 0/255 alpha that coverage-vs-scale curve is a step function, so the
+ * search overshot the step and landed on a scale that zeroed the fence. Result:
+ * Keswick's thin fences dissolved at distance / popped in up close. Boost-only
+ * makes type-1 a no-op (scale stays 1, plain box keeps the fence visible) while
+ * type-2 (ref=0x80, coverage shrinks with distance) still boosts up to `cap` to
+ * hold the SF chain-link solid. */
 static void d3d12_mip_preserve_coverage(uint8_t *bgra, size_t n, int ref, double target)
 {
-    double lo = 0.0, hi = 4.0, scale = 1.0;
+    double lo = 1.0, hi = 32.0, scale = 1.0;   /* boost-only: scale >= 1 */
     int it;
     size_t i;
     if (target <= 0.0 || n == 0) return;
-    for (it = 0; it < 12; it++) {
+    for (it = 0; it < 16; it++) {
         double mid = 0.5 * (lo + hi), cov;
         size_t pass = 0;
         for (i = 0; i < n; i++) {
@@ -1641,7 +1655,8 @@ static void d3d12_mip_preserve_coverage(uint8_t *bgra, size_t n, int ref, double
         if (cov < target) lo = mid; else hi = mid;
         scale = mid;
     }
-    if (scale > 0.999 && scale < 1.001) return;   /* no-op (e.g. near-opaque type-1) */
+    if (scale < 1.0) scale = 1.0;                 /* never reduce coverage */
+    if (scale < 1.001) return;                    /* no-op (already >= target, e.g. type-1) */
     for (i = 0; i < n; i++) {
         int a = (int)(bgra[i * 4 + 3] * scale + 0.5);
         bgra[i * 4 + 3] = (uint8_t)(a > 255 ? 255 : a);

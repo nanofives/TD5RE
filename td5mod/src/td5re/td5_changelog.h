@@ -45,6 +45,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  longer shimmer into a checkerboard with a jagged top" },
     { CL_ITEM,    "  edge at distance (e.g. the San Francisco fence) - they" },
     { CL_ITEM,    "  now get smooth mipmaps that keep the mesh see-through." },
+    { CL_ITEM,    "  Thin fences (e.g. Keswick) no longer fade out far away" },
+    { CL_ITEM,    "  or pop in up close - they draw at full distance again." },
     { CL_ITEM,    "FIX (trees): roadside tree/sign billboards (e.g. the big" },
     { CL_ITEM,    "  Keswick trees) no longer show hard blocky black borders" },
     { CL_ITEM,    "  around their edges - 2D cutout edge smoothing is back on" },
