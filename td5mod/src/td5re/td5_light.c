@@ -357,7 +357,7 @@ static int   s_lamp_knobs_read = 0;
 static float s_lamp_range      = 2400.0f;  /* TD5RE_LAMP_RANGE      pool radius (world units) */
 static float s_lamp_intensity  = 1.00f;    /* TD5RE_LAMP_INTENSITY  peak added light 0..1     */
 static int   s_lamp_budget     = 10;       /* TD5RE_LAMP_COUNT      nearest-N promoted/frame  */
-static float s_tlamp_range     = 1200.0f;  /* TD5RE_TUNNEL_LAMP_RANGE     tighter than sodium */
+static float s_tlamp_range     = 3500.0f;  /* TD5RE_TUNNEL_LAMP_RANGE  fills the tunnel corridor (1200 = tight pools hugging the car) */
 static float s_tlamp_intensity = 1.00f;    /* TD5RE_TUNNEL_LAMP_INTENSITY                     */
 /* TD5RE_TUNNEL_LAMP_COUNT: cap on how many tunnel wall lamps promote to real
  * point lights per frame (nearest-first). Measured cost on a fast GPU is ~0 ms
