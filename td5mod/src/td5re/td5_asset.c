@@ -2989,7 +2989,7 @@ static void td5_tunnel_plainify_page(int level_number, int page,
     static float s_str = -1.0f;
     if (s_str < 0.0f) {
         const char *e = getenv("TD5RE_TUNNEL_PLAIN_STRENGTH");
-        s_str = (e && e[0]) ? (float)atof(e) : 0.75f;
+        s_str = (e && e[0]) ? (float)atof(e) : 0.30f;
         if (s_str < 0.0f) s_str = 0.0f; else if (s_str > 1.0f) s_str = 1.0f;
     }
 
@@ -3013,27 +3013,33 @@ static void td5_tunnel_plainify_page(int level_number, int page,
     if (!bn) return;
     double baseB = bB / bn, baseG = bG / bn, baseR = bR / bn;
     double baseL = 0.114 * baseB + 0.587 * baseG + 0.299 * baseR;
-    baseB = baseB * 0.4 + baseL * 0.6;      /* neutralise the base's warm cast */
-    baseG = baseG * 0.4 + baseL * 0.6;
-    baseR = baseR * 0.4 + baseL * 0.6;
-    double capL = baseL * 1.30 + 6.0;       /* clamp glow to just above base */
+    (void)baseB; (void)baseG; (void)baseR;  /* only the dark-base LUMA is needed */
+    double capL = baseL * 1.25 + 6.0;       /* knock glow down to ~base, keep grain */
 
     for (long i = 0; i < total; i++) {
         uint8_t *p = px + i * 4;
         double B = p[0], G = p[1], R = p[2];
         double l = 0.114 * B + 0.587 * G + 0.299 * R;
+        /* 1) Knock down ONLY the baked bright glow: texels brighter than the page's
+         *    dark base are scaled down toward it. Proportional scaling preserves the
+         *    concrete/asphalt GRAIN (relative variation) — it does not flatten the
+         *    material to a solid colour (the previous blend-toward-base did, which is
+         *    why the walls/road stopped resembling the original track). */
         if (l > capL && l > 1.0) { double k = capL / l; B *= k; G *= k; R *= k; }
-        double g = 0.114 * B + 0.587 * G + 0.299 * R;   /* grey for desaturation */
+        /* 2) Gentle desaturation toward the texel's OWN grey (never a flat base) takes
+         *    the warm-orange edge off the glow while preserving luma detail (grain)
+         *    and the base material. Strength via TD5RE_TUNNEL_PLAIN_STRENGTH. */
+        double g = 0.114 * B + 0.587 * G + 0.299 * R;
         double s = s_str;
-        B = B * (1.0 - s) + (g * 0.5 + baseB * 0.5) * s;
-        G = G * (1.0 - s) + (g * 0.5 + baseG * 0.5) * s;
-        R = R * (1.0 - s) + (g * 0.5 + baseR * 0.5) * s;
+        B = B * (1.0 - s) + g * s;
+        G = G * (1.0 - s) + g * s;
+        R = R * (1.0 - s) + g * s;
         p[0] = (uint8_t)(B < 0 ? 0 : B > 255 ? 255 : B);
         p[1] = (uint8_t)(G < 0 ? 0 : G > 255 ? 255 : G);
         p[2] = (uint8_t)(R < 0 ? 0 : R > 255 ? 255 : R);
     }
-    TD5_LOG_I(LOG_TAG, "tunnel plainify: page=%d base=(%d,%d,%d) capL=%.0f str=%.2f",
-              page, (int)baseB, (int)baseG, (int)baseR, capL, (double)s_str);
+    TD5_LOG_I(LOG_TAG, "tunnel plainify: page=%d baseL=%.0f capL=%.0f str=%.2f",
+              page, baseL, capL, (double)s_str);
 }
 
 int td5_asset_load_race_texture_pages(void)
