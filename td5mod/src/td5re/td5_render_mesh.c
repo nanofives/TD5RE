@@ -113,6 +113,18 @@ static int foliage_billboard_aa_enabled(void)
     }
     return v;
 }
+/* [foliage feather 2026-08-11] Soften (feather) the silhouette edge of dark
+ * tree-canopy billboards so the near-black rim dissolves into the sky. Default
+ * ON; TD5RE_FOLIAGE_FEATHER=0 disables (revert to the crisp 0x80 cutout). */
+static int foliage_feather_enabled(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TD5RE_FOLIAGE_FEATHER");
+        v = (e && e[0]) ? (atoi(e) != 0) : 1;
+    }
+    return v;
+}
 /* [car look] Saturation of the authored zone COLOUR applied to VEHICLE bodies in
  * the Mode>=1 colored path: 1.0 = full authored colour, 0.0 = neutral grey (the
  * original averaged zone light to grey, so 0 == the faithful car look). Warm-lit
@@ -4010,6 +4022,14 @@ void td5_render_apply_page_blend_preset(int page_id)
      * OPAQUE_LINEAR — faithful hard cutout, unchanged. */
     else if (t == 1 && s_bb_foliage_aa) p = TD5_PRESET_TRANSLUCENT_ANISO;
     else             p = TD5_PRESET_OPAQUE_LINEAR;
+    /* [foliage feather] A dark green TREE-canopy billboard (classified at load)
+     * uses the feather variant so its near-black silhouette edge fades into the
+     * sky instead of ending in a hard dark line. Scoped to billboard draws
+     * (s_bb_foliage_aa) on dark-foliage pages only, so bright signs/banners and
+     * non-billboard world geometry keep the crisp cutout. */
+    if (s_bb_foliage_aa && p == TD5_PRESET_TRANSLUCENT_ANISO &&
+        foliage_feather_enabled() && td5_asset_get_page_dark_foliage(page_id))
+        p = TD5_PRESET_FOLIAGE_AA_FEATHER;
     /* [dynamic-traffic] A fading car body must alpha-blend regardless of page
      * type. Additive pages keep ONE/ONE (the fade is folded into their RGB by
      * the flush fixup); opaque/color-key pages remap to the fade preset whose

@@ -16,7 +16,7 @@ cbuffer FogParams : register(b0)
     int    fogEnabled;  /* 0 = off, 1 = linear, 2 = exp, 3 = exp2 */
     int    alphaTestEnabled; /* 1 = discard pixels with alpha < alphaRef */
     float  alphaRef;    /* alpha test reference value (0..1) */
-    float  _pad1;
+    float  foliageFeather; /* >0 = feather the foliage silhouette edge (ramp outer alpha); 0 = crisp cutout */
     float  foliageAA;   /* 1.0 = use SampleFoliageAA() for texMap, else Sample() */
     float4 carSun;      /* [CAR SUN] w = sunlit-car brighten gain (per-draw, RT car bodies only) */
 };
@@ -133,8 +133,30 @@ float4 ApplyFogAndAlphaTest(float4 color, float depth)
     /* Alpha test: discard pixels below threshold (replaces D3D6 fixed-function alpha test).
      * This is critical for color-keyed textures (A1R5G5B5 with alpha=0 for transparent pixels).
      * Without this, transparent pixels render as opaque black, covering geometry behind them. */
-    if (alphaTestEnabled && color.a < alphaRef)
-        discard;
+    if (alphaTestEnabled)
+    {
+        if (foliageFeather > 0.0)
+        {
+            /* [foliage feather] Dark tree-canopy billboard: instead of a hard cut
+             * at alphaRef (which leaves the near-black silhouette as a solid dark
+             * rim), lower the discard threshold and RAMP the surviving alpha from
+             * 0 at the (lowered) threshold to 1 at fully-opaque. The outer edge
+             * therefore becomes progressively more transparent and blends into the
+             * sky — the dark line dissolves into a soft gradient. The extra pixels
+             * kept below alphaRef have near-zero ramped alpha, so the tree does not
+             * visibly fatten and (blending a DARK colour toward the sky) there is
+             * no bright halo. color.rgb is already the alpha-weighted foliage
+             * colour from SampleFoliageAA, so no black is pulled in. */
+            float lowRef = alphaRef * (1.0 - 0.5 * foliageFeather);
+            if (color.a < lowRef)
+                discard;
+            color.a = saturate((color.a - lowRef) / max(1e-4, 1.0 - lowRef));
+        }
+        else if (color.a < alphaRef)
+        {
+            discard;
+        }
+    }
 
     /* [CAR SUN 2026-08-04] The sunlit-car brighten is now DIRECTIONAL (N.L against
      * the sun) and applied in ps_modulate_g / ps_modulate_alpha_g, where the packed

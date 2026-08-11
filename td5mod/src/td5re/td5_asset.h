@@ -43,6 +43,11 @@ int  td5_asset_static_tpage_is_real(int slot);
  * Mirrors the per-page metadata in BindRaceTexturePage @ 0x0040B660. */
 void td5_asset_set_page_transparency(int page_id, int transparency);
 int  td5_asset_get_page_transparency(int page_id);
+/* [foliage feather] dark-green tree-canopy page classification (see td5_asset.c). */
+void td5_asset_set_page_dark_foliage(int page_id, int is_foliage);
+int  td5_asset_get_page_dark_foliage(int page_id);
+void td5_asset_classify_dark_foliage(int page_id, const uint8_t *bgra,
+                                     int w, int h, int page_type);
 
 /* ========================================================================
  * ZIP Archive System

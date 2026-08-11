@@ -3273,11 +3273,32 @@ void Backend_UpdateFogCB(void)
      * else (the D3D11 gate's current_tex_has_alpha is unusable here — the game's
      * textures are all flagged r5g6b5_source, so it is 0 for every draw). Opaque
      * sky/road/car/HUD draws don't match and keep foliageAA=0 (byte-identical). */
-    fog.foliageAA = (g_backend.foliage_aa_enabled &&
-                     st->alpha_test_enable &&
-                     st->blend_enable &&
-                     !st->z_write &&
-                     st->alpha_ref == 0x80) ? 1.0f : 0.0f;
+    /* alpha_ref 0x80 = plain foliage AA (signs/fences/foliage); 0x81 = the same
+     * but marks a DARK TREE-canopy billboard that should also be edge-feathered
+     * (TD5_PRESET_FOLIAGE_AA_FEATHER). Both take the SampleFoliageAA path. */
+    {
+        int is_foliage = (st->alpha_ref == 0x80 || st->alpha_ref == 0x81);
+        fog.foliageAA = (g_backend.foliage_aa_enabled &&
+                         st->alpha_test_enable &&
+                         st->blend_enable &&
+                         !st->z_write &&
+                         is_foliage) ? 1.0f : 0.0f;
+        /* [foliage feather] strength for the 0x81-marked dark-tree draws. Env
+         * TD5RE_FOLIAGE_FEATHER_STRENGTH (0..1, default 0.6) dials how far the
+         * outer edge fades; 0 falls back to a crisp cutout. */
+        if (fog.foliageAA != 0.0f && st->alpha_ref == 0x81) {
+            static float s_feather = -1.0f;
+            if (s_feather < 0.0f) {
+                const char *e = getenv("TD5RE_FOLIAGE_FEATHER_STRENGTH");
+                s_feather = (e && e[0]) ? (float)atof(e) : 0.6f;
+                if (s_feather < 0.0f) s_feather = 0.0f;
+                if (s_feather > 1.0f) s_feather = 1.0f;
+            }
+            fog.foliageFeather = s_feather;
+        } else {
+            fog.foliageFeather = 0.0f;
+        }
+    }
     fog.carSun[0] = s_car_sun_dir[0];              /* [CAR SUN] frame sun dir (N.L) */
     fog.carSun[1] = s_car_sun_dir[1];
     fog.carSun[2] = s_car_sun_dir[2];

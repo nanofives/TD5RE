@@ -174,7 +174,10 @@ typedef struct {
     int     fogEnabled;
     int     alphaTestEnabled;
     float   alphaRef;       /* 0..1 range */
-    float   _pad1;
+    float   foliageFeather; /* [foliage feather] >0 = soften the silhouette alpha
+                              * edge of a dark tree billboard (ramp the outer
+                              * alpha so the near-black rim dissolves into the
+                              * sky). 0 = crisp cutout. Value = feather strength. */
     float   foliageAA;      /* [foliage AA] 1.0 = this draw uses the clamped,
                               * alpha-weighted manual reconstruction in
                               * SampleFoliageAA (ps_common.hlsli) instead of

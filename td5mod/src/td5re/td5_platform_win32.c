@@ -3544,6 +3544,26 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->alpha_ref         = 0x80;
         break;
 
+    case TD5_PRESET_FOLIAGE_AA_FEATHER:
+        /* [foliage feather 2026-08-11] Same state as TRANSLUCENT_ANISO above,
+         * only alpha_ref = 0x81 (not 0x80). The +1 is a wrapper-side marker (see
+         * td5_types.h): Backend_UpdateFogCB treats 0x80/0x81 identically for the
+         * foliage-AA discard, but sets FogCB.foliageFeather for 0x81 so the shader
+         * ramps the silhouette alpha (dark rim dissolves into the sky). Applied
+         * only to dark green tree-canopy billboard pages, so signs stay crisp. */
+        s->blend_enable = 1;
+        s->src_blend    = D3D6BLEND_SRCALPHA;
+        s->dest_blend   = D3D6BLEND_INVSRCALPHA;
+        s->z_enable     = 1;
+        s->z_write      = 0;
+        s->z_func       = 0;
+        s->mag_filter   = 2;
+        s->min_filter   = 2;
+        s->texblend_mode = D3DTBLEND_MODULATEALPHA;
+        s->alpha_test_enable = 1;
+        s->alpha_ref         = 0x81;
+        break;
+
     case TD5_PRESET_OPAQUE_LINEAR:
         s->blend_enable = 0;
         s->z_enable     = 1;

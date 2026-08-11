@@ -750,6 +750,60 @@ int td5_asset_get_page_transparency(int page_id)
     return s_page_transparency[page_id];
 }
 
+/* [foliage feather 2026-08-11] Per-page "dark foliage" classification, computed
+ * from the decoded pixels at load (td5_asset_classify_dark_foliage). 1 = a dark,
+ * green-dominant colour-key page (i.e. a TREE canopy sprite like Keswick pages
+ * 372-375) whose near-black silhouette edge reads as a dark rim against the sky.
+ * The renderer feathers ONLY these pages' billboard edges; bright signs/banners
+ * (e.g. the START banner) and non-green cutouts classify 0 and stay crisp. */
+static uint8_t s_page_dark_foliage[TD5_PAGE_TRANSPARENCY_MAX] = { 0 };
+
+void td5_asset_set_page_dark_foliage(int page_id, int is_foliage)
+{
+    if (page_id < 0 || page_id >= TD5_PAGE_TRANSPARENCY_MAX) return;
+    s_page_dark_foliage[page_id] = is_foliage ? 1u : 0u;
+}
+
+int td5_asset_get_page_dark_foliage(int page_id)
+{
+    if (page_id < 0 || page_id >= TD5_PAGE_TRANSPARENCY_MAX) return 0;
+    return s_page_dark_foliage[page_id];
+}
+
+/* Classify a decoded BGRA page as "dark foliage" for edge feathering. A tree
+ * canopy is a colour-key cutout (type 1/2) whose OPAQUE texels are dark and
+ * green-dominant. Signs/banners/text are bright and/or non-green -> return 0 so
+ * they are never feathered. Thresholds are deliberately conservative (must be
+ * BOTH dark AND green) so only genuine dark tree sprites match. */
+void td5_asset_classify_dark_foliage(int page_id, const uint8_t *bgra,
+                                     int w, int h, int page_type)
+{
+    long n = 0, sr = 0, sg = 0, sb = 0;
+    int i, px = w * h;
+    if (page_id < 0 || page_id >= TD5_PAGE_TRANSPARENCY_MAX) return;
+    if (!bgra || (page_type != 1 && page_type != 2)) {   /* only colour-key cutouts */
+        s_page_dark_foliage[page_id] = 0;
+        return;
+    }
+    for (i = 0; i < px; i++) {
+        if (bgra[i * 4 + 3] < 200) continue;             /* opaque texels only */
+        sb += bgra[i * 4 + 0];
+        sg += bgra[i * 4 + 1];
+        sr += bgra[i * 4 + 2];
+        n++;
+    }
+    if (n < 64) { s_page_dark_foliage[page_id] = 0; return; }   /* too few opaque texels */
+    {
+        double r = (double)sr / n, g = (double)sg / n, b = (double)sb / n;
+        double lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        /* dark AND green-dominant => a tree canopy. Green must lead both other
+         * channels by a margin so bright/reddish/white signage never matches. */
+        int dark  = lum < 45.0;
+        int green = (g >= r + 3.0) && (g >= b + 3.0);
+        s_page_dark_foliage[page_id] = (dark && green) ? 1u : 0u;
+    }
+}
+
 /* ========================================================================
  * ZIP Central Directory Parser
  *
@@ -3063,6 +3117,10 @@ int td5_asset_load_race_texture_pages(void)
              * upload time, so the mip path never fired. Order-independent for
              * every other reader (the value is only consumed later at draw). */
             td5_asset_set_page_transparency(r->page, r->type);
+            /* Classification is read-only over r->pixels (it just records the
+             * dark-foliage flag consumed later at draw), so it is independent of
+             * the upload — it only has to run before r->pixels is freed below. */
+            td5_asset_classify_dark_foliage(r->page, r->pixels, r->w, r->h, r->type);
             td5_plat_render_upload_texture(r->page, r->pixels, r->w, r->h, 2);
             if (r->type == 1 && r->keyed_pixels > 0) {
                 TD5_LOG_I(LOG_TAG,

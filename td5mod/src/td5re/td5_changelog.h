@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 11" },
+    { CL_ITEM,    "FIX (trees): the dark near-black outline that hugged tree" },
+    { CL_ITEM,    "  silhouettes against the sky is gone - dark tree-canopy" },
+    { CL_ITEM,    "  edges now feather softly into the sky instead of ending" },
+    { CL_ITEM,    "  in a hard dark rim. Signs/banners + fences stay crisp." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 10" },
     { CL_ITEM,    "CHANGE (transmission): the AUTO/MANUAL gearbox is now chosen" },
     { CL_ITEM,    "  ONLY on the car-select screen (defaults to Automatic each" },
