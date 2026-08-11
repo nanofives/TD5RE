@@ -359,13 +359,16 @@ static float s_lamp_intensity  = 1.00f;    /* TD5RE_LAMP_INTENSITY  peak added l
 static int   s_lamp_budget     = 10;       /* TD5RE_LAMP_COUNT      nearest-N promoted/frame  */
 static float s_tlamp_range     = 1200.0f;  /* TD5RE_TUNNEL_LAMP_RANGE     tighter than sodium */
 static float s_tlamp_intensity = 1.00f;    /* TD5RE_TUNNEL_LAMP_INTENSITY                     */
-/* TD5RE_TUNNEL_LAMP_COUNT: SAFETY CAP on how many tunnel wall lamps promote to
- * real point lights per frame (nearest-first). Measured cost on a fast GPU is
- * ~0 ms for 8 lamps, but each real light still adds per-light work in the RT
- * light pass, so on a GPU-bound card fewer is cheaper. Default 3 (was
- * effectively ~8, all in-range patches); set high (e.g. 32) to restore the
- * uncapped look. Independent of the street-lamp TD5RE_LAMP_COUNT budget. */
-static int   s_tlamp_budget    = 3;
+/* TD5RE_TUNNEL_LAMP_COUNT: cap on how many tunnel wall lamps promote to real
+ * point lights per frame (nearest-first). Measured cost on a fast GPU is ~0 ms
+ * for 8 lamps, so the DEFAULT is 8 (light a stretch of the tunnel ahead, not
+ * just the nearest few hugging the camera). LOWER it (e.g. 3) as a perf lever on
+ * a GPU-bound card. Independent of the street-lamp TD5RE_LAMP_COUNT budget. */
+static int   s_tlamp_budget    = 8;
+/* Tunnel lamp colour — WARM tungsten (env-tunable while art-directing). */
+static float s_tlamp_r         = 1.00f;    /* TD5RE_TUNNEL_LAMP_R */
+static float s_tlamp_g         = 0.85f;    /* TD5RE_TUNNEL_LAMP_G */
+static float s_tlamp_b         = 0.62f;    /* TD5RE_TUNNEL_LAMP_B */
 
 void td5_light_emit_street_lamps(void)
 {
@@ -398,6 +401,9 @@ void td5_light_emit_street_lamps(void)
             const char *e = getenv("TD5RE_TUNNEL_LAMP_COUNT");
             if (e && e[0]) { int v = atoi(e); if (v >= 0 && v <= TD5_LIGHT_MAX) s_tlamp_budget = v; }
         }
+        s_tlamp_r = env_f("TD5RE_TUNNEL_LAMP_R", s_tlamp_r);
+        s_tlamp_g = env_f("TD5RE_TUNNEL_LAMP_G", s_tlamp_g);
+        s_tlamp_b = env_f("TD5RE_TUNNEL_LAMP_B", s_tlamp_b);
         TD5_LOG_I(LOG_TAG, "street lamps: %d registered, range=%.0f intensity=%.2f budget=%d tunnel_budget=%d",
                   s_lamp_count, (double)s_lamp_range, (double)s_lamp_intensity, s_lamp_budget, s_tlamp_budget);
     }
@@ -451,10 +457,10 @@ void td5_light_emit_street_lamps(void)
              * lamps and drops farther ones (per-light RT-pass work headroom). */
             if (tunnel_emitted >= s_tlamp_budget) continue;
             tunnel_emitted++;
-            /* Cool-white fixture, tighter pool — reads as a tunnel lamp. */
+            /* Warm tungsten fixture, tighter pool — reads as a tunnel lamp. */
             td5_light_add_point(L[0], L[1], L[2],
                                 s_tlamp_range, s_tlamp_intensity,
-                                0.90f, 0.95f, 1.00f);
+                                s_tlamp_r, s_tlamp_g, s_tlamp_b);
         } else {
             /* Warm sodium-vapor tint. */
             td5_light_add_point(L[0], L[1], L[2],
