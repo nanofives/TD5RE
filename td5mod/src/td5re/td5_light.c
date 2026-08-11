@@ -358,7 +358,14 @@ static float s_lamp_range      = 2400.0f;  /* TD5RE_LAMP_RANGE      pool radius 
 static float s_lamp_intensity  = 1.00f;    /* TD5RE_LAMP_INTENSITY  peak added light 0..1     */
 static int   s_lamp_budget     = 10;       /* TD5RE_LAMP_COUNT      nearest-N promoted/frame  */
 static float s_tlamp_range     = 3500.0f;  /* TD5RE_TUNNEL_LAMP_RANGE  fills the tunnel corridor (1200 = tight pools hugging the car) */
-static float s_tlamp_intensity = 1.00f;    /* TD5RE_TUNNEL_LAMP_INTENSITY                     */
+static float s_tlamp_intensity = 1.35f;    /* TD5RE_TUNNEL_LAMP_INTENSITY  peak added light (raised so the road/car read) */
+/* TD5RE_TUNNEL_LAMP_DROP: the wall/ceiling patches sit ~1600 units ABOVE the road,
+ * so a point light left there barely reaches the floor or a passing car (falloff
+ * (1-d/range)^2 collapses at that distance). Move each tunnel lamp DOWN toward the
+ * road by this fraction of (lamp_y -> player/road_y) at emit time, so the warm pool
+ * lands ON the road and lights cars under it. 0 = keep at the ceiling; 1 = at road
+ * level. Default 0.6 (mid-tunnel, biased low). */
+static float s_tlamp_drop      = 0.60f;
 /* TD5RE_TUNNEL_LAMP_COUNT: cap on how many tunnel wall lamps promote to real
  * point lights per frame (nearest-first). Measured cost on a fast GPU is ~0 ms
  * for 8 lamps, so the DEFAULT is 8 (light a stretch of the tunnel ahead, not
@@ -404,6 +411,8 @@ void td5_light_emit_street_lamps(void)
         s_tlamp_r = env_f("TD5RE_TUNNEL_LAMP_R", s_tlamp_r);
         s_tlamp_g = env_f("TD5RE_TUNNEL_LAMP_G", s_tlamp_g);
         s_tlamp_b = env_f("TD5RE_TUNNEL_LAMP_B", s_tlamp_b);
+        s_tlamp_drop = env_f("TD5RE_TUNNEL_LAMP_DROP", s_tlamp_drop);
+        if (s_tlamp_drop < 0.0f) s_tlamp_drop = 0.0f; else if (s_tlamp_drop > 1.0f) s_tlamp_drop = 1.0f;
         TD5_LOG_I(LOG_TAG, "street lamps: %d registered, range=%.0f intensity=%.2f budget=%d tunnel_budget=%d",
                   s_lamp_count, (double)s_lamp_range, (double)s_lamp_intensity, s_lamp_budget, s_tlamp_budget);
     }
@@ -457,8 +466,12 @@ void td5_light_emit_street_lamps(void)
              * lamps and drops farther ones (per-light RT-pass work headroom). */
             if (tunnel_emitted >= s_tlamp_budget) continue;
             tunnel_emitted++;
+            /* Drop the emitter DOWN toward the road (player Y) so the pool lands
+             * on the floor and lights cars under it — the captured patch sits up
+             * on the wall/ceiling where falloff starves the road. */
+            float ly = L[1] + s_tlamp_drop * (py - L[1]);
             /* Warm tungsten fixture, tighter pool — reads as a tunnel lamp. */
-            td5_light_add_point(L[0], L[1], L[2],
+            td5_light_add_point(L[0], ly, L[2],
                                 s_tlamp_range, s_tlamp_intensity,
                                 s_tlamp_r, s_tlamp_g, s_tlamp_b);
         } else {
