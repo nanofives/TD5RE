@@ -7678,6 +7678,91 @@ void td5_track_register_lamp_lights(void)
     td5_light_lamps_set_level(td5_asset_level_number(g_td5.track_index));
     TD5_LOG_I("track", "street lamps: registry reset (render-time capture active)");
 
+    /* [Route B: STATIC tunnel-lamp extraction 2026-08-11] Render-time capture
+     * (clip_and_submit_polygon) only registers a tunnel lamp once its wall patch
+     * polygon has actually been drawn, so lamps far ahead / around the S-bend
+     * POP ON as the camera nears. Unlike the street-lamp GLOW BILLBOARDS (whose
+     * skyline placement folds defeat static extraction, see above), the Keswick
+     * tunnel WALL patches (pages 152/153/155) are ordinary track meshes with
+     * ROTATION IDENTITY -- world = origin/256 + local vert (td5_render_mesh.c:
+     * "track verts are world-space offset by origin"). So every patch centroid
+     * extracts correctly from MODELS.DAT up front. Walk every command on every
+     * loaded mesh once and register each as a persistent tunnel lamp; the
+     * per-frame nearest-N emit budget (TD5RE_TUNNEL_LAMP_COUNT) then always picks
+     * from the FULL set (ahead + behind), so the tunnel is lit from the start.
+     * The dedup in td5_light_lamps_capture_tunnel (650u) merges a patch's several
+     * quads into one lamp. Keswick (track 10) only; TD5RE_TUNNEL_LAMP_STATIC=0
+     * falls back to render-time capture. */
+    {
+        static int s_tstatic = -1;
+        if (s_tstatic < 0) {
+            const char *e = getenv("TD5RE_TUNNEL_LAMP_STATIC");
+            s_tstatic = (e && e[0] == '0') ? 0 : 1;
+        }
+        if (s_tstatic && g_td5.track_index == 10) {
+            int registered = 0;
+            for (int dl = 0; dl < s_models_display_list_count; dl++) {
+                if (s_models_entry_offsets[dl] == 0) continue;
+                uint8_t *bb = s_models_blob + s_models_entry_offsets[dl];
+                uint32_t sc = *(const uint32_t *)bb;
+                if (sc == 0 || sc > 256) continue;
+                for (uint32_t j = 0; j < sc; j++) {
+                    uint32_t mp = *(const uint32_t *)(bb + 4 + j * 4);
+                    if (mp == 0) continue;
+                    TD5_MeshHeader *m = td5_track_runtime_mesh_for(mp);
+                    if (!m || !m->commands || !m->vertices) continue;
+                    int cnt = m->total_vertex_count, cc = m->command_count;
+                    if (cnt <= 0 || cnt > 65536 || cc <= 0 || cc > 4096) continue;
+                    TD5_MeshVertex *bv = m->vertices;
+                    const TD5_PrimitiveCmd *cd = m->commands;
+                    if ((uintptr_t)bv < 0x10000u || (uintptr_t)cd < 0x10000u) continue;
+                    float ox = m->origin_x / 256.0f, oy = m->origin_y / 256.0f,
+                          oz = m->origin_z / 256.0f;
+                    int cur = 0;
+                    for (int ci = 0; ci < cc; ci++) {
+                        int need = cd[ci].triangle_count * 3 + cd[ci].quad_count * 4;
+                        int i0;
+                        if (cd[ci].vertex_data_ptr != 0) {
+                            uintptr_t vp2 = (uintptr_t)cd[ci].vertex_data_ptr;
+                            const TD5_MeshVertex *cv2 = (vp2 < 0x10000u)
+                                ? (const TD5_MeshVertex *)((uint8_t *)m + vp2)
+                                : (const TD5_MeshVertex *)vp2;
+                            i0 = (int)(cv2 - bv);
+                            if (i0 < 0 || i0 + need > cnt) continue;
+                        } else {
+                            i0 = cur;
+                            if (cur + need > cnt) break;
+                            cur += need;
+                        }
+                        if (need <= 0) continue;
+                        /* Distinct glow PATCH pages only (the fixture spots),
+                         * matching the render-time capture. 155 is the broad wall
+                         * FACE texture (would register a lamp on every wall quad),
+                         * so it's excluded here even though plainify still knocks
+                         * its baked glow. */
+                        int pg = (int)cd[ci].texture_page_id;
+                        if (pg != 152 && pg != 153) continue;
+                        float ax = 0, ay = 0, az = 0;
+                        for (int v = 0; v < need; v++) {
+                            ax += bv[i0 + v].pos_x;
+                            ay += bv[i0 + v].pos_y;
+                            az += bv[i0 + v].pos_z;
+                        }
+                        float ninv = 1.0f / (float)need;
+                        td5_light_lamps_capture_tunnel(ox + ax * ninv,
+                                                       oy + ay * ninv,
+                                                       oz + az * ninv);
+                        registered++;
+                    }
+                }
+            }
+            TD5_LOG_I("track",
+                      "tunnel lamps: static extraction scanned %d patch command(s) "
+                      "(level001 pages 152/153) -> %d lamp(s) after dedup",
+                      registered, td5_light_lamps_count());
+        }
+    }
+
     /* TD5RE_LAMP_SCAN="x,z": one-shot dump of every mesh whose origin sits
      * within 5000 world units of the given XZ — per-command page ids,
      * transparency classes, counts and local geometry extents. Asset
