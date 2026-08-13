@@ -17,6 +17,7 @@
 #include "td5_race_state.h"  /* [LAYERING 2026-07-06] read-only race queries (was td5_game.h) */
 #include "td5_light.h"
 #include "td5_platform.h"
+#include "td5_track.h"       /* td5_track_probe_height — static per-lamp floor Y */
 #include "td5_rt.h"          /* [RT2 P7] td5_rt_active() — HIGH street-lamp default */
 
 #define LOG_TAG "render"   /* routes to engine.log */
@@ -263,6 +264,18 @@ void td5_light_emit_vehicle_headlights(void)
 
 static float   s_lamp_pos[TD5_LAMP_MAX][3];
 static uint8_t s_lamp_tunnel[TD5_LAMP_MAX];  /* 1 = tunnel wall lamp: cool-white, tighter range, always-on (bypasses s_env_dark) */
+/* [STATIC LAMP Y 2026-08-12] Resolved-once emit Y for a tunnel lamp (see the
+ * TD5RE_TUNNEL_LAMP_DROP note below). A tunnel lamp is authored up on the
+ * wall/ceiling but must POOL ON THE ROAD, so its emit Y is dropped toward the
+ * floor. That drop used to be recomputed every frame against the PLAYER's Y,
+ * which made every lamp's height track the car: the pools read as a cluster
+ * hugging the player instead of fixtures fixed in the world, and lamps further
+ * along a gradient were dragged to the player's elevation rather than to the
+ * floor beneath themselves. Now the floor is probed ONCE per lamp, at the
+ * lamp's OWN x/z, and cached — so the emitter is world-static. Same
+ * resolve-once-and-cache shape as TD6 props' ground_y/ground_done. */
+static float   s_lamp_emit_y[TD5_LAMP_MAX];
+static uint8_t s_lamp_emit_done[TD5_LAMP_MAX];
 static int   s_lamp_count     = 0;
 static int   s_street_lights  = 0;   /* OFF by default: parked pending a lamp look-dev session */
 
@@ -278,6 +291,8 @@ void td5_light_lamps_add(float x, float y, float z)
     s_lamp_pos[s_lamp_count][1] = y;
     s_lamp_pos[s_lamp_count][2] = z;
     s_lamp_tunnel[s_lamp_count] = 0;
+    s_lamp_emit_y[s_lamp_count]    = y;   /* until resolved, emit where authored */
+    s_lamp_emit_done[s_lamp_count] = 0;
     s_lamp_count++;
 }
 
@@ -362,10 +377,17 @@ static float s_tlamp_intensity = 1.35f;    /* TD5RE_TUNNEL_LAMP_INTENSITY  peak 
 /* TD5RE_TUNNEL_LAMP_DROP: the wall/ceiling patches sit ~1600 units ABOVE the road,
  * so a point light left there barely reaches the floor or a passing car (falloff
  * (1-d/range)^2 collapses at that distance). Move each tunnel lamp DOWN toward the
- * road by this fraction of (lamp_y -> player/road_y) at emit time, so the warm pool
- * lands ON the road and lights cars under it. 0 = keep at the ceiling; 1 = at road
- * level. Default 0.6 (mid-tunnel, biased low). */
+ * road by this fraction of (lamp_y -> floor_y), so the warm pool lands ON the road
+ * and lights cars under it. 0 = keep at the ceiling; 1 = at road level.
+ * Default 0.6 (mid-tunnel, biased low).
+ * floor_y is the TRACK SURFACE under the lamp's own x/z, probed once and cached
+ * (s_lamp_emit_y) — NOT the player's Y, which would make the lamp follow the car. */
 static float s_tlamp_drop      = 0.60f;
+/* TD5RE_TUNNEL_LAMP_STATIC_Y: 1 (default) = resolve each tunnel lamp's emit Y once
+ * from the track floor beneath it, so the light is fixed in the world. 0 = the old
+ * per-frame drop toward the player's Y (kept as an A/B escape hatch; that path is
+ * what made the lamps appear to spawn on top of the car). */
+static int   s_tlamp_static_y  = 1;
 /* TD5RE_TUNNEL_LAMP_COUNT: cap on how many tunnel wall lamps promote to real
  * point lights per frame (nearest-first). Measured cost on a fast GPU is ~0 ms
  * for 8 lamps, so the DEFAULT is 8 (light a stretch of the tunnel ahead, not
@@ -413,6 +435,10 @@ void td5_light_emit_street_lamps(void)
         s_tlamp_b = env_f("TD5RE_TUNNEL_LAMP_B", s_tlamp_b);
         s_tlamp_drop = env_f("TD5RE_TUNNEL_LAMP_DROP", s_tlamp_drop);
         if (s_tlamp_drop < 0.0f) s_tlamp_drop = 0.0f; else if (s_tlamp_drop > 1.0f) s_tlamp_drop = 1.0f;
+        {
+            const char *e = getenv("TD5RE_TUNNEL_LAMP_STATIC_Y");
+            if (e && e[0] == '0') s_tlamp_static_y = 0;
+        }
         TD5_LOG_I(LOG_TAG, "street lamps: %d registered, range=%.0f intensity=%.2f budget=%d tunnel_budget=%d",
                   s_lamp_count, (double)s_lamp_range, (double)s_lamp_intensity, s_lamp_budget, s_tlamp_budget);
     }
@@ -466,10 +492,30 @@ void td5_light_emit_street_lamps(void)
              * lamps and drops farther ones (per-light RT-pass work headroom). */
             if (tunnel_emitted >= s_tlamp_budget) continue;
             tunnel_emitted++;
-            /* Drop the emitter DOWN toward the road (player Y) so the pool lands
-             * on the floor and lights cars under it — the captured patch sits up
-             * on the wall/ceiling where falloff starves the road. */
-            float ly = L[1] + s_tlamp_drop * (py - L[1]);
+            /* Drop the emitter DOWN toward the FLOOR so the pool lands on the road
+             * and lights cars under it — the captured patch sits up on the
+             * wall/ceiling where falloff starves the road. The floor is probed at
+             * the LAMP's own x/z and cached, so the lamp stays put in the world as
+             * the player drives past (and under it) rather than riding the car's Y. */
+            float ly;
+            if (s_tlamp_static_y) {
+                if (!s_lamp_emit_done[li]) {
+                    int gy = 0, gst = 0;
+                    /* Seed the span walk with the player's span: the probe steps
+                     * outward from there, and a tunnel lamp inside the nearest-N
+                     * set is by definition near the player's stretch of road. */
+                    float floor_y = td5_track_probe_height(
+                                        (int)(L[0] * 256.0f), (int)(L[2] * 256.0f),
+                                        (int)p->track_span_raw, &gy, &gst)
+                                    ? (float)gy * (1.0f / 256.0f)
+                                    : py;   /* off-mesh: fall back to the old reference */
+                    s_lamp_emit_y[li]    = L[1] + s_tlamp_drop * (floor_y - L[1]);
+                    s_lamp_emit_done[li] = 1;
+                }
+                ly = s_lamp_emit_y[li];
+            } else {
+                ly = L[1] + s_tlamp_drop * (py - L[1]);   /* legacy A/B path */
+            }
             /* Warm tungsten fixture, tighter pool — reads as a tunnel lamp. */
             td5_light_add_point(L[0], ly, L[2],
                                 s_tlamp_range, s_tlamp_intensity,
