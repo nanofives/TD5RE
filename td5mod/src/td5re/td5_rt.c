@@ -500,9 +500,12 @@ static int rt_build_scenery_mesh(const TD5_MeshHeader *mesh, unsigned matid_flag
             verts[nvo].pos[0] = px; verts[nvo].pos[1] = py; verts[nvo].pos[2] = pz;
             verts[nvo].uv[0] = cv[j].tex_u;  verts[nvo].uv[1] = cv[j].tex_v;
             verts[nvo].color = cv[j].lighting;
-            if (px < bbmin[0]) bbmin[0] = px; if (px > bbmax[0]) bbmax[0] = px;
-            if (py < bbmin[1]) bbmin[1] = py; if (py > bbmax[1]) bbmax[1] = py;
-            if (pz < bbmin[2]) bbmin[2] = pz; if (pz > bbmax[2]) bbmax[2] = pz;
+            if (px < bbmin[0]) bbmin[0] = px;
+            if (px > bbmax[0]) bbmax[0] = px;
+            if (py < bbmin[1]) bbmin[1] = py;
+            if (py > bbmax[1]) bbmax[1] = py;
+            if (pz < bbmin[2]) bbmin[2] = pz;
+            if (pz > bbmax[2]) bbmax[2] = pz;
             nvo++;
         }
         for (t = 0; t < tris; t++) {

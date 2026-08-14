@@ -305,7 +305,8 @@ static void sun_elevate(float sun[3])
     if (e < 0.0f) {
         const char *s = getenv("TD5RE_SUN_ELEVATE");
         e = (s && s[0]) ? (float)atof(s) : 0.0f;
-        if (e < 0.0f) e = 0.0f; if (e > 1.0f) e = 1.0f;
+        if (e < 0.0f) e = 0.0f;
+        if (e > 1.0f) e = 1.0f;
     }
     if (e <= 0.0f) return;
     sun[0] *= (1.0f - e);

@@ -3256,7 +3256,8 @@ static void sky_probe_classify(const uint8_t *bgra, int w, int h)
     int md = (w > h) ? w : h, f = 1;
     while (md / f > 128) f++;
     int dw = w / f, dh = h / f;
-    if (dw < 1) dw = 1; if (dh < 1) dh = 1;
+    if (dw < 1) dw = 1;
+    if (dh < 1) dh = 1;
     float *cr = (float *)malloc((size_t)dw * dh * sizeof(float));
     float *cg = (float *)malloc((size_t)dw * dh * sizeof(float));
     float *cb = (float *)malloc((size_t)dw * dh * sizeof(float));
@@ -3680,7 +3681,9 @@ void td5_render_draw_sun_disc(void)
     vx *= invz; vy *= invz;                              /* view/z for projection */
 
     int R = (int)s_sky_sun_rgb[0], G = (int)s_sky_sun_rgb[1], B = (int)s_sky_sun_rgb[2];
-    if (R > 255) R = 255; if (G > 255) G = 255; if (B > 255) B = 255;
+    if (R > 255) R = 255;
+    if (G > 255) G = 255;
+    if (B > 255) B = 255;
     uint32_t core  = 0xFF000000u | ((uint32_t)R << 16) | ((uint32_t)G << 8) | (uint32_t)B;
     uint32_t glare = 0x60000000u | ((uint32_t)R << 16) | ((uint32_t)G << 8) | (uint32_t)B;
 

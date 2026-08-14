@@ -713,7 +713,7 @@ static void st_inv_sample(void)
 
 /* Fold the invariant verdict into (status,note) at race teardown. For moving
  * depths, add a conservative "driven car never progressed" stuck WARN. */
-static int st_inv_result(int depth, char *note, size_t nsz)
+static int st_inv_result(char *note, size_t nsz)
 {
     int status = s_inv.active ? s_inv.worst : ST_PASS;
     int i, moved = 0, active = 0, stuck = 0;
@@ -754,7 +754,9 @@ static int st_inv_result(int depth, char *note, size_t nsz)
     if (status == ST_PASS)
         snprintf(note, nsz, "ok (%d samp) %s", s_inv.samples, tele);
     else
-        snprintf(note, nsz, "%s [%s]", s_inv.desc, tele);
+        /* desc is capped so desc + " [" + tele + "]" provably fits note[120] —
+         * every desc we emit above is well under 30 chars. */
+        snprintf(note, nsz, "%.30s [%s]", s_inv.desc, tele);
     s_inv.active = 0;
     return status;
 }
@@ -2111,7 +2113,7 @@ static void st_tick_races(uint32_t now)
                 row->max_ms    = mx;
                 row->sim_ticks = s_last_sim_tick - s_race_start_tick;
                 /* [NEW SUITE] the invariant checker is the primary verdict. */
-                invstatus = st_inv_result(sc->depth, note, sizeof(note));
+                invstatus = st_inv_result(note, sizeof(note));
                 if (invstatus > status) status = invstatus;
                 /* RUN_FINISH rows must actually reach the results screen. */
                 if (sc->natural_finish) {

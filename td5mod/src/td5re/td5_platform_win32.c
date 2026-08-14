@@ -4022,7 +4022,8 @@ void td5_plat_render_apply_shadow(const float cam_pos[3], const float basis9[9],
           s_bias = ((e = getenv("TD5RE_RT_BIAS")) && e[0]) ? (float)atof(e) : 1.0f;
           s_rays = ((e = getenv("TD5RE_RT_RAYS")) && e[0]) ? atoi(e) : 2;
           if (s_bias < 0.0f) s_bias = 0.0f;
-          if (s_rays < 1) s_rays = 1; if (s_rays > 16) s_rays = 16; }
+          if (s_rays < 1) s_rays = 1;
+          if (s_rays > 16) s_rays = 16; }
       cb.params2[1] = s_bias;
       cb.params2[2] = (float)s_rays; }
     /* [RT2 P1] params2.w = RT sun-shadow cone-spread scale (1 = default ~0.7deg;
