@@ -143,16 +143,27 @@ echo.
 REM ---------------------------------------------------------------------------
 REM Compile td5re modules
 REM ---------------------------------------------------------------------------
+REM If TD5RE_BUILD_LOG is set, diagnostics are ALSO appended to it so
+REM scripts/lint_structure.ps1 can ratchet the warning count the same way CI
+REM does (the workflow pipes gcc through `tee`). batch has no tee, so each
+REM compile's stderr goes to a temp file that is then echoed to the console and
+REM appended to the log. gcc's exit code must be captured BEFORE the `type`
+REM calls, which reset errorlevel. [2026-08-14]
+set "CCERR=!BUILDDIR!\_cc_stderr.tmp"
 set FAIL=0
 for %%F in (!TD5RE_SRCS!) do (
     echo Compiling %%~nF.c...
-    "%GCC%" !CFLAGS! %SRCDIR%\%%F -o !BUILDDIR!\%%~nF.o
-    if errorlevel 1 (
+    "%GCC%" !CFLAGS! %SRCDIR%\%%F -o !BUILDDIR!\%%~nF.o 2> "!CCERR!"
+    set "CCRC=!errorlevel!"
+    type "!CCERR!"
+    if defined TD5RE_BUILD_LOG type "!CCERR!" >> "%TD5RE_BUILD_LOG%"
+    if not "!CCRC!"=="0" (
         echo FAILED: %%F
         set FAIL=1
         goto :check_fail
     )
 )
+if exist "!CCERR!" del "!CCERR!"
 
 :check_fail
 if !FAIL!==1 goto :fail

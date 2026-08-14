@@ -42,12 +42,22 @@ exit /b 1
 :wrapper_ok
 echo.
 
+REM Tee the DEV compile diagnostics so the structure lint can ratchet the warning
+REM count LOCALLY, not just in CI. DEV (not RELEASE) because the CI job that owns
+REM the baseline builds dev — RELEASE's extra -DTD5RE_RELEASE compiles modules out
+REM and would undercount. Cleared before the release build so the log stays
+REM single-variant. [2026-08-14]
+set "TD5RE_BUILD_LOG=%~dp0..\..\..\build_warnings.log"
+break > "%TD5RE_BUILD_LOG%"
+
 call "%~dp0build_standalone.bat" dev
 if errorlevel 1 (
     echo.
     echo build_all: DEV build FAILED -- stopping before release build.
     exit /b 1
 )
+
+set "TD5RE_BUILD_LOG="
 
 echo.
 call "%~dp0build_standalone.bat" release
@@ -57,21 +67,36 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM --- Structure lint (report-only locally; CI fails on regressions) --------
-REM Ratchets: extern-in-.c, td5_game.h includer set, warning classes. See
-REM scripts/lint_structure.ps1 + scripts/lint_structure_baseline.json.
-where pwsh >nul 2>&1
-if not errorlevel 1 (
-    echo.
-    pwsh -NoProfile -File "%~dp0..\..\..\scripts\lint_structure.ps1" -ReportOnly
-)
-
 REM --- Code map refresh (navigation indexes; see CLAUDE.md "Fast navigation")
 REM codemap\*.tsv is gitignored and regenerated here so it never goes stale.
+REM Runs BEFORE the lint so a lint failure still leaves the indexes fresh.
 where python >nul 2>&1
 if not errorlevel 1 (
     python "%~dp0..\..\..\scripts\gen_codemap.py"
 )
+
+REM --- Structure lint (FAILS the build on regressions, same as CI) ----------
+REM Ratchets: extern-in-.c, td5_game.h includer set, per-flag warning counts vs
+REM the DEV build log tee'd above. See scripts/lint_structure.ps1 +
+REM scripts/lint_structure_baseline.json.
+REM
+REM [2026-08-14] Was -ReportOnly AND passed no -BuildLog, so the warning ratchet
+REM was never even evaluated locally — a regression was invisible until a push,
+REM and CI stayed red for 10 days (84 -> 93) before anyone noticed. It now fails
+REM here, where the fix is cheap. Set TD5RE_LINT_SOFT=1 to downgrade to a warning
+REM for mid-experiment builds you do not intend to commit.
+set LINTRC=0
+where pwsh >nul 2>&1
+if not errorlevel 1 (
+    echo.
+    if defined TD5RE_LINT_SOFT (
+        pwsh -NoProfile -File "%~dp0..\..\..\scripts\lint_structure.ps1" -ReportOnly -BuildLog "%~dp0..\..\..\build_warnings.log"
+    ) else (
+        pwsh -NoProfile -File "%~dp0..\..\..\scripts\lint_structure.ps1" -BuildLog "%~dp0..\..\..\build_warnings.log"
+        if errorlevel 1 set LINTRC=1
+    )
+)
+if "%LINTRC%"=="1" goto :lint_failed
 
 echo.
 echo ############################################################
@@ -79,3 +104,17 @@ echo #  build_all OK
 echo #  td5re.exe + td5re_release.exe deployed to project root
 echo ############################################################
 endlocal
+exit /b 0
+
+:lint_failed
+echo.
+echo ############################################################
+echo #  build_all: STRUCTURE LINT FAILED
+echo #  The exes built and deployed, but the ratchet regressed --
+echo #  see the STRUCTURE REGRESSIONS lines above. CI will reject
+echo #  this. Fix it, or re-baseline if the change is intentional:
+echo #    pwsh scripts\lint_structure.ps1 -UpdateBaseline -BuildLog build_warnings.log
+echo #  Override for a throwaway build: set TD5RE_LINT_SOFT=1
+echo ############################################################
+endlocal
+exit /b 1
