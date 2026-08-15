@@ -2531,6 +2531,30 @@ void td5_camera_apply_view(int view)
     /* [FREE CAMERA] Dev free-roam takes over pane 0 while active. Other panes
      * fall through to the (frozen, sim-paused) normal pipeline. */
     if (v == 0 && s_freecam_active) { td5_camera_freecam_apply(); return; }
+
+    /* [OVERHEAD SNAPSHOT] Dev-only static top-down for map screenshots. When
+     * TD5RE_CAM_TOPDOWN=<altitude in world units> (>0), pane 0 looks (almost)
+     * straight down at the followed car from that altitude. Render-only — never
+     * touches the sim, so determinism/goldens are unaffected — and mirrors the
+     * freecam write path. A tiny Z back-off gives the look-at a horizontal
+     * component so the up-vector stays well-defined (no vertical gimbal). */
+    if (v == 0) {
+        static float s_topdown = -1.0f;
+        if (s_topdown < 0.0f)
+            s_topdown = td5_env_float("TD5RE_CAM_TOPDOWN", 0.0f, 0.0f, 5000000.0f);
+        if (s_topdown > 0.0f) {
+            TD5_Actor *a = camera_actor_for_view(0);
+            if (a) {
+                int alt  = (int)(s_topdown * 256.0f);      /* world units -> 24.8 */
+                int back = alt / 20;                        /* ~2.9deg tilt for a stable basis */
+                int eye[3] = { a->world_pos.x, a->world_pos.y + alt, a->world_pos.z - back };
+                int tgt[3] = { a->world_pos.x, a->world_pos.y, a->world_pos.z };
+                SetCameraWorldPosition(eye);
+                OrientCameraTowardTarget(tgt, 0);
+                return;
+            }
+        }
+    }
 #endif
     TD5_CamPose *C = &s_cam_pose_cur[v];
     if (!C->valid) return;

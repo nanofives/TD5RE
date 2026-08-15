@@ -618,9 +618,12 @@ static void td5_physics_check_td6_props(TD5_Actor *actor)
     int32_t seg_ax, seg_az, seg_dx, seg_dz;
     int64_t seg_len2;
     if (!actor) return;
-    if (!td6_props_enabled()) return;
     n = td5_track_td6_prop_count();
-    if (n <= 0) return;
+    if (n <= 0) return;                          /* native TD5 / no props -> no-op */
+    /* Native TD6 city tracks keep the opt-in env (TD5RE_TD6_PROPS default off ->
+     * Pelton golden unchanged). CUSTOM tracks (g_active_td6_level<=0) that
+     * authored props collide automatically. */
+    if (g_active_td6_level > 0 && !td6_props_enabled()) return;
     vx = vx0 = actor->linear_velocity_x;
     vz = vz0 = actor->linear_velocity_z;
     /* Speed gate: only interact with props while genuinely driving (>~5 MPH).

@@ -3024,6 +3024,16 @@ static void init_race_level_and_assets(void)
     td5_asset_load_level(g_td5.track_index);
     g_track_is_circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
     g_track_type_mode = g_track_is_circuit ? 1 : 0;
+    /* [RT RESTART HANG FIX 2026-08-12] The models blob + mesh/texture caches were
+     * just freed & re-parsed by td5_asset_load_level. On a SAME-TRACK restart there
+     * is no device-loss and no HIGH<->LOW switch, so td5_rt_warmup_prepare/td5_rt_frame
+     * (which only rebuild when s_track_chunk_count==0 / !s_scenery_fed) keep the STALE
+     * race-1 track/scenery BLAS + an actor-mesh cache keyed on now-freed pointers ->
+     * a freeze under RT HIGH that reads as "stuck on the loading splash" (dev ini
+     * ships Reflections=1/ReflectionQuality=2, so this bites by default). Force a
+     * clean teardown here so warmup rebuilds from the reloaded level in watchdog-safe
+     * chunks on the loading screen. No-op when RT is unavailable / LOW. */
+    td5_rt_level_unload();
     /* [task#14] Un-break all TD6 breakable props for the new race (lampposts/
      * bins re-stand). Load already zeroes these; this also covers a same-track
      * restart that reuses the already-loaded level. No-op on non-prop tracks. */
@@ -4240,6 +4250,14 @@ static void init_race_spawn_actors(void)
              * geom=0x000 (north/correct), tangent-fallback yields 0x800 (south).]
              * Exclude P2P reverse from the correction; only circuits (generated
              * STRIPB) and TD6 tracks need it. */
+            /* [CUSTOM-TRACK AI GRID-STALL] NOTE 2026-08-13: extending this gate to
+             * custom tracks (|| td5_track_registry_has_level(level_num)) was TRIED
+             * and REVERTED -- it made ALL AI stall (0/5) vs the geometry-heading
+             * baseline (4/5 launch). The generator's LEFT/RIGHT.TRK route bytes are
+             * NON-zero but NOT in the heading-encoding format td5_ai_correct_spawn_
+             * heading expects, so the correction seeds a wrong yaw for every car.
+             * Proper fix is to emit route bytes in the native heading format in
+             * td5_trackgen.emit_routes (deferred); geometry heading is better today. */
             if (g_active_td6_level > 0 || (g_td5.reverse_direction && g_track_is_circuit))
                 td5_ai_correct_spawn_heading(slot);
 

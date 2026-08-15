@@ -8418,13 +8418,20 @@ void td5_track_append_td6_props(const void *data, size_t size)
             int model;
             if (r[0] == 0)   continue;       /* serial 0 = terminator/empty slot */
             if (r[0] == 0xFF) break;
-            model = r[4] & 0x0F;             /* low nibble = COL_<idx> mesh */
-            if (model > 7) model &= 7;
+            model = r[4] & 0x0F;             /* low nibble = prop mesh index (native: 0..7) */
+            /* Native TD6 clamps to its 8 furniture meshes + the fixed radius
+             * table (unchanged -> golden-safe). CUSTOM tracks keep the raw nibble
+             * (up to TD6_PROP_MESH_MAX types) and get model clamped + radius
+             * sourced from PROPMESH.BIN in td5_track_td6_finalize_props(), which
+             * runs AFTER the prop meshes load (the MOV table loads first). */
+            if (g_active_td6_level > 0 && model > 7) model &= 7;
             {
                 TD6Prop *pr = &s_td6_props[s_td6_prop_count++];
                 pr->type        = r[0];
                 pr->model       = (uint8_t)model;
-                pr->radius      = (uint8_t)(s_td6_col_radius[model] / 16);  /* collision */
+                pr->radius      = (g_active_td6_level > 0)
+                                    ? (uint8_t)(s_td6_col_radius[model] / 16)   /* native: table */
+                                    : 0;                                        /* custom: finalize */
                 pr->broken      = 0;
                 pr->ground_y    = 0.0f;
                 pr->ground_done = 0;
@@ -8456,6 +8463,30 @@ void td5_track_load_td6_props(const void *data, size_t size)
 }
 
 int td5_track_td6_prop_count(void) { return s_td6_prop_count; }
+
+/* [custom-track props] Resolve CUSTOM-track props after PROPMESH.BIN has loaded
+ * (it loads AFTER the MOV table, so append() couldn't do this): clamp each prop's
+ * model to the number of loaded prop meshes (so a custom level can author up to
+ * TD6_PROP_MESH_MAX distinct types, not just 8) and set its collision radius from
+ * the mesh's own PROPMESH.BIN radius instead of the fixed s_td6_col_radius[8]
+ * table. Native TD6 tracks (g_active_td6_level>0) are already final and untouched
+ * -> byte-for-byte identical sim. Call once, right after
+ * td5_render_load_td6_prop_meshes at track load. */
+void td5_track_td6_finalize_props(void)
+{
+    int i, cnt;
+    if (g_active_td6_level > 0) return;          /* native: already final (golden-safe) */
+    cnt = td5_render_prop_mesh_count();
+    for (i = 0; i < s_td6_prop_count; i++) {
+        TD6Prop *pr = &s_td6_props[i];
+        int m = pr->model;
+        int rb;
+        if (cnt > 0 && m >= cnt) m %= cnt;       /* clamp to available meshes */
+        pr->model = (uint8_t)m;
+        rb = td5_render_prop_mesh_radius(m);     /* PROPMESH.BIN radius / 16 */
+        pr->radius = (uint8_t)(rb > 0 ? rb : 20);/* fallback ~320 world units */
+    }
+}
 
 /* Get prop i: world pos (24.8) + collision radius (world units = byte*16) +
  * anchor span. Returns 1 on success, 0 if i out of range. */

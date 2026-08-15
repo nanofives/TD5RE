@@ -924,7 +924,7 @@ static int td6_prop_mesh_enabled(void)
 /* The 8 de-indexed COL furniture meshes (PROPMESH.BIN). pos = vcount*3 floats
  * (tri-list, local), col = vcount baked-grey ARGB, min_y for ground planting. */
 #define TD6_PROP_MESH_MAX 12
-typedef struct { float *pos; float *uv; uint32_t *col; int vcount; float min_y; } TD6PropMesh;
+typedef struct { float *pos; float *uv; uint32_t *col; int vcount; float min_y; float radius; } TD6PropMesh;
 static TD6PropMesh s_td6_pmesh[TD6_PROP_MESH_MAX];
 static int s_td6_pmesh_count = 0;
 
@@ -981,12 +981,16 @@ void td5_render_load_td6_prop_meshes(const void *data, size_t size)
     if (!data || size < 8) return;
     {
         const uint8_t *p = (const uint8_t *)data;
-        uint32_t mc; int vcounts[TD6_PROP_MESH_MAX]; const uint8_t *vd; size_t off;
+        uint32_t mc; int vcounts[TD6_PROP_MESH_MAX]; float radii[TD6_PROP_MESH_MAX];
+        const uint8_t *vd; size_t off;
         if (p[0] != 'P' || p[1] != 'M' || p[2] != 'S' || p[3] != '2') return;  /* PMS2 = pos+uv+col */
         memcpy(&mc, p + 4, 4);
         if (mc > TD6_PROP_MESH_MAX) mc = TD6_PROP_MESH_MAX;
         if (size < 8 + (size_t)mc * 8) return;
-        for (i = 0; i < (int)mc; i++) memcpy(&vcounts[i], p + 8 + i * 8, 4);
+        for (i = 0; i < (int)mc; i++) {          /* per-mesh header = u32 vcount, f32 radius */
+            memcpy(&vcounts[i], p + 8 + i * 8, 4);
+            memcpy(&radii[i],   p + 8 + i * 8 + 4, 4);
+        }
         vd = p + 8 + mc * 8; off = 0;
         for (i = 0; i < (int)mc; i++) {
             int vc = vcounts[i], v; float miny = 1e30f;
@@ -1010,6 +1014,7 @@ void td5_render_load_td6_prop_meshes(const void *data, size_t size)
                 if (buf[1] < miny) miny = buf[1];
             }
             s_td6_pmesh[i].min_y = (s_td6_pmesh[i].vcount > 0) ? miny : 0.0f;
+            s_td6_pmesh[i].radius = (radii[i] > 0.0f) ? radii[i] : 0.0f;
             off += (size_t)vc * 24;
             s_td6_pmesh_count = i + 1;
         }
@@ -1017,9 +1022,33 @@ void td5_render_load_td6_prop_meshes(const void *data, size_t size)
     TD5_LOG_I(LOG_TAG, "TD6 prop meshes loaded: %d", s_td6_pmesh_count);
 }
 
+/* Custom tracks: how many prop meshes are loaded, and each mesh's collision
+ * radius on the byte scale TD6Prop.radius uses (world units / 16). Lets a
+ * custom level define >8 prop types with per-prop radii instead of the fixed
+ * native s_td6_col_radius[8] table. */
+int td5_render_prop_mesh_count(void)
+{
+    return s_td6_pmesh_count;
+}
+
+int td5_render_prop_mesh_radius(int model)
+{
+    int b;
+    if (model < 0 || model >= s_td6_pmesh_count) return 0;
+    b = (int)(s_td6_pmesh[model].radius / 16.0f + 0.5f);
+    if (b < 1)   b = 1;
+    if (b > 255) b = 255;
+    return b;
+}
+
 void render_td6_props(const TD5_Actor *ref)
 {
-    if (!td6_prop_mesh_enabled() || g_active_td6_level <= 0 || !ref) return;
+    if (!ref) return;
+    /* Native TD6 city tracks keep the opt-in env (TD5RE_TD6_PROP_MESH default
+     * off, unchanged). CUSTOM tracks (g_active_td6_level<=0) that authored props
+     * render them automatically — native TD5 tracks load no LEVEL.MOV, so the
+     * count guard below makes this a no-op there. */
+    if (g_active_td6_level > 0 && !td6_prop_mesh_enabled()) return;
     int n = td5_track_td6_prop_count();
     if (n <= 0 || s_td6_pmesh_count <= 0) return;
 

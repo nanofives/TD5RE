@@ -140,6 +140,14 @@ void render_td6_props(const TD5_Actor *ref);
  * Called at TD6 track load; pass NULL/0 to clear. */
 void td5_render_load_td6_prop_meshes(const void *data, size_t size);
 
+/* Loaded breakable prop-mesh count (PROPMESH.BIN). Lets custom tracks author up
+ * to TD6_PROP_MESH_MAX distinct prop meshes (not just the 8 native TD6 slots). */
+int td5_render_prop_mesh_count(void);
+/* Per-mesh collision radius (world units / 16, the byte scale TD6Prop.radius
+ * uses) sourced from PROPMESH.BIN's per-mesh radius. 0 if `model` has no mesh.
+ * Custom tracks use this instead of the fixed s_td6_col_radius[8] table. */
+int td5_render_prop_mesh_radius(int model);
+
 /* Per-slot paint TINT (0xRRGGBB; 0 = white/identity). Used to color a grayscale
  * TD6 car body. TD5 cars/AI keep tint 0 and render unchanged. */
 void td5_render_set_vehicle_tint(int slot, uint32_t rgb);

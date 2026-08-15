@@ -145,6 +145,9 @@ int              td5_track_td6_surface_grid_loaded(void);
 void             td5_track_load_td6_props(const void *data, size_t size);
 void             td5_track_append_td6_props(const void *data, size_t size);
 int              td5_track_td6_prop_count(void);
+/* Resolve custom-track props (model clamp + PROPMESH.BIN radius) after the prop
+ * meshes have loaded. No-op for native TD6 tracks. */
+void             td5_track_td6_finalize_props(void);
 int              td5_track_td6_prop_get_mov(int i, int32_t *out_px, int32_t *out_py,
                                             int32_t *out_pz, int *out_model, int *out_angle);
 /* [#20 pushable] Mass (MOV byte 6; 0=immovable), add slide velocity (24.8/tick),

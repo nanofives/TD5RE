@@ -2508,6 +2508,10 @@ int td5_asset_load_level(int track_index)
                 td5_render_load_td6_prop_meshes(pm_data, (size_t)(pm_sz > 0 ? pm_sz : 0));
                 free(pm_data);
             }
+            /* Custom tracks: now that the prop meshes are loaded, resolve each
+             * prop's model clamp + collision radius from PROPMESH.BIN (no-op for
+             * native TD6). */
+            td5_track_td6_finalize_props();
         }
 
         /* [TD6 AUTHORITATIVE TRACK TYPE] For migrated TD6 tracks, derive circuit
