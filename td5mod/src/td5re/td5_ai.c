@@ -5951,6 +5951,17 @@ void td5_ai_update_track_behavior(int slot) {
          * Honolulu rollover residual after the engine-pin fix. */
         int16_t span = ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED);
         int span_count = td5_track_get_span_count();
+        /* [BRANCH AI-CRAWL FIX 2026-08-13] The +N look-ahead must wrap by the RING
+         * length, NOT the physical span count. Native wraps by g_trackTotalSpanCount
+         * = strip header word[1] = the RING (main racing line), while td5_track_get_
+         * span_count() = s_span_count is PHYSICAL (ring + appended branch corridors).
+         * On an UNbranched track physical==ring so this was invisible; on a BRANCHED
+         * track physical>ring, so a car at the finish band [ring-4, ring-1] wraps to
+         * ring+3 (a corridor span) instead of lap-start span 3 -> its steer target is
+         * a corridor point far off-line -> the whole field crawls at the start/finish.
+         * Byte-faithful to UpdateActorTrackBehavior @ 0x00434fe0. [child branch_fix.md] */
+        int ring_len = td5_track_get_ring_length();
+        if (ring_len <= 0) ring_len = span_count;   /* unbranched: identical */
         if (span_count > 0 && span >= 0) {
             /* (a) Target span: 4 spans ahead, then remap through junction
              * table when the actor is NOT on the LEFT.TRK (canonical) route.
@@ -5967,7 +5978,7 @@ void td5_ai_update_track_behavior(int slot) {
              * (LEFT.TRK). Original gates on pointer equality to g_activeRouteTablePtrA_left
              * (LEFT.TRK blob ptr) — same intent. */
             int is_canonical = (rs[RS_ROUTE_TABLE_SELECTOR] == 0);
-            int lin_span = ((int)span + 4) % span_count;
+            int lin_span = ((int)span + 4) % ring_len;
             int target_span = td5_track_apply_target_span_remap(lin_span, is_canonical);
 
             /* Adaptive lookahead (solo_mode_synth slot 0 only, 2026-05-22 v2).
@@ -6009,7 +6020,7 @@ void td5_ai_update_track_behavior(int slot) {
                 if (triggered) {
                     int extended = 0;
                     for (int e = 0; e < TD5_ADAPTIVE_LOOKAHEAD_MAX_EXTEND; e++) {
-                        lin_span = (lin_span + 1) % span_count;
+                        lin_span = (lin_span + 1) % ring_len;
                         target_span = td5_track_apply_target_span_remap(lin_span, is_canonical);
                         if (rt_probe) probe_rb = (int)rt_probe[(size_t)(unsigned)lin_span * 3u];
                         extended = e + 1;
