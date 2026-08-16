@@ -4242,14 +4242,23 @@ static void init_race_spawn_actors(void)
              * reverse (Edinburgh, Moscow, etc.) use the ORIGINAL game's STRIPB.DAT
              * whose per-span vertex layout is identical to the forward strip — the
              * geometry yaw from td5_track_compute_heading is already correct.
-             * Applying the correction to these tracks is harmful: if LEFTB.TRK
+             * Applying the correction to these tracks WAS harmful: if LEFTB.TRK
              * route bytes are zero at the spawn spans (e.g. Edinburgh spans 45-119
-             * are all rb=0), the tangent-fallback fires and adds +0x800 to the
+             * are all rb=0), the tangent-fallback fired and added +0x800 to the
              * already-correct geometry heading, rotating cars 180° to face
              * backward. [CONFIRMED Edinburgh level016 STRIPB spans 53-119 rb=0,
-             * geom=0x000 (north/correct), tangent-fallback yields 0x800 (south).]
-             * Exclude P2P reverse from the correction; only circuits (generated
-             * STRIPB) and TD6 tracks need it. */
+             * geom=0x000 (north/correct), tangent-fallback yielded 0x800 (south).]
+             *
+             * [2026-08-15] That +0x800 was a genuine bug and is now REMOVED (see
+             * td5_ai.c td5_ai_correct_spawn_heading). Re-measured with the fix:
+             * Edinburgh reverse spawns log geom_yaw=0 tangent_yaw=0 (dx=0
+             * dz=5999, due north) — the fallback and the geometry now AGREE, and
+             * including P2P reverse gives 5/5 AI launch either way. The exclusion
+             * is therefore no longer needed to avoid the 180° flip; it is KEPT on
+             * faithfulness grounds (the geometry yaw is already correct for these
+             * tracks, so there is nothing to post-process — see the "DO NOT
+             * post-process" note below). Only circuits (generated STRIPB) and TD6
+             * tracks, whose vertex layout yields a wrong geometry yaw, need it. */
             /* [CUSTOM-TRACK AI GRID-STALL] NOTE 2026-08-13: extending this gate to
              * custom tracks (|| td5_track_registry_has_level(level_num)) was TRIED
              * and REVERTED -- it made ALL AI stall (0/5) vs the geometry-heading

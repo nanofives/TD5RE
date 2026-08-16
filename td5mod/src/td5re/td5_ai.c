@@ -1258,7 +1258,7 @@ void td5_ai_correct_spawn_heading(int slot) {
         TD5_LOG_I(LOG_TAG,
                   "correct_spawn_heading: slot=%d span=%d rb=%d geom_yaw=%d route_yaw=%d",
                   slot, (int)span, (int)rb,
-                  ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8,
+                  (ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8) & 0xFFF,
                   route_heading);
 
         /* Write route heading to the 20-bit yaw accumulator (<<8 = 12→20 bit) */
@@ -1277,14 +1277,23 @@ void td5_ai_correct_spawn_heading(int slot) {
      * the delta.  The tangent is layout-independent, so the car faces down-track
      * regardless of vertex layout or missing route data.
      *
-     * Yaw convention: ACTOR_YAW_ACCUM stores (angle + 0x800) << 8 — the same
-     * +0x800 baseline the route_heading path and the geometry spawn pose use
-     * (td5_game.c spawn writes (geom_angle + 0x800) << 8; deviation baseline is
-     * ~0x800, see td5_ai.c:4010).  This function is only called from the
-     * TD6-gated site (td5_game.c, g_active_td6_level > 0), so faithful TD5
-     * tracks never reach here and keep byte-identical behaviour; for tracks
-     * that have a valid route byte (all currently-migrated TD6 levels at their
-     * spawn spans, e.g. Rome rb=188) the primary path above is taken. */
+     * Yaw convention: ACTOR_YAW_ACCUM stores heading12 << 8 with NO baseline.
+     * Every reader masks and compares it bare — physics body-frame projection
+     * (td5_physics.c forward = (sin h, cos h)), the cop heading error at
+     * td5_ai.c:7043, and all three hdelta sites, where the paired -0x800 terms
+     * cancel mod 0x1000 (td5_ai.c:5867-5869).  The route_heading path above
+     * likewise writes route_heading << 8 with no offset.
+     *
+     * [+0x800 REMOVED 2026-08-15] This fallback used to write (tangent+0x800),
+     * on the belief that storage carried a +0x800 baseline.  It does not: the
+     * dx/dz here is ALREADY the forward centreline delta (span s0 -> s0+4
+     * below), unlike td5_track_compute_heading, whose +0x800 legitimately flips
+     * a BACKWARD-pointing vertex-row difference into the travel direction.  So
+     * the old code seeded every fallback car 180 deg backward.  Confirmed by
+     * the Edinburgh evidence recorded at td5_game.c:4245-4250 (level016 STRIPB
+     * spans 53-119 rb=0, geom 0x000 = north/correct, fallback yielded 0x800 =
+     * south); that was worked around by EXCLUDING native P2P-reverse tracks at
+     * the call site rather than by fixing the offset. */
     {
         int span_count = td5_track_get_span_count();
         int s0 = (int)span;
@@ -1296,12 +1305,12 @@ void td5_ai_correct_spawn_heading(int slot) {
             int32_t dx = (int32_t)(x1 - x0) >> 8;   /* 24.8 FP -> integer */
             int32_t dz = (int32_t)(z1 - z0) >> 8;
             int32_t tangent = ai_angle_from_vector(dx, dz) & 0xFFF;
-            int32_t yaw12   = (tangent + 0x800) & 0xFFF;
+            int32_t yaw12   = tangent;
             TD5_LOG_I(LOG_TAG,
                       "correct_spawn_heading: slot=%d span=%d TANGENT fallback "
                       "(rb=%d no usable route byte) geom_yaw=%d tangent_yaw=%d dx=%d dz=%d",
                       slot, (int)span, (int)rb,
-                      ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8, yaw12, dx, dz);
+                      (ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8) & 0xFFF, yaw12, dx, dz);
             ACTOR_I32(actor, ACTOR_YAW_ACCUM) = yaw12 << 8;
         }
     }
