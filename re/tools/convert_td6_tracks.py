@@ -1082,8 +1082,24 @@ def build_routes(strip: bytes, circuit: bool = True, spline: bytes = None):
             right_byte = spline[s * 4 + 2]
             if right_byte < left_byte:           # keep left<right (corridor sense)
                 left_byte, right_byte = right_byte, left_byte
-            if right_byte - left_byte < 8:        # never a zero-width corridor
+            # Never a zero-width corridor. TD6 authors laneA==laneB (or near) to
+            # mean "hold exactly this line" — on Pelton that is 64% of spans, on
+            # Egypt 69% (verified against the source SPLINE1.TD6: the splines
+            # load fine, ring-aligned, 0% default-fill, so these widths are
+            # AUTHORED, not a conversion artifact). TD5's route system wants a
+            # corridor band instead, so we have to widen.
+            #
+            # Widen SYMMETRICALLY about the authored midpoint. The old clamp
+            # (`right = left + 8`) pinned the left edge and pushed only the
+            # right one out, which moved the corridor CENTRE +4 off the authored
+            # racing line on every clamped span — a systematic rightward bias
+            # across most of Pelton/Egypt/New York. Re-centring keeps the line
+            # the TD6 designers authored; only the band around it is synthetic.
+            if right_byte - left_byte < 8:
+                mid = (left_byte + right_byte) // 2
+                left_byte  = max(0,   mid - 4)
                 right_byte = min(255, left_byte + 8)
+                left_byte  = max(0,   right_byte - 8)   # re-fix if we hit 255
             thr = spline_curv_threshold(s)
         else:
             # Geometric fallback (branch spans / no spline): centre + road edge.
