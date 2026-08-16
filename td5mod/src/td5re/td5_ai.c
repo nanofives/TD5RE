@@ -5499,11 +5499,13 @@ static void td5_ai_smart_speed(int slot) {
     int nb = smart_gather_blockers(slot, span_raw, span_count, lookahead,
                                    bl, TD5_MAX_TOTAL_ACTORS);
     int nearest_gap = 99; int32_t peer_speed = 0; int have = 0;
+    int peer_slot = -1; double peer_du = 0.0;   /* [DIAG 2026-08-15] who / how far abeam */
     for (int k = 0; k < nb; k++) {
         if (bl[k].gap < 0) continue;
         double du = bl[k].u - u_self; if (du < 0) du = -du;
         if (du < lane_w * 0.8 && bl[k].gap < nearest_gap) {
             nearest_gap = bl[k].gap; peer_speed = bl[k].speed; have = 1;
+            peer_slot = bl[k].slot; peer_du = du;
         }
     }
 
@@ -5533,7 +5535,29 @@ static void td5_ai_smart_speed(int slot) {
     if (desired < 1) desired = 1;
     int16_t thr = ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER);
 
-    if (nearest_gap <= desired && self_speed > peer_speed) {
+    /* [GAP>=1 2026-08-15] Only ease the throttle for a peer genuinely AHEAD.
+     * smart_span_gap returns >0 for "ahead", so gap==0 is a car on the SAME
+     * span — level with us, not in front. Easing for it cannot help us past it,
+     * and when two cars are level it is mutual: whichever is momentarily faster
+     * takes the cut (floor 0.66), drops behind, and then the other takes it, so
+     * the pair ratchets each other down. MEASURED on Pelton (TD6 slot 26) with
+     * per-peer logging: slots 4<->5 easing off each other continuously, peer_v
+     * driven NEGATIVE (-85, -432, -1389) while grinding together.
+     *
+     * MEASURED EFFECT (Pelton, pinned seed, same 30s window): slot 3 freed
+     * outright — avg speed 48148 -> 66297 (+38%), spans reached 410 -> 448,
+     * finishing with the leaders (449/449) which were themselves unchanged.
+     * Slot 5 avg speed 2520 -> 7121.
+     *
+     * SCOPE / WHAT THIS IS NOT: the level pair here are in genuine physical
+     * contact (V2V fires at ~1096 apart, and their collision half-diagonals sum
+     * to ~1502, so they really are overlapping — the collision radius was
+     * checked and tracks each car's own box at a ratio of 1.02-1.07, i.e. it is
+     * correct). So this does NOT fix the underlying grind, and slots 4/5 still
+     * trail. It removes one self-reinforcing throttle cut that was making a real
+     * problem worse. Validated on ONE track, one seed; this path is shared with
+     * traffic, cop chases and split-screen. */
+    if (nearest_gap >= 1 && nearest_gap <= desired && self_speed > peer_speed) {
         if (nearest_gap <= 1 && (self_speed - peer_speed) > 0x6000) {
             ACTOR_U8(actor, ACTOR_BRAKE_FLAG)     = 1;
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
@@ -5545,8 +5569,10 @@ static void td5_ai_smart_speed(int slot) {
         }
         if ((g_ai_frame_counter % 60u) == 0u) {
             TD5_LOG_I(LOG_TAG, "smart_follow: slot=%d gap=%d desired=%d "
-                      "self_v=%d peer_v=%d thr0=%d", slot, nearest_gap, desired,
-                      (int)self_speed, (int)peer_speed, (int)thr);
+                      "self_v=%d peer_v=%d thr0=%d peer_slot=%d peer_du=%.3f lane_w=%.3f",
+                      slot, nearest_gap, desired,
+                      (int)self_speed, (int)peer_speed, (int)thr,
+                      peer_slot, peer_du, lane_w);
         }
     }
 }
