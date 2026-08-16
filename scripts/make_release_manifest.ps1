@@ -5,12 +5,19 @@
 .DESCRIPTION
     Walks the playable release set and writes a manifest of {path, size, sha256}:
         td5re_release.exe, td5re_release.ini, td5re_update.ps1, update.bat
+        td5re.exe, td5re.ini.default   (DEV build — see note below)
         pending_to_test.csv   (copied here from td5mod/src/td5re/, the tracked
                                source of truth, so release machines get the list)
         re/assets/**  (everything, recursive)
 
     Deliberately EXCLUDES per-machine state so the updater never clobbers it:
-        td5re_input.ini, td5re_progress.ini, and the dev build (td5re.exe / td5re.ini).
+        td5re_input.ini, td5re_progress.ini, and the live dev ini (td5re.ini).
+
+    [2026-08-16] The DEV exe is now published alongside the release one, so a LAN
+    machine can run the debug affordances the release build compiles out (trace
+    knobs, F12 collision overlay, selftest, the live-control socket). Its LIVE ini
+    stays excluded — that is per-machine state; we ship td5re.ini.default instead
+    so a fresh machine has a template without its own config being overwritten.
 
 .USAGE
     powershell -ExecutionPolicy Bypass -File tools\make_release_manifest.ps1
@@ -28,7 +35,7 @@ if (-not $Root) {
 if (-not $OutFile) { $OutFile = Join-Path $Root "manifest.json" }
 $rootFull = (Resolve-Path $Root).Path.TrimEnd('\')
 
-$topLevel = @('td5re_release.exe','td5re_release.ini','td5re_update.ps1','update.bat','pending_to_test.csv')
+$topLevel = @('td5re_release.exe','td5re_release.ini','td5re_update.ps1','update.bat','pending_to_test.csv','td5re.exe','td5re.ini.default')
 $entries  = New-Object System.Collections.Generic.List[object]
 
 # Stage the pending-to-test checklist next to the exe from its tracked source of
