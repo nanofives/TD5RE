@@ -32,11 +32,20 @@ re/scripts/gap_func_analysis.txt
 *.td5
 
 # Organized INI runtime saves written by td5_save.c (input/progress/cup config;
-# regenerated at runtime, never source — same rationale as *.td5 above). Anchored
-# to repo root so the TRACKED td5re.ini / td5re_release.ini are unaffected.
+# regenerated at runtime, never source — same rationale as *.td5 above).
 /td5re_input.ini
 /td5re_progress.ini
 /td5re_cup.ini
+
+# [2026-08-15] The LIVE launch configs are runtime state too, for exactly the
+# same reason: main.c's td5_ini_write_* persists options straight back into
+# them, so every single run dirtied a tracked file (and every tuning session
+# produced a diff nobody meant to commit). The tracked source of truth is now
+# td5re.ini.default / td5re_release.ini.default; the live file is seeded from
+# it on first launch (main.c) and before packaging (make_release_manifest.ps1).
+# Edit the .default when you want to change shipped defaults.
+/td5re.ini
+/td5re_release.ini
 
 # Untracked per-worktree pointer at the mingw64 toolchain, written by
 # scripts/worktree_setup.ps1 and read by the build scripts. Replaces the old

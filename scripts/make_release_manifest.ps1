@@ -43,6 +43,23 @@ if (Test-Path -LiteralPath $pendingSrc) {
     Write-Warning "missing tracked pending_to_test.csv at $pendingSrc"
 }
 
+# [2026-08-15] Seed the shipping td5re_release.ini from its tracked template.
+# The live ini is gitignored runtime state (main.c persists options back into
+# it), so on a fresh clone / CI checkout it does not exist yet -- but it IS a
+# top-level release artifact above, and packaging must not depend on someone
+# having launched the release exe first. Seed only when missing, so a curated
+# local config is never overwritten during a publish.
+$relIniSrc = Join-Path $Root 'td5re_release.ini.default'
+$relIniDst = Join-Path $Root 'td5re_release.ini'
+if (-not (Test-Path -LiteralPath $relIniDst)) {
+    if (Test-Path -LiteralPath $relIniSrc) {
+        Copy-Item -LiteralPath $relIniSrc -Destination $relIniDst
+        Write-Host "seeded td5re_release.ini from td5re_release.ini.default"
+    } else {
+        Write-Warning "missing both td5re_release.ini and its .default template at $Root"
+    }
+}
+
 # SHA256 via .NET rather than Get-FileHash: this box's Windows PowerShell 5.1
 # ships a partially-broken Microsoft.PowerShell.Utility that is missing
 # Get-FileHash (and Import-PowerShellDataFile) — other Utility cmdlets work, but
