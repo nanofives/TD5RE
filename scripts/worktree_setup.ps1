@@ -49,34 +49,34 @@ if ((Test-Path $assetSrc) -and -not (Test-Path $assetDst)) {
 
 # 1b. td5mod\deps — DO NOT JUNCTION. Worktree auto-cleanup follows junctions and
 # DELETES the parent's mingw toolchain (twice in one session, 2026-05-16).
-# Instead: patch the worktree's build_standalone.bat to point at the parent's
-# absolute mingw path. No junction = no cleanup-cascade = parent's deps safe.
-# [2026-07-30 i686 retirement] toolchain is now deps\mingw64; the wrapper's
-# build.bat needs the same treatment (its relative path is one level shallower).
+#
+# [2026-08-15] This used to REWRITE the worktree's build_standalone.bat and
+# ddraw_wrapper\build.bat with the parent's absolute mingw path. That worked,
+# but both files are TRACKED, so every worktree permanently showed two modified
+# build scripts -- noise on every `git status`, and a real hazard: an absolute
+# C:\Users\... path is one careless `git add` away from breaking CI and every
+# other checkout. Instead write an UNTRACKED pointer file at the worktree root;
+# both build scripts read it (see the resolution note in build_standalone.bat).
+# Still no junction, so the parent's deps stay safe from cleanup-cascade.
 $parentMingw64 = Join-Path $parent 'td5mod\deps\mingw64\mingw64\bin'
-$buildBat = Join-Path $wt 'td5mod\src\td5re\build_standalone.bat'
-if (Test-Path $buildBat) {
-    $batContent = Get-Content $buildBat -Raw
-    if ($batContent -match '\.\.\\\.\.\\deps\\mingw64\\mingw64\\bin') {
-        $newContent = $batContent `
-            -replace '\.\.\\\.\.\\deps\\mingw64\\mingw64\\bin', $parentMingw64
-        Set-Content -Path $buildBat -Value $newContent -NoNewline
-        Write-Host "  +    build_standalone.bat (patched to use parent's mingw64 at $parentMingw64)"
-    } else {
-        Write-Host "  ok   build_standalone.bat (already absolute or different pattern)"
-    }
+$mingwPointer  = Join-Path $wt '.td5re_mingw'
+if (Test-Path (Join-Path $parentMingw64 'gcc.exe')) {
+    Set-Content -Path $mingwPointer -Value $parentMingw64 -NoNewline -Encoding ascii
+    Write-Host "  +    .td5re_mingw -> $parentMingw64 (untracked pointer; no tracked file touched)"
 } else {
-    Write-Host "  miss td5mod\src\td5re\build_standalone.bat (not in worktree?)"
+    Write-Host "  WARN parent mingw64 not found at $parentMingw64 -- builds in this worktree will fail loudly"
 }
-$wrapBat = Join-Path $wt 'td5mod\ddraw_wrapper\build.bat'
-if (Test-Path $wrapBat) {
-    $wrapContent = Get-Content $wrapBat -Raw
-    if ($wrapContent -match '\.\.\\deps\\mingw64\\mingw64\\bin') {
-        $wrapContent = $wrapContent -replace '\.\.\\deps\\mingw64\\mingw64\\bin', $parentMingw64
-        Set-Content -Path $wrapBat -Value $wrapContent -NoNewline
-        Write-Host "  +    ddraw_wrapper\build.bat (patched to use parent's mingw64)"
-    } else {
-        Write-Host "  ok   ddraw_wrapper\build.bat (already absolute or different pattern)"
+
+# Undo the historic in-place patch if this worktree was set up by an older
+# version of this script, so the tracked build scripts go back to pristine.
+foreach ($bat in @('td5mod\src\td5re\build_standalone.bat',
+                   'td5mod\ddraw_wrapper\build.bat')) {
+    $p = Join-Path $wt $bat
+    if ((Test-Path $p) -and ((Get-Content $p -Raw) -match [regex]::Escape($parentMingw64))) {
+        Push-Location $wt
+        git checkout -- $bat 2>$null
+        Pop-Location
+        Write-Host "  fix  $bat (reverted stale absolute-path patch)"
     }
 }
 

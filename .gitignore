@@ -38,6 +38,11 @@ re/scripts/gap_func_analysis.txt
 /td5re_progress.ini
 /td5re_cup.ini
 
+# Untracked per-worktree pointer at the mingw64 toolchain, written by
+# scripts/worktree_setup.ps1 and read by the build scripts. Replaces the old
+# scheme of rewriting the TRACKED build .bat files with an absolute path.
+/.td5re_mingw
+
 # Legacy Dev/QA pending-test checklist (pre-CSV; untracked runtime file).
 /td5re_pending.txt
 # Publish artifact: make_release_manifest.ps1 copies the TRACKED source-of-truth

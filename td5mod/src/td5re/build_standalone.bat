@@ -51,7 +51,39 @@ if /I "%TD5RE_ARCH%"=="i686" (
     echo        last 32-bit tree available in git history.
     exit /b 1
 )
-set TOOLPREFIX=..\..\deps\mingw64\mingw64\bin
+REM ---------------------------------------------------------------------------
+REM Toolchain location. Resolved at RUN time, never by patching this file.
+REM
+REM [2026-08-15] worktree_setup.ps1 used to REWRITE this line with the parent
+REM tree's absolute mingw path, which left build_standalone.bat permanently
+REM "modified" in every worktree and made it impossible to commit cleanly.
+REM The toolchain still must NOT be junctioned into a worktree (worktree
+REM auto-cleanup follows junctions and deleted the parent's real toolchain
+REM twice on 2026-05-16), so instead the path is resolved in priority order:
+REM   1. the normal in-tree relative path (main tree: always correct)
+REM   2. %TD5RE_MINGW%                     (one-off / CI override)
+REM   3. .td5re_mingw at the repo root     (UNTRACKED pointer file that
+REM                                         worktree_setup.ps1 writes)
+REM and if none of those hold a gcc.exe we fail LOUDLY with the fix, rather
+REM than letting someone "solve" it by hardcoding a path into this file again.
+REM ---------------------------------------------------------------------------
+set "TOOLPREFIX=..\..\deps\mingw64\mingw64\bin"
+if not exist "%TOOLPREFIX%\gcc.exe" if defined TD5RE_MINGW set "TOOLPREFIX=%TD5RE_MINGW%"
+if not exist "%TOOLPREFIX%\gcc.exe" if exist "%~dp0..\..\..\.td5re_mingw" (
+    for /f "usebackq delims=" %%P in ("%~dp0..\..\..\.td5re_mingw") do set "TOOLPREFIX=%%P"
+)
+if not exist "%TOOLPREFIX%\gcc.exe" (
+    echo ERROR: mingw64 toolchain not found ^(no gcc.exe^).
+    echo        looked at: %TOOLPREFIX%
+    echo.
+    echo   In the main tree this should be td5mod\deps\mingw64\mingw64\bin.
+    echo   In a WORKTREE the toolchain is deliberately not junctioned -- run
+    echo     pwsh -NoProfile -File scripts\worktree_setup.ps1 -Worktree "%%CD%%"
+    echo   to write the untracked .td5re_mingw pointer, or set TD5RE_MINGW
+    echo   to the parent tree's mingw64\bin for this shell.
+    echo   Do NOT hardcode a path into this file -- it is tracked.
+    exit /b 1
+)
 set WINDRES_TARGET=pe-x86-64
 set ARCHLDFLAG=-m64
 set GCC=%TOOLPREFIX%\gcc.exe
