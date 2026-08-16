@@ -4259,14 +4259,33 @@ static void init_race_spawn_actors(void)
              * tracks, so there is nothing to post-process — see the "DO NOT
              * post-process" note below). Only circuits (generated STRIPB) and TD6
              * tracks, whose vertex layout yields a wrong geometry yaw, need it. */
-            /* [CUSTOM-TRACK AI GRID-STALL] NOTE 2026-08-13: extending this gate to
-             * custom tracks (|| td5_track_registry_has_level(level_num)) was TRIED
-             * and REVERTED -- it made ALL AI stall (0/5) vs the geometry-heading
-             * baseline (4/5 launch). The generator's LEFT/RIGHT.TRK route bytes are
-             * NON-zero but NOT in the heading-encoding format td5_ai_correct_spawn_
-             * heading expects, so the correction seeds a wrong yaw for every car.
-             * Proper fix is to emit route bytes in the native heading format in
-             * td5_trackgen.emit_routes (deferred); geometry heading is better today. */
+            /* [CUSTOM TRACKS] Deliberately NOT gated in — but not for the reason
+             * the 2026-08-13 note here used to give. That note claimed extending
+             * the gate to custom tracks stalled ALL AI (0/5 vs a 4/5 baseline)
+             * because td5_trackgen's LEFT/RIGHT.TRK route bytes were "not in the
+             * native heading encoding", and deferred a fix to
+             * td5_trackgen.emit_routes. That diagnosis was WRONG; do not write
+             * that emitter. [MEASURED 2026-08-15]
+             *
+             *   - emit_routes has no encoder of its own. td5_trackgen.py does
+             *     `build_routes = _td6.build_routes`, i.e. the SAME encoder that
+             *     produces the working TD6 tables.
+             *   - Decoding the shipped left.trk.csv with this engine's own
+             *     formula ((rb * 0x102C) >> 8) and comparing against the
+             *     centreline tangent recomputed from strip.json gives a max
+             *     error of 30 angle units (2.6 deg) on level041/045/046 and 8 on
+             *     level044 — pure byte quantisation (0x102C/256 ~ 16 units per
+             *     step) plus the +/-3-span averaging window.
+             *   - A/B on slot 38 (level041, 5 opponents): 5/5 AI launch with the
+             *     gate ON and 5/5 with it OFF, each completing 234 of the 239
+             *     ring spans. Spawn deltas were 3..36 units, no 90/180 error.
+             *
+             * The old 0/5 almost certainly predates the look-ahead ring-wrap fix
+             * on this branch (these strips are 239 ring spans vs 288 physical,
+             * exactly that case). The gate stays OFF because it is unnecessary:
+             * the generator emits a TD5-native vertex layout, so the geometry
+             * yaw is already right. Turning it on is worth only 1 fewer
+             * borderline recovery line. */
             if (g_active_td6_level > 0 || (g_td5.reverse_direction && g_track_is_circuit))
                 td5_ai_correct_spawn_heading(slot);
 
