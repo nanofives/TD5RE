@@ -220,6 +220,12 @@ static const int32_t *script_program_from_handle(int32_t handle)
 static int g_script_bank_index[TD5_MAX_TOTAL_ACTORS];
 static int32_t g_last_logged_opcode[TD5_MAX_TOTAL_ACTORS];
 
+/* [RECOVERY HYSTERESIS 2026-08-15] Per-actor latch for the heading-misalignment
+ * recovery gate. 1 = the actor is currently considered misaligned, so the gate
+ * has already fired and must not re-fire until the heading comes back inside
+ * the ALIGNED band. See the recovery-trigger site for the rationale. */
+static uint8_t g_recovery_armed[TD5_MAX_TOTAL_ACTORS];
+
 /* Special encounter globals */
 int32_t g_encounter_tracked_handle = -1;    /* -1 = none */
 int32_t g_encounter_enabled;                 /* master gate */
@@ -5888,11 +5894,73 @@ void td5_ai_update_track_behavior(int slot) {
              * recovery-script set on the first sub-tick. orig with route data
              * loaded computes a meaningful route_heading and does NOT enter
              * recovery. */
-            if (rs[RS_ROUTE_TABLE_PTR] != 0 && hdelta > 0x320 && hdelta < 0xCE0
-                && !smart_on_branch) {
-                TD5_LOG_I(LOG_TAG, "recovery: slot=%d hdelta=0x%X heading=0x%X route=0x%X gt=%d",
+            /* [TICK-0 SPAN-NORMALISATION GUARD 2026-08-15] Also suppress the
+             * set on the very first sim tick. ai_route_heading_for_actor keys
+             * off ACTOR_SPAN_NORMALIZED (+0x82), which the track walker has NOT
+             * populated yet at tick 0 — it still reads 0 while ACTOR_SPAN_RAW
+             * already holds the real spawn span. So the route heading is
+             * sampled from span 0 instead of the car's actual span, and any
+             * track whose span-0 heading differs from its grid heading trips
+             * this gate on tick 0 for the whole field.
+             *
+             * [CONFIRMED @ Pelton (TD6 level010, slot 26), instrumented run:
+             *  "recovery: slot=1 hdelta=0xB33 heading=0xE87 route=0x9BA
+             *   span_norm=0 span_raw=306 tick=0" — all 5 AI, every one with
+             *  span_norm=0 and a correct span_raw. Pelton's span-0 route
+             *  heading is 0x9BA (2490) vs 0xE87 (3719) at span 306, so
+             *  hdelta = (2490-3719)&0xFFF = 0xB32, inside (0x320,0xCE0). The
+             *  recovery script latched from tick 0 and the field crawled at
+             *  ~3% of racing speed. Track geometry and LEFT.TRK are both clean
+             *  there (0 of 450 spans deviate >200 units), so this was never a
+             *  data problem.]
+             *
+             * Nothing is lost by skipping tick 0: the car has not moved yet, so
+             * a genuine misalignment is still caught on tick 1 with a correct
+             * normalised span. The legitimate mid-race firing observed at
+             * tick=605 (span_norm=299 span_raw=299) is unaffected. */
+
+            /* [RECOVERY HYSTERESIS 2026-08-15] The original gate is a bare
+             * window test, so a car hovering at the EDGE of it latches into a
+             * recovery it cannot escape. Measured on Pelton: slot 4 entered at
+             * hdelta=0x323 (THREE units past the 0x320 lower bound) and slot 5
+             * at 0xCDE (TWO units under the 0xCE0 upper bound). Both then spent
+             * ~66% of the race at full steering lock (steer=+/-73728) with speed
+             * oscillating negative, while a healthy car (slot 1) never ran the
+             * track script at all. The latch is self-sustaining for the reason
+             * already documented on td5_ai_correct_spawn_heading: at v~0 the
+             * bicycle model cannot generate yaw torque, so the script can never
+             * satisfy the very condition that started it.
+             *
+             * Fix: two-level hysteresis. ARMING (entering recovery) needs the
+             * misalignment to clear the original bounds by RECOVERY_MARGIN;
+             * DISARMING only happens once the heading returns inside the
+             * original aligned band. A marginal wobble can no longer trigger,
+             * and while armed the gate cannot re-fire every tick. The original
+             * 0x320/0xCE0 bounds still define "aligned", so a genuinely
+             * spun-round car (hdelta near 0x800) arms exactly as before. */
+            {
+            const int32_t RECOVERY_MARGIN = 0xA0;   /* 160 units ~ 14 degrees */
+            int armed_slot = (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) ? slot : -1;
+            int misaligned = (hdelta > 0x320 && hdelta < 0xCE0);
+            int arming     = (hdelta > (0x320 + RECOVERY_MARGIN) &&
+                              hdelta < (0xCE0 - RECOVERY_MARGIN));
+
+            /* Leave the misaligned band -> clear the latch so a LATER genuine
+             * misalignment can arm again. */
+            if (armed_slot >= 0 && !misaligned)
+                g_recovery_armed[armed_slot] = 0;
+
+            if (rs[RS_ROUTE_TABLE_PTR] != 0 && arming
+                && !smart_on_branch && g_td5.simulation_tick_counter > 0
+                && (armed_slot < 0 || !g_recovery_armed[armed_slot])) {
+                if (armed_slot >= 0) g_recovery_armed[armed_slot] = 1;
+                TD5_LOG_I(LOG_TAG, "recovery: slot=%d hdelta=0x%X heading=0x%X route=0x%X gt=%d "
+                          "span_norm=%d span_raw=%d tick=%u",
                           slot, hdelta, heading & 0xFFF, route_heading & 0xFFF,
-                          (int)g_td5.game_type);
+                          (int)g_td5.game_type,
+                          (int)ACTOR_I16(actor, ACTOR_SPAN_NORMALIZED),
+                          (int)ACTOR_I16(actor, ACTOR_SPAN_RAW),
+                          (unsigned)g_td5.simulation_tick_counter);
                 /* [PRECISE-PORT D1 narrowed 2026-05-14, pool9_00434FE0]:
                  * the original at 0x00435094-0x0043509F writes ONLY the two
                  * pointer fields, both with the same recovery-script pointer
@@ -5921,6 +5989,7 @@ void td5_ai_update_track_behavior(int slot) {
                 rs[RS_SCRIPT_IP]       = 0;
                 return;
             }
+            }   /* recovery-hysteresis scope */
         }
     } else {
         /* Suppress compiler warnings for unused locals when the gate is closed. */
