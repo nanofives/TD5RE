@@ -33,6 +33,11 @@ static int          s_env_dark      = 0;   /* set per-frame by the render env-br
  * lighting simultaneously, so vehicle headlight emission follows THIS array,
  * not the single s_env_dark above (see td5_light_set_env_dark_for_slot). */
 static int          s_env_dark_slot[TD5_ACTOR_MAX_TOTAL_SLOTS];
+/* [HEADLIGHT DIR FIX 2026-08-13] Per-slot forward-sign for the headlight beam,
+ * calibrated from the car's DIRECTION OF TRAVEL (convention-independent). The old
+ * rear-lamp-Z heuristic pointed the beam BACKWARD on every tested car, pooling a
+ * white patch on the road BEHIND the car (at the chase camera). 0 = uncalibrated. */
+static float        s_hl_fwd_sign_slot[TD5_ACTOR_MAX_TOTAL_SLOTS];
 
 void td5_light_set_enabled(int on)      { s_enabled = on ? 1 : 0; }
 int  td5_light_enabled(void)            { return s_enabled; }
@@ -215,18 +220,34 @@ void td5_light_emit_vehicle_headlights(void)
             memcpy(hp1, (const uint8_t *)car_def + 0x68, 6);   /* right rear lamp */
         }
 
-        /* forward sign: opposite the rear-lamp Z (env override wins if != 0). */
+        /* [HEADLIGHT DIR FIX 2026-08-13] Pick the forward sign for body +Z from the
+         * car's DIRECTION OF TRAVEL, not the rear-lamp-Z guess (that guess pointed
+         * the beam BACKWARD on every car -> a white pool behind the car at the
+         * camera). body +Z is the model's longitudinal axis on every TD5/TD6 car;
+         * only its SIGN (nose vs tail) is model-dependent, so calibrate that sign
+         * against world velocity whenever the car is clearly rolling FORWARD
+         * (longitudinal_speed > floor -- gated to forward so REVERSE, whose velocity
+         * points at the tail, can't flip it), cache it per slot, and reuse it at a
+         * standstill. Env TD5RE_HEADLIGHT_FWD_SIGN still forces it; the uncalibrated
+         * default is +1 (body +Z = nose), self-corrected the first time it drives. */
+        float bzx, bzy, bzz;
+        body_to_world(m, 0.0f, 0.0f, 1.0f, &bzx, &bzy, &bzz);   /* body +Z in world */
+
         float fsign;
         if (s_hl_fwd_sign > 0.5f || s_hl_fwd_sign < -0.5f) {
             fsign = (s_hl_fwd_sign > 0.0f) ? 1.0f : -1.0f;
         } else {
-            float rear_z = 0.5f * ((float)hp0[2] + (float)hp1[2]);
-            fsign = (rear_z >= 0.0f) ? -1.0f : 1.0f;
+            if (a->longitudinal_speed > (3 << 8)) {   /* clearly rolling FORWARD (8.8) */
+                float d = bzx * (float)a->linear_velocity_x
+                        + bzz * (float)a->linear_velocity_z;
+                s_hl_fwd_sign_slot[slot] = (d >= 0.0f) ? 1.0f : -1.0f;
+            }
+            fsign = s_hl_fwd_sign_slot[slot];
+            if (fsign == 0.0f) fsign = 1.0f;   /* uncalibrated: assume body +Z = nose */
         }
 
-        /* World forward axis (body +Z * front-sign), for the beam direction. */
-        float ffx, ffy, ffz;
-        body_to_world(m, 0.0f, 0.0f, fsign, &ffx, &ffy, &ffz);
+        /* World forward axis (body +Z * calibrated sign), for the beam direction. */
+        float ffx = bzx * fsign, ffy = bzy * fsign, ffz = bzz * fsign;
         /* Beam dir = forward, tilted DOWN toward the road (+Y is world down). */
         float bdx = ffx, bdy = ffy + s_hl_tilt, bdz = ffz;
 
