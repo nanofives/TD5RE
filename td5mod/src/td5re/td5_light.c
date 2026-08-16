@@ -17,6 +17,7 @@
 #include "td5_race_state.h"  /* [LAYERING 2026-07-06] read-only race queries (was td5_game.h) */
 #include "td5_light.h"
 #include "td5_platform.h"
+#include "td5_track.h"       /* td5_track_probe_height — static per-lamp floor Y */
 #include "td5_rt.h"          /* [RT2 P7] td5_rt_active() — HIGH street-lamp default */
 
 #define LOG_TAG "render"   /* routes to engine.log */
@@ -32,6 +33,11 @@ static int          s_env_dark      = 0;   /* set per-frame by the render env-br
  * lighting simultaneously, so vehicle headlight emission follows THIS array,
  * not the single s_env_dark above (see td5_light_set_env_dark_for_slot). */
 static int          s_env_dark_slot[TD5_ACTOR_MAX_TOTAL_SLOTS];
+/* [HEADLIGHT DIR FIX 2026-08-13] Per-slot forward-sign for the headlight beam,
+ * calibrated from the car's DIRECTION OF TRAVEL (convention-independent). The old
+ * rear-lamp-Z heuristic pointed the beam BACKWARD on every tested car, pooling a
+ * white patch on the road BEHIND the car (at the chase camera). 0 = uncalibrated. */
+static float        s_hl_fwd_sign_slot[TD5_ACTOR_MAX_TOTAL_SLOTS];
 
 void td5_light_set_enabled(int on)      { s_enabled = on ? 1 : 0; }
 int  td5_light_enabled(void)            { return s_enabled; }
@@ -214,18 +220,34 @@ void td5_light_emit_vehicle_headlights(void)
             memcpy(hp1, (const uint8_t *)car_def + 0x68, 6);   /* right rear lamp */
         }
 
-        /* forward sign: opposite the rear-lamp Z (env override wins if != 0). */
+        /* [HEADLIGHT DIR FIX 2026-08-13] Pick the forward sign for body +Z from the
+         * car's DIRECTION OF TRAVEL, not the rear-lamp-Z guess (that guess pointed
+         * the beam BACKWARD on every car -> a white pool behind the car at the
+         * camera). body +Z is the model's longitudinal axis on every TD5/TD6 car;
+         * only its SIGN (nose vs tail) is model-dependent, so calibrate that sign
+         * against world velocity whenever the car is clearly rolling FORWARD
+         * (longitudinal_speed > floor -- gated to forward so REVERSE, whose velocity
+         * points at the tail, can't flip it), cache it per slot, and reuse it at a
+         * standstill. Env TD5RE_HEADLIGHT_FWD_SIGN still forces it; the uncalibrated
+         * default is +1 (body +Z = nose), self-corrected the first time it drives. */
+        float bzx, bzy, bzz;
+        body_to_world(m, 0.0f, 0.0f, 1.0f, &bzx, &bzy, &bzz);   /* body +Z in world */
+
         float fsign;
         if (s_hl_fwd_sign > 0.5f || s_hl_fwd_sign < -0.5f) {
             fsign = (s_hl_fwd_sign > 0.0f) ? 1.0f : -1.0f;
         } else {
-            float rear_z = 0.5f * ((float)hp0[2] + (float)hp1[2]);
-            fsign = (rear_z >= 0.0f) ? -1.0f : 1.0f;
+            if (a->longitudinal_speed > (3 << 8)) {   /* clearly rolling FORWARD (8.8) */
+                float d = bzx * (float)a->linear_velocity_x
+                        + bzz * (float)a->linear_velocity_z;
+                s_hl_fwd_sign_slot[slot] = (d >= 0.0f) ? 1.0f : -1.0f;
+            }
+            fsign = s_hl_fwd_sign_slot[slot];
+            if (fsign == 0.0f) fsign = 1.0f;   /* uncalibrated: assume body +Z = nose */
         }
 
-        /* World forward axis (body +Z * front-sign), for the beam direction. */
-        float ffx, ffy, ffz;
-        body_to_world(m, 0.0f, 0.0f, fsign, &ffx, &ffy, &ffz);
+        /* World forward axis (body +Z * calibrated sign), for the beam direction. */
+        float ffx = bzx * fsign, ffy = bzy * fsign, ffz = bzz * fsign;
         /* Beam dir = forward, tilted DOWN toward the road (+Y is world down). */
         float bdx = ffx, bdy = ffy + s_hl_tilt, bdz = ffz;
 
@@ -261,11 +283,39 @@ void td5_light_emit_vehicle_headlights(void)
 
 #define TD5_LAMP_MAX 4096
 
-static float s_lamp_pos[TD5_LAMP_MAX][3];
+static float   s_lamp_pos[TD5_LAMP_MAX][3];
+static uint8_t s_lamp_tunnel[TD5_LAMP_MAX];  /* 1 = tunnel wall lamp: cool-white, tighter range, always-on (bypasses s_env_dark) */
+/* [STATIC LAMP Y 2026-08-12] Resolved-once emit Y for a tunnel lamp (see the
+ * TD5RE_TUNNEL_LAMP_DROP note below). A tunnel lamp is authored up on the
+ * wall/ceiling but must POOL ON THE ROAD, so its emit Y is dropped toward the
+ * floor. That drop used to be recomputed every frame against the PLAYER's Y,
+ * which made every lamp's height track the car: the pools read as a cluster
+ * hugging the player instead of fixtures fixed in the world, and lamps further
+ * along a gradient were dragged to the player's elevation rather than to the
+ * floor beneath themselves. Now the floor is probed ONCE per lamp, at the
+ * lamp's OWN x/z, and cached — so the emitter is world-static. Same
+ * resolve-once-and-cache shape as TD6 props' ground_y/ground_done. */
+static float   s_lamp_emit_y[TD5_LAMP_MAX];
+/* Probed floor Y under the lamp, kept so the BEAM DIRECTION can be derived from
+ * geometry rather than from a hardcoded world-up sign. The engine's Y convention
+ * is genuinely ambiguous in this area (the headlight emitter documents "up = -Y"
+ * in BODY space, while world_pos measurements put the road at a SMALLER Y than
+ * the car centre), and guessing wrong would aim the beam at the ceiling and leave
+ * the road dark. (floor_y - lamp_y) always points lamp -> road whatever the
+ * convention, so the beam is self-correcting. */
+static float   s_lamp_floor_y[TD5_LAMP_MAX];
+static uint8_t s_lamp_emit_done[TD5_LAMP_MAX];
+/* [UNDULATION FIX 2026-08-13] Shared patch->road DROP for tunnel lamps. The tunnel
+ * rises and falls, so a lamp's pool must sit below ITS OWN wall patch (which follows
+ * the undulation), not at one shared probed height. Resolve this delta ONCE from a
+ * real probe (correct sign+magnitude for the tunnel cross-section) and apply it to
+ * each lamp's own L[1]. Reset per race. */
+static float   s_tlamp_drop_delta    = 0.0f;
+static int     s_tlamp_drop_resolved = 0;
 static int   s_lamp_count     = 0;
 static int   s_street_lights  = 0;   /* OFF by default: parked pending a lamp look-dev session */
 
-void td5_light_lamps_reset(void)          { s_lamp_count = 0; }
+void td5_light_lamps_reset(void)          { s_lamp_count = 0; s_tlamp_drop_resolved = 0; }
 int  td5_light_lamps_count(void)          { return s_lamp_count; }
 void td5_light_set_street_lights(int on)  { s_street_lights = on ? 1 : 0; }
 int  td5_light_street_lights(void)        { return s_street_lights; }
@@ -276,10 +326,14 @@ void td5_light_lamps_add(float x, float y, float z)
     s_lamp_pos[s_lamp_count][0] = x;
     s_lamp_pos[s_lamp_count][1] = y;
     s_lamp_pos[s_lamp_count][2] = z;
+    s_lamp_tunnel[s_lamp_count] = 0;
+    s_lamp_emit_y[s_lamp_count]    = y;   /* until resolved, emit where authored */
+    s_lamp_floor_y[s_lamp_count]   = y;   /* == lamp y => no beam dir => stays omni */
+    s_lamp_emit_done[s_lamp_count] = 0;
     s_lamp_count++;
 }
 
-void td5_light_lamps_capture(float x, float y, float z)
+static void td5_light_lamps_capture_impl(float x, float y, float z, int tunnel)
 {
     /* Dedupe: the same halo is captured every frame it is on screen, and the
      * big soft glows are assembled from 2-4 quadrant quads whose centers sit
@@ -292,13 +346,29 @@ void td5_light_lamps_capture(float x, float y, float z)
         if (dx * dx + dy * dy + dz * dz < 650.0f * 650.0f)
             return;
     }
+    int idx = s_lamp_count;
     td5_light_lamps_add(x, y, z);
+    if (s_lamp_count > idx)              /* add() may no-op at the cap */
+        s_lamp_tunnel[idx] = tunnel ? 1 : 0;
     static int s_cap_log = 0;
     if (s_cap_log < 8) {
         s_cap_log++;
-        TD5_LOG_I(LOG_TAG, "lamp capture[%d]: (%.0f,%.0f,%.0f)",
-                  s_lamp_count - 1, x, y, z);
+        TD5_LOG_I(LOG_TAG, "lamp capture[%d]%s: (%.0f,%.0f,%.0f)",
+                  s_lamp_count - 1, tunnel ? " tunnel" : "", x, y, z);
     }
+}
+
+void td5_light_lamps_capture(float x, float y, float z)
+{
+    td5_light_lamps_capture_impl(x, y, z, 0);
+}
+
+/* Tunnel wall "fake-light" patches (e.g. Keswick pages 152/153) → real
+ * cool-white point lights. Same shared registry as street lamps, but tagged so
+ * the emitter gives them a tighter, cool tint and skips the dark-env gate. */
+void td5_light_lamps_capture_tunnel(float x, float y, float z)
+{
+    td5_light_lamps_capture_impl(x, y, z, 1);
 }
 
 /* ---- Content-classified glow pages (per level) --------------------------
@@ -339,6 +409,67 @@ static int   s_lamp_knobs_read = 0;
 static float s_lamp_range      = 2400.0f;  /* TD5RE_LAMP_RANGE      pool radius (world units) */
 static float s_lamp_intensity  = 1.00f;    /* TD5RE_LAMP_INTENSITY  peak added light 0..1     */
 static int   s_lamp_budget     = 10;       /* TD5RE_LAMP_COUNT      nearest-N promoted/frame  */
+static float s_tlamp_range     = 3500.0f;  /* TD5RE_TUNNEL_LAMP_RANGE  fills the tunnel corridor (1200 = tight pools hugging the car) */
+static float s_tlamp_intensity = 1.35f;    /* TD5RE_TUNNEL_LAMP_INTENSITY  peak added light (raised so the road/car read) */
+/* TD5RE_TUNNEL_LAMP_DROP: the wall/ceiling patches sit ~1600 units ABOVE the road,
+ * so a point light left there barely reaches the floor or a passing car (falloff
+ * (1-d/range)^2 collapses at that distance). Move each tunnel lamp DOWN toward the
+ * road by this fraction of (lamp_y -> floor_y), so the warm pool lands ON the road
+ * and lights cars under it. 0 = keep at the ceiling; 1 = at road level.
+ * Default 0.6 (mid-tunnel, biased low).
+ * floor_y is the TRACK SURFACE under the lamp's own x/z, probed once and cached
+ * (s_lamp_emit_y) — NOT the player's Y, which would make the lamp follow the car. */
+static float s_tlamp_drop      = 0.60f;
+/* TD5RE_TUNNEL_LAMP_STATIC_Y: 1 (default) = resolve each tunnel lamp's emit Y once
+ * from the track floor beneath it, so the light is fixed in the world. 0 = the old
+ * per-frame drop toward the player's Y (kept as an A/B escape hatch; that path is
+ * what made the lamps appear to spawn on top of the car). */
+static int   s_tlamp_static_y  = 1;
+/* TD5RE_TUNNEL_LAMP_CONE: beam half-angle in DEGREES for the downward tunnel-lamp
+ * cone. A real tunnel fixture throws light DOWN at the carriageway; emitting an
+ * OMNI point light instead lit the tunnel ROOF as hard as the road (user report:
+ * "the roof of the tunnel should not be that bright"). The roof cannot be fixed by
+ * the Lambert term alone: ps_light.hlsl gives back-facing surfaces a 0.15 wrap
+ * floor, and any surface with no G-buffer normal takes ndotl = 1.0 outright — but
+ * `cone` multiplies independently of ndotl, so a downward beam kills roof spill
+ * regardless of normals. 0 (or >=180) = omni, i.e. the old behaviour.
+ * Default 80 deg: a wide pool on the road, nothing on the ceiling. */
+static float s_tlamp_cone_deg  = 80.0f;
+/* TD5RE_TUNNEL_LAMP_COUNT: cap on how many tunnel wall lamps promote to real
+ * point lights per frame (nearest-first). Measured cost on a fast GPU is ~0 ms
+ * for 8 lamps, so the DEFAULT is 8 (light a stretch of the tunnel ahead, not
+ * just the nearest few hugging the camera). LOWER it (e.g. 3) as a perf lever on
+ * a GPU-bound card. Independent of the street-lamp TD5RE_LAMP_COUNT budget.
+ *
+ * [POP-IN 2026-08-12] Raised 8 -> 14. A lamp only becomes a real light once it
+ * enters the nearest-N set, so if that set spans LESS than the lamp's own range
+ * the lamp switches on already contributing light — visible as "lights turn on
+ * very close to the camera" (user report). Tunnel lamps sit on BOTH walls ~650u
+ * apart, so 8 slots covered only ~2-3 pairs, half of them BEHIND the car. 14
+ * slots plus the forward bias below cover ~4500u ahead, comfortably past
+ * TD5RE_TUNNEL_LAMP_RANGE (3500), so lamps now fade up through the normal
+ * (1-d/range)^2 attenuation instead of popping in. */
+static int   s_tlamp_budget    = 14;
+/* TD5RE_TUNNEL_LAMP_AHEAD: world units of BEHIND-the-car slack kept when the
+ * nearest-N ranking is biased along the direction of travel. Ranking purely by
+ * distance spends half the budget on lamps the player has already passed (and
+ * cannot see) — biasing forward puts those slots into the corridor ahead, which
+ * is what actually removes the pop-in. Some slack is kept so a lamp just passed
+ * still lights the road behind. 0 disables the bias (pure nearest-N). */
+static float s_tlamp_ahead     = 1200.0f;
+/* TD5RE_TUNNEL_LAMP_EDGEFADE: [POP-IN FADE 2026-08-13] fraction of the emit
+ * boundary distance over which the OUTERMOST (marginal) tunnel lamps fade up from
+ * zero. nearest-N is a hard cap, so a lamp used to SNAP on at full (1-d/range)^2
+ * the instant it entered the budget -- "lights turning on close to the camera".
+ * With more lamps in range than the budget, that boundary is well inside range, so
+ * the falloff alone can't hide it. Fade smoothly over this band ending at the
+ * boundary distance so the entering lamp starts at 0 and grows as it nears. 0 = off
+ * (old hard cap). Default 0.40. */
+static float s_tlamp_edgefade  = 0.40f;
+/* Tunnel lamp colour — WARM tungsten (env-tunable while art-directing). */
+static float s_tlamp_r         = 1.00f;    /* TD5RE_TUNNEL_LAMP_R */
+static float s_tlamp_g         = 0.85f;    /* TD5RE_TUNNEL_LAMP_G */
+static float s_tlamp_b         = 0.62f;    /* TD5RE_TUNNEL_LAMP_B */
 
 void td5_light_emit_street_lamps(void)
 {
@@ -349,20 +480,46 @@ void td5_light_emit_street_lamps(void)
      * identical. (The dark-only + nearest-N budget gates below still apply.) */
     int want_lamps = s_street_lights || td5_rt_active();
     if (!s_enabled || !want_lamps || s_lamp_count <= 0) return;
-    /* Same verdict as auto headlights: lamps light up in rain/dusk/dark zones
-     * and stay off in bright daylight. */
-    if (!s_env_dark) return;
+    /* Street lamps follow the auto-headlight verdict: on in rain/dusk/dark
+     * zones, off in bright daylight. Tunnel lamps live INSIDE a tunnel, so they
+     * ignore the sky-based dark probe — if any are registered we keep going and
+     * emit only those when the env reads bright. */
+    int any_tunnel = 0;
+    for (int i = 0; i < s_lamp_count; i++) if (s_lamp_tunnel[i]) { any_tunnel = 1; break; }
+    if (!s_env_dark && !any_tunnel) return;
 
     if (!s_lamp_knobs_read) {
         s_lamp_knobs_read = 1;
-        s_lamp_range     = env_f("TD5RE_LAMP_RANGE",     s_lamp_range);
-        s_lamp_intensity = env_f("TD5RE_LAMP_INTENSITY", s_lamp_intensity);
+        s_lamp_range      = env_f("TD5RE_LAMP_RANGE",     s_lamp_range);
+        s_lamp_intensity  = env_f("TD5RE_LAMP_INTENSITY", s_lamp_intensity);
+        s_tlamp_range     = env_f("TD5RE_TUNNEL_LAMP_RANGE",     s_tlamp_range);
+        s_tlamp_intensity = env_f("TD5RE_TUNNEL_LAMP_INTENSITY", s_tlamp_intensity);
         {
             const char *e = getenv("TD5RE_LAMP_COUNT");
             if (e && e[0]) { int v = atoi(e); if (v >= 0 && v <= TD5_LIGHT_MAX) s_lamp_budget = v; }
         }
-        TD5_LOG_I(LOG_TAG, "street lamps: %d registered, range=%.0f intensity=%.2f budget=%d",
-                  s_lamp_count, (double)s_lamp_range, (double)s_lamp_intensity, s_lamp_budget);
+        {
+            const char *e = getenv("TD5RE_TUNNEL_LAMP_COUNT");
+            if (e && e[0]) { int v = atoi(e); if (v >= 0 && v <= TD5_LIGHT_MAX) s_tlamp_budget = v; }
+        }
+        s_tlamp_r = env_f("TD5RE_TUNNEL_LAMP_R", s_tlamp_r);
+        s_tlamp_g = env_f("TD5RE_TUNNEL_LAMP_G", s_tlamp_g);
+        s_tlamp_b = env_f("TD5RE_TUNNEL_LAMP_B", s_tlamp_b);
+        s_tlamp_drop = env_f("TD5RE_TUNNEL_LAMP_DROP", s_tlamp_drop);
+        if (s_tlamp_drop < 0.0f) s_tlamp_drop = 0.0f; else if (s_tlamp_drop > 1.0f) s_tlamp_drop = 1.0f;
+        {
+            const char *e = getenv("TD5RE_TUNNEL_LAMP_STATIC_Y");
+            if (e && e[0] == '0') s_tlamp_static_y = 0;
+        }
+        s_tlamp_cone_deg = env_f("TD5RE_TUNNEL_LAMP_CONE", s_tlamp_cone_deg);
+        if (s_tlamp_cone_deg < 0.0f) s_tlamp_cone_deg = 0.0f;
+        s_tlamp_ahead = env_f("TD5RE_TUNNEL_LAMP_AHEAD", s_tlamp_ahead);
+        if (s_tlamp_ahead < 0.0f) s_tlamp_ahead = 0.0f;
+        s_tlamp_edgefade = env_f("TD5RE_TUNNEL_LAMP_EDGEFADE", s_tlamp_edgefade);
+        if (s_tlamp_edgefade < 0.0f) s_tlamp_edgefade = 0.0f;
+        else if (s_tlamp_edgefade > 1.0f) s_tlamp_edgefade = 1.0f;
+        TD5_LOG_I(LOG_TAG, "street lamps: %d registered, range=%.0f intensity=%.2f budget=%d tunnel_budget=%d",
+                  s_lamp_count, (double)s_lamp_range, (double)s_lamp_intensity, s_lamp_budget, s_tlamp_budget);
     }
     if (s_lamp_budget <= 0 || s_lamp_intensity <= 0.0f) return;
 
@@ -383,7 +540,29 @@ void td5_light_emit_street_lamps(void)
     float best_d2[TD5_LIGHT_MAX];
     int   nbest = 0;
     float cutoff2 = (s_lamp_range * 6.0f) * (s_lamp_range * 6.0f);
+    /* The candidate window has to be at least as wide as the TUNNEL budget or the
+     * tunnel cap can never be reached: this list is capped at s_lamp_budget (the
+     * STREET-lamp budget, 10) and the tunnel emit loop below draws from it. With a
+     * 14-lamp tunnel budget the window must grow to match, or the pop-in fix does
+     * nothing. Street-lamp-only levels keep the untouched s_lamp_budget window. */
+    int   cand_budget = s_lamp_budget;
+    if (any_tunnel && s_tlamp_budget > cand_budget) cand_budget = s_tlamp_budget;
+    if (cand_budget > TD5_LIGHT_MAX) cand_budget = TD5_LIGHT_MAX;
+    /* Direction of travel, for the forward bias. World-space velocity, so no
+     * body/world axis-sign guess is needed; below the speed floor the bias is
+     * skipped entirely (parked cars have no meaningful "ahead"). */
+    float fwd_x = 0.0f, fwd_z = 0.0f;
+    int   fwd_ok = 0;
+    if (s_tlamp_ahead > 0.0f) {
+        float vx = (float)p->linear_velocity_x;
+        float vz = (float)p->linear_velocity_z;
+        float vlen = (float)sqrt((double)(vx * vx + vz * vz));
+        if (vlen > 64.0f) { fwd_x = vx / vlen; fwd_z = vz / vlen; fwd_ok = 1; }
+    }
     for (int i = 0; i < s_lamp_count; i++) {
+        /* In bright daylight only tunnel lamps emit (street lamps gated off);
+         * don't let daylight street lamps consume the nearest-N budget. */
+        if (!s_env_dark && !s_lamp_tunnel[i]) continue;
         float dx = s_lamp_pos[i][0] - px;
         float dy = s_lamp_pos[i][1] - py;
         float dz = s_lamp_pos[i][2] - pz;
@@ -392,8 +571,15 @@ void td5_light_emit_street_lamps(void)
         if (dy > s_lamp_range * 1.25f || dy < -s_lamp_range * 1.25f) continue;
         float d2 = dx * dx + dy * dy + dz * dz;
         if (d2 > cutoff2) continue;
+        /* Forward bias: drop TUNNEL lamps the car has already driven well past, so
+         * their budget slots go to the corridor ahead instead. Street lamps are
+         * left on pure nearest-N (they ring junctions, where "behind" still
+         * matters visually). */
+        if (fwd_ok && s_lamp_tunnel[i] &&
+            (dx * fwd_x + dz * fwd_z) < -s_tlamp_ahead)
+            continue;
         int j = nbest;
-        if (nbest < s_lamp_budget) nbest++;
+        if (nbest < cand_budget) nbest++;
         else if (d2 >= best_d2[nbest - 1]) continue;
         else j = nbest - 1;
         while (j > 0 && best_d2[j - 1] > d2) {
@@ -402,12 +588,101 @@ void td5_light_emit_street_lamps(void)
         best_d2[j] = d2; best_idx[j] = i;
     }
 
+    /* [POP-IN FADE 2026-08-13] Distance at the tunnel emit boundary = the
+     * s_tlamp_budget-th nearest tunnel lamp. Fade a band ending there so the
+     * marginal lamp ramps up from 0 with distance instead of snapping on. Clamped
+     * to range; a sparse tunnel (< budget lamps) just keeps the natural falloff. */
+    float tlamp_fade_r = s_tlamp_range;
+    if (s_tlamp_edgefade > 0.0f) {
+        int tc = 0;
+        for (int k = 0; k < nbest; k++) {
+            if (!s_lamp_tunnel[best_idx[k]]) continue;
+            if (++tc == s_tlamp_budget) {
+                float bd = (float)sqrt((double)best_d2[k]);
+                if (bd < tlamp_fade_r) tlamp_fade_r = bd;
+                break;
+            }
+        }
+    }
+    float tlamp_fade_band = tlamp_fade_r * s_tlamp_edgefade;
+
+    int tunnel_emitted = 0;   /* SAFETY CAP: nearest s_tlamp_budget tunnel lamps only */
     for (int k = 0; k < nbest; k++) {
-        const float *L = s_lamp_pos[best_idx[k]];
-        /* Warm sodium-vapor tint. */
-        td5_light_add_point(L[0], L[1], L[2],
-                            s_lamp_range, s_lamp_intensity,
-                            1.0f, 0.82f, 0.55f);
+        int li = best_idx[k];
+        const float *L = s_lamp_pos[li];
+        if (s_lamp_tunnel[li]) {
+            /* best_idx is distance-sorted, so this keeps the NEAREST N tunnel
+             * lamps and drops farther ones (per-light RT-pass work headroom). */
+            if (tunnel_emitted >= s_tlamp_budget) continue;
+            tunnel_emitted++;
+            /* Drop the emitter DOWN toward the FLOOR so the pool lands on the road
+             * and lights cars under it — the captured patch sits up on the
+             * wall/ceiling where falloff starves the road. The floor is probed at
+             * the LAMP's own x/z and cached, so the lamp stays put in the world as
+             * the player drives past (and under it) rather than riding the car's Y. */
+            float ly;
+            if (s_tlamp_static_y) {
+                if (!s_lamp_emit_done[li]) {
+                    /* Resolve the patch->road DROP ONCE (a real probe near the
+                     * player, where the seed span is valid), then apply that same
+                     * delta to EVERY lamp's own L[1] -- which follows the tunnel's
+                     * up/down, so the pools rise and fall WITH the corridor instead
+                     * of hanging at one shared height. (Probing each lamp with the
+                     * player's span returned the player's floor for all of them.) */
+                    if (!s_tlamp_drop_resolved) {
+                        int gy = 0, gst = 0;
+                        if (td5_track_probe_height((int)(L[0] * 256.0f), (int)(L[2] * 256.0f),
+                                                   (int)p->track_span_raw, &gy, &gst)) {
+                            s_tlamp_drop_delta    = (float)gy * (1.0f / 256.0f) - L[1];
+                            s_tlamp_drop_resolved = 1;
+                        }
+                    }
+                    /* delta = signed patch->road distance; off-mesh fallback keeps the
+                     * old player-Y reference so a lamp still lands somewhere sane. */
+                    float delta = s_tlamp_drop_resolved ? s_tlamp_drop_delta : (py - L[1]);
+                    s_lamp_emit_y[li]    = L[1] + s_tlamp_drop * delta;
+                    s_lamp_floor_y[li]   = L[1] + delta;   /* per-lamp local road (beam aim) */
+                    s_lamp_emit_done[li] = 1;
+                }
+                ly = s_lamp_emit_y[li];
+            } else {
+                ly = L[1] + s_tlamp_drop * (py - L[1]);   /* legacy A/B path */
+            }
+            /* Warm tungsten fixture, tighter pool — reads as a tunnel lamp.
+             * Throw the beam DOWN at the carriageway (see TD5RE_TUNNEL_LAMP_CONE)
+             * so the roof stays dark. Beam Y is (floor - lamp), so it aims at the
+             * road under whichever sign convention this level uses; if the floor
+             * never resolved the delta is 0 and add_spot falls back to omni. */
+            /* Edge fade: ramp the marginal (boundary) lamp up from 0 so it doesn't
+             * snap on. Smoothstep over the band ending at the boundary distance. */
+            float t_int = s_tlamp_intensity;
+            if (s_tlamp_edgefade > 0.0f && tlamp_fade_band > 1.0f) {
+                float d = (float)sqrt((double)best_d2[k]);
+                float f = (tlamp_fade_r - d) / tlamp_fade_band;
+                if (f < 0.0f) f = 0.0f; else if (f > 1.0f) f = 1.0f;
+                t_int *= f * f * (3.0f - 2.0f * f);   /* smoothstep 0->1 */
+            }
+            if (t_int <= 0.0f) continue;   /* faded fully out: nothing to add */
+            float beam_dy = s_lamp_floor_y[li] - L[1];
+            if (s_tlamp_cone_deg > 0.0f && s_tlamp_cone_deg < 180.0f &&
+                (beam_dy > 1.0f || beam_dy < -1.0f)) {
+                float cone_cos = (float)cos((double)s_tlamp_cone_deg *
+                                            3.14159265358979 / 180.0);
+                td5_light_add_spot(L[0], ly, L[2],
+                                   0.0f, beam_dy, 0.0f,
+                                   s_tlamp_range, t_int, cone_cos,
+                                   s_tlamp_r, s_tlamp_g, s_tlamp_b);
+            } else {
+                td5_light_add_point(L[0], ly, L[2],
+                                    s_tlamp_range, t_int,
+                                    s_tlamp_r, s_tlamp_g, s_tlamp_b);
+            }
+        } else {
+            /* Warm sodium-vapor tint. */
+            td5_light_add_point(L[0], L[1], L[2],
+                                s_lamp_range, s_lamp_intensity,
+                                1.0f, 0.82f, 0.55f);
+        }
     }
 
     static int s_lamp_logged = 0;

@@ -32,51 +32,77 @@ Write-Host "Setting up worktree at $wt"
 # junction incident below, just hitting a different shared directory).
 # Copy instead: slower to set up (~11.5k files) but the worktree owns its
 # own bytes, so no other worktree's cleanup can ever touch the parent's copy.
+#
+# [2026-08-15] The old guard was `-not (Test-Path $assetDst)`, which silently
+# never fired: re\assets is gitignored EXCEPT for two tracked files
+# (frontend\lang\es_AR.txt, frontend\menu.ttf), so `git worktree add` always
+# creates re\assets to check them out. The directory therefore always existed
+# before this ran, the copy was always skipped, and every new worktree got 2
+# asset files instead of ~11.8k -- i.e. it could build the game but never run
+# it. Test for CONTENT, not for the directory, and let robocopy top up an
+# incomplete tree (it skips same-size/same-time files, so a repeat run is cheap
+# and this is self-healing for worktrees that were set up while it was broken).
 $assetSrc = Join-Path $parent 're\assets'
 $assetDst = Join-Path $wt 're\assets'
-if ((Test-Path $assetSrc) -and -not (Test-Path $assetDst)) {
-    $assetParentDir = Split-Path $assetDst -Parent
-    if (-not (Test-Path $assetParentDir)) {
-        New-Item -ItemType Directory -Path $assetParentDir -Force | Out-Null
+if (-not (Test-Path $assetSrc)) {
+    Write-Host "  WARN parent re\assets missing at $assetSrc -- this worktree will not be able to run the game"
+} else {
+    # NEVER overwrite the tracked files: they are branch content, and the parent
+    # tree is usually on a DIFFERENT branch, so copying its versions over would
+    # dirty the worktree with changes that silently came from another branch.
+    Push-Location $wt
+    $trackedRel = @(git ls-files 're/assets' 2>$null)
+    Pop-Location
+    $trackedExcl = @()
+    foreach ($rel in $trackedRel) {
+        if ($rel) { $trackedExcl += (Join-Path $parent ($rel -replace '/', '\')) }
     }
-    New-Item -ItemType Directory -Path $assetDst -Force | Out-Null
-    robocopy $assetSrc $assetDst /E /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
-    $global:LASTEXITCODE = 0   # robocopy's exit codes are bitflags; 0-7 all mean success, not an error
-    Write-Host "  +    re\assets (copied, not junctioned)"
-} elseif (Test-Path $assetDst) {
-    Write-Host "  ok   re\assets (already present)"
+
+    $before = @(Get-ChildItem -LiteralPath $assetDst -Recurse -File -Force -ErrorAction SilentlyContinue).Count
+    $srcCount = @(Get-ChildItem -LiteralPath $assetSrc -Recurse -File -Force -ErrorAction SilentlyContinue).Count
+    if ($before -ge ($srcCount - $trackedExcl.Count)) {
+        Write-Host "  ok   re\assets ($before files, complete)"
+    } else {
+        if (-not (Test-Path $assetDst)) { New-Item -ItemType Directory -Path $assetDst -Force | Out-Null }
+        $rcArgs = @($assetSrc, $assetDst, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NC', '/NS', '/NP')
+        if ($trackedExcl.Count) { $rcArgs += '/XF'; $rcArgs += $trackedExcl }
+        robocopy @rcArgs | Out-Null
+        $global:LASTEXITCODE = 0   # robocopy's exit codes are bitflags; 0-7 all mean success, not an error
+        $after = @(Get-ChildItem -LiteralPath $assetDst -Recurse -File -Force -ErrorAction SilentlyContinue).Count
+        Write-Host "  +    re\assets (copied, not junctioned): $before -> $after files, $($trackedExcl.Count) tracked file(s) left alone"
+    }
 }
 
 # 1b. td5mod\deps — DO NOT JUNCTION. Worktree auto-cleanup follows junctions and
 # DELETES the parent's mingw toolchain (twice in one session, 2026-05-16).
-# Instead: patch the worktree's build_standalone.bat to point at the parent's
-# absolute mingw path. No junction = no cleanup-cascade = parent's deps safe.
-# [2026-07-30 i686 retirement] toolchain is now deps\mingw64; the wrapper's
-# build.bat needs the same treatment (its relative path is one level shallower).
+#
+# [2026-08-15] This used to REWRITE the worktree's build_standalone.bat and
+# ddraw_wrapper\build.bat with the parent's absolute mingw path. That worked,
+# but both files are TRACKED, so every worktree permanently showed two modified
+# build scripts -- noise on every `git status`, and a real hazard: an absolute
+# C:\Users\... path is one careless `git add` away from breaking CI and every
+# other checkout. Instead write an UNTRACKED pointer file at the worktree root;
+# both build scripts read it (see the resolution note in build_standalone.bat).
+# Still no junction, so the parent's deps stay safe from cleanup-cascade.
 $parentMingw64 = Join-Path $parent 'td5mod\deps\mingw64\mingw64\bin'
-$buildBat = Join-Path $wt 'td5mod\src\td5re\build_standalone.bat'
-if (Test-Path $buildBat) {
-    $batContent = Get-Content $buildBat -Raw
-    if ($batContent -match '\.\.\\\.\.\\deps\\mingw64\\mingw64\\bin') {
-        $newContent = $batContent `
-            -replace '\.\.\\\.\.\\deps\\mingw64\\mingw64\\bin', $parentMingw64
-        Set-Content -Path $buildBat -Value $newContent -NoNewline
-        Write-Host "  +    build_standalone.bat (patched to use parent's mingw64 at $parentMingw64)"
-    } else {
-        Write-Host "  ok   build_standalone.bat (already absolute or different pattern)"
-    }
+$mingwPointer  = Join-Path $wt '.td5re_mingw'
+if (Test-Path (Join-Path $parentMingw64 'gcc.exe')) {
+    Set-Content -Path $mingwPointer -Value $parentMingw64 -NoNewline -Encoding ascii
+    Write-Host "  +    .td5re_mingw -> $parentMingw64 (untracked pointer; no tracked file touched)"
 } else {
-    Write-Host "  miss td5mod\src\td5re\build_standalone.bat (not in worktree?)"
+    Write-Host "  WARN parent mingw64 not found at $parentMingw64 -- builds in this worktree will fail loudly"
 }
-$wrapBat = Join-Path $wt 'td5mod\ddraw_wrapper\build.bat'
-if (Test-Path $wrapBat) {
-    $wrapContent = Get-Content $wrapBat -Raw
-    if ($wrapContent -match '\.\.\\deps\\mingw64\\mingw64\\bin') {
-        $wrapContent = $wrapContent -replace '\.\.\\deps\\mingw64\\mingw64\\bin', $parentMingw64
-        Set-Content -Path $wrapBat -Value $wrapContent -NoNewline
-        Write-Host "  +    ddraw_wrapper\build.bat (patched to use parent's mingw64)"
-    } else {
-        Write-Host "  ok   ddraw_wrapper\build.bat (already absolute or different pattern)"
+
+# Undo the historic in-place patch if this worktree was set up by an older
+# version of this script, so the tracked build scripts go back to pristine.
+foreach ($bat in @('td5mod\src\td5re\build_standalone.bat',
+                   'td5mod\ddraw_wrapper\build.bat')) {
+    $p = Join-Path $wt $bat
+    if ((Test-Path $p) -and ((Get-Content $p -Raw) -match [regex]::Escape($parentMingw64))) {
+        Push-Location $wt
+        git checkout -- $bat 2>$null
+        Pop-Location
+        Write-Host "  fix  $bat (reverted stale absolute-path patch)"
     }
 }
 

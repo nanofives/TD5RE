@@ -21,6 +21,14 @@
 
 #define LIGHT_MAX 32
 
+/* [CLOSE-RANGE FLOOD FIX 2026-08-12] Ceiling for the summed point light on this
+ * (non-RT / LOW-mode) deferred pass: a lamp directly under the camera drives
+ * every channel past 1 and the warm pool blows to WHITE. Hue-preservingly clamp
+ * the magnitude ONLY when it exceeds this, so normal sub-ceiling lamp light is
+ * untouched and only the flood is pulled back to a warm highlight. Mirrors
+ * RT_LAMP_LIGHT_SOFT in the RT rgen_light path. */
+#define LAMP_LIGHT_SOFT 0.90
+
 cbuffer LightCB : register(b0)
 {
     float4 camPosFocal;    /* xyz = camera world pos, w = focal length         */
@@ -180,6 +188,10 @@ float4 main(PS_INPUT input) : SV_TARGET
 
         accum += ci.rgb * (ci.w * atten * cone * ndotl * vis);
     }
+
+    /* [CLOSE-RANGE FLOOD FIX 2026-08-12] stop the near-lamp pool blowing to white */
+    float mL = max(accum.r, max(accum.g, accum.b));
+    if (mL > LAMP_LIGHT_SOFT) accum *= LAMP_LIGHT_SOFT / mL;
 
     return float4(accum, 1.0);
 }

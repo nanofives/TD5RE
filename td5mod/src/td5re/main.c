@@ -264,6 +264,26 @@ static char s_ini_path[MAX_PATH];
 #  define TD5RE_INI_FILENAME "td5re.ini"
 #endif
 
+/* [2026-08-15] The LIVE ini is runtime state, not source: td5_ini_write_*
+ * below persists the user's options straight back into it on every run, so
+ * keeping it under version control meant every single launch dirtied a tracked
+ * file. It is now gitignored, and the TRACKED source of truth is the sibling
+ * <name>.default. Seed the live file from that template when it is missing (a
+ * fresh clone, a new worktree, or after someone deletes it to get defaults
+ * back). CopyFile with bFailIfExists=TRUE so an existing live config is never
+ * clobbered; if the template is absent too we simply carry on and every
+ * GetPrivateProfile* call falls back to its hardcoded default. */
+static void td5_seed_ini_from_default(void)
+{
+    char tmpl[MAX_PATH + 16];
+
+    if (GetFileAttributesA(s_ini_path) != INVALID_FILE_ATTRIBUTES) return;
+    if (snprintf(tmpl, sizeof(tmpl), "%s.default", s_ini_path) >= (int)sizeof(tmpl)) return;
+    if (GetFileAttributesA(tmpl) == INVALID_FILE_ATTRIBUTES) return;
+
+    CopyFileA(tmpl, s_ini_path, TRUE);
+}
+
 static void td5_load_ini(void)
 {
     DWORD n = GetModuleFileNameA(NULL, s_ini_path, MAX_PATH);
@@ -275,6 +295,7 @@ static void td5_load_ini(void)
     } else {
         strcpy(s_ini_path, TD5RE_INI_FILENAME);
     }
+    td5_seed_ini_from_default();
 }
 
 static int td5_ini_int(const char *section, const char *key, int fallback)

@@ -1400,6 +1400,29 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
         }
     }
 
+    /* [tunnel lamps] Keswick tunnel (track 10): the wall "fake-light" patches
+     * (pages 152 & 153 — confirmed by the per-page tint pass) become real
+     * cool-white point lights. Unlike street lamps these are ordinary wall
+     * quads (no tall-thin pole aspect) inside a tunnel (dark regardless of the
+     * sky-based env probe), so this deliberately BYPASSES both the pole-aspect
+     * gate and the s_env_dark gate. The patch centroid is the emitter; the
+     * capture dedupe (650u) merges the several quads that tile one patch. */
+    if (out_count >= 3 && out_count <= 5 &&
+        td5_light2_active() &&
+        g_td5.track_index == 10 &&
+        (tex_page == 152 || tex_page == 153)) {
+        float vx0 = 0, vy0 = 0, vz0 = 0;
+        for (int i2 = 0; i2 < out_count; i2++) { vx0 += out_vx[i2]; vy0 += out_vy[i2]; vz0 += out_vz[i2]; }
+        float invn = 1.0f / (float)out_count;
+        vx0 *= invn; vy0 *= invn; vz0 *= invn;
+        if (vz0 > s_near_clip && vz0 < 20000.0f) {
+            float wx = s_camera_pos[0] + vx0 * s_camera_basis[0] + vy0 * s_camera_basis[3] + vz0 * s_camera_basis[6];
+            float wy = s_camera_pos[1] + vx0 * s_camera_basis[1] + vy0 * s_camera_basis[4] + vz0 * s_camera_basis[7];
+            float wz = s_camera_pos[2] + vx0 * s_camera_basis[2] + vy0 * s_camera_basis[5] + vz0 * s_camera_basis[8];
+            td5_light_lamps_capture_tunnel(wx, wy, wz);
+        }
+    }
+
     /* [DEV: TD5RE_GLOW_SCAN=1] Render-side fixture identification: log each
      * texture page whose polygons draw ELEVATED near the camera (lamp posts /
      * halos), with a reconstructed world position. Ground truth regardless of

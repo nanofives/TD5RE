@@ -15,7 +15,23 @@ if /I "%TD5RE_ARCH%"=="i686" (
     echo ERROR: i686 was retired 2026-07-30 -- toolchain parked in _archive\.
     exit /b 1
 )
-set TOOLPREFIX=..\deps\mingw64\mingw64\bin
+REM Toolchain location -- resolved at RUN time, never by patching this file.
+REM Same contract as build_standalone.bat (see the long note there): relative
+REM path first, then %TD5RE_MINGW%, then the untracked .td5re_mingw pointer at
+REM the repo root, then a loud failure. This script sits one level shallower
+REM than build_standalone.bat, so both offsets differ by one.
+set "TOOLPREFIX=..\deps\mingw64\mingw64\bin"
+if not exist "%TOOLPREFIX%\gcc.exe" if defined TD5RE_MINGW set "TOOLPREFIX=%TD5RE_MINGW%"
+if not exist "%TOOLPREFIX%\gcc.exe" if exist "%~dp0..\..\.td5re_mingw" (
+    for /f "usebackq delims=" %%P in ("%~dp0..\..\.td5re_mingw") do set "TOOLPREFIX=%%P"
+)
+if not exist "%TOOLPREFIX%\gcc.exe" (
+    echo ERROR: mingw64 toolchain not found ^(no gcc.exe^).
+    echo        looked at: %TOOLPREFIX%
+    echo   Run scripts\worktree_setup.ps1 for this worktree, or set TD5RE_MINGW.
+    echo   Do NOT hardcode a path into this file -- it is tracked.
+    exit /b 1
+)
 
 set GCC=%TOOLPREFIX%\gcc.exe
 set AR=%TOOLPREFIX%\ar.exe
