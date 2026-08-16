@@ -167,6 +167,16 @@ float rt_hash13(float3 p)
 #ifndef RT_CAR_LIGHT_SOFT
 #define RT_CAR_LIGHT_SOFT 0.70f
 #endif
+/* [CLOSE-RANGE FLOOD FIX 2026-08-12] Same problem for ROAD/WALL (non-car) pixels:
+ * a lamp directly under the camera drives the summed point light past 1 on every
+ * channel and the warm pool blows to WHITE. Hue-preservingly clamp the non-car
+ * magnitude to this ceiling ONLY when it exceeds it (a hard clamp, not a knee),
+ * so normal sub-ceiling lamp light is untouched (no global dimming) and only the
+ * flood is pulled back to a warm highlight. Higher than the car ceiling: a road
+ * right under a lamp SHOULD read bright, just not pure white. */
+#ifndef RT_LAMP_LIGHT_SOFT
+#define RT_LAMP_LIGHT_SOFT 0.90f
+#endif
 float rt_hash_world_cell(float3 world, float k, float cell)
 {
     float3 c = floor(world / cell) + k * float3(1.7f, 2.3f, 3.1f);

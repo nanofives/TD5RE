@@ -424,12 +424,17 @@ void rgen_light()
      * car) keep the full additive term. */
     {
         int carA = (int)(gb.a * 255.0f + 0.5f);
+        float m = max(accum.r, max(accum.g, accum.b));
         if ((carA & 0x40) != 0) {
-            float m = max(accum.r, max(accum.g, accum.b));
             if (m > 1e-4f) {
                 float mt = m / (1.0f + m / RT_CAR_LIGHT_SOFT);   /* soft knee -> ceiling */
                 accum *= mt / m;                                 /* preserve hue, cap magnitude */
             }
+        } else {
+            /* [CLOSE-RANGE FLOOD FIX 2026-08-12] road/walls: hue-preserving clamp
+             * only above the ceiling, so a lamp right under the camera stops
+             * blowing the warm pool to WHITE while normal lamp light is untouched. */
+            if (m > RT_LAMP_LIGHT_SOFT) accum *= RT_LAMP_LIGHT_SOFT / m;
         }
     }
     g_lightcol[fp] = float4(accum, 1.0f);
