@@ -117,6 +117,10 @@ static int    s_thr_kp;          /* throttle P gain (cmd per speed-frac error) *
 static double s_thr_deadband;    /* speed-frac error deadband                  */
 static int    s_slip_thresh;     /* rear-slip level where the traction cap starts */
 static int    s_slip_range;      /* slip span over which the cap ramps to floor    */
+static int    s_ahead_spans;     /* [P3] how many spans ahead a peer counts as blocking */
+static double s_pass_frac;       /* [P3] overtake aim offset as a fraction of half-width */
+static double s_offset_clamp;    /* [P3] max lateral offset as a fraction of half-width  */
+static int    s_overtake_ticks;  /* [P3] dwell ticks a pass side stays committed         */
 
 static void driver_read_knobs(void)
 {
@@ -140,6 +144,10 @@ static void driver_read_knobs(void)
     s_thr_deadband = (double)td5_env_int("TD5RE_AI_DRIVER_THR_DEADBAND", 3, 0, 40) / 100.0;
     s_slip_thresh  = td5_env_int  ("TD5RE_AI_DRIVER_SLIP_THRESH", 0x600, 0x40, 0x8000);
     s_slip_range   = td5_env_int  ("TD5RE_AI_DRIVER_SLIP_RANGE",  0x1200, 0x100, 0x8000);
+    s_ahead_spans  = td5_env_int  ("TD5RE_AI_DRIVER_AHEAD_SPANS", 10, 2, 40);
+    s_pass_frac    = (double)td5_env_int("TD5RE_AI_DRIVER_PASS_FRAC",   55, 10, 90) / 100.0;
+    s_offset_clamp = (double)td5_env_int("TD5RE_AI_DRIVER_OFFSET_CLAMP",70, 10, 95) / 100.0;
+    s_overtake_ticks = td5_env_int("TD5RE_AI_DRIVER_OVERTAKE_TICKS", 40, 5, 200);
 }
 
 /* ------------------------------------------------------------------------
@@ -176,6 +184,13 @@ static int      s_rec_ticks[TD5_MAX_RACER_SLOTS];   /* ticks in current non-norm
 static int      s_spin_cnt[TD5_MAX_RACER_SLOTS];    /* consecutive spun-detection ticks   */
 static int      s_stuck_cnt[TD5_MAX_RACER_SLOTS];   /* consecutive not-moving ticks        */
 static int      s_launched[TD5_MAX_RACER_SLOTS];    /* car has moved off the line at least once */
+
+/* [P3] Racecraft: a smoothed lateral aim-point offset (24.8 world units; + =
+ * right of the racing line) that overtaking / defending / hazard-avoidance
+ * steer through, plus a dwell so an overtaking commitment doesn't flip lane
+ * every tick. */
+static double   s_lane_offset[TD5_MAX_RACER_SLOTS];
+static int      s_overtake_dwell[TD5_MAX_RACER_SLOTS]; /* ticks left committed to a pass side */
 
 static int      s_pt_valid;          /* table built for this race             */
 
@@ -303,6 +318,8 @@ void td5_ai_driver_race_init(void)
         s_spin_cnt[s]       = 0;
         s_stuck_cnt[s]      = 0;
         s_launched[s]       = 0;
+        s_lane_offset[s]    = 0.0;
+        s_overtake_dwell[s] = 0;
     }
     if (td5_ai_driver_mode() != TD5_AI_MODE_DRIVER) { driver_free_path_table(); return; }
     driver_build_path_table();
@@ -321,6 +338,123 @@ static int driver_angle_from_vec(double dx, double dz)
     double a = atan2(dx, dz) * (4096.0 / (2.0 * 3.14159265358979323846));
     int ai = (int)a;
     return ai & 0xFFF;
+}
+
+/* [P3] Racecraft: scan the other cars and decide (a) a speed cap as a fraction
+ * of this car's top speed (to follow a slower car ahead instead of rear-ending
+ * it, or to slow for a hazard) and (b) a lateral aim-point offset in 24.8 world
+ * units (to commit to an overtake down a clear side). Hybrid proximity: span
+ * ordering gives reliable ahead/behind; a metric lateral projection gives lane
+ * overlap the span-only classic search can't see (a car one lane over).
+ *
+ * right is the car's unit rightward vector in world (x,z); fore/aft comes from
+ * span ordering, so only the lateral (right) projection is needed here. */
+static void driver_racecraft(int slot, TD5_Actor *self,
+                             double rightx, double rightz,
+                             double v_abs, double vmax,
+                             double *out_cap, double *out_offset)
+{
+    *out_cap = 1.0;
+    *out_offset = 0.0;
+
+    int ring = (s_pt_valid && s_pt_count > 0) ? s_pt_count : td5_track_get_ring_length();
+    if (ring <= 2) return;
+
+    int self_span = (int)self->track_span_normalized;
+
+    /* half road width at the car (24.8), from the rail frame. */
+    double hw = 0.25e6;   /* fallback if geometry unavailable */
+    { int lx, lz, rx, rz;
+      if (td5_track_get_span_route_frame(((self_span % ring) + ring) % ring, &lx, &lz, &rx, &rz)) {
+          double ddx = (double)(rx - lx), ddz = (double)(rz - lz);
+          double w_tu = 0.5 * sqrt(ddx * ddx + ddz * ddz);
+          if (w_tu > 1.0) hw = w_tu * 256.0;   /* track-units -> 24.8 */
+      } }
+    double block_w = 0.60 * hw;
+
+    /* [P3] Per-slot baseline lane bias: spread the field left / centre / right
+     * across the road so six cars don't all converge on one racing line and
+     * bunch/shove into each other. Deterministic per slot (also a natural
+     * lead-in to P4 route variety). This is the default offset when not
+     * actively overtaking. */
+    double baseline = ((double)(slot % 3) - 1.0) * 0.30 * hw;
+
+    double self_x = (double)self->world_pos.x;
+    double self_z = (double)self->world_pos.z;
+
+    int    have_ahead = 0;
+    int    ahead_gap  = 999;
+    double ahead_v    = 0.0;
+    double ahead_lat  = 0.0;
+    int    left_block = 0, right_block = 0;   /* a peer sitting in the pass corridor */
+
+    int total = td5_game_get_total_actor_count();
+    for (int j = 0; j < total && j < TD5_MAX_TOTAL_ACTORS; j++) {
+        if (j == slot) continue;
+        if (td5_game_get_slot_state(j) == 3) continue;   /* inactive grid slot */
+        TD5_Actor *p = td5_game_get_actor(j);
+        if (!p) continue;
+
+        double rx = (double)p->world_pos.x - self_x;
+        double rz = (double)p->world_pos.z - self_z;
+        double lat = rx * rightx + rz * rightz;   /* + = to my right */
+        double latabs = lat < 0 ? -lat : lat;
+
+        int pspan = (int)p->track_span_normalized;
+        int d = pspan - self_span;
+        if (d >  ring / 2) d -= ring;
+        if (d < -ring / 2) d += ring;
+
+        double pv = (double)p->longitudinal_speed;
+        if (pv < 0) pv = -pv;
+
+        /* nearest car ahead, roughly in my path */
+        if (d > 0 && d <= s_ahead_spans && latabs < block_w) {
+            if (d < ahead_gap) { ahead_gap = d; ahead_v = pv; ahead_lat = lat; have_ahead = 1; }
+        }
+        /* pass-corridor occupancy (from just behind to a bit ahead, out to a lane) */
+        if (d > -2 && d <= s_ahead_spans && latabs >= 0.20 * hw && latabs <= 1.05 * hw) {
+            if (lat > 0) right_block = 1; else left_block = 1;
+        }
+    }
+
+    if (!have_ahead) { s_overtake_dwell[slot] = 0; *out_offset = baseline; return; }
+
+    double pass_mag = s_pass_frac * hw;
+    int    slower    = ahead_v < v_abs * 0.97;
+    int    very_slow = ahead_v < vmax * 0.15;   /* stopped / crawling hazard */
+
+    if (s_overtake_dwell[slot] > 0) {
+        /* stay committed to the side we already chose (sign of the live offset) */
+        double side = (s_lane_offset[slot] >= 0.0) ? 1.0 : -1.0;
+        *out_offset = side * pass_mag;
+        *out_cap = 1.0;
+        s_overtake_dwell[slot]--;
+        return;
+    }
+
+    /* choose the side away from the car ahead; require it clear */
+    double want_side = (ahead_lat <= 0.0) ? 1.0 : -1.0;   /* peer left -> pass right */
+    int side_clear = (want_side > 0.0) ? !right_block : !left_block;
+
+    if ((slower || very_slow) && side_clear) {
+        *out_offset = want_side * pass_mag;
+        *out_cap = 1.0;                        /* commit to the pass, keep the speed */
+        s_overtake_dwell[slot] = s_overtake_ticks;
+        return;
+    }
+
+    /* can't pass -> follow the car ahead: cap speed to it, scaled by the gap so
+     * we tuck in a car-length back instead of punting it. */
+    double gapf = 0.55 + 0.055 * (double)ahead_gap;   /* gap 1 -> ~0.6, gap 8 -> ~1.0 */
+    if (gapf > 1.0) gapf = 1.0;
+    double cap = (vmax > 1.0) ? (ahead_v / vmax) * gapf : 1.0;
+    if (ahead_gap <= 1) { double c2 = (ahead_v / vmax) * 0.85; if (c2 < cap) cap = c2; }
+    if (very_slow && cap > 0.25) cap = 0.25;   /* hazard with no room: slow hard */
+    if (cap < 0.05) cap = 0.05;
+    if (cap > 1.0)  cap = 1.0;
+    *out_cap = cap;
+    *out_offset = baseline;   /* hold your own lane while tucked in behind */
 }
 
 int td5_ai_driver_tick(int slot)
@@ -449,16 +583,18 @@ int td5_ai_driver_tick(int slot)
             steer_cmd = (int32_t)((long)steer_cmd + d);
             throttle = 0;
             if (speed2d > 0.25 * vmax) brake = 1;   /* bleed off a fast spin */
-        } else { /* DRV_STUCK: rock free — reverse a beat, steer to track, then go */
-            int phase = s_rec_ticks[slot] % 50;
-            /* steer toward the track aim so we back/pull off a wall, not into it */
+        } else { /* DRV_STUCK: rock free. Try steer-to-track + forward FIRST
+                  * (frees most shove-offs); only reverse if forward didn't
+                  * work within the first phase (truly nosed into a wall). */
+            int phase = s_rec_ticks[slot] % 60;
             long tc = (long)herr * (long)s_steer_kp;
             if (tc >  DRV_STEER_CLAMP) tc =  DRV_STEER_CLAMP;
             if (tc < -DRV_STEER_CLAMP) tc = -DRV_STEER_CLAMP;
             steer_cmd = (int32_t)tc;
-            if (phase < 18) {
+            if (phase < 35) {
+                throttle = DRV_THROTTLE_FULL;   /* pull forward toward the track */
+            } else {
                 /* reverse away (encounter_steering_cmd < 0 drives the reverse path) */
-                throttle = 0;
                 actor->encounter_steering_cmd = (int16_t)(-0xC0);
                 actor->brake_flag = 0;
                 actor->throttle_state = 0;
@@ -466,7 +602,6 @@ int td5_ai_driver_tick(int slot)
                 s_prev_steer[slot] = steer_cmd;
                 return 1;
             }
-            throttle = DRV_THROTTLE_FULL;   /* then pull forward hard */
         }
         if (steer_cmd >  DRV_STEER_CLAMP) steer_cmd =  DRV_STEER_CLAMP;
         if (steer_cmd < -DRV_STEER_CLAMP) steer_cmd = -DRV_STEER_CLAMP;
@@ -479,6 +614,28 @@ int td5_ai_driver_tick(int slot)
     }
 
     /* ================= NORMAL CONTROL ================= */
+
+    /* --- RACECRAFT: follow / overtake / hazard relative to the other cars.
+     * Produces a speed cap (fraction of top speed) and a lateral aim offset. */
+    double cap_frac = 1.0;
+    if (have_target && s_launched[slot]) {
+        double theta  = (double)heading * (2.0 * 3.14159265358979323846 / 4096.0);
+        double rightx = cos(theta), rightz = -sin(theta); /* +right of heading */
+        double off_target = 0.0;
+        driver_racecraft(slot, actor, rightx, rightz,
+                         v_abs, vmax, &cap_frac, &off_target);
+        /* ease the lateral offset (anti-yank) */
+        s_lane_offset[slot] += (off_target - s_lane_offset[slot]) * 0.15;
+        /* shift the aim point sideways and recompute the heading error */
+        double atx = (double)tx + s_lane_offset[slot] * rightx;
+        double atz = (double)tz + s_lane_offset[slot] * rightz;
+        double dx = atx - (double)actor->world_pos.x;
+        double dz = atz - (double)actor->world_pos.z;
+        herr = ang_signed12(driver_angle_from_vec(dx, dz) - heading);
+    } else {
+        s_lane_offset[slot] = 0.0;
+        s_overtake_dwell[slot] = 0;
+    }
 
     /* --- STEERING: pure pursuit + yaw-rate damping (replaces the banded slam) --- */
     if (have_target) {
@@ -498,14 +655,20 @@ int td5_ai_driver_tick(int slot)
     s_prev_steer[slot] = steer_cmd;
     actor->steering_command = steer_cmd;
 
-    /* --- THROTTLE / BRAKE (backward-braked profile => braking points free) --- */
+    /* --- THROTTLE / BRAKE (backward-braked profile => braking points free) ---
+     * Effective target = min(profile fraction, racecraft cap). The cap makes
+     * the car settle behind a slower car ahead instead of flooring into it. */
+    double eff_frac = frac;
+    if (cap_frac < eff_frac) eff_frac = cap_frac;
+    target_speed = eff_frac * vmax;
+
     if (frac >= 0.97) {
         s_straight_ticks[slot]++;
         if (s_straight_ticks[slot] >= 20) s_vmax_ready[slot] = 1;
     }
 
-    if (!s_vmax_ready[slot] || frac >= 0.97) {
-        throttle = DRV_THROTTLE_FULL;   /* launch/straight: floor it (also builds vmax) */
+    if (!s_vmax_ready[slot] || eff_frac >= 0.97) {
+        throttle = DRV_THROTTLE_FULL;   /* launch/clear straight: floor it (builds vmax) */
         s_thr_integ[slot] = 0.0;
     } else {
         double err_frac = (vmax > 1.0) ? (target_speed - v_abs) / vmax : 0.0;

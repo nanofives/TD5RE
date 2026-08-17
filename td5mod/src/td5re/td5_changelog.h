@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 17" },
+    { CL_ITEM,    "DRIVER AI opponents now RACE each other: they follow" },
+    { CL_ITEM,    "  without rear-ending, pull out to overtake a slower" },
+    { CL_ITEM,    "  car down a clear side, and spread across the road" },
+    { CL_ITEM,    "  instead of all fighting for one line." },
     { CL_ITEM,    "DRIVER AI now eases off when a wheel breaks traction and" },
     { CL_ITEM,    "  self-recovers if it spins or gets wedged - no more" },
     { CL_ITEM,    "  opponents stuck against a wall for the whole race." },
