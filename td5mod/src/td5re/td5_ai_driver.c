@@ -396,7 +396,7 @@ static int driver_angle_from_vec(double dx, double dz)
  * span ordering, so only the lateral (right) projection is needed here. */
 static void driver_racecraft(int slot, TD5_Actor *self,
                              double rightx, double rightz,
-                             double v_abs, double vmax,
+                             double v_abs, double vmax, double straightness,
                              double *out_cap, double *out_offset)
 {
     *out_cap = 1.0;
@@ -419,8 +419,11 @@ static void driver_racecraft(int slot, TD5_Actor *self,
 
     /* [P4] Per-driver preferred line across the road (route variety) -- replaces
      * P3's static third-bias. Each driver favours its own lateral fraction, so
-     * the field spreads out and cars don't all converge on one line. */
-    double baseline = (double)s_persona[slot].line_bias * 0.32 * hw;
+     * the field spreads out and cars don't all converge on one line.
+     * [P5] Scaled by straightness: cars run their preferred line on straights /
+     * gentle bends but converge toward the racing line through tight corners,
+     * where an off-centre line would clip the walls (Newcastle/BlueRidge). */
+    double baseline = (double)s_persona[slot].line_bias * 0.32 * hw * straightness;
 
     double self_x = (double)self->world_pos.x;
     double self_z = (double)self->world_pos.z;
@@ -467,7 +470,9 @@ static void driver_racecraft(int slot, TD5_Actor *self,
      * aggressive driver pulls out for a car only slightly slower; a cautious
      * one waits for a clear speed advantage. */
     double aggr = (double)s_persona[slot].aggression;
-    double pass_mag  = s_pass_frac * hw;
+    /* pass line also converges toward the racing line in tight corners (but not
+     * to zero -- overtakes into corners still happen). */
+    double pass_mag  = s_pass_frac * hw * (0.35 + 0.65 * straightness);
     double slower_thr = 0.99 - 0.07 * aggr;    /* ~0.99 (cautious) .. ~0.92 (aggressive) */
     int    slower    = ahead_v < v_abs * slower_thr;
     int    very_slow = ahead_v < vmax * 0.15;   /* stopped / crawling hazard */
@@ -669,9 +674,13 @@ int td5_ai_driver_tick(int slot)
     if (have_target && s_launched[slot]) {
         double theta  = (double)heading * (2.0 * 3.14159265358979323846 / 4096.0);
         double rightx = cos(theta), rightz = -sin(theta); /* +right of heading */
+        /* straightness 0 (tight corner) .. 1 (straight), from the profile frac */
+        double straightness = (frac - 0.55) / 0.45;
+        if (straightness < 0.0) straightness = 0.0;
+        if (straightness > 1.0) straightness = 1.0;
         double off_target = 0.0;
         driver_racecraft(slot, actor, rightx, rightz,
-                         v_abs, vmax, &cap_frac, &off_target);
+                         v_abs, vmax, straightness, &cap_frac, &off_target);
         /* ease the lateral offset (anti-yank) */
         s_lane_offset[slot] += (off_target - s_lane_offset[slot]) * 0.15;
         /* shift the aim point sideways and recompute the heading error */
@@ -704,56 +713,50 @@ int td5_ai_driver_tick(int slot)
     actor->steering_command = steer_cmd;
 
     /* --- THROTTLE / BRAKE (backward-braked profile => braking points free) ---
-     * Effective target = min(profile fraction, racecraft cap). The cap makes
-     * the car settle behind a slower car ahead instead of flooring into it. */
-    double eff_frac = frac;
-    if (cap_frac < eff_frac) eff_frac = cap_frac;
+     * base_frac = min(profile fraction, racecraft follow cap). The floor
+     * decision keys on THIS (not the persona-shaped value): a clear straight is
+     * always flat-out, so vmax keeps converging to the car's true top speed on
+     * every straight (fixes the bootstrap trap where persona pace pushed the
+     * value below 0.97 and froze vmax early). The follow cap still gates the
+     * floor, so a car settles behind a slower car ahead instead of flooring
+     * into it. Personality shapes only the LIMITED (corner / following) target,
+     * which is where driver skill actually shows -- top speed stays uniform. */
+    double base_frac = frac;
+    if (cap_frac < base_frac) base_frac = cap_frac;
 
-    /* [P4] Personality + hidden leash shape the pace, but ONLY after vmax has
-     * been established during the launch floor -- otherwise capping below 1
-     * would stop vmax converging to the true top speed (the bootstrap trap). */
-    if (s_vmax_ready[slot]) {
+    if (base_frac >= 0.97) {
+        s_straight_ticks[slot]++;
+        if (s_straight_ticks[slot] >= 20) s_vmax_ready[slot] = 1;
+    }
+
+    if (!s_vmax_ready[slot] || base_frac >= 0.97) {
+        throttle = DRV_THROTTLE_FULL;   /* launch / clear straight: floor (builds vmax) */
+        s_thr_integ[slot] = 0.0;
+        target_speed = base_frac * vmax;
+    } else {
+        /* Corner / following: apply personality + hidden leash to the target. */
         double skill = (double)s_persona[slot].skill;
-        double pace  = 0.92 + 0.08 * skill;   /* weaker drivers ~8% off the pace */
+        double pace  = 0.90 + 0.10 * skill;   /* weaker drivers carry less corner speed */
 
-        /* Hidden leash: a subtle catch-up boost for cars running behind, applied
-         * to the target only (never a raw throttle override) -- replaces the old
-         * visible rubber-band. race_position 0 = leader (no boost). */
-        double leash = 1.0;
+        double leash = 1.0;   /* subtle catch-up for cars running behind (target only) */
         if (s_leash_max > 0) {
             int rpos = (int)actor->race_position;
             if (rpos > 3) rpos = 3;
             if (rpos > 0) leash = 1.0 + (double)rpos * ((double)s_leash_max / 100.0) / 3.0;
         }
 
-        /* Consistency: a small deterministic per-corner error (a less consistent
-         * driver occasionally carries too much / too little speed). Bucketed by
-         * span so it's stable through a corner, hashed (no RNG) for determinism. */
-        double jit = 1.0;
-        if (eff_frac < 0.97) {
-            int cb = ((int)actor->track_span_normalized) / 3;
-            uint32_t hj = drv_hash((uint32_t)slot * 2654435761u ^ (uint32_t)cb * 40503u);
-            double j = (double)(hj & 0xFFFF) / 65535.0 - 0.5;   /* -0.5..0.5 */
-            jit = 1.0 + j * (1.0 - (double)s_persona[slot].consistency) * 0.20;
-        }
+        /* consistency: a small deterministic per-corner error (span-bucketed,
+         * hashed -- no RNG, so it stays lockstep/replay-deterministic). */
+        int cb = ((int)actor->track_span_normalized) / 3;
+        uint32_t hj = drv_hash((uint32_t)slot * 2654435761u ^ (uint32_t)cb * 40503u);
+        double j = (double)(hj & 0xFFFF) / 65535.0 - 0.5;   /* -0.5..0.5 */
+        double jit = 1.0 + j * (1.0 - (double)s_persona[slot].consistency) * 0.20;
 
-        eff_frac *= pace * leash * jit;
-        /* a mistake/leash may raise corner speed slightly, but never wildly past
-         * the safe profile */
-        if (eff_frac > frac + 0.06) eff_frac = frac + 0.06;
-        if (eff_frac < 0.05) eff_frac = 0.05;
-    }
-    target_speed = eff_frac * vmax;
+        double eff = base_frac * pace * leash * jit;
+        if (eff > base_frac + 0.06) eff = base_frac + 0.06;   /* bounded mistake */
+        if (eff < 0.05) eff = 0.05;
+        target_speed = eff * vmax;
 
-    if (frac >= 0.97) {
-        s_straight_ticks[slot]++;
-        if (s_straight_ticks[slot] >= 20) s_vmax_ready[slot] = 1;
-    }
-
-    if (!s_vmax_ready[slot] || eff_frac >= 0.97) {
-        throttle = DRV_THROTTLE_FULL;   /* launch/clear straight: floor it (builds vmax) */
-        s_thr_integ[slot] = 0.0;
-    } else {
         double err_frac = (vmax > 1.0) ? (target_speed - v_abs) / vmax : 0.0;
         if (err_frac > s_thr_deadband) {
             s_thr_integ[slot] += err_frac;

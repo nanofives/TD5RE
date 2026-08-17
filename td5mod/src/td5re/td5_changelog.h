@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 17" },
+    { CL_ITEM,    "DRIVER AI: fixed opponents driving too slowly, and cars" },
+    { CL_ITEM,    "  clipping walls on tight tracks (Newcastle/Blue Ridge)." },
+    { CL_ITEM,    "  Tuned + checked across TD5 and TD6 tracks." },
     { CL_ITEM,    "DRIVER AI opponents now have PERSONALITIES: each has its" },
     { CL_ITEM,    "  own pace, aggression, preferred line and consistency," },
     { CL_ITEM,    "  so the field feels like distinct drivers and the odd" },
