@@ -33,9 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 17" },
-    { CL_ITEM,    "NEW (opponents): RACE OPTIONS has an AI MODEL row -" },
-    { CL_ITEM,    "  CLASSIC / SMART / DRIVER. Groundwork for a smarter" },
-    { CL_ITEM,    "  driver model; DRIVER currently matches SMART." },
+    { CL_ITEM,    "NEW (opponents): DRIVER AI - a from-scratch driver that" },
+    { CL_ITEM,    "  plans a line + braking points and steers smoothly" },
+    { CL_ITEM,    "  instead of the old lock-to-lock wobble. Faster and" },
+    { CL_ITEM,    "  cleaner through corners. Now the default; RACE" },
+    { CL_ITEM,    "  OPTIONS > AI MODEL switches back to CLASSIC / SMART." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 10" },
