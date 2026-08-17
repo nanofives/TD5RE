@@ -33,9 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 17" },
-    { CL_ITEM,    "FIX (foliage): distant trees and billboards no longer" },
-    { CL_ITEM,    "  sparkle/stipple at the edges against the sky; cutout" },
-    { CL_ITEM,    "  borders are now smoothly anti-aliased." },
+    { CL_ITEM,    "FIX (foliage): billboard trees now correctly hide the" },
+    { CL_ITEM,    "  houses and scenery behind them (no more see-through" },
+    { CL_ITEM,    "  canopy), and the dark line along the top edge of the" },
+    { CL_ITEM,    "  tree textures is gone." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 10" },

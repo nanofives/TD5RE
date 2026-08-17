@@ -3556,6 +3556,27 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->alpha_ref         = 1; /* discard alpha < 1/255 (color-keyed pixels) */
         break;
 
+    case TD5_PRESET_FOLIAGE_CUTOUT:
+        /* [foliage occlusion 2026-08-17] Billboard tree/foliage cutout drawn as
+         * ALPHA-TESTED OPAQUE with z-write ON so it occludes (and is occluded by)
+         * world geometry -- the earlier TRANSLUCENT_ANISO billboard promotion drew
+         * with blend ON + z-write OFF, so a house BEHIND a tree painted over it and
+         * the sparse canopy blended the background through. Blend OFF removes both.
+         * alpha_ref 0x80 is the discriminator the wrapper's foliage-AA gate keys on
+         * (shared with TRANSLUCENT_ANISO); MODULATEALPHA + LINEAR match the foliage
+         * sampling path. The actual test threshold + edge cleanup are applied
+         * shader-side (SampleFoliageAA / ApplyFogAndAlphaTest). */
+        s->blend_enable = 0;
+        s->z_enable     = 1;
+        s->z_write      = 1;
+        s->z_func       = 0; /* LESSEQUAL */
+        s->mag_filter   = 2; /* LINEAR */
+        s->min_filter   = 2;
+        s->texblend_mode = D3DTBLEND_MODULATEALPHA;
+        s->alpha_test_enable = 1;
+        s->alpha_ref         = 0x80;
+        break;
+
     case TD5_PRESET_TRANSLUCENT_POINT:
         s->blend_enable = 1;
         s->src_blend    = D3D6BLEND_SRCALPHA;
@@ -4203,10 +4224,25 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
             const char *e = getenv("TD5RE_TRACK_MIPS");
             s_track_mips = (e && e[0] == '0') ? 0 : 1;
         }
+        /* [foliage black-line 2026-08-17] type-1 foliage cutouts (trees) get NO
+         * mips. The mip box-down averages the tree art's dark outer leaves + the
+         * transparent (black-RGB) border ABOVE the canopy into semi-opaque dark
+         * texels; at distance (a coarse mip) that reads as a dark line above the
+         * foliage that fades as you approach (finer mips). Confirmed in-game:
+         * disabling foliage mips removes it. Done per-type so mips stay ON for
+         * everything else (t==2 cutouts, buildings, signs) -- a GLOBAL mips-off made
+         * those alias / go see-through. Occlusion is handled separately by the
+         * FOLIAGE_CUTOUT preset's z-write. TD5RE_FOLIAGE_MIPS=1 restores mipped
+         * foliage for A/B. */
+        static int s_foliage_mips = -1;
+        if (s_foliage_mips < 0) {
+            const char *e = getenv("TD5RE_FOLIAGE_MIPS");
+            s_foliage_mips = (e && e[0] && e[0] != '0') ? 1 : 0;
+        }
         if (s_track_mips && format == 2 && page_index >= 0 && page_index < 700) {
             int t = td5_asset_get_page_transparency(page_index);
-            if (t == 1)      { want_track_mips = 1; mip_ref = 1;    }
-            else if (t == 2) { want_track_mips = 1; mip_ref = 0x80; }
+            if (t == 1)      { want_track_mips = s_foliage_mips; mip_ref = 1;    }
+            else if (t == 2) { want_track_mips = 1;              mip_ref = 0x80; }
         }
         if (want_track_mips)
             TD5_LOG_I(LOG_TAG, "track mips: page=%d %dx%d type=%d ref=%d",

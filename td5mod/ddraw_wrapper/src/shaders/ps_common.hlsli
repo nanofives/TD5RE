@@ -189,16 +189,18 @@ float4 ApplyFogAndAlphaTest(float4 color, float depth)
     /* Alpha test: discard pixels below threshold (replaces D3D6 fixed-function alpha test).
      * This is critical for color-keyed textures (A1R5G5B5 with alpha=0 for transparent pixels).
      * Without this, transparent pixels render as opaque black, covering geometry behind them. */
-    /* [foliage soft coverage 2026-08-17] Foliage draws (foliageAA!=0) carry a
-     * SMOOTH LOD-derived coverage in color.a from SampleFoliageAA, meant to feed
-     * the SRCALPHA/INVSRCALPHA blend for anti-aliased cutout edges. The normal
-     * alphaRef (0x80 for TRANSLUCENT_ANISO) would re-binarize that coverage and
-     * bring back the distant-canopy edge flicker (the diamond stipple), so for
-     * foliage we discard only fully-transparent texels and let the coverage
-     * drive the blend. Non-foliage draws are unchanged. TD5RE_FOLIAGE_AA=0 sets
-     * foliageAA=0 -> falls back to the hard alphaRef cutout. */
-    float aref = (foliageAA != 0.0) ? (1.0 / 255.0) : alphaRef;
-    if (alphaTestEnabled && color.a < aref)
+    /* [foliage occlusion 2026-08-17] Foliage (foliageAA!=0) draws as an ALPHA-
+     * TESTED OPAQUE cutout (FOLIAGE_CUTOUT: blend OFF, z-write ON) so it occludes
+     * and is occluded correctly. color.a is the LOD-merged coverage from
+     * SampleFoliageAA; test it HARD at the SAME alphaRef (0x80) the hardware path
+     * uses. An earlier attempt biased this down to 0.25 to fill the merged 2x2
+     * dither, but that KEPT the low-coverage OUTERMOST edge texels -- which carry
+     * the tree art's dark leaf rim -- and rendered them as a dark/black line
+     * around the canopy (the hardware 0.5 test discards exactly those). Testing
+     * at 0x80 discards the dark rim (clean edge, matches faa=0) while the LOD
+     * floor in SampleFoliageAA still merges the interior dither. Non-foliage is
+     * unchanged. */
+    if (alphaTestEnabled && color.a < alphaRef)
         discard;
 
     /* [CAR SUN 2026-08-04] The sunlit-car brighten is now DIRECTIONAL (N.L against
