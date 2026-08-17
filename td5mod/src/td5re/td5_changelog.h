@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 17" },
+    { CL_ITEM,    "DRIVER AI opponents now have PERSONALITIES: each has its" },
+    { CL_ITEM,    "  own pace, aggression, preferred line and consistency," },
+    { CL_ITEM,    "  so the field feels like distinct drivers and the odd" },
+    { CL_ITEM,    "  mistake happens. Close races stay close (subtle)." },
     { CL_ITEM,    "DRIVER AI opponents now RACE each other: they follow" },
     { CL_ITEM,    "  without rear-ending, pull out to overtake a slower" },
     { CL_ITEM,    "  car down a clear side, and spread across the road" },

@@ -52,6 +52,32 @@
 #define DRV_THROTTLE_FULL   0x100
 #define DRV_STEER_CLAMP     0x18000   /* physics saturation clamp on steering_command */
 
+/* [P4] Per-driver personality (deterministic). Seeded from (slot, difficulty
+ * tier) only -- NOT the CRT rand() and NOT a race seed, so it is identical on
+ * every lockstep peer and every replay by construction (slot + tier are both
+ * replicated). skill scales pace + corner speed; aggression tunes overtaking /
+ * following; consistency gates a small deterministic per-corner mistake;
+ * line_bias [-1,1] is the driver's preferred lane across the road (route
+ * variety, replacing P3's static third-bias). */
+typedef struct {
+    float skill;        /* 0.12 .. 0.99  */
+    float aggression;   /* 0.25 .. 0.95  */
+    float consistency;  /* 0.40 .. 0.97 (higher = fewer mistakes) */
+    float line_bias;    /* -1 .. +1 preferred lateral fraction     */
+} DriverPersona;
+static DriverPersona s_persona[TD5_MAX_RACER_SLOTS];
+
+/* Deterministic integer hash (no runtime RNG). */
+static uint32_t drv_hash(uint32_t x)
+{
+    x ^= x >> 16; x *= 0x7feb352dU;
+    x ^= x >> 15; x *= 0x846ca68bU;
+    x ^= x >> 16;
+    return x;
+}
+static inline float drv_clampf(float v, float lo, float hi)
+{ return v < lo ? lo : (v > hi ? hi : v); }
+
 /* ------------------------------------------------------------------------
  * Mode resolution
  * ---------------------------------------------------------------------- */
@@ -121,6 +147,7 @@ static int    s_ahead_spans;     /* [P3] how many spans ahead a peer counts as b
 static double s_pass_frac;       /* [P3] overtake aim offset as a fraction of half-width */
 static double s_offset_clamp;    /* [P3] max lateral offset as a fraction of half-width  */
 static int    s_overtake_ticks;  /* [P3] dwell ticks a pass side stays committed         */
+static int    s_leash_max;       /* [P4] hidden catch-up: max % speed boost for laggards  */
 
 static void driver_read_knobs(void)
 {
@@ -148,6 +175,7 @@ static void driver_read_knobs(void)
     s_pass_frac    = (double)td5_env_int("TD5RE_AI_DRIVER_PASS_FRAC",   55, 10, 90) / 100.0;
     s_offset_clamp = (double)td5_env_int("TD5RE_AI_DRIVER_OFFSET_CLAMP",70, 10, 95) / 100.0;
     s_overtake_ticks = td5_env_int("TD5RE_AI_DRIVER_OVERTAKE_TICKS", 40, 5, 200);
+    s_leash_max      = td5_env_int("TD5RE_AI_DRIVER_LEASH", 3, 0, 15); /* hidden catch-up, % ; 0 = off */
 }
 
 /* ------------------------------------------------------------------------
@@ -323,7 +351,24 @@ void td5_ai_driver_race_init(void)
     }
     if (td5_ai_driver_mode() != TD5_AI_MODE_DRIVER) { driver_free_path_table(); return; }
     driver_build_path_table();
-    TD5_LOG_I(LOG_TAG, "ai_driver_race_init: DRIVER mode, path_valid=%d", s_pt_valid);
+
+    /* [P4] Derive per-driver personalities from (slot, difficulty tier). */
+    int tier = g_td5.difficulty_tier;
+    float base = (tier <= 0) ? 0.42f : (tier == 1 ? 0.63f : 0.86f);
+    for (int s = 0; s < TD5_MAX_RACER_SLOTS; s++) {
+        uint32_t h = drv_hash((uint32_t)s * 2654435761u + (uint32_t)(tier + 1) * 40503u);
+        float sk = drv_clampf(base + ((float)(h & 0xFFFF) / 65535.0f - 0.5f) * 0.24f, 0.12f, 0.99f);
+        s_persona[s].skill      = sk;
+        s_persona[s].aggression = 0.25f + (float)((h >> 16) & 0xFF) / 255.0f * 0.70f;
+        /* consistency correlates with skill (aces make fewer mistakes) */
+        s_persona[s].consistency = drv_clampf(
+            (0.55f + (float)((h >> 8) & 0xFF) / 255.0f * 0.40f) * 0.6f + sk * 0.4f, 0.40f, 0.97f);
+        s_persona[s].line_bias  = ((float)((h >> 1) & 0x3FF) / 1023.0f - 0.5f) * 2.0f;
+    }
+    TD5_LOG_I(LOG_TAG, "ai_driver_race_init: DRIVER mode, path_valid=%d tier=%d "
+              "(s0 skill=%.2f aggr=%.2f cons=%.2f line=%.2f)",
+              s_pt_valid, tier, (double)s_persona[0].skill, (double)s_persona[0].aggression,
+              (double)s_persona[0].consistency, (double)s_persona[0].line_bias);
 }
 
 /* ------------------------------------------------------------------------
@@ -372,12 +417,10 @@ static void driver_racecraft(int slot, TD5_Actor *self,
       } }
     double block_w = 0.60 * hw;
 
-    /* [P3] Per-slot baseline lane bias: spread the field left / centre / right
-     * across the road so six cars don't all converge on one racing line and
-     * bunch/shove into each other. Deterministic per slot (also a natural
-     * lead-in to P4 route variety). This is the default offset when not
-     * actively overtaking. */
-    double baseline = ((double)(slot % 3) - 1.0) * 0.30 * hw;
+    /* [P4] Per-driver preferred line across the road (route variety) -- replaces
+     * P3's static third-bias. Each driver favours its own lateral fraction, so
+     * the field spreads out and cars don't all converge on one line. */
+    double baseline = (double)s_persona[slot].line_bias * 0.32 * hw;
 
     double self_x = (double)self->world_pos.x;
     double self_z = (double)self->world_pos.z;
@@ -420,8 +463,13 @@ static void driver_racecraft(int slot, TD5_Actor *self,
 
     if (!have_ahead) { s_overtake_dwell[slot] = 0; *out_offset = baseline; return; }
 
-    double pass_mag = s_pass_frac * hw;
-    int    slower    = ahead_v < v_abs * 0.97;
+    /* [P4] Aggression tunes how small a speed deficit is worth a pass: an
+     * aggressive driver pulls out for a car only slightly slower; a cautious
+     * one waits for a clear speed advantage. */
+    double aggr = (double)s_persona[slot].aggression;
+    double pass_mag  = s_pass_frac * hw;
+    double slower_thr = 0.99 - 0.07 * aggr;    /* ~0.99 (cautious) .. ~0.92 (aggressive) */
+    int    slower    = ahead_v < v_abs * slower_thr;
     int    very_slow = ahead_v < vmax * 0.15;   /* stopped / crawling hazard */
 
     if (s_overtake_dwell[slot] > 0) {
@@ -660,6 +708,41 @@ int td5_ai_driver_tick(int slot)
      * the car settle behind a slower car ahead instead of flooring into it. */
     double eff_frac = frac;
     if (cap_frac < eff_frac) eff_frac = cap_frac;
+
+    /* [P4] Personality + hidden leash shape the pace, but ONLY after vmax has
+     * been established during the launch floor -- otherwise capping below 1
+     * would stop vmax converging to the true top speed (the bootstrap trap). */
+    if (s_vmax_ready[slot]) {
+        double skill = (double)s_persona[slot].skill;
+        double pace  = 0.92 + 0.08 * skill;   /* weaker drivers ~8% off the pace */
+
+        /* Hidden leash: a subtle catch-up boost for cars running behind, applied
+         * to the target only (never a raw throttle override) -- replaces the old
+         * visible rubber-band. race_position 0 = leader (no boost). */
+        double leash = 1.0;
+        if (s_leash_max > 0) {
+            int rpos = (int)actor->race_position;
+            if (rpos > 3) rpos = 3;
+            if (rpos > 0) leash = 1.0 + (double)rpos * ((double)s_leash_max / 100.0) / 3.0;
+        }
+
+        /* Consistency: a small deterministic per-corner error (a less consistent
+         * driver occasionally carries too much / too little speed). Bucketed by
+         * span so it's stable through a corner, hashed (no RNG) for determinism. */
+        double jit = 1.0;
+        if (eff_frac < 0.97) {
+            int cb = ((int)actor->track_span_normalized) / 3;
+            uint32_t hj = drv_hash((uint32_t)slot * 2654435761u ^ (uint32_t)cb * 40503u);
+            double j = (double)(hj & 0xFFFF) / 65535.0 - 0.5;   /* -0.5..0.5 */
+            jit = 1.0 + j * (1.0 - (double)s_persona[slot].consistency) * 0.20;
+        }
+
+        eff_frac *= pace * leash * jit;
+        /* a mistake/leash may raise corner speed slightly, but never wildly past
+         * the safe profile */
+        if (eff_frac > frac + 0.06) eff_frac = frac + 0.06;
+        if (eff_frac < 0.05) eff_frac = 0.05;
+    }
     target_speed = eff_frac * vmax;
 
     if (frac >= 0.97) {
