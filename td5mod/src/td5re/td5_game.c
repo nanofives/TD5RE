@@ -16,6 +16,7 @@
 #include "td5_sound.h"
 #include "td5_input.h"
 #include "td5_ai.h"
+#include "td5_ai_driver.h"   /* [AI DRIVER MODEL] driver trace-row accessors */
 #include "td5_asset.h"
 #include "td5_physics.h"
 #include "td5_render.h"
@@ -5108,7 +5109,8 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
         td5_trace_active(TD5_TRACE_MOD_TRACK,    stage_bit) ||
         td5_trace_active(TD5_TRACE_MOD_CONTROLS, stage_bit) ||
         td5_trace_active(TD5_TRACE_MOD_PROGRESS, stage_bit) ||
-        td5_trace_active(TD5_TRACE_MOD_ROTATION, stage_bit);
+        td5_trace_active(TD5_TRACE_MOD_ROTATION, stage_bit) ||
+        td5_trace_active(TD5_TRACE_MOD_DRIVER,   stage_bit);
 
     if (any_slot_module) {
         for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
@@ -5192,6 +5194,21 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
                 r.world_y       = actor->world_pos.y;
                 r.vel_y         = actor->linear_velocity_y;
                 td5_trace_emit_rotation(frame, sim_tick, stage, &r);
+            }
+
+            if (td5_trace_active(TD5_TRACE_MOD_DRIVER, stage_bit)) {
+                /* [AI DRIVER MODEL] target-vs-actual + command outputs for the
+                 * driver-model calibration harness (P0: target_speed is 0). */
+                TD5_TraceDriverRow r;
+                r.slot         = i;
+                r.ai_mode      = td5_ai_driver_mode();
+                r.owned        = td5_ai_driver_owns_slot(i);
+                r.target_speed = td5_ai_driver_target_speed(i);
+                r.long_speed   = actor->longitudinal_speed;
+                r.steering_cmd = actor->steering_command;
+                r.throttle_cmd = actor->encounter_steering_cmd;
+                r.brake_flag   = actor->brake_flag;
+                td5_trace_emit_driver(frame, sim_tick, stage, &r);
             }
 
             if (td5_trace_active(TD5_TRACE_MOD_PROGRESS, stage_bit)) {

@@ -39,7 +39,8 @@
 #define TD5_TRACE_MOD_ROTATION  0x100
 #define TD5_TRACE_MOD_CAMERA    0x200
 #define TD5_TRACE_MOD_SOUND     0x400
-#define TD5_TRACE_MOD_ALL       0x7FF
+#define TD5_TRACE_MOD_DRIVER    0x800   /* [AI DRIVER MODEL] target vs actual speed, cmd outputs */
+#define TD5_TRACE_MOD_ALL       0xFFF
 
 /* -------- Stage bitmask --------------------------------------------------
  * One bit per emit call site in RunRaceFrame's tick loop. Each module emits
@@ -191,6 +192,25 @@ void td5_trace_emit_view    (uint32_t frame, uint32_t tick, const char *stage,
                              const TD5_TraceViewRow *r);
 void td5_trace_emit_rotation(uint32_t frame, uint32_t tick, const char *stage,
                              const TD5_TraceRotationRow *r);
+
+/* [AI DRIVER MODEL 2026-08-17] Driver-model diagnostics: the closed-loop
+ * target speed vs the achieved longitudinal speed, plus the command outputs, so
+ * the P1 speed profile can be calibrated from target-vs-actual per span rather
+ * than eyeballed. P0 emits ai_mode/owned/actual/cmds; target_speed is 0 until
+ * the profile lands. */
+typedef struct TD5_TraceDriverRow {
+    int      slot;
+    int      ai_mode;        /* effective mode: 0=CLASSIC,1=SMART,2=DRIVER */
+    int      owned;          /* 1 = driver model owns this slot this race */
+    int32_t  target_speed;   /* speed-profile target (raw units; P0: 0) */
+    int32_t  long_speed;     /* actual longitudinal_speed (+0x314) */
+    int32_t  steering_cmd;   /* command written this tick (+0x30C) */
+    int32_t  throttle_cmd;   /* encounter_steering_cmd throttle (+0x33E) */
+    uint8_t  brake_flag;     /* +0x36D */
+} TD5_TraceDriverRow;
+
+void td5_trace_emit_driver  (uint32_t frame, uint32_t tick, const char *stage,
+                             const TD5_TraceDriverRow *r);
 
 /* Camera stream: the per-TICK solved pose (td5_camera_get_tick_pose) --
  * NOT g_camWorldPos, whose subtick extrapolation is render-frame-paced and

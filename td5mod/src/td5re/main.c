@@ -414,6 +414,8 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("GameOptions", "Cops",             g_td5.ini.cops);
     td5_ini_write_int("GameOptions", "Difficulty",       g_td5.ini.difficulty);
     td5_ini_write_int("GameOptions", "Dynamics",         g_td5.ini.dynamics);
+    /* [AI DRIVER MODEL 2026-08-17] Persist the RACE OPTIONS "AI MODEL" choice. */
+    td5_ini_write_int("GameOptions", "AIModel",          g_td5.ini.ai_model);
     td5_ini_write_int("GameOptions", "Collisions",       g_td5.ini.collisions);
     td5_ini_write_int("GameOptions", "Powerups",         g_td5.ini.powerups);
     /* [SP DRAG DISTANCE 2026-07-23] Persist the SP drag DISTANCE preset so the
@@ -568,6 +570,7 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "SmartAIAggression",    &g_td5.ini.smart_ai_aggression },
         { "SmartAILeash",         &g_td5.ini.smart_ai_leash },
         { "SmartAIRays",          &g_td5.ini.smart_ai_rays },
+        { "AIModel",              &g_td5.ini.ai_model },
         /* Traffic (S20 smart traffic) */
         { "TrafficSmart",         &g_td5.ini.traffic_smart },
         { "TrafficWallAvoid",     &g_td5.ini.traffic_wall_avoid },
@@ -1026,6 +1029,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * chassis/glass now mirror the sky/scene out of the box; earlier defaults
      * left ReflectionQuality=0, which forced g_td5.ini.reflections=0 and
      * skipped the whole SSR/RT reflection pass. Range stays FAR = TDR-safe. */
+    /* [AI DRIVER MODEL 2026-08-17] Load ai_model BEFORE the RT opt-version
+     * migration below: that migration calls td5_ini_persist_options(), which
+     * writes the FULL options set (incl. AIModel). If ai_model were still
+     * unset here, the migration would persist AIModel=0 (CLASSIC) on a fresh /
+     * pre-v5 INI and defeat the DRIVER default. Loaded early, the migration
+     * persists the correct value. 0=CLASSIC,1=SMART,2=DRIVER (default). */
+    g_td5.ini.ai_model = td5_ini_int("GameOptions", "AIModel", 2);
+    if (g_td5.ini.ai_model < 0) g_td5.ini.ai_model = 0;
+    if (g_td5.ini.ai_model > 2) g_td5.ini.ai_model = 2;
+
     #define RT_OPT_VERSION_CURRENT 5
     if (g_td5.ini.rt_opt_version < RT_OPT_VERSION_CURRENT) {
         g_td5.ini.rt_shadow_rays    = 2;
@@ -1121,6 +1134,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.smart_ai_rays = td5_ini_int("GameOptions", "SmartAIRays", 1);
     if (g_td5.ini.smart_ai_rays < 0) g_td5.ini.smart_ai_rays = 0;
     if (g_td5.ini.smart_ai_rays > 1) g_td5.ini.smart_ai_rays = 1;
+    /* [AI DRIVER MODEL 2026-08-17] ai_model is loaded EARLY (before the RT
+     * opt-version migration persist) so it isn't in this block — see the load
+     * ahead of the migration gate above. */
     /* S20 Smart Traffic (source-port enhancement; all default ON, traffic-only). */
     g_td5.ini.traffic_smart           = td5_ini_int("Traffic", "TrafficSmart", 1);
     g_td5.ini.traffic_wall_avoid      = td5_ini_int("Traffic", "WallAvoid", 1);

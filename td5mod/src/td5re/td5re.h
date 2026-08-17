@@ -444,6 +444,15 @@ typedef struct TD5_GlobalState {
         int  smart_ai_aggression;
         int  smart_ai_leash;
         int  smart_ai_rays;
+        /* [AI DRIVER MODEL 2026-08-17] Opponent-AI mode ladder ([GameOptions]
+         * AIModel; RACE OPTIONS "AI MODEL" row; --AIModel=N; TD5RE_AI_MODEL env).
+         *   0 = CLASSIC -> byte-faithful original AI (SmartAI decision layer off)
+         *   1 = SMART   -> SmartAI decision layer on, faithful execution layer
+         *   2 = DRIVER  -> new closed-loop driver model (default)
+         * This is the authoritative opponent-AI switch: td5_ai_smart_active()
+         * keys the SmartAI layer on (SMART|DRIVER) vs off (CLASSIC). Owned by
+         * td5_ai_driver.c (see td5_ai_driver.h). */
+        int  ai_model;
         /* --- S20 Smart Traffic (source-port enhancement, all default ON) ---
          * The original background traffic is scripted/reactive (flat 0x3c cruise,
          * deterministic junction route, no active wall avoidance). These knobs

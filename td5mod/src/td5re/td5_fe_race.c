@@ -6775,6 +6775,8 @@ static void raceopts_commit_persist(void) {
     g_td5.ini.car_damage           = s_game_option_car_damage ? 1 : 0;
     g_td5.ini.car_damage_bar       = s_game_option_car_damage ? 1 : 0;
     g_td5.ini.lane_assist          = s_game_option_laneassist ? 1 : 0;
+    /* [AI DRIVER MODEL 2026-08-17] Commit the opponent-AI mode choice. */
+    g_td5.ini.ai_model             = ((s_game_option_ai_model % 3) + 3) % 3;
     g_td5.ini.tutorial_overlay     = s_game_option_tutorial
         ? (g_td5.ini.tutorial_overlay >= 2 ? 2 : 1) : 0;
     /* [RACE OPTIONS CONSOLIDATION 2026-07-21] RACE OPTIONS is now the ONLY
