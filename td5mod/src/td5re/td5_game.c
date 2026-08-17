@@ -5208,6 +5208,8 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
                 r.steering_cmd = actor->steering_command;
                 r.throttle_cmd = actor->encounter_steering_cmd;
                 r.brake_flag   = actor->brake_flag;
+                r.rec_state    = td5_ai_driver_rec_state(i);
+                r.rear_slip    = actor->rear_axle_slip_excess;
                 td5_trace_emit_driver(frame, sim_tick, stage, &r);
             }
 

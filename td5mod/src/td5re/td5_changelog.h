@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 17" },
+    { CL_ITEM,    "DRIVER AI now eases off when a wheel breaks traction and" },
+    { CL_ITEM,    "  self-recovers if it spins or gets wedged - no more" },
+    { CL_ITEM,    "  opponents stuck against a wall for the whole race." },
     { CL_ITEM,    "NEW (opponents): DRIVER AI - a from-scratch driver that" },
     { CL_ITEM,    "  plans a line + braking points and steers smoothly" },
     { CL_ITEM,    "  instead of the old lock-to-lock wobble. Faster and" },

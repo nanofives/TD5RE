@@ -69,7 +69,7 @@ static ModuleFile s_modules[] = {
       "frame,sim_tick,stage,slot,cop_siren,any_siren",
       "TD5RE_TRACE_SOUND_PATH",    NULL, NULL },
     { TD5_TRACE_MOD_DRIVER,   "driver",   "driver",
-      "frame,sim_tick,stage,slot,ai_mode,owned,target_speed,long_speed,steering_cmd,throttle_cmd,brake_flag",
+      "frame,sim_tick,stage,slot,ai_mode,owned,target_speed,long_speed,steering_cmd,throttle_cmd,brake_flag,rec_state,rear_slip",
       "TD5RE_TRACE_DRIVER_PATH",   NULL, NULL },
 };
 static const int s_module_count = (int)(sizeof(s_modules) / sizeof(s_modules[0]));
@@ -495,10 +495,11 @@ void td5_trace_emit_driver(uint32_t frame, uint32_t tick, const char *stage,
     FILE *fp = fp_for(TD5_TRACE_MOD_DRIVER);
     if (!fp || !r) return;
     fprintf(fp,
-            "%u,%u,%s,%d,%d,%d,%d,%d,%d,%d,%u\n",
+            "%u,%u,%s,%d,%d,%d,%d,%d,%d,%d,%u,%d,%d\n",
             (unsigned)frame, (unsigned)tick, stage ? stage : "", r->slot,
             r->ai_mode, r->owned, r->target_speed, r->long_speed,
-            r->steering_cmd, r->throttle_cmd, (unsigned)r->brake_flag);
+            r->steering_cmd, r->throttle_cmd, (unsigned)r->brake_flag,
+            r->rec_state, r->rear_slip);
 }
 
 /* -------- calls trace --------------------------------------------------- */

@@ -71,4 +71,8 @@ int  td5_ai_driver_tick(int slot);
  * the `driver` trace module for target-vs-actual calibration in later phases. */
 int  td5_ai_driver_target_speed(int slot);
 
+/* Current recovery-FSM state for a slot (0=NORMAL,1=AIRBORNE,2=SPUN,3=STUCK),
+ * for the `driver` trace / diagnostics. */
+int  td5_ai_driver_rec_state(int slot);
+
 #endif /* TD5_AI_DRIVER_H */

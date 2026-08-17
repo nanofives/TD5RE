@@ -115,6 +115,8 @@ static double s_brake_k;         /* backward-pass braking coupling (frac^2 per t
 static double s_accel_k;         /* forward-pass accel coupling                */
 static int    s_thr_kp;          /* throttle P gain (cmd per speed-frac error) */
 static double s_thr_deadband;    /* speed-frac error deadband                  */
+static int    s_slip_thresh;     /* rear-slip level where the traction cap starts */
+static int    s_slip_range;      /* slip span over which the cap ramps to floor    */
 
 static void driver_read_knobs(void)
 {
@@ -136,6 +138,8 @@ static void driver_read_knobs(void)
     s_accel_k      = (double)td5_env_int("TD5RE_AI_DRIVER_ACCEL_K",   6, 1, 400) / 100000.0;
     s_thr_kp       = td5_env_int  ("TD5RE_AI_DRIVER_THR_KP",       900, 50, 4000);
     s_thr_deadband = (double)td5_env_int("TD5RE_AI_DRIVER_THR_DEADBAND", 3, 0, 40) / 100.0;
+    s_slip_thresh  = td5_env_int  ("TD5RE_AI_DRIVER_SLIP_THRESH", 0x600, 0x40, 0x8000);
+    s_slip_range   = td5_env_int  ("TD5RE_AI_DRIVER_SLIP_RANGE",  0x1200, 0x100, 0x8000);
 }
 
 /* ------------------------------------------------------------------------
@@ -161,6 +165,17 @@ static double   s_target_frac_dbg[TD5_MAX_RACER_SLOTS]; /* for the trace row   *
  * limiting/braking to a fraction of it. */
 static int      s_vmax_ready[TD5_MAX_RACER_SLOTS];
 static int      s_straight_ticks[TD5_MAX_RACER_SLOTS];
+
+/* [P2] Recovery state machine. NORMAL is the P1 controller; the others take
+ * over when the car is airborne, spun (travelling backwards relative to its
+ * heading), or stuck (not moving while trying to). Replaces racer_collision_
+ * escape for driver-owned cars. */
+enum { DRV_NORMAL = 0, DRV_AIRBORNE, DRV_SPUN, DRV_STUCK };
+static int      s_rec_state[TD5_MAX_RACER_SLOTS];
+static int      s_rec_ticks[TD5_MAX_RACER_SLOTS];   /* ticks in current non-normal state */
+static int      s_spin_cnt[TD5_MAX_RACER_SLOTS];    /* consecutive spun-detection ticks   */
+static int      s_stuck_cnt[TD5_MAX_RACER_SLOTS];   /* consecutive not-moving ticks        */
+static int      s_launched[TD5_MAX_RACER_SLOTS];    /* car has moved off the line at least once */
 
 static int      s_pt_valid;          /* table built for this race             */
 
@@ -283,6 +298,11 @@ void td5_ai_driver_race_init(void)
         s_target_frac_dbg[s] = 0.0;
         s_vmax_ready[s]     = 0;
         s_straight_ticks[s] = 0;
+        s_rec_state[s]      = DRV_NORMAL;
+        s_rec_ticks[s]      = 0;
+        s_spin_cnt[s]       = 0;
+        s_stuck_cnt[s]      = 0;
+        s_launched[s]       = 0;
     }
     if (td5_ai_driver_mode() != TD5_AI_MODE_DRIVER) { driver_free_path_table(); return; }
     driver_build_path_table();
@@ -318,6 +338,18 @@ int td5_ai_driver_tick(int slot)
     if (v_abs > s_vmax[slot]) s_vmax[slot] = v_abs;
     double vmax = s_vmax[slot];
 
+    /* --- dynamics: world velocity, travel direction vs heading (spin), slip --- */
+    double vx = (double)actor->linear_velocity_x;
+    double vz = (double)actor->linear_velocity_z;
+    double speed2d = sqrt(vx * vx + vz * vz);
+    int heading = ((int)actor->euler_accum.yaw >> 8) & 0xFFF;
+    int vel_head = (speed2d > 1.0) ? driver_angle_from_vec(vx, vz) : heading;
+    int misalign = ang_signed12(vel_head - heading);
+    int misalign_abs = misalign < 0 ? -misalign : misalign;   /* 0..0x800 */
+    int32_t yaw_rate = actor->angular_velocity_yaw;
+    int32_t rslip = actor->rear_axle_slip_excess;
+    if (rslip < 0) rslip = -rslip;
+
     /* --- target speed fraction from the profile at the current ring span --- */
     double frac = 0.80;   /* fallback if the path table is unavailable */
     if (s_pt_valid && s_pt_count > 0) {
@@ -329,7 +361,7 @@ int td5_ai_driver_tick(int slot)
     s_target_frac_dbg[slot] = frac;
     double target_speed = frac * vmax;
 
-    /* --- STEERING: pure pursuit to a speed-scaled look-ahead aim point --- */
+    /* --- STEERING aim point (pure pursuit); reused by recovery + normal --- */
     double speed_frac_now = (vmax > 1.0) ? (v_abs / vmax) : 0.0;
     if (speed_frac_now > 1.0) speed_frac_now = 1.0;
     int lookahead = s_look_base + (int)(speed_frac_now * (double)s_look_speed);
@@ -341,60 +373,141 @@ int td5_ai_driver_tick(int slot)
                                                   lookahead, /*fork_commit=*/1,
                                                   /*fork_diverge=*/1, /*lane_band=*/1,
                                                   &tx, &tz);
-
-    int32_t steer_cmd = s_prev_steer[slot];
+    int herr = 0;
     if (have_target) {
         double dx = (double)(tx - actor->world_pos.x);
         double dz = (double)(tz - actor->world_pos.z);
-        int heading = ((int)actor->euler_accum.yaw >> 8) & 0xFFF;
-        int des_h   = driver_angle_from_vec(dx, dz);
-        int herr    = ang_signed12(des_h - heading);   /* [-2048, +2048] */
+        herr = ang_signed12(driver_angle_from_vec(dx, dz) - heading);
+    }
 
-        /* steering_command = +Kp*herr - Kd*yaw_rate (derived-sign negative
-         * feedback: target-to-the-right -> herr>0 -> +cmd -> physics turns right).
-         * Yaw-rate damping trims overshoot so the car settles instead of weaving,
-         * replacing the banded slam. */
-        int32_t yaw_rate = actor->angular_velocity_yaw;
+    /* --- RECOVERY STATE MACHINE ---
+     * Runs before the normal controller. Spin = travelling backwards relative
+     * to the way the car points (misalign near 180); stuck = not moving while
+     * meant to. Speed thresholds are relative to this car's own top speed so
+     * they scale with the car/track. (No airborne state: a brief crest is
+     * normal racing, not a recovery situation -- an earlier airborne branch
+     * over-triggered on Newcastle's undulations and cut the launch throttle,
+     * deadlocking the car.) */
+    double spin_speed_min = 0.05 * vmax;   /* only judge a spin above a crawl */
+    double stuck_speed    = 0.015 * vmax;  /* effectively stationary          */
+    double stuck_exit     = 0.06 * vmax;
+    int st = s_rec_state[slot];
+
+    /* spin detection (hysteresis) */
+    if (speed2d > spin_speed_min && misalign_abs > 0x600) {
+        if (s_spin_cnt[slot] < 99) s_spin_cnt[slot]++;
+    } else if (s_spin_cnt[slot] > 0) {
+        s_spin_cnt[slot]--;
+    }
+    /* stuck detection -- but only AFTER the car has launched off the line. Until
+     * then (grid + countdown) every car sits at v=0, which is not "stuck": the
+     * game holds them for the green light. Rocking free during the countdown
+     * would command reverse against a field of stationary cars. */
+    if (v_abs > stuck_exit) s_launched[slot] = 1;
+    if (v_abs < stuck_speed) s_stuck_cnt[slot]++;
+    else                     s_stuck_cnt[slot] = 0;
+
+    if (st == DRV_NORMAL) {
+        if (s_spin_cnt[slot] >= 3)         { st = DRV_SPUN;  s_rec_ticks[slot] = 0;
+            TD5_LOG_I(LOG_TAG, "ai_driver: slot=%d SPUN (misalign=0x%X yaw=%d spd2d=%d)",
+                      slot, misalign_abs, (int)yaw_rate, (int)speed2d); }
+        else if (s_launched[slot] && s_stuck_cnt[slot] >= 45)  { st = DRV_STUCK; s_rec_ticks[slot] = 0;
+            TD5_LOG_I(LOG_TAG, "ai_driver: slot=%d STUCK (v=%d)", slot, (int)v_abs); }
+    } else if (st == DRV_SPUN) {
+        /* recovered when re-aligned and no longer spinning fast */
+        int yr = yaw_rate < 0 ? -yaw_rate : yaw_rate;
+        if ((misalign_abs < 0x280 && yr < 0x1800) || v_abs < stuck_speed) {
+            int held = s_rec_ticks[slot];
+            st = (s_launched[slot] && v_abs < stuck_speed && s_stuck_cnt[slot] >= 45) ? DRV_STUCK : DRV_NORMAL;
+            s_spin_cnt[slot] = 0;
+            s_rec_ticks[slot] = 0;
+            TD5_LOG_I(LOG_TAG, "ai_driver: slot=%d SPUN->%s after %d ticks",
+                      slot, st == DRV_STUCK ? "STUCK" : "NORMAL", held);
+        }
+    } else if (st == DRV_STUCK) {
+        if (v_abs > stuck_exit)            { st = DRV_NORMAL; s_stuck_cnt[slot] = 0; s_rec_ticks[slot] = 0;
+            TD5_LOG_I(LOG_TAG, "ai_driver: slot=%d STUCK->NORMAL (v=%d)", slot, (int)v_abs); }
+    }
+    s_rec_state[slot] = st;
+
+    int32_t steer_cmd = s_prev_steer[slot];
+    int     throttle  = 0;
+    uint8_t brake     = 0;
+
+    if (st != DRV_NORMAL) {
+        s_rec_ticks[slot]++;
+        if (st == DRV_SPUN) {
+            /* Coast + steer to re-align with the track-forward aim, with strong
+             * yaw damping to kill the rotation; scrub speed if still fast. */
+            long tc = (long)herr * (long)s_steer_kp
+                    - ((long)yaw_rate * (long)(s_steer_kd * 3) >> 8);
+            if (tc >  DRV_STEER_CLAMP) tc =  DRV_STEER_CLAMP;
+            if (tc < -DRV_STEER_CLAMP) tc = -DRV_STEER_CLAMP;
+            long d = tc - (long)steer_cmd;
+            if (d >  s_steer_rate) d =  s_steer_rate;
+            if (d < -s_steer_rate) d = -s_steer_rate;
+            steer_cmd = (int32_t)((long)steer_cmd + d);
+            throttle = 0;
+            if (speed2d > 0.25 * vmax) brake = 1;   /* bleed off a fast spin */
+        } else { /* DRV_STUCK: rock free — reverse a beat, steer to track, then go */
+            int phase = s_rec_ticks[slot] % 50;
+            /* steer toward the track aim so we back/pull off a wall, not into it */
+            long tc = (long)herr * (long)s_steer_kp;
+            if (tc >  DRV_STEER_CLAMP) tc =  DRV_STEER_CLAMP;
+            if (tc < -DRV_STEER_CLAMP) tc = -DRV_STEER_CLAMP;
+            steer_cmd = (int32_t)tc;
+            if (phase < 18) {
+                /* reverse away (encounter_steering_cmd < 0 drives the reverse path) */
+                throttle = 0;
+                actor->encounter_steering_cmd = (int16_t)(-0xC0);
+                actor->brake_flag = 0;
+                actor->throttle_state = 0;
+                actor->steering_command = steer_cmd;
+                s_prev_steer[slot] = steer_cmd;
+                return 1;
+            }
+            throttle = DRV_THROTTLE_FULL;   /* then pull forward hard */
+        }
+        if (steer_cmd >  DRV_STEER_CLAMP) steer_cmd =  DRV_STEER_CLAMP;
+        if (steer_cmd < -DRV_STEER_CLAMP) steer_cmd = -DRV_STEER_CLAMP;
+        s_prev_steer[slot] = steer_cmd;
+        actor->steering_command       = steer_cmd;
+        actor->encounter_steering_cmd = (int16_t)throttle;
+        actor->brake_flag             = brake;
+        actor->throttle_state         = (uint8_t)(brake ? 1 : 0);
+        return 1;
+    }
+
+    /* ================= NORMAL CONTROL ================= */
+
+    /* --- STEERING: pure pursuit + yaw-rate damping (replaces the banded slam) --- */
+    if (have_target) {
         long target_cmd = (long)herr * (long)s_steer_kp
                         - ((long)yaw_rate * (long)s_steer_kd >> 8);
         if (target_cmd >  DRV_STEER_CLAMP) target_cmd =  DRV_STEER_CLAMP;
         if (target_cmd < -DRV_STEER_CLAMP) target_cmd = -DRV_STEER_CLAMP;
-
-        /* rate-limit per tick */
         long d = target_cmd - (long)steer_cmd;
         if (d >  s_steer_rate) d =  s_steer_rate;
         if (d < -s_steer_rate) d = -s_steer_rate;
         steer_cmd = (int32_t)((long)steer_cmd + d);
     } else {
-        /* no look-ahead (off track / no track): bleed steering toward centre */
-        steer_cmd -= steer_cmd / 8;
+        steer_cmd -= steer_cmd / 8;   /* no aim point: bleed toward centre */
     }
     if (steer_cmd >  DRV_STEER_CLAMP) steer_cmd =  DRV_STEER_CLAMP;
     if (steer_cmd < -DRV_STEER_CLAMP) steer_cmd = -DRV_STEER_CLAMP;
     s_prev_steer[slot] = steer_cmd;
     actor->steering_command = steer_cmd;
 
-    /* --- THROTTLE / BRAKE ---
-     * The profile at the current span (frac) is already backward-braked, so it
-     * dips on a corner APPROACH -> braking points fall out naturally. But the
-     * fraction is only meaningful once vmax reflects the true top speed, so we
-     * launch flat-out until the car has run a straight (frac>=0.97) for a while. */
-    int throttle;
-    uint8_t brake = 0;
-
+    /* --- THROTTLE / BRAKE (backward-braked profile => braking points free) --- */
     if (frac >= 0.97) {
         s_straight_ticks[slot]++;
         if (s_straight_ticks[slot] >= 20) s_vmax_ready[slot] = 1;
     }
 
     if (!s_vmax_ready[slot] || frac >= 0.97) {
-        /* Launch / straight: floor it. This both drives the car and lets vmax
-         * converge to the car's real flat-out speed for the profile below. */
-        throttle = DRV_THROTTLE_FULL;
+        throttle = DRV_THROTTLE_FULL;   /* launch/straight: floor it (also builds vmax) */
         s_thr_integ[slot] = 0.0;
     } else {
-        /* Corner: hold a fraction of the (now real) top speed. PI on the
-         * speed-fraction error; lift then brake as the car goes over. */
         double err_frac = (vmax > 1.0) ? (target_speed - v_abs) / vmax : 0.0;
         if (err_frac > s_thr_deadband) {
             s_thr_integ[slot] += err_frac;
@@ -406,13 +519,23 @@ int td5_ai_driver_tick(int slot)
         } else if (err_frac < -s_thr_deadband) {
             s_thr_integ[slot] = 0.0;
             throttle = 0;
-            if (err_frac < -0.08) brake = 1;   /* meaningfully too fast -> brake */
+            if (err_frac < -0.08) brake = 1;
         } else {
             s_thr_integ[slot] = 0.0;
-            throttle = (int)((double)s_thr_kp * 0.20);  /* gentle maintenance */
+            throttle = (int)((double)s_thr_kp * 0.20);
             if (throttle > DRV_THROTTLE_FULL) throttle = DRV_THROTTLE_FULL;
             if (throttle < 0) throttle = 0;
         }
+    }
+
+    /* --- TRACTION CAP: back off power when the rear is sliding beyond grip, so
+     * a power-on corner exit doesn't snap into a spin. Never touches braking. */
+    if (!brake && throttle > 0 && rslip > s_slip_thresh) {
+        double over = (double)(rslip - s_slip_thresh) / (double)s_slip_range;
+        double k = 1.0 - over;
+        if (k < 0.25) k = 0.25;
+        throttle = (int)((double)throttle * k);
+        if (throttle < 0) throttle = 0;
     }
 
     actor->encounter_steering_cmd = (int16_t)throttle;
@@ -428,4 +551,10 @@ int td5_ai_driver_target_speed(int slot)
     /* Report the target in longitudinal_speed units for the `driver` trace:
      * fraction * this car's running-max top speed. */
     return (int)(s_target_frac_dbg[slot] * s_vmax[slot]);
+}
+
+int td5_ai_driver_rec_state(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    return s_rec_state[slot];
 }

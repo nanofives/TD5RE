@@ -207,6 +207,8 @@ typedef struct TD5_TraceDriverRow {
     int32_t  steering_cmd;   /* command written this tick (+0x30C) */
     int32_t  throttle_cmd;   /* encounter_steering_cmd throttle (+0x33E) */
     uint8_t  brake_flag;     /* +0x36D */
+    int      rec_state;      /* driver recovery FSM: 0=NORMAL,1=AIR,2=SPUN,3=STUCK */
+    int32_t  rear_slip;      /* rear_axle_slip_excess (+0x320) for traction-cap tuning */
 } TD5_TraceDriverRow;
 
 void td5_trace_emit_driver  (uint32_t frame, uint32_t tick, const char *stage,
