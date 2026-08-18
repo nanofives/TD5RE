@@ -4004,11 +4004,17 @@ void td5_render_apply_page_blend_preset(int page_id)
     if (s_in_sky_draw)           return; /* preserve caller's SKY preset */
     if (t == 3)      p = TD5_PRESET_ADDITIVE;
     else if (t == 2) p = TD5_PRESET_TRANSLUCENT_ANISO;
-    /* [foliage AA] A type-1 cutout page drawn as a BILLBOARD (tree/sign) promotes to
-     * the same blended/AA preset as type 2, so its hard-cut silhouette gets wrapper
-     * edge-AA. Non-billboard type-1 world geometry (s_bb_foliage_aa==0) stays
-     * OPAQUE_LINEAR — faithful hard cutout, unchanged. */
-    else if (t == 1 && s_bb_foliage_aa) p = TD5_PRESET_TRANSLUCENT_ANISO;
+    /* [foliage occlusion 2026-08-17] A type-1 cutout page drawn as a BILLBOARD
+     * (tree/sign) uses FOLIAGE_CUTOUT: alpha-tested OPAQUE with z-write ON, so it
+     * correctly occludes houses/geometry behind it and is occluded in front. This
+     * REPLACES the earlier TRANSLUCENT_ANISO promotion (blend on, z-write OFF),
+     * which left no depth -> houses drawn afterward painted over the tree and the
+     * sparse canopy blended the background through (the "trees don't render over
+     * the houses behind them" bug). Edge cleanup (dither merge, alpha-weighted RGB
+     * so there's no black top-border fringe) is done shader-side in SampleFoliageAA,
+     * still gated by the same foliage-AA signal. Non-billboard type-1 world geometry
+     * (s_bb_foliage_aa==0) stays OPAQUE_LINEAR — faithful hard cutout, unchanged. */
+    else if (t == 1 && s_bb_foliage_aa) p = TD5_PRESET_FOLIAGE_CUTOUT;
     else             p = TD5_PRESET_OPAQUE_LINEAR;
     /* [dynamic-traffic] A fading car body must alpha-blend regardless of page
      * type. Additive pages keep ONE/ONE (the fade is folded into their RGB by

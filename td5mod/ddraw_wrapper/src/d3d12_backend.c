@@ -3277,11 +3277,18 @@ void Backend_UpdateFogCB(void)
      * else (the D3D11 gate's current_tex_has_alpha is unusable here — the game's
      * textures are all flagged r5g6b5_source, so it is 0 for every draw). Opaque
      * sky/road/car/HUD draws don't match and keep foliageAA=0 (byte-identical). */
+    /* [foliage occlusion 2026-08-17] Two foliage states now feed the AA sampler,
+     * both keyed by the unique alpha_ref==0x80 colour-key discriminator:
+     *   - TRANSLUCENT_ANISO  (type-2 pages): blend ON,  z-write OFF  (unchanged).
+     *   - FOLIAGE_CUTOUT     (type-1 billboards): blend OFF, z-write ON — the new
+     *     alpha-tested-opaque path so trees occlude houses behind them. The first
+     *     clause is byte-identical to the old gate, so type-2 is unaffected. */
     fog.foliageAA = (g_backend.foliage_aa_enabled &&
                      st->alpha_test_enable &&
-                     st->blend_enable &&
-                     !st->z_write &&
-                     st->alpha_ref == 0x80) ? 1.0f : 0.0f;
+                     st->alpha_ref == 0x80 &&
+                     ((st->blend_enable && !st->z_write) ||   /* TRANSLUCENT_ANISO */
+                      (!st->blend_enable && st->z_write)))    /* FOLIAGE_CUTOUT    */
+                    ? 1.0f : 0.0f;
     fog.carSun[0] = s_car_sun_dir[0];              /* [CAR SUN] frame sun dir (N.L) */
     fog.carSun[1] = s_car_sun_dir[1];
     fog.carSun[2] = s_car_sun_dir[2];
