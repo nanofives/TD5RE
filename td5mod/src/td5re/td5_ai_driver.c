@@ -40,6 +40,7 @@
 #include "td5_config.h"     /* td5_env_int/float/int_opt */
 #include "td5_race_state.h" /* td5_game_get_slot_state / _get_actor */
 #include "td5_track.h"      /* span geometry + laneassist_target look-ahead */
+#include "td5_ai.h"         /* td5_ai_route_speed_hint (authored corner speeds) */
 #include "../../../re/include/td5_actor_struct.h"
 
 #include <stdlib.h>
@@ -148,6 +149,7 @@ static double s_pass_frac;       /* [P3] overtake aim offset as a fraction of ha
 static double s_offset_clamp;    /* [P3] max lateral offset as a fraction of half-width  */
 static int    s_overtake_ticks;  /* [P3] dwell ticks a pass side stays committed         */
 static int    s_leash_max;       /* [P4] hidden catch-up: max % speed boost for laggards  */
+static int    s_use_route;       /* [rework] use authored route speed hints in the profile */
 
 static void driver_read_knobs(void)
 {
@@ -162,10 +164,17 @@ static void driver_read_knobs(void)
     s_steer_kp     = td5_env_int  ("TD5RE_AI_DRIVER_STEER_KP",    110,  8, 800);
     s_steer_kd     = td5_env_int  ("TD5RE_AI_DRIVER_STEER_KD",     24,  0, 400);
     s_steer_rate   = td5_env_int  ("TD5RE_AI_DRIVER_STEER_RATE", 0x9000, 0x800, DRV_STEER_CLAMP);
+    /* Corner speed profile (recalibrated 2026-08-18 after the multi-track A/B
+     * rework): slow HARDER for genuinely sharp corners (loss 55->72, floor
+     * 42->28) and brake EARLIER (brake_k 12->40) so the car doesn't arrive too
+     * fast and spin on technical tracks (Tokyo/Kyoto fixed). CURV_SHARP kept at
+     * the default sensitivity so fast sweepers (Sydney) are NOT flagged as
+     * corners -- that preserves open-track pace. Steep-descent tracks with
+     * crests (Blue Ridge) remain a known weak spot -- see the notes. */
     s_curv_sharp   = (double)td5_env_int("TD5RE_AI_DRIVER_CURV_SHARP", 0x2A0, 0x40, 0x800);
-    s_corner_floor = (double)td5_env_int("TD5RE_AI_DRIVER_CORNER_FLOOR", 42, 10, 95) / 100.0;
-    s_corner_loss  = (double)td5_env_int("TD5RE_AI_DRIVER_CORNER_LOSS",  55, 10, 90) / 100.0;
-    s_brake_k      = (double)td5_env_int("TD5RE_AI_DRIVER_BRAKE_K",  12, 1, 400) / 100000.0;
+    s_corner_floor = (double)td5_env_int("TD5RE_AI_DRIVER_CORNER_FLOOR", 28, 10, 95) / 100.0;
+    s_corner_loss  = (double)td5_env_int("TD5RE_AI_DRIVER_CORNER_LOSS",  72, 10, 90) / 100.0;
+    s_brake_k      = (double)td5_env_int("TD5RE_AI_DRIVER_BRAKE_K",  40, 1, 400) / 100000.0;
     s_accel_k      = (double)td5_env_int("TD5RE_AI_DRIVER_ACCEL_K",   6, 1, 400) / 100000.0;
     s_thr_kp       = td5_env_int  ("TD5RE_AI_DRIVER_THR_KP",       900, 50, 4000);
     s_thr_deadband = (double)td5_env_int("TD5RE_AI_DRIVER_THR_DEADBAND", 3, 0, 40) / 100.0;
@@ -176,6 +185,8 @@ static void driver_read_knobs(void)
     s_offset_clamp = (double)td5_env_int("TD5RE_AI_DRIVER_OFFSET_CLAMP",70, 10, 95) / 100.0;
     s_overtake_ticks = td5_env_int("TD5RE_AI_DRIVER_OVERTAKE_TICKS", 40, 5, 200);
     s_leash_max      = td5_env_int("TD5RE_AI_DRIVER_LEASH", 3, 0, 15); /* hidden catch-up, % ; 0 = off */
+    /* authored route speeds ON by default; TD5RE_AI_DRIVER_NOROUTE=1 disables (A/B). */
+    s_use_route      = !td5_env_flag_off("TD5RE_AI_DRIVER_NOROUTE");
 }
 
 /* ------------------------------------------------------------------------
@@ -219,6 +230,10 @@ static int      s_launched[TD5_MAX_RACER_SLOTS];    /* car has moved off the lin
  * every tick. */
 static double   s_lane_offset[TD5_MAX_RACER_SLOTS];
 static int      s_overtake_dwell[TD5_MAX_RACER_SLOTS]; /* ticks left committed to a pass side */
+/* [P5 drive-test] wall-grind escape: leaky counter of ticks in wall contact.
+ * When it builds up the car peels back to the racing-line centre and eases off,
+ * so a single bad corner (e.g. Moscow span 412) can't turn into a long grind. */
+static int      s_wall_cnt[TD5_MAX_RACER_SLOTS];
 
 static int      s_pt_valid;          /* table built for this race             */
 
@@ -290,6 +305,28 @@ static void driver_build_path_table(void)
         if (sharp > 1.0) sharp = 1.0;
         double cap = 1.0 - s_corner_loss * sharp;
         if (cap < s_corner_floor) cap = s_corner_floor;
+
+        /* [AI DRIVER MODEL 2026-08-18] Prefer the AUTHORED per-corner speed
+         * (route byte[2]) where the track ships one -- the designers' hand-tuned
+         * speed that the faithful AI uses to drive every track well, including
+         * the twisty/downhill ones the curvature heuristic mis-judges. Use it
+         * as the primary per-span cap, keeping the curvature value as the cap on
+         * tracks with no route data (custom/TD6). The backward/forward passes
+         * below still add anticipatory braking + exit smoothing on top. */
+        if (s_use_route) {
+            int hint = td5_ai_route_speed_hint(s);
+            if (hint >= 0) {
+                double authored = (double)hint / 255.0;
+                if (authored < s_corner_floor) authored = s_corner_floor;
+                if (authored > 1.0) authored = 1.0;
+                /* Take the MORE CONSERVATIVE of the designer speed and the
+                 * geometry estimate: the authored value catches corners the
+                 * curvature heuristic mis-judges (Blue Ridge downhill), and the
+                 * curvature value catches corners where the authored speed is
+                 * too high for the driver's line (Newcastle). */
+                if (authored < cap) cap = authored;
+            }
+        }
         curv_cap[s] = cap;
     }
 
@@ -348,6 +385,7 @@ void td5_ai_driver_race_init(void)
         s_launched[s]       = 0;
         s_lane_offset[s]    = 0.0;
         s_overtake_dwell[s] = 0;
+        s_wall_cnt[s]       = 0;
     }
     if (td5_ai_driver_mode() != TD5_AI_MODE_DRIVER) { driver_free_path_table(); return; }
     driver_build_path_table();
@@ -395,12 +433,13 @@ static int driver_angle_from_vec(double dx, double dz)
  * right is the car's unit rightward vector in world (x,z); fore/aft comes from
  * span ordering, so only the lateral (right) projection is needed here. */
 static void driver_racecraft(int slot, TD5_Actor *self,
-                             double rightx, double rightz,
+                             double fwdx, double fwdz, double rightx, double rightz,
                              double v_abs, double vmax, double straightness,
-                             double *out_cap, double *out_offset)
+                             double *out_cap, double *out_offset, double *out_maxoff)
 {
     *out_cap = 1.0;
     *out_offset = 0.0;
+    *out_maxoff = 0.0;
 
     int ring = (s_pt_valid && s_pt_count > 0) ? s_pt_count : td5_track_get_ring_length();
     if (ring <= 2) return;
@@ -417,22 +456,34 @@ static void driver_racecraft(int slot, TD5_Actor *self,
       } }
     double block_w = 0.60 * hw;
 
+    /* [P5 drive-test fix] Hard cap on how far off the racing line any car may
+     * aim, so the offset can NEVER push the aim point past a rail (the reported
+     * "leans into the wall" / "spawns off the road on Sydney"). 0.40*half-width
+     * from centre always leaves a comfortable margin to the rail. */
+    *out_maxoff = 0.40 * hw;
+
     /* [P4] Per-driver preferred line across the road (route variety) -- replaces
      * P3's static third-bias. Each driver favours its own lateral fraction, so
      * the field spreads out and cars don't all converge on one line.
      * [P5] Scaled by straightness: cars run their preferred line on straights /
-     * gentle bends but converge toward the racing line through tight corners,
-     * where an off-centre line would clip the walls (Newcastle/BlueRidge). */
-    double baseline = (double)s_persona[slot].line_bias * 0.32 * hw * straightness;
+     * gentle bends but converge toward the racing line through tight corners.
+     * Magnitude reduced (0.32 -> 0.18) after the drive-test showed cars leaning
+     * too far and clipping walls. */
+    double baseline = (double)s_persona[slot].line_bias * 0.18 * hw * straightness;
 
     double self_x = (double)self->world_pos.x;
     double self_z = (double)self->world_pos.z;
 
-    int    have_ahead = 0;
-    int    ahead_gap  = 999;
-    double ahead_v    = 0.0;
-    double ahead_lat  = 0.0;
-    int    left_block = 0, right_block = 0;   /* a peer sitting in the pass corridor */
+    /* Metric proximity: project each other car onto the heading (fwd) / right
+     * frame. This works for racers AND traffic uniformly -- span-based fore/aft
+     * broke for traffic, which runs a different lane path (the reported "not
+     * reactive to traffic"). */
+    double follow_dist = 14.0 * hw;      /* how far ahead a car starts to matter */
+    int    have_ahead  = 0;
+    double ahead_dist  = follow_dist;
+    double ahead_v     = 0.0;
+    double ahead_lat   = 0.0;
+    int    left_block = 0, right_block = 0;   /* a car sitting in the pass corridor */
 
     int total = td5_game_get_total_actor_count();
     for (int j = 0; j < total && j < TD5_MAX_TOTAL_ACTORS; j++) {
@@ -443,42 +494,30 @@ static void driver_racecraft(int slot, TD5_Actor *self,
 
         double rx = (double)p->world_pos.x - self_x;
         double rz = (double)p->world_pos.z - self_z;
+        double fwd = rx * fwdx + rz * fwdz;       /* + = ahead of me */
         double lat = rx * rightx + rz * rightz;   /* + = to my right */
         double latabs = lat < 0 ? -lat : lat;
-
-        int pspan = (int)p->track_span_normalized;
-        int d = pspan - self_span;
-        if (d >  ring / 2) d -= ring;
-        if (d < -ring / 2) d += ring;
-
         double pv = (double)p->longitudinal_speed;
         if (pv < 0) pv = -pv;
 
-        /* nearest car ahead, roughly in my path */
-        if (d > 0 && d <= s_ahead_spans && latabs < block_w) {
-            if (d < ahead_gap) { ahead_gap = d; ahead_v = pv; ahead_lat = lat; have_ahead = 1; }
+        if (fwd > 0.0 && fwd < ahead_dist && latabs < block_w) {
+            ahead_dist = fwd; ahead_v = pv; ahead_lat = lat; have_ahead = 1;
         }
-        /* pass-corridor occupancy (from just behind to a bit ahead, out to a lane) */
-        if (d > -2 && d <= s_ahead_spans && latabs >= 0.20 * hw && latabs <= 1.05 * hw) {
-            if (lat > 0) right_block = 1; else left_block = 1;
+        if (fwd > -3.0 * hw && fwd < follow_dist &&
+            latabs >= 0.20 * hw && latabs <= 1.20 * hw) {
+            if (lat > 0.0) right_block = 1; else left_block = 1;
         }
     }
 
     if (!have_ahead) { s_overtake_dwell[slot] = 0; *out_offset = baseline; return; }
 
-    /* [P4] Aggression tunes how small a speed deficit is worth a pass: an
-     * aggressive driver pulls out for a car only slightly slower; a cautious
-     * one waits for a clear speed advantage. */
     double aggr = (double)s_persona[slot].aggression;
-    /* pass line also converges toward the racing line in tight corners (but not
-     * to zero -- overtakes into corners still happen). */
     double pass_mag  = s_pass_frac * hw * (0.35 + 0.65 * straightness);
-    double slower_thr = 0.99 - 0.07 * aggr;    /* ~0.99 (cautious) .. ~0.92 (aggressive) */
+    double slower_thr = 1.02 - 0.06 * aggr;    /* pass a car that's even marginally slower */
     int    slower    = ahead_v < v_abs * slower_thr;
-    int    very_slow = ahead_v < vmax * 0.15;   /* stopped / crawling hazard */
+    int    very_slow = ahead_v < vmax * 0.30;   /* traffic / crawling -- be eager to pass */
 
     if (s_overtake_dwell[slot] > 0) {
-        /* stay committed to the side we already chose (sign of the live offset) */
         double side = (s_lane_offset[slot] >= 0.0) ? 1.0 : -1.0;
         *out_offset = side * pass_mag;
         *out_cap = 1.0;
@@ -486,9 +525,15 @@ static void driver_racecraft(int slot, TD5_Actor *self,
         return;
     }
 
-    /* choose the side away from the car ahead; require it clear */
-    double want_side = (ahead_lat <= 0.0) ? 1.0 : -1.0;   /* peer left -> pass right */
+    /* prefer the side away from the car ahead; if that side is blocked, try the
+     * other side before giving up and following. */
+    double want_side = (ahead_lat <= 0.0) ? 1.0 : -1.0;   /* car to my left -> pass right */
     int side_clear = (want_side > 0.0) ? !right_block : !left_block;
+    if (!side_clear) {
+        double alt = -want_side;
+        int alt_clear = (alt > 0.0) ? !right_block : !left_block;
+        if (alt_clear) { want_side = alt; side_clear = 1; }
+    }
 
     if ((slower || very_slow) && side_clear) {
         *out_offset = want_side * pass_mag;
@@ -497,17 +542,21 @@ static void driver_racecraft(int slot, TD5_Actor *self,
         return;
     }
 
-    /* can't pass -> follow the car ahead: cap speed to it, scaled by the gap so
-     * we tuck in a car-length back instead of punting it. */
-    double gapf = 0.55 + 0.055 * (double)ahead_gap;   /* gap 1 -> ~0.6, gap 8 -> ~1.0 */
+    /* Can't pass -> follow, but keep momentum (don't crawl behind slow traffic;
+     * that was the "holds off its speed"): cap scaled by how close we are. */
+    double gapf = 0.60 + 0.40 * (ahead_dist / follow_dist);   /* close ~0.6, far ~1.0 */
     if (gapf > 1.0) gapf = 1.0;
     double cap = (vmax > 1.0) ? (ahead_v / vmax) * gapf : 1.0;
-    if (ahead_gap <= 1) { double c2 = (ahead_v / vmax) * 0.85; if (c2 < cap) cap = c2; }
-    if (very_slow && cap > 0.25) cap = 0.25;   /* hazard with no room: slow hard */
-    if (cap < 0.05) cap = 0.05;
+    if (cap < 0.45) cap = 0.45;                /* momentum floor -> take the next gap */
     if (cap > 1.0)  cap = 1.0;
+    /* but if we're right on the gearbox of a much slower car, ease hard to avoid
+     * rear-ending it (overrides the momentum floor). */
+    if (ahead_dist < 3.0 * hw && ahead_v < v_abs * 0.6) {
+        double c2 = (ahead_v / vmax) * 0.9;
+        if (c2 < cap) cap = (c2 < 0.12) ? 0.12 : c2;
+    }
     *out_cap = cap;
-    *out_offset = baseline;   /* hold your own lane while tucked in behind */
+    *out_offset = baseline;
 }
 
 int td5_ai_driver_tick(int slot)
@@ -554,11 +603,22 @@ int td5_ai_driver_tick(int slot)
     int lookahead = s_look_base + (int)(speed_frac_now * (double)s_look_speed);
     if (lookahead < 1) lookahead = 1;
 
+    /* Aim at the ROAD CENTRE (the racing line), NOT the car's current grid
+     * sub-lane: a car that starts/ends in an outer lane must converge to the
+     * line, else it keeps aiming near a rail and grinds the wall (seen on
+     * Sydney for the outer grid slots). The per-driver line offset (racecraft,
+     * clamped) then adds variety from the centre. */
+    int lane_cnt = td5_track_get_span_lane_count((int)actor->track_span_normalized);
+    int aim_lane = (lane_cnt > 0) ? (lane_cnt / 2) : (int)actor->track_sub_lane_index;
     int tx = 0, tz = 0;
+    /* fork_diverge=0: don't scout / peel toward a side branch early. The AI was
+     * half-committing to tight fork branches with too short a window and
+     * clipping the divider wall; staying on the main racing line through forks
+     * is cleaner (branch route-variety deferred). */
     int have_target = td5_track_laneassist_target((int)actor->track_span_raw,
-                                                  (int)actor->track_sub_lane_index,
+                                                  aim_lane,
                                                   lookahead, /*fork_commit=*/1,
-                                                  /*fork_diverge=*/1, /*lane_band=*/1,
+                                                  /*fork_diverge=*/0, /*lane_band=*/1,
                                                   &tx, &tz);
     int herr = 0;
     if (have_target) {
@@ -678,11 +738,35 @@ int td5_ai_driver_tick(int slot)
         double straightness = (frac - 0.55) / 0.45;
         if (straightness < 0.0) straightness = 0.0;
         if (straightness > 1.0) straightness = 1.0;
-        double off_target = 0.0;
-        driver_racecraft(slot, actor, rightx, rightz,
-                         v_abs, vmax, straightness, &cap_frac, &off_target);
-        /* ease the lateral offset (anti-yank) */
-        s_lane_offset[slot] += (off_target - s_lane_offset[slot]) * 0.15;
+        double fwdx = sin(theta), fwdz = cos(theta);   /* heading unit (x,z) */
+        double off_target = 0.0, max_off = 0.0;
+        driver_racecraft(slot, actor, fwdx, fwdz, rightx, rightz,
+                         v_abs, vmax, straightness, &cap_frac, &off_target, &max_off);
+
+        /* [P5 drive-test] wall-grind escape. Touching a rail bumps a leaky
+         * counter; once it builds, force the aim back to the racing-line centre
+         * and clamp the speed so the car peels off the wall instead of grinding
+         * along it (fixes the Moscow span-412 grind and hardens every track). */
+        if (actor->track_contact_flag != 0) {
+            if (s_wall_cnt[slot] < 30) s_wall_cnt[slot] += 3;
+        } else if (s_wall_cnt[slot] > 0) {
+            s_wall_cnt[slot]--;
+        }
+        if (s_wall_cnt[slot] >= 6) {
+            off_target = 0.0;                 /* peel to centre line */
+            double wc = 0.55;                 /* ease off while escaping */
+            if (wc < cap_frac) cap_frac = wc;
+        }
+
+        /* ease the lateral offset (anti-yank); snap harder toward centre while
+         * escaping a wall so it actually leaves the rail. */
+        double ease = (s_wall_cnt[slot] >= 6) ? 0.35 : 0.15;
+        s_lane_offset[slot] += (off_target - s_lane_offset[slot]) * ease;
+        /* hard-clamp so the aim point can never leave the drivable width */
+        if (max_off > 0.0) {
+            if (s_lane_offset[slot] >  max_off) s_lane_offset[slot] =  max_off;
+            if (s_lane_offset[slot] < -max_off) s_lane_offset[slot] = -max_off;
+        }
         /* shift the aim point sideways and recompute the heading error */
         double atx = (double)tx + s_lane_offset[slot] * rightx;
         double atz = (double)tz + s_lane_offset[slot] * rightz;
@@ -774,6 +858,24 @@ int td5_ai_driver_tick(int slot)
             throttle = (int)((double)s_thr_kp * 0.20);
             if (throttle > DRV_THROTTLE_FULL) throttle = DRV_THROTTLE_FULL;
             if (throttle < 0) throttle = 0;
+        }
+    }
+
+    /* [P5 drive-test] STEERING-SATURATION BRAKE. If the controller is demanding
+     * near-full steering lock, the car is at (or past) its cornering limit --
+     * it entered the corner too fast and is understeering wide. Lift, and brake
+     * once pinned, so it slows until full lock can actually hold the line rather
+     * than running into the outer wall (Moscow span-412 hairpin). Proactive; the
+     * profile's curvature estimate under-slowed this corner. */
+    {
+        long sc = steer_cmd < 0 ? -steer_cmd : steer_cmd;
+        double sat = (double)sc / (double)DRV_STEER_CLAMP;
+        /* Default OFF: on twisty tracks steering is saturated most of the time,
+         * so this braked constantly and crawled the car (Blue Ridge/Tokyo). Its
+         * only clear win was one Moscow hairpin -- not worth the regression. */
+        if (td5_env_flag_off("TD5RE_AI_DRIVER_SATBRAKE") && sat > 0.80) {
+            throttle = 0;
+            if (sat > 0.90 && v_abs > 0.15 * vmax) brake = 1;
         }
     }
 

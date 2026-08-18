@@ -5160,6 +5160,25 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
                 r.span_high          = *(int16_t *)(a + 0x086);
                 r.track_contact_flag = actor->track_contact_flag;
                 r.wheel_contact_mask = actor->damage_lockout;
+                /* [A/B harness] distance to the nearer rail (track units) by
+                 * projecting the car onto this span's left->right rail axis.
+                 * <0 = off the rail span / geometry unavailable. Works for any
+                 * AI mode (reads only the actor position + track geometry). */
+                r.wall_clear = -1;
+                {
+                    int lx, lz, rx, rz;
+                    if (td5_track_get_span_route_frame((int)r.span_norm, &lx, &lz, &rx, &rz)) {
+                        double axx = (double)(rx - lx), axz = (double)(rz - lz);
+                        double len = sqrt(axx * axx + axz * axz);
+                        if (len > 1.0) {
+                            double cxx = (double)(actor->world_pos.x >> 8) - (double)lx;
+                            double czz = (double)(actor->world_pos.z >> 8) - (double)lz;
+                            double t = (cxx * axx + czz * axz) / len;   /* along axis */
+                            double clr = (t < len - t) ? t : (len - t); /* to nearer rail */
+                            r.wall_clear = (int32_t)clr;
+                        }
+                    }
+                }
                 td5_trace_emit_track(frame, sim_tick, stage, &r);
             }
 

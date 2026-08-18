@@ -80,6 +80,23 @@ const uint8_t *td5_ai_route_table(int32_t handle)
     return g_route_tables[handle - 1];
 }
 
+/* [AI DRIVER MODEL 2026-08-18] Authored per-span speed hint from the PRIMARY
+ * (LEFT) route table: byte[2] of each 3-byte span record, 0..255 (higher =
+ * faster; it is the same value the faithful throttle-threshold path consumes,
+ * so it encodes the designers' hand-tuned speed for every corner). The driver
+ * model uses this as its corner-speed reference so it inherits proven per-track
+ * pace instead of guessing from curvature. Returns -1 when no route table is
+ * loaded or the span is out of range (e.g. custom tracks) -> caller falls back
+ * to its curvature heuristic. */
+int td5_ai_route_speed_hint(int span_normalized)
+{
+    const uint8_t *t = g_route_tables[0];
+    if (!t || span_normalized < 0) return -1;
+    size_t off = (size_t)(unsigned)span_normalized * 3u + 2u;
+    if (off >= g_route_table_sizes[0]) return -1;
+    return (int)t[off];
+}
+
 static int32_t  g_route_state_storage[TD5_MAX_TOTAL_ACTORS * RS_STRIDE_DWORDS];
 
 /* Public accessor used by td5_physics.c */

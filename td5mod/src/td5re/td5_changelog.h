@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 18" },
+    { CL_ITEM,    "DRIVER AI is now steady on twisty + hilly tracks: it uses" },
+    { CL_ITEM,    "  each corner's intended speed so it stops spinning off or" },
+    { CL_ITEM,    "  grinding walls (Blue Ridge, Tokyo, Kyoto). Reacts to" },
+    { CL_ITEM,    "  traffic and no longer gets stuck at the odd corner." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 17" },
     { CL_ITEM,    "DRIVER AI: fixed opponents driving too slowly, and cars" },
     { CL_ITEM,    "  clipping walls on tight tracks (Newcastle/Blue Ridge)." },

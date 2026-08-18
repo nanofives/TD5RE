@@ -117,6 +117,7 @@ typedef struct TD5_TraceTrackRow {
     int16_t span_raw, span_norm, span_accum, span_high;
     uint8_t track_contact_flag;
     uint8_t wheel_contact_mask;
+    int32_t wall_clear;   /* distance (track units) to the nearer rail; <0 = off track / unknown */
 } TD5_TraceTrackRow;
 
 typedef struct TD5_TraceControlsRow {

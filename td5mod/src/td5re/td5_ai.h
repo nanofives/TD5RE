@@ -92,6 +92,11 @@ int32_t *td5_ai_get_route_state(int slot);
  * "none" handle (0) or any out-of-range value, so existing `if (!table)`
  * guards keep working. */
 const uint8_t *td5_ai_route_table(int32_t handle);
+
+/* [AI DRIVER MODEL] Authored per-span speed hint (primary/LEFT route byte[2],
+ * 0..255; higher = faster), or -1 if unavailable. Used by td5_ai_driver.c to
+ * seed its corner-speed profile from the designers' tuned per-corner speeds. */
+int td5_ai_route_speed_hint(int span_normalized);
 /* Correct an AI actor's spawn heading to match the LEFT.TRK route byte.
  * Called from td5_game.c after td5_track_compute_heading() for AI slots.
  * Prevents the recovery-script loop that keeps throttle=0 forever. */
