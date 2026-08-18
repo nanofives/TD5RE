@@ -607,6 +607,10 @@ void Screen_RaceOptions(void);
  * follow. */
 enum {
     RO_OPPONENTS = 0, RO_TRAFFIC, RO_POLICE, RO_DIFFICULTY,
+    /* [AI DRIVER MODEL 2026-08-17] Opponent-AI mode: CLASSIC / SMART / DRIVER.
+     * Edits g_td5.ini.ai_model (see td5_ai_driver.h). Sits with DIFFICULTY as
+     * the other opponent-behaviour lever. */
+    RO_AI_MODEL,
     /* [SP DRAG DISTANCE 2026-07-23] Drag-only DISTANCE preset (SHORT/MEDIUM/
      * LONG/EPIC), matching the MP drag DISTANCE option. Edits g_td5.ini.drag_length
      * (read by drag_length_level() for SP); MP reads mp_mode_config.drag_length. */
@@ -808,6 +812,7 @@ extern int             s_game_option_checkpoint_timers;
 extern int             s_game_option_collisions;
 extern int             s_game_option_powerups;   /* [ITEM CHAOS 2026-07-04] 0=OFF 1=CASUAL 2=CHAOS */
 extern int             s_game_option_laneassist;
+extern int             s_game_option_ai_model;   /* [AI DRIVER MODEL] 0=CLASSIC,1=SMART,2=DRIVER */
 extern int             s_game_option_difficulty;
 extern int             s_game_option_dynamics;
 extern int             s_game_option_car_toughness;   /* [TOUGHNESS OFF 2026-07-04] 0=Low 1=Medium 2=High 3=Off */

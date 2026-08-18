@@ -16,6 +16,7 @@
 #include "td5_sound.h"
 #include "td5_input.h"
 #include "td5_ai.h"
+#include "td5_ai_driver.h"   /* [AI DRIVER MODEL] driver trace-row accessors */
 #include "td5_asset.h"
 #include "td5_physics.h"
 #include "td5_render.h"
@@ -5108,7 +5109,8 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
         td5_trace_active(TD5_TRACE_MOD_TRACK,    stage_bit) ||
         td5_trace_active(TD5_TRACE_MOD_CONTROLS, stage_bit) ||
         td5_trace_active(TD5_TRACE_MOD_PROGRESS, stage_bit) ||
-        td5_trace_active(TD5_TRACE_MOD_ROTATION, stage_bit);
+        td5_trace_active(TD5_TRACE_MOD_ROTATION, stage_bit) ||
+        td5_trace_active(TD5_TRACE_MOD_DRIVER,   stage_bit);
 
     if (any_slot_module) {
         for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
@@ -5158,6 +5160,25 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
                 r.span_high          = *(int16_t *)(a + 0x086);
                 r.track_contact_flag = actor->track_contact_flag;
                 r.wheel_contact_mask = actor->damage_lockout;
+                /* [A/B harness] distance to the nearer rail (track units) by
+                 * projecting the car onto this span's left->right rail axis.
+                 * <0 = off the rail span / geometry unavailable. Works for any
+                 * AI mode (reads only the actor position + track geometry). */
+                r.wall_clear = -1;
+                {
+                    int lx, lz, rx, rz;
+                    if (td5_track_get_span_route_frame((int)r.span_norm, &lx, &lz, &rx, &rz)) {
+                        double axx = (double)(rx - lx), axz = (double)(rz - lz);
+                        double len = sqrt(axx * axx + axz * axz);
+                        if (len > 1.0) {
+                            double cxx = (double)(actor->world_pos.x >> 8) - (double)lx;
+                            double czz = (double)(actor->world_pos.z >> 8) - (double)lz;
+                            double t = (cxx * axx + czz * axz) / len;   /* along axis */
+                            double clr = (t < len - t) ? t : (len - t); /* to nearer rail */
+                            r.wall_clear = (int32_t)clr;
+                        }
+                    }
+                }
                 td5_trace_emit_track(frame, sim_tick, stage, &r);
             }
 
@@ -5192,6 +5213,23 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
                 r.world_y       = actor->world_pos.y;
                 r.vel_y         = actor->linear_velocity_y;
                 td5_trace_emit_rotation(frame, sim_tick, stage, &r);
+            }
+
+            if (td5_trace_active(TD5_TRACE_MOD_DRIVER, stage_bit)) {
+                /* [AI DRIVER MODEL] target-vs-actual + command outputs for the
+                 * driver-model calibration harness (P0: target_speed is 0). */
+                TD5_TraceDriverRow r;
+                r.slot         = i;
+                r.ai_mode      = td5_ai_driver_mode();
+                r.owned        = td5_ai_driver_owns_slot(i);
+                r.target_speed = td5_ai_driver_target_speed(i);
+                r.long_speed   = actor->longitudinal_speed;
+                r.steering_cmd = actor->steering_command;
+                r.throttle_cmd = actor->encounter_steering_cmd;
+                r.brake_flag   = actor->brake_flag;
+                r.rec_state    = td5_ai_driver_rec_state(i);
+                r.rear_slip    = actor->rear_axle_slip_excess;
+                td5_trace_emit_driver(frame, sim_tick, stage, &r);
             }
 
             if (td5_trace_active(TD5_TRACE_MOD_PROGRESS, stage_bit)) {

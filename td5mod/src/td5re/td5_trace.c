@@ -45,7 +45,7 @@ static ModuleFile s_modules[] = {
       "frame,sim_tick,stage,slot,vel_x,vel_y,vel_z,long_speed,lat_speed,front_slip,rear_slip",
       "TD5RE_TRACE_MOTION_PATH",   NULL, NULL },
     { TD5_TRACE_MOD_TRACK,    "track",    "track",
-      "frame,sim_tick,stage,slot,span_raw,span_norm,span_accum,span_high,track_contact,wheel_mask",
+      "frame,sim_tick,stage,slot,span_raw,span_norm,span_accum,span_high,track_contact,wheel_mask,wall_clear",
       "TD5RE_TRACE_TRACK_PATH",    NULL, NULL },
     { TD5_TRACE_MOD_CONTROLS, "controls", "controls",
       "frame,sim_tick,stage,slot,slot_state,steering,engine,gear,vehicle_mode",
@@ -68,6 +68,9 @@ static ModuleFile s_modules[] = {
     { TD5_TRACE_MOD_SOUND,    "sound",    "sound",
       "frame,sim_tick,stage,slot,cop_siren,any_siren",
       "TD5RE_TRACE_SOUND_PATH",    NULL, NULL },
+    { TD5_TRACE_MOD_DRIVER,   "driver",   "driver",
+      "frame,sim_tick,stage,slot,ai_mode,owned,target_speed,long_speed,steering_cmd,throttle_cmd,brake_flag,rec_state,rear_slip",
+      "TD5RE_TRACE_DRIVER_PATH",   NULL, NULL },
 };
 static const int s_module_count = (int)(sizeof(s_modules) / sizeof(s_modules[0]));
 
@@ -89,6 +92,7 @@ static const struct { unsigned int mod; unsigned int stages; } s_module_stages[]
     { TD5_TRACE_MOD_ROTATION, TD5_TRACE_STG_PRE_PHYSICS | TD5_TRACE_STG_POST_PHYSICS },
     { TD5_TRACE_MOD_CAMERA,   TD5_TRACE_STG_POST_CAMERA },
     { TD5_TRACE_MOD_SOUND,    TD5_TRACE_STG_POST_AI },
+    { TD5_TRACE_MOD_DRIVER,   TD5_TRACE_STG_POST_AI | TD5_TRACE_STG_PRE_PHYSICS | TD5_TRACE_STG_POST_PHYSICS },
 };
 
 /* -------- runtime state ------------------------------------------------- */
@@ -195,6 +199,7 @@ unsigned int td5_trace_parse_modules(const char *csv)
         { "rotation", TD5_TRACE_MOD_ROTATION },
         { "camera",   TD5_TRACE_MOD_CAMERA   },
         { "sound",    TD5_TRACE_MOD_SOUND    },
+        { "driver",   TD5_TRACE_MOD_DRIVER   },
     };
     return parse_csv_mask(csv, tbl, (int)(sizeof(tbl)/sizeof(tbl[0])),
                           TD5_TRACE_MOD_ALL, "module");
@@ -400,11 +405,12 @@ void td5_trace_emit_track(uint32_t frame, uint32_t tick, const char *stage,
     FILE *fp = fp_for(TD5_TRACE_MOD_TRACK);
     if (!fp || !r) return;
     fprintf(fp,
-            "%u,%u,%s,%d,%d,%d,%d,%d,%u,%u\n",
+            "%u,%u,%s,%d,%d,%d,%d,%d,%u,%u,%d\n",
             (unsigned)frame, (unsigned)tick, stage ? stage : "", r->slot,
             (int)r->span_raw, (int)r->span_norm,
             (int)r->span_accum, (int)r->span_high,
-            (unsigned)r->track_contact_flag, (unsigned)r->wheel_contact_mask);
+            (unsigned)r->track_contact_flag, (unsigned)r->wheel_contact_mask,
+            (int)r->wall_clear);
 }
 
 void td5_trace_emit_controls(uint32_t frame, uint32_t tick, const char *stage,
@@ -482,6 +488,19 @@ void td5_trace_emit_sound(uint32_t frame, uint32_t tick, const char *stage,
     if (!fp) return;
     fprintf(fp, "%u,%u,%s,%d,%d,%d\n",
             frame, tick, stage, r->slot, r->cop_siren, r->any_siren);
+}
+
+void td5_trace_emit_driver(uint32_t frame, uint32_t tick, const char *stage,
+                           const TD5_TraceDriverRow *r)
+{
+    FILE *fp = fp_for(TD5_TRACE_MOD_DRIVER);
+    if (!fp || !r) return;
+    fprintf(fp,
+            "%u,%u,%s,%d,%d,%d,%d,%d,%d,%d,%u,%d,%d\n",
+            (unsigned)frame, (unsigned)tick, stage ? stage : "", r->slot,
+            r->ai_mode, r->owned, r->target_speed, r->long_speed,
+            r->steering_cmd, r->throttle_cmd, (unsigned)r->brake_flag,
+            r->rec_state, r->rear_slip);
 }
 
 /* -------- calls trace --------------------------------------------------- */

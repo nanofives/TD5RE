@@ -20,6 +20,7 @@
  */
 
 #include "td5_ai.h"
+#include "td5_ai_driver.h"  /* [AI DRIVER MODEL] mode gate + per-tick fork */
 #include "td5_bytes.h"
 #include "td5_math_util.h"
 #include "td5_track.h"
@@ -77,6 +78,23 @@ const uint8_t *td5_ai_route_table(int32_t handle)
     if (handle <= ROUTE_TABLE_NONE || handle >= ROUTE_TABLE_COUNT)
         return NULL;
     return g_route_tables[handle - 1];
+}
+
+/* [AI DRIVER MODEL 2026-08-18] Authored per-span speed hint from the PRIMARY
+ * (LEFT) route table: byte[2] of each 3-byte span record, 0..255 (higher =
+ * faster; it is the same value the faithful throttle-threshold path consumes,
+ * so it encodes the designers' hand-tuned speed for every corner). The driver
+ * model uses this as its corner-speed reference so it inherits proven per-track
+ * pace instead of guessing from curvature. Returns -1 when no route table is
+ * loaded or the span is out of range (e.g. custom tracks) -> caller falls back
+ * to its curvature heuristic. */
+int td5_ai_route_speed_hint(int span_normalized)
+{
+    const uint8_t *t = g_route_tables[0];
+    if (!t || span_normalized < 0) return -1;
+    size_t off = (size_t)(unsigned)span_normalized * 3u + 2u;
+    if (off >= g_route_table_sizes[0]) return -1;
+    return (int)t[off];
 }
 
 static int32_t  g_route_state_storage[TD5_MAX_TOTAL_ACTORS * RS_STRIDE_DWORDS];
@@ -2214,7 +2232,12 @@ void td5_ai_init_race_actor_runtime(void) {
     /* [SmartAI overhaul] derive per-car skill + per-car branch tie-breaks once
      * per race (cheap; only consumed when SmartAI is on). Must run after
      * g_td5.difficulty_tier is set for this race. */
-    if (g_td5.ini.smart_ai) td5_ai_smart_race_init();
+    /* [AI DRIVER MODEL 2026-08-17] SmartAI per-car skill is needed for both
+     * SMART and DRIVER modes (the driver model reuses skill for its gains), so
+     * seed it whenever the mode isn't CLASSIC — no longer gated on the legacy
+     * smart_ai flag. td5_ai_driver_race_init self-gates to DRIVER mode. */
+    if (td5_ai_driver_mode() != TD5_AI_MODE_CLASSIC) td5_ai_smart_race_init();
+    td5_ai_driver_race_init();
     /* [CONFIRMED @ InitializeRaceActorRuntime 0x00432E60 reads gRaceDifficultyTier
      * @ 0x00463210 throughout the Layer-2 decision tree.] The port previously
      * read a file-static `g_race_difficulty_tier` that was never written —
@@ -4485,10 +4508,20 @@ static inline uint32_t smart_hash_u32(uint32_t x) {
     return x;
 }
 
-/* Race-level master gate: on, and not in a faithful-only mode. */
+/* Race-level master gate: on, and not in a faithful-only mode.
+ *
+ * [AI DRIVER MODEL 2026-08-17] The opponent-AI mode (g_td5.ini.ai_model) is now
+ * the authoritative switch, via td5_ai_driver_mode():
+ *   CLASSIC -> SmartAI OFF (byte-faithful original AI)
+ *   SMART   -> SmartAI ON, faithful execution layer
+ *   DRIVER  -> SmartAI ON (the driver model layers on top; in P0 it forwards
+ *              to SmartAI, so DRIVER behaves exactly like SMART for now)
+ * The legacy [GameOptions] SmartAI flag is retained in the INI/CLI surface but
+ * no longer gates here — the RACE OPTIONS "AI MODEL" row supersedes it. */
  int td5_ai_smart_active(void) {
-    return g_td5.ini.smart_ai
-        && !g_td5.drag_race_enabled
+    int mode = td5_ai_driver_mode();
+    if (mode == TD5_AI_MODE_CLASSIC) return 0;
+    return !g_td5.drag_race_enabled
         && !g_td5.wanted_mode_enabled;
 }
 
@@ -7029,6 +7062,15 @@ static void ai_update_single_racer(int slot) {
             }
             return;
         }
+
+        /* [AI DRIVER MODEL 2026-08-17] In DRIVER mode the closed-loop driver
+         * owns this racer: it writes the command fields itself and, when it
+         * returns "handled", we skip the classic/SmartAI path AND the collision
+         * escape (the driver has its own recovery). In P0 the tick forwards
+         * (returns 0), so the SmartAI path below still runs. Cop/drag/wanted
+         * special cases were already handled above, matching td5_ai_driver_active. */
+        if (td5_ai_driver_tick(slot))
+            break;
 
         td5_ai_update_track_behavior(slot);
         /* [AI UNSTICK] If this AI racer is wedged against another car, override

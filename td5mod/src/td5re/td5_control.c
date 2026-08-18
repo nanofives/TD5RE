@@ -207,6 +207,7 @@ static const CtrlIntParam k_params[] = {
     { "debug_overlay",     &g_td5.ini.debug_overlay,      0,  1,  0 },
     { "car_damage",        &g_td5.ini.car_damage,         0,  1,  0 },
     { "difficulty",        &g_td5.ini.difficulty,         0,  2,  1 },
+    { "ai_model",          &g_td5.ini.ai_model,           0,  2,  2 },
     { "lane_assist",       &g_td5.ini.lane_assist,        0,  1,  0 },
     { "sfx_volume",        &g_td5.ini.sfx_volume,         0,100,  0 },
     { "music_volume",      &g_td5.ini.music_volume,       0,100,  0 },

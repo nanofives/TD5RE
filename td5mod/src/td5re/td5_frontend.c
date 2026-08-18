@@ -22,6 +22,7 @@
 #include "td5_render.h"
 #include "td5_save.h"
 #include "td5_config.h"      /* shared TD5RE_* env-knob accessors */
+#include "td5_ai_driver.h"   /* [AI DRIVER MODEL] td5_ai_driver_mode_name */
 #include "td5_sound.h"
 #include "td5_hud.h"           /* per-viewport player-identity overlay (race) */
 #include "td5re.h"
@@ -817,6 +818,7 @@ int             s_game_option_car_toughness = 1; /* [TOUGHNESS OFF 2026-07-04] 0
 int             s_game_option_car_deform = 1;    /* [DEFORM OFF 2026-07-05] 0=Low 1=Normal 2=High 3=Off */
 int             s_game_option_car_damage = 1; /* [DAMAGE 2026-07-04] single toggle: master car-damage + HUD bar/wreck */
 int             s_game_option_laneassist = 0; /* lane-assist steering aid on/off */
+int             s_game_option_ai_model = 2;   /* [AI DRIVER MODEL] 0=CLASSIC,1=SMART,2=DRIVER */
 int             s_game_option_tutorial = 1;   /* [TUTORIAL 2026-06-29] controller overlay every race on/off */
 int             s_sound_option_sfx_mode;
 int             s_sound_option_sfx_volume = 80;
@@ -3233,6 +3235,7 @@ void td5_frontend_auto_race_setup(void) {
     s_game_option_car_deform        = g_td5.ini.car_damage_deform;
     s_game_option_car_damage        = (g_td5.ini.car_damage != 0);
     s_game_option_laneassist        = g_td5.ini.lane_assist;
+    s_game_option_ai_model          = g_td5.ini.ai_model;
     s_game_option_tutorial          = (g_td5.ini.tutorial_overlay > 0) ? 1 : 0;
 
     /* Commit the dynamics (arcade/sim) selection into the physics race-init
@@ -6402,6 +6405,7 @@ const char *td5_raceopts_label(int idx) {
         case RO_TRAFFIC:     return SNK_TrafficButTxt;
         case RO_POLICE:      return SNK_CopsButTxt;        /* label: POLICE */
         case RO_DIFFICULTY:  return SNK_DifficultyButTxt;
+        case RO_AI_MODEL:    return TR("AI MODEL");        /* [AI DRIVER MODEL 2026-08-17] CLASSIC/SMART/DRIVER */
         case RO_DISTANCE:    return TR("DISTANCE");        /* [SP DRAG DISTANCE 2026-07-23] drag length preset */
         case RO_CATCHUP:     return SNK_CatchupTxt;        /* [CATCHUP 2026-07-21] MP AI rubber-band */
         case RO_DYNAMICS:    return SNK_DynamicsButTxt;
@@ -6502,6 +6506,10 @@ void td5_raceopts_value(int idx, char *out, size_t out_sz) {
             v = traffic_vol[t]; break;
         case RO_POLICE:      v = on_off[s_game_option_cops & 1]; break;
         case RO_DIFFICULTY:  v = difficulty[((s_race_difficulty % 3) + 3) % 3]; break;
+        case RO_AI_MODEL:    /* [AI DRIVER MODEL] CLASSIC/SMART/DRIVER (untranslated technical label) */
+            snprintf(out, out_sz, "%s",
+                     td5_ai_driver_mode_name(((s_game_option_ai_model % 3) + 3) % 3));
+            return;
         case RO_CATCHUP:     v = on_off[td5_save_get_catchup_assist() > 0 ? 1 : 0]; break;
         case RO_DYNAMICS:    v = dynamics[s_game_option_dynamics & 1]; break;
         case RO_CHECKPOINTS: v = on_off[s_game_option_checkpoint_timers & 1]; break;
@@ -6598,6 +6606,11 @@ void td5_raceopts_cycle(int idx, int delta) {
             if (s_game_option_car_deform > 3) s_game_option_car_deform = 0;
             break;
         /* [RACE OPTIONS CONSOLIDATION 2026-07-21] absorbed GAME OPTIONS rows. */
+        case RO_AI_MODEL:    /* [AI DRIVER MODEL] CLASSIC(0) -> SMART(1) -> DRIVER(2) -> wrap */
+            s_game_option_ai_model += delta;
+            if (s_game_option_ai_model < 0) s_game_option_ai_model = 2;
+            if (s_game_option_ai_model > 2) s_game_option_ai_model = 0;
+            break;
         case RO_COLLISIONS:  s_game_option_collisions ^= 1; break;
         case RO_DAMAGE:      s_game_option_car_damage ^= 1; break;
         case RO_LANEASSIST:  s_game_option_laneassist ^= 1; break;
@@ -6722,6 +6735,9 @@ int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
                           * cop chase, drag — see td5_game.c ~2380) */
         return !c->is_mp && !c->is_cop_chase && !c->is_drag;
     case RO_POWERUPS:    /* road power-ups everywhere but drag */
+        return !c->is_drag;
+    case RO_AI_MODEL:    /* opponent-AI mode — meaningful in any race with AI
+                          * opponents; not on the drag strip (dedicated driver) */
         return !c->is_drag;
     case RO_TOUGHNESS:
     case RO_DEFORM:
@@ -10585,6 +10601,7 @@ int td5_frontend_init(void) {
         s_game_option_car_deform        = g_td5.ini.car_damage_deform;
         s_game_option_car_damage        = (g_td5.ini.car_damage != 0);
         s_game_option_laneassist        = g_td5.ini.lane_assist;
+        s_game_option_ai_model          = g_td5.ini.ai_model;
         s_game_option_tutorial          = (g_td5.ini.tutorial_overlay > 0) ? 1 : 0;
         s_selected_game_type = g_td5.ini.default_game_type;
     }
