@@ -614,6 +614,7 @@ static struct {
     int  seen[ST_INV_MAX_SLOTS];
     int  px[ST_INV_MAX_SLOTS], py[ST_INV_MAX_SLOTS], pz[ST_INV_MAX_SLOTS];
     int  haspos[ST_INV_MAX_SLOTS];            /* prev world_pos captured yet? */
+    int  moving[ST_INV_MAX_SLOTS];            /* slot has started moving off the grid (arms the jump check) */
     /* [CHUNK 1 telemetry] per-scenario peaks — recorded even on PASS so we can
      * SEE severity of "cars fly / jump / don't stay on the road" that the
      * generous FAIL thresholds don't trip, and per-slot progress to spot an
@@ -671,9 +672,22 @@ static void st_inv_sample(void)
             llabs(pz) > s_inv_max_world)
             st_inv_flag(ST_FAIL, "slot%d pos overflow (%lld,%lld,%lld)",
                         slot, px, py, pz);
+        /* Arm the position-jump check only once the car is actually MOVING. The
+         * opening frames sit stationary on the grid while the actor is placed
+         * onto the track surface; that one-off spawn-placement transition is a
+         * large |pos delta| whose magnitude is just the track's spawn elevation
+         * (Newcastle ~21846, Moscow ~3174 render units) -- NOT a launch: the car
+         * is at longitudinal_speed ~0. A genuine crest launch always happens at
+         * speed, so gate peak_jump (and the teleport FAIL) on motion. This kills
+         * the spurious "peak jump > 8000" WARN while still catching real launches
+         * and mid-race teleports (once moving, it stays armed). prev world_pos is
+         * still updated every frame, so the first post-arm delta is small. */
+        if (!s_inv.moving[slot] &&
+            llabs((long long)a->longitudinal_speed) > 0x800)   /* ~8 body units */
+            s_inv.moving[slot] = 1;
         /* Teleport / fall-through: a car never MOVES more than s_inv_max_jump
-         * between samples. First sample just seeds prev. */
-        if (s_inv.haspos[slot]) {
+         * between samples. First sample (and the pre-launch grid) just seeds prev. */
+        if (s_inv.haspos[slot] && s_inv.moving[slot]) {
             long long dx = px - s_inv.px[slot];
             long long dy = py - s_inv.py[slot];
             long long dz = pz - s_inv.pz[slot];
