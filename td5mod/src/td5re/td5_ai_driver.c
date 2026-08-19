@@ -150,6 +150,8 @@ static double s_offset_clamp;    /* [P3] max lateral offset as a fraction of hal
 static int    s_overtake_ticks;  /* [P3] dwell ticks a pass side stays committed         */
 static int    s_leash_max;       /* [P4] hidden catch-up: max % speed boost for laggards  */
 static int    s_use_route;       /* [rework] use authored route speed hints in the profile */
+static double s_route_pull;      /* [followup-a] authored weight in the corner cap: 1.0 = full authored (old hard min), 0.0 = geometry-only. Lower lifts every authored cap toward the geometry estimate to recover twisty pace. */
+static int    s_route_dump;      /* [followup-a] diag: log per-span authored vs curvature vs chosen cap */
 
 static void driver_read_knobs(void)
 {
@@ -187,6 +189,27 @@ static void driver_read_knobs(void)
     s_leash_max      = td5_env_int("TD5RE_AI_DRIVER_LEASH", 3, 0, 15); /* hidden catch-up, % ; 0 = off */
     /* authored route speeds ON by default; TD5RE_AI_DRIVER_NOROUTE=1 disables (A/B). */
     s_use_route      = !td5_env_flag_off("TD5RE_AI_DRIVER_NOROUTE");
+    /* [followup-a 2026-08-18] Divergence gate on the authored cap. The authored
+     * route byte[2] is a fwd_comp brake-onset threshold in the faithful path,
+     * NOT a speed fraction, so hint/255 systematically UNDER-reads corner speed
+     * and dragged whole twisty laps (~0.55x CLASSIC on BlueRidge/Tokyo/Kyoto).
+     * Pure curvature is FASTER but unstable (selftest crash), so authored still
+     * guards genuine hazards the geometry misjudges. Compromise: authored only
+     * pulls the cap down when it is at least ROUTE_MARGIN below the geometry
+     * estimate (a real designer-flagged slow-down); routine mild under-reads keep
+     * the faster geometry cap. hint/255 is uniformly too low across twisty
+     * corners (not hazard-concentrated), so rather than a divergence gate we
+     * lift every authored cap a fixed fraction TOWARD the geometry estimate:
+     *   cap = geo - (geo - authored) * ROUTE_PULL
+     * ROUTE_PULL 1.0 = full authored (old hard min), 0.0 = geometry-only.
+     * Default 0.70 (tuned 2026-08-19 by per-span dump + fixed-seed A/B sweep +
+     * selftest): recovers twisty-track pace (BlueRidge 0.56->0.62x, Tokyo
+     * 0.53->0.62x, Kyoto 0.63->0.68x of CLASSIC) with no guard-track regression
+     * (Moscow/Sydney/Newcastle within 2%) and the full selftest still green.
+     * Lower pulls (<=0.6) recover more but stall the car on BlueRidge / crash
+     * the selftest, so 0.70 is the safe floor for this global knob. */
+    s_route_pull     = (double)td5_env_int("TD5RE_AI_DRIVER_ROUTE_PULL", 70, 0, 100) / 100.0;
+    s_route_dump     = td5_env_flag_on("TD5RE_AI_DRIVER_DUMPCAP");
 }
 
 /* ------------------------------------------------------------------------
@@ -313,18 +336,28 @@ static void driver_build_path_table(void)
          * as the primary per-span cap, keeping the curvature value as the cap on
          * tracks with no route data (custom/TD6). The backward/forward passes
          * below still add anticipatory braking + exit smoothing on top. */
+        double geo_cap = cap;   /* geometry-only estimate (for the divergence gate + diag) */
         if (s_use_route) {
             int hint = td5_ai_route_speed_hint(s);
             if (hint >= 0) {
                 double authored = (double)hint / 255.0;
                 if (authored < s_corner_floor) authored = s_corner_floor;
                 if (authored > 1.0) authored = 1.0;
-                /* Take the MORE CONSERVATIVE of the designer speed and the
-                 * geometry estimate: the authored value catches corners the
-                 * curvature heuristic mis-judges (Blue Ridge downhill), and the
-                 * curvature value catches corners where the authored speed is
-                 * too high for the driver's line (Newcastle). */
-                if (authored < cap) cap = authored;
+                /* [followup-a 2026-08-18] The authored byte[2] is a fwd_comp
+                 * brake-onset threshold in the faithful path, NOT a speed
+                 * fraction, so hint/255 systematically UNDER-reads corner speed
+                 * and the old hard min(authored,curvature) dragged whole twisty
+                 * laps (~0.55x CLASSIC on BlueRidge/Tokyo/Kyoto). Pure curvature
+                 * is faster but unstable (selftest crash), so authored still
+                 * matters. The under-read is roughly uniform across corners, so
+                 * lift the authored cap a fixed fraction toward the geometry
+                 * estimate rather than trusting the raw (too-low) hint. */
+                double authored_eff = geo_cap - (geo_cap - authored) * s_route_pull;
+                if (authored_eff < cap) cap = authored_eff;
+                if (s_route_dump)
+                    TD5_LOG_I(LOG_TAG,
+                              "dumpcap span=%d geo=%.3f authored=%.3f eff=%.3f chosen=%.3f",
+                              s, geo_cap, authored, authored_eff, cap);
             }
         }
         curv_cap[s] = cap;
