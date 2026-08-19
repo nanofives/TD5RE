@@ -152,6 +152,16 @@ static int    s_leash_max;       /* [P4] hidden catch-up: max % speed boost for 
 static int    s_use_route;       /* [rework] use authored route speed hints in the profile */
 static double s_route_pull;      /* [followup-a] authored weight in the corner cap: 1.0 = full authored (old hard min), 0.0 = geometry-only. Lower lifts every authored cap toward the geometry estimate to recover twisty pace. */
 static int    s_route_dump;      /* [followup-a] diag: log per-span authored vs curvature vs chosen cap */
+static int    s_line_on;         /* [C2] use the computed out-in-out racing line (1) vs road centre (0) */
+static double s_line_margin;     /* [C2] keep the line this fraction of half-width off each rail (safety) */
+static int    s_line_iters;      /* [C2] elastic-band relaxation iterations */
+static double s_line_rref;       /* [C3] reference radius (render units) where the line cap reaches 1.0; cap = sqrt(R_line/R_ref). 0 = use the old heuristic cap. */
+static double s_line_rlo;        /* [C3b] below this line radius the apex offset ramps to centre (tight-hairpin stall guard); 0 = no blend */
+static int    s_stats;           /* [C2 diag] per-race steering-saturation% + wall-contact% + mean speed */
+static int    s_stat_ticks[TD5_MAX_RACER_SLOTS];
+static int    s_stat_sat[TD5_MAX_RACER_SLOTS];
+static int    s_stat_wall[TD5_MAX_RACER_SLOTS];
+static double s_stat_spd[TD5_MAX_RACER_SLOTS];
 
 static void driver_read_knobs(void)
 {
@@ -210,6 +220,37 @@ static void driver_read_knobs(void)
      * the selftest, so 0.70 is the safe floor for this global knob. */
     s_route_pull     = (double)td5_env_int("TD5RE_AI_DRIVER_ROUTE_PULL", 70, 0, 100) / 100.0;
     s_route_dump     = td5_env_flag_on("TD5RE_AI_DRIVER_DUMPCAP");
+    /* [C2 2026-08-19] Out-in-out RACING LINE. The driver aimed at road CENTRE and
+     * derived corner speed from centre-line curvature -- the tightest possible
+     * radius, so the lowest corner speed. Compute a per-span lateral line that
+     * MINIMISES path curvature (elastic band relaxed between the rails, clamped
+     * s_line_margin off each rail for safety), then aim at it AND derive the
+     * corner-speed curvature from it (a wider radius -> higher corner speed).
+     * OPT-IN (default OFF): with the grounded sqrt(R) corner cap (RREF) this is
+     * +27-29% on the twistiest tracks (Tokyo/Kyoto) and gains on most others, but
+     * one Newcastle corner (span 744) spins on a knife-edge RREF value (clean at
+     * 34k, stalls at 30k and 38k), so it is not robust enough to be the default
+     * yet. TD5RE_AI_DRIVER_LINE=1 enables it. */
+    s_line_on        = td5_env_int("TD5RE_AI_DRIVER_LINE", 0, 0, 1);   /* default OFF (opt-in); =1 enables */
+    s_line_margin    = (double)td5_env_int("TD5RE_AI_DRIVER_LINE_MARGIN", 14, 2, 45) / 100.0;
+    s_line_iters     = td5_env_int("TD5RE_AI_DRIVER_LINE_ITERS", 60, 0, 400);
+    /* [C3 2026-08-19] Grounded corner speed. The line raises the corner-speed cap
+     * (wider radius) but the old 1-loss*sharp heuristic OVER-estimated what the car
+     * can hold, so pushing the line stalled specific corners (Moscow span 268). Use
+     * the physically-correct shape v ~ sqrt(R): cap = sqrt(R_line / R_ref), R_line
+     * the actual line radius (render units), R_ref the radius at which the car goes
+     * flat-out. Matching the cap to a real holdable speed removes the stall. R_ref
+     * calibrated by A/B sweep; 0 falls back to the heuristic cap. Only used when the
+     * line is on (needs the line radius). */
+    s_line_rref      = (double)td5_env_int("TD5RE_AI_DRIVER_RREF", 34000, 0, 2000000);
+    /* [C3b] Blend the racing line back toward CENTRE on the tightest corners. The
+     * apex-aim wins on medium/open twisties (Tokyo/Kyoto +28%) but backfires on a
+     * tight hairpin: at low corner speed the pure-pursuit noses at the inside apex
+     * and stalls (Newcastle span 744). Below R = LINE_RLO the line offset ramps to
+     * 0 (centre), above 2*RLO it is full; the speed cap uses the SAME blended line.
+     * 0 disables the blend (full line everywhere). */
+    s_line_rlo       = (double)td5_env_int("TD5RE_AI_DRIVER_LINE_RLO", 10000, 0, 2000000);
+    s_stats          = td5_env_flag_on("TD5RE_AI_DRIVER_STATS");
 }
 
 /* ------------------------------------------------------------------------
@@ -220,6 +261,8 @@ static int      s_pt_count;          /* spans in the table (ring length)      */
 static int      s_pt_cap;            /* allocated capacity                    */
 static double  *s_pt_seg_len;        /* arc length span[s] -> span[s+1]        */
 static double  *s_pt_frac;           /* speed-profile target fraction 0..1     */
+static double  *s_pt_latx;           /* [C2] racing-line offset from span centre, world 24.8 (X) */
+static double  *s_pt_latz;           /* [C2] racing-line offset from span centre, world 24.8 (Z) */
 static int      s_pt_circuit;        /* 1 = ring wraps, 0 = point-to-point     */
 
 /* running per-slot max longitudinal_speed (the car's demonstrated top speed on
@@ -262,13 +305,13 @@ static int      s_pt_valid;          /* table built for this race             */
 
 static inline int ang_signed12(int a) { a &= 0xFFF; if (a > 0x800) a -= 0x1000; return a; }
 
-/* Rail-midpoint of a span in track units (world pos >> 8 space, as SmartAI). */
-static int pt_span_mid(int span, double *mx, double *mz)
+/* [C2] Left/right rail points of a span (world 24.8), for the racing-line solve.
+ * (Replaces the former pt_span_mid; the midpoint is now 0.5*(L+R) inline.) */
+static int pt_span_rails(int span, double *lx, double *lz, double *rx, double *rz)
 {
-    int lx, lz, rx, rz;
-    if (!td5_track_get_span_route_frame(span, &lx, &lz, &rx, &rz)) return 0;
-    *mx = 0.5 * ((double)lx + (double)rx);
-    *mz = 0.5 * ((double)lz + (double)rz);
+    int ilx, ilz, irx, irz;
+    if (!td5_track_get_span_route_frame(span, &ilx, &ilz, &irx, &irz)) return 0;
+    *lx = (double)ilx; *lz = (double)ilz; *rx = (double)irx; *rz = (double)irz;
     return 1;
 }
 
@@ -276,6 +319,8 @@ static void driver_free_path_table(void)
 {
     free(s_pt_seg_len); s_pt_seg_len = NULL;
     free(s_pt_frac);    s_pt_frac    = NULL;
+    free(s_pt_latx);    s_pt_latx    = NULL;
+    free(s_pt_latz);    s_pt_latz    = NULL;
     s_pt_cap   = 0;   /* MUST reset with the buffers: otherwise a later race on a
                        * SHORTER ring sees count <= cap, skips the realloc, and
                        * writes through the freed NULL pointer (0xC0000005). */
@@ -299,59 +344,172 @@ static void driver_build_path_table(void)
     if (count > s_pt_cap) {
         double *sl = (double *)realloc(s_pt_seg_len, (size_t)count * sizeof(double));
         double *fr = (double *)realloc(s_pt_frac,    (size_t)count * sizeof(double));
-        if (!sl || !fr) { free(sl); free(fr); s_pt_seg_len = NULL; s_pt_frac = NULL; s_pt_cap = 0; return; }
-        s_pt_seg_len = sl; s_pt_frac = fr; s_pt_cap = count;
+        double *lx = (double *)realloc(s_pt_latx,    (size_t)count * sizeof(double));
+        double *lz = (double *)realloc(s_pt_latz,    (size_t)count * sizeof(double));
+        if (!sl || !fr || !lx || !lz) {
+            free(sl); free(fr); free(lx); free(lz);
+            s_pt_seg_len = NULL; s_pt_frac = NULL; s_pt_latx = NULL; s_pt_latz = NULL;
+            s_pt_cap = 0; return;
+        }
+        s_pt_seg_len = sl; s_pt_frac = fr; s_pt_latx = lx; s_pt_latz = lz; s_pt_cap = count;
     }
 
-    /* Pass 0: arc length (mid[s] -> mid[s+1]) + curvature-based slow-in cap. */
+    /* [C2] Rails + out-in-out racing-line solve, then curvature/speed profile.
+     * Temp arrays: left/right rail per span + the line parameter t[s] in [0,1]. */
     double *curv_cap = (double *)malloc((size_t)count * sizeof(double));
-    if (!curv_cap) return;
+    double *lxA = (double *)malloc((size_t)count * sizeof(double));
+    double *lzA = (double *)malloc((size_t)count * sizeof(double));
+    double *rxA = (double *)malloc((size_t)count * sizeof(double));
+    double *rzA = (double *)malloc((size_t)count * sizeof(double));
+    double *tA  = (double *)malloc((size_t)count * sizeof(double));
+    if (!curv_cap || !lxA || !lzA || !rxA || !rzA || !tA) {
+        free(curv_cap); free(lxA); free(lzA); free(rxA); free(rzA); free(tA); return;
+    }
+    const double DEG12 = 4096.0 / (2.0 * 3.14159265358979323846); /* rad -> 12-bit angle */
 
+    /* Pass A: collect rails + centre-line arc length; init the line at centre. */
     for (int s = 0; s < count; s++) {
-        double ax, az, bx, bz;
+        if (!pt_span_rails(s, &lxA[s], &lzA[s], &rxA[s], &rzA[s]))
+            { lxA[s] = lzA[s] = rxA[s] = rzA[s] = 0.0; }
+        tA[s] = 0.5;
+    }
+    for (int s = 0; s < count; s++) {
         int s1 = (s + 1) % count;
-        double len = 1.0;
-        if (pt_span_mid(s, &ax, &az) && pt_span_mid(s1, &bx, &bz)) {
-            double dx = bx - ax, dz = bz - az;
-            len = sqrt(dx * dx + dz * dz);
-            if (len < 1.0) len = 1.0;
-        }
+        double ax = 0.5 * (lxA[s]  + rxA[s]),  az = 0.5 * (lzA[s]  + rzA[s]);
+        double bx = 0.5 * (lxA[s1] + rxA[s1]), bz = 0.5 * (lzA[s1] + rzA[s1]);
+        double dx = bx - ax, dz = bz - az;
+        double len = sqrt(dx * dx + dz * dz);
+        if (len < 1.0) len = 1.0;
         s_pt_seg_len[s] = len;
+    }
 
-        /* Curvature over a short window ahead (heading delta), like SmartAI's
-         * smart_corner_eval. Sharper bend -> lower cap; floor keeps it moving. */
+    /* Racing line: minimise path curvature by relaxing each span's point toward
+     * the midpoint of its neighbours' points, projected back onto this span's
+     * rail segment and clamped s_line_margin off each rail (safety). Projected
+     * Gauss-Seidel elastic band -> out-in-out apex line. P2P tracks pin the
+     * start/finish spans at centre. */
+    double m0 = s_line_margin, m1 = 1.0 - s_line_margin;
+    if (s_line_on) {
+        for (int it = 0; it < s_line_iters; it++) {
+            for (int s = 0; s < count; s++) {
+                int sp = (s - 1 + count) % count, sn = (s + 1) % count;
+                if (!s_pt_circuit && (s == 0 || s == count - 1)) { tA[s] = 0.5; continue; }
+                double dx = rxA[s] - lxA[s], dz = rzA[s] - lzA[s];
+                double len2 = dx * dx + dz * dz;
+                if (len2 < 1.0) continue;   /* degenerate rails: keep centre */
+                double px = lxA[sp] + tA[sp] * (rxA[sp] - lxA[sp]);
+                double pz = lzA[sp] + tA[sp] * (rzA[sp] - lzA[sp]);
+                double nx = lxA[sn] + tA[sn] * (rxA[sn] - lxA[sn]);
+                double nz = lzA[sn] + tA[sn] * (rzA[sn] - lzA[sn]);
+                double mx = 0.5 * (px + nx), mz = 0.5 * (pz + nz);
+                double tstar = ((mx - lxA[s]) * dx + (mz - lzA[s]) * dz) / len2;
+                if (tstar < m0) tstar = m0;
+                if (tstar > m1) tstar = m1;
+                tA[s] += 0.5 * (tstar - tA[s]);   /* relaxation weight */
+            }
+        }
+    }
+    /* [C3b] Tight-corner blend: ramp the apex offset back toward centre where the
+     * line radius is small, so a tight hairpin keeps the proven centre-through aim
+     * (the apex-aim stalled the low-speed pure-pursuit on Newcastle span 744). Uses
+     * the FULL-line radius over the window; the blended t then feeds both the aim
+     * and the speed cap, keeping them consistent. */
+    if (s_line_on && s_line_rlo > 0.0) {
+        double *tblend = (double *)malloc((size_t)count * sizeof(double));
+        if (tblend) {
+            for (int s = 0; s < count; s++) {
+                int s2 = (s + 3) % count, sn = (s + 1) % count, s2n = (s2 + 1) % count;
+                double p0x = 0.5*(lxA[s]+rxA[s])   + (tA[s]  -0.5)*(rxA[s]  -lxA[s]);
+                double p0z = 0.5*(lzA[s]+rzA[s])   + (tA[s]  -0.5)*(rzA[s]  -lzA[s]);
+                double p0nx= 0.5*(lxA[sn]+rxA[sn]) + (tA[sn] -0.5)*(rxA[sn] -lxA[sn]);
+                double p0nz= 0.5*(lzA[sn]+rzA[sn]) + (tA[sn] -0.5)*(rzA[sn] -lzA[sn]);
+                double p2x = 0.5*(lxA[s2]+rxA[s2]) + (tA[s2] -0.5)*(rxA[s2] -lxA[s2]);
+                double p2z = 0.5*(lzA[s2]+rzA[s2]) + (tA[s2] -0.5)*(rzA[s2] -lzA[s2]);
+                double p2nx= 0.5*(lxA[s2n]+rxA[s2n])+(tA[s2n]-0.5)*(rxA[s2n]-lxA[s2n]);
+                double p2nz= 0.5*(lzA[s2n]+rzA[s2n])+(tA[s2n]-0.5)*(rzA[s2n]-lzA[s2n]);
+                double v0x=p0nx-p0x, v0z=p0nz-p0z, v2x=p2nx-p2x, v2z=p2nz-p2z;
+                double cross=v0x*v2z-v0z*v2x, dot=v0x*v2x+v0z*v2z;
+                double ang=atan2(cross<0?-cross:cross, dot);
+                double arc=s_pt_seg_len[s]+s_pt_seg_len[sn]+s_pt_seg_len[s2];
+                double R=(ang>1e-4)?(arc/ang):1e12;
+                double f=(R - s_line_rlo)/s_line_rlo;   /* 0 at RLO, 1 at 2*RLO */
+                if (f<0.0) f=0.0;
+                if (f>1.0) f=1.0;
+                tblend[s]=0.5+(tA[s]-0.5)*f;
+            }
+            for (int s = 0; s < count; s++) tA[s]=tblend[s];
+            free(tblend);
+        }
+    }
+    /* Store the line as a world offset from the span centre. */
+    for (int s = 0; s < count; s++) {
+        double dx = rxA[s] - lxA[s], dz = rzA[s] - lzA[s];
+        if (s_line_on) { s_pt_latx[s] = (tA[s] - 0.5) * dx; s_pt_latz[s] = (tA[s] - 0.5) * dz; }
+        else           { s_pt_latx[s] = 0.0;                s_pt_latz[s] = 0.0; }
+    }
+
+    /* Pass B: curvature-based slow-in cap. When the line is on, measure the bend
+     * of the LINE (angle between the line's segment directions ~3 spans apart) --
+     * a wider apex line has a bigger radius / smaller bend -> higher corner speed.
+     * Otherwise fall back to the road centre-line heading delta. */
+    for (int s = 0; s < count; s++) {
         int s0 = s;
         int s2 = (s + 3) % count;
-        int turn = ang_signed12(td5_track_get_primary_route_heading(s2)
-                                - td5_track_get_primary_route_heading(s0));
-        double sharp = (double)(turn < 0 ? -turn : turn) / s_curv_sharp;
-        if (sharp > 1.0) sharp = 1.0;
-        double cap = 1.0 - s_corner_loss * sharp;
+        double cap;
+        double dx0 = rxA[s0] - lxA[s0], dz0 = rzA[s0] - lzA[s0];
+        if (s_line_on && (dx0 * dx0 + dz0 * dz0) >= 1.0) {
+            int s0n = (s0 + 1) % count, s2n = (s2 + 1) % count;
+            double p0x = 0.5*(lxA[s0]+rxA[s0]) + s_pt_latx[s0];
+            double p0z = 0.5*(lzA[s0]+rzA[s0]) + s_pt_latz[s0];
+            double p0nx= 0.5*(lxA[s0n]+rxA[s0n]) + s_pt_latx[s0n];
+            double p0nz= 0.5*(lzA[s0n]+rzA[s0n]) + s_pt_latz[s0n];
+            double p2x = 0.5*(lxA[s2]+rxA[s2]) + s_pt_latx[s2];
+            double p2z = 0.5*(lzA[s2]+rzA[s2]) + s_pt_latz[s2];
+            double p2nx= 0.5*(lxA[s2n]+rxA[s2n]) + s_pt_latx[s2n];
+            double p2nz= 0.5*(lzA[s2n]+rzA[s2n]) + s_pt_latz[s2n];
+            double v0x = p0nx - p0x, v0z = p0nz - p0z;
+            double v2x = p2nx - p2x, v2z = p2nz - p2z;
+            double cross = v0x*v2z - v0z*v2x, dot = v0x*v2x + v0z*v2z;
+            double ang = atan2(cross < 0 ? -cross : cross, dot); /* unsigned 0..pi */
+            if (s_line_rref > 0.0) {
+                /* [C3] Physical corner speed: cap = sqrt(R_line / R_ref). R_line =
+                 * arc / bend-angle over the window (render units) is the actual
+                 * radius of the line the car drives; R_ref is where it goes flat-
+                 * out. This is what the car can HOLD, so it removes the heuristic's
+                 * over-estimate that stalled the line on tight corners. */
+                double arc = s_pt_seg_len[s0]
+                           + s_pt_seg_len[(s0 + 1) % count]
+                           + s_pt_seg_len[(s0 + 2) % count];
+                double R = (ang > 1e-4) ? (arc / ang) : 1e12;
+                cap = sqrt(R / s_line_rref);
+                if (cap > 1.0) cap = 1.0;
+                if (s_route_dump)
+                    TD5_LOG_I(LOG_TAG, "rcap span=%d R=%.0f cap=%.3f", s0, R, cap);
+            } else {
+                double sharp = (ang * DEG12) / s_curv_sharp;
+                if (sharp > 1.0) sharp = 1.0;
+                cap = 1.0 - s_corner_loss * sharp;
+            }
+        } else {
+            int turn = ang_signed12(td5_track_get_primary_route_heading(s2)
+                                    - td5_track_get_primary_route_heading(s0));
+            double sharp = (double)(turn < 0 ? -turn : turn) / s_curv_sharp;
+            if (sharp > 1.0) sharp = 1.0;
+            cap = 1.0 - s_corner_loss * sharp;
+        }
         if (cap < s_corner_floor) cap = s_corner_floor;
 
-        /* [AI DRIVER MODEL 2026-08-18] Prefer the AUTHORED per-corner speed
-         * (route byte[2]) where the track ships one -- the designers' hand-tuned
-         * speed that the faithful AI uses to drive every track well, including
-         * the twisty/downhill ones the curvature heuristic mis-judges. Use it
-         * as the primary per-span cap, keeping the curvature value as the cap on
-         * tracks with no route data (custom/TD6). The backward/forward passes
-         * below still add anticipatory braking + exit smoothing on top. */
-        double geo_cap = cap;   /* geometry-only estimate (for the divergence gate + diag) */
+        /* [followup-a 2026-08-18] AUTHORED per-corner speed (route byte[2]) lifted
+         * toward the geometry estimate by ROUTE_PULL (byte[2] is a fwd_comp gate,
+         * not a speed, so the raw hint/255 is systematically too low). Kept on
+         * top of the line-derived geometry cap. */
+        double geo_cap = cap;
         if (s_use_route) {
             int hint = td5_ai_route_speed_hint(s);
             if (hint >= 0) {
                 double authored = (double)hint / 255.0;
                 if (authored < s_corner_floor) authored = s_corner_floor;
                 if (authored > 1.0) authored = 1.0;
-                /* [followup-a 2026-08-18] The authored byte[2] is a fwd_comp
-                 * brake-onset threshold in the faithful path, NOT a speed
-                 * fraction, so hint/255 systematically UNDER-reads corner speed
-                 * and the old hard min(authored,curvature) dragged whole twisty
-                 * laps (~0.55x CLASSIC on BlueRidge/Tokyo/Kyoto). Pure curvature
-                 * is faster but unstable (selftest crash), so authored still
-                 * matters. The under-read is roughly uniform across corners, so
-                 * lift the authored cap a fixed fraction toward the geometry
-                 * estimate rather than trusting the raw (too-low) hint. */
                 double authored_eff = geo_cap - (geo_cap - authored) * s_route_pull;
                 if (authored_eff < cap) cap = authored_eff;
                 if (s_route_dump)
@@ -390,11 +548,11 @@ static void driver_build_path_table(void)
         }
     }
 
-    free(curv_cap);
+    free(curv_cap); free(lxA); free(lzA); free(rxA); free(rzA); free(tA);
     s_pt_count = count;
     s_pt_valid = 1;
-    TD5_LOG_I(LOG_TAG, "ai_driver: path table built spans=%d circuit=%d",
-              count, s_pt_circuit);
+    TD5_LOG_I(LOG_TAG, "ai_driver: path table built spans=%d circuit=%d line=%d margin=%.2f",
+              count, s_pt_circuit, s_line_on, s_line_margin);
 }
 
 /* ------------------------------------------------------------------------
@@ -419,6 +577,10 @@ void td5_ai_driver_race_init(void)
         s_lane_offset[s]    = 0.0;
         s_overtake_dwell[s] = 0;
         s_wall_cnt[s]       = 0;
+        s_stat_ticks[s]     = 0;
+        s_stat_sat[s]       = 0;
+        s_stat_wall[s]      = 0;
+        s_stat_spd[s]       = 0.0;
     }
     if (td5_ai_driver_mode() != TD5_AI_MODE_DRIVER) { driver_free_path_table(); return; }
     driver_build_path_table();
@@ -653,6 +815,17 @@ int td5_ai_driver_tick(int slot)
                                                   lookahead, /*fork_commit=*/1,
                                                   /*fork_diverge=*/0, /*lane_band=*/1,
                                                   &tx, &tz);
+    /* [C2] Shift the (centre) aim point onto the computed racing line: add the
+     * per-span line offset (world vector from span centre) at the look-ahead
+     * span. laneassist_target follows forks and returns no span index, so use
+     * the primary-ring aim span -- exact off forks, a close approximation on
+     * them (the line is a refinement, the fork walk still owns branch choice). */
+    if (have_target && s_line_on && s_pt_valid && s_pt_count > 0) {
+        int aim_span = (((int)actor->track_span_normalized + lookahead) % s_pt_count
+                        + s_pt_count) % s_pt_count;
+        tx += (int)s_pt_latx[aim_span];
+        tz += (int)s_pt_latz[aim_span];
+    }
     int herr = 0;
     if (have_target) {
         double dx = (double)(tx - actor->world_pos.x);
@@ -828,6 +1001,24 @@ int td5_ai_driver_tick(int slot)
     if (steer_cmd < -DRV_STEER_CLAMP) steer_cmd = -DRV_STEER_CLAMP;
     s_prev_steer[slot] = steer_cmd;
     actor->steering_command = steer_cmd;
+
+    /* [C2 diag] Per-race steering-saturation% + wall-contact% + mean speed, so the
+     * racing line's effect (higher corner speed, less wall grind) is measured, not
+     * eyeballed. Off unless TD5RE_AI_DRIVER_STATS; logged for slot 0 every 200 ticks. */
+    if (s_stats && slot >= 0 && slot < TD5_MAX_RACER_SLOTS) {
+        long sc = steer_cmd < 0 ? -steer_cmd : steer_cmd;
+        s_stat_ticks[slot]++;
+        if ((double)sc > 0.80 * (double)DRV_STEER_CLAMP) s_stat_sat[slot]++;
+        if (actor->track_contact_flag) s_stat_wall[slot]++;
+        s_stat_spd[slot] += v_abs;
+        if (slot == 0 && (s_stat_ticks[0] % 200) == 0)
+            TD5_LOG_I(LOG_TAG,
+                      "stats slot0 t=%d sat%%=%.1f wall%%=%.1f meanv=%.0f line=%d",
+                      s_stat_ticks[0],
+                      100.0 * (double)s_stat_sat[0]  / (double)s_stat_ticks[0],
+                      100.0 * (double)s_stat_wall[0] / (double)s_stat_ticks[0],
+                      s_stat_spd[0] / (double)s_stat_ticks[0], s_line_on);
+    }
 
     /* --- THROTTLE / BRAKE (backward-braked profile => braking points free) ---
      * base_frac = min(profile fraction, racecraft follow cap). The floor
