@@ -2584,6 +2584,18 @@ static int trf_dyn_cap(void)
     } else {
         per = k_cap[v];
     }
+    /* [DRAG TRAFFIC DENSITY 2026-08-19] The drag strip needs a much bigger on-road
+     * budget than any circuit. Census over a full drag run showed on_road pinned at
+     * exactly the cap (16) at EVERY player position, with 48 of the 64 pool slots
+     * permanently idle — so the spawn rate could never exceed the RETIRE rate. That
+     * is what "frequency lowers drastically after the opening" actually is: 16 cars
+     * arrive together at the start, then new ones only trickle in as old ones retire.
+     * Raising the ceiling is the direct lever, and the pool has the room.
+     * Drag only, so no other mode's pacing moves. TD5RE_DRAG_TRAFFIC_CAP overrides. */
+    if (g_td5.drag_race_enabled) {
+        int dc = td5_env_int("TD5RE_DRAG_TRAFFIC_CAP", 32, 2, TD5_MAX_TRAFFIC_SLOTS);
+        if (dc > per) per = dc;
+    }
     if (per > TD5_MAX_TRAFFIC_SLOTS) per = TD5_MAX_TRAFFIC_SLOTS;
     /* [PER-PLAYER TRAFFIC CAP] scale the per-anchor budget by the number of
      * separate racer clusters, bounded by the pool. */
