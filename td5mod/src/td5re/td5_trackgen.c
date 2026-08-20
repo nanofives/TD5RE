@@ -613,6 +613,13 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
      * road (measured: wheel_mask=0 for 343/385 ticks, even dead flat). */
     const int lanes   = nl->v[0].lanes;
     const int row_pts = lanes + 1;
+    /* Spans per shared origin. Tunable so the effect of origin granularity on
+     * ground contact is measurable: the ground probe appears to read a span's
+     * origin_y (a track starting at y=-2040 probed -522240 = -2040*256), and a
+     * shared origin_y makes the collision ground a flat step at the block base
+     * while the visible road ramps away from it on hills. */
+    const int block = td5_env_int("TD5RE_AUTOTRACK_BLOCK",
+                                  TD5_TG_ORIGIN_BLOCK, 1, 20);
     int s0;
 
     /* ORIGIN BLOCKS. The loader resolves BOTH of a span's vertex rows against
@@ -629,9 +636,8 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
      *
      * Block length is bounded by the int16 vertex offset: TD5_TG_ORIGIN_BLOCK
      * spans of span_length, plus half the widest road, must stay under 32767. */
-    for (s0 = 0; s0 < nspans; s0 += TD5_TG_ORIGIN_BLOCK) {
-        const int ns  = (s0 + TD5_TG_ORIGIN_BLOCK <= nspans)
-                      ? TD5_TG_ORIGIN_BLOCK : (nspans - s0);
+    for (s0 = 0; s0 < nspans; s0 += block) {
+        const int ns  = (s0 + block <= nspans) ? block : (nspans - s0);
         const int ox  = tg_round(nl->v[s0].x);
         const int oy  = tg_round(nl->v[s0].y);
         const int oz  = tg_round(nl->v[s0].z);
@@ -970,8 +976,15 @@ int td5_trackgen_regenerate(unsigned int seed)
     td5_trackgen_default_spec(&spec);
     td5_trackgen_apply_config(&spec);
 
-    if (seed == 0)
-        seed = (unsigned int)td5_plat_time_ms() * 2654435761u + 0x9E3779B9u;
+    /* TD5RE_AUTOTRACK_SEED pins the seed so two runs generate the IDENTICAL
+     * track. Without this any A/B measurement compares two different random
+     * roads and attributes the difference to whatever knob was changed. */
+    if (seed == 0) {
+        int pinned = td5_env_int("TD5RE_AUTOTRACK_SEED", 0, 0, 0x7FFFFFFF);
+        seed = pinned ? (unsigned int)pinned
+                      : (unsigned int)td5_plat_time_ms() * 2654435761u
+                        + 0x9E3779B9u;
+    }
     spec.seed = seed;
 
     if (!td5_trackgen_build_level(&spec, TD5_TG_LEVEL_NUM, &spans)) {
