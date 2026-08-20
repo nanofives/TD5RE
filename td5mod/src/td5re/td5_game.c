@@ -3219,8 +3219,9 @@ static void init_race_level_and_assets(void)
             }
             int *car_slot = (s == 0 && !g_td5.network_active) ? &g_td5.car_index
                                                                 : &g_td5.ai_car_indices[s];
-            int is_cop_car = (*car_slot >= 33 && *car_slot <= 36) ||
-                             (*car_slot >= 46 && *car_slot <= 49);
+            /* [GEARBOX REWORK 2026-08-20] Was an inline range test; now the
+             * shared query so physics and this loop cannot disagree. */
+            int is_cop_car = td5_game_car_index_is_cop_car(*car_slot);
             if (!is_cop_car) {
                 TD5_LOG_I(LOG_TAG,
                           "Cop Chase: forcing slot %d car %d -> 33 (Police Cerbera, cop.zip)",
@@ -11440,6 +11441,37 @@ int td5_game_cop_chase_is_suspect(int slot) {
      * arrest points. Traffic must never be a cop-chase racer. */
     if (slot < 0 || slot >= g_traffic_slot_base) return 0;
     return !td5_game_cop_chase_is_cop(slot);          /* every non-cop racer */
+}
+
+/* [GEARBOX REWORK 2026-08-20] CANONICAL "is this a police car" test — by roster
+ * IDENTITY, not by cop ROLE: the TD5 police at 33-36 and the TD6 police cp1..cp4
+ * at 46-49. Neither range is player-selectable; both belong to Cop Chase.
+ *
+ * This is the ONLY definition of those ranges. Before this there were three
+ * independent copies: the Cop Chase car-forcing loop below, frontend_car_is_cop()
+ * in td5_frontend.c, and (nearly) the physics top-gear fix. All three now route
+ * here — leaf modules via td5_race_state.h, the frontend via td5_game.h.
+ *
+ * The 46-49 pair is also named TD6_COP_FIRST/TD6_COP_LAST in
+ * td5_frontend_internal.h because TD6_COP_LAST caps the Cop Chase roster
+ * pickers. Those macros are frontend-private so this function cannot use them;
+ * instead td5_frontend.c carries a _Static_assert pinning them to 46/49, so
+ * editing either side without the other fails the build rather than silently
+ * disagreeing. Keep that assert in step if these bounds ever change. */
+int td5_game_car_index_is_cop_car(int car_index) {
+    return (car_index >= 33 && car_index <= 36) ||
+           (car_index >= 46 && car_index <= 49);
+}
+
+/* [GEARBOX REWORK 2026-08-20] Roster car index actually driven by `slot`.
+ * Mirrors the selection rule used throughout the race-setup path: slot 0 uses
+ * the player's pick unless this is a net race (where every slot, including 0,
+ * comes from the per-slot AI/roster array). Returns -1 for an out-of-range slot
+ * so callers can tell "unknown" from a real index. */
+int td5_game_get_slot_car_index(int slot) {
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return -1;
+    if (slot == 0 && !g_td5.network_active) return g_td5.car_index;
+    return g_td5.ai_car_indices[slot];
 }
 
 /* [MP COP CHASE results 2026-06-25] True when a cop chase is running — the gate

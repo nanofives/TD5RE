@@ -30,6 +30,7 @@
 #include "td5_arcade.h"
 #include "td5_damage.h"
 #include "td5_camera.h"   /* td5_camera_reset_yaw_offset (post-repair cam un-spin) */
+#include "td5_net.h"      /* td5_net_is_active (earned manual bonus is SP-only) */
 #include "td5_platform.h"
 #include "td5_config.h"   /* shared TD5RE_* env-knob accessors */
 #include "td5_carparam.h" /* shared carparam field map (weight mechanics) */
@@ -563,44 +564,450 @@ int td5_physics_actor_should_auto_shift(const TD5_Actor *actor)
  * layer (TD5RE_MANUAL_GEARBOX) to be ON.
  * ======================================================================== */
 
-/* Resolved manual-boost factor, Q8 (0x100 = 1.0 = inert). -1 = unresolved. */
-static int32_t s_manual_boost_q8 = -1;
+/* Resolved manual-boost knobs. -1 = unresolved. `s_manual_on` gates the whole
+ * boost; `s_manual_base_pct` is the floor you get just for picking manual;
+ * `s_manual_max_pct` is the ceiling reachable by shifting well (see the
+ * shift-quality section below). */
+static int s_manual_on       = -1;
+static int s_manual_base_pct = 20;
+static int s_manual_max_pct  = 50;
 
-/* Resolve TD5RE_MANUAL_BOOST / _PCT once into a cached Q8 factor; logged once.
- * getenv is launch config (same on every client), not sim input, so caching it
- * does not break lockstep determinism. */
-static int32_t td5_physics_manual_boost_q8(void)
+/* Resolve TD5RE_MANUAL_BOOST / _PCT / _MAX_PCT once; logged once. getenv is
+ * launch config (same on every client), not sim input, so caching it does not
+ * break lockstep determinism. */
+static void td5_physics_manual_boost_resolve(void)
 {
-    if (s_manual_boost_q8 < 0) {
-        const char *e = getenv("TD5RE_MANUAL_BOOST");
-        int on = 1;  /* default ON */
-        int pct = 20;
-        if (e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N' || e[0] == 'f' || e[0] == 'F'))
-            on = 0;
-        pct = td5_env_int("TD5RE_MANUAL_BOOST_PCT", 20, 0, 100);
-        s_manual_boost_q8 = on ? (MP_CATCHUP_Q8_ONE + (MP_CATCHUP_Q8_ONE * pct) / 100)
-                               : MP_CATCHUP_Q8_ONE;
-        TD5_LOG_I(LOG_TAG,
-                  "manual_boost: TD5RE_MANUAL_BOOST=%d pct=%d -> factor=%d/256 "
-                  "(+accel +top-speed for manual gearbox, all cars)",
-                  on, pct, s_manual_boost_q8);
+    if (s_manual_on >= 0)
+        return;
+
+    const char *e = getenv("TD5RE_MANUAL_BOOST");
+    s_manual_on = (e && (e[0] == '0' || e[0] == 'n' || e[0] == 'N' ||
+                         e[0] == 'f' || e[0] == 'F')) ? 0 : 1;   /* default ON */
+    s_manual_base_pct = td5_env_int("TD5RE_MANUAL_BOOST_PCT", 20, 0, 200);
+    s_manual_max_pct  = td5_env_int("TD5RE_MANUAL_MAX_PCT",   50, 0, 200);
+    /* The earned ceiling can never sit below the unconditional floor. */
+    if (s_manual_max_pct < s_manual_base_pct)
+        s_manual_max_pct = s_manual_base_pct;
+
+    TD5_LOG_I(LOG_TAG,
+              "manual_boost: on=%d base=+%d%% earned_max=+%d%% "
+              "(+accel +top-speed for manual gearbox; earned half needs clean shifts)",
+              s_manual_on, s_manual_base_pct, s_manual_max_pct);
+}
+
+/* ========================================================================
+ * Shift-quality streak -> EARNED manual bonus. PORT-ONLY.
+ * [GEARBOX REWORK 2026-08-20 — "reward manual driving that shifts well"]
+ *
+ * The manual bonus is now two-tier:
+ *
+ *   base  (TD5RE_MANUAL_BOOST_PCT, default +20%) — unconditional, you get it
+ *         for driving manual at all. This is the pre-rework behaviour.
+ *   earned(TD5RE_MANUAL_MAX_PCT,   default +50%) — the CEILING, reached only by
+ *         stringing together clean (GREEN-band) upshifts.
+ *
+ * The streak counter walks 0..len (TD5RE_SHIFT_STREAK_LEN, default 5) and the
+ * effective bonus interpolates linearly between base and max:
+ *
+ *     pct = base + (max - base) * streak / len
+ *
+ * A GREEN shift adds 1. A mistimed shift COSTS more than a good one earns, so
+ * the ceiling has to be actively maintained rather than reached once and kept:
+ * EARLY (short-shift, bogged) costs 2, RED (over-rev money shift) costs 3.
+ * Clamped to 0..len, so the worst case is simply the base +20%.
+ *
+ * There is deliberately NO time-based decay: if you have shifted well and are
+ * sitting in top gear on a long straight, you keep what you earned. Decay only
+ * happens through the act of shifting badly, which is the thing being scored.
+ *
+ * The resulting factor flows through td5_physics_actor_manual_boost_q8(), which
+ * the callers already apply at BOTH the drive-torque chokepoint (acceleration)
+ * and all three speed_limit gates (top speed) — so a maintained streak makes the
+ * car both pull harder and run taller with no new call sites.
+ *
+ * DETERMINISM / NETPLAY: the streak is driven from the input path (same place as
+ * the existing s_shift_penalty_ticks bog window), i.e. LOCAL input state, but it
+ * feeds physics that every lockstep client recomputes per-actor. That would
+ * desync. So the EARNED half is applied only when td5_net_is_active() is false;
+ * in a net race every manual car falls back to the flat base bonus, which is
+ * pure launch config and therefore identical on every client.
+ * ======================================================================== */
+
+/* Clean-upshift streak per racer slot, 0..s_streak_len. */
+static int s_shift_streak[TD5_MAX_RACER_SLOTS];
+static int s_streak_len = -1;
+
+static int td5_physics_streak_len(void)
+{
+    if (s_streak_len < 0)
+        s_streak_len = td5_env_int("TD5RE_SHIFT_STREAK_LEN", 5, 1, 20);
+    return s_streak_len;
+}
+
+/* Score one manual upshift for `slot`. `verdict` is one of the
+ * TD5_SHIFT_VERDICT_* values, produced by the shift-timing band check in
+ * td5_input.c (the same bands the HUD arrow colours show). */
+void td5_physics_shift_quality_note(int slot, int verdict)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS)
+        return;
+
+    const int len = td5_physics_streak_len();
+    const int before = s_shift_streak[slot];
+
+    switch (verdict) {
+    case TD5_SHIFT_VERDICT_GREEN: s_shift_streak[slot] += 1; break;
+    case TD5_SHIFT_VERDICT_EARLY: s_shift_streak[slot] -= 2; break;
+    case TD5_SHIFT_VERDICT_RED:   s_shift_streak[slot] -= 3; break;
+    default: return;
     }
-    return s_manual_boost_q8;
+
+    if (s_shift_streak[slot] < 0)   s_shift_streak[slot] = 0;
+    if (s_shift_streak[slot] > len) s_shift_streak[slot] = len;
+
+    if (s_shift_streak[slot] != before) {
+        TD5_LOG_I(LOG_TAG,
+                  "shift_streak: slot=%d verdict=%d streak=%d->%d/%d bonus=+%d%%",
+                  slot, verdict, before, s_shift_streak[slot], len,
+                  td5_physics_shift_quality_bonus_pct(slot));
+    }
+}
+
+/* Clear every slot's streak. Called from the input-layer race reset so a new
+ * race always starts at the base bonus. */
+void td5_physics_shift_quality_reset(void)
+{
+    memset(s_shift_streak, 0, sizeof(s_shift_streak));
+}
+
+/* Raw streak for `slot` (0..len). HUD/diagnostics. */
+int td5_physics_shift_quality_streak(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS)
+        return 0;
+    return s_shift_streak[slot];
+}
+
+int td5_physics_shift_quality_streak_len(void)
+{
+    return td5_physics_streak_len();
+}
+
+/* Effective manual bonus percentage for `slot`, base..max. This is the number
+ * the HUD shows, so it must match exactly what the physics applies. */
+int td5_physics_shift_quality_bonus_pct(int slot)
+{
+    td5_physics_manual_boost_resolve();
+    if (!s_manual_on)
+        return 0;
+
+    /* Netplay: earned half disabled for lockstep safety (see section header). */
+    if (td5_net_is_active())
+        return s_manual_base_pct;
+
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS)
+        return s_manual_base_pct;
+
+    const int len   = td5_physics_streak_len();
+    const int span  = s_manual_max_pct - s_manual_base_pct;
+    return s_manual_base_pct + (span * s_shift_streak[slot]) / len;
+}
+
+/* ========================================================================
+ * Per-gear speed ceilings. PORT-ONLY.
+ * [GEARBOX REWORK 2026-08-20 — "make the gearbox behave like other racing games"]
+ *
+ * Faithfully, gear only ever SCALED TORQUE (compute_drive_torque multiplies by
+ * the per-gear ratio at carparam+0x2E). There was no per-gear speed ceiling at
+ * all, so 2nd gear would happily pull to the car's absolute top speed given
+ * enough road — which is why the box never felt like a real gearbox and why the
+ * gear you were in barely mattered once you were rolling.
+ *
+ * A real gearbox tops out per gear: each ratio can only spin the engine to the
+ * limiter, and that fixes a maximum road speed for that gear. We derive exactly
+ * that by INVERTING the engine-speed model in td5_physics_update_engine_speed:
+ *
+ *     rpm = ((|speed>>8| * gear_ratio * 45) >> 12) + 400      (clamped to redline)
+ *  => |speed>>8| at redline = (redline - 400) * 4096 / (gear_ratio * 45)
+ *
+ * This is the same inversion the engine-brake path already does at
+ * td5_physics_drivetrain.c (over-limiter downshift recovery), so the two agree
+ * by construction rather than by coincidence.
+ *
+ * SCOPE: applied BELOW top gear only. In top gear the car's authored top-speed
+ * rating (carparam+0x74) still governs, exactly as before, so this can never
+ * lower any car's actual top speed — it only makes the intermediate gears
+ * behave like gears. That also keeps it orthogonal to the manual bonus, which
+ * raises the top-gear cap.
+ *
+ * KNOB: TD5RE_GEAR_CEILING (default 1 = ON). Off restores the pre-rework
+ * behaviour for A/B testing.
+ * ======================================================================== */
+
+static int s_gear_ceiling_on = -1;
+
+int td5_physics_gear_ceiling_enabled(void)
+{
+    if (s_gear_ceiling_on < 0) {
+        s_gear_ceiling_on = td5_env_int("TD5RE_GEAR_CEILING", 1, 0, 1);
+        TD5_LOG_I(LOG_TAG,
+                  "gear_ceiling: TD5RE_GEAR_CEILING=%d "
+                  "(1 = intermediate gears top out at their redline speed)",
+                  s_gear_ceiling_on);
+    }
+    return s_gear_ceiling_on;
+}
+
+/* Highest usable forward gear, or 0 when the car has no gear data (traffic).
+ * max_gear_index is the gear-count scan result written in
+ * td5_physics_init_vehicle_runtime (scans the upshift table for the 0x270F
+ * sentinel); the input layer's own upshift guard is `gear < max_gear_index-1`,
+ * so max_gear_index-1 IS the top reachable gear. */
+int td5_physics_top_gear(const TD5_Actor *actor)
+{
+    if (!actor)
+        return 0;
+    int mg = (int)TD5_ACTOR_AT(actor)->max_gear_index;
+    if (mg <= 2)
+        return 0;                       /* traffic / uninitialised */
+    int tg = mg - 1;
+    if (tg > 7) tg = 7;
+    return tg;
+}
+
+/* ------------------------------------------------------------------------
+ * TOP-GEAR STRETCH — why the earned bonus needs it.
+ *
+ * MEASURED against all 77 shipped carparam.json files (2026-08-20): the speed
+ * at which TOP gear hits the rev limiter is only a median 1.10x the car's
+ * authored top-speed rating (min 0.90x, max 1.86x). Because drive torque is
+ * hard-zeroed above redline-50 (compute_drive_torque), that limiter — not the
+ * rating — is what actually stops the car. Consequences:
+ *
+ *   - Raising the top-speed CAP alone does almost nothing: 71/77 cars cannot
+ *     reach rating*1.5, and 53/77 cannot even reach rating*1.2. That means the
+ *     PRE-EXISTING flat +20% manual boost was already inert on most of the
+ *     roster — it raised a cap the car could never touch.
+ *   - 10/77 cars sit at 0.90x, i.e. the limiter stops them BELOW their own
+ *     authored top speed even with no bonus at all.
+ *
+ * So the reward has to change the GEARING, not just the cap. We stretch the
+ * effective TOP-gear ratio by the same bonus factor, which is exactly what a
+ * taller final drive does: at a given road speed the engine turns slower, so
+ * the limiter arrives later and the higher cap becomes reachable.
+ *
+ * Scope is deliberately TOP GEAR ONLY. Stretching every gear would drop revs
+ * across the whole box and make the car lug in 1st/2nd; stretching just the top
+ * extends the top end and leaves the car's low-gear character intact.
+ *
+ * Deliberate asymmetry: the stretch applies to the RPM model (and therefore the
+ * ceiling maths), but compute_drive_torque keeps multiplying by the RAW ratio.
+ * Physically, taller gearing would cost torque; here it must not, because the
+ * whole point is to reward the driver. The bonus already scales torque up
+ * separately, so top gear gets both a taller ratio and full torque.
+ * ------------------------------------------------------------------------ */
+
+/* Q8 gearing stretch for (actor, gear): the manual bonus factor in TOP gear,
+ * 1.0 everywhere else. */
+static int32_t td5_physics_gear_stretch_q8(TD5_Actor *actor, int gear)
+{
+    if (gear < 2)
+        return MP_CATCHUP_Q8_ONE;
+    int tg = td5_physics_top_gear(actor);
+    if (tg < 2 || gear != tg)
+        return MP_CATCHUP_Q8_ONE;
+    return td5_physics_actor_manual_boost_q8(actor);
+}
+
+/* Effective gear ratio for RPM / ceiling purposes: the authored ratio, made
+ * TALLER (numerically smaller) in top gear by the manual bonus. Always returns
+ * a positive magnitude; 0 when the car has no usable ratio. Single source of
+ * truth so the RPM model, the per-gear ceiling and the over-limiter engine-brake
+ * target agree by construction instead of by coincidence. */
+/* ------------------------------------------------------------------------
+ * TOP-GEAR REACHABILITY FIX — applies to EVERY car, not just manual.
+ * [GEARBOX REWORK 2026-08-20]
+ *
+ * Ten of the 77 shipped cars are geared so tall-revving that TOP gear hits the
+ * rev limiter BELOW their own authored top-speed rating (carparam+0x74) — the
+ * car can never reach the top speed its own data claims, no matter who drives
+ * it or how well. Measured ceiling/rating ratios: chr 0.90, cp2 0.90, lit 0.90,
+ * flx 0.91, nis 0.91, pwr 0.92, cp3 0.96, mgt 0.96, cob 0.98, mcj 0.98.
+ *
+ * That is a plain defect, not a balance choice, and it penalises AUTOMATIC
+ * drivers and AI exactly as much as manual ones. So it is fixed here for
+ * everybody, independently of the manual reward: in top gear, cap the ratio at
+ * the tallest value that still reaches the authored rating.
+ *
+ *     ceiling(ratio) = (redline-400)*4096 / (ratio*45)  >= rating
+ *  => ratio <= (redline-400)*4096 / (rating*45)
+ *
+ * Cars already able to reach their rating are untouched (the clamp is a no-op),
+ * so 67/77 cars — and every golden/AI pacing assumption that depends on them —
+ * are bit-unchanged. For the 10 affected cars the ratio drops at most 10.4% and
+ * top speed rises 2.0%..11.7%, which is exactly the speed their carparam always
+ * claimed. Uses the RAW authored rating, deliberately NOT phys_top_speed_rating()
+ * (that one returns 0x7FFF for a chasing cop and folds in catch-up/arcade
+ * multipliers, which would make the gearing situational and unstable).
+ *
+ * KNOB: TD5RE_TOPGEAR_FIX (default 1 = ON).
+ * ------------------------------------------------------------------------ */
+
+static int s_topgear_fix_on = -1;
+
+static int td5_physics_topgear_fix_enabled(void)
+{
+    if (s_topgear_fix_on < 0) {
+        s_topgear_fix_on = td5_env_int("TD5RE_TOPGEAR_FIX", 1, 0, 1);
+        TD5_LOG_I(LOG_TAG,
+                  "topgear_fix: TD5RE_TOPGEAR_FIX=%d "
+                  "(1 = top gear geared tall enough to reach the car's authored top speed)",
+                  s_topgear_fix_on);
+    }
+    return s_topgear_fix_on;
+}
+
+int32_t td5_physics_effective_gear_ratio(TD5_Actor *actor, int gear)
+{
+    if (!actor || !get_phys(actor) || gear < 0 || gear > 7)
+        return 0;
+
+    int32_t ratio = (int32_t)PHYS_S(actor, PHYS_GEAR_RATIO_BASE + gear * 2);
+    if (ratio < 0) ratio = -ratio;
+    if (ratio == 0)
+        return 0;
+
+    /* Top-gear reachability fix — must run BEFORE the manual stretch so the two
+     * compose: first guarantee the authored top speed is reachable, then stretch
+     * further for an earned bonus on top of it.
+     *
+     * POLICE CARS ARE EXCLUDED (user decision 2026-08-20). Two of the ten
+     * affected cars are the TD6 police cp2/cp3 (roster 47/48), and handing a
+     * pursuing cop +11.7% / +4.1% top speed would silently re-balance Cop Chase
+     * on top of the existing TD5RE_COPCHASE_AI_SPEED_PCT suspect debuff. This is
+     * a correctness fix, so it must not move a game mode's difficulty. Excluded
+     * by CAR IDENTITY, not by cop ROLE, so a police car is consistent wherever
+     * it appears rather than changing gearing when a chase happens to start.
+     * The remaining 8 affected cars are fixed normally. */
+    if (gear >= 2 && td5_physics_topgear_fix_enabled()
+        && !td5_game_car_index_is_cop_car(
+                td5_game_get_slot_car_index((int)actor->slot_index))) {
+        int tg = td5_physics_top_gear(actor);
+        if (tg >= 2 && gear == tg) {
+            int32_t redline = (int32_t)PHYS_S(actor, PHYS_REDLINE_RPM);
+            int32_t rating  = (int32_t)PHYS_S(actor, PHYS_TOP_SPEED);
+            if (redline > 400 && rating > 0) {
+                int64_t max_ratio =
+                    ((int64_t)(redline - 400) * 4096) / ((int64_t)rating * 45);
+                if (max_ratio >= 1 && max_ratio < ratio)
+                    ratio = (int32_t)max_ratio;   /* no-op for 67/77 cars */
+            }
+        }
+    }
+
+    int32_t q8 = td5_physics_gear_stretch_q8(actor, gear);
+    if (q8 != MP_CATCHUP_Q8_ONE && q8 > 0) {
+        /* Taller gearing = ratio / factor. Round to nearest, floor at 1 so a
+         * huge bonus can never collapse the ratio to zero (div-by-zero later). */
+        int64_t r = ((int64_t)ratio * MP_CATCHUP_Q8_ONE + (q8 / 2)) / q8;
+        ratio = (int32_t)(r < 1 ? 1 : r);
+    }
+    return ratio;
+}
+
+int32_t td5_physics_gear_ceiling_speed(TD5_Actor *actor, int gear)
+{
+    if (!actor || !get_phys(actor))
+        return 0;
+    /* Reverse (0) and neutral (1) have no meaningful forward ceiling. */
+    if (gear < 2 || gear > 7)
+        return 0;
+
+    int32_t redline = (int32_t)PHYS_S(actor, PHYS_REDLINE_RPM);
+    int32_t ratio   = td5_physics_effective_gear_ratio(actor, gear);
+    if (ratio <= 0 || redline <= 400)
+        return 0;
+
+    /* |speed>>8| at redline, then back to 24.8 units. int64 because
+     * (redline-400)*4096 can exceed int32 for a high-revving car. */
+    int64_t s8 = ((int64_t)(redline - 400) * 4096) / ((int64_t)ratio * 45);
+    if (s8 < 0) s8 = 0;
+    return (int32_t)(s8 << 8);
+}
+
+/* Effective forward speed limit for `actor`, given the faithful per-car limit.
+ * Composes the two PORT-ONLY gearbox-rework layers in one place so all three
+ * drive-side gates (player on-ground / airborne, AI) stay consistent:
+ *
+ *   1. manual bonus  — raises the cap (and, via the top-gear stretch above,
+ *                      actually makes the raised cap reachable)
+ *   2. gear ceiling  — BELOW top gear, clamps to the speed at which THIS gear
+ *                      hits the limiter, so intermediate gears behave like
+ *                      gears. Never applied in top gear, so a car's real top
+ *                      speed is never reduced by this.
+ */
+int32_t td5_physics_effective_speed_limit(TD5_Actor *actor, int32_t speed_limit)
+{
+    int32_t lim = td5_physics_apply_speed_limit_boost(
+                      speed_limit, td5_physics_actor_manual_boost_q8(actor));
+
+    if (!td5_physics_gear_ceiling_enabled() || !actor)
+        return lim;
+
+    int gear = (int)(uint8_t)TD5_ACTOR_AT(actor)->current_gear;
+    int tg   = td5_physics_top_gear(actor);
+    /* Top gear (and cars with no gear data) keep the rating-derived limit. */
+    if (tg < 2 || gear >= tg || gear < 2)
+        return lim;
+
+    int32_t ceil = td5_physics_gear_ceiling_speed(actor, gear);
+    if (ceil > 0 && ceil < lim)
+        return ceil;
+    return lim;
+}
+
+/* HUD accessor: the bonus percent to DISPLAY for `slot`, or -1 when there is
+ * nothing to show (automatic gearbox, gearbox layer off, boost off, no such
+ * actor). Keeps the manual-mode predicate out of the HUD, and guarantees the
+ * number on screen is the same one the physics applies. */
+int td5_physics_shift_quality_hud_pct(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS)
+        return -1;
+    if (!td5_physics_manual_gearbox_enabled())
+        return -1;
+
+    TD5_Actor *a = td5_game_get_actor(slot);
+    if (!a || !td5_physics_actor_is_manual_gearbox(a))
+        return -1;
+
+    td5_physics_manual_boost_resolve();
+    if (!s_manual_on)
+        return -1;
+
+    return td5_physics_shift_quality_bonus_pct(slot);
 }
 
 /* Per-actor drive-side boost factor, Q8 (0x100 = 1.0). Returns the manual-boost
  * factor when the actor is in MANUAL gearbox mode (byte +0x378 == 0) AND the
  * gearbox layer is enabled, else 1.0. Used to scale both drive torque
  * (acceleration) and the speed_limit gate (top speed) so a manual car
- * accelerates harder AND tops out higher. */
+ * accelerates harder AND tops out higher — now scaled by how well the driver
+ * has been shifting (shift-quality streak, above). */
 int32_t td5_physics_actor_manual_boost_q8(const TD5_Actor *actor)
 {
     /* +0x378 == 0 → manual [authoritative gearbox-mode flag; see header above].
      * Gated by TD5RE_MANUAL_GEARBOX so the whole manual layer toggles together. */
-    if (td5_physics_manual_gearbox_enabled() &&
-        td5_physics_actor_is_manual_gearbox(actor))
-        return td5_physics_manual_boost_q8();
-    return MP_CATCHUP_Q8_ONE;
+    if (!td5_physics_manual_gearbox_enabled() ||
+        !td5_physics_actor_is_manual_gearbox(actor))
+        return MP_CATCHUP_Q8_ONE;
+
+    td5_physics_manual_boost_resolve();
+    if (!s_manual_on)
+        return MP_CATCHUP_Q8_ONE;
+
+    int pct = td5_physics_shift_quality_bonus_pct((int)actor->slot_index);
+    return MP_CATCHUP_Q8_ONE + (MP_CATCHUP_Q8_ONE * pct) / 100;
 }
 
 /* Raise a per-car speed limit by a Q8 factor (top-speed half of the manual
@@ -2222,4 +2629,9 @@ void td5_physics_assists_race_reset(void)
 {
     memset(s_manual_recovery_cooldown, 0, sizeof(s_manual_recovery_cooldown));
     memset(s_recover_bit_held, 0, sizeof(s_recover_bit_held));   /* [CAR BROKE DOWN] */
+    /* [GEARBOX REWORK 2026-08-20] Clear the auto-shift dwell so a new race can
+     * shift on its first tick, and the earned-bonus streak so manual starts at
+     * the base bonus (belt-and-braces with td5_input_reset_buffers). */
+    td5_physics_auto_shift_dwell_reset();
+    td5_physics_shift_quality_reset();
 }

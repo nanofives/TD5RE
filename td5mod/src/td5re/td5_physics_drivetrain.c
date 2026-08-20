@@ -304,6 +304,20 @@ void td5_physics_update_engine_speed(TD5_Actor *actor)
      * param_2 is the caller-cached tuning_data_ptr (== actor->tuning_data_ptr). */
     int32_t gear_ratio = (int32_t)PHYS_S(actor, PHYS_GEAR_RATIO_BASE + gear * 2);
 
+    /* [GEARBOX REWORK 2026-08-20 PORT ENHANCEMENT] In TOP gear a manual car with
+     * an earned bonus runs a TALLER effective ratio, so the engine turns slower
+     * at a given road speed and the rev limiter stops fighting the raised
+     * top-speed cap (measured: the limiter, not the cap, is what actually
+     * bounds 71/77 shipped cars — see the top-gear stretch note in
+     * td5_physics_assists.c). Returns the authored magnitude unchanged for
+     * automatic cars / knob-off / any gear below top, so AI, traffic and the
+     * golden races take the byte-faithful value. */
+    {
+        int32_t eff = td5_physics_effective_gear_ratio(actor, gear);
+        if (eff > 0 && eff != (gear_ratio < 0 ? -gear_ratio : gear_ratio))
+            gear_ratio = eff;
+    }
+
     /* MOV ECX,[ESI+0x310]  [@ 0x42EE28] */
     int32_t rpm = actor->engine_speed_accum;
 
@@ -500,6 +514,59 @@ void td5_physics_auto_gear_select(TD5_Actor *actor)
     }
 }
 
+/* ========================================================================
+ * Auto-shift hysteresis (minimum dwell between shifts). PORT-ONLY.
+ * [GEARBOX REWORK 2026-08-20]
+ *
+ * The faithful auto FSM has NO dwell and NO hysteresis beyond the two authored
+ * per-gear RPM thresholds: it re-decides every single tick. When a car sits
+ * where the upshift threshold for gear N and the downshift threshold for gear
+ * N+1 overlap (cresting a hill, part throttle, a long gentle climb), it shifts
+ * up and straight back down repeatedly — audible gear hunting.
+ *
+ * A minimum dwell after each shift fixes it: once the box has changed gear it
+ * must hold that gear for a few ticks before it may change again.
+ *
+ * SCOPE: HUMAN players in automatic ONLY (g_race_slot_state[slot] == 1). AI and
+ * traffic keep the byte-faithful every-tick FSM deliberately — the DRIVER AI
+ * model's pace was tuned against that exact behaviour (2026-08-18), and adding
+ * dwell there would silently re-tune every opponent's acceleration out of a
+ * corner. Manual cars never reach this code at all (they don't auto-shift).
+ *
+ * KNOB: TD5RE_AUTO_SHIFT_DWELL, default 12 ticks (~0.2 s at 60 Hz), 0 = off
+ * (fully faithful).
+ * ======================================================================== */
+
+static int32_t s_auto_shift_dwell[TD5_MAX_RACER_SLOTS];
+
+static int td5_physics_auto_shift_dwell_ticks(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+        cached = td5_env_int("TD5RE_AUTO_SHIFT_DWELL", 12, 0, 120);
+    return cached;
+}
+
+/* Slot index when auto-shift hysteresis applies to this actor, else -1.
+ * -1 keeps the caller on the exact byte-faithful path. */
+static int td5_physics_auto_shift_hyst_slot(TD5_Actor *actor)
+{
+    if (td5_physics_auto_shift_dwell_ticks() <= 0)
+        return -1;
+    int slot = (int)actor->slot_index;
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS)
+        return -1;
+    /* Human-driven slot only; AI/traffic stay faithful. */
+    if (g_race_slot_state[slot] != 1)
+        return -1;
+    return slot;
+}
+
+void td5_physics_auto_shift_dwell_reset(void)
+{
+    memset(s_auto_shift_dwell, 0, sizeof(s_auto_shift_dwell));
+}
+
 /* --- On-ground variant of auto_gear_select ---
  * Same gear logic but WITHOUT the drivetrain kick (wheel_spring_dv writes).
  * The original only calls auto_gear on airborne frames where kicks are rare.
@@ -524,20 +591,35 @@ void td5_physics_auto_gear_select_no_kick(TD5_Actor *actor)
         actor->current_gear = TD5_GEAR_FIRST;
     }
 
+    /* [GEARBOX REWORK 2026-08-20] Minimum dwell between shifts (human-in-auto
+     * only; see section header). Blocks only the up/down DECISIONS below — the
+     * reverse/neutral handling above is untouched. */
+    const int hslot = td5_physics_auto_shift_hyst_slot(actor);
+    int shift_locked = 0;
+    if (hslot >= 0 && s_auto_shift_dwell[hslot] > 0) {
+        s_auto_shift_dwell[hslot]--;
+        shift_locked = 1;
+    }
+
     int32_t up_thresh = (int32_t)PHYS_S(actor, PHYS_GEAR_UPSHIFT_BASE + gear_cached * 2);
 
-    if (rpm > up_thresh
+    if (!shift_locked
+        && rpm > up_thresh
         && gear_cached < 8
         && actor->longitudinal_speed > 0) {
         uint8_t new_gear = (uint8_t)(actor->current_gear + 1);
         actor->current_gear = new_gear;
+        if (hslot >= 0)
+            s_auto_shift_dwell[hslot] = td5_physics_auto_shift_dwell_ticks();
         /* No drivetrain kick — on-ground only */
         return;
     }
 
     int32_t dn_thresh = (int32_t)PHYS_S(actor, PHYS_GEAR_DOWNSHIFT_BASE + gear_cached * 2);
-    if (rpm < dn_thresh && gear_cached > TD5_GEAR_FIRST) {
+    if (!shift_locked && rpm < dn_thresh && gear_cached > TD5_GEAR_FIRST) {
         actor->current_gear = (uint8_t)(actor->current_gear - 1);
+        if (hslot >= 0)
+            s_auto_shift_dwell[hslot] = td5_physics_auto_shift_dwell_ticks();
     }
 }
 
@@ -742,14 +824,12 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
             && gear_u8 >= 0x02
             && actor->longitudinal_speed > 0
             && td5_physics_actor_is_manual_gearbox(actor)) {
-            int32_t gr = (int32_t)PHYS_S(actor, PHYS_GEAR_RATIO_BASE + (int32_t)gear_u8 * 2);
-            if (gr < 0) gr = -gr;
-            int32_t gear_max = 0;
-            if (gr > 0 && redline > 400) {
-                int64_t s8 = ((int64_t)(redline - 400) * 4096) / ((int64_t)gr * 45);
-                if (s8 < 0) s8 = 0;
-                gear_max = (int32_t)(s8 << 8);
-            }
+            /* [GEARBOX REWORK 2026-08-20] Use the shared ceiling helper so this
+             * engine-brake target and the per-gear speed ceiling at the drive
+             * gates are derived from the SAME effective ratio (incl. the top-gear
+             * stretch). Previously this inlined its own copy of the inversion,
+             * which would disagree once the stretch existed. */
+            int32_t gear_max = td5_physics_gear_ceiling_speed(actor, (int)gear_u8);
             int32_t excess = actor->longitudinal_speed - gear_max;
             if (excess > 0) {
                 return -(int32_t)((int64_t)excess * ebp / 100);

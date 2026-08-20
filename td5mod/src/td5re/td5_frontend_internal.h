@@ -695,6 +695,17 @@ extern int  s_buttonlights_h;
 
 /* ---- car selection / simultaneous-MP grid ---- */
 #define FE_CARSEL_SLIDE_IN_MS 1250
+
+/* TD6 cop cars cp1..cp4 (Jaguar/Charger/Mustang/Cerbera police) sit at roster
+ * indices 37 + TD6_NEW_CODES{9..12} = 46..49. Like the TD5 police (33-36) they
+ * are NOT player-selectable and cannot be painted — they belong to Cop Chase.
+ * TD6_COP_LAST also caps the roster in the Cop Chase car pickers (td5_fe_race.c).
+ *
+ * [GEARBOX REWORK 2026-08-20] FIRST was previously #defined halfway down
+ * td5_frontend.c while LAST lived here, so the pair could drift. Both now sit
+ * together, and the range is asserted against the canonical cop-car predicate
+ * td5_game_car_index_is_cop_car() at the frontend_car_is_cop() definition. */
+#define TD6_COP_FIRST 46
 #define TD6_COP_LAST  49
 /* [2026-06-29] The simultaneous-MP car-select grid pane now carries only CAR /
  * PAINT / OK: MORE STATS was dropped (the at-a-glance SPEED/ACCEL/HANDLING bars

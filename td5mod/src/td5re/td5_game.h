@@ -257,6 +257,10 @@ int  td5_game_cop_chase_cop_slot(void);
  * Returns 0 outside an active cop chase (wanted mode off). */
 int  td5_game_cop_chase_is_cop(int slot);
 int  td5_game_cop_chase_is_suspect(int slot);
+/* Police car by IDENTITY (roster 33-36 TD5, 46-49 TD6 cp1..cp4), not by role. */
+int  td5_game_car_index_is_cop_car(int car_index);
+/* Roster car index driven by `slot`, or -1 if the slot is out of range. */
+int  td5_game_get_slot_car_index(int slot);
 /* Active racer count for an MP cop chase (human suspects + an AI-cop slot when
  * the cop is an AI). 0 = not an MP cop chase -> callers keep the faithful SP
  * wanted-mode 2-slot field. Keeps the field-size decisions (g_racer_count,
