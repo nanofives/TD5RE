@@ -58,6 +58,25 @@
 /* Vertex indices in a span record are u16, and each span emits 2*(lanes+1)
  * vertices, so the vertex table -- not the span count -- is the binding
  * ceiling. Keep a margin under 65535. */
+/* Spans per shared origin block. Bounded by the int16 vertex offset: the last
+ * row of a block sits TD5_TG_ORIGIN_BLOCK * span_length down-track from the
+ * origin, plus half the widest road, and that must stay under 32767.
+ * 16 * 1500 + ~7500 = 31500, inside 32767 (the emitter hard-checks anyway).
+ * Shipped level001 uses runs of ~22 spans per origin. */
+#define TD5_TG_ORIGIN_BLOCK   16
+
+/* Span byte flags copied from shipped data (level001: every road span is
+ * [type 1, attr 0x11, mask 0x09, packed 0x84]).
+ *   attr  0x11 = primary surface 1 / alternate surface 1. Surface type selects
+ *                GRIP (td5_track.c:3837); type 0 -- what this generator wrote
+ *                at first -- is not the tarmac class shipped roads use.
+ *   mask  bit N = lane N uses the alternate surface; shipped marks the two
+ *                outer lanes (0x09 for a 4-lane road).
+ *   packed high nibble 8 = span_height_offset, only ever read as a DIFFERENCE
+ *                between neighbours, so a uniform value is what matters. */
+#define TD5_TG_SURFACE_ATTR   0x11
+#define TD5_TG_HEIGHT_NIBBLE  8
+
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
 
@@ -65,8 +84,11 @@
  * td5_trackgen.py's CURVE_SAFETY_DEFAULT (1.5); the extra 1.2 is headroom so
  * the resampled centerline never lands exactly on the floor. */
 #define TD5_TG_CURVE_SAFETY   (1.5 * 1.2)
-/* Steepest allowed |dY/d(arc)|, mirroring td5_trackgen.py's max_grade. */
-#define TD5_TG_MAX_GRADE      0.12
+/* Steepest allowed |dY/d(arc)|. td5_trackgen.py uses 0.12; that is far too
+ * steep here, because at span_length 1500 a 0.12 grade is a 180-unit step per
+ * span and the result is a series of ramps that launches the car at speed.
+ * MEASURED: dead flat gives 94% wheel contact, 0.12 gives 40%. */
+#define TD5_TG_MAX_GRADE      0.035
 
 #define TD5_TG_PI 3.14159265358979323846
 
@@ -357,9 +379,15 @@ static int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
                 x += sin(heading) * span_len;
                 z += cos(heading) * span_len;
 
-                lanes_here = (int)((width / (double)spec->lane_width) + 0.5);
-                if (lanes_here < 1)  lanes_here = 1;
-                if (lanes_here > 12) lanes_here = 12;
+                /* Lane COUNT is constant for the whole track; only the WIDTH
+                 * varies. Two reasons: (a) consecutive spans must SHARE a
+                 * vertex row (see tg_emit_strip) and a shared row has one
+                 * point count; (b) shipped tracks only ever use 2-4 lanes, so
+                 * the rail LUTs and suspension paths are only exercised there.
+                 * A "dual-lane" section is therefore a visibly WIDER road, not
+                 * a different subdivision -- which is the visual intent anyway,
+                 * since the lane count is really a surface-grid stride. */
+                lanes_here = spec->lanes;
 
                 /* Would this node put road on top of earlier road? */
                 if (tg_too_close(nl, x, z, width, (double)spec->lane_width)) {
@@ -570,77 +598,99 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
 {
     const int nspans = nl->count - 1;
     TG_Buf spans, verts;
-    int si, vtx_count = 0, ok = 1;
+    int vtx_count = 0, ok = 1;
 
     memset(&spans, 0, sizeof(spans));
     memset(&verts, 0, sizeof(verts));
 
-    for (si = 0; si < nspans; si++) {
-        const TG_Node *a = &nl->v[si];
-        const TG_Node *b = &nl->v[si + 1];
-        /* One lane count governs BOTH rows of a span: the renderer reads a
-         * single lane count from byte +0x03 and indexes the quad as
-         * lvi..lvi+lanes / rvi..rvi+lanes, so the rows must match in length.
-         * The far node's WIDTH is still honoured, so tapers stay smooth. */
-        const int lanes = a->lanes;
-        const int row_pts = lanes + 1;
-        int ox, oy, oz, k;
+    /* Lane count is uniform (see tg_build_centerline), so every row has the
+     * same point count and consecutive spans can SHARE a row: span i spans
+     * rows i and i+1. Shipped tracks do exactly this (level001: span0
+     * lvi=0 rvi=5, span1 lvi=5 rvi=10). Emitting a private duplicated row
+     * pair per span is geometrically identical but breaks span-to-span
+     * adjacency, which resolve_neighbor (td5_track.c:4013) detects by vertex
+     * INDEX -- contact then fails at every seam and the car sinks through the
+     * road (measured: wheel_mask=0 for 343/385 ticks, even dead flat). */
+    const int lanes   = nl->v[0].lanes;
+    const int row_pts = lanes + 1;
+    int s0;
 
-        if (vtx_count + 2 * row_pts > TD5_TG_MAX_VERTICES) {
+    /* ORIGIN BLOCKS. The loader resolves BOTH of a span's vertex rows against
+     * THAT span's origin, so two spans can only share a row if they share an
+     * origin. Hence origins are per-BLOCK, constant across the block, with the
+     * shared row duplicated at block seams -- which is exactly what shipped
+     * tracks do (level001 span0 lvi=0 rvi=5, span1 lvi=5 rvi=10).
+     *
+     * Storing one origin per span while sharing rows displaces every span's FAR
+     * edge by one span step, skewing the road surface: contact then flickers
+     * between all-four-wheels and none, and the car gets flung down-track
+     * (measured: wall_clear median -583186 while driving, though a perfect 2250
+     * at rest -- the giveaway that only the far row was wrong).
+     *
+     * Block length is bounded by the int16 vertex offset: TD5_TG_ORIGIN_BLOCK
+     * spans of span_length, plus half the widest road, must stay under 32767. */
+    for (s0 = 0; s0 < nspans; s0 += TD5_TG_ORIGIN_BLOCK) {
+        const int ns  = (s0 + TD5_TG_ORIGIN_BLOCK <= nspans)
+                      ? TD5_TG_ORIGIN_BLOCK : (nspans - s0);
+        const int ox  = tg_round(nl->v[s0].x);
+        const int oy  = tg_round(nl->v[s0].y);
+        const int oz  = tg_round(nl->v[s0].z);
+        const int base = vtx_count;
+        int k;
+
+        if (vtx_count + (ns + 1) * row_pts > TD5_TG_MAX_VERTICES) {
             TD5_LOG_W(LOG_TAG, "trackgen: vertex ceiling hit at span %d "
-                      "(%d verts); truncating track", si, vtx_count);
+                      "(%d verts); truncating track", s0, vtx_count);
             break;
         }
 
-        ox = tg_round(a->x);
-        oy = tg_round(a->y);
-        oz = tg_round(a->z);
-
-        /* Span record. */
-        tg_put_u8 (&spans, 1);                 /* span_type QUAD_A */
-        tg_put_u8 (&spans, 0);                 /* surface_attribute: road */
-        tg_put_u8 (&spans, 0);                 /* off-road lane bitmask */
-        tg_put_u8 (&spans, (unsigned)(lanes & 0x0F));  /* height nibble 0 */
-        tg_put_u16(&spans, (unsigned)vtx_count);               /* near row */
-        tg_put_u16(&spans, (unsigned)(vtx_count + row_pts));   /* far row  */
-        tg_put_u16(&spans, 0xFFFF);            /* link_next = -1 */
-        tg_put_u16(&spans, 0xFFFF);            /* link_prev = -1 */
-        tg_put_i32(&spans, ox);
-        tg_put_i32(&spans, oy);
-        tg_put_i32(&spans, oz);
-
-        /* Two vertex rows, left rail -> right rail, local to this origin. */
-        for (k = 0; k < 2; k++) {
-            const TG_Node *n = k ? b : a;
-            /* Left of travel is (tz, -tx). */
-            double lx = n->tz, lz = -n->tx;
+        /* ns+1 rows: one per node from s0 to s0+ns inclusive, all relative to
+         * this block's origin. */
+        for (k = 0; k <= ns; k++) {
+            const TG_Node *n = &nl->v[s0 + k];
+            /* Left of travel is (tz, -tx). Row runs -half_width -> +half_width:
+             * the reverse order renders identically (the fallback ribbon draws
+             * double-sided, td5_render.c:3945) but gives a DOWNWARD surface
+             * normal, so the suspension finds no ground and the car floats. */
+            const double lx = n->tz, lz = -n->tx;
             int j;
             for (j = 0; j < row_pts; j++) {
-                /* Row runs -half_width -> +half_width along (tz,-tx). The
-                 * opposite order renders identically (the fallback ribbon is
-                 * drawn double-sided, td5_render.c:3945) but yields a DOWNWARD
-                 * surface normal, so the suspension finds no ground and the car
-                 * floats -- observed as wheel_mask=0 for 947/991 sim ticks. */
-                double t = -(n->width * 0.5)
-                         + (n->width * (double)j / (double)lanes);
-                double wx = n->x + lx * t;
-                double wz = n->z + lz * t;
-                int dx = tg_round(wx) - ox;
+                double t  = -(n->width * 0.5)
+                          + (n->width * (double)j / (double)lanes);
+                int dx = tg_round(n->x + lx * t) - ox;
                 int dy = tg_round(n->y) - oy;
-                int dz = tg_round(wz) - oz;
-                if (dx < -32768 || dx > 32767 ||
-                    dy < -32768 || dy > 32767 ||
+                int dz = tg_round(n->z + lz * t) - oz;
+                if (dx < -32768 || dx > 32767 || dy < -32768 || dy > 32767 ||
                     dz < -32768 || dz > 32767) {
                     TD5_LOG_E(LOG_TAG, "trackgen: vertex offset out of int16 "
-                              "range at span %d (%d,%d,%d)", si, dx, dy, dz);
+                              "range in block at span %d (%d,%d,%d) -- reduce "
+                              "TD5_TG_ORIGIN_BLOCK", s0, dx, dy, dz);
                     ok = 0;
                 }
                 tg_put_u16(&verts, (unsigned)(dx & 0xFFFF));
                 tg_put_u16(&verts, (unsigned)(dy & 0xFFFF));
                 tg_put_u16(&verts, (unsigned)(dz & 0xFFFF));
             }
+            vtx_count += row_pts;
         }
-        vtx_count += 2 * row_pts;
+
+        /* Every span in the block carries the block origin and indexes two
+         * consecutive rows within it. */
+        for (k = 0; k < ns; k++) {
+            tg_put_u8 (&spans, 1);                       /* span_type QUAD_A */
+            tg_put_u8 (&spans, TD5_TG_SURFACE_ATTR);     /* surface class */
+            /* Alternate surface on the two outer lanes, as shipped does. */
+            tg_put_u8 (&spans, (unsigned)(1 | (1 << (lanes - 1))));
+            tg_put_u8 (&spans, (unsigned)((TD5_TG_HEIGHT_NIBBLE << 4)
+                                          | (lanes & 0x0F)));
+            tg_put_u16(&spans, (unsigned)(base + k * row_pts));
+            tg_put_u16(&spans, (unsigned)(base + (k + 1) * row_pts));
+            tg_put_u16(&spans, 0xFFFF);            /* link_next = -1 */
+            tg_put_u16(&spans, 0xFFFF);            /* link_prev = -1 */
+            tg_put_i32(&spans, ox);
+            tg_put_i32(&spans, oy);
+            tg_put_i32(&spans, oz);
+        }
     }
 
     if (spans.oom || verts.oom) {
@@ -654,7 +704,12 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
             (unsigned int)(TD5_TG_SPAN_OFFSET + 24 * emitted);
 
         tg_put_u32(out, TD5_TG_SPAN_OFFSET);
-        tg_put_u32(out, (unsigned int)emitted);   /* ring length */
+        /* Ring length = full span count for a POINT-TO-POINT track. Shipped
+         * level001 writes span_count-1 ([216,3175,...,3176]) but it is a
+         * CIRCUIT, where the last span closes onto the first. Copying that
+         * here made the walker wrap backward off span 0 to the ring end:
+         * span_raw oscillated 0 <-> 1798 every tick, 952 times in one run. */
+        tg_put_u32(out, (unsigned int)emitted);
         tg_put_u32(out, vtx_off);
         tg_put_u32(out, (unsigned int)vtx_count);
         tg_put_u32(out, (unsigned int)emitted);   /* total spans */
@@ -782,8 +837,11 @@ void td5_trackgen_apply_config(TD5_TrackGenSpec *spec)
     if (!spec) return;
     spec->target_spans = td5_env_int("TD5RE_AUTOTRACK_SPANS",
                                      spec->target_spans, 60, TD5_TG_MAX_SPANS);
+    /* 2..4 only: shipped tracks never exceed 4 lanes, so the rail LUTs
+     * (td5_track.c:1315), edge masks and suspension paths are only exercised
+     * in that range. Road WIDTH still varies freely. */
     spec->lanes        = td5_env_int("TD5RE_AUTOTRACK_LANES",
-                                     spec->lanes, 1, 8);
+                                     spec->lanes, 2, 4);
     spec->elevation_amplitude =
         td5_env_int("TD5RE_AUTOTRACK_ELEVATION",
                     spec->elevation_amplitude, 0, 40000);
