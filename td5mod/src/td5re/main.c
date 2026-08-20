@@ -424,6 +424,8 @@ void td5_ini_persist_options(void)
     /* [SP DRAG DISTANCE 2026-07-23] Persist the SP drag DISTANCE preset so the
      * RACE OPTIONS choice sticks across launches (loaded in main() as DragLength). */
     td5_ini_write_int("GameOptions", "DragLength",        g_td5.ini.drag_length);
+    /* [SP DRAG LANES 2026-08-19] Persist the SP drag LANES count the same way. */
+    td5_ini_write_int("GameOptions", "DragLanes",         g_td5.ini.drag_lanes);
     /* [TUTORIAL 2026-06-29] Controller-overlay on/off (0=off, 1=on every race,
      * 2=dev force) — set by the Game Options TUTORIAL row. */
     td5_ini_write_int("GameOptions", "TutorialOverlay",  g_td5.ini.tutorial_overlay);
@@ -1248,6 +1250,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     if (g_td5.ini.drag_length < 0) g_td5.ini.drag_length = 0;
     if (g_td5.ini.drag_length > 3) g_td5.ini.drag_length = 3;
     g_td5.ini.drag_traffic      = td5_ini_int("GameOptions", "DragTraffic", 0) ? 1 : 0;
+    /* [SP DRAG LANES 2026-08-19] SP drag field size, clamped to the same [2,8]
+     * range td5_game_drag_field_size() enforces (int8 sub_lane / int16 vtx). */
+    g_td5.ini.drag_lanes        = td5_ini_int("GameOptions", "DragLanes", 2);
+    if (g_td5.ini.drag_lanes < 2) g_td5.ini.drag_lanes = 2;
+    if (g_td5.ini.drag_lanes > 8) g_td5.ini.drag_lanes = 8;
     /* OtherPlayersAI: AI-drive every local human slot except slot 0 (drive P1). */
     g_td5.ini.others_ai         = td5_ini_int("GameOptions", "OtherPlayersAI", 0);
     g_td5.ini.solo_ai_slot      = td5_ini_int("GameOptions", "SoloAISlot", 0);

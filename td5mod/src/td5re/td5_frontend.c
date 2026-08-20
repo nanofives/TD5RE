@@ -5735,6 +5735,23 @@ static int frontend_get_button_anim_state(int *out_mode, int *out_tick, int *out
         if (s_inner_state == 0x0E) { mode = FE_BUTTON_ANIM_IN;  max_tick = 0x10; }
         else if (s_inner_state == 0x10) { mode = FE_BUTTON_ANIM_OUT; max_tick = 0x10; }
         break;
+    /* [SCREEN ENTRY ANIM 2026-08-19] RACE OPTIONS (44) and NET CREATE (10) were
+     * HALF-WIRED: their handlers call frontend_begin_timed_animation() at init and
+     * poll frontend_update_timed_animation(0x27, 650) in state 3, but neither
+     * screen was listed here or in frontend_screen_has_button_anim(), so
+     * frontend_get_button_anim_x() always returned base_x -> the buttons popped in
+     * fully formed while a dead 650 ms timer ran. Both set s_anim_complete = 1 when
+     * the slide finishes, so the offscreen_x branch in frontend_get_button_anim_x
+     * releases correctly (the RACE_RESULTS trap documented above does not apply).
+     *
+     * MP LOBBY (30) is DELIBERATELY still excluded — see the [R3-1 2026-06-19] note
+     * in frontend_render_mp_lobby_overlay(): that screen renders its roster/header
+     * and side-by-side START/BACK re-layout from frame 1 precisely BECAUSE its
+     * buttons do not slide. Adding it here would restore the two-stage-load snap. */
+    case TD5_SCREEN_RACE_OPTIONS:
+    case TD5_SCREEN_CREATE_SESSION:
+        if (s_inner_state == 3) { mode = FE_BUTTON_ANIM_IN; max_tick = 0x27; }
+        break;
     default:
         break;
     }
@@ -5766,6 +5783,11 @@ static int frontend_screen_has_button_anim(void) {
     case TD5_SCREEN_CAR_SELECTION:
     case TD5_SCREEN_TRACK_SELECTION:
     case TD5_SCREEN_CUP_TRACK_SELECT:   /* shares the track-select button anim */
+    /* [SCREEN ENTRY ANIM 2026-08-19] see the matching note in
+     * frontend_get_button_anim_state(): these two drove the timer but never
+     * animated. MP LOBBY (30) stays out on purpose. */
+    case TD5_SCREEN_RACE_OPTIONS:
+    case TD5_SCREEN_CREATE_SESSION:
     case TD5_SCREEN_HIGH_SCORE:
         /* TD5_SCREEN_RACE_RESULTS deliberately NOT listed: only its post-race
          * MENU buttons (states 0xE / 0x10) animate, while the click-catcher /
@@ -6456,6 +6478,7 @@ const char *td5_raceopts_label(int idx) {
         case RO_DIFFICULTY:  return SNK_DifficultyButTxt;
         case RO_AI_MODEL:    return TR("AI MODEL");        /* [AI DRIVER MODEL 2026-08-17] CLASSIC/SMART/DRIVER */
         case RO_DISTANCE:    return TR("DISTANCE");        /* [SP DRAG DISTANCE 2026-07-23] drag length preset */
+        case RO_DRAG_LANES:  return TR("LANES");           /* [SP DRAG LANES 2026-08-19] SP drag field size */
         case RO_CATCHUP:     return SNK_CatchupTxt;        /* [CATCHUP 2026-07-21] MP AI rubber-band */
         case RO_DYNAMICS:    return SNK_DynamicsButTxt;
         case RO_CHECKPOINTS: return SNK_CheckpointTimersButTxt;
@@ -6548,6 +6571,9 @@ void td5_raceopts_value(int idx, char *out, size_t out_sz) {
         case RO_DISTANCE:
             t = g_td5.ini.drag_length; if (t < 0) t = 0; if (t > 3) t = 3;
             v = draglen_lv[t]; break;
+        case RO_DRAG_LANES:  /* [SP DRAG LANES 2026-08-19] absolute field size 2..8 */
+            t = g_td5.ini.drag_lanes; if (t < 2) t = 2; if (t > 8) t = 8;
+            snprintf(out, out_sz, "%d", t); return;
         case RO_TRAFFIC:
             t = s_game_option_traffic;
             if (t < 0) t = 0;
@@ -6627,6 +6653,15 @@ void td5_raceopts_cycle(int idx, int delta) {
             if (g_td5.ini.drag_length > 3) g_td5.ini.drag_length = 0;
             TD5_LOG_I(LOG_TAG, "raceopts: DISTANCE -> %d (0=SHORT 1=MEDIUM 2=LONG 3=EPIC)",
                       g_td5.ini.drag_length);
+            break;
+        case RO_DRAG_LANES:  /* [SP DRAG LANES 2026-08-19] wraps 2..8; the ceiling
+                              * matches td5_game_drag_field_size()'s int8 sub_lane /
+                              * int16 vertex headroom clamp. */
+            g_td5.ini.drag_lanes += delta;
+            if (g_td5.ini.drag_lanes < 2) g_td5.ini.drag_lanes = 8;
+            if (g_td5.ini.drag_lanes > 8) g_td5.ini.drag_lanes = 2;
+            TD5_LOG_I(LOG_TAG, "raceopts: LANES -> %d (SP drag field size)",
+                      g_td5.ini.drag_lanes);
             break;
         case RO_CATCHUP: {   /* [CATCHUP 2026-07-21] MP AI rubber-band on/off */
             int cur = td5_save_get_catchup_assist();
@@ -6762,8 +6797,14 @@ int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
     case RO_OPPONENTS:   /* no AI-count control in drag, cup (cup sets it), TB, or
                           * time trial (a solo run against the clock) */
         return !(c->is_drag || c->is_cup || tb || c->is_time_trial);
-    case RO_TRAFFIC:     /* drag has its own traffic switch */
-        return !c->is_drag;
+    case RO_TRAFFIC:     /* [SP DRAG TRAFFIC 2026-08-19] MP drag owns its traffic
+                          * switch on the MP mode-config screen (36), so it stays
+                          * hidden there — but SP drag had NO traffic control
+                          * anywhere. Show it for SP drag: the value feeds
+                          * g_td5.ini.traffic, which the SP drag InitRace block
+                          * (td5_game.c) turns into the same oncoming stream MP drag
+                          * gets from mp_mode_config.drag_traffic. */
+        return !(c->is_drag && c->is_mp);
     case RO_POLICE:      /* player IS the pursuit in cop chase; none in drag */
         return !(c->is_cop_chase || c->is_drag);
     case RO_DIFFICULTY:  /* AI difficulty: opponent-gated except drag's own 1v1 rule */
@@ -6775,6 +6816,10 @@ int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
     case RO_DISTANCE:    /* [SP DRAG DISTANCE 2026-07-23] drag length preset. SP
                           * reads g_td5.ini.drag_length; MP drag has its own
                           * DISTANCE row on the MP config screen, so SP-drag only. */
+        return c->is_drag && !c->is_mp;
+    case RO_DRAG_LANES:  /* [SP DRAG LANES 2026-08-19] SP-drag-only field size. MP
+                          * drag sizes its field from the human count + its own
+                          * EXTRA LANES row on the MP config screen. */
         return c->is_drag && !c->is_mp;
     case RO_CATCHUP:     /* [CATCHUP 2026-07-21] MP-only AI rubber-band assist */
         return c->is_mp;

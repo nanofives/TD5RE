@@ -549,12 +549,17 @@ void frontend_init_race_schedule(void) {
 
     /* Two-player setup [CONFIRMED @ 0x0040daf0]:
      * Original gate: g_twoPlayerModeEnabled != 0 || g_selectedGameType == 7.
-     * In the original, game_type 7 is DRAG RACE (user picks a 2nd car via the
-     * 2-pass CarSelect loop). The port's convention uses game_type 9 for drag
-     * race, so the constant is swapped here. Time Trials is solo and must NOT
-     * fall into this branch. (Skipped for the N-way multiplayer lobby flow,
-     * which already populated the human slots above.) */
-    if ((s_two_player_mode || s_selected_game_type == 9) && !s_mp_flow &&
+     * In the original, game_type 7 is DRAG RACE — it force-seeded slot 1 from the
+     * 2nd car the user hand-picked in the 2-pass CarSelect loop.
+     *
+     * [SP DRAG ONE CAR 2026-08-19] The drag term (port game_type 9) is REMOVED:
+     * single-player drag now picks ONE car (see the CarSelect note in
+     * td5_fe_race.c), so slot 1 must NOT be force-seeded from s_p2_car — it falls
+     * through to the normal AI fill from start_slot, which is what lets the SP drag
+     * field scale to the LANES count chosen on RACE OPTIONS. s_two_player_mode
+     * (local 2P) still takes this branch; MP drag goes through the s_mp_flow path
+     * above. Time Trials is solo and never belonged here either. */
+    if (s_two_player_mode && !s_mp_flow &&
         !g_td5.network_active) {
         slot_active[1]  = 1;
         slot_ext_id[1]  = s_p2_car;

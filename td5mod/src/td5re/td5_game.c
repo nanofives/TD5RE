@@ -2533,6 +2533,40 @@ static void init_race_modes_and_seed(void)
                   td5_game_drag_field_size());
     }
 
+    /* [SP DRAG TRAFFIC 2026-08-19] Single-player drag-race traffic. The MP block
+     * above turns mp_mode_config.drag_traffic into an oncoming stream; SP drag had
+     * NO traffic path at all (g_td5.ini.drag_traffic was written from the INI and
+     * read by nothing). The new TRAFFIC row on RACE OPTIONS feeds g_td5.ini.traffic,
+     * so mirror the MP setup here off whichever of the two is armed, using the same
+     * cadence/spawn window so the two drag modes look identical. Guarded on
+     * drag_race_enabled && !mp so it can never touch a normal SP race or MP drag. */
+    if (g_td5.drag_race_enabled && !td5_game_drag_mp_active()) {
+        int sp_drag_traffic = (g_td5.ini.traffic > 0) || g_td5.ini.drag_traffic;
+        if (sp_drag_traffic) {
+            /* Honour the VOLUME the TRAFFIC row picked (it is a level, not a
+             * toggle) so LOW/MED/HIGH still differ; the DragTraffic INI key has no
+             * level of its own, so it maps to the engine max like MP drag does. */
+            int vol = (g_td5.ini.traffic > 0) ? g_td5.ini.traffic : 4;
+            if (vol > TD5_TRAFFIC_VOLUME_COUNT - 1) vol = TD5_TRAFFIC_VOLUME_COUNT - 1;
+            g_td5.traffic_enabled           = 1;
+            g_td5.ini.traffic_dynamic       = 1;
+            g_td5.ini.traffic_dyn_period    = 20;   /* dense stream, as MP drag */
+            g_td5.traffic_volume            = vol;
+            g_td5.ini.traffic_dyn_spawn_min = 8;
+            g_td5.ini.traffic_dyn_spawn_max = 18;
+            td5_physics_set_collisions(1);
+        } else {
+            g_td5.traffic_enabled     = 0;
+            g_td5.ini.traffic_dynamic = 0;
+        }
+        TD5_LOG_I(LOG_TAG, "InitRace: SP DRAG RACE — traffic=%s (ini.traffic=%d "
+                  "drag_traffic=%d), distance=%d, lanes=%d, field=%d",
+                  sp_drag_traffic ? "ONCOMING" : "off",
+                  g_td5.ini.traffic, g_td5.ini.drag_traffic,
+                  g_td5.ini.drag_length, g_td5.ini.drag_lanes,
+                  td5_game_drag_field_size());
+    }
+
     /* Resolve g_special_encounter (port mirror of g_specialEncounterType
      * @ 0x004B0FA8). This is the runtime gate read by both the HUD timer
      * widget (RenderRaceHudOverlays @ 0x004391CC) and the per-actor timer
@@ -2745,16 +2779,15 @@ static void init_race_slot_states(void)
      * active (P2) and slots 2..5 decoration.
      *
      * [PORT ENHANCEMENT — diverges from original]
-     * The port's CarSelection screen runs a 2-pass loop for game_type==9
-     * (drag race) so the user picks TWO cars. InitializeRaceSeriesSchedule
-     * @ td5_frontend.c:1628 then loads s_p2_car into slot[1].ext_id and
-     * line ~966 loads slot 1's mesh + sound bank. Keeping slot 1 at
-     * decoration_start=1 (faithful) leaves that fully-prepared slot inert
-     * at span=1 (parked at the strip start), which is the bug the user
-     * reports as "no car beside me, two stationary cars at the back."
-     * Force decoration_start=2 in drag mode regardless of split-screen so
-     * slot 1 stays state=0 (AI in SP) or state=1 (P2 in 2P split) — making
-     * the 2-pass CarSelect actually produce a 2-car race. */
+     * Keeping slot 1 at decoration_start=1 (faithful) leaves a fully-prepared
+     * slot inert at span=1 (parked at the strip start), which is the bug the user
+     * reported as "no car beside me, two stationary cars at the back." The port
+     * instead derives decoration_start from the LANE COUNT, so every lane gets a
+     * live car (slot 0 human, the rest AI in SP, P2 in 2P split).
+     * [SP DRAG LANES 2026-08-19] For SP that lane count is now the LANES row on
+     * RACE OPTIONS (g_td5.ini.drag_lanes), not a fixed 2 — and note the generic
+     * racer-count block above explicitly EXCLUDES drag, so num_ai_opponents does
+     * not cap the drag field. */
     if (g_td5.drag_race_enabled) {
         /* [DRAG DYNAMIC FIELD 2026-06-27] One active car per lane: the field
          * scales with humans+AI (td5_game_drag_field_size), and the track is
@@ -9576,6 +9609,12 @@ int td5_game_drag_field_size(void)
                  ? g_td5.num_human_players + g_td5.num_ai_opponents
                  : g_td5.num_human_players)
             + g_td5.mp_mode_config.drag_extra_lanes;
+    /* [SP DRAG LANES 2026-08-19] SP drag: the LANES row on RACE OPTIONS is
+     * authoritative. It replaced the old implicit
+     * num_human_players + num_ai_opponents sum, which the SP drag menu had no way
+     * to control (RO_OPPONENTS is hidden for drag) — so the field was always 2. */
+    else if (g_td5.ini.drag_lanes >= 2 && g_td5.ini.drag_lanes <= 8)
+        n = g_td5.ini.drag_lanes;
     else
         n = g_td5.num_human_players + g_td5.num_ai_opponents;
 

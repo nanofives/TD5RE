@@ -2242,6 +2242,11 @@ static int trf_force_oncoming(void)
     if (td5_game_battle_mode_active()) return 1;
     /* [DRAG RACE 2026-06-30] Oncoming traffic when the drag TRAFFIC option is on. */
     if (td5_game_drag_mp_active() && g_td5.mp_mode_config.drag_traffic) return 1;
+    /* [SP DRAG TRAFFIC 2026-08-19] Same oncoming rule for single-player drag: the
+     * TRAFFIC row on RACE OPTIONS (g_td5.ini.traffic) or the DragTraffic INI key.
+     * Both are process config, so this stays lockstep-deterministic. */
+    if (g_td5.drag_race_enabled && !td5_game_drag_mp_active() &&
+        ((g_td5.ini.traffic > 0) || g_td5.ini.drag_traffic)) return 1;
     return 0;
 }
 

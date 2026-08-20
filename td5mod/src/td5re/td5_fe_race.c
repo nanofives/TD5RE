@@ -6521,57 +6521,39 @@ void Screen_CarSelection(void) {
             return;
         }
 
-        /* Drag-race 2-pass CarSelect [CONFIRMED @ 0x0040f744].
-         * Original: game_type==7 (=drag race there) && pass_marker==0 → re-enter
-         * CarSelect with pass_marker=1, showing "CAR 2". After pass 2, skip
-         * TrackSelection entirely and call InitializeRaceSeriesSchedule +
-         * InitializeFrontendDisplayModeState directly (drag strip is fixed).
+        /* Single-player drag CarSelect — ONE car [DIVERGENCE FROM ORIGINAL].
+         * The original ran a 2-pass CarSelect here [CONFIRMED @ 0x0040f744]:
+         * game_type==7 (=drag race there) && pass_marker==0 -> re-enter CarSelect
+         * with pass_marker=1, showing "CAR 2", so the user hand-picked BOTH the
+         * player's and the rival's car in what is a single-player race.
+         *
+         * [SP DRAG ONE CAR 2026-08-19] The port drops that second pass: single
+         * player means you pick YOUR car and the AI rivals are filled by the normal
+         * opponent path (td5_fe_mp_setup.c no longer force-seeds slot 1 with
+         * s_p2_car for game_type 9). Picking a second car is a multiplayer concern
+         * — MP DRAG RACE (mode config screen 36 -> per-player car select) is where
+         * more than one human car gets chosen. This also lets the SP drag field
+         * scale past 2 cars via the new LANES row on RACE OPTIONS.
+         *
          * Port convention: case 4 OK sets s_return_screen=TRACK_SELECTION while
          * case 5 Back sets RACE_TYPE_MENU — only fire on OK. */
         if (g_td5.drag_race_enabled &&
             s_return_screen == TD5_SCREEN_TRACK_SELECTION) {
-            if (s_drag_carselect_pass == 0) {
-                /* Pass 1 = PLAYER car. Stash it in dedicated storage so the
-                 * pass-2 navigation cursor (s_selected_car) cannot clobber it.
-                 * [Mirrors orig g_selectedCarIndex @0x0048f364 being preserved
-                 *  across the opponent pass — the port's root-cause fix.] */
-                s_p1_car   = actual_car;
-                s_p1_paint = s_selected_paint;
-                s_drag_carselect_pass = 1;
-                /* Seed the pass-2 cursor from the opponent slot (orig loads its
-                 * scratch from DAT_00463e08 on the opponent pass) so pass 2 does
-                 * not start showing the player's just-picked car. Screen case 0
-                 * clamps to the valid roster range. */
-                s_selected_car   = s_p2_car;
-                s_selected_paint = s_p2_paint;
-                TD5_LOG_I(LOG_TAG,
-                          "CarSelect: drag-race pass1 PLAYER car=%d saved → re-enter for opponent (cursor seed=%d)",
-                          s_p1_car, s_selected_car);
-                td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
-                return;
-            } else {
-                /* Pass 2 = OPPONENT car. */
-                s_p2_car = actual_car;
-                s_p2_paint = s_selected_paint;
-                s_p2_config = s_selected_config;
-                s_p2_transmission = s_selected_transmission;
-                s_drag_carselect_pass = 0;
-                /* Restore the PLAYER car/paint into the live selector BEFORE the
-                 * schedule reads slot 0 from s_selected_car. Without this, slot 0
-                 * (player) inherits the opponent car the user just cycled to ->
-                 * both racers get the same car (the reported bug). */
-                s_selected_car   = s_p1_car;
-                s_selected_paint = s_p1_paint;
-                TD5_LOG_I(LOG_TAG,
-                          "CarSelect: drag-race pass2 OPPONENT car=%d, restored PLAYER car=%d",
-                          s_p2_car, s_selected_car);
-                /* [CONSOLIDATION 2026-07-21] SP drag has no track-select — insert
-                 * RACE OPTIONS as the pre-launch step. OK launches; BACK re-enters
-                 * this opponent pass (RO_BACK_DRAG_OPPONENT). The restored PLAYER
-                 * car/paint survive in the live selector across the overlay. */
-                raceopts_open(TD5_SCREEN_CAR_SELECTION, 1, RO_BACK_DRAG_OPPONENT);
-                return;
-            }
+            /* Keep s_p1_car/paint in sync for any consumer that still reads the
+             * stashed player pick, and hard-clear the pass marker so a stale 1
+             * (e.g. from an aborted MP/two-player flow) can't resurrect the
+             * "CAR 2" caption on the next entry. */
+            s_p1_car   = actual_car;
+            s_p1_paint = s_selected_paint;
+            s_drag_carselect_pass = 0;
+            TD5_LOG_I(LOG_TAG,
+                      "CarSelect: SP drag single-car PLAYER car=%d -> RACE OPTIONS "
+                      "(opponent cars are AI-filled)", s_p1_car);
+            /* [CONSOLIDATION 2026-07-21] SP drag has no track-select — insert
+             * RACE OPTIONS as the pre-launch step. OK launches; BACK returns to
+             * this car-select (RO_BACK_PARENT), which is now the only car pick. */
+            raceopts_open(TD5_SCREEN_CAR_SELECTION, 1, RO_BACK_PARENT);
+            return;
         }
 
         /* Single-player: OK → track selection, Back → return screen */
@@ -6825,15 +6807,12 @@ static void raceopts_back(void) {
     raceopts_commit_persist();
     frontend_play_sfx(5);
     s_raceopts_launch_after = 0;
-    if (s_raceopts_back_mode == RO_BACK_DRAG_OPPONENT) {
+    /* [SP DRAG ONE CAR 2026-08-19] RO_BACK_DRAG_OPPONENT is no longer produced —
+     * SP drag has a single car pick, so BACK from its pre-launch RACE OPTIONS is a
+     * plain RO_BACK_PARENT return to car-select. The mode is kept as a defensive
+     * alias (any stale value falls through to the parent return below). */
+    if (s_raceopts_back_mode == RO_BACK_DRAG_OPPONENT)
         s_raceopts_back_mode = RO_BACK_PARENT;
-        s_drag_carselect_pass = 1;
-        s_selected_car   = s_p2_car;
-        s_selected_paint = s_p2_paint;
-        TD5_LOG_I(LOG_TAG, "RaceOpts: BACK -> re-enter drag opponent car-select");
-        td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
-        return;
-    }
     /* Arm the TrackSelection chokepoint's re-entry guard ONLY when returning from
      * a pre-launch step (MP drag) — a plain track-select overlay BACK must not
      * leave the flag set for a later drag setup to misread. */
