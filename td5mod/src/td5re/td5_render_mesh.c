@@ -3333,7 +3333,9 @@ void td5_render_actors_for_view(int view_index)
              * UpdateWantedDamageIndicator(slot) unconditionally per actor;
              * the gate (wanted_mode + matching slot) lives inside the
              * called function. Port mirrors orig callsite location. */
-            if (slot < TD5_MAX_RACER_SLOTS) {
+            /* [TRAFFIC GATE DRIFT 2026-08-20] is_racer, not TD5_MAX_RACER_SLOTS
+             * — same drift the traffic-wheel gate above documents. */
+            if (is_racer) {
                 td5_hud_update_wanted_damage_indicator(slot);
             }
 
@@ -3352,8 +3354,11 @@ void td5_render_actors_for_view(int view_index)
              * Also skip for the camera-target actor when this view is in
              * cinematic preset mode (g_raceCameraPresetMode[view] != 0)
              * — matches the original gate at 0x40C120. */
+            /* [TRAFFIC GATE DRIFT 2026-08-20] is_racer: g_wanted_damage_state is
+             * racer-sized, so a traffic slot both indexed it out of role and let
+             * a civilian car emit the wanted-target smoke trail. */
             int wanted_smoke_ok = g_td5.wanted_mode_enabled != 0 &&
-                                  slot < TD5_MAX_RACER_SLOTS &&
+                                  is_racer &&
                                   g_wanted_damage_state[slot] == 0;
             /* [POLICE rewrite 2026-06-19] A broken-down TRAFFIC car or COP smokes
              * from its chassis. Restricted to non-racers (slot >= traffic base):

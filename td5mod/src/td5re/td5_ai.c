@@ -1101,8 +1101,13 @@ int td5_ai_wanted_cop_hit(int cop_slot, int suspect_slot, int32_t impact_mag) {
      * ramming cop — rather than the single representative cop — is what makes a
      * MULTI-cop chase award each cop their OWN arrest tally (the cop-chase
      * results screen lists per-cop arrests). [MP COP CHASE results 2026-06-25] */
-    if (suspect_slot < 0 || suspect_slot >= TD5_MAX_RACER_SLOTS) return 0;
-    if (cop_slot < 0 || cop_slot >= TD5_MAX_RACER_SLOTS) return 0;
+    /* [TRAFFIC GATE DRIFT 2026-08-20] Racer slots only — g_traffic_slot_base,
+     * not the stale TD5_MAX_RACER_SLOTS (see td5_game_cop_chase_is_suspect).
+     * Belt-and-braces: the caller's is_cop/is_suspect pair now rejects traffic,
+     * but this is the single entry point that mutates wanted damage/score state,
+     * so it validates its own indices too. */
+    if (suspect_slot < 0 || suspect_slot >= g_traffic_slot_base) return 0;
+    if (cop_slot < 0 || cop_slot >= g_traffic_slot_base) return 0;
 
     /* Gate 1 [orig 0x0043D690 entry]: impact must be material (> 9999). */
     if (impact_mag <= 9999) return 0;
@@ -2455,7 +2460,7 @@ void td5_ai_init_race_actor_runtime(void) {
         /* MP cop chase keeps the human suspects + the AI-cop slot (the cop sits at
          * slot num_human_players, AI-driven via g_slot_state==0); SP wanted keeps
          * the faithful slots 0-1. MUST match td5_game.c's s_slot_state field. */
-        int keep = td5_game_mp_cop_chase_field();
+        int keep = td5_game_cop_chase_field();
         if (keep <= 0) keep = 2;
         for (int k = keep; k < g_traffic_slot_base; k++)
             g_slot_state[k] = 3;

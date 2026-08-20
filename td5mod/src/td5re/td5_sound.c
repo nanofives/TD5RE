@@ -432,6 +432,10 @@ static int s_siren_user_enabled;
  * keep working unchanged; td5_sound_toggle_cop_siren maintains both. */
 static uint8_t s_cop_siren_on[TD5_MAX_RACER_SLOTS];
 
+/* [COP-CHASE SIREN COUNTDOWN GATE 2026-08-19] One-shot log latch so the
+ * "siren armed" line lands once per race instead of on every re-arm. */
+static int s_siren_countdown_armed_logged;
+
 /** Per-viewport skid playing state. Original: g_rainLoopActiveByViewport. */
 static int s_skid_playing[2];
 
@@ -655,6 +659,7 @@ int td5_sound_init_race_resources(void)
     s_siren_active_flag     = 0;
     s_siren_refreshed       = 0;
     s_siren_user_enabled    = 0;   /* siren starts off; press horn to re-toggle */
+    s_siren_countdown_armed_logged = 0;
     memset(s_cop_siren_on, 0, sizeof(s_cop_siren_on));   /* per-cop sirens off (default) */
     td5_sound_apply_cop_siren_defaults();   /* MP cop chase: default cop(s) siren ON */
     s_skid_playing[0]       = 0;
@@ -844,6 +849,7 @@ int td5_sound_load_vehicle_bank(const char *car_dir, int vehicle_index,
     s_siren_refreshed   = 0;
     s_siren_active_flag = 0;
     s_siren_user_enabled = 0;   /* siren off until the player presses the horn (default) */
+    s_siren_countdown_armed_logged = 0;
     memset(s_cop_siren_on, 0, sizeof(s_cop_siren_on));   /* per-cop sirens off (default) */
     td5_sound_apply_cop_siren_defaults();   /* MP cop chase: default cop(s) siren ON */
 
@@ -1036,8 +1042,24 @@ void td5_sound_update_vehicle_looping_state(int actor_index)
          * the siren would stay dead. Skipping the refresh during pause lets the mixer's
          * post-loop timeout clear the flag, so resume re-arms and re-plays cleanly.
          * Mirrors the pause gating already on td5_sound_update_police_siren. */
-        if (s_siren_user_enabled && !td5_game_is_pause_menu_active()) {
+        /* [COP-CHASE SIREN COUNTDOWN GATE 2026-08-19, PORT-ONLY] Hold the siren
+         * silent through the pre-race countdown. The cop lights are driven by
+         * td5_vfx_advance_tracked_marker_phases(), which only advances on a
+         * NON-paused sim tick (td5_game.c "Per-non-paused-tick world animation
+         * advances"), so during the countdown the strobe phase stays 0 -> alpha 0
+         * -> additive black -> invisible. The siren, by contrast, runs from
+         * frame_audio_tick() every rendered frame, countdown included. Result the
+         * user saw: audible siren with no lights on the grid. Gating the sound on
+         * the same "race is running" condition re-couples them, so siren + strobe
+         * both start on the green light. */
+        if (s_siren_user_enabled && !td5_game_is_pause_menu_active() &&
+            !td5_game_is_countdown_active()) {
             if (s_siren_active_flag == 0) {
+                if (!s_siren_countdown_armed_logged) {
+                    s_siren_countdown_armed_logged = 1;
+                    TD5_LOG_I(LOG_TAG,
+                              "cop siren armed post-countdown: actor=%d", actor_index);
+                }
                 /* Activate tracked vehicle audio (siren) */
                 s_tracked_veh_active_p2 = 1;
                 s_tracked_veh_active    = 1;

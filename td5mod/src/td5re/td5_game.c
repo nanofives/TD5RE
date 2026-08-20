@@ -2798,12 +2798,16 @@ static void init_race_slot_states(void)
          * wanted mode keeps the faithful slots 0-1. Slots 0..humans-1 are already
          * human (1) and the AI-cop slot (= num_human_players) is AI (0); only the
          * slots past the field get disabled. */
-        int keep = td5_game_mp_cop_chase_field();
-        if (keep <= 0) keep = 2;   /* SP wanted: slot 0 player + slot 1 AI suspect */
+        /* [SP COP CHASE FIELD 2026-08-20] Field size (SP now follows OPPONENTS)
+         * comes from the shared td5_game_cop_chase_field() so this and the AI's
+         * mirror in td5_ai_init_race_state cannot drift apart. */
+        int keep = td5_game_cop_chase_field();
+        if (keep <= 0) keep = 2;   /* defensive: 1 player-cop + 1 AI suspect */
         for (int i = keep; i < TD5_MAX_RACER_SLOTS; i++) {
             s_slot_state[i].state = 3;  /* disabled */
         }
-        TD5_LOG_I(LOG_TAG, "Cop Chase: active field=%d, slots %d..5 disabled", keep, keep);
+        TD5_LOG_I(LOG_TAG, "Cop Chase: active field=%d (1 cop + %d suspect(s)), slots %d..%d disabled",
+                  keep, keep - 1, keep, TD5_MAX_RACER_SLOTS - 1);
     }
     /* Player-as-AI autopilot: mirrors original attract-mode at
      * InitializeRaceSession 0x0042ACCF, which writes
@@ -2979,8 +2983,8 @@ static void init_race_slot_states(void)
         g_racer_count = (g_td5.split_screen_mode > 0) ? 2 : 1;
     } else if (g_td5.wanted_mode_enabled) {
         /* MP cop chase: human suspects + AI-cop slot. SP wanted: faithful 2. */
-        int f = td5_game_mp_cop_chase_field();
-        g_racer_count = (f > 0) ? f : 2;  /* SP: slot 0 = player, slot 1 = cop AI */
+        int f = td5_game_cop_chase_field();
+        g_racer_count = (f > 0) ? f : 2;  /* SP: slot 0 = player-cop + suspects */
     } else if (g_td5.num_human_players >= 1) {
         /* Single race / Quick Race: humans + opponents (<=6) [PORT ENHANCEMENT].
          * Default (1+5) yields 6 — legacy behavior. */
@@ -7880,7 +7884,13 @@ static void frame_audio_tick(void)
      * chasing traffic cop (gated by the POLICE option), distance-attenuated to
      * the local camera. Cosmetic / post-sim — no netplay effect. Silenced while
      * the pause menu is up (the sim is frozen — no siren on pause). */
-    if (s_pause_menu_active)
+    /* [COP-CHASE SIREN COUNTDOWN GATE 2026-08-19] Silent through the pre-race
+     * countdown too, for the same reason as the cop-chase horn siren in
+     * td5_sound_update_vehicle_looping_state(): the strobe-light phase only
+     * advances on non-paused sim ticks, so a siren heard on the grid has no
+     * lights to go with it. td5_ai_tick() DOES run during the countdown, so a
+     * cop can already be in COP_CHASING before the green light. */
+    if (s_pause_menu_active || td5_game_is_countdown_active())
         td5_sound_stop_tracked_vehicle_audio();
     else
         td5_sound_update_police_siren();
@@ -11301,6 +11311,38 @@ int td5_game_mp_cop_chase_field(void) {
     return f;
 }
 
+/* [SP COP CHASE FIELD 2026-08-20, PORT ENHANCEMENT] Single source of truth for
+ * the cop-chase racer field, so the game-side s_slot_state and the AI-side
+ * g_slot_state can never disagree about how many racers exist.
+ *
+ * MP cop chase is unchanged (td5_game_mp_cop_chase_field: humans + AI cop).
+ *
+ * SP cop chase was a HARDCODED 2-car field — 1 player-cop + 1 AI suspect —
+ * faithful to the original [CONFIRMED @ InitializeRaceActorRuntime 0x00432E60:
+ * if (g_selectedGameType != 0) g_racerCount = 2; slots 2..5 disabled @
+ * InitializeRaceSession 0x0042AB91]. User request: let the chase have a real
+ * field, so the suspect count now follows the same OPPONENTS row /
+ * DefaultOpponents that a normal race uses.
+ *
+ * Bounds: at least 1 suspect (a chase needs something to chase, and
+ * OPPONENTS=0 would otherwise leave the cop alone on the track), and the field
+ * is capped at the legacy 6-slot layout. That cap is load-bearing, not
+ * cosmetic: g_traffic_slot_base only stays 6 while g_racer_count <= 6, and a
+ * >6-racer field pushes traffic to slot 16 and force-disables traffic/cops
+ * because the cop subsystem is hardwired to the 6+6 layout (see the
+ * g_traffic_slot_base assignment in InitRace). OPPONENTS=5 therefore yields a
+ * full 6-car chase, which is also the original's maximum grid. */
+int td5_game_cop_chase_field(void) {
+    if (!g_td5.wanted_mode_enabled) return 0;
+    int mp = td5_game_mp_cop_chase_field();
+    if (mp > 0) return mp;                       /* MP cop chase: untouched */
+    int suspects = g_td5.num_ai_opponents;
+    if (suspects < 1) suspects = 1;              /* always at least one suspect */
+    if (suspects > TD5_LEGACY_RACE_SLOTS - 1)
+        suspects = TD5_LEGACY_RACE_SLOTS - 1;    /* keep the 6+6 layout intact */
+    return 1 + suspects;                         /* + the player-cop */
+}
+
 /* [MP COP CHASE multi-cop 2026-06-24] True when `slot` is a COP in the active cop
  * chase. SP wanted + AI cop keep the single-cop slot; MP human cop chase reads
  * cop_slot_mask so 2+ split-screen players can all be cops. Returns 0 outside an
@@ -11308,7 +11350,13 @@ int td5_game_mp_cop_chase_field(void) {
 int td5_game_cop_chase_is_cop(int slot) {
     int primary = td5_game_cop_chase_cop_slot();
     if (primary < 0) return 0;                       /* no active cop chase */
-    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    /* [TRAFFIC GATE DRIFT 2026-08-20] Bound by the RUNTIME racer/traffic
+     * boundary, not TD5_MAX_RACER_SLOTS. Same drift class as the traffic-wheel
+     * gate fix in td5_render_mesh.c: that constant was 6 when these gates were
+     * written, but the N-way work bumped it to 16 while g_traffic_slot_base
+     * stays 6 for a legacy <=6-racer field — so traffic slots 6..15 aliased
+     * into every racer-sized array and passed as cop-chase racers. */
+    if (slot < 0 || slot >= g_traffic_slot_base) return 0;
     /* [INFECT 2026-06-25] A converted (arrested-then-infected) suspect is a cop in
      * EVERY cop-chase variant, regardless of the AI-cop / human-cop branch below. */
     if ((s_infected_mask >> slot) & 1u) return 1;
@@ -11325,7 +11373,14 @@ int td5_game_cop_chase_is_cop(int slot) {
 /* True when `slot` is a racer SUSPECT (a non-cop racer) in a cop chase. */
 int td5_game_cop_chase_is_suspect(int slot) {
     if (td5_game_cop_chase_cop_slot() < 0) return 0;  /* no active cop chase */
-    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    /* [TRAFFIC GATE DRIFT 2026-08-20] ROOT CAUSE of "ramming traffic shows the
+     * chase indicator": this returns !is_cop(slot), so with the stale
+     * TD5_MAX_RACER_SLOTS (16) bound every TRAFFIC actor in slots 6..15 read as
+     * a SUSPECT. The V2V hook (td5_physics_collision.c) passes raw actor
+     * slot_index values, so ramming a civilian car ran the whole wanted chain:
+     * hit-tick stamp -> chase arrow + WANTED banner, damage-bar drain, and even
+     * arrest points. Traffic must never be a cop-chase racer. */
+    if (slot < 0 || slot >= g_traffic_slot_base) return 0;
     return !td5_game_cop_chase_is_cop(slot);          /* every non-cop racer */
 }
 
