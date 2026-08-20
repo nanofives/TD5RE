@@ -84,11 +84,10 @@
  * td5_trackgen.py's CURVE_SAFETY_DEFAULT (1.5); the extra 1.2 is headroom so
  * the resampled centerline never lands exactly on the floor. */
 #define TD5_TG_CURVE_SAFETY   (1.5 * 1.2)
-/* Steepest allowed |dY/d(arc)|. td5_trackgen.py uses 0.12; that is far too
- * steep here, because at span_length 1500 a 0.12 grade is a 180-unit step per
- * span and the result is a series of ramps that launches the car at speed.
- * MEASURED: dead flat gives 94% wheel contact, 0.12 gives 40%. */
-#define TD5_TG_MAX_GRADE      0.035
+/* Steepest allowed |dY/d(arc)|, mirroring td5_trackgen.py's max_grade.
+ * Was briefly cut to 0.035 on an inverted reading of the airborne mask (see
+ * the row-order note in tg_emit_strip); restored to the Python tool's value. */
+#define TD5_TG_MAX_GRADE      0.12
 
 #define TD5_TG_PI 3.14159265358979323846
 
@@ -654,15 +653,17 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
          * this block's origin. */
         for (k = 0; k <= ns; k++) {
             const TG_Node *n = &nl->v[s0 + k];
-            /* Left of travel is (tz, -tx). Row runs -half_width -> +half_width:
-             * the reverse order renders identically (the fallback ribbon draws
-             * double-sided, td5_render.c:3945) but gives a DOWNWARD surface
-             * normal, so the suspension finds no ground and the car floats. */
+            /* Left of travel is (tz, -tx); row runs +half_width -> -half_width.
+             * NOTE: this was briefly reversed on the belief that it fixed ground
+             * contact. That was based on reading actor+0x37C as a CONTACT mask
+             * when it is an AIRBORNE mask (bit set = wheel airborne), so
+             * "wheel_mask=0 for 947/991 ticks" actually meant all four wheels
+             * GROUNDED 96% of the time. Reverted. */
             const double lx = n->tz, lz = -n->tx;
             int j;
             for (j = 0; j < row_pts; j++) {
-                double t  = -(n->width * 0.5)
-                          + (n->width * (double)j / (double)lanes);
+                double t  = (n->width * 0.5)
+                          - (n->width * (double)j / (double)lanes);
                 int dx = tg_round(n->x + lx * t) - ox;
                 int dy = tg_round(n->y) - oy;
                 int dz = tg_round(n->z + lz * t) - oz;
