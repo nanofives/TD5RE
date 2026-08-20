@@ -31,6 +31,7 @@ td5_radio.c
 td5_input.c
 td5_asset.c
 td5_assetsrc.c
+td5_carbalance.c
 td5_customcar.c
 deps/cjson/cJSON.c
 td5_inflate.c

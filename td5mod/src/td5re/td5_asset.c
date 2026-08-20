@@ -28,6 +28,7 @@
 #include "td5_asset.h"
 #include "td5_bytes.h"
 #include "td5_assetsrc.h" /* pack-on-load editable sources (step 0) */
+#include "td5_carbalance.h" /* tracked per-car carparam corrections */
 #include "td5_customcar.h" /* drop-in custom car registry (slots 76+) */
 #include "td5_track.h"
 #include "td5_track_registry.h" /* custom-track registry: level/finish-span lookups */
@@ -1314,9 +1315,13 @@ int td5_asset_read_entry_from_path(const char *entry_name,
     return result;
 }
 
-void *td5_asset_open_and_read(const char *entry_name,
-                              const char *zip_path,
-                              int *out_size)
+/* Raw asset fetch — every lookup path (assetsrc pack, loose file, extracted
+ * level/asset, zip). Wrapped by td5_asset_open_and_read below, which is the
+ * single place tracked carparam corrections are applied so that EVERY consumer
+ * sees identical bytes (see td5_carbalance.h). */
+static void *asset_open_and_read_raw(const char *entry_name,
+                                     const char *zip_path,
+                                     int *out_size)
 {
     if (!entry_name || !zip_path) {
         TD5_LOG_E(LOG_TAG, "open_and_read invalid args: entry=%p zip=%p",
@@ -1397,6 +1402,17 @@ void *td5_asset_open_and_read(const char *entry_name,
     }
 
     if (out_size) *out_size = result;
+    return buf;
+}
+
+void *td5_asset_open_and_read(const char *entry_name,
+                              const char *zip_path,
+                              int *out_size)
+{
+    int   sz  = 0;
+    void *buf = asset_open_and_read_raw(entry_name, zip_path, &sz);
+    if (buf) td5_carbalance_apply(entry_name, zip_path, buf, sz);
+    if (out_size) *out_size = sz;
     return buf;
 }
 
