@@ -11279,10 +11279,23 @@ int td5_game_cop_chase_cop_slot(void) {
  * suspects plus an AI cop — without this the AI cop slot was disabled and the
  * cop role fell back onto player 1. */
 int td5_game_mp_cop_chase_field(void) {
+    int f;
     if (!g_td5.wanted_mode_enabled) return 0;
-    if (g_td5.mp_mode_config.mode != TD5_MP_MODE_COP_CHASE || g_td5.network_active)
+    if (g_td5.mp_mode_config.mode != TD5_MP_MODE_COP_CHASE)
         return 0;
-    int f = g_td5.num_human_players + (g_td5.mp_mode_config.cop_is_ai ? 1 : 0);
+    /* [NET COP CHASE FIELD 2026-08-20] Net cop chase used to fall through the
+     * old `|| network_active` bail and return 0, which collapsed the active
+     * field to the faithful 2 (slot activation at td5_game.c:2801, racer count
+     * at :2982) -- so a 3+ player net cop chase only ever activated TWO cars.
+     * Over the net every racer is a human net player (num_human_players is
+     * forced to 1 locally) and cops are drawn from them (net forces
+     * cop_is_ai=0), so the active field is exactly the replicated net player
+     * count -- identical on every peer, so slot activation stays in lockstep. */
+    if (g_td5.network_active) {
+        f = td5_net_get_player_count();
+    } else {
+        f = g_td5.num_human_players + (g_td5.mp_mode_config.cop_is_ai ? 1 : 0);
+    }
     if (f < 2) f = 2;
     if (f > TD5_MAX_RACER_SLOTS) f = TD5_MAX_RACER_SLOTS;
     return f;

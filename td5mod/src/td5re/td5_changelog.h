@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 20" },
+    { CL_ITEM,    "Cop Chase over the network now activates ALL players, not" },
+    { CL_ITEM,    "  just two - a 3+ player online cop chase was silently" },
+    { CL_ITEM,    "  disabling the extra cars." },
     { CL_ITEM,    "Car horn now fades smoothly with distance and no longer" },
     { CL_ITEM,    "  detunes a nearby car's engine when honked." },
     { CL_BLANK,   "" },
