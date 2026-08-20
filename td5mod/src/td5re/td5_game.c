@@ -3219,8 +3219,9 @@ static void init_race_level_and_assets(void)
             }
             int *car_slot = (s == 0 && !g_td5.network_active) ? &g_td5.car_index
                                                                 : &g_td5.ai_car_indices[s];
-            int is_cop_car = (*car_slot >= 33 && *car_slot <= 36) ||
-                             (*car_slot >= 46 && *car_slot <= 49);
+            /* [GEARBOX REWORK 2026-08-20] Was an inline range test; now the
+             * shared query so physics and this loop cannot disagree. */
+            int is_cop_car = td5_game_car_index_is_cop_car(*car_slot);
             if (!is_cop_car) {
                 TD5_LOG_I(LOG_TAG,
                           "Cop Chase: forcing slot %d car %d -> 33 (Police Cerbera, cop.zip)",
@@ -11440,6 +11441,32 @@ int td5_game_cop_chase_is_suspect(int slot) {
      * arrest points. Traffic must never be a cop-chase racer. */
     if (slot < 0 || slot >= g_traffic_slot_base) return 0;
     return !td5_game_cop_chase_is_cop(slot);          /* every non-cop racer */
+}
+
+/* [GEARBOX REWORK 2026-08-20] True when `car_index` is a POLICE car by identity
+ * (not by role): the TD5 police at roster 33-36 and the TD6 police cp1..cp4 at
+ * 46-49. Neither range is player-selectable; they belong to Cop Chase.
+ *
+ * Hoisted into a single named query because the ranges were being spelled out
+ * inline in more than one place (the Cop Chase car-forcing loop below, and
+ * frontend_car_is_cop() in td5_frontend.c, which is frontend-private and so
+ * unreachable from leaf modules). Leaf modules read it via td5_race_state.h.
+ * NOTE: td5_frontend.c still has its own copy behind the TD6_COP_* constants;
+ * it was left alone to keep this change scoped, but the two must agree. */
+int td5_game_car_index_is_cop_car(int car_index) {
+    return (car_index >= 33 && car_index <= 36) ||
+           (car_index >= 46 && car_index <= 49);
+}
+
+/* [GEARBOX REWORK 2026-08-20] Roster car index actually driven by `slot`.
+ * Mirrors the selection rule used throughout the race-setup path: slot 0 uses
+ * the player's pick unless this is a net race (where every slot, including 0,
+ * comes from the per-slot AI/roster array). Returns -1 for an out-of-range slot
+ * so callers can tell "unknown" from a real index. */
+int td5_game_get_slot_car_index(int slot) {
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return -1;
+    if (slot == 0 && !g_td5.network_active) return g_td5.car_index;
+    return g_td5.ai_car_indices[slot];
 }
 
 /* [MP COP CHASE results 2026-06-25] True when a cop chase is running — the gate

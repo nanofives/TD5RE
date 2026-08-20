@@ -43,6 +43,10 @@ int  td5_game_is_wanted_mode(void);
 int  td5_game_is_pause_menu_active(void);
 int  td5_game_cop_chase_is_cop(int slot);
 int  td5_game_cop_chase_is_suspect(int slot);
+/* Police car by IDENTITY (roster 33-36 TD5, 46-49 TD6 cp1..cp4), not by role. */
+int  td5_game_car_index_is_cop_car(int car_index);
+/* Roster car index driven by `slot`, or -1 if the slot is out of range. */
+int  td5_game_get_slot_car_index(int slot);
 int  td5_game_get_cop_actor_index(void);
 int  td5_game_mp_traffic_fair(void);
 int  td5_game_battle_mode_active(void);

@@ -824,6 +824,49 @@ static int32_t td5_physics_gear_stretch_q8(TD5_Actor *actor, int gear)
  * a positive magnitude; 0 when the car has no usable ratio. Single source of
  * truth so the RPM model, the per-gear ceiling and the over-limiter engine-brake
  * target agree by construction instead of by coincidence. */
+/* ------------------------------------------------------------------------
+ * TOP-GEAR REACHABILITY FIX — applies to EVERY car, not just manual.
+ * [GEARBOX REWORK 2026-08-20]
+ *
+ * Ten of the 77 shipped cars are geared so tall-revving that TOP gear hits the
+ * rev limiter BELOW their own authored top-speed rating (carparam+0x74) — the
+ * car can never reach the top speed its own data claims, no matter who drives
+ * it or how well. Measured ceiling/rating ratios: chr 0.90, cp2 0.90, lit 0.90,
+ * flx 0.91, nis 0.91, pwr 0.92, cp3 0.96, mgt 0.96, cob 0.98, mcj 0.98.
+ *
+ * That is a plain defect, not a balance choice, and it penalises AUTOMATIC
+ * drivers and AI exactly as much as manual ones. So it is fixed here for
+ * everybody, independently of the manual reward: in top gear, cap the ratio at
+ * the tallest value that still reaches the authored rating.
+ *
+ *     ceiling(ratio) = (redline-400)*4096 / (ratio*45)  >= rating
+ *  => ratio <= (redline-400)*4096 / (rating*45)
+ *
+ * Cars already able to reach their rating are untouched (the clamp is a no-op),
+ * so 67/77 cars — and every golden/AI pacing assumption that depends on them —
+ * are bit-unchanged. For the 10 affected cars the ratio drops at most 10.4% and
+ * top speed rises 2.0%..11.7%, which is exactly the speed their carparam always
+ * claimed. Uses the RAW authored rating, deliberately NOT phys_top_speed_rating()
+ * (that one returns 0x7FFF for a chasing cop and folds in catch-up/arcade
+ * multipliers, which would make the gearing situational and unstable).
+ *
+ * KNOB: TD5RE_TOPGEAR_FIX (default 1 = ON).
+ * ------------------------------------------------------------------------ */
+
+static int s_topgear_fix_on = -1;
+
+static int td5_physics_topgear_fix_enabled(void)
+{
+    if (s_topgear_fix_on < 0) {
+        s_topgear_fix_on = td5_env_int("TD5RE_TOPGEAR_FIX", 1, 0, 1);
+        TD5_LOG_I(LOG_TAG,
+                  "topgear_fix: TD5RE_TOPGEAR_FIX=%d "
+                  "(1 = top gear geared tall enough to reach the car's authored top speed)",
+                  s_topgear_fix_on);
+    }
+    return s_topgear_fix_on;
+}
+
 int32_t td5_physics_effective_gear_ratio(TD5_Actor *actor, int gear)
 {
     if (!actor || !get_phys(actor) || gear < 0 || gear > 7)
@@ -833,6 +876,34 @@ int32_t td5_physics_effective_gear_ratio(TD5_Actor *actor, int gear)
     if (ratio < 0) ratio = -ratio;
     if (ratio == 0)
         return 0;
+
+    /* Top-gear reachability fix — must run BEFORE the manual stretch so the two
+     * compose: first guarantee the authored top speed is reachable, then stretch
+     * further for an earned bonus on top of it.
+     *
+     * POLICE CARS ARE EXCLUDED (user decision 2026-08-20). Two of the ten
+     * affected cars are the TD6 police cp2/cp3 (roster 47/48), and handing a
+     * pursuing cop +11.7% / +4.1% top speed would silently re-balance Cop Chase
+     * on top of the existing TD5RE_COPCHASE_AI_SPEED_PCT suspect debuff. This is
+     * a correctness fix, so it must not move a game mode's difficulty. Excluded
+     * by CAR IDENTITY, not by cop ROLE, so a police car is consistent wherever
+     * it appears rather than changing gearing when a chase happens to start.
+     * The remaining 8 affected cars are fixed normally. */
+    if (gear >= 2 && td5_physics_topgear_fix_enabled()
+        && !td5_game_car_index_is_cop_car(
+                td5_game_get_slot_car_index((int)actor->slot_index))) {
+        int tg = td5_physics_top_gear(actor);
+        if (tg >= 2 && gear == tg) {
+            int32_t redline = (int32_t)PHYS_S(actor, PHYS_REDLINE_RPM);
+            int32_t rating  = (int32_t)PHYS_S(actor, PHYS_TOP_SPEED);
+            if (redline > 400 && rating > 0) {
+                int64_t max_ratio =
+                    ((int64_t)(redline - 400) * 4096) / ((int64_t)rating * 45);
+                if (max_ratio >= 1 && max_ratio < ratio)
+                    ratio = (int32_t)max_ratio;   /* no-op for 67/77 cars */
+            }
+        }
+    }
 
     int32_t q8 = td5_physics_gear_stretch_q8(actor, gear);
     if (q8 != MP_CATCHUP_Q8_ONE && q8 > 0) {
