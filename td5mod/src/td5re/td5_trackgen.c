@@ -821,6 +821,199 @@ static int tg_emit_levelinf(const TD5_TrackGenSpec *spec, int nspans,
     return !out->oom;
 }
 
+/* ==========================================================================
+ * MODELS.DAT -- road surface mesh
+ *
+ * Emitting ANY MODELS.DAT switches OFF the procedural ribbon renderer (it is
+ * gated on "zero display-list entries", td5_render_mesh.c:2663), so the road
+ * surface must come from here instead. Hence TD5RE_AUTOTRACK_SCENERY defaults
+ * to OFF: until this is verified, the shipped path stays the ribbon.
+ *
+ * Byte format is a C port of re/tools/mesh_tool.py (_pack_mesh, build_dat) --
+ * the emitter the existing Python-generated levels are validated against --
+ * rather than a fresh reading of the parser.
+ *
+ * Container ("format A strict", td5_track_parser.c:79-119):
+ *   u32 entry_count
+ *   (u32 block_offset, u32 block_size) * entry_count   -- offset ABSOLUTE
+ *   blocks, contiguous; block 0 must start at 4 + count*8 (no padding)
+ * Block:
+ *   u32 sub_count (1..256)
+ *   u32 mesh_off[sub_count]   -- BLOCK-relative; 0 = empty slot
+ *   packed mesh records
+ * Mesh record is 0x38 bytes, then commands (16 B each), then vertices (44 B).
+ * ========================================================================== */
+#define TD5_TG_MESH_DISK_SIZE  0x38
+#define TD5_TG_CMD_SIZE        16
+#define TD5_TG_VTX_SIZE        44
+/* Down-track sub-quads per span. A single 1500-unit quad shimmers at distance;
+ * the Python emitter uses 3 for the same reason. */
+#define TD5_TG_ROAD_SUBDIV     3
+#define TD5_TG_SPANS_PER_ENTRY 4     /* entry = span >> 2 */
+
+static void tg_put_f32(TG_Buf *buf, double v)
+{
+    float f = (float)v;
+    unsigned int u;
+    memcpy(&u, &f, sizeof(u));
+    tg_put_u32(buf, u);
+}
+
+/* Left and right road edge at fraction f along span si. */
+static void tg_road_edge(const TG_NodeList *nl, int si, double f,
+                         double *lx, double *ly, double *lz,
+                         double *rx, double *ry, double *rz)
+{
+    const TG_Node *a = &nl->v[si];
+    const TG_Node *b = &nl->v[si + 1];
+    double x = a->x + (b->x - a->x) * f;
+    double y = a->y + (b->y - a->y) * f;
+    double z = a->z + (b->z - a->z) * f;
+    double w = a->width + (b->width - a->width) * f;
+    double tx = a->tx + (b->tx - a->tx) * f;
+    double tz = a->tz + (b->tz - a->tz) * f;
+    double m = sqrt(tx * tx + tz * tz);
+    if (m < 1e-9) { tx = 0.0; tz = 1.0; m = 1.0; }
+    tx /= m; tz /= m;
+    /* Left of travel is (tz, -tx), matching the strip row order. */
+    *lx = x + tz * (w * 0.5); *ly = y; *lz = z - tx * (w * 0.5);
+    *rx = x - tz * (w * 0.5); *ry = y; *rz = z + tx * (w * 0.5);
+}
+
+/* One road mesh for span si, appended to blk. Returns 0 on OOM. */
+static int tg_emit_road_mesh(const TG_NodeList *nl, int si, int lanes,
+                             TG_Buf *blk)
+{
+    double px[TD5_TG_ROAD_SUBDIV * 4], py[TD5_TG_ROAD_SUBDIV * 4];
+    double pz[TD5_TG_ROAD_SUBDIV * 4], uu[TD5_TG_ROAD_SUBDIV * 4];
+    double vv[TD5_TG_ROAD_SUBDIV * 4];
+    double cx = 0.0, cy = 0.0, cz = 0.0, radius = 0.0;
+    int k, i, n = 0;
+
+    for (k = 0; k < TD5_TG_ROAD_SUBDIV; k++) {
+        double f0 = (double)k / (double)TD5_TG_ROAD_SUBDIV;
+        double f1 = (double)(k + 1) / (double)TD5_TG_ROAD_SUBDIV;
+        double nlx, nly, nlz, nrx, nry, nrz;
+        double flx, fly, flz, frx, fry, frz;
+        tg_road_edge(nl, si, f0, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
+        tg_road_edge(nl, si, f1, &flx, &fly, &flz, &frx, &fry, &frz);
+        /* Quad loop: near-left, near-right, far-right, far-left. */
+        px[n]=nlx; py[n]=nly; pz[n]=nlz; uu[n]=0.0;           vv[n]=si+f0; n++;
+        px[n]=nrx; py[n]=nry; pz[n]=nrz; uu[n]=(double)lanes; vv[n]=si+f0; n++;
+        px[n]=frx; py[n]=fry; pz[n]=frz; uu[n]=(double)lanes; vv[n]=si+f1; n++;
+        px[n]=flx; py[n]=fly; pz[n]=flz; uu[n]=0.0;           vv[n]=si+f1; n++;
+    }
+
+    for (i = 0; i < n; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
+    cx /= n; cy /= n; cz /= n;
+    for (i = 0; i < n; i++) {
+        double dx = px[i]-cx, dy = py[i]-cy, dz = pz[i]-cz;
+        double d = sqrt(dx*dx + dy*dy + dz*dz);
+        if (d > radius) radius = d;
+    }
+    if (!(radius > 0.0)) radius = 1.0;   /* NaN/<=0 is rejected by the culler */
+
+    /* --- mesh record (0x38) --- */
+    tg_put_u16(blk, 259);            /* 0x00 render_type (nothing reads it) */
+    tg_put_u16(blk, 0);              /* 0x02 billboard tag: 0 = opaque */
+    tg_put_u32(blk, 1);              /* 0x04 command_count */
+    tg_put_u32(blk, (unsigned)n);    /* 0x08 total_vertex_count */
+    tg_put_f32(blk, radius);         /* 0x0C bounding_radius */
+    tg_put_f32(blk, cx);             /* 0x10 bounding_center */
+    tg_put_f32(blk, cy);
+    tg_put_f32(blk, cz);
+    tg_put_f32(blk, 0.0);            /* 0x1C origin: 0 for opaque geometry */
+    tg_put_f32(blk, 0.0);
+    tg_put_f32(blk, 0.0);
+    tg_put_u32(blk, 0);              /* 0x28 reserved */
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE);                       /* commands */
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE + TD5_TG_CMD_SIZE);     /* vertices */
+    tg_put_u32(blk, 0);              /* 0x34 normals: NULL is allowed */
+
+    /* --- one command: quads only, sequential vertex cursor --- */
+    tg_put_u16(blk, 0);              /* dispatch_type 0 = TRISTRIP */
+    tg_put_u16(blk, 0);              /* texture_page_id: the SAMPLED page */
+    tg_put_u32(blk, 0);              /* reserved */
+    tg_put_u16(blk, 0);                             /* triangle_count */
+    tg_put_u16(blk, TD5_TG_ROAD_SUBDIV);            /* quad_count */
+    tg_put_u32(blk, 0);              /* vertex_data_ptr 0 = sequential */
+
+    /* --- de-indexed vertices, 44 B each --- */
+    for (i = 0; i < n; i++) {
+        tg_put_f32(blk, px[i]);
+        tg_put_f32(blk, py[i]);
+        tg_put_f32(blk, pz[i]);
+        tg_put_f32(blk, 0.0);        /* view xyz: filled at runtime */
+        tg_put_f32(blk, 0.0);
+        tg_put_f32(blk, 0.0);
+        tg_put_u32(blk, 0xFFFFFFFFu);/* lighting ARGB: full bright */
+        tg_put_f32(blk, uu[i]);      /* UVs are normalised floats; >1 tiles */
+        tg_put_f32(blk, vv[i]);
+        tg_put_f32(blk, 0.0);        /* proj_u/proj_v: runtime */
+        tg_put_f32(blk, 0.0);
+    }
+    return !blk->oom;
+}
+
+static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
+                          TG_Buf *out)
+{
+    const int nentries = (nspans + TD5_TG_SPANS_PER_ENTRY - 1)
+                       / TD5_TG_SPANS_PER_ENTRY;
+    TG_Buf *blocks;
+    unsigned int cursor;
+    int e, ok = 1;
+
+    blocks = (TG_Buf *)calloc((size_t)nentries, sizeof(TG_Buf));
+    if (!blocks) return 0;
+
+    /* Build each entry's block: one road mesh per span it covers. */
+    for (e = 0; e < nentries && ok; e++) {
+        const int s0 = e * TD5_TG_SPANS_PER_ENTRY;
+        int ns = nspans - s0;
+        int i;
+        if (ns > TD5_TG_SPANS_PER_ENTRY) ns = TD5_TG_SPANS_PER_ENTRY;
+
+        tg_put_u32(&blocks[e], (unsigned)ns);          /* sub_count */
+        for (i = 0; i < ns; i++) {
+            /* Mesh offsets are BLOCK-relative and uniform in size. */
+            unsigned int off = (unsigned)(4 + ns * 4)
+                             + (unsigned)i * (TD5_TG_MESH_DISK_SIZE
+                                              + TD5_TG_CMD_SIZE
+                                              + TD5_TG_ROAD_SUBDIV * 4
+                                                * TD5_TG_VTX_SIZE);
+            tg_put_u32(&blocks[e], off);
+        }
+        for (i = 0; i < ns; i++) {
+            if (!tg_emit_road_mesh(nl, s0 + i, lanes, &blocks[e])) { ok = 0; break; }
+        }
+    }
+
+    if (ok) {
+        /* Header: count, then (offset,size) pairs. Block 0 must begin exactly
+         * at 4 + count*8 -- the strict-format-A autodetect requires it. */
+        cursor = (unsigned)(4 + nentries * 8);
+        tg_put_u32(out, (unsigned)nentries);
+        for (e = 0; e < nentries; e++) {
+            tg_put_u32(out, cursor);
+            tg_put_u32(out, (unsigned)blocks[e].len);
+            cursor += (unsigned)blocks[e].len;
+        }
+        for (e = 0; e < nentries; e++) {
+            if (!tg_buf_need(out, blocks[e].len)) { ok = 0; break; }
+            memcpy(out->b + out->len, blocks[e].b, blocks[e].len);
+            out->len += blocks[e].len;
+        }
+        if (ok)
+            TD5_LOG_I(LOG_TAG, "trackgen: models = %d entries, %zu bytes "
+                      "(%d road meshes)", nentries, out->len, nspans);
+    }
+
+    for (e = 0; e < nentries; e++) tg_buf_free(&blocks[e]);
+    free(blocks);
+    return ok && !out->oom;
+}
+
 /* ---------------------------------------------------------- config ------- */
 void td5_trackgen_default_spec(TD5_TrackGenSpec *spec)
 {
@@ -919,6 +1112,29 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         !tg_write_file(dir, "RIGHT.TRK", right.b, right.len) ||
         !tg_write_file(dir, "LEVELINF.DAT", info.b, info.len)) {
         goto done;
+    }
+
+    /* MODELS.DAT is OPT-IN (TD5RE_AUTOTRACK_SCENERY=1) and all-or-nothing:
+     * its mere presence disables the procedural ribbon renderer, so if the
+     * mesh bytes are wrong the road goes INVISIBLE (still drivable). Default
+     * off keeps the verified ribbon path as shipped. A stale MODELS.DAT from a
+     * previous opt-in run would silently keep the ribbon disabled, so remove
+     * it when the knob is off. */
+    {
+        char models_path[320];
+        snprintf(models_path, sizeof(models_path), "%s/MODELS.DAT", dir);
+        if (td5_env_flag_off("TD5RE_AUTOTRACK_SCENERY")) {
+            TG_Buf models;
+            memset(&models, 0, sizeof(models));
+            if (tg_emit_models(&nl, nspans, spec->lanes, &models))
+                tg_write_file(dir, "MODELS.DAT", models.b, models.len);
+            else
+                TD5_LOG_W(LOG_TAG, "trackgen: models emit failed; "
+                          "falling back to the ribbon renderer");
+            tg_buf_free(&models);
+        } else {
+            remove(models_path);
+        }
     }
 
     TD5_LOG_I(LOG_TAG, "trackgen: seed=%u level=%d spans=%d len=%.0f world units",
