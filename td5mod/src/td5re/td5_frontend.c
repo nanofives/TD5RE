@@ -2027,12 +2027,24 @@ int frontend_current_car_index(void) {
 }
 
 
-/* TD6 cop cars cp1..cp4 (Jaguar/Charger/Mustang/Cerbera police) sit at roster
- * indices 37 + TD6_NEW_CODES{9..12} = 46..49. Like the TD5 police (33-36) they
- * are NOT player-selectable and cannot be painted — they belong to Cop Chase. */
-#define TD6_COP_FIRST 46
+/* Police car by roster identity — the TD5 police (33-36) and the TD6 cp1..cp4
+ * police (TD6_COP_FIRST..TD6_COP_LAST = 46..49). Neither range is
+ * player-selectable and neither can be painted; they belong to Cop Chase.
+ *
+ * [GEARBOX REWORK 2026-08-20] De-duplicated: this used to spell the ranges out
+ * itself, which made three independent copies in the tree (here, the Cop Chase
+ * car-forcing loop in td5_game.c, and the physics top-gear fix). The single
+ * definition now lives in td5_game_car_index_is_cop_car() and this stays as the
+ * frontend's spelling of it — 11 call sites across td5_fe_*.c keep working
+ * unchanged, and td5_frontend.c already includes td5_game.h so there is no new
+ * coupling. The constants remain because TD6_COP_LAST also caps the Cop Chase
+ * roster pickers; the assert below stops them drifting from the canonical
+ * predicate's ranges, since that one cannot reference frontend-private macros. */
+_Static_assert(TD6_COP_FIRST == 46 && TD6_COP_LAST == 49,
+               "TD6 cop roster range drifted from td5_game_car_index_is_cop_car()");
+
 int frontend_car_is_cop(int i) {
-    return (i >= 33 && i <= 36) || (i >= TD6_COP_FIRST && i <= TD6_COP_LAST);
+    return td5_game_car_index_is_cop_car(i);
 }
 
 

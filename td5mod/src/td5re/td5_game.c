@@ -11443,16 +11443,21 @@ int td5_game_cop_chase_is_suspect(int slot) {
     return !td5_game_cop_chase_is_cop(slot);          /* every non-cop racer */
 }
 
-/* [GEARBOX REWORK 2026-08-20] True when `car_index` is a POLICE car by identity
- * (not by role): the TD5 police at roster 33-36 and the TD6 police cp1..cp4 at
- * 46-49. Neither range is player-selectable; they belong to Cop Chase.
+/* [GEARBOX REWORK 2026-08-20] CANONICAL "is this a police car" test — by roster
+ * IDENTITY, not by cop ROLE: the TD5 police at 33-36 and the TD6 police cp1..cp4
+ * at 46-49. Neither range is player-selectable; both belong to Cop Chase.
  *
- * Hoisted into a single named query because the ranges were being spelled out
- * inline in more than one place (the Cop Chase car-forcing loop below, and
- * frontend_car_is_cop() in td5_frontend.c, which is frontend-private and so
- * unreachable from leaf modules). Leaf modules read it via td5_race_state.h.
- * NOTE: td5_frontend.c still has its own copy behind the TD6_COP_* constants;
- * it was left alone to keep this change scoped, but the two must agree. */
+ * This is the ONLY definition of those ranges. Before this there were three
+ * independent copies: the Cop Chase car-forcing loop below, frontend_car_is_cop()
+ * in td5_frontend.c, and (nearly) the physics top-gear fix. All three now route
+ * here — leaf modules via td5_race_state.h, the frontend via td5_game.h.
+ *
+ * The 46-49 pair is also named TD6_COP_FIRST/TD6_COP_LAST in
+ * td5_frontend_internal.h because TD6_COP_LAST caps the Cop Chase roster
+ * pickers. Those macros are frontend-private so this function cannot use them;
+ * instead td5_frontend.c carries a _Static_assert pinning them to 46/49, so
+ * editing either side without the other fails the build rather than silently
+ * disagreeing. Keep that assert in step if these bounds ever change. */
 int td5_game_car_index_is_cop_car(int car_index) {
     return (car_index >= 33 && car_index <= 36) ||
            (car_index >= 46 && car_index <= 49);
