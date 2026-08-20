@@ -3886,7 +3886,22 @@ void td5_ai_traffic_dynamic_tick(void)
              * and retire it once past the threshold, regardless of distance — this
              * is what frees battle slots so fresh traffic keeps coming. A car that
              * isn't a live wreck resets its age (fresh spawns start at 0). */
-            if (td5_game_battle_mode_active() && battle_wreck_despawn_enabled() &&
+            /* [DRAG TRAFFIC DRY-UP 2026-08-19] DRAG needs this arm for exactly the
+             * reason the note above gives for battle, and its absence is THE cause of
+             * the reported "traffic dries up after a fixed time, anywhere on the
+             * strip". Drag traffic is oncoming and gets destroyed constantly (a
+             * multi-car field meeting it head-on), and a broken-down car stays ACTIVE
+             * forever, so wrecks accumulate and permanently consume slots. Found with
+             * the traffic census below, which showed the pool pinned at the cap while
+             * the wreck count climbed monotonically:
+             *   tick=900  active=16 broken=5 cap=16
+             *   tick=1050 active=16 broken=6 cap=16
+             * ~1 new permanent wreck every 5 s, so the pool is dead after a roughly
+             * FIXED time independent of track position — which is precisely the
+             * symptom, and why a position-based theory never fit. No distance arm can
+             * save these: they sit wherever they died, usually near the player. */
+            if ((td5_game_battle_mode_active() || g_td5.drag_race_enabled) &&
+                battle_wreck_despawn_enabled() &&
                 g_actor_broken_down[slot]) {
                 if (s_trf_wreck_age[slot] < 0x7fff) s_trf_wreck_age[slot]++;
                 if (s_trf_wreck_age[slot] >= (int16_t)battle_wreck_despawn_ticks())
@@ -4172,7 +4187,42 @@ void td5_ai_traffic_dynamic_tick(void)
             }
         }
     }
+
+    /* [DRAG TRAFFIC CENSUS 2026-08-19] Periodic traffic-pool census, so a dry-up
+     * reported from real play can be diagnosed from the log instead of guessed at.
+     * A tester saw drag traffic stop "after a fixed time, anywhere on the strip" --
+     * a TEMPORAL latch, which the automated harness never reproduced (it kept
+     * spawning for 100 s). This prints the pool composition against the sim tick, so
+     * the moment spawning stops it is visible WHY: slots consumed by stuck/broken
+     * cars, the cap collapsing, or attempts simply never being made. Default ON in
+     * dev (cheap: one line per 5 s); TD5RE_TRAFFIC_CENSUS=0 silences it.
+     * Counts are over the whole traffic slot range, not just this cluster. */
+    if (td5_env_flag_on("TD5RE_TRAFFIC_CENSUS") &&
+        (g_td5.simulation_tick_counter % 150u) == 0u) {
+        int n_inact = 0, n_fin = 0, n_act = 0, n_fout = 0, n_stuck = 0, n_broken = 0;
+        for (int i = g_traffic_slot_base;
+             i < g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS &&
+             i < TD5_MAX_TOTAL_ACTORS; i++) {
+            switch (s_trf_dyn_state[i]) {
+                case TRF_DYN_INACTIVE: n_inact++; break;
+                case TRF_DYN_FADE_IN:  n_fin++;   break;
+                case TRF_DYN_ACTIVE:   n_act++;   break;
+                case TRF_DYN_FADE_OUT: n_fout++;  break;
+                default: break;
+            }
+            if (s_traffic_stuck_frames[i] > 0)    n_stuck++;
+            if (g_actor_broken_down[i])           n_broken++;
+        }
+        TD5_LOG_I(LOG_TAG,
+                  "traffic_census: tick=%u inactive=%d fadein=%d active=%d fadeout=%d "
+                  "stuck=%d broken=%d cap=%d cooldown=%d lead_span=%d",
+                  (unsigned)g_td5.simulation_tick_counter,
+                  n_inact, n_fin, n_act, n_fout, n_stuck, n_broken,
+                  trf_dyn_cap(), s_trf_dyn_cooldown,
+                  ai_player_span_lead());
+    }
 }
+
 
 void td5_ai_update_traffic_route_plan(int slot) {
     int32_t *rs = route_state(slot);
