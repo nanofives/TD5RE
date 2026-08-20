@@ -41,6 +41,12 @@ int          td5_track_registry_has_slot(int slot);
 const char  *td5_track_registry_name_for_slot(int slot);   /* NULL if not custom */
 int          td5_track_registry_level_for_slot(int slot);  /* <=0 if not custom */
 int          td5_track_registry_tga_for_slot(int slot);    /* -1 = no preview */
+/* [NET PROTO PHASE 0 2026-08-19] Stable hash of this slot's manifest entry
+ * (level + name + circuit + start/finish span), for netplay track-identity
+ * checking -- slot numbers alone are meaningless across machines because each
+ * peer's custom_tracks.json is its own. 0 when the slot is not custom.
+ * Hashes the manifest ENTRY only, not the level file contents. */
+unsigned int td5_track_registry_fingerprint_for_slot(int slot);
 
 /* --- by LEVEL (asset loader) --- */
 int   td5_track_registry_has_level(int level_num);

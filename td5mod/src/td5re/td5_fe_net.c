@@ -82,6 +82,9 @@ static void frontend_net_build_join_fail(int nak) {
     switch (nak) {
     case 1:  why = TR("SESSION FULL"); break;
     case 2:  why = TR("WRONG PASSWORD"); break;
+    /* [NET PROTO PHASE 0 2026-08-19] Name the real cause -- a build mismatch
+     * used to present as a generic timeout, or (worse) as a mid-race desync. */
+    case 3:  why = TR("DIFFERENT GAME VERSION"); break;
     default: why = TR("HOST UNREACHABLE (NO RESPONSE)"); break;
     }
     snprintf(s_net_join_fail_msg, sizeof(s_net_join_fail_msg),
@@ -1706,6 +1709,27 @@ void Screen_NetworkLobby(void) {
         }
 #endif
 
+        /* [NET PROTO PHASE 0 2026-08-19] The net layer refused the host's
+         * DXPSTART (protocol version or track identity mismatch). Bail out
+         * with a named reason INSTEAD of launching -- starting here would run
+         * a different sim than the host and lockstep has no state correction,
+         * so it would surface later as inexplicable physics, not as an error. */
+        {
+            int reject = td5_net_get_start_reject_reason();
+            if (reject) {
+                TD5_LOG_E(LOG_TAG, "NetworkLobby: refusing host race start (reason=%d)",
+                          reject);
+                td5_net_clear_start_reject();
+                s_race_active_flag = 0;
+                s_network_active = 0;
+                frontend_net_destroy();
+                td5_frontend_show_net_disconnect(
+                    (reject == 4) ? "The host is racing a track you do not have"
+                                  : "The host is running a different game version");
+                return;
+            }
+        }
+
         /* S10: a client auto-launches into the race once the host's DXPSTART
          * rendezvous has activated lockstep sync (td5_net_is_active). The host
          * launches via state 5 -> 0x10 -> 0x11. */
@@ -2051,6 +2075,13 @@ void Screen_NetworkLobby(void) {
                                         ((uint32_t)rand() << 16);
                 cfg.track_index       = s_selected_track;
                 cfg.reverse_direction = s_track_direction;
+                /* [NET PROTO PHASE 0 2026-08-19] Stamp the protocol version and
+                 * the identity of the track we actually selected. Clients
+                 * recompute the fingerprint from their own registry and refuse
+                 * to start on a mismatch, instead of silently loading a
+                 * different custom track under the same slot number. */
+                cfg.proto_version     = (uint32_t)TD5_NET_PROTO_VERSION;
+                cfg.track_fingerprint = td5_net_track_fingerprint(s_selected_track);
                 /* Live frontend choices, NOT g_td5.* -- those are only
                  * refreshed by the schedule (which runs AFTER this config is
                  * broadcast) and were stale ("AI players are not loading"). */
