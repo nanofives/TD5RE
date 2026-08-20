@@ -56,9 +56,74 @@ typedef struct {
  * than data errors — the rest of the roster is a coherent scheme (16 typical,
  * 12 muscle, 18..20 light sports).
  * ------------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------------
+ * DONOR-PARAM CARS: aud, pro, xjr.
+ *
+ * TD6's param.zip ships NO <code>param.dat for these three, so
+ * convert_td6_cars.py:379-395 fell back to the donor car's carparam wholesale
+ * (documented there as "approximate physics", stamped [param=DONOR]; the donor
+ * was tvr CERBERA). Result: four roster slots -- tvr, aud, pro, xjr -- all
+ * drove as a CERBERA. pro was byte-identical to tvr in every field; aud and
+ * xjr differed only in wheel_pos (0x40), which is `live` so at least those two
+ * sat on their own wheelbase.
+ *
+ * The visible symptom was displayed-vs-actual divergence: the SELECT CAR spec
+ * sheets are authored from a separate table (convert_td6_cars.py TD6_STATS) and
+ * claimed a 40 mph / 2.5 s spread across these cars while the actual spread was
+ * zero. Four consecutive rows also shared the identical tier score 0.376.
+ *
+ * There is no correct value to RESTORE -- the source data does not exist -- so
+ * these are DERIVED from the only per-car intent that does: the config.nfo spec
+ * sheet (line 7 = top speed mph, line 8 = 0-60 s). Method: nearest neighbour in
+ * (mph, 0-60) space over the 65 roster cars that have genuine params, ranges
+ * normalised, the three donor cars themselves excluded so they cannot poison it.
+ *
+ *   aud  EXACT twin (distance 0.000) of att "1999_AUDI_TT_COUPE" -- the same
+ *        car, already on the roster with real TD6 params. Its values are
+ *        COPIED, which is correct: two Audi TTs should drive alike.
+ *   pro  inverse-distance-weighted mean of its 5 nearest neighbours
+ *        (tur .035, sp3 .049, lit .115, esp .116, sky .139).
+ *   xjr  same, over (gts .007, cer .048, lgt .063, atp .068, chd .068).
+ *
+ * Weighted means rather than copying the single nearest car, so pro/xjr get
+ * their own distinct values instead of becoming a fresh clone of gts/tur --
+ * which would just relocate the bug being fixed here.
+ *
+ * A global least-squares fit was tried first and REJECTED for two fields:
+ * lateral-G vs drag_coefficient came out at R2=0.006 (no relationship at all --
+ * the lateral column has junk in it, e.g. sp4 claims an impossible 3.0G), and
+ * 60-0 ft vs brake_force only reached R2=0.36. Top speed fit acceptably
+ * (R2=0.79) and 0-60 vs accel weakly (R2=0.42). Nearest-neighbour is used
+ * instead because it relies on local roster structure rather than a weak global
+ * trend. CONFIDENCE: top speed and torque are well supported; brake_force is
+ * the noisiest of the five and is the first thing to revisit if these cars
+ * brake oddly. grip/mass come along from the neighbourhood, which is why all
+ * three land on invmass 16 (the roster-typical value) instead of CERBERA's 18.
+ * ------------------------------------------------------------------------- */
 static const TD5_CarOverride k_overrides[] = {
     { "sp8", TD5CP_OFF_COLLISION_MASS, TD5CP_INVMASS_MAX,
       "was 32 = traffic inverse-mass override, off the 3..20 player scale" },
+
+    /* aud AUDI TT — copied from att, its exact spec twin (151 mph, 6.4 s). */
+    { "aud", TD5CP_OFF_TOP_SPEED,       786, "donor-param: = att (exact spec twin)" },
+    { "aud", TD5CP_OFF_DRIVE_TORQUE,     50, "donor-param: = att" },
+    { "aud", TD5CP_OFF_COLLISION_MASS,   16, "donor-param: = att" },
+    { "aud", TD5CP_OFF_BRAKE_FORCE,     422, "donor-param: = att" },
+    { "aud", TD5CP_OFF_AERO,           2200, "donor-param: = att" },
+
+    /* pro FORD MUSTANG COBRA — 155 mph, 5.5 s; kNN5 weighted mean. */
+    { "pro", TD5CP_OFF_TOP_SPEED,       765, "donor-param: kNN5 from spec 155mph/5.5s" },
+    { "pro", TD5CP_OFF_DRIVE_TORQUE,     59, "donor-param: kNN5" },
+    { "pro", TD5CP_OFF_COLLISION_MASS,   16, "donor-param: kNN5" },
+    { "pro", TD5CP_OFF_BRAKE_FORCE,     542, "donor-param: kNN5 (noisiest field)" },
+    { "pro", TD5CP_OFF_AERO,           2239, "donor-param: kNN5" },
+
+    /* xjr JAGUAR XJR-15 — 191 mph, 3.9 s; kNN5 weighted mean. */
+    { "xjr", TD5CP_OFF_TOP_SPEED,       947, "donor-param: kNN5 from spec 191mph/3.9s" },
+    { "xjr", TD5CP_OFF_DRIVE_TORQUE,    145, "donor-param: kNN5" },
+    { "xjr", TD5CP_OFF_COLLISION_MASS,   16, "donor-param: kNN5" },
+    { "xjr", TD5CP_OFF_BRAKE_FORCE,     541, "donor-param: kNN5 (noisiest field)" },
+    { "xjr", TD5CP_OFF_AERO,           2526, "donor-param: kNN5" },
 };
 
 #define TD5CB_OVERRIDE_COUNT ((int)(sizeof(k_overrides) / sizeof(k_overrides[0])))

@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 20" },
+    { CL_ITEM,    "AUDI TT, MUSTANG COBRA and JAGUAR XJR-15 now drive like" },
+    { CL_ITEM,    "  themselves - all three were secretly using the" },
+    { CL_ITEM,    "  CERBERA's engine, brakes and grip, so their spec" },
+    { CL_ITEM,    "  sheets bore no relation to how they actually drove." },
     { CL_ITEM,    "PITBULL is no longer absurdly quicker than every other" },
     { CL_ITEM,    "  car - it was carrying the weight value meant for" },
     { CL_ITEM,    "  traffic vehicles. Still the fastest, by a fair margin." },
