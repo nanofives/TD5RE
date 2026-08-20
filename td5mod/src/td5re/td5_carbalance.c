@@ -89,13 +89,26 @@ typedef struct {
  * their own distinct values instead of becoming a fresh clone of gts/tur --
  * which would just relocate the bug being fixed here.
  *
- * A global least-squares fit was tried first and REJECTED for two fields:
- * lateral-G vs drag_coefficient came out at R2=0.006 (no relationship at all --
- * the lateral column has junk in it, e.g. sp4 claims an impossible 3.0G), and
- * 60-0 ft vs brake_force only reached R2=0.36. Top speed fit acceptably
+ * A global least-squares fit was tried first and REJECTED as too weak to carry
+ * grip or braking: lateral-G vs drag_coefficient reaches only R2=0.06 over the
+ * roster (R2=0.33 once the four extreme/fictional cars 128, s12, sp4 and sp8 are
+ * excluded), and 60-0 ft vs brake_force only R2=0.36. Top speed fit acceptably
  * (R2=0.79) and 0-60 vs accel weakly (R2=0.42). Nearest-neighbour is used
  * instead because it relies on local roster structure rather than a weak global
- * trend. CONFIDENCE: top speed and torque are well supported; brake_force is
+ * trend.
+ *
+ * [CORRECTION 2026-08-20] An earlier revision of this comment claimed
+ * "R2=0.006, no relationship at all" and called the lateral-G column junk,
+ * citing sp4's 3.0G as impossible. Both claims were wrong, caused by a scratch
+ * parser whose regex required a leading digit and so read ".99G" as 99.0. The
+ * spec-sheet values are FAITHFUL: 128/sp4/sp8's 2.1G/3.0G/3.5G come byte-for-byte
+ * out of the original per-car zips under original/cars/, s12's 2.1G is authored
+ * in the tracked TD6_STATS
+ * table, and the two literal "UNKNOWN" entries (atp, van) are what the 1999 game
+ * shipped for those Aston Martin concept cars. The kNN decision below stands on
+ * the corrected numbers; only the stated reason needed fixing.
+ *
+ * CONFIDENCE: top speed and torque are well supported; brake_force is
  * the noisiest of the five and is the first thing to revisit if these cars
  * brake oddly. grip/mass come along from the neighbourhood, which is why all
  * three land on invmass 16 (the roster-typical value) instead of CERBERA's 18.
