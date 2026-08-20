@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 19" },
+    { CL_ITEM,    "Menu double-click is reliable: no time limit between the" },
+    { CL_ITEM,    "  two clicks, and the second click counts anywhere on the" },
+    { CL_ITEM,    "  button, not just inside the green box" },
     { CL_ITEM,    "Two new LIGHTING OPTIONS rows for weaker machines:" },
     { CL_ITEM,    "  CAR LIGHTS turns off the light cars cast on the road," },
     { CL_ITEM,    "  LEGACY SHADOWS swaps the soft car shadow for the" },

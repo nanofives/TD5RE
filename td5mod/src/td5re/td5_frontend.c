@@ -2366,6 +2366,11 @@ void frontend_reset_buttons(void) {
     s_mouse_flash_button = -1;
     s_prev_mouse_x = -1;
     s_prev_mouse_y = -1;
+    /* [fix 2026-08-19] Disarm the double-click. The activation window is now
+     * unbounded by default, so the arm must die with the button set it refers to
+     * — otherwise a click on the same index on a LATER screen would activate on
+     * the first click. Called on screen-state transitions, not per frame. */
+    s_dbl_last_button = -1;
 }
 
 static int frontend_resolve_selected_button(void) {
@@ -3629,6 +3634,33 @@ static int frontend_mouse_single_click_on(void) {
     return v;
 }
 
+/* [fix 2026-08-19] How long the double-click window stays open after the first
+ * (selecting) click. The original 2026-06-15 implementation used the Windows
+ * system interval (GetDoubleClickTime(), 500ms by default), which made menu
+ * activation feel inconsistent: pause a beat between the two clicks and the
+ * second one silently re-armed instead of activating.
+ *
+ * DEFAULT 0 = NO timeout — the second click on the same button activates it
+ * however long the player took. That is what "first click selects, second
+ * confirms" already implies everywhere else in this file, and a stale arm can't
+ * leak: activation additionally requires the button to still be the selected
+ * one, and frontend_reset_buttons() disarms on every screen change.
+ * TD5RE_MOUSE_DBLCLICK_MS=N restores a bounded window of N ms; a negative value
+ * restores the Windows system interval. */
+static int frontend_dblclick_window_open(uint32_t now) {
+    static int ms = -2;   /* -2 = not yet read from the environment */
+    if (ms == -2) {
+        const char *e = getenv("TD5RE_MOUSE_DBLCLICK_MS");
+        ms = e ? atoi(e) : 0;
+        TD5_LOG_I(LOG_TAG, "mouse dbl-click window = %s (TD5RE_MOUSE_DBLCLICK_MS=%s)",
+                  ms == 0 ? "unlimited" : (ms < 0 ? "system" : "custom ms"),
+                  e ? e : "default");
+    }
+    if (ms == 0) return 1;                                  /* no timeout */
+    int win = (ms < 0) ? (int)GetDoubleClickTime() : ms;     /* system / custom */
+    return (uint32_t)(now - s_dbl_last_time) <= (uint32_t)win;
+}
+
 /* Re-assert the software cursor whenever the mouse actually moves. Cursor
  * visibility is otherwise toggled only at a handful of screen-settle points
  * (main menu / car-select / track-select) and is HIDDEN during every slide
@@ -4000,10 +4032,26 @@ static void frontend_poll_input(void) {
         }
         if (hit_button >= 0) {
             int i = hit_button;
+            /* [fix 2026-08-19] Is this the CONFIRMING click of a double-click?
+             * Checked BEFORE the arrow zone below, because the two regions
+             * overlap exactly: the arrow zone is the 20px left/right edge strip
+             * of the selected button, which is precisely the area OUTSIDE the
+             * green highlight box (drawn with insets inL=20/inR=22). So a player
+             * who clicked once to select and then clicked again anywhere but the
+             * green box had their second click consumed as an arrow-cycle and the
+             * menu never changed — the reported "click outside the green square
+             * and it won't trigger". The confirming click now wins everywhere
+             * inside the button. Repeated arrow cycling is unaffected: the arrow
+             * branch never arms s_dbl_last_button, so edge clicks on an already-
+             * selected button still cycle as before. */
+            int dbl_armed = (!frontend_mouse_single_click_on() &&
+                             i == s_dbl_last_button &&
+                             i == s_selected_button &&
+                             frontend_dblclick_window_open(now));
             /* Arrow-zone edge cycling applies only to the already-selected button
              * (click within 20px of its left/right edge). */
             int arrow_zone = 0;
-            if (i == s_selected_button) {
+            if (i == s_selected_button && !dbl_armed) {
                 if (s_mouse_x >= s_buttons[i].x + s_buttons[i].w - 0x14) {
                     arrow_zone = 1;   /* RIGHT */
                 } else if (s_mouse_x < s_buttons[i].x + 0x14) {
@@ -4032,9 +4080,10 @@ static void frontend_poll_input(void) {
             } else {
                 /* [fix 2026-06-15] DEFAULT: DOUBLE-CLICK to activate. A single click
                  * SELECTS (highlights) the button; a 2nd click on the SAME button
-                 * within the system double-click interval ACTIVATES it. */
-                uint32_t dwin = GetDoubleClickTime();
-                if (i == s_dbl_last_button && (uint32_t)(now - s_dbl_last_time) <= dwin) {
+                 * ACTIVATES it.
+                 * [fix 2026-08-19] The window is no longer the 500ms system
+                 * double-click interval — see frontend_dblclick_window_open(). */
+                if (dbl_armed) {
                     s_selected_button = i;
                     s_selection_from_mouse = 1;
                     s_button_index = i;
