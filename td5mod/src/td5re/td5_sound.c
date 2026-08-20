@@ -1824,32 +1824,45 @@ void td5_sound_update_audio_mix(void)
              * Horn playback for this vehicle
              * ---------------------------------------------------------- */
             if (s_horn_state[state_idx] != 0) {
+                /* Slots are 3 per vehicle (Drive, Rev, Horn); the horn's own
+                 * one-shot slot is base+2. [2026-08-20] Poll and modify THIS
+                 * slot -- the old code used horn_slot+1, which is the NEXT
+                 * vehicle's looping Drive.wav (or the Rain ambient loop for the
+                 * last car): it stranded the state at 2 (the neighbour loop is
+                 * always "playing" so it never reset to 0) and, once running,
+                 * scribbled the horn's volume/pan onto that neighbour engine
+                 * every frame instead of updating the horn itself. */
                 int horn_slot = veh * 3 + slot_offset + 2;
-                int horn_playing = slot_is_playing(horn_slot + 1);
+                int horn_playing = slot_is_playing(horn_slot);
 
                 if (horn_playing == 0 && s_horn_state[state_idx] != 1) {
                     /* Horn finished playing, reset state */
                     s_horn_state[state_idx] = 0;
                 } else {
-                    /* Compute spatial horn volume */
+                    /* Spatial horn volume: linear distance falloff, same
+                     * attenuation model as the engine/siren. [2026-08-20] The
+                     * old inline formula scaled by 0x1000 then clamped >=0x80 to
+                     * 0x7F, i.e. it pinned full volume until ~15872 units then
+                     * fell off a cliff -- effectively binary. */
                     float dx = ((float)s_active_listener_pos[0] - (float)actor->world_pos.x)
                                * TD5_SOUND_DISTANCE_SCALE;
                     float dz = ((float)s_active_listener_pos[2] - (float)actor->world_pos.z)
                                * TD5_SOUND_DISTANCE_SCALE;
                     float dist = sqrtf(dx * dx + dz * dz);
-                    int horn_vol = ((0x7F - ((int)roundf(dist) >> 7)) * 0x1000) / 0x7F;
-                    if (horn_vol < 0) horn_vol = 0;
-                    if (horn_vol >= 0x80) horn_vol = 0x7F;
+                    int horn_vol = sound_attenuate_volume(0x7F, dist);
 
-                if (s_horn_state[state_idx] == 1) {
-                        /* Start horn */
-                        if (!slot_is_playing(veh * 3 + 2 + slot_offset)) {
-                            slot_play(veh * 3 + 2 + slot_offset, 0,
-                                                horn_vol, veh_pan, TD5_SOUND_FREQ_22050);
+                    if (s_horn_state[state_idx] == 1) {
+                        /* Start horn (only if its own slot isn't already live) */
+                        if (!slot_is_playing(horn_slot)) {
+                            slot_play(horn_slot, 0, horn_vol, veh_pan,
+                                      TD5_SOUND_FREQ_22050);
+                            TD5_LOG_I(LOG_TAG,
+                                      "horn play: pass=%d veh=%d slot=%d vol=%d pan=%d dist=%.0f",
+                                      pass, veh, horn_slot, horn_vol, veh_pan, dist);
                         }
                     } else {
-                        slot_modify(horn_slot + 1, horn_vol,
-                                              veh_pan, TD5_SOUND_FREQ_22050);
+                        slot_modify(horn_slot, horn_vol, veh_pan,
+                                    TD5_SOUND_FREQ_22050);
                     }
                     s_horn_state[state_idx] = 2;
                 }
