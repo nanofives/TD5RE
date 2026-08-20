@@ -5671,8 +5671,10 @@ static int traffic_lane_hyst_cooldown(void) { /* ticks between committed changes
     if (lane_count > SMART_MAX_LANES) lane_count = SMART_MAX_LANES;
 
     /* [DRAG RACE 2026-06-30] Drag oncoming traffic never changes lanes — it holds
-     * the lane it spawned in (user rule). Clamp + return the spawn lane. */
-    if (td5_game_drag_mp_active()) {
+     * the lane it spawned in (user rule). Clamp + return the spawn lane.
+     * [SP DRAG TRAFFIC 2026-08-19] Any drag race, not just MP — SP drag now has a
+     * TRAFFIC option and must hold lanes the same way. */
+    if (g_td5.drag_race_enabled) {
         int b = base_sub_lane;
         if (b < 0) b = 0;
         if (b >= lane_count) b = lane_count - 1;
@@ -7044,12 +7046,70 @@ static void ai_update_single_racer(int slot) {
          * to 0x02 (finished) and the brake branch below takes over. */
         if (g_td5.drag_race_enabled) {
             ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)0xFF;
-            ACTOR_I32(actor, ACTOR_STEERING_CMD) = 0;
             ACTOR_U8(actor, ACTOR_BRAKE_FLAG) = 0;
+            /* [DRAG AI LANE-HOLD 2026-08-19] The zero-steer stub above was written
+             * when the drag field was always 2 cars sitting near the strip centre
+             * ("Drag strip is a single straight span"). That premise broke once the
+             * SP OPPONENTS row let the field widen to 8: the widener re-derives each
+             * span's centre (td5_track.c center_e/center_x), so the strip is not
+             * perfectly straight, lanes 0 and field-1 sit hard against the rails,
+             * and a dead-straight integration from the spawn lane walks the outer
+             * cars into a wall (the reported "AI hitting the walls").
+             *
+             * Minimal lateral controller: aim at the CENTRE OF THE LANE THE CAR IS
+             * CURRENTLY OVER, a few spans ahead, and steer proportionally. Using the
+             * current sub_lane rather than a latched spawn lane keeps this stateless
+             * (nothing to go stale across races) and is inherently self-correcting —
+             * it always pulls toward a valid lane centre, i.e. away from the rails.
+             *
+             * SIGN [derived, not guessed]: the script-release path builds
+             * `combined = ACTOR_STEERING_CMD + ACTOR_YAW_ACCUM` and compares
+             * combined>>8 against a heading (see aligned_finalize above), so
+             * STEERING_CMD is an additive heading offset in the SAME sense and units
+             * (angle<<8) as the yaw accumulator. A POSITIVE command therefore
+             * increases heading, so the command tracks the signed target-minus-
+             * heading deviation directly.
+             *
+             * Gain is deliberately well under unity (0x100 would fully cancel the
+             * deviation in one tick and ring); the clamp is a third of the engine's
+             * ±0x18000 steering limit so a bad geometry read can never slam the
+             * cascade. TD5RE_DRAG_AI_STEER=0 restores the old zero-steer stub. */
+            int32_t steer_cmd = 0;
+            if (td5_env_int("TD5RE_DRAG_AI_STEER", 1, 0, 1)) {
+                int lookahead = td5_env_int("TD5RE_DRAG_AI_LOOKAHEAD", 6, 1, 32);
+                int gain      = td5_env_int("TD5RE_DRAG_AI_STEER_GAIN", 0x60, 0, 0x200);
+                int clamp     = td5_env_int("TD5RE_DRAG_AI_STEER_CLAMP", 0x8000, 0, 0x18000);
+                int span      = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+                int span_cnt  = td5_track_get_span_count();
+                int aim_span  = span + lookahead;
+                int lane      = (int)ACTOR_I8(actor, ACTOR_SUB_LANE_INDEX);
+                int lane_cnt;
+                int tx = 0, ty = 0, tz = 0;
+                if (span_cnt > 0 && aim_span >= span_cnt) aim_span = span_cnt - 1;
+                lane_cnt = td5_track_span_lane_count_at(aim_span);
+                if (lane_cnt > 0) {
+                    if (lane < 0)         lane = 0;
+                    if (lane >= lane_cnt) lane = lane_cnt - 1;
+                    if (td5_track_get_span_lane_world(aim_span, lane, &tx, &ty, &tz)) {
+                        int32_t dx = tx - ACTOR_I32(actor, ACTOR_WORLD_POS_X);
+                        int32_t dz = tz - ACTOR_I32(actor, ACTOR_WORLD_POS_Z);
+                        if (dx || dz) {
+                            int32_t tgt  = ai_angle_from_vector(dx, dz) & 0xFFF;
+                            int32_t head = (ACTOR_I32(actor, ACTOR_YAW_ACCUM) >> 8) & 0xFFF;
+                            int32_t sdev = (int32_t)(((uint32_t)(tgt - head) + 0x800U) & 0xFFF) - 0x800;
+                            steer_cmd = sdev * gain;
+                            if (steer_cmd >  clamp) steer_cmd =  clamp;
+                            if (steer_cmd < -clamp) steer_cmd = -clamp;
+                        }
+                    }
+                }
+            }
+            ACTOR_I32(actor, ACTOR_STEERING_CMD) = steer_cmd;
             if ((g_td5.simulation_tick_counter % 60u) == 0u) {
                 TD5_LOG_I(LOG_TAG,
-                    "drag_ai_drive: slot=%d throttle=0xFF steer=0 brake=0",
-                    slot);
+                    "drag_ai_drive: slot=%d throttle=0xFF steer=%d brake=0 lane=%d span=%d",
+                    slot, (int)steer_cmd, (int)ACTOR_I8(actor, ACTOR_SUB_LANE_INDEX),
+                    (int)ACTOR_I16(actor, ACTOR_SPAN_RAW));
             }
             return;
         }

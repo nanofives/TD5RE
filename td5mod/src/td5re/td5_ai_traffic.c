@@ -2242,6 +2242,11 @@ static int trf_force_oncoming(void)
     if (td5_game_battle_mode_active()) return 1;
     /* [DRAG RACE 2026-06-30] Oncoming traffic when the drag TRAFFIC option is on. */
     if (td5_game_drag_mp_active() && g_td5.mp_mode_config.drag_traffic) return 1;
+    /* [SP DRAG TRAFFIC 2026-08-19] Same oncoming rule for single-player drag: the
+     * TRAFFIC row on RACE OPTIONS (g_td5.ini.traffic) or the DragTraffic INI key.
+     * Both are process config, so this stays lockstep-deterministic. */
+    if (g_td5.drag_race_enabled && !td5_game_drag_mp_active() &&
+        ((g_td5.ini.traffic > 0) || g_td5.ini.drag_traffic)) return 1;
     return 0;
 }
 
@@ -2316,8 +2321,10 @@ static int trf_dyn_lane_change_blocked(int slot, int lane_count, int cand_lane)
     int32_t *rs;
     if (!td5_ai_traffic_dynamic_active()) return 0;
     /* [DRAG RACE 2026-06-30] Drag traffic stays in its spawn lane — block every
-     * candidate lane change (covers the choose-lane + react-to-peer paths). */
-    if (td5_game_drag_mp_active()) return 1;
+     * candidate lane change (covers the choose-lane + react-to-peer paths).
+     * [SP DRAG TRAFFIC 2026-08-19] Any drag race, not just MP: SP drag now has a
+     * TRAFFIC option and must behave identically (lane-holding oncoming stream). */
+    if (g_td5.drag_race_enabled) return 1;
     if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return 0;
     rs = route_state(slot);
     if (!rs) return 0;
@@ -2576,6 +2583,18 @@ static int trf_dyn_cap(void)
         per = k_old[ov];
     } else {
         per = k_cap[v];
+    }
+    /* [DRAG TRAFFIC DENSITY 2026-08-19] The drag strip needs a much bigger on-road
+     * budget than any circuit. Census over a full drag run showed on_road pinned at
+     * exactly the cap (16) at EVERY player position, with 48 of the 64 pool slots
+     * permanently idle — so the spawn rate could never exceed the RETIRE rate. That
+     * is what "frequency lowers drastically after the opening" actually is: 16 cars
+     * arrive together at the start, then new ones only trickle in as old ones retire.
+     * Raising the ceiling is the direct lever, and the pool has the room.
+     * Drag only, so no other mode's pacing moves. TD5RE_DRAG_TRAFFIC_CAP overrides. */
+    if (g_td5.drag_race_enabled) {
+        int dc = td5_env_int("TD5RE_DRAG_TRAFFIC_CAP", 32, 2, TD5_MAX_TRAFFIC_SLOTS);
+        if (dc > per) per = dc;
     }
     if (per > TD5_MAX_TRAFFIC_SLOTS) per = TD5_MAX_TRAFFIC_SLOTS;
     /* [PER-PLAYER TRAFFIC CAP] scale the per-anchor budget by the number of
@@ -3498,9 +3517,34 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
          * TD5RE_TRAFFIC_SPAWN_DIST / window math are untouched — this only affects
          * the RETRY band when the nominal window has no room. */
         int a_win_hi = win_hi;
+        int a_win_lo = win_lo;
         if (attempt >= 2 && win_hi > win_lo)
             a_win_hi = win_hi + (attempt - 1) * (win_hi - win_lo);
-        int dist = win_lo + (int)(trf_dyn_rand() % (uint32_t)(a_win_hi - win_lo + 1));
+        /* [DRAG TRAFFIC DRY-UP 2026-08-19] On a POINT-TO-POINT track the road ends,
+         * so a window measured forward from the anchor eventually points past the
+         * last placeable span and EVERY candidate is thrown out by the
+         * `span >= limit - 8` guard below. Measured with per-reason rejection
+         * counters on a drag strip: 265 rejections, ALL of them that edge guard —
+         * startline/playerdist/cluster/lanecount/lanepick were all zero. The retry
+         * band above makes it worse by pushing the far edge further out on each
+         * attempt, so the retries that exist to FIND room are guaranteed to miss.
+         * Once the anchor is within win_lo of the end, traffic stops for good: the
+         * reported "dries up mid-race", and it got earlier when the window was
+         * widened to fix the too-close spawns (the two symptoms fight each other).
+         *
+         * Fix: clamp the roll to the road that actually exists, and if that leaves
+         * less than the nominal near edge, pull the NEAR edge down too rather than
+         * rejecting. Near the end of a strip a closer spawn is the only physically
+         * possible one, and it beats no traffic at all. Circuits are untouched —
+         * their span wrap already makes every candidate valid. */
+        if (!(is_circuit && ring > 0)) {
+            int max_dist = (limit - 9) - ps;   /* furthest placeable span ahead */
+            if (max_dist < 1) max_dist = 1;
+            if (a_win_hi > max_dist) a_win_hi = max_dist;
+            if (a_win_lo > a_win_hi)  a_win_lo = a_win_hi;
+            if (a_win_lo < 1)         a_win_lo = 1;
+        }
+        int dist = a_win_lo + (int)(trf_dyn_rand() % (uint32_t)(a_win_hi - a_win_lo + 1));
         int span = ps + dist;
         int main_span;
         int lane_count, lane, polarity;
@@ -3544,7 +3588,11 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
 
         /* The window must hold against EVERY local player, not just the one
          * we rolled (multiplayer: no spawning on top of another pane). */
-        if (trf_dyn_min_player_dist(span) < win_lo) continue;
+        /* [DRAG TRAFFIC DRY-UP 2026-08-19] Compare against the CLAMPED near edge,
+         * not the nominal win_lo: at the end of a point-to-point strip a_win_lo is
+         * pulled in to whatever road remains, and gating on the un-clamped win_lo
+         * here would reject exactly the closer placements that clamp just enabled. */
+        if (trf_dyn_min_player_dist(span) < a_win_lo) continue;
 
         /* [proximity gate] Don't clump: skip this span if its stretch of road
          * already holds enough traffic. `span` here is the main-ring candidate
@@ -3850,7 +3898,22 @@ void td5_ai_traffic_dynamic_tick(void)
              * and retire it once past the threshold, regardless of distance — this
              * is what frees battle slots so fresh traffic keeps coming. A car that
              * isn't a live wreck resets its age (fresh spawns start at 0). */
-            if (td5_game_battle_mode_active() && battle_wreck_despawn_enabled() &&
+            /* [DRAG TRAFFIC DRY-UP 2026-08-19] DRAG needs this arm for exactly the
+             * reason the note above gives for battle, and its absence is THE cause of
+             * the reported "traffic dries up after a fixed time, anywhere on the
+             * strip". Drag traffic is oncoming and gets destroyed constantly (a
+             * multi-car field meeting it head-on), and a broken-down car stays ACTIVE
+             * forever, so wrecks accumulate and permanently consume slots. Found with
+             * the traffic census below, which showed the pool pinned at the cap while
+             * the wreck count climbed monotonically:
+             *   tick=900  active=16 broken=5 cap=16
+             *   tick=1050 active=16 broken=6 cap=16
+             * ~1 new permanent wreck every 5 s, so the pool is dead after a roughly
+             * FIXED time independent of track position — which is precisely the
+             * symptom, and why a position-based theory never fit. No distance arm can
+             * save these: they sit wherever they died, usually near the player. */
+            if ((td5_game_battle_mode_active() || g_td5.drag_race_enabled) &&
+                battle_wreck_despawn_enabled() &&
                 g_actor_broken_down[slot]) {
                 if (s_trf_wreck_age[slot] < 0x7fff) s_trf_wreck_age[slot]++;
                 if (s_trf_wreck_age[slot] >= (int16_t)battle_wreck_despawn_ticks())
@@ -3939,8 +4002,24 @@ void td5_ai_traffic_dynamic_tick(void)
                  behind < -g_td5.ini.traffic_dyn_despawn) ||
                 /* [TRAFFIC BATTLE] Passed traffic despawns 50 spans behind the
                  * trailing-most player (fires even with the per-player cap on, whose
-                 * union-of-bubbles rear bound is otherwise ~115+ spans). */
-                (td5_game_battle_mode_active() &&
+                 * union-of-bubbles rear bound is otherwise ~115+ spans).
+                 * [DRAG TRAFFIC STARVATION 2026-08-19] DRAG needs this same arm, or
+                 * traffic spawns exactly one wave and then stops forever (reported in
+                 * SP and MP drag alike). Drag traffic is ONCOMING, so it sweeps past
+                 * the player within seconds and parks behind them at the strip head —
+                 * yet NO other despawn arm can retire it:
+                 *   - the legacy rear rule above is dead whenever the per-player cap
+                 *     is on, which td5_env_flag_on makes the DEFAULT;
+                 *   - `ahead > front_keep` can never fire, because oncoming cars move
+                 *     DOWN the span axis so `ahead` only grows more negative;
+                 *   - the two remaining arms need separation > front_keep, whose
+                 *     default floor is ~228 spans (trf_dyn_front_keep_floor) — more
+                 *     than a short/medium drag strip affords;
+                 *   - the circuit/ring-wrap paths are inert on a point-to-point strip.
+                 * So every slot stays ACTIVE, on_road pins at the cap, and the spawn
+                 * gate never reopens. `behind` is sp - trailing-player span, so a
+                 * passed oncoming car goes increasingly negative and this arm fires. */
+                ((td5_game_battle_mode_active() || g_td5.drag_race_enabled) &&
                  behind < -battle_despawn_behind()) ||
                 ahead  >  front_keep ||
                 far_from_all ||
@@ -4120,7 +4199,42 @@ void td5_ai_traffic_dynamic_tick(void)
             }
         }
     }
+
+    /* [DRAG TRAFFIC CENSUS 2026-08-19] Periodic traffic-pool census, so a dry-up
+     * reported from real play can be diagnosed from the log instead of guessed at.
+     * A tester saw drag traffic stop "after a fixed time, anywhere on the strip" --
+     * a TEMPORAL latch, which the automated harness never reproduced (it kept
+     * spawning for 100 s). This prints the pool composition against the sim tick, so
+     * the moment spawning stops it is visible WHY: slots consumed by stuck/broken
+     * cars, the cap collapsing, or attempts simply never being made. Default ON in
+     * dev (cheap: one line per 5 s); TD5RE_TRAFFIC_CENSUS=0 silences it.
+     * Counts are over the whole traffic slot range, not just this cluster. */
+    if (td5_env_flag_on("TD5RE_TRAFFIC_CENSUS") &&
+        (g_td5.simulation_tick_counter % 150u) == 0u) {
+        int n_inact = 0, n_fin = 0, n_act = 0, n_fout = 0, n_stuck = 0, n_broken = 0;
+        for (int i = g_traffic_slot_base;
+             i < g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS &&
+             i < TD5_MAX_TOTAL_ACTORS; i++) {
+            switch (s_trf_dyn_state[i]) {
+                case TRF_DYN_INACTIVE: n_inact++; break;
+                case TRF_DYN_FADE_IN:  n_fin++;   break;
+                case TRF_DYN_ACTIVE:   n_act++;   break;
+                case TRF_DYN_FADE_OUT: n_fout++;  break;
+                default: break;
+            }
+            if (s_traffic_stuck_frames[i] > 0)    n_stuck++;
+            if (g_actor_broken_down[i])           n_broken++;
+        }
+        TD5_LOG_I(LOG_TAG,
+                  "traffic_census: tick=%u inactive=%d fadein=%d active=%d fadeout=%d "
+                  "stuck=%d broken=%d cap=%d cooldown=%d lead_span=%d",
+                  (unsigned)g_td5.simulation_tick_counter,
+                  n_inact, n_fin, n_act, n_fout, n_stuck, n_broken,
+                  trf_dyn_cap(), s_trf_dyn_cooldown,
+                  ai_player_span_lead());
+    }
 }
+
 
 void td5_ai_update_traffic_route_plan(int slot) {
     int32_t *rs = route_state(slot);

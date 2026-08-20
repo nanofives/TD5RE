@@ -2516,11 +2516,26 @@ static void init_race_modes_and_seed(void)
              * quickly as oncoming cars blow past — "increase the volume of traffic". */
             g_td5.ini.traffic_dyn_period = 20;
             g_td5.traffic_volume         = 4;     /* full oncoming stream (engine max) */
-            /* [DRAG TRAFFIC 2026-06-30] Spawn CLOSER — the window is scaled by
-             * TD5RE_TRAFFIC_SPAWN_DIST (default 2x), so 8..18 -> ~16..36 spans ahead
-             * of the lead (was 25..50 -> 50..100, which popped in much too far out). */
-            g_td5.ini.traffic_dyn_spawn_min = 8;
-            g_td5.ini.traffic_dyn_spawn_max = 18;
+            /* [DRAG TRAFFIC SPAWN DISTANCE 2026-08-19] Spawn FAR AHEAD.
+             * The old 8..18 was written believing TD5RE_TRAFFIC_SPAWN_DIST (2x) made
+             * it "~16..36 spans ahead" — but that is only true up to HIGH. Drag forces
+             * volume 4 (Very-High), and trf_dyn_effective_spawn_window() pulls the
+             * NEAR edge back to the raw base at that tier ("if (v >= 4) elo =
+             * base_lo"), so the real window was 8..36: oncoming cars materialised
+             * ~8 spans in front of the player. With drag closing speeds (player and
+             * traffic approaching head-on) that is effectively on top of them —
+             * reported as "traffic spawns too close after the first wave", and it
+             * affected MP drag exactly as much as SP.
+             * 50..80 scales to 100..160. The far edge MUST stay inside front_keep
+             * (= traffic_dyn_despawn + eff_hi, floored at 228) or a freshly spawned
+             * car is outside the keep-zone on its first tick and is retired at once --
+             * spawn/despawn THRASH, which an 80..140 window produced (cars appearing
+             * up to 332 spans out against a ~252 keep-zone). At 100..160 the far edge
+             * is 160 against a 228 floor, a comfortable margin. At volume 4 the
+             * near edge lands at 50 — far enough that oncoming cars appear in the
+             * distance and close in, instead of popping into the player's face. */
+            g_td5.ini.traffic_dyn_spawn_min = 50;
+            g_td5.ini.traffic_dyn_spawn_max = 80;
             td5_physics_set_collisions(1);
         } else {
             g_td5.traffic_enabled        = 0;
@@ -2530,6 +2545,46 @@ static void init_race_modes_and_seed(void)
                   "extra_lanes=%d, field=%d lanes",
                   g_td5.mp_mode_config.drag_traffic ? "ONCOMING" : "off",
                   g_td5.mp_mode_config.drag_length, g_td5.mp_mode_config.drag_extra_lanes,
+                  td5_game_drag_field_size());
+    }
+
+    /* [SP DRAG TRAFFIC 2026-08-19] Single-player drag-race traffic. The MP block
+     * above turns mp_mode_config.drag_traffic into an oncoming stream; SP drag had
+     * NO traffic path at all (g_td5.ini.drag_traffic was written from the INI and
+     * read by nothing). The new TRAFFIC row on RACE OPTIONS feeds g_td5.ini.traffic,
+     * so mirror the MP setup here off whichever of the two is armed, using the same
+     * cadence/spawn window so the two drag modes look identical. Guarded on
+     * drag_race_enabled && !mp so it can never touch a normal SP race or MP drag. */
+    if (g_td5.drag_race_enabled && !td5_game_drag_mp_active()) {
+        int sp_drag_traffic = (g_td5.ini.traffic > 0) || g_td5.ini.drag_traffic;
+        if (sp_drag_traffic) {
+            /* [SP DRAG TRAFFIC DENSITY 2026-08-19] Force volume 4, exactly as the MP
+             * drag block above does. An earlier revision of this arm honoured the
+             * TRAFFIC row's LEVEL (LOW/MED/HIGH) instead, which looked like a nicety
+             * but was the cause of "much reduced frequency after the first wave":
+             * volume drives BOTH the on-road cap (trf_dyn_cap: level 2 -> 4 cars,
+             * level 4 -> 16) AND the spawn cadence (trf_dyn_spawn_period: level 2 ->
+             * x1.0, level 4 -> x0.3). A mid level therefore gave a quarter of the cars
+             * refilling at a third of the rate. The drag strip needs the relentless
+             * oncoming stream, so TRAFFIC behaves as OFF/ON here — matching MP drag,
+             * whose row is literally OFF/ON. Spawn window matches the MP block too,
+             * so the two drag modes cannot drift apart. */
+            g_td5.traffic_enabled           = 1;
+            g_td5.ini.traffic_dynamic       = 1;
+            g_td5.ini.traffic_dyn_period    = 20;   /* dense stream, as MP drag */
+            g_td5.traffic_volume            = 4;    /* engine max, as MP drag */
+            g_td5.ini.traffic_dyn_spawn_min = 50;
+            g_td5.ini.traffic_dyn_spawn_max = 80;
+            td5_physics_set_collisions(1);
+        } else {
+            g_td5.traffic_enabled     = 0;
+            g_td5.ini.traffic_dynamic = 0;
+        }
+        TD5_LOG_I(LOG_TAG, "InitRace: SP DRAG RACE — traffic=%s (ini.traffic=%d "
+                  "drag_traffic=%d), distance=%d, opponents=%d, field=%d lanes",
+                  sp_drag_traffic ? "ONCOMING" : "off",
+                  g_td5.ini.traffic, g_td5.ini.drag_traffic,
+                  g_td5.ini.drag_length, g_td5.num_ai_opponents,
                   td5_game_drag_field_size());
     }
 
@@ -2745,16 +2800,15 @@ static void init_race_slot_states(void)
      * active (P2) and slots 2..5 decoration.
      *
      * [PORT ENHANCEMENT — diverges from original]
-     * The port's CarSelection screen runs a 2-pass loop for game_type==9
-     * (drag race) so the user picks TWO cars. InitializeRaceSeriesSchedule
-     * @ td5_frontend.c:1628 then loads s_p2_car into slot[1].ext_id and
-     * line ~966 loads slot 1's mesh + sound bank. Keeping slot 1 at
-     * decoration_start=1 (faithful) leaves that fully-prepared slot inert
-     * at span=1 (parked at the strip start), which is the bug the user
-     * reports as "no car beside me, two stationary cars at the back."
-     * Force decoration_start=2 in drag mode regardless of split-screen so
-     * slot 1 stays state=0 (AI in SP) or state=1 (P2 in 2P split) — making
-     * the 2-pass CarSelect actually produce a 2-car race. */
+     * Keeping slot 1 at decoration_start=1 (faithful) leaves a fully-prepared
+     * slot inert at span=1 (parked at the strip start), which is the bug the user
+     * reported as "no car beside me, two stationary cars at the back." The port
+     * instead derives decoration_start from the LANE COUNT, so every lane gets a
+     * live car (slot 0 human, the rest AI in SP, P2 in 2P split).
+     * [SP DRAG OPPONENTS 2026-08-19] For SP that lane count follows the OPPONENTS
+     * row on RACE OPTIONS: field = 1 human + num_ai_opponents, so choosing the
+     * opponent count IS choosing the lane count. Note the generic racer-count
+     * block above explicitly EXCLUDES drag, so it does not also clamp the field. */
     if (g_td5.drag_race_enabled) {
         /* [DRAG DYNAMIC FIELD 2026-06-27] One active car per lane: the field
          * scales with humans+AI (td5_game_drag_field_size), and the track is
@@ -3307,14 +3361,18 @@ static void init_race_level_and_assets(void)
      * Reverse-direction flag (TRAFFIC.BUS entry flags bit 0) is applied in
      * td5_ai_init_traffic_actors / td5_ai_recycle_traffic_actor via +0x80000
      * heading offset [CONFIRMED @ 0x00435786, 0x00435C00]. */
-    /* [DRAG RACE TRAFFIC 2026-06-30] SP drag never has traffic, but the MP DRAG mode
-     * with its TRAFFIC option DOES (the AI dynamic spawner already seeds + collides
-     * the actors — they were just meshless/invisible because this loader excluded all
-     * drag). Allow the mesh load for MP drag; traffic_enabled is the master gate (only
-     * set when the drag TRAFFIC option is on), so SP drag still skips it. */
+    /* [DRAG RACE TRAFFIC 2026-06-30] The MP DRAG mode's TRAFFIC option needs these
+     * meshes (the AI dynamic spawner already seeds + collides the actors — they were
+     * just meshless/INVISIBLE because this loader excluded all drag).
+     * [SP DRAG TRAFFIC 2026-08-19] The drag term is now GONE entirely, not just
+     * widened to MP: SP drag has a TRAFFIC option too, and the old
+     * "(!drag || drag_mp_active())" form reproduced exactly the invisible-traffic
+     * bug for SP (actors spawned and collided, nothing rendered). g_td5.traffic_enabled
+     * is the master gate and is only set when some traffic option is actually on —
+     * including the SP drag arm in InitRace above — so no extra drag test is needed
+     * or wanted here. */
     if (g_td5.traffic_enabled
-        && !g_td5.time_trial_enabled
-        && (!g_td5.drag_race_enabled || td5_game_drag_mp_active())) {
+        && !g_td5.time_trial_enabled) {
         /* [POLICE rewrite 2026-06-19] Traffic now runs in net races, so load its
          * meshes here too (was gated !network_active when net had no traffic) —
          * otherwise net traffic/cops would be invisible.

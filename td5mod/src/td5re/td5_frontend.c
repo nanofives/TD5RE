@@ -5735,6 +5735,23 @@ static int frontend_get_button_anim_state(int *out_mode, int *out_tick, int *out
         if (s_inner_state == 0x0E) { mode = FE_BUTTON_ANIM_IN;  max_tick = 0x10; }
         else if (s_inner_state == 0x10) { mode = FE_BUTTON_ANIM_OUT; max_tick = 0x10; }
         break;
+    /* [SCREEN ENTRY ANIM 2026-08-19] RACE OPTIONS (44) and NET CREATE (10) were
+     * HALF-WIRED: their handlers call frontend_begin_timed_animation() at init and
+     * poll frontend_update_timed_animation(0x27, 650) in state 3, but neither
+     * screen was listed here or in frontend_screen_has_button_anim(), so
+     * frontend_get_button_anim_x() always returned base_x -> the buttons popped in
+     * fully formed while a dead 650 ms timer ran. Both set s_anim_complete = 1 when
+     * the slide finishes, so the offscreen_x branch in frontend_get_button_anim_x
+     * releases correctly (the RACE_RESULTS trap documented above does not apply).
+     *
+     * MP LOBBY (30) is DELIBERATELY still excluded — see the [R3-1 2026-06-19] note
+     * in frontend_render_mp_lobby_overlay(): that screen renders its roster/header
+     * and side-by-side START/BACK re-layout from frame 1 precisely BECAUSE its
+     * buttons do not slide. Adding it here would restore the two-stage-load snap. */
+    case TD5_SCREEN_RACE_OPTIONS:
+    case TD5_SCREEN_CREATE_SESSION:
+        if (s_inner_state == 3) { mode = FE_BUTTON_ANIM_IN; max_tick = 0x27; }
+        break;
     default:
         break;
     }
@@ -5766,6 +5783,11 @@ static int frontend_screen_has_button_anim(void) {
     case TD5_SCREEN_CAR_SELECTION:
     case TD5_SCREEN_TRACK_SELECTION:
     case TD5_SCREEN_CUP_TRACK_SELECT:   /* shares the track-select button anim */
+    /* [SCREEN ENTRY ANIM 2026-08-19] see the matching note in
+     * frontend_get_button_anim_state(): these two drove the timer but never
+     * animated. MP LOBBY (30) stays out on purpose. */
+    case TD5_SCREEN_RACE_OPTIONS:
+    case TD5_SCREEN_CREATE_SESSION:
     case TD5_SCREEN_HIGH_SCORE:
         /* TD5_SCREEN_RACE_RESULTS deliberately NOT listed: only its post-race
          * MENU buttons (states 0xE / 0x10) animate, while the click-catcher /
@@ -6600,15 +6622,27 @@ void td5_raceopts_value(int idx, char *out, size_t out_sz) {
     snprintf(out, out_sz, "%s", td5_tr(v));
 }
 
+/* [SP DRAG OPPONENTS 2026-08-19] Forward decl (defined beside s_ro_ctx): the
+ * OPPONENTS clamp below needs the mode ctx in BOTH dev and release, and the
+ * frontend_raceopts_ctx() accessor is dev-only (#ifndef TD5RE_RELEASE). */
+static int raceopts_ctx_is_sp_drag(void);
+
 void td5_raceopts_cycle(int idx, int delta) {
     if (delta == 0) return;
     switch (idx) {
-        case RO_OPPONENTS:
+        case RO_OPPONENTS: {
+            /* [SP DRAG OPPONENTS 2026-08-19] On the drag strip the opponent count
+             * IS the lane count (field = 1 human + opponents), so it is bounded by
+             * the drag lane ceiling of 8 -> at most 7 rivals, and at least 1 (a
+             * drag race with nobody to race is meaningless). Other modes keep the
+             * full 0..MAX-1 range. */
+            int lo = 0, hi = TD5_MAX_RACER_SLOTS - 1;
+            if (raceopts_ctx_is_sp_drag()) { lo = 1; hi = 7; }
             s_num_ai_opponents += delta;
-            if (s_num_ai_opponents < 0) s_num_ai_opponents = 0;
-            if (s_num_ai_opponents > TD5_MAX_RACER_SLOTS - 1)
-                s_num_ai_opponents = TD5_MAX_RACER_SLOTS - 1;
+            if (s_num_ai_opponents < lo) s_num_ai_opponents = lo;
+            if (s_num_ai_opponents > hi) s_num_ai_opponents = hi;
             break;
+        }
         case RO_TRAFFIC:
             s_game_option_traffic =
                 ((s_game_option_traffic + delta) % TD5_TRAFFIC_VOLUME_COUNT
@@ -6719,6 +6753,11 @@ static TD5_RaceOptsCtx s_ro_ctx;
  * -Wunused-function in stripped builds. */
 static const TD5_RaceOptsCtx *frontend_raceopts_ctx(void) { return &s_ro_ctx; }
 #endif
+/* [SP DRAG OPPONENTS 2026-08-19] Is the live RACE OPTIONS ctx a SINGLE-PLAYER drag
+ * setup? Used by the OPPONENTS cycle clamp, which needs this in BOTH dev and
+ * release — hence a dedicated always-compiled helper rather than reusing the
+ * dev-only frontend_raceopts_ctx() accessor above. */
+static int raceopts_ctx_is_sp_drag(void) { return s_ro_ctx.is_drag && !s_ro_ctx.is_mp; }
 static int s_ro_rows[RO_OPT_COUNT];   /* filtered available RO_* ids, display order */
 static int s_ro_total     = 0;        /* count across all pages */
 static int s_ro_page      = 0;
@@ -6759,11 +6798,23 @@ int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
     /* Traffic Battle is an MP sub-mode; cop chase covers SP (game_type 8) and MP. */
     int tb = c->is_mp && c->mp_mode == TD5_MP_MODE_TRAFFIC_BATTLE;
     switch (ro) {
-    case RO_OPPONENTS:   /* no AI-count control in drag, cup (cup sets it), TB, or
-                          * time trial (a solo run against the clock) */
-        return !(c->is_drag || c->is_cup || tb || c->is_time_trial);
-    case RO_TRAFFIC:     /* drag has its own traffic switch */
-        return !c->is_drag;
+    case RO_OPPONENTS:   /* no AI-count control in cup (cup sets it), TB, or time
+                          * trial (a solo run against the clock).
+                          * [SP DRAG OPPONENTS 2026-08-19] SP drag DOES get the row:
+                          * the opponent count also defines the LANE count, since
+                          * td5_game_drag_field_size() sizes the SP field (and the
+                          * road widener) as 1 human + num_ai_opponents. MP drag
+                          * stays excluded — it has no AI at all (its field is the
+                          * human count + its own EXTRA LANES row on screen 36). */
+        return !((c->is_drag && c->is_mp) || c->is_cup || tb || c->is_time_trial);
+    case RO_TRAFFIC:     /* [SP DRAG TRAFFIC 2026-08-19] MP drag owns its traffic
+                          * switch on the MP mode-config screen (36), so it stays
+                          * hidden there — but SP drag had NO traffic control
+                          * anywhere. Show it for SP drag: the value feeds
+                          * g_td5.ini.traffic, which the SP drag InitRace block
+                          * (td5_game.c) turns into the same oncoming stream MP drag
+                          * gets from mp_mode_config.drag_traffic. */
+        return !(c->is_drag && c->is_mp);
     case RO_POLICE:      /* player IS the pursuit in cop chase; none in drag */
         return !(c->is_cop_chase || c->is_drag);
     case RO_DIFFICULTY:  /* AI difficulty: opponent-gated except drag's own 1v1 rule */
