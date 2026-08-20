@@ -3505,9 +3505,34 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
          * TD5RE_TRAFFIC_SPAWN_DIST / window math are untouched — this only affects
          * the RETRY band when the nominal window has no room. */
         int a_win_hi = win_hi;
+        int a_win_lo = win_lo;
         if (attempt >= 2 && win_hi > win_lo)
             a_win_hi = win_hi + (attempt - 1) * (win_hi - win_lo);
-        int dist = win_lo + (int)(trf_dyn_rand() % (uint32_t)(a_win_hi - win_lo + 1));
+        /* [DRAG TRAFFIC DRY-UP 2026-08-19] On a POINT-TO-POINT track the road ends,
+         * so a window measured forward from the anchor eventually points past the
+         * last placeable span and EVERY candidate is thrown out by the
+         * `span >= limit - 8` guard below. Measured with per-reason rejection
+         * counters on a drag strip: 265 rejections, ALL of them that edge guard —
+         * startline/playerdist/cluster/lanecount/lanepick were all zero. The retry
+         * band above makes it worse by pushing the far edge further out on each
+         * attempt, so the retries that exist to FIND room are guaranteed to miss.
+         * Once the anchor is within win_lo of the end, traffic stops for good: the
+         * reported "dries up mid-race", and it got earlier when the window was
+         * widened to fix the too-close spawns (the two symptoms fight each other).
+         *
+         * Fix: clamp the roll to the road that actually exists, and if that leaves
+         * less than the nominal near edge, pull the NEAR edge down too rather than
+         * rejecting. Near the end of a strip a closer spawn is the only physically
+         * possible one, and it beats no traffic at all. Circuits are untouched —
+         * their span wrap already makes every candidate valid. */
+        if (!(is_circuit && ring > 0)) {
+            int max_dist = (limit - 9) - ps;   /* furthest placeable span ahead */
+            if (max_dist < 1) max_dist = 1;
+            if (a_win_hi > max_dist) a_win_hi = max_dist;
+            if (a_win_lo > a_win_hi)  a_win_lo = a_win_hi;
+            if (a_win_lo < 1)         a_win_lo = 1;
+        }
+        int dist = a_win_lo + (int)(trf_dyn_rand() % (uint32_t)(a_win_hi - a_win_lo + 1));
         int span = ps + dist;
         int main_span;
         int lane_count, lane, polarity;
@@ -3551,7 +3576,11 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
 
         /* The window must hold against EVERY local player, not just the one
          * we rolled (multiplayer: no spawning on top of another pane). */
-        if (trf_dyn_min_player_dist(span) < win_lo) continue;
+        /* [DRAG TRAFFIC DRY-UP 2026-08-19] Compare against the CLAMPED near edge,
+         * not the nominal win_lo: at the end of a point-to-point strip a_win_lo is
+         * pulled in to whatever road remains, and gating on the un-clamped win_lo
+         * here would reject exactly the closer placements that clamp just enabled. */
+        if (trf_dyn_min_player_dist(span) < a_win_lo) continue;
 
         /* [proximity gate] Don't clump: skip this span if its stretch of road
          * already holds enough traffic. `span` here is the main-ring candidate
