@@ -33,6 +33,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 19" },
+    { CL_ITEM,    "CONTROL OPTIONS rows now use the same spacing as the" },
+    { CL_ITEM,    "  other options screens (they were spaced twice as far" },
+    { CL_ITEM,    "  apart as everywhere else)." },
+    { CL_ITEM,    "The PLAYER selector on CONTROL OPTIONS only reaches" },
+    { CL_ITEM,    "  players that have a controller connected, so you can no" },
+    { CL_ITEM,    "  longer configure a player with nothing plugged in." },
     { CL_ITEM,    "DRIVER AI carries more speed through twisty + hilly tracks" },
     { CL_ITEM,    "  (Blue Ridge, Tokyo, Kyoto) - it was braking/coasting too" },
     { CL_ITEM,    "  much there. Faster now, still clean; open tracks" },
