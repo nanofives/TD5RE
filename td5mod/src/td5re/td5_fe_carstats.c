@@ -432,15 +432,26 @@ static float frontend_carphys_frac(int ext_id, int stat) {
  * Each built-in, non-cop car with a valid carparam has a combined score = mean of
  * its normalized TOP-SPEED and ACCEL fractions (both roster-normalised + cop-
  * excluded by frontend_carphys_frac). Cars are sorted by that score and assigned to
- * classes by RANK so every class is guaranteed to hold SEVERAL DISTINCT cars:
+ * classes by RANK.
+ *
+ * DEFAULT [2026-08-20]: a full three-way PARTITION into thirds — slowest n/3 =
+ * SLOW, middle third = AVG, fastest third = FAST. EVERY scored car gets exactly
+ * one class. This replaced the narrow-window default, which classified only 3*K
+ * cars and left the rest at tier -1 (measured: 68 scored cars, K=10 -> 38 cars
+ * with no class at all, so the MP class-deal fell through to its
+ * nearest-to-centre fallback for most of the roster). Thirds still satisfy the
+ * 2026-06-29 invariant below for any n >= 27, and cannot collapse a class to a
+ * single car the way a fixed percentage band could.
+ *
+ * LEGACY windows are kept, reachable by setting TD5RE_HOST_TIER_CARS explicitly:
  *   - the single slowest and single fastest car are dropped (the extremes),
  *   - SLOW = the next K slowest, FAST = the next K fastest, AVG = K around the
  *     median. The three windows never overlap, so each car is in at most ONE class
- *     and no car is ever shared between classes.
- * K = TD5RE_HOST_TIER_CARS, default max(9, ~15% of the scored roster), clamped so
- * the three windows + the two dropped extremes all fit. [user 2026-06-29: a fixed
- * ~10% band collapsed 'fast' to a single car (Pitbull 2); each class must hold AT
- * LEAST 9 distinct cars and no car may sit in more than one class.] Cached once. */
+ *     and no car is ever shared between classes. Cars between windows stay -1.
+ * K = TD5RE_HOST_TIER_CARS, clamped so the three windows + the two dropped
+ * extremes all fit. [user 2026-06-29: a fixed ~10% band collapsed 'fast' to a
+ * single car (Pitbull 2); each class must hold AT LEAST 9 distinct cars and no
+ * car may sit in more than one class.] Cached once. */
 static int   s_speed_built = 0;
 static float s_speed_min   = 0.0f, s_speed_max = 1.0f;   /* combined-score range */
 static int   s_car_tier[TD5_CAR_COUNT];                  /* per-car class: -1/0/1/2 */
@@ -490,19 +501,41 @@ static void frontend_build_speed_tiers(void) {
     s_speed_min = (n > 0) ? sc[0]     : 0.0f;
     s_speed_max = (n > 0) ? sc[n - 1] : 1.0f;
     if (n >= 5) {
-        int k    = frontend_host_tier_cars(n);
-        int kmax = (n - 2) / 3;                  /* room for 3 windows + 2 dropped extremes */
-        int slo, shi, alo, ahi, flo, fhi;
-        if (kmax < 1) kmax = 1;
-        if (k > kmax) k = kmax;
-        slo = 1;             shi = 1 + k;                  /* SLOW: next-slowest K (rank 0 dropped)    */
-        alo = (n - k) / 2;   ahi = (n - k) / 2 + k;        /* AVG : K around the median                */
-        flo = n - 1 - k;     fhi = n - 1;                  /* FAST: next-fastest K (rank n-1 dropped)   */
-        for (j = slo; j < shi; j++) s_car_tier[ids[j]] = 0;
-        for (j = alo; j < ahi; j++) s_car_tier[ids[j]] = 1;
-        for (j = flo; j < fhi; j++) s_car_tier[ids[j]] = 2;
-        TD5_LOG_I(LOG_TAG, "host car speed tiers: %d cars, %d/class, slow[%d,%d) avg[%d,%d) fast[%d,%d)",
-                  n, k, slo, shi, alo, ahi, flo, fhi);
+        const char *kenv = getenv("TD5RE_HOST_TIER_CARS");
+        if (kenv && kenv[0]) {
+            /* LEGACY narrow windows — only when the count knob is set explicitly.
+             * Three K-sized rank windows with the two extremes dropped; leaves the
+             * cars between the windows unclassified (tier -1). */
+            int k    = frontend_host_tier_cars(n);
+            int kmax = (n - 2) / 3;              /* room for 3 windows + 2 dropped extremes */
+            int slo, shi, alo, ahi, flo, fhi;
+            if (kmax < 1) kmax = 1;
+            if (k > kmax) k = kmax;
+            slo = 1;             shi = 1 + k;              /* SLOW: next-slowest K (rank 0 dropped)   */
+            alo = (n - k) / 2;   ahi = (n - k) / 2 + k;    /* AVG : K around the median               */
+            flo = n - 1 - k;     fhi = n - 1;              /* FAST: next-fastest K (rank n-1 dropped) */
+            for (j = slo; j < shi; j++) s_car_tier[ids[j]] = 0;
+            for (j = alo; j < ahi; j++) s_car_tier[ids[j]] = 1;
+            for (j = flo; j < fhi; j++) s_car_tier[ids[j]] = 2;
+            TD5_LOG_I(LOG_TAG, "host car speed tiers (legacy windows): %d cars, %d/class, "
+                      "slow[%d,%d) avg[%d,%d) fast[%d,%d)",
+                      n, k, slo, shi, alo, ahi, flo, fhi);
+        } else {
+            /* DEFAULT: full three-way PARTITION by rank — every scored car gets a
+             * class, none is shared. Fixes the old default leaving ~56% of the
+             * roster at tier -1 (68 cars, K=10 -> only 30 classified), which made
+             * the MP class-deal fall through to its nearest-to-centre path for most
+             * of the roster. Thirds also keep the 2026-06-29 invariant (each class
+             * holds >= 9 cars for any n >= 27) without the gaps. */
+            int b1 = n / 3;
+            int b2 = (2 * n) / 3;
+            for (j = 0;  j < b1; j++) s_car_tier[ids[j]] = 0;   /* SLOW */
+            for (j = b1; j < b2; j++) s_car_tier[ids[j]] = 1;   /* AVG  */
+            for (j = b2; j < n;  j++) s_car_tier[ids[j]] = 2;   /* FAST */
+            TD5_LOG_I(LOG_TAG, "host car speed tiers (partition): %d cars, "
+                      "slow[0,%d) avg[%d,%d) fast[%d,%d)",
+                      n, b1, b1, b2, b2, n);
+        }
     } else {
         TD5_LOG_W(LOG_TAG, "host car speed tiers: only %d scored cars - classes disabled", n);
     }

@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 20" },
+    { CL_ITEM,    "Every car is now rated SLOW, NORMAL or FAST - previously" },
+    { CL_ITEM,    "  over half the roster had no speed class at all, so" },
+    { CL_ITEM,    "  multiplayer class picks kept reusing the same few cars." },
     { CL_ITEM,    "Cop Chase over the network now activates ALL players, not" },
     { CL_ITEM,    "  just two - a 3+ player online cop chase was silently" },
     { CL_ITEM,    "  disabling the extra cars." },
