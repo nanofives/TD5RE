@@ -352,3 +352,12 @@ running the game/dev harness, semgrep, edits/writes, git mutations.
 
 ## Happy info pane
 Keep `.happy/project-info.json` (the Happy right-sidebar Project Info pane) current: whenever a standing, glance-worthy fact for this folder changes (status, counts, key dates/names), proactively overwrite that JSON and bump `updatedAt`. Shape: `{ title, updatedAt, sections:[{ heading, fields:[{ label, value, kind }] }] }`, kind = text|number|date|list.
+
+## Voice and tone (writing as Mariano)
+
+Before drafting ANY text that goes out under Mariano's name (emails, Teams messages, DMs, slide copy,
+CV/portfolio prose, replies, nudges, status reports), read [VOICE.md](C:\Users\maria\Desktop\Proyectos\VOICE.md).
+
+Non-negotiables from that file: no em-dashes, no semicolons, no emoji, no ellipsis, no intensifiers
+(`very`/`really`/`significantly`), never invent a metric. Fact before ask, verdict first, emphasis by
+number not adjective. Match his language (ES/EN) rather than switching it.
