@@ -1524,25 +1524,33 @@ void Screen_OptionsHub(void) {
  * row. Screen table slot [13] is NULL; set_screen redirects stale jumps to the
  * OPTIONS hub. */
 
-/* Recompute the player range from the live device count ("hot-swap") and re-seed
- * each player's source from the persisted device index, dropping any index that
- * now points at an unplugged device. */
+/* Recompute the player range from the live CONNECTED-device count ("hot-swap")
+ * and re-seed each player's source from the persisted device index, dropping any
+ * index that now points at an unplugged device. */
 static void ctrl_opts_refresh_devices(void)
 {
     int dev_count = td5_input_enumerate_devices();
-    int joys, n, p;
+    int connected, d, n, p;
     if (dev_count < 1) dev_count = 1;
-    joys = dev_count - 1;            /* device 0 = keyboard */
-    if (joys < 0) joys = 0;
-    /* The PLAYER selector lets you configure ANY of the up-to-9 split-screen
-     * players, independent of how many joysticks are plugged in. The keyboard is
-     * shareable and the per-player device is picked on the CONTROLLER SELECTION
-     * row, so capping the player count at the joystick count was wrong — with N
-     * pads you could only reach PLAYER N, blocking setups like "keyboard + pads"
-     * or more players than pads. (The race's human count is still chosen on the
-     * Quick Race / Multiplayer Options screens; this only governs which player
-     * you are configuring here.) */
-    n = TD5_MAX_HUMAN_PLAYERS;
+    /* [CONNECTED-ONLY 2026-08-19] The PLAYER selector only reaches players that
+     * can actually own an input device, so you can't configure a PLAYER 5 that
+     * has nothing plugged in.
+     *
+     * The cap is the CONNECTED DEVICE count, not the joystick count. An earlier
+     * fix removed a cap at `joys` because with N pads you could only reach
+     * PLAYER N, which broke "keyboard + pads" setups. Counting the keyboard as
+     * the device it is fixes that: 1 keyboard (player 1 only) + one exclusive
+     * pad each => N pads reach PLAYER N+1. Unplugged-but-still-enumerated pads
+     * are excluded via td5_plat_input_device_is_lost (1-based enum index, same
+     * predicate the MP lobby panes use).
+     *
+     * s_num_human_players is kept as a FLOOR: a player already in the race
+     * stays configurable even if their pad dropped out, so a mid-session unplug
+     * can't strand them behind an unreachable selector. */
+    connected = 1;                       /* device 0 = keyboard, always present */
+    for (d = 1; d < dev_count; d++)
+        if (!td5_plat_input_device_is_lost(d)) connected++;
+    n = connected;
     if (n < s_num_human_players) n = s_num_human_players;
     if (n < 1) n = 1;
     if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
@@ -1555,8 +1563,9 @@ static void ctrl_opts_refresh_devices(void)
         if (idx < 0 || idx >= dev_count) idx = 0;   /* unplugged → keyboard */
         td5_input_set_input_source(p, idx);
     }
-    TD5_LOG_I(LOG_TAG, "ControlOptions: devices=%d joys=%d range=1..%d player=%d",
-              dev_count, joys, s_ctrl_opts_max_players, s_ctrl_opts_player + 1);
+    TD5_LOG_I(LOG_TAG, "ControlOptions: devices=%d connected=%d humans=%d range=1..%d player=%d",
+              dev_count, connected, s_num_human_players,
+              s_ctrl_opts_max_players, s_ctrl_opts_player + 1);
 }
 
 /* Cycle the selected player's input device by delta. Keyboard (0) is always
@@ -1606,9 +1615,13 @@ void Screen_ControlOptions(void) {
          * dispatch, values by the overlay. PLAYER(0) + CONTROLLER SELECTION(1)
          * cycle on ◄►; CONFIGURE(2) + OK(3) are plain buttons. */
         frontend_reset_buttons();
+        /* [SPACING 2026-08-19] Rows were on an 80px pitch, double every other
+         * options screen. Use the standard base y=97 / step 40 (OPTIONS hub,
+         * GRAPHICS OPTIONS, SOUND OPTIONS, RACE MENU) so this screen matches;
+         * OK stays on the shared y=377 footer row. */
         frontend_create_button(SNK_PlayerSelectButTxt,     120,  97, 0x100, 0x20);  /* 0 */
-        frontend_create_button(SNK_ControllerSelectButTxt, 120, 177, 0x100, 0x20);  /* 1 */
-        frontend_create_button(SNK_ConfigureButTxt,        120, 257, 0x100, 0x20);  /* 2 */
+        frontend_create_button(SNK_ControllerSelectButTxt, 120, 137, 0x100, 0x20);  /* 1 */
+        frontend_create_button(SNK_ConfigureButTxt,        120, 177, 0x100, 0x20);  /* 2 */
         frontend_create_button(SNK_OkButTxt,               200, 377, 0x60,  0x20);  /* 3 */
         s_anim_complete = 0;
         frontend_begin_timed_animation();

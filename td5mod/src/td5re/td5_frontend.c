@@ -7784,7 +7784,10 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
 static void frontend_render_control_options_overlay(float sx, float sy) {
     /* [PORT ENHANCEMENT 2026-06] Single-player-selector layout:
      *   row 0 (y=97)  PLAYER value (the selected 1-based player)
-     *   row 1 (y=177) CONTROLLER SELECTION: device-type icon + device name. */
+     *   row 1 (y=137) CONTROLLER SELECTION: device-type icon + device name.
+     * [SPACING 2026-08-19] Row 1 moved 177 -> 137 with the screen's switch to the
+     * standard step-40 row pitch; keep these in sync with the button rects in
+     * Screen_ControlOptions (td5_fe_menu.c). */
     char buf[40];
     int player, type, source;
 
@@ -7811,7 +7814,7 @@ static void frontend_render_control_options_overlay(float sx, float sy) {
             float v_row = 32.0f / (float)s_surfaces[slot].height;
             float v0 = (float)type * v_row, v1 = v0 + v_row;
             td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
-            fe_draw_quad(394.0f * sx, 177.0f * sy, 64.0f * sx, 32.0f * sy,
+            fe_draw_quad(394.0f * sx, 137.0f * sy, 64.0f * sx, 32.0f * sy,
                          0xFFFFFFFF, s_surfaces[slot].tex_page, 0.0f, v0, 1.0f, v1);
             td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
         }
@@ -7830,7 +7833,7 @@ static void frontend_render_control_options_overlay(float sx, float sy) {
         float step = 14.0f, first_y;
         if (!dname || !dname[0]) dname = "<NONE>";
         nl = fe_wrap_text_lines(dname, maxw, sx * ts, sy * ts, lines, 6);
-        first_y = 185.0f - (float)(nl - 1) * step * 0.5f;   /* centre on icon (y 177..209) */
+        first_y = 145.0f - (float)(nl - 1) * step * 0.5f;   /* centre on icon (y 137..169) */
         for (li = 0; li < nl; li++)
             fe_draw_text(nx, (first_y + (float)li * step) * sy, lines[li],
                          0xFFFFFFFF, sx * ts, sy * ts);
