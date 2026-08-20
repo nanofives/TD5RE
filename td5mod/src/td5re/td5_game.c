@@ -7880,7 +7880,13 @@ static void frame_audio_tick(void)
      * chasing traffic cop (gated by the POLICE option), distance-attenuated to
      * the local camera. Cosmetic / post-sim — no netplay effect. Silenced while
      * the pause menu is up (the sim is frozen — no siren on pause). */
-    if (s_pause_menu_active)
+    /* [COP-CHASE SIREN COUNTDOWN GATE 2026-08-19] Silent through the pre-race
+     * countdown too, for the same reason as the cop-chase horn siren in
+     * td5_sound_update_vehicle_looping_state(): the strobe-light phase only
+     * advances on non-paused sim ticks, so a siren heard on the grid has no
+     * lights to go with it. td5_ai_tick() DOES run during the countdown, so a
+     * cop can already be in COP_CHASING before the green light. */
+    if (s_pause_menu_active || td5_game_is_countdown_active())
         td5_sound_stop_tracked_vehicle_audio();
     else
         td5_sound_update_police_siren();
