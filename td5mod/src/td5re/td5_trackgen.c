@@ -1014,6 +1014,84 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     return ok && !out->oom;
 }
 
+/* ==========================================================================
+ * TEXTURES.DAT -- texture pages for the road mesh
+ *
+ * Texture pages are PER-LEVEL, so a generated track must ship its own. The
+ * loose textures/tex_NNN.png path is gated on g_active_td6_level > 0
+ * (td5_asset.c:2864) and custom-track slots force that to 0, so it is not
+ * available here -- hence the binary container, written directly like every
+ * other level entry.
+ *
+ * Container (td5_asset.c:3064-3075):
+ *   u32 page_count
+ *   u32 page_offset[page_count]        -- absolute from file start
+ *   per page: u8 pad[3], u8 type, i32 palette_count,
+ *             u8 palette[count*3] (BGR), u8 indices[4096]   (64x64, 8-bit)
+ * type: 0 opaque, 1 alpha-keyed, 2 semi-transparent, 3 additive.
+ * ========================================================================== */
+#define TD5_TG_TEX_DIM     64
+#define TD5_TG_TEX_TEXELS  (TD5_TG_TEX_DIM * TD5_TG_TEX_DIM)
+#define TD5_TG_PAL_COUNT   16
+
+/* Page 0: asphalt with a lane line down one edge of the tile. The road mesh's
+ * UVs run u = 0..lanes and tile, so a tile edge lands exactly on every lane
+ * boundary -- a stripe at u=0 therefore draws lane dividers AND both road
+ * edges for free, with no extra geometry. */
+static void tg_emit_texture_page_asphalt(TG_Buf *out)
+{
+    unsigned int rng = 0x1234567u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);  /* pad[3] */
+    tg_put_u8(out, 0);                                        /* type: opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* Palette is BGR. 0..11 asphalt greys, 12..15 near-white for the marking. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v = (i < 12) ? (44 + i * 3) : (196 + (i - 12) * 12);
+        tg_put_u8(out, (unsigned)v);   /* B */
+        tg_put_u8(out, (unsigned)v);   /* G */
+        tg_put_u8(out, (unsigned)v);   /* R */
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        int x = i % TD5_TG_TEX_DIM;
+        int y = i / TD5_TG_TEX_DIM;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if (x <= 1) {
+            /* Lane marking, dashed down-track so it reads as road paint. */
+            idx = ((y % 24) < 16) ? (12 + (int)((rng >> 16) % 4)) : 6;
+        } else {
+            idx = (int)((rng >> 16) % 12);   /* asphalt grain */
+        }
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
+static int tg_emit_textures(TG_Buf *out)
+{
+    TG_Buf page;
+    const unsigned int count = 1;
+
+    memset(&page, 0, sizeof(page));
+    tg_emit_texture_page_asphalt(&page);
+    if (page.oom) { tg_buf_free(&page); return 0; }
+
+    tg_put_u32(out, count);
+    tg_put_u32(out, 4 + 4 * count);         /* page 0 follows the table */
+    if (tg_buf_need(out, page.len)) {
+        memcpy(out->b + out->len, page.b, page.len);
+        out->len += page.len;
+    }
+    tg_buf_free(&page);
+
+    TD5_LOG_I(LOG_TAG, "trackgen: textures = %u page(s), %zu bytes",
+              count, out->len);
+    return !out->oom;
+}
+
 /* ---------------------------------------------------------- config ------- */
 void td5_trackgen_default_spec(TD5_TrackGenSpec *spec)
 {
@@ -1124,16 +1202,25 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         char models_path[320];
         snprintf(models_path, sizeof(models_path), "%s/MODELS.DAT", dir);
         if (td5_env_flag_off("TD5RE_AUTOTRACK_SCENERY")) {
-            TG_Buf models;
+            TG_Buf models, tex;
             memset(&models, 0, sizeof(models));
+            memset(&tex, 0, sizeof(tex));
             if (tg_emit_models(&nl, nspans, spec->lanes, &models))
                 tg_write_file(dir, "MODELS.DAT", models.b, models.len);
             else
                 TD5_LOG_W(LOG_TAG, "trackgen: models emit failed; "
                           "falling back to the ribbon renderer");
+            /* Texture pages are only referenced by the mesh, so they follow
+             * the same gate -- without MODELS.DAT nothing samples them. */
+            if (tg_emit_textures(&tex))
+                tg_write_file(dir, "TEXTURES.DAT", tex.b, tex.len);
             tg_buf_free(&models);
+            tg_buf_free(&tex);
         } else {
+            char tex_path[320];
+            snprintf(tex_path, sizeof(tex_path), "%s/TEXTURES.DAT", dir);
             remove(models_path);
+            remove(tex_path);
         }
     }
 
