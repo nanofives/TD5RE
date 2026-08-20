@@ -32,6 +32,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 20" },
+    { CL_ITEM,    "Car horn now fades smoothly with distance and no longer" },
+    { CL_ITEM,    "  detunes a nearby car's engine when honked." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 19" },
     { CL_ITEM,    "Menu double-click is reliable: no time limit between the" },
     { CL_ITEM,    "  two clicks, and the second click counts anywhere on the" },
