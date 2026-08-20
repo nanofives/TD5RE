@@ -275,8 +275,15 @@ void frontend_init_race_schedule(void) {
          * Single/Quick Race (game_type 0) honour the snapshotted opponent count
          * (restored into s_num_ai_opponents above); cups (game_type != 0) keep
          * the legacy fill and override the count downstream. */
+        /* [SP DRAG OPPONENTS 2026-08-19] RACE_OPTIONS is added because SP drag has
+         * no track-select: raceopts_ok() calls frontend_init_race_schedule()
+         * directly while screen 44 is current, so without this the drag field fell
+         * through to the legacy fill (TD5_LEGACY_RACE_SLOTS - humans = 5) and the
+         * OPPONENTS row the user just set was silently discarded. Scoped to drag so
+         * no other pre-launch RACE OPTIONS path changes behaviour. */
         if (s_current_screen == TD5_SCREEN_QUICK_RACE ||
             s_current_screen == TD5_SCREEN_TRACK_SELECTION ||
+            (s_current_screen == TD5_SCREEN_RACE_OPTIONS && s_selected_game_type == 9) ||
             (s_current_screen == TD5_SCREEN_RACE_RESULTS && s_selected_game_type == 0))
             ai = s_num_ai_opponents;
         else

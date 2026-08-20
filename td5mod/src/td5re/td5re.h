@@ -366,11 +366,6 @@ typedef struct TD5_GlobalState {
          * drag_traffic: 0=off, 1=oncoming traffic. */
         int  drag_length;
         int  drag_traffic;
-        /* [SP DRAG LANES 2026-08-19] SP drag field size (2..8), set by the LANES
-         * row on RACE OPTIONS and read by td5_game_drag_field_size() in the SP
-         * branch. Absolute (not "extra") because SP drag has exactly one human.
-         * MP drag ignores this — it uses mp_mode_config.drag_extra_lanes. */
-        int  drag_lanes;
         /* RearImpactResponse (port-only playability knob, S08 2026-06-04):
          * percentage of the original car-vs-car ANGULAR response (yaw spin +
          * heavy-impact scatter/lift) to retain when a HUMAN player is struck on

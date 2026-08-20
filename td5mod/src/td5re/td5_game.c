@@ -2560,10 +2560,10 @@ static void init_race_modes_and_seed(void)
             g_td5.ini.traffic_dynamic = 0;
         }
         TD5_LOG_I(LOG_TAG, "InitRace: SP DRAG RACE — traffic=%s (ini.traffic=%d "
-                  "drag_traffic=%d), distance=%d, lanes=%d, field=%d",
+                  "drag_traffic=%d), distance=%d, opponents=%d, field=%d lanes",
                   sp_drag_traffic ? "ONCOMING" : "off",
                   g_td5.ini.traffic, g_td5.ini.drag_traffic,
-                  g_td5.ini.drag_length, g_td5.ini.drag_lanes,
+                  g_td5.ini.drag_length, g_td5.num_ai_opponents,
                   td5_game_drag_field_size());
     }
 
@@ -2784,10 +2784,10 @@ static void init_race_slot_states(void)
      * reported as "no car beside me, two stationary cars at the back." The port
      * instead derives decoration_start from the LANE COUNT, so every lane gets a
      * live car (slot 0 human, the rest AI in SP, P2 in 2P split).
-     * [SP DRAG LANES 2026-08-19] For SP that lane count is now the LANES row on
-     * RACE OPTIONS (g_td5.ini.drag_lanes), not a fixed 2 — and note the generic
-     * racer-count block above explicitly EXCLUDES drag, so num_ai_opponents does
-     * not cap the drag field. */
+     * [SP DRAG OPPONENTS 2026-08-19] For SP that lane count follows the OPPONENTS
+     * row on RACE OPTIONS: field = 1 human + num_ai_opponents, so choosing the
+     * opponent count IS choosing the lane count. Note the generic racer-count
+     * block above explicitly EXCLUDES drag, so it does not also clamp the field. */
     if (g_td5.drag_race_enabled) {
         /* [DRAG DYNAMIC FIELD 2026-06-27] One active car per lane: the field
          * scales with humans+AI (td5_game_drag_field_size), and the track is
@@ -3340,14 +3340,18 @@ static void init_race_level_and_assets(void)
      * Reverse-direction flag (TRAFFIC.BUS entry flags bit 0) is applied in
      * td5_ai_init_traffic_actors / td5_ai_recycle_traffic_actor via +0x80000
      * heading offset [CONFIRMED @ 0x00435786, 0x00435C00]. */
-    /* [DRAG RACE TRAFFIC 2026-06-30] SP drag never has traffic, but the MP DRAG mode
-     * with its TRAFFIC option DOES (the AI dynamic spawner already seeds + collides
-     * the actors — they were just meshless/invisible because this loader excluded all
-     * drag). Allow the mesh load for MP drag; traffic_enabled is the master gate (only
-     * set when the drag TRAFFIC option is on), so SP drag still skips it. */
+    /* [DRAG RACE TRAFFIC 2026-06-30] The MP DRAG mode's TRAFFIC option needs these
+     * meshes (the AI dynamic spawner already seeds + collides the actors — they were
+     * just meshless/INVISIBLE because this loader excluded all drag).
+     * [SP DRAG TRAFFIC 2026-08-19] The drag term is now GONE entirely, not just
+     * widened to MP: SP drag has a TRAFFIC option too, and the old
+     * "(!drag || drag_mp_active())" form reproduced exactly the invisible-traffic
+     * bug for SP (actors spawned and collided, nothing rendered). g_td5.traffic_enabled
+     * is the master gate and is only set when some traffic option is actually on —
+     * including the SP drag arm in InitRace above — so no extra drag test is needed
+     * or wanted here. */
     if (g_td5.traffic_enabled
-        && !g_td5.time_trial_enabled
-        && (!g_td5.drag_race_enabled || td5_game_drag_mp_active())) {
+        && !g_td5.time_trial_enabled) {
         /* [POLICE rewrite 2026-06-19] Traffic now runs in net races, so load its
          * meshes here too (was gated !network_active when net had no traffic) —
          * otherwise net traffic/cops would be invisible.
@@ -9609,12 +9613,6 @@ int td5_game_drag_field_size(void)
                  ? g_td5.num_human_players + g_td5.num_ai_opponents
                  : g_td5.num_human_players)
             + g_td5.mp_mode_config.drag_extra_lanes;
-    /* [SP DRAG LANES 2026-08-19] SP drag: the LANES row on RACE OPTIONS is
-     * authoritative. It replaced the old implicit
-     * num_human_players + num_ai_opponents sum, which the SP drag menu had no way
-     * to control (RO_OPPONENTS is hidden for drag) — so the field was always 2. */
-    else if (g_td5.ini.drag_lanes >= 2 && g_td5.ini.drag_lanes <= 8)
-        n = g_td5.ini.drag_lanes;
     else
         n = g_td5.num_human_players + g_td5.num_ai_opponents;
 

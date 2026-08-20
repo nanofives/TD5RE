@@ -6478,7 +6478,6 @@ const char *td5_raceopts_label(int idx) {
         case RO_DIFFICULTY:  return SNK_DifficultyButTxt;
         case RO_AI_MODEL:    return TR("AI MODEL");        /* [AI DRIVER MODEL 2026-08-17] CLASSIC/SMART/DRIVER */
         case RO_DISTANCE:    return TR("DISTANCE");        /* [SP DRAG DISTANCE 2026-07-23] drag length preset */
-        case RO_DRAG_LANES:  return TR("LANES");           /* [SP DRAG LANES 2026-08-19] SP drag field size */
         case RO_CATCHUP:     return SNK_CatchupTxt;        /* [CATCHUP 2026-07-21] MP AI rubber-band */
         case RO_DYNAMICS:    return SNK_DynamicsButTxt;
         case RO_CHECKPOINTS: return SNK_CheckpointTimersButTxt;
@@ -6571,9 +6570,6 @@ void td5_raceopts_value(int idx, char *out, size_t out_sz) {
         case RO_DISTANCE:
             t = g_td5.ini.drag_length; if (t < 0) t = 0; if (t > 3) t = 3;
             v = draglen_lv[t]; break;
-        case RO_DRAG_LANES:  /* [SP DRAG LANES 2026-08-19] absolute field size 2..8 */
-            t = g_td5.ini.drag_lanes; if (t < 2) t = 2; if (t > 8) t = 8;
-            snprintf(out, out_sz, "%d", t); return;
         case RO_TRAFFIC:
             t = s_game_option_traffic;
             if (t < 0) t = 0;
@@ -6626,15 +6622,27 @@ void td5_raceopts_value(int idx, char *out, size_t out_sz) {
     snprintf(out, out_sz, "%s", td5_tr(v));
 }
 
+/* [SP DRAG OPPONENTS 2026-08-19] Forward decl (defined beside s_ro_ctx): the
+ * OPPONENTS clamp below needs the mode ctx in BOTH dev and release, and the
+ * frontend_raceopts_ctx() accessor is dev-only (#ifndef TD5RE_RELEASE). */
+static int raceopts_ctx_is_sp_drag(void);
+
 void td5_raceopts_cycle(int idx, int delta) {
     if (delta == 0) return;
     switch (idx) {
-        case RO_OPPONENTS:
+        case RO_OPPONENTS: {
+            /* [SP DRAG OPPONENTS 2026-08-19] On the drag strip the opponent count
+             * IS the lane count (field = 1 human + opponents), so it is bounded by
+             * the drag lane ceiling of 8 -> at most 7 rivals, and at least 1 (a
+             * drag race with nobody to race is meaningless). Other modes keep the
+             * full 0..MAX-1 range. */
+            int lo = 0, hi = TD5_MAX_RACER_SLOTS - 1;
+            if (raceopts_ctx_is_sp_drag()) { lo = 1; hi = 7; }
             s_num_ai_opponents += delta;
-            if (s_num_ai_opponents < 0) s_num_ai_opponents = 0;
-            if (s_num_ai_opponents > TD5_MAX_RACER_SLOTS - 1)
-                s_num_ai_opponents = TD5_MAX_RACER_SLOTS - 1;
+            if (s_num_ai_opponents < lo) s_num_ai_opponents = lo;
+            if (s_num_ai_opponents > hi) s_num_ai_opponents = hi;
             break;
+        }
         case RO_TRAFFIC:
             s_game_option_traffic =
                 ((s_game_option_traffic + delta) % TD5_TRAFFIC_VOLUME_COUNT
@@ -6653,15 +6661,6 @@ void td5_raceopts_cycle(int idx, int delta) {
             if (g_td5.ini.drag_length > 3) g_td5.ini.drag_length = 0;
             TD5_LOG_I(LOG_TAG, "raceopts: DISTANCE -> %d (0=SHORT 1=MEDIUM 2=LONG 3=EPIC)",
                       g_td5.ini.drag_length);
-            break;
-        case RO_DRAG_LANES:  /* [SP DRAG LANES 2026-08-19] wraps 2..8; the ceiling
-                              * matches td5_game_drag_field_size()'s int8 sub_lane /
-                              * int16 vertex headroom clamp. */
-            g_td5.ini.drag_lanes += delta;
-            if (g_td5.ini.drag_lanes < 2) g_td5.ini.drag_lanes = 8;
-            if (g_td5.ini.drag_lanes > 8) g_td5.ini.drag_lanes = 2;
-            TD5_LOG_I(LOG_TAG, "raceopts: LANES -> %d (SP drag field size)",
-                      g_td5.ini.drag_lanes);
             break;
         case RO_CATCHUP: {   /* [CATCHUP 2026-07-21] MP AI rubber-band on/off */
             int cur = td5_save_get_catchup_assist();
@@ -6754,6 +6753,11 @@ static TD5_RaceOptsCtx s_ro_ctx;
  * -Wunused-function in stripped builds. */
 static const TD5_RaceOptsCtx *frontend_raceopts_ctx(void) { return &s_ro_ctx; }
 #endif
+/* [SP DRAG OPPONENTS 2026-08-19] Is the live RACE OPTIONS ctx a SINGLE-PLAYER drag
+ * setup? Used by the OPPONENTS cycle clamp, which needs this in BOTH dev and
+ * release — hence a dedicated always-compiled helper rather than reusing the
+ * dev-only frontend_raceopts_ctx() accessor above. */
+static int raceopts_ctx_is_sp_drag(void) { return s_ro_ctx.is_drag && !s_ro_ctx.is_mp; }
 static int s_ro_rows[RO_OPT_COUNT];   /* filtered available RO_* ids, display order */
 static int s_ro_total     = 0;        /* count across all pages */
 static int s_ro_page      = 0;
@@ -6794,9 +6798,15 @@ int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
     /* Traffic Battle is an MP sub-mode; cop chase covers SP (game_type 8) and MP. */
     int tb = c->is_mp && c->mp_mode == TD5_MP_MODE_TRAFFIC_BATTLE;
     switch (ro) {
-    case RO_OPPONENTS:   /* no AI-count control in drag, cup (cup sets it), TB, or
-                          * time trial (a solo run against the clock) */
-        return !(c->is_drag || c->is_cup || tb || c->is_time_trial);
+    case RO_OPPONENTS:   /* no AI-count control in cup (cup sets it), TB, or time
+                          * trial (a solo run against the clock).
+                          * [SP DRAG OPPONENTS 2026-08-19] SP drag DOES get the row:
+                          * the opponent count also defines the LANE count, since
+                          * td5_game_drag_field_size() sizes the SP field (and the
+                          * road widener) as 1 human + num_ai_opponents. MP drag
+                          * stays excluded — it has no AI at all (its field is the
+                          * human count + its own EXTRA LANES row on screen 36). */
+        return !((c->is_drag && c->is_mp) || c->is_cup || tb || c->is_time_trial);
     case RO_TRAFFIC:     /* [SP DRAG TRAFFIC 2026-08-19] MP drag owns its traffic
                           * switch on the MP mode-config screen (36), so it stays
                           * hidden there — but SP drag had NO traffic control
@@ -6816,10 +6826,6 @@ int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
     case RO_DISTANCE:    /* [SP DRAG DISTANCE 2026-07-23] drag length preset. SP
                           * reads g_td5.ini.drag_length; MP drag has its own
                           * DISTANCE row on the MP config screen, so SP-drag only. */
-        return c->is_drag && !c->is_mp;
-    case RO_DRAG_LANES:  /* [SP DRAG LANES 2026-08-19] SP-drag-only field size. MP
-                          * drag sizes its field from the human count + its own
-                          * EXTRA LANES row on the MP config screen. */
         return c->is_drag && !c->is_mp;
     case RO_CATCHUP:     /* [CATCHUP 2026-07-21] MP-only AI rubber-band assist */
         return c->is_mp;

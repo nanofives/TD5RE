@@ -2321,8 +2321,10 @@ static int trf_dyn_lane_change_blocked(int slot, int lane_count, int cand_lane)
     int32_t *rs;
     if (!td5_ai_traffic_dynamic_active()) return 0;
     /* [DRAG RACE 2026-06-30] Drag traffic stays in its spawn lane — block every
-     * candidate lane change (covers the choose-lane + react-to-peer paths). */
-    if (td5_game_drag_mp_active()) return 1;
+     * candidate lane change (covers the choose-lane + react-to-peer paths).
+     * [SP DRAG TRAFFIC 2026-08-19] Any drag race, not just MP: SP drag now has a
+     * TRAFFIC option and must behave identically (lane-holding oncoming stream). */
+    if (g_td5.drag_race_enabled) return 1;
     if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return 0;
     rs = route_state(slot);
     if (!rs) return 0;

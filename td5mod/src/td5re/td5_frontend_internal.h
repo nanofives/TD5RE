@@ -615,12 +615,6 @@ enum {
      * LONG/EPIC), matching the MP drag DISTANCE option. Edits g_td5.ini.drag_length
      * (read by drag_length_level() for SP); MP reads mp_mode_config.drag_length. */
     RO_DISTANCE,
-    /* [SP DRAG LANES 2026-08-19] Drag-only LANES count (2..8) — the SP counterpart
-     * of the MP drag EXTRA LANES option, expressed as an absolute field size
-     * because SP drag has exactly one human. Edits g_td5.ini.drag_lanes, read by
-     * td5_game_drag_field_size() (which also drives the road widener and the
-     * per-lane racer fill, so lanes and cars can never disagree). SP drag only. */
-    RO_DRAG_LANES,
     /* [CATCHUP 2026-07-21] AI rubber-band assist — MP-only, moved here from the
      * Multiplayer Options screen so it lives with the other per-race MP options. */
     RO_CATCHUP,

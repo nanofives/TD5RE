@@ -6829,6 +6829,16 @@ static void raceopts_build_ctx(TD5_RaceOptsCtx *ctx) {
     int is_mp  = any_mp || s_mp_flow;
     int mode   = g_td5.mp_mode_config.mode;
     memset(ctx, 0, sizeof *ctx);
+    /* [SP DRAG OPPONENTS 2026-08-19] On the SP drag strip the opponent count is
+     * also the lane count, so sanitize it into the drag-legal [1,7] band BEFORE
+     * the row model snapshots it. Without this, a 0 carried over from a previous
+     * race would ask for a 1-car field -- td5_game_drag_field_size() floors that
+     * to 2 lanes while the schedule assigns no AI car to slot 1, reproducing the
+     * old "fully-prepared but inert car parked at the strip start" bug. */
+    if (!(is_mp || s_mp_flow) && s_selected_game_type == 9) {
+        if (s_num_ai_opponents < 1) s_num_ai_opponents = 1;
+        if (s_num_ai_opponents > 7) s_num_ai_opponents = 7;
+    }
     ctx->game_type     = s_selected_game_type;
     ctx->opponents     = s_num_ai_opponents;
     ctx->is_mp         = is_mp ? 1 : 0;
