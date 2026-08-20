@@ -39,6 +39,11 @@ static int          s_env_dark_slot[TD5_ACTOR_MAX_TOTAL_SLOTS];
  * white patch on the road BEHIND the car (at the chase camera). 0 = uncalibrated. */
 static float        s_hl_fwd_sign_slot[TD5_ACTOR_MAX_TOTAL_SLOTS];
 
+/* [GFXOPT] Car-emitted lighting master — see td5_light.h. Separate from
+ * s_enabled (which is the whole dynamic-light system, street lamps included) so
+ * a user can shed the per-car light cost while keeping lamps/tunnels lit. */
+static int          s_car_lights    = 1;
+
 void td5_light_set_enabled(int on)      { s_enabled = on ? 1 : 0; }
 int  td5_light_enabled(void)            { return s_enabled; }
 void td5_light_set_headlights(int on)   { s_headlights = on ? 1 : 0; }
@@ -58,6 +63,10 @@ void td5_light_set_env_dark_for_slot(int slot, int dark)
 static int td5_light_headlights_active_for_slot(int slot)
 {
     if (!s_enabled) return 0;
+    /* [GFXOPT] CAR LIGHTS = OFF strips every car-emitted light, whatever the
+     * auto/manual verdict below would have said. Checked here (not at the
+     * emit_vehicle_headlights entry) so it is the single per-slot authority. */
+    if (!s_car_lights) return 0;
     if (!s_auto) return s_headlights;
     if (slot < 0 || slot >= TD5_ACTOR_MAX_TOTAL_SLOTS) return s_env_dark;
     return s_env_dark_slot[slot];
@@ -319,6 +328,16 @@ void td5_light_lamps_reset(void)          { s_lamp_count = 0; s_tlamp_drop_resol
 int  td5_light_lamps_count(void)          { return s_lamp_count; }
 void td5_light_set_street_lights(int on)  { s_street_lights = on ? 1 : 0; }
 int  td5_light_street_lights(void)        { return s_street_lights; }
+
+void td5_light_set_car_lights(int on)
+{
+    int want = on ? 1 : 0;
+    if (want != s_car_lights) {
+        s_car_lights = want;
+        TD5_LOG_I(LOG_TAG, "car lights %s", want ? "ON" : "OFF");
+    }
+}
+int  td5_light_car_lights(void)           { return s_car_lights; }
 
 void td5_light_lamps_add(float x, float y, float z)
 {

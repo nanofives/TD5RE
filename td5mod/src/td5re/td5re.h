@@ -306,6 +306,17 @@ typedef struct TD5_GlobalState {
         int  reflections;       /* [LIGHT2 P3] 1 = SSR (car paint/glass/wet roads, default) */
         int  wet_roads;         /* [LIGHT2 P3] 1 = rain makes roads reflective (default) */
         int  street_lights;     /* [LIGHT2] 1 = lamp fixtures emit real light when dark (default) */
+        /* [GFXOPT] Quality-stripping toggles surfaced in LIGHTING OPTIONS. Both
+         * are live at LOW *and* HIGH (unlike the rt_* tiers, which are HIGH-only)
+         * so a low-end machine can shed cost without dropping the whole tier. */
+        int  car_lights;        /* 1 = cars emit real headlight light (default);
+                                 * 0 = no car-emitted lights at all (headlight
+                                 * spots never enter the dynamic light registry).
+                                 * Brake-light billboards are unaffected. */
+        int  legacy_shadows;    /* 0 = terrain-conforming raycast blob (default);
+                                 * 1 = original flat textured quad (cheaper).
+                                 * Seeds TD5RE_SHADOW_RAYCAST; the env knob, when
+                                 * explicitly set, still overrides this. */
         int  lighting_quality;  /* [RT] LIGHTING QUALITY: 0 = LOW (screen-space stack),
                                  * 1 = HIGH (ray-traced shadows/lights/reflections when a
                                  * DXR device is present; auto-falls-back to LOW otherwise).

@@ -214,14 +214,37 @@ typedef struct {
 static ShadowGrid s_shadow_grid[TD5_MAX_TOTAL_ACTORS];
 static int        s_shadow_white_uploaded = 0;
 
-/* A/B toggle (cached once): TD5RE_SHADOW_RAYCAST=0 -> legacy textured quad. */
+/* Which car shadow to draw: the terrain-conforming raycast mesh (default) or the
+ * original flat textured quad.
+ *
+ * [GFXOPT] This is now user-facing as LIGHTING OPTIONS -> "LEGACY SHADOWS"
+ * ([Lighting]LegacyShadows), so the INI is read LIVE (not cached) and the row
+ * applies without a restart. The pre-existing TD5RE_SHADOW_RAYCAST dev knob
+ * still wins whenever it is explicitly set, so A/B scripts are unaffected --
+ * same env-over-INI layering as td5_rt.c's TD5RE_RT over lighting_quality.
+ * Only the getenv result is cached; the INI field is a plain load. */
 static int shadow_raycast_enabled(void)
 {
-    static int cached = -1;
-    if (cached < 0) {
-        cached = td5_env_flag_on("TD5RE_SHADOW_RAYCAST");
+    static int env_override = -2;   /* -2 = not probed, -1 = env unset */
+    if (env_override == -2) {
+        env_override = td5_env_int_opt("TD5RE_SHADOW_RAYCAST", 0, 1, -1);
+        if (env_override >= 0)
+            TD5_LOG_I(LOG_TAG, "shadow path forced by TD5RE_SHADOW_RAYCAST=%d "
+                               "(ignoring [Lighting]LegacyShadows)", env_override);
     }
-    return cached;
+    if (env_override >= 0) return env_override;
+
+    int raycast = g_td5.ini.legacy_shadows ? 0 : 1;
+    /* Log only on TRANSITION: this runs per actor per frame, and the value can
+     * now change mid-session from the menu row. */
+    static int s_last = -1;
+    if (raycast != s_last) {
+        s_last = raycast;
+        TD5_LOG_I(LOG_TAG, "car shadow path: %s ([Lighting]LegacyShadows=%d)",
+                  raycast ? "conforming raycast blob" : "legacy flat quad",
+                  g_td5.ini.legacy_shadows);
+    }
+    return raycast;
 }
 
 /* [task#4] Shadow anti-flicker (cached once): TD5RE_SHADOW_ANTIFLICKER=0 -> off.
