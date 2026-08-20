@@ -8325,7 +8325,9 @@ void td5_hud_update_wanted_damage_indicator(int actor_slot)
     /* Gate matches orig 0x0043d4f5:
      *   if (wanted_mode_enabled != 0 && slot == g_wantedDamageHudOverlayCount) */
     if (!g_td5.wanted_mode_enabled) return;
-    if ((unsigned)actor_slot >= (unsigned)TD5_MAX_RACER_SLOTS) return;
+    /* [TRAFFIC GATE DRIFT 2026-08-20] Racer slots only (g_traffic_slot_base),
+     * not the stale TD5_MAX_RACER_SLOTS — see td5_game_cop_chase_is_suspect. */
+    if (actor_slot < 0 || actor_slot >= g_traffic_slot_base) return;
 
     /* [COP CHASE ARROW-ON-HIT 2026-06-27] Only show the indicator for a short
      * window after a crash into THIS suspect. g_wanted_hit_tick[slot] is stamped

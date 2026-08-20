@@ -11314,7 +11314,13 @@ int td5_game_mp_cop_chase_field(void) {
 int td5_game_cop_chase_is_cop(int slot) {
     int primary = td5_game_cop_chase_cop_slot();
     if (primary < 0) return 0;                       /* no active cop chase */
-    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    /* [TRAFFIC GATE DRIFT 2026-08-20] Bound by the RUNTIME racer/traffic
+     * boundary, not TD5_MAX_RACER_SLOTS. Same drift class as the traffic-wheel
+     * gate fix in td5_render_mesh.c: that constant was 6 when these gates were
+     * written, but the N-way work bumped it to 16 while g_traffic_slot_base
+     * stays 6 for a legacy <=6-racer field — so traffic slots 6..15 aliased
+     * into every racer-sized array and passed as cop-chase racers. */
+    if (slot < 0 || slot >= g_traffic_slot_base) return 0;
     /* [INFECT 2026-06-25] A converted (arrested-then-infected) suspect is a cop in
      * EVERY cop-chase variant, regardless of the AI-cop / human-cop branch below. */
     if ((s_infected_mask >> slot) & 1u) return 1;
@@ -11331,7 +11337,14 @@ int td5_game_cop_chase_is_cop(int slot) {
 /* True when `slot` is a racer SUSPECT (a non-cop racer) in a cop chase. */
 int td5_game_cop_chase_is_suspect(int slot) {
     if (td5_game_cop_chase_cop_slot() < 0) return 0;  /* no active cop chase */
-    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    /* [TRAFFIC GATE DRIFT 2026-08-20] ROOT CAUSE of "ramming traffic shows the
+     * chase indicator": this returns !is_cop(slot), so with the stale
+     * TD5_MAX_RACER_SLOTS (16) bound every TRAFFIC actor in slots 6..15 read as
+     * a SUSPECT. The V2V hook (td5_physics_collision.c) passes raw actor
+     * slot_index values, so ramming a civilian car ran the whole wanted chain:
+     * hit-tick stamp -> chase arrow + WANTED banner, damage-bar drain, and even
+     * arrest points. Traffic must never be a cop-chase racer. */
+    if (slot < 0 || slot >= g_traffic_slot_base) return 0;
     return !td5_game_cop_chase_is_cop(slot);          /* every non-cop racer */
 }
 
