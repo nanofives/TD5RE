@@ -2516,11 +2516,26 @@ static void init_race_modes_and_seed(void)
              * quickly as oncoming cars blow past — "increase the volume of traffic". */
             g_td5.ini.traffic_dyn_period = 20;
             g_td5.traffic_volume         = 4;     /* full oncoming stream (engine max) */
-            /* [DRAG TRAFFIC 2026-06-30] Spawn CLOSER — the window is scaled by
-             * TD5RE_TRAFFIC_SPAWN_DIST (default 2x), so 8..18 -> ~16..36 spans ahead
-             * of the lead (was 25..50 -> 50..100, which popped in much too far out). */
-            g_td5.ini.traffic_dyn_spawn_min = 8;
-            g_td5.ini.traffic_dyn_spawn_max = 18;
+            /* [DRAG TRAFFIC SPAWN DISTANCE 2026-08-19] Spawn FAR AHEAD.
+             * The old 8..18 was written believing TD5RE_TRAFFIC_SPAWN_DIST (2x) made
+             * it "~16..36 spans ahead" — but that is only true up to HIGH. Drag forces
+             * volume 4 (Very-High), and trf_dyn_effective_spawn_window() pulls the
+             * NEAR edge back to the raw base at that tier ("if (v >= 4) elo =
+             * base_lo"), so the real window was 8..36: oncoming cars materialised
+             * ~8 spans in front of the player. With drag closing speeds (player and
+             * traffic approaching head-on) that is effectively on top of them —
+             * reported as "traffic spawns too close after the first wave", and it
+             * affected MP drag exactly as much as SP.
+             * 50..80 scales to 100..160. The far edge MUST stay inside front_keep
+             * (= traffic_dyn_despawn + eff_hi, floored at 228) or a freshly spawned
+             * car is outside the keep-zone on its first tick and is retired at once --
+             * spawn/despawn THRASH, which an 80..140 window produced (cars appearing
+             * up to 332 spans out against a ~252 keep-zone). At 100..160 the far edge
+             * is 160 against a 228 floor, a comfortable margin. At volume 4 the
+             * near edge lands at 50 — far enough that oncoming cars appear in the
+             * distance and close in, instead of popping into the player's face. */
+            g_td5.ini.traffic_dyn_spawn_min = 50;
+            g_td5.ini.traffic_dyn_spawn_max = 80;
             td5_physics_set_collisions(1);
         } else {
             g_td5.traffic_enabled        = 0;
@@ -2543,17 +2558,23 @@ static void init_race_modes_and_seed(void)
     if (g_td5.drag_race_enabled && !td5_game_drag_mp_active()) {
         int sp_drag_traffic = (g_td5.ini.traffic > 0) || g_td5.ini.drag_traffic;
         if (sp_drag_traffic) {
-            /* Honour the VOLUME the TRAFFIC row picked (it is a level, not a
-             * toggle) so LOW/MED/HIGH still differ; the DragTraffic INI key has no
-             * level of its own, so it maps to the engine max like MP drag does. */
-            int vol = (g_td5.ini.traffic > 0) ? g_td5.ini.traffic : 4;
-            if (vol > TD5_TRAFFIC_VOLUME_COUNT - 1) vol = TD5_TRAFFIC_VOLUME_COUNT - 1;
+            /* [SP DRAG TRAFFIC DENSITY 2026-08-19] Force volume 4, exactly as the MP
+             * drag block above does. An earlier revision of this arm honoured the
+             * TRAFFIC row's LEVEL (LOW/MED/HIGH) instead, which looked like a nicety
+             * but was the cause of "much reduced frequency after the first wave":
+             * volume drives BOTH the on-road cap (trf_dyn_cap: level 2 -> 4 cars,
+             * level 4 -> 16) AND the spawn cadence (trf_dyn_spawn_period: level 2 ->
+             * x1.0, level 4 -> x0.3). A mid level therefore gave a quarter of the cars
+             * refilling at a third of the rate. The drag strip needs the relentless
+             * oncoming stream, so TRAFFIC behaves as OFF/ON here — matching MP drag,
+             * whose row is literally OFF/ON. Spawn window matches the MP block too,
+             * so the two drag modes cannot drift apart. */
             g_td5.traffic_enabled           = 1;
             g_td5.ini.traffic_dynamic       = 1;
             g_td5.ini.traffic_dyn_period    = 20;   /* dense stream, as MP drag */
-            g_td5.traffic_volume            = vol;
-            g_td5.ini.traffic_dyn_spawn_min = 8;
-            g_td5.ini.traffic_dyn_spawn_max = 18;
+            g_td5.traffic_volume            = 4;    /* engine max, as MP drag */
+            g_td5.ini.traffic_dyn_spawn_min = 50;
+            g_td5.ini.traffic_dyn_spawn_max = 80;
             td5_physics_set_collisions(1);
         } else {
             g_td5.traffic_enabled     = 0;
