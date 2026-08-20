@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 20" },
+    { CL_ITEM,    "PITBULL is no longer absurdly quicker than every other" },
+    { CL_ITEM,    "  car - it was carrying the weight value meant for" },
+    { CL_ITEM,    "  traffic vehicles. Still the fastest, by a fair margin." },
     { CL_ITEM,    "Every car is now rated SLOW, NORMAL or FAST - previously" },
     { CL_ITEM,    "  over half the roster had no speed class at all, so" },
     { CL_ITEM,    "  multiplayer class picks kept reusing the same few cars." },
