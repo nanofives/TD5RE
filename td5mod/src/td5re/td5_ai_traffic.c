@@ -3946,8 +3946,24 @@ void td5_ai_traffic_dynamic_tick(void)
                  behind < -g_td5.ini.traffic_dyn_despawn) ||
                 /* [TRAFFIC BATTLE] Passed traffic despawns 50 spans behind the
                  * trailing-most player (fires even with the per-player cap on, whose
-                 * union-of-bubbles rear bound is otherwise ~115+ spans). */
-                (td5_game_battle_mode_active() &&
+                 * union-of-bubbles rear bound is otherwise ~115+ spans).
+                 * [DRAG TRAFFIC STARVATION 2026-08-19] DRAG needs this same arm, or
+                 * traffic spawns exactly one wave and then stops forever (reported in
+                 * SP and MP drag alike). Drag traffic is ONCOMING, so it sweeps past
+                 * the player within seconds and parks behind them at the strip head —
+                 * yet NO other despawn arm can retire it:
+                 *   - the legacy rear rule above is dead whenever the per-player cap
+                 *     is on, which td5_env_flag_on makes the DEFAULT;
+                 *   - `ahead > front_keep` can never fire, because oncoming cars move
+                 *     DOWN the span axis so `ahead` only grows more negative;
+                 *   - the two remaining arms need separation > front_keep, whose
+                 *     default floor is ~228 spans (trf_dyn_front_keep_floor) — more
+                 *     than a short/medium drag strip affords;
+                 *   - the circuit/ring-wrap paths are inert on a point-to-point strip.
+                 * So every slot stays ACTIVE, on_road pins at the cap, and the spawn
+                 * gate never reopens. `behind` is sp - trailing-player span, so a
+                 * passed oncoming car goes increasingly negative and this arm fires. */
+                ((td5_game_battle_mode_active() || g_td5.drag_race_enabled) &&
                  behind < -battle_despawn_behind()) ||
                 ahead  >  front_keep ||
                 far_from_all ||
