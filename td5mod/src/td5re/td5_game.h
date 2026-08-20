@@ -263,6 +263,9 @@ int  td5_game_cop_chase_is_suspect(int slot);
  * s_slot_state, the AI's g_slot_state) consistent so the AI cop slot stays
  * active instead of being disabled with slots 2..5. */
 int  td5_game_mp_cop_chase_field(void);
+/* [SP COP CHASE FIELD 2026-08-20] Cop-chase racer field: MP = humans + AI cop,
+ * SP = 1 player-cop + OPPONENTS suspects (clamped 1..5). 0 outside cop chase. */
+int  td5_game_cop_chase_field(void);
 /* [MP COP CHASE results 2026-06-25] True when a LOCAL (split-screen) MP cop chase
  * is active — gates the dedicated COPS/SUSPECTS results layout and the "CHASE
  * RESULTS" title. SP wanted mode and net play keep the normal results table. */

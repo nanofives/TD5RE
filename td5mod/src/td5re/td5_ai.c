@@ -2460,7 +2460,7 @@ void td5_ai_init_race_actor_runtime(void) {
         /* MP cop chase keeps the human suspects + the AI-cop slot (the cop sits at
          * slot num_human_players, AI-driven via g_slot_state==0); SP wanted keeps
          * the faithful slots 0-1. MUST match td5_game.c's s_slot_state field. */
-        int keep = td5_game_mp_cop_chase_field();
+        int keep = td5_game_cop_chase_field();
         if (keep <= 0) keep = 2;
         for (int k = keep; k < g_traffic_slot_base; k++)
             g_slot_state[k] = 3;
