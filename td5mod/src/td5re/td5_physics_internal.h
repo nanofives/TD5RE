@@ -229,6 +229,31 @@ int     td5_physics_actor_should_auto_shift(const TD5_Actor *actor);
 int32_t td5_physics_actor_manual_boost_q8(const TD5_Actor *actor);
 int32_t td5_physics_apply_speed_limit_boost(int32_t speed_limit, int32_t q8);
 
+/* Shift-quality streak -> earned manual bonus: PUBLIC API lives in
+ * td5_physics.h (td5_input.c feeds it, td5_hud.c displays it). */
+
+/* Speed at which `gear` hits the rev limiter, in the actor's 24.8 longitudinal
+ * -speed units; 0 when the car has no usable gearing data. Below top gear this
+ * is the real ceiling for that gear (a gearbox rework, not a faithful cap). */
+int32_t td5_physics_gear_ceiling_speed(TD5_Actor *actor, int gear);
+int     td5_physics_gear_ceiling_enabled(void);
+
+/* Highest usable forward gear (max_gear_index-1), or 0 for traffic/no data. */
+int     td5_physics_top_gear(const TD5_Actor *actor);
+
+/* Authored gear ratio made TALLER in top gear by the manual bonus, so the
+ * earned top-speed cap is actually reachable past the rev limiter. Single
+ * source of truth for the RPM model, the per-gear ceiling and the over-limiter
+ * engine-brake target. Positive magnitude; 0 when there is no usable ratio. */
+int32_t td5_physics_effective_gear_ratio(TD5_Actor *actor, int gear);
+
+/* Faithful per-car speed limit + the manual bonus + the per-gear ceiling.
+ * Use this at every drive-side speed gate instead of applying them piecemeal. */
+int32_t td5_physics_effective_speed_limit(TD5_Actor *actor, int32_t speed_limit);
+
+/* Clear the human-in-automatic auto-shift dwell counters (race reset). */
+void    td5_physics_auto_shift_dwell_reset(void);
+
 /* Slope / hill assists */
 int32_t td5_physics_slope_light_scale_q12(int32_t top_speed);
 int32_t td5_physics_hill_assist_q12(int32_t up_mag);

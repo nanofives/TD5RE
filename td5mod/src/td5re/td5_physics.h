@@ -258,4 +258,25 @@ float td5_sin_12bit(uint32_t angle);
  * read cross-module (e.g. the camera's wall-proximity easing). */
 extern int16_t g_actor_near_wall[TD5_MAX_RACER_SLOTS];
 
+/* --- Shift-quality streak -> earned manual bonus (PORT-ONLY) ---
+ * [GEARBOX REWORK 2026-08-20] Driving manual pays a floor bonus
+ * (TD5RE_MANUAL_BOOST_PCT, default +20% accel AND top speed); shifting well
+ * earns the rest of the way up to TD5RE_MANUAL_MAX_PCT (default +50%).
+ * td5_input.c scores each manual upshift with one of the verdicts below (the
+ * same rev bands the HUD arrow colours use); td5_hud.c displays the result.
+ * Implementation + the netplay caveat: td5_physics_assists.c. */
+#define TD5_SHIFT_VERDICT_GREEN 0   /* ideal — in the green band            */
+#define TD5_SHIFT_VERDICT_EARLY 1   /* short-shifted below the green band   */
+#define TD5_SHIFT_VERDICT_RED   2   /* over-revved "money shift"            */
+
+void td5_physics_shift_quality_note(int slot, int verdict);
+void td5_physics_shift_quality_reset(void);
+int  td5_physics_shift_quality_streak(int slot);
+int  td5_physics_shift_quality_streak_len(void);
+/* Effective bonus percent for `slot` (what the physics actually applies). */
+int  td5_physics_shift_quality_bonus_pct(int slot);
+/* Bonus percent to DISPLAY for `slot`, or -1 when there is nothing to show
+ * (automatic gearbox / feature off / no such actor). HUD-facing. */
+int  td5_physics_shift_quality_hud_pct(int slot);
+
 #endif /* TD5_PHYSICS_H */

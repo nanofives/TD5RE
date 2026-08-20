@@ -5579,6 +5579,30 @@ void td5_hud_render_overlays(float dt)
                         hud_submit_quad(&q);
                     }
 
+                    /* [GEARBOX REWORK 2026-08-20] Earned manual-bonus readout.
+                     * Driving manual pays a floor bonus; clean (green-band)
+                     * shifts earn it up toward TD5RE_MANUAL_MAX_PCT, and mistimed
+                     * shifts give it back. An invisible reward is no reward, so
+                     * show the live number under the dial with the streak pips so
+                     * the player can watch it build and decay. -1 = nothing to
+                     * show (automatic gearbox / feature off). */
+                    {
+                        int bonus_pct = td5_physics_shift_quality_hud_pct(actor_slot);
+                        if (bonus_pct >= 0) {
+                            int streak = td5_physics_shift_quality_streak(actor_slot);
+                            int len    = td5_physics_shift_quality_streak_len();
+                            /* Compact streak bar, e.g. "+38% ***--" at 3/5. */
+                            char pips[24];
+                            int np = (len > 20) ? 20 : len;
+                            for (int i = 0; i < np; i++)
+                                pips[i] = (i < streak) ? '*' : '-';
+                            pips[np] = '\0';
+                            td5_hud_queue_text(0, (int)cx,
+                                               (int)(cy + ssy * 30.0f), 1,
+                                               "+%d%% %s", bonus_pct, pips);
+                        }
+                    }
+
                     /* Pulsating red border once the car has been over-revving
                      * continuously for TD5RE_OVERREV_WARN_MS — a loud "you are
                      * hurting the engine, SHIFT" cue. Four edge bars around the

@@ -2060,11 +2060,13 @@ void td5_physics_update_player(TD5_Actor *actor)
 
             int32_t dt_type = (int32_t)PHYS_S(actor, PHYS_DRIVETRAIN_TYPE);
             int32_t speed_limit = FP_SCALE(phys_top_speed_rating(actor));
-            /* [MANUAL BOOST #2] Top-speed half: a manual-gearbox car (byte
-             * +0x378 == 0) tops out +N% higher. 1.0 (no change) for automatic
-             * or knob-off → byte-faithful limit. */
-            speed_limit = td5_physics_apply_speed_limit_boost(
-                              speed_limit, td5_physics_actor_manual_boost_q8(actor));
+            /* [MANUAL BOOST #2 / GEARBOX REWORK 2026-08-20] Top-speed half of
+             * the manual bonus (+N%, now earned by shifting well) PLUS the
+             * per-gear ceiling below top gear. The bonus is inert for automatic
+             * cars; the CEILING applies to every car, but is near-inert in
+             * practice because a correctly-shifting box is never far above the
+             * current gear's redline speed. Both off → byte-faithful limit. */
+            speed_limit = td5_physics_effective_speed_limit(actor, speed_limit);
             int32_t abs_speed = v_long < 0 ? -v_long : v_long;
 
             if (abs_speed <= speed_limit) {
@@ -2231,9 +2233,9 @@ void td5_physics_update_player(TD5_Actor *actor)
             drive_torque = td5_physics_compute_drive_torque(actor);
             int32_t dt_type = (int32_t)PHYS_S(actor, PHYS_DRIVETRAIN_TYPE);
             int32_t speed_limit = FP_SCALE(phys_top_speed_rating(actor));
-            /* [MANUAL BOOST #2] Top-speed half: +N% limit in manual gearbox. */
-            speed_limit = td5_physics_apply_speed_limit_boost(
-                              speed_limit, td5_physics_actor_manual_boost_q8(actor));
+            /* [MANUAL BOOST #2 / GEARBOX REWORK 2026-08-20] +N% earned manual
+             * limit, plus the per-gear ceiling below top gear. */
+            speed_limit = td5_physics_effective_speed_limit(actor, speed_limit);
             int32_t abs_speed = v_long < 0 ? -v_long : v_long;
             if (abs_speed <= speed_limit) {
                 switch (dt_type) {
@@ -3348,12 +3350,14 @@ void td5_physics_update_ai(TD5_Actor *actor)
              * local_3c = local_40; then skips to LAB_00405285 which does *2. */
             front_drive = (drive_torque + ((drive_torque >> 31) & 3)) >> 2;
             rear_drive  = front_drive;
-            /* [MANUAL BOOST #2] Top-speed half (AI drive gate): a manual-gearbox
-             * AI car (byte +0x378 == 0) tops out +N% higher. 1.0 for automatic
-             * or knob-off → byte-faithful gate. Drive-side only (brake clamps
-             * below use lateral_speed/v_long, not speed_limit). */
-            if (v_long > td5_physics_apply_speed_limit_boost(
-                             speed_limit, td5_physics_actor_manual_boost_q8(actor))) {
+            /* [MANUAL BOOST #2 / GEARBOX REWORK 2026-08-20] Top-speed half (AI
+             * drive gate) + per-gear ceiling below top gear. The manual bonus is
+             * always inert here (every AI runs automatic); the CEILING does apply
+             * to AI, but the auto box shifts at the tuned upshift RPM so the car
+             * is never far above the current gear's redline speed and it rarely
+             * binds. Drive-side only (brake clamps below use lateral_speed/v_long,
+             * not speed_limit). */
+            if (v_long > td5_physics_effective_speed_limit(actor, speed_limit)) {
                 front_drive = 0;
                 rear_drive  = 0;
             }

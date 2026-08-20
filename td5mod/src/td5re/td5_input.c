@@ -180,6 +180,18 @@ static int32_t s_shift_penalty_ticks[TD5_MAX_RACER_SLOTS];
 #define TD5_SHIFT_EARLY_CUT_NUM   60   /* throttle scaled to 60% (40% cut)  */
 #define TD5_SHIFT_EARLY_CUT_DEN  100
 
+/** [GEARBOX REWORK 2026-08-20 PORT ENHANCEMENT] Frames of the brief torque
+ * interruption applied to EVERY manual shift, good or bad — the "clutch is out"
+ * moment. Faithfully a manual shift was instantaneous, which is why the box felt
+ * weightless; other racing games all cost you a beat of drive per shift. This is
+ * short and mild (a beat, not a penalty) and is deliberately SEPARATE from
+ * s_shift_penalty_ticks above, which is the longer, harsher mistimed-shift bog.
+ * The two compose: a badly timed shift gets the dip AND the penalty. */
+static int32_t s_shift_dip_ticks[TD5_MAX_RACER_SLOTS];
+#define TD5_SHIFT_DIP_TICKS  6         /* ~0.1s at 60 Hz  */
+#define TD5_SHIFT_DIP_NUM   78         /* throttle -> 78% */
+#define TD5_SHIFT_DIP_DEN  100
+
 /** NOS latch accumulator per-player (mirrors 0x483014). */
 static uint8_t s_nos_latch[TD5_MAX_RACER_SLOTS];
 
@@ -1908,6 +1920,12 @@ void td5_input_update_player_control(int slot)
                                         /* over-rev money shift: firm ~6% speed knock */
                                         a_gear->longitudinal_speed = (int32_t)
                                             ((int64_t)a_gear->longitudinal_speed * 94 / 100);
+                                        /* [GEARBOX REWORK 2026-08-20] Also the
+                                         * biggest hit to the earned-bonus streak
+                                         * (costs 3) — over-revving is the worst
+                                         * shift you can make. */
+                                        td5_physics_shift_quality_note(
+                                            slot, TD5_SHIFT_VERDICT_RED);
                                         TD5_LOG_I(LOG_TAG,
                                             "shift-timing RED slot=%d rpm=%d red=%d -> -6%% speed",
                                             slot, (int)rpm, (int)red_rpm);
@@ -1920,11 +1938,19 @@ void td5_input_update_player_control(int slot)
                                         if (bog < floor_rpm) bog = floor_rpm;
                                         a_gear->engine_speed_accum = bog;
                                         s_shift_penalty_ticks[slot] = TD5_SHIFT_EARLY_CUT_TICKS;
+                                        /* [GEARBOX REWORK 2026-08-20] Short-shift
+                                         * costs 2 off the earned-bonus streak. */
+                                        td5_physics_shift_quality_note(
+                                            slot, TD5_SHIFT_VERDICT_EARLY);
                                         TD5_LOG_I(LOG_TAG,
                                             "shift-timing EARLY slot=%d rpm=%d green=%d -> bog %d->%d + %d-tick cut",
                                             slot, (int)rpm, (int)green_rpm, (int)rpm, (int)bog,
                                             TD5_SHIFT_EARLY_CUT_TICKS);
                                     } else {
+                                        /* [GEARBOX REWORK 2026-08-20] Clean shift:
+                                         * +1 toward the earned top-speed ceiling. */
+                                        td5_physics_shift_quality_note(
+                                            slot, TD5_SHIFT_VERDICT_GREEN);
                                         TD5_LOG_I(LOG_TAG,
                                             "shift-timing GREEN slot=%d rpm=%d green=%d red=%d (ideal)",
                                             slot, (int)rpm, (int)green_rpm, (int)red_rpm);
@@ -1933,6 +1959,8 @@ void td5_input_update_player_control(int slot)
                             }
                         }
                     }
+                    /* [GEARBOX REWORK 2026-08-20] Clutch beat on every upshift. */
+                    s_shift_dip_ticks[slot] = TD5_SHIFT_DIP_TICKS;
                     /* Write new gear back to actor so physics sees manual shift
                      * [CONFIRMED @ 0x402E60: original writes actor[0x36B]] */
                     if (a_gear) a_gear->current_gear = s_gear[slot];
@@ -1951,6 +1979,8 @@ void td5_input_update_player_control(int slot)
                  * checks if RPM would exceed redline.
                  * Deferred to physics module. */
                 s_gear[slot]--;
+                /* [GEARBOX REWORK 2026-08-20] Clutch beat on downshifts too. */
+                s_shift_dip_ticks[slot] = TD5_SHIFT_DIP_TICKS;
                 if (a_gdn) a_gdn->current_gear = s_gear[slot];
             }
             s_gear_debounce[slot] = TD5_INPUT_GEAR_DEBOUNCE;
@@ -2066,6 +2096,16 @@ void td5_input_update_player_control(int slot)
                 }
                 s_shift_penalty_ticks[slot]--;
             }
+            /* [GEARBOX REWORK 2026-08-20] Short torque interruption on EVERY
+             * manual shift (the clutch beat), independent of shift quality.
+             * Forward throttle only, so braking/reverse is untouched. */
+            if (s_shift_dip_ticks[slot] > 0) {
+                if (s_throttle[slot] > 0) {
+                    s_throttle[slot] = (int16_t)((int32_t)s_throttle[slot]
+                        * TD5_SHIFT_DIP_NUM / TD5_SHIFT_DIP_DEN);
+                }
+                s_shift_dip_ticks[slot]--;
+            }
             /* encounter_steering_cmd (int16) — used as throttle by physics */
             actor->encounter_steering_cmd = s_throttle[slot];
             actor->brake_flag = s_brake[slot];
@@ -2141,7 +2181,13 @@ void td5_input_reset_buffers(void)
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         s_gear_debounce[i] = 0;
         s_shift_penalty_ticks[i] = 0;
+        s_shift_dip_ticks[i] = 0;
     }
+    /* [GEARBOX REWORK 2026-08-20] PORT-ONLY: every race starts at the BASE
+     * manual bonus — the earned half (up to TD5RE_MANUAL_MAX_PCT) has to be
+     * re-earned by shifting well. Called from the race-start path alongside
+     * td5_input_reset_accumulators (td5_game.c). */
+    td5_physics_shift_quality_reset();
 }
 
 /* ========================================================================
