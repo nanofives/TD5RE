@@ -395,6 +395,9 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("Lighting", "Reflections",    g_td5.ini.reflections);
     td5_ini_write_int("Lighting", "WetRoads",       g_td5.ini.wet_roads);
     td5_ini_write_int("Lighting", "StreetLights",   g_td5.ini.street_lights);
+    /* [GFXOPT] MUST mirror k_lighting_cfg (dual-site, same trap as Quality). */
+    td5_ini_write_int("Lighting", "CarLights",      g_td5.ini.car_lights);
+    td5_ini_write_int("Lighting", "LegacyShadows",  g_td5.ini.legacy_shadows);
     td5_ini_write_int("Lighting", "Quality",        g_td5.ini.lighting_quality);  /* [RT] LOW/HIGH */
     /* [RT2 P8] LIGHTING OPTIONS per-feature tiers — MUST mirror k_lighting_cfg
      * (dual-site: the Quality round-trip persist bug must not repeat). */
@@ -505,6 +508,11 @@ static const TD5_CfgIntEntry k_lighting_cfg[] = {
     { "WetRoads",       "Lighting", "WetRoads",         &g_td5.ini.wet_roads,        1 },
     /* [LIGHT2] street-lamp light emission */
     { "StreetLights",   "Lighting", "StreetLights",     &g_td5.ini.street_lights,    0 },
+    /* [GFXOPT] Quality-stripping toggles, live at LOW *and* HIGH (see td5re.h).
+     * CarLights default ON and LegacyShadows default OFF = today's look exactly,
+     * so shipping these options changes nothing until the user opts in. */
+    { "CarLights",      "Lighting", "CarLights",        &g_td5.ini.car_lights,       1 },
+    { "LegacyShadows",  "Lighting", "LegacyShadows",    &g_td5.ini.legacy_shadows,   0 },
     /* [RT] LIGHTING QUALITY: 0 = LOW (screen-space), 1 = HIGH (ray traced when DXR
      * present; td5_rt_active() gates on availability so HIGH auto-runs as LOW on a
      * non-DXR device without rewriting the INI). Default HIGH. */
@@ -1436,6 +1444,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     td5_light2_set_reflections(g_td5.ini.reflections);
     td5_light2_set_wet_roads(g_td5.ini.wet_roads);
     td5_light_set_street_lights(g_td5.ini.street_lights);
+    /* [GFXOPT] LegacyShadows needs no setter — shadow_raycast_enabled() reads
+     * the INI field live so the menu row applies without a restart. */
+    td5_light_set_car_lights(g_td5.ini.car_lights);
     dbglog("Lighting: enabled=%d headlights=%d dark_mode=%d auto=%d mode=%d "
            "sun_shadows=%d strength=%d light_occl=%d refl=%d wet=%d",
            g_td5.ini.lighting_enabled, g_td5.ini.headlights,

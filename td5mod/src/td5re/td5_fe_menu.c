@@ -29,6 +29,7 @@
 #include "td5_font.h"
 #include "td5_i18n.h"   /* [I18N] TR() + language switch (Screen_LanguageOptions) */
 #include "td5_rt.h"     /* [RT] LIGHTING QUALITY row: available/set_quality */
+#include "td5_light.h"  /* [GFXOPT] CAR LIGHTS row: td5_light_set_car_lights */
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -1776,19 +1777,25 @@ void Screen_LanguageOptions(void) {
 /* ========================================================================
  * [RT2 P8] LIGHTING OPTIONS sub-screen — per-feature RT tiers (see
  * docs/plans/RT_LIGHTING2_PLAN.md Phase 8). Reached from the GRAPHICS OPTIONS
- * "LIGHTING OPTIONS ->" row; BACK returns there. 8 ◄► selector rows + OK.
+ * "LIGHTING OPTIONS ->" row; BACK returns there. 10 ◄► selector rows + OK.
  * Row 0 (LIGHTING QUALITY) is the master and is live even at LOW (greyed only
  * when no DXR device); rows 1..7 are HIGH-only features, greyed/inert at LOW.
  * L/R writes g_td5.ini.rt_* + persists; the tier->env-knob mapping is applied
  * by td5_rt_apply_lighting_options() (env-cached knobs take effect next race).
+ *
+ * [GFXOPT] Rows 8..9 (CAR LIGHTS, LEGACY SHADOWS) are quality-STRIPPING toggles
+ * and are deliberately live at LOW as well as HIGH -- they exist to shed cost on
+ * a weak machine, which is exactly the LOW case, so they must NOT inherit the
+ * rows-1..7 "greyed unless RT" rule. See lo_row_active().
  * ==================================================================== */
 #define LO_BASE_Y 74
 #define LO_STEP_Y 36
-#define LO_ROWS   8
+#define LO_ROWS   10
 
 static const char *const k_lo_labels[LO_ROWS] = {
     "LIGHTING QUALITY", "SHADOW QUALITY", "SHADOW DETAIL", "REFLECTIONS",
-    "REFLECTION RANGE", "GLOBAL ILLUM.",  "SUN & SKY",     "LIGHTS"
+    "REFLECTION RANGE", "GLOBAL ILLUM.",  "SUN & SKY",     "LIGHTS",
+    "CAR LIGHTS",       "LEGACY SHADOWS"
 };
 static const char *const k_lo_lowhigh[] = { "LOW", "HIGH" };
 static const char *const k_lo_shadowq[] = { "LOW", "MEDIUM", "HIGH" };
@@ -1799,6 +1806,7 @@ static const char *const k_lo_range[]   = { "NEAR", "FAR", "UNLIMITED" };
 static const char *const k_lo_gi[]      = { "OFF", "LOW", "HIGH" };
 static const char *const k_lo_sun[]     = { "CLASSIC", "AUTO" };
 static const char *const k_lo_lights[]  = { "BASIC", "REALISTIC" };
+static const char *const k_lo_offon[]   = { "OFF", "ON" };   /* [GFXOPT] rows 8..9 */
 
 static const char *const *lo_row_opts(int row, int *count)
 {
@@ -1811,6 +1819,8 @@ static const char *const *lo_row_opts(int row, int *count)
     case 5: *count = 3; return k_lo_gi;
     case 6: *count = 2; return k_lo_sun;
     case 7: *count = 2; return k_lo_lights;
+    case 8: *count = 2; return k_lo_offon;   /* [GFXOPT] CAR LIGHTS     */
+    case 9: *count = 2; return k_lo_offon;   /* [GFXOPT] LEGACY SHADOWS */
     }
     *count = 0; return NULL;
 }
@@ -1826,16 +1836,24 @@ static int lo_row_index(int row)
     case 5: return g_td5.ini.rt_gi_quality;
     case 6: return g_td5.ini.rt_sun_probe ? 1 : 0;
     case 7: return g_td5.ini.rt_light_quality ? 1 : 0;
+    /* [GFXOPT] Both read as plain ON/OFF. Note LEGACY SHADOWS is shown in its
+     * OWN sense (ON = legacy quad), NOT inverted into the TD5RE_SHADOW_RAYCAST
+     * sense the renderer uses -- the inversion lives in shadow_raycast_enabled(). */
+    case 8: return g_td5.ini.car_lights     ? 1 : 0;
+    case 9: return g_td5.ini.legacy_shadows ? 1 : 0;
     }
     return 0;
 }
 
 /* Row 0 is the LIGHTING QUALITY master (live whenever a DXR device exists);
  * rows 1..7 are HIGH-only features, inert (greyed) unless RT is actually
- * running. */
+ * running; rows 8..9 ([GFXOPT] CAR LIGHTS / LEGACY SHADOWS) gate code paths that
+ * exist in BOTH tiers, so they are always live -- greying them at LOW would hide
+ * them exactly where a user needs to strip cost. */
 static int lo_row_active(int row)
 {
     if (row == 0) return td5_rt_available();
+    if (row >= 8) return 1;
     return td5_rt_active();
 }
 
@@ -1855,6 +1873,12 @@ static void lo_row_apply(int row, int delta)
     case 5: g_td5.ini.rt_gi_quality    = idx;                          break;
     case 6: g_td5.ini.rt_sun_probe     = idx;                          break;
     case 7: g_td5.ini.rt_light_quality = idx;                          break;
+    /* [GFXOPT] Both apply LIVE (no restart, unlike the env-cached rt_* tiers).
+     * Car lights latch through the light-registry setter because td5_light.c
+     * owns that flag and never reads g_td5.ini; legacy shadows needs no setter
+     * because shadow_raycast_enabled() loads the INI field on every call. */
+    case 8: g_td5.ini.car_lights     = idx; td5_light_set_car_lights(idx); break;
+    case 9: g_td5.ini.legacy_shadows = idx;                                break;
     }
 }
 

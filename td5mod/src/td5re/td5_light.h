@@ -137,6 +137,12 @@ int  td5_light_lamp_page_is_halo(int page);
 int  td5_light_lamps_count(void);
 void td5_light_set_street_lights(int on);
 int  td5_light_street_lights(void);
+/* [GFXOPT] Car-emitted lighting master ([Lighting]CarLights, LIGHTING OPTIONS
+ * "CAR LIGHTS"). 0 = vehicle headlight spots never enter the light registry, in
+ * BOTH the LOW screen-space stack and the HIGH RT path — a pure cost saving with
+ * no effect on street lamps or brake-light billboards. Default 1. */
+void td5_light_set_car_lights(int on);
+int  td5_light_car_lights(void);
 /* Per frame, after td5_light_emit_vehicle_headlights(). */
 void td5_light_emit_street_lamps(void);
 

@@ -168,5 +168,7 @@ LightOcclusion=1
 Reflections=1
 WetRoads=1
 StreetLights=0
+CarLights=1        ; 0 = cars emit no light (strips headlight cost, LOW and HIGH)
+LegacyShadows=0    ; 1 = original flat shadow quad instead of the conforming blob
 [Input]
 LaneAssist=0

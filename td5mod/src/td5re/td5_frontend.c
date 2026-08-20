@@ -10173,8 +10173,13 @@ void td5_frontend_render_ui_rects(void) {
             fe_draw_option_arrows(0, sx, sy);
             break;
         case TD5_SCREEN_LIGHTING_OPTIONS:
-            /* [RT2 P8] ◄► on all 8 selector rows (0..7); OK (row 8) has none. */
-            for (int lo_r = 0; lo_r < 8; lo_r++) fe_draw_option_arrows(lo_r, sx, sy);
+            /* [RT2 P8] ◄► on all 10 selector rows (0..9); OK (row 10) has none.
+             * [GFXOPT] Bound raised 8 -> 10 with the CAR LIGHTS / LEGACY SHADOWS
+             * rows. This MUST track LO_ROWS in td5_fe_menu.c (that #define is
+             * file-local, so it cannot be referenced here) -- a stale bound is
+             * the classic creation!=rendering gap: the row exists and cycles on
+             * L/R but silently renders no arrows. */
+            for (int lo_r = 0; lo_r < 10; lo_r++) fe_draw_option_arrows(lo_r, sx, sy);
             break;
         case TD5_SCREEN_MUSIC_TEST:
             /* orig 0x418460: InitializeFrontendDisplayModeArrows(0,1) — the TRACK

@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 19" },
+    { CL_ITEM,    "Two new LIGHTING OPTIONS rows for weaker machines:" },
+    { CL_ITEM,    "  CAR LIGHTS turns off the light cars cast on the road," },
+    { CL_ITEM,    "  LEGACY SHADOWS swaps the soft car shadow for the" },
+    { CL_ITEM,    "  original flat one. Both work at LOW and HIGH quality," },
+    { CL_ITEM,    "  and apply straight away without a restart." },
     { CL_ITEM,    "CONTROL OPTIONS rows now use the same spacing as the" },
     { CL_ITEM,    "  other options screens (they were spaced twice as far" },
     { CL_ITEM,    "  apart as everywhere else)." },
