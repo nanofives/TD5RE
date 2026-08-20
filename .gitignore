@@ -192,3 +192,6 @@ CLAUDE.local.md
 # Generated code-navigation indexes (scripts/gen_codemap.py) — line numbers
 # churn every commit, so these stay untracked; build_all.bat refreshes them.
 codemap/
+
+# Happy app per-machine project-pane state (not project source)
+.happy/
