@@ -63,7 +63,8 @@ void td5_net_set_session_limits(int max_players, const char *password);
 int  td5_net_get_max_players(void);
 /* Client: set the password to send with the JOIN request (before joining). */
 void td5_net_set_join_password(const char *password);
-/* Last join rejection reason: 0=none, 1=session full, 2=wrong/again password. */
+/* Last join rejection reason: 0=none, 1=session full, 2=wrong/again password,
+ * 3=protocol version mismatch (peer runs a different td5re build). */
 int  td5_net_get_join_nak_reason(void);
 const char *td5_net_get_slot_name(int slot);    /* "" if empty */
 int  td5_net_get_slot_latency_ms(int slot);     /* -1 = unknown (e.g. self/host) */
@@ -101,6 +102,21 @@ void td5_net_lobby_touch_host_clock(void);
 int  td5_net_get_enum_session_count(void);
 const char *td5_net_get_enum_session_name(int index);
 int  td5_net_get_enum_session_info(int index, int *player_count, int *max_players);
+
+/* --- Protocol version (2026-08-19, Phase 0) -----------------------------
+ * Every wire-visible change to this file MUST bump this number in the same
+ * commit. It is exchanged in the JOIN handshake (DiscoveryMsg.proto_version)
+ * and echoed in TD5_NetRaceConfig, so a peer running a different build is
+ * rejected at the lobby door with WS2_NAK_VERSION instead of joining and
+ * desyncing on lap 1 -- lockstep has no state correction, so a silent
+ * mismatch is unrecoverable and looks like a physics bug.
+ *
+ * History:
+ *   1 -- first versioned protocol. Adds DiscoveryMsg.proto_version and
+ *        TD5_NetRaceConfig.{proto_version,track_fingerprint}. Every build
+ *        before this is version 0 and is refused (it cannot parse these
+ *        fields, and its TD5_NetRaceConfig is 428 bytes, not 436). */
+#define TD5_NET_PROTO_VERSION 1
 
 /* --- S31 network race config (2026-06-10) -------------------------------
  * Host-authoritative race parameters broadcast in the DXPSTART payload so
@@ -155,12 +171,26 @@ typedef struct TD5_NetRaceConfig {
     int32_t  car_damage;          /* master car-damage + HUD bar toggle */
     int32_t  collisions;          /* 3D collisions on/off */
     int32_t  checkpoint_timers;   /* checkpoint-timer system on/off */
+    /* [NET PROTO PHASE 0 2026-08-19] Appended, all-uint32, same wire rules as
+     * the rest of the struct. */
+    uint32_t proto_version;       /* TD5_NET_PROTO_VERSION of the composing host */
+    /* Identity of the track the host actually selected, not just its index.
+     * track_index alone is ambiguous for CUSTOM tracks: slot 37+ is whatever
+     * sits in that peer's own custom_tracks.json, so two players with
+     * different manifests would each load a DIFFERENT track from the same
+     * index and desync instantly with no error. Clients recompute this from
+     * their own registry on DXPSTART and refuse to start on mismatch.
+     * SCOPE: this fingerprints the manifest ENTRY (name/level/circuit/spans),
+     * not the level file CONTENT -- two peers with the same manifest but
+     * differently-edited level geometry are NOT caught by this. */
+    uint32_t track_fingerprint;
 } TD5_NetRaceConfig;
 /* WIRE CONTRACT -- host->client race setup, exchanged by whole-struct memcpy
  * of sizeof(TD5_NetRaceConfig). All-int32 layout by design (see note above),
  * so it is identical on 32- and 64-bit builds. Adding a member changes the
- * protocol; bump this number deliberately and in step with both endpoints. */
-_Static_assert(sizeof(TD5_NetRaceConfig) == 428, "TD5_NetRaceConfig is a wire format -- size must not change");
+ * protocol; bump BOTH this number and TD5_NET_PROTO_VERSION deliberately and
+ * in step with both endpoints. 428 -> 436 at proto version 1. */
+_Static_assert(sizeof(TD5_NetRaceConfig) == 436, "TD5_NetRaceConfig is a wire format -- size must not change");
 
 void td5_net_set_local_car(int car_index, int paint_index, int td6_color);
 int  td5_net_get_slot_td6_color(int slot);
@@ -174,5 +204,18 @@ int  td5_net_get_race_config(TD5_NetRaceConfig *out);
  * every client calls it after parsing the same seed back out of that
  * broadcast, so all machines land on the identical new value. */
 void td5_net_update_race_seed(uint32_t new_seed);
+
+/* [NET PROTO PHASE 0 2026-08-19] Identity of a track SLOT as this machine
+ * would load it. Native slots hash the index alone (the schedule is compiled
+ * in, so an index means the same track everywhere); custom slots hash the
+ * local registry's manifest entry. Never returns 0 for a resolvable slot, so
+ * 0 is usable as "not computed". */
+uint32_t td5_net_track_fingerprint(int track_index);
+/* Non-zero once a client has parsed a DXPSTART it must NOT act on (protocol
+ * or track-identity mismatch with the host). The race launcher checks this
+ * and aborts back to the lobby instead of starting a guaranteed-desync race.
+ * Returns the same WS2_NAK_* vocabulary as the join gate. */
+int  td5_net_get_start_reject_reason(void);
+void td5_net_clear_start_reject(void);
 
 #endif /* TD5_NET_H */

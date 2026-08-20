@@ -17,6 +17,7 @@
 #include "td5_net.h"
 #include "td5_platform.h"
 #include "td5_upnp.h"
+#include "td5_track_registry.h"   /* custom-track identity for the net track check */
 
 #include <string.h>
 #include <stdlib.h>
@@ -87,6 +88,8 @@
 /** JOIN_NAK reason codes (also surfaced via td5_net_get_join_nak_reason). */
 #define WS2_NAK_FULL         1
 #define WS2_NAK_PASSWORD     2
+#define WS2_NAK_VERSION      3   /* peer speaks a different TD5_NET_PROTO_VERSION */
+#define WS2_NAK_TRACK        4   /* host's track resolves to something else here  */
 
 /* Worker thread event indices for WaitForMultipleObjects */
 #define EVT_RECEIVE         0
@@ -272,7 +275,16 @@ typedef struct DiscoveryMsg {
     uint32_t    nak_reason;          /* JOIN_NAK: WS2_NAK_* */
     char        password[32];        /* JOIN_REQ: password the joiner supplies      */
     uint32_t    session_token;       /* JOIN_ACK: per-session auth token (host->client) */
+    /* [NET PROTO PHASE 0 2026-08-19] Appended LAST on purpose: every field
+     * above keeps its original offset, so a pre-versioning (v0) peer's
+     * shorter packet still parses correctly up to here and we can answer it
+     * with a real JOIN_NAK instead of dropping it on a size check and leaving
+     * it to spin on "connecting" until it times out. */
+    uint32_t    proto_version;       /* TD5_NET_PROTO_VERSION; absent => 0 */
 } DiscoveryMsg;
+/* Wire size of a v0 (pre-versioning) DiscoveryMsg -- everything but the
+ * trailing proto_version. Receivers accept >= this and infer version 0. */
+#define WS2_DISCOVERY_MSG_V0_SIZE ((int)sizeof(DiscoveryMsg) - 4)
 
 /* PING/PONG RTT probe (small; magic-tagged on the game socket). */
 typedef struct CarInfoMsg {          /* S31: client announces its car pick */
@@ -356,9 +368,11 @@ static uint32_t         ws2_resolve_sender_id(const SOCKADDR_IN *addr);
 static const SOCKADDR_IN *ws2_get_target_addr(uint32_t target_id);
 static int              ws2_discovery_init(void);
 static void             ws2_discovery_shutdown(void);
-static void             ws2_handle_join_request(const SOCKADDR_IN *from_addr);
+static void             ws2_handle_join_request(const SOCKADDR_IN *from_addr,
+                                                uint32_t peer_proto_version);
 static void             ws2_accept_join(const SOCKADDR_IN *from_addr, const char *name,
-                                        const char *password, SOCKET reply_socket);
+                                        const char *password, SOCKET reply_socket,
+                                        uint32_t peer_proto_version);
 static void             ws2_handle_game_control(const void *buf, int size,
                                                 const SOCKADDR_IN *from_addr);
 static int              ws2_send_join_request(const char *player_name);
@@ -747,6 +761,37 @@ void td5_net_update_race_seed(uint32_t new_seed)
     InterlockedIncrement(&s_race_config_seq);            /* leave write (even) */
 }
 
+/* [NET PROTO PHASE 0 2026-08-19] Set when a client parses a DXPSTART it must
+ * not act on. Written on the worker thread, read by the game thread; a plain
+ * int is enough (single writer, single reader, one word). */
+static volatile LONG s_start_reject_reason = 0;
+
+int td5_net_get_start_reject_reason(void)
+{
+    return (int)InterlockedCompareExchange(&s_start_reject_reason, 0, 0);
+}
+
+void td5_net_clear_start_reject(void)
+{
+    InterlockedExchange(&s_start_reject_reason, 0);
+}
+
+uint32_t td5_net_track_fingerprint(int track_index)
+{
+    /* Custom slots (37+) are per-machine: the same index is a different track
+     * on a peer with a different manifest, so hash the manifest entry. */
+    if (track_index >= TD5_CUSTOM_TRACK_SLOT_BASE) {
+        unsigned int fp = td5_track_registry_fingerprint_for_slot(track_index);
+        /* No entry at that slot on THIS machine -- the host has a custom track
+         * we simply do not have. Distinct from any real fingerprint. */
+        return fp ? (uint32_t)fp : 0xFFFFFFFFu;
+    }
+    /* Native / cup / TD6 slots come from compiled-in tables, so the index
+     * alone is a complete identity. Offset so it can never collide with a
+     * registry FNV value of the same magnitude by accident. */
+    return 0x4E415400u ^ (uint32_t)track_index;   /* "NAT\0" ^ index */
+}
+
 /**
  * Type 4 -- DXPSTART (4 bytes)
  * Host signals race start to each client.
@@ -766,6 +811,28 @@ static void handle_start(uint32_t sender, const void *data, int size)
         TD5_LOG_I(NET_LOG, "DXPSTART config: seed=0x%08X track=%d dir=%d",
                   s_race_config.rng_seed, s_race_config.track_index,
                   s_race_config.reverse_direction);
+
+        /* [NET PROTO PHASE 0] Last line of defence before the sim starts.
+         * The join gate already refused mismatched builds, so reaching either
+         * branch here means something got past it (host rebuilt mid-session,
+         * custom manifest changed since the lobby). Refuse rather than start a
+         * race that is guaranteed to desync. */
+        if (s_race_config.proto_version != (uint32_t)TD5_NET_PROTO_VERSION) {
+            TD5_LOG_E(NET_LOG, "DXPSTART REFUSED: host proto v%u, ours v%d",
+                      (unsigned)s_race_config.proto_version, TD5_NET_PROTO_VERSION);
+            InterlockedExchange(&s_start_reject_reason, WS2_NAK_VERSION);
+        } else {
+            uint32_t local_fp = td5_net_track_fingerprint(s_race_config.track_index);
+            if (local_fp != s_race_config.track_fingerprint) {
+                TD5_LOG_E(NET_LOG,
+                          "DXPSTART REFUSED: track %d identity mismatch "
+                          "(host fp=0x%08X, ours=0x%08X)",
+                          s_race_config.track_index,
+                          (unsigned)s_race_config.track_fingerprint,
+                          (unsigned)local_fp);
+                InterlockedExchange(&s_start_reject_reason, WS2_NAK_TRACK);
+            }
+        }
     } else {
         TD5_LOG_W(NET_LOG, "DXPSTART without race config (size=%d)", size);
     }
@@ -1462,7 +1529,10 @@ static int ws2_transport_enum(void)
 
         ret = recvfrom(s_ws2_browse_socket, (char *)&resp, sizeof(resp), 0,
                        (struct sockaddr *)&from_addr, &from_len);
-        if (ret < (int)sizeof(DiscoveryMsg)) continue;
+        /* [NET PROTO PHASE 0] Tolerate the shorter v0 ANNOUNCE so an older
+         * host still APPEARS in the browser -- hiding it would look like the
+         * session is down. The join gate is what rejects it, with a reason. */
+        if (ret < WS2_DISCOVERY_MSG_V0_SIZE) continue;
         if (resp.magic != WS2_DISCOVERY_MAGIC) continue;
         if (resp.disc_type != WS2_DISC_ANNOUNCE) continue;
         if (resp.sealed) continue;
@@ -1839,6 +1909,7 @@ static void ws2_send_join_nak(const SOCKADDR_IN *from_addr, int reason)
     nak.magic = WS2_DISCOVERY_MAGIC;
     nak.disc_type = WS2_DISC_JOIN_NAK;
     nak.nak_reason = (uint32_t)reason;
+    nak.proto_version = (uint32_t)TD5_NET_PROTO_VERSION;
     sendto(s_ws2_socket, (const char *)&nak, sizeof(nak), 0,
            (const struct sockaddr *)from_addr, (int)sizeof(*from_addr));
 }
@@ -1849,7 +1920,8 @@ static void ws2_send_join_nak(const SOCKADDR_IN *from_addr, int reason)
  * (JOIN_NAK on rejection). Idempotent so a retried JOIN_REQ is harmless.
  */
 static void ws2_accept_join(const SOCKADDR_IN *from_addr, const char *name,
-                            const char *password, SOCKET reply_socket)
+                            const char *password, SOCKET reply_socket,
+                            uint32_t peer_proto_version)
 {
     int slot = -1, active_count = 0;
     int i;
@@ -1857,6 +1929,19 @@ static void ws2_accept_join(const SOCKADDR_IN *from_addr, const char *name,
 
     if (!s_is_host || !from_addr)
         return;
+
+    /* [NET PROTO PHASE 0] Version gate FIRST -- before the password and
+     * capacity gates. A peer on a different protocol cannot be allowed into
+     * the roster at all: lockstep has no state correction, so it would run a
+     * different sim and the failure would surface mid-race as unexplainable
+     * physics rather than as a join error. */
+    if (peer_proto_version != (uint32_t)TD5_NET_PROTO_VERSION) {
+        TD5_LOG_W(NET_LOG, "Join rejected: protocol v%u, we speak v%d",
+                  (unsigned)peer_proto_version, TD5_NET_PROTO_VERSION);
+        ws2_send_join_nak(from_addr, WS2_NAK_VERSION);
+        return;
+    }
+
     if (s_session.sealed) {
         ws2_send_join_nak(from_addr, WS2_NAK_FULL);
         return;
@@ -1922,6 +2007,7 @@ static void ws2_accept_join(const SOCKADDR_IN *from_addr, const char *name,
     ack.assigned_id   = s_roster[slot].id;
     ack.game_port     = (uint16_t)s_game_port;
     ack.session_token = s_session_token;   /* [SEC] only sent after the pw gate */
+    ack.proto_version = (uint32_t)TD5_NET_PROTO_VERSION;
     strncpy(ack.session_name, s_session.name, sizeof(ack.session_name) - 1);
 
     if (reply_socket != INVALID_SOCKET) {
@@ -1934,9 +2020,10 @@ static void ws2_accept_join(const SOCKADDR_IN *from_addr, const char *name,
 }
 
 /** Legacy discovery-socket join entry; delegates to the shared accept path. */
-static void ws2_handle_join_request(const SOCKADDR_IN *from_addr)
+static void ws2_handle_join_request(const SOCKADDR_IN *from_addr,
+                                    uint32_t peer_proto_version)
 {
-    ws2_accept_join(from_addr, NULL, NULL, s_ws2_disc_socket);
+    ws2_accept_join(from_addr, NULL, NULL, s_ws2_disc_socket, peer_proto_version);
 }
 
 /** Host: broadcast per-slot names + latency so clients can render the roster. */
@@ -1994,12 +2081,16 @@ static void ws2_handle_game_control(const void *buf, int size, const SOCKADDR_IN
     switch (type) {
     case WS2_DISC_JOIN_REQ:
         /* Host: a client wants in (player name + password in the payload). */
-        if (s_is_host && size >= (int)sizeof(DiscoveryMsg)) {
+        /* [NET PROTO PHASE 0] Accept the shorter v0 packet too, so a
+         * pre-versioning peer gets an explicit JOIN_NAK(VERSION) rather than
+         * being silently dropped by the size check. */
+        if (s_is_host && size >= WS2_DISCOVERY_MSG_V0_SIZE) {
             const DiscoveryMsg *dm = (const DiscoveryMsg *)buf;
             char name[64], pw[32];
+            uint32_t ver = (size >= (int)sizeof(DiscoveryMsg)) ? dm->proto_version : 0u;
             strncpy(name, dm->session_name, sizeof(name) - 1); name[sizeof(name) - 1] = '\0';
             strncpy(pw, dm->password, sizeof(pw) - 1);         pw[sizeof(pw) - 1] = '\0';
-            ws2_accept_join(from_addr, name, pw, s_ws2_socket);
+            ws2_accept_join(from_addr, name, pw, s_ws2_socket, ver);
         }
         break;
 
@@ -2027,11 +2118,14 @@ static void ws2_handle_game_control(const void *buf, int size, const SOCKADDR_IN
 
     case WS2_DISC_JOIN_NAK:
         /* Client: rejected (wrong password / full). The UI re-prompts/back-offs. */
-        if (!s_is_host && size >= (int)sizeof(DiscoveryMsg)) {
+        if (!s_is_host && size >= WS2_DISCOVERY_MSG_V0_SIZE) {
             const DiscoveryMsg *dm = (const DiscoveryMsg *)buf;
             s_join_nak_reason = (int)dm->nak_reason;
             s_join_pending = 0;
-            TD5_LOG_W(NET_LOG, "JOIN_NAK: reason=%d", s_join_nak_reason);
+            TD5_LOG_W(NET_LOG, "JOIN_NAK: reason=%d (host proto v%u, ours v%d)",
+                      s_join_nak_reason,
+                      (size >= (int)sizeof(DiscoveryMsg)) ? (unsigned)dm->proto_version : 0u,
+                      TD5_NET_PROTO_VERSION);
         }
         break;
 
@@ -2122,6 +2216,7 @@ static int ws2_send_join_request(const char *player_name)
     memset(&req, 0, sizeof(req));
     req.magic = WS2_DISCOVERY_MAGIC;
     req.disc_type = WS2_DISC_JOIN_REQ;
+    req.proto_version = (uint32_t)TD5_NET_PROTO_VERSION;
     if (player_name && player_name[0])
         strncpy(req.session_name, player_name, sizeof(req.session_name) - 1);
     strncpy(req.password, s_join_password, sizeof(req.password) - 1);
@@ -2520,8 +2615,12 @@ void td5_net_tick(void)
             from_len = (int)sizeof(from_addr);
             ret = recvfrom(s_ws2_disc_socket, (char *)&disc_msg, sizeof(disc_msg), 0,
                            (struct sockaddr *)&from_addr, &from_len);
-            if (ret < (int)sizeof(DiscoveryMsg))
+            if (ret < WS2_DISCOVERY_MSG_V0_SIZE)
                 break;
+            /* v0 peers omit the trailing proto_version; zero it so the join
+             * gate sees 0 rather than whatever the last packet left behind. */
+            if (ret < (int)sizeof(DiscoveryMsg))
+                disc_msg.proto_version = 0u;
             if (disc_msg.magic != WS2_DISCOVERY_MAGIC)
                 continue;
 
@@ -2539,6 +2638,7 @@ void td5_net_tick(void)
                     announce.game_type    = s_session.game_type;
                     announce.sealed       = (uint32_t)s_session.sealed;
                     announce.game_port    = (uint16_t)s_game_port;
+                    announce.proto_version = (uint32_t)TD5_NET_PROTO_VERSION;
                     sendto(s_ws2_disc_socket, (const char *)&announce,
                            sizeof(announce), 0,
                            (const struct sockaddr *)&from_addr,
@@ -2548,7 +2648,7 @@ void td5_net_tick(void)
 
             case WS2_DISC_JOIN_REQ:
                 if (s_is_host)
-                    ws2_handle_join_request(&from_addr);
+                    ws2_handle_join_request(&from_addr, disc_msg.proto_version);
                 break;
 
             case WS2_DISC_JOIN_ACK:
@@ -2591,6 +2691,7 @@ void td5_net_tick(void)
         announce.game_type    = s_session.game_type;
         announce.sealed       = (uint32_t)s_session.sealed;
         announce.game_port    = (uint16_t)s_game_port;
+        announce.proto_version = (uint32_t)TD5_NET_PROTO_VERSION;
         memset(&bcast, 0, sizeof(bcast));
         bcast.sin_family = AF_INET;
         bcast.sin_addr.s_addr = htonl(INADDR_BROADCAST);

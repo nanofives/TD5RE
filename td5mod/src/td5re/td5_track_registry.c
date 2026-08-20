@@ -180,6 +180,38 @@ int td5_track_registry_has_slot(int slot)
     return find_by_slot(slot) != NULL;
 }
 
+/* FNV-1a over the manifest fields that decide WHICH track loads. Fixed
+ * byte-at-a-time order, so the value is identical on every build/arch --
+ * it goes on the wire. sky_pitch and tga are deliberately excluded: they are
+ * cosmetic and would make two visually-identical tracks fail the net check. */
+unsigned int td5_track_registry_fingerprint_for_slot(int slot)
+{
+    const TD5_CustomTrack *t = find_by_slot(slot);
+    unsigned int h = 2166136261u;
+    int fields[4];
+    int i, b;
+    const char *p;
+
+    if (!t) return 0u;
+
+    fields[0] = t->level;
+    fields[1] = t->circuit;
+    fields[2] = t->start_span;
+    fields[3] = t->finish_span;
+    for (i = 0; i < 4; i++) {
+        for (b = 0; b < 4; b++) {
+            h ^= (unsigned int)((fields[i] >> (b * 8)) & 0xFF);
+            h *= 16777619u;
+        }
+    }
+    for (p = t->name; *p; p++) {
+        h ^= (unsigned int)(unsigned char)*p;
+        h *= 16777619u;
+    }
+    /* Never hand back 0 -- callers use 0 as "no fingerprint". */
+    return h ? h : 1u;
+}
+
 const char *td5_track_registry_name_for_slot(int slot)
 {
     const TD5_CustomTrack *t = find_by_slot(slot);
