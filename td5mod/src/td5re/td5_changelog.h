@@ -32,6 +32,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 20" },
+    { CL_ITEM,    "New AUTO-GENERATED track in the track selector -" },
+    { CL_ITEM,    "  a fresh random road is built for every race" },
+    { CL_ITEM,    "Random road mixes straights, sweeping curves," },
+    { CL_ITEM,    "  sharp bends and widened multi-lane stretches" },
+    { CL_ITEM,    "  with rolling hills; percentages are tunable" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 19" },
     { CL_ITEM,    "Two new LIGHTING OPTIONS rows for weaker machines:" },
     { CL_ITEM,    "  CAR LIGHTS turns off the light cars cast on the road," },

@@ -159,6 +159,53 @@ void td5_track_registry_shutdown(void)
 int td5_track_registry_count(void) { return s_track_count; }
 int td5_track_registry_slot_max(void) { return s_slot_max; }
 
+int td5_track_registry_set_auto(int slot, int level, const char *name,
+                                int circuit, int start_span, int finish_span)
+{
+    TD5_CustomTrack *t = NULL;
+    int i;
+
+    if (slot < TD5_CUSTOM_TRACK_SLOT_BASE) {
+        TD5_LOG_W(LOG_TAG, "track registry: set_auto rejected slot %d "
+                  "(must be >= %d)", slot, TD5_CUSTOM_TRACK_SLOT_BASE);
+        return 0;
+    }
+
+    /* Update in place if this slot is already registered -- a per-race
+     * regenerate re-registers the same slot with a new span count. */
+    for (i = 0; i < s_track_count; i++) {
+        if (s_tracks[i].slot == slot) { t = &s_tracks[i]; break; }
+    }
+    if (!t) {
+        if (s_track_count >= TD5_CUSTOM_TRACK_MAX) {
+            TD5_LOG_W(LOG_TAG, "track registry: set_auto has no free row "
+                      "(%d manifest tracks already loaded)", s_track_count);
+            return 0;
+        }
+        t = &s_tracks[s_track_count++];
+    }
+
+    t->slot        = slot;
+    t->level       = level;
+    t->circuit     = circuit ? 1 : 0;
+    t->start_span  = start_span;
+    t->finish_span = finish_span;
+    t->sky_pitch   = 0.08f;
+    t->tga         = -1;
+    if (name && name[0]) {
+        strncpy(t->name, name, sizeof(t->name) - 1);
+        t->name[sizeof(t->name) - 1] = '\0';
+    } else {
+        snprintf(t->name, sizeof(t->name), "AUTO TRACK %d", slot);
+    }
+    if (slot + 1 > s_slot_max) s_slot_max = slot + 1;
+
+    TD5_LOG_I(LOG_TAG, "track registry: set_auto slot %d -> level %d '%s' "
+              "(%s, start=%d finish=%d)", t->slot, t->level, t->name,
+              t->circuit ? "circuit" : "p2p", t->start_span, t->finish_span);
+    return 1;
+}
+
 static const TD5_CustomTrack *find_by_slot(int slot)
 {
     int i;
