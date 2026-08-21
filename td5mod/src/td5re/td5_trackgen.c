@@ -81,6 +81,7 @@
  * because the mesh emitters (further up) reference them. */
 #define TD5_TG_PAGE_ROAD   0
 #define TD5_TG_PAGE_WALL   1
+#define TD5_TG_PAGE_GREEN  2
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
@@ -1037,6 +1038,44 @@ static int tg_emit_box_mesh(TG_Buf *blk, double cx, double cy, double cz,
     return !blk->oom;
 }
 
+/* ===================== BIOMES =====================
+ * A biome owns a RUN of spans and drives what stands beside the road: how
+ * dense the props are, how tall, how far back, and which texture page. That is
+ * what makes a stretch of city read differently from open fields without
+ * needing separate emitters per biome -- every prop is still a box.
+ *
+ * Not yet driven by biome: the section mix (straight/curve/acute weighting).
+ * The section picker runs during the centerline walk, before any of this, so
+ * per-biome cornering needs the picker to know its own position first. */
+typedef struct {
+    const char *name;
+    int    density;      /* prop if (hash>>28) <= this, so 0..15 */
+    int    h_min, h_extra;
+    int    gap_min, gap_extra;
+    int    page;
+    int    tower_mask;   /* (hash>>24)&mask == 0 -> add a tall one */
+    double tile;
+} TG_Biome;
+
+static const TG_Biome k_biomes[] = {
+    /* dense, tall, close to the road, frequent towers */
+    { "CITY",       9, 1600, 5200, 2400,  3000, TD5_TG_PAGE_WALL,   3, 4500.0 },
+    /* sparse low hedgerows set well back -- open horizon */
+    { "FIELDS",     2,  600,  900, 4000, 12000, TD5_TG_PAGE_GREEN, 255, 3000.0 },
+    /* dense low-to-mid greenery crowding the verge */
+    { "FOREST",    11,  900, 1400, 2000,  4000, TD5_TG_PAGE_GREEN, 255, 3000.0 },
+    /* wide squat sheds, mid setback, rare towers */
+    { "INDUSTRIAL", 6, 1000, 1600, 3000,  6000, TD5_TG_PAGE_WALL,  63, 6000.0 }
+};
+#define TD5_TG_BIOME_COUNT 4
+#define TD5_TG_BIOME_RUN   150
+
+static int tg_biome_for_span(int si)
+{
+    unsigned int h = (unsigned)(si / TD5_TG_BIOME_RUN) * 2654435761u;
+    return (int)((h >> 27) % TD5_TG_BIOME_COUNT);
+}
+
 /* Building beside span si, or 0 if this span gets none. Deterministic from si
  * alone -- deliberately NOT the shared RNG, which has already been consumed by
  * the centerline walk, so scenery cannot perturb track shape. */
@@ -1047,28 +1086,30 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
     double side, gap, hx, hy, hz, lx, lz, cx, cz;
 
     if (si <= TD5_TG_GRID_SPAN) return 1;      /* keep the grid area clear */
-    if ((h >> 28) > 4) return 1;               /* ~31% of spans get one */
+    const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
+
+    if ((int)(h >> 28) > b->density) return 1;   /* biome sets the density */
 
     n = &nl->v[si];
     side = ((h >> 3) & 1) ? 1.0 : -1.0;
-    /* Set well back: at a 1200-3800 gap these formed a canyon that walled off
-     * the horizon instead of framing the road. */
-    gap  = 3200.0 + (double)((h >> 5) % 7000);
+    /* Setback is biome-driven: FIELDS pushes props right back for an open
+     * horizon, CITY brings them in to frame the road. */
+    gap  = (double)b->gap_min + (double)((h >> 5) % (unsigned)b->gap_extra);
     hx   = 900.0  + (double)((h >> 9) % 2600);        /* footprint */
     hz   = 900.0  + (double)((h >> 14) % 2600);
-    /* Mostly low-rise, with an occasional tower rather than a wall of them. */
-    hy   = 1100.0 + (double)((h >> 19) % 2600);
-    if (((h >> 24) & 7) == 0) hy += (double)((h >> 11) % 5200);
+    hy   = (double)b->h_min + (double)((h >> 19) % (unsigned)b->h_extra);
+    if (((h >> 24) & (unsigned)b->tower_mask) == 0)
+        hy += (double)((h >> 11) % 5200);
 
     /* Left of travel is (tz, -tx); push out past the road edge. */
     lx = n->tz * side; lz = -n->tx * side;
     cx = n->x + lx * (n->width * 0.5 + gap + hx);
     cz = n->z + lz * (n->width * 0.5 + gap + hx);
 
-    /* A 4500-unit tile puts ~4 window cells across that span, so one cell
-     * reads as roughly one window rather than the ~0.9 m it was at 1500. */
+    /* Tile size is per-biome: ~4 window cells across a 4500 span reads as one
+     * window per cell for masonry, while foliage wants a coarser repeat. */
     return tg_emit_box_mesh(blk, cx, n->y + hy, cz, hx, hy, hz,
-                            n->tx, n->tz, TD5_TG_PAGE_WALL, 4500.0);
+                            n->tx, n->tz, b->page, b->tile);
 }
 
 /* Tunnels come in runs so a whole stretch is enclosed, not isolated spans. */
@@ -1355,16 +1396,55 @@ static void tg_emit_texture_page_wall(TG_Buf *out)
     }
 }
 
+/* Page 2: foliage / vegetation -- mottled greens for hedgerows and treelines.
+ * Deliberately noisy rather than structured: these boxes stand in for organic
+ * mass, so any regular pattern reads as wrong. */
+static void tg_emit_texture_page_green(TG_Buf *out)
+{
+    unsigned int rng = 0x51ED2701u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR. Dark shadowed foliage up to sunlit leaf, with a little earth. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        if (i < 12) { b = 28 + i * 3; g = 52 + i * 9; r = 24 + i * 4; }
+        else        { b = 46;         g = 58;         r = 62 + (i-12) * 6; }
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        /* Clumped rather than per-texel noise: bias by a coarse cell so the
+         * canopy has light and dark masses instead of uniform static. */
+        {
+            int x = i % TD5_TG_TEX_DIM, y = i / TD5_TG_TEX_DIM;
+            unsigned int cell = (unsigned)((y / 8) * 8 + (x / 8)) * 2654435761u;
+            int bias = (int)((cell >> 29) % 5);
+            idx = (int)((rng >> 16) % 8) + bias;
+            if (idx > 15) idx = 15;
+        }
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 static int tg_emit_textures(TG_Buf *out)
 {
-    TG_Buf pages[2];
-    const unsigned int count = 2;
+    TG_Buf pages[3];
+    const unsigned int count = 3;
     unsigned int cursor = 4 + 4 * count;
     unsigned int i;
 
     memset(pages, 0, sizeof(pages));
     tg_emit_texture_page_asphalt(&pages[TD5_TG_PAGE_ROAD]);
     tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_WALL]);
+    tg_emit_texture_page_green(&pages[TD5_TG_PAGE_GREEN]);
     for (i = 0; i < count; i++) {
         if (pages[i].oom) {
             for (i = 0; i < count; i++) tg_buf_free(&pages[i]);
@@ -1538,6 +1618,16 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
             TD5_LOG_I(LOG_TAG, "trackgen:   %-10s x%d (weight %d)",
                       tg_section_name((TD5_TrackGenSection)s), tally[s],
                       spec->weight[s]);
+    }
+    {   /* Biome layout, so a run can be checked against what is on screen. */
+        int s, runs = 0;
+        for (s = 0; s < nspans; s += TD5_TG_BIOME_RUN) {
+            TD5_LOG_I(LOG_TAG, "trackgen:   biome span %5d.. = %s",
+                      s, k_biomes[tg_biome_for_span(s)].name);
+            runs++;
+        }
+        TD5_LOG_I(LOG_TAG, "trackgen: %d biome run(s) of %d spans",
+                  runs, TD5_TG_BIOME_RUN);
     }
     ok = 1;
 
