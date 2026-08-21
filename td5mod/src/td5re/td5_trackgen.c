@@ -77,6 +77,11 @@
 #define TD5_TG_SURFACE_ATTR   0x11
 #define TD5_TG_HEIGHT_NIBBLE  8
 
+/* Texture page ids, in the order tg_emit_textures writes them. Declared here
+ * because the mesh emitters (further up) reference them. */
+#define TD5_TG_PAGE_ROAD   0
+#define TD5_TG_PAGE_WALL   1
+
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
 
@@ -956,11 +961,109 @@ static int tg_emit_road_mesh(const TG_NodeList *nl, int si, int lanes,
     return !blk->oom;
 }
 
+/* Six quads. Corner sign triples per face, then which half-extents span the
+ * face (for UV scaling). Winding is effectively free -- clip_and_submit_polygon
+ * culls by screen area, and scenery is submitted CULL_NONE. */
+static const signed char k_box_corner[6][4][3] = {
+    {{-1, 1,-1},{ 1, 1,-1},{ 1, 1, 1},{-1, 1, 1}},   /* +Y top    */
+    {{-1,-1, 1},{ 1,-1, 1},{ 1,-1,-1},{-1,-1,-1}},   /* -Y bottom */
+    {{-1,-1,-1},{ 1,-1,-1},{ 1, 1,-1},{-1, 1,-1}},   /* -Z        */
+    {{ 1,-1, 1},{-1,-1, 1},{-1, 1, 1},{ 1, 1, 1}},   /* +Z        */
+    {{-1,-1, 1},{-1,-1,-1},{-1, 1,-1},{-1, 1, 1}},   /* -X        */
+    {{ 1,-1,-1},{ 1,-1, 1},{ 1, 1, 1},{ 1, 1,-1}}    /* +X        */
+};
+/* Half-extent axis pairs giving each face's (u,v) size: 0=x 1=y 2=z. */
+static const signed char k_box_uv_axis[6][2] = {
+    {0,2},{0,2},{0,1},{0,1},{2,1},{2,1}
+};
+
+/* A box (building / bridge pier / tunnel wall) centred at c with half-extents
+ * h, textured from `page`, tiling every `tile` world units. */
+static int tg_emit_box_mesh(TG_Buf *blk, double cx, double cy, double cz,
+                            double hx, double hy, double hz,
+                            int page, double tile)
+{
+    const double hv[3] = { hx, hy, hz };
+    double radius = sqrt(hx*hx + hy*hy + hz*hz);
+    int f, i;
+
+    if (!(radius > 0.0)) radius = 1.0;
+    if (tile <= 0.0) tile = 1500.0;
+
+    tg_put_u16(blk, 259);
+    tg_put_u16(blk, 0);                    /* opaque, not a billboard */
+    tg_put_u32(blk, 1);                    /* one command */
+    tg_put_u32(blk, 6 * 4);                /* 6 quads, de-indexed */
+    tg_put_f32(blk, radius);
+    tg_put_f32(blk, cx);
+    tg_put_f32(blk, cy);
+    tg_put_f32(blk, cz);
+    tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+    tg_put_u32(blk, 0);
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE);
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE + TD5_TG_CMD_SIZE);
+    tg_put_u32(blk, 0);
+
+    tg_put_u16(blk, 0);                    /* dispatch_type 0 */
+    tg_put_u16(blk, (unsigned)page);
+    tg_put_u32(blk, 0);
+    tg_put_u16(blk, 0);                    /* triangle_count */
+    tg_put_u16(blk, 6);                    /* quad_count */
+    tg_put_u32(blk, 0);
+
+    for (f = 0; f < 6; f++) {
+        double ua = 2.0 * hv[(int)k_box_uv_axis[f][0]] / tile;
+        double vb = 2.0 * hv[(int)k_box_uv_axis[f][1]] / tile;
+        for (i = 0; i < 4; i++) {
+            tg_put_f32(blk, cx + hx * k_box_corner[f][i][0]);
+            tg_put_f32(blk, cy + hy * k_box_corner[f][i][1]);
+            tg_put_f32(blk, cz + hz * k_box_corner[f][i][2]);
+            tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+            tg_put_u32(blk, 0xFFFFFFFFu);
+            /* Corner order walks the quad loop, so (0,0)(u,0)(u,v)(0,v). */
+            tg_put_f32(blk, (i == 1 || i == 2) ? ua : 0.0);
+            tg_put_f32(blk, (i >= 2) ? vb : 0.0);
+            tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+        }
+    }
+    return !blk->oom;
+}
+
+/* Building beside span si, or 0 if this span gets none. Deterministic from si
+ * alone -- deliberately NOT the shared RNG, which has already been consumed by
+ * the centerline walk, so scenery cannot perturb track shape. */
+static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
+{
+    unsigned int h = (unsigned)si * 2654435761u;
+    const TG_Node *n;
+    double side, gap, hx, hy, hz, lx, lz, cx, cz;
+
+    if (si <= TD5_TG_GRID_SPAN) return 1;      /* keep the grid area clear */
+    if ((h >> 28) > 5) return 1;               /* ~37% of spans get one */
+
+    n = &nl->v[si];
+    side = ((h >> 3) & 1) ? 1.0 : -1.0;
+    gap  = 1200.0 + (double)((h >> 5) % 2600);        /* verge to wall */
+    hx   = 900.0  + (double)((h >> 9) % 2600);        /* footprint */
+    hz   = 900.0  + (double)((h >> 14) % 2600);
+    hy   = 1200.0 + (double)((h >> 19) % 7000);       /* height */
+
+    /* Left of travel is (tz, -tx); push out past the road edge. */
+    lx = n->tz * side; lz = -n->tx * side;
+    cx = n->x + lx * (n->width * 0.5 + gap + hx);
+    cz = n->z + lz * (n->width * 0.5 + gap + hx);
+
+    return tg_emit_box_mesh(blk, cx, n->y + hy, cz, hx, hy, hz,
+                            TD5_TG_PAGE_WALL, 1500.0);
+}
+
 static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                           TG_Buf *out)
 {
     const int nentries = (nspans + TD5_TG_SPANS_PER_ENTRY - 1)
                        / TD5_TG_SPANS_PER_ENTRY;
+    /* Road meshes plus at most one building per span in the entry. */
+    enum { TG_MAX_MESHES_PER_ENTRY = TD5_TG_SPANS_PER_ENTRY * 2 };
     TG_Buf *blocks;
     unsigned int cursor;
     int e, ok = 1;
@@ -968,26 +1071,42 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     blocks = (TG_Buf *)calloc((size_t)nentries, sizeof(TG_Buf));
     if (!blocks) return 0;
 
-    /* Build each entry's block: one road mesh per span it covers. */
     for (e = 0; e < nentries && ok; e++) {
         const int s0 = e * TD5_TG_SPANS_PER_ENTRY;
         int ns = nspans - s0;
-        int i;
-        if (ns > TD5_TG_SPANS_PER_ENTRY) ns = TD5_TG_SPANS_PER_ENTRY;
+        size_t moff[TG_MAX_MESHES_PER_ENTRY];
+        TG_Buf meshes;
+        int nmesh = 0, i;
 
-        tg_put_u32(&blocks[e], (unsigned)ns);          /* sub_count */
-        for (i = 0; i < ns; i++) {
-            /* Mesh offsets are BLOCK-relative and uniform in size. */
-            unsigned int off = (unsigned)(4 + ns * 4)
-                             + (unsigned)i * (TD5_TG_MESH_DISK_SIZE
-                                              + TD5_TG_CMD_SIZE
-                                              + TD5_TG_ROAD_SUBDIV * 4
-                                                * TD5_TG_VTX_SIZE);
-            tg_put_u32(&blocks[e], off);
+        if (ns > TD5_TG_SPANS_PER_ENTRY) ns = TD5_TG_SPANS_PER_ENTRY;
+        memset(&meshes, 0, sizeof(meshes));
+
+        /* Build the meshes first, RECORDING each one's start offset. Mesh
+         * sizes differ once buildings are mixed in with road quads, so the
+         * offsets can no longer be computed from a uniform stride. */
+        for (i = 0; i < ns && ok; i++) {
+            moff[nmesh++] = meshes.len;
+            if (!tg_emit_road_mesh(nl, s0 + i, lanes, &meshes)) ok = 0;
         }
-        for (i = 0; i < ns; i++) {
-            if (!tg_emit_road_mesh(nl, s0 + i, lanes, &blocks[e])) { ok = 0; break; }
+        for (i = 0; i < ns && ok; i++) {
+            size_t before = meshes.len;
+            if (nmesh >= TG_MAX_MESHES_PER_ENTRY) break;
+            if (!tg_building_for_span(nl, s0 + i, &meshes)) { ok = 0; break; }
+            if (meshes.len > before) moff[nmesh++] = before;  /* one was added */
         }
+
+        if (ok) {
+            const unsigned int hdr = (unsigned)(4 + nmesh * 4);
+            tg_put_u32(&blocks[e], (unsigned)nmesh);
+            for (i = 0; i < nmesh; i++)
+                tg_put_u32(&blocks[e], hdr + (unsigned)moff[i]);
+            if (!tg_buf_need(&blocks[e], meshes.len)) ok = 0;
+            else {
+                memcpy(blocks[e].b + blocks[e].len, meshes.b, meshes.len);
+                blocks[e].len += meshes.len;
+            }
+        }
+        tg_buf_free(&meshes);
     }
 
     if (ok) {
@@ -1071,22 +1190,76 @@ static void tg_emit_texture_page_asphalt(TG_Buf *out)
     }
 }
 
+/* Page 1: building wall -- banded masonry with lit windows. Box UVs tile every
+ * 1500 world units (one lane width), so one tile reads as roughly one storey. */
+static void tg_emit_texture_page_wall(TG_Buf *out)
+{
+    unsigned int rng = 0x9E3779B9u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR. 0..9 concrete greys, 10..12 mortar shadow, 13..15 lit windows. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        if (i < 10)      { b = 96 + i * 7;  g = 92 + i * 7;  r = 88 + i * 7; }
+        else if (i < 13) { b = 54;          g = 52;          r = 50;         }
+        else             { b = 150 + (i-13) * 30; g = 170 + (i-13) * 28;
+                           r = 190 + (i-13) * 20; }
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        int x = i % TD5_TG_TEX_DIM;
+        int y = i / TD5_TG_TEX_DIM;
+        int wx = x % 16, wy = y % 16;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if (wy < 2 || wx < 2) {
+            idx = 10 + (int)((rng >> 16) % 3);          /* storey / pier lines */
+        } else if (wx >= 4 && wx <= 12 && wy >= 5 && wy <= 12) {
+            /* Window, lit or dark per cell so the facade is not uniform. */
+            unsigned int cell = (unsigned)((y / 16) * 4 + (x / 16)) * 2654435761u;
+            idx = ((cell >> 28) & 1) ? (13 + (int)((rng >> 18) % 3)) : 11;
+        } else {
+            idx = (int)((rng >> 16) % 10);               /* concrete */
+        }
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 static int tg_emit_textures(TG_Buf *out)
 {
-    TG_Buf page;
-    const unsigned int count = 1;
+    TG_Buf pages[2];
+    const unsigned int count = 2;
+    unsigned int cursor = 4 + 4 * count;
+    unsigned int i;
 
-    memset(&page, 0, sizeof(page));
-    tg_emit_texture_page_asphalt(&page);
-    if (page.oom) { tg_buf_free(&page); return 0; }
+    memset(pages, 0, sizeof(pages));
+    tg_emit_texture_page_asphalt(&pages[TD5_TG_PAGE_ROAD]);
+    tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_WALL]);
+    for (i = 0; i < count; i++) {
+        if (pages[i].oom) {
+            for (i = 0; i < count; i++) tg_buf_free(&pages[i]);
+            return 0;
+        }
+    }
 
     tg_put_u32(out, count);
-    tg_put_u32(out, 4 + 4 * count);         /* page 0 follows the table */
-    if (tg_buf_need(out, page.len)) {
-        memcpy(out->b + out->len, page.b, page.len);
-        out->len += page.len;
+    for (i = 0; i < count; i++) {           /* absolute page offsets */
+        tg_put_u32(out, cursor);
+        cursor += (unsigned)pages[i].len;
     }
-    tg_buf_free(&page);
+    for (i = 0; i < count; i++) {
+        if (!tg_buf_need(out, pages[i].len)) break;
+        memcpy(out->b + out->len, pages[i].b, pages[i].len);
+        out->len += pages[i].len;
+    }
+    for (i = 0; i < count; i++) tg_buf_free(&pages[i]);
 
     TD5_LOG_I(LOG_TAG, "trackgen: textures = %u page(s), %zu bytes",
               count, out->len);

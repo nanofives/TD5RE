@@ -40,6 +40,15 @@ static TD5_CustomTrack s_tracks[TD5_CUSTOM_TRACK_MAX];
 static int s_track_count = 0;
 static int s_slot_max = TD5_CUSTOM_TRACK_SLOT_BASE;
 
+/* The procedurally generated track lives OUTSIDE the manifest table. It used
+ * to take a row via set_auto, which silently failed once a user's
+ * custom_tracks.json filled all TD5_CUSTOM_TRACK_MAX rows -- the auto slot
+ * then never registered and its level number fell through to an unrelated
+ * shipped level (observed: slot 60 loading level023.zip). Dedicated storage
+ * removes the contention entirely. */
+static TD5_CustomTrack s_auto;
+static int s_auto_valid = 0;
+
 /* Read a whole file into a malloc'd, NUL-terminated buffer (for cJSON_Parse).
  * Mirrors td5_assetsrc.c's reader (which is file-static there). */
 static char *registry_read_file(const char *path)
@@ -152,6 +161,7 @@ int td5_track_registry_init(void)
 
 void td5_track_registry_shutdown(void)
 {
+    s_auto_valid = 0;
     s_track_count = 0;
     s_slot_max = TD5_CUSTOM_TRACK_SLOT_BASE;
 }
@@ -162,28 +172,17 @@ int td5_track_registry_slot_max(void) { return s_slot_max; }
 int td5_track_registry_set_auto(int slot, int level, const char *name,
                                 int circuit, int start_span, int finish_span)
 {
-    TD5_CustomTrack *t = NULL;
-    int i;
+    TD5_CustomTrack *t = &s_auto;
 
     if (slot < TD5_CUSTOM_TRACK_SLOT_BASE) {
         TD5_LOG_W(LOG_TAG, "track registry: set_auto rejected slot %d "
                   "(must be >= %d)", slot, TD5_CUSTOM_TRACK_SLOT_BASE);
         return 0;
     }
-
-    /* Update in place if this slot is already registered -- a per-race
-     * regenerate re-registers the same slot with a new span count. */
-    for (i = 0; i < s_track_count; i++) {
-        if (s_tracks[i].slot == slot) { t = &s_tracks[i]; break; }
-    }
-    if (!t) {
-        if (s_track_count >= TD5_CUSTOM_TRACK_MAX) {
-            TD5_LOG_W(LOG_TAG, "track registry: set_auto has no free row "
-                      "(%d manifest tracks already loaded)", s_track_count);
-            return 0;
-        }
-        t = &s_tracks[s_track_count++];
-    }
+    /* Dedicated storage: never consumes a manifest row, so a full
+     * custom_tracks.json cannot stop the auto track registering. Re-calling
+     * overwrites in place, which is what a per-race regenerate needs. */
+    s_auto_valid = 1;
 
     t->slot        = slot;
     t->level       = level;
@@ -209,6 +208,7 @@ int td5_track_registry_set_auto(int slot, int level, const char *name,
 static const TD5_CustomTrack *find_by_slot(int slot)
 {
     int i;
+    if (s_auto_valid && s_auto.slot == slot) return &s_auto;
     for (i = 0; i < s_track_count; i++)
         if (s_tracks[i].slot == slot) return &s_tracks[i];
     return NULL;
@@ -217,6 +217,7 @@ static const TD5_CustomTrack *find_by_slot(int slot)
 static const TD5_CustomTrack *find_by_level(int level)
 {
     int i;
+    if (s_auto_valid && s_auto.level == level) return &s_auto;
     for (i = 0; i < s_track_count; i++)
         if (s_tracks[i].level == level) return &s_tracks[i];
     return NULL;
