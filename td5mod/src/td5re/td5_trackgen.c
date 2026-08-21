@@ -105,6 +105,10 @@
  * downstream random draw and break trace goldens. */
 static unsigned int s_rng;
 
+/* Branch jump-table state, produced by tg_emit_strip and consumed by the
+ * header write in the same call. */
+static int s_jump_lo, s_jump_hi, s_jump_base, s_jump_have, s_ring_len;
+
 /* Seed of the last successful build, for reproducing a good random track. */
 static unsigned int s_last_seed = 0;
 
@@ -601,6 +605,114 @@ static int tg_round(double v)
  * Each span emits its own near row then far row (rows are duplicated at seams,
  * exactly as the Python emitter does -- the loader tolerates it).
  */
+/* ===================== BRANCHES =====================
+ * Full spec and provenance: docs/plans/AUTOTRACK_BRANCHES.md.
+ *
+ * DEFAULT OFF (TD5RE_AUTOTRACK_BRANCHES=1). A branch changes strip TOPOLOGY,
+ * not just geometry, so a mistake corrupts the whole track rather than looking
+ * wrong. Structurally complete but NOT verified in game.
+ *
+ * Design note: the main road keeps its verified shared-row emission untouched.
+ * Junction and corridor spans instead get DEDICATED rows appended afterwards,
+ * and their records are patched in place. That is also what native TD5 does --
+ * level014's fork span owns its rows and the corridor start duplicates them --
+ * so per-span lane counts are legal without disturbing the shared-row blocks
+ * that fixed seam contact.
+ *
+ * Layout produced (ring = nspans = main road only):
+ *   0..nspans-1     main road; [F-W..F] widened to main+branch, F is type 8
+ *   nspans          PAD span -- exists solely so the corridor can start at
+ *                   ring+1, because td5_track_branch_to_main_span REJECTS
+ *                   span <= ring (td5_track.c:8185). td5_trackgen.py gets this
+ *                   wrong (lo == ring) and must not be copied.
+ *   nspans+1..      corridor: type 9, type 1 interior, type 10 linking to R
+ *   jump record     (lo=nspans+1, hi=last, base=F+1) so main = span - lo + base
+ */
+#define TD5_TG_BRANCH_FORK_SPAN  600   /* fixed, so a test can drive to it */
+#define TD5_TG_BRANCH_LEN         40   /* corridor spans */
+#define TD5_TG_BRANCH_WIDEN        6   /* approach spans widened before F */
+
+static int tg_branches_enabled(void)
+{
+    return td5_env_flag_off("TD5RE_AUTOTRACK_BRANCHES");
+}
+
+/* Append one vertex row of (lanes+1) points for node n, relative to (ox,oy,oz),
+ * laterally shifted by `shift` (world units, +ve = left of travel) and using
+ * `width`. Returns the row's first vertex index. */
+static int tg_append_row(TG_Buf *verts, int *vtx_count, const TG_Node *n,
+                         int lanes, double width, double shift,
+                         int ox, int oy, int oz)
+{
+    const double lx = n->tz, lz = -n->tx;
+    const int first = *vtx_count;
+    int j;
+    for (j = 0; j <= lanes; j++) {
+        double t = shift + (width * 0.5) - (width * (double)j / (double)lanes);
+        int dx = tg_round(n->x + lx * t) - ox;
+        int dy = tg_round(n->y) - oy;
+        int dz = tg_round(n->z + lz * t) - oz;
+        tg_put_u16(verts, (unsigned)(dx & 0xFFFF));
+        tg_put_u16(verts, (unsigned)(dy & 0xFFFF));
+        tg_put_u16(verts, (unsigned)(dz & 0xFFFF));
+    }
+    *vtx_count += lanes + 1;
+    return first;
+}
+
+/* Overwrite fields of an already-emitted span record in place. */
+static void tg_patch_span(TG_Buf *spans, int si, int type, int lanes,
+                          int lvi, int rvi, int link_next, int link_prev,
+                          int ox, int oy, int oz)
+{
+    unsigned char *r = spans->b + (size_t)si * 24;
+    r[0] = (unsigned char)type;
+    r[3] = (unsigned char)((TD5_TG_HEIGHT_NIBBLE << 4) | (lanes & 0x0F));
+    r[4] = (unsigned char)(lvi & 0xFF);       r[5] = (unsigned char)(lvi >> 8);
+    r[6] = (unsigned char)(rvi & 0xFF);       r[7] = (unsigned char)(rvi >> 8);
+    r[8] = (unsigned char)(link_next & 0xFF); r[9] = (unsigned char)((link_next >> 8) & 0xFF);
+    r[10]= (unsigned char)(link_prev & 0xFF); r[11]= (unsigned char)((link_prev >> 8) & 0xFF);
+    {   /* origin: these spans own their rows, so they own their origin too */
+        int i, v[3];
+        v[0] = ox; v[1] = oy; v[2] = oz;
+        for (i = 0; i < 3; i++) {
+            unsigned int u = (unsigned int)v[i];
+            r[12 + i*4 + 0] = (unsigned char)(u & 0xFF);
+            r[12 + i*4 + 1] = (unsigned char)((u >> 8) & 0xFF);
+            r[12 + i*4 + 2] = (unsigned char)((u >> 16) & 0xFF);
+            r[12 + i*4 + 3] = (unsigned char)((u >> 24) & 0xFF);
+        }
+    }
+}
+
+/* Append a whole span record (used for the pad span and the corridor). */
+static void tg_append_span(TG_Buf *spans, int type, int lanes,
+                           int lvi, int rvi, int link_next, int link_prev,
+                           int ox, int oy, int oz)
+{
+    tg_put_u8 (spans, (unsigned)type);
+    tg_put_u8 (spans, TD5_TG_SURFACE_ATTR);
+    tg_put_u8 (spans, (unsigned)(1 | (1 << (lanes - 1))));
+    tg_put_u8 (spans, (unsigned)((TD5_TG_HEIGHT_NIBBLE << 4) | (lanes & 0x0F)));
+    tg_put_u16(spans, (unsigned)lvi);
+    tg_put_u16(spans, (unsigned)rvi);
+    tg_put_u16(spans, (unsigned)(link_next & 0xFFFF));
+    tg_put_u16(spans, (unsigned)(link_prev & 0xFFFF));
+    tg_put_i32(spans, ox);
+    tg_put_i32(spans, oy);
+    tg_put_i32(spans, oz);
+}
+
+/* Lateral offset of the branch corridor at step k of TD5_TG_BRANCH_LEN: starts
+ * at one road width (aligned with the outer half of the widened fork), bows out,
+ * and returns, so the corridor leaves and rejoins without a large jump. */
+static double tg_branch_shift(int k, double width)
+{
+    double f = (double)k / (double)TD5_TG_BRANCH_LEN;
+    double bow = sin(f * TD5_TG_PI);            /* 0 -> 1 -> 0 */
+    return width * (1.0 + bow * 1.6);
+}
+
 static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
 {
     const int nspans = nl->count - 1;
@@ -620,6 +732,10 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
      * road (measured: wheel_mask=0 for 343/385 ticks, even dead flat). */
     const int lanes   = nl->v[0].lanes;
     const int row_pts = lanes + 1;
+    /* Reset per-call: a failed or branch-less build must not leave a stale
+     * jump record from a previous generation in the header. */
+    s_jump_lo = s_jump_hi = s_jump_base = s_jump_have = 0;
+    s_ring_len = 0;
     /* Spans per shared origin. Tunable so the effect of origin granularity on
      * ground contact is measurable: the ground probe appears to read a span's
      * origin_y (a track starting at y=-2040 probed -522240 = -2040*256), and a
@@ -708,6 +824,94 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
         }
     }
 
+    /* ---- BRANCH (opt-in) ---- */
+    {
+        const int emitted_main = (int)(spans.len / 24);
+        int jump_lo = 0, jump_hi = 0, jump_base = 0, have_jump = 0;
+
+        if (ok && tg_branches_enabled() &&
+            emitted_main > TD5_TG_BRANCH_FORK_SPAN + TD5_TG_BRANCH_LEN + 8) {
+            const int F     = TD5_TG_BRANCH_FORK_SPAN;
+            const int ring  = emitted_main;
+            const int b0    = ring + 1;               /* NOT ring: see spec */
+            const int main_lanes = lanes;
+            const int br_lanes   = lanes;
+            const int fork_lanes = main_lanes + br_lanes;
+            int k;
+
+            /* 1. Widen the approach [F-W .. F] to main+branch lanes, with
+             *    dedicated rows. Without this the outer lanes never exist and
+             *    sub_lane can never reach main_lanes, so the fork would be
+             *    physically unreachable. */
+            for (k = F - TD5_TG_BRANCH_WIDEN; k <= F; k++) {
+                const TG_Node *a = &nl->v[k];
+                const TG_Node *b = &nl->v[k + 1];
+                /* Ramp from the plain road width up to double width. */
+                double f0 = (double)(k - (F - TD5_TG_BRANCH_WIDEN))
+                          / (double)TD5_TG_BRANCH_WIDEN;
+                double f1 = (double)(k + 1 - (F - TD5_TG_BRANCH_WIDEN))
+                          / (double)TD5_TG_BRANCH_WIDEN;
+                double w0 = a->width * (1.0 + f0);
+                double w1 = b->width * (1.0 + (f1 > 1.0 ? 1.0 : f1));
+                int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
+                int lvi, rvi;
+                /* Widening is one-sided (to the left of travel) so the main
+                 * lanes keep their line and the branch peels off outward. */
+                lvi = tg_append_row(&verts, &vtx_count, a, fork_lanes, w0,
+                                    (w0 - a->width) * 0.5, ox, oy, oz);
+                rvi = tg_append_row(&verts, &vtx_count, b, fork_lanes, w1,
+                                    (w1 - b->width) * 0.5, ox, oy, oz);
+                tg_patch_span(&spans, k, (k == F) ? 8 : 1, fork_lanes,
+                              lvi, rvi, (k == F) ? b0 : -1, -1, ox, oy, oz);
+            }
+
+            /* 2. PAD span at index == ring, so the corridor starts at ring+1.
+             *    Geometry is irrelevant; it is never linked to. */
+            {
+                const TG_Node *a = &nl->v[F];
+                int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
+                int lvi = tg_append_row(&verts, &vtx_count, a, main_lanes,
+                                        a->width, 0.0, ox, oy, oz);
+                int rvi = tg_append_row(&verts, &vtx_count, a, main_lanes,
+                                        a->width, 0.0, ox, oy, oz);
+                tg_append_span(&spans, 1, main_lanes, lvi, rvi, -1, -1,
+                               ox, oy, oz);
+            }
+
+            /* 3. Corridor. Runs parallel to main spans F+1.., bowed outward,
+             *    so B0 maps to main F+1 -- which is exactly what the jump
+             *    record encodes. */
+            for (k = 0; k < TD5_TG_BRANCH_LEN; k++) {
+                const TG_Node *a = &nl->v[F + 1 + k];
+                const TG_Node *b = &nl->v[F + 2 + k];
+                int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
+                int lvi = tg_append_row(&verts, &vtx_count, a, br_lanes,
+                                        a->width, tg_branch_shift(k, a->width),
+                                        ox, oy, oz);
+                int rvi = tg_append_row(&verts, &vtx_count, b, br_lanes,
+                                        b->width, tg_branch_shift(k + 1, b->width),
+                                        ox, oy, oz);
+                int type = (k == 0) ? 9 : ((k == TD5_TG_BRANCH_LEN - 1) ? 10 : 1);
+                int nxt  = (k == TD5_TG_BRANCH_LEN - 1) ? (F + 1 + TD5_TG_BRANCH_LEN) : -1;
+                int prv  = (k == 0) ? F : -1;
+                tg_append_span(&spans, type, br_lanes, lvi, rvi, nxt, prv,
+                               ox, oy, oz);
+            }
+
+            jump_lo   = b0;
+            jump_hi   = b0 + TD5_TG_BRANCH_LEN - 1;
+            jump_base = F + 1;
+            have_jump = 1;
+            TD5_LOG_I(LOG_TAG, "trackgen: branch fork=%d corridor=%d..%d "
+                      "base=%d (ring=%d, main=span-%d)", F, jump_lo, jump_hi,
+                      jump_base, ring, jump_lo - jump_base);
+        }
+
+        s_jump_lo = jump_lo; s_jump_hi = jump_hi;
+        s_jump_base = jump_base; s_jump_have = have_jump;
+        s_ring_len = emitted_main;
+    }
+
     if (spans.oom || verts.oom) {
         TD5_LOG_E(LOG_TAG, "trackgen: out of memory building strip");
         ok = 0;
@@ -719,21 +923,33 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
             (unsigned int)(TD5_TG_SPAN_OFFSET + 24 * emitted);
 
         tg_put_u32(out, TD5_TG_SPAN_OFFSET);
-        /* Ring length = full span count for a POINT-TO-POINT track. Shipped
-         * level001 writes span_count-1 ([216,3175,...,3176]) but it is a
-         * CIRCUIT, where the last span closes onto the first. Copying that
-         * here made the walker wrap backward off span 0 to the ring end:
-         * span_raw oscillated 0 <-> 1798 every tick, 952 times in one run. */
-        tg_put_u32(out, (unsigned int)emitted);
+        /* Ring length = the MAIN ROAD span count. With a branch, `emitted`
+         * also counts the pad + corridor spans, which must sit OUTSIDE the
+         * ring -- that is what makes branch spans normalize through the jump
+         * table. Without a branch the two are identical.
+         *
+         * Shipped level001 writes span_count-1 but it is a CIRCUIT, where the
+         * last span closes onto the first. Copying that made the walker wrap
+         * backward off span 0 to the ring end (span_raw oscillated 0 <-> 1798
+         * every tick, 952 times in one run). */
+        tg_put_u32(out, (unsigned int)(s_ring_len > 0 ? s_ring_len : emitted));
         tg_put_u32(out, vtx_off);
         tg_put_u32(out, (unsigned int)vtx_count);
         tg_put_u32(out, (unsigned int)emitted);   /* total spans */
-        tg_put_u32(out, 0);                       /* jump-entry count */
-        /* Remainder of the pre-span block: no jump records, all zero. The
-         * loader derives the real span count from
-         * (vtx_off - span_off)/24, so this block must stay exactly
-         * TD5_TG_PRE_SPAN_BYTES long. */
-        tg_put_zeros(out, TD5_TG_PRE_SPAN_BYTES - 4);
+        /* Jump-entry count at 0x14, then 6-byte records from 0x18 (native TD5
+         * offset; 0x20 is the TD6-converted form). */
+        tg_put_u32(out, (unsigned int)(s_jump_have ? 1 : 0));
+        if (s_jump_have) {
+            tg_put_u16(out, (unsigned)s_jump_lo);
+            tg_put_u16(out, (unsigned)s_jump_hi);
+            tg_put_u16(out, (unsigned)s_jump_base);
+            tg_put_zeros(out, TD5_TG_PRE_SPAN_BYTES - 4 - 6);
+        } else {
+            /* No records. This block must stay exactly TD5_TG_PRE_SPAN_BYTES
+             * long -- the loader derives the span count from
+             * (vtx_off - span_off)/24. */
+            tg_put_zeros(out, TD5_TG_PRE_SPAN_BYTES - 4);
+        }
         if (!tg_buf_need(out, spans.len + verts.len)) {
             ok = 0;
         } else {
