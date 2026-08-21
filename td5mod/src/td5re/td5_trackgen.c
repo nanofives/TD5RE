@@ -1042,8 +1042,13 @@ static int tg_emit_levelinf(const TD5_TrackGenSpec *spec, int nspans,
     tg_put_u32(out, 0);                         /* 0x30 traffic_enable */
     tg_put_zeros(out, 24);                      /* 0x34 density_pairs 12xu16 */
     tg_put_zeros(out, 8);                       /* 0x4C pad */
-    /* 0x54 sky_animation_index: 36 for circuits, -1 for point-to-point. */
-    tg_put_u32(out, spec->circuit ? 36u : 0xFFFFFFFFu);
+    /* 0x54 sky_animation_index. Shipped circuits use 36 and point-to-point
+     * tracks use -1, but -1 appears to be why a generated track renders
+     * against a flat clear colour with no sky at all, so use the circuit index
+     * regardless. [UNCERTAIN] Untested when written -- if it does not produce a
+     * sky, the other candidate is the missing FORWSKY.png the renderer logs
+     * ("sky not found: re/assets/levels/levelNNN/FORWSKY.png"). */
+    tg_put_u32(out, 36u);
     tg_put_u32(out, (unsigned)nspans);          /* 0x58 total_span_count */
     tg_put_u32(out, 0);                         /* 0x5C fog_enabled */
     tg_put_u8(out, 0);                          /* 0x60 fog r */
@@ -1340,17 +1345,22 @@ typedef struct {
     int    tower_mask;   /* (hash>>24)&mask == 0 -> add a tall one */
     double tile;
     int    billboard;    /* 1 = camera-facing quad (trees), 0 = box */
+    int    ground_page;  /* page for the terrain slab under/around the road */
 } TG_Biome;
 
 static const TG_Biome k_biomes[] = {
     /* dense, tall, close to the road, frequent towers */
-    { "CITY",       9, 1600, 5200, 2400,  3000, TD5_TG_PAGE_WALL,   3, 4500.0, 0 },
+    { "CITY",       9, 1600, 5200, 2400,  3000, TD5_TG_PAGE_WALL,   3, 4500.0, 0,
+      TD5_TG_PAGE_WALL },
     /* sparse low hedgerows set well back -- open horizon */
-    { "FIELDS",     2, 1400, 1200, 4000, 12000, TD5_TG_PAGE_TREE,  255, 3000.0, 1 },
+    { "FIELDS",     2, 1400, 1200, 4000, 12000, TD5_TG_PAGE_TREE,  255, 3000.0, 1,
+      TD5_TG_PAGE_GREEN },
     /* dense low-to-mid greenery crowding the verge */
-    { "FOREST",    11, 1800, 2200, 1600,  4000, TD5_TG_PAGE_TREE,  255, 3000.0, 1 },
+    { "FOREST",    11, 1800, 2200, 1600,  4000, TD5_TG_PAGE_TREE,  255, 3000.0, 1,
+      TD5_TG_PAGE_GREEN },
     /* wide squat sheds, mid setback, rare towers */
-    { "INDUSTRIAL", 6, 1000, 1600, 3000,  6000, TD5_TG_PAGE_WALL,  63, 6000.0, 0 }
+    { "INDUSTRIAL", 6, 1000, 1600, 3000,  6000, TD5_TG_PAGE_WALL,  63, 6000.0, 0,
+      TD5_TG_PAGE_WALL }
 };
 #define TD5_TG_BIOME_COUNT 4
 #define TD5_TG_BIOME_RUN   150
@@ -1486,15 +1496,41 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si, double ground_y,
     return 1;
 }
 
+/* GROUND. Without this the road is a ribbon in a void: buildings and trees
+ * stand on nothing and every frame reads as objects floating in blue. One wide
+ * flat slab per display-list ENTRY (not per span -- per-span slabs would
+ * overlap into heavy overdraw for no gain), sitting just below the road
+ * surface and extending well past both verges.
+ *
+ * Textured from the biome's ground page, so FIELDS/FOREST get vegetation and
+ * CITY/INDUSTRIAL get concrete. Cosmetic only: driving off the road still puts
+ * you on nothing, because collision comes from the STRIP, not from this. */
+#define TD5_TG_GROUND_HALF_WIDTH  26000.0
+#define TD5_TG_GROUND_DROP          280.0   /* below the road surface */
+
+static int tg_emit_ground(const TG_NodeList *nl, int s0, int ns, TG_Buf *blk)
+{
+    /* Anchor on the middle span of the entry so the slab is centred on the
+     * road it covers, and make it long enough to span the whole entry. */
+    const int mid = s0 + ns / 2;
+    const TG_Node *n = &nl->v[mid];
+    const TG_Biome *b = &k_biomes[tg_biome_for_span(mid)];
+    const double half_len = (double)ns * 0.5 * (double)TD5_TG_SPAN_LENGTH + 400.0;
+
+    return tg_emit_box_mesh(blk, n->x, n->y - TD5_TG_GROUND_DROP, n->z,
+                            TD5_TG_GROUND_HALF_WIDTH, 120.0, half_len,
+                            n->tx, n->tz, b->ground_page, 9000.0);
+}
+
 static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                           TG_Buf *out)
 {
     const int nentries = (nspans + TD5_TG_SPANS_PER_ENTRY - 1)
                        / TD5_TG_SPANS_PER_ENTRY;
     /* Road meshes plus at most one building per span in the entry. */
-    /* Road + building + up to 3 tunnel pieces + up to 2 bridge pieces per
-     * span in the entry. */
-    enum { TG_MAX_MESHES_PER_ENTRY = TD5_TG_SPANS_PER_ENTRY * 7 };
+    /* One ground slab, plus per span: road + building + up to 3 tunnel pieces
+     * + up to 2 bridge pieces. */
+    enum { TG_MAX_MESHES_PER_ENTRY = TD5_TG_SPANS_PER_ENTRY * 7 + 1 };
     TG_Buf *blocks;
     unsigned int cursor;
     int e, ok = 1;
@@ -1518,9 +1554,13 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
         if (ns > TD5_TG_SPANS_PER_ENTRY) ns = TD5_TG_SPANS_PER_ENTRY;
         memset(&meshes, 0, sizeof(meshes));
 
-        /* Build the meshes first, RECORDING each one's start offset. Mesh
-         * sizes differ once buildings are mixed in with road quads, so the
-         * offsets can no longer be computed from a uniform stride. */
+        /* Ground slab FIRST so the road and props draw over it. Build the
+         * meshes RECORDING each one's start offset -- sizes differ once
+         * buildings and ground are mixed in with road quads, so offsets can no
+         * longer be computed from a uniform stride. */
+        moff[nmesh++] = meshes.len;
+        if (!tg_emit_ground(nl, s0, ns, &meshes)) ok = 0;
+
         for (i = 0; i < ns && ok; i++) {
             moff[nmesh++] = meshes.len;
             if (!tg_emit_road_mesh(nl, s0 + i, lanes, &meshes)) ok = 0;
