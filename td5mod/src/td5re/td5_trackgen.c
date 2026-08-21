@@ -82,6 +82,7 @@
 #define TD5_TG_PAGE_ROAD   0
 #define TD5_TG_PAGE_WALL   1
 #define TD5_TG_PAGE_GREEN  2
+#define TD5_TG_PAGE_TREE   3
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
@@ -1038,6 +1039,65 @@ static int tg_emit_box_mesh(TG_Buf *blk, double cx, double cy, double cz,
     return !blk->oom;
 }
 
+/* A camera-facing billboard: the natural primitive for a tree, where a box
+ * reads as a hedge slab. Two things differ from the opaque box path:
+ *   - the mesh header field at 0x02 is a BILLBOARD TAG, not a page id: 1 or 2
+ *     makes the renderer face the quad at the camera (td5_render_mesh.c:1720);
+ *   - `origin` carries the WORLD position in 24.8, where opaque geometry
+ *     leaves it zero (td5_render_mesh.c:1666), so the vertices below are LOCAL
+ *     offsets about that origin -- x across, y up from the base.
+ * The sampled page still comes from the command, as everywhere else.
+ *
+ * [UNCERTAIN] The transparent key index for an alpha-keyed page is not
+ * documented in what I read; palette index 0 is reserved for it here. If the
+ * engine keys on something else the surround will show as a solid block rather
+ * than cutting out -- visible immediately, and diagnosable. */
+static int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz,
+                                  double half_w, double height, int page)
+{
+    double radius = sqrt(half_w * half_w + height * height);
+    int i;
+    static const double lx[4] = { -1.0,  1.0,  1.0, -1.0 };
+    static const double ly[4] = {  0.0,  0.0,  1.0,  1.0 };
+
+    if (!(radius > 0.0)) radius = 1.0;
+
+    tg_put_u16(blk, 259);
+    tg_put_u16(blk, 1);                    /* 1 = camera-facing billboard */
+    tg_put_u32(blk, 1);                    /* one command */
+    tg_put_u32(blk, 4);                    /* one quad */
+    tg_put_f32(blk, radius);
+    tg_put_f32(blk, wx);                   /* bounding centre stays world */
+    tg_put_f32(blk, wy + height * 0.5);
+    tg_put_f32(blk, wz);
+    tg_put_f32(blk, wx * 256.0);           /* origin is 24.8 for billboards */
+    tg_put_f32(blk, wy * 256.0);
+    tg_put_f32(blk, wz * 256.0);
+    tg_put_u32(blk, 0);
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE);
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE + TD5_TG_CMD_SIZE);
+    tg_put_u32(blk, 0);
+
+    tg_put_u16(blk, 0);                    /* dispatch_type 0 */
+    tg_put_u16(blk, (unsigned)page);
+    tg_put_u32(blk, 0);
+    tg_put_u16(blk, 0);
+    tg_put_u16(blk, 1);                    /* quad_count */
+    tg_put_u32(blk, 0);
+
+    for (i = 0; i < 4; i++) {
+        tg_put_f32(blk, lx[i] * half_w);   /* local: x across, y up */
+        tg_put_f32(blk, ly[i] * height);
+        tg_put_f32(blk, 0.0);
+        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+        tg_put_u32(blk, 0xFFFFFFFFu);
+        tg_put_f32(blk, (i == 1 || i == 2) ? 1.0 : 0.0);
+        tg_put_f32(blk, (i >= 2) ? 0.0 : 1.0);   /* v flipped: base at v=1 */
+        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+    }
+    return !blk->oom;
+}
+
 /* ===================== BIOMES =====================
  * A biome owns a RUN of spans and drives what stands beside the road: how
  * dense the props are, how tall, how far back, and which texture page. That is
@@ -1055,17 +1115,18 @@ typedef struct {
     int    page;
     int    tower_mask;   /* (hash>>24)&mask == 0 -> add a tall one */
     double tile;
+    int    billboard;    /* 1 = camera-facing quad (trees), 0 = box */
 } TG_Biome;
 
 static const TG_Biome k_biomes[] = {
     /* dense, tall, close to the road, frequent towers */
-    { "CITY",       9, 1600, 5200, 2400,  3000, TD5_TG_PAGE_WALL,   3, 4500.0 },
+    { "CITY",       9, 1600, 5200, 2400,  3000, TD5_TG_PAGE_WALL,   3, 4500.0, 0 },
     /* sparse low hedgerows set well back -- open horizon */
-    { "FIELDS",     2,  600,  900, 4000, 12000, TD5_TG_PAGE_GREEN, 255, 3000.0 },
+    { "FIELDS",     2, 1400, 1200, 4000, 12000, TD5_TG_PAGE_TREE,  255, 3000.0, 1 },
     /* dense low-to-mid greenery crowding the verge */
-    { "FOREST",    11,  900, 1400, 2000,  4000, TD5_TG_PAGE_GREEN, 255, 3000.0 },
+    { "FOREST",    11, 1800, 2200, 1600,  4000, TD5_TG_PAGE_TREE,  255, 3000.0, 1 },
     /* wide squat sheds, mid setback, rare towers */
-    { "INDUSTRIAL", 6, 1000, 1600, 3000,  6000, TD5_TG_PAGE_WALL,  63, 6000.0 }
+    { "INDUSTRIAL", 6, 1000, 1600, 3000,  6000, TD5_TG_PAGE_WALL,  63, 6000.0, 0 }
 };
 #define TD5_TG_BIOME_COUNT 4
 #define TD5_TG_BIOME_RUN   150
@@ -1106,8 +1167,14 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
     cx = n->x + lx * (n->width * 0.5 + gap + hx);
     cz = n->z + lz * (n->width * 0.5 + gap + hx);
 
+    if (b->billboard) {
+        /* Trees: one camera-facing quad standing on the ground, so it reads as
+         * a tree from every angle instead of a slab with visible corners. */
+        return tg_emit_billboard_mesh(blk, cx, n->y, cz,
+                                      hx * 0.6, hy * 2.0, b->page);
+    }
     /* Tile size is per-biome: ~4 window cells across a 4500 span reads as one
-     * window per cell for masonry, while foliage wants a coarser repeat. */
+     * window per cell for masonry. */
     return tg_emit_box_mesh(blk, cx, n->y + hy, cz, hx, hy, hz,
                             n->tx, n->tz, b->page, b->tile);
 }
@@ -1434,10 +1501,57 @@ static void tg_emit_texture_page_green(TG_Buf *out)
     }
 }
 
+/* Page 3: a single tree silhouette on an ALPHA-KEYED page (type 1), so the
+ * surround cuts out and the billboard reads as a tree rather than a square.
+ * Palette index 0 is reserved as the transparent key -- see the [UNCERTAIN]
+ * note on tg_emit_billboard_mesh. */
+static void tg_emit_texture_page_tree(TG_Buf *out)
+{
+    unsigned int rng = 0x2545F491u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 1);                                  /* 1 = alpha-keyed */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR. 0 = key (never drawn), 1..3 trunk browns, 4..15 canopy greens. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        if (i == 0)     { b = 255; g = 0;  r = 255; }   /* key: magenta */
+        else if (i < 4) { b = 30 + i * 6;  g = 44 + i * 8;  r = 62 + i * 10; }
+        else            { b = 26 + i * 2;  g = 60 + i * 10; r = 22 + i * 3;  }
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        /* v=0 is the TOP of the page; the billboard maps the base to v=1. */
+        int x = i % TD5_TG_TEX_DIM;
+        int y = i / TD5_TG_TEX_DIM;
+        int dx = x - 32;
+        int idx = 0;
+        rng = rng * 1103515245u + 12345u;
+
+        if (y >= 44) {
+            /* Trunk: narrow, slightly ragged. */
+            if (dx > -4 && dx < 4) idx = 1 + (int)((rng >> 17) % 3);
+        } else {
+            /* Canopy: a rough blob, widest around a third down, with a noisy
+             * edge so the outline does not read as a circle. */
+            int cy = 22;
+            int ry = y - cy;
+            int rad = 26 - (ry * ry) / 18 - (int)((rng >> 19) % 5);
+            if (dx * dx < rad * rad) idx = 4 + (int)((rng >> 16) % 12);
+        }
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 static int tg_emit_textures(TG_Buf *out)
 {
-    TG_Buf pages[3];
-    const unsigned int count = 3;
+    TG_Buf pages[4];
+    const unsigned int count = 4;
     unsigned int cursor = 4 + 4 * count;
     unsigned int i;
 
@@ -1445,6 +1559,7 @@ static int tg_emit_textures(TG_Buf *out)
     tg_emit_texture_page_asphalt(&pages[TD5_TG_PAGE_ROAD]);
     tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_WALL]);
     tg_emit_texture_page_green(&pages[TD5_TG_PAGE_GREEN]);
+    tg_emit_texture_page_tree(&pages[TD5_TG_PAGE_TREE]);
     for (i = 0; i < count; i++) {
         if (pages[i].oom) {
             for (i = 0; i < count; i++) tg_buf_free(&pages[i]);
