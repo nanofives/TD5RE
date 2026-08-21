@@ -48,6 +48,12 @@ typedef struct {
     int  weight[TD5_TG_SECTION_COUNT];  /* relative section mix */
     int  elevation_amplitude;       /* world units; 0 = dead flat */
     int  circuit;                   /* 0 = point-to-point (Phase 1 default) */
+    /* Ride-smoothness levers, held as scaled ints so they can be driven from
+     * the integer env-knob helpers. Measured against a shipped track: Moscow
+     * runs p95 |roll rate| 288 / |pitch rate| 512; raising curve_safety eases
+     * the tightest corner, lowering max_grade eases the crests. */
+    int  curve_safety_x100;         /* min turn radius / half-width, x100 */
+    int  max_grade_x1000;           /* steepest |dY/d(arc)|, x1000 */
 } TD5_TrackGenSpec;
 
 /* Module lifecycle (registered in g_td5re_modules, after "trackreg"). Init

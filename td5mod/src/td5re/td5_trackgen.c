@@ -324,7 +324,7 @@ static int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
                 /* Tight: sit just above the curvature-safety floor for the
                  * CURRENT width, so a hairpin never self-intersects the road
                  * surface. */
-                radius = (width * 0.5) * TD5_TG_CURVE_SAFETY
+                radius = (width * 0.5) * (spec->curve_safety_x100 / 100.0)
                        * (1.0 + tg_frand() * 0.6);
                 break;
 
@@ -360,7 +360,7 @@ static int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
                  * a bend that was legal at 4 lanes can be illegal once a
                  * dual-lane taper has widened the road under it. */
                 if (radius > 0.0) {
-                    double floor_r = (width * 0.5) * TD5_TG_CURVE_SAFETY;
+                    double floor_r = (width * 0.5) * (spec->curve_safety_x100 / 100.0);
                     double r = radius < floor_r ? floor_r : radius;
                     heading += (double)dir * (span_len / r);
                     /* Keep the walk non-trapping (see TD5_TG_HEADING_LIMIT).
@@ -440,6 +440,7 @@ static int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
  * Mirrors apply_road_elevation() in td5_trackgen.py. */
 static void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
 {
+    const double max_grade = spec->max_grade_x1000 / 1000.0;
     double amp = (double)spec->elevation_amplitude;
     double ph1, ph2, worst = 0.0;
     int waves, i;
@@ -470,11 +471,11 @@ static void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
         double g  = fabs(dy) / (double)spec->span_length;
         if (g > worst) worst = g;
     }
-    if (worst > TD5_TG_MAX_GRADE) {
-        double k = TD5_TG_MAX_GRADE / worst;
+    if (max_grade > 0.0 && worst > max_grade) {
+        double k = max_grade / worst;
         for (i = 0; i < nl->count; i++) nl->v[i].y *= k;
         TD5_LOG_I(LOG_TAG, "trackgen: elevation rescaled by %.3f (grade %.3f -> %.3f)",
-                  k, worst, TD5_TG_MAX_GRADE);
+                  k, worst, max_grade);
     }
 }
 
@@ -1104,6 +1105,8 @@ void td5_trackgen_default_spec(TD5_TrackGenSpec *spec)
     spec->span_length   = TD5_TG_SPAN_LENGTH;
     spec->elevation_amplitude = 6000;
     spec->circuit       = 0;    /* point-to-point: no lap wrap, cheap ribbon */
+    spec->curve_safety_x100 = 180;   /* 1.80 = the Python tool's 1.5 + headroom */
+    spec->max_grade_x1000   = 120;   /* 0.120 = the Python tool's max_grade */
     spec->weight[TD5_TG_STRAIGHT]  = 35;
     spec->weight[TD5_TG_CURVE]     = 40;
     spec->weight[TD5_TG_ACUTE]     = 15;
@@ -1135,6 +1138,12 @@ void td5_trackgen_apply_config(TD5_TrackGenSpec *spec)
     spec->weight[TD5_TG_DUAL_LANE] =
         td5_env_int("TD5RE_AUTOTRACK_PCT_DUAL",
                     spec->weight[TD5_TG_DUAL_LANE], 0, 100);
+    spec->curve_safety_x100 =
+        td5_env_int("TD5RE_AUTOTRACK_CURVESAFE",
+                    spec->curve_safety_x100, 100, 800);
+    spec->max_grade_x1000 =
+        td5_env_int("TD5RE_AUTOTRACK_GRADE",
+                    spec->max_grade_x1000, 0, 200);
 }
 
 /* ----------------------------------------------------------- build ------- */
