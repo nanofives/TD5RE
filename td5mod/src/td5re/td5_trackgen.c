@@ -710,7 +710,10 @@ static double tg_branch_shift(int k, double width)
 {
     double f = (double)k / (double)TD5_TG_BRANCH_LEN;
     double bow = sin(f * TD5_TG_PI);            /* 0 -> 1 -> 0 */
-    return width * (1.0 + bow * 1.6);
+    /* NEGATIVE: the branch takes the HIGH sub-lanes, which the widened fork
+     * row places to the RIGHT of travel. Bowing left would put the corridor on
+     * the opposite side from the lanes that feed it. */
+    return -width * (1.0 + bow * 1.6);
 }
 
 static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
@@ -855,12 +858,17 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                 double w1 = b->width * (1.0 + (f1 > 1.0 ? 1.0 : f1));
                 int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
                 int lvi, rvi;
-                /* Widening is one-sided (to the left of travel) so the main
-                 * lanes keep their line and the branch peels off outward. */
+                /* Widen to the RIGHT of travel, NEGATIVE shift, so sub-lanes
+                 * 0..main-1 stay exactly on the main road line and the extra
+                 * lanes extend outward. The walker sends sub_lane <
+                 * lanes(F+1) to the main continuation, so the MAIN half must
+                 * be the LOW indices -- widening leftward (positive shift)
+                 * moved the main lanes off their line and produced bogus wall
+                 * penetrations at span F+1. */
                 lvi = tg_append_row(&verts, &vtx_count, a, fork_lanes, w0,
-                                    (w0 - a->width) * 0.5, ox, oy, oz);
+                                    -(w0 - a->width) * 0.5, ox, oy, oz);
                 rvi = tg_append_row(&verts, &vtx_count, b, fork_lanes, w1,
-                                    (w1 - b->width) * 0.5, ox, oy, oz);
+                                    -(w1 - b->width) * 0.5, ox, oy, oz);
                 tg_patch_span(&spans, k, (k == F) ? 8 : 1, fork_lanes,
                               lvi, rvi, (k == F) ? b0 : -1, -1, ox, oy, oz);
             }
@@ -1917,7 +1925,11 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     {
         char models_path[320];
         snprintf(models_path, sizeof(models_path), "%s/MODELS.DAT", dir);
-        if (td5_env_flag_off("TD5RE_AUTOTRACK_SCENERY")) {
+        /* Scenery is now DEFAULT ON (textured road, buildings, bridges,
+         * biomes, tree billboards -- all verified in frame). Set
+         * TD5RE_AUTOTRACK_SCENERY=0 to fall back to the untextured procedural
+         * ribbon. */
+        if (td5_env_flag_on("TD5RE_AUTOTRACK_SCENERY")) {
             TG_Buf models, tex;
             memset(&models, 0, sizeof(models));
             memset(&tex, 0, sizeof(tex));
