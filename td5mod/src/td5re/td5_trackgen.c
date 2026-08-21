@@ -981,8 +981,13 @@ static const signed char k_box_uv_axis[6][2] = {
  * h, textured from `page`, tiling every `tile` world units. */
 static int tg_emit_box_mesh(TG_Buf *blk, double cx, double cy, double cz,
                             double hx, double hy, double hz,
-                            int page, double tile)
+                            double fx, double fz, int page, double tile)
 {
+    /* Box frame: fwd = (fx,fz) along the road, right = (fz,-fx), up = +Y.
+     * An axis-aligned box is fine for a building but wrong for anything that
+     * must FOLLOW a curving road (tunnel walls, bridge decks), so hz runs
+     * along the road and hx across it. */
+    const double rx = fz, rz = -fx;
     const double hv[3] = { hx, hy, hz };
     double radius = sqrt(hx*hx + hy*hy + hz*hz);
     int f, i;
@@ -1015,9 +1020,12 @@ static int tg_emit_box_mesh(TG_Buf *blk, double cx, double cy, double cz,
         double ua = 2.0 * hv[(int)k_box_uv_axis[f][0]] / tile;
         double vb = 2.0 * hv[(int)k_box_uv_axis[f][1]] / tile;
         for (i = 0; i < 4; i++) {
-            tg_put_f32(blk, cx + hx * k_box_corner[f][i][0]);
-            tg_put_f32(blk, cy + hy * k_box_corner[f][i][1]);
-            tg_put_f32(blk, cz + hz * k_box_corner[f][i][2]);
+            const double sx = k_box_corner[f][i][0];
+            const double sy = k_box_corner[f][i][1];
+            const double sz = k_box_corner[f][i][2];
+            tg_put_f32(blk, cx + rx * (sx * hx) + fx * (sz * hz));
+            tg_put_f32(blk, cy +       sy * hy);
+            tg_put_f32(blk, cz + rz * (sx * hx) + fz * (sz * hz));
             tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
             tg_put_u32(blk, 0xFFFFFFFFu);
             /* Corner order walks the quad loop, so (0,0)(u,0)(u,v)(0,v). */
@@ -1039,22 +1047,111 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
     double side, gap, hx, hy, hz, lx, lz, cx, cz;
 
     if (si <= TD5_TG_GRID_SPAN) return 1;      /* keep the grid area clear */
-    if ((h >> 28) > 5) return 1;               /* ~37% of spans get one */
+    if ((h >> 28) > 4) return 1;               /* ~31% of spans get one */
 
     n = &nl->v[si];
     side = ((h >> 3) & 1) ? 1.0 : -1.0;
-    gap  = 1200.0 + (double)((h >> 5) % 2600);        /* verge to wall */
+    /* Set well back: at a 1200-3800 gap these formed a canyon that walled off
+     * the horizon instead of framing the road. */
+    gap  = 3200.0 + (double)((h >> 5) % 7000);
     hx   = 900.0  + (double)((h >> 9) % 2600);        /* footprint */
     hz   = 900.0  + (double)((h >> 14) % 2600);
-    hy   = 1200.0 + (double)((h >> 19) % 7000);       /* height */
+    /* Mostly low-rise, with an occasional tower rather than a wall of them. */
+    hy   = 1100.0 + (double)((h >> 19) % 2600);
+    if (((h >> 24) & 7) == 0) hy += (double)((h >> 11) % 5200);
 
     /* Left of travel is (tz, -tx); push out past the road edge. */
     lx = n->tz * side; lz = -n->tx * side;
     cx = n->x + lx * (n->width * 0.5 + gap + hx);
     cz = n->z + lz * (n->width * 0.5 + gap + hx);
 
+    /* A 4500-unit tile puts ~4 window cells across that span, so one cell
+     * reads as roughly one window rather than the ~0.9 m it was at 1500. */
     return tg_emit_box_mesh(blk, cx, n->y + hy, cz, hx, hy, hz,
-                            TD5_TG_PAGE_WALL, 1500.0);
+                            n->tx, n->tz, TD5_TG_PAGE_WALL, 4500.0);
+}
+
+/* Tunnels come in runs so a whole stretch is enclosed, not isolated spans. */
+#define TD5_TG_TUNNEL_RUN  20
+
+static int tg_span_in_tunnel(int si)
+{
+    unsigned int h;
+    /* OFF BY DEFAULT -- emitted but NEVER VERIFIED IN FRAME. A test run with
+     * tunnels on showed a dark slab near the road that turned out to be a tall
+     * BUILDING (tunnels off, still present), so no frame has yet confirmed a
+     * tunnel appearing at all -- neither working nor broken. Off until someone
+     * drives into a known tunnel run and looks.
+     *
+     * Known RISK, from the format survey rather than observation: there is no
+     * engine support for interior darkening or occlusion, so the roof will be
+     * lit from outside; and every span in the run gets an identical section,
+     * so there is no MOUTH and the near end may read as a wall.
+     * Enable with TD5RE_AUTOTRACK_TUNNELS=1 to work on them. */
+    if (!td5_env_flag_off("TD5RE_AUTOTRACK_TUNNELS")) return 0;
+    if (si <= TD5_TG_GRID_SPAN + 40) return 0;      /* not right off the grid */
+    h = (unsigned)(si / TD5_TG_TUNNEL_RUN) * 2246822519u;
+    return ((h >> 29) == 0);                        /* ~1 run in 8 */
+}
+
+/* Tunnel cross-section at span si: two side walls plus a roof, each its own
+ * mesh so per-mesh frustum culling cannot pop the whole tunnel at once.
+ * Oriented to the road tangent, one span long with a slight overlap. */
+static int tg_emit_tunnel(const TG_NodeList *nl, int si, TG_Buf *blk,
+                          int *added)
+{
+    const TG_Node *n = &nl->v[si];
+    const double wall_t = 300.0;
+    const double height = 2600.0;
+    const double side_x = n->width * 0.5 + wall_t;
+    const double lx = n->tz, lz = -n->tx;
+    int i;
+
+    for (i = 0; i < 3; i++) {
+        double ox = 0.0, oz = 0.0, hx, hy, cy;
+        if (i < 2) {                                /* side walls */
+            double sgn = i ? 1.0 : -1.0;
+            ox = lx * side_x * sgn;
+            oz = lz * side_x * sgn;
+            hx = wall_t; hy = height * 0.5; cy = n->y + height * 0.5;
+        } else {                                    /* roof */
+            hx = side_x + wall_t; hy = 200.0; cy = n->y + height + 200.0;
+        }
+        if (!tg_emit_box_mesh(blk, n->x + ox, cy, n->z + oz,
+                              hx, hy, 780.0, n->tx, n->tz,
+                              TD5_TG_PAGE_WALL, 3000.0))
+            return 0;
+        (*added)++;
+    }
+    return 1;
+}
+
+/* Bridge: where the road runs high above the low point of the track, put a
+ * deck slab just under it and a pier down to the ground. Purely cosmetic --
+ * the driving surface is still the STRIP. */
+static int tg_emit_bridge(const TG_NodeList *nl, int si, double ground_y,
+                          TG_Buf *blk, int *added)
+{
+    const TG_Node *n = &nl->v[si];
+    const double lift = n->y - ground_y;
+
+    if (lift < 900.0) return 1;                     /* too low to read */
+
+    if (!tg_emit_box_mesh(blk, n->x, n->y - 300.0, n->z,
+                          n->width * 0.5 + 250.0, 200.0, 780.0,
+                          n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0))
+        return 0;
+    (*added)++;
+
+    if ((si & 3) == 0) {                            /* a pier every 4th span */
+        double pier_h = lift * 0.5;
+        if (!tg_emit_box_mesh(blk, n->x, ground_y + pier_h, n->z,
+                              700.0, pier_h, 700.0,
+                              n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0))
+            return 0;
+        (*added)++;
+    }
+    return 1;
 }
 
 static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
@@ -1063,10 +1160,18 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     const int nentries = (nspans + TD5_TG_SPANS_PER_ENTRY - 1)
                        / TD5_TG_SPANS_PER_ENTRY;
     /* Road meshes plus at most one building per span in the entry. */
-    enum { TG_MAX_MESHES_PER_ENTRY = TD5_TG_SPANS_PER_ENTRY * 2 };
+    /* Road + building + up to 3 tunnel pieces + up to 2 bridge pieces per
+     * span in the entry. */
+    enum { TG_MAX_MESHES_PER_ENTRY = TD5_TG_SPANS_PER_ENTRY * 7 };
     TG_Buf *blocks;
     unsigned int cursor;
     int e, ok = 1;
+
+    /* Low point of the track, so bridge piers have a ground to stand on. */
+    double ground_y = nl->v[0].y;
+    int gi;
+    for (gi = 1; gi < nl->count; gi++)
+        if (nl->v[gi].y < ground_y) ground_y = nl->v[gi].y;
 
     blocks = (TG_Buf *)calloc((size_t)nentries, sizeof(TG_Buf));
     if (!blocks) return 0;
@@ -1089,10 +1194,28 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
             if (!tg_emit_road_mesh(nl, s0 + i, lanes, &meshes)) ok = 0;
         }
         for (i = 0; i < ns && ok; i++) {
+            const int si = s0 + i;
             size_t before = meshes.len;
-            if (nmesh >= TG_MAX_MESHES_PER_ENTRY) break;
-            if (!tg_building_for_span(nl, s0 + i, &meshes)) { ok = 0; break; }
-            if (meshes.len > before) moff[nmesh++] = before;  /* one was added */
+            int n_added = 0, k;
+
+            if (nmesh + 6 > TG_MAX_MESHES_PER_ENTRY) break;
+
+            if (tg_span_in_tunnel(si)) {
+                /* Enclosed: no buildings, they would stand inside the walls. */
+                if (!tg_emit_tunnel(nl, si, &meshes, &n_added)) { ok = 0; break; }
+            } else {
+                if (!tg_building_for_span(nl, si, &meshes)) { ok = 0; break; }
+                if (meshes.len > before) n_added = 1;
+                if (!tg_emit_bridge(nl, si, ground_y, &meshes, &n_added)) {
+                    ok = 0; break;
+                }
+            }
+            /* Everything emitted in this pass is a same-sized box, so each
+             * piece's offset is recoverable by dividing the appended span. */
+            for (k = 0; k < n_added; k++) {
+                size_t sz = (meshes.len - before) / (size_t)n_added;
+                moff[nmesh++] = before + (size_t)k * sz;
+            }
         }
 
         if (ok) {
