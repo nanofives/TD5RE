@@ -1505,21 +1505,100 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si, double ground_y,
  * Textured from the biome's ground page, so FIELDS/FOREST get vegetation and
  * CITY/INDUSTRIAL get concrete. Cosmetic only: driving off the road still puts
  * you on nothing, because collision comes from the STRIP, not from this. */
-#define TD5_TG_GROUND_HALF_WIDTH  26000.0
-#define TD5_TG_GROUND_DROP          280.0   /* below the road surface */
+#define TD5_TG_GROUND_WIDTH   24000.0   /* how far the verge extends outward */
+#define TD5_TG_GROUND_DROP       70.0    /* just under the road, avoids z-fight */
 
-static int tg_emit_ground(const TG_NodeList *nl, int s0, int ns, TG_Buf *blk)
+/* Ground as two SKIRT STRIPS per span -- one off each verge -- built from the
+ * same road-edge computation the road mesh uses. That makes the terrain follow
+ * width changes, curvature and elevation exactly, and adjacent spans share edge
+ * positions so there are no seams.
+ *
+ * This replaced a flat box slab per display-list entry. A box cannot follow a
+ * curving or undulating road: its top face sat at one height and one heading
+ * for four spans, so on bends its straight edge cut visibly across the verge
+ * and slab-to-slab joins showed.
+ */
+static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk)
 {
-    /* Anchor on the middle span of the entry so the slab is centred on the
-     * road it covers, and make it long enough to span the whole entry. */
-    const int mid = s0 + ns / 2;
-    const TG_Node *n = &nl->v[mid];
-    const TG_Biome *b = &k_biomes[tg_biome_for_span(mid)];
-    const double half_len = (double)ns * 0.5 * (double)TD5_TG_SPAN_LENGTH + 400.0;
+    const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
+    const double drop = TD5_TG_GROUND_DROP;
+    double nlx, nly, nlz, nrx, nry, nrz;   /* near left / right road edge */
+    double flx, fly, flz, frx, fry, frz;   /* far  left / right road edge */
+    double nux, nuz, fux, fuz;             /* outward lateral units */
+    double len;
+    double cx, cy, cz, radius = 0.0;
+    double px[8], py[8], pz[8], uu[8], vv[8];
+    int i, n = 0;
 
-    return tg_emit_box_mesh(blk, n->x, n->y - TD5_TG_GROUND_DROP, n->z,
-                            TD5_TG_GROUND_HALF_WIDTH, 120.0, half_len,
-                            n->tx, n->tz, b->ground_page, 9000.0);
+    tg_road_edge(nl, si, 0.0, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
+    tg_road_edge(nl, si, 1.0, &flx, &fly, &flz, &frx, &fry, &frz);
+
+    /* Outward direction = along the cross-section, away from the centre. */
+    nux = nlx - nrx; nuz = nlz - nrz;
+    len = sqrt(nux * nux + nuz * nuz);
+    if (len < 1e-6) { nux = 1.0; nuz = 0.0; } else { nux /= len; nuz /= len; }
+    fux = flx - frx; fuz = flz - frz;
+    len = sqrt(fux * fux + fuz * fuz);
+    if (len < 1e-6) { fux = 1.0; fuz = 0.0; } else { fux /= len; fuz /= len; }
+
+    /* LEFT skirt: road edge -> outward. Loop order near-in, near-out, far-out,
+     * far-in so the quad is a proper ring. */
+    px[n]=nlx;                        py[n]=nly-drop; pz[n]=nlz;
+    uu[n]=0.0; vv[n]=(double)si;      n++;
+    px[n]=nlx+nux*TD5_TG_GROUND_WIDTH; py[n]=nly-drop; pz[n]=nlz+nuz*TD5_TG_GROUND_WIDTH;
+    uu[n]=4.0; vv[n]=(double)si;      n++;
+    px[n]=flx+fux*TD5_TG_GROUND_WIDTH; py[n]=fly-drop; pz[n]=flz+fuz*TD5_TG_GROUND_WIDTH;
+    uu[n]=4.0; vv[n]=(double)si+1.0;  n++;
+    px[n]=flx;                        py[n]=fly-drop; pz[n]=flz;
+    uu[n]=0.0; vv[n]=(double)si+1.0;  n++;
+
+    /* RIGHT skirt: mirrored, outward is -unit. */
+    px[n]=nrx;                        py[n]=nry-drop; pz[n]=nrz;
+    uu[n]=0.0; vv[n]=(double)si;      n++;
+    px[n]=nrx-nux*TD5_TG_GROUND_WIDTH; py[n]=nry-drop; pz[n]=nrz-nuz*TD5_TG_GROUND_WIDTH;
+    uu[n]=4.0; vv[n]=(double)si;      n++;
+    px[n]=frx-fux*TD5_TG_GROUND_WIDTH; py[n]=fry-drop; pz[n]=frz-fuz*TD5_TG_GROUND_WIDTH;
+    uu[n]=4.0; vv[n]=(double)si+1.0;  n++;
+    px[n]=frx;                        py[n]=fry-drop; pz[n]=frz;
+    uu[n]=0.0; vv[n]=(double)si+1.0;  n++;
+
+    cx = cy = cz = 0.0;
+    for (i = 0; i < n; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
+    cx /= n; cy /= n; cz /= n;
+    for (i = 0; i < n; i++) {
+        double dx = px[i]-cx, dy = py[i]-cy, dz = pz[i]-cz;
+        double d = sqrt(dx*dx + dy*dy + dz*dz);
+        if (d > radius) radius = d;
+    }
+    if (!(radius > 0.0)) radius = 1.0;
+
+    tg_put_u16(blk, 259);
+    tg_put_u16(blk, 0);                    /* opaque, not a billboard */
+    tg_put_u32(blk, 1);
+    tg_put_u32(blk, (unsigned)n);
+    tg_put_f32(blk, radius);
+    tg_put_f32(blk, cx); tg_put_f32(blk, cy); tg_put_f32(blk, cz);
+    tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+    tg_put_u32(blk, 0);
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE);
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE + TD5_TG_CMD_SIZE);
+    tg_put_u32(blk, 0);
+
+    tg_put_u16(blk, 0);                    /* dispatch_type 0 */
+    tg_put_u16(blk, (unsigned)b->ground_page);
+    tg_put_u32(blk, 0);
+    tg_put_u16(blk, 0);                    /* triangle_count */
+    tg_put_u16(blk, 2);                    /* two quads: left + right skirt */
+    tg_put_u32(blk, 0);
+
+    for (i = 0; i < n; i++) {
+        tg_put_f32(blk, px[i]); tg_put_f32(blk, py[i]); tg_put_f32(blk, pz[i]);
+        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+        tg_put_u32(blk, 0xFFFFFFFFu);
+        tg_put_f32(blk, uu[i]); tg_put_f32(blk, vv[i]);
+        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+    }
+    return !blk->oom;
 }
 
 static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
@@ -1528,9 +1607,9 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     const int nentries = (nspans + TD5_TG_SPANS_PER_ENTRY - 1)
                        / TD5_TG_SPANS_PER_ENTRY;
     /* Road meshes plus at most one building per span in the entry. */
-    /* One ground slab, plus per span: road + building + up to 3 tunnel pieces
-     * + up to 2 bridge pieces. */
-    enum { TG_MAX_MESHES_PER_ENTRY = TD5_TG_SPANS_PER_ENTRY * 7 + 1 };
+    /* Per span: ground skirt + road + building + up to 3 tunnel pieces + up to
+     * 2 bridge pieces. */
+    enum { TG_MAX_MESHES_PER_ENTRY = TD5_TG_SPANS_PER_ENTRY * 8 };
     TG_Buf *blocks;
     unsigned int cursor;
     int e, ok = 1;
@@ -1554,14 +1633,12 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
         if (ns > TD5_TG_SPANS_PER_ENTRY) ns = TD5_TG_SPANS_PER_ENTRY;
         memset(&meshes, 0, sizeof(meshes));
 
-        /* Ground slab FIRST so the road and props draw over it. Build the
-         * meshes RECORDING each one's start offset -- sizes differ once
-         * buildings and ground are mixed in with road quads, so offsets can no
-         * longer be computed from a uniform stride. */
-        moff[nmesh++] = meshes.len;
-        if (!tg_emit_ground(nl, s0, ns, &meshes)) ok = 0;
-
+        /* Ground skirt then road, per span. Offsets are RECORDED as meshes are
+         * appended -- sizes differ once ground, buildings and road quads are
+         * mixed, so they cannot come from a uniform stride. */
         for (i = 0; i < ns && ok; i++) {
+            moff[nmesh++] = meshes.len;
+            if (!tg_emit_ground(nl, s0 + i, &meshes)) { ok = 0; break; }
             moff[nmesh++] = meshes.len;
             if (!tg_emit_road_mesh(nl, s0 + i, lanes, &meshes)) ok = 0;
         }
