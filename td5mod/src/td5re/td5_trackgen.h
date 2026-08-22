@@ -89,6 +89,15 @@ int td5_trackgen_is_auto_slot(int slot);
  * gets new geometry). Returns 1 on success. */
 int td5_trackgen_regenerate(unsigned int seed);
 
+/* [S2 / Phase 2 streaming] Rebuild the main-road span records for `seed` and
+ * return them as a blob of 24-byte records for the caller to free. Lets the
+ * track module overwrite a region of its LIVE span array with bytes that
+ * provably match what the seed produced originally. Never touches live state;
+ * deterministic across calls. See docs/plans/AUTOTRACK_STREAMING.md. */
+int td5_trackgen_regenerate_main_spans(unsigned int seed,
+                                      unsigned char **out_bytes,
+                                      int *out_span_count);
+
 /* Seed actually used by the last successful regenerate (0 if none yet) --
  * surfaced in the HUD/log so a good random track can be reproduced. */
 unsigned int td5_trackgen_last_seed(void);

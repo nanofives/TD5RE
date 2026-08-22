@@ -105,6 +105,11 @@
  * downstream random draw and break trace goldens. */
 static unsigned int s_rng;
 
+/* Seed to run the S2 regen gate against, set during a build and consumed after
+ * it finishes (the gate itself rebuilds a centerline, so it cannot run from
+ * inside one). 0 = nothing to check. */
+static unsigned int s_selfcheck_regen_seed = 0;
+
 /* Branch jump-table state, produced by tg_emit_strip and consumed by the
  * header write in the same call. */
 static int s_jump_lo, s_jump_hi, s_jump_base, s_jump_have, s_ring_len;
@@ -2140,10 +2145,12 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     }
     tg_apply_elevation(spec, &nl);
 
-    if (td5_env_flag_off("TD5RE_AUTOTRACK_SELFCHECK"))
+    if (td5_env_flag_off("TD5RE_AUTOTRACK_SELFCHECK")) {
         tg_selfcheck_ranges(&nl, spec->lanes,
                             td5_env_int("TD5RE_AUTOTRACK_BLOCK",
                                         TD5_TG_ORIGIN_BLOCK, 1, 20));
+        s_selfcheck_regen_seed = spec->seed;   /* run after the build completes */
+    }
 
     if (!tg_emit_strip(&nl, &strip, &nspans) || nspans < 8) {
         TD5_LOG_E(LOG_TAG, "trackgen: strip emit failed (spans=%d)", nspans);
@@ -2240,6 +2247,99 @@ done:
     return ok;
 }
 
+/* ===================== [S2] REGENERATE FOR IN-PLACE REWRITE =====================
+ * Rebuild the main-road span records for `seed` and hand them back as a blob of
+ * 24-byte records. Phase 2 streaming needs this so the track module can
+ * overwrite a REGION of its live span array with bytes that provably match what
+ * the same seed produced originally
+ * (docs/plans/AUTOTRACK_STREAMING.md, stage S2).
+ *
+ * Ownership is deliberate: the generator produces bytes, the track module owns
+ * its arrays and does the writing. This function never touches live state.
+ *
+ * Deterministic by construction -- tg_srand(seed) resets the private xorshift,
+ * and nothing here draws from the game's rand(), so a later call with the same
+ * seed reproduces the same bytes regardless of what happened in between.
+ *
+ * Caller frees *out_bytes. Returns 1 on success.
+ */
+int td5_trackgen_regenerate_main_spans(unsigned int seed,
+                                      unsigned char **out_bytes,
+                                      int *out_span_count)
+{
+    TD5_TrackGenSpec spec;
+    TG_NodeList nl;
+    TG_Buf spans, verts;
+    int vtx_count = 0, ok = 0, block;
+
+    if (!out_bytes || !out_span_count) return 0;
+    *out_bytes = NULL;
+    *out_span_count = 0;
+
+    td5_trackgen_default_spec(&spec);
+    td5_trackgen_apply_config(&spec);
+    spec.seed = seed;
+
+    memset(&nl, 0, sizeof(nl));
+    memset(&spans, 0, sizeof(spans));
+    memset(&verts, 0, sizeof(verts));
+
+    tg_srand(spec.seed);
+    block = td5_env_int("TD5RE_AUTOTRACK_BLOCK", TD5_TG_ORIGIN_BLOCK, 1, 20);
+
+    {
+        int tally[TD5_TG_SECTION_COUNT];
+        memset(tally, 0, sizeof(tally));
+        if (tg_build_centerline(&spec, &nl, tally)) {
+            tg_apply_elevation(&spec, &nl);
+            if (tg_emit_span_range(&nl, 0, nl.count - 1, spec.lanes, block,
+                                   &spans, &verts, &vtx_count)) {
+                *out_bytes = spans.b;          /* hand the buffer over */
+                *out_span_count = (int)(spans.len / 24);
+                spans.b = NULL;                /* so tg_buf_free does not free it */
+                spans.len = spans.cap = 0;
+                ok = 1;
+            }
+        }
+    }
+
+    free(nl.v);
+    tg_buf_free(&spans);
+    tg_buf_free(&verts);
+
+    if (ok)
+        TD5_LOG_I(LOG_TAG, "trackgen: regenerated %d main span records for "
+                  "seed %u (%d bytes)", *out_span_count, seed,
+                  *out_span_count * 24);
+    else
+        TD5_LOG_E(LOG_TAG, "trackgen: regenerate for seed %u FAILED", seed);
+    return ok;
+}
+
+/* [S2 GATE, generator half] Regenerating twice from one seed must give
+ * identical bytes -- otherwise an in-place rewrite could not be trusted to
+ * reproduce what the track was built from. Cheap, so it runs with the same
+ * TD5RE_AUTOTRACK_SELFCHECK knob as the S1 gate. */
+static void tg_selfcheck_regen(unsigned int seed)
+{
+    unsigned char *a = NULL, *b = NULL;
+    int na = 0, nb = 0;
+
+    if (!td5_trackgen_regenerate_main_spans(seed, &a, &na) ||
+        !td5_trackgen_regenerate_main_spans(seed, &b, &nb)) {
+        TD5_LOG_E(LOG_TAG, "trackgen selfcheck: regen FAILED");
+    } else if (na != nb || memcmp(a, b, (size_t)na * 24) != 0) {
+        TD5_LOG_E(LOG_TAG, "trackgen selfcheck: regen NOT deterministic "
+                  "(%d vs %d spans)", na, nb);
+    } else {
+        TD5_LOG_I(LOG_TAG, "trackgen selfcheck: regen PASS -- seed %u "
+                  "reproduces %d identical span records on a second call",
+                  seed, na);
+    }
+    free(a);
+    free(b);
+}
+
 /* ------------------------------------------------------- lifecycle ------- */
 int td5_trackgen_init(void)
 {
@@ -2291,6 +2391,12 @@ int td5_trackgen_regenerate(unsigned int seed)
     }
 
     s_last_seed = seed;
+
+    if (s_selfcheck_regen_seed) {
+        unsigned int sd = s_selfcheck_regen_seed;
+        s_selfcheck_regen_seed = 0;
+        tg_selfcheck_regen(sd);
+    }
 
     /* Start a little way in so the grid has road behind it, and finish a few
      * spans short of the end so the walker still has road beyond the line. */
