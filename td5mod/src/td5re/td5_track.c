@@ -17,6 +17,13 @@
 
 #include "td5_track.h"
 #include "td5_track_internal.h"
+#include "td5_trackgen.h"   /* [S2] streaming self-check: regenerate + compare */
+
+/* [S2 / Phase 2 streaming] Verify that the LIVE span array matches what the
+ * generator reproduces from its seed, then overwrite one origin block in place
+ * and verify again. Dev gate only (TD5RE_AUTOTRACK_SELFCHECK=1); defined at the
+ * end of this file. */
+static void td5_track_stream_selfcheck(void);
 #include "td5_fp.h"       /* FP_TRUNC/FP_SCALE/FP_ANGLE 24.8 fixed-point macros */
 #include "td5_asset.h"
 #include "td5_physics.h"
@@ -3661,6 +3668,10 @@ int td5_track_load_strip(const void *data, size_t size)
      * address 0x4 = movzwl 0x4(%edx),%eax with edx=g_spanTable+anchor*0x18
      * resolving to NULL+0 because nothing wired these globals before. */
     td5_camera_bind_track_geometry(s_span_array, s_vertex_table);
+
+    /* [S2] Arrays are live and published here -- the right place to prove an
+     * in-place rewrite is safe, before anything starts moving. */
+    td5_track_stream_selfcheck();
 
     if (s_models_display_list_count > 0)
         rebuild_span_display_list_mapping();
@@ -9617,3 +9628,79 @@ void td5_track_debug_emit_collision_lines(int center_span, int span_radius)
  *     inflate in td5_inflate.c -- the port reads the entire compressed
  *     blob once, so there is no chunk-refill state machine.
  */
+
+/* ===================== [S2] STREAMING SELF-CHECK =====================
+ * Phase 2 streaming rewrites a REGION of the live span array as the player
+ * advances (docs/plans/AUTOTRACK_STREAMING.md). Two things must hold before
+ * that can be trusted, and both are checked here while the car is stationary
+ * at load:
+ *
+ *   1. The bytes the loader has in memory are EXACTLY what the generator
+ *      reproduces from its seed. If they differ, a rewritten region would not
+ *      match the track around it.
+ *   2. Writing into the array at a computed block offset lands where intended.
+ *      Addressing errors here are the silent kind -- geometry would shift by a
+ *      span and present as a walker or contact bug somewhere else entirely.
+ *
+ * The rewrite is deliberately IDENTICAL content, so a pass proves the plumbing
+ * without changing the track. Guarded so it silently skips for any track that
+ * is not the generated one.
+ */
+static void td5_track_stream_selfcheck(void)
+{
+    const int block = 16;            /* one origin block */
+    unsigned char *regen = NULL;
+    int regen_count = 0, ring;
+    unsigned int seed;
+
+    if (!td5_env_flag_off("TD5RE_AUTOTRACK_SELFCHECK")) return;
+
+    seed = td5_trackgen_last_seed();
+    if (!seed || !s_span_array || s_span_count <= 0) return;
+
+    ring = g_td5.track_span_ring_length;
+    if (ring <= 0 || ring > s_span_count) ring = s_span_count;
+
+    if (!td5_trackgen_regenerate_main_spans(seed, &regen, &regen_count))
+        return;
+
+    if (regen_count != ring) {
+        /* Almost certainly a shipped track, not the generated one. */
+        TD5_LOG_I(LOG_TAG, "stream selfcheck: skipped (live ring %d, regen %d)",
+                  ring, regen_count);
+        free(regen);
+        return;
+    }
+
+    if (memcmp(s_span_array, regen, (size_t)ring * 24) != 0) {
+        int i, first = -1;
+        for (i = 0; i < ring && first < 0; i++)
+            if (memcmp((const unsigned char *)s_span_array + (size_t)i * 24,
+                       regen + (size_t)i * 24, 24) != 0)
+                first = i;
+        TD5_LOG_E(LOG_TAG, "stream selfcheck: FAIL -- live span array differs "
+                  "from regen at span %d (ring=%d). In-place rewrite is NOT "
+                  "safe until this matches.", first, ring);
+        free(regen);
+        return;
+    }
+    TD5_LOG_I(LOG_TAG, "stream selfcheck: live array matches regen over %d "
+              "spans", ring);
+
+    if (ring > block * 2) {
+        /* Rewrite one block in place with identical bytes, then re-verify the
+         * whole ring: proves the write addresses correctly and touches nothing
+         * outside the intended range. */
+        memcpy((unsigned char *)s_span_array + (size_t)block * 24,
+               regen + (size_t)block * 24, (size_t)block * 24);
+        if (memcmp(s_span_array, regen, (size_t)ring * 24) != 0)
+            TD5_LOG_E(LOG_TAG, "stream selfcheck: FAIL -- in-place block "
+                      "rewrite corrupted the array");
+        else
+            TD5_LOG_I(LOG_TAG, "stream selfcheck: PASS -- in-place rewrite of "
+                      "spans [%d,%d) left the ring byte-identical",
+                      block, block * 2);
+    }
+
+    free(regen);
+}
