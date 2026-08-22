@@ -765,6 +765,149 @@ static double tg_branch_shift(int k, double width)
     return -width * (1.0 + bow * 1.6);
 }
 
+/* ===================== [S1] RANGE EMITTER =====================
+ * Emit spans [first_span, first_span+span_count) and their vertex rows into
+ * CALLER-OWNED buffers, with vertex indices continuing from *vtx_count.
+ *
+ * This exists for Phase 2 streaming (docs/plans/AUTOTRACK_STREAMING.md): a
+ * rolling ring buffer has to rewrite a REGION of the track, not rebuild the
+ * whole thing, so the emitter has to be addressable by range.
+ *
+ * CONTRACT: first_span MUST be block-aligned (first_span % block == 0), and
+ * span_count SHOULD be a multiple of block except for the final partial one.
+ * Origin blocks share an origin and share rows across the block, so a range
+ * starting mid-block would produce a different origin for those spans and
+ * different vertex indices -- silently different geometry, not an error. The
+ * streaming design already advances the write cursor in block units for this
+ * reason. Asserted below rather than assumed.
+ */
+static int tg_emit_span_range(const TG_NodeList *nl, int first_span,
+                              int span_count, int lanes, int block,
+                              TG_Buf *spans, TG_Buf *verts, int *vtx_count)
+{
+    const int row_pts = lanes + 1;
+    const int range_end = first_span + span_count;
+    int s0, ok = 1;
+
+    if (block <= 0 || span_count <= 0) return 0;
+    if (first_span % block != 0) {
+        TD5_LOG_E(LOG_TAG, "trackgen: emit range first_span=%d is not aligned "
+                  "to the %d-span origin block; refusing (would silently "
+                  "change geometry)", first_span, block);
+        return 0;
+    }
+    if (range_end > nl->count - 1) {
+        TD5_LOG_E(LOG_TAG, "trackgen: emit range [%d,%d) exceeds %d spans",
+                  first_span, range_end, nl->count - 1);
+        return 0;
+    }
+
+    for (s0 = first_span; s0 < range_end; s0 += block) {
+        const int ns  = (s0 + block <= range_end) ? block : (range_end - s0);
+        const int ox  = tg_round(nl->v[s0].x);
+        const int oy  = tg_round(nl->v[s0].y);
+        const int oz  = tg_round(nl->v[s0].z);
+        const int base = *vtx_count;
+        int k;
+
+        if (*vtx_count + (ns + 1) * row_pts > TD5_TG_MAX_VERTICES) {
+            TD5_LOG_W(LOG_TAG, "trackgen: vertex ceiling hit at span %d "
+                      "(%d verts); truncating", s0, *vtx_count);
+            break;
+        }
+
+        /* ns+1 rows, one per node s0..s0+ns inclusive, all relative to this
+         * block's origin. The shared row at a block seam is re-emitted under
+         * the new origin, exactly as shipped tracks do. */
+        for (k = 0; k <= ns; k++) {
+            const TG_Node *n = &nl->v[s0 + k];
+            const double lx = n->tz, lz = -n->tx;
+            int j;
+            for (j = 0; j < row_pts; j++) {
+                double t  = (n->width * 0.5)
+                          - (n->width * (double)j / (double)lanes);
+                int dx = tg_round(n->x + lx * t) - ox;
+                int dy = tg_round(n->y) - oy;
+                int dz = tg_round(n->z + lz * t) - oz;
+                if (dx < -32768 || dx > 32767 || dy < -32768 || dy > 32767 ||
+                    dz < -32768 || dz > 32767) {
+                    TD5_LOG_E(LOG_TAG, "trackgen: vertex offset out of int16 "
+                              "range in block at span %d (%d,%d,%d) -- reduce "
+                              "the origin block size", s0, dx, dy, dz);
+                    ok = 0;
+                }
+                tg_put_u16(verts, (unsigned)(dx & 0xFFFF));
+                tg_put_u16(verts, (unsigned)(dy & 0xFFFF));
+                tg_put_u16(verts, (unsigned)(dz & 0xFFFF));
+            }
+            *vtx_count += row_pts;
+        }
+
+        for (k = 0; k < ns; k++) {
+            tg_put_u8 (spans, 1);                        /* span_type QUAD_A */
+            tg_put_u8 (spans, TD5_TG_SURFACE_ATTR);
+            tg_put_u8 (spans, (unsigned)(1 | (1 << (lanes - 1))));
+            tg_put_u8 (spans, (unsigned)((TD5_TG_HEIGHT_NIBBLE << 4)
+                                         | (lanes & 0x0F)));
+            tg_put_u16(spans, (unsigned)(base + k * row_pts));
+            tg_put_u16(spans, (unsigned)(base + (k + 1) * row_pts));
+            tg_put_u16(spans, 0xFFFF);                   /* link_next = -1 */
+            tg_put_u16(spans, 0xFFFF);                   /* link_prev = -1 */
+            tg_put_i32(spans, ox);
+            tg_put_i32(spans, oy);
+            tg_put_i32(spans, oz);
+        }
+    }
+    return ok && !spans->oom && !verts->oom;
+}
+
+/* [S1 GATE] Prove the range emitter is composable: emitting the track in
+ * block-aligned CHUNKS must be byte-identical to emitting it in one call. If
+ * that does not hold, streaming would silently produce different geometry from
+ * the same seed. Runs only when TD5RE_AUTOTRACK_SELFCHECK=1. */
+static void tg_selfcheck_ranges(const TG_NodeList *nl, int lanes, int block)
+{
+    const int nspans = nl->count - 1;
+    TG_Buf one_s, one_v, many_s, many_v;
+    int vc_one = 0, vc_many = 0, s0, ok = 1;
+    int chunk = block * 5;      /* several blocks per chunk, still aligned */
+
+    memset(&one_s, 0, sizeof(one_s));   memset(&one_v, 0, sizeof(one_v));
+    memset(&many_s, 0, sizeof(many_s)); memset(&many_v, 0, sizeof(many_v));
+
+    if (!tg_emit_span_range(nl, 0, nspans, lanes, block, &one_s, &one_v,
+                            &vc_one))
+        ok = 0;
+
+    for (s0 = 0; ok && s0 < nspans; s0 += chunk) {
+        int n = (s0 + chunk <= nspans) ? chunk : (nspans - s0);
+        if (!tg_emit_span_range(nl, s0, n, lanes, block, &many_s, &many_v,
+                                &vc_many))
+            ok = 0;
+    }
+
+    if (!ok) {
+        TD5_LOG_E(LOG_TAG, "trackgen selfcheck: range emit FAILED");
+    } else if (one_s.len != many_s.len || one_v.len != many_v.len ||
+               vc_one != vc_many) {
+        TD5_LOG_E(LOG_TAG, "trackgen selfcheck: FAIL size (spans %zu vs %zu, "
+                  "verts %zu vs %zu, vtx %d vs %d)", one_s.len, many_s.len,
+                  one_v.len, many_v.len, vc_one, vc_many);
+    } else if (memcmp(one_s.b, many_s.b, one_s.len) != 0) {
+        TD5_LOG_E(LOG_TAG, "trackgen selfcheck: FAIL span bytes differ");
+    } else if (memcmp(one_v.b, many_v.b, one_v.len) != 0) {
+        TD5_LOG_E(LOG_TAG, "trackgen selfcheck: FAIL vertex bytes differ");
+    } else {
+        TD5_LOG_I(LOG_TAG, "trackgen selfcheck: PASS -- %d spans emitted in "
+                  "%d-span chunks is byte-identical to one shot (%zu span B, "
+                  "%zu vtx B, %d verts)", nspans, chunk, one_s.len, one_v.len,
+                  vc_one);
+    }
+
+    tg_buf_free(&one_s);  tg_buf_free(&one_v);
+    tg_buf_free(&many_s); tg_buf_free(&many_v);
+}
+
 static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
 {
     const int nspans = nl->count - 1;
@@ -783,7 +926,6 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
      * INDEX -- contact then fails at every seam and the car sinks through the
      * road (measured: wheel_mask=0 for 343/385 ticks, even dead flat). */
     const int lanes   = nl->v[0].lanes;
-    const int row_pts = lanes + 1;
     /* Reset per-call: a failed or branch-less build must not leave a stale
      * jump record from a previous generation in the header. */
     s_jump_lo = s_jump_hi = s_jump_base = s_jump_have = 0;
@@ -795,7 +937,6 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
      * while the visible road ramps away from it on hills. */
     const int block = td5_env_int("TD5RE_AUTOTRACK_BLOCK",
                                   TD5_TG_ORIGIN_BLOCK, 1, 20);
-    int s0;
 
     /* ORIGIN BLOCKS. The loader resolves BOTH of a span's vertex rows against
      * THAT span's origin, so two spans can only share a row if they share an
@@ -811,70 +952,12 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
      *
      * Block length is bounded by the int16 vertex offset: TD5_TG_ORIGIN_BLOCK
      * spans of span_length, plus half the widest road, must stay under 32767. */
-    for (s0 = 0; s0 < nspans; s0 += block) {
-        const int ns  = (s0 + block <= nspans) ? block : (nspans - s0);
-        const int ox  = tg_round(nl->v[s0].x);
-        const int oy  = tg_round(nl->v[s0].y);
-        const int oz  = tg_round(nl->v[s0].z);
-        const int base = vtx_count;
-        int k;
-
-        if (vtx_count + (ns + 1) * row_pts > TD5_TG_MAX_VERTICES) {
-            TD5_LOG_W(LOG_TAG, "trackgen: vertex ceiling hit at span %d "
-                      "(%d verts); truncating track", s0, vtx_count);
-            break;
-        }
-
-        /* ns+1 rows: one per node from s0 to s0+ns inclusive, all relative to
-         * this block's origin. */
-        for (k = 0; k <= ns; k++) {
-            const TG_Node *n = &nl->v[s0 + k];
-            /* Left of travel is (tz, -tx); row runs +half_width -> -half_width.
-             * NOTE: this was briefly reversed on the belief that it fixed ground
-             * contact. That was based on reading actor+0x37C as a CONTACT mask
-             * when it is an AIRBORNE mask (bit set = wheel airborne), so
-             * "wheel_mask=0 for 947/991 ticks" actually meant all four wheels
-             * GROUNDED 96% of the time. Reverted. */
-            const double lx = n->tz, lz = -n->tx;
-            int j;
-            for (j = 0; j < row_pts; j++) {
-                double t  = (n->width * 0.5)
-                          - (n->width * (double)j / (double)lanes);
-                int dx = tg_round(n->x + lx * t) - ox;
-                int dy = tg_round(n->y) - oy;
-                int dz = tg_round(n->z + lz * t) - oz;
-                if (dx < -32768 || dx > 32767 || dy < -32768 || dy > 32767 ||
-                    dz < -32768 || dz > 32767) {
-                    TD5_LOG_E(LOG_TAG, "trackgen: vertex offset out of int16 "
-                              "range in block at span %d (%d,%d,%d) -- reduce "
-                              "TD5_TG_ORIGIN_BLOCK", s0, dx, dy, dz);
-                    ok = 0;
-                }
-                tg_put_u16(&verts, (unsigned)(dx & 0xFFFF));
-                tg_put_u16(&verts, (unsigned)(dy & 0xFFFF));
-                tg_put_u16(&verts, (unsigned)(dz & 0xFFFF));
-            }
-            vtx_count += row_pts;
-        }
-
-        /* Every span in the block carries the block origin and indexes two
-         * consecutive rows within it. */
-        for (k = 0; k < ns; k++) {
-            tg_put_u8 (&spans, 1);                       /* span_type QUAD_A */
-            tg_put_u8 (&spans, TD5_TG_SURFACE_ATTR);     /* surface class */
-            /* Alternate surface on the two outer lanes, as shipped does. */
-            tg_put_u8 (&spans, (unsigned)(1 | (1 << (lanes - 1))));
-            tg_put_u8 (&spans, (unsigned)((TD5_TG_HEIGHT_NIBBLE << 4)
-                                          | (lanes & 0x0F)));
-            tg_put_u16(&spans, (unsigned)(base + k * row_pts));
-            tg_put_u16(&spans, (unsigned)(base + (k + 1) * row_pts));
-            tg_put_u16(&spans, 0xFFFF);            /* link_next = -1 */
-            tg_put_u16(&spans, 0xFFFF);            /* link_prev = -1 */
-            tg_put_i32(&spans, ox);
-            tg_put_i32(&spans, oy);
-            tg_put_i32(&spans, oz);
-        }
-    }
+    /* [S1] Whole track = one block-aligned range. The emitter below can write
+     * any block-aligned range into caller buffers, which is what Phase 2
+     * streaming needs to rewrite a region in place. */
+    if (!tg_emit_span_range(nl, 0, nspans, lanes, block, &spans, &verts,
+                            &vtx_count))
+        ok = 0;
 
     /* ---- BRANCH (opt-in) ---- */
     {
@@ -2056,6 +2139,11 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         goto done;
     }
     tg_apply_elevation(spec, &nl);
+
+    if (td5_env_flag_off("TD5RE_AUTOTRACK_SELFCHECK"))
+        tg_selfcheck_ranges(&nl, spec->lanes,
+                            td5_env_int("TD5RE_AUTOTRACK_BLOCK",
+                                        TD5_TG_ORIGIN_BLOCK, 1, 20));
 
     if (!tg_emit_strip(&nl, &strip, &nspans) || nspans < 8) {
         TD5_LOG_E(LOG_TAG, "trackgen: strip emit failed (spans=%d)", nspans);
