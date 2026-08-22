@@ -555,6 +555,55 @@ static void tg_put_zeros(TG_Buf *buf, size_t n)
     buf->len += n;
 }
 
+/* Copy a file verbatim. Used for the sky: the renderer wants a 256x256 RGBA
+ * FORWSKY.png in the level directory, and reusing a shipped panorama is both
+ * guaranteed-valid and better looking than anything this generator could
+ * synthesise. Forward-only tracks need no BACKSKY -- the loader falls back to
+ * FORWSKY when it is absent (td5_game.c:4644-4648). */
+static int tg_copy_file(const char *src, const char *dst)
+{
+    FILE *fi, *fo;
+    char buf[16384];
+    size_t n;
+    int ok = 1;
+
+    fi = fopen(src, "rb");
+    if (!fi) return 0;
+    fo = fopen(dst, "wb");
+    if (!fo) { fclose(fi); return 0; }
+    while ((n = fread(buf, 1, sizeof(buf), fi)) > 0) {
+        if (fwrite(buf, 1, n, fo) != n) { ok = 0; break; }
+    }
+    fclose(fi);
+    fclose(fo);
+    return ok;
+}
+
+/* Install a sky by borrowing one from a shipped level, chosen from the seed so
+ * different generated tracks get different skies. Candidates are probed in
+ * order because not every level ships one. Non-fatal: without it the race just
+ * renders against the flat clear colour, which is what happened before. */
+static void tg_install_sky(const char *dir, unsigned int seed)
+{
+    static const int k_sky_levels[] = { 1, 2, 3, 5, 8, 13, 21, 29 };
+    const int n = (int)(sizeof(k_sky_levels) / sizeof(k_sky_levels[0]));
+    char src[256], dst[320];
+    int i;
+
+    for (i = 0; i < n; i++) {
+        int lvl = k_sky_levels[(seed / 7u + (unsigned)i) % (unsigned)n];
+        snprintf(src, sizeof(src),
+                 "re/assets/levels/level%03d/FORWSKY.png", lvl);
+        snprintf(dst, sizeof(dst), "%s/FORWSKY.png", dir);
+        if (tg_copy_file(src, dst)) {
+            TD5_LOG_I(LOG_TAG, "trackgen: sky from level%03d -> %s", lvl, dst);
+            return;
+        }
+    }
+    TD5_LOG_W(LOG_TAG, "trackgen: no shipped FORWSKY.png found to borrow; "
+              "race will render against the flat clear colour");
+}
+
 static int tg_write_file(const char *dir, const char *name,
                          const unsigned char *data, size_t len)
 {
@@ -2068,6 +2117,8 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
             remove(tex_path);
         }
     }
+
+    tg_install_sky(dir, spec->seed);
 
     TD5_LOG_I(LOG_TAG, "trackgen: seed=%u level=%d spans=%d len=%.0f world units",
               spec->seed, level_num, nspans,
