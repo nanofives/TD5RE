@@ -97,6 +97,12 @@ void td5_track_shutdown(void);
 /* --- STRIP.DAT loading --- */
 int  td5_track_load_strip(const void *data, size_t size);
 void td5_track_bind_runtime_pointers(void);
+/* Re-apply the loader's post-parse sentinel patch to spans [first, first+count)
+ * of `arr` (ring = main-road length). Idempotent, pointer-free; a no-op for any
+ * interior region. Phase 2 streaming uses it after rewriting a region with
+ * regenerated parse-state bytes. See td5_track.c / AUTOTRACK_STREAMING.md. */
+void td5_track_apply_load_transform(TD5_StripSpan *arr, int ring,
+                                    int first, int count);
 void td5_track_apply_attribute_overrides(void);
 
 /* --- Track runtime data --- */

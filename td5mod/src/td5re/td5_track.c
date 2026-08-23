@@ -3726,6 +3726,44 @@ int td5_track_load_strip(const void *data, size_t size)
     return 1;
 }
 
+/* [S2/S3 streaming] Re-apply the loader's post-parse span transform to a REGION
+ * of a span array (docs/plans/AUTOTRACK_STREAMING.md, option b).
+ *
+ * The generator emits PARSE-state span records: every main-road span has
+ * span_type=1 and link_next=link_prev=-1 (td5_trackgen.c tg_emit_span_range).
+ * The loader then patches the two ring sentinels in td5_track_bind_runtime_pointers,
+ * so the LIVE array is NOT byte-identical to what the generator reproduces from
+ * its seed. Phase 2 streaming rewrites a region of the live ring with
+ * regenerated (parse-state) bytes and must re-run this transform over that
+ * region to restore the loader-final state.
+ *
+ * Idempotent and depends only on `ring` -- never on runtime pointers, which are
+ * wired separately in td5_track_load_strip -- so it is safe to call on any
+ * region, any number of times. The transform touches ONLY span 0
+ * (SENTINEL_START, link_prev = ring-1) and span ring-1 (SENTINEL_END,
+ * link_next = 0), so it is a no-op for any interior region: exactly the regions
+ * the streaming write cursor rewrites.
+ */
+void td5_track_apply_load_transform(TD5_StripSpan *arr, int ring,
+                                    int first, int count)
+{
+    int last = ring - 1;
+
+    if (!arr || ring < 2 || count <= 0)
+        return;
+
+    /* span 0: SENTINEL_START, backward link wraps to the last main span */
+    if (first <= 0 && first + count > 0) {
+        arr[0].span_type = 9;
+        arr[0].link_prev = (int16_t)(ring - 1);
+    }
+    /* span ring-1: SENTINEL_END, forward link cleared */
+    if (first <= last && first + count > last) {
+        arr[last].span_type = 10;
+        arr[last].link_next = 0;
+    }
+}
+
 /**
  * BindTrackStripRuntimePointers (0x444070) — byte-faithful port
  *
@@ -3760,32 +3798,25 @@ int td5_track_load_strip(const void *data, size_t size)
  */
 void td5_track_bind_runtime_pointers(void)
 {
-    TD5_StripSpan *first, *last;
     int ring = g_td5.track_span_ring_length;
 
     if (!s_span_array || ring < 2)
         return;
 
-    first = &s_span_array[0];
-    last  = &s_span_array[ring - 1];
-
-    /* Patch first span:
-     *   span_type   = 9   (SENTINEL_START)  -- byte at +0x00
-     *   link_prev   = ring - 1              -- int16 at +0x0a */
-    first->span_type = 9;
-    first->link_prev = (int16_t)(ring - 1);
-
-    /* Patch last main road span:
-     *   span_type   = 10  (SENTINEL_END)    -- byte at +0x00
-     *   link_next   = 0                     -- uint16 at +0x08 (NOT origin_y!)
+    /* The two sentinel patches the original executes after the global wiring
+     * ARE the whole of the load transform, so apply it across the entire ring:
+     *   span[0]      span_type = 9  (SENTINEL_START), link_prev = ring-1
+     *   span[ring-1] span_type = 10 (SENTINEL_END),   link_next = 0
      *
-     * Original disassembly: `MOV word ptr [EAX + EDX*0x8 + -0x10],0x0`
-     * with EDX = total*3 and EAX = strip base, so the displacement
-     * total*0x18 - 0x10 = (total-1)*0x18 + 0x08, i.e. last-span +0x08
-     * which is link_next, not +0x10 (origin_y) as the previous comment
-     * claimed. */
-    last->span_type = 10;
-    last->link_next = 0;
+     * Original disassembly for the last patch: `MOV word ptr [EAX + EDX*0x8 +
+     * -0x10],0x0` with EDX = total*3 and EAX = strip base, so the displacement
+     * total*0x18 - 0x10 = (total-1)*0x18 + 0x08 == last-span +0x08, i.e.
+     * link_next (NOT +0x10 origin_y as an earlier comment claimed).
+     *
+     * Factored into td5_track_apply_load_transform so Phase 2 streaming can
+     * re-run the same patch over a rewritten region (AUTOTRACK_STREAMING.md,
+     * option b). Behaviourally identical to the previous inline patches. */
+    td5_track_apply_load_transform(s_span_array, ring, 0, ring);
 
     TD5_LOG_I(LOG_TAG, "bind_runtime: sentinels at span[0]=type9, span[%d]=type10 (ring=%d total=%d)",
               ring - 1, ring, s_span_count);
@@ -9642,9 +9673,11 @@ void td5_track_debug_emit_collision_lines(int center_span, int span_radius)
  * that can be trusted, and both are checked here while the car is stationary
  * at load:
  *
- *   1. The bytes the loader has in memory are EXACTLY what the generator
- *      reproduces from its seed. If they differ, a rewritten region would not
- *      match the track around it.
+ *   1. The bytes the loader has in memory match what the generator reproduces
+ *      from its seed, once the loader's own post-parse transform is re-applied
+ *      to the regenerated copy (td5_track_apply_load_transform -- the generator
+ *      emits parse-state bytes; the loader patches two ring sentinels). If they
+ *      differ after that, a rewritten region would not match the track around it.
  *   2. Writing into the array at a computed block offset lands where intended.
  *      Addressing errors here are the silent kind -- geometry would shift by a
  *      span and present as a walker or contact bug somewhere else entirely.
@@ -9683,6 +9716,13 @@ static void td5_track_stream_selfcheck(void)
         free(regen);
         return;
     }
+
+    /* [option b] regen hands back PARSE-state bytes; the live array is in
+     * LOAD-FINAL state because bind patched the two ring sentinels. Re-apply the
+     * loader transform to the regen copy so we compare like with like. This is
+     * the exact primitive a streaming rewrite will run over each rewritten
+     * region -- proving it here proves the memcpy assumption in the design. */
+    td5_track_apply_load_transform((TD5_StripSpan *)regen, ring, 0, ring);
 
     if (memcmp(s_span_array, regen, (size_t)ring * 24) != 0) {
         int i, first = -1;
