@@ -36,6 +36,15 @@ int  td5_track_registry_count(void);
  * the frontend track-cycler's range. */
 int  td5_track_registry_slot_max(void);
 
+/* Register (or re-register) a track programmatically, bypassing the manifest.
+ * Used by the procedural generator (td5_trackgen.c), which synthesises its
+ * level directory at runtime and so has no manifest entry. Re-calling with the
+ * same slot UPDATES that row in place, which is what a per-race regenerate
+ * needs (the span count -- and therefore finish_span -- changes every time).
+ * Returns 1 on success, 0 if the table is full or the slot is out of range. */
+int td5_track_registry_set_auto(int slot, int level, const char *name,
+                                int circuit, int start_span, int finish_span);
+
 /* --- by SLOT (frontend) --- */
 int          td5_track_registry_has_slot(int slot);
 const char  *td5_track_registry_name_for_slot(int slot);   /* NULL if not custom */

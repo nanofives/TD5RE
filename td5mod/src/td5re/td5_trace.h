@@ -116,6 +116,9 @@ typedef struct TD5_TraceTrackRow {
     int     slot;
     int16_t span_raw, span_norm, span_accum, span_high;
     uint8_t track_contact_flag;
+    /* actor+0x37C. BIT SET = that wheel is AIRBORNE, so 0 = all four
+     * wheels GROUNDED and 0x0F = fully airborne. Named "contact" for
+     * historical reasons; read it as an AIRBORNE mask. */
     uint8_t wheel_contact_mask;
     int32_t wall_clear;   /* distance (track units) to the nearer rail; <0 = off track / unknown */
 } TD5_TraceTrackRow;

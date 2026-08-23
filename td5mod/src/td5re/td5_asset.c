@@ -32,6 +32,7 @@
 #include "td5_customcar.h" /* drop-in custom car registry (slots 76+) */
 #include "td5_track.h"
 #include "td5_track_registry.h" /* custom-track registry: level/finish-span lookups */
+#include "td5_trackgen.h"       /* AUTO-GENERATED track: per-race regeneration */
 #include "td5_platform.h"
 #include "td5re.h"
 #include "td5_render.h"
@@ -2359,6 +2360,19 @@ int td5_asset_load_level(int track_index)
 {
     char zip_path[256];
     char strip_source[256];
+
+    /* AUTO-GENERATED track: rebuild its level directory with a fresh seed so
+     * every race gets new geometry. Done here rather than in the frontend so
+     * every entry path is covered (menu, --AutoRace, selftest, control socket).
+     * On failure the stale previous build is left in place and the load
+     * continues, so a generator hiccup degrades to "same track again" rather
+     * than a failed race launch. */
+    if (td5_trackgen_is_auto_slot(track_index)) {
+        if (!td5_trackgen_regenerate(0))
+            TD5_LOG_W(LOG_TAG, "load_level: auto-track regenerate failed; "
+                      "reusing the previous generated track");
+    }
+
     td5_asset_build_level_zip_path(track_index, zip_path, sizeof(zip_path));
 
     TD5_LOG_I(LOG_TAG, "td5_asset_load_level: track_index=%d -> zip=%s exists=%d",

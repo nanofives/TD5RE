@@ -73,6 +73,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  only real suspects count" },
     { CL_ITEM,    "Police chase (1 player): the number of suspects now" },
     { CL_ITEM,    "  follows the OPPONENTS setting (1-5), was always 1" },
+    { CL_ITEM,    "New AUTO-GENERATED track in the track selector -" },
+    { CL_ITEM,    "  a fresh random road is built for every race" },
+    { CL_ITEM,    "Random road mixes straights, sweeping curves," },
+    { CL_ITEM,    "  sharp bends and widened multi-lane stretches" },
+    { CL_ITEM,    "  with rolling hills; percentages are tunable" },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 19" },

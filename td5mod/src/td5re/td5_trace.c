@@ -45,7 +45,7 @@ static ModuleFile s_modules[] = {
       "frame,sim_tick,stage,slot,vel_x,vel_y,vel_z,long_speed,lat_speed,front_slip,rear_slip",
       "TD5RE_TRACE_MOTION_PATH",   NULL, NULL },
     { TD5_TRACE_MOD_TRACK,    "track",    "track",
-      "frame,sim_tick,stage,slot,span_raw,span_norm,span_accum,span_high,track_contact,wheel_mask,wall_clear",
+      "frame,sim_tick,stage,slot,span_raw,span_norm,span_accum,span_high,track_contact,airborne_mask,wall_clear",
       "TD5RE_TRACE_TRACK_PATH",    NULL, NULL },
     { TD5_TRACE_MOD_CONTROLS, "controls", "controls",
       "frame,sim_tick,stage,slot,slot_state,steering,engine,gear,vehicle_mode",

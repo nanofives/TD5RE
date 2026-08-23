@@ -40,6 +40,15 @@ static TD5_CustomTrack s_tracks[TD5_CUSTOM_TRACK_MAX];
 static int s_track_count = 0;
 static int s_slot_max = TD5_CUSTOM_TRACK_SLOT_BASE;
 
+/* The procedurally generated track lives OUTSIDE the manifest table. It used
+ * to take a row via set_auto, which silently failed once a user's
+ * custom_tracks.json filled all TD5_CUSTOM_TRACK_MAX rows -- the auto slot
+ * then never registered and its level number fell through to an unrelated
+ * shipped level (observed: slot 60 loading level023.zip). Dedicated storage
+ * removes the contention entirely. */
+static TD5_CustomTrack s_auto;
+static int s_auto_valid = 0;
+
 /* Read a whole file into a malloc'd, NUL-terminated buffer (for cJSON_Parse).
  * Mirrors td5_assetsrc.c's reader (which is file-static there). */
 static char *registry_read_file(const char *path)
@@ -152,6 +161,7 @@ int td5_track_registry_init(void)
 
 void td5_track_registry_shutdown(void)
 {
+    s_auto_valid = 0;
     s_track_count = 0;
     s_slot_max = TD5_CUSTOM_TRACK_SLOT_BASE;
 }
@@ -159,9 +169,46 @@ void td5_track_registry_shutdown(void)
 int td5_track_registry_count(void) { return s_track_count; }
 int td5_track_registry_slot_max(void) { return s_slot_max; }
 
+int td5_track_registry_set_auto(int slot, int level, const char *name,
+                                int circuit, int start_span, int finish_span)
+{
+    TD5_CustomTrack *t = &s_auto;
+
+    if (slot < TD5_CUSTOM_TRACK_SLOT_BASE) {
+        TD5_LOG_W(LOG_TAG, "track registry: set_auto rejected slot %d "
+                  "(must be >= %d)", slot, TD5_CUSTOM_TRACK_SLOT_BASE);
+        return 0;
+    }
+    /* Dedicated storage: never consumes a manifest row, so a full
+     * custom_tracks.json cannot stop the auto track registering. Re-calling
+     * overwrites in place, which is what a per-race regenerate needs. */
+    s_auto_valid = 1;
+
+    t->slot        = slot;
+    t->level       = level;
+    t->circuit     = circuit ? 1 : 0;
+    t->start_span  = start_span;
+    t->finish_span = finish_span;
+    t->sky_pitch   = 0.08f;
+    t->tga         = -1;
+    if (name && name[0]) {
+        strncpy(t->name, name, sizeof(t->name) - 1);
+        t->name[sizeof(t->name) - 1] = '\0';
+    } else {
+        snprintf(t->name, sizeof(t->name), "AUTO TRACK %d", slot);
+    }
+    if (slot + 1 > s_slot_max) s_slot_max = slot + 1;
+
+    TD5_LOG_I(LOG_TAG, "track registry: set_auto slot %d -> level %d '%s' "
+              "(%s, start=%d finish=%d)", t->slot, t->level, t->name,
+              t->circuit ? "circuit" : "p2p", t->start_span, t->finish_span);
+    return 1;
+}
+
 static const TD5_CustomTrack *find_by_slot(int slot)
 {
     int i;
+    if (s_auto_valid && s_auto.slot == slot) return &s_auto;
     for (i = 0; i < s_track_count; i++)
         if (s_tracks[i].slot == slot) return &s_tracks[i];
     return NULL;
@@ -170,6 +217,7 @@ static const TD5_CustomTrack *find_by_slot(int slot)
 static const TD5_CustomTrack *find_by_level(int level)
 {
     int i;
+    if (s_auto_valid && s_auto.level == level) return &s_auto;
     for (i = 0; i < s_track_count; i++)
         if (s_tracks[i].level == level) return &s_tracks[i];
     return NULL;
