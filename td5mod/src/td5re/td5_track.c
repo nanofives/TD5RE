@@ -22,8 +22,10 @@
 /* [S2 / Phase 2 streaming] Verify that the LIVE span array matches what the
  * generator reproduces from its seed, then overwrite one origin block in place
  * and verify again. Dev gate only (TD5RE_AUTOTRACK_SELFCHECK=1); defined at the
- * end of this file. */
+ * end of this file. Compile-time gated (see the call site). */
+#ifdef TD5RE_AUTOTRACK_STREAM_SELFCHECK
 static void td5_track_stream_selfcheck(void);
+#endif
 #include "td5_fp.h"       /* FP_TRUNC/FP_SCALE/FP_ANGLE 24.8 fixed-point macros */
 #include "td5_asset.h"
 #include "td5_physics.h"
@@ -3669,9 +3671,14 @@ int td5_track_load_strip(const void *data, size_t size)
      * resolving to NULL+0 because nothing wired these globals before. */
     td5_camera_bind_track_geometry(s_span_array, s_vertex_table);
 
+#ifdef TD5RE_AUTOTRACK_STREAM_SELFCHECK
     /* [S2] Arrays are live and published here -- the right place to prove an
-     * in-place rewrite is safe, before anything starts moving. */
+     * in-place rewrite is safe, before anything starts moving. COMPILE-TIME
+     * gated rather than env-gated: an env guard still fired on a default run
+     * and put an [ERR] in every generated race log. Build with
+     * -DTD5RE_AUTOTRACK_STREAM_SELFCHECK to re-enable. */
     td5_track_stream_selfcheck();
+#endif
 
     if (s_models_display_list_count > 0)
         rebuild_span_display_list_mapping();
@@ -9646,6 +9653,7 @@ void td5_track_debug_emit_collision_lines(int center_span, int span_radius)
  * without changing the track. Guarded so it silently skips for any track that
  * is not the generated one.
  */
+#ifdef TD5RE_AUTOTRACK_STREAM_SELFCHECK
 static void td5_track_stream_selfcheck(void)
 {
     const int block = 16;            /* one origin block */
@@ -9653,7 +9661,11 @@ static void td5_track_stream_selfcheck(void)
     int regen_count = 0, ring;
     unsigned int seed;
 
-    if (!td5_env_flag_off("TD5RE_AUTOTRACK_SELFCHECK")) return;
+    /* Strictly opt-in: requires the value to be exactly 1. A flag helper was
+     * used here first and the check still fired on a default run, putting an
+     * [ERR] in every generated race log -- unacceptable noise for a known,
+     * documented precondition. */
+    if (td5_env_int("TD5RE_AUTOTRACK_SELFCHECK", 0, 0, 1) != 1) return;
 
     seed = td5_trackgen_last_seed();
     if (!seed || !s_span_array || s_span_count <= 0) return;
@@ -9704,3 +9716,4 @@ static void td5_track_stream_selfcheck(void)
 
     free(regen);
 }
+#endif /* TD5RE_AUTOTRACK_STREAM_SELFCHECK */
