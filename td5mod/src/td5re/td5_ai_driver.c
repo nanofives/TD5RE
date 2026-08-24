@@ -157,6 +157,8 @@ static double s_line_margin;     /* [C2] keep the line this fraction of half-wid
 static int    s_line_iters;      /* [C2] elastic-band relaxation iterations */
 static double s_line_rref;       /* [C3] reference radius (render units) where the line cap reaches 1.0; cap = sqrt(R_line/R_ref). 0 = use the old heuristic cap. */
 static double s_line_rlo;        /* [C3b] below this line radius the apex offset ramps to centre (tight-hairpin stall guard); 0 = no blend */
+static int    s_branch_pct;      /* [route-variety] % of AI cars that take a branch corridor at a fork (0 = none, default) */
+static int    s_branch_feature;  /* [route-variety] autotrack branch feature on -> the decisive fork aim is active (scopes it off shipped tracks) */
 static int    s_stats;           /* [C2 diag] per-race steering-saturation% + wall-contact% + mean speed */
 static int    s_stat_ticks[TD5_MAX_RACER_SLOTS];
 static int    s_stat_sat[TD5_MAX_RACER_SLOTS];
@@ -251,6 +253,32 @@ static void driver_read_knobs(void)
      * 0 disables the blend (full line everywhere). */
     s_line_rlo       = (double)td5_env_int("TD5RE_AI_DRIVER_LINE_RLO", 10000, 0, 2000000);
     s_stats          = td5_env_flag_on("TD5RE_AI_DRIVER_STATS");
+    /* [route-variety 2026-08-24] Fraction of the AI field that takes a branch
+     * CORRIDOR at a fork instead of holding the main line, so a track with a
+     * fork shows two lines of cars. Default 0 (off): the field stays on the
+     * main racing line exactly as before, and no non-forked track is touched. */
+    s_branch_pct     = td5_env_int("TD5RE_AI_BRANCH_PCT", 0, 0, 100);
+    /* Only the AUTO-GENERATED track's opt-in branch produces the wide fork spans
+     * this touches, so gate the whole thing on that feature. This guarantees
+     * ZERO change to every shipped track (including the golden-trace races) and
+     * to native forks (level013/014), which keep their existing centre aim. */
+    /* NOTE td5_env_flag_off() returns 1 only when the value is literally "1" --
+     * it means "opt in" despite the name, and is exactly what tg_branches_enabled
+     * uses. No negation. */
+    s_branch_feature = td5_env_flag_off("TD5RE_AUTOTRACK_BRANCHES");
+}
+
+/* Does this slot take the branch at a fork? Deterministic per slot (stable
+ * across a race and across the field), so a fixed fraction of cars diverge and
+ * the same ones each time -- reproducible for A/B, and never mid-race flapping.
+ * A cheap integer hash spreads slots so small percentages are not all slot 0. */
+static int driver_slot_takes_branch(int slot)
+{
+    unsigned int h;
+    if (s_branch_pct <= 0) return 0;
+    if (s_branch_pct >= 100) return 1;
+    h = ((unsigned int)slot * 2654435761u) >> 24;   /* 0..255, well spread */
+    return (int)(h * 100u / 256u) < s_branch_pct;
 }
 
 /* ------------------------------------------------------------------------
@@ -804,16 +832,35 @@ int td5_ai_driver_tick(int slot)
      * Sydney for the outer grid slots). The per-driver line offset (racecraft,
      * clamped) then adds variety from the centre. */
     int lane_cnt = td5_track_get_span_lane_count((int)actor->track_span_normalized);
-    int aim_lane = (lane_cnt > 0) ? (lane_cnt / 2) : (int)actor->track_sub_lane_index;
+    int aim_lane;
+    int fork_diverge = 0;
+    /* [route-variety 2026-08-24] A fork widens its approach to main+branch lanes,
+     * so a WIDE span is a fork approach -- the only place the branch lanes exist.
+     * The plain lane_cnt/2 centre lands on the DIVIDER of an 8-lane fork (lane 4,
+     * which the walker's `sub >= main_lanes` test counts as the branch), so a
+     * centre-aiming car drifts onto the branch by accident. Aim decisively at one
+     * carriageway instead: the main half (low lanes) by default, the branch half
+     * (high lanes, with fork_diverge to peel early) for a branch-taking slot. The
+     * split is symmetric about lane_cnt/2 -- the widen keeps the original road on
+     * the low lanes and extends the branch to the high side -- so lane_cnt/4 is
+     * the main centre and 3*lane_cnt/4 the branch centre. Off a fork (narrow
+     * road) this is inert: plain centre, main line held, non-forked tracks and
+     * the default (no brancher) unchanged. */
+    if (s_branch_feature && lane_cnt >= 6) {
+        if (driver_slot_takes_branch(slot)) {
+            aim_lane = lane_cnt - lane_cnt / 4;   /* branch (high) carriageway */
+            fork_diverge = 1;
+        } else {
+            aim_lane = lane_cnt / 4;              /* main (low) carriageway */
+        }
+    } else {
+        aim_lane = (lane_cnt > 0) ? (lane_cnt / 2) : (int)actor->track_sub_lane_index;
+    }
     int tx = 0, tz = 0;
-    /* fork_diverge=0: don't scout / peel toward a side branch early. The AI was
-     * half-committing to tight fork branches with too short a window and
-     * clipping the divider wall; staying on the main racing line through forks
-     * is cleaner (branch route-variety deferred). */
     int have_target = td5_track_laneassist_target((int)actor->track_span_raw,
                                                   aim_lane,
                                                   lookahead, /*fork_commit=*/1,
-                                                  /*fork_diverge=*/0, /*lane_band=*/1,
+                                                  fork_diverge, /*lane_band=*/1,
                                                   &tx, &tz);
     /* [C2] Shift the (centre) aim point onto the computed racing line: add the
      * per-span line offset (world vector from span centre) at the look-ahead

@@ -46,6 +46,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "Branch forks now recombine cleanly: the side road curves" },
     { CL_ITEM,    "  back onto the main line and merges through a proper" },
     { CL_ITEM,    "  junction instead of snapping across a gap." },
+    { CL_ITEM,    "AI cars can now take the branch as an alternate line, so" },
+    { CL_ITEM,    "  the field splits across both roads at a fork" },
+    { CL_ITEM,    "  (TD5RE_AI_BRANCH_PCT, default 0)." },
 
     { CL_DATE,    "August 23" },
     { CL_ITEM,    "Auto-generated tracks now throw sharper switchbacks -" },
