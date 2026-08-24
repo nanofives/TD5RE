@@ -32,6 +32,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 23" },
+    { CL_ITEM,    "Auto-generated tracks now throw sharper switchbacks -" },
+    { CL_ITEM,    "  tight sections swing up to ~176 degrees, close to a" },
+    { CL_ITEM,    "  hairpin, without the road ever crossing itself." },
+
     { CL_DATE,    "August 20" },
     { CL_ITEM,    "Eight cars could never reach the top speed their own" },
     { CL_ITEM,    "  stats claimed - top gear hit the rev limiter first." },
