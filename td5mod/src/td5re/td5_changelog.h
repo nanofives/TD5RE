@@ -43,6 +43,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "Real bridges instead: the road now deliberately climbs" },
     { CL_ITEM,    "  over chosen stretches, with barriers along the deck." },
     { CL_ITEM,    "  Off by default (TD5RE_AUTOTRACK_BRIDGES=1)." },
+    { CL_ITEM,    "Branch forks now recombine cleanly: the side road curves" },
+    { CL_ITEM,    "  back onto the main line and merges through a proper" },
+    { CL_ITEM,    "  junction instead of snapping across a gap." },
 
     { CL_DATE,    "August 23" },
     { CL_ITEM,    "Auto-generated tracks now throw sharper switchbacks -" },

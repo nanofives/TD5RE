@@ -927,6 +927,19 @@ static void tg_patch_span(TG_Buf *spans, int si, int type, int lanes,
     }
 }
 
+/* Set ONLY the span type and link_prev of an already-emitted record, leaving
+ * its rows, lane count and origin untouched. Used for the type-11 rejoin: it
+ * keeps its main-road shared rows (so the road stays 4 lanes and no car is
+ * stranded on a width that narrows forward -- see the rejoin note) and only
+ * gains the junction marker plus a back-link to the corridor's SENTINEL_END. */
+static void tg_set_span_type_prev(TG_Buf *spans, int si, int type, int link_prev)
+{
+    unsigned char *r = spans->b + (size_t)si * 24;
+    r[0]  = (unsigned char)type;
+    r[10] = (unsigned char)(link_prev & 0xFF);
+    r[11] = (unsigned char)((link_prev >> 8) & 0xFF);
+}
+
 /* Append a whole span record (used for the pad span and the corridor). */
 static void tg_append_span(TG_Buf *spans, int type, int lanes,
                            int lvi, int rvi, int link_next, int link_prev,
@@ -945,17 +958,27 @@ static void tg_append_span(TG_Buf *spans, int type, int lanes,
     tg_put_i32(spans, oz);
 }
 
-/* Lateral offset of the branch corridor at step k of TD5_TG_BRANCH_LEN: starts
- * at one road width (aligned with the outer half of the widened fork), bows out,
- * and returns, so the corridor leaves and rejoins without a large jump. */
+/* Lateral offset of the branch corridor at step k of TD5_TG_BRANCH_LEN.
+ *
+ * The corridor PEELS OFF at the fork (offset one road width to the right, where
+ * the widened fork's high sub-lanes sit) and CONVERGES back onto the main line
+ * by the end, so the type-11 rejoin is a genuine merge rather than a lateral
+ * snap onto a plain span (which is what the one-way version did -- it ended a
+ * full width off the main line and hard-linked across the gap).
+ *
+ *   base : ramps -width -> 0 across the run (peel off, then rejoin the line)
+ *   bow  : an extra outward sag in the middle so the two carriageways are
+ *          visibly separate rather than a hair apart the whole way
+ *
+ * NEGATIVE throughout: the branch takes the HIGH sub-lanes, which the widened
+ * fork row places to the RIGHT of travel. Bowing left would put the corridor
+ * on the opposite side from the lanes that feed it. */
 static double tg_branch_shift(int k, double width)
 {
-    double f = (double)k / (double)TD5_TG_BRANCH_LEN;
-    double bow = sin(f * TD5_TG_PI);            /* 0 -> 1 -> 0 */
-    /* NEGATIVE: the branch takes the HIGH sub-lanes, which the widened fork
-     * row places to the RIGHT of travel. Bowing left would put the corridor on
-     * the opposite side from the lanes that feed it. */
-    return -width * (1.0 + bow * 1.6);
+    double f   = (double)k / (double)TD5_TG_BRANCH_LEN;   /* 0 .. 1 */
+    double base = -width * (1.0 - f);                     /* -width -> 0 */
+    double bow  = -width * 1.4 * sin(f * TD5_TG_PI);      /* 0 -> peak -> 0 */
+    return base + bow;
 }
 
 /* ===================== [S1] RANGE EMITTER =====================
@@ -1231,13 +1254,41 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                                ox, oy, oz);
             }
 
+            /* 4. REJOIN. The corridor's SENTINEL_END (last appended span, at
+             *    index ring+LEN) links forward to main span R = F+1+LEN. Mark R
+             *    as a type-11 JUNCTION_BWD and back-link it to that SENTINEL_END.
+             *
+             *    R KEEPS its 4-lane main-road rows on purpose. The corridor now
+             *    converges geometrically onto the main line (tg_branch_shift ->
+             *    0 at the end), so a branch car arrives already overlapping the
+             *    main lanes and merges with a zero sub_lane delta
+             *    (dest_lanes == cur_lane_count). Widening R to main+branch would
+             *    read as doc-faithful but STRANDS cars: the forward walker has
+             *    no lane-drop path (only the type-8 fork narrows forward), so an
+             *    8-lane R followed by the 4-lane R+1 would leave the high
+             *    sub-lanes off the road. A 4-lane merge is the only forward-safe
+             *    recombine for a road that resumes at its normal width.
+             *
+             *    Reverse consequence, accepted: with lanes(R) == lanes(R-1) the
+             *    type-11 reverse test never routes onto the branch, so the
+             *    branch is not drivable backwards. That is a safe degradation
+             *    (no stranding), not a corruption; a reverse-drivable branch
+             *    needs the whole region held at double width, a larger change. */
+            {
+                const int sentinel_end = ring + TD5_TG_BRANCH_LEN; /* pad@ring, corridor ring+1..ring+LEN */
+                const int R = F + 1 + TD5_TG_BRANCH_LEN;
+                if (R >= 0 && R < ring)
+                    tg_set_span_type_prev(&spans, R, 11, sentinel_end);
+            }
+
             jump_lo   = b0;
             jump_hi   = b0 + TD5_TG_BRANCH_LEN - 1;
             jump_base = F + 1;
             have_jump = 1;
             TD5_LOG_I(LOG_TAG, "trackgen: branch fork=%d corridor=%d..%d "
-                      "base=%d (ring=%d, main=span-%d)", F, jump_lo, jump_hi,
-                      jump_base, ring, jump_lo - jump_base);
+                      "base=%d rejoin=%d(type11) (ring=%d, main=span-%d)",
+                      F, jump_lo, jump_hi, jump_base, F + 1 + TD5_TG_BRANCH_LEN,
+                      ring, jump_lo - jump_base);
         }
 
         s_jump_lo = jump_lo; s_jump_hi = jump_hi;
