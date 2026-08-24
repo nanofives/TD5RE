@@ -40,6 +40,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  the track's model data." },
     { CL_ITEM,    "Optional crash barriers through the corners, off by" },
     { CL_ITEM,    "  default (TD5RE_AUTOTRACK_GUARDRAILS=1)." },
+    { CL_ITEM,    "Real bridges instead: the road now deliberately climbs" },
+    { CL_ITEM,    "  over chosen stretches, with barriers along the deck." },
+    { CL_ITEM,    "  Off by default (TD5RE_AUTOTRACK_BRIDGES=1)." },
 
     { CL_DATE,    "August 23" },
     { CL_ITEM,    "Auto-generated tracks now throw sharper switchbacks -" },

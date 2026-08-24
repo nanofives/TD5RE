@@ -524,8 +524,62 @@ static int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
     return 1;
 }
 
-/* Two summed sines, then a global rescale so no span exceeds MAX_GRADE.
- * Mirrors apply_road_elevation() in td5_trackgen.py. */
+/* ===================== DELIBERATE BRIDGES =====================
+ * Bridges are PLACED, not detected. The organic lift test alone can never
+ * produce one: the elevation profile is 2..6 sine waves spread over ~1800
+ * spans, so its wavelength is 300..900 spans and across the +/-8 span window
+ * the local terrain test uses it is essentially a straight line. Measured
+ * local convexity peaks near 160 -- against a 900 threshold that exists
+ * because the deck is 780 tall. So the road never rises above its own
+ * surroundings fast enough to be "on a bridge", and after the global-minimum
+ * bug was fixed no bridge emitted at all.
+ *
+ * Fix: choose bridge RUNS the same stateless way tunnels choose theirs (hash
+ * of si/RUN, no generator state), then drive the elevation into a hump over
+ * each run so the road genuinely climbs and the deck has real clearance.
+ *
+ * The hump is a RAISED COSINE: zero value AND zero slope at both ends, so it
+ * splices into the sine profile without a kink that would read as a ramp.
+ *
+ * Height is bounded by the grade cap, and that bound is the whole reason for
+ * these numbers. Peak slope of the hump is H*PI/RUN per span, and
+ * tg_apply_elevation rescales the ENTIRE profile if any span exceeds
+ * max_grade (0.120 => 180 units per 1500-unit span). A hump too steep would
+ * therefore flatten the whole track to fix itself. With RUN 24, H 1300 gives
+ * a peak slope of ~170/span (grade 0.113), just inside the cap.
+ *
+ * That also happens to clear the lift threshold -- at RUN 24 the +/-8 window
+ * sits at 0.25H either side, so lift at the crown is 0.75H = 975 > 900 -- but
+ * emission deliberately does NOT depend on that. The RANGE decides, exactly
+ * as it does for tunnels, so a future grade or amplitude tweak cannot silently
+ * delete every bridge again. */
+#define TD5_TG_BRIDGE_RUN     24       /* spans per deliberate bridge */
+#define TD5_TG_BRIDGE_HEIGHT  1300.0   /* crown lift; bounded by max_grade */
+
+static int tg_bridges_enabled(void)
+{
+    /* Default OFF: unlike tunnels and guardrails this moves the STRIP, which
+     * is the surface the car actually drives on, so it can affect climb, AI
+     * pacing and crest jumps. Opt in with TD5RE_AUTOTRACK_BRIDGES=1 until a
+     * frame plus the self-test matrix confirm it. */
+    return td5_env_flag_off("TD5RE_AUTOTRACK_BRIDGES");
+}
+
+/* Is span si inside a deliberately-placed bridge run? Stateless and derived
+ * only from si, so the generator, the emitter and the guardrail gate all agree
+ * without passing anything around. */
+static int tg_span_in_bridge_run(int si)
+{
+    unsigned int h;
+    if (!tg_bridges_enabled()) return 0;
+    if (si <= TD5_TG_GRID_SPAN + 40) return 0;   /* not right off the grid */
+    h = (unsigned)(si / TD5_TG_BRIDGE_RUN) * 2654435761u;
+    return ((h >> 29) == 0);                     /* ~1 run in 8 */
+}
+
+/* Two summed sines, a raised-cosine hump over each deliberate bridge run, then
+ * a global rescale so no span exceeds MAX_GRADE.
+ * Mirrors apply_road_elevation() in td5_trackgen.py, plus the bridge humps. */
 static void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
 {
     const double max_grade = spec->max_grade_x1000 / 1000.0;
@@ -543,6 +597,68 @@ static void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
         double f = (double)i / (double)(nl->count - 1);
         nl->v[i].y = amp * (0.6 * sin(2.0 * TD5_TG_PI * waves * f + ph1)
                           + 0.4 * sin(4.0 * TD5_TG_PI * waves * f + ph2));
+    }
+
+    /* Deck per deliberate bridge run: flatten the run to its own chord, then
+     * add a raised-cosine hump on top.
+     *
+     * BOTH halves are needed, and the first one is not cosmetic. Hump slope
+     * SUPERPOSES on the sine profile's slope. Adding a 0.113-grade hump to a
+     * profile already near the 0.120 cap pushed the worst span to 0.169, and
+     * tg_apply_elevation's rescale is GLOBAL -- it then multiplied the whole
+     * track by 0.708, so switching bridges on silently flattened every hill on
+     * the map by 29%. Measured, not hypothetical.
+     *
+     * Flattening the run to its chord removes the base profile's local slope
+     * from the grade budget (and is what a deck looks like anyway -- a bridge
+     * spans terrain, it does not undulate over it). The remaining budget is
+     * then handed to the hump, whose height is clamped to fit. So no bridge can
+     * ever trigger the global rescale, and terrain outside the runs is
+     * untouched. */
+    {
+        int runs = 0, clamped = 0, r0;
+        double lowest = TD5_TG_BRIDGE_HEIGHT;
+        for (r0 = 0; r0 < nl->count; r0 += TD5_TG_BRIDGE_RUN) {
+            int s0 = r0, s1 = r0 + TD5_TG_BRIDGE_RUN - 1, k;
+            double yb0, yb1, chord, allowed, hrun;
+
+            if (s1 > nl->count - 1) s1 = nl->count - 1;
+            if (s1 <= s0) continue;
+            /* One hash per run, so the crown is a fair representative. */
+            if (!tg_span_in_bridge_run(s0 + TD5_TG_BRIDGE_RUN / 2)) continue;
+
+            yb0 = nl->v[s0].y;
+            yb1 = nl->v[s1].y;
+            chord = (yb1 - yb0) / (double)(s1 - s0);
+            for (k = s0; k <= s1; k++) {
+                double u = (double)(k - s0) / (double)(s1 - s0);
+                nl->v[k].y = yb0 + (yb1 - yb0) * u;
+            }
+
+            /* Peak slope of a raised cosine of height H over RUN spans is
+             * H*PI/RUN, so invert that against the leftover budget. */
+            if (max_grade <= 0.0) {
+                hrun = TD5_TG_BRIDGE_HEIGHT;      /* no cap configured */
+            } else {
+                allowed = max_grade * (double)spec->span_length - fabs(chord);
+                if (allowed < 0.0) allowed = 0.0;
+                hrun = allowed * (double)TD5_TG_BRIDGE_RUN / TD5_TG_PI;
+                if (hrun > TD5_TG_BRIDGE_HEIGHT) hrun = TD5_TG_BRIDGE_HEIGHT;
+            }
+
+            for (k = s0; k <= s1; k++) {
+                double t = ((double)(k - s0) + 0.5) / (double)TD5_TG_BRIDGE_RUN;
+                nl->v[k].y += hrun * 0.5 * (1.0 - cos(2.0 * TD5_TG_PI * t));
+            }
+            runs++;
+            if (hrun < TD5_TG_BRIDGE_HEIGHT - 1.0) clamped++;
+            if (hrun < lowest) lowest = hrun;
+        }
+        if (runs)
+            TD5_LOG_I(LOG_TAG, "trackgen: %d deliberate bridge run(s) of %d "
+                      "spans, crown +%.0f (%d grade-clamped, lowest +%.0f)",
+                      runs, TD5_TG_BRIDGE_RUN, TD5_TG_BRIDGE_HEIGHT,
+                      clamped, lowest);
     }
 
     /* Anchor the profile to y=0 at the start line. The grid spawn places cars
@@ -1734,8 +1850,13 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
     const TG_Node *n = &nl->v[si];
     const double ref  = tg_local_ground_y(nl, si);
     const double lift = n->y - ref;
+    const int deliberate = tg_span_in_bridge_run(si);
 
-    if (lift < TD5_TG_BRIDGE_MIN_LIFT) return 1;    /* too low to read */
+    /* A PLACED run always gets its deck -- the range decides, so a later grade
+     * or amplitude change cannot silently delete every bridge the way keying
+     * purely off lift did. The organic lift test is kept as a second route so
+     * a genuinely convex crest still gets a deck if one ever occurs. */
+    if (!deliberate && lift < TD5_TG_BRIDGE_MIN_LIFT) return 1;
 
     if (!tg_emit_box_mesh(blk, n->x, n->y - 300.0, n->z,
                           n->width * 0.5 + 250.0, 200.0, 780.0,
@@ -1744,7 +1865,11 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
     (*added)++;
 
     if ((si & 3) == 0) {                            /* a pier every 4th span */
+        /* Floor the height: at the very ends of a placed run the hump is still
+         * near zero, and a pier a few units tall is invisible clutter that
+         * still costs a mesh. */
         double pier_h = lift * 0.5;
+        if (pier_h < 150.0) pier_h = 150.0;
         if (!tg_emit_box_mesh(blk, n->x, ref + pier_h, n->z,
                               700.0, pier_h, 700.0,
                               n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0))
@@ -1932,6 +2057,11 @@ static int tg_span_needs_guardrail(const TG_NodeList *nl, int si, int nspans)
         if (si >= lo && si <= hi) return 0;
     }
     (void)nspans;
+
+    /* On a deliberately-placed deck: rail the WHOLE run, including the shallow
+     * ends the lift test would miss. This is the case the guardrail work
+     * existed for -- nothing stops you leaving a deck sideways. */
+    if (tg_span_in_bridge_run(si)) return 1;
 
     /* Elevated: nothing stops you leaving a bridge deck, so rail it. Judged
      * against the LOCAL terrain line, so this means "on a deck" and not
