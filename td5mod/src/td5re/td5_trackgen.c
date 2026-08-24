@@ -196,40 +196,57 @@ static int tg_nodes_push(TG_NodeList *nl, double x, double z,
  *
  * Two roads overlap when their centerlines are closer than the sum of their
  * half-widths, so that -- plus a quarter-lane epsilon -- is the exact test.
- * Deliberately NOT a fat margin: a legal hairpin at the curvature-safety
- * floor genuinely passes within ~2*R of itself, and a generous margin would
- * reject every tight turn. Nodes within TD5_TG_ADJACENT_SKIP of each other
- * along the road are exempt (they are meant to be close); that skip is sized
- * so half a turn at the tightest legal radius clears it.
+ * Nodes within an ADJACENT-SKIP window of each other along the road are exempt
+ * (a legal tight turn genuinely brings the road near itself); beyond that
+ * window the heading budget below makes overlap geometrically IMPOSSIBLE, so
+ * the check there is a pure backstop that never fires. The skip is DERIVED
+ * from the budget at build time (tg_adjacent_skip) rather than hardcoded, so
+ * the guarantee holds no matter how sharp the acute budget is set -- a
+ * previously-hardcoded 25 would silently under-exempt once the budget rose.
  */
-#define TD5_TG_ADJACENT_SKIP 25
 
-/* Hard cap on how far the heading may stray from the global +Z axis, radians
- * (~80 deg). This is what makes the walk NON-TRAPPING: with |heading| <= 80 deg
- * every span advances Z by at least span_length*cos(80 deg), so Z is strictly
- * increasing and two spans more than TD5_TG_ADJACENT_SKIP apart can never
- * coincide -- self-intersection becomes geometrically impossible instead of
- * merely rejected. Pure rejection sampling was tried first and traps: a
- * self-avoiding random walk in 2D paints itself into a cul-de-sac (observed:
- * 1800 spans requested, 1033 then 300 delivered).
+/* Widest road the generator can emit: the DUAL_LANE section caps lanes at 12
+ * (see tg_build_centerline), so this bounds the too-close "need" distance and
+ * therefore the derived adjacent-skip. */
+#define TD5_TG_MAX_LANES 12
+
+/* Heading budget, radians, measured from TD5_TG_AXIS_HEADING. This is what
+ * makes the walk NON-TRAPPING: with |dev| <= limit every span advances the
+ * axis coordinate by at least span_length*cos(limit) > 0, so that coordinate
+ * is strictly increasing and two nodes far enough apart in span index can
+ * never coincide -- self-intersection is geometrically impossible, not merely
+ * rejected. Pure rejection sampling was tried first and traps: a self-avoiding
+ * 2D walk paints itself into a cul-de-sac (observed: 1800 requested, then 300).
  *
- * This still allows sharp direction changes: a section may swing from -80 to
- * +80 deg, a 160 deg switchback. What it rules out is a true hairpin that
- * doubles back down-track, which is the price of the guarantee. */
-#define TD5_TG_HEADING_LIMIT 1.396
+ *   SPINE (~80 deg): straight/curve/dual-lane. Swings -80..+80 = a 160 deg
+ *         switchback.
+ *   ACUTE (~88 deg, tunable): tight sections only. Swings up to ~176 deg, a
+ *         near-hairpin. cos(88 deg) is still > 0, so forward progress -- and
+ *         the non-trapping proof -- survive; the price is a larger derived
+ *         skip. A TRUE >=180 deg down-track hairpin is INCOMPATIBLE with a
+ *         single-axis monotone guarantee (cos <= 0 there) and is deliberately
+ *         NOT offered. TD5RE_AUTOTRACK_ACUTE_DEG (80..89) tunes the acute
+ *         budget; the derived skip uses whichever limit is larger. */
+#define TD5_TG_HEADING_LIMIT       1.396   /* spine, ~80 deg */
+#define TD5_TG_ACUTE_HEADING_DEG   88      /* default acute budget, degrees */
+#define TD5_TG_ACUTE_HEADING_MIN   80      /* never below the spine */
+#define TD5_TG_ACUTE_HEADING_MAX   89      /* keep cos(limit) > 0 (non-trapping) */
 
 /* Global axis the walk wanders about, radians. Deliberately +X (90 deg) rather
  * than +Z (0 deg): route byte[1] encodes the ABSOLUTE 12-bit heading as
  * heading = (byte * 0x102C) >> 8 (td5_ai.c:1280), and a byte < 4 is a junction
  * sentinel rather than a heading. With the axis at 0 the commonest heading
  * (straight ahead) would encode to byte 0..3 and be read as a sentinel; at
- * 90 deg the whole +/-80 deg band maps to bytes 7..120, clear of it. */
+ * 90 deg the +/-80 deg spine band maps to bytes 7..120, clear of it. The
+ * wider acute band reaches down toward byte 4 at its sharpest left-hand apex;
+ * tg_emit_routes clamps to >=4 there, a small heading-fidelity loss on a
+ * handful of apex spans rather than a sentinel collision. */
 #define TD5_TG_AXIS_HEADING (TD5_TG_PI * 0.5)
 
 static int tg_too_close(const TG_NodeList *nl, double x, double z,
-                        double width, double lane_width)
+                        double width, double lane_width, int skip)
 {
-    const int limit = nl->count - TD5_TG_ADJACENT_SKIP;
+    const int limit = nl->count - skip;
     int i;
     for (i = 0; i < limit; i++) {
         double dx = nl->v[i].x - x;
@@ -238,6 +255,35 @@ static int tg_too_close(const TG_NodeList *nl, double x, double z,
         if (dx * dx + dz * dz < need * need) return 1;
     }
     return 0;
+}
+
+/* Acute heading budget in radians, from the env knob, clamped so cos(limit)>0
+ * (the non-trapping proof requires strictly-positive forward progress). */
+static double tg_acute_heading_limit(void)
+{
+    int deg = td5_env_int("TD5RE_AUTOTRACK_ACUTE_DEG", TD5_TG_ACUTE_HEADING_DEG,
+                          TD5_TG_ACUTE_HEADING_MIN, TD5_TG_ACUTE_HEADING_MAX);
+    return (double)deg * TD5_TG_PI / 180.0;
+}
+
+/* Derived adjacent-skip window (see the self-intersection guard note): the
+ * smallest N such that N spans of guaranteed forward progress exceed the
+ * widest possible too-close "need", so any two nodes >= N apart provably
+ * cannot overlap. limit_max is the largest heading budget any section may use,
+ * so cos(limit_max) is the GLOBAL minimum forward progress per span. */
+static int tg_adjacent_skip(const TD5_TrackGenSpec *spec, double limit_max)
+{
+    double span_len   = (double)spec->span_length;
+    double lane_width = (double)spec->lane_width;
+    double w_max      = (double)TD5_TG_MAX_LANES * lane_width;
+    /* Worst-case need in tg_too_close: both roads at the max width. */
+    double need_max   = w_max + lane_width * 0.25;
+    double dmin       = span_len * cos(limit_max);   /* min forward progress/span */
+    int skip;
+    if (dmin < 1.0) dmin = 1.0;                       /* guard against cos -> 0 */
+    skip = (int)ceil(need_max / dmin);
+    if (skip < 1) skip = 1;
+    return skip;
 }
 
 /* Pick a section type from the normalised weights. */
@@ -287,6 +333,23 @@ static int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
     double width = base_width;        /* current, ramped toward target_width */
     /* Max width change per span so widenings taper instead of stepping. */
     const double width_ramp = (double)spec->lane_width * 0.5;
+
+    /* Heading budgets and the adjacent-skip derived from them. ACUTE sections
+     * get a sharper budget (see TD5_TG_ACUTE_HEADING_DEG); the derived skip is
+     * sized off the LARGER budget so the non-trapping / no-self-intersection
+     * guarantee holds across all section types. */
+    const double acute_limit = tg_acute_heading_limit();
+    const double limit_max    = (acute_limit > TD5_TG_HEADING_LIMIT)
+                              ? acute_limit : TD5_TG_HEADING_LIMIT;
+    const int    skip         = tg_adjacent_skip(spec, limit_max);
+    /* Round, do not truncate. The spine limit is the literal 1.396 rad =
+     * 79.985 deg, and an 88 deg acute budget round-trips through radians to
+     * 87.999..., so %.0f printed "spine=79deg acute=87deg" -- which reads as
+     * the knob having failed to apply, when the derived skip proves it did. */
+    TD5_LOG_I(LOG_TAG, "trackgen: heading budget spine=%ddeg acute=%ddeg "
+              "-> adjacent_skip=%d",
+              (int)(TD5_TG_HEADING_LIMIT * 180.0 / TD5_TG_PI + 0.5),
+              (int)(acute_limit * 180.0 / TD5_TG_PI + 0.5), skip);
 
     if (!tg_nodes_push(nl, x, z, width, spec->lanes)) return 0;
 
@@ -358,6 +421,12 @@ static int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
             }
         }
 
+        /* ACUTE sections may swing to the sharper budget; everything else
+         * stays on the spine budget. The forced-straight escape above sets
+         * sec = STRAIGHT first, so it correctly uses the spine budget here. */
+        const double heading_limit = (sec == TD5_TG_ACUTE)
+                                   ? acute_limit : TD5_TG_HEADING_LIMIT;
+
         {
             int i;
             for (i = 0; i < len_spans && nl->count < want_nodes; i++) {
@@ -382,11 +451,11 @@ static int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
                     /* Keep the walk non-trapping (see TD5_TG_HEADING_LIMIT).
                      * On hitting the limit, reverse the turn so the road peels
                      * back off the boundary instead of grinding along it. */
-                    if (heading > TD5_TG_AXIS_HEADING + TD5_TG_HEADING_LIMIT) {
-                        heading = TD5_TG_AXIS_HEADING + TD5_TG_HEADING_LIMIT;
+                    if (heading > TD5_TG_AXIS_HEADING + heading_limit) {
+                        heading = TD5_TG_AXIS_HEADING + heading_limit;
                         dir = -1;
-                    } else if (heading < TD5_TG_AXIS_HEADING - TD5_TG_HEADING_LIMIT) {
-                        heading = TD5_TG_AXIS_HEADING - TD5_TG_HEADING_LIMIT;
+                    } else if (heading < TD5_TG_AXIS_HEADING - heading_limit) {
+                        heading = TD5_TG_AXIS_HEADING - heading_limit;
                         dir = 1;
                     }
                 }
@@ -405,7 +474,8 @@ static int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
                 lanes_here = spec->lanes;
 
                 /* Would this node put road on top of earlier road? */
-                if (tg_too_close(nl, x, z, width, (double)spec->lane_width)) {
+                if (tg_too_close(nl, x, z, width, (double)spec->lane_width,
+                                 skip)) {
                     rejected = 1;
                     break;
                 }
