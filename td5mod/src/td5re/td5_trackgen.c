@@ -83,6 +83,8 @@
 #define TD5_TG_PAGE_WALL   1
 #define TD5_TG_PAGE_GREEN  2
 #define TD5_TG_PAGE_TREE   3
+#define TD5_TG_PAGE_RAIL   4
+#define TD5_TG_PAGE_COUNT  5
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
@@ -1675,16 +1677,65 @@ static int tg_emit_tunnel(const TG_NodeList *nl, int si, TG_Buf *blk,
     return 1;
 }
 
-/* Bridge: where the road runs high above the low point of the track, put a
- * deck slab just under it and a pier down to the ground. Purely cosmetic --
- * the driving surface is still the STRIP. */
-static int tg_emit_bridge(const TG_NodeList *nl, int si, double ground_y,
+/* How far above the LOCAL terrain line counts as ELEVATED. Single definition:
+ * both the bridge deck and the guardrail gate key off it, so "on a bridge"
+ * cannot mean two different things in two places.
+ *
+ * 900 is a GEOMETRY fact, not a tuning dial: the deck is 780 tall and the pier
+ * is lift*0.5, so below roughly this much lift the deck sits in the road and
+ * the pier is too short to see. Do not lower it to make bridges appear.
+ *
+ * MEASURED CONSEQUENCE (3 seeds, 1800 spans each): against the local terrain
+ * line, this generator's elevation almost never reaches 900 of local
+ * convexity -- seed 123456789 peaks near 160, seed 42 near 200, and seed 777
+ * does not reach even 100. So bridges now essentially never emit, and that is
+ * CORRECT: the previous 87%-of-all-spans bridging was an artifact of measuring
+ * against the global track minimum, which made every hill a bridge.
+ *
+ * To make bridges a real feature again they must be PLACED DELIBERATELY, the
+ * way tunnels and branch forks are (a chosen span range, with the elevation
+ * driven to suit), not conjured by lowering this threshold. */
+#define TD5_TG_BRIDGE_MIN_LIFT 900.0
+
+/* Half-width, in spans, of the window the local terrain line is taken over.
+ * ~8 spans either side = the length of road a deck would plausibly carry. */
+#define TD5_TG_LIFT_WINDOW 8
+
+/* The terrain line this span's elevation is judged against.
+ *
+ * This was previously the GLOBAL minimum elevation of the whole track, which
+ * made "elevated" mean "higher than the single lowest point in 1800 spans" --
+ * true for 87% of a rolling track, so bridge decks were emitted almost
+ * everywhere and the guardrail gate inherited the same fault.
+ *
+ * Instead take the CHORD between the two window endpoints. That is
+ * grade-invariant by construction: on any constant grade the midpoint of the
+ * endpoints equals this node's own height, so the lift is exactly zero no
+ * matter how steep the hill. Only local CONVEXITY -- the road humping up over
+ * ground that falls away on both sides, which is what a bridge actually is --
+ * produces a positive lift. */
+static double tg_local_ground_y(const TG_NodeList *nl, int si)
+{
+    const int w = td5_env_int("TD5RE_AUTOTRACK_LIFT_WINDOW",
+                              TD5_TG_LIFT_WINDOW, 1, 200);
+    int a = si - w;
+    int b = si + w;
+    if (a < 0) a = 0;
+    if (b > nl->count - 1) b = nl->count - 1;
+    return (nl->v[a].y + nl->v[b].y) * 0.5;
+}
+
+/* Bridge: where the road humps above the local terrain line, put a deck slab
+ * just under it and a pier down to that line. Purely cosmetic -- the driving
+ * surface is still the STRIP. */
+static int tg_emit_bridge(const TG_NodeList *nl, int si,
                           TG_Buf *blk, int *added)
 {
     const TG_Node *n = &nl->v[si];
-    const double lift = n->y - ground_y;
+    const double ref  = tg_local_ground_y(nl, si);
+    const double lift = n->y - ref;
 
-    if (lift < 900.0) return 1;                     /* too low to read */
+    if (lift < TD5_TG_BRIDGE_MIN_LIFT) return 1;    /* too low to read */
 
     if (!tg_emit_box_mesh(blk, n->x, n->y - 300.0, n->z,
                           n->width * 0.5 + 250.0, 200.0, 780.0,
@@ -1694,7 +1745,7 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si, double ground_y,
 
     if ((si & 3) == 0) {                            /* a pier every 4th span */
         double pier_h = lift * 0.5;
-        if (!tg_emit_box_mesh(blk, n->x, ground_y + pier_h, n->z,
+        if (!tg_emit_box_mesh(blk, n->x, ref + pier_h, n->z,
                               700.0, pier_h, 700.0,
                               n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0))
             return 0;
@@ -1808,24 +1859,207 @@ static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk)
     return !blk->oom;
 }
 
+/* ===================== GUARDRAILS =====================
+ * The car is already contained by collision WALLS derived from the STRIP rail
+ * vertices, but nothing draws them, so the road ends at an invisible boundary.
+ * Guardrails do not add a constraint -- they make the existing one legible.
+ *
+ * PLACEMENT is the whole correctness question, and it is NOT assumed here.
+ * td5_track_resolve_wall_contacts builds the left rail from row point 0 and the
+ * right rail from row point `lane_count + k_rail_lut_[lr][type]`. For span_type
+ * 1 -- the only type this generator emits -- BOTH LUT entries are 0, so the
+ * rails are row points 0 and lane_count: the outermost points of the row, which
+ * tg_emit_span_range places at -/+ width/2. tg_road_edge returns exactly those
+ * two points, so deriving the barrier from it puts the visual where collision
+ * actually stops you.
+ *
+ * Deriving from tg_road_edge rather than hardcoding width/2 also means the
+ * barrier tracks width changes for free, and keeps ONE definition of "the road
+ * edge" shared with the road mesh and the ground skirts. NOTE for the acute /
+ * dual-carriageway work: emitting any span type other than 1 brings the LUT
+ * offsets into play (types 2..7 are nonzero) and the right rail stops being the
+ * outermost point -- this function would then need the same LUT.
+ *
+ * A BOX per span was rejected: a box cannot follow a curving or undulating
+ * road, which is exactly why the ground moved from slabs to edge-derived
+ * strips. This emits a proper 3-quad prism per side (inner face, outer face,
+ * top cap) built from the span's own edge points, so it curves and climbs with
+ * the road. A prism rather than a flat ribbon because a single quad may be
+ * backface-culled from one side, and two opposite-wound coplanar quads would
+ * z-fight if culling is off -- the prism is correct either way.
+ */
+#define TD5_TG_RAIL_HEIGHT     700.0   /* top of the barrier above road level */
+#define TD5_TG_RAIL_BASE_DROP   60.0   /* start below the surface: no gap on
+                                        * undulating spans */
+#define TD5_TG_RAIL_THICK       55.0   /* prism depth, outward */
+#define TD5_TG_RAIL_OFFSET      40.0   /* outboard of the rail line, so the
+                                        * barrier does not share an edge with
+                                        * the road surface and shimmer */
+
+static int tg_guardrails_enabled(void)
+{
+    /* Default OFF until a frame confirms it, same discipline as tunnels and
+     * branches. NOTE td5_env_flag_off() returns 1 only when the value is
+     * literally "1" -- it means "opt in", despite the name. */
+    return td5_env_flag_off("TD5RE_AUTOTRACK_GUARDRAILS");
+}
+
+/* Should span si carry a barrier? Not every span: real roads are lined on the
+ * outside of bends and where the road is elevated, not down every straight, and
+ * railing all 1800 spans would both look wrong and cost 1800 extra meshes. */
+static int tg_span_needs_guardrail(const TG_NodeList *nl, int si, int nspans)
+{
+    /* 50 = 5 deg of heading change across the span. MEASURED over 3 seeds this
+     * rails 11-15% of spans, consistently -- barriers through the corners and
+     * not down the straights, which is the point. The previous default of 15
+     * (1.5 deg) railed 62%, i.e. nearly everything. Curvature is the stable
+     * signal here: unlike the elevation gate its coverage barely moves between
+     * seeds. */
+    const int limit = td5_env_int("TD5RE_AUTOTRACK_RAIL_DEG10", 50, 0, 900);
+    double cross, dot, ang_deg;
+
+    if (si < 1 || si + 2 >= nl->count) return 0;
+
+    /* EXCLUSION: inside a tunnel the walls already contain and read as a
+     * boundary; a barrier there is invisible clutter. */
+    if (tg_span_in_tunnel(si)) return 0;
+
+    /* EXCLUSION: the branch fork mouth and its widened approach. A barrier
+     * across the corridor entrance would visually wall off the branch. */
+    if (tg_branches_enabled()) {
+        const int lo = TD5_TG_BRANCH_FORK_SPAN - TD5_TG_BRANCH_WIDEN - 2;
+        const int hi = TD5_TG_BRANCH_FORK_SPAN + TD5_TG_BRANCH_LEN + 2;
+        if (si >= lo && si <= hi) return 0;
+    }
+    (void)nspans;
+
+    /* Elevated: nothing stops you leaving a bridge deck, so rail it. Judged
+     * against the LOCAL terrain line, so this means "on a deck" and not
+     * merely "uphill of the lowest point on the track". */
+    if (nl->v[si].y - tg_local_ground_y(nl, si) >= TD5_TG_BRIDGE_MIN_LIFT)
+        return 1;
+
+    /* Bend: heading change across this span, in tenths of a degree. */
+    cross = nl->v[si].tx * nl->v[si + 1].tz - nl->v[si].tz * nl->v[si + 1].tx;
+    dot   = nl->v[si].tx * nl->v[si + 1].tx + nl->v[si].tz * nl->v[si + 1].tz;
+    ang_deg = atan2(fabs(cross), dot) * 180.0 / TD5_TG_PI;
+    return (ang_deg * 10.0) >= (double)limit;
+}
+
+/* One barrier prism per side for span si. Caller gates with
+ * tg_span_needs_guardrail. */
+static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk)
+{
+    double nlx, nly, nlz, nrx, nry, nrz;   /* near left / right road edge */
+    double flx, fly, flz, frx, fry, frz;   /* far  left / right road edge */
+    double nux, nuz, fux, fuz;             /* outward lateral units */
+    double len, cx, cy, cz, radius = 0.0;
+    double px[24], py[24], pz[24], uu[24], vv[24];
+    int side, i, n = 0;
+
+    tg_road_edge(nl, si, 0.0, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
+    tg_road_edge(nl, si, 1.0, &flx, &fly, &flz, &frx, &fry, &frz);
+
+    nux = nlx - nrx; nuz = nlz - nrz;
+    len = sqrt(nux * nux + nuz * nuz);
+    if (len < 1e-6) { nux = 1.0; nuz = 0.0; } else { nux /= len; nuz /= len; }
+    fux = flx - frx; fuz = flz - frz;
+    len = sqrt(fux * fux + fuz * fuz);
+    if (len < 1e-6) { fux = 1.0; fuz = 0.0; } else { fux /= len; fuz /= len; }
+
+    for (side = 0; side < 2; side++) {
+        /* side 0 = left edge (outward = +unit), side 1 = right (outward = -). */
+        const double s  = side ? -1.0 : 1.0;
+        const double ex = side ? nrx : nlx, ey = side ? nry : nly;
+        const double ez = side ? nrz : nlz;
+        const double gx = side ? frx : flx, gy = side ? fry : fly;
+        const double gz = side ? frz : flz;
+        const double o0 = TD5_TG_RAIL_OFFSET;
+        const double o1 = TD5_TG_RAIL_OFFSET + TD5_TG_RAIL_THICK;
+        /* near/far x inner/outer, at base and top. */
+        const double nib_x = ex + s * nux * o0, nib_z = ez + s * nuz * o0;
+        const double nob_x = ex + s * nux * o1, nob_z = ez + s * nuz * o1;
+        const double fib_x = gx + s * fux * o0, fib_z = gz + s * fuz * o0;
+        const double fob_x = gx + s * fux * o1, fob_z = gz + s * fuz * o1;
+        const double nyb = ey - TD5_TG_RAIL_BASE_DROP;
+        const double fyb = gy - TD5_TG_RAIL_BASE_DROP;
+        const double nyt = ey + TD5_TG_RAIL_HEIGHT;
+        const double fyt = gy + TD5_TG_RAIL_HEIGHT;
+        const double u0 = (double)si, u1 = (double)si + 1.0;
+
+        /* INNER face (towards the road). U runs along the road, V up the face,
+         * so the page's bottom rows land at the base -- see the page comment. */
+        px[n]=nib_x; py[n]=nyb; pz[n]=nib_z; uu[n]=u0; vv[n]=0.0; n++;
+        px[n]=nib_x; py[n]=nyt; pz[n]=nib_z; uu[n]=u0; vv[n]=1.0; n++;
+        px[n]=fib_x; py[n]=fyt; pz[n]=fib_z; uu[n]=u1; vv[n]=1.0; n++;
+        px[n]=fib_x; py[n]=fyb; pz[n]=fib_z; uu[n]=u1; vv[n]=0.0; n++;
+
+        /* OUTER face, wound the other way so it faces away from the road. */
+        px[n]=fob_x; py[n]=fyb; pz[n]=fob_z; uu[n]=u1; vv[n]=0.0; n++;
+        px[n]=fob_x; py[n]=fyt; pz[n]=fob_z; uu[n]=u1; vv[n]=1.0; n++;
+        px[n]=nob_x; py[n]=nyt; pz[n]=nob_z; uu[n]=u0; vv[n]=1.0; n++;
+        px[n]=nob_x; py[n]=nyb; pz[n]=nob_z; uu[n]=u0; vv[n]=0.0; n++;
+
+        /* TOP cap, so the barrier reads as solid from a chase camera. */
+        px[n]=nib_x; py[n]=nyt; pz[n]=nib_z; uu[n]=u0; vv[n]=1.0; n++;
+        px[n]=nob_x; py[n]=nyt; pz[n]=nob_z; uu[n]=u0; vv[n]=0.85; n++;
+        px[n]=fob_x; py[n]=fyt; pz[n]=fob_z; uu[n]=u1; vv[n]=0.85; n++;
+        px[n]=fib_x; py[n]=fyt; pz[n]=fib_z; uu[n]=u1; vv[n]=1.0; n++;
+    }
+
+    cx = cy = cz = 0.0;
+    for (i = 0; i < n; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
+    cx /= n; cy /= n; cz /= n;
+    for (i = 0; i < n; i++) {
+        double dx = px[i]-cx, dy = py[i]-cy, dz = pz[i]-cz;
+        double d = sqrt(dx*dx + dy*dy + dz*dz);
+        if (d > radius) radius = d;
+    }
+    if (!(radius > 0.0)) radius = 1.0;
+
+    tg_put_u16(blk, 259);
+    tg_put_u16(blk, 0);                    /* opaque, not a billboard */
+    tg_put_u32(blk, 1);
+    tg_put_u32(blk, (unsigned)n);
+    tg_put_f32(blk, radius);
+    tg_put_f32(blk, cx); tg_put_f32(blk, cy); tg_put_f32(blk, cz);
+    tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+    tg_put_u32(blk, 0);
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE);
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE + TD5_TG_CMD_SIZE);
+    tg_put_u32(blk, 0);
+
+    tg_put_u16(blk, 0);                    /* dispatch_type 0 */
+    tg_put_u16(blk, TD5_TG_PAGE_RAIL);
+    tg_put_u32(blk, 0);
+    tg_put_u16(blk, 0);                    /* triangle_count */
+    tg_put_u16(blk, 6);                    /* 3 quads x 2 sides */
+    tg_put_u32(blk, 0);
+
+    for (i = 0; i < n; i++) {
+        tg_put_f32(blk, px[i]); tg_put_f32(blk, py[i]); tg_put_f32(blk, pz[i]);
+        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+        tg_put_u32(blk, 0xFFFFFFFFu);
+        tg_put_f32(blk, uu[i]); tg_put_f32(blk, vv[i]);
+        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+    }
+    return !blk->oom;
+}
+
 static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                           TG_Buf *out)
 {
     const int nentries = (nspans + TD5_TG_SPANS_PER_ENTRY - 1)
                        / TD5_TG_SPANS_PER_ENTRY;
     /* Road meshes plus at most one building per span in the entry. */
-    /* Per span: ground skirt + road + building + up to 3 tunnel pieces + up to
-     * 2 bridge pieces. */
-    enum { TG_MAX_MESHES_PER_ENTRY = TD5_TG_SPANS_PER_ENTRY * 8 };
+    /* Per span: ground skirt + road + guardrail + building + up to 3 tunnel
+     * pieces + up to 2 bridge pieces. */
+    enum { TG_MAX_MESHES_PER_ENTRY = TD5_TG_SPANS_PER_ENTRY * 10 };
+    const int rails = tg_guardrails_enabled();
+    int nrails = 0;
     TG_Buf *blocks;
     unsigned int cursor;
     int e, ok = 1;
-
-    /* Low point of the track, so bridge piers have a ground to stand on. */
-    double ground_y = nl->v[0].y;
-    int gi;
-    for (gi = 1; gi < nl->count; gi++)
-        if (nl->v[gi].y < ground_y) ground_y = nl->v[gi].y;
 
     blocks = (TG_Buf *)calloc((size_t)nentries, sizeof(TG_Buf));
     if (!blocks) return 0;
@@ -1848,6 +2082,17 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
             if (!tg_emit_ground(nl, s0 + i, &meshes)) { ok = 0; break; }
             moff[nmesh++] = meshes.len;
             if (!tg_emit_road_mesh(nl, s0 + i, lanes, &meshes)) ok = 0;
+            /* Guardrails belong in THIS loop, not the box pass below: that pass
+             * recovers each piece's offset by dividing the appended bytes by
+             * n_added, which only holds while every piece is a same-sized box.
+             * A rail prism has a different vertex count and would silently
+             * corrupt those offsets. Here each offset is recorded explicitly. */
+            if (ok && rails &&
+                tg_span_needs_guardrail(nl, s0 + i, nspans)) {
+                moff[nmesh++] = meshes.len;
+                if (!tg_emit_guardrail(nl, s0 + i, &meshes)) ok = 0;
+                else nrails++;
+            }
         }
         for (i = 0; i < ns && ok; i++) {
             const int si = s0 + i;
@@ -1862,7 +2107,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
             } else {
                 if (!tg_building_for_span(nl, si, &meshes)) { ok = 0; break; }
                 if (meshes.len > before) n_added = 1;
-                if (!tg_emit_bridge(nl, si, ground_y, &meshes, &n_added)) {
+                if (!tg_emit_bridge(nl, si, &meshes, &n_added)) {
                     ok = 0; break;
                 }
             }
@@ -1903,9 +2148,17 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
             memcpy(out->b + out->len, blocks[e].b, blocks[e].len);
             out->len += blocks[e].len;
         }
-        if (ok)
+        if (ok) {
             TD5_LOG_I(LOG_TAG, "trackgen: models = %d entries, %zu bytes "
                       "(%d road meshes)", nentries, out->len, nspans);
+            /* Report coverage rather than assuming the gate is sane: a rail
+             * count of 0 or of nspans both mean the curvature threshold is
+             * wrong, and that is invisible without a number. */
+            if (rails)
+                TD5_LOG_I(LOG_TAG, "trackgen: guardrails on %d/%d spans (%d%%)",
+                          nrails, nspans,
+                          nspans ? (nrails * 100 / nspans) : 0);
+        }
     }
 
     for (e = 0; e < nentries; e++) tg_buf_free(&blocks[e]);
@@ -2096,10 +2349,61 @@ static void tg_emit_texture_page_tree(TG_Buf *out)
     }
 }
 
+/* Page 4: crash barrier -- galvanised steel with a dark shadow gutter along the
+ * bottom and a rhythm of darker post marks.
+ *
+ * Reusing the building-wall page (the cheap option) was tried on paper and
+ * rejected: that page is banded masonry WITH LIT WINDOWS, so a barrier drawn
+ * with it reads as a low garden wall rather than as a road barrier. A page is
+ * ~30 lines here, so a dedicated one is the cheaper mistake to avoid.
+ *
+ * The V axis runs up the barrier's face (see tg_emit_guardrail), so row 0 is
+ * the bottom edge -- hence the gutter lives in the low rows, not the high ones.
+ */
+static void tg_emit_texture_page_rail(TG_Buf *out)
+{
+    unsigned int rng = 0x7F4A7C15u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR. 0..9 steel greys (cooler + brighter than the wall page's concrete),
+     * 10..12 shadow/gutter, 13..15 specular highlight along the top rib. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        if (i < 10)      { b = 150 + i * 8; g = 148 + i * 8; r = 142 + i * 8; }
+        else if (i < 13) { b = 60;          g = 58;          r = 56;          }
+        else             { b = 228 + (i-13) * 8; g = 228 + (i-13) * 8;
+                           r = 224 + (i-13) * 8; }
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        int x = i % TD5_TG_TEX_DIM;
+        int y = i / TD5_TG_TEX_DIM;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if (y < 8) {
+            idx = 10 + (int)((rng >> 16) % 3);        /* gutter under the rail */
+        } else if (y >= 26 && y <= 34) {
+            idx = 13 + (int)((rng >> 17) % 3);        /* highlight rib */
+        } else if ((x % 32) < 3) {
+            idx = 10 + (int)((rng >> 18) % 3);        /* post every half tile */
+        } else {
+            idx = (int)((rng >> 16) % 10);            /* steel */
+        }
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 static int tg_emit_textures(TG_Buf *out)
 {
-    TG_Buf pages[4];
-    const unsigned int count = 4;
+    TG_Buf pages[TD5_TG_PAGE_COUNT];
+    const unsigned int count = TD5_TG_PAGE_COUNT;
     unsigned int cursor = 4 + 4 * count;
     unsigned int i;
 
@@ -2108,6 +2412,7 @@ static int tg_emit_textures(TG_Buf *out)
     tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_WALL]);
     tg_emit_texture_page_green(&pages[TD5_TG_PAGE_GREEN]);
     tg_emit_texture_page_tree(&pages[TD5_TG_PAGE_TREE]);
+    tg_emit_texture_page_rail(&pages[TD5_TG_PAGE_RAIL]);
     for (i = 0; i < count; i++) {
         if (pages[i].oom) {
             for (i = 0; i < count; i++) tg_buf_free(&pages[i]);
