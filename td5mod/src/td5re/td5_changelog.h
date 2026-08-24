@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 24" },
+    { CL_ITEM,    "Auto-generated tracks were putting a bridge deck under" },
+    { CL_ITEM,    "  87% of the road, because \"elevated\" meant higher than" },
+    { CL_ITEM,    "  the single lowest point on the whole track. It now" },
+    { CL_ITEM,    "  means higher than the ground either side, which halves" },
+    { CL_ITEM,    "  the track's model data." },
+    { CL_ITEM,    "Optional crash barriers through the corners, off by" },
+    { CL_ITEM,    "  default (TD5RE_AUTOTRACK_GUARDRAILS=1)." },
+
     { CL_DATE,    "August 23" },
     { CL_ITEM,    "Auto-generated tracks now throw sharper switchbacks -" },
     { CL_ITEM,    "  tight sections swing up to ~176 degrees, close to a" },
