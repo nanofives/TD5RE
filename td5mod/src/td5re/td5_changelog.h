@@ -65,6 +65,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "The branch is now VISIBLE as you approach the fork and" },
     { CL_ITEM,    "  through the merge, not only once you are on it - so a" },
     { CL_ITEM,    "  fork reads as a real alternate route." },
+    { CL_ITEM,    "Forks now split the road DOWN THE MIDDLE like real TD5" },
+    { CL_ITEM,    "  tracks (two half-width carriageways) instead of" },
+    { CL_ITEM,    "  bulging out and back - and are reverse-drivable." },
 
     { CL_DATE,    "August 23" },
     { CL_ITEM,    "Auto-generated tracks now throw sharper switchbacks -" },
