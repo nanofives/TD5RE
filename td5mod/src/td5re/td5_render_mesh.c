@@ -2628,12 +2628,22 @@ void td5_render_actors_for_view(int view_index)
          * whether the span is in the main ring (td5_track.c:6040-6057). When
          * the branch span's >>2 falls inside the MODELS.DAT range, the same
          * block is re-submitted → Munich gantry double + mirror. */
-        if (player_branch_span >= 0 && total_spans > ring) {
-            int blo = player_branch_span - back_window;
-            int bhi = player_branch_span + fwd_window;
-            if (blo < ring)         blo = ring;
-            if (bhi >= total_spans) bhi = total_spans - 1;
-            for (int span_index = blo; span_index <= bhi; span_index++) {
+        /* [BRANCH VISIBILITY 2026-08-25] Draw the branch corridor whenever it is
+         * near the player's NORMALISED position -- on the APPROACH to the fork,
+         * while on the branch, and through the MERGE -- not only once the player
+         * is physically on it (the old `player_branch_span >= 0` gate). A branch
+         * span (index >= ring) maps through the jump table to its parallel main
+         * position, so draw it when that falls within the render reach. The
+         * projector frustum-culls the ones off-screen, and s_submitted dedups
+         * against the main-road draw. This is what makes a fork read as a visible
+         * alternate route instead of a road that only appears once you have
+         * already committed to it. */
+        if (total_spans > ring) {
+            for (int span_index = ring; span_index < total_spans; span_index++) {
+                int norm = td5_track_branch_to_main_span(span_index);
+                int d = norm - player_span;
+                if (d < -back_window || d > fwd_window)
+                    continue;
                 const TD5_SpanDisplayList *display_list =
                     td5_track_get_display_list(span_index);
                 if (!display_list)

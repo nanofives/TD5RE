@@ -62,6 +62,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "Fixed the invisible walls when a branch merges back:" },
     { CL_ITEM,    "  the car no longer flickers between the side road and" },
     { CL_ITEM,    "  the main road it runs beside." },
+    { CL_ITEM,    "The branch is now VISIBLE as you approach the fork and" },
+    { CL_ITEM,    "  through the merge, not only once you are on it - so a" },
+    { CL_ITEM,    "  fork reads as a real alternate route." },
 
     { CL_DATE,    "August 23" },
     { CL_ITEM,    "Auto-generated tracks now throw sharper switchbacks -" },
