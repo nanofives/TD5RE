@@ -2012,24 +2012,29 @@ static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk)
     const double u_out = TD5_TG_GROUND_WIDTH / (double)TD5_TG_SPAN_LENGTH;
 
     /* LEFT skirt: road edge -> outward. Loop order near-in, near-out, far-out,
-     * far-in so the quad is a proper ring. */
-    px[n]=nlx;                        py[n]=nly-drop; pz[n]=nlz;
+     * far-in so the quad is a proper ring. The INNER edge sits at ROAD LEVEL
+     * (nly, not nly-drop) so the terrain meets the asphalt flush -- the old
+     * uniform -drop left the whole skirt 70 units below the road edge, a thin
+     * void/lip between road and grass. Only the OUTER edge drops, giving a gentle
+     * embankment away from the road. Inner and road edge share the same line
+     * (they meet, they do not overlap), so there is no z-fight to avoid. */
+    px[n]=nlx;                        py[n]=nly;      pz[n]=nlz;
     uu[n]=0.0;   vv[n]=(double)si;      n++;
     px[n]=nlx+nux*TD5_TG_GROUND_WIDTH; py[n]=nly-drop; pz[n]=nlz+nuz*TD5_TG_GROUND_WIDTH;
     uu[n]=u_out; vv[n]=(double)si;      n++;
     px[n]=flx+fux*TD5_TG_GROUND_WIDTH; py[n]=fly-drop; pz[n]=flz+fuz*TD5_TG_GROUND_WIDTH;
     uu[n]=u_out; vv[n]=(double)si+1.0;  n++;
-    px[n]=flx;                        py[n]=fly-drop; pz[n]=flz;
+    px[n]=flx;                        py[n]=fly;      pz[n]=flz;
     uu[n]=0.0;   vv[n]=(double)si+1.0;  n++;
 
     /* RIGHT skirt: mirrored, outward is -unit. */
-    px[n]=nrx;                        py[n]=nry-drop; pz[n]=nrz;
+    px[n]=nrx;                        py[n]=nry;      pz[n]=nrz;
     uu[n]=0.0;   vv[n]=(double)si;      n++;
     px[n]=nrx-nux*TD5_TG_GROUND_WIDTH; py[n]=nry-drop; pz[n]=nrz-nuz*TD5_TG_GROUND_WIDTH;
     uu[n]=u_out; vv[n]=(double)si;      n++;
     px[n]=frx-fux*TD5_TG_GROUND_WIDTH; py[n]=fry-drop; pz[n]=frz-fuz*TD5_TG_GROUND_WIDTH;
     uu[n]=u_out; vv[n]=(double)si+1.0;  n++;
-    px[n]=frx;                        py[n]=fry-drop; pz[n]=frz;
+    px[n]=frx;                        py[n]=fry;      pz[n]=frz;
     uu[n]=0.0;   vv[n]=(double)si+1.0;  n++;
 
     cx = cy = cz = 0.0;
