@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 25" },
+    { CL_ITEM,    "Auto-track has THEMATIC trees now: forests mix species," },
+    { CL_ITEM,    "  new COAST (palms), ALPINE (snow conifers) and" },
+    { CL_ITEM,    "  ORIENTAL (topiary/willow) biomes -- real TD5 foliage." },
     { CL_ITEM,    "Auto-track buildings now have STOREFRONTS: a glazed" },
     { CL_ITEM,    "  shop ground floor (real shopfronts / awning strips)" },
     { CL_ITEM,    "  under the tower facade, shops at street level." },

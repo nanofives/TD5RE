@@ -96,7 +96,12 @@
  * shipped city does. Store variants live right after the wall variants. */
 #define TD5_TG_STORE_VARIANTS  3
 #define TD5_TG_PAGE_STORE  (TD5_TG_PAGE_WALL_EXTRA + TD5_TG_WALL_VARIANTS - 1)
-#define TD5_TG_PAGE_COUNT  (TD5_TG_PAGE_STORE + TD5_TG_STORE_VARIANTS)
+/* Thematic trees: a set of distinct tree/palm/conifer/topiary pages so each
+ * biome mixes several species. Variant 0 reuses TD5_TG_PAGE_TREE; 1..N-1 live
+ * after the store pages. */
+#define TD5_TG_TREE_VARIANTS   10
+#define TD5_TG_PAGE_TREE_EXTRA (TD5_TG_PAGE_STORE + TD5_TG_STORE_VARIANTS)
+#define TD5_TG_PAGE_COUNT  (TD5_TG_PAGE_TREE_EXTRA + TD5_TG_TREE_VARIANTS - 1)
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
@@ -1868,6 +1873,34 @@ static int tg_store_page(unsigned int gh)
     return TD5_TG_PAGE_STORE + (int)((gh >> 23) % (unsigned)TD5_TG_STORE_VARIANTS);
 }
 
+/* ===================== TREES =====================
+ * A palette of tree/palm/conifer/topiary SPECIES. Each entry is a billboard
+ * size (raw = world_units*256) plus a procedural silhouette shape used when
+ * real textures are off. Real mode fills each variant page from a shipped TD5
+ * foliage page (level ids in the comments); index 0 of those pages is the
+ * transparent key. Biomes reference these by index (tree_set) and mix them. */
+enum { TG_TREE_DECID = 0, TG_TREE_CONIFER, TG_TREE_PALM, TG_TREE_TOPIARY,
+       TG_TREE_WILLOW };
+typedef struct { int w, h, shape; } TG_TreePage;
+static const TG_TreePage k_tree_pages[TD5_TG_TREE_VARIANTS] = {
+    { 4200, 5600, TG_TREE_DECID   },  /* 0  L017 p266  deciduous            */
+    { 5200, 6600, TG_TREE_DECID   },  /* 1  L008 p173  big deciduous        */
+    { 4000, 5400, TG_TREE_DECID   },  /* 2  L013 p234  deciduous            */
+    { 3200, 6400, TG_TREE_CONIFER },  /* 3  L003 p441  conifer              */
+    { 3200, 6400, TG_TREE_CONIFER },  /* 4  L003 p445  snow conifer         */
+    { 3400, 7200, TG_TREE_PALM    },  /* 5  L026 p097  palm                 */
+    { 3800, 6800, TG_TREE_PALM    },  /* 6  L014 p249  palm                 */
+    { 3600, 4200, TG_TREE_TOPIARY },  /* 7  L004 p359  topiary              */
+    { 3600, 5000, TG_TREE_TOPIARY },  /* 8  L004 p360  topiary              */
+    { 4200, 6000, TG_TREE_WILLOW  }   /* 9  L004 p369  weeping willow       */
+};
+
+/* TEXTURES.DAT page slot for tree variant v (variant 0 reuses PAGE_TREE). */
+static int tg_tree_slot(int v)
+{
+    return v == 0 ? TD5_TG_PAGE_TREE : (TD5_TG_PAGE_TREE_EXTRA + v - 1);
+}
+
 /* ===================== BIOMES =====================
  * A biome owns a RUN of spans and drives what stands beside the road: how
  * dense the props are, how tall, how far back, and which texture page. That is
@@ -1882,6 +1915,7 @@ static int tg_store_page(unsigned int gh)
  * facade page-cell is ~8.4 x 11.5 wu (2150 x 2950 raw), a city frontage ~3
  * floors tall, buildings sit ON the curb (setback ~0), and city trees are big
  * and sparse while rural trees are small and dense. */
+#define TD5_TG_TREESET_MAX 4
 typedef struct {
     const char *name;
     int    density;      /* trees: prop if (hash>>28) <= this, so 0..15 */
@@ -1889,28 +1923,38 @@ typedef struct {
     int    floors_min, floors_extra; /* facade height in cells */
     int    depth;        /* building depth for side returns, raw */
     int    sidewalk;     /* setback from road edge, raw (~0 = on the curb) */
-    int    tree_w, tree_h;      /* billboard tree size, raw */
-    int    page;
+    int    tree_set[TD5_TG_TREESET_MAX]; /* tree-variant indices to mix */
+    int    tree_n;       /* how many entries of tree_set are used (0 = facade) */
+    int    page;         /* facade WALL page for box biomes */
     int    tower_mask;   /* (hash>>3 & mask)==0 -> a taller run (tower cluster) */
-    int    billboard;    /* 1 = camera-facing quad (trees), 0 = facade wall */
+    int    billboard;    /* 1 = camera-facing trees, 0 = facade wall */
     int    ground_page;  /* page for the terrain slab under/around the road */
 } TG_Biome;
 
 static const TG_Biome k_biomes[] = {
     /* CITY: ~8.4x11.5 wu cells, ~3 floors, on the curb, big sparse towers. */
-    { "CITY",       9, 2150, 2950, 2, 3, 6000, 350,    0,    0,
+    { "CITY",       9, 2150, 2950, 2, 3, 6000, 350, {0}, 0,
       TD5_TG_PAGE_WALL,   3, 0, TD5_TG_PAGE_GROUND },
-    /* FIELDS: sparse, biggish trees on an open horizon. */
-    { "FIELDS",     2,    0,    0, 0, 0,    0,   0, 1700, 3600,
+    /* FIELDS: sparse deciduous on an open horizon. */
+    { "FIELDS",     2, 0,0,0,0,0,0, {2, 0},       2,
       TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN },
-    /* FOREST: rural dense low trees (~4.7x10.1 wu) crowding the verge. */
-    { "FOREST",    11,    0,    0, 0, 0,    0,   0, 1250, 2600,
+    /* FOREST: dense mixed deciduous crowding the verge. */
+    { "FOREST",    11, 0,0,0,0,0,0, {0, 1, 2},    3,
       TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN },
     /* INDUSTRIAL: wider squat sheds (~10 wu cells), 1-2 floors, deeper. */
-    { "INDUSTRIAL", 6, 2560, 2300, 1, 2, 8000, 600,    0,    0,
-      TD5_TG_PAGE_WALL,  63, 0, TD5_TG_PAGE_GROUND }
+    { "INDUSTRIAL", 6, 2560, 2300, 1, 2, 8000, 600, {0}, 0,
+      TD5_TG_PAGE_WALL,  63, 0, TD5_TG_PAGE_GROUND },
+    /* ALPINE: conifers + snow conifers. */
+    { "ALPINE",     8, 0,0,0,0,0,0, {3, 4},       2,
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN },
+    /* COAST: palms. */
+    { "COAST",      5, 0,0,0,0,0,0, {5, 6},       2,
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN },
+    /* ORIENTAL: manicured topiary + weeping willow. */
+    { "ORIENTAL",   9, 0,0,0,0,0,0, {7, 8, 9},    3,
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN }
 };
-#define TD5_TG_BIOME_COUNT 4
+#define TD5_TG_BIOME_COUNT 7
 #define TD5_TG_BIOME_RUN   150
 
 static int tg_biome_for_span(int si)
@@ -2061,32 +2105,37 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
     unsigned int h = (unsigned)si * 2654435761u;
     const TG_Node *n;
     const TG_Biome *b;
+    const TG_TreePage *tp;
     double side, gap, tw, th, jit, lx, lz, cx, cz;
+    int tv;
 
     if (si <= TD5_TG_GRID_SPAN) return 1;      /* keep the grid area clear */
     b = &k_biomes[tg_biome_for_span(si)];
 
-    if (!b->billboard)
+    if (!b->billboard || b->tree_n <= 0)
         return tg_emit_street_wall(nl, si, b, blk);
 
-    /* Trees: density-gated camera-facing billboards, sized to the SHIPPED tree
-     * dimensions for the biome (city big+sparse, rural small+dense), with a
-     * per-tree scale jitter that keeps the page aspect. */
+    /* Trees: density-gated camera-facing billboards. Each biome MIXES several
+     * species (tree_set) picked per-tree, each with its own shipped size, and a
+     * scale jitter that keeps the page aspect. */
     if ((int)(h >> 28) > b->density) return 1;
 
     n = &nl->v[si];
     side = ((h >> 3) & 1) ? 1.0 : -1.0;
+    tv  = b->tree_set[(h >> 13) % (unsigned)b->tree_n];
+    tp  = &k_tree_pages[tv];
 
     jit = 0.8 + (double)((h >> 9) % 41) * 0.01;    /* 0.80 .. 1.20 */
-    tw  = (double)b->tree_w * jit;
-    th  = (double)b->tree_h * jit;
+    tw  = (double)tp->w * jit;
+    th  = (double)tp->h * jit;
     gap = 800.0 + (double)((h >> 5) % 2400);       /* set back off the verge */
 
     lx = n->tz * side; lz = -n->tx * side;
     cx = n->x + lx * (n->width * 0.5 + gap + tw * 0.5);
     cz = n->z + lz * (n->width * 0.5 + gap + tw * 0.5);
 
-    return tg_emit_billboard_mesh(blk, cx, n->y, cz, tw * 0.5, th, b->page);
+    return tg_emit_billboard_mesh(blk, cx, n->y, cz, tw * 0.5, th,
+                                  tg_tree_slot(tv));
 }
 
 /* Tunnels come in runs so a whole stretch is enclosed, not isolated spans. */
@@ -2973,48 +3022,67 @@ static void tg_emit_texture_page_green(TG_Buf *out)
     }
 }
 
-/* Page 3: a single tree silhouette on an ALPHA-KEYED page (type 1), so the
- * surround cuts out and the billboard reads as a tree rather than a square.
- * Palette index 0 is reserved as the transparent key -- see the [UNCERTAIN]
- * note on tg_emit_billboard_mesh. */
-static void tg_emit_texture_page_tree(TG_Buf *out)
+/* Tree pages: an ALPHA-KEYED silhouette (type 1, index 0 = transparent key) so
+ * the surround cuts out. `shape` selects the species outline so the procedural
+ * fallback still mixes deciduous/conifer/palm/topiary/willow like the real set. */
+static void tg_emit_texture_page_tree(TG_Buf *out, int shape)
 {
-    unsigned int rng = 0x2545F491u;
+    unsigned int rng = 0x2545F491u + (unsigned)shape * 0x9E3779B9u;
     int i;
 
     tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
     tg_put_u8(out, 1);                                  /* 1 = alpha-keyed */
     tg_put_u32(out, TD5_TG_PAL_COUNT);
 
-    /* BGR. 0 = key (never drawn), 1..3 trunk browns, 4..15 canopy greens. */
+    /* BGR. 0 = key (never drawn), 1..3 trunk browns, 4..15 canopy greens
+     * (olive-yellow for palm fronds). */
     for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
         int b, g, r;
-        if (i == 0)     { b = 255; g = 0;  r = 255; }   /* key: magenta */
-        else if (i < 4) { b = 30 + i * 6;  g = 44 + i * 8;  r = 62 + i * 10; }
-        else            { b = 26 + i * 2;  g = 60 + i * 10; r = 22 + i * 3;  }
+        if (i == 0)                       { b = 255; g = 0;  r = 255; }
+        else if (i < 4)                   { b = 30 + i * 6; g = 44 + i * 8; r = 62 + i * 10; }
+        else if (shape == TG_TREE_PALM)   { b = 24 + i;     g = 70 + i * 8; r = 40 + i * 4;  }
+        else                              { b = 26 + i * 2; g = 60 + i * 10; r = 22 + i * 3; }
         tg_put_u8(out, (unsigned)b);
         tg_put_u8(out, (unsigned)g);
         tg_put_u8(out, (unsigned)r);
     }
 
     for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
-        /* v=0 is the TOP of the page; the billboard maps the base to v=1. */
+        /* y=0 is the TOP of the page; the billboard maps the base to v=1. */
         int x = i % TD5_TG_TEX_DIM;
         int y = i / TD5_TG_TEX_DIM;
         int dx = x - 32;
         int idx = 0;
         rng = rng * 1103515245u + 12345u;
 
-        if (y >= 44) {
-            /* Trunk: narrow, slightly ragged. */
-            if (dx > -4 && dx < 4) idx = 1 + (int)((rng >> 17) % 3);
-        } else {
-            /* Canopy: a rough blob, widest around a third down, with a noisy
-             * edge so the outline does not read as a circle. */
-            int cy = 22;
-            int ry = y - cy;
-            int rad = 26 - (ry * ry) / 18 - (int)((rng >> 19) % 5);
-            if (dx * dx < rad * rad) idx = 4 + (int)((rng >> 16) % 12);
+        switch (shape) {
+        case TG_TREE_CONIFER:      /* triangle widening to the base */
+            if (y >= 52) { if (dx > -3 && dx < 3) idx = 1 + (int)((rng >> 17) % 3); }
+            else { int hw = 2 + (y * 26) / 52 - (int)((rng >> 19) % 4);
+                   if (dx > -hw && dx < hw) idx = 4 + (int)((rng >> 16) % 12); }
+            break;
+        case TG_TREE_PALM:         /* tall bare trunk, fronds fanning at the top */
+            if (y >= 20) { if (dx > -2 && dx < 3) idx = 1 + (int)((rng >> 17) % 3); }
+            else { int ry = y - 8, rad = 20 - (ry * ry) / 6 - (int)((rng >> 19) % 4);
+                   if (dx * dx < rad * rad && ((x + y) & 3) != 0)
+                       idx = 4 + (int)((rng >> 16) % 12); }
+            break;
+        case TG_TREE_TOPIARY:      /* tight round ball on a short stem */
+            if (y >= 48) { if (dx > -2 && dx < 2) idx = 1 + (int)((rng >> 17) % 3); }
+            else { int ry = y - 26, rad = 22 - (int)((rng >> 19) % 2);
+                   if (dx * dx + ry * ry < rad * rad) idx = 4 + (int)((rng >> 16) % 8); }
+            break;
+        case TG_TREE_WILLOW:       /* wide drooping canopy with trailing strands */
+            if (y >= 50) { if (dx > -3 && dx < 3) idx = 1 + (int)((rng >> 17) % 3); }
+            else { int rad = 24 - (y / 4) - (int)((rng >> 19) % 3);
+                   if (dx > -rad && dx < rad && (y < 30 || ((y + dx) & 1)))
+                       idx = 4 + (int)((rng >> 16) % 12); }
+            break;
+        default:                   /* TG_TREE_DECID: rough blob */
+            if (y >= 44) { if (dx > -4 && dx < 4) idx = 1 + (int)((rng >> 17) % 3); }
+            else { int ry = y - 22, rad = 26 - (ry * ry) / 18 - (int)((rng >> 19) % 5);
+                   if (dx * dx < rad * rad) idx = 4 + (int)((rng >> 16) % 12); }
+            break;
         }
         tg_put_u8(out, (unsigned)idx);
     }
@@ -3115,11 +3183,11 @@ static void tg_emit_texture_page_ground(TG_Buf *out)
  * on-disk page format as the procedural emitters -- pad, opaque type, palette
  * count, BGR palette, then the 64x64 index bytes. */
 static void tg_emit_real_page(TG_Buf *out, const unsigned char *pal, int paln,
-                              const unsigned char *idx)
+                              const unsigned char *idx, int type)
 {
     int i;
     tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
-    tg_put_u8(out, 0);                                   /* opaque */
+    tg_put_u8(out, (unsigned)type);         /* 0 opaque, 1 alpha-keyed (idx 0) */
     tg_put_u32(out, (unsigned)paln);
     for (i = 0; i < paln * 3; i++) tg_put_u8(out, pal[i]);
     for (i = 0; i < TD5_TG_TEX_TEXELS; i++) tg_put_u8(out, idx[i]);
@@ -3154,15 +3222,19 @@ static int tg_emit_textures(TG_Buf *out)
     if (tg_real_textures_enabled()) {
         int v;
         tg_emit_real_page(&pages[TD5_TG_PAGE_WALL],
-                          k_real_wall_pal[0], k_real_wall_paln[0], k_real_wall_idx[0]);
+                          k_real_wall_pal[0], k_real_wall_paln[0], k_real_wall_idx[0], 0);
         for (v = 1; v < k_real_wall_count && v < TD5_TG_WALL_VARIANTS; v++)
             tg_emit_real_page(&pages[TD5_TG_PAGE_WALL_EXTRA + v - 1],
-                              k_real_wall_pal[v], k_real_wall_paln[v], k_real_wall_idx[v]);
+                              k_real_wall_pal[v], k_real_wall_paln[v], k_real_wall_idx[v], 0);
         for (v = 0; v < k_real_store_count && v < TD5_TG_STORE_VARIANTS; v++)
             tg_emit_real_page(&pages[TD5_TG_PAGE_STORE + v],
-                              k_real_store_pal[v], k_real_store_paln[v], k_real_store_idx[v]);
+                              k_real_store_pal[v], k_real_store_paln[v], k_real_store_idx[v], 0);
         tg_emit_real_page(&pages[TD5_TG_PAGE_GREEN],
-                          k_real_green_pal, k_real_green_paln, k_real_green_idx);
+                          k_real_green_pal, k_real_green_paln, k_real_green_idx, 0);
+        /* Thematic trees: alpha-keyed (type 1), index 0 transparent. */
+        for (v = 0; v < TD5_TG_TREE_VARIANTS && v < k_real_tree_count; v++)
+            tg_emit_real_page(&pages[tg_tree_slot(v)],
+                              k_real_tree_pal[v], k_real_tree_paln[v], k_real_tree_idx[v], 1);
     } else {
         int v;
         tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_WALL], 0);
@@ -3171,8 +3243,10 @@ static int tg_emit_textures(TG_Buf *out)
         for (v = 0; v < TD5_TG_STORE_VARIANTS; v++)
             tg_emit_texture_page_store(&pages[TD5_TG_PAGE_STORE + v], v);
         tg_emit_texture_page_green(&pages[TD5_TG_PAGE_GREEN]);
+        /* Procedural trees vary by shape (deciduous/conifer). */
+        for (v = 0; v < TD5_TG_TREE_VARIANTS; v++)
+            tg_emit_texture_page_tree(&pages[tg_tree_slot(v)], k_tree_pages[v].shape);
     }
-    tg_emit_texture_page_tree(&pages[TD5_TG_PAGE_TREE]);
     tg_emit_texture_page_rail(&pages[TD5_TG_PAGE_RAIL]);
     for (i = 0; i < count; i++) {
         if (pages[i].oom) {
