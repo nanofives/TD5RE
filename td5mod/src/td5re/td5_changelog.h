@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 25" },
+    { CL_ITEM,    "Auto-track buildings are now flat facade WALLS, like" },
+    { CL_ITEM,    "  shipped TD5 tracks: whole-page cells laid into a" },
+    { CL_ITEM,    "  continuous street, so no window is cut mid-facade." },
+    { CL_ITEM,    "  Run ends turn a corner; trees sized to their page." },
     { CL_ITEM,    "Auto-track can now borrow REAL TD5 textures (roads," },
     { CL_ITEM,    "  buildings, ground) from a shipped city track instead" },
     { CL_ITEM,    "  of the procedural placeholders" },

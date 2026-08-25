@@ -1719,6 +1719,118 @@ static int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz,
     return !blk->oom;
 }
 
+/* ===================== FACADE WALLS =====================
+ * Shipped TD5 buildings are NOT closed boxes with a UV-wrapped masonry texture.
+ * A survey of level014 (Melbourne, 1743 meshes) found exactly ONE 6-quad box:
+ * every building front is a FLAT array of road-facing quads, and every shipped
+ * vertex UV is inside [0,1] -- pages are mapped ONCE per quad, never wrapped. A
+ * wide/tall frontage is built by REPEATING GEOMETRY (many whole-page cells side
+ * by side), not by stretching one page across a big face. That is why our boxes
+ * read as "cut off in the middle": tg_emit_box_mesh sets UV = 2*half/tile > 1,
+ * slicing the facade page mid-window at each edge.
+ *
+ * The facade path below imitates the shipped look: a grid of whole-page cells
+ * laid flat along the road into a continuous street wall, so the texture is what
+ * sizes the building (one page image per cell) and nothing is ever cut. */
+#define TD5_TG_FACADE_MODULE  1500.0   /* world size of one whole-page cell */
+#define TD5_TG_FACADE_MAXQUAD 48
+
+/* Write ONE opaque quad-list mesh sampling `page`, in the 0x38 mesh format --
+ * n vertices = 4*quads, each quad a separate whole-page cell (UV 0..1). */
+static int tg_write_quad_mesh(TG_Buf *blk, const double *px, const double *py,
+                              const double *pz, const double *uu, const double *vv,
+                              int n, int page)
+{
+    double cx = 0.0, cy = 0.0, cz = 0.0, radius = 0.0;
+    int i, quads = n / 4;
+
+    if (n <= 0) return 1;
+    for (i = 0; i < n; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
+    cx /= n; cy /= n; cz /= n;
+    for (i = 0; i < n; i++) {
+        double dx = px[i]-cx, dy = py[i]-cy, dz = pz[i]-cz;
+        double d = sqrt(dx*dx + dy*dy + dz*dz);
+        if (d > radius) radius = d;
+    }
+    if (!(radius > 0.0)) radius = 1.0;
+
+    tg_put_u16(blk, 259);
+    tg_put_u16(blk, 0);                    /* opaque, not a billboard */
+    tg_put_u32(blk, 1);                    /* one command */
+    tg_put_u32(blk, (unsigned)n);          /* total de-indexed vertices */
+    tg_put_f32(blk, radius);
+    tg_put_f32(blk, cx);
+    tg_put_f32(blk, cy);
+    tg_put_f32(blk, cz);
+    tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+    tg_put_u32(blk, 0);
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE);
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE + TD5_TG_CMD_SIZE);
+    tg_put_u32(blk, 0);
+
+    tg_put_u16(blk, 0);                    /* dispatch_type 0 */
+    tg_put_u16(blk, (unsigned)page);
+    tg_put_u32(blk, 0);
+    tg_put_u16(blk, 0);                    /* triangle_count */
+    tg_put_u16(blk, (unsigned)quads);      /* quad_count */
+    tg_put_u32(blk, 0);
+
+    for (i = 0; i < n; i++) {
+        tg_put_f32(blk, px[i]);
+        tg_put_f32(blk, py[i]);
+        tg_put_f32(blk, pz[i]);
+        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+        tg_put_u32(blk, 0xFFFFFFFFu);
+        tg_put_f32(blk, uu[i]);
+        tg_put_f32(blk, vv[i]);
+        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+    }
+    return !blk->oom;
+}
+
+/* Push a cols x rows grid of flat quads onto the vertex arrays. `base` is the
+ * lower-near corner; `across` and `up` are the FULL edge vectors. Each cell maps
+ * the whole page (UV 0..1) with v=1 at the base, so no image is cut mid-cell. */
+static void tg_facade_push_grid(double bx, double by, double bz,
+                                double ax, double ay, double az,
+                                double ux, double uy, double uz,
+                                int cols, int rows,
+                                double *px, double *py, double *pz,
+                                double *uu, double *vv, int *pn)
+{
+    int c, r, n = *pn;
+    if (cols < 1) cols = 1;
+    if (rows < 1) rows = 1;
+    for (r = 0; r < rows; r++) {
+        for (c = 0; c < cols; c++) {
+            double c0 = (double)c / cols, c1 = (double)(c + 1) / cols;
+            double r0 = (double)r / rows, r1 = (double)(r + 1) / rows;
+            if (n + 4 > TD5_TG_FACADE_MAXQUAD * 4) { *pn = n; return; }
+            /* quad loop: near-bottom, far-bottom, far-top, near-top */
+            px[n]=bx+ax*c0+ux*r0; py[n]=by+ay*c0+uy*r0; pz[n]=bz+az*c0+uz*r0; uu[n]=0.0; vv[n]=1.0; n++;
+            px[n]=bx+ax*c1+ux*r0; py[n]=by+ay*c1+uy*r0; pz[n]=bz+az*c1+uz*r0; uu[n]=1.0; vv[n]=1.0; n++;
+            px[n]=bx+ax*c1+ux*r1; py[n]=by+ay*c1+uy*r1; pz[n]=bz+az*c1+uz*r1; uu[n]=1.0; vv[n]=0.0; n++;
+            px[n]=bx+ax*c0+ux*r1; py[n]=by+ay*c0+uy*r1; pz[n]=bz+az*c0+uz*r1; uu[n]=0.0; vv[n]=0.0; n++;
+        }
+    }
+    *pn = n;
+}
+
+/* Is a facade wall present at span si on this side? A deterministic run/gap
+ * pattern: spans group into periods; a per-period hash carves a leading GAP
+ * (a side street) and the rest of the period is a continuous built RUN. The two
+ * sides break at different spans (the +777 offset) so a street is never gapped
+ * on both sides at once. */
+#define TD5_TG_FACADE_PERIOD 13
+static int tg_facade_built(int si, int left)
+{
+    unsigned int s     = (unsigned)si + (left ? 777u : 0u);
+    unsigned int block = s / TD5_TG_FACADE_PERIOD;
+    unsigned int phase = s % TD5_TG_FACADE_PERIOD;
+    unsigned int gap   = 2u + ((block * 2654435761u) >> 29);   /* 2..9 */
+    return (int)(phase >= gap);
+}
+
 /* ===================== BIOMES =====================
  * A biome owns a RUN of spans and drives what stands beside the road: how
  * dense the props are, how tall, how far back, and which texture page. That is
@@ -1763,59 +1875,131 @@ static int tg_biome_for_span(int si)
     return (int)((h >> 27) % TD5_TG_BIOME_COUNT);
 }
 
-/* Building beside span si, or 0 if this span gets none. Deterministic from si
- * alone -- deliberately NOT the shared RNG, which has already been consumed by
- * the centerline walk, so scenery cannot perturb track shape. */
+/* A continuous street wall of flat facade cells lining span si -- one mesh,
+ * both sides. A side is built per tg_facade_built (runs separated by side
+ * streets). Consecutive built spans share their near/far endpoints, so the
+ * facades ABUT into an unbroken wall the way a shipped city block does.
+ *
+ * Single- vs multi-sided is POSITIONAL, exactly as in the shipped data: a
+ * run-INTERIOR span shows only its road-facing plane (single-sided); a run-END
+ * span (its neighbour on that side is a gap) also gets a RETURN cap turning the
+ * corner, so the wall does not read as a paper edge (multi-sided). Setback and
+ * base height are keyed to the RUN, not the span, so a wall stays straight and a
+ * block shares a rough height while individual buildings still step. */
+static int tg_emit_street_wall(const TG_NodeList *nl, int si,
+                               const TG_Biome *b, TG_Buf *blk)
+{
+    double px[TD5_TG_FACADE_MAXQUAD * 4], py[TD5_TG_FACADE_MAXQUAD * 4];
+    double pz[TD5_TG_FACADE_MAXQUAD * 4], uu[TD5_TG_FACADE_MAXQUAD * 4];
+    double vv[TD5_TG_FACADE_MAXQUAD * 4];
+    const TG_Node *n0 = &nl->v[si];
+    const TG_Node *n1;
+    int n = 0, s;
+
+    if (si + 1 >= nl->count) return 1;    /* need the far endpoint to abut */
+    n1 = &nl->v[si + 1];
+
+    for (s = 0; s < 2; s++) {
+        const int left = s;                       /* 0 = right, 1 = left */
+        const double side = left ? 1.0 : -1.0;
+        unsigned int gh;
+        double lx0, lz0, lx1, lz1, gap, set0, set1, H, Hbase;
+        double bx, by, bz, ax, ay, az, flen;
+        int cols, rows;
+
+        if (!tg_facade_built(si, left)) continue;
+
+        /* Keep the branch corridor clear (see tg_building_for_span's note): the
+         * corridor bows into the side<0 lateral over the fork span range. */
+        if (tg_branches_enabled() && side < 0.0) {
+            const int lo = TD5_TG_BRANCH_FORK_SPAN - TD5_TG_BRANCH_WIDEN;
+            const int hi = TD5_TG_BRANCH_FORK_SPAN + TD5_TG_BRANCH_LEN + 1;
+            if (si >= lo && si <= hi) continue;
+        }
+
+        gh = (((unsigned)si + (left ? 777u : 0u)) / TD5_TG_FACADE_PERIOD)
+             * 2246822519u;
+        gap   = (double)b->gap_min * 0.4 + (double)(gh % 1200u);
+        Hbase = (double)b->h_min + (double)((gh >> 7) % (unsigned)b->h_extra);
+        H     = Hbase + (double)(((unsigned)si * 2654435761u >> 19) % 700u);
+        if (((gh >> 3) & (unsigned)b->tower_mask) == 0)
+            H += (double)((gh >> 11) % 5200u);      /* whole-run tower cluster */
+
+        /* Left of travel is (tz, -tx); push both endpoints out past the road. */
+        lx0 = n0->tz * side; lz0 = -n0->tx * side;
+        lx1 = n1->tz * side; lz1 = -n1->tx * side;
+        set0 = n0->width * 0.5 + gap;
+        set1 = n1->width * 0.5 + gap;
+
+        bx = n0->x + lx0 * set0; by = n0->y; bz = n0->z + lz0 * set0;
+        ax = (n1->x + lx1 * set1) - bx;
+        ay = n1->y - n0->y;
+        az = (n1->z + lz1 * set1) - bz;
+
+        flen = sqrt(ax * ax + az * az);
+        if (flen < 1.0) flen = 1.0;
+        cols = (int)(flen / TD5_TG_FACADE_MODULE + 0.5);
+        if (cols < 1) cols = 1;
+        if (cols > 3) cols = 3;
+        rows = (int)(H / TD5_TG_FACADE_MODULE + 0.5);
+        if (rows < 1) rows = 1;
+        if (rows > 4) rows = 4;
+
+        /* Road-facing plane. */
+        tg_facade_push_grid(bx, by, bz, ax, ay, az, 0.0, H, 0.0,
+                            cols, rows, px, py, pz, uu, vv, &n);
+
+        /* Return caps at run ends turn the corner (the multi-sided buildings). */
+        if (!tg_facade_built(si - 1, left))
+            tg_facade_push_grid(bx, by, bz,
+                                lx0 * TD5_TG_FACADE_MODULE, 0.0,
+                                lz0 * TD5_TG_FACADE_MODULE, 0.0, H, 0.0,
+                                1, rows, px, py, pz, uu, vv, &n);
+        if (!tg_facade_built(si + 1, left))
+            tg_facade_push_grid(bx + ax, by + ay, bz + az,
+                                lx1 * TD5_TG_FACADE_MODULE, 0.0,
+                                lz1 * TD5_TG_FACADE_MODULE, 0.0, H, 0.0,
+                                1, rows, px, py, pz, uu, vv, &n);
+    }
+
+    if (n <= 0) return 1;
+    return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, b->page);
+}
+
+/* Scenery beside span si, or 0 (no-op success) if this span gets none. One mesh
+ * at most, deterministic from si -- NOT the shared RNG, which the centerline
+ * walk has already consumed, so scenery cannot perturb track shape. Tree biomes
+ * keep the camera-facing billboard; box biomes now lay a flat facade wall
+ * (tg_emit_street_wall) instead of a UV-tiled 6-sided box. */
 static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
 {
     unsigned int h = (unsigned)si * 2654435761u;
     const TG_Node *n;
-    double side, gap, hx, hy, hz, lx, lz, cx, cz;
+    const TG_Biome *b;
+    double side, gap, tw, th, lx, lz, cx, cz;
 
     if (si <= TD5_TG_GRID_SPAN) return 1;      /* keep the grid area clear */
-    const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
+    b = &k_biomes[tg_biome_for_span(si)];
 
-    if ((int)(h >> 28) > b->density) return 1;   /* biome sets the density */
+    if (!b->billboard)
+        return tg_emit_street_wall(nl, si, b, blk);
+
+    /* Trees: density-gated billboards, sized to the tree page's aspect (taller
+     * than wide) so a tree reads as a tree, not a stretched slab. */
+    if ((int)(h >> 28) > b->density) return 1;
 
     n = &nl->v[si];
     side = ((h >> 3) & 1) ? 1.0 : -1.0;
 
-    /* Keep the branch corridor clear. It bows ~1.9 road-widths in the -n->tz
-     * direction over its parallel main spans, which is the side<0 building side
-     * (same lateral basis), and reaches well past the near buildings there -- so
-     * a side<0 building in that span range sits in the corridor and the branch
-     * traffic drives through it. Suppress those; the far (side>0) buildings and
-     * every span outside the fork are untouched. */
-    if (tg_branches_enabled() && side < 0.0) {
-        const int lo = TD5_TG_BRANCH_FORK_SPAN - TD5_TG_BRANCH_WIDEN;
-        const int hi = TD5_TG_BRANCH_FORK_SPAN + TD5_TG_BRANCH_LEN + 1;
-        if (si >= lo && si <= hi) return 1;
-    }
+    gap = (double)b->gap_min + (double)((h >> 5) % (unsigned)b->gap_extra);
+    tw  = 1400.0 + (double)((h >> 9) % 1600);      /* trunk-to-canopy scale */
+    th  = tw * 1.35;                               /* page aspect: ~4:3 tall */
 
-    /* Setback is biome-driven: FIELDS pushes props right back for an open
-     * horizon, CITY brings them in to frame the road. */
-    gap  = (double)b->gap_min + (double)((h >> 5) % (unsigned)b->gap_extra);
-    hx   = 900.0  + (double)((h >> 9) % 2600);        /* footprint */
-    hz   = 900.0  + (double)((h >> 14) % 2600);
-    hy   = (double)b->h_min + (double)((h >> 19) % (unsigned)b->h_extra);
-    if (((h >> 24) & (unsigned)b->tower_mask) == 0)
-        hy += (double)((h >> 11) % 5200);
-
-    /* Left of travel is (tz, -tx); push out past the road edge. */
     lx = n->tz * side; lz = -n->tx * side;
-    cx = n->x + lx * (n->width * 0.5 + gap + hx);
-    cz = n->z + lz * (n->width * 0.5 + gap + hx);
+    cx = n->x + lx * (n->width * 0.5 + gap + tw * 0.5);
+    cz = n->z + lz * (n->width * 0.5 + gap + tw * 0.5);
 
-    if (b->billboard) {
-        /* Trees: one camera-facing quad standing on the ground, so it reads as
-         * a tree from every angle instead of a slab with visible corners. */
-        return tg_emit_billboard_mesh(blk, cx, n->y, cz,
-                                      hx * 0.6, hy * 2.0, b->page);
-    }
-    /* Tile size is per-biome: ~4 window cells across a 4500 span reads as one
-     * window per cell for masonry. */
-    return tg_emit_box_mesh(blk, cx, n->y + hy, cz, hx, hy, hz,
-                            n->tx, n->tz, b->page, b->tile);
+    return tg_emit_billboard_mesh(blk, cx, n->y, cz, tw * 0.5, th, b->page);
 }
 
 /* Tunnels come in runs so a whole stretch is enclosed, not isolated spans. */
