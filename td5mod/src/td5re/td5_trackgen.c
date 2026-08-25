@@ -84,7 +84,8 @@
 #define TD5_TG_PAGE_GREEN  2
 #define TD5_TG_PAGE_TREE   3
 #define TD5_TG_PAGE_RAIL   4
-#define TD5_TG_PAGE_COUNT  5
+#define TD5_TG_PAGE_GROUND 5
+#define TD5_TG_PAGE_COUNT  6
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
@@ -1727,7 +1728,7 @@ typedef struct {
 static const TG_Biome k_biomes[] = {
     /* dense, tall, close to the road, frequent towers */
     { "CITY",       9, 1600, 5200, 2400,  3000, TD5_TG_PAGE_WALL,   3, 4500.0, 0,
-      TD5_TG_PAGE_WALL },
+      TD5_TG_PAGE_GROUND },
     /* sparse low hedgerows set well back -- open horizon */
     { "FIELDS",     2, 1400, 1200, 4000, 12000, TD5_TG_PAGE_TREE,  255, 3000.0, 1,
       TD5_TG_PAGE_GREEN },
@@ -1736,7 +1737,7 @@ static const TG_Biome k_biomes[] = {
       TD5_TG_PAGE_GREEN },
     /* wide squat sheds, mid setback, rare towers */
     { "INDUSTRIAL", 6, 1000, 1600, 3000,  6000, TD5_TG_PAGE_WALL,  63, 6000.0, 0,
-      TD5_TG_PAGE_WALL }
+      TD5_TG_PAGE_GROUND }
 };
 #define TD5_TG_BIOME_COUNT 4
 #define TD5_TG_BIOME_RUN   150
@@ -1763,6 +1764,19 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
 
     n = &nl->v[si];
     side = ((h >> 3) & 1) ? 1.0 : -1.0;
+
+    /* Keep the branch corridor clear. It bows ~1.9 road-widths in the -n->tz
+     * direction over its parallel main spans, which is the side<0 building side
+     * (same lateral basis), and reaches well past the near buildings there -- so
+     * a side<0 building in that span range sits in the corridor and the branch
+     * traffic drives through it. Suppress those; the far (side>0) buildings and
+     * every span outside the fork are untouched. */
+    if (tg_branches_enabled() && side < 0.0) {
+        const int lo = TD5_TG_BRANCH_FORK_SPAN - TD5_TG_BRANCH_WIDEN;
+        const int hi = TD5_TG_BRANCH_FORK_SPAN + TD5_TG_BRANCH_LEN + 1;
+        if (si >= lo && si <= hi) return 1;
+    }
+
     /* Setback is biome-driven: FIELDS pushes props right back for an open
      * horizon, CITY brings them in to frame the road. */
     gap  = (double)b->gap_min + (double)((h >> 5) % (unsigned)b->gap_extra);
@@ -1975,26 +1989,34 @@ static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk)
     len = sqrt(fux * fux + fuz * fuz);
     if (len < 1e-6) { fux = 1.0; fuz = 0.0; } else { fux /= len; fuz /= len; }
 
+    /* ISOTROPIC UV. V advances one tile per span (~SPAN_LENGTH world units), so
+     * the outer U is GROUND_WIDTH/SPAN_LENGTH to make each tile SQUARE. The old
+     * U ran 0..4 across the full 24000-unit skirt -- a ~4:1 lateral stretch that
+     * both smeared the texture and defeated the (isotropic, box-filter) mipmaps,
+     * so the far ground shimmered/rippled. Square tiles let the mips minify
+     * cleanly and the ground reads flat to the horizon. */
+    const double u_out = TD5_TG_GROUND_WIDTH / (double)TD5_TG_SPAN_LENGTH;
+
     /* LEFT skirt: road edge -> outward. Loop order near-in, near-out, far-out,
      * far-in so the quad is a proper ring. */
     px[n]=nlx;                        py[n]=nly-drop; pz[n]=nlz;
-    uu[n]=0.0; vv[n]=(double)si;      n++;
+    uu[n]=0.0;   vv[n]=(double)si;      n++;
     px[n]=nlx+nux*TD5_TG_GROUND_WIDTH; py[n]=nly-drop; pz[n]=nlz+nuz*TD5_TG_GROUND_WIDTH;
-    uu[n]=4.0; vv[n]=(double)si;      n++;
+    uu[n]=u_out; vv[n]=(double)si;      n++;
     px[n]=flx+fux*TD5_TG_GROUND_WIDTH; py[n]=fly-drop; pz[n]=flz+fuz*TD5_TG_GROUND_WIDTH;
-    uu[n]=4.0; vv[n]=(double)si+1.0;  n++;
+    uu[n]=u_out; vv[n]=(double)si+1.0;  n++;
     px[n]=flx;                        py[n]=fly-drop; pz[n]=flz;
-    uu[n]=0.0; vv[n]=(double)si+1.0;  n++;
+    uu[n]=0.0;   vv[n]=(double)si+1.0;  n++;
 
     /* RIGHT skirt: mirrored, outward is -unit. */
     px[n]=nrx;                        py[n]=nry-drop; pz[n]=nrz;
-    uu[n]=0.0; vv[n]=(double)si;      n++;
+    uu[n]=0.0;   vv[n]=(double)si;      n++;
     px[n]=nrx-nux*TD5_TG_GROUND_WIDTH; py[n]=nry-drop; pz[n]=nrz-nuz*TD5_TG_GROUND_WIDTH;
-    uu[n]=4.0; vv[n]=(double)si;      n++;
+    uu[n]=u_out; vv[n]=(double)si;      n++;
     px[n]=frx-fux*TD5_TG_GROUND_WIDTH; py[n]=fry-drop; pz[n]=frz-fuz*TD5_TG_GROUND_WIDTH;
-    uu[n]=4.0; vv[n]=(double)si+1.0;  n++;
+    uu[n]=u_out; vv[n]=(double)si+1.0;  n++;
     px[n]=frx;                        py[n]=fry-drop; pz[n]=frz;
-    uu[n]=0.0; vv[n]=(double)si+1.0;  n++;
+    uu[n]=0.0;   vv[n]=(double)si+1.0;  n++;
 
     cx = cy = cz = 0.0;
     for (i = 0; i < n; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
@@ -2581,6 +2603,46 @@ static void tg_emit_texture_page_rail(TG_Buf *out)
     }
 }
 
+/* Page 5: bare GROUND -- flat concrete/gravel for the terrain skirt. The point
+ * is that it has NO structure: the CITY/INDUSTRIAL biomes used to floor their
+ * ground with the WALL page, whose storey/window grid, stretched over the
+ * undulating skirt, warped into a rippled "distorted" look filling the
+ * background. Just tonal grain here -- a couple of darker gravel patches so it
+ * is not a flat sheet, but no lines, so it reads as ground over any slope. */
+static void tg_emit_texture_page_ground(TG_Buf *out)
+{
+    unsigned int rng = 0x2545F491u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR. 0..11 mid concrete greys (a touch warmer/darker than the steel rail),
+     * 12..15 darker gravel/stain patches. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v = (i < 12) ? (104 + i * 5) : (70 - (i - 12) * 8);
+        tg_put_u8(out, (unsigned)v);
+        tg_put_u8(out, (unsigned)v);
+        tg_put_u8(out, (unsigned)(v > 4 ? v - 4 : 0));   /* faintly warm */
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        int x = i % TD5_TG_TEX_DIM;
+        int y = i / TD5_TG_TEX_DIM;
+        /* Low-frequency patch mask so darker gravel clumps instead of speckling;
+         * no axis-aligned lines, so nothing to shear over a slope. */
+        unsigned int patch = (unsigned)((x >> 3) + (y >> 3) * 9) * 2654435761u;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if ((patch >> 29) == 0)
+            idx = 12 + (int)((rng >> 16) % 4);           /* gravel/stain */
+        else
+            idx = (int)((rng >> 16) % 12);               /* concrete grain */
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 static int tg_emit_textures(TG_Buf *out)
 {
     TG_Buf pages[TD5_TG_PAGE_COUNT];
@@ -2594,6 +2656,7 @@ static int tg_emit_textures(TG_Buf *out)
     tg_emit_texture_page_green(&pages[TD5_TG_PAGE_GREEN]);
     tg_emit_texture_page_tree(&pages[TD5_TG_PAGE_TREE]);
     tg_emit_texture_page_rail(&pages[TD5_TG_PAGE_RAIL]);
+    tg_emit_texture_page_ground(&pages[TD5_TG_PAGE_GROUND]);
     for (i = 0; i < count; i++) {
         if (pages[i].oom) {
             for (i = 0; i < count; i++) tg_buf_free(&pages[i]);

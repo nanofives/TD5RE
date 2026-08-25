@@ -49,6 +49,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "AI cars can now take the branch as an alternate line, so" },
     { CL_ITEM,    "  the field splits across both roads at a fork" },
     { CL_ITEM,    "  (TD5RE_AI_BRANCH_PCT, default 0)." },
+    { CL_ITEM,    "Auto-track scenery: branch corridor no longer runs" },
+    { CL_ITEM,    "  through the roadside buildings, and the CITY/INDUSTRIAL" },
+    { CL_ITEM,    "  ground reads as flat concrete instead of a smeared," },
+    { CL_ITEM,    "  rippled texture to the horizon." },
 
     { CL_DATE,    "August 23" },
     { CL_ITEM,    "Auto-generated tracks now throw sharper switchbacks -" },
