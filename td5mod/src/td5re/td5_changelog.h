@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 25" },
+    { CL_ITEM,    "Auto-track facade/tree sizes now match MEASURED" },
+    { CL_ITEM,    "  shipped-track geometry: real cell size, ~3-floor" },
+    { CL_ITEM,    "  blocks on the curb with deep corners, per-biome" },
+    { CL_ITEM,    "  tree dimensions (city big/sparse, rural small/dense)." },
     { CL_ITEM,    "Auto-track buildings are now flat facade WALLS, like" },
     { CL_ITEM,    "  shipped TD5 tracks: whole-page cells laid into a" },
     { CL_ITEM,    "  continuous street, so no window is cut mid-facade." },

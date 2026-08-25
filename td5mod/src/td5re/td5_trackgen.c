@@ -1732,8 +1732,7 @@ static int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz,
  * The facade path below imitates the shipped look: a grid of whole-page cells
  * laid flat along the road into a continuous street wall, so the texture is what
  * sizes the building (one page image per cell) and nothing is ever cut. */
-#define TD5_TG_FACADE_MODULE  1500.0   /* world size of one whole-page cell */
-#define TD5_TG_FACADE_MAXQUAD 48
+#define TD5_TG_FACADE_MAXQUAD 64   /* front grid + two deep side returns */
 
 /* Write ONE opaque quad-list mesh sampling `page`, in the 0x38 mesh format --
  * n vertices = 4*quads, each quad a separate whole-page cell (UV 0..1). */
@@ -1827,8 +1826,8 @@ static int tg_facade_built(int si, int left)
     unsigned int s     = (unsigned)si + (left ? 777u : 0u);
     unsigned int block = s / TD5_TG_FACADE_PERIOD;
     unsigned int phase = s % TD5_TG_FACADE_PERIOD;
-    unsigned int gap   = 2u + ((block * 2654435761u) >> 29);   /* 2..9 */
-    return (int)(phase >= gap);
+    unsigned int gap   = 4u + ((block * 2654435761u) >> 29);   /* 4..11 */
+    return (int)(phase >= gap);   /* runs 2..9 spans -> ~40% frontage built */
 }
 
 /* ===================== BIOMES =====================
@@ -1840,31 +1839,38 @@ static int tg_facade_built(int si, int left)
  * Not yet driven by biome: the section mix (straight/curve/acute weighting).
  * The section picker runs during the centerline walk, before any of this, so
  * per-biome cornering needs the picker to know its own position first. */
+/* Facade/tree sizes below are the SHIPPED-track measurements (level014 city,
+ * level005 rural), in raw 24.8 units == world_units * 256. A survey found a
+ * facade page-cell is ~8.4 x 11.5 wu (2150 x 2950 raw), a city frontage ~3
+ * floors tall, buildings sit ON the curb (setback ~0), and city trees are big
+ * and sparse while rural trees are small and dense. */
 typedef struct {
     const char *name;
-    int    density;      /* prop if (hash>>28) <= this, so 0..15 */
-    int    h_min, h_extra;
-    int    gap_min, gap_extra;
+    int    density;      /* trees: prop if (hash>>28) <= this, so 0..15 */
+    int    cell_w, cell_h;      /* facade page-cell world size, raw */
+    int    floors_min, floors_extra; /* facade height in cells */
+    int    depth;        /* building depth for side returns, raw */
+    int    sidewalk;     /* setback from road edge, raw (~0 = on the curb) */
+    int    tree_w, tree_h;      /* billboard tree size, raw */
     int    page;
-    int    tower_mask;   /* (hash>>24)&mask == 0 -> add a tall one */
-    double tile;
-    int    billboard;    /* 1 = camera-facing quad (trees), 0 = box */
+    int    tower_mask;   /* (hash>>3 & mask)==0 -> a taller run (tower cluster) */
+    int    billboard;    /* 1 = camera-facing quad (trees), 0 = facade wall */
     int    ground_page;  /* page for the terrain slab under/around the road */
 } TG_Biome;
 
 static const TG_Biome k_biomes[] = {
-    /* dense, tall, close to the road, frequent towers */
-    { "CITY",       9, 1600, 5200, 2400,  3000, TD5_TG_PAGE_WALL,   3, 4500.0, 0,
-      TD5_TG_PAGE_GROUND },
-    /* sparse low hedgerows set well back -- open horizon */
-    { "FIELDS",     2, 1400, 1200, 4000, 12000, TD5_TG_PAGE_TREE,  255, 3000.0, 1,
-      TD5_TG_PAGE_GREEN },
-    /* dense low-to-mid greenery crowding the verge */
-    { "FOREST",    11, 1800, 2200, 1600,  4000, TD5_TG_PAGE_TREE,  255, 3000.0, 1,
-      TD5_TG_PAGE_GREEN },
-    /* wide squat sheds, mid setback, rare towers */
-    { "INDUSTRIAL", 6, 1000, 1600, 3000,  6000, TD5_TG_PAGE_WALL,  63, 6000.0, 0,
-      TD5_TG_PAGE_GROUND }
+    /* CITY: ~8.4x11.5 wu cells, ~3 floors, on the curb, big sparse towers. */
+    { "CITY",       9, 2150, 2950, 2, 3, 6000, 350,    0,    0,
+      TD5_TG_PAGE_WALL,   3, 0, TD5_TG_PAGE_GROUND },
+    /* FIELDS: sparse, biggish trees on an open horizon. */
+    { "FIELDS",     2,    0,    0, 0, 0,    0,   0, 1700, 3600,
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN },
+    /* FOREST: rural dense low trees (~4.7x10.1 wu) crowding the verge. */
+    { "FOREST",    11,    0,    0, 0, 0,    0,   0, 1250, 2600,
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN },
+    /* INDUSTRIAL: wider squat sheds (~10 wu cells), 1-2 floors, deeper. */
+    { "INDUSTRIAL", 6, 2560, 2300, 1, 2, 8000, 600,    0,    0,
+      TD5_TG_PAGE_WALL,  63, 0, TD5_TG_PAGE_GROUND }
 };
 #define TD5_TG_BIOME_COUNT 4
 #define TD5_TG_BIOME_RUN   150
@@ -1903,9 +1909,9 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
         const int left = s;                       /* 0 = right, 1 = left */
         const double side = left ? 1.0 : -1.0;
         unsigned int gh;
-        double lx0, lz0, lx1, lz1, gap, set0, set1, H, Hbase;
-        double bx, by, bz, ax, ay, az, flen;
-        int cols, rows;
+        double lx0, lz0, lx1, lz1, set0, set1, H;
+        double bx, by, bz, ax, ay, az, flen, depth;
+        int cols, rows, floors;
 
         if (!tg_facade_built(si, left)) continue;
 
@@ -1917,49 +1923,51 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
             if (si >= lo && si <= hi) continue;
         }
 
-        gh = (((unsigned)si + (left ? 777u : 0u)) / TD5_TG_FACADE_PERIOD)
-             * 2246822519u;
-        gap   = (double)b->gap_min * 0.4 + (double)(gh % 1200u);
-        Hbase = (double)b->h_min + (double)((gh >> 7) % (unsigned)b->h_extra);
-        H     = Hbase + (double)(((unsigned)si * 2654435761u >> 19) % 700u);
-        if (((gh >> 3) & (unsigned)b->tower_mask) == 0)
-            H += (double)((gh >> 11) % 5200u);      /* whole-run tower cluster */
+        /* Height is a whole number of FLOORS (real cells), keyed to the RUN so a
+         * building is one uniform-height block that steps at the next side street
+         * -- shipped city frontages read as ~3 floors, taller in tower runs. */
+        gh     = (((unsigned)si + (left ? 777u : 0u)) / TD5_TG_FACADE_PERIOD)
+                 * 2246822519u;
+        floors = b->floors_min + (int)((gh >> 7) % (unsigned)b->floors_extra);
+        if (b->tower_mask && ((gh >> 3) & (unsigned)b->tower_mask) == 0)
+            floors += 1 + (int)((gh >> 11) % 4);      /* whole-run tower cluster */
+        rows   = floors;
+        H      = (double)floors * (double)b->cell_h;
+        depth  = (double)b->depth;
 
-        /* Left of travel is (tz, -tx); push both endpoints out past the road. */
+        /* Left of travel is (tz, -tx); facades sit on the curb (setback ~0). */
         lx0 = n0->tz * side; lz0 = -n0->tx * side;
         lx1 = n1->tz * side; lz1 = -n1->tx * side;
-        set0 = n0->width * 0.5 + gap;
-        set1 = n1->width * 0.5 + gap;
+        set0 = n0->width * 0.5 + (double)b->sidewalk;
+        set1 = n1->width * 0.5 + (double)b->sidewalk;
 
         bx = n0->x + lx0 * set0; by = n0->y; bz = n0->z + lz0 * set0;
         ax = (n1->x + lx1 * set1) - bx;
         ay = n1->y - n0->y;
         az = (n1->z + lz1 * set1) - bz;
 
+        /* Columns follow the real cell width; a single span is shorter than one
+         * cell, so most spans lay one cell and wide/junction spans lay a few. */
         flen = sqrt(ax * ax + az * az);
         if (flen < 1.0) flen = 1.0;
-        cols = (int)(flen / TD5_TG_FACADE_MODULE + 0.5);
+        cols = (int)(flen / (double)b->cell_w + 0.5);
         if (cols < 1) cols = 1;
-        if (cols > 3) cols = 3;
-        rows = (int)(H / TD5_TG_FACADE_MODULE + 0.5);
-        if (rows < 1) rows = 1;
-        if (rows > 4) rows = 4;
+        if (cols > 4) cols = 4;
 
         /* Road-facing plane. */
         tg_facade_push_grid(bx, by, bz, ax, ay, az, 0.0, H, 0.0,
                             cols, rows, px, py, pz, uu, vv, &n);
 
-        /* Return caps at run ends turn the corner (the multi-sided buildings). */
+        /* Deep return walls at run ends turn the corner into the building's side
+         * (the multi-sided buildings) -- real footprints run ~46 wu back. */
         if (!tg_facade_built(si - 1, left))
             tg_facade_push_grid(bx, by, bz,
-                                lx0 * TD5_TG_FACADE_MODULE, 0.0,
-                                lz0 * TD5_TG_FACADE_MODULE, 0.0, H, 0.0,
-                                1, rows, px, py, pz, uu, vv, &n);
+                                lx0 * depth, 0.0, lz0 * depth, 0.0, H, 0.0,
+                                2, rows, px, py, pz, uu, vv, &n);
         if (!tg_facade_built(si + 1, left))
             tg_facade_push_grid(bx + ax, by + ay, bz + az,
-                                lx1 * TD5_TG_FACADE_MODULE, 0.0,
-                                lz1 * TD5_TG_FACADE_MODULE, 0.0, H, 0.0,
-                                1, rows, px, py, pz, uu, vv, &n);
+                                lx1 * depth, 0.0, lz1 * depth, 0.0, H, 0.0,
+                                2, rows, px, py, pz, uu, vv, &n);
     }
 
     if (n <= 0) return 1;
@@ -1976,7 +1984,7 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
     unsigned int h = (unsigned)si * 2654435761u;
     const TG_Node *n;
     const TG_Biome *b;
-    double side, gap, tw, th, lx, lz, cx, cz;
+    double side, gap, tw, th, jit, lx, lz, cx, cz;
 
     if (si <= TD5_TG_GRID_SPAN) return 1;      /* keep the grid area clear */
     b = &k_biomes[tg_biome_for_span(si)];
@@ -1984,16 +1992,18 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
     if (!b->billboard)
         return tg_emit_street_wall(nl, si, b, blk);
 
-    /* Trees: density-gated billboards, sized to the tree page's aspect (taller
-     * than wide) so a tree reads as a tree, not a stretched slab. */
+    /* Trees: density-gated camera-facing billboards, sized to the SHIPPED tree
+     * dimensions for the biome (city big+sparse, rural small+dense), with a
+     * per-tree scale jitter that keeps the page aspect. */
     if ((int)(h >> 28) > b->density) return 1;
 
     n = &nl->v[si];
     side = ((h >> 3) & 1) ? 1.0 : -1.0;
 
-    gap = (double)b->gap_min + (double)((h >> 5) % (unsigned)b->gap_extra);
-    tw  = 1400.0 + (double)((h >> 9) % 1600);      /* trunk-to-canopy scale */
-    th  = tw * 1.35;                               /* page aspect: ~4:3 tall */
+    jit = 0.8 + (double)((h >> 9) % 41) * 0.01;    /* 0.80 .. 1.20 */
+    tw  = (double)b->tree_w * jit;
+    th  = (double)b->tree_h * jit;
+    gap = 800.0 + (double)((h >> 5) % 2400);       /* set back off the verge */
 
     lx = n->tz * side; lz = -n->tx * side;
     cx = n->x + lx * (n->width * 0.5 + gap + tw * 0.5);
