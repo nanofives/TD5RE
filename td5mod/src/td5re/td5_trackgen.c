@@ -1063,7 +1063,14 @@ static int tg_emit_span_range(const TG_NodeList *nl, int first_span,
         for (k = 0; k < ns; k++) {
             tg_put_u8 (spans, 1);                        /* span_type QUAD_A */
             tg_put_u8 (spans, TD5_TG_SURFACE_ATTR);
-            tg_put_u8 (spans, (unsigned)(1 | (1 << (lanes - 1))));
+            /* Lane bitmask 0 = every lane is the low-nibble surface (dry asphalt,
+         * full grip). The old `1 | (1<<(lanes-1))` marked the OUTER lanes, which
+         * surface_type_for_span_lane turns into the 0x10 "alternate/off-road"
+         * surface -- td5_track_surface_is_slow returns 1 for anything with 0x10
+         * set, so those lanes silently SLOWED the car while textured identically
+         * to the fast lanes (reported as "lanes that make the car slower look the
+         * same as the road"). A generated arcade road is uniformly drivable. */
+        tg_put_u8 (spans, 0);
             tg_put_u8 (spans, (unsigned)((TD5_TG_HEIGHT_NIBBLE << 4)
                                          | (lanes & 0x0F)));
             tg_put_u16(spans, (unsigned)(base + k * row_pts));
