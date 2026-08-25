@@ -32,6 +32,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 25" },
+    { CL_ITEM,    "Auto-track can now borrow REAL TD5 textures (roads," },
+    { CL_ITEM,    "  buildings, ground) from a shipped city track instead" },
+    { CL_ITEM,    "  of the procedural placeholders" },
+    { CL_ITEM,    "  (TD5RE_AUTOTRACK_REAL_TEX=1, opt-in)." },
+
     { CL_DATE,    "August 24" },
     { CL_ITEM,    "Auto-generated tracks were putting a bridge deck under" },
     { CL_ITEM,    "  87% of the road, because \"elevated\" meant higher than" },

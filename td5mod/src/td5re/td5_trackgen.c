@@ -28,6 +28,7 @@
 #include "td5_track_registry.h"
 #include "td5_platform.h"
 #include "td5_config.h"
+#include "td5_tg_real_tex.h"   /* real TD5 texture pages (level014), opt-in */
 #include "td5re.h"
 
 #include <stdio.h>
@@ -2783,6 +2784,29 @@ static void tg_emit_texture_page_ground(TG_Buf *out)
     }
 }
 
+/* Emit a page from real (already palette-indexed) TD5 texture data, in the same
+ * on-disk page format as the procedural emitters -- pad, opaque type, palette
+ * count, BGR palette, then the 64x64 index bytes. */
+static void tg_emit_real_page(TG_Buf *out, const unsigned char *pal, int paln,
+                              const unsigned char *idx)
+{
+    int i;
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                   /* opaque */
+    tg_put_u32(out, (unsigned)paln);
+    for (i = 0; i < paln * 3; i++) tg_put_u8(out, pal[i]);
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) tg_put_u8(out, idx[i]);
+}
+
+/* Opt-in: fill the road/wall/grass/ground pages with REAL TD5 textures borrowed
+ * from a shipped city track (level014) instead of the procedural placeholders,
+ * so the auto-track reads like an actual TD5 level. Tree + rail stay procedural
+ * (the tree needs an alpha cutout the borrowed page does not carry). */
+static int tg_real_textures_enabled(void)
+{
+    return td5_env_flag_off("TD5RE_AUTOTRACK_REAL_TEX");
+}
+
 static int tg_emit_textures(TG_Buf *out)
 {
     TG_Buf pages[TD5_TG_PAGE_COUNT];
@@ -2791,12 +2815,19 @@ static int tg_emit_textures(TG_Buf *out)
     unsigned int i;
 
     memset(pages, 0, sizeof(pages));
-    tg_emit_texture_page_asphalt(&pages[TD5_TG_PAGE_ROAD]);
-    tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_WALL]);
-    tg_emit_texture_page_green(&pages[TD5_TG_PAGE_GREEN]);
+    if (tg_real_textures_enabled()) {
+        tg_emit_real_page(&pages[TD5_TG_PAGE_ROAD],   k_real_road_pal,   k_real_road_paln,   k_real_road_idx);
+        tg_emit_real_page(&pages[TD5_TG_PAGE_WALL],   k_real_wall_pal,   k_real_wall_paln,   k_real_wall_idx);
+        tg_emit_real_page(&pages[TD5_TG_PAGE_GREEN],  k_real_green_pal,  k_real_green_paln,  k_real_green_idx);
+        tg_emit_real_page(&pages[TD5_TG_PAGE_GROUND], k_real_ground_pal, k_real_ground_paln, k_real_ground_idx);
+    } else {
+        tg_emit_texture_page_asphalt(&pages[TD5_TG_PAGE_ROAD]);
+        tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_WALL]);
+        tg_emit_texture_page_green(&pages[TD5_TG_PAGE_GREEN]);
+        tg_emit_texture_page_ground(&pages[TD5_TG_PAGE_GROUND]);
+    }
     tg_emit_texture_page_tree(&pages[TD5_TG_PAGE_TREE]);
     tg_emit_texture_page_rail(&pages[TD5_TG_PAGE_RAIL]);
-    tg_emit_texture_page_ground(&pages[TD5_TG_PAGE_GROUND]);
     for (i = 0; i < count; i++) {
         if (pages[i].oom) {
             for (i = 0; i < count; i++) tg_buf_free(&pages[i]);
