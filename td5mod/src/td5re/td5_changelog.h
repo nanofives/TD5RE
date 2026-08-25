@@ -53,6 +53,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  through the roadside buildings, and the CITY/INDUSTRIAL" },
     { CL_ITEM,    "  ground reads as flat concrete instead of a smeared," },
     { CL_ITEM,    "  rippled texture to the horizon." },
+    { CL_ITEM,    "The branch corridor now has an actual road surface" },
+    { CL_ITEM,    "  (asphalt + lane lines); it was bare ground before." },
 
     { CL_DATE,    "August 23" },
     { CL_ITEM,    "Auto-generated tracks now throw sharper switchbacks -" },

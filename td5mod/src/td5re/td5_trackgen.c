@@ -1474,7 +1474,7 @@ static void tg_put_f32(TG_Buf *buf, double v)
 }
 
 /* Left and right road edge at fraction f along span si. */
-static void tg_road_edge(const TG_NodeList *nl, int si, double f,
+static void tg_road_edge(const TG_NodeList *nl, int si, double f, double shift,
                          double *lx, double *ly, double *lz,
                          double *rx, double *ry, double *rz)
 {
@@ -1489,14 +1489,19 @@ static void tg_road_edge(const TG_NodeList *nl, int si, double f,
     double m = sqrt(tx * tx + tz * tz);
     if (m < 1e-9) { tx = 0.0; tz = 1.0; m = 1.0; }
     tx /= m; tz /= m;
-    /* Left of travel is (tz, -tx), matching the strip row order. */
+    /* Left of travel is (tz, -tx), matching the strip row order. `shift` slides
+     * the whole cross-section along that axis -- 0 for the main road, the branch
+     * offset for the corridor (so the corridor road mesh follows the bowed
+     * strip rows exactly). */
+    x += tz * shift; z -= tx * shift;
     *lx = x + tz * (w * 0.5); *ly = y; *lz = z - tx * (w * 0.5);
     *rx = x - tz * (w * 0.5); *ry = y; *rz = z + tx * (w * 0.5);
 }
 
-/* One road mesh for span si, appended to blk. Returns 0 on OOM. */
-static int tg_emit_road_mesh(const TG_NodeList *nl, int si, int lanes,
-                             TG_Buf *blk)
+/* One road mesh for span si laterally offset by shift_near..shift_far across the
+ * span (0,0 = the plain main road). Appended to blk. Returns 0 on OOM. */
+static int tg_emit_road_quad(const TG_NodeList *nl, int si, int lanes,
+                             double shift_near, double shift_far, TG_Buf *blk)
 {
     double px[TD5_TG_ROAD_SUBDIV * 4], py[TD5_TG_ROAD_SUBDIV * 4];
     double pz[TD5_TG_ROAD_SUBDIV * 4], uu[TD5_TG_ROAD_SUBDIV * 4];
@@ -1509,8 +1514,10 @@ static int tg_emit_road_mesh(const TG_NodeList *nl, int si, int lanes,
         double f1 = (double)(k + 1) / (double)TD5_TG_ROAD_SUBDIV;
         double nlx, nly, nlz, nrx, nry, nrz;
         double flx, fly, flz, frx, fry, frz;
-        tg_road_edge(nl, si, f0, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
-        tg_road_edge(nl, si, f1, &flx, &fly, &flz, &frx, &fry, &frz);
+        double s0v = shift_near + (shift_far - shift_near) * f0;
+        double s1v = shift_near + (shift_far - shift_near) * f1;
+        tg_road_edge(nl, si, f0, s0v, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
+        tg_road_edge(nl, si, f1, s1v, &flx, &fly, &flz, &frx, &fry, &frz);
         /* Quad loop: near-left, near-right, far-right, far-left. */
         px[n]=nlx; py[n]=nly; pz[n]=nlz; uu[n]=0.0;           vv[n]=si+f0; n++;
         px[n]=nrx; py[n]=nry; pz[n]=nrz; uu[n]=(double)lanes; vv[n]=si+f0; n++;
@@ -1567,6 +1574,13 @@ static int tg_emit_road_mesh(const TG_NodeList *nl, int si, int lanes,
         tg_put_f32(blk, 0.0);
     }
     return !blk->oom;
+}
+
+/* Plain main-road mesh for span si (no lateral offset). */
+static int tg_emit_road_mesh(const TG_NodeList *nl, int si, int lanes,
+                             TG_Buf *blk)
+{
+    return tg_emit_road_quad(nl, si, lanes, 0.0, 0.0, blk);
 }
 
 /* Six quads. Corner sign triples per face, then which half-extents span the
@@ -1978,8 +1992,8 @@ static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk)
     double px[8], py[8], pz[8], uu[8], vv[8];
     int i, n = 0;
 
-    tg_road_edge(nl, si, 0.0, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
-    tg_road_edge(nl, si, 1.0, &flx, &fly, &flz, &frx, &fry, &frz);
+    tg_road_edge(nl, si, 0.0, 0.0, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
+    tg_road_edge(nl, si, 1.0, 0.0, &flx, &fly, &flz, &frx, &fry, &frz);
 
     /* Outward direction = along the cross-section, away from the centre. */
     nux = nlx - nrx; nuz = nlz - nrz;
@@ -2160,8 +2174,8 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk)
     double px[24], py[24], pz[24], uu[24], vv[24];
     int side, i, n = 0;
 
-    tg_road_edge(nl, si, 0.0, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
-    tg_road_edge(nl, si, 1.0, &flx, &fly, &flz, &frx, &fry, &frz);
+    tg_road_edge(nl, si, 0.0, 0.0, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
+    tg_road_edge(nl, si, 1.0, 0.0, &flx, &fly, &flz, &frx, &fry, &frz);
 
     nux = nlx - nrx; nuz = nlz - nrz;
     len = sqrt(nux * nux + nuz * nuz);
@@ -2252,6 +2266,16 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk)
 static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                           TG_Buf *out)
 {
+    /* `nspans` is the FULL strip span count. With a branch it INCLUDES the pad +
+     * corridor tail (layout: main 0..ring-1, pad at ring, corridor ring+1..
+     * ring+LEN), so nspans = ring + 1 + LEN. The centerline `nl` only has the
+     * main-ring nodes, so the corridor spans must take their geometry from the
+     * base main node nl->v[F+1+k] plus the branch shift -- NOT from nl->v[si],
+     * which is out of range there (the old code read OOB garbage for those spans,
+     * emitting nothing visible, which is why the branch had no road). */
+    const int branch_active = tg_branches_enabled() &&
+        nspans > TD5_TG_BRANCH_FORK_SPAN + TD5_TG_BRANCH_LEN + 8;
+    const int ring = branch_active ? nspans - 1 - TD5_TG_BRANCH_LEN : nspans;
     const int nentries = (nspans + TD5_TG_SPANS_PER_ENTRY - 1)
                        / TD5_TG_SPANS_PER_ENTRY;
     /* Road meshes plus at most one building per span in the entry. */
@@ -2281,19 +2305,39 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
          * appended -- sizes differ once ground, buildings and road quads are
          * mixed, so they cannot come from a uniform stride. */
         for (i = 0; i < ns && ok; i++) {
+            const int si = s0 + i;
+
+            /* Corridor span (ring < si <= ring+LEN): a road quad only, at the
+             * bowed geometry. The pad span (si == ring) carries nothing -- it is
+             * never linked to or driven. The main-road ground skirt already
+             * extends under the corridor, so no separate ground here. */
+            if (si >= ring) {
+                const int k = si - ring - 1;
+                if (branch_active && k >= 0 && k < TD5_TG_BRANCH_LEN) {
+                    const int F = TD5_TG_BRANCH_FORK_SPAN;
+                    moff[nmesh++] = meshes.len;
+                    if (!tg_emit_road_quad(nl, F + 1 + k, lanes,
+                                           tg_branch_shift(k, nl->v[F + 1 + k].width),
+                                           tg_branch_shift(k + 1, nl->v[F + 2 + k].width),
+                                           &meshes))
+                        ok = 0;
+                }
+                continue;
+            }
+
             moff[nmesh++] = meshes.len;
-            if (!tg_emit_ground(nl, s0 + i, &meshes)) { ok = 0; break; }
+            if (!tg_emit_ground(nl, si, &meshes)) { ok = 0; break; }
             moff[nmesh++] = meshes.len;
-            if (!tg_emit_road_mesh(nl, s0 + i, lanes, &meshes)) ok = 0;
+            if (!tg_emit_road_mesh(nl, si, lanes, &meshes)) ok = 0;
             /* Guardrails belong in THIS loop, not the box pass below: that pass
              * recovers each piece's offset by dividing the appended bytes by
              * n_added, which only holds while every piece is a same-sized box.
              * A rail prism has a different vertex count and would silently
              * corrupt those offsets. Here each offset is recorded explicitly. */
             if (ok && rails &&
-                tg_span_needs_guardrail(nl, s0 + i, nspans)) {
+                tg_span_needs_guardrail(nl, si, nspans)) {
                 moff[nmesh++] = meshes.len;
-                if (!tg_emit_guardrail(nl, s0 + i, &meshes)) ok = 0;
+                if (!tg_emit_guardrail(nl, si, &meshes)) ok = 0;
                 else nrails++;
             }
         }
@@ -2302,6 +2346,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
             size_t before = meshes.len;
             int n_added = 0, k;
 
+            if (si >= ring) continue;   /* pad + corridor carry road only */
             if (nmesh + 6 > TG_MAX_MESHES_PER_ENTRY) break;
 
             if (tg_span_in_tunnel(si)) {
