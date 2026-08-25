@@ -81,12 +81,17 @@
 /* Texture page ids, in the order tg_emit_textures writes them. Declared here
  * because the mesh emitters (further up) reference them. */
 #define TD5_TG_PAGE_ROAD   0
-#define TD5_TG_PAGE_WALL   1
+#define TD5_TG_PAGE_WALL   1   /* facade variant 0 */
 #define TD5_TG_PAGE_GREEN  2
 #define TD5_TG_PAGE_TREE   3
 #define TD5_TG_PAGE_RAIL   4
 #define TD5_TG_PAGE_GROUND 5
-#define TD5_TG_PAGE_COUNT  6
+/* Facade variety: each RUN picks one of N wall pages so a street is not one
+ * repeated building. Variant 0 is TD5_TG_PAGE_WALL; variants 1..N-1 live at
+ * consecutive pages after GROUND. */
+#define TD5_TG_WALL_VARIANTS   5
+#define TD5_TG_PAGE_WALL_EXTRA 6
+#define TD5_TG_PAGE_COUNT  (TD5_TG_PAGE_WALL_EXTRA + TD5_TG_WALL_VARIANTS - 1)
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
@@ -1830,6 +1835,16 @@ static int tg_facade_built(int si, int left)
     return (int)(phase >= gap);   /* runs 2..9 spans -> ~40% frontage built */
 }
 
+/* Which facade page a RUN uses -- keyed to the run hash so a whole building is
+ * one texture but neighbouring buildings differ, the way a real street mixes
+ * stone/glass/brick frontages. Variant 0 is the base WALL page; 1..N-1 are the
+ * extra pages appended after GROUND. */
+static int tg_facade_page(unsigned int gh)
+{
+    unsigned int v = (gh >> 17) % (unsigned)TD5_TG_WALL_VARIANTS;
+    return v == 0 ? TD5_TG_PAGE_WALL : (TD5_TG_PAGE_WALL_EXTRA + (int)v - 1);
+}
+
 /* ===================== BIOMES =====================
  * A biome owns a RUN of spans and drives what stands beside the road: how
  * dense the props are, how tall, how far back, and which texture page. That is
@@ -1971,7 +1986,12 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
     }
 
     if (n <= 0) return 1;
-    return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, b->page);
+    /* One facade page per PERIOD-block (a run lives inside one block) so a whole
+     * building keeps one texture and neighbours differ -- keyed on the block, not
+     * the span, or the page would flicker cell-to-cell along a building. Both
+     * sides of a span share the page (one mesh); runs vary it along the road. */
+    return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n,
+        tg_facade_page((unsigned)(si / TD5_TG_FACADE_PERIOD) * 2246822519u));
 }
 
 /* Scenery beside span si, or 0 (no-op success) if this span gets none. One mesh
@@ -2760,11 +2780,14 @@ static void tg_emit_texture_page_asphalt(TG_Buf *out)
     }
 }
 
-/* Page 1: building wall -- banded masonry with lit windows. Box UVs tile every
- * 1500 world units (one lane width), so one tile reads as roughly one storey. */
-static void tg_emit_texture_page_wall(TG_Buf *out)
+/* Page 1 (+ variants): building wall -- banded masonry with lit windows. The
+ * `variant` seeds the concrete tone, window tint and window rhythm so the
+ * procedural streetscape mixes several facades the way the real one does. */
+static void tg_emit_texture_page_wall(TG_Buf *out, int variant)
 {
-    unsigned int rng = 0x9E3779B9u;
+    unsigned int rng = 0x9E3779B9u + (unsigned)variant * 0x2545F491u;
+    int wcols  = 3 + (variant % 3);      /* window bays per cell: 3..5 */
+    int warm   = (variant & 1) ? 24 : 0; /* some blocks read brick-warm */
     int i;
 
     tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
@@ -2774,10 +2797,13 @@ static void tg_emit_texture_page_wall(TG_Buf *out)
     /* BGR. 0..9 concrete greys, 10..12 mortar shadow, 13..15 lit windows. */
     for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
         int b, g, r;
-        if (i < 10)      { b = 96 + i * 7;  g = 92 + i * 7;  r = 88 + i * 7; }
-        else if (i < 13) { b = 54;          g = 52;          r = 50;         }
-        else             { b = 150 + (i-13) * 30; g = 170 + (i-13) * 28;
-                           r = 190 + (i-13) * 20; }
+        if (i < 10)      { b = 96 + i * 7;         g = 92 + i * 7;
+                           r = 88 + i * 7 + warm;  }
+        else if (i < 13) { b = 54;                 g = 52;
+                           r = 50 + warm;          }
+        else             { b = 150 + (i-13) * 30 - warm; g = 170 + (i-13) * 28;
+                           r = 190 + (i-13) * 20 + warm;   }
+        if (r > 255) r = 255;
         tg_put_u8(out, (unsigned)b);
         tg_put_u8(out, (unsigned)g);
         tg_put_u8(out, (unsigned)r);
@@ -2786,14 +2812,16 @@ static void tg_emit_texture_page_wall(TG_Buf *out)
     for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
         int x = i % TD5_TG_TEX_DIM;
         int y = i / TD5_TG_TEX_DIM;
-        int wx = x % 16, wy = y % 16;
+        int cellpx = TD5_TG_TEX_DIM / (wcols + 1);   /* window cell pitch */
+        int wx = (cellpx > 0) ? (x % cellpx) : x;
+        int wy = y % 16;
         int idx;
         rng = rng * 1103515245u + 12345u;
         if (wy < 2 || wx < 2) {
             idx = 10 + (int)((rng >> 16) % 3);          /* storey / pier lines */
-        } else if (wx >= 4 && wx <= 12 && wy >= 5 && wy <= 12) {
+        } else if (wx >= 3 && wx <= cellpx - 3 && wy >= 5 && wy <= 12) {
             /* Window, lit or dark per cell so the facade is not uniform. */
-            unsigned int cell = (unsigned)((y / 16) * 4 + (x / 16)) * 2654435761u;
+            unsigned int cell = (unsigned)((y / 16) * 8 + (x / cellpx)) * 2654435761u;
             idx = ((cell >> 28) & 1) ? (13 + (int)((rng >> 18) % 3)) : 11;
         } else {
             idx = (int)((rng >> 16) % 10);               /* concrete */
@@ -3009,16 +3037,30 @@ static int tg_emit_textures(TG_Buf *out)
     unsigned int i;
 
     memset(pages, 0, sizeof(pages));
+
+    /* ROAD and GROUND are ALWAYS procedural: the shipped city road/ground pages
+     * are sandstone tan and read muddy under the auto-track, whereas the
+     * procedural asphalt is grey with lane paint and the procedural ground is
+     * neutral grey concrete -- both closer to what a generic street wants. Only
+     * the FACADE walls (and grass) borrow real TD5 pages, which is where the
+     * photographic detail actually pays off. */
+    tg_emit_texture_page_asphalt(&pages[TD5_TG_PAGE_ROAD]);
+    tg_emit_texture_page_ground(&pages[TD5_TG_PAGE_GROUND]);
     if (tg_real_textures_enabled()) {
-        tg_emit_real_page(&pages[TD5_TG_PAGE_ROAD],   k_real_road_pal,   k_real_road_paln,   k_real_road_idx);
-        tg_emit_real_page(&pages[TD5_TG_PAGE_WALL],   k_real_wall_pal,   k_real_wall_paln,   k_real_wall_idx);
-        tg_emit_real_page(&pages[TD5_TG_PAGE_GREEN],  k_real_green_pal,  k_real_green_paln,  k_real_green_idx);
-        tg_emit_real_page(&pages[TD5_TG_PAGE_GROUND], k_real_ground_pal, k_real_ground_paln, k_real_ground_idx);
+        int v;
+        tg_emit_real_page(&pages[TD5_TG_PAGE_WALL],
+                          k_real_wall_pal[0], k_real_wall_paln[0], k_real_wall_idx[0]);
+        for (v = 1; v < k_real_wall_count && v < TD5_TG_WALL_VARIANTS; v++)
+            tg_emit_real_page(&pages[TD5_TG_PAGE_WALL_EXTRA + v - 1],
+                              k_real_wall_pal[v], k_real_wall_paln[v], k_real_wall_idx[v]);
+        tg_emit_real_page(&pages[TD5_TG_PAGE_GREEN],
+                          k_real_green_pal, k_real_green_paln, k_real_green_idx);
     } else {
-        tg_emit_texture_page_asphalt(&pages[TD5_TG_PAGE_ROAD]);
-        tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_WALL]);
+        int v;
+        tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_WALL], 0);
+        for (v = 1; v < TD5_TG_WALL_VARIANTS; v++)
+            tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_WALL_EXTRA + v - 1], v);
         tg_emit_texture_page_green(&pages[TD5_TG_PAGE_GREEN]);
-        tg_emit_texture_page_ground(&pages[TD5_TG_PAGE_GROUND]);
     }
     tg_emit_texture_page_tree(&pages[TD5_TG_PAGE_TREE]);
     tg_emit_texture_page_rail(&pages[TD5_TG_PAGE_RAIL]);
