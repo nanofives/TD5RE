@@ -2076,6 +2076,68 @@ static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk)
     return !blk->oom;
 }
 
+/* GORE / MEDIAN fill for a split-fork span. The main (left) and branch (right)
+ * half carriageways only touch at the fork and rejoin; where the branch bows
+ * away, the strip between the main's right edge (road centre, lateral 0) and the
+ * branch's left edge (branch_shift + width/4) has no road mesh and shows through
+ * to the void. Fill it with a ground quad, just below road level so it reads as
+ * a sunken median and does not z-fight the carriageway edges. Zero-width (hence
+ * invisible) at the fork/rejoin where the two edges meet. `si` is the MAIN span;
+ * shift_n/shift_f are the BRANCH lateral offsets at this span's ends. */
+static int tg_emit_gore(const TG_NodeList *nl, int si,
+                        double shift_n, double shift_f, TG_Buf *blk)
+{
+    const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
+    const TG_Node *a = &nl->v[si], *c = &nl->v[si + 1];
+    const double drop = 20.0;
+    double tnr = shift_n + a->width * 0.25;   /* branch left edge, near */
+    double tfr = shift_f + c->width * 0.25;   /* branch left edge, far  */
+    double px[4], py[4], pz[4], uu[4], vv[4];
+    double cx = 0, cy = 0, cz = 0, radius = 0;
+    int i;
+
+    /* near-left = road centre, near-right = branch left edge, then far. */
+    px[0]=a->x;             py[0]=a->y-drop; pz[0]=a->z;             uu[0]=0.0; vv[0]=(double)si;
+    px[1]=a->x+a->tz*tnr;   py[1]=a->y-drop; pz[1]=a->z-a->tx*tnr;   uu[1]=1.0; vv[1]=(double)si;
+    px[2]=c->x+c->tz*tfr;   py[2]=c->y-drop; pz[2]=c->z-c->tx*tfr;   uu[2]=1.0; vv[2]=(double)si+1.0;
+    px[3]=c->x;             py[3]=c->y-drop; pz[3]=c->z;             uu[3]=0.0; vv[3]=(double)si+1.0;
+
+    for (i = 0; i < 4; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
+    cx /= 4; cy /= 4; cz /= 4;
+    for (i = 0; i < 4; i++) {
+        double dx=px[i]-cx, dy=py[i]-cy, dz=pz[i]-cz;
+        double d = sqrt(dx*dx+dy*dy+dz*dz);
+        if (d > radius) radius = d;
+    }
+    if (!(radius > 0.0)) radius = 1.0;
+
+    tg_put_u16(blk, 259);
+    tg_put_u16(blk, 0);
+    tg_put_u32(blk, 1);
+    tg_put_u32(blk, 4);
+    tg_put_f32(blk, radius);
+    tg_put_f32(blk, cx); tg_put_f32(blk, cy); tg_put_f32(blk, cz);
+    tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+    tg_put_u32(blk, 0);
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE);
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE + TD5_TG_CMD_SIZE);
+    tg_put_u32(blk, 0);
+    tg_put_u16(blk, 0);
+    tg_put_u16(blk, (unsigned)b->ground_page);
+    tg_put_u32(blk, 0);
+    tg_put_u16(blk, 0);
+    tg_put_u16(blk, 1);                    /* one quad */
+    tg_put_u32(blk, 0);
+    for (i = 0; i < 4; i++) {
+        tg_put_f32(blk, px[i]); tg_put_f32(blk, py[i]); tg_put_f32(blk, pz[i]);
+        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+        tg_put_u32(blk, 0xFFFFFFFFu);
+        tg_put_f32(blk, uu[i]); tg_put_f32(blk, vv[i]);
+        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+    }
+    return !blk->oom;
+}
+
 /* ===================== GUARDRAILS =====================
  * The car is already contained by collision WALLS derived from the STRIP rail
  * vertices, but nothing draws them, so the road ends at an invisible boundary.
@@ -2344,11 +2406,21 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
              * region [F+1 .. F+LEN]; elsewhere (incl. the full-width fork span F
              * and rejoin R) it is the plain full road. */
             if (branch_active && si > F_fork && si <= F_fork + TD5_TG_BRANCH_LEN) {
+                const int j = si - F_fork - 1;      /* corridor step */
                 if (!tg_emit_road_quad(nl, si, main_half,
                                        TD5_TG_MAIN_SHIFT(nl->v[si].width),
                                        TD5_TG_MAIN_SHIFT(nl->v[si + 1].width),
                                        0.5, &meshes))
                     ok = 0;
+                /* Fill the median between the two carriageways. */
+                if (ok) {
+                    moff[nmesh++] = meshes.len;
+                    if (!tg_emit_gore(nl, si,
+                                      tg_branch_shift(j, nl->v[si].width),
+                                      tg_branch_shift(j + 1, nl->v[si + 1].width),
+                                      &meshes))
+                        ok = 0;
+                }
             } else if (!tg_emit_road_mesh(nl, si, lanes, &meshes)) {
                 ok = 0;
             }
