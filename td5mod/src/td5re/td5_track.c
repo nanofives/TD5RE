@@ -5049,7 +5049,34 @@ void td5_track_update_actor_position(TD5_Actor *actor)
      * pass restores faithful behavior; under the original spec the chassis
      * walker incurs at most a 1-tick lag after V2V push / spawn jumps,
      * which the next-tick call resolves. */
-    update_position_recursive(track_state, pos_x, pos_z, 0, /*single_step=*/1);
+    /* [BRANCH COMMIT 2026-08-25] Anti-flicker guard for parallel branch
+     * corridors. A branch corridor runs BESIDE the main road it forked from, so
+     * in the overlap region the chassis reference point can sit inside both
+     * roads' quads and the walker re-locates across the ring boundary
+     * (branch span_index >= ring <-> main span_index < ring) frame to frame.
+     * Each flip swaps the collision rails between the two laterally-offset
+     * roads, so the car is shoved by the wall of whichever road it is NOT on --
+     * the "invisible walls at the merge". A branch<->main transition is only
+     * LEGITIMATE through a junction span (type 8 fork / 9,10 sentinels / 11
+     * rejoin); a crossing that starts on a plain interior span (type 1) is the
+     * spurious spatial flip, so keep the car on the road it was committed to.
+     * Inert on every non-forked track (s_span_count == ring). */
+    {
+        int16_t saved[8];
+        int ring = g_td5.track_span_ring_length;
+        int old_span = (int)track_state[0];
+        memcpy(saved, track_state, 16);
+        update_position_recursive(track_state, pos_x, pos_z, 0, /*single_step=*/1);
+        if (ring > 0 && s_span_count > ring &&
+            old_span >= 0 && old_span < s_span_count) {
+            int new_span = (int)track_state[0];
+            if (((old_span >= ring) != (new_span >= ring))) {
+                int ot = s_span_array[old_span].span_type;
+                if (ot != 8 && ot != 9 && ot != 10 && ot != 11)
+                    memcpy(track_state, saved, 16);   /* revert the spurious flip */
+            }
+        }
+    }
 
     if ((uintptr_t)actor == (uintptr_t)0x004AB108u) {
         s_actor_position_log_counter++;

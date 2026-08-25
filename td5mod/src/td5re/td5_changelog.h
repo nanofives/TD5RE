@@ -59,6 +59,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  grass - the terrain now meets the asphalt flush." },
     { CL_ITEM,    "The outer lanes of the auto-track no longer secretly" },
     { CL_ITEM,    "  slow the car - the whole road is full-grip now." },
+    { CL_ITEM,    "Fixed the invisible walls when a branch merges back:" },
+    { CL_ITEM,    "  the car no longer flickers between the side road and" },
+    { CL_ITEM,    "  the main road it runs beside." },
 
     { CL_DATE,    "August 23" },
     { CL_ITEM,    "Auto-generated tracks now throw sharper switchbacks -" },
