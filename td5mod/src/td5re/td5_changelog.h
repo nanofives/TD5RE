@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 25" },
+    { CL_ITEM,    "Auto-track buildings now have STOREFRONTS: a glazed" },
+    { CL_ITEM,    "  shop ground floor (real shopfronts / awning strips)" },
+    { CL_ITEM,    "  under the tower facade, shops at street level." },
     { CL_ITEM,    "Auto-track streets now MIX facade textures per block" },
     { CL_ITEM,    "  (5 real TD5 building fronts) so a street is not one" },
     { CL_ITEM,    "  repeated wall; road + ground are grey asphalt/concrete" },

@@ -91,7 +91,12 @@
  * consecutive pages after GROUND. */
 #define TD5_TG_WALL_VARIANTS   5
 #define TD5_TG_PAGE_WALL_EXTRA 6
-#define TD5_TG_PAGE_COUNT  (TD5_TG_PAGE_WALL_EXTRA + TD5_TG_WALL_VARIANTS - 1)
+/* Storefronts: the GROUND floor of a facade uses a shop page (glass/signage),
+ * upper floors the wall page -- shops at street level, tower above, as the
+ * shipped city does. Store variants live right after the wall variants. */
+#define TD5_TG_STORE_VARIANTS  3
+#define TD5_TG_PAGE_STORE  (TD5_TG_PAGE_WALL_EXTRA + TD5_TG_WALL_VARIANTS - 1)
+#define TD5_TG_PAGE_COUNT  (TD5_TG_PAGE_STORE + TD5_TG_STORE_VARIANTS)
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
@@ -1737,18 +1742,22 @@ static int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz,
  * The facade path below imitates the shipped look: a grid of whole-page cells
  * laid flat along the road into a continuous street wall, so the texture is what
  * sizes the building (one page image per cell) and nothing is ever cut. */
-#define TD5_TG_FACADE_MAXQUAD 64   /* front grid + two deep side returns */
+#define TD5_TG_FACADE_MAXQUAD 160  /* both sides: front grid + two deep returns */
 
-/* Write ONE opaque quad-list mesh sampling `page`, in the 0x38 mesh format --
- * n vertices = 4*quads, each quad a separate whole-page cell (UV 0..1). */
+/* Write ONE opaque quad-list mesh in the 0x38 format, split into up to `nseg`
+ * COMMANDS -- each command samples its own page over its own run of quads, in
+ * vertex order. That is how one building can carry a shop page on the ground
+ * floor and a wall page above without a second mesh (which would corrupt the
+ * one-mesh-per-building offset accounting in tg_emit_models). */
 static int tg_write_quad_mesh(TG_Buf *blk, const double *px, const double *py,
                               const double *pz, const double *uu, const double *vv,
-                              int n, int page)
+                              int n, const int *seg_page, const int *seg_nq,
+                              int nseg)
 {
     double cx = 0.0, cy = 0.0, cz = 0.0, radius = 0.0;
-    int i, quads = n / 4;
+    int i, s;
 
-    if (n <= 0) return 1;
+    if (n <= 0 || nseg <= 0) return 1;
     for (i = 0; i < n; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
     cx /= n; cy /= n; cz /= n;
     for (i = 0; i < n; i++) {
@@ -1760,7 +1769,7 @@ static int tg_write_quad_mesh(TG_Buf *blk, const double *px, const double *py,
 
     tg_put_u16(blk, 259);
     tg_put_u16(blk, 0);                    /* opaque, not a billboard */
-    tg_put_u32(blk, 1);                    /* one command */
+    tg_put_u32(blk, (unsigned)nseg);       /* command_count */
     tg_put_u32(blk, (unsigned)n);          /* total de-indexed vertices */
     tg_put_f32(blk, radius);
     tg_put_f32(blk, cx);
@@ -1769,15 +1778,17 @@ static int tg_write_quad_mesh(TG_Buf *blk, const double *px, const double *py,
     tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
     tg_put_u32(blk, 0);
     tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE);
-    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE + TD5_TG_CMD_SIZE);
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE + nseg * TD5_TG_CMD_SIZE);
     tg_put_u32(blk, 0);
 
-    tg_put_u16(blk, 0);                    /* dispatch_type 0 */
-    tg_put_u16(blk, (unsigned)page);
-    tg_put_u32(blk, 0);
-    tg_put_u16(blk, 0);                    /* triangle_count */
-    tg_put_u16(blk, (unsigned)quads);      /* quad_count */
-    tg_put_u32(blk, 0);
+    for (s = 0; s < nseg; s++) {
+        tg_put_u16(blk, 0);                    /* dispatch_type 0 */
+        tg_put_u16(blk, (unsigned)seg_page[s]);
+        tg_put_u32(blk, 0);
+        tg_put_u16(blk, 0);                    /* triangle_count */
+        tg_put_u16(blk, (unsigned)seg_nq[s]);  /* quad_count */
+        tg_put_u32(blk, 0);
+    }
 
     for (i = 0; i < n; i++) {
         tg_put_f32(blk, px[i]);
@@ -1792,29 +1803,34 @@ static int tg_write_quad_mesh(TG_Buf *blk, const double *px, const double *py,
     return !blk->oom;
 }
 
-/* Push a cols x rows grid of flat quads onto the vertex arrays. `base` is the
- * lower-near corner; `across` and `up` are the FULL edge vectors. Each cell maps
- * the whole page (UV 0..1) with v=1 at the base, so no image is cut mid-cell. */
+/* Push floors [r0,r1) of a cols x `rows` grid onto the vertex arrays. `base` is
+ * the lower-near corner; `across` and `up` are the FULL edge vectors (up spans
+ * all `rows` floors). Each cell maps the whole page (UV 0..1, v=1 at the base),
+ * so no image is cut mid-cell. Splitting the row range lets the ground floor go
+ * on a shop page and the floors above on the wall page. */
 static void tg_facade_push_grid(double bx, double by, double bz,
                                 double ax, double ay, double az,
                                 double ux, double uy, double uz,
-                                int cols, int rows,
+                                int cols, int rows, int r0, int r1,
                                 double *px, double *py, double *pz,
                                 double *uu, double *vv, int *pn)
 {
     int c, r, n = *pn;
     if (cols < 1) cols = 1;
     if (rows < 1) rows = 1;
-    for (r = 0; r < rows; r++) {
+    if (r0 < 0) r0 = 0;
+    if (r1 > rows) r1 = rows;
+    for (r = r0; r < r1; r++) {
         for (c = 0; c < cols; c++) {
             double c0 = (double)c / cols, c1 = (double)(c + 1) / cols;
-            double r0 = (double)r / rows, r1 = (double)(r + 1) / rows;
+            double r0f = (double)r / rows, r1f = (double)(r + 1) / rows;
+            double rr0 = r0f, rr1 = r1f;
             if (n + 4 > TD5_TG_FACADE_MAXQUAD * 4) { *pn = n; return; }
             /* quad loop: near-bottom, far-bottom, far-top, near-top */
-            px[n]=bx+ax*c0+ux*r0; py[n]=by+ay*c0+uy*r0; pz[n]=bz+az*c0+uz*r0; uu[n]=0.0; vv[n]=1.0; n++;
-            px[n]=bx+ax*c1+ux*r0; py[n]=by+ay*c1+uy*r0; pz[n]=bz+az*c1+uz*r0; uu[n]=1.0; vv[n]=1.0; n++;
-            px[n]=bx+ax*c1+ux*r1; py[n]=by+ay*c1+uy*r1; pz[n]=bz+az*c1+uz*r1; uu[n]=1.0; vv[n]=0.0; n++;
-            px[n]=bx+ax*c0+ux*r1; py[n]=by+ay*c0+uy*r1; pz[n]=bz+az*c0+uz*r1; uu[n]=0.0; vv[n]=0.0; n++;
+            px[n]=bx+ax*c0+ux*rr0; py[n]=by+ay*c0+uy*rr0; pz[n]=bz+az*c0+uz*rr0; uu[n]=0.0; vv[n]=1.0; n++;
+            px[n]=bx+ax*c1+ux*rr0; py[n]=by+ay*c1+uy*rr0; pz[n]=bz+az*c1+uz*rr0; uu[n]=1.0; vv[n]=1.0; n++;
+            px[n]=bx+ax*c1+ux*rr1; py[n]=by+ay*c1+uy*rr1; pz[n]=bz+az*c1+uz*rr1; uu[n]=1.0; vv[n]=0.0; n++;
+            px[n]=bx+ax*c0+ux*rr1; py[n]=by+ay*c0+uy*rr1; pz[n]=bz+az*c0+uz*rr1; uu[n]=0.0; vv[n]=0.0; n++;
         }
     }
     *pn = n;
@@ -1843,6 +1859,13 @@ static int tg_facade_page(unsigned int gh)
 {
     unsigned int v = (gh >> 17) % (unsigned)TD5_TG_WALL_VARIANTS;
     return v == 0 ? TD5_TG_PAGE_WALL : (TD5_TG_PAGE_WALL_EXTRA + (int)v - 1);
+}
+
+/* Which shop page a run's ground floor uses -- a different hash bit than the
+ * wall page so the storefront and the tower above are chosen independently. */
+static int tg_store_page(unsigned int gh)
+{
+    return TD5_TG_PAGE_STORE + (int)((gh >> 23) % (unsigned)TD5_TG_STORE_VARIANTS);
 }
 
 /* ===================== BIOMES =====================
@@ -1907,91 +1930,125 @@ static int tg_biome_for_span(int si)
  * corner, so the wall does not read as a paper edge (multi-sided). Setback and
  * base height are keyed to the RUN, not the span, so a wall stays straight and a
  * block shares a rough height while individual buildings still step. */
+typedef struct {
+    int    built;
+    double bx, by, bz, ax, ay, az, H, depth;
+    double lx0, lz0, lx1, lz1;
+    int    cols, rows, cap_near, cap_far;
+} TG_SideGeom;
+
+/* Geometry for one side (0=right,1=left) of the wall at span si. built=0 when
+ * the run/gap pattern or the branch-corridor exclusion skips this side. */
+static void tg_side_geom(const TG_NodeList *nl, int si, int left,
+                         const TG_Biome *b, TG_SideGeom *g)
+{
+    const TG_Node *n0 = &nl->v[si];
+    const TG_Node *n1 = &nl->v[si + 1];
+    const double side = left ? 1.0 : -1.0;
+    unsigned int gh;
+    double set0, set1, flen;
+    int floors;
+
+    g->built = 0;
+    if (!tg_facade_built(si, left)) return;
+    if (tg_branches_enabled() && side < 0.0) {
+        const int lo = TD5_TG_BRANCH_FORK_SPAN - TD5_TG_BRANCH_WIDEN;
+        const int hi = TD5_TG_BRANCH_FORK_SPAN + TD5_TG_BRANCH_LEN + 1;
+        if (si >= lo && si <= hi) return;
+    }
+
+    /* Height is a whole number of FLOORS, keyed to the RUN so a building is one
+     * uniform block that steps at the next side street. */
+    gh     = (((unsigned)si + (left ? 777u : 0u)) / TD5_TG_FACADE_PERIOD)
+             * 2246822519u;
+    floors = b->floors_min + (int)((gh >> 7) % (unsigned)b->floors_extra);
+    if (b->tower_mask && ((gh >> 3) & (unsigned)b->tower_mask) == 0)
+        floors += 1 + (int)((gh >> 11) % 4);          /* whole-run tower cluster */
+    g->rows  = floors;
+    g->H     = (double)floors * (double)b->cell_h;
+    g->depth = (double)b->depth;
+
+    g->lx0 = n0->tz * side; g->lz0 = -n0->tx * side;
+    g->lx1 = n1->tz * side; g->lz1 = -n1->tx * side;
+    set0 = n0->width * 0.5 + (double)b->sidewalk;
+    set1 = n1->width * 0.5 + (double)b->sidewalk;
+
+    g->bx = n0->x + g->lx0 * set0; g->by = n0->y; g->bz = n0->z + g->lz0 * set0;
+    g->ax = (n1->x + g->lx1 * set1) - g->bx;
+    g->ay = n1->y - n0->y;
+    g->az = (n1->z + g->lz1 * set1) - g->bz;
+
+    flen = sqrt(g->ax * g->ax + g->az * g->az);
+    if (flen < 1.0) flen = 1.0;
+    g->cols = (int)(flen / (double)b->cell_w + 0.5);
+    if (g->cols < 1) g->cols = 1;
+    if (g->cols > 4) g->cols = 4;
+
+    g->cap_near = !tg_facade_built(si - 1, left);
+    g->cap_far  = !tg_facade_built(si + 1, left);
+    g->built = 1;
+}
+
 static int tg_emit_street_wall(const TG_NodeList *nl, int si,
                                const TG_Biome *b, TG_Buf *blk)
 {
     double px[TD5_TG_FACADE_MAXQUAD * 4], py[TD5_TG_FACADE_MAXQUAD * 4];
     double pz[TD5_TG_FACADE_MAXQUAD * 4], uu[TD5_TG_FACADE_MAXQUAD * 4];
     double vv[TD5_TG_FACADE_MAXQUAD * 4];
-    const TG_Node *n0 = &nl->v[si];
-    const TG_Node *n1;
-    int n = 0, s;
+    TG_SideGeom sd[2];
+    unsigned int block_gh = (unsigned)(si / TD5_TG_FACADE_PERIOD) * 2246822519u;
+    int n = 0, n_store, s, nseg, seg_page[2], seg_nq[2];
 
     if (si + 1 >= nl->count) return 1;    /* need the far endpoint to abut */
-    n1 = &nl->v[si + 1];
+    tg_side_geom(nl, si, 0, b, &sd[0]);
+    tg_side_geom(nl, si, 1, b, &sd[1]);
 
+    /* STOREFRONT pass: the ground floor (row 0) of each front plane goes FIRST
+     * in the vertex list, so a leading command can bind the shop page. */
     for (s = 0; s < 2; s++) {
-        const int left = s;                       /* 0 = right, 1 = left */
-        const double side = left ? 1.0 : -1.0;
-        unsigned int gh;
-        double lx0, lz0, lx1, lz1, set0, set1, H;
-        double bx, by, bz, ax, ay, az, flen, depth;
-        int cols, rows, floors;
+        TG_SideGeom *g = &sd[s];
+        if (!g->built) continue;
+        tg_facade_push_grid(g->bx, g->by, g->bz, g->ax, g->ay, g->az,
+                            0.0, g->H, 0.0, g->cols, g->rows, 0, 1,
+                            px, py, pz, uu, vv, &n);
+    }
+    n_store = n;
 
-        if (!tg_facade_built(si, left)) continue;
-
-        /* Keep the branch corridor clear (see tg_building_for_span's note): the
-         * corridor bows into the side<0 lateral over the fork span range. */
-        if (tg_branches_enabled() && side < 0.0) {
-            const int lo = TD5_TG_BRANCH_FORK_SPAN - TD5_TG_BRANCH_WIDEN;
-            const int hi = TD5_TG_BRANCH_FORK_SPAN + TD5_TG_BRANCH_LEN + 1;
-            if (si >= lo && si <= hi) continue;
-        }
-
-        /* Height is a whole number of FLOORS (real cells), keyed to the RUN so a
-         * building is one uniform-height block that steps at the next side street
-         * -- shipped city frontages read as ~3 floors, taller in tower runs. */
-        gh     = (((unsigned)si + (left ? 777u : 0u)) / TD5_TG_FACADE_PERIOD)
-                 * 2246822519u;
-        floors = b->floors_min + (int)((gh >> 7) % (unsigned)b->floors_extra);
-        if (b->tower_mask && ((gh >> 3) & (unsigned)b->tower_mask) == 0)
-            floors += 1 + (int)((gh >> 11) % 4);      /* whole-run tower cluster */
-        rows   = floors;
-        H      = (double)floors * (double)b->cell_h;
-        depth  = (double)b->depth;
-
-        /* Left of travel is (tz, -tx); facades sit on the curb (setback ~0). */
-        lx0 = n0->tz * side; lz0 = -n0->tx * side;
-        lx1 = n1->tz * side; lz1 = -n1->tx * side;
-        set0 = n0->width * 0.5 + (double)b->sidewalk;
-        set1 = n1->width * 0.5 + (double)b->sidewalk;
-
-        bx = n0->x + lx0 * set0; by = n0->y; bz = n0->z + lz0 * set0;
-        ax = (n1->x + lx1 * set1) - bx;
-        ay = n1->y - n0->y;
-        az = (n1->z + lz1 * set1) - bz;
-
-        /* Columns follow the real cell width; a single span is shorter than one
-         * cell, so most spans lay one cell and wide/junction spans lay a few. */
-        flen = sqrt(ax * ax + az * az);
-        if (flen < 1.0) flen = 1.0;
-        cols = (int)(flen / (double)b->cell_w + 0.5);
-        if (cols < 1) cols = 1;
-        if (cols > 4) cols = 4;
-
-        /* Road-facing plane. */
-        tg_facade_push_grid(bx, by, bz, ax, ay, az, 0.0, H, 0.0,
-                            cols, rows, px, py, pz, uu, vv, &n);
-
-        /* Deep return walls at run ends turn the corner into the building's side
-         * (the multi-sided buildings) -- real footprints run ~46 wu back. */
-        if (!tg_facade_built(si - 1, left))
-            tg_facade_push_grid(bx, by, bz,
-                                lx0 * depth, 0.0, lz0 * depth, 0.0, H, 0.0,
-                                2, rows, px, py, pz, uu, vv, &n);
-        if (!tg_facade_built(si + 1, left))
-            tg_facade_push_grid(bx + ax, by + ay, bz + az,
-                                lx1 * depth, 0.0, lz1 * depth, 0.0, H, 0.0,
-                                2, rows, px, py, pz, uu, vv, &n);
+    /* FACADE pass: the floors ABOVE the shop, plus the deep return walls that
+     * turn the corner at run ends (the multi-sided buildings). */
+    for (s = 0; s < 2; s++) {
+        TG_SideGeom *g = &sd[s];
+        if (!g->built) continue;
+        tg_facade_push_grid(g->bx, g->by, g->bz, g->ax, g->ay, g->az,
+                            0.0, g->H, 0.0, g->cols, g->rows, 1, g->rows,
+                            px, py, pz, uu, vv, &n);
+        if (g->cap_near)
+            tg_facade_push_grid(g->bx, g->by, g->bz,
+                                g->lx0 * g->depth, 0.0, g->lz0 * g->depth,
+                                0.0, g->H, 0.0, 2, g->rows, 0, g->rows,
+                                px, py, pz, uu, vv, &n);
+        if (g->cap_far)
+            tg_facade_push_grid(g->bx + g->ax, g->by + g->ay, g->bz + g->az,
+                                g->lx1 * g->depth, 0.0, g->lz1 * g->depth,
+                                0.0, g->H, 0.0, 2, g->rows, 0, g->rows,
+                                px, py, pz, uu, vv, &n);
     }
 
     if (n <= 0) return 1;
-    /* One facade page per PERIOD-block (a run lives inside one block) so a whole
-     * building keeps one texture and neighbours differ -- keyed on the block, not
-     * the span, or the page would flicker cell-to-cell along a building. Both
-     * sides of a span share the page (one mesh); runs vary it along the road. */
-    return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n,
-        tg_facade_page((unsigned)(si / TD5_TG_FACADE_PERIOD) * 2246822519u));
+    /* Pages keyed to the PERIOD-block (a run lives inside one block) so a whole
+     * building keeps one shop + one wall page and neighbours differ. Ground
+     * quads [0,n_store) sample the shop page, the rest the wall page. */
+    if (n_store > 0 && n_store < n) {
+        seg_page[0] = tg_store_page(block_gh);  seg_nq[0] = n_store / 4;
+        seg_page[1] = tg_facade_page(block_gh); seg_nq[1] = (n - n_store) / 4;
+        nseg = 2;
+    } else {
+        seg_page[0] = (n_store >= n) ? tg_store_page(block_gh)
+                                     : tg_facade_page(block_gh);
+        seg_nq[0] = n / 4;
+        nseg = 1;
+    }
+    return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, seg_page, seg_nq, nseg);
 }
 
 /* Scenery beside span si, or 0 (no-op success) if this span gets none. One mesh
@@ -2830,6 +2887,54 @@ static void tg_emit_texture_page_wall(TG_Buf *out, int variant)
     }
 }
 
+/* Storefront pages: a glazed ground floor -- a coloured awning/sign band across
+ * the top, big mullioned shop windows below with the odd lit pane, and a dark
+ * doorway. `variant` recolours the awning (red/green/blue) so shops differ. */
+static void tg_emit_texture_page_store(TG_Buf *out, int variant)
+{
+    static const int awn[3][3] = {           /* BGR awnings */
+        { 40, 40, 170 }, { 60, 150, 60 }, { 160, 90, 40 } };
+    unsigned int rng = 0x1234567u + (unsigned)variant * 0x9E3779B9u;
+    int av = variant % 3, i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* 0..5 dark glass, 6..8 frame/mullion + doorway, 9..11 awning, 12..15
+     * reflection / lit-sign highlights. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        if (i < 6)       { b = 46 + i * 6;  g = 40 + i * 5;  r = 34 + i * 4; }
+        else if (i < 9)  { b = 26;          g = 24;          r = 22;         }
+        else if (i < 12) { b = awn[av][0];  g = awn[av][1];  r = awn[av][2]; }
+        else             { b = 150 + (i-12) * 24; g = 160 + (i-12) * 22;
+                           r = 170 + (i-12) * 18; }
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        int x = i % TD5_TG_TEX_DIM;
+        int y = i / TD5_TG_TEX_DIM;              /* y=0 is the TOP of the page */
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if (y < 12) {
+            idx = 9 + (int)((rng >> 16) % 3);            /* awning / sign band */
+        } else if (y > 46 && x > 26 && x < 38) {
+            idx = 6 + (int)((rng >> 16) % 3);            /* dark doorway */
+        } else if ((x % 16) < 2 || (y % 20) < 2) {
+            idx = 6 + (int)((rng >> 16) % 3);            /* window frame/mullion */
+        } else {
+            unsigned int pane = (unsigned)((y / 20) * 4 + x / 16) * 2654435761u;
+            idx = ((pane >> 29) == 0) ? (12 + (int)((rng >> 18) % 4))
+                                      : (int)((rng >> 16) % 6);   /* lit / glass */
+        }
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 /* Page 2: foliage / vegetation -- mottled greens for hedgerows and treelines.
  * Deliberately noisy rather than structured: these boxes stand in for organic
  * mass, so any regular pattern reads as wrong. */
@@ -3053,6 +3158,9 @@ static int tg_emit_textures(TG_Buf *out)
         for (v = 1; v < k_real_wall_count && v < TD5_TG_WALL_VARIANTS; v++)
             tg_emit_real_page(&pages[TD5_TG_PAGE_WALL_EXTRA + v - 1],
                               k_real_wall_pal[v], k_real_wall_paln[v], k_real_wall_idx[v]);
+        for (v = 0; v < k_real_store_count && v < TD5_TG_STORE_VARIANTS; v++)
+            tg_emit_real_page(&pages[TD5_TG_PAGE_STORE + v],
+                              k_real_store_pal[v], k_real_store_paln[v], k_real_store_idx[v]);
         tg_emit_real_page(&pages[TD5_TG_PAGE_GREEN],
                           k_real_green_pal, k_real_green_paln, k_real_green_idx);
     } else {
@@ -3060,6 +3168,8 @@ static int tg_emit_textures(TG_Buf *out)
         tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_WALL], 0);
         for (v = 1; v < TD5_TG_WALL_VARIANTS; v++)
             tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_WALL_EXTRA + v - 1], v);
+        for (v = 0; v < TD5_TG_STORE_VARIANTS; v++)
+            tg_emit_texture_page_store(&pages[TD5_TG_PAGE_STORE + v], v);
         tg_emit_texture_page_green(&pages[TD5_TG_PAGE_GREEN]);
     }
     tg_emit_texture_page_tree(&pages[TD5_TG_PAGE_TREE]);
