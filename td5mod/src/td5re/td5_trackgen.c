@@ -3085,9 +3085,119 @@ typedef struct {
 static int tg_emit_fb_city(const TG_FBHook *h)      { (void)h; return 1; }
 /* Group B -- flora & figures: tree placement/backdrop, prop scale & density. */
 static int tg_emit_fb_flora(const TG_FBHook *h)     { (void)h; return 1; }
+/* How many spans either side of a portal carry mountain massing. Beyond this
+ * the camera is inside the bore and the mass is behind the lining, so it is
+ * invisible geometry -- 5 spans (~4000 units) is what a driver actually sees
+ * from outside the mouth. */
+#define TD5_TG_TUNNEL_MASS_SPANS 5
+
+/* Spans from si to the nearest END of its tunnel run, capped. tg_span_in_tunnel
+ * is a pure hash of si, so this is a bounded walk of at most cap+1 steps, not a
+ * search over the track. Negative si is safe: the function early-outs on
+ * si <= TD5_TG_GRID_SPAN + 40 before touching anything. */
+static int tg_tunnel_edge_dist(int si, int cap)
+{
+    int d;
+    for (d = 0; d <= cap; d++)
+        if (!tg_span_in_tunnel(si - d) || !tg_span_in_tunnel(si + d))
+            return d;
+    return cap + 1;
+}
+
 /* Group C -- tunnels: portal surrounds, mountain massing, width for branches.
- * Called INSIDE the tunnel branch, where no buildings/props are emitted. */
-static int tg_emit_fb_tunnel(const TG_FBHook *h)    { (void)h; return 1; }
+ * Called INSIDE the tunnel branch, where no buildings/props are emitted.
+ *
+ * ROOT CAUSE this addresses: tg_emit_tunnel emits an enclosure and nothing
+ * else, so a tunnel in open country is a concrete box sitting ON the landscape
+ * with sky above and behind it -- the road does not go THROUGH anything, so the
+ * mouth reads as the end of a shed. Fix by putting mass over and beside the
+ * bore: a CROWN slab stacked on the roof and a SHOULDER each side, plus, at the
+ * portal span itself, two BUTTRESSES hugging the mouth so the opening reads as
+ * cut into rock. Because this hook only runs on tunnel spans, the mountain
+ * begins exactly at the mouth -- which is what you want: from outside you see a
+ * rock face with a hole in it.
+ *
+ * Weighted toward the PORTALS, and skipped past TD5_TG_TUNNEL_MASS_SPANS, for
+ * the reason above: deep inside the run the mass is occluded by the lining, so
+ * emitting it there would only spend mesh budget.
+ *
+ * Pages: TD5_TG_PAGE_HILL, read-only (Group D fills it) -- a hillside flank is
+ * exactly what this is. Vertex colour darkens the mass slightly so it does not
+ * read as the same material as the lining. */
+static int tg_emit_fb_tunnel(const TG_FBHook *h)
+{
+    const TG_Node *n = &h->nl->v[h->si];
+    const double lx = n->tz, lz = -n->tx;
+    const double roof_top = n->y + TD5_TG_TUNNEL_HEIGHT + 400.0;
+    const unsigned int rock  = 0xFFC0C8C0u;   /* lit rock/turf flank */
+    const unsigned int shade = 0xFF98A098u;   /* the cut face at the mouth */
+    double bore_half, bore_shift, side_x, cx, cz, vis, crown_h, flank_hx;
+    int ed, s;
+
+    /* Default ON (a fix); TD5RE_AUTOTRACK_TUNNEL_MOUNTAIN=0 to disable. */
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_TUNNEL_MOUNTAIN")) return 1;
+
+    ed = tg_tunnel_edge_dist(h->si, TD5_TG_TUNNEL_MASS_SPANS);
+    if (ed > TD5_TG_TUNNEL_MASS_SPANS) return 1;      /* buried out of sight */
+    if (*h->nmesh + 6 > h->maxmesh) return 1;         /* budget, not an error */
+
+    /* 1.0 at the portal span, tapering inward -- the hill thins as it goes
+     * behind the lining, which is also how a real cutting looks from outside. */
+    vis = (double)(TD5_TG_TUNNEL_MASS_SPANS + 1 - ed) /
+          (double)TD5_TG_TUNNEL_MASS_SPANS;
+
+    tg_tunnel_bore(h->nl, h->si, &bore_half, &bore_shift);
+    side_x = bore_half + TD5_TG_TUNNEL_WALL_T;
+    cx = n->x + lx * bore_shift;
+    cz = n->z + lz * bore_shift;
+
+    crown_h  = 700.0 + 1900.0 * vis;
+    flank_hx = 900.0 + 2200.0 * vis;
+
+    /* CROWN: mass stacked directly on the roof slab, overhanging it a little so
+     * no sliver of sky shows between hill and tunnel. */
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    if (!tg_emit_box_mesh(h->blk, cx, roof_top + crown_h * 0.5, cz,
+                          side_x + 900.0, crown_h * 0.5, 780.0,
+                          n->tx, n->tz, TD5_TG_PAGE_HILL, 3000.0, rock))
+        return 0;
+
+    /* SHOULDERS: one each side, outboard of the roof overhang so they never
+     * intrude into the bore, sunk well below the road so they meet whatever
+     * terrain the ground pass laid down instead of floating over it. */
+    for (s = 0; s < 2; s++) {
+        const double sgn = s ? 1.0 : -1.0;
+        const double off = side_x + 900.0 + flank_hx;
+        const double top = roof_top - 600.0;
+        const double bot = n->y - 2500.0;
+        h->moff[(*h->nmesh)++] = h->blk->len;
+        if (!tg_emit_box_mesh(h->blk, cx + lx * off * sgn, (top + bot) * 0.5,
+                              cz + lz * off * sgn,
+                              flank_hx, (top - bot) * 0.5, 780.0,
+                              n->tx, n->tz, TD5_TG_PAGE_HILL, 3000.0, rock))
+            return 0;
+    }
+
+    /* BUTTRESSES: only on the portal span itself. Deeper along the road than a
+     * span slab (1400 vs 780) so the mouth sits in a recess rather than flush
+     * with the hillside, which is what makes it read as a bore rather than a
+     * hole painted on a wall. */
+    if (ed <= 1) {
+        for (s = 0; s < 2; s++) {
+            const double sgn = s ? 1.0 : -1.0;
+            const double off = side_x + 800.0;
+            if (*h->nmesh + 1 > h->maxmesh) break;
+            h->moff[(*h->nmesh)++] = h->blk->len;
+            if (!tg_emit_box_mesh(h->blk, cx + lx * off * sgn, n->y + 900.0,
+                                  cz + lz * off * sgn,
+                                  800.0, 2400.0, 1400.0,
+                                  n->tx, n->tz, TD5_TG_PAGE_HILL, 2400.0,
+                                  shade))
+                return 0;
+        }
+    }
+    return 1;
+}
 /* Group D -- terrain & water: ledge slopes, longer skirts, hills, snow. */
 static int tg_emit_fb_terrain(const TG_FBHook *h)   { (void)h; return 1; }
 /* Group E -- track furniture: start/finish banners, branch mouths, run-off. */
