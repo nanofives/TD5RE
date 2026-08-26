@@ -5704,41 +5704,15 @@ static void tg_emit_texture_page_ground(TG_Buf *out)
     }
 }
 
-/* ===================== [FB] RESERVED FEEDBACK-BATCH PAGES =====================
- * One emitter per reserved TD5_TG_PAGE_* slot above. They start as tonal grain
- * in a plausible base colour so the pages are valid from the first build; each
- * work area replaces the body of ITS OWN emitter with real artwork. Keep the
- * signatures -- tg_emit_textures calls them from one marked block. */
 
-/* Tonal-grain page in a single BGR base colour: the least a valid page can be.
- * `spread` is the per-texel lightness swing, `type` the page type (0 opaque,
- * 1 alpha-keyed on index 0, 3 additive). */
-static void tg_emit_texture_page_flat(TG_Buf *out, int type,
-                                      int b, int g, int r, int spread,
-                                      unsigned int seed)
-{
-    unsigned int rng = seed | 1u;
-    int i;
-
-    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
-    tg_put_u8(out, (unsigned)type);
-    tg_put_u32(out, TD5_TG_PAL_COUNT);
-
-    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
-        const int d = (i - TD5_TG_PAL_COUNT / 2) * spread / TD5_TG_PAL_COUNT;
-        int c[3], j;
-        c[0] = b + d; c[1] = g + d; c[2] = r + d;
-        for (j = 0; j < 3; j++) {
-            if (c[j] < 0)   c[j] = 0;
-            if (c[j] > 255) c[j] = 255;
-            tg_put_u8(out, (unsigned)c[j]);
-        }
-    }
-    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
-        rng = rng * 1103515245u + 12345u;
-        tg_put_u8(out, (unsigned)((rng >> 16) % TD5_TG_PAL_COUNT));
-    }
-}
+/* ===================== [FB] FEEDBACK-BATCH PAGES =====================
+ * One emitter per page slot reserved in the TD5_TG_PAGE_* block above. Each was
+ * seeded as tonal grain when the slots were carved and then filled in with real
+ * artwork by the area that owns it, so the shared placeholder helper is gone.
+ *
+ * The recurring lesson in these emitters: a page has to read at the SIZE its
+ * geometry maps it at, and several of them are stretched over surfaces that
+ * curve or climb, where any axis-aligned feature ladders or shears. */
 
 /* City street furniture: 0 = SIDEWALK paving, 1 = CROSSING (zebra), 2 = FENCE
  * railing (alpha-keyed, index 0 must stay transparent).
