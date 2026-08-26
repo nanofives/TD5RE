@@ -116,7 +116,21 @@ static int tg_road_page(int si);
  * live after WATER. Each also carries a grip class so the car drives to match. */
 #define TD5_TG_ROAD_VARIANTS   5
 #define TD5_TG_PAGE_ROAD_EXTRA (TD5_TG_PAGE_WATER + 1)
-#define TD5_TG_PAGE_COUNT  (TD5_TG_PAGE_ROAD_EXTRA + TD5_TG_ROAD_VARIANTS - 1)
+/* Feedback batch (2026-08-26): page slots RESERVED up front, one contiguous
+ * group per work area, so several parallel changes can each fill their own page
+ * without renumbering the derived chain above (every constant here is defined
+ * off FB_BASE, never off its neighbour). Each page is filled by exactly one
+ * emitter, called from the marked block in tg_emit_textures. */
+#define TD5_TG_PAGE_FB_BASE   (TD5_TG_PAGE_ROAD_EXTRA + TD5_TG_ROAD_VARIANTS - 1)
+#define TD5_TG_PAGE_SIDEWALK  (TD5_TG_PAGE_FB_BASE + 0)  /* paving slabs      */
+#define TD5_TG_PAGE_CROSSING  (TD5_TG_PAGE_FB_BASE + 1)  /* zebra crossing    */
+#define TD5_TG_PAGE_FENCE     (TD5_TG_PAGE_FB_BASE + 2)  /* sidewalk railing  */
+#define TD5_TG_PAGE_TREELINE  (TD5_TG_PAGE_FB_BASE + 3)  /* continuous canopy */
+#define TD5_TG_PAGE_TUNNEL    (TD5_TG_PAGE_FB_BASE + 4)  /* tunnel lining     */
+#define TD5_TG_PAGE_SNOW      (TD5_TG_PAGE_FB_BASE + 5)  /* snow ground       */
+#define TD5_TG_PAGE_HILL      (TD5_TG_PAGE_FB_BASE + 6)  /* distant hillside  */
+#define TD5_TG_PAGE_BANNER    (TD5_TG_PAGE_FB_BASE + 7)  /* start/finish gate */
+#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_FB_BASE + 8)
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
@@ -2944,6 +2958,37 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk)
     return !blk->oom;
 }
 
+/* ===================== [FB] RESERVED SCENERY HOOKS =====================
+ * One hook per work area of the 2026-08-26 feedback batch, called from the
+ * marked lines in tg_emit_models. They exist so several parallel changes can
+ * each add scenery without all editing the same dispatcher: fill in the body of
+ * YOUR hook, leave the others alone.
+ *
+ * Contract, identical to tg_emit_props: append whole meshes to `blk`, and for
+ * every mesh appended record its start offset via moff[(*nmesh)++]. Never let
+ * *nmesh reach maxmesh. Return 0 only on allocation failure. The span si is
+ * always a MAIN-RING span; `b` is its biome. */
+typedef struct {
+    const TG_NodeList *nl;
+    int    si, nspans, lanes;
+    const TG_Biome *b;
+    TG_Buf *blk;
+    size_t *moff;
+    int    *nmesh, maxmesh;
+} TG_FBHook;
+
+/* Group A -- city: sidewalks, kerb fences, crossings, deeper building rows. */
+static int tg_emit_fb_city(const TG_FBHook *h)      { (void)h; return 1; }
+/* Group B -- flora & figures: tree placement/backdrop, prop scale & density. */
+static int tg_emit_fb_flora(const TG_FBHook *h)     { (void)h; return 1; }
+/* Group C -- tunnels: portal surrounds, mountain massing, width for branches.
+ * Called INSIDE the tunnel branch, where no buildings/props are emitted. */
+static int tg_emit_fb_tunnel(const TG_FBHook *h)    { (void)h; return 1; }
+/* Group D -- terrain & water: ledge slopes, longer skirts, hills, snow. */
+static int tg_emit_fb_terrain(const TG_FBHook *h)   { (void)h; return 1; }
+/* Group E -- track furniture: start/finish banners, branch mouths, run-off. */
+static int tg_emit_fb_track(const TG_FBHook *h)     { (void)h; return 1; }
+
 /* Fork whose MAIN half-carriageway covers main-ring span si, or -1. */
 static int tg_fork_of_main(int si)
 {
@@ -2983,7 +3028,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                        / TD5_TG_SPANS_PER_ENTRY;
     /* Per span: ground skirt + road + guardrail + building + up to 3 tunnel
      * pieces + up to 2 bridge pieces + several prop billboards. */
-    enum { TG_MAX_MESHES_PER_ENTRY = TD5_TG_SPANS_PER_ENTRY * 20 };
+    enum { TG_MAX_MESHES_PER_ENTRY = TD5_TG_SPANS_PER_ENTRY * 48 };
     const int rails = tg_guardrails_enabled();
     int nrails = 0;
     TG_Buf *blocks;
@@ -3076,7 +3121,25 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
             int k;
 
             if (si >= ring) continue;   /* pad + corridor carry road only */
-            if (nmesh + 16 > TG_MAX_MESHES_PER_ENTRY) break;
+            if (nmesh + 40 > TG_MAX_MESHES_PER_ENTRY) break;
+
+            {   /* [FB] scenery hooks: one call per work area. `hook` is rebuilt
+                 * per span so *nmesh always tracks the live counter. */
+                TG_FBHook hook;
+                hook.nl = nl; hook.si = si; hook.nspans = nspans;
+                hook.lanes = lanes;
+                hook.b = &k_biomes[tg_biome_for_span(si)];
+                hook.blk = &meshes; hook.moff = moff; hook.nmesh = &nmesh;
+                hook.maxmesh = TG_MAX_MESHES_PER_ENTRY;
+                if (tg_span_in_tunnel(si)) {
+                    if (!tg_emit_fb_tunnel(&hook)) { ok = 0; break; }
+                } else {
+                    if (!tg_emit_fb_city(&hook))    { ok = 0; break; }
+                    if (!tg_emit_fb_flora(&hook))   { ok = 0; break; }
+                    if (!tg_emit_fb_terrain(&hook)) { ok = 0; break; }
+                }
+                if (!tg_emit_fb_track(&hook)) { ok = 0; break; }
+            }
 
             if (tg_span_in_tunnel(si)) {
                 /* Enclosed: no buildings, they would stand inside the walls.
@@ -3662,6 +3725,77 @@ static void tg_emit_texture_page_ground(TG_Buf *out)
     }
 }
 
+/* ===================== [FB] RESERVED FEEDBACK-BATCH PAGES =====================
+ * One emitter per reserved TD5_TG_PAGE_* slot above. They start as tonal grain
+ * in a plausible base colour so the pages are valid from the first build; each
+ * work area replaces the body of ITS OWN emitter with real artwork. Keep the
+ * signatures -- tg_emit_textures calls them from one marked block. */
+
+/* Tonal-grain page in a single BGR base colour: the least a valid page can be.
+ * `spread` is the per-texel lightness swing, `type` the page type (0 opaque,
+ * 1 alpha-keyed on index 0, 3 additive). */
+static void tg_emit_texture_page_flat(TG_Buf *out, int type,
+                                      int b, int g, int r, int spread,
+                                      unsigned int seed)
+{
+    unsigned int rng = seed | 1u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, (unsigned)type);
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        const int d = (i - TD5_TG_PAL_COUNT / 2) * spread / TD5_TG_PAL_COUNT;
+        int c[3], j;
+        c[0] = b + d; c[1] = g + d; c[2] = r + d;
+        for (j = 0; j < 3; j++) {
+            if (c[j] < 0)   c[j] = 0;
+            if (c[j] > 255) c[j] = 255;
+            tg_put_u8(out, (unsigned)c[j]);
+        }
+    }
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        rng = rng * 1103515245u + 12345u;
+        tg_put_u8(out, (unsigned)((rng >> 16) % TD5_TG_PAL_COUNT));
+    }
+}
+
+/* City street furniture: 0 = SIDEWALK paving, 1 = CROSSING (zebra), 2 = FENCE
+ * railing (alpha-keyed, index 0 must stay transparent). */
+static void tg_emit_texture_page_fb_city(TG_Buf *out, int which)
+{
+    if (which == 2) tg_emit_texture_page_flat(out, 1, 150, 150, 150, 40, 0xC17Au);
+    else if (which == 1) tg_emit_texture_page_flat(out, 0, 190, 190, 190, 90, 0xC27Bu);
+    else tg_emit_texture_page_flat(out, 0, 148, 148, 144, 30, 0xC37Du);
+}
+
+/* Continuous tree-line backdrop: a canopy band that tiles horizontally without
+ * a visible seam (alpha-keyed above the canopy). */
+static void tg_emit_texture_page_fb_treeline(TG_Buf *out)
+{
+    tg_emit_texture_page_flat(out, 1, 40, 78, 34, 34, 0x77E1u);
+}
+
+/* Tunnel lining -- deliberately NOT a building facade (no windows, no storeys). */
+static void tg_emit_texture_page_fb_tunnel(TG_Buf *out)
+{
+    tg_emit_texture_page_flat(out, 0, 96, 96, 98, 24, 0x7011u);
+}
+
+/* Terrain: 0 = SNOW ground, 1 = distant HILL / mountain flank. */
+static void tg_emit_texture_page_fb_terrain(TG_Buf *out, int which)
+{
+    if (which) tg_emit_texture_page_flat(out, 0, 96, 104, 92, 30, 0x4111u);
+    else tg_emit_texture_page_flat(out, 0, 236, 240, 244, 26, 0x4222u);
+}
+
+/* Start/finish gate banner. */
+static void tg_emit_texture_page_fb_banner(TG_Buf *out)
+{
+    tg_emit_texture_page_flat(out, 0, 60, 60, 60, 120, 0xBA11u);
+}
+
 /* Emit a page from real (already palette-indexed) TD5 texture data, in the same
  * on-disk page format as the procedural emitters -- pad, opaque type, palette
  * count, BGR palette, then the 64x64 index bytes. */
@@ -3746,6 +3880,16 @@ static int tg_emit_textures(TG_Buf *out)
             tg_emit_texture_page_roadsurf(&pages[tg_road_slot(v)],
                                           k_road_surf[v].proc_kind);
     }
+    /* [FB 2026-08-26] reserved feedback-batch pages -- one owner each. */
+    tg_emit_texture_page_fb_city(&pages[TD5_TG_PAGE_SIDEWALK], 0);
+    tg_emit_texture_page_fb_city(&pages[TD5_TG_PAGE_CROSSING], 1);
+    tg_emit_texture_page_fb_city(&pages[TD5_TG_PAGE_FENCE], 2);
+    tg_emit_texture_page_fb_treeline(&pages[TD5_TG_PAGE_TREELINE]);
+    tg_emit_texture_page_fb_tunnel(&pages[TD5_TG_PAGE_TUNNEL]);
+    tg_emit_texture_page_fb_terrain(&pages[TD5_TG_PAGE_SNOW], 0);
+    tg_emit_texture_page_fb_terrain(&pages[TD5_TG_PAGE_HILL], 1);
+    tg_emit_texture_page_fb_banner(&pages[TD5_TG_PAGE_BANNER]);
+
     for (i = 0; i < count; i++) {
         if (pages[i].oom) {
             for (i = 0; i < count; i++) tg_buf_free(&pages[i]);
