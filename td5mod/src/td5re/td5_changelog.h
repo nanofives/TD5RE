@@ -33,6 +33,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 26" },
+    { CL_ITEM,    "Auto-track branches, bridges and tunnels are ON by" },
+    { CL_ITEM,    "  default now (set the matching knob =0 to disable)." },
     { CL_ITEM,    "Auto-track TUNNELS now read as tunnels: enclosed dim" },
     { CL_ITEM,    "  interior with a lit portal at each mouth" },
     { CL_ITEM,    "  (TD5RE_AUTOTRACK_TUNNELS=1, port-original)." },

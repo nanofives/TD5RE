@@ -598,11 +598,10 @@ static int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
 
 static int tg_bridges_enabled(void)
 {
-    /* Default OFF: unlike tunnels and guardrails this moves the STRIP, which
-     * is the surface the car actually drives on, so it can affect climb, AI
-     * pacing and crest jumps. Opt in with TD5RE_AUTOTRACK_BRIDGES=1 until a
-     * frame plus the self-test matrix confirm it. */
-    return td5_env_flag_off("TD5RE_AUTOTRACK_BRIDGES");
+    /* Default ON (2026-08-26); set TD5RE_AUTOTRACK_BRIDGES=0 to disable. This
+     * moves the STRIP (the elevation hump), so it can affect climb/AI pacing/
+     * crest jumps -- pending a drive test. */
+    return td5_env_flag_on("TD5RE_AUTOTRACK_BRIDGES");
 }
 
 /* Is span si inside a deliberately-placed bridge run? Stateless and derived
@@ -916,7 +915,8 @@ static int tg_round(double v)
 
 static int tg_branches_enabled(void)
 {
-    return td5_env_flag_off("TD5RE_AUTOTRACK_BRANCHES");
+    /* Default ON (2026-08-26); set TD5RE_AUTOTRACK_BRANCHES=0 to disable. */
+    return td5_env_flag_on("TD5RE_AUTOTRACK_BRANCHES");
 }
 
 /* True if span si lies in ANY fork's cleared region (approach through rejoin):
@@ -2384,7 +2384,8 @@ static int tg_span_in_tunnel(int si)
      * lit from outside; and every span in the run gets an identical section,
      * so there is no MOUTH and the near end may read as a wall.
      * Enable with TD5RE_AUTOTRACK_TUNNELS=1 to work on them. */
-    if (!td5_env_flag_off("TD5RE_AUTOTRACK_TUNNELS")) return 0;
+    /* Default ON (2026-08-26); set TD5RE_AUTOTRACK_TUNNELS=0 to disable. */
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_TUNNELS")) return 0;
     if (si <= TD5_TG_GRID_SPAN + 40) return 0;      /* not right off the grid */
     h = (unsigned)(si / TD5_TG_TUNNEL_RUN) * 2246822519u;
     return ((h >> 29) == 0);                        /* ~1 run in 8 */
