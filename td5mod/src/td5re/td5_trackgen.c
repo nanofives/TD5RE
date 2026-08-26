@@ -169,6 +169,12 @@ static TG_Fork s_forks[TD5_TG_BRANCH_MAX];
 static int s_fork_count;
 static int s_ring_len;
 
+/* Fork lookups live down in the [FB] block (three other work areas read them
+ * from there); forward-declared here because the strip emitters above need
+ * them to map an APPENDED corridor span back to its main-ring node. */
+static int tg_fork_of_main(int si);
+static int tg_fork_of_corridor(int si, int *k);
+
 /* Seed of the last successful build, for reproducing a good random track. */
 static unsigned int s_last_seed = 0;
 
@@ -994,14 +1000,30 @@ static void tg_patch_span(TG_Buf *spans, int si, int type, int lanes,
     }
 }
 
-/* Append a whole span record (used for the pad span and the corridor). */
-static void tg_append_span(TG_Buf *spans, int type, int lanes,
+/* Append a whole span record (used for the pad span and the corridor).
+ *
+ * `attr` is the surface byte, passed in rather than hardcoded so an appended
+ * corridor span carries the SAME surface class as the main-ring span it runs
+ * beside (biome grip included) -- the branch is the same road, not a different
+ * one.
+ *
+ * MASK 0, deliberately. The old body wrote `1 | (1 << (lanes - 1))`, i.e. "the
+ * two outer lanes use the ALTERNATE surface", copied from shipped level001. On
+ * a HALF carriageway br_lanes is 2, so bit0 | bit1 = 0x03 marks BOTH lanes --
+ * the whole branch became the 0x10 alternate class, and
+ * td5_track_surface_is_slow returns 1 for anything with 0x10 set. That is the
+ * reported "some branches spawn with slow lane attribute, like driving on a
+ * sidewalk": every lane of the corridor was the slow class while textured like
+ * tarmac. tg_emit_span_range was already fixed to write 0 for the main ring
+ * (see the note there); this is the same fix for the appended spans, which were
+ * missed because they go through a different writer. */
+static void tg_append_span(TG_Buf *spans, int type, int attr, int lanes,
                            int lvi, int rvi, int link_next, int link_prev,
                            int ox, int oy, int oz)
 {
     tg_put_u8 (spans, (unsigned)type);
-    tg_put_u8 (spans, TD5_TG_SURFACE_ATTR);
-    tg_put_u8 (spans, (unsigned)(1 | (1 << (lanes - 1))));
+    tg_put_u8 (spans, (unsigned)attr);
+    tg_put_u8 (spans, 0);
     tg_put_u8 (spans, (unsigned)((TD5_TG_HEIGHT_NIBBLE << 4) | (lanes & 0x0F)));
     tg_put_u16(spans, (unsigned)lvi);
     tg_put_u16(spans, (unsigned)rvi);
@@ -1032,18 +1054,118 @@ static void tg_append_span(TG_Buf *spans, int type, int lanes,
  * had. */
 #define TD5_TG_BRANCH_BOW  1.20   /* extra outward sag of the branch, x width */
 
+/* MINIMUM corridor length, spans. A fork shorter than this cannot taper: the
+ * bow below is a half sine over `len` spans, so its peak LATERAL RATE is
+ * width*BOW*PI/len per span. At the shipped 4-lane width (6000) with BOW 1.20
+ * that is 22600/len units per 1500-unit span -- 2827 units/span at len=8, i.e.
+ * the branch centre jumps sideways nearly TWICE the span length per step. The
+ * two half-carriageways then diverge faster than they advance, the gore quad
+ * that fills between them turns inside out, and the strip rows cross: the
+ * "very small branches like the one in the last race caused glitches" report.
+ * The shortest fork in the old length table was exactly 8.
+ *
+ * 24 spans is the length at which the derived bow below stops being clamped for
+ * a 2-lane-wide half carriageway, so it is the shortest fork that can reach a
+ * full-width separation without exceeding the rate limit. */
+#define TD5_TG_BRANCH_MIN_LEN  24
+/* Peak lateral movement of the branch centre per span, as a fraction of the
+ * span length. 0.35 = ~19 degrees of divergence, which the gore can fill and
+ * the AI can follow. The bow amplitude is DERIVED from this and the corridor
+ * length instead of being a flat 1.20, so a long fork bows out fully and a
+ * short one bows out only as far as it can taper. */
+#define TD5_TG_BRANCH_RATE   0.35
+
+static int tg_branch_min_len(void)
+{
+    return td5_env_int("TD5RE_AUTOTRACK_BRANCH_MINLEN",
+                       TD5_TG_BRANCH_MIN_LEN, 8, 400);
+}
+
 /* Lateral centre of the MAIN (left) half carriageway -- constant. */
 #define TD5_TG_MAIN_SHIFT(w)   ((w) * 0.25)
+
+/* Bow amplitude (x width) usable over a corridor of `len` spans without the
+ * branch centre moving sideways faster than TD5_TG_BRANCH_RATE * span_length
+ * per span. d/dk of the half-sine peaks at amp*width*PI/len, so
+ * amp <= RATE*span_len*len / (width*PI). Never above TD5_TG_BRANCH_BOW: a long
+ * fork should look like the authored one, not sail off across the map. */
+static double tg_branch_bow(int len, double width)
+{
+    double amp;
+    if (len <= 0 || width < 1.0) return 0.0;
+    amp = TD5_TG_BRANCH_RATE * (double)TD5_TG_SPAN_LENGTH * (double)len
+        / (width * TD5_TG_PI);
+    return (amp > TD5_TG_BRANCH_BOW) ? TD5_TG_BRANCH_BOW : amp;
+}
 
 /* Lateral centre of the BRANCH (right) half carriageway at corridor step k:
  * the right-half centre (-width/4) plus an outward bow that is 0 at both ends
  * (so it lines back up with the road halves at the fork and the rejoin) and
- * peaks in the middle. */
+ * peaks in the middle.
+ *
+ * SEMANTIC CHANGE 2026-08-26: the bow amplitude is now length-derived
+ * (tg_branch_bow) rather than the flat TD5_TG_BRANCH_BOW, so short forks return
+ * SMALLER offsets than they used to. Signature and sign convention are
+ * unchanged (negative = right of travel), so every reader keeps working; a
+ * reader that hardcoded the old 1.20 amplitude would now disagree. */
 static double tg_branch_shift(int k, int len, double width)
 {
     double f   = (len > 0) ? (double)k / (double)len : 0.0;   /* 0 .. 1 */
     double bow = sin(f * TD5_TG_PI);                          /* 0 -> 1 -> 0 */
-    return -width * 0.25 - width * TD5_TG_BRANCH_BOW * bow;
+    return -width * 0.25 - width * tg_branch_bow(len, width) * bow;
+}
+
+/* ---- branch lane GAIN (feedback: "branches should be able to spawn and
+ * widen their lanes") ----
+ * The old corridor was a fixed half carriageway for its whole length: br_lanes
+ * lanes at wscale 0.5, start to finish. A real alternate route opens out once
+ * it is clear of the split.
+ *
+ * So the corridor now RAMPS: it must be exactly the half carriageway at k=0
+ * and at k=len-1 (those two spans are where it lines up with the fork span and
+ * the type-11 rejoin, both of which are full width and unchanged), and in
+ * between it gains up to TD5RE_AUTOTRACK_BRANCH_GAIN extra lanes on a half sine
+ * -- same shape as the bow, so the widening and the divergence peak together.
+ *
+ * Per-span lane counts are legal on these spans because appended corridor spans
+ * own their vertex rows (see the BRANCHES design note); no shared row changes
+ * point count. Default ON, TD5RE_AUTOTRACK_BRANCH_WIDEN=0 to pin the old fixed
+ * half width. */
+static int tg_branch_widen_enabled(void)
+{
+    return td5_env_flag_on("TD5RE_AUTOTRACK_BRANCH_WIDEN");
+}
+
+/* Extra lanes at corridor step k (0 at both ends). */
+static int tg_branch_lane_gain(int k, int len, int base_lanes)
+{
+    int gain_max, g;
+    double f;
+    if (!tg_branch_widen_enabled() || len < 4) return 0;
+    if (k <= 0 || k >= len - 1) return 0;
+    gain_max = td5_env_int("TD5RE_AUTOTRACK_BRANCH_GAIN", 2, 0, 4);
+    /* Keep the widened corridor inside the lane range the rail LUTs, edge masks
+     * and suspension paths are exercised in (see td5_trackgen_apply_config's
+     * 2..4 clamp): never take the branch past 4 lanes. */
+    if (base_lanes + gain_max > 4) gain_max = 4 - base_lanes;
+    if (gain_max <= 0) return 0;
+    /* Half sine over the INTERIOR of the corridor, so the first and last
+     * interior steps gain a fraction of a lane and round to 0 -- the widening
+     * grows in and out over several spans instead of stepping at k=1. */
+    f = (double)(k - 1) / (double)(len - 3 > 0 ? len - 3 : 1);
+    g = (int)(sin(f * TD5_TG_PI) * (double)gain_max + 0.5);
+    if (g < 0) g = 0;
+    if (g > gain_max) g = gain_max;
+    return g;
+}
+
+/* Width scale of the branch carriageway at step k: 0.5 (the half road) plus a
+ * quarter road per gained lane, so the extra lanes are the same width as the
+ * road's own and the mesh matches the strip rows exactly. */
+static double tg_branch_wscale(int k, int len, int base_lanes)
+{
+    const int g = tg_branch_lane_gain(k, len, base_lanes);
+    return 0.5 + 0.25 * (double)g;
 }
 
 /* ===================== [S1] RANGE EMITTER =====================
@@ -1256,15 +1378,18 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
             const int main_half = lanes / 2;
             const int br_lanes  = lanes - main_half;
             /* Varied corridor lengths give the shipped topologies: a short
-             * chicane, a canonical split, a long alternate route. */
+             * chicane, a canonical split, a long alternate route. The first
+             * entry USED to be 8 spans, which is the "very small branch" that
+             * glitched -- lengths are now floored at tg_branch_min_len(). */
             static const int k_lens[] = { 8, 40, 120 };
+            const int min_len = tg_branch_min_len();
             int off = ring;                          /* append cursor after ring */
             int pos = TD5_TG_GRID_SPAN + 120;        /* first fork, past the grid */
             unsigned int i;
 
             for (i = 0; i < sizeof(k_lens) / sizeof(k_lens[0]) &&
                         s_fork_count < TD5_TG_BRANCH_MAX; i++) {
-                int L = k_lens[i];
+                int L = k_lens[i] < min_len ? min_len : k_lens[i];
                 int F = pos;
                 int R = F + 1 + L;
                 if (main_half < 1 || br_lanes < 1) break;
@@ -1318,23 +1443,39 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                                             a->width * 0.5, 0.0, ox, oy, oz);
                     int rvi = tg_append_row(&verts, &vtx_count, a, br_lanes,
                                             a->width * 0.5, 0.0, ox, oy, oz);
-                    tg_append_span(&spans, 1, br_lanes, lvi, rvi, -1, -1, ox, oy, oz);
+                    tg_append_span(&spans, 1, tg_surface_attr(F), br_lanes,
+                                   lvi, rvi, -1, -1, ox, oy, oz);
                 }
-                /* 4. BRANCH corridor b0..b0+L-1 (right half, bowed). */
+                /* 4. BRANCH corridor b0..b0+L-1 (right half, bowed, and gaining
+                 *    lanes over its interior -- see tg_branch_lane_gain). Each
+                 *    row's point count comes from the SAME helper the road mesh
+                 *    uses, so strip and mesh cannot drift apart. */
                 for (k = 0; k < L; k++) {
                     const TG_Node *a = &nl->v[F + 1 + k], *b = &nl->v[F + 2 + k];
+                    const int ln = br_lanes + tg_branch_lane_gain(k, L, br_lanes);
+                    const double wn = tg_branch_wscale(k, L, br_lanes);
+                    const int lnf = br_lanes + tg_branch_lane_gain(k + 1, L, br_lanes);
+                    const double wf = tg_branch_wscale(k + 1, L, br_lanes);
                     int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
-                    int lvi = tg_append_row(&verts, &vtx_count, a, br_lanes,
-                                            a->width * 0.5, tg_branch_shift(k, L, a->width),
+                    /* A span's two rows must have the SAME point count (they are
+                     * the two edges of one quad grid), so a span where the gain
+                     * steps up uses the WIDER of its two ends for both rows and
+                     * the widening lands on a span boundary. */
+                    const int lanes_here = (lnf > ln) ? lnf : ln;
+                    const double wsc     = (wf > wn) ? wf : wn;
+                    int lvi = tg_append_row(&verts, &vtx_count, a, lanes_here,
+                                            a->width * wsc,
+                                            tg_branch_shift(k, L, a->width),
                                             ox, oy, oz);
-                    int rvi = tg_append_row(&verts, &vtx_count, b, br_lanes,
-                                            b->width * 0.5, tg_branch_shift(k + 1, L, b->width),
+                    int rvi = tg_append_row(&verts, &vtx_count, b, lanes_here,
+                                            b->width * wsc,
+                                            tg_branch_shift(k + 1, L, b->width),
                                             ox, oy, oz);
                     int type = (k == 0) ? 9 : ((k == L - 1) ? 10 : 1);
                     int nxt  = (k == L - 1) ? R : -1;
                     int prv  = (k == 0) ? F : -1;
-                    tg_append_span(&spans, type, br_lanes, lvi, rvi, nxt, prv,
-                                   ox, oy, oz);
+                    tg_append_span(&spans, type, tg_surface_attr(F + 1 + k),
+                                   lanes_here, lvi, rvi, nxt, prv, ox, oy, oz);
                 }
                 /* 5. REJOIN span R: full width, type 11, link_prev -> sentinel. */
                 {
@@ -1430,6 +1571,20 @@ static int tg_emit_routes(const TG_NodeList *nl, int nspans,
 {
     int i;
     for (i = 0; i < nspans; i++) {
+        /* `nspans` is the TOTAL strip span count, which with branches includes
+         * each fork's pad + corridor tail -- but the centerline only has the
+         * main-ring nodes, so nl->v[i] for i >= nl->count READ PAST THE ARRAY
+         * (uninitialised realloc slack at best, heap overread at worst) and put
+         * garbage headings in the table the AI steers by. Map an appended span
+         * to the main node its corridor runs beside instead; the pad span, which
+         * has no geometry of its own, takes the last real node. */
+        int ni = i;
+        if (ni > nl->count - 2) {
+            int ck = 0, fi = tg_fork_of_corridor(i, &ck);
+            ni = (fi >= 0) ? s_forks[fi].F + 1 + ck : nl->count - 2;
+            if (ni > nl->count - 2) ni = nl->count - 2;
+            if (ni < 0) ni = 0;
+        }
         /* byte1 is the ABSOLUTE 12-bit heading, not a deflection: the engine
          * recovers it as heading = (byte * 0x102C) >> 8 (td5_ai.c:1280, and the
          * same formula in ai_route_heading_for_actor at td5_ai.c:305), so invert
@@ -1439,7 +1594,7 @@ static int tg_emit_routes(const TG_NodeList *nl, int nspans,
          * Getting this wrong is not subtle: encoding a deflection here (128 =
          * straight) spawned every car pointing the wrong way, and with
          * auto-throttle they drove backwards off the start line into the void. */
-        double h = atan2(nl->v[i].tx, nl->v[i].tz) * 4096.0 / (2.0 * TD5_TG_PI);
+        double h = atan2(nl->v[ni].tx, nl->v[ni].tz) * 4096.0 / (2.0 * TD5_TG_PI);
         int h12 = tg_round(h) & 0xFFF;
         int hb  = tg_round((double)h12 * 256.0 / 4140.0);   /* 4140 = 0x102C */
 
@@ -2715,24 +2870,48 @@ static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
  * to the void. Fill it with a ground quad, just below road level so it reads as
  * a sunken median and does not z-fight the carriageway edges. Zero-width (hence
  * invisible) at the fork/rejoin where the two edges meet. `si` is the MAIN span;
- * shift_n/shift_f are the BRANCH lateral offsets at this span's ends. */
+ * shift_n/shift_f are the BRANCH lateral offsets at this span's ends.
+ *
+ * MOUTH HOLE FIX (2026-08-26). Reported: "the beginnings of branches have a
+ * small portion of see-through no geometry". Root cause is this quad's geometry
+ * at the mouth, not a missing mesh: it met the two carriageways on EXACTLY their
+ * edges while sitting a full 20 units below them, so the join was an open
+ * vertical slit 20 units tall. Anywhere the gore is wide that slit is hidden by
+ * the surrounding tarmac at any sane camera angle, but at the mouth the wedge is
+ * only a few hundred units across and the slit is a large fraction of what you
+ * can see of it -- you look straight through the split into the void.
+ *
+ * Two changes, both of which have to hold at once: the drop shrinks to a few
+ * units (enough to stay behind the road in depth, not enough to be a visible
+ * step) and the quad now UNDERLAPS both carriageways by TD5_TG_GORE_OVERLAP
+ * instead of sharing their edges, so there is no seam to see through even where
+ * the wedge is narrow. The overlap is why the drop cannot go to zero: with the
+ * quads coplanar AND overlapping they would z-fight (the Keswick start-banner
+ * lesson). */
+#define TD5_TG_GORE_DROP      4.0    /* below road level, world units */
+#define TD5_TG_GORE_OVERLAP 240.0    /* underlap into each carriageway */
+
 static int tg_emit_gore(const TG_NodeList *nl, int si,
                         double shift_n, double shift_f, TG_Buf *blk)
 {
     const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
     const TG_Node *a = &nl->v[si], *c = &nl->v[si + 1];
-    const double drop = 20.0;
-    double tnr = shift_n + a->width * 0.25;   /* branch left edge, near */
-    double tfr = shift_f + c->width * 0.25;   /* branch left edge, far  */
+    const double drop = TD5_TG_GORE_DROP;
+    const double ov   = TD5_TG_GORE_OVERLAP;
+    /* Branch left edge, pushed a further `ov` to the RIGHT (lateral is +ve to
+     * the left of travel, and the branch sits at negative lateral). */
+    double tnr = shift_n + a->width * 0.25 - ov;   /* near */
+    double tfr = shift_f + c->width * 0.25 - ov;   /* far  */
     double px[4], py[4], pz[4], uu[4], vv[4];
     double cx = 0, cy = 0, cz = 0, radius = 0;
     int i;
 
-    /* near-left = road centre, near-right = branch left edge, then far. */
-    px[0]=a->x;             py[0]=a->y-drop; pz[0]=a->z;             uu[0]=0.0; vv[0]=(double)si;
+    /* near-left = road centre pushed `ov` INTO the main carriageway,
+     * near-right = branch left edge pushed `ov` into the branch, then far. */
+    px[0]=a->x+a->tz*ov;    py[0]=a->y-drop; pz[0]=a->z-a->tx*ov;    uu[0]=0.0; vv[0]=(double)si;
     px[1]=a->x+a->tz*tnr;   py[1]=a->y-drop; pz[1]=a->z-a->tx*tnr;   uu[1]=1.0; vv[1]=(double)si;
     px[2]=c->x+c->tz*tfr;   py[2]=c->y-drop; pz[2]=c->z-c->tx*tfr;   uu[2]=1.0; vv[2]=(double)si+1.0;
-    px[3]=c->x;             py[3]=c->y-drop; pz[3]=c->z;             uu[3]=0.0; vv[3]=(double)si+1.0;
+    px[3]=c->x+c->tz*ov;    py[3]=c->y-drop; pz[3]=c->z-c->tx*ov;    uu[3]=0.0; vv[3]=(double)si+1.0;
 
     for (i = 0; i < 4; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
     cx /= 4; cy /= 4; cz /= 4;
@@ -3062,13 +3241,26 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 if (fi >= 0) {
                     const int mb = s_forks[fi].F + 1 + ck;  /* base main node */
                     const int L  = s_forks[fi].len;
+                    /* Same lane/width helpers the STRIP rows used, so the
+                     * surface you see is the surface you collide with even where
+                     * the corridor gains a lane. */
+                    const int ln  = br_lanes + tg_branch_lane_gain(ck, L, br_lanes);
+                    const int lnf = br_lanes + tg_branch_lane_gain(ck + 1, L, br_lanes);
+                    const double wn = tg_branch_wscale(ck, L, br_lanes);
+                    const double wf = tg_branch_wscale(ck + 1, L, br_lanes);
                     moff[nmesh++] = meshes.len;
-                    if (!tg_emit_road_quad(nl, mb, br_lanes,
+                    if (!tg_emit_road_quad(nl, mb, (lnf > ln) ? lnf : ln,
                                            tg_branch_shift(ck, L, nl->v[mb].width),
                                            tg_branch_shift(ck + 1, L, nl->v[mb + 1].width),
-                                           0.5, tg_road_page(mb), &meshes))
+                                           (wf > wn) ? wf : wn,
+                                           tg_road_page(mb), &meshes))
                         ok = 0;
                 }
+                /* The other appended span is the PAD (si == cbase-1). It is
+                 * DEGENERATE by construction -- both of its rows are node F --
+                 * and the fork span's own full-width quad already covers that
+                 * ground, so giving it a mesh would only z-fight (the Keswick
+                 * start-banner lesson). It stays geometry-free on purpose. */
                 continue;
             }
 
