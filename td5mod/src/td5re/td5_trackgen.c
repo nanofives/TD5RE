@@ -4975,9 +4975,18 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                        / TD5_TG_SPANS_PER_ENTRY;
     /* Per span: ground skirt + road + guardrail + building + up to 3 tunnel
      * pieces + up to 2 bridge pieces + several prop billboards. */
-    enum { TG_MAX_MESHES_PER_ENTRY = TD5_TG_SPANS_PER_ENTRY * 48 };
+    /* 96 per span, raised from 48 once all five scenery areas of the 2026-08-26
+     * batch were emitting at once: a built city span can carry ground + road +
+     * gore + rail + facade + storefront + sidewalk + kerb + railing + crossing
+     * + 6 lamp pieces + 4 back-row rows + treeline + far band + props, and the
+     * budget is per ENTRY of TD5_TG_SPANS_PER_ENTRY spans, so the worst case is
+     * four such spans in a row. Overflow is SILENT (the loop just stops adding
+     * scenery), which is why it is counted and logged below rather than trusted.
+     * Cost is stack only: moff is 96*4*8 = 3 KB. */
+    enum { TG_MAX_MESHES_PER_ENTRY = TD5_TG_SPANS_PER_ENTRY * 96 };
     const int rails = tg_guardrails_enabled();
     int nrails = 0;
+    int nbudget = 0;                /* entries that ran out of mesh slots */
     TG_Buf *blocks;
     unsigned int cursor;
     int e, ok = 1;
@@ -5081,7 +5090,11 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
             int k;
 
             if (si >= ring) continue;   /* pad + corridor carry road only */
-            if (nmesh + 40 > TG_MAX_MESHES_PER_ENTRY) break;
+            /* Headroom for the widest single span (see the budget note above).
+             * Hitting this is not an error, but it drops the rest of the entry's
+             * scenery with no other symptom, so COUNT it -- a silent hole in the
+             * world is the hardest kind of bug to chase from a screenshot. */
+            if (nmesh + 96 > TG_MAX_MESHES_PER_ENTRY) { nbudget++; break; }
 
             {   /* [FB] scenery hooks: one call per work area. `hook` is rebuilt
                  * per span so *nmesh always tracks the live counter. */
@@ -5178,6 +5191,12 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 TD5_LOG_I(LOG_TAG, "trackgen: guardrails on %d/%d spans (%d%%)",
                           nrails, nspans,
                           nspans ? (nrails * 100 / nspans) : 0);
+            /* WARN, not INFO: any non-zero count means some spans are missing
+             * scenery they were meant to have, and nothing else would say so. */
+            if (nbudget)
+                TD5_LOG_W(LOG_TAG, "trackgen: mesh budget exhausted in %d/%d "
+                          "entries -- those spans lost scenery (raise "
+                          "TG_MAX_MESHES_PER_ENTRY)", nbudget, nentries);
         }
     }
 
