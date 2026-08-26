@@ -2593,9 +2593,11 @@ static int tg_emit_props(const TG_NodeList *nl, int si, const TG_Biome *b,
  * level021 coast) do exactly this -- a big flat blue mesh grid below road level.
  * Raw = world*256. */
 #define TD5_TG_WATER_DROP    1200    /* how far below the road the surface sits  */
-#define TD5_TG_WATER_BEACH   2400    /* gap from the road edge to the shoreline  */
+#define TD5_TG_WATER_BEACH   8100    /* gap from the road edge to the shoreline  */
 #define TD5_TG_WATER_EXTENT  50000   /* how far out to sea the plane reaches     */
-#define TD5_TG_WATER_ROWS    6       /* tiles seaward (page repeats per cell)    */
+/* World units per page repeat. The sea is textured by WORLD POSITION, not by
+ * cell, so the page tiles on a single global grid (see tg_emit_water). */
+#define TD5_TG_WATER_TILE    6000.0
 
 /* Which side of a coastal run the sea is on -- fixed per biome-run so the coast
  * does not flip sides mid-stretch. */
@@ -2605,18 +2607,46 @@ static double tg_water_side(int si)
     return (h & 1) ? 1.0 : -1.0;
 }
 
-/* Emit the sea plane beside span si on `side`, recording its mesh offset. */
+/* Sea level for the coastal run containing span si -- ONE height for the whole
+ * run, not per span.
+ *
+ * Root cause of the "marching" sea: the surface used to be n->y - WATER_DROP,
+ * i.e. it followed the road's own elevation profile, so the sea rose and fell
+ * with every hill. A body of water is level by definition, so take the LOWEST
+ * road node in the biome run and sit below that -- below the road everywhere in
+ * the run, so no low point is ever flooded. */
+static double tg_sea_level_y(const TG_NodeList *nl, int si)
+{
+    const int run = si / TD5_TG_BIOME_RUN;
+    int a = run * TD5_TG_BIOME_RUN;
+    int b = a + TD5_TG_BIOME_RUN - 1;
+    double lo;
+    int i;
+
+    if (a > nl->count - 1) a = nl->count - 1;
+    if (b > nl->count - 1) b = nl->count - 1;
+    lo = nl->v[a].y;
+    for (i = a + 1; i <= b; i++) if (nl->v[i].y < lo) lo = nl->v[i].y;
+    return lo - (double)TD5_TG_WATER_DROP;
+}
+
+/* Emit the sea plane beside span si on `side`, recording its mesh offset.
+ *
+ * ONE quad, and its UVs come from the WORLD x/z of each corner rather than
+ * running 0..1 per cell. Both changes fix the same fault: a 2 x 6 cell grid per
+ * span mapped the page once per cell, so every cell boundary was a seam and the
+ * whole field of them slid past as a marching pattern. Projecting the page onto
+ * the world XZ grid instead makes neighbouring spans agree at their shared edge
+ * by construction, so the sea reads as one continuous body. It is also 4
+ * vertices instead of 48. */
 static int tg_emit_water(const TG_NodeList *nl, int si, double side,
                          TG_Buf *m, size_t *moff, int *pn)
 {
-    double px[TD5_TG_WATER_ROWS * 2 * 4], py[TD5_TG_WATER_ROWS * 2 * 4];
-    double pz[TD5_TG_WATER_ROWS * 2 * 4], uu[TD5_TG_WATER_ROWS * 2 * 4];
-    double vv[TD5_TG_WATER_ROWS * 2 * 4];
+    double px[4], py[4], pz[4], uu[4], vv[4];
     const TG_Node *n0 = &nl->v[si];
     const TG_Node *n1;
-    double lx0, lz0, lx1, lz1, e0, e1, ax, ay, az, ux, uz, wy0;
-    double ax0, az0, bx0, bz0;
-    int n = 0, seg_page = TD5_TG_PAGE_WATER, seg_nq;
+    double lx0, lz0, lx1, lz1, e0, e1, wy;
+    int i, seg_page = TD5_TG_PAGE_WATER, seg_nq = 1;
 
     if (si + 1 >= nl->count) return 1;
     if (tg_side_blocked(si, side)) return 1;
@@ -2626,22 +2656,24 @@ static int tg_emit_water(const TG_NodeList *nl, int si, double side,
     lx1 = n1->tz * side; lz1 = -n1->tx * side;
     e0 = n0->width * 0.5 + (double)TD5_TG_WATER_BEACH;
     e1 = n1->width * 0.5 + (double)TD5_TG_WATER_BEACH;
-    wy0 = n0->y - (double)TD5_TG_WATER_DROP;
+    wy = tg_sea_level_y(nl, si);
 
-    /* near/far shoreline points (flat surface: both at wy0). */
-    ax0 = n0->x + lx0 * e0; az0 = n0->z + lz0 * e0;
-    bx0 = n1->x + lx1 * e1; bz0 = n1->z + lz1 * e1;
-    ax = bx0 - ax0; ay = 0.0; az = bz0 - az0;        /* along the shore */
-    ux = lx0 * (double)TD5_TG_WATER_EXTENT;           /* out to sea */
-    uz = lz0 * (double)TD5_TG_WATER_EXTENT;
+    /* shore-near, shore-far, sea-far, sea-near: the same ring order the cell
+     * grid produced, so the face keeps whatever winding was drawing before. */
+    px[0] = n0->x + lx0 * e0;                        pz[0] = n0->z + lz0 * e0;
+    px[1] = n1->x + lx1 * e1;                        pz[1] = n1->z + lz1 * e1;
+    px[2] = px[1] + lx1 * (double)TD5_TG_WATER_EXTENT;
+    pz[2] = pz[1] + lz1 * (double)TD5_TG_WATER_EXTENT;
+    px[3] = px[0] + lx0 * (double)TD5_TG_WATER_EXTENT;
+    pz[3] = pz[0] + lz0 * (double)TD5_TG_WATER_EXTENT;
+    for (i = 0; i < 4; i++) {
+        py[i] = wy;
+        uu[i] = px[i] / TD5_TG_WATER_TILE;
+        vv[i] = pz[i] / TD5_TG_WATER_TILE;
+    }
 
-    tg_facade_push_grid(ax0, wy0, az0, ax, ay, az, ux, 0.0, uz,
-                        2, TD5_TG_WATER_ROWS, 0, TD5_TG_WATER_ROWS,
-                        px, py, pz, uu, vv, &n);
-    if (n <= 0) return 1;
-    seg_nq = n / 4;
     moff[*pn] = m->len;
-    if (!tg_write_quad_mesh(m, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1))
+    if (!tg_write_quad_mesh(m, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1))
         return 0;
     (*pn)++;
     return 1;
@@ -2844,16 +2876,74 @@ static double tg_local_ground_y(const TG_NodeList *nl, int si)
     return (nl->v[a].y + nl->v[b].y) * 0.5;
 }
 
-/* River level under a bridge deck at span si (the banks drop to here). */
+/* The span range of the bridge run containing si. Partitioned exactly the way
+ * tg_apply_elevation partitions it (fixed RUN-sized blocks from span 0), so the
+ * deck hump, the river level and the gorge all describe the same crossing. */
+static void tg_bridge_run_bounds(const TG_NodeList *nl, int si, int *s0, int *s1)
+{
+    int a = (si / TD5_TG_BRIDGE_RUN) * TD5_TG_BRIDGE_RUN;
+    int b = a + TD5_TG_BRIDGE_RUN - 1;
+    if (b > nl->count - 1) b = nl->count - 1;
+    if (a > b) a = b;
+    *s0 = a; *s1 = b;
+}
+
+/* River level under a bridge deck at span si (the banks drop to here).
+ *
+ * Flat over the whole run: this used to be nl->v[si].y - CHASM, i.e. the river
+ * surface followed the deck's raised-cosine hump, so the water arched up under
+ * the middle of the bridge. Taking the run's chord midpoint instead gives ONE
+ * level for the crossing, which is what a river looks like. */
 static double tg_bridge_water_y(const TG_NodeList *nl, int si)
 {
-    return nl->v[si].y - TD5_TG_BRIDGE_CHASM - 300.0;
+    int s0, s1;
+    tg_bridge_run_bounds(nl, si, &s0, &s1);
+    return (nl->v[s0].y + nl->v[s1].y) * 0.5 - TD5_TG_BRIDGE_CHASM - 300.0;
+}
+
+/* How fully span si is "over the gorge", 0 at both ends of the bridge run and 1
+ * at the crown, as a raised cosine -- the same shape as the deck hump.
+ *
+ * Why a ramp and not a flag: the banks beside a bridge span sit far lower than
+ * ordinary terrain, so switching that on at a run boundary would leave exactly
+ * the kind of unpainted vertical riser this batch is fixing. Ramping the gorge
+ * in and out means the terrain is continuous at the run ends by construction. */
+static double tg_bridge_gorge_phase(const TG_NodeList *nl, int si)
+{
+    int s0, s1;
+    double u;
+    if (!tg_span_in_bridge_run(si)) return 0.0;
+    tg_bridge_run_bounds(nl, si, &s0, &s1);
+    if (s1 <= s0) return 0.0;
+    u = (double)(si - s0) / (double)(s1 - s0);
+    return 0.5 - 0.5 * cos(2.0 * TD5_TG_PI * u);
+}
+
+/* Visible SUPPORT STRUCTURE under and above the deck (towers, twin piers,
+ * cross-braces, under-deck girder). Default ON; TD5RE_AUTOTRACK_BRIDGE_STRUCT=0
+ * leaves only the parapets and the single centre pier the deck had before. */
+static int tg_bridge_struct_enabled(void)
+{
+    return td5_env_flag_on("TD5RE_AUTOTRACK_BRIDGE_STRUCT");
 }
 
 /* Bridge: a deck over a river. The road STRIP is the deck; here we add the
- * parapets (side walls) that read as a bridge from the car, plus piers dropping
- * to the water. The ground under a bridge run has already plunged to the river
- * (tg_emit_ground) and the water plane is emitted separately. */
+ * parapets (side walls) that read as a bridge from the car, plus the structure
+ * that carries it. The ground beside a bridge run drops away into the gorge
+ * (tg_emit_ground) and the river plane is emitted separately.
+ *
+ * WHY the extra boxes: with only parapets and one slim centre pier, a deck seen
+ * from the side or from underneath read as a floating slab -- the feedback item.
+ * Real crossings of this kind (Golden Gate, Sydney Harbour) are legible because
+ * of three things, and each maps to one piece here:
+ *   - a continuous girder under the deck, so the underside has depth;
+ *   - PAIRED piers at the deck edges with a cross-brace between them, not a
+ *     single post on the centreline;
+ *   - a tower pair rising ABOVE the deck at the crossing's middle, braced
+ *     across the top, which is the silhouette that says "bridge" at distance.
+ * All pieces are boxes, which matters: tg_emit_models recovers each piece's
+ * offset by dividing the appended bytes by the piece count, and that only holds
+ * while every piece is the same size. Do not mix a non-box mesh in here. */
 static int tg_emit_bridge(const TG_NodeList *nl, int si,
                           TG_Buf *blk, int *added)
 {
@@ -2861,16 +2951,20 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
     const double ref  = tg_local_ground_y(nl, si);
     const double lift = n->y - ref;
     const int deliberate = tg_span_in_bridge_run(si);
-    int s;
+    const double half = n->width * 0.5;
+    /* Deck level for the boxes: the strip surface, with the girder just under. */
+    const double wy = deliberate ? tg_bridge_water_y(nl, si) : ref;
+    int s0, s1, s;
 
     if (!deliberate && lift < TD5_TG_BRIDGE_MIN_LIFT) return 1;
+    tg_bridge_run_bounds(nl, si, &s0, &s1);
 
     /* Parapets: a low wall along each deck edge. */
     for (s = 0; s < 2; s++) {
         double side = s ? 1.0 : -1.0;
         double lx = n->tz * side, lz = -n->tx * side;
-        double ex = n->x + lx * (n->width * 0.5 + 120.0);
-        double ez = n->z + lz * (n->width * 0.5 + 120.0);
+        double ex = n->x + lx * (half + 120.0);
+        double ez = n->z + lz * (half + 120.0);
         if (!tg_emit_box_mesh(blk, ex, n->y + 180.0, ez,
                               90.0, 180.0, 780.0,
                               n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0, 0xFFFFFFFFu))
@@ -2878,14 +2972,73 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
         (*added)++;
     }
 
-    /* Pier every 4th span, dropping from the deck to the river. */
+    if (tg_bridge_struct_enabled()) {
+        /* Girder: full-width beam immediately under the deck, one per span, so
+         * the underside is a structural depth and not a paper-thin surface.
+         * 780 along the road = the same half-length the tunnel sections use, so
+         * consecutive spans butt together into a continuous beam. */
+        if (!tg_emit_box_mesh(blk, n->x, n->y - 260.0, n->z,
+                              half + 60.0, 170.0, 780.0,
+                              n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0, 0xFFD8D8D8u))
+            return 0;
+        (*added)++;
+    }
+
+    /* Piers every 4th span, dropping from the girder to the river bed. */
     if ((si & 3) == 0) {
-        double wy = deliberate ? tg_bridge_water_y(nl, si) : ref;
-        double h  = (n->y - wy) * 0.5;
+        double h = (n->y - wy) * 0.5;
         if (h < 150.0) h = 150.0;
-        if (!tg_emit_box_mesh(blk, n->x, n->y - h, n->z,
-                              450.0, h, 450.0,
-                              n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0, 0xFFFFFFFFu))
+        if (tg_bridge_struct_enabled()) {
+            /* Paired legs under the deck EDGES plus a brace between them. */
+            for (s = 0; s < 2; s++) {
+                double side = s ? 1.0 : -1.0;
+                double lx = n->tz * side, lz = -n->tx * side;
+                if (!tg_emit_box_mesh(blk, n->x + lx * (half * 0.7),
+                                      n->y - h, n->z + lz * (half * 0.7),
+                                      300.0, h, 300.0, n->tx, n->tz,
+                                      TD5_TG_PAGE_WALL, 3000.0, 0xFFFFFFFFu))
+                    return 0;
+                (*added)++;
+            }
+            /* Brace across the legs, a third of the way down the pier. */
+            if (!tg_emit_box_mesh(blk, n->x, n->y - h * 0.55, n->z,
+                                  half * 0.7 + 300.0, 130.0, 200.0,
+                                  n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0,
+                                  0xFFFFFFFFu))
+                return 0;
+            (*added)++;
+        } else {
+            if (!tg_emit_box_mesh(blk, n->x, n->y - h, n->z,
+                                  450.0, h, 450.0,
+                                  n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0,
+                                  0xFFFFFFFFu))
+                return 0;
+            (*added)++;
+        }
+    }
+
+    /* Towers: once per crossing, at the crown span, so a run has ONE gateway
+     * rather than a forest of posts. Height is a fixed 3400 above the deck --
+     * tall enough to be the silhouette from a chase camera without reaching the
+     * clip plane. */
+    if (deliberate && tg_bridge_struct_enabled() &&
+        si == s0 + (s1 - s0) / 2) {
+        const double th = 1700.0;              /* half-height of the tower box */
+        for (s = 0; s < 2; s++) {
+            double side = s ? 1.0 : -1.0;
+            double lx = n->tz * side, lz = -n->tx * side;
+            if (!tg_emit_box_mesh(blk, n->x + lx * (half + 300.0),
+                                  n->y + th, n->z + lz * (half + 300.0),
+                                  240.0, th, 240.0, n->tx, n->tz,
+                                  TD5_TG_PAGE_WALL, 3000.0, 0xFFFFFFFFu))
+                return 0;
+            (*added)++;
+        }
+        /* Cross-member near the top of the towers, closing the gateway. */
+        if (!tg_emit_box_mesh(blk, n->x, n->y + th * 1.7, n->z,
+                              half + 540.0, 160.0, 200.0,
+                              n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0,
+                              0xFFFFFFFFu))
             return 0;
         (*added)++;
     }
@@ -2893,29 +3046,37 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
 }
 
 /* The river surface spanning the full width under a bridge run, recording its
- * own mesh offset. */
+ * own mesh offset. ONE quad with world-projected UVs, for the same reason as
+ * tg_emit_water: a cell grid seamed and marched, a world projection is
+ * continuous across spans and across the two water emitters (same tile size, so
+ * a river and a sea meeting at a biome edge stay on one texture grid). */
 static int tg_emit_bridge_water(const TG_NodeList *nl, int si,
                                 TG_Buf *m, size_t *moff, int *pn)
 {
-    double px[64], py[64], pz[64], uu[64], vv[64];
+    double px[4], py[4], pz[4], uu[4], vv[4];
     const TG_Node *n0 = &nl->v[si];
     const TG_Node *n1;
-    double lx, lz, wy, ax, az, Ax, Az;
+    double lx, lz, wy;
     const double BW = 32000.0;              /* half-width of the river channel */
-    int n = 0, seg_page = TD5_TG_PAGE_WATER, seg_nq;
+    int i, seg_page = TD5_TG_PAGE_WATER, seg_nq = 1;
 
     if (si + 1 >= nl->count) return 1;
     n1 = &nl->v[si + 1];
     lx = n0->tz; lz = -n0->tx;              /* left unit */
     wy = tg_bridge_water_y(nl, si) + 100.0; /* just under the banks */
-    Ax = n0->x - lx * BW; Az = n0->z - lz * BW;
-    ax = n1->x - n0->x;  az = n1->z - n0->z;
-    tg_facade_push_grid(Ax, wy, Az, ax, 0.0, az, lx * 2.0 * BW, 0.0, lz * 2.0 * BW,
-                        2, 4, 0, 4, px, py, pz, uu, vv, &n);
-    if (n <= 0) return 1;
-    seg_nq = n / 4;
+
+    px[0] = n0->x - lx * BW; pz[0] = n0->z - lz * BW;
+    px[1] = n1->x - lx * BW; pz[1] = n1->z - lz * BW;
+    px[2] = n1->x + lx * BW; pz[2] = n1->z + lz * BW;
+    px[3] = n0->x + lx * BW; pz[3] = n0->z + lz * BW;
+    for (i = 0; i < 4; i++) {
+        py[i] = wy;
+        uu[i] = px[i] / TD5_TG_WATER_TILE;
+        vv[i] = pz[i] / TD5_TG_WATER_TILE;
+    }
+
     moff[*pn] = m->len;
-    if (!tg_write_quad_mesh(m, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1))
+    if (!tg_write_quad_mesh(m, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1))
         return 0;
     (*pn)++;
     return 1;
@@ -2932,6 +3093,28 @@ static int tg_emit_bridge_water(const TG_NodeList *nl, int si,
  * you on nothing, because collision comes from the STRIP, not from this. */
 #define TD5_TG_GROUND_WIDTH   24000.0   /* how far the verge extends outward */
 #define TD5_TG_GROUND_DROP       70.0    /* just under the road, avoids z-fight */
+/* Seaward skirt: a flat VERGE, then a ramp that carries the terrain THROUGH sea
+ * level and keeps going, so land and water actually intersect.
+ *
+ * The old profile stopped flat at the shoreline 70 units under the road while
+ * the sea sat 1200 lower -- an unpainted 1100-unit riser you could see through,
+ * which is the feedback item. The numbers here are derived, not chosen: keep the
+ * first 3600 units flat (roadside props and Group B's trees are placed at ROAD
+ * height with gaps up to ~3200, so they must stand on level ground), then ramp
+ * from VERGE to END and require the ramp to cross sea level exactly at the
+ * shoreline. That fixes the outer drop as
+ *   GROUND_DROP + (road-to-sea) * (END-VERGE)/(BEACH-VERGE)
+ * for ANY sea level, and at the nominal 1200-unit drop it works out to a 1:4
+ * beach. Where the road runs high above the run's sea level the same formula
+ * steepens it into a bank -- steep, but continuous geometry either way, which is
+ * the actual bug being fixed. */
+#define TD5_TG_SHORE_VERGE     3600.0
+#define TD5_TG_SHORE_END       9600.0
+/* How far out from the deck edge the far bank of a gorge starts. Inside this,
+ * beside a bridge, there is nothing but air and the river below -- which is the
+ * point: the bank used to start AT the deck edge at road level and hid the
+ * river completely, so under a bridge you saw a grass slope, not water. */
+#define TD5_TG_GORGE_INSET     9000.0
 
 /* Ground as two SKIRT STRIPS per span -- one off each verge -- built from the
  * same road-edge computation the road mesh uses. That makes the terrain follow
@@ -2943,26 +3126,135 @@ static int tg_emit_bridge_water(const TG_NodeList *nl, int si,
  * for four spans, so on bends its straight edge cut visibly across the verge
  * and slab-to-slab joins showed.
  */
+/* Is this biome a SNOW biome? Derived from the drivable surface rather than
+ * carried in TG_Biome: the biome table is shared with several parallel work
+ * areas this cycle, and "the road is ice" is already exactly the fact we mean --
+ * an icy road with green grass beside it was the feedback item. Kept as its own
+ * accessor so a future snow biome with a grippy road only has to change here. */
+static int tg_biome_is_snow(const TG_Biome *b)
+{
+    return b->road_surf == RS_ICE;
+}
+
+/* The page the terrain around span si is textured from.
+ *
+ * Overrides the biome's own ground_page with SNOW on icy biomes -- but NEVER on
+ * a tunnel span: a tunnel is an enclosed section (Group C's massing sits around
+ * its mouths) and snow inside it would show through the lining as a bright
+ * floor. Cross-group constraint, gate kept here so both the skirt and the far
+ * terrain read the same page. TD5RE_AUTOTRACK_SNOW=0 restores the green skirt. */
+static int tg_ground_page_for_span(int si, const TG_Biome *b)
+{
+    if (!tg_biome_is_snow(b)) return b->ground_page;
+    if (tg_span_in_tunnel(si)) return b->ground_page;
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_SNOW")) return b->ground_page;
+    return TD5_TG_PAGE_SNOW;
+}
+
+/* Lateral clearance the RIGHT-hand skirt must leave at span si so it does not
+ * cover the branch carriageway.
+ *
+ * Root cause of "grass on top of the road on a branch": the skirt is built from
+ * the MAIN centreline's road edges (tg_road_edge with shift 0, full width), so
+ * its inner edge sits at -width/2 -- but over a fork the branch half-carriageway
+ * has bowed outward to as far as -(width/2 + BOW*width), i.e. underneath the
+ * skirt. Pushing the skirt's inner edge out to the branch's OUTER edge leaves
+ * the carriageway uncovered; the gore mesh already fills the wedge inboard of
+ * it, so nothing shows through. Returns 0 where no fork is active.
+ *
+ * Deliberately reads s_forks directly rather than calling tg_fork_of_main: that
+ * helper is defined further down the file and moving shared code around during
+ * a parallel batch costs more than four lines of duplication. */
+static double tg_ground_branch_clear(const TG_NodeList *nl, int si)
+{
+    int i;
+
+    if (!tg_branches_enabled()) return 0.0;
+    for (i = 0; i < s_fork_count; i++) {
+        const int F = s_forks[i].F, L = s_forks[i].len;
+        if (si > F && si <= F + L) {
+            const double w = nl->v[si].width;
+            /* Branch centre is NEGATIVE (right of travel); its outer edge is a
+             * further quarter width right, and the skirt starts at width/2. */
+            double edge  = -tg_branch_shift(si - F - 1, L, w) + w * 0.25;
+            double clear = edge - w * 0.5 + 200.0;   /* + margin, no shared edge */
+            return clear > 0.0 ? clear : 0.0;
+        }
+    }
+    return 0.0;
+}
+
+/* One side's terrain CROSS-SECTION at span si: a chain of (distance from the
+ * road edge, drop below the road) points, innermost first. Consecutive points
+ * make one quad, so a plain verge is 2 points / 1 quad and a beach is 3 points /
+ * 2 quads. One function, so the skirt in tg_emit_ground and the far terrain in
+ * tg_emit_fb_terrain cannot disagree about where the skirt ended or how low. */
+#define TD5_TG_GROUND_MAXPT 3
+typedef struct {
+    double d[TD5_TG_GROUND_MAXPT];
+    double dy[TD5_TG_GROUND_MAXPT];
+    int    n;
+} TG_GroundProf;
+
+static void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
+                           double water_side, TG_GroundProf *p)
+{
+    const double phase = tg_bridge_gorge_phase(nl, si);
+    const int seaward = (water_side > 0.0 && is_left) ||
+                        (water_side < 0.0 && !is_left);
+
+    /* Default: flush with the asphalt at the road edge, a gentle embankment
+     * outward. The INNER point stays at road level on purpose -- dropping the
+     * whole skirt left a thin void/lip between road and grass. */
+    p->n = 2;
+    p->d[0]  = 0.0;                    p->dy[0] = 0.0;
+    p->d[1]  = TD5_TG_GROUND_WIDTH;    p->dy[1] = TD5_TG_GROUND_DROP;
+
+    if (seaward) {
+        const double d = nl->v[si].y - tg_sea_level_y(nl, si);
+        const double fall = (d > 0.0 ? d : (double)TD5_TG_WATER_DROP)
+                          - TD5_TG_GROUND_DROP;
+        p->n = 3;
+        p->d[1]  = TD5_TG_SHORE_VERGE;  p->dy[1] = TD5_TG_GROUND_DROP;
+        p->d[2]  = TD5_TG_SHORE_END;
+        p->dy[2] = TD5_TG_GROUND_DROP
+                 + fall * (TD5_TG_SHORE_END - TD5_TG_SHORE_VERGE)
+                        / ((double)TD5_TG_WATER_BEACH - TD5_TG_SHORE_VERGE);
+        return;
+    }
+    if (phase > 0.0) {
+        /* Gorge: the bank pulls back from the deck and drops to just under the
+         * river, so the river plane is the visible floor beside the deck. Both
+         * the pull-back and the drop scale with the run phase, so the terrain is
+         * continuous with the ordinary skirt at the run ends. */
+        const double bed = nl->v[si].y - (tg_bridge_water_y(nl, si) - 150.0);
+        p->d[0]  = phase * TD5_TG_GORGE_INSET;
+        p->dy[0] = phase * bed;
+        p->dy[1] = TD5_TG_GROUND_DROP + phase * (bed - TD5_TG_GROUND_DROP);
+        return;
+    }
+    if (!is_left) {
+        /* Branch corridor bows into the right verge -- keep off its carriageway. */
+        p->d[0] = tg_ground_branch_clear(nl, si);
+        if (p->d[0] > TD5_TG_GROUND_WIDTH - 1000.0)
+            p->d[0] = TD5_TG_GROUND_WIDTH - 1000.0;
+    }
+}
+
 static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
                           double water_side)
 {
     const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
-    const double drop = TD5_TG_GROUND_DROP;
-    /* On a coast, the seaward skirt stops at the beach so the sea shows beyond
-     * it (water_side +1 = LEFT skirt, -1 = RIGHT). */
-    const double wl = (water_side > 0.0) ? (double)TD5_TG_WATER_BEACH
-                                         : TD5_TG_GROUND_WIDTH;
-    const double wr = (water_side < 0.0) ? (double)TD5_TG_WATER_BEACH
-                                         : TD5_TG_GROUND_WIDTH;
-    /* Over a bridge run the banks plunge to the river below the deck. */
-    const double odrop = tg_span_in_bridge_run(si) ? TD5_TG_BRIDGE_CHASM : drop;
     double nlx, nly, nlz, nrx, nry, nrz;   /* near left / right road edge */
     double flx, fly, flz, frx, fry, frz;   /* far  left / right road edge */
     double nux, nuz, fux, fuz;             /* outward lateral units */
     double len;
-    double cx, cy, cz, radius = 0.0;
-    double px[8], py[8], pz[8], uu[8], vv[8];
-    int i, n = 0;
+    /* Up to (MAXPT-1) quads per side. */
+    double px[(TD5_TG_GROUND_MAXPT - 1) * 8], py[(TD5_TG_GROUND_MAXPT - 1) * 8];
+    double pz[(TD5_TG_GROUND_MAXPT - 1) * 8], uu[(TD5_TG_GROUND_MAXPT - 1) * 8];
+    double vv[(TD5_TG_GROUND_MAXPT - 1) * 8];
+    int seg_page = tg_ground_page_for_span(si, b), seg_nq;
+    int s, k, n = 0;
 
     tg_road_edge(nl, si, 0.0, 0.0, 1.0, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
     tg_road_edge(nl, si, 1.0, 0.0, 1.0, &flx, &fly, &flz, &frx, &fry, &frz);
@@ -2975,78 +3267,43 @@ static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
     len = sqrt(fux * fux + fuz * fuz);
     if (len < 1e-6) { fux = 1.0; fuz = 0.0; } else { fux /= len; fuz /= len; }
 
-    /* ISOTROPIC UV. V advances one tile per span (~SPAN_LENGTH world units), so
-     * the outer U is GROUND_WIDTH/SPAN_LENGTH to make each tile SQUARE. The old
-     * U ran 0..4 across the full 24000-unit skirt -- a ~4:1 lateral stretch that
-     * both smeared the texture and defeated the (isotropic, box-filter) mipmaps,
-     * so the far ground shimmered/rippled. Square tiles let the mips minify
-     * cleanly and the ground reads flat to the horizon. */
-    const double u_l = wl / (double)TD5_TG_SPAN_LENGTH;
-    const double u_r = wr / (double)TD5_TG_SPAN_LENGTH;
+    /* One quad per profile segment per side, loop order near-in, near-out,
+     * far-out, far-in so each quad is a proper ring.
+     *
+     * ISOTROPIC UV: V advances one tile per span (~SPAN_LENGTH world units), so U
+     * is the OUTWARD DISTANCE in span-lengths, which makes each tile square. U
+     * running 0..4 across the whole 24000-unit skirt was a ~4:1 lateral stretch
+     * that smeared the texture and defeated the (isotropic, box-filter) mipmaps,
+     * so the far ground shimmered. Taking U from the distance also means the
+     * tiling does not change when the profile does. */
+    for (s = 0; s < 2; s++) {
+        const int is_left = s ? 0 : 1;
+        const double ox = is_left ? nux : -nux, oz = is_left ? nuz : -nuz;
+        const double gx = is_left ? fux : -fux, gz = is_left ? fuz : -fuz;
+        const double bnx = is_left ? nlx : nrx, bnz = is_left ? nlz : nrz;
+        const double bfx = is_left ? flx : frx, bfz = is_left ? flz : frz;
+        const double bny = is_left ? nly : nry, bfy = is_left ? fly : fry;
+        TG_GroundProf p;
 
-    /* LEFT skirt: road edge -> outward. Loop order near-in, near-out, far-out,
-     * far-in so the quad is a proper ring. The INNER edge sits at ROAD LEVEL
-     * (nly, not nly-drop) so the terrain meets the asphalt flush -- the old
-     * uniform -drop left the whole skirt 70 units below the road edge, a thin
-     * void/lip between road and grass. Only the OUTER edge drops, giving a gentle
-     * embankment away from the road. Inner and road edge share the same line
-     * (they meet, they do not overlap), so there is no z-fight to avoid. */
-    px[n]=nlx;                py[n]=nly;       pz[n]=nlz;
-    uu[n]=0.0;  vv[n]=(double)si;      n++;
-    px[n]=nlx+nux*wl;         py[n]=nly-odrop; pz[n]=nlz+nuz*wl;
-    uu[n]=u_l;  vv[n]=(double)si;      n++;
-    px[n]=flx+fux*wl;         py[n]=fly-odrop; pz[n]=flz+fuz*wl;
-    uu[n]=u_l;  vv[n]=(double)si+1.0;  n++;
-    px[n]=flx;                py[n]=fly;       pz[n]=flz;
-    uu[n]=0.0;  vv[n]=(double)si+1.0;  n++;
-
-    /* RIGHT skirt: mirrored, outward is -unit. */
-    px[n]=nrx;                py[n]=nry;       pz[n]=nrz;
-    uu[n]=0.0;  vv[n]=(double)si;      n++;
-    px[n]=nrx-nux*wr;         py[n]=nry-odrop; pz[n]=nrz-nuz*wr;
-    uu[n]=u_r;  vv[n]=(double)si;      n++;
-    px[n]=frx-fux*wr;         py[n]=fry-odrop; pz[n]=frz-fuz*wr;
-    uu[n]=u_r;  vv[n]=(double)si+1.0;  n++;
-    px[n]=frx;                py[n]=fry;       pz[n]=frz;
-    uu[n]=0.0;  vv[n]=(double)si+1.0;  n++;
-
-    cx = cy = cz = 0.0;
-    for (i = 0; i < n; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
-    cx /= n; cy /= n; cz /= n;
-    for (i = 0; i < n; i++) {
-        double dx = px[i]-cx, dy = py[i]-cy, dz = pz[i]-cz;
-        double d = sqrt(dx*dx + dy*dy + dz*dz);
-        if (d > radius) radius = d;
+        tg_ground_side(nl, si, is_left, water_side, &p);
+        for (k = 0; k + 1 < p.n; k++) {
+            const double d0 = p.d[k],  d1 = p.d[k + 1];
+            const double y0 = p.dy[k], y1 = p.dy[k + 1];
+            const double u0 = d0 / (double)TD5_TG_SPAN_LENGTH;
+            const double u1 = d1 / (double)TD5_TG_SPAN_LENGTH;
+            px[n]=bnx+ox*d0; py[n]=bny-y0; pz[n]=bnz+oz*d0;
+            uu[n]=u0; vv[n]=(double)si;     n++;
+            px[n]=bnx+ox*d1; py[n]=bny-y1; pz[n]=bnz+oz*d1;
+            uu[n]=u1; vv[n]=(double)si;     n++;
+            px[n]=bfx+gx*d1; py[n]=bfy-y1; pz[n]=bfz+gz*d1;
+            uu[n]=u1; vv[n]=(double)si+1.0; n++;
+            px[n]=bfx+gx*d0; py[n]=bfy-y0; pz[n]=bfz+gz*d0;
+            uu[n]=u0; vv[n]=(double)si+1.0; n++;
+        }
     }
-    if (!(radius > 0.0)) radius = 1.0;
 
-    tg_put_u16(blk, 259);
-    tg_put_u16(blk, 0);                    /* opaque, not a billboard */
-    tg_put_u32(blk, 1);
-    tg_put_u32(blk, (unsigned)n);
-    tg_put_f32(blk, radius);
-    tg_put_f32(blk, cx); tg_put_f32(blk, cy); tg_put_f32(blk, cz);
-    tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
-    tg_put_u32(blk, 0);
-    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE);
-    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE + TD5_TG_CMD_SIZE);
-    tg_put_u32(blk, 0);
-
-    tg_put_u16(blk, 0);                    /* dispatch_type 0 */
-    tg_put_u16(blk, (unsigned)b->ground_page);
-    tg_put_u32(blk, 0);
-    tg_put_u16(blk, 0);                    /* triangle_count */
-    tg_put_u16(blk, 2);                    /* two quads: left + right skirt */
-    tg_put_u32(blk, 0);
-
-    for (i = 0; i < n; i++) {
-        tg_put_f32(blk, px[i]); tg_put_f32(blk, py[i]); tg_put_f32(blk, pz[i]);
-        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
-        tg_put_u32(blk, 0xFFFFFFFFu);
-        tg_put_f32(blk, uu[i]); tg_put_f32(blk, vv[i]);
-        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
-    }
-    return !blk->oom;
+    seg_nq = n / 4;
+    return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
 }
 
 /* GORE / MEDIAN fill for a split-fork span. The main (left) and branch (right)
@@ -3543,8 +3800,188 @@ static int tg_emit_fb_tunnel(const TG_FBHook *h)
     }
     return 1;
 }
-/* Group D -- terrain & water: ledge slopes, longer skirts, hills, snow. */
-static int tg_emit_fb_terrain(const TG_FBHook *h)   { (void)h; return 1; }
+/* Group D -- terrain & water: ledge slopes, longer skirts, hills, snow.
+ * ===================== FAR TERRAIN =====================
+ * The skirt reaches 24000 units (16 span lengths) and then stops dead, so the
+ * background is a thin green band and then sky -- the "grass should be much
+ * longer, with small hills and mountains far away" item.
+ *
+ * The whole design constraint is COST, not looks: this file is written to disk
+ * per race and the model buffer is already ~2.3 MB, so distance has to be bought
+ * with FEW LARGE polygons. Hence:
+ *   - one band mesh per SIDE per GROUP of 4 spans (= one per display-list entry,
+ *     so a band always lives in the entry that covers its own spans and cannot
+ *     be culled independently of them), not one per span;
+ *   - three quads outward per side, spaced geometrically, not a tessellated
+ *     grid: 24000 -> ~52000 -> ~94000 -> reach;
+ *   - the distant ridge is ONE more quad in the SAME mesh, on its own command,
+ *     so a whole side costs 1 mesh / 16 vertices per 4 spans.
+ * Measured cost: +0.5 meshes and +8 vertices per span, ~350 bytes/span.
+ *
+ * Heights come from a smooth function of WORLD POSITION, never of the span
+ * index. Adjacent bands share their corner points exactly (tg_road_edge at
+ * (si,1.0) and (si+1,0.0) are the same point), so sampling by position makes
+ * every seam watertight and the ridge silhouette a continuous polyline rather
+ * than a comb of per-group steps. */
+#define TD5_TG_FAR_GROUP   TD5_TG_SPANS_PER_ENTRY
+#define TD5_TG_FAR_TUCK      2000.0   /* overlap under the skirt's outer edge */
+#define TD5_TG_FAR_SINK        150.0   /* and below it, so the skirt wins the seam */
+#define TD5_TG_FAR_REACH      180000   /* default outward reach, world units */
+#define TD5_TG_RIDGE_BASE      4500.0  /* mean ridge height above the far plain */
+
+/* Default ON -- these are fixes. TERRAIN_FAR=0 restores the short skirt only,
+ * TERRAIN_HILLS=0 keeps the long plain but drops the distant ridge wall. */
+static int tg_terrain_far_enabled(void)
+{
+    return td5_env_flag_on("TD5RE_AUTOTRACK_TERRAIN_FAR");
+}
+
+static int tg_terrain_ridge_enabled(void)
+{
+    return td5_env_flag_on("TD5RE_AUTOTRACK_TERRAIN_HILLS");
+}
+
+/* Smooth low-frequency terrain height at a world point. Two summed products of
+ * sines at ~42000 and ~17000 world units, which at a 1500-unit span length is a
+ * hill every ~28 and ~11 spans -- long enough to read as topology from a car
+ * rather than as noise. Result is in [-amp, +amp]. */
+static double tg_terrain_hill_y(double x, double z, double amp)
+{
+    const double s1 = 1.0 / 42000.0, s2 = 1.0 / 17000.0;
+    return amp * (0.70 * sin(x * s1 + 1.3) * cos(z * s1 - 0.4)
+                + 0.30 * sin(x * s2 - 2.1) * cos(z * s2 + 0.9));
+}
+
+/* Does span si emit its group's band? The FIRST non-tunnel span of the group
+ * does. The hook is not called on tunnel spans at all, so keying on si % GROUP
+ * would silently drop a band wherever a tunnel run happened to cover the
+ * group's first span. */
+static int tg_far_group_owner(int si)
+{
+    const int g0 = (si / TD5_TG_FAR_GROUP) * TD5_TG_FAR_GROUP;
+    int j;
+    for (j = g0; j < si; j++)
+        if (!tg_span_in_tunnel(j)) return 0;
+    return 1;
+}
+
+/* One side's background band: 3 ground quads outward plus the ridge wall. */
+static int tg_emit_far_band(const TG_FBHook *h, int is_left)
+{
+    const TG_NodeList *nl = h->nl;
+    const double reach = (double)td5_env_int("TD5RE_AUTOTRACK_TERRAIN_REACH",
+                                             TD5_TG_FAR_REACH, 30000, 400000);
+    /* Band height envelope: flat at the seam, rolling further out. */
+    static const double k_amp[4] = { 0.0, 700.0, 2200.0, 4200.0 };
+    const int g0 = (h->si / TD5_TG_FAR_GROUP) * TD5_TG_FAR_GROUP;
+    int g1 = g0 + TD5_TG_FAR_GROUP - 1;
+    double X[2][4], Y[2][4], Z[2][4], D[2][4], U[2];
+    double px[16], py[16], pz[16], uu[16], vv[16];
+    int seg_page[2], seg_nq[2];
+    int e, j, n = 0, nseg = 1;
+
+    if (g1 > nl->count - 2) g1 = nl->count - 2;
+    if (g1 < g0) return 1;
+
+    for (e = 0; e < 2; e++) {
+        const int se = e ? g1 : g0;
+        double lx, ly, lz, rx, ry, rz, ux, uz, len, so, base;
+        TG_GroundProf p;
+
+        tg_road_edge(nl, se, e ? 1.0 : 0.0, 0.0, 1.0,
+                     &lx, &ly, &lz, &rx, &ry, &rz);
+        ux = lx - rx; uz = lz - rz;
+        len = sqrt(ux * ux + uz * uz);
+        if (len < 1e-6) { ux = 1.0; uz = 0.0; } else { ux /= len; uz /= len; }
+        if (!is_left) { ux = -ux; uz = -uz; }
+
+        /* Start where the skirt ended, from the SAME profile the skirt used. */
+        tg_ground_side(nl, se, is_left, 0.0, &p);
+        so = p.d[p.n - 1];
+        base = (is_left ? ly : ry) - p.dy[p.n - 1] - TD5_TG_FAR_SINK;
+        U[e] = (double)se + (e ? 1.0 : 0.0);
+
+        /* Geometric spacing: each band is roughly twice the depth of the one
+         * inside it, so the near ground still has detail while three quads
+         * still cover ten times the old reach. */
+        D[e][0] = so - TD5_TG_FAR_TUCK;
+        D[e][1] = so + (reach - so) * 0.18;
+        D[e][2] = so + (reach - so) * 0.45;
+        D[e][3] = reach;
+
+        for (j = 0; j < 4; j++) {
+            const double ex = (is_left ? lx : rx) + ux * D[e][j];
+            const double ez = (is_left ? lz : rz) + uz * D[e][j];
+            X[e][j] = ex;
+            Z[e][j] = ez;
+            Y[e][j] = base + tg_terrain_hill_y(ex, ez, k_amp[j]);
+        }
+    }
+
+    /* Apron quads, same ring order as the skirt (near-in, near-out, far-out,
+     * far-in) so the winding matches geometry that is known to draw. U is the
+     * outward distance in span-lengths, matching the skirt's square tiling. */
+    for (j = 0; j < 3; j++) {
+        px[n]=X[0][j];   py[n]=Y[0][j];   pz[n]=Z[0][j];
+        uu[n]=D[0][j]  /(double)TD5_TG_SPAN_LENGTH; vv[n]=U[0]; n++;
+        px[n]=X[0][j+1]; py[n]=Y[0][j+1]; pz[n]=Z[0][j+1];
+        uu[n]=D[0][j+1]/(double)TD5_TG_SPAN_LENGTH; vv[n]=U[0]; n++;
+        px[n]=X[1][j+1]; py[n]=Y[1][j+1]; pz[n]=Z[1][j+1];
+        uu[n]=D[1][j+1]/(double)TD5_TG_SPAN_LENGTH; vv[n]=U[1]; n++;
+        px[n]=X[1][j];   py[n]=Y[1][j];   pz[n]=Z[1][j];
+        uu[n]=D[1][j]  /(double)TD5_TG_SPAN_LENGTH; vv[n]=U[1]; n++;
+    }
+    seg_page[0] = tg_ground_page_for_span(h->si, h->b);
+    seg_nq[0]   = 3;
+
+    if (tg_terrain_ridge_enabled()) {
+        /* Ridge: a wall standing on the outermost edge, its top sampled from the
+         * same hill function so consecutive groups share a crest height and the
+         * skyline is one continuous ridge line. Snow biomes get a white flank
+         * for the same reason the skirt does. */
+        double t0 = TD5_TG_RIDGE_BASE + tg_terrain_hill_y(X[0][3], Z[0][3], 3600.0);
+        double t1 = TD5_TG_RIDGE_BASE + tg_terrain_hill_y(X[1][3], Z[1][3], 3600.0);
+        if (t0 < 1200.0) t0 = 1200.0;
+        if (t1 < 1200.0) t1 = 1200.0;
+        /* near-bottom, far-bottom, far-top, near-top; v = 1 at the base, so the
+         * page's top rows (v = 0) land on the crest. */
+        px[n]=X[0][3]; py[n]=Y[0][3];      pz[n]=Z[0][3]; uu[n]=U[0]; vv[n]=1.0; n++;
+        px[n]=X[1][3]; py[n]=Y[1][3];      pz[n]=Z[1][3]; uu[n]=U[1]; vv[n]=1.0; n++;
+        px[n]=X[1][3]; py[n]=Y[1][3] + t1; pz[n]=Z[1][3]; uu[n]=U[1]; vv[n]=0.0; n++;
+        px[n]=X[0][3]; py[n]=Y[0][3] + t0; pz[n]=Z[0][3]; uu[n]=U[0]; vv[n]=0.0; n++;
+        seg_page[1] = tg_biome_is_snow(h->b) ? tg_ground_page_for_span(h->si, h->b)
+                                             : TD5_TG_PAGE_HILL;
+        seg_nq[1]   = 1;
+        nseg = 2;
+    }
+
+    h->moff[(*h->nmesh)] = h->blk->len;
+    if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, seg_page, seg_nq, nseg))
+        return 0;
+    (*h->nmesh)++;
+    return 1;
+}
+
+static int tg_emit_fb_terrain(const TG_FBHook *h)
+{
+    double wsd;
+    int s;
+
+    if (!tg_terrain_far_enabled()) return 1;
+    if (!tg_far_group_owner(h->si)) return 1;
+
+    /* Seaward side is the sea's, not the plain's -- the water plane already
+     * reaches 50000 out there and a grass band would float over it. */
+    wsd = h->b->water ? tg_water_side(h->si) : 0.0;
+
+    for (s = 0; s < 2; s++) {
+        const int is_left = s ? 1 : 0;
+        if ((wsd > 0.0 && is_left) || (wsd < 0.0 && !is_left)) continue;
+        if (*h->nmesh + 2 >= h->maxmesh) break;
+        if (!tg_emit_far_band(h, is_left)) return 0;
+    }
+    return 1;
+}
 /* ===================== [FB] START / FINISH GANTRY =====================
  * Reported: "add start banner" and "there should be a finish banner".
  *
@@ -4582,11 +5019,67 @@ static void tg_emit_texture_page_fb_tunnel(TG_Buf *out)
     }
 }
 
-/* Terrain: 0 = SNOW ground, 1 = distant HILL / mountain flank. */
+/* Terrain: 0 = SNOW ground, 1 = distant HILL / mountain flank.
+ *
+ * Both follow the rule the GROUND page comment sets out: NO structure and no
+ * axis-aligned lines, because these pages are stretched over sloping,
+ * undulating terrain where any grid shears into a rippled pattern. All the
+ * variation is low-frequency patches plus per-texel grain.
+ *
+ * SNOW is deliberately not pure white: a flat 255 sheet loses all shape at
+ * distance and every mip level collapses to the same colour, so the palette runs
+ * cool blue-shadow to sunlit white and a coarse patch mask picks out drifts.
+ *
+ * HILL is mapped v=0 at the CREST (tg_emit_far_band winds the ridge with v=1 at
+ * the base), so the page's TOP rows are the snowline and the rest is rock. */
 static void tg_emit_texture_page_fb_terrain(TG_Buf *out, int which)
 {
-    if (which) tg_emit_texture_page_flat(out, 0, 96, 104, 92, 30, 0x4111u);
-    else tg_emit_texture_page_flat(out, 0, 236, 240, 244, 26, 0x4222u);
+    unsigned int rng = which ? 0x4111BEEFu : 0x4222FEEDu;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR. SNOW: 0..5 blue-grey shadow, 6..15 up to near-white sunlit crust.
+     * HILL: 0..9 rock (cool grey-brown), 10..15 pale snowline. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        if (!which) {
+            if (i < 6) { b = 208 + i * 6; g = 198 + i * 7; r = 188 + i * 8; }
+            else       { b = 244 + (i - 6); g = 240 + (i - 6); r = 236 + (i - 6) * 2; }
+        } else {
+            if (i < 10) { b = 92 + i * 4; g = 96 + i * 4; r = 88 + i * 5; }
+            else        { b = 214 + (i - 10) * 8; g = 212 + (i - 10) * 8;
+                          r = 208 + (i - 10) * 9; }
+        }
+        if (b > 255) b = 255;
+        if (g > 255) g = 255;
+        if (r > 255) r = 255;
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;
+        /* Coarse 8x8-texel patch mask: drifts on snow, shadowed faces on rock. */
+        const unsigned int patch = (unsigned)((x >> 3) + (y >> 3) * 11)
+                                 * 2654435761u;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if (!which) {
+            idx = 6 + (int)((rng >> 16) % 10);                /* sunlit crust */
+            if ((patch >> 30) == 0) idx = (int)((rng >> 18) % 6);  /* drift shade */
+        } else {
+            /* Snowline over the top ~14 rows, ragged so it is not a hard band. */
+            const int line = 10 + (int)((patch >> 29) % 5);
+            if (y < line) idx = 10 + (int)((rng >> 16) % 6);
+            else          idx = (int)((rng >> 16) % 10);
+        }
+        tg_put_u8(out, (unsigned)idx);
+    }
 }
 
 /* Start/finish gate banner: a black-and-white chequer band across the middle of
