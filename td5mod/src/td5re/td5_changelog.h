@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 25" },
+    { CL_ITEM,    "Auto-track BRIDGES rebuilt as decks over a river: side" },
+    { CL_ITEM,    "  parapets, piers, banks that drop to water, clear deck" },
+    { CL_ITEM,    "  (TD5RE_AUTOTRACK_BRIDGES=1, opt-in)." },
     { CL_ITEM,    "Auto-track COAST biome now has the SEA alongside: a" },
     { CL_ITEM,    "  blue water plane past a palm-lined beach." },
     { CL_ITEM,    "Auto-track roadside PROPS: spectators line city streets," },

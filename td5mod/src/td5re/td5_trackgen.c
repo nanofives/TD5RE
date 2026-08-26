@@ -577,6 +577,7 @@ static int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
  * delete every bridge again. */
 #define TD5_TG_BRIDGE_RUN     24       /* spans per deliberate bridge */
 #define TD5_TG_BRIDGE_HEIGHT  1300.0   /* crown lift; bounded by max_grade */
+#define TD5_TG_BRIDGE_CHASM   2500.0   /* how far the ground/river drops below */
 
 static int tg_bridges_enabled(void)
 {
@@ -2142,6 +2143,7 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
     int tv;
 
     if (si <= TD5_TG_GRID_SPAN) return 1;      /* keep the grid area clear */
+    if (tg_span_in_bridge_run(si)) return 1;   /* deck is clear -- see the river */
     b = &k_biomes[tg_biome_for_span(si)];
 
     if (!b->billboard || b->tree_n <= 0)
@@ -2209,6 +2211,8 @@ static int tg_emit_props(const TG_NodeList *nl, int si, const TG_Biome *b,
 {
     unsigned int h = (unsigned)si * 0x9E3779B9u;   /* independent of the tree hash */
     double side;
+
+    if (tg_span_in_bridge_run(si)) return 1;   /* nothing on the deck but rails */
 
     /* People: spectators on the sidewalk, sometimes a pair. */
     if (b->prop_people > 0 && (int)(h >> 28) <= b->prop_people && *pn < cap) {
@@ -2408,9 +2412,16 @@ static double tg_local_ground_y(const TG_NodeList *nl, int si)
     return (nl->v[a].y + nl->v[b].y) * 0.5;
 }
 
-/* Bridge: where the road humps above the local terrain line, put a deck slab
- * just under it and a pier down to that line. Purely cosmetic -- the driving
- * surface is still the STRIP. */
+/* River level under a bridge deck at span si (the banks drop to here). */
+static double tg_bridge_water_y(const TG_NodeList *nl, int si)
+{
+    return nl->v[si].y - TD5_TG_BRIDGE_CHASM - 300.0;
+}
+
+/* Bridge: a deck over a river. The road STRIP is the deck; here we add the
+ * parapets (side walls) that read as a bridge from the car, plus piers dropping
+ * to the water. The ground under a bridge run has already plunged to the river
+ * (tg_emit_ground) and the water plane is emitted separately. */
 static int tg_emit_bridge(const TG_NodeList *nl, int si,
                           TG_Buf *blk, int *added)
 {
@@ -2418,31 +2429,63 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
     const double ref  = tg_local_ground_y(nl, si);
     const double lift = n->y - ref;
     const int deliberate = tg_span_in_bridge_run(si);
+    int s;
 
-    /* A PLACED run always gets its deck -- the range decides, so a later grade
-     * or amplitude change cannot silently delete every bridge the way keying
-     * purely off lift did. The organic lift test is kept as a second route so
-     * a genuinely convex crest still gets a deck if one ever occurs. */
     if (!deliberate && lift < TD5_TG_BRIDGE_MIN_LIFT) return 1;
 
-    if (!tg_emit_box_mesh(blk, n->x, n->y - 300.0, n->z,
-                          n->width * 0.5 + 250.0, 200.0, 780.0,
-                          n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0))
-        return 0;
-    (*added)++;
-
-    if ((si & 3) == 0) {                            /* a pier every 4th span */
-        /* Floor the height: at the very ends of a placed run the hump is still
-         * near zero, and a pier a few units tall is invisible clutter that
-         * still costs a mesh. */
-        double pier_h = lift * 0.5;
-        if (pier_h < 150.0) pier_h = 150.0;
-        if (!tg_emit_box_mesh(blk, n->x, ref + pier_h, n->z,
-                              700.0, pier_h, 700.0,
+    /* Parapets: a low wall along each deck edge. */
+    for (s = 0; s < 2; s++) {
+        double side = s ? 1.0 : -1.0;
+        double lx = n->tz * side, lz = -n->tx * side;
+        double ex = n->x + lx * (n->width * 0.5 + 120.0);
+        double ez = n->z + lz * (n->width * 0.5 + 120.0);
+        if (!tg_emit_box_mesh(blk, ex, n->y + 180.0, ez,
+                              90.0, 180.0, 780.0,
                               n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0))
             return 0;
         (*added)++;
     }
+
+    /* Pier every 4th span, dropping from the deck to the river. */
+    if ((si & 3) == 0) {
+        double wy = deliberate ? tg_bridge_water_y(nl, si) : ref;
+        double h  = (n->y - wy) * 0.5;
+        if (h < 150.0) h = 150.0;
+        if (!tg_emit_box_mesh(blk, n->x, n->y - h, n->z,
+                              450.0, h, 450.0,
+                              n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0))
+            return 0;
+        (*added)++;
+    }
+    return 1;
+}
+
+/* The river surface spanning the full width under a bridge run, recording its
+ * own mesh offset. */
+static int tg_emit_bridge_water(const TG_NodeList *nl, int si,
+                                TG_Buf *m, size_t *moff, int *pn)
+{
+    double px[64], py[64], pz[64], uu[64], vv[64];
+    const TG_Node *n0 = &nl->v[si];
+    const TG_Node *n1;
+    double lx, lz, wy, ax, az, Ax, Az;
+    const double BW = 32000.0;              /* half-width of the river channel */
+    int n = 0, seg_page = TD5_TG_PAGE_WATER, seg_nq;
+
+    if (si + 1 >= nl->count) return 1;
+    n1 = &nl->v[si + 1];
+    lx = n0->tz; lz = -n0->tx;              /* left unit */
+    wy = tg_bridge_water_y(nl, si) + 100.0; /* just under the banks */
+    Ax = n0->x - lx * BW; Az = n0->z - lz * BW;
+    ax = n1->x - n0->x;  az = n1->z - n0->z;
+    tg_facade_push_grid(Ax, wy, Az, ax, 0.0, az, lx * 2.0 * BW, 0.0, lz * 2.0 * BW,
+                        2, 4, 0, 4, px, py, pz, uu, vv, &n);
+    if (n <= 0) return 1;
+    seg_nq = n / 4;
+    moff[*pn] = m->len;
+    if (!tg_write_quad_mesh(m, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1))
+        return 0;
+    (*pn)++;
     return 1;
 }
 
@@ -2479,6 +2522,8 @@ static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
                                          : TD5_TG_GROUND_WIDTH;
     const double wr = (water_side < 0.0) ? (double)TD5_TG_WATER_BEACH
                                          : TD5_TG_GROUND_WIDTH;
+    /* Over a bridge run the banks plunge to the river below the deck. */
+    const double odrop = tg_span_in_bridge_run(si) ? TD5_TG_BRIDGE_CHASM : drop;
     double nlx, nly, nlz, nrx, nry, nrz;   /* near left / right road edge */
     double flx, fly, flz, frx, fry, frz;   /* far  left / right road edge */
     double nux, nuz, fux, fuz;             /* outward lateral units */
@@ -2514,23 +2559,23 @@ static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
      * void/lip between road and grass. Only the OUTER edge drops, giving a gentle
      * embankment away from the road. Inner and road edge share the same line
      * (they meet, they do not overlap), so there is no z-fight to avoid. */
-    px[n]=nlx;                py[n]=nly;      pz[n]=nlz;
+    px[n]=nlx;                py[n]=nly;       pz[n]=nlz;
     uu[n]=0.0;  vv[n]=(double)si;      n++;
-    px[n]=nlx+nux*wl;         py[n]=nly-drop; pz[n]=nlz+nuz*wl;
+    px[n]=nlx+nux*wl;         py[n]=nly-odrop; pz[n]=nlz+nuz*wl;
     uu[n]=u_l;  vv[n]=(double)si;      n++;
-    px[n]=flx+fux*wl;         py[n]=fly-drop; pz[n]=flz+fuz*wl;
+    px[n]=flx+fux*wl;         py[n]=fly-odrop; pz[n]=flz+fuz*wl;
     uu[n]=u_l;  vv[n]=(double)si+1.0;  n++;
-    px[n]=flx;                py[n]=fly;      pz[n]=flz;
+    px[n]=flx;                py[n]=fly;       pz[n]=flz;
     uu[n]=0.0;  vv[n]=(double)si+1.0;  n++;
 
     /* RIGHT skirt: mirrored, outward is -unit. */
-    px[n]=nrx;                py[n]=nry;      pz[n]=nrz;
+    px[n]=nrx;                py[n]=nry;       pz[n]=nrz;
     uu[n]=0.0;  vv[n]=(double)si;      n++;
-    px[n]=nrx-nux*wr;         py[n]=nry-drop; pz[n]=nrz-nuz*wr;
+    px[n]=nrx-nux*wr;         py[n]=nry-odrop; pz[n]=nrz-nuz*wr;
     uu[n]=u_r;  vv[n]=(double)si;      n++;
-    px[n]=frx-fux*wr;         py[n]=fry-drop; pz[n]=frz-fuz*wr;
+    px[n]=frx-fux*wr;         py[n]=fry-odrop; pz[n]=frz-fuz*wr;
     uu[n]=u_r;  vv[n]=(double)si+1.0;  n++;
-    px[n]=frx;                py[n]=fry;      pz[n]=frz;
+    px[n]=frx;                py[n]=fry;       pz[n]=frz;
     uu[n]=0.0;  vv[n]=(double)si+1.0;  n++;
 
     cx = cy = cz = 0.0;
@@ -2965,6 +3010,11 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 for (k = 0; k < nb; k++)
                     moff[nmesh++] = b1 + (size_t)k *
                                     ((meshes.len - b1) / (size_t)nb);
+                /* River under a bridge run. */
+                if (tg_span_in_bridge_run(si) &&
+                    !tg_emit_bridge_water(nl, si, &meshes, moff, &nmesh)) {
+                    ok = 0; break;
+                }
                 /* Prop billboards: variable count/size, each records its own. */
                 if (!tg_emit_props(nl, si, b, &meshes, moff, &nmesh,
                                    TG_MAX_MESHES_PER_ENTRY)) { ok = 0; break; }
