@@ -104,7 +104,9 @@
 /* Props: people/statue/animal (alpha-keyed) + streetlamp glow (additive). */
 #define TD5_TG_PROP_COUNT      7
 #define TD5_TG_PAGE_PROP   (TD5_TG_PAGE_TREE_EXTRA + TD5_TG_TREE_VARIANTS - 1)
-#define TD5_TG_PAGE_COUNT  (TD5_TG_PAGE_PROP + TD5_TG_PROP_COUNT)
+/* Water: one flat blue page for the sea/river plane beside coastal roads. */
+#define TD5_TG_PAGE_WATER  (TD5_TG_PAGE_PROP + TD5_TG_PROP_COUNT)
+#define TD5_TG_PAGE_COUNT  (TD5_TG_PAGE_WATER + 1)
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
@@ -1958,30 +1960,31 @@ typedef struct {
      * lamp = 1 for streetlamp glows; statue/animal = a k_prop_pages index or
      * -1. Props are emitted for every biome, additional to trees/facades. */
     int    prop_people, prop_lamp, prop_statue, prop_animal;
+    int    water;        /* 1 = a sea plane on the seaward side of the run */
 } TG_Biome;
 
 static const TG_Biome k_biomes[] = {
     /* CITY: ~8.4x11.5 wu cells, ~3 floors, on the curb, big sparse towers. */
     { "CITY",       9, 2150, 2950, 2, 3, 6000, 350, {0}, 0,
-      TD5_TG_PAGE_WALL,   3, 0, TD5_TG_PAGE_GROUND,   6, 1, PP_MONUMENT, -1 },
+      TD5_TG_PAGE_WALL,   3, 0, TD5_TG_PAGE_GROUND,   6, 1, PP_MONUMENT, -1, 0 },
     /* FIELDS: sparse deciduous on an open horizon; grazing sheep. */
     { "FIELDS",     2, 0,0,0,0,0,0, {2, 0},       2,
-      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_SHEEP },
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_SHEEP, 0 },
     /* FOREST: dense mixed deciduous crowding the verge; deer. */
     { "FOREST",    11, 0,0,0,0,0,0, {0, 1, 2},    3,
-      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_DEER },
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_DEER, 0 },
     /* INDUSTRIAL: wider squat sheds (~10 wu cells), 1-2 floors, deeper. */
     { "INDUSTRIAL", 6, 2560, 2300, 1, 2, 8000, 600, {0}, 0,
-      TD5_TG_PAGE_WALL,  63, 0, TD5_TG_PAGE_GROUND,   3, 1, -1, -1 },
+      TD5_TG_PAGE_WALL,  63, 0, TD5_TG_PAGE_GROUND,   3, 1, -1, -1, 0 },
     /* ALPINE: conifers + snow conifers; deer. */
     { "ALPINE",     8, 0,0,0,0,0,0, {3, 4},       2,
-      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_DEER },
-    /* COAST: palms; beach crowds + promenade lamps. */
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_DEER, 0 },
+    /* COAST: palms; beach crowds + promenade lamps; the sea alongside. */
     { "COAST",      5, 0,0,0,0,0,0, {5, 6},       2,
-      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   6, 1, -1, -1 },
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   6, 1, -1, -1, 1 },
     /* ORIENTAL: manicured topiary + weeping willow; guardian lions. */
     { "ORIENTAL",   9, 0,0,0,0,0,0, {7, 8, 9},    3,
-      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   4, 0, PP_LION, -1 }
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   4, 0, PP_LION, -1, 0 }
 };
 #define TD5_TG_BIOME_COUNT 7
 #define TD5_TG_BIOME_RUN   150
@@ -2241,6 +2244,67 @@ static int tg_emit_props(const TG_NodeList *nl, int si, const TG_Biome *b,
     return 1;
 }
 
+/* ===================== WATER =====================
+ * A flat sea/river plane on the SEAWARD side of a coastal run: it starts past a
+ * beach strip (so palms on the verge stand on the sand, not in the water) and
+ * runs far out, a bit below the road. Shipped coastal tracks (level012 sea,
+ * level021 coast) do exactly this -- a big flat blue mesh grid below road level.
+ * Raw = world*256. */
+#define TD5_TG_WATER_DROP    1200    /* how far below the road the surface sits  */
+#define TD5_TG_WATER_BEACH   2400    /* gap from the road edge to the shoreline  */
+#define TD5_TG_WATER_EXTENT  50000   /* how far out to sea the plane reaches     */
+#define TD5_TG_WATER_ROWS    6       /* tiles seaward (page repeats per cell)    */
+
+/* Which side of a coastal run the sea is on -- fixed per biome-run so the coast
+ * does not flip sides mid-stretch. */
+static double tg_water_side(int si)
+{
+    unsigned int h = (unsigned)(si / TD5_TG_BIOME_RUN) * 2246822519u;
+    return (h & 1) ? 1.0 : -1.0;
+}
+
+/* Emit the sea plane beside span si on `side`, recording its mesh offset. */
+static int tg_emit_water(const TG_NodeList *nl, int si, double side,
+                         TG_Buf *m, size_t *moff, int *pn)
+{
+    double px[TD5_TG_WATER_ROWS * 2 * 4], py[TD5_TG_WATER_ROWS * 2 * 4];
+    double pz[TD5_TG_WATER_ROWS * 2 * 4], uu[TD5_TG_WATER_ROWS * 2 * 4];
+    double vv[TD5_TG_WATER_ROWS * 2 * 4];
+    const TG_Node *n0 = &nl->v[si];
+    const TG_Node *n1;
+    double lx0, lz0, lx1, lz1, e0, e1, ax, ay, az, ux, uz, wy0;
+    double ax0, az0, bx0, bz0;
+    int n = 0, seg_page = TD5_TG_PAGE_WATER, seg_nq;
+
+    if (si + 1 >= nl->count) return 1;
+    if (tg_side_blocked(si, side)) return 1;
+    n1 = &nl->v[si + 1];
+
+    lx0 = n0->tz * side; lz0 = -n0->tx * side;
+    lx1 = n1->tz * side; lz1 = -n1->tx * side;
+    e0 = n0->width * 0.5 + (double)TD5_TG_WATER_BEACH;
+    e1 = n1->width * 0.5 + (double)TD5_TG_WATER_BEACH;
+    wy0 = n0->y - (double)TD5_TG_WATER_DROP;
+
+    /* near/far shoreline points (flat surface: both at wy0). */
+    ax0 = n0->x + lx0 * e0; az0 = n0->z + lz0 * e0;
+    bx0 = n1->x + lx1 * e1; bz0 = n1->z + lz1 * e1;
+    ax = bx0 - ax0; ay = 0.0; az = bz0 - az0;        /* along the shore */
+    ux = lx0 * (double)TD5_TG_WATER_EXTENT;           /* out to sea */
+    uz = lz0 * (double)TD5_TG_WATER_EXTENT;
+
+    tg_facade_push_grid(ax0, wy0, az0, ax, ay, az, ux, 0.0, uz,
+                        2, TD5_TG_WATER_ROWS, 0, TD5_TG_WATER_ROWS,
+                        px, py, pz, uu, vv, &n);
+    if (n <= 0) return 1;
+    seg_nq = n / 4;
+    moff[*pn] = m->len;
+    if (!tg_write_quad_mesh(m, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1))
+        return 0;
+    (*pn)++;
+    return 1;
+}
+
 /* Tunnels come in runs so a whole stretch is enclosed, not isolated spans. */
 #define TD5_TG_TUNNEL_RUN  20
 
@@ -2404,10 +2468,17 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
  * for four spans, so on bends its straight edge cut visibly across the verge
  * and slab-to-slab joins showed.
  */
-static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk)
+static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
+                          double water_side)
 {
     const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
     const double drop = TD5_TG_GROUND_DROP;
+    /* On a coast, the seaward skirt stops at the beach so the sea shows beyond
+     * it (water_side +1 = LEFT skirt, -1 = RIGHT). */
+    const double wl = (water_side > 0.0) ? (double)TD5_TG_WATER_BEACH
+                                         : TD5_TG_GROUND_WIDTH;
+    const double wr = (water_side < 0.0) ? (double)TD5_TG_WATER_BEACH
+                                         : TD5_TG_GROUND_WIDTH;
     double nlx, nly, nlz, nrx, nry, nrz;   /* near left / right road edge */
     double flx, fly, flz, frx, fry, frz;   /* far  left / right road edge */
     double nux, nuz, fux, fuz;             /* outward lateral units */
@@ -2433,7 +2504,8 @@ static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk)
      * both smeared the texture and defeated the (isotropic, box-filter) mipmaps,
      * so the far ground shimmered/rippled. Square tiles let the mips minify
      * cleanly and the ground reads flat to the horizon. */
-    const double u_out = TD5_TG_GROUND_WIDTH / (double)TD5_TG_SPAN_LENGTH;
+    const double u_l = wl / (double)TD5_TG_SPAN_LENGTH;
+    const double u_r = wr / (double)TD5_TG_SPAN_LENGTH;
 
     /* LEFT skirt: road edge -> outward. Loop order near-in, near-out, far-out,
      * far-in so the quad is a proper ring. The INNER edge sits at ROAD LEVEL
@@ -2442,24 +2514,24 @@ static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk)
      * void/lip between road and grass. Only the OUTER edge drops, giving a gentle
      * embankment away from the road. Inner and road edge share the same line
      * (they meet, they do not overlap), so there is no z-fight to avoid. */
-    px[n]=nlx;                        py[n]=nly;      pz[n]=nlz;
-    uu[n]=0.0;   vv[n]=(double)si;      n++;
-    px[n]=nlx+nux*TD5_TG_GROUND_WIDTH; py[n]=nly-drop; pz[n]=nlz+nuz*TD5_TG_GROUND_WIDTH;
-    uu[n]=u_out; vv[n]=(double)si;      n++;
-    px[n]=flx+fux*TD5_TG_GROUND_WIDTH; py[n]=fly-drop; pz[n]=flz+fuz*TD5_TG_GROUND_WIDTH;
-    uu[n]=u_out; vv[n]=(double)si+1.0;  n++;
-    px[n]=flx;                        py[n]=fly;      pz[n]=flz;
-    uu[n]=0.0;   vv[n]=(double)si+1.0;  n++;
+    px[n]=nlx;                py[n]=nly;      pz[n]=nlz;
+    uu[n]=0.0;  vv[n]=(double)si;      n++;
+    px[n]=nlx+nux*wl;         py[n]=nly-drop; pz[n]=nlz+nuz*wl;
+    uu[n]=u_l;  vv[n]=(double)si;      n++;
+    px[n]=flx+fux*wl;         py[n]=fly-drop; pz[n]=flz+fuz*wl;
+    uu[n]=u_l;  vv[n]=(double)si+1.0;  n++;
+    px[n]=flx;                py[n]=fly;      pz[n]=flz;
+    uu[n]=0.0;  vv[n]=(double)si+1.0;  n++;
 
     /* RIGHT skirt: mirrored, outward is -unit. */
-    px[n]=nrx;                        py[n]=nry;      pz[n]=nrz;
-    uu[n]=0.0;   vv[n]=(double)si;      n++;
-    px[n]=nrx-nux*TD5_TG_GROUND_WIDTH; py[n]=nry-drop; pz[n]=nrz-nuz*TD5_TG_GROUND_WIDTH;
-    uu[n]=u_out; vv[n]=(double)si;      n++;
-    px[n]=frx-fux*TD5_TG_GROUND_WIDTH; py[n]=fry-drop; pz[n]=frz-fuz*TD5_TG_GROUND_WIDTH;
-    uu[n]=u_out; vv[n]=(double)si+1.0;  n++;
-    px[n]=frx;                        py[n]=fry;      pz[n]=frz;
-    uu[n]=0.0;   vv[n]=(double)si+1.0;  n++;
+    px[n]=nrx;                py[n]=nry;      pz[n]=nrz;
+    uu[n]=0.0;  vv[n]=(double)si;      n++;
+    px[n]=nrx-nux*wr;         py[n]=nry-drop; pz[n]=nrz-nuz*wr;
+    uu[n]=u_r;  vv[n]=(double)si;      n++;
+    px[n]=frx-fux*wr;         py[n]=fry-drop; pz[n]=frz-fuz*wr;
+    uu[n]=u_r;  vv[n]=(double)si+1.0;  n++;
+    px[n]=frx;                py[n]=fry;      pz[n]=frz;
+    uu[n]=0.0;  vv[n]=(double)si+1.0;  n++;
 
     cx = cy = cz = 0.0;
     for (i = 0; i < n; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
@@ -2823,7 +2895,11 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
             }
 
             moff[nmesh++] = meshes.len;
-            if (!tg_emit_ground(nl, si, &meshes)) { ok = 0; break; }
+            {
+                const TG_Biome *gb = &k_biomes[tg_biome_for_span(si)];
+                double wsd = gb->water ? tg_water_side(si) : 0.0;
+                if (!tg_emit_ground(nl, si, &meshes, wsd)) { ok = 0; break; }
+            }
             moff[nmesh++] = meshes.len;
             /* MAIN carriageway is narrowed to the LEFT half over the branch
              * region [F+1 .. F+LEN]; elsewhere (incl. the full-width fork span F
@@ -2892,6 +2968,10 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 /* Prop billboards: variable count/size, each records its own. */
                 if (!tg_emit_props(nl, si, b, &meshes, moff, &nmesh,
                                    TG_MAX_MESHES_PER_ENTRY)) { ok = 0; break; }
+                /* Sea plane on coastal runs. */
+                if (b->water &&
+                    !tg_emit_water(nl, si, tg_water_side(si), &meshes,
+                                   moff, &nmesh)) { ok = 0; break; }
             }
         }
 
@@ -3260,6 +3340,41 @@ static void tg_emit_texture_page_prop(TG_Buf *out, int kind)
     }
 }
 
+/* Water page: deep blue with lighter ripple crests and the odd foam fleck. */
+static void tg_emit_texture_page_water(TG_Buf *out)
+{
+    unsigned int rng = 0x009E12D3u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR: 0..11 blue deepening, 12..15 foam highlight. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        if (i < 12) { b = 150 + i * 8; g = 90 + i * 9;  r = 40 + i * 6; }
+        else        { b = 235;         g = 210 + (i-12) * 10; r = 200 + (i-12) * 12; }
+        if (b > 255) b = 255;
+        if (g > 255) g = 255;
+        if (r > 255) r = 255;
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        int y = i / TD5_TG_TEX_DIM;
+        int band, idx;
+        rng = rng * 1103515245u + 12345u;
+        band = (y + (int)((rng >> 20) % 3)) % 8;
+        if (band < 2) idx = 8 + (int)((rng >> 16) % 4);      /* ripple crest */
+        else          idx = (int)((rng >> 16) % 8);          /* blue */
+        if (((rng >> 24) & 31) == 0) idx = 12 + (int)((rng >> 16) % 4); /* foam */
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 /* Page 4: crash barrier -- galvanised steel with a dark shadow gutter along the
  * bottom and a rhythm of darker post marks.
  *
@@ -3428,6 +3543,7 @@ static int tg_emit_textures(TG_Buf *out)
             tg_emit_texture_page_prop(&pages[tg_prop_slot(v)], k_prop_pages[v].kind);
     }
     tg_emit_texture_page_rail(&pages[TD5_TG_PAGE_RAIL]);
+    tg_emit_texture_page_water(&pages[TD5_TG_PAGE_WATER]);
     for (i = 0; i < count; i++) {
         if (pages[i].oom) {
             for (i = 0; i < count; i++) tg_buf_free(&pages[i]);

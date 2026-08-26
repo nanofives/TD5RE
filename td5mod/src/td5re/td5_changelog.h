@@ -33,6 +33,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 25" },
+    { CL_ITEM,    "Auto-track COAST biome now has the SEA alongside: a" },
+    { CL_ITEM,    "  blue water plane past a palm-lined beach." },
     { CL_ITEM,    "Auto-track roadside PROPS: spectators line city streets," },
     { CL_ITEM,    "  sheep graze fields, deer in woods, lions guard the" },
     { CL_ITEM,    "  oriental route, streetlamps + monuments in town." },
