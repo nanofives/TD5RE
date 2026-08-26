@@ -1795,7 +1795,11 @@ static int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz,
  * The facade path below imitates the shipped look: a grid of whole-page cells
  * laid flat along the road into a continuous street wall, so the texture is what
  * sizes the building (one page image per cell) and nothing is ever cut. */
-#define TD5_TG_FACADE_MAXQUAD 160  /* both sides: front grid + two deep returns */
+/* Worst case, both sides: front grid (4 cols x 8 floors) + two run-end corner
+ * prisms per side (5*floors + 2 quads each, see tg_facade_push_cap). 232 at the
+ * tallest tower run; 256 leaves headroom. The arrays are stack doubles, so this
+ * is ~40 KB of frame -- fine, but do not grow it casually. */
+#define TD5_TG_FACADE_MAXQUAD 256
 
 /* Write ONE opaque quad-list mesh in the 0x38 format, split into up to `nseg`
  * COMMANDS -- each command samples its own page over its own run of quads, in
@@ -1889,19 +1893,97 @@ static void tg_facade_push_grid(double bx, double by, double bz,
     *pn = n;
 }
 
-/* Is a facade wall present at span si on this side? A deterministic run/gap
- * pattern: spans group into periods; a per-period hash carves a leading GAP
- * (a side street) and the rest of the period is a continuous built RUN. The two
- * sides break at different spans (the +777 offset) so a street is never gapped
- * on both sides at once. */
-#define TD5_TG_FACADE_PERIOD 13
+/* Is a facade wall present at span si on this side? Spans group into
+ * SUPERBLOCKS, and each superblock carries ONE side street whose START and
+ * WIDTH both come from the superblock hash.
+ *
+ * The first cut divided a fixed 13-span period into "leading gap, then run",
+ * which put a gap boundary on every 13-span beat: the gap WIDTH varied but its
+ * position did not, so the street read as a metronome. Varying the start as
+ * well, and letting runs cross superblock boundaries (a run that ends one
+ * superblock joins the run that starts the next), gives gaps of 3..8 spans at
+ * moving positions and run lengths anywhere from ~4 to ~30 spans.
+ *
+ * The two sides break at different spans (the +777 offset) so a street is never
+ * gapped on both sides at once. */
+#define TD5_TG_FACADE_PERIOD 22
+/* Spans from the start line that are forced to a solid frontage -- see below. */
+#define TD5_TG_FACADE_START_RUN 60
+
+/* Side street of superblock `block`: phase where the gap opens and how wide. */
+static void tg_facade_gap(unsigned int block, unsigned int *start,
+                          unsigned int *len)
+{
+    const unsigned int h = block * 2654435761u;
+    *start = 2u + ((h >> 27) % 11u);        /* 2..12 spans of run first  */
+    *len   = 3u + ((h >> 23) % 6u);         /* 3..8 spans of side street */
+}
+
 static int tg_facade_built(int si, int left)
+{
+    unsigned int s, block, phase, gs, gl;
+
+    /* Off the near end of the track there is nothing, so span 0 always gets a
+     * corner return rather than a wall that starts as a bare edge. */
+    if (si <= 0) return 0;
+    /* "Start at the very beginnings with buildings": the opening stretch is
+     * FORCED built on both sides. Otherwise the run/gap hash decides it, and
+     * on most seeds it opens a gap right where the grid sits -- the start line
+     * came up in bare ground even though span 0 is always the CITY biome. */
+    if (si < TD5_TG_FACADE_START_RUN &&
+        td5_env_flag_on("TD5RE_AUTOTRACK_START_CITY"))
+        return 1;
+
+    s     = (unsigned)si + (left ? 777u : 0u);
+    block = s / TD5_TG_FACADE_PERIOD;
+    phase = s % TD5_TG_FACADE_PERIOD;
+    tg_facade_gap(block, &gs, &gl);
+    return (int)(phase < gs || phase >= gs + gl);
+}
+
+/* Hash identifying the RUN span si belongs to on this side. A superblock now
+ * holds up to TWO runs (before and after its side street), so keying pages and
+ * floor counts on the superblock alone would give one texture and one height to
+ * two buildings that are visibly separated by a street. */
+static unsigned int tg_facade_run_id(int si, int left)
 {
     unsigned int s     = (unsigned)si + (left ? 777u : 0u);
     unsigned int block = s / TD5_TG_FACADE_PERIOD;
     unsigned int phase = s % TD5_TG_FACADE_PERIOD;
-    unsigned int gap   = 4u + ((block * 2654435761u) >> 29);   /* 4..11 */
-    return (int)(phase >= gap);   /* runs 2..9 spans -> ~40% frontage built */
+    unsigned int gs, gl;
+    tg_facade_gap(block, &gs, &gl);
+    return (block * 2u + (phase >= gs + gl ? 1u : 0u)) * 2246822519u;
+}
+
+/* Corner return at a run END, with real MASS. The first cut pushed a SINGLE
+ * flat plane back along the lateral -- a zero-thickness sheet, which from any
+ * oblique angle read as a folded piece of paper joined to the front wall: the
+ * "two sides ... non width L shape" in the feedback. A run end now gets a
+ * four-face prism (outer return, inner return one thickness into the run, the
+ * rear face closing the back, and a roof), so the corner has body from every
+ * angle and the block is capped when seen from a rise.
+ *
+ * `l` is the outward lateral unit, `ti` the along-road unit pointing INTO the
+ * run. With thick == 0 the inner/rear/roof faces collapse to zero area, which
+ * the screen-area cull drops -- that is the fallback when the knob is off. */
+static void tg_facade_push_cap(double bx, double by, double bz,
+                               double lx, double lz, double tix, double tiz,
+                               double depth, double thick, double H, int rows,
+                               double *px, double *py, double *pz,
+                               double *uu, double *vv, int *pn)
+{
+    const double dx = lx * depth, dz = lz * depth;
+    const double tx = tix * thick, tz = tiz * thick;
+
+    tg_facade_push_grid(bx, by, bz, dx, 0.0, dz, 0.0, H, 0.0,
+                        2, rows, 0, rows, px, py, pz, uu, vv, pn);
+    tg_facade_push_grid(bx + tx, by, bz + tz, dx, 0.0, dz, 0.0, H, 0.0,
+                        2, rows, 0, rows, px, py, pz, uu, vv, pn);
+    tg_facade_push_grid(bx + dx, by, bz + dz, tx, 0.0, tz, 0.0, H, 0.0,
+                        1, rows, 0, rows, px, py, pz, uu, vv, pn);
+    /* Roof: one horizontal cell, `up` reused as the along-road thickness. */
+    tg_facade_push_grid(bx, by + H, bz, dx, 0.0, dz, tx, 0.0, tz,
+                        2, 1, 0, 1, px, py, pz, uu, vv, pn);
 }
 
 /* Which facade page a RUN uses -- keyed to the run hash so a whole building is
@@ -2092,6 +2174,50 @@ typedef struct {
     int    cols, rows, cap_near, cap_far;
 } TG_SideGeom;
 
+/* ===================== CITY PAVEMENT GEOMETRY =====================
+ * Values the biome table does not carry, derived from it here rather than added
+ * to the shared struct: the facade SETBACK and the SLAB that carries it have to
+ * agree exactly or the wall floats over the kerb, so they read one function.
+ * Raw = world_units * 256; a lane is TD5_TG_LANE_WIDTH (1500) raw. */
+
+/* Kerb rise of a city pavement. A step, not a wall: 130 raw is ~0.5 wu, low
+ * enough that the slab does not read as a plinth and high enough that the kerb
+ * face is still a visible line at speed. */
+#define TD5_TG_KERB_H       130.0
+
+/* Usable pavement width for a biome. k_biomes carries `sidewalk` only as the
+ * facade setback, and the CITY value (350 raw) came from the shipped
+ * measurement "buildings sit on the curb" -- less than a quarter of a lane, too
+ * narrow to read as a pavement at all, let alone carry a railing. Widened to a
+ * floor of 620 raw here; INDUSTRIAL's 600 already clears it. Tree biomes get
+ * none, which is also the "no pavement here" signal for the hook. */
+static double tg_city_sidewalk_w(const TG_Biome *b)
+{
+    if (b->billboard || b->cell_w <= 0) return 0.0;
+    return (double)b->sidewalk < 620.0 ? 620.0 : (double)b->sidewalk;
+}
+
+/* Along-road depth of a run-end corner return, keyed to the facade cell so it
+ * scales with the biome's building size. 0.45 of a cell is enough mass to read
+ * as a corner block without closing off the side street behind it. */
+static double tg_facade_cap_thick(const TG_Biome *b)
+{
+    /* Default ON; TD5RE_AUTOTRACK_FACADE_MASS=0 restores the old flat plane. */
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_FACADE_MASS")) return 0.0;
+    return (double)b->cell_w * 0.45;
+}
+
+/* Streetlamp glows used to come from the prop layer as a lone additive
+ * billboard at k_prop_pages[PP_LAMP].y_off = 2500 with NO POST under it, so the
+ * light hung in mid-air -- the first item of the feedback. Real lamps (post +
+ * arm/head + glow at the head) are emitted from tg_emit_fb_city instead, so the
+ * prop layer must not also emit a bare glow. Kept as a switch rather than
+ * deleting the prop block, so the old behaviour is one env var away for an A/B. */
+static int tg_lamp_glow_from_props(const TG_Biome *b)
+{
+    return b->prop_lamp && !td5_env_flag_on("TD5RE_AUTOTRACK_LAMP_POSTS");
+}
+
 /* Geometry for one side (0=right,1=left) of the wall at span si. built=0 when
  * the run/gap pattern or the branch-corridor exclusion skips this side. */
 static void tg_side_geom(const TG_NodeList *nl, int si, int left,
@@ -2110,8 +2236,7 @@ static void tg_side_geom(const TG_NodeList *nl, int si, int left,
 
     /* Height is a whole number of FLOORS, keyed to the RUN so a building is one
      * uniform block that steps at the next side street. */
-    gh     = (((unsigned)si + (left ? 777u : 0u)) / TD5_TG_FACADE_PERIOD)
-             * 2246822519u;
+    gh     = tg_facade_run_id(si, left);
     floors = b->floors_min + (int)((gh >> 7) % (unsigned)b->floors_extra);
     if (b->tower_mask && ((gh >> 3) & (unsigned)b->tower_mask) == 0)
         floors += 1 + (int)((gh >> 11) % 4);          /* whole-run tower cluster */
@@ -2121,10 +2246,16 @@ static void tg_side_geom(const TG_NodeList *nl, int si, int left,
 
     g->lx0 = n0->tz * side; g->lz0 = -n0->tx * side;
     g->lx1 = n1->tz * side; g->lz1 = -n1->tx * side;
-    set0 = n0->width * 0.5 + (double)b->sidewalk;
-    set1 = n1->width * 0.5 + (double)b->sidewalk;
+    /* Setback is the PAVEMENT width (tg_city_sidewalk_w), not the raw table
+     * field: the wall must land on the back edge of the slab the hook lays, or
+     * one of the two is left hanging. Base rises by the kerb for the same
+     * reason -- the wall stands ON the pavement, not in the gutter. */
+    set0 = n0->width * 0.5 + tg_city_sidewalk_w(b);
+    set1 = n1->width * 0.5 + tg_city_sidewalk_w(b);
 
-    g->bx = n0->x + g->lx0 * set0; g->by = n0->y; g->bz = n0->z + g->lz0 * set0;
+    g->bx = n0->x + g->lx0 * set0;
+    g->by = n0->y + (tg_city_sidewalk_w(b) > 0.0 ? TD5_TG_KERB_H : 0.0);
+    g->bz = n0->z + g->lz0 * set0;
     g->ax = (n1->x + g->lx1 * set1) - g->bx;
     g->ay = n1->y - n0->y;
     g->az = (n1->z + g->lz1 * set1) - g->bz;
@@ -2147,7 +2278,11 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
     double pz[TD5_TG_FACADE_MAXQUAD * 4], uu[TD5_TG_FACADE_MAXQUAD * 4];
     double vv[TD5_TG_FACADE_MAXQUAD * 4];
     TG_SideGeom sd[2];
-    unsigned int block_gh = (unsigned)(si / TD5_TG_FACADE_PERIOD) * 2246822519u;
+    /* Pages are keyed to the RIGHT side's run: both sides share one mesh, so
+     * they cannot carry different pages, and the run id at least keeps a whole
+     * building on one texture across the side streets. */
+    unsigned int block_gh = tg_facade_run_id(si, 0);
+    const double cap_thick = tg_facade_cap_thick(b);
     int n = 0, n_store, s, nseg, seg_page[2], seg_nq[2];
 
     if (si + 1 >= nl->count) return 1;    /* need the far endpoint to abut */
@@ -2173,16 +2308,25 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
         tg_facade_push_grid(g->bx, g->by, g->bz, g->ax, g->ay, g->az,
                             0.0, g->H, 0.0, g->cols, g->rows, 1, g->rows,
                             px, py, pz, uu, vv, &n);
-        if (g->cap_near)
-            tg_facade_push_grid(g->bx, g->by, g->bz,
-                                g->lx0 * g->depth, 0.0, g->lz0 * g->depth,
-                                0.0, g->H, 0.0, 2, g->rows, 0, g->rows,
-                                px, py, pz, uu, vv, &n);
-        if (g->cap_far)
-            tg_facade_push_grid(g->bx + g->ax, g->by + g->ay, g->bz + g->az,
-                                g->lx1 * g->depth, 0.0, g->lz1 * g->depth,
-                                0.0, g->H, 0.0, 2, g->rows, 0, g->rows,
-                                px, py, pz, uu, vv, &n);
+        if (g->cap_near || g->cap_far) {
+            /* Along-road unit, needed to give the corner prism its thickness.
+             * Clamped to most of the span so a return can never overrun the
+             * span it belongs to and poke out of the far end of the run. */
+            const double alen = sqrt(g->ax * g->ax + g->az * g->az);
+            const double aux = (alen > 1.0) ? g->ax / alen : 0.0;
+            const double auz = (alen > 1.0) ? g->az / alen : 1.0;
+            double thick = cap_thick;
+            if (alen > 1.0 && thick > alen * 0.9) thick = alen * 0.9;
+            if (g->cap_near)
+                tg_facade_push_cap(g->bx, g->by, g->bz, g->lx0, g->lz0,
+                                   aux, auz, g->depth, thick, g->H, g->rows,
+                                   px, py, pz, uu, vv, &n);
+            if (g->cap_far)
+                tg_facade_push_cap(g->bx + g->ax, g->by + g->ay, g->bz + g->az,
+                                   g->lx1, g->lz1, -aux, -auz,
+                                   g->depth, thick, g->H, g->rows,
+                                   px, py, pz, uu, vv, &n);
+        }
     }
 
     if (n <= 0) return 1;
@@ -2216,7 +2360,13 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
     double side, gap, tw, th, jit, lx, lz, cx, cz;
     int tv;
 
-    if (si <= TD5_TG_GRID_SPAN) return 1;      /* keep the grid area clear */
+    /* Only span 0 is kept clear, not the whole grid stretch. The old
+     * `si <= TD5_TG_GRID_SPAN` skipped 24 spans -- 36000 raw, the entire
+     * opening straight -- so the race began in bare ground and the buildings
+     * only cut in once the player was already moving. Nothing here is ever ON
+     * the road (the wall sits behind the pavement), so the grid does not need
+     * the clearance; it only needs somewhere for the near cap to end. */
+    if (si <= 0) return 1;
     if (tg_span_in_bridge_run(si)) return 1;   /* deck is clear -- see the river */
     b = &k_biomes[tg_biome_for_span(si)];
 
@@ -2298,7 +2448,7 @@ static int tg_emit_props(const TG_NodeList *nl, int si, const TG_Biome *b,
             return 0;
     }
     /* Streetlamp glows: periodic, both curbs (additive). */
-    if (b->prop_lamp && (si % 7) == 0) {
+    if (tg_lamp_glow_from_props(b) && (si % 7) == 0) {
         int s;
         for (s = 0; s < 2 && *pn < cap; s++)
             if (!tg_prop_one(nl, si, PP_LAMP, s ? 1.0 : -1.0, 300.0,
