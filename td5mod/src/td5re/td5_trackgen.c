@@ -78,6 +78,12 @@
 #define TD5_TG_SURFACE_ATTR   0x11
 #define TD5_TG_HEIGHT_NIBBLE  8
 
+/* Per-span drivable surface byte + road texture page (biome-themed). Defined
+ * after the biome table; forward-declared because the strip/road emitters that
+ * use them are defined earlier. */
+static int tg_surface_attr(int si);
+static int tg_road_page(int si);
+
 /* Texture page ids, in the order tg_emit_textures writes them. Declared here
  * because the mesh emitters (further up) reference them. */
 #define TD5_TG_PAGE_ROAD   0
@@ -106,7 +112,11 @@
 #define TD5_TG_PAGE_PROP   (TD5_TG_PAGE_TREE_EXTRA + TD5_TG_TREE_VARIANTS - 1)
 /* Water: one flat blue page for the sea/river plane beside coastal roads. */
 #define TD5_TG_PAGE_WATER  (TD5_TG_PAGE_PROP + TD5_TG_PROP_COUNT)
-#define TD5_TG_PAGE_COUNT  (TD5_TG_PAGE_WATER + 1)
+/* Road surfaces: tarmac reuses PAGE_ROAD (variant 0); gravel/dirt/ice/cobble
+ * live after WATER. Each also carries a grip class so the car drives to match. */
+#define TD5_TG_ROAD_VARIANTS   5
+#define TD5_TG_PAGE_ROAD_EXTRA (TD5_TG_PAGE_WATER + 1)
+#define TD5_TG_PAGE_COUNT  (TD5_TG_PAGE_ROAD_EXTRA + TD5_TG_ROAD_VARIANTS - 1)
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
@@ -1082,7 +1092,7 @@ static int tg_emit_span_range(const TG_NodeList *nl, int first_span,
 
         for (k = 0; k < ns; k++) {
             tg_put_u8 (spans, 1);                        /* span_type QUAD_A */
-            tg_put_u8 (spans, TD5_TG_SURFACE_ATTR);
+            tg_put_u8 (spans, (unsigned)tg_surface_attr(s0 + k));
             /* Lane bitmask 0 = every lane is the low-nibble surface (dry asphalt,
          * full grip). The old `1 | (1<<(lanes-1))` marked the OUTER lanes, which
          * surface_type_for_span_lane turns into the 0x10 "alternate/off-road"
@@ -1523,7 +1533,7 @@ static void tg_road_edge(const TG_NodeList *nl, int si, double f, double shift,
  * Appended to blk. Returns 0 on OOM. */
 static int tg_emit_road_quad(const TG_NodeList *nl, int si, int lanes,
                              double shift_near, double shift_far, double wscale,
-                             TG_Buf *blk)
+                             int page, TG_Buf *blk)
 {
     double px[TD5_TG_ROAD_SUBDIV * 4], py[TD5_TG_ROAD_SUBDIV * 4];
     double pz[TD5_TG_ROAD_SUBDIV * 4], uu[TD5_TG_ROAD_SUBDIV * 4];
@@ -1575,7 +1585,7 @@ static int tg_emit_road_quad(const TG_NodeList *nl, int si, int lanes,
 
     /* --- one command: quads only, sequential vertex cursor --- */
     tg_put_u16(blk, 0);              /* dispatch_type 0 = TRISTRIP */
-    tg_put_u16(blk, 0);              /* texture_page_id: the SAMPLED page */
+    tg_put_u16(blk, (unsigned)page); /* texture_page_id: the SAMPLED page */
     tg_put_u32(blk, 0);              /* reserved */
     tg_put_u16(blk, 0);                             /* triangle_count */
     tg_put_u16(blk, TD5_TG_ROAD_SUBDIV);            /* quad_count */
@@ -1602,7 +1612,7 @@ static int tg_emit_road_quad(const TG_NodeList *nl, int si, int lanes,
 static int tg_emit_road_mesh(const TG_NodeList *nl, int si, int lanes,
                              TG_Buf *blk)
 {
-    return tg_emit_road_quad(nl, si, lanes, 0.0, 0.0, 1.0, blk);
+    return tg_emit_road_quad(nl, si, lanes, 0.0, 0.0, 1.0, tg_road_page(si), blk);
 }
 
 /* Six quads. Corner sign triples per face, then which half-extents span the
@@ -1929,6 +1939,25 @@ static const TG_PropPage k_prop_pages[TD5_TG_PROP_COUNT] = {
 };
 static int tg_prop_slot(int i) { return TD5_TG_PAGE_PROP + i; }
 
+/* ===================== ROAD SURFACES =====================
+ * Each biome drives on one surface: a GRIP class written into the strip's
+ * surface byte (so the car really slides on ice / drags on cobble) plus a
+ * matching texture. Grip classes are the shipped values (td5_physics.c grip
+ * table): 1 tarmac 1.0, 4 gravel 0.98, 3 dirt 0.94, 5 cobble 0.75, 6 ice 0.70. */
+enum { RS_TARMAC = 0, RS_GRAVEL, RS_DIRT, RS_ICE, RS_COBBLE };
+typedef struct { int grip_class; int page_var; int proc_kind; } TG_RoadSurf;
+static const TG_RoadSurf k_road_surf[TD5_TG_ROAD_VARIANTS] = {
+    { 1, 0, RS_TARMAC },   /* dry asphalt, full grip (base ROAD page) */
+    { 4, 1, RS_GRAVEL },   /* packed gravel */
+    { 3, 2, RS_DIRT   },   /* dirt */
+    { 6, 3, RS_ICE    },   /* ice / snow -- slippery */
+    { 5, 4, RS_COBBLE }    /* cobble -- draggy stone */
+};
+static int tg_road_slot(int v)
+{
+    return v == 0 ? TD5_TG_PAGE_ROAD : (TD5_TG_PAGE_ROAD_EXTRA + v - 1);
+}
+
 /* ===================== BIOMES =====================
  * A biome owns a RUN of spans and drives what stands beside the road: how
  * dense the props are, how tall, how far back, and which texture page. That is
@@ -1962,30 +1991,31 @@ typedef struct {
      * -1. Props are emitted for every biome, additional to trees/facades. */
     int    prop_people, prop_lamp, prop_statue, prop_animal;
     int    water;        /* 1 = a sea plane on the seaward side of the run */
+    int    road_surf;    /* index into k_road_surf: drivable surface + grip */
 } TG_Biome;
 
 static const TG_Biome k_biomes[] = {
     /* CITY: ~8.4x11.5 wu cells, ~3 floors, on the curb, big sparse towers. */
     { "CITY",       9, 2150, 2950, 2, 3, 6000, 350, {0}, 0,
-      TD5_TG_PAGE_WALL,   3, 0, TD5_TG_PAGE_GROUND,   6, 1, PP_MONUMENT, -1, 0 },
-    /* FIELDS: sparse deciduous on an open horizon; grazing sheep. */
+      TD5_TG_PAGE_WALL,   3, 0, TD5_TG_PAGE_GROUND,   6, 1, PP_MONUMENT, -1, 0, RS_TARMAC },
+    /* FIELDS: sparse deciduous on an open horizon; grazing sheep; dirt road. */
     { "FIELDS",     2, 0,0,0,0,0,0, {2, 0},       2,
-      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_SHEEP, 0 },
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_SHEEP, 0, RS_DIRT },
     /* FOREST: dense mixed deciduous crowding the verge; deer. */
     { "FOREST",    11, 0,0,0,0,0,0, {0, 1, 2},    3,
-      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_DEER, 0 },
-    /* INDUSTRIAL: wider squat sheds (~10 wu cells), 1-2 floors, deeper. */
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_DEER, 0, RS_TARMAC },
+    /* INDUSTRIAL: wider squat sheds; gravel yards. */
     { "INDUSTRIAL", 6, 2560, 2300, 1, 2, 8000, 600, {0}, 0,
-      TD5_TG_PAGE_WALL,  63, 0, TD5_TG_PAGE_GROUND,   3, 1, -1, -1, 0 },
-    /* ALPINE: conifers + snow conifers; deer. */
+      TD5_TG_PAGE_WALL,  63, 0, TD5_TG_PAGE_GROUND,   3, 1, -1, -1, 0, RS_GRAVEL },
+    /* ALPINE: conifers + snow conifers; deer; icy road. */
     { "ALPINE",     8, 0,0,0,0,0,0, {3, 4},       2,
-      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_DEER, 0 },
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_DEER, 0, RS_ICE },
     /* COAST: palms; beach crowds + promenade lamps; the sea alongside. */
     { "COAST",      5, 0,0,0,0,0,0, {5, 6},       2,
-      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   6, 1, -1, -1, 1 },
-    /* ORIENTAL: manicured topiary + weeping willow; guardian lions. */
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   6, 1, -1, -1, 1, RS_TARMAC },
+    /* ORIENTAL: manicured topiary + weeping willow; guardian lions; cobbles. */
     { "ORIENTAL",   9, 0,0,0,0,0,0, {7, 8, 9},    3,
-      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   4, 0, PP_LION, -1, 0 }
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   4, 0, PP_LION, -1, 0, RS_COBBLE }
 };
 #define TD5_TG_BIOME_COUNT 7
 #define TD5_TG_BIOME_RUN   150
@@ -1994,6 +2024,22 @@ static int tg_biome_for_span(int si)
 {
     unsigned int h = (unsigned)(si / TD5_TG_BIOME_RUN) * 2654435761u;
     return (int)((h >> 27) % TD5_TG_BIOME_COUNT);
+}
+
+/* Strip surface byte for span si: low nibble = the biome's drivable GRIP class
+ * (what td5_track.c surface_type_for_span_lane reads for the centre lanes when
+ * lane_bitmask is 0), high nibble left at 1 (the verge class, unused at mask 0). */
+static int tg_surface_attr(int si)
+{
+    const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
+    return 0x10 | (k_road_surf[b->road_surf].grip_class & 0x0F);
+}
+
+/* Road texture page for span si, from the biome's surface. */
+static int tg_road_page(int si)
+{
+    const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
+    return tg_road_slot(k_road_surf[b->road_surf].page_var);
 }
 
 /* A continuous street wall of flat facade cells lining span si -- one mesh,
@@ -2933,7 +2979,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     if (!tg_emit_road_quad(nl, F_fork + 1 + k, br_lanes,
                                            tg_branch_shift(k, nl->v[F_fork + 1 + k].width),
                                            tg_branch_shift(k + 1, nl->v[F_fork + 2 + k].width),
-                                           0.5, &meshes))
+                                           0.5, tg_road_page(F_fork + 1 + k), &meshes))
                         ok = 0;
                 }
                 continue;
@@ -2954,7 +3000,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 if (!tg_emit_road_quad(nl, si, main_half,
                                        TD5_TG_MAIN_SHIFT(nl->v[si].width),
                                        TD5_TG_MAIN_SHIFT(nl->v[si + 1].width),
-                                       0.5, &meshes))
+                                       0.5, tg_road_page(si), &meshes))
                     ok = 0;
                 /* Fill the median between the two carriageways. */
                 if (ok) {
@@ -3425,6 +3471,61 @@ static void tg_emit_texture_page_water(TG_Buf *out)
     }
 }
 
+/* Road-surface pages for the themed biomes: gravel, dirt, ice, cobble. No lane
+ * paint (only the base tarmac page carries markings). `kind` is an RS_* value. */
+static void tg_emit_texture_page_roadsurf(TG_Buf *out, int kind)
+{
+    unsigned int rng = 0x00C0FFEEu + (unsigned)kind * 0x9E3779B9u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        switch (kind) {
+        case RS_DIRT:   b = 40 + i * 5;  g = 60 + i * 6;  r = 80 + i * 8;  break;
+        case RS_ICE:    b = 210 + i * 3; g = 205 + i * 3; r = 195 + i * 3; break;
+        case RS_COBBLE: b = 78 + i * 7;  g = 76 + i * 7;  r = 74 + i * 7;  break;
+        default:        b = 96 + i * 6;  g = 96 + i * 6;  r = 94 + i * 6;  break; /* gravel */
+        }
+        if (b > 255) b = 255;
+        if (g > 255) g = 255;
+        if (r > 255) r = 255;
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        int x = i % TD5_TG_TEX_DIM;
+        int y = i / TD5_TG_TEX_DIM;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        switch (kind) {
+        case RS_COBBLE: {                        /* stone blocks with mortar */
+            int cx = x % 12, cy = y % 12;
+            idx = (cx < 2 || cy < 2) ? 1 + (int)((rng >> 16) % 2)
+                                     : 6 + (int)((rng >> 16) % 8);
+            break; }
+        case RS_ICE:                             /* pale, faint cracks */
+            idx = 10 + (int)((rng >> 16) % 6);
+            if (((rng >> 24) & 63) == 0) idx = 2 + (int)((rng >> 16) % 3);
+            break;
+        case RS_DIRT: {                          /* brown with down-track ruts */
+            int rut = (x % 20);
+            idx = (rut < 3) ? 2 + (int)((rng >> 16) % 3)
+                            : 4 + (int)((rng >> 16) % 10);
+            break; }
+        default:                                 /* gravel speckle */
+            idx = (int)((rng >> 16) % 14);
+            break;
+        }
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 /* Page 4: crash barrier -- galvanised steel with a dark shadow gutter along the
  * bottom and a rhythm of darker post marks.
  *
@@ -3594,6 +3695,12 @@ static int tg_emit_textures(TG_Buf *out)
     }
     tg_emit_texture_page_rail(&pages[TD5_TG_PAGE_RAIL]);
     tg_emit_texture_page_water(&pages[TD5_TG_PAGE_WATER]);
+    {   /* themed road-surface pages (variant 0 = base asphalt, already done) */
+        int v;
+        for (v = 1; v < TD5_TG_ROAD_VARIANTS; v++)
+            tg_emit_texture_page_roadsurf(&pages[tg_road_slot(v)],
+                                          k_road_surf[v].proc_kind);
+    }
     for (i = 0; i < count; i++) {
         if (pages[i].oom) {
             for (i = 0; i < count; i++) tg_buf_free(&pages[i]);

@@ -32,6 +32,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 26" },
+    { CL_ITEM,    "Auto-track ROAD SURFACES now vary by biome: icy alpine" },
+    { CL_ITEM,    "  roads slide, cobbled oriental streets drag, dirt in" },
+    { CL_ITEM,    "  the fields, gravel yards -- grip + texture per theme." },
     { CL_DATE,    "August 25" },
     { CL_ITEM,    "Auto-track BRIDGES rebuilt as decks over a river: side" },
     { CL_ITEM,    "  parapets, piers, banks that drop to water, clear deck" },
