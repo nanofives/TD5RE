@@ -3073,7 +3073,7 @@ static int tg_guardrails_enabled(void)
 /* Should span si carry a barrier? Not every span: real roads are lined on the
  * outside of bends and where the road is elevated, not down every straight, and
  * railing all 1800 spans would both look wrong and cost 1800 extra meshes. */
-static int tg_span_needs_guardrail(const TG_NodeList *nl, int si, int nspans)
+static int tg_span_needs_guardrail_raw(const TG_NodeList *nl, int si, int nspans)
 {
     /* 50 = 5 deg of heading change across the span. MEASURED over 3 seeds this
      * rails 11-15% of spans, consistently -- barriers through the corners and
@@ -3113,10 +3113,63 @@ static int tg_span_needs_guardrail(const TG_NodeList *nl, int si, int nspans)
     return (ang_deg * 10.0) >= (double)limit;
 }
 
+/* RUN DILATION. The raw test above is per-span, and its ELEVATION half is
+ * judged against a +/-8 span average (tg_local_ground_y), so on undulating or
+ * graded ground it latches for one or two spans at a time -- a crest trips it,
+ * the approach and the exit do not. The result is ONE-SPAN RAIL ISLANDS: a
+ * 1500-unit stub of barrier that begins and ends in mid-air on a slope, which is
+ * the other half of the "fences on slope" report (a rail that stops on a grade
+ * reads as stair-stepping, and one that starts mid-grade reads as floating).
+ *
+ * Fix: rail a span if ANY span within +/-TD5RE_AUTOTRACK_RAIL_PAD needs one.
+ * That bridges the gaps between islands and extends every run past its ends, so
+ * a barrier always starts and finishes on road the raw test agreed was worth
+ * railing. Pure function of nl -- no state, so the streaming range emitter can
+ * still ask about any span in isolation. */
+static int tg_span_needs_guardrail(const TG_NodeList *nl, int si, int nspans)
+{
+    const int pad = td5_env_int("TD5RE_AUTOTRACK_RAIL_PAD", 3, 0, 16);
+    int k;
+
+    /* Exclusions must be re-checked on THIS span, not on the neighbour that
+     * satisfied the test: dilating into a tunnel or across a fork mouth is
+     * exactly what those exclusions exist to prevent. */
+    if (tg_span_in_tunnel(si)) return 0;
+    if (tg_branches_enabled() && tg_span_in_fork_clear(si)) return 0;
+
+    for (k = -pad; k <= pad; k++)
+        if (tg_span_needs_guardrail_raw(nl, si + k, nspans)) return 1;
+    return 0;
+}
+
 /* One barrier prism per side for span si. Caller gates with
- * tg_span_needs_guardrail. */
+ * tg_span_needs_guardrail.
+ *
+ * PITCH (2026-08-26, "fences on slope should be inclined to follow the slope").
+ * The rail used to be extruded straight UP: top = edge_y + RAIL_HEIGHT, base =
+ * edge_y - BASE_DROP, both purely vertical. On a graded span that leaves the
+ * barrier standing plumb while the road it guards is inclined, so its inner face
+ * is not perpendicular to the tarmac and its top edge is not parallel to the
+ * road -- and where two spans of different grade meet, the two plumb rails join
+ * at a visible kink instead of a continuous line. Real crash barriers lean with
+ * the road.
+ *
+ * So the extrusion axis is now the road's SURFACE NORMAL in the pitch plane:
+ * with grade g = dY/d(along-road), the along-road unit is (1, g)/|.| and the
+ * normal is (-g, 1)/|.|, both in the (along-road, up) plane. Offsetting by
+ * height*normal instead of height*up tilts the posts back by exactly the road's
+ * pitch, which is what "inclined to follow the slope" means. At g = 0 the normal
+ * IS up, so a flat span is bit-identical to the old behaviour and only graded
+ * spans move. The lateral offsets are untouched -- camber is not modelled here,
+ * and the two edges already carry their own heights.
+ */
 static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk)
 {
+    /* Road grade over this span, and the pitch-plane normal derived from it.
+     * ny is the vertical part of the normal and nt the along-road part, so a
+     * point offset by h is (p + nt*h*along, p_y + ny*h). */
+    double grade = 0.0, gm, n_up, n_along;
+    double atx = 0.0, atz = 0.0;      /* along-road unit, horizontal part */
     double nlx, nly, nlz, nrx, nry, nrz;   /* near left / right road edge */
     double flx, fly, flz, frx, fry, frz;   /* far  left / right road edge */
     double nux, nuz, fux, fuz;             /* outward lateral units */
@@ -3126,6 +3179,21 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk)
 
     tg_road_edge(nl, si, 0.0, 0.0, 1.0, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
     tg_road_edge(nl, si, 1.0, 0.0, 1.0, &flx, &fly, &flz, &frx, &fry, &frz);
+
+    /* Grade of THIS span, from the centerline nodes rather than the edges, so a
+     * width change across the span cannot be mistaken for pitch. */
+    {
+        double dx = nl->v[si + 1].x - nl->v[si].x;
+        double dz = nl->v[si + 1].z - nl->v[si].z;
+        double dh = sqrt(dx * dx + dz * dz);
+        if (dh > 1e-6) {
+            atx = dx / dh; atz = dz / dh;
+            grade = (nl->v[si + 1].y - nl->v[si].y) / dh;
+        }
+    }
+    gm      = sqrt(1.0 + grade * grade);
+    n_up    =  1.0 / gm;            /* vertical part of the surface normal   */
+    n_along = -grade / gm;          /* along-road part (leans against the climb) */
 
     nux = nlx - nrx; nuz = nlz - nrz;
     len = sqrt(nux * nux + nuz * nuz);
@@ -3143,35 +3211,51 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk)
         const double gz = side ? frz : flz;
         const double o0 = TD5_TG_RAIL_OFFSET;
         const double o1 = TD5_TG_RAIL_OFFSET + TD5_TG_RAIL_THICK;
-        /* near/far x inner/outer, at base and top. */
+        /* Along-road slide that goes with a given height offset, so the post
+         * leans with the road's pitch instead of standing plumb. Zero on a flat
+         * span (n_along = 0), which keeps flat road byte-identical. */
+        const double slide_t = n_along * TD5_TG_RAIL_HEIGHT;
+        const double slide_b = n_along * -TD5_TG_RAIL_BASE_DROP;
+        /* near/far x inner/outer, at base and top -- the lateral offsets are the
+         * same as before, the pitch lean is the extra atx/atz term on the TOP
+         * and BASE rows. */
         const double nib_x = ex + s * nux * o0, nib_z = ez + s * nuz * o0;
         const double nob_x = ex + s * nux * o1, nob_z = ez + s * nuz * o1;
         const double fib_x = gx + s * fux * o0, fib_z = gz + s * fuz * o0;
         const double fob_x = gx + s * fux * o1, fob_z = gz + s * fuz * o1;
-        const double nyb = ey - TD5_TG_RAIL_BASE_DROP;
-        const double fyb = gy - TD5_TG_RAIL_BASE_DROP;
-        const double nyt = ey + TD5_TG_RAIL_HEIGHT;
-        const double fyt = gy + TD5_TG_RAIL_HEIGHT;
+        /* Top and base rows, offset along the SURFACE NORMAL. */
+        const double nibt_x = nib_x + atx * slide_t, nibt_z = nib_z + atz * slide_t;
+        const double nobt_x = nob_x + atx * slide_t, nobt_z = nob_z + atz * slide_t;
+        const double fibt_x = fib_x + atx * slide_t, fibt_z = fib_z + atz * slide_t;
+        const double fobt_x = fob_x + atx * slide_t, fobt_z = fob_z + atz * slide_t;
+        const double nibb_x = nib_x + atx * slide_b, nibb_z = nib_z + atz * slide_b;
+        const double nobb_x = nob_x + atx * slide_b, nobb_z = nob_z + atz * slide_b;
+        const double fibb_x = fib_x + atx * slide_b, fibb_z = fib_z + atz * slide_b;
+        const double fobb_x = fob_x + atx * slide_b, fobb_z = fob_z + atz * slide_b;
+        const double nyb = ey - n_up * TD5_TG_RAIL_BASE_DROP;
+        const double fyb = gy - n_up * TD5_TG_RAIL_BASE_DROP;
+        const double nyt = ey + n_up * TD5_TG_RAIL_HEIGHT;
+        const double fyt = gy + n_up * TD5_TG_RAIL_HEIGHT;
         const double u0 = (double)si, u1 = (double)si + 1.0;
 
         /* INNER face (towards the road). U runs along the road, V up the face,
          * so the page's bottom rows land at the base -- see the page comment. */
-        px[n]=nib_x; py[n]=nyb; pz[n]=nib_z; uu[n]=u0; vv[n]=0.0; n++;
-        px[n]=nib_x; py[n]=nyt; pz[n]=nib_z; uu[n]=u0; vv[n]=1.0; n++;
-        px[n]=fib_x; py[n]=fyt; pz[n]=fib_z; uu[n]=u1; vv[n]=1.0; n++;
-        px[n]=fib_x; py[n]=fyb; pz[n]=fib_z; uu[n]=u1; vv[n]=0.0; n++;
+        px[n]=nibb_x; py[n]=nyb; pz[n]=nibb_z; uu[n]=u0; vv[n]=0.0; n++;
+        px[n]=nibt_x; py[n]=nyt; pz[n]=nibt_z; uu[n]=u0; vv[n]=1.0; n++;
+        px[n]=fibt_x; py[n]=fyt; pz[n]=fibt_z; uu[n]=u1; vv[n]=1.0; n++;
+        px[n]=fibb_x; py[n]=fyb; pz[n]=fibb_z; uu[n]=u1; vv[n]=0.0; n++;
 
         /* OUTER face, wound the other way so it faces away from the road. */
-        px[n]=fob_x; py[n]=fyb; pz[n]=fob_z; uu[n]=u1; vv[n]=0.0; n++;
-        px[n]=fob_x; py[n]=fyt; pz[n]=fob_z; uu[n]=u1; vv[n]=1.0; n++;
-        px[n]=nob_x; py[n]=nyt; pz[n]=nob_z; uu[n]=u0; vv[n]=1.0; n++;
-        px[n]=nob_x; py[n]=nyb; pz[n]=nob_z; uu[n]=u0; vv[n]=0.0; n++;
+        px[n]=fobb_x; py[n]=fyb; pz[n]=fobb_z; uu[n]=u1; vv[n]=0.0; n++;
+        px[n]=fobt_x; py[n]=fyt; pz[n]=fobt_z; uu[n]=u1; vv[n]=1.0; n++;
+        px[n]=nobt_x; py[n]=nyt; pz[n]=nobt_z; uu[n]=u0; vv[n]=1.0; n++;
+        px[n]=nobb_x; py[n]=nyb; pz[n]=nobb_z; uu[n]=u0; vv[n]=0.0; n++;
 
         /* TOP cap, so the barrier reads as solid from a chase camera. */
-        px[n]=nib_x; py[n]=nyt; pz[n]=nib_z; uu[n]=u0; vv[n]=1.0; n++;
-        px[n]=nob_x; py[n]=nyt; pz[n]=nob_z; uu[n]=u0; vv[n]=0.85; n++;
-        px[n]=fob_x; py[n]=fyt; pz[n]=fob_z; uu[n]=u1; vv[n]=0.85; n++;
-        px[n]=fib_x; py[n]=fyt; pz[n]=fib_z; uu[n]=u1; vv[n]=1.0; n++;
+        px[n]=nibt_x; py[n]=nyt; pz[n]=nibt_z; uu[n]=u0; vv[n]=1.0; n++;
+        px[n]=nobt_x; py[n]=nyt; pz[n]=nobt_z; uu[n]=u0; vv[n]=0.85; n++;
+        px[n]=fobt_x; py[n]=fyt; pz[n]=fobt_z; uu[n]=u1; vv[n]=0.85; n++;
+        px[n]=fibt_x; py[n]=fyt; pz[n]=fibt_z; uu[n]=u1; vv[n]=1.0; n++;
     }
 
     cx = cy = cz = 0.0;
