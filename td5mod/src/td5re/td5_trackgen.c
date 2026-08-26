@@ -1652,7 +1652,8 @@ static const signed char k_box_uv_axis[6][2] = {
  * h, textured from `page`, tiling every `tile` world units. */
 static int tg_emit_box_mesh(TG_Buf *blk, double cx, double cy, double cz,
                             double hx, double hy, double hz,
-                            double fx, double fz, int page, double tile)
+                            double fx, double fz, int page, double tile,
+                            unsigned int color)
 {
     /* Box frame: fwd = (fx,fz) along the road, right = (fz,-fx), up = +Y.
      * An axis-aligned box is fine for a building but wrong for anything that
@@ -1698,7 +1699,7 @@ static int tg_emit_box_mesh(TG_Buf *blk, double cx, double cy, double cz,
             tg_put_f32(blk, cy +       sy * hy);
             tg_put_f32(blk, cz + rz * (sx * hx) + fz * (sz * hz));
             tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
-            tg_put_u32(blk, 0xFFFFFFFFu);
+            tg_put_u32(blk, color);
             /* Corner order walks the quad loop, so (0,0)(u,0)(u,v)(0,v). */
             tg_put_f32(blk, (i == 1 || i == 2) ? ua : 0.0);
             tg_put_f32(blk, (i >= 2) ? vb : 0.0);
@@ -2390,8 +2391,14 @@ static int tg_span_in_tunnel(int si)
 }
 
 /* Tunnel cross-section at span si: two side walls plus a roof, each its own
- * mesh so per-mesh frustum culling cannot pop the whole tunnel at once.
- * Oriented to the road tangent, one span long with a slight overlap. */
+ * mesh so per-mesh frustum culling cannot pop the whole tunnel at once. The
+ * enclosure is drawn DIM (vertex colour) so the interior reads as shadowed --
+ * the engine has no interior lighting, so this fakes it. At the run ends a
+ * PORTAL frame (a lintel above the road spanning the full mouth) marks the
+ * entrance/exit so the near end does not read as an open box.
+ *
+ * Port-original: shipped TD5 has no true tunnels, so there is no reference to
+ * match -- this is an invented enclosed section. */
 static int tg_emit_tunnel(const TG_NodeList *nl, int si, TG_Buf *blk,
                           int *added)
 {
@@ -2400,6 +2407,7 @@ static int tg_emit_tunnel(const TG_NodeList *nl, int si, TG_Buf *blk,
     const double height = 2600.0;
     const double side_x = n->width * 0.5 + wall_t;
     const double lx = n->tz, lz = -n->tx;
+    const unsigned int dim = 0xFF585868u;   /* shadowed blue-grey interior */
     int i;
 
     for (i = 0; i < 3; i++) {
@@ -2414,7 +2422,18 @@ static int tg_emit_tunnel(const TG_NodeList *nl, int si, TG_Buf *blk,
         }
         if (!tg_emit_box_mesh(blk, n->x + ox, cy, n->z + oz,
                               hx, hy, 780.0, n->tx, n->tz,
-                              TD5_TG_PAGE_WALL, 3000.0))
+                              TD5_TG_PAGE_WALL, 3000.0, dim))
+            return 0;
+        (*added)++;
+    }
+
+    /* Portal frame at a run END: a lit lintel across the mouth, above the road,
+     * so the entrance/exit reads as a tunnel opening rather than an open box. */
+    if (!tg_span_in_tunnel(si - 1) || !tg_span_in_tunnel(si + 1)) {
+        if (!tg_emit_box_mesh(blk, n->x, n->y + height + 150.0, n->z,
+                              side_x + wall_t, 500.0, wall_t,
+                              n->tx, n->tz, TD5_TG_PAGE_WALL, 2000.0,
+                              0xFFFFFFFFu))
             return 0;
         (*added)++;
     }
@@ -2498,7 +2517,7 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
         double ez = n->z + lz * (n->width * 0.5 + 120.0);
         if (!tg_emit_box_mesh(blk, ex, n->y + 180.0, ez,
                               90.0, 180.0, 780.0,
-                              n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0))
+                              n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0, 0xFFFFFFFFu))
             return 0;
         (*added)++;
     }
@@ -2510,7 +2529,7 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
         if (h < 150.0) h = 150.0;
         if (!tg_emit_box_mesh(blk, n->x, n->y - h, n->z,
                               450.0, h, 450.0,
-                              n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0))
+                              n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0, 0xFFFFFFFFu))
             return 0;
         (*added)++;
     }

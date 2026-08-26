@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 26" },
+    { CL_ITEM,    "Auto-track TUNNELS now read as tunnels: enclosed dim" },
+    { CL_ITEM,    "  interior with a lit portal at each mouth" },
+    { CL_ITEM,    "  (TD5RE_AUTOTRACK_TUNNELS=1, port-original)." },
     { CL_ITEM,    "Auto-track now has MULTIPLE branches: a short chicane, a" },
     { CL_ITEM,    "  split carriageway and a long alternate route, each" },
     { CL_ITEM,    "  forking and rejoining (TD5RE_AUTOTRACK_BRANCHES=1)." },
