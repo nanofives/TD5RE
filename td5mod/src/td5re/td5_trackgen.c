@@ -1610,19 +1610,95 @@ static int tg_emit_routes(const TG_NodeList *nl, int nspans,
     return !out->oom;
 }
 
+/* ------------------------------------------------- FINISH LINE + RUN-OFF ---
+ * Reported: "fix track end, there should be a finish banner and around 100 span
+ * after the end".
+ *
+ * VERIFIED where the finish actually comes from before changing anything. A
+ * generated track is a faithful TD5 point-to-point, so s_td6_finish_span is 0
+ * and advance_pending_finish_state takes the CHECKPOINT path
+ * (td5_game.c:9152): the race ends for an actor the tick its checkpoint_index
+ * reaches s_active_checkpoint.checkpoint_count, and those thresholds are the
+ * LEVELINF checkpoint spans this function writes. So the finish line IS the last
+ * checkpoint span -- there is no separate finish field to set.
+ *
+ * The old placement was `nspans * (i+1) / (cp_count+1)`, i.e. the last
+ * checkpoint at 80% of the span count, and `nspans` here is the TOTAL emitted
+ * count including every fork's pad and corridor tail -- so the finish landed on
+ * an arbitrary interior span that moved when the branch layout changed, with
+ * nothing on screen marking it. Whatever road happened to be left past it was
+ * an accident of that arithmetic, not a run-off.
+ *
+ * Now the finish is PLACED: ring_len - runoff, so there are exactly `runoff`
+ * spans of road past the line for the car to slow down on, and the earlier
+ * checkpoints are spread evenly between the grid and the finish. This needs no
+ * extra spans -- the run-off is road that already existed and used to sit
+ * uselessly past an interior finish -- so TD5_TG_MAX_SPANS, TD5_TG_MAX_VERTICES
+ * and TD5_TG_ORIGIN_BLOCK are all untouched by it.
+ */
+#define TD5_TG_RUNOFF_SPANS  100
+
+/* Finish span for a ring of `ring` main-road spans, or -1 if the ring is too
+ * short to hold a grid, a race and a run-off. Pure function of the ring length
+ * and the fork table, so the LEVELINF writer and the banner emitter agree
+ * without either of them storing it. */
+static int tg_finish_span(int ring)
+{
+    int runoff = td5_env_int("TD5RE_AUTOTRACK_RUNOFF", TD5_TG_RUNOFF_SPANS,
+                             0, 600);
+    int lo = TD5_TG_GRID_SPAN + 60;      /* shortest race worth having */
+    int fs, guard;
+
+    if (ring <= lo) return -1;
+    /* A short track cannot afford the full run-off; give it what is left after
+     * the minimum race distance rather than refusing to place a finish. */
+    if (ring - runoff <= lo) runoff = ring - lo;
+    fs = ring - runoff;
+
+    /* Never put the finish line inside a fork's split region: the line would
+     * cross two separated half carriageways, so a banner over it would either
+     * miss the road or straddle the gore. Walk it back to clear ground. */
+    for (guard = 0; guard < ring && fs > lo && tg_span_in_fork_clear(fs); guard++)
+        fs--;
+    if (fs <= lo) return -1;
+    return fs;
+}
+
 /* ------------------------------------------------------ LEVELINF.DAT ----- */
 /* 100 bytes. The level loader reads DWORD[0] (1 = circuit, else
  * point-to-point) and keeps the rest as opaque environment config. */
 static int tg_emit_levelinf(const TD5_TrackGenSpec *spec, int nspans,
                             TG_Buf *out)
 {
+    /* Checkpoints are compared against the NORMALIZED main-ring span, so they
+     * are placed on the ring -- not on `nspans`, which also counts the appended
+     * corridors. s_ring_len is set by tg_emit_strip, which always runs first. */
+    const int ring = (s_ring_len > 0) ? s_ring_len : nspans;
+    const int finish = tg_finish_span(ring);
     int cp_count = 4, i;
     int cp_span[7];
 
     for (i = 0; i < 7; i++) cp_span[i] = 0;
-    if (nspans < 200) cp_count = 2;
-    for (i = 0; i < cp_count; i++)
-        cp_span[i] = (int)((long)nspans * (i + 1) / (cp_count + 1));
+    if (ring < 200) cp_count = 2;
+    if (finish > 0) {
+        /* Evenly spaced from the grid to the finish, LAST one exactly on the
+         * finish span -- that crossing is what ends the race. */
+        const int span0 = TD5_TG_GRID_SPAN;
+        for (i = 0; i < cp_count; i++)
+            cp_span[i] = span0 + (int)((long)(finish - span0) * (i + 1)
+                                       / cp_count);
+        TD5_LOG_I(LOG_TAG, "trackgen: finish span %d of ring %d (%d spans of "
+                  "run-off past the line), %d checkpoints",
+                  finish, ring, ring - finish, cp_count);
+    } else {
+        /* Ring too short for a grid + race + run-off: fall back to the old
+         * proportional placement rather than shipping a track that cannot be
+         * finished. */
+        for (i = 0; i < cp_count; i++)
+            cp_span[i] = (int)((long)ring * (i + 1) / (cp_count + 1));
+        TD5_LOG_W(LOG_TAG, "trackgen: ring %d too short to place a finish with "
+                  "run-off; using proportional checkpoints", ring);
+    }
 
     tg_put_u32(out, spec->circuit ? 1u : 0u);   /* 0x00 track_type */
     tg_put_u32(out, 1);                         /* 0x04 smoke_enable */
@@ -3165,8 +3241,189 @@ static int tg_emit_fb_flora(const TG_FBHook *h)     { (void)h; return 1; }
 static int tg_emit_fb_tunnel(const TG_FBHook *h)    { (void)h; return 1; }
 /* Group D -- terrain & water: ledge slopes, longer skirts, hills, snow. */
 static int tg_emit_fb_terrain(const TG_FBHook *h)   { (void)h; return 1; }
-/* Group E -- track furniture: start/finish banners, branch mouths, run-off. */
-static int tg_emit_fb_track(const TG_FBHook *h)     { (void)h; return 1; }
+/* ===================== [FB] START / FINISH GANTRY =====================
+ * Reported: "add start banner" and "there should be a finish banner".
+ *
+ * PRIOR ART. Shipped TD5 start gantries are ordinary MODELS.DAT quads on a
+ * dedicated texture page (Keswick's is page 338), not a special engine object:
+ * two uprights either side of the road and a panel bridging them. Two lessons
+ * from that one carry over. (a) It Z-FIGHTS when built from coplanar quads under
+ * CULL_NONE, which is how scenery is submitted here -- so the panel is a SLAB
+ * with real thickness, front and back separated, never two back-to-back quads
+ * on the same plane. (b) It is authored at the road's own scale, so the span is
+ * derived from the road edges (tg_road_edge, the same source the guardrails and
+ * ground skirts use) rather than from a fixed width.
+ *
+ * ONE mesh for the whole gantry: legs and panel are the same page and the same
+ * opaque dispatch, so splitting them would only cost extra moff slots.
+ */
+#define TD5_TG_GANTRY_CLEAR    2600.0  /* underside of the panel above the road */
+#define TD5_TG_GANTRY_PANEL_H  1000.0  /* panel height                          */
+#define TD5_TG_GANTRY_LEG_W     220.0  /* upright half-width, lateral           */
+#define TD5_TG_GANTRY_THICK     160.0  /* slab depth, along the road            */
+#define TD5_TG_GANTRY_OUT       260.0  /* legs outboard of the road edge         */
+
+/* Push one axis-aligned-in-the-road-frame quad into the caller's arrays. */
+static void tg_gantry_quad(double *px, double *py, double *pz,
+                           double *uu, double *vv, int *n,
+                           const double *x, const double *y, const double *z,
+                           double u0, double u1, double v0, double v1)
+{
+    const double us[4] = { u0, u1, u1, u0 };
+    const double vs[4] = { v0, v0, v1, v1 };
+    int i;
+    for (i = 0; i < 4; i++) {
+        px[*n] = x[i]; py[*n] = y[i]; pz[*n] = z[i];
+        uu[*n] = us[i]; vv[*n] = vs[i];
+        (*n)++;
+    }
+}
+
+/* Gantry across span si. Returns 0 on OOM. */
+static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk)
+{
+    double lx, ly, lz, rx, ry, rz;     /* road edge at the span's near row */
+    double dx, dz, len;                /* unit lateral, left-positive      */
+    double tx, tz;                     /* unit along the road              */
+    double px[64], py[64], pz[64], uu[64], vv[64];
+    double cx = 0.0, cy = 0.0, cz = 0.0, radius = 0.0;
+    double qx[4], qy[4], qz[4];
+    double base_y;
+    int n = 0, i, quads;
+
+    tg_road_edge(nl, si, 0.0, 0.0, 1.0, &lx, &ly, &lz, &rx, &ry, &rz);
+    dx = lx - rx; dz = lz - rz;
+    len = sqrt(dx * dx + dz * dz);
+    if (len < 1e-6) return 1;          /* degenerate span: nothing to straddle */
+    dx /= len; dz /= len;
+    /* Along-road unit is the lateral rotated 90 deg (left of travel is
+     * (tz,-tx), so travel is (-dz, dx) in the same convention). */
+    tx = -dz; tz = dx;
+    /* Legs stand on the LOWER of the two edges so neither foot floats on a
+     * cambered or graded span. */
+    base_y = (ly < ry) ? ly : ry;
+
+    /* --- two uprights, each a 4-quad box (no top/bottom: the panel covers the
+     * top and the ground covers the bottom) --- */
+    for (i = 0; i < 2; i++) {
+        const double ex = i ? rx : lx, ez = i ? rz : lz;
+        const double s  = i ? -1.0 : 1.0;              /* outboard direction */
+        const double cxx = ex + dx * s * TD5_TG_GANTRY_OUT;
+        const double czz = ez + dz * s * TD5_TG_GANTRY_OUT;
+        const double y0 = base_y - 40.0;               /* sunk, no gap        */
+        const double y1 = base_y + TD5_TG_GANTRY_CLEAR + TD5_TG_GANTRY_PANEL_H;
+        int face;
+        /* Four faces of the post, each spanned by the lateral or the along-road
+         * axis; the page's V runs up the post. */
+        for (face = 0; face < 4; face++) {
+            /* (a,b) = the in-plane axis, (c) = the fixed offset axis. */
+            const double ax = (face < 2) ? dx : tx, az = (face < 2) ? dz : tz;
+            const double ox = (face < 2) ? tx : dx, oz = (face < 2) ? tz : dz;
+            const double half = (face < 2) ? TD5_TG_GANTRY_LEG_W
+                                           : TD5_TG_GANTRY_THICK;
+            const double off  = ((face & 1) ? -1.0 : 1.0)
+                              * ((face < 2) ? TD5_TG_GANTRY_THICK
+                                            : TD5_TG_GANTRY_LEG_W);
+            qx[0] = cxx + ax * half + ox * off; qz[0] = czz + az * half + oz * off;
+            qx[1] = cxx - ax * half + ox * off; qz[1] = czz - az * half + oz * off;
+            qx[2] = qx[1];                      qz[2] = qz[1];
+            qx[3] = qx[0];                      qz[3] = qz[0];
+            qy[0] = y0; qy[1] = y0; qy[2] = y1; qy[3] = y1;
+            tg_gantry_quad(px, py, pz, uu, vv, &n, qx, qy, qz,
+                           0.0, 0.12, 1.0, 0.0);
+        }
+    }
+
+    /* --- panel: a slab bridging the two legs. Front and back faces are
+     * separated by TD5_TG_GANTRY_THICK so they cannot z-fight, and the
+     * underside is capped so the slab does not read as hollow from a chase
+     * camera looking up at it. --- */
+    {
+        const double y0 = base_y + TD5_TG_GANTRY_CLEAR;
+        const double y1 = y0 + TD5_TG_GANTRY_PANEL_H;
+        const double ox = lx + dx * TD5_TG_GANTRY_OUT;   /* left  end */
+        const double oz = lz + dz * TD5_TG_GANTRY_OUT;
+        const double kx = rx - dx * TD5_TG_GANTRY_OUT;   /* right end */
+        const double kz = rz - dz * TD5_TG_GANTRY_OUT;
+        int face;
+        for (face = 0; face < 2; face++) {
+            const double s = face ? -1.0 : 1.0;
+            qx[0] = ox + tx * s * TD5_TG_GANTRY_THICK;
+            qz[0] = oz + tz * s * TD5_TG_GANTRY_THICK;
+            qx[1] = kx + tx * s * TD5_TG_GANTRY_THICK;
+            qz[1] = kz + tz * s * TD5_TG_GANTRY_THICK;
+            qx[2] = qx[1]; qz[2] = qz[1];
+            qx[3] = qx[0]; qz[3] = qz[0];
+            qy[0] = y0; qy[1] = y0; qy[2] = y1; qy[3] = y1;
+            /* U across the whole page: the banner artwork reads left to right
+             * across the road on both faces. */
+            tg_gantry_quad(px, py, pz, uu, vv, &n, qx, qy, qz,
+                           face ? 1.0 : 0.0, face ? 0.0 : 1.0, 1.0, 0.0);
+        }
+        /* Underside cap. */
+        qx[0] = ox + tx * TD5_TG_GANTRY_THICK; qz[0] = oz + tz * TD5_TG_GANTRY_THICK;
+        qx[1] = kx + tx * TD5_TG_GANTRY_THICK; qz[1] = kz + tz * TD5_TG_GANTRY_THICK;
+        qx[2] = kx - tx * TD5_TG_GANTRY_THICK; qz[2] = kz - tz * TD5_TG_GANTRY_THICK;
+        qx[3] = ox - tx * TD5_TG_GANTRY_THICK; qz[3] = oz - tz * TD5_TG_GANTRY_THICK;
+        qy[0] = y0; qy[1] = y0; qy[2] = y0; qy[3] = y0;
+        tg_gantry_quad(px, py, pz, uu, vv, &n, qx, qy, qz, 0.0, 1.0, 0.9, 1.0);
+    }
+
+    quads = n / 4;
+    for (i = 0; i < n; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
+    cx /= n; cy /= n; cz /= n;
+    for (i = 0; i < n; i++) {
+        double ddx = px[i] - cx, ddy = py[i] - cy, ddz = pz[i] - cz;
+        double d = sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+        if (d > radius) radius = d;
+    }
+    if (!(radius > 0.0)) radius = 1.0;
+
+    tg_put_u16(blk, 259);
+    tg_put_u16(blk, 0);                    /* opaque, not a billboard */
+    tg_put_u32(blk, 1);
+    tg_put_u32(blk, (unsigned)n);
+    tg_put_f32(blk, radius);
+    tg_put_f32(blk, cx); tg_put_f32(blk, cy); tg_put_f32(blk, cz);
+    tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+    tg_put_u32(blk, 0);
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE);
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE + TD5_TG_CMD_SIZE);
+    tg_put_u32(blk, 0);
+
+    tg_put_u16(blk, 0);                    /* dispatch_type 0 */
+    tg_put_u16(blk, TD5_TG_PAGE_BANNER);
+    tg_put_u32(blk, 0);
+    tg_put_u16(blk, 0);                    /* triangle_count */
+    tg_put_u16(blk, (unsigned)quads);
+    tg_put_u32(blk, 0);
+
+    for (i = 0; i < n; i++) {
+        tg_put_f32(blk, px[i]); tg_put_f32(blk, py[i]); tg_put_f32(blk, pz[i]);
+        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+        tg_put_u32(blk, 0xFFFFFFFFu);
+        tg_put_f32(blk, uu[i]); tg_put_f32(blk, vv[i]);
+        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+    }
+    return !blk->oom;
+}
+
+/* Group E -- track furniture: start/finish banners, branch mouths, run-off.
+ * Exactly two gantries per track: one on the grid span and one on the finish
+ * span (tg_finish_span, the same span the last LEVELINF checkpoint sits on --
+ * so the banner is over the line that actually ends the race, not near it).
+ * Default ON; TD5RE_AUTOTRACK_BANNERS=0 removes both. */
+static int tg_emit_fb_track(const TG_FBHook *h)
+{
+    const int ring = (s_ring_len > 0) ? s_ring_len : h->nspans;
+    const int finish = tg_finish_span(ring);
+
+    if (h->si != TD5_TG_GRID_SPAN && h->si != finish) return 1;
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_BANNERS")) return 1;
+    if (*h->nmesh + 1 >= h->maxmesh) return 1;
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    return tg_emit_gantry(h->nl, h->si, h->blk);
+}
 
 /* Fork whose MAIN half-carriageway covers main-ring span si, or -1. */
 static int tg_fork_of_main(int si)
@@ -3982,10 +4239,46 @@ static void tg_emit_texture_page_fb_terrain(TG_Buf *out, int which)
     else tg_emit_texture_page_flat(out, 0, 236, 240, 244, 26, 0x4222u);
 }
 
-/* Start/finish gate banner. */
+/* Start/finish gate banner: a black-and-white chequer band across the middle of
+ * the page with a dark surround, which is what the shipped gantries read as from
+ * the road and what makes a start/finish line legible at speed. Painted rather
+ * than grained because the gantry maps this page ONCE across the whole panel
+ * (see tg_emit_gantry's UVs), so tonal noise would just be a grey slab.
+ *
+ * The page is used for the LEGS too, and they sample only u in [0, 0.12] -- the
+ * left column band -- so that column is kept a plain dark grey. */
 static void tg_emit_texture_page_fb_banner(TG_Buf *out)
 {
-    tg_emit_texture_page_flat(out, 0, 60, 60, 60, 120, 0xBA11u);
+    /* 0 = post grey, 1 = surround (near black), 2 = white, 3 = mid grey. */
+    static const unsigned char k_pal[4][3] = {
+        {  92,  92,  94 },   /* BGR: post/leg grey       */
+        {  22,  22,  24 },   /* surround                 */
+        { 236, 240, 244 },   /* chequer light            */
+        {  34,  34,  36 }    /* chequer dark             */
+    };
+    const int band_lo = TD5_TG_TEX_DIM / 4;          /* chequer band, top    */
+    const int band_hi = TD5_TG_TEX_DIM - band_lo;    /* chequer band, bottom */
+    const int cell    = TD5_TG_TEX_DIM / 8;          /* 8 units, so 8x4 cells */
+    const int leg_col = (TD5_TG_TEX_DIM * 12) / 100; /* the legs' u window   */
+    int i, y, x;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                /* opaque page */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        const unsigned char *c = k_pal[i & 3];
+        tg_put_u8(out, c[0]); tg_put_u8(out, c[1]); tg_put_u8(out, c[2]);
+    }
+
+    for (y = 0; y < TD5_TG_TEX_DIM; y++) {
+        for (x = 0; x < TD5_TG_TEX_DIM; x++) {
+            int idx;
+            if (x < leg_col)                       idx = 0;   /* leg column   */
+            else if (y < band_lo || y >= band_hi)  idx = 1;    /* surround     */
+            else idx = (((x / cell) + (y / cell)) & 1) ? 3 : 2;
+            tg_put_u8(out, (unsigned)idx);
+        }
+    }
 }
 
 /* Emit a page from real (already palette-indexed) TD5 texture data, in the same
