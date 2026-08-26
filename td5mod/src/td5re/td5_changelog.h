@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 26" },
+    { CL_ITEM,    "Auto-track now has MULTIPLE branches: a short chicane, a" },
+    { CL_ITEM,    "  split carriageway and a long alternate route, each" },
+    { CL_ITEM,    "  forking and rejoining (TD5RE_AUTOTRACK_BRANCHES=1)." },
     { CL_ITEM,    "Auto-track ROAD SURFACES now vary by biome: icy alpine" },
     { CL_ITEM,    "  roads slide, cobbled oriental streets drag, dirt in" },
     { CL_ITEM,    "  the fields, gravel yards -- grip + texture per theme." },

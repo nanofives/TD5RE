@@ -144,9 +144,16 @@ static unsigned int s_rng;
  * inside one). 0 = nothing to check. */
 static unsigned int s_selfcheck_regen_seed = 0;
 
-/* Branch jump-table state, produced by tg_emit_strip and consumed by the
- * header write in the same call. */
-static int s_jump_lo, s_jump_hi, s_jump_base, s_jump_have, s_ring_len;
+/* Branch fork descriptors, produced by tg_build_strip and consumed by the header
+ * jump-table write and by tg_emit_models (multi-fork). Each fork splits the ring
+ * at span F into a main half [F+1..F+len] and a corridor appended after the ring
+ * at [cbase..cbase+len-1], rejoining at span R. The loader (td5_track.c) already
+ * iterates an N-entry jump table, so the whole chain is multi-fork. */
+#define TD5_TG_BRANCH_MAX 4
+typedef struct { int F, len, cbase, R; } TG_Fork;
+static TG_Fork s_forks[TD5_TG_BRANCH_MAX];
+static int s_fork_count;
+static int s_ring_len;
 
 /* Seed of the last successful build, for reproducing a good random track. */
 static unsigned int s_last_seed = 0;
@@ -912,6 +919,19 @@ static int tg_branches_enabled(void)
     return td5_env_flag_off("TD5RE_AUTOTRACK_BRANCHES");
 }
 
+/* True if span si lies in ANY fork's cleared region (approach through rejoin):
+ * the corridor bows into the side<0 lateral, so verge scenery there would sit in
+ * the branch. Used by the facade/prop/water suppression. */
+static int tg_span_in_fork_clear(int si)
+{
+    int i;
+    for (i = 0; i < s_fork_count; i++)
+        if (si >= s_forks[i].F - TD5_TG_BRANCH_WIDEN - 2 &&
+            si <= s_forks[i].R + 2)
+            return 1;
+    return 0;
+}
+
 /* Append one vertex row of (lanes+1) points for node n, relative to (ox,oy,oz),
  * laterally shifted by `shift` (world units, +ve = left of travel) and using
  * `width`. Returns the row's first vertex index. */
@@ -1005,10 +1025,10 @@ static void tg_append_span(TG_Buf *spans, int type, int lanes,
  * the right-half centre (-width/4) plus an outward bow that is 0 at both ends
  * (so it lines back up with the road halves at the fork and the rejoin) and
  * peaks in the middle. */
-static double tg_branch_shift(int k, double width)
+static double tg_branch_shift(int k, int len, double width)
 {
-    double f   = (double)k / (double)TD5_TG_BRANCH_LEN;   /* 0 .. 1 */
-    double bow = sin(f * TD5_TG_PI);                      /* 0 -> 1 -> 0 */
+    double f   = (len > 0) ? (double)k / (double)len : 0.0;   /* 0 .. 1 */
+    double bow = sin(f * TD5_TG_PI);                          /* 0 -> 1 -> 0 */
     return -width * 0.25 - width * TD5_TG_BRANCH_BOW * bow;
 }
 
@@ -1180,9 +1200,9 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
      * INDEX -- contact then fails at every seam and the car sinks through the
      * road (measured: wheel_mask=0 for 343/385 ticks, even dead flat). */
     const int lanes   = nl->v[0].lanes;
-    /* Reset per-call: a failed or branch-less build must not leave a stale
-     * jump record from a previous generation in the header. */
-    s_jump_lo = s_jump_hi = s_jump_base = s_jump_have = 0;
+    /* Reset per-call: a failed or branch-less build must not leave stale fork
+     * records from a previous generation in the header. */
+    s_fork_count = 0;
     s_ring_len = 0;
     /* Spans per shared origin. Tunable so the effect of origin granularity on
      * ground contact is measurable: the ground probe appears to read a span's
@@ -1213,117 +1233,112 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                             &vtx_count))
         ok = 0;
 
-    /* ---- BRANCH (opt-in) ---- */
+    /* ---- BRANCHES (opt-in): multiple forks, each a split-and-rejoin ---- */
     {
-        const int emitted_main = (int)(spans.len / 24);
-        int jump_lo = 0, jump_hi = 0, jump_base = 0, have_jump = 0;
+        const int ring = (int)(spans.len / 24);   /* main ring span count */
+        s_fork_count = 0;
 
-        if (ok && tg_branches_enabled() &&
-            emitted_main > TD5_TG_BRANCH_FORK_SPAN + TD5_TG_BRANCH_LEN + 8) {
-            const int F     = TD5_TG_BRANCH_FORK_SPAN;
-            const int ring  = emitted_main;
-            const int b0    = ring + 1;               /* NOT ring: see spec */
-            const int LEN   = TD5_TG_BRANCH_LEN;
-            const int main_half = lanes / 2;          /* main (left) carriageway */
-            const int br_lanes  = lanes - main_half;  /* branch (right) carriageway */
-            const int R     = F + 1 + LEN;            /* rejoin span (main ring) */
-            int k;
+        if (ok && tg_branches_enabled()) {
+            const int main_half = lanes / 2;
+            const int br_lanes  = lanes - main_half;
+            /* Varied corridor lengths give the shipped topologies: a short
+             * chicane, a canonical split, a long alternate route. */
+            static const int k_lens[] = { 8, 40, 120 };
+            int off = ring;                          /* append cursor after ring */
+            int pos = TD5_TG_GRID_SPAN + 120;        /* first fork, past the grid */
+            unsigned int i;
 
-            /* 1. FORK span F: stays FULL width and splits down the middle. Its
-             *    own dedicated full-width rows, type 8, link_next -> corridor.
-             *    sub_lane < main_half -> main (span F+1); else -> branch (b0). */
-            {
-                const TG_Node *a = &nl->v[F], *b = &nl->v[F + 1];
-                int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
-                int lvi = tg_append_row(&verts, &vtx_count, a, lanes,
-                                        a->width, 0.0, ox, oy, oz);
-                int rvi = tg_append_row(&verts, &vtx_count, b, lanes,
-                                        b->width, 0.0, ox, oy, oz);
-                tg_patch_span(&spans, F, 8, lanes, lvi, rvi, b0, -1, ox, oy, oz);
+            for (i = 0; i < sizeof(k_lens) / sizeof(k_lens[0]) &&
+                        s_fork_count < TD5_TG_BRANCH_MAX; i++) {
+                int L = k_lens[i];
+                int F = pos;
+                int R = F + 1 + L;
+                if (main_half < 1 || br_lanes < 1) break;
+                if (R + 24 >= ring) break;           /* must fit on the ring */
+                s_forks[s_fork_count].F = F;
+                s_forks[s_fork_count].len = L;
+                s_forks[s_fork_count].cbase = off + 1;  /* pad@off, corridor off+1.. */
+                s_forks[s_fork_count].R = R;
+                s_fork_count++;
+                off += 1 + L;
+                pos = R + 150;                        /* gap before the next fork */
             }
 
-            /* 2. MAIN carriageway [F+1 .. F+LEN]: narrow to the LEFT half. Each
-             *    span gets dedicated rows at main_half lanes, centre +width/4. */
-            for (k = 1; k <= LEN; k++) {
-                const int si = F + k;
-                const TG_Node *a = &nl->v[si], *b = &nl->v[si + 1];
-                int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
-                int lvi = tg_append_row(&verts, &vtx_count, a, main_half,
-                                        a->width * 0.5, TD5_TG_MAIN_SHIFT(a->width),
-                                        ox, oy, oz);
-                int rvi = tg_append_row(&verts, &vtx_count, b, main_half,
-                                        b->width * 0.5, TD5_TG_MAIN_SHIFT(b->width),
-                                        ox, oy, oz);
-                tg_patch_span(&spans, si, 1, main_half, lvi, rvi, -1, -1,
-                              ox, oy, oz);
-            }
+            /* Emit each fork's strip pieces. Corridors are appended in fork
+             * order, so their indices match the cbase computed above. */
+            for (i = 0; ok && i < (unsigned)s_fork_count; i++) {
+                const int F = s_forks[i].F, L = s_forks[i].len;
+                const int b0 = s_forks[i].cbase, R = s_forks[i].R;
+                const int sentinel_end = b0 + L - 1;
+                int k;
 
-            /* 3. PAD span at index == ring, so the corridor starts at ring+1.
-             *    Geometry is irrelevant; it is never linked to. */
-            {
-                const TG_Node *a = &nl->v[F];
-                int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
-                int lvi = tg_append_row(&verts, &vtx_count, a, br_lanes,
-                                        a->width * 0.5, 0.0, ox, oy, oz);
-                int rvi = tg_append_row(&verts, &vtx_count, a, br_lanes,
-                                        a->width * 0.5, 0.0, ox, oy, oz);
-                tg_append_span(&spans, 1, br_lanes, lvi, rvi, -1, -1,
-                               ox, oy, oz);
+                /* 1. FORK span F: full width, type 8, link_next -> corridor. */
+                {
+                    const TG_Node *a = &nl->v[F], *b = &nl->v[F + 1];
+                    int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
+                    int lvi = tg_append_row(&verts, &vtx_count, a, lanes,
+                                            a->width, 0.0, ox, oy, oz);
+                    int rvi = tg_append_row(&verts, &vtx_count, b, lanes,
+                                            b->width, 0.0, ox, oy, oz);
+                    tg_patch_span(&spans, F, 8, lanes, lvi, rvi, b0, -1, ox, oy, oz);
+                }
+                /* 2. MAIN half carriageway [F+1 .. F+L]. */
+                for (k = 1; k <= L; k++) {
+                    const int si = F + k;
+                    const TG_Node *a = &nl->v[si], *b = &nl->v[si + 1];
+                    int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
+                    int lvi = tg_append_row(&verts, &vtx_count, a, main_half,
+                                            a->width * 0.5, TD5_TG_MAIN_SHIFT(a->width),
+                                            ox, oy, oz);
+                    int rvi = tg_append_row(&verts, &vtx_count, b, main_half,
+                                            b->width * 0.5, TD5_TG_MAIN_SHIFT(b->width),
+                                            ox, oy, oz);
+                    tg_patch_span(&spans, si, 1, main_half, lvi, rvi, -1, -1,
+                                  ox, oy, oz);
+                }
+                /* 3. PAD span at b0-1 (the current append head). */
+                {
+                    const TG_Node *a = &nl->v[F];
+                    int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
+                    int lvi = tg_append_row(&verts, &vtx_count, a, br_lanes,
+                                            a->width * 0.5, 0.0, ox, oy, oz);
+                    int rvi = tg_append_row(&verts, &vtx_count, a, br_lanes,
+                                            a->width * 0.5, 0.0, ox, oy, oz);
+                    tg_append_span(&spans, 1, br_lanes, lvi, rvi, -1, -1, ox, oy, oz);
+                }
+                /* 4. BRANCH corridor b0..b0+L-1 (right half, bowed). */
+                for (k = 0; k < L; k++) {
+                    const TG_Node *a = &nl->v[F + 1 + k], *b = &nl->v[F + 2 + k];
+                    int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
+                    int lvi = tg_append_row(&verts, &vtx_count, a, br_lanes,
+                                            a->width * 0.5, tg_branch_shift(k, L, a->width),
+                                            ox, oy, oz);
+                    int rvi = tg_append_row(&verts, &vtx_count, b, br_lanes,
+                                            b->width * 0.5, tg_branch_shift(k + 1, L, b->width),
+                                            ox, oy, oz);
+                    int type = (k == 0) ? 9 : ((k == L - 1) ? 10 : 1);
+                    int nxt  = (k == L - 1) ? R : -1;
+                    int prv  = (k == 0) ? F : -1;
+                    tg_append_span(&spans, type, br_lanes, lvi, rvi, nxt, prv,
+                                   ox, oy, oz);
+                }
+                /* 5. REJOIN span R: full width, type 11, link_prev -> sentinel. */
+                {
+                    const TG_Node *a = &nl->v[R], *b = &nl->v[R + 1];
+                    int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
+                    int lvi = tg_append_row(&verts, &vtx_count, a, lanes,
+                                            a->width, 0.0, ox, oy, oz);
+                    int rvi = tg_append_row(&verts, &vtx_count, b, lanes,
+                                            b->width, 0.0, ox, oy, oz);
+                    if (R >= 0 && R < ring)
+                        tg_patch_span(&spans, R, 11, lanes, lvi, rvi, -1,
+                                      sentinel_end, ox, oy, oz);
+                }
+                TD5_LOG_I(LOG_TAG, "trackgen: fork %u F=%d len=%d corridor=%d..%d "
+                          "rejoin=%d (ring=%d)", i, F, L, b0, sentinel_end, R, ring);
             }
-
-            /* 4. BRANCH corridor b0..b0+LEN-1: the RIGHT half, centre -width/4
-             *    plus an outward bow, running parallel to main spans F+1..F+LEN.
-             *    type 9 start / 1 interior / 10 end (links to the rejoin). */
-            for (k = 0; k < LEN; k++) {
-                const TG_Node *a = &nl->v[F + 1 + k], *b = &nl->v[F + 2 + k];
-                int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
-                int lvi = tg_append_row(&verts, &vtx_count, a, br_lanes,
-                                        a->width * 0.5, tg_branch_shift(k, a->width),
-                                        ox, oy, oz);
-                int rvi = tg_append_row(&verts, &vtx_count, b, br_lanes,
-                                        b->width * 0.5, tg_branch_shift(k + 1, b->width),
-                                        ox, oy, oz);
-                int type = (k == 0) ? 9 : ((k == LEN - 1) ? 10 : 1);
-                int nxt  = (k == LEN - 1) ? R : -1;
-                int prv  = (k == 0) ? F : -1;
-                tg_append_span(&spans, type, br_lanes, lvi, rvi, nxt, prv,
-                               ox, oy, oz);
-            }
-
-            /* 5. REJOIN span R: back to FULL width -- the two half carriageways
-             *    merge here. Dedicated full-width rows, type 11 (JUNCTION_BWD),
-             *    link_prev -> corridor SENTINEL_END. Main (R-1, main_half) feeds
-             *    the LEFT lanes, the branch (br_lanes) feeds the right via the
-             *    type-10 forward delta (+= lanes(R) - br_lanes). Because R is the
-             *    road's OWN width there is no forward lane-drop after it, so
-             *    nothing is stranded -- and because lanes(R) > lanes(R-1) the
-             *    reverse split fires too, so the branch is reverse-drivable. */
-            {
-                const int sentinel_end = ring + LEN; /* pad@ring, corridor ring+1..ring+LEN */
-                const TG_Node *a = &nl->v[R], *b = &nl->v[R + 1];
-                int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
-                int lvi = tg_append_row(&verts, &vtx_count, a, lanes,
-                                        a->width, 0.0, ox, oy, oz);
-                int rvi = tg_append_row(&verts, &vtx_count, b, lanes,
-                                        b->width, 0.0, ox, oy, oz);
-                if (R >= 0 && R < ring)
-                    tg_patch_span(&spans, R, 11, lanes, lvi, rvi, -1,
-                                  sentinel_end, ox, oy, oz);
-            }
-
-            jump_lo   = b0;
-            jump_hi   = b0 + TD5_TG_BRANCH_LEN - 1;
-            jump_base = F + 1;
-            have_jump = 1;
-            TD5_LOG_I(LOG_TAG, "trackgen: branch fork=%d corridor=%d..%d "
-                      "base=%d rejoin=%d(type11) (ring=%d, main=span-%d)",
-                      F, jump_lo, jump_hi, jump_base, F + 1 + TD5_TG_BRANCH_LEN,
-                      ring, jump_lo - jump_base);
         }
-
-        s_jump_lo = jump_lo; s_jump_hi = jump_hi;
-        s_jump_base = jump_base; s_jump_have = have_jump;
-        s_ring_len = emitted_main;
+        s_ring_len = ring;
     }
 
     if (spans.oom || verts.oom) {
@@ -1350,19 +1365,21 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
         tg_put_u32(out, vtx_off);
         tg_put_u32(out, (unsigned int)vtx_count);
         tg_put_u32(out, (unsigned int)emitted);   /* total spans */
-        /* Jump-entry count at 0x14, then 6-byte records from 0x18 (native TD5
-         * offset; 0x20 is the TD6-converted form). */
-        tg_put_u32(out, (unsigned int)(s_jump_have ? 1 : 0));
-        if (s_jump_have) {
-            tg_put_u16(out, (unsigned)s_jump_lo);
-            tg_put_u16(out, (unsigned)s_jump_hi);
-            tg_put_u16(out, (unsigned)s_jump_base);
-            tg_put_zeros(out, TD5_TG_PRE_SPAN_BYTES - 4 - 6);
-        } else {
-            /* No records. This block must stay exactly TD5_TG_PRE_SPAN_BYTES
-             * long -- the loader derives the span count from
-             * (vtx_off - span_off)/24. */
-            tg_put_zeros(out, TD5_TG_PRE_SPAN_BYTES - 4);
+        /* Jump-entry count at 0x14, then N 6-byte records [lo,hi,base] from 0x18
+         * (native TD5 offset; the loader iterates all N). The block must stay
+         * exactly TD5_TG_PRE_SPAN_BYTES long -- the loader derives the span count
+         * from (vtx_off - span_off)/24 -- so pad out the remainder. */
+        {
+            int j, nrec = s_fork_count;
+            if (nrec > (TD5_TG_PRE_SPAN_BYTES - 4) / 6)
+                nrec = (TD5_TG_PRE_SPAN_BYTES - 4) / 6;
+            tg_put_u32(out, (unsigned int)nrec);
+            for (j = 0; j < nrec; j++) {
+                tg_put_u16(out, (unsigned)s_forks[j].cbase);
+                tg_put_u16(out, (unsigned)(s_forks[j].cbase + s_forks[j].len - 1));
+                tg_put_u16(out, (unsigned)(s_forks[j].F + 1));
+            }
+            tg_put_zeros(out, TD5_TG_PRE_SPAN_BYTES - 4 - nrec * 6);
         }
         if (!tg_buf_need(out, spans.len + verts.len)) {
             ok = 0;
@@ -2074,11 +2091,7 @@ static void tg_side_geom(const TG_NodeList *nl, int si, int left,
 
     g->built = 0;
     if (!tg_facade_built(si, left)) return;
-    if (tg_branches_enabled() && side < 0.0) {
-        const int lo = TD5_TG_BRANCH_FORK_SPAN - TD5_TG_BRANCH_WIDEN;
-        const int hi = TD5_TG_BRANCH_FORK_SPAN + TD5_TG_BRANCH_LEN + 1;
-        if (si >= lo && si <= hi) return;
-    }
+    if (tg_branches_enabled() && side < 0.0 && tg_span_in_fork_clear(si)) return;
 
     /* Height is a whole number of FLOORS, keyed to the RUN so a building is one
      * uniform block that steps at the next side street. */
@@ -2222,9 +2235,7 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
  * suppress props there for the same reason as facades/trees. */
 static int tg_side_blocked(int si, double side)
 {
-    const int lo = TD5_TG_BRANCH_FORK_SPAN - TD5_TG_BRANCH_WIDEN;
-    const int hi = TD5_TG_BRANCH_FORK_SPAN + TD5_TG_BRANCH_LEN + 1;
-    return tg_branches_enabled() && side < 0.0 && si >= lo && si <= hi;
+    return tg_branches_enabled() && side < 0.0 && tg_span_in_fork_clear(si);
 }
 
 /* Emit one prop billboard (prop-page index pp) beside span si on `side`, `gap`
@@ -2790,13 +2801,9 @@ static int tg_span_needs_guardrail(const TG_NodeList *nl, int si, int nspans)
      * boundary; a barrier there is invisible clutter. */
     if (tg_span_in_tunnel(si)) return 0;
 
-    /* EXCLUSION: the branch fork mouth and its widened approach. A barrier
-     * across the corridor entrance would visually wall off the branch. */
-    if (tg_branches_enabled()) {
-        const int lo = TD5_TG_BRANCH_FORK_SPAN - TD5_TG_BRANCH_WIDEN - 2;
-        const int hi = TD5_TG_BRANCH_FORK_SPAN + TD5_TG_BRANCH_LEN + 2;
-        if (si >= lo && si <= hi) return 0;
-    }
+    /* EXCLUSION: the branch fork mouths and their widened approaches. A barrier
+     * across a corridor entrance would visually wall off the branch. */
+    if (tg_branches_enabled() && tg_span_in_fork_clear(si)) return 0;
     (void)nspans;
 
     /* On a deliberately-placed deck: rail the WHOLE run, including the shallow
@@ -2917,25 +2924,39 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk)
     return !blk->oom;
 }
 
+/* Fork whose MAIN half-carriageway covers main-ring span si, or -1. */
+static int tg_fork_of_main(int si)
+{
+    int i;
+    for (i = 0; i < s_fork_count; i++)
+        if (si > s_forks[i].F && si <= s_forks[i].F + s_forks[i].len) return i;
+    return -1;
+}
+
+/* Fork whose appended CORRIDOR covers span si (sets *k = corridor step), or -1. */
+static int tg_fork_of_corridor(int si, int *k)
+{
+    int i;
+    for (i = 0; i < s_fork_count; i++) {
+        int lo = s_forks[i].cbase, hi = lo + s_forks[i].len - 1;
+        if (si >= lo && si <= hi) { if (k) *k = si - lo; return i; }
+    }
+    return -1;
+}
+
 static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                           TG_Buf *out)
 {
-    /* `nspans` is the FULL strip span count. With a branch it INCLUDES the pad +
-     * corridor tail (layout: main 0..ring-1, pad at ring, corridor ring+1..
-     * ring+LEN), so nspans = ring + 1 + LEN. The centerline `nl` only has the
-     * main-ring nodes, so the corridor spans must take their geometry from the
-     * base main node nl->v[F+1+k] plus the branch shift -- NOT from nl->v[si],
-     * which is out of range there (the old code read OOB garbage for those spans,
-     * emitting nothing visible, which is why the branch had no road). */
-    const int branch_active = tg_branches_enabled() &&
-        nspans > TD5_TG_BRANCH_FORK_SPAN + TD5_TG_BRANCH_LEN + 8;
-    const int ring = branch_active ? nspans - 1 - TD5_TG_BRANCH_LEN : nspans;
+    /* `nspans` is the FULL strip span count. With branches it INCLUDES each
+     * fork's pad + corridor tail; the main ring is s_ring_len and the corridors
+     * are appended after it (fork descriptors in s_forks). The centerline `nl`
+     * only has the main-ring nodes, so a corridor span takes its geometry from
+     * the base main node nl->v[F+1+k] plus the branch shift. */
+    const int branch_active = tg_branches_enabled() && s_fork_count > 0;
+    const int ring = branch_active ? s_ring_len : nspans;
     /* Native-faithful fork: the road SPLITS into two half-width carriageways --
-     * MAIN (left, main_half lanes, +width/4) over ring spans F+1..F+LEN, and the
-     * BRANCH (right, br_lanes, bowed) over the appended corridor. The fork span
-     * F and rejoin R stay full width. The road meshes must match those strip
-     * carriageways, not the full road. */
-    const int F_fork    = TD5_TG_BRANCH_FORK_SPAN;
+     * MAIN (left, main_half lanes, +width/4) and BRANCH (right, br_lanes, bowed)
+     * over the appended corridor. Fork/rejoin spans stay full width. */
     const int main_half = lanes / 2;
     const int br_lanes  = lanes - main_half;
     const int nentries = (nspans + TD5_TG_SPANS_PER_ENTRY - 1)
@@ -2968,18 +2989,19 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
         for (i = 0; i < ns && ok; i++) {
             const int si = s0 + i;
 
-            /* Corridor span (ring < si <= ring+LEN): the BRANCH (right) half
-             * carriageway only, at the bowed geometry. The pad span (si == ring)
-             * carries nothing. The main-road ground skirt already extends under
-             * the corridor, so no separate ground here. */
+            /* Appended corridor span: the BRANCH (right) half carriageway only,
+             * at the bowed geometry of whichever fork owns it. The pad span
+             * (si == cbase-1) carries nothing. */
             if (si >= ring) {
-                const int k = si - ring - 1;
-                if (branch_active && k >= 0 && k < TD5_TG_BRANCH_LEN) {
+                int ck = 0, fi = branch_active ? tg_fork_of_corridor(si, &ck) : -1;
+                if (fi >= 0) {
+                    const int mb = s_forks[fi].F + 1 + ck;  /* base main node */
+                    const int L  = s_forks[fi].len;
                     moff[nmesh++] = meshes.len;
-                    if (!tg_emit_road_quad(nl, F_fork + 1 + k, br_lanes,
-                                           tg_branch_shift(k, nl->v[F_fork + 1 + k].width),
-                                           tg_branch_shift(k + 1, nl->v[F_fork + 2 + k].width),
-                                           0.5, tg_road_page(F_fork + 1 + k), &meshes))
+                    if (!tg_emit_road_quad(nl, mb, br_lanes,
+                                           tg_branch_shift(ck, L, nl->v[mb].width),
+                                           tg_branch_shift(ck + 1, L, nl->v[mb + 1].width),
+                                           0.5, tg_road_page(mb), &meshes))
                         ok = 0;
                 }
                 continue;
@@ -2992,27 +3014,30 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 if (!tg_emit_ground(nl, si, &meshes, wsd)) { ok = 0; break; }
             }
             moff[nmesh++] = meshes.len;
-            /* MAIN carriageway is narrowed to the LEFT half over the branch
-             * region [F+1 .. F+LEN]; elsewhere (incl. the full-width fork span F
-             * and rejoin R) it is the plain full road. */
-            if (branch_active && si > F_fork && si <= F_fork + TD5_TG_BRANCH_LEN) {
-                const int j = si - F_fork - 1;      /* corridor step */
-                if (!tg_emit_road_quad(nl, si, main_half,
-                                       TD5_TG_MAIN_SHIFT(nl->v[si].width),
-                                       TD5_TG_MAIN_SHIFT(nl->v[si + 1].width),
-                                       0.5, tg_road_page(si), &meshes))
-                    ok = 0;
-                /* Fill the median between the two carriageways. */
-                if (ok) {
-                    moff[nmesh++] = meshes.len;
-                    if (!tg_emit_gore(nl, si,
-                                      tg_branch_shift(j, nl->v[si].width),
-                                      tg_branch_shift(j + 1, nl->v[si + 1].width),
-                                      &meshes))
+            /* MAIN carriageway is narrowed to the LEFT half over each fork's
+             * region [F+1 .. F+len]; elsewhere (incl. the full-width fork and
+             * rejoin spans) it is the plain full road. */
+            {
+                int fi = branch_active ? tg_fork_of_main(si) : -1;
+                if (fi >= 0) {
+                    const int L = s_forks[fi].len;
+                    const int j = si - s_forks[fi].F - 1;   /* corridor step */
+                    if (!tg_emit_road_quad(nl, si, main_half,
+                                           TD5_TG_MAIN_SHIFT(nl->v[si].width),
+                                           TD5_TG_MAIN_SHIFT(nl->v[si + 1].width),
+                                           0.5, tg_road_page(si), &meshes))
                         ok = 0;
+                    if (ok) {
+                        moff[nmesh++] = meshes.len;
+                        if (!tg_emit_gore(nl, si,
+                                          tg_branch_shift(j, L, nl->v[si].width),
+                                          tg_branch_shift(j + 1, L, nl->v[si + 1].width),
+                                          &meshes))
+                            ok = 0;
+                    }
+                } else if (!tg_emit_road_mesh(nl, si, lanes, &meshes)) {
+                    ok = 0;
                 }
-            } else if (!tg_emit_road_mesh(nl, si, lanes, &meshes)) {
-                ok = 0;
             }
             /* Guardrails belong in THIS loop, not the box pass below: that pass
              * recovers each piece's offset by dividing the appended bytes by
