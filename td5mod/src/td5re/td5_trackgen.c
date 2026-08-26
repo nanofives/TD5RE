@@ -1973,12 +1973,20 @@ static int tg_emit_box_mesh(TG_Buf *blk, double cx, double cy, double cz,
  * documented in what I read; palette index 0 is reserved for it here. If the
  * engine keys on something else the surround will show as a solid block rather
  * than cutting out -- visible immediately, and diagnosable. */
+/* Declared here, defined with the TREES table it consults: some borrowed TD5
+ * foliage pages hold only ONE HALF of a mirrored pair, and this writer is the
+ * single place that can rebuild the whole tree from one. */
+static int tg_tree_page_is_half(int page);
+
 static int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz,
                                   double half_w, double height, int page, int tag)
 {
     double radius = sqrt(half_w * half_w + height * height);
-    int i;
-    static const double lx[4] = { -1.0,  1.0,  1.0, -1.0 };
+    /* A HALF page is drawn as TWO quads meeting at the billboard's vertical
+     * axis, the second with u reversed -- mirror-and-duplicate, which is how
+     * the shipped level placed the pair. Whole pages stay one quad. */
+    const int nq = tg_tree_page_is_half(page) ? 2 : 1;
+    int q, i;
     static const double ly[4] = {  0.0,  0.0,  1.0,  1.0 };
 
     if (!(radius > 0.0)) radius = 1.0;
@@ -1986,7 +1994,7 @@ static int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz,
     tg_put_u16(blk, 259);
     tg_put_u16(blk, (unsigned)tag);        /* 1 = camera-facing, 2 = additive */
     tg_put_u32(blk, 1);                    /* one command */
-    tg_put_u32(blk, 4);                    /* one quad */
+    tg_put_u32(blk, (unsigned)(4 * nq));   /* one quad, or two when mirrored */
     tg_put_f32(blk, radius);
     tg_put_f32(blk, wx);                   /* bounding centre stays world */
     tg_put_f32(blk, wy + height * 0.5);
@@ -2003,18 +2011,31 @@ static int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz,
     tg_put_u16(blk, (unsigned)page);
     tg_put_u32(blk, 0);
     tg_put_u16(blk, 0);
-    tg_put_u16(blk, 1);                    /* quad_count */
+    tg_put_u16(blk, (unsigned)nq);         /* quad_count */
     tg_put_u32(blk, 0);
 
-    for (i = 0; i < 4; i++) {
-        tg_put_f32(blk, lx[i] * half_w);   /* local: x across, y up */
-        tg_put_f32(blk, ly[i] * height);
-        tg_put_f32(blk, 0.0);
-        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
-        tg_put_u32(blk, 0xFFFFFFFFu);
-        tg_put_f32(blk, (i == 1 || i == 2) ? 1.0 : 0.0);
-        tg_put_f32(blk, (i >= 2) ? 0.0 : 1.0);   /* v flipped: base at v=1 */
-        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+    for (q = 0; q < nq; q++) {
+        /* Whole page: one quad spanning -half_w..+half_w, u 0..1.
+         * Half page: the image's own axis is its u=1 edge (measured: every
+         * half page's foliage is FLUSH at column 63 with a keyed left margin),
+         * so quad 0 runs -half_w..0 with u 0..1 and quad 1 runs 0..+half_w
+         * with u 1..0 -- the seam is the axis and the halves match exactly. */
+        const double x0 = (nq == 1 || q == 0) ? -half_w : 0.0;
+        const double x1 = (nq == 1 || q == 1) ?  half_w : 0.0;
+        const double u0 = (q == 1) ? 1.0 : 0.0;
+        const double u1 = (q == 1) ? 0.0 : 1.0;
+        for (i = 0; i < 4; i++) {
+            /* local: x across, y up. Quad loop order is near-bottom,
+             * far-bottom, far-top, near-top, so 1 and 2 take the far edge. */
+            tg_put_f32(blk, (i == 1 || i == 2) ? x1 : x0);
+            tg_put_f32(blk, ly[i] * height);
+            tg_put_f32(blk, 0.0);
+            tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+            tg_put_u32(blk, 0xFFFFFFFFu);
+            tg_put_f32(blk, (i == 1 || i == 2) ? u1 : u0);
+            tg_put_f32(blk, (i >= 2) ? 0.0 : 1.0);   /* v flipped: base at v=1 */
+            tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+        }
     }
     return !blk->oom;
 }
@@ -2163,27 +2184,123 @@ static int tg_store_page(unsigned int gh)
  * size (raw = world_units*256) plus a procedural silhouette shape used when
  * real textures are off. Real mode fills each variant page from a shipped TD5
  * foliage page (level ids in the comments); index 0 of those pages is the
- * transparent key. Biomes reference these by index (tree_set) and mix them. */
+ * transparent key. Biomes reference these by index (tree_set) and mix them.
+ *
+ * `half` marks a page that holds only ONE HALF of a mirrored pair, which is
+ * what the "trees cut in half" report was seeing: the shipped level placed two
+ * quads sharing a vertical axis, we drew one of them alone. MEASURED from the
+ * key coverage of the borrowed pages in td5_tg_real_tex.h (64x64 index maps,
+ * index 0 = key), per page: how far the non-key content reaches at each edge.
+ *   whole (keyed margin on BOTH edges, so the silhouette closes off):
+ *     0 cols 2..59   1 cols 2..61   5 cols 8..57   6 cols 1..63 (col63 = 1
+ *     texel)   7 cols 7..58   8 cols 1..62 (col63 = 0)
+ *   half (content FLUSH at column 63 -- a straight vertical cut -- with a wide
+ *   keyed margin on the left, and a silhouette that only widens toward that
+ *   edge, i.e. the edge IS the tree's axis):
+ *     2 cols 13..63, col63 filled on 55 of 64 rows
+ *     3 cols 37..63, col63 on 45  (the whole page is one flank of the cone)
+ *     4 cols 38..63, col63 on 49
+ *     9 cols  7..63, col63 on 41
+ * The same measurement over the PROP pages found none half (only prop3, the
+ * monument, reaches both edges, and it reaches BOTH -- a full-page image), so
+ * this is a trees-only problem. Procedural pages draw whole trees, so the
+ * mirroring in tg_emit_billboard_mesh is real-texture mode only. */
 enum { TG_TREE_DECID = 0, TG_TREE_CONIFER, TG_TREE_PALM, TG_TREE_TOPIARY,
        TG_TREE_WILLOW };
-typedef struct { int w, h, shape; } TG_TreePage;
+typedef struct { int w, h, shape, half; } TG_TreePage;
 static const TG_TreePage k_tree_pages[TD5_TG_TREE_VARIANTS] = {
-    { 4200, 5600, TG_TREE_DECID   },  /* 0  L017 p266  deciduous            */
-    { 5200, 6600, TG_TREE_DECID   },  /* 1  L008 p173  big deciduous        */
-    { 4000, 5400, TG_TREE_DECID   },  /* 2  L013 p234  deciduous            */
-    { 3200, 6400, TG_TREE_CONIFER },  /* 3  L003 p441  conifer              */
-    { 3200, 6400, TG_TREE_CONIFER },  /* 4  L003 p445  snow conifer         */
-    { 3400, 7200, TG_TREE_PALM    },  /* 5  L026 p097  palm                 */
-    { 3800, 6800, TG_TREE_PALM    },  /* 6  L014 p249  palm                 */
-    { 3600, 4200, TG_TREE_TOPIARY },  /* 7  L004 p359  topiary              */
-    { 3600, 5000, TG_TREE_TOPIARY },  /* 8  L004 p360  topiary              */
-    { 4200, 6000, TG_TREE_WILLOW  }   /* 9  L004 p369  weeping willow       */
+    { 4200, 5600, TG_TREE_DECID,   0 },  /* 0  L017 p266  deciduous         */
+    { 5200, 6600, TG_TREE_DECID,   0 },  /* 1  L008 p173  big deciduous     */
+    { 4000, 5400, TG_TREE_DECID,   1 },  /* 2  L013 p234  deciduous, half   */
+    { 3200, 6400, TG_TREE_CONIFER, 1 },  /* 3  L003 p441  conifer, half     */
+    { 3200, 6400, TG_TREE_CONIFER, 1 },  /* 4  L003 p445  snow conifer, half*/
+    { 3400, 7200, TG_TREE_PALM,    0 },  /* 5  L026 p097  palm              */
+    { 3800, 6800, TG_TREE_PALM,    0 },  /* 6  L014 p249  palm              */
+    { 3600, 4200, TG_TREE_TOPIARY, 0 },  /* 7  L004 p359  topiary           */
+    { 3600, 5000, TG_TREE_TOPIARY, 0 },  /* 8  L004 p360  topiary           */
+    { 4200, 6000, TG_TREE_WILLOW,  1 }   /* 9  L004 p369  willow, half      */
 };
 
 /* TEXTURES.DAT page slot for tree variant v (variant 0 reuses PAGE_TREE). */
 static int tg_tree_slot(int v)
 {
     return v == 0 ? TD5_TG_PAGE_TREE : (TD5_TG_PAGE_TREE_EXTRA + v - 1);
+}
+
+/* Inverse of tg_tree_slot: tree variant drawn on `page`, or -1 if it is not a
+ * tree page at all. The billboard writer only has the page id to go on. */
+static int tg_tree_variant_of_page(int page)
+{
+    if (page == TD5_TG_PAGE_TREE) return 0;
+    if (page >= TD5_TG_PAGE_TREE_EXTRA &&
+        page <  TD5_TG_PAGE_TREE_EXTRA + TD5_TG_TREE_VARIANTS - 1)
+        return page - TD5_TG_PAGE_TREE_EXTRA + 1;
+    return -1;
+}
+
+static int tg_real_textures_enabled(void);   /* defined with the page emitters */
+
+/* Does `page` need mirror-and-duplicate? Only a real (borrowed) tree page that
+ * the measurement above found to be one half of a pair. */
+static int tg_tree_page_is_half(int page)
+{
+    const int v = tg_tree_variant_of_page(page);
+    if (v < 0 || !k_tree_pages[v].half) return 0;
+    if (!tg_real_textures_enabled()) return 0;   /* procedural pages are whole */
+    /* Default ON (2026-08-26); TD5RE_AUTOTRACK_TREE_MIRROR=0 restores the raw
+     * half page, i.e. the sliced-tree look that was reported. */
+    return td5_env_flag_on("TD5RE_AUTOTRACK_TREE_MIRROR");
+}
+
+/* ---- branch-corridor clearance for verge scenery ----
+ * Trees are placed off the MAIN RING only, so where a branch corridor runs
+ * alongside they land on the branch carriageway. The corridor bows up to
+ * TD5_TG_BRANCH_BOW (1.2) road widths into the -ve lateral, far past the
+ * 800..3200 tree setback, which is why the trees were standing in the road.
+ * Group E owns the fork data; this only READS it. */
+#define TD5_TG_FLORA_BRANCH_MARGIN  600.0   /* verge left between road and trunk */
+
+/* Outward reach of any branch carriageway alongside main-ring span si, in world
+ * units from the centerline, on the -ve lateral. 0 when no fork covers si.
+ * The corridor at step k is centred on tg_branch_shift(k) and is width*0.5
+ * wide, so its outer edge sits at |shift| + width*0.25. Both endpoints of the
+ * span are measured because the bow grows across it. */
+static double tg_flora_branch_reach(const TG_NodeList *nl, int si)
+{
+    double reach = 0.0;
+    int i;
+
+    if (!tg_branches_enabled()) return 0.0;
+    if (si + 1 >= nl->count) return 0.0;
+    for (i = 0; i < s_fork_count; i++) {
+        const int F = s_forks[i].F, L = s_forks[i].len;
+        const int k = si - F - 1;
+        double a, b;
+        if (si <= F || si > F + L) continue;
+        a = -tg_branch_shift(k, L, nl->v[si].width) + nl->v[si].width * 0.25;
+        b = -tg_branch_shift(k + 1, L, nl->v[si + 1].width)
+            + nl->v[si + 1].width * 0.25;
+        if (a > reach) reach = a;
+        if (b > reach) reach = b;
+    }
+    return reach;
+}
+
+/* Push a verge setback (`gap`, measured from the road EDGE) out far enough that
+ * nothing standing on it overlaps a branch carriageway. Returns `gap` unchanged
+ * on the +ve lateral, which no corridor bows into. */
+static double tg_flora_gap_clear(const TG_NodeList *nl, int si, double side,
+                                 double gap)
+{
+    double need;
+
+    if (side > 0.0) return gap;
+    /* Default ON (2026-08-26); TD5RE_AUTOTRACK_FLORA_CLEAR=0 restores the old
+     * placement, i.e. trees standing on the branch. */
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_FLORA_CLEAR")) return gap;
+    need = tg_flora_branch_reach(nl, si) - nl->v[si].width * 0.5
+           + TD5_TG_FLORA_BRANCH_MARGIN;
+    return (gap < need) ? need : gap;
 }
 
 /* ===================== PROPS =====================
@@ -2196,10 +2313,17 @@ static int tg_tree_slot(int v)
 enum { TG_PROP_PERSON = 0, TG_PROP_STATUE, TG_PROP_ANIMAL, TG_PROP_LAMP };
 /* prop-page indices (into k_prop_pages) used by biomes */
 enum { PP_PERSON0 = 0, PP_PERSON1, PP_LION, PP_MONUMENT, PP_SHEEP, PP_DEER, PP_LAMP };
+/* People are HALF the size they were until 2026-08-26. The scale anchor in this
+ * file is TD5_TG_LANE_WIDTH = 1500 raw per lane: at a real 3.65 m lane that is
+ * 411 raw per metre, so the old 600x1400 spectator stood 3.4 m tall and 1.5 m
+ * wide -- 0.93 of a lane width tall, where a 1.8 m human beside a 3.65 m lane
+ * is 0.49. 300x700 puts them at 1.70 m tall / 0.73 m wide, which is 0.47 of a
+ * lane. Only the PEOPLE were rescaled; the statue/animal/lamp entries are what
+ * the report asked to leave alone. */
 typedef struct { int w, h, tag, type, y_off, kind; } TG_PropPage;
 static const TG_PropPage k_prop_pages[TD5_TG_PROP_COUNT] = {
-    {  600, 1400, 1, 1,    0, TG_PROP_PERSON },  /* 0 L001 p316 spectator   */
-    {  600, 1400, 1, 1,    0, TG_PROP_PERSON },  /* 1 L001 p318 spectator   */
+    {  300,  700, 1, 1,    0, TG_PROP_PERSON },  /* 0 L001 p316 spectator   */
+    {  300,  700, 1, 1,    0, TG_PROP_PERSON },  /* 1 L001 p318 spectator   */
     { 1400, 1700, 1, 1,    0, TG_PROP_STATUE },  /* 2 L004 p446 lion        */
     { 1800, 4200, 1, 1,    0, TG_PROP_STATUE },  /* 3 L014 p274 monument    */
     { 1300, 1000, 1, 1,    0, TG_PROP_ANIMAL },  /* 4 L001 p341 sheep       */
@@ -2503,6 +2627,7 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
     tw  = (double)tp->w * jit;
     th  = (double)tp->h * jit;
     gap = 800.0 + (double)((h >> 5) % 2400);       /* set back off the verge */
+    gap = tg_flora_gap_clear(nl, si, side, gap);    /* never on a branch */
 
     lx = n->tz * side; lz = -n->tx * side;
     cx = n->x + lx * (n->width * 0.5 + gap + tw * 0.5);
@@ -2541,6 +2666,24 @@ static int tg_prop_one(const TG_NodeList *nl, int si, int pp, double side,
     return 1;
 }
 
+/* Spectator density for biome `b`, overriding the shared table's prop_people.
+ * The gate below fires when (hash>>28) <= density, so density d covers (d+1)/16
+ * of spans. The table put crowds in four biomes -- CITY 6 (44% of spans),
+ * COAST 6 (44%), ORIENTAL 4 (31%), INDUSTRIAL 3 (25%) -- which reads as a
+ * permanent crowd lining an empty industrial road or a temple lane. A crowd is
+ * a city (and seafront promenade) thing, so those keep a real density and
+ * everywhere else drops to a rare passer-by:
+ *   CITY 6 -> 44%   COAST 3 -> 25%   any other crowded biome 1 -> 12.5%
+ * An accessor rather than an edit to k_biomes, so the shared table stays a
+ * single definition; matched on name so it survives a table reorder. */
+static int tg_people_density(const TG_Biome *b)
+{
+    if (b->prop_people <= 0) return 0;             /* biome wants none */
+    if (!strcmp(b->name, "CITY"))  return b->prop_people;
+    if (!strcmp(b->name, "COAST")) return 3;       /* promenade, not a grandstand */
+    return 1;
+}
+
 /* Roadside prop layer for span si (spectators, streetlamps, statues, animals),
  * additional to the trees/facades. Each emitted billboard records its own mesh
  * offset, so props may be a variable count of differently-sized meshes. */
@@ -2548,12 +2691,13 @@ static int tg_emit_props(const TG_NodeList *nl, int si, const TG_Biome *b,
                          TG_Buf *m, size_t *moff, int *pn, int cap)
 {
     unsigned int h = (unsigned)si * 0x9E3779B9u;   /* independent of the tree hash */
+    const int people = tg_people_density(b);
     double side;
 
     if (tg_span_in_bridge_run(si)) return 1;   /* nothing on the deck but rails */
 
     /* People: spectators on the sidewalk, sometimes a pair. */
-    if (b->prop_people > 0 && (int)(h >> 28) <= b->prop_people && *pn < cap) {
+    if (people > 0 && (int)(h >> 28) <= people && *pn < cap) {
         int pp = PP_PERSON0 + (int)((h >> 5) & 1);
         side = ((h >> 3) & 1) ? 1.0 : -1.0;
         if (!tg_prop_one(nl, si, pp, side, 400.0 + (double)((h >> 6) % 800),
@@ -3685,8 +3829,101 @@ typedef struct {
 
 /* Group A -- city: sidewalks, kerb fences, crossings, deeper building rows. */
 static int tg_emit_fb_city(const TG_FBHook *h)      { (void)h; return 1; }
-/* Group B -- flora & figures: tree placement/backdrop, prop scale & density. */
-static int tg_emit_fb_flora(const TG_FBHook *h)     { (void)h; return 1; }
+/* Group B -- flora & figures: tree placement/backdrop, prop scale & density.
+ *
+ * A CONTINUOUS TREE-LINE band. Individual tree billboards leave the horizon
+ * open, so a forest reads as a handful of cut-outs standing on empty ground:
+ * there was no backdrop layer at all before 2026-08-26. This lays one
+ * alpha-keyed quad per side per span on TD5_TG_PAGE_TREELINE, set back well
+ * behind the billboards, so the far side of the verge is closed off.
+ *
+ * Two properties the report asked for, both from the span's own endpoints:
+ *   - NO POP: the band uses nodes si and si+1, and consecutive spans SHARE that
+ *     endpoint, so the segments abut into one unbroken wall rather than
+ *     appearing and disappearing per span.
+ *   - NO SEAM: u runs 0..1 across a span but ALTERNATES direction per span, so
+ *     at every shared edge the same texel column meets itself. A plain repeat
+ *     would butt u=1 against u=0, which is only seamless if the page tiles
+ *     horizontally, and a noise-built page does not.
+ * The band base is sunk below road level so it sits IN the ground skirt rather
+ * than floating on it. */
+#define TD5_TG_TREELINE_SINK   600.0   /* base below road level, raw */
+
+/* Band height for biome b, 0 = no backdrop. A forest wall stands above the
+ * 5400..7200-raw billboards in front of it; alpine conifers read taller; open
+ * FIELDS get a low far hedgerow line instead of a wall, which is what keeps the
+ * "open horizon" the biome comment asks for. City/industrial/coast/oriental get
+ * none: buildings, the sea and manicured planting close those off already. */
+static double tg_treeline_height(const TG_Biome *b)
+{
+    if (!strcmp(b->name, "FOREST")) return 12000.0;
+    if (!strcmp(b->name, "ALPINE")) return 14000.0;
+    if (!strcmp(b->name, "FIELDS")) return  7000.0;
+    return 0.0;
+}
+
+/* Lateral setback of the band from the road EDGE. Trees sit at 800..3200 plus
+ * half their own width, so the band has to be past that or it would hide them
+ * instead of backing them. FIELDS puts its hedgerow line further out again, at
+ * the far side of the open ground. */
+static double tg_treeline_back(const TG_Biome *b)
+{
+    return (!strcmp(b->name, "FIELDS")) ? 22000.0 : 11000.0;
+}
+
+static int tg_emit_fb_flora(const TG_FBHook *h)
+{
+    const TG_NodeList *nl = h->nl;
+    const int si = h->si;
+    double band, back;
+    int s;
+
+    /* Default ON (2026-08-26); TD5RE_AUTOTRACK_TREELINE=0 disables the band. */
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_TREELINE")) return 1;
+    if (si <= TD5_TG_GRID_SPAN) return 1;        /* keep the grid area clear */
+    if (si + 1 >= nl->count) return 1;
+    if (tg_span_in_bridge_run(si)) return 1;     /* see the river from the deck */
+    band = tg_treeline_height(h->b);
+    if (!(band > 0.0)) return 1;
+    back = tg_treeline_back(h->b);
+
+    /* ONE MESH PER SIDE, not one for both: a mesh spanning both verges has a
+     * bounding sphere wider than the band is far away, so the culler could
+     * never reject it. Two tight spheres cull properly. */
+    for (s = 0; s < 2; s++) {
+        double px[4], py[4], pz[4], uu[4], vv[4];
+        const double side = s ? 1.0 : -1.0;
+        const TG_Node *n0 = &nl->v[si];
+        const TG_Node *n1 = &nl->v[si + 1];
+        const double lx0 = n0->tz * side, lz0 = -n0->tx * side;
+        const double lx1 = n1->tz * side, lz1 = -n1->tx * side;
+        /* Clear of any branch carriageway, same rule as the trees. */
+        const double d = tg_flora_gap_clear(nl, si, side, back);
+        const double e0 = n0->width * 0.5 + d, e1 = n1->width * 0.5 + d;
+        const double bx = n0->x + lx0 * e0, bz = n0->z + lz0 * e0;
+        const double fx = n1->x + lx1 * e1, fz = n1->z + lz1 * e1;
+        const double by = n0->y - TD5_TG_TREELINE_SINK;
+        const double fy = n1->y - TD5_TG_TREELINE_SINK;
+        /* u alternates per span -- see the seam note above. */
+        const double u0 = ((si & 1) == 0) ? 0.0 : 1.0;
+        const double u1 = 1.0 - u0;
+        int seg_page = TD5_TG_PAGE_TREELINE, seg_nq = 1;
+
+        if (*h->nmesh + 1 >= h->maxmesh) return 1;   /* out of slots this entry */
+        /* quad loop: near-bottom, far-bottom, far-top, near-top; v=1 at the
+         * base, matching the page convention that row 0 is the TOP. */
+        px[0] = bx; py[0] = by;        pz[0] = bz; uu[0] = u0; vv[0] = 1.0;
+        px[1] = fx; py[1] = fy;        pz[1] = fz; uu[1] = u1; vv[1] = 1.0;
+        px[2] = fx; py[2] = fy + band; pz[2] = fz; uu[2] = u1; vv[2] = 0.0;
+        px[3] = bx; py[3] = by + band; pz[3] = bz; uu[3] = u0; vv[3] = 0.0;
+
+        h->moff[*h->nmesh] = h->blk->len;
+        if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, 4,
+                                &seg_page, &seg_nq, 1)) return 0;
+        (*h->nmesh)++;
+    }
+    return 1;
+}
 /* How many spans either side of a portal carry mountain massing. Beyond this
  * the camera is inside the bore and the mass is behind the lining, so it is
  * invisible geometry -- 5 spans (~4000 units) is what a driver actually sees
@@ -4960,11 +5197,53 @@ static void tg_emit_texture_page_fb_city(TG_Buf *out, int which)
     else tg_emit_texture_page_flat(out, 0, 148, 148, 144, 30, 0xC37Du);
 }
 
-/* Continuous tree-line backdrop: a canopy band that tiles horizontally without
- * a visible seam (alpha-keyed above the canopy). */
+/* Continuous tree-line backdrop: a canopy band closing off the horizon behind
+ * the individual tree billboards. ALPHA-KEYED (type 1, index 0 = key) so the
+ * sky shows through a ragged top edge -- the flat page this replaced filled
+ * every texel from the whole palette, which both keyed 1 texel in 16 at random
+ * (speckled holes) and gave a dead straight top edge that reads as a green
+ * wall. The page does NOT have to tile horizontally: tg_emit_fb_flora
+ * alternates u direction per span, so a shared edge always meets its own texel
+ * column. */
 static void tg_emit_texture_page_fb_treeline(TG_Buf *out)
 {
-    tg_emit_texture_page_flat(out, 1, 40, 78, 34, 34, 0x77E1u);
+    unsigned int rng = 0x77E1B3C5u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 1);                                  /* 1 = alpha-keyed */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR. 0 = key, 1..7 shadowed mass, 8..15 sunlit crowns. A distant
+     * treeline is desaturated and blue-shifted by haze, which is what keeps it
+     * reading as BACKGROUND rather than a second row of trees. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        if (i == 0)     { b = 255; g = 0;          r = 255; }
+        else if (i < 8) { b = 64 + i * 4; g = 62 + i * 5; r = 44 + i * 3; }
+        else            { b = 88 + i * 2; g = 92 + i * 4; r = 66 + i * 3; }
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;      /* y=0 is the TOP of the page */
+        /* Crown line: 9-texel cells, each a crown of its own height, rounded
+         * off at its shoulders, so the top edge is lumpy like a real canopy
+         * instead of a straight cut. Keyed above it, foliage below. */
+        const unsigned int c = (unsigned)(x / 9) * 2654435761u;
+        const int crown = 12 + (int)((c >> 28) % 10);          /* 12..21 */
+        const int top   = crown + (((x % 9) < 2 || (x % 9) > 6) ? 3 : 0);
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if (y < top - (int)((rng >> 22) % 3)) { tg_put_u8(out, 0); continue; }
+        /* Lit at the crowns where the sun hits, darker down in the mass. */
+        idx = (y < top + 8) ? (8 + (int)((rng >> 16) % 8))
+                            : (1 + (int)((rng >> 16) % 7));
+        tg_put_u8(out, (unsigned)idx);
+    }
 }
 
 /* Tunnel lining -- deliberately NOT a building facade: no windows, no storey
