@@ -3123,8 +3123,101 @@ typedef struct {
 
 /* Group A -- city: sidewalks, kerb fences, crossings, deeper building rows. */
 static int tg_emit_fb_city(const TG_FBHook *h)      { (void)h; return 1; }
-/* Group B -- flora & figures: tree placement/backdrop, prop scale & density. */
-static int tg_emit_fb_flora(const TG_FBHook *h)     { (void)h; return 1; }
+/* Group B -- flora & figures: tree placement/backdrop, prop scale & density.
+ *
+ * A CONTINUOUS TREE-LINE band. Individual tree billboards leave the horizon
+ * open, so a forest reads as a handful of cut-outs standing on empty ground:
+ * there was no backdrop layer at all before 2026-08-26. This lays one
+ * alpha-keyed quad per side per span on TD5_TG_PAGE_TREELINE, set back well
+ * behind the billboards, so the far side of the verge is closed off.
+ *
+ * Two properties the report asked for, both from the span's own endpoints:
+ *   - NO POP: the band uses nodes si and si+1, and consecutive spans SHARE that
+ *     endpoint, so the segments abut into one unbroken wall rather than
+ *     appearing and disappearing per span.
+ *   - NO SEAM: u runs 0..1 across a span but ALTERNATES direction per span, so
+ *     at every shared edge the same texel column meets itself. A plain repeat
+ *     would butt u=1 against u=0, which is only seamless if the page tiles
+ *     horizontally, and a noise-built page does not.
+ * The band base is sunk below road level so it sits IN the ground skirt rather
+ * than floating on it. */
+#define TD5_TG_TREELINE_SINK   600.0   /* base below road level, raw */
+
+/* Band height for biome b, 0 = no backdrop. A forest wall stands above the
+ * 5400..7200-raw billboards in front of it; alpine conifers read taller; open
+ * FIELDS get a low far hedgerow line instead of a wall, which is what keeps the
+ * "open horizon" the biome comment asks for. City/industrial/coast/oriental get
+ * none: buildings, the sea and manicured planting close those off already. */
+static double tg_treeline_height(const TG_Biome *b)
+{
+    if (!strcmp(b->name, "FOREST")) return 12000.0;
+    if (!strcmp(b->name, "ALPINE")) return 14000.0;
+    if (!strcmp(b->name, "FIELDS")) return  7000.0;
+    return 0.0;
+}
+
+/* Lateral setback of the band from the road EDGE. Trees sit at 800..3200 plus
+ * half their own width, so the band has to be past that or it would hide them
+ * instead of backing them. FIELDS puts its hedgerow line further out again, at
+ * the far side of the open ground. */
+static double tg_treeline_back(const TG_Biome *b)
+{
+    return (!strcmp(b->name, "FIELDS")) ? 22000.0 : 11000.0;
+}
+
+static int tg_emit_fb_flora(const TG_FBHook *h)
+{
+    const TG_NodeList *nl = h->nl;
+    const int si = h->si;
+    double band, back;
+    int s;
+
+    /* Default ON (2026-08-26); TD5RE_AUTOTRACK_TREELINE=0 disables the band. */
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_TREELINE")) return 1;
+    if (si <= TD5_TG_GRID_SPAN) return 1;        /* keep the grid area clear */
+    if (si + 1 >= nl->count) return 1;
+    if (tg_span_in_bridge_run(si)) return 1;     /* see the river from the deck */
+    band = tg_treeline_height(h->b);
+    if (!(band > 0.0)) return 1;
+    back = tg_treeline_back(h->b);
+
+    /* ONE MESH PER SIDE, not one for both: a mesh spanning both verges has a
+     * bounding sphere wider than the band is far away, so the culler could
+     * never reject it. Two tight spheres cull properly. */
+    for (s = 0; s < 2; s++) {
+        double px[4], py[4], pz[4], uu[4], vv[4];
+        const double side = s ? 1.0 : -1.0;
+        const TG_Node *n0 = &nl->v[si];
+        const TG_Node *n1 = &nl->v[si + 1];
+        const double lx0 = n0->tz * side, lz0 = -n0->tx * side;
+        const double lx1 = n1->tz * side, lz1 = -n1->tx * side;
+        /* Clear of any branch carriageway, same rule as the trees. */
+        const double d = tg_flora_gap_clear(nl, si, side, back);
+        const double e0 = n0->width * 0.5 + d, e1 = n1->width * 0.5 + d;
+        const double bx = n0->x + lx0 * e0, bz = n0->z + lz0 * e0;
+        const double fx = n1->x + lx1 * e1, fz = n1->z + lz1 * e1;
+        const double by = n0->y - TD5_TG_TREELINE_SINK;
+        const double fy = n1->y - TD5_TG_TREELINE_SINK;
+        /* u alternates per span -- see the seam note above. */
+        const double u0 = ((si & 1) == 0) ? 0.0 : 1.0;
+        const double u1 = 1.0 - u0;
+        int seg_page = TD5_TG_PAGE_TREELINE, seg_nq = 1;
+
+        if (*h->nmesh + 1 >= h->maxmesh) return 1;   /* out of slots this entry */
+        /* quad loop: near-bottom, far-bottom, far-top, near-top; v=1 at the
+         * base, matching the page convention that row 0 is the TOP. */
+        px[0] = bx; py[0] = by;        pz[0] = bz; uu[0] = u0; vv[0] = 1.0;
+        px[1] = fx; py[1] = fy;        pz[1] = fz; uu[1] = u1; vv[1] = 1.0;
+        px[2] = fx; py[2] = fy + band; pz[2] = fz; uu[2] = u1; vv[2] = 0.0;
+        px[3] = bx; py[3] = by + band; pz[3] = bz; uu[3] = u0; vv[3] = 0.0;
+
+        h->moff[*h->nmesh] = h->blk->len;
+        if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, 4,
+                                &seg_page, &seg_nq, 1)) return 0;
+        (*h->nmesh)++;
+    }
+    return 1;
+}
 /* Group C -- tunnels: portal surrounds, mountain massing, width for branches.
  * Called INSIDE the tunnel branch, where no buildings/props are emitted. */
 static int tg_emit_fb_tunnel(const TG_FBHook *h)    { (void)h; return 1; }
@@ -3914,11 +4007,53 @@ static void tg_emit_texture_page_fb_city(TG_Buf *out, int which)
     else tg_emit_texture_page_flat(out, 0, 148, 148, 144, 30, 0xC37Du);
 }
 
-/* Continuous tree-line backdrop: a canopy band that tiles horizontally without
- * a visible seam (alpha-keyed above the canopy). */
+/* Continuous tree-line backdrop: a canopy band closing off the horizon behind
+ * the individual tree billboards. ALPHA-KEYED (type 1, index 0 = key) so the
+ * sky shows through a ragged top edge -- the flat page this replaced filled
+ * every texel from the whole palette, which both keyed 1 texel in 16 at random
+ * (speckled holes) and gave a dead straight top edge that reads as a green
+ * wall. The page does NOT have to tile horizontally: tg_emit_fb_flora
+ * alternates u direction per span, so a shared edge always meets its own texel
+ * column. */
 static void tg_emit_texture_page_fb_treeline(TG_Buf *out)
 {
-    tg_emit_texture_page_flat(out, 1, 40, 78, 34, 34, 0x77E1u);
+    unsigned int rng = 0x77E1B3C5u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 1);                                  /* 1 = alpha-keyed */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR. 0 = key, 1..7 shadowed mass, 8..15 sunlit crowns. A distant
+     * treeline is desaturated and blue-shifted by haze, which is what keeps it
+     * reading as BACKGROUND rather than a second row of trees. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        if (i == 0)     { b = 255; g = 0;          r = 255; }
+        else if (i < 8) { b = 64 + i * 4; g = 62 + i * 5; r = 44 + i * 3; }
+        else            { b = 88 + i * 2; g = 92 + i * 4; r = 66 + i * 3; }
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;      /* y=0 is the TOP of the page */
+        /* Crown line: 9-texel cells, each a crown of its own height, rounded
+         * off at its shoulders, so the top edge is lumpy like a real canopy
+         * instead of a straight cut. Keyed above it, foliage below. */
+        const unsigned int c = (unsigned)(x / 9) * 2654435761u;
+        const int crown = 12 + (int)((c >> 28) % 10);          /* 12..21 */
+        const int top   = crown + (((x % 9) < 2 || (x % 9) > 6) ? 3 : 0);
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if (y < top - (int)((rng >> 22) % 3)) { tg_put_u8(out, 0); continue; }
+        /* Lit at the crowns where the sun hits, darker down in the mass. */
+        idx = (y < top + 8) ? (8 + (int)((rng >> 16) % 8))
+                            : (1 + (int)((rng >> 16) % 7));
+        tg_put_u8(out, (unsigned)idx);
+    }
 }
 
 /* Tunnel lining -- deliberately NOT a building facade (no windows, no storeys). */
