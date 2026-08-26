@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 25" },
+    { CL_ITEM,    "Auto-track roadside PROPS: spectators line city streets," },
+    { CL_ITEM,    "  sheep graze fields, deer in woods, lions guard the" },
+    { CL_ITEM,    "  oriental route, streetlamps + monuments in town." },
     { CL_ITEM,    "Auto-track has THEMATIC trees now: forests mix species," },
     { CL_ITEM,    "  new COAST (palms), ALPINE (snow conifers) and" },
     { CL_ITEM,    "  ORIENTAL (topiary/willow) biomes -- real TD5 foliage." },

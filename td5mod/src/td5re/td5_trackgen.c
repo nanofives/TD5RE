@@ -101,7 +101,10 @@
  * after the store pages. */
 #define TD5_TG_TREE_VARIANTS   10
 #define TD5_TG_PAGE_TREE_EXTRA (TD5_TG_PAGE_STORE + TD5_TG_STORE_VARIANTS)
-#define TD5_TG_PAGE_COUNT  (TD5_TG_PAGE_TREE_EXTRA + TD5_TG_TREE_VARIANTS - 1)
+/* Props: people/statue/animal (alpha-keyed) + streetlamp glow (additive). */
+#define TD5_TG_PROP_COUNT      7
+#define TD5_TG_PAGE_PROP   (TD5_TG_PAGE_TREE_EXTRA + TD5_TG_TREE_VARIANTS - 1)
+#define TD5_TG_PAGE_COUNT  (TD5_TG_PAGE_PROP + TD5_TG_PROP_COUNT)
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
@@ -1689,7 +1692,7 @@ static int tg_emit_box_mesh(TG_Buf *blk, double cx, double cy, double cz,
  * engine keys on something else the surround will show as a solid block rather
  * than cutting out -- visible immediately, and diagnosable. */
 static int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz,
-                                  double half_w, double height, int page)
+                                  double half_w, double height, int page, int tag)
 {
     double radius = sqrt(half_w * half_w + height * height);
     int i;
@@ -1699,7 +1702,7 @@ static int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz,
     if (!(radius > 0.0)) radius = 1.0;
 
     tg_put_u16(blk, 259);
-    tg_put_u16(blk, 1);                    /* 1 = camera-facing billboard */
+    tg_put_u16(blk, (unsigned)tag);        /* 1 = camera-facing, 2 = additive */
     tg_put_u32(blk, 1);                    /* one command */
     tg_put_u32(blk, 4);                    /* one quad */
     tg_put_f32(blk, radius);
@@ -1901,6 +1904,28 @@ static int tg_tree_slot(int v)
     return v == 0 ? TD5_TG_PAGE_TREE : (TD5_TG_PAGE_TREE_EXTRA + v - 1);
 }
 
+/* ===================== PROPS =====================
+ * Roadside billboards beyond trees: spectators, statues, animals and streetlamp
+ * glows -- all one camera-facing quad, differing only in page/size/tag. Each
+ * entry: billboard size (raw), the mesh billboard tag (1 camera-facing, 2
+ * additive), the page TYPE (1 alpha-keyed, 3 additive) for the real page, a Y
+ * lift (streetlamp glows float), and a procedural silhouette kind. Real mode
+ * fills the pages from shipped foliage/figure pages (level ids in comments). */
+enum { TG_PROP_PERSON = 0, TG_PROP_STATUE, TG_PROP_ANIMAL, TG_PROP_LAMP };
+/* prop-page indices (into k_prop_pages) used by biomes */
+enum { PP_PERSON0 = 0, PP_PERSON1, PP_LION, PP_MONUMENT, PP_SHEEP, PP_DEER, PP_LAMP };
+typedef struct { int w, h, tag, type, y_off, kind; } TG_PropPage;
+static const TG_PropPage k_prop_pages[TD5_TG_PROP_COUNT] = {
+    {  600, 1400, 1, 1,    0, TG_PROP_PERSON },  /* 0 L001 p316 spectator   */
+    {  600, 1400, 1, 1,    0, TG_PROP_PERSON },  /* 1 L001 p318 spectator   */
+    { 1400, 1700, 1, 1,    0, TG_PROP_STATUE },  /* 2 L004 p446 lion        */
+    { 1800, 4200, 1, 1,    0, TG_PROP_STATUE },  /* 3 L014 p274 monument    */
+    { 1300, 1000, 1, 1,    0, TG_PROP_ANIMAL },  /* 4 L001 p341 sheep       */
+    { 1300, 1600, 1, 1,    0, TG_PROP_ANIMAL },  /* 5 L003 p453 deer        */
+    {  800,  800, 2, 3, 2500, TG_PROP_LAMP   }   /* 6 L001 p378 lamp glow   */
+};
+static int tg_prop_slot(int i) { return TD5_TG_PAGE_PROP + i; }
+
 /* ===================== BIOMES =====================
  * A biome owns a RUN of spans and drives what stands beside the road: how
  * dense the props are, how tall, how far back, and which texture page. That is
@@ -1929,30 +1954,34 @@ typedef struct {
     int    tower_mask;   /* (hash>>3 & mask)==0 -> a taller run (tower cluster) */
     int    billboard;    /* 1 = camera-facing trees, 0 = facade wall */
     int    ground_page;  /* page for the terrain slab under/around the road */
+    /* Prop layer (Phase 2). people = spectator density 0..15 (0 none);
+     * lamp = 1 for streetlamp glows; statue/animal = a k_prop_pages index or
+     * -1. Props are emitted for every biome, additional to trees/facades. */
+    int    prop_people, prop_lamp, prop_statue, prop_animal;
 } TG_Biome;
 
 static const TG_Biome k_biomes[] = {
     /* CITY: ~8.4x11.5 wu cells, ~3 floors, on the curb, big sparse towers. */
     { "CITY",       9, 2150, 2950, 2, 3, 6000, 350, {0}, 0,
-      TD5_TG_PAGE_WALL,   3, 0, TD5_TG_PAGE_GROUND },
-    /* FIELDS: sparse deciduous on an open horizon. */
+      TD5_TG_PAGE_WALL,   3, 0, TD5_TG_PAGE_GROUND,   6, 1, PP_MONUMENT, -1 },
+    /* FIELDS: sparse deciduous on an open horizon; grazing sheep. */
     { "FIELDS",     2, 0,0,0,0,0,0, {2, 0},       2,
-      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN },
-    /* FOREST: dense mixed deciduous crowding the verge. */
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_SHEEP },
+    /* FOREST: dense mixed deciduous crowding the verge; deer. */
     { "FOREST",    11, 0,0,0,0,0,0, {0, 1, 2},    3,
-      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN },
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_DEER },
     /* INDUSTRIAL: wider squat sheds (~10 wu cells), 1-2 floors, deeper. */
     { "INDUSTRIAL", 6, 2560, 2300, 1, 2, 8000, 600, {0}, 0,
-      TD5_TG_PAGE_WALL,  63, 0, TD5_TG_PAGE_GROUND },
-    /* ALPINE: conifers + snow conifers. */
+      TD5_TG_PAGE_WALL,  63, 0, TD5_TG_PAGE_GROUND,   3, 1, -1, -1 },
+    /* ALPINE: conifers + snow conifers; deer. */
     { "ALPINE",     8, 0,0,0,0,0,0, {3, 4},       2,
-      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN },
-    /* COAST: palms. */
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_DEER },
+    /* COAST: palms; beach crowds + promenade lamps. */
     { "COAST",      5, 0,0,0,0,0,0, {5, 6},       2,
-      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN },
-    /* ORIENTAL: manicured topiary + weeping willow. */
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   6, 1, -1, -1 },
+    /* ORIENTAL: manicured topiary + weeping willow; guardian lions. */
     { "ORIENTAL",   9, 0,0,0,0,0,0, {7, 8, 9},    3,
-      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN }
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   4, 0, PP_LION, -1 }
 };
 #define TD5_TG_BIOME_COUNT 7
 #define TD5_TG_BIOME_RUN   150
@@ -2135,7 +2164,81 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
     cz = n->z + lz * (n->width * 0.5 + gap + tw * 0.5);
 
     return tg_emit_billboard_mesh(blk, cx, n->y, cz, tw * 0.5, th,
-                                  tg_tree_slot(tv));
+                                  tg_tree_slot(tv), 1);
+}
+
+/* A verge side that the branch corridor bows into over the fork span range --
+ * suppress props there for the same reason as facades/trees. */
+static int tg_side_blocked(int si, double side)
+{
+    const int lo = TD5_TG_BRANCH_FORK_SPAN - TD5_TG_BRANCH_WIDEN;
+    const int hi = TD5_TG_BRANCH_FORK_SPAN + TD5_TG_BRANCH_LEN + 1;
+    return tg_branches_enabled() && side < 0.0 && si >= lo && si <= hi;
+}
+
+/* Emit one prop billboard (prop-page index pp) beside span si on `side`, `gap`
+ * world units past the road edge, recording its mesh offset. */
+static int tg_prop_one(const TG_NodeList *nl, int si, int pp, double side,
+                       double gap, TG_Buf *m, size_t *moff, int *pn)
+{
+    const TG_Node *n = &nl->v[si];
+    const TG_PropPage *P = &k_prop_pages[pp];
+    double lx = n->tz * side, lz = -n->tx * side;
+    double cx = n->x + lx * (n->width * 0.5 + gap);
+    double cz = n->z + lz * (n->width * 0.5 + gap);
+    size_t b0 = m->len;
+
+    if (tg_side_blocked(si, side)) return 1;
+    moff[*pn] = b0;
+    if (!tg_emit_billboard_mesh(m, cx, n->y + (double)P->y_off, cz,
+                                (double)P->w * 0.5, (double)P->h,
+                                tg_prop_slot(pp), P->tag))
+        return 0;
+    if (m->len > b0) (*pn)++;
+    return 1;
+}
+
+/* Roadside prop layer for span si (spectators, streetlamps, statues, animals),
+ * additional to the trees/facades. Each emitted billboard records its own mesh
+ * offset, so props may be a variable count of differently-sized meshes. */
+static int tg_emit_props(const TG_NodeList *nl, int si, const TG_Biome *b,
+                         TG_Buf *m, size_t *moff, int *pn, int cap)
+{
+    unsigned int h = (unsigned)si * 0x9E3779B9u;   /* independent of the tree hash */
+    double side;
+
+    /* People: spectators on the sidewalk, sometimes a pair. */
+    if (b->prop_people > 0 && (int)(h >> 28) <= b->prop_people && *pn < cap) {
+        int pp = PP_PERSON0 + (int)((h >> 5) & 1);
+        side = ((h >> 3) & 1) ? 1.0 : -1.0;
+        if (!tg_prop_one(nl, si, pp, side, 400.0 + (double)((h >> 6) % 800),
+                         m, moff, pn)) return 0;
+        if (((h >> 20) & 1) && *pn < cap &&
+            !tg_prop_one(nl, si, pp ^ 1, side,
+                         1000.0 + (double)((h >> 7) % 700), m, moff, pn))
+            return 0;
+    }
+    /* Streetlamp glows: periodic, both curbs (additive). */
+    if (b->prop_lamp && (si % 7) == 0) {
+        int s;
+        for (s = 0; s < 2 && *pn < cap; s++)
+            if (!tg_prop_one(nl, si, PP_LAMP, s ? 1.0 : -1.0, 300.0,
+                             m, moff, pn)) return 0;
+    }
+    /* Statue / monument: sparse landmark. */
+    if (b->prop_statue >= 0 && (si % 29) == 0 && *pn < cap) {
+        side = ((h >> 9) & 1) ? 1.0 : -1.0;
+        if (!tg_prop_one(nl, si, b->prop_statue, side, 1500.0, m, moff, pn))
+            return 0;
+    }
+    /* Animals: low density, set well back off the verge. */
+    if (b->prop_animal >= 0 && (int)(h >> 28) <= 2 && *pn < cap) {
+        side = ((h >> 11) & 1) ? 1.0 : -1.0;
+        if (!tg_prop_one(nl, si, b->prop_animal, side,
+                         2500.0 + (double)((h >> 12) % 4000), m, moff, pn))
+            return 0;
+    }
+    return 1;
 }
 
 /* Tunnels come in runs so a whole stretch is enclosed, not isolated spans. */
@@ -2674,10 +2777,9 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     const int br_lanes  = lanes - main_half;
     const int nentries = (nspans + TD5_TG_SPANS_PER_ENTRY - 1)
                        / TD5_TG_SPANS_PER_ENTRY;
-    /* Road meshes plus at most one building per span in the entry. */
     /* Per span: ground skirt + road + guardrail + building + up to 3 tunnel
-     * pieces + up to 2 bridge pieces. */
-    enum { TG_MAX_MESHES_PER_ENTRY = TD5_TG_SPANS_PER_ENTRY * 10 };
+     * pieces + up to 2 bridge pieces + several prop billboards. */
+    enum { TG_MAX_MESHES_PER_ENTRY = TD5_TG_SPANS_PER_ENTRY * 20 };
     const int rails = tg_guardrails_enabled();
     int nrails = 0;
     TG_Buf *blocks;
@@ -2759,27 +2861,37 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
         }
         for (i = 0; i < ns && ok; i++) {
             const int si = s0 + i;
-            size_t before = meshes.len;
-            int n_added = 0, k;
+            int k;
 
             if (si >= ring) continue;   /* pad + corridor carry road only */
-            if (nmesh + 6 > TG_MAX_MESHES_PER_ENTRY) break;
+            if (nmesh + 16 > TG_MAX_MESHES_PER_ENTRY) break;
 
             if (tg_span_in_tunnel(si)) {
-                /* Enclosed: no buildings, they would stand inside the walls. */
+                /* Enclosed: no buildings, they would stand inside the walls.
+                 * Tunnel pieces are equal-sized boxes, so recover each from the
+                 * appended span. */
+                size_t before = meshes.len;
+                int n_added = 0;
                 if (!tg_emit_tunnel(nl, si, &meshes, &n_added)) { ok = 0; break; }
+                for (k = 0; k < n_added; k++)
+                    moff[nmesh++] = before + (size_t)k *
+                                    ((meshes.len - before) / (size_t)n_added);
             } else {
+                const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
+                size_t b0 = meshes.len, b1;
+                int nb = 0;
+                /* Building: 0 or 1 mesh -- record its offset explicitly. */
                 if (!tg_building_for_span(nl, si, &meshes)) { ok = 0; break; }
-                if (meshes.len > before) n_added = 1;
-                if (!tg_emit_bridge(nl, si, &meshes, &n_added)) {
-                    ok = 0; break;
-                }
-            }
-            /* Everything emitted in this pass is a same-sized box, so each
-             * piece's offset is recoverable by dividing the appended span. */
-            for (k = 0; k < n_added; k++) {
-                size_t sz = (meshes.len - before) / (size_t)n_added;
-                moff[nmesh++] = before + (size_t)k * sz;
+                if (meshes.len > b0) moff[nmesh++] = b0;
+                /* Bridge: 0..N equal-sized boxes among themselves. */
+                b1 = meshes.len;
+                if (!tg_emit_bridge(nl, si, &meshes, &nb)) { ok = 0; break; }
+                for (k = 0; k < nb; k++)
+                    moff[nmesh++] = b1 + (size_t)k *
+                                    ((meshes.len - b1) / (size_t)nb);
+                /* Prop billboards: variable count/size, each records its own. */
+                if (!tg_emit_props(nl, si, b, &meshes, moff, &nmesh,
+                                   TG_MAX_MESHES_PER_ENTRY)) { ok = 0; break; }
             }
         }
 
@@ -3088,6 +3200,66 @@ static void tg_emit_texture_page_tree(TG_Buf *out, int shape)
     }
 }
 
+/* Procedural prop silhouettes (fallback when real textures are off): a person,
+ * a stone statue, an animal, or a radial streetlamp glow. Alpha-keyed (index 0)
+ * except the lamp, which is additive (type 3). Crude but recognisable. */
+static void tg_emit_texture_page_prop(TG_Buf *out, int kind)
+{
+    unsigned int rng = 0x51ED2701u + (unsigned)kind * 0x9E3779B9u;
+    int type = (kind == TG_PROP_LAMP) ? 3 : 1;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, (unsigned)type);
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        if (i == 0)                     { b = 255; g = 0; r = 255; }   /* key */
+        else if (kind == TG_PROP_LAMP)  { int v = 60 + i * 13; if (v > 255) v = 255;
+                                          b = v; g = v; r = (v > 30 ? v - 30 : 0); }
+        else if (kind == TG_PROP_STATUE){ int v = 70 + i * 11; if (v > 255) v = 255;
+                                          b = v; g = v; r = v; }
+        else if (kind == TG_PROP_ANIMAL){ b = 40 + i * 6; g = 44 + i * 7; r = 52 + i * 9; }
+        else if (i < 8)                 { b = 40 + i * 4; g = 44 + i * 5; r = 60 + i * 8; }
+        else                            { b = 90; g = 70; r = 60; }   /* person cloth */
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        int x = i % TD5_TG_TEX_DIM;
+        int y = i / TD5_TG_TEX_DIM;              /* y=0 is the TOP */
+        int dx = x - 32;
+        int idx = 0;
+        rng = rng * 1103515245u + 12345u;
+        switch (kind) {
+        case TG_PROP_LAMP: {
+            int d2 = dx * dx + (y - 32) * (y - 32), rad = 28;
+            if (d2 < rad * rad) { int t = 15 - (d2 * 15) / (rad * rad);
+                                  idx = t < 1 ? 1 : t; }
+            break; }
+        case TG_PROP_ANIMAL:
+            if (y >= 30 && y < 46 && dx > -16 && dx < 16) idx = 2 + (int)((rng >> 16) % 6);
+            else if (y >= 46 && y < 58 && (x % 10) < 3)   idx = 2 + (int)((rng >> 16) % 4);
+            break;
+        case TG_PROP_STATUE:
+            if (y >= 54) { if (dx > -14 && dx < 14) idx = 4 + (int)((rng >> 16) % 6); }
+            else if (y >= 16) { if (dx > -8 && dx < 8) idx = 6 + (int)((rng >> 16) % 8); }
+            else { if (dx > -5 && dx < 5) idx = 6 + (int)((rng >> 16) % 8); }
+            break;
+        default: /* TG_PROP_PERSON */
+            if (y >= 8 && y < 18) { if (dx > -5 && dx < 5) idx = 9 + (int)((rng >> 16) % 3); }
+            else if (y >= 18 && y < 40) { if (dx > -8 && dx < 8) idx = 1 + (int)((rng >> 16) % 7); }
+            else if (y >= 40 && y < 60) { if ((dx > -8 && dx < -1) || (dx > 1 && dx < 8))
+                                              idx = 1 + (int)((rng >> 16) % 5); }
+            break;
+        }
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 /* Page 4: crash barrier -- galvanised steel with a dark shadow gutter along the
  * bottom and a rhythm of darker post marks.
  *
@@ -3235,6 +3407,11 @@ static int tg_emit_textures(TG_Buf *out)
         for (v = 0; v < TD5_TG_TREE_VARIANTS && v < k_real_tree_count; v++)
             tg_emit_real_page(&pages[tg_tree_slot(v)],
                               k_real_tree_pal[v], k_real_tree_paln[v], k_real_tree_idx[v], 1);
+        /* Props: people/statue/animal (type 1), lamp glow (type 3 additive). */
+        for (v = 0; v < TD5_TG_PROP_COUNT && v < k_real_prop_count; v++)
+            tg_emit_real_page(&pages[tg_prop_slot(v)],
+                              k_real_prop_pal[v], k_real_prop_paln[v],
+                              k_real_prop_idx[v], k_prop_pages[v].type);
     } else {
         int v;
         tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_WALL], 0);
@@ -3246,6 +3423,9 @@ static int tg_emit_textures(TG_Buf *out)
         /* Procedural trees vary by shape (deciduous/conifer). */
         for (v = 0; v < TD5_TG_TREE_VARIANTS; v++)
             tg_emit_texture_page_tree(&pages[tg_tree_slot(v)], k_tree_pages[v].shape);
+        /* Procedural props by kind (person/statue/animal/lamp). */
+        for (v = 0; v < TD5_TG_PROP_COUNT; v++)
+            tg_emit_texture_page_prop(&pages[tg_prop_slot(v)], k_prop_pages[v].kind);
     }
     tg_emit_texture_page_rail(&pages[TD5_TG_PAGE_RAIL]);
     for (i = 0; i < count; i++) {
