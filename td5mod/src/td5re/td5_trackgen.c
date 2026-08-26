@@ -2076,10 +2076,17 @@ static double tg_flora_gap_clear(const TG_NodeList *nl, int si, double side,
 enum { TG_PROP_PERSON = 0, TG_PROP_STATUE, TG_PROP_ANIMAL, TG_PROP_LAMP };
 /* prop-page indices (into k_prop_pages) used by biomes */
 enum { PP_PERSON0 = 0, PP_PERSON1, PP_LION, PP_MONUMENT, PP_SHEEP, PP_DEER, PP_LAMP };
+/* People are HALF the size they were until 2026-08-26. The scale anchor in this
+ * file is TD5_TG_LANE_WIDTH = 1500 raw per lane: at a real 3.65 m lane that is
+ * 411 raw per metre, so the old 600x1400 spectator stood 3.4 m tall and 1.5 m
+ * wide -- 0.93 of a lane width tall, where a 1.8 m human beside a 3.65 m lane
+ * is 0.49. 300x700 puts them at 1.70 m tall / 0.73 m wide, which is 0.47 of a
+ * lane. Only the PEOPLE were rescaled; the statue/animal/lamp entries are what
+ * the report asked to leave alone. */
 typedef struct { int w, h, tag, type, y_off, kind; } TG_PropPage;
 static const TG_PropPage k_prop_pages[TD5_TG_PROP_COUNT] = {
-    {  600, 1400, 1, 1,    0, TG_PROP_PERSON },  /* 0 L001 p316 spectator   */
-    {  600, 1400, 1, 1,    0, TG_PROP_PERSON },  /* 1 L001 p318 spectator   */
+    {  300,  700, 1, 1,    0, TG_PROP_PERSON },  /* 0 L001 p316 spectator   */
+    {  300,  700, 1, 1,    0, TG_PROP_PERSON },  /* 1 L001 p318 spectator   */
     { 1400, 1700, 1, 1,    0, TG_PROP_STATUE },  /* 2 L004 p446 lion        */
     { 1800, 4200, 1, 1,    0, TG_PROP_STATUE },  /* 3 L014 p274 monument    */
     { 1300, 1000, 1, 1,    0, TG_PROP_ANIMAL },  /* 4 L001 p341 sheep       */
@@ -2393,6 +2400,24 @@ static int tg_prop_one(const TG_NodeList *nl, int si, int pp, double side,
     return 1;
 }
 
+/* Spectator density for biome `b`, overriding the shared table's prop_people.
+ * The gate below fires when (hash>>28) <= density, so density d covers (d+1)/16
+ * of spans. The table put crowds in four biomes -- CITY 6 (44% of spans),
+ * COAST 6 (44%), ORIENTAL 4 (31%), INDUSTRIAL 3 (25%) -- which reads as a
+ * permanent crowd lining an empty industrial road or a temple lane. A crowd is
+ * a city (and seafront promenade) thing, so those keep a real density and
+ * everywhere else drops to a rare passer-by:
+ *   CITY 6 -> 44%   COAST 3 -> 25%   any other crowded biome 1 -> 12.5%
+ * An accessor rather than an edit to k_biomes, so the shared table stays a
+ * single definition; matched on name so it survives a table reorder. */
+static int tg_people_density(const TG_Biome *b)
+{
+    if (b->prop_people <= 0) return 0;             /* biome wants none */
+    if (!strcmp(b->name, "CITY"))  return b->prop_people;
+    if (!strcmp(b->name, "COAST")) return 3;       /* promenade, not a grandstand */
+    return 1;
+}
+
 /* Roadside prop layer for span si (spectators, streetlamps, statues, animals),
  * additional to the trees/facades. Each emitted billboard records its own mesh
  * offset, so props may be a variable count of differently-sized meshes. */
@@ -2400,12 +2425,13 @@ static int tg_emit_props(const TG_NodeList *nl, int si, const TG_Biome *b,
                          TG_Buf *m, size_t *moff, int *pn, int cap)
 {
     unsigned int h = (unsigned)si * 0x9E3779B9u;   /* independent of the tree hash */
+    const int people = tg_people_density(b);
     double side;
 
     if (tg_span_in_bridge_run(si)) return 1;   /* nothing on the deck but rails */
 
     /* People: spectators on the sidewalk, sometimes a pair. */
-    if (b->prop_people > 0 && (int)(h >> 28) <= b->prop_people && *pn < cap) {
+    if (people > 0 && (int)(h >> 28) <= people && *pn < cap) {
         int pp = PP_PERSON0 + (int)((h >> 5) & 1);
         side = ((h >> 3) & 1) ? 1.0 : -1.0;
         if (!tg_prop_one(nl, si, pp, side, 400.0 + (double)((h >> 6) % 800),
