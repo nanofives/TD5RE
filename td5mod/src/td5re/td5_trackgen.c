@@ -2058,19 +2058,48 @@ static int tg_biome_for_span(int si)
     return (int)((h >> 27) % TD5_TG_BIOME_COUNT);
 }
 
+/* TUNNEL EXCEPTION -- the one reason a span's surface is not its biome's.
+ * Defined further down; forward-declared here because the two accessors below
+ * sit above the tunnel block. */
+static int tg_span_in_tunnel(int si);
+
+/* True when span si's surface must ignore its biome and be plain tarmac.
+ *
+ * Weather does not fall inside a bore. In ALPINE the biome surface is RS_ICE,
+ * so a tunnelled ALPINE stretch got the icy grip class AND the snow-and-ice
+ * road page under a roof that no snow could ever reach -- the road inside read
+ * as an ice rink. The same argument covers the other weather-ish surfaces
+ * (nothing washes gravel or grows moss on a sheltered carriageway), so the rule
+ * is simply: inside a tunnel, dry asphalt.
+ *
+ * Single definition, used by both accessors below so the GRIP the car feels and
+ * the TEXTURE it drives over can never disagree. Gated so the old behaviour is
+ * one env var away; default ON, it is a fix. */
+static int tg_span_tunnel_tarmac(int si)
+{
+    return tg_span_in_tunnel(si) &&
+           td5_env_flag_on("TD5RE_AUTOTRACK_TUNNEL_TARMAC");
+}
+
 /* Strip surface byte for span si: low nibble = the biome's drivable GRIP class
  * (what td5_track.c surface_type_for_span_lane reads for the centre lanes when
  * lane_bitmask is 0), high nibble left at 1 (the verge class, unused at mask 0). */
 static int tg_surface_attr(int si)
 {
-    const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
+    const TG_Biome *b;
+    if (tg_span_tunnel_tarmac(si))
+        return 0x10 | (k_road_surf[RS_TARMAC].grip_class & 0x0F);
+    b = &k_biomes[tg_biome_for_span(si)];
     return 0x10 | (k_road_surf[b->road_surf].grip_class & 0x0F);
 }
 
 /* Road texture page for span si, from the biome's surface. */
 static int tg_road_page(int si)
 {
-    const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
+    const TG_Biome *b;
+    if (tg_span_tunnel_tarmac(si))
+        return tg_road_slot(k_road_surf[RS_TARMAC].page_var);
+    b = &k_biomes[tg_biome_for_span(si)];
     return tg_road_slot(k_road_surf[b->road_surf].page_var);
 }
 
@@ -2405,6 +2434,70 @@ static int tg_span_in_tunnel(int si)
     return ((h >> 29) == 0);                        /* ~1 run in 8 */
 }
 
+/* Clear interior height of the bore, and the thickness of wall/roof slabs.
+ * Named because the mountain massing above the tunnel (tg_emit_fb_tunnel) has
+ * to stack on top of the roof and cannot guess these. */
+#define TD5_TG_TUNNEL_HEIGHT  2600.0
+#define TD5_TG_TUNNEL_WALL_T   300.0
+
+/* Fork whose MAIN half-carriageway covers a main-ring span. Owned by the branch
+ * area and defined further down, forward-declared here because the bore has to
+ * know whether a branch runs alongside it. READ ONLY from the tunnel code. */
+static int tg_fork_of_main(int si);
+
+/* Lateral extent the bore has to enclose at main-ring span si: *half is the
+ * clear half-width, *shift the centre offset from the road centreline (+ve =
+ * LEFT of travel, matching tg_append_row's sign).
+ *
+ * Normally that is just the road (half = width/2, centre 0). But where a BRANCH
+ * fork runs through a tunnelled stretch, the main-ring span carries only the
+ * LEFT half carriageway -- shifted to +width/4 by TD5_TG_MAIN_SHIFT, so it
+ * occupies [0, +width/2] -- while the branch corridor is a SECOND drivable
+ * carriageway at the same span, bowing out to the right to tg_branch_shift(k)
+ * (down to -(0.25 + TD5_TG_BRANCH_BOW) * width at the bow peak). A bore sized
+ * for the road alone therefore puts its left wall straight through the branch,
+ * which is the clipping the feedback describes.
+ *
+ * So enclose the UNION of the two carriageways and re-centre the bore on it:
+ * one wide cavern carrying both, rather than a box one of them passes through.
+ *
+ * DERIVED CONSEQUENCE, worth knowing before looking at it: with BRANCH_BOW 1.20
+ * the union at the bow peak runs from -1.70*width to +0.50*width, i.e. 2.2x the
+ * road's own width and offset 0.6*width to the right. A fork inside a tunnel is
+ * a genuinely wide cavern, not a road tunnel. Capped below so a long fork
+ * cannot demand an unbuildable span. */
+static void tg_tunnel_bore(const TG_NodeList *nl, int si,
+                           double *half, double *shift)
+{
+    const double w = nl->v[si].width;
+    int fi;
+
+    *half  = w * 0.5;
+    *shift = 0.0;
+    if (!tg_branches_enabled()) return;
+
+    fi = tg_fork_of_main(si);
+    if (fi < 0) return;                     /* no branch alongside this span */
+    {
+        /* Corridor step paired with this main span, same indexing tg_emit_models
+         * uses for the corridor road (j = si - F - 1). */
+        const int L = s_forks[fi].len;
+        const int j = si - s_forks[fi].F - 1;
+        const double br = tg_branch_shift(j, L, w);      /* branch centre, -ve */
+        const double lo = br - w * 0.25;                 /* right edge of union */
+        const double hi = w * 0.5;                       /* left edge of union */
+        double h = (hi - lo) * 0.5;
+        /* Cap: the roof is one flat slab, and past ~3x the road width it reads
+         * as a ceiling over open ground rather than a bore. Beyond the cap the
+         * branch simply runs outside the tunnel, which is at least not a wall
+         * through the road. */
+        const double cap = w * 1.5;
+        if (h > cap) h = cap;
+        *shift = (lo + hi) * 0.5;
+        *half  = h;
+    }
+}
+
 /* Tunnel cross-section at span si: two side walls plus a roof, each its own
  * mesh so per-mesh frustum culling cannot pop the whole tunnel at once. The
  * enclosure is drawn DIM (vertex colour) so the interior reads as shadowed --
@@ -2412,18 +2505,29 @@ static int tg_span_in_tunnel(int si)
  * PORTAL frame (a lintel above the road spanning the full mouth) marks the
  * entrance/exit so the near end does not read as an open box.
  *
+ * All pieces sample TD5_TG_PAGE_TUNNEL. They used to sample TD5_TG_PAGE_WALL,
+ * which is the city FACADE page -- with TD5RE_AUTOTRACK_REAL_TEX on that is a
+ * photographic office frontage, so the inside of every tunnel read as building
+ * windows. The bore has its own concrete lining page for exactly this reason.
+ *
  * Port-original: shipped TD5 has no true tunnels, so there is no reference to
  * match -- this is an invented enclosed section. */
 static int tg_emit_tunnel(const TG_NodeList *nl, int si, TG_Buf *blk,
                           int *added)
 {
     const TG_Node *n = &nl->v[si];
-    const double wall_t = 300.0;
-    const double height = 2600.0;
-    const double side_x = n->width * 0.5 + wall_t;
+    const double wall_t = TD5_TG_TUNNEL_WALL_T;
+    const double height = TD5_TG_TUNNEL_HEIGHT;
     const double lx = n->tz, lz = -n->tx;
     const unsigned int dim = 0xFF585868u;   /* shadowed blue-grey interior */
+    double bore_half, bore_shift, side_x, cx, cz;
     int i;
+
+    tg_tunnel_bore(nl, si, &bore_half, &bore_shift);
+    side_x = bore_half + wall_t;
+    /* Bore centreline: the road node displaced laterally onto the bore centre. */
+    cx = n->x + lx * bore_shift;
+    cz = n->z + lz * bore_shift;
 
     for (i = 0; i < 3; i++) {
         double ox = 0.0, oz = 0.0, hx, hy, cy;
@@ -2435,9 +2539,9 @@ static int tg_emit_tunnel(const TG_NodeList *nl, int si, TG_Buf *blk,
         } else {                                    /* roof */
             hx = side_x + wall_t; hy = 200.0; cy = n->y + height + 200.0;
         }
-        if (!tg_emit_box_mesh(blk, n->x + ox, cy, n->z + oz,
+        if (!tg_emit_box_mesh(blk, cx + ox, cy, cz + oz,
                               hx, hy, 780.0, n->tx, n->tz,
-                              TD5_TG_PAGE_WALL, 3000.0, dim))
+                              TD5_TG_PAGE_TUNNEL, 3000.0, dim))
             return 0;
         (*added)++;
     }
@@ -2445,9 +2549,9 @@ static int tg_emit_tunnel(const TG_NodeList *nl, int si, TG_Buf *blk,
     /* Portal frame at a run END: a lit lintel across the mouth, above the road,
      * so the entrance/exit reads as a tunnel opening rather than an open box. */
     if (!tg_span_in_tunnel(si - 1) || !tg_span_in_tunnel(si + 1)) {
-        if (!tg_emit_box_mesh(blk, n->x, n->y + height + 150.0, n->z,
+        if (!tg_emit_box_mesh(blk, cx, n->y + height + 150.0, cz,
                               side_x + wall_t, 500.0, wall_t,
-                              n->tx, n->tz, TD5_TG_PAGE_WALL, 2000.0,
+                              n->tx, n->tz, TD5_TG_PAGE_TUNNEL, 2000.0,
                               0xFFFFFFFFu))
             return 0;
         (*added)++;
@@ -3777,10 +3881,56 @@ static void tg_emit_texture_page_fb_treeline(TG_Buf *out)
     tg_emit_texture_page_flat(out, 1, 40, 78, 34, 34, 0x77E1u);
 }
 
-/* Tunnel lining -- deliberately NOT a building facade (no windows, no storeys). */
+/* Tunnel lining -- deliberately NOT a building facade: no windows, no storey
+ * grid, no straight bright lines at all.
+ *
+ * Two facts force that. First, the lining is drawn by tg_emit_box_mesh, which
+ * sets UV = 2*half/tile and so TILES the page over a face several thousand
+ * world units long: a page with any strong axis-aligned feature repeats it as a
+ * visible ladder, and shears it the moment the box follows a curve or a grade.
+ * Second, the page it used to borrow (TD5_TG_PAGE_WALL) is the city facade --
+ * under TD5RE_AUTOTRACK_REAL_TEX a photographic office frontage -- which is why
+ * tunnel interiors read as building windows.
+ *
+ * So: damp cast concrete. A narrow cool-grey ramp plus a LOW-FREQUENCY patch
+ * mask (the trick the rail page already uses) so the darker damp stains CLUMP
+ * into blotches instead of speckling per texel. Every feature is isotropic, so
+ * it tiles and stretches with nothing for the eye to lock onto. */
 static void tg_emit_texture_page_fb_tunnel(TG_Buf *out)
 {
-    tg_emit_texture_page_flat(out, 0, 96, 96, 98, 24, 0x7011u);
+    unsigned int rng = 0x7011u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR. 0..10 cool concrete greys (blue channel a touch high, so the lining
+     * stays distinct from the warm-grey ground page); 11..15 darker damp/soot
+     * stains for the patch mask below. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v = (i < 11) ? (92 + i * 4) : (66 - (i - 11) * 9);
+        if (v < 0) v = 0;
+        tg_put_u8(out, (unsigned)(v + 6 < 255 ? v + 6 : 255));  /* B, cooler */
+        tg_put_u8(out, (unsigned)v);                            /* G */
+        tg_put_u8(out, (unsigned)v);                            /* R */
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;
+        /* 8x8-texel cells hashed to a patch id: blotches ~1/8 of the page wide,
+         * which at the 3000-unit tile the walls use is a stain a car length
+         * across. No axis-aligned run survives, so nothing shears. */
+        unsigned int patch = (unsigned)((x >> 3) + (y >> 3) * 11) * 2654435761u;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if ((patch >> 29) < 2)
+            idx = 11 + (int)((rng >> 16) % 5);          /* damp / soot stain */
+        else
+            idx = (int)((rng >> 16) % 11);              /* concrete grain */
+        tg_put_u8(out, (unsigned)idx);
+    }
 }
 
 /* Terrain: 0 = SNOW ground, 1 = distant HILL / mountain flank. */
