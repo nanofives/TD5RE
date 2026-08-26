@@ -3127,8 +3127,391 @@ typedef struct {
     int    *nmesh, maxmesh;
 } TG_FBHook;
 
+/* ===================== [FB] GROUP A -- CITY STREET FURNITURE =====================
+ * Pavements, kerb railings, zebra crossings, real streetlamps and the rows of
+ * buildings BEHIND the street wall. Everything here is cosmetic: collision
+ * comes from the STRIP, so a kerb is a step you drive over, not a step you hit.
+ *
+ * Sizes are raw world units (renderer divides by 256); a lane is 1500 raw and a
+ * span is TD5_TG_SPAN_LENGTH (1500) raw long.
+ */
+#define TD5_TG_FENCE_H       520.0   /* pedestrian railing height              */
+#define TD5_TG_CROSS_LIFT     20.0   /* decal lift above the road, see below   */
+#define TD5_TG_LAMP_H       2500.0   /* head height == k_prop_pages PP_LAMP y  */
+#define TD5_TG_LAMP_REACH    620.0   /* how far the arm leans over the road    */
+
+/* Does span si carry city street furniture at all? Tree biomes have no
+ * pavement (tg_city_sidewalk_w returns 0), and a bridge deck carries only its
+ * own rails -- a pavement there would hang off the side of the deck. */
+static int tg_city_span_paved(const TG_FBHook *h)
+{
+    if (tg_span_in_bridge_run(h->si)) return 0;
+    return tg_city_sidewalk_w(h->b) > 0.0;
+}
+
+/* Lateral frame for span si: both road edges at f=0 and f=1 plus the outward
+ * unit at each end. Same computation tg_emit_ground uses, so the pavement
+ * follows width changes, curvature and elevation exactly and abuts the skirt
+ * without a seam. `out[]` = near-in-x, y, z, far-in-x, y, z, near-ux, near-uz,
+ * far-ux, far-uz for side `sg` (+1 = left of travel). */
+static void tg_city_edge_frame(const TG_NodeList *nl, int si, double sg,
+                               double *out)
+{
+    double nlx, nly, nlz, nrx, nry, nrz;
+    double flx, fly, flz, frx, fry, frz;
+    double nux, nuz, fux, fuz, len;
+
+    tg_road_edge(nl, si, 0.0, 0.0, 1.0, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
+    tg_road_edge(nl, si, 1.0, 0.0, 1.0, &flx, &fly, &flz, &frx, &fry, &frz);
+    nux = nlx - nrx; nuz = nlz - nrz;
+    len = sqrt(nux * nux + nuz * nuz);
+    if (len < 1e-6) { nux = 1.0; nuz = 0.0; } else { nux /= len; nuz /= len; }
+    fux = flx - frx; fuz = flz - frz;
+    len = sqrt(fux * fux + fuz * fuz);
+    if (len < 1e-6) { fux = 1.0; fuz = 0.0; } else { fux /= len; fuz /= len; }
+
+    if (sg > 0.0) {
+        out[0] = nlx; out[1] = nly; out[2] = nlz;
+        out[3] = flx; out[4] = fly; out[5] = flz;
+        out[6] = nux; out[7] = nuz; out[8] = fux; out[9] = fuz;
+    } else {
+        out[0] = nrx; out[1] = nry; out[2] = nrz;
+        out[3] = frx; out[4] = fry; out[5] = frz;
+        out[6] = -nux; out[7] = -nuz; out[8] = -fux; out[9] = -fuz;
+    }
+}
+
+/* Append one quad (loop order given by the caller) to the vertex arrays. */
+static void tg_city_push_quad(double *px, double *py, double *pz,
+                              double *uu, double *vv, int *pn,
+                              const double *xyz, const double *uv)
+{
+    int i, n = *pn;
+    for (i = 0; i < 4; i++) {
+        px[n] = xyz[i * 3 + 0];
+        py[n] = xyz[i * 3 + 1];
+        pz[n] = xyz[i * 3 + 2];
+        uu[n] = uv[i * 2 + 0];
+        vv[n] = uv[i * 2 + 1];
+        n++;
+    }
+    *pn = n;
+}
+
+/* RAISED PAVEMENT between kerb and facade, one mesh for both sides: a top slab
+ * plus the kerb face that closes the step down to the asphalt. The slab top
+ * sits at TD5_TG_KERB_H, which is exactly where tg_side_geom now starts the
+ * wall, so the two meet flush.
+ *
+ * UVs are isotropic (u = width/SPAN_LENGTH, v advances one tile per span) for
+ * the same reason tg_emit_ground does it: a stretched u both smears the paving
+ * and defeats the box-filter mips, which is what made the old ground shimmer. */
+static int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
+{
+    double px[16], py[16], pz[16], uu[16], vv[16];
+    double e[10], q[12], t[8];
+    int seg_page = TD5_TG_PAGE_SIDEWALK, seg_nq;
+    int s, n = 0;
+
+    for (s = 0; s < 2; s++) {
+        const double sg = s ? 1.0 : -1.0;
+        const double u_w = sw / (double)TD5_TG_SPAN_LENGTH;
+        const double u_k = TD5_TG_KERB_H / (double)TD5_TG_SPAN_LENGTH;
+        if (tg_side_blocked(h->si, sg)) continue;
+        tg_city_edge_frame(h->nl, h->si, sg, e);
+
+        /* Top slab: near-in, near-out, far-out, far-in. */
+        q[0] = e[0];              q[1]  = e[1] + TD5_TG_KERB_H; q[2]  = e[2];
+        q[3] = e[0] + e[6] * sw;  q[4]  = e[1] + TD5_TG_KERB_H; q[5]  = e[2] + e[7] * sw;
+        q[6] = e[3] + e[8] * sw;  q[7]  = e[4] + TD5_TG_KERB_H; q[8]  = e[5] + e[9] * sw;
+        q[9] = e[3];              q[10] = e[4] + TD5_TG_KERB_H; q[11] = e[5];
+        t[0] = 0.0; t[1] = (double)h->si;
+        t[2] = u_w; t[3] = (double)h->si;
+        t[4] = u_w; t[5] = (double)h->si + 1.0;
+        t[6] = 0.0; t[7] = (double)h->si + 1.0;
+        tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+
+        /* Kerb face, road-facing: bottom sits ON the asphalt so there is no
+         * lip between the two, top meets the slab. */
+        q[0] = e[0]; q[1]  = e[1];                 q[2]  = e[2];
+        q[3] = e[0]; q[4]  = e[1] + TD5_TG_KERB_H; q[5]  = e[2];
+        q[6] = e[3]; q[7]  = e[4] + TD5_TG_KERB_H; q[8]  = e[5];
+        q[9] = e[3]; q[10] = e[4];                 q[11] = e[5];
+        t[0] = 0.0; t[1] = (double)h->si;
+        t[2] = u_k; t[3] = (double)h->si;
+        t[4] = u_k; t[5] = (double)h->si + 1.0;
+        t[6] = 0.0; t[7] = (double)h->si + 1.0;
+        tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+    }
+
+    if (n <= 0) return 1;
+    if (*h->nmesh >= h->maxmesh) return 1;
+    seg_nq = n / 4;
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                              &seg_page, &seg_nq, 1);
+}
+
+/* PEDESTRIAN RAILING along the outer edge of the pavement: one alpha-keyed
+ * plane per side, scenery is submitted CULL_NONE so a single plane reads from
+ * both sides. "most of the times" in the feedback, not always -- a hash gate
+ * drops roughly a third of spans, which is what breaks the railing into runs
+ * that end at crossings and side streets instead of ringing the whole city. */
+static int tg_city_emit_fence(const TG_FBHook *h, double sw)
+{
+    double px[8], py[8], pz[8], uu[8], vv[8];
+    double e[10], q[12], t[8];
+    /* One page per span across, so the upright pitch is span-independent. */
+    const double u_n = 1.0;
+    int seg_page = TD5_TG_PAGE_FENCE, seg_nq;
+    int s, n = 0;
+
+    for (s = 0; s < 2; s++) {
+        const double sg = s ? 1.0 : -1.0;
+        /* Independent hash per side, so the two railings do not start and stop
+         * together (that reads as a fence around a compound, not a street). */
+        const unsigned int fh = ((unsigned)h->si + (s ? 4177u : 91u)) * 0x9E3779B9u;
+        const double back = sw * 0.88;      /* just inside the facade line */
+        if ((fh >> 29) >= 6u) continue;     /* ~25% of spans left open */
+        if (tg_side_blocked(h->si, sg)) continue;
+        tg_city_edge_frame(h->nl, h->si, sg, e);
+
+        q[0] = e[0] + e[6] * back; q[1]  = e[1] + TD5_TG_KERB_H;
+        q[2] = e[2] + e[7] * back;
+        q[3] = e[3] + e[8] * back; q[4]  = e[4] + TD5_TG_KERB_H;
+        q[5] = e[5] + e[9] * back;
+        q[6] = e[3] + e[8] * back; q[7]  = e[4] + TD5_TG_KERB_H + TD5_TG_FENCE_H;
+        q[8] = e[5] + e[9] * back;
+        q[9] = e[0] + e[6] * back; q[10] = e[1] + TD5_TG_KERB_H + TD5_TG_FENCE_H;
+        q[11] = e[2] + e[7] * back;
+        /* v = 1 at the base, matching the page's top-down row order. */
+        t[0] = 0.0; t[1] = 1.0;
+        t[2] = u_n; t[3] = 1.0;
+        t[4] = u_n; t[5] = 0.0;
+        t[6] = 0.0; t[7] = 0.0;
+        tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+    }
+
+    if (n <= 0) return 1;
+    if (*h->nmesh >= h->maxmesh) return 1;
+    seg_nq = n / 4;
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                              &seg_page, &seg_nq, 1);
+}
+
+/* A crossing belongs where a side street meets the road, which on this
+ * generator is the FIRST span of a facade gap. Both sides are tested, so a
+ * street opening on the left gets one too. */
+static int tg_city_crossing_here(int si)
+{
+    int s;
+    if (si <= 1) return 0;
+    /* Over a fork the main carriageway is HALF width and shifted, so a
+     * kerb-to-kerb quad would float across the gore. The pavements survive it
+     * (the shifted half road's outer edge is still the full-width edge) but a
+     * crossing spans both edges, so skip the whole fork region. */
+    if (tg_branches_enabled() && tg_span_in_fork_clear(si)) return 0;
+    for (s = 0; s < 2; s++)
+        if (!tg_facade_built(si, s) && tg_facade_built(si - 1, s)) return 1;
+    return 0;
+}
+
+/* ZEBRA CROSSING: one flat quad lying on the road, kerb to kerb.
+ *
+ * Two conventions copied from tg_emit_road_quad, which this has to sit on top
+ * of without fighting it: the corners come from tg_road_edge (so the crossing
+ * follows the same curvature and camber as the asphalt under it) and u runs
+ * 0..lanes across the road. That makes the page tile once per lane, and since
+ * the page carries two bars, a 4-lane road gets 8 bars -- bars running ALONG
+ * travel, which is how a crossing is actually painted.
+ *
+ * Z-FIGHTING: the renderer has no polygon-offset path, so the only lever is a
+ * lift. TD5_TG_CROSS_LIFT is 20 raw (~0.08 wu) -- far less than the 70 the
+ * ground skirt drops by, enough to win the depth test at the distances a
+ * crossing is visible from, and too small to see as a step. */
+static int tg_city_emit_crossing(const TG_FBHook *h)
+{
+    double px[4], py[4], pz[4], uu[4], vv[4];
+    double l0x, l0y, l0z, r0x, r0y, r0z;
+    double l1x, l1y, l1z, r1x, r1y, r1z;
+    const double f0 = 0.22, f1 = 0.62;    /* ~600 raw of crossing, in-span */
+    const double L = (double)h->lanes;
+    int seg_page = TD5_TG_PAGE_CROSSING, seg_nq = 1;
+    int n = 0;
+
+    tg_road_edge(h->nl, h->si, f0, 0.0, 1.0, &l0x, &l0y, &l0z, &r0x, &r0y, &r0z);
+    tg_road_edge(h->nl, h->si, f1, 0.0, 1.0, &l1x, &l1y, &l1z, &r1x, &r1y, &r1z);
+
+    px[n]=r0x; py[n]=r0y+TD5_TG_CROSS_LIFT; pz[n]=r0z; uu[n]=0.0; vv[n]=0.0; n++;
+    px[n]=l0x; py[n]=l0y+TD5_TG_CROSS_LIFT; pz[n]=l0z; uu[n]=L;   vv[n]=0.0; n++;
+    px[n]=l1x; py[n]=l1y+TD5_TG_CROSS_LIFT; pz[n]=l1z; uu[n]=L;   vv[n]=1.0; n++;
+    px[n]=r1x; py[n]=r1y+TD5_TG_CROSS_LIFT; pz[n]=r1z; uu[n]=0.0; vv[n]=1.0; n++;
+
+    if (*h->nmesh >= h->maxmesh) return 1;
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                              &seg_page, &seg_nq, 1);
+}
+
+/* REAL STREETLAMPS. The prop layer emitted PP_LAMP as a bare additive glow at
+ * y_off = 2500 with nothing under it, so every light hung in mid-air -- exactly
+ * what the feedback describes. This emits the fixture: a slim post on the
+ * pavement, an arm leaning out over the carriageway, and the same additive glow
+ * placed at the arm's head.
+ *
+ * [CONFIRMED, re/analysis/subsystems/track-3d-rendering-pipeline.md sec.8]
+ * shipped TD5 embeds whole lamp posts as opcode-4 BILLBOARDS in MODELS.DAT --
+ * one alpha-keyed sprite per lamp, post included. We cannot copy that here: the
+ * only lamp page we have (k_prop_pages[PP_LAMP], borrowed from level001 p378)
+ * is the additive GLOW, a radial gradient with no post silhouette in it. So the
+ * post is built from boxes on the RAIL page (steel grey, and already loaded)
+ * and only the glow stays a billboard.
+ *
+ * 3 meshes per lamp x 2 kerbs = 6, on 1 span in 7. */
+static int tg_city_emit_lamp(const TG_FBHook *h, double sw)
+{
+    const TG_Node *n = &h->nl->v[h->si];
+    /* Post stands on the pavement a little back from the kerb face, so a car
+     * clipping the kerb does not visually pass through it. */
+    const double stand = (sw > 0.0) ? sw * 0.35 : 300.0;
+    const double base_y = n->y + ((sw > 0.0) ? TD5_TG_KERB_H : 0.0);
+    int s;
+
+    for (s = 0; s < 2; s++) {
+        const double sg = s ? 1.0 : -1.0;
+        const double lx = n->tz * sg, lz = -n->tx * sg;
+        const double px = n->x + lx * (n->width * 0.5 + stand);
+        const double pz = n->z + lz * (n->width * 0.5 + stand);
+        /* Arm/head lean INWARD (-l), i.e. out over the road. */
+        const double hx = px - lx * TD5_TG_LAMP_REACH * 0.5;
+        const double hz = pz - lz * TD5_TG_LAMP_REACH * 0.5;
+        if (tg_side_blocked(h->si, sg)) continue;
+        if (*h->nmesh + 3 > h->maxmesh) return 1;
+
+        /* POST. hx runs across the road and hz along it (see tg_emit_box_mesh),
+         * so a square section is hx == hz. */
+        h->moff[(*h->nmesh)++] = h->blk->len;
+        if (!tg_emit_box_mesh(h->blk, px, base_y + TD5_TG_LAMP_H * 0.5, pz,
+                              46.0, TD5_TG_LAMP_H * 0.5, 46.0,
+                              n->tx, n->tz, TD5_TG_PAGE_RAIL, 600.0,
+                              0xFF9AA0A6u))
+            return 0;
+        /* ARM + HEAD as one flattened box reaching from the post out over the
+         * road -- one mesh instead of two, and the overlap at the post end
+         * hides the joint. */
+        h->moff[(*h->nmesh)++] = h->blk->len;
+        if (!tg_emit_box_mesh(h->blk, hx, base_y + TD5_TG_LAMP_H, hz,
+                              TD5_TG_LAMP_REACH * 0.5, 70.0, 78.0,
+                              n->tx, n->tz, TD5_TG_PAGE_RAIL, 600.0,
+                              0xFFB6BCC2u))
+            return 0;
+        /* GLOW at the head: tg_prop_one places PP_LAMP at y + its own y_off
+         * (2500 == TD5_TG_LAMP_H), and `gap` is measured from the road edge, so
+         * the reach comes off it to land the glow on the arm end. */
+        if (!tg_prop_one(h->nl, h->si, PP_LAMP, sg,
+                         stand - TD5_TG_LAMP_REACH, h->blk, h->moff, h->nmesh))
+            return 0;
+    }
+    return 1;
+}
+
+/* BUILDINGS BEHIND THE STREET WALL. With only the front row, every side street
+ * and every gap in the roofline showed empty ground behind it, which is what
+ * reads as "no life around it": a city is depth, not a wall.
+ *
+ * Deliberately cheaper than the front row -- one page, no storefront command,
+ * no corner returns, two columns -- because these are only ever seen OVER a
+ * roofline or DOWN a side street, never up close. Two rows, each set further
+ * back, at their own jittered heights so the skyline is not a stepped terrace.
+ * Emitted whether or not the front row is built here, so a side street looks
+ * into a block rather than into the void. */
+#define TD5_TG_BACKROW_N     2
+#define TD5_TG_BACKROW_GAP   3200.0   /* clear air behind the row in front */
+
+static int tg_city_emit_backrows(const TG_FBHook *h, double sw)
+{
+    double px[TD5_TG_FACADE_MAXQUAD * 4], py[TD5_TG_FACADE_MAXQUAD * 4];
+    double pz[TD5_TG_FACADE_MAXQUAD * 4], uu[TD5_TG_FACADE_MAXQUAD * 4];
+    double vv[TD5_TG_FACADE_MAXQUAD * 4];
+    const TG_Biome *b = h->b;
+    const TG_Node *n0 = &h->nl->v[h->si];
+    const TG_Node *n1;
+    int s, r;
+
+    if (h->si + 1 >= h->nl->count) return 1;
+    n1 = &h->nl->v[h->si + 1];
+
+    for (s = 0; s < 2; s++) {
+        const double sg = s ? 1.0 : -1.0;
+        const double lx0 = n0->tz * sg, lz0 = -n0->tx * sg;
+        const double lx1 = n1->tz * sg, lz1 = -n1->tx * sg;
+        if (tg_side_blocked(h->si, sg)) continue;
+        for (r = 0; r < TD5_TG_BACKROW_N; r++) {
+            /* Row hash: per span, per side, per row -- so neighbouring spans
+             * step in height and the two rows never line up. */
+            const unsigned int rh = ((unsigned)h->si * 31u + (unsigned)s * 7u
+                                     + (unsigned)r) * 2246822519u;
+            double set, H, ax, az, ay, bx, by, bz;
+            int rows, page, seg_nq, n = 0;
+
+            if ((rh >> 29) == 0u) continue;      /* ~12% of slots left empty */
+            /* Each row sits a building depth plus clear air behind the last. */
+            set = sw + (double)b->depth * (double)(r + 1)
+                + TD5_TG_BACKROW_GAP * (double)(r + 1)
+                + (double)(rh % 1800u);
+            rows = b->floors_min + (int)((rh >> 9) % 5u);
+            H    = (double)rows * (double)b->cell_h;
+
+            bx = n0->x + lx0 * (n0->width * 0.5 + set);
+            by = n0->y;
+            bz = n0->z + lz0 * (n0->width * 0.5 + set);
+            ax = (n1->x + lx1 * (n1->width * 0.5 + set)) - bx;
+            ay = n1->y - n0->y;
+            az = (n1->z + lz1 * (n1->width * 0.5 + set)) - bz;
+
+            tg_facade_push_grid(bx, by, bz, ax, ay, az, 0.0, H, 0.0,
+                                2, rows, 0, rows, px, py, pz, uu, vv, &n);
+            if (n <= 0) continue;
+            if (*h->nmesh >= h->maxmesh) return 1;
+            page   = tg_facade_page(rh);
+            seg_nq = n / 4;
+            h->moff[(*h->nmesh)++] = h->blk->len;
+            if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                                    &page, &seg_nq, 1))
+                return 0;
+        }
+    }
+    return 1;
+}
+
 /* Group A -- city: sidewalks, kerb fences, crossings, deeper building rows. */
-static int tg_emit_fb_city(const TG_FBHook *h)      { (void)h; return 1; }
+static int tg_emit_fb_city(const TG_FBHook *h)
+{
+    const int paved = tg_city_span_paved(h);
+    const double sw = tg_city_sidewalk_w(h->b);
+
+    if (paved && td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS")) {
+        if (!tg_city_emit_sidewalk(h, sw)) return 0;
+        if (!tg_city_emit_fence(h, sw)) return 0;
+    }
+    if (paved && tg_city_crossing_here(h->si) &&
+        td5_env_flag_on("TD5RE_AUTOTRACK_CROSSINGS")) {
+        if (!tg_city_emit_crossing(h)) return 0;
+    }
+    /* Lamps follow the biome's prop_lamp flag (city/industrial/coast), on the
+     * same 1-in-7 beat the prop layer used, so the spacing is unchanged -- only
+     * the fixture under the glow is new. */
+    if (h->b->prop_lamp && (h->si % 7) == 0 && !tg_span_in_bridge_run(h->si) &&
+        td5_env_flag_on("TD5RE_AUTOTRACK_LAMP_POSTS")) {
+        if (!tg_city_emit_lamp(h, sw)) return 0;
+    }
+    if (paved && !tg_span_in_bridge_run(h->si) &&
+        td5_env_flag_on("TD5RE_AUTOTRACK_BACKROWS")) {
+        if (!tg_city_emit_backrows(h, sw)) return 0;
+    }
+    return 1;
+}
 /* Group B -- flora & figures: tree placement/backdrop, prop scale & density. */
 static int tg_emit_fb_flora(const TG_FBHook *h)     { (void)h; return 1; }
 /* Group C -- tunnels: portal surrounds, mountain massing, width for branches.
@@ -3912,12 +4295,78 @@ static void tg_emit_texture_page_flat(TG_Buf *out, int type,
 }
 
 /* City street furniture: 0 = SIDEWALK paving, 1 = CROSSING (zebra), 2 = FENCE
- * railing (alpha-keyed, index 0 must stay transparent). */
+ * railing (alpha-keyed, index 0 must stay transparent).
+ *
+ * All three have to read at the SIZE the geometry maps them at, which is what
+ * decides the patterns below:
+ *   SIDEWALK is mapped isotropically at one page per SPAN_LENGTH (1500 raw), so
+ *     16-texel slabs come out at ~375 raw -- a paving slab, not a tile floor.
+ *   CROSSING is mapped u = 0..lanes across the road, so each page repeat covers
+ *     one lane; two bars per page gives the ~8 bars a 4-lane crossing wants.
+ *     Its background must MATCH the asphalt or the crossing reads as a grey
+ *     patch on the road rather than paint on it.
+ *   FENCE is one page per span, so 8 uprights per page is one every ~190 raw.
+ *     Everything that is not metal is index 0 and cuts out. */
 static void tg_emit_texture_page_fb_city(TG_Buf *out, int which)
 {
-    if (which == 2) tg_emit_texture_page_flat(out, 1, 150, 150, 150, 40, 0xC17Au);
-    else if (which == 1) tg_emit_texture_page_flat(out, 0, 190, 190, 190, 90, 0xC27Bu);
-    else tg_emit_texture_page_flat(out, 0, 148, 148, 144, 30, 0xC37Du);
+    unsigned int rng = 0xC17A0000u + (unsigned)which * 0x9E3779B9u;
+    const int type = (which == 2) ? 1 : 0;      /* FENCE is alpha-keyed */
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, (unsigned)type);
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR. Index 0 is the transparent key on the FENCE page only -- the other
+     * two are opaque, so index 0 is an ordinary colour there. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        if (which == 2) {
+            if (i == 0)      { b = 255; g = 0;   r = 255; }        /* key   */
+            else if (i < 11) { b = 118 + i * 5; g = 122 + i * 5; r = 128 + i * 5; }
+            else             { b = 62 + i * 2;  g = 64 + i * 2;  r = 68 + i * 2;  }
+        } else if (which == 1) {
+            /* 0..7 asphalt greys, 8..15 worn white paint. */
+            if (i < 8) { b = 52 + i * 4;       g = 52 + i * 4;       r = 54 + i * 4; }
+            else       { b = 196 + (i - 8) * 7; g = 198 + (i - 8) * 7; r = 200 + (i - 8) * 7; }
+        } else {
+            /* 0..11 paving greys, 12..15 darker mortar joints. */
+            if (i < 12) { b = 136 + i * 5; g = 138 + i * 5; r = 136 + i * 5; }
+            else        { b = 94 - (i - 12) * 7; g = 96 - (i - 12) * 7; r = 94 - (i - 12) * 7; }
+        }
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;       /* y = 0 is the TOP of the page */
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if (which == 2) {
+            /* Uprights every 8 texels, plus a top rail, a waist rail and a
+             * bottom rail. The geometry maps v = 1 at the base, matching this
+             * top-down row order. */
+            if ((x & 7) < 2 || y < 4 || (y >= 27 && y < 31) || y >= 60)
+                idx = 1 + (int)((rng >> 16) % 10);
+            else
+                idx = 0;                        /* keyed out */
+        } else if (which == 1) {
+            /* Two full-length bars per page, bars varying in x (== u, across
+             * the road) so they run ALONG the direction of travel. Painted
+             * edges get a texel of grain so they are not razor-straight. */
+            const int b0 = x & 31;
+            idx = (b0 >= 3 && b0 < 21) ? (8 + (int)((rng >> 16) % 8))
+                                       : (int)((rng >> 16) % 8);
+        } else {
+            /* 16-texel slabs with mortar joints, plus per-texel grain. */
+            idx = ((x & 15) == 0 || (y & 15) == 0)
+                  ? 12 + (int)((rng >> 18) % 4)
+                  : (int)((rng >> 16) % 12);
+        }
+        tg_put_u8(out, (unsigned)idx);
+    }
 }
 
 /* Continuous tree-line backdrop: a canopy band that tiles horizontally without
