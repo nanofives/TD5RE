@@ -174,6 +174,10 @@ static int s_ring_len;
  * them to map an APPENDED corridor span back to its main-ring node. */
 static int tg_fork_of_main(int si);
 static int tg_fork_of_corridor(int si, int *k);
+/* Same reason: the finish-line placer below has to keep the finish (and its
+ * gantry) out of a tunnel run, and the tunnel test is defined with the tunnel
+ * emitters much further down. */
+static int tg_span_in_tunnel(int si);
 
 /* Seed of the last successful build, for reproducing a good random track. */
 static unsigned int s_last_seed = 0;
@@ -1655,10 +1659,12 @@ static int tg_finish_span(int ring)
     if (ring - runoff <= lo) runoff = ring - lo;
     fs = ring - runoff;
 
-    /* Never put the finish line inside a fork's split region: the line would
+    /* Never put the finish line inside a fork's split region (the line would
      * cross two separated half carriageways, so a banner over it would either
-     * miss the road or straddle the gore. Walk it back to clear ground. */
-    for (guard = 0; guard < ring && fs > lo && tg_span_in_fork_clear(fs); guard++)
+     * miss the road or straddle the gore) nor inside a tunnel run (the gantry
+     * would stand through the roof). Walk it back to clear ground. */
+    for (guard = 0; guard < ring && fs > lo &&
+         (tg_span_in_fork_clear(fs) || tg_span_in_tunnel(fs)); guard++)
         fs--;
     if (fs <= lo) return -1;
     return fs;
