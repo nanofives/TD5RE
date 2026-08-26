@@ -1736,12 +1736,20 @@ static int tg_emit_box_mesh(TG_Buf *blk, double cx, double cy, double cz,
  * documented in what I read; palette index 0 is reserved for it here. If the
  * engine keys on something else the surround will show as a solid block rather
  * than cutting out -- visible immediately, and diagnosable. */
+/* Declared here, defined with the TREES table it consults: some borrowed TD5
+ * foliage pages hold only ONE HALF of a mirrored pair, and this writer is the
+ * single place that can rebuild the whole tree from one. */
+static int tg_tree_page_is_half(int page);
+
 static int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz,
                                   double half_w, double height, int page, int tag)
 {
     double radius = sqrt(half_w * half_w + height * height);
-    int i;
-    static const double lx[4] = { -1.0,  1.0,  1.0, -1.0 };
+    /* A HALF page is drawn as TWO quads meeting at the billboard's vertical
+     * axis, the second with u reversed -- mirror-and-duplicate, which is how
+     * the shipped level placed the pair. Whole pages stay one quad. */
+    const int nq = tg_tree_page_is_half(page) ? 2 : 1;
+    int q, i;
     static const double ly[4] = {  0.0,  0.0,  1.0,  1.0 };
 
     if (!(radius > 0.0)) radius = 1.0;
@@ -1749,7 +1757,7 @@ static int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz,
     tg_put_u16(blk, 259);
     tg_put_u16(blk, (unsigned)tag);        /* 1 = camera-facing, 2 = additive */
     tg_put_u32(blk, 1);                    /* one command */
-    tg_put_u32(blk, 4);                    /* one quad */
+    tg_put_u32(blk, (unsigned)(4 * nq));   /* one quad, or two when mirrored */
     tg_put_f32(blk, radius);
     tg_put_f32(blk, wx);                   /* bounding centre stays world */
     tg_put_f32(blk, wy + height * 0.5);
@@ -1766,18 +1774,31 @@ static int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz,
     tg_put_u16(blk, (unsigned)page);
     tg_put_u32(blk, 0);
     tg_put_u16(blk, 0);
-    tg_put_u16(blk, 1);                    /* quad_count */
+    tg_put_u16(blk, (unsigned)nq);         /* quad_count */
     tg_put_u32(blk, 0);
 
-    for (i = 0; i < 4; i++) {
-        tg_put_f32(blk, lx[i] * half_w);   /* local: x across, y up */
-        tg_put_f32(blk, ly[i] * height);
-        tg_put_f32(blk, 0.0);
-        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
-        tg_put_u32(blk, 0xFFFFFFFFu);
-        tg_put_f32(blk, (i == 1 || i == 2) ? 1.0 : 0.0);
-        tg_put_f32(blk, (i >= 2) ? 0.0 : 1.0);   /* v flipped: base at v=1 */
-        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+    for (q = 0; q < nq; q++) {
+        /* Whole page: one quad spanning -half_w..+half_w, u 0..1.
+         * Half page: the image's own axis is its u=1 edge (measured: every
+         * half page's foliage is FLUSH at column 63 with a keyed left margin),
+         * so quad 0 runs -half_w..0 with u 0..1 and quad 1 runs 0..+half_w
+         * with u 1..0 -- the seam is the axis and the halves match exactly. */
+        const double x0 = (nq == 1 || q == 0) ? -half_w : 0.0;
+        const double x1 = (nq == 1 || q == 1) ?  half_w : 0.0;
+        const double u0 = (q == 1) ? 1.0 : 0.0;
+        const double u1 = (q == 1) ? 0.0 : 1.0;
+        for (i = 0; i < 4; i++) {
+            /* local: x across, y up. Quad loop order is near-bottom,
+             * far-bottom, far-top, near-top, so 1 and 2 take the far edge. */
+            tg_put_f32(blk, (i == 1 || i == 2) ? x1 : x0);
+            tg_put_f32(blk, ly[i] * height);
+            tg_put_f32(blk, 0.0);
+            tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+            tg_put_u32(blk, 0xFFFFFFFFu);
+            tg_put_f32(blk, (i == 1 || i == 2) ? u1 : u0);
+            tg_put_f32(blk, (i >= 2) ? 0.0 : 1.0);   /* v flipped: base at v=1 */
+            tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+        }
     }
     return !blk->oom;
 }
@@ -1926,27 +1947,123 @@ static int tg_store_page(unsigned int gh)
  * size (raw = world_units*256) plus a procedural silhouette shape used when
  * real textures are off. Real mode fills each variant page from a shipped TD5
  * foliage page (level ids in the comments); index 0 of those pages is the
- * transparent key. Biomes reference these by index (tree_set) and mix them. */
+ * transparent key. Biomes reference these by index (tree_set) and mix them.
+ *
+ * `half` marks a page that holds only ONE HALF of a mirrored pair, which is
+ * what the "trees cut in half" report was seeing: the shipped level placed two
+ * quads sharing a vertical axis, we drew one of them alone. MEASURED from the
+ * key coverage of the borrowed pages in td5_tg_real_tex.h (64x64 index maps,
+ * index 0 = key), per page: how far the non-key content reaches at each edge.
+ *   whole (keyed margin on BOTH edges, so the silhouette closes off):
+ *     0 cols 2..59   1 cols 2..61   5 cols 8..57   6 cols 1..63 (col63 = 1
+ *     texel)   7 cols 7..58   8 cols 1..62 (col63 = 0)
+ *   half (content FLUSH at column 63 -- a straight vertical cut -- with a wide
+ *   keyed margin on the left, and a silhouette that only widens toward that
+ *   edge, i.e. the edge IS the tree's axis):
+ *     2 cols 13..63, col63 filled on 55 of 64 rows
+ *     3 cols 37..63, col63 on 45  (the whole page is one flank of the cone)
+ *     4 cols 38..63, col63 on 49
+ *     9 cols  7..63, col63 on 41
+ * The same measurement over the PROP pages found none half (only prop3, the
+ * monument, reaches both edges, and it reaches BOTH -- a full-page image), so
+ * this is a trees-only problem. Procedural pages draw whole trees, so the
+ * mirroring in tg_emit_billboard_mesh is real-texture mode only. */
 enum { TG_TREE_DECID = 0, TG_TREE_CONIFER, TG_TREE_PALM, TG_TREE_TOPIARY,
        TG_TREE_WILLOW };
-typedef struct { int w, h, shape; } TG_TreePage;
+typedef struct { int w, h, shape, half; } TG_TreePage;
 static const TG_TreePage k_tree_pages[TD5_TG_TREE_VARIANTS] = {
-    { 4200, 5600, TG_TREE_DECID   },  /* 0  L017 p266  deciduous            */
-    { 5200, 6600, TG_TREE_DECID   },  /* 1  L008 p173  big deciduous        */
-    { 4000, 5400, TG_TREE_DECID   },  /* 2  L013 p234  deciduous            */
-    { 3200, 6400, TG_TREE_CONIFER },  /* 3  L003 p441  conifer              */
-    { 3200, 6400, TG_TREE_CONIFER },  /* 4  L003 p445  snow conifer         */
-    { 3400, 7200, TG_TREE_PALM    },  /* 5  L026 p097  palm                 */
-    { 3800, 6800, TG_TREE_PALM    },  /* 6  L014 p249  palm                 */
-    { 3600, 4200, TG_TREE_TOPIARY },  /* 7  L004 p359  topiary              */
-    { 3600, 5000, TG_TREE_TOPIARY },  /* 8  L004 p360  topiary              */
-    { 4200, 6000, TG_TREE_WILLOW  }   /* 9  L004 p369  weeping willow       */
+    { 4200, 5600, TG_TREE_DECID,   0 },  /* 0  L017 p266  deciduous         */
+    { 5200, 6600, TG_TREE_DECID,   0 },  /* 1  L008 p173  big deciduous     */
+    { 4000, 5400, TG_TREE_DECID,   1 },  /* 2  L013 p234  deciduous, half   */
+    { 3200, 6400, TG_TREE_CONIFER, 1 },  /* 3  L003 p441  conifer, half     */
+    { 3200, 6400, TG_TREE_CONIFER, 1 },  /* 4  L003 p445  snow conifer, half*/
+    { 3400, 7200, TG_TREE_PALM,    0 },  /* 5  L026 p097  palm              */
+    { 3800, 6800, TG_TREE_PALM,    0 },  /* 6  L014 p249  palm              */
+    { 3600, 4200, TG_TREE_TOPIARY, 0 },  /* 7  L004 p359  topiary           */
+    { 3600, 5000, TG_TREE_TOPIARY, 0 },  /* 8  L004 p360  topiary           */
+    { 4200, 6000, TG_TREE_WILLOW,  1 }   /* 9  L004 p369  willow, half      */
 };
 
 /* TEXTURES.DAT page slot for tree variant v (variant 0 reuses PAGE_TREE). */
 static int tg_tree_slot(int v)
 {
     return v == 0 ? TD5_TG_PAGE_TREE : (TD5_TG_PAGE_TREE_EXTRA + v - 1);
+}
+
+/* Inverse of tg_tree_slot: tree variant drawn on `page`, or -1 if it is not a
+ * tree page at all. The billboard writer only has the page id to go on. */
+static int tg_tree_variant_of_page(int page)
+{
+    if (page == TD5_TG_PAGE_TREE) return 0;
+    if (page >= TD5_TG_PAGE_TREE_EXTRA &&
+        page <  TD5_TG_PAGE_TREE_EXTRA + TD5_TG_TREE_VARIANTS - 1)
+        return page - TD5_TG_PAGE_TREE_EXTRA + 1;
+    return -1;
+}
+
+static int tg_real_textures_enabled(void);   /* defined with the page emitters */
+
+/* Does `page` need mirror-and-duplicate? Only a real (borrowed) tree page that
+ * the measurement above found to be one half of a pair. */
+static int tg_tree_page_is_half(int page)
+{
+    const int v = tg_tree_variant_of_page(page);
+    if (v < 0 || !k_tree_pages[v].half) return 0;
+    if (!tg_real_textures_enabled()) return 0;   /* procedural pages are whole */
+    /* Default ON (2026-08-26); TD5RE_AUTOTRACK_TREE_MIRROR=0 restores the raw
+     * half page, i.e. the sliced-tree look that was reported. */
+    return td5_env_flag_on("TD5RE_AUTOTRACK_TREE_MIRROR");
+}
+
+/* ---- branch-corridor clearance for verge scenery ----
+ * Trees are placed off the MAIN RING only, so where a branch corridor runs
+ * alongside they land on the branch carriageway. The corridor bows up to
+ * TD5_TG_BRANCH_BOW (1.2) road widths into the -ve lateral, far past the
+ * 800..3200 tree setback, which is why the trees were standing in the road.
+ * Group E owns the fork data; this only READS it. */
+#define TD5_TG_FLORA_BRANCH_MARGIN  600.0   /* verge left between road and trunk */
+
+/* Outward reach of any branch carriageway alongside main-ring span si, in world
+ * units from the centerline, on the -ve lateral. 0 when no fork covers si.
+ * The corridor at step k is centred on tg_branch_shift(k) and is width*0.5
+ * wide, so its outer edge sits at |shift| + width*0.25. Both endpoints of the
+ * span are measured because the bow grows across it. */
+static double tg_flora_branch_reach(const TG_NodeList *nl, int si)
+{
+    double reach = 0.0;
+    int i;
+
+    if (!tg_branches_enabled()) return 0.0;
+    if (si + 1 >= nl->count) return 0.0;
+    for (i = 0; i < s_fork_count; i++) {
+        const int F = s_forks[i].F, L = s_forks[i].len;
+        const int k = si - F - 1;
+        double a, b;
+        if (si <= F || si > F + L) continue;
+        a = -tg_branch_shift(k, L, nl->v[si].width) + nl->v[si].width * 0.25;
+        b = -tg_branch_shift(k + 1, L, nl->v[si + 1].width)
+            + nl->v[si + 1].width * 0.25;
+        if (a > reach) reach = a;
+        if (b > reach) reach = b;
+    }
+    return reach;
+}
+
+/* Push a verge setback (`gap`, measured from the road EDGE) out far enough that
+ * nothing standing on it overlaps a branch carriageway. Returns `gap` unchanged
+ * on the +ve lateral, which no corridor bows into. */
+static double tg_flora_gap_clear(const TG_NodeList *nl, int si, double side,
+                                 double gap)
+{
+    double need;
+
+    if (side > 0.0) return gap;
+    /* Default ON (2026-08-26); TD5RE_AUTOTRACK_FLORA_CLEAR=0 restores the old
+     * placement, i.e. trees standing on the branch. */
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_FLORA_CLEAR")) return gap;
+    need = tg_flora_branch_reach(nl, si) - nl->v[si].width * 0.5
+           + TD5_TG_FLORA_BRANCH_MARGIN;
+    return (gap < need) ? need : gap;
 }
 
 /* ===================== PROPS =====================
@@ -2237,6 +2354,7 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
     tw  = (double)tp->w * jit;
     th  = (double)tp->h * jit;
     gap = 800.0 + (double)((h >> 5) % 2400);       /* set back off the verge */
+    gap = tg_flora_gap_clear(nl, si, side, gap);    /* never on a branch */
 
     lx = n->tz * side; lz = -n->tx * side;
     cx = n->x + lx * (n->width * 0.5 + gap + tw * 0.5);
