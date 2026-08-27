@@ -102,4 +102,14 @@ int td5_trackgen_regenerate_main_spans(unsigned int seed,
  * surfaced in the HUD/log so a good random track can be reproduced. */
 unsigned int td5_trackgen_last_seed(void);
 
+/* Is the auto-generated track a NIGHT track? Decided ONCE per race entry (in
+ * td5_trackgen_regenerate, which every race launch calls) and latched, so every
+ * emitter and every renderer that asks during a build gets the same answer --
+ * see the TIME OF DAY block in td5_trackgen.c for why a per-call predicate is
+ * wrong. Safe to call at any time; 0 (day) before the first regenerate.
+ *
+ * Knob: TD5RE_AUTOTRACK_NIGHT (0 = always day, 1 = always night, 2 = decide
+ * from the seed, default 2). */
+int td5_trackgen_is_night(void);
+
 #endif /* TD5_TRACKGEN_H */

@@ -187,6 +187,202 @@ static void tg_srand(unsigned int seed)
     s_rng = seed ? seed : 0x9E3779B9u;
 }
 
+/* ==========================================================================
+ * ELEMENT ACCOUNTING  (feedback R2 item 24)
+ *
+ * WHY THIS EXISTS. The build log used to record the seed, the span count, the
+ * section mix, the biome runs, the fork positions, the texture-page count, the
+ * MODELS.DAT size and the guardrail coverage -- everything EXCEPT what was
+ * actually emitted into the world. So the only way to answer "what is standing
+ * at span 900?" was to pull MODELS.DAT off disk and parse it offline. One
+ * session burned eight wrong hypotheses that a per-element inventory would have
+ * settled in one grep, which is what this replaces.
+ *
+ * CONTRACT FOR EMITTERS. One line, at the point the element is committed to a
+ * buffer (not where it is merely considered -- a rejected candidate must not be
+ * counted, or the log lies in the direction that hurts most):
+ *
+ *     tg_acct(TG_ACCT_TREE, si);                 // one element at span si
+ *     tg_acct_n(TG_ACCT_TREE, si, 12);           // n elements at span si
+ *     tg_acct_range(TG_ACCT_TUNNEL, si0, si1);   // one element spanning si0..si1
+ *
+ * All three are no-fail, no-alloc and safe before/after a build, so an emitter
+ * never needs a guard around the call.
+ *
+ * WHAT THE REPORT ANSWERS. Per kind: how many, over how many spans, and the
+ * contiguous span RUNS it occupies. The runs are what make "what is at span N"
+ * a log question -- read down the report and every kind whose run list brackets
+ * N is present there. Runs are logged rather than a per-span dump because a
+ * 3000-span track with 20 kinds would otherwise be 60000 log lines; a kind that
+ * is genuinely scattered is capped and summarised instead.
+ * ========================================================================== */
+typedef enum {
+    TG_ACCT_BUILDING = 0,   /* facade wall cell / street-wall block */
+    TG_ACCT_SIDEWALK,       /* pavement slab + kerb */
+    TG_ACCT_SHOPFRONT,      /* ground-floor storefront command */
+    TG_ACCT_FENCE,          /* roadside fence / railing (not a guardrail) */
+    TG_ACCT_LAMP,           /* street lamp (post + head + glow) */
+    TG_ACCT_CROSSING,       /* pedestrian crossing / side-street mouth */
+    TG_ACCT_TREE,           /* tree billboard */
+    TG_ACCT_PROP,           /* people / statues / animals / misc furniture */
+    TG_ACCT_WATER,          /* sea / river plane */
+    TG_ACCT_BRIDGE,         /* bridge deck / pier piece */
+    TG_ACCT_TUNNEL,         /* tunnel bore piece */
+    TG_ACCT_TERRAIN,        /* ground slab */
+    TG_ACCT_FARBAND,        /* distant hillside / horizon band */
+    TG_ACCT_BANNER,         /* start / finish gantry */
+    TG_ACCT_GUARDRAIL,      /* armco / barrier */
+    TG_ACCT_ROAD,           /* drivable road quad */
+    TG_ACCT_CHECKPOINT,     /* LEVELINF checkpoint gate */
+    TG_ACCT_BRANCH,         /* fork split / rejoin marker */
+    TG_ACCT_KIND_COUNT
+} TG_AcctKind;
+
+static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
+    "buildings", "sidewalks", "shopfronts", "fences",   "lamps",
+    "crossings", "trees",     "props",      "water",    "bridge-pieces",
+    "tunnel-pieces", "terrain", "far-bands", "banners", "guardrails",
+    "road-quads", "checkpoints", "branch-nodes"
+};
+
+static long s_acct_count[TG_ACCT_KIND_COUNT];
+/* Presence bitmap: bit k of s_acct_mask[si] = kind k stands at span si. One
+ * unsigned int per span costs 12 KB at TD5_TG_MAX_SPANS and buys exact run
+ * extraction, which a running min/max pair cannot give (a kind present at spans
+ * 0-40 and 900-940 would otherwise report as one run 0..940). */
+static unsigned int s_acct_mask[TD5_TG_MAX_SPANS];
+
+static void tg_acct_reset(void)
+{
+    memset(s_acct_count, 0, sizeof(s_acct_count));
+    memset(s_acct_mask,  0, sizeof(s_acct_mask));
+}
+
+/* n elements of `kind` standing at span si. si out of range still COUNTS (the
+ * total must stay truthful) but contributes no run -- an emitter placing
+ * something off the ring is itself a finding, and silently dropping it would
+ * hide it. */
+static void tg_acct_n(TG_AcctKind kind, int si, int n)
+{
+    if ((unsigned)kind >= TG_ACCT_KIND_COUNT || n <= 0) return;
+    s_acct_count[kind] += n;
+    if (si >= 0 && si < TD5_TG_MAX_SPANS)
+        s_acct_mask[si] |= 1u << (unsigned)kind;
+}
+
+static void tg_acct(TG_AcctKind kind, int si) { tg_acct_n(kind, si, 1); }
+
+/* One element that OCCUPIES spans si0..si1 (a bridge deck, a tunnel bore, a
+ * water plane). Counted once -- it is one object -- but marked present across
+ * its whole extent so the run list brackets every span you can see it from. */
+static void tg_acct_range(TG_AcctKind kind, int si0, int si1)
+{
+    int s;
+    if ((unsigned)kind >= TG_ACCT_KIND_COUNT) return;
+    if (si1 < si0) { s = si0; si0 = si1; si1 = s; }
+    s_acct_count[kind] += 1;
+    if (si0 < 0) si0 = 0;
+    if (si1 >= TD5_TG_MAX_SPANS) si1 = TD5_TG_MAX_SPANS - 1;
+    for (s = si0; s <= si1; s++)
+        s_acct_mask[s] |= 1u << (unsigned)kind;
+}
+
+/* Cap on run entries printed per kind. A kind with more runs than this is
+ * scattered rather than placed, and its exact run list is not what anyone reads
+ * the log for -- the count and the first/last span are. */
+#define TD5_TG_ACCT_MAX_RUNS 10
+
+static void tg_acct_report(int nspans)
+{
+    int k;
+    if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
+    TD5_LOG_I(LOG_TAG, "trackgen: ---- element inventory (%d spans) ----", nspans);
+    for (k = 0; k < TG_ACCT_KIND_COUNT; k++) {
+        const unsigned int bit = 1u << (unsigned)k;
+        char runs[240];
+        int  pos = 0, nruns = 0, touched = 0, first = -1, last = -1;
+        int  s = 0;
+
+        if (s_acct_count[k] == 0) continue;
+        runs[0] = '\0';
+        while (s < nspans) {
+            int a;
+            if (!(s_acct_mask[s] & bit)) { s++; continue; }
+            a = s;
+            while (s < nspans && (s_acct_mask[s] & bit)) s++;
+            touched += s - a;
+            if (first < 0) first = a;
+            last = s - 1;
+            nruns++;
+            if (nruns <= TD5_TG_ACCT_MAX_RUNS && pos < (int)sizeof(runs) - 24) {
+                pos += snprintf(runs + pos, sizeof(runs) - (size_t)pos,
+                                "%s%d-%d", pos ? "," : "", a, s - 1);
+            }
+        }
+        if (nruns > TD5_TG_ACCT_MAX_RUNS)
+            snprintf(runs + pos, sizeof(runs) - (size_t)pos,
+                     ",+%d more", nruns - TD5_TG_ACCT_MAX_RUNS);
+        TD5_LOG_I(LOG_TAG,
+                  "trackgen:   %-14s n=%-6ld spans=%-5d first=%-5d last=%-5d runs[%d]: %s",
+                  k_acct_names[k], s_acct_count[k], touched, first, last,
+                  nruns, runs[0] ? runs : "-");
+    }
+    /* Empty kinds are reported as a single line rather than skipped silently:
+     * "trees n=0" is a finding, and a reader who does not see the kind at all
+     * cannot tell "none emitted" from "not accounted yet". */
+    {
+        char none[320];
+        int pos = 0;
+        for (k = 0; k < TG_ACCT_KIND_COUNT; k++) {
+            if (s_acct_count[k] != 0) continue;
+            if (pos < (int)sizeof(none) - 20)
+                pos += snprintf(none + pos, sizeof(none) - (size_t)pos,
+                                "%s%s", pos ? " " : "", k_acct_names[k]);
+        }
+        if (pos)
+            TD5_LOG_I(LOG_TAG, "trackgen:   NONE emitted: %s", none);
+    }
+    TD5_LOG_I(LOG_TAG, "trackgen: ---- end inventory ----");
+}
+
+/* ==========================================================================
+ * TIME OF DAY  (feedback R2 item 22)
+ *
+ * Night is a property of the RACE, not of a span, a biome or a texture page, so
+ * it is decided ONCE when the race is entered (td5_trackgen_regenerate, which is
+ * what a race launch calls) and latched. Emitters that need it -- street lamps
+ * only lighting up at night, headlights, sky choice -- read the latch through
+ * td5_trackgen_is_night() instead of each rolling its own predicate, which is
+ * how a track ends up with lit lamps under a noon sky.
+ *
+ * Latching also makes it stable across the build: tg_emit_models runs thousands
+ * of times per track and a predicate that re-rolled per call would light every
+ * other lamp.
+ *
+ * TD5RE_AUTOTRACK_NIGHT: 0 = always day, 1 = always night, 2 = decide from the
+ * seed (default). Seed-derived keeps a given seed reproducible -- the same seed
+ * is the same track at the same time of day, which the whole generator relies on.
+ * ========================================================================== */
+static int s_is_night = 0;
+
+static void tg_decide_night(unsigned int seed)
+{
+    int mode = td5_env_int("TD5RE_AUTOTRACK_NIGHT", 2, 0, 2);
+    if (mode < 2) {
+        s_is_night = mode;
+    } else {
+        /* Knuth multiplicative hash of the seed, high bit. ~1 in 4 night, which
+         * is roughly the shipped TD5 ratio (5 of the 19 schedule tracks run at
+         * night or dusk) rather than a coin flip. */
+        unsigned int h = seed * 2654435761u;
+        s_is_night = ((h >> 29) == 0) ? 1 : 0;
+    }
+    TD5_LOG_I(LOG_TAG, "trackgen: time of day = %s (seed=%u knob=%d)",
+              s_is_night ? "NIGHT" : "DAY", seed, mode);
+}
+
+int td5_trackgen_is_night(void) { return s_is_night; }
+
 static unsigned int tg_rand(void)
 {
     unsigned int x = s_rng;
@@ -1690,9 +1886,11 @@ static int tg_emit_levelinf(const TD5_TrackGenSpec *spec, int nspans,
         /* Evenly spaced from the grid to the finish, LAST one exactly on the
          * finish span -- that crossing is what ends the race. */
         const int span0 = TD5_TG_GRID_SPAN;
-        for (i = 0; i < cp_count; i++)
+        for (i = 0; i < cp_count; i++) {
             cp_span[i] = span0 + (int)((long)(finish - span0) * (i + 1)
                                        / cp_count);
+            tg_acct(TG_ACCT_CHECKPOINT, cp_span[i]);
+        }
         TD5_LOG_I(LOG_TAG, "trackgen: finish span %d of ring %d (%d spans of "
                   "run-off past the line), %d checkpoints",
                   finish, ring, ring - finish, cp_count);
@@ -2482,38 +2680,277 @@ typedef struct {
     int    prop_people, prop_lamp, prop_statue, prop_animal;
     int    water;        /* 1 = a sea plane on the seaward side of the run */
     int    road_surf;    /* index into k_road_surf: drivable surface + grip */
+    /* ---- [R2 item 23] biome character: adjacency axes + feature weighting ----
+     * climate  0 = warm/tropical, 1 = temperate, 2 = cold/alpine
+     * urbanity 0 = wilderness, 1 = rural, 2 = edge-of-town, 3 = dense urban
+     * w_bridge / w_tunnel  percent weighting the bridge/tunnel emitters scale
+     *          their own gates by -- 100 = "as often as the global rate", 0 =
+     *          never here, 200 = twice as often here.
+     * repeat_max  how many CONSECUTIVE 150-span cells this biome may occupy.
+     *          This is how "cities should have urban and suburban areas longer"
+     *          is expressed without changing the fixed run grid that the water
+     *          and prop emitters key their per-run state off. */
+    int    climate, urbanity;
+    int    w_bridge, w_tunnel;
+    int    repeat_max;
 } TG_Biome;
 
+/*                                                clim urb  brdg tunl rpt */
 static const TG_Biome k_biomes[] = {
-    /* CITY: ~8.4x11.5 wu cells, ~3 floors, on the curb, big sparse towers. */
+    /* CITY: ~8.4x11.5 wu cells, ~3 floors, on the curb, big sparse towers.
+     * Few bridges (a city road crosses at grade), the odd underpass. */
     { "CITY",       9, 2150, 2950, 2, 3, 6000, 350, {0}, 0,
-      TD5_TG_PAGE_WALL,   3, 0, TD5_TG_PAGE_GROUND,   6, 1, PP_MONUMENT, -1, 0, RS_TARMAC },
-    /* FIELDS: sparse deciduous on an open horizon; grazing sheep; dirt road. */
+      TD5_TG_PAGE_WALL,   3, 0, TD5_TG_PAGE_GROUND,   6, 1, PP_MONUMENT, -1, 0, RS_TARMAC,
+      1, 3,  40,  60, 3 },
+    /* FIELDS: sparse deciduous on an open horizon; grazing sheep; dirt road.
+     * COUNTRYSIDE = BRIDGES: open farmland is where the road crosses rivers and
+     * dry valleys, which is the user's "if it's a countryside there should be
+     * more bridges". Nothing to tunnel through. */
     { "FIELDS",     2, 0,0,0,0,0,0, {2, 0},       2,
-      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_SHEEP, 0, RS_DIRT },
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_SHEEP, 0, RS_DIRT,
+      1, 1, 190,  10, 2 },
     /* FOREST: dense mixed deciduous crowding the verge; deer. */
     { "FOREST",    11, 0,0,0,0,0,0, {0, 1, 2},    3,
-      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_DEER, 0, RS_TARMAC },
-    /* INDUSTRIAL: wider squat sheds; gravel yards. */
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_DEER, 0, RS_TARMAC,
+      1, 0, 110,  70, 2 },
+    /* INDUSTRIAL: wider squat sheds; gravel yards. The transition biome between
+     * a city and open country -- see the adjacency reasoning below. */
     { "INDUSTRIAL", 6, 2560, 2300, 1, 2, 8000, 600, {0}, 0,
-      TD5_TG_PAGE_WALL,  63, 0, TD5_TG_PAGE_GROUND,   3, 1, -1, -1, 0, RS_GRAVEL },
-    /* ALPINE: conifers + snow conifers; deer; icy road. */
+      TD5_TG_PAGE_WALL,  63, 0, TD5_TG_PAGE_GROUND,   3, 1, -1, -1, 0, RS_GRAVEL,
+      1, 2,  90,  40, 2 },
+    /* ALPINE: conifers + snow conifers; deer; icy road.
+     * MOUNTAINS = TUNNELS, the user's second example. Also bridges (viaducts
+     * across the valleys between the bores), but tunnels dominate. */
     { "ALPINE",     8, 0,0,0,0,0,0, {3, 4},       2,
-      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_DEER, 0, RS_ICE },
-    /* COAST: palms; beach crowds + promenade lamps; the sea alongside. */
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   0, 0, -1, PP_DEER, 0, RS_ICE,
+      2, 0, 140, 230, 2 },
+    /* COAST: palms; beach crowds + promenade lamps; the sea alongside.
+     * Causeways over inlets, headland bores. repeat_max 1 ON PURPOSE: the water
+     * emitter keys its sea level and its seaward side off the 150-span cell, so
+     * a COAST spanning two cells could step the sea surface or flip which side
+     * it is on. Single-cell coasts keep that emitter exactly as correct as it is
+     * today. Lift this only together with tg_biome_run_bounds adoption there. */
     { "COAST",      5, 0,0,0,0,0,0, {5, 6},       2,
-      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   6, 1, -1, -1, 1, RS_TARMAC },
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   6, 1, -1, -1, 1, RS_TARMAC,
+      0, 1, 160,  60, 1 },
     /* ORIENTAL: manicured topiary + weeping willow; guardian lions; cobbles. */
     { "ORIENTAL",   9, 0,0,0,0,0,0, {7, 8, 9},    3,
-      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   4, 0, PP_LION, -1, 0, RS_COBBLE }
+      TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   4, 0, PP_LION, -1, 0, RS_COBBLE,
+      1, 2, 120,  50, 2 }
 };
 #define TD5_TG_BIOME_COUNT 7
 #define TD5_TG_BIOME_RUN   150
 
+/* ==========================================================================
+ * BIOME ADJACENCY  (feedback R2 item 23)
+ *
+ * THE COMPLAINT was that biome transitions are abrupt and that the biome does
+ * not change what gets built. Both come from the same line of code: the biome
+ * used to be a raw hash of (span / 150), so consecutive runs were INDEPENDENT
+ * draws from all 7 biomes with a hard cut at the boundary. That produces snow
+ * conifers ending and palm trees starting on the same span, which is the
+ * "incompatibility due to difference" the user asked to be reasoned about.
+ *
+ * HOW LONG IS A RUN? A span is TD5_TG_SPAN_LENGTH (1500) world units and a lane
+ * is TD5_TG_LANE_WIDTH (1500) world units. Taking a lane as a real 3.5 m lane,
+ * one span is ~3.5 m and a 150-span run is ~525 m of road. That number is what
+ * makes the rules below obvious rather than arbitrary: half a kilometre.
+ *
+ * RULE 1 -- CLIMATE, |climate[a] - climate[b]| <= 1.
+ *   You do not drive out of snowbound conifers into a palm-lined beach road in
+ *   half a kilometre. Nothing in the world does that; a mountain road reaches
+ *   the sea through a treeline, then foothills, then the coast. Adjacent runs
+ *   must be at most one step apart on warm(0) / temperate(1) / cold(2), so
+ *   ALPINE-COAST is rejected outright and can only occur with a temperate run
+ *   (FIELDS, FOREST) between them.
+ *   This rule also does the grip work for free: RS_ICE lives only in ALPINE and
+ *   ALPINE can only touch temperate biomes, so the car never steps from cobbles
+ *   straight onto ice at speed.
+ *
+ * RULE 2 -- URBANITY, |urbanity[a] - urbanity[b]| <= 1.
+ *   Real roads step into a city, they do not cut into it: wilderness, farmland,
+ *   the edge with its sheds and yards, then the dense centre. A CITY run whose
+ *   neighbour is FOREST reads as two tracks spliced together. Requiring one step
+ *   on wild(0) / rural(1) / edge(2) / urban(3) forces INDUSTRIAL or ORIENTAL to
+ *   stand between CITY and open country, which is exactly the suburban belt the
+ *   user is asking for -- it is not a separate feature, it falls out of the rule.
+ *
+ * RULE 3 -- REPETITION, up to repeat_max consecutive cells.
+ *   The rules above are constraints; this is the one that lengthens things.
+ *   A biome may hold several cells in a row, and the urban biomes are allowed
+ *   the most (CITY 3 cells = ~1.5 km of city), which is the user's "urban and
+ *   suburban areas longer". COAST is pinned to 1 for the emitter reason in its
+ *   table row.
+ *
+ * The graph these rules leave is connected with no dead ends (every biome has at
+ * least two legal successors), so the picker below can never get stuck and never
+ * needs a "give up and take anything" escape that would reintroduce the bad cuts.
+ * ========================================================================== */
+static int tg_biome_compatible(int a, int b)
+{
+    int dc = k_biomes[a].climate  - k_biomes[b].climate;
+    int du = k_biomes[a].urbanity - k_biomes[b].urbanity;
+    if (dc < 0) dc = -dc;
+    if (du < 0) du = -du;
+    return dc <= 1 && du <= 1;
+}
+
+/* Biome per 150-span CELL. The cell grid is deliberately unchanged from the old
+ * hash version: the water and prop emitters derive per-run state from
+ * (span / TD5_TG_BIOME_RUN), so making runs variable-length would silently
+ * desynchronise them. Length comes from repeating a cell instead. */
+#define TD5_TG_BIOME_CELLS ((TD5_TG_MAX_SPANS / TD5_TG_BIOME_RUN) + 2)
+static unsigned char s_biome_cell[TD5_TG_BIOME_CELLS];
+static int           s_biome_laid_out = 0;
+
+/* Deterministic per-cell hash. Not tg_rand(): the biome layout must not consume
+ * the geometry RNG stream, or adding a biome rule would move the road. */
+static unsigned int tg_biome_hash(unsigned int seed, int cell, unsigned int salt)
+{
+    unsigned int h = seed ^ (salt * 0x9E3779B9u);
+    h += (unsigned)cell * 2654435761u;
+    h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12;
+    return h;
+}
+
+/* Lay the whole cell grid out once per build, before any emitter asks. */
+static void tg_biome_layout(unsigned int seed)
+{
+    int cell, run_len = 1;
+
+    s_biome_cell[0] = (unsigned char)(tg_biome_hash(seed, 0, 1u)
+                                      % TD5_TG_BIOME_COUNT);
+    for (cell = 1; cell < TD5_TG_BIOME_CELLS; cell++) {
+        int prev = s_biome_cell[cell - 1];
+        unsigned int h = tg_biome_hash(seed, cell, 2u);
+        int cand, chosen = -1, tries;
+
+        /* Extend the current biome first, up to its repeat_max. The 0..99 draw
+         * against a flat 45% keeps runs varied -- always extending to the cap
+         * would make every city exactly repeat_max cells long. */
+        if (run_len < k_biomes[prev].repeat_max && (h % 100u) < 45u) {
+            s_biome_cell[cell] = (unsigned char)prev;
+            run_len++;
+            continue;
+        }
+        /* Otherwise walk the biome list from a hashed offset and take the first
+         * COMPATIBLE one that is not the biome we just left (we already decided
+         * not to extend it). Scanning from a rotating offset rather than
+         * rejection-sampling keeps this bounded and deterministic. */
+        for (tries = 0; tries < TD5_TG_BIOME_COUNT; tries++) {
+            cand = (int)(((h >> 8) + (unsigned)tries) % TD5_TG_BIOME_COUNT);
+            if (cand == prev) continue;
+            if (!tg_biome_compatible(prev, cand)) continue;
+            chosen = cand;
+            break;
+        }
+        /* Unreachable by construction (the adjacency graph has no dead ends),
+         * but a silent out-of-range index here would be a crash rather than a
+         * cosmetic bug, so it is pinned rather than asserted. */
+        if (chosen < 0) chosen = prev;
+        s_biome_cell[cell] = (unsigned char)chosen;
+        run_len = (chosen == prev) ? run_len + 1 : 1;
+    }
+    s_biome_laid_out = 1;
+}
+
+/* HARD cell assignment -- no blending. This is the biome that OWNS the span, and
+ * it is what per-run state (road surface, sea level, run bounds) must key off:
+ * a dithered road-surface class would flip grip from span to span. */
+static int tg_biome_cell_index(int si)
+{
+    int cell;
+    if (si < 0) si = 0;
+    cell = si / TD5_TG_BIOME_RUN;
+    if (cell >= TD5_TG_BIOME_CELLS) cell = TD5_TG_BIOME_CELLS - 1;
+    if (!s_biome_laid_out)   /* asked before a build laid the grid out */
+        return (int)(((unsigned)cell * 2654435761u) >> 27) % TD5_TG_BIOME_COUNT;
+    return (int)s_biome_cell[cell];
+}
+
+/* Merged extent of the biome run containing si (consecutive cells of the same
+ * biome collapse into one run). Offered for the emitters that currently do
+ * `si / TD5_TG_BIOME_RUN` arithmetic to derive per-run state -- with repeated
+ * cells that arithmetic sees a 300-span city as two runs. Not yet adopted by
+ * them; see the COAST repeat_max note. */
+static void tg_biome_run_bounds(int si, int *out_a, int *out_b)
+{
+    int cell = (si < 0) ? 0 : si / TD5_TG_BIOME_RUN;
+    int b = tg_biome_cell_index(si), a = cell, z = cell;
+    if (cell >= TD5_TG_BIOME_CELLS) cell = a = z = TD5_TG_BIOME_CELLS - 1;
+    while (a > 0 && tg_biome_cell_index((a - 1) * TD5_TG_BIOME_RUN) == b) a--;
+    while (z + 1 < TD5_TG_BIOME_CELLS &&
+           tg_biome_cell_index((z + 1) * TD5_TG_BIOME_RUN) == b) z++;
+    if (out_a) *out_a = a * TD5_TG_BIOME_RUN;
+    if (out_b) *out_b = (z + 1) * TD5_TG_BIOME_RUN - 1;
+}
+
+/* Width of the dithered transition band, in spans, either side of a cell
+ * boundary. 20 spans is ~70 m of road at the scale derived above: long enough
+ * that the changeover reads as a gradient at racing speed, short enough that a
+ * 150-span run still has a solid ~110-span core of its own character. */
+#define TD5_TG_BIOME_BLEND 20
+
+/* BLENDED biome for span si -- what the SCENERY emitters should ask.
+ *
+ * Inside the band around a cell boundary the span is assigned to the incoming or
+ * the outgoing biome by a per-span hash whose threshold ramps linearly across
+ * the band. That is ordered dithering of a categorical field, and it is the only
+ * thing that actually smooths a transition between two DISCRETE biomes: you
+ * cannot interpolate "forest" into "city", but you can interleave them, so the
+ * trees thin out over ~140 m while the first buildings start appearing, instead
+ * of every tree stopping and every building starting on one span.
+ *
+ * The hash is per-span and seed-independent-of-order, so the interleave is
+ * stable across the thousands of calls an emitter makes for the same span. */
 static int tg_biome_for_span(int si)
 {
-    unsigned int h = (unsigned)(si / TD5_TG_BIOME_RUN) * 2654435761u;
-    return (int)((h >> 27) % TD5_TG_BIOME_COUNT);
+    int here, cell, off, other, dist;
+    unsigned int h, thresh;
+
+    if (si < 0) si = 0;
+    here = tg_biome_cell_index(si);
+    if (td5_env_int("TD5RE_AUTOTRACK_BIOME_BLEND", TD5_TG_BIOME_BLEND,
+                    0, TD5_TG_BIOME_RUN / 2) <= 0)
+        return here;
+
+    cell = si / TD5_TG_BIOME_RUN;
+    off  = si - cell * TD5_TG_BIOME_RUN;
+
+    if (off < TD5_TG_BIOME_BLEND) {              /* leading edge of this cell */
+        other = tg_biome_cell_index((cell - 1) * TD5_TG_BIOME_RUN);
+        dist  = off;                              /* 0 = right on the boundary */
+    } else if (off >= TD5_TG_BIOME_RUN - TD5_TG_BIOME_BLEND) { /* trailing edge */
+        other = tg_biome_cell_index((cell + 1) * TD5_TG_BIOME_RUN);
+        dist  = TD5_TG_BIOME_RUN - 1 - off;
+    } else {
+        return here;                              /* solid core of the run */
+    }
+    if (other == here) return here;
+
+    /* dist 0 -> even odds; dist == BLEND -> always `here`. */
+    thresh = (unsigned)(50 + (50 * dist) / TD5_TG_BIOME_BLEND);
+    h = tg_biome_hash((unsigned)si, si, 3u);
+    return ((h % 100u) < thresh) ? here : other;
+}
+
+/* Per-biome feature weighting, as a PERCENT of the emitter's own global rate:
+ * 100 = unchanged, 0 = never in this biome, 200 = twice as likely.
+ *
+ * Offered as accessors rather than as raw table reads so the bridge and tunnel
+ * emitters (owned elsewhere) need one line each and stay unaware of the biome
+ * struct. Keyed on the HARD cell index, not the blended one: a bridge is a
+ * hundred spans of structure and must not be decided by a dithered edge span.
+ *
+ * Suggested use at the emitter's existing gate:
+ *     if (roll % 100 >= (base_pct * tg_biome_bridge_pct(si)) / 100) return 0; */
+static int tg_biome_bridge_pct(int si)
+{
+    return k_biomes[tg_biome_cell_index(si)].w_bridge;
+}
+static int tg_biome_tunnel_pct(int si)
+{
+    return k_biomes[tg_biome_cell_index(si)].w_tunnel;
 }
 
 /* TUNNEL EXCEPTION -- the one reason a span's surface is not its biome's.
@@ -2547,7 +2984,10 @@ static int tg_surface_attr(int si)
     const TG_Biome *b;
     if (tg_span_tunnel_tarmac(si))
         return 0x10 | (k_road_surf[RS_TARMAC].grip_class & 0x0F);
-    b = &k_biomes[tg_biome_for_span(si)];
+    /* [R2 item 23] HARD cell index, never the blended one: the blend dithers
+     * span by span, and a grip class that alternates ice/tarmac down a straight
+     * is a spin, not a transition. Scenery blends; the road does not. */
+    b = &k_biomes[tg_biome_cell_index(si)];
     return 0x10 | (k_road_surf[b->road_surf].grip_class & 0x0F);
 }
 
@@ -2557,7 +2997,10 @@ static int tg_road_page(int si)
     const TG_Biome *b;
     if (tg_span_tunnel_tarmac(si))
         return tg_road_slot(k_road_surf[RS_TARMAC].page_var);
-    b = &k_biomes[tg_biome_for_span(si)];
+    /* Same hard index as tg_surface_attr -- the TEXTURE the car drives over and
+     * the GRIP it feels must never disagree, which is only guaranteed while both
+     * read the same function. */
+    b = &k_biomes[tg_biome_cell_index(si)];
     return tg_road_slot(k_road_surf[b->road_surf].page_var);
 }
 
@@ -6259,6 +6702,19 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     memset(&info, 0, sizeof(info));
     memset(tally, 0, sizeof(tally));
 
+    /* [R2 item 24] Clear the inventory BEFORE anything is emitted. Placed here
+     * rather than in regenerate so a direct build_level call (the S2 regen
+     * self-check, a future editor) reports its own elements and not the
+     * previous build's. */
+    tg_acct_reset();
+
+    /* [R2 item 23] Lay the biome grid out BEFORE the centerline walk: the strip
+     * emitter asks tg_surface_attr for every span, so the grid has to exist by
+     * then. Driven by the seed, not by the geometry RNG, so it never perturbs
+     * the road. Laid out for the whole cell array rather than for nspans, so a
+     * span past the ring (an appended branch corridor) still has a biome. */
+    tg_biome_layout(spec->seed);
+
     tg_srand(spec->seed);
 
     snprintf(dir, sizeof(dir), "re/assets/levels/level%03d", level_num);
@@ -6350,16 +6806,45 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
                       tg_section_name((TD5_TrackGenSection)s), tally[s],
                       spec->weight[s]);
     }
-    {   /* Biome layout, so a run can be checked against what is on screen. */
-        int s, runs = 0;
-        for (s = 0; s < nspans; s += TD5_TG_BIOME_RUN) {
-            TD5_LOG_I(LOG_TAG, "trackgen:   biome span %5d.. = %s",
-                      s, k_biomes[tg_biome_for_span(s)].name);
+    {   /* Biome layout, so a run can be checked against what is on screen.
+         * [R2 item 23] Logged as MERGED runs (consecutive same-biome cells
+         * collapsed) with each biome's feature weighting, so "why are there no
+         * tunnels here" and "why did the scenery change" are both answerable
+         * from the log. */
+        int s = 0, runs = 0;
+        while (s < nspans) {
+            int a, z, b = tg_biome_cell_index(s);
+            tg_biome_run_bounds(s, &a, &z);
+            if (z >= nspans) z = nspans - 1;
+            TD5_LOG_I(LOG_TAG,
+                      "trackgen:   biome run %2d: spans %5d-%5d %-11s "
+                      "(climate=%d urbanity=%d bridge=%d%% tunnel=%d%% surf=%s)",
+                      runs, a, z, k_biomes[b].name,
+                      k_biomes[b].climate, k_biomes[b].urbanity,
+                      tg_biome_bridge_pct(a), tg_biome_tunnel_pct(a),
+                      k_road_surf[k_biomes[b].road_surf].grip_class == 1
+                          ? "tarmac" : "special");
             runs++;
+            s = z + 1;
         }
-        TD5_LOG_I(LOG_TAG, "trackgen: %d biome run(s) of %d spans",
-                  runs, TD5_TG_BIOME_RUN);
+        TD5_LOG_I(LOG_TAG,
+                  "trackgen: %d biome run(s), cell=%d spans, blend=%d spans, "
+                  "time=%s",
+                  runs, TD5_TG_BIOME_RUN,
+                  td5_env_int("TD5RE_AUTOTRACK_BIOME_BLEND",
+                              TD5_TG_BIOME_BLEND, 0, TD5_TG_BIOME_RUN / 2),
+                  s_is_night ? "NIGHT" : "DAY");
     }
+    {   /* Branch nodes are held in s_forks rather than emitted through a single
+         * call site, so they are accounted here where the table is complete. */
+        int f;
+        for (f = 0; f < s_fork_count; f++) {
+            tg_acct_range(TG_ACCT_BRANCH, s_forks[f].F, s_forks[f].R);
+            tg_acct_range(TG_ACCT_BRANCH, s_forks[f].cbase,
+                          s_forks[f].cbase + s_forks[f].len - 1);
+        }
+    }
+    tg_acct_report(nspans);
     ok = 1;
 
 done:
@@ -6509,6 +6994,11 @@ int td5_trackgen_regenerate(unsigned int seed)
                         + 0x9E3779B9u;
     }
     spec.seed = seed;
+
+    /* [R2 item 22] Time of day is decided HERE -- regenerate is what a race
+     * launch calls, so this is "on entering the race" -- and BEFORE the build,
+     * so every emitter that asks td5_trackgen_is_night() during it agrees. */
+    tg_decide_night(seed);
 
     if (!td5_trackgen_build_level(&spec, TD5_TG_LEVEL_NUM, &spans)) {
         TD5_LOG_E(LOG_TAG, "trackgen: regenerate failed; auto track unavailable");

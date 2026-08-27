@@ -22,6 +22,7 @@
 #include "td5_hud.h"
 #include "td5_track.h"
 #include "td5_track_registry.h"  /* custom-track registry: selector bound + has-slot */
+#include "td5_trackgen.h"        /* [R2 item 25] auto-track slot test + last seed */
 #include "td5_types.h"
 #include "td5re.h"
 #include "td5_snk_strings.h"
@@ -313,6 +314,9 @@ static int  s_track_max;               /* max track index for current mode */
  * selector is still reached by pressing UP. -1 = not created this entry. */
 static int  s_carsel_rand_btn = -1;
 static int  s_trksel_rand_btn = -1;
+/* [AUTOTRACK R2 item 25] AUTO TRACK OPTIONS button index on the track-select
+ * column, or -1 when the current pick is not the auto-generated slot. */
+static int  s_trksel_auto_btn = -1;
 /* [ARCADE 2026-06-26] ARCADE/SIMULATION selector on Track Selection — APPENDED
  * as the highest button index so the load-bearing 0..8 rows stay put. -1 = not
  * created this entry. Non-static: the value render lives in td5_frontend.c
@@ -6721,6 +6725,16 @@ static void trksel_build_main_buttons(void) {
             s_trksel_rand_btn = frontend_create_button(TR("Randomize"), 120, 57, 224, 32);
         }
     }
+    /* [AUTOTRACK R2 item 25] AUTO TRACK OPTIONS, shown ONLY while the
+     * AUTO-GENERATED slot is the current pick -- the generator knobs mean
+     * nothing on a shipped track. Created AFTER the fixed rows and the randomize
+     * chip so indices 0..5 stay stable for the handlers that test them by
+     * number. */
+    s_trksel_auto_btn = -1;
+    if (td5_trackgen_is_auto_slot(s_selected_track))
+        s_trksel_auto_btn = frontend_create_button(TR("Auto Track"),
+                                                   120, 306, 224, 32);
+
     s_trksel_dyn_btn = -1;   /* DYNAMICS moved onto the RACE OPTIONS screen */
     /* Track-dependent row visibility (Direction hidden on forward-only tracks,
      * Laps hidden on point-to-point tracks) — same helpers, new indices. */
@@ -6951,6 +6965,223 @@ void Screen_RaceOptions(void) {
                 }
             }
         }
+        break;
+    }
+}
+
+/* ===== AUTO TRACK OPTIONS screen (PORT ENHANCEMENT, autotrack R2 item 25) ===
+ * The procedural generator has ~48 TD5RE_AUTOTRACK_* knobs and every one of them
+ * needed an environment variable and a relaunch. This exposes the dozen a player
+ * would actually turn, and only where they mean something: the screen is reached
+ * from track-select ONLY while the AUTO-GENERATED slot is the current pick.
+ *
+ * The knobs are ENV VARS, not INI fields, so the rows write them back with
+ * _putenv_s (the same mechanism td5_rt.c uses for the RT tiers). That is enough
+ * because td5_env_int/td5_env_flag_* call getenv on every read and never cache,
+ * and because the generator reads them in td5_trackgen_regenerate, which runs at
+ * race launch -- i.e. always after this screen has been left. Nothing here needs
+ * to regenerate eagerly, and deliberately does not: rebuilding a 1800-span track
+ * on every arrow press would stall the menu.
+ *
+ * NOT persisted to the INI on purpose. These are per-session generator settings,
+ * and an INI round-trip would also have to defend against a stale env var set on
+ * the command line for an A/B, which is the documented way to drive them.
+ *
+ * LAYOUT: 12 selector rows do not fit the standard 97/40 button grid (row 11
+ * would land at 537, off a 480-line screen). Follows the LIGHTING OPTIONS
+ * precedent instead, which solved the same problem with a tighter base/step. */
+#define AT_BASE_Y 62
+#define AT_STEP_Y 32
+#define AT_ROWS   12
+
+/* A row is a label, an env knob, and the discrete values it cycles through.
+ * Values are the literal integers written to the knob, so the option list and
+ * the knob's own clamp range can never drift apart. */
+typedef struct {
+    const char *label;
+    const char *knob;            /* NULL = composite row, handled by index */
+    const int  *values;
+    const char *const *names;
+    int         n;
+    int         def;             /* value the generator uses when unset */
+} AT_Row;
+
+static const int  k_at_len_v[]  = { 600, 1200, 1800, 2400, 3000 };
+static const char *const k_at_len_n[] = { "SHORT", "MEDIUM", "LONG",
+                                          "VERY LONG", "MARATHON" };
+static const int  k_at_lane_v[] = { 2, 3, 4 };
+static const char *const k_at_lane_n[] = { "2", "3", "4" };
+static const int  k_at_elev_v[] = { 0, 3000, 6000, 12000, 20000 };
+static const char *const k_at_elev_n[] = { "FLAT", "LOW", "MEDIUM",
+                                           "HIGH", "EXTREME" };
+/* TWISTINESS is a composite: one pick drives the three section-mix knobs. A
+ * player thinking "I want a twisty track" should not have to balance three
+ * percentages by hand, and three independent rows also let them be set to a mix
+ * the picker cannot honour. */
+static const char *const k_at_twist_n[] = { "GENTLE", "BALANCED", "TWISTY",
+                                            "EXTREME" };
+static const int k_at_twist_mix[4][3] = {   /* straight, curve, acute */
+    { 60, 35,  5 },
+    { 35, 40, 15 },   /* the generator's shipped default */
+    { 20, 45, 35 },
+    { 10, 40, 50 }
+};
+static const int  k_at_night_v[] = { 0, 1, 2 };
+static const char *const k_at_night_n[] = { "DAY", "NIGHT", "RANDOM" };
+static const int  k_at_blend_v[] = { 0, 10, 20, 40 };
+static const char *const k_at_blend_n[] = { "SHARP", "SHORT", "NORMAL", "LONG" };
+static const int  k_at_off_on_v[] = { 0, 1 };
+static const char *const k_at_off_on_n[] = { "OFF", "ON" };
+
+#define AT_ROW_TWIST 3
+
+static const AT_Row k_at_rows[AT_ROWS] = {
+    { "LENGTH",      "TD5RE_AUTOTRACK_SPANS",       k_at_len_v,    k_at_len_n,    5, 1800 },
+    { "LANES",       "TD5RE_AUTOTRACK_LANES",       k_at_lane_v,   k_at_lane_n,   3, 4    },
+    { "HILLS",       "TD5RE_AUTOTRACK_ELEVATION",   k_at_elev_v,   k_at_elev_n,   5, 6000 },
+    { "TWISTINESS",  NULL,                          NULL,          k_at_twist_n,  4, 1    },
+    { "TIME OF DAY", "TD5RE_AUTOTRACK_NIGHT",       k_at_night_v,  k_at_night_n,  3, 2    },
+    { "TRANSITIONS", "TD5RE_AUTOTRACK_BIOME_BLEND", k_at_blend_v,  k_at_blend_n,  4, 20   },
+    { "SCENERY",     "TD5RE_AUTOTRACK_SCENERY",     k_at_off_on_v, k_at_off_on_n, 2, 1    },
+    { "BRIDGES",     "TD5RE_AUTOTRACK_BRIDGES",     k_at_off_on_v, k_at_off_on_n, 2, 1    },
+    { "TUNNELS",     "TD5RE_AUTOTRACK_TUNNELS",     k_at_off_on_v, k_at_off_on_n, 2, 1    },
+    { "BRANCHES",    "TD5RE_AUTOTRACK_BRANCHES",    k_at_off_on_v, k_at_off_on_n, 2, 1    },
+    { "GUARDRAILS",  "TD5RE_AUTOTRACK_GUARDRAILS",  k_at_off_on_v, k_at_off_on_n, 2, 0    },
+    { "REAL TEXTURES","TD5RE_AUTOTRACK_REAL_TEX",   k_at_off_on_v, k_at_off_on_n, 2, 0    }
+};
+
+static void at_setenv(const char *knob, int value)
+{
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%d", value);
+    _putenv_s(knob, buf);
+}
+
+/* Current option index for a row. Reads the LIVE env var so a knob set on the
+ * command line shows up here instead of the screen silently disagreeing with
+ * what the generator will do. An unrecognised value falls back to the row's
+ * default rather than to index 0, so a hand-set TD5RE_AUTOTRACK_SPANS=1234 does
+ * not read as "SHORT". */
+static int at_row_index(int row)
+{
+    const AT_Row *r = &k_at_rows[row];
+    const char *e;
+    int cur, i, best = 0;
+
+    if (row == AT_ROW_TWIST) {
+        int st = td5_env_int("TD5RE_AUTOTRACK_PCT_STRAIGHT", -1, -1, 100);
+        int ac = td5_env_int("TD5RE_AUTOTRACK_PCT_ACUTE",    -1, -1, 100);
+        if (st < 0 && ac < 0) return r->def;
+        for (i = 0; i < r->n; i++)
+            if (k_at_twist_mix[i][0] == st && k_at_twist_mix[i][2] == ac)
+                return i;
+        return r->def;
+    }
+
+    e = getenv(r->knob);
+    cur = (e && e[0]) ? atoi(e) : r->def;
+    for (i = 0; i < r->n; i++) {
+        if (r->values[i] == cur) return i;
+        if (r->values[i] == r->def) best = i;
+    }
+    return best;
+}
+
+static void at_row_apply(int row, int delta)
+{
+    const AT_Row *r = &k_at_rows[row];
+    int idx = at_row_index(row) + delta;
+
+    while (idx < 0) idx += r->n;
+    idx %= r->n;
+
+    if (row == AT_ROW_TWIST) {
+        at_setenv("TD5RE_AUTOTRACK_PCT_STRAIGHT", k_at_twist_mix[idx][0]);
+        at_setenv("TD5RE_AUTOTRACK_PCT_CURVE",    k_at_twist_mix[idx][1]);
+        at_setenv("TD5RE_AUTOTRACK_PCT_ACUTE",    k_at_twist_mix[idx][2]);
+    } else {
+        at_setenv(r->knob, r->values[idx]);
+    }
+    TD5_LOG_I(LOG_TAG, "AutoTrackOptions: %s -> %s",
+              r->label, r->names[idx]);
+}
+
+/* Drawn by the td5_frontend.c render dispatch, like every other option screen. */
+void frontend_render_autotrack_options_overlay(float sx, float sy)
+{
+    int r;
+    if (!s_anim_complete) return;
+    for (r = 0; r < AT_ROWS; r++)
+        frontend_draw_value_centered(sx, sy, AT_BASE_Y + AT_STEP_Y * r + 6,
+                                     k_at_rows[r].names[at_row_index(r)],
+                                     0xFFFFFFFF);
+}
+
+int td5_autotrack_opts_row_count(void) { return AT_ROWS; }
+
+void Screen_AutoTrackOptions(void) {
+    switch (s_inner_state) {
+    case 0: {
+        int r;
+        frontend_init_return_screen(TD5_SCREEN_AUTOTRACK_OPTIONS);
+        frontend_reset_buttons();
+        for (r = 0; r < AT_ROWS; r++)
+            frontend_create_button(TR(k_at_rows[r].label), 120,
+                                   AT_BASE_Y + AT_STEP_Y * r, 224, 28);
+        frontend_create_button(SNK_OkButTxt, 200,
+                               AT_BASE_Y + AT_STEP_Y * AT_ROWS, 96, 28);
+        frontend_set_cursor_visible(1);
+        s_return_screen   = TD5_SCREEN_TRACK_SELECTION;
+        s_selected_button = 0;
+        s_anim_complete   = 0;
+        frontend_begin_timed_animation();
+        s_inner_state = 1;
+        TD5_LOG_I(LOG_TAG, "AutoTrackOptions: init (seed of last build=%u)",
+                  td5_trackgen_last_seed());
+        break;
+    }
+    case 1: case 2:
+        frontend_present_buffer();
+        s_inner_state++;
+        break;
+    case 3:
+        if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
+            s_anim_complete = 1;
+            s_inner_state = 4;
+        }
+        break;
+    case 4: case 5:
+        s_inner_state = 6;
+        break;
+    case 6:
+        /* ESC consumed here for the same reason RACE OPTIONS does it: the screen
+         * dispatch runs before the central back handler, which would navigate
+         * without logging the exit. */
+        if (frontend_check_escape()) {
+            s_inner_state = 7;
+            break;
+        }
+        if (s_input_ready) {
+            int delta  = frontend_option_delta();
+            int active = (s_button_index >= 0) ? s_button_index : s_selected_button;
+            if (delta != 0 && active >= 0 && active < AT_ROWS) {
+                at_row_apply(active, delta);
+                frontend_play_sfx(2);
+            }
+            if (s_button_index == AT_ROWS)      /* OK */
+                s_inner_state = 7;
+        }
+        break;
+    case 7:
+        frontend_begin_timed_animation();
+        s_inner_state = 8;
+        break;
+    case 8:
+        if (frontend_update_timed_animation(16, 267) >= 1.0f)
+            s_inner_state = 9;
+        break;
+    case 9:
+        td5_frontend_set_screen(TD5_SCREEN_TRACK_SELECTION);
         break;
     }
 }
@@ -7323,6 +7554,18 @@ void Screen_TrackSelection(void) {
             if (s_button_index == 5 && s_button_index != s_trksel_rand_btn) { /* Back */
                 s_return_screen = TD5_SCREEN_CAR_SELECTION;
                 s_inner_state = 6;
+            }
+
+            /* [AUTOTRACK R2 item 25] AUTO TRACK OPTIONS. Same focus-agreement
+             * guard the randomize chip uses: this button is created past the
+             * fixed rows, so in a flow with fewer buttons a stray s_button_index
+             * could alias it and open the screen on a focus change. */
+            if (s_trksel_auto_btn >= 0 &&
+                s_button_index == s_trksel_auto_btn &&
+                s_selected_button == s_trksel_auto_btn) {
+                frontend_play_sfx(3);
+                td5_frontend_set_screen(TD5_SCREEN_AUTOTRACK_OPTIONS);
+                break;
             }
 
             /* [#14] RANDOMIZE: pick a random track, then run the SAME change flow as
