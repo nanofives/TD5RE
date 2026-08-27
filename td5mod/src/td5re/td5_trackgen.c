@@ -3536,7 +3536,13 @@ static void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
          * river, so the river plane is the visible floor beside the deck. Both
          * the pull-back and the drop scale with the run phase, so the terrain is
          * continuous with the ordinary skirt at the run ends. */
-        const double bed = nl->v[si].y - (tg_bridge_water_y(nl, si) - 150.0);
+        /* dy is a DROP BELOW the road, so it must never come out negative: a
+         * river plane sitting ABOVE its road node is not a gorge, and a negative
+         * drop lifts every piece of terrain built off this profile above the
+         * road. Clamp here rather than at each consumer -- see the ceiling note
+         * in tg_emit_far_band for what that looked like in frame. */
+        double bed = nl->v[si].y - (tg_bridge_water_y(nl, si) - 150.0);
+        if (bed < 0.0) bed = 0.0;
         p->d[0]  = phase * TD5_TG_GORGE_INSET;
         p->dy[0] = phase * bed;
         p->dy[1] = TD5_TG_GROUND_DROP + phase * (bed - TD5_TG_GROUND_DROP);
@@ -4680,10 +4686,27 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
         if (len < 1e-6) { ux = 1.0; uz = 0.0; } else { ux /= len; uz /= len; }
         if (!is_left) { ux = -ux; uz = -uz; }
 
-        /* Start where the skirt ended, from the SAME profile the skirt used. */
-        tg_ground_side(nl, se, is_left, 0.0, &p);
-        so = p.d[p.n - 1];
-        base = (is_left ? ly : ry) - p.dy[p.n - 1] - TD5_TG_FAR_SINK;
+        /* Start where the skirt ended, from the SAME profile the skirt used --
+         * including its WATER SIDE. This used to hardcode 0.0 while
+         * tg_emit_ground passes the real side, so on a coastal run the band and
+         * the skirt disagreed about where the ground was. */
+        {
+            const double wsd = h->b->water ? tg_water_side(se) : 0.0;
+            double drop;
+
+            tg_ground_side(nl, se, is_left, wsd, &p);
+            so   = p.d[p.n - 1];
+            drop = p.dy[p.n - 1];
+            /* Belt and braces on top of the clamp in tg_ground_side: this band
+             * runs out to TD5_TG_FAR_REACH (180000), so ANY upward error here is
+             * multiplied into a slab across the whole view. Measured on seed
+             * 1234567 span 218 before the fix: the seam sat 6350 units ABOVE the
+             * road and the player drove under its underside, which read in frame
+             * as the sky being replaced by a dark ceiling. The far terrain is
+             * never allowed above the road edge. */
+            if (drop < 0.0) drop = 0.0;
+            base = (is_left ? ly : ry) - drop - TD5_TG_FAR_SINK;
+        }
         U[e] = (double)se + (e ? 1.0 : 0.0);
 
         /* Geometric spacing: each band is roughly twice the depth of the one
