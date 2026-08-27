@@ -29,6 +29,7 @@
 #include "td5_platform.h"
 #include "td5_config.h"
 #include "td5_tg_real_tex.h"   /* real TD5 texture pages (level014), opt-in */
+#include "td5_tg_furniture_tex.h" /* real TD5 lamp/railing/banner pages     */
 #include "td5re.h"
 
 #include <stdio.h>
@@ -129,8 +130,17 @@ static int tg_road_page(int si);
 #define TD5_TG_PAGE_TUNNEL    (TD5_TG_PAGE_FB_BASE + 4)  /* tunnel lining     */
 #define TD5_TG_PAGE_SNOW      (TD5_TG_PAGE_FB_BASE + 5)  /* snow ground       */
 #define TD5_TG_PAGE_HILL      (TD5_TG_PAGE_FB_BASE + 6)  /* distant hillside  */
-#define TD5_TG_PAGE_BANNER    (TD5_TG_PAGE_FB_BASE + 7)  /* start/finish gate */
-#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_FB_BASE + 8)
+#define TD5_TG_PAGE_BANNER    (TD5_TG_PAGE_FB_BASE + 7)  /* gantry legs       */
+/* [FB r2] Real shipped TD5 street furniture (feedback items 10 and 12). The
+ * banner word does not fit one 64x64 page: shipped TD5 splits it over two
+ * consecutive pages laid side by side, so each banner needs a LEFT and a RIGHT
+ * slot. Page ids of the originals are in td5_tg_furniture_tex.h. */
+#define TD5_TG_PAGE_LAMPPOST  (TD5_TG_PAGE_FB_BASE + 8)  /* L001 p356 lamp    */
+#define TD5_TG_PAGE_START_L   (TD5_TG_PAGE_FB_BASE + 9)  /* L001 p337 "STA"   */
+#define TD5_TG_PAGE_START_R   (TD5_TG_PAGE_FB_BASE + 10) /* L001 p338 "RT"    */
+#define TD5_TG_PAGE_FINISH_L  (TD5_TG_PAGE_FB_BASE + 11) /* L001 p369 "FIN"   */
+#define TD5_TG_PAGE_FINISH_R  (TD5_TG_PAGE_FB_BASE + 12) /* L001 p370 "ISH"   */
+#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_FB_BASE + 13)
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
@@ -182,9 +192,33 @@ static int tg_span_in_tunnel(int si);
 /* Seed of the last successful build, for reproducing a good random track. */
 static unsigned int s_last_seed = 0;
 
+/* Seed the build was started from, kept apart from s_rng (which advances on
+ * every draw). Only the night predicate below reads it, and it must stay a
+ * pure function of the seed so two builds of the same track agree. */
+static unsigned int s_build_seed = 0;
+
 static void tg_srand(unsigned int seed)
 {
     s_rng = seed ? seed : 0x9E3779B9u;
+    s_build_seed = s_rng;
+}
+
+/* Is this generated track a NIGHT track? Feedback item 11: "street lamps should
+ * only be visible on night time auto-generated tracks" -- lit lamp posts down a
+ * midday road are the giveaway that the scenery is synthetic.
+ *
+ * TODO(meta agent, feedback item 22): night-ness is decided when the race is
+ * ENTERED, and that owner will expose the query. Replace this whole body with a
+ * call to it -- every caller already goes through this one predicate, so the
+ * swap is one line. Until then the answer is derived from the build seed, which
+ * keeps it deterministic: the same seed always produces the same track, lamps
+ * included. TD5RE_AUTOTRACK_NIGHT forces it (0 = day, 1 = night, -1 = auto).
+ * The 5-in-16 rate is a choice, not a measurement: night is the exception. */
+static int tg_track_is_night(void)
+{
+    const int forced = td5_env_int("TD5RE_AUTOTRACK_NIGHT", -1, -1, 1);
+    if (forced >= 0) return forced;
+    return ((s_build_seed * 2654435761u) >> 28) < 5u;   /* 5/16 of seeds */
 }
 
 static unsigned int tg_rand(void)
@@ -2620,6 +2654,7 @@ static double tg_facade_cap_thick(const TG_Biome *b)
  * deleting the prop block, so the old behaviour is one env var away for an A/B. */
 static int tg_lamp_glow_from_props(const TG_Biome *b)
 {
+    if (!tg_track_is_night()) return 0;    /* item 11: night tracks only */
     return b->prop_lamp && !td5_env_flag_on("TD5RE_AUTOTRACK_LAMP_POSTS");
 }
 
@@ -3268,7 +3303,15 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
     if (!deliberate && lift < TD5_TG_BRIDGE_MIN_LIFT) return 1;
     tg_bridge_run_bounds(nl, si, &s0, &s1);
 
-    /* Parapets: a low wall along each deck edge. */
+    /* Parapets: a low wall along each deck edge.
+     *
+     * [FB r2 item 9] These are the "fences using the same texture as buildings".
+     * They sampled TD5_TG_PAGE_WALL -- the city FACADE page, which under
+     * TD5RE_AUTOTRACK_REAL_TEX is a photographic office frontage, so every
+     * bridge got a run of windows for a guard wall. Same fault the tunnel bore
+     * had. The barrier page (steel/concrete, already loaded for the guardrails)
+     * is what a parapet is made of, and it also separates the parapet from the
+     * piers, which stay on the wall page. */
     for (s = 0; s < 2; s++) {
         double side = s ? 1.0 : -1.0;
         double lx = n->tz * side, lz = -n->tx * side;
@@ -3276,7 +3319,7 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
         double ez = n->z + lz * (half + 120.0);
         if (!tg_emit_box_mesh(blk, ex, n->y + 180.0, ez,
                               90.0, 180.0, 780.0,
-                              n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0, 0xFFFFFFFFu))
+                              n->tx, n->tz, TD5_TG_PAGE_RAIL, 3000.0, 0xFFFFFFFFu))
             return 0;
         (*added)++;
     }
@@ -4007,9 +4050,9 @@ typedef struct {
  * span is TD5_TG_SPAN_LENGTH (1500) raw long.
  */
 #define TD5_TG_FENCE_H       520.0   /* pedestrian railing height              */
+#define TD5_TG_FENCE_KERB    140.0   /* railing set back from the kerb face    */
 #define TD5_TG_CROSS_LIFT     20.0   /* decal lift above the road, see below   */
 #define TD5_TG_LAMP_H       2500.0   /* head height == k_prop_pages PP_LAMP y  */
-#define TD5_TG_LAMP_REACH    620.0   /* how far the arm leans over the road    */
 
 /* Does span si carry city street furniture at all? Tree biomes have no
  * pavement (tg_city_sidewalk_w returns 0), and a bridge deck carries only its
@@ -4123,11 +4166,19 @@ static int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
                               &seg_page, &seg_nq, 1);
 }
 
-/* PEDESTRIAN RAILING along the outer edge of the pavement: one alpha-keyed
- * plane per side, scenery is submitted CULL_NONE so a single plane reads from
- * both sides. "most of the times" in the feedback, not always -- a hash gate
- * drops roughly a third of spans, which is what breaks the railing into runs
- * that end at crossings and side streets instead of ringing the whole city. */
+/* PEDESTRIAN RAILING along the KERB: one alpha-keyed plane per side, scenery is
+ * submitted CULL_NONE so a single plane reads from both sides. "most of the
+ * times" in the feedback, not always -- a hash gate drops roughly a third of
+ * spans, which is what breaks the railing into runs that end at crossings and
+ * side streets instead of ringing the whole city.
+ *
+ * SIDE (2026-08-27, "fences should be on the side near the road"). The railing
+ * used to stand at 0.88 of the pavement width, i.e. hard against the building
+ * line, which reads as a fence around each property rather than street
+ * furniture. A pedestrian guard rail exists to keep people OFF the carriageway,
+ * so it belongs at the kerb: TD5_TG_FENCE_KERB back from the kerb face, far
+ * enough that a car clipping the kerb does not pass through it and the posts
+ * still stand on the slab. */
 static int tg_city_emit_fence(const TG_FBHook *h, double sw)
 {
     double px[8], py[8], pz[8], uu[8], vv[8];
@@ -4142,7 +4193,10 @@ static int tg_city_emit_fence(const TG_FBHook *h, double sw)
         /* Independent hash per side, so the two railings do not start and stop
          * together (that reads as a fence around a compound, not a street). */
         const unsigned int fh = ((unsigned)h->si + (s ? 4177u : 91u)) * 0x9E3779B9u;
-        const double back = sw * 0.88;      /* just inside the facade line */
+        /* Kerb-side, clamped so a narrow pavement still puts it inboard of the
+         * building line rather than off the far edge of the slab. */
+        const double back = (sw * 0.35 < TD5_TG_FENCE_KERB)
+                          ? sw * 0.35 : TD5_TG_FENCE_KERB;
         if ((fh >> 29) >= 6u) continue;     /* ~25% of spans left open */
         if (tg_side_blocked(h->si, sg)) continue;
         tg_city_edge_frame(h->nl, h->si, sg, e);
@@ -4225,21 +4279,32 @@ static int tg_city_emit_crossing(const TG_FBHook *h)
                               &seg_page, &seg_nq, 1);
 }
 
-/* REAL STREETLAMPS. The prop layer emitted PP_LAMP as a bare additive glow at
- * y_off = 2500 with nothing under it, so every light hung in mid-air -- exactly
- * what the feedback describes. This emits the fixture: a slim post on the
- * pavement, an arm leaning out over the carriageway, and the same additive glow
- * placed at the arm's head.
+/* REAL STREETLAMPS, on the SHIPPED lamp page.
  *
- * [CONFIRMED, re/analysis/subsystems/track-3d-rendering-pipeline.md sec.8]
- * shipped TD5 embeds whole lamp posts as opcode-4 BILLBOARDS in MODELS.DAT --
- * one alpha-keyed sprite per lamp, post included. We cannot copy that here: the
- * only lamp page we have (k_prop_pages[PP_LAMP], borrowed from level001 p378)
- * is the additive GLOW, a radial gradient with no post silhouette in it. So the
- * post is built from boxes on the RAIL page (steel grey, and already loaded)
- * and only the glow stays a billboard.
+ * The prop layer emitted PP_LAMP as a bare additive glow at y_off = 2500 with
+ * nothing under it, so every light hung in mid-air. The first fix built a
+ * fixture out of two grey boxes on the RAIL page, because the only lamp page
+ * anyone had found was the additive GLOW (level001 p378, a radial gradient with
+ * no post in it) -- that is what "lamp post textures look wrong" reports.
  *
- * 3 meshes per lamp x 2 kerbs = 6, on 1 span in 7. */
+ * [CONFIRMED, re/assets/levels/level001/textures.src/pages/page_356.png]
+ * A sweep of every extracted level page for a full-height narrow alpha-keyed
+ * silhouette turned up the real article: Keswick page 356 is a whole street
+ * lamp -- silver post, arm, dark lantern head -- alpha-keyed on palette index 0,
+ * exactly the opcode-4 billboard form the RE notes describe. So the boxes are
+ * gone and the fixture is ONE quad carrying that page.
+ *
+ * The lamp occupies only the left 16 of the page's 64 columns (post at columns
+ * 3..5, arm reaching right to column 15), so the quad maps the u SUBRECT
+ * 0..TD5_TG_LAMP_U and is sized to that subrect's 1:4 aspect. U runs from the
+ * OUTER edge inward, which is what makes the arm lean over the carriageway on
+ * both kerbs without a second, mirrored page.
+ *
+ * 2 meshes per lamp (quad + glow) x 2 kerbs = 4, on 1 span in 7, night only. */
+#define TD5_TG_LAMP_U       0.25    /* used width of the page, 16 of 64 cols   */
+#define TD5_TG_LAMP_W       (TD5_TG_LAMP_H * TD5_TG_LAMP_U)   /* 1:4 aspect    */
+#define TD5_TG_LAMP_POST_U  0.25    /* post's position across the subrect      */
+
 static int tg_city_emit_lamp(const TG_FBHook *h, double sw)
 {
     const TG_Node *n = &h->nl->v[h->si];
@@ -4247,41 +4312,45 @@ static int tg_city_emit_lamp(const TG_FBHook *h, double sw)
      * clipping the kerb does not visually pass through it. */
     const double stand = (sw > 0.0) ? sw * 0.35 : 300.0;
     const double base_y = n->y + ((sw > 0.0) ? TD5_TG_KERB_H : 0.0);
+    /* Where the lantern ends up, relative to the post: the arm's far end. */
+    const double reach = TD5_TG_LAMP_W * (1.0 - TD5_TG_LAMP_POST_U);
     int s;
 
     for (s = 0; s < 2; s++) {
         const double sg = s ? 1.0 : -1.0;
-        const double lx = n->tz * sg, lz = -n->tx * sg;
-        const double px = n->x + lx * (n->width * 0.5 + stand);
-        const double pz = n->z + lz * (n->width * 0.5 + stand);
-        /* Arm/head lean INWARD (-l), i.e. out over the road. */
-        const double hx = px - lx * TD5_TG_LAMP_REACH * 0.5;
-        const double hz = pz - lz * TD5_TG_LAMP_REACH * 0.5;
-        if (tg_side_blocked(h->si, sg)) continue;
-        if (*h->nmesh + 3 > h->maxmesh) return 1;
+        const double lx = n->tz * sg, lz = -n->tx * sg;   /* outward unit */
+        const double post = n->width * 0.5 + stand;
+        /* Quad spans the lateral axis: outer edge (u = 0) sits outboard of the
+         * post by the page's own margin, inner edge (u = LAMP_U) hangs over the
+         * road, so the head really is above the carriageway. */
+        const double o = post + TD5_TG_LAMP_W * TD5_TG_LAMP_POST_U;
+        const double in = o - TD5_TG_LAMP_W;
+        double px[4], py[4], pz[4], uu[4], vv[4];
+        int seg_page = TD5_TG_PAGE_LAMPPOST, seg_nq = 1;
 
-        /* POST. hx runs across the road and hz along it (see tg_emit_box_mesh),
-         * so a square section is hx == hz. */
+        if (tg_side_blocked(h->si, sg)) continue;
+        if (*h->nmesh + 2 > h->maxmesh) return 1;
+
+        /* Quad loop: outer-bottom, inner-bottom, inner-top, outer-top. v = 1 at
+         * the base, matching the page's top-down row order. */
+        px[0] = n->x + lx * o; py[0] = base_y;                  pz[0] = n->z + lz * o;
+        px[1] = n->x + lx * in; py[1] = base_y;                 pz[1] = n->z + lz * in;
+        px[2] = n->x + lx * in; py[2] = base_y + TD5_TG_LAMP_H; pz[2] = n->z + lz * in;
+        px[3] = n->x + lx * o; py[3] = base_y + TD5_TG_LAMP_H;  pz[3] = n->z + lz * o;
+        uu[0] = 0.0;            vv[0] = 1.0;
+        uu[1] = TD5_TG_LAMP_U;  vv[1] = 1.0;
+        uu[2] = TD5_TG_LAMP_U;  vv[2] = 0.0;
+        uu[3] = 0.0;            vv[3] = 0.0;
+
         h->moff[(*h->nmesh)++] = h->blk->len;
-        if (!tg_emit_box_mesh(h->blk, px, base_y + TD5_TG_LAMP_H * 0.5, pz,
-                              46.0, TD5_TG_LAMP_H * 0.5, 46.0,
-                              n->tx, n->tz, TD5_TG_PAGE_RAIL, 600.0,
-                              0xFF9AA0A6u))
+        if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, 4,
+                                &seg_page, &seg_nq, 1))
             return 0;
-        /* ARM + HEAD as one flattened box reaching from the post out over the
-         * road -- one mesh instead of two, and the overlap at the post end
-         * hides the joint. */
-        h->moff[(*h->nmesh)++] = h->blk->len;
-        if (!tg_emit_box_mesh(h->blk, hx, base_y + TD5_TG_LAMP_H, hz,
-                              TD5_TG_LAMP_REACH * 0.5, 70.0, 78.0,
-                              n->tx, n->tz, TD5_TG_PAGE_RAIL, 600.0,
-                              0xFFB6BCC2u))
-            return 0;
-        /* GLOW at the head: tg_prop_one places PP_LAMP at y + its own y_off
-         * (2500 == TD5_TG_LAMP_H), and `gap` is measured from the road edge, so
-         * the reach comes off it to land the glow on the arm end. */
+        /* GLOW at the lantern: tg_prop_one places PP_LAMP at y + its own y_off
+         * (2500 == TD5_TG_LAMP_H) and measures `gap` from the road edge, so the
+         * arm's reach comes off the stand to land the glow on the head. */
         if (!tg_prop_one(h->nl, h->si, PP_LAMP, sg,
-                         stand - TD5_TG_LAMP_REACH, h->blk, h->moff, h->nmesh))
+                         stand - reach, h->blk, h->moff, h->nmesh))
             return 0;
     }
     return 1;
@@ -4372,8 +4441,10 @@ static int tg_emit_fb_city(const TG_FBHook *h)
     }
     /* Lamps follow the biome's prop_lamp flag (city/industrial/coast), on the
      * same 1-in-7 beat the prop layer used, so the spacing is unchanged -- only
-     * the fixture under the glow is new. */
+     * the fixture under the glow is new. NIGHT ONLY (item 11): a lit lamp head
+     * over a midday road is what gives the generated scenery away. */
     if (h->b->prop_lamp && (h->si % 7) == 0 && !tg_span_in_bridge_run(h->si) &&
+        tg_track_is_night() &&
         td5_env_flag_on("TD5RE_AUTOTRACK_LAMP_POSTS")) {
         if (!tg_city_emit_lamp(h, sw)) return 0;
     }
@@ -4864,17 +4935,20 @@ static void tg_gantry_quad(double *px, double *py, double *pz,
     }
 }
 
-/* Gantry across span si. Returns 0 on OOM. */
-static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk)
+/* Gantry across span si. `finish` selects the FINISH artwork over the START
+ * artwork. Returns 0 on OOM. */
+static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish)
 {
     double lx, ly, lz, rx, ry, rz;     /* road edge at the span's near row */
     double dx, dz, len;                /* unit lateral, left-positive      */
     double tx, tz;                     /* unit along the road              */
     double px[64], py[64], pz[64], uu[64], vv[64];
-    double cx = 0.0, cy = 0.0, cz = 0.0, radius = 0.0;
     double qx[4], qy[4], qz[4];
     double base_y;
-    int n = 0, i, quads;
+    /* One command per page, in vertex order: the frame first, then the two
+     * halves of the word (see the panel block). */
+    int seg_page[3], seg_nq[3];
+    int n = 0, i;
 
     tg_road_edge(nl, si, 0.0, 0.0, 1.0, &lx, &ly, &lz, &rx, &ry, &rz);
     dx = lx - rx; dz = lz - rz;
@@ -4919,33 +4993,14 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk)
         }
     }
 
-    /* --- panel: a slab bridging the two legs. Front and back faces are
-     * separated by TD5_TG_GANTRY_THICK so they cannot z-fight, and the
-     * underside is capped so the slab does not read as hollow from a chase
-     * camera looking up at it. --- */
+    /* Underside cap of the panel, emitted here so the whole steel FRAME (legs +
+     * cap) is one contiguous run of quads and therefore one command. */
     {
         const double y0 = base_y + TD5_TG_GANTRY_CLEAR;
-        const double y1 = y0 + TD5_TG_GANTRY_PANEL_H;
-        const double ox = lx + dx * TD5_TG_GANTRY_OUT;   /* left  end */
+        const double ox = lx + dx * TD5_TG_GANTRY_OUT;
         const double oz = lz + dz * TD5_TG_GANTRY_OUT;
-        const double kx = rx - dx * TD5_TG_GANTRY_OUT;   /* right end */
+        const double kx = rx - dx * TD5_TG_GANTRY_OUT;
         const double kz = rz - dz * TD5_TG_GANTRY_OUT;
-        int face;
-        for (face = 0; face < 2; face++) {
-            const double s = face ? -1.0 : 1.0;
-            qx[0] = ox + tx * s * TD5_TG_GANTRY_THICK;
-            qz[0] = oz + tz * s * TD5_TG_GANTRY_THICK;
-            qx[1] = kx + tx * s * TD5_TG_GANTRY_THICK;
-            qz[1] = kz + tz * s * TD5_TG_GANTRY_THICK;
-            qx[2] = qx[1]; qz[2] = qz[1];
-            qx[3] = qx[0]; qz[3] = qz[0];
-            qy[0] = y0; qy[1] = y0; qy[2] = y1; qy[3] = y1;
-            /* U across the whole page: the banner artwork reads left to right
-             * across the road on both faces. */
-            tg_gantry_quad(px, py, pz, uu, vv, &n, qx, qy, qz,
-                           face ? 1.0 : 0.0, face ? 0.0 : 1.0, 1.0, 0.0);
-        }
-        /* Underside cap. */
         qx[0] = ox + tx * TD5_TG_GANTRY_THICK; qz[0] = oz + tz * TD5_TG_GANTRY_THICK;
         qx[1] = kx + tx * TD5_TG_GANTRY_THICK; qz[1] = kz + tz * TD5_TG_GANTRY_THICK;
         qx[2] = kx - tx * TD5_TG_GANTRY_THICK; qz[2] = kz - tz * TD5_TG_GANTRY_THICK;
@@ -4953,44 +5008,66 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk)
         qy[0] = y0; qy[1] = y0; qy[2] = y0; qy[3] = y0;
         tg_gantry_quad(px, py, pz, uu, vv, &n, qx, qy, qz, 0.0, 1.0, 0.9, 1.0);
     }
+    seg_page[0] = TD5_TG_PAGE_BANNER;
+    seg_nq[0]   = n / 4;
 
-    quads = n / 4;
-    for (i = 0; i < n; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
-    cx /= n; cy /= n; cz /= n;
-    for (i = 0; i < n; i++) {
-        double ddx = px[i] - cx, ddy = py[i] - cy, ddz = pz[i] - cz;
-        double d = sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
-        if (d > radius) radius = d;
+    /* --- panel: a slab bridging the two legs, carrying the SHIPPED START or
+     * FINISH artwork. Front and back faces are separated by
+     * TD5_TG_GANTRY_THICK so they cannot z-fight.
+     *
+     * [FB r2 item 12] The panel used to be a procedural chequer. Shipped TD5
+     * banners are photographic pages that spell the word out, and the word does
+     * not fit one 64x64 page: Keswick splits START over pages 337+338 and
+     * FINISH over 369+370 (each with its own chequer end block), laid side by
+     * side. So the panel is TWO half quads per face, each mapping one whole
+     * page -- never one page stretched across the road, which is the mistake
+     * the facade survey warned about.
+     *
+     * The BACK face carries the same word readable from behind, which is why
+     * the halves swap pages and reverse u there: from behind, the world-right
+     * half of the panel is what a viewer sees on their left. Emitting the two
+     * L-page halves before the two R-page halves keeps each page one contiguous
+     * command run. --- */
+    {
+        const double y0 = base_y + TD5_TG_GANTRY_CLEAR;
+        const double y1 = y0 + TD5_TG_GANTRY_PANEL_H;
+        const double ox = lx + dx * TD5_TG_GANTRY_OUT;   /* left  end */
+        const double oz = lz + dz * TD5_TG_GANTRY_OUT;
+        const double kx = rx - dx * TD5_TG_GANTRY_OUT;   /* right end */
+        const double kz = rz - dz * TD5_TG_GANTRY_OUT;
+        const double mx = 0.5 * (ox + kx), mz = 0.5 * (oz + kz);
+        /* (a-end, b-end, face sign, u at a, u at b) for the four half quads.
+         * Row order IS the page order: rows 0-1 are the L page, rows 2-3 the R
+         * page, which is what makes each page one command. */
+        const double ends[4][5] = {
+            { 0.0, 1.0,  1.0, 0.0, 1.0 },   /* front, left  half */
+            { 1.0, 2.0, -1.0, 1.0, 0.0 },   /* back,  right half */
+            { 1.0, 2.0,  1.0, 0.0, 1.0 },   /* front, right half */
+            { 0.0, 1.0, -1.0, 1.0, 0.0 }    /* back,  left  half */
+        };
+        const double ptx[3] = { ox, mx, kx };
+        const double ptz[3] = { oz, mz, kz };
+        int q;
+        for (q = 0; q < 4; q++) {
+            const int    ia = (int)ends[q][0], ib = (int)ends[q][1];
+            const double sf = ends[q][2];
+            qx[0] = ptx[ia] + tx * sf * TD5_TG_GANTRY_THICK;
+            qz[0] = ptz[ia] + tz * sf * TD5_TG_GANTRY_THICK;
+            qx[1] = ptx[ib] + tx * sf * TD5_TG_GANTRY_THICK;
+            qz[1] = ptz[ib] + tz * sf * TD5_TG_GANTRY_THICK;
+            qx[2] = qx[1]; qz[2] = qz[1];
+            qx[3] = qx[0]; qz[3] = qz[0];
+            qy[0] = y0; qy[1] = y0; qy[2] = y1; qy[3] = y1;
+            tg_gantry_quad(px, py, pz, uu, vv, &n, qx, qy, qz,
+                           ends[q][3], ends[q][4], 1.0, 0.0);
+        }
+        seg_page[1] = finish ? TD5_TG_PAGE_FINISH_L : TD5_TG_PAGE_START_L;
+        seg_page[2] = finish ? TD5_TG_PAGE_FINISH_R : TD5_TG_PAGE_START_R;
+        seg_nq[1]   = 2;
+        seg_nq[2]   = 2;
     }
-    if (!(radius > 0.0)) radius = 1.0;
 
-    tg_put_u16(blk, 259);
-    tg_put_u16(blk, 0);                    /* opaque, not a billboard */
-    tg_put_u32(blk, 1);
-    tg_put_u32(blk, (unsigned)n);
-    tg_put_f32(blk, radius);
-    tg_put_f32(blk, cx); tg_put_f32(blk, cy); tg_put_f32(blk, cz);
-    tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
-    tg_put_u32(blk, 0);
-    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE);
-    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE + TD5_TG_CMD_SIZE);
-    tg_put_u32(blk, 0);
-
-    tg_put_u16(blk, 0);                    /* dispatch_type 0 */
-    tg_put_u16(blk, TD5_TG_PAGE_BANNER);
-    tg_put_u32(blk, 0);
-    tg_put_u16(blk, 0);                    /* triangle_count */
-    tg_put_u16(blk, (unsigned)quads);
-    tg_put_u32(blk, 0);
-
-    for (i = 0; i < n; i++) {
-        tg_put_f32(blk, px[i]); tg_put_f32(blk, py[i]); tg_put_f32(blk, pz[i]);
-        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
-        tg_put_u32(blk, 0xFFFFFFFFu);
-        tg_put_f32(blk, uu[i]); tg_put_f32(blk, vv[i]);
-        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
-    }
-    return !blk->oom;
+    return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, seg_page, seg_nq, 3);
 }
 
 /* Group E -- track furniture: start/finish banners, branch mouths, run-off.
@@ -5007,7 +5084,9 @@ static int tg_emit_fb_track(const TG_FBHook *h)
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_BANNERS")) return 1;
     if (*h->nmesh + 1 >= h->maxmesh) return 1;
     h->moff[(*h->nmesh)++] = h->blk->len;
-    return tg_emit_gantry(h->nl, h->si, h->blk);
+    /* The finish span wins a tie: on a circuit the grid span and the finish can
+     * be the same span, and that gantry marks the end of the race. */
+    return tg_emit_gantry(h->nl, h->si, h->blk, h->si == finish);
 }
 
 /* Fork whose MAIN half-carriageway covers main-ring span si, or -1. */
@@ -6027,14 +6106,13 @@ static void tg_emit_texture_page_fb_terrain(TG_Buf *out, int which)
     }
 }
 
-/* Start/finish gate banner: a black-and-white chequer band across the middle of
- * the page with a dark surround, which is what the shipped gantries read as from
- * the road and what makes a start/finish line legible at speed. Painted rather
- * than grained because the gantry maps this page ONCE across the whole panel
- * (see tg_emit_gantry's UVs), so tonal noise would just be a grey slab.
+/* Gantry FRAME page: the uprights and the panel's underside cap.
  *
- * The page is used for the LEGS too, and they sample only u in [0, 0.12] -- the
- * left column band -- so that column is kept a plain dark grey. */
+ * [FB r2 item 12] The panel itself no longer samples this page -- it carries the
+ * shipped START / FINISH artwork instead (see tg_emit_gantry). Only the legs
+ * (u in [0, 0.12], the left column band) and the cap (v in [0.9, 1]) are left
+ * here, so the chequer band is now just what the cap's underside shows. Painted
+ * rather than grained, because both users map flat unlit strips of it. */
 static void tg_emit_texture_page_fb_banner(TG_Buf *out)
 {
     /* 0 = post grey, 1 = surround (near black), 2 = white, 3 = mid grey. */
@@ -6090,6 +6168,16 @@ static void tg_emit_real_page(TG_Buf *out, const unsigned char *pal, int paln,
 static int tg_real_textures_enabled(void)
 {
     return td5_env_flag_off("TD5RE_AUTOTRACK_REAL_TEX");
+}
+
+/* Street FURNITURE (the kerb railing) on shipped art rather than the painted
+ * stand-in. Default ON and independent of TD5RE_AUTOTRACK_REAL_TEX: that knob
+ * trades a neutral generic street for photographic Melbourne facades, which is
+ * a taste call, whereas a real railing has no such downside. The knob exists so
+ * the painted page is still one A/B away. */
+static int tg_furniture_real_pages(void)
+{
+    return td5_env_flag_on("TD5RE_AUTOTRACK_REAL_FURNITURE");
 }
 
 static int tg_emit_textures(TG_Buf *out)
@@ -6156,12 +6244,30 @@ static int tg_emit_textures(TG_Buf *out)
     /* [FB 2026-08-26] reserved feedback-batch pages -- one owner each. */
     tg_emit_texture_page_fb_city(&pages[TD5_TG_PAGE_SIDEWALK], 0);
     tg_emit_texture_page_fb_city(&pages[TD5_TG_PAGE_CROSSING], 1);
-    tg_emit_texture_page_fb_city(&pages[TD5_TG_PAGE_FENCE], 2);
+    if (tg_furniture_real_pages())
+        tg_emit_real_page(&pages[TD5_TG_PAGE_FENCE], k_furn_fence_pal,
+                          k_furn_fence_paln, k_furn_fence_idx, k_furn_fence_type);
+    else
+        tg_emit_texture_page_fb_city(&pages[TD5_TG_PAGE_FENCE], 2);
     tg_emit_texture_page_fb_treeline(&pages[TD5_TG_PAGE_TREELINE]);
     tg_emit_texture_page_fb_tunnel(&pages[TD5_TG_PAGE_TUNNEL]);
     tg_emit_texture_page_fb_terrain(&pages[TD5_TG_PAGE_SNOW], 0);
     tg_emit_texture_page_fb_terrain(&pages[TD5_TG_PAGE_HILL], 1);
     tg_emit_texture_page_fb_banner(&pages[TD5_TG_PAGE_BANNER]);
+    /* [FB r2] Real shipped furniture art. Unlike the level014 pages above these
+     * are NOT behind TD5RE_AUTOTRACK_REAL_TEX: there is no procedural stand-in
+     * worth keeping for a lamp post or a word, so they are the only artwork
+     * these three page groups ever carry. */
+    tg_emit_real_page(&pages[TD5_TG_PAGE_LAMPPOST], k_furn_lamp_pal,
+                      k_furn_lamp_paln, k_furn_lamp_idx, k_furn_lamp_type);
+    tg_emit_real_page(&pages[TD5_TG_PAGE_START_L], k_furn_start_l_pal,
+                      k_furn_start_l_paln, k_furn_start_l_idx, k_furn_start_l_type);
+    tg_emit_real_page(&pages[TD5_TG_PAGE_START_R], k_furn_start_r_pal,
+                      k_furn_start_r_paln, k_furn_start_r_idx, k_furn_start_r_type);
+    tg_emit_real_page(&pages[TD5_TG_PAGE_FINISH_L], k_furn_finish_l_pal,
+                      k_furn_finish_l_paln, k_furn_finish_l_idx, k_furn_finish_l_type);
+    tg_emit_real_page(&pages[TD5_TG_PAGE_FINISH_R], k_furn_finish_r_pal,
+                      k_furn_finish_r_paln, k_furn_finish_r_idx, k_furn_finish_r_type);
 
     for (i = 0; i < count; i++) {
         if (pages[i].oom) {
