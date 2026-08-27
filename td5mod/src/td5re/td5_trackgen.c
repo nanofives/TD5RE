@@ -2638,16 +2638,52 @@ typedef struct {
  * face is still a visible line at speed. */
 #define TD5_TG_KERB_H       130.0
 
-/* Usable pavement width for a biome. k_biomes carries `sidewalk` only as the
- * facade setback, and the CITY value (350 raw) came from the shipped
- * measurement "buildings sit on the curb" -- less than a quarter of a lane, too
- * narrow to read as a pavement at all, let alone carry a railing. Widened to a
- * floor of 620 raw here; INDUSTRIAL's 600 already clears it. Tree biomes get
- * none, which is also the "no pavement here" signal for the hook. */
+/* NO BUILDING EVER TOUCHES THE ROAD. This is the one place that gap is decided,
+ * for every facade emitter (street wall, corner returns, back rows) and for the
+ * pavement that fills it, so the two cannot disagree and no per-biome table
+ * value can undercut it.
+ *
+ * k_biomes carries `sidewalk` only as the facade setback, and the CITY value
+ * (350 raw) came from the shipped measurement "buildings sit on the curb" --
+ * less than a quarter of a lane. That is a kerb, not a pavement: too narrow to
+ * walk on, to carry a railing, or to read as a gap at all from the car, which is
+ * what made the front row look like it was growing out of the asphalt. The floor
+ * is 900 raw, 0.6 of a lane, which reads as a pavement from the road and still
+ * leaves the frontage close enough to feel like a street canyon. */
+#define TD5_TG_SIDEWALK_MIN 900.0
+
+/* Usable pavement width for a biome, 0 = "no raised pavement here" (the signal
+ * the hook reads to lay a flat verge band instead -- see tg_verge_band_w). */
 static double tg_city_sidewalk_w(const TG_Biome *b)
 {
     if (b->billboard || b->cell_w <= 0) return 0.0;
-    return (double)b->sidewalk < 620.0 ? 620.0 : (double)b->sidewalk;
+    return (double)b->sidewalk < TD5_TG_SIDEWALK_MIN ? TD5_TG_SIDEWALK_MIN
+                                                     : (double)b->sidewalk;
+}
+
+/* Width of the FLAT verge band outside the city: "elevated sidewalks are fine,
+ * but when outside the city the sidewalks can be just another texture". Tree
+ * biomes get a painted-looking margin drawn on the ground rather than a slab
+ * with a kerb face -- no geometry to climb, nothing to catch a wheel on, and one
+ * quad per side instead of two. Biomes that HAVE a pavement get none. */
+#define TD5_TG_VERGE_W      700.0   /* band width, raw                        */
+#define TD5_TG_VERGE_LIFT    16.0   /* clear of the ground skirt, see below   */
+
+static double tg_verge_band_w(const TG_Biome *b)
+{
+    if (tg_city_sidewalk_w(b) > 0.0) return 0.0;
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_VERGE_BAND")) return 0.0;
+    return TD5_TG_VERGE_W;
+}
+
+/* Rise of the pavement a facade stands on -- KERB_H only when the slab that
+ * carries it is actually emitted. The wall used to add the kerb unconditionally
+ * while the slab was behind TD5RE_AUTOTRACK_SIDEWALKS, so turning that knob off
+ * left every building floating 130 raw over bare ground. */
+static double tg_city_kerb_h(const TG_Biome *b)
+{
+    if (!(tg_city_sidewalk_w(b) > 0.0)) return 0.0;
+    return td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS") ? TD5_TG_KERB_H : 0.0;
 }
 
 /* ---- FACADE CELL SIZING (the page must map at its own aspect) -------------
@@ -2775,7 +2811,7 @@ static void tg_side_geom(const TG_NodeList *nl, int si, int left,
     set1 = n1->width * 0.5 + tg_city_sidewalk_w(b);
 
     g->bx = n0->x + g->lx0 * set0;
-    g->by = n0->y + (tg_city_sidewalk_w(b) > 0.0 ? TD5_TG_KERB_H : 0.0);
+    g->by = n0->y + tg_city_kerb_h(b);
     g->bz = n0->z + g->lz0 * set0;
     g->ax = (n1->x + g->lx1 * set1) - g->bx;
     g->ay = n1->y - n0->y;
@@ -4274,6 +4310,49 @@ static int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
                               &seg_page, &seg_nq, 1);
 }
 
+/* FLAT VERGE BAND -- the out-of-town "sidewalk" (item 7). One quad per side
+ * lying on the ground beside the road, on the same paving page as the city
+ * pavement, with no kerb face and no rise: outside a town a made-up margin is
+ * paint and gravel, not a slab, and a raised lip out there would only be
+ * something to trip a car that runs wide.
+ *
+ * The lift is 16 raw, chosen the same way TD5_TG_CROSS_LIFT was: there is no
+ * polygon-offset path, the ground skirt sits 70 raw BELOW road level, so
+ * anything in between wins the depth test without reading as a step. */
+static int tg_city_emit_verge_band(const TG_FBHook *h, double bw)
+{
+    double px[8], py[8], pz[8], uu[8], vv[8];
+    double e[10], q[12], t[8];
+    const double u_w = bw / (double)TD5_TG_SPAN_LENGTH;
+    int seg_page = TD5_TG_PAGE_SIDEWALK, seg_nq;
+    int s, n = 0;
+
+    for (s = 0; s < 2; s++) {
+        const double sg = s ? 1.0 : -1.0;
+        if (tg_side_blocked(h->si, sg)) continue;
+        tg_city_edge_frame(h->nl, h->si, sg, e);
+
+        /* Same winding and the same isotropic UV as the city slab, so the two
+         * tile identically where a biome changes mid-block. */
+        q[0] = e[0];             q[1]  = e[1] + TD5_TG_VERGE_LIFT; q[2]  = e[2];
+        q[3] = e[0] + e[6] * bw; q[4]  = e[1] + TD5_TG_VERGE_LIFT; q[5]  = e[2] + e[7] * bw;
+        q[6] = e[3] + e[8] * bw; q[7]  = e[4] + TD5_TG_VERGE_LIFT; q[8]  = e[5] + e[9] * bw;
+        q[9] = e[3];             q[10] = e[4] + TD5_TG_VERGE_LIFT; q[11] = e[5];
+        t[0] = 0.0; t[1] = (double)h->si;
+        t[2] = u_w; t[3] = (double)h->si;
+        t[4] = u_w; t[5] = (double)h->si + 1.0;
+        t[6] = 0.0; t[7] = (double)h->si + 1.0;
+        tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+    }
+
+    if (n <= 0) return 1;
+    if (*h->nmesh >= h->maxmesh) return 1;
+    seg_nq = n / 4;
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                              &seg_page, &seg_nq, 1);
+}
+
 /* PEDESTRIAN RAILING along the outer edge of the pavement: one alpha-keyed
  * plane per side, scenery is submitted CULL_NONE so a single plane reads from
  * both sides. "most of the times" in the feedback, not always -- a hash gate
@@ -4397,7 +4476,7 @@ static int tg_city_emit_lamp(const TG_FBHook *h, double sw)
     /* Post stands on the pavement a little back from the kerb face, so a car
      * clipping the kerb does not visually pass through it. */
     const double stand = (sw > 0.0) ? sw * 0.35 : 300.0;
-    const double base_y = n->y + ((sw > 0.0) ? TD5_TG_KERB_H : 0.0);
+    const double base_y = n->y + tg_city_kerb_h(h->b);
     int s;
 
     for (s = 0; s < 2; s++) {
@@ -4523,6 +4602,13 @@ static int tg_emit_fb_city(const TG_FBHook *h)
     if (paved && td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS")) {
         if (!tg_city_emit_sidewalk(h, sw)) return 0;
         if (!tg_city_emit_fence(h, sw)) return 0;
+    }
+    /* Outside the city the same margin is a texture band, not a slab. Bridge
+     * decks are excluded exactly as the pavement is -- there is no ground beside
+     * a deck for a band to lie on. */
+    if (!paved && !tg_span_in_bridge_run(h->si) &&
+        tg_verge_band_w(h->b) > 0.0) {
+        if (!tg_city_emit_verge_band(h, tg_verge_band_w(h->b))) return 0;
     }
     if (paved && tg_city_crossing_here(h->si) &&
         td5_env_flag_on("TD5RE_AUTOTRACK_CROSSINGS")) {
