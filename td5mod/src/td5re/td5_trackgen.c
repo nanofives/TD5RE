@@ -2278,10 +2278,11 @@ static int tg_store_page(unsigned int gh)
 
 /* ===================== TREES =====================
  * A palette of tree/palm/conifer/topiary SPECIES. Each entry is a billboard
- * size (raw = world_units*256) plus a procedural silhouette shape used when
- * real textures are off. Real mode fills each variant page from a shipped TD5
- * foliage page (level ids in the comments); index 0 of those pages is the
- * transparent key. Biomes reference these by index (tree_set) and mix them.
+ * size (raw = world_units*256) plus a procedural silhouette shape used ONLY
+ * when real textures are switched off. Real mode -- the default since
+ * 2026-08-27, see tg_real_textures_enabled -- fills each variant page from a
+ * shipped TD5 foliage page (level ids in the comments); index 0 of those pages
+ * is the transparent key. Biomes reference these by index (tree_set), mixed.
  *
  * `half` marks a page that holds only ONE HALF of a mirrored pair, which is
  * what the "trees cut in half" report was seeing: the shipped level placed two
@@ -5863,15 +5864,134 @@ static void tg_emit_texture_page_fb_city(TG_Buf *out, int which)
     }
 }
 
-/* Continuous tree-line backdrop: a canopy band closing off the horizon behind
- * the individual tree billboards. ALPHA-KEYED (type 1, index 0 = key) so the
- * sky shows through a ragged top edge -- the flat page this replaced filled
- * every texel from the whole palette, which both keyed 1 texel in 16 at random
- * (speckled holes) and gave a dead straight top edge that reads as a green
- * wall. The page does NOT have to tile horizontally: tg_emit_fb_flora
+/* ---- tree-line backdrop page ----
+ * A canopy band closing off the horizon behind the individual tree billboards.
+ * ALPHA-KEYED (type 1, index 0 = key) so the sky shows through a ragged top
+ * edge. The page does NOT have to tile horizontally: tg_emit_fb_flora
  * alternates u direction per span, so a shared edge always meets its own texel
- * column. */
-static void tg_emit_texture_page_fb_treeline(TG_Buf *out)
+ * column.
+ *
+ * The band is built from a SHIPPED foliage page (real mode) and only falls
+ * back to synthetic colour when real textures are switched off. Root cause of
+ * the "grey at the bottom, white at the top" report is the synthetic palette
+ * below, which desaturated and blue-shifted itself "for haze" and overshot on
+ * both counts. MEASURED off its own ramp:
+ *   entries 1..7 (the shadowed mass, used from the crown line down to the base
+ *     -- around 40 of 64 rows, most of the band's area) run R 47..65 / G 67..97
+ *     / B 68..92. Blue tracks green to within 5 at every entry while red sits
+ *     20..32 below both, so the hue is TEAL, and saturation never exceeds 0.33.
+ *   entries 8..15 (used only in the 8 rows under the crown) mean about
+ *     R100 G138 B111 -- 1.7x brighter than the mass below them.
+ * A dark near-neutral teal body under a bright cap is exactly "grey at the
+ * bottom, white at the top". Real canopy texels have no such ramp to overshoot:
+ * the same simulation over the page this now emits gives a mean of R60 G68 B53
+ * (blue LOWEST, a leaf green) varying only R46..68 top to bottom.
+ *
+ * Source window: rows outside a tree page's canopy are sky (keyed) above and
+ * trunk below, neither of which belongs in a continuous band, so the densest
+ * TG_TREELINE_WIN-row window is used. MEASURED over the ten pages in
+ * td5_tg_real_tex.h, the source picked here (tree 1 = L008 p173, big
+ * deciduous) peaks at row 15 with 86% of that window's texels non-key -- the
+ * densest broadleaf canopy of the set. The window is COMPUTED, not hard-coded,
+ * so a re-export of the page data cannot silently slide it onto the trunk.
+ *
+ * One page slot serves all three banded biomes, so ALPINE gets the same
+ * broadleaf mass as FOREST and FIELDS; giving it conifers needs a second page
+ * slot, which is shared state this change does not claim. */
+#define TG_TREELINE_SRC   1     /* index into k_real_tree_* used for the band */
+#define TG_TREELINE_WIN   20    /* rows of canopy sampled out of the source */
+
+/* First row of the densest TG_TREELINE_WIN-row window of a 64x64 index page. */
+static int tg_treeline_src_window(const unsigned char *idx)
+{
+    int y, best_y = 0, best = -1;
+
+    for (y = 0; y + TG_TREELINE_WIN <= TD5_TG_TEX_DIM; y++) {
+        int fill = 0, r, x;
+        for (r = y; r < y + TG_TREELINE_WIN; r++)
+            for (x = 0; x < TD5_TG_TEX_DIM; x++)
+                if (idx[r * TD5_TG_TEX_DIM + x]) fill++;
+        if (fill > best) { best = fill; best_y = y; }
+    }
+    return best_y;
+}
+
+/* Most common non-key index inside that window -- the canopy's dominant colour,
+ * used whenever a sample lands in a keyed gap and the band must stay solid. */
+static int tg_treeline_src_fill(const unsigned char *idx, int y0)
+{
+    int hist[256], i, r, x, best = 0;
+
+    memset(hist, 0, sizeof(hist));
+    for (r = y0; r < y0 + TG_TREELINE_WIN; r++)
+        for (x = 0; x < TD5_TG_TEX_DIM; x++) {
+            const int v = idx[r * TD5_TG_TEX_DIM + x];
+            if (v) hist[v]++;
+        }
+    for (i = 1; i < 256; i++) if (hist[i] > hist[best]) best = i;
+    return best ? best : 1;
+}
+
+/* Real-texture band: shipped palette verbatim (no haze tint -- that is exactly
+ * what greyed the synthetic page out) over shipped canopy texels, cut off at
+ * the top by the same lumpy crown line the synthetic page uses. The crown line
+ * is a MASK, not art, so it carries no placeholder colour of its own. */
+static void tg_emit_texture_page_fb_treeline_real(TG_Buf *out)
+{
+    const unsigned char *sidx = k_real_tree_idx[TG_TREELINE_SRC];
+    const unsigned char *spal = k_real_tree_pal[TG_TREELINE_SRC];
+    const int paln = k_real_tree_paln[TG_TREELINE_SRC];
+    const int wy   = tg_treeline_src_window(sidx);
+    const int fill = tg_treeline_src_fill(sidx, wy);
+    unsigned int rng = 0x77E1B3C5u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 1);                                  /* 1 = alpha-keyed */
+    tg_put_u32(out, (unsigned)paln);
+    for (i = 0; i < paln * 3; i++) tg_put_u8(out, spal[i]);
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;      /* y=0 is the TOP of the page */
+        /* Crown line: 9-texel cells, each a crown of its own height, rounded
+         * off at its shoulders, so the top edge is lumpy like a real canopy
+         * instead of a straight cut. Keyed above it, foliage below. */
+        const unsigned int c = (unsigned)(x / 9) * 2654435761u;
+        const int crown = 12 + (int)((c >> 28) % 10);          /* 12..21 */
+        const int top   = crown + (((x % 9) < 2 || (x % 9) > 6) ? 3 : 0);
+        int cut, span, sx, sy, v, t;
+
+        rng = rng * 1103515245u + 12345u;
+        cut = top - (int)((rng >> 22) % 3);                    /* 10..24 */
+        if (y < cut) { tg_put_u8(out, 0); continue; }
+
+        /* Nine contiguous source columns per crown cell, each cell starting
+         * somewhere else across the page, so the band does not repeat one
+         * tree's silhouette along the whole horizon. Vertically the band's
+         * crown maps to the window's crown, keeping the source's own top-lit
+         * gradient instead of inventing one. */
+        span = TD5_TG_TEX_DIM - 1 - cut;
+        if (span < 1) span = 1;
+        sx = (int)(((c >> 8) + (unsigned)(x % 9)) % (unsigned)TD5_TG_TEX_DIM);
+        sy = wy + ((y - cut) * (TG_TREELINE_WIN - 1)) / span;
+
+        /* A sample can land in a keyed gap between the source tree's leaves;
+         * step across the window until it finds canopy, and fall back to the
+         * dominant colour rather than punching a hole in the backdrop. */
+        v = 0;
+        for (t = 0; t < 8 && v == 0; t++) {
+            const int rx = (sx + t * 5) & (TD5_TG_TEX_DIM - 1);
+            const int ry = wy + ((sy - wy + t) % TG_TREELINE_WIN);
+            v = sidx[ry * TD5_TG_TEX_DIM + rx];
+        }
+        tg_put_u8(out, (unsigned)(v ? v : fill));
+    }
+}
+
+/* Synthetic fallback, used only with TD5RE_AUTOTRACK_REAL_TEX=0. Kept as it
+ * was reported so the =0 side stays a faithful "before" to compare against. */
+static void tg_emit_texture_page_fb_treeline_proc(TG_Buf *out)
 {
     unsigned int rng = 0x77E1B3C5u;
     int i;
@@ -5910,6 +6030,12 @@ static void tg_emit_texture_page_fb_treeline(TG_Buf *out)
                             : (1 + (int)((rng >> 16) % 7));
         tg_put_u8(out, (unsigned)idx);
     }
+}
+
+static void tg_emit_texture_page_fb_treeline(TG_Buf *out)
+{
+    if (tg_real_textures_enabled()) tg_emit_texture_page_fb_treeline_real(out);
+    else                            tg_emit_texture_page_fb_treeline_proc(out);
 }
 
 /* Tunnel lining -- deliberately NOT a building facade: no windows, no storey
@@ -6083,13 +6209,30 @@ static void tg_emit_real_page(TG_Buf *out, const unsigned char *pal, int paln,
     for (i = 0; i < TD5_TG_TEX_TEXELS; i++) tg_put_u8(out, idx[i]);
 }
 
-/* Opt-in: fill the road/wall/grass/ground pages with REAL TD5 textures borrowed
- * from a shipped city track (level014) instead of the procedural placeholders,
- * so the auto-track reads like an actual TD5 level. Tree + rail stay procedural
- * (the tree needs an alpha cutout the borrowed page does not carry). */
+/* Fill the wall/store/grass/tree/prop pages with REAL TD5 texture data borrowed
+ * from shipped tracks instead of the procedural placeholders, so the auto-track
+ * reads like an actual TD5 level.
+ *
+ * DEFAULT ON since 2026-08-27 (TD5RE_AUTOTRACK_REAL_TEX=0 restores procedural
+ * art). It was opt-in while td5_tg_real_tex.h only carried the facade set, and
+ * the header comment above still said "tree + rail stay procedural" long after
+ * the foliage pages landed -- which is why placeholder tree silhouettes were
+ * still what a default run put on screen. The borrowed set is now complete for
+ * every page this branch fills, VERIFIED against the header data:
+ *   wall  5 of TD5_TG_WALL_VARIANTS  5   store 3 of TD5_TG_STORE_VARIANTS 3
+ *   tree 10 of TD5_TG_TREE_VARIANTS 10   prop  7 of TD5_TG_PROP_COUNT     7
+ * and every one of those 25 pages is well formed -- palette length == 3*paln,
+ * 4096 index bytes, max index < paln. The 17 alpha-keyed pages (10 tree, 7
+ * prop) all carry palette entry 0 = black with real key coverage (tree 35..83%
+ * of texels, prop 32..74%), so index 0 is genuinely the transparent key on all
+ * of them and nothing keys away real foliage.
+ *
+ * Nothing ELSE moves when this flips: road, ground, rail, water, the themed
+ * road surfaces and every [FB] page are emitted procedurally on BOTH sides of
+ * the branch (road/ground deliberately so -- see tg_emit_textures). */
 static int tg_real_textures_enabled(void)
 {
-    return td5_env_flag_off("TD5RE_AUTOTRACK_REAL_TEX");
+    return td5_env_flag_on("TD5RE_AUTOTRACK_REAL_TEX");
 }
 
 static int tg_emit_textures(TG_Buf *out)
