@@ -6352,11 +6352,31 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish
      * page -- never one page stretched across the road, which is the mistake
      * the facade survey warned about.
      *
-     * The BACK face carries the same word readable from behind, which is why
-     * the halves swap pages and reverse u there: from behind, the world-right
-     * half of the panel is what a viewer sees on their left. Emitting the two
-     * L-page halves before the two R-page halves keeps each page one contiguous
-     * command run. --- */
+     * [FIX 2026-08-27 -- BANNER READ "TRATS" IN FRAME] There used to be a BACK
+     * face too, carrying the same word readable from behind (halves swapped
+     * pages and u reversed, because from behind the world-right half is what a
+     * viewer sees on their left). It was separated from the front by
+     * TD5_TG_GANTRY_THICK and the comment here claimed that meant they "cannot
+     * z-fight". They can, and they did: THICK is 160 raw = 0.625 world units,
+     * and the banner is first seen from tens of thousands of units away against
+     * a 195000 far plane, so that separation is well inside depth-buffer noise.
+     * The back face won, and since its halves are page-swapped AND u-reversed,
+     * what you read from the car was the whole word mirrored: "TRATS".
+     * Framedump: log/R_post1.png.
+     *
+     * This is the same failure the shipped-track banners hit (Keswick page 338,
+     * Blue Ridge page 156, both z-fighting under the wrapper's global
+     * CULL_MODE_NONE); there the cure was one-sided culling, NOT more
+     * separation -- which is the evidence that separation does not hold up here.
+     *
+     * So the back face is gone. A start/finish gantry is read by a driver
+     * APPROACHING the line, the back face served only legibility from behind
+     * (which nobody needs while racing the right way round), and dropping it
+     * makes the z-fight impossible by construction instead of merely unlikely.
+     * Scenery is submitted CULL_NONE, so the single remaining face is still
+     * drawn from both sides -- it just reads mirrored from behind, exactly like
+     * the shipped one-sided banners do. Two half quads, one per page, emitted
+     * in page order so each page stays one contiguous command run. --- */
     {
         const double y0 = base_y + TD5_TG_GANTRY_CLEAR;
         const double y1 = y0 + TD5_TG_GANTRY_PANEL_H;
@@ -6365,19 +6385,17 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish
         const double kx = rx - dx * TD5_TG_GANTRY_OUT;   /* right end */
         const double kz = rz - dz * TD5_TG_GANTRY_OUT;
         const double mx = 0.5 * (ox + kx), mz = 0.5 * (oz + kz);
-        /* (a-end, b-end, face sign, u at a, u at b) for the four half quads.
-         * Row order IS the page order: rows 0-1 are the L page, rows 2-3 the R
-         * page, which is what makes each page one command. */
-        const double ends[4][5] = {
+        /* (a-end, b-end, face sign, u at a, u at b) for the two half quads.
+         * Row order IS the page order: row 0 is the L page, row 1 the R page,
+         * which is what makes each page one command. */
+        const double ends[2][5] = {
             { 0.0, 1.0,  1.0, 0.0, 1.0 },   /* front, left  half */
-            { 1.0, 2.0, -1.0, 1.0, 0.0 },   /* back,  right half */
-            { 1.0, 2.0,  1.0, 0.0, 1.0 },   /* front, right half */
-            { 0.0, 1.0, -1.0, 1.0, 0.0 }    /* back,  left  half */
+            { 1.0, 2.0,  1.0, 0.0, 1.0 }    /* front, right half */
         };
         const double ptx[3] = { ox, mx, kx };
         const double ptz[3] = { oz, mz, kz };
         int q;
-        for (q = 0; q < 4; q++) {
+        for (q = 0; q < 2; q++) {
             const int    ia = (int)ends[q][0], ib = (int)ends[q][1];
             const double sf = ends[q][2];
             qx[0] = ptx[ia] + tx * sf * TD5_TG_GANTRY_THICK;
@@ -6392,8 +6410,8 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish
         }
         seg_page[1] = finish ? TD5_TG_PAGE_FINISH_L : TD5_TG_PAGE_START_L;
         seg_page[2] = finish ? TD5_TG_PAGE_FINISH_R : TD5_TG_PAGE_START_R;
-        seg_nq[1]   = 2;
-        seg_nq[2]   = 2;
+        seg_nq[1]   = 1;      /* one front half per page (back face dropped) */
+        seg_nq[2]   = 1;
     }
 
     tg_acct(TG_ACCT_BANNER, si);
