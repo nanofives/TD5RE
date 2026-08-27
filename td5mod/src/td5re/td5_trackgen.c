@@ -1716,13 +1716,28 @@ static int tg_emit_levelinf(const TD5_TrackGenSpec *spec, int nspans,
     tg_put_u32(out, 0);                         /* 0x30 traffic_enable */
     tg_put_zeros(out, 24);                      /* 0x34 density_pairs 12xu16 */
     tg_put_zeros(out, 8);                       /* 0x4C pad */
-    /* 0x54 sky_animation_index. Shipped circuits use 36 and point-to-point
-     * tracks use -1, but -1 appears to be why a generated track renders
-     * against a flat clear colour with no sky at all, so use the circuit index
-     * regardless. [UNCERTAIN] Untested when written -- if it does not produce a
-     * sky, the other candidate is the missing FORWSKY.png the renderer logs
-     * ("sky not found: re/assets/levels/levelNNN/FORWSKY.png"). */
-    tg_put_u32(out, 36u);
+    /* 0x54 sky_animation_index. Shipped circuits use 36, point-to-point tracks
+     * use -1. This forced 36 onto a POINT-TO-POINT track on the theory that -1
+     * was why a generated track rendered against a flat clear colour -- but that
+     * was written [UNCERTAIN] and untested, and the missing FORWSKY.png it names
+     * as the other candidate has since been fixed (tg_install_sky copies one in,
+     * and the renderer now logs it loading at 256x256, probe class=SUNNY).
+     *
+     * Being chased 2026-08-26: the auto track shows a large dark region overhead
+     * that is NOT geometry (survives every terrain/tunnel knob) and NOT weather
+     * (LEVELINF says none, runtime confirms particles=0). The sky draws with
+     * z_func=ALWAYS/z_write=0, so anywhere it fails to cover you see the clear
+     * colour -- which is what that dark region looks like. Knob so the value can
+     * be swept without a rebuild; -1 is the shipped P2P value.
+     *
+     * RESULT: swept to -1, frame IDENTICAL -- this field is NOT the cause, so
+     * the default stays at the value that has actually been driven. The next
+     * suspect is the fog/background COLOUR written at 0x60..0x62 just below,
+     * which this generator leaves at 0,0,0: if the renderer clears to the
+     * level's background colour, every part of the view the sky band does not
+     * cover is filled with BLACK, which is exactly what the dark region is. */
+    tg_put_u32(out, (unsigned)td5_env_int("TD5RE_AUTOTRACK_SKY_ANIM",
+                                          36, -1, 64));
     tg_put_u32(out, (unsigned)nspans);          /* 0x58 total_span_count */
     tg_put_u32(out, 0);                         /* 0x5C fog_enabled */
     tg_put_u8(out, 0);                          /* 0x60 fog r */
