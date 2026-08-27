@@ -2094,6 +2094,10 @@ static int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz,
  * the towers and nothing else. */
 #define TD5_TG_FACADE_TALL_ROWS 5
 
+/* Hard ceiling on a run's floor count -- a quad-budget bound, see the note at
+ * the clamp in tg_side_geom. */
+#define TD5_TG_FACADE_MAX_ROWS 10
+
 /* Write ONE opaque quad-list mesh in the 0x38 format, split into up to `nseg`
  * COMMANDS -- each command samples its own page over its own run of quads, in
  * vertex order. That is how one building can carry a shop page on the ground
@@ -2204,18 +2208,48 @@ static void tg_facade_push_grid(double bx, double by, double bz,
 /* Spans from the start line that are forced to a solid frontage -- see below. */
 #define TD5_TG_FACADE_START_RUN 60
 
-/* Side street of superblock `block`: phase where the gap opens and how wide. */
-static void tg_facade_gap(unsigned int block, unsigned int *start,
-                          unsigned int *len)
+/* STREET vs AVENUE. A real city has a hierarchy: most side streets are narrow
+ * and meet the road on one side only (a T junction), and every few blocks an
+ * AVENUE crosses it -- wider, and continuing through BOTH kerbs as one
+ * crossroads. The first cut had a single uniform gap of 3..8 spans, always
+ * offset by 777 spans between the two sides so the kerbs could never open
+ * together, which is exactly what stopped any crossing from reading as a
+ * crossing: there was never a street on the far side to continue into.
+ *
+ * One superblock in four is an avenue. The avenue test uses the span's own
+ * index, not the per-side one, so both kerbs agree on which blocks are avenues;
+ * only minor streets keep the per-side offset. Where an avenue block abuts a
+ * street block the left kerb changes partition, which can leave a one- or
+ * two-span sliver of wall or gap at the seam -- an alley, which a city has. */
+#define TD5_TG_AVENUE_IN     4       /* 1 superblock in N is an avenue */
+
+/* Resolve span si on one side to its superblock, its phase within it, that
+ * block's side street (start phase + length) and whether it is an avenue. */
+static void tg_facade_block(int si, int left, unsigned int *block,
+                            unsigned int *phase, unsigned int *gs,
+                            unsigned int *gl, int *avenue)
 {
-    const unsigned int h = block * 2654435761u;
-    *start = 2u + ((h >> 27) % 11u);        /* 2..12 spans of run first  */
-    *len   = 3u + ((h >> 23) % 6u);         /* 3..8 spans of side street */
+    const unsigned int ab = (unsigned)si / TD5_TG_FACADE_PERIOD;
+    const int av = (int)(((ab * 2654435761u) >> 28) % (unsigned)TD5_TG_AVENUE_IN
+                         == 0u);
+    const unsigned int s = (unsigned)si + ((!av && left) ? 777u : 0u);
+    const unsigned int blk = s / TD5_TG_FACADE_PERIOD;
+    const unsigned int h = blk * 2654435761u;
+
+    *block  = blk;
+    *phase  = s % TD5_TG_FACADE_PERIOD;
+    *gs     = 2u + ((h >> 27) % 11u);            /* run before the street */
+    /* An avenue is wider than a street, and that is the whole point of the
+     * distinction: 6..8 spans (9000..12000 raw, six to eight lanes) against the
+     * 2..4 of a minor street. */
+    *gl     = av ? (6u + ((h >> 23) % 3u)) : (2u + ((h >> 23) % 3u));
+    *avenue = av;
 }
 
 static int tg_facade_built(int si, int left)
 {
-    unsigned int s, block, phase, gs, gl;
+    unsigned int block, phase, gs, gl;
+    int av;
 
     /* Off the near end of the track there is nothing, so span 0 always gets a
      * corner return rather than a wall that starts as a bare edge. */
@@ -2228,10 +2262,7 @@ static int tg_facade_built(int si, int left)
         td5_env_flag_on("TD5RE_AUTOTRACK_START_CITY"))
         return 1;
 
-    s     = (unsigned)si + (left ? 777u : 0u);
-    block = s / TD5_TG_FACADE_PERIOD;
-    phase = s % TD5_TG_FACADE_PERIOD;
-    tg_facade_gap(block, &gs, &gl);
+    tg_facade_block(si, left, &block, &phase, &gs, &gl, &av);
     return (int)(phase < gs || phase >= gs + gl);
 }
 
@@ -2241,12 +2272,34 @@ static int tg_facade_built(int si, int left)
  * two buildings that are visibly separated by a street. */
 static unsigned int tg_facade_run_id(int si, int left)
 {
-    unsigned int s     = (unsigned)si + (left ? 777u : 0u);
-    unsigned int block = s / TD5_TG_FACADE_PERIOD;
-    unsigned int phase = s % TD5_TG_FACADE_PERIOD;
-    unsigned int gs, gl;
-    tg_facade_gap(block, &gs, &gl);
-    return (block * 2u + (phase >= gs + gl ? 1u : 0u)) * 2246822519u;
+    unsigned int block, phase, gs, gl;
+    int av;
+    tg_facade_block(si, left, &block, &phase, &gs, &gl, &av);
+    /* The side is part of the key: with avenues both kerbs share a block index,
+     * so without it the two facing blocks would be one building repeated. */
+    return ((block * 2u + (phase >= gs + gl ? 1u : 0u)) * 2u
+            + (unsigned)(left ? 1 : 0)) * 2246822519u;
+}
+
+/* DOWNTOWN GRADIENT. Height was a per-run hash alone, so a "city" was a random
+ * jumble of 2..4-storey blocks with the odd tower and no sense of place. A real
+ * city has a centre: frontages climb toward a core and fall away to suburbs.
+ *
+ * The cycle is evaluated at the SUPERBLOCK, never at the span -- keying it to
+ * the span would change height inside one building and saw-tooth its roofline --
+ * and it is a raised cosine rather than a step so the skyline ramps into the
+ * core over several blocks instead of jumping at one street corner. */
+#define TD5_TG_DISTRICT_BLOCKS 12    /* superblocks per core-to-core cycle */
+#define TD5_TG_DOWNTOWN_FLOORS  5    /* extra floors at the core */
+
+static int tg_city_district_floors(unsigned int block)
+{
+    double t, w;
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_DISTRICTS")) return 0;
+    t = (double)(block % (unsigned)TD5_TG_DISTRICT_BLOCKS)
+      / (double)TD5_TG_DISTRICT_BLOCKS;
+    w = 0.5 - 0.5 * cos(2.0 * 3.14159265358979 * t);
+    return (int)(w * (double)TD5_TG_DOWNTOWN_FLOORS + 0.5);
 }
 
 /* Corner return at a run END, with real MASS. The first cut pushed a SINGLE
@@ -2797,6 +2850,19 @@ static void tg_side_geom(const TG_NodeList *nl, int si, int left,
     floors = b->floors_min + (int)((gh >> 7) % (unsigned)b->floors_extra);
     if (b->tower_mask && ((gh >> 3) & (unsigned)b->tower_mask) == 0)
         floors += 1 + (int)((gh >> 11) % 4);          /* whole-run tower cluster */
+    {   /* Where in the city this block stands: core blocks are taller. */
+        unsigned int blk, ph, gs2, gl2;
+        int av;
+        tg_facade_block(si, left, &blk, &ph, &gs2, &gl2, &av);
+        floors += tg_city_district_floors(blk);
+    }
+    /* Ceiling, and not a cosmetic one: at cols == 1 (which every city biome is,
+     * a 1500-raw span against a 2150-raw cell) a run costs rows quads for the
+     * front, rows for a tower back wall and 2*(2*rows + rows + 2) for the two
+     * corner prisms -- about 12*rows + 4 per side. 10 floors keeps both sides
+     * inside TD5_TG_FACADE_MAXQUAD, and past it tg_facade_push_grid silently
+     * drops quads, which shows up as buildings missing their top floors. */
+    if (floors > TD5_TG_FACADE_MAX_ROWS) floors = TD5_TG_FACADE_MAX_ROWS;
     g->rows  = floors;
     g->H     = (double)floors * tg_facade_floor_h(b);
     g->depth = tg_facade_depth(b);
@@ -4192,6 +4258,13 @@ typedef struct {
  *
  * Sizes are raw world units (renderer divides by 256); a lane is 1500 raw and a
  * span is TD5_TG_SPAN_LENGTH (1500) raw long.
+ *
+ * PLACEMENT HOOK for pedestrians (the prop/flora side owns their density and
+ * pages, this side owns where the pavement is): tg_city_sidewalk_w(b) > 0 says
+ * a span has a walkable pavement, tg_city_kerb_h(b) is the height its surface
+ * stands at, and tg_city_edge_frame gives the road edge and outward unit at both
+ * ends of the span -- a figure belongs between `back` = 0.2 and 0.8 of the
+ * pavement width out from that edge. Nothing here places people.
  */
 #define TD5_TG_FENCE_H       520.0   /* pedestrian railing height              */
 #define TD5_TG_CROSS_LIFT     20.0   /* decal lift above the road, see below   */
@@ -4593,6 +4666,68 @@ static int tg_city_emit_backrows(const TG_FBHook *h, double sw)
     return 1;
 }
 
+/* CROSS STREETS. A facade gap used to be nothing but absent buildings: the
+ * corner returns turned inward at each end and between them lay the same verge
+ * as open country, so a "side street" was a hole in a wall, not a street. This
+ * lays the carriageway of that street -- one quad per open side, running from
+ * the kerb straight out past the first back row, on the biome's own road page.
+ * With the returns down each flank (tg_facade_push_cap) and the back rows behind
+ * them, the gap now reads as a street you could turn into.
+ *
+ * Two conventions borrowed from the road mesh so the two match without a seam:
+ * the page is tg_road_page(si), and UVs are isotropic at the road's own scale --
+ * one page per LANE_WIDTH outward, one page per span across -- so the asphalt
+ * grain is the same size on both carriageways.
+ *
+ * Height follows the ground skirt (TD5_TG_GROUND_DROP over TD5_TG_GROUND_WIDTH)
+ * rather than staying flat at road level: over the ~7000 raw it reaches, the
+ * skirt has already fallen ~20 raw, and a flat strip would lift off it. */
+static double tg_city_crossst_reach(const TG_Biome *b, double sw)
+{
+    return sw + tg_facade_depth(b) + TD5_TG_BACKROW_GAP;
+}
+
+static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
+{
+    double px[8], py[8], pz[8], uu[8], vv[8];
+    double e[10], q[12], t[8];
+    const double reach = tg_city_crossst_reach(h->b, sw);
+    const double drop  = TD5_TG_GROUND_DROP * reach / TD5_TG_GROUND_WIDTH;
+    const double u_r   = reach / (double)TD5_TG_LANE_WIDTH;
+    int seg_page = tg_road_page(h->si), seg_nq;
+    int s, n = 0;
+
+    for (s = 0; s < 2; s++) {
+        const double sg = s ? 1.0 : -1.0;
+        /* Only where THIS kerb is open. On an avenue both are, and the two
+         * quads plus the crossing between them make one crossroads. */
+        if (tg_facade_built(h->si, s)) continue;
+        if (tg_side_blocked(h->si, sg)) continue;
+        tg_city_edge_frame(h->nl, h->si, sg, e);
+
+        q[0] = e[0];                q[1]  = e[1] + TD5_TG_VERGE_LIFT;
+        q[2] = e[2];
+        q[3] = e[0] + e[6] * reach; q[4]  = e[1] + TD5_TG_VERGE_LIFT - drop;
+        q[5] = e[2] + e[7] * reach;
+        q[6] = e[3] + e[8] * reach; q[7]  = e[4] + TD5_TG_VERGE_LIFT - drop;
+        q[8] = e[5] + e[9] * reach;
+        q[9] = e[3];                q[10] = e[4] + TD5_TG_VERGE_LIFT;
+        q[11] = e[5];
+        t[0] = 0.0; t[1] = (double)h->si;
+        t[2] = u_r; t[3] = (double)h->si;
+        t[4] = u_r; t[5] = (double)h->si + 1.0;
+        t[6] = 0.0; t[7] = (double)h->si + 1.0;
+        tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+    }
+
+    if (n <= 0) return 1;
+    if (*h->nmesh >= h->maxmesh) return 1;
+    seg_nq = n / 4;
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                              &seg_page, &seg_nq, 1);
+}
+
 /* Group A -- city: sidewalks, kerb fences, crossings, deeper building rows. */
 static int tg_emit_fb_city(const TG_FBHook *h)
 {
@@ -4613,6 +4748,13 @@ static int tg_emit_fb_city(const TG_FBHook *h)
     if (paved && tg_city_crossing_here(h->si) &&
         td5_env_flag_on("TD5RE_AUTOTRACK_CROSSINGS")) {
         if (!tg_city_emit_crossing(h)) return 0;
+    }
+    /* The side street itself, on every span of the gap (the zebra above is only
+     * on its first span). Both are gated on the pavement, since a gap in a
+     * biome with no frontage is just open country. */
+    if (paved && !tg_span_in_bridge_run(h->si) &&
+        td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_STREETS")) {
+        if (!tg_city_emit_crossstreet(h, sw)) return 0;
     }
     /* Lamps follow the biome's prop_lamp flag (city/industrial/coast), on the
      * same 1-in-7 beat the prop layer used, so the spacing is unchanged -- only
