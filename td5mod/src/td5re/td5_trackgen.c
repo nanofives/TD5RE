@@ -4617,7 +4617,29 @@ static int tg_emit_fb_tunnel(const TG_FBHook *h)
 #define TD5_TG_FAR_GROUP   TD5_TG_SPANS_PER_ENTRY
 #define TD5_TG_FAR_TUCK      2000.0   /* overlap under the skirt's outer edge */
 #define TD5_TG_FAR_SINK        150.0   /* and below it, so the skirt wins the seam */
-#define TD5_TG_FAR_REACH      180000   /* default outward reach, world units */
+/* Outward reach of the background band, world units.
+ *
+ * Was 180000. That is a DESIGN limit, not a taste one: each band is a FLAT slab
+ * emitted at ITS OWN span's road height, so any two bands whose reaches overlap
+ * are two slabs at different heights sharing the same airspace. Measured on
+ * seed 1234567: road height across 715 bands runs -195..10467, a relief of
+ * 10662 -- while one band reached 180000, seventeen times that. A band emitted
+ * up on high ground therefore swept out over the low ground you were driving on
+ * and hung ~6400 units above the car, reading in frame as the sky being
+ * replaced by a dark slab (log/S1_skyanim_minus1.png).
+ *
+ * 30000 is the smallest the TD5RE_AUTOTRACK_TERRAIN_REACH knob allows and still
+ * comfortably longer than the 24000 this replaced, so the "much longer grass
+ * background" the reach was raised for survives. Verified with the band ENABLED
+ * at the span that used to be covered: log/H1_reach30k.png.
+ *
+ * This is a MITIGATION, not a cure. Overlap is still possible wherever two
+ * stretches of track pass within 30000 of each other with a big height
+ * difference; the real fix is to stop the band being a per-span flat slab (sink
+ * it to the track's GLOBAL minimum, or emit one continuous surface). Same class
+ * of error as the 2026-08-24 elevated-bridge gate: a local value used where a
+ * global one was needed. */
+#define TD5_TG_FAR_REACH       30000
 #define TD5_TG_RIDGE_BASE      4500.0  /* mean ridge height above the far plain */
 
 /* Default ON -- these are fixes. TERRAIN_FAR=0 restores the short skirt only,
@@ -4724,6 +4746,20 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
             Z[e][j] = ez;
             Y[e][j] = base + tg_terrain_hill_y(ex, ez, k_amp[j]);
         }
+
+        /* [DIAG] Every term that decides how high this band sits, so the large
+         * one identifies ITSELF. Three inferred mechanisms for the "ceiling"
+         * have already been wrong; this prints the arithmetic instead.
+         * TD5RE_AUTOTRACK_FAR_LOG=1. */
+        if (td5_env_flag_off("TD5RE_AUTOTRACK_FAR_LOG"))
+            TD5_LOG_I(LOG_TAG,
+                      "farband si=%d %s e=%d biome=%s | road_y=%.0f edge_y=%.0f "
+                      "prof_n=%d prof_dy_last=%.0f base=%.0f | Y0=%.0f Y3=%.0f "
+                      "| lift_vs_road=%.0f",
+                      h->si, is_left ? "L" : "R", e, h->b->name,
+                      nl->v[se].y, (is_left ? ly : ry),
+                      p.n, p.dy[p.n - 1], base, Y[e][0], Y[e][3],
+                      Y[e][0] - nl->v[se].y);
     }
 
     /* Apron quads, same ring order as the skirt (near-in, near-out, far-out,
