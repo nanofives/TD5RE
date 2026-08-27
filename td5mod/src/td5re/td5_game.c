@@ -4911,6 +4911,93 @@ static void init_race_checkpoints(void)
         }
     }
 
+    /* ================= LEVELINF checkpoint fallback (autotrack R2 item 21) ===
+     * ROOT CAUSE of "the finish banner is placed but the race never ends" on a
+     * generated / custom track.
+     *
+     * Step 20 above is the ONLY writer of s_active_checkpoint for a normal TD5
+     * race, and it sources it from k_checkpoint_table via
+     * k_schedule_to_checkpoint_index[track_index] -- a 19-entry table covering
+     * the 19 SHIPPED schedule slots. The auto-generated track is schedule slot
+     * 60 (TD5_CUSTOM_TRACK_SLOT_BASE 37 + TD5_CUSTOM_TRACK_MAX 24 - 1) and every
+     * manifest-loaded custom track is >= 37, so `tidx < 19` fails, record_idx
+     * stays -1, and the only trace is the warning "Track index 60 out of range,
+     * no checkpoint data" -- after which checkpoint_count is 0.
+     *
+     * Everything downstream then behaves EXACTLY as if the track had no finish:
+     *   - advance_pending_finish_state takes the P2P checkpoint path (this is a
+     *     point-to-point track, so s_td6_finish_span is 0 and g_track_is_circuit
+     *     is 0),
+     *   - it passes the `s_levelinf_checkpoint_config == 0` early-out, because
+     *     the generator DOES write a non-zero checkpoint count to LEVELINF +0x08,
+     *   - then `m->checkpoint_index (0) < checkpoint_count (0)` is false, so no
+     *     crossing is ever detected,
+     *   - and `checkpoint_count > 0 && index >= count` is false, so the finish
+     *     is never promoted.
+     * The race runs forever. The banner placement was never the problem: the
+     * generator puts the last LEVELINF checkpoint exactly on tg_finish_span and
+     * the gantry on the same span, and both are correct. The break is that the
+     * port read checkpoints from the hardcoded exe table ONLY and ignored the
+     * ones the level's own LEVELINF.DAT carries.
+     *
+     * The original binary has no such gap because it never had a track outside
+     * the table. The fix keeps the table authoritative for the 19 shipped tracks
+     * (byte-identical: this block only runs when the table produced nothing) and
+     * falls back to the level's own LEVELINF spans otherwise -- which is where a
+     * generated or hand-built track has always declared them.
+     *
+     * Timing values have no LEVELINF home (the original stores them only in the
+     * exe table), so they are invented here and knobbed. They matter only when
+     * checkpoint timers are on; with timers off, initial_time is unused and the
+     * finish comes purely from the crossing count. */
+    if (s_active_checkpoint.checkpoint_count == 0 &&
+        s_levelinf_checkpoint_config > 0 && g_active_td6_level <= 0) {
+        int n = s_levelinf_checkpoint_config;
+        int ci, valid = 0;
+        if (n > 5) n = 5;   /* CheckpointRecord holds 5; LEVELINF declares up to 7 */
+        for (ci = 0; ci < n; ci++) {
+            if (s_levelinf_checkpoint_spans[ci] > 0) valid++;
+        }
+        if (valid == n && n > 0) {
+            /* Packed 8.8: hi byte = whole seconds, lo 0x3B matches every shipped
+             * record. Generous by default -- a generated track is 1800 spans and
+             * nobody has pace notes for it, and a too-short timer turns the fix
+             * into a different "the race ended by itself" bug. */
+            int init_secs  = td5_env_int("TD5RE_AUTOTRACK_CP_TIME",  120, 10, 250);
+            int bonus_secs = td5_env_int("TD5RE_AUTOTRACK_CP_BONUS",  45, 0,  250);
+            memset(&s_active_checkpoint, 0, sizeof(s_active_checkpoint));
+            s_active_checkpoint.checkpoint_count = (uint16_t)n;
+            s_active_checkpoint.initial_time =
+                (uint16_t)(((init_secs & 0xFF) << 8) | 0x3B);
+            for (ci = 0; ci < n; ci++) {
+                s_active_checkpoint.checkpoints[ci].span_threshold =
+                    (uint16_t)s_levelinf_checkpoint_spans[ci];
+                /* The LAST LEVELINF checkpoint IS the finish line on a
+                 * point-to-point track (the generator places it on
+                 * tg_finish_span and puts the gantry there), so it grants no
+                 * time -- same convention as every shipped record, whose last
+                 * entry has bonus 0. */
+                s_active_checkpoint.checkpoints[ci].time_bonus =
+                    (ci == n - 1) ? 0 : (uint16_t)((bonus_secs & 0xFF) << 8);
+            }
+            TD5_LOG_I(LOG_TAG,
+                      "Checkpoint record from LEVELINF: track=%d count=%d "
+                      "spans=%d,%d,%d,%d,%d initial=%ds bonus=%ds/cp",
+                      g_td5.track_index, n,
+                      s_levelinf_checkpoint_spans[0], s_levelinf_checkpoint_spans[1],
+                      s_levelinf_checkpoint_spans[2], s_levelinf_checkpoint_spans[3],
+                      s_levelinf_checkpoint_spans[4], init_secs, bonus_secs);
+        } else {
+            /* Declared N checkpoints but did not fill N spans: refusing to
+             * synthesize is right -- a partial record would finish the race at
+             * span 0. Loud, because this leaves the race unfinishable. */
+            TD5_LOG_W(LOG_TAG,
+                      "LEVELINF declares %d checkpoints but only %d have a span; "
+                      "track=%d has NO finish condition",
+                      s_levelinf_checkpoint_config, valid, g_td5.track_index);
+        }
+    }
+
     /* [#R3-7 2026-06-19] TD6 P2P checkpoint timer. TD6.exe shipped NONE for these
      * city tracks (RE-confirmed), so synthesize the TD5-format record from the
      * already-extracted TD6 checkpoint spans (s_td6_cp_spans) and force the gates
