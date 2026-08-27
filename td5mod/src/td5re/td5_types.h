@@ -465,7 +465,11 @@ typedef enum TD5_ScreenIndex {
     TD5_SCREEN_MP_CAR_GRID        = 49,  /* Screen_CarSelection, MP phase 1 (simultaneous grid) */
     TD5_SCREEN_MP_CUP_INTERMISSION = 50, /* Screen_MpPostRace, cup-between "what next" layout */
     TD5_SCREEN_LIGHTING_OPTIONS   = 51,  /* [RT2 P8] Screen_LightingOptions (td5_fe_menu.c) */
-    TD5_SCREEN_COUNT               = 52
+    /* [AUTOTRACK R2 item 25] Screen_AutoTrackOptions (td5_fe_race.c) — the
+     * TD5RE_AUTOTRACK_* generator knobs, reachable only from track-select while
+     * the AUTO-GENERATED slot is the current pick. */
+    TD5_SCREEN_AUTOTRACK_OPTIONS  = 52,
+    TD5_SCREEN_COUNT               = 53
 } TD5_ScreenIndex;
 
 /* ========================================================================

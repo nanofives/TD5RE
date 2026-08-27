@@ -603,6 +603,7 @@ void Screen_TrackSelection(void);
  * reuses the track-select backdrop. Screen body in td5_fe_race.c; the label/value/
  * cycle model + value render live in td5_frontend.c. */
 void Screen_RaceOptions(void);
+void Screen_AutoTrackOptions(void);   /* [AUTOTRACK R2 item 25] */
 /* Option ids: screen button i (0..RO_OPT_COUNT-1) maps 1:1 to these; OK + BACK
  * follow. */
 enum {
@@ -920,6 +921,13 @@ void frontend_render_language_options_overlay(float sx, float sy);
 /* [RT2 P8] LIGHTING OPTIONS sub-screen (td5_fe_menu.c) + its per-row value overlay. */
 void Screen_LightingOptions(void);
 void frontend_render_lighting_options_overlay(float sx, float sy);
+
+/* [AUTOTRACK R2 item 25] AUTO TRACK OPTIONS (td5_fe_race.c) — the
+ * TD5RE_AUTOTRACK_* generator knobs. The row count is exported so the arrow
+ * dispatch in td5_frontend.c cannot go stale against the screen's own AT_ROWS,
+ * which is the creation-vs-rendering gap that has bitten this file before. */
+void frontend_render_autotrack_options_overlay(float sx, float sy);
+int  td5_autotrack_opts_row_count(void);
 void Screen_LocalizationInit(void);
 void Screen_MainMenu(void);
 void Screen_MusicTestExtras(void);

@@ -164,6 +164,7 @@ static const ScreenDesc s_screens[TD5_SCREEN_COUNT] = {
     /* [49] */ { "MP CAR GRID",          Screen_CarSelection },   /* MP setup phase 1 (car grid) */
     /* [50] */ { "CUP INTERMISSION",     Screen_MpPostRace },     /* cup-between post-race menu */
     /* [51] */ { "LIGHTING",             Screen_LightingOptions },/* [RT2 P8] RT lighting per-feature options */
+    /* [52] */ { "AUTO TRACK",           Screen_AutoTrackOptions },/* [AUTOTRACK R2 item 25] generator knobs */
 };
 
 /* [SUB-SCREEN PROMOTION 2026-07-27] Map an identity screen number back to the
@@ -1572,6 +1573,7 @@ static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_TWO_PLAYER_OPTIONS: return "MULTIPLAYER OPTIONS";
     case TD5_SCREEN_LANGUAGE_OPTIONS:   return TR("LANGUAGE");
     case TD5_SCREEN_LIGHTING_OPTIONS:   return "LIGHTING OPTIONS";
+    case TD5_SCREEN_AUTOTRACK_OPTIONS:  return "AUTO TRACK OPTIONS"; /* [R2 item 25] */
     case TD5_SCREEN_CONTROLLER_BINDING: return "CONTROLLER SETUP";
     case TD5_SCREEN_CAR_SELECTION:      return "SELECT CAR";
     case TD5_SCREEN_TRACK_SELECTION:    return "SELECT TRACK";
@@ -3431,6 +3433,8 @@ static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
         return TD5_SCREEN_OPTIONS_HUB;
     case TD5_SCREEN_LIGHTING_OPTIONS:   /* [RT2 P8] entered from GRAPHICS OPTIONS -> BACK there */
         return TD5_SCREEN_DISPLAY_OPTIONS;
+    case TD5_SCREEN_AUTOTRACK_OPTIONS:  /* [R2 item 25] only reachable from track-select */
+        return TD5_SCREEN_TRACK_SELECTION;
 
     case TD5_SCREEN_CONTROLLER_BINDING:
         return TD5_SCREEN_CONTROL_OPTIONS;
@@ -5443,6 +5447,7 @@ int td5_frontend_display_loop(void) {
                      s_current_screen == TD5_SCREEN_TWO_PLAYER_OPTIONS ||
                      s_current_screen == TD5_SCREEN_LANGUAGE_OPTIONS ||
                      s_current_screen == TD5_SCREEN_LIGHTING_OPTIONS ||
+                     s_current_screen == TD5_SCREEN_AUTOTRACK_OPTIONS ||
                      s_current_screen == TD5_SCREEN_CONTROLLER_BINDING);
                 /* [splitscreen back-confirm] In split-screen, returning to the
                  * parent screen first raises the "GO BACK?" prompt; otherwise
@@ -5707,6 +5712,7 @@ static int frontend_get_button_anim_state(int *out_mode, int *out_tick, int *out
     case TD5_SCREEN_TWO_PLAYER_OPTIONS:
     case TD5_SCREEN_LANGUAGE_OPTIONS:
     case TD5_SCREEN_LIGHTING_OPTIONS:
+    case TD5_SCREEN_AUTOTRACK_OPTIONS:   /* [R2 item 25] same 3/8 anim states */
         if (s_inner_state == 3) { mode = FE_BUTTON_ANIM_IN;  max_tick = 0x27; }
         else if (s_inner_state == 8) { mode = FE_BUTTON_ANIM_OUT; max_tick = 16; }
         break;
@@ -5791,6 +5797,7 @@ static int frontend_screen_has_button_anim(void) {
     case TD5_SCREEN_TWO_PLAYER_OPTIONS:
     case TD5_SCREEN_LANGUAGE_OPTIONS:
     case TD5_SCREEN_LIGHTING_OPTIONS:
+    case TD5_SCREEN_AUTOTRACK_OPTIONS:   /* [R2 item 25] */
     case TD5_SCREEN_MUSIC_TEST:
     case TD5_SCREEN_CAR_SELECTION:
     case TD5_SCREEN_TRACK_SELECTION:
@@ -9888,7 +9895,8 @@ void td5_frontend_render_ui_rects(void) {
         s_current_screen != TD5_SCREEN_MP_POSITION &&
         s_current_screen != TD5_SCREEN_TRACK_SELECTION &&
         s_current_screen != TD5_SCREEN_CUP_TRACK_SELECT &&
-        s_current_screen != TD5_SCREEN_RACE_OPTIONS)   /* [2026-07-04] shares the track-select backdrop */
+        s_current_screen != TD5_SCREEN_RACE_OPTIONS &&  /* [2026-07-04] shares the track-select backdrop */
+        s_current_screen != TD5_SCREEN_AUTOTRACK_OPTIONS) /* [R2 item 25] same, entered from track-select */
         frontend_render_bg_gallery(sx, sy);
 
     switch (frontend_effective_screen(s_current_screen)) {
@@ -9955,6 +9963,9 @@ void td5_frontend_render_ui_rects(void) {
         break;
     case TD5_SCREEN_LIGHTING_OPTIONS:   /* [RT2 P8] per-row tier value text */
         frontend_render_lighting_options_overlay(sx, sy);
+        break;
+    case TD5_SCREEN_AUTOTRACK_OPTIONS:  /* [R2 item 25] generator knob values */
+        frontend_render_autotrack_options_overlay(sx, sy);
         break;
     case TD5_SCREEN_CONTROLLER_BINDING:
         frontend_render_controller_binding_overlay(sx, sy);
@@ -10292,6 +10303,17 @@ void td5_frontend_render_ui_rects(void) {
              * the classic creation!=rendering gap: the row exists and cycles on
              * L/R but silently renders no arrows. */
             for (int lo_r = 0; lo_r < 10; lo_r++) fe_draw_option_arrows(lo_r, sx, sy);
+            break;
+        case TD5_SCREEN_AUTOTRACK_OPTIONS:
+            /* [R2 item 25] ◄► on every selector row; OK (the last button) has
+             * none. Bound comes from the screen itself via
+             * td5_autotrack_opts_row_count() rather than a literal, so it
+             * cannot go stale against AT_ROWS the way the LIGHTING bound above
+             * did -- that is the creation-vs-rendering gap this file has hit
+             * before (re/analysis/frontend_diff_blindspot_postmortem.md). */
+            { int at_r, at_n = td5_autotrack_opts_row_count();
+              for (at_r = 0; at_r < at_n; at_r++)
+                  fe_draw_option_arrows(at_r, sx, sy); }
             break;
         case TD5_SCREEN_MUSIC_TEST:
             /* orig 0x418460: InitializeFrontendDisplayModeArrows(0,1) — the TRACK
