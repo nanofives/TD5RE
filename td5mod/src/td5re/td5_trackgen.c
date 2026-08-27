@@ -2072,7 +2072,27 @@ static int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz,
  * prisms per side (5*floors + 2 quads each, see tg_facade_push_cap). 232 at the
  * tallest tower run; 256 leaves headroom. The arrays are stack doubles, so this
  * is ~40 KB of frame -- fine, but do not grow it casually. */
-#define TD5_TG_FACADE_MAXQUAD 256
+#define TD5_TG_FACADE_MAXQUAD 320
+
+/* Half a texel of a 64x64 page -- the only page size the TEXTURES.DAT container
+ * carries (TD5_TG_TEX_DIM, defined with the page emitters far below).
+ *
+ * Why every cell is inset by it: scenery samples LINEAR + WRAP (d3d12_backend.c
+ * sampler table), so a UV of exactly 1.0 lands on the texel boundary and the
+ * bilinear tap blends texel 63 with texel 0 -- the OPPOSITE edge of the same
+ * page. On the procedural pages that is a grey-on-grey smear, but the real
+ * borrowed frontages (k_real_wall_*, photographic level014 pages) have a strong
+ * coloured column/row at one edge, so every cell boundary drew a coloured line
+ * across the building. That is the "colored lines on buildings" report. Insetting
+ * the cell by half a texel keeps every tap strictly inside the page and costs
+ * half a texel of image at the seam. */
+#define TD5_TG_FACADE_UV_INSET (0.5 / 64.0)
+
+/* A run this many floors tall counts as a TOWER: it stands above the back rows,
+ * so it needs its own back wall (see the MASS pass in tg_emit_street_wall).
+ * CITY runs are 2..4 floors normally and 3..8 in a tower cluster, so 5 selects
+ * the towers and nothing else. */
+#define TD5_TG_FACADE_TALL_ROWS 5
 
 /* Write ONE opaque quad-list mesh in the 0x38 format, split into up to `nseg`
  * COMMANDS -- each command samples its own page over its own run of quads, in
@@ -2145,6 +2165,7 @@ static void tg_facade_push_grid(double bx, double by, double bz,
                                 double *px, double *py, double *pz,
                                 double *uu, double *vv, int *pn)
 {
+    const double e0 = TD5_TG_FACADE_UV_INSET, e1 = 1.0 - TD5_TG_FACADE_UV_INSET;
     int c, r, n = *pn;
     if (cols < 1) cols = 1;
     if (rows < 1) rows = 1;
@@ -2157,10 +2178,10 @@ static void tg_facade_push_grid(double bx, double by, double bz,
             double rr0 = r0f, rr1 = r1f;
             if (n + 4 > TD5_TG_FACADE_MAXQUAD * 4) { *pn = n; return; }
             /* quad loop: near-bottom, far-bottom, far-top, near-top */
-            px[n]=bx+ax*c0+ux*rr0; py[n]=by+ay*c0+uy*rr0; pz[n]=bz+az*c0+uz*rr0; uu[n]=0.0; vv[n]=1.0; n++;
-            px[n]=bx+ax*c1+ux*rr0; py[n]=by+ay*c1+uy*rr0; pz[n]=bz+az*c1+uz*rr0; uu[n]=1.0; vv[n]=1.0; n++;
-            px[n]=bx+ax*c1+ux*rr1; py[n]=by+ay*c1+uy*rr1; pz[n]=bz+az*c1+uz*rr1; uu[n]=1.0; vv[n]=0.0; n++;
-            px[n]=bx+ax*c0+ux*rr1; py[n]=by+ay*c0+uy*rr1; pz[n]=bz+az*c0+uz*rr1; uu[n]=0.0; vv[n]=0.0; n++;
+            px[n]=bx+ax*c0+ux*rr0; py[n]=by+ay*c0+uy*rr0; pz[n]=bz+az*c0+uz*rr0; uu[n]=e0; vv[n]=e1; n++;
+            px[n]=bx+ax*c1+ux*rr0; py[n]=by+ay*c1+uy*rr0; pz[n]=bz+az*c1+uz*rr0; uu[n]=e1; vv[n]=e1; n++;
+            px[n]=bx+ax*c1+ux*rr1; py[n]=by+ay*c1+uy*rr1; pz[n]=bz+az*c1+uz*rr1; uu[n]=e1; vv[n]=e0; n++;
+            px[n]=bx+ax*c0+ux*rr1; py[n]=by+ay*c0+uy*rr1; pz[n]=bz+az*c0+uz*rr1; uu[n]=e0; vv[n]=e0; n++;
         }
     }
     *pn = n;
@@ -2237,11 +2258,14 @@ static unsigned int tg_facade_run_id(int si, int left)
  * angle and the block is capped when seen from a rise.
  *
  * `l` is the outward lateral unit, `ti` the along-road unit pointing INTO the
- * run. With thick == 0 the inner/rear/roof faces collapse to zero area, which
- * the screen-area cull drops -- that is the fallback when the knob is off. */
+ * run. `cols` is how many whole page cells the return is deep (tg_facade_cap_cols
+ * -- passing it in keeps the flank at the page's own aspect, like the front).
+ * With thick == 0 the inner/rear/roof faces collapse to zero area, which the
+ * screen-area cull drops -- that is the fallback when the knob is off. */
 static void tg_facade_push_cap(double bx, double by, double bz,
                                double lx, double lz, double tix, double tiz,
                                double depth, double thick, double H, int rows,
+                               int cols,
                                double *px, double *py, double *pz,
                                double *uu, double *vv, int *pn)
 {
@@ -2249,14 +2273,38 @@ static void tg_facade_push_cap(double bx, double by, double bz,
     const double tx = tix * thick, tz = tiz * thick;
 
     tg_facade_push_grid(bx, by, bz, dx, 0.0, dz, 0.0, H, 0.0,
-                        2, rows, 0, rows, px, py, pz, uu, vv, pn);
+                        cols, rows, 0, rows, px, py, pz, uu, vv, pn);
     tg_facade_push_grid(bx + tx, by, bz + tz, dx, 0.0, dz, 0.0, H, 0.0,
-                        2, rows, 0, rows, px, py, pz, uu, vv, pn);
+                        cols, rows, 0, rows, px, py, pz, uu, vv, pn);
     tg_facade_push_grid(bx + dx, by, bz + dz, tx, 0.0, tz, 0.0, H, 0.0,
                         1, rows, 0, rows, px, py, pz, uu, vv, pn);
     /* Roof: one horizontal cell, `up` reused as the along-road thickness. */
     tg_facade_push_grid(bx, by + H, bz, dx, 0.0, dz, tx, 0.0, tz,
-                        2, 1, 0, 1, px, py, pz, uu, vv, pn);
+                        cols, 1, 0, 1, px, py, pz, uu, vv, pn);
+}
+
+/* Push ONE quad from four explicit corners (near-bottom, far-bottom, far-top,
+ * near-top order, like tg_facade_push_grid). Used where a face is not a
+ * parallelogram -- a roof deck between a curved frontage and its back line --
+ * so the corners can be taken from the geometry instead of a single lateral. */
+static void tg_facade_push_quad(const double *xyz,
+                                double *px, double *py, double *pz,
+                                double *uu, double *vv, int *pn)
+{
+    static const double k_u[4] = { 0.0, 1.0, 1.0, 0.0 };
+    static const double k_v[4] = { 1.0, 1.0, 0.0, 0.0 };
+    const double e = TD5_TG_FACADE_UV_INSET;
+    int i, n = *pn;
+    if (n + 4 > TD5_TG_FACADE_MAXQUAD * 4) return;
+    for (i = 0; i < 4; i++) {
+        px[n] = xyz[i * 3 + 0];
+        py[n] = xyz[i * 3 + 1];
+        pz[n] = xyz[i * 3 + 2];
+        uu[n] = k_u[i] > 0.5 ? 1.0 - e : e;
+        vv[n] = k_v[i] > 0.5 ? 1.0 - e : e;
+        n++;
+    }
+    *pn = n;
 }
 
 /* Which facade page a RUN uses -- keyed to the run hash so a whole building is
@@ -2602,6 +2650,74 @@ static double tg_city_sidewalk_w(const TG_Biome *b)
     return (double)b->sidewalk < 620.0 ? 620.0 : (double)b->sidewalk;
 }
 
+/* ---- FACADE CELL SIZING (the page must map at its own aspect) -------------
+ * A page cell is authored at cell_w x cell_h raw (CITY: 2150 x 2950, the
+ * shipped level014 measurement). The geometry can only ever fit a WHOLE number
+ * of cells along a frontage, and a frontage is one span -- 1500 raw -- so at
+ * CITY sizes exactly one cell covers 1500 across while the code still gave it
+ * 2950 up: the page came out squashed 1500/2150 = 0.70 across, which is the
+ * "building textures should not be stretched" report. Windows read tall and
+ * narrow, and the error is worse the wider the authored cell is.
+ *
+ * The along-road extent is not ours to choose (the wall must abut the span
+ * endpoints or the street wall breaks), so the FLOOR HEIGHT is what gets
+ * corrected: floor_h = cell_h * (effective cell width / authored cell width).
+ * The page then maps at its authored aspect and the building is simply a little
+ * shorter per floor.
+ *
+ * The scale is computed from the NOMINAL span length, not the span's own
+ * length: neighbouring spans differ by a few percent on a curve (the outer
+ * setback is a longer arc), and keying height to that would saw-tooth the
+ * roofline of one continuous building. Residual stretch is that same few
+ * percent, which is not visible. */
+static int tg_facade_cols_for(double len, double cell_w, int cap)
+{
+    int c;
+    if (!(cell_w > 1.0)) return 1;
+    c = (int)(len / cell_w + 0.5);
+    if (c < 1) c = 1;
+    if (c > cap) c = cap;
+    return c;
+}
+
+/* Effective (as-built) cell width for biome b on a nominal-length frontage. */
+static double tg_facade_cell_w(const TG_Biome *b)
+{
+    const double len = (double)TD5_TG_SPAN_LENGTH;
+    return len / (double)tg_facade_cols_for(len, (double)b->cell_w, 4);
+}
+
+/* Height of ONE floor: the authored cell height, corrected so the page keeps
+ * its aspect. Default ON; TD5RE_AUTOTRACK_FACADE_ASPECT=0 restores the raw
+ * table height (and the stretch) for an A/B. */
+static double tg_facade_floor_h(const TG_Biome *b)
+{
+    if (b->cell_w <= 0 || b->cell_h <= 0) return (double)b->cell_h;
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_FACADE_ASPECT"))
+        return (double)b->cell_h;
+    return (double)b->cell_h * tg_facade_cell_w(b) / (double)b->cell_w;
+}
+
+/* Whole cells across a corner return. Capped at 2 on purpose: the return is
+ * emitted three faces deep at every run end, so each extra column costs
+ * 2*rows+1 quads on a budget (TD5_TG_FACADE_MAXQUAD) that a tall tower already
+ * nearly fills. */
+static int tg_facade_cap_cols(const TG_Biome *b)
+{
+    return tg_facade_cols_for((double)b->depth, tg_facade_cell_w(b), 2);
+}
+
+/* Building depth, quantised to whole cells for the same reason as the height:
+ * a return that is not a multiple of the cell width stretches the page across
+ * the flank. CITY's authored 6000 raw becomes 2 x 1500 = 3000. */
+static double tg_facade_depth(const TG_Biome *b)
+{
+    if (b->cell_w <= 0) return (double)b->depth;
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_FACADE_ASPECT"))
+        return (double)b->depth;
+    return (double)tg_facade_cap_cols(b) * tg_facade_cell_w(b);
+}
+
 /* Along-road depth of a run-end corner return, keyed to the facade cell so it
  * scales with the biome's building size. 0.45 of a cell is enough mass to read
  * as a corner block without closing off the side street behind it. */
@@ -2646,8 +2762,8 @@ static void tg_side_geom(const TG_NodeList *nl, int si, int left,
     if (b->tower_mask && ((gh >> 3) & (unsigned)b->tower_mask) == 0)
         floors += 1 + (int)((gh >> 11) % 4);          /* whole-run tower cluster */
     g->rows  = floors;
-    g->H     = (double)floors * (double)b->cell_h;
-    g->depth = (double)b->depth;
+    g->H     = (double)floors * tg_facade_floor_h(b);
+    g->depth = tg_facade_depth(b);
 
     g->lx0 = n0->tz * side; g->lz0 = -n0->tx * side;
     g->lx1 = n1->tz * side; g->lz1 = -n1->tx * side;
@@ -2667,9 +2783,7 @@ static void tg_side_geom(const TG_NodeList *nl, int si, int left,
 
     flen = sqrt(g->ax * g->ax + g->az * g->az);
     if (flen < 1.0) flen = 1.0;
-    g->cols = (int)(flen / (double)b->cell_w + 0.5);
-    if (g->cols < 1) g->cols = 1;
-    if (g->cols > 4) g->cols = 4;
+    g->cols = tg_facade_cols_for(flen, (double)b->cell_w, 4);
 
     g->cap_near = !tg_facade_built(si - 1, left);
     g->cap_far  = !tg_facade_built(si + 1, left);
@@ -2688,6 +2802,7 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
      * building on one texture across the side streets. */
     unsigned int block_gh = tg_facade_run_id(si, 0);
     const double cap_thick = tg_facade_cap_thick(b);
+    const int cap_cols = tg_facade_cap_cols(b);
     int n = 0, n_store, s, nseg, seg_page[2], seg_nq[2];
 
     if (si + 1 >= nl->count) return 1;    /* need the far endpoint to abut */
@@ -2713,6 +2828,42 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
         tg_facade_push_grid(g->bx, g->by, g->bz, g->ax, g->ay, g->az,
                             0.0, g->H, 0.0, g->cols, g->rows, 1, g->rows,
                             px, py, pz, uu, vv, &n);
+        /* MASS, on every span of the run rather than only at its ends. The
+         * front plane is a zero-thickness sheet: at run INTERIOR spans there was
+         * nothing at all behind it, so a tall run seen from a rise, a crest or
+         * an approaching curve showed one face and a knife-edge roofline -- the
+         * "taller buildings only have a facade ... just one visible face"
+         * report. Two faces close it for the cost of a roof quad plus, on
+         * TOWERS only, a back wall:
+         *   ROOF  -- always. Four explicit corners (the back line follows the
+         *            frontage through the curve), so the deck cannot gap at the
+         *            joint the way a single-lateral parallelogram would.
+         *   BACK  -- towers only. A low block is hidden by the back rows behind
+         *            it, but a tower stands over them and was see-through from
+         *            behind and down every cross street. Gated by height so the
+         *            quad budget is only spent where it shows. */
+        if (g->depth > 1.0 && td5_env_flag_on("TD5RE_AUTOTRACK_FACADE_MASS")) {
+            const double d = g->depth;
+            double q[12];
+            q[0] = g->bx;                  q[1]  = g->by + g->H;
+            q[2] = g->bz;
+            q[3] = g->bx + g->ax;          q[4]  = g->by + g->ay + g->H;
+            q[5] = g->bz + g->az;
+            q[6] = g->bx + g->ax + g->lx1 * d; q[7] = g->by + g->ay + g->H;
+            q[8] = g->bz + g->az + g->lz1 * d;
+            q[9] = g->bx + g->lx0 * d;     q[10] = g->by + g->H;
+            q[11] = g->bz + g->lz0 * d;
+            tg_facade_push_quad(q, px, py, pz, uu, vv, &n);
+
+            if (g->rows >= TD5_TG_FACADE_TALL_ROWS) {
+                const double bx2 = g->bx + g->lx0 * d, bz2 = g->bz + g->lz0 * d;
+                tg_facade_push_grid(bx2, g->by, bz2,
+                                    (g->bx + g->ax + g->lx1 * d) - bx2, g->ay,
+                                    (g->bz + g->az + g->lz1 * d) - bz2,
+                                    0.0, g->H, 0.0, g->cols, g->rows, 0, g->rows,
+                                    px, py, pz, uu, vv, &n);
+            }
+        }
         if (g->cap_near || g->cap_far) {
             /* Along-road unit, needed to give the corner prism its thickness.
              * Clamped to most of the span so a return can never overrun the
@@ -2725,12 +2876,12 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
             if (g->cap_near)
                 tg_facade_push_cap(g->bx, g->by, g->bz, g->lx0, g->lz0,
                                    aux, auz, g->depth, thick, g->H, g->rows,
-                                   px, py, pz, uu, vv, &n);
+                                   cap_cols, px, py, pz, uu, vv, &n);
             if (g->cap_far)
                 tg_facade_push_cap(g->bx + g->ax, g->by + g->ay, g->bz + g->az,
                                    g->lx1, g->lz1, -aux, -auz,
                                    g->depth, thick, g->H, g->rows,
-                                   px, py, pz, uu, vv, &n);
+                                   cap_cols, px, py, pz, uu, vv, &n);
         }
     }
 
@@ -4323,16 +4474,16 @@ static int tg_city_emit_backrows(const TG_FBHook *h, double sw)
              * step in height and the two rows never line up. */
             const unsigned int rh = ((unsigned)h->si * 31u + (unsigned)s * 7u
                                      + (unsigned)r) * 2246822519u;
-            double set, H, ax, az, ay, bx, by, bz;
-            int rows, page, seg_nq, n = 0;
+            double set, H, ax, az, ay, bx, by, bz, flen;
+            int rows, cols, page, seg_nq, n = 0;
 
             if ((rh >> 29) == 0u) continue;      /* ~12% of slots left empty */
             /* Each row sits a building depth plus clear air behind the last. */
-            set = sw + (double)b->depth * (double)(r + 1)
+            set = sw + tg_facade_depth(b) * (double)(r + 1)
                 + TD5_TG_BACKROW_GAP * (double)(r + 1)
                 + (double)(rh % 1800u);
             rows = b->floors_min + (int)((rh >> 9) % 5u);
-            H    = (double)rows * (double)b->cell_h;
+            H    = (double)rows * tg_facade_floor_h(b);
 
             bx = n0->x + lx0 * (n0->width * 0.5 + set);
             by = n0->y;
@@ -4341,8 +4492,15 @@ static int tg_city_emit_backrows(const TG_FBHook *h, double sw)
             ay = n1->y - n0->y;
             az = (n1->z + lz1 * (n1->width * 0.5 + set)) - bz;
 
+            /* Columns from the row's OWN frontage length, which at a big setback
+             * on a curve is appreciably longer than a span: the fixed 2 columns
+             * this used squashed the page to 750 raw across, a third of its
+             * authored 2150, and the back rows read as a different (much finer)
+             * building than the front row of the same block. */
+            flen = sqrt(ax * ax + az * az);
+            cols = tg_facade_cols_for(flen, (double)b->cell_w, 4);
             tg_facade_push_grid(bx, by, bz, ax, ay, az, 0.0, H, 0.0,
-                                2, rows, 0, rows, px, py, pz, uu, vv, &n);
+                                cols, rows, 0, rows, px, py, pz, uu, vv, &n);
             if (n <= 0) continue;
             if (*h->nmesh >= h->maxmesh) return 1;
             page   = tg_facade_page(rh);
