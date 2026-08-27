@@ -619,6 +619,10 @@ static int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
 #define TD5_TG_BRIDGE_RUN     24       /* spans per deliberate bridge */
 #define TD5_TG_BRIDGE_HEIGHT  1300.0   /* crown lift; bounded by max_grade */
 #define TD5_TG_BRIDGE_CHASM   2500.0   /* how far the ground/river drops below */
+/* Half-width of the river channel. Unlike the sea (which starts outboard of the
+ * road edge) this crosses the CENTRELINE, which is why it is the water plane
+ * that can end up over a bore -- see tg_water_span_clear. */
+#define TD5_TG_BRIDGE_WATER_HALF 32000.0
 
 static int tg_bridges_enabled(void)
 {
@@ -640,6 +644,33 @@ static int tg_span_in_bridge_run(int si)
     return ((h >> 29) == 0);                     /* ~1 run in 8 */
 }
 
+/* Lowest road node on the WHOLE track, cached.
+ *
+ * A global fact with one consumer that genuinely needs a global one: the
+ * background band (tg_emit_far_band) reaches tens of thousands of units sideways
+ * from its own span, so a height taken from that span is meaningless once the
+ * band has swept out over a different stretch of track. See the ceiling note on
+ * TD5_TG_FAR_REACH for what the local version looked like in frame.
+ *
+ * Computed lazily rather than at generate time because the node list is still
+ * being appended to (branch corridors) after the elevation pass; by the time the
+ * first band is emitted the list is final. tg_apply_elevation invalidates it, so
+ * a second generate in the same process cannot inherit the first one's floor. */
+static double s_track_min_y;
+static int    s_track_min_valid;
+
+static double tg_track_min_y(const TG_NodeList *nl)
+{
+    int i;
+
+    if (s_track_min_valid) return s_track_min_y;
+    s_track_min_y = (nl->count > 0) ? nl->v[0].y : 0.0;
+    for (i = 1; i < nl->count; i++)
+        if (nl->v[i].y < s_track_min_y) s_track_min_y = nl->v[i].y;
+    s_track_min_valid = 1;
+    return s_track_min_y;
+}
+
 /* Two summed sines, a raised-cosine hump over each deliberate bridge run, then
  * a global rescale so no span exceeds MAX_GRADE.
  * Mirrors apply_road_elevation() in td5_trackgen.py, plus the bridge humps. */
@@ -649,6 +680,10 @@ static void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
     double amp = (double)spec->elevation_amplitude;
     double ph1, ph2, worst = 0.0;
     int waves, i;
+
+    /* Every y on the track is about to change (or, on the early-out below, has
+     * just been built fresh) -- either way the cached global floor is stale. */
+    s_track_min_valid = 0;
 
     if (amp <= 0.0 || nl->count < 3) return;
 
@@ -2939,6 +2974,27 @@ static double tg_sea_level_y(const TG_NodeList *nl, int si)
     return lo - (double)TD5_TG_WATER_DROP;
 }
 
+/* May a water quad be laid across span si at all?
+ *
+ * Reported: "i see water on top of the tunnel". Neither water emitter consulted
+ * the tunnel gate. Both are called from the NON-tunnel branch of the emit loop,
+ * which looks like it settles the question but does not: every water quad runs
+ * from node si to node si+1, so the last open span before a portal lays its
+ * plane across the FIRST span of the tunnel run. The sea gets away with it (it
+ * starts TD5_TG_WATER_BEACH outboard of the road edge, so it never reaches the
+ * bore) but the river spans the full TD5_TG_BRIDGE_WATER_HALF either side of the
+ * centreline and goes straight through it.
+ *
+ * A tunnel is an enclosed section cut into rock; nothing floats over it and
+ * nothing runs through it. Cheaper and more honest to refuse the quad than to
+ * try to clip it. TD5RE_AUTOTRACK_WATER_TUNNEL_GATE=0 restores the old
+ * behaviour for comparison. */
+static int tg_water_span_clear(int si)
+{
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_WATER_TUNNEL_GATE")) return 1;
+    return !tg_span_in_tunnel(si) && !tg_span_in_tunnel(si + 1);
+}
+
 /* Emit the sea plane beside span si on `side`, recording its mesh offset.
  *
  * ONE quad, and its UVs come from the WORLD x/z of each corner rather than
@@ -2959,6 +3015,7 @@ static int tg_emit_water(const TG_NodeList *nl, int si, double side,
 
     if (si + 1 >= nl->count) return 1;
     if (tg_side_blocked(si, side)) return 1;
+    if (!tg_water_span_clear(si)) return 1;
     n1 = &nl->v[si + 1];
 
     lx0 = n0->tz * side; lz0 = -n0->tx * side;
@@ -3197,17 +3254,51 @@ static void tg_bridge_run_bounds(const TG_NodeList *nl, int si, int *s0, int *s1
     *s0 = a; *s1 = b;
 }
 
+/* The LOWEST road node in the bridge run containing si.
+ *
+ * The one determined height for the crossing. Everything that has to sit UNDER
+ * the deck -- the river, the pier tops -- measures from this instead of from its
+ * own span's y, and because it is the run MINIMUM the result is at or below the
+ * road at every span in the run by construction. Nothing derived from it can
+ * surface through the deck no matter what the profile does in between.
+ *
+ * Off a deliberate run there is no crossing to be level with (the lift-triggered
+ * path is a single humped span), so fall back to the span's own height rather
+ * than to the minimum of an arbitrary 24-span block, which could be far below. */
+static double tg_bridge_deck_y(const TG_NodeList *nl, int si)
+{
+    int s0, s1, k;
+    double lo;
+
+    if (!tg_span_in_bridge_run(si)) return nl->v[si].y;
+    tg_bridge_run_bounds(nl, si, &s0, &s1);
+    lo = nl->v[s0].y;
+    for (k = s0 + 1; k <= s1; k++)
+        if (nl->v[k].y < lo) lo = nl->v[k].y;
+    return lo;
+}
+
 /* River level under a bridge deck at span si (the banks drop to here).
  *
  * Flat over the whole run: this used to be nl->v[si].y - CHASM, i.e. the river
  * surface followed the deck's raised-cosine hump, so the water arched up under
- * the middle of the bridge. Taking the run's chord midpoint instead gives ONE
- * level for the crossing, which is what a river looks like. */
+ * the middle of the bridge.
+ *
+ * The chord MIDPOINT that replaced it was still not safe, and is half of the
+ * "water on top of the tunnel" report. A midpoint is only guaranteed to be below
+ * the road at the two endpoints it is taken from; anywhere the run's interior
+ * dips under its own chord -- or where the 24-span window spills past the main
+ * ring onto appended branch-corridor nodes, whose y has nothing to do with this
+ * crossing -- the river surfaces above the local road, and a bore anchored to
+ * that same local road is then under water. Same class of error as the
+ * 2026-08-24 elevated-bridge gate, one level up: a value taken from two samples
+ * where it had to hold over the whole run.
+ *
+ * The run MINIMUM (tg_bridge_deck_y) is that guarantee, and it is the rule
+ * tg_sea_level_y already uses for the sea for exactly the same reason. */
 static double tg_bridge_water_y(const TG_NodeList *nl, int si)
 {
-    int s0, s1;
-    tg_bridge_run_bounds(nl, si, &s0, &s1);
-    return (nl->v[s0].y + nl->v[s1].y) * 0.5 - TD5_TG_BRIDGE_CHASM - 300.0;
+    return tg_bridge_deck_y(nl, si) - TD5_TG_BRIDGE_CHASM - 300.0;
 }
 
 /* How fully span si is "over the gorge", 0 at both ends of the bridge run and 1
@@ -3236,6 +3327,31 @@ static int tg_bridge_struct_enabled(void)
     return td5_env_flag_on("TD5RE_AUTOTRACK_BRIDGE_STRUCT");
 }
 
+/* Page for everything STRUCTURAL on a bridge -- girder, piers, braces, towers.
+ *
+ * Reported: "bridge pillars should have a different texture than bridge
+ * fences". They shared TD5_TG_PAGE_WALL, which is the city FACADE page: with
+ * TD5RE_AUTOTRACK_REAL_TEX on the piers were a photographic office frontage,
+ * and the parapet immediately above them was the same frontage, so deck and
+ * supports read as one undifferentiated slab.
+ *
+ * TD5_TG_PAGE_TUNNEL is the concrete lining page already generated for the
+ * bores (cool greys, damp/soot blotches) -- a page already in use, not new art,
+ * and concrete is what carries a bridge. Parapets stay on the facade page, so
+ * the two now differ. TD5RE_AUTOTRACK_BRIDGE_PIER_TEX=0 puts them back on one
+ * page. */
+static int tg_bridge_pier_page(void)
+{
+    return td5_env_flag_on("TD5RE_AUTOTRACK_BRIDGE_PIER_TEX")
+         ? TD5_TG_PAGE_TUNNEL : TD5_TG_PAGE_WALL;
+}
+
+/* Clearance from the deck SURFACE down to the top of anything hanging under it.
+ * Derived, not chosen: the girder is a 170 half-height box centred 260 below the
+ * road, so its underside is at road - 430. 480 clears that with a margin, which
+ * is why a pier topped out here can never break the road surface. */
+#define TD5_TG_BRIDGE_UNDER 480.0
+
 /* Bridge: a deck over a river. The road STRIP is the deck; here we add the
  * parapets (side walls) that read as a bridge from the car, plus the structure
  * that carries it. The ground beside a bridge run drops away into the gorge
@@ -3261,6 +3377,7 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
     const double lift = n->y - ref;
     const int deliberate = tg_span_in_bridge_run(si);
     const double half = n->width * 0.5;
+    const int pier_page = tg_bridge_pier_page();
     /* Deck level for the boxes: the strip surface, with the girder just under. */
     const double wy = deliberate ? tg_bridge_water_y(nl, si) : ref;
     int s0, s1, s;
@@ -3288,38 +3405,56 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
          * consecutive spans butt together into a continuous beam. */
         if (!tg_emit_box_mesh(blk, n->x, n->y - 260.0, n->z,
                               half + 60.0, 170.0, 780.0,
-                              n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0, 0xFFD8D8D8u))
+                              n->tx, n->tz, pier_page, 3000.0, 0xFFD8D8D8u))
             return 0;
         (*added)++;
     }
 
-    /* Piers every 4th span, dropping from the girder to the river bed. */
+    /* Piers every 4th span, dropping from the deck underside to the river bed.
+     *
+     * Reported: "bridge road should have a predetermined height, this will make
+     * pillars not visible on the road surface during bridges". Root cause was
+     * arithmetic, and it was exact rather than marginal: the pier was a box of
+     * half-height h centred at n->y - h, so its TOP FACE landed at n->y -- the
+     * road surface itself, coplanar with the deck. Every pier was drawn into the
+     * carriageway, z-fighting the tarmac it was supposed to be holding up.
+     *
+     * The fix is the run-wide determined height the report asks for, not a local
+     * nudge: hang the pier from tg_bridge_deck_y, the LOWEST road node in the
+     * crossing, less the girder depth. Because that reference is the run minimum
+     * it is at or below the road at every span in the run, so a pier top is
+     * below the carriageway everywhere -- including at the crown, where the
+     * raised-cosine hump puts the road a further BRIDGE_HEIGHT up. Reading n->y
+     * here was the same local-for-global mistake as the elevated-bridge gate. */
     if ((si & 3) == 0) {
-        double h = (n->y - wy) * 0.5;
+        const double top = tg_bridge_deck_y(nl, si) - TD5_TG_BRIDGE_UNDER;
+        double h = (top - wy) * 0.5;
+        double cy;
         if (h < 150.0) h = 150.0;
+        cy = top - h;
         if (tg_bridge_struct_enabled()) {
             /* Paired legs under the deck EDGES plus a brace between them. */
             for (s = 0; s < 2; s++) {
                 double side = s ? 1.0 : -1.0;
                 double lx = n->tz * side, lz = -n->tx * side;
                 if (!tg_emit_box_mesh(blk, n->x + lx * (half * 0.7),
-                                      n->y - h, n->z + lz * (half * 0.7),
+                                      cy, n->z + lz * (half * 0.7),
                                       300.0, h, 300.0, n->tx, n->tz,
-                                      TD5_TG_PAGE_WALL, 3000.0, 0xFFFFFFFFu))
+                                      pier_page, 3000.0, 0xFFFFFFFFu))
                     return 0;
                 (*added)++;
             }
             /* Brace across the legs, a third of the way down the pier. */
-            if (!tg_emit_box_mesh(blk, n->x, n->y - h * 0.55, n->z,
+            if (!tg_emit_box_mesh(blk, n->x, top - h * 0.55, n->z,
                                   half * 0.7 + 300.0, 130.0, 200.0,
-                                  n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0,
+                                  n->tx, n->tz, pier_page, 3000.0,
                                   0xFFFFFFFFu))
                 return 0;
             (*added)++;
         } else {
-            if (!tg_emit_box_mesh(blk, n->x, n->y - h, n->z,
+            if (!tg_emit_box_mesh(blk, n->x, cy, n->z,
                                   450.0, h, 450.0,
-                                  n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0,
+                                  n->tx, n->tz, pier_page, 3000.0,
                                   0xFFFFFFFFu))
                 return 0;
             (*added)++;
@@ -3339,14 +3474,14 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
             if (!tg_emit_box_mesh(blk, n->x + lx * (half + 300.0),
                                   n->y + th, n->z + lz * (half + 300.0),
                                   240.0, th, 240.0, n->tx, n->tz,
-                                  TD5_TG_PAGE_WALL, 3000.0, 0xFFFFFFFFu))
+                                  pier_page, 3000.0, 0xFFFFFFFFu))
                 return 0;
             (*added)++;
         }
         /* Cross-member near the top of the towers, closing the gateway. */
         if (!tg_emit_box_mesh(blk, n->x, n->y + th * 1.7, n->z,
                               half + 540.0, 160.0, 200.0,
-                              n->tx, n->tz, TD5_TG_PAGE_WALL, 3000.0,
+                              n->tx, n->tz, pier_page, 3000.0,
                               0xFFFFFFFFu))
             return 0;
         (*added)++;
@@ -3366,10 +3501,11 @@ static int tg_emit_bridge_water(const TG_NodeList *nl, int si,
     const TG_Node *n0 = &nl->v[si];
     const TG_Node *n1;
     double lx, lz, wy;
-    const double BW = 32000.0;              /* half-width of the river channel */
+    const double BW = TD5_TG_BRIDGE_WATER_HALF;
     int i, seg_page = TD5_TG_PAGE_WATER, seg_nq = 1;
 
     if (si + 1 >= nl->count) return 1;
+    if (!tg_water_span_clear(si)) return 1;
     n1 = &nl->v[si + 1];
     lx = n0->tz; lz = -n0->tx;              /* left unit */
     wy = tg_bridge_water_y(nl, si) + 100.0; /* just under the banks */
@@ -4633,14 +4769,37 @@ static int tg_emit_fb_tunnel(const TG_FBHook *h)
  * background" the reach was raised for survives. Verified with the band ENABLED
  * at the span that used to be covered: log/H1_reach30k.png.
  *
- * This is a MITIGATION, not a cure. Overlap is still possible wherever two
- * stretches of track pass within 30000 of each other with a big height
- * difference; the real fix is to stop the band being a per-span flat slab (sink
- * it to the track's GLOBAL minimum, or emit one continuous surface). Same class
- * of error as the 2026-08-24 elevated-bridge gate: a local value used where a
- * global one was needed. */
+ * The reach cut was a MITIGATION. The cure is below (TD5_TG_FAR_SINK_AT): the
+ * band is no longer a flat slab at all, so overlapping reaches no longer mean
+ * overlapping heights. The reach stays at 30000 anyway because nothing has yet
+ * looked at a longer one WITH the sink in place, and TD5RE_AUTOTRACK_TERRAIN_
+ * REACH raises it without a rebuild once someone has. */
 #define TD5_TG_FAR_REACH       30000
 #define TD5_TG_RIDGE_BASE      4500.0  /* mean ridge height above the far plain */
+
+/* THE CURE for the ceiling above, replacing the reach cut that only hid it.
+ *
+ * The band was flat: all four of its rings sat at the emitting span's own road
+ * height, so a band on high ground was a slab of high ground hanging over
+ * whatever low ground it reached. Height is a LOCAL fact but the band's extent
+ * is not, which is the whole defect -- and the same shape as the 2026-08-24
+ * elevated-bridge gate, one axis over.
+ *
+ * So make it a SLOPE instead of a slab. Ring 0 still meets the skirt at the
+ * local road height, because that seam has to stay watertight; from there the
+ * band descends to the track's GLOBAL minimum (tg_track_min_y) and stays there
+ * for the outer two rings. Two consequences, and both are the point:
+ *   - beyond ring 2 every band on the track is at the SAME height, so however
+ *     many of them overlap out there they are coplanar, not stacked;
+ *   - nothing above the global floor survives past 45% of the reach, so the
+ *     span of track a band can hang over shrinks from the full reach to that.
+ * On the measured seed 1234567 (relief 10662, reach 30000) that is the
+ * difference between a 6400-unit ceiling and none.
+ *
+ * TD5RE_AUTOTRACK_TERRAIN_SINK=0 restores the flat slab. */
+static const double k_tg_far_sink[4] = { 0.0, 0.45, 1.0, 1.0 };
+#define TD5_TG_FAR_SINK_AT   300.0   /* the floor sits this far under the min */
+#define TD5_TG_RIDGE_MIN_UP 1200.0   /* crest above the road it is seen from */
 
 /* Default ON -- these are fixes. TERRAIN_FAR=0 restores the short skirt only,
  * TERRAIN_HILLS=0 keeps the long plain but drops the distant ridge wall. */
@@ -4686,9 +4845,11 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
                                              TD5_TG_FAR_REACH, 30000, 400000);
     /* Band height envelope: flat at the seam, rolling further out. */
     static const double k_amp[4] = { 0.0, 700.0, 2200.0, 4200.0 };
+    const int sink = td5_env_flag_on("TD5RE_AUTOTRACK_TERRAIN_SINK");
+    const double floor_y = tg_track_min_y(nl) - TD5_TG_FAR_SINK_AT;
     const int g0 = (h->si / TD5_TG_FAR_GROUP) * TD5_TG_FAR_GROUP;
     int g1 = g0 + TD5_TG_FAR_GROUP - 1;
-    double X[2][4], Y[2][4], Z[2][4], D[2][4], U[2];
+    double X[2][4], Y[2][4], Z[2][4], D[2][4], U[2], B[2];
     double px[16], py[16], pz[16], uu[16], vv[16];
     int seg_page[2], seg_nq[2];
     int e, j, n = 0, nseg = 1;
@@ -4730,6 +4891,7 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
             base = (is_left ? ly : ry) - drop - TD5_TG_FAR_SINK;
         }
         U[e] = (double)se + (e ? 1.0 : 0.0);
+        B[e] = base;
 
         /* Geometric spacing: each band is roughly twice the depth of the one
          * inside it, so the near ground still has detail while three quads
@@ -4742,9 +4904,15 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
         for (j = 0; j < 4; j++) {
             const double ex = (is_left ? lx : rx) + ux * D[e][j];
             const double ez = (is_left ? lz : rz) + uz * D[e][j];
+            /* Descend from the seam to the GLOBAL floor -- see k_tg_far_sink.
+             * Never the other way: where the emitting span IS the low point of
+             * the track the floor is above the seam, and lifting the band onto
+             * it would recreate the ceiling this cures. */
+            double yb = sink ? base + (floor_y - base) * k_tg_far_sink[j] : base;
+            if (yb > base) yb = base;
             X[e][j] = ex;
             Z[e][j] = ez;
-            Y[e][j] = base + tg_terrain_hill_y(ex, ez, k_amp[j]);
+            Y[e][j] = yb + tg_terrain_hill_y(ex, ez, k_amp[j]);
         }
 
         /* [DIAG] Every term that decides how high this band sits, so the large
@@ -4754,12 +4922,12 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
         if (td5_env_flag_off("TD5RE_AUTOTRACK_FAR_LOG"))
             TD5_LOG_I(LOG_TAG,
                       "farband si=%d %s e=%d biome=%s | road_y=%.0f edge_y=%.0f "
-                      "prof_n=%d prof_dy_last=%.0f base=%.0f | Y0=%.0f Y3=%.0f "
-                      "| lift_vs_road=%.0f",
+                      "prof_n=%d prof_dy_last=%.0f base=%.0f floor=%.0f sink=%d "
+                      "| Y0=%.0f Y3=%.0f | lift_vs_road=%.0f",
                       h->si, is_left ? "L" : "R", e, h->b->name,
                       nl->v[se].y, (is_left ? ly : ry),
-                      p.n, p.dy[p.n - 1], base, Y[e][0], Y[e][3],
-                      Y[e][0] - nl->v[se].y);
+                      p.n, p.dy[p.n - 1], base, floor_y, sink,
+                      Y[e][0], Y[e][3], Y[e][0] - nl->v[se].y);
     }
 
     /* Apron quads, same ring order as the skirt (near-in, near-out, far-out,
@@ -4785,8 +4953,17 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
          * for the same reason the skirt does. */
         double t0 = TD5_TG_RIDGE_BASE + tg_terrain_hill_y(X[0][3], Z[0][3], 3600.0);
         double t1 = TD5_TG_RIDGE_BASE + tg_terrain_hill_y(X[1][3], Z[1][3], 3600.0);
-        if (t0 < 1200.0) t0 = 1200.0;
-        if (t1 < 1200.0) t1 = 1200.0;
+        if (t0 < TD5_TG_RIDGE_MIN_UP) t0 = TD5_TG_RIDGE_MIN_UP;
+        if (t1 < TD5_TG_RIDGE_MIN_UP) t1 = TD5_TG_RIDGE_MIN_UP;
+        /* The wall's height is measured from its own base, and that base is now
+         * on the global floor rather than under the emitting span. On a stretch
+         * of road high above the floor a purely relative crest therefore falls
+         * BELOW the horizon and the skyline opens up. Require it to clear the
+         * road it is seen from instead, which is what a ridge does. */
+        if (Y[0][3] + t0 < B[0] + TD5_TG_RIDGE_MIN_UP)
+            t0 = B[0] + TD5_TG_RIDGE_MIN_UP - Y[0][3];
+        if (Y[1][3] + t1 < B[1] + TD5_TG_RIDGE_MIN_UP)
+            t1 = B[1] + TD5_TG_RIDGE_MIN_UP - Y[1][3];
         /* near-bottom, far-bottom, far-top, near-top; v = 1 at the base, so the
          * page's top rows (v = 0) land on the crest. */
         px[n]=X[0][3]; py[n]=Y[0][3];      pz[n]=Z[0][3]; uu[n]=U[0]; vv[n]=1.0; n++;
