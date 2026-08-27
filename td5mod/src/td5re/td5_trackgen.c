@@ -29,6 +29,7 @@
 #include "td5_platform.h"
 #include "td5_config.h"
 #include "td5_tg_real_tex.h"   /* real TD5 texture pages (level014), opt-in */
+#include "td5_tg_real_tex_city.h"  /* extra city facades: SF/Tokyo/Moscow */
 #include "td5re.h"
 
 #include <stdio.h>
@@ -94,13 +95,23 @@ static int tg_road_page(int si);
 #define TD5_TG_PAGE_GROUND 5
 /* Facade variety: each RUN picks one of N wall pages so a street is not one
  * repeated building. Variant 0 is TD5_TG_PAGE_WALL; variants 1..N-1 live at
- * consecutive pages after GROUND. */
-#define TD5_TG_WALL_VARIANTS   5
+ * consecutive pages after GROUND.
+ *
+ * In real-texture mode the variants come from FOUR shipped city tracks, not one:
+ * 0..4 are level014 (Sydney), 5..8 are masonry frontage from San Francisco and
+ * Moscow, and 9..11 are Tokyo office curtain wall. The last group is the TOWER
+ * class -- tg_facade_page hands it to runs tall enough to be a tower, so a
+ * downtown block is glass high-rise while the street around it stays masonry.
+ * With real textures off every variant is a procedural wall seeded by its index,
+ * so the split costs nothing there. */
+#define TD5_TG_WALL_VARIANTS    12
+#define TD5_TG_WALL_TOWER_FIRST  9
 #define TD5_TG_PAGE_WALL_EXTRA 6
 /* Storefronts: the GROUND floor of a facade uses a shop page (glass/signage),
  * upper floors the wall page -- shops at street level, tower above, as the
- * shipped city does. Store variants live right after the wall variants. */
-#define TD5_TG_STORE_VARIANTS  3
+ * shipped city does. Store variants live right after the wall variants: 0..2
+ * from level014, 3..5 from San Francisco and Tokyo. */
+#define TD5_TG_STORE_VARIANTS  6
 #define TD5_TG_PAGE_STORE  (TD5_TG_PAGE_WALL_EXTRA + TD5_TG_WALL_VARIANTS - 1)
 /* Thematic trees: a set of distinct tree/palm/conifer/topiary pages so each
  * biome mixes several species. Variant 0 reuses TD5_TG_PAGE_TREE; 1..N-1 live
@@ -2363,11 +2374,28 @@ static void tg_facade_push_quad(const double *xyz,
 /* Which facade page a RUN uses -- keyed to the run hash so a whole building is
  * one texture but neighbouring buildings differ, the way a real street mixes
  * stone/glass/brick frontages. Variant 0 is the base WALL page; 1..N-1 are the
- * extra pages appended after GROUND. */
+ * extra pages appended after GROUND.
+ *
+ * `rows` splits the palette by BUILDING CLASS, not at random: a run tall enough
+ * to be a tower draws from the TOWER variants (office curtain wall) and anything
+ * shorter from the low-rise masonry ones. Handing a 10-storey block a two-storey
+ * shopfront texture is what makes a procedural city read as a texture soup
+ * rather than a place. */
+static int tg_facade_page_class(unsigned int gh, int rows)
+{
+    unsigned int lo = 0, hi = (unsigned)TD5_TG_WALL_TOWER_FIRST, v;
+    if (rows >= TD5_TG_FACADE_TALL_ROWS) {
+        lo = (unsigned)TD5_TG_WALL_TOWER_FIRST;
+        hi = (unsigned)TD5_TG_WALL_VARIANTS;
+    }
+    v = lo + (gh >> 17) % (hi - lo);
+    return v == 0 ? TD5_TG_PAGE_WALL : (TD5_TG_PAGE_WALL_EXTRA + (int)v - 1);
+}
+
+/* Low-rise pick, for callers with no height of their own (the back rows). */
 static int tg_facade_page(unsigned int gh)
 {
-    unsigned int v = (gh >> 17) % (unsigned)TD5_TG_WALL_VARIANTS;
-    return v == 0 ? TD5_TG_PAGE_WALL : (TD5_TG_PAGE_WALL_EXTRA + (int)v - 1);
+    return tg_facade_page_class(gh, 0);
 }
 
 /* Which shop page a run's ground floor uses -- a different hash bit than the
@@ -2905,7 +2933,7 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
     unsigned int block_gh = tg_facade_run_id(si, 0);
     const double cap_thick = tg_facade_cap_thick(b);
     const int cap_cols = tg_facade_cap_cols(b);
-    int n = 0, n_store, s, nseg, seg_page[2], seg_nq[2];
+    int n = 0, n_store, s, nseg, seg_page[2], seg_nq[2], wall_rows;
 
     if (si + 1 >= nl->count) return 1;    /* need the far endpoint to abut */
     tg_side_geom(nl, si, 0, b, &sd[0]);
@@ -2991,13 +3019,19 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
     /* Pages keyed to the PERIOD-block (a run lives inside one block) so a whole
      * building keeps one shop + one wall page and neighbours differ. Ground
      * quads [0,n_store) sample the shop page, the rest the wall page. */
+    /* Page CLASS follows the taller of the two sides -- they share one mesh, so
+     * they share one wall page, and a tower opposite a shop row should read as
+     * the tower it is. */
+    wall_rows = sd[0].built ? sd[0].rows : 0;
+    if (sd[1].built && sd[1].rows > wall_rows) wall_rows = sd[1].rows;
     if (n_store > 0 && n_store < n) {
         seg_page[0] = tg_store_page(block_gh);  seg_nq[0] = n_store / 4;
-        seg_page[1] = tg_facade_page(block_gh); seg_nq[1] = (n - n_store) / 4;
+        seg_page[1] = tg_facade_page_class(block_gh, wall_rows);
+        seg_nq[1] = (n - n_store) / 4;
         nseg = 2;
     } else {
         seg_page[0] = (n_store >= n) ? tg_store_page(block_gh)
-                                     : tg_facade_page(block_gh);
+                                     : tg_facade_page_class(block_gh, wall_rows);
         seg_nq[0] = n / 4;
         nseg = 1;
     }
@@ -4655,7 +4689,7 @@ static int tg_city_emit_backrows(const TG_FBHook *h, double sw)
                                 cols, rows, 0, rows, px, py, pz, uu, vv, &n);
             if (n <= 0) continue;
             if (*h->nmesh >= h->maxmesh) return 1;
-            page   = tg_facade_page(rh);
+            page   = tg_facade_page_class(rh, rows);
             seg_nq = n / 4;
             h->moff[(*h->nmesh)++] = h->blk->len;
             if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
@@ -6496,15 +6530,41 @@ static int tg_emit_textures(TG_Buf *out)
     tg_emit_texture_page_asphalt(&pages[TD5_TG_PAGE_ROAD]);
     tg_emit_texture_page_ground(&pages[TD5_TG_PAGE_GROUND]);
     if (tg_real_textures_enabled()) {
-        int v;
+        int v, w;
         tg_emit_real_page(&pages[TD5_TG_PAGE_WALL],
                           k_real_wall_pal[0], k_real_wall_paln[0], k_real_wall_idx[0], 0);
         for (v = 1; v < k_real_wall_count && v < TD5_TG_WALL_VARIANTS; v++)
             tg_emit_real_page(&pages[TD5_TG_PAGE_WALL_EXTRA + v - 1],
                               k_real_wall_pal[v], k_real_wall_paln[v], k_real_wall_idx[v], 0);
+        /* Variants from the OTHER city tracks, laid down after the level014
+         * ones: low-rise masonry, then the tower class at WALL_TOWER_FIRST.
+         * Each loop stops at the smaller of its source count and the slots it
+         * owns, so adding a page to either header cannot walk into the next
+         * group's pages. */
+        for (v = 0; v < k_real_city_low_count; v++) {
+            w = k_real_wall_count + v;
+            if (w >= TD5_TG_WALL_TOWER_FIRST) break;
+            tg_emit_real_page(&pages[TD5_TG_PAGE_WALL_EXTRA + w - 1],
+                              k_real_city_low_pal[v], k_real_city_low_paln[v],
+                              k_real_city_low_idx[v], 0);
+        }
+        for (v = 0; v < k_real_city_tower_count; v++) {
+            w = TD5_TG_WALL_TOWER_FIRST + v;
+            if (w >= TD5_TG_WALL_VARIANTS) break;
+            tg_emit_real_page(&pages[TD5_TG_PAGE_WALL_EXTRA + w - 1],
+                              k_real_city_tower_pal[v], k_real_city_tower_paln[v],
+                              k_real_city_tower_idx[v], 0);
+        }
         for (v = 0; v < k_real_store_count && v < TD5_TG_STORE_VARIANTS; v++)
             tg_emit_real_page(&pages[TD5_TG_PAGE_STORE + v],
                               k_real_store_pal[v], k_real_store_paln[v], k_real_store_idx[v], 0);
+        for (v = 0; v < k_real_city_store_count; v++) {
+            w = k_real_store_count + v;
+            if (w >= TD5_TG_STORE_VARIANTS) break;
+            tg_emit_real_page(&pages[TD5_TG_PAGE_STORE + w],
+                              k_real_city_store_pal[v], k_real_city_store_paln[v],
+                              k_real_city_store_idx[v], 0);
+        }
         tg_emit_real_page(&pages[TD5_TG_PAGE_GREEN],
                           k_real_green_pal, k_real_green_paln, k_real_green_idx, 0);
         /* Thematic trees: alpha-keyed (type 1), index 0 transparent. */
