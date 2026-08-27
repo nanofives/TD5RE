@@ -199,6 +199,11 @@ static int tg_fork_of_corridor(int si, int *k);
  * gantry) out of a tunnel run, and the tunnel test is defined with the tunnel
  * emitters much further down. */
 static int tg_span_in_tunnel(int si);
+/* Per-biome bridge/tunnel weighting. The two run gates sit up here (the strip
+ * pass needs them) but the biome table is defined with the biome block much
+ * further down, so the accessors are forward-declared the same way. */
+static int tg_biome_bridge_pct(int si);
+static int tg_biome_tunnel_pct(int si);
 
 /* Seed of the last successful build, for reproducing a good random track. */
 static unsigned int s_last_seed = 0;
@@ -250,7 +255,7 @@ typedef enum {
     TG_ACCT_FENCE,          /* roadside fence / railing (not a guardrail) */
     TG_ACCT_LAMP,           /* street lamp (post + head + glow) */
     TG_ACCT_CROSSING,       /* pedestrian crossing / side-street mouth */
-    TG_ACCT_TREE,           /* tree billboard */
+    TG_ACCT_TREE,           /* tree billboard, or a tree-line band quad */
     TG_ACCT_PROP,           /* people / statues / animals / misc furniture */
     TG_ACCT_WATER,          /* sea / river plane */
     TG_ACCT_BRIDGE,         /* bridge deck / pier piece */
@@ -916,11 +921,18 @@ static int tg_bridges_enabled(void)
  * without passing anything around. */
 static int tg_span_in_bridge_run(int si)
 {
-    unsigned int h;
+    unsigned int h, thresh;
     if (!tg_bridges_enabled()) return 0;
     if (si <= TD5_TG_GRID_SPAN + 40) return 0;   /* not right off the grid */
     h = (unsigned)(si / TD5_TG_BRIDGE_RUN) * 2654435761u;
-    return ((h >> 29) == 0);                     /* ~1 run in 8 */
+    /* Base rate ~1 run in 8, scaled by the biome's weighting (feedback: "if it
+     * is a countryside there should be more bridges"). 125/1000 IS that 1-in-8,
+     * so a biome at 100 keeps exactly the old rate; FIELDS at 190 gets ~24%,
+     * CITY at 40 gets 5%. Keyed on the run, not the span, so a run never
+     * half-exists. */
+    thresh = (125u * (unsigned)tg_biome_bridge_pct(si)) / 100u;
+    if (thresh > 1000u) thresh = 1000u;
+    return ((h >> 8) % 1000u) < thresh;
 }
 
 /* Lowest road node on the WHOLE track, cached.
@@ -2356,6 +2368,9 @@ static int tg_emit_road_quad_taper(const TG_NodeList *nl, int si, int lanes,
         tg_put_f32(blk, 0.0);        /* proj_u/proj_v: runtime */
         tg_put_f32(blk, 0.0);
     }
+    /* Every drivable quad lands here -- the plain road, the fork half-road and
+     * the branch corridor all route through this one writer. */
+    tg_acct(TG_ACCT_ROAD, si);
     return !blk->oom;
 }
 
@@ -2948,47 +2963,30 @@ static int tg_tree_page_is_half(int page)
  * Group E owns the fork data; this only READS it. */
 #define TD5_TG_FLORA_BRANCH_MARGIN  600.0   /* verge left between road and trunk */
 
-/* Outward reach of any branch carriageway alongside main-ring span si, in world
- * units from the centerline, on the -ve lateral. 0 when no fork covers si.
- * The corridor at step k is centred on tg_branch_shift(k) and is width*0.5
- * wide, so its outer edge sits at |shift| + width*0.25. Both endpoints of the
- * span are measured because the bow grows across it. */
-static double tg_flora_branch_reach(const TG_NodeList *nl, int si)
-{
-    double reach = 0.0;
-    int i;
-
-    if (!tg_branches_enabled()) return 0.0;
-    if (si + 1 >= nl->count) return 0.0;
-    for (i = 0; i < s_fork_count; i++) {
-        const int F = s_forks[i].F, L = s_forks[i].len;
-        const int k = si - F - 1;
-        double a, b;
-        if (si <= F || si > F + L) continue;
-        a = -tg_branch_shift(k, L, nl->v[si].width) + nl->v[si].width * 0.25;
-        b = -tg_branch_shift(k + 1, L, nl->v[si + 1].width)
-            + nl->v[si + 1].width * 0.25;
-        if (a > reach) reach = a;
-        if (b > reach) reach = b;
-    }
-    return reach;
-}
-
 /* Push a verge setback (`gap`, measured from the road EDGE) out far enough that
  * nothing standing on it overlaps a branch carriageway. Returns `gap` unchanged
- * on the +ve lateral, which no corridor bows into. */
+ * on the +ve lateral, which no corridor bows into.
+ *
+ * This used to carry its own tg_flora_branch_reach, one of the two hand-rolled
+ * copies of the fork arithmetic the CARRIAGEWAY QUERY section was written to
+ * retire. That copy assumed the corridor was a FIXED half carriageway
+ * (width*0.25 out from its centre), which stopped being true once the corridor
+ * learned to widen and taper, so it UNDER-REPORTED on a widened branch and
+ * trees kept landing on it. Retired onto tg_carriageway_clear_gap at the
+ * round-2 merge (2026-08-27).
+ *
+ * Off a fork the authority's reach floors at the main road's half width, so
+ * `need` is just the margin -- 600, well under the 800 minimum tree setback and
+ * the 11000 treeline setback, i.e. no change to placement away from a fork. */
 static double tg_flora_gap_clear(const TG_NodeList *nl, int si, double side,
                                  double gap)
 {
-    double need;
-
     if (side > 0.0) return gap;
     /* Default ON (2026-08-26); TD5RE_AUTOTRACK_FLORA_CLEAR=0 restores the old
      * placement, i.e. trees standing on the branch. */
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_FLORA_CLEAR")) return gap;
-    need = tg_flora_branch_reach(nl, si) - nl->v[si].width * 0.5
-           + TD5_TG_FLORA_BRANCH_MARGIN;
-    return (gap < need) ? need : gap;
+    return tg_carriageway_clear_gap(nl, si, side, gap,
+                                    TD5_TG_FLORA_BRANCH_MARGIN);
 }
 
 /* ===================== PROPS =====================
@@ -3743,6 +3741,11 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
         seg_nq[0] = n / 4;
         nseg = 1;
     }
+    /* One mesh, but up to one frontage per side, and a ground-floor storefront
+     * command only when the run actually got one. */
+    tg_acct_n(TG_ACCT_BUILDING, si,
+              (sd[0].built ? 1 : 0) + (sd[1].built ? 1 : 0));
+    if (n_store > 0) tg_acct(TG_ACCT_SHOPFRONT, si);
     return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, seg_page, seg_nq, nseg);
 }
 
@@ -3793,6 +3796,7 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
     cx = n->x + lx * (n->width * 0.5 + gap + tw * 0.5);
     cz = n->z + lz * (n->width * 0.5 + gap + tw * 0.5);
 
+    tg_acct(TG_ACCT_TREE, si);
     return tg_emit_billboard_mesh(blk, cx, n->y, cz, tw * 0.5, th,
                                   tg_tree_slot(tv), 1);
 }
@@ -3822,7 +3826,14 @@ static int tg_prop_one(const TG_NodeList *nl, int si, int pp, double side,
                                 (double)P->w * 0.5, (double)P->h,
                                 tg_prop_slot(pp), P->tag))
         return 0;
-    if (m->len > b0) (*pn)++;
+    /* PP_LAMP is the streetlamp GLOW, emitted through this same helper by the
+     * lamp fixture (and by the props layer when the biome puts glows there).
+     * It is accounted as a LAMP at the fixture, so keep it out of the prop
+     * bucket or every lamp shows up twice under two different kinds. */
+    if (m->len > b0) {
+        (*pn)++;
+        if (pp != PP_LAMP) tg_acct(TG_ACCT_PROP, si);
+    }
     return 1;
 }
 
@@ -4002,6 +4013,7 @@ static int tg_emit_water(const TG_NodeList *nl, int si, double side,
     if (!tg_write_quad_mesh(m, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1))
         return 0;
     (*pn)++;
+    tg_acct_range(TG_ACCT_WATER, si, si + 1);   /* sea or river plane */
     return 1;
 }
 
@@ -4023,10 +4035,16 @@ static int tg_span_in_tunnel(int si)
      * so there is no MOUTH and the near end may read as a wall.
      * Enable with TD5RE_AUTOTRACK_TUNNELS=1 to work on them. */
     /* Default ON (2026-08-26); set TD5RE_AUTOTRACK_TUNNELS=0 to disable. */
+    unsigned int thresh;
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_TUNNELS")) return 0;
     if (si <= TD5_TG_GRID_SPAN + 40) return 0;      /* not right off the grid */
     h = (unsigned)(si / TD5_TG_TUNNEL_RUN) * 2246822519u;
-    return ((h >> 29) == 0);                        /* ~1 run in 8 */
+    /* Same shape as the bridge gate: 125/1000 is the old ~1-in-8, scaled by the
+     * biome weight, so ALPINE at 230 bores ~29% of runs and FIELDS at 10 gets
+     * ~1% ("mountains = tunnels"). */
+    thresh = (125u * (unsigned)tg_biome_tunnel_pct(si)) / 100u;
+    if (thresh > 1000u) thresh = 1000u;
+    return ((h >> 8) % 1000u) < thresh;
 }
 
 /* Clear interior height of the bore, and the thickness of wall/roof slabs.
@@ -4139,6 +4157,7 @@ static int tg_emit_tunnel(const TG_NodeList *nl, int si, TG_Buf *blk,
                               TD5_TG_PAGE_TUNNEL, 3000.0, dim))
             return 0;
         (*added)++;
+        tg_acct(TG_ACCT_TUNNEL, si);
     }
 
     /* Portal frame at a run END: a lit lintel across the mouth, above the road,
@@ -4150,6 +4169,7 @@ static int tg_emit_tunnel(const TG_NodeList *nl, int si, TG_Buf *blk,
                               0xFFFFFFFFu))
             return 0;
         (*added)++;
+        tg_acct(TG_ACCT_TUNNEL, si);
     }
     return 1;
 }
@@ -4368,6 +4388,7 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
                               n->tx, n->tz, TD5_TG_PAGE_RAIL, 3000.0, 0xFFFFFFFFu))
             return 0;
         (*added)++;
+        tg_acct(TG_ACCT_BRIDGE, si);
     }
 
     if (tg_bridge_struct_enabled()) {
@@ -4380,6 +4401,7 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
                               n->tx, n->tz, pier_page, 3000.0, 0xFFD8D8D8u))
             return 0;
         (*added)++;
+        tg_acct(TG_ACCT_BRIDGE, si);
     }
 
     /* Piers every 4th span, dropping from the deck underside to the river bed.
@@ -4415,6 +4437,7 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
                                       pier_page, 3000.0, 0xFFFFFFFFu))
                     return 0;
                 (*added)++;
+                tg_acct(TG_ACCT_BRIDGE, si);
             }
             /* Brace across the legs, a third of the way down the pier. */
             if (!tg_emit_box_mesh(blk, n->x, top - h * 0.55, n->z,
@@ -4423,6 +4446,7 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
                                   0xFFFFFFFFu))
                 return 0;
             (*added)++;
+            tg_acct(TG_ACCT_BRIDGE, si);
         } else {
             if (!tg_emit_box_mesh(blk, n->x, cy, n->z,
                                   450.0, h, 450.0,
@@ -4430,6 +4454,7 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
                                   0xFFFFFFFFu))
                 return 0;
             (*added)++;
+            tg_acct(TG_ACCT_BRIDGE, si);
         }
     }
 
@@ -4449,6 +4474,7 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
                                   pier_page, 3000.0, 0xFFFFFFFFu))
                 return 0;
             (*added)++;
+            tg_acct(TG_ACCT_BRIDGE, si);
         }
         /* Cross-member near the top of the towers, closing the gateway. */
         if (!tg_emit_box_mesh(blk, n->x, n->y + th * 1.7, n->z,
@@ -4457,6 +4483,7 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
                               0xFFFFFFFFu))
             return 0;
         (*added)++;
+        tg_acct(TG_ACCT_BRIDGE, si);
     }
     return 1;
 }
@@ -4496,6 +4523,7 @@ static int tg_emit_bridge_water(const TG_NodeList *nl, int si,
     if (!tg_write_quad_mesh(m, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1))
         return 0;
     (*pn)++;
+    tg_acct_range(TG_ACCT_WATER, si, si + 1);   /* river under a bridge run */
     return 1;
 }
 
@@ -4579,26 +4607,29 @@ static int tg_ground_page_for_span(int si, const TG_Biome *b)
  * the carriageway uncovered; the gore mesh already fills the wedge inboard of
  * it, so nothing shows through. Returns 0 where no fork is active.
  *
- * Deliberately reads s_forks directly rather than calling tg_fork_of_main: that
- * helper is defined further down the file and moving shared code around during
- * a parallel batch costs more than four lines of duplication. */
+ * This was the second hand-rolled copy of the fork arithmetic (the note in the
+ * CARRIAGEWAY QUERY section named it). It read s_forks directly and assumed a
+ * FIXED half carriageway (w*0.25 out from the corridor centre), so once the
+ * corridor could widen and taper it UNDER-REPORTED and the skirt went back over
+ * the branch. Retired onto tg_carriageway_reach at the round-2 merge
+ * (2026-08-27).
+ *
+ * The 0-off-a-fork return is DELIBERATE and is why this does not just call
+ * tg_carriageway_clear_gap with a 200 margin: the skirt's inner point sits
+ * flush with the asphalt on an ordinary span on purpose (see tg_ground_side --
+ * setting it back left a thin void between road and grass). The margin is only
+ * wanted where there is actually a carriageway to clear, so the excess over the
+ * main road's own half width is what gets tested. */
 static double tg_ground_branch_clear(const TG_NodeList *nl, int si)
 {
-    int i;
+    double over;
 
     if (!tg_branches_enabled()) return 0.0;
-    for (i = 0; i < s_fork_count; i++) {
-        const int F = s_forks[i].F, L = s_forks[i].len;
-        if (si > F && si <= F + L) {
-            const double w = nl->v[si].width;
-            /* Branch centre is NEGATIVE (right of travel); its outer edge is a
-             * further quarter width right, and the skirt starts at width/2. */
-            double edge  = -tg_branch_shift(si - F - 1, L, w) + w * 0.25;
-            double clear = edge - w * 0.5 + 200.0;   /* + margin, no shared edge */
-            return clear > 0.0 ? clear : 0.0;
-        }
-    }
-    return 0.0;
+    /* How far the outermost carriageway reaches PAST the main road edge. Zero
+     * on any span no corridor bows across, since reach floors at the half width. */
+    over = tg_carriageway_reach(nl, si, -1.0) - tg_road_half_width(nl, si);
+    if (over <= 0.0) return 0.0;
+    return over + 200.0;                 /* + margin, no shared edge */
 }
 
 /* One side's terrain CROSS-SECTION at span si: a chain of (distance from the
@@ -4726,6 +4757,7 @@ static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
     }
 
     seg_nq = n / 4;
+    tg_acct(TG_ACCT_TERRAIN, si);      /* one slab covering both verges */
     return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
 }
 
@@ -5126,6 +5158,9 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk)
         tg_put_f32(blk, uu[i]); tg_put_f32(blk, vv[i]);
         tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
     }
+    /* One mesh, but one rail per side and the right side can be skipped over a
+     * fork, so count RAILS: each pushes 3 quads = 12 verts. */
+    tg_acct_n(TG_ACCT_GUARDRAIL, si, n / 12);
     return !blk->oom;
 }
 
@@ -5275,6 +5310,7 @@ static int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
     if (n <= 0) return 1;
     if (*h->nmesh >= h->maxmesh) return 1;
     seg_nq = n / 4;
+    tg_acct_n(TG_ACCT_SIDEWALK, h->si, n / 8);   /* slab + kerb per side */
     h->moff[(*h->nmesh)++] = h->blk->len;
     return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
                               &seg_page, &seg_nq, 1);
@@ -5318,6 +5354,7 @@ static int tg_city_emit_verge_band(const TG_FBHook *h, double bw)
     if (n <= 0) return 1;
     if (*h->nmesh >= h->maxmesh) return 1;
     seg_nq = n / 4;
+    tg_acct_n(TG_ACCT_SIDEWALK, h->si, n / 4);   /* out-of-town verge band */
     h->moff[(*h->nmesh)++] = h->blk->len;
     return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
                               &seg_page, &seg_nq, 1);
@@ -5377,6 +5414,7 @@ static int tg_city_emit_fence(const TG_FBHook *h, double sw)
     if (n <= 0) return 1;
     if (*h->nmesh >= h->maxmesh) return 1;
     seg_nq = n / 4;
+    tg_acct_n(TG_ACCT_FENCE, h->si, n / 4);      /* one railing per side */
     h->moff[(*h->nmesh)++] = h->blk->len;
     return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
                               &seg_page, &seg_nq, 1);
@@ -5431,6 +5469,7 @@ static int tg_city_emit_crossing(const TG_FBHook *h)
     px[n]=r1x; py[n]=r1y+TD5_TG_CROSS_LIFT; pz[n]=r1z; uu[n]=0.0; vv[n]=1.0; n++;
 
     if (*h->nmesh >= h->maxmesh) return 1;
+    tg_acct(TG_ACCT_CROSSING, h->si);
     h->moff[(*h->nmesh)++] = h->blk->len;
     return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
                               &seg_page, &seg_nq, 1);
@@ -5506,6 +5545,7 @@ static int tg_city_emit_lamp(const TG_FBHook *h, double sw)
         if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, 4,
                                 &seg_page, &seg_nq, 1))
             return 0;
+        tg_acct(TG_ACCT_LAMP, h->si);
         /* GLOW at the lantern: tg_prop_one places PP_LAMP at y + its own y_off
          * (2500 == TD5_TG_LAMP_H) and measures `gap` from the road edge, so the
          * arm's reach comes off the stand to land the glow on the head. */
@@ -5587,6 +5627,7 @@ static int tg_city_emit_backrows(const TG_FBHook *h, double sw)
             if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
                                     &page, &seg_nq, 1))
                 return 0;
+            tg_acct(TG_ACCT_BUILDING, h->si);
         }
     }
     return 1;
@@ -5649,6 +5690,7 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
     if (n <= 0) return 1;
     if (*h->nmesh >= h->maxmesh) return 1;
     seg_nq = n / 4;
+    tg_acct_n(TG_ACCT_CROSSING, h->si, n / 4);   /* side-street mouths */
     h->moff[(*h->nmesh)++] = h->blk->len;
     return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
                               &seg_page, &seg_nq, 1);
@@ -5789,6 +5831,7 @@ static int tg_emit_fb_flora(const TG_FBHook *h)
         if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, 4,
                                 &seg_page, &seg_nq, 1)) return 0;
         (*h->nmesh)++;
+        tg_acct(TG_ACCT_TREE, si);   /* tree-line band, one per side */
     }
     return 1;
 }
@@ -6158,6 +6201,8 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
     if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, seg_page, seg_nq, nseg))
         return 0;
     (*h->nmesh)++;
+    /* One band covers the whole far-group, not just its owner span. */
+    tg_acct_range(TG_ACCT_FARBAND, g0, g1);
     return 1;
 }
 
@@ -6351,6 +6396,7 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish
         seg_nq[2]   = 2;
     }
 
+    tg_acct(TG_ACCT_BANNER, si);
     return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, seg_page, seg_nq, 3);
 }
 
