@@ -528,21 +528,71 @@ static double tg_acute_heading_limit(void)
 }
 
 /* Derived adjacent-skip window (see the self-intersection guard note): the
- * smallest N such that N spans of guaranteed forward progress exceed the
- * widest possible too-close "need", so any two nodes >= N apart provably
- * cannot overlap. limit_max is the largest heading budget any section may use,
- * so cos(limit_max) is the GLOBAL minimum forward progress per span. */
+ * smallest N such that two nodes N spans apart along the road provably cannot
+ * be within tg_too_close's "need" distance of each other.
+ *
+ * ROOT CAUSE of "geometry can overlap on acute curves" (2026-08-27). This used
+ * to derive N from the AXIS advance -- dmin = span_len * cos(limit_max), the
+ * guaranteed progress along TD5_TG_AXIS_HEADING. That is the right quantity for
+ * the NON-TRAPPING proof and the wrong one for SEPARATION, because cos(88 deg)
+ * is 0.035: at the default acute budget it produced N = 351. Every pair of
+ * nodes less than 351 spans apart was therefore EXEMPT from the overlap test,
+ * and an acute section is only 4..12 spans long -- a run of them can double the
+ * road back alongside itself well inside that window with nothing checking it.
+ * The road then interpenetrates, which is exactly the reported symptom (and the
+ * span walker snaps to the wrong span there, the same failure the guard exists
+ * to prevent).
+ *
+ * Separation does not come from the heading budget at all. It comes from the
+ * CURVATURE SAFETY floor: every turning span is clamped to
+ * radius >= (width/2) * curve_safety, so the WORST case for two nodes n spans
+ * apart is a single arc at exactly that radius, where their separation is the
+ * chord c(n) = 2r * sin(n * span_len / (2r)). Anything less curved -- a
+ * straight, a sweeping curve, an S, a hairpin made of two arcs -- puts them
+ * further apart, not closer. So N is the smallest n with c(n) >= need_max:
+ *
+ *     n >= (2r / span_len) * asin(need_max / (2r)),   2r = curve_safety * w_max
+ *
+ * At 12 lanes and curve_safety 1.8 that is ~13 spans rather than 351, so the
+ * 13..351 band -- where the real overlaps live -- is now CHECKED instead of
+ * assumed away. 2r > need_max holds for any road at least one lane wide, so the
+ * asin argument stays in range; the degenerate branch below covers the rest.
+ *
+ * Knobs: TD5RE_AUTOTRACK_ADJ_SKIP (0 = derive, else force a window) and
+ * TD5RE_AUTOTRACK_SKIP_AXIS=1 (restore the old axis-derived window), both for
+ * bisecting a track that comes out shorter than wanted -- a tighter window
+ * rejects more sections, so the walk falls back to straights more often. */
 static int tg_adjacent_skip(const TD5_TrackGenSpec *spec, double limit_max)
 {
-    double span_len   = (double)spec->span_length;
-    double lane_width = (double)spec->lane_width;
-    double w_max      = (double)TD5_TG_MAX_LANES * lane_width;
+    const double span_len   = (double)spec->span_length;
+    const double lane_width = (double)spec->lane_width;
+    const double w_max      = (double)TD5_TG_MAX_LANES * lane_width;
     /* Worst-case need in tg_too_close: both roads at the max width. */
-    double need_max   = w_max + lane_width * 0.25;
-    double dmin       = span_len * cos(limit_max);   /* min forward progress/span */
+    const double need_max   = w_max + lane_width * 0.25;
+    const double safety     = (spec->curve_safety_x100 > 0)
+                            ? (double)spec->curve_safety_x100 / 100.0
+                            : TD5_TG_CURVE_SAFETY;
+    const double two_r      = safety * w_max;    /* 2x the tightest legal radius */
+    const int    forced     = td5_env_int("TD5RE_AUTOTRACK_ADJ_SKIP", 0, 0, 4000);
+    const double step       = (span_len > 1.0) ? span_len : 1.0;
     int skip;
-    if (dmin < 1.0) dmin = 1.0;                       /* guard against cos -> 0 */
-    skip = (int)ceil(need_max / dmin);
+
+    if (forced > 0) return forced;
+
+    if (td5_env_flag_off("TD5RE_AUTOTRACK_SKIP_AXIS")) {
+        double dmin = span_len * cos(limit_max);
+        if (dmin < 1.0) dmin = 1.0;              /* guard against cos -> 0 */
+        skip = (int)ceil(need_max / dmin);
+    } else if (two_r > need_max) {
+        /* +2 spans of margin: the width RAMPS across a dual-lane taper, so the
+         * two nodes need not carry the same width and the closed form above is
+         * a bound rather than an identity. */
+        skip = (int)ceil((two_r / step) * asin(need_max / two_r)) + 2;
+    } else {
+        /* Degenerate spec (a road as wide as its own tightest turn): fall back
+         * to the straight-line bound, which is always safe. */
+        skip = (int)ceil(need_max / step) + 2;
+    }
     if (skip < 1) skip = 1;
     return skip;
 }
@@ -608,9 +658,15 @@ static int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
      * 87.999..., so %.0f printed "spine=79deg acute=87deg" -- which reads as
      * the knob having failed to apply, when the derived skip proves it did. */
     TD5_LOG_I(LOG_TAG, "trackgen: heading budget spine=%ddeg acute=%ddeg "
-              "-> adjacent_skip=%d",
+              "-> adjacent_skip=%d (curve-safety %d/100; the old heading-derived "
+              "window was %d)",
               (int)(TD5_TG_HEADING_LIMIT * 180.0 / TD5_TG_PI + 0.5),
-              (int)(acute_limit * 180.0 / TD5_TG_PI + 0.5), skip);
+              (int)(acute_limit * 180.0 / TD5_TG_PI + 0.5), skip,
+              spec->curve_safety_x100,
+              (int)ceil(((double)TD5_TG_MAX_LANES * spec->lane_width
+                         + spec->lane_width * 0.25)
+                        / (span_len * cos(limit_max) > 1.0
+                           ? span_len * cos(limit_max) : 1.0)));
 
     if (!tg_nodes_push(nl, x, z, width, spec->lanes)) return 0;
 
@@ -1336,36 +1392,171 @@ static int tg_branch_widen_enabled(void)
     return td5_env_flag_on("TD5RE_AUTOTRACK_BRANCH_WIDEN");
 }
 
-/* Extra lanes at corridor step k (0 at both ends). */
-static int tg_branch_lane_gain(int k, int len, int base_lanes)
+/* Extra lanes at corridor step k as a CONTINUOUS quantity, 0 at both ends.
+ *
+ * Split out from tg_branch_lane_gain (2026-08-27) because the two consumers
+ * want different things and conflating them is what produced the reported
+ * "sudden changes of lane widths on right track branches". The strip row needs
+ * an INTEGER point count -- a row has a whole number of points -- but the road
+ * WIDTH has no such constraint, and taking the width from the rounded lane
+ * count quantised it to 0.5 / 0.75 / 1.0 of the road: three discrete widths
+ * with a hard step at whichever span the rounding tipped over. */
+static double tg_branch_gain_f(int k, int len, int base_lanes)
 {
-    int gain_max, g;
+    int gain_max;
     double f;
-    if (!tg_branch_widen_enabled() || len < 4) return 0;
-    if (k <= 0 || k >= len - 1) return 0;
+    if (!tg_branch_widen_enabled() || len < 4) return 0.0;
+    if (k <= 0 || k >= len - 1) return 0.0;
     gain_max = td5_env_int("TD5RE_AUTOTRACK_BRANCH_GAIN", 2, 0, 4);
     /* Keep the widened corridor inside the lane range the rail LUTs, edge masks
      * and suspension paths are exercised in (see td5_trackgen_apply_config's
      * 2..4 clamp): never take the branch past 4 lanes. */
     if (base_lanes + gain_max > 4) gain_max = 4 - base_lanes;
-    if (gain_max <= 0) return 0;
-    /* Half sine over the INTERIOR of the corridor, so the first and last
-     * interior steps gain a fraction of a lane and round to 0 -- the widening
-     * grows in and out over several spans instead of stepping at k=1. */
+    if (gain_max <= 0) return 0.0;
+    /* Half sine over the INTERIOR of the corridor, so the widening grows in and
+     * out over several spans instead of stepping at k=1. */
     f = (double)(k - 1) / (double)(len - 3 > 0 ? len - 3 : 1);
-    g = (int)(sin(f * TD5_TG_PI) * (double)gain_max + 0.5);
+    return sin(f * TD5_TG_PI) * (double)gain_max;
+}
+
+/* Extra lanes at corridor step k (0 at both ends), rounded to a whole lane.
+ * SUBDIVISION ONLY: this is the row's point count, not its width. */
+static int tg_branch_lane_gain(int k, int len, int base_lanes)
+{
+    const double gf = tg_branch_gain_f(k, len, base_lanes);
+    int g = (int)(gf + 0.5);
     if (g < 0) g = 0;
-    if (g > gain_max) g = gain_max;
     return g;
 }
 
 /* Width scale of the branch carriageway at step k: 0.5 (the half road) plus a
- * quarter road per gained lane, so the extra lanes are the same width as the
- * road's own and the mesh matches the strip rows exactly. */
+ * quarter road per gained lane -- CONTINUOUS, so the widening is a taper the
+ * eye reads as a smooth opening-out rather than a step at a span boundary.
+ *
+ * SEMANTIC CHANGE 2026-08-27: this used to quantise through tg_branch_lane_gain
+ * and return one of {0.50, 0.75, 1.00}; it now returns any value in [0.5, 1.0].
+ * Signature and meaning ("multiply the road's full width by this to get the
+ * branch carriageway's width at step k") are unchanged, and the new value is
+ * never larger than the old one by more than half a lane, so a reader using it
+ * for CLEARANCE is still conservative. A reader that assumed the three discrete
+ * values would now disagree. */
 static double tg_branch_wscale(int k, int len, int base_lanes)
 {
-    const int g = tg_branch_lane_gain(k, len, base_lanes);
-    return 0.5 + 0.25 * (double)g;
+    return 0.5 + 0.25 * tg_branch_gain_f(k, len, base_lanes);
+}
+
+/* ===================== CARRIAGEWAY QUERY =====================
+ * THE authority on "is this ground drivable road?". One function the whole
+ * generator asks, instead of each work area re-deriving the fork geometry.
+ *
+ * ROOT CAUSE it exists for (feedback: "implement safeguards that avoid other
+ * geometry being rendered over the branches"). Flora, terrain skirts, facades,
+ * props and guardrails each grew their OWN copy of the branch arithmetic --
+ * tg_flora_branch_reach and tg_ground_branch_clear are two surviving examples.
+ * Every copy has to be updated in lockstep whenever the corridor changes shape,
+ * and they were not: both of those still assume the corridor is a FIXED half
+ * carriageway (width*0.25 out from its centre), which stopped being true the
+ * day the corridor learned to widen. Scenery sized against the old assumption
+ * then lands on the widened part of the branch. Route every clearance decision
+ * through here and that entire class of bug is one function deep.
+ *
+ * CONVENTIONS -- identical to the strip rows and tg_road_edge:
+ *   si       MAIN-RING span index. `nl` only has main-ring nodes; an appended
+ *            corridor span has none of its own, so ask about the main span the
+ *            corridor runs beside (tg_fork_of_corridor maps one to the other).
+ *   lateral  world units across the road, POSITIVE = LEFT of travel.
+ *   side     +1 = left of travel, -1 = right. No corridor ever bows left.
+ *   margin   extra clearance, world units. 0 asks the bare geometric question;
+ *            TD5_TG_CARRIAGEWAY_MARGIN is the house verge.
+ *
+ * COVERAGE: the full-width main road everywhere, plus -- over a fork -- the
+ * MAIN half carriageway, the bowed BRANCH half carriageway at its CURRENT
+ * (tapering) width, and the GORE wedge between them. Those three are contiguous
+ * in lateral by construction (the gore exists to fill the wedge), so one
+ * outward reach per side describes all of it: the test is a single compare, no
+ * sqrt, and the only loop is over the <= TD5_TG_BRANCH_MAX fork table.
+ *
+ * ADOPTION, one call. Something placed at an absolute lateral:
+ *     if (tg_on_carriageway(nl, si, lat, TD5_TG_CARRIAGEWAY_MARGIN)) return;
+ * Something placed at a setback measured from the MAIN ROAD EDGE (the usual
+ * case -- trees, kerbs, facades, terrain skirts):
+ *     gap = tg_carriageway_clear_gap(nl, si, side, gap,
+ *                                    TD5_TG_CARRIAGEWAY_MARGIN);
+ * Both are pure functions of (nl, s_forks), so a streaming range emitter can
+ * ask about any span in isolation.
+ */
+#define TD5_TG_CARRIAGEWAY_MARGIN 300.0   /* house verge between road and prop */
+
+/* Half the MAIN road's width at span si, taking the wider of the span's two
+ * ends so a width ramp never reports less road than the span actually has. */
+static double tg_road_half_width(const TG_NodeList *nl, int si)
+{
+    double w;
+    if (!nl || si < 0 || si >= nl->count) return 0.0;
+    w = nl->v[si].width;
+    if (si + 1 < nl->count && nl->v[si + 1].width > w) w = nl->v[si + 1].width;
+    return w * 0.5;
+}
+
+/* Outermost drivable lateral at span si on `side`, as a POSITIVE distance from
+ * the main centerline. Never less than the main road's own half width. */
+static double tg_carriageway_reach(const TG_NodeList *nl, int si, double side)
+{
+    double reach = tg_road_half_width(nl, si);
+    int i;
+
+    if (side >= 0.0) return reach;            /* no corridor bows LEFT */
+    if (!tg_branches_enabled()) return reach;
+    if (!nl || si < 0 || si + 1 >= nl->count) return reach;
+
+    for (i = 0; i < s_fork_count; i++) {
+        const int F = s_forks[i].F, L = s_forks[i].len;
+        const int lanes = nl->v[si].lanes;
+        const int br    = lanes - lanes / 2;   /* branch half, as tg_emit_strip */
+        int k, e;
+        /* One span of slack past each mouth: at the fork and the rejoin the
+         * corridor is still lined up with the road, but a caller asking about
+         * the mouth span itself must not see a narrower answer than its
+         * neighbour or scenery pops in for one span. */
+        if (si < F - 1 || si > F + L + 1) continue;
+        k = si - F - 1;
+        if (k < 0) k = 0;
+        if (k > L) k = L;
+        /* BOTH ends of the span: the bow and the widening grow across it, so
+         * the near end alone under-reports. */
+        for (e = 0; e <= 1; e++) {
+            const int    kk = (k + e > L) ? L : k + e;
+            const int    ni = (si + e < nl->count) ? si + e : si;
+            const double w  = nl->v[ni].width;
+            /* Branch centre is NEGATIVE (right of travel); its outer edge is a
+             * further half carriageway-width right of that. */
+            const double out = -tg_branch_shift(kk, L, w)
+                             + w * tg_branch_wscale(kk, L, br) * 0.5;
+            if (out > reach) reach = out;
+        }
+    }
+    return reach;
+}
+
+/* Is `lateral` on (or within `margin` of) any carriageway at span si? */
+static int tg_on_carriageway(const TG_NodeList *nl, int si, double lateral,
+                             double margin)
+{
+    const double side = (lateral >= 0.0) ? 1.0 : -1.0;
+    const double lat  = (lateral >= 0.0) ? lateral : -lateral;
+    return lat <= tg_carriageway_reach(nl, si, side) + margin;
+}
+
+/* Push a setback measured from the MAIN ROAD EDGE out far enough that nothing
+ * standing on it overlaps a carriageway. Returns `gap` unchanged where the road
+ * edge is already the outermost tarmac (which is every span on the +ve lateral,
+ * and every span off a fork). */
+static double tg_carriageway_clear_gap(const TG_NodeList *nl, int si,
+                                       double side, double gap, double margin)
+{
+    const double need = tg_carriageway_reach(nl, si, side)
+                      - tg_road_half_width(nl, si) + margin;
+    return (gap < need) ? need : gap;
 }
 
 /* ===================== [S1] RANGE EMITTER =====================
@@ -1657,18 +1848,26 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                     const int lnf = br_lanes + tg_branch_lane_gain(k + 1, L, br_lanes);
                     const double wf = tg_branch_wscale(k + 1, L, br_lanes);
                     int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
-                    /* A span's two rows must have the SAME point count (they are
+                    /* A span's two rows must have the same POINT COUNT (they are
                      * the two edges of one quad grid), so a span where the gain
-                     * steps up uses the WIDER of its two ends for both rows and
-                     * the widening lands on a span boundary. */
+                     * rounds up uses the finer subdivision for both rows.
+                     *
+                     * Their WIDTHS are independent, and giving both rows the
+                     * wider end's width -- which is what this did until
+                     * 2026-08-27 -- is what produced the reported "sudden
+                     * changes of lane widths on right track branches": the
+                     * corridor became a staircase of constant-width spans that
+                     * stepped wherever the rounding tipped over. Each row now
+                     * carries its OWN width, so consecutive spans meet at
+                     * identical outer points (the collision rails are row points
+                     * 0 and lanes_here) and the widening reads as a taper. */
                     const int lanes_here = (lnf > ln) ? lnf : ln;
-                    const double wsc     = (wf > wn) ? wf : wn;
                     int lvi = tg_append_row(&verts, &vtx_count, a, lanes_here,
-                                            a->width * wsc,
+                                            a->width * wn,
                                             tg_branch_shift(k, L, a->width),
                                             ox, oy, oz);
                     int rvi = tg_append_row(&verts, &vtx_count, b, lanes_here,
-                                            b->width * wsc,
+                                            b->width * wf,
                                             tg_branch_shift(k + 1, L, b->width),
                                             ox, oy, oz);
                     int type = (k == 0) ? 9 : ((k == L - 1) ? 10 : 1);
@@ -2009,12 +2208,19 @@ static void tg_road_edge(const TG_NodeList *nl, int si, double f, double shift,
     *rx = x - tz * (w * 0.5); *ry = y; *rz = z + tx * (w * 0.5);
 }
 
-/* One road mesh for span si, width scaled by wscale and laterally offset by
- * shift_near..shift_far across the span (1.0, 0, 0 = the plain full road).
- * Appended to blk. Returns 0 on OOM. */
-static int tg_emit_road_quad(const TG_NodeList *nl, int si, int lanes,
-                             double shift_near, double shift_far, double wscale,
-                             int page, TG_Buf *blk)
+/* One road mesh for span si, laterally offset by shift_near..shift_far AND
+ * width-scaled wscale_near..wscale_far across the span. Appended to blk.
+ *
+ * The width TAPERS across the span rather than being one number for the whole
+ * of it (2026-08-27): a branch corridor widens continuously (tg_branch_wscale),
+ * and a constant-per-span width turns that taper back into the staircase the
+ * strip rows no longer have -- the mesh would then disagree with the surface
+ * you collide with. tg_emit_road_quad below passes the same value twice, so the
+ * plain road and the fixed-width halves are unchanged. Returns 0 on OOM. */
+static int tg_emit_road_quad_taper(const TG_NodeList *nl, int si, int lanes,
+                                   double shift_near, double shift_far,
+                                   double wscale_near, double wscale_far,
+                                   int page, TG_Buf *blk)
 {
     double px[TD5_TG_ROAD_SUBDIV * 4], py[TD5_TG_ROAD_SUBDIV * 4];
     double pz[TD5_TG_ROAD_SUBDIV * 4], uu[TD5_TG_ROAD_SUBDIV * 4];
@@ -2029,8 +2235,10 @@ static int tg_emit_road_quad(const TG_NodeList *nl, int si, int lanes,
         double flx, fly, flz, frx, fry, frz;
         double s0v = shift_near + (shift_far - shift_near) * f0;
         double s1v = shift_near + (shift_far - shift_near) * f1;
-        tg_road_edge(nl, si, f0, s0v, wscale, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
-        tg_road_edge(nl, si, f1, s1v, wscale, &flx, &fly, &flz, &frx, &fry, &frz);
+        double w0v = wscale_near + (wscale_far - wscale_near) * f0;
+        double w1v = wscale_near + (wscale_far - wscale_near) * f1;
+        tg_road_edge(nl, si, f0, s0v, w0v, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
+        tg_road_edge(nl, si, f1, s1v, w1v, &flx, &fly, &flz, &frx, &fry, &frz);
         /* Quad loop: near-left, near-right, far-right, far-left. */
         px[n]=nlx; py[n]=nly; pz[n]=nlz; uu[n]=0.0;           vv[n]=si+f0; n++;
         px[n]=nrx; py[n]=nry; pz[n]=nrz; uu[n]=(double)lanes; vv[n]=si+f0; n++;
@@ -2087,6 +2295,16 @@ static int tg_emit_road_quad(const TG_NodeList *nl, int si, int lanes,
         tg_put_f32(blk, 0.0);
     }
     return !blk->oom;
+}
+
+/* Constant-width road mesh: the taper emitter with one width for both ends.
+ * Kept as its own name so every existing caller is untouched. */
+static int tg_emit_road_quad(const TG_NodeList *nl, int si, int lanes,
+                             double shift_near, double shift_far, double wscale,
+                             int page, TG_Buf *blk)
+{
+    return tg_emit_road_quad_taper(nl, si, lanes, shift_near, shift_far,
+                                   wscale, wscale, page, blk);
 }
 
 /* Plain main-road mesh for span si (no lateral offset). */
@@ -4092,8 +4310,15 @@ static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
 #define TD5_TG_GORE_DROP      4.0    /* below road level, world units */
 #define TD5_TG_GORE_OVERLAP 240.0    /* underlap into each carriageway */
 
+/* `half_n` / `half_f` are the branch carriageway's OWN half width at each end of
+ * the span, not a fixed quarter of the road. Until 2026-08-27 this computed
+ * width*0.25 internally, which was the half width of a FIXED half carriageway
+ * -- once the corridor could widen and taper (tg_branch_wscale) the gore stopped
+ * reaching the branch's left edge and re-opened the see-through slit at the
+ * mouth that TD5_TG_GORE_OVERLAP exists to close. */
 static int tg_emit_gore(const TG_NodeList *nl, int si,
-                        double shift_n, double shift_f, TG_Buf *blk)
+                        double shift_n, double shift_f,
+                        double half_n, double half_f, TG_Buf *blk)
 {
     const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
     const TG_Node *a = &nl->v[si], *c = &nl->v[si + 1];
@@ -4101,8 +4326,8 @@ static int tg_emit_gore(const TG_NodeList *nl, int si,
     const double ov   = TD5_TG_GORE_OVERLAP;
     /* Branch left edge, pushed a further `ov` to the RIGHT (lateral is +ve to
      * the left of travel, and the branch sits at negative lateral). */
-    double tnr = shift_n + a->width * 0.25 - ov;   /* near */
-    double tfr = shift_f + c->width * 0.25 - ov;   /* far  */
+    double tnr = shift_n + half_n - ov;            /* near */
+    double tfr = shift_f + half_f - ov;            /* far  */
     double px[4], py[4], pz[4], uu[4], vv[4];
     double cx = 0, cy = 0, cz = 0, radius = 0;
     int i;
@@ -4215,9 +4440,11 @@ static int tg_span_needs_guardrail_raw(const TG_NodeList *nl, int si, int nspans
      * boundary; a barrier there is invisible clutter. */
     if (tg_span_in_tunnel(si)) return 0;
 
-    /* EXCLUSION: the branch fork mouths and their widened approaches. A barrier
-     * across a corridor entrance would visually wall off the branch. */
-    if (tg_branches_enabled() && tg_span_in_fork_clear(si)) return 0;
+    /* Forks used to be excluded outright here (a rail derived from the MAIN
+     * road edge lands ON the branch carriageway, walling the corridor off), at
+     * the cost of a rail-free hole around every fork. tg_emit_guardrail now
+     * slides the right-hand barrier out to tg_carriageway_reach instead, so the
+     * fork region rails like any other span and the exclusion is gone. */
     (void)nspans;
 
     /* On a deliberately-placed deck: rail the WHOLE run, including the shallow
@@ -4257,10 +4484,9 @@ static int tg_span_needs_guardrail(const TG_NodeList *nl, int si, int nspans)
     int k;
 
     /* Exclusions must be re-checked on THIS span, not on the neighbour that
-     * satisfied the test: dilating into a tunnel or across a fork mouth is
-     * exactly what those exclusions exist to prevent. */
+     * satisfied the test: dilating a rail into a tunnel is exactly what that
+     * exclusion exists to prevent. */
     if (tg_span_in_tunnel(si)) return 0;
-    if (tg_branches_enabled() && tg_span_in_fork_clear(si)) return 0;
 
     for (k = -pad; k <= pad; k++)
         if (tg_span_needs_guardrail_raw(nl, si + k, nspans)) return 1;
@@ -4334,8 +4560,34 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk)
         const double ez = side ? nrz : nlz;
         const double gx = side ? frx : flx, gy = side ? fry : fly;
         const double gz = side ? frz : flz;
+        /* Outboard push, from the ONE carriageway authority. Over a fork the
+         * branch has bowed out beyond the main road edge these points come
+         * from, so a barrier at the bare edge would stand in the corridor;
+         * asking for a zero setback returns exactly how far out the outermost
+         * tarmac is. Zero on the left (nothing bows that way) and zero on every
+         * span off a fork, so ordinary road is bit-identical. Near and far are
+         * asked separately so the rail follows the bow instead of stepping. */
+        const double push_n = side
+            ? tg_carriageway_clear_gap(nl, si, -1.0, 0.0, 0.0) : 0.0;
+        const double push_f = side
+            ? tg_carriageway_clear_gap(nl, si + 1, -1.0, 0.0, 0.0) : 0.0;
         const double o0 = TD5_TG_RAIL_OFFSET;
         const double o1 = TD5_TG_RAIL_OFFSET + TD5_TG_RAIL_THICK;
+
+        /* SAFEGUARD: never leave a barrier standing on tarmac. Asked of the
+         * same authority the push came from, so in a consistent world it cannot
+         * fire (the rail line is reach + RAIL_OFFSET, one offset OUTSIDE the
+         * reach). It exists for the inconsistent world: if some future
+         * carriageway grows past its own reported reach, dropping the rail is
+         * the right failure -- a missing barrier is a cosmetic loss, a barrier
+         * across a live lane is a wall. The LEFT side can never trip it (no
+         * corridor bows left, so left reach IS the road edge), which is what
+         * keeps the mesh non-empty and the quad count below >= 3. */
+        if (tg_on_carriageway(nl, si, s * (tg_road_half_width(nl, si)
+                                           + o0 + push_n), 0.0) ||
+            tg_on_carriageway(nl, si + 1, s * (tg_road_half_width(nl, si + 1)
+                                               + o0 + push_f), 0.0))
+            continue;
         /* Along-road slide that goes with a given height offset, so the post
          * leans with the road's pitch instead of standing plumb. Zero on a flat
          * span (n_along = 0), which keeps flat road byte-identical. */
@@ -4344,10 +4596,14 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk)
         /* near/far x inner/outer, at base and top -- the lateral offsets are the
          * same as before, the pitch lean is the extra atx/atz term on the TOP
          * and BASE rows. */
-        const double nib_x = ex + s * nux * o0, nib_z = ez + s * nuz * o0;
-        const double nob_x = ex + s * nux * o1, nob_z = ez + s * nuz * o1;
-        const double fib_x = gx + s * fux * o0, fib_z = gz + s * fuz * o0;
-        const double fob_x = gx + s * fux * o1, fob_z = gz + s * fuz * o1;
+        const double nib_x = ex + s * nux * (o0 + push_n);
+        const double nib_z = ez + s * nuz * (o0 + push_n);
+        const double nob_x = ex + s * nux * (o1 + push_n);
+        const double nob_z = ez + s * nuz * (o1 + push_n);
+        const double fib_x = gx + s * fux * (o0 + push_f);
+        const double fib_z = gz + s * fuz * (o0 + push_f);
+        const double fob_x = gx + s * fux * (o1 + push_f);
+        const double fob_z = gz + s * fuz * (o1 + push_f);
         /* Top and base rows, offset along the SURFACE NORMAL. */
         const double nibt_x = nib_x + atx * slide_t, nibt_z = nib_z + atz * slide_t;
         const double nobt_x = nob_x + atx * slide_t, nobt_z = nob_z + atz * slide_t;
@@ -4409,7 +4665,11 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk)
     tg_put_u16(blk, TD5_TG_PAGE_RAIL);
     tg_put_u32(blk, 0);
     tg_put_u16(blk, 0);                    /* triangle_count */
-    tg_put_u16(blk, 6);                    /* 3 quads x 2 sides */
+    /* 3 quads per side, but the safeguard above may have dropped the right one,
+     * so DERIVE the count from the vertices actually written rather than
+     * hardcoding 6 -- a quad count that overruns the vertex array is read as
+     * garbage geometry, not as a missing rail. */
+    tg_put_u16(blk, (unsigned)(n / 4));
     tg_put_u32(blk, 0);
 
     for (i = 0; i < n; i++) {
@@ -5543,11 +5803,14 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     const double wn = tg_branch_wscale(ck, L, br_lanes);
                     const double wf = tg_branch_wscale(ck + 1, L, br_lanes);
                     moff[nmesh++] = meshes.len;
-                    if (!tg_emit_road_quad(nl, mb, (lnf > ln) ? lnf : ln,
+                    /* Widths near/far, NOT the wider of the two: the strip rows
+                     * taper across the span (see the corridor loop in
+                     * tg_emit_strip) and the mesh has to taper with them or the
+                     * surface you see stops being the surface you collide with. */
+                    if (!tg_emit_road_quad_taper(nl, mb, (lnf > ln) ? lnf : ln,
                                            tg_branch_shift(ck, L, nl->v[mb].width),
                                            tg_branch_shift(ck + 1, L, nl->v[mb + 1].width),
-                                           (wf > wn) ? wf : wn,
-                                           tg_road_page(mb), &meshes))
+                                           wn, wf, tg_road_page(mb), &meshes))
                         ok = 0;
                 }
                 /* The other appended span is the PAD (si == cbase-1). It is
@@ -5579,11 +5842,18 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                                            0.5, tg_road_page(si), &meshes))
                         ok = 0;
                     if (ok) {
+                        /* Branch half widths from the SAME helper the corridor
+                         * strip rows and mesh use, so the gore always meets the
+                         * branch's left edge however wide the taper has made it. */
+                        const double gw0 = nl->v[si].width
+                            * tg_branch_wscale(j, L, br_lanes) * 0.5;
+                        const double gw1 = nl->v[si + 1].width
+                            * tg_branch_wscale(j + 1, L, br_lanes) * 0.5;
                         moff[nmesh++] = meshes.len;
                         if (!tg_emit_gore(nl, si,
                                           tg_branch_shift(j, L, nl->v[si].width),
                                           tg_branch_shift(j + 1, L, nl->v[si + 1].width),
-                                          &meshes))
+                                          gw0, gw1, &meshes))
                             ok = 0;
                     }
                 } else if (!tg_emit_road_mesh(nl, si, lanes, &meshes)) {
