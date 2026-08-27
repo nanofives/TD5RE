@@ -4952,11 +4952,30 @@ static void init_race_checkpoints(void)
      * finish comes purely from the crossing count. */
     if (s_active_checkpoint.checkpoint_count == 0 &&
         s_levelinf_checkpoint_config > 0 && g_active_td6_level <= 0) {
-        int n = s_levelinf_checkpoint_config;
+        int declared = s_levelinf_checkpoint_config;
+        int n = declared;
+        int src[5];
         int ci, valid = 0;
-        if (n > 5) n = 5;   /* CheckpointRecord holds 5; LEVELINF declares up to 7 */
+        if (declared > 7) declared = 7;
+        /* CheckpointRecord holds 5; LEVELINF declares up to 7. Truncating to the
+         * first 5 would drop the LAST checkpoint, which is the one on the finish
+         * span -- the race would then end early, at what is really checkpoint 5
+         * of 7. Keep the first four and the last instead, so the finish is always
+         * the final entry. The generator only ever writes 2 or 4, so this path is
+         * for hand-built LEVELINFs. */
+        if (n > 5) {
+            n = 5;
+            for (ci = 0; ci < 4; ci++) src[ci] = s_levelinf_checkpoint_spans[ci];
+            src[4] = s_levelinf_checkpoint_spans[declared - 1];
+            TD5_LOG_W(LOG_TAG,
+                      "LEVELINF declares %d checkpoints, record holds 5: keeping "
+                      "the first 4 and the finish (span %d)",
+                      declared, src[4]);
+        } else {
+            for (ci = 0; ci < n; ci++) src[ci] = s_levelinf_checkpoint_spans[ci];
+        }
         for (ci = 0; ci < n; ci++) {
-            if (s_levelinf_checkpoint_spans[ci] > 0) valid++;
+            if (src[ci] > 0) valid++;
         }
         if (valid == n && n > 0) {
             /* Packed 8.8: hi byte = whole seconds, lo 0x3B matches every shipped
@@ -4971,7 +4990,7 @@ static void init_race_checkpoints(void)
                 (uint16_t)(((init_secs & 0xFF) << 8) | 0x3B);
             for (ci = 0; ci < n; ci++) {
                 s_active_checkpoint.checkpoints[ci].span_threshold =
-                    (uint16_t)s_levelinf_checkpoint_spans[ci];
+                    (uint16_t)src[ci];
                 /* The LAST LEVELINF checkpoint IS the finish line on a
                  * point-to-point track (the generator places it on
                  * tg_finish_span and puts the gantry there), so it grants no
