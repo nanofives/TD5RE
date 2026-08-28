@@ -239,6 +239,10 @@ static int tg_road_page(int si);
  * so a planted median stops painting grass up its vertical walls. ------- */
 #define TD5_TG_PAGE_R4_BRANCH (TD5_TG_PAGE_R4_BASE + 28)
 #define TD5_TG_R4_BRANCH_N    4
+/* Named slot inside the BRANCH block. +0 is the vertical KERB face used for the
+ * two side walls of a planted / kerbed avenue median (item 8): a concrete kerb
+ * so the median's walls are not painted with the grass page the TOP wears. */
+#define TD5_TG_PAGE_BRANCH_KERB  (TD5_TG_PAGE_R4_BRANCH + 0)
 
 /* --- BRIDGE block (items 16-20): 8 slots (real guardrail face, pier/pillar,
  * coastline strip where water meets land). ------------------------------ */
@@ -2640,8 +2644,24 @@ static void tg_road_edge(const TG_NodeList *nl, int si, double f, double shift,
  * and a constant-per-span width turns that taper back into the staircase the
  * strip rows no longer have -- the mesh would then disagree with the surface
  * you collide with. tg_emit_road_quad below passes the same value twice, so the
- * plain road and the fixed-width halves are unchanged. Returns 0 on OOM. */
-static int tg_emit_road_quad_taper(const TG_NodeList *nl, int si, int lanes,
+ * plain road and the fixed-width halves are unchanged. Returns 0 on OOM.
+ *
+ * ITEMS 7 & 11 (2026-08-28): the across-road U is `u_scale * wscale`, NOT a flat
+ * lane count anchored edge-to-edge. Root cause of "textures moving on branches"
+ * and "lane markers shift when adding lanes": the old code set the right-edge U
+ * to a per-span integer lane count while the physical width tapered
+ * continuously (tg_branch_wscale) and stepped the lane count independently. That
+ * made the world-space tile size vary along a corridor (the asphalt "moved") and
+ * jump at each lane-count change (the lane paint "shifted"), because on the main
+ * ring width and lane count are both constant so the bug never showed. Tying U
+ * to wscale makes the tile size (physical_width / U = width/u_scale) CONSTANT in
+ * world units along the whole corridor and continuous across span joins: with a
+ * per-corridor-constant u_scale, adjacent spans agree at their shared node
+ * because U there depends only on the shared wscale, not on either span's lane
+ * count. Constant-width callers (main road wscale 1.0, fork half wscale 0.5)
+ * pass u_scale = lanes/wscale via tg_emit_road_quad, so their U is byte-identical
+ * to before. `u_scale` = the U reached at the right edge when wscale == 1.0. */
+static int tg_emit_road_quad_taper(const TG_NodeList *nl, int si, double u_scale,
                                    double shift_near, double shift_far,
                                    double wscale_near, double wscale_far,
                                    int page, TG_Buf *blk)
@@ -2663,11 +2683,18 @@ static int tg_emit_road_quad_taper(const TG_NodeList *nl, int si, int lanes,
         double w1v = wscale_near + (wscale_far - wscale_near) * f1;
         tg_road_edge(nl, si, f0, s0v, w0v, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
         tg_road_edge(nl, si, f1, s1v, w1v, &flx, &fly, &flz, &frx, &fry, &frz);
+        /* Right-edge U tracks the PHYSICAL width at each subdiv end (u_scale *
+         * wscale), so the lane paint keeps a constant world-space pitch along a
+         * tapering/widening corridor instead of stretching and jumping. */
+        {
+        const double ur0 = u_scale * w0v;
+        const double ur1 = u_scale * w1v;
         /* Quad loop: near-left, near-right, far-right, far-left. */
-        px[n]=nlx; py[n]=nly; pz[n]=nlz; uu[n]=0.0;           vv[n]=si+f0; n++;
-        px[n]=nrx; py[n]=nry; pz[n]=nrz; uu[n]=(double)lanes; vv[n]=si+f0; n++;
-        px[n]=frx; py[n]=fry; pz[n]=frz; uu[n]=(double)lanes; vv[n]=si+f1; n++;
-        px[n]=flx; py[n]=fly; pz[n]=flz; uu[n]=0.0;           vv[n]=si+f1; n++;
+        px[n]=nlx; py[n]=nly; pz[n]=nlz; uu[n]=0.0; vv[n]=si+f0; n++;
+        px[n]=nrx; py[n]=nry; pz[n]=nrz; uu[n]=ur0; vv[n]=si+f0; n++;
+        px[n]=frx; py[n]=fry; pz[n]=frz; uu[n]=ur1; vv[n]=si+f1; n++;
+        px[n]=flx; py[n]=fly; pz[n]=flz; uu[n]=0.0; vv[n]=si+f1; n++;
+        }
     }
 
     for (i = 0; i < n; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
@@ -2730,7 +2757,11 @@ static int tg_emit_road_quad(const TG_NodeList *nl, int si, int lanes,
                              double shift_near, double shift_far, double wscale,
                              int page, TG_Buf *blk)
 {
-    return tg_emit_road_quad_taper(nl, si, lanes, shift_near, shift_far,
+    /* Constant width, so u_scale*wscale must reproduce the flat `lanes` the old
+     * code wrote at the right edge. wscale is 0.5 or 1.0 here (exact in binary),
+     * so lanes/wscale then *wscale is byte-identical to the old integer U. */
+    const double u_scale = (wscale > 0.0) ? (double)lanes / wscale : (double)lanes;
+    return tg_emit_road_quad_taper(nl, si, u_scale, shift_near, shift_far,
                                    wscale, wscale, page, blk);
 }
 
@@ -5516,9 +5547,17 @@ static int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
     const double H      = (treat == 1) ? 360.0 : (treat == 0 ? 220.0 : 150.0);
     const int    page   = (treat == 0) ? TD5_TG_PAGE_GREEN
                         : (treat == 1) ? TD5_TG_PAGE_RAIL : TD5_TG_PAGE_SIDEWALK;
+    /* Item 8: the two vertical side walls must NOT wear the TOP page. A planted
+     * median (treat 0, GREEN top) painted grass up its walls -- verbatim "grass
+     * as walls is wrong"; a kerbed island (treat 2) put paving slabs on its
+     * walls. Both want a concrete KERB face on the sides. A concrete barrier
+     * (treat 1, RAIL) is a wall material through and through, so it keeps RAIL on
+     * every face. Per-quad paging via a 2-segment mesh: seg 0 = the single TOP
+     * quad on `page`, seg 1 = the two side-wall quads on `side_page`. */
+    const int    side_page = (treat == 1) ? TD5_TG_PAGE_RAIL : TD5_TG_PAGE_BRANCH_KERB;
     double mc0, mc1, mw0, mw1, cl0, cr0, cl1, cr1, base0, base1;
     double px[12], py[12], pz[12], uu[12], vv[12];
-    int seg_page = page, seg_nq;
+    int seg_page[2], seg_nq[2];
     int n = 0;
 
     /* No island where the gore is a mere sliver (near the mouths): a 100-unit
@@ -5552,12 +5591,16 @@ static int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
     px[n]=c->x+c->tz*cr1; py[n]=base1+H; pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=0.0; n++;
     px[n]=a->x+a->tz*cr0; py[n]=base0+H; pz[n]=a->z-a->tx*cr0; uu[n]=0.0; vv[n]=0.0; n++;
 
-    seg_nq = n / 4;
+    /* TOP quad (verts 0..3) on `page`; the two side walls (verts 4..11) on
+     * `side_page`. Segments consume quads sequentially in vertex order, so this
+     * split matches the emit order above exactly. */
+    seg_page[0] = page;      seg_nq[0] = 1;
+    seg_page[1] = side_page; seg_nq[1] = 2;
     /* Accounted as a FENCE (a linear median structure) rather than a new
      * inventory kind, to keep the shared enum untouched for the parallel batch. */
     tg_acct_n(TG_ACCT_FENCE, si, 1);
     moff[(*nmesh)++] = blk->len;
-    return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
+    return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, seg_page, seg_nq, 2);
 }
 
 /* ===================== GUARDRAILS =====================
@@ -7703,16 +7746,22 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                      * surface you see is the surface you collide with even where
                      * the corridor gains a lane. */
                     const double sep = s_forks[fi].sep;
-                    const int ln  = br_lanes + tg_branch_lane_gain_s(ck, L, br_lanes, sep);
-                    const int lnf = br_lanes + tg_branch_lane_gain_s(ck + 1, L, br_lanes, sep);
                     const double wn = tg_branch_wscale_s(ck, L, br_lanes, sep);
                     const double wf = tg_branch_wscale_s(ck + 1, L, br_lanes, sep);
+                    /* Items 7 & 11: u_scale is CONSTANT along the corridor -- the
+                     * base half carriageway (wscale 0.5) carries br_lanes lanes,
+                     * so u_scale = br_lanes/0.5 = 2*br_lanes gives U = br_lanes at
+                     * the base and one fixed-pitch lane stripe per real lane as it
+                     * widens. It does NOT depend on this span's lane count, so the
+                     * paint neither stretches with the width taper nor jumps when
+                     * a lane is gained (both were the old flat max(ln,lnf) U). */
+                    const double u_scale = 2.0 * (double)br_lanes;
                     moff[nmesh++] = meshes.len;
                     /* Widths near/far, NOT the wider of the two: the strip rows
                      * taper across the span (see the corridor loop in
                      * tg_emit_strip) and the mesh has to taper with them or the
                      * surface you see stops being the surface you collide with. */
-                    if (!tg_emit_road_quad_taper(nl, mb, (lnf > ln) ? lnf : ln,
+                    if (!tg_emit_road_quad_taper(nl, mb, u_scale,
                                            tg_branch_shift_s(ck, L, nl->v[mb].width, sep),
                                            tg_branch_shift_s(ck + 1, L, nl->v[mb + 1].width, sep),
                                            wn, wf, tg_road_page(mb), &meshes))
@@ -9032,6 +9081,43 @@ static void tg_emit_texture_page_fb_banner(TG_Buf *out)
     }
 }
 
+/* [R4 BRANCH item 8] Vertical concrete KERB face for the two side walls of an
+ * avenue median (see tg_emit_avenue_divider). Plain cast concrete: a lighter
+ * kerb cap at the page top (v -> 0 is the top of the wall, matching the tree
+ * page's "y=0 is the TOP" convention) over a mid-grey body with faint cast-joint
+ * lines, so a planted or kerbed median reads as a real kerb instead of grass or
+ * paving slabs climbing its walls. Opaque, neutral grey (BGR == R == G). */
+static void tg_emit_texture_page_branch_kerb(TG_Buf *out)
+{
+    unsigned int rng = 0x4B00B1E5u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR, neutral grey. 0..11 concrete body greys, 12..15 the light kerb cap. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v = (i < 12) ? (96 + i * 6) : (188 + (i - 12) * 10);
+        tg_put_u8(out, (unsigned)v);   /* B */
+        tg_put_u8(out, (unsigned)v);   /* G */
+        tg_put_u8(out, (unsigned)v);   /* R */
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        int x = i % TD5_TG_TEX_DIM;
+        int y = i / TD5_TG_TEX_DIM;    /* y = 0 is the TOP of the page */
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if (y < 6) idx = 12 + (int)((rng >> 17) % 4);    /* light kerb cap */
+        else       idx = (int)((rng >> 16) % 12);        /* concrete grain */
+        if (y >= 6 && (y % 20) == 0)                     /* faint cast joints */
+            idx = (idx > 2) ? idx - 2 : 0;
+        (void)x;
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 /* Emit a page from real (already palette-indexed) TD5 texture data, in the same
  * on-disk page format as the procedural emitters -- pad, opaque type, palette
  * count, BGR palette, then the 64x64 index bytes. */
@@ -9203,6 +9289,8 @@ static int tg_emit_textures(TG_Buf *out)
                       k_furn_finish_l_paln, k_furn_finish_l_idx, k_furn_finish_l_type);
     tg_emit_real_page(&pages[TD5_TG_PAGE_FINISH_R], k_furn_finish_r_pal,
                       k_furn_finish_r_paln, k_furn_finish_r_idx, k_furn_finish_r_type);
+    /* [R4 BRANCH item 8] concrete kerb face for avenue-median side walls. */
+    tg_emit_texture_page_branch_kerb(&pages[TD5_TG_PAGE_BRANCH_KERB]);
     /* [R3 BLOCK] park & house art (feedback items 5-6). Slots +4..+9 of the
      * BLOCK reservation stay empty (unreferenced empty pages are free). */
     tg_emit_texture_page_r3_block(&pages[TD5_TG_PAGE_R3_BLOCK + 0], 0);  /* lawn  */
