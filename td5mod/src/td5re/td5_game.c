@@ -9220,6 +9220,22 @@ static void advance_pending_finish_state(int slot, uint32_t sim_delta) {
             int32_t raw_acc = actor
                 ? (int32_t)*(int16_t *)((uint8_t *)actor + 0x84)
                 : (int32_t)actor_span;
+            /* [R3 item 18 instrumentation] Watch the finish gate for slot 0 so a
+             * drive can PROVE the mechanism: raw_acc (+0x84) must climb to
+             * s_td6_finish_span for a P2P finish. If the finish span is placed on a
+             * corridor tail beyond the main ring, raw_acc plateaus at ~ring_len on a
+             * main-line drive and never reaches it -- the race never ends. Throttled
+             * to once a second. Remove once autotrack finish is confirmed stable. */
+            if (slot == 0) {
+                static int s_r3_finish_div = 0;
+                if ((++s_r3_finish_div % 30) == 0) {
+                    TD5_LOG_I(LOG_TAG,
+                              "R3-finish watch: slot=0 raw_acc=%d norm_span=%d "
+                              "finish=%d ring=%d",
+                              (int)raw_acc, (int)actor_span, s_td6_finish_span,
+                              td5_track_get_ring_length());
+                }
+            }
             if (s_slot_state[slot].companion_1 == 0 &&
                 raw_acc >= s_td6_finish_span) {
                 m->post_finish_metric_base = m->cumulative_timer;

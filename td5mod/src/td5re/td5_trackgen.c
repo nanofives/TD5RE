@@ -242,6 +242,7 @@ static int s_ring_len;
  * them to map an APPENDED corridor span back to its main-ring node. */
 static int tg_fork_of_main(int si);
 static int tg_fork_of_corridor(int si, int *k);
+static int tg_city_crossing_here(int si);   /* [R3 item 7] fence break gate */
 /* Same reason: the finish-line placer below has to keep the finish (and its
  * gantry) out of a tunnel run, and the tunnel test is defined with the tunnel
  * emitters much further down. */
@@ -1678,6 +1679,97 @@ static double tg_carriageway_clear_gap(const TG_NodeList *nl, int si,
     const double need = tg_carriageway_reach(nl, si, side)
                       - tg_road_half_width(nl, si) + margin;
     return (gap < need) ? need : gap;
+}
+
+/* [R3 item 17] Geometry-safety validation pass. "Add additional checks to avoid
+ * geometry of floor and walls getting in the way of the road."
+ *
+ * This is a read-only diagnostic run once the strip is built. It cannot MOVE
+ * geometry (the meshes are already authored to clear the carriageway through
+ * tg_carriageway_clear_gap / tg_side_blocked), so its job is to make the two
+ * failure modes that DO put a floor on the road VISIBLE as a number in race.log
+ * instead of a silent hole you can only find by driving into it:
+ *
+ *   1. ROAD SELF-OVERLAP. The centreline is an OPEN wandering walk
+ *      (tg_build_centerline); when the section placer runs out of retries
+ *      escaping a cul-de-sac it forces a straight and can leave the road passing
+ *      back over an EARLIER stretch -- two road floors sharing the same ground.
+ *      Flagged when two NON-neighbour spans' road surfaces actually overlap
+ *      (centre distance < 0.8*(half_i+half_j)); a clean hairpin keeps its two
+ *      sides a full road-width apart (the curvature-safety floor guarantees it)
+ *      so it does NOT trip this.
+ *   2. SUSPECT FORK REACH. The shared carriageway authority
+ *      (tg_carriageway_reach) must never report a reach narrower than the plain
+ *      road nor an implausibly wide one; either means a fork put drivable
+ *      surface where scenery (or another carriageway) is placed. Uses the
+ *      authority read-only -- no fork arithmetic is re-derived here.
+ *
+ * Scoped to the MAIN RING (s_ring_len): appended branch corridors legitimately
+ * run beside the main road and would false-positive the overlap test. */
+static void tg_validate_geometry_safety(const TG_NodeList *nl, int nspans)
+{
+    int i, j, ring, overlaps = 0, bad_reach = 0, checked = 0;
+    double span_len;
+
+    if (!nl || nl->count < 3 || nspans < 3) return;
+    ring = (s_ring_len > 0 && s_ring_len < nspans) ? s_ring_len : nspans;
+    if (ring + 1 > nl->count) ring = nl->count - 1;
+    if (ring < 3) return;
+
+    /* Approx span spacing from the first step, to size the "legitimately near"
+     * exclusion window: spans within a few of each other are ALWAYS close and
+     * are not an overlap. */
+    {
+        const double dx = nl->v[1].x - nl->v[0].x;
+        const double dz = nl->v[1].z - nl->v[0].z;
+        span_len = sqrt(dx * dx + dz * dz);
+        if (span_len < 1.0) span_len = 1.0;
+    }
+
+    for (i = 0; i < ring; i++) {
+        const double hi = tg_road_half_width(nl, i);
+        const double rr = tg_carriageway_reach(nl, i, -1.0);
+        if (rr < hi - 1.0 || rr > hi * 6.0 + 1.0) {
+            if (bad_reach < 8)
+                TD5_LOG_W(LOG_TAG, "geometry-safety: span %d carriageway reach "
+                          "%.0f vs road half %.0f (suspect fork geometry)",
+                          i, rr, hi);
+            bad_reach++;
+        }
+    }
+
+    for (i = 0; i < ring; i++) {
+        const double xi = nl->v[i].x, zi = nl->v[i].z;
+        const double hi = tg_road_half_width(nl, i);
+        /* Exclusion window: pairs this close along the path are neighbours and
+         * are supposed to be near each other. Sized off the wider of the two
+         * roads so a wide road's neighbours are never mistaken for an overlap. */
+        for (j = i + 1; j < ring; j++) {
+            const double hj = tg_road_half_width(nl, j);
+            const int window = (int)((hi + hj) / span_len) + 6;
+            double dx, dz, d2, lim;
+            if (j - i <= window) continue;
+            dx = nl->v[j].x - xi; dz = nl->v[j].z - zi;
+            d2 = dx * dx + dz * dz;
+            lim = (hi + hj) * 0.8;
+            checked++;
+            if (d2 < lim * lim) {
+                if (overlaps < 8)
+                    TD5_LOG_W(LOG_TAG, "geometry-safety: road self-overlap spans "
+                              "%d<->%d (dist %.0f < %.0f)", i, j, sqrt(d2), lim);
+                overlaps++;
+            }
+        }
+    }
+
+    if (overlaps || bad_reach)
+        TD5_LOG_W(LOG_TAG, "geometry-safety: %d road-overlap pair(s), %d suspect "
+                  "fork span(s) over %d main-ring spans (%d pairs tested)",
+                  overlaps, bad_reach, ring, checked);
+    else
+        TD5_LOG_I(LOG_TAG, "geometry-safety: clean -- 0 road overlaps, 0 suspect "
+                  "fork spans over %d main-ring spans (%d pairs tested)",
+                  ring, checked);
 }
 
 /* ===================== [S1] RANGE EMITTER =====================
@@ -5428,17 +5520,27 @@ static int tg_city_emit_fence(const TG_FBHook *h, double sw)
     const double u_n = 1.0;
     int seg_page = TD5_TG_PAGE_FENCE, seg_nq;
     int s, n = 0;
+    /* [R3 item 7] The kerb railing should read as a CONTINUOUS street edge and
+     * break ONLY where it has a reason to: a pedestrian crossing over the road
+     * (both kerbs), this side opening onto a side street (a facade gap is a
+     * street mouth in this generator's block model), or a biome-run boundary
+     * where the city itself ends. The old code dropped ~1/4 of spans through an
+     * independent per-side hash (`(fh >> 29) >= 6`), which read as a railing
+     * full of random holes rather than a street edge -- the user's report. That
+     * hash is gone; the breaks below are the only ones now. */
+    const int crossing = tg_city_crossing_here(h->si);
+    const int biome_edge = (h->si > 0 &&
+        tg_biome_cell_index(h->si) != tg_biome_cell_index(h->si - 1));
 
     for (s = 0; s < 2; s++) {
         const double sg = s ? 1.0 : -1.0;
-        /* Independent hash per side, so the two railings do not start and stop
-         * together (that reads as a fence around a compound, not a street). */
-        const unsigned int fh = ((unsigned)h->si + (s ? 4177u : 91u)) * 0x9E3779B9u;
         /* Kerb-side, clamped so a narrow pavement still puts it inboard of the
          * building line rather than off the far edge of the slab. */
         const double back = (sw * 0.35 < TD5_TG_FENCE_KERB)
                           ? sw * 0.35 : TD5_TG_FENCE_KERB;
-        if ((fh >> 29) >= 6u) continue;     /* ~25% of spans left open */
+        if (crossing) continue;                       /* pedestrians cross here */
+        if (!tg_facade_built(h->si, s)) continue;     /* side-street mouth */
+        if (biome_edge) continue;                     /* city/biome edge */
         if (tg_side_blocked(h->si, sg)) continue;
         tg_city_edge_frame(h->nl, h->si, sg, e);
 
@@ -6238,8 +6340,21 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
         px[n]=X[1][3]; py[n]=Y[1][3];      pz[n]=Z[1][3]; uu[n]=U[1]; vv[n]=1.0; n++;
         px[n]=X[1][3]; py[n]=Y[1][3] + t1; pz[n]=Z[1][3]; uu[n]=U[1]; vv[n]=0.0; n++;
         px[n]=X[0][3]; py[n]=Y[0][3] + t0; pz[n]=Z[0][3]; uu[n]=U[0]; vv[n]=0.0; n++;
+        /* [R3 item 8] This distant ridge IS the "background tree line" the user
+         * reported as "grey at the bottom and white at the top ... doesn't seem
+         * to be a tree texture there". It was drawn on TD5_TG_PAGE_HILL, whose
+         * palette is literally grey rock (idx 0..9) under a white snowline (idx
+         * 10..15) -- correct for a snowy peak, wrong everywhere else, and NOT a
+         * tree. (The r2 attempt rebuilt the flora TREELINE band instead, which
+         * never even emits on a seed with no FOREST/ALPINE/FIELDS biome -- e.g.
+         * 99991 -- so it could not have fixed what is on screen.) Draw the ridge
+         * on the green alpha-keyed canopy page in every non-snow biome: its
+         * ragged keyed top reads as a forested skyline silhouette against the
+         * sky, which is exactly the tree line the user expected. Snow/alpine keep
+         * the snowy flank. TD5_TG_PAGE_HILL stays the tunnel rock massing page,
+         * untouched. */
         seg_page[1] = tg_biome_is_snow(h->b) ? tg_ground_page_for_span(h->si, h->b)
-                                             : TD5_TG_PAGE_HILL;
+                                             : TD5_TG_PAGE_TREELINE;
         seg_nq[1]   = 1;
         nseg = 2;
     }
@@ -6484,6 +6599,38 @@ static int tg_emit_fb_track(const TG_FBHook *h)
     return tg_emit_gantry(h->nl, h->si, h->blk, h->si == finish);
 }
 
+/* [R3 item 19] Visible backstop wall across the full road at each OPEN end of
+ * the strip, so the invisible boundary sentinel (td5_track_bind_boundary_
+ * sentinels sets fwd=2 / rev=ring-3 for a custom P2P track) has something to
+ * look like. The autotrack centreline is an open path, so those two spans are
+ * the real map edges. `at_far` picks which edge of the span to draw on: 0 = the
+ * near edge (start end, behind the grid), 1 = the far edge (finish end). One
+ * opaque quad on the solid facade page (TD5_TG_PAGE_WALL) -- no new art. */
+#define TD5_TG_ENDWALL_H 3200.0   /* raw; ~12.5 wu, over any jump the car makes */
+
+static int tg_emit_end_wall(const TG_NodeList *nl, int si, int at_far,
+                            size_t *moff, int *nmesh, int maxmesh, TG_Buf *blk)
+{
+    double px[4], py[4], pz[4], uu[4], vv[4];
+    double lx, ly, lz, rx, ry, rz;
+    int seg_page = TD5_TG_PAGE_WALL, seg_nq = 1;
+    const double f = at_far ? 1.0 : 0.0;
+
+    if (si < 0 || si + 1 >= nl->count) return 1;
+    if (*nmesh >= maxmesh) return 1;
+    tg_road_edge(nl, si, f, 0.0, 1.0, &lx, &ly, &lz, &rx, &ry, &rz);
+
+    /* Quad loop: left-bottom, right-bottom, right-top, left-top. u spans the
+     * road width twice so the brick reads at a believable scale; v 0..1 up. */
+    px[0] = lx; py[0] = ly;                    pz[0] = lz; uu[0] = 0.0; vv[0] = 1.0;
+    px[1] = rx; py[1] = ry;                    pz[1] = rz; uu[1] = 2.0; vv[1] = 1.0;
+    px[2] = rx; py[2] = ry + TD5_TG_ENDWALL_H; pz[2] = rz; uu[2] = 2.0; vv[2] = 0.0;
+    px[3] = lx; py[3] = ly + TD5_TG_ENDWALL_H; pz[3] = lz; uu[3] = 0.0; vv[3] = 0.0;
+
+    moff[(*nmesh)++] = blk->len;
+    return tg_write_quad_mesh(blk, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1);
+}
+
 /* Fork whose MAIN half-carriageway covers main-ring span si, or -1. */
 static int tg_fork_of_main(int si)
 {
@@ -6670,6 +6817,16 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     if (!tg_emit_fb_terrain(&hook)) { ok = 0; break; }
                 }
                 if (!tg_emit_fb_track(&hook)) { ok = 0; break; }
+            }
+
+            /* [R3 item 19] Backstop walls at the two OPEN ends of the strip,
+             * aligned with the collision boundary sentinels (fwd=2, rev=ring-3).
+             * Emitted here so a tunnel span at either end still gets its cap. */
+            if (si == 2 || si == ring - 3) {
+                if (!tg_emit_end_wall(nl, si, si != 2, moff, &nmesh,
+                                      TG_MAX_MESHES_PER_ENTRY, &meshes)) {
+                    ok = 0; break;
+                }
             }
 
             if (tg_span_in_tunnel(si)) {
@@ -7973,6 +8130,9 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         TD5_LOG_E(LOG_TAG, "trackgen: strip emit failed (spans=%d)", nspans);
         goto done;
     }
+    /* [R3 item 17] Surface any floor/road-overlap or suspect fork geometry now
+     * that the strip (and s_ring_len) exist -- read-only, one-off. */
+    tg_validate_geometry_safety(&nl, nspans);
     /* Routes must cover exactly the ring the strip header declares. */
     /* byte0 is the lateral corridor position (0 = left rail, 255 = right).
      * Straddle the centreline symmetrically so the AI's racing line runs down
@@ -8249,12 +8409,34 @@ int td5_trackgen_regenerate(unsigned int seed)
         tg_selfcheck_regen(sd);
     }
 
-    /* Start a little way in so the grid has road behind it, and finish a few
-     * spans short of the end so the walker still has road beyond the line. */
-    td5_track_registry_set_auto(TD5_TG_SLOT, TD5_TG_LEVEL_NUM,
-                               "AUTO-GENERATED", spec.circuit,
-                               TD5_TG_GRID_SPAN,
-                               spans > 8 ? spans - 4 : spans - 1);
+    /* [R3 item 18] Finish span for the registry MUST be the same MAIN-RING span
+     * that tg_emit_levelinf placed the last checkpoint on -- tg_finish_span(ring)
+     * -- NOT `spans - 4`.
+     *
+     * `spans` is the FULL emitted strip count, which also counts every fork's pad
+     * and appended corridor tail (with branches on seed 99991 the main ring is
+     * ~1800 spans but `spans` is ~1987). The registry finish span is consumed by
+     * advance_pending_finish_state as s_td6_finish_span, and that P2P branch takes
+     * PRECEDENCE over the LEVELINF checkpoints (it returns before reaching the
+     * checkpoint-crossing code). So `spans - 4` put the finish line on a CORRIDOR
+     * tail (~1983) that a normal main-line drive never reaches: the race could
+     * only finish by driving ~180 spans into a second lap, which is why the user
+     * saw the race never finish and race.log logged zero checkpoint-pass events
+     * (that code was dead). Deriving the finish from s_ring_len makes the registry
+     * finish, the LEVELINF last checkpoint and the finish banner all agree on one
+     * on-ring span. */
+    {
+        int ring   = (s_ring_len > 0) ? s_ring_len : spans;
+        int finish = tg_finish_span(ring);
+        if (finish <= 0)   /* ring too short for a placed finish: last-resort */
+            finish = (spans > 8) ? spans - 4 : spans - 1;
+        td5_track_registry_set_auto(TD5_TG_SLOT, TD5_TG_LEVEL_NUM,
+                                   "AUTO-GENERATED", spec.circuit,
+                                   TD5_TG_GRID_SPAN, finish);
+        TD5_LOG_I(LOG_TAG, "trackgen: registry finish span=%d (main ring=%d, full "
+                  "strip=%d; old spans-4 would be %d)", finish, ring, spans,
+                  spans > 8 ? spans - 4 : spans - 1);
+    }
 
     TD5_LOG_I(LOG_TAG, "trackgen: auto track ready (slot %d, level %d, "
               "seed %u, %d spans)", TD5_TG_SLOT, TD5_TG_LEVEL_NUM, seed, spans);
