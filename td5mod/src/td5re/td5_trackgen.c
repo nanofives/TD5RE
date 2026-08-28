@@ -197,6 +197,14 @@ static int tg_road_page(int si);
  * lining VARIETY, so several of these are tunnel variants. ------------------ */
 #define TD5_TG_PAGE_R3_BRIDGE (TD5_TG_PAGE_R3_BASE + 26)
 #define TD5_TG_R3_BRIDGE_N    8
+/* Named slots inside the BRIDGE block. +0 is the bridge DECK surface (item 11:
+ * a deck must not wear the tiling lane-marked road page); +1..+4 are extra
+ * TUNNEL LINING variants (item 16a: "tunnel texture is always the same"), used
+ * together with the existing TD5_TG_PAGE_TUNNEL as variant 0 -> 5 linings that a
+ * per-run hash chooses between, so consecutive bores do not read identically. */
+#define TD5_TG_PAGE_BRIDGE_DECK  (TD5_TG_PAGE_R3_BRIDGE + 0)
+#define TD5_TG_PAGE_TUNNEL_VAR   (TD5_TG_PAGE_R3_BRIDGE + 1)  /* +1..+4 */
+#define TD5_TG_TUNNEL_VARIANTS   5   /* base page + 4 variant pages */
 
 #define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R3_BASE + 36)
 
@@ -251,6 +259,13 @@ static int tg_span_in_tunnel(int si);
  * further down, so the accessors are forward-declared the same way. */
 static int tg_biome_bridge_pct(int si);
 static int tg_biome_tunnel_pct(int si);
+/* [R3 item 15] the centreline walk (above the bridge block) clamps curvature on
+ * bridge spans, so it needs the run gate before that gate is defined. */
+static int tg_span_in_bridge_run(int si);
+/* Largest heading change per span allowed on a bridge deck, radians. 0.03 =>
+ * turn radius >= ~50000 units, a sweeping curve rather than a hairpin, so a
+ * deliberate bridge that lands on a tight section is straightened out. */
+#define TD5_TG_BRIDGE_MAX_TURN 0.03
 
 /* Seed of the last successful build, for reproducing a good random track. */
 static unsigned int s_last_seed = 0;
@@ -843,7 +858,22 @@ static int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
                 if (radius > 0.0) {
                     double floor_r = (width * 0.5) * (spec->curve_safety_x100 / 100.0);
                     double r = radius < floor_r ? floor_r : radius;
-                    heading += (double)dir * (span_len / r);
+                    double dh = (double)dir * (span_len / r);
+                    /* [R3 item 15] no sharp turns on a bridge. A deliberate
+                     * bridge run may land on any section, including a hairpin
+                     * ACUTE, and a sharply curved deck reads wrong (and would
+                     * shear the transverse deck seam of item 11). Cap the
+                     * per-span heading change to a sweeping minimum on bridge
+                     * spans. This only ever REDUCES curvature, and a straighter
+                     * road cannot self-overlap where the curved one did not, so
+                     * it needs no extra rejection handling. Keyed on the node
+                     * about to be pushed (index nl->count); an off-by-one at a
+                     * run boundary is immaterial across a 40-span run. */
+                    if (tg_span_in_bridge_run(nl->count)) {
+                        if (dh >  TD5_TG_BRIDGE_MAX_TURN) dh =  TD5_TG_BRIDGE_MAX_TURN;
+                        if (dh < -TD5_TG_BRIDGE_MAX_TURN) dh = -TD5_TG_BRIDGE_MAX_TURN;
+                    }
+                    heading += dh;
                     /* Keep the walk non-trapping (see TD5_TG_HEADING_LIMIT).
                      * On hitting the limit, reverse the turn so the road peels
                      * back off the boundary instead of grinding along it. */
@@ -939,16 +969,24 @@ static int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
  * these numbers. Peak slope of the hump is H*PI/RUN per span, and
  * tg_apply_elevation rescales the ENTIRE profile if any span exceeds
  * max_grade (0.120 => 180 units per 1500-unit span). A hump too steep would
- * therefore flatten the whole track to fix itself. With RUN 24, H 1300 gives
- * a peak slope of ~170/span (grade 0.113), just inside the cap.
+ * therefore flatten the whole track to fix itself.
  *
- * That also happens to clear the lift threshold -- at RUN 24 the +/-8 window
- * sits at 0.25H either side, so lift at the crown is 0.75H = 975 > 900 -- but
- * emission deliberately does NOT depend on that. The RANGE decides, exactly
- * as it does for tunnels, so a future grade or amplitude tweak cannot silently
- * delete every bridge again. */
-#define TD5_TG_BRIDGE_RUN     24       /* spans per deliberate bridge */
-#define TD5_TG_BRIDGE_HEIGHT  1300.0   /* crown lift; bounded by max_grade */
+ * [R3 item 13] The user's report was "bridges are like small bumps": RUN 24 /
+ * H 1300 was a short deck with a shallow rise. Longer AND taller reads as a
+ * real crossing, but the two pull against the grade cap in opposite directions,
+ * and lengthening is what buys the headroom to also raise it: peak slope is
+ * H*PI/RUN, so stretching the run to 40 spans lets H climb to 2000 while the
+ * slope stays inside the cap (2000*PI/40 = 157/span = grade 0.105 < 0.120). The
+ * net effect is a deck ~1.7x longer with a ~1.5x taller crown -- i.e. bigger
+ * pre-bridge approach ramps, exactly the two things asked for. Ceilinged at
+ * 2000 in tg_apply_elevation's clamp, so a leftover-budget span can never push
+ * the hump past what the grade permits.
+ *
+ * Emission deliberately does NOT depend on the lift threshold. The RANGE
+ * decides, exactly as it does for tunnels, so a future grade or amplitude tweak
+ * cannot silently delete every bridge again. */
+#define TD5_TG_BRIDGE_RUN     40       /* spans per deliberate bridge (item 13) */
+#define TD5_TG_BRIDGE_HEIGHT  2000.0   /* crown lift; bounded by max_grade */
 #define TD5_TG_BRIDGE_CHASM   2500.0   /* how far the ground/river drops below */
 /* Half-width of the river channel. Unlike the sea (which starts outboard of the
  * road edge) this crosses the CENTRELINE, which is why it is the water plane
@@ -3139,7 +3177,7 @@ static const TG_Biome k_biomes[] = {
      * Few bridges (a city road crosses at grade), the odd underpass. */
     { "CITY",       9, 2150, 2950, 2, 3, 6000, 350, {0}, 0,
       TD5_TG_PAGE_WALL,   3, 0, TD5_TG_PAGE_GROUND,   6, 1, PP_MONUMENT, -1, 0, RS_TARMAC,
-      1, 3,  40,  60, 3 },
+      1, 3,  40,   0, 3 },
     /* FIELDS: sparse deciduous on an open horizon; grazing sheep; dirt road.
      * COUNTRYSIDE = BRIDGES: open farmland is where the road crosses rivers and
      * dry valleys, which is the user's "if it's a countryside there should be
@@ -3433,6 +3471,18 @@ static int tg_surface_attr(int si)
 static int tg_road_page(int si)
 {
     const TG_Biome *b;
+    /* [R3 item 11] A bridge DECK is not tarmac. The biome road pages carry lane
+     * paint and asphalt grain that tile down the span, and on a raised deck that
+     * repeat reads as a stack of identical road tiles rather than a structure.
+     * Swap in the dedicated deck page (cast concrete with a transverse seam per
+     * span) so the crossing looks built, not paved. Bridge runs are near-straight
+     * (item 15), so the transverse seam does not shear. NOT inside a tunnel: a
+     * 40-span bridge run can overlap a 20-span tunnel run (seed 99991 has this at
+     * spans 1340-1359), and there the bridge geometry is suppressed for the
+     * enclosed section, so a deck seam would belong to nothing -- keep the
+     * tunnel's dry tarmac. */
+    if (tg_span_in_bridge_run(si) && !tg_span_in_tunnel(si))
+        return TD5_TG_PAGE_BRIDGE_DECK;
     if (tg_span_tunnel_tarmac(si))
         return tg_road_slot(k_road_surf[RS_TARMAC].page_var);
     /* Same hard index as tg_surface_attr -- the TEXTURE the car drives over and
@@ -4094,6 +4144,23 @@ static int tg_span_in_tunnel(int si)
     return ((h >> 8) % 1000u) < thresh;
 }
 
+/* Lining page for the tunnel RUN containing si (item 16a).
+ *
+ * The report was that every bore wears the one concrete page, so a long
+ * tunnelled stretch reads as a copy-paste. There is no per-bore art to draw on
+ * (tunnels are port-original), so instead we generate several concrete linings
+ * that differ in tone/grain (tg_emit_texture_page_tunnel_var) and hand each RUN
+ * a different one. Keyed on si/RUN, not si, so a single bore is ONE lining end
+ * to end -- a lining that changed mid-tunnel would be the worse artifact. The
+ * base TD5_TG_PAGE_TUNNEL is variant 0 so the existing page is never wasted. */
+static int tg_tunnel_lining_page(int si)
+{
+    unsigned int h = (unsigned)(si / TD5_TG_TUNNEL_RUN) * 2654435761u;
+    unsigned int v = (h >> 13) % (unsigned)TD5_TG_TUNNEL_VARIANTS;
+    if (v == 0) return TD5_TG_PAGE_TUNNEL;
+    return TD5_TG_PAGE_TUNNEL_VAR + (int)(v - 1);
+}
+
 /* Clear interior height of the bore, and the thickness of wall/roof slabs.
  * Named because the mountain massing above the tunnel (tg_emit_fb_tunnel) has
  * to stack on top of the roof and cannot guess these. */
@@ -4180,6 +4247,7 @@ static int tg_emit_tunnel(const TG_NodeList *nl, int si, TG_Buf *blk,
     const double height = TD5_TG_TUNNEL_HEIGHT;
     const double lx = n->tz, lz = -n->tx;
     const unsigned int dim = 0xFF585868u;   /* shadowed blue-grey interior */
+    const int lining = tg_tunnel_lining_page(si);   /* item 16a: per-run variety */
     double bore_half, bore_shift, side_x, cx, cz;
     int i;
 
@@ -4201,7 +4269,7 @@ static int tg_emit_tunnel(const TG_NodeList *nl, int si, TG_Buf *blk,
         }
         if (!tg_emit_box_mesh(blk, cx + ox, cy, cz + oz,
                               hx, hy, 780.0, n->tx, n->tz,
-                              TD5_TG_PAGE_TUNNEL, 3000.0, dim))
+                              lining, 3000.0, dim))
             return 0;
         (*added)++;
         tg_acct(TG_ACCT_TUNNEL, si);
@@ -4212,7 +4280,7 @@ static int tg_emit_tunnel(const TG_NodeList *nl, int si, TG_Buf *blk,
     if (!tg_span_in_tunnel(si - 1) || !tg_span_in_tunnel(si + 1)) {
         if (!tg_emit_box_mesh(blk, cx, n->y + height + 150.0, cz,
                               side_x + wall_t, 500.0, wall_t,
-                              n->tx, n->tz, TD5_TG_PAGE_TUNNEL, 2000.0,
+                              n->tx, n->tz, lining, 2000.0,
                               0xFFFFFFFFu))
             return 0;
         (*added)++;
@@ -4415,28 +4483,15 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
     if (!deliberate && lift < TD5_TG_BRIDGE_MIN_LIFT) return 1;
     tg_bridge_run_bounds(nl, si, &s0, &s1);
 
-    /* Parapets: a low wall along each deck edge.
-     *
-     * [FB r2 item 9] These are the "fences using the same texture as buildings".
-     * They sampled TD5_TG_PAGE_WALL -- the city FACADE page, which under
-     * TD5RE_AUTOTRACK_REAL_TEX is a photographic office frontage, so every
-     * bridge got a run of windows for a guard wall. Same fault the tunnel bore
-     * had. The barrier page (steel/concrete, already loaded for the guardrails)
-     * is what a parapet is made of, and it also separates the parapet from the
-     * structure below, which tg_bridge_pier_page puts on the concrete tunnel
-     * lining page (item 16: pillars and fences must not share a texture). */
-    for (s = 0; s < 2; s++) {
-        double side = s ? 1.0 : -1.0;
-        double lx = n->tz * side, lz = -n->tx * side;
-        double ex = n->x + lx * (half + 120.0);
-        double ez = n->z + lz * (half + 120.0);
-        if (!tg_emit_box_mesh(blk, ex, n->y + 180.0, ez,
-                              90.0, 180.0, 780.0,
-                              n->tx, n->tz, TD5_TG_PAGE_RAIL, 3000.0, 0xFFFFFFFFu))
-            return 0;
-        (*added)++;
-        tg_acct(TG_ACCT_BRIDGE, si);
-    }
+    /* NOTE the parapets are NOT emitted here. [R3 item 12] the old per-span
+     * parapet BOX sat level at its own node height, so on the humped deck and
+     * its approach ramps the boxes stepped up in a staircase -- the "guardrails
+     * look like steps" report. A level box cannot follow a slope, so the rail
+     * moved to tg_emit_bridge_rails, which draws a SLOPED ribbon whose top edge
+     * runs node-to-node and therefore inclines with the deck. It has to be a
+     * separate quad mesh with its own recorded offset because everything emitted
+     * in THIS function is a same-byte-size box, recovered by the caller dividing
+     * the appended bytes by the box count (see the header comment). */
 
     if (tg_bridge_struct_enabled()) {
         /* Girder: full-width beam immediately under the deck, one per span, so
@@ -4530,6 +4585,117 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
                               0xFFFFFFFFu))
             return 0;
         (*added)++;
+        tg_acct(TG_ACCT_BRIDGE, si);
+    }
+    return 1;
+}
+
+/* Does span si carry a bridge DECK? The same two-way test tg_emit_bridge makes
+ * internally (a deliberate run, OR a lone span lifted above the local terrain),
+ * factored out so the parapet emitter gates on EXACTLY the spans that got a
+ * deck -- a rail on a span with no deck under it would float. */
+static int tg_span_is_bridge_deck(const TG_NodeList *nl, int si)
+{
+    double lift;
+    if (tg_span_in_bridge_run(si)) return 1;
+    lift = nl->v[si].y - tg_local_ground_y(nl, si);
+    return lift >= TD5_TG_BRIDGE_MIN_LIFT;
+}
+
+/* Base offset of the parapet above the deck surface (clear of z-fighting) and
+ * its height. */
+#define TD5_TG_BRIDGE_RAIL_BASE  40.0
+#define TD5_TG_BRIDGE_RAIL_H    420.0
+
+/* [R3 item 13] Overhead ribs across the deck are OPTIONAL structure above the
+ * road. Only drawn when the support structure is on; default ON so the fuller
+ * "there should be structure above" silhouette is what ships. Set
+ * TD5RE_AUTOTRACK_BRIDGE_OVERHEAD=0 to leave just the deck, rails and towers. */
+static int tg_bridge_overhead_enabled(void)
+{
+    return td5_env_flag_on("TD5RE_AUTOTRACK_BRIDGE_OVERHEAD");
+}
+
+/* One sloped parapet panel spanning node si -> si+1 on one deck edge. This is
+ * the item-12 fix: the top edge runs from (x0,y0) to (x1,y1), so it INCLINES
+ * with the deck instead of the old level box that stepped. A single quad, its
+ * own recorded mesh offset (it cannot join tg_emit_bridge's equal-size box
+ * group). Sampled from the barrier page like the old parapet. */
+static int tg_emit_bridge_rail_panel(TG_Buf *m,
+                                     double x0, double y0, double z0,
+                                     double x1, double y1, double z1,
+                                     int si, size_t *moff, int *pn)
+{
+    double px[4], py[4], pz[4], uu[4], vv[4];
+    const double base = TD5_TG_BRIDGE_RAIL_BASE, h = TD5_TG_BRIDGE_RAIL_H;
+    int seg_page = TD5_TG_PAGE_RAIL, seg_nq = 1;
+
+    /* Quad: near-bottom, far-bottom, far-top, near-top. u across the page over
+     * the panel height (0..1 = the whole barrier face); v advances one page per
+     * span down the run. */
+    px[0] = x0; py[0] = y0 + base;     pz[0] = z0; uu[0] = 0.0; vv[0] = (double)si;
+    px[1] = x1; py[1] = y1 + base;     pz[1] = z1; uu[1] = 0.0; vv[1] = (double)(si + 1);
+    px[2] = x1; py[2] = y1 + base + h; pz[2] = z1; uu[2] = 1.0; vv[2] = (double)(si + 1);
+    px[3] = x0; py[3] = y0 + base + h; pz[3] = z0; uu[3] = 1.0; vv[3] = (double)si;
+
+    moff[*pn] = m->len;
+    if (!tg_write_quad_mesh(m, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1))
+        return 0;
+    (*pn)++;
+    tg_acct(TG_ACCT_BRIDGE, si);
+    return 1;
+}
+
+/* Parapets on both deck edges (item 12) plus optional overhead ribs (item 13),
+ * for span si. Recorded via moff/pn like tg_emit_bridge_water, so each mesh
+ * carries its own offset -- these are quads, not the boxes tg_emit_bridge's
+ * caller recovers by even division. */
+static int tg_emit_bridge_rails(const TG_NodeList *nl, int si,
+                                TG_Buf *m, size_t *moff, int *pn)
+{
+    const TG_Node *n0 = &nl->v[si];
+    const TG_Node *n1;
+    double half0, half1;
+    int s;
+
+    if (si + 1 >= nl->count) return 1;
+    if (!tg_span_is_bridge_deck(nl, si)) return 1;
+    n1 = &nl->v[si + 1];
+    half0 = n0->width * 0.5 + 120.0;
+    half1 = n1->width * 0.5 + 120.0;
+
+    for (s = 0; s < 2; s++) {
+        const double side = s ? 1.0 : -1.0;
+        const double x0 = n0->x + n0->tz * side * half0;
+        const double z0 = n0->z - n0->tx * side * half0;
+        const double x1 = n1->x + n1->tz * side * half1;
+        const double z1 = n1->z - n1->tx * side * half1;
+        if (!tg_emit_bridge_rail_panel(m, x0, n0->y, z0, x1, n1->y, z1,
+                                       si, moff, pn))
+            return 0;
+    }
+
+    /* Overhead rib: a flat cross-beam bridging the two parapet tops, every 6th
+     * span, so the deck reads as a trussed span rather than a bare slab. Its own
+     * quad mesh / offset. Concrete (pier) page, so it matches the structure. */
+    if (tg_bridge_struct_enabled() && tg_bridge_overhead_enabled() &&
+        (si % 6) == 0) {
+        double px[4], py[4], pz[4], uu[4], vv[4];
+        int seg_page = tg_bridge_pier_page(), seg_nq = 1;
+        const double ry = n0->y + TD5_TG_BRIDGE_RAIL_BASE
+                        + TD5_TG_BRIDGE_RAIL_H + 1800.0;   /* clears traffic */
+        const double lx = n0->tz, lz = -n0->tx;            /* left unit */
+        const double fx = n0->tx * 160.0, fz = n0->tz * 160.0; /* half depth */
+        const double lex = n0->x + lx * half0, lez = n0->z + lz * half0;
+        const double rex = n0->x - lx * half0, rez = n0->z - lz * half0;
+        px[0] = lex - fx; py[0] = ry; pz[0] = lez - fz; uu[0] = 0.0; vv[0] = 0.0;
+        px[1] = rex - fx; py[1] = ry; pz[1] = rez - fz; uu[1] = 1.0; vv[1] = 0.0;
+        px[2] = rex + fx; py[2] = ry; pz[2] = rez + fz; uu[2] = 1.0; vv[2] = 1.0;
+        px[3] = lex + fx; py[3] = ry; pz[3] = lez + fz; uu[3] = 0.0; vv[3] = 1.0;
+        moff[*pn] = m->len;
+        if (!tg_write_quad_mesh(m, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1))
+            return 0;
+        (*pn)++;
         tg_acct(TG_ACCT_BRIDGE, si);
     }
     return 1;
@@ -4637,6 +4803,13 @@ static int tg_biome_is_snow(const TG_Biome *b)
  * terrain read the same page. TD5RE_AUTOTRACK_SNOW=0 restores the green skirt. */
 static int tg_ground_page_for_span(int si, const TG_Biome *b)
 {
+    /* [R3 item 14] "patches of grass on bridges". The terrain beside a bridge
+     * run is the GORGE bank -- rock/earth dropping to the river -- not lawn, but
+     * it inherited the biome's green ground page (FIELDS/COAST carry bridges), so
+     * grass slabs showed under and beside the deck. Give the whole run the
+     * neutral concrete/earth embankment page instead. Cosmetic only; the gorge
+     * SHAPE (pull-back + drop to the river) is set in tg_ground_side. */
+    if (tg_span_in_bridge_run(si)) return TD5_TG_PAGE_GROUND;
     if (!tg_biome_is_snow(b)) return b->ground_page;
     if (tg_span_in_tunnel(si)) return b->ground_page;
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_SNOW")) return b->ground_page;
@@ -6695,6 +6868,11 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 for (k = 0; k < nb; k++)
                     moff[nmesh++] = b1 + (size_t)k *
                                     ((meshes.len - b1) / (size_t)nb);
+                /* Sloped parapets + optional overhead ribs (items 12, 13):
+                 * separate quad meshes, each records its own offset. */
+                if (!tg_emit_bridge_rails(nl, si, &meshes, moff, &nmesh)) {
+                    ok = 0; break;
+                }
                 /* River under a bridge run. */
                 if (tg_span_in_bridge_run(si) &&
                     !tg_emit_bridge_water(nl, si, &meshes, moff, &nmesh)) {
@@ -7573,6 +7751,102 @@ static void tg_emit_texture_page_fb_tunnel(TG_Buf *out)
     }
 }
 
+/* Extra tunnel LININGS for item 16a: same isotropic cast-concrete recipe as the
+ * base page above (no axis-aligned feature, so nothing shears as a bore curves),
+ * but each variant shifts the grey ramp and its warmth and its stain density so
+ * consecutive tunnels plainly differ. variant is 1..4; variant 0 is the base
+ * page and is not generated here. The palette/texel structure is identical to
+ * tg_emit_texture_page_fb_tunnel so the two pages sit at the same tone family --
+ * a tunnel network, not four unrelated boxes. */
+static void tg_emit_texture_page_tunnel_var(TG_Buf *out, int variant)
+{
+    /* vi indexes the tweak tables. Per variant: grey-ramp start, R/G/B tint
+     * offsets (warm sand / cool soot / pale new / damp green-blue) and a stain
+     * frequency (higher = more damp blotching). */
+    static const int base_lo[4]  = { 100,  74, 122,  90 };
+    static const int dR[4]       = {  16,   0,   4, -10 };
+    static const int dG[4]       = {   4,  -2,   2,   6 };
+    static const int dB[4]       = { -10,   6,   0,  14 };
+    static const unsigned bl[4]  = {   2u,  3u,  1u,  2u };
+    const int vi = (variant >= 1 && variant <= 4) ? variant - 1 : 0;
+    unsigned int rng = 0x7011u + (unsigned)variant * 0x9E3779B1u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v = (i < 11) ? (base_lo[vi] + i * 4)
+                         : (base_lo[vi] - 30 - (i - 11) * 9);
+        int b = v + dB[vi], g = v + dG[vi], r = v + dR[vi];
+        b = b < 0 ? 0 : (b > 255 ? 255 : b);
+        g = g < 0 ? 0 : (g > 255 ? 255 : g);
+        r = r < 0 ? 0 : (r > 255 ? 255 : r);
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;
+        unsigned int patch = (unsigned)((x >> 3) + (y >> 3) * 11) * 2654435761u;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if ((patch >> 29) < bl[vi])
+            idx = 11 + (int)((rng >> 16) % 5);          /* damp / soot stain */
+        else
+            idx = (int)((rng >> 16) % 11);              /* concrete grain */
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
+/* Bridge DECK surface (item 11). The road quad maps this page v = si + f, one
+ * page repeat per span, u = 0..lanes across -- so a page with any longitudinal
+ * (lane-paint) feature would tile down the deck as a stack of identical road
+ * tiles, which is exactly the "tiled road on a bridge" report. Two rules follow:
+ *   - ACROSS the deck (u): plain cast concrete, NO lane markings.
+ *   - ALONG the deck (v): one dark EXPANSION-JOINT band per page repeat, i.e.
+ *     one transverse seam per span, which is what a real segmented deck shows
+ *     and reads as structure rather than tarmac. The seam is transverse, so it
+ *     only stays straight because bridge runs are kept near-straight (item 15). */
+static void tg_emit_texture_page_bridge_deck(TG_Buf *out)
+{
+    unsigned int rng = 0xBD9C5A11u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR. 0..12 neutral mid concrete greys, 13..15 dark joint/shadow. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v = (i < 13) ? (120 + i * 4) : (58 - (i - 13) * 12);
+        if (v < 0) v = 0;
+        tg_put_u8(out, (unsigned)v);
+        tg_put_u8(out, (unsigned)v);
+        tg_put_u8(out, (unsigned)v);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;
+        /* The expansion joint: the bottom 3 rows (v just past the span join) go
+         * dark, plus a 1-row soft shadow. A darker slab per ~8 texels elsewhere
+         * so the concrete is not a flat sheet. No vertical (lane) structure. */
+        unsigned int patch = (unsigned)((x >> 3) + (y >> 3) * 9) * 2654435761u;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if (y < 3)              idx = 13 + (int)((rng >> 16) % 3);  /* joint    */
+        else if (y == 3)        idx = 12;                          /* shadow   */
+        else if ((patch >> 30) == 0)
+                                idx = 8 + (int)((rng >> 16) % 4);  /* stain    */
+        else                    idx = (int)((rng >> 16) % 12);     /* concrete */
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 /* Terrain: 0 = SNOW ground, 1 = distant HILL / mountain flank.
  *
  * Both follow the rule the GROUND page comment sets out: NO structure and no
@@ -7824,6 +8098,13 @@ static int tg_emit_textures(TG_Buf *out)
         tg_emit_texture_page_fb_city(&pages[TD5_TG_PAGE_FENCE], 2);
     tg_emit_texture_page_fb_treeline(&pages[TD5_TG_PAGE_TREELINE]);
     tg_emit_texture_page_fb_tunnel(&pages[TD5_TG_PAGE_TUNNEL]);
+    /* [R3 BRIDGE] deck surface (item 11) + 4 extra tunnel linings (item 16a). */
+    tg_emit_texture_page_bridge_deck(&pages[TD5_TG_PAGE_BRIDGE_DECK]);
+    {
+        int v;
+        for (v = 1; v < TD5_TG_TUNNEL_VARIANTS; v++)
+            tg_emit_texture_page_tunnel_var(&pages[TD5_TG_PAGE_TUNNEL_VAR + v - 1], v);
+    }
     tg_emit_texture_page_fb_terrain(&pages[TD5_TG_PAGE_SNOW], 0);
     tg_emit_texture_page_fb_terrain(&pages[TD5_TG_PAGE_HILL], 1);
     tg_emit_texture_page_fb_banner(&pages[TD5_TG_PAGE_BANNER]);
