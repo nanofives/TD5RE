@@ -404,6 +404,9 @@ static UINT64           s_rtts_freq;
 static int              s_rtts_on = -1;
 static double           s_rtts_slow_ms;   /* wall-clock cost of the last slow present */
 static LARGE_INTEGER    s_rtts_t0;        /* wall clock at submit, for that measure   */
+static UINT64           s_rtts_last_end;  /* previous frame's final GPU tick          */
+static int              s_rtts_have_last;
+static double           s_rtts_gap_ms;    /* GPU idle gap before this frame (-1 = n/a) */
 
 /* Defined with the fence helpers further down; the forced drain below needs it. */
 static void d3d12_wait_value(UINT64 v);
@@ -492,17 +495,47 @@ static int rtts_ensure(void)
     return 1;
 }
 
-/* Called at frame open: this slot's marks start fresh. */
+/* Record one timestamp into this frame's slot run. Shared by the RT marks and by
+ * the whole-frame brackets below, so a frame's total GPU span and its RT portion
+ * are measured on the same clock and are directly comparable. */
+static void rtts_stamp(const char *tag)
+{
+    UINT fi, n;
+    if (!rtts_enabled() || !g_d3d12.frame_open || !g_d3d12.list) return;
+    if (!rtts_ensure()) return;
+    fi = g_d3d12.frame_index;
+    n  = s_rtts_count[fi];
+    if (n >= TD5_RTTS_SLOTS) return;
+    strncpy(s_rtts_tag[fi][n], tag ? tag : "", sizeof(s_rtts_tag[fi][n]) - 1);
+    s_rtts_tag[fi][n][sizeof(s_rtts_tag[fi][n]) - 1] = 0;
+    ID3D12GraphicsCommandList_EndQuery(g_d3d12.list, s_rtts_heap,
+        D3D12_QUERY_TYPE_TIMESTAMP, fi * TD5_RTTS_SLOTS + n);
+    s_rtts_count[fi] = n + 1;
+}
+
+/* Called at frame open: this slot's marks start fresh, and the FIRST stamp
+ * brackets the whole frame.
+ *
+ * WHY THE BRACKETS EXIST. The RT marks alone showed 0.13 ms of ray-tracing work
+ * on a frame that cost 4859 ms of CPU wall time -- but they only bracket the RT
+ * ops, so they could not say whether the rest of the frame's GPU work (the track
+ * and actor draws, texture uploads, the blit) was the expensive part. These two
+ * stamps close that gap: "*frame_begin" is the first command recorded and
+ * "*frame_end" the last, so their span is ALL GPU work in the frame. If that span
+ * is also small, no submitted GPU work is slow and the stall is CPU/driver side. */
 static void rtts_frame_begin(UINT fi)
 {
     if (!rtts_enabled()) return;
     s_rtts_count[fi] = 0;
+    rtts_stamp("*frame_begin");
 }
 
-/* Called just before the command list is closed: stage this frame's stamps. */
+/* Called just before the command list is closed: close the bracket, then stage
+ * this frame's stamps. The Resolve must follow the last EndQuery. */
 static void rtts_frame_end(UINT fi)
 {
     if (!rtts_enabled() || !s_rtts_heap || !g_d3d12.list) return;
+    rtts_stamp("*frame_end");
     if (!s_rtts_count[fi]) { s_rtts_pending[fi] = 0; return; }
     ID3D12GraphicsCommandList_ResolveQueryData(g_d3d12.list, s_rtts_heap,
         D3D12_QUERY_TYPE_TIMESTAMP, fi * TD5_RTTS_SLOTS, s_rtts_count[fi],
@@ -533,13 +566,32 @@ static void rtts_drain_ex(UINT fi, int force, double present_ms)
     if (FAILED(ID3D12Resource_Map(s_rtts_rb[fi], 0, &rd, (void **)&ts)) || !ts) return;
 
     total_ms = 1000.0 * (double)(ts[n - 1] - ts[0]) / (double)s_rtts_freq;
+
+    /* GAP SINCE THE PREVIOUS FRAME'S LAST STAMP. This is the discriminator the
+     * per-frame span cannot give: timestamps are absolute GPU ticks, so if this
+     * frame's work is trivial AND the gap before it is also small, the GPU was
+     * neither working nor waiting on a backlog -- the lost time is CPU/driver
+     * side. A large gap instead means the GPU sat idle (or on untimestamped work)
+     * between the two submissions. */
+    if (s_rtts_have_last && ts[0] > s_rtts_last_end)
+        s_rtts_gap_ms = 1000.0 * (double)(ts[0] - s_rtts_last_end) / (double)s_rtts_freq;
+    else
+        s_rtts_gap_ms = -1.0;
+    s_rtts_last_end = ts[n - 1];
+    s_rtts_have_last = 1;
+
     if (force || total_ms >= rtts_threshold_ms()) {
         if (force)
             rtts_log("*** SLOW PRESENT %.0f ms (cpu wall) -- GPU marks for that frame follow ***",
                      present_ms);
-        rtts_log("frame present=%u gen=%u marks=%u span=%.2f ms",
-                 (unsigned)g_backend.present_count, (unsigned)g_backend.device_generation,
-                 n, total_ms);
+        if (s_rtts_gap_ms >= 0.0)
+            rtts_log("frame present=%u gen=%u marks=%u span=%.2f ms  gpu_idle_gap_before=%.2f ms",
+                     (unsigned)g_backend.present_count, (unsigned)g_backend.device_generation,
+                     n, total_ms, s_rtts_gap_ms);
+        else
+            rtts_log("frame present=%u gen=%u marks=%u span=%.2f ms  gpu_idle_gap_before=n/a",
+                     (unsigned)g_backend.present_count, (unsigned)g_backend.device_generation,
+                     n, total_ms);
         for (i = 0; i < n; i++) {
             double from0 = 1000.0 * (double)(ts[i] - ts[0]) / (double)s_rtts_freq;
             double step  = i ? 1000.0 * (double)(ts[i] - ts[i - 1]) / (double)s_rtts_freq : 0.0;
@@ -569,17 +621,7 @@ void Backend_NoteRTMark(const char *tag)
     m->gen     = g_backend.device_generation;
     s_rtmark_head++; s_rtmark_total++;
 
-    if (rtts_enabled() && g_d3d12.frame_open && g_d3d12.list && rtts_ensure()) {
-        UINT fi = g_d3d12.frame_index;
-        UINT n  = s_rtts_count[fi];
-        if (n < TD5_RTTS_SLOTS) {
-            strncpy(s_rtts_tag[fi][n], m->tag, sizeof(s_rtts_tag[fi][n]) - 1);
-            s_rtts_tag[fi][n][sizeof(s_rtts_tag[fi][n]) - 1] = 0;
-            ID3D12GraphicsCommandList_EndQuery(g_d3d12.list, s_rtts_heap,
-                D3D12_QUERY_TYPE_TIMESTAMP, fi * TD5_RTTS_SLOTS + n);
-            s_rtts_count[fi] = n + 1;
-        }
-    }
+    rtts_stamp(m->tag);
 }
 
 void Backend_NotePresent(void)
@@ -785,7 +827,7 @@ static void d3d12_frame_begin(void)
     ID3D12CommandAllocator_Reset(g_d3d12.allocators[idx]);
     ID3D12GraphicsCommandList_Reset(g_d3d12.list, g_d3d12.allocators[idx], NULL);
     s_upload_off[idx] = 0;   /* recycle this slot's upload ring (GPU done via fence) */
-    rtts_frame_begin(idx);   /* RT timestamp slots for this frame start empty */
+    s_rtts_count[idx] = 0;   /* this frame's timestamp slots start empty */
 
     d3d12_resource_barrier(g_d3d12.backbuffers[idx],
         D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -817,6 +859,11 @@ static void d3d12_frame_begin(void)
      * drop it; the draw path re-allocs from the persistent copy on first use. */
     if (s_viewport_cb) s_viewport_cb->gpu_va = 0;
     g_d3d12.frame_open = 1;
+    /* Whole-frame bracket. Must come AFTER frame_open goes 1, because rtts_stamp
+     * refuses to record on a closed frame -- placing it earlier silently dropped
+     * "*frame_begin" and left the span starting at the first RT mark, missing all
+     * the draw work it exists to measure. */
+    rtts_frame_begin(g_d3d12.frame_index);
 }
 
 /* ---- framedump capture (must happen BEFORE the flip; flip-discard recycles
