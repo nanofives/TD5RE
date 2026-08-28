@@ -33,6 +33,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 28" },
+    { CL_ITEM,    "START/FINISH BANNER: the vertical line down the middle" },
+    { CL_ITEM,    "  is gone (half-texel inset at the L/R page join) and" },
+    { CL_ITEM,    "  the legs are squared up so the posts read as solid." },
+    { CL_ITEM,    "DISTANT RIDGE: black line along the texture top removed;" },
+    { CL_ITEM,    "  city/industrial biomes get a building skyline instead" },
+    { CL_ITEM,    "  of a forest canopy on the horizon." },
     { CL_ITEM,    "AUTO TRACKS FINISH AGAIN on branchy seeds. The finish" },
     { CL_ITEM,    "  line was placed on an appended branch corridor a" },
     { CL_ITEM,    "  normal drive never reaches; now on the main ring." },
