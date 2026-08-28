@@ -3665,9 +3665,26 @@ static void tg_side_geom(const TG_NodeList *nl, int si, int left,
     /* Setback is the PAVEMENT width (tg_city_sidewalk_w), not the raw table
      * field: the wall must land on the back edge of the slab the hook lays, or
      * one of the two is left hanging. Base rises by the kerb for the same
-     * reason -- the wall stands ON the pavement, not in the gutter. */
-    set0 = n0->width * 0.5 + tg_city_sidewalk_w(b);
-    set1 = n1->width * 0.5 + tg_city_sidewalk_w(b);
+     * reason -- the wall stands ON the pavement, not in the gutter.
+     *
+     * The setback is pushed out through the SHARED carriageway authority rather
+     * than derived from a fixed width: BRANCH makes the corridor width per-fork
+     * variable, so a facade keying off a constant road half-width would drift
+     * onto a widened branch (the round-3 item 9 "buildings spawned ON the
+     * branches"). tg_carriageway_clear_gap is the documented adoption for
+     * facades and re-derives no fork arithmetic; it returns the pavement width
+     * unchanged wherever the road edge is already the outermost tarmac -- every
+     * span off a fork, and the whole +ve lateral -- so straight city blocks are
+     * byte-identical. The right-side facade in a fork's cleared region is still
+     * dropped by the tg_span_in_fork_clear guard above; this only hardens the
+     * setback everywhere else, and keeps the whole building (front, caps and the
+     * step wall, which all derive from set0/set1) off any carriageway. */
+    {
+        const double gap = tg_carriageway_clear_gap(nl, si, side,
+                               tg_city_sidewalk_w(b), TD5_TG_CARRIAGEWAY_MARGIN);
+        set0 = n0->width * 0.5 + gap;
+        set1 = n1->width * 0.5 + gap;
+    }
 
     g->bx = n0->x + g->lx0 * set0;
     g->by = n0->y + tg_city_kerb_h(b);
@@ -3797,20 +3814,14 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
          *
          * Dedicated knob TD5RE_AUTOTRACK_STEP_WALLS (default on) so this one
          * feature can be A/B'd in isolation from the rest of the FACADE_MASS
-         * pass. CARRIAGEWAY GUARD: like flora and ground skirts, ask the shared
-         * authority (never re-derive fork arithmetic) whether the seam's base
-         * lateral lands on any carriageway -- on a widened fork span the branch
-         * bows into the side<0 lateral, and a wall there would sit in the road.
-         * The base is the seam's CLOSEST point to the road (the wall extends
-         * AWAY from it, into the block), so one test on the base clears it. */
+         * pass. CARRIAGEWAY CLEARANCE is inherited: the base derives from set1,
+         * which tg_side_geom now pushes out through the shared authority, so the
+         * seam can no more land on a branch than the front facade can -- no
+         * separate guard is needed here. */
         if (g->built && td5_env_flag_on("TD5RE_AUTOTRACK_FACADE_MASS") &&
             td5_env_flag_on("TD5RE_AUTOTRACK_STEP_WALLS")) {
             const int nrows = tg_facade_floors(si + 1, s, b);
-            const double base_lat = (s ? 1.0 : -1.0)
-                * (nl->v[si + 1].width * 0.5 + tg_city_sidewalk_w(b));
-            if (nrows > 0 && nrows != g->rows &&
-                !tg_on_carriageway(nl, si + 1, base_lat,
-                                   TD5_TG_CARRIAGEWAY_MARGIN)) {
+            if (nrows > 0 && nrows != g->rows) {
                 const int hi = nrows > g->rows ? nrows : g->rows;
                 const int lo = nrows < g->rows ? nrows : g->rows;
                 const double fh = tg_facade_floor_h(b);
