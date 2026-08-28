@@ -40,7 +40,7 @@ with open(out_path, "w") as fh:
     proc = subprocess.Popen(
         [os.path.join(exe_dir, "td5re.exe"),
          "--AutoRace=1", "--SkipIntro=1", "--DefaultTrack=60",
-         "--PlayerIsAI=1", "--Control=1"],
+         "--PlayerIsAI=1", "--Control=1"] + os.environ.get("TDR_EXTRA_ARGS","").split(),
         cwd=exe_dir, env=env, stdout=fh, stderr=subprocess.STDOUT)
 
 result = "UNKNOWN"

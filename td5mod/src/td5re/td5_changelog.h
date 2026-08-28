@@ -58,6 +58,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "A tight avenue no longer WIDENS its lanes -- that used" },
     { CL_ITEM,    "  to push its inner edge back across the median into" },
     { CL_ITEM,    "  the oncoming carriageway. Wide forks still open out." },
+    { CL_ITEM,    "CITY INTERSECTIONS, PARKS & HOUSES. Side streets now" },
+    { CL_ITEM,    "  read as real junctions -- pavements and railings" },
+    { CL_ITEM,    "  turn to follow the street, some run diagonally. One" },
+    { CL_ITEM,    "  city gap in four is now a green park with a hedge" },
+    { CL_ITEM,    "  border and the odd house instead of a through road." },
+    { CL_ITEM,    "  New: TD5RE_AUTOTRACK_BLOCK_TURNS=1 adds occasional" },
+    { CL_ITEM,    "  around-the-block 90-degree corners in cities." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 27" },

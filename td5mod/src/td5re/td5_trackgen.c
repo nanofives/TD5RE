@@ -273,6 +273,9 @@ static int tg_span_in_bridge_run(int si);
  * turn radius >= ~50000 units, a sweeping curve rather than a hairpin, so a
  * deliberate bridge that lands on a tight section is straightened out. */
 #define TD5_TG_BRIDGE_MAX_TURN 0.03
+/* [R3 BLOCK] item 4: the centerline walk (above the biome block) needs to know
+ * whether span si is a CITY cell to place "around the block" turns there. */
+static int tg_biome_span_is_city(int si);
 
 /* Seed of the last successful build, for reproducing a good random track. */
 static unsigned int s_last_seed = 0;
@@ -336,6 +339,12 @@ typedef enum {
     TG_ACCT_ROAD,           /* drivable road quad */
     TG_ACCT_CHECKPOINT,     /* LEVELINF checkpoint gate */
     TG_ACCT_BRANCH,         /* fork split / rejoin marker */
+    /* [R3 BLOCK] appended (never renumbered): park green + individual houses.
+     * Two new kinds rather than folding houses into TG_ACCT_BUILDING so the
+     * element inventory can confirm the park/house emitters actually fired --
+     * "confirm your emitter ran before hunting pixels". */
+    TG_ACCT_PARK,           /* park lawn / hedge quad */
+    TG_ACCT_HOUSE,          /* individual house in a park */
     TG_ACCT_KIND_COUNT
 } TG_AcctKind;
 
@@ -343,7 +352,8 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
     "buildings", "sidewalks", "shopfronts", "fences",   "lamps",
     "crossings", "trees",     "props",      "water",    "bridge-pieces",
     "tunnel-pieces", "terrain", "far-bands", "banners", "guardrails",
-    "road-quads", "checkpoints", "branch-nodes"
+    "road-quads", "checkpoints", "branch-nodes",
+    "parks", "houses"
 };
 
 static long s_acct_count[TG_ACCT_KIND_COUNT];
@@ -802,6 +812,24 @@ static int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
         const double save_heading = heading;
         const double save_width   = width;
         int rejected = 0;
+
+        /* [R3 BLOCK] item 4: "around the block" 90-degree turns. In a CITY biome
+         * (which the seed lays out before this walk), occasionally force a tight
+         * ACUTE corner so the route reads as turning a block rather than sweeping
+         * through it. The existing ACUTE machinery keeps the curvature-safety
+         * floor and the non-trapping heading budget, so this reuses that guard
+         * rather than adding a new turn kind. Keyed on a per-position hash (not
+         * the shared RNG) so toggling the knob does not otherwise move the road.
+         *
+         * DEFAULT OFF (td5_env_flag_off): a shape change can leave the walk
+         * boxed in and the track short -- the r2-branch item 20 lesson -- so it
+         * is opt-in until driven and checked for "boxed in" in race.log. The
+         * attempts guard keeps the forced-straight escape below able to win. */
+        if (attempts < 8 && td5_env_flag_off("TD5RE_AUTOTRACK_BLOCK_TURNS") &&
+            tg_biome_span_is_city(nl->count)) {
+            const unsigned int bh = (unsigned)nl->count * 2654435761u;
+            if ((bh >> 28) == 0u) sec = TD5_TG_ACUTE;   /* ~1 city section in 16 */
+        }
 
         if (attempts >= 12) sec = TD5_TG_STRAIGHT;   /* try to escape */
 
@@ -3599,6 +3627,12 @@ static int tg_biome_tunnel_pct(int si)
 {
     return k_biomes[tg_biome_cell_index(si)].w_tunnel;
 }
+/* [R3 BLOCK] item 4: HARD cell index (not blended) -- a block turn is a shape
+ * decision, so it must key off the same solid cell the road surface does. */
+static int tg_biome_span_is_city(int si)
+{
+    return !strcmp(k_biomes[tg_biome_cell_index(si)].name, "CITY");
+}
 
 /* TUNNEL EXCEPTION -- the one reason a span's surface is not its biome's.
  * Defined further down; forward-declared here because the two accessors below
@@ -6176,6 +6210,48 @@ static int tg_city_emit_backrows(const TG_FBHook *h, double sw)
     return 1;
 }
 
+/* ===================== [R3 BLOCK] SIDE-STREET DIRECTION =====================
+ * (feedback R3 item 3). Shared by the cross-street carriageway and the sidewalk/
+ * railing arms that flank it, so all three leave the kerb in the SAME direction.
+ * A diagonal carriageway with square-on pavements would read as broken geometry;
+ * routing every arm's outward direction through one function keeps them aligned.
+ *
+ * DIAGONAL variance ("investigate if the crossings can be diagonal"): the angle
+ * is keyed on the facade SUPERBLOCK, not the span, so every span of one gap
+ * skews by the same amount and the arm stays one straight street rather than a
+ * fan. Roughly a third of junctions are angled; the rest stay square. The angle
+ * is capped well under 45 deg so a leaning arm can never double back across the
+ * main carriageway (which would put a side street on top of the road).
+ * ========================================================================== */
+#define TD5_TG_DIAG_MAX_DEG   28.0    /* steepest diagonal side street, deg */
+
+static double tg_block_arm_skew(int si, int left)
+{
+    unsigned int block, phase, gs, gl, h;
+    int av;
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_DIAG_CROSS")) return 0.0;
+    tg_facade_block(si, left, &block, &phase, &gs, &gl, &av);
+    h = (block * 2u + (unsigned)(left ? 1 : 0)) * 2654435761u;
+    if ((h >> 28) >= 5u) return 0.0;             /* ~31% of gaps run angled */
+    {   /* signed fraction in -1..1 from an independent hash slice */
+        const double f = (double)((h >> 8) & 0xFFFFu) / 32768.0 - 1.0;
+        return f * (TD5_TG_DIAG_MAX_DEG * TD5_TG_PI / 180.0);
+    }
+}
+
+/* Rotate an outward unit (ux,uz) in the XZ plane by `ang` radians. */
+static void tg_block_rot2(double ux, double uz, double ang,
+                          double *ox, double *oz)
+{
+    const double c = cos(ang), s = sin(ang);
+    *ox = ux * c - uz * s;
+    *oz = ux * s + uz * c;
+}
+
+/* A park gap carries a lawn instead of a carriageway, so the crossstreet emitter
+ * skips it. Defined with the park code further down; forward-declared here. */
+static int tg_block_is_park(int si, int left);
+
 /* CROSS STREETS. A facade gap used to be nothing but absent buildings: the
  * corner returns turned inward at each end and between them lay the same verge
  * as open country, so a "side street" was a hole in a wall, not a street. This
@@ -6211,16 +6287,24 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
         const double sg = s ? 1.0 : -1.0;
         /* Only where THIS kerb is open. On an avenue both are, and the two
          * quads plus the crossing between them make one crossroads. */
+        double ang, nox, noz, fox, foz;
         if (tg_facade_built(h->si, s)) continue;
+        if (tg_block_is_park(h->si, s)) continue;   /* a park, not a through st */
         if (tg_side_blocked(h->si, sg)) continue;
         tg_city_edge_frame(h->nl, h->si, sg, e);
 
+        /* Skew the outward edge (item 3 diagonal). Both ends rotate by the same
+         * per-gap angle, so the carriageway leans as one straight street. */
+        ang = tg_block_arm_skew(h->si, s);
+        tg_block_rot2(e[6], e[7], ang, &nox, &noz);
+        tg_block_rot2(e[8], e[9], ang, &fox, &foz);
+
         q[0] = e[0];                q[1]  = e[1] + TD5_TG_VERGE_LIFT;
         q[2] = e[2];
-        q[3] = e[0] + e[6] * reach; q[4]  = e[1] + TD5_TG_VERGE_LIFT - drop;
-        q[5] = e[2] + e[7] * reach;
-        q[6] = e[3] + e[8] * reach; q[7]  = e[4] + TD5_TG_VERGE_LIFT - drop;
-        q[8] = e[5] + e[9] * reach;
+        q[3] = e[0] + nox * reach;  q[4]  = e[1] + TD5_TG_VERGE_LIFT - drop;
+        q[5] = e[2] + noz * reach;
+        q[6] = e[3] + fox * reach;  q[7]  = e[4] + TD5_TG_VERGE_LIFT - drop;
+        q[8] = e[5] + foz * reach;
         q[9] = e[3];                q[10] = e[4] + TD5_TG_VERGE_LIFT;
         q[11] = e[5];
         t[0] = 0.0; t[1] = (double)h->si;
@@ -6237,6 +6321,346 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
     h->moff[(*h->nmesh)++] = h->blk->len;
     return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
                               &seg_page, &seg_nq, 1);
+}
+
+/* ==========================================================================
+ * [R3 BLOCK] STREET INTERSECTIONS, PARKS & HOUSES  (feedback R3 items 3-6)
+ *
+ * This whole block is owned by the BLOCK work area. It sits AFTER Group A (city
+ * furniture) and BEFORE the Group A dispatcher on purpose -- its own dispatcher
+ * tg_emit_fb_block is wired into the scenery loop next to tg_emit_fb_city, so
+ * none of the code below edits another area's emitter.
+ *
+ * WHAT A "GAP" IS. tg_facade_built(si, side) is false where a superblock's side
+ * street opens the frontage. Round 2 filled that gap with a carriageway arm
+ * (tg_city_emit_crossstreet) but the pavements and railings ran straight past
+ * it, so a "crossing" was a hole in a wall, not a junction. Two things fix that:
+ *   1. INTERSECTIONS (item 3): at the two ALONG-ROAD corners of a gap, a
+ *      pavement + railing turn off the main kerb and run OUTWARD down the side
+ *      street, so the sidewalk and the guard rail follow the street. The arm
+ *      shares its outward direction with the carriageway (tg_block_arm_skew), so
+ *      a diagonal side street gets diagonal pavements too.
+ *   2. PARKS (items 5-6): one gap in four is a green square instead of a through
+ *      street -- a lawn from the kerb out, a hedge border behind the pavement,
+ *      and the occasional individual house set back on the grass. A park and a
+ *      side street are mutually exclusive on a given gap (tg_block_is_park is the
+ *      single predicate both the crossstreet guard and the park emitter read),
+ *      so a lawn never lands on top of a carriageway.
+ * ========================================================================== */
+
+/* Is the gap on span si / side `left` a PARK rather than a through street?
+ * Keyed on the facade SUPERBLOCK so every span of one gap agrees (a gap lies
+ * wholly within one block's period). Avenues -- open on both kerbs -- are never
+ * parks: an avenue is a through route, not a square. Default ON. */
+static int tg_block_is_park(int si, int left)
+{
+    unsigned int block, phase, gs, gl, h;
+    int av;
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_PARKS")) return 0;
+    tg_facade_block(si, left, &block, &phase, &gs, &gl, &av);
+    if (av) return 0;
+    h = (block * 2u + (unsigned)(left ? 1 : 0)) * 0x85EBCA6Bu;
+    return (h >> 30) == 0u;                       /* ~1 gap in 4 is a park */
+}
+
+/* ---- item 3: one corner arm -- a pavement + railing turning off the main kerb
+ * to run OUTWARD along the side street. `C` is the kerb corner (a main-road edge
+ * point); (ox,oz) the skewed OUTWARD unit down the street; (bx,bz) the BACK unit
+ * (away from the gap, onto the built side) so the slab and railing sit clear of
+ * the carriageway; `reach` how far the arm runs; `sw` the pavement width. Up to
+ * 3 meshes: slab, its road-facing kerb face, and the railing. */
+#define TD5_TG_ARM_SET   140.0    /* railing set back from the kerb, raw */
+
+static int tg_block_emit_arm(const TG_FBHook *h,
+                             double cx, double cy, double cz,
+                             double ox, double oz, double bx, double bz,
+                             double reach, double sw)
+{
+    double px[8], py[8], pz[8], uu[8], vv[8], q[12], t[8];
+    const double drop = TD5_TG_GROUND_DROP * reach / TD5_TG_GROUND_WIDTH;
+    const double ur = reach / (double)TD5_TG_SPAN_LENGTH;
+    const double uw = sw / (double)TD5_TG_SPAN_LENGTH;
+    const double back = (sw * 0.35 < TD5_TG_ARM_SET) ? sw * 0.35 : TD5_TG_ARM_SET;
+    int seg_page, seg_nq, n;
+
+    /* Slab top at kerb height: kerb-corner, kerb-outer, back-outer, back-corner.
+     * "back" thickens the slab by sw away from the carriageway. */
+    n = 0; seg_page = TD5_TG_PAGE_SIDEWALK;
+    q[0]  = cx;                     q[1]  = cy + TD5_TG_KERB_H;
+    q[2]  = cz;
+    q[3]  = cx + ox * reach;        q[4]  = cy + TD5_TG_KERB_H - drop;
+    q[5]  = cz + oz * reach;
+    q[6]  = cx + ox * reach + bx * sw; q[7] = cy + TD5_TG_KERB_H - drop;
+    q[8]  = cz + oz * reach + bz * sw;
+    q[9]  = cx + bx * sw;           q[10] = cy + TD5_TG_KERB_H;
+    q[11] = cz + bz * sw;
+    t[0] = 0.0; t[1] = 0.0;  t[2] = ur; t[3] = 0.0;
+    t[4] = ur;  t[5] = uw;   t[6] = 0.0; t[7] = uw;
+    tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+    if (*h->nmesh >= h->maxmesh) return 1;
+    seg_nq = n / 4;
+    tg_acct(TG_ACCT_SIDEWALK, h->si);
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1))
+        return 0;
+
+    /* Kerb face down to the carriageway along the kerb-corner..kerb-outer edge. */
+    n = 0;
+    q[0]  = cx;                q[1]  = cy;                    q[2]  = cz;
+    q[3]  = cx + ox * reach;   q[4]  = cy - drop;             q[5]  = cz + oz * reach;
+    q[6]  = cx + ox * reach;   q[7]  = cy + TD5_TG_KERB_H - drop;
+    q[8]  = cz + oz * reach;
+    q[9]  = cx;                q[10] = cy + TD5_TG_KERB_H;    q[11] = cz;
+    t[0] = 0.0; t[1] = 0.0; t[2] = ur; t[3] = 0.0;
+    t[4] = ur; t[5] = TD5_TG_KERB_H / (double)TD5_TG_SPAN_LENGTH;
+    t[6] = 0.0; t[7] = TD5_TG_KERB_H / (double)TD5_TG_SPAN_LENGTH;
+    tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+    if (*h->nmesh >= h->maxmesh) return 1;
+    seg_nq = n / 4;
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1))
+        return 0;
+
+    /* Railing along the same edge, set back onto the slab (posts off the road). */
+    n = 0; seg_page = TD5_TG_PAGE_FENCE;
+    q[0]  = cx + bx * back;              q[1]  = cy + TD5_TG_KERB_H;
+    q[2]  = cz + bz * back;
+    q[3]  = cx + bx * back + ox * reach; q[4]  = cy + TD5_TG_KERB_H - drop;
+    q[5]  = cz + bz * back + oz * reach;
+    q[6]  = cx + bx * back + ox * reach; q[7]  = cy + TD5_TG_KERB_H - drop + TD5_TG_FENCE_H;
+    q[8]  = cz + bz * back + oz * reach;
+    q[9]  = cx + bx * back;              q[10] = cy + TD5_TG_KERB_H + TD5_TG_FENCE_H;
+    q[11] = cz + bz * back;
+    t[0] = 0.0; t[1] = 1.0; t[2] = ur; t[3] = 1.0;
+    t[4] = ur;  t[5] = 0.0; t[6] = 0.0; t[7] = 0.0;
+    tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+    if (*h->nmesh >= h->maxmesh) return 1;
+    seg_nq = n / 4;
+    tg_acct(TG_ACCT_FENCE, h->si);
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
+}
+
+/* Intersections (item 3): pavement + railing arms at the two along-road corners
+ * of every side-street gap, so the sidewalks and guard rails TURN to follow the
+ * street. Only at the gap's boundary spans (where the neighbour on that side is
+ * built) -- the interior of the gap is the carriageway itself. Parks and forks
+ * are skipped: a park has no through street, and a fork's half-width road has no
+ * room for a junction. */
+static int tg_block_emit_intersection(const TG_FBHook *h)
+{
+    double e[10];
+    const double sw = tg_city_sidewalk_w(h->b);
+    int s;
+
+    if (!(sw > 0.0)) return 1;
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_INTERSECTIONS")) return 1;
+    if (tg_span_in_bridge_run(h->si)) return 1;
+    if (tg_branches_enabled() && tg_span_in_fork_clear(h->si)) return 1;
+
+    for (s = 0; s < 2; s++) {
+        const double sg = s ? 1.0 : -1.0;
+        double reach, ang, ax, az, alen, ox, oz;
+        int near_corner, far_corner;
+
+        if (tg_facade_built(h->si, s)) continue;      /* built = no junction */
+        if (tg_block_is_park(h->si, s)) continue;     /* a park, not a street */
+        if (tg_side_blocked(h->si, sg)) continue;
+        near_corner = tg_facade_built(h->si - 1, s);  /* gap starts here */
+        far_corner  = tg_facade_built(h->si + 1, s);  /* gap ends here */
+        if (!near_corner && !far_corner) continue;    /* gap interior */
+
+        tg_city_edge_frame(h->nl, h->si, sg, e);
+        reach = tg_city_crossst_reach(h->b, sw);
+        ang   = tg_block_arm_skew(h->si, s);
+        /* Along-road unit, near -> far. */
+        ax = e[3] - e[0]; az = e[5] - e[2];
+        alen = sqrt(ax * ax + az * az);
+        if (alen < 1e-6) { ax = 0.0; az = 1.0; } else { ax /= alen; az /= alen; }
+
+        if (near_corner) {                            /* corner at the near node */
+            tg_block_rot2(e[6], e[7], ang, &ox, &oz);
+            /* back = -along (onto the built side, off the carriageway). */
+            if (!tg_block_emit_arm(h, e[0], e[1], e[2], ox, oz, -ax, -az,
+                                   reach, sw))
+                return 0;
+        }
+        if (far_corner) {                             /* corner at the far node */
+            tg_block_rot2(e[8], e[9], ang, &ox, &oz);
+            if (!tg_block_emit_arm(h, e[3], e[4], e[5], ox, oz, ax, az,
+                                   reach, sw))
+                return 0;
+        }
+    }
+    return 1;
+}
+
+/* ---- items 5-6: parks & houses ----------------------------------------------
+ * A park fills a gap side with a lawn, a hedge border behind the pavement, and
+ * the occasional house. The lawn abuts span to span (shared endpoints) into one
+ * continuous green, the same no-pop trick the treeline band uses. */
+#define TD5_TG_HEDGE_H    520.0    /* park hedge height, raw (~2 wu, see over)  */
+#define TD5_TG_HOUSE_W   2600.0    /* individual house footprint, raw           */
+#define TD5_TG_HOUSE_D   2200.0
+#define TD5_TG_HOUSE_H   2600.0    /* ~two low storeys                          */
+
+/* One small house box (4 walls + a roof) as a single 2-segment mesh, centred
+ * along the span and set back on the lawn. Walls on the house page, roof on the
+ * roof page. */
+static int tg_block_emit_house(const TG_FBHook *h, const double *e, double set)
+{
+    double px[20], py[20], pz[20], uu[20], vv[20];
+    double ax, az, alen, ox, oz, y0, drop;
+    double flx, flz, frx, frz, blx, blz, brx, brz;
+    const double w = TD5_TG_HOUSE_W, d = TD5_TG_HOUSE_D, H = TD5_TG_HOUSE_H;
+    int seg_page[2], seg_nq[2], n = 0;
+
+    /* Along-road unit and length of this span's edge. */
+    ax = e[3] - e[0]; az = e[5] - e[2];
+    alen = sqrt(ax * ax + az * az);
+    if (alen < 1e-6) return 1;
+    ax /= alen; az /= alen;
+    ox = e[6]; oz = e[7];                     /* near outward (square-on house) */
+    drop = TD5_TG_GROUND_DROP * set / TD5_TG_GROUND_WIDTH;
+    y0 = e[1] + TD5_TG_VERGE_LIFT - drop;
+
+    {   /* front-left base, centred along the span. */
+        const double off = (alen - w) > 0.0 ? (alen - w) * 0.5 : 0.0;
+        const double fx = e[0] + ax * off + ox * set;
+        const double fz = e[2] + az * off + oz * set;
+        flx = fx;            flz = fz;
+        frx = fx + ax * w;   frz = fz + az * w;
+        blx = flx + ox * d;  blz = flz + oz * d;
+        brx = frx + ox * d;  brz = frz + oz * d;
+    }
+
+    /* Four walls (near-bottom, far-bottom, far-top, near-top per quad). */
+    #define HQ(x0,z0,x1,z1) \
+        do { \
+            px[n]=x0; py[n]=y0;   pz[n]=z0; uu[n]=0.0; vv[n]=1.0; n++; \
+            px[n]=x1; py[n]=y0;   pz[n]=z1; uu[n]=1.0; vv[n]=1.0; n++; \
+            px[n]=x1; py[n]=y0+H; pz[n]=z1; uu[n]=1.0; vv[n]=0.0; n++; \
+            px[n]=x0; py[n]=y0+H; pz[n]=z0; uu[n]=0.0; vv[n]=0.0; n++; \
+        } while (0)
+    HQ(flx, flz, frx, frz);      /* front */
+    HQ(brx, brz, blx, blz);      /* back  */
+    HQ(blx, blz, flx, flz);      /* left  */
+    HQ(frx, frz, brx, brz);      /* right */
+    #undef HQ
+
+    /* Roof: flat deck at the top (near a low pitch would need a ridge; a deck
+     * reads fine at the distance a park house is ever seen). */
+    px[n]=flx; py[n]=y0+H; pz[n]=flz; uu[n]=0.0; vv[n]=1.0; n++;
+    px[n]=frx; py[n]=y0+H; pz[n]=frz; uu[n]=1.0; vv[n]=1.0; n++;
+    px[n]=brx; py[n]=y0+H; pz[n]=brz; uu[n]=1.0; vv[n]=0.0; n++;
+    px[n]=blx; py[n]=y0+H; pz[n]=blz; uu[n]=0.0; vv[n]=0.0; n++;
+
+    if (*h->nmesh >= h->maxmesh) return 1;
+    seg_page[0] = TD5_TG_PAGE_R3_BLOCK + 2;   /* house wall */
+    seg_nq[0]   = 4;
+    seg_page[1] = TD5_TG_PAGE_R3_BLOCK + 3;   /* house roof */
+    seg_nq[1]   = 1;
+    tg_acct(TG_ACCT_HOUSE, h->si);
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, seg_page, seg_nq, 2);
+}
+
+/* Park green + hedge (+ a house on some spans) for every open, non-street gap
+ * side. Default ON; houses behind their own knob so a plain green park is one
+ * A/B away. */
+static int tg_block_emit_park(const TG_FBHook *h)
+{
+    const double sw = tg_city_sidewalk_w(h->b);
+    int s;
+
+    if (!(sw > 0.0)) return 1;
+    if (tg_span_in_bridge_run(h->si)) return 1;
+    if (tg_branches_enabled() && tg_span_in_fork_clear(h->si)) return 1;
+
+    for (s = 0; s < 2; s++) {
+        const double sg = s ? 1.0 : -1.0;
+        double e[10], q[12], t[8], px[8], py[8], pz[8], uu[8], vv[8];
+        double reach, drop, u_r;
+        int seg_page, seg_nq, n;
+
+        if (tg_facade_built(h->si, s)) continue;
+        if (!tg_block_is_park(h->si, s)) continue;    /* only park gaps */
+        if (tg_side_blocked(h->si, sg)) continue;
+        tg_city_edge_frame(h->nl, h->si, sg, e);
+
+        reach = tg_city_crossst_reach(h->b, sw);
+        drop  = TD5_TG_GROUND_DROP * reach / TD5_TG_GROUND_WIDTH;
+        u_r   = reach / (double)TD5_TG_SPAN_LENGTH;
+
+        /* Lawn: kerb -> reach, sinking with the skirt, isotropic UV so it tiles
+         * the same on curves. Same winding as the verge band. */
+        n = 0; seg_page = TD5_TG_PAGE_R3_BLOCK + 0;   /* park lawn */
+        q[0] = e[0];               q[1]  = e[1] + TD5_TG_VERGE_LIFT;
+        q[2] = e[2];
+        q[3] = e[0] + e[6] * reach; q[4] = e[1] + TD5_TG_VERGE_LIFT - drop;
+        q[5] = e[2] + e[7] * reach;
+        q[6] = e[3] + e[8] * reach; q[7] = e[4] + TD5_TG_VERGE_LIFT - drop;
+        q[8] = e[5] + e[9] * reach;
+        q[9] = e[3];               q[10] = e[4] + TD5_TG_VERGE_LIFT;
+        q[11] = e[5];
+        t[0] = 0.0; t[1] = (double)h->si;
+        t[2] = u_r; t[3] = (double)h->si;
+        t[4] = u_r; t[5] = (double)h->si + 1.0;
+        t[6] = 0.0; t[7] = (double)h->si + 1.0;
+        tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+        if (*h->nmesh >= h->maxmesh) return 1;
+        seg_nq = n / 4;
+        tg_acct(TG_ACCT_PARK, h->si);
+        h->moff[(*h->nmesh)++] = h->blk->len;
+        if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                                &seg_page, &seg_nq, 1))
+            return 0;
+
+        /* Hedge border, standing on the lawn just behind the pavement (sw out),
+         * low enough to see the park over it. CULL_NONE, so one plane reads from
+         * both sides. */
+        n = 0; seg_page = TD5_TG_PAGE_R3_BLOCK + 1;   /* park hedge */
+        q[0] = e[0] + e[6] * sw;  q[1]  = e[1] + TD5_TG_KERB_H;
+        q[2] = e[2] + e[7] * sw;
+        q[3] = e[3] + e[8] * sw;  q[4]  = e[4] + TD5_TG_KERB_H;
+        q[5] = e[5] + e[9] * sw;
+        q[6] = e[3] + e[8] * sw;  q[7]  = e[4] + TD5_TG_KERB_H + TD5_TG_HEDGE_H;
+        q[8] = e[5] + e[9] * sw;
+        q[9] = e[0] + e[6] * sw;  q[10] = e[1] + TD5_TG_KERB_H + TD5_TG_HEDGE_H;
+        q[11] = e[2] + e[7] * sw;
+        t[0] = 0.0; t[1] = 1.0; t[2] = 1.0; t[3] = 1.0;
+        t[4] = 1.0; t[5] = 0.0; t[6] = 0.0; t[7] = 0.0;
+        tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+        if (*h->nmesh >= h->maxmesh) return 1;
+        seg_nq = n / 4;
+        tg_acct(TG_ACCT_PARK, h->si);
+        h->moff[(*h->nmesh)++] = h->blk->len;
+        if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                                &seg_page, &seg_nq, 1))
+            return 0;
+
+        /* One house on ~1 park span in 4, set back in the middle of the lawn. */
+        if (td5_env_flag_on("TD5RE_AUTOTRACK_PARK_HOUSES")) {
+            const unsigned int hh = ((unsigned)h->si * 2654435761u
+                                     + (unsigned)s * 40503u) * 0x9E3779B9u;
+            if ((hh >> 30) == 0u) {
+                const double set = sw + (reach - sw) * 0.45;
+                if (!tg_block_emit_house(h, e, set)) return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+/* Group BLOCK dispatcher (feedback R3 items 3-6). Wired into the scenery loop
+ * next to tg_emit_fb_city; keeps all BLOCK-area emitters out of another area's
+ * dispatcher. */
+static int tg_emit_fb_block(const TG_FBHook *h)
+{
+    if (!tg_city_span_paved(h)) return 1;      /* only where the city is */
+    if (!tg_block_emit_intersection(h)) return 0;
+    if (!tg_block_emit_park(h)) return 0;
+    return 1;
 }
 
 /* Group A -- city: sidewalks, kerb fences, crossings, deeper building rows. */
@@ -7233,6 +7657,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     if (!tg_emit_fb_tunnel(&hook)) { ok = 0; break; }
                 } else {
                     if (!tg_emit_fb_city(&hook))    { ok = 0; break; }
+                    if (!tg_emit_fb_block(&hook))   { ok = 0; break; }
                     if (!tg_emit_fb_flora(&hook))   { ok = 0; break; }
                     if (!tg_emit_fb_terrain(&hook)) { ok = 0; break; }
                 }
@@ -7840,6 +8265,90 @@ static void tg_emit_texture_page_ground(TG_Buf *out)
             idx = 12 + (int)((rng >> 16) % 4);           /* gravel/stain */
         else
             idx = (int)((rng >> 16) % 12);               /* concrete grain */
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
+/* [R3 BLOCK] pages for parks & houses (feedback items 5-6). One generator,
+ * `which` selects the artwork so the four block pages share one function:
+ *   0 park LAWN   -- mowed grass, brighter and more uniform than the mottled
+ *                    hedgerow GREEN page, with faint mow stripes down-track so a
+ *                    flat lawn is not a dead sheet.
+ *   1 park HEDGE  -- dense dark clipped foliage, low-frequency clumps, no lines.
+ *   2 house WALL  -- warm plaster/brick with small windows and a door, a domestic
+ *                    frontage rather than the tall CITY office grid.
+ *   3 house ROOF  -- terracotta tiles in horizontal courses.
+ * Isotropic where it can be (lawn/hedge tile over a curved skirt); the house
+ * pages map one cell per face so a light window grid is fine. */
+static void tg_emit_texture_page_r3_block(TG_Buf *out, int which)
+{
+    unsigned int rng = 0x6C078965u + (unsigned)which * 0x9E3779B9u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* Palette (BGR). */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        if (which == 0) {            /* mowed grass: green ramp, light->deep */
+            b = 40 + i * 3;  g = 96 + i * 8;  r = 44 + i * 4;
+        } else if (which == 1) {     /* hedge: darker, denser green */
+            b = 24 + i * 2;  g = 58 + i * 6;  r = 22 + i * 3;
+        } else if (which == 2) {     /* house wall: warm plaster/brick */
+            if (i < 10)      { b = 120 + i * 6; g = 138 + i * 6; r = 158 + i * 6; }
+            else if (i < 13) { b = 40;          g = 40;          r = 44;          }
+            else             { b = 150 + (i-13)*24; g = 172 + (i-13)*22;
+                               r = 196 + (i-13)*18; }   /* lit panes */
+        } else {                     /* roof: terracotta tiles */
+            if (i < 12) { b = 40 + i * 3; g = 60 + i * 4; r = 120 + i * 8; }
+            else        { b = 30;         g = 44;         r = 90 + (i-12)*6; }
+        }
+        if (r > 255) r = 255;
+        if (g > 255) g = 255;
+        if (b > 255) b = 255;
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        int x = i % TD5_TG_TEX_DIM;
+        int y = i / TD5_TG_TEX_DIM;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if (which == 0) {
+            /* Grass grain with a faint vertical mow stripe every 8 texels. */
+            int base = 6 + (int)((rng >> 16) % 8);
+            if (((x >> 3) & 1) == 0) base += 2;
+            if (base > 15) base = 15;
+            idx = base;
+        } else if (which == 1) {
+            /* Clumped foliage, no structure -- reads as a hedge over any slope. */
+            unsigned int cell = (unsigned)((y / 8) * 8 + (x / 8)) * 2654435761u;
+            idx = ((cell >> 29) == 0) ? (int)((rng >> 16) % 5)
+                                      : 5 + (int)((rng >> 16) % 10);
+        } else if (which == 2) {
+            /* Two window bays + a central door on the ground row. */
+            int cell = TD5_TG_TEX_DIM / 3;              /* 3 bays across */
+            int wx = x % cell, wy = y % 20;
+            if (wy < 2 || wx < 2) {
+                idx = 10 + (int)((rng >> 16) % 3);      /* trim / mortar lines */
+            } else if (y > 48 && x > 27 && x < 37) {
+                idx = 10 + (int)((rng >> 16) % 3);      /* door */
+            } else if (wx >= 3 && wx <= cell - 3 && wy >= 5 && wy <= 15) {
+                unsigned int pane = (unsigned)((y / 20) * 3 + x / cell)
+                                    * 2654435761u;
+                idx = ((pane >> 29) == 0) ? (13 + (int)((rng >> 18) % 3)) : 11;
+            } else {
+                idx = (int)((rng >> 16) % 10);          /* plaster */
+            }
+        } else {
+            /* Terracotta courses: a darker mortar line every 8 rows. */
+            idx = ((y & 7) == 0) ? 12 + (int)((rng >> 16) % 4)
+                                 : (int)((rng >> 16) % 12);
+        }
         tg_put_u8(out, (unsigned)idx);
     }
 }
@@ -8526,6 +9035,12 @@ static int tg_emit_textures(TG_Buf *out)
                       k_furn_finish_l_paln, k_furn_finish_l_idx, k_furn_finish_l_type);
     tg_emit_real_page(&pages[TD5_TG_PAGE_FINISH_R], k_furn_finish_r_pal,
                       k_furn_finish_r_paln, k_furn_finish_r_idx, k_furn_finish_r_type);
+    /* [R3 BLOCK] park & house art (feedback items 5-6). Slots +4..+9 of the
+     * BLOCK reservation stay empty (unreferenced empty pages are free). */
+    tg_emit_texture_page_r3_block(&pages[TD5_TG_PAGE_R3_BLOCK + 0], 0);  /* lawn  */
+    tg_emit_texture_page_r3_block(&pages[TD5_TG_PAGE_R3_BLOCK + 1], 1);  /* hedge */
+    tg_emit_texture_page_r3_block(&pages[TD5_TG_PAGE_R3_BLOCK + 2], 2);  /* wall  */
+    tg_emit_texture_page_r3_block(&pages[TD5_TG_PAGE_R3_BLOCK + 3], 3);  /* roof  */
 
     for (i = 0; i < count; i++) {
         if (pages[i].oom) {
