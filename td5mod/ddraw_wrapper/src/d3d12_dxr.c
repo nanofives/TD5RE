@@ -830,12 +830,42 @@ static void dxr_write_geo(int slot, const DxrMesh *m)
     g->matid         = m->nranges ? m->ranges[0].matid_flags : 0u;
 }
 
+/* [POOL REWIND 2026-08-28] The VB/IB pools are a bump allocator with no free
+ * list: Backend_RTMeshCreate only ever advances vb_used/ib_used, dxr_free_mesh
+ * never gave the bytes back, and dxr_ensure_pools() early-returns once the pools
+ * exist, so the counters used to reset ONLY at pool creation. Every in-place race
+ * restart therefore burned another whole track's worth of pool -- race 2
+ * allocated from wherever race 1 stopped -- and on exhaustion the failure is
+ * quiet and nasty: "pool overflow -- mesh dropped", after which that mesh is
+ * simply absent from every ray-traced pass with no crash to point at it.
+ *
+ * Rewinding is safe EXACTLY when no mesh occupies the pool any more, since
+ * nothing then holds a vb_offset/ib_offset into it. td5_rt_level_unload() frees
+ * the whole mesh set in one go, so that condition is genuinely reached on every
+ * level teardown -- which is the case that was leaking.
+ *
+ * NOT the cause of the RT-HIGH restart wedge (measured 0 overflows across a
+ * restart on the auto track: 128 MB VB / 48 MB IB absorbs ~1900 small meshes
+ * twice over). This is a latent leak that a denser track or a long session of
+ * restarts would hit. */
+static void dxr_pool_rewind_if_empty(void)
+{
+    UINT i;
+    for (i = 0; i < DXR_MAX_MESHES; i++)
+        if (g_dxr.meshes[i].used) return;      /* someone still holds an offset */
+    if (g_dxr.vb_used || g_dxr.ib_used)
+        dxr_log("pool rewind: all meshes freed, vb %u ib %u -> 0",
+                g_dxr.vb_used, g_dxr.ib_used);
+    g_dxr.vb_used = g_dxr.ib_used = 0;
+}
+
 static void dxr_free_mesh(DxrMesh *m)
 {
     if (m->blas)    { d3d12_priv_retire(m->blas); m->blas = NULL; }
     if (m->staging) { d3d12_priv_retire(m->staging); m->staging = NULL; }
     free(m->ranges); m->ranges = NULL;
     ZeroMemory(m, sizeof(*m));
+    dxr_pool_rewind_if_empty();
 }
 
 int Backend_RTMeshCreate(const BackendRTVertex *verts, unsigned nverts,
