@@ -151,7 +151,54 @@ static int tg_road_page(int si);
 #define TD5_TG_PAGE_START_R   (TD5_TG_PAGE_FB_BASE + 10) /* L001 p338 "RT"    */
 #define TD5_TG_PAGE_FINISH_L  (TD5_TG_PAGE_FB_BASE + 11) /* L001 p369 "FIN"   */
 #define TD5_TG_PAGE_FINISH_R  (TD5_TG_PAGE_FB_BASE + 12) /* L001 p370 "ISH"   */
-#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_FB_BASE + 13)
+
+/* ===================== [R3] RESERVED PAGE SLOTS =====================
+ * SEAM CARVING for the round-3 feedback batch, same pattern that made round 1
+ * survive five concurrent editors.
+ *
+ * THE PROBLEM THIS SOLVES. Every page id here is DERIVED from its neighbour, so
+ * two agents each appending "one more page" both rewrite the same tail of the
+ * chain and the #define block becomes one unresolvable conflict. That is exactly
+ * what happened in round 2 (r2-city took PAGE_COUNT 42->52 while r2-furniture
+ * took it 42->47, a 3-way hand-recombine).
+ *
+ * THE RULE. Each work area gets a PRE-RESERVED, FIXED-SIZE block measured off
+ * TD5_TG_PAGE_R3_BASE -- never off its neighbour's block. Use only your own
+ * block. Do NOT move TD5_TG_PAGE_COUNT, do NOT renumber another area's slots,
+ * and do NOT append outside your range. Unused slots inside a block are free:
+ * they cost one 64x64 page each and the loader cap is 1024, so we are nowhere
+ * near a limit. Blocks are deliberately spaced and each is introduced by its own
+ * comment, so two areas filling different blocks touch non-adjacent lines --
+ * round 1's other lesson was that ADJACENT stubs merge into one conflict region
+ * even when the edits are logically independent.
+ *
+ * Owners (see docs/AUTOTRACK_FEEDBACK_R3.md for the item numbers):
+ *   CITY   items 1, 2     building side walls, back rows behind real streets
+ *   BLOCK  items 3-6      intersections, 90-degree block turns, parks, houses
+ *   BRANCH items 9, 10    avenue dividers, variable branch separation
+ *   BRIDGE items 11-16    bridge deck/rail/structure, tunnel lining variety
+ * ==================================================================== */
+#define TD5_TG_PAGE_R3_BASE   (TD5_TG_PAGE_FB_BASE + 13)
+
+/* --- CITY block (items 1, 2): 6 slots ------------------------------------- */
+#define TD5_TG_PAGE_R3_CITY   (TD5_TG_PAGE_R3_BASE + 0)
+#define TD5_TG_R3_CITY_N      6
+
+/* --- BLOCK block (items 3-6): 10 slots. Widest reservation on purpose --
+ * intersections, park greens/hedges and individual houses are all new art. --- */
+#define TD5_TG_PAGE_R3_BLOCK  (TD5_TG_PAGE_R3_BASE + 8)
+#define TD5_TG_R3_BLOCK_N     10
+
+/* --- BRANCH block (items 9, 10): 4 slots (avenue dividers, kerb infill) --- */
+#define TD5_TG_PAGE_R3_BRANCH (TD5_TG_PAGE_R3_BASE + 20)
+#define TD5_TG_R3_BRANCH_N    4
+
+/* --- BRIDGE block (items 11-16): 8 slots. Item 16 explicitly asks for tunnel
+ * lining VARIETY, so several of these are tunnel variants. ------------------ */
+#define TD5_TG_PAGE_R3_BRIDGE (TD5_TG_PAGE_R3_BASE + 26)
+#define TD5_TG_R3_BRIDGE_N    8
+
+#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R3_BASE + 36)
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
