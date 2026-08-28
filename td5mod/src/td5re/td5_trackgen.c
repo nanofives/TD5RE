@@ -393,7 +393,7 @@ typedef enum {
      * line. An unused reserved slot just reports 0 in the inventory. */
     TG_ACCT_R4_FLOW,        /* FLOW  (items 1, 5, 12)   rename in place */
     TG_ACCT_R4_CROSS,       /* CROSS (items 2,4,9,10,14) rename in place */
-    TG_ACCT_R4_CITY,        /* CITY  (items 3, 6, 13, 15) rename in place */
+    TG_ACCT_FORKBACK,       /* CITY item 6: background massing behind a fork gore */
     TG_ACCT_R4_BRANCH,      /* BRANCH(items 7, 8, 11)   rename in place */
     TG_ACCT_R4_BRIDGE,      /* BRIDGE(items 16-20)      rename in place */
     TG_ACCT_KIND_COUNT
@@ -413,7 +413,7 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
      * two names silently concatenated into a single string literal. */
     "r4-flow",              /* FLOW   */
     "r4-cross",             /* CROSS  */
-    "r4-city",              /* CITY   */
+    "fork-back",            /* CITY   */
     "r4-branch",            /* BRANCH */
     "r4-bridge"             /* BRIDGE */
 };
@@ -3109,6 +3109,26 @@ static int tg_facade_built(int si, int left)
     return (int)(phase < gs || phase >= gs + gl);
 }
 
+/* Does a facade actually STAND on side `left` (1=left,0=right) at span si? The
+ * run/gap pattern (tg_facade_built) is not the whole story: a fork clears its
+ * side<0 (=right, left==0) lateral for the branch corridor, and tg_side_geom
+ * drops the wall there. Caps, step walls and neighbour-height queries must all
+ * agree with tg_side_geom on this or a flank facing a suppressed side is left
+ * open air -- the returning "some buildings still don't have sides, only a
+ * facade" (item 15): a run whose FAR neighbour is a fork-cleared span had
+ * cap_far == !tg_facade_built(si+1) == 0 (the pattern still says "built"), and
+ * the step wall would even try to close to a building that was never emitted.
+ * One predicate, shared, removes both mismatches. Gated so the widened coverage
+ * can be A/B'd against the old cap-on-gap-only behaviour. */
+static int tg_side_built(int si, int left)
+{
+    if (!tg_facade_built(si, left)) return 0;
+    if (td5_env_flag_on("TD5RE_AUTOTRACK_SIDE_CLOSE") &&
+        tg_branches_enabled() && !left && tg_span_in_fork_clear(si))
+        return 0;
+    return 1;
+}
+
 /* Hash identifying the RUN span si belongs to on this side. A superblock now
  * holds up to TWO runs (before and after its side street), so keying pages and
  * floor counts on the superblock alone would give one texture and one height to
@@ -4017,8 +4037,12 @@ static void tg_side_geom(const TG_NodeList *nl, int si, int left,
     if (flen < 1.0) flen = 1.0;
     g->cols = tg_facade_cols_for(flen, (double)b->cell_w, 4);
 
-    g->cap_near = !tg_facade_built(si - 1, left);
-    g->cap_far  = !tg_facade_built(si + 1, left);
+    /* A cap closes a flank whose neighbour side is NOT actually built -- which
+     * includes a fork-cleared span (item 15), not just a run/gap boundary.
+     * tg_side_built folds that in; on the left side and off any fork it is
+     * exactly tg_facade_built, so straight blocks are unchanged. */
+    g->cap_near = !tg_side_built(si - 1, left);
+    g->cap_far  = !tg_side_built(si + 1, left);
     g->built = 1;
 }
 
@@ -4139,7 +4163,8 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
          * seam can no more land on a branch than the front facade can -- no
          * separate guard is needed here. */
         if (g->built && td5_env_flag_on("TD5RE_AUTOTRACK_FACADE_MASS") &&
-            td5_env_flag_on("TD5RE_AUTOTRACK_STEP_WALLS")) {
+            td5_env_flag_on("TD5RE_AUTOTRACK_STEP_WALLS") &&
+            tg_side_built(si + 1, s)) {
             const int nrows = tg_facade_floors(si + 1, s, b);
             if (nrows > 0 && nrows != g->rows) {
                 const int hi = nrows > g->rows ? nrows : g->rows;
@@ -6294,11 +6319,73 @@ static int tg_city_emit_lamp(const TG_FBHook *h, double sw)
 #define TD5_TG_BACKROW_N     2        /* rows revealed down a wide avenue        */
 #define TD5_TG_BACKROW_GAP   3200.0   /* clear air behind the row in front       */
 
-static int tg_city_emit_backrows(const TG_FBHook *h, double sw)
+/* One BACKGROUND building written as its own mesh. `solid` closes it into a BOX
+ * (front grid + roof + two side returns + a back sheet) instead of the old bare
+ * front grid. The bare grid is a zero-thickness sheet: seen from anything but
+ * dead-on -- which is most of a curving street and the whole fork gore -- it read
+ * as a paper sliver, the "background buildings ... look wrong" (item 3) and part
+ * of "buildings ... only a facade" (item 15). Scenery is submitted CULL_NONE, so
+ * every face reads from both sides and the winding only has to be self-consistent.
+ * `bx,by,bz` is the front-left base, `a*` the along-frontage vector to the
+ * front-right base, `l*0`/`l*1` the OUTWARD lateral units at the two ends and
+ * `depth` how far back the box goes. Returns 0 only on a buffer write failure; a
+ * full mesh table is a silent no-op success, matching the back-row contract. */
+static int tg_bg_building_box(TG_Buf *blk, size_t *moff, int *nmesh, int maxmesh,
+                              double bx, double by, double bz,
+                              double ax, double ay, double az,
+                              double lx0, double lz0, double lx1, double lz1,
+                              double depth, double H, int cols, int rows,
+                              int page, int solid, int si)
 {
     double px[TD5_TG_FACADE_MAXQUAD * 4], py[TD5_TG_FACADE_MAXQUAD * 4];
     double pz[TD5_TG_FACADE_MAXQUAD * 4], uu[TD5_TG_FACADE_MAXQUAD * 4];
     double vv[TD5_TG_FACADE_MAXQUAD * 4];
+    int seg_nq, n = 0;
+
+    tg_facade_push_grid(bx, by, bz, ax, ay, az, 0.0, H, 0.0,
+                        cols, rows, 0, rows, px, py, pz, uu, vv, &n);
+    if (solid && depth > 1.0) {
+        const double blx = bx + lx0 * depth, blz = bz + lz0 * depth;
+        const double frx = bx + ax, fry = by + ay, frz = bz + az;
+        const double brx = frx + lx1 * depth, brz = frz + lz1 * depth;
+        double q[12];
+        /* ROOF (matches the front-facade MASS roof winding). */
+        q[0] = bx;  q[1] = by + H;       q[2] = bz;
+        q[3] = frx; q[4] = fry + H;      q[5] = frz;
+        q[6] = brx; q[7] = fry + H;      q[8] = brz;
+        q[9] = blx; q[10] = by + H;      q[11] = blz;
+        tg_facade_push_quad(q, px, py, pz, uu, vv, &n);
+        /* LEFT return. */
+        q[0] = bx;  q[1] = by;           q[2] = bz;
+        q[3] = blx; q[4] = by;           q[5] = blz;
+        q[6] = blx; q[7] = by + H;       q[8] = blz;
+        q[9] = bx;  q[10] = by + H;      q[11] = bz;
+        tg_facade_push_quad(q, px, py, pz, uu, vv, &n);
+        /* RIGHT return. */
+        q[0] = frx; q[1] = fry;          q[2] = frz;
+        q[3] = brx; q[4] = fry;          q[5] = brz;
+        q[6] = brx; q[7] = fry + H;      q[8] = brz;
+        q[9] = frx; q[10] = fry + H;     q[11] = frz;
+        tg_facade_push_quad(q, px, py, pz, uu, vv, &n);
+        /* BACK sheet. */
+        q[0] = blx; q[1] = by;           q[2] = blz;
+        q[3] = brx; q[4] = fry;          q[5] = brz;
+        q[6] = brx; q[7] = fry + H;      q[8] = brz;
+        q[9] = blx; q[10] = by + H;      q[11] = blz;
+        tg_facade_push_quad(q, px, py, pz, uu, vv, &n);
+    }
+    if (n <= 0) return 1;
+    if (*nmesh >= maxmesh) return 1;
+    seg_nq = n / 4;
+    moff[(*nmesh)++] = blk->len;
+    if (!tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, &page, &seg_nq, 1))
+        return 0;
+    tg_acct(TG_ACCT_BUILDING, si);
+    return 1;
+}
+
+static int tg_city_emit_backrows(const TG_FBHook *h, double sw)
+{
     const TG_Biome *b = h->b;
     const TG_Node *n0 = &h->nl->v[h->si];
     const TG_Node *n1;
@@ -6338,7 +6425,7 @@ static int tg_city_emit_backrows(const TG_FBHook *h, double sw)
             const unsigned int rh = ((unsigned)h->si * 31u + (unsigned)s * 7u
                                      + (unsigned)r) * 2246822519u;
             double set, H, ax, az, ay, bx, by, bz, flen;
-            int rows, cols, page, seg_nq, n = 0;
+            int rows, cols, page;
 
             if ((rh >> 29) == 0u) continue;      /* ~12% of slots left empty */
             /* Each row sits a building depth plus clear air behind the last. */
@@ -6362,17 +6449,16 @@ static int tg_city_emit_backrows(const TG_FBHook *h, double sw)
              * building than the front row of the same block. */
             flen = sqrt(ax * ax + az * az);
             cols = tg_facade_cols_for(flen, (double)b->cell_w, 4);
-            tg_facade_push_grid(bx, by, bz, ax, ay, az, 0.0, H, 0.0,
-                                cols, rows, 0, rows, px, py, pz, uu, vv, &n);
-            if (n <= 0) continue;
-            if (*h->nmesh >= h->maxmesh) return 1;
-            page   = tg_facade_page_class(rh, rows);
-            seg_nq = n / 4;
-            h->moff[(*h->nmesh)++] = h->blk->len;
-            if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
-                                    &page, &seg_nq, 1))
+            page = tg_facade_page_class(rh, rows);
+            /* Solid box (item 3): the old flat grid read as a paper sliver from
+             * any oblique angle. Default ON; TD5RE_AUTOTRACK_BACKROW_SOLID=0
+             * restores the flat sheet for an A/B. */
+            if (!tg_bg_building_box(h->blk, h->moff, h->nmesh, h->maxmesh,
+                                    bx, by, bz, ax, ay, az, lx0, lz0, lx1, lz1,
+                                    tg_facade_depth(b), H, cols, rows, page,
+                                    td5_env_flag_on("TD5RE_AUTOTRACK_BACKROW_SOLID"),
+                                    h->si))
                 return 0;
-            tg_acct(TG_ACCT_BUILDING, h->si);
         }
     }
     return 1;
@@ -6529,6 +6615,113 @@ static int tg_block_is_park(int si, int left)
     if (av) return 0;
     h = (block * 2u + (unsigned)(left ? 1 : 0)) * 0x85EBCA6Bu;
     return (h >> 30) == 0u;                       /* ~1 gap in 4 is a park */
+}
+
+/* [R4 item 6] BACKGROUND massing behind a fork gore. Where a fork clears its
+ * RIGHT lateral for the branch corridor, tg_side_geom drops the facade and every
+ * verge emitter skips the side (tg_side_blocked), so the whole flank was bare
+ * ground tiles out to the horizon -- verbatim "on the right side of the road
+ * where there's a lot of tiles there should be a park or buildings in the
+ * background depending on whether it's a park or not". This fills that void with
+ * a continuous band set BEYOND the corridor: park green where the block
+ * classifies as a park, a deep building box otherwise -- exactly the
+ * park-or-buildings choice asked for.
+ *
+ * The setback is pushed out through the shared carriageway authority
+ * (tg_carriageway_clear_gap on the right side, which alone knows the bowed
+ * branch's current width), so nothing here can land on the corridor -- the same
+ * guarantee the facade setback uses, just applied on the side the facade was
+ * dropped from. Continuous span to span: consecutive spans share the endpoint
+ * node, and height/page key on the SUPERBLOCK not the span, so the band does not
+ * saw-tooth. Default ON; TD5RE_AUTOTRACK_FORK_BACKDROP=0 restores the bare flank
+ * for an A/B. */
+#define TD5_TG_FORKBACK_GAP    5000.0   /* background air past the corridor, raw */
+#define TD5_TG_FORKBACK_DEPTH  6000.0   /* how deep the background block reads    */
+
+static int tg_city_emit_forkback(const TG_FBHook *h)
+{
+    const TG_Biome *b = h->b;
+    const TG_NodeList *nl = h->nl;
+    const int si = h->si;
+    const double side = -1.0;               /* forks only clear the RIGHT lateral */
+    const TG_Node *n0, *n1;
+    double lx0, lz0, lx1, lz1, set, bx, by, bz, ax, ay, az;
+    unsigned int blk, ph, gs, gl, bh;
+    int av;
+
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_FORK_BACKDROP")) return 1;
+    if (!tg_branches_enabled() || !tg_span_in_fork_clear(si)) return 1;
+    if (tg_span_in_bridge_run(si)) return 1;
+    if (si + 1 >= nl->count) return 1;
+    n0 = &nl->v[si]; n1 = &nl->v[si + 1];
+
+    lx0 = n0->tz * side; lz0 = -n0->tx * side;
+    lx1 = n1->tz * side; lz1 = -n1->tx * side;
+
+    /* Distance from the road EDGE to the front of the band: at least the whole
+     * corridor clearance (clear_gap), then a background gap on top so the block
+     * stands well back rather than crowding the branch. */
+    set = tg_carriageway_clear_gap(nl, si, side, tg_city_sidewalk_w(b),
+                                   TD5_TG_CARRIAGEWAY_MARGIN)
+        + TD5_TG_FORKBACK_GAP;
+
+    bx = n0->x + lx0 * (n0->width * 0.5 + set);
+    by = n0->y;
+    bz = n0->z + lz0 * (n0->width * 0.5 + set);
+    ax = (n1->x + lx1 * (n1->width * 0.5 + set)) - bx;
+    ay = n1->y - n0->y;
+    az = (n1->z + lz1 * (n1->width * 0.5 + set)) - bz;
+
+    tg_facade_block(si, 0, &blk, &ph, &gs, &gl, &av);
+    bh = blk * 2654435761u;
+
+    if (tg_block_is_park(si, 0)) {
+        /* PARK: a green lawn over the bare tiles, deep enough to read as open
+         * ground behind the branch. One flat quad, park-lawn page, isotropic UV
+         * so it tiles the same on a curve. */
+        double px[4], py[4], pz[4], uu[4], vv[4], q[12];
+        const double d = TD5_TG_FORKBACK_DEPTH;
+        int seg_page = TD5_TG_PAGE_R3_BLOCK + 0, seg_nq, n = 0;
+        const double u_d = d / (double)TD5_TG_SPAN_LENGTH;
+        q[0] = bx;              q[1] = by;  q[2] = bz;
+        q[3] = bx + lx0 * d;    q[4] = by;  q[5] = bz + lz0 * d;
+        q[6] = bx + ax + lx1*d; q[7] = by + ay; q[8] = bz + az + lz1 * d;
+        q[9] = bx + ax;         q[10] = by + ay; q[11] = bz + az;
+        px[0]=q[0]; py[0]=q[1]; pz[0]=q[2];  uu[0]=0.0;  vv[0]=(double)si;
+        px[1]=q[3]; py[1]=q[4]; pz[1]=q[5];  uu[1]=u_d;  vv[1]=(double)si;
+        px[2]=q[6]; py[2]=q[7]; pz[2]=q[8];  uu[2]=u_d;  vv[2]=(double)si + 1.0;
+        px[3]=q[9]; py[3]=q[10];pz[3]=q[11]; uu[3]=0.0;  vv[3]=(double)si + 1.0;
+        n = 4;
+        if (*h->nmesh >= h->maxmesh) return 1;
+        seg_nq = n / 4;
+        h->moff[(*h->nmesh)++] = h->blk->len;
+        if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                                &seg_page, &seg_nq, 1))
+            return 0;
+        tg_acct(TG_ACCT_FORKBACK, si);
+        return 1;
+    }
+
+    /* BUILDINGS: a deep, tall skyline block set behind the corridor. Height and
+     * page key on the superblock so the band is one continuous massing. */
+    {
+        int rows = b->floors_min + tg_city_district_floors(blk)
+                 + (int)((bh >> 9) % 5u) + 2;   /* +2: a background skyline reads
+                                                 * taller than a low street run */
+        double H, flen;
+        int cols, page;
+        if (rows > TD5_TG_FACADE_MAX_ROWS) rows = TD5_TG_FACADE_MAX_ROWS;
+        H = (double)rows * tg_facade_floor_h(b);
+        flen = sqrt(ax * ax + az * az);
+        cols = tg_facade_cols_for(flen, (double)b->cell_w, 4);
+        page = tg_facade_page_class(bh, rows);
+        if (!tg_bg_building_box(h->blk, h->moff, h->nmesh, h->maxmesh,
+                                bx, by, bz, ax, ay, az, lx0, lz0, lx1, lz1,
+                                TD5_TG_FORKBACK_DEPTH, H, cols, rows, page, 1, si))
+            return 0;
+        tg_acct(TG_ACCT_FORKBACK, si);
+    }
+    return 1;
 }
 
 /* ---- item 3: one corner arm -- a pavement + railing turning off the main kerb
@@ -6871,6 +7064,12 @@ static int tg_emit_fb_city(const TG_FBHook *h)
     if (paved && !tg_span_in_bridge_run(h->si) &&
         td5_env_flag_on("TD5RE_AUTOTRACK_BACKROWS")) {
         if (!tg_city_emit_backrows(h, sw)) return 0;
+    }
+    /* [R4 item 6] Fill the bare flank a fork clears on the right with background
+     * park/buildings set beyond the corridor. Runs on paved (city) fork spans
+     * only; a no-op everywhere else. */
+    if (paved) {
+        if (!tg_city_emit_forkback(h)) return 0;
     }
     return 1;
 }
