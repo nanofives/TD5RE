@@ -18,6 +18,7 @@
 #include "td5_track.h"
 #include "td5_track_internal.h"
 #include "td5_trackgen.h"   /* [S2] streaming self-check: regenerate + compare */
+#include "td5_track_registry.h" /* [R3 item 19] custom-track end-wall sentinels */
 
 /* [S2 / Phase 2 streaming] Verify that the LIVE span array matches what the
  * generator reproduces from its seed, then overwrite one origin block in place
@@ -1682,6 +1683,45 @@ void td5_track_bind_boundary_sentinels(int level_number)
             s_boundary_rev_sentinel = 9999;
             TD5_LOG_I(LOG_TAG,
                       "boundary sentinels: override track (level=%d) -> DISABLED "
+                      "(circuit, or endwall off)", level_number);
+        }
+        return;
+    }
+
+    /* [R3 item 19] Custom registry tracks -- the procedural autotrack (level 90)
+     * and user-built tracks (slots >= 37) -- load with g_active_td6_level == 0
+     * and a level number OUTSIDE the 1..40 native table, so without this they
+     * fell straight through to the "out of table range -> disable" path below and
+     * got NO end-of-road boundary wall. The autotrack centreline is an OPEN path
+     * (tg_build_centerline wanders from the origin and never closes), so a car
+     * that reverses off the grid or overruns the finish drove straight off the
+     * end of the strip into the void -- the user's "car leaves the map". Cap both
+     * physical ends of the MAIN ROAD exactly as the TD6 P2P path above does; the
+     * forward/reverse contact resolver (fwd_rev_resolve_contact, with its
+     * penetration-reject guard) turns these sentinels into a solid invisible
+     * wall. trackgen emits a matching VISIBLE wall mesh at the same ends
+     * (tg_emit_end_wall). Circuit registry tracks loop and need no cap. Shares
+     * the TD5RE_TD6_ENDWALL knob (default on). */
+    if (td5_track_registry_has_level(level_number)) {
+        static int s_endwall_reg = -1;
+        int circuit = td5_track_registry_is_circuit_for_level(level_number);
+        int ring = td5_track_get_ring_length();
+        if (ring <= 16) ring = s_span_count;   /* fallback if ring not yet resolved */
+        if (s_endwall_reg < 0)
+            s_endwall_reg = td5_env_flag_on("TD5RE_TD6_ENDWALL");
+        if (s_endwall_reg && !circuit && ring > 16) {
+            s_boundary_fwd_sentinel = 2;
+            s_boundary_rev_sentinel = ring - 3;
+            TD5_LOG_I(LOG_TAG,
+                      "boundary sentinels: custom P2P (level=%d) -> END CAPS "
+                      "fwd=%d rev=%d (ring=%d span_count=%d)", level_number,
+                      s_boundary_fwd_sentinel, s_boundary_rev_sentinel, ring,
+                      s_span_count);
+        } else {
+            s_boundary_fwd_sentinel = -1;
+            s_boundary_rev_sentinel = 9999;
+            TD5_LOG_I(LOG_TAG,
+                      "boundary sentinels: custom track (level=%d) -> DISABLED "
                       "(circuit, or endwall off)", level_number);
         }
         return;
