@@ -33,6 +33,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 28" },
+    { CL_ITEM,    "STREET CROSSINGS reworked into fuller intersections:" },
+    { CL_ITEM,    "  side streets get perpendicular lane markings, a" },
+    { CL_ITEM,    "  raised kerb break at the crossing, and buildings" },
+    { CL_ITEM,    "  lining their sides so they read further and deeper." },
+    { CL_ITEM,    "  No pedestrian crossing is painted into a park now," },
+    { CL_ITEM,    "  and crossings close together on a bend join up." },
     { CL_ITEM,    "AUTO TRACKS FINISH AGAIN on branchy seeds. The finish" },
     { CL_ITEM,    "  line was placed on an appended branch corridor a" },
     { CL_ITEM,    "  normal drive never reaches; now on the main ring." },
