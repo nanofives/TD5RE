@@ -80,11 +80,22 @@ driving (no AI override).
 
 ### Three of these land on work that was reported as done. Own that.
 
-- **Item 8 (grey/white tree lines) is a REPEAT of round-2 item 14.** r2-flora
-  claimed it by flipping `TD5RE_AUTOTRACK_REAL_TEX` to default ON and rebuilding
-  the tree-line band from a real canopy page. That was merged but recorded as NOT
-  confirmed in frame, and this report confirms it did not work. Re-open, and this
-  time verify with a framedump of the band before claiming it.
+- **Item 8 (grey/white tree lines): my first framing here was WRONG, corrected
+  2026-08-28.** I wrote that r2-flora's tree-line fix "did not work". It is more
+  precise, and more useful, to say **r2-flora fixed a different object than the
+  one being complained about**:
+  - The flora tree-line band (`tg_emit_fb_flora` -> `TD5_TG_PAGE_TREELINE`) only
+    emits in FOREST / ALPINE / FIELDS. Seed 99991 has none of those
+    (CITY / ORIENTAL / INDUSTRIAL / COAST), so that band **never renders on the
+    seed the user drove** and the r2 change could not have affected what they saw.
+  - The grey-bottom/white-top object actually on screen is the **far-terrain
+    ridge** (`tg_emit_far_band`) drawn on **`TD5_TG_PAGE_HILL`**, whose palette is
+    grey rock under a white snowline -- verbatim "grey at the bottom and white at
+    the top".
+  Fix (r3-flow) routes that ridge to the green canopy page in non-snow biomes,
+  A/B-confirmed in frame at span 494. **Nothing to revert in r2-flora.**
+  LESSON: before calling a previous fix a failure, confirm the fix and the
+  complaint are even about the same geometry.
 - **Item 9 (buildings on branches, road/sidewalk gaps) lands on the post-merge
   carriageway work.** `tg_flora_branch_reach` and `tg_ground_branch_clear` were
   retired onto the shared `tg_carriageway_reach` specifically to stop scenery
@@ -125,6 +136,30 @@ player's raw span, the corridor-vs-main-ring flag, and the mapped main-ring span
 (`tg_fork_of_corridor` exists for exactly this mapping). Then drive the main line
 without touching a branch and see whether it finishes -- that single A/B splits
 "checkpoint detection is broken" from "corridors break progress".
+
+### ✅ RESOLVED 2026-08-28 (r3-flow @b46bba38). The hypothesis above was WRONG.
+Right neighbourhood -- corridors WERE implicated -- but the wrong mechanism. What
+instrumenting actually found:
+1. The autotrack finish runs through the `s_td6_finish_span` branch
+   (`mode=td6-p2p`), which **returns before the LEVELINF checkpoint code**. That
+   path was DEAD CODE, which is why zero checkpoint-pass events were ever logged.
+   Checkpoint detection was never the issue.
+2. The registry finish span came from `regenerate()` as `spans - 4`, where `spans`
+   is the **full strip count INCLUDING the appended branch corridors**. On seed
+   99991 that put the finish at ~1983, a corridor tail no main-line drive reaches.
+   Branchless seeds (`spans == ring`) were unaffected, which is why an earlier
+   seed did finish and made this look fixed.
+FIX: derive the registry finish from `tg_finish_span(s_ring_len)` = 1700, the same
+main-ring span LEVELINF and the banner already use. Self-documenting A/B in the
+log: `registry finish span=1700 (main ring=1800, full strip=1987; old spans-4
+would be 1983)`.
+PROOF (orchestrator-verified by grepping the preserved log, not the report): the
+finish watch climbs `raw_acc=1692..1698` against `finish=1700`, then
+`Actor finish: slot=0 mode=td6-p2p raw=1700 norm=1700 finish=1700`, then
+`Race finished -> results screen`. Kept at `log/race_item18_proof.log`.
+NOTE ON EVIDENCE: the first attempt's proof was lost because ~6 later framedump
+launches rotated `race.log` past its 5-rotation window. `race.log` flushes only on
+clean shutdown AND survives only 5 rotations -- copy it out immediately.
 
 ### Cross-cutting engineering notes
 
