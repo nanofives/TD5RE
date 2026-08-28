@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 28" },
+    { CL_ITEM,    "City buildings no longer look hollow. Where two" },
+    { CL_ITEM,    "  neighbouring buildings differ in height, the taller" },
+    { CL_ITEM,    "  one's exposed flank is now a real side wall instead" },
+    { CL_ITEM,    "  of open air you could see straight into." },
+    { CL_ITEM,    "Rows of buildings behind buildings now appear ONLY" },
+    { CL_ITEM,    "  down a real cross street, not over every frontage;" },
+    { CL_ITEM,    "  a wide avenue reveals a deeper, taller block, a" },
+    { CL_ITEM,    "  narrow pedestrian street a single closer row." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 27" },
     { CL_ITEM,    "GENERATED RACES NOW END. An auto track finished the" },
     { CL_ITEM,    "  race and went to the results screen -- it used to" },
