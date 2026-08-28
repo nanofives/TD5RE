@@ -232,7 +232,13 @@ static unsigned int s_selfcheck_regen_seed = 0;
  * at [cbase..cbase+len-1], rejoining at span R. The loader (td5_track.c) already
  * iterates an N-entry jump table, so the whole chain is multi-fork. */
 #define TD5_TG_BRANCH_MAX 4
-typedef struct { int F, len, cbase, R; } TG_Fork;
+/* sep = per-fork separation scale in [0,1] (item 10): how far the branch bows
+ * away from the main carriageway, as a fraction of the widest bow tg_branch_bow
+ * allows. Small = a divided AVENUE (the two carriageways stay close, split only
+ * by a central median); large = a road that genuinely diverges in two. Stored
+ * on the fork so the strip rows, the road mesh, the clearance query and the
+ * divider all read ONE value and cannot drift. */
+typedef struct { int F, len, cbase, R; double sep; } TG_Fork;
 static TG_Fork s_forks[TD5_TG_BRANCH_MAX];
 static int s_fork_count;
 static int s_ring_len;
@@ -1476,21 +1482,64 @@ static double tg_branch_bow(int len, double width)
     return (amp > TD5_TG_BRANCH_BOW) ? TD5_TG_BRANCH_BOW : amp;
 }
 
-/* Lateral centre of the BRANCH (right) half carriageway at corridor step k:
- * the right-half centre (-width/4) plus an outward bow that is 0 at both ends
- * (so it lines back up with the road halves at the fork and the rejoin) and
- * peaks in the middle.
+/* ---- variable branch separation (item 10) ----
+ * Each fork gets a separation scale in [0,1] that multiplies the outward bow.
+ * A small repeating ladder keyed to the fork index guarantees VARIETY on any
+ * track with several forks -- one tight avenue, one medium split, one wide
+ * split -- rather than every fork looking the same. It is a closed form (no
+ * shared mutable) so tg_carriageway_reach, the strip builder, the road mesh and
+ * the divider all resolve the SAME value for a given fork without coordination.
  *
- * SEMANTIC CHANGE 2026-08-26: the bow amplitude is now length-derived
- * (tg_branch_bow) rather than the flat TD5_TG_BRANCH_BOW, so short forks return
- * SMALLER offsets than they used to. Signature and sign convention are
- * unchanged (negative = right of travel), so every reader keeps working; a
- * reader that hardcoded the old 1.20 amplitude would now disagree. */
-static double tg_branch_shift(int k, int len, double width)
+ * The floor is not zero: at sep 0 the branch's left edge would meet the main's
+ * right edge exactly (a divided road with no median at all). The tightest entry
+ * keeps a thin median so an avenue still reads as two carriageways, not one. */
+#define TD5_TG_BRANCH_SEP_MIN   0.16   /* tightest avenue: a slim central median */
+#define TD5_TG_AVENUE_SEP_MAX   0.34   /* sep <= this reads as an AVENUE         */
+
+static double tg_fork_sep_for(int fork_index)
+{
+    static const double k_sep[] = { 0.20, 0.60, 1.00, 0.30 };
+    const int n = (int)(sizeof(k_sep) / sizeof(k_sep[0]));
+    double s;
+    /* Default ON: the user asked for various separation sizes. =0 pins the old
+     * uniform widest (sep 1.0) for an A/B against the pre-item-10 behaviour. */
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_BRANCH_VARY_SEP")) return 1.0;
+    if (fork_index < 0) fork_index = 0;
+    s = k_sep[(unsigned)fork_index % (unsigned)n];
+    if (s < TD5_TG_BRANCH_SEP_MIN) s = TD5_TG_BRANCH_SEP_MIN;
+    return s;
+}
+
+/* True where fork `fork_index` is tight enough to read as a divided avenue
+ * (item 9: "a distinction of different dividers ... if it is a branch
+ * representing an avenue"). Above the threshold the carriageways diverge into
+ * two separate roads and a central island would just float in open ground. */
+static int tg_fork_is_avenue(int fork_index)
+{
+    return tg_fork_sep_for(fork_index) <= TD5_TG_AVENUE_SEP_MAX;
+}
+
+/* Lateral centre of the BRANCH (right) half carriageway at corridor step k with
+ * separation scale `sep`: the right-half centre (-width/4) plus an outward bow
+ * that is 0 at both ends (so it lines back up with the road halves at the fork
+ * and the rejoin) and peaks in the middle, scaled by `sep`.
+ *
+ * SEMANTIC CHANGE 2026-08-26: the bow amplitude is length-derived
+ * (tg_branch_bow) rather than the flat TD5_TG_BRANCH_BOW. 2026-08-28 (item 10):
+ * split out the sep-scaled form; tg_branch_shift is now the sep=1.0 (widest)
+ * case, which is what the tunnel-bore enclosure wants (it must cover the WIDEST
+ * a corridor could be). Sign convention is unchanged (negative = right of
+ * travel), so every reader keeps working. */
+static double tg_branch_shift_s(int k, int len, double width, double sep)
 {
     double f   = (len > 0) ? (double)k / (double)len : 0.0;   /* 0 .. 1 */
     double bow = sin(f * TD5_TG_PI);                          /* 0 -> 1 -> 0 */
-    return -width * 0.25 - width * tg_branch_bow(len, width) * bow;
+    return -width * 0.25 - width * tg_branch_bow(len, width) * sep * bow;
+}
+
+static double tg_branch_shift(int k, int len, double width)
+{
+    return tg_branch_shift_s(k, len, width, 1.0);
 }
 
 /* ---- branch lane GAIN (feedback: "branches should be able to spawn and
@@ -1565,6 +1614,28 @@ static int tg_branch_lane_gain(int k, int len, int base_lanes)
 static double tg_branch_wscale(int k, int len, int base_lanes)
 {
     return 0.5 + 0.25 * tg_branch_gain_f(k, len, base_lanes);
+}
+
+/* Separation-aware forms (item 10). The branch row is centred on tg_branch_shift
+ * and extends +/- half its width, so WIDENING grows the carriageway INWARD as
+ * well as outward. On a WIDE split there is room -- the bow has carried the
+ * branch far enough right that its inner edge still clears the main road. On a
+ * tight AVENUE there is not: gaining a lane would push the inner edge back
+ * across the slim median into the oncoming main carriageway. So an avenue keeps
+ * the FIXED half carriageway (a constant 2+2 divided road, which is what an
+ * avenue actually is); only diverging forks open out. Both the width and the
+ * point count are gated the SAME way, so the strip rows and the road mesh stay
+ * point-for-point identical however the fork is classified. */
+static double tg_branch_wscale_s(int k, int len, int base_lanes, double sep)
+{
+    if (sep <= TD5_TG_AVENUE_SEP_MAX) return 0.5;
+    return tg_branch_wscale(k, len, base_lanes);
+}
+
+static int tg_branch_lane_gain_s(int k, int len, int base_lanes, double sep)
+{
+    if (sep <= TD5_TG_AVENUE_SEP_MAX) return 0;
+    return tg_branch_lane_gain(k, len, base_lanes);
 }
 
 /* ===================== CARRIAGEWAY QUERY =====================
@@ -1651,9 +1722,11 @@ static double tg_carriageway_reach(const TG_NodeList *nl, int si, double side)
             const int    ni = (si + e < nl->count) ? si + e : si;
             const double w  = nl->v[ni].width;
             /* Branch centre is NEGATIVE (right of travel); its outer edge is a
-             * further half carriageway-width right of that. */
-            const double out = -tg_branch_shift(kk, L, w)
-                             + w * tg_branch_wscale(kk, L, br) * 0.5;
+             * further half carriageway-width right of that. Uses the fork's OWN
+             * separation (item 10) so a tight avenue reports a nearer reach than
+             * a wide split and scenery clears the branch at its ACTUAL width. */
+            const double out = -tg_branch_shift_s(kk, L, w, s_forks[i].sep)
+                             + w * tg_branch_wscale_s(kk, L, br, s_forks[i].sep) * 0.5;
             if (out > reach) reach = out;
         }
     }
@@ -2002,6 +2075,9 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                 s_forks[s_fork_count].len = L;
                 s_forks[s_fork_count].cbase = off + 1;  /* pad@off, corridor off+1.. */
                 s_forks[s_fork_count].R = R;
+                /* Separation is keyed to the fork's ORDINAL, not its span, so it
+                 * is stable across a regen and varied across the track. */
+                s_forks[s_fork_count].sep = tg_fork_sep_for(s_fork_count);
                 s_fork_count++;
                 off += 1 + L;
                 pos = R + 150;                        /* gap before the next fork */
@@ -2056,10 +2132,11 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                  *    uses, so strip and mesh cannot drift apart. */
                 for (k = 0; k < L; k++) {
                     const TG_Node *a = &nl->v[F + 1 + k], *b = &nl->v[F + 2 + k];
-                    const int ln = br_lanes + tg_branch_lane_gain(k, L, br_lanes);
-                    const double wn = tg_branch_wscale(k, L, br_lanes);
-                    const int lnf = br_lanes + tg_branch_lane_gain(k + 1, L, br_lanes);
-                    const double wf = tg_branch_wscale(k + 1, L, br_lanes);
+                    const double bsep = s_forks[i].sep;
+                    const int ln = br_lanes + tg_branch_lane_gain_s(k, L, br_lanes, bsep);
+                    const double wn = tg_branch_wscale_s(k, L, br_lanes, bsep);
+                    const int lnf = br_lanes + tg_branch_lane_gain_s(k + 1, L, br_lanes, bsep);
+                    const double wf = tg_branch_wscale_s(k + 1, L, br_lanes, bsep);
                     int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
                     /* A span's two rows must have the same POINT COUNT (they are
                      * the two edges of one quad grid), so a span where the gain
@@ -2077,11 +2154,11 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                     const int lanes_here = (lnf > ln) ? lnf : ln;
                     int lvi = tg_append_row(&verts, &vtx_count, a, lanes_here,
                                             a->width * wn,
-                                            tg_branch_shift(k, L, a->width),
+                                            tg_branch_shift_s(k, L, a->width, bsep),
                                             ox, oy, oz);
                     int rvi = tg_append_row(&verts, &vtx_count, b, lanes_here,
                                             b->width * wf,
-                                            tg_branch_shift(k + 1, L, b->width),
+                                            tg_branch_shift_s(k + 1, L, b->width, bsep),
                                             ox, oy, oz);
                     int type = (k == 0) ? 9 : ((k == L - 1) ? 10 : 1);
                     int nxt  = (k == L - 1) ? R : -1;
@@ -2102,7 +2179,9 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                                       sentinel_end, ox, oy, oz);
                 }
                 TD5_LOG_I(LOG_TAG, "trackgen: fork %u F=%d len=%d corridor=%d..%d "
-                          "rejoin=%d (ring=%d)", i, F, L, b0, sentinel_end, R, ring);
+                          "rejoin=%d sep=%.2f%s (ring=%d)", i, F, L, b0,
+                          sentinel_end, R, s_forks[i].sep,
+                          tg_fork_is_avenue((int)i) ? " AVENUE" : "", ring);
             }
         }
         s_ring_len = ring;
@@ -4993,6 +5072,148 @@ static int tg_emit_gore(const TG_NodeList *nl, int si,
     return !blk->oom;
 }
 
+/* ===================== BRANCH-CORRIDOR PAVEMENT (item 9a) =====================
+ * The branch carriageway of a fork is APPENDED after the ring and never sees the
+ * city hooks (tg_emit_fb_city runs on main-ring spans only), so a corridor was
+ * bare road meeting open ground -- the "missing gaps between road and sidewalk
+ * on branches" report. This lays a pavement along the branch's OUTER edge, on
+ * the shipped sidewalk page, derived from the SAME shift/width the corridor road
+ * mesh used (tg_branch_shift_s / tg_branch_wscale with the fork's own sep) so it
+ * follows the bow and the taper instead of a fixed quarter-road assumption.
+ *
+ * Coordinate frame is identical to tg_append_row and tg_emit_gore: a point at
+ * lateral t (POSITIVE = left of travel) off node n is
+ * (n->x + n->tz*t, n->y, n->z - n->tx*t). The branch sits at NEGATIVE lateral;
+ * its outer edge is the most-negative point, so the pavement runs further
+ * negative still (t decreasing).
+ *
+ * `mb` is the base MAIN node the corridor step rides on; `acct_si` is the
+ * APPENDED corridor span, passed only so the element inventory brackets the
+ * pavement at the corridor spans (>= ring) -- that is what proves, without a
+ * frame, that scenery now reaches the branch. */
+static int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
+                                    double sep, int br_lanes, const TG_Biome *b,
+                                    TG_Buf *blk, size_t *moff, int *nmesh,
+                                    int acct_si)
+{
+    const TG_Node *a = &nl->v[mb];
+    const TG_Node *c = &nl->v[mb + 1];
+    const double sw = tg_city_sidewalk_w(b);
+    const double kh = tg_city_kerb_h(b);
+    /* Branch centre and half width at each end, from the shared helpers. */
+    const double sh0 = tg_branch_shift_s(k,     L, a->width, sep);
+    const double sh1 = tg_branch_shift_s(k + 1, L, c->width, sep);
+    const double h0  = a->width * tg_branch_wscale_s(k,     L, br_lanes, sep) * 0.5;
+    const double h1  = c->width * tg_branch_wscale_s(k + 1, L, br_lanes, sep) * 0.5;
+    const double e0  = sh0 - h0;                 /* outer (right) edge, near */
+    const double e1  = sh1 - h1;                 /* outer (right) edge, far  */
+    const double u_w = sw / (double)TD5_TG_SPAN_LENGTH;
+    const double u_k = kh / (double)TD5_TG_SPAN_LENGTH;
+    double px[8], py[8], pz[8], uu[8], vv[8];
+    int seg_page = TD5_TG_PAGE_SIDEWALK, seg_nq;
+    int n = 0;
+
+    if (sw <= 0.0) return 1;
+
+    /* Top slab: near-edge, near-outer, far-outer, far-edge -- the up-facing
+     * winding tg_emit_gore uses (near-high-t, near-low-t, far-low-t, far-high-t;
+     * the outer point is at LOWER t because the branch is at negative lateral). */
+    px[n]=a->x+a->tz*e0;        py[n]=a->y+kh; pz[n]=a->z-a->tx*e0;        uu[n]=0.0;  vv[n]=0.0; n++;
+    px[n]=a->x+a->tz*(e0-sw);   py[n]=a->y+kh; pz[n]=a->z-a->tx*(e0-sw);   uu[n]=u_w;  vv[n]=0.0; n++;
+    px[n]=c->x+c->tz*(e1-sw);   py[n]=c->y+kh; pz[n]=c->z-c->tx*(e1-sw);   uu[n]=u_w;  vv[n]=1.0; n++;
+    px[n]=c->x+c->tz*e1;        py[n]=c->y+kh; pz[n]=c->z-c->tx*e1;        uu[n]=0.0;  vv[n]=1.0; n++;
+
+    /* Kerb face, facing the branch carriageway (toward +lateral): base on the
+     * asphalt, top at the slab. */
+    px[n]=a->x+a->tz*e0; py[n]=a->y;    pz[n]=a->z-a->tx*e0; uu[n]=0.0; vv[n]=0.0; n++;
+    px[n]=a->x+a->tz*e0; py[n]=a->y+kh; pz[n]=a->z-a->tx*e0; uu[n]=u_k; vv[n]=0.0; n++;
+    px[n]=c->x+c->tz*e1; py[n]=c->y+kh; pz[n]=c->z-c->tx*e1; uu[n]=u_k; vv[n]=1.0; n++;
+    px[n]=c->x+c->tz*e1; py[n]=c->y;    pz[n]=c->z-c->tx*e1; uu[n]=0.0; vv[n]=1.0; n++;
+
+    seg_nq = n / 4;
+    tg_acct_n(TG_ACCT_SIDEWALK, acct_si, 1);
+    moff[(*nmesh)++] = blk->len;
+    return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
+}
+
+/* ===================== AVENUE DIVIDER (items 9c / 10) =====================
+ * Where a fork is TIGHT -- a divided AVENUE rather than a road splitting in two
+ * (tg_fork_is_avenue) -- the gore between the two carriageways is a slim central
+ * strip, and a real avenue puts something ON it. This raises a median island
+ * down the centre of the gore. THREE treatments, chosen by the fork's ordinal so
+ * a track with several avenues shows all of them: a planted strip, a concrete
+ * barrier, and a plain kerbed island ("a distinction of different dividers").
+ *
+ * A 3-quad prism (top + the two road-facing side walls), not a single decal,
+ * because the car passes on BOTH sides and each face must be visible from its
+ * carriageway even with backface culling on -- the same reasoning the guardrail
+ * prism documents. Windings verified against the gore's up-facing top quad.
+ *
+ * The island pinches to nothing at the fork and the rejoin (the gore does too),
+ * so it opens out of and closes back into the full-width road like a real
+ * avenue median opening from an intersection. `sh*`/`half*` are the branch shift
+ * and half width at the span's two ends, exactly as passed to tg_emit_gore. */
+static int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
+                                  double sh0, double sh1, double half0,
+                                  double half1, TG_Buf *blk, size_t *moff,
+                                  int *nmesh)
+{
+    const TG_Node *a = &nl->v[si];
+    const TG_Node *c = &nl->v[si + 1];
+    /* The gore runs from the main road's right edge (lateral ~0) to the branch's
+     * LEFT edge (sh+half, negative). Median centre = halfway; gore width = how
+     * far that edge is from the road centre. */
+    const double bl0 = sh0 + half0, bl1 = sh1 + half1;   /* branch left edges */
+    const double gw0 = -bl0, gw1 = -bl1;                 /* gore widths (>=0)  */
+    const int    treat = ((unsigned)fork_index) % 3;     /* 0 plant 1 bar 2 kerb */
+    const double mw_cap = (treat == 1) ? 260.0 : 520.0;  /* island half width  */
+    const double H      = (treat == 1) ? 360.0 : (treat == 0 ? 220.0 : 150.0);
+    const int    page   = (treat == 0) ? TD5_TG_PAGE_GREEN
+                        : (treat == 1) ? TD5_TG_PAGE_RAIL : TD5_TG_PAGE_SIDEWALK;
+    double mc0, mc1, mw0, mw1, cl0, cr0, cl1, cr1, base0, base1;
+    double px[12], py[12], pz[12], uu[12], vv[12];
+    int seg_page = page, seg_nq;
+    int n = 0;
+
+    /* No island where the gore is a mere sliver (near the mouths): a 100-unit
+     * strip of raised concrete popping in and out reads worse than nothing. */
+    if (gw0 < 200.0 && gw1 < 200.0) return 1;
+
+    mc0 = bl0 * 0.5; mc1 = bl1 * 0.5;                    /* median centre lateral */
+    mw0 = gw0 * 0.32; if (mw0 > mw_cap) mw0 = mw_cap; if (mw0 < 0.0) mw0 = 0.0;
+    mw1 = gw1 * 0.32; if (mw1 > mw_cap) mw1 = mw_cap; if (mw1 < 0.0) mw1 = 0.0;
+    cl0 = mc0 + mw0; cr0 = mc0 - mw0;                    /* road side / branch side */
+    cl1 = mc1 + mw1; cr1 = mc1 - mw1;
+    /* Sit the base at the gore's own level (4 below road) so the island rises
+     * out of the median rather than floating a hair above it. */
+    base0 = a->y - TD5_TG_GORE_DROP; base1 = c->y - TD5_TG_GORE_DROP;
+
+    /* TOP (up-facing): near-road, near-branch, far-branch, far-road. */
+    px[n]=a->x+a->tz*cl0; py[n]=base0+H; pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=0.0; n++;
+    px[n]=a->x+a->tz*cr0; py[n]=base0+H; pz[n]=a->z-a->tx*cr0; uu[n]=1.0; vv[n]=0.0; n++;
+    px[n]=c->x+c->tz*cr1; py[n]=base1+H; pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=1.0; n++;
+    px[n]=c->x+c->tz*cl1; py[n]=base1+H; pz[n]=c->z-c->tx*cl1; uu[n]=0.0; vv[n]=1.0; n++;
+
+    /* ROAD-side wall (faces +lateral, toward the main carriageway). */
+    px[n]=a->x+a->tz*cl0; py[n]=base0;   pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=1.0; n++;
+    px[n]=a->x+a->tz*cl0; py[n]=base0+H; pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=0.0; n++;
+    px[n]=c->x+c->tz*cl1; py[n]=base1+H; pz[n]=c->z-c->tx*cl1; uu[n]=1.0; vv[n]=0.0; n++;
+    px[n]=c->x+c->tz*cl1; py[n]=base1;   pz[n]=c->z-c->tx*cl1; uu[n]=1.0; vv[n]=1.0; n++;
+
+    /* BRANCH-side wall (faces -lateral, toward the corridor). */
+    px[n]=a->x+a->tz*cr0; py[n]=base0;   pz[n]=a->z-a->tx*cr0; uu[n]=0.0; vv[n]=1.0; n++;
+    px[n]=c->x+c->tz*cr1; py[n]=base1;   pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=1.0; n++;
+    px[n]=c->x+c->tz*cr1; py[n]=base1+H; pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=0.0; n++;
+    px[n]=a->x+a->tz*cr0; py[n]=base0+H; pz[n]=a->z-a->tx*cr0; uu[n]=0.0; vv[n]=0.0; n++;
+
+    seg_nq = n / 4;
+    /* Accounted as a FENCE (a linear median structure) rather than a new
+     * inventory kind, to keep the shared enum untouched for the parallel batch. */
+    tg_acct_n(TG_ACCT_FENCE, si, 1);
+    moff[(*nmesh)++] = blk->len;
+    return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
+}
+
 /* ===================== GUARDRAILS =====================
  * The car is already contained by collision WALLS derived from the STRIP rail
  * vertices, but nothing draws them, so the road ends at an invisible boundary.
@@ -6716,20 +6937,36 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     /* Same lane/width helpers the STRIP rows used, so the
                      * surface you see is the surface you collide with even where
                      * the corridor gains a lane. */
-                    const int ln  = br_lanes + tg_branch_lane_gain(ck, L, br_lanes);
-                    const int lnf = br_lanes + tg_branch_lane_gain(ck + 1, L, br_lanes);
-                    const double wn = tg_branch_wscale(ck, L, br_lanes);
-                    const double wf = tg_branch_wscale(ck + 1, L, br_lanes);
+                    const double sep = s_forks[fi].sep;
+                    const int ln  = br_lanes + tg_branch_lane_gain_s(ck, L, br_lanes, sep);
+                    const int lnf = br_lanes + tg_branch_lane_gain_s(ck + 1, L, br_lanes, sep);
+                    const double wn = tg_branch_wscale_s(ck, L, br_lanes, sep);
+                    const double wf = tg_branch_wscale_s(ck + 1, L, br_lanes, sep);
                     moff[nmesh++] = meshes.len;
                     /* Widths near/far, NOT the wider of the two: the strip rows
                      * taper across the span (see the corridor loop in
                      * tg_emit_strip) and the mesh has to taper with them or the
                      * surface you see stops being the surface you collide with. */
                     if (!tg_emit_road_quad_taper(nl, mb, (lnf > ln) ? lnf : ln,
-                                           tg_branch_shift(ck, L, nl->v[mb].width),
-                                           tg_branch_shift(ck + 1, L, nl->v[mb + 1].width),
+                                           tg_branch_shift_s(ck, L, nl->v[mb].width, sep),
+                                           tg_branch_shift_s(ck + 1, L, nl->v[mb + 1].width, sep),
                                            wn, wf, tg_road_page(mb), &meshes))
                         ok = 0;
+                    /* Item 9a: the branch carriageway had NO kerb of its own, so
+                     * driving a corridor there was road meeting bare ground with
+                     * no pavement -- the "missing gaps between road and sidewalk
+                     * on branches". Lay a pavement along the branch's OUTER edge,
+                     * derived from the SAME shift/width the road just used so it
+                     * follows the bow and the widening. Paved biomes only, same
+                     * rule the main-ring sidewalk uses. */
+                    if (ok) {
+                        const TG_Biome *cb = &k_biomes[tg_biome_for_span(mb)];
+                        if (tg_city_sidewalk_w(cb) > 0.0 &&
+                            td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS"))
+                            if (!tg_emit_branch_sidewalk(nl, mb, ck, L, sep,
+                                                         br_lanes, cb, &meshes,
+                                                         moff, &nmesh, si)) ok = 0;
+                    }
                 }
                 /* The other appended span is the PAD (si == cbase-1). It is
                  * DEGENERATE by construction -- both of its rows are node F --
@@ -6763,16 +7000,26 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                         /* Branch half widths from the SAME helper the corridor
                          * strip rows and mesh use, so the gore always meets the
                          * branch's left edge however wide the taper has made it. */
+                        const double sep = s_forks[fi].sep;
+                        const double sh0 = tg_branch_shift_s(j, L, nl->v[si].width, sep);
+                        const double sh1 = tg_branch_shift_s(j + 1, L, nl->v[si + 1].width, sep);
                         const double gw0 = nl->v[si].width
-                            * tg_branch_wscale(j, L, br_lanes) * 0.5;
+                            * tg_branch_wscale_s(j, L, br_lanes, sep) * 0.5;
                         const double gw1 = nl->v[si + 1].width
-                            * tg_branch_wscale(j + 1, L, br_lanes) * 0.5;
+                            * tg_branch_wscale_s(j + 1, L, br_lanes, sep) * 0.5;
                         moff[nmesh++] = meshes.len;
-                        if (!tg_emit_gore(nl, si,
-                                          tg_branch_shift(j, L, nl->v[si].width),
-                                          tg_branch_shift(j + 1, L, nl->v[si + 1].width),
-                                          gw0, gw1, &meshes))
+                        if (!tg_emit_gore(nl, si, sh0, sh1, gw0, gw1, &meshes))
                             ok = 0;
+                        /* Items 9c/10: where the fork is TIGHT (an avenue) the
+                         * gore is a slim central median, not a wide split -- give
+                         * it a raised divider so the two carriageways read as one
+                         * divided avenue. Treatment varies per fork. Emitted on
+                         * the MAIN fork span alongside the gore it sits on. */
+                        if (ok && tg_fork_is_avenue(fi) &&
+                            td5_env_flag_on("TD5RE_AUTOTRACK_AVENUE_DIVIDER"))
+                            if (!tg_emit_avenue_divider(nl, si, fi, sh0, sh1,
+                                                        gw0, gw1, &meshes,
+                                                        moff, &nmesh)) ok = 0;
                     }
                 } else if (!tg_emit_road_mesh(nl, si, lanes, &meshes)) {
                     ok = 0;
