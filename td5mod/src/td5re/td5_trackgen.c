@@ -354,8 +354,8 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
     "crossings", "trees",     "props",      "water",    "bridge-pieces",
     "tunnel-pieces", "terrain", "far-bands", "banners", "guardrails",
     "road-quads", "checkpoints", "branch-nodes",
-    "parks", "houses"
-    "road-quads", "checkpoints", "branch-nodes", "step-walls"
+    /* [R3] appended in enum order: BLOCK's park/house, CITY's step wall. */
+    "parks", "houses", "step-walls"
 };
 
 static long s_acct_count[TG_ACCT_KIND_COUNT];
