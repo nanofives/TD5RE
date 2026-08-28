@@ -244,6 +244,19 @@ static int tg_road_page(int si);
  * coastline strip where water meets land). ------------------------------ */
 #define TD5_TG_PAGE_R4_BRIDGE (TD5_TG_PAGE_R4_BASE + 34)
 #define TD5_TG_R4_BRIDGE_N    8
+/* Named slots inside the BRIDGE block:
+ *   +0 GUARDRAIL -- a real barrier face drawn for the parapet's UV convention
+ *      (u across the panel HEIGHT, v along the road). The shared TD5_TG_PAGE_RAIL
+ *      was authored for a horizontal armco and, sampled rotated on the sloped
+ *      parapet ribbon, scrambled into a page that "is not a guardrail texture"
+ *      (item 16b). This one has its rails and posts in the panel's own axes.
+ *   +1 PIER -- smooth cast concrete for towers/piers. They shared the TUNNEL
+ *      LINING page, whose damp/soot blotches read as a checkerboard on a bright
+ *      exterior tower (item 18, "pillar has wrong texture").
+ *   +2 COAST -- shore band where the bridge water meets the bank (item 20). */
+#define TD5_TG_PAGE_R4_GUARDRAIL (TD5_TG_PAGE_R4_BRIDGE + 0)
+#define TD5_TG_PAGE_R4_PIER      (TD5_TG_PAGE_R4_BRIDGE + 1)
+#define TD5_TG_PAGE_R4_COAST     (TD5_TG_PAGE_R4_BRIDGE + 2)
 
 #define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R4_BASE + 44)
 
@@ -395,7 +408,7 @@ typedef enum {
     TG_ACCT_R4_CROSS,       /* CROSS (items 2,4,9,10,14) rename in place */
     TG_ACCT_R4_CITY,        /* CITY  (items 3, 6, 13, 15) rename in place */
     TG_ACCT_R4_BRANCH,      /* BRANCH(items 7, 8, 11)   rename in place */
-    TG_ACCT_R4_BRIDGE,      /* BRIDGE(items 16-20)      rename in place */
+    TG_ACCT_COASTLINE,      /* BRIDGE(item 20) coastline strip; renamed in place */
     TG_ACCT_KIND_COUNT
 } TG_AcctKind;
 
@@ -415,7 +428,7 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
     "r4-cross",             /* CROSS  */
     "r4-city",              /* CITY   */
     "r4-branch",            /* BRANCH */
-    "r4-bridge"             /* BRIDGE */
+    "coastline"             /* BRIDGE item 20 */
 };
 
 static long s_acct_count[TG_ACCT_KIND_COUNT];
@@ -4461,6 +4474,13 @@ static int tg_emit_water(const TG_NodeList *nl, int si, double side,
 /* Tunnels come in runs so a whole stretch is enclosed, not isolated spans. */
 #define TD5_TG_TUNNEL_RUN  20
 
+/* [R4 item 19] Spans of ordinary ground a tunnel run must keep clear of any
+ * bridge run, on either side. A deck runs into a bore with zero clearance today
+ * (seed 99991: bridge 1320-1359 overlaps tunnel 1340-1359), so this both forbids
+ * the OVERLAP and guarantees a flat approach band between the two -- ~10 spans
+ * (~15000 world units) is a full bridge approach length. */
+#define TD5_TG_BRIDGE_TUNNEL_CLEAR 10
+
 static int tg_span_in_tunnel(int si)
 {
     unsigned int h;
@@ -4485,7 +4505,30 @@ static int tg_span_in_tunnel(int si)
      * ~1% ("mountains = tunnels"). */
     thresh = (125u * (unsigned)tg_biome_tunnel_pct(si)) / 100u;
     if (thresh > 1000u) thresh = 1000u;
-    return ((h >> 8) % 1000u) < thresh;
+    if (((h >> 8) % 1000u) >= thresh) return 0;     /* this run does not bore */
+
+    /* [R4 item 19] INTERLOCK. The bridge gate (tg_span_in_bridge_run) and this
+     * one are independent hash draws with no shared state, so nothing stopped a
+     * bridge run and a tunnel run from overlapping -- seed 99991 has bridge run
+     * 1320-1359 and tunnel run 1340-1359 both firing, and the raised deck drives
+     * straight into the bore, which is illegal terrain. Resolve it one way: the
+     * BRIDGE is the authored crossing and keeps its span; the tunnel YIELDS. A
+     * tunnel run is suppressed if any span within CLEAR of it lies in a bridge
+     * run, which forbids the overlap AND leaves a flat approach band between the
+     * two. Stateless and derived only from si, so the elevation pass, the strip
+     * builder and every scenery gate agree without passing anything around. A
+     * bridge weight tweak could only make the collision rarer; this makes it
+     * impossible. */
+    {
+        const int t0 = (si / TD5_TG_TUNNEL_RUN) * TD5_TG_TUNNEL_RUN;
+        const int t1 = t0 + TD5_TG_TUNNEL_RUN - 1;
+        int s, lo = t0 - TD5_TG_BRIDGE_TUNNEL_CLEAR;
+        const int hi = t1 + TD5_TG_BRIDGE_TUNNEL_CLEAR;
+        if (lo < 0) lo = 0;
+        for (s = lo; s <= hi; s++)
+            if (tg_span_in_bridge_run(s)) return 0;
+    }
+    return 1;
 }
 
 /* Lining page for the tunnel RUN containing si (item 16a).
@@ -4774,18 +4817,16 @@ static int tg_bridge_struct_enabled(void)
  * and the parapet immediately above them was the same frontage, so deck and
  * supports read as one undifferentiated slab.
  *
- * TD5_TG_PAGE_TUNNEL is the concrete lining page already generated for the
- * bores (cool greys, damp/soot blotches) -- a page already in use, not new art,
- * and concrete is what carries a bridge.
- *
- * The parapets moved to TD5_TG_PAGE_RAIL in the same round (see tg_emit_bridge),
- * so structure and parapet now differ from each other AND from the facade page
- * they both used to share -- which is what item 16 asked for.
- * TD5RE_AUTOTRACK_BRIDGE_PIER_TEX=0 puts the structure back on the facade page. */
+ * [R4 item 18] It shared TD5_TG_PAGE_TUNNEL, the bore LINING page whose damp/
+ * soot blotches are meant to read in a dim enclosed section. On a bright
+ * EXTERIOR tower those blotches read as a checkerboard -- the "pillar looks
+ * wrong and has wrong texture" report. TD5_TG_PAGE_R4_PIER is smooth cast
+ * concrete authored for a lit surface. TD5RE_AUTOTRACK_BRIDGE_PIER_TEX=0 puts
+ * the structure back on the city FACADE page for comparison. */
 static int tg_bridge_pier_page(void)
 {
     return td5_env_flag_on("TD5RE_AUTOTRACK_BRIDGE_PIER_TEX")
-         ? TD5_TG_PAGE_TUNNEL : TD5_TG_PAGE_WALL;
+         ? TD5_TG_PAGE_R4_PIER : TD5_TG_PAGE_WALL;
 }
 
 /* Clearance from the deck SURFACE down to the top of anything hanging under it.
@@ -4972,7 +5013,11 @@ static int tg_emit_bridge_rail_panel(TG_Buf *m,
 {
     double px[4], py[4], pz[4], uu[4], vv[4];
     const double base = TD5_TG_BRIDGE_RAIL_BASE, h = TD5_TG_BRIDGE_RAIL_H;
-    int seg_page = TD5_TG_PAGE_RAIL, seg_nq = 1;
+    /* [R4 item 16b] Was TD5_TG_PAGE_RAIL, an armco authored for a HORIZONTAL
+     * strip. This panel maps u across the panel HEIGHT and v along the road, so
+     * that page sampled rotated and "is not a guardrail texture". The R4 page is
+     * drawn in these axes -- rails run horizontally, posts periodically along. */
+    int seg_page = TD5_TG_PAGE_R4_GUARDRAIL, seg_nq = 1;
 
     /* Quad: near-bottom, far-bottom, far-top, near-top. u across the page over
      * the panel height (0..1 = the whole barrier face); v advances one page per
@@ -5019,15 +5064,20 @@ static int tg_emit_bridge_rails(const TG_NodeList *nl, int si,
             return 0;
     }
 
-    /* Overhead rib: a flat cross-beam bridging the two parapet tops, every 6th
-     * span, so the deck reads as a trussed span rather than a bare slab. Its own
-     * quad mesh / offset. Concrete (pier) page, so it matches the structure. */
+    /* Overhead rib, every 6th span. [R4 item 17] The cross-beam alone floated:
+     * a bar in the sky with nothing joining it to the deck ("floating element").
+     * Give it two VERTICAL LEGS down to the parapet tops so it reads as a portal
+     * gantry, not a hovering slab. Beam + legs are three separate quad meshes,
+     * each recording its own offset. Concrete (pier) page, so it matches the
+     * towers. */
     if (tg_bridge_struct_enabled() && tg_bridge_overhead_enabled() &&
         (si % 6) == 0) {
         double px[4], py[4], pz[4], uu[4], vv[4];
-        int seg_page = tg_bridge_pier_page(), seg_nq = 1;
+        int seg_page = tg_bridge_pier_page(), seg_nq = 1, leg;
         const double ry = n0->y + TD5_TG_BRIDGE_RAIL_BASE
                         + TD5_TG_BRIDGE_RAIL_H + 1800.0;   /* clears traffic */
+        /* Legs stand from the parapet top up to the beam. */
+        const double ly = n0->y + TD5_TG_BRIDGE_RAIL_BASE + TD5_TG_BRIDGE_RAIL_H;
         const double lx = n0->tz, lz = -n0->tx;            /* left unit */
         const double fx = n0->tx * 160.0, fz = n0->tz * 160.0; /* half depth */
         const double lex = n0->x + lx * half0, lez = n0->z + lz * half0;
@@ -5041,6 +5091,19 @@ static int tg_emit_bridge_rails(const TG_NodeList *nl, int si,
             return 0;
         (*pn)++;
         tg_acct(TG_ACCT_BRIDGE, si);
+        /* Two legs: a thin vertical quad (front-back depth) at each deck edge. */
+        for (leg = 0; leg < 2; leg++) {
+            const double ex = leg ? rex : lex, ez = leg ? rez : lez;
+            px[0] = ex - fx; py[0] = ly; pz[0] = ez - fz; uu[0] = 0.0; vv[0] = 1.0;
+            px[1] = ex + fx; py[1] = ly; pz[1] = ez + fz; uu[1] = 1.0; vv[1] = 1.0;
+            px[2] = ex + fx; py[2] = ry; pz[2] = ez + fz; uu[2] = 1.0; vv[2] = 0.0;
+            px[3] = ex - fx; py[3] = ry; pz[3] = ez - fz; uu[3] = 0.0; vv[3] = 0.0;
+            moff[*pn] = m->len;
+            if (!tg_write_quad_mesh(m, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1))
+                return 0;
+            (*pn)++;
+            tg_acct(TG_ACCT_BRIDGE, si);
+        }
     }
     return 1;
 }
@@ -5081,6 +5144,73 @@ static int tg_emit_bridge_water(const TG_NodeList *nl, int si,
         return 0;
     (*pn)++;
     tg_acct_range(TG_ACCT_WATER, si, si + 1);   /* river under a bridge run */
+    return 1;
+}
+
+/* Lateral half-width of the coastline band. The river is ±BRIDGE_WATER_HALF
+ * (32000) but the seam the user sees is the near-deck one; a ±12000 band covers
+ * the gorge pull-back (GORGE_INSET 9000) plus a margin without a huge tilted
+ * slab reaching to the far water edge. */
+#define TD5_TG_COAST_HALF 12000.0
+
+/* [R4 item 20] COASTLINE where the bridge water meets the land, at the two
+ * LONGITUDINAL ends of the river rectangle (perpendicular to the bridge). The
+ * river is a flat plane under the run; before the run starts and after it ends
+ * the terrain is back at road level, so the plane's transverse edge met the bank
+ * as an open seam ("grass slopes not connecting properly with water"). This lays
+ * one shore band per open end, from the water-edge node at the river surface out
+ * to the neighbouring land node at ground level, so water grades into shore into
+ * bank. Gated (default ON); TD5RE_AUTOTRACK_COASTLINE=0 removes it.
+ *
+ * VISUAL CAVEAT: the chase camera never gives a side view of the gorge, so this
+ * band's appearance at the junction is NOT frame-verified -- only that it FIRES
+ * at the run-boundary spans (element inventory "coastline"). */
+static int tg_emit_bridge_coast(const TG_NodeList *nl, int si,
+                                TG_Buf *m, size_t *moff, int *pn)
+{
+    const double CH = TD5_TG_COAST_HALF;
+    int s0, s1, ends = 0, k;
+    int wnode[2], lnode[2];
+
+    if (!tg_span_in_bridge_run(si)) return 1;
+    if (!tg_water_span_clear(si)) return 1;         /* no river here */
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_COASTLINE")) return 1;
+    tg_bridge_run_bounds(nl, si, &s0, &s1);
+
+    /* River nodes run s0 .. s1+1; its open ends are node s0 (back onto s0-1) and
+     * node s1+1 (forward onto s1+2). */
+    if (si == s0 && s0 - 1 >= 0) {
+        wnode[ends] = s0;     lnode[ends] = s0 - 1;     ends++;
+    }
+    if (si == s1 && s1 + 2 < nl->count) {
+        wnode[ends] = s1 + 1; lnode[ends] = s1 + 2;     ends++;
+    }
+
+    for (k = 0; k < ends; k++) {
+        const TG_Node *nw = &nl->v[wnode[k]];
+        const TG_Node *nn = &nl->v[lnode[k]];
+        const double wy = tg_bridge_water_y(nl, si) + 100.0;   /* river surface */
+        const double gy = nn->y - 70.0;   /* land at road (== TD5_TG_GROUND_DROP,
+                                            * whose #define sits below the GROUND
+                                            * block; the 70u z-fight bias). */
+        const double lx = nw->tz, lz = -nw->tx;                /* left unit     */
+        double px[4], py[4], pz[4], uu[4], vv[4];
+        int seg_page = TD5_TG_PAGE_R4_COAST, seg_nq = 1, i;
+
+        px[0] = nw->x - lx * CH; py[0] = wy; pz[0] = nw->z - lz * CH;
+        px[1] = nn->x - lx * CH; py[1] = gy; pz[1] = nn->z - lz * CH;
+        px[2] = nn->x + lx * CH; py[2] = gy; pz[2] = nn->z + lz * CH;
+        px[3] = nw->x + lx * CH; py[3] = wy; pz[3] = nw->z + lz * CH;
+        for (i = 0; i < 4; i++) {
+            uu[i] = px[i] / TD5_TG_WATER_TILE;
+            vv[i] = pz[i] / TD5_TG_WATER_TILE;
+        }
+        moff[*pn] = m->len;
+        if (!tg_write_quad_mesh(m, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1))
+            return 0;
+        (*pn)++;
+        tg_acct(TG_ACCT_COASTLINE, wnode[k]);
+    }
     return 1;
 }
 
@@ -5222,7 +5352,15 @@ static void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
     p->d[0]  = 0.0;                    p->dy[0] = 0.0;
     p->d[1]  = TD5_TG_GROUND_WIDTH;    p->dy[1] = TD5_TG_GROUND_DROP;
 
-    if (seaward) {
+    /* [R4 item 16a] The GORGE wins over the seaward beach on a bridge run.
+     * On a COAST bridge (seed 99991 span 1160-1199) the seaward test fired first
+     * and laid a FLAT beach verge alongside the raised deck -- a light concrete
+     * strip hanging at deck height, which reads as "a bridge with a sidewalk on
+     * the left". A raised deck crosses the water; there is no beach beside it, so
+     * inside the run (phase > 0) the bank must pull back and drop to the river on
+     * BOTH sides. phase is 0 exactly at the run ends, so the beach still applies
+     * there and the two treatments stay continuous at the boundary. */
+    if (seaward && phase <= 0.0) {
         const double d = nl->v[si].y - tg_sea_level_y(nl, si);
         const double fall = (d > 0.0 ? d : (double)TD5_TG_WATER_DROP)
                           - TD5_TG_GROUND_DROP;
@@ -7875,6 +8013,11 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     !tg_emit_bridge_water(nl, si, &meshes, moff, &nmesh)) {
                     ok = 0; break;
                 }
+                /* [R4 item 20] Coastline at the river's longitudinal ends. */
+                if (tg_span_in_bridge_run(si) &&
+                    !tg_emit_bridge_coast(nl, si, &meshes, moff, &nmesh)) {
+                    ok = 0; break;
+                }
                 /* Prop billboards: variable count/size, each records its own. */
                 if (!tg_emit_props(nl, si, b, &meshes, moff, &nmesh,
                                    TG_MAX_MESHES_PER_ENTRY)) { ok = 0; break; }
@@ -8928,6 +9071,125 @@ static void tg_emit_texture_page_bridge_deck(TG_Buf *out)
     }
 }
 
+/* [R4 item 16b] GUARDRAIL face for the sloped bridge parapet. Its quad maps
+ * u across the panel HEIGHT and v along the road, so this page is authored in
+ * those axes (unlike TD5_TG_PAGE_RAIL, an armco meant to lie horizontally, which
+ * sampled rotated here and read as noise). page-X therefore IS the barrier
+ * height (0 = deck, 63 = top) and page-Y runs along the road:
+ *   - a solid pale-concrete barrier body,
+ *   - a darker METAL CAP RAIL across the top rows (constant height),
+ *   - a shadow groove at mid height,
+ *   - vertical expansion JOINTS at a road interval (bands in page-Y). */
+static void tg_emit_texture_page_r4_guardrail(TG_Buf *out)
+{
+    unsigned int rng = 0x51E7A113u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR. 0..3 dark steel (cap rail / groove), 4..11 pale concrete body,
+     * 12..15 sunlit concrete highlight. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        if (i < 4)       { b = 96 + i * 6;  g = 98 + i * 6;  r = 100 + i * 6; }
+        else if (i < 12) { b = 168 + (i-4) * 6; g = 170 + (i-4) * 6;
+                           r = 172 + (i-4) * 6; }
+        else             { b = 224 + (i-12) * 6; g = 226 + (i-12) * 6;
+                           r = 228 + (i-12) * 6; }
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;   /* barrier HEIGHT, 0=deck..63=top */
+        const int y = i / TD5_TG_TEX_DIM;   /* along the road                 */
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if ((y % 22) < 2)          idx = 1 + (int)((rng >> 16) % 3); /* joint  */
+        else if (x >= 55)          idx = (int)((rng >> 16) % 4);     /* cap    */
+        else if (x >= 50)          idx = 12 + (int)((rng >> 16) % 4);/* cap lip*/
+        else if (x >= 30 && x <= 32) idx = 1;                        /* groove */
+        else                       idx = 4 + (int)((rng >> 16) % 8); /* body   */
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
+/* [R4 item 18] PIER / TOWER concrete. Smooth cast concrete for a LIT exterior:
+ * a tight pale-grey ramp with faint vertical form-board seams and only sparse
+ * grain -- deliberately none of the damp/soot blotching the bore LINING page
+ * carries, which read as a checkerboard on a bright tower. */
+static void tg_emit_texture_page_r4_pier(TG_Buf *out)
+{
+    unsigned int rng = 0x9A31C7E5u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR. 0..11 a narrow pale-concrete ramp, 12..15 faint form-seam shadow. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v = (i < 12) ? (176 + i * 5) : (150 - (i - 12) * 10);
+        if (v < 0) v = 0;
+        if (v > 255) v = 255;
+        tg_put_u8(out, (unsigned)v);
+        tg_put_u8(out, (unsigned)v);
+        tg_put_u8(out, (unsigned)(v > 3 ? v - 3 : 0));   /* faintly warm grey */
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;
+        unsigned int patch = (unsigned)((x >> 4) + (y >> 4) * 5) * 2654435761u;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if ((x % 16) == 0)          idx = 12 + (int)((rng >> 16) % 3); /* seam */
+        else if ((patch >> 30) == 0) idx = 6 + (int)((rng >> 16) % 3); /* grain*/
+        else                        idx = (int)((rng >> 16) % 12);     /* face */
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
+/* [R4 item 20] COASTLINE / shore band where the bridge water meets the bank.
+ * Warm sand grading into darker wet sand / shingle at the waterline. Isotropic
+ * and line-free like the GROUND page, so it never shears where the shore slopes;
+ * the wet band is a low-frequency patch, not an axis-aligned edge. */
+static void tg_emit_texture_page_r4_coast(TG_Buf *out)
+{
+    unsigned int rng = 0xC0A57011u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR, warm: r > g > b. 0..10 dry sand ramp, 11..15 darker wet sand/shingle. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int base = (i < 11) ? (150 + i * 8) : (120 - (i - 11) * 12);
+        if (base < 0) base = 0;
+        if (base > 255) base = 255;
+        tg_put_u8(out, (unsigned)(base > 40 ? base - 40 : 0));   /* b */
+        tg_put_u8(out, (unsigned)(base > 18 ? base - 18 : 0));   /* g */
+        tg_put_u8(out, (unsigned)base);                          /* r */
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;
+        unsigned int patch = (unsigned)((x >> 3) + (y >> 3) * 7) * 2654435761u;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if ((patch >> 29) < 2u)
+            idx = 11 + (int)((rng >> 16) % 5);           /* wet sand / shingle */
+        else
+            idx = (int)((rng >> 16) % 11);               /* dry sand grain     */
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 /* Terrain: 0 = SNOW ground, 1 = distant HILL / mountain flank.
  *
  * Both follow the rule the GROUND page comment sets out: NO structure and no
@@ -9209,6 +9471,10 @@ static int tg_emit_textures(TG_Buf *out)
     tg_emit_texture_page_r3_block(&pages[TD5_TG_PAGE_R3_BLOCK + 1], 1);  /* hedge */
     tg_emit_texture_page_r3_block(&pages[TD5_TG_PAGE_R3_BLOCK + 2], 2);  /* wall  */
     tg_emit_texture_page_r3_block(&pages[TD5_TG_PAGE_R3_BLOCK + 3], 3);  /* roof  */
+    /* [R4 BRIDGE] guardrail face (16b), pier/tower concrete (18), shore (20). */
+    tg_emit_texture_page_r4_guardrail(&pages[TD5_TG_PAGE_R4_GUARDRAIL]);
+    tg_emit_texture_page_r4_pier(&pages[TD5_TG_PAGE_R4_PIER]);
+    tg_emit_texture_page_r4_coast(&pages[TD5_TG_PAGE_R4_COAST]);
 
     for (i = 0; i < count; i++) {
         if (pages[i].oom) {
