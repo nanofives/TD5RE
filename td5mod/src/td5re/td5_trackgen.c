@@ -345,6 +345,7 @@ typedef enum {
      * "confirm your emitter ran before hunting pixels". */
     TG_ACCT_PARK,           /* park lawn / hedge quad */
     TG_ACCT_HOUSE,          /* individual house in a park */
+    TG_ACCT_STEPWALL,       /* side wall closing a run-to-run height step */
     TG_ACCT_KIND_COUNT
 } TG_AcctKind;
 
@@ -354,6 +355,7 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
     "tunnel-pieces", "terrain", "far-bands", "banners", "guardrails",
     "road-quads", "checkpoints", "branch-nodes",
     "parks", "houses"
+    "road-quads", "checkpoints", "branch-nodes", "step-walls"
 };
 
 static long s_acct_count[TG_ACCT_KIND_COUNT];
@@ -3852,6 +3854,27 @@ static double tg_facade_cap_thick(const TG_Biome *b)
     return (double)b->cell_w * 0.45;
 }
 
+/* Floor count of the run at span si on this side, 0 if the side is a gap. The
+ * whole-block-then-tower-then-district climb was inlined in tg_side_geom; it is
+ * pulled out here because the STEP-WALL pass (item 1) needs a NEIGHBOUR's height
+ * without paying to build its full TG_SideGeom. tg_side_geom now calls this too,
+ * so the two can never disagree on how tall a run is. */
+static int tg_facade_floors(int si, int left, const TG_Biome *b)
+{
+    unsigned int gh, blk, ph, gs, gl;
+    int floors, av;
+
+    if (!tg_facade_built(si, left)) return 0;
+    gh = tg_facade_run_id(si, left);
+    floors = b->floors_min + (int)((gh >> 7) % (unsigned)b->floors_extra);
+    if (b->tower_mask && ((gh >> 3) & (unsigned)b->tower_mask) == 0)
+        floors += 1 + (int)((gh >> 11) % 4);          /* whole-run tower cluster */
+    tg_facade_block(si, left, &blk, &ph, &gs, &gl, &av);
+    floors += tg_city_district_floors(blk);
+    if (floors > TD5_TG_FACADE_MAX_ROWS) floors = TD5_TG_FACADE_MAX_ROWS;
+    return floors;
+}
+
 /* Streetlamp glows used to come from the prop layer as a lone additive
  * billboard at k_prop_pages[PP_LAMP].y_off = 2500 with NO POST under it, so the
  * light hung in mid-air -- the first item of the feedback. Real lamps (post +
@@ -3872,7 +3895,6 @@ static void tg_side_geom(const TG_NodeList *nl, int si, int left,
     const TG_Node *n0 = &nl->v[si];
     const TG_Node *n1 = &nl->v[si + 1];
     const double side = left ? 1.0 : -1.0;
-    unsigned int gh;
     double set0, set1, flen;
     int floors;
 
@@ -3881,24 +3903,15 @@ static void tg_side_geom(const TG_NodeList *nl, int si, int left,
     if (tg_branches_enabled() && side < 0.0 && tg_span_in_fork_clear(si)) return;
 
     /* Height is a whole number of FLOORS, keyed to the RUN so a building is one
-     * uniform block that steps at the next side street. */
-    gh     = tg_facade_run_id(si, left);
-    floors = b->floors_min + (int)((gh >> 7) % (unsigned)b->floors_extra);
-    if (b->tower_mask && ((gh >> 3) & (unsigned)b->tower_mask) == 0)
-        floors += 1 + (int)((gh >> 11) % 4);          /* whole-run tower cluster */
-    {   /* Where in the city this block stands: core blocks are taller. */
-        unsigned int blk, ph, gs2, gl2;
-        int av;
-        tg_facade_block(si, left, &blk, &ph, &gs2, &gl2, &av);
-        floors += tg_city_district_floors(blk);
-    }
-    /* Ceiling, and not a cosmetic one: at cols == 1 (which every city biome is,
-     * a 1500-raw span against a 2150-raw cell) a run costs rows quads for the
-     * front, rows for a tower back wall and 2*(2*rows + rows + 2) for the two
-     * corner prisms -- about 12*rows + 4 per side. 10 floors keeps both sides
-     * inside TD5_TG_FACADE_MAXQUAD, and past it tg_facade_push_grid silently
-     * drops quads, which shows up as buildings missing their top floors. */
-    if (floors > TD5_TG_FACADE_MAX_ROWS) floors = TD5_TG_FACADE_MAX_ROWS;
+     * uniform block that steps at the next side street. tg_facade_floors folds
+     * in the tower cluster and the downtown-district climb, and clamps to
+     * TD5_TG_FACADE_MAX_ROWS -- a real ceiling, not cosmetic: at cols == 1 (every
+     * city biome, a 1500-raw span against a 2150-raw cell) a run costs rows quads
+     * for the front, rows for a tower back wall and 2*(2*rows + rows + 2) for the
+     * two corner prisms -- about 12*rows + 4 per side. 10 floors keeps both sides
+     * inside TD5_TG_FACADE_MAXQUAD; past it tg_facade_push_grid silently drops
+     * quads, which shows up as buildings missing their top floors. */
+    floors   = tg_facade_floors(si, left, b);
     g->rows  = floors;
     g->H     = (double)floors * tg_facade_floor_h(b);
     g->depth = tg_facade_depth(b);
@@ -3908,9 +3921,26 @@ static void tg_side_geom(const TG_NodeList *nl, int si, int left,
     /* Setback is the PAVEMENT width (tg_city_sidewalk_w), not the raw table
      * field: the wall must land on the back edge of the slab the hook lays, or
      * one of the two is left hanging. Base rises by the kerb for the same
-     * reason -- the wall stands ON the pavement, not in the gutter. */
-    set0 = n0->width * 0.5 + tg_city_sidewalk_w(b);
-    set1 = n1->width * 0.5 + tg_city_sidewalk_w(b);
+     * reason -- the wall stands ON the pavement, not in the gutter.
+     *
+     * The setback is pushed out through the SHARED carriageway authority rather
+     * than derived from a fixed width: BRANCH makes the corridor width per-fork
+     * variable, so a facade keying off a constant road half-width would drift
+     * onto a widened branch (the round-3 item 9 "buildings spawned ON the
+     * branches"). tg_carriageway_clear_gap is the documented adoption for
+     * facades and re-derives no fork arithmetic; it returns the pavement width
+     * unchanged wherever the road edge is already the outermost tarmac -- every
+     * span off a fork, and the whole +ve lateral -- so straight city blocks are
+     * byte-identical. The right-side facade in a fork's cleared region is still
+     * dropped by the tg_span_in_fork_clear guard above; this only hardens the
+     * setback everywhere else, and keeps the whole building (front, caps and the
+     * step wall, which all derive from set0/set1) off any carriageway. */
+    {
+        const double gap = tg_carriageway_clear_gap(nl, si, side,
+                               tg_city_sidewalk_w(b), TD5_TG_CARRIAGEWAY_MARGIN);
+        set0 = n0->width * 0.5 + gap;
+        set1 = n1->width * 0.5 + gap;
+    }
 
     g->bx = n0->x + g->lx0 * set0;
     g->by = n0->y + tg_city_kerb_h(b);
@@ -3941,7 +3971,7 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
     unsigned int block_gh = tg_facade_run_id(si, 0);
     const double cap_thick = tg_facade_cap_thick(b);
     const int cap_cols = tg_facade_cap_cols(b);
-    int n = 0, n_store, s, nseg, seg_page[2], seg_nq[2], wall_rows;
+    int n = 0, n_store, s, nseg, seg_page[2], seg_nq[2], wall_rows, step_max = 0;
 
     if (si + 1 >= nl->count) return 1;    /* need the far endpoint to abut */
     tg_side_geom(nl, si, 0, b, &sd[0]);
@@ -4021,6 +4051,47 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
                                    g->depth, thick, g->H, g->rows,
                                    cap_cols, px, py, pz, uu, vv, &n);
         }
+        /* SIDE WALL at a height STEP (item 1). Two ADJACENT built runs of
+         * different height share a flush frontage, but the taller one's flank
+         * ABOVE the shorter roof was open air, so a driver looked straight into
+         * the building -- the "buildings with different height look like they are
+         * hollow inside" report. A run END (the neighbour is a gap) is already
+         * closed by the corner prism above; this closes a run-to-run height
+         * CHANGE, which the prisms never touched because both spans are BUILT.
+         *
+         * Emitted only at the FAR boundary (si|si+1) so each seam is filled
+         * exactly once -- the near boundary is the previous span's far boundary --
+         * and only across the EXPOSED band [shorter roof, taller roof], so no quad
+         * is spent where the two roofs already meet flush. The face lies in the
+         * lateral-vertical plane at the shared endpoint, its depth the building's
+         * own, so from either approach direction it caps the step. Same page as
+         * the facade above (it IS the building's side); grouped after the
+         * storefront so it lands in the wall command.
+         *
+         * Dedicated knob TD5RE_AUTOTRACK_STEP_WALLS (default on) so this one
+         * feature can be A/B'd in isolation from the rest of the FACADE_MASS
+         * pass. CARRIAGEWAY CLEARANCE is inherited: the base derives from set1,
+         * which tg_side_geom now pushes out through the shared authority, so the
+         * seam can no more land on a branch than the front facade can -- no
+         * separate guard is needed here. */
+        if (g->built && td5_env_flag_on("TD5RE_AUTOTRACK_FACADE_MASS") &&
+            td5_env_flag_on("TD5RE_AUTOTRACK_STEP_WALLS")) {
+            const int nrows = tg_facade_floors(si + 1, s, b);
+            if (nrows > 0 && nrows != g->rows) {
+                const int hi = nrows > g->rows ? nrows : g->rows;
+                const int lo = nrows < g->rows ? nrows : g->rows;
+                const double fh = tg_facade_floor_h(b);
+                const double fx = g->bx + g->ax, fy = g->by + g->ay,
+                             fz = g->bz + g->az;
+                tg_facade_push_grid(fx, fy, fz,
+                                    g->lx1 * g->depth, 0.0, g->lz1 * g->depth,
+                                    0.0, (double)hi * fh, 0.0,
+                                    cap_cols, hi, lo, hi,
+                                    px, py, pz, uu, vv, &n);
+                if (nrows > step_max) step_max = nrows;
+                tg_acct(TG_ACCT_STEPWALL, si);
+            }
+        }
     }
 
     if (n <= 0) return 1;
@@ -4032,6 +4103,10 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
      * the tower it is. */
     wall_rows = sd[0].built ? sd[0].rows : 0;
     if (sd[1].built && sd[1].rows > wall_rows) wall_rows = sd[1].rows;
+    /* A step wall borrowed from a taller NEIGHBOUR run can be the tallest thing
+     * in the mesh; let it pull the wall page up to the tower class so the flank
+     * matches the office block it belongs to rather than the low run beside it. */
+    if (step_max > wall_rows) wall_rows = step_max;
     if (n_store > 0 && n_store < n) {
         seg_page[0] = tg_store_page(block_gh);  seg_nq[0] = n_store / 4;
         seg_page[1] = tg_facade_page_class(block_gh, wall_rows);
@@ -6133,18 +6208,27 @@ static int tg_city_emit_lamp(const TG_FBHook *h, double sw)
     return 1;
 }
 
-/* BUILDINGS BEHIND THE STREET WALL. With only the front row, every side street
- * and every gap in the roofline showed empty ground behind it, which is what
- * reads as "no life around it": a city is depth, not a wall.
+/* BUILDINGS SEEN DOWN A CROSS STREET. A city is depth, not a wall, but that
+ * depth is only ever VISIBLE where a street opens through the frontage.
  *
- * Deliberately cheaper than the front row -- one page, no storefront command,
- * no corner returns, two columns -- because these are only ever seen OVER a
- * roofline or DOWN a side street, never up close. Two rows, each set further
- * back, at their own jittered heights so the skyline is not a stepped terrace.
- * Emitted whether or not the front row is built here, so a side street looks
- * into a block rather than into the void. */
-#define TD5_TG_BACKROW_N     2
-#define TD5_TG_BACKROW_GAP   3200.0   /* clear air behind the row in front */
+ * The first cut emitted these rows on EVERY span, on both sides, whether or not
+ * the front row was built. Behind a solid frontage they are hidden, but a taller
+ * back building pokes ABOVE a short front roofline and the gaps between front
+ * runs let more show through, so the whole city read as "rows of buildings
+ * behind buildings" everywhere -- exactly the report. A real street only reveals
+ * the block behind it where there is an actual opening to see through.
+ *
+ * So the rows are now GATED to a side that has a STREET OPENING at this span
+ * (the front frontage is a gap there, which is precisely where
+ * tg_city_emit_crossstreet lays the cross-street asphalt), and the DEPTH of the
+ * reveal follows the street's WIDTH CLASS: a wide vehicular avenue (both kerbs
+ * open) shows two rows of taller arterial blocks receding, a narrow pedestrian
+ * side street shows a single closer, lower row. Deliberately cheaper than the
+ * front row -- one page, no storefront command, no corner returns -- because they
+ * are only ever seen DOWN the street, never up close, and set far enough back to
+ * clear the cross-street carriageway the crossstreet emitter lays. */
+#define TD5_TG_BACKROW_N     2        /* rows revealed down a wide avenue        */
+#define TD5_TG_BACKROW_GAP   3200.0   /* clear air behind the row in front       */
 
 static int tg_city_emit_backrows(const TG_FBHook *h, double sw)
 {
@@ -6159,12 +6243,32 @@ static int tg_city_emit_backrows(const TG_FBHook *h, double sw)
     if (h->si + 1 >= h->nl->count) return 1;
     n1 = &h->nl->v[h->si + 1];
 
+    /* Default ON (gated to real streets); TD5RE_AUTOTRACK_BACKROW_STREETS=0
+     * restores the old "a row behind every span, both sides" behaviour for an
+     * A/B -- that is the state the round-3 report was taken against. */
+    const int gate = td5_env_flag_on("TD5RE_AUTOTRACK_BACKROW_STREETS");
+
     for (s = 0; s < 2; s++) {
         const double sg = s ? 1.0 : -1.0;
         const double lx0 = n0->tz * sg, lz0 = -n0->tx * sg;
         const double lx1 = n1->tz * sg, lz1 = -n1->tx * sg;
+        unsigned int blk, ph, gs, gl;
+        int av, nrow;
         if (tg_side_blocked(h->si, sg)) continue;
-        for (r = 0; r < TD5_TG_BACKROW_N; r++) {
+        /* GATE to a street opening. A solid frontage hides whatever is behind
+         * it, so a back row there only ever pokes above the front roofline --
+         * the "rows behind rows" everywhere. tg_facade_built == 0 on this side is
+         * the gap the cross-street asphalt (tg_city_emit_crossstreet) runs
+         * through, and the ONLY place the block behind is actually visible. */
+        if (gate && tg_facade_built(h->si, s)) continue;
+        /* Street WIDTH CLASS (item 2). An avenue opens both kerbs and carries
+         * traffic, so it reveals a deeper, taller block receding; a narrow
+         * pedestrian side street reveals a single closer, lower row. Read-only
+         * use of the same partition the frontage and crossings key off, so all
+         * three agree on which openings are avenues. */
+        tg_facade_block(h->si, s, &blk, &ph, &gs, &gl, &av);
+        nrow = (gate && !av) ? 1 : TD5_TG_BACKROW_N;
+        for (r = 0; r < nrow; r++) {
             /* Row hash: per span, per side, per row -- so neighbouring spans
              * step in height and the two rows never line up. */
             const unsigned int rh = ((unsigned)h->si * 31u + (unsigned)s * 7u
@@ -6177,7 +6281,7 @@ static int tg_city_emit_backrows(const TG_FBHook *h, double sw)
             set = sw + tg_facade_depth(b) * (double)(r + 1)
                 + TD5_TG_BACKROW_GAP * (double)(r + 1)
                 + (double)(rh % 1800u);
-            rows = b->floors_min + (int)((rh >> 9) % 5u);
+            rows = b->floors_min + (int)((rh >> 9) % 5u) + ((gate && av) ? 1 : 0);
             H    = (double)rows * tg_facade_floor_h(b);
 
             bx = n0->x + lx0 * (n0->width * 0.5 + set);
