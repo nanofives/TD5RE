@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 28" },
+    { CL_ITEM,    "CITY INTERSECTIONS, PARKS & HOUSES. Side streets now" },
+    { CL_ITEM,    "  read as real junctions -- pavements and railings" },
+    { CL_ITEM,    "  turn to follow the street, some run diagonally. One" },
+    { CL_ITEM,    "  city gap in four is now a green park with a hedge" },
+    { CL_ITEM,    "  border and the odd house instead of a through road." },
+    { CL_ITEM,    "  New: TD5RE_AUTOTRACK_BLOCK_TURNS=1 adds occasional" },
+    { CL_ITEM,    "  around-the-block 90-degree corners in cities." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 27" },
     { CL_ITEM,    "GENERATED RACES NOW END. An auto track finished the" },
     { CL_ITEM,    "  race and went to the results screen -- it used to" },
