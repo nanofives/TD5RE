@@ -314,6 +314,7 @@ typedef enum {
     TG_ACCT_ROAD,           /* drivable road quad */
     TG_ACCT_CHECKPOINT,     /* LEVELINF checkpoint gate */
     TG_ACCT_BRANCH,         /* fork split / rejoin marker */
+    TG_ACCT_STEPWALL,       /* side wall closing a run-to-run height step */
     TG_ACCT_KIND_COUNT
 } TG_AcctKind;
 
@@ -321,7 +322,7 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
     "buildings", "sidewalks", "shopfronts", "fences",   "lamps",
     "crossings", "trees",     "props",      "water",    "bridge-pieces",
     "tunnel-pieces", "terrain", "far-bands", "banners", "guardrails",
-    "road-quads", "checkpoints", "branch-nodes"
+    "road-quads", "checkpoints", "branch-nodes", "step-walls"
 };
 
 static long s_acct_count[TG_ACCT_KIND_COUNT];
@@ -3792,10 +3793,24 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
          * lateral-vertical plane at the shared endpoint, its depth the building's
          * own, so from either approach direction it caps the step. Same page as
          * the facade above (it IS the building's side); grouped after the
-         * storefront so it lands in the wall command. */
-        if (g->built && td5_env_flag_on("TD5RE_AUTOTRACK_FACADE_MASS")) {
+         * storefront so it lands in the wall command.
+         *
+         * Dedicated knob TD5RE_AUTOTRACK_STEP_WALLS (default on) so this one
+         * feature can be A/B'd in isolation from the rest of the FACADE_MASS
+         * pass. CARRIAGEWAY GUARD: like flora and ground skirts, ask the shared
+         * authority (never re-derive fork arithmetic) whether the seam's base
+         * lateral lands on any carriageway -- on a widened fork span the branch
+         * bows into the side<0 lateral, and a wall there would sit in the road.
+         * The base is the seam's CLOSEST point to the road (the wall extends
+         * AWAY from it, into the block), so one test on the base clears it. */
+        if (g->built && td5_env_flag_on("TD5RE_AUTOTRACK_FACADE_MASS") &&
+            td5_env_flag_on("TD5RE_AUTOTRACK_STEP_WALLS")) {
             const int nrows = tg_facade_floors(si + 1, s, b);
-            if (nrows > 0 && nrows != g->rows) {
+            const double base_lat = (s ? 1.0 : -1.0)
+                * (nl->v[si + 1].width * 0.5 + tg_city_sidewalk_w(b));
+            if (nrows > 0 && nrows != g->rows &&
+                !tg_on_carriageway(nl, si + 1, base_lat,
+                                   TD5_TG_CARRIAGEWAY_MARGIN)) {
                 const int hi = nrows > g->rows ? nrows : g->rows;
                 const int lo = nrows < g->rows ? nrows : g->rows;
                 const double fh = tg_facade_floor_h(b);
@@ -3807,6 +3822,7 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
                                     cap_cols, hi, lo, hi,
                                     px, py, pz, uu, vv, &n);
                 if (nrows > step_max) step_max = nrows;
+                tg_acct(TG_ACCT_STEPWALL, si);
             }
         }
     }
