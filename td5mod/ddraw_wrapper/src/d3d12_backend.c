@@ -373,6 +373,193 @@ typedef struct { char tag[24]; unsigned present, gen; } TD5RTMark;
 static TD5RTMark s_rtmark_ring[TD5_RTMARK_RING];
 static unsigned  s_rtmark_head, s_rtmark_total;
 
+/* ---- GPU TIMESTAMPS on the RT marks (TD5RE_RT_TIMESTAMPS=1, dev only) -------
+ *
+ * WHY. The RT marks above record only present_count + device_generation, so they
+ * give ORDER but no cost, and the in-place restart wedge is a COST problem: one
+ * Present blocks ~4.9 s and trips the 2 s watchdog. Attributing that to a
+ * specific GPU operation (tlas_build vs blas_build vs the first real dispatch_*)
+ * is what the marks could not answer.
+ *
+ * ⚠️ WHY THERE IS NO EXTRA FENCE WAIT HERE. This fault is a Heisenbug: every
+ * observer that synchronises the GPU HIDES it (arming framedump capture took the
+ * failure rate from 8/8 to 1/8; TD5RE_RT_DIAG=1 hid it too). So this must not add
+ * a wait of its own. It doesn't: timestamps are resolved into a per-frame-slot
+ * readback buffer at frame end, and read back only when that slot comes round
+ * again, by which point d3d12_frame_present's EXISTING
+ * d3d12_wait_value(fence_values[frame_index]) has already guaranteed the work
+ * finished. Zero added synchronisation -- the numbers are trustworthy because
+ * measuring does not change the thing measured. Do not "simplify" this by
+ * waiting on the fence right after Resolve.
+ *
+ * Deltas are reported against the FIRST mark of the frame, plus a per-mark step,
+ * so a single dominant operation stands out immediately. */
+#define TD5_RTTS_SLOTS 32
+static ID3D12QueryHeap *s_rtts_heap;
+static ID3D12Resource  *s_rtts_rb[D3D12_FRAME_COUNT];
+static char             s_rtts_tag[D3D12_FRAME_COUNT][TD5_RTTS_SLOTS][24];
+static UINT             s_rtts_count[D3D12_FRAME_COUNT];   /* marks recorded this frame */
+static UINT             s_rtts_pending[D3D12_FRAME_COUNT]; /* marks awaiting readback   */
+static UINT64           s_rtts_freq;
+static int              s_rtts_on = -1;
+static double           s_rtts_slow_ms;   /* wall-clock cost of the last slow present */
+static LARGE_INTEGER    s_rtts_t0;        /* wall clock at submit, for that measure   */
+
+/* Defined with the fence helpers further down; the forced drain below needs it. */
+static void d3d12_wait_value(UINT64 v);
+
+static int rtts_enabled(void)
+{
+    if (s_rtts_on < 0) {
+        const char *e = getenv("TD5RE_RT_TIMESTAMPS");
+        s_rtts_on = (e && e[0] == '1') ? 1 : 0;
+    }
+    return s_rtts_on;
+}
+
+/* ⚠️ THIS LOGGER IS PART OF THE MEASUREMENT. The first version did
+ * fopen+fflush+fclose per LINE and logged every frame over 1 ms -- 31891 lines in
+ * one run -- and that alone was enough to make the wedge vanish (HEALTHY, 0.0 s
+ * stall). It became the third observer to hide the fault, after framedump capture
+ * and TD5RE_RT_DIAG. So: keep ONE handle open, never flush per line, and only
+ * write frames that are actually pathological (TD5RE_RT_TS_MS, default 50 ms).
+ * A quiet run should produce a handful of lines, not tens of thousands. */
+static FILE *s_rtts_f;
+
+static void rtts_log(const char *fmt, ...)
+{
+    va_list ap;
+    if (!s_rtts_f) {
+        s_rtts_f = fopen("log/rt_timestamps.log", "a");
+        if (!s_rtts_f) return;
+    }
+    va_start(ap, fmt); vfprintf(s_rtts_f, fmt, ap); va_end(ap);
+    fputc('\n', s_rtts_f);
+}
+
+/* Only frames at least this slow get written (ms). */
+static double rtts_threshold_ms(void)
+{
+    static double s_ms = -1.0;
+    if (s_ms < 0.0) {
+        const char *e = getenv("TD5RE_RT_TS_MS");
+        s_ms = (e && e[0]) ? atof(e) : 50.0;
+        if (s_ms < 0.0) s_ms = 0.0;
+    }
+    return s_ms;
+}
+
+static int rtts_ensure(void)
+{
+    D3D12_QUERY_HEAP_DESC qd;
+    D3D12_HEAP_PROPERTIES hp;
+    D3D12_RESOURCE_DESC bd;
+    UINT i;
+
+    if (s_rtts_heap) return 1;
+    if (!g_d3d12.device || !g_d3d12.queue) return 0;
+
+    ZeroMemory(&qd, sizeof(qd));
+    qd.Type  = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    qd.Count = TD5_RTTS_SLOTS * D3D12_FRAME_COUNT;
+    if (FAILED(ID3D12Device_CreateQueryHeap(g_d3d12.device, &qd, &IID_ID3D12QueryHeap,
+                                            (void **)&s_rtts_heap))) {
+        rtts_log("timestamp query heap FAILED -- disabling");
+        s_rtts_on = 0;
+        return 0;
+    }
+    ZeroMemory(&hp, sizeof(hp)); hp.Type = D3D12_HEAP_TYPE_READBACK;
+    ZeroMemory(&bd, sizeof(bd));
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bd.Width = TD5_RTTS_SLOTS * sizeof(UINT64); bd.Height = 1;
+    bd.DepthOrArraySize = 1; bd.MipLevels = 1; bd.Format = DXGI_FORMAT_UNKNOWN;
+    bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    for (i = 0; i < D3D12_FRAME_COUNT; i++) {
+        if (FAILED(ID3D12Device_CreateCommittedResource(g_d3d12.device, &hp, D3D12_HEAP_FLAG_NONE, &bd,
+                D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource, (void **)&s_rtts_rb[i]))) {
+            rtts_log("timestamp readback[%u] FAILED -- disabling", i);
+            s_rtts_on = 0;
+            return 0;
+        }
+    }
+    if (FAILED(ID3D12CommandQueue_GetTimestampFrequency(g_d3d12.queue, &s_rtts_freq)) || !s_rtts_freq) {
+        rtts_log("GetTimestampFrequency FAILED -- disabling");
+        s_rtts_on = 0;
+        return 0;
+    }
+    rtts_log("--- rt timestamps armed (freq=%llu Hz, %d slots/frame) ---",
+             (unsigned long long)s_rtts_freq, TD5_RTTS_SLOTS);
+    return 1;
+}
+
+/* Called at frame open: this slot's marks start fresh. */
+static void rtts_frame_begin(UINT fi)
+{
+    if (!rtts_enabled()) return;
+    s_rtts_count[fi] = 0;
+}
+
+/* Called just before the command list is closed: stage this frame's stamps. */
+static void rtts_frame_end(UINT fi)
+{
+    if (!rtts_enabled() || !s_rtts_heap || !g_d3d12.list) return;
+    if (!s_rtts_count[fi]) { s_rtts_pending[fi] = 0; return; }
+    ID3D12GraphicsCommandList_ResolveQueryData(g_d3d12.list, s_rtts_heap,
+        D3D12_QUERY_TYPE_TIMESTAMP, fi * TD5_RTTS_SLOTS, s_rtts_count[fi],
+        s_rtts_rb[fi], 0);
+    s_rtts_pending[fi] = s_rtts_count[fi];
+}
+
+/* Force-report a slot's stamps regardless of the ms threshold. Used only after a
+ * present has ALREADY blocked pathologically long: the damage is done by then, so
+ * the wait this implies cannot mask the fault it is measuring. Without this the
+ * wedge frame is never seen at all -- its slot never comes round again, because
+ * the process dies during device-lost recovery first (observed: a whole run
+ * produced only the "armed" header). */
+static void rtts_drain_forced(UINT fi);
+
+/* Called AFTER the present path's existing wait on this slot's fence, so the
+ * data is complete without us adding any synchronisation. */
+static void rtts_drain_ex(UINT fi, int force, double present_ms)
+{
+    UINT64 *ts = NULL;
+    D3D12_RANGE rd;
+    UINT n = s_rtts_pending[fi], i;
+    double total_ms;
+
+    if (!rtts_enabled() || !n || !s_rtts_rb[fi]) return;
+    s_rtts_pending[fi] = 0;
+    rd.Begin = 0; rd.End = n * sizeof(UINT64);
+    if (FAILED(ID3D12Resource_Map(s_rtts_rb[fi], 0, &rd, (void **)&ts)) || !ts) return;
+
+    total_ms = 1000.0 * (double)(ts[n - 1] - ts[0]) / (double)s_rtts_freq;
+    if (force || total_ms >= rtts_threshold_ms()) {
+        if (force)
+            rtts_log("*** SLOW PRESENT %.0f ms (cpu wall) -- GPU marks for that frame follow ***",
+                     present_ms);
+        rtts_log("frame present=%u gen=%u marks=%u span=%.2f ms",
+                 (unsigned)g_backend.present_count, (unsigned)g_backend.device_generation,
+                 n, total_ms);
+        for (i = 0; i < n; i++) {
+            double from0 = 1000.0 * (double)(ts[i] - ts[0]) / (double)s_rtts_freq;
+            double step  = i ? 1000.0 * (double)(ts[i] - ts[i - 1]) / (double)s_rtts_freq : 0.0;
+            rtts_log("    %-18s t=%8.2f ms  step=%8.2f ms", s_rtts_tag[fi][i], from0, step);
+        }
+        if (s_rtts_f) fflush(s_rtts_f);   /* once per logged frame, not per line */
+    }
+    { D3D12_RANGE wr; wr.Begin = 0; wr.End = 0; ID3D12Resource_Unmap(s_rtts_rb[fi], 0, &wr); }
+}
+
+static void rtts_drain(UINT fi) { rtts_drain_ex(fi, 0, 0.0); }
+
+static void rtts_drain_forced(UINT fi)
+{
+    /* No-op unless this slot still has stamps staged. */
+    if (!rtts_enabled() || !s_rtts_pending[fi]) return;
+    d3d12_wait_value(g_d3d12.fence_values[fi]);
+    rtts_drain_ex(fi, 1, s_rtts_slow_ms);
+}
+
 void Backend_NoteRTMark(const char *tag)
 {
     TD5RTMark *m = &s_rtmark_ring[s_rtmark_head % TD5_RTMARK_RING];
@@ -381,6 +568,18 @@ void Backend_NoteRTMark(const char *tag)
     m->present = (unsigned)g_backend.present_count;
     m->gen     = g_backend.device_generation;
     s_rtmark_head++; s_rtmark_total++;
+
+    if (rtts_enabled() && g_d3d12.frame_open && g_d3d12.list && rtts_ensure()) {
+        UINT fi = g_d3d12.frame_index;
+        UINT n  = s_rtts_count[fi];
+        if (n < TD5_RTTS_SLOTS) {
+            strncpy(s_rtts_tag[fi][n], m->tag, sizeof(s_rtts_tag[fi][n]) - 1);
+            s_rtts_tag[fi][n][sizeof(s_rtts_tag[fi][n]) - 1] = 0;
+            ID3D12GraphicsCommandList_EndQuery(g_d3d12.list, s_rtts_heap,
+                D3D12_QUERY_TYPE_TIMESTAMP, fi * TD5_RTTS_SLOTS + n);
+            s_rtts_count[fi] = n + 1;
+        }
+    }
 }
 
 void Backend_NotePresent(void)
@@ -586,6 +785,7 @@ static void d3d12_frame_begin(void)
     ID3D12CommandAllocator_Reset(g_d3d12.allocators[idx]);
     ID3D12GraphicsCommandList_Reset(g_d3d12.list, g_d3d12.allocators[idx], NULL);
     s_upload_off[idx] = 0;   /* recycle this slot's upload ring (GPU done via fence) */
+    rtts_frame_begin(idx);   /* RT timestamp slots for this frame start empty */
 
     d3d12_resource_barrier(g_d3d12.backbuffers[idx],
         D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -740,6 +940,8 @@ static void d3d12_frame_present(int sync)
         s_cap_pending_fp = cap ? &s_fp : NULL;
     }
 
+    rtts_frame_end(idx);   /* stage this frame's RT timestamps into readback[idx] */
+    if (rtts_enabled()) QueryPerformanceCounter(&s_rtts_t0);
     ID3D12GraphicsCommandList_Close(g_d3d12.list);
     {
         ID3D12CommandList *lists[1];
@@ -761,6 +963,32 @@ static void d3d12_frame_present(int sync)
     g_d3d12.fence_values[idx] = d3d12_signal();
     g_d3d12.frame_index = IDXGISwapChain3_GetCurrentBackBufferIndex(g_d3d12.swapchain);
     d3d12_wait_value(g_d3d12.fence_values[g_d3d12.frame_index]);
+
+    /* Slow-frame catch. The wedge frame is never seen by the deferred read: the
+     * process dies in device-lost recovery before this slot comes round again (a
+     * whole wedged run produced only the "armed" header). So if this frame just
+     * cost pathologically long, read ITS stamps now.
+     *
+     * The window deliberately spans Close+Execute+Present AND the fence wait
+     * above. A first attempt stopped the clock right after Present and caught
+     * nothing, because Present only QUEUES -- the backlog actually manifests in
+     * the wait. The game's own profiler bundles both into its "present" phase,
+     * which is why it reported present=4861 ms.
+     *
+     * The stall has already happened by the time we get here, so the read cannot
+     * mask the fault it is measuring. */
+    if (rtts_enabled()) {
+        LARGE_INTEGER t1, f;
+        QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&f);
+        if (f.QuadPart) {
+            s_rtts_slow_ms = 1000.0 * (double)(t1.QuadPart - s_rtts_t0.QuadPart) / (double)f.QuadPart;
+            if (s_rtts_slow_ms >= 500.0) rtts_drain_forced(idx);
+        }
+    }
+    /* This slot's PREVIOUS submission is now GPU-complete thanks to the wait
+     * above, so its timestamps can be read with no synchronisation of our own
+     * (see the Heisenbug note on the timestamp block). */
+    rtts_drain(g_d3d12.frame_index);
 
     /* Capture copy is now GPU-complete (waited on idx's fence above). */
     if (s_cap_pending_fp) { d3d12_wait_value(g_d3d12.fence_values[idx]); d3d12_store_capture(s_cap_pending_fp); s_cap_pending_fp = NULL; }
