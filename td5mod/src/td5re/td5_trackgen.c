@@ -206,7 +206,46 @@ static int tg_road_page(int si);
 #define TD5_TG_PAGE_TUNNEL_VAR   (TD5_TG_PAGE_R3_BRIDGE + 1)  /* +1..+4 */
 #define TD5_TG_TUNNEL_VARIANTS   5   /* base page + 4 variant pages */
 
-#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R3_BASE + 36)
+/* ====================== ROUND-4 PAGE BLOCKS ==========================
+ * Same rule as the R3 block above, measured off its OWN base so the two
+ * rounds' reservations cannot interact. Use only your own block; do not move
+ * TD5_TG_PAGE_COUNT and do not renumber another area's slots.
+ *
+ * Owners (see docs/AUTOTRACK_FEEDBACK_R4.md for the item numbers):
+ *   FLOW   items 1, 5, 12   banner seam + legs, tree-line pages, map-edge safety
+ *   CROSS  items 2,4,9,10,14 real intersections: markings, kerb breaks, joins
+ *   CITY   items 3, 6, 13, 15 building sides, background rows, narrow streets
+ *   BRANCH items 7, 8, 11   divider kerb faces, branch UV stability
+ *   BRIDGE items 16-20      deck furniture, pillars, coastline, tunnel interlock
+ * ==================================================================== */
+#define TD5_TG_PAGE_R4_BASE   (TD5_TG_PAGE_R3_BASE + 36)
+
+/* --- FLOW block (items 1, 5, 12): 6 slots. Item 5 asks for tree pages that
+ * suit a CITY skyline, so several of these are canopy/skyline variants. ----- */
+#define TD5_TG_PAGE_R4_FLOW   (TD5_TG_PAGE_R4_BASE + 0)
+#define TD5_TG_R4_FLOW_N      6
+
+/* --- CROSS block (items 2, 4, 9, 10, 14): 8 slots. Perpendicular lane
+ * markings and raised kerb breaks are both new art. --------------------- */
+#define TD5_TG_PAGE_R4_CROSS  (TD5_TG_PAGE_R4_BASE + 8)
+#define TD5_TG_R4_CROSS_N     8
+
+/* --- CITY block (items 3, 6, 13, 15): 8 slots (side walls, narrow-street
+ * surfaces, background massing). ---------------------------------------- */
+#define TD5_TG_PAGE_R4_CITY   (TD5_TG_PAGE_R4_BASE + 18)
+#define TD5_TG_R4_CITY_N      8
+
+/* --- BRANCH block (items 7, 8, 11): 4 slots. Item 8 needs a KERB face page
+ * so a planted median stops painting grass up its vertical walls. ------- */
+#define TD5_TG_PAGE_R4_BRANCH (TD5_TG_PAGE_R4_BASE + 28)
+#define TD5_TG_R4_BRANCH_N    4
+
+/* --- BRIDGE block (items 16-20): 8 slots (real guardrail face, pier/pillar,
+ * coastline strip where water meets land). ------------------------------ */
+#define TD5_TG_PAGE_R4_BRIDGE (TD5_TG_PAGE_R4_BASE + 34)
+#define TD5_TG_R4_BRIDGE_N    8
+
+#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R4_BASE + 44)
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
@@ -346,6 +385,17 @@ typedef enum {
     TG_ACCT_PARK,           /* park lawn / hedge quad */
     TG_ACCT_HOUSE,          /* individual house in a park */
     TG_ACCT_STEPWALL,       /* side wall closing a run-to-run height step */
+    /* [R4] PRE-RESERVED, one slot per work area, each on its OWN line with its
+     * OWN comment. Round 3 pre-reserved pages but NOT accounting kinds, so two
+     * areas appended to this enum and to k_acct_names and the union resolve
+     * silently dropped a comma. RENAME YOUR OWN SLOT IN PLACE -- do not append
+     * to the enum, do not append to k_acct_names, do not touch another area's
+     * line. An unused reserved slot just reports 0 in the inventory. */
+    TG_ACCT_R4_FLOW,        /* FLOW  (items 1, 5, 12)   rename in place */
+    TG_ACCT_R4_CROSS,       /* CROSS (items 2,4,9,10,14) rename in place */
+    TG_ACCT_R4_CITY,        /* CITY  (items 3, 6, 13, 15) rename in place */
+    TG_ACCT_R4_BRANCH,      /* BRANCH(items 7, 8, 11)   rename in place */
+    TG_ACCT_R4_BRIDGE,      /* BRIDGE(items 16-20)      rename in place */
     TG_ACCT_KIND_COUNT
 } TG_AcctKind;
 
@@ -355,15 +405,29 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
     "tunnel-pieces", "terrain", "far-bands", "banners", "guardrails",
     "road-quads", "checkpoints", "branch-nodes",
     /* [R3] appended in enum order: BLOCK's park/house, CITY's step wall. */
-    "parks", "houses", "step-walls"
+    "parks", "houses", "step-walls",
+    /* [R4] one reserved name per area, in enum order, each on its own line so
+     * two areas renaming their own slot touch non-adjacent lines. Rename the
+     * string to match your renamed enum constant. Keep the trailing comma on
+     * every line but the last -- the R3 union merge lost exactly one comma and
+     * two names silently concatenated into a single string literal. */
+    "r4-flow",              /* FLOW   */
+    "r4-cross",             /* CROSS  */
+    "r4-city",              /* CITY   */
+    "r4-branch",            /* BRANCH */
+    "r4-bridge"             /* BRIDGE */
 };
 
 static long s_acct_count[TG_ACCT_KIND_COUNT];
 /* Presence bitmap: bit k of s_acct_mask[si] = kind k stands at span si. One
- * unsigned int per span costs 12 KB at TD5_TG_MAX_SPANS and buys exact run
- * extraction, which a running min/max pair cannot give (a kind present at spans
- * 0-40 and 900-940 would otherwise report as one run 0..940). */
-static unsigned int s_acct_mask[TD5_TG_MAX_SPANS];
+ * word per span costs 24 KB at TD5_TG_MAX_SPANS and buys exact run extraction,
+ * which a running min/max pair cannot give (a kind present at spans 0-40 and
+ * 900-940 would otherwise report as one run 0..940).
+ * WIDENED to 64 bits for round 4: the kind count reached 26 of the 32 bits an
+ * unsigned int offers, and overflowing it would not fail loudly -- it would
+ * silently shift a bit out and report a real emitter as "NONE emitted", which
+ * is the one lie this inventory exists to prevent. */
+static unsigned long long s_acct_mask[TD5_TG_MAX_SPANS];
 
 static void tg_acct_reset(void)
 {
@@ -380,7 +444,7 @@ static void tg_acct_n(TG_AcctKind kind, int si, int n)
     if ((unsigned)kind >= TG_ACCT_KIND_COUNT || n <= 0) return;
     s_acct_count[kind] += n;
     if (si >= 0 && si < TD5_TG_MAX_SPANS)
-        s_acct_mask[si] |= 1u << (unsigned)kind;
+        s_acct_mask[si] |= 1ull << (unsigned)kind;
 }
 
 static void tg_acct(TG_AcctKind kind, int si) { tg_acct_n(kind, si, 1); }
@@ -397,7 +461,7 @@ static void tg_acct_range(TG_AcctKind kind, int si0, int si1)
     if (si0 < 0) si0 = 0;
     if (si1 >= TD5_TG_MAX_SPANS) si1 = TD5_TG_MAX_SPANS - 1;
     for (s = si0; s <= si1; s++)
-        s_acct_mask[s] |= 1u << (unsigned)kind;
+        s_acct_mask[s] |= 1ull << (unsigned)kind;
 }
 
 /* Cap on run entries printed per kind. A kind with more runs than this is
@@ -411,7 +475,7 @@ static void tg_acct_report(int nspans)
     if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
     TD5_LOG_I(LOG_TAG, "trackgen: ---- element inventory (%d spans) ----", nspans);
     for (k = 0; k < TG_ACCT_KIND_COUNT; k++) {
-        const unsigned int bit = 1u << (unsigned)k;
+        const unsigned long long bit = 1ull << (unsigned)k;
         char runs[240];
         int  pos = 0, nruns = 0, touched = 0, first = -1, last = -1;
         int  s = 0;
