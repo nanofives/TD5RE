@@ -298,6 +298,10 @@ static int tg_road_page(int si);
  * branch pavement). ------------------------------------------------------- */
 #define TD5_TG_PAGE_R5_STRUCT (TD5_TG_PAGE_R5_BASE + 30)
 #define TD5_TG_R5_STRUCT_N    8
+/* Named slot inside the STRUCT block. +0 is the SOLID leg-face concrete page for
+ * the start/finish gantry uprights (item 1), replacing the bleeding 12% window
+ * of the shared BANNER page. Slots +1..+7 stay reserved for future STRUCT art. */
+#define TD5_TG_PAGE_R5_LEG    (TD5_TG_PAGE_R5_STRUCT + 0)
 
 /* --- FLORA block (items 16,18): 12 slots. Widest reservation on purpose --
  * item 18 asks to EXPAND the tree library (varied canopies, tall trees,
@@ -476,7 +480,7 @@ typedef enum {
 
     TG_ACCT_R5_BRIDGE,      /* BRIDGE (items 13,14,17)   rename in place */
 
-    TG_ACCT_R5_STRUCT,      /* STRUCT (items 1,9,10)     rename in place */
+    TG_ACCT_BRANCH_VERGE,   /* STRUCT item 10: flat verge band on a branch's outer edge */
 
     TG_ACCT_R5_FLORA,       /* FLORA  (items 16,18)      rename in place */
     TG_ACCT_KIND_COUNT
@@ -508,7 +512,7 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
 
     "bridge-kerb",          /* BRIDGE (item 17 deck kerb) */
 
-    "r5-struct",            /* STRUCT */
+    "branch-verge",         /* STRUCT item 10 */
 
     "r5-flora"              /* FLORA  */
 };
@@ -3122,6 +3126,64 @@ static int tg_write_quad_mesh(TG_Buf *blk, const double *px, const double *py,
     return !blk->oom;
 }
 
+/* [R5 STRUCT item 9] Same as tg_write_quad_mesh but with a PER-VERTEX colour,
+ * so one mesh can carry both the DIM tunnel walls and a BRIGHT portal lintel
+ * (the swept tunnel keeps everything in a single mesh per span so the caller's
+ * offset bookkeeping records exactly one model). */
+static int tg_write_quad_mesh_col(TG_Buf *blk, const double *px, const double *py,
+                                  const double *pz, const double *uu, const double *vv,
+                                  const unsigned int *col, int n,
+                                  const int *seg_page, const int *seg_nq, int nseg)
+{
+    double cx = 0.0, cy = 0.0, cz = 0.0, radius = 0.0;
+    int i, s;
+
+    if (n <= 0 || nseg <= 0) return 1;
+    for (i = 0; i < n; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
+    cx /= n; cy /= n; cz /= n;
+    for (i = 0; i < n; i++) {
+        double dx = px[i]-cx, dy = py[i]-cy, dz = pz[i]-cz;
+        double d = sqrt(dx*dx + dy*dy + dz*dz);
+        if (d > radius) radius = d;
+    }
+    if (!(radius > 0.0)) radius = 1.0;
+
+    tg_put_u16(blk, 259);
+    tg_put_u16(blk, 0);                    /* opaque, not a billboard */
+    tg_put_u32(blk, (unsigned)nseg);
+    tg_put_u32(blk, (unsigned)n);
+    tg_put_f32(blk, radius);
+    tg_put_f32(blk, cx);
+    tg_put_f32(blk, cy);
+    tg_put_f32(blk, cz);
+    tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+    tg_put_u32(blk, 0);
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE);
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE + nseg * TD5_TG_CMD_SIZE);
+    tg_put_u32(blk, 0);
+
+    for (s = 0; s < nseg; s++) {
+        tg_put_u16(blk, 0);
+        tg_put_u16(blk, (unsigned)seg_page[s]);
+        tg_put_u32(blk, 0);
+        tg_put_u16(blk, 0);
+        tg_put_u16(blk, (unsigned)seg_nq[s]);
+        tg_put_u32(blk, 0);
+    }
+
+    for (i = 0; i < n; i++) {
+        tg_put_f32(blk, px[i]);
+        tg_put_f32(blk, py[i]);
+        tg_put_f32(blk, pz[i]);
+        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+        tg_put_u32(blk, col[i]);
+        tg_put_f32(blk, uu[i]);
+        tg_put_f32(blk, vv[i]);
+        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+    }
+    return !blk->oom;
+}
+
 /* Push floors [r0,r1) of a cols x `rows` grid onto the vertex arrays. `base` is
  * the lower-near corner; `across` and `up` are the FULL edge vectors (up spans
  * all `rows` floors). Each cell maps the whole page (UV 0..1, v=1 at the base),
@@ -4782,6 +4844,104 @@ static void tg_tunnel_bore(const TG_NodeList *nl, int si,
     }
 }
 
+/* [R5 STRUCT item 9] Sweep the tunnel walls/roof between consecutive nodes.
+ *
+ * The box version below placed one axis-aligned box at EACH node, oriented by
+ * that node's own straight tangent only. On a curving or graded bore those
+ * rigid boxes diverge from the centreline: on the inside of a curve the wall
+ * pulls away and daylight shows through, on the outside it juts across the road,
+ * and the mismatched slabs read as tilted "slopes" -- verbatim item 9, and
+ * visible in log/r5s_tunnel_b.png (road curving left, left wall gone, blocks
+ * scattered). Sweeping the two side walls and the roof from node si to node si+1
+ * -- the same way the road quads are built -- makes the enclosure follow the
+ * road in both plan and grade. Walls are single inner-face planes (scenery is
+ * CULL_NONE so they draw solid from inside), the roof caps between the wall
+ * tops, and a bright lintel closes each run mouth. Default ON;
+ * TD5RE_R5_TUNNEL_SWEEP=0 restores the boxes for an A/B. */
+static int tg_r5_tunnel_sweep(void)
+{
+    return td5_env_flag_on("TD5RE_R5_TUNNEL_SWEEP");   /* default ON */
+}
+
+static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
+                                int *added)
+{
+    const double wall_t = TD5_TG_TUNNEL_WALL_T;
+    const double height = TD5_TG_TUNNEL_HEIGHT;
+    const unsigned int dim = 0xFF585868u;   /* shadowed interior */
+    const int lining = tg_tunnel_lining_page(si);
+    const double tile = 3000.0;
+    const TG_Node *nd = &nl->v[si];
+    double px[32], py[32], pz[32], uu[32], vv[32];
+    unsigned int col[32];
+    int seg_page = lining, seg_nq, n = 0;
+
+    /* +lateral = LEFT of travel: point at lateral t off node = (x + tz*t, y,
+     * z - tx*t), the same frame the road/gore/sidewalk use. */
+    #define TG_TUN_PUSH(ND, T, YY, U, V, C) do {                 \
+        px[n] = (ND)->x + (ND)->tz * (T); py[n] = (YY);          \
+        pz[n] = (ND)->z - (ND)->tx * (T);                        \
+        uu[n] = (U); vv[n] = (V); col[n] = (C); n++;             \
+    } while (0)
+
+    /* Wall/roof segment [si, si+1]; only when si+1 is bored too, so a run's last
+     * span does not push the tube one span past its mouth. */
+    if (tg_span_in_tunnel(si + 1)) {
+        const TG_Node *a = &nl->v[si];
+        const TG_Node *c = &nl->v[si + 1];
+        double ha, sa, hc, sc, dx, dz, seglen, u1, vtop, wv;
+        double al, ar, cl, cr;
+        tg_tunnel_bore(nl, si,     &ha, &sa);
+        tg_tunnel_bore(nl, si + 1, &hc, &sc);
+        al = sa + ha; ar = sa - ha;          /* inner edges at a (L, R) */
+        cl = sc + hc; cr = sc - hc;          /* inner edges at c (L, R) */
+        dx = c->x - a->x; dz = c->z - a->z;
+        seglen = sqrt(dx * dx + dz * dz);
+        u1   = (seglen > 1.0) ? seglen / tile : 0.5;
+        vtop = height / tile;
+        wv   = (2.0 * ha) / tile;
+        /* Left wall inner face */
+        TG_TUN_PUSH(a, al, a->y,          0.0, 0.0,  dim);
+        TG_TUN_PUSH(c, cl, c->y,          u1,  0.0,  dim);
+        TG_TUN_PUSH(c, cl, c->y + height, u1,  vtop, dim);
+        TG_TUN_PUSH(a, al, a->y + height, 0.0, vtop, dim);
+        /* Right wall inner face */
+        TG_TUN_PUSH(a, ar, a->y,          0.0, 0.0,  dim);
+        TG_TUN_PUSH(c, cr, c->y,          u1,  0.0,  dim);
+        TG_TUN_PUSH(c, cr, c->y + height, u1,  vtop, dim);
+        TG_TUN_PUSH(a, ar, a->y + height, 0.0, vtop, dim);
+        /* Roof: near-left, far-left, far-right, near-right at ceiling height */
+        TG_TUN_PUSH(a, al, a->y + height, 0.0, 0.0, dim);
+        TG_TUN_PUSH(c, cl, c->y + height, u1,  0.0, dim);
+        TG_TUN_PUSH(c, cr, c->y + height, u1,  wv,  dim);
+        TG_TUN_PUSH(a, ar, a->y + height, 0.0, wv,  dim);
+    }
+
+    /* Bright lintel across a run mouth (near end at the first bored node, far
+     * end at the last), so an opening reads as a portal rather than an open box. */
+    if (!tg_span_in_tunnel(si - 1) || !tg_span_in_tunnel(si + 1)) {
+        double ph, psh, lo, ro, y0, y1, pw;
+        tg_tunnel_bore(nl, si, &ph, &psh);
+        lo = psh + ph + wall_t;              /* left outer  */
+        ro = psh - ph - wall_t;              /* right outer */
+        y0 = nd->y + height;
+        y1 = y0 + 500.0;
+        pw = (lo - ro) / tile;
+        TG_TUN_PUSH(nd, lo, y0, 0.0, 0.0,  0xFFFFFFFFu);
+        TG_TUN_PUSH(nd, ro, y0, pw,  0.0,  0xFFFFFFFFu);
+        TG_TUN_PUSH(nd, ro, y1, pw,  0.17, 0xFFFFFFFFu);
+        TG_TUN_PUSH(nd, lo, y1, 0.0, 0.17, 0xFFFFFFFFu);
+    }
+    #undef TG_TUN_PUSH
+
+    if (n <= 0) return 1;
+    seg_nq = n / 4;
+    tg_acct(TG_ACCT_TUNNEL, si);
+    (*added)++;
+    return tg_write_quad_mesh_col(blk, px, py, pz, uu, vv, col, n,
+                                  &seg_page, &seg_nq, 1);
+}
+
 /* Tunnel cross-section at span si: two side walls plus a roof, each its own
  * mesh so per-mesh frustum culling cannot pop the whole tunnel at once. The
  * enclosure is drawn DIM (vertex colour) so the interior reads as shadowed --
@@ -4807,6 +4967,9 @@ static int tg_emit_tunnel(const TG_NodeList *nl, int si, TG_Buf *blk,
     const int lining = tg_tunnel_lining_page(si);   /* item 16a: per-run variety */
     double bore_half, bore_shift, side_x, cx, cz;
     int i;
+
+    if (tg_r5_tunnel_sweep())               /* [R5 item 9] swept, road-following */
+        return tg_emit_tunnel_swept(nl, si, blk, added);
 
     tg_tunnel_bore(nl, si, &bore_half, &bore_shift);
     side_x = bore_half + wall_t;
@@ -5846,6 +6009,54 @@ static int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
 
     seg_nq = n / 4;
     tg_acct_n(TG_ACCT_SIDEWALK, acct_si, 1);
+    moff[(*nmesh)++] = blk->len;
+    return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
+}
+
+/* [R5 STRUCT item 10] Flat VERGE BAND along a branch corridor's OUTER edge.
+ *
+ * tg_emit_branch_sidewalk above lays a raised kerb+slab, but ONLY where the
+ * corridor's base main node is a PAVED (city) biome -- tg_city_sidewalk_w is 0
+ * for the billboard/tree biomes. On seed 99991 fork 2 (F=510) runs its corridor
+ * mostly through ORIENTAL (main nodes 511-599), so its whole start had NO edge
+ * treatment at all: bare road meeting open ground on the right, the reported
+ * "no sidewalk on the right side of the branch". Meanwhile the ORIENTAL MAIN
+ * road gets the flat verge band (tg_city_emit_verge_band). This gives the branch
+ * the SAME out-of-town margin on its outer edge, mirroring the main road, so the
+ * corridor is no longer bare where its biome has no pavement. Flat (no kerb),
+ * one quad, lifted TD5_TG_VERGE_LIFT off the ground like the main-road band, on
+ * the shipped sidewalk page. Frame and outer-edge derivation identical to
+ * tg_emit_branch_sidewalk. Default ON; TD5RE_R5_BRANCH_VERGE=0 for an A/B. */
+static int tg_emit_branch_verge(const TG_NodeList *nl, int mb, int k, int L,
+                                double sep, int br_lanes, double bw,
+                                TG_Buf *blk, size_t *moff, int *nmesh,
+                                int acct_si)
+{
+    const TG_Node *a = &nl->v[mb];
+    const TG_Node *c = &nl->v[mb + 1];
+    const double sh0 = tg_branch_shift_s(k,     L, a->width, sep);
+    const double sh1 = tg_branch_shift_s(k + 1, L, c->width, sep);
+    const double h0  = a->width * tg_branch_wscale_s(k,     L, br_lanes, sep) * 0.5;
+    const double h1  = c->width * tg_branch_wscale_s(k + 1, L, br_lanes, sep) * 0.5;
+    const double e0  = sh0 - h0;                 /* outer (right) edge, near */
+    const double e1  = sh1 - h1;                 /* outer (right) edge, far  */
+    const double lift = TD5_TG_VERGE_LIFT;
+    const double u_w = bw / (double)TD5_TG_SPAN_LENGTH;
+    double px[4], py[4], pz[4], uu[4], vv[4];
+    int seg_page = TD5_TG_PAGE_SIDEWALK, seg_nq;
+    int n = 0;
+
+    if (bw <= 0.0) return 1;
+    /* Flat band, same winding as the sidewalk top slab: near-edge, near-outer,
+     * far-outer, far-edge. The branch is at negative lateral, so "further out"
+     * is t decreasing (e - bw). */
+    px[n]=a->x+a->tz*e0;        py[n]=a->y+lift; pz[n]=a->z-a->tx*e0;        uu[n]=0.0; vv[n]=0.0; n++;
+    px[n]=a->x+a->tz*(e0-bw);   py[n]=a->y+lift; pz[n]=a->z-a->tx*(e0-bw);   uu[n]=u_w; vv[n]=0.0; n++;
+    px[n]=c->x+c->tz*(e1-bw);   py[n]=c->y+lift; pz[n]=c->z-c->tx*(e1-bw);   uu[n]=u_w; vv[n]=1.0; n++;
+    px[n]=c->x+c->tz*e1;        py[n]=c->y+lift; pz[n]=c->z-c->tx*e1;        uu[n]=0.0; vv[n]=1.0; n++;
+
+    seg_nq = n / 4;
+    tg_acct_n(TG_ACCT_BRANCH_VERGE, acct_si, 1);
     moff[(*nmesh)++] = blk->len;
     return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
 }
@@ -8306,6 +8517,15 @@ static int tg_r4_banner_fix(void)
     return td5_env_flag_on("TD5RE_R4_BANNER_FIX");   /* default ON */
 }
 
+/* [R5 STRUCT item 1] Point the gantry LEGS at their own solid concrete page
+ * (TD5_TG_PAGE_R5_LEG) instead of the bleeding 12% window of the shared BANNER
+ * page. Default ON; =0 pins the round-4 legs-on-BANNER for a single-variable
+ * A/B of the leg texture. */
+static int tg_r5_leg_fix(void)
+{
+    return td5_env_flag_on("TD5RE_R5_STRUCT_LEG");   /* default ON */
+}
+
 /* Push one axis-aligned-in-the-road-frame quad into the caller's arrays. */
 static void tg_gantry_quad(double *px, double *py, double *pz,
                            double *uu, double *vv, int *n,
@@ -8333,9 +8553,14 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish
     double qx[4], qy[4], qz[4];
     double base_y;
     /* One command per page, in vertex order: the frame first, then the two
-     * halves of the word (see the panel block). */
-    int seg_page[3], seg_nq[3];
+     * halves of the word (see the panel block). [R5 item 1] a 4th segment when
+     * the legs move to their own page (legs page, cap page, then the two word
+     * halves). */
+    int seg_page[4], seg_nq[4];
+    int nseg = 3, cap_n = 0;
     int n = 0, i;
+    const int    legfix = tg_r5_leg_fix();
+    const double lue     = legfix ? TD5_TG_FACADE_UV_INSET : 0.0;
     /* [R4 item 1] one flag drives both halves of the fix so the A/B is single
      * variable. leg_w/leg_d square the posts up; `out` moves the feet outboard
      * to match; `ins` insets the panel UVs to kill the centre seam. */
@@ -8381,10 +8606,16 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish
             qx[2] = qx[1];                      qz[2] = qz[1];
             qx[3] = qx[0];                      qz[3] = qz[0];
             qy[0] = y0; qy[1] = y0; qy[2] = y1; qy[3] = y1;
+            /* [R5 item 1] On the dedicated leg page the whole 64x64 is concrete,
+             * so map the face across the page inset by half a texel (no border
+             * fetch). Without the fix, the legacy 0..0.12 window of the BANNER
+             * page -- the source of the reported edge bleed. */
             tg_gantry_quad(px, py, pz, uu, vv, &n, qx, qy, qz,
-                           0.0, 0.12, 1.0, 0.0);
+                           legfix ? lue : 0.0, legfix ? 1.0 - lue : 0.12,
+                           legfix ? 1.0 - lue : 1.0, legfix ? lue : 0.0);
         }
     }
+    cap_n = n;   /* verts so far are all legs; the cap follows on its own page */
 
     /* Underside cap of the panel, emitted here so the whole steel FRAME (legs +
      * cap) is one contiguous run of quads and therefore one command. */
@@ -8401,8 +8632,19 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish
         qy[0] = y0; qy[1] = y0; qy[2] = y0; qy[3] = y0;
         tg_gantry_quad(px, py, pz, uu, vv, &n, qx, qy, qz, 0.0, 1.0, 0.9, 1.0);
     }
-    seg_page[0] = TD5_TG_PAGE_BANNER;
-    seg_nq[0]   = n / 4;
+    /* [R5 item 1] With the leg fix the legs are one command on the LEG page and
+     * the underside cap stays on the BANNER page (its chequer end block); the
+     * two word halves follow. Without it, legs+cap are one BANNER command as
+     * before. */
+    if (legfix) {
+        seg_page[0] = TD5_TG_PAGE_R5_LEG;  seg_nq[0] = cap_n / 4;       /* legs */
+        seg_page[1] = TD5_TG_PAGE_BANNER;  seg_nq[1] = (n - cap_n) / 4; /* cap  */
+        nseg = 4;
+    } else {
+        seg_page[0] = TD5_TG_PAGE_BANNER;
+        seg_nq[0]   = n / 4;
+        nseg = 3;
+    }
 
     /* --- panel: a slab bridging the two legs, carrying the SHIPPED START or
      * FINISH artwork. Front and back faces are separated by
@@ -8480,14 +8722,19 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish
                            ends[q][4] - (ends[q][4] - ends[q][3]) * ins,
                            1.0 - ins, ins);
         }
-        seg_page[1] = finish ? TD5_TG_PAGE_FINISH_L : TD5_TG_PAGE_START_L;
-        seg_page[2] = finish ? TD5_TG_PAGE_FINISH_R : TD5_TG_PAGE_START_R;
-        seg_nq[1]   = 1;      /* one front half per page (back face dropped) */
-        seg_nq[2]   = 1;
+        /* Panel halves are the last two commands; their index shifts by one when
+         * the legs took their own page ahead of the cap ([R5 item 1]). */
+        {
+            const int ps = legfix ? 2 : 1;
+            seg_page[ps]     = finish ? TD5_TG_PAGE_FINISH_L : TD5_TG_PAGE_START_L;
+            seg_page[ps + 1] = finish ? TD5_TG_PAGE_FINISH_R : TD5_TG_PAGE_START_R;
+            seg_nq[ps]       = 1;  /* one front half per page (back face dropped) */
+            seg_nq[ps + 1]   = 1;
+        }
     }
 
     tg_acct(TG_ACCT_BANNER, si);
-    return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, seg_page, seg_nq, 3);
+    return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, seg_page, seg_nq, nseg);
 }
 
 /* Group E -- track furniture: start/finish banners, branch mouths, run-off.
@@ -8657,10 +8904,22 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     if (ok) {
                         const TG_Biome *cb = &k_biomes[tg_biome_for_span(mb)];
                         if (tg_city_sidewalk_w(cb) > 0.0 &&
-                            td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS"))
+                            td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS")) {
                             if (!tg_emit_branch_sidewalk(nl, mb, ck, L, sep,
                                                          br_lanes, cb, &meshes,
                                                          moff, &nmesh, si)) ok = 0;
+                        /* [R5 item 10] Out-of-town corridor: no city pavement, so
+                         * give the outer edge the SAME flat verge band the main
+                         * road gets in that biome. Without this a fork through a
+                         * tree biome (seed 99991 fork 2 through ORIENTAL) had a
+                         * bare right edge -- "no sidewalk on the right of the
+                         * branch". */
+                        } else if (tg_verge_band_w(cb) > 0.0 &&
+                                   td5_env_flag_on("TD5RE_R5_BRANCH_VERGE")) {
+                            if (!tg_emit_branch_verge(nl, mb, ck, L, sep,
+                                                      br_lanes, tg_verge_band_w(cb),
+                                                      &meshes, moff, &nmesh, si)) ok = 0;
+                        }
                     }
                 }
                 /* The other appended span is the PAD (si == cbase-1). It is
@@ -10232,6 +10491,46 @@ static void tg_emit_texture_page_fb_banner(TG_Buf *out)
     }
 }
 
+/* [R5 STRUCT item 1] Dedicated SOLID leg-face page for the start/finish gantry
+ * uprights. The legs used to sample a 12% window (u 0..0.12) of the shared
+ * BANNER page, whose left column is post-grey and the rest is the black surround
+ * + chequer end block. But the solid leg column is only 7 texels wide (leg_col =
+ * 64*12/100 = 7, u <= 0.109), so the leg's u=0.12 right edge OVERSHOOTS the
+ * column into the surround and chequer -- the reported "texture not fully
+ * covering it, bleeding the edges into another texture" (framedump
+ * log/r5s_leg_left_base.png: a black strip and white chequer blobs down the leg
+ * edge). This page is cast concrete edge to edge, so there is no neighbouring
+ * region for the leg UVs to bleed into -- the bleed is impossible by
+ * construction, not merely inset away. Opaque, neutral grey (BGR == R == G),
+ * matched to the old post-grey (~92) with faint vertical cast-joint lines so a
+ * column reads as a column rather than a flat card. */
+static void tg_emit_texture_page_r5_leg(TG_Buf *out)
+{
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR, neutral grey around the old post-grey (92,92,94). A small spread so
+     * the joint lines below have something to pick from. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v = 78 + (i % 8) * 5;                            /* 78..113 */
+        tg_put_u8(out, (unsigned)v);   /* B */
+        tg_put_u8(out, (unsigned)v);   /* G */
+        tg_put_u8(out, (unsigned)v);   /* R */
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        int x = i % TD5_TG_TEX_DIM;
+        int y = i / TD5_TG_TEX_DIM;
+        int idx = 3 + ((x * 7 + y) & 1);                     /* base concrete    */
+        /* Two faint vertical cast joints so the post has some vertical grain. */
+        if (x == TD5_TG_TEX_DIM / 3 || x == (2 * TD5_TG_TEX_DIM) / 3) idx = 1;
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 /* [R4 BRANCH item 8] Vertical concrete KERB face for the two side walls of an
  * avenue median (see tg_emit_avenue_divider). Plain cast concrete: a lighter
  * kerb cap at the page top (v -> 0 is the top of the wall, matching the tree
@@ -10457,6 +10756,8 @@ static int tg_emit_textures(TG_Buf *out)
     tg_emit_texture_page_r5_guardrail(&pages[TD5_TG_PAGE_R5_BRIDGE + 0]);
     /* [R4 CROSS item 9] cross-street asphalt with a longitudinal centre line. */
     tg_emit_texture_page_r4_cross(&pages[TD5_TG_PAGE_R4_CROSS + 0]);
+    /* [R5 STRUCT item 1] solid concrete leg-face page for the gantry uprights. */
+    tg_emit_texture_page_r5_leg(&pages[TD5_TG_PAGE_R5_LEG]);
 
     for (i = 0; i < count; i++) {
         if (pages[i].oom) {
