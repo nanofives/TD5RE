@@ -32,6 +32,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 29 (auto-track off-map, deep)" },
+    { CL_ITEM,    "FIXED: on a branch corridor a car flung far off the" },
+    { CL_ITEM,    "  map could stay lost -- the recovery only searched" },
+    { CL_ITEM,    "  near the road, so a deep escape found nothing and" },
+    { CL_ITEM,    "  was never pulled back. It now searches the whole" },
+    { CL_ITEM,    "  track and recovers the car from any distance." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 29 (auto-track fork)" },
     { CL_ITEM,    "FIXED: on the auto-track you could drive THROUGH the map" },
     { CL_ITEM,    "  and out of bounds at a fork's sharp half-width bend at" },

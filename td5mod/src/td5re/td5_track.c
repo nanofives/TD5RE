@@ -1332,14 +1332,73 @@ static void geo_resolve_walls(TD5_Actor *actor)
  * per-tick cap so a fast escapee is recovered in a few ticks instead of lost. */
 #define OOB_RESCUE_DIST 1200   /* world units clear of all road before we act   */
 #define OOB_RESCUE_CAP  4000   /* max pull-back per tick during a rescue        */
+
+/* [FORK OOB R5 2026-08-29] Hint-independent, grid-independent nearest-road query.
+ * The gridded geo_locate scans only +/-8 cells (~32k units) around the car's
+ * CLAMPED cell (geo_cell_of pins an off-grid point to the nearest edge cell).
+ * Once a car has drifted far enough off the map that no drivable quad lies inside
+ * that window, geo_locate returns 0 with no `near` candidate, and geo_rescue_offmap
+ * used to give up EXACTLY when the car was most lost -- the deep-escape hole behind
+ * round-5 item 11: shallow excursions (dist just over OOB_RESCUE_DIST) got rescued,
+ * a real fling that walked the car off-grid over many ticks never did, so nothing
+ * ever opposed the drift and it sailed to ~1e6 units out. This brute-forces every
+ * quad for the nearest boundary point. O(quads) (~7.4k) but only runs on a genuine
+ * off-map tick for a racer slot, so the cost is irrelevant. Fills GeoHit the same
+ * way geo_locate does (inside=1 with a zero push when the point is on the road). */
+static int geo_nearest_global(int32_t px, int32_t pz, GeoHit *out)
+{
+    int i, best_i = -1; int64_t best = -1; int32_t bx = 0, bz = 0;
+    if (!s_geo_quads || s_geo_quad_count <= 0) return 0;
+    for (i = 0; i < s_geo_quad_count; i++) {
+        GeoQuad *q = &s_geo_quads[i];
+        int32_t nx, nz; int64_t d;
+        if (px >= q->minx && px <= q->maxx && pz >= q->minz && pz <= q->maxz &&
+            geo_point_in_quad(q, px, pz)) {
+            out->span = q->span; out->lane = q->lane;
+            out->inside = 1; out->pushx = out->pushz = out->pushdist = 0;
+            return 1;
+        }
+        d = geo_quad_nearest(q, px, pz, &nx, &nz);
+        if (best < 0 || d < best) { best = d; bx = nx; bz = nz; best_i = i; }
+    }
+    if (best_i < 0) return 0;
+    out->span = s_geo_quads[best_i].span; out->lane = s_geo_quads[best_i].lane;
+    out->inside = 0;
+    out->pushx = bx - px; out->pushz = bz - pz;
+    out->pushdist = (int32_t)sqrt((double)best);
+    return 1;
+}
+
 static void geo_rescue_offmap(TD5_Actor *actor)
 {
     int32_t cx = FP_TRUNC(actor->world_pos.x);
     int32_t cz = FP_TRUNC(actor->world_pos.z);
     GeoHit h; double dx, dz, mag, rad; int32_t wall_angle, pen;
-    static int s_r_diag = -1;
+    int located, off_grid, used_global = 0;
+    static int s_r_diag = -1, s_use_global = -1;
     if (s_r_diag < 0) s_r_diag = td5_env_flag_on("TD5RE_OOB_DIAG");
-    if (!geo_locate(cx, cz, (int)actor->track_span_raw, &h)) return;
+    /* Default ON; TD5RE_OOB_GLOBAL=0 restores the pre-fix behaviour for A/B. */
+    if (s_use_global < 0) s_use_global = td5_env_flag_on("TD5RE_OOB_GLOBAL");
+
+    /* A far fling leaves the grid AABB entirely, where geo_cell_of clamps and the
+     * gridded scan can't reach the road. Detect off-grid up-front and go straight
+     * to the global search; also fall back to it if the gridded lookup fails for
+     * any other reason (e.g. on-grid but >8 cells clear of any road). */
+    off_grid = (cx <  s_geo_gx0 || cx >= s_geo_gx0 + (int64_t)s_geo_gnx * s_geo_gcell ||
+                cz <  s_geo_gz0 || cz >= s_geo_gz0 + (int64_t)s_geo_gnz * s_geo_gcell);
+    if (s_use_global && off_grid) {
+        located = geo_nearest_global(cx, cz, &h); used_global = 1;
+    } else {
+        located = geo_locate(cx, cz, (int)actor->track_span_raw, &h);
+        if (!located && s_use_global) { located = geo_nearest_global(cx, cz, &h); used_global = 1; }
+    }
+
+    if (s_r_diag && actor->slot_index == 0 && (off_grid || used_global || (located && !h.inside)))
+        TD5_LOG_W(LOG_TAG, "OOB RESCUE probe: span=%d cx=%d cz=%d off_grid=%d located=%d "
+                  "global=%d inside=%d dist=%d", (int)actor->track_span_raw, cx, cz, off_grid,
+                  located, used_global, located ? h.inside : -1, located ? h.pushdist : -1);
+
+    if (!located) return;
     if (h.inside || h.pushdist <= OOB_RESCUE_DIST) return;   /* on/near road */
     dx = (double)h.pushx; dz = (double)h.pushz;
     mag = sqrt(dx * dx + dz * dz);
@@ -1350,8 +1409,8 @@ static void geo_rescue_offmap(TD5_Actor *actor)
     td5_physics_wall_response(actor, wall_angle, pen, 1, actor->world_pos.x, actor->world_pos.z);
     td5_physics_rebuild_pose(actor);
     if (s_r_diag && actor->slot_index == 0)
-        TD5_LOG_W(LOG_TAG, "OOB RESCUE: slot=0 span=%d off-map dist=%d -> pulled back "
-                  "(posY=%d px=%d pz=%d)", (int)actor->track_span_raw, h.pushdist,
+        TD5_LOG_W(LOG_TAG, "OOB RESCUE: slot=0 span=%d off-map dist=%d global=%d -> pulled back "
+                  "(posY=%d px=%d pz=%d)", (int)actor->track_span_raw, h.pushdist, used_global,
                   FP_TRUNC(actor->world_pos.y), cx, cz);
 }
 
@@ -1583,6 +1642,36 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             }
         }
     }
+
+#ifndef TD5RE_RELEASE
+    /* [FORK OOB R5 repro 2026-08-29] Dev-only, off by default: deterministically
+     * reproduce the deep off-map escape so the backstop can be A/B'd without a
+     * flaky manual drive into a corridor wall. When TD5RE_OOB_REPRO=<raw span> is
+     * set, the first time the player (slot 0) reaches that span it is displaced
+     * far off the drivable surface (TD5RE_OOB_REPRO_KICK world units, default
+     * 80000) -- past the gridded geo_locate's ~32k reach -- which is exactly the
+     * off-grid state a wall-overshoot fling walks the car into. Never fires unless
+     * the knob is set. Runs on the forward autotrack only (geo_query_active). */
+    if (actor->slot_index == 0 && geo_query_active()) {
+        static int s_repro_span = -2, s_repro_kick = 0, s_repro_done = 0;
+        if (s_repro_span == -2) {
+            s_repro_span = td5_env_int("TD5RE_OOB_REPRO", -1, -1, 1000000);
+            s_repro_kick = td5_env_int("TD5RE_OOB_REPRO_KICK", 80000, 1000, 4000000);
+        }
+        if (s_repro_span >= 0 && !s_repro_done) {
+            int rs = (int)actor->track_span_raw;
+            if (rs >= s_repro_span) {   /* first tick at/after the target span */
+                actor->world_pos.x += FP_SCALE((int32_t)s_repro_kick);
+                actor->world_pos.z += FP_SCALE((int32_t)s_repro_kick);
+                td5_physics_rebuild_pose(actor);
+                s_repro_done = 1;
+                TD5_LOG_W(LOG_TAG, "OOB REPRO: flung slot0 at raw=%d by %d -> px=%d pz=%d",
+                          rs, s_repro_kick, FP_TRUNC(actor->world_pos.x),
+                          FP_TRUNC(actor->world_pos.z));
+            }
+        }
+    }
+#endif
 
     /* [FORK OOB 2026-08-29] Last-resort off-map recovery for forward custom
      * tracks (autotrack forks). The rail-LUT pass above owns normal containment;
