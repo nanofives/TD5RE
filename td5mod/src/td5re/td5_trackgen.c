@@ -379,6 +379,12 @@ static int tg_span_in_bridge_run(int si);
  * whether span si is a CITY cell to place "around the block" turns there. */
 static int tg_biome_span_is_city(int si);
 
+/* [R5 item 15] True where a street-wall facade actually STANDS at span si (not
+ * merely where the run/gap pattern says "built"). Forward-declared: it reads the
+ * biome table and bridge runs, both defined below, but tg_side_built above needs
+ * it. */
+static int tg_facade_stands(int si);
+
 /* Seed of the last successful build, for reproducing a good random track. */
 static unsigned int s_last_seed = 0;
 
@@ -3242,6 +3248,18 @@ static int tg_side_built(int si, int left)
     if (td5_env_flag_on("TD5RE_AUTOTRACK_SIDE_CLOSE") &&
         tg_branches_enabled() && !left && tg_span_in_fork_clear(si))
         return 0;
+    /* [R5 item 15] tg_facade_built is the run/gap PATTERN only -- biome- and
+     * bridge-blind. On a bridge deck (tg_building_for_span returns early) or in a
+     * tree-billboard biome (COAST/FOREST/... build no wall) the pattern still
+     * says "built", so a cap keyed off tg_side_built left the flank open where a
+     * facade run met a bridge or a non-facade biome: "one span of the front of a
+     * building disconnected from the following spans" (span 1047, the INDUSTRIAL
+     * band 1040-1049 wedged between bridge run 1000-1039 and COAST 1050+). A span
+     * where no wall actually stands must read as a run boundary so its neighbour
+     * caps. Default ON; TD5RE_AUTOTRACK_EDGE_CAP=0 restores the pattern-only
+     * predicate for an A/B. */
+    if (td5_env_flag_on("TD5RE_AUTOTRACK_EDGE_CAP") && !tg_facade_stands(si))
+        return 0;
     return 1;
 }
 
@@ -4336,6 +4354,18 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
  * walk has already consumed, so scenery cannot perturb track shape. Tree biomes
  * keep the camera-facing billboard; box biomes now lay a flat facade wall
  * (tg_emit_street_wall) instead of a UV-tiled 6-sided box. */
+/* [R5 item 15] Where does a street wall actually STAND? Mirrors the emit gate in
+ * tg_building_for_span below: past span 0, not on a bridge deck (the deck is
+ * cleared), and in a facade biome (tg_city_sidewalk_w > 0 -- CITY / INDUSTRIAL,
+ * not the tree-billboard biomes). tg_side_built uses this so caps and step walls
+ * treat a bridge span or a non-facade neighbour as a run boundary. */
+static int tg_facade_stands(int si)
+{
+    if (si <= 0) return 0;
+    if (tg_span_in_bridge_run(si)) return 0;
+    return tg_city_sidewalk_w(&k_biomes[tg_biome_for_span(si)]) > 0.0;
+}
+
 static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
 {
     unsigned int h = (unsigned)si * 2654435761u;
@@ -6903,8 +6933,26 @@ static int tg_block_is_park(int si, int left)
  * node, and height/page key on the SUPERBLOCK not the span, so the band does not
  * saw-tooth. Default ON; TD5RE_AUTOTRACK_FORK_BACKDROP=0 restores the bare flank
  * for an A/B. */
-#define TD5_TG_FORKBACK_GAP    5000.0   /* background air past the corridor, raw */
-#define TD5_TG_FORKBACK_DEPTH  6000.0   /* how deep the background block reads    */
+/* [R5 item 5] The fork-back BUILDING massing (span 137 on seed 99991) read as
+ * "a way too big skyscraper that takes a lot of space and looks weird". It is a
+ * BACKDROP behind the fork gore, only ever seen at a distance past the branch,
+ * so it does not need a downtown tower's height or a full building's depth. Three
+ * levers, all cut here so item 5 is one reviewable place:
+ *   - GAP up (5000 -> 7000): stand it further back so it reads as skyline, not
+ *     a wall crowding the branch. Also widens the clear air between it and the
+ *     bowed branch road (helps items 6/7, same emitter, same near-branch spans).
+ *   - DEPTH down (6000 -> 3000): half the footprint. "takes a lot of space".
+ *   - a dedicated ROW CAP (below), well under the street facade's 10, plus
+ *     dropping the +2 skyline bump, so it never towers over the street run in
+ *     front of it.
+ * Default ON; TD5RE_AUTOTRACK_FORKBACK_SMALL=0 restores the old tall/deep/near
+ * massing (GAP 5000, DEPTH 6000, cap FACADE_MAX_ROWS, +(hash%5)+2) for a
+ * single-build A/B and byte attribution. */
+#define TD5_TG_FORKBACK_GAP        7000.0 /* new: background air past the corridor */
+#define TD5_TG_FORKBACK_GAP_TALL   5000.0 /* old (A/B): pre-R5 gap                  */
+#define TD5_TG_FORKBACK_DEPTH      3000.0 /* new: how deep the background reads     */
+#define TD5_TG_FORKBACK_DEPTH_TALL 6000.0 /* old (A/B): pre-R5 depth                */
+#define TD5_TG_FORKBACK_MAX_ROWS   6      /* new: shorter than a street facade      */
 
 static int tg_city_emit_forkback(const TG_FBHook *h)
 {
@@ -6912,8 +6960,10 @@ static int tg_city_emit_forkback(const TG_FBHook *h)
     const TG_NodeList *nl = h->nl;
     const int si = h->si;
     const double side = -1.0;               /* forks only clear the RIGHT lateral */
+    const int small = td5_env_flag_on("TD5RE_AUTOTRACK_FORKBACK_SMALL");
+    const double gap = small ? TD5_TG_FORKBACK_GAP : TD5_TG_FORKBACK_GAP_TALL;
     const TG_Node *n0, *n1;
-    double lx0, lz0, lx1, lz1, set, bx, by, bz, ax, ay, az;
+    double lx0, lz0, lx1, lz1, set0, set1, bx, by, bz, ax, ay, az;
     unsigned int blk, ph, gs, gl, bh;
     int av;
 
@@ -6926,19 +6976,32 @@ static int tg_city_emit_forkback(const TG_FBHook *h)
     lx0 = n0->tz * side; lz0 = -n0->tx * side;
     lx1 = n1->tz * side; lz1 = -n1->tx * side;
 
-    /* Distance from the road EDGE to the front of the band: at least the whole
-     * corridor clearance (clear_gap), then a background gap on top so the block
-     * stands well back rather than crowding the branch. */
-    set = tg_carriageway_clear_gap(nl, si, side, tg_city_sidewalk_w(b),
-                                   TD5_TG_CARRIAGEWAY_MARGIN)
-        + TD5_TG_FORKBACK_GAP;
+    /* Distance from the road EDGE to the front of the band: the whole corridor
+     * clearance (clear_gap) plus a background gap so the block stands well back.
+     * [R5 items 6/7] The clearance is taken PER ENDPOINT -- clear_gap(si) for the
+     * near base and clear_gap(si+1) for the far base -- not one clear_gap(si) for
+     * both. The corridor BOWS: the branch's outer edge is further out at si+1
+     * than at si over the widening half of a fork, so applying si's clearance to
+     * the far base set the front INBOARD of the branch there, and the front chord
+     * skewed against the branch it was meant to back. That is item 6 ("background
+     * building colliding with the road" at 153) and item 7 ("stretched ...
+     * diagonally to the branch road" at 160): the branch bows into a backdrop
+     * laid to the near span's narrower reach. Per-endpoint clearance makes the
+     * band follow the bow. Default ON; TD5RE_AUTOTRACK_FORKBACK_FOLLOW=0 restores
+     * the single-set behaviour for an A/B. */
+    set0 = tg_carriageway_clear_gap(nl, si, side, tg_city_sidewalk_w(b),
+                                    TD5_TG_CARRIAGEWAY_MARGIN) + gap;
+    set1 = td5_env_flag_on("TD5RE_AUTOTRACK_FORKBACK_FOLLOW")
+         ? tg_carriageway_clear_gap(nl, si + 1, side, tg_city_sidewalk_w(b),
+                                    TD5_TG_CARRIAGEWAY_MARGIN) + gap
+         : set0;
 
-    bx = n0->x + lx0 * (n0->width * 0.5 + set);
+    bx = n0->x + lx0 * (n0->width * 0.5 + set0);
     by = n0->y;
-    bz = n0->z + lz0 * (n0->width * 0.5 + set);
-    ax = (n1->x + lx1 * (n1->width * 0.5 + set)) - bx;
+    bz = n0->z + lz0 * (n0->width * 0.5 + set0);
+    ax = (n1->x + lx1 * (n1->width * 0.5 + set1)) - bx;
     ay = n1->y - n0->y;
-    az = (n1->z + lz1 * (n1->width * 0.5 + set)) - bz;
+    az = (n1->z + lz1 * (n1->width * 0.5 + set1)) - bz;
 
     tg_facade_block(si, 0, &blk, &ph, &gs, &gl, &av);
     bh = blk * 2654435761u;
@@ -6948,7 +7011,7 @@ static int tg_city_emit_forkback(const TG_FBHook *h)
          * ground behind the branch. One flat quad, park-lawn page, isotropic UV
          * so it tiles the same on a curve. */
         double px[4], py[4], pz[4], uu[4], vv[4], q[12];
-        const double d = TD5_TG_FORKBACK_DEPTH;
+        const double d = small ? TD5_TG_FORKBACK_DEPTH : TD5_TG_FORKBACK_DEPTH_TALL;
         int seg_page = TD5_TG_PAGE_R3_BLOCK + 0, seg_nq, n = 0;
         const double u_d = d / (double)TD5_TG_SPAN_LENGTH;
         q[0] = bx;              q[1] = by;  q[2] = bz;
@@ -6974,18 +7037,23 @@ static int tg_city_emit_forkback(const TG_FBHook *h)
      * page key on the superblock so the band is one continuous massing. */
     {
         int rows = b->floors_min + tg_city_district_floors(blk)
-                 + (int)((bh >> 9) % 5u) + 2;   /* +2: a background skyline reads
-                                                 * taller than a low street run */
+                 + (int)((bh >> 9) % (small ? 3u : 5u))  /* [R5 item 5] was %5+2; */
+                 + (small ? 0 : 2);                       /* a distant backdrop
+                                                 * must not tower over the street
+                                                 * run in front of it */
+        const int cap = small ? TD5_TG_FORKBACK_MAX_ROWS : TD5_TG_FACADE_MAX_ROWS;
+        const double depth = small ? TD5_TG_FORKBACK_DEPTH
+                                   : TD5_TG_FORKBACK_DEPTH_TALL;
         double H, flen;
         int cols, page;
-        if (rows > TD5_TG_FACADE_MAX_ROWS) rows = TD5_TG_FACADE_MAX_ROWS;
+        if (rows > cap) rows = cap;
         H = (double)rows * tg_facade_floor_h(b);
         flen = sqrt(ax * ax + az * az);
         cols = tg_facade_cols_for(flen, (double)b->cell_w, 4);
         page = tg_facade_page_class(bh, rows);
         if (!tg_bg_building_box(h->blk, h->moff, h->nmesh, h->maxmesh,
                                 bx, by, bz, ax, ay, az, lx0, lz0, lx1, lz1,
-                                TD5_TG_FORKBACK_DEPTH, H, cols, rows, page, 1, si))
+                                depth, H, cols, rows, page, 1, si))
             return 0;
         tg_acct(TG_ACCT_FORKBACK, si);
     }
