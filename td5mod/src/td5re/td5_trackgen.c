@@ -7850,6 +7850,19 @@ static const double k_tg_far_sink[4] = { 0.0, 0.45, 1.0, 1.0 };
 #define TD5_TG_FAR_SINK_AT   300.0   /* the floor sits this far under the min */
 #define TD5_TG_RIDGE_MIN_UP 1200.0   /* crest above the road it is seen from */
 
+/* [R5 item 16] "the height is not following the grass": on a tree-line biome the
+ * ridge stands on the OUTERMOST far-ground point (j==3, at TD5_TG_FAR_REACH out).
+ * With the full hill amplitude that point plunged up to ~2800 below the near
+ * grass seam and jumped ~2000 between adjacent far-groups (measured on seed 99991
+ * span 1052..1124, COAST), so the horizon tree line sat in a jagged trough rather
+ * than tracking the grass in front of it. For tree-line biomes only, pull the
+ * outer points into a shallow, gently-rolling band just under the seam so the
+ * band -- and the ridge that stands on it -- follows the near grass. Strictly at
+ * or below `base` (the road/grass edge), so the far-terrain "ceiling" the sink
+ * cures can never return. TD5RE_R5_FLORA_TREELINE=0 restores the old plunge. */
+#define TD5_TG_TREELINE_AMP_SCALE  0.25   /* shrink outer hill roll on tree lines */
+#define TD5_TG_TREELINE_BASE_DROP  400.0  /* how far the far grass sits below seam */
+
 /* Default ON -- these are fixes. TERRAIN_FAR=0 restores the short skirt only,
  * TERRAIN_HILLS=0 keeps the long plain but drops the distant ridge wall. */
 static int tg_terrain_far_enabled(void)
@@ -7877,6 +7890,13 @@ static int tg_r4_treeline_fix(void)
 static int tg_r4_city_skyline(void)
 {
     return td5_env_flag_on("TD5RE_R4_CITY_SKYLINE");
+}
+
+/* [R5 item 16] Tree-line stretch + "height not following the grass" fix. Default
+ * ON; TD5RE_R5_FLORA_TREELINE=0 restores the pre-fix band for an A/B. */
+static int tg_r5_treeline_fix(void)
+{
+    return td5_env_flag_on("TD5RE_R5_FLORA_TREELINE");
 }
 
 /* Smooth low-frequency terrain height at a world point. Two summed products of
@@ -7919,6 +7939,11 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
     double px[16], py[16], pz[16], uu[16], vv[16];
     int seg_page[2], seg_nq[2];
     int e, j, n = 0, nseg = 1;
+    /* [R5 item 16] The height/stretch cure only applies where the ridge is an
+     * actual tree line: non-snow, non-urban (snow keeps its flank, urban gets the
+     * blocky skyline -- see the seg_page[1] routing below). */
+    const int r5fix = tg_r5_treeline_fix();
+    const int r5treeline = !tg_biome_is_snow(h->b) && h->b->urbanity < 2;
 
     if (g1 > nl->count - 2) g1 = nl->count - 2;
     if (g1 < g0) return 1;
@@ -7974,11 +7999,22 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
              * Never the other way: where the emitting span IS the low point of
              * the track the floor is above the seam, and lifting the band onto
              * it would recreate the ceiling this cures. */
-            double yb = sink ? base + (floor_y - base) * k_tg_far_sink[j] : base;
+            double yb   = sink ? base + (floor_y - base) * k_tg_far_sink[j] : base;
+            double ampj = k_amp[j];
             if (yb > base) yb = base;
+            /* [R5 item 16] On a tree line, replace the deep floor sink of the two
+             * outer points with a shallow, gently-rolling drop below the seam, so
+             * the ridge that stands on j==3 follows the near grass instead of
+             * dropping into a jagged trough. Kept strictly at or below `base`. */
+            if (r5fix && r5treeline && j >= 2) {
+                yb    = base - TD5_TG_TREELINE_BASE_DROP * k_tg_far_sink[j];
+                ampj *= TD5_TG_TREELINE_AMP_SCALE;
+                if (yb > base) yb = base;
+            }
             X[e][j] = ex;
             Z[e][j] = ez;
-            Y[e][j] = yb + tg_terrain_hill_y(ex, ez, k_amp[j]);
+            Y[e][j] = yb + tg_terrain_hill_y(ex, ez, ampj);
+            if (r5fix && r5treeline && j >= 2 && Y[e][j] > base) Y[e][j] = base;
         }
 
         /* [DIAG] Every term that decides how high this band sits, so the large
@@ -8039,12 +8075,29 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
         const int    tfix = tg_r4_treeline_fix();
         const double vt = tfix ? TD5_TG_FACADE_UV_INSET       : 0.0;
         const double vb = tfix ? 1.0 - TD5_TG_FACADE_UV_INSET : 1.0;
+        /* [R5 item 16] Horizontal tiling. The ridge quad spans one far-group, but
+         * its two ends are at TD5_TG_FAR_REACH (30000) OUT, so on a curve they fan
+         * far wider than the FAR_GROUP span-index delta the old U used (a fixed 4
+         * tiles). That stretched each 64-texel canopy tile to thousands of world
+         * units -- the reported "trees texture looks very stretched out". Tile by
+         * the ridge's ACTUAL world width instead, one tile per span-length, so a
+         * tile is the same size on a straight and through a bend. The page wraps
+         * and every quad starts at U=0 and ends on an integer tile count, so the
+         * join to the next group's quad stays continuous. */
+        double u_near = U[0], u_far = U[1];
+        if (r5fix && r5treeline) {
+            const double w = sqrt((X[1][3]-X[0][3])*(X[1][3]-X[0][3])
+                                + (Z[1][3]-Z[0][3])*(Z[1][3]-Z[0][3]));
+            double tiles = floor(w / (double)TD5_TG_SPAN_LENGTH + 0.5);
+            if (tiles < 1.0) tiles = 1.0;
+            u_near = 0.0; u_far = tiles;
+        }
         /* near-bottom, far-bottom, far-top, near-top; v = 1 at the base, so the
          * page's top rows (v = 0) land on the crest. */
-        px[n]=X[0][3]; py[n]=Y[0][3];      pz[n]=Z[0][3]; uu[n]=U[0]; vv[n]=vb; n++;
-        px[n]=X[1][3]; py[n]=Y[1][3];      pz[n]=Z[1][3]; uu[n]=U[1]; vv[n]=vb; n++;
-        px[n]=X[1][3]; py[n]=Y[1][3] + t1; pz[n]=Z[1][3]; uu[n]=U[1]; vv[n]=vt; n++;
-        px[n]=X[0][3]; py[n]=Y[0][3] + t0; pz[n]=Z[0][3]; uu[n]=U[0]; vv[n]=vt; n++;
+        px[n]=X[0][3]; py[n]=Y[0][3];      pz[n]=Z[0][3]; uu[n]=u_near; vv[n]=vb; n++;
+        px[n]=X[1][3]; py[n]=Y[1][3];      pz[n]=Z[1][3]; uu[n]=u_far;  vv[n]=vb; n++;
+        px[n]=X[1][3]; py[n]=Y[1][3] + t1; pz[n]=Z[1][3]; uu[n]=u_far;  vv[n]=vt; n++;
+        px[n]=X[0][3]; py[n]=Y[0][3] + t0; pz[n]=Z[0][3]; uu[n]=u_near; vv[n]=vt; n++;
         /* [R3 item 8] This distant ridge IS the "background tree line" the user
          * reported as "grey at the bottom and white at the top ... doesn't seem
          * to be a tree texture there". It was drawn on TD5_TG_PAGE_HILL, whose
