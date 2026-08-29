@@ -47,6 +47,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  shows open lawn rather than a green wall at the road." },
     { CL_ITEM,    "FIXED: pedestrian crossings stay off gravel/cobble" },
     { CL_ITEM,    "  roads where the markings looked out of place." },
+    { CL_DATE,    "August 29 (auto-track city scenery)" },
+    { CL_ITEM,    "FIXED: the oversized skyscraper beside a fork is now a" },
+    { CL_ITEM,    "  shorter, set-back skyline, not a looming canyon wall." },
+    { CL_ITEM,    "FIXED: the fork backdrop follows the bowed branch road" },
+    { CL_ITEM,    "  instead of colliding with it / skewing diagonally." },
+    { CL_ITEM,    "FIXED: building fronts at bridge and biome edges (e.g." },
+    { CL_ITEM,    "  near span 1047) no longer stand disconnected." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 29 (auto-track fork)" },
