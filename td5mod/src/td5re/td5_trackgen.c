@@ -3836,6 +3836,18 @@ static int tg_biome_span_is_city(int si)
     return !strcmp(k_biomes[tg_biome_cell_index(si)].name, "CITY");
 }
 
+/* [R5 CROSS item 12] Is span si's road surface plain tarmac? The pedestrian
+ * ZEBRA page (white bars on a dark base) is authored for asphalt; on the pale
+ * gravel of INDUSTRIAL or the cobble of ORIENTAL the white bars sit on an
+ * already-light surface and read as a mismatched patch ("the road crossing
+ * texture looks out of place ... near this road texture", span 934 = INDUSTRIAL
+ * gravel). The side-street MOUTH (crossstreet asphalt) uses the biome's own road
+ * page and is unaffected; only the zebra decal keys off this. */
+static int tg_span_surface_is_tarmac(int si)
+{
+    return k_biomes[tg_biome_cell_index(si)].road_surf == RS_TARMAC;
+}
+
 /* TUNNEL EXCEPTION -- the one reason a span's surface is not its biome's.
  * Defined further down; forward-declared here because the two accessors below
  * sit above the tunnel block. */
@@ -6464,6 +6476,11 @@ static int tg_city_emit_crossing(const TG_FBHook *h)
     int seg_page = TD5_TG_PAGE_CROSSING, seg_nq = 1;
     int n = 0;
 
+    /* [R5 CROSS item 12] the zebra reads correctly only on tarmac; skip it on
+     * the pale gravel/cobble surfaces where it clashes (the side-street mouth
+     * still draws, on the biome road page). */
+    if (!tg_span_surface_is_tarmac(h->si)) return 1;
+
     tg_road_edge(h->nl, h->si, f0, 0.0, 1.0, &l0x, &l0y, &l0z, &r0x, &r0y, &r0z);
     tg_road_edge(h->nl, h->si, f1, 0.0, 1.0, &l1x, &l1y, &l1z, &r1x, &r1y, &r1z);
 
@@ -7245,28 +7262,41 @@ static int tg_block_emit_park(const TG_FBHook *h)
                                 &seg_page, &seg_nq, 1))
             return 0;
 
-        /* Hedge border, standing on the lawn just behind the pavement (sw out),
-         * low enough to see the park over it. CULL_NONE, so one plane reads from
-         * both sides. */
-        n = 0; seg_page = TD5_TG_PAGE_R3_BLOCK + 1;   /* park hedge */
-        q[0] = e[0] + e[6] * sw;  q[1]  = e[1] + TD5_TG_KERB_H;
-        q[2] = e[2] + e[7] * sw;
-        q[3] = e[3] + e[8] * sw;  q[4]  = e[4] + TD5_TG_KERB_H;
-        q[5] = e[5] + e[9] * sw;
-        q[6] = e[3] + e[8] * sw;  q[7]  = e[4] + TD5_TG_KERB_H + TD5_TG_HEDGE_H;
-        q[8] = e[5] + e[9] * sw;
-        q[9] = e[0] + e[6] * sw;  q[10] = e[1] + TD5_TG_KERB_H + TD5_TG_HEDGE_H;
-        q[11] = e[2] + e[7] * sw;
-        t[0] = 0.0; t[1] = 1.0; t[2] = 1.0; t[3] = 1.0;
-        t[4] = 1.0; t[5] = 0.0; t[6] = 0.0; t[7] = 0.0;
-        tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
-        if (*h->nmesh >= h->maxmesh) return 1;
-        seg_nq = n / 4;
-        tg_acct(TG_ACCT_PARK, h->si);
-        h->moff[(*h->nmesh)++] = h->blk->len;
-        if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
-                                &seg_page, &seg_nq, 1))
-            return 0;
+        /* Hedge border. [R5 CROSS item 4] The user reported "a green texture
+         * around 1m height" that "looks out of place" near crossings: it is this
+         * hedge, which stood ONE pavement-width (sw ~= 350 raw) off the kerb and
+         * so read as a bright green ~1m WALL right at the roadside wherever a
+         * park gap fell in the city (confirmed by framedump at span 92, page
+         * R3_BLOCK+1). A real park shows open lawn to the kerb with its boundary
+         * hedge at the BACK, so the hedge is set back onto the far part of the
+         * lawn (hset) and stood on the sloped lawn surface there (verge lift less
+         * the ground-skirt drop at that distance), turning "green wall at the
+         * road" into "hedge at the back of the park". Still CULL_NONE so one
+         * plane reads both sides. Knob for a single-variable A/B. */
+        if (td5_env_flag_on("TD5RE_AUTOTRACK_PARK_HEDGE")) {
+            const double hset  = sw + (reach - sw) * 0.75;
+            const double hdrop = TD5_TG_GROUND_DROP * hset / TD5_TG_GROUND_WIDTH;
+            const double hy    = TD5_TG_VERGE_LIFT - hdrop;
+            n = 0; seg_page = TD5_TG_PAGE_R3_BLOCK + 1;   /* park hedge */
+            q[0] = e[0] + e[6] * hset;  q[1]  = e[1] + hy;
+            q[2] = e[2] + e[7] * hset;
+            q[3] = e[3] + e[8] * hset;  q[4]  = e[4] + hy;
+            q[5] = e[5] + e[9] * hset;
+            q[6] = e[3] + e[8] * hset;  q[7]  = e[4] + hy + TD5_TG_HEDGE_H;
+            q[8] = e[5] + e[9] * hset;
+            q[9] = e[0] + e[6] * hset;  q[10] = e[1] + hy + TD5_TG_HEDGE_H;
+            q[11] = e[2] + e[7] * hset;
+            t[0] = 0.0; t[1] = 1.0; t[2] = 1.0; t[3] = 1.0;
+            t[4] = 1.0; t[5] = 0.0; t[6] = 0.0; t[7] = 0.0;
+            tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+            if (*h->nmesh >= h->maxmesh) return 1;
+            seg_nq = n / 4;
+            tg_acct(TG_ACCT_PARK, h->si);
+            h->moff[(*h->nmesh)++] = h->blk->len;
+            if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                                    &seg_page, &seg_nq, 1))
+                return 0;
+        }
 
         /* One house on ~1 park span in 4, set back in the middle of the lawn. */
         if (td5_env_flag_on("TD5RE_AUTOTRACK_PARK_HOUSES")) {
@@ -7302,8 +7332,9 @@ static int tg_emit_fb_block(const TG_FBHook *h)
  * none of it edits another area's emitter. Every emitter is behind its own knob
  * (default ON) so each is a single-variable A/B away.
  *
- *   item 2  a RAISED KERB BREAK at the crossing -- the sidewalk kerb steps up a
- *           little where the crossing cuts it, a pedestrian threshold.
+ *   item 2  (R4) a RAISED KERB BREAK at the crossing -- REMOVED in R5 CROSS
+ *           item 3 (it was the "elevated sidewalk on crossings" the user then
+ *           reported; the wrap is done by tg_block_emit_intersection instead).
  *   item 10 BUILDINGS LINING a through side street (walls on the two along-road
  *           edges of the gap, running outward), so the street reads as going
  *           further with more buildings on its sides. They only ever extend
@@ -7315,66 +7346,21 @@ static int tg_emit_fb_block(const TG_FBHook *h)
  *           streets reads as one junction rather than a stutter of crosswalks.
  *           The join is a road-surface decal only (no wall or corridor change).
  * ========================================================================== */
-#define TD5_TG_XKERB_RISE   120.0   /* raised kerb break, extra height over KERB */
-#define TD5_TG_XKERB_DEPTH  300.0   /* how far the raised lip sits back, raw     */
 #define TD5_TG_XJOIN_WIN    5       /* max span gap between two joined crossings */
 #define TD5_TG_XJOIN_CURVE  0.06    /* min |sin turn| over the sliver to join    */
 
-/* item 2 -- a raised kerb break at a crossing. On each BUILT kerb of a crossing
- * span the pavement kerb steps up TD5_TG_XKERB_RISE over the zebra's along-road
- * extent (the same f0..f1 tg_city_emit_crossing paints), so the crossing has a
- * raised threshold rather than a flush edge. Sits on the pavement page. */
-static int tg_cross_emit_kerb_break(const TG_FBHook *h)
-{
-    double px[16], py[16], pz[16], uu[16], vv[16], q[12], t[8];
-    const double sw = tg_city_sidewalk_w(h->b);
-    const double f0 = 0.22, f1 = 0.62;
-    double l0x, l0y, l0z, r0x, r0y, r0z, l1x, l1y, l1z, r1x, r1y, r1z;
-    int seg_page = TD5_TG_PAGE_SIDEWALK, seg_nq, s, n = 0;
-
-    if (!(sw > 0.0)) return 1;
-    if (!td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_KERB")) return 1;
-    tg_road_edge(h->nl, h->si, f0, 0.0, 1.0, &l0x, &l0y, &l0z, &r0x, &r0y, &r0z);
-    tg_road_edge(h->nl, h->si, f1, 0.0, 1.0, &l1x, &l1y, &l1z, &r1x, &r1y, &r1z);
-
-    for (s = 0; s < 2; s++) {
-        const double sg = s ? 1.0 : -1.0;
-        double e[10], a0x, a0y, a0z, a1x, a1y, a1z;
-        const double base = TD5_TG_KERB_H;
-        const double top  = TD5_TG_KERB_H + TD5_TG_XKERB_RISE;
-        const double dep  = TD5_TG_XKERB_DEPTH;
-        if (!tg_facade_built(h->si, s)) continue;   /* kerb only where a pavement is */
-        if (tg_side_blocked(h->si, sg)) continue;
-        tg_city_edge_frame(h->nl, h->si, sg, e);    /* e[6],e[7] = outward unit */
-        if (sg > 0.0) { a0x = l0x; a0y = l0y; a0z = l0z; a1x = l1x; a1y = l1y; a1z = l1z; }
-        else          { a0x = r0x; a0y = r0y; a0z = r0z; a1x = r1x; a1y = r1y; a1z = r1z; }
-
-        /* Raised top slab: f0-inner, f1-inner, f1-outer, f0-outer at `top`. */
-        q[0] = a0x;              q[1]  = a0y + top; q[2]  = a0z;
-        q[3] = a1x;              q[4]  = a1y + top; q[5]  = a1z;
-        q[6] = a1x + e[6] * dep; q[7]  = a1y + top; q[8]  = a1z + e[7] * dep;
-        q[9] = a0x + e[6] * dep; q[10] = a0y + top; q[11] = a0z + e[7] * dep;
-        t[0] = 0.0;  t[1] = 0.0;  t[2] = 0.0;  t[3] = 0.26;
-        t[4] = 0.2;  t[5] = 0.26; t[6] = 0.2;  t[7] = 0.0;
-        tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
-
-        /* Road-facing riser: from the normal kerb top up to the raised top. */
-        q[0] = a0x; q[1]  = a0y + base; q[2]  = a0z;
-        q[3] = a1x; q[4]  = a1y + base; q[5]  = a1z;
-        q[6] = a1x; q[7]  = a1y + top;  q[8]  = a1z;
-        q[9] = a0x; q[10] = a0y + top;  q[11] = a0z;
-        t[0] = 0.0; t[1] = 1.0; t[2] = 0.26; t[3] = 1.0;
-        t[4] = 0.26; t[5] = 0.9; t[6] = 0.0; t[7] = 0.9;
-        tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
-    }
-
-    if (n <= 0) return 1;
-    if (*h->nmesh >= h->maxmesh) return 1;
-    seg_nq = n / 4;
-    tg_acct_n(TG_ACCT_CROSSFURN, h->si, n / 4);
-    h->moff[(*h->nmesh)++] = h->blk->len;
-    return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
-}
+/* [R5 CROSS item 3] "there's still elevated sidewalk on street crossings; those
+ * should wrap around the road." R4's item 2 read "raised sidewalk break" as a
+ * pedestrian THRESHOLD and stepped the built kerb UP TD5_TG_XKERB_RISE across
+ * the crossing (tg_cross_emit_kerb_break). That is the elevated sidewalk the
+ * user is now pointing at -- a lip that steps ALONG the kerb rather than a
+ * pavement that turns the corner. The wrap the user wants already exists:
+ * tg_block_emit_intersection stands a pavement + railing arm at each of the
+ * gap's two along-road corners, turning off the main kerb to run down the side
+ * street. So the raised break is removed outright (byte attribution: 108 meshes
+ * / 23 KB) and the crossing kerb is left flush, with the corner arms doing the
+ * wrap. No knob to restore it: a raised threshold at a crossing was the wrong
+ * reading of the original request. */
 
 /* item 10 -- buildings LINING a through side street, so it reads as going
  * further with more buildings on its sides. A first cut placed extra rows
@@ -7389,7 +7375,19 @@ static int tg_cross_emit_kerb_break(const TG_FBHook *h)
  * gap. They only ever extend PERPENDICULAR to the main road (down the side
  * street), so nothing here can reach the drivable corridor. The wall runs the
  * cross-street's own reach, a couple of storeys taller than the front row so
- * the canyon has depth. */
+ * the canyon has depth.
+ *
+ * [R5 CROSS item 2] "building facades on every 'lane' of road spawned." A side
+ * street is a GAP that is several spans wide, and the first cut emitted BOTH
+ * along-road edges on EVERY span of that gap, so a four-span gap grew eight
+ * walls -- a comb of parallel frontages marching down the street, one per span
+ * boundary, exactly the "facade on every lane" report (byte attribution: 588
+ * walls across 274 spans, >2 per gap-span, where a side street wants only its
+ * two flanking frontages). The two frontages of a side street sit at the gap's
+ * two along-MAIN-road extremes: the NEAR edge of the gap's first span and the
+ * FAR edge of its last span. So each edge is now gated to its boundary corner
+ * (si-1 built for the near frontage, si+1 built for the far), the same corner
+ * test tg_block_emit_intersection uses -- two walls per gap side, no comb. */
 static int tg_cross_emit_sidewalls(const TG_FBHook *h)
 {
     double px[TD5_TG_FACADE_MAXQUAD * 4], py[TD5_TG_FACADE_MAXQUAD * 4];
@@ -7408,20 +7406,29 @@ static int tg_cross_emit_sidewalls(const TG_FBHook *h)
     for (s = 0; s < 2; s++) {
         const double sg = s ? 1.0 : -1.0;
         double e[10], ang, ox, oz;
-        int edge;
+        int edge, near_corner, far_corner;
         if (tg_facade_built(h->si, s)) continue;      /* only a through street */
         if (tg_block_is_park(h->si, s)) continue;     /* a park has no street */
         if (tg_side_blocked(h->si, sg)) continue;
+        /* Emit a frontage only at the gap's own boundary spans, so one wide gap
+         * grows exactly its two flanking frontages, not one per span. */
+        near_corner = tg_facade_built(h->si - 1, s);  /* gap starts here */
+        far_corner  = tg_facade_built(h->si + 1, s);  /* gap ends here   */
+        if (!near_corner && !far_corner) continue;    /* gap interior: no wall */
         tg_city_edge_frame(h->nl, h->si, sg, e);
         ang = tg_block_arm_skew(h->si, s);
         tg_block_rot2(e[6], e[7], ang, &ox, &oz);     /* outward down the street */
 
         /* One wall on each along-road edge of the gap: edge 0 = e[0] (near),
-         * edge 1 = e[3] (far). Each runs outward `reach`, rising H. */
+         * edge 1 = e[3] (far). Each runs outward `reach`, rising H. The near
+         * frontage belongs to the gap-start span, the far to the gap-end span. */
         for (edge = 0; edge < 2; edge++) {
             const double bx = edge ? e[3] : e[0];
             const double bz = edge ? e[5] : e[2];
             const double by = (edge ? e[4] : e[1]) + TD5_TG_KERB_H;
+            /* near frontage only at the gap start, far only at the gap end. */
+            if (edge == 0 && !near_corner) continue;
+            if (edge == 1 && !far_corner)  continue;
             const unsigned int rh = ((unsigned)h->si * 2654435761u
                                      + (unsigned)s * 40503u
                                      + (unsigned)edge * 21841u) * 2246822519u;
@@ -7487,6 +7494,7 @@ static int tg_cross_emit_join_zebra(const TG_FBHook *h)
 
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_JOIN")) return 1;
     if (tg_branches_enabled() && tg_span_in_fork_clear(h->si)) return 1;
+    if (!tg_span_surface_is_tarmac(h->si)) return 1;   /* [R5 CROSS item 12] */
     for (s = 0; s < 2; s++)
         if (tg_cross_join_side(h->nl, h->si, s)) joined = 1;
     if (!joined) return 1;
@@ -7504,15 +7512,12 @@ static int tg_cross_emit_join_zebra(const TG_FBHook *h)
     return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
 }
 
-/* Group CROSS dispatcher (feedback R4 items 2, 10, 14). Wired into the scenery
- * loop next to tg_emit_fb_block; city spans only. */
+/* Group CROSS dispatcher (feedback R4 items 10, 14; R5 items 2, 3, 4, 12).
+ * Wired into the scenery loop next to tg_emit_fb_block; city spans only.
+ * R5 item 3 removed the raised kerb break that used to run here. */
 static int tg_emit_fb_cross(const TG_FBHook *h)
 {
     if (!tg_city_span_paved(h)) return 1;      /* only where the city is */
-    if (tg_city_crossing_here(h->si) &&
-        td5_env_flag_on("TD5RE_AUTOTRACK_CROSSINGS")) {
-        if (!tg_cross_emit_kerb_break(h)) return 0;
-    }
     if (!tg_cross_emit_sidewalls(h)) return 0;
     if (!tg_cross_emit_join_zebra(h)) return 0;
     return 1;

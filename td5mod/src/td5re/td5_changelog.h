@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 29 (auto-track crossings)" },
+    { CL_ITEM,    "FIXED: side streets no longer grow a facade on every" },
+    { CL_ITEM,    "  span (one comb of walls per gap became two frontages)." },
+    { CL_ITEM,    "FIXED: crossings no longer have a raised sidewalk lip;" },
+    { CL_ITEM,    "  the pavement wraps the corner instead." },
+    { CL_ITEM,    "FIXED: park hedges set back off the kerb, so a park" },
+    { CL_ITEM,    "  shows open lawn rather than a green wall at the road." },
+    { CL_ITEM,    "FIXED: pedestrian crossings stay off gravel/cobble" },
+    { CL_ITEM,    "  roads where the markings looked out of place." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 29 (auto-track fork)" },
     { CL_ITEM,    "FIXED: on the auto-track you could drive THROUGH the map" },
     { CL_ITEM,    "  and out of bounds at a fork's sharp half-width bend at" },
