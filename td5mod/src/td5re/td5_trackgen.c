@@ -30,6 +30,7 @@
 #include "td5_config.h"
 #include "td5_tg_real_tex.h"   /* real TD5 texture pages (level014), opt-in */
 #include "td5_tg_real_tex_city.h"  /* extra city facades: SF/Tokyo/Moscow */
+#include "td5_tg_real_tex_r5flora.h"  /* [R5 item 18] tall Moscow park trees */
 #include "td5_tg_furniture_tex.h" /* real TD5 lamp/railing/banner pages     */
 #include "td5re.h"
 
@@ -3494,6 +3495,13 @@ static const TG_TreePage k_tree_pages[TD5_TG_TREE_VARIANTS] = {
 static int tg_tree_slot(int v)
 {
     return v == 0 ? TD5_TG_PAGE_TREE : (TD5_TG_PAGE_TREE_EXTRA + v - 1);
+}
+
+/* [R5 item 18] Page slot for the v-th tall Moscow park tree, in the reserved
+ * FLORA block. Only the first k_r5_flora_tree_count slots are ever filled. */
+static int tg_flora_tree_slot(int v)
+{
+    return TD5_TG_PAGE_R5_FLORA + v;
 }
 
 /* Inverse of tg_tree_slot: tree variant drawn on `page`, or -1 if it is not a
@@ -8007,6 +8015,68 @@ static int tg_emit_fb_flora(const TG_FBHook *h)
     }
     return 1;
 }
+
+/* [R5 item 18] Tall park trees. The user asked a curvy park to justify itself
+ * with "a lot of trees ... trees that take up to the ceiling like the sections
+ * at the end of Moscow or the middle of Australia", and to "expand the library
+ * of available resources". The 10-page borrowed tree set took nothing from
+ * Moscow (level023), whose texture set is unusually rich in foliage; this plants
+ * a TALL Moscow canopy billboard set well BACK behind each tree biome's own
+ * verge planting, so the park (and every billboard-tree biome) gains a high
+ * canopy backdrop rising above the near trees rather than a flat hedge line.
+ * Real-texture only -- the pages are Moscow art -- and gated for an A/B via
+ * TD5RE_R5_FLORA_PARKTREES (default ON). One billboard per qualifying span,
+ * accounted under the FLORA area. */
+static int tg_emit_fb_park_trees(const TG_FBHook *h)
+{
+    const TG_NodeList *nl = h->nl;
+    const int si = h->si;
+    const TG_Biome *b = h->b;
+    unsigned int hh;
+    const TG_Node *n;
+    double side, gap, tw, th, jit, lx, lz, cx, cz;
+    int v, page;
+
+    if (!td5_env_flag_on("TD5RE_R5_FLORA_PARKTREES")) return 1;
+    if (!tg_real_textures_enabled())  return 1;   /* pages are Moscow art */
+    if (k_r5_flora_tree_count <= 0)   return 1;
+    if (!b->billboard || b->tree_n <= 0) return 1;/* tree biomes only, not facades */
+    if (si <= TD5_TG_GRID_SPAN)       return 1;   /* keep the grid area clear */
+    if (si + 1 >= nl->count)          return 1;
+    if (tg_span_in_bridge_run(si))    return 1;   /* deck is clear */
+    if (*h->nmesh + 1 >= h->maxmesh)  return 1;
+
+    /* Sparser than the near trees: a grove on roughly one span in three, so the
+     * tall canopy reads as clumps rather than a continuous second wall. */
+    hh = (unsigned)si * 2246822519u + 0x2545F491u;
+    if ((int)(hh >> 29) > (b->density >> 1)) return 1;
+
+    n    = &nl->v[si];
+    side = ((hh >> 4) & 1) ? 1.0 : -1.0;
+    if (tg_side_blocked(si, side)) return 1;
+    v    = (int)((hh >> 13) % (unsigned)k_r5_flora_tree_count);
+    page = tg_flora_tree_slot(v);
+
+    /* Tall: the near verge trees top out around 7200 raw (the palm); these reach
+     * ~10000 raw (~40 world units) so they stand above that as a canopy. Page
+     * aspect kept by the shared jitter. */
+    jit = 1.40 + (double)((hh >> 9) % 61) * 0.01;   /* 1.40 .. 2.00 */
+    tw  = 4200.0 * jit;
+    th  = 5200.0 * jit;
+    gap = 2600.0 + (double)((hh >> 5) % 3200);      /* set BACK, behind the verge */
+    gap = tg_flora_gap_clear(nl, si, side, gap);    /* never on a branch */
+
+    lx = n->tz * side; lz = -n->tx * side;
+    cx = n->x + lx * (n->width * 0.5 + gap + tw * 0.5);
+    cz = n->z + lz * (n->width * 0.5 + gap + tw * 0.5);
+
+    h->moff[*h->nmesh] = h->blk->len;
+    if (!tg_emit_billboard_mesh(h->blk, cx, n->y, cz, tw * 0.5, th, page, 1))
+        return 0;
+    (*h->nmesh)++;
+    tg_acct(TG_ACCT_R5_FLORA, si);
+    return 1;
+}
 /* How many spans either side of a portal carry mountain massing. Beyond this
  * the camera is inside the bore and the mass is behind the lining, so it is
  * invisible geometry -- 5 spans (~4000 units) is what a driver actually sees
@@ -8194,6 +8264,19 @@ static const double k_tg_far_sink[4] = { 0.0, 0.45, 1.0, 1.0 };
 #define TD5_TG_FAR_SINK_AT   300.0   /* the floor sits this far under the min */
 #define TD5_TG_RIDGE_MIN_UP 1200.0   /* crest above the road it is seen from */
 
+/* [R5 item 16] "the height is not following the grass": on a tree-line biome the
+ * ridge stands on the OUTERMOST far-ground point (j==3, at TD5_TG_FAR_REACH out).
+ * With the full hill amplitude that point plunged up to ~2800 below the near
+ * grass seam and jumped ~2000 between adjacent far-groups (measured on seed 99991
+ * span 1052..1124, COAST), so the horizon tree line sat in a jagged trough rather
+ * than tracking the grass in front of it. For tree-line biomes only, pull the
+ * outer points into a shallow, gently-rolling band just under the seam so the
+ * band -- and the ridge that stands on it -- follows the near grass. Strictly at
+ * or below `base` (the road/grass edge), so the far-terrain "ceiling" the sink
+ * cures can never return. TD5RE_R5_FLORA_TREELINE=0 restores the old plunge. */
+#define TD5_TG_TREELINE_AMP_SCALE  0.25   /* shrink outer hill roll on tree lines */
+#define TD5_TG_TREELINE_BASE_DROP  400.0  /* how far the far grass sits below seam */
+
 /* Default ON -- these are fixes. TERRAIN_FAR=0 restores the short skirt only,
  * TERRAIN_HILLS=0 keeps the long plain but drops the distant ridge wall. */
 static int tg_terrain_far_enabled(void)
@@ -8221,6 +8304,13 @@ static int tg_r4_treeline_fix(void)
 static int tg_r4_city_skyline(void)
 {
     return td5_env_flag_on("TD5RE_R4_CITY_SKYLINE");
+}
+
+/* [R5 item 16] Tree-line stretch + "height not following the grass" fix. Default
+ * ON; TD5RE_R5_FLORA_TREELINE=0 restores the pre-fix band for an A/B. */
+static int tg_r5_treeline_fix(void)
+{
+    return td5_env_flag_on("TD5RE_R5_FLORA_TREELINE");
 }
 
 /* Smooth low-frequency terrain height at a world point. Two summed products of
@@ -8263,6 +8353,11 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
     double px[16], py[16], pz[16], uu[16], vv[16];
     int seg_page[2], seg_nq[2];
     int e, j, n = 0, nseg = 1;
+    /* [R5 item 16] The height/stretch cure only applies where the ridge is an
+     * actual tree line: non-snow, non-urban (snow keeps its flank, urban gets the
+     * blocky skyline -- see the seg_page[1] routing below). */
+    const int r5fix = tg_r5_treeline_fix();
+    const int r5treeline = !tg_biome_is_snow(h->b) && h->b->urbanity < 2;
 
     if (g1 > nl->count - 2) g1 = nl->count - 2;
     if (g1 < g0) return 1;
@@ -8318,11 +8413,22 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
              * Never the other way: where the emitting span IS the low point of
              * the track the floor is above the seam, and lifting the band onto
              * it would recreate the ceiling this cures. */
-            double yb = sink ? base + (floor_y - base) * k_tg_far_sink[j] : base;
+            double yb   = sink ? base + (floor_y - base) * k_tg_far_sink[j] : base;
+            double ampj = k_amp[j];
             if (yb > base) yb = base;
+            /* [R5 item 16] On a tree line, replace the deep floor sink of the two
+             * outer points with a shallow, gently-rolling drop below the seam, so
+             * the ridge that stands on j==3 follows the near grass instead of
+             * dropping into a jagged trough. Kept strictly at or below `base`. */
+            if (r5fix && r5treeline && j >= 2) {
+                yb    = base - TD5_TG_TREELINE_BASE_DROP * k_tg_far_sink[j];
+                ampj *= TD5_TG_TREELINE_AMP_SCALE;
+                if (yb > base) yb = base;
+            }
             X[e][j] = ex;
             Z[e][j] = ez;
-            Y[e][j] = yb + tg_terrain_hill_y(ex, ez, k_amp[j]);
+            Y[e][j] = yb + tg_terrain_hill_y(ex, ez, ampj);
+            if (r5fix && r5treeline && j >= 2 && Y[e][j] > base) Y[e][j] = base;
         }
 
         /* [DIAG] Every term that decides how high this band sits, so the large
@@ -8383,12 +8489,29 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
         const int    tfix = tg_r4_treeline_fix();
         const double vt = tfix ? TD5_TG_FACADE_UV_INSET       : 0.0;
         const double vb = tfix ? 1.0 - TD5_TG_FACADE_UV_INSET : 1.0;
+        /* [R5 item 16] Horizontal tiling. The ridge quad spans one far-group, but
+         * its two ends are at TD5_TG_FAR_REACH (30000) OUT, so on a curve they fan
+         * far wider than the FAR_GROUP span-index delta the old U used (a fixed 4
+         * tiles). That stretched each 64-texel canopy tile to thousands of world
+         * units -- the reported "trees texture looks very stretched out". Tile by
+         * the ridge's ACTUAL world width instead, one tile per span-length, so a
+         * tile is the same size on a straight and through a bend. The page wraps
+         * and every quad starts at U=0 and ends on an integer tile count, so the
+         * join to the next group's quad stays continuous. */
+        double u_near = U[0], u_far = U[1];
+        if (r5fix && r5treeline) {
+            const double w = sqrt((X[1][3]-X[0][3])*(X[1][3]-X[0][3])
+                                + (Z[1][3]-Z[0][3])*(Z[1][3]-Z[0][3]));
+            double tiles = floor(w / (double)TD5_TG_SPAN_LENGTH + 0.5);
+            if (tiles < 1.0) tiles = 1.0;
+            u_near = 0.0; u_far = tiles;
+        }
         /* near-bottom, far-bottom, far-top, near-top; v = 1 at the base, so the
          * page's top rows (v = 0) land on the crest. */
-        px[n]=X[0][3]; py[n]=Y[0][3];      pz[n]=Z[0][3]; uu[n]=U[0]; vv[n]=vb; n++;
-        px[n]=X[1][3]; py[n]=Y[1][3];      pz[n]=Z[1][3]; uu[n]=U[1]; vv[n]=vb; n++;
-        px[n]=X[1][3]; py[n]=Y[1][3] + t1; pz[n]=Z[1][3]; uu[n]=U[1]; vv[n]=vt; n++;
-        px[n]=X[0][3]; py[n]=Y[0][3] + t0; pz[n]=Z[0][3]; uu[n]=U[0]; vv[n]=vt; n++;
+        px[n]=X[0][3]; py[n]=Y[0][3];      pz[n]=Z[0][3]; uu[n]=u_near; vv[n]=vb; n++;
+        px[n]=X[1][3]; py[n]=Y[1][3];      pz[n]=Z[1][3]; uu[n]=u_far;  vv[n]=vb; n++;
+        px[n]=X[1][3]; py[n]=Y[1][3] + t1; pz[n]=Z[1][3]; uu[n]=u_far;  vv[n]=vt; n++;
+        px[n]=X[0][3]; py[n]=Y[0][3] + t0; pz[n]=Z[0][3]; uu[n]=u_near; vv[n]=vt; n++;
         /* [R3 item 8] This distant ridge IS the "background tree line" the user
          * reported as "grey at the bottom and white at the top ... doesn't seem
          * to be a tree texture there". It was drawn on TD5_TG_PAGE_HILL, whose
@@ -9017,6 +9140,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     if (!tg_emit_fb_block(&hook))   { ok = 0; break; }
                     if (!tg_emit_fb_cross(&hook))   { ok = 0; break; }
                     if (!tg_emit_fb_flora(&hook))   { ok = 0; break; }
+                    if (!tg_emit_fb_park_trees(&hook)) { ok = 0; break; }
                     if (!tg_emit_fb_terrain(&hook)) { ok = 0; break; }
                 }
                 if (!tg_emit_fb_track(&hook)) { ok = 0; break; }
@@ -10677,6 +10801,12 @@ static int tg_emit_textures(TG_Buf *out)
         for (v = 0; v < TD5_TG_TREE_VARIANTS && v < k_real_tree_count; v++)
             tg_emit_real_page(&pages[tg_tree_slot(v)],
                               k_real_tree_pal[v], k_real_tree_paln[v], k_real_tree_idx[v], 1);
+        /* [R5 item 18] Tall Moscow park trees, alpha-keyed like the rest. Capped
+         * at the FLORA block width so a header edit cannot walk past it. */
+        for (v = 0; v < k_r5_flora_tree_count && v < TD5_TG_R5_FLORA_N; v++)
+            tg_emit_real_page(&pages[tg_flora_tree_slot(v)],
+                              k_r5_flora_tree_pal[v], k_r5_flora_tree_paln[v],
+                              k_r5_flora_tree_idx[v], 1);
         /* Props: people/statue/animal (type 1), lamp glow (type 3 additive). */
         for (v = 0; v < TD5_TG_PROP_COUNT && v < k_real_prop_count; v++)
             tg_emit_real_page(&pages[tg_prop_slot(v)],
