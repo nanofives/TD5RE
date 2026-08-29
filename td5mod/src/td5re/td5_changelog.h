@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 29 (auto-track fork)" },
+    { CL_ITEM,    "FIXED: on the auto-track you could drive THROUGH the map" },
+    { CL_ITEM,    "  and out of bounds at a fork's sharp half-width bend at" },
+    { CL_ITEM,    "  speed. A car that overshoots the outer wall is now" },
+    { CL_ITEM,    "  caught and pulled back onto the road instead of lost." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 28 (bridges)" },
     { CL_ITEM,    "A BRIDGE CAN NO LONGER RUN INTO A TUNNEL. The two were" },
     { CL_ITEM,    "  rolled independently and could overlap; a tunnel now" },

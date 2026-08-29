@@ -859,6 +859,11 @@ static int32_t  s_geo_gx0 = 0, s_geo_gz0 = 0, s_geo_gcell = 1;
 static int     *s_geo_cell_start = NULL;  /* size gnx*gnz + 1 */
 static int     *s_geo_cell_items = NULL;
 static int      s_geo_enabled = -1;       /* -1 unknown, 0 off, 1 on */
+/* [FORK OOB 2026-08-29] Set by td5_track_bind_boundary_sentinels when the
+ * loaded track is a CUSTOM REGISTRY track (procedural autotrack level 90 or a
+ * user-built track), which unlike the faithful native levels carries FORWARD
+ * fork geometry. See geo_active(). */
+static int      s_track_custom_registry = 0;
 
 /* Per-tick eject cap (world units): the divider/wall is solid but a deep
  * penetration (tunnel/glitch) climbs out over a few ticks instead of snapping. */
@@ -872,13 +877,29 @@ static int geo_is_enabled(void)
     return s_geo_enabled;
 }
 
-/* [GEO SCOPE 2026-07-01] The geometric collision path only replaces the legacy
- * span-walker on the REVERSE NATIVE circuits, where the mirrored-fork geometry
- * defeats the topology walker. Forward + TD6 keep the proven byte-faithful
- * collision. TD5RE_GEO_COLLISION=0 still forces it fully off. */
+/* [GEO SCOPE 2026-07-01] The geometric collision path REPLACES the legacy
+ * topology span-walker on the REVERSE NATIVE circuits, where the mirrored-fork
+ * geometry defeats the topology walker. Forward + TD6 keep the proven
+ * byte-faithful collision. TD5RE_GEO_COLLISION=0 still forces it fully off.
+ *
+ * NOTE (FORK OOB 2026-08-29): forward custom tracks are deliberately NOT routed
+ * here. Using geo_resolve_walls as the primary wall handler on the autotrack's
+ * half-width fork WEDGES a car at a sharp fork bend (the per-tick nearest-edge
+ * push fights the turn), which stops the race finishing. The forward fork OOB is
+ * instead caught by geo_rescue_offmap() below, a last-resort backstop that only
+ * fires once a car has genuinely left the map — normal driving stays on the
+ * faithful rail-LUT path. */
 static int geo_active(void)
 {
     return geo_is_enabled() && g_td5.reverse_direction && (g_active_td6_level == 0);
+}
+
+/* [FORK OOB 2026-08-29] The geo model is also BUILT (for query only) on forward
+ * custom registry tracks, so geo_rescue_offmap can snap an escaped car back. */
+static int geo_query_active(void)
+{
+    return geo_is_enabled() && s_track_custom_registry && (g_active_td6_level == 0)
+           && !g_td5.reverse_direction;
 }
 
 static void geo_free(void)
@@ -1295,6 +1316,45 @@ static void geo_resolve_walls(TD5_Actor *actor)
     }
 }
 
+/* [FORK OOB 2026-08-29] Off-map rescue backstop for FORWARD custom tracks.
+ *
+ * The faithful rail-LUT wall handler contains a car on the autotrack's
+ * half-width fork carriageway under normal driving, but at speed a car can
+ * overshoot the outer wall by more than WALL_PEN_REJECT_LIMIT in a single tick;
+ * that penetration is then REJECTED as a "bogus junction teleport" (it can't be
+ * told apart from a genuine mis-walk), so no push is applied and the car sails
+ * off the map (item 12: span 570, seed 99991). This backstop runs AFTER the
+ * rail-LUT pass and only acts once the chassis is already well clear of every
+ * drivable quad (pushdist > OOB_RESCUE_DIST) -- i.e. the car has genuinely left
+ * the road -- so it never interferes with the near-wall driving the rail-LUT
+ * owns, and never fires on faithful tracks (geo_query_active is autotrack-only).
+ * It pulls the chassis back toward the nearest road edge, harder than the normal
+ * per-tick cap so a fast escapee is recovered in a few ticks instead of lost. */
+#define OOB_RESCUE_DIST 1200   /* world units clear of all road before we act   */
+#define OOB_RESCUE_CAP  4000   /* max pull-back per tick during a rescue        */
+static void geo_rescue_offmap(TD5_Actor *actor)
+{
+    int32_t cx = FP_TRUNC(actor->world_pos.x);
+    int32_t cz = FP_TRUNC(actor->world_pos.z);
+    GeoHit h; double dx, dz, mag, rad; int32_t wall_angle, pen;
+    static int s_r_diag = -1;
+    if (s_r_diag < 0) s_r_diag = td5_env_flag_on("TD5RE_OOB_DIAG");
+    if (!geo_locate(cx, cz, (int)actor->track_span_raw, &h)) return;
+    if (h.inside || h.pushdist <= OOB_RESCUE_DIST) return;   /* on/near road */
+    dx = (double)h.pushx; dz = (double)h.pushz;
+    mag = sqrt(dx * dx + dz * dz);
+    if (mag < 0.5) return;
+    rad = atan2(dx, -dz);
+    wall_angle = (int32_t)(rad * (4096.0 / (2.0 * 3.14159265358979323846))) & 0xFFF;
+    { int32_t ip = (int32_t)(mag + 0.5); pen = -(ip > OOB_RESCUE_CAP ? OOB_RESCUE_CAP : ip); }
+    td5_physics_wall_response(actor, wall_angle, pen, 1, actor->world_pos.x, actor->world_pos.z);
+    td5_physics_rebuild_pose(actor);
+    if (s_r_diag && actor->slot_index == 0)
+        TD5_LOG_W(LOG_TAG, "OOB RESCUE: slot=0 span=%d off-map dist=%d -> pulled back "
+                  "(posY=%d px=%d pz=%d)", (int)actor->track_span_raw, h.pushdist,
+                  FP_TRUNC(actor->world_pos.y), cx, cz);
+}
+
 void td5_track_resolve_wall_contacts(TD5_Actor *actor)
 {
     static uint32_t s_wall_tick = 0;
@@ -1523,6 +1583,11 @@ void td5_track_resolve_wall_contacts(TD5_Actor *actor)
             }
         }
     }
+
+    /* [FORK OOB 2026-08-29] Last-resort off-map recovery for forward custom
+     * tracks (autotrack forks). The rail-LUT pass above owns normal containment;
+     * this only fires if a car has already sailed clear of the road. */
+    if (geo_query_active()) geo_rescue_offmap(actor);
 }
 
 /* ========================================================================
@@ -1632,6 +1697,20 @@ static int32_t s_boundary_rev_sentinel = 9999;
 
 void td5_track_bind_boundary_sentinels(int level_number)
 {
+    /* [FORK OOB 2026-08-29] Classify the track as a custom registry track
+     * (autotrack / user-built) here, where the level number is known. On the
+     * FORWARD custom road this arms geo_query_active(), so the geo model gets
+     * built for geo_rescue_offmap() to query. td5_track_load_strip already ran
+     * (asset load order) and its load-time geo_build only fires for the reverse
+     * case, so build the model now. geo_build no-ops if s_span_array is unset. */
+    s_track_custom_registry = (g_active_td6_level == 0 &&
+                               (level_number < 1 || level_number > 40) &&
+                               td5_track_registry_has_level(level_number));
+    /* Forward custom: build fresh here (load_strip's geo_build only fires for the
+     * reverse case). Rebuild each load so track B never inherits track A's model. */
+    if (geo_query_active()) geo_build();
+    else if (geo_active() && !s_geo_quads) geo_build();
+
     /* [TD6 SEAM-TELEPORT ROOT FIX — track-scoped, OverrideTrackZip-gated]
      * s_level_boundary_sentinels is keyed by NATIVE TD5 level number and holds
      * geometry-specific span indices for that level's point-to-point end-of-
