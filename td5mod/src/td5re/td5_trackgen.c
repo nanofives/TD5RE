@@ -224,6 +224,11 @@ static int tg_road_page(int si);
  * suit a CITY skyline, so several of these are canopy/skyline variants. ----- */
 #define TD5_TG_PAGE_R4_FLOW   (TD5_TG_PAGE_R4_BASE + 0)
 #define TD5_TG_R4_FLOW_N      6
+/* +0: distant CITY skyline silhouette (item 5). A tree canopy behind a city
+ * skyline reads wrong -- the far ridge in an urban biome should be blocky
+ * building tops, not forest. Alpha-keyed like the treeline page it stands in
+ * for. Slots +1..+5 stay reserved for future FLOW art. */
+#define TD5_TG_PAGE_R4_SKYLINE (TD5_TG_PAGE_R4_FLOW + 0)
 
 /* --- CROSS block (items 2, 4, 9, 10, 14): 8 slots. Perpendicular lane
  * markings and raised kerb breaks are both new art. --------------------- */
@@ -7793,6 +7798,23 @@ static int tg_terrain_ridge_enabled(void)
     return td5_env_flag_on("TD5RE_AUTOTRACK_TERRAIN_HILLS");
 }
 
+/* [R4 item 5] Two independent far-ridge fixes, each its own single-variable
+ * flag (both default ON):
+ *  - TREELINE_FIX: half-texel V inset that kills the "black line at the top".
+ *    Safe by construction (matches the facade UV-inset precedent).
+ *  - CITY_SKYLINE: route the ridge to a blocky building skyline in urban biomes
+ *    instead of a forest canopy ("which ones are suitable for cities"). A
+ *    judgment change, split out so it can be A/B'd and reverted on its own. */
+static int tg_r4_treeline_fix(void)
+{
+    return td5_env_flag_on("TD5RE_R4_TREELINE_FIX");
+}
+
+static int tg_r4_city_skyline(void)
+{
+    return td5_env_flag_on("TD5RE_R4_CITY_SKYLINE");
+}
+
 /* Smooth low-frequency terrain height at a world point. Two summed products of
  * sines at ~42000 and ~17000 world units, which at a 1500-unit span length is a
  * hill every ~28 and ~11 spans -- long enough to read as topology from a car
@@ -7944,12 +7966,21 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
             t0 = B[0] + TD5_TG_RIDGE_MIN_UP - Y[0][3];
         if (Y[1][3] + t1 < B[1] + TD5_TG_RIDGE_MIN_UP)
             t1 = B[1] + TD5_TG_RIDGE_MIN_UP - Y[1][3];
+        /* [R4 item 5] Half-texel V inset. The band maps v=0 at the crest and
+         * v=1 at the base; reaching EXACTLY 0.0/1.0 samples the page's edge texel
+         * row, and under the wrapped sampler the top edge (v=0) fetches the
+         * bottom row (v=1, the darkest foliage base) -- the reported "black line
+         * at the top of the texture". e0..e1 keeps both edges off the border.
+         * flag off restores the raw 0/1 for the A/B. */
+        const int    tfix = tg_r4_treeline_fix();
+        const double vt = tfix ? TD5_TG_FACADE_UV_INSET       : 0.0;
+        const double vb = tfix ? 1.0 - TD5_TG_FACADE_UV_INSET : 1.0;
         /* near-bottom, far-bottom, far-top, near-top; v = 1 at the base, so the
          * page's top rows (v = 0) land on the crest. */
-        px[n]=X[0][3]; py[n]=Y[0][3];      pz[n]=Z[0][3]; uu[n]=U[0]; vv[n]=1.0; n++;
-        px[n]=X[1][3]; py[n]=Y[1][3];      pz[n]=Z[1][3]; uu[n]=U[1]; vv[n]=1.0; n++;
-        px[n]=X[1][3]; py[n]=Y[1][3] + t1; pz[n]=Z[1][3]; uu[n]=U[1]; vv[n]=0.0; n++;
-        px[n]=X[0][3]; py[n]=Y[0][3] + t0; pz[n]=Z[0][3]; uu[n]=U[0]; vv[n]=0.0; n++;
+        px[n]=X[0][3]; py[n]=Y[0][3];      pz[n]=Z[0][3]; uu[n]=U[0]; vv[n]=vb; n++;
+        px[n]=X[1][3]; py[n]=Y[1][3];      pz[n]=Z[1][3]; uu[n]=U[1]; vv[n]=vb; n++;
+        px[n]=X[1][3]; py[n]=Y[1][3] + t1; pz[n]=Z[1][3]; uu[n]=U[1]; vv[n]=vt; n++;
+        px[n]=X[0][3]; py[n]=Y[0][3] + t0; pz[n]=Z[0][3]; uu[n]=U[0]; vv[n]=vt; n++;
         /* [R3 item 8] This distant ridge IS the "background tree line" the user
          * reported as "grey at the bottom and white at the top ... doesn't seem
          * to be a tree texture there". It was drawn on TD5_TG_PAGE_HILL, whose
@@ -7963,8 +7994,21 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
          * sky, which is exactly the tree line the user expected. Snow/alpine keep
          * the snowy flank. TD5_TG_PAGE_HILL stays the tunnel rock massing page,
          * untouched. */
-        seg_page[1] = tg_biome_is_snow(h->b) ? tg_ground_page_for_span(h->si, h->b)
-                                             : TD5_TG_PAGE_TREELINE;
+        /* [R4 item 5] "which ones are suitable for cities": a forest canopy
+         * behind a city skyline reads wrong. Snow keeps its white flank; the
+         * urban biomes (urbanity >= 2: CITY, INDUSTRIAL, ORIENTAL) get the blocky
+         * building-tops skyline page; everything else keeps the tree line. Gated
+         * so the A/B toggles ONE thing. */
+        if (tg_biome_is_snow(h->b))
+            seg_page[1] = tg_ground_page_for_span(h->si, h->b);
+        else if (tg_r4_city_skyline() && h->b->urbanity >= 2)
+            seg_page[1] = TD5_TG_PAGE_R4_SKYLINE;
+        else
+            seg_page[1] = TD5_TG_PAGE_TREELINE;
+        /* [R4 seam] account the urban-skyline ridge under the FLOW bucket so the
+         * inventory reflects the reclassification (renamed in place). */
+        if (seg_page[1] == TD5_TG_PAGE_R4_SKYLINE)
+            tg_acct(TG_ACCT_R4_FLOW, h->si);
         seg_nq[1]   = 1;
         nseg = 2;
     }
@@ -8020,6 +8064,23 @@ static int tg_emit_fb_terrain(const TG_FBHook *h)
 #define TD5_TG_GANTRY_THICK     160.0  /* slab depth, along the road            */
 #define TD5_TG_GANTRY_OUT       260.0  /* legs outboard of the road edge         */
 
+/* [R4 item 1] Solid-leg + seam-free dimensions, gated so the fix is a clean
+ * single-variable A/B against the shipped round-3 gantry. The leg cross-section
+ * at LEG_W 220 x THICK 160 (0.86 x 0.63 wu) under a 3600-raw-tall post reads as
+ * a spindly stick, not a solid column ("pillars don't look quite solid"); the
+ * fix squares it up to LEG_W/LEG_D and pushes the feet further outboard so the
+ * inner face still clears the carriageway. The centre line down the panel is the
+ * L/R page boundary sampled at its extreme texel column (same class the facade
+ * survey cured with a half-texel inset), so the fixed panel insets its UVs. */
+#define TD5_TG_GANTRY_LEG_W2    300.0  /* fixed upright half-width, lateral      */
+#define TD5_TG_GANTRY_LEG_D2    300.0  /* fixed leg depth along the road         */
+#define TD5_TG_GANTRY_OUT2      360.0  /* fixed foot outboard (inner face clears) */
+
+static int tg_r4_banner_fix(void)
+{
+    return td5_env_flag_on("TD5RE_R4_BANNER_FIX");   /* default ON */
+}
+
 /* Push one axis-aligned-in-the-road-frame quad into the caller's arrays. */
 static void tg_gantry_quad(double *px, double *py, double *pz,
                            double *uu, double *vv, int *n,
@@ -8050,6 +8111,14 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish
      * halves of the word (see the panel block). */
     int seg_page[3], seg_nq[3];
     int n = 0, i;
+    /* [R4 item 1] one flag drives both halves of the fix so the A/B is single
+     * variable. leg_w/leg_d square the posts up; `out` moves the feet outboard
+     * to match; `ins` insets the panel UVs to kill the centre seam. */
+    const int    fix   = tg_r4_banner_fix();
+    const double leg_w = fix ? TD5_TG_GANTRY_LEG_W2 : TD5_TG_GANTRY_LEG_W;
+    const double leg_d = fix ? TD5_TG_GANTRY_LEG_D2 : TD5_TG_GANTRY_THICK;
+    const double out   = fix ? TD5_TG_GANTRY_OUT2   : TD5_TG_GANTRY_OUT;
+    const double ins   = fix ? TD5_TG_FACADE_UV_INSET : 0.0;
 
     tg_road_edge(nl, si, 0.0, 0.0, 1.0, &lx, &ly, &lz, &rx, &ry, &rz);
     dx = lx - rx; dz = lz - rz;
@@ -8068,8 +8137,8 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish
     for (i = 0; i < 2; i++) {
         const double ex = i ? rx : lx, ez = i ? rz : lz;
         const double s  = i ? -1.0 : 1.0;              /* outboard direction */
-        const double cxx = ex + dx * s * TD5_TG_GANTRY_OUT;
-        const double czz = ez + dz * s * TD5_TG_GANTRY_OUT;
+        const double cxx = ex + dx * s * out;
+        const double czz = ez + dz * s * out;
         const double y0 = base_y - 40.0;               /* sunk, no gap        */
         const double y1 = base_y + TD5_TG_GANTRY_CLEAR + TD5_TG_GANTRY_PANEL_H;
         int face;
@@ -8079,11 +8148,9 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish
             /* (a,b) = the in-plane axis, (c) = the fixed offset axis. */
             const double ax = (face < 2) ? dx : tx, az = (face < 2) ? dz : tz;
             const double ox = (face < 2) ? tx : dx, oz = (face < 2) ? tz : dz;
-            const double half = (face < 2) ? TD5_TG_GANTRY_LEG_W
-                                           : TD5_TG_GANTRY_THICK;
+            const double half = (face < 2) ? leg_w : leg_d;
             const double off  = ((face & 1) ? -1.0 : 1.0)
-                              * ((face < 2) ? TD5_TG_GANTRY_THICK
-                                            : TD5_TG_GANTRY_LEG_W);
+                              * ((face < 2) ? leg_d : leg_w);
             qx[0] = cxx + ax * half + ox * off; qz[0] = czz + az * half + oz * off;
             qx[1] = cxx - ax * half + ox * off; qz[1] = czz - az * half + oz * off;
             qx[2] = qx[1];                      qz[2] = qz[1];
@@ -8098,10 +8165,10 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish
      * cap) is one contiguous run of quads and therefore one command. */
     {
         const double y0 = base_y + TD5_TG_GANTRY_CLEAR;
-        const double ox = lx + dx * TD5_TG_GANTRY_OUT;
-        const double oz = lz + dz * TD5_TG_GANTRY_OUT;
-        const double kx = rx - dx * TD5_TG_GANTRY_OUT;
-        const double kz = rz - dz * TD5_TG_GANTRY_OUT;
+        const double ox = lx + dx * out;
+        const double oz = lz + dz * out;
+        const double kx = rx - dx * out;
+        const double kz = rz - dz * out;
         qx[0] = ox + tx * TD5_TG_GANTRY_THICK; qz[0] = oz + tz * TD5_TG_GANTRY_THICK;
         qx[1] = kx + tx * TD5_TG_GANTRY_THICK; qz[1] = kz + tz * TD5_TG_GANTRY_THICK;
         qx[2] = kx - tx * TD5_TG_GANTRY_THICK; qz[2] = kz - tz * TD5_TG_GANTRY_THICK;
@@ -8152,10 +8219,10 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish
     {
         const double y0 = base_y + TD5_TG_GANTRY_CLEAR;
         const double y1 = y0 + TD5_TG_GANTRY_PANEL_H;
-        const double ox = lx + dx * TD5_TG_GANTRY_OUT;   /* left  end */
-        const double oz = lz + dz * TD5_TG_GANTRY_OUT;
-        const double kx = rx - dx * TD5_TG_GANTRY_OUT;   /* right end */
-        const double kz = rz - dz * TD5_TG_GANTRY_OUT;
+        const double ox = lx + dx * out;   /* left  end */
+        const double oz = lz + dz * out;
+        const double kx = rx - dx * out;   /* right end */
+        const double kz = rz - dz * out;
         const double mx = 0.5 * (ox + kx), mz = 0.5 * (oz + kz);
         /* (a-end, b-end, face sign, u at a, u at b) for the two half quads.
          * Row order IS the page order: row 0 is the L page, row 1 the R page,
@@ -8177,8 +8244,16 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish
             qx[2] = qx[1]; qz[2] = qz[1];
             qx[3] = qx[0]; qz[3] = qz[0];
             qy[0] = y0; qy[1] = y0; qy[2] = y1; qy[3] = y1;
+            /* [R4 item 1] Inset the panel UVs by half a texel. Each half maps
+             * one whole 64x64 page (u 0->1); at the panel centre the L page's
+             * right edge (u=1) abuts the R page's left edge (u=0), and sampling
+             * those extreme columns -- wrapped, they fetch the OPPOSITE edge --
+             * draws the reported vertical line. e0..e1 keeps every fetch off the
+             * page border. ins=0 restores the raw 0/1 for the A/B. */
             tg_gantry_quad(px, py, pz, uu, vv, &n, qx, qy, qz,
-                           ends[q][3], ends[q][4], 1.0, 0.0);
+                           ends[q][3] + (ends[q][4] - ends[q][3]) * ins,
+                           ends[q][4] - (ends[q][4] - ends[q][3]) * ins,
+                           1.0 - ins, ins);
         }
         seg_page[1] = finish ? TD5_TG_PAGE_FINISH_L : TD5_TG_PAGE_START_L;
         seg_page[2] = finish ? TD5_TG_PAGE_FINISH_R : TD5_TG_PAGE_START_R;
@@ -9464,6 +9539,54 @@ static void tg_emit_texture_page_fb_treeline(TG_Buf *out)
     else                            tg_emit_texture_page_fb_treeline_proc(out);
 }
 
+/* [R4 item 5] Distant CITY skyline. Same role and format as the treeline page
+ * (alpha-keyed, keyed above the roofline) but the silhouette is blocky building
+ * tops rather than a forest crown, so an urban biome's far ridge reads as a city
+ * skyline. Hazy cool-grey so it sits BACK like the treeline does, not as a wall
+ * of near buildings. Tiles once per span along the band, exactly as the treeline
+ * page does, so it shares that page's proven horizontal behaviour. */
+static void tg_emit_texture_page_fb_skyline(TG_Buf *out)
+{
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 1);                                  /* 1 = alpha-keyed */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR. 0 = key; 1..7 hazy building bodies (blue a touch high, low
+     * saturation, so the skyline recedes); 8..15 brighter lit windows / sunlit
+     * walls. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        if (i == 0)     { b = 255; g = 0;          r = 255; }
+        else if (i < 8) { b = 96 + i * 4; g = 92 + i * 3; r = 86 + i * 3; }
+        else            { b = 150 + (i - 8) * 6; g = 148 + (i - 8) * 6;
+                          r = 138 + (i - 8) * 5; }
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;      /* y=0 is the TOP of the page */
+        /* ~8-column building blocks, each a flat roof at its own height, so the
+         * skyline is a stepped run of low-rise and towers. Keyed above the roof,
+         * facade below. */
+        const unsigned int c = (unsigned)(x / 8) * 2654435761u;
+        int roof = 8 + (int)((c >> 27) % 32);              /* 8..39 rows down */
+        int body, win;
+        if (((c >> 20) & 7u) == 0u) roof = 3 + (int)((c >> 23) % 5); /* tower */
+        if (y < roof) { tg_put_u8(out, 0); continue; }     /* sky above roof */
+        /* Facade: a window grid on the lit tones over a per-block body grey.
+         * Windows every 4th column (offset per block) and every 4th row down. */
+        body = 2 + (int)((c >> 8) % 5);                    /* 2..6 body grey */
+        win  = (((unsigned)x & 3u) == ((c >> 4) & 3u)) &&
+               (((y - roof) & 3) == 1);
+        tg_put_u8(out, (unsigned)(win ? (9 + (int)((c >> 12) % 6)) : body));
+    }
+}
+
 /* Tunnel lining -- deliberately NOT a building facade: no windows, no storey
  * grid, no straight bright lines at all.
  *
@@ -10018,6 +10141,7 @@ static int tg_emit_textures(TG_Buf *out)
     else
         tg_emit_texture_page_fb_city(&pages[TD5_TG_PAGE_FENCE], 2);
     tg_emit_texture_page_fb_treeline(&pages[TD5_TG_PAGE_TREELINE]);
+    tg_emit_texture_page_fb_skyline(&pages[TD5_TG_PAGE_R4_SKYLINE]);  /* [R4 item 5] */
     tg_emit_texture_page_fb_tunnel(&pages[TD5_TG_PAGE_TUNNEL]);
     /* [R3 BRIDGE] deck surface (item 11) + 4 extra tunnel linings (item 16a). */
     tg_emit_texture_page_bridge_deck(&pages[TD5_TG_PAGE_BRIDGE_DECK]);
