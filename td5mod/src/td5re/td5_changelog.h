@@ -46,6 +46,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 28" },
+    { CL_ITEM,    "FORK GORES no longer bare tiles: the flank a branch" },
+    { CL_ITEM,    "  clears now fills with background buildings (or a" },
+    { CL_ITEM,    "  park) set back past the corridor." },
+    { CL_ITEM,    "BACKGROUND CITY BLOCKS are solid boxes now, not" },
+    { CL_ITEM,    "  paper-thin facades seen edge-on." },
+    { CL_ITEM,    "BUILDING FLANKS close where a run meets a cleared" },
+    { CL_ITEM,    "  fork side (no more open-air sides there)." },
     { CL_ITEM,    "AUTO TRACKS FINISH AGAIN on branchy seeds. The finish" },
     { CL_ITEM,    "  line was placed on an appended branch corridor a" },
     { CL_ITEM,    "  normal drive never reaches; now on the main ring." },
