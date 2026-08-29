@@ -30,6 +30,7 @@
 #include "td5_config.h"
 #include "td5_tg_real_tex.h"   /* real TD5 texture pages (level014), opt-in */
 #include "td5_tg_real_tex_city.h"  /* extra city facades: SF/Tokyo/Moscow */
+#include "td5_tg_real_tex_r5flora.h"  /* [R5 item 18] tall Moscow park trees */
 #include "td5_tg_furniture_tex.h" /* real TD5 lamp/railing/banner pages     */
 #include "td5re.h"
 
@@ -3414,6 +3415,13 @@ static const TG_TreePage k_tree_pages[TD5_TG_TREE_VARIANTS] = {
 static int tg_tree_slot(int v)
 {
     return v == 0 ? TD5_TG_PAGE_TREE : (TD5_TG_PAGE_TREE_EXTRA + v - 1);
+}
+
+/* [R5 item 18] Page slot for the v-th tall Moscow park tree, in the reserved
+ * FLORA block. Only the first k_r5_flora_tree_count slots are ever filled. */
+static int tg_flora_tree_slot(int v)
+{
+    return TD5_TG_PAGE_R5_FLORA + v;
 }
 
 /* Inverse of tg_tree_slot: tree variant drawn on `page`, or -1 if it is not a
@@ -7663,6 +7671,68 @@ static int tg_emit_fb_flora(const TG_FBHook *h)
     }
     return 1;
 }
+
+/* [R5 item 18] Tall park trees. The user asked a curvy park to justify itself
+ * with "a lot of trees ... trees that take up to the ceiling like the sections
+ * at the end of Moscow or the middle of Australia", and to "expand the library
+ * of available resources". The 10-page borrowed tree set took nothing from
+ * Moscow (level023), whose texture set is unusually rich in foliage; this plants
+ * a TALL Moscow canopy billboard set well BACK behind each tree biome's own
+ * verge planting, so the park (and every billboard-tree biome) gains a high
+ * canopy backdrop rising above the near trees rather than a flat hedge line.
+ * Real-texture only -- the pages are Moscow art -- and gated for an A/B via
+ * TD5RE_R5_FLORA_PARKTREES (default ON). One billboard per qualifying span,
+ * accounted under the FLORA area. */
+static int tg_emit_fb_park_trees(const TG_FBHook *h)
+{
+    const TG_NodeList *nl = h->nl;
+    const int si = h->si;
+    const TG_Biome *b = h->b;
+    unsigned int hh;
+    const TG_Node *n;
+    double side, gap, tw, th, jit, lx, lz, cx, cz;
+    int v, page;
+
+    if (!td5_env_flag_on("TD5RE_R5_FLORA_PARKTREES")) return 1;
+    if (!tg_real_textures_enabled())  return 1;   /* pages are Moscow art */
+    if (k_r5_flora_tree_count <= 0)   return 1;
+    if (!b->billboard || b->tree_n <= 0) return 1;/* tree biomes only, not facades */
+    if (si <= TD5_TG_GRID_SPAN)       return 1;   /* keep the grid area clear */
+    if (si + 1 >= nl->count)          return 1;
+    if (tg_span_in_bridge_run(si))    return 1;   /* deck is clear */
+    if (*h->nmesh + 1 >= h->maxmesh)  return 1;
+
+    /* Sparser than the near trees: a grove on roughly one span in three, so the
+     * tall canopy reads as clumps rather than a continuous second wall. */
+    hh = (unsigned)si * 2246822519u + 0x2545F491u;
+    if ((int)(hh >> 29) > (b->density >> 1)) return 1;
+
+    n    = &nl->v[si];
+    side = ((hh >> 4) & 1) ? 1.0 : -1.0;
+    if (tg_side_blocked(si, side)) return 1;
+    v    = (int)((hh >> 13) % (unsigned)k_r5_flora_tree_count);
+    page = tg_flora_tree_slot(v);
+
+    /* Tall: the near verge trees top out around 7200 raw (the palm); these reach
+     * ~10000 raw (~40 world units) so they stand above that as a canopy. Page
+     * aspect kept by the shared jitter. */
+    jit = 1.40 + (double)((hh >> 9) % 61) * 0.01;   /* 1.40 .. 2.00 */
+    tw  = 4200.0 * jit;
+    th  = 5200.0 * jit;
+    gap = 2600.0 + (double)((hh >> 5) % 3200);      /* set BACK, behind the verge */
+    gap = tg_flora_gap_clear(nl, si, side, gap);    /* never on a branch */
+
+    lx = n->tz * side; lz = -n->tx * side;
+    cx = n->x + lx * (n->width * 0.5 + gap + tw * 0.5);
+    cz = n->z + lz * (n->width * 0.5 + gap + tw * 0.5);
+
+    h->moff[*h->nmesh] = h->blk->len;
+    if (!tg_emit_billboard_mesh(h->blk, cx, n->y, cz, tw * 0.5, th, page, 1))
+        return 0;
+    (*h->nmesh)++;
+    tg_acct(TG_ACCT_R5_FLORA, si);
+    return 1;
+}
 /* How many spans either side of a portal carry mountain massing. Beyond this
  * the camera is inside the bore and the mass is behind the lining, so it is
  * invisible geometry -- 5 spans (~4000 units) is what a driver actually sees
@@ -8650,6 +8720,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     if (!tg_emit_fb_block(&hook))   { ok = 0; break; }
                     if (!tg_emit_fb_cross(&hook))   { ok = 0; break; }
                     if (!tg_emit_fb_flora(&hook))   { ok = 0; break; }
+                    if (!tg_emit_fb_park_trees(&hook)) { ok = 0; break; }
                     if (!tg_emit_fb_terrain(&hook)) { ok = 0; break; }
                 }
                 if (!tg_emit_fb_track(&hook)) { ok = 0; break; }
@@ -10221,6 +10292,12 @@ static int tg_emit_textures(TG_Buf *out)
         for (v = 0; v < TD5_TG_TREE_VARIANTS && v < k_real_tree_count; v++)
             tg_emit_real_page(&pages[tg_tree_slot(v)],
                               k_real_tree_pal[v], k_real_tree_paln[v], k_real_tree_idx[v], 1);
+        /* [R5 item 18] Tall Moscow park trees, alpha-keyed like the rest. Capped
+         * at the FLORA block width so a header edit cannot walk past it. */
+        for (v = 0; v < k_r5_flora_tree_count && v < TD5_TG_R5_FLORA_N; v++)
+            tg_emit_real_page(&pages[tg_flora_tree_slot(v)],
+                              k_r5_flora_tree_pal[v], k_r5_flora_tree_paln[v],
+                              k_r5_flora_tree_idx[v], 1);
         /* Props: people/statue/animal (type 1), lamp glow (type 3 additive). */
         for (v = 0; v < TD5_TG_PROP_COUNT && v < k_real_prop_count; v++)
             tg_emit_real_page(&pages[tg_prop_slot(v)],
