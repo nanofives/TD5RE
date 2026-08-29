@@ -267,7 +267,45 @@ static int tg_road_page(int si);
 #define TD5_TG_PAGE_R4_PIER      (TD5_TG_PAGE_R4_BRIDGE + 1)
 #define TD5_TG_PAGE_R4_COAST     (TD5_TG_PAGE_R4_BRIDGE + 2)
 
-#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R4_BASE + 44)
+/* ====================== ROUND-5 PAGE BLOCKS ==========================
+ * Same rule as R3/R4, measured off its OWN base. Use only your own block; do
+ * not move TD5_TG_PAGE_COUNT and do not renumber another area's slots.
+ *
+ * Owners (see docs/AUTOTRACK_FEEDBACK_R5.md for the item numbers):
+ *   CROSS  items 2,3,4,12   per-intersection crossings, wrapped kerbs
+ *   CITY   items 5,6,7,8,15 skyscraper scale, clipping, stretched facades
+ *   BRIDGE items 13,14,17   clear ground under bridges, sloped coastline, rails
+ *   STRUCT items 1,9,10     banner legs, tunnel bore walls, branch pavement
+ *   FLORA  items 16,18      tree variety/ponds, non-stretched treeline
+ * (The OOB item 11 lives in td5_track.c and needs no page block.)
+ * ==================================================================== */
+#define TD5_TG_PAGE_R5_BASE   (TD5_TG_PAGE_R4_BASE + 44)
+
+/* --- CROSS block (items 2,3,4,12): 8 slots ------------------------------- */
+#define TD5_TG_PAGE_R5_CROSS  (TD5_TG_PAGE_R5_BASE + 0)
+#define TD5_TG_R5_CROSS_N     8
+
+/* --- CITY block (items 5,6,7,8,15): 8 slots ------------------------------ */
+#define TD5_TG_PAGE_R5_CITY   (TD5_TG_PAGE_R5_BASE + 10)
+#define TD5_TG_R5_CITY_N      8
+
+/* --- BRIDGE block (items 13,14,17): 8 slots (sloped shore, real guardrail,
+ * under-bridge water bed). ------------------------------------------------ */
+#define TD5_TG_PAGE_R5_BRIDGE (TD5_TG_PAGE_R5_BASE + 20)
+#define TD5_TG_R5_BRIDGE_N    8
+
+/* --- STRUCT block (items 1,9,10): 8 slots (banner leg face, tunnel lining,
+ * branch pavement). ------------------------------------------------------- */
+#define TD5_TG_PAGE_R5_STRUCT (TD5_TG_PAGE_R5_BASE + 30)
+#define TD5_TG_R5_STRUCT_N    8
+
+/* --- FLORA block (items 16,18): 12 slots. Widest reservation on purpose --
+ * item 18 asks to EXPAND the tree library (varied canopies, tall trees,
+ * ponds), so this area is expected to add the most new art. --------------- */
+#define TD5_TG_PAGE_R5_FLORA  (TD5_TG_PAGE_R5_BASE + 40)
+#define TD5_TG_R5_FLORA_N     12
+
+#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R5_BASE + 54)
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
@@ -421,6 +459,20 @@ typedef enum {
     TG_ACCT_FORKBACK,       /* CITY item 6: background massing behind a fork gore */
     TG_ACCT_R4_BRANCH,      /* BRANCH(items 7, 8, 11)   rename in place */
     TG_ACCT_COASTLINE,      /* BRIDGE(item 20) coastline strip; renamed in place */
+    /* [R5] PRE-RESERVED, one slot per work area, each on its OWN line. Same
+     * rule as R4: RENAME YOUR OWN SLOT IN PLACE. Do not append to the enum, do
+     * not append to k_acct_names, do not touch another area's line. R4 still
+     * produced one conflict here because two areas' lines were ADJACENT, so
+     * these are spaced by a blank line as well. An unused slot reports 0. */
+    TG_ACCT_R5_CROSS,       /* CROSS  (items 2,3,4,12)   rename in place */
+
+    TG_ACCT_R5_CITY,        /* CITY   (items 5,6,7,8,15) rename in place */
+
+    TG_ACCT_R5_BRIDGE,      /* BRIDGE (items 13,14,17)   rename in place */
+
+    TG_ACCT_R5_STRUCT,      /* STRUCT (items 1,9,10)     rename in place */
+
+    TG_ACCT_R5_FLORA,       /* FLORA  (items 16,18)      rename in place */
     TG_ACCT_KIND_COUNT
 } TG_AcctKind;
 
@@ -440,7 +492,19 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
     "cross-furn",           /* CROSS  */
     "fork-back",            /* CITY   */
     "r4-branch",            /* BRANCH */
-    "coastline"             /* BRIDGE item 20 */
+    "coastline",            /* BRIDGE item 20 */
+    /* [R5] one reserved name per area, in enum order, each on its own line and
+     * spaced by a blank line. Rename the string to match your renamed enum
+     * constant. Keep the trailing comma on every line but the last. */
+    "r5-cross",             /* CROSS  */
+
+    "r5-city",              /* CITY   */
+
+    "r5-bridge",            /* BRIDGE */
+
+    "r5-struct",            /* STRUCT */
+
+    "r5-flora"              /* FLORA  */
 };
 
 static long s_acct_count[TG_ACCT_KIND_COUNT];
