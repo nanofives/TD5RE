@@ -309,6 +309,9 @@ static int s_ring_len;
 static int tg_fork_of_main(int si);
 static int tg_fork_of_corridor(int si, int *k);
 static int tg_city_crossing_here(int si);   /* [R3 item 7] fence break gate */
+/* [R4 CROSS item 4] a zebra must not mark a PARK frontage, so tg_city_crossing_here
+ * (defined above the park block) needs the park predicate forward-declared. */
+static int tg_block_is_park(int si, int left);
 /* Same reason: the finish-line placer below has to keep the finish (and its
  * gantry) out of a tunnel run, and the tunnel test is defined with the tunnel
  * emitters much further down. */
@@ -405,7 +408,7 @@ typedef enum {
      * to the enum, do not append to k_acct_names, do not touch another area's
      * line. An unused reserved slot just reports 0 in the inventory. */
     TG_ACCT_R4_FLOW,        /* FLOW  (items 1, 5, 12)   rename in place */
-    TG_ACCT_R4_CROSS,       /* CROSS (items 2,4,9,10,14) rename in place */
+    TG_ACCT_CROSSFURN,      /* CROSS (items 2,4,9,10,14): markings, kerb breaks, side buildings */
     TG_ACCT_FORKBACK,       /* CITY item 6: background massing behind a fork gore */
     TG_ACCT_R4_BRANCH,      /* BRANCH(items 7, 8, 11)   rename in place */
     TG_ACCT_COASTLINE,      /* BRIDGE(item 20) coastline strip; renamed in place */
@@ -425,7 +428,7 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
      * every line but the last -- the R3 union merge lost exactly one comma and
      * two names silently concatenated into a single string literal. */
     "r4-flow",              /* FLOW   */
-    "r4-cross",             /* CROSS  */
+    "cross-furn",           /* CROSS  */
     "fork-back",            /* CITY   */
     "r4-branch",            /* BRANCH */
     "coastline"             /* BRIDGE item 20 */
@@ -6311,8 +6314,18 @@ static int tg_city_crossing_here(int si)
      * (the shifted half road's outer edge is still the full-width edge) but a
      * crossing spans both edges, so skip the whole fork region. */
     if (tg_branches_enabled() && tg_span_in_fork_clear(si)) return 0;
-    for (s = 0; s < 2; s++)
-        if (!tg_facade_built(si, s) && tg_facade_built(si - 1, s)) return 1;
+    for (s = 0; s < 2; s++) {
+        if (!(!tg_facade_built(si, s) && tg_facade_built(si - 1, s))) continue;
+        /* [R4 CROSS item 4] A zebra marks a road you cross INTO A STREET. On
+         * seed 99991 one gap in four is a PARK (a green lawn + hedge from the
+         * kerb out, tg_block_is_park), and painting a pedestrian crossing in
+         * front of it is exactly the "weird green texture on some crossings"
+         * report: the crosswalk reads as leading into a bright-green wall. A
+         * park frontage is not a through street, so it gets no crossing. The
+         * side-street mouths that ARE through streets still do. */
+        if (tg_block_is_park(si, s)) continue;
+        return 1;
+    }
     return 0;
 }
 
@@ -6672,7 +6685,11 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
     const double reach = tg_city_crossst_reach(h->b, sw);
     const double drop  = TD5_TG_GROUND_DROP * reach / TD5_TG_GROUND_WIDTH;
     const double u_r   = reach / (double)TD5_TG_LANE_WIDTH;
-    int seg_page = tg_road_page(h->si), seg_nq;
+    /* [R4 CROSS item 9] Perpendicular lane markings: swap in the cross-street
+     * page whose centre line runs DOWN the street (see tg_emit_texture_page_r4_cross).
+     * Default ON; TD5RE_AUTOTRACK_CROSS_MARKINGS=0 restores the biome road page. */
+    const int marks = td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_MARKINGS");
+    int seg_page = marks ? (TD5_TG_PAGE_R4_CROSS + 0) : tg_road_page(h->si), seg_nq;
     int s, n = 0;
 
     for (s = 0; s < 2; s++) {
@@ -6710,6 +6727,7 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
     if (*h->nmesh >= h->maxmesh) return 1;
     seg_nq = n / 4;
     tg_acct_n(TG_ACCT_CROSSING, h->si, n / 4);   /* side-street mouths */
+    if (marks) tg_acct_n(TG_ACCT_CROSSFURN, h->si, n / 4);  /* item 9 markings fired */
     h->moff[(*h->nmesh)++] = h->blk->len;
     return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
                               &seg_page, &seg_nq, 1);
@@ -7159,6 +7177,232 @@ static int tg_emit_fb_block(const TG_FBHook *h)
     if (!tg_city_span_paved(h)) return 1;      /* only where the city is */
     if (!tg_block_emit_intersection(h)) return 0;
     if (!tg_block_emit_park(h)) return 0;
+    return 1;
+}
+
+/* ==========================================================================
+ * [R4 CROSS] REAL INTERSECTIONS  (feedback R4 items 2, 10, 14)
+ *
+ * This block turns the existing street crossings into fuller intersections. It
+ * owns page TD5_TG_PAGE_R4_CROSS (8 slots; +0 is the marked cross-street from
+ * item 9) and the TG_ACCT_CROSSFURN inventory kind. Its dispatcher
+ * tg_emit_fb_cross is wired into the scenery loop next to tg_emit_fb_block, so
+ * none of it edits another area's emitter. Every emitter is behind its own knob
+ * (default ON) so each is a single-variable A/B away.
+ *
+ *   item 2  a RAISED KERB BREAK at the crossing -- the sidewalk kerb steps up a
+ *           little where the crossing cuts it, a pedestrian threshold.
+ *   item 10 BUILDINGS LINING a through side street (walls on the two along-road
+ *           edges of the gap, running outward), so the street reads as going
+ *           further with more buildings on its sides. They only ever extend
+ *           perpendicular to the main road, so they can never land on the
+ *           drivable corridor. (An earlier deep-rows cut emitted but was
+ *           invisible from the racing line -- see tg_cross_emit_sidewalls.)
+ *   item 14 CONTINUOUS ZEBRA joining two crossings that fall within a couple of
+ *           spans of each other on a curve, so a run of closely-spaced side
+ *           streets reads as one junction rather than a stutter of crosswalks.
+ *           The join is a road-surface decal only (no wall or corridor change).
+ * ========================================================================== */
+#define TD5_TG_XKERB_RISE   120.0   /* raised kerb break, extra height over KERB */
+#define TD5_TG_XKERB_DEPTH  300.0   /* how far the raised lip sits back, raw     */
+#define TD5_TG_XJOIN_WIN    5       /* max span gap between two joined crossings */
+#define TD5_TG_XJOIN_CURVE  0.06    /* min |sin turn| over the sliver to join    */
+
+/* item 2 -- a raised kerb break at a crossing. On each BUILT kerb of a crossing
+ * span the pavement kerb steps up TD5_TG_XKERB_RISE over the zebra's along-road
+ * extent (the same f0..f1 tg_city_emit_crossing paints), so the crossing has a
+ * raised threshold rather than a flush edge. Sits on the pavement page. */
+static int tg_cross_emit_kerb_break(const TG_FBHook *h)
+{
+    double px[16], py[16], pz[16], uu[16], vv[16], q[12], t[8];
+    const double sw = tg_city_sidewalk_w(h->b);
+    const double f0 = 0.22, f1 = 0.62;
+    double l0x, l0y, l0z, r0x, r0y, r0z, l1x, l1y, l1z, r1x, r1y, r1z;
+    int seg_page = TD5_TG_PAGE_SIDEWALK, seg_nq, s, n = 0;
+
+    if (!(sw > 0.0)) return 1;
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_KERB")) return 1;
+    tg_road_edge(h->nl, h->si, f0, 0.0, 1.0, &l0x, &l0y, &l0z, &r0x, &r0y, &r0z);
+    tg_road_edge(h->nl, h->si, f1, 0.0, 1.0, &l1x, &l1y, &l1z, &r1x, &r1y, &r1z);
+
+    for (s = 0; s < 2; s++) {
+        const double sg = s ? 1.0 : -1.0;
+        double e[10], a0x, a0y, a0z, a1x, a1y, a1z;
+        const double base = TD5_TG_KERB_H;
+        const double top  = TD5_TG_KERB_H + TD5_TG_XKERB_RISE;
+        const double dep  = TD5_TG_XKERB_DEPTH;
+        if (!tg_facade_built(h->si, s)) continue;   /* kerb only where a pavement is */
+        if (tg_side_blocked(h->si, sg)) continue;
+        tg_city_edge_frame(h->nl, h->si, sg, e);    /* e[6],e[7] = outward unit */
+        if (sg > 0.0) { a0x = l0x; a0y = l0y; a0z = l0z; a1x = l1x; a1y = l1y; a1z = l1z; }
+        else          { a0x = r0x; a0y = r0y; a0z = r0z; a1x = r1x; a1y = r1y; a1z = r1z; }
+
+        /* Raised top slab: f0-inner, f1-inner, f1-outer, f0-outer at `top`. */
+        q[0] = a0x;              q[1]  = a0y + top; q[2]  = a0z;
+        q[3] = a1x;              q[4]  = a1y + top; q[5]  = a1z;
+        q[6] = a1x + e[6] * dep; q[7]  = a1y + top; q[8]  = a1z + e[7] * dep;
+        q[9] = a0x + e[6] * dep; q[10] = a0y + top; q[11] = a0z + e[7] * dep;
+        t[0] = 0.0;  t[1] = 0.0;  t[2] = 0.0;  t[3] = 0.26;
+        t[4] = 0.2;  t[5] = 0.26; t[6] = 0.2;  t[7] = 0.0;
+        tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+
+        /* Road-facing riser: from the normal kerb top up to the raised top. */
+        q[0] = a0x; q[1]  = a0y + base; q[2]  = a0z;
+        q[3] = a1x; q[4]  = a1y + base; q[5]  = a1z;
+        q[6] = a1x; q[7]  = a1y + top;  q[8]  = a1z;
+        q[9] = a0x; q[10] = a0y + top;  q[11] = a0z;
+        t[0] = 0.0; t[1] = 1.0; t[2] = 0.26; t[3] = 1.0;
+        t[4] = 0.26; t[5] = 0.9; t[6] = 0.0; t[7] = 0.9;
+        tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+    }
+
+    if (n <= 0) return 1;
+    if (*h->nmesh >= h->maxmesh) return 1;
+    seg_nq = n / 4;
+    tg_acct_n(TG_ACCT_CROSSFURN, h->si, n / 4);
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
+}
+
+/* item 10 -- buildings LINING a through side street, so it reads as going
+ * further with more buildings on its sides. A first cut placed extra rows
+ * straight out along the kerb normal (like the back rows, only deeper); a
+ * single-variable A/B showed they emitted but were invisible from the racing
+ * line -- too far out and occluded by the front frontage. Buildings that don't
+ * show are not buildings the user asked for.
+ *
+ * These instead stand at the TWO along-road edges of the gap (e[0] near, e[3]
+ * far) and run OUTWARD down the street, one wall each, facing in -- the left
+ * and right frontages of the side street, seen straight down it through the
+ * gap. They only ever extend PERPENDICULAR to the main road (down the side
+ * street), so nothing here can reach the drivable corridor. The wall runs the
+ * cross-street's own reach, a couple of storeys taller than the front row so
+ * the canyon has depth. */
+static int tg_cross_emit_sidewalls(const TG_FBHook *h)
+{
+    double px[TD5_TG_FACADE_MAXQUAD * 4], py[TD5_TG_FACADE_MAXQUAD * 4];
+    double pz[TD5_TG_FACADE_MAXQUAD * 4], uu[TD5_TG_FACADE_MAXQUAD * 4];
+    double vv[TD5_TG_FACADE_MAXQUAD * 4];
+    const TG_Biome *b = h->b;
+    const double sw = tg_city_sidewalk_w(b);
+    const double reach = tg_city_crossst_reach(b, sw);
+    int s;
+
+    if (!(sw > 0.0)) return 1;
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_SIDEWALLS")) return 1;
+    if (tg_span_in_bridge_run(h->si)) return 1;
+    if (tg_branches_enabled() && tg_span_in_fork_clear(h->si)) return 1;
+
+    for (s = 0; s < 2; s++) {
+        const double sg = s ? 1.0 : -1.0;
+        double e[10], ang, ox, oz;
+        int edge;
+        if (tg_facade_built(h->si, s)) continue;      /* only a through street */
+        if (tg_block_is_park(h->si, s)) continue;     /* a park has no street */
+        if (tg_side_blocked(h->si, sg)) continue;
+        tg_city_edge_frame(h->nl, h->si, sg, e);
+        ang = tg_block_arm_skew(h->si, s);
+        tg_block_rot2(e[6], e[7], ang, &ox, &oz);     /* outward down the street */
+
+        /* One wall on each along-road edge of the gap: edge 0 = e[0] (near),
+         * edge 1 = e[3] (far). Each runs outward `reach`, rising H. */
+        for (edge = 0; edge < 2; edge++) {
+            const double bx = edge ? e[3] : e[0];
+            const double bz = edge ? e[5] : e[2];
+            const double by = (edge ? e[4] : e[1]) + TD5_TG_KERB_H;
+            const unsigned int rh = ((unsigned)h->si * 2654435761u
+                                     + (unsigned)s * 40503u
+                                     + (unsigned)edge * 21841u) * 2246822519u;
+            const double drop = TD5_TG_GROUND_DROP * reach / TD5_TG_GROUND_WIDTH;
+            int rows = b->floors_min + 1 + (int)((rh >> 9) % 4u);
+            double H = (double)rows * tg_facade_floor_h(b);
+            int cols, page, seg_nq, n = 0;
+
+            cols = tg_facade_cols_for(reach, (double)b->cell_w, 5);
+            /* base -> outward*reach, sinking with the skirt, rising H. */
+            tg_facade_push_grid(bx, by, bz, ox * reach, -drop, oz * reach,
+                                0.0, H, 0.0, cols, rows, 0, rows,
+                                px, py, pz, uu, vv, &n);
+            if (n <= 0) continue;
+            if (*h->nmesh >= h->maxmesh) return 1;
+            page   = tg_facade_page_class(rh, rows);
+            seg_nq = n / 4;
+            h->moff[(*h->nmesh)++] = h->blk->len;
+            if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                                    &page, &seg_nq, 1))
+                return 0;
+            tg_acct_n(TG_ACCT_CROSSFURN, h->si, 1);
+        }
+    }
+    return 1;
+}
+
+/* item 14 -- is span si a short built SLIVER between two crossings on a curve?
+ * A run of side streets separated by a one- or two-span wall on a bend reads as
+ * a stutter of separate crosswalks; joining them gives one continuous junction.
+ * True when this side is BUILT here but has an open (non-park) side street both
+ * within TD5_TG_XJOIN_WIN before AND after, and the centreline actually turns
+ * across the sliver (a straight run of side streets is left as separate ones). */
+static int tg_cross_join_side(const TG_NodeList *nl, int si, int s)
+{
+    int k, gb = -1, ga = -1;
+    double cross;
+
+    if (!tg_facade_built(si, s)) return 0;            /* must be the wall sliver */
+    /* Nearest through-street mouth on this side within the window, each way. */
+    for (k = 1; k <= TD5_TG_XJOIN_WIN; k++)
+        if (si - k >= 0 && !tg_facade_built(si - k, s)
+            && !tg_block_is_park(si - k, s)) { gb = si - k; break; }
+    for (k = 1; k <= TD5_TG_XJOIN_WIN; k++)
+        if (si + k < nl->count && !tg_facade_built(si + k, s)
+            && !tg_block_is_park(si + k, s)) { ga = si + k; break; }
+    if (gb < 0 || ga < 0) return 0;
+    /* Turn measured across the two flanking mouths (a wider, more reliable
+     * baseline than the immediate neighbours), so only a genuine bend joins. */
+    cross = nl->v[gb].tx * nl->v[ga].tz - nl->v[gb].tz * nl->v[ga].tx;
+    return (cross < 0.0 ? -cross : cross) >= TD5_TG_XJOIN_CURVE;
+}
+
+/* item 14 -- paint the zebra across a joining sliver span, so two nearby
+ * crossings on a curve read as one. Road-surface decal only (PAGE_CROSSING,
+ * lifted like tg_city_emit_crossing), no wall or corridor change. */
+static int tg_cross_emit_join_zebra(const TG_FBHook *h)
+{
+    double px[4], py[4], pz[4], uu[4], vv[4];
+    double l0x, l0y, l0z, r0x, r0y, r0z, l1x, l1y, l1z, r1x, r1y, r1z;
+    const double f0 = 0.22, f1 = 0.62, L = (double)h->lanes;
+    int seg_page = TD5_TG_PAGE_CROSSING, seg_nq = 1, s, joined = 0, n = 0;
+
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_JOIN")) return 1;
+    if (tg_branches_enabled() && tg_span_in_fork_clear(h->si)) return 1;
+    for (s = 0; s < 2; s++)
+        if (tg_cross_join_side(h->nl, h->si, s)) joined = 1;
+    if (!joined) return 1;
+
+    tg_road_edge(h->nl, h->si, f0, 0.0, 1.0, &l0x, &l0y, &l0z, &r0x, &r0y, &r0z);
+    tg_road_edge(h->nl, h->si, f1, 0.0, 1.0, &l1x, &l1y, &l1z, &r1x, &r1y, &r1z);
+    px[n]=r0x; py[n]=r0y+TD5_TG_CROSS_LIFT; pz[n]=r0z; uu[n]=0.0; vv[n]=0.0; n++;
+    px[n]=l0x; py[n]=l0y+TD5_TG_CROSS_LIFT; pz[n]=l0z; uu[n]=L;   vv[n]=0.0; n++;
+    px[n]=l1x; py[n]=l1y+TD5_TG_CROSS_LIFT; pz[n]=l1z; uu[n]=L;   vv[n]=1.0; n++;
+    px[n]=r1x; py[n]=r1y+TD5_TG_CROSS_LIFT; pz[n]=r1z; uu[n]=0.0; vv[n]=1.0; n++;
+
+    if (*h->nmesh >= h->maxmesh) return 1;
+    tg_acct_n(TG_ACCT_CROSSFURN, h->si, 1);
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
+}
+
+/* Group CROSS dispatcher (feedback R4 items 2, 10, 14). Wired into the scenery
+ * loop next to tg_emit_fb_block; city spans only. */
+static int tg_emit_fb_cross(const TG_FBHook *h)
+{
+    if (!tg_city_span_paved(h)) return 1;      /* only where the city is */
+    if (tg_city_crossing_here(h->si) &&
+        td5_env_flag_on("TD5RE_AUTOTRACK_CROSSINGS")) {
+        if (!tg_cross_emit_kerb_break(h)) return 0;
+    }
+    if (!tg_cross_emit_sidewalls(h)) return 0;
+    if (!tg_cross_emit_join_zebra(h)) return 0;
     return 1;
 }
 
@@ -8163,6 +8407,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 } else {
                     if (!tg_emit_fb_city(&hook))    { ok = 0; break; }
                     if (!tg_emit_fb_block(&hook))   { ok = 0; break; }
+                    if (!tg_emit_fb_cross(&hook))   { ok = 0; break; }
                     if (!tg_emit_fb_flora(&hook))   { ok = 0; break; }
                     if (!tg_emit_fb_terrain(&hook)) { ok = 0; break; }
                 }
@@ -8948,6 +9193,54 @@ static void tg_emit_texture_page_fb_city(TG_Buf *out, int which)
     }
 }
 
+/* [R4 CROSS item 9] CROSS-STREET asphalt with a LONGITUDINAL centre line.
+ *
+ * The side-street carriageway (tg_city_emit_crossstreet) used the biome road
+ * page, whose lane paint is a stripe at the u=0 tile edge -- authored for the
+ * MAIN road where u runs 0..lanes ACROSS. On the cross-street the mesh maps u
+ * along the OUTWARD run and v across the ~one-lane width, so that same stripe
+ * comes out as a rung every ~1500 raw ACROSS the side street -- rungs, not lane
+ * markings. The user asked for "lane markers on the perpendicular direction if
+ * it's a crossing", i.e. a line running DOWN the side street.
+ *
+ * This page puts the marking where the cross-street mapping needs it: a dashed
+ * white line along the page's X axis (== u == outward) at its Y centre (== v
+ * centre == the middle of the street width), so it reads as one broken centre
+ * line the length of the perpendicular street. Asphalt grey elsewhere so it
+ * still matches the main carriageway it leaves. OPAQUE. */
+static void tg_emit_texture_page_r4_cross(TG_Buf *out)
+{
+    unsigned int rng = 0x5C0554E1u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR: 0..11 asphalt greys (match the main road page), 12..15 near-white. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v = (i < 12) ? (44 + i * 3) : (196 + (i - 12) * 12);
+        tg_put_u8(out, (unsigned)v);
+        tg_put_u8(out, (unsigned)v);
+        tg_put_u8(out, (unsigned)v);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;       /* == u, along the street       */
+        const int y = i / TD5_TG_TEX_DIM;       /* == v, across the street      */
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        /* Centre line: 2 rows either side of y=32, dashed along x so it reads as
+         * road paint rather than a solid rail. Tiles once in v per span, so the
+         * line lands mid-street on every span it covers. */
+        if (y >= 30 && y <= 33 && (x % 20) < 12)
+            idx = 12 + (int)((rng >> 16) % 4);
+        else
+            idx = (int)((rng >> 16) % 12);       /* asphalt grain */
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 /* ---- tree-line backdrop page ----
  * A canopy band closing off the horizon behind the individual tree billboards.
  * ALPHA-KEYED (type 1, index 0 = key) so the sky shows through a ragged top
@@ -9674,6 +9967,8 @@ static int tg_emit_textures(TG_Buf *out)
     tg_emit_texture_page_r4_guardrail(&pages[TD5_TG_PAGE_R4_GUARDRAIL]);
     tg_emit_texture_page_r4_pier(&pages[TD5_TG_PAGE_R4_PIER]);
     tg_emit_texture_page_r4_coast(&pages[TD5_TG_PAGE_R4_COAST]);
+    /* [R4 CROSS item 9] cross-street asphalt with a longitudinal centre line. */
+    tg_emit_texture_page_r4_cross(&pages[TD5_TG_PAGE_R4_CROSS + 0]);
 
     for (i = 0; i < count; i++) {
         if (pages[i].oom) {
