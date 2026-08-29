@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 29 (auto-track bridges)" },
+    { CL_ITEM,    "Under a bridge you now see ONLY WATER. The distant" },
+    { CL_ITEM,    "  terrain and building skyline no longer drape down" },
+    { CL_ITEM,    "  into the gorge mixed with the river." },
+    { CL_ITEM,    "Bridge guardrails now meet the deck with no see-through" },
+    { CL_ITEM,    "  gap, and wear a proper steel armco face." },
+    { CL_ITEM,    "Overhead bridge beams are solid 3D structure, not flat" },
+    { CL_ITEM,    "  cut-outs that vanished edge-on." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 29 (auto-track fork)" },
     { CL_ITEM,    "FIXED: on the auto-track you could drive THROUGH the map" },
     { CL_ITEM,    "  and out of bounds at a fork's sharp half-width bend at" },

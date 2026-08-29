@@ -500,7 +500,7 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
 
     "r5-city",              /* CITY   */
 
-    "r5-bridge",            /* BRIDGE */
+    "bridge-kerb",          /* BRIDGE (item 17 deck kerb) */
 
     "r5-struct",            /* STRUCT */
 
@@ -5115,9 +5115,15 @@ static int tg_span_is_bridge_deck(const TG_NodeList *nl, int si)
     return lift >= TD5_TG_BRIDGE_MIN_LIFT;
 }
 
-/* Base offset of the parapet above the deck surface (clear of z-fighting) and
- * its height. */
-#define TD5_TG_BRIDGE_RAIL_BASE  40.0
+/* Base offset of the parapet FOOT relative to the deck surface, and its height.
+ * [R5 item 17b] Was +40 (parapet floated 40u above the deck); with the deck
+ * kerb only reaching deck level that left a thin open slot at the barrier foot
+ * you could see the river through -- the residual half of the "gap between the
+ * guardrails and the road" report. Drop the foot just BELOW the deck (-20) so
+ * the rail overlaps the kerb and seals the edge. The rail is a vertical quad and
+ * the kerb a horizontal one meeting only along the outer edge line, so the small
+ * overlap intersects rather than co-planar z-fights. */
+#define TD5_TG_BRIDGE_RAIL_BASE (-20.0)
 #define TD5_TG_BRIDGE_RAIL_H    420.0
 
 /* [R3 item 13] Overhead ribs across the deck are OPTIONAL structure above the
@@ -5144,8 +5150,13 @@ static int tg_emit_bridge_rail_panel(TG_Buf *m,
     /* [R4 item 16b] Was TD5_TG_PAGE_RAIL, an armco authored for a HORIZONTAL
      * strip. This panel maps u across the panel HEIGHT and v along the road, so
      * that page sampled rotated and "is not a guardrail texture". The R4 page is
-     * drawn in these axes -- rails run horizontally, posts periodically along. */
-    int seg_page = TD5_TG_PAGE_R4_GUARDRAIL, seg_nq = 1;
+     * drawn in these axes -- rails run horizontally, posts periodically along.
+     * [R5 item 17a] The R4 page still read as a CONCRETE barrier, not a
+     * guardrail; default to the R5 armco steel W-beam authored in the same axes.
+     * TD5RE_AUTOTRACK_ARMCO=0 restores the R4 concrete face for an A/B. */
+    int seg_page = td5_env_flag_on("TD5RE_AUTOTRACK_ARMCO")
+                 ? TD5_TG_PAGE_R5_BRIDGE + 0 : TD5_TG_PAGE_R4_GUARDRAIL;
+    int seg_nq = 1;
 
     /* Quad: near-bottom, far-bottom, far-top, near-top. u across the page over
      * the panel height (0..1 = the whole barrier face); v advances one page per
@@ -5167,19 +5178,56 @@ static int tg_emit_bridge_rail_panel(TG_Buf *m,
  * for span si. Recorded via moff/pn like tg_emit_bridge_water, so each mesh
  * carries its own offset -- these are quads, not the boxes tg_emit_bridge's
  * caller recovers by even division. */
+/* [R5 item 17b] One DECK KERB quad along one edge, span si -> si+1, filling the
+ * horizontal gap between the carriageway edge and the parapet line.
+ *
+ * The parapet sits at width/2 + RAIL_OUT (120) but the road mesh only reaches
+ * width/2, so between the tarmac and the barrier there was a 120-unit strip of
+ * nothing at deck level -- you looked straight down through it to the river.
+ * That open strip is the "gap between the guardrails and the road" report. This
+ * lays a flat concrete kerb across it at deck level, so the deck reads as solid
+ * out to the barrier. Concrete (pier) page, its own recorded offset. */
+#define TD5_TG_BRIDGE_RAIL_OUT 120.0
+static int tg_emit_bridge_kerb_panel(TG_Buf *m,
+                                     double ix0, double iz0, double ox0, double oz0,
+                                     double ix1, double iz1, double ox1, double oz1,
+                                     double y0, double y1,
+                                     int si, size_t *moff, int *pn)
+{
+    double px[4], py[4], pz[4], uu[4], vv[4];
+    int seg_page = tg_bridge_pier_page(), seg_nq = 1;
+
+    /* inner-near, inner-far, outer-far, outer-near -- a proper ring. U across
+     * the kerb width, V one page per span down the run. */
+    px[0] = ix0; py[0] = y0; pz[0] = iz0; uu[0] = 0.0; vv[0] = (double)si;
+    px[1] = ix1; py[1] = y1; pz[1] = iz1; uu[1] = 0.0; vv[1] = (double)(si + 1);
+    px[2] = ox1; py[2] = y1; pz[2] = oz1; uu[2] = 1.0; vv[2] = (double)(si + 1);
+    px[3] = ox0; py[3] = y0; pz[3] = oz0; uu[3] = 1.0; vv[3] = (double)si;
+
+    moff[*pn] = m->len;
+    if (!tg_write_quad_mesh(m, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1))
+        return 0;
+    (*pn)++;
+    tg_acct(TG_ACCT_R5_BRIDGE, si);
+    return 1;
+}
+
 static int tg_emit_bridge_rails(const TG_NodeList *nl, int si,
                                 TG_Buf *m, size_t *moff, int *pn)
 {
     const TG_Node *n0 = &nl->v[si];
     const TG_Node *n1;
-    double half0, half1;
+    double half0, half1, road0, road1;
+    const int kerb = td5_env_flag_on("TD5RE_AUTOTRACK_BRIDGE_KERB");
     int s;
 
     if (si + 1 >= nl->count) return 1;
     if (!tg_span_is_bridge_deck(nl, si)) return 1;
     n1 = &nl->v[si + 1];
-    half0 = n0->width * 0.5 + 120.0;
-    half1 = n1->width * 0.5 + 120.0;
+    road0 = n0->width * 0.5;
+    road1 = n1->width * 0.5;
+    half0 = road0 + TD5_TG_BRIDGE_RAIL_OUT;
+    half1 = road1 + TD5_TG_BRIDGE_RAIL_OUT;
 
     for (s = 0; s < 2; s++) {
         const double side = s ? 1.0 : -1.0;
@@ -5187,6 +5235,16 @@ static int tg_emit_bridge_rails(const TG_NodeList *nl, int si,
         const double z0 = n0->z - n0->tx * side * half0;
         const double x1 = n1->x + n1->tz * side * half1;
         const double z1 = n1->z - n1->tx * side * half1;
+        /* [R5 item 17b] Kerb first, so the deck is solid out to the barrier. */
+        if (kerb) {
+            const double ix0 = n0->x + n0->tz * side * road0;
+            const double iz0 = n0->z - n0->tx * side * road0;
+            const double ix1 = n1->x + n1->tz * side * road1;
+            const double iz1 = n1->z - n1->tx * side * road1;
+            if (!tg_emit_bridge_kerb_panel(m, ix0, iz0, x0, z0, ix1, iz1, x1, z1,
+                                           n0->y, n1->y, si, moff, pn))
+                return 0;
+        }
         if (!tg_emit_bridge_rail_panel(m, x0, n0->y, z0, x1, n1->y, z1,
                                        si, moff, pn))
             return 0;
@@ -5195,39 +5253,41 @@ static int tg_emit_bridge_rails(const TG_NodeList *nl, int si,
     /* Overhead rib, every 6th span. [R4 item 17] The cross-beam alone floated:
      * a bar in the sky with nothing joining it to the deck ("floating element").
      * Give it two VERTICAL LEGS down to the parapet tops so it reads as a portal
-     * gantry, not a hovering slab. Beam + legs are three separate quad meshes,
-     * each recording its own offset. Concrete (pier) page, so it matches the
-     * towers. */
+     * gantry, not a hovering slab.
+     *
+     * [R5 item 13] "geometry going over the bridge that doesn't have any depth
+     * to it, looks 2D flat": the round-4 beam and legs were single QUADS -- a
+     * horizontal slab with no thickness and vertical sheets with no lateral
+     * width, so edge-on they vanished and read as flat cut-outs spanning the
+     * deck. Build them as solid BOXES instead (tg_emit_box_mesh, six faces each),
+     * so the gantry has real depth from every angle. Concrete (pier) page, so it
+     * matches the towers. TD5RE_AUTOTRACK_BRIDGE_OVERHEAD=0 removes the gantry. */
     if (tg_bridge_struct_enabled() && tg_bridge_overhead_enabled() &&
         (si % 6) == 0) {
-        double px[4], py[4], pz[4], uu[4], vv[4];
-        int seg_page = tg_bridge_pier_page(), seg_nq = 1, leg;
+        const int pier_page = tg_bridge_pier_page();
         const double ry = n0->y + TD5_TG_BRIDGE_RAIL_BASE
                         + TD5_TG_BRIDGE_RAIL_H + 1800.0;   /* clears traffic */
         /* Legs stand from the parapet top up to the beam. */
         const double ly = n0->y + TD5_TG_BRIDGE_RAIL_BASE + TD5_TG_BRIDGE_RAIL_H;
-        const double lx = n0->tz, lz = -n0->tx;            /* left unit */
-        const double fx = n0->tx * 160.0, fz = n0->tz * 160.0; /* half depth */
+        const double lx = n0->tz, lz = -n0->tx;            /* left unit  */
+        const double fwx = n0->tx, fwz = n0->tz;           /* along-road unit */
         const double lex = n0->x + lx * half0, lez = n0->z + lz * half0;
         const double rex = n0->x - lx * half0, rez = n0->z - lz * half0;
-        px[0] = lex - fx; py[0] = ry; pz[0] = lez - fz; uu[0] = 0.0; vv[0] = 0.0;
-        px[1] = rex - fx; py[1] = ry; pz[1] = rez - fz; uu[1] = 1.0; vv[1] = 0.0;
-        px[2] = rex + fx; py[2] = ry; pz[2] = rez + fz; uu[2] = 1.0; vv[2] = 1.0;
-        px[3] = lex + fx; py[3] = ry; pz[3] = lez + fz; uu[3] = 0.0; vv[3] = 1.0;
+        int leg;
+        /* Beam: a box spanning both deck edges, 260 tall x 320 deep along road. */
         moff[*pn] = m->len;
-        if (!tg_write_quad_mesh(m, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1))
+        if (!tg_emit_box_mesh(m, n0->x, ry, n0->z, half0, 130.0, 160.0,
+                              fwx, fwz, pier_page, 3000.0, 0xFFFFFFFFu))
             return 0;
         (*pn)++;
         tg_acct(TG_ACCT_BRIDGE, si);
-        /* Two legs: a thin vertical quad (front-back depth) at each deck edge. */
+        /* Two legs: a solid post at each deck edge, from parapet top to beam. */
         for (leg = 0; leg < 2; leg++) {
             const double ex = leg ? rex : lex, ez = leg ? rez : lez;
-            px[0] = ex - fx; py[0] = ly; pz[0] = ez - fz; uu[0] = 0.0; vv[0] = 1.0;
-            px[1] = ex + fx; py[1] = ly; pz[1] = ez + fz; uu[1] = 1.0; vv[1] = 1.0;
-            px[2] = ex + fx; py[2] = ry; pz[2] = ez + fz; uu[2] = 1.0; vv[2] = 0.0;
-            px[3] = ex - fx; py[3] = ry; pz[3] = ez - fz; uu[3] = 0.0; vv[3] = 0.0;
+            const double cy = (ly + ry) * 0.5, hy = (ry - ly) * 0.5;
             moff[*pn] = m->len;
-            if (!tg_write_quad_mesh(m, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1))
+            if (!tg_emit_box_mesh(m, ex, cy, ez, 150.0, hy, 150.0,
+                                  fwx, fwz, pier_page, 3000.0, 0xFFFFFFFFu))
                 return 0;
             (*pn)++;
             tg_acct(TG_ACCT_BRIDGE, si);
@@ -8086,6 +8146,18 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
     return 1;
 }
 
+/* [R5 item 14] Does the far-group owned by span si sit over a bridge run?
+ * The far band is emitted per 4-span group (TD5_TG_FAR_GROUP); a bridge run is
+ * 40 spans and 40-aligned, so a whole run maps onto ten complete groups and no
+ * group straddles a run boundary. Test both group ends anyway so a future
+ * unaligned run still reads correctly. */
+static int tg_far_group_over_bridge(int si)
+{
+    const int g0 = (si / TD5_TG_FAR_GROUP) * TD5_TG_FAR_GROUP;
+    const int g1 = g0 + TD5_TG_FAR_GROUP - 1;
+    return tg_span_in_bridge_run(g0) || tg_span_in_bridge_run(g1);
+}
+
 static int tg_emit_fb_terrain(const TG_FBHook *h)
 {
     double wsd;
@@ -8093,6 +8165,22 @@ static int tg_emit_fb_terrain(const TG_FBHook *h)
 
     if (!tg_terrain_far_enabled()) return 1;
     if (!tg_far_group_owner(h->si)) return 1;
+
+    /* [R5 item 14] Leave ONLY water on the floor below a bridge. The distant
+     * terrain apron + ridge/skyline wall (tg_emit_far_band) is not gated on the
+     * crossing, so over every bridge run it draped a grass/concrete apron and a
+     * building-tops skyline down into the gorge -- the "still plenty of road,
+     * building backgrounds mixed with grass" report. Suppress it over a bridge
+     * group: the bridge water plane (BRIDGE_WATER_HALF 32000) already reaches
+     * past the far band's own reach (FAR_REACH 30000), so removing the band
+     * leaves open water to the horizon with nothing to cover, and the sloped
+     * shore is carried by the gorge banks (tg_ground_side gorge branch) and the
+     * longitudinal coastline strips (tg_emit_bridge_coast). The suppression
+     * shows in the element inventory as a far-bands GAP over each run.
+     * TD5RE_AUTOTRACK_BRIDGE_CLEARFAR=0 restores the draped band for an A/B. */
+    if (td5_env_flag_on("TD5RE_AUTOTRACK_BRIDGE_CLEARFAR") &&
+        tg_far_group_over_bridge(h->si))
+        return 1;
 
     /* Seaward side is the sea's, not the plain's -- the water plane already
      * reaches 50000 out there and a grass band would float over it. */
@@ -9918,6 +10006,55 @@ static void tg_emit_texture_page_r4_coast(TG_Buf *out)
     }
 }
 
+/* [R5 item 17a] ARMCO steel guardrail face. The R4 page reads as a concrete
+ * barrier ("still not a guardrail texture"); this is the galvanized W-beam the
+ * user expects: cool blue-grey steel with the two horizontal corrugation ridges
+ * of a W-section, a dark rail cap, and vertical posts at a road interval.
+ *
+ * Same axes as the R4 page so the panel UVs need no change: page-X is the
+ * barrier HEIGHT (0 = deck .. 63 = top), page-Y runs ALONG the road. The two
+ * beam ridges are therefore constant-X bands and the posts are constant-Y bands. */
+static void tg_emit_texture_page_r5_guardrail(TG_Buf *out)
+{
+    unsigned int rng = 0x7A5CE001u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR galvanized steel: cool (b >= g >= r). 0..3 dark groove/post shadow,
+     * 4..11 mid steel ramp, 12..15 bright spangle highlight. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v;
+        if (i < 4)       v = 70 + i * 10;            /* dark groove / shadow */
+        else if (i < 12) v = 130 + (i - 4) * 9;      /* mid steel            */
+        else             v = 210 + (i - 12) * 11;    /* bright spangle       */
+        if (v > 255) v = 255;
+        tg_put_u8(out, (unsigned)v);                             /* b (coolest) */
+        tg_put_u8(out, (unsigned)(v > 6 ? v - 6 : 0));          /* g           */
+        tg_put_u8(out, (unsigned)(v > 12 ? v - 12 : 0));        /* r           */
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;   /* barrier HEIGHT, 0=deck..63=top */
+        const int y = i / TD5_TG_TEX_DIM;   /* along the road                 */
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if ((y % 20) < 3)                    /* vertical post, full height     */
+            idx = 1 + (int)((rng >> 16) % 2);
+        else if (x >= 58)                    /* dark rail cap along the top    */
+            idx = (int)((rng >> 16) % 2);
+        else if ((x >= 22 && x <= 26) || (x >= 40 && x <= 44))
+            idx = 12 + (int)((rng >> 16) % 4);   /* the two W-beam ridge crests */
+        else if (x == 33 || x < 8)           /* centre valley + skirt shadow    */
+            idx = 1 + (int)((rng >> 16) % 3);
+        else                                 /* steel body, faint spangle       */
+            idx = 4 + (int)((rng >> 16) % 8);
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 /* Terrain: 0 = SNOW ground, 1 = distant HILL / mountain flank.
  *
  * Both follow the rule the GROUND page comment sets out: NO structure and no
@@ -10243,6 +10380,8 @@ static int tg_emit_textures(TG_Buf *out)
     tg_emit_texture_page_r4_guardrail(&pages[TD5_TG_PAGE_R4_GUARDRAIL]);
     tg_emit_texture_page_r4_pier(&pages[TD5_TG_PAGE_R4_PIER]);
     tg_emit_texture_page_r4_coast(&pages[TD5_TG_PAGE_R4_COAST]);
+    /* [R5 item 17a] armco steel W-beam guardrail (replaces the R4 concrete). */
+    tg_emit_texture_page_r5_guardrail(&pages[TD5_TG_PAGE_R5_BRIDGE + 0]);
     /* [R4 CROSS item 9] cross-street asphalt with a longitudinal centre line. */
     tg_emit_texture_page_r4_cross(&pages[TD5_TG_PAGE_R4_CROSS + 0]);
 
