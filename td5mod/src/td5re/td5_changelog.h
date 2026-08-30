@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 30 (auto-track branches R7)" },
+    { CL_ITEM,    "FIXED: the right sidewalk no longer breaks off" },
+    { CL_ITEM,    "  early, leaving a see-through gap before a branch." },
+    { CL_ITEM,    "NEW: the grass verge beside a branch is now dressed" },
+    { CL_ITEM,    "  with roadside trees instead of a bare strip." },
+    { CL_ITEM,    "FIXED: an avenue median no longer flickers between" },
+    { CL_ITEM,    "  grass and tiles -- one surface runs its full length." },
     { CL_DATE,    "August 29 (auto-track tunnels)" },
     { CL_ITEM,    "FIXED: distant scenery no longer shows through a" },
     { CL_ITEM,    "  tunnel as grey slabs standing in the road." },
