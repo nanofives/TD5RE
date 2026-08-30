@@ -35,6 +35,7 @@
 #include <process.h>     /* _beginthreadex */
 #include <string.h>
 #include <stdlib.h>
+#include "td5_config.h"  /* td5_env_flag_on (dev fault-injection knob) */
 
 #define LOG_TAG "sound"
 
@@ -78,6 +79,67 @@ static void radio_make_label(const char *url, char *out, int cap)
 }
 
 /* ========================================================================
+ * Worker fault containment
+ *
+ * WHY. The stream is handed to Media Foundation as a URL, and MF's network
+ * source drives WinHTTP internally, so a long-lived stream spends its life
+ * inside Microsoft's HTTP stack. Observed 2026-08-30: an access violation deep
+ * in webio.dll (near-null read at +0x2C1) on a stream that had connected ONCE
+ * and never reconnected -- i.e. a fault in the MF/WinHTTP read path, not in
+ * this file. That is not code we can patch, but it took the whole GAME down,
+ * which is the part we own: background music must never be able to kill a race.
+ *
+ * HOW. MinGW's GCC does not implement MSVC's __try/__except, so the guard is a
+ * vectored handler instead. It fires ONLY for an access violation ON THE RADIO
+ * WORKER THREAD, and redirects that thread to radio_worker_abort(), which exits
+ * it. Everything else -- every other thread, every other exception code -- is
+ * passed straight through untouched so the normal crash handler still reports
+ * real bugs. The radio then stays silent for the rest of the session.
+ *
+ * DELIBERATELY NOT DONE in the abort path: no MF calls, no radio critical
+ * section, no sink teardown. The faulting thread may hold MF-internal locks,
+ * so re-entering MF (or anything that waits on it) could deadlock. We leak the
+ * MF objects and the sink on purpose -- the same trade the shutdown join-timeout
+ * path already makes, and for the same reason. s_aborted makes that permanent.
+ * ======================================================================== */
+
+static volatile LONG s_worker_tid;   /* GetCurrentThreadId of the worker  */
+static volatile LONG s_aborted;      /* worker died in MF; never re-enter */
+static PVOID         s_veh;
+
+/* Redirect target. Runs on the worker's own stack with a fresh frame, so it is
+ * safe to log; it must not touch anything MF might have locked. */
+static void radio_worker_abort(void)
+{
+    InterlockedExchange(&s_aborted, 1);
+    InterlockedExchange(&s_stop, 1);
+    InterlockedExchange(&s_worker_tid, 0);
+    TD5_LOG_E(LOG_TAG, "radio: FAULT inside the Media Foundation / WinHTTP read "
+                       "path -- radio thread terminated, game continues (music "
+                       "off for this session)");
+    _endthreadex(0);
+}
+
+static LONG CALLBACK radio_veh(EXCEPTION_POINTERS *ep)
+{
+    ULONG64 sp;
+    if (!ep || !ep->ExceptionRecord || !ep->ContextRecord)
+        return EXCEPTION_CONTINUE_SEARCH;
+    /* Only this thread, only a genuine AV, and only once. */
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+        return EXCEPTION_CONTINUE_SEARCH;
+    if ((LONG)GetCurrentThreadId() != s_worker_tid || s_aborted)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    /* Enter radio_worker_abort as if it had been CALLed: x64 wants RSP+8
+     * 16-byte aligned at function entry, so align down then bias by 8. */
+    sp = (ep->ContextRecord->Rsp & ~(ULONG64)15) - 8;
+    ep->ContextRecord->Rsp = sp;
+    ep->ContextRecord->Rip = (ULONG64)(ULONG_PTR)&radio_worker_abort;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+/* ========================================================================
  * Decode worker
  * ======================================================================== */
 
@@ -86,7 +148,24 @@ static unsigned __stdcall radio_worker(void *arg)
     int backoff = 1000;     /* ms between reconnect attempts, capped at 5s */
     (void)arg;
 
+    InterlockedExchange(&s_worker_tid, (LONG)GetCurrentThreadId());
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
+
+#ifndef TD5RE_RELEASE
+    /* Dev-only fault injection, to PROVE the guard above actually catches a
+     * worker AV rather than assuming it does. TD5RE_RADIO_FAULT_TEST=1 reads
+     * the same near-null address the real webio.dll fault reported (+0x2C1).
+     * With the guard working, the game survives and the radio goes silent. */
+    if (td5_env_flag_on("TD5RE_RADIO_FAULT_TEST")) {
+        /* Address kept in a volatile so the compiler cannot fold it and warn
+         * (-Warray-bounds) about the deliberate bad access. */
+        static volatile ULONG_PTR s_fault_addr = 0x2C1;
+        volatile int *boom = (volatile int *)s_fault_addr;
+        TD5_LOG_W(LOG_TAG, "radio: FAULT TEST -- deliberately faulting the worker");
+        (void)*boom;
+        TD5_LOG_E(LOG_TAG, "radio: FAULT TEST did not fault (unexpected)");
+    }
+#endif
 
     while (!s_stop) {
         IMFSourceReader *reader = NULL;
@@ -197,6 +276,7 @@ static unsigned __stdcall radio_worker(void *arg)
         }
     }
 
+    InterlockedExchange(&s_worker_tid, 0);   /* stop guarding before we unwind */
     CoUninitialize();
     return 0;
 }
@@ -208,7 +288,7 @@ static unsigned __stdcall radio_worker(void *arg)
 static void radio_play(void *user, int track)
 {
     (void)user; (void)track;
-    if (!s_inited) return;
+    if (!s_inited || s_aborted) return;   /* a faulted radio stays off */
     td5_plat_radio_set_playing(1);
     if (!s_thread) {
         InterlockedExchange(&s_stop, 0);
@@ -290,9 +370,13 @@ void td5_radio_init(const char *stream_url, int volume)
     s_backend.now_playing = radio_now_playing;
     s_backend.tick        = radio_tick;
 
+    /* First in the chain, so we see the worker's AV before anything else does.
+     * It no-ops for every thread but the worker (see radio_veh). */
+    if (!s_veh) s_veh = AddVectoredExceptionHandler(1, radio_veh);
+
     s_inited = 1;
-    TD5_LOG_I(LOG_TAG, "radio: initialized url=%s label=%s vol=%d mf=%d",
-              s_url, s_label, s_volume, s_mf_started);
+    TD5_LOG_I(LOG_TAG, "radio: initialized url=%s label=%s vol=%d mf=%d guard=%d",
+              s_url, s_label, s_volume, s_mf_started, s_veh ? 1 : 0);
 }
 
 void td5_radio_shutdown(void)
@@ -315,12 +399,16 @@ void td5_radio_shutdown(void)
         s_thread = NULL;
     }
 
-    if (joined) {
+    /* s_aborted: the worker died inside MF and may have left MF-internal locks
+     * held, so calling MFShutdown() here could hang the exit. Skip teardown for
+     * the same reason the join-timeout path does -- the process is going away. */
+    if (joined && !s_aborted) {
         td5_plat_radio_close();
         if (s_mf_started) { MFShutdown(); s_mf_started = 0; }
     }
+    if (s_veh) { RemoveVectoredExceptionHandler(s_veh); s_veh = NULL; }
     s_inited = 0;
-    TD5_LOG_I(LOG_TAG, "radio: shutdown (joined=%d)", joined);
+    TD5_LOG_I(LOG_TAG, "radio: shutdown (joined=%d aborted=%d)", joined, (int)s_aborted);
 }
 
 const td5_music_backend *td5_radio_get_backend(void)
