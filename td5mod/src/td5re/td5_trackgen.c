@@ -3908,10 +3908,97 @@ static void tg_facade_block(int si, int left, unsigned int *block,
     *avenue = av;
 }
 
+/* ===================== [R8 CROSS item 9] TURN CONTINUATION =====================
+ * "implement 'continuation' of a perpendicular street, where you make a sharp
+ * turn, that turn could be coming from an existing street."
+ *
+ * A generated bend currently leaves the frontage running unbroken around the
+ * outside of the corner, so the road reads as bending in a void: there is no
+ * reason for the turn to be there. A real street grid explains it -- you were on
+ * a street, the street carries straight on, and your route turns off it. So at a
+ * SHARP bend the outside frontage opens and a street runs out of that opening
+ * along the INCOMING heading: the straight you arrived on, continued.
+ *
+ * The whole element is built by MACHINERY THIS AREA ALREADY OWNS. Rather than a
+ * new mesh kind, a turn marks two things:
+ *   1. tg_facade_built returns 0 on the outside of the bend, which is the
+ *      existing definition of a street opening -- so the cross-street
+ *      carriageway, the pavement + railing arms, the pedestrian crossing, the
+ *      reveal row and the R8 flanking massing ALL lay themselves there, already
+ *      agreeing with each other because they read one predicate.
+ *   2. tg_block_arm_skew returns the signed angle from that side's outward
+ *      normal to the incoming tangent, which is the existing hook every one of
+ *      those emitters already routes its outward direction through (it is what
+ *      makes DIAGONAL side streets diagonal). Pointing it at the incoming
+ *      heading is what turns a perpendicular side street into a continuation.
+ * No emitter below is edited for item 9; the two predicates do all of it.
+ *
+ * The map is precomputed once per build (tg_turn_map_build, called from
+ * tg_emit_models) because both predicates are called with a span index and no
+ * node list, and because a per-call rescan would be quadratic.
+ *
+ * BOXING IN. Nothing here touches the carriageway, the strip or the routes: it
+ * only OPENS a frontage (removing mass, never adding it near the road) and
+ * points existing outward-running scenery along a different bearing. Everything
+ * the opening then emits starts at the kerb and runs away from the road, exactly
+ * as an ordinary side street does. Default ON; TD5RE_R8_CROSS_TURN=0 disables. */
+#define TD5_TG_R8_TURN_BASE   3      /* spans either side used to read the bend */
+#define TD5_TG_R8_TURN_SIN 0.34      /* |sin| of the heading change to qualify  */
+#define TD5_TG_R8_TURN_GAP   16      /* min spans between two continuations     */
+
+static signed char s_turn_side[TD5_TG_MAX_SPANS];   /* 0 none, +1 left, -1 right */
+static float       s_turn_skew[TD5_TG_MAX_SPANS];   /* normal -> incoming heading */
+
+static void tg_turn_map_build(const TG_NodeList *nl, int nspans)
+{
+    const int k = TD5_TG_R8_TURN_BASE;
+    int si, last = -TD5_TG_R8_TURN_GAP;
+
+    memset(s_turn_side, 0, sizeof(s_turn_side));
+    memset(s_turn_skew, 0, sizeof(s_turn_skew));
+    if (!td5_env_flag_on("TD5RE_R8_CROSS_TURN")) return;
+    if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
+
+    for (si = k; si < nspans - k; si++) {
+        const TG_Node *a = &nl->v[si - k], *c = &nl->v[si + k];
+        double cross, sg, ux, uz, dot, det;
+        if (si - last < TD5_TG_R8_TURN_GAP) continue;
+        cross = a->tx * c->tz - a->tz * c->tx;
+        if (fabs(cross) < TD5_TG_R8_TURN_SIN) continue;
+        /* A LEFT turn rotates the tangent toward the left normal (tz,-tx), which
+         * makes this cross product NEGATIVE; the continuation belongs on the
+         * OUTSIDE of the bend, so left turn -> right side and vice versa. */
+        sg = (cross < 0.0) ? -1.0 : 1.0;
+        /* Outward unit on that side, and the signed angle from it to the
+         * incoming heading. Reject a bend too shallow for the continuation to
+         * actually leave the road (the street would graze the kerb). */
+        ux = nl->v[si].tz * sg; uz = -nl->v[si].tx * sg;
+        dot = ux * a->tx + uz * a->tz;
+        if (dot < 0.30) continue;
+        det = ux * a->tz - uz * a->tx;
+        s_turn_side[si] = (signed char)(sg > 0.0 ? 1 : -1);
+        s_turn_skew[si] = (float)atan2(det, dot);
+        last = si;
+    }
+}
+
+/* Is span si / side `left` (1 = left of travel) the outside of a sharp bend
+ * that a continuation street runs out of? */
+static int tg_turn_open(int si, int left)
+{
+    if (si <= 0 || si >= TD5_TG_MAX_SPANS) return 0;
+    return s_turn_side[si] == (signed char)(left ? 1 : -1);
+}
+
 static int tg_facade_built(int si, int left)
 {
     unsigned int block, phase, gs, gl;
     int av;
+
+    /* [R8 CROSS item 9] A turn continuation opens the frontage on the outside of
+     * the bend. Placed FIRST so every reader of this predicate -- carriageway,
+     * arms, crossing, reveal row, flanking massing -- sees the same opening. */
+    if (tg_turn_open(si, left)) return 0;
 
     /* Off the near end of the track there is nothing, so span 0 always gets a
      * corner return rather than a wall that starts as a bare edge. */
@@ -8256,6 +8343,16 @@ static int tg_bg_building_box(TG_Buf *blk, size_t *moff, int *nmesh, int maxmesh
     return 1;
 }
 
+/* [R8 CROSS item 1] The reveal row has to know how deep the street it reveals
+ * actually runs, so it can stand BEYOND it instead of across it. Both live
+ * further down with the cross-street code; declared here rather than moved so
+ * the CROSS rewrite does not shuffle another area's emitter. */
+static double tg_city_crossst_reach(const TG_Biome *b, double sw);
+static double tg_xstreet_reach_at(const TG_NodeList *nl, int si, double sg,
+                                  double ang, const TG_Biome *b, double sw);
+static double tg_block_arm_skew(int si, int left);
+static int tg_block_is_park(int si, int left);
+
 static int tg_city_emit_backrows(const TG_FBHook *h, double sw)
 {
     const TG_Biome *b = h->b;
@@ -8304,6 +8401,31 @@ static int tg_city_emit_backrows(const TG_FBHook *h, double sw)
             set = sw + tg_facade_depth(b) * (double)(r + 1)
                 + TD5_TG_BACKROW_GAP * (double)(r + 1)
                 + (double)(rh % 1800u);
+            /* [R8 CROSS item 1] MASSING SETBACK. This row is emitted ONLY on a
+             * span whose frontage is a street opening, i.e. exactly where
+             * tg_city_emit_crossstreet lays a carriageway -- and the setback
+             * above put it one building depth plus one clear gap out, which is
+             * INSIDE that carriageway. The row therefore stood ACROSS the mouth
+             * of the side street, right behind the flanking pavement arm: the
+             * user's "buildings are spawning on the edge of the sidewalks near
+             * the street". It also capped how long the street could ever LOOK,
+             * which is why R7's reach increment did not read as longer.
+             *
+             * A reveal building belongs at the FAR END of the vista it reveals,
+             * terminating the street the way a real block closes a view. Rebase
+             * the setback on the street's own reach, walking outward one whole
+             * block per row from there. What lines the street's FLANKS is
+             * emitted separately (tg_cross_emit_street_flank), so the two halves
+             * of item 1 -- how long the street is and what stands beside it --
+             * are answered by the same model. Park gaps keep the old setback:
+             * a park has no carriageway to stand clear of. */
+            if (td5_env_flag_on("TD5RE_R8_CROSS_REACH") &&
+                !tg_facade_built(h->si, s) && !tg_block_is_park(h->si, s))
+                set = tg_xstreet_reach_at(h->nl, h->si, sg,
+                                          tg_block_arm_skew(h->si, s), b, sw)
+                    + TD5_TG_BACKROW_GAP
+                    + (tg_facade_depth(b) + TD5_TG_BACKROW_GAP) * (double)r
+                    + (double)(rh % 1800u);
             rows = b->floors_min + (int)((rh >> 9) % 5u) + ((gate && av) ? 1 : 0);
             H    = (double)rows * tg_facade_floor_h(b);
 
@@ -8355,6 +8477,12 @@ static double tg_block_arm_skew(int si, int left)
 {
     unsigned int block, phase, gs, gl, h;
     int av;
+    /* [R8 CROSS item 9] At a turn continuation the outward direction is NOT a
+     * random diagonal: it is the heading the road arrived on. Returned ahead of
+     * the block hash (and ahead of the DIAG_CROSS gate, which only governs the
+     * decorative skew) so the carriageway, both pavement arms and the flanking
+     * massing all leave the kerb along that one bearing. */
+    if (tg_turn_open(si, left)) return (double)s_turn_skew[si];
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_DIAG_CROSS")) return 0.0;
     tg_facade_block(si, left, &block, &phase, &gs, &gl, &av);
     h = (block * 2u + (unsigned)(left ? 1 : 0)) * 2654435761u;
@@ -8404,20 +8532,159 @@ static int tg_block_is_park(int si, int left);
  * the main-road end is unchanged -- so it cannot intrude on the carriageway.
  * DEFAULT ON; TD5RE_AUTOTRACK_XLONG=0 restores the one-gap stub. */
 #define TD5_TG_XSTREET_GAPS  2.0
+/* [R8 CROSS item 1] REACH MODEL REWRITE, not another increment of the constant.
+ *
+ * R7 raised TD5_TG_XSTREET_GAPS from 1 to 2 (7100 -> 10300 raw) and the report
+ * came back verbatim: "the street should be much longer (in this and all
+ * crossings)", now paired with "the buildings are spawning on the edge of the
+ * sidewalks near the street". Those are ONE defect, and the constant was never
+ * the cause of either half:
+ *
+ *   - The old expression measured the street against ONE building's depth plus
+ *     N slabs of clear air. That is a SETBACK formula (how far behind the kerb
+ *     does a wall stand), borrowed to answer a different question (how deep does
+ *     a street run). A street's depth is a count of CITY BLOCKS, and a block is
+ *     a building depth PLUS the clear air behind it -- the same quantity the
+ *     back-row emitter already walks outward in. Expressing the reach in whole
+ *     blocks makes "much longer" a number of blocks (3) instead of a magic
+ *     distance, and it makes the street commensurate with the massing beside it.
+ *   - "Buildings on the edge of the sidewalk near the street" is the reveal ROW:
+ *     tg_city_emit_backrows stands its first row at sw + depth + BACKROW_GAP,
+ *     which under the old reach was INSIDE the street and lay ACROSS its mouth.
+ *     Lengthening the carriageway alone would just have produced a longer
+ *     corridor with the same wall across it, which is why R7's increment did not
+ *     read as any longer. The row now terminates the vista PAST the reach (see
+ *     tg_city_emit_backrows), and new massing lines the street's flanks
+ *     (tg_cross_emit_street_flank) instead of blocking it.
+ *
+ * HEIGHT. The old drop extrapolated GROUND_DROP linearly on a 24000 denominator
+ * while the skirt actually falls its full drop over tg_verge_reach() (12000 by
+ * default), so the carriageway floated above the ground it was supposed to lie
+ * on -- harmless at 10300, a visible lift at 19600. tg_xstreet_drop samples the
+ * skirt's real profile and stays FLAT past its outer edge, which is also what
+ * makes a reach beyond the skirt safe to ask for.
+ *
+ * The cap keeps the far end inside the band a fork backdrop is known to render
+ * in (14000-21000 out, R7 CITY item 3), so the street never runs off into
+ * nothing. Everything is purely OUTWARD; the main-road end is untouched, so a
+ * longer street cannot intrude on the carriageway.
+ *
+ * DEFAULT ON; TD5RE_R8_CROSS_REACH=0 restores the R7 two-gap reach (and with it
+ * the R7 drop) for an A/B. */
+#define TD5_TG_R8_XSTREET_BLOCKS  3.0      /* city blocks a side street runs   */
+#define TD5_TG_R8_XSTREET_MAX 21000.0      /* far end stays on rendered ground */
+
+static double tg_xstreet_drop(double d)
+{
+    const double w = tg_verge_reach();
+    if (!td5_env_flag_on("TD5RE_R8_CROSS_REACH"))
+        return TD5_TG_GROUND_DROP * d / TD5_TG_GROUND_WIDTH;
+    if (!(w > 1.0)) return TD5_TG_GROUND_DROP;
+    return TD5_TG_GROUND_DROP * (d < w ? d : w) / w;
+}
+
 static double tg_city_crossst_reach(const TG_Biome *b, double sw)
 {
-    const double gaps = td5_env_flag_on("TD5RE_AUTOTRACK_XLONG")
-                      ? TD5_TG_XSTREET_GAPS : 1.0;
-    return sw + tg_facade_depth(b) + TD5_TG_BACKROW_GAP * gaps;
+    if (td5_env_flag_on("TD5RE_R8_CROSS_REACH")) {
+        const double blk = tg_facade_depth(b) + TD5_TG_BACKROW_GAP;
+        const double r   = sw + blk * TD5_TG_R8_XSTREET_BLOCKS;
+        return r > TD5_TG_R8_XSTREET_MAX ? TD5_TG_R8_XSTREET_MAX : r;
+    }
+    {
+        const double gaps = td5_env_flag_on("TD5RE_AUTOTRACK_XLONG")
+                          ? TD5_TG_XSTREET_GAPS : 1.0;
+        return sw + tg_facade_depth(b) + TD5_TG_BACKROW_GAP * gaps;
+    }
+}
+
+/* [R8 CROSS item 1] SELF-LIMITING REACH. A street is a STRAIGHT ray; the main
+ * road is not. Doubling the reach therefore introduces a failure the short stub
+ * never had: on a bend (and above all around a fork, where tg_carriageway_reach
+ * balloons to cover the branch corridor) a long straight street eventually
+ * re-enters the carriageway of a span further along the track. Measured on seed
+ * 99991 the raw 19500 reach did exactly that at 9 spans, and the R7 on-road
+ * guard dutifully dropped the offending meshes -- safe, but it leaves holes in
+ * the streets and leans on a backstop for something the model can decide itself.
+ *
+ * So the reach is clamped per mouth: step outward along the street's own bearing
+ * and stop short of the first sample that comes within a margin of ANY nearby
+ * span's carriageway. Spans adjacent to the mouth are excluded from the test --
+ * the first few hundred units are always beside their own road by construction,
+ * and clamping on that would collapse every street to nothing. The result is
+ * floored at the R7 reach so a clamp can never ship a street SHORTER than the
+ * one already merged.
+ *
+ * This is also the "cannot box the racing line in" guarantee for both items in
+ * one place: nothing this area emits outward can reach back onto drivable
+ * tarmac, by construction rather than by cleanup. Default ON;
+ * TD5RE_R8_CROSS_CLAMP=0 for an A/B against the raw model reach. */
+#define TD5_TG_R8_CLAMP_STEP    600.0   /* outward sampling step, raw       */
+#define TD5_TG_R8_CLAMP_MARGIN 1400.0   /* clear air kept off any carriageway */
+#define TD5_TG_R8_CLAMP_SKIP       4    /* spans either side excluded        */
+#define TD5_TG_R8_CLAMP_WIN       48    /* spans either side tested          */
+/* Sampling starts OUT HERE, not at the kerb. Measured trap: a point only a few
+ * hundred units off its own kerb is, by construction, within a road width of the
+ * spans just up and down the track, so testing from d=0 clamped EVERY street to
+ * the floor (mean reach 11577 of a modelled 19500, flank blocks 406 -> 230 --
+ * the clamp had quietly cancelled the whole item). Past this distance the ray
+ * has cleared the road corridor on a straight, so anything the test then finds
+ * is a genuine re-entry further along the track. */
+#define TD5_TG_R8_CLAMP_MIN     4200.0
+
+static double tg_xstreet_reach_at(const TG_NodeList *nl, int si, double sg,
+                                  double ang, const TG_Biome *b, double sw)
+{
+    const double r = tg_city_crossst_reach(b, sw);
+    double e[10], ox, oz, floor_r, d;
+    int lo, hi;
+
+    if (!td5_env_flag_on("TD5RE_R8_CROSS_REACH")) return r;
+    if (!td5_env_flag_on("TD5RE_R8_CROSS_CLAMP")) return r;
+
+    floor_r = sw + tg_facade_depth(b) + TD5_TG_BACKROW_GAP * TD5_TG_XSTREET_GAPS;
+    if (floor_r > r) floor_r = r;
+
+    tg_city_edge_frame(nl, si, sg, e);
+    tg_block_rot2(e[6], e[7], ang, &ox, &oz);
+    lo = si - TD5_TG_R8_CLAMP_WIN; if (lo < 0) lo = 0;
+    hi = si + TD5_TG_R8_CLAMP_WIN; if (hi > nl->count - 1) hi = nl->count - 1;
+
+    for (d = TD5_TG_R8_CLAMP_MIN; d <= r; d += TD5_TG_R8_CLAMP_STEP) {
+        const double px = e[0] + ox * d, pz = e[2] + oz * d;
+        double lat, best = 1e300;
+        int i, ni = -1;
+        for (i = lo; i <= hi; i++) {
+            double dx, dz, d2;
+            if (i > si - TD5_TG_R8_CLAMP_SKIP && i < si + TD5_TG_R8_CLAMP_SKIP)
+                continue;
+            dx = px - nl->v[i].x; dz = pz - nl->v[i].z;
+            d2 = dx * dx + dz * dz;
+            if (d2 < best) { best = d2; ni = i; }
+        }
+        if (ni < 0) break;
+        lat = (px - nl->v[ni].x) * nl->v[ni].tz
+            - (pz - nl->v[ni].z) * nl->v[ni].tx;
+        /* The carriageway authority is asked for the side the SAMPLE lands on at
+         * that distant span, not the side the street left from -- a street off a
+         * hairpin can come back at the far span's other lateral. Same rule the
+         * on-road guard applies, so clamp and guard cannot disagree. */
+        {
+            const double lim = tg_carriageway_reach(nl, ni,
+                                   (lat >= 0.0) ? 1.0 : -1.0)
+                             + TD5_TG_R8_CLAMP_MARGIN;
+            if ((lat < 0.0 ? -lat : lat) < lim) {
+                d -= TD5_TG_R8_CLAMP_STEP;     /* last sample known clear */
+                return d < floor_r ? floor_r : d;
+            }
+        }
+    }
+    return r;
 }
 
 static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
 {
     double px[8], py[8], pz[8], uu[8], vv[8];
     double e[10], q[12], t[8];
-    const double reach = tg_city_crossst_reach(h->b, sw);
-    const double drop  = TD5_TG_GROUND_DROP * reach / TD5_TG_GROUND_WIDTH;
-    const double u_r   = reach / (double)TD5_TG_LANE_WIDTH;
     /* [R4 CROSS item 9] Perpendicular lane markings: swap in the cross-street
      * page whose centre line runs DOWN the street (see tg_emit_texture_page_r4_cross).
      * Default ON; TD5RE_AUTOTRACK_CROSS_MARKINGS=0 restores the biome road page. */
@@ -8433,7 +8700,7 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
         const double sg = s ? 1.0 : -1.0;
         /* Only where THIS kerb is open. On an avenue both are, and the two
          * quads plus the crossing between them make one crossroads. */
-        double ang, nox, noz, fox, foz;
+        double ang, nox, noz, fox, foz, reach, drop, u_r;
         if (tg_facade_built(h->si, s)) continue;
         if (tg_block_is_park(h->si, s)) continue;   /* a park, not a through st */
         if (tg_side_blocked(h->si, sg)) continue;
@@ -8442,6 +8709,12 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
         /* Skew the outward edge (item 3 diagonal). Both ends rotate by the same
          * per-gap angle, so the carriageway leans as one straight street. */
         ang = tg_block_arm_skew(h->si, s);
+        /* [R8] Reach is now PER SIDE: the clamp depends on this side's bearing
+         * and on how the road curves away from it, so the two kerbs of an
+         * avenue can legitimately stop at different depths. */
+        reach = tg_xstreet_reach_at(h->nl, h->si, sg, ang, h->b, sw);
+        drop  = tg_xstreet_drop(reach);
+        u_r   = reach / (double)TD5_TG_LANE_WIDTH;
         tg_block_rot2(e[6], e[7], ang, &nox, &noz);
         tg_block_rot2(e[8], e[9], ang, &fox, &foz);
 
@@ -8774,7 +9047,7 @@ static int tg_block_emit_arm(const TG_FBHook *h,
                              double reach, double sw)
 {
     double px[8], py[8], pz[8], uu[8], vv[8], q[12], t[8];
-    const double drop = TD5_TG_GROUND_DROP * reach / TD5_TG_GROUND_WIDTH;
+    const double drop = tg_xstreet_drop(reach);    /* [R8] matches the street */
     const double ur = reach / (double)TD5_TG_SPAN_LENGTH;
     const double uw = sw / (double)TD5_TG_SPAN_LENGTH;
     const double back = (sw * 0.35 < TD5_TG_ARM_SET) ? sw * 0.35 : TD5_TG_ARM_SET;
@@ -8855,7 +9128,19 @@ static int tg_block_emit_intersection(const TG_FBHook *h)
     if (tg_span_in_bridge_run(h->si)) return 1;
     if (td5_env_flag_on("TD5RE_AUTOTRACK_XBRIDGE_GATE") &&   /* item 15 */
         tg_span_near_bridge(h->si, TD5_TG_XBRIDGE_CLEAR)) return 1;
-    if (tg_branches_enabled() && tg_span_in_fork_clear(h->si)) return 1;
+    /* [R8 CROSS, carried-in open item] "8 side-street mouths inside forks lack
+     * flanking pavement." This blanket return was the cause and it was never
+     * matched by the emitter it flanks: tg_city_emit_crossstreet gates on
+     * tg_side_blocked ALONE, which suppresses only the side a fork corridor
+     * actually eats (side < 0). So inside a fork-clear region the carriageway
+     * was still laid on the untouched side while its pavement + railing arms
+     * were dropped for BOTH sides -- a street with no kerbs, which is exactly
+     * the reported symptom. Dropping the blanket gate leaves the per-side
+     * tg_side_blocked test in the loop below as the single authority, so the two
+     * emitters now agree span for span on where a junction exists.
+     * TD5RE_R8_CROSS_FORKARM=0 restores the blanket fork drop for an A/B. */
+    if (tg_branches_enabled() && tg_span_in_fork_clear(h->si) &&
+        !td5_env_flag_on("TD5RE_R8_CROSS_FORKARM")) return 1;
 
     for (s = 0; s < 2; s++) {
         const double sg = s ? 1.0 : -1.0;
@@ -8870,8 +9155,10 @@ static int tg_block_emit_intersection(const TG_FBHook *h)
         if (!near_corner && !far_corner) continue;    /* gap interior */
 
         tg_city_edge_frame(h->nl, h->si, sg, e);
-        reach = tg_city_crossst_reach(h->b, sw);
         ang   = tg_block_arm_skew(h->si, s);
+        /* [R8] Same per-side clamped reach the carriageway uses, so a pavement
+         * arm can never outrun (or fall short of) the street it flanks. */
+        reach = tg_xstreet_reach_at(h->nl, h->si, sg, ang, h->b, sw);
         /* Along-road unit, near -> far. */
         ax = e[3] - e[0]; az = e[5] - e[2];
         alen = sqrt(ax * ax + az * az);
@@ -9298,6 +9585,203 @@ static int tg_cross_emit_join_zebra(const TG_FBHook *h)
     return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
 }
 
+/* [R8 CROSS item 1] MASSING BESIDE THE STREET -- the other half of the reach
+ * rewrite. Lengthening the carriageway alone gives a long strip of asphalt with
+ * blank ground down both sides, which does not read as a street either; and the
+ * only massing that used to acknowledge a side street at all was the reveal row,
+ * which stood ACROSS its mouth (see tg_city_emit_backrows). So a street now gets
+ * a proper FRONTAGE: blocks standing back from its pavement arms, running out
+ * along the street at block spacing, on the side streets' own flanks.
+ *
+ * Placement is derived from the pieces that already define the street, not from
+ * new constants: the corner point and the outward bearing come from the same
+ * tg_city_edge_frame + tg_block_arm_skew the carriageway and the arms use, the
+ * lateral setback clears the arm pavement (sw) by a margin, the first block
+ * starts past the MAIN-road frontage's own depth so the two never interpenetrate,
+ * and the run stops at the street's reach so nothing stands beyond the street it
+ * lines. Because the setback is measured from the arm pavement's BACK edge, no
+ * block can land "on the edge of the sidewalk".
+ *
+ * Cheap by construction (tg_bg_building_box, one page, no storefronts, no corner
+ * returns): these are only ever seen down a street. About a quarter of slots are
+ * left empty as yards so a street is not a solid canyon. Default ON, and paired
+ * with the reach model -- TD5RE_R8_CROSS_FLANK=0 (or the reach knob off) removes
+ * it for an A/B. */
+#define TD5_TG_R8_FLANK_LEN   4200.0   /* one flanking block along the street */
+#define TD5_TG_R8_FLANK_ALLEY 1700.0   /* service gap between two of them     */
+#define TD5_TG_R8_FLANK_SET    420.0   /* clear air behind the arm pavement   */
+
+static int tg_cross_emit_street_flank(const TG_FBHook *h)
+{
+    const TG_Biome *b = h->b;
+    const double sw = tg_city_sidewalk_w(b);
+    double e[10];
+    int s;
+
+    if (!(sw > 0.0)) return 1;
+    if (!td5_env_flag_on("TD5RE_R8_CROSS_REACH")) return 1;   /* model pair */
+    if (!td5_env_flag_on("TD5RE_R8_CROSS_FLANK")) return 1;
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_INTERSECTIONS")) return 1;
+    if (tg_span_in_bridge_run(h->si)) return 1;
+    if (td5_env_flag_on("TD5RE_AUTOTRACK_XBRIDGE_GATE") &&
+        tg_span_near_bridge(h->si, TD5_TG_XBRIDGE_CLEAR)) return 1;
+    if (h->si + 1 >= h->nl->count) return 1;
+
+    for (s = 0; s < 2; s++) {
+        const double sg = s ? 1.0 : -1.0;
+        const double depth = tg_facade_depth(b);
+        const double d0 = sw + depth + TD5_TG_BACKROW_GAP * 0.5;
+        double ang, ax, az, alen, reach;
+        int near_corner, far_corner, c;
+
+        if (tg_facade_built(h->si, s)) continue;      /* built = no street */
+        if (tg_block_is_park(h->si, s)) continue;
+        if (tg_side_blocked(h->si, sg)) continue;
+        near_corner = tg_facade_built(h->si - 1, s);
+        far_corner  = tg_facade_built(h->si + 1, s);
+        if (!near_corner && !far_corner) continue;    /* gap interior */
+
+        tg_city_edge_frame(h->nl, h->si, sg, e);
+        ang = tg_block_arm_skew(h->si, s);
+        reach = tg_xstreet_reach_at(h->nl, h->si, sg, ang, b, sw);
+        ax = e[3] - e[0]; az = e[5] - e[2];
+        alen = sqrt(ax * ax + az * az);
+        if (alen < 1e-6) continue;
+        ax /= alen; az /= alen;
+
+        for (c = 0; c < 2; c++) {
+            double cx, cy, cz, ox, oz, bx, bz, d;
+            int k;
+
+            if (c == 0) {
+                if (!near_corner) continue;
+                cx = e[0]; cy = e[1]; cz = e[2];
+                tg_block_rot2(e[6], e[7], ang, &ox, &oz);
+                bx = -ax; bz = -az;          /* back into the block before it */
+            } else {
+                if (!far_corner) continue;
+                cx = e[3]; cy = e[4]; cz = e[5];
+                tg_block_rot2(e[8], e[9], ang, &ox, &oz);
+                bx = ax; bz = az;            /* back into the block after it  */
+            }
+
+            for (k = 0, d = d0;
+                 d + TD5_TG_R8_FLANK_LEN <= reach;
+                 k++, d += TD5_TG_R8_FLANK_LEN + TD5_TG_R8_FLANK_ALLEY) {
+                const unsigned int rh = ((unsigned)h->si * 2654435761u
+                                       + (unsigned)s * 40503u
+                                       + (unsigned)c * 2246822519u
+                                       + (unsigned)k * 668265263u);
+                const double set = sw + TD5_TG_R8_FLANK_SET;
+                double y0, H, bxp, byp, bzp;
+                int rows, cols, page;
+
+                if ((rh >> 30) == 0u) continue;      /* ~25% left as a yard */
+                rows = b->floors_min + (int)((rh >> 9) % 4u);
+                H    = (double)rows * tg_facade_floor_h(b);
+                y0   = cy + TD5_TG_KERB_H - tg_xstreet_drop(d);
+                bxp  = cx + ox * d + bx * set;
+                byp  = y0;
+                bzp  = cz + oz * d + bz * set;
+                cols = tg_facade_cols_for(TD5_TG_R8_FLANK_LEN,
+                                          (double)b->cell_w, 4);
+                page = tg_facade_page_class(rh, rows);
+                if (!tg_bg_building_box(h->blk, h->moff, h->nmesh, h->maxmesh,
+                                        bxp, byp, bzp,
+                                        ox * TD5_TG_R8_FLANK_LEN, 0.0,
+                                        oz * TD5_TG_R8_FLANK_LEN,
+                                        bx, bz, bx, bz,
+                                        depth, H, cols, rows, page, 1, h->si))
+                    return 0;
+                tg_acct(TG_ACCT_R8_CROSS, h->si);
+            }
+        }
+    }
+    return 1;
+}
+
+/* [R8 CROSS] CLASS-LEVEL REPORT. "in this and all crossings" makes the CLASS the
+ * acceptance test, and a frame proves one mouth at one span. Every quantity this
+ * round changes is a deterministic function of the span index, so the whole class
+ * can be enumerated instead of photographed: one line per side-street MOUTH with
+ * its reach, whether its flanking pavement arms are laid, whether it sits inside
+ * a fork corridor, whether it is a turn continuation, how many flanking blocks
+ * line it, and how far back the reveal row now stands. A sweep is then a log
+ * parse over both seeds rather than a pile of screenshots.
+ *
+ * Read-only: it emits nothing and calls only predicates. TD5RE_R8_CROSS_REPORT=1
+ * to enable (off by default -- it is one line per mouth). */
+static void tg_r8_cross_report(const TG_NodeList *nl, int nspans)
+{
+    int si, s;
+    int mouths = 0, armed = 0, forkm = 0, fork_armed = 0, turns = 0, flanks = 0;
+    double rmin = 1e30, rmax = -1e30, rsum = 0.0;
+
+    if (!td5_env_int("TD5RE_R8_CROSS_REPORT", 0, 0, 1)) return;
+    if (nspans > nl->count - 1) nspans = nl->count - 1;
+
+    TD5_LOG_I(LOG_TAG, "trackgen: ---- r8cross mouth sweep ----");
+    for (si = 1; si < nspans; si++) {
+        const TG_Biome *b = &k_biomes[tg_scenery_biome_index(si)];
+        const double sw = tg_city_sidewalk_w(b);
+        if (!(sw > 0.0)) continue;              /* no facades, no side streets */
+        if (tg_span_in_bridge_run(si)) continue;
+        for (s = 0; s < 2; s++) {
+            const double sg = s ? 1.0 : -1.0;
+            double reach;
+            int fork, arms, turn, nflank, corner;
+            if (tg_facade_built(si, s)) continue;        /* frontage, not a gap */
+            if (tg_block_is_park(si, s)) continue;
+            if (tg_side_blocked(si, sg)) continue;
+            if (td5_env_flag_on("TD5RE_AUTOTRACK_XBRIDGE_GATE") &&
+                tg_span_near_bridge(si, TD5_TG_XBRIDGE_CLEAR)) continue;
+            corner = tg_facade_built(si - 1, s) || tg_facade_built(si + 1, s);
+            if (!corner) continue;              /* gap interior: not a mouth */
+
+            reach = tg_xstreet_reach_at(nl, si, sg,
+                                        tg_block_arm_skew(si, s), b, sw);
+            fork  = tg_branches_enabled() && tg_span_in_fork_clear(si);
+            turn  = tg_turn_open(si, s);
+            /* Arms are laid unless the (now per-side) fork gate stops them. */
+            arms  = !(fork && !td5_env_flag_on("TD5RE_R8_CROSS_FORKARM"));
+            {   /* Flanking blocks that fit between the first station and the
+                 * reach, per corner -- the same walk tg_cross_emit_street_flank
+                 * makes, so the report cannot drift from the emitter. */
+                const double d0 = sw + tg_facade_depth(b)
+                                + TD5_TG_BACKROW_GAP * 0.5;
+                double d;
+                nflank = 0;
+                for (d = d0; d + TD5_TG_R8_FLANK_LEN <= reach;
+                     d += TD5_TG_R8_FLANK_LEN + TD5_TG_R8_FLANK_ALLEY)
+                    nflank++;
+                if (tg_facade_built(si - 1, s) && tg_facade_built(si + 1, s))
+                    nflank *= 2;                /* both corners build a flank */
+            }
+            mouths++;
+            if (arms) armed++;
+            if (fork) { forkm++; if (arms) fork_armed++; }
+            if (turn) turns++;
+            flanks += nflank;
+            rsum += reach;
+            if (reach < rmin) rmin = reach;
+            if (reach > rmax) rmax = reach;
+            TD5_LOG_I(LOG_TAG,
+                "trackgen:   r8cross mouth si=%d side=%s reach=%.0f arms=%d "
+                "fork=%d turn=%d flank=%d row=%.0f",
+                si, s ? "L" : "R", reach, arms, fork, turn, nflank,
+                td5_env_flag_on("TD5RE_R8_CROSS_REACH")
+                    ? reach + TD5_TG_BACKROW_GAP
+                    : sw + tg_facade_depth(b) + TD5_TG_BACKROW_GAP);
+        }
+    }
+    TD5_LOG_I(LOG_TAG,
+        "trackgen: r8cross SUMMARY mouths=%d armed=%d fork_mouths=%d "
+        "fork_armed=%d turns=%d flank_blocks=%d reach min/mean/max=%.0f/%.0f/%.0f",
+        mouths, armed, forkm, fork_armed, turns, flanks,
+        mouths ? rmin : 0.0, mouths ? rsum / (double)mouths : 0.0,
+        mouths ? rmax : 0.0);
+}
+
 /* Group CROSS dispatcher (feedback R4 items 10, 14; R5 items 2, 3, 4, 12).
  * Wired into the scenery loop next to tg_emit_fb_block; city spans only.
  * R5 item 3 removed the raised kerb break that used to run here. */
@@ -9306,6 +9790,7 @@ static int tg_emit_fb_cross(const TG_FBHook *h)
     if (!tg_city_span_paved(h)) return 1;      /* only where the city is */
     if (!tg_cross_emit_sidewalls(h)) return 0;
     if (!tg_cross_emit_join_zebra(h)) return 0;
+    if (!tg_cross_emit_street_flank(h)) return 0;   /* [R8 CROSS item 1] */
     return 1;
 }
 
@@ -10495,6 +10980,12 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
 
     s_guard_rejects = 0;   /* [R7 GUARD] per-build tally, reported below */
     s_guard_residual = 0;
+    /* [R8 CROSS item 9] Sharp-bend map, built ONCE per generation: the two
+     * predicates that carry the continuation (tg_facade_built, tg_block_arm_skew)
+     * take a span index and no node list, and a per-call rescan would be
+     * quadratic in the span count. Must precede the first facade query. */
+    tg_turn_map_build(nl, nspans);
+    tg_r8_cross_report(nl, nspans);   /* [R8 CROSS] class sweep, opt-in */
 
     for (e = 0; e < nentries && ok; e++) {
         const int s0 = e * TD5_TG_SPANS_PER_ENTRY;
