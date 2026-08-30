@@ -1014,6 +1014,19 @@ static const char *const k_rail_class[TG_RAIL_CLASS_COUNT] = {
  * speaks (see the side loops). */
 static unsigned char s_rail_edge[TD5_TG_MAX_SPANS][2];
 
+/* [si][side] = 1 where the ROUND-8 roadside emitter would have railed, i.e.
+ * every edge that passed all of tg_emit_guardrail's own gates before ownership
+ * was considered. This is the baseline for the SAFETY half of the invariant.
+ *
+ * Why it has to be recorded rather than derived: the first version of this fix
+ * reported only the doubling, and "no rail was removed" was then argued from
+ * class totals (roadside fell by 726, doubled was 696). That arithmetic hid 30
+ * edges which had a roadside rail ALONE and ended up with none, because the
+ * roadside yielded to a kerb railing that never ran on a corridor span. A total
+ * going DOWN is no more evidence of correct removal than a total going up is of
+ * correct placement, so the safety property is now measured directly. */
+static unsigned char s_rail_would[TD5_TG_MAX_SPANS][2];
+
 static void tg_rail_edge_note(TG_RailClass c, int si, double lateral_sign)
 {
     if ((unsigned)c >= TG_RAIL_CLASS_COUNT) return;
@@ -1021,61 +1034,10 @@ static void tg_rail_edge_note(TG_RailClass c, int si, double lateral_sign)
     s_rail_edge[si][lateral_sign >= 0.0 ? 0 : 1] |= (unsigned char)(1u << c);
 }
 
-/* Number of edges carrying more than one rail class, with the offenders named.
- * Returns that count so a caller can assert on it. */
-static int tg_rail_edge_report(int nspans)
+static void tg_rail_edge_would(int si, double lateral_sign)
 {
-    long own[TG_RAIL_CLASS_COUNT];
-    long pair[TG_RAIL_CLASS_COUNT][TG_RAIL_CLASS_COUNT];
-    char first[240];
-    int si, s, a, b, dup = 0, pos = 0, nlisted = 0;
-
-    memset(own, 0, sizeof(own));
-    memset(pair, 0, sizeof(pair));
-    first[0] = '\0';
-    if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
-
-    for (si = 0; si < nspans; si++)
-        for (s = 0; s < 2; s++) {
-            const unsigned m = s_rail_edge[si][s];
-            int n = 0;
-            for (a = 0; a < TG_RAIL_CLASS_COUNT; a++)
-                if (m & (1u << a)) { own[a]++; n++; }
-            if (n < 2) continue;
-            dup++;
-            /* Full dump, opt-in. The capped "first:" list below is enough to see
-             * that a doubling EXISTS; naming the span the USER named needs every
-             * offender printed, so TD5RE_R9_RAILFIX_REPORT=1 prints them all. */
-            if (td5_env_flag_off("TD5RE_R9_RAILFIX_REPORT"))
-                TD5_LOG_I(LOG_TAG, "trackgen:   dup-edge si=%d side=%s%s%s%s",
-                          si, s ? "R" : "L",
-                          (m & (1u << TG_RAIL_ROADSIDE))   ? " roadside"   : "",
-                          (m & (1u << TG_RAIL_DECK))       ? " deck"       : "",
-                          (m & (1u << TG_RAIL_KERBFENCE))  ? " kerb-fence" : "");
-            for (a = 0; a < TG_RAIL_CLASS_COUNT; a++)
-                for (b = a + 1; b < TG_RAIL_CLASS_COUNT; b++)
-                    if ((m & (1u << a)) && (m & (1u << b))) pair[a][b]++;
-            if (nlisted < 12 && pos < (int)sizeof(first) - 24) {
-                pos += snprintf(first + pos, sizeof(first) - (size_t)pos,
-                                "%s%d%s", nlisted ? " " : "", si, s ? "R" : "L");
-                nlisted++;
-            }
-        }
-
-    TD5_LOG_I(LOG_TAG,
-              "trackgen: ---- rail-edge uniqueness (%d spans, %d edges) ----",
-              nspans, nspans * 2);
-    for (a = 0; a < TG_RAIL_CLASS_COUNT; a++)
-        TD5_LOG_I(LOG_TAG, "trackgen:   %-11s edges=%ld",
-                  k_rail_class[a], own[a]);
-    TD5_LOG_I(LOG_TAG, "trackgen:   DOUBLED edges=%d%s%s", dup,
-              nlisted ? "  first: " : "", nlisted ? first : "");
-    for (a = 0; a < TG_RAIL_CLASS_COUNT; a++)
-        for (b = a + 1; b < TG_RAIL_CLASS_COUNT; b++)
-            if (pair[a][b])
-                TD5_LOG_I(LOG_TAG, "trackgen:     %s + %s = %ld edges",
-                          k_rail_class[a], k_rail_class[b], pair[a][b]);
-    return dup;
+    if (si < 0 || si >= TD5_TG_MAX_SPANS) return;
+    s_rail_would[si][lateral_sign >= 0.0 ? 0 : 1] = 1;
 }
 
 static void tg_acct_reset(void)
@@ -1083,6 +1045,7 @@ static void tg_acct_reset(void)
     memset(s_acct_count, 0, sizeof(s_acct_count));
     memset(s_acct_mask,  0, sizeof(s_acct_mask));
     memset(s_rail_edge,  0, sizeof(s_rail_edge));
+    memset(s_rail_would, 0, sizeof(s_rail_would));
     memset(s_var_id,    0, sizeof(s_var_id));
     memset(s_var_hits,  0, sizeof(s_var_hits));
     memset(s_var_n,     0, sizeof(s_var_n));
@@ -7961,6 +7924,146 @@ static int tg_rail_deck_here(const TG_NodeList *nl, int si)
     return tg_span_is_bridge_deck(nl, si);
 }
 
+/* FROZEN round-8 coverage rule, used ONLY as the report's baseline.
+ *
+ * Deliberately a SECOND COPY of the live rule rather than a call into it, which
+ * is the opposite of this file's usual policy and is the right call here: a
+ * baseline that tracks the code under test cannot detect a regression in that
+ * code. That is not hypothetical -- the first version of this instrument
+ * recorded its baseline as a side effect of the guardrail emitter running, so
+ * when a draft added a SPAN-LEVEL gate that suppressed the emitter, the baseline
+ * fell with it (1178 -> 830) and the zero-rail counter read a false 0 while 30
+ * edges really had lost their only rail. A baseline must be independent of the
+ * path it is judging.
+ *
+ * Span-level, not per-side: the question it answers is "did this span end up
+ * with NO barrier at all", which is the safety property. Mirrors the round-8
+ * tg_span_needs_guardrail: tunnel exclusion, then dilation over the bridge-run /
+ * elevation / bend rules. */
+static int tg_rail_r8_baseline_raw(const TG_NodeList *nl, int si)
+{
+    double cross, dot, ang_deg;
+    if (si < 1 || si + 2 >= nl->count) return 0;
+    if (tg_span_in_tunnel(si)) return 0;
+    if (tg_span_in_bridge_run(si)) return 1;
+    if (nl->v[si].y - tg_local_ground_y(nl, si) >= TD5_TG_BRIDGE_MIN_LIFT)
+        return 1;
+    cross = nl->v[si].tx * nl->v[si + 1].tz - nl->v[si].tz * nl->v[si + 1].tx;
+    dot   = nl->v[si].tx * nl->v[si + 1].tx + nl->v[si].tz * nl->v[si + 1].tz;
+    ang_deg = atan2(fabs(cross), dot) * 180.0 / TD5_TG_PI;
+    return (ang_deg * 10.0) >=
+           (double)td5_env_int("TD5RE_AUTOTRACK_RAIL_DEG10", 50, 0, 900);
+}
+
+static int tg_rail_r8_baseline(const TG_NodeList *nl, int si)
+{
+    const int pad = td5_env_int("TD5RE_AUTOTRACK_RAIL_PAD", 3, 0, 16);
+    int k;
+    if (tg_span_in_tunnel(si)) return 0;
+    for (k = -pad; k <= pad; k++)
+        if (tg_rail_r8_baseline_raw(nl, si + k)) return 1;
+    return 0;
+}
+
+/* Number of edges carrying more than one rail class, with the offenders named.
+ * Returns doubled + zero-rail regressions, i.e. every violation of "exactly one
+ * rail per edge", so a caller can assert on a single number. */
+static int tg_rail_edge_report(const TG_NodeList *nl, int nspans)
+{
+    long own[TG_RAIL_CLASS_COUNT];
+    long pair[TG_RAIL_CLASS_COUNT][TG_RAIL_CLASS_COUNT];
+    char first[240], zfirst[240];
+    int si, s, a, b, dup = 0, pos = 0, nlisted = 0;
+    int zero = 0, zpos = 0, zlisted = 0;
+    long would = 0, railed = 0;
+
+    memset(own, 0, sizeof(own));
+    memset(pair, 0, sizeof(pair));
+    first[0] = '\0';
+    zfirst[0] = '\0';
+    if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
+
+    for (si = 0; si < nspans; si++)
+        for (s = 0; s < 2; s++) {
+            const unsigned m = s_rail_edge[si][s];
+            int n = 0;
+            for (a = 0; a < TG_RAIL_CLASS_COUNT; a++)
+                if (m & (1u << a)) { own[a]++; n++; }
+            if (n > 0) railed++;
+            if (s_rail_would[si][s]) would++;
+            /* SAFETY HALF OF THE INVARIANT, judged against the FROZEN round-8
+             * baseline rather than against anything this build recorded. The
+             * round-8 rules said this span must carry a barrier, and it now
+             * carries none on this edge. */
+            if (n == 0 && tg_rail_r8_baseline(nl, si)) {
+                zero++;
+                if (zlisted < 12 && zpos < (int)sizeof(zfirst) - 24) {
+                    zpos += snprintf(zfirst + zpos,
+                                     sizeof(zfirst) - (size_t)zpos, "%s%d%s",
+                                     zlisted ? " " : "", si, s ? "R" : "L");
+                    zlisted++;
+                }
+                if (td5_env_flag_off("TD5RE_R9_RAILFIX_REPORT"))
+                    TD5_LOG_I(LOG_TAG,
+                              "trackgen:   ZERO-RAIL si=%d side=%s (r8 baseline "
+                              "wanted a barrier, nothing stands)",
+                              si, s ? "R" : "L");
+            }
+            if (n < 2) continue;
+            dup++;
+            /* Full dump, opt-in. The capped "first:" list below is enough to see
+             * that a doubling EXISTS; naming the span the USER named needs every
+             * offender printed, so TD5RE_R9_RAILFIX_REPORT=1 prints them all. */
+            if (td5_env_flag_off("TD5RE_R9_RAILFIX_REPORT"))
+                TD5_LOG_I(LOG_TAG, "trackgen:   dup-edge si=%d side=%s%s%s%s",
+                          si, s ? "R" : "L",
+                          (m & (1u << TG_RAIL_ROADSIDE))   ? " roadside"   : "",
+                          (m & (1u << TG_RAIL_DECK))       ? " deck"       : "",
+                          (m & (1u << TG_RAIL_KERBFENCE))  ? " kerb-fence" : "");
+            for (a = 0; a < TG_RAIL_CLASS_COUNT; a++)
+                for (b = a + 1; b < TG_RAIL_CLASS_COUNT; b++)
+                    if ((m & (1u << a)) && (m & (1u << b))) pair[a][b]++;
+            if (nlisted < 12 && pos < (int)sizeof(first) - 24) {
+                pos += snprintf(first + pos, sizeof(first) - (size_t)pos,
+                                "%s%d%s", nlisted ? " " : "", si, s ? "R" : "L");
+                nlisted++;
+            }
+        }
+
+    TD5_LOG_I(LOG_TAG,
+              "trackgen: ---- rail-edge uniqueness (%d spans, %d edges) ----",
+              nspans, nspans * 2);
+    for (a = 0; a < TG_RAIL_CLASS_COUNT; a++)
+        TD5_LOG_I(LOG_TAG, "trackgen:   %-11s edges=%ld",
+                  k_rail_class[a], own[a]);
+    TD5_LOG_I(LOG_TAG, "trackgen:   railed edges=%ld", railed);
+    /* THE INVARIANT, both halves, side by side. Exactly one rail per edge means
+     * never two AND never zero; either number alone proves nothing. */
+    TD5_LOG_I(LOG_TAG, "trackgen:   DOUBLED edges=%d%s%s", dup,
+              nlisted ? "  first: " : "", nlisted ? first : "");
+    for (a = 0; a < TG_RAIL_CLASS_COUNT; a++)
+        for (b = a + 1; b < TG_RAIL_CLASS_COUNT; b++)
+            if (pair[a][b])
+                TD5_LOG_I(LOG_TAG, "trackgen:     %s + %s = %ld edges",
+                          k_rail_class[a], k_rail_class[b], pair[a][b]);
+    TD5_LOG_I(LOG_TAG, "trackgen:   ZERO-RAIL regressions=%d%s%s", zero,
+              zlisted ? "  first: " : "", zlisted ? zfirst : "");
+    /* RECONCILIATION. The yield counter and the roadside delta are recorded at
+     * the SAME point in the same loop, so these must balance exactly:
+     *   would = roadside-now + yielded.
+     * A non-zero residual means the yield is not the set of edges the roadside
+     * actually gave up, which is what an earlier version of this report got
+     * wrong (690 counted against 726 real losses). */
+    TD5_LOG_I(LOG_TAG,
+              "trackgen:   roadside would=%ld now=%ld yielded=%ld residual=%ld",
+              would, own[TG_RAIL_ROADSIDE],
+              s_acct_count[TG_ACCT_R9_RAILYIELD],
+              would - own[TG_RAIL_ROADSIDE]
+                    - s_acct_count[TG_ACCT_R9_RAILYIELD]);
+    return dup + zero;
+}
+
+
 /* Base offset of the parapet FOOT relative to the deck surface, and its height.
  * [R5 item 17b] Was +40 (parapet floated 40u above the deck); with the deck
  * kerb only reaching deck level that left a thin open slot at the barrier foot
@@ -9400,14 +9503,28 @@ static int tg_span_needs_guardrail_raw(const TG_NodeList *nl, int si, int nspans
      * to be railed by this test is a span the parapet rails instead. Spans
      * outside the parapet pass (fork pads, branch corridors) are NOT excluded --
      * see tg_rail_deck_here for why that distinction is the whole point. */
-    if (!tg_railfix_on()) {
-        /* A/B: the two round-8 rules, verbatim. */
-        if (tg_span_in_bridge_run(si)) return 1;
-        if (nl->v[si].y - tg_local_ground_y(nl, si) >= TD5_TG_BRIDGE_MIN_LIFT)
-            return 1;
-    } else if (tg_rail_deck_here(nl, si)) {
+    /* These two rules are UNCHANGED from round 8 and stay that way ON PURPOSE.
+     * The first attempt at this fix excluded decks HERE, at span level, which
+     * mixed two jobs into one predicate: "should this span carry a barrier at
+     * all" and "which treatment owns each of its two edges". Those are different
+     * questions -- the first is per SPAN, the second per SIDE -- and merging
+     * them cost the safety property: a span whose two edges are owned
+     * differently cannot be described by one span-level answer, and an edge
+     * whose owner never actually emits ended up with nothing.
+     *
+     * So this stays the round-8 coverage question, and it is also the BASELINE
+     * the zero-rail invariant is measured against. Ownership is decided per side
+     * in tg_emit_guardrail, where the yield can be counted at the same point it
+     * is taken.
+     *
+     * TD5RE_R9_RAILFIX_SPANDECK=1 restores the draft's span-level exclusion, as
+     * a regression probe for the ZERO-RAIL counter. Keep it: the failure it
+     * reproduces is not obvious from reading the code. */
+    if (td5_env_flag_off("TD5RE_R9_RAILFIX_SPANDECK") && tg_rail_deck_here(nl, si))
         return 0;
-    }
+    if (tg_span_in_bridge_run(si)) return 1;
+    if (nl->v[si].y - tg_local_ground_y(nl, si) >= TD5_TG_BRIDGE_MIN_LIFT)
+        return 1;
 
     /* Bend: heading change across this span, in tenths of a degree. */
     cross = nl->v[si].tx * nl->v[si + 1].tz - nl->v[si].tz * nl->v[si + 1].tx;
@@ -9438,12 +9555,10 @@ static int tg_span_needs_guardrail(const TG_NodeList *nl, int si, int nspans)
      * satisfied the test: dilating a rail into a tunnel is exactly what that
      * exclusion exists to prevent. */
     if (tg_span_in_tunnel(si)) return 0;
-    /* [R9 RAILFIX] Same reasoning for the deck: the pad is +/-3 spans, so
-     * without this re-check the three spans either side of every bridge run
-     * would smear a roadside rail onto the parapet's edges -- reintroducing the
-     * doubling at the run ends, which is exactly where the user was looking
-     * (span 1191 sits in run 1160-1199). */
-    if (tg_railfix_on() && tg_rail_deck_here(nl, si)) return 0;
+    /* [R9 RAILFIX] NO deck exclusion here any more -- see the note in
+     * tg_span_needs_guardrail_raw. Dilation may well pull a rail onto a deck
+     * span; the per-side ownership test in tg_emit_guardrail drops it there, and
+     * drops it only where the parapet really stands. */
 
     for (k = -pad; k <= pad; k++)
         if (tg_span_needs_guardrail_raw(nl, si + k, nspans)) return 1;
@@ -9561,12 +9676,25 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk,
          * because dropping the railing instead would leave crash barrier
          * standing in the middle of a city footway. Per SIDE, not per span: a
          * bend with a pavement on one side only keeps its armco on the other. */
-        if (tg_railfix_on() && tg_rail_kerbfence_here(si, s)) {
+        /* [R9 RAILFIX] Past every gate above, the ROUND-8 emitter would have put
+         * a rail on this edge. Record that BEFORE deciding whether to yield: it
+         * is the baseline the safety invariant is measured against ("did any
+         * edge that had a rail end up with none?"), and recording it at the same
+         * single point where the yield is decided is what makes the two numbers
+         * reconcile by construction instead of by argument. */
+        tg_rail_edge_would(si, s);
+
+        /* OWNERSHIP, decided here and ONLY here, per side. Both predicates
+         * answer "does that emitter actually run on this edge" -- see the ring
+         * gate in each. If NEITHER claims it, the roadside rail stands: an edge
+         * must never end up with zero rails, which is the other half of the
+         * invariant and the half a doubling fix is most likely to break. */
+        if (tg_railfix_on() &&
+            (tg_rail_deck_here(nl, si) || tg_rail_kerbfence_here(si, s))) {
             tg_acct(TG_ACCT_R9_RAILYIELD, si);
             continue;
         }
-        /* [R9 RAILFIX] Claim this road edge: past every gate above, this side
-         * is now committed to geometry. */
+        /* Claim this road edge: this side is now committed to geometry. */
         tg_rail_edge_note(TG_RAIL_ROADSIDE, si, s);
         /* Along-road slide that goes with a given height offset, so the post
          * leans with the road's pitch instead of standing plumb. Zero on a flat
@@ -9969,6 +10097,27 @@ static int tg_rail_kerbfence_here(int si, double sg)
 {
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS")) return 0;
     if (si <= 0) return 0;
+    /* RING GATE, and it is the whole reason an edge could lose its ONLY rail.
+     * The scenery loop that runs tg_emit_fb_city bails with `if (si >= ring)
+     * continue` -- fork pads and appended branch corridors carry road only. The
+     * GUARDRAIL loop has no such gate. So on a corridor span the gate list below
+     * could say "a railing stands here", the roadside rail would stand down for
+     * it, and the railing would never actually be emitted: zero rails on that
+     * edge. MEASURED before this line existed: 30 edges on seed 99991 had a
+     * roadside rail and lost it to a railing that never ran.
+     *
+     * tg_rail_deck_here carries the identical gate for the identical reason.
+     * Both predicates answer "does that emitter ACTUALLY RUN on this edge", not
+     * "would that emitter like this edge" -- a hand-off to a claim that is never
+     * made is worse than the doubling it was meant to remove.
+     *
+     * TD5RE_R9_RAILFIX_NOGATE=1 REMOVES this gate on purpose, so the ZERO-RAIL
+     * counter can be pointed at it and the cost of dropping it MEASURED rather
+     * than argued. It is a regression probe, not a tuning knob. */
+    if (!td5_env_flag_off("TD5RE_R9_RAILFIX_NOGATE")) {
+        if (si >= ((s_ring_len > 0) ? s_ring_len : si + 1)) return 0;
+        if (tg_span_in_tunnel(si)) return 0;  /* bore: fb loop routes elsewhere */
+    }
     if (tg_span_in_bridge_run(si)) return 0;            /* no pavement on a deck */
     if (!(tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(si)]) > 0.0))
         return 0;                                        /* not a facade biome   */
@@ -13667,11 +13816,6 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
              * n_added, which only holds while every piece is a same-sized box.
              * A rail prism has a different vertex count and would silently
              * corrupt those offsets. Here each offset is recorded explicitly. */
-            /* [R9 RAILFIX] The deck hand-off happens inside the predicate (a
-             * pure function, so it must not account), but the inventory should
-             * still show it fired -- both edges of this span, once. */
-            if (ok && rails && tg_railfix_on() && tg_rail_deck_here(nl, si))
-                tg_acct_n(TG_ACCT_R9_RAILYIELD, si, 2);
             if (ok && rails &&
                 tg_span_needs_guardrail(nl, si, nspans)) {
                 const size_t r0 = meshes.len;
@@ -16650,7 +16794,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         }
     }
     tg_acct_report(nspans);
-    tg_rail_edge_report(nspans);       /* [R9 RAILFIX] per-edge uniqueness */
+    tg_rail_edge_report(&nl, nspans);  /* [R9 RAILFIX] per-edge uniqueness */
     tg_r8_bridge_diag(&nl);            /* [R8 BRIDGE] opt-in measurement dump */
     tg_r8_terrain_extent_report(&nl, nspans);  /* [R8 TERRAIN] opt-in, ditto */
     ok = 1;
