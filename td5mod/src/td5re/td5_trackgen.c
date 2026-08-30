@@ -3401,6 +3401,22 @@ static int tg_side_built(int si, int left)
     return 1;
 }
 
+/* [R6 item 16] A facade span whose side stands but whose BOTH along-road
+ * neighbours do NOT -- a building one span long, capped on both ends, floating
+ * detached from anything. It is the biome BLEND dithering a single facade-biome
+ * span into a run of tree-biome (COAST) spans: seed 99991 spans 1043 and 1047,
+ * lone INDUSTRIAL blocks in the COAST band just past the bridge -- "1 span of
+ * building not connected with anything ... if this is the transition, remove the
+ * logic". So: do not build a lone one-span frontage. tg_side_built (not the raw
+ * pattern) is used for the neighbours so a bridge/biome edge already counts as
+ * "not built", and it does NOT itself call this, so there is no recursion.
+ * Per-side, since a run can end isolated on one kerb while the other continues. */
+static int tg_facade_isolated(int si, int left)
+{
+    if (!tg_side_built(si, left)) return 0;
+    return !tg_side_built(si - 1, left) && !tg_side_built(si + 1, left);
+}
+
 /* Hash identifying the RUN span si belongs to on this side. A superblock now
  * holds up to TWO runs (before and after its side street), so keying pages and
  * floor counts on the superblock alone would give one texture and one height to
@@ -4276,6 +4292,9 @@ static void tg_side_geom(const TG_NodeList *nl, int si, int left,
     g->built = 0;
     if (!tg_facade_built(si, left)) return;
     if (tg_branches_enabled() && side < 0.0 && tg_span_in_fork_clear(si)) return;
+    /* [R6 item 16] Never a lone one-span building (both neighbours unbuilt). */
+    if (td5_env_flag_on("TD5RE_AUTOTRACK_NO_STUB") && tg_facade_isolated(si, left))
+        return;
 
     /* Height is a whole number of FLOORS, keyed to the RUN so a building is one
      * uniform block that steps at the next side street. tg_facade_floors folds
@@ -5849,7 +5868,8 @@ static int tg_emit_bridge_coast(const TG_NodeList *nl, int si,
  * Textured from the biome's ground page, so FIELDS/FOREST get vegetation and
  * CITY/INDUSTRIAL get concrete. Cosmetic only: driving off the road still puts
  * you on nothing, because collision comes from the STRIP, not from this. */
-#define TD5_TG_GROUND_WIDTH   24000.0   /* how far the verge extends outward */
+#define TD5_TG_GROUND_WIDTH   24000.0   /* old (A/B): flat verge reach outward   */
+#define TD5_TG_VERGE_REACH    12000.0   /* [R6 item 6] new default verge reach   */
 #define TD5_TG_GROUND_DROP       70.0    /* just under the road, avoids z-fight */
 /* Seaward skirt: a flat VERGE, then a ramp that carries the terrain THROUGH sea
  * level and keeps going, so land and water actually intersect.
@@ -5964,6 +5984,23 @@ typedef struct {
     int    n;
 } TG_GroundProf;
 
+/* [R6 item 6] How far the flat verge (near ground skirt) reaches outward. At the
+ * historical 24000 the skirt is a wide, near-flat apron that on a DESCENT
+ * projects over the road ahead and hides it -- seed 99991 span 188 (a straight,
+ * gently descending 4-lane avenue) vanished behind its own verge. PROVEN by an
+ * A/B frame: the road, the car and everything forward reappeared the moment the
+ * skirt was pulled in, with far-band and buildings still on. 12000 still reaches
+ * well past the sidewalks, and the far background band starts exactly where the
+ * skirt ends (tg_ground_side is the far-band's source too), so the backdrop
+ * simply comes in with it -- no gap, no bare ground. Uniform, so the per-group
+ * far-band samples stay consistent with the per-span skirt. Default ON;
+ * TD5RE_AUTOTRACK_VERGE_NARROW=0 restores the old 24000 apron for an A/B. */
+static double tg_verge_reach(void)
+{
+    return td5_env_flag_on("TD5RE_AUTOTRACK_VERGE_NARROW")
+         ? TD5_TG_VERGE_REACH : TD5_TG_GROUND_WIDTH;
+}
+
 static void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
                            double water_side, TG_GroundProf *p)
 {
@@ -5976,7 +6013,7 @@ static void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
      * whole skirt left a thin void/lip between road and grass. */
     p->n = 2;
     p->d[0]  = 0.0;                    p->dy[0] = 0.0;
-    p->d[1]  = TD5_TG_GROUND_WIDTH;    p->dy[1] = TD5_TG_GROUND_DROP;
+    p->d[1]  = tg_verge_reach();      p->dy[1] = TD5_TG_GROUND_DROP;
 
     /* [R4 item 16a] The GORGE wins over the seaward beach on a bridge run.
      * On a COAST bridge (seed 99991 span 1160-1199) the seaward test fired first
@@ -6031,8 +6068,8 @@ static void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
     if (!is_left) {
         /* Branch corridor bows into the right verge -- keep off its carriageway. */
         p->d[0] = tg_ground_branch_clear(nl, si);
-        if (p->d[0] > TD5_TG_GROUND_WIDTH - 1000.0)
-            p->d[0] = TD5_TG_GROUND_WIDTH - 1000.0;
+        if (p->d[0] > p->d[1] - 1000.0)
+            p->d[0] = p->d[1] - 1000.0;
     }
 }
 
@@ -7516,7 +7553,14 @@ static int tg_block_is_park(int si, int left)
 #define TD5_TG_FORKBACK_GAP_TALL   5000.0 /* old (A/B): pre-R5 gap                  */
 #define TD5_TG_FORKBACK_DEPTH      3000.0 /* new: how deep the background reads     */
 #define TD5_TG_FORKBACK_DEPTH_TALL 6000.0 /* old (A/B): pre-R5 depth                */
-#define TD5_TG_FORKBACK_MAX_ROWS   6      /* new: shorter than a street facade      */
+#define TD5_TG_FORKBACK_MAX_ROWS   6      /* a backdrop, not a downtown tower       */
+/* [R6 item 3] Per-span variation of the fork-back band. STAGGER pushes each
+ * span's block to a different depth so the face is jagged and neighbouring spans
+ * no longer share an edge -- distinct buildings with gaps ("breaks in the row"),
+ * not one swept curtain. BASE lifts the whole band further back so it reads as a
+ * distant skyline rather than a wall hugging the branch. */
+#define TD5_TG_FORKBACK_STAGGER_BASE  2500.0
+#define TD5_TG_FORKBACK_STAGGER_RANGE 9000u
 
 static int tg_city_emit_forkback(const TG_FBHook *h)
 {
@@ -7528,7 +7572,8 @@ static int tg_city_emit_forkback(const TG_FBHook *h)
     const double gap = small ? TD5_TG_FORKBACK_GAP : TD5_TG_FORKBACK_GAP_TALL;
     const TG_Node *n0, *n1;
     double lx0, lz0, lx1, lz1, set0, set1, bx, by, bz, ax, ay, az;
-    unsigned int blk, ph, gs, gl, bh;
+    unsigned int blk, ph, gs, gl, bh, sh;
+    const int vary = td5_env_flag_on("TD5RE_AUTOTRACK_FORKBACK_VARY");
     int av;
 
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_FORK_BACKDROP")) return 1;
@@ -7559,6 +7604,18 @@ static int tg_city_emit_forkback(const TG_FBHook *h)
          ? tg_carriageway_clear_gap(nl, si + 1, side, tg_city_sidewalk_w(b),
                                     TD5_TG_CARRIAGEWAY_MARGIN) + gap
          : set0;
+
+    /* [R6 item 3] Per-span stagger: shift this span's whole block back by a
+     * span-keyed amount so the row breaks into distinct, differently-set-back
+     * buildings instead of one continuous wall. Applied to both endpoints so the
+     * block stays parallel; the far background band closes the ground behind the
+     * gaps a stagger opens between neighbouring spans. */
+    sh = ((unsigned)si * 2654435761u) ^ 0x9e3779b9u;
+    if (vary) {
+        const double stag = TD5_TG_FORKBACK_STAGGER_BASE
+                          + (double)((sh >> 17) % TD5_TG_FORKBACK_STAGGER_RANGE);
+        set0 += stag; set1 += stag;
+    }
 
     bx = n0->x + lx0 * (n0->width * 0.5 + set0);
     by = n0->y;
@@ -7597,14 +7654,16 @@ static int tg_city_emit_forkback(const TG_FBHook *h)
         return 1;
     }
 
-    /* BUILDINGS: a deep, tall skyline block set behind the corridor. Height and
-     * page key on the superblock so the band is one continuous massing. */
+    /* BUILDINGS: a skyline block set behind the corridor. [R6 item 3] height is
+     * keyed PER SPAN (not the superblock) so neighbouring blocks step up and down
+     * -- a varied skyline, not one flat-topped wall. The district climb is
+     * dropped for the backdrop: it only pinned the whole run to the cap, which is
+     * what read as the uniform "line of skyscrapers". */
     {
-        int rows = b->floors_min + tg_city_district_floors(blk)
-                 + (int)((bh >> 9) % (small ? 3u : 5u))  /* [R5 item 5] was %5+2; */
-                 + (small ? 0 : 2);                       /* a distant backdrop
-                                                 * must not tower over the street
-                                                 * run in front of it */
+        int rows = vary
+                 ? b->floors_min + (int)((sh >> 11) % 5u)
+                 : b->floors_min + tg_city_district_floors(blk)
+                   + (int)((bh >> 9) % (small ? 3u : 5u)) + (small ? 0 : 2);
         const int cap = small ? TD5_TG_FORKBACK_MAX_ROWS : TD5_TG_FACADE_MAX_ROWS;
         const double depth = small ? TD5_TG_FORKBACK_DEPTH
                                    : TD5_TG_FORKBACK_DEPTH_TALL;
@@ -7614,7 +7673,13 @@ static int tg_city_emit_forkback(const TG_FBHook *h)
         H = (double)rows * tg_facade_floor_h(b);
         flen = sqrt(ax * ax + az * az);
         cols = tg_facade_cols_for(flen, (double)b->cell_w, 4);
-        page = tg_facade_page_class(bh, rows);
+        /* [R6 item 3] A backdrop uses a low-rise MASONRY page even when tall: the
+         * glass TOWER pages (rows >= FACADE_TALL_ROWS) read as a blown-out white
+         * slab at the distance a fork backdrop is usually seen from -- fork
+         * 319-360 seen down the descending avenue from span 188 -- which is worse
+         * than the uniform wall it replaced. Stone/brick reads correctly there. */
+        page = vary ? tg_facade_page_class(bh, TD5_TG_FACADE_TALL_ROWS - 1)
+                    : tg_facade_page_class(bh, rows);
         if (!tg_bg_building_box(h->blk, h->moff, h->nmesh, h->maxmesh,
                                 bx, by, bz, ax, ay, az, lx0, lz0, lx1, lz1,
                                 depth, H, cols, rows, page, 1, si))
@@ -8892,6 +8957,30 @@ static int tg_far_group_near_tunnel(int si)
     return 0;
 }
 
+/* [R6 item 4] Does this far-band group cover (or sweep over) a fork's branch?
+ * The fork bows the RIGHT corridor out into the plain, so the right far-band
+ * skyline -- laid from the main-road edge -- lands ON the branch carriageway as
+ * a row of grey slabs "crossing the street" (seed 99991 spans 150/154 on the
+ * right branch). The forkback backdrop already closes that flank, so the right
+ * band is pure intrusion there. The intrusion is NOT confined to the fork's own
+ * spans: the band of a group just PAST the rejoin still sweeps back across the
+ * branch on the curve, so the window is padded forward by TD5_TG_FAR_FORK_PAD.
+ * Same shape as tg_far_group_over_bridge. */
+#define TD5_TG_FAR_FORK_PAD 12
+static int tg_far_group_over_fork(int si)
+{
+    const int g0 = (si / TD5_TG_FAR_GROUP) * TD5_TG_FAR_GROUP;
+    const int g1 = g0 + TD5_TG_FAR_GROUP - 1;
+    int i;
+    if (!tg_branches_enabled()) return 0;
+    for (i = 0; i < s_fork_count; i++) {
+        const int a = s_forks[i].F - TD5_TG_BRANCH_WIDEN - 2;
+        const int b = s_forks[i].R + TD5_TG_FAR_FORK_PAD;
+        if (g1 >= a && g0 <= b) return 1;   /* group overlaps the fork + bow */
+    }
+    return 0;
+}
+
 static int tg_emit_fb_terrain(const TG_FBHook *h)
 {
     double wsd;
@@ -8932,6 +9021,11 @@ static int tg_emit_fb_terrain(const TG_FBHook *h)
     for (s = 0; s < 2; s++) {
         const int is_left = s ? 1 : 0;
         if ((wsd > 0.0 && is_left) || (wsd < 0.0 && !is_left)) continue;
+        /* [R6 item 4] Skip the RIGHT band over a fork: it lands on the branch,
+         * which the forkback backdrop already closes. Left band is untouched. */
+        if (!is_left && td5_env_flag_on("TD5RE_AUTOTRACK_FORK_CLEARFAR") &&
+            tg_far_group_over_fork(h->si))
+            continue;
         if (*h->nmesh + 2 >= h->maxmesh) break;
         if (!tg_emit_far_band(h, is_left)) return 0;
     }
