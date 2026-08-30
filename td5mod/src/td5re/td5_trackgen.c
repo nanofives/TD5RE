@@ -3680,10 +3680,38 @@ static int tg_r9_wet_kind_ok(int kind)
  * pass over the assembled bytes. "Nothing but the crossing stands on water" is
  * the same kind of rule, so it gets the same kind of enforcement -- and a future
  * emitter that forgets is caught for free. TD5RE_R9_BRIDGE_WATERGUARD=0 leaves
- * it report-only. */
+ * it report-only.
+ *
+ * [ORCHESTRATOR, R9 merge] TEMPORARILY DEFAULTED OFF -- this pass CRASHES seed
+ * 777 during track generation in the merged tree. Bisected (merged master,
+ * clean env, seed 777, --StartSpanOffset=1690):
+ *
+ *   everything on                  -> DIES, race.log frozen at 16208 bytes,
+ *                                     "end inventory" never reached, NO [ERR]
+ *   TD5RE_R9_BRIDGE_WATERGUARD=0   -> generates, 35503 bytes, inventory reached
+ *   COAST=0 / TIE=0 / FARSHORE=0   -> each still dies
+ *   all R9 knobs off               -> generates
+ *   TOPO/INFRA/TUNNEL/CITY/RAILFIX off, each alone -> each still dies
+ *
+ * So this knob alone. Seed 99991 is fine (127 meshes dropped); 777 is where it
+ * drops 207, i.e. the seed that exercises the pass hardest. The BRIDGE area's
+ * own report was not wrong -- its branch worked in isolation; the failure only
+ * exists in the merged tree.
+ *
+ * LEAD for whoever fixes this, from the R7 guard this pass is modelled on:
+ * tg_guard_validate_entry warns that "exempt ranges are ORIGINAL BYTE OFFSETS
+ * and stop mapping once compaction moves the bytes". A reject-and-compact pass
+ * leaves any pre-compaction offset (exempt ranges, moff[], tg_guard_mark kinds)
+ * pointing at moved bytes, and 777 compacts further than 99991. That is the
+ * shape of a silent death with no diagnostic.
+ *
+ * This is OFF only so the merged tree generates on both seeds. It re-opens R9
+ * item 10 (background buildings over water), which this pass is the fix for --
+ * so turning it back ON after a root-cause fix is REQUIRED, not optional.
+ * TD5RE_R9_BRIDGE_WATERGUARD=1 re-enables it (and reproduces the crash). */
 static int tg_r9_waterguard_enabled(void)
 {
-    return td5_env_flag_on("TD5RE_R9_BRIDGE_WATERGUARD");
+    return td5_env_flag_off("TD5RE_R9_BRIDGE_WATERGUARD");
 }
 static int s_r9_wet_rejected;
 
