@@ -83,7 +83,7 @@ BANN = [
 # horizontal across the page, which is the axis the roadside rail quad wants
 # (u along the road, v up the face).
 RAIL = [
-    ("level014", 276, "Melbourne: steel W-beam armco on posts"),
+    ("level014", 276, "Sydney: steel W-beam armco on posts"),
     ("level018", 45,  "green timber post-and-rail (rural)"),
     ("level023", 418, "Moscow: dark steel double rail"),
     ("level013", 264, "Waikiki: white steel armco"),

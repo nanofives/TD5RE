@@ -4498,7 +4498,7 @@ static int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz,
 
 /* ===================== FACADE WALLS =====================
  * Shipped TD5 buildings are NOT closed boxes with a UV-wrapped masonry texture.
- * A survey of level014 (Melbourne, 1743 meshes) found exactly ONE 6-quad box:
+ * A survey of level014 (Sydney, 1743 meshes) found exactly ONE 6-quad box:
  * every building front is a FLAT array of road-facing quads, and every shipped
  * vertex UV is inside [0,1] -- pages are mapped ONCE per quad, never wrapped. A
  * wide/tall frontage is built by REPEATING GEOMETRY (many whole-page cells side
@@ -15758,7 +15758,7 @@ static int tg_real_textures_enabled(void)
 
 /* Street FURNITURE (the kerb railing) on shipped art rather than the painted
  * stand-in. Default ON and independent of TD5RE_AUTOTRACK_REAL_TEX: that knob
- * trades a neutral generic street for photographic Melbourne facades, which is
+ * trades a neutral generic street for photographic Sydney facades, which is
  * a taste call, whereas a real railing has no such downside. The knob exists so
  * the painted page is still one A/B away. */
 static int tg_furniture_real_pages(void)

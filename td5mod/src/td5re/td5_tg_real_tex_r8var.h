@@ -2072,7 +2072,7 @@ static const int k_real_r8var_bann_count = 4;
 static const int k_real_r8var_bann_paln[4] = { k_real_r8var_bann0_paln, k_real_r8var_bann1_paln, k_real_r8var_bann2_paln, k_real_r8var_bann3_paln };
 static const unsigned char *const k_real_r8var_bann_pal[4] = { k_real_r8var_bann0_pal, k_real_r8var_bann1_pal, k_real_r8var_bann2_pal, k_real_r8var_bann3_pal };
 static const unsigned char *const k_real_r8var_bann_idx[4] = { k_real_r8var_bann0_idx, k_real_r8var_bann1_idx, k_real_r8var_bann2_idx, k_real_r8var_bann3_idx };
-/* level014 page 276 -> RAIL 0: Melbourne: steel W-beam armco on posts (255 colours, key 35.3%) */
+/* level014 page 276 -> RAIL 0: Sydney: steel W-beam armco on posts (255 colours, key 35.3%) */
 static const int k_real_r8var_rail0_paln = 255;
 static const unsigned char k_real_r8var_rail0_pal[765] = {
 0,0,0,181,206,214,189,206,214,181,206,206,173,198,198,173,189,189,173,189,181,181,189,189,181,198,189,181,189,198,181,198,
