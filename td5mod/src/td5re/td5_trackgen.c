@@ -688,7 +688,11 @@ typedef enum {
 
     TG_ACCT_R8_SHAPE,       /* SHAPE  (G2,G3,G5,G4-part)    rename in place */
 
-    TG_ACCT_R8_BIOME,       /* BIOME  (777 19; G4-part)     rename in place */
+    /* [R8 BIOME item 19] Spans owned by a SNOWY biome cell (ALPINE or the new
+     * ALPTOWN) on a seed the snow-coherent path claimed. Zero on every non-snow
+     * seed by construction, so its presence in the inventory is the proof that
+     * the selection rule fired -- and its run list is the snow layout itself. */
+    TG_ACCT_R8_SNOWRUN,
     TG_ACCT_KIND_COUNT
 } TG_AcctKind;
 
@@ -765,7 +769,7 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
 
     "r8-shape",             /* SHAPE   */
 
-    "r8-biome"              /* BIOME   */
+    "snow-runs"             /* BIOME   */
 };
 
 static long s_acct_count[TG_ACCT_KIND_COUNT];
@@ -4467,9 +4471,45 @@ static const TG_Biome k_biomes[] = {
     /* ORIENTAL: manicured topiary + weeping willow; guardian lions; cobbles. */
     { "ORIENTAL",   9, 0,0,0,0,0,0, {7, 8, 9},    3,
       TD5_TG_PAGE_TREE,  255, 1, TD5_TG_PAGE_GREEN,   4, 0, PP_LION, -1, 0, RS_COBBLE,
-      1, 2, 120,  50, 2 }
+      1, 2, 120,  50, 2 },
+    /* ---------------------------------------------------------------------
+     * [R8 BIOME item 19] ALPTOWN -- the SNOW-ONLY biome, index 7.
+     *
+     * It exists to answer the "snowy themed biomes AND CITIES" half of item 19.
+     * Before it, `cold` (climate 2) had exactly ONE member, ALPINE, and ALPINE
+     * is urbanity 0 (wilderness). Rule 2 caps an urbanity step at 1, so a cold
+     * run could never be followed by another cold run: every snow stretch was
+     * forced back through a temperate biome. That is the mechanism behind the
+     * user's "lurch", and no amount of re-weighting the picker could fix it --
+     * the adjacency graph simply had no cold-to-cold edge.
+     *
+     * ALPTOWN is climate 2 / urbanity 1, so ALPINE(0) <-> ALPTOWN(1) is one
+     * urbanity step and one climate step of zero: the first legal cold-to-cold
+     * edge. Snow can now chain for as long as the picker wants.
+     *
+     * ROAD SURFACE IS TARMAC, NOT ICE, ON PURPOSE. A ploughed town road is the
+     * real-world answer, and it is also the safe one: with snow chaining, an
+     * icy ALPTOWN would put most of a snow seed's length on RS_ICE and put the
+     * race-finishes-at-all acceptance at risk. ALPINE keeps repeat_max 2, so
+     * the longest continuous ice run stays 300 spans -- the same order as
+     * before this change.
+     *
+     * It reuses the existing WALL / GROUND pages: what a snowy town LOOKS like
+     * is TERRAIN's and VARIETY's call this round, not BIOME's.
+     *
+     * NOT counted in TD5_TG_BIOME_COUNT. Every `% TD5_TG_BIOME_COUNT` in this
+     * file stays modulo 7, so a non-snow seed's layout is bit-identical to the
+     * pre-R8 build. Only the snow-coherent path widens the draw to 8. */
+    { "ALPTOWN",    7, 2300, 2600, 1, 2, 6500, 400, {0}, 0,
+      TD5_TG_PAGE_WALL,  63, 0, TD5_TG_PAGE_GROUND,   4, 1, -1, PP_DEER, 0, RS_TARMAC,
+      2, 1, 120, 160, 3 }
 };
+/* Biomes drawable by a NORMAL (non-snow-coherent) seed. Deliberately 7, not
+ * ARRAY_COUNT(k_biomes): see the ALPTOWN note above. */
 #define TD5_TG_BIOME_COUNT 7
+/* Biomes drawable once a seed has been declared snowy (adds ALPTOWN). */
+#define TD5_TG_BIOME_COUNT_SNOW 8
+#define TD5_TG_BIOME_ALPINE  4    /* index of ALPINE in k_biomes */
 #define TD5_TG_BIOME_RUN   150
 
 /* ==========================================================================
@@ -4544,13 +4584,115 @@ static unsigned int tg_biome_hash(unsigned int seed, int cell, unsigned int salt
     return h;
 }
 
-/* Lay the whole cell grid out once per build, before any emitter asks. */
-static void tg_biome_layout(unsigned int seed)
+/* ==========================================================================
+ * SNOW COHERENCE  ([R8] BIOME, seed 777 item 19, first clause)
+ *
+ * THE COMPLAINT, verbatim: "if you include snow in the seed there has to be a
+ * prevalence for snowy themed biomes and cities TO AVOID MAJOR CHANGES".
+ * The stated reason is the important half. Seed 777 lays out
+ *   INDUSTRIAL COAST FOREST *ALPINE* FIELDS INDUSTRIAL ORIENTAL FIELDS
+ * -- one 150-span run of snow with five non-snowy runs around it, including a
+ * palm-lined COAST 300 spans earlier. The adjacency rules (R2 item 23) already
+ * forbid ALPINE touching COAST, so nothing is "wrong" span-by-span; the defect
+ * is at the level of the WHOLE SEED. A track is not a sequence of locally legal
+ * transitions, it is one place, and one place does not contain both a snowbound
+ * pass and a tropical beach.
+ *
+ * SO THE RULE IS SEED-LEVEL, NOT CELL-LEVEL:
+ *   1. Lay the grid out exactly as before. Ask one question of the result:
+ *      does ALPINE appear anywhere the track actually reaches?
+ *   2. If it does, THROW THAT LAYOUT AWAY and lay the seed out again in snow
+ *      mode: warm biomes (climate 0, i.e. COAST) are struck from the draw
+ *      entirely, ALPTOWN joins it, and a cold predecessor prefers a cold
+ *      successor 80% of the time (a temperate one, 60%).
+ *
+ * Two-pass rather than one because the trigger has to be a property of the
+ * seed, not of the cell being filled: you cannot know at cell 3 whether cell 9
+ * will roll snow. Pass 1 is pure and cheap (22 cells), so the cost is nil.
+ *
+ * WHY 80/60 AND NOT 100. At 100% every snow seed becomes 10/10 cold and stops
+ * varying at all, which trades one monotony for another. Measured across 18
+ * seeds (7 of them snow seeds), 80/60 leaves 60 of 70 cells cold, 0 warm, and
+ * cuts climate flips from 31 to 8 -- snow dominates without the track becoming
+ * a single texture. See the changelog entry for the full before/after table.
+ *
+ * WHY NON-SNOW SEEDS ARE UNTOUCHED, and why that matters this round: pass 1 is
+ * the unmodified algorithm over the unmodified modulo-7 draw, so a seed with no
+ * ALPINE never enters pass 2 and its layout is bit-identical to the pre-R8
+ * build. Seed 99991 -- the reference layout the other seven R8 areas are
+ * testing their span numbers against -- has no ALPINE and is therefore
+ * unchanged BY CONSTRUCTION, not by luck.
+ *
+ * KNOB: TD5RE_R8_BIOME_SNOW, default ON. td5_env_flag_on returns 1 when the
+ * variable is UNSET, which is the default-on behaviour wanted here; =0 restores
+ * the pre-R8 selection exactly.
+ * ========================================================================== */
+
+/* May biome b be drawn at all in this mode? Snow mode strikes warm (climate 0)
+ * biomes; normal mode strikes ALPTOWN by keeping the draw at modulo 7. */
+static int tg_biome_snow_allows(int b) { return k_biomes[b].climate >= 1; }
+
+/* ==========================================================================
+ * ONE-SIDE SEA  ([R8] BIOME, seed 777 item 19, third clause: "add one side sea
+ * like on sydney")
+ *
+ * The machinery is already here -- COAST carries water=1, tg_water_side picks a
+ * side and holds it, tg_emit_water lays the plane, R4's coastline strip joins
+ * it to the bank and R7 FLORA's SHORE_VERGE keeps palms out of it. What is
+ * missing is DURATION: COAST is pinned to repeat_max 1, so the sea is never
+ * more than one 150-span cell, and Sydney's sea is alongside you for minutes.
+ *
+ * COAST's own table row says why it was pinned, and says what has to happen
+ * first: "the water emitter keys its sea level and its seaward side off the
+ * 150-span cell, so a COAST spanning two cells could step the sea surface or
+ * flip which side it is on. Lift this only together with tg_biome_run_bounds
+ * adoption there."  So that is done first, below, in tg_water_side and
+ * tg_sea_level_y: both now key off the MERGED run rather than the raw cell.
+ * With COAST still at repeat_max 1 a merged run IS one cell, so that adoption
+ * is a provable no-op on every existing seed -- it changes nothing until the
+ * cap is lifted.
+ *
+ * The cap lift itself is knob-gated and DEFAULT OFF for round 8. Not because it
+ * is unsound but because seed 99991 contains a COAST run, so lifting the cap
+ * would move 99991's biome boundaries -- and 99991 is the reference layout the
+ * other seven R8 areas are quoting span numbers against this round. Turning it
+ * on is a one-variable change once the round closes.
+ *
+ * td5_env_flag_on returns 1 for an UNSET variable, which is the wrong default
+ * here, so this reads through td5_env_int with an explicit 0 default instead.
+ * ========================================================================== */
+#define TD5_TG_COAST_REPEAT_SEA 3   /* ~1.5 km of sea alongside, Sydney-scale */
+
+static int tg_biome_repeat_max(int b)
 {
+    if (k_biomes[b].water && td5_env_int("TD5RE_R8_BIOME_SEA", 0, 0, 1))
+        return TD5_TG_COAST_REPEAT_SEA;
+    return k_biomes[b].repeat_max;
+}
+
+/* One layout pass. `snow` widens the draw to include ALPTOWN, bans warm biomes
+ * and biases succession toward cold. Writes s_biome_cell. */
+static void tg_biome_layout_pass(unsigned int seed, int snow)
+{
+    const int nb = snow ? TD5_TG_BIOME_COUNT_SNOW : TD5_TG_BIOME_COUNT;
     int cell, run_len = 1;
 
-    s_biome_cell[0] = (unsigned char)(tg_biome_hash(seed, 0, 1u)
-                                      % TD5_TG_BIOME_COUNT);
+    if (!snow) {
+        s_biome_cell[0] = (unsigned char)(tg_biome_hash(seed, 0, 1u)
+                                          % TD5_TG_BIOME_COUNT);
+    } else {
+        /* Same hash, then walk forward to the first snow-legal biome, so the
+         * starting cell is drawn from the same stream and only the FILTER
+         * differs between the two passes. */
+        unsigned int h0 = tg_biome_hash(seed, 0, 1u);
+        int t, first = 0;
+        for (t = 0; t < nb; t++) {
+            int c0 = (int)((h0 + (unsigned)t) % (unsigned)nb);
+            if (tg_biome_snow_allows(c0)) { first = c0; break; }
+        }
+        s_biome_cell[0] = (unsigned char)first;
+    }
+
     for (cell = 1; cell < TD5_TG_BIOME_CELLS; cell++) {
         int prev = s_biome_cell[cell - 1];
         unsigned int h = tg_biome_hash(seed, cell, 2u);
@@ -4559,21 +4701,40 @@ static void tg_biome_layout(unsigned int seed)
         /* Extend the current biome first, up to its repeat_max. The 0..99 draw
          * against a flat 45% keeps runs varied -- always extending to the cap
          * would make every city exactly repeat_max cells long. */
-        if (run_len < k_biomes[prev].repeat_max && (h % 100u) < 45u) {
+        if (run_len < tg_biome_repeat_max(prev) && (h % 100u) < 45u) {
             s_biome_cell[cell] = (unsigned char)prev;
             run_len++;
             continue;
+        }
+        /* [R8] Snow mode's COLD-FIRST pass. Restricted to climate 2 candidates;
+         * if none is compatible it simply falls through to the normal scan
+         * below, so this can only ever bias the choice, never fail it. Keyed on
+         * a different slice of the same hash word (>>16) than the extend draw
+         * (%100) and the candidate rotation (>>8), so the three decisions do not
+         * correlate. */
+        if (snow && ((h >> 16) % 100u) < (k_biomes[prev].climate == 2 ? 80u : 60u)) {
+            for (tries = 0; tries < nb; tries++) {
+                cand = (int)(((h >> 8) + (unsigned)tries) % (unsigned)nb);
+                if (cand == prev) continue;
+                if (k_biomes[cand].climate != 2) continue;
+                if (!tg_biome_compatible(prev, cand)) continue;
+                chosen = cand;
+                break;
+            }
         }
         /* Otherwise walk the biome list from a hashed offset and take the first
          * COMPATIBLE one that is not the biome we just left (we already decided
          * not to extend it). Scanning from a rotating offset rather than
          * rejection-sampling keeps this bounded and deterministic. */
-        for (tries = 0; tries < TD5_TG_BIOME_COUNT; tries++) {
-            cand = (int)(((h >> 8) + (unsigned)tries) % TD5_TG_BIOME_COUNT);
-            if (cand == prev) continue;
-            if (!tg_biome_compatible(prev, cand)) continue;
-            chosen = cand;
-            break;
+        if (chosen < 0) {
+            for (tries = 0; tries < nb; tries++) {
+                cand = (int)(((h >> 8) + (unsigned)tries) % (unsigned)nb);
+                if (cand == prev) continue;
+                if (snow && !tg_biome_snow_allows(cand)) continue;
+                if (!tg_biome_compatible(prev, cand)) continue;
+                chosen = cand;
+                break;
+            }
         }
         /* Unreachable by construction (the adjacency graph has no dead ends),
          * but a silent out-of-range index here would be a crash rather than a
@@ -4583,6 +4744,39 @@ static void tg_biome_layout(unsigned int seed)
         run_len = (chosen == prev) ? run_len + 1 : 1;
     }
     s_biome_laid_out = 1;
+}
+
+/* Set by tg_biome_layout so the build log and the element inventory can state
+ * plainly whether the snow-coherent path was taken. */
+static int s_biome_snow_seed = 0;
+
+/* Lay the whole cell grid out once per build, before any emitter asks.
+ * nspans_hint is the track's target length: the snow TRIGGER is scanned only
+ * over the cells the track will actually reach, because s_biome_cell covers
+ * TD5_TG_MAX_SPANS (22 cells / 3300 spans) and a ~1500-span track never sees
+ * the tail. Triggering on an ALPINE nobody can drive to would be a silent
+ * false positive -- exactly the kind of "the mechanism fired for the wrong
+ * reason" the round's method rules exist to catch. */
+static void tg_biome_layout(unsigned int seed, int nspans_hint)
+{
+    int used, cell;
+
+    s_biome_snow_seed = 0;
+    tg_biome_layout_pass(seed, 0);
+
+    if (!td5_env_flag_on("TD5RE_R8_BIOME_SNOW")) return;
+
+    used = (nspans_hint > 0 ? nspans_hint : TD5_TG_MAX_SPANS)
+           / TD5_TG_BIOME_RUN + 1;
+    if (used > TD5_TG_BIOME_CELLS) used = TD5_TG_BIOME_CELLS;
+
+    for (cell = 0; cell < used; cell++) {
+        if (s_biome_cell[cell] == (unsigned char)TD5_TG_BIOME_ALPINE) {
+            s_biome_snow_seed = 1;
+            break;
+        }
+    }
+    if (s_biome_snow_seed) tg_biome_layout_pass(seed, 1);
 }
 
 /* HARD cell assignment -- no blending. This is the biome that OWNS the span, and
@@ -5445,9 +5639,17 @@ static int tg_emit_props(const TG_NodeList *nl, int si, const TG_Biome *b,
 
 /* Which side of a coastal run the sea is on -- fixed per biome-run so the coast
  * does not flip sides mid-stretch. */
+/* [R8 BIOME item 19] Keyed on the FIRST CELL OF THE MERGED RUN, not on the raw
+ * cell. With COAST at repeat_max 1 a merged run is exactly one cell and this is
+ * bit-identical to the old expression; once TD5RE_R8_BIOME_SEA lifts the cap it
+ * is what stops a multi-cell coast flipping the sea from left to right halfway
+ * along. See the ONE-SIDE SEA note above tg_biome_repeat_max. */
 static double tg_water_side(int si)
 {
-    unsigned int h = (unsigned)(si / TD5_TG_BIOME_RUN) * 2246822519u;
+    int a;
+    unsigned int h;
+    tg_biome_run_bounds(si, &a, NULL);
+    h = (unsigned)(a / TD5_TG_BIOME_RUN) * 2246822519u;
     return (h & 1) ? 1.0 : -1.0;
 }
 
@@ -5461,11 +5663,15 @@ static double tg_water_side(int si)
  * the run, so no low point is ever flooded. */
 static double tg_sea_level_y(const TG_NodeList *nl, int si)
 {
-    const int run = si / TD5_TG_BIOME_RUN;
-    int a = run * TD5_TG_BIOME_RUN;
-    int b = a + TD5_TG_BIOME_RUN - 1;
+    /* [R8 BIOME item 19] Lowest node of the MERGED run, not of the raw cell.
+     * A no-op while COAST is capped at one cell; with TD5RE_R8_BIOME_SEA on it
+     * is what keeps one body of water at ONE height across a multi-cell coast
+     * instead of stepping at each cell boundary. */
+    int a, b;
     double lo;
     int i;
+
+    tg_biome_run_bounds(si, &a, &b);
 
     if (a > nl->count - 1) a = nl->count - 1;
     if (b > nl->count - 1) b = nl->count - 1;
@@ -12991,7 +13197,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
      * then. Driven by the seed, not by the geometry RNG, so it never perturbs
      * the road. Laid out for the whole cell array rather than for nspans, so a
      * span past the ring (an appended branch corridor) still has a biome. */
-    tg_biome_layout(spec->seed);
+    tg_biome_layout(spec->seed, spec->target_spans);
 
     tg_srand(spec->seed);
 
@@ -13105,9 +13311,21 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
                       tg_biome_bridge_pct(a), tg_biome_tunnel_pct(a),
                       k_road_surf[k_biomes[b].road_surf].grip_class == 1
                           ? "tarmac" : "special");
+            /* [R8 BIOME item 19] Account the snowy runs so the element
+             * inventory carries the proof that the snow-coherent path fired,
+             * and so its run list IS the snow layout. */
+            if (s_biome_snow_seed && k_biomes[b].climate == 2)
+                tg_acct_range(TG_ACCT_R8_SNOWRUN, a, z);
             runs++;
             s = z + 1;
         }
+        TD5_LOG_I(LOG_TAG,
+                  "trackgen: [R8 BIOME] snow-coherent=%s (knob TD5RE_R8_BIOME_SNOW=%s, "
+                  "one-side-sea TD5RE_R8_BIOME_SEA=%d)",
+                  s_biome_snow_seed ? "YES -- warm biomes struck, cold preferred"
+                                    : "no (seed rolled no ALPINE)",
+                  td5_env_flag_on("TD5RE_R8_BIOME_SNOW") ? "on" : "off",
+                  td5_env_int("TD5RE_R8_BIOME_SEA", 0, 0, 1));
         TD5_LOG_I(LOG_TAG,
                   "trackgen: %d biome run(s), cell=%d spans, blend=%d spans, "
                   "time=%s",
