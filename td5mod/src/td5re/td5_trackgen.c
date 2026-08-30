@@ -415,6 +415,19 @@ static int tg_span_in_bridge_run(int si);
  * turn radius >= ~50000 units, a sweeping curve rather than a hairpin, so a
  * deliberate bridge that lands on a tight section is straightened out. */
 #define TD5_TG_BRIDGE_MAX_TURN 0.03
+/* [R6 item 10] the centreline walk clamps curvature on FORK spans too -- a fork
+ * on a sharp bend folds its shifted main half-carriageway and its bowed branch
+ * corridor together, and a car driving the region is lifted (the "span 570
+ * collision is LIFTING the car" report + the paired "avoid this kind of curve"
+ * request). tg_span_in_fork_run gates it; forward-declared like the bridge one. */
+static int tg_span_in_fork_run(int si);
+/* Largest heading change per span allowed across a fork's span range, radians.
+ * 0.045 => turn radius >= ~33000 units, a sweeping curve. Sharper than this and
+ * the quarter-road main shift + full-width branch bow overlap on the inside of
+ * the bend. Looser than the bridge cap (a fork is a longer feature and a dead-
+ * straight 120-span corridor reads worse than a gentle sweep) but still well
+ * inside the fold threshold (measured folds began around 0.10 rad/span). */
+#define TD5_TG_FORK_MAX_TURN 0.045
 /* [R3 BLOCK] item 4: the centerline walk (above the biome block) needs to know
  * whether span si is a CITY cell to place "around the block" turns there. */
 static int tg_biome_span_is_city(int si);
@@ -1135,6 +1148,18 @@ static int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
                         if (dh >  TD5_TG_BRIDGE_MAX_TURN) dh =  TD5_TG_BRIDGE_MAX_TURN;
                         if (dh < -TD5_TG_BRIDGE_MAX_TURN) dh = -TD5_TG_BRIDGE_MAX_TURN;
                     }
+                    /* [R6 item 10] Same treatment for fork spans: a fork narrows
+                     * the road to its left half and shifts it a quarter-road to
+                     * the inside while the branch bows a full road-width out; on a
+                     * sharp bend those fold together and lift a car ("span 570").
+                     * Cap the per-span heading change so every fork sits on a
+                     * sweeping curve, never a hairpin -- the user's "avoid this
+                     * kind of curve". Only ever REDUCES curvature (no self-overlap
+                     * a straighter road did not already have). */
+                    if (tg_span_in_fork_run(nl->count)) {
+                        if (dh >  TD5_TG_FORK_MAX_TURN) dh =  TD5_TG_FORK_MAX_TURN;
+                        if (dh < -TD5_TG_FORK_MAX_TURN) dh = -TD5_TG_FORK_MAX_TURN;
+                    }
                     heading += dh;
                     /* Keep the walk non-trapping (see TD5_TG_HEADING_LIMIT).
                      * On hitting the limit, reverse the turn so the road peels
@@ -1629,6 +1654,39 @@ static int tg_span_in_fork_clear(int si)
     return 0;
 }
 
+/* [R6 item 10] Largest per-span heading change (radians) over a fork's span
+ * range, read from the already-built centreline tangents. A fork narrows the
+ * main road to its LEFT half and shifts it a quarter-road toward the inside of
+ * the bend (TD5_TG_MAIN_SHIFT) while the branch bows a full road-width the
+ * other way; on a tight/acute curve the shifted carriageway folds over its own
+ * inner edge, which lifts a car driving it -- the user's "span 570 collision is
+ * LIFTING the car" (fork 2 on seed 99991 lands on an acute S-bend) and the
+ * paired request to "avoid this kind of curve". The placement loop slides a
+ * fork forward until this stays under TD5_TG_FORK_MAX_TURN, i.e. onto a
+ * sweeping stretch where the shift cannot fold. Covers the widened approach
+ * (F-WIDEN) through the rejoin span (R). */
+static double tg_fork_region_max_curve(const TG_NodeList *nl, int F, int L, int ring)
+{
+    /* Scan exactly the span range the walk-time clamp (tg_span_in_fork_run)
+     * gentles, so the logged number reflects what was actually straightened --
+     * a span one past either end is ordinary single road (no fork geometry) and
+     * its curvature is not a fold risk. */
+    int lo = F - TD5_TG_BRANCH_WIDEN;
+    int hi = F + 1 + L;
+    double worst = 0.0;
+    int i;
+    if (lo < 1) lo = 1;
+    if (hi > ring - 1) hi = ring - 1;
+    for (i = lo; i <= hi && i + 1 < nl->count; i++) {
+        double d = nl->v[i].tx * nl->v[i + 1].tx + nl->v[i].tz * nl->v[i + 1].tz;
+        double a;
+        if (d > 1.0) d = 1.0; else if (d < -1.0) d = -1.0;
+        a = acos(d);
+        if (a > worst) worst = a;
+    }
+    return worst;
+}
+
 /* Append one vertex row of (lanes+1) points for node n, relative to (ox,oy,oz),
  * laterally shifted by `shift` (world units, +ve = left of travel) and using
  * `width`. Returns the row's first vertex index. */
@@ -1756,6 +1814,34 @@ static int tg_branch_min_len(void)
 {
     return td5_env_int("TD5RE_AUTOTRACK_BRANCH_MINLEN",
                        TD5_TG_BRANCH_MIN_LEN, 8, 400);
+}
+
+/* [R6 item 10] Is span si inside a fork's span range (widened approach through
+ * rejoin)? Stateless, derived only from si and the deterministic fork placement
+ * constants -- the SAME positions the placement loop in tg_emit_strip commits to
+ * (pos = grid+120, then R+150; L = max(k_len, min_len)). Used by the centreline
+ * walk (via the forward declaration up top) to gentle the curvature there,
+ * BEFORE s_forks exists. If the placement loop later drops the last fork (ring-
+ * fit / lane check), the extra straightened span range simply carries no fork --
+ * gentle road, no harm. Mirrors the bridge-run gate exactly. */
+static int tg_span_in_fork_run(int si)
+{
+    static const int k_lens[3] = { 8, 40, 120 };
+    int min_len, pos, i;
+    if (!tg_branches_enabled()) return 0;
+    min_len = tg_branch_min_len();
+    pos = TD5_TG_GRID_SPAN + 120;
+    for (i = 0; i < 3; i++) {
+        int L = k_lens[i] < min_len ? min_len : k_lens[i];
+        int F = pos;
+        int R = F + 1 + L;
+        /* +/-2 spans of margin past the widened approach and the rejoin so the
+         * road eases INTO and OUT of the fork gently rather than meeting a sharp
+         * bend right where the carriageways start to split / merge. */
+        if (si >= F - TD5_TG_BRANCH_WIDEN - 2 && si <= R + 2) return 1;
+        pos = R + 150;
+    }
+    return 0;
 }
 
 /* Lateral centre of the MAIN (left) half carriageway -- constant. */
@@ -2364,6 +2450,14 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                 int R = F + 1 + L;
                 if (main_half < 1 || br_lanes < 1) break;
                 if (R + 24 >= ring) break;           /* must fit on the ring */
+                /* [R6 item 10] Verify the walk-time straightening (tg_span_in_fork_run
+                 * clamp) actually gentled this fork's span range: a fork left on a
+                 * sharp bend folds its shifted/bowed carriageways and lifts a car
+                 * (the "span 570" report). Should read <= TD5_TG_FORK_MAX_TURN. */
+                TD5_LOG_I(LOG_TAG, "trackgen: fork %u F=%d L=%d region maxcurve=%.4f "
+                          "(cap %.3f)", i, F, L,
+                          tg_fork_region_max_curve(nl, F, L, ring),
+                          TD5_TG_FORK_MAX_TURN);
                 s_forks[s_fork_count].F = F;
                 s_forks[s_fork_count].len = L;
                 s_forks[s_fork_count].cbase = off + 1;  /* pad@off, corridor off+1.. */
@@ -6116,13 +6210,21 @@ static int tg_emit_branch_verge(const TG_NodeList *nl, int mb, int k, int L,
     int n = 0;
 
     if (bw <= 0.0) return 1;
-    /* Flat band, same winding as the sidewalk top slab: near-edge, near-outer,
-     * far-outer, far-edge. The branch is at negative lateral, so "further out"
-     * is t decreasing (e - bw). */
-    px[n]=a->x+a->tz*e0;        py[n]=a->y+lift; pz[n]=a->z-a->tx*e0;        uu[n]=0.0; vv[n]=0.0; n++;
+    /* [R6 items 9 & 5] The INNER edge sits at ROAD LEVEL (a->y / c->y), the outer
+     * edge at +lift. The band used to sit ENTIRELY at +lift, which floated its
+     * whole inner edge TD5_TG_VERGE_LIFT above the carriageway it abuts. On the
+     * main road the ground skirt fills behind that step, but a branch corridor
+     * has NO skirt (pad + corridor carry road only), so the step was open to the
+     * void -- the "small see-through gap between the branch and the sidewalk"
+     * (item 9), and the floating band parallaxing against the road as the car
+     * moved read as "the floor on the right side of the branch MOVES" (item 5).
+     * Meeting the road edge exactly and ramping up to the lift outboard closes
+     * both. Winding unchanged: near-edge, near-outer, far-outer, far-edge; the
+     * branch is at negative lateral so "further out" is t decreasing (e - bw). */
+    px[n]=a->x+a->tz*e0;        py[n]=a->y;      pz[n]=a->z-a->tx*e0;        uu[n]=0.0; vv[n]=0.0; n++;
     px[n]=a->x+a->tz*(e0-bw);   py[n]=a->y+lift; pz[n]=a->z-a->tx*(e0-bw);   uu[n]=u_w; vv[n]=0.0; n++;
     px[n]=c->x+c->tz*(e1-bw);   py[n]=c->y+lift; pz[n]=c->z-c->tx*(e1-bw);   uu[n]=u_w; vv[n]=1.0; n++;
-    px[n]=c->x+c->tz*e1;        py[n]=c->y+lift; pz[n]=c->z-c->tx*e1;        uu[n]=0.0; vv[n]=1.0; n++;
+    px[n]=c->x+c->tz*e1;        py[n]=c->y;      pz[n]=c->z-c->tx*e1;        uu[n]=0.0; vv[n]=1.0; n++;
 
     seg_nq = n / 4;
     tg_acct_n(TG_ACCT_BRANCH_VERGE, acct_si, 1);

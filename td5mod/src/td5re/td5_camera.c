@@ -2545,8 +2545,15 @@ void td5_camera_apply_view(int view)
         if (s_topdown > 0.0f) {
             TD5_Actor *a = camera_actor_for_view(0);
             if (a) {
+                /* TD5RE_CAM_TOPDOWN_BACKDIV: back-off = alt/BACKDIV. 20 (default)
+                 * ~= 2.9deg tilt (near-vertical map shot); smaller values tilt
+                 * the shot oblique (e.g. 2 -> ~27deg, 1 -> ~45deg) to see vertical
+                 * seams/lift from a raised angle. Dev-only, render-only. */
+                static float s_backdiv = -1.0f;
+                if (s_backdiv < 0.0f)
+                    s_backdiv = td5_env_float("TD5RE_CAM_TOPDOWN_BACKDIV", 20.0f, 0.5f, 1000.0f);
                 int alt  = (int)(s_topdown * 256.0f);      /* world units -> 24.8 */
-                int back = alt / 20;                        /* ~2.9deg tilt for a stable basis */
+                int back = (int)((float)alt / s_backdiv);   /* tilt for a stable basis */
                 int eye[3] = { a->world_pos.x, a->world_pos.y + alt, a->world_pos.z - back };
                 int tgt[3] = { a->world_pos.x, a->world_pos.y, a->world_pos.z };
                 SetCameraWorldPosition(eye);
