@@ -5327,14 +5327,46 @@ static int tg_side_blocked(int si, double side)
  * Render the pavement wherever the branch does not overlap this lateral, and drop
  * it only where the pavement would otherwise land on the bowed corridor. Same
  * spirit as item 7: keep the element continuous until the run actually ends.
- * TD5RE_R7_PRE_BRANCH_PAVE=0 restores the blanket fork-clear drop for an A/B. */
-static int tg_pavement_side_blocked(const TG_NodeList *nl, int si, double side)
+ * TD5RE_R7_PRE_BRANCH_PAVE=0 restores the blanket fork-clear drop for an A/B.
+ *
+ * [R8 CITY item 2] R7's rule is still BINARY -- it drops the whole slab the
+ * instant the corridor pokes ONE unit past the plain road edge. Measured on seed
+ * 99991 (r8city-diag, span 143): reach=3104 against half=3000, so the branch had
+ * bowed out 104 raw units into a 900-wide pavement and 796 units of it were
+ * still clear ground -- and the entire kerb vanished from 143 onward while the
+ * left kerb ran on. That is the user's "on span 143 the sidewalk stop spawning
+ * here": not a biome edge (R7 item 7) and not the blanket fork-clear block (R7
+ * BRANCH item 6, which this side already passes), but the successor threshold
+ * being a hairline.
+ *
+ * So the authority is a WIDTH, not a flag: the pavement keeps whatever lateral
+ * the corridor has not taken (sw minus the overlap) and is dropped only once
+ * what is left is too narrow to read as a kerb. The slab therefore TAPERS out
+ * over the spans where the branch peels away instead of ending on one span, and
+ * the run ends where the branch actually occupies the verge. tg_road_half_width
+ * is the plain carriageway, tg_carriageway_reach the main+branch envelope, both
+ * measured from the centreline, so their difference is exactly the bite the
+ * corridor takes out of this side's verge.
+ *
+ * Returns the usable width (0.0 = emit nothing on this side). Both the raised
+ * city slab and the out-of-town verge band ask this one function, so the two
+ * never disagree about where a pavement run ends.
+ * TD5RE_R8_CITY_PAVE_TAPER=0 restores R7's all-or-nothing drop for an A/B. */
+#define TD5_TG_PAVE_MIN_W   250.0   /* narrower than this is a sliver, not a kerb */
+
+static double tg_pavement_side_width(const TG_NodeList *nl, int si,
+                                     double side, double sw)
 {
-    if (!tg_branches_enabled() || side >= 0.0) return 0;
-    if (!tg_span_in_fork_clear(si)) return 0;
-    if (!td5_env_flag_on("TD5RE_R7_PRE_BRANCH_PAVE")) return 1;
-    return tg_carriageway_reach(nl, si, side)
-         > tg_road_half_width(nl, si) + 1.0;
+    double over;
+    if (!(sw > 0.0)) return 0.0;
+    if (!tg_branches_enabled() || side >= 0.0) return sw;
+    if (!tg_span_in_fork_clear(si)) return sw;
+    if (!td5_env_flag_on("TD5RE_R7_PRE_BRANCH_PAVE")) return 0.0;
+    over = tg_carriageway_reach(nl, si, side) - tg_road_half_width(nl, si);
+    if (over <= 1.0) return sw;              /* corridor not into the verge yet */
+    if (!td5_env_flag_on("TD5RE_R8_CITY_PAVE_TAPER")) return 0.0;   /* R7 rule */
+    sw -= over;
+    return (sw >= TD5_TG_PAVE_MIN_W) ? sw : 0.0;
 }
 
 /* Emit one prop billboard (prop-page index pp) beside span si on `side`, `gap`
@@ -7818,9 +7850,13 @@ static int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
 
     for (s = 0; s < 2; s++) {
         const double sg = s ? 1.0 : -1.0;
-        const double u_w = sw / (double)TD5_TG_SPAN_LENGTH;
+        /* [R8 CITY item 2] PER SIDE: the branch corridor eats into the right
+         * verge gradually, so the slab there narrows span by span rather than
+         * disappearing at the first unit of overlap. */
+        const double sw_s = tg_pavement_side_width(h->nl, h->si, sg, sw);
+        const double u_w = sw_s / (double)TD5_TG_SPAN_LENGTH;
         const double u_k = TD5_TG_KERB_H / (double)TD5_TG_SPAN_LENGTH;
-        if (tg_pavement_side_blocked(h->nl, h->si, sg)) continue;
+        if (!(sw_s > 0.0)) continue;
         /* [R6 CROSS item 1] The raised pavement STOPS at a road intersection.
          * Where this side opens onto a side-street mouth (the frontage is a gap
          * here), the slab used to run straight across the mouth at kerb height,
@@ -7836,10 +7872,10 @@ static int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
         tg_city_edge_frame(h->nl, h->si, sg, e);
 
         /* Top slab: near-in, near-out, far-out, far-in. */
-        q[0] = e[0];              q[1]  = e[1] + TD5_TG_KERB_H; q[2]  = e[2];
-        q[3] = e[0] + e[6] * sw;  q[4]  = e[1] + TD5_TG_KERB_H; q[5]  = e[2] + e[7] * sw;
-        q[6] = e[3] + e[8] * sw;  q[7]  = e[4] + TD5_TG_KERB_H; q[8]  = e[5] + e[9] * sw;
-        q[9] = e[3];              q[10] = e[4] + TD5_TG_KERB_H; q[11] = e[5];
+        q[0] = e[0];               q[1]  = e[1] + TD5_TG_KERB_H; q[2]  = e[2];
+        q[3] = e[0] + e[6] * sw_s; q[4]  = e[1] + TD5_TG_KERB_H; q[5]  = e[2] + e[7] * sw_s;
+        q[6] = e[3] + e[8] * sw_s; q[7]  = e[4] + TD5_TG_KERB_H; q[8]  = e[5] + e[9] * sw_s;
+        q[9] = e[3];               q[10] = e[4] + TD5_TG_KERB_H; q[11] = e[5];
         t[0] = 0.0; t[1] = (double)h->si;
         t[2] = u_w; t[3] = (double)h->si;
         t[4] = u_w; t[5] = (double)h->si + 1.0;
@@ -7881,21 +7917,24 @@ static int tg_city_emit_verge_band(const TG_FBHook *h, double bw)
 {
     double px[8], py[8], pz[8], uu[8], vv[8];
     double e[10], q[12], t[8];
-    const double u_w = bw / (double)TD5_TG_SPAN_LENGTH;
     int seg_page = TD5_TG_PAGE_SIDEWALK, seg_nq;
     int s, n = 0;
 
     for (s = 0; s < 2; s++) {
         const double sg = s ? 1.0 : -1.0;
-        if (tg_pavement_side_blocked(h->nl, h->si, sg)) continue;
+        /* [R8 CITY item 2] same width authority as the city slab: the band
+         * narrows into a fork instead of ending on one span. */
+        const double bw_s = tg_pavement_side_width(h->nl, h->si, sg, bw);
+        const double u_w = bw_s / (double)TD5_TG_SPAN_LENGTH;
+        if (!(bw_s > 0.0)) continue;
         tg_city_edge_frame(h->nl, h->si, sg, e);
 
         /* Same winding and the same isotropic UV as the city slab, so the two
          * tile identically where a biome changes mid-block. */
-        q[0] = e[0];             q[1]  = e[1] + TD5_TG_VERGE_LIFT; q[2]  = e[2];
-        q[3] = e[0] + e[6] * bw; q[4]  = e[1] + TD5_TG_VERGE_LIFT; q[5]  = e[2] + e[7] * bw;
-        q[6] = e[3] + e[8] * bw; q[7]  = e[4] + TD5_TG_VERGE_LIFT; q[8]  = e[5] + e[9] * bw;
-        q[9] = e[3];             q[10] = e[4] + TD5_TG_VERGE_LIFT; q[11] = e[5];
+        q[0] = e[0];               q[1]  = e[1] + TD5_TG_VERGE_LIFT; q[2]  = e[2];
+        q[3] = e[0] + e[6] * bw_s; q[4]  = e[1] + TD5_TG_VERGE_LIFT; q[5]  = e[2] + e[7] * bw_s;
+        q[6] = e[3] + e[8] * bw_s; q[7]  = e[4] + TD5_TG_VERGE_LIFT; q[8]  = e[5] + e[9] * bw_s;
+        q[9] = e[3];               q[10] = e[4] + TD5_TG_VERGE_LIFT; q[11] = e[5];
         t[0] = 0.0; t[1] = (double)h->si;
         t[2] = u_w; t[3] = (double)h->si;
         t[4] = u_w; t[5] = (double)h->si + 1.0;
@@ -7910,6 +7949,48 @@ static int tg_city_emit_verge_band(const TG_FBHook *h, double bw)
     h->moff[(*h->nmesh)++] = h->blk->len;
     return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
                               &seg_page, &seg_nq, 1);
+}
+
+/* [R8 CITY item 2] Per-span, per-side DIAGNOSTIC of every gate that can drop the
+ * raised pavement. Item 2 ("on span 143 the sidewalk stop spawning here") has the
+ * same SYMPTOM as R7 CITY item 7 (biome-edge ragged end) and R7 BRANCH item 6
+ * (pre-fork right-side gap), but span 143 is neither a biome edge nor an approach
+ * span on the branch side, so the mechanism must be measured rather than
+ * inherited. Dumps: paved / sidewalk width / fork-clear membership / the branch
+ * pavement block / the XSTOP facade gate / carriageway reach vs plain road half
+ * width -- i.e. every `continue` in tg_city_emit_sidewalk, per side, so the log
+ * names WHICH gate fired. Read-only, gated by TD5RE_R8_CITY_DIAG=1 and windowed
+ * around TD5RE_R8_CITY_DIAG_SPAN (+/- TD5RE_R8_CITY_DIAG_PAD) so race.log stays
+ * legible. */
+static void tg_r8_city_sidewalk_diag(const TG_FBHook *h)
+{
+    int tgt, pad, s;
+    if (!td5_env_flag_on("TD5RE_R8_CITY_DIAG")) return;
+    tgt = td5_env_int("TD5RE_R8_CITY_DIAG_SPAN", 143, 0, 100000);
+    pad = td5_env_int("TD5RE_R8_CITY_DIAG_PAD", 24, 0, 4000);
+    if (h->si < tgt - pad || h->si > tgt + pad) return;
+
+    for (s = 0; s < 2; s++) {
+        const double sg = s ? 1.0 : -1.0;
+        const int paved = tg_city_span_paved(h);
+        const double sw =
+            tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(h->si)]);
+        const double sw_s  = tg_pavement_side_width(h->nl, h->si, sg, sw);
+        const int built    = tg_facade_built(h->si, s);
+        const int xstop    = td5_env_flag_on("TD5RE_AUTOTRACK_XSTOP") && !built;
+        const int forkclr  = tg_span_in_fork_clear(h->si);
+        const int emitted  = paved && sw_s > 0.0 && !xstop;
+        TD5_LOG_I(LOG_TAG,
+            "r8city-diag: si=%d side=%s paved=%d sw=%.0f use=%.0f forkclear=%d "
+            "built=%d xstop=%d reach=%.0f half=%.0f park=%d -> %s",
+            h->si, s ? "L" : "R", paved, sw, sw_s, forkclr, built, xstop,
+            tg_carriageway_reach(h->nl, h->si, sg),
+            tg_road_half_width(h->nl, h->si), tg_block_is_park(h->si, s),
+            emitted ? "PAVED"
+                    : (!paved ? "drop:not-city"
+                       : !(sw_s > 0.0) ? "drop:branch-corridor"
+                       : "drop:xstop-gap"));
+    }
 }
 
 /* PEDESTRIAN RAILING along the KERB: one alpha-keyed plane per side, scenery is
@@ -8284,6 +8365,34 @@ static int tg_city_emit_backrows(const TG_FBHook *h, double sw)
          * the gap the cross-street asphalt (tg_city_emit_crossstreet) runs
          * through, and the ONLY place the block behind is actually visible. */
         if (gate && tg_facade_built(h->si, s)) continue;
+        /* [R8 CITY item 12] "avoid using city background texture when in the
+         * middle of a park." A gap is either a through STREET or a PARK, and the
+         * back row exists to fill the view down a street mouth. The park lawn
+         * (tg_block_emit_park) runs out to tg_city_crossst_reach -- sw + facade
+         * depth + TWO BACKROW_GAPs since R7 CROSS item 2 -- while row 0 of this
+         * emitter stands at sw + depth + ONE BACKROW_GAP, i.e. squarely INSIDE
+         * the lawn, so a city block was planted in the middle of the green.
+         * Confirmed by a matched-pose top-down A/B at span 115 on seed 99991
+         * with TD5RE_AUTOTRACK_PARKS=1: a dark building box sits on the lawn
+         * with backrows on and the lawn is clear with them off.
+         *
+         * This is a placement-validity rule of the same family as "no tree over
+         * water" (R7 FLORA item 18) and "no green median in a tunnel": the
+         * backdrop is not wrong, its CONTEXT is. So it is suppressed only where
+         * the gap is a park -- every street mouth keeps its receding block, and
+         * the frontage runs either side of the park are untouched. It also puts
+         * this emitter on the SAME park predicate the cross-street carriageway
+         * and the corner intersection already read, which is the invariant the
+         * park code documents ("a park and a side street are mutually exclusive
+         * on a given gap ... the single predicate both read").
+         * TD5RE_R8_CITY_PARK_BACKDROP=0 restores the block-in-the-park for an
+         * A/B. Parks are default OFF (TD5RE_AUTOTRACK_PARKS), so with stock
+         * settings this branch is unreachable and nothing changes. */
+        if (tg_block_is_park(h->si, s) &&
+            td5_env_flag_on("TD5RE_R8_CITY_PARK_BACKDROP")) {
+            tg_acct(TG_ACCT_R8_CITY, h->si);   /* backdrop refused: park gap */
+            continue;
+        }
         /* Street WIDTH CLASS (item 2). An avenue opens both kerbs and carries
          * traffic, so it reveals a deeper, taller block receding; a narrow
          * pedestrian side street reveals a single closer, lower row. Read-only
@@ -9316,6 +9425,8 @@ static int tg_emit_fb_city(const TG_FBHook *h)
     /* [R7 item 7] sw from the SAME hardened city edge tg_city_span_paved uses, so
      * the slab, its kerb height and the railing all agree on where the city is. */
     const double sw = tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(h->si)]);
+
+    tg_r8_city_sidewalk_diag(h);       /* [R8 CITY item 2] measure, don't guess */
 
     if (paved && td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS")) {
         if (!tg_city_emit_sidewalk(h, sw)) return 0;

@@ -32,6 +32,18 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 30 (auto-track city placement)" },
+    { CL_ITEM,    "FIXED: the pavement no longer vanishes on one" },
+    { CL_ITEM,    "  span as a fork opens. It now NARROWS to the" },
+    { CL_ITEM,    "  ground the branch road has not taken and ends" },
+    { CL_ITEM,    "  only where the branch really occupies the" },
+    { CL_ITEM,    "  verge (TD5RE_R8_CITY_PAVE_TAPER)." },
+    { CL_ITEM,    "FIXED: with roadside parks enabled, a city" },
+    { CL_ITEM,    "  building block no longer stands in the middle" },
+    { CL_ITEM,    "  of the park lawn. Street mouths keep their" },
+    { CL_ITEM,    "  receding block (TD5RE_R8_CITY_PARK_BACKDROP)." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 30 (auto-track on-road guard)" },
     { CL_ITEM,    "FIXED: buildings, background skyline and grass" },
     { CL_ITEM,    "  no longer render standing in the road. A new" },
