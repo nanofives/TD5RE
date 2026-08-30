@@ -32,6 +32,18 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 29 (auto-track bridges R6)" },
+    { CL_ITEM,    "FIXED: bridge piers floated in mid-air and stopped" },
+    { CL_ITEM,    "  short of the water -- they now run full height" },
+    { CL_ITEM,    "  from the deck down onto the riverbed." },
+    { CL_ITEM,    "NEW: bridge guardrails are see-through W-beam armco" },
+    { CL_ITEM,    "  (alpha-keyed), not a solid slab." },
+    { CL_ITEM,    "FIXED: grey tile patches over the water under a" },
+    { CL_ITEM,    "  bridge; the water reads as one continuous body." },
+    { CL_ITEM,    "NEW: bridges vary -- concrete, steel and stone" },
+    { CL_ITEM,    "  styles differ in piers, spacing and towers." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 29 (auto-track off-map, deep)" },
     { CL_ITEM,    "FIXED: on a branch corridor a car flung far off the" },
     { CL_ITEM,    "  map could stay lost -- the recovery only searched" },
