@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 30 (auto-track bridges/tunnels R7)" },
+    { CL_ITEM,    "FIXED: only water shows under a bridge now -- the" },
+    { CL_ITEM,    "  concrete bank tiles that sat above the river" },
+    { CL_ITEM,    "  across the run are submerged out of sight." },
+    { CL_ITEM,    "NEW: tunnel mouths get a proper concrete portal" },
+    { CL_ITEM,    "  facade (header + jambs) standing proud of the" },
+    { CL_ITEM,    "  cutting, not a thin grey beam." },
+    { CL_ITEM,    "FIXED: bridge pier faces no longer smear to flat" },
+    { CL_ITEM,    "  grey -- steel/stone/concrete detail reads now." },
+
     { CL_DATE,    "August 29 (auto-track tunnels)" },
     { CL_ITEM,    "FIXED: distant scenery no longer shows through a" },
     { CL_ITEM,    "  tunnel as grey slabs standing in the road." },
