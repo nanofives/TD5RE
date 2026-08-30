@@ -2545,13 +2545,30 @@ void td5_camera_apply_view(int view)
         if (s_topdown > 0.0f) {
             TD5_Actor *a = camera_actor_for_view(0);
             if (a) {
+                /* Optional OBLIQUE knobs (render-only, dev). Straight-down misses
+                 * anything under the deck (bridge piers reaching the riverbed);
+                 * a lateral offset + a dropped look-at gives a side elevation that
+                 * shows the pier full height and the water beneath. All default to
+                 * the plain top-down back-off so existing captures are unchanged. */
+                static float s_side = -1e9f, s_back = -1e9f, s_drop = -1e9f;
                 int alt  = (int)(s_topdown * 256.0f);      /* world units -> 24.8 */
-                int back = alt / 20;                        /* ~2.9deg tilt for a stable basis */
-                int eye[3] = { a->world_pos.x, a->world_pos.y + alt, a->world_pos.z - back };
-                int tgt[3] = { a->world_pos.x, a->world_pos.y, a->world_pos.z };
-                SetCameraWorldPosition(eye);
-                OrientCameraTowardTarget(tgt, 0);
-                return;
+                int back, side, drop;
+                if (s_side <= -1e8f) {
+                    s_side = td5_env_float("TD5RE_CAM_TOPDOWN_SIDE",   0.0f, -5000000.0f, 5000000.0f);
+                    s_back = td5_env_float("TD5RE_CAM_TOPDOWN_BACK",   0.0f, -5000000.0f, 5000000.0f);
+                    s_drop = td5_env_float("TD5RE_CAM_TOPDOWN_TGTDROP",0.0f, -5000000.0f, 5000000.0f);
+                }
+                side = (int)(s_side * 256.0f);
+                back = (s_back != 0.0f) ? (int)(s_back * 256.0f)
+                                        : alt / 20;         /* ~2.9deg tilt for a stable basis */
+                drop = (int)(s_drop * 256.0f);
+                {
+                    int eye[3] = { a->world_pos.x + side, a->world_pos.y + alt, a->world_pos.z - back };
+                    int tgt[3] = { a->world_pos.x, a->world_pos.y - drop, a->world_pos.z };
+                    SetCameraWorldPosition(eye);
+                    OrientCameraTowardTarget(tgt, 0);
+                    return;
+                }
             }
         }
     }

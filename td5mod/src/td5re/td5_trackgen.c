@@ -5223,6 +5223,16 @@ static double tg_bridge_deck_y(const TG_NodeList *nl, int si)
  * tg_sea_level_y already uses for the sea for exactly the same reason. */
 static double tg_bridge_water_y(const TG_NodeList *nl, int si)
 {
+    /* [R6 item 14] A bridge over a WATER biome crosses the SEA, so its water has
+     * to sit at the SAME level as the sea beyond the run. The deep dedicated
+     * "river" plane sat ~1000 units BELOW that sea (deck - CHASM vs biome-min -
+     * WATER_DROP), so where the two met at the run ends the surface stepped down
+     * -- half of "the water is not continuous". Matching sea level makes the
+     * water one continuous body and drags the gorge bed and the pier feet with it
+     * (both derive from here). Over a DRY biome there is no sea to match, so keep
+     * the deep gorge river. */
+    if (k_biomes[tg_biome_for_span(si)].water)
+        return tg_sea_level_y(nl, si);
     return tg_bridge_deck_y(nl, si) - TD5_TG_BRIDGE_CHASM - 300.0;
 }
 
@@ -5272,6 +5282,46 @@ static int tg_bridge_pier_page(void)
          ? TD5_TG_PAGE_R4_PIER : TD5_TG_PAGE_WALL;
 }
 
+/* [R6 item 17] "All bridges have pillars every few spans and they all look the
+ * same. I want more variety." Give each crossing a STYLE, keyed on the run index
+ * (like the tunnel lining variant) so a whole run is one style end to end and
+ * the four bridges on a track differ from one another:
+ *   0 CONCRETE  box-girder: paired square legs + a tower pair at the crown.
+ *   1 STEEL     slimmer, taller paired legs on a tighter pitch, extra cross
+ *               bracing, slim tall towers -- reads as a steel-truss viaduct.
+ *   2 MASONRY   one FAT round-ish pier on a wide pitch with an arch cap under
+ *               the deck and NO towers -- reads as a stone viaduct.
+ * TD5RE_AUTOTRACK_BRIDGE_VARIETY=0 forces style 0 (the pre-R6 single look). */
+#define TD5_TG_BRIDGE_STYLES 3
+static int tg_bridge_style(int si)
+{
+    unsigned int h;
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_BRIDGE_VARIETY")) return 0;
+    h = (unsigned)(si / TD5_TG_BRIDGE_RUN) * 2654435761u;
+    return (int)((h >> 12) % (unsigned)TD5_TG_BRIDGE_STYLES);
+}
+
+/* Structural page for a given style. Concrete keeps the R4 cast-concrete page;
+ * steel and masonry get their own R6 pages so the piers read differently, not
+ * just at a different size. Honours the same PIER_TEX A/B switch. */
+static int tg_bridge_pier_page_for(int style)
+{
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_BRIDGE_PIER_TEX"))
+        return TD5_TG_PAGE_WALL;
+    if (style == 1) return TD5_TG_PAGE_R6_BRIDGE + 1;   /* steel   */
+    if (style == 2) return TD5_TG_PAGE_R6_BRIDGE + 2;   /* masonry */
+    return TD5_TG_PAGE_R4_PIER;                          /* concrete*/
+}
+
+/* Pier PITCH (spans between piers) for a style: steel viaducts stand on a
+ * tighter grid, masonry arches on a wider one. */
+static int tg_bridge_pier_pitch(int style)
+{
+    if (style == 1) return 3;
+    if (style == 2) return 6;
+    return 4;
+}
+
 /* Clearance from the deck SURFACE down to the top of anything hanging under it.
  * Derived, not chosen: the girder is a 170 half-height box centred 260 below the
  * road, so its underside is at road - 430. 480 clears that with a margin, which
@@ -5303,7 +5353,9 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
     const double lift = n->y - ref;
     const int deliberate = tg_span_in_bridge_run(si);
     const double half = n->width * 0.5;
-    const int pier_page = tg_bridge_pier_page();
+    const int style = tg_bridge_style(si);            /* [R6 item 17] */
+    const int pier_page = tg_bridge_pier_page_for(style);
+    const int pitch = tg_bridge_pier_pitch(style);
     /* Deck level for the boxes: the strip surface, with the girder just under. */
     const double wy = deliberate ? tg_bridge_water_y(nl, si) : ref;
     int s0, s1, s;
@@ -5334,36 +5386,75 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
         tg_acct(TG_ACCT_BRIDGE, si);
     }
 
-    /* Piers every 4th span, dropping from the deck underside to the river bed.
+    /* Piers on the style's PITCH (item 17), dropping from the deck underside to
+     * the river bed (item 12).
      *
      * Reported: "bridge road should have a predetermined height, this will make
      * pillars not visible on the road surface during bridges". Root cause was
      * arithmetic, and it was exact rather than marginal: the pier was a box of
      * half-height h centred at n->y - h, so its TOP FACE landed at n->y -- the
      * road surface itself, coplanar with the deck. Every pier was drawn into the
-     * carriageway, z-fighting the tarmac it was supposed to be holding up.
-     *
-     * The fix is the run-wide determined height the report asks for, not a local
-     * nudge: hang the pier from tg_bridge_deck_y, the LOWEST road node in the
-     * crossing, less the girder depth. Because that reference is the run minimum
-     * it is at or below the road at every span in the run, so a pier top is
-     * below the carriageway everywhere -- including at the crown, where the
-     * raised-cosine hump puts the road a further BRIDGE_HEIGHT up. Reading n->y
-     * here was the same local-for-global mistake as the elevated-bridge gate. */
-    if ((si & 3) == 0) {
-        const double top = tg_bridge_deck_y(nl, si) - TD5_TG_BRIDGE_UNDER;
-        double h = (top - wy) * 0.5;
+     * carriageway, z-fighting the tarmac it was supposed to be holding up. See
+     * the item-12 note below for the height fix. */
+    if ((si % pitch) == 0) {
+        /* [R6 item 12] Piers span the LOCAL deck underside down INTO the bed.
+         *
+         * Was: top = run-minimum deck (tg_bridge_deck_y) - UNDER, bottom = water
+         * level. Two faults, both visible from the side (frame-verified): at the
+         * crown the deck sits up to BRIDGE_HEIGHT above the run minimum, so a pier
+         * topped out at the run min hung ~3000 units BELOW the deck underside --
+         * disconnected posts floating in the gorge, not supports. And the bottom
+         * stopped at the water SURFACE, 150 above the gorge bed, so it never
+         * reached the floor ("pillars are not reaching the floor").
+         *
+         * Now the top follows n->y (this span's carriageway) less UNDER, so it is
+         * always just below the local deck -- meets the girder at every span,
+         * crown included, and still can't break the road. The bottom drops to
+         * wy - 400, past the water surface and below the gorge bed (bed sits at
+         * wy - 150), so the pier visibly plants on the floor. */
+        const double top = n->y - TD5_TG_BRIDGE_UNDER;
+        const double bot = wy - 400.0;
+        double h = (top - bot) * 0.5;
         double cy;
         if (h < 150.0) h = 150.0;
         cy = top - h;
-        if (tg_bridge_struct_enabled()) {
-            /* Paired legs under the deck EDGES plus a brace between them. */
+        if (td5_env_flag_off("TD5RE_BRIDGE_DIAG"))
+            TD5_LOG_I(LOG_TAG,
+                "BRIDGEDIAG si=%d ny=%.0f deckmin=%.0f wy=%.0f "
+                "briverSurf=%.0f sea=%.0f pier_top=%.0f pier_bot=%.0f "
+                "gorge_bed_crown=%.0f",
+                si, n->y, tg_bridge_deck_y(nl, si), wy,
+                tg_bridge_water_y(nl, si) + 100.0, tg_sea_level_y(nl, si),
+                top, cy - h, tg_bridge_water_y(nl, si) - 150.0);
+        if (tg_bridge_struct_enabled() && style == 2) {
+            /* [R6 item 17] MASONRY: one FAT pier on a wide pitch, with a shallow
+             * arch cap under the deck that reads as the springing of a stone
+             * arch -- no leg pair, no towers (added below only for 0/1). */
+            if (!tg_emit_box_mesh(blk, n->x, cy, n->z,
+                                  620.0, h, 620.0, n->tx, n->tz,
+                                  pier_page, 3000.0, 0xFFFFFFFFu))
+                return 0;
+            (*added)++;
+            tg_acct(TG_ACCT_BRIDGE, si);
+            if (!tg_emit_box_mesh(blk, n->x, top - 140.0, n->z,
+                                  half * 0.9, 170.0, 360.0, n->tx, n->tz,
+                                  pier_page, 3000.0, 0xFFFFFFFFu))
+                return 0;
+            (*added)++;
+            tg_acct(TG_ACCT_BRIDGE, si);
+        } else if (tg_bridge_struct_enabled()) {
+            /* [R6 item 17] Paired legs under the deck EDGES. STEEL (style 1) legs
+             * are slimmer, set wider and get a SECOND (upper) cross-brace so the
+             * pier reads as a braced steel bent; CONCRETE (style 0) legs are
+             * stockier with a single brace. */
+            const double legw   = (style == 1) ? 200.0 : 300.0;
+            const double legpos = (style == 1) ? 0.85 : 0.70;
             for (s = 0; s < 2; s++) {
                 double side = s ? 1.0 : -1.0;
                 double lx = n->tz * side, lz = -n->tx * side;
-                if (!tg_emit_box_mesh(blk, n->x + lx * (half * 0.7),
-                                      cy, n->z + lz * (half * 0.7),
-                                      300.0, h, 300.0, n->tx, n->tz,
+                if (!tg_emit_box_mesh(blk, n->x + lx * (half * legpos),
+                                      cy, n->z + lz * (half * legpos),
+                                      legw, h, legw, n->tx, n->tz,
                                       pier_page, 3000.0, 0xFFFFFFFFu))
                     return 0;
                 (*added)++;
@@ -5371,12 +5462,21 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
             }
             /* Brace across the legs, a third of the way down the pier. */
             if (!tg_emit_box_mesh(blk, n->x, top - h * 0.55, n->z,
-                                  half * 0.7 + 300.0, 130.0, 200.0,
+                                  half * legpos + legw, 130.0, 200.0,
                                   n->tx, n->tz, pier_page, 3000.0,
                                   0xFFFFFFFFu))
                 return 0;
             (*added)++;
             tg_acct(TG_ACCT_BRIDGE, si);
+            if (style == 1) {                 /* second, upper brace for steel */
+                if (!tg_emit_box_mesh(blk, n->x, top - h * 0.22, n->z,
+                                      half * legpos + legw, 110.0, 180.0,
+                                      n->tx, n->tz, pier_page, 3000.0,
+                                      0xFFFFFFFFu))
+                    return 0;
+                (*added)++;
+                tg_acct(TG_ACCT_BRIDGE, si);
+            }
         } else {
             if (!tg_emit_box_mesh(blk, n->x, cy, n->z,
                                   450.0, h, 450.0,
@@ -5389,18 +5489,20 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
     }
 
     /* Towers: once per crossing, at the crown span, so a run has ONE gateway
-     * rather than a forest of posts. Height is a fixed 3400 above the deck --
-     * tall enough to be the silhouette from a chase camera without reaching the
-     * clip plane. */
-    if (deliberate && tg_bridge_struct_enabled() &&
+     * rather than a forest of posts. [R6 item 17] CONCRETE (0) gets a stocky
+     * gateway; STEEL (1) a slimmer, taller pylon pair; MASONRY (2) has NO towers
+     * (a stone viaduct is arches all the way, not a gateway) -- so the three
+     * crossings on a track read differently at distance. */
+    if (deliberate && tg_bridge_struct_enabled() && style != 2 &&
         si == s0 + (s1 - s0) / 2) {
-        const double th = 1700.0;              /* half-height of the tower box */
+        const double th = (style == 1) ? 2200.0 : 1700.0;  /* tower half-height */
+        const double tw = (style == 1) ? 170.0 : 240.0;    /* tower half-width  */
         for (s = 0; s < 2; s++) {
             double side = s ? 1.0 : -1.0;
             double lx = n->tz * side, lz = -n->tx * side;
             if (!tg_emit_box_mesh(blk, n->x + lx * (half + 300.0),
                                   n->y + th, n->z + lz * (half + 300.0),
-                                  240.0, th, 240.0, n->tx, n->tz,
+                                  tw, th, tw, n->tx, n->tz,
                                   pier_page, 3000.0, 0xFFFFFFFFu))
                 return 0;
             (*added)++;
@@ -5467,10 +5569,13 @@ static int tg_emit_bridge_rail_panel(TG_Buf *m,
      * that page sampled rotated and "is not a guardrail texture". The R4 page is
      * drawn in these axes -- rails run horizontally, posts periodically along.
      * [R5 item 17a] The R4 page still read as a CONCRETE barrier, not a
-     * guardrail; default to the R5 armco steel W-beam authored in the same axes.
-     * TD5RE_AUTOTRACK_ARMCO=0 restores the R4 concrete face for an A/B. */
+     * guardrail; the R5 armco was steel but still an OPAQUE slab.
+     * [R6 item 13] A guardrail with no extrusion has to be ALPHA-KEYED, not a
+     * solid panel -- real armco is mostly air. Default to the R6 W-beam page
+     * (type 1, transparent between beam and posts). TD5RE_AUTOTRACK_ARMCO=0
+     * restores the R5 opaque steel face for an A/B. */
     int seg_page = td5_env_flag_on("TD5RE_AUTOTRACK_ARMCO")
-                 ? TD5_TG_PAGE_R5_BRIDGE + 0 : TD5_TG_PAGE_R4_GUARDRAIL;
+                 ? TD5_TG_PAGE_R6_BRIDGE + 0 : TD5_TG_PAGE_R5_BRIDGE + 0;
     int seg_nq = 1;
 
     /* Quad: near-bottom, far-bottom, far-top, near-top. u across the page over
@@ -5579,7 +5684,7 @@ static int tg_emit_bridge_rails(const TG_NodeList *nl, int si,
      * matches the towers. TD5RE_AUTOTRACK_BRIDGE_OVERHEAD=0 removes the gantry. */
     if (tg_bridge_struct_enabled() && tg_bridge_overhead_enabled() &&
         (si % 6) == 0) {
-        const int pier_page = tg_bridge_pier_page();
+        const int pier_page = tg_bridge_pier_page_for(tg_bridge_style(si));
         const double ry = n0->y + TD5_TG_BRIDGE_RAIL_BASE
                         + TD5_TG_BRIDGE_RAIL_H + 1800.0;   /* clears traffic */
         /* Legs stand from the parapet top up to the beam. */
@@ -5630,7 +5735,11 @@ static int tg_emit_bridge_water(const TG_NodeList *nl, int si,
     if (!tg_water_span_clear(si)) return 1;
     n1 = &nl->v[si + 1];
     lx = n0->tz; lz = -n0->tx;              /* left unit */
-    wy = tg_bridge_water_y(nl, si) + 100.0; /* just under the banks */
+    /* [R6 item 14] Over a water biome sit EXACTLY at sea level so the river and
+     * the sea beyond the run are coplanar (no step). Over a dry biome the +100
+     * keeps the surface just under the banks as before. */
+    wy = tg_bridge_water_y(nl, si)
+       + (k_biomes[tg_biome_for_span(si)].water ? 0.0 : 100.0);
 
     px[0] = n0->x - lx * BW; pz[0] = n0->z - lz * BW;
     px[1] = n1->x - lx * BW; pz[1] = n1->z - lz * BW;
@@ -5889,6 +5998,19 @@ static void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
         if (bed < 0.0) bed = 0.0;
         p->d[0]  = phase * TD5_TG_GORGE_INSET;
         p->dy[0] = phase * bed;
+        /* [R6 item 14] The OUTER edge used to stay at the ordinary 24000 verge,
+         * so once the inner point had dropped to the bed the whole skirt was a
+         * wide near-flat GROUND (concrete-tile) shelf lying ACROSS the river --
+         * "patches of tile textures on top of the water", and the alternating
+         * grey/blue bands span-to-span that read as the water "not continuous"
+         * from above. Bring the outer edge in to a narrow submerged wall at the
+         * crown (~3000 past the inner point, at bed level, below the surface so
+         * the water plane hides it); the far-band is gated off over a bridge run,
+         * so beyond it there is only open water. Lerps back to the ordinary verge
+         * at the run ends (phase -> 0), staying continuous with the plain skirt. */
+        p->d[1]  = TD5_TG_GROUND_WIDTH
+                 + phase * (phase * TD5_TG_GORGE_INSET + 3000.0
+                            - TD5_TG_GROUND_WIDTH);
         p->dy[1] = TD5_TG_GROUND_DROP + phase * (bed - TD5_TG_GROUND_DROP);
         return;
     }
@@ -9339,8 +9461,12 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 /* Prop billboards: variable count/size, each records its own. */
                 if (!tg_emit_props(nl, si, b, &meshes, moff, &nmesh,
                                    TG_MAX_MESHES_PER_ENTRY)) { ok = 0; break; }
-                /* Sea plane on coastal runs. */
-                if (b->water &&
+                /* Sea plane on coastal runs. [R6 item 14] NOT on a bridge run:
+                 * the full-width bridge water already covers the surface there
+                 * (now at sea level), and laying the one-sided sea plane over it
+                 * too gave two overlapping surfaces -- the z-fighting seam and
+                 * the level step of "the water is not continuous". */
+                if (b->water && !tg_span_in_bridge_run(si) &&
                     !tg_emit_water(nl, si, tg_water_side(si), &meshes,
                                    moff, &nmesh)) { ok = 0; break; }
             }
@@ -10789,6 +10915,140 @@ static void tg_emit_texture_page_r5_guardrail(TG_Buf *out)
     }
 }
 
+/* [R6 item 13] ALPHA-KEYED W-beam guardrail -- the real fix for "guardrails
+ * that don't have extrusion should have a transparent background".
+ *
+ * The R4/R5 pages were opaque: a barrier with no extrusion painted as a solid
+ * slab can never read as a guardrail, because real armco is mostly AIR -- a
+ * corrugated beam on posts with sky between and below. This page is TYPE 1
+ * (index 0 = transparent key), so the thin one-quad rail shows the world through
+ * the gaps: a W-beam across the middle, vertical posts at a road pitch, and open
+ * air above, below and between them.
+ *
+ * Same axes as the R4/R5 pages (page-X = barrier HEIGHT 0=deck..63=top, page-Y
+ * = along the road) so the rail panel UVs are unchanged. The general rule the
+ * user stated applies beyond bridges; the sidewalk/branch rail pages are owned
+ * by other areas and should move to this same alpha-keyed shape. */
+static void tg_emit_texture_page_r6_guardrail_alpha(TG_Buf *out)
+{
+    unsigned int rng = 0x6A1CD00Du;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 1);                                    /* 1 = alpha-keyed */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* index 0 = transparent key (magenta, never drawn); 1..3 dark steel edge/
+     * post shadow, 4..11 mid galvanized steel, 12..15 bright spangle. Cool
+     * (b >= g >= r) like the R5 armco so lit/shadowed rails still match. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v;
+        if (i == 0) { tg_put_u8(out, 255); tg_put_u8(out, 0); tg_put_u8(out, 255); continue; }
+        if (i < 4)       v = 74 + i * 10;
+        else if (i < 12) v = 132 + (i - 4) * 9;
+        else             v = 212 + (i - 12) * 11;
+        if (v > 255) v = 255;
+        tg_put_u8(out, (unsigned)v);                            /* b (coolest) */
+        tg_put_u8(out, (unsigned)(v > 6 ? v - 6 : 0));          /* g           */
+        tg_put_u8(out, (unsigned)(v > 12 ? v - 12 : 0));        /* r           */
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;   /* barrier HEIGHT, 0=deck..63=top */
+        const int y = i / TD5_TG_TEX_DIM;   /* along the road                 */
+        const int post = (y % 18) < 3;            /* vertical post at a pitch  */
+        const int beam = (x >= 16 && x <= 52);    /* the W-beam's vertical run */
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if (beam) {
+            if ((x >= 20 && x <= 24) || (x >= 44 && x <= 48))
+                idx = 12 + (int)((rng >> 16) % 4);   /* the two W ridge crests */
+            else if (x == 34 || x == 16 || x == 52)
+                idx = 1 + (int)((rng >> 16) % 2);    /* centre valley + edges  */
+            else
+                idx = 4 + (int)((rng >> 16) % 8);    /* steel body             */
+        } else if (post) {
+            idx = 1 + (int)((rng >> 16) % 3);        /* post above/below beam  */
+        } else {
+            idx = 0;                                 /* transparent air        */
+        }
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
+/* [R6 item 17] STEEL pier/tower face -- cool blue-grey plate steel with dark
+ * I-beam flange shadows down the edges and centre and a rivet grid, so a
+ * steel-style crossing reads as a braced viaduct, not cast concrete. Opaque. */
+static void tg_emit_texture_page_r6_pier_steel(TG_Buf *out)
+{
+    unsigned int rng = 0x53EE1002u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v = (i < 4) ? (60 + i * 10)
+              : (i < 12) ? (120 + (i - 4) * 10)
+                         : (210 + (i - 12) * 11);
+        if (v > 255) v = 255;
+        tg_put_u8(out, (unsigned)v);                          /* b (coolest) */
+        tg_put_u8(out, (unsigned)(v > 4 ? v - 4 : 0));        /* g           */
+        tg_put_u8(out, (unsigned)(v > 10 ? v - 10 : 0));      /* r           */
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if (x < 6 || x > 57 || (x >= 30 && x <= 33))
+            idx = (int)((rng >> 16) % 4);            /* I-beam flange shadow */
+        else if ((x % 8) == 0 && (y % 8) == 0)
+            idx = 12 + (int)((rng >> 16) % 4);       /* rivet head highlight */
+        else
+            idx = 4 + (int)((rng >> 16) % 8);        /* web steel            */
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
+/* [R6 item 17] MASONRY pier face -- warm sandstone ashlar in staggered courses
+ * (mortar lines every few rows, vertical joints offset course to course), so a
+ * stone-style crossing reads as a masonry viaduct. Opaque. */
+static void tg_emit_texture_page_r6_pier_stone(TG_Buf *out)
+{
+    unsigned int rng = 0x57021ACEu;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* warm sandstone, r >= g >= b. 0..2 mortar shadow, 3..15 stone ramp. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int base = (i < 3) ? (70 + i * 10) : (120 + (i - 3) * 10);
+        if (base > 255) base = 255;
+        tg_put_u8(out, (unsigned)(base > 30 ? base - 30 : 0));   /* b */
+        tg_put_u8(out, (unsigned)(base > 14 ? base - 14 : 0));   /* g */
+        tg_put_u8(out, (unsigned)base);                          /* r */
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;
+        const int course = y / 10;
+        const int joint  = ((x + (course & 1) * 8) % 16) < 1;   /* staggered */
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if ((y % 10) < 1 || joint)
+            idx = (int)((rng >> 16) % 3);            /* mortar line */
+        else
+            idx = 3 + (int)((rng >> 16) % 13);       /* stone face  */
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 /* Terrain: 0 = SNOW ground, 1 = distant HILL / mountain flank.
  *
  * Both follow the rule the GROUND page comment sets out: NO structure and no
@@ -11171,6 +11431,11 @@ static int tg_emit_textures(TG_Buf *out)
     tg_emit_texture_page_r4_coast(&pages[TD5_TG_PAGE_R4_COAST]);
     /* [R5 item 17a] armco steel W-beam guardrail (replaces the R4 concrete). */
     tg_emit_texture_page_r5_guardrail(&pages[TD5_TG_PAGE_R5_BRIDGE + 0]);
+    /* [R6 item 13] alpha-keyed W-beam guardrail (transparent between beam/posts). */
+    tg_emit_texture_page_r6_guardrail_alpha(&pages[TD5_TG_PAGE_R6_BRIDGE + 0]);
+    /* [R6 item 17] per-style pier faces: steel plate + masonry ashlar. */
+    tg_emit_texture_page_r6_pier_steel(&pages[TD5_TG_PAGE_R6_BRIDGE + 1]);
+    tg_emit_texture_page_r6_pier_stone(&pages[TD5_TG_PAGE_R6_BRIDGE + 2]);
     /* [R4 CROSS item 9] cross-street asphalt with a longitudinal centre line. */
     tg_emit_texture_page_r4_cross(&pages[TD5_TG_PAGE_R4_CROSS + 0]);
     /* [R5 STRUCT item 1] solid concrete leg-face page for the gantry uprights. */
