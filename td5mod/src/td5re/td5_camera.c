@@ -2549,7 +2549,8 @@ void td5_camera_apply_view(int view)
                  * anything under the deck (bridge piers reaching the riverbed);
                  * a lateral offset + a dropped look-at gives a side elevation that
                  * shows the pier full height and the water beneath. All default to
-                 * the plain top-down back-off so existing captures are unchanged. */
+                 * the plain top-down back-off so existing captures are unchanged.
+                 *
                  * TD5RE_CAM_TOPDOWN_BACKDIV expresses the same back-off as a
                  * DIVISOR of the altitude instead of absolute units: 20 (default)
                  * ~= 2.9deg (near-vertical map shot), 2 -> ~27deg, 1 -> ~45deg,
