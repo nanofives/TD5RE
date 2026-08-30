@@ -34,6 +34,7 @@
 #include "td5_tg_real_tex_r7city.h"   /* [R7 item 4] more city facade variety */
 #include "td5_tg_real_tex_r8var.h"    /* [R8 G1] facades, banners, guardrails */
 #include "td5_tg_furniture_tex.h" /* real TD5 lamp/railing/banner pages     */
+#include "td5_tg_props_tex.h"     /* [R9 INFRA] TD6 street-furniture pages  */
 #include "td5re.h"
 
 #include <stdio.h>
@@ -518,6 +519,22 @@ static int tg_road_page(int si);
  * street-furniture meshes in re/assets/props/ that nothing currently places. */
 #define TD5_TG_PAGE_R9_INFRA  (TD5_TG_PAGE_R9_BASE + 62)
 #define TD5_TG_R9_INFRA_N     14
+
+/* One page per street-furniture tile in td5_tg_props_tex.h, in that header's
+ * own order (its PAGES table is append-only for exactly this reason). The
+ * assert below is the seam contract: if the header ever grows past the 14 slots
+ * this area reserved, the build stops instead of quietly walking into the next
+ * round's block. */
+enum {
+    TG_INFRA_CRATE = 0, TG_INFRA_CRATEFRG, TG_INFRA_CARDBOX,
+    TG_INFRA_BINBODY,   TG_INFRA_BINLID,   TG_INFRA_PHONE,
+    TG_INFRA_BENCH,     TG_INFRA_BENCHEND, TG_INFRA_CANOPY,
+    TG_INFRA_WORKY,     TG_INFRA_REDTAPE,  TG_INFRA_SIGN,
+    TG_INFRA_RICKSHAW
+};
+#define TD5_TG_INFRA_PAGE(i)  (TD5_TG_PAGE_R9_INFRA + (i))
+typedef char tg_infra_pages_fit[(TD5_TG_PROPS_TEX_COUNT <= TD5_TG_R9_INFRA_N)
+                                ? 1 : -1];
 
 #define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R9_BASE + 78)
 
@@ -11807,6 +11824,465 @@ static int tg_emit_fb_park_trees(const TG_FBHook *h)
         return 1;
     }
 }
+/* ===================== [R9 INFRA] STREET FURNITURE =====================
+ * The deferred-backlog item with the best ratio of visible density to risk:
+ * twelve breakable street-furniture textures were extracted from TD6 in June
+ * (re/assets/props/, extract_td6_prop_meshes.py) and NOTHING in the generator
+ * ever placed one. td5_tg_props_tex.h now carries thirteen 64x64 pages mined
+ * from those atlases; this places them.
+ *
+ * FORM. A bin, a crate and a phone box are read from a few metres away at
+ * eye level, which is exactly where a camera-facing billboard gives itself
+ * away, so these are BOXES: four sides and a lid, in one mesh with three
+ * texture segments (ends / long sides / top) so a bench can carry its ornate
+ * cast-iron end on the ends and its slats on the seat. Only the genuinely
+ * flat-fronted pieces (a road sign, a barrier plank, a rickshaw) stay
+ * billboards, where facing the camera is correct rather than a shortcut.
+ *
+ * PLACEMENT. Furniture stands ON the pavement where a biome has one (city and
+ * its relatives) and on the verge where it does not, always outboard of
+ * tg_carriageway_clear_gap so a fork's bowed corridor pushes it out with the
+ * rest of the scenery. It is NOT exempted from the R7 on-road guard: if the
+ * guard eats a bin, the bin was in the road and the guard was right.
+ *
+ * MENU. What stands beside a road is a property of the place: bins, signs and
+ * phone boxes on a city pavement, a rickshaw only in ORIENTAL, crates and
+ * cardboard in INDUSTRIAL, a bench on a COAST promenade, roadworks anywhere.
+ * Knob TD5RE_R9_INFRA_PROPS (default ON), accounted TG_ACCT_R9_INFRA. */
+
+/* Raw world units per metre: TD5_TG_LANE_WIDTH (1500) over a real 3.65 m lane.
+ * Every size below is written as metres * this, so the furniture is at human
+ * scale beside the road rather than at whatever looked right in a screenshot --
+ * the mistake that made spectators 3.4 m tall until 2026-08-26. */
+#define TD5_TG_INFRA_M   411.0
+
+/* Both of this area's deliverables share ONE reserved accounting slot, so the
+ * element inventory alone cannot say which of them fired. These counters carry
+ * the split, logged as their own line at the end of the build -- an explicit
+ * number in race.log rather than a second area's enum slot borrowed. Reset per
+ * build, alongside s_acct_count. */
+static long s_r9_infra_props;      /* furniture pieces emitted */
+static long s_r9_infra_ponds;      /* pond sheets emitted      */
+
+/* page_end / page_side / page_top: the three texture segments of the box, or
+ * -1 in page_top to mean "billboard, page_side is the page". w = across the
+ * road, d = along it, hgt = up; lift raises the piece off its footing (an
+ * awning hangs, a sign sits on a post we do not model). */
+typedef struct {
+    int    page_end, page_side, page_top;
+    double w, hgt, d, lift;
+} TG_InfraProp;
+
+enum {
+    IP_BIN = 0, IP_CRATE, IP_CRATEFRG, IP_CARDBOX, IP_PHONE,
+    IP_BENCH, IP_CANOPY, IP_WORKY, IP_REDTAPE, IP_SIGN, IP_RICKSHAW,
+    IP_COUNT
+};
+
+/* TD5RE_R9_INFRA_REPORT=1 names every piece as it is placed. The element
+ * inventory proves the EMITTER fired; this says WHICH piece stands WHERE, which
+ * is what lets a frame be aimed at a real placement instead of a guessed span
+ * (a frame of an empty verge proves nothing about a class). Capped only so a
+ * pathological track cannot fill the log; the cap sits above any real count. */
+static const char *const k_infra_names[IP_COUNT] = {
+    "bin", "crate", "crate-fragile", "cardboard-box", "phone-box",
+    "bench", "awning", "roadworks", "barrier-plank", "road-sign", "rickshaw"
+};
+#define TD5_TG_INFRA_REPORT_MAX 3000
+static int s_r9_infra_reported;
+
+static const TG_InfraProp k_infra_props[IP_COUNT] = {
+    /* bin: 0.55 m across, 1.05 m tall, lid page on top */
+    { TG_INFRA_BINBODY, TG_INFRA_BINBODY, TG_INFRA_BINLID,
+      0.55 * TD5_TG_INFRA_M, 1.05 * TD5_TG_INFRA_M, 0.55 * TD5_TG_INFRA_M, 0.0 },
+    /* crate: 0.9 m cube */
+    { TG_INFRA_CRATE, TG_INFRA_CRATE, TG_INFRA_CRATE,
+      0.90 * TD5_TG_INFRA_M, 0.90 * TD5_TG_INFRA_M, 0.90 * TD5_TG_INFRA_M, 0.0 },
+    /* stencilled crate, same box, different face */
+    { TG_INFRA_CRATEFRG, TG_INFRA_CRATEFRG, TG_INFRA_CRATE,
+      0.85 * TD5_TG_INFRA_M, 0.85 * TD5_TG_INFRA_M, 0.85 * TD5_TG_INFRA_M, 0.0 },
+    /* cardboard box: smaller, stacked next to the crates */
+    { TG_INFRA_CARDBOX, TG_INFRA_CARDBOX, TG_INFRA_CARDBOX,
+      0.60 * TD5_TG_INFRA_M, 0.60 * TD5_TG_INFRA_M, 0.60 * TD5_TG_INFRA_M, 0.0 },
+    /* phone box: 0.9 x 0.9 footprint, 2.4 m tall */
+    { TG_INFRA_PHONE, TG_INFRA_PHONE, TG_INFRA_PHONE,
+      0.90 * TD5_TG_INFRA_M, 2.40 * TD5_TG_INFRA_M, 0.90 * TD5_TG_INFRA_M, 0.0 },
+    /* bench: ornate ends, slatted seat, 1.7 m along the pavement */
+    { TG_INFRA_BENCHEND, TG_INFRA_BENCH, TG_INFRA_BENCH,
+      0.50 * TD5_TG_INFRA_M, 0.85 * TD5_TG_INFRA_M, 1.70 * TD5_TG_INFRA_M, 0.0 },
+    /* shop awning: hangs 2.2 m up, 2.4 m along the frontage */
+    { TG_INFRA_CANOPY, TG_INFRA_CANOPY, TG_INFRA_CANOPY,
+      1.10 * TD5_TG_INFRA_M, 0.45 * TD5_TG_INFRA_M, 2.40 * TD5_TG_INFRA_M,
+      2.20 * TD5_TG_INFRA_M },
+    /* roadworks barrier: banded, 2.6 m along, waist high */
+    { TG_INFRA_WORKY, TG_INFRA_WORKY, TG_INFRA_WORKY,
+      0.30 * TD5_TG_INFRA_M, 1.00 * TD5_TG_INFRA_M, 2.60 * TD5_TG_INFRA_M, 0.0 },
+    /* barrier plank: flat, so a billboard is the honest form */
+    { -1, TG_INFRA_REDTAPE, -1,
+      2.60 * TD5_TG_INFRA_M, 1.10 * TD5_TG_INFRA_M, 0.0, 0.0 },
+    /* road sign: flat disc on a post we do not model, so it is lifted */
+    { -1, TG_INFRA_SIGN, -1,
+      0.80 * TD5_TG_INFRA_M, 0.80 * TD5_TG_INFRA_M, 0.0, 1.90 * TD5_TG_INFRA_M },
+    /* rickshaw: a cutout of a shafted cart, ORIENTAL only */
+    { -1, TG_INFRA_RICKSHAW, -1,
+      2.10 * TD5_TG_INFRA_M, 1.80 * TD5_TG_INFRA_M, 0.0, 0.0 }
+};
+
+/* One furniture BOX: four upright faces plus a lid, written as a single mesh
+ * with three texture segments in vertex order (2 end quads, 2 side quads, 1
+ * top). Scenery is submitted CULL_NONE, so the winding only has to be
+ * self-consistent. `ax/az` is the along-road unit and `lx/lz` the outward
+ * lateral one, so a box on a curve sits square to the kerb it stands on. */
+static int tg_infra_box(const TG_FBHook *h, const TG_InfraProp *P,
+                        double cx, double base_y, double cz,
+                        double ax, double az, double lx, double lz)
+{
+    double px[20], py[20], pz[20], uu[20], vv[20];
+    const double hw = P->w * 0.5, hd = P->d * 0.5;
+    const double y0 = base_y + P->lift, y1 = y0 + P->hgt;
+    int seg_page[3], seg_nq[3], n = 0, e, s;
+
+    /* Corner offsets in (lateral, along) order: 0 = -w -d, 1 = +w -d,
+     * 2 = +w +d, 3 = -w +d, walked anticlockwise seen from above. */
+    static const double cl[4] = { -1.0,  1.0, 1.0, -1.0 };
+    static const double cd[4] = { -1.0, -1.0, 1.0,  1.0 };
+    double kx[4], kz[4];
+
+    for (e = 0; e < 4; e++) {
+        kx[e] = cx + lx * (cl[e] * hw) + ax * (cd[e] * hd);
+        kz[e] = cz + lz * (cl[e] * hw) + az * (cd[e] * hd);
+    }
+    /* Faces in segment order: the two ENDS (spanning the lateral axis) first,
+     * then the two long SIDES, then the lid. Edge e joins corner e to e+1, so
+     * edges 0 and 2 are the ends and 1 and 3 the sides. */
+    for (s = 0; s < 2; s++) {
+        for (e = s; e < 4; e += 2) {
+            const int f = (e + 1) & 3;
+            px[n] = kx[e]; py[n] = y0; pz[n] = kz[e]; uu[n] = 0.0; vv[n] = 1.0; n++;
+            px[n] = kx[f]; py[n] = y0; pz[n] = kz[f]; uu[n] = 1.0; vv[n] = 1.0; n++;
+            px[n] = kx[f]; py[n] = y1; pz[n] = kz[f]; uu[n] = 1.0; vv[n] = 0.0; n++;
+            px[n] = kx[e]; py[n] = y1; pz[n] = kz[e]; uu[n] = 0.0; vv[n] = 0.0; n++;
+        }
+    }
+    for (e = 0; e < 4; e++) {
+        static const double tu[4] = { 0.0, 1.0, 1.0, 0.0 };
+        static const double tv[4] = { 0.0, 0.0, 1.0, 1.0 };
+        px[n] = kx[e]; py[n] = y1; pz[n] = kz[e];
+        uu[n] = tu[e]; vv[n] = tv[e]; n++;
+    }
+    seg_page[0] = TD5_TG_INFRA_PAGE(P->page_end);  seg_nq[0] = 2;
+    seg_page[1] = TD5_TG_INFRA_PAGE(P->page_side); seg_nq[1] = 2;
+    seg_page[2] = TD5_TG_INFRA_PAGE(P->page_top);  seg_nq[2] = 1;
+
+    h->moff[*h->nmesh] = h->blk->len;
+    if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, seg_page, seg_nq, 3))
+        return 0;
+    (*h->nmesh)++;
+    tg_acct(TG_ACCT_R9_INFRA, h->si);
+    s_r9_infra_props++;
+    return 1;
+}
+
+/* One furniture piece, box or billboard, at `gap` out from the road edge. */
+static int tg_infra_place(const TG_FBHook *h, int kind, double side,
+                          double gap, double base_y)
+{
+    const TG_InfraProp *P = &k_infra_props[kind];
+    const TG_NodeList *nl = h->nl;
+    const TG_Node *n = &nl->v[h->si];
+    const double lx = n->tz * side, lz = -n->tx * side;
+    const double ax = n->tx, az = n->tz;
+    double out, cx, cz;
+
+    if (tg_side_blocked(h->si, side)) return 1;
+    if (*h->nmesh + 1 >= h->maxmesh)  return 1;   /* budget, not an error */
+
+    /* Push the setback out past any branch carriageway bowing into this
+     * lateral, exactly as the pavement and the trees do. The half-width of the
+     * piece is added so the FOOTPRINT clears, not just its centre. */
+    out = tg_carriageway_clear_gap(nl, h->si, side, gap + P->w * 0.5,
+                                   TD5_TG_CARRIAGEWAY_MARGIN);
+    cx = n->x + lx * (n->width * 0.5 + out);
+    cz = n->z + lz * (n->width * 0.5 + out);
+
+    if (P->page_top < 0) {
+        size_t b0 = h->blk->len;
+        h->moff[*h->nmesh] = b0;
+        if (!tg_emit_billboard_mesh(h->blk, cx, base_y + P->lift, cz,
+                                    P->w * 0.5, P->hgt,
+                                    TD5_TG_INFRA_PAGE(P->page_side), 1))
+            return 0;
+        if (h->blk->len > b0) {
+            (*h->nmesh)++;
+            tg_acct(TG_ACCT_R9_INFRA, h->si);
+            s_r9_infra_props++;
+        }
+        return 1;
+    }
+    return tg_infra_box(h, P, cx, base_y, cz, ax, az, lx, lz);
+}
+
+/* The menu for a biome: which pieces belong beside THIS road, in the order a
+ * per-span hash picks from. Returns the count written into `out`. Kept as a
+ * function rather than a column in k_biomes so the shared biome table stays a
+ * single definition, matched on name the way tg_people_density is. */
+static int tg_infra_menu(const TG_Biome *b, int paved, int *out)
+{
+    int n = 0;
+
+    /* BIOME FIRST, pavement second. The first cut had it the other way round
+     * and the ORIENTAL and INDUSTRIAL branches sat INSIDE the paved arm -- but
+     * ORIENTAL is a billboard biome here, so tg_city_sidewalk_w returns 0 for
+     * it and that whole arm was unreachable. The rickshaw, the piece with the
+     * strongest biome tie on the list, was never placed once on either seed.
+     * Caught by the per-piece report, not by the mesh count, which was happily
+     * counting 546 pieces the entire time -- the round's own method note that a
+     * count going up is not evidence of correct placement. */
+    if (!strcmp(b->name, "ORIENTAL")) {
+        out[n++] = IP_RICKSHAW;
+        out[n++] = IP_CRATE;
+        out[n++] = IP_SIGN;
+        out[n++] = IP_RICKSHAW;
+        if (paved) { out[n++] = IP_BIN; out[n++] = IP_CANOPY; }
+        return n;
+    }
+    if (!strcmp(b->name, "INDUSTRIAL")) {
+        out[n++] = IP_CRATE;
+        out[n++] = IP_CRATEFRG;
+        out[n++] = IP_CARDBOX;
+        out[n++] = IP_SIGN;
+        if (paved) out[n++] = IP_BIN;
+        return n;
+    }
+    if (paved) {   /* CITY and any other biome with a real pavement */
+        out[n++] = IP_BIN;
+        out[n++] = IP_SIGN;
+        out[n++] = IP_BIN;                        /* bins are the common case */
+        out[n++] = IP_PHONE;
+        out[n++] = IP_BENCH;
+        out[n++] = IP_CANOPY;                     /* hangs off a frontage */
+        return n;
+    }
+    /* Unpaved: a verge, not a pavement. Only what plausibly stands on grass,
+     * so no awning (it needs a shopfront to hang from) and no phone box. */
+    if (!strcmp(b->name, "COAST")) {
+        out[n++] = IP_BENCH;
+        out[n++] = IP_SIGN;
+        out[n++] = IP_BIN;
+    } else {
+        out[n++] = IP_SIGN;
+        out[n++] = IP_CRATE;
+        out[n++] = IP_BENCH;
+    }
+    return n;
+}
+
+/* ===================== [R9 INFRA] PONDS =====================
+ * Asked for in ROUND 5 and unbuilt for four rounds. Small standing water away
+ * from the road in the green biomes.
+ *
+ * IT REUSES THE WATER PLANE, it does not add a second water system: the same
+ * TD5_TG_PAGE_WATER, the same world-space UV convention as tg_emit_water, and
+ * the same TG_ACCT_WATER kind in the element inventory, so a pond is a water
+ * surface as far as every other consumer is concerned.
+ *
+ * WHY IT IS A SHEET AND NOT A BASIN. There is no terrain-carving pass in this
+ * generator -- the ground is a skirt profile (tg_ground_side), authored, not
+ * sculpted -- so a pond sunk INTO it would be underneath the ground and
+ * invisible, which is the failure mode that looks like a working feature in a
+ * mesh count. What is buildable honestly is a sheet of shallow water LYING ON
+ * flat ground, so the pond is gated on the terrain under its whole footprint
+ * being flat (every sampled corner within TD5_TG_POND_FLAT of the others) and
+ * sits TD5_TG_POND_LIFT above it. On a slope it simply does not appear.
+ *
+ * A basin needs the terrain profile to gain a per-span depression, which is
+ * TOPO's authority this round, not INFRA's -- noted here as the design step a
+ * later round would take rather than half-built now. */
+#define TD5_TG_POND_LIFT    10.0    /* sheet clear of the ground, world units */
+#define TD5_TG_POND_FLAT   130.0    /* max ground variation under a pond      */
+#define TD5_TG_POND_NEAR  2600.0    /* inner edge, out from the road edge     */
+#define TD5_TG_POND_FAR   7200.0    /* outer edge                             */
+
+/* Drop below road level of the terrain at distance `d` out from the road edge,
+ * interpolated along the side's cross-section. Same walk tg_flora_plant does
+ * for a tree trunk; kept local so the flora rule stays one owner's code. */
+static double tg_infra_ground_dy(const TG_NodeList *nl, int si, double side,
+                                 double d, double water_side)
+{
+    TG_GroundProf p;
+    int k;
+
+    tg_ground_side(nl, si, side > 0.0, water_side, &p);
+    if (p.n <= 0)              return 0.0;
+    if (d <= p.d[0])           return p.dy[0];
+    if (d >= p.d[p.n - 1])     return p.dy[p.n - 1];
+    for (k = 0; k + 1 < p.n; k++)
+        if (d <= p.d[k + 1]) {
+            const double t = (d - p.d[k]) / (p.d[k + 1] - p.d[k]);
+            return p.dy[k] + t * (p.dy[k + 1] - p.dy[k]);
+        }
+    return p.dy[p.n - 1];
+}
+
+/* Do the green biomes want a pond here? Ponds come in ones, not runs -- a
+ * puddle chain along a verge would read as a leak, not as landscape. */
+static int tg_pond_here(const TG_Biome *b, int si)
+{
+    if (b->water)               return 0;   /* already beside sea or river */
+    if (tg_city_sidewalk_w(b) > 0.0) return 0;  /* not on a paved street   */
+    if (strcmp(b->name, "FIELDS") && strcmp(b->name, "FOREST")
+        && strcmp(b->name, "ALPINE")) return 0;
+    return (((unsigned)si * 0x1B873593u) >> 26) == 0u;   /* ~1 span in 64 */
+}
+
+static int tg_emit_pond(const TG_FBHook *h)
+{
+    const TG_NodeList *nl = h->nl;
+    const int si = h->si;
+    const TG_Node *n0 = &nl->v[si];
+    const TG_Node *n1 = &nl->v[si + 1];
+    const unsigned int hh = (unsigned)si * 0x1B873593u;
+    const double side = (hh & 0x100u) ? 1.0 : -1.0;
+    const double lx0 = n0->tz * side, lz0 = -n0->tx * side;
+    const double lx1 = n1->tz * side, lz1 = -n1->tx * side;
+    double px[4], py[4], pz[4], uu[4], vv[4];
+    double dy[4], lo, hi, near_d, far_d, e0, e1, y;
+    int i, seg_page = TD5_TG_PAGE_WATER, seg_nq = 1;
+
+    if (!td5_env_flag_on("TD5RE_R9_INFRA_PONDS")) return 1;
+    if (!tg_pond_here(h->b, si))    return 1;
+    if (tg_side_blocked(si, side))  return 1;
+    if (*h->nmesh + 1 >= h->maxmesh) return 1;
+
+    /* Push the near edge out past any branch corridor bowing into this
+     * lateral, and carry the same push to the far edge so the sheet keeps its
+     * size instead of being squeezed to a stripe. */
+    near_d = tg_carriageway_clear_gap(nl, si, side, TD5_TG_POND_NEAR,
+                                      TD5_TG_CARRIAGEWAY_MARGIN);
+    far_d  = near_d + (TD5_TG_POND_FAR - TD5_TG_POND_NEAR);
+
+    dy[0] = tg_infra_ground_dy(nl, si,     side, near_d, 0.0);
+    dy[1] = tg_infra_ground_dy(nl, si + 1, side, near_d, 0.0);
+    dy[2] = tg_infra_ground_dy(nl, si + 1, side, far_d,  0.0);
+    dy[3] = tg_infra_ground_dy(nl, si,     side, far_d,  0.0);
+    lo = hi = dy[0];
+    for (i = 1; i < 4; i++) {
+        if (dy[i] < lo) lo = dy[i];
+        if (dy[i] > hi) hi = dy[i];
+    }
+    /* FLATNESS GATE. Both the cross-section AND the along-road grade have to be
+     * flat: the node Y difference is the second half of that test, and without
+     * it a pond on a hill would pass on its cross-section alone. */
+    if (hi - lo > TD5_TG_POND_FLAT) return 1;
+    if (fabs(n1->y - n0->y) > TD5_TG_POND_FLAT) return 1;
+
+    e0 = n0->width * 0.5;
+    e1 = n1->width * 0.5;
+    /* Lowest corner wins, so the sheet never floats above the ground it lies
+     * on -- it can only ever be buried by at most the flatness tolerance. */
+    y = (n0->y < n1->y ? n0->y : n1->y) - hi + TD5_TG_POND_LIFT;
+
+    px[0] = n0->x + lx0 * (e0 + near_d); pz[0] = n0->z + lz0 * (e0 + near_d);
+    px[1] = n1->x + lx1 * (e1 + near_d); pz[1] = n1->z + lz1 * (e1 + near_d);
+    px[2] = n1->x + lx1 * (e1 + far_d);  pz[2] = n1->z + lz1 * (e1 + far_d);
+    px[3] = n0->x + lx0 * (e0 + far_d);  pz[3] = n0->z + lz0 * (e0 + far_d);
+    for (i = 0; i < 4; i++) {
+        py[i] = y;
+        uu[i] = px[i] / TD5_TG_WATER_TILE;   /* same UV rule as the sea plane */
+        vv[i] = pz[i] / TD5_TG_WATER_TILE;
+    }
+
+    h->moff[*h->nmesh] = h->blk->len;
+    if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, 4,
+                            &seg_page, &seg_nq, 1)) return 0;
+    (*h->nmesh)++;
+    tg_acct(TG_ACCT_WATER, si);   /* a pond IS water, not a new element kind */
+    s_r9_infra_ponds++;
+    if (td5_env_flag_off("TD5RE_R9_INFRA_REPORT"))
+        TD5_LOG_I(LOG_TAG, "trackgen: [R9 INFRA] span %4d %-5s pond "
+                  "biome=%s ground-spread=%.0f", si,
+                  side > 0.0 ? "left" : "right", h->b->name, hi - lo);
+    return 1;
+}
+
+/* Street furniture for span si. Density is a per-(span, side) hash so the two
+ * kerbs are independent and a re-run of the same seed lays the same street. */
+static int tg_emit_fb_infra(const TG_FBHook *h)
+{
+    const TG_NodeList *nl = h->nl;
+    const int si = h->si;
+    const TG_Biome *sb = &k_biomes[tg_scenery_biome_index(si)];
+    const double sw = tg_city_sidewalk_w(sb);
+    const int paved = (sw > 0.0);
+    const TG_Node *n = &nl->v[si];
+    int menu[8], nmenu, s;
+
+    if (si <= TD5_TG_GRID_SPAN)  return 1;      /* keep the start grid clear */
+    if (si + 1 >= nl->count)     return 1;
+    if (tg_span_in_bridge_run(si)) return 1;    /* the deck carries rails only */
+
+    /* Ponds share this hook (and this area's one guard mark) rather than
+     * taking a dispatcher slot of their own -- both are INFRA scenery on the
+     * verge, and the guard has to judge them by the same rule either way.
+     * They keep their OWN knob, so either half can be A/B'd alone. */
+    if (!tg_emit_pond(h)) return 0;
+
+    if (!td5_env_flag_on("TD5RE_R9_INFRA_PROPS")) return 1;
+    nmenu = tg_infra_menu(sb, paved, menu);
+    if (nmenu <= 0) return 1;
+
+    for (s = 0; s < 2; s++) {
+        const double side = s ? 1.0 : -1.0;
+        /* Independent hash per side: 0x9E3779B9 is already the prop layer's
+         * multiplier, so mix in the side and a different constant or the
+         * furniture would land on exactly the spans the spectators use. */
+        const unsigned int hh = ((unsigned)si * 0x27220A95u)
+                              ^ ((unsigned)(s + 1) * 0x85EBCA6Bu);
+        double gap, base_y;
+        int kind;
+
+        /* ~1 span in 5 per side. Denser than the statues (1 in 29) because
+         * furniture is what makes a street look inhabited, sparse enough that
+         * a straight does not read as a warehouse aisle. */
+        if ((hh >> 28) > 2u) continue;
+
+        kind = menu[(hh >> 5) % (unsigned)nmenu];
+        /* Roadworks replace the menu pick occasionally, on ONE side only, so
+         * they read as a works site rather than a decoration. */
+        if (((hh >> 13) & 0x3Fu) == 0u) kind = IP_WORKY;
+        else if (((hh >> 19) & 0x3Fu) == 0u) kind = IP_REDTAPE;
+
+        if (kind == IP_RICKSHAW && strcmp(sb->name, "ORIENTAL")) continue;
+
+        if (td5_env_flag_off("TD5RE_R9_INFRA_REPORT")
+            && s_r9_infra_reported < TD5_TG_INFRA_REPORT_MAX) {
+            s_r9_infra_reported++;
+            TD5_LOG_I(LOG_TAG,
+                      "trackgen: [R9 INFRA] span %4d %-5s %-14s biome=%s %s",
+                      si, side > 0.0 ? "left" : "right", k_infra_names[kind],
+                      sb->name, paved ? "pavement" : "verge");
+        }
+
+        if (paved) {
+            /* Across the pavement, between 0.30 and 0.70 of its width -- clear
+             * of the kerb face on one side and of the frontage on the other. */
+            gap = sw * (0.30 + 0.40 * (double)((hh >> 8) & 0xFFu) / 255.0);
+            base_y = n->y + tg_city_kerb_h(sb);
+        } else {
+            /* On a verge there is no kerb to stand on, and the skirt DROPS
+             * away from the road -- so road height is the wrong footing and a
+             * bench two lanes out would hang in the air over falling ground.
+             * Rest on the sampled terrain instead, the same rule R7 FLORA gave
+             * tree trunks. */
+            gap = TD5_TG_VERGE_W + 200.0
+                + (double)((hh >> 8) & 0x1FFu);
+            base_y = n->y - tg_infra_ground_dy(nl, si, side, gap, 0.0);
+        }
+        if (!tg_infra_place(h, kind, side, gap, base_y)) return 0;
+    }
+    return 1;
+}
+
 /* How many spans either side of a portal carry mountain massing. Beyond this
  * the camera is inside the bore and the mass is behind the lining, so it is
  * invisible geometry -- 5 spans (~4000 units) is what a driver actually sees
@@ -13215,6 +13691,11 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
      * the base main node nl->v[F+1+k] plus the branch shift. */
     const int branch_active = tg_branches_enabled() && s_fork_count > 0;
     const int ring = branch_active ? s_ring_len : nspans;
+
+    /* [R9 INFRA] per-build counters, reset with the rest of the accounting. */
+    s_r9_infra_props = 0;
+    s_r9_infra_ponds = 0;
+    s_r9_infra_reported = 0;
     /* Native-faithful fork: the road SPLITS into two half-width carriageways --
      * MAIN (left, main_half lanes, +width/4) and BRANCH (right, br_lanes, bowed)
      * over the appended corridor. Fork/rejoin spans stay full width. */
@@ -13506,6 +13987,13 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     g0 = meshes.len;
                     if (!tg_emit_fb_terrain(&hook)) { ok = 0; break; }
                     tg_guard_mark(g0, meshes.len, TG_GK_TERRAIN, si);
+                    /* [R9 INFRA] street furniture. Marked TG_GK_PROP, which is
+                     * SCENERY class -- deliberately NOT exempt from the on-road
+                     * guard, so a bin standing in the carriageway is dropped
+                     * and counted rather than licensed. */
+                    g0 = meshes.len;
+                    if (!tg_emit_fb_infra(&hook))   { ok = 0; break; }
+                    tg_guard_mark(g0, meshes.len, TG_GK_PROP, si);
                 }
                 /* [R7 GUARD] the start/finish gantry legs stand at the road edge
                  * and its beam spans overhead -- authored across the road. */
@@ -16047,6 +16535,16 @@ static int tg_emit_textures(TG_Buf *out)
                 &pages[TD5_TG_PAGE_R8_SNOWGND + v], v);
         tg_emit_texture_page_r8_snow_median(&pages[TD5_TG_PAGE_R8_SNOWMED]);
     }
+    {   /* [R9 INFRA] Street-furniture pages. ALWAYS emitted, and deliberately
+         * outside tg_real_textures_enabled(): that knob trades a neutral street
+         * for photographic facades, which is a taste call, whereas a bin that
+         * looks like a bin has no downside. A slot the header does not fill is
+         * left to the procedural filler below rather than decoded as garbage. */
+        int v;
+        for (v = 0; v < TD5_TG_PROPS_TEX_COUNT && v < TD5_TG_R9_INFRA_N; v++)
+            tg_emit_real_page(&pages[TD5_TG_INFRA_PAGE(v)], k_props_pal[v],
+                              k_props_paln[v], k_props_idx[v], k_props_type[v]);
+    }
     tg_emit_texture_page_fb_skyline(&pages[TD5_TG_PAGE_R4_SKYLINE]);  /* [R4 item 5] */
     tg_emit_texture_page_fb_tunnel(&pages[TD5_TG_PAGE_TUNNEL]);
     /* [R3 BRIDGE] deck surface (item 11) + 4 extra tunnel linings (item 16a). */
@@ -16419,6 +16917,19 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         }
     }
     tg_acct_report(nspans);
+    /* [R9 INFRA] The two deliverables share one accounting slot, so print the
+     * split explicitly. Ponds are accounted as WATER (they are water), which
+     * means the r9-infra row is the FURNITURE row -- this line is what says so,
+     * and what proves the pond half fired rather than leaving it inferred from
+     * a water count that a coastal run would dominate anyway. */
+    TD5_LOG_I(LOG_TAG,
+              "trackgen: [R9 INFRA] furniture=%ld piece(s) (knob "
+              "TD5RE_R9_INFRA_PROPS=%s), ponds=%ld sheet(s) (knob "
+              "TD5RE_R9_INFRA_PONDS=%s)",
+              s_r9_infra_props,
+              td5_env_flag_on("TD5RE_R9_INFRA_PROPS") ? "on" : "off",
+              s_r9_infra_ponds,
+              td5_env_flag_on("TD5RE_R9_INFRA_PONDS") ? "on" : "off");
     tg_r8_bridge_diag(&nl);            /* [R8 BRIDGE] opt-in measurement dump */
     tg_r8_terrain_extent_report(&nl, nspans);  /* [R8 TERRAIN] opt-in, ditto */
     ok = 1;
