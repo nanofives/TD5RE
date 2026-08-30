@@ -2463,18 +2463,149 @@ static void tg_validate_geometry_safety(const TG_NodeList *nl, int nspans)
  * more than TD5_TG_GUARD_PEN -- so edge-hugging kerbs, sidewalks, guardrails and
  * edge-to-edge crossing decals (whose vertices sit AT the road edge) survive
  * without needing an explicit exemption.
+ *
+ * ===================== [R8 GUARD] PRECISION PASS =====================
+ * R8 items 3 (`floating tiles on top of the road` @187), 7 (`tiles spilling over
+ * the road` @627) and 8 (`background texture over the road` @686), seed 99991.
+ * Three objects still stood in the road on a build where this guard already
+ * dropped 44 meshes, so the guard's TEST -- not its ambition -- was wrong.
+ *
+ * MEASURED ROOT CAUSE (not the inherited one). The R7 test above samples
+ * VERTICES: a mesh is on the road when one of its own vertices lands inside the
+ * carriageway envelope. That is exactly blind to the shape that produces all
+ * three complaints: a WIDE QUAD WHOSE TWO ENDS LIE OUTSIDE THE ROAD ON OPPOSITE
+ * SIDES. A skyline backdrop band, a plaza floor slab and a fork-back apron are
+ * all tens of thousands of units wide; when one crosses the carriageway, every
+ * one of its four vertices is far OUTSIDE it, penetration computes as negative
+ * at each, and the mesh ships. (The second-hand diagnosis for these items was
+ * "the height gate and the byte-range exemptions" -- both were wrong: crossing
+ * and plaza geometry are NOT in the exempt set at all, and the offenders sit at
+ * road level, not above it. See the DIAG dump this file can emit.)
+ *
+ * THE FIX IS AREA COVERAGE, NOT WIDTH. Each mesh is walked QUAD BY QUAD and the
+ * quad's LATERAL INTERVAL is intersected with the carriageway interval, so a
+ * quad that straddles the road is measured by how much road it COVERS, not by
+ * how deep its corners poke in. The old vertex penetration is kept and the two
+ * are maxed, so every mesh R7 rejected is still rejected and the new test can
+ * only ever be a superset.
+ *
+ * A wider test needs SHARPER exemptions or it starts eating decks and gantries,
+ * so the single exempt bit becomes a KIND with a POLICY CLASS:
+ *   EXEMPT  road / gore / skirt / branch road / tunnel bore / bridge deck +
+ *           rails / water / coast / gantry / end wall. Authored across the
+ *           carriageway. Now SPAN-SCOPED: the mark records the span it was
+ *           emitted for, and the licence only covers intrusions within
+ *           TD5_TG_GUARD_EX_SPANS of it, so a deck exemption cannot cover a
+ *           stray mesh emitted later in the same entry.
+ *   DECAL   the zebra/crossing road paint. It is authored EDGE TO EDGE across
+ *           the road on purpose, so it cannot be judged by coverage -- but it
+ *           is only legal FLUSH WITH THE ROAD SURFACE (it is lifted
+ *           TD5_TG_CROSS_LIFT = 20 raw). A crossing slab that floats above the
+ *           tarmac is rejected, which is item 3's own wording as a rule.
+ *   SCENERY everything else. Rejected on any road coverage, unless it clears
+ *           the road entirely overhead (dy > TD5_TG_GUARD_OVERHEAD -- lamp arms
+ *           and signs) or is buried under it.
+ * The kind is also what makes the acceptance evidence readable: rejections are
+ * counted PER KIND, so "did this change start eating road/deck/gantry/tunnel"
+ * is a number in the log, not a screenshot.
  */
 #define TD5_TG_GUARD_PEN       700.0    /* min intrusion past the road edge to reject */
 #define TD5_TG_GUARD_OVERHEAD 1800.0    /* a vertex this far above road Y is overhead */
 #define TD5_TG_GUARD_UNDER     800.0    /* a vertex this far below road Y is underground */
 #define TD5_TG_GUARD_WINDOW     40      /* nearest-node search half-width, spans */
 #define TD5_TG_GUARD_EX_MAX    768      /* exempt byte ranges per entry */
+/* [R8] A road decal may sit this far off the tarmac and no further. The zebra is
+ * lifted 20 raw; 150 leaves room for the road's own within-span camber without
+ * licensing anything a driver would read as floating. */
+#define TD5_TG_GUARD_FLUSH     150.0
+/* [R8] How far from its own span an EXEMPT mark's licence reaches. Bridge decks,
+ * bores and gantries are emitted per span but legitimately reach a span or two
+ * either way (a 4-span entry's geometry is assembled into one buffer), so this
+ * is deliberately loose -- it exists to stop a licence covering an unrelated
+ * mesh, not to second-guess the deck emitters. */
+#define TD5_TG_GUARD_EX_SPANS   8
+
+/* [R8] Mesh kinds, marked at the emit sites in tg_emit_models. Order is only
+ * used for the log breakdown. */
+enum {
+    TG_GK_OTHER = 0, TG_GK_SKIRT, TG_GK_ROAD, TG_GK_BRANCHROAD, TG_GK_TUNNEL,
+    TG_GK_GANTRY, TG_GK_ENDWALL, TG_GK_DECK, TG_GK_WATER, TG_GK_COAST,
+    TG_GK_DECAL, TG_GK_CITY, TG_GK_BLOCK, TG_GK_CROSS, TG_GK_FLORA,
+    TG_GK_PARKTREE, TG_GK_TERRAIN, TG_GK_BUILDING, TG_GK_PROP, TG_GK_RAIL,
+    TG_GK_BRANCHSIDE, TG_GK_COUNT
+};
+static const char *const k_guard_kind_name[TG_GK_COUNT] = {
+    "other", "skirt", "road", "branch-road", "tunnel", "gantry", "end-wall",
+    "deck", "water", "coast", "decal", "city", "block", "cross", "flora",
+    "park-tree", "terrain", "building", "prop", "rail", "branch-side"
+};
+enum { TG_GKC_SCENERY = 0, TG_GKC_EXEMPT = 1, TG_GKC_DECAL = 2,
+       TG_GKC_UNDER = 3 };
+/* [R8] Is this exempt kind's licence SPAN-LOCAL? A bridge deck, a bore, a
+ * gantry, a road quad and an end wall are all authored for ONE span and reach
+ * barely past it, so their licence is scoped to a span run and cannot cover a
+ * mesh that lands somewhere else.
+ *
+ * MEASURED EXCEPTION -- the ground skirt, the sea plane and the coastline are
+ * legitimately TENS OF THOUSANDS of units wide. On seed 99991 the skirt emitted
+ * for span 627 reaches the carriageway at span 647 where the road doubles back
+ * on itself; that is the ground doing its job, not a stray. Scoping those would
+ * have made the guard reject the ground under the road -- caught by the DIAG
+ * dump before it shipped, and the reason this is a per-kind property rather
+ * than one global rule. */
+static const unsigned char k_guard_kind_local[TG_GK_COUNT] = {
+    0,  /* other       */
+    0,  /* skirt       -- wide by design, see above */
+    1,  /* road        */
+    1,  /* branch-road */
+    1,  /* tunnel      */
+    1,  /* gantry      */
+    1,  /* end-wall    */
+    1,  /* deck        */
+    0,  /* water       -- a sea plane spans the whole seaward side */
+    0,  /* coast       */
+    1,  /* decal       */
+    0, 0, 0, 0, 0,                 /* city block cross flora park-tree */
+    0,                             /* terrain -- wide by design, see above */
+    0, 0, 0, 0                     /* building prop rail branch-side */
+};
+static const unsigned char k_guard_kind_class[TG_GK_COUNT] = {
+    TG_GKC_SCENERY,  /* other       */
+    TG_GKC_UNDER,    /* skirt       */
+    TG_GKC_EXEMPT,   /* road        */
+    TG_GKC_EXEMPT,   /* branch-road */
+    TG_GKC_EXEMPT,   /* tunnel      */
+    TG_GKC_EXEMPT,   /* gantry      */
+    TG_GKC_EXEMPT,   /* end-wall    */
+    TG_GKC_EXEMPT,   /* deck        */
+    TG_GKC_UNDER,    /* water       */
+    TG_GKC_UNDER,    /* coast       */
+    TG_GKC_DECAL,    /* decal       */
+    TG_GKC_SCENERY,  /* city        */
+    TG_GKC_SCENERY,  /* block       */
+    TG_GKC_SCENERY,  /* cross       */
+    TG_GKC_SCENERY,  /* flora       */
+    TG_GKC_SCENERY,  /* park-tree   */
+    /* [R8] Ground, like the skirt: legal under the road, never on top of it.
+     * Rejecting a terrain apron that sits BELOW an elevated road (seed 777
+     * spans 860..904, dy -9900..-500) would punch a hole under the track; the
+     * same emitter putting grass ON the road is R7 item 19 and must still go. */
+    TG_GKC_UNDER,    /* terrain     */
+    TG_GKC_SCENERY,  /* building    */
+    TG_GKC_SCENERY,  /* prop        */
+    TG_GKC_SCENERY,  /* rail        */
+    TG_GKC_SCENERY   /* branch-side */
+};
 
 static size_t s_guard_ex_lo[TD5_TG_GUARD_EX_MAX];
 static size_t s_guard_ex_hi[TD5_TG_GUARD_EX_MAX];
+static unsigned char s_guard_ex_kind[TD5_TG_GUARD_EX_MAX];
+static int    s_guard_ex_si[TD5_TG_GUARD_EX_MAX];
 static int    s_guard_ex_n;
 static long   s_guard_rejects;          /* running total across the whole build */
 static long   s_guard_residual;         /* on-road meshes STILL present post-drop */
+static long   s_guard_rej_kind[TG_GK_COUNT];   /* [R8] breakdown by kind */
+static long   s_guard_ex_scope_hits;    /* [R8] exempt marks that fell out of scope */
 
 /* Default ON -- this is the fix, not an opt-in. TD5RE_R7_GUARD=0 pins the old
  * unguarded output for an A/B, and TD5RE_R7_GUARD_REPORT=1 makes it report-only
@@ -2486,28 +2617,55 @@ static int tg_guard_report_only(void)
 {
     return td5_env_flag_off("TD5RE_R7_GUARD_REPORT");
 }
+/* [R8] The precision pass (area coverage + kind classes + span-scoped
+ * exemptions). Default ON; TD5RE_R8_GUARD=0 pins the R7 vertex-only test for a
+ * single-variable A/B. */
+static int tg_guard_r8(void) { return td5_env_flag_on("TD5RE_R8_GUARD"); }
+/* [R8] TD5RE_R8_GUARD_DIAG=<span>: dump every mesh of the entry containing that
+ * span with its kind, coverage, height band and verdict. 0 = off. */
+static int tg_guard_diag_span(void)
+{
+    return td5_env_int("TD5RE_R8_GUARD_DIAG", 0, 0, 100000);
+}
 
 static void tg_guard_ex_reset(void) { s_guard_ex_n = 0; }
 
-/* Record [lo, hi) of the current entry's mesh buffer as authored road-surface or
- * enclosure geometry the guard must never reject. Called at the exempt emit
- * sites in tg_emit_models. */
-static void tg_guard_ex_mark(size_t lo, size_t hi)
+/* Record [lo, hi) of the current entry's mesh buffer as geometry of `kind`
+ * emitted for span `si`. Called at the emit sites in tg_emit_models; ranges the
+ * emitters never mark fall through as TG_GK_OTHER, which is SCENERY -- the
+ * fail-safe direction (validated, not licensed). */
+static void tg_guard_mark(size_t lo, size_t hi, int kind, int si)
 {
     if (hi <= lo) return;
     if (s_guard_ex_n < TD5_TG_GUARD_EX_MAX) {
         s_guard_ex_lo[s_guard_ex_n] = lo;
         s_guard_ex_hi[s_guard_ex_n] = hi;
+        s_guard_ex_kind[s_guard_ex_n] = (unsigned char)kind;
+        s_guard_ex_si[s_guard_ex_n] = si;
         s_guard_ex_n++;
     }
 }
 
-static int tg_guard_is_exempt(size_t off)
+/* Kind of the mesh at byte offset `off`, plus the span it was marked for.
+ * The NARROWEST matching mark wins. Marks NEST -- an emitter group's range in
+ * tg_emit_models encloses the specific ranges its own emitters marked inside it
+ * (the decal, for one) -- and the specific one is the answer, whichever order
+ * the two were recorded in. */
+static int tg_guard_kind_of(size_t off, int *pmark_si)
 {
-    int i;
+    int i, kind = TG_GK_OTHER;
+    size_t best = (size_t)-1;
+    if (pmark_si) *pmark_si = -1;
     for (i = 0; i < s_guard_ex_n; i++)
-        if (off >= s_guard_ex_lo[i] && off < s_guard_ex_hi[i]) return 1;
-    return 0;
+        if (off >= s_guard_ex_lo[i] && off < s_guard_ex_hi[i]) {
+            const size_t w = s_guard_ex_hi[i] - s_guard_ex_lo[i];
+            if (w <= best) {
+                best = w;
+                kind = (int)s_guard_ex_kind[i];
+                if (pmark_si) *pmark_si = s_guard_ex_si[i];
+            }
+        }
+    return kind;
 }
 
 /* Little-endian scalar reads over the assembled mesh bytes. */
@@ -2560,57 +2718,247 @@ static int tg_guard_nearest_node(const TG_NodeList *nl, int lo, int hi,
     return best;
 }
 
-/* Does the mesh at byte offset `off` stand on the drivable road? Fills *pdepth
- * (deepest intrusion past the road edge, world units) and *psi (the span it
- * intrudes on) when it does. Height-gated: a vertex far above (overhead beam) or
- * far below (buried/water) the road is ignored, so only geometry AT road level
- * counts. */
-static int tg_guard_mesh_on_road(const TG_NodeList *nl, int ring,
-                                 const unsigned char *b, size_t off, size_t mlen,
-                                 int win_lo, int win_hi,
-                                 double *pdepth, int *psi)
+/* [R8] Worst road intrusion this mesh makes, and the height band it makes it in.
+ * `cover` is the metric the R8 pass adds: how much CARRIAGEWAY WIDTH the mesh's
+ * footprint covers, which is what catches a wide quad whose own corners are
+ * outside the road on both sides. `pen` is R7's vertex penetration, kept so the
+ * new test is a strict superset (a narrow post standing in the middle of the
+ * road covers little width but penetrates deeply). */
+typedef struct {
+    double intr;        /* max(cover, pen) at the worst quad, world units */
+    double dy_lo;       /* that quad's lowest  point above the road surface */
+    double dy_hi;       /* that quad's highest point above the road surface */
+    int    si;          /* span it intrudes on */
+} TG_GuardHit;
+
+/* Is a quad with this intrusion, height band and policy class illegal? */
+static int tg_guard_quad_bad(int cls, double intr, double dy_lo, double dy_hi)
+{
+    if (intr <= TD5_TG_GUARD_PEN)        return 0;   /* edge-hugging: legal */
+    if (dy_hi < -TD5_TG_GUARD_UNDER)     return 0;   /* buried under the road */
+    if (cls == TG_GKC_EXEMPT)            return 0;   /* authored across it */
+    if (cls == TG_GKC_DECAL)                         /* legal only flush */
+        return !(dy_lo >= -TD5_TG_GUARD_FLUSH && dy_hi <= TD5_TG_GUARD_FLUSH);
+    /* [R8 item 7] UNDER: the ground skirt, the sea plane and the coastline are
+     * ALLOWED to reach across the carriageway -- they are the surface it is laid
+     * on -- but only from BELOW. This is the discrimination R8 item 7 turned out
+     * to need. MEASURED: seed 99991's skirt for spans 643..647 lies over the
+     * carriageway at spans 626..629 at dy +250..+450 (the road doubles back on
+     * itself at a different height), which is the user's "tiles spilling over
+     * the road around 627" exactly. A blanket skirt exemption licenses that; a
+     * span-scoped one would instead have rejected the perfectly good ground the
+     * same emitter lays UNDER the road. Height is the axis that separates them. */
+    if (cls == TG_GKC_UNDER)
+        return dy_hi > TD5_TG_GUARD_FLUSH;
+    if (dy_lo > TD5_TG_GUARD_OVERHEAD)   return 0;   /* clears it overhead */
+    return 1;
+}
+
+/* Accumulate one candidate group's verdict into the running worst. `bad` quads
+ * outrank clean ones outright, so the reported hit always explains the verdict. */
+static void tg_guard_hit_keep(TG_GuardHit *h, int *have_bad, int bad,
+                              double intr, double dy_lo, double dy_hi, int si)
+{
+    if (*have_bad && !bad) return;
+    if (bad && !*have_bad) { *have_bad = 1; h->intr = -1e300; }
+    if (intr > h->intr) {
+        h->intr = intr; h->dy_lo = dy_lo; h->dy_hi = dy_hi; h->si = si;
+    }
+}
+
+/* Scan the mesh at `off` against the carriageway under policy class `cls`.
+ * Returns 1 when some part of it is illegal, filling *hit with the worst
+ * offending group. When nothing is illegal *hit still carries the worst
+ * intrusion seen, which is what the DIAG dump prints. */
+static int tg_guard_mesh_scan(const TG_NodeList *nl, int ring,
+                              const unsigned char *b, size_t off, size_t mlen,
+                              int win_lo, int win_hi, int cls, TG_GuardHit *hit)
 {
     const int    tag    = (int)tg_rd_u16(b + off + 0x02);
     const unsigned int vtxcnt = tg_rd_u32(b + off + 0x08);
     const unsigned int vtxoff = tg_rd_u32(b + off + 0x30);
-    double ox = 0.0, oy = 0.0, oz = 0.0;
+    const int r8 = tg_guard_r8();
+    TG_GuardHit worst;
     unsigned int vi;
-    double worst = 0.0;
-    int worst_si = -1;
+    int bad = 0, have_bad = 0;
 
-    if (tag) {                             /* billboard: verts are 24.8 local */
-        ox = (double)tg_rd_f32(b + off + 0x1C) / 256.0;
-        oy = (double)tg_rd_f32(b + off + 0x20) / 256.0;
-        oz = (double)tg_rd_f32(b + off + 0x24) / 256.0;
-    }
-    for (vi = 0; vi < vtxcnt; vi++) {
-        const unsigned char *vp = b + off + vtxoff + (size_t)vi * TD5_TG_VTX_SIZE;
-        double vx, vy, vz, lateral, reach, depth;
+    worst.intr = -1e300; worst.dy_lo = 0.0; worst.dy_hi = 0.0; worst.si = -1;
+    /* Two running maxima, because the widest-covering quad of a mesh is often
+     * NOT the illegal one (a terrain apron's deepest quad can be buried under
+     * the road while a different quad of the same mesh stands on it). Reporting
+     * the first would have made the DIAG dump lie about why a mesh was dropped,
+     * which is the kind of half-truth that produced the diagnosis this round had
+     * to re-measure. Once anything is illegal, only illegal quads compete. */
+
+    if (tag) {
+        /* Billboard. The vertices are LOCAL offsets about a 24.8 world origin
+         * and the quad is turned at the camera every frame, so its footprint is
+         * not a quad at all -- it is a DISC of radius max|local x| about the
+         * origin. Testing it as a disc is both cheaper and orientation-correct;
+         * the R7 code added local x to world X, which only held where the road
+         * happened to run along Z. */
+        const double ox = (double)tg_rd_f32(b + off + 0x1C) / 256.0;
+        const double oy = (double)tg_rd_f32(b + off + 0x20) / 256.0;
+        const double oz = (double)tg_rd_f32(b + off + 0x24) / 256.0;
+        double half = 0.0, top = 0.0, bot = 0.0;
+        double lateral, rp, rn, cover, pen, roady;
         int si;
-        if ((size_t)(vp + 12 - b) > off + mlen) break;   /* truncated: stop */
-        vx = ox + (double)tg_rd_f32(vp);
-        vy = oy + (double)tg_rd_f32(vp + 4);
-        vz = oz + (double)tg_rd_f32(vp + 8);
-        si = tg_guard_nearest_node(nl, win_lo, win_hi, vx, vz);
-        if (si < 0 || si >= ring) continue;
-        /* Height gate against this span's road surface. */
-        if (vy > nl->v[si].y + TD5_TG_GUARD_OVERHEAD) continue;
-        if (vy < nl->v[si].y - TD5_TG_GUARD_UNDER)    continue;
-        /* Signed lateral from the centreline (left of travel positive), matching
-         * the strip rows and the carriageway authority. */
-        lateral = (vx - nl->v[si].x) * nl->v[si].tz
-                - (vz - nl->v[si].z) * nl->v[si].tx;
-        reach = tg_carriageway_reach(nl, si, (lateral >= 0.0) ? 1.0 : -1.0);
-        depth = reach - (lateral >= 0.0 ? lateral : -lateral);
-        if (depth > worst) { worst = depth; worst_si = si; }
+        for (vi = 0; vi < vtxcnt; vi++) {
+            const unsigned char *vp = b + off + vtxoff + (size_t)vi * TD5_TG_VTX_SIZE;
+            double lx, ly;
+            if ((size_t)(vp + 12 - b) > off + mlen) break;
+            lx = (double)tg_rd_f32(vp);
+            ly = (double)tg_rd_f32(vp + 4);
+            if (lx < 0.0) lx = -lx;
+            if (lx > half) half = lx;
+            if (ly > top)  top = ly;
+            if (ly < bot)  bot = ly;
+        }
+        if (!r8) {
+            /* R7 fallback path, kept BYTE-FAITHFUL: R7 added the billboard's
+             * local x straight onto world X and tested each resulting point.
+             * That is only correct where the road runs along Z, but the A/B
+             * knob is worthless unless it reproduces what R7 actually did. */
+            for (vi = 0; vi < vtxcnt; vi++) {
+                const unsigned char *vp = b + off + vtxoff
+                                        + (size_t)vi * TD5_TG_VTX_SIZE;
+                double vx, vy, vz, lat, r, d;
+                int s2;
+                if ((size_t)(vp + 12 - b) > off + mlen) break;
+                vx = ox + (double)tg_rd_f32(vp);
+                vy = oy + (double)tg_rd_f32(vp + 4);
+                vz = oz + (double)tg_rd_f32(vp + 8);
+                s2 = tg_guard_nearest_node(nl, win_lo, win_hi, vx, vz);
+                if (s2 < 0 || s2 >= ring) continue;
+                if (vy > nl->v[s2].y + TD5_TG_GUARD_OVERHEAD) continue;
+                if (vy < nl->v[s2].y - TD5_TG_GUARD_UNDER)    continue;
+                lat = (vx - nl->v[s2].x) * nl->v[s2].tz
+                    - (vz - nl->v[s2].z) * nl->v[s2].tx;
+                r = tg_carriageway_reach(nl, s2, (lat >= 0.0) ? 1.0 : -1.0);
+                d = r - (lat >= 0.0 ? lat : -lat);
+                if (d > worst.intr) {
+                    worst.intr = d; worst.si = s2;
+                    worst.dy_lo = worst.dy_hi = vy - nl->v[s2].y;
+                }
+            }
+            bad = (worst.intr > TD5_TG_GUARD_PEN && cls != TG_GKC_EXEMPT);
+            if (hit) *hit = worst;
+            return bad;
+        }
+        si = tg_guard_nearest_node(nl, win_lo, win_hi, ox, oz);
+        if (si < 0 || si >= ring) { if (hit) *hit = worst; return 0; }
+        roady = nl->v[si].y;
+        lateral = (ox - nl->v[si].x) * nl->v[si].tz
+                - (oz - nl->v[si].z) * nl->v[si].tx;
+        rp = tg_carriageway_reach(nl, si, 1.0);
+        rn = tg_carriageway_reach(nl, si, -1.0);
+        cover = (lateral + half < rp ? lateral + half : rp)
+              - (lateral - half > -rn ? lateral - half : -rn);
+        pen = (lateral >= 0.0 ? rp : rn) - (lateral >= 0.0 ? lateral : -lateral);
+        if (!r8 || cover < pen) cover = pen;
+        bad = tg_guard_quad_bad(cls, cover, oy + bot - roady, oy + top - roady);
+        tg_guard_hit_keep(&worst, &have_bad, bad, cover,
+                          oy + bot - roady, oy + top - roady, si);
+        if (hit) *hit = worst;
+        return bad;
     }
-    if (worst > TD5_TG_GUARD_PEN) {
-        if (pdepth) *pdepth = worst;
-        if (psi)    *psi = worst_si;
-        return 1;
+
+    /* Opaque geometry: de-indexed QUADS, which is what every writer in this file
+     * emits (road strip, box faces, facade cells, decals). Walking them four at
+     * a time is what makes the lateral INTERVAL meaningful -- a per-mesh bounding
+     * box would fuse a building's near and far walls into one slab and a whole
+     * tunnel entry would read as covering the road. */
+    for (vi = 0; vi < vtxcnt; vi += 4) {
+        /* EACH VERTEX IS MEASURED IN ITS OWN SPAN'S FRAME, and its lateral is
+         * NORMALISED by that span's own reach (t = +-1 is the road edge). A
+         * quad spans a whole road segment, so its far corner belongs to the
+         * next node; projecting all four into one frame put a lateral error of
+         * (span length x curvature) on the near corner, and on a bend that read
+         * as ~750 units of false coverage. It rejected 34 perfectly good verge
+         * bands on seed 777 -- every one of them at si = mark_si+1, which is
+         * what gave the artefact away. Normalising per vertex removes the frame
+         * error AND handles a mesh whose corners resolve to different spans,
+         * which is exactly the doubling-back case this guard has to judge. */
+        double t[4], dy[4];
+        double t_lo, t_hi, dy_lo, dy_hi, r_rep = 0.0, t_best = 1e300;
+        double cover, pen;
+        int k, n = 0, si0 = -1;
+
+        for (k = 0; k < 4 && vi + (unsigned)k < vtxcnt; k++) {
+            const unsigned char *vp = b + off + vtxoff
+                                    + (size_t)(vi + (unsigned)k) * TD5_TG_VTX_SIZE;
+            double vx, vy, vz, lateral, r;
+            int si;
+            if ((size_t)(vp + 12 - b) > off + mlen) break;
+            vx = (double)tg_rd_f32(vp);
+            vy = (double)tg_rd_f32(vp + 4);
+            vz = (double)tg_rd_f32(vp + 8);
+            si = tg_guard_nearest_node(nl, win_lo, win_hi, vx, vz);
+            if (si < 0 || si >= ring) continue;
+            lateral = (vx - nl->v[si].x) * nl->v[si].tz
+                    - (vz - nl->v[si].z) * nl->v[si].tx;
+            r = tg_carriageway_reach(nl, si, (lateral >= 0.0) ? 1.0 : -1.0);
+            if (!(r > 0.0)) continue;
+            t[n] = lateral / r;
+            dy[n] = vy - nl->v[si].y;
+            r_rep += r;
+            /* Report the span the mesh reaches DEEPEST into, not an arbitrary
+             * corner's: that is the span the user is standing on. */
+            if (si0 < 0 || (lateral >= 0.0 ? t[n] : -t[n]) < t_best) {
+                t_best = (lateral >= 0.0 ? t[n] : -t[n]);
+                si0 = si;
+            }
+            n++;
+        }
+        if (n <= 0) continue;
+        r_rep /= (double)n;
+        t_lo = t_hi = t[0];
+        dy_lo = dy_hi = dy[0];
+        pen = 0.0;
+        for (k = 0; k < n; k++) {
+            double d;
+            if (t[k] < t_lo) t_lo = t[k];
+            if (t[k] > t_hi) t_hi = t[k];
+            if (dy[k] < dy_lo) dy_lo = dy[k];
+            if (dy[k] > dy_hi) dy_hi = dy[k];
+            /* R7's per-vertex penetration, height-gated per vertex as it was. */
+            if (dy[k] > TD5_TG_GUARD_OVERHEAD || dy[k] < -TD5_TG_GUARD_UNDER)
+                continue;
+            d = (1.0 - (t[k] >= 0.0 ? t[k] : -t[k])) * r_rep;
+            if (d > pen) pen = d;
+        }
+        /* Road half-widths cancel: the overlap is computed in t and scaled back
+         * by the representative reach, so it reads in world units as before. */
+        cover = ((t_hi < 1.0 ? t_hi : 1.0) - (t_lo > -1.0 ? t_lo : -1.0)) * r_rep;
+        if (!r8 || cover < pen) cover = pen;
+        {   /* keep scanning: the DIAG dump wants the WORST offending quad,
+             * not the first one found. */
+            const int qbad = tg_guard_quad_bad(cls, cover, dy_lo, dy_hi);
+            tg_guard_hit_keep(&worst, &have_bad, qbad, cover, dy_lo, dy_hi, si0);
+            if (qbad) bad = 1;
+        }
     }
-    return 0;
+    if (hit) *hit = worst;
+    return bad;
 }
+
+/* R7-shaped wrapper kept for the residual self-check and the exempt-scope test:
+ * "is this mesh illegal under class `cls`", reporting depth and span. */
+static int tg_guard_mesh_on_road_cls(const TG_NodeList *nl, int ring,
+                                     const unsigned char *b, size_t off,
+                                     size_t mlen, int win_lo, int win_hi,
+                                     int cls, double *pdepth, int *psi)
+{
+    TG_GuardHit hit;
+    int bad = tg_guard_mesh_scan(nl, ring, b, off, mlen, win_lo, win_hi,
+                                 cls, &hit);
+    if (bad) {
+        if (pdepth) *pdepth = hit.intr;
+        if (psi)    *psi = hit.si;
+    }
+    return bad;
+}
+
 
 /* Validate one entry's assembled meshes against the carriageway and drop the
  * ones standing in the road. Rewrites `meshes` and `moff`/`*pnmesh` in place
@@ -2630,7 +2978,7 @@ static int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
      * residual self-check, which must count only NON-exempt on-road meshes --
      * exempt ranges are original byte offsets and stop mapping once compaction
      * moves the bytes. */
-    static unsigned char kept_exempt[TD5_TG_GUARD_KEPT_MAX];
+    static unsigned char kept_exempt[TD5_TG_GUARD_KEPT_MAX];  /* policy class */
     int win_lo, win_hi, i, nn = 0, rejected = 0;
     size_t w = 0;
 
@@ -2645,26 +2993,94 @@ static int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
     for (i = 0; i < nmesh; i++) {
         const size_t off = moff[i];
         size_t mlen = (off <= meshes->len) ? tg_guard_mesh_len(b, off, meshes->len) : 0;
-        int keep = 1, exempt;
+        int keep = 1, exempt, kind = TG_GK_OTHER, cls = TG_GKC_SCENERY;
+        int mark_si = -1;
         double depth = 0.0;
         int si = -1;
 
-        exempt = (mlen == 0) ? 1 : tg_guard_is_exempt(off);
         if (mlen == 0 || off + mlen > meshes->len) {
             /* Unparseable / spans to end: keep verbatim, do not risk corruption. */
             mlen = (i + 1 < nmesh ? moff[i + 1] : meshes->len) - off;
             exempt = 1;
-        } else if (!exempt &&
-                   tg_guard_mesh_on_road(nl, ring, b, off, mlen,
-                                         win_lo, win_hi, &depth, &si)) {
-            keep = 0;
-            rejected++;
-            s_guard_rejects++;
-            tg_acct(TG_ACCT_GUARD_REJECT, si);
-            if (rejected <= 8)
-                TD5_LOG_W(LOG_TAG, "on-road guard: rejected mesh at span %d "
-                          "(penetration %.0f, %u verts)", si, depth,
-                          tg_rd_u32(b + off + 0x08));
+        } else {
+            kind = tg_guard_kind_of(off, &mark_si);
+            cls  = (int)k_guard_kind_class[kind];
+            /* R7 fallback (TD5RE_R8_GUARD=0): the two classes R8 introduced
+             * collapse back to what R7 did -- a decal was ordinary scenery that
+             * simply never tripped the vertex test, and the skirt/water/coast
+             * were unconditionally exempt. */
+            if (!tg_guard_r8() && cls == TG_GKC_DECAL) cls = TG_GKC_SCENERY;
+            if (!tg_guard_r8() && cls == TG_GKC_UNDER) cls = TG_GKC_EXEMPT;
+            exempt = (cls == TG_GKC_EXEMPT);
+            /* [R8] SPAN-SCOPED EXEMPTION. An exempt mark licenses geometry that
+             * crosses the carriageway AT THE SPAN IT WAS EMITTED FOR. Test the
+             * mesh as plain SCENERY first: if it does intrude, the licence only
+             * stands when the intrusion is near the marking span. Anything
+             * further is an unrelated mesh that happened to land inside an
+             * exempt byte range, and it is validated normally. */
+            if (exempt && tg_guard_r8() && mark_si >= 0 &&
+                k_guard_kind_local[kind] &&
+                tg_guard_mesh_on_road_cls(nl, ring, b, off, mlen, win_lo, win_hi,
+                                          TG_GKC_SCENERY, &depth, &si)) {
+                int d = si - mark_si; if (d < 0) d = -d;
+                if (d > TD5_TG_GUARD_EX_SPANS) {
+                    cls = TG_GKC_SCENERY;
+                    exempt = 0;
+                    s_guard_ex_scope_hits++;
+                }
+            }
+            depth = 0.0; si = -1;
+            if (!exempt &&
+                tg_guard_mesh_on_road_cls(nl, ring, b, off, mlen, win_lo, win_hi,
+                                          cls, &depth, &si)) {
+                keep = 0;
+                rejected++;
+                s_guard_rejects++;
+                s_guard_rej_kind[kind]++;
+                tg_acct(TG_ACCT_GUARD_REJECT, si);
+                tg_acct(TG_ACCT_R8_GUARD, si);
+                if (rejected <= 8)
+                    TD5_LOG_W(LOG_TAG, "on-road guard: rejected %s mesh at span "
+                              "%d (coverage %.0f, %u verts)",
+                              k_guard_kind_name[kind], si, depth,
+                              tg_rd_u32(b + off + 0x08));
+            }
+        }
+
+        /* [R8] DIAG: dump every mesh of one entry with its measured footprint.
+         * This is the instrument the R8 diagnosis was made with -- it is what
+         * showed that the surviving objects at spans 187/627/686 were NOT
+         * height-gated and NOT exempt, but wide quads whose corners all sat
+         * outside the road. Kept so the next round re-measures instead of
+         * inheriting this conclusion in turn. */
+        {
+            const int dsp = tg_guard_diag_span();
+            /* Report by WHERE THE MESH LANDS, not by which entry emitted it.
+             * Scenery for span 184 routinely reaches span 187, so dumping only
+             * the entry that contains the complaint span would miss the very
+             * mesh the user is looking at. TD5RE_R8_GUARD_AUDIT=1 instead dumps
+             * EVERY mesh on the whole strip that covers the carriageway at all,
+             * whatever its class -- the sweep the acceptance bar asks for, and
+             * the only way to see what the exemptions are currently licensing. */
+            const int audit = td5_env_flag_off("TD5RE_R8_GUARD_AUDIT");
+            if ((audit || (dsp > 0 && dsp >= win_lo && dsp <= win_hi))
+                && mlen > 0 && off + mlen <= meshes->len) {
+                TG_GuardHit h;
+                int badv = tg_guard_mesh_scan(nl, ring, b, off, mlen, win_lo,
+                                              win_hi, cls, &h);
+                int d = (dsp > 0) ? h.si - dsp : 0;
+                if (d < 0) d = -d;
+                if (audit ? (h.intr > TD5_TG_GUARD_PEN
+                             && tg_guard_quad_bad(TG_GKC_SCENERY, h.intr,
+                                                  h.dy_lo, h.dy_hi))
+                          : (d <= 2 && h.intr > -1e299))
+                    TD5_LOG_I(LOG_TAG, "guard-diag: entry@%d mesh %d kind=%s "
+                              "cls=%d mark_si=%d verts=%u intr=%.0f si=%d "
+                              "dy=[%.0f,%.0f] %s", s0, i,
+                              k_guard_kind_name[kind], cls, mark_si,
+                              tg_rd_u32(b + off + 0x08), h.intr, h.si, h.dy_lo,
+                              h.dy_hi, badv ? "REJECT" : "keep");
+            }
         }
 
         /* Drop the bytes only on a real rejection AND when NOT in report-only
@@ -2672,7 +3088,11 @@ static int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
          * the mesh, compacting it left over any gap left by earlier drops. */
         if (keep || tg_guard_report_only()) {
             if (w != off) memmove(b + w, b + off, mlen);
-            if (nn < TD5_TG_GUARD_KEPT_MAX) kept_exempt[nn] = (unsigned char)exempt;
+            /* Record the POLICY CLASS, not a bare exempt bit: the residual
+             * self-check has to judge each kept mesh by the same rule the drop
+             * pass did, and a decal legally covers the road. */
+            if (nn < TD5_TG_GUARD_KEPT_MAX)
+                kept_exempt[nn] = (unsigned char)(exempt ? TG_GKC_EXEMPT : cls);
             moff[nn++] = w;
             w += mlen;
         }
@@ -2693,10 +3113,12 @@ static int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
             size_t mlen = tg_guard_mesh_len(b, off, meshes->len);
             double depth = 0.0;
             int si = -1;
-            if (i < TD5_TG_GUARD_KEPT_MAX && kept_exempt[i]) continue;
+            int cls = (i < TD5_TG_GUARD_KEPT_MAX) ? (int)kept_exempt[i]
+                                                  : TG_GKC_SCENERY;
+            if (cls == TG_GKC_EXEMPT) continue;
             if (mlen == 0 || off + mlen > meshes->len) continue;
-            if (tg_guard_mesh_on_road(nl, ring, b, off, mlen, win_lo, win_hi,
-                                      &depth, &si))
+            if (tg_guard_mesh_on_road_cls(nl, ring, b, off, mlen, win_lo, win_hi,
+                                          cls, &depth, &si))
                 s_guard_residual++;
         }
     }
@@ -8084,8 +8506,18 @@ static int tg_city_emit_crossing(const TG_FBHook *h)
     if (*h->nmesh >= h->maxmesh) return 1;
     tg_acct(TG_ACCT_CROSSING, h->si);
     h->moff[(*h->nmesh)++] = h->blk->len;
-    return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
-                              &seg_page, &seg_nq, 1);
+    {   /* [R8 GUARD] A zebra is authored KERB TO KERB, so the on-road guard's
+         * coverage test would drop it on sight. It is marked DECAL instead of
+         * exempt: covering the road is licensed, but ONLY flush with the tarmac
+         * (this quad is lifted TD5_TG_CROSS_LIFT = 20 raw). A crossing slab that
+         * floats above the road is still rejected, which is R8 item 3 stated as
+         * a rule rather than as a special case. */
+        const size_t d0 = h->blk->len;
+        int r = tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                                   &seg_page, &seg_nq, 1);
+        tg_guard_mark(d0, h->blk->len, TG_GK_DECAL, h->si);
+        return r;
+    }
 }
 
 /* REAL STREETLAMPS, on the SHIPPED lamp page.
@@ -9295,7 +9727,13 @@ static int tg_cross_emit_join_zebra(const TG_FBHook *h)
     if (*h->nmesh >= h->maxmesh) return 1;
     tg_acct_n(TG_ACCT_CROSSFURN, h->si, 1);
     h->moff[(*h->nmesh)++] = h->blk->len;
-    return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
+    {   /* [R8 GUARD] road-surface paint: DECAL, same rule as the crossing zebra. */
+        const size_t d0 = h->blk->len;
+        int r = tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                                   &seg_page, &seg_nq, 1);
+        tg_guard_mark(d0, h->blk->len, TG_GK_DECAL, h->si);
+        return r;
+    }
 }
 
 /* Group CROSS dispatcher (feedback R4 items 10, 14; R5 items 2, 3, 4, 12).
@@ -10495,6 +10933,8 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
 
     s_guard_rejects = 0;   /* [R7 GUARD] per-build tally, reported below */
     s_guard_residual = 0;
+    s_guard_ex_scope_hits = 0;
+    memset(s_guard_rej_kind, 0, sizeof s_guard_rej_kind);
 
     for (e = 0; e < nentries && ok; e++) {
         const int s0 = e * TD5_TG_SPANS_PER_ENTRY;
@@ -10547,7 +10987,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                         ok = 0;
                     /* [R7 GUARD] the branch carriageway is drivable; it sits deep
                      * inside the -side reach envelope, so mark it exempt. */
-                    tg_guard_ex_mark(moff[nmesh - 1], meshes.len);
+                    tg_guard_mark(moff[nmesh - 1], meshes.len, TG_GK_BRANCHROAD, si);
                     /* Item 9a: the branch carriageway had NO kerb of its own, so
                      * driving a corridor there was road meeting bare ground with
                      * no pavement -- the "missing gaps between road and sidewalk
@@ -10596,7 +11036,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 if (!tg_emit_ground(nl, si, &meshes, wsd)) { ok = 0; break; }
             }
             /* [R7 GUARD] the ground skirt underlaps the road by design. */
-            tg_guard_ex_mark(moff[nmesh - 1], meshes.len);
+            tg_guard_mark(moff[nmesh - 1], meshes.len, TG_GK_SKIRT, si);
             {
             const size_t road_ex0 = meshes.len;   /* [R7 GUARD] road+gore+divider */
             moff[nmesh++] = meshes.len;
@@ -10655,7 +11095,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
             }
             /* [R7 GUARD] road quads, the fork gore and the avenue divider all
              * occupy the drivable envelope on purpose. */
-            tg_guard_ex_mark(road_ex0, meshes.len);
+            tg_guard_mark(road_ex0, meshes.len, TG_GK_ROAD, si);
             }
             /* Guardrails belong in THIS loop, not the box pass below: that pass
              * recovers each piece's offset by dividing the appended bytes by
@@ -10664,9 +11104,11 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
              * corrupt those offsets. Here each offset is recorded explicitly. */
             if (ok && rails &&
                 tg_span_needs_guardrail(nl, si, nspans)) {
+                const size_t r0 = meshes.len;
                 moff[nmesh++] = meshes.len;
                 if (!tg_emit_guardrail(nl, si, &meshes)) ok = 0;
                 else nrails++;
+                tg_guard_mark(r0, meshes.len, TG_GK_RAIL, si);
             }
         }
         for (i = 0; i < ns && ok; i++) {
@@ -10693,21 +11135,39 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                      * beside the bore on purpose. */
                     size_t t0 = meshes.len;
                     if (!tg_emit_fb_tunnel(&hook)) { ok = 0; break; }
-                    tg_guard_ex_mark(t0, meshes.len);
+                    tg_guard_mark(t0, meshes.len, TG_GK_TUNNEL, si);
                 } else {
+                    /* [R8 GUARD] Kind marks on the NON-exempt hooks too. These
+                     * license nothing (every kind below is SCENERY class); they
+                     * exist so a rejection can name the emitter that produced
+                     * the mesh, which is what makes "rejections broken down by
+                     * kind, and zero of them road/deck/gantry/tunnel" a number
+                     * in the log rather than a claim. */
+                    size_t g0 = meshes.len;
                     if (!tg_emit_fb_city(&hook))    { ok = 0; break; }
+                    tg_guard_mark(g0, meshes.len, TG_GK_CITY, si);
+                    g0 = meshes.len;
                     if (!tg_emit_fb_block(&hook))   { ok = 0; break; }
+                    tg_guard_mark(g0, meshes.len, TG_GK_BLOCK, si);
+                    g0 = meshes.len;
                     if (!tg_emit_fb_cross(&hook))   { ok = 0; break; }
+                    tg_guard_mark(g0, meshes.len, TG_GK_CROSS, si);
+                    g0 = meshes.len;
                     if (!tg_emit_fb_flora(&hook))   { ok = 0; break; }
+                    tg_guard_mark(g0, meshes.len, TG_GK_FLORA, si);
+                    g0 = meshes.len;
                     if (!tg_emit_fb_park_trees(&hook)) { ok = 0; break; }
+                    tg_guard_mark(g0, meshes.len, TG_GK_PARKTREE, si);
+                    g0 = meshes.len;
                     if (!tg_emit_fb_terrain(&hook)) { ok = 0; break; }
+                    tg_guard_mark(g0, meshes.len, TG_GK_TERRAIN, si);
                 }
                 /* [R7 GUARD] the start/finish gantry legs stand at the road edge
                  * and its beam spans overhead -- authored across the road. */
                 {
                     size_t k0 = meshes.len;
                     if (!tg_emit_fb_track(&hook)) { ok = 0; break; }
-                    tg_guard_ex_mark(k0, meshes.len);
+                    tg_guard_mark(k0, meshes.len, TG_GK_GANTRY, si);
                 }
             }
 
@@ -10722,7 +11182,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 }
                 /* [R7 GUARD] the strip's two end backstop walls span the road on
                  * purpose (the collision sentinels behind the start/finish). */
-                tg_guard_ex_mark(ew0, meshes.len);
+                tg_guard_mark(ew0, meshes.len, TG_GK_ENDWALL, si);
             }
 
             if (tg_span_in_tunnel(si)) {
@@ -10736,7 +11196,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     moff[nmesh++] = before + (size_t)k *
                                     ((meshes.len - before) / (size_t)n_added);
                 /* [R7 GUARD] the tunnel bore encloses the road. */
-                tg_guard_ex_mark(before, meshes.len);
+                tg_guard_mark(before, meshes.len, TG_GK_TUNNEL, si);
             } else {
                 const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
                 size_t b0 = meshes.len, b1;
@@ -10744,6 +11204,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 /* Building: 0 or 1 mesh -- record its offset explicitly. */
                 if (!tg_building_for_span(nl, si, &meshes)) { ok = 0; break; }
                 if (meshes.len > b0) moff[nmesh++] = b0;
+                tg_guard_mark(b0, meshes.len, TG_GK_BUILDING, si);
                 /* Bridge: 0..N equal-sized boxes among themselves.
                  * [R7 GUARD] the deck IS the road and the piers descend from it;
                  * the parapets/ribs sit on the deck edge or overhead. */
@@ -10752,7 +11213,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 for (k = 0; k < nb; k++)
                     moff[nmesh++] = b1 + (size_t)k *
                                     ((meshes.len - b1) / (size_t)nb);
-                tg_guard_ex_mark(b1, meshes.len);
+                tg_guard_mark(b1, meshes.len, TG_GK_DECK, si);
                 /* Sloped parapets + optional overhead ribs (items 12, 13):
                  * separate quad meshes, each records its own offset. */
                 {
@@ -10760,7 +11221,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     if (!tg_emit_bridge_rails(nl, si, &meshes, moff, &nmesh)) {
                         ok = 0; break;
                     }
-                    tg_guard_ex_mark(br0, meshes.len);
+                    tg_guard_mark(br0, meshes.len, TG_GK_DECK, si);
                 }
                 /* River under a bridge run. [R7 GUARD] the water is the surface a
                  * bridge deck flies over -- never scenery on the road. */
@@ -10769,7 +11230,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     if (!tg_emit_bridge_water(nl, si, &meshes, moff, &nmesh)) {
                         ok = 0; break;
                     }
-                    tg_guard_ex_mark(bw0, meshes.len);
+                    tg_guard_mark(bw0, meshes.len, TG_GK_WATER, si);
                 }
                 /* [R4 item 20] Coastline at the river's longitudinal ends. */
                 if (tg_span_in_bridge_run(si)) {
@@ -10777,11 +11238,15 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     if (!tg_emit_bridge_coast(nl, si, &meshes, moff, &nmesh)) {
                         ok = 0; break;
                     }
-                    tg_guard_ex_mark(bc0, meshes.len);
+                    tg_guard_mark(bc0, meshes.len, TG_GK_COAST, si);
                 }
                 /* Prop billboards: variable count/size, each records its own. */
-                if (!tg_emit_props(nl, si, b, &meshes, moff, &nmesh,
-                                   TG_MAX_MESHES_PER_ENTRY)) { ok = 0; break; }
+                {
+                    size_t p0 = meshes.len;
+                    if (!tg_emit_props(nl, si, b, &meshes, moff, &nmesh,
+                                       TG_MAX_MESHES_PER_ENTRY)) { ok = 0; break; }
+                    tg_guard_mark(p0, meshes.len, TG_GK_PROP, si);
+                }
                 /* Sea plane on coastal runs. [R6 item 14] NOT on a bridge run:
                  * the full-width bridge water already covers the surface there
                  * (now at sea level), and laying the one-sided sea plane over it
@@ -10792,7 +11257,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     if (!tg_emit_water(nl, si, tg_water_side(si), &meshes,
                                        moff, &nmesh)) { ok = 0; break; }
                     /* [R7 GUARD] the sea plane sits beside/below the road. */
-                    tg_guard_ex_mark(sw0, meshes.len);
+                    tg_guard_mark(sw0, meshes.len, TG_GK_WATER, si);
                 }
             }
         }
@@ -10871,6 +11336,42 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 TD5_LOG_W(LOG_TAG, "on-road guard: RESIDUAL %ld non-exempt "
                           "on-road mesh(es) survived -- parse/compaction bug",
                           s_guard_residual);
+            /* [R8] The acceptance evidence for the precision pass, as numbers.
+             * ONE line per kind that was rejected, and an explicit line for the
+             * kinds that must NEVER appear: if road / deck / gantry / tunnel /
+             * skirt / water / branch-road ever show a non-zero count, the guard
+             * has started eating the track and that is a stop-the-line failure,
+             * not a tuning question. */
+            if (tg_guard_enabled()) {
+                /* The kinds that must NEVER be rejected: the drivable surface
+                 * and the structures that enclose it. NOT skirt/water/coast --
+                 * those are UNDER class, and rejecting one that has climbed ON
+                 * TOP of the carriageway is the R8 item-7 fix, not a failure. */
+                static const int k_never[] = {
+                    TG_GK_ROAD, TG_GK_BRANCHROAD, TG_GK_DECK, TG_GK_GANTRY,
+                    TG_GK_TUNNEL, TG_GK_ENDWALL
+                };
+                long never = 0;
+                int ki;
+                for (ki = 0; ki < TG_GK_COUNT; ki++)
+                    if (s_guard_rej_kind[ki])
+                        TD5_LOG_I(LOG_TAG, "on-road guard: rejects by kind: "
+                                  "%-12s %ld", k_guard_kind_name[ki],
+                                  s_guard_rej_kind[ki]);
+                for (ki = 0; ki < (int)(sizeof k_never / sizeof k_never[0]); ki++)
+                    never += s_guard_rej_kind[k_never[ki]];
+                if (never)
+                    TD5_LOG_W(LOG_TAG, "on-road guard: %ld TRACK-SURFACE mesh(es) "
+                              "rejected (road/branch-road/deck/gantry/tunnel/"
+                              "end-wall) -- the guard is eating the track", never);
+                else
+                    TD5_LOG_I(LOG_TAG, "on-road guard: 0 road/branch-road/deck/"
+                              "gantry/tunnel/end-wall meshes rejected");
+                if (s_guard_ex_scope_hits)
+                    TD5_LOG_I(LOG_TAG, "on-road guard: %ld exempt mesh(es) fell "
+                              "outside their own span run and were validated as "
+                              "scenery", s_guard_ex_scope_hits);
+            }
         }
     }
 
