@@ -31,6 +31,7 @@
 #include "td5_tg_real_tex.h"   /* real TD5 texture pages (level014), opt-in */
 #include "td5_tg_real_tex_city.h"  /* extra city facades: SF/Tokyo/Moscow */
 #include "td5_tg_real_tex_r5flora.h"  /* [R5 item 18] tall Moscow park trees */
+#include "td5_tg_real_tex_r7city.h"   /* [R7 item 4] more city facade variety */
 #include "td5_tg_furniture_tex.h" /* real TD5 lamp/railing/banner pages     */
 #include "td5re.h"
 
@@ -370,6 +371,16 @@ static int tg_road_page(int si);
  * pre-selection and item 3 for plaza dressing, so it adds the most new art. */
 #define TD5_TG_PAGE_R7_CITY   (TD5_TG_PAGE_R7_BASE + 14)
 #define TD5_TG_R7_CITY_N      16
+/* [R7 item 4] The CITY block's first 12 slots carry EXTRA facade variety: the
+ * original 12 wall variants (level014 + SF/Moscow/Tokyo) are joined by 12 more
+ * mined from the shipped city levels (gen_trackgen_r7city_tex.py) -- 7 low-rise
+ * masonry, 5 tower/office -- so the pre-selection is not one town repeated. They
+ * sit in this reserved block, so the derived WALL/STORE/TREE page chain above is
+ * untouched; tg_facade_page_class draws from the union. Slots +12..+15 are spare. */
+#define TD5_TG_R7_WALL_LOW_N       7
+#define TD5_TG_R7_WALL_TOWER_N     5
+#define TD5_TG_PAGE_R7_WALL_LOW    (TD5_TG_PAGE_R7_CITY + 0)   /* +0..+6  */
+#define TD5_TG_PAGE_R7_WALL_TOWER  (TD5_TG_PAGE_R7_CITY + 7)   /* +7..+11 */
 
 #define TD5_TG_PAGE_R7_BRANCH (TD5_TG_PAGE_R7_BASE + 32)
 #define TD5_TG_R7_BRANCH_N    8
@@ -3969,13 +3980,31 @@ static void tg_facade_push_quad(const double *xyz,
  * rather than a place. */
 static int tg_facade_page_class(unsigned int gh, int rows)
 {
-    unsigned int lo = 0, hi = (unsigned)TD5_TG_WALL_TOWER_FIRST, v;
+    /* [R7 item 4] Draw from the UNION of the original 12 variants and the R7
+     * variety pages, still split by class: a tower run picks among the original
+     * tower variants (TOWER_FIRST..WALL_VARIANTS) plus the R7 tower pages, a
+     * low-rise run among the original low variants (0..TOWER_FIRST) plus the R7
+     * low pages. Same hash bits key the pick, so a given block keeps a stable
+     * page. TD5RE_R7_CITY_VARIETY=0 restores the original 12-page pool for an
+     * A/B. */
+    const int r7 = td5_env_flag_on("TD5RE_R7_CITY_VARIETY");
+    unsigned int v;
     if (rows >= TD5_TG_FACADE_TALL_ROWS) {
-        lo = (unsigned)TD5_TG_WALL_TOWER_FIRST;
-        hi = (unsigned)TD5_TG_WALL_VARIANTS;
+        const int orig  = TD5_TG_WALL_VARIANTS - TD5_TG_WALL_TOWER_FIRST; /* 3 */
+        const int extra = r7 ? TD5_TG_R7_WALL_TOWER_N : 0;
+        v = (gh >> 17) % (unsigned)(orig + extra);
+        if ((int)v < orig)
+            return TD5_TG_PAGE_WALL_EXTRA + TD5_TG_WALL_TOWER_FIRST + (int)v - 1;
+        return TD5_TG_PAGE_R7_WALL_TOWER + ((int)v - orig);
+    } else {
+        const int orig  = TD5_TG_WALL_TOWER_FIRST;                        /* 9 */
+        const int extra = r7 ? TD5_TG_R7_WALL_LOW_N : 0;
+        v = (gh >> 17) % (unsigned)(orig + extra);
+        if ((int)v < orig)
+            return v == 0 ? TD5_TG_PAGE_WALL
+                          : (TD5_TG_PAGE_WALL_EXTRA + (int)v - 1);
+        return TD5_TG_PAGE_R7_WALL_LOW + ((int)v - orig);
     }
-    v = lo + (gh >> 17) % (hi - lo);
-    return v == 0 ? TD5_TG_PAGE_WALL : (TD5_TG_PAGE_WALL_EXTRA + (int)v - 1);
 }
 
 /* Which shop page a run's ground floor uses -- a different hash bit than the
@@ -4523,6 +4552,40 @@ static int tg_biome_span_is_city(int si)
     return !strcmp(k_biomes[tg_biome_cell_index(si)].name, "CITY");
 }
 
+/* [R7 CITY item 7] Continuity of the city's STRUCTURAL edge -- raised sidewalk +
+ * kerb HEIGHT + roadside railing, and the street-wall/tree choice that carries
+ * them -- to the TRUE end of a city run. The scenery emitters normally read the
+ * BLENDED biome (tg_biome_for_span), whose ~20-span dither band around a cell
+ * boundary lets a trailing city span resolve to the neighbour (and a leading
+ * neighbour span to the city). At a city edge that dithers the kerb height, the
+ * railing and the wall/tree choice per span, and bleeds the pavement raggedly
+ * into the next biome -- the railing present on one side only, the "transition
+ * on span 455 doesn't keep continuity" report (seed 99991: CITY ends at 449, the
+ * pavement + a one-sided railing bleed on to ~479). A raised kerb and a guard
+ * rail are per-RUN structure, not a dithered categorical field, so at a CITY
+ * boundary they key off the HARD cell the road surface already uses
+ * (tg_biome_cell_index): solid to the last city span, then a clean edge.
+ *
+ * SCOPED TO CITY EDGES ONLY. Where the hard and blended biome already agree, or
+ * where NEITHER is CITY, this returns the blended index unchanged -- every
+ * non-city transition keeps its dither (the trees-thinning-into-buildings blend
+ * this replaces only at the city line). Default ON; TD5RE_R7_CITY_CONT=0 restores
+ * the fully-blended edge for an A/B. */
+static int tg_biome_index_is_city(int idx)
+{
+    return !strcmp(k_biomes[idx].name, "CITY");
+}
+static int tg_scenery_biome_index(int si)
+{
+    int hard = tg_biome_cell_index(si);
+    int soft = tg_biome_for_span(si);
+    if (hard == soft) return soft;
+    if (td5_env_flag_on("TD5RE_R7_CITY_CONT") &&
+        (tg_biome_index_is_city(hard) || tg_biome_index_is_city(soft)))
+        return hard;
+    return soft;
+}
+
 /* [R5 CROSS item 12] Is span si's road surface plain tarmac? The pedestrian
  * ZEBRA page (white bars on a dark base) is authored for asphalt; on the pale
  * gravel of INDUSTRIAL or the cobble of ORIENTAL the white bars sit on an
@@ -5047,7 +5110,7 @@ static int tg_facade_stands(int si)
 {
     if (si <= 0) return 0;
     if (tg_span_in_bridge_run(si)) return 0;
-    return tg_city_sidewalk_w(&k_biomes[tg_biome_for_span(si)]) > 0.0;
+    return tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(si)]) > 0.0;
 }
 
 static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
@@ -5067,7 +5130,9 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
      * the clearance; it only needs somewhere for the near cap to end. */
     if (si <= 0) return 1;
     if (tg_span_in_bridge_run(si)) return 1;   /* deck is clear -- see the river */
-    b = &k_biomes[tg_biome_for_span(si)];
+    /* [R7 item 7] wall-vs-tree keyed on the hardened city edge so the frontage
+     * ends cleanly with its sidewalk, not a span early/late (see the helper). */
+    b = &k_biomes[tg_scenery_biome_index(si)];
 
     if (!b->billboard || b->tree_n <= 0)
         return tg_emit_street_wall(nl, si, b, blk);
@@ -7379,7 +7444,10 @@ typedef struct {
 static int tg_city_span_paved(const TG_FBHook *h)
 {
     if (tg_span_in_bridge_run(h->si)) return 0;
-    return tg_city_sidewalk_w(h->b) > 0.0;
+    /* [R7 item 7] hardened city edge -- the raised pavement + kerb HEIGHT run to
+     * the true end of the city cell instead of dithering out over the blend band.
+     * Keep sw (below) sourced the same way so paved and width never disagree. */
+    return tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(h->si)]) > 0.0;
 }
 
 /* Lateral frame for span si: both road edges at f=0 and f=1 plus the outward
@@ -8151,6 +8219,68 @@ static int tg_block_is_park(int si, int left)
     return (h >> 30) == 0u;                       /* ~1 gap in 4 is a park */
 }
 
+/* [R7 CITY item 3] Ground + dressing under a fork-gore BUILDING backdrop. The
+ * backdrop massing (tg_bg_building_box) stood on its base chord alone; where the
+ * far terrain does not reach behind the corridor the block read as "buildings at
+ * the back that don't reach the floor / have no ground" (span 137, seed 99991).
+ * This lays a tiled PLAZA slab from the carriageway clearance out past the block
+ * back, at the block's own base Y (the road-node Y), so the buildings visibly
+ * stand on a floor, and dresses it with a fountain/monument or a passer-by --
+ * the "plazas can contain fountains and people" request. Everything sits BEHIND
+ * the carriageway clearance (routes the same tg_carriageway_clear_gap the block
+ * does, so the GUARD backstop has nothing to reject). Gate TD5RE_R7_CITY_PLAZA
+ * (default ON); =0 restores the bare backdrop for an A/B. */
+static int tg_city_emit_forkback_plaza(const TG_FBHook *h, double side,
+                                       const TG_Node *n0, const TG_Node *n1,
+                                       double lx0, double lz0,
+                                       double lx1, double lz1,
+                                       double set0, double set1, double depth)
+{
+    const int si = h->si;
+    /* Inner edge sits at the skirt's outer reach (measured from the road edge),
+     * underlapped a little so the plaza abuts the ordinary ground with no seam
+     * and does NOT overlap-and-z-fight the sloping skirt inside it. The whole
+     * point is the region BEYOND the 12000 skirt, where a fork backdrop stands
+     * (front ~14000-21000 out, seed 99991 span 137) over the sunk far-band and so
+     * "does not reach the floor". */
+    const double inner = tg_verge_reach() - 1000.0;
+    double dn, df, u_d;
+    double px[4], py[4], pz[4], uu[4], vv[4];
+    int seg_page = TD5_TG_PAGE_GROUND, seg_nq, pp;
+
+    if (!td5_env_flag_on("TD5RE_R7_CITY_PLAZA")) return 1;
+
+    dn  = n0->width * 0.5 + set0 + depth;      /* near outer = block back */
+    df  = n1->width * 0.5 + set1 + depth;      /* far  outer              */
+    u_d = (dn - (n0->width * 0.5 + inner)) / (double)TD5_TG_SPAN_LENGTH;
+    {
+        const double inx0 = n0->x + lx0 * (n0->width * 0.5 + inner);
+        const double inz0 = n0->z + lz0 * (n0->width * 0.5 + inner);
+        const double inx1 = n1->x + lx1 * (n1->width * 0.5 + inner);
+        const double inz1 = n1->z + lz1 * (n1->width * 0.5 + inner);
+        px[0]=inx0;            py[0]=n0->y; pz[0]=inz0;            uu[0]=0.0; vv[0]=(double)si;
+        px[1]=n0->x+lx0*dn;    py[1]=n0->y; pz[1]=n0->z+lz0*dn;   uu[1]=u_d; vv[1]=(double)si;
+        px[2]=n1->x+lx1*df;    py[2]=n1->y; pz[2]=n1->z+lz1*df;   uu[2]=u_d; vv[2]=(double)si + 1.0;
+        px[3]=inx1;            py[3]=n1->y; pz[3]=inz1;            uu[3]=0.0; vv[3]=(double)si + 1.0;
+    }
+    if (*h->nmesh < h->maxmesh) {
+        seg_nq = 1;
+        h->moff[(*h->nmesh)++] = h->blk->len;
+        if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1))
+            return 0;
+        tg_acct(TG_ACCT_R7_CITY, si);          /* the plaza floor */
+    }
+
+    /* Dressing: a fountain/monument on a ~1-in-3 beat, a passer-by otherwise,
+     * out on the plaza between the skirt end and the block front. tg_prop_one
+     * adds width/2 + gap itself and accounts each as a PROP. */
+    pp = ((unsigned)si % 3u == 0u) ? PP_MONUMENT : PP_PERSON0;
+    if (!tg_prop_one(h->nl, si, pp, side, inner + 0.4 * (set0 - inner),
+                     h->blk, h->moff, h->nmesh))
+        return 0;
+    return 1;
+}
+
 /* [R4 item 6] BACKGROUND massing behind a fork gore. Where a fork clears its
  * RIGHT lateral for the branch corridor, tg_side_geom drops the facade and every
  * verge emitter skips the side (tg_side_blocked), so the whole flank was bare
@@ -8320,6 +8450,10 @@ static int tg_city_emit_forkback(const TG_FBHook *h)
                                 depth, H, cols, rows, page, 1, si))
             return 0;
         tg_acct(TG_ACCT_FORKBACK, si);
+        /* [R7 item 3] give the backdrop a floor to stand on + plaza dressing. */
+        if (!tg_city_emit_forkback_plaza(h, side, n0, n1, lx0, lz0, lx1, lz1,
+                                         set0, set1, depth))
+            return 0;
     }
     return 1;
 }
@@ -8877,7 +9011,9 @@ static int tg_emit_fb_cross(const TG_FBHook *h)
 static int tg_emit_fb_city(const TG_FBHook *h)
 {
     const int paved = tg_city_span_paved(h);
-    const double sw = tg_city_sidewalk_w(h->b);
+    /* [R7 item 7] sw from the SAME hardened city edge tg_city_span_paved uses, so
+     * the slab, its kerb height and the railing all agree on where the city is. */
+    const double sw = tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(h->si)]);
 
     if (paved && td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS")) {
         if (!tg_city_emit_sidewalk(h, sw)) return 0;
@@ -12287,6 +12423,30 @@ static int tg_emit_textures(TG_Buf *out)
                               k_real_city_store_pal[v], k_real_city_store_paln[v],
                               k_real_city_store_idx[v], 0);
         }
+        /* [R7 item 4] extra facade variety in the R7_CITY block. Any slot the
+         * header does not fill falls back to a procedural wall so the selection
+         * pool never lands on a blank (black) page. */
+        for (v = 0; v < TD5_TG_R7_WALL_LOW_N; v++) {
+            if (v < k_real_r7city_low_count)
+                tg_emit_real_page(&pages[TD5_TG_PAGE_R7_WALL_LOW + v],
+                                  k_real_r7city_low_pal[v],
+                                  k_real_r7city_low_paln[v],
+                                  k_real_r7city_low_idx[v], 0);
+            else
+                tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_R7_WALL_LOW + v],
+                                          TD5_TG_WALL_VARIANTS + v);
+        }
+        for (v = 0; v < TD5_TG_R7_WALL_TOWER_N; v++) {
+            if (v < k_real_r7city_tower_count)
+                tg_emit_real_page(&pages[TD5_TG_PAGE_R7_WALL_TOWER + v],
+                                  k_real_r7city_tower_pal[v],
+                                  k_real_r7city_tower_paln[v],
+                                  k_real_r7city_tower_idx[v], 0);
+            else
+                tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_R7_WALL_TOWER + v],
+                                          TD5_TG_WALL_VARIANTS
+                                          + TD5_TG_R7_WALL_LOW_N + v);
+        }
         tg_emit_real_page(&pages[TD5_TG_PAGE_GREEN],
                           k_real_green_pal, k_real_green_paln, k_real_green_idx, 0);
         /* Thematic trees: alpha-keyed (type 1), index 0 transparent. */
@@ -12309,6 +12469,14 @@ static int tg_emit_textures(TG_Buf *out)
         tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_WALL], 0);
         for (v = 1; v < TD5_TG_WALL_VARIANTS; v++)
             tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_WALL_EXTRA + v - 1], v);
+        /* [R7 item 4] procedural fill of the R7 variety pages -- distinct seeds
+         * past the original variant range so each is its own wall. */
+        for (v = 0; v < TD5_TG_R7_WALL_LOW_N; v++)
+            tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_R7_WALL_LOW + v],
+                                      TD5_TG_WALL_VARIANTS + v);
+        for (v = 0; v < TD5_TG_R7_WALL_TOWER_N; v++)
+            tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_R7_WALL_TOWER + v],
+                                      TD5_TG_WALL_VARIANTS + TD5_TG_R7_WALL_LOW_N + v);
         for (v = 0; v < TD5_TG_STORE_VARIANTS; v++)
             tg_emit_texture_page_store(&pages[TD5_TG_PAGE_STORE + v], v);
         tg_emit_texture_page_green(&pages[TD5_TG_PAGE_GREEN]);
