@@ -585,6 +585,11 @@ static int tg_biome_tunnel_pct(int si);
 /* [R3 item 15] the centreline walk (above the bridge block) clamps curvature on
  * bridge spans, so it needs the run gate before that gate is defined. */
 static int tg_span_in_bridge_run(int si);
+/* [R9 RAILFIX] "Does the pedestrian kerb railing stand on this road edge?" --
+ * the single definition of tg_city_emit_fence's placement, asked by the ROADSIDE
+ * guardrail (which yields the edge) long before the city emitters are defined.
+ * Declared here rather than duplicated so the two can never disagree. */
+static int tg_rail_kerbfence_here(int si, double sg);
 /* Largest heading change per span allowed on a bridge deck, radians. 0.03 =>
  * turn radius >= ~50000 units, a sweeping curve rather than a hairpin, so a
  * deliberate bridge that lands on a tight section is straightened out. */
@@ -775,7 +780,12 @@ typedef enum {
      * The 64-bit headroom warning that used to live here is RETIRED: the mask
      * is now self-sizing off TG_ACCT_KIND_COUNT (see s_acct_mask), so adding a
      * kind grows the array instead of silently dropping a bit. */
-    TG_ACCT_R9_RAILFIX,     /* RAILFIX (8,12)               rename in place */
+    /* [R9 RAILFIX] One count per (span, side) road edge where the ROADSIDE
+     * guardrail STOOD DOWN because another treatment already owns that edge
+     * (the bridge parapet, or the pedestrian kerb railing). It is the
+     * inventory proof that the hand-off fired -- the doubling it removes is
+     * invisible to every mesh COUNT, which is why the R8 checks missed it. */
+    TG_ACCT_R9_RAILYIELD,
 
     TG_ACCT_R9_TUNNEL,      /* TUNNEL  (5,13)               rename in place */
 
@@ -866,7 +876,7 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
     /* [R9] one reserved name per area, in enum order, blank-line spaced.
      * Rename to match your renamed enum constant; keep every comma. Only the
      * LAST entry omits its trailing comma. */
-    "r9-railfix",           /* RAILFIX */
+    "rail-yields",          /* RAILFIX */
 
     "r9-tunnel",            /* TUNNEL  */
 
@@ -965,10 +975,114 @@ static void tg_var_report(void)
     }
 }
 
+/* ================= [R9 RAILFIX] ROAD-EDGE RAIL OWNERSHIP =================
+ * The element inventory counts MESHES. That is precisely the measurement that
+ * could not see the round-8 guardrail regression: "1178 rails over 589 spans"
+ * was true, and said nothing about whether two of those rails stood on the SAME
+ * ROAD EDGE. A doubling is not a total, it is a collision over a shared
+ * resource, so it needs a UNIQUENESS check over that resource.
+ *
+ * The shared resource here is the (span, side) road edge. Three emitters can
+ * put a linear barrier on one:
+ *
+ *   roadside    tg_emit_guardrail     -- the armco prism at road half width
+ *   deck        tg_emit_bridge_rails  -- the bridge parapet on the deck edge
+ *   kerb-fence  tg_city_emit_fence    -- the pedestrian railing on the pavement
+ *
+ * Each notes its claim at the point the geometry is committed. The report then
+ * prints, per class, how many edges it owns, and -- the number this exists for
+ * -- how many edges carry MORE THAN ONE class, broken down by which pair. That
+ * count going to zero is the acceptance test; the mesh total is not evidence.
+ *
+ * A BITMASK per edge, not a counter: the streaming emitter may be asked for
+ * overlapping span ranges, so the same emitter legitimately runs twice over one
+ * span. Re-setting a bit is idempotent, so re-entry cannot fabricate a
+ * duplicate, while two DIFFERENT classes on one edge always show. */
+typedef enum {
+    TG_RAIL_ROADSIDE = 0,       /* tg_emit_guardrail    */
+    TG_RAIL_DECK,               /* tg_emit_bridge_rails */
+    TG_RAIL_KERBFENCE,          /* tg_city_emit_fence   */
+    TG_RAIL_CLASS_COUNT
+} TG_RailClass;
+
+static const char *const k_rail_class[TG_RAIL_CLASS_COUNT] = {
+    "roadside", "deck", "kerb-fence"
+};
+
+/* [si][0] = LEFT edge, [si][1] = RIGHT edge. "Left" is lateral +1, the sign
+ * convention tg_append_row uses and every one of the three emitters already
+ * speaks (see the side loops). */
+static unsigned char s_rail_edge[TD5_TG_MAX_SPANS][2];
+
+static void tg_rail_edge_note(TG_RailClass c, int si, double lateral_sign)
+{
+    if ((unsigned)c >= TG_RAIL_CLASS_COUNT) return;
+    if (si < 0 || si >= TD5_TG_MAX_SPANS) return;
+    s_rail_edge[si][lateral_sign >= 0.0 ? 0 : 1] |= (unsigned char)(1u << c);
+}
+
+/* Number of edges carrying more than one rail class, with the offenders named.
+ * Returns that count so a caller can assert on it. */
+static int tg_rail_edge_report(int nspans)
+{
+    long own[TG_RAIL_CLASS_COUNT];
+    long pair[TG_RAIL_CLASS_COUNT][TG_RAIL_CLASS_COUNT];
+    char first[240];
+    int si, s, a, b, dup = 0, pos = 0, nlisted = 0;
+
+    memset(own, 0, sizeof(own));
+    memset(pair, 0, sizeof(pair));
+    first[0] = '\0';
+    if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
+
+    for (si = 0; si < nspans; si++)
+        for (s = 0; s < 2; s++) {
+            const unsigned m = s_rail_edge[si][s];
+            int n = 0;
+            for (a = 0; a < TG_RAIL_CLASS_COUNT; a++)
+                if (m & (1u << a)) { own[a]++; n++; }
+            if (n < 2) continue;
+            dup++;
+            /* Full dump, opt-in. The capped "first:" list below is enough to see
+             * that a doubling EXISTS; naming the span the USER named needs every
+             * offender printed, so TD5RE_R9_RAILFIX_REPORT=1 prints them all. */
+            if (td5_env_flag_off("TD5RE_R9_RAILFIX_REPORT"))
+                TD5_LOG_I(LOG_TAG, "trackgen:   dup-edge si=%d side=%s%s%s%s",
+                          si, s ? "R" : "L",
+                          (m & (1u << TG_RAIL_ROADSIDE))   ? " roadside"   : "",
+                          (m & (1u << TG_RAIL_DECK))       ? " deck"       : "",
+                          (m & (1u << TG_RAIL_KERBFENCE))  ? " kerb-fence" : "");
+            for (a = 0; a < TG_RAIL_CLASS_COUNT; a++)
+                for (b = a + 1; b < TG_RAIL_CLASS_COUNT; b++)
+                    if ((m & (1u << a)) && (m & (1u << b))) pair[a][b]++;
+            if (nlisted < 12 && pos < (int)sizeof(first) - 24) {
+                pos += snprintf(first + pos, sizeof(first) - (size_t)pos,
+                                "%s%d%s", nlisted ? " " : "", si, s ? "R" : "L");
+                nlisted++;
+            }
+        }
+
+    TD5_LOG_I(LOG_TAG,
+              "trackgen: ---- rail-edge uniqueness (%d spans, %d edges) ----",
+              nspans, nspans * 2);
+    for (a = 0; a < TG_RAIL_CLASS_COUNT; a++)
+        TD5_LOG_I(LOG_TAG, "trackgen:   %-11s edges=%ld",
+                  k_rail_class[a], own[a]);
+    TD5_LOG_I(LOG_TAG, "trackgen:   DOUBLED edges=%d%s%s", dup,
+              nlisted ? "  first: " : "", nlisted ? first : "");
+    for (a = 0; a < TG_RAIL_CLASS_COUNT; a++)
+        for (b = a + 1; b < TG_RAIL_CLASS_COUNT; b++)
+            if (pair[a][b])
+                TD5_LOG_I(LOG_TAG, "trackgen:     %s + %s = %ld edges",
+                          k_rail_class[a], k_rail_class[b], pair[a][b]);
+    return dup;
+}
+
 static void tg_acct_reset(void)
 {
     memset(s_acct_count, 0, sizeof(s_acct_count));
     memset(s_acct_mask,  0, sizeof(s_acct_mask));
+    memset(s_rail_edge,  0, sizeof(s_rail_edge));
     memset(s_var_id,    0, sizeof(s_var_id));
     memset(s_var_hits,  0, sizeof(s_var_hits));
     memset(s_var_n,     0, sizeof(s_var_n));
@@ -7819,6 +7933,34 @@ static int tg_span_is_bridge_deck(const TG_NodeList *nl, int si)
     return lift >= TD5_TG_BRIDGE_MIN_LIFT;
 }
 
+/* [R9 RAILFIX] Does the DECK PARAPET actually stand on span si?
+ *
+ * tg_span_is_bridge_deck answers "is there a deck here", which is not the same
+ * question: the parapet pass runs in the scenery loop, which skips everything
+ * past the main ring (fork pads and appended branch corridors carry road only),
+ * and it needs a far node to build a panel between. So a corridor span can be
+ * "in a bridge run" by hash and carry no parapet at all.
+ *
+ * That distinction is the whole reason this exists. The roadside guardrail has
+ * to yield the deck edges to the parapet (otherwise both rail the same edge --
+ * items 8/12), and it must yield ONLY where the parapet is really there, or the
+ * hand-off leaves a corridor span with no barrier of either kind. So the gate is
+ * defined ONCE here and asked by both emitters, instead of each keeping its own
+ * copy of "on a bridge" that can drift apart. */
+/* [R9 RAILFIX] Master A/B for the whole edge-ownership hand-off. Default ON.
+ * TD5RE_R9_RAILFIX=0 restores the round-8 behaviour (both treatments fire on a
+ * shared edge) from the SAME build, which is what makes the before/after
+ * uniqueness numbers a measurement rather than two different binaries. */
+static int tg_railfix_on(void) { return td5_env_flag_on("TD5RE_R9_RAILFIX"); }
+
+static int tg_rail_deck_here(const TG_NodeList *nl, int si)
+{
+    const int ring = (s_ring_len > 0) ? s_ring_len : nl->count;
+    if (si < 0 || si >= ring) return 0;      /* pad / corridor: no parapet pass */
+    if (si + 1 >= nl->count) return 0;       /* no far node to panel towards   */
+    return tg_span_is_bridge_deck(nl, si);
+}
+
 /* Base offset of the parapet FOOT relative to the deck surface, and its height.
  * [R5 item 17b] Was +40 (parapet floated 40u above the deck); with the deck
  * kerb only reaching deck level that left a thin open slot at the barrier foot
@@ -7928,8 +8070,7 @@ static int tg_emit_bridge_rails(const TG_NodeList *nl, int si,
     const int kerb = td5_env_flag_on("TD5RE_AUTOTRACK_BRIDGE_KERB");
     int s;
 
-    if (si + 1 >= nl->count) return 1;
-    if (!tg_span_is_bridge_deck(nl, si)) return 1;
+    if (!tg_rail_deck_here(nl, si)) return 1;   /* [R9 RAILFIX] shared gate */
     n1 = &nl->v[si + 1];
 
     for (s = 0; s < 2; s++) {
@@ -7986,6 +8127,7 @@ static int tg_emit_bridge_rails(const TG_NodeList *nl, int si,
         if (!tg_emit_bridge_rail_panel(m, x0, n0->y, z0, x1, n1->y, z1,
                                        si, moff, pn))
             return 0;
+        tg_rail_edge_note(TG_RAIL_DECK, si, side);      /* [R9 RAILFIX] */
         tg_acct(TG_ACCT_R8_BRIDGE, si);
     }
 
@@ -9240,16 +9382,32 @@ static int tg_span_needs_guardrail_raw(const TG_NodeList *nl, int si, int nspans
      * fork region rails like any other span and the exclusion is gone. */
     (void)nspans;
 
-    /* On a deliberately-placed deck: rail the WHOLE run, including the shallow
-     * ends the lift test would miss. This is the case the guardrail work
-     * existed for -- nothing stops you leaving a deck sideways. */
-    if (tg_span_in_bridge_run(si)) return 1;
-
-    /* Elevated: nothing stops you leaving a bridge deck, so rail it. Judged
-     * against the LOCAL terrain line, so this means "on a deck" and not
-     * merely "uphill of the lowest point on the track". */
-    if (nl->v[si].y - tg_local_ground_y(nl, si) >= TD5_TG_BRIDGE_MIN_LIFT)
-        return 1;
+    /* EXCLUSION [R9 RAILFIX, items 8+12]. This used to be two RETURN-1 rules --
+     * "rail the whole bridge run" and "rail anything lifted above local ground"
+     * -- and they were correct while the roadside emitter was opt-in and OFF:
+     * the rails a player actually saw on a deck were the bridge parapet, so
+     * nobody noticed that the gate claimed the deck too.
+     *
+     * With the emitter default-ON at the R8 merge, both fired on every deck edge
+     * at two different treatments, which is item 12 ("different guardrails ...
+     * upside down?" -- two rails, two art conventions, one edge). MEASURED on
+     * seed 99991 before this change: 320 edges carried roadside + deck.
+     *
+     * The parapet is the right owner of a deck edge (it follows the humped deck
+     * as a sloped ribbon and seals to the deck kerb), so the roadside rail
+     * yields. Note the two old rules were between them EXACTLY
+     * tg_span_is_bridge_deck, so nothing loses a barrier: every span that used
+     * to be railed by this test is a span the parapet rails instead. Spans
+     * outside the parapet pass (fork pads, branch corridors) are NOT excluded --
+     * see tg_rail_deck_here for why that distinction is the whole point. */
+    if (!tg_railfix_on()) {
+        /* A/B: the two round-8 rules, verbatim. */
+        if (tg_span_in_bridge_run(si)) return 1;
+        if (nl->v[si].y - tg_local_ground_y(nl, si) >= TD5_TG_BRIDGE_MIN_LIFT)
+            return 1;
+    } else if (tg_rail_deck_here(nl, si)) {
+        return 0;
+    }
 
     /* Bend: heading change across this span, in tenths of a degree. */
     cross = nl->v[si].tx * nl->v[si + 1].tz - nl->v[si].tz * nl->v[si + 1].tx;
@@ -9280,6 +9438,12 @@ static int tg_span_needs_guardrail(const TG_NodeList *nl, int si, int nspans)
      * satisfied the test: dilating a rail into a tunnel is exactly what that
      * exclusion exists to prevent. */
     if (tg_span_in_tunnel(si)) return 0;
+    /* [R9 RAILFIX] Same reasoning for the deck: the pad is +/-3 spans, so
+     * without this re-check the three spans either side of every bridge run
+     * would smear a roadside rail onto the parapet's edges -- reintroducing the
+     * doubling at the run ends, which is exactly where the user was looking
+     * (span 1191 sits in run 1160-1199). */
+    if (tg_railfix_on() && tg_rail_deck_here(nl, si)) return 0;
 
     for (k = -pad; k <= pad; k++)
         if (tg_span_needs_guardrail_raw(nl, si + k, nspans)) return 1;
@@ -9307,7 +9471,8 @@ static int tg_span_needs_guardrail(const TG_NodeList *nl, int si, int nspans)
  * spans move. The lateral offsets are untouched -- camber is not modelled here,
  * and the two edges already carry their own heights.
  */
-static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk)
+static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk,
+                             int *emitted)
 {
     /* Road grade over this span, and the pitch-plane normal derived from it.
      * ny is the vertical part of the normal and nt the along-road part, so a
@@ -9321,6 +9486,7 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk)
     double px[24], py[24], pz[24], uu[24], vv[24];
     int side, i, n = 0;
 
+    *emitted = 0;
     tg_road_edge(nl, si, 0.0, 0.0, 1.0, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
     tg_road_edge(nl, si, 1.0, 0.0, 1.0, &flx, &fly, &flz, &frx, &fry, &frz);
 
@@ -9381,6 +9547,27 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk)
             tg_on_carriageway(nl, si + 1, s * (tg_road_half_width(nl, si + 1)
                                                + o0 + push_f), 0.0))
             continue;
+        /* [R9 RAILFIX, item 8] YIELD to the pedestrian kerb railing. A city span
+         * on a bend satisfies both gates, so an armco prism at road half width
+         * and the railing on the pavement stood a couple of hundred units apart
+         * on the SAME kerb -- the "double guardrails" at span 957, which lies in
+         * no bridge run at all and so is a genuinely different mechanism from
+         * item 12. MEASURED on seed 99991 before this change: 376 edges carried
+         * roadside + kerb-fence.
+         *
+         * The railing wins because it is the correct treatment for a kerbed
+         * urban street (armco belongs where there is no pavement), because it
+         * costs the fewer edges (376 of 1178 roadside vs 376 of 1626 fence), and
+         * because dropping the railing instead would leave crash barrier
+         * standing in the middle of a city footway. Per SIDE, not per span: a
+         * bend with a pavement on one side only keeps its armco on the other. */
+        if (tg_railfix_on() && tg_rail_kerbfence_here(si, s)) {
+            tg_acct(TG_ACCT_R9_RAILYIELD, si);
+            continue;
+        }
+        /* [R9 RAILFIX] Claim this road edge: past every gate above, this side
+         * is now committed to geometry. */
+        tg_rail_edge_note(TG_RAIL_ROADSIDE, si, s);
         /* Along-road slide that goes with a given height offset, so the post
          * leans with the road's pitch instead of standing plumb. Zero on a flat
          * span (n_along = 0), which keeps flat road byte-identical. */
@@ -9431,6 +9618,13 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk)
         px[n]=fobt_x; py[n]=fyt; pz[n]=fobt_z; uu[n]=u1; vv[n]=0.85; n++;
         px[n]=fibt_x; py[n]=fyt; pz[n]=fibt_z; uu[n]=u1; vv[n]=1.0; n++;
     }
+
+    /* [R9 RAILFIX] BOTH sides can now be refused (the left side was previously
+     * unrefusable, which is what let the centroid loop below divide by n
+     * unguarded). Emit nothing rather than a zero-vertex mesh -- and tell the
+     * caller, so it does not record a mesh offset pointing at no bytes. */
+    if (n == 0) return 1;
+    *emitted = 1;
 
     cx = cy = cz = 0.0;
     for (i = 0; i < n; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
@@ -9756,6 +9950,35 @@ static void tg_r8_city_sidewalk_diag(const TG_FBHook *h)
  * so it belongs at the kerb: TD5_TG_FENCE_KERB back from the kerb face, far
  * enough that a car clipping the kerb does not pass through it and the posts
  * still stand on the slab. */
+
+/* [R9 RAILFIX] THE definition of "a pedestrian kerb railing stands on the (si,
+ * sg) road edge". Forward-declared at the top of this file because the ROADSIDE
+ * guardrail -- defined hundreds of lines earlier -- has to ask it in order to
+ * yield the edge (item 8: an armco prism and this railing were standing on the
+ * same city kerb, which is the "double guardrails" report at span 957).
+ *
+ * The gate list below IS tg_city_emit_fence's gate list, and the emitter now
+ * calls this instead of keeping its own copy. That is deliberate: a hand-off
+ * between two emitters is only safe while both agree exactly on where the
+ * handed-off thing is, and two copies of a five-clause predicate in a 16k-line
+ * file will drift. One definition, two callers.
+ *
+ * The caller-side gates (paved / TD5RE_AUTOTRACK_SIDEWALKS) are folded in here
+ * too, so the guardrail does not have to reconstruct the call chain. */
+static int tg_rail_kerbfence_here(int si, double sg)
+{
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS")) return 0;
+    if (si <= 0) return 0;
+    if (tg_span_in_bridge_run(si)) return 0;            /* no pavement on a deck */
+    if (!(tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(si)]) > 0.0))
+        return 0;                                        /* not a facade biome   */
+    if (tg_city_crossing_here(si)) return 0;              /* pedestrians cross    */
+    if (!tg_facade_built(si, sg > 0.0)) return 0;         /* side-street mouth    */
+    if (tg_biome_cell_index(si) != tg_biome_cell_index(si - 1)) return 0;
+    if (tg_side_blocked(si, sg)) return 0;                /* fork corridor        */
+    return 1;
+}
+
 static int tg_city_emit_fence(const TG_FBHook *h, double sw)
 {
     double px[8], py[8], pz[8], uu[8], vv[8];
@@ -9771,10 +9994,9 @@ static int tg_city_emit_fence(const TG_FBHook *h, double sw)
      * where the city itself ends. The old code dropped ~1/4 of spans through an
      * independent per-side hash (`(fh >> 29) >= 6`), which read as a railing
      * full of random holes rather than a street edge -- the user's report. That
-     * hash is gone; the breaks below are the only ones now. */
-    const int crossing = tg_city_crossing_here(h->si);
-    const int biome_edge = (h->si > 0 &&
-        tg_biome_cell_index(h->si) != tg_biome_cell_index(h->si - 1));
+     * hash is gone; the breaks below are the only ones now.
+     * [R9 RAILFIX] Those breaks now live in tg_rail_kerbfence_here, unchanged,
+     * so the roadside guardrail can ask the same question. */
 
     for (s = 0; s < 2; s++) {
         const double sg = s ? 1.0 : -1.0;
@@ -9782,10 +10004,8 @@ static int tg_city_emit_fence(const TG_FBHook *h, double sw)
          * building line rather than off the far edge of the slab. */
         const double back = (sw * 0.35 < TD5_TG_FENCE_KERB)
                           ? sw * 0.35 : TD5_TG_FENCE_KERB;
-        if (crossing) continue;                       /* pedestrians cross here */
-        if (!tg_facade_built(h->si, s)) continue;     /* side-street mouth */
-        if (biome_edge) continue;                     /* city/biome edge */
-        if (tg_side_blocked(h->si, sg)) continue;
+        if (!tg_rail_kerbfence_here(h->si, sg)) continue;
+        tg_rail_edge_note(TG_RAIL_KERBFENCE, h->si, sg);   /* [R9 RAILFIX] */
         tg_city_edge_frame(h->nl, h->si, sg, e);
 
         q[0] = e[0] + e[6] * back; q[1]  = e[1] + TD5_TG_KERB_H;
@@ -13447,12 +13667,23 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
              * n_added, which only holds while every piece is a same-sized box.
              * A rail prism has a different vertex count and would silently
              * corrupt those offsets. Here each offset is recorded explicitly. */
+            /* [R9 RAILFIX] The deck hand-off happens inside the predicate (a
+             * pure function, so it must not account), but the inventory should
+             * still show it fired -- both edges of this span, once. */
+            if (ok && rails && tg_railfix_on() && tg_rail_deck_here(nl, si))
+                tg_acct_n(TG_ACCT_R9_RAILYIELD, si, 2);
             if (ok && rails &&
                 tg_span_needs_guardrail(nl, si, nspans)) {
                 const size_t r0 = meshes.len;
-                moff[nmesh++] = meshes.len;
-                if (!tg_emit_guardrail(nl, si, &meshes)) ok = 0;
-                else nrails++;
+                int emitted = 0;
+                /* [R9 RAILFIX] The offset is only COMMITTED (nmesh++) if a mesh
+                 * was actually written: the emitter can now refuse both sides
+                 * (deck / kerb-fence ownership), and a moff entry pointing at
+                 * zero bytes is read as garbage geometry, not as a missing
+                 * rail. */
+                moff[nmesh] = meshes.len;
+                if (!tg_emit_guardrail(nl, si, &meshes, &emitted)) ok = 0;
+                else if (emitted) { nmesh++; nrails++; }
                 tg_guard_mark(r0, meshes.len, TG_GK_RAIL, si);
             }
         }
@@ -16419,6 +16650,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         }
     }
     tg_acct_report(nspans);
+    tg_rail_edge_report(nspans);       /* [R9 RAILFIX] per-edge uniqueness */
     tg_r8_bridge_diag(&nl);            /* [R8 BRIDGE] opt-in measurement dump */
     tg_r8_terrain_extent_report(&nl, nspans);  /* [R8 TERRAIN] opt-in, ditto */
     ok = 1;
