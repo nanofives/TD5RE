@@ -4070,20 +4070,56 @@ static int tg_flora_tree_slot(int v)
     return TD5_TG_PAGE_R5_FLORA + v;
 }
 
-/* [R6 item 7] Not every extracted FLORA page is a single tree. Index 1
- * (level023 p412) is a "dense green canopy WALL / grove backdrop" -- authored to
- * read as a distant BAND of foliage, not one trunk. Standing it up as an upright
- * camera-facing billboard is exactly the "billboard that looks like it should be
- * a background tree line" report (measured at span 462: park page 178 = FLORA
- * index 1, 6761 wide). Restrict the upright rotation to the individual-canopy
- * indices; the wall page is simply not planted as a single tree. Returns the
- * FLORA index picked by `pick`, or -1 if none of the individual pages exist. */
+/* [R7 item 8] Is FLORA page `v` a horizontally CONTINUOUS BAND rather than a
+ * single-tree silhouette? A grove backdrop / treeline page is authored to TILE
+ * edge-to-edge, so standing one upright as a camera-facing billboard shows a
+ * SLICE of the band -- "the texture is cut off because it can be continuous".
+ *
+ * R6 fixed exactly this at span 462 but by a HAND-PICKED list { 0, 2 }: it
+ * excluded FLORA index 1 (p412, the dense green grove wall) and KEPT index 2
+ * (p424, the autumn/orange canopy). Index 2 has the SAME property -- it too
+ * bleeds foliage off both edges -- so the user now reports the orange tree at the
+ * same span. Listing pages fixes the instance; measuring the property fixes the
+ * class (and any future page).
+ *
+ * The tell is in the alpha key (index 0 = transparent): a single tree leaves
+ * transparent SKY down both sides, so its opaque pixels never reach both image
+ * edges in the same row; a tiling band bleeds opaque foliage off BOTH edges so
+ * neighbouring copies join. Measured over the shipped pages (64x64), the
+ * both-edge-touch fraction is 0.00 for the individual canopy (FLORA0) and
+ * 0.77 / 0.86 for the two bands (FLORA1 grove wall, FLORA2 autumn) -- a wide gap
+ * the 0.40 threshold sits inside. */
+static int tg_flora_page_is_band(int v)
+{
+    enum { PGW = 64, PGH = 64, KEY = 0, EDGE = 2 };
+    const unsigned char *idx;
+    int r, c, opaque = 0, both = 0;
+
+    if (v < 0 || v >= k_r5_flora_tree_count) return 1;   /* unknown -> not upright */
+    idx = k_r5_flora_tree_idx[v];
+    for (r = 0; r < PGH; r++) {
+        const unsigned char *row = idx + r * PGW;
+        int lo = -1, hi = -1;
+        for (c = 0; c < PGW; c++)
+            if (row[c] != KEY) { if (lo < 0) lo = c; hi = c; }
+        if (lo < 0) continue;                            /* fully transparent row */
+        opaque++;
+        if (lo <= EDGE && hi >= PGW - 1 - EDGE) both++;  /* reaches both edges */
+    }
+    if (opaque <= 0) return 1;
+    return (both * 100) >= (opaque * 40);
+}
+
+/* [R6 item 7 / R7 item 8] Pick a FLORA page fit to stand upright as ONE tree.
+ * Selects on the band PROPERTY (tg_flora_page_is_band) over the whole set rather
+ * than a fixed index list, so every band page -- present or future -- is skipped.
+ * Returns the FLORA index picked by `pick`, or -1 if no individual page exists. */
 static int tg_flora_upright_index(unsigned int pick)
 {
-    static const int upright[] = { 0, 2 };   /* TREE0, TREE2; skip TREE1 wall */
-    int j, n = 0, avail[(int)(sizeof upright / sizeof upright[0])];
-    for (j = 0; j < (int)(sizeof upright / sizeof upright[0]); j++)
-        if (upright[j] < k_r5_flora_tree_count) avail[n++] = upright[j];
+    int v, n = 0, avail[TD5_TG_R5_FLORA_N];
+
+    for (v = 0; v < k_r5_flora_tree_count && v < TD5_TG_R5_FLORA_N; v++)
+        if (!tg_flora_page_is_band(v)) avail[n++] = v;
     if (n <= 0) return -1;
     return avail[pick % (unsigned)n];
 }
@@ -5113,13 +5149,20 @@ static int tg_facade_stands(int si)
     return tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(si)]) > 0.0;
 }
 
+/* [R7 item 18] Ground/water validity + base-Y for a verge tree billboard.
+ * Defined after the terrain cross-section (tg_ground_side); forward-declared here
+ * so both tree emitters can share it. Returns 0 when the trunk is over water or a
+ * coastline (skip the tree), else writes the plant point and sampled ground Y. */
+static int tg_flora_plant(const TG_NodeList *nl, int si, const TG_Biome *b,
+                          double side, double gap, double tw,
+                          double *cx, double *cz, double *base_y);
+
 static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
 {
     unsigned int h = (unsigned)si * 2654435761u;
-    const TG_Node *n;
     const TG_Biome *b;
     const TG_TreePage *tp;
-    double side, gap, tw, th, jit, lx, lz, cx, cz;
+    double side, gap, tw, th, jit, cx, cz;
     int tv;
 
     /* Only span 0 is kept clear, not the whole grid stretch. The old
@@ -5142,7 +5185,6 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
      * scale jitter that keeps the page aspect. */
     if ((int)(h >> 28) > b->density) return 1;
 
-    n = &nl->v[si];
     side = ((h >> 3) & 1) ? 1.0 : -1.0;
     tv  = b->tree_set[(h >> 13) % (unsigned)b->tree_n];
     tp  = &k_tree_pages[tv];
@@ -5153,14 +5195,16 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
     gap = 800.0 + (double)((h >> 5) % 2400);       /* set back off the verge */
     gap = tg_flora_gap_clear(nl, si, side, gap);    /* never on a branch */
 
-    lx = n->tz * side; lz = -n->tx * side;
-    cx = n->x + lx * (n->width * 0.5 + gap + tw * 0.5);
-    cz = n->z + lz * (n->width * 0.5 + gap + tw * 0.5);
+    {   /* [R7 item 18] on the ground, never on water/coastline */
+        double base_y;
+        if (!tg_flora_plant(nl, si, b, side, gap, tw, &cx, &cz, &base_y))
+            return 1;
 
-    tg_flora_diag(nl, si, "near", tg_tree_slot(tv), side, tw, th, cx, cz);
-    tg_acct(TG_ACCT_TREE, si);
-    return tg_emit_billboard_mesh(blk, cx, n->y, cz, tw * 0.5, th,
-                                  tg_tree_slot(tv), 1);
+        tg_flora_diag(nl, si, "near", tg_tree_slot(tv), side, tw, th, cx, cz);
+        tg_acct(TG_ACCT_TREE, si);
+        return tg_emit_billboard_mesh(blk, cx, base_y, cz, tw * 0.5, th,
+                                      tg_tree_slot(tv), 1);
+    }
 }
 
 /* A verge side that the branch corridor bows into over the fork span range --
@@ -6805,6 +6849,68 @@ static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
     seg_nq = n / 4;
     tg_acct(TG_ACCT_TERRAIN, si);      /* one slab covering both verges */
     return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
+}
+
+/* [R7 item 18] "Water near the road but trees floating in the air ... add a
+ * check to see if trees are touching ground, and if it's water or a coastline
+ * trees should not be placed." Two rules, one gate:
+ *
+ * 1. GROUND. The tree base used n->y -- the ROAD height -- so a tree set back
+ *    onto terrain that falls away from the road hung in the air above it. Sample
+ *    the drop-below-road at the trunk's lateral distance from the SAME
+ *    cross-section the ground mesh is built from (tg_ground_side), and stand the
+ *    tree on that. Away from a coast the skirt is near-flat (70 raw), so this is
+ *    a no-op there; on a seaward coast the terrain ramps down and this makes the
+ *    trunk follow it instead of floating.
+ *
+ * 2. WATER / COASTLINE. On a coastal run's SEAWARD side the terrain leaves a flat
+ *    verge (TD5_TG_SHORE_VERGE) and then ramps THROUGH sea level to the shore.
+ *    Anything planted past that flat verge is on the beach ramp or the sea, so
+ *    refuse it -- exactly the span-1120 "trees floating over water" report. The
+ *    landward side and non-coastal biomes are unaffected.
+ *
+ * Bridge decks are already skipped by both callers, so the gorge branch of
+ * tg_ground_side never applies here. Gated by TD5RE_R7_FLORA (default ON; =0
+ * restores the R6 behaviour of planting at road height with no water check). */
+static int tg_flora_plant(const TG_NodeList *nl, int si, const TG_Biome *b,
+                          double side, double gap, double tw,
+                          double *cx, double *cz, double *base_y)
+{
+    const TG_Node *n = &nl->v[si];
+    const double d  = gap + tw * 0.5;             /* trunk distance from road edge */
+    const double lx = n->tz * side, lz = -n->tx * side;
+    const double water_side = b->water ? tg_water_side(si) : 0.0;
+    TG_GroundProf p;
+    double dy;
+    int k;
+
+    *cx = n->x + lx * (n->width * 0.5 + gap + tw * 0.5);
+    *cz = n->z + lz * (n->width * 0.5 + gap + tw * 0.5);
+    *base_y = n->y;
+
+    if (!td5_env_flag_on("TD5RE_R7_FLORA")) return 1;   /* A/B: R6 behaviour */
+
+    /* Rule 2: over the seaward beach/sea of a coastal run -> no tree. */
+    if (b->water && side == tg_water_side(si) && d > (double)TD5_TG_SHORE_VERGE)
+        return 0;
+
+    /* Rule 1: rest on the sampled terrain, not at road height. */
+    tg_ground_side(nl, si, side > 0.0, water_side, &p);
+    if (d <= p.d[0]) {
+        dy = p.dy[0];
+    } else if (d >= p.d[p.n - 1]) {
+        dy = p.dy[p.n - 1];
+    } else {
+        dy = p.dy[p.n - 1];
+        for (k = 0; k + 1 < p.n; k++)
+            if (d <= p.d[k + 1]) {
+                const double t = (d - p.d[k]) / (p.d[k + 1] - p.d[k]);
+                dy = p.dy[k] + t * (p.dy[k + 1] - p.dy[k]);
+                break;
+            }
+    }
+    *base_y = n->y - dy;
+    return 1;
 }
 
 /* GORE / MEDIAN fill for a split-fork span. The main (left) and branch (right)
@@ -9266,8 +9372,7 @@ static int tg_emit_fb_park_trees(const TG_FBHook *h)
     const int si = h->si;
     const TG_Biome *b = h->b;
     unsigned int hh;
-    const TG_Node *n;
-    double side, gap, tw, th, jit, lx, lz, cx, cz;
+    double side, gap, tw, th, jit, cx, cz;
     int v, page;
 
     if (!td5_env_flag_on("TD5RE_R5_FLORA_PARKTREES")) return 1;
@@ -9284,7 +9389,6 @@ static int tg_emit_fb_park_trees(const TG_FBHook *h)
     hh = (unsigned)si * 2246822519u + 0x2545F491u;
     if ((int)(hh >> 29) > (b->density >> 1)) return 1;
 
-    n    = &nl->v[si];
     side = ((hh >> 4) & 1) ? 1.0 : -1.0;
     if (tg_side_blocked(si, side)) return 1;
 
@@ -9312,17 +9416,19 @@ static int tg_emit_fb_park_trees(const TG_FBHook *h)
     gap = 2600.0 + (double)((hh >> 5) % 3200);      /* set BACK, behind the verge */
     gap = tg_flora_gap_clear(nl, si, side, gap);    /* never on a branch */
 
-    lx = n->tz * side; lz = -n->tx * side;
-    cx = n->x + lx * (n->width * 0.5 + gap + tw * 0.5);
-    cz = n->z + lz * (n->width * 0.5 + gap + tw * 0.5);
+    {   /* [R7 item 18] on the ground, never on water/coastline */
+        double base_y;
+        if (!tg_flora_plant(nl, si, b, side, gap, tw, &cx, &cz, &base_y))
+            return 1;
 
-    tg_flora_diag(nl, si, "park", page, side, tw, th, cx, cz);
-    h->moff[*h->nmesh] = h->blk->len;
-    if (!tg_emit_billboard_mesh(h->blk, cx, n->y, cz, tw * 0.5, th, page, 1))
-        return 0;
-    (*h->nmesh)++;
-    tg_acct(TG_ACCT_R5_FLORA, si);
-    return 1;
+        tg_flora_diag(nl, si, "park", page, side, tw, th, cx, cz);
+        h->moff[*h->nmesh] = h->blk->len;
+        if (!tg_emit_billboard_mesh(h->blk, cx, base_y, cz, tw * 0.5, th, page, 1))
+            return 0;
+        (*h->nmesh)++;
+        tg_acct(TG_ACCT_R5_FLORA, si);
+        return 1;
+    }
 }
 /* How many spans either side of a portal carry mountain massing. Beyond this
  * the camera is inside the bore and the mass is behind the lining, so it is
