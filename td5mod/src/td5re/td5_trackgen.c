@@ -4843,10 +4843,18 @@ static int tg_span_in_tunnel(int si)
  * base TD5_TG_PAGE_TUNNEL is variant 0 so the existing page is never wasted. */
 static int tg_tunnel_lining_page(int si)
 {
+    /* [R6 TUNNEL item 8c] Repointed to the R6 cast-concrete lining family (4
+     * variants) that replaces the checkerboard-reading grain of the old
+     * TD5_TG_PAGE_TUNNEL(_VAR) pages. Still one lining per RUN (keyed on
+     * si/RUN) so a bore is a single lining end to end. TD5RE_AUTOTRACK_
+     * TUNNEL_OLDLINING=1 restores the old pages for an A/B. */
     unsigned int h = (unsigned)(si / TD5_TG_TUNNEL_RUN) * 2654435761u;
-    unsigned int v = (h >> 13) % (unsigned)TD5_TG_TUNNEL_VARIANTS;
-    if (v == 0) return TD5_TG_PAGE_TUNNEL;
-    return TD5_TG_PAGE_TUNNEL_VAR + (int)(v - 1);
+    if (td5_env_flag_off("TD5RE_AUTOTRACK_TUNNEL_OLDLINING")) {
+        unsigned int ov = (h >> 13) % (unsigned)TD5_TG_TUNNEL_VARIANTS;
+        if (ov == 0) return TD5_TG_PAGE_TUNNEL;
+        return TD5_TG_PAGE_TUNNEL_VAR + (int)(ov - 1);
+    }
+    return TD5_TG_PAGE_R6_TUNNEL + (int)((h >> 13) % 4u);
 }
 
 /* Clear interior height of the bore, and the thickness of wall/roof slabs.
@@ -4938,12 +4946,17 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
     const double wall_t = TD5_TG_TUNNEL_WALL_T;
     const double height = TD5_TG_TUNNEL_HEIGHT;
     const unsigned int dim = 0xFF585868u;   /* shadowed interior */
-    const int lining = tg_tunnel_lining_page(si);
+    const unsigned int lampc = 0xFFFFE8B4u; /* warm-white lamp glow (ARGB) */
+    const int lining  = tg_tunnel_lining_page(si);
+    const int lamp_pg = TD5_TG_PAGE_R6_TUNNEL + 5;      /* [item 8d] */
+    const int portal_pg = TD5_TG_PAGE_R6_TUNNEL + 4;    /* [item 8b] */
+    const int lamps_on = td5_env_flag_on("TD5RE_AUTOTRACK_TUNNEL_LAMPS");
     const double tile = 3000.0;
     const TG_Node *nd = &nl->v[si];
-    double px[32], py[32], pz[32], uu[32], vv[32];
-    unsigned int col[32];
-    int seg_page = lining, seg_nq, n = 0;
+    double px[40], py[40], pz[40], uu[40], vv[40];
+    unsigned int col[40];
+    int seg_page[3], seg_nq[3], nseg = 0;
+    int n = 0, n_lin = 0, n_lamp = 0, n_portal = 0;
 
     /* +lateral = LEFT of travel: point at lateral t off node = (x + tz*t, y,
      * z - tx*t), the same frame the road/gore/sidewalk use. */
@@ -4954,7 +4967,10 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
     } while (0)
 
     /* Wall/roof segment [si, si+1]; only when si+1 is bored too, so a run's last
-     * span does not push the tube one span past its mouth. */
+     * span does not push the tube one span past its mouth. Vertices are grouped
+     * by texture page -- all LINING quads, then all LAMP quads, then the PORTAL
+     * lintel -- because tg_write_quad_mesh_col draws each command's quads from a
+     * contiguous vertex run. */
     if (tg_span_in_tunnel(si + 1)) {
         const TG_Node *a = &nl->v[si];
         const TG_Node *c = &nl->v[si + 1];
@@ -4984,10 +5000,31 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
         TG_TUN_PUSH(c, cl, c->y + height, u1,  0.0, dim);
         TG_TUN_PUSH(c, cr, c->y + height, u1,  wv,  dim);
         TG_TUN_PUSH(a, ar, a->y + height, 0.0, wv,  dim);
+        n_lin = n;
+
+        /* [item 8d] Emissive lamp strip near the top of each wall, inset a little
+         * toward the bore so it does not z-fight the lining. One quad per side per
+         * segment = a continuous run of side lights down the bore. */
+        if (lamps_on) {
+            const double ins = 40.0;                 /* lateral inset from wall */
+            const double ly0 = 0.70 * height, ly1 = 0.80 * height;
+            /* Left wall lamp */
+            TG_TUN_PUSH(a, al - ins, a->y + ly0, 0.0, 1.0, lampc);
+            TG_TUN_PUSH(c, cl - ins, c->y + ly0, u1,  1.0, lampc);
+            TG_TUN_PUSH(c, cl - ins, c->y + ly1, u1,  0.0, lampc);
+            TG_TUN_PUSH(a, al - ins, a->y + ly1, 0.0, 0.0, lampc);
+            /* Right wall lamp */
+            TG_TUN_PUSH(a, ar + ins, a->y + ly0, 0.0, 1.0, lampc);
+            TG_TUN_PUSH(c, cr + ins, c->y + ly0, u1,  1.0, lampc);
+            TG_TUN_PUSH(c, cr + ins, c->y + ly1, u1,  0.0, lampc);
+            TG_TUN_PUSH(a, ar + ins, a->y + ly1, 0.0, 0.0, lampc);
+            n_lamp = n - n_lin;
+        }
     }
 
-    /* Bright lintel across a run mouth (near end at the first bored node, far
-     * end at the last), so an opening reads as a portal rather than an open box. */
+    /* [item 8b] Portal header across a run mouth (near end at the first bored
+     * node, far end at the last), on its own concrete-portal page so the opening
+     * reads as a proper beam rather than a washed-out white slab. */
     if (!tg_span_in_tunnel(si - 1) || !tg_span_in_tunnel(si + 1)) {
         double ph, psh, lo, ro, y0, y1, pw;
         tg_tunnel_bore(nl, si, &ph, &psh);
@@ -5000,15 +5037,19 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
         TG_TUN_PUSH(nd, ro, y0, pw,  0.0,  0xFFFFFFFFu);
         TG_TUN_PUSH(nd, ro, y1, pw,  0.17, 0xFFFFFFFFu);
         TG_TUN_PUSH(nd, lo, y1, 0.0, 0.17, 0xFFFFFFFFu);
+        n_portal = n - n_lin - n_lamp;
     }
     #undef TG_TUN_PUSH
 
     if (n <= 0) return 1;
-    seg_nq = n / 4;
+    if (n_lin    > 0) { seg_page[nseg] = lining;    seg_nq[nseg] = n_lin / 4;    nseg++; }
+    if (n_lamp   > 0) { seg_page[nseg] = lamp_pg;   seg_nq[nseg] = n_lamp / 4;   nseg++; }
+    if (n_portal > 0) { seg_page[nseg] = portal_pg; seg_nq[nseg] = n_portal / 4; nseg++; }
     tg_acct(TG_ACCT_TUNNEL, si);
+    tg_acct(TG_ACCT_R6_TUNNEL, si);
     (*added)++;
     return tg_write_quad_mesh_col(blk, px, py, pz, uu, vv, col, n,
-                                  &seg_page, &seg_nq, 1);
+                                  seg_page, seg_nq, nseg);
 }
 
 /* Tunnel cross-section at span si: two side walls plus a roof, each its own
@@ -8626,6 +8667,37 @@ static int tg_far_group_over_bridge(int si)
     return tg_span_in_bridge_run(g0) || tg_span_in_bridge_run(g1);
 }
 
+/* [R6 TUNNEL item 8a] Is the far-group owned by span si close enough to a tunnel
+ * run that its distant ridge/skyline shows THROUGH the bore or stands beside the
+ * portal approach?
+ *
+ * The far band is never emitted AT a tunnel span (the emit loop takes the tunnel
+ * branch there, which calls no far-terrain), so the inventory already gaps over
+ * 480-499 / 1520-1539. But the run reported by item 8 -- "geometry crossing the
+ * road while inside the tunnel" -- is the far band of the groups just OUTSIDE the
+ * mouths (e.g. 476-479 and 500-503 around the 480-499 bore): a long straight bore
+ * looks clean through to its far mouth, and the distant ridge standing beyond
+ * that mouth reads as a grey slab down the road. The mountain massing
+ * (tg_emit_fb_tunnel) only surrounds the portal out to TD5_TG_TUNNEL_MASS_SPANS,
+ * so past that the far band is what you see through the hole.
+ *
+ * Suppress the band for any group within TD5_TG_TUNNEL_FARCLEAR spans of a tunnel
+ * span. That clears both the through-bore view and the immediate approach while
+ * leaving the ordinary far background everywhere else. Proven by A/B frame at the
+ * entrance and by the far-bands inventory widening its gap around each run. */
+#define TD5_TG_TUNNEL_FARCLEAR 40
+static int tg_far_group_near_tunnel(int si)
+{
+    const int m = td5_env_int("TD5RE_AUTOTRACK_TUNNEL_FARCLEAR",
+                              TD5_TG_TUNNEL_FARCLEAR, 0, 400);
+    const int g0 = (si / TD5_TG_FAR_GROUP) * TD5_TG_FAR_GROUP;
+    const int g1 = g0 + TD5_TG_FAR_GROUP - 1;
+    int s;
+    for (s = g0 - m; s <= g1 + m; s++)
+        if (s >= 0 && tg_span_in_tunnel(s)) return 1;
+    return 0;
+}
+
 static int tg_emit_fb_terrain(const TG_FBHook *h)
 {
     double wsd;
@@ -8648,6 +8720,15 @@ static int tg_emit_fb_terrain(const TG_FBHook *h)
      * TD5RE_AUTOTRACK_BRIDGE_CLEARFAR=0 restores the draped band for an A/B. */
     if (td5_env_flag_on("TD5RE_AUTOTRACK_BRIDGE_CLEARFAR") &&
         tg_far_group_over_bridge(h->si))
+        return 1;
+
+    /* [R6 TUNNEL item 8a] Same idea for tunnels: the distant ridge of the groups
+     * flanking a bore shows through the mouth as "geometry crossing the road
+     * inside the tunnel". Suppress the band near a run; the portal mountain
+     * massing carries the immediate surround. TD5RE_AUTOTRACK_TUNNEL_CLEARFAR=0
+     * restores the band for an A/B. */
+    if (td5_env_flag_on("TD5RE_AUTOTRACK_TUNNEL_CLEARFAR") &&
+        tg_far_group_near_tunnel(h->si))
         return 1;
 
     /* Seaward side is the sea's, not the plain's -- the water plane already
@@ -10359,6 +10440,142 @@ static void tg_emit_texture_page_tunnel_var(TG_Buf *out, int variant)
     }
 }
 
+/* [R6 TUNNEL item 8c] Proper cast-concrete bore lining, replacing the isotropic
+ * grain that read in frame as a grey checkerboard placeholder. A real road-tunnel
+ * lining has a clear ROAD-LEVEL DATUM -- a dark dado/kerb band at the bottom with
+ * a bright reflective strip just above it -- and light concrete PANELS divided by
+ * thin recessed joints above that. The datum keys on the V axis, which in the
+ * swept mesh is HEIGHT up the wall (row y=0 = v=0 = road level), so it stays put
+ * as the bore curves; the panel joints run both axes but stay low-contrast so a
+ * curving segment cannot shear a hard line. variant 0..3 shift tone/warmth and
+ * panel pitch so consecutive bores plainly differ (item 16a lives on here). */
+static void tg_emit_texture_page_r6_tunnel_lining(TG_Buf *out, int variant)
+{
+    static const int base_lo[4] = { 150, 134, 168, 122 }; /* light-concrete floor */
+    static const int warm[4]    = {  10,  -6,   2,  -3 };  /* +R/-B = warm, -R/+B = cool */
+    static const int pitch[4]   = {  16,  16,  21,  13 };  /* panel size, texels */
+    const int vi = (variant >= 0 && variant <= 3) ? variant : 0;
+    const int lo = base_lo[vi];
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* 0..9 light concrete ramp; 10 bright reflective strip; 11 recessed joint;
+     * 12..13 dark dado/kerb; 14..15 mid soot stain. BGR, R vs B tilt = warmth. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v, b, g, r;
+        if      (i <= 9)  v = lo + i * 3;
+        else if (i == 10) v = 236;
+        else if (i == 11) v = lo - 58;
+        else if (i <= 13) v = lo - 80;
+        else              v = lo - 34;
+        if (v < 0)   v = 0;
+        if (v > 255) v = 255;
+        b = v - warm[vi]; g = v; r = v + warm[vi];
+        b = b < 0 ? 0 : (b > 255 ? 255 : b);
+        r = r < 0 ? 0 : (r > 255 ? 255 : r);
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;
+        const int p = pitch[vi];
+        int idx;
+        if (y <= 8)                             /* road-level dado band */
+            idx = 12 + ((x ^ y) & 1);
+        else if (y <= 10)                       /* reflective strip above dado */
+            idx = 10;
+        else if ((x % p) == 0 || (y % p) == 0)  /* recessed panel joints */
+            idx = 11;
+        else {                                  /* concrete panels, faint variation */
+            unsigned int h = (unsigned)((x / p) + (y / p) * 7) * 2654435761u;
+            idx = (int)((h >> 28) % 8);
+        }
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
+/* [R6 TUNNEL item 8b] Portal header for the run mouths. The lintel samples only
+ * v 0..0.17 (a short band above the opening), so the design lives in the low
+ * rows: a bright reflective lower lip that meets the mouth top, then a lit
+ * concrete face. Reads as a proper portal beam instead of the washed-out white
+ * lining the swept mouth used before. */
+static void tg_emit_texture_page_r6_tunnel_portal(TG_Buf *out)
+{
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* 0..11 warm-grey concrete ramp; 12 bright reflective lip; 13..15 dark trim. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v, b, g, r;
+        if      (i <= 11) v = 120 + i * 8;
+        else if (i == 12) v = 242;
+        else              v = 70 - (i - 13) * 16;
+        if (v < 0)   v = 0;
+        if (v > 255) v = 255;
+        b = v - 8; g = v; r = v + 8;             /* faintly warm */
+        b = b < 0 ? 0 : b;
+        r = r > 255 ? 255 : r;
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;
+        int idx;
+        if (y <= 2)                     idx = 13 + (y % 3);   /* dark shadow lip top */
+        else if (y <= 5)                idx = 12;             /* bright reflective lip */
+        else if ((x % 32) < 1)          idx = 13;             /* pier joint */
+        else                            idx = 5 + ((x >> 4) & 3) + ((y >> 4) & 1);
+        if (idx > 15) idx = 15;
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
+/* [R6 TUNNEL item 8d] Emissive wall-lamp strip. The engine has no interior
+ * lighting, so a "lamp" is a bright textured quad drawn with a warm-white vertex
+ * colour: a hot core tube with a small dark housing top and bottom. Tiled along
+ * the bore top on both walls it gives the run a run of side lights. */
+static void tg_emit_texture_page_r6_tunnel_lamp(TG_Buf *out)
+{
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* 0 dark housing; 1..3 warm halo ramp; 4..15 hot white-yellow core. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        if (i == 0)      { b = 24;  g = 22;  r = 20; }        /* housing */
+        else if (i <= 3) { b = 120 + i * 20; g = 150 + i * 24; r = 170 + i * 26; }
+        else             { b = 210; g = 244; r = 255; }       /* hot core */
+        b = b > 255 ? 255 : b; g = g > 255 ? 255 : g; r = r > 255 ? 255 : r;
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int y = i / TD5_TG_TEX_DIM;
+        int idx;
+        if (y <= 6 || y >= 57)      idx = 0;                  /* housing top/bottom */
+        else if (y <= 12 || y >= 51) idx = 1 + ((y ^ i) & 2); /* warm halo */
+        else                        idx = 4 + (i & 11);       /* hot core */
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 /* Bridge DECK surface (item 11). The road quad maps this page v = si + f, one
  * page repeat per span, u = 0..lanes across -- so a page with any longitudinal
  * (lane-paint) feature would tile down the deck as a stack of identical road
@@ -10914,6 +11131,15 @@ static int tg_emit_textures(TG_Buf *out)
         for (v = 1; v < TD5_TG_TUNNEL_VARIANTS; v++)
             tg_emit_texture_page_tunnel_var(&pages[TD5_TG_PAGE_TUNNEL_VAR + v - 1], v);
     }
+    /* [R6 TUNNEL item 8] proper concrete lining variants (b/c), portal header,
+     * and emissive wall-lamp strip -- all in the reserved R6_TUNNEL page block. */
+    {
+        int v;
+        for (v = 0; v < 4; v++)
+            tg_emit_texture_page_r6_tunnel_lining(&pages[TD5_TG_PAGE_R6_TUNNEL + v], v);
+    }
+    tg_emit_texture_page_r6_tunnel_portal(&pages[TD5_TG_PAGE_R6_TUNNEL + 4]);
+    tg_emit_texture_page_r6_tunnel_lamp(&pages[TD5_TG_PAGE_R6_TUNNEL + 5]);
     tg_emit_texture_page_fb_terrain(&pages[TD5_TG_PAGE_SNOW], 0);
     tg_emit_texture_page_fb_terrain(&pages[TD5_TG_PAGE_HILL], 1);
     tg_emit_texture_page_fb_banner(&pages[TD5_TG_PAGE_BANNER]);

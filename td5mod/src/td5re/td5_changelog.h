@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 29 (auto-track tunnels)" },
+    { CL_ITEM,    "FIXED: distant scenery no longer shows through a" },
+    { CL_ITEM,    "  tunnel as grey slabs standing in the road." },
+    { CL_ITEM,    "NEW: tunnel bores wear a proper cast-concrete" },
+    { CL_ITEM,    "  lining (was a checkerboard) and a portal beam" },
+    { CL_ITEM,    "  frames each mouth." },
+    { CL_ITEM,    "NEW: warm wall lamps light both sides of the bore." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 29 (auto-track off-map, deep)" },
     { CL_ITEM,    "FIXED: on a branch corridor a car flung far off the" },
     { CL_ITEM,    "  map could stay lost -- the recovery only searched" },
