@@ -1475,10 +1475,25 @@ static int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
  * the round's other five items could not be shown fixed where they were
  * reported. Both layouts are therefore verified separately: the fixes at the
  * spans the user named with LONGRUN off, and the class plus race completion
- * with it on. Default ON -- the longer crossing is what was asked for. */
+ * with it on.
+ *
+ * [ORCHESTRATOR, R8 merge] Default flipped to OFF, for two reasons the area
+ * could not weigh from inside its own scope:
+ *   1. The race-completion check for this knob never reported. Shipping a
+ *      track repartition whose races are unverified is the one failure mode
+ *      that wastes a whole feedback round.
+ *   2. More important: the repartition MOVES the spans the user is about to
+ *      re-drive. With this ON, 99991's tunnel 477 and bridge 1031 contain no
+ *      crossing at all, so the user could not check items 4 and 11 where they
+ *      reported them, and a "still broken" reply would be unattributable.
+ * Item 18 is therefore shipped but parked behind an opt-in until the longer
+ * layout has its own verified races AND the round's span references are spent.
+ * Flip by setting TD5RE_R8_LONGRUN=1. */
 static int tg_bridge_run_len(void)
 {
-    return td5_env_flag_on("TD5RE_R8_LONGRUN")
+    /* td5_env_flag_off() returns 1 only for a literal "1" -- it means "opt in",
+     * despite the name. This is the OFF-by-default idiom in this file. */
+    return td5_env_flag_off("TD5RE_R8_LONGRUN")
          ? TD5_TG_BRIDGE_RUN_R8 : TD5_TG_BRIDGE_RUN_R3;
 }
 #define TD5_TG_BRIDGE_RUN     (tg_bridge_run_len())
@@ -5592,7 +5607,8 @@ static int tg_emit_water(const TG_NodeList *nl, int si, double side,
 #define TD5_TG_TUNNEL_RUN_R8  32      /* [R8 item 18] longer bore          */
 static int tg_tunnel_run_len(void)
 {
-    return td5_env_flag_on("TD5RE_R8_LONGRUN")
+    /* Opt-in, paired with tg_bridge_run_len -- see the reasoning there. */
+    return td5_env_flag_off("TD5RE_R8_LONGRUN")
          ? TD5_TG_TUNNEL_RUN_R8 : TD5_TG_TUNNEL_RUN_R3;
 }
 #define TD5_TG_TUNNEL_RUN  (tg_tunnel_run_len())
