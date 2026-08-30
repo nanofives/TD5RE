@@ -3163,6 +3163,75 @@ static int tg_guard_kind_of(size_t off, int *pmark_si)
     return kind;
 }
 
+/* ===================== [R9 CITY] PAVEMENT PROVENANCE MARKS =================
+ * Round 9 item 2 ("the right track on span 150 branch has double sidewalk") is a
+ * UNIQUENESS defect: two emitters each lay a legal-looking pavement on the SAME
+ * span-side. R9's method rule says a count going up is not evidence of correct
+ * placement, so the acceptance test cannot be "how many pavements did we emit" --
+ * it has to be "does any span-side carry more than one SEPARATED pavement band".
+ *
+ * Answering that needs to know which assembled meshes are pavements laid ALONG
+ * the road, and which emitter laid each one. Page alone is not enough: the corner
+ * ARMS (tg_block_emit_arm) and the crossing decals share TD5_TG_PAGE_SIDEWALK and
+ * legitimately add lateral off a mouth, so a page-only sweep reports false doubles
+ * at every side street. So the four along-road pavement emitters mark their byte
+ * range here, exactly the way tg_guard_mark records kinds, and the sweep measures
+ * only marked ranges. Marks are per-entry byte offsets and are read BEFORE the
+ * guard's compaction moves anything (see the call site in tg_emit_models). */
+enum {
+    TG_PVS_CITY = 0,    /* tg_city_emit_sidewalk    -- raised main-road slab   */
+    TG_PVS_VERGE,       /* tg_city_emit_verge_band  -- flat main-road band     */
+    TG_PVS_BRANCH,      /* tg_emit_branch_sidewalk  -- raised branch slab      */
+    TG_PVS_BRVERGE,     /* tg_emit_branch_verge     -- flat branch band        */
+    TG_PVS_ARM,         /* tg_block_emit_arm -- kerb turning down a side street.
+                         * NOT an along-road band: an arm legitimately adds
+                         * lateral at a mouth, so it is recorded as a per-side
+                         * FLAG (item 4's evidence) and deliberately kept out of
+                         * the item-2 uniqueness test, which would otherwise
+                         * report a false double at every side street. */
+    TG_PVS_COUNT
+};
+static const char *const k_pave_src_name[TG_PVS_COUNT] = {
+    "city-slab", "verge-band", "branch-slab", "branch-verge", "arm"
+};
+
+#define TD5_TG_PAVE_MARK_MAX 512
+static size_t        s_pave_mark_lo[TD5_TG_PAVE_MARK_MAX];
+static size_t        s_pave_mark_hi[TD5_TG_PAVE_MARK_MAX];
+static unsigned char s_pave_mark_src[TD5_TG_PAVE_MARK_MAX];
+static int           s_pave_mark_si[TD5_TG_PAVE_MARK_MAX];
+static int           s_pave_mark_n;
+
+static void tg_pave_mark_reset(void) { s_pave_mark_n = 0; }
+
+static void tg_pave_mark(size_t lo, size_t hi, int src, int si)
+{
+    if (hi <= lo || s_pave_mark_n >= TD5_TG_PAVE_MARK_MAX) return;
+    s_pave_mark_lo[s_pave_mark_n]  = lo;
+    s_pave_mark_hi[s_pave_mark_n]  = hi;
+    s_pave_mark_src[s_pave_mark_n] = (unsigned char)src;
+    s_pave_mark_si[s_pave_mark_n]  = si;
+    s_pave_mark_n++;
+}
+
+/* Which pavement emitter produced the mesh at byte offset `off`, or -1. */
+static int tg_pave_src_of(size_t off, int *pmark_si)
+{
+    int i, src = -1;
+    size_t best = (size_t)-1;
+    if (pmark_si) *pmark_si = -1;
+    for (i = 0; i < s_pave_mark_n; i++)
+        if (off >= s_pave_mark_lo[i] && off < s_pave_mark_hi[i]) {
+            const size_t w = s_pave_mark_hi[i] - s_pave_mark_lo[i];
+            if (w <= best) {
+                best = w;
+                src = (int)s_pave_mark_src[i];
+                if (pmark_si) *pmark_si = s_pave_mark_si[i];
+            }
+        }
+    return src;
+}
+
 /* Little-endian scalar reads over the assembled mesh bytes. */
 static float tg_rd_f32(const unsigned char *p)
 {
@@ -6615,6 +6684,44 @@ static int tg_side_blocked(int si, double side)
     return tg_branches_enabled() && side < 0.0 && tg_span_in_fork_clear(si);
 }
 
+/* [R9 CITY item 4] Does the branch corridor ACTUALLY reach into this side's
+ * verge at span si? tg_side_blocked above answers the BLANKET question -- "is
+ * this span anywhere in a fork's cleared region" -- which is the right, cheap,
+ * fail-safe answer for things that must never be near a corridor (facades,
+ * trunks, props). It is the WRONG question for street furniture at the fork's two
+ * MOUTHS, where the region is open but the corridor is still lined up with the
+ * road and takes no verge at all.
+ *
+ * Item 4 ("there are no sidewalks on the merging of the branch on span 361") is
+ * that error at the REJOIN. Measured on seed 99991 (r9city-win, fork 1 R=360):
+ * spans 360/361/362 side R report reach=3000 against half=3000 -- the corridor
+ * has fully rejoined and occupies nothing -- yet BOTH pavement providers are off
+ * there. The main slab is dropped by the XSTOP gate because the block model
+ * genuinely opens a frontage gap across those spans (blk=16, phase 8/9/10 of
+ * gap [8,11)), and the pavement ARMS that are supposed to turn the kerb down that
+ * side street are dropped by the blanket tg_side_blocked. Neither gate is wrong
+ * on its own; together they leave bare ground where the branch merges.
+ *
+ * NOTE this is NOT the span-143 off-by-one at the other end: 143's drop was the
+ * R8 taper on the slab, and 361's slab is at its FULL 900 width and dropped for a
+ * different reason entirely. Same family (a fork-region blanket outliving its
+ * reason), different mechanism -- measured, not inherited.
+ *
+ * Scoped deliberately to the junction furniture (arms + street flank) rather than
+ * changed inside tg_side_blocked, because relaxing the blanket for facades and
+ * trees is a separate question this item did not measure. Threshold matches
+ * tg_pavement_side_width's, so the kerb and its arms agree span for span.
+ * TD5RE_R9_CITY_ARM_MEASURED=0 restores the blanket gate for an A/B. */
+static int tg_side_corridor_here(const TG_NodeList *nl, int si, double side)
+{
+    if (!td5_env_flag_on("TD5RE_R9_CITY_ARM_MEASURED"))
+        return tg_side_blocked(si, side);
+    if (!tg_branches_enabled() || side >= 0.0) return 0;
+    if (!tg_span_in_fork_clear(si)) return 0;
+    return (tg_carriageway_reach(nl, si, side)
+            - tg_road_half_width(nl, si)) > 1.0;
+}
+
 /* [R7 item 6] The FLAT PAVEMENT (city sidewalk slab / out-of-town verge band) on
  * the RIGHT needs suppressing only where the branch carriageway actually reaches
  * into that lateral. tg_side_blocked keys on the whole fork-CLEAR region, which
@@ -6650,22 +6757,60 @@ static int tg_side_blocked(int si, double side)
  * Returns the usable width (0.0 = emit nothing on this side). Both the raised
  * city slab and the out-of-town verge band ask this one function, so the two
  * never disagree about where a pavement run ends.
- * TD5RE_R8_CITY_PAVE_TAPER=0 restores R7's all-or-nothing drop for an A/B. */
+ * TD5RE_R8_CITY_PAVE_TAPER=0 restores R7's all-or-nothing drop for an A/B.
+ *
+ * [R9 CITY item 2] R8's taper is right at the FORK MOUTH and wrong once the
+ * corridor has pulled clear, and that is what the user reads as "the right track
+ * on span 150 branch has double sidewalk". Measured on seed 99991 (r9city
+ * uniqueness sweep, spans 150/151/162/163 and span 150 again on seed 777):
+ *
+ *     si=150 side=R  bands=2  [2999..3332 city-slab] [3488..4467 branch-slab]
+ *
+ * Two SEPARATED pavements on one span-side. The mechanism is not the taper's
+ * arithmetic -- it is that this slab is laid on the FULL road edge
+ * (tg_city_edge_frame asks tg_road_edge for the plain carriageway), while over a
+ * fork the MAIN carriageway is narrowed to its LEFT half and shifted away. So the
+ * moment the branch separates, the slab is standing in the middle of the GORE,
+ * attached to no carriageway at all, with the branch's own kerb a few hundred
+ * units further out. R7's binary drop hid this by killing the slab at the first
+ * unit of overlap; R8 made it taper and thereby exposed it.
+ *
+ * The stopping rule is therefore CONTIGUITY, not width: the main road's outer
+ * pavement is legitimate only while it still MEETS the branch's own pavement, so
+ * that the two read as one widening kerb across the mouth (which is exactly the
+ * span-143 continuity R8 was asked to restore). Once a gap opens between them the
+ * outer pavement is the branch's job and this slab is a stranded island. The
+ * branch lays its kerb from tg_carriageway_reach outward, so the gap is
+ * reach - (half + remaining), and TD5_TG_PAVE_JOIN is the same "these two read as
+ * one pavement" tolerance the uniqueness sweep merges bands with -- one number,
+ * so the emitter and its acceptance test cannot disagree.
+ *
+ * On seed 99991 this keeps the taper over spans 143-149 (where the slabs still
+ * touch, i.e. the R8 fix) and stops it at 150, which is the span the user named.
+ * TD5RE_R9_CITY_PAVE_JOIN=0 restores R8's taper-to-a-sliver for an A/B. */
 #define TD5_TG_PAVE_MIN_W   250.0   /* narrower than this is a sliver, not a kerb */
+#define TD5_TG_PAVE_JOIN    150.0   /* == TD5_TG_R9_BAND_JOIN, see sweep (A)      */
 
 static double tg_pavement_side_width(const TG_NodeList *nl, int si,
                                      double side, double sw)
 {
-    double over;
+    double over, half, reach;
     if (!(sw > 0.0)) return 0.0;
     if (!tg_branches_enabled() || side >= 0.0) return sw;
     if (!tg_span_in_fork_clear(si)) return sw;
     if (!td5_env_flag_on("TD5RE_R7_PRE_BRANCH_PAVE")) return 0.0;
-    over = tg_carriageway_reach(nl, si, side) - tg_road_half_width(nl, si);
+    half  = tg_road_half_width(nl, si);
+    reach = tg_carriageway_reach(nl, si, side);
+    over  = reach - half;
     if (over <= 1.0) return sw;              /* corridor not into the verge yet */
     if (!td5_env_flag_on("TD5RE_R8_CITY_PAVE_TAPER")) return 0.0;   /* R7 rule */
     sw -= over;
-    return (sw >= TD5_TG_PAVE_MIN_W) ? sw : 0.0;
+    if (sw < TD5_TG_PAVE_MIN_W) return 0.0;
+    /* [R9 CITY item 2] contiguity with the branch's own kerb, see above. */
+    if (td5_env_flag_on("TD5RE_R9_CITY_PAVE_JOIN") &&
+        reach - (half + sw) > TD5_TG_PAVE_JOIN)
+        return 0.0;
+    return sw;
 }
 
 /* Emit one prop billboard (prop-page index pp) beside span si on `side`, `gap`
@@ -8896,7 +9041,13 @@ static int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
     seg_nq = n / 4;
     tg_acct_n(TG_ACCT_SIDEWALK, acct_si, 1);
     moff[(*nmesh)++] = blk->len;
-    return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
+    {   /* [R9 CITY item 2] provenance for the pavement-uniqueness sweep */
+        const size_t p0 = blk->len;
+        const int r = tg_write_quad_mesh(blk, px, py, pz, uu, vv, n,
+                                         &seg_page, &seg_nq, 1);
+        tg_pave_mark(p0, blk->len, TG_PVS_BRANCH, acct_si);
+        return r;
+    }
 }
 
 /* [R5 STRUCT item 10] Flat VERGE BAND along a branch corridor's OUTER edge.
@@ -8952,7 +9103,13 @@ static int tg_emit_branch_verge(const TG_NodeList *nl, int mb, int k, int L,
     seg_nq = n / 4;
     tg_acct_n(TG_ACCT_BRANCH_VERGE, acct_si, 1);
     moff[(*nmesh)++] = blk->len;
-    return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
+    {   /* [R9 CITY item 2] provenance for the pavement-uniqueness sweep */
+        const size_t p0 = blk->len;
+        const int r = tg_write_quad_mesh(blk, px, py, pz, uu, vv, n,
+                                         &seg_page, &seg_nq, 1);
+        tg_pave_mark(p0, blk->len, TG_PVS_BRVERGE, acct_si);
+        return r;
+    }
 }
 
 /* [R7 item 10] SCENERY on the branch corridor's GRASS verge. tg_emit_branch_verge
@@ -9650,8 +9807,13 @@ static int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
     seg_nq = n / 4;
     tg_acct_n(TG_ACCT_SIDEWALK, h->si, n / 8);   /* slab + kerb per side */
     h->moff[(*h->nmesh)++] = h->blk->len;
-    return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
-                              &seg_page, &seg_nq, 1);
+    {   /* [R9 CITY item 2] provenance for the pavement-uniqueness sweep */
+        const size_t p0 = h->blk->len;
+        const int r = tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                                         &seg_page, &seg_nq, 1);
+        tg_pave_mark(p0, h->blk->len, TG_PVS_CITY, h->si);
+        return r;
+    }
 }
 
 /* FLAT VERGE BAND -- the out-of-town "sidewalk" (item 7). One quad per side
@@ -9697,8 +9859,13 @@ static int tg_city_emit_verge_band(const TG_FBHook *h, double bw)
     seg_nq = n / 4;
     tg_acct_n(TG_ACCT_SIDEWALK, h->si, n / 4);   /* out-of-town verge band */
     h->moff[(*h->nmesh)++] = h->blk->len;
-    return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
-                              &seg_page, &seg_nq, 1);
+    {   /* [R9 CITY item 2] provenance for the pavement-uniqueness sweep */
+        const size_t p0 = h->blk->len;
+        const int r = tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                                         &seg_page, &seg_nq, 1);
+        tg_pave_mark(p0, h->blk->len, TG_PVS_VERGE, h->si);
+        return r;
+    }
 }
 
 /* [R8 CITY item 2] Per-span, per-side DIAGNOSTIC of every gate that can drop the
@@ -10485,7 +10652,11 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
         double ang, nox, noz, fox, foz, reach, drop, u_r;
         if (tg_facade_built(h->si, s)) continue;
         if (tg_block_is_park(h->si, s)) continue;   /* a park, not a through st */
-        if (tg_side_blocked(h->si, sg)) continue;
+        /* [R9 CITY item 4] measured, not blanket. The street, its pavement arms
+         * and its flanking blocks must all use the SAME gate, or a frontage gap
+         * that opens across a fork mouth gets a kerb dropped for a side street
+         * that was never laid -- bare ground, which is item 4. */
+        if (tg_side_corridor_here(h->nl, h->si, sg)) continue;
         tg_city_edge_frame(h->nl, h->si, sg, e);
 
         /* Skew the outward edge (item 3 diagonal). Both ends rotate by the same
@@ -10576,6 +10747,18 @@ static int tg_block_is_park(int si, int left)
     return (h >> 30) == 0u;                       /* ~1 gap in 4 is a park */
 }
 
+/* Fork-back band sizing. Declared here rather than beside tg_city_emit_forkback
+ * because the plaza emitter below closes the plaza's ENDS ([R9 CITY item 3]) at
+ * the same depth and row cap the backdrop stands at -- one definition, so the
+ * end walls can never drift from the band they close. See the rationale for the
+ * values at tg_city_emit_forkback ([R5 item 5]: stand it back, halve the
+ * footprint, cap the rows). */
+#define TD5_TG_FORKBACK_GAP        7000.0 /* new: background air past the corridor */
+#define TD5_TG_FORKBACK_GAP_TALL   5000.0 /* old (A/B): pre-R5 gap                  */
+#define TD5_TG_FORKBACK_DEPTH      3000.0 /* new: how deep the background reads     */
+#define TD5_TG_FORKBACK_DEPTH_TALL 6000.0 /* old (A/B): pre-R5 depth                */
+#define TD5_TG_FORKBACK_MAX_ROWS   6      /* a backdrop, not a downtown tower       */
+
 /* [R7 CITY item 3] Ground + dressing under a fork-gore BUILDING backdrop. The
  * backdrop massing (tg_bg_building_box) stood on its base chord alone; where the
  * far terrain does not reach behind the corridor the block read as "buildings at
@@ -10635,6 +10818,70 @@ static int tg_city_emit_forkback_plaza(const TG_FBHook *h, double side,
     if (!tg_prop_one(h->nl, si, pp, side, inner + 0.4 * (set0 - inner),
                      h->blk, h->moff, h->nmesh))
         return 0;
+
+    /* [R9 CITY item 3] CLOSE THE PLAZA'S ENDS.
+     *
+     * The user asks for "buildings on its three sides" at span 358. First, what
+     * IS that thing: roadside parks are default OFF (tg_block_is_park returns 0
+     * unless TD5RE_AUTOTRACK_PARKS=1) and the element inventory confirms it --
+     * `parks` is in the NONE-emitted list on both seeds, so there is no park
+     * anywhere on this track. What stands to the right of 358 is THIS emitter's
+     * plaza: the r7-city accounting run covers 311-362, span 358 included. So the
+     * item is real, but it is a plaza, not a park -- an open paved square with a
+     * fountain and passers-by.
+     *
+     * Its composition is the complaint. The forkback lays a building band along
+     * the plaza's BACK edge only, so the square is walled on one side and open on
+     * the other three -- which is why it reads as an undeveloped green rather
+     * than a city square. The back is already built, so "three sides" means the
+     * back plus the two ENDS. This closes the ends: where a forkback run STARTS
+     * or ENDS (the neighbouring span has no backdrop), stand a block across the
+     * plaza's depth, running from the inner edge out to the block back, square to
+     * the road. Interior spans of a run add nothing, so a long plaza gets exactly
+     * two end walls rather than a comb.
+     *
+     * Geometry is taken from the same chord this function already computed -- the
+     * inner edge at `inner`, the outer at dn -- so the end wall cannot drift from
+     * the floor it closes, and it is set at the plaza depth, which the backdrop
+     * already cleared through tg_carriageway_clear_gap. Nothing new is placed
+     * nearer the road than the existing block, so the on-road guard has nothing
+     * more to reject. TD5RE_R9_CITY_PLAZA_ENDS=0 for an A/B. */
+    if (td5_env_flag_on("TD5RE_R9_CITY_PLAZA_ENDS")) {
+        const int prev_run = tg_span_in_fork_clear(si - 1);
+        const int next_run = tg_span_in_fork_clear(si + 1);
+        int end = 0;
+        if (!prev_run) end = -1;            /* first span of the run */
+        else if (!next_run) end = +1;       /* last span of the run  */
+        if (end != 0) {
+            const TG_Biome *b = h->b;
+            const unsigned int eh = ((unsigned)si * 2246822519u) ^ 0x85EBCA6Bu;
+            /* Along-road unit for THIS span, and the wall's own thickness. */
+            double wx = n1->x - n0->x, wz = n1->z - n0->z;
+            double wl = sqrt(wx * wx + wz * wz);
+            const double d_in = n0->width * 0.5 + inner;
+            const double span_d = dn - d_in;       /* plaza depth to close */
+            int rows = b->floors_min + (int)((eh >> 13) % 4u);
+            double H;
+            if (wl < 1e-6 || !(span_d > 0.0)) return 1;
+            wx /= wl; wz /= wl;
+            if (rows > TD5_TG_FORKBACK_MAX_ROWS) rows = TD5_TG_FORKBACK_MAX_ROWS;
+            H = (double)rows * tg_facade_floor_h(b);
+            {   /* Base chord runs OUTWARD across the plaza at the run's end. */
+                const double ex = n0->x + lx0 * d_in + wx * (end < 0 ? 0.0 : wl);
+                const double ez = n0->z + lz0 * d_in + wz * (end < 0 ? 0.0 : wl);
+                const double axx = lx0 * span_d, azz = lz0 * span_d;
+                const int cols = tg_facade_cols_for(span_d, (double)b->cell_w, 4);
+                if (!tg_bg_building_box(h->blk, h->moff, h->nmesh, h->maxmesh,
+                                        ex, n0->y, ez, axx, 0.0, azz,
+                                        wx * (double)end, wz * (double)end,
+                                        wx * (double)end, wz * (double)end,
+                                        TD5_TG_FORKBACK_DEPTH, H, cols, rows,
+                                        tg_facade_page_class(eh, rows), 1, si))
+                    return 0;
+                tg_acct(TG_ACCT_R9_CITY, si);
+            }
+        }
+    }
     return 1;
 }
 
@@ -10671,11 +10918,8 @@ static int tg_city_emit_forkback_plaza(const TG_FBHook *h, double side,
  * Default ON; TD5RE_AUTOTRACK_FORKBACK_SMALL=0 restores the old tall/deep/near
  * massing (GAP 5000, DEPTH 6000, cap FACADE_MAX_ROWS, +(hash%5)+2) for a
  * single-build A/B and byte attribution. */
-#define TD5_TG_FORKBACK_GAP        7000.0 /* new: background air past the corridor */
-#define TD5_TG_FORKBACK_GAP_TALL   5000.0 /* old (A/B): pre-R5 gap                  */
-#define TD5_TG_FORKBACK_DEPTH      3000.0 /* new: how deep the background reads     */
-#define TD5_TG_FORKBACK_DEPTH_TALL 6000.0 /* old (A/B): pre-R5 depth                */
-#define TD5_TG_FORKBACK_MAX_ROWS   6      /* a backdrop, not a downtown tower       */
+/* (sizes are declared above tg_city_emit_forkback_plaza -- [R9 CITY item 3]
+ * needs them to close the plaza's ends at the same depth the backdrop uses.) */
 /* [R6 item 3] Per-span variation of the fork-back band. STAGGER pushes each
  * span's block to a different depth so the face is jagged and neighbouring spans
  * no longer share an edge -- distinct buildings with gaps ("breaks in the row"),
@@ -10853,8 +11097,13 @@ static int tg_block_emit_arm(const TG_FBHook *h,
     seg_nq = n / 4;
     tg_acct(TG_ACCT_SIDEWALK, h->si);
     h->moff[(*h->nmesh)++] = h->blk->len;
-    if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1))
-        return 0;
+    {   /* [R9 CITY item 4] provenance: proves the kerb turns down this mouth */
+        const size_t p0 = h->blk->len;
+        const int r = tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                                         &seg_page, &seg_nq, 1);
+        tg_pave_mark(p0, h->blk->len, TG_PVS_ARM, h->si);
+        if (!r) return 0;
+    }
 
     /* Kerb face down to the carriageway along the kerb-corner..kerb-outer edge. */
     n = 0;
@@ -10931,7 +11180,8 @@ static int tg_block_emit_intersection(const TG_FBHook *h)
 
         if (tg_facade_built(h->si, s)) continue;      /* built = no junction */
         if (tg_block_is_park(h->si, s)) continue;     /* a park, not a street */
-        if (tg_side_blocked(h->si, sg)) continue;
+        /* [R9 CITY item 4] measured, not blanket -- see tg_side_corridor_here */
+        if (tg_side_corridor_here(h->nl, h->si, sg)) continue;
         near_corner = tg_facade_built(h->si - 1, s);  /* gap starts here */
         far_corner  = tg_facade_built(h->si + 1, s);  /* gap ends here */
         if (!near_corner && !far_corner) continue;    /* gap interior */
@@ -11424,7 +11674,8 @@ static int tg_cross_emit_street_flank(const TG_FBHook *h)
 
         if (tg_facade_built(h->si, s)) continue;      /* built = no street */
         if (tg_block_is_park(h->si, s)) continue;
-        if (tg_side_blocked(h->si, sg)) continue;
+        /* [R9 CITY item 4] measured, not blanket -- see tg_side_corridor_here */
+        if (tg_side_corridor_here(h->nl, h->si, sg)) continue;
         near_corner = tg_facade_built(h->si - 1, s);
         far_corner  = tg_facade_built(h->si + 1, s);
         if (!near_corner && !far_corner) continue;    /* gap interior */
@@ -11568,6 +11819,291 @@ static void tg_r8_cross_report(const TG_NodeList *nl, int nspans)
         mouths, armed, forkm, fork_armed, turns, flanks,
         mouths ? rmin : 0.0, mouths ? rsum / (double)mouths : 0.0,
         mouths ? rmax : 0.0);
+}
+
+/* ============ [R9 CITY] PAVEMENT UNIQUENESS + MOUTH MASSING SWEEP =========
+ * Two class-level measurements over the ASSEMBLED geometry, so neither can be
+ * satisfied by an emitter merely changing (R9 method rule 1) nor by one frame
+ * (rule 2). Both run over every entry of the whole strip, both seeds.
+ *
+ * (A) PAVEMENT UNIQUENESS -- item 2. Per (main span, side), merge the marked
+ *     along-road pavement meshes into SEPARATED lateral bands. One band is
+ *     correct however wide it is; TWO separated bands on one span-side is the
+ *     user's "double sidewalk". This is a uniqueness test over the shared
+ *     resource (this span-side), not a total: emitting more pavement cannot
+ *     make it pass, and dropping all pavement would show up as the run-length
+ *     going to zero, which the SIDEWALK element inventory already tracks.
+ *
+ * (B) MOUTH MASSING -- item 1. Per (main span, side), the smallest |lateral| any
+ *     UPRIGHT mesh reaches. Compared against the pavement line (road half width
+ *     + pavement width), that answers "is there massing standing inside the
+ *     sidewalk" directly from geometry. Crucially it is evaluated on EVERY span
+ *     of a frontage gap, including the GAP INTERIOR spans -- span 66 is interior
+ *     to the 65-68 gap, and the R8 CROSS sweep only ever visited the corner
+ *     (mouth) spans, which is why 190 swept mouths left span 66 untouched.
+ *
+ * A corridor span carries no node of its own, so its pavement is attributed to
+ * the MAIN span it runs beside (tg_fork_of_corridor), which is the span the user
+ * names when driving the branch.
+ *
+ * Read-only. TD5RE_R9_CITY_REPORT=1 prints the per-span offender lines; the
+ * SUMMARY totals are always logged, since they are the acceptance numbers. */
+#define TD5_TG_R9_BANDS_MAX   4      /* separated pavement bands tracked/side  */
+#define TD5_TG_R9_BAND_JOIN 150.0    /* closer than this reads as ONE pavement */
+#define TD5_TG_R9_UPRIGHT   300.0    /* rises this far above road = massing    */
+
+typedef struct {
+    float lo[TD5_TG_R9_BANDS_MAX];   /* inboard |lateral| of the band */
+    float hi[TD5_TG_R9_BANDS_MAX];   /* outboard |lateral|            */
+    unsigned char src[TD5_TG_R9_BANDS_MAX];
+    unsigned char n;
+} TG_R9Bands;
+
+static TG_R9Bands     s_r9_bands[TD5_TG_MAX_SPANS][2];
+static float          s_r9_massing[TD5_TG_MAX_SPANS][2];
+static unsigned short s_r9_mass_page[TD5_TG_MAX_SPANS][2];  /* who stands there */
+static float          s_r9_mass_top[TD5_TG_MAX_SPANS][2];
+static unsigned char  s_r9_arm[TD5_TG_MAX_SPANS][2];        /* kerb turns here  */
+
+static void tg_r9_city_reset(void)
+{
+    int i, s;
+    memset(s_r9_bands, 0, sizeof s_r9_bands);
+    memset(s_r9_mass_page, 0, sizeof s_r9_mass_page);
+    memset(s_r9_mass_top, 0, sizeof s_r9_mass_top);
+    memset(s_r9_arm, 0, sizeof s_r9_arm);
+    for (i = 0; i < TD5_TG_MAX_SPANS; i++)
+        for (s = 0; s < 2; s++) s_r9_massing[i][s] = 1e30f;
+}
+
+/* Merge [lo,hi] into span si / side s's band set, joining bands that touch. */
+static void tg_r9_band_add(int si, int s, double lo, double hi, int src)
+{
+    TG_R9Bands *B;
+    int i;
+    if (si < 0 || si >= TD5_TG_MAX_SPANS || !(hi > lo)) return;
+    B = &s_r9_bands[si][s];
+    for (i = 0; i < (int)B->n; i++)
+        if (lo <= (double)B->hi[i] + TD5_TG_R9_BAND_JOIN &&
+            hi >= (double)B->lo[i] - TD5_TG_R9_BAND_JOIN) {
+            if (lo < (double)B->lo[i]) B->lo[i] = (float)lo;
+            if (hi > (double)B->hi[i]) B->hi[i] = (float)hi;
+            return;                       /* same pavement, just wider */
+        }
+    if ((int)B->n >= TD5_TG_R9_BANDS_MAX) return;
+    B->lo[B->n] = (float)lo;
+    B->hi[B->n] = (float)hi;
+    B->src[B->n] = (unsigned char)src;
+    B->n++;
+}
+
+/* Walk one entry's assembled meshes, before the guard compacts them (so the
+ * pavement marks still map), and accumulate (A) and (B). */
+static void tg_r9_city_scan_entry(const TG_NodeList *nl, int ring, int s0,
+                                  int ns, const TG_Buf *meshes,
+                                  const size_t *moff, int nmesh)
+{
+    const unsigned char *b = meshes->b;
+    int win_lo, win_hi, i;
+
+    if (nmesh <= 0 || ring < 3 || !b) return;
+    win_lo = s0 - TD5_TG_GUARD_WINDOW; if (win_lo < 0) win_lo = 0;
+    win_hi = s0 + ns - 1 + TD5_TG_GUARD_WINDOW;
+    if (win_hi > ring - 1) win_hi = ring - 1;
+    /* A corridor entry sits past the ring and has no nodes of its own; measure
+     * it against the MAIN spans its fork runs beside. */
+    if (s0 >= ring) { win_lo = 0; win_hi = ring - 1; }
+    if (win_hi < win_lo) return;
+
+    for (i = 0; i < nmesh; i++) {
+        const size_t off = moff[i];
+        const size_t mlen = (off <= meshes->len)
+                          ? tg_guard_mesh_len(b, off, meshes->len) : 0;
+        unsigned int vtxoff, vtxcnt, vi;
+        int src, mark_si = -1;
+
+        unsigned int page0;
+        if (mlen == 0 || off + mlen > meshes->len) continue;
+        if (tg_rd_u16(b + off + 0x02) != 0) continue;      /* billboards: (B) only via box */
+        vtxcnt = tg_rd_u32(b + off + 0x08);
+        vtxoff = tg_rd_u32(b + off + 0x30);
+        page0  = tg_rd_u16(b + off + TD5_TG_MESH_DISK_SIZE + 0x02);
+        src = tg_pave_src_of(off, &mark_si);
+
+        for (vi = 0; vi + 3 < vtxcnt; vi += 4) {
+            double qlo = 1e30, qhi = -1e30, dymax = -1e30;
+            int qsi = -1, qside = -1, k, have = 0;
+            for (k = 0; k < 4; k++) {
+                const unsigned char *vp = b + off + vtxoff
+                                        + (size_t)(vi + (unsigned)k) * TD5_TG_VTX_SIZE;
+                double vx, vy, vz, lat, a, dy;
+                int si;
+                if ((size_t)(vp + 12 - b) > off + mlen) break;
+                vx = (double)tg_rd_f32(vp);
+                vy = (double)tg_rd_f32(vp + 4);
+                vz = (double)tg_rd_f32(vp + 8);
+                si = tg_guard_nearest_node(nl, win_lo, win_hi, vx, vz);
+                if (si < 0 || si >= ring) continue;
+                lat = (vx - nl->v[si].x) * nl->v[si].tz
+                    - (vz - nl->v[si].z) * nl->v[si].tx;
+                a  = (lat >= 0.0) ? lat : -lat;
+                dy = vy - nl->v[si].y;
+                if (dy > dymax) dymax = dy;
+                if (!have) { qsi = si; qside = (lat >= 0.0) ? 1 : 0; have = 1; }
+                if (a < qlo) qlo = a;
+                if (a > qhi) qhi = a;
+            }
+            if (!have || qsi < 0 || qsi >= TD5_TG_MAX_SPANS) continue;
+
+            /* (A) marked pavement only, and only where it lies near road level
+             * (the kerb FACE of the city slab is the same mesh but vertical --
+             * it shares the slab's lateral, so it merges into the same band). */
+            if (src == TG_PVS_ARM) {
+                /* An arm is pavement, but it runs OUT along the side street, so
+                 * it is evidence for item 4 and noise for item 2. */
+                if (mark_si >= 0 && mark_si < TD5_TG_MAX_SPANS)
+                    s_r9_arm[mark_si][qside] = 1;
+            } else if (src >= 0 && dymax < TD5_TG_R9_UPRIGHT) {
+                tg_r9_band_add(qsi, qside, qlo, qhi, src);
+            }
+
+            /* (B) anything that stands up, whatever emitted it. */
+            if (dymax >= TD5_TG_R9_UPRIGHT &&
+                qlo < (double)s_r9_massing[qsi][qside]) {
+                s_r9_massing[qsi][qside]   = (float)qlo;
+                s_r9_mass_page[qsi][qside] = (unsigned short)page0;
+                s_r9_mass_top[qsi][qside]  = (float)dymax;
+            }
+        }
+    }
+}
+
+/* Is span si / side s inside a frontage GAP (a side-street mouth or its
+ * interior)? tg_facade_built is the block model's "is there a frontage here";
+ * the R8 CROSS sweep additionally required a built neighbour, which is what
+ * confined it to corner spans. */
+static int tg_r9_in_gap(int si, int s)
+{
+    return !tg_facade_built(si, s);
+}
+
+static void tg_r9_city_report(const TG_NodeList *nl, int nspans)
+{
+    const int verbose = td5_env_int("TD5RE_R9_CITY_REPORT", 0, 0, 1);
+    /* Windowed detail: TD5RE_R9_CITY_SPAN=N (+/- _PAD) dumps EVERY span-side in
+     * the window, offender or not, so the span the user named can be inspected
+     * even when the offender list is long. */
+    const int wspan = td5_env_int("TD5RE_R9_CITY_SPAN", -1, -1, 100000);
+    const int wpad  = td5_env_int("TD5RE_R9_CITY_PAD", 6, 0, 4000);
+    int si, s, ring = (s_ring_len > 0) ? s_ring_len : nspans;
+    int dbl = 0, sides = 0, gaps = 0, intrude = 0, listed = 0;
+
+    if (ring > nspans) ring = nspans;
+    if (ring > TD5_TG_MAX_SPANS) ring = TD5_TG_MAX_SPANS;
+
+    for (si = 1; si < ring; si++) {
+        const TG_Biome *b = &k_biomes[tg_scenery_biome_index(si)];
+        const double sw = tg_city_sidewalk_w(b);
+        const double half = tg_road_half_width(nl, si);
+        for (s = 0; s < 2; s++) {
+            const TG_R9Bands *B = &s_r9_bands[si][s];
+            if (wspan >= 0 && si >= wspan - wpad && si <= wspan + wpad) {
+                char w[256];
+                int k, p = 0;
+                w[0] = 0;
+                for (k = 0; k < (int)B->n && p < 200; k++)
+                    p += snprintf(w + p, sizeof(w) - (size_t)p, " [%.0f..%.0f %s]",
+                                  (double)B->lo[k], (double)B->hi[k],
+                                  k_pave_src_name[B->src[k]]);
+                unsigned int blk, ph, gs, gl;
+                int av;
+                tg_facade_block(si, s, &blk, &ph, &gs, &gl, &av);
+                TD5_LOG_I(LOG_TAG, "r9city-win: si=%d side=%s gap=%d bands=%d%s "
+                          "| massing nearest=%.0f page=%d top=%.0f line=%.0f "
+                          "| facade turn=%d blk=%u ph=%u gap=[%u,%u) av=%d",
+                          si, s ? "L" : "R", tg_r9_in_gap(si, s), (int)B->n, w,
+                          (double)s_r9_massing[si][s],
+                          (int)s_r9_mass_page[si][s],
+                          (double)s_r9_mass_top[si][s], half + sw,
+                          tg_turn_open(si, s), blk, ph, gs, gs + gl, av);
+            }
+            if (B->n > 0) sides++;
+            if (B->n >= 2) {
+                dbl++;
+                if (verbose && listed++ < 60) {
+                    char msg[256];
+                    int k, p = 0;
+                    for (k = 0; k < (int)B->n && p < 200; k++)
+                        p += snprintf(msg + p, sizeof(msg) - (size_t)p,
+                                      " [%.0f..%.0f %s]", (double)B->lo[k],
+                                      (double)B->hi[k],
+                                      k_pave_src_name[B->src[k]]);
+                    TD5_LOG_W(LOG_TAG, "r9city: DOUBLE PAVEMENT si=%d side=%s "
+                              "bands=%d%s", si, s ? "L" : "R", (int)B->n, msg);
+                }
+            }
+            /* (B) only asks the question where the city has a pavement line and
+             * the frontage is open -- that is what a crossing mouth is. */
+            if (!(sw > 0.0) || tg_span_in_bridge_run(si)) continue;
+            if (!tg_r9_in_gap(si, s)) continue;
+            gaps++;
+            if ((double)s_r9_massing[si][s] < half + sw) {
+                intrude++;
+                if (verbose && listed++ < 60)
+                    TD5_LOG_W(LOG_TAG, "r9city: MOUTH MASSING si=%d side=%s "
+                              "nearest=%.0f pavement_line=%.0f (%.0f inside)",
+                              si, s ? "L" : "R", (double)s_r9_massing[si][s],
+                              half + sw, half + sw - (double)s_r9_massing[si][s]);
+            }
+        }
+    }
+    /* [R9 CITY item 4] FORK-MOUTH SWEEP -- every fork's entry AND rejoin, not
+     * just the span the user named. A mouth span-side is BARE when the city has a
+     * pavement line there but nothing provides one: no along-road band and no arm
+     * turning down a side street. That is the "no sidewalks on the merging of the
+     * branch" condition, stated so it can be counted over both seeds. Only the
+     * RIGHT side is swept -- no corridor ever bows left, so the left side has no
+     * fork-related reason to lose its kerb. */
+    {
+        int f, bare = 0, checked = 0;
+        for (f = 0; f < s_fork_count; f++) {
+            int lo = s_forks[f].F - TD5_TG_BRANCH_WIDEN - 2;
+            int hi = s_forks[f].R + 2;
+            if (lo < 1) lo = 1;
+            if (hi > ring - 1) hi = ring - 1;
+            for (si = lo; si <= hi; si++) {
+                const TG_Biome *b = &k_biomes[tg_scenery_biome_index(si)];
+                if (!(tg_city_sidewalk_w(b) > 0.0)) continue;
+                if (tg_span_in_bridge_run(si)) continue;
+                /* Where the corridor really is, bare ground is CORRECT: the
+                 * branch carries its own kerb out there. */
+                if (tg_side_corridor_here(nl, si, -1.0)) continue;
+                checked++;
+                /* A gap-interior span with the side street crossing it is
+                 * CORRECTLY kerbless -- that is what every junction on the track
+                 * looks like. BARE means no kerb, no arm AND no street: the
+                 * frontage opened and nothing serviced it. */
+                {
+                    const int street = !tg_facade_built(si, 0)
+                                     && !tg_block_is_park(si, 0);
+                    if (s_r9_bands[si][0].n == 0 && !s_r9_arm[si][0] && !street) {
+                        bare++;
+                        if (verbose)
+                            TD5_LOG_W(LOG_TAG, "r9city: BARE FORK MOUTH si=%d "
+                                      "side=R (fork %d F=%d R=%d) -- no band, "
+                                      "no arm, no street", si, f,
+                                      s_forks[f].F, s_forks[f].R);
+                    }
+                }
+            }
+        }
+        TD5_LOG_I(LOG_TAG, "trackgen: r9city FORK MOUTHS checked=%d BARE=%d",
+                  checked, bare);
+    }
+
+    TD5_LOG_I(LOG_TAG, "trackgen: r9city SUMMARY paved_span_sides=%d "
+              "DOUBLE_PAVEMENT=%d | gap_span_sides=%d MASSING_INSIDE_PAVEMENT=%d",
+              sides, dbl, gaps, intrude);
 }
 
 /* Group CROSS dispatcher (feedback R4 items 10, 14; R5 items 2, 3, 4, 12).
@@ -13254,6 +13790,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
      * quadratic in the span count. Must precede the first facade query. */
     tg_turn_map_build(nl, nspans);
     tg_r8_cross_report(nl, nspans);   /* [R8 CROSS] class sweep, opt-in */
+    tg_r9_city_reset();               /* [R9 CITY] pavement/massing sweep */
 
     for (e = 0; e < nentries && ok; e++) {
         const int s0 = e * TD5_TG_SPANS_PER_ENTRY;
@@ -13265,6 +13802,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
         if (ns > TD5_TG_SPANS_PER_ENTRY) ns = TD5_TG_SPANS_PER_ENTRY;
         memset(&meshes, 0, sizeof(meshes));
         tg_guard_ex_reset();   /* [R7 GUARD] exempt ranges are per-entry */
+        tg_pave_mark_reset();  /* [R9 CITY] pavement provenance, per-entry */
 
         /* Ground skirt then road, per span. Offsets are RECORDED as meshes are
          * appended -- sizes differ once ground, buildings and road quads are
@@ -13611,6 +14149,12 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
          * carriageway, over ALL of this entry's assembled geometry, whatever
          * emitter produced it. Runs before the block header so the rejected
          * meshes never reach the offset table. */
+        /* [R9 CITY] Measure BEFORE the guard compacts the buffer -- the pavement
+         * marks are byte offsets into it. Pavement is never a guard reject
+         * (rejects-by-kind reports zero sidewalk/city kinds), so measuring here
+         * and shipping after describe the same geometry. */
+        if (ok)
+            tg_r9_city_scan_entry(nl, ring, s0, ns, &meshes, moff, nmesh);
         if (ok)
             tg_guard_validate_entry(nl, ring, s0, ns, &meshes, moff, &nmesh);
 
@@ -13681,6 +14225,9 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 TD5_LOG_W(LOG_TAG, "on-road guard: RESIDUAL %ld non-exempt "
                           "on-road mesh(es) survived -- parse/compaction bug",
                           s_guard_residual);
+            /* [R9 CITY] pavement uniqueness + mouth massing, over the whole
+             * assembled strip. These are the round's acceptance numbers. */
+            tg_r9_city_report(nl, nspans);
             /* [R8] The acceptance evidence for the precision pass, as numbers.
              * ONE line per kind that was rejected, and an explicit line for the
              * kinds that must NEVER appear: if road / deck / gantry / tunnel /
