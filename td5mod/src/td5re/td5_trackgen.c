@@ -1282,6 +1282,20 @@ static int tg_span_in_bridge_run(int si)
     return ((h >> 8) % 1000u) < thresh;
 }
 
+/* [R6 CROSS item 15] Is span si within `clear` spans of any bridge run? A side
+ * street opening right off a bridge end reads as detached from its surroundings
+ * ("avoid adding crossing streets right after a bridge"), so the crossing
+ * emitters use this to keep a clearance band around every run -- an explicit
+ * gate in the same shape as the R4 bridge/tunnel interlock, not a rate tweak. */
+#define TD5_TG_XBRIDGE_CLEAR 5
+static int tg_span_near_bridge(int si, int clear)
+{
+    int k;
+    for (k = -clear; k <= clear; k++)
+        if (si + k >= 0 && tg_span_in_bridge_run(si + k)) return 1;
+    return 0;
+}
+
 /* Lowest road node on the WHOLE track, cached.
  *
  * A global fact with one consumer that genuinely needs a global one: the
@@ -6647,6 +6661,18 @@ static int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
         const double u_w = sw / (double)TD5_TG_SPAN_LENGTH;
         const double u_k = TD5_TG_KERB_H / (double)TD5_TG_SPAN_LENGTH;
         if (tg_side_blocked(h->si, sg)) continue;
+        /* [R6 CROSS item 1] The raised pavement STOPS at a road intersection.
+         * Where this side opens onto a side-street mouth (the frontage is a gap
+         * here), the slab used to run straight across the mouth at kerb height,
+         * so the pavement was "lifted during the crossing" and floated over the
+         * cross-street asphalt that tg_city_emit_crossstreet lays at road level
+         * (framedump top-down spans 178 / 206, seed 99991). Dropping the slab on
+         * the mouth side leaves the carriageway flush and the corner pavement
+         * arms (tg_block_emit_intersection) turn the sidewalk down the side
+         * street instead. The built side keeps its pavement. */
+        if (td5_env_flag_on("TD5RE_AUTOTRACK_XSTOP") &&
+            !tg_facade_built(h->si, s))
+            continue;
         tg_city_edge_frame(h->nl, h->si, sg, e);
 
         /* Top slab: near-in, near-out, far-out, far-in. */
@@ -6808,6 +6834,9 @@ static int tg_city_crossing_here(int si)
      * (the shifted half road's outer edge is still the full-width edge) but a
      * crossing spans both edges, so skip the whole fork region. */
     if (tg_branches_enabled() && tg_span_in_fork_clear(si)) return 0;
+    /* [R6 CROSS item 15] no crossing right after (or before) a bridge run. */
+    if (td5_env_flag_on("TD5RE_AUTOTRACK_XBRIDGE_GATE") &&
+        tg_span_near_bridge(si, TD5_TG_XBRIDGE_CLEAR)) return 0;
     for (s = 0; s < 2; s++) {
         if (!(!tg_facade_built(si, s) && tg_facade_built(si - 1, s))) continue;
         /* [R4 CROSS item 4] A zebra marks a road you cross INTO A STREET. On
@@ -7191,6 +7220,10 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
     int seg_page = marks ? (TD5_TG_PAGE_R4_CROSS + 0) : tg_road_page(h->si), seg_nq;
     int s, n = 0;
 
+    /* [R6 CROSS item 15] no cross-street carriageway right after a bridge run. */
+    if (td5_env_flag_on("TD5RE_AUTOTRACK_XBRIDGE_GATE") &&
+        tg_span_near_bridge(h->si, TD5_TG_XBRIDGE_CLEAR)) return 1;
+
     for (s = 0; s < 2; s++) {
         const double sg = s ? 1.0 : -1.0;
         /* Only where THIS kerb is open. On an avenue both are, and the two
@@ -7260,12 +7293,23 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
 /* Is the gap on span si / side `left` a PARK rather than a through street?
  * Keyed on the facade SUPERBLOCK so every span of one gap agrees (a gap lies
  * wholly within one block's period). Avenues -- open on both kerbs -- are never
- * parks: an avenue is a through route, not a square. Default ON. */
+ * parks: an avenue is a through route, not a square.
+ *
+ * [R6 CROSS item 2] DEFAULT OFF. Every park IS a roadside gap, so from the
+ * racing line a park reads as a side street whose surface is a green lawn with
+ * the boundary hedge standing across the far end like a guardrail -- verbatim
+ * "an intersection where instead of road I see green grass ... it still has that
+ * vertical green texture as guardrail" (framedump top-down span 115, seed 99991:
+ * a bright-green mouth on the right kerb). The user's instruction is explicit --
+ * "fix this to be street" -- so parks no longer open a gap: with is_park false a
+ * former park gap is laid as a normal through street (carriageway + crossing +
+ * lined frontages) by the existing emitters, and no lawn or hedge is emitted.
+ * TD5RE_AUTOTRACK_PARKS=1 restores the green squares for an A/B. */
 static int tg_block_is_park(int si, int left)
 {
     unsigned int block, phase, gs, gl, h;
     int av;
-    if (!td5_env_flag_on("TD5RE_AUTOTRACK_PARKS")) return 0;
+    if (!td5_env_int("TD5RE_AUTOTRACK_PARKS", 0, 0, 1)) return 0;
     tg_facade_block(si, left, &block, &phase, &gs, &gl, &av);
     if (av) return 0;
     h = (block * 2u + (unsigned)(left ? 1 : 0)) * 0x85EBCA6Bu;
@@ -7510,6 +7554,8 @@ static int tg_block_emit_intersection(const TG_FBHook *h)
     if (!(sw > 0.0)) return 1;
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_INTERSECTIONS")) return 1;
     if (tg_span_in_bridge_run(h->si)) return 1;
+    if (td5_env_flag_on("TD5RE_AUTOTRACK_XBRIDGE_GATE") &&   /* item 15 */
+        tg_span_near_bridge(h->si, TD5_TG_XBRIDGE_CLEAR)) return 1;
     if (tg_branches_enabled() && tg_span_in_fork_clear(h->si)) return 1;
 
     for (s = 0; s < 2; s++) {
@@ -7809,6 +7855,8 @@ static int tg_cross_emit_sidewalls(const TG_FBHook *h)
     if (!(sw > 0.0)) return 1;
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_SIDEWALLS")) return 1;
     if (tg_span_in_bridge_run(h->si)) return 1;
+    if (td5_env_flag_on("TD5RE_AUTOTRACK_XBRIDGE_GATE") &&   /* item 15 */
+        tg_span_near_bridge(h->si, TD5_TG_XBRIDGE_CLEAR)) return 1;
     if (tg_branches_enabled() && tg_span_in_fork_clear(h->si)) return 1;
 
     for (s = 0; s < 2; s++) {
@@ -7831,23 +7879,47 @@ static int tg_cross_emit_sidewalls(const TG_FBHook *h)
          * edge 1 = e[3] (far). Each runs outward `reach`, rising H. The near
          * frontage belongs to the gap-start span, the far to the gap-end span. */
         for (edge = 0; edge < 2; edge++) {
-            const double bx = edge ? e[3] : e[0];
-            const double bz = edge ? e[5] : e[2];
-            const double by = (edge ? e[4] : e[1]) + TD5_TG_KERB_H;
             /* near frontage only at the gap start, far only at the gap end. */
             if (edge == 0 && !near_corner) continue;
             if (edge == 1 && !far_corner)  continue;
             const unsigned int rh = ((unsigned)h->si * 2654435761u
                                      + (unsigned)s * 40503u
                                      + (unsigned)edge * 21841u) * 2246822519u;
-            const double drop = TD5_TG_GROUND_DROP * reach / TD5_TG_GROUND_WIDTH;
-            int rows = b->floors_min + 1 + (int)((rh >> 9) % 4u);
-            double H = (double)rows * tg_facade_floor_h(b);
+            /* [R6 CROSS item 1] The corner building's cap (tg_side_geom
+             * cap_near/cap_far) already returns a wall tg_facade_depth(b) down
+             * this side street, height-matched to the block. The old frontage
+             * started at the road edge and ran the full reach, standing ON that
+             * cap for its first stretch -- the "double geometry on the buildings
+             * on the side". Start it where the cap ends and line only the street
+             * BEYOND the corner block, so cap + frontage read as one building. */
+            /* TD5RE_AUTOTRACK_XWALL=0 reverts both halves (base offset + block
+             * height) to the pre-R6 frontage for a single-variable A/B. */
+            const int xwall = td5_env_flag_on("TD5RE_AUTOTRACK_XWALL");
+            const double capd = tg_city_sidewalk_w(b) + tg_facade_depth(b);
+            double off = (reach - capd < (double)b->cell_w * 0.5) ? 0.0 : capd;
+            double flen;
+            if (!xwall) off = 0.0;
+            flen = reach - off;
+            const double cx = (edge ? e[3] : e[0]) + ox * off;
+            const double cz = (edge ? e[5] : e[2]) + oz * off;
+            const double cdrop = TD5_TG_GROUND_DROP * off / TD5_TG_GROUND_WIDTH;
+            const double by = (edge ? e[4] : e[1]) + TD5_TG_KERB_H - cdrop;
+            const double drop = TD5_TG_GROUND_DROP * flen / TD5_TG_GROUND_WIDTH;
+            /* [R6 CROSS item 19] Height comes from the adjacent BUILT block, not
+             * an independent roll, so a crossing-street frontage agrees with the
+             * block it fronts (was b->floors_min+1+rand, which towered over the
+             * 1-floor INDUSTRIAL sheds -- "make crossing-street buildings the same
+             * height"). rh still keys the page class only. */
+            const int nbi = edge ? (h->si + 1) : (h->si - 1);
+            int rows = xwall ? tg_facade_floors(nbi, s, b)
+                             : (int)(b->floors_min + 1 + (rh >> 9) % 4u);
             int cols, page, seg_nq, n = 0;
-
-            cols = tg_facade_cols_for(reach, (double)b->cell_w, 5);
-            /* base -> outward*reach, sinking with the skirt, rising H. */
-            tg_facade_push_grid(bx, by, bz, ox * reach, -drop, oz * reach,
+            double H;
+            if (rows <= 0) rows = b->floors_min + 1;
+            H = (double)rows * tg_facade_floor_h(b);
+            cols = tg_facade_cols_for(flen, (double)b->cell_w, 5);
+            /* base -> outward*flen, sinking with the skirt, rising H. */
+            tg_facade_push_grid(cx, by, cz, ox * flen, -drop, oz * flen,
                                 0.0, H, 0.0, cols, rows, 0, rows,
                                 px, py, pz, uu, vv, &n);
             if (n <= 0) continue;
