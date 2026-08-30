@@ -5170,6 +5170,27 @@ static int tg_side_blocked(int si, double side)
     return tg_branches_enabled() && side < 0.0 && tg_span_in_fork_clear(si);
 }
 
+/* [R7 item 6] The FLAT PAVEMENT (city sidewalk slab / out-of-town verge band) on
+ * the RIGHT needs suppressing only where the branch carriageway actually reaches
+ * into that lateral. tg_side_blocked keys on the whole fork-CLEAR region, which
+ * opens TD5_TG_BRANCH_WIDEN+2 spans BEFORE the fork splits (span 311 for a fork
+ * at F=319). On those APPROACH spans the road is merely widening -- the branch
+ * has not peeled off yet, so tg_carriageway_reach there is exactly the plain road
+ * half width -- yet the blanket block dropped the kerb anyway, leaving the
+ * "see-through gap in the right sidewalk before the branch" (item 6, span 318).
+ * Render the pavement wherever the branch does not overlap this lateral, and drop
+ * it only where the pavement would otherwise land on the bowed corridor. Same
+ * spirit as item 7: keep the element continuous until the run actually ends.
+ * TD5RE_R7_PRE_BRANCH_PAVE=0 restores the blanket fork-clear drop for an A/B. */
+static int tg_pavement_side_blocked(const TG_NodeList *nl, int si, double side)
+{
+    if (!tg_branches_enabled() || side >= 0.0) return 0;
+    if (!tg_span_in_fork_clear(si)) return 0;
+    if (!td5_env_flag_on("TD5RE_R7_PRE_BRANCH_PAVE")) return 1;
+    return tg_carriageway_reach(nl, si, side)
+         > tg_road_half_width(nl, si) + 1.0;
+}
+
 /* Emit one prop billboard (prop-page index pp) beside span si on `side`, `gap`
  * world units past the road edge, recording its mesh offset. */
 static int tg_prop_one(const TG_NodeList *nl, int si, int pp, double side,
@@ -6814,6 +6835,22 @@ static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
 #define TD5_TG_GORE_DROP      4.0    /* below road level, world units */
 #define TD5_TG_GORE_OVERLAP 240.0    /* underlap into each carriageway */
 
+/* [R7 item 12] The median (gore floor) surface page, held STABLE for the whole
+ * length of a fork. tg_emit_gore used to key its page on tg_biome_for_span(si) --
+ * the BLENDED biome index -- so where a biome boundary crosses a fork (seed 99991
+ * fork 3, 510-631, enters CITY at 600) the median floor DITHERED between the two
+ * biomes' ground pages span by span, the "median switches between grass and
+ * tiles" report (item 12, span 611). Keyed to the fork's HARD start cell, exactly
+ * as the divider TREATMENT keys on the fork ordinal (tg_emit_avenue_divider,
+ * fork_index % 3), so ONE material runs the length of the median instead of a
+ * per-span roll. */
+static int tg_fork_gore_page(int fork_index)
+{
+    if (fork_index < 0 || fork_index >= s_fork_count)
+        return k_biomes[0].ground_page;
+    return k_biomes[tg_biome_cell_index(s_forks[fork_index].F)].ground_page;
+}
+
 /* `half_n` / `half_f` are the branch carriageway's OWN half width at each end of
  * the span, not a fixed quarter of the road. Until 2026-08-27 this computed
  * width*0.25 internally, which was the half width of a FIXED half carriageway
@@ -6822,9 +6859,9 @@ static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
  * mouth that TD5_TG_GORE_OVERLAP exists to close. */
 static int tg_emit_gore(const TG_NodeList *nl, int si,
                         double shift_n, double shift_f,
-                        double half_n, double half_f, TG_Buf *blk)
+                        double half_n, double half_f, int ground_page,
+                        TG_Buf *blk)
 {
-    const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
     const TG_Node *a = &nl->v[si], *c = &nl->v[si + 1];
     const double drop = TD5_TG_GORE_DROP;
     const double ov   = TD5_TG_GORE_OVERLAP;
@@ -6864,7 +6901,7 @@ static int tg_emit_gore(const TG_NodeList *nl, int si,
     tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE + TD5_TG_CMD_SIZE);
     tg_put_u32(blk, 0);
     tg_put_u16(blk, 0);
-    tg_put_u16(blk, (unsigned)b->ground_page);
+    tg_put_u16(blk, (unsigned)ground_page);
     tg_put_u32(blk, 0);
     tg_put_u16(blk, 0);
     tg_put_u16(blk, 1);                    /* one quad */
@@ -6997,6 +7034,63 @@ static int tg_emit_branch_verge(const TG_NodeList *nl, int mb, int k, int L,
     tg_acct_n(TG_ACCT_BRANCH_VERGE, acct_si, 1);
     moff[(*nmesh)++] = blk->len;
     return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
+}
+
+/* [R7 item 10] SCENERY on the branch corridor's GRASS verge. tg_emit_branch_verge
+ * lays a flat grass band along the corridor's outer edge, but nothing DRESSES it,
+ * so a fork through a tree biome (seed 99991 fork 2 runs its corridor through
+ * ORIENTAL) showed bare grass and nothing else beside the branch -- "barely any
+ * grass to the side and nothing else ... add more scenery on the side if it is
+ * grass" (item 10, span 569). This plants the biome's OWN roadside tree billboards
+ * along that verge, mirroring the main road's roadside trees (tg_building_for_span
+ * tree path), so the branch flank reads like the main road's instead of a bald
+ * strip.
+ *
+ * PLACEMENT clears the branch through the shared carriageway authority: the
+ * setback is measured from the MAIN road edge and pushed out past the bowed
+ * corridor's CURRENT width by tg_carriageway_clear_gap on the RIGHT side, so a
+ * trunk can never land on the branch carriageway (the GUARD contract -- the same
+ * adoption facades, terrain skirts and the fork backdrop use). Billboard (grass)
+ * biomes only; where the biome has no trees nothing is added and the verge is
+ * unchanged. `mb` is the base MAIN node the corridor step rides on; `acct_si` is
+ * the appended corridor span, so the inventory brackets the tree at the corridor
+ * spans (>= ring) -- what proves, without a frame, that scenery now reaches the
+ * branch flank. Default ON; TD5RE_R7_BRANCH_FLORA=0 for an A/B. */
+static int tg_emit_branch_flora(const TG_NodeList *nl, int mb,
+                                const TG_Biome *b, TG_Buf *blk,
+                                size_t *moff, int *nmesh, int acct_si)
+{
+    const TG_Node *n = &nl->v[mb];
+    unsigned int h = (unsigned)mb * 2654435761u;
+    const TG_TreePage *tp;
+    double jit, tw, th, gap, set, cx, cz;
+    int tv;
+
+    if (!b->billboard || b->tree_n <= 0) return 1;
+    if (!td5_env_flag_on("TD5RE_R7_BRANCH_FLORA")) return 1;
+    /* One tree in roughly half of the corridor spans: a dressed verge, not a
+     * solid wall of trunks hugging the branch. */
+    if ((h >> 28) & 1u) return 1;
+
+    tv  = b->tree_set[(h >> 13) % (unsigned)b->tree_n];
+    tp  = &k_tree_pages[tv];
+    jit = 0.8 + (double)((h >> 9) % 41) * 0.01;        /* 0.80 .. 1.20 */
+    tw  = (double)tp->w * jit;
+    th  = (double)tp->h * jit;
+    /* Base gap past the branch's own grass verge, then clear_gap lifts it past
+     * the bowed corridor so the trunk clears the branch at its ACTUAL width. */
+    gap = tg_verge_band_w(b) + 500.0 + (double)((h >> 5) % 1800);
+    set = n->width * 0.5
+        + tg_carriageway_clear_gap(nl, mb, -1.0, gap, TD5_TG_CARRIAGEWAY_MARGIN)
+        + tw * 0.5;
+    /* Right of travel is NEGATIVE lateral: point at lateral t off node n is
+     * (n->x + n->tz*t, n->y, n->z - n->tx*t). */
+    cx = n->x + n->tz * (-set);
+    cz = n->z - n->tx * (-set);
+    tg_acct_n(TG_ACCT_R7_BRANCH, acct_si, 1);
+    moff[(*nmesh)++] = blk->len;
+    return tg_emit_billboard_mesh(blk, cx, n->y, cz, tw * 0.5, th,
+                                  tg_tree_slot(tv), 1);
 }
 
 /* ===================== AVENUE DIVIDER (items 9c / 10) =====================
@@ -7518,7 +7612,7 @@ static int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
         const double sg = s ? 1.0 : -1.0;
         const double u_w = sw / (double)TD5_TG_SPAN_LENGTH;
         const double u_k = TD5_TG_KERB_H / (double)TD5_TG_SPAN_LENGTH;
-        if (tg_side_blocked(h->si, sg)) continue;
+        if (tg_pavement_side_blocked(h->nl, h->si, sg)) continue;
         /* [R6 CROSS item 1] The raised pavement STOPS at a road intersection.
          * Where this side opens onto a side-street mouth (the frontage is a gap
          * here), the slab used to run straight across the mouth at kerb height,
@@ -7585,7 +7679,7 @@ static int tg_city_emit_verge_band(const TG_FBHook *h, double bw)
 
     for (s = 0; s < 2; s++) {
         const double sg = s ? 1.0 : -1.0;
-        if (tg_side_blocked(h->si, sg)) continue;
+        if (tg_pavement_side_blocked(h->nl, h->si, sg)) continue;
         tg_city_edge_frame(h->nl, h->si, sg, e);
 
         /* Same winding and the same isotropic UV as the city slab, so the two
@@ -10272,6 +10366,11 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                                                       br_lanes, tg_verge_band_w(cb),
                                                       &meshes, moff, &nmesh, si)) ok = 0;
                         }
+                        /* [R7 item 10] Dress the grass verge with the biome's own
+                         * roadside trees. No-op on paved biomes (no billboard set)
+                         * and inherently clear of the branch (clear_gap). */
+                        if (ok && !tg_emit_branch_flora(nl, mb, cb, &meshes,
+                                                        moff, &nmesh, si)) ok = 0;
                     }
                 }
                 /* The other appended span is the PAD (si == cbase-1). It is
@@ -10318,8 +10417,19 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                         const double gw1 = nl->v[si + 1].width
                             * tg_branch_wscale_s(j + 1, L, br_lanes, sep) * 0.5;
                         moff[nmesh++] = meshes.len;
-                        if (!tg_emit_gore(nl, si, sh0, sh1, gw0, gw1, &meshes))
-                            ok = 0;
+                        /* [R7 item 12] Median surface stable per fork, not the
+                         * blended per-span biome that dithered grass/tiles at a
+                         * boundary crossing the fork. TD5RE_R7_MEDIAN_STABLE=0
+                         * restores the per-span page for an A/B. */
+                        {
+                            const int gore_page =
+                                td5_env_flag_on("TD5RE_R7_MEDIAN_STABLE")
+                                    ? tg_fork_gore_page(fi)
+                                    : k_biomes[tg_biome_for_span(si)].ground_page;
+                            if (!tg_emit_gore(nl, si, sh0, sh1, gw0, gw1,
+                                              gore_page, &meshes))
+                                ok = 0;
+                        }
                         /* Items 9c/10: where the fork is TIGHT (an avenue) the
                          * gore is a slim central median, not a wide split -- give
                          * it a raised divider so the two carriageways read as one
