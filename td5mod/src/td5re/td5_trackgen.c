@@ -345,7 +345,43 @@ static int tg_road_page(int si);
 #define TD5_TG_PAGE_R6_FLORA  (TD5_TG_PAGE_R6_BASE + 58)
 #define TD5_TG_R6_FLORA_N     8
 
-#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R6_BASE + 68)
+/* ====================== ROUND-7 PAGE BLOCKS ==========================
+ * Same rule as R3-R6, measured off its OWN base. Use only your own block.
+ *
+ * Owners (see docs/AUTOTRACK_FEEDBACK_R7.md):
+ *   GUARD  items 5,11,13,15,19  GLOBAL on-road geometry backstop (no new art)
+ *   CROSS  items 1,2,14         perpendicular-street pavement, length, spacing
+ *   CITY   items 3,4,7          plaza dressing, building variety, run-end continuity
+ *   BRANCH items 6,10,12        pre-branch gap, verge scenery, median material
+ *   BRIDGE items 9,16,17        tunnel portal art, pier base, water under deck
+ *   FLORA  items 8,18           billboard page selection, ground/water validity
+ * ==================================================================== */
+#define TD5_TG_PAGE_R7_BASE   (TD5_TG_PAGE_R6_BASE + 68)
+
+/* GUARD needs no art -- it validates what other emitters produced. Two slots
+ * only, for an optional debug-overlay page if it wants to mark rejects. */
+#define TD5_TG_PAGE_R7_GUARD  (TD5_TG_PAGE_R7_BASE + 0)
+#define TD5_TG_R7_GUARD_N     2
+
+#define TD5_TG_PAGE_R7_CROSS  (TD5_TG_PAGE_R7_BASE + 4)
+#define TD5_TG_R7_CROSS_N     8
+
+/* CITY block is wide: item 4 asks for more building variety in the city
+ * pre-selection and item 3 for plaza dressing, so it adds the most new art. */
+#define TD5_TG_PAGE_R7_CITY   (TD5_TG_PAGE_R7_BASE + 14)
+#define TD5_TG_R7_CITY_N      16
+
+#define TD5_TG_PAGE_R7_BRANCH (TD5_TG_PAGE_R7_BASE + 32)
+#define TD5_TG_R7_BRANCH_N    8
+
+/* BRIDGE block covers the tunnel PORTAL rework (item 9) as well as pier art. */
+#define TD5_TG_PAGE_R7_BRIDGE (TD5_TG_PAGE_R7_BASE + 42)
+#define TD5_TG_R7_BRIDGE_N    12
+
+#define TD5_TG_PAGE_R7_FLORA  (TD5_TG_PAGE_R7_BASE + 56)
+#define TD5_TG_R7_FLORA_N     8
+
+#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R7_BASE + 66)
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
@@ -545,6 +581,19 @@ typedef enum {
     TG_ACCT_R6_BRIDGE,      /* BRIDGE (items 12,13,14,17) rename in place */
 
     TG_ACCT_R6_FLORA,       /* FLORA  (items 7,18)        rename in place */
+    /* [R7] PRE-RESERVED, one per area, own line, blank-line spaced.
+     * RENAME YOUR OWN SLOT IN PLACE. Never append here. */
+    TG_ACCT_R7_GUARD,       /* GUARD  (items 5,11,13,15,19) rename in place */
+
+    TG_ACCT_R7_CROSS,       /* CROSS  (items 1,2,14)        rename in place */
+
+    TG_ACCT_R7_CITY,        /* CITY   (items 3,4,7)         rename in place */
+
+    TG_ACCT_R7_BRANCH,      /* BRANCH (items 6,10,12)       rename in place */
+
+    TG_ACCT_R7_BRIDGE,      /* BRIDGE (items 9,16,17)       rename in place */
+
+    TG_ACCT_R7_FLORA,       /* FLORA  (items 8,18)          rename in place */
     TG_ACCT_KIND_COUNT
 } TG_AcctKind;
 
@@ -589,7 +638,20 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
 
     "r6-bridge",            /* BRIDGE */
 
-    "r6-flora"              /* FLORA  */
+    "r6-flora",             /* FLORA  */
+    /* [R7] one reserved name per area, in enum order, blank-line spaced.
+     * Rename to match your renamed enum constant; keep every comma. */
+    "r7-guard",             /* GUARD  */
+
+    "r7-cross",             /* CROSS  */
+
+    "r7-city",              /* CITY   */
+
+    "r7-branch",            /* BRANCH */
+
+    "r7-bridge",            /* BRIDGE */
+
+    "r7-flora"              /* FLORA  */
 };
 
 static long s_acct_count[TG_ACCT_KIND_COUNT];
