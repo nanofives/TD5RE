@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 29 (auto-track park trees)" },
+    { CL_ITEM,    "FIXED: a treeline/grove-backdrop texture was standing" },
+    { CL_ITEM,    "  up as a single billboard (span ~462); the upright" },
+    { CL_ITEM,    "  rotation now uses only individual-canopy pages." },
+    { CL_ITEM,    "FIXED: park trees were up to 8400 wide -- flat walls" },
+    { CL_ITEM,    "  that loomed over the road (span ~1413). Narrowed to" },
+    { CL_ITEM,    "  a slender canopy while keeping the ceiling height." },
     { CL_DATE,    "August 29 (auto-track off-map, deep)" },
     { CL_ITEM,    "FIXED: on a branch corridor a car flung far off the" },
     { CL_ITEM,    "  map could stay lost -- the recovery only searched" },

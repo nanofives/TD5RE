@@ -3565,6 +3565,24 @@ static int tg_flora_tree_slot(int v)
     return TD5_TG_PAGE_R5_FLORA + v;
 }
 
+/* [R6 item 7] Not every extracted FLORA page is a single tree. Index 1
+ * (level023 p412) is a "dense green canopy WALL / grove backdrop" -- authored to
+ * read as a distant BAND of foliage, not one trunk. Standing it up as an upright
+ * camera-facing billboard is exactly the "billboard that looks like it should be
+ * a background tree line" report (measured at span 462: park page 178 = FLORA
+ * index 1, 6761 wide). Restrict the upright rotation to the individual-canopy
+ * indices; the wall page is simply not planted as a single tree. Returns the
+ * FLORA index picked by `pick`, or -1 if none of the individual pages exist. */
+static int tg_flora_upright_index(unsigned int pick)
+{
+    static const int upright[] = { 0, 2 };   /* TREE0, TREE2; skip TREE1 wall */
+    int j, n = 0, avail[(int)(sizeof upright / sizeof upright[0])];
+    for (j = 0; j < (int)(sizeof upright / sizeof upright[0]); j++)
+        if (upright[j] < k_r5_flora_tree_count) avail[n++] = upright[j];
+    if (n <= 0) return -1;
+    return avail[pick % (unsigned)n];
+}
+
 /* Inverse of tg_tree_slot: tree variant drawn on `page`, or -1 if it is not a
  * tree page at all. The billboard writer only has the page id to go on. */
 static int tg_tree_variant_of_page(int page)
@@ -3622,6 +3640,50 @@ static double tg_flora_gap_clear(const TG_NodeList *nl, int si, double side,
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_FLORA_CLEAR")) return gap;
     return tg_carriageway_clear_gap(nl, si, side, gap,
                                     TD5_TG_FLORA_BRANCH_MARGIN);
+}
+
+/* [R6 FLORA diag, dev-only] A camera-facing tree billboard is a DISC of radius
+ * tw/2 about its plant point, so "clears the verge at span si" is not the same
+ * as "clears the road": where the road CURVES back under a wide tree, or on a
+ * fork, the tree can overhang a carriageway one or more spans away while its own
+ * span's gap looks fine. This dumps, for a tree planted at world (cx,cz), the
+ * SWEPT nearest approach of its disc to any road surface within +/-6 spans, as a
+ * signed clearance (negative = the disc overlaps the road = spill). Read-only;
+ * gated by TD5RE_FLORA_DIAG=1 and limited to spans near TD5RE_FLORA_DIAG_SPAN so
+ * race.log stays legible. Confirms item 7/18 by number, not by eye. */
+static void tg_flora_diag(const TG_NodeList *nl, int si, const char *kind,
+                          int page, double side, double tw, double th,
+                          double cx, double cz)
+{
+    int tgt, m, worst = -1;
+    double min_clear = 1e18;
+    if (!td5_env_flag_on("TD5RE_FLORA_DIAG")) return;
+    tgt = td5_env_int("TD5RE_FLORA_DIAG_SPAN", 1413, 0, 100000);
+    if (si < tgt - 8 || si > tgt + 8) return;
+    for (m = si - 6; m <= si + 6; m++) {
+        const TG_Node *nm, *nn;
+        double dx, dz, lat, lon, seglen, clear;
+        if (m < 0 || m + 1 >= nl->count) continue;
+        nm  = &nl->v[m];
+        nn  = &nl->v[m + 1];
+        dx  = cx - nm->x; dz = cz - nm->z;
+        lon = dx * nm->tx + dz * nm->tz;          /* along the span's tangent */
+        seglen = sqrt((nn->x - nm->x) * (nn->x - nm->x) +
+                      (nn->z - nm->z) * (nn->z - nm->z));
+        /* only spans the tree is actually BESIDE (not a far stretch the road
+         * doubles back near) -- a slab of one span length, small end slop. */
+        if (lon < -600.0 || lon > seglen + 600.0) continue;
+        lat = dx * nm->tz - dz * nm->tx;          /* signed lateral offset */
+        if (lat < 0.0) lat = -lat;
+        clear = lat - nm->width * 0.5 - tw * 0.5;  /* disc edge to road edge */
+        if (clear < min_clear) { min_clear = clear; worst = m; }
+    }
+    TD5_LOG_I(LOG_TAG,
+        "flora-diag: si=%d %s page=%d side=%+.0f tw=%.0f th=%.0f "
+        "reach=%.0f swept_clear=%.0f @m=%d %s",
+        si, kind, page, side, tw, th,
+        tg_carriageway_reach(nl, si, side), min_clear, worst,
+        (min_clear < 0.0) ? "SPILL" : "ok");
 }
 
 /* ===================== PROPS =====================
@@ -4551,6 +4613,7 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
     cx = n->x + lx * (n->width * 0.5 + gap + tw * 0.5);
     cz = n->z + lz * (n->width * 0.5 + gap + tw * 0.5);
 
+    tg_flora_diag(nl, si, "near", tg_tree_slot(tv), side, tw, th, cx, cz);
     tg_acct(TG_ACCT_TREE, si);
     return tg_emit_billboard_mesh(blk, cx, n->y, cz, tw * 0.5, th,
                                   tg_tree_slot(tv), 1);
@@ -8115,14 +8178,27 @@ static int tg_emit_fb_park_trees(const TG_FBHook *h)
     n    = &nl->v[si];
     side = ((hh >> 4) & 1) ? 1.0 : -1.0;
     if (tg_side_blocked(si, side)) return 1;
-    v    = (int)((hh >> 13) % (unsigned)k_r5_flora_tree_count);
+
+    /* [R6 items 7/18] Default ON; TD5RE_R6_FLORA=0 restores the R5 park tree
+     * (grove-wall page in the upright rotation + 4200-wide billboards) for A/B. */
+    if (td5_env_flag_on("TD5RE_R6_FLORA")) {
+        v = tg_flora_upright_index(hh >> 13);    /* skip the grove-backdrop wall */
+        if (v < 0) return 1;
+    } else {
+        v = (int)((hh >> 13) % (unsigned)k_r5_flora_tree_count);
+    }
     page = tg_flora_tree_slot(v);
 
     /* Tall: the near verge trees top out around 7200 raw (the palm); these reach
-     * ~10000 raw (~40 world units) so they stand above that as a canopy. Page
-     * aspect kept by the shared jitter. */
+     * ~10000 raw (~40 world units) so they stand above that as a canopy. */
     jit = 1.40 + (double)((hh >> 9) % 61) * 0.01;   /* 1.40 .. 2.00 */
-    tw  = 4200.0 * jit;
+    /* WIDTH [R6 items 7/18]: was 4200*jit (up to 8400). A single flat billboard
+     * that wide reads as a WALL/treeline beside the road and looms over a curved
+     * approach ("bigger than the area ... spill onto the road"). A tree is
+     * slender -- the near-verge species measure ~2900..4700 wide and read
+     * correctly -- so narrow to 2600*jit (3640..5200) while KEEPING the extra
+     * height the "ceiling-tall Moscow trees" request wanted. */
+    tw  = (td5_env_flag_on("TD5RE_R6_FLORA") ? 2600.0 : 4200.0) * jit;
     th  = 5200.0 * jit;
     gap = 2600.0 + (double)((hh >> 5) % 3200);      /* set BACK, behind the verge */
     gap = tg_flora_gap_clear(nl, si, side, gap);    /* never on a branch */
@@ -8131,6 +8207,7 @@ static int tg_emit_fb_park_trees(const TG_FBHook *h)
     cx = n->x + lx * (n->width * 0.5 + gap + tw * 0.5);
     cz = n->z + lz * (n->width * 0.5 + gap + tw * 0.5);
 
+    tg_flora_diag(nl, si, "park", page, side, tw, th, cx, cz);
     h->moff[*h->nmesh] = h->blk->len;
     if (!tg_emit_billboard_mesh(h->blk, cx, n->y, cz, tw * 0.5, th, page, 1))
         return 0;
