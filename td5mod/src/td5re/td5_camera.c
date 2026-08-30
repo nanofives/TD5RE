@@ -2550,17 +2550,24 @@ void td5_camera_apply_view(int view)
                  * a lateral offset + a dropped look-at gives a side elevation that
                  * shows the pier full height and the water beneath. All default to
                  * the plain top-down back-off so existing captures are unchanged. */
+                 * TD5RE_CAM_TOPDOWN_BACKDIV expresses the same back-off as a
+                 * DIVISOR of the altitude instead of absolute units: 20 (default)
+                 * ~= 2.9deg (near-vertical map shot), 2 -> ~27deg, 1 -> ~45deg,
+                 * which is the quick way to tilt a shot far enough to read a
+                 * vertical seam or a lift. _BACK wins if both are set. */
                 static float s_side = -1e9f, s_back = -1e9f, s_drop = -1e9f;
+                static float s_backdiv = -1.0f;
                 int alt  = (int)(s_topdown * 256.0f);      /* world units -> 24.8 */
                 int back, side, drop;
                 if (s_side <= -1e8f) {
                     s_side = td5_env_float("TD5RE_CAM_TOPDOWN_SIDE",   0.0f, -5000000.0f, 5000000.0f);
                     s_back = td5_env_float("TD5RE_CAM_TOPDOWN_BACK",   0.0f, -5000000.0f, 5000000.0f);
                     s_drop = td5_env_float("TD5RE_CAM_TOPDOWN_TGTDROP",0.0f, -5000000.0f, 5000000.0f);
+                    s_backdiv = td5_env_float("TD5RE_CAM_TOPDOWN_BACKDIV", 20.0f, 0.5f, 1000.0f);
                 }
                 side = (int)(s_side * 256.0f);
                 back = (s_back != 0.0f) ? (int)(s_back * 256.0f)
-                                        : alt / 20;         /* ~2.9deg tilt for a stable basis */
+                                        : (int)((float)alt / s_backdiv);
                 drop = (int)(s_drop * 256.0f);
                 {
                     int eye[3] = { a->world_pos.x + side, a->world_pos.y + alt, a->world_pos.z - back };
