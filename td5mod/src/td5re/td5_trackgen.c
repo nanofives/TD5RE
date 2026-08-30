@@ -8252,6 +8252,51 @@ static int tg_r8_median_page(int si, int fallback)
     return TD5_TG_PAGE_R8_SNOWMED;
 }
 
+static int tg_topo_enabled(void);
+
+/* [R9 TOPO C4, item 11] THE GROUND IS A SURFACE, NOT A CATEGORY.
+ *
+ * "the transition around span 1050 is grass in between tiles, this is wrong."
+ * Seed 99991 has INDUSTRIAL 900-1049 and COAST 1050-1199, so 1050 is exactly a
+ * biome cell boundary -- and INDUSTRIAL's ground_page is TD5_TG_PAGE_GROUND
+ * (concrete tiles) while COAST's is TD5_TG_PAGE_GREEN (grass).
+ *
+ * MECHANISM, and it is not the R8 BRIDGE one-end-sampled bug the triage
+ * suspected: that bug was FIXED in R8 (tg_emit_ground now samples a profile at
+ * BOTH ends of every slab) and it was about HEIGHT, not material. This is the
+ * categorical dither. tg_emit_ground takes its biome from tg_biome_for_span,
+ * the BLENDED index, which inside the +-20-span band around a cell boundary
+ * assigns each span to the incoming or outgoing biome by a PER-SPAN HASH. For
+ * trees that is exactly right and is why the blend exists -- a forest thins
+ * into a city over 140 m instead of stopping on one span. For the GROUND
+ * SURFACE it means forty consecutive slabs each roll their own material, so a
+ * grass slab lands between two tile slabs. That is not a transition, it is a
+ * chequerboard, and it is what the user photographed.
+ *
+ * The precedent is already in this file, one level down: R7 CITY item 7 took
+ * kerb height and railing off the dither because "a raised kerb and a guard
+ * rail are per-RUN structure, not a dithered categorical field", and R7 item 12
+ * did the same for the fork median because it "DITHERED between two biomes'
+ * ground pages span by span". This is the same statement about the ground
+ * itself, made once, where every ground consumer reads it.
+ *
+ * So the SURFACE material keys on the HARD cell (tg_biome_cell_index): one
+ * material per ground run, changing exactly once, at the boundary. Everything
+ * that STANDS on the ground -- trees, props, facades -- keeps the dither.
+ * TD5RE_R9_TOPO=0 restores the per-span roll for an A/B. */
+static int tg_topo_ground_index(int si)
+{
+    return tg_topo_enabled() ? tg_biome_cell_index(si) : tg_biome_for_span(si);
+}
+
+/* The one page the ground surface at span si is drawn on. Routed through
+ * tg_ground_page_for_span so the bridge-run, snow and tunnel overrides that
+ * already had to agree between skirt and far band still apply, unchanged. */
+static int tg_topo_surface_page(int si)
+{
+    return tg_ground_page_for_span(si, &k_biomes[tg_topo_ground_index(si)]);
+}
+
 /* Lateral clearance the RIGHT-hand skirt must leave at span si so it does not
  * cover the branch carriageway.
  *
@@ -8300,6 +8345,205 @@ typedef struct {
     int    n;
 } TG_GroundProf;
 
+/* ==================================================================
+ * SECTION: [R9 TOPO] TOPOGRAPHIC CONTINUITY AUTHORITY  (items 6, 7, 11)
+ *
+ * "ALL GEOMETRY HAS TO BE CONNECTED THROUGH THE SAME TOPOGRAPHIC LOGIC."
+ * That is the user's own sentence and it is the whole of this section. Items
+ * 6, 7 and 11 are one defect seen three ways: two adjacent pieces of world are
+ * each individually plausible and mutually inconsistent, because each is built
+ * from a query only IT asks.
+ *
+ * WHY A SHARED AUTHORITY AND NOT THREE PATCHES. This is the same shape as R7's
+ * on-road guard, which is the only recurring-class fix in this project's
+ * history that held: one rule, consulted by every emitter, so an emitter
+ * written NEXT round inherits the constraint instead of re-earning it. Three
+ * local patches would each be true at the span they were photographed at.
+ *
+ * THE RULE. For one span-side there is exactly ONE ground surface: a chain of
+ * (outward distance, drop below the road edge) points running from the road
+ * edge to wherever the world ends on that side -- the near skirt
+ * (tg_ground_side) and the far band (tg_emit_far_band) are two halves of it,
+ * not two objects. That chain must satisfy, at every span and both sides:
+ *
+ *   C1 CONNECTED  no lateral gap: it starts at the road edge and each point
+ *                 continues from the last (the far band tucks under the skirt).
+ *   C2 CLOSED     it may not simply STOP in mid-air where it can be looked
+ *                 down at. Either a wall stands on its outer edge, or it is
+ *                 the sea, or it must RUN OUT -- keep going until its terminal
+ *                 grade is shallow enough that the edge is on the horizon.
+ *   C3 BOUNDED    where another part of the track passes nearby, the chain
+ *                 ENDS at that road rather than running past it at this span's
+ *                 height. Two carriageways at a U-turn share their ground.
+ *   C4 MATERIAL   the surface material is a property of the GROUND RUN, not a
+ *                 per-span categorical roll, so neighbouring slabs agree.
+ *
+ * WHY R8'S HONEST MEASUREMENT DID NOT CLOSE ITEM 6. R8 TERRAIN widened the
+ * ground and reported seed 99991 span 549 R going 12000 -> 30000. That number
+ * is TRUE. It is also the wrong axis twice over:
+ *   - it is a HORIZONTAL extent, and a falling side spends its reach
+ *     VERTICALLY. The chain below therefore reports SURFACE distance (arc
+ *     length along the profile) as well, which is the distance the ground
+ *     actually covers.
+ *   - and extent was never the binding constraint anyway. At span 549 the
+ *     ground DOES reach 30000 -- but 549 is inside fork 3 (510-631), the fork
+ *     gate suppresses the RIDGE on the right (R8 TERRAIN items 5/15 turned the
+ *     fork gate from a whole-band gate into a ridge-only gate and kept the
+ *     ground), and the ridge was the only thing CLOSING that edge. So the
+ *     ground runs 30000 out, sinks toward the global floor on the way, and
+ *     then stops dead with sky behind it. "A very inclined slope ... and the
+ *     ground is not there any more" is an unterminated edge, not a short one.
+ *     C2 is the clause that says so, and the user's own instruction -- "if you
+ *     make a sloped side make sure that it goes further than usual" -- is
+ *     exactly its run-out: the steeper the drop, the further it must go before
+ *     it is allowed to end.
+ *
+ * TD5RE_R9_TOPO=0 restores round-8 behaviour for an A/B (every clause off).
+ * TD5RE_R9_TOPO_LOG=1 sweeps every span-side and reports the violation counts
+ * and BOTH extents (horizontal and surface).
+ * ================================================================== */
+
+/* Terminal grade a ground edge must run out to before it may end unwalled.
+ * 0.06 is ~3.4 degrees: at a 200-unit eye height the edge is then below one
+ * degree of depression from 3300 units away, i.e. on the horizon rather than
+ * a step you look down at. */
+#define TD5_TG_TOPO_RUNOUT     0.06
+/* A drop this large at an UNCLOSED outer edge is a C2 violation. Below it the
+ * edge is effectively flush with the plain and cannot read as a cliff. */
+#define TD5_TG_TOPO_OPEN_DROP  600.0
+/* Ceiling on the run-out extension. The extension only lengthens the band's
+ * OUTER rings, which the R8 sink pins at the track's global floor, so every
+ * band out there is coplanar however many overlap -- the hazard the original
+ * 180000 -> 30000 reach cut existed to prevent cannot return through it. The
+ * cap is here so a pathological relief cannot make one band cover the map. */
+#define TD5_TG_TOPO_MAX_REACH  140000.0
+/* C1 tolerance: a lateral step smaller than this is a shared edge, not a gap. */
+#define TD5_TG_TOPO_GAP_TOL    1.0
+/* C3: clearance kept off a neighbouring carriageway's own edge, and the
+ * narrowest verge the cap is ever allowed to leave. */
+#define TD5_TG_TOPO_ROAD_MARGIN 600.0
+#define TD5_TG_TOPO_MIN_VERGE  1200.0
+/* C3 only looks at road that is FAR AWAY ALONG THE TRACK. Nearer than this in
+ * span index and the "other" road is just this road a moment later, whose
+ * ground is the same surface by construction. */
+#define TD5_TG_TOPO_SELF_SPANS 14
+
+static int tg_topo_enabled(void)
+{
+    return td5_env_flag_on("TD5RE_R9_TOPO");
+}
+
+/* ONE span-side's whole ground surface, near skirt and far band concatenated
+ * into a single outward polyline: `d` = horizontal distance from the road edge,
+ * `dy` = drop BELOW the road edge (positive down, TG_GroundProf's convention).
+ * Built by tg_topo_chain, which lives with the far-band constants further down.
+ *
+ * `horiz` is R8's number, kept so before/after is comparable. `surf` is the arc
+ * length along the same polyline -- the distance the ground actually covers --
+ * and is the number this round reports, because a falling side spends its reach
+ * vertically and a horizontal extent cannot see that. */
+#define TD5_TG_TOPO_MAXPT 8
+typedef struct {
+    double d[TD5_TG_TOPO_MAXPT];
+    double dy[TD5_TG_TOPO_MAXPT];
+    int    n;
+    int    closed;      /* C2: far end closed by a wall, the sea or a gorge */
+    double horiz;       /* outward extent ACROSS THE MAP                    */
+    double surf;        /* outward extent ALONG THE SURFACE                 */
+    double drop;        /* total fall from the road edge to the outer point */
+    double end_grade;   /* grade of the last segment -- the run-out test    */
+    double gap;         /* C1: worst unexplained lateral discontinuity      */
+    double road_cap;    /* C3: where a neighbouring carriageway intervenes  */
+} TG_TopoChain;
+
+static void tg_topo_chain(const TG_NodeList *nl, int si, int is_left,
+                          TG_TopoChain *c);
+static double tg_topo_drop_at(const TG_TopoChain *c, double d);
+
+/* [C3] How far this span-side's ground may reach before another part of the
+ * track intervenes, as a distance from THIS span's road edge. Returns a huge
+ * number where nothing intervenes.
+ *
+ * This is the query item 7 is about. The user's words: "you gotta take into
+ * consideration if the nearby geometry is touching another road and a
+ * downwards slope". At a U-turn the two legs are a few thousand units apart,
+ * and each lays a 12000-unit skirt at ITS OWN height straight across the
+ * other's -- two surfaces in one place, disagreeing. R8's GUARD area MEASURED
+ * exactly this on this seed ("spans 643..647 lies over the carriageway at
+ * spans 626..629 at dy +250..+450, the road doubles back on itself at a
+ * different height") and answered it by letting the skirt cross from BELOW,
+ * which stops it drawing over the tarmac but leaves the two surfaces
+ * interpenetrating in the open ground either side. Ending the chain at the
+ * other road instead makes the two carriageways SHARE their ground: this
+ * side's surface runs up to that road's edge, and that road's own skirt
+ * carries on from there. Connected, by construction, with one authority.
+ *
+ * Main ring only (s_ring_len): a fork's branch corridor is appended past the
+ * ring and is already cleared by tg_carriageway_reach / tg_ground_branch_clear,
+ * which know its bow. Span separation is measured AROUND the ring so the
+ * start/finish join does not read as a foreign road. */
+static double tg_topo_road_cap(const TG_NodeList *nl, int si, int is_left)
+{
+    const int ring = (s_ring_len > 1 && s_ring_len <= nl->count)
+                   ? s_ring_len : nl->count;
+    const TG_Node *n;
+    double ex, ez, ux, uz, half, best = 1e30;
+    int j;
+
+    /* DELIBERATELY NOT gated on tg_topo_enabled(): this is the MEASUREMENT of
+     * C3 as well as its input, and a query that returns "nothing intervenes"
+     * whenever the fix is off makes the before/after sweep report zero
+     * violations before the fix -- which is how a round measures its own knob
+     * instead of the world. The gate belongs at the two places that APPLY the
+     * cap (tg_ground_side and tg_emit_far_band), and it is there. */
+    if (!nl || si < 0 || si >= ring) return best;
+    n = &nl->v[si];
+    half = tg_road_half_width(nl, si);
+    /* Outward lateral unit, same convention as tg_flora_plant. */
+    ux = n->tz * (is_left ? 1.0 : -1.0);
+    uz = -n->tx * (is_left ? 1.0 : -1.0);
+    ex = n->x + ux * half;
+    ez = n->z + uz * half;
+
+    for (j = 0; j < ring; j++) {
+        double dx, dz, along, perp, w, lim;
+        int sep = j - si;
+        if (sep < 0) sep = -sep;
+        if (ring - sep < sep) sep = ring - sep;      /* around the ring */
+        if (sep <= TD5_TG_TOPO_SELF_SPANS) continue;
+        dx = nl->v[j].x - ex; dz = nl->v[j].z - ez;
+        along = dx * ux + dz * uz;
+        if (along <= 0.0) continue;                  /* behind this side */
+        perp  = dx * uz - dz * ux;
+        if (perp < 0.0) perp = -perp;
+        w = tg_road_half_width(nl, j) + TD5_TG_TOPO_ROAD_MARGIN;
+        /* The ray only meets that road if it passes within its own width. Half
+         * a span length of slack: consecutive nodes are TD5_TG_SPAN_LENGTH
+         * apart, so a ray crossing BETWEEN two of them must still see them. */
+        if (perp > w + (double)TD5_TG_SPAN_LENGTH * 0.5) continue;
+        lim = along - w;
+        if (lim < TD5_TG_TOPO_MIN_VERGE) lim = TD5_TG_TOPO_MIN_VERGE;
+        if (lim < best) best = lim;
+    }
+    return best;
+}
+
+/* [C2] Where a falling side must reach before it is allowed to end unwalled.
+ * `so` is the skirt's own outer distance, `drop` the total fall from the road
+ * edge to the outer ring. A flat side needs nothing; a side that has fallen
+ * `drop` must run out at TD5_TG_TOPO_RUNOUT, hence drop/RUNOUT of horizontal
+ * beyond the skirt. This is the arithmetic behind "make sure it goes further
+ * than usual", and it is proportional to the SLOPE, not a flat bonus. */
+static double tg_topo_runout_reach(double so, double drop, double base_reach)
+{
+    double need;
+    if (!tg_topo_enabled()) return base_reach;
+    if (drop <= TD5_TG_TOPO_OPEN_DROP) return base_reach;
+    need = so + drop / TD5_TG_TOPO_RUNOUT;
+    if (need > TD5_TG_TOPO_MAX_REACH) need = TD5_TG_TOPO_MAX_REACH;
+    return (need > base_reach) ? need : base_reach;
+}
+
 /* [R6 item 6] How far the flat verge (near ground skirt) reaches outward. At the
  * historical 24000 the skirt is a wide, near-flat apron that on a DESCENT
  * projects over the road ahead and hides it -- seed 99991 span 188 (a straight,
@@ -8317,8 +8561,8 @@ static double tg_verge_reach(void)
          ? TD5_TG_VERGE_REACH : TD5_TG_GROUND_WIDTH;
 }
 
-static void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
-                           double water_side, TG_GroundProf *p)
+static void tg_ground_side_raw(const TG_NodeList *nl, int si, int is_left,
+                               double water_side, TG_GroundProf *p)
 {
     const double phase = tg_bridge_gorge_phase(nl, si);
     const int seaward = (water_side > 0.0 && is_left) ||
@@ -8468,10 +8712,40 @@ static void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
     }
 }
 
+/* [R9 TOPO C3] Every consumer of the near cross-section -- the skirt slab, the
+ * far band's seam, the flora planter -- goes through here, so the "another road
+ * is closer than my ground reaches" rule cannot be honoured by one of them and
+ * missed by the next. Purely a CLAMP on the raw profile: the outer point (and
+ * any point beyond it) is pulled in to the neighbouring carriageway's edge and
+ * its drop is interpolated along the segment it landed in, so the surface keeps
+ * its shape and simply stops earlier. */
+static void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
+                           double water_side, TG_GroundProf *p)
+{
+    double cap;
+    int k;
+
+    tg_ground_side_raw(nl, si, is_left, water_side, p);
+    if (!tg_topo_enabled()) return;
+    cap = tg_topo_road_cap(nl, si, is_left);
+    if (cap >= p->d[p->n - 1]) return;
+    if (cap < p->d[0] + TD5_TG_TOPO_GAP_TOL) cap = p->d[0] + TD5_TG_TOPO_GAP_TOL;
+    for (k = 1; k < p->n; k++) {
+        if (p->d[k] <= cap) continue;
+        {
+            const double span = p->d[k] - p->d[k - 1];
+            const double t = (span > 1e-6) ? (cap - p->d[k - 1]) / span : 0.0;
+            p->dy[k] = p->dy[k - 1] + t * (p->dy[k] - p->dy[k - 1]);
+            p->d[k]  = cap;
+        }
+        p->n = k + 1;
+        break;
+    }
+}
+
 static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
                           double water_side)
 {
-    const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
     double nlx, nly, nlz, nrx, nry, nrz;   /* near left / right road edge */
     double flx, fly, flz, frx, fry, frz;   /* far  left / right road edge */
     double nux, nuz, fux, fuz;             /* outward lateral units */
@@ -8480,7 +8754,9 @@ static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
     double px[(TD5_TG_GROUND_MAXPT - 1) * 8], py[(TD5_TG_GROUND_MAXPT - 1) * 8];
     double pz[(TD5_TG_GROUND_MAXPT - 1) * 8], uu[(TD5_TG_GROUND_MAXPT - 1) * 8];
     double vv[(TD5_TG_GROUND_MAXPT - 1) * 8];
-    int seg_page = tg_ground_page_for_span(si, b), seg_nq;
+    /* [R9 TOPO C4] The SURFACE material comes from the ground-run authority,
+     * not from this span's dithered biome roll. See tg_topo_ground_index. */
+    int seg_page = tg_topo_surface_page(si), seg_nq;
     int s, k, n = 0;
 
     tg_road_edge(nl, si, 0.0, 0.0, 1.0, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
@@ -8683,6 +8959,18 @@ static int tg_flora_plant(const TG_NodeList *nl, int si, const TG_Biome *b,
     /* Rule 2: over the seaward beach/sea of a coastal run -> no tree. */
     if (b->water && side == tg_water_side(si) && d > (double)TD5_TG_SHORE_VERGE)
         return 0;
+
+    /* [R9 TOPO item 6] Rule 1 used to sample the SKIRT only and clamp to its
+     * outer point, so anything planted past the skirt stood at the LIP height
+     * while the ground under it had already descended -- "the trees are not
+     * following". Sample the whole chain instead: skirt AND the far band's
+     * descent, one surface, the same one the ground slab is built from. */
+    if (tg_topo_enabled()) {
+        TG_TopoChain c;
+        tg_topo_chain(nl, si, side > 0.0, &c);
+        *base_y = n->y - tg_topo_drop_at(&c, d);
+        return 1;
+    }
 
     /* Rule 1: rest on the sampled terrain, not at road height. */
     tg_ground_side(nl, si, side > 0.0, water_side, &p);
@@ -12144,14 +12432,20 @@ static int tg_far_group_owner(int si)
 static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
 {
     const TG_NodeList *nl = h->nl;
-    const double reach = (double)td5_env_int("TD5RE_AUTOTRACK_TERRAIN_REACH",
-                                             TD5_TG_FAR_REACH, 30000, 400000);
+    const double base_reach = (double)td5_env_int("TD5RE_AUTOTRACK_TERRAIN_REACH",
+                                                  TD5_TG_FAR_REACH, 30000, 400000);
+    double reach = base_reach;
+    /* [R9 TOPO C2/C3] This band's own reach, decided by the continuity rule
+     * rather than by a single global constant. Filled in below once the seam
+     * height and the skirt's outer distance are known -- see the RUN-OUT note. */
+    int runout = 0;
     /* Band height envelope: flat at the seam, rolling further out. */
     static const double k_amp[4] = { 0.0, 700.0, 2200.0, 4200.0 };
     const int sink = td5_env_flag_on("TD5RE_AUTOTRACK_TERRAIN_SINK");
     const double floor_y = tg_track_min_y(nl) - TD5_TG_FAR_SINK_AT;
     const int g0 = (h->si / TD5_TG_FAR_GROUP) * TD5_TG_FAR_GROUP;
     int g1 = g0 + TD5_TG_FAR_GROUP - 1;
+    double so_max = 0.0;
     double X[2][4], Y[2][4], Z[2][4], D[2][4], U[2], B[2];
     double px[16], py[16], pz[16], uu[16], vv[16];
     int seg_page[2], seg_nq[2];
@@ -12164,6 +12458,64 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
 
     if (g1 > nl->count - 2) g1 = nl->count - 2;
     if (g1 < g0) return 1;
+
+    /* ---------------- [R9 TOPO C2/C3] RUN-OUT AND ROAD CAP ----------------
+     *
+     * The reach used to be one global constant for every band on the track.
+     * That is fine while a wall stands on the outer edge -- the wall closes the
+     * view and the edge is never seen. Where the RIDGE IS SUPPRESSED (the fork
+     * and tunnel gates, which R8 TERRAIN correctly turned into ridge-only gates
+     * so the ground survived) the band ends in an open edge instead, and
+     * because the R8 sink descends it toward the track's global floor on the
+     * way out, that edge has FALLEN by the time it stops. Falling ground is not
+     * foreshortened -- you look down onto it -- so its terminating edge is
+     * plainly in view with sky beyond. That is seed 99991 span 549 R: inside
+     * fork 3 (510-631), ground measured at the full 30000 by R8's own report,
+     * and still "no geometry on the right side" because the last thing you see
+     * of it is a cut edge on a slope.
+     *
+     * So a band with no wall must RUN OUT: keep going until its terminal grade
+     * is TD5_TG_TOPO_RUNOUT, which for a drop of D costs D/0.06 of extra
+     * horizontal. That is the user's "if you make a sloped side make sure that
+     * it goes further than usual", stated as arithmetic and scaled by the
+     * actual slope. Safe by the sink's own argument: the extension only
+     * lengthens rings 2 and 3, which sit ON the global floor and are therefore
+     * coplanar with every other band out there, so no amount of overlap can
+     * stack them. The two outer rings are also pinned to the floor here
+     * (the R5 tree-line shallow drop is skipped when running out) precisely so
+     * that argument keeps holding at the longer reach.
+     *
+     * C3 then caps whatever C2 asked for at the nearest OTHER carriageway, so
+     * running out can never walk this band across the far leg of a U-turn.
+     */
+    if (tg_topo_enabled()) {
+        double cap = 1e30, drop_max = 0.0;
+        for (e = 0; e < 2; e++) {
+            const int se = e ? g1 : g0;
+            const double wsd = h->b->water ? tg_water_side(se) : 0.0;
+            const double c = tg_topo_road_cap(nl, se, is_left);
+            TG_GroundProf pp;
+            double seam, d;
+            tg_ground_side(nl, se, is_left, wsd, &pp);
+            seam = nl->v[se].y - pp.dy[pp.n - 1] - TD5_TG_FAR_SINK;
+            d = seam - floor_y;
+            if (d > drop_max) drop_max = d;
+            if (c < cap) cap = c;
+            if (pp.d[pp.n - 1] > so_max) so_max = pp.d[pp.n - 1];
+        }
+        /* "No wall" means no wall ACTUALLY EMITTED -- ridge_ok is only half of
+         * that test, and tg_topo_chain's closure test is the other half, so
+         * they are written the same way here and there. */
+        if (!(ridge_ok && tg_terrain_ridge_enabled()) && sink) {
+            const double want = tg_topo_runout_reach(so_max, drop_max, base_reach);
+            if (want > reach) { reach = want; runout = 1; }
+        }
+        /* C3 applies to EVERY band, walled or not: ground belonging to this
+         * span must not be laid across another road at this span's height. */
+        if (cap < reach) reach = cap;
+        if (reach < so_max + TD5_TG_FAR_TUCK + 500.0)
+            reach = so_max + TD5_TG_FAR_TUCK + 500.0;
+    }
 
     for (e = 0; e < 2; e++) {
         const int se = e ? g1 : g0;
@@ -12223,7 +12575,14 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
              * outer points with a shallow, gently-rolling drop below the seam, so
              * the ridge that stands on j==3 follows the near grass instead of
              * dropping into a jagged trough. Kept strictly at or below `base`. */
-            if (r5fix && r5treeline && j >= 2) {
+            /* [R9 TOPO C2] While RUNNING OUT the two outer rings must stay ON
+             * the global floor -- see the run-out note. The R5 tree-line
+             * shallow drop deliberately holds them just under the seam so the
+             * ridge that STANDS on ring 3 follows the near grass; there is no
+             * ridge here (that is why we are running out) and at the extended
+             * reach a near-seam-height outer ring would be the flat overhead
+             * slab the sink exists to prevent. */
+            if (r5fix && r5treeline && j >= 2 && !runout) {
                 yb    = base - TD5_TG_TREELINE_BASE_DROP * k_tg_far_sink[j];
                 ampj *= TD5_TG_TREELINE_AMP_SCALE;
                 if (yb > base) yb = base;
@@ -12231,7 +12590,8 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
             X[e][j] = ex;
             Z[e][j] = ez;
             Y[e][j] = yb + tg_terrain_hill_y(ex, ez, ampj);
-            if (r5fix && r5treeline && j >= 2 && Y[e][j] > base) Y[e][j] = base;
+            if (r5fix && r5treeline && j >= 2 && !runout && Y[e][j] > base)
+                Y[e][j] = base;
         }
 
         /* [DIAG] Every term that decides how high this band sits, so the large
@@ -12262,7 +12622,11 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
         px[n]=X[1][j];   py[n]=Y[1][j];   pz[n]=Z[1][j];
         uu[n]=D[1][j]  /(double)TD5_TG_SPAN_LENGTH; vv[n]=U[1]; n++;
     }
-    seg_page[0] = tg_ground_page_for_span(h->si, h->b);
+    /* [R9 TOPO C4] The apron is the same SURFACE the skirt it seams to is, so
+     * it reads the same ground-run material. It used to read the far-group
+     * owner's DITHERED biome, which at a boundary could put a tile apron behind
+     * a grass skirt (or the reverse) at the very seam they share. */
+    seg_page[0] = tg_topo_surface_page(h->si);
     seg_nq[0]   = 3;
 
     if (ridge_ok && tg_terrain_ridge_enabled()) {
@@ -12675,6 +13039,317 @@ static const char *tg_r8_far_block_reason(const TG_NodeList *nl, int si,
         *ridge = 0;
     }
     return NULL;
+}
+
+/* ==================================================================
+ * SECTION: [R9 TOPO] THE CHAIN -- one span-side's whole ground surface
+ *
+ * The clauses are stated at the head of the file (SECTION: TOPOGRAPHIC
+ * CONTINUITY AUTHORITY). This is where they are MEASURED and where the flora
+ * consumer reads the surface from, and it lives here rather than up there
+ * because the chain's outer half is the far band and needs its constants.
+ * ================================================================== */
+
+/* Does this span-side's far band emit GROUND, and does a wall stand on it?
+ * Mirrors tg_emit_fb_terrain's gate chain via the R8 reason helper, so the
+ * chain and the emitter cannot disagree about what exists. */
+static int tg_topo_far_state(const TG_NodeList *nl, int si,
+                             const TG_Biome *b, int is_left, int *closed)
+{
+    int ridge = 1;
+    const char *why;
+    *closed = 0;
+    if (!tg_far_group_owner(si) && 0) return 0;   /* bands cover their group */
+    why = tg_r8_far_block_reason(nl, si, b, is_left, &ridge);
+    if (why) {
+        /* The sea IS a closed horizon (R8's far shore stands on it); a bridge
+         * gorge is closed by its own banks and water. Neither is an open edge. */
+        *closed = (why == k_r8_why_sea || why == k_r8_why_bridge);
+        return 0;
+    }
+    *closed = ridge && tg_terrain_ridge_enabled();
+    return 1;
+}
+
+/* Build the whole chain for one span-side: skirt points, then the far band's
+ * four rings where it emits. `dy` is DROP BELOW THE ROAD EDGE, positive down,
+ * the same sign convention TG_GroundProf uses, so the two halves concatenate. */
+static void tg_topo_chain(const TG_NodeList *nl, int si, int is_left,
+                          TG_TopoChain *c)
+{
+    const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
+    const double wsd = b->water ? tg_water_side(si) : 0.0;
+    const double base_reach = (double)td5_env_int("TD5RE_AUTOTRACK_TERRAIN_REACH",
+                                                  TD5_TG_FAR_REACH, 30000, 400000);
+    const int sink = td5_env_flag_on("TD5RE_AUTOTRACK_TERRAIN_SINK");
+    const double floor_drop = nl->v[si].y
+                            - (tg_track_min_y(nl) - TD5_TG_FAR_SINK_AT);
+    TG_GroundProf p;
+    double so, seam, reach, cap;
+    int k, has_far;
+
+    memset(c, 0, sizeof(*c));
+    tg_ground_side(nl, si, is_left, wsd, &p);
+    for (k = 0; k < p.n && c->n < TD5_TG_TOPO_MAXPT; k++) {
+        c->d[c->n]  = p.d[k];
+        c->dy[c->n] = p.dy[k];
+        c->n++;
+    }
+    so   = p.d[p.n - 1];
+    seam = p.dy[p.n - 1] + TD5_TG_FAR_SINK;
+
+    has_far = tg_topo_far_state(nl, si, b, is_left, &c->closed);
+    if (has_far) {
+        static const double k_ring[4] = { 0.0, 0.18, 0.45, 1.0 };
+        reach = base_reach;
+        cap   = tg_topo_road_cap(nl, si, is_left);
+        if (!c->closed && sink)
+            reach = tg_topo_runout_reach(so, seam < floor_drop
+                                             ? floor_drop - seam : 0.0,
+                                         base_reach);
+        if (cap < reach) reach = cap;
+        if (reach < so + TD5_TG_FAR_TUCK + 500.0)
+            reach = so + TD5_TG_FAR_TUCK + 500.0;
+        for (k = 1; k < 4 && c->n < TD5_TG_TOPO_MAXPT; k++) {
+            const double dd = so + (reach - so) * k_ring[k];
+            double dy = sink ? seam + (floor_drop - seam) * k_tg_far_sink[k]
+                             : seam;
+            if (dy < seam) dy = seam;
+            c->d[c->n]  = dd;
+            c->dy[c->n] = dy;
+            c->n++;
+        }
+    }
+
+    /* C1: the chain must start at the road edge and never jump laterally.
+     * d[0] > 0 IS legal on the right of a fork -- the branch carriageway and
+     * the gore floor occupy that strip -- so the start is only a gap where no
+     * carriageway explains it. */
+    c->gap = 0.0;
+    if (c->d[0] > TD5_TG_TOPO_GAP_TOL && !tg_span_in_bridge_run(si)) {
+        /* A branch carriageway and the gore floor legitimately occupy the strip
+         * the right-hand skirt stands off. A GORGE inset is legitimate too --
+         * the deck is elevated and there is deliberately no ground under it --
+         * which is why bridge runs are excluded outright rather than netted off:
+         * on this seed they account for 304 of the pre-fix "gaps" and every one
+         * of them is correct, so counting them would drown the real holes. */
+        const double explained = tg_ground_branch_clear(nl, si);
+        const double g = c->d[0] - explained;
+        if (g > c->gap) c->gap = g;
+    }
+    /* The far band tucks UNDER the skirt by TD5_TG_FAR_TUCK, so its first ring
+     * is inboard of the skirt's outer point by construction; a positive step
+     * anywhere in the chain would be a hole. */
+    for (k = 1; k < c->n; k++) {
+        const double g = c->d[k] - c->d[k - 1];
+        if (g < 0.0 && -g > c->gap) c->gap = -g;
+    }
+
+    c->horiz = c->d[c->n - 1];
+    c->drop  = c->dy[c->n - 1];
+    c->surf  = 0.0;
+    for (k = 1; k < c->n; k++) {
+        const double dd = c->d[k] - c->d[k - 1];
+        const double dv = c->dy[k] - c->dy[k - 1];
+        c->surf += sqrt(dd * dd + dv * dv);
+    }
+    c->end_grade = 0.0;
+    if (c->n >= 2) {
+        const double dd = c->d[c->n - 1] - c->d[c->n - 2];
+        if (dd > 1e-6) c->end_grade = (c->dy[c->n - 1] - c->dy[c->n - 2]) / dd;
+    }
+    c->road_cap = tg_topo_road_cap(nl, si, is_left);
+}
+
+/* Drop below the road edge at outward distance d, from the WHOLE chain --
+ * skirt and far band. This is what "the trees are not following" needs:
+ * tg_flora_plant clamps to the skirt's last point, so anything planted past
+ * the skirt stands at the LIP height while the ground under it has descended.
+ * Linear between chain points, flat past the end. */
+static double tg_topo_drop_at(const TG_TopoChain *c, double d)
+{
+    int k;
+    if (c->n <= 0) return 0.0;
+    if (d <= c->d[0]) return c->dy[0];
+    for (k = 0; k + 1 < c->n; k++) {
+        if (d <= c->d[k + 1]) {
+            const double w = c->d[k + 1] - c->d[k];
+            const double t = (w > 1e-6) ? (d - c->d[k]) / w : 0.0;
+            return c->dy[k] + t * (c->dy[k + 1] - c->dy[k]);
+        }
+    }
+    return c->dy[c->n - 1];
+}
+
+/* [R9 TOPO item 6] SLOPE FLORA -- "the trees are not following".
+ *
+ * The near-verge planters put every tree inside the flat skirt, so where a side
+ * falls away the tree line stops dead on the ridge and the whole slope below it
+ * is bare. That reads as the world ending at the tree line even when the ground
+ * carries on, which is half of what the span-549 screenshot shows.
+ *
+ * This plants a second, sparse rank OUT ON THE FALLING SURFACE: distances drawn
+ * past the skirt's outer edge, heights taken from the chain (so a tree sits on
+ * the slope, not above it), and only where the chain actually falls. It is a
+ * consumer of the authority, not a new placement rule of its own -- it inherits
+ * the C3 road cap and the C2 run-out for free because the chain already applies
+ * them, which is the entire point of building the authority first.
+ *
+ * Billboard-tree biomes only (a facade biome has no trees to speak of) and one
+ * per span at most. TD5RE_R9_TOPO_FLORA=0 for an A/B without disabling the
+ * continuity clauses. */
+#define TD5_TG_TOPO_FLORA_MINDROP 700.0   /* a side must fall this much to plant */
+static int tg_emit_fb_slope_flora(const TG_FBHook *h)
+{
+    const TG_NodeList *nl = h->nl;
+    const int si = h->si;
+    const TG_Biome *b = h->b;
+    TG_TopoChain c;
+    unsigned int hh;
+    double side, d, tw, th, jit, cx, cz, lx, lz, drop_in, base_y;
+    int s, v, page;
+
+    if (!tg_topo_enabled()) return 1;
+    if (!td5_env_flag_on("TD5RE_R9_TOPO_FLORA")) return 1;
+    if (!tg_real_textures_enabled())     return 1;
+    if (k_r5_flora_tree_count <= 0)      return 1;
+    if (!b->billboard || b->tree_n <= 0) return 1;
+    if (si <= TD5_TG_GRID_SPAN)          return 1;
+    if (si + 1 >= nl->count)             return 1;
+    if (tg_span_in_bridge_run(si))       return 1;   /* the gorge is water */
+    if (tg_span_in_tunnel(si))           return 1;
+    if (*h->nmesh + 1 >= h->maxmesh)     return 1;
+
+    hh = (unsigned)si * 2654435761u + 0x9E3779B9u;
+    if ((int)(hh >> 29) > (b->density >> 1)) return 1;   /* sparse rank */
+    s    = (int)((hh >> 4) & 1u);
+    side = s ? 1.0 : -1.0;
+    if (tg_side_blocked(si, side)) return 1;
+    if (b->water && side == tg_water_side(si)) return 1; /* never over the sea */
+
+    tg_topo_chain(nl, si, side > 0.0, &c);
+    if (c.n < 2) return 1;
+    /* Only a FALLING side gets a slope rank; on flat ground the near planters
+     * already cover what you can see and a distant billboard is just cost. */
+    if (c.drop - c.dy[0] < TD5_TG_TOPO_FLORA_MINDROP) return 1;
+
+    /* Somewhere on the falling part of the chain: past the skirt's outer point,
+     * inside the ring that still carries relief. */
+    {
+        const double d0 = c.d[1] + 500.0;
+        const double d1 = c.d[c.n - 1] * 0.45;
+        if (!(d1 > d0)) return 1;
+        d = d0 + (d1 - d0) * (double)((hh >> 11) % 1000u) * 0.001;
+    }
+    drop_in = tg_topo_drop_at(&c, d);
+
+    if (td5_env_flag_on("TD5RE_R6_FLORA")) {
+        v = tg_flora_upright_index(hh >> 13);
+        if (v < 0) return 1;
+    } else {
+        v = (int)((hh >> 13) % (unsigned)k_r5_flora_tree_count);
+    }
+    page = tg_flora_tree_slot(v);
+
+    jit = 1.00 + (double)((hh >> 9) % 61) * 0.01;
+    tw  = 2600.0 * jit;
+    th  = 4200.0 * jit;
+
+    lx = nl->v[si].tz * side; lz = -nl->v[si].tx * side;
+    {
+        const double e = nl->v[si].width * 0.5 + d;
+        cx = nl->v[si].x + lx * e;
+        cz = nl->v[si].z + lz * e;
+    }
+    base_y = nl->v[si].y - drop_in;      /* ON the slope, not on its lip */
+
+    tg_flora_diag(nl, si, "r9slope", page, side, tw, th, cx, cz);
+    h->moff[*h->nmesh] = h->blk->len;
+    if (!tg_emit_billboard_mesh(h->blk, cx, base_y, cz, tw * 0.5, th, page, 1))
+        return 0;
+    (*h->nmesh)++;
+    tg_acct(TG_ACCT_R9_TOPO, si);
+    return 1;
+}
+
+/* [R9 TOPO] CLASS SWEEP. Every span-side, both clauses that are geometric,
+ * before/after in one number each -- and BOTH extents, because reporting the
+ * horizontal one again is repeating exactly the measurement error that let item
+ * 6 survive round 8. TD5RE_R9_TOPO_LOG=1. */
+static void tg_r9_topo_report(const TG_NodeList *nl, int nspans)
+{
+    const int ring = (s_ring_len > 0 && s_ring_len < nspans) ? s_ring_len : nspans;
+    int si, s, sides = 0, v_open = 0, v_gap = 0, v_road = 0, v_mat = 0;
+    double sum_h = 0.0, sum_s = 0.0, worst_open = 0.0, worst_road = 0.0;
+    /* The three spans the user named, so the report photographs the spans the
+     * complaint is about and not a convenient neighbour. Overridable. */
+    const int at[3] = {
+        td5_env_int("TD5RE_R9_TOPO_AT1",  549, 0, TD5_TG_MAX_SPANS),
+        td5_env_int("TD5RE_R9_TOPO_AT2",  617, 0, TD5_TG_MAX_SPANS),
+        td5_env_int("TD5RE_R9_TOPO_AT3", 1050, 0, TD5_TG_MAX_SPANS)
+    };
+
+    if (!td5_env_flag_off("TD5RE_R9_TOPO_LOG")) return;
+
+    TD5_LOG_I(LOG_TAG, "trackgen: R9TOPO sweep enabled=%d ring=%d",
+              tg_topo_enabled(), ring);
+    for (si = 0; si + 1 < ring; si++) {
+        /* C4 is a per-SPAN property of the surface material, not per side: the
+         * ground page must not differ from BOTH neighbours (an isolated slab). */
+        if (si > 0 && si + 2 < ring) {
+            const int me = tg_topo_surface_page(si);
+            if (me != tg_topo_surface_page(si - 1) &&
+                me != tg_topo_surface_page(si + 1))
+                v_mat++;
+        }
+        for (s = 0; s < 2; s++) {
+            TG_TopoChain c;
+            tg_topo_chain(nl, si, s, &c);
+            sides++;
+            sum_h += c.horiz;
+            sum_s += c.surf;
+            /* C2, stated as the EDGE'S OWN DEPRESSION rather than as its last
+             * segment's grade. The first version of this test asked for
+             * end_grade > RUNOUT and reported ZERO violations in both states,
+             * which was true and useless: the R8 sink pins rings 2 and 3 at the
+             * global floor, so the terminating segment is always FLAT. The
+             * thing you can see is not the last segment, it is where the edge
+             * SITS -- ground that has fallen `drop` and stops at `horiz` is a
+             * cut edge seen at atan(drop/horiz) below the road, and the whole
+             * point of the run-out is to push that angle onto the horizon. */
+            if (!c.closed && (c.drop - c.dy[0]) > TD5_TG_TOPO_OPEN_DROP &&
+                c.horiz > 1.0 &&
+                (c.drop - c.dy[0]) / c.horiz > TD5_TG_TOPO_RUNOUT) {
+                v_open++;
+                if (c.drop > worst_open) worst_open = c.drop;
+            }
+            if (c.gap > TD5_TG_TOPO_GAP_TOL) v_gap++;
+            if (c.road_cap < c.horiz - 1.0) {
+                const double over = c.horiz - c.road_cap;
+                v_road++;
+                if (over > worst_road) worst_road = over;
+            }
+            if (si == at[0] || si == at[1] || si == at[2])
+                TD5_LOG_I(LOG_TAG,
+                    "trackgen: R9TOPO at si=%d %s biome=%s page=%d pts=%d "
+                    "horiz=%.0f SURFACE=%.0f drop=%.0f closed=%d "
+                    "road_cap=%.0f gap=%.0f end_grade=%.3f depress=%.3f",
+                    si, s ? "L" : "R",
+                    k_biomes[tg_topo_ground_index(si)].name,
+                    tg_topo_surface_page(si), c.n,
+                    c.horiz, c.surf, c.drop - c.dy[0], c.closed,
+                    c.road_cap, c.gap, c.end_grade,
+                    c.horiz > 1.0 ? (c.drop - c.dy[0]) / c.horiz : 0.0);
+        }
+    }
+    TD5_LOG_I(LOG_TAG,
+        "trackgen: R9TOPO SUMMARY sides=%d | C1 gap=%d | C2 open-edge=%d "
+        "(worst drop %.0f) | C3 road-overrun=%d (worst %.0f) "
+        "| C4 isolated-surface-spans=%d "
+        "| extent horiz mean=%.0f SURFACE mean=%.0f",
+        sides, v_gap, v_open, worst_open, v_road, worst_road, v_mat,
+        sides ? sum_h / (double)sides : 0.0,
+        sides ? sum_s / (double)sides : 0.0);
 }
 
 static void tg_r8_terrain_extent_report(const TG_NodeList *nl, int nspans)
@@ -13503,6 +14178,13 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     g0 = meshes.len;
                     if (!tg_emit_fb_park_trees(&hook)) { ok = 0; break; }
                     tg_guard_mark(g0, meshes.len, TG_GK_PARKTREE, si);
+                    g0 = meshes.len;
+                    /* [R9 TOPO item 6] trees ON the slope, not on its lip.
+                     * Marked FLORA so the on-road guard validates it exactly as
+                     * it validates every other billboard -- a new emitter must
+                     * inherit R7's authority, not be exempted from it. */
+                    if (!tg_emit_fb_slope_flora(&hook)) { ok = 0; break; }
+                    tg_guard_mark(g0, meshes.len, TG_GK_FLORA, si);
                     g0 = meshes.len;
                     if (!tg_emit_fb_terrain(&hook)) { ok = 0; break; }
                     tg_guard_mark(g0, meshes.len, TG_GK_TERRAIN, si);
@@ -16421,6 +17103,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     tg_acct_report(nspans);
     tg_r8_bridge_diag(&nl);            /* [R8 BRIDGE] opt-in measurement dump */
     tg_r8_terrain_extent_report(&nl, nspans);  /* [R8 TERRAIN] opt-in, ditto */
+    tg_r9_topo_report(&nl, nspans);            /* [R9 TOPO] class sweep, ditto */
     ok = 1;
 
 done:
