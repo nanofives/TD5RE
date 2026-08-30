@@ -32,6 +32,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 30 (auto-track on-road guard)" },
+    { CL_ITEM,    "FIXED: buildings, background skyline and grass" },
+    { CL_ITEM,    "  no longer render standing in the road. A new" },
+    { CL_ITEM,    "  post-build pass validates every emitted mesh" },
+    { CL_ITEM,    "  against the drivable surface and drops any" },
+    { CL_ITEM,    "  scenery overlapping it (TD5RE_R7_GUARD)." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 29 (auto-track tunnels)" },
     { CL_ITEM,    "FIXED: distant scenery no longer shows through a" },
     { CL_ITEM,    "  tunnel as grey slabs standing in the road." },
