@@ -392,7 +392,64 @@ static int tg_road_page(int si);
 #define TD5_TG_PAGE_R7_FLORA  (TD5_TG_PAGE_R7_BASE + 56)
 #define TD5_TG_R7_FLORA_N     8
 
-#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R7_BASE + 66)
+/* ====================== ROUND-8 PAGE BLOCKS ==========================
+ * Same rule as R3-R7, measured off its OWN base. Use only your own block.
+ * Do NOT move TD5_TG_PAGE_COUNT and do NOT renumber another area's slots.
+ *
+ * Round 8 runs EIGHT areas (up from six), because the user's five untagged
+ * design items were split into art breadth and generated shape rather than
+ * folded into one over-subscribed area.
+ *
+ * Owners (see docs/AUTOTRACK_FEEDBACK_R8.md):
+ *   GUARD   99991 3,7,8        precise height gate + per-run exemptions (no art)
+ *   CROSS   99991 1,9          perpendicular-street reach rewrite, turn continuation
+ *   CITY    99991 2,12         sidewalk run-end, no city backdrop inside a park
+ *   BRIDGE  99991 4,10,11 + 777 13,17,18   portal page choice, piers, under-deck
+ *   TERRAIN 99991 5 + 777 14,15,16         field extent, tree-line UV, snow ground
+ *   VARIETY G1 + 99991 6       facades, depth, skyboxes, banners, guardrails
+ *   SHAPE   G2,G3,G5,G4-part   height steps, long rejoining branches (picks TWO)
+ *   BIOME   777 19 + G4-part   snow-coherent seeds, one-side sea, element inventory
+ *
+ * Budget check at reservation time: TD5_TRACK_TEXTURE_PAGE_LIMIT is 1024 and
+ * this block takes the total from 325 to 435, so the cap is not in reach.
+ * ==================================================================== */
+#define TD5_TG_PAGE_R8_BASE   (TD5_TG_PAGE_R7_BASE + 66)
+
+/* GUARD needs no art -- like R7 it validates what other emitters produced.
+ * Two slots only, for an optional debug page marking rejects. */
+#define TD5_TG_PAGE_R8_GUARD  (TD5_TG_PAGE_R8_BASE + 0)
+#define TD5_TG_R8_GUARD_N     2
+
+#define TD5_TG_PAGE_R8_CROSS  (TD5_TG_PAGE_R8_BASE + 4)
+#define TD5_TG_R8_CROSS_N     8
+
+#define TD5_TG_PAGE_R8_CITY   (TD5_TG_PAGE_R8_BASE + 14)
+#define TD5_TG_R8_CITY_N      10
+
+/* BRIDGE block is wide: item 4 is a tunnel-portal page SELECTION complaint, so
+ * this area is expected to bring in alternative lining/portal art to choose
+ * from rather than to re-texture the one page it already has. */
+#define TD5_TG_PAGE_R8_BRIDGE (TD5_TG_PAGE_R8_BASE + 26)
+#define TD5_TG_R8_BRIDGE_N    14
+
+/* TERRAIN owns snow ground variety (777 item 16) and tree-line band variety
+ * (777 item 14), both of which are "one page repeated" complaints. */
+#define TD5_TG_PAGE_R8_TERRAIN (TD5_TG_PAGE_R8_BASE + 42)
+#define TD5_TG_R8_TERRAIN_N    12
+
+/* VARIETY is the widest block in the round by design: G1 asks for more building
+ * variety AND day/night skyboxes AND start/finish banner variety AND guardrail
+ * variety, and every one of those is new art rather than new geometry. */
+#define TD5_TG_PAGE_R8_VARIETY (TD5_TG_PAGE_R8_BASE + 56)
+#define TD5_TG_R8_VARIETY_N    24
+
+#define TD5_TG_PAGE_R8_SHAPE  (TD5_TG_PAGE_R8_BASE + 82)
+#define TD5_TG_R8_SHAPE_N     10
+
+#define TD5_TG_PAGE_R8_BIOME  (TD5_TG_PAGE_R8_BASE + 94)
+#define TD5_TG_R8_BIOME_N     14
+
+#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R8_BASE + 110)
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
@@ -606,6 +663,32 @@ typedef enum {
     TG_ACCT_R7_BRIDGE,      /* BRIDGE (items 9,16,17)       rename in place */
 
     TG_ACCT_R7_FLORA,       /* FLORA  (items 8,18)          rename in place */
+    /* [R8] PRE-RESERVED, one per area, own line, blank-line spaced.
+     * RENAME YOUR OWN SLOT IN PLACE. Never append here.
+     * EIGHT areas this round, not six -- see the R8 page-block comment.
+     *
+     * HEADROOM WARNING for round 9: s_acct_mask below is a 64-bit presence
+     * bitmap, one bit per kind. These eight take the count from 43 to 51, so
+     * 13 bits remain. Round 9 fits; round 10 does not. Widening is not a
+     * one-line change (the mask is also read by the inventory run extractor),
+     * so plan it before the count reaches 64 rather than after -- an overflow
+     * does not fail loudly, it silently reports a live emitter as "NONE
+     * emitted", which is the one lie this inventory exists to prevent. */
+    TG_ACCT_R8_GUARD,       /* GUARD  (99991 3,7,8)         rename in place */
+
+    TG_ACCT_R8_CROSS,       /* CROSS  (99991 1,9)           rename in place */
+
+    TG_ACCT_R8_CITY,        /* CITY   (99991 2,12)          rename in place */
+
+    TG_ACCT_R8_BRIDGE,      /* BRIDGE (99991 4,10,11; 777 13,17,18) rename */
+
+    TG_ACCT_R8_TERRAIN,     /* TERRAIN(99991 5; 777 14,15,16)  rename in place */
+
+    TG_ACCT_R8_VARIETY,     /* VARIETY(G1; 99991 6)         rename in place */
+
+    TG_ACCT_R8_SHAPE,       /* SHAPE  (G2,G3,G5,G4-part)    rename in place */
+
+    TG_ACCT_R8_BIOME,       /* BIOME  (777 19; G4-part)     rename in place */
     TG_ACCT_KIND_COUNT
 } TG_AcctKind;
 
@@ -663,7 +746,26 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
 
     "r7-bridge",            /* BRIDGE */
 
-    "r7-flora"              /* FLORA  */
+    "r7-flora",             /* FLORA  */
+    /* [R8] one reserved name per area, in enum order, blank-line spaced.
+     * Rename to match your renamed enum constant; keep every comma. Only the
+     * LAST entry omits its trailing comma -- the R3 union merge lost exactly
+     * one comma here and two names concatenated into a single literal. */
+    "r8-guard",             /* GUARD   */
+
+    "r8-cross",             /* CROSS   */
+
+    "r8-city",              /* CITY    */
+
+    "r8-bridge",            /* BRIDGE  */
+
+    "r8-terrain",           /* TERRAIN */
+
+    "r8-variety",           /* VARIETY */
+
+    "r8-shape",             /* SHAPE   */
+
+    "r8-biome"              /* BIOME   */
 };
 
 static long s_acct_count[TG_ACCT_KIND_COUNT];
