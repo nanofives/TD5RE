@@ -5491,12 +5491,14 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
     const unsigned int lampc = 0xFFFFE8B4u; /* warm-white lamp glow (ARGB) */
     const int lining  = tg_tunnel_lining_page(si);
     const int lamp_pg = TD5_TG_PAGE_R6_TUNNEL + 5;      /* [item 8d] */
-    const int portal_pg = TD5_TG_PAGE_R6_TUNNEL + 4;    /* [item 8b] */
+    /* [R7 item 9] portal facade page (was the R6 thin-lintel page +4). */
+    const int portal_pg = td5_env_flag_on("TD5RE_AUTOTRACK_R7_PORTAL")
+                        ? TD5_TG_PAGE_R7_BRIDGE + 0 : TD5_TG_PAGE_R6_TUNNEL + 4;
     const int lamps_on = td5_env_flag_on("TD5RE_AUTOTRACK_TUNNEL_LAMPS");
     const double tile = 3000.0;
     const TG_Node *nd = &nl->v[si];
-    double px[40], py[40], pz[40], uu[40], vv[40];
-    unsigned int col[40];
+    double px[64], py[64], pz[64], uu[64], vv[64];
+    unsigned int col[64];
     int seg_page[3], seg_nq[3], nseg = 0;
     int n = 0, n_lin = 0, n_lamp = 0, n_portal = 0;
 
@@ -5564,21 +5566,66 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
         }
     }
 
-    /* [item 8b] Portal header across a run mouth (near end at the first bored
-     * node, far end at the last), on its own concrete-portal page so the opening
-     * reads as a proper beam rather than a washed-out white slab. */
+    /* [R7 item 9] Portal FACADE across a run mouth (near end at the first bored
+     * node, far end at the last). The R6 portal was a single thin lintel beam, so
+     * the entrance read as "a weird grey texture, not a tunnel entrance". Build a
+     * proper concrete FRAME instead: a HEADER above the opening plus a JAMB down
+     * each side, on the R7 concrete-portal page, framing the dark bore on three
+     * sides. Each face is double-sided (front quad + reversed quad) so it reads
+     * from both directions -- one emit serves both the entrance (faces the
+     * approach) and the exit (faces the departure). UVs map the face's TOP edge
+     * to page V=0 so the coping band sits along the top; U tiles by world lateral.
+     * TD5RE_AUTOTRACK_R7_PORTAL=0 falls back to the R6 lintel (page + winding). */
     if (!tg_span_in_tunnel(si - 1) || !tg_span_in_tunnel(si + 1)) {
-        double ph, psh, lo, ro, y0, y1, pw;
+        double ph, psh, lo, ro;
         tg_tunnel_bore(nl, si, &ph, &psh);
-        lo = psh + ph + wall_t;              /* left outer  */
-        ro = psh - ph - wall_t;              /* right outer */
-        y0 = nd->y + height;
-        y1 = y0 + 500.0;
-        pw = (lo - ro) / tile;
-        TG_TUN_PUSH(nd, lo, y0, 0.0, 0.0,  0xFFFFFFFFu);
-        TG_TUN_PUSH(nd, ro, y0, pw,  0.0,  0xFFFFFFFFu);
-        TG_TUN_PUSH(nd, ro, y1, pw,  0.17, 0xFFFFFFFFu);
-        TG_TUN_PUSH(nd, lo, y1, 0.0, 0.17, 0xFFFFFFFFu);
+        lo = psh + ph + wall_t;              /* left opening edge  */
+        ro = psh - ph - wall_t;              /* right opening edge */
+        if (td5_env_flag_on("TD5RE_AUTOTRACK_R7_PORTAL")) {
+            const double JW  = 1400.0;       /* jamb width beyond the opening */
+            const double HDR = 1500.0;       /* header height above the opening */
+            const double fl  = lo + JW;      /* frame outer left  */
+            const double fr  = ro - JW;      /* frame outer right */
+            const double yb  = nd->y;                    /* facade foot (road)   */
+            const double hb  = nd->y + height;           /* opening top          */
+            const double yt  = nd->y + height + HDR;     /* header top (coping)  */
+            /* Stand the headwall PROUD of the cutting: the Group-C mountain mass
+             * (crown slab + buttresses, TD5_TG_PAGE_HILL) sits AT the mouth node
+             * and would occlude a facade drawn in the node plane -- the R7 frame
+             * has to project OUTWARD along the road, out past the buttress depth
+             * (hz 1400), so it reads as a projecting concrete portal with the bore
+             * recessed behind it. Outward = away from the tunnel interior: at the
+             * entrance the interior is ahead (+tangent) so we step back, at the
+             * exit it is behind so we step forward. */
+            const double outsign = tg_span_in_tunnel(si + 1) ? -1.0 : 1.0;
+            const double proud   = 1600.0;
+            TG_Node fn = *nd;
+            fn.x = nd->x + nd->tx * proud * outsign;
+            fn.z = nd->z + nd->tz * proud * outsign;
+            /* One frame face: laterals [la..lb], y [ylo..yhi]; front + reverse. */
+            #define TG_PORTAL_FACE(la, lb, ylo, yhi) do {                        \
+                TG_TUN_PUSH(&fn,(la),(yhi), (la)/tile,0.0,            0xFFFFFFFFu);\
+                TG_TUN_PUSH(&fn,(lb),(yhi), (lb)/tile,0.0,            0xFFFFFFFFu);\
+                TG_TUN_PUSH(&fn,(lb),(ylo), (lb)/tile,((yt)-(ylo))/tile,0xFFFFFFFFu);\
+                TG_TUN_PUSH(&fn,(la),(ylo), (la)/tile,((yt)-(ylo))/tile,0xFFFFFFFFu);\
+                TG_TUN_PUSH(&fn,(la),(yhi), (la)/tile,0.0,            0xFFFFFFFFu);\
+                TG_TUN_PUSH(&fn,(la),(ylo), (la)/tile,((yt)-(ylo))/tile,0xFFFFFFFFu);\
+                TG_TUN_PUSH(&fn,(lb),(ylo), (lb)/tile,((yt)-(ylo))/tile,0xFFFFFFFFu);\
+                TG_TUN_PUSH(&fn,(lb),(yhi), (lb)/tile,0.0,            0xFFFFFFFFu);\
+            } while (0)
+            TG_PORTAL_FACE(fl, fr, hb, yt);      /* header over the opening */
+            TG_PORTAL_FACE(fl, lo, yb, yt);      /* left jamb  */
+            TG_PORTAL_FACE(ro, fr, yb, yt);      /* right jamb */
+            #undef TG_PORTAL_FACE
+            tg_acct(TG_ACCT_R7_BRIDGE, si);
+        } else {
+            const double y0 = nd->y + height, y1 = y0 + 500.0;
+            const double pw = (lo - ro) / tile;
+            TG_TUN_PUSH(nd, lo, y0, 0.0, 0.0,  0xFFFFFFFFu);
+            TG_TUN_PUSH(nd, ro, y0, pw,  0.0,  0xFFFFFFFFu);
+            TG_TUN_PUSH(nd, ro, y1, pw,  0.17, 0xFFFFFFFFu);
+            TG_TUN_PUSH(nd, lo, y1, 0.0, 0.17, 0xFFFFFFFFu);
+        }
         n_portal = n - n_lin - n_lamp;
     }
     #undef TG_TUN_PUSH
@@ -5898,6 +5945,17 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
     const int style = tg_bridge_style(si);            /* [R6 item 17] */
     const int pier_page = tg_bridge_pier_page_for(style);
     const int pitch = tg_bridge_pier_pitch(style);
+    /* [R7 item 16] "The texture of the pillar doesn't seem fine." The pier boxes
+     * tiled every 3000 world units, but a pier LEG is only ~400 wide, so a side
+     * face sampled just U 0..0.13 of the page -- a thin vertical sliver that
+     * flattened the I-beam / ashlar / form-board pattern into featureless grey.
+     * A ~600-unit repeat maps close to one full page WIDTH across a leg (so the
+     * flanges land at the leg edges and the web fills the middle) and tiles the
+     * detail up the column. Only the vertical members use it; the girder stays at
+     * 3000 (it is a wide flat beam along the road). TD5RE_AUTOTRACK_R7_PIERTEX=0
+     * restores the 3000 sliver for an A/B. */
+    const double pier_tile = td5_env_flag_on("TD5RE_AUTOTRACK_R7_PIERTEX")
+                           ? 600.0 : 3000.0;
     /* Deck level for the boxes: the strip surface, with the girder just under. */
     const double wy = deliberate ? tg_bridge_water_y(nl, si) : ref;
     int s0, s1, s;
@@ -5974,13 +6032,13 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
              * arch -- no leg pair, no towers (added below only for 0/1). */
             if (!tg_emit_box_mesh(blk, n->x, cy, n->z,
                                   620.0, h, 620.0, n->tx, n->tz,
-                                  pier_page, 3000.0, 0xFFFFFFFFu))
+                                  pier_page, pier_tile, 0xFFFFFFFFu))
                 return 0;
             (*added)++;
             tg_acct(TG_ACCT_BRIDGE, si);
             if (!tg_emit_box_mesh(blk, n->x, top - 140.0, n->z,
                                   half * 0.9, 170.0, 360.0, n->tx, n->tz,
-                                  pier_page, 3000.0, 0xFFFFFFFFu))
+                                  pier_page, pier_tile, 0xFFFFFFFFu))
                 return 0;
             (*added)++;
             tg_acct(TG_ACCT_BRIDGE, si);
@@ -5997,7 +6055,7 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
                 if (!tg_emit_box_mesh(blk, n->x + lx * (half * legpos),
                                       cy, n->z + lz * (half * legpos),
                                       legw, h, legw, n->tx, n->tz,
-                                      pier_page, 3000.0, 0xFFFFFFFFu))
+                                      pier_page, pier_tile, 0xFFFFFFFFu))
                     return 0;
                 (*added)++;
                 tg_acct(TG_ACCT_BRIDGE, si);
@@ -6005,7 +6063,7 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
             /* Brace across the legs, a third of the way down the pier. */
             if (!tg_emit_box_mesh(blk, n->x, top - h * 0.55, n->z,
                                   half * legpos + legw, 130.0, 200.0,
-                                  n->tx, n->tz, pier_page, 3000.0,
+                                  n->tx, n->tz, pier_page, pier_tile,
                                   0xFFFFFFFFu))
                 return 0;
             (*added)++;
@@ -6013,7 +6071,7 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
             if (style == 1) {                 /* second, upper brace for steel */
                 if (!tg_emit_box_mesh(blk, n->x, top - h * 0.22, n->z,
                                       half * legpos + legw, 110.0, 180.0,
-                                      n->tx, n->tz, pier_page, 3000.0,
+                                      n->tx, n->tz, pier_page, pier_tile,
                                       0xFFFFFFFFu))
                     return 0;
                 (*added)++;
@@ -6022,7 +6080,7 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
         } else {
             if (!tg_emit_box_mesh(blk, n->x, cy, n->z,
                                   450.0, h, 450.0,
-                                  n->tx, n->tz, pier_page, 3000.0,
+                                  n->tx, n->tz, pier_page, pier_tile,
                                   0xFFFFFFFFu))
                 return 0;
             (*added)++;
@@ -6045,7 +6103,7 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
             if (!tg_emit_box_mesh(blk, n->x + lx * (half + 300.0),
                                   n->y + th, n->z + lz * (half + 300.0),
                                   tw, th, tw, n->tx, n->tz,
-                                  pier_page, 3000.0, 0xFFFFFFFFu))
+                                  pier_page, pier_tile, 0xFFFFFFFFu))
                 return 0;
             (*added)++;
             tg_acct(TG_ACCT_BRIDGE, si);
@@ -6053,7 +6111,7 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
         /* Cross-member near the top of the towers, closing the gateway. */
         if (!tg_emit_box_mesh(blk, n->x, n->y + th * 1.7, n->z,
                               half + 540.0, 160.0, 200.0,
-                              n->tx, n->tz, pier_page, 3000.0,
+                              n->tx, n->tz, pier_page, pier_tile,
                               0xFFFFFFFFu))
             return 0;
         (*added)++;
@@ -6545,33 +6603,48 @@ static void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
         return;
     }
     if (phase > 0.0) {
-        /* Gorge: the bank pulls back from the deck and drops to just under the
-         * river, so the river plane is the visible floor beside the deck. Both
-         * the pull-back and the drop scale with the run phase, so the terrain is
-         * continuous with the ordinary skirt at the run ends. */
-        /* dy is a DROP BELOW the road, so it must never come out negative: a
-         * river plane sitting ABOVE its road node is not a gorge, and a negative
-         * drop lifts every piece of terrain built off this profile above the
-         * road. Clamp here rather than at each consumer -- see the ceiling note
-         * in tg_emit_far_band for what that looked like in frame. */
+        /* Gorge: the bank pulls back from the deck; the pull-back scales with the
+         * run phase so the terrain is continuous with the ordinary skirt at the
+         * run ends. `bed` is the R6 drop target (just under the river bed); it is
+         * clamped non-negative because a river plane above its road node is not a
+         * gorge and a negative drop would lift the terrain above the road. */
         double bed = nl->v[si].y - (tg_bridge_water_y(nl, si) - 150.0);
         if (bed < 0.0) bed = 0.0;
         p->d[0]  = phase * TD5_TG_GORGE_INSET;
-        p->dy[0] = phase * bed;
         /* [R6 item 14] The OUTER edge used to stay at the ordinary 24000 verge,
-         * so once the inner point had dropped to the bed the whole skirt was a
-         * wide near-flat GROUND (concrete-tile) shelf lying ACROSS the river --
-         * "patches of tile textures on top of the water", and the alternating
-         * grey/blue bands span-to-span that read as the water "not continuous"
-         * from above. Bring the outer edge in to a narrow submerged wall at the
-         * crown (~3000 past the inner point, at bed level, below the surface so
-         * the water plane hides it); the far-band is gated off over a bridge run,
-         * so beyond it there is only open water. Lerps back to the ordinary verge
-         * at the run ends (phase -> 0), staying continuous with the plain skirt. */
+         * so once the inner point dropped, the whole skirt was a wide near-flat
+         * GROUND (concrete-tile) shelf lying ACROSS the river. Bring the outer
+         * edge in to a narrow band at the crown, lerping back to the ordinary
+         * verge at the run ends so it stays continuous with the plain skirt. */
         p->d[1]  = TD5_TG_GROUND_WIDTH
                  + phase * (phase * TD5_TG_GORGE_INSET + 3000.0
                             - TD5_TG_GROUND_WIDTH);
-        p->dy[1] = TD5_TG_GROUND_DROP + phase * (bed - TD5_TG_GROUND_DROP);
+        /* [R7 item 17] "Below bridges only water should be rendered", still not
+         * true after R6. R6 dropped the skirt to the river BED (wy-150) but ramped
+         * there LINEARLY with phase, so across the whole INTERIOR of the run the
+         * concrete skirt sat ABOVE the water surface (wy+100) -- the "tiles at one
+         * height and water at a lower height on alternated spans" the user still
+         * sees. The bed was never the right target: the bridge-water plane
+         * (BRIDGE_WATER_HALF 32000) already covers the entire gorge, so anything
+         * at or above the water surface pokes through it. Drop the skirt just
+         * BELOW the water surface on a FAST ramp (fully submerged by ~30% into the
+         * run), so the interior shows only water while the run ENDS (phase -> 0)
+         * still rise to the bank as a shore. Both profile points share the depth,
+         * so the submerged strip is flat and wholly hidden by the water plane.
+         * TD5RE_AUTOTRACK_BRIDGE_SUBMERGE=0 restores the R6 bed ramp for an A/B. */
+        if (td5_env_flag_on("TD5RE_AUTOTRACK_BRIDGE_SUBMERGE")) {
+            const double surf = tg_bridge_water_y(nl, si)
+                + (k_biomes[tg_biome_for_span(si)].water ? 0.0 : 100.0);
+            double sub = nl->v[si].y - surf + 250.0;   /* 250 below the surface */
+            double r   = phase * (1.0 / 0.30);
+            if (sub < TD5_TG_GROUND_DROP) sub = TD5_TG_GROUND_DROP;
+            if (r > 1.0) r = 1.0;
+            p->dy[0] = TD5_TG_GROUND_DROP + r * (sub - TD5_TG_GROUND_DROP);
+            p->dy[1] = p->dy[0];
+        } else {
+            p->dy[0] = phase * bed;
+            p->dy[1] = TD5_TG_GROUND_DROP + phase * (bed - TD5_TG_GROUND_DROP);
+        }
         return;
     }
     if (!is_left) {
@@ -11788,6 +11861,60 @@ static void tg_emit_texture_page_r6_pier_steel(TG_Buf *out)
     }
 }
 
+/* [R7 item 9] Concrete TUNNEL PORTAL facade. The R6 portal was a single thin
+ * lintel beam over the mouth on TD5_TG_PAGE_R6_TUNNEL+4, so the entrance read as
+ * "a weird grey texture ... doesn't look like the entrance of a tunnel". Shipped
+ * TD5 has no portal-facade sprite to mine: its *TUN*.TGA billboards are interior
+ * "light at the end of the tunnel" glows (single/twin arch glows, edge-light
+ * streaks) and the mouth surround is darkened track MESH, confirmed by decoding
+ * all 12 environs *TUN* pages. So this page is authored to dress a proper facade
+ * FRAME (header + jambs, built in tg_emit_tunnel_swept) as cast concrete civil
+ * work: a bright coping band along the top, horizontal form-board courses and
+ * vertical form-joint lines over a warm-grey field, a weathered darker base.
+ * Opaque. y=0 is the TOP of the page (coping), so the frame maps V=0 to its top
+ * edge. */
+static void tg_emit_texture_page_r7_tunnel_portal(TG_Buf *out)
+{
+    unsigned int rng = 0x7A11B00Cu;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* 0..1 form-joint shadow, 2..12 concrete ramp, 13 bright coping, 14..15 base. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v = (i < 2)  ? (56 + i * 20)
+              : (i < 13) ? (120 + (i - 2) * 11)
+              : (i == 13) ? 238
+                          : (90 - (i - 14) * 22);
+        int b, g, r;
+        if (v < 0)   v = 0;
+        if (v > 255) v = 255;
+        b = v - 6; g = v; r = v + 8;                        /* faintly warm */
+        if (b < 0)   b = 0;
+        if (r > 255) r = 255;
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;              /* y=0 is the TOP */
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if (y < 4)                        idx = 13;    /* coping highlight  */
+        else if (y == 4 || y == 5)        idx = 1;     /* shadow under coping */
+        else if (y > 58)                  idx = 14 + (int)((rng >> 16) & 1); /* base */
+        else if ((y % 20) < 1)            idx = 1;     /* horizontal form course */
+        else if ((x % 32) < 1)            idx = 2;     /* sparse vertical joint */
+        else idx = 4 + (int)(((unsigned)((x >> 4) + (y >> 4)) + (rng >> 19)) % 7u);
+        if (idx > 15) idx = 15;
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 /* [R6 item 17] MASONRY pier face -- warm sandstone ashlar in staggered courses
  * (mortar lines every few rows, vertical joints offset course to course), so a
  * stone-style crossing reads as a masonry viaduct. Opaque. */
@@ -12211,6 +12338,9 @@ static int tg_emit_textures(TG_Buf *out)
     /* [R6 item 17] per-style pier faces: steel plate + masonry ashlar. */
     tg_emit_texture_page_r6_pier_steel(&pages[TD5_TG_PAGE_R6_BRIDGE + 1]);
     tg_emit_texture_page_r6_pier_stone(&pages[TD5_TG_PAGE_R6_BRIDGE + 2]);
+    /* [R7 item 9] concrete tunnel-portal facade (framed mouth, replaces the
+     * R6 thin lintel). */
+    tg_emit_texture_page_r7_tunnel_portal(&pages[TD5_TG_PAGE_R7_BRIDGE + 0]);
     /* [R4 CROSS item 9] cross-street asphalt with a longitudinal centre line. */
     tg_emit_texture_page_r4_cross(&pages[TD5_TG_PAGE_R4_CROSS + 0]);
     /* [R5 STRUCT item 1] solid concrete leg-face page for the gantry uprights. */
