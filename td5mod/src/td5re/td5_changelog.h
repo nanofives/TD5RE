@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 30 (distant texture quality)" },
+    { CL_ITEM,    "FIXED: road, wall and tunnel textures no longer" },
+    { CL_ITEM,    "  warp and ripple in the distance -- straight lane" },
+    { CL_ITEM,    "  lines stay straight all the way to the horizon" },
+    { CL_ITEM,    "  instead of kinking and then snapping back as" },
+    { CL_ITEM,    "  you drive up to them" },
+    { CL_ITEM,    "IMPROVED: distant road surface and lane markings" },
+    { CL_ITEM,    "  are smoother and stop shimmering as you drive" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 30 (auto-track on-road guard, round 8)" },
     { CL_ITEM,    "FIXED: ground and background terrain no longer" },
     { CL_ITEM,    "  lie ON TOP of the road where the track doubles" },

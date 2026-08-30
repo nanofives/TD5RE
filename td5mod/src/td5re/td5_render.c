@@ -1314,6 +1314,41 @@ void clip_and_submit_polygon(TD5_MeshVertex *vert_data, int vert_count,
     const float zfix = s_td6_car_zbias;   /* 0 = inactive */
     for (int i = 0; i < out_count; i++) {
         float inv_z = 1.0f / out_vz[i];
+#ifndef TD5RE_RELEASE
+        /* [FAR-SPAN WARP DIAG 2026-08-30] TD5RE_RHW_DIAG=1 measures how much
+         * submitted world geometry the OLD vs_pretransformed.hlsl guard
+         * (max(rhw, 1e-4) -> w capped at 10000) was actually collapsing to a
+         * single w, which is what degraded UV interpolation back to affine.
+         * Counts projected vertices past that view_z, and past the NEW 1e-6
+         * guard, so "did the clamp bind on real geometry, and on what share of
+         * the frame" is answered by measurement rather than inference.
+         * Reported every 500k vertices to race.log. Pure counting, no effect on
+         * output; compiled out of RELEASE. */
+        {
+            static int s_rhw_diag = -1;
+            static long long s_tot, s_over_10k, s_over_1m;
+            static float s_max_vz;
+            if (s_rhw_diag < 0) {
+                const char *e = getenv("TD5RE_RHW_DIAG");
+                s_rhw_diag = (e && e[0] && e[0] != '0') ? 1 : 0;
+            }
+            if (s_rhw_diag) {
+                float vz = out_vz[i];
+                s_tot++;
+                if (vz > 10000.0f)    s_over_10k++;   /* OLD clamp bound here */
+                if (vz > 1000000.0f)  s_over_1m++;    /* NEW clamp binds here */
+                if (vz > s_max_vz)    s_max_vz = vz;
+                if (s_tot >= 500000) {
+                    TD5_LOG_I(LOG_TAG,
+                        "rhw diag: verts=%lld past_old_clamp(vz>10000)=%lld (%.1f%%) "
+                        "past_new_clamp(vz>1e6)=%lld max_view_z=%.0f",
+                        s_tot, s_over_10k, 100.0 * (double)s_over_10k / (double)s_tot,
+                        s_over_1m, s_max_vz);
+                    s_tot = s_over_10k = s_over_1m = 0; s_max_vz = 0.0f;
+                }
+            }
+        }
+#endif
         clipped[i].screen_x = -out_vx[i] * s_focal_length * inv_z + s_center_x;
         clipped[i].screen_y = -out_vy[i] * s_focal_length * inv_z + s_center_y;
         /* [DA-T1 fix #4 2026-05-22] orig 0x00432362 region:

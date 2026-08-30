@@ -4239,9 +4239,33 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
             const char *e = getenv("TD5RE_FOLIAGE_MIPS");
             s_foliage_mips = (e && e[0] && e[0] != '0') ? 1 : 0;
         }
+        /* [FAR-SPAN ALIASING FIX 2026-08-30] Opaque (type-0) track pages -- road
+         * asphalt, lane markings, tunnel masonry, building walls -- were the one
+         * class NEVER mipped: the branch below only ever matched t==1/t==2, so
+         * every opaque page was created MipLevels=1 (d3d12_backend.c). The
+         * OPAQUE_LINEAR sampler asks for MIN_MAG_MIP_LINEAR, but with a single
+         * level there is nothing to minify into, so distant road surface and
+         * lane lines alias/shimmer and read as "jagged" until the camera closes
+         * in enough for the texel:pixel ratio to approach 1.
+         *
+         * Coverage preservation is a no-op here by construction: an opaque page
+         * is alpha=255 everywhere, so coverage at ref=0x80 is 1.0 at every
+         * level, d3d12_mip_preserve_coverage's boost-only search converges to
+         * scale 1.0 and returns early. The alpha-weighted RGB box filter also
+         * degenerates to a plain average under uniform alpha. So this reuses the
+         * existing chain builder unchanged.
+         *
+         * TD5RE_OPAQUE_MIPS=0 disables (A/B kill-switch; default ON). Costs ~33%
+         * VRAM on track pages. */
+        static int s_opaque_mips = -1;
+        if (s_opaque_mips < 0) {
+            const char *e = getenv("TD5RE_OPAQUE_MIPS");
+            s_opaque_mips = (e && e[0] == '0') ? 0 : 1;
+        }
         if (s_track_mips && format == 2 && page_index >= 0 && page_index < 700) {
             int t = td5_asset_get_page_transparency(page_index);
-            if (t == 1)      { want_track_mips = s_foliage_mips; mip_ref = 1;    }
+            if (t == 0)      { want_track_mips = s_opaque_mips;  mip_ref = 0x80; }
+            else if (t == 1) { want_track_mips = s_foliage_mips; mip_ref = 1;    }
             else if (t == 2) { want_track_mips = 1;              mip_ref = 0x80; }
         }
         if (want_track_mips)
