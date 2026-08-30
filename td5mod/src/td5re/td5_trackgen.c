@@ -9112,10 +9112,19 @@ static int tg_rail_page(int si)
 
 static int tg_guardrails_enabled(void)
 {
-    /* Default OFF until a frame confirms it, same discipline as tunnels and
-     * branches. NOTE td5_env_flag_off() returns 1 only when the value is
-     * literally "1" -- it means "opt in", despite the name. */
-    return td5_env_flag_off("TD5RE_AUTOTRACK_GUARDRAILS");
+    /* [R8 merge] Flipped to default ON. The old default was "OFF until a frame
+     * confirms it"; R8 VARIETY built four real guardrail pages for G1 ("different
+     * guardrails") and framed them, so the stated precondition is met -- and with
+     * the emitter off, that whole axis shipped invisible, since the rails a player
+     * actually saw were the bridge parapet.
+     *
+     * Verified on the merged tree before flipping (seed 99991, clean env):
+     * 1178 rails over 589 spans, on-road guard rejections UNCHANGED at 69 (the
+     * rails add no carriageway overlap), the road/branch-road/deck/gantry/tunnel
+     * invariant still 0, and the race reaches span 1699.
+     *
+     * TD5RE_AUTOTRACK_GUARDRAILS=0 restores the old opt-in behaviour. */
+    return td5_env_flag_on("TD5RE_AUTOTRACK_GUARDRAILS");
 }
 
 /* Should span si carry a barrier? Not every span: real roads are lined on the
