@@ -1448,7 +1448,40 @@ static int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
  * Emission deliberately does NOT depend on the lift threshold. The RANGE
  * decides, exactly as it does for tunnels, so a future grade or amplitude tweak
  * cannot silently delete every bridge again. */
-#define TD5_TG_BRIDGE_RUN     40       /* spans per deliberate bridge (item 13) */
+/* [R8 item 18] "You can make longer tunnels and bridges."
+ *
+ * 40 was chosen in R3 as the longest run the GRADE CAP allowed at crown height
+ * 2000: peak slope of the raised cosine is H*PI/RUN, and 2000*PI/40 = 157 units
+ * per 1500-unit span = grade 0.105 against the 0.120 cap. Length and height pull
+ * against that cap in OPPOSITE directions, which is the point -- lengthening is
+ * free of it. At 56 spans the same 2000 crown peaks at 2000*PI/56 = 112/span
+ * (grade 0.075), so the deck is 40% longer with MORE grade headroom than
+ * before, not less. Deck length goes from 60000 to 84000 world units.
+ *
+ * The run count is what falls: runs are chosen by hashing si/RUN at a fixed
+ * rate, so a longer RUN means fewer draws over the same track. That is the
+ * intended trade (fewer, bigger crossings), but it is also why this is verified
+ * by the element inventory on both seeds rather than assumed. */
+#define TD5_TG_BRIDGE_RUN_R3  40       /* pre-R8 run length (A/B baseline)    */
+#define TD5_TG_BRIDGE_RUN_R8  56       /* [R8 item 18] longer crossing        */
+
+/* MEASURED CONSEQUENCE, and the reason this is a gate rather than a new
+ * constant: runs are chosen by hashing si/RUN, so changing RUN does not
+ * lengthen the existing crossings -- it REPARTITIONS the track and draws an
+ * entirely new set of them. On seed 99991 the four runs at 1000-1039 /
+ * 1160-1199 / 1320-1359 / 1640-1679 become two at 1176-1231 / 1400-1455, and
+ * the two tunnels at 480-499 / 1520-1539 become one at 1248-1279. The user's
+ * reported spans (bridge 1031, tunnel 477) then contain no crossing at all, so
+ * the round's other five items could not be shown fixed where they were
+ * reported. Both layouts are therefore verified separately: the fixes at the
+ * spans the user named with LONGRUN off, and the class plus race completion
+ * with it on. Default ON -- the longer crossing is what was asked for. */
+static int tg_bridge_run_len(void)
+{
+    return td5_env_flag_on("TD5RE_R8_LONGRUN")
+         ? TD5_TG_BRIDGE_RUN_R8 : TD5_TG_BRIDGE_RUN_R3;
+}
+#define TD5_TG_BRIDGE_RUN     (tg_bridge_run_len())
 #define TD5_TG_BRIDGE_HEIGHT  2000.0   /* crown lift; bounded by max_grade */
 #define TD5_TG_BRIDGE_CHASM   2500.0   /* how far the ground/river drops below */
 /* Half-width of the river channel. Unlike the sea (which starts outboard of the
@@ -5546,8 +5579,23 @@ static int tg_emit_water(const TG_NodeList *nl, int si, double side,
     return 1;
 }
 
-/* Tunnels come in runs so a whole stretch is enclosed, not isolated spans. */
-#define TD5_TG_TUNNEL_RUN  20
+/* Tunnels come in runs so a whole stretch is enclosed, not isolated spans.
+ *
+ * [R8 item 18] 20 -> 32. A bore has no grade cap to respect (it follows the
+ * road, it does not shape it), so the only thing 20 was buying was a shorter
+ * stretch of the one thing the user asked to see more of. 32 spans is ~48000
+ * world units of enclosed road. The BRIDGE/TUNNEL interlock below is the real
+ * constraint on going further: a tunnel run yields to any bridge run within
+ * CLEAR spans, and both runs just got longer, so tunnel COUNT is the number to
+ * watch in the element inventory rather than to assume. */
+#define TD5_TG_TUNNEL_RUN_R3  20      /* pre-R8 bore length (A/B baseline) */
+#define TD5_TG_TUNNEL_RUN_R8  32      /* [R8 item 18] longer bore          */
+static int tg_tunnel_run_len(void)
+{
+    return td5_env_flag_on("TD5RE_R8_LONGRUN")
+         ? TD5_TG_TUNNEL_RUN_R8 : TD5_TG_TUNNEL_RUN_R3;
+}
+#define TD5_TG_TUNNEL_RUN  (tg_tunnel_run_len())
 
 /* [R4 item 19] Spans of ordinary ground a tunnel run must keep clear of any
  * bridge run, on either side. A deck runs into a bore with zero clearance today
@@ -5723,9 +5771,14 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
     const unsigned int lampc = 0xFFFFE8B4u; /* warm-white lamp glow (ARGB) */
     const int lining  = tg_tunnel_lining_page(si);
     const int lamp_pg = TD5_TG_PAGE_R6_TUNNEL + 5;      /* [item 8d] */
-    /* [R7 item 9] portal facade page (was the R6 thin-lintel page +4). */
-    const int portal_pg = td5_env_flag_on("TD5RE_AUTOTRACK_R7_PORTAL")
-                        ? TD5_TG_PAGE_R7_BRIDGE + 0 : TD5_TG_PAGE_R6_TUNNEL + 4;
+    /* [R7 item 9] portal facade page (was the R6 thin-lintel page +4).
+     * [R8 item 4] the R7 page IS the reported "grey-ish texture with lighter
+     * gray stripes" (dump: log/tgpage_301.ppm). Choose the R8 unbanded headwall
+     * instead; TD5RE_R8_PORTAL=0 puts the R7 page back for the A/B. */
+    const int portal_pg =
+        !td5_env_flag_on("TD5RE_AUTOTRACK_R7_PORTAL") ? TD5_TG_PAGE_R6_TUNNEL + 4
+      : td5_env_flag_on("TD5RE_R8_PORTAL")            ? TD5_TG_PAGE_R8_BRIDGE + 1
+      :                                                 TD5_TG_PAGE_R7_BRIDGE + 0;
     const int lamps_on = td5_env_flag_on("TD5RE_AUTOTRACK_TUNNEL_LAMPS");
     const double tile = 3000.0;
     const TG_Node *nd = &nl->v[si];
@@ -5834,21 +5887,41 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
             TG_Node fn = *nd;
             fn.x = nd->x + nd->tx * proud * outsign;
             fn.z = nd->z + nd->tz * proud * outsign;
+            /* [R8 item 4] V used to be the face's world height divided by the
+             * 3000-unit tile, so a jamb (2600 bore + 1500 header = 4100 tall)
+             * sampled V 0..1.37 and the page REPEATED a third of the way up --
+             * which is what put the R7 page's bright coping band across the
+             * middle of both jambs, twice per mouth. That is the "lighter gray
+             * stripes" the report names, and it is a mapping fault as much as an
+             * art one: any page with a distinctive row would show it.
+             *
+             * Map V over the FACE, 0 at its top edge to 1 at its bottom, so no
+             * face can ever sample the page more than once vertically. U keeps
+             * the world-lateral tiling (a portal is wider than it is tall and
+             * horizontal repetition across it is correct).
+             * TD5RE_R8_PORTAL=0 restores the R7 world-height V for the A/B. */
+            const int pv = td5_env_flag_on("TD5RE_R8_PORTAL");
+            #define TG_PORTAL_V(ylo, yhi, yy) \
+                (pv ? ((yhi) - (yy)) / ((yhi) - (ylo) > 1.0 ? (yhi) - (ylo) : 1.0) \
+                    : ((yt) - (yy)) / tile)
             /* One frame face: laterals [la..lb], y [ylo..yhi]; front + reverse. */
             #define TG_PORTAL_FACE(la, lb, ylo, yhi) do {                        \
-                TG_TUN_PUSH(&fn,(la),(yhi), (la)/tile,0.0,            0xFFFFFFFFu);\
-                TG_TUN_PUSH(&fn,(lb),(yhi), (lb)/tile,0.0,            0xFFFFFFFFu);\
-                TG_TUN_PUSH(&fn,(lb),(ylo), (lb)/tile,((yt)-(ylo))/tile,0xFFFFFFFFu);\
-                TG_TUN_PUSH(&fn,(la),(ylo), (la)/tile,((yt)-(ylo))/tile,0xFFFFFFFFu);\
-                TG_TUN_PUSH(&fn,(la),(yhi), (la)/tile,0.0,            0xFFFFFFFFu);\
-                TG_TUN_PUSH(&fn,(la),(ylo), (la)/tile,((yt)-(ylo))/tile,0xFFFFFFFFu);\
-                TG_TUN_PUSH(&fn,(lb),(ylo), (lb)/tile,((yt)-(ylo))/tile,0xFFFFFFFFu);\
-                TG_TUN_PUSH(&fn,(lb),(yhi), (lb)/tile,0.0,            0xFFFFFFFFu);\
+                const double v0 = TG_PORTAL_V((ylo),(yhi),(yhi));                 \
+                const double v1 = TG_PORTAL_V((ylo),(yhi),(ylo));                 \
+                TG_TUN_PUSH(&fn,(la),(yhi), (la)/tile,v0, 0xFFFFFFFFu);           \
+                TG_TUN_PUSH(&fn,(lb),(yhi), (lb)/tile,v0, 0xFFFFFFFFu);           \
+                TG_TUN_PUSH(&fn,(lb),(ylo), (lb)/tile,v1, 0xFFFFFFFFu);           \
+                TG_TUN_PUSH(&fn,(la),(ylo), (la)/tile,v1, 0xFFFFFFFFu);           \
+                TG_TUN_PUSH(&fn,(la),(yhi), (la)/tile,v0, 0xFFFFFFFFu);           \
+                TG_TUN_PUSH(&fn,(la),(ylo), (la)/tile,v1, 0xFFFFFFFFu);           \
+                TG_TUN_PUSH(&fn,(lb),(ylo), (lb)/tile,v1, 0xFFFFFFFFu);           \
+                TG_TUN_PUSH(&fn,(lb),(yhi), (lb)/tile,v0, 0xFFFFFFFFu);           \
             } while (0)
             TG_PORTAL_FACE(fl, fr, hb, yt);      /* header over the opening */
             TG_PORTAL_FACE(fl, lo, yb, yt);      /* left jamb  */
             TG_PORTAL_FACE(ro, fr, yb, yt);      /* right jamb */
             #undef TG_PORTAL_FACE
+            #undef TG_PORTAL_V
             tg_acct(TG_ACCT_R7_BRIDGE, si);
         } else {
             const double y0 = nd->y + height, y1 = y0 + 500.0;
@@ -6042,6 +6115,45 @@ static double tg_bridge_deck_y(const TG_NodeList *nl, int si)
  *
  * The run MINIMUM (tg_bridge_deck_y) is that guarantee, and it is the rule
  * tg_sea_level_y already uses for the sea for exactly the same reason. */
+/* [R8 item 11] Does the crossing containing si cross WATER? A property of the
+ * RUN, decided once, not of the span.
+ *
+ * MEASURED FAULT this replaces (seed 777, run 160-199): the old test was
+ * `k_biomes[tg_biome_for_span(si)].water` evaluated per span, and
+ * tg_biome_for_span DITHERS per span inside a biome blend band -- it hashes on
+ * si and returns the neighbouring biome for a random subset of spans near the
+ * boundary. Span 165 therefore drew the DRY branch while 164 and 166 drew the
+ * SEA branch, and the river surface stepped 1239 units down for exactly one
+ * span (R8BDIAG: si=165 surf=-9211 against -7972 either side). Everything
+ * downstream stepped with it -- the pier foot, the gorge bed, and the submerge
+ * depth of the bank -- which is the reported "alternation between water spans
+ * and tile spans at different height", one span wide, in the middle of a run.
+ *
+ * A body of water is one body. Ask the question once for the whole run and let
+ * every span in it agree, the same reasoning tg_bridge_deck_y already applies to
+ * the deck height and tg_sea_level_y to the sea. ANY water span carries the run:
+ * a crossing that touches the sea at either end is the sea's, so the two
+ * surfaces join instead of stepping. */
+/* Single A/B switch for the whole R8 item-11 rewrite (run-level water level,
+ * shore-shaped bank, longitudinally continuous ground slabs). Default ON;
+ * TD5RE_R8_BRIDGE_WATER=0 restores the R7 behaviour so a frame pair can be
+ * taken at one span with one variable changed. */
+static int tg_r8_bridge_water(void)
+{
+    return td5_env_flag_on("TD5RE_R8_BRIDGE_WATER");
+}
+
+static int tg_bridge_run_is_water(const TG_NodeList *nl, int si)
+{
+    int s0, s1, k;
+    if (!tg_r8_bridge_water() || !tg_span_in_bridge_run(si))
+        return k_biomes[tg_biome_for_span(si)].water;
+    tg_bridge_run_bounds(nl, si, &s0, &s1);
+    for (k = s0; k <= s1; k++)
+        if (k_biomes[tg_biome_for_span(k)].water) return 1;
+    return 0;
+}
+
 static double tg_bridge_water_y(const TG_NodeList *nl, int si)
 {
     /* [R6 item 14] A bridge over a WATER biome crosses the SEA, so its water has
@@ -6051,10 +6163,42 @@ static double tg_bridge_water_y(const TG_NodeList *nl, int si)
      * -- half of "the water is not continuous". Matching sea level makes the
      * water one continuous body and drags the gorge bed and the pier feet with it
      * (both derive from here). Over a DRY biome there is no sea to match, so keep
-     * the deep gorge river. */
-    if (k_biomes[tg_biome_for_span(si)].water)
-        return tg_sea_level_y(nl, si);
+     * the deep gorge river.
+     *
+     * [R8 item 11] Both halves are now RUN quantities. The water test is the
+     * run vote above. The sea level itself is per BIOME run, and a 40-span
+     * bridge run can straddle two of those, so take the MINIMUM across the
+     * crossing: at or below every span's own sea, hence never surfacing through
+     * a deck or a bank that was built against a lower neighbour. */
+    if (tg_bridge_run_is_water(nl, si)) {
+        int s0, s1, k;
+        double lo;
+        if (!tg_r8_bridge_water() || !tg_span_in_bridge_run(si))
+            return tg_sea_level_y(nl, si);
+        tg_bridge_run_bounds(nl, si, &s0, &s1);
+        lo = tg_sea_level_y(nl, s0);
+        for (k = s0 + 1; k <= s1; k++) {
+            const double v = tg_sea_level_y(nl, k);
+            if (v < lo) lo = v;
+        }
+        return lo;
+    }
     return tg_bridge_deck_y(nl, si) - TD5_TG_BRIDGE_CHASM - 300.0;
+}
+
+/* The VISIBLE river surface under a bridge run -- the y the water quad is drawn
+ * at, as opposed to tg_bridge_water_y's reference level.
+ *
+ * [R8 item 11] Single definition. Three call sites computed this offset
+ * independently (the water emitter, the coastline band, the gorge submerge
+ * ramp), each re-deriving the biome water test, so a change to that test had to
+ * be made in three places or the bank and the water it hides under would
+ * disagree. Over the sea the surface IS the reference level (they must be
+ * coplanar); over a dry gorge the +100 keeps the river just under its banks. */
+static double tg_bridge_water_surf_y(const TG_NodeList *nl, int si)
+{
+    return tg_bridge_water_y(nl, si)
+         + (tg_bridge_run_is_water(nl, si) ? 0.0 : 100.0);
 }
 
 /* How fully span si is "over the gorge", 0 at both ends of the bridge run and 1
@@ -6476,17 +6620,48 @@ static int tg_emit_bridge_rails(const TG_NodeList *nl, int si,
     if (si + 1 >= nl->count) return 1;
     if (!tg_span_is_bridge_deck(nl, si)) return 1;
     n1 = &nl->v[si + 1];
-    road0 = n0->width * 0.5;
-    road1 = n1->width * 0.5;
-    half0 = road0 + TD5_TG_BRIDGE_RAIL_OUT;
-    half1 = road1 + TD5_TG_BRIDGE_RAIL_OUT;
 
     for (s = 0; s < 2; s++) {
+        /* +1 = LEFT of travel (the lateral sign tg_append_row uses), -1 = right,
+         * which is the side a branch corridor bows out to. */
         const double side = s ? 1.0 : -1.0;
-        const double x0 = n0->x + n0->tz * side * half0;
-        const double z0 = n0->z - n0->tx * side * half0;
-        const double x1 = n1->x + n1->tz * side * half1;
-        const double z1 = n1->z - n1->tx * side * half1;
+        double x0, z0, x1, z1;
+        /* [R8 item 13] "At the beginning of bridge on span 161, if the bridge
+         * has sidewalk the guardrail should be on both sides."
+         *
+         * Both parapets were derived from `n->width * 0.5` -- the MAIN
+         * carriageway's own half width. On an ordinary span that is the deck
+         * edge and the rail lands right. On a FORK span it is not: the deck
+         * there carries the main half carriageway, the gore (with its raised
+         * avenue median -- the "sidewalk" in the report) and the branch
+         * corridor, and the corridor bows out to well past the main half width.
+         * So the right-hand parapet was planted in the MIDDLE of the deck, on
+         * the median, and the branch carriageway's outboard edge -- the one you
+         * are actually driving next to -- had no barrier at all.
+         *
+         * MEASURED (seed 777): bridge run 160-199 and fork 144-169 overlap at
+         * spans 160-169, so the reported span 161 is a forked deck. Same overlap
+         * exists at fork 510-631 / bridge 480-519.
+         *
+         * tg_carriageway_reach is the single definition of "outermost drivable
+         * lateral on this side" -- the R7 on-road guard and the ordinary
+         * guardrail emitter already ask it the same question. Asking it here
+         * puts each parapet on the true outboard edge of whatever the deck
+         * carries, so a forked deck is railed on both of ITS sides rather than
+         * on both sides of one of its carriageways. Off a fork it returns the
+         * main half width, so unforked decks are unchanged.
+         * TD5RE_R8_BRIDGE_RAIL_REACH=0 restores the main-width derivation. */
+        const int reach_on = td5_env_flag_on("TD5RE_R8_BRIDGE_RAIL_REACH");
+        road0 = reach_on ? tg_carriageway_reach(nl, si,     side)
+                         : n0->width * 0.5;
+        road1 = reach_on ? tg_carriageway_reach(nl, si + 1, side)
+                         : n1->width * 0.5;
+        half0 = road0 + TD5_TG_BRIDGE_RAIL_OUT;
+        half1 = road1 + TD5_TG_BRIDGE_RAIL_OUT;
+        x0 = n0->x + n0->tz * side * half0;
+        z0 = n0->z - n0->tx * side * half0;
+        x1 = n1->x + n1->tz * side * half1;
+        z1 = n1->z - n1->tx * side * half1;
         /* [R5 item 17b] Kerb first, so the deck is solid out to the barrier. */
         if (kerb) {
             const double ix0 = n0->x + n0->tz * side * road0;
@@ -6500,6 +6675,7 @@ static int tg_emit_bridge_rails(const TG_NodeList *nl, int si,
         if (!tg_emit_bridge_rail_panel(m, x0, n0->y, z0, x1, n1->y, z1,
                                        si, moff, pn))
             return 0;
+        tg_acct(TG_ACCT_R8_BRIDGE, si);
     }
 
     /* Overhead rib, every 6th span. [R4 item 17] The cross-beam alone floated:
@@ -6569,9 +6745,10 @@ static int tg_emit_bridge_water(const TG_NodeList *nl, int si,
     lx = n0->tz; lz = -n0->tx;              /* left unit */
     /* [R6 item 14] Over a water biome sit EXACTLY at sea level so the river and
      * the sea beyond the run are coplanar (no step). Over a dry biome the +100
-     * keeps the surface just under the banks as before. */
-    wy = tg_bridge_water_y(nl, si)
-       + (k_biomes[tg_biome_for_span(si)].water ? 0.0 : 100.0);
+     * keeps the surface just under the banks as before.
+     * [R8 item 11] via the shared surface accessor, so this and the bank that
+     * hides under it cannot be computed from two different water tests. */
+    wy = tg_bridge_water_surf_y(nl, si);
 
     px[0] = n0->x - lx * BW; pz[0] = n0->z - lz * BW;
     px[1] = n1->x - lx * BW; pz[1] = n1->z - lz * BW;
@@ -6633,7 +6810,7 @@ static int tg_emit_bridge_coast(const TG_NodeList *nl, int si,
     for (k = 0; k < ends; k++) {
         const TG_Node *nw = &nl->v[wnode[k]];
         const TG_Node *nn = &nl->v[lnode[k]];
-        const double wy = tg_bridge_water_y(nl, si) + 100.0;   /* river surface */
+        const double wy = tg_bridge_water_surf_y(nl, si);      /* river surface */
         const double gy = nn->y - 70.0;   /* land at road (== TD5_TG_GROUND_DROP,
                                             * whose #define sits below the GROUND
                                             * block; the 70u z-fight bias). */
@@ -6847,10 +7024,18 @@ static void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
          * so once the inner point dropped, the whole skirt was a wide near-flat
          * GROUND (concrete-tile) shelf lying ACROSS the river. Bring the outer
          * edge in to a narrow band at the crown, lerping back to the ordinary
-         * verge at the run ends so it stays continuous with the plain skirt. */
-        p->d[1]  = TD5_TG_GROUND_WIDTH
+         * verge at the run ends so it stays continuous with the plain skirt.
+         *
+         * [R8 item 11] "Back to the ordinary verge" was written as the literal
+         * 24000, and R6 CITY item 6 then narrowed the ordinary verge to 12000
+         * without this line hearing about it. MEASURED (seed 99991, R8BDIAG):
+         * span 1000 outer edge 12000, span 1001 outer edge 23864 -- an 11864
+         * lateral jump between two adjacent slabs at the run mouth. Take the
+         * base from tg_verge_reach() so the gorge lands on whatever the plain
+         * skirt actually reaches, by construction rather than by coincidence. */
+        p->d[1]  = tg_verge_reach()
                  + phase * (phase * TD5_TG_GORGE_INSET + 3000.0
-                            - TD5_TG_GROUND_WIDTH);
+                            - tg_verge_reach());
         /* [R7 item 17] "Below bridges only water should be rendered", still not
          * true after R6. R6 dropped the skirt to the river BED (wy-150) but ramped
          * there LINEARLY with phase, so across the whole INTERIOR of the run the
@@ -6865,14 +7050,50 @@ static void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
          * so the submerged strip is flat and wholly hidden by the water plane.
          * TD5RE_AUTOTRACK_BRIDGE_SUBMERGE=0 restores the R6 bed ramp for an A/B. */
         if (td5_env_flag_on("TD5RE_AUTOTRACK_BRIDGE_SUBMERGE")) {
-            const double surf = tg_bridge_water_y(nl, si)
-                + (k_biomes[tg_biome_for_span(si)].water ? 0.0 : 100.0);
+            /* [R8 item 11] R7's ramp was applied to BOTH profile points at once,
+             * so the bank was a FLAT SHELF whose single height ramped from road
+             * level to below the water and back. A flat shelf is above the water
+             * for every span where the ramp has not finished, and the ramp is
+             * symmetric in phase, so it is unfinished at BOTH ends of every run.
+             *
+             * MEASURED (seed 99991, run 1000-1039, R8BDIAG skirt vs surf):
+             * spans 1000-1007 and 1033-1039 -- 15 of 40 -- carried the shelf
+             * ABOVE the river surface, by up to 4782 at the mouth and 754 at
+             * span 1033. Span 1031 is where the user is standing when they
+             * report "alternation between water spans and tile spans at
+             * different height", and it is two spans before the shelf surfaces.
+             *
+             * The shelf is the wrong SHAPE, not the wrong height. A bank meets
+             * water by descending THROUGH the surface -- the rule
+             * TD5_TG_SHORE_VERGE/SHORE_END already encodes for the sea. So make
+             * the gorge a shore too: the INNER point carries the phase ramp (it
+             * is the bank top, at road level near the mouths and submerged at
+             * the crown), and everything beyond one bank-face width is pinned
+             * FULLY SUBMERGED regardless of phase. Then no span can show a flat
+             * horizontal slab above the water: the only ground above the surface
+             * is the sloping bank face, which is what a shore looks like. */
+            const double surf = tg_bridge_water_surf_y(nl, si);
             double sub = nl->v[si].y - surf + 250.0;   /* 250 below the surface */
             double r   = phase * (1.0 / 0.30);
+            double face;
             if (sub < TD5_TG_GROUND_DROP) sub = TD5_TG_GROUND_DROP;
             if (r > 1.0) r = 1.0;
             p->dy[0] = TD5_TG_GROUND_DROP + r * (sub - TD5_TG_GROUND_DROP);
-            p->dy[1] = p->dy[0];
+            /* Bank face: wide enough that the descent is a slope and not a
+             * cliff, and short enough that it is over well inside the river
+             * half-width (32000) at every phase. */
+            face = TD5_TG_SHORE_END - TD5_TG_SHORE_VERGE;   /* 6000 */
+            if (!tg_r8_bridge_water()) {
+                p->dy[1] = p->dy[0];        /* R7 flat shelf, for the A/B */
+            } else if (p->d[0] + face < p->d[1]) {
+                p->n     = 3;
+                p->d[2]  = p->d[1];
+                p->dy[2] = sub;
+                p->d[1]  = p->d[0] + face;
+                p->dy[1] = sub;
+            } else {
+                p->dy[1] = sub;      /* no room for a face: outer point is bed */
+            }
         } else {
             p->dy[0] = phase * bed;
             p->dy[1] = TD5_TG_GROUND_DROP + phase * (bed - TD5_TG_GROUND_DROP);
@@ -6929,28 +7150,135 @@ static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
         const double bnx = is_left ? nlx : nrx, bnz = is_left ? nlz : nrz;
         const double bfx = is_left ? flx : frx, bfz = is_left ? flz : frz;
         const double bny = is_left ? nly : nry, bfy = is_left ? fly : fry;
-        TG_GroundProf p;
+        TG_GroundProf pa, pb;
+        int nseg;
 
-        tg_ground_side(nl, si, is_left, water_side, &p);
-        for (k = 0; k + 1 < p.n; k++) {
-            const double d0 = p.d[k],  d1 = p.d[k + 1];
-            const double y0 = p.dy[k], y1 = p.dy[k + 1];
-            const double u0 = d0 / (double)TD5_TG_SPAN_LENGTH;
-            const double u1 = d1 / (double)TD5_TG_SPAN_LENGTH;
-            px[n]=bnx+ox*d0; py[n]=bny-y0; pz[n]=bnz+oz*d0;
-            uu[n]=u0; vv[n]=(double)si;     n++;
-            px[n]=bnx+ox*d1; py[n]=bny-y1; pz[n]=bnz+oz*d1;
-            uu[n]=u1; vv[n]=(double)si;     n++;
-            px[n]=bfx+gx*d1; py[n]=bfy-y1; pz[n]=bfz+gz*d1;
-            uu[n]=u1; vv[n]=(double)si+1.0; n++;
-            px[n]=bfx+gx*d0; py[n]=bfy-y0; pz[n]=bfz+gz*d0;
-            uu[n]=u0; vv[n]=(double)si+1.0; n++;
+        /* [R8 item 11] TWO profiles, one per END of the slab.
+         *
+         * This function used to evaluate the profile ONCE, at span si, and then
+         * use it for the slab's near edge (node si) AND its far edge (node
+         * si+1). Off a bridge run that is invisible because the profile is a
+         * constant, so the seam between consecutive slabs closes by accident.
+         * Inside a bridge run the profile is a steep function of the gorge
+         * phase, so slab(si)'s far edge was built from profile(si) while
+         * slab(si+1)'s near edge was built from profile(si+1) -- two different
+         * heights and two different lateral extents at the SAME node.
+         *
+         * MEASURED (seed 99991, run 1000-1039, R8BDIAG): the bank height moves
+         * up to 990 units and the inner pull-back up to 700 units from one span
+         * to the next near the run ends, so every span boundary there was a
+         * vertical crack of that size with the river visible through it. That is
+         * the per-span "alternation between water spans and tile spans at
+         * different height", and it is why a frame taken at the crown (where the
+         * profile is flat and the seams close) passed in rounds 6 and 7 while
+         * the complaint span kept coming back.
+         *
+         * Sampling both ends makes the slab a proper ruled surface between the
+         * two cross-sections: slab(si)'s far edge and slab(si+1)'s near edge are
+         * now the same profile evaluated at the same node, so they agree by
+         * construction at every span, on any profile, forever. Where the two
+         * ends have different point counts (the boundary between the seaward
+         * beach and the gorge) the index is clamped, which pairs the last real
+         * point with itself and closes the seam with a degenerate quad rather
+         * than a hole. */
+        tg_ground_side(nl, si, is_left, water_side, &pa);
+        if (tg_r8_bridge_water() && si + 1 < nl->count)
+            tg_ground_side(nl, si + 1, is_left, water_side, &pb);
+        else
+            pb = pa;                      /* R7 single-profile slab, for the A/B */
+        nseg = (pa.n > pb.n ? pa.n : pb.n) - 1;
+        for (k = 0; k < nseg; k++) {
+            const int ka0 = (k     < pa.n) ? k     : pa.n - 1;
+            const int ka1 = (k + 1 < pa.n) ? k + 1 : pa.n - 1;
+            const int kb0 = (k     < pb.n) ? k     : pb.n - 1;
+            const int kb1 = (k + 1 < pb.n) ? k + 1 : pb.n - 1;
+            const double a0 = pa.d[ka0],  a1 = pa.d[ka1];
+            const double b0 = pb.d[kb0],  b1 = pb.d[kb1];
+            const double ay0 = pa.dy[ka0], ay1 = pa.dy[ka1];
+            const double by0 = pb.dy[kb0], by1 = pb.dy[kb1];
+            px[n]=bnx+ox*a0; py[n]=bny-ay0; pz[n]=bnz+oz*a0;
+            uu[n]=a0/(double)TD5_TG_SPAN_LENGTH; vv[n]=(double)si;     n++;
+            px[n]=bnx+ox*a1; py[n]=bny-ay1; pz[n]=bnz+oz*a1;
+            uu[n]=a1/(double)TD5_TG_SPAN_LENGTH; vv[n]=(double)si;     n++;
+            px[n]=bfx+gx*b1; py[n]=bfy-by1; pz[n]=bfz+gz*b1;
+            uu[n]=b1/(double)TD5_TG_SPAN_LENGTH; vv[n]=(double)si+1.0; n++;
+            px[n]=bfx+gx*b0; py[n]=bfy-by0; pz[n]=bfz+gz*b0;
+            uu[n]=b0/(double)TD5_TG_SPAN_LENGTH; vv[n]=(double)si+1.0; n++;
         }
     }
 
     seg_nq = n / 4;
     tg_acct(TG_ACCT_TERRAIN, si);      /* one slab covering both verges */
     return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
+}
+
+/* ===================== [R8 BRIDGE] MEASUREMENT HARNESS =====================
+ *
+ * Rounds 6 and 7 both shipped bridge fixes on the strength of a frame and both
+ * came back. The reason is structural: everything under a deck is computed from
+ * four independent heights (the node, the run-minimum deck, the water surface,
+ * the gorge skirt) and a frame shows their DIFFERENCE at one span only. This
+ * dumps all four, per span, for every bridge run and every tunnel mouth, so a
+ * claim about pier feet or skirt/water ordering is a column of numbers rather
+ * than a photograph.
+ *
+ * Read-only: it re-evaluates the same pure functions the emitters call and
+ * writes a CSV-ish line per span. TD5RE_R8_BRIDGE_DIAG=1 (opt-in; off by
+ * default so ordinary runs are not slowed by ~200 log lines). */
+static void tg_r8_bridge_diag(const TG_NodeList *nl)
+{
+    int si;
+
+    if (!td5_env_flag_off("TD5RE_R8_BRIDGE_DIAG")) return;
+
+    TD5_LOG_I(LOG_TAG, "R8BDIAG hdr "
+              "si,phase,node_y,deckmin,water_y,surf,bed,"
+              "skirt_in_y,skirt_out_y,skirt_in_d,skirt_out_d,"
+              "pier,pier_top,pier_bot,style,waterq,seaward");
+    for (si = 0; si + 1 < nl->count; si++) {
+        double phase, wy, surf, bed, ptop, pbot, h;
+        TG_GroundProf pl, pr;
+        const TG_Node *n = &nl->v[si];
+        const double wsd = tg_water_side(si);
+        int style, pitch, has_pier, seaward;
+
+        if (!tg_span_in_bridge_run(si)) continue;
+        phase = tg_bridge_gorge_phase(nl, si);
+        wy    = tg_bridge_water_y(nl, si);
+        surf  = tg_bridge_water_surf_y(nl, si);
+        bed   = wy - 150.0;
+        style = tg_bridge_style(si);
+        pitch = tg_bridge_pier_pitch(style);
+        has_pier = ((si % pitch) == 0);
+        ptop  = n->y - TD5_TG_BRIDGE_UNDER;
+        h     = (ptop - (wy - 400.0)) * 0.5;
+        if (h < 150.0) h = 150.0;
+        pbot  = ptop - 2.0 * h;
+        tg_ground_side(nl, si, 1, wsd, &pl);
+        tg_ground_side(nl, si, 0, wsd, &pr);
+        seaward = (wsd > 0.0);
+        TD5_LOG_I(LOG_TAG, "R8BDIAG %d,%.3f,%.0f,%.0f,%.0f,%.0f,%.0f,"
+                  "%.0f,%.0f,%.0f,%.0f,%d,%.0f,%.0f,%d,%d,%d",
+                  si, phase, n->y, tg_bridge_deck_y(nl, si), wy, surf, bed,
+                  n->y - pl.dy[0], n->y - pl.dy[pl.n - 1],
+                  pl.d[0], pl.d[pl.n - 1],
+                  has_pier, ptop, pbot, style,
+                  tg_water_span_clear(si), seaward);
+    }
+    for (si = 1; si + 1 < nl->count; si++) {
+        double bh, bs;
+        if (!tg_span_in_tunnel(si)) continue;
+        if (tg_span_in_tunnel(si - 1) && tg_span_in_tunnel(si + 1)) continue;
+        tg_tunnel_bore(nl, si, &bh, &bs);
+        TD5_LOG_I(LOG_TAG, "R8TDIAG mouth si=%d lining_page=%d portal_page=%d "
+                  "bore_half=%.0f shift=%.0f node_y=%.0f",
+                  si, tg_tunnel_lining_page(si),
+                  !td5_env_flag_on("TD5RE_AUTOTRACK_R7_PORTAL")
+                      ? TD5_TG_PAGE_R6_TUNNEL + 4
+                  : td5_env_flag_on("TD5RE_R8_PORTAL")
+                      ? TD5_TG_PAGE_R8_BRIDGE + 1 : TD5_TG_PAGE_R7_BRIDGE + 0,
+                  bh, bs, nl->v[si].y);
+    }
 }
 
 /* [R7 item 18] "Water near the road but trees floating in the air ... add a
@@ -7330,7 +7658,16 @@ static int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
      * far that edge is from the road centre. */
     const double bl0 = sh0 + half0, bl1 = sh1 + half1;   /* branch left edges */
     const double gw0 = -bl0, gw1 = -bl1;                 /* gore widths (>=0)  */
-    const int    treat = ((unsigned)fork_index) % 3;     /* 0 plant 1 bar 2 kerb */
+    /* [R8 item 17] Same rule as the gore surface: a PLANTED median (treat 0,
+     * grass top) is not legal inside a bore. Substitute the concrete barrier,
+     * which is what a real divided tunnel carries, for the spans that are
+     * actually enclosed -- the swap lands on the portal line, where a material
+     * change belongs. Only the planted treatment is affected; a kerbed island
+     * indoors is fine. */
+    const int    treat = (tg_span_in_tunnel(si) &&
+                          td5_env_flag_on("TD5RE_R8_BORE_MEDIAN") &&
+                          (((unsigned)fork_index) % 3) == 0)
+                       ? 1 : (int)(((unsigned)fork_index) % 3);
     const double mw_cap = (treat == 1) ? 260.0 : 520.0;  /* island half width  */
     const double H      = (treat == 1) ? 360.0 : (treat == 0 ? 220.0 : 150.0);
     const int    page   = (treat == 0) ? TD5_TG_PAGE_GREEN
@@ -10630,13 +10967,28 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                          * boundary crossing the fork. TD5RE_R7_MEDIAN_STABLE=0
                          * restores the per-span page for an A/B. */
                         {
-                            const int gore_page =
+                            int gore_page =
                                 td5_env_flag_on("TD5RE_R7_MEDIAN_STABLE")
                                     ? tg_fork_gore_page(fi)
                                     : k_biomes[tg_biome_for_span(si)].ground_page;
+                            /* [R8 item 17] "Avoid green medians within tunnels
+                             * like on span 562." The gore's surface is the
+                             * BIOME's ground page, and the biome does not stop
+                             * at a portal -- so where a fork runs through a bore
+                             * (seed 777: fork 510-631 crosses tunnel 560-579,
+                             * biome ALPINE) the median between the two
+                             * carriageways was grass, indoors. The bore decides
+                             * what is legal inside it, the same rule that keeps
+                             * sidewalks and guardrails out of a tunnel; a bore
+                             * floor is made surface. */
+                            if (tg_span_in_tunnel(si) &&
+                                td5_env_flag_on("TD5RE_R8_BORE_MEDIAN"))
+                                gore_page = TD5_TG_PAGE_R8_BRIDGE + 0;
                             if (!tg_emit_gore(nl, si, sh0, sh1, gw0, gw1,
                                               gore_page, &meshes))
                                 ok = 0;
+                            if (tg_span_in_tunnel(si))
+                                tg_acct(TG_ACCT_R8_BRIDGE, si);
                         }
                         /* Items 9c/10: where the fork is TIGHT (an avenue) the
                          * gore is a slim central median, not a wide split -- give
@@ -12421,6 +12773,116 @@ static void tg_emit_texture_page_r7_tunnel_portal(TG_Buf *out)
     }
 }
 
+/* [R8 item 17] BORE FLOOR / tunnel median surface. Grey made concrete with a
+ * faint aggregate speckle and no directional structure -- the gore is a
+ * horizontal strip seen at a shallow angle down the bore, so any axis-aligned
+ * line in the page shears into a stripe (the rule the GROUND page comment sets
+ * out). Deliberately darker than the roadside sidewalk page so it sits in the
+ * bore's shadowed interior instead of glowing. Opaque. */
+static void tg_emit_texture_page_r8_bore_median(TG_Buf *out)
+{
+    unsigned int rng = 0x8B0DE117u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* One narrow neutral ramp -- dim concrete, cool rather than warm so it
+     * reads as indoor surface next to the lit portal. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v = 74 + i * 5;                       /* 74..149 */
+        tg_put_u8(out, (unsigned)(v + 6 > 255 ? 255 : v + 6));   /* b */
+        tg_put_u8(out, (unsigned)v);                             /* g */
+        tg_put_u8(out, (unsigned)(v > 4 ? v - 4 : 0));           /* r */
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        /* Low-frequency patch + per-texel grain, no grid. */
+        idx = 5 + (int)(((rng >> 17) & 7u));
+        if (((rng >> 26) & 31u) == 0u) idx = 2;   /* sparse dark aggregate */
+        if (idx > 15) idx = 15;
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
+/* [R8 item 4] TUNNEL PORTAL headwall, replacing TD5_TG_PAGE_R7_BRIDGE+0.
+ *
+ * The complaint sharpened this round from "the mouth looks weird" to a specific
+ * one: "I don't want you to use this grey-ish texture on this place, the one
+ * with LIGHTER GRAY STRIPES." Dumping the page that was actually being chosen
+ * (log/tgpage_301.ppm, TD5RE_R8_TEXDUMP=1) shows exactly that and identifies
+ * where the stripes come from -- two independent sources, both in the R7 page:
+ *
+ *   - a near-white coping band across rows 0..3 with a dark shadow line under
+ *     it, and
+ *   - a dark form-course line every 20 rows down the whole page.
+ *
+ * On the header those read as one coping, which is what they were for. On the
+ * JAMBS they do not: the jamb face is (bore height 2600 + header 1500) = 4100
+ * tall and V was scaled by the 3000-unit world tile, so the page repeated 1.37
+ * times up each jamb and the bright coping band reappeared a third of the way
+ * up -- a light horizontal stripe across the middle of a concrete pier, twice,
+ * on both jambs of every mouth.
+ *
+ * So this page carries NO axis-aligned banding at all. A portal headwall is one
+ * cast pour: low-frequency weathering patches, streaking down from the top
+ * where water runs, per-texel grain, and nothing periodic. The coping is now a
+ * geometric fact (the header slab's own top edge), not a stripe painted into a
+ * tiling page, so it cannot repeat no matter how the face is mapped. Same rule
+ * the GROUND page comment states for terrain, applied to a vertical face.
+ *
+ * NOT the art-mining outcome the round asked for: shipped level textures are
+ * unnamed tex_NNN.png and identifying a real portal headwall among them was out
+ * of reach this round. This is authored, and it is a page CHOICE change with
+ * both pages dumped so the swap is auditable. */
+static void tg_emit_texture_page_r8_tunnel_portal(TG_Buf *out)
+{
+    unsigned int rng = 0xC0117A15u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* One narrow, low-contrast concrete ramp. Narrow ON PURPOSE: the previous
+     * page spread 56..238, and that range is what let a band read as a stripe
+     * at distance. 96..171 keeps the face legible as concrete while making any
+     * residual pattern sub-threshold. Faintly warm, like cast concrete. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v = 96 + i * 5;
+        int b = v - 5, g = v, r = v + 7;
+        if (b < 0) b = 0;
+        if (r > 255) r = 255;
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        /* Two superimposed low-frequency patch fields at coprime cell sizes, so
+         * the sum has no period inside the page and no visible cell grid. */
+        idx = 7
+            + (int)((((unsigned)(x / 7) * 2654435761u) >> 29) & 3u)
+            - (int)((((unsigned)(y / 11) * 2246822519u) >> 29) & 3u);
+        /* Vertical weather streaking: slowly varying in x, biased downward, and
+         * deliberately NOT a repeating column -- the darkening is a function of
+         * a hash of the column, not of x modulo anything. */
+        if (((((unsigned)x * 2654435761u) >> 27) & 7u) == 0u && y > 8)
+            idx -= 1 + (y * 2) / TD5_TG_TEX_DIM;
+        idx += (int)((rng >> 22) & 1u);                  /* per-texel grain */
+        if (idx < 0)  idx = 0;
+        if (idx > 15) idx = 15;
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 /* [R6 item 17] MASONRY pier face -- warm sandstone ashlar in staggered courses
  * (mortar lines every few rows, vertical joints offset course to course), so a
  * stone-style crossing reads as a masonry viaduct. Opaque. */
@@ -12879,6 +13341,12 @@ static int tg_emit_textures(TG_Buf *out)
     /* [R7 item 9] concrete tunnel-portal facade (framed mouth, replaces the
      * R6 thin lintel). */
     tg_emit_texture_page_r7_tunnel_portal(&pages[TD5_TG_PAGE_R7_BRIDGE + 0]);
+    /* [R8 item 17] bore floor / tunnel median concrete (replaces the biome
+     * grass page on a fork gore that runs through a tunnel). */
+    tg_emit_texture_page_r8_bore_median(&pages[TD5_TG_PAGE_R8_BRIDGE + 0]);
+    /* [R8 item 4] unbanded cast-concrete portal headwall (replaces the R7 page
+     * whose coping band repeated up the jambs as "lighter gray stripes"). */
+    tg_emit_texture_page_r8_tunnel_portal(&pages[TD5_TG_PAGE_R8_BRIDGE + 1]);
     /* [R4 CROSS item 9] cross-street asphalt with a longitudinal centre line. */
     tg_emit_texture_page_r4_cross(&pages[TD5_TG_PAGE_R4_CROSS + 0]);
     /* [R5 STRUCT item 1] solid concrete leg-face page for the gantry uprights. */
@@ -12889,6 +13357,39 @@ static int tg_emit_textures(TG_Buf *out)
             for (i = 0; i < count; i++) tg_buf_free(&pages[i]);
             return 0;
         }
+    }
+
+    /* [R8 BRIDGE item 4] The complaint about the tunnel mouth is a page CHOICE
+     * ("this grey-ish texture, the one with lighter gray stripes"), and two
+     * rounds were spent arguing about pages by their NUMBER. Dump every
+     * assembled page as a PPM so a selection claim can be looked at instead of
+     * asserted. TD5RE_R8_TEXDUMP=1; writes log/tgpage_NNN.ppm. */
+    if (td5_env_flag_off("TD5RE_R8_TEXDUMP")) {
+        unsigned p;
+        for (p = 0; p < count; p++) {
+            char path[160];
+            FILE *f;
+            const unsigned char *b = pages[p].b;
+            unsigned paln;
+            int t;
+            if (pages[p].len < 8u + 3u * 16u + (unsigned)TD5_TG_TEX_TEXELS)
+                continue;
+            paln = (unsigned)b[4] | ((unsigned)b[5] << 8)
+                 | ((unsigned)b[6] << 16) | ((unsigned)b[7] << 24);
+            if (paln == 0u || paln > 256u) continue;
+            snprintf(path, sizeof(path), "log/tgpage_%03u.ppm", p);
+            f = fopen(path, "wb");
+            if (!f) continue;
+            fprintf(f, "P6\n%d %d\n255\n", TD5_TG_TEX_DIM, TD5_TG_TEX_DIM);
+            for (t = 0; t < TD5_TG_TEX_TEXELS; t++) {
+                unsigned idx = b[8 + 3u * paln + (unsigned)t];
+                const unsigned char *c = b + 8 + 3u * (idx < paln ? idx : 0u);
+                fputc(c[2], f); fputc(c[1], f); fputc(c[0], f);  /* BGR -> RGB */
+            }
+            fclose(f);
+        }
+        TD5_LOG_I(LOG_TAG, "trackgen: R8 TEXDUMP wrote %u page PPMs to log/",
+                  count);
     }
 
     tg_put_u32(out, count);
@@ -13126,6 +13627,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         }
     }
     tg_acct_report(nspans);
+    tg_r8_bridge_diag(&nl);            /* [R8 BRIDGE] opt-in measurement dump */
     ok = 1;
 
 done:
