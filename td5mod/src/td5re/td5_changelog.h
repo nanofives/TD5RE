@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 30 (auto-track flora)" },
+    { CL_ITEM,    "FIXED: the orange tree at span 462 was a foliage" },
+    { CL_ITEM,    "  BAND stood on end and cut off at the sides." },
+    { CL_ITEM,    "  Upright trees are now chosen by measuring the" },
+    { CL_ITEM,    "  page, so no band-type page is ever planted." },
+    { CL_ITEM,    "FIXED: trees no longer float over the sea or a" },
+    { CL_ITEM,    "  coastline; each rests on the sampled ground." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 29 (auto-track tunnels)" },
     { CL_ITEM,    "FIXED: distant scenery no longer shows through a" },
     { CL_ITEM,    "  tunnel as grey slabs standing in the road." },
