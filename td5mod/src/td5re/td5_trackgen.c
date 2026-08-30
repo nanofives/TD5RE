@@ -436,6 +436,13 @@ static int tg_road_page(int si);
  * (777 item 14), both of which are "one page repeated" complaints. */
 #define TD5_TG_PAGE_R8_TERRAIN (TD5_TG_PAGE_R8_BASE + 42)
 #define TD5_TG_R8_TERRAIN_N    12
+/* Allocation inside the reserved block. Slots 8..11 are unused headroom; the
+ * block size stays 12 so no other area's base moves. */
+#define TD5_TG_PAGE_R8_TREELINE (TD5_TG_PAGE_R8_TERRAIN + 0)  /* +0..+3, 4 variants */
+#define TD5_TG_R8_TREELINE_N    4
+#define TD5_TG_PAGE_R8_SNOWGND  (TD5_TG_PAGE_R8_TERRAIN + 4)  /* +4..+6, 3 variants */
+#define TD5_TG_R8_SNOWGND_N     3
+#define TD5_TG_PAGE_R8_SNOWMED  (TD5_TG_PAGE_R8_TERRAIN + 7)  /* snow median top    */
 
 /* VARIETY is the widest block in the round by design: G1 asks for more building
  * variety AND day/night skyboxes AND start/finish banner variety AND guardrail
@@ -682,7 +689,7 @@ typedef enum {
 
     TG_ACCT_R8_BRIDGE,      /* BRIDGE (99991 4,10,11; 777 13,17,18) rename */
 
-    TG_ACCT_R8_TERRAIN,     /* TERRAIN(99991 5; 777 14,15,16)  rename in place */
+    TG_ACCT_R8_TERRAIN,     /* TERRAIN 99991 5; 777 14,15,16: extent + variety */
 
     TG_ACCT_R8_VARIETY,     /* VARIETY(G1; 99991 6)         rename in place */
 
@@ -759,7 +766,7 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
 
     "r8-bridge",            /* BRIDGE  */
 
-    "r8-terrain",           /* TERRAIN */
+    "r8-terrain",           /* far-band ground restored + far shore + treeline/snow pages */
 
     "r8-variety",           /* VARIETY */
 
@@ -7466,7 +7473,36 @@ static int tg_ground_page_for_span(int si, const TG_Biome *b)
     if (!tg_biome_is_snow(b)) return b->ground_page;
     if (tg_span_in_tunnel(si)) return b->ground_page;
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_SNOW")) return b->ground_page;
+    /* [R8 TERRAIN item 16] "use different snow ground textures too". One page
+     * used to cover every snow span on the track. Pick a variant per biome CELL,
+     * not per span: R7 item 12 is the recorded cost of a per-span page roll (a
+     * fork's median DITHERED between two pages span by span), so the selector
+     * keys on the hard cell index and one variant runs a whole 150-span cell.
+     * TD5RE_R8_TERRAIN_SNOW=0 restores the single page. */
+    if (td5_env_flag_on("TD5RE_R8_TERRAIN_SNOW")) {
+        const unsigned h = (unsigned)((si < 0 ? 0 : si) / TD5_TG_BIOME_RUN)
+                         * 2654435761u;
+        return TD5_TG_PAGE_R8_SNOWGND
+             + (int)((h >> 15) % (unsigned)TD5_TG_R8_SNOWGND_N);
+    }
     return TD5_TG_PAGE_SNOW;
+}
+
+/* [R8 TERRAIN item 16] The MEDIAN surface in a snow biome. A gore floor and an
+ * avenue island both inherited the biome's own ground page, which on an icy
+ * biome is the green summer page (tg_fork_gore_page reads k_biomes[].ground_page
+ * directly, bypassing the SNOW override in tg_ground_page_for_span) -- so a snow
+ * run had a green strip down the middle of its avenues. Returns the ploughed-snow
+ * page, which is deliberately NOT the snow GROUND page: the user asked for the
+ * median to be snowy "but a different texture". Returns `fallback` off snow. */
+static int tg_r8_median_page(int si, int fallback)
+{
+    const TG_Biome *b = &k_biomes[tg_biome_cell_index(si)];
+    if (!td5_env_flag_on("TD5RE_R8_TERRAIN_SNOW")) return fallback;
+    if (!tg_biome_is_snow(b)) return fallback;
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_SNOW")) return fallback;
+    if (tg_span_in_tunnel(si)) return fallback;
+    return TD5_TG_PAGE_R8_SNOWMED;
 }
 
 /* Lateral clearance the RIGHT-hand skirt must leave at span si so it does not
@@ -7939,9 +7975,17 @@ static int tg_flora_plant(const TG_NodeList *nl, int si, const TG_Biome *b,
  * per-span roll. */
 static int tg_fork_gore_page(int fork_index)
 {
+    int si, page;
     if (fork_index < 0 || fork_index >= s_fork_count)
         return k_biomes[0].ground_page;
-    return k_biomes[tg_biome_cell_index(s_forks[fork_index].F)].ground_page;
+    si   = s_forks[fork_index].F;
+    page = k_biomes[tg_biome_cell_index(si)].ground_page;
+    /* [R8 TERRAIN item 16] On an icy biome that ground_page is still the green
+     * summer page -- this reads k_biomes directly and so never saw the SNOW
+     * override. Route it to the ploughed-snow median page instead. Keyed on the
+     * fork's HARD start cell exactly as the rest of this function is, so the
+     * median stays ONE material for the whole fork (the R7 item 12 contract). */
+    return tg_r8_median_page(si, page);
 }
 
 /* `half_n` / `half_f` are the branch carriageway's OWN half width at each end of
@@ -8227,7 +8271,12 @@ static int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
                        ? 1 : (int)(((unsigned)fork_index) % 3);
     const double mw_cap = (treat == 1) ? 260.0 : 520.0;  /* island half width  */
     const double H      = (treat == 1) ? 360.0 : (treat == 0 ? 220.0 : 150.0);
-    const int    page   = (treat == 0) ? TD5_TG_PAGE_GREEN
+    /* [R8 TERRAIN item 16] A PLANTED median (treat 0, grass top) in a snow biome
+     * is a green strip between two icy carriageways -- the verbatim complaint.
+     * Snow it over with the ploughed-snow page, which is distinct from the snow
+     * GROUND page so the median still reads as its own surface. The barrier and
+     * kerb treatments are man-made and keep their concrete. */
+    const int    page   = (treat == 0) ? tg_r8_median_page(si, TD5_TG_PAGE_GREEN)
                         : (treat == 1) ? TD5_TG_PAGE_RAIL : TD5_TG_PAGE_SIDEWALK;
     /* Item 8: the two vertical side walls must NOT wear the TOP page. A planted
      * median (treat 0, GREEN top) painted grass up its walls -- verbatim "grass
@@ -11155,6 +11204,76 @@ static int tg_r5_treeline_fix(void)
     return td5_env_flag_on("TD5RE_R5_FLORA_TREELINE");
 }
 
+/* [R8 TERRAIN item 14] "the background texture for tree lines ... looks
+ * STRETCHED and VERY REPEATED, is the texture bigger than one span? should you
+ * use more texture variety?"
+ *
+ * The user's own hypothesis, checked rather than assumed, and it is half right.
+ * MEASURED against the shipped R7 ridge:
+ *   - horizontal: R5 item 16 already tiles the ridge by its ACTUAL world width
+ *     at one tile per TD5_TG_SPAN_LENGTH, so a tile is 1500 world units wide --
+ *     exactly one span, not bigger.
+ *   - vertical: v runs 0..1 over the WHOLE wall in one go, and the wall is
+ *     TD5_TG_RIDGE_BASE (4500) plus up to 3600 of hill roll, floored at
+ *     TD5_TG_RIDGE_MIN_UP (1200) and lifted further to clear the road it is
+ *     seen from. So one 64x64 tile is drawn 1500 wide by ~4500 tall.
+ * That is a 1:3 vertical stretch of a square page, which is the "stretched"
+ * half of the report. The "very repeated" half is a separate cause: the ridge
+ * has always drawn on ONE page for the entire track, and every far-group
+ * restarts u at 0, so the same four tiles recur every four spans forever.
+ *
+ * Two independent fixes, two knobs, because they are two defects:
+ *   ASPECT: tile horizontally by the wall's own crest height instead of by the
+ *     span length, so a tile is as wide as it is tall and the page is drawn at
+ *     the ratio it was authored at.
+ *   VARY:  four tree-line pages instead of one, picked per far-group, plus a
+ *     per-group integer u phase so the tile sequence does not restart at the
+ *     same texel column. The phase is an INTEGER number of tiles, so the page
+ *     still wraps exactly and group-to-group joins stay continuous. */
+static int tg_r8_treeline_aspect(void)
+{
+    return td5_env_flag_on("TD5RE_R8_TERRAIN_TREELINE_ASPECT");
+}
+
+static int tg_r8_treeline_vary(void)
+{
+    return td5_env_flag_on("TD5RE_R8_TERRAIN_TREELINE_VARY");
+}
+
+/* Which tree-line page a far-group draws on. Keyed on the group's FIRST span so
+ * the two ends of one quad can never disagree, and hashed rather than taken
+ * modulo so neighbouring groups do not walk the variants in a visible cycle. */
+/* [R8 item 14] Measured tiling of every tree-line ridge actually emitted, so
+ * "stretched" and "repeated" are reported as numbers rather than judged from a
+ * screenshot. tile_w / tile_h are the WORLD size one 64x64 page tile is drawn
+ * at; their ratio is the stretch. pages[] counts how many ridges landed on each
+ * variant slot. Reported by tg_r8_terrain_extent_report. */
+static double s_r8_tl_w, s_r8_tl_h, s_r8_tl_ratio_min, s_r8_tl_ratio_max;
+static int    s_r8_tl_n, s_r8_tl_pages[TD5_TG_R8_TREELINE_N + 1];
+
+static void tg_r8_tl_note(double tile_w, double tile_h, int page)
+{
+    const double r = (tile_h > 1.0) ? tile_w / tile_h : 0.0;
+    if (!s_r8_tl_n) { s_r8_tl_ratio_min = r; s_r8_tl_ratio_max = r; }
+    if (r < s_r8_tl_ratio_min) s_r8_tl_ratio_min = r;
+    if (r > s_r8_tl_ratio_max) s_r8_tl_ratio_max = r;
+    s_r8_tl_w += tile_w; s_r8_tl_h += tile_h; s_r8_tl_n++;
+    if (page >= TD5_TG_PAGE_R8_TREELINE &&
+        page <  TD5_TG_PAGE_R8_TREELINE + TD5_TG_R8_TREELINE_N)
+        s_r8_tl_pages[page - TD5_TG_PAGE_R8_TREELINE]++;
+    else
+        s_r8_tl_pages[TD5_TG_R8_TREELINE_N]++;   /* the single legacy page */
+}
+
+static int tg_r8_treeline_page(int g0)
+{
+    unsigned int h;
+    if (!tg_r8_treeline_vary()) return TD5_TG_PAGE_TREELINE;
+    h = (unsigned)(g0 / TD5_TG_FAR_GROUP) * 2654435761u;
+    return TD5_TG_PAGE_R8_TREELINE
+         + (int)((h >> 13) % (unsigned)TD5_TG_R8_TREELINE_N);
+}
+
 /* Smooth low-frequency terrain height at a world point. Two summed products of
  * sines at ~42000 and ~17000 world units, which at a 1500-unit span length is a
  * hill every ~28 and ~11 spans -- long enough to read as topology from a car
@@ -11179,8 +11298,11 @@ static int tg_far_group_owner(int si)
     return 1;
 }
 
-/* One side's background band: 3 ground quads outward plus the ridge wall. */
-static int tg_emit_far_band(const TG_FBHook *h, int is_left)
+/* One side's background band: 3 ground quads outward plus the ridge wall.
+ *
+ * [R8 TERRAIN items 5/15] `ridge_ok` = 0 emits the GROUND apron without the
+ * standing ridge wall. See tg_emit_fb_terrain for why that split exists. */
+static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
 {
     const TG_NodeList *nl = h->nl;
     const double reach = (double)td5_env_int("TD5RE_AUTOTRACK_TERRAIN_REACH",
@@ -11304,7 +11426,7 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
     seg_page[0] = tg_ground_page_for_span(h->si, h->b);
     seg_nq[0]   = 3;
 
-    if (tg_terrain_ridge_enabled()) {
+    if (ridge_ok && tg_terrain_ridge_enabled()) {
         /* Ridge: a wall standing on the outermost edge, its top sampled from the
          * same hill function so consecutive groups share a crest height and the
          * skyline is one continuous ridge line. Snow biomes get a white flank
@@ -11344,9 +11466,22 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
         if (r5fix && r5treeline) {
             const double w = sqrt((X[1][3]-X[0][3])*(X[1][3]-X[0][3])
                                 + (Z[1][3]-Z[0][3])*(Z[1][3]-Z[0][3]));
-            double tiles = floor(w / (double)TD5_TG_SPAN_LENGTH + 0.5);
+            /* [R8 item 14 ASPECT] Tile width = the wall's own crest height, so
+             * a square page is drawn square. Was TD5_TG_SPAN_LENGTH (1500)
+             * against a ~4500 wall: a 1:3 vertical stretch of a 64x64 page. */
+            const double tw = tg_r8_treeline_aspect()
+                            ? (0.5 * (t0 + t1)) : (double)TD5_TG_SPAN_LENGTH;
+            double tiles = floor(w / (tw > 1.0 ? tw : 1.0) + 0.5);
             if (tiles < 1.0) tiles = 1.0;
             u_near = 0.0; u_far = tiles;
+            /* [R8 item 14 VARY] Integer per-group phase: shifts which texel
+             * columns a group starts on without breaking the wrap. */
+            if (tg_r8_treeline_vary()) {
+                const unsigned hh = (unsigned)(g0 / TD5_TG_FAR_GROUP)
+                                  * 2246822519u;
+                const double ph = (double)((hh >> 17) % 7u);
+                u_near += ph; u_far += ph;
+            }
         }
         /* near-bottom, far-bottom, far-top, near-top; v = 1 at the base, so the
          * page's top rows (v = 0) land on the crest. */
@@ -11377,11 +11512,22 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left)
         else if (tg_r4_city_skyline() && h->b->urbanity >= 2)
             seg_page[1] = TD5_TG_PAGE_R4_SKYLINE;
         else
-            seg_page[1] = TD5_TG_PAGE_TREELINE;
+            seg_page[1] = tg_r8_treeline_page(g0);   /* [R8 item 14 VARY] */
+        if (seg_page[1] >= TD5_TG_PAGE_R8_TREELINE &&
+            seg_page[1] <  TD5_TG_PAGE_R8_TREELINE + TD5_TG_R8_TREELINE_N)
+            tg_acct(TG_ACCT_R8_TERRAIN, h->si);
         /* [R4 seam] account the urban-skyline ridge under the FLOW bucket so the
          * inventory reflects the reclassification (renamed in place). */
         if (seg_page[1] == TD5_TG_PAGE_R4_SKYLINE)
             tg_acct(TG_ACCT_R4_FLOW, h->si);
+        /* [R8 item 14] Record the world size one page tile is drawn at, on the
+         * tree-line ridges only -- the ones the report is about. */
+        if (seg_page[1] != TD5_TG_PAGE_R4_SKYLINE && !tg_biome_is_snow(h->b)) {
+            const double w = sqrt((X[1][3]-X[0][3])*(X[1][3]-X[0][3])
+                                + (Z[1][3]-Z[0][3])*(Z[1][3]-Z[0][3]));
+            const double nt = (u_far - u_near);
+            if (nt > 0.0) tg_r8_tl_note(w / nt, 0.5 * (t0 + t1), seg_page[1]);
+        }
         seg_nq[1]   = 1;
         nseg = 2;
     }
@@ -11462,10 +11608,88 @@ static int tg_far_group_over_fork(int si)
     return 0;
 }
 
+/* [R8 TERRAIN item 15] FAR SHORE -- the seaward horizon.
+ *
+ * On a water run the seaward side deliberately carries no far band (the plane
+ * is 50000 units of sea and a grass apron would float over it), so the horizon
+ * out there is bare sky meeting flat water. Measured at the span the user named
+ * (777 span 200): left extent 9600 against 30000 on the right.
+ *
+ * One quad per far-group per seaward side: a wall standing ON the sea surface
+ * just inside the water plane's outer edge, textured from the same treeline /
+ * skyline pages the inland ridge uses so the far side of a bay reads as land.
+ * It is a SILHOUETTE, not terrain -- there is no apron behind it, which is why
+ * it costs one quad and cannot recreate the flat-slab-overhead class of bug the
+ * far band's reach cut exists to prevent (it never rises above its own base +
+ * crest, and its base is the sea, the lowest surface in the run).
+ *
+ * TD5RE_R8_TERRAIN_SHORE=0 restores the empty seaward horizon for an A/B. */
+#define TD5_TG_SHORE_FAR_INSET  4000.0   /* inside the water plane's outer edge */
+#define TD5_TG_SHORE_FAR_HIGH   2600.0   /* crest above the sea surface         */
+static int tg_emit_far_shore(const TG_FBHook *h, int is_left)
+{
+    const TG_NodeList *nl = h->nl;
+    const int g0 = (h->si / TD5_TG_FAR_GROUP) * TD5_TG_FAR_GROUP;
+    int g1 = g0 + TD5_TG_FAR_GROUP - 1;
+    const double out = (double)TD5_TG_WATER_EXTENT - TD5_TG_SHORE_FAR_INSET;
+    double px[4], py[4], pz[4], uu[4], vv[4];
+    double ex[2], ey[2], ez[2];
+    int seg_page, seg_nq = 1, e;
+
+    if (!td5_env_flag_on("TD5RE_R8_TERRAIN_SHORE")) return 1;
+    if (g1 > nl->count - 2) g1 = nl->count - 2;
+    if (g1 < g0) return 1;
+    if (*h->nmesh + 1 >= h->maxmesh) return 1;
+
+    for (e = 0; e < 2; e++) {
+        const int se = e ? g1 : g0;
+        double lx, ly, lz, rx, ry, rz, ux, uz, len;
+
+        tg_road_edge(nl, se, e ? 1.0 : 0.0, 0.0, 1.0,
+                     &lx, &ly, &lz, &rx, &ry, &rz);
+        ux = lx - rx; uz = lz - rz;
+        len = sqrt(ux * ux + uz * uz);
+        if (len < 1e-6) { ux = 1.0; uz = 0.0; } else { ux /= len; uz /= len; }
+        if (!is_left) { ux = -ux; uz = -uz; }
+        ex[e] = (is_left ? lx : rx) + ux * out;
+        ez[e] = (is_left ? lz : rz) + uz * out;
+        ey[e] = tg_sea_level_y(nl, se);
+    }
+
+    /* Tile by the shore's own world width, one tile per crest height, so the
+     * page keeps its authored 1:1 aspect (same rule as the R8 ridge below). */
+    {
+        const double w = sqrt((ex[1]-ex[0])*(ex[1]-ex[0])
+                            + (ez[1]-ez[0])*(ez[1]-ez[0]));
+        double tiles = floor(w / TD5_TG_SHORE_FAR_HIGH + 0.5);
+        if (tiles < 1.0) tiles = 1.0;
+        /* near-bottom, far-bottom, far-top, near-top; v = 1 at the waterline. */
+        px[0]=ex[0]; py[0]=ey[0];                        pz[0]=ez[0];
+        px[1]=ex[1]; py[1]=ey[1];                        pz[1]=ez[1];
+        px[2]=ex[1]; py[2]=ey[1]+TD5_TG_SHORE_FAR_HIGH;  pz[2]=ez[1];
+        px[3]=ex[0]; py[3]=ey[0]+TD5_TG_SHORE_FAR_HIGH;  pz[3]=ez[0];
+        uu[0]=0.0;   vv[0]=1.0 - TD5_TG_FACADE_UV_INSET;
+        uu[1]=tiles; vv[1]=1.0 - TD5_TG_FACADE_UV_INSET;
+        uu[2]=tiles; vv[2]=TD5_TG_FACADE_UV_INSET;
+        uu[3]=0.0;   vv[3]=TD5_TG_FACADE_UV_INSET;
+    }
+
+    seg_page = tg_biome_is_snow(h->b) ? tg_ground_page_for_span(h->si, h->b)
+             : (h->b->urbanity >= 2  ? TD5_TG_PAGE_R4_SKYLINE
+                                     : tg_r8_treeline_page(g0));
+
+    h->moff[(*h->nmesh)] = h->blk->len;
+    if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1))
+        return 0;
+    (*h->nmesh)++;
+    tg_acct_range(TG_ACCT_R8_TERRAIN, g0, g1);
+    return 1;
+}
+
 static int tg_emit_fb_terrain(const TG_FBHook *h)
 {
     double wsd;
-    int s;
+    int s, ridge_ok = 1, ridge_gate;
 
     if (!tg_terrain_far_enabled()) return 1;
     if (!tg_far_group_owner(h->si)) return 1;
@@ -11486,14 +11710,49 @@ static int tg_emit_fb_terrain(const TG_FBHook *h)
         tg_far_group_over_bridge(h->si))
         return 1;
 
-    /* [R6 TUNNEL item 8a] Same idea for tunnels: the distant ridge of the groups
-     * flanking a bore shows through the mouth as "geometry crossing the road
-     * inside the tunnel". Suppress the band near a run; the portal mountain
-     * massing carries the immediate surround. TD5RE_AUTOTRACK_TUNNEL_CLEARFAR=0
-     * restores the band for an A/B. */
+    /* [R8 TERRAIN items 5/15] THE TUNNEL AND FORK GATES ARE RIDGE GATES, NOT
+     * GROUND GATES -- and until round 8 both dropped the whole band.
+     *
+     * "on the right side of span 569 there's just a few meters of terrain
+     * outside road" (99991) and "on the left side there's barely any geometry"
+     * (777 @200) are one complaint: the world ends too close to the road. R7
+     * answered a third sighting of it with verge PROPS and the user came back
+     * saying the FIELD is still narrow, so the defect is the ground EXTENT.
+     *
+     * MEASURED (tg_r8_terrain_extent_report, both seeds, before this change):
+     *   99991: 1289 of 3972 span-sides (32.4%) end inside 20000 units.
+     *          At span 569 the RIGHT side reaches 12000 and the LEFT 30000 --
+     *          same skirt on both sides, so R6 CITY's 24000->12000 verge
+     *          narrowing is NOT what the user is hitting. The asymmetry is
+     *          entirely the fork gate. Blocked sides: fork 220, tunnel 600,
+     *          bridge 372, sea 185.
+     *   777:   1678 of 3972 (42.2%); ALPINE is the worst biome at mean 15030
+     *          with 496 of its 600 sides narrow. Blocked: tunnel 840,
+     *          bridge 692, sea 216, fork 106.
+     *
+     * Read the two gates' own recorded reasons and they are both about the
+     * standing WALL, never the ground under it:
+     *   - fork (R6 item 4): "the right far-band SKYLINE ... lands ON the branch
+     *     carriageway as a row of grey slabs crossing the street".
+     *   - tunnel (R6 TUNNEL item 8a): "the distant RIDGE standing beyond that
+     *     mouth reads as a grey slab down the road".
+     * The apron is flat, sits at or below road level and falls away outward, so
+     * it can be neither a slab across a street nor a slab down a bore. Suppress
+     * the ridge on those two and keep the ground.
+     *
+     * The BRIDGE and SEA gates are different in kind and stay whole-band: R5
+     * item 14's report was that the band "draped a grass/concrete APRON ... down
+     * into the gorge", i.e. the ground itself was wrong there, and on the seaward
+     * side the ground is water. Those two are the gates whose reason survives.
+     *
+     * TD5RE_R8_TERRAIN_EXTENT=0 restores the round-7 whole-band suppression. */
+    ridge_gate = td5_env_flag_on("TD5RE_R8_TERRAIN_EXTENT");
+
     if (td5_env_flag_on("TD5RE_AUTOTRACK_TUNNEL_CLEARFAR") &&
-        tg_far_group_near_tunnel(h->si))
-        return 1;
+        tg_far_group_near_tunnel(h->si)) {
+        if (!ridge_gate) return 1;
+        ridge_ok = 0;
+    }
 
     /* Seaward side is the sea's, not the plain's -- the water plane already
      * reaches 50000 out there and a grass band would float over it. */
@@ -11501,17 +11760,241 @@ static int tg_emit_fb_terrain(const TG_FBHook *h)
 
     for (s = 0; s < 2; s++) {
         const int is_left = s ? 1 : 0;
-        if ((wsd > 0.0 && is_left) || (wsd < 0.0 && !is_left)) continue;
-        /* [R6 item 4] Skip the RIGHT band over a fork: it lands on the branch,
-         * which the forkback backdrop already closes. Left band is untouched. */
-        if (!is_left && td5_env_flag_on("TD5RE_AUTOTRACK_FORK_CLEARFAR") &&
-            tg_far_group_over_fork(h->si))
+        int side_ridge = ridge_ok;
+        if ((wsd > 0.0 && is_left) || (wsd < 0.0 && !is_left)) {
+            /* [R8 TERRAIN item 15] The seaward side is the one the user called
+             * "barely any geometry": measured, span 200 on 777 reaches 9600 on
+             * the left (the shore ramp) against 30000 on the right, and past
+             * that there is only the flat water plane out to 50000. Correct
+             * ground, empty horizon. Close it with a far SHORE instead of a
+             * grass band -- one wall standing on the sea surface at the water
+             * plane's own outer edge, so the ocean ends in a coastline rather
+             * than in nothing. */
+            if (!tg_emit_far_shore(h, is_left)) return 0;
             continue;
+        }
+        /* [R6 item 4] The RIGHT band's ridge over a fork lands on the branch;
+         * its ground does not. Drop only the ridge (see the note above). */
+        if (!is_left && td5_env_flag_on("TD5RE_AUTOTRACK_FORK_CLEARFAR") &&
+            tg_far_group_over_fork(h->si)) {
+            if (!ridge_gate) continue;
+            side_ridge = 0;
+        }
         if (*h->nmesh + 2 >= h->maxmesh) break;
-        if (!tg_emit_far_band(h, is_left)) return 0;
+        if (!tg_emit_far_band(h, is_left, side_ridge)) return 0;
+        if (side_ridge != ridge_ok || !side_ridge)
+            tg_acct(TG_ACCT_R8_TERRAIN, h->si);
     }
     return 1;
 }
+
+/* ===================== [R8 TERRAIN items 5/15] EXTENT DIAGNOSTIC =====================
+ * "on the right side of span 569 there's just a few meters of terrain outside
+ * road, it has to be a much bigger field" (99991) and "on the left side of the
+ * track there's barely any geometry" (777 @200) are the SAME complaint: the
+ * world ends too close to the road. R7's BRANCH item 10 answered a third
+ * sighting of it with verge PROPS, and the user came back saying the FIELD is
+ * still only a few meters wide -- so the defect is the ground EXTENT, not what
+ * stands on it.
+ *
+ * Three rounds of this item have been argued from frames. This reports the
+ * arithmetic instead: for every span and both sides, the skirt's outer reach,
+ * whether the far band covers that side, and if not WHICH gate suppressed it.
+ * "Effective extent" is what the user can actually see ground on.
+ * TD5RE_R8_TERRAIN_EXTENT_LOG=1. */
+/* Mirrors tg_emit_fb_terrain's gate chain exactly, including the R8 ridge-only
+ * split, so before/after is measured on one model and not on two. Returns the
+ * reason the GROUND is absent, or NULL; *ridge is cleared where the band emits
+ * ground but no standing wall. */
+static const char k_r8_why_fork[]   = "fork";
+static const char k_r8_why_bridge[] = "bridge";
+static const char k_r8_why_tunnel[] = "tunnel";
+static const char k_r8_why_sea[]    = "sea";
+static const char k_r8_why_off[]    = "far-off";
+
+static const char *tg_r8_far_block_reason(const TG_NodeList *nl, int si,
+                                          const TG_Biome *b, int is_left,
+                                          int *ridge)
+{
+    const int rg = td5_env_flag_on("TD5RE_R8_TERRAIN_EXTENT");
+    double wsd;
+    (void)nl;
+    *ridge = 1;
+    if (!tg_terrain_far_enabled())                       return k_r8_why_off;
+    if (td5_env_flag_on("TD5RE_AUTOTRACK_BRIDGE_CLEARFAR") &&
+        tg_far_group_over_bridge(si))                    return k_r8_why_bridge;
+    if (td5_env_flag_on("TD5RE_AUTOTRACK_TUNNEL_CLEARFAR") &&
+        tg_far_group_near_tunnel(si)) {
+        if (!rg) return k_r8_why_tunnel;
+        *ridge = 0;
+    }
+    wsd = b->water ? tg_water_side(si) : 0.0;
+    if ((wsd > 0.0 && is_left) || (wsd < 0.0 && !is_left)) return k_r8_why_sea;
+    if (!is_left && td5_env_flag_on("TD5RE_AUTOTRACK_FORK_CLEARFAR") &&
+        tg_far_group_over_fork(si)) {
+        if (!rg) return k_r8_why_fork;
+        *ridge = 0;
+    }
+    return NULL;
+}
+
+static void tg_r8_terrain_extent_report(const TG_NodeList *nl, int nspans)
+{
+    /* Per-biome-kind accumulators of the effective extent, both sides. */
+    double sum[TD5_TG_BIOME_COUNT], worst[TD5_TG_BIOME_COUNT];
+    int    cnt[TD5_TG_BIOME_COUNT], narrow[TD5_TG_BIOME_COUNT];
+    int    blocked_fork = 0, blocked_bridge = 0, blocked_tunnel = 0;
+    int    blocked_sea = 0, blocked_off = 0, sides = 0, narrow_all = 0;
+    int    noridge = 0;
+    const double far_reach = (double)td5_env_int("TD5RE_AUTOTRACK_TERRAIN_REACH",
+                                                 TD5_TG_FAR_REACH, 30000, 400000);
+    int si, s, k;
+
+    /* Opt-in: td5_env_flag_off is 1 only when the var is explicitly "1", which is
+     * the idiom the other trackgen DIAG knobs use (see the farband log). */
+    if (!td5_env_flag_off("TD5RE_R8_TERRAIN_EXTENT_LOG")) return;
+
+    for (k = 0; k < TD5_TG_BIOME_COUNT; k++) {
+        sum[k] = 0.0; worst[k] = 1e30; cnt[k] = 0; narrow[k] = 0;
+    }
+    /* Every number below is only meaningful together with the knobs that were
+     * in force, and TD5RE_* env vars survive for the life of the launching
+     * shell -- an A/B run back-to-back can silently inherit the previous run's
+     * settings. Print the state so a report line identifies its own build. */
+    TD5_LOG_I(LOG_TAG,
+              "trackgen: ---- R8 terrain extent (knobs: EXTENT=%d SHORE=%d "
+              "SNOW=%d TL_ASPECT=%d TL_VARY=%d) ----",
+              td5_env_flag_on("TD5RE_R8_TERRAIN_EXTENT"),
+              td5_env_flag_on("TD5RE_R8_TERRAIN_SHORE"),
+              td5_env_flag_on("TD5RE_R8_TERRAIN_SNOW"),
+              tg_r8_treeline_aspect(), tg_r8_treeline_vary());
+    for (si = 0; si < nspans - 1 && si < TD5_TG_MAX_SPANS; si++) {
+        const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
+        const int bk = tg_biome_cell_index(si);
+        const double wsd = b->water ? tg_water_side(si) : 0.0;
+        for (s = 0; s < 2; s++) {
+            const int is_left = s ? 1 : 0;
+            const char *why;
+            TG_GroundProf p;
+            double skirt, ext;
+            int ridge = 1;
+
+            tg_ground_side(nl, si, is_left, wsd, &p);
+            skirt = p.d[p.n - 1];
+            why = tg_r8_far_block_reason(nl, (si / TD5_TG_FAR_GROUP)
+                                             * TD5_TG_FAR_GROUP,
+                                         b, is_left, &ridge);
+            ext = why ? skirt : far_reach;
+            if (!ridge) noridge++;
+            sides++;
+            /* The reason strings are the file-scope literals returned by
+             * tg_r8_far_block_reason, so identity is the right test; strcmp
+             * here trips -Wstring-compare on the folded constant lengths. */
+            if (why) {
+                if      (why == k_r8_why_fork)   blocked_fork++;
+                else if (why == k_r8_why_bridge) blocked_bridge++;
+                else if (why == k_r8_why_tunnel) blocked_tunnel++;
+                else if (why == k_r8_why_sea)    blocked_sea++;
+                else                             blocked_off++;
+            }
+            if (ext < 20000.0) { narrow[bk]++; narrow_all++; }
+            sum[bk] += ext; cnt[bk]++;
+            if (ext < worst[bk]) worst[bk] = ext;
+            /* Per-span detail only around the spans the user named, plus every
+             * 100th span, so the log stays readable on a 1800-span track. */
+            if ((si >= 560 && si <= 580) || (si >= 190 && si <= 215) ||
+                (si % 100) == 0)
+                TD5_LOG_I(LOG_TAG,
+                          "  extent si=%4d %s biome=%-11s skirt=%7.0f "
+                          "far=%s%s%s ridge=%d ext=%8.0f over=%6.0f",
+                          si, is_left ? "L" : "R", b->name, skirt,
+                          why ? "NO(" : "YES", why ? why : "", why ? ")" : "",
+                          ridge, ext,
+                          tg_carriageway_reach(nl, si, is_left ? 1.0 : -1.0)
+                              - tg_road_half_width(nl, si));
+        }
+    }
+    for (k = 0; k < TD5_TG_BIOME_COUNT; k++) {
+        if (!cnt[k]) continue;
+        TD5_LOG_I(LOG_TAG,
+                  "  extent BIOME %-11s sides=%5d mean=%8.0f min=%8.0f "
+                  "narrow(<20000)=%d",
+                  k_biomes[k].name, cnt[k], sum[k] / cnt[k], worst[k], narrow[k]);
+    }
+    TD5_LOG_I(LOG_TAG,
+              "  extent TOTAL sides=%d narrow=%d (%.1f%%) | ground-blocked "
+              "fork=%d bridge=%d tunnel=%d sea=%d off=%d | ridge-only-dropped=%d",
+              sides, narrow_all, sides ? 100.0 * narrow_all / sides : 0.0,
+              blocked_fork, blocked_bridge, blocked_tunnel, blocked_sea,
+              blocked_off, noridge);
+    /* [R8 item 14] The stretch and repetition numbers, measured off the ridges
+     * that were actually written. ratio = tile world width / tile world height;
+     * 1.0 means the square page is drawn square. */
+    if (s_r8_tl_n) {
+        int v;
+        TD5_LOG_I(LOG_TAG,
+                  "  treeline ridges=%d tile_w=%.0f tile_h=%.0f ratio=%.2f "
+                  "(min %.2f max %.2f) aspect=%d vary=%d",
+                  s_r8_tl_n, s_r8_tl_w / s_r8_tl_n, s_r8_tl_h / s_r8_tl_n,
+                  (s_r8_tl_h > 0.0) ? s_r8_tl_w / s_r8_tl_h : 0.0,
+                  s_r8_tl_ratio_min, s_r8_tl_ratio_max,
+                  tg_r8_treeline_aspect(), tg_r8_treeline_vary());
+        for (v = 0; v <= TD5_TG_R8_TREELINE_N; v++)
+            if (s_r8_tl_pages[v])
+                TD5_LOG_I(LOG_TAG, "  treeline page %s%d used by %d ridges",
+                          (v == TD5_TG_R8_TREELINE_N) ? "LEGACY" : "variant ",
+                          (v == TD5_TG_R8_TREELINE_N) ? 0 : v, s_r8_tl_pages[v]);
+    }
+    /* [R8 item 16] Snow appearance, per BIOME CELL rather than per span, because
+     * the cell is the unit the variant is chosen on. Proves three things at
+     * once: every snowy cell is on a snow page; the pages are not all the same
+     * one; and the median page differs from the ground page on every one. */
+    {
+        int cell, nsnow = 0, nmed_ok = 0, nvar[TD5_TG_R8_SNOWGND_N + 1];
+        for (cell = 0; cell <= TD5_TG_R8_SNOWGND_N; cell++) nvar[cell] = 0;
+        for (cell = 0; cell * TD5_TG_BIOME_RUN < nspans; cell++) {
+            const int cs = cell * TD5_TG_BIOME_RUN;
+            const TG_Biome *cb = &k_biomes[tg_biome_cell_index(cs)];
+            int gp, mp, probe = -1, j;
+            if (!tg_biome_is_snow(cb)) continue;
+            /* A tunnel span keeps the biome page by design, so probe the first
+             * NON-tunnel span of the cell -- otherwise the report would read a
+             * deliberate exemption as a miss. */
+            for (j = cs; j < cs + TD5_TG_BIOME_RUN && j < nspans; j++)
+                if (!tg_span_in_tunnel(j) && !tg_span_in_bridge_run(j)) {
+                    probe = j; break;
+                }
+            if (probe < 0) continue;
+            gp = tg_ground_page_for_span(probe, cb);
+            mp = tg_r8_median_page(probe, cb->ground_page);
+            nsnow++;
+            if (mp != gp && mp != cb->ground_page) nmed_ok++;
+            if (gp >= TD5_TG_PAGE_R8_SNOWGND &&
+                gp <  TD5_TG_PAGE_R8_SNOWGND + TD5_TG_R8_SNOWGND_N)
+                nvar[gp - TD5_TG_PAGE_R8_SNOWGND]++;
+            else
+                nvar[TD5_TG_R8_SNOWGND_N]++;
+            TD5_LOG_I(LOG_TAG,
+                      "  snow cell %2d spans %4d-%4d %-11s ground_page=%d "
+                      "median_page=%d biome_page=%d distinct=%d",
+                      cell, cs, cs + TD5_TG_BIOME_RUN - 1, cb->name,
+                      gp, mp, cb->ground_page,
+                      (mp != gp && mp != cb->ground_page));
+        }
+        if (nsnow)
+            TD5_LOG_I(LOG_TAG,
+                      "  snow TOTAL cells=%d median-distinct=%d | ground "
+                      "variant0=%d variant1=%d variant2=%d legacy=%d",
+                      nsnow, nmed_ok, nvar[0], nvar[1], nvar[2],
+                      nvar[TD5_TG_R8_SNOWGND_N]);
+    }
+
+    /* A race launch builds the level more than once; clear so the second report
+     * measures its own build rather than the sum of both. */
+    s_r8_tl_w = s_r8_tl_h = 0.0; s_r8_tl_n = 0;
+    memset(s_r8_tl_pages, 0, sizeof(s_r8_tl_pages));
+}
+
 /* ===================== [FB] START / FINISH GANTRY =====================
  * Reported: "add start banner" and "there should be a finish banner".
  *
@@ -13139,14 +13622,34 @@ static int tg_treeline_src_fill(const unsigned char *idx, int y0)
  * what greyed the synthetic page out) over shipped canopy texels, cut off at
  * the top by the same lumpy crown line the synthetic page uses. The crown line
  * is a MASK, not art, so it carries no placeholder colour of its own. */
-static void tg_emit_texture_page_fb_treeline_real(TG_Buf *out)
+/* [R8 TERRAIN item 14 VARY] Per-variant source. Variant 0 is the shipped page
+ * verbatim (TG_TREELINE_SRC = tree 1, the measured densest broadleaf canopy), so
+ * the A/B against round 7 is a true "before". The other three take a different
+ * source tree, a different crown-cell width and a different crown RNG, which
+ * changes both the foliage colour/texel mass AND the silhouette rhythm -- the
+ * two things that made one page recur visibly every four spans. Source indices
+ * are into k_real_tree_* (10 shipped foliage pages); the densest 20-row window
+ * of each is still COMPUTED, so a thin or trunk-heavy source cannot slide the
+ * band onto bark. */
+static const struct { int src, cell; unsigned seed; } k_r8_treeline_var[4] = {
+    { TG_TREELINE_SRC,  9, 0x77E1B3C5u },   /* 0: the round-7 page, unchanged  */
+    { 4,               13, 0x2F19A77Bu },   /* 1: wider crowns, other foliage  */
+    { 7,                7, 0x51C0DE33u },   /* 2: tighter, busier crown line   */
+    { 9,               11, 0x9A3B7E11u }    /* 3: conifer-ish narrow silhouette*/
+};
+
+static void tg_emit_texture_page_fb_treeline_real(TG_Buf *out, int variant)
 {
-    const unsigned char *sidx = k_real_tree_idx[TG_TREELINE_SRC];
-    const unsigned char *spal = k_real_tree_pal[TG_TREELINE_SRC];
-    const int paln = k_real_tree_paln[TG_TREELINE_SRC];
+    const int vi   = (variant < 0 || variant >= 4) ? 0 : variant;
+    const int vsrc = (k_r8_treeline_var[vi].src < k_real_tree_count)
+                   ? k_r8_treeline_var[vi].src : TG_TREELINE_SRC;
+    const int vcell = k_r8_treeline_var[vi].cell;
+    const unsigned char *sidx = k_real_tree_idx[vsrc];
+    const unsigned char *spal = k_real_tree_pal[vsrc];
+    const int paln = k_real_tree_paln[vsrc];
     const int wy   = tg_treeline_src_window(sidx);
     const int fill = tg_treeline_src_fill(sidx, wy);
-    unsigned int rng = 0x77E1B3C5u;
+    unsigned int rng = k_r8_treeline_var[vi].seed;
     int i;
 
     tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
@@ -13160,9 +13663,10 @@ static void tg_emit_texture_page_fb_treeline_real(TG_Buf *out)
         /* Crown line: 9-texel cells, each a crown of its own height, rounded
          * off at its shoulders, so the top edge is lumpy like a real canopy
          * instead of a straight cut. Keyed above it, foliage below. */
-        const unsigned int c = (unsigned)(x / 9) * 2654435761u;
+        const unsigned int c = (unsigned)(x / vcell) * 2654435761u;
         const int crown = 12 + (int)((c >> 28) % 10);          /* 12..21 */
-        const int top   = crown + (((x % 9) < 2 || (x % 9) > 6) ? 3 : 0);
+        const int xm    = x % vcell;
+        const int top   = crown + ((xm < 2 || xm > vcell - 3) ? 3 : 0);
         int cut, span, sx, sy, v, t;
 
         rng = rng * 1103515245u + 12345u;
@@ -13176,7 +13680,7 @@ static void tg_emit_texture_page_fb_treeline_real(TG_Buf *out)
          * gradient instead of inventing one. */
         span = TD5_TG_TEX_DIM - 1 - cut;
         if (span < 1) span = 1;
-        sx = (int)(((c >> 8) + (unsigned)(x % 9)) % (unsigned)TD5_TG_TEX_DIM);
+        sx = (int)(((c >> 8) + (unsigned)(x % vcell)) % (unsigned)TD5_TG_TEX_DIM);
         sy = wy + ((y - cut) * (TG_TREELINE_WIN - 1)) / span;
 
         /* A sample can land in a keyed gap between the source tree's leaves;
@@ -13235,10 +13739,118 @@ static void tg_emit_texture_page_fb_treeline_proc(TG_Buf *out)
     }
 }
 
-static void tg_emit_texture_page_fb_treeline(TG_Buf *out)
+static void tg_emit_texture_page_fb_treeline(TG_Buf *out, int variant)
 {
-    if (tg_real_textures_enabled()) tg_emit_texture_page_fb_treeline_real(out);
+    if (tg_real_textures_enabled()) tg_emit_texture_page_fb_treeline_real(out, variant);
     else                            tg_emit_texture_page_fb_treeline_proc(out);
+}
+
+/* ---- [R8 TERRAIN item 16] SNOW APPEARANCE ----
+ * "if there's snow the median should be snowy too but a different texture, and
+ * use different snow ground textures too."
+ *
+ * Two distinct requests, and the second one names the defect precisely: there
+ * has only ever been ONE snow page (TD5_TG_PAGE_SNOW), used for every snow
+ * ground quad on the track and for the snow biome's far ridge flank as well, so
+ * a whole ALPINE run is a single 64x64 tile repeated to the horizon.
+ *
+ * VARIANTS differ in the two things that read at ground scale: the coarse drift
+ * mask's cell size (how big the shaded patches are) and how much of the page is
+ * shade rather than sunlit crust. All three keep the same blue-grey-to-white
+ * palette as TD5_TG_PAGE_SNOW, so neighbouring biome cells on different variants
+ * do not show a colour seam where they meet -- only a texture-scale change.
+ *
+ * The MEDIAN page is deliberately NOT one of these. A median is ploughed or
+ * walked snow between two carriageways: harder, greyer, with a directional
+ * grain rather than drift patches, and darker than the open field so it reads as
+ * a separate surface rather than a continuation of the ground the user is
+ * complaining reads as one flat sheet. */
+static void tg_emit_texture_page_r8_snow_ground(TG_Buf *out, int variant)
+{
+    /* cell = drift patch size in texels; shade = 1-in-N patches shadowed. */
+    static const struct { int cell, shade; unsigned seed; } k_var[3] = {
+        {  4, 3, 0x51A7C001u },   /* fine granular crust                */
+        { 16, 4, 0x51A7C002u },   /* broad wind drifts                  */
+        {  8, 2, 0x51A7C003u }    /* heavily shadowed, hummocky         */
+    };
+    const int vi = (variant < 0 || variant >= 3) ? 0 : variant;
+    unsigned int rng = k_var[vi].seed;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR, identical ramp to TD5_TG_PAGE_SNOW: 0..5 blue-grey shadow,
+     * 6..15 up to near-white sunlit crust. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        if (i < 6) { b = 208 + i * 6; g = 198 + i * 7; r = 188 + i * 8; }
+        else       { b = 244 + (i - 6); g = 240 + (i - 6); r = 236 + (i - 6) * 2; }
+        if (b > 255) b = 255;
+        if (g > 255) g = 255;
+        if (r > 255) r = 255;
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;
+        const unsigned int patch = (unsigned)((x / k_var[vi].cell)
+                                 + (y / k_var[vi].cell) * 11) * 2654435761u;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        idx = 6 + (int)((rng >> 16) % 10);                    /* sunlit crust */
+        if ((patch >> 30) % (unsigned)k_var[vi].shade == 0)
+            idx = (int)((rng >> 18) % 6);                     /* drift shade  */
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
+/* Ploughed / trodden snow for a snow-biome median: a darker, greyer ramp than
+ * the ground page and a LONGITUDINAL grain instead of drift patches, so the
+ * strip between the carriageways reads as a different surface at a glance. */
+static void tg_emit_texture_page_r8_snow_median(TG_Buf *out)
+{
+    unsigned int rng = 0x51A7DEEDu;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* Compressed range and a cooler cast: 0..7 grey slush, 8..15 dull white.
+     * Peak is 226 against the ground page's 255, which is the whole point --
+     * a median must not be the brightest thing beside the road. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        if (i < 8) { b = 152 + i * 5; g = 146 + i * 5; r = 140 + i * 5; }
+        else       { b = 196 + (i - 8) * 4; g = 192 + (i - 8) * 4;
+                     r = 186 + (i - 8) * 4; }
+        if (b > 255) b = 255;
+        if (g > 255) g = 255;
+        if (r > 255) r = 255;
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;
+        /* Grain runs along v (the median's length): banded in x, near-constant
+         * in y, so a long thin strip does not tile visibly across its width. */
+        const unsigned int band = (unsigned)(x >> 2) * 2654435761u;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        idx = (int)((band >> 29) % 6) + (int)((rng >> 20) % 3);
+        if (((band >> 26) & 7u) == 0) idx += 8;    /* an occasional cleared strip */
+        if (idx > TD5_TG_PAL_COUNT - 1) idx = TD5_TG_PAL_COUNT - 1;
+        (void)y;
+        tg_put_u8(out, (unsigned)idx);
+    }
 }
 
 /* [R4 item 5] Distant CITY skyline. Same role and format as the treeline page
@@ -14403,7 +15015,20 @@ static int tg_emit_textures(TG_Buf *out)
                           k_furn_fence_paln, k_furn_fence_idx, k_furn_fence_type);
     else
         tg_emit_texture_page_fb_city(&pages[TD5_TG_PAGE_FENCE], 2);
-    tg_emit_texture_page_fb_treeline(&pages[TD5_TG_PAGE_TREELINE]);
+    tg_emit_texture_page_fb_treeline(&pages[TD5_TG_PAGE_TREELINE], 0);
+    {   /* [R8 TERRAIN items 14/16] tree-line variants, snow ground variants and
+         * the snow median page. Always emitted so the pages exist whether or not
+         * the selection knobs route anything to them -- a page slot that is
+         * referenced but never written decodes as garbage. */
+        int v;
+        for (v = 0; v < TD5_TG_R8_TREELINE_N; v++)
+            tg_emit_texture_page_fb_treeline(
+                &pages[TD5_TG_PAGE_R8_TREELINE + v], v);
+        for (v = 0; v < TD5_TG_R8_SNOWGND_N; v++)
+            tg_emit_texture_page_r8_snow_ground(
+                &pages[TD5_TG_PAGE_R8_SNOWGND + v], v);
+        tg_emit_texture_page_r8_snow_median(&pages[TD5_TG_PAGE_R8_SNOWMED]);
+    }
     tg_emit_texture_page_fb_skyline(&pages[TD5_TG_PAGE_R4_SKYLINE]);  /* [R4 item 5] */
     tg_emit_texture_page_fb_tunnel(&pages[TD5_TG_PAGE_TUNNEL]);
     /* [R3 BRIDGE] deck surface (item 11) + 4 extra tunnel linings (item 16a). */
@@ -14748,6 +15373,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     }
     tg_acct_report(nspans);
     tg_r8_bridge_diag(&nl);            /* [R8 BRIDGE] opt-in measurement dump */
+    tg_r8_terrain_extent_report(&nl, nspans);  /* [R8 TERRAIN] opt-in, ditto */
     ok = 1;
 
 done:
