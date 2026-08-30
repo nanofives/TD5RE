@@ -481,7 +481,45 @@ static int tg_road_page(int si);
 #define TD5_TG_PAGE_R8_BIOME  (TD5_TG_PAGE_R8_BASE + 94)
 #define TD5_TG_R8_BIOME_N     14
 
-#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R8_BASE + 110)
+/* ====================== ROUND-9 PAGE BLOCKS ==========================
+ * Same rule as R3-R8, measured off its OWN base. Use only your own block.
+ * Do NOT move TD5_TG_PAGE_COUNT and do NOT renumber another area's slots.
+ *
+ * Owners (see docs/AUTOTRACK_FEEDBACK_R9.md):
+ *   RAILFIX  8,12      orchestrator-caused double guardrails (no new art)
+ *   TUNNEL   5,13      city tunnel -> UNDERPASS, portal SURROUND, bore ceiling
+ *   TOPO     6,7,11    topographic continuity between neighbouring surfaces
+ *   BRIDGE   9,10      over-deck structure lands on piers, pillar/beam, coast
+ *   CITY     1,2,3,4   crossing massing, double pavement, park sides, rejoin
+ *   INFRA    backlog   props/street furniture, ponds, deferred R8 items
+ * ==================================================================== */
+#define TD5_TG_PAGE_R9_BASE   (TD5_TG_PAGE_R8_BASE + 110)
+
+/* RAILFIX needs no art -- it removes a duplicate, it does not add a rail. */
+#define TD5_TG_PAGE_R9_RAILFIX (TD5_TG_PAGE_R9_BASE + 0)
+#define TD5_TG_R9_RAILFIX_N    6
+
+/* TUNNEL is the widest block in the round: item 13 reframes a city tunnel as an
+ * UNDERPASS (a new element, not a re-texture) and item 5 needs a portal
+ * SURROUND material distinct from the hillside plus a separate bore ceiling. */
+#define TD5_TG_PAGE_R9_TUNNEL (TD5_TG_PAGE_R9_BASE + 8)
+#define TD5_TG_R9_TUNNEL_N    16
+
+#define TD5_TG_PAGE_R9_TOPO   (TD5_TG_PAGE_R9_BASE + 26)
+#define TD5_TG_R9_TOPO_N      8
+
+#define TD5_TG_PAGE_R9_BRIDGE (TD5_TG_PAGE_R9_BASE + 36)
+#define TD5_TG_R9_BRIDGE_N    12
+
+#define TD5_TG_PAGE_R9_CITY   (TD5_TG_PAGE_R9_BASE + 50)
+#define TD5_TG_R9_CITY_N      10
+
+/* INFRA owns the deferred backlog, including the 12 already-extracted breakable
+ * street-furniture meshes in re/assets/props/ that nothing currently places. */
+#define TD5_TG_PAGE_R9_INFRA  (TD5_TG_PAGE_R9_BASE + 62)
+#define TD5_TG_R9_INFRA_N     14
+
+#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R9_BASE + 78)
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
@@ -732,6 +770,22 @@ typedef enum {
      * seed by construction, so its presence in the inventory is the proof that
      * the selection rule fired -- and its run list is the snow layout itself. */
     TG_ACCT_R8_SNOWRUN,
+    /* [R9] PRE-RESERVED, one per area, own line, blank-line spaced.
+     * RENAME YOUR OWN SLOT IN PLACE. Never append here.
+     * The 64-bit headroom warning that used to live here is RETIRED: the mask
+     * is now self-sizing off TG_ACCT_KIND_COUNT (see s_acct_mask), so adding a
+     * kind grows the array instead of silently dropping a bit. */
+    TG_ACCT_R9_RAILFIX,     /* RAILFIX (8,12)               rename in place */
+
+    TG_ACCT_R9_TUNNEL,      /* TUNNEL  (5,13)               rename in place */
+
+    TG_ACCT_R9_TOPO,        /* TOPO    (6,7,11)             rename in place */
+
+    TG_ACCT_R9_BRIDGE,      /* BRIDGE  (9,10)               rename in place */
+
+    TG_ACCT_R9_CITY,        /* CITY    (1,2,3,4)            rename in place */
+
+    TG_ACCT_R9_INFRA,       /* INFRA   (backlog)            rename in place */
     TG_ACCT_KIND_COUNT
 } TG_AcctKind;
 
@@ -808,7 +862,21 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
 
     "r8-longbranch",        /* SHAPE   */
 
-    "snow-runs"             /* BIOME   */
+    "snow-runs",            /* BIOME   */
+    /* [R9] one reserved name per area, in enum order, blank-line spaced.
+     * Rename to match your renamed enum constant; keep every comma. Only the
+     * LAST entry omits its trailing comma. */
+    "r9-railfix",           /* RAILFIX */
+
+    "r9-tunnel",            /* TUNNEL  */
+
+    "r9-topo",              /* TOPO    */
+
+    "r9-bridge",            /* BRIDGE  */
+
+    "r9-city",              /* CITY    */
+
+    "r9-infra"              /* INFRA   */
 };
 
 static long s_acct_count[TG_ACCT_KIND_COUNT];
@@ -819,8 +887,27 @@ static long s_acct_count[TG_ACCT_KIND_COUNT];
  * WIDENED to 64 bits for round 4: the kind count reached 26 of the 32 bits an
  * unsigned int offers, and overflowing it would not fail loudly -- it would
  * silently shift a bit out and report a real emitter as "NONE emitted", which
- * is the one lie this inventory exists to prevent. */
-static unsigned long long s_acct_mask[TD5_TG_MAX_SPANS];
+ * is the one lie this inventory exists to prevent.
+ *
+ * [R9 INFRA] WIDENED AGAIN, and this time made SELF-SIZING. Round 8's eight
+ * areas took the kind count to 51 of 64, so round 9 was the last one that fit
+ * and round 10 would have overflowed -- silently, in exactly the way described
+ * above. Rather than move to 128 bits and face the same deadline a few rounds
+ * later, the word count is now DERIVED from TG_ACCT_KIND_COUNT, so adding a
+ * kind can never overflow it again: the array grows when the enum does.
+ *
+ * The compile-time assert below is belt-and-braces -- it cannot fire while the
+ * WORDS expression is derived, but it will fire loudly if someone later hard-
+ * codes the word count back to a literal. Cost at 51 kinds is unchanged (one
+ * word per span, 24 KB); it becomes 48 KB only once a 65th kind exists. */
+#define TG_ACCT_MASK_WORDS  (((int)TG_ACCT_KIND_COUNT + 63) / 64)
+static unsigned long long s_acct_mask[TD5_TG_MAX_SPANS][TG_ACCT_MASK_WORDS];
+typedef char tg_acct_mask_fits[(TG_ACCT_MASK_WORDS * 64 >= (int)TG_ACCT_KIND_COUNT) ? 1 : -1];
+
+#define TG_ACCT_MASK_SET(si, k)                                               \
+    (s_acct_mask[(si)][(unsigned)(k) >> 6] |= 1ull << ((unsigned)(k) & 63u))
+#define TG_ACCT_MASK_TEST(si, k)                                              \
+    ((s_acct_mask[(si)][(unsigned)(k) >> 6] >> ((unsigned)(k) & 63u)) & 1ull)
 
 /* [R8 G1] PER-AXIS PAGE CENSUS. The element inventory above answers "did the
  * emitter fire"; it cannot answer the question a BREADTH complaint actually
@@ -897,7 +984,7 @@ static void tg_acct_n(TG_AcctKind kind, int si, int n)
     if ((unsigned)kind >= TG_ACCT_KIND_COUNT || n <= 0) return;
     s_acct_count[kind] += n;
     if (si >= 0 && si < TD5_TG_MAX_SPANS)
-        s_acct_mask[si] |= 1ull << (unsigned)kind;
+        TG_ACCT_MASK_SET(si, kind);
 }
 
 static void tg_acct(TG_AcctKind kind, int si) { tg_acct_n(kind, si, 1); }
@@ -914,7 +1001,7 @@ static void tg_acct_range(TG_AcctKind kind, int si0, int si1)
     if (si0 < 0) si0 = 0;
     if (si1 >= TD5_TG_MAX_SPANS) si1 = TD5_TG_MAX_SPANS - 1;
     for (s = si0; s <= si1; s++)
-        s_acct_mask[s] |= 1ull << (unsigned)kind;
+        TG_ACCT_MASK_SET(s, kind);
 }
 
 /* Cap on run entries printed per kind. A kind with more runs than this is
@@ -928,7 +1015,6 @@ static void tg_acct_report(int nspans)
     if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
     TD5_LOG_I(LOG_TAG, "trackgen: ---- element inventory (%d spans) ----", nspans);
     for (k = 0; k < TG_ACCT_KIND_COUNT; k++) {
-        const unsigned long long bit = 1ull << (unsigned)k;
         char runs[240];
         int  pos = 0, nruns = 0, touched = 0, first = -1, last = -1;
         int  s = 0;
@@ -937,9 +1023,9 @@ static void tg_acct_report(int nspans)
         runs[0] = '\0';
         while (s < nspans) {
             int a;
-            if (!(s_acct_mask[s] & bit)) { s++; continue; }
+            if (!TG_ACCT_MASK_TEST(s, k)) { s++; continue; }
             a = s;
-            while (s < nspans && (s_acct_mask[s] & bit)) s++;
+            while (s < nspans && TG_ACCT_MASK_TEST(s, k)) s++;
             touched += s - a;
             if (first < 0) first = a;
             last = s - 1;
