@@ -32,6 +32,7 @@
 #include "td5_tg_real_tex_city.h"  /* extra city facades: SF/Tokyo/Moscow */
 #include "td5_tg_real_tex_r5flora.h"  /* [R5 item 18] tall Moscow park trees */
 #include "td5_tg_real_tex_r7city.h"   /* [R7 item 4] more city facade variety */
+#include "td5_tg_real_tex_r8var.h"    /* [R8 G1] facades, banners, guardrails */
 #include "td5_tg_furniture_tex.h" /* real TD5 lamp/railing/banner pages     */
 #include "td5re.h"
 
@@ -450,6 +451,30 @@ static int tg_road_page(int si);
 #define TD5_TG_PAGE_R8_VARIETY (TD5_TG_PAGE_R8_BASE + 56)
 #define TD5_TG_R8_VARIETY_N    24
 
+/* [R8 VARIETY / G1] Layout INSIDE the 24-slot VARIETY block. Every one of the
+ * five art axes G1 asks for is either new pages here or (skyboxes, depth) needs
+ * none at all; the two spare slots at the top of the block stay spare.
+ *
+ *   +0..+5   WALL_LOW    6   more low-rise facades   (td5_tg_real_tex_r8var.h)
+ *   +6..+9   WALL_TOWER  4   more tower facades
+ *   +10..+13 BANNER      4   level003 start/finish word set (L,R,L,R)
+ *   +14..+17 BANNER_NIGHT4   the shipped level001 set, palette-darkened
+ *   +18..+21 RAIL        4   real photographic guardrails, alpha-keyed
+ *   +22..+23 spare
+ *
+ * Skyboxes take no page: the sky is a FORWSKY.png copied into the level
+ * directory (tg_install_sky), so day/night variety is a file CHOICE. Building
+ * depth takes no page either -- it is massing, not art. */
+#define TD5_TG_PAGE_R8V_WALL_LOW    (TD5_TG_PAGE_R8_VARIETY + 0)
+#define TD5_TG_R8V_WALL_LOW_N       6
+#define TD5_TG_PAGE_R8V_WALL_TOWER  (TD5_TG_PAGE_R8_VARIETY + 6)
+#define TD5_TG_R8V_WALL_TOWER_N     4
+#define TD5_TG_PAGE_R8V_BANNER      (TD5_TG_PAGE_R8_VARIETY + 10)
+#define TD5_TG_PAGE_R8V_BANNER_NIGHT (TD5_TG_PAGE_R8_VARIETY + 14)
+#define TD5_TG_R8V_BANNER_N         4   /* START_L, START_R, FINISH_L, FINISH_R */
+#define TD5_TG_PAGE_R8V_RAIL        (TD5_TG_PAGE_R8_VARIETY + 18)
+#define TD5_TG_R8V_RAIL_N           4
+
 #define TD5_TG_PAGE_R8_SHAPE  (TD5_TG_PAGE_R8_BASE + 82)
 #define TD5_TG_R8_SHAPE_N     10
 
@@ -551,6 +576,13 @@ static int tg_facade_stands(int si);
 
 /* Seed of the last successful build, for reproducing a good random track. */
 static unsigned int s_last_seed = 0;
+
+/* [R8 G1] Seed of the build in progress, latched at the top of
+ * td5_trackgen_build_level. s_last_seed above is only written AFTER the build
+ * finishes, so an emitter reading it during the build would get the PREVIOUS
+ * track's seed -- which is why this is a second static rather than a reuse. */
+static unsigned int s_gen_seed = 0;
+static unsigned int tg_gen_seed(void) { return s_gen_seed; }
 
 static void tg_srand(unsigned int seed)
 {
@@ -786,10 +818,70 @@ static long s_acct_count[TG_ACCT_KIND_COUNT];
  * is the one lie this inventory exists to prevent. */
 static unsigned long long s_acct_mask[TD5_TG_MAX_SPANS];
 
+/* [R8 G1] PER-AXIS PAGE CENSUS. The element inventory above answers "did the
+ * emitter fire"; it cannot answer the question a BREADTH complaint actually
+ * asks, which is "how many DIFFERENT things are on screen". A page that is
+ * defined and never selected is not a fix (R7 item 4), and a pool that is wired
+ * up but always resolves to the same member is the same failure one level down.
+ *
+ * So each of the four art axes tallies, per BUILD, how many times every page id
+ * it could have chosen was actually chosen. The dump lands next to the element
+ * inventory, and the DISTINCT count in it is the before/after number the round
+ * is judged on -- with the axis knobs off it prints the old pool, with them on
+ * the new one, from the same code path.
+ *
+ * Depth is a fifth axis and is NOT a page, so it is censused by cell count. */
+typedef enum {
+    TG_VAR_FACADE = 0, TG_VAR_BANNER, TG_VAR_RAIL, TG_VAR_DEPTH,
+    TG_VAR_AXIS_COUNT
+} TG_VarAxis;
+#define TD5_TG_VAR_SLOTS 64     /* distinct ids tracked per axis before spill */
+static const char *const k_var_axis[TG_VAR_AXIS_COUNT] = {
+    "facade-pages", "banner-pages", "rail-pages", "depth-cells"
+};
+static int  s_var_id[TG_VAR_AXIS_COUNT][TD5_TG_VAR_SLOTS];
+static long s_var_hits[TG_VAR_AXIS_COUNT][TD5_TG_VAR_SLOTS];
+static int  s_var_n[TG_VAR_AXIS_COUNT];
+static long s_var_spill[TG_VAR_AXIS_COUNT];
+
+static void tg_var_note(TG_VarAxis axis, int id)
+{
+    int i;
+    if ((unsigned)axis >= TG_VAR_AXIS_COUNT) return;
+    for (i = 0; i < s_var_n[axis]; i++) {
+        if (s_var_id[axis][i] == id) { s_var_hits[axis][i]++; return; }
+    }
+    if (s_var_n[axis] >= TD5_TG_VAR_SLOTS) { s_var_spill[axis]++; return; }
+    s_var_id[axis][s_var_n[axis]]   = id;
+    s_var_hits[axis][s_var_n[axis]] = 1;
+    s_var_n[axis]++;
+}
+
+static void tg_var_report(void)
+{
+    int a, i;
+    for (a = 0; a < TG_VAR_AXIS_COUNT; a++) {
+        char line[400];
+        int pos = 0;
+        for (i = 0; i < s_var_n[a] && pos < (int)sizeof(line) - 24; i++)
+            pos += snprintf(line + pos, sizeof(line) - (size_t)pos,
+                            "%s%d:%ld", pos ? " " : "",
+                            s_var_id[a][i], s_var_hits[a][i]);
+        TD5_LOG_I(LOG_TAG,
+                  "trackgen:   %-13s distinct=%-3d spill=%-4ld  %s",
+                  k_var_axis[a], s_var_n[a], s_var_spill[a],
+                  pos ? line : "-");
+    }
+}
+
 static void tg_acct_reset(void)
 {
     memset(s_acct_count, 0, sizeof(s_acct_count));
     memset(s_acct_mask,  0, sizeof(s_acct_mask));
+    memset(s_var_id,    0, sizeof(s_var_id));
+    memset(s_var_hits,  0, sizeof(s_var_hits));
+    memset(s_var_n,     0, sizeof(s_var_n));
+    memset(s_var_spill, 0, sizeof(s_var_spill));
 }
 
 /* n elements of `kind` standing at span si. si out of range still COUNTS (the
@@ -876,6 +968,7 @@ static void tg_acct_report(int nspans)
         if (pos)
             TD5_LOG_I(LOG_TAG, "trackgen:   NONE emitted: %s", none);
     }
+    tg_var_report();
     TD5_LOG_I(LOG_TAG, "trackgen: ---- end inventory ----");
 }
 
@@ -1782,20 +1875,60 @@ static int tg_copy_file(const char *src, const char *dst)
  * different generated tracks get different skies. Candidates are probed in
  * order because not every level ships one. Non-fatal: without it the race just
  * renders against the flat clear colour, which is what happened before. */
+/* [R8 G1 "use different skyboxes for day and night"] Sky pools, split by a
+ * MEASURED property rather than a hand-picked list -- the R7 flora lesson
+ * (listing pages fixes the instance, measuring the property fixes the class).
+ *
+ * Every shipped FORWSKY.png is a 256x256 backdrop panorama; the 31 that exist
+ * were scored by mean luminance (0.299R + 0.587G + 0.114B over all 65536
+ * texels) and the distribution has a clear gap:
+ *
+ *   level037   0.0   degenerate, all black -- EXCLUDED from both pools
+ *   level030  27.3   night, heavy cloud over a dark horizon
+ *   level005  36.7   night, storm cloud
+ *   level023  62.7   dusk city, lit windows
+ *   level018  76.5   overcast dusk over water
+ *   ---------------- gap ----------------
+ *   level039  96.5   level015 102.2   level002 106.8   level017 115.7
+ *   level013 118.4   level010 118.6   level003 119.4   level004 119.6 ...
+ *   ... up to level008 164.7
+ *
+ * The old pool was { 1, 2, 3, 5, 8, 13, 21, 29 } chosen blind, so a DAY track
+ * had a one-in-eight chance of drawing level005's night storm and a NIGHT track
+ * had a seven-in-eight chance of racing under a bright blue sky. That is the
+ * complaint. td5_trackgen_is_night() is the same latched predicate the lamp
+ * posts and the headlights already read, so the sky now agrees with them.
+ *
+ * TD5RE_R8_VARIETY_SKY=0 restores the single blind pool for an A/B. */
+static const int k_sky_day[]   = { 39, 15, 2, 17, 13, 10, 3, 4, 25, 28, 1, 20,
+                                   27, 19, 16, 29, 11, 9, 6, 26, 21, 22, 12,
+                                   7, 14, 8 };
+static const int k_sky_night[] = { 30, 5, 23, 18 };
+static const int k_sky_blind[] = { 1, 2, 3, 5, 8, 13, 21, 29 };
+
 static void tg_install_sky(const char *dir, unsigned int seed)
 {
-    static const int k_sky_levels[] = { 1, 2, 3, 5, 8, 13, 21, 29 };
-    const int n = (int)(sizeof(k_sky_levels) / sizeof(k_sky_levels[0]));
+    const int night = td5_trackgen_is_night();
+    const int variety = td5_env_flag_on("TD5RE_R8_VARIETY_SKY");
+    const int *pool = !variety ? k_sky_blind
+                    : (night ? k_sky_night : k_sky_day);
+    const int n = !variety
+        ? (int)(sizeof(k_sky_blind) / sizeof(k_sky_blind[0]))
+        : (night ? (int)(sizeof(k_sky_night) / sizeof(k_sky_night[0]))
+                 : (int)(sizeof(k_sky_day)   / sizeof(k_sky_day[0])));
     char src[256], dst[320];
     int i;
 
     for (i = 0; i < n; i++) {
-        int lvl = k_sky_levels[(seed / 7u + (unsigned)i) % (unsigned)n];
+        int lvl = pool[(seed / 7u + (unsigned)i) % (unsigned)n];
         snprintf(src, sizeof(src),
                  "re/assets/levels/level%03d/FORWSKY.png", lvl);
         snprintf(dst, sizeof(dst), "%s/FORWSKY.png", dir);
         if (tg_copy_file(src, dst)) {
-            TD5_LOG_I(LOG_TAG, "trackgen: sky from level%03d -> %s", lvl, dst);
+            TD5_LOG_I(LOG_TAG,
+                      "trackgen: sky from level%03d -> %s (%s pool, %d cands)",
+                      lvl, dst, !variety ? "blind" : (night ? "NIGHT" : "DAY"),
+                      n);
             return;
         }
     }
@@ -4644,6 +4777,17 @@ static void tg_facade_push_quad(const double *xyz,
  * shorter from the low-rise masonry ones. Handing a 10-storey block a two-storey
  * shopfront texture is what makes a procedural city read as a texture soup
  * rather than a place. */
+/* [R8 G1] Is `page` one of the VARIETY block's pages? The inventory line for
+ * this area has to count what was SELECTED, not what was defined -- a page that
+ * exists and is never picked is not a fix (the R7 item-4 lesson). Every R8
+ * VARIETY emit site asks this and accounts on a hit, so "r8-variety: NONE
+ * emitted" in race.log means the art really is unreachable. */
+static int tg_page_is_r8_variety(int page)
+{
+    return page >= TD5_TG_PAGE_R8_VARIETY
+        && page <  TD5_TG_PAGE_R8_VARIETY + TD5_TG_R8_VARIETY_N;
+}
+
 static int tg_facade_page_class(unsigned int gh, int rows)
 {
     /* [R7 item 4] Draw from the UNION of the original 12 variants and the R7
@@ -4653,23 +4797,38 @@ static int tg_facade_page_class(unsigned int gh, int rows)
      * low pages. Same hash bits key the pick, so a given block keeps a stable
      * page. TD5RE_R7_CITY_VARIETY=0 restores the original 12-page pool for an
      * A/B. */
+    /* [R8 G1 "more building variety"] The union grows again, in its OWN block:
+     * R7's pages are untouched and the R8 pages are appended AFTER them, so the
+     * pool is orig + R7 + R8 and the two knobs are independent
+     * (TD5RE_R7_CITY_VARIETY=0 TD5RE_R8_VARIETY_FACADES=1 is a legal A/B).
+     * Counts, tower class then low class:
+     *   towers  3 orig + 5 R7 + 4 R8 = 12   lows  9 orig + 7 R7 + 6 R8 = 22
+     * Same hash bits key the pick, so a block still keeps ONE stable page --
+     * variety between buildings, not within one. */
     const int r7 = td5_env_flag_on("TD5RE_R7_CITY_VARIETY");
+    const int r8 = td5_env_flag_on("TD5RE_R8_VARIETY_FACADES");
     unsigned int v;
     if (rows >= TD5_TG_FACADE_TALL_ROWS) {
         const int orig  = TD5_TG_WALL_VARIANTS - TD5_TG_WALL_TOWER_FIRST; /* 3 */
         const int extra = r7 ? TD5_TG_R7_WALL_TOWER_N : 0;
-        v = (gh >> 17) % (unsigned)(orig + extra);
+        const int more  = r8 ? TD5_TG_R8V_WALL_TOWER_N : 0;
+        v = (gh >> 17) % (unsigned)(orig + extra + more);
         if ((int)v < orig)
             return TD5_TG_PAGE_WALL_EXTRA + TD5_TG_WALL_TOWER_FIRST + (int)v - 1;
-        return TD5_TG_PAGE_R7_WALL_TOWER + ((int)v - orig);
+        if ((int)v < orig + extra)
+            return TD5_TG_PAGE_R7_WALL_TOWER + ((int)v - orig);
+        return TD5_TG_PAGE_R8V_WALL_TOWER + ((int)v - orig - extra);
     } else {
         const int orig  = TD5_TG_WALL_TOWER_FIRST;                        /* 9 */
         const int extra = r7 ? TD5_TG_R7_WALL_LOW_N : 0;
-        v = (gh >> 17) % (unsigned)(orig + extra);
+        const int more  = r8 ? TD5_TG_R8V_WALL_LOW_N : 0;
+        v = (gh >> 17) % (unsigned)(orig + extra + more);
         if ((int)v < orig)
             return v == 0 ? TD5_TG_PAGE_WALL
                           : (TD5_TG_PAGE_WALL_EXTRA + (int)v - 1);
-        return TD5_TG_PAGE_R7_WALL_LOW + ((int)v - orig);
+        if ((int)v < orig + extra)
+            return TD5_TG_PAGE_R7_WALL_LOW + ((int)v - orig);
+        return TD5_TG_PAGE_R8V_WALL_LOW + ((int)v - orig - extra);
     }
 }
 
@@ -5379,6 +5538,10 @@ typedef struct {
     double bx, by, bz, ax, ay, az, H, depth;
     double lx0, lz0, lx1, lz1;
     int    cols, rows, cap_near, cap_far;
+    /* [R8 item 6] Whole cells of DEPTH for this run. Per SIDE, not per mesh:
+     * the two sides of one span belong to different runs and so may be
+     * different depths, and `depth` above is just dcols * the cell width. */
+    int    dcols;
 } TG_SideGeom;
 
 /* ===================== CITY PAVEMENT GEOMETRY =====================
@@ -5508,6 +5671,43 @@ static double tg_facade_depth(const TG_Biome *b)
     return (double)tg_facade_cap_cols(b) * tg_facade_cell_w(b);
 }
 
+/* [R8 item 6 -- "buildings look like they are all the same depth, some
+ * buildings should have more depth"] How many whole cells deep THIS RUN is.
+ *
+ * Depth was one number per BIOME (tg_facade_depth above): every building on a
+ * city street was the biome's `depth` field, quantised to the same 2 cells, so
+ * the back line of the street was a single plane parallel to the road however
+ * the heights varied. That is the complaint, and it is MASSING, not art -- no
+ * amount of facade variety fixes a silhouette that is flat behind.
+ *
+ * Keyed to the RUN hash, exactly like the height and the page, so one building
+ * has one depth and its neighbour has another, and a run keeps its depth along
+ * its whole length (a building that changed depth span to span would saw-tooth
+ * the back line, which is the same mistake tg_facade_floors avoids for height).
+ * Whole cells, for the reason tg_facade_depth already gives: a return that is
+ * not a multiple of the cell width stretches the page across the flank.
+ *
+ * BUDGET IS LOAD-BEARING here, not cosmetic. A corner return costs about
+ * 2*cols*rows quads and TD5_TG_FACADE_MAXQUAD (320) is already nearly filled by
+ * a 10-floor run with two caps a side; past it tg_facade_push_grid drops quads
+ * SILENTLY, which reads as buildings missing their top floors. So a run tall
+ * enough to be a tower gets at most one extra cell, a low-rise up to two.
+ *
+ * Depth grows along the OUTWARD lateral, i.e. away from the carriageway, so
+ * this cannot push a building into the road and cannot trip the R7 guard.
+ * TD5RE_R8_VARIETY_DEPTH=0 restores the single biome depth for an A/B. */
+static int tg_facade_depth_cols(const TG_Biome *b, unsigned int gh, int rows)
+{
+    const int base = tg_facade_cap_cols(b);
+    int extra;
+    if (b->cell_w <= 0) return base;
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_FACADE_ASPECT")) return base;
+    if (!td5_env_flag_on("TD5RE_R8_VARIETY_DEPTH")) return base;
+    extra = (int)((gh >> 13) % 3u);                    /* 0, 1 or 2 cells */
+    if (rows >= TD5_TG_FACADE_TALL_ROWS && extra > 1) extra = 1;
+    return base + extra;
+}
+
 /* Along-road depth of a run-end corner return, keyed to the facade cell so it
  * scales with the biome's building size. 0.45 of a cell is enough mass to read
  * as a corner block without closing off the side street behind it. */
@@ -5581,7 +5781,14 @@ static void tg_side_geom(const TG_NodeList *nl, int si, int left,
     floors   = tg_facade_floors(si, left, b);
     g->rows  = floors;
     g->H     = (double)floors * tg_facade_floor_h(b);
-    g->depth = tg_facade_depth(b);
+    /* [R8 item 6] Depth is now per RUN, not per biome. Same run id the height
+     * and the page use, so a building is one depth end to end. With the knob
+     * off tg_facade_depth_cols returns tg_facade_cap_cols and this is exactly
+     * the old tg_facade_depth. */
+    g->dcols = tg_facade_depth_cols(b, tg_facade_run_id(si, left), floors);
+    g->depth = (b->cell_w > 0 && td5_env_flag_on("TD5RE_AUTOTRACK_FACADE_ASPECT"))
+             ? (double)g->dcols * tg_facade_cell_w(b)
+             : tg_facade_depth(b);
 
     g->lx0 = n0->tz * side; g->lz0 = -n0->tx * side;
     g->lx1 = n1->tz * side; g->lz1 = -n1->tx * side;
@@ -5641,7 +5848,10 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
      * building on one texture across the side streets. */
     unsigned int block_gh = tg_facade_run_id(si, 0);
     const double cap_thick = tg_facade_cap_thick(b);
-    const int cap_cols = tg_facade_cap_cols(b);
+    /* [R8 item 6] The return depth used to be one biome constant read here for
+     * the whole mesh; it now lives on each side's TG_SideGeom as `dcols`,
+     * because the two sides belong to different runs and so to different
+     * depths. Nothing mesh-wide is left to compute. */
     int n = 0, n_store, s, nseg, seg_page[2], seg_nq[2], wall_rows, step_max = 0;
 
     if (si + 1 >= nl->count) return 1;    /* need the far endpoint to abut */
@@ -5712,15 +5922,18 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
             const double auz = (alen > 1.0) ? g->az / alen : 1.0;
             double thick = cap_thick;
             if (alen > 1.0 && thick > alen * 0.9) thick = alen * 0.9;
+            /* [R8 item 6] The return is `dcols` cells deep, this RUN's depth,
+             * not the one biome depth -- the prism has to follow the body or
+             * the corner would fold back short of the roof it closes. */
             if (g->cap_near)
                 tg_facade_push_cap(g->bx, g->by, g->bz, g->lx0, g->lz0,
                                    aux, auz, g->depth, thick, g->H, g->rows,
-                                   cap_cols, px, py, pz, uu, vv, &n);
+                                   g->dcols, px, py, pz, uu, vv, &n);
             if (g->cap_far)
                 tg_facade_push_cap(g->bx + g->ax, g->by + g->ay, g->bz + g->az,
                                    g->lx1, g->lz1, -aux, -auz,
                                    g->depth, thick, g->H, g->rows,
-                                   cap_cols, px, py, pz, uu, vv, &n);
+                                   g->dcols, px, py, pz, uu, vv, &n);
         }
         /* SIDE WALL at a height STEP (item 1). Two ADJACENT built runs of
          * different height share a flush frontage, but the taller one's flank
@@ -5758,7 +5971,7 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
                 tg_facade_push_grid(fx, fy, fz,
                                     g->lx1 * g->depth, 0.0, g->lz1 * g->depth,
                                     0.0, (double)hi * fh, 0.0,
-                                    cap_cols, hi, lo, hi,
+                                    g->dcols, hi, lo, hi,
                                     px, py, pz, uu, vv, &n);
                 if (nrows > step_max) step_max = nrows;
                 tg_acct(TG_ACCT_STEPWALL, si);
@@ -5789,6 +6002,25 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
                                      : tg_facade_page_class(block_gh, wall_rows);
         seg_nq[0] = n / 4;
         nseg = 1;
+    }
+    /* [R8 G1 + item 6] Account this span for VARIETY when it actually took an
+     * R8 facade page, or when its massing is DEEPER than the biome default --
+     * the two halves of "more building variety" and "some buildings should have
+     * more depth". Counted once per span, not once per side, so the number in
+     * the inventory reads as "spans showing R8 variety". */
+    {
+        const int wall = seg_page[nseg - 1];
+        const int base = tg_facade_cap_cols(b);
+        const int deep = (sd[0].built && sd[0].dcols > base)
+                      || (sd[1].built && sd[1].dcols > base);
+        const int r8p = tg_page_is_r8_variety(wall)
+                     || (nseg > 1 && tg_page_is_r8_variety(seg_page[0]));
+        if (r8p || deep) tg_acct(TG_ACCT_R8_VARIETY, si);
+        /* Census the WALL page (seg_page[0] is the storefront, a separate
+         * pool this area does not touch) and each built side's depth. */
+        tg_var_note(TG_VAR_FACADE, wall);
+        if (sd[0].built) tg_var_note(TG_VAR_DEPTH, sd[0].dcols);
+        if (sd[1].built) tg_var_note(TG_VAR_DEPTH, sd[1].dcols);
     }
     /* One mesh, but up to one frontage per side, and a ground-floor storefront
      * command only when the run actually got one. */
@@ -8371,6 +8603,49 @@ static int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
                                         * barrier does not share an edge with
                                         * the road surface and shimmer */
 
+/* [R8 G1 "different guardrails"] Which page the roadside barrier wears.
+ *
+ * Every generated track wore TD5_TG_PAGE_RAIL, one procedural armco, on every
+ * span of every biome -- and the only other rail art in the generator was made
+ * for the BRIDGE parapet, whose quad maps its axes the other way round, so it
+ * was never available here. The R8 survey found real photographic rails in the
+ * shipped levels instead (scored by horizontal banding plus a keyed band, see
+ * gen_trackgen_r8var_tex.py) and this picks among four of them.
+ *
+ * Choice is BIOME-led, then varied by a per-biome-run hash. Biome-led because a
+ * guardrail is not decoration: a timber post-and-rail belongs on a forest road
+ * and a dark steel double rail belongs in a city, and rolling them at random
+ * would swap "one rail everywhere" for "the wrong rail everywhere". `urbanity`
+ * (0 wilderness .. 3 dense urban) is the axis the biome table already carries
+ * for exactly this kind of question. Each urbanity picks a PAIR, and the run
+ * hash picks inside the pair, so two consecutive runs in one biome differ while
+ * both stay plausible for it.
+ *
+ * All four pages are alpha-keyed on index 0, which is what a guardrail has to
+ * be -- real armco is mostly air, the R6 item-13 finding for the bridge rail.
+ * The prism's top cap samples the page's top rows, which are keyed on all four,
+ * so the cap simply drops out and the barrier reads as beam-and-post rather
+ * than as the solid slab the procedural page made it.
+ *
+ * TD5RE_R8_VARIETY_RAILS=0 restores the one procedural page for an A/B. */
+static int tg_rail_page(int si)
+{
+    const TG_Biome *b;
+    unsigned int h;
+    int a, c;
+
+    if (!td5_env_flag_on("TD5RE_R8_VARIETY_RAILS")) return TD5_TG_PAGE_RAIL;
+    b = &k_biomes[tg_scenery_biome_index(si)];
+    h = (unsigned)(si / TD5_TG_BIOME_RUN) * 2654435761u;
+    switch (b->urbanity) {
+    case 0:  a = 1; c = 0; break;   /* wilderness  timber  / steel W-beam */
+    case 1:  a = 0; c = 1; break;   /* rural       W-beam  / timber       */
+    case 2:  a = 3; c = 0; break;   /* edge of town white armco / W-beam  */
+    default: a = 2; c = 3; break;   /* dense urban dark rail / white armco*/
+    }
+    return TD5_TG_PAGE_R8V_RAIL + (((h >> 15) & 1u) ? c : a);
+}
+
 static int tg_guardrails_enabled(void)
 {
     /* Default OFF until a frame confirms it, same discipline as tunnels and
@@ -8621,7 +8896,12 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk)
     tg_put_u32(blk, 0);
 
     tg_put_u16(blk, 0);                    /* dispatch_type 0 */
-    tg_put_u16(blk, TD5_TG_PAGE_RAIL);
+    {
+        const int rp = tg_rail_page(si);
+        tg_put_u16(blk, (unsigned)rp);
+        if (tg_page_is_r8_variety(rp)) tg_acct(TG_ACCT_R8_VARIETY, si);
+        tg_var_note(TG_VAR_RAIL, rp);
+    }
     tg_put_u32(blk, 0);
     tg_put_u16(blk, 0);                    /* triangle_count */
     /* 3 quads per side, but the safeguard above may have dropped the right one,
@@ -12059,6 +12339,43 @@ static void tg_gantry_quad(double *px, double *py, double *pz,
     }
 }
 
+/* [R8 G1 "different start/finish banners"] Which banner page a gantry half
+ * uses. `finish` picks FINISH over START, `half` picks the R page over the L.
+ *
+ * The gantry used to hardcode the four Keswick pages, so every generated track
+ * in every biome at every time of day carried the same red-on-white board.
+ * Three sets now exist and the choice is per TRACK (a start and a finish banner
+ * that did not match each other would read as a bug, not as variety):
+ *
+ *   0  the shipped Keswick set          level001 337/338 + 369/370
+ *   1  the ONE other word set in TD5    level003 499/500 + 439/440
+ *   2  the Keswick set, palette-darkened for a night track
+ *
+ * Set 1 is not a guess: the R8 survey scanned every page of every shipped level
+ * for banner art (see gen_trackgen_r8var_tex.py) and found the Keswick set
+ * duplicated verbatim into six other levels plus exactly one genuinely
+ * different word set, level003's black serif on pale blue steel. It splits each
+ * word over two pages the same way, so it drops into the two-half-quad panel
+ * with no layout change. level013 page 222 is a third style but puts the whole
+ * word on ONE page, which this panel cannot render, so it is left out.
+ *
+ * A NIGHT track always takes set 2 rather than rolling: a white board under a
+ * night sky was the mismatch the day/night sky work is fixing one line up, and
+ * the same argument applies to the brightest object on the track.
+ *
+ * TD5RE_R8_VARIETY_BANNERS=0 restores the single hardcoded set for an A/B. */
+static int tg_banner_page(int finish, int half)
+{
+    static const int k_orig[4] = { TD5_TG_PAGE_START_L, TD5_TG_PAGE_START_R,
+                                   TD5_TG_PAGE_FINISH_L, TD5_TG_PAGE_FINISH_R };
+    const int slot = (finish ? 2 : 0) + (half ? 1 : 0);
+    unsigned int h;
+    if (!td5_env_flag_on("TD5RE_R8_VARIETY_BANNERS")) return k_orig[slot];
+    if (td5_trackgen_is_night()) return TD5_TG_PAGE_R8V_BANNER_NIGHT + slot;
+    h = tg_gen_seed() * 2654435761u;
+    return ((h >> 19) & 1u) ? TD5_TG_PAGE_R8V_BANNER + slot : k_orig[slot];
+}
+
 /* Gantry across span si. `finish` selects the FINISH artwork over the START
  * artwork. Returns 0 on OOM. */
 static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish)
@@ -12243,8 +12560,12 @@ static int tg_emit_gantry(const TG_NodeList *nl, int si, TG_Buf *blk, int finish
          * the legs took their own page ahead of the cap ([R5 item 1]). */
         {
             const int ps = legfix ? 2 : 1;
-            seg_page[ps]     = finish ? TD5_TG_PAGE_FINISH_L : TD5_TG_PAGE_START_L;
-            seg_page[ps + 1] = finish ? TD5_TG_PAGE_FINISH_R : TD5_TG_PAGE_START_R;
+            seg_page[ps]     = tg_banner_page(finish, 0);
+            seg_page[ps + 1] = tg_banner_page(finish, 1);
+            if (tg_page_is_r8_variety(seg_page[ps]))
+                tg_acct(TG_ACCT_R8_VARIETY, si);
+            tg_var_note(TG_VAR_BANNER, seg_page[ps]);
+            tg_var_note(TG_VAR_BANNER, seg_page[ps + 1]);
             seg_nq[ps]       = 1;  /* one front half per page (back face dropped) */
             seg_nq[ps + 1]   = 1;
         }
@@ -14846,6 +15167,94 @@ static void tg_emit_real_page(TG_Buf *out, const unsigned char *pal, int paln,
     for (i = 0; i < TD5_TG_TEX_TEXELS; i++) tg_put_u8(out, idx[i]);
 }
 
+/* [R8 G1] Same page, PALETTE DIMMED to num/den, with a slight warm bias so the
+ * result reads as sodium-lit rather than as a grey photograph. Only the palette
+ * is touched -- the 4096 indices are copied verbatim -- so the artwork, its key
+ * coverage and its alpha type are bit-identical to the source.
+ *
+ * Entry 0 is left alone: on an alpha-keyed page it IS the key, and darkening a
+ * key colour is at best a no-op and at worst turns a transparent texel into a
+ * visible dark one if the renderer ever compares by colour rather than index. */
+static void tg_emit_real_page_dim(TG_Buf *out, const unsigned char *pal,
+                                  int paln, const unsigned char *idx, int type,
+                                  int num, int den)
+{
+    int i;
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, (unsigned)type);
+    tg_put_u32(out, (unsigned)paln);
+    for (i = 0; i < paln; i++) {
+        /* Source is BGR. Blue is dimmed hardest and red least, which is the
+         * warm bias -- a night banner lit by street lighting, not a photograph
+         * with the brightness pulled down. */
+        static const int k_bias[3] = { 82, 92, 108 };   /* B, G, R, percent */
+        int c;
+        for (c = 0; c < 3; c++) {
+            int v = (i == 0) ? pal[i * 3 + c]
+                  : pal[i * 3 + c] * num * k_bias[c] / (den * 100);
+            if (v > 255) v = 255;
+            if (v < 0) v = 0;
+            tg_put_u8(out, (unsigned)v);
+        }
+    }
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) tg_put_u8(out, idx[i]);
+}
+
+/* [R8 G1] The two alternative start/finish banner sets, in the
+ * START_L, START_R, FINISH_L, FINISH_R order tg_banner_page indexes.
+ *   +0..+3  level003's black-serif-on-pale-blue word set (mined, real art)
+ *   +4..+7  the shipped Keswick set at 45% brightness, for a night track
+ * Emitted with each source page's own alpha type so a keyed banner stays keyed.
+ * If the mined header is ever short, the slot falls back to the shipped page's
+ * artwork rather than to a blank -- an empty banner would read as a missing
+ * gantry, which is a far worse failure than a repeated one. */
+static void tg_emit_r8var_banner_pages(TG_Buf *pages)
+{
+    static const unsigned char *const k_src_pal[4] = {
+        k_furn_start_l_pal, k_furn_start_r_pal,
+        k_furn_finish_l_pal, k_furn_finish_r_pal };
+    static const unsigned char *const k_src_idx[4] = {
+        k_furn_start_l_idx, k_furn_start_r_idx,
+        k_furn_finish_l_idx, k_furn_finish_r_idx };
+    const int k_src_paln[4] = { k_furn_start_l_paln, k_furn_start_r_paln,
+                                k_furn_finish_l_paln, k_furn_finish_r_paln };
+    const int k_src_type[4] = { k_furn_start_l_type, k_furn_start_r_type,
+                                k_furn_finish_l_type, k_furn_finish_r_type };
+    int v;
+
+    for (v = 0; v < TD5_TG_R8V_BANNER_N; v++) {
+        if (v < k_real_r8var_bann_count)
+            tg_emit_real_page(&pages[TD5_TG_PAGE_R8V_BANNER + v],
+                              k_real_r8var_bann_pal[v],
+                              k_real_r8var_bann_paln[v],
+                              k_real_r8var_bann_idx[v], 1);
+        else
+            tg_emit_real_page(&pages[TD5_TG_PAGE_R8V_BANNER + v],
+                              k_src_pal[v], k_src_paln[v], k_src_idx[v],
+                              k_src_type[v]);
+        tg_emit_real_page_dim(&pages[TD5_TG_PAGE_R8V_BANNER_NIGHT + v],
+                              k_src_pal[v], k_src_paln[v], k_src_idx[v],
+                              k_src_type[v], 45, 100);
+    }
+}
+
+/* [R8 G1] Real guardrail pages, alpha-keyed on index 0. A slot the header does
+ * not fill falls back to the procedural armco so tg_rail_page can never land on
+ * a blank page. */
+static void tg_emit_r8var_rail_pages(TG_Buf *pages)
+{
+    int v;
+    for (v = 0; v < TD5_TG_R8V_RAIL_N; v++) {
+        if (v < k_real_r8var_rail_count)
+            tg_emit_real_page(&pages[TD5_TG_PAGE_R8V_RAIL + v],
+                              k_real_r8var_rail_pal[v],
+                              k_real_r8var_rail_paln[v],
+                              k_real_r8var_rail_idx[v], 1);
+        else
+            tg_emit_texture_page_rail(&pages[TD5_TG_PAGE_R8V_RAIL + v]);
+    }
+}
+
 /* Fill the wall/store/grass/tree/prop pages with REAL TD5 texture data borrowed
  * from shipped tracks instead of the procedural placeholders, so the auto-track
  * reads like an actual TD5 level.
@@ -14959,6 +15368,35 @@ static int tg_emit_textures(TG_Buf *out)
                                           TD5_TG_WALL_VARIANTS
                                           + TD5_TG_R7_WALL_LOW_N + v);
         }
+        /* [R8 G1] The R8 facade block, filled the same way and with the same
+         * "never leave a selectable slot blank" fallback. Seeds for the
+         * procedural fallback continue past the R7 range so no two variety
+         * pages are the same procedural wall. */
+        for (v = 0; v < TD5_TG_R8V_WALL_LOW_N; v++) {
+            if (v < k_real_r8var_low_count)
+                tg_emit_real_page(&pages[TD5_TG_PAGE_R8V_WALL_LOW + v],
+                                  k_real_r8var_low_pal[v],
+                                  k_real_r8var_low_paln[v],
+                                  k_real_r8var_low_idx[v], 0);
+            else
+                tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_R8V_WALL_LOW + v],
+                                          TD5_TG_WALL_VARIANTS
+                                          + TD5_TG_R7_WALL_LOW_N
+                                          + TD5_TG_R7_WALL_TOWER_N + v);
+        }
+        for (v = 0; v < TD5_TG_R8V_WALL_TOWER_N; v++) {
+            if (v < k_real_r8var_tower_count)
+                tg_emit_real_page(&pages[TD5_TG_PAGE_R8V_WALL_TOWER + v],
+                                  k_real_r8var_tower_pal[v],
+                                  k_real_r8var_tower_paln[v],
+                                  k_real_r8var_tower_idx[v], 0);
+            else
+                tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_R8V_WALL_TOWER + v],
+                                          TD5_TG_WALL_VARIANTS
+                                          + TD5_TG_R7_WALL_LOW_N
+                                          + TD5_TG_R7_WALL_TOWER_N
+                                          + TD5_TG_R8V_WALL_LOW_N + v);
+        }
         tg_emit_real_page(&pages[TD5_TG_PAGE_GREEN],
                           k_real_green_pal, k_real_green_paln, k_real_green_idx, 0);
         /* Thematic trees: alpha-keyed (type 1), index 0 transparent. */
@@ -14989,6 +15427,16 @@ static int tg_emit_textures(TG_Buf *out)
         for (v = 0; v < TD5_TG_R7_WALL_TOWER_N; v++)
             tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_R7_WALL_TOWER + v],
                                       TD5_TG_WALL_VARIANTS + TD5_TG_R7_WALL_LOW_N + v);
+        /* [R8 G1] and the R8 variety block, distinct seeds again. */
+        for (v = 0; v < TD5_TG_R8V_WALL_LOW_N; v++)
+            tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_R8V_WALL_LOW + v],
+                                      TD5_TG_WALL_VARIANTS + TD5_TG_R7_WALL_LOW_N
+                                      + TD5_TG_R7_WALL_TOWER_N + v);
+        for (v = 0; v < TD5_TG_R8V_WALL_TOWER_N; v++)
+            tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_R8V_WALL_TOWER + v],
+                                      TD5_TG_WALL_VARIANTS + TD5_TG_R7_WALL_LOW_N
+                                      + TD5_TG_R7_WALL_TOWER_N
+                                      + TD5_TG_R8V_WALL_LOW_N + v);
         for (v = 0; v < TD5_TG_STORE_VARIANTS; v++)
             tg_emit_texture_page_store(&pages[TD5_TG_PAGE_STORE + v], v);
         tg_emit_texture_page_green(&pages[TD5_TG_PAGE_GREEN]);
@@ -15064,6 +15512,15 @@ static int tg_emit_textures(TG_Buf *out)
                       k_furn_finish_l_paln, k_furn_finish_l_idx, k_furn_finish_l_type);
     tg_emit_real_page(&pages[TD5_TG_PAGE_FINISH_R], k_furn_finish_r_pal,
                       k_furn_finish_r_paln, k_furn_finish_r_idx, k_furn_finish_r_type);
+    /* [R8 G1] The two ALTERNATIVE banner sets. Filled unconditionally, next to
+     * the shipped set and for the same reason: there is no procedural stand-in
+     * for a word, and an unreferenced page costs nothing but its 4KB. */
+    tg_emit_r8var_banner_pages(pages);
+    /* [R8 G1] Real photographic guardrails, alpha-keyed on index 0. Also
+     * unconditional: TD5RE_AUTOTRACK_REAL_TEX only gates the pages that HAVE a
+     * procedural stand-in, and tg_rail_page falls back to TD5_TG_PAGE_RAIL --
+     * a different page entirely -- when its own knob is off. */
+    tg_emit_r8var_rail_pages(pages);
     /* [R4 BRANCH item 8] concrete kerb face for avenue-median side walls. */
     tg_emit_texture_page_branch_kerb(&pages[TD5_TG_PAGE_BRANCH_KERB]);
     /* [R3 BLOCK] park & house art (feedback items 5-6). Slots +4..+9 of the
@@ -15218,6 +15675,14 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     int nspans = 0, ok = 0;
 
     if (!spec) return 0;
+
+    /* [R8 G1] Latch the build seed for the emitters that need a whole-TRACK
+     * choice rather than a per-span one -- the start/finish banner set is one
+     * object per track, so it cannot key off a span hash the way the facades
+     * and the guardrails do. Latched here, not in regenerate, for the same
+     * reason tg_acct_reset is: a direct build_level call must see its own seed.
+     * Read only through tg_gen_seed(). */
+    s_gen_seed = spec->seed;
 
     memset(&nl, 0, sizeof(nl));
     memset(&strip, 0, sizeof(strip));
