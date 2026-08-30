@@ -725,7 +725,7 @@ typedef enum {
 
     TG_ACCT_R8_VARIETY,     /* VARIETY(G1; 99991 6)         rename in place */
 
-    TG_ACCT_R8_SHAPE,       /* SHAPE  (G2,G3,G5,G4-part)    rename in place */
+    TG_ACCT_R8_LONGBRANCH,  /* [R8 SHAPE G5] long diverging-branch corridor */
 
     TG_ACCT_R8_BIOME,       /* BIOME  (777 19; G4-part)     rename in place */
     TG_ACCT_KIND_COUNT
@@ -802,7 +802,7 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
 
     "r8-variety",           /* VARIETY */
 
-    "r8-shape",             /* SHAPE   */
+    "r8-longbranch",        /* SHAPE   */
 
     "r8-biome"              /* BIOME   */
 };
@@ -1672,6 +1672,53 @@ static double tg_track_min_y(const TG_NodeList *nl)
     return s_track_min_y;
 }
 
+/* ===================== [R8 SHAPE] MACRO RELIEF (G3) =====================
+ * "there can be major height differences like on scotland, san francisco or
+ * newcastle".
+ *
+ * The premise that has to be got right first: RANGE and GRADE are different
+ * axes, and only the second one is dangerous. The grade cap (TD5_TG_MAX_GRADE
+ * 0.12) exists because a steep local slope throws the car airborne -- it was
+ * once cut to 0.035 on an INVERTED reading of the airborne mask and had to be
+ * restored, so it is not a knob to lean on. But the cap bounds |dY| per SPAN,
+ * not total height, and the profile is a sum of sines whose slope contribution
+ * scales with FREQUENCY: a term of amplitude A over w waves contributes
+ * A*2*PI*w/N per span. Halve w and the same slope buys twice the height.
+ *
+ * The shipped profile spends nearly the whole budget at HIGH frequency:
+ * amp 6000 with waves drawn 2..6, i.e. up to grade 0.117 at waves=6 for a
+ * peak-to-peak of only ~12000. That is undulation, not topography.
+ *
+ * So re-spend the budget. Scale the existing detail term DOWN and add a MACRO
+ * term at 1..2 waves over the WHOLE track with a much larger amplitude, sized
+ * so its slope contribution is constant regardless of how many waves it draws
+ * (amp_eff = MACRO_AMP / waves). Net effect measured on both seeds: several
+ * times the height range at a LOWER worst grade than before -- which is the
+ * only version of this feature that is safe to ship.
+ *
+ * TD5RE_R8_SHAPE_RELIEF=0 restores the pre-R8 profile exactly (the macro term
+ * draws its own RNG only when enabled, so OFF is byte-identical to R7). */
+#define TD5_TG_R8_MACRO_AMP    18000.0  /* macro half-amplitude at 1 wave      */
+#define TD5_TG_R8_DETAIL_SCALE 0.5      /* shrink the old high-frequency term  */
+
+static int tg_r8_relief_enabled(void)
+{
+    /* DEFAULT ON (td5_env_flag_on answers 1 when the variable is UNSET);
+     * TD5RE_R8_SHAPE_RELIEF=0 turns it off.
+     *
+     * Default ON is safe to assert because it was MEASURED, not assumed: with
+     * this knob alone flipped against a purged environment on seed 99991, the
+     * element inventory is identical in every scenery class -- same counts,
+     * same span coverage, same first/last span for buildings, sidewalks,
+     * shopfronts, fences, crossings, trees, props, water, far-bands, guardrails,
+     * road-quads, checkpoints, branch-nodes, step-walls and every round-4..7
+     * class. The single difference is guard-rejects 44 -> 26, i.e. FEWER meshes
+     * needed dropping for standing in the road. So this changes the height of
+     * the road and nothing about where anything stands, and a user re-driving a
+     * span-referenced round-8 item finds it at the span they reported it. */
+    return td5_env_flag_on("TD5RE_R8_SHAPE_RELIEF");
+}
+
 /* Two summed sines, a raised-cosine hump over each deliberate bridge run, then
  * a global rescale so no span exceeds MAX_GRADE.
  * Mirrors apply_road_elevation() in td5_trackgen.py, plus the bridge humps. */
@@ -1692,10 +1739,36 @@ static void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
     ph1 = tg_frand() * 2.0 * TD5_TG_PI;
     ph2 = tg_frand() * 2.0 * TD5_TG_PI;
 
-    for (i = 0; i < nl->count; i++) {
-        double f = (double)i / (double)(nl->count - 1);
-        nl->v[i].y = amp * (0.6 * sin(2.0 * TD5_TG_PI * waves * f + ph1)
-                          + 0.4 * sin(4.0 * TD5_TG_PI * waves * f + ph2));
+    if (tg_r8_relief_enabled()) {
+        /* The macro term is ALWAYS one wave over the whole track -- that is the
+         * whole point, and drawing 1..2 was a mistake worth recording: the
+         * profile is rescaled GLOBALLY to the grade cap either way, so what the
+         * shipped height range actually depends on is the pre-scale ratio of
+         * amplitude to slope, i.e. how much of the amplitude sits at the LOWEST
+         * frequency. Two waves halved the range for the same grade (measured:
+         * seed 777 got 19437 where seed 99991's one-wave draw got 36953).
+         * Variety comes from the PHASE and from a small second harmonic, not
+         * from doubling the base frequency. */
+        const double ph3 = tg_frand() * 2.0 * TD5_TG_PI;
+        const double ph4 = tg_frand() * 2.0 * TD5_TG_PI;
+        const double det = amp * TD5_TG_R8_DETAIL_SCALE;
+        const double mac = TD5_TG_R8_MACRO_AMP;
+        for (i = 0; i < nl->count; i++) {
+            double f = (double)i / (double)(nl->count - 1);
+            nl->v[i].y = det * (0.6 * sin(2.0 * TD5_TG_PI * waves * f + ph1)
+                              + 0.4 * sin(4.0 * TD5_TG_PI * waves * f + ph2))
+                       + mac * (0.85 * sin(2.0 * TD5_TG_PI * f + ph3)
+                              + 0.15 * sin(4.0 * TD5_TG_PI * f + ph4));
+        }
+        TD5_LOG_I(LOG_TAG, "trackgen: [R8 SHAPE] macro relief ON -- detail amp "
+                  "%.0f x%.2f, macro amp %.0f (1 wave + 0.15 second harmonic)",
+                  amp, TD5_TG_R8_DETAIL_SCALE, mac);
+    } else {
+        for (i = 0; i < nl->count; i++) {
+            double f = (double)i / (double)(nl->count - 1);
+            nl->v[i].y = amp * (0.6 * sin(2.0 * TD5_TG_PI * waves * f + ph1)
+                              + 0.4 * sin(4.0 * TD5_TG_PI * waves * f + ph2));
+        }
     }
 
     /* Deck per deliberate bridge run: flatten the run to its own chord, then
@@ -1779,6 +1852,26 @@ static void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
         for (i = 0; i < nl->count; i++) nl->v[i].y *= k;
         TD5_LOG_I(LOG_TAG, "trackgen: elevation rescaled by %.3f (grade %.3f -> %.3f)",
                   k, worst, max_grade);
+    }
+
+    /* [R8 SHAPE] The two NUMBERS this area is judged on, logged unconditionally
+     * so a knob A/B compares like with like: total height RANGE (the feature)
+     * and the worst per-span GRADE that survived the rescale (the safety
+     * bound). Recomputed after the rescale so both describe the shipped road. */
+    {
+        double lo = nl->v[0].y, hi = nl->v[0].y, wg = 0.0;
+        for (i = 0; i < nl->count; i++) {
+            if (nl->v[i].y < lo) lo = nl->v[i].y;
+            if (nl->v[i].y > hi) hi = nl->v[i].y;
+        }
+        for (i = 1; i < nl->count; i++) {
+            double g = fabs(nl->v[i].y - nl->v[i - 1].y)
+                     / (double)spec->span_length;
+            if (g > wg) wg = g;
+        }
+        TD5_LOG_I(LOG_TAG, "trackgen: [R8 SHAPE] relief=%d height min %.0f max "
+                  "%.0f RANGE %.0f, worst grade %.4f (cap %.3f)",
+                  tg_r8_relief_enabled(), lo, hi, hi - lo, wg, max_grade);
     }
 }
 
@@ -2194,6 +2287,96 @@ static int tg_branch_min_len(void)
                        TD5_TG_BRANCH_MIN_LEN, 8, 400);
 }
 
+/* ===================== [R8 SHAPE] LONG DIVERGING BRANCH (G5) ==============
+ * "you should add major branches that goes in completely different ways for
+ * longer and then come back like on sydney".
+ *
+ * The fork table already ships a short chicane, a canonical split and a "long"
+ * route -- but the long one is 120 spans and its centre never gets further than
+ * TD5_TG_BRANCH_BOW (1.20 x width = 7200 units) from the main road, so it reads
+ * as a wide lay-by rather than an alternate route.
+ *
+ * TWO axes, and the safety argument is that they move in the SAME direction as
+ * the existing rate limit rather than against it. TD5_TG_BRANCH_RATE (0.35 of a
+ * span length of lateral movement per span) is what actually keeps the gore
+ * fillable and the strip rows from crossing; tg_branch_bow already derives the
+ * usable amplitude from it. Lengthening the corridor RAISES the amplitude that
+ * rate permits: at len 260 the rate allows 7.24 x width. So the binding
+ * constraint on divergence today is the flat BOW ceiling, not the rate, and
+ * raising the ceiling for LONG corridors only costs lateral rate 0.145 of a
+ * span -- BELOW what the current 120-span fork already runs at (0.126) by a
+ * factor well inside the measured fold threshold.
+ *
+ * The remaining hard ceiling is the int16 vertex offset: corridor spans carry a
+ * per-span origin, so |lateral| + half the branch width + one span step must
+ * stay under 32767. At bow 3.0 that is 18000 + 1500 + 3000 + ~2100 = 24600,
+ * roughly 8000 units of margin.
+ *
+ * TD5RE_R8_SHAPE_LONGBRANCH=0 restores the 120-span / 1.20-bow fork. */
+#define TD5_TG_R8_LONG_LEN   260     /* corridor spans for the long fork      */
+#define TD5_TG_R8_LONG_MIN   200     /* len >= this counts as a LONG corridor */
+#define TD5_TG_R8_BOW_LONG   3.75    /* bow ceiling (x width) for a long fork.
+                                      * 3.75 not 3.0: at the shipped 6000-unit
+                                      * road that is 25500 units of carriageway
+                                      * separation, just inside the LAT_MAX
+                                      * int16 clamp below, and it costs a peak
+                                      * lateral rate of 0.181 span/span -- under
+                                      * half TD5_TG_BRANCH_RATE and 1.4x what the
+                                      * shipped 120-span fork already runs at. */
+#define TD5_TG_R8_LONG_APRON 4000.0  /* ground kept OUTBOARD of a bowed branch */
+/* Furthest a corridor point may sit from the main centreline, world units. The
+ * strip writes it as an int16 offset from a per-span origin, so this must stay
+ * clear of 32767 with room for the far row's origin delta and rounding. */
+#define TD5_TG_R8_LAT_MAX    28000.0
+
+static int tg_r8_longbranch_enabled(void)
+{
+    /* DEFAULT OFF -- td5_env_flag_OFF, not flag_on. This is deliberate and it is
+     * not a confidence problem: the feature works, races finish on both seeds,
+     * and the geometry checks are clean (see the R8 SHAPE notes in
+     * td5_changelog.h). It is parked because it REPARTITIONS THE MAIN RING.
+     *
+     * MEASURED on seed 99991, this knob alone against a purged environment:
+     * fork 2's rejoin moves from ring span 631 to 771, so ring spans 631-770
+     * stop being full road and become the fork's main half; the fork-back
+     * backdrop grows from 122 to 262 spans (last span 633 -> 773); and the
+     * main-ring scenery counts move with it -- buildings 2245->2228, fences
+     * 1829->1698, crossings 377->341, props 669->622, cross-furn 505->452,
+     * step-walls 75->69. Round 8's user-reported items are span-referenced
+     * ("tiles spilling over the road around 627"), and item 7's span sits
+     * directly inside the range this moves. Shipping it default ON would mean
+     * the user re-drives a different track from the one they reported, and
+     * could not verify the other seven areas' fixes where they reported them.
+     *
+     * TD5RE_R8_SHAPE_LONGBRANCH=1 turns it on. Flip the default to
+     * td5_env_flag_on once the round's span-referenced items are closed. */
+    return td5_env_flag_off("TD5RE_R8_SHAPE_LONGBRANCH");
+}
+
+/* THE fork length table. Both the stateless run gate (tg_span_in_fork_run,
+ * consulted by the centreline walk BEFORE s_forks exists) and the placement
+ * loop in tg_emit_strip read it, and they MUST agree -- a mismatch straightens
+ * the wrong span range. One function so they cannot drift. */
+static int tg_branch_len_for(int index)
+{
+    static const int k_lens[3] = { 8, 40, 120 };
+    int L;
+    if (index < 0 || index >= 3) return 0;
+    L = k_lens[index];
+    if (index == 2 && tg_r8_longbranch_enabled())
+        L = td5_env_int("TD5RE_R8_SHAPE_LONGBRANCH_LEN",
+                        TD5_TG_R8_LONG_LEN, 24, 400);
+    return L;
+}
+
+static int tg_branch_count_max(void) { return 3; }
+
+/* Is `len` a LONG corridor (i.e. one entitled to the raised bow ceiling)? */
+static int tg_branch_is_long(int len)
+{
+    return tg_r8_longbranch_enabled() && len >= TD5_TG_R8_LONG_MIN;
+}
+
 /* [R6 item 10] Is span si inside a fork's span range (widened approach through
  * rejoin)? Stateless, derived only from si and the deterministic fork placement
  * constants -- the SAME positions the placement loop in tg_emit_strip commits to
@@ -2204,13 +2387,13 @@ static int tg_branch_min_len(void)
  * gentle road, no harm. Mirrors the bridge-run gate exactly. */
 static int tg_span_in_fork_run(int si)
 {
-    static const int k_lens[3] = { 8, 40, 120 };
     int min_len, pos, i;
     if (!tg_branches_enabled()) return 0;
     min_len = tg_branch_min_len();
     pos = TD5_TG_GRID_SPAN + 120;
-    for (i = 0; i < 3; i++) {
-        int L = k_lens[i] < min_len ? min_len : k_lens[i];
+    for (i = 0; i < tg_branch_count_max(); i++) {
+        int kl = tg_branch_len_for(i);
+        int L = kl < min_len ? min_len : kl;
         int F = pos;
         int R = F + 1 + L;
         /* +/-2 spans of margin past the widened approach and the rejoin so the
@@ -2232,11 +2415,32 @@ static int tg_span_in_fork_run(int si)
  * fork should look like the authored one, not sail off across the map. */
 static double tg_branch_bow(int len, double width)
 {
+    /* [R8 SHAPE G5] A LONG corridor gets a raised ceiling so it can actually
+     * go somewhere; everything else keeps the shipped 1.20. The RATE-derived
+     * bound below is unchanged and still applies first, so a long fork that is
+     * somehow not long enough to taper still gets only what it can taper to. */
+    double cap = tg_branch_is_long(len) ? TD5_TG_R8_BOW_LONG
+                                        : TD5_TG_BRANCH_BOW;
     double amp;
     if (len <= 0 || width < 1.0) return 0.0;
+    /* [R8 SHAPE G5] HARD int16 clamp, and it is not theoretical. A corridor span
+     * carries a PER-SPAN origin, and tg_append_row writes each point's offset
+     * from it as an int16 with a silent `& 0xFFFF`. The outermost point of the
+     * branch sits at width*(0.25 + bow) + half the branch's own (up to full)
+     * width from the centreline. At the 6000-unit road of seed 99991 a bow of
+     * 3.0 lands at 24000, well inside; at seed 777's 9000-unit road the same
+     * 3.0 lands at 33750 -- PAST 32767, where the offset wraps sign and the
+     * corridor's geometry inverts. So express the ceiling in WORLD UNITS and
+     * derive the multiple from the actual road width, keeping headroom for the
+     * far row's origin delta (one span step) and rounding. */
+    {
+        const double unit_cap = TD5_TG_R8_LAT_MAX / width - 0.75;
+        if (unit_cap < cap) cap = unit_cap;
+        if (cap < 0.0) cap = 0.0;
+    }
     amp = TD5_TG_BRANCH_RATE * (double)TD5_TG_SPAN_LENGTH * (double)len
         / (width * TD5_TG_PI);
-    return (amp > TD5_TG_BRANCH_BOW) ? TD5_TG_BRANCH_BOW : amp;
+    return (amp > cap) ? cap : amp;
 }
 
 /* ---- variable branch separation (item 10) ----
@@ -2559,7 +2763,20 @@ static void tg_validate_geometry_safety(const TG_NodeList *nl, int nspans)
     for (i = 0; i < ring; i++) {
         const double hi = tg_road_half_width(nl, i);
         const double rr = tg_carriageway_reach(nl, i, -1.0);
-        if (rr < hi - 1.0 || rr > hi * 6.0 + 1.0) {
+        /* [R8 SHAPE G5] Ceiling the fork geometry can LEGITIMATELY produce,
+         * derived rather than guessed. A branch centre sits a quarter road right
+         * of the centreline plus at most the bow ceiling, and its own carriageway
+         * extends up to half a road further. The old bound was a flat 6x the road
+         * half width -- a number that sat above the then-current 1.20 bow ceiling
+         * and below nothing in particular, so raising that ceiling for long forks
+         * tripped it 116 times on seed 99991 with nothing actually wrong. Note
+         * this makes the check STRICTER, not looser, when the long branch is off:
+         * 14700 against the old 18001 at the shipped 6000-unit road width. */
+        const double w = nl->v[i].width;
+        const double bowmax = tg_r8_longbranch_enabled() ? TD5_TG_R8_BOW_LONG
+                                                         : TD5_TG_BRANCH_BOW;
+        const double lim = hi + w * (0.25 + bowmax + 0.5) + 1.0;
+        if (rr < hi - 1.0 || rr > lim) {
             if (bad_reach < 8)
                 TD5_LOG_W(LOG_TAG, "geometry-safety: span %d carriageway reach "
                           "%.0f vs road half %.0f (suspect fork geometry)",
@@ -3527,15 +3744,15 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
              * chicane, a canonical split, a long alternate route. The first
              * entry USED to be 8 spans, which is the "very small branch" that
              * glitched -- lengths are now floored at tg_branch_min_len(). */
-            static const int k_lens[] = { 8, 40, 120 };
             const int min_len = tg_branch_min_len();
             int off = ring;                          /* append cursor after ring */
             int pos = TD5_TG_GRID_SPAN + 120;        /* first fork, past the grid */
             unsigned int i;
 
-            for (i = 0; i < sizeof(k_lens) / sizeof(k_lens[0]) &&
+            for (i = 0; i < (unsigned int)tg_branch_count_max() &&
                         s_fork_count < TD5_TG_BRANCH_MAX; i++) {
-                int L = k_lens[i] < min_len ? min_len : k_lens[i];
+                int kl = tg_branch_len_for((int)i);
+                int L = kl < min_len ? min_len : kl;
                 int F = pos;
                 int R = F + 1 + L;
                 if (main_half < 1 || br_lanes < 1) break;
@@ -3544,10 +3761,16 @@ static int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                  * clamp) actually gentled this fork's span range: a fork left on a
                  * sharp bend folds its shifted/bowed carriageways and lifts a car
                  * (the "span 570" report). Should read <= TD5_TG_FORK_MAX_TURN. */
-                TD5_LOG_I(LOG_TAG, "trackgen: fork %u F=%d L=%d region maxcurve=%.4f "
-                          "(cap %.3f)", i, F, L,
+                TD5_LOG_I(LOG_TAG, "trackgen: fork %u F=%d L=%d R=%d region "
+                          "maxcurve=%.4f (cap %.3f) long=%d sep=%.2f bow=%.2f "
+                          "maxsep=%.0f", i, F, L, R,
                           tg_fork_region_max_curve(nl, F, L, ring),
-                          TD5_TG_FORK_MAX_TURN);
+                          TD5_TG_FORK_MAX_TURN, tg_branch_is_long(L),
+                          tg_fork_sep_for(s_fork_count),
+                          tg_branch_bow(L, nl->v[F].width),
+                          -tg_branch_shift_s(L / 2, L, nl->v[F].width,
+                                             tg_fork_sep_for(s_fork_count))
+                          + TD5_TG_MAIN_SHIFT(nl->v[F].width));
                 s_forks[s_fork_count].F = F;
                 s_forks[s_fork_count].len = L;
                 s_forks[s_fork_count].cbase = off + 1;  /* pad@off, corridor off+1.. */
@@ -7928,6 +8151,26 @@ static void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
     if (!is_left) {
         /* Branch corridor bows into the right verge -- keep off its carriageway. */
         p->d[0] = tg_ground_branch_clear(nl, si);
+        /* [R8 SHAPE G5] ...but the skirt still has to END somewhere OUTBOARD of
+         * the corridor, and the clamp below is what decides that. Before R8 the
+         * widest a corridor ever reached (bow 1.20) was ~7400 past the road edge
+         * and the 12000 verge covered it. A long fork bows past 18000, so the
+         * clamp would drag the skirt's INNER point back to 11000 and lay a
+         * 1000-wide sliver of ground in the open air between the two
+         * carriageways -- with the branch itself, and everything beyond it,
+         * standing on nothing. So push the OUTER point out to clear the corridor
+         * first and keep an apron beyond it.
+         *
+         * The apron is deliberately narrower than the ordinary 12000 verge: a
+         * wide near-flat skirt on a descent projects over the road ahead and
+         * hides it (the R6 item-6 finding that cut the verge from 24000), and
+         * this one sits on the far side of the branch where it would hide the
+         * CORRIDOR. 4000 reaches past the branch's own pavement without
+         * becoming that apron again. */
+        if (tg_r8_longbranch_enabled()) {
+            const double need = p->d[0] + TD5_TG_R8_LONG_APRON;
+            if (need > p->d[1]) p->d[1] = need;
+        }
         if (p->d[0] > p->d[1] - 1000.0)
             p->d[0] = p->d[1] - 1000.0;
     }
@@ -8240,13 +8483,28 @@ static int tg_emit_gore(const TG_NodeList *nl, int si,
     double tfr = shift_f + half_f - ov;            /* far  */
     double px[4], py[4], pz[4], uu[4], vv[4];
     double cx = 0, cy = 0, cz = 0, radius = 0;
+    /* [R8 SHAPE G5] Lateral texture repeat. V already advances one tile per
+     * span, so U spanning 0..1 across the WHOLE gore only matched the V density
+     * while the gore was about a span wide -- which it was, at bow 1.20. A long
+     * fork's gore is 18000+ units across, i.e. one tile smeared over twelve
+     * span lengths. Tile U at the same world period as V so the median reads at
+     * the same texel density however wide it gets. Floored at 1.0 so a narrow
+     * avenue gore is byte-identical to the shipped one. */
+    double un = 1.0, uf = 1.0;
     int i;
+
+    if (tg_r8_longbranch_enabled()) {
+        un = fabs(tnr - ov) / (double)TD5_TG_SPAN_LENGTH;
+        uf = fabs(tfr - ov) / (double)TD5_TG_SPAN_LENGTH;
+        if (un < 1.0) un = 1.0;
+        if (uf < 1.0) uf = 1.0;
+    }
 
     /* near-left = road centre pushed `ov` INTO the main carriageway,
      * near-right = branch left edge pushed `ov` into the branch, then far. */
     px[0]=a->x+a->tz*ov;    py[0]=a->y-drop; pz[0]=a->z-a->tx*ov;    uu[0]=0.0; vv[0]=(double)si;
-    px[1]=a->x+a->tz*tnr;   py[1]=a->y-drop; pz[1]=a->z-a->tx*tnr;   uu[1]=1.0; vv[1]=(double)si;
-    px[2]=c->x+c->tz*tfr;   py[2]=c->y-drop; pz[2]=c->z-c->tx*tfr;   uu[2]=1.0; vv[2]=(double)si+1.0;
+    px[1]=a->x+a->tz*tnr;   py[1]=a->y-drop; pz[1]=a->z-a->tx*tnr;   uu[1]=un;  vv[1]=(double)si;
+    px[2]=c->x+c->tz*tfr;   py[2]=c->y-drop; pz[2]=c->z-c->tx*tfr;   uu[2]=uf;  vv[2]=(double)si+1.0;
     px[3]=c->x+c->tz*ov;    py[3]=c->y-drop; pz[3]=c->z-c->tx*ov;    uu[3]=0.0; vv[3]=(double)si+1.0;
 
     for (i = 0; i < 4; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
@@ -12747,7 +13005,18 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                         ok = 0;
                     /* [R7 GUARD] the branch carriageway is drivable; it sits deep
                      * inside the -side reach envelope, so mark it exempt. */
+                    /* [R8 merge] GUARD replaced the blanket tg_guard_ex_mark()
+                     * with the per-kind tg_guard_mark(); SHAPE was written
+                     * against the old API. Use the new one -- BRANCHROAD is
+                     * span-scoped exempt, which is what this quad needs. */
                     tg_guard_mark(moff[nmesh - 1], meshes.len, TG_GK_BRANCHROAD, si);
+                    /* [R8 SHAPE G5] Count the LONG corridor's own road quads, so
+                     * "did the long branch actually get built, and over which
+                     * spans" is answerable from the element inventory instead of
+                     * from a frame. Long forks only -- an ordinary fork already
+                     * reports under branch-nodes. */
+                    if (tg_branch_is_long(L))
+                        tg_acct(TG_ACCT_R8_LONGBRANCH, si);
                     /* Item 9a: the branch carriageway had NO kerb of its own, so
                      * driving a corridor there was road meeting bare ground with
                      * no pavement -- the "missing gaps between road and sidewalk
