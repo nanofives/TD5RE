@@ -7612,10 +7612,25 @@ static int tg_city_emit_fence(const TG_FBHook *h, double sw)
                               &seg_page, &seg_nq, 1);
 }
 
-/* A crossing belongs where a side street meets the road, which on this
- * generator is the FIRST span of a facade gap. Both sides are tested, so a
- * street opening on the left gets one too. */
-static int tg_city_crossing_here(int si)
+/* [R7 CROSS item 14] Minimum spacing between KEPT crossings, in spans. Just
+ * past a fork on a tight bend (seed 99991, the curve at span 635 immediately
+ * after fork 2, 510-631) several side-street mouths open within a few spans of
+ * each other, so the first-gap-span rule painted a zebra on nearly every span
+ * and the R4/R5 "join" sliver-fill (tg_cross_emit_join_zebra) then merged them
+ * into one radial fan of crosswalks -- the "many crossings all together"
+ * report. Thinning keeps the first crossing of a cluster and drops any within
+ * XMIN_GAP spans of the last KEPT one, so no two crossings crowd a bend. */
+#define TD5_TG_XMIN_GAP   8
+/* Backward window over which the greedy keep/drop decision is simulated. Larger
+ * than any run of bunched mouths, so the simulated "last kept" state at span si
+ * is correct wherever the window starts: a run of >= XMIN_GAP base-free spans
+ * inside it resets the state, and city gaps that long are common. */
+#define TD5_TG_XMIN_LOOK  48
+
+/* The crossing predicate WITHOUT the min-spacing thinning: the FIRST span of a
+ * non-park side-street gap on either kerb, off forks and bridge approaches.
+ * Both sides are tested, so a street opening on the left gets one too. */
+static int tg_crossing_base(int si)
 {
     int s;
     if (si <= 1) return 0;
@@ -7640,6 +7655,24 @@ static int tg_city_crossing_here(int si)
         return 1;
     }
     return 0;
+}
+
+/* Where a pedestrian crossing is actually painted: a base crossing span that
+ * survives the min-spacing thinning. The thinning is a greedy left-to-right
+ * keep/drop simulated over a bounded backward window, so the decision is a pure
+ * function of si with no cross-call state (this is called from both the zebra
+ * emitter and the kerb-fence break gate, possibly out of span order). */
+static int tg_city_crossing_here(int si)
+{
+    int j, last = -1000000;
+    if (!tg_crossing_base(si)) return 0;
+    /* DEFAULT ON; TD5RE_AUTOTRACK_XMIN=0 restores the un-thinned behaviour. */
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_XMIN")) return 1;
+    for (j = si - TD5_TG_XMIN_LOOK; j < si; j++) {
+        if (j > 1 && tg_crossing_base(j) && j - last >= TD5_TG_XMIN_GAP)
+            last = j;                 /* j is a KEPT crossing */
+    }
+    return si - last >= TD5_TG_XMIN_GAP;
 }
 
 /* ZEBRA CROSSING: one flat quad lying on the road, kerb to kerb.
@@ -7991,9 +8024,21 @@ static int tg_block_is_park(int si, int left);
  * Height follows the ground skirt (TD5_TG_GROUND_DROP over TD5_TG_GROUND_WIDTH)
  * rather than staying flat at road level: over the ~7000 raw it reaches, the
  * skirt has already fallen ~20 raw, and a flat strip would lift off it. */
+/* [R7 CROSS item 2] The perpendicular street used to stop one BACKROW_GAP past
+ * the front facades -- a stub that ended at the first back row, so from the
+ * racing line a side street read as a short dead-end apron rather than a road
+ * receding into the block. Running it TD5_TG_XSTREET_GAPS back-row gaps deep
+ * carries it past the first back row and up to the second, so the carriageway
+ * (and the flanking sidewalk arms, which take their reach from here, so item 1
+ * pavement lengthens WITH the street) recede convincingly. Purely OUTWARD --
+ * the main-road end is unchanged -- so it cannot intrude on the carriageway.
+ * DEFAULT ON; TD5RE_AUTOTRACK_XLONG=0 restores the one-gap stub. */
+#define TD5_TG_XSTREET_GAPS  2.0
 static double tg_city_crossst_reach(const TG_Biome *b, double sw)
 {
-    return sw + tg_facade_depth(b) + TD5_TG_BACKROW_GAP;
+    const double gaps = td5_env_flag_on("TD5RE_AUTOTRACK_XLONG")
+                      ? TD5_TG_XSTREET_GAPS : 1.0;
+    return sw + tg_facade_depth(b) + TD5_TG_BACKROW_GAP * gaps;
 }
 
 static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
@@ -8790,7 +8835,14 @@ static int tg_cross_emit_join_zebra(const TG_FBHook *h)
     const double f0 = 0.22, f1 = 0.62, L = (double)h->lanes;
     int seg_page = TD5_TG_PAGE_CROSSING, seg_nq = 1, s, joined = 0, n = 0;
 
-    if (!td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_JOIN")) return 1;
+    /* [R7 CROSS item 14] DEFAULT OFF (was default on). The sliver-fill was the
+     * R4/R5 answer to "crossings on a curve" -- merge two near ones into one
+     * continuous junction. On the tight bend past fork 2 (seed 99991 span 635)
+     * it merged a whole RUN of bunched mouths into one radial fan of zebra, the
+     * exact "many crossings all together" the user now reports. Min-spacing
+     * thinning (tg_city_crossing_here) is the R7 replacement, so the join is
+     * retired; TD5RE_AUTOTRACK_CROSS_JOIN=1 restores the legacy behaviour. */
+    if (!td5_env_flag_off("TD5RE_AUTOTRACK_CROSS_JOIN")) return 1;
     if (tg_branches_enabled() && tg_span_in_fork_clear(h->si)) return 1;
     if (!tg_span_surface_is_tarmac(h->si)) return 1;   /* [R5 CROSS item 12] */
     for (s = 0; s < 2; s++)

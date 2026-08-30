@@ -48,6 +48,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  cutting, not a thin grey beam." },
     { CL_ITEM,    "FIXED: bridge pier faces no longer smear to flat" },
     { CL_ITEM,    "  grey -- steel/stone/concrete detail reads now." },
+    { CL_DATE,    "August 30 (auto-track crossings)" },
+    { CL_ITEM,    "FIXED: no more clumps of pedestrian crossings on" },
+    { CL_ITEM,    "  a bend -- kept ones are now spaced apart." },
+    { CL_ITEM,    "NEW: side streets run deeper into the block, with" },
+    { CL_ITEM,    "  pavements lining them their full length." },
+    { CL_BLANK,   "" },
 
     { CL_DATE,    "August 29 (auto-track tunnels)" },
     { CL_ITEM,    "FIXED: distant scenery no longer shows through a" },
