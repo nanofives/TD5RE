@@ -3455,6 +3455,178 @@ static int tg_guard_mesh_on_road_cls(const TG_NodeList *nl, int ring,
 }
 
 
+/* ============ [R9 BRIDGE item 10] OVER-WATER AUDIT (see the call site) ========
+ * The river rectangle and its surface are owned by the bridge block much
+ * further down, so both are forward-declared rather than re-derived here -- the
+ * whole point is that the audit tests the SAME water the emitter laid. */
+#define TD5_TG_WATER_DROP    1200    /* how far below the road the surface sits  */
+#define TD5_TG_WATER_BEACH   8100    /* gap from the road edge to the shoreline  */
+#define TD5_TG_WATER_EXTENT  50000   /* how far out to sea the plane reaches     */
+static int    tg_water_span_clear(int si);
+static double tg_bridge_water_surf_y(const TG_NodeList *nl, int si);
+static double tg_sea_level_y(const TG_NodeList *nl, int si);
+static double tg_water_side(int si);
+static int    tg_biome_for_span(int si);
+static int    tg_biome_span_has_water(int si);
+
+static int    s_r9_wet_total;
+static int    s_r9_wet_kind[TG_GK_COUNT];
+static int    s_r9_wet_first_span = -1;
+static double s_r9_wet_worst;
+
+/* Which kinds are ALLOWED over water. The deck, its structure and rails, the
+ * water itself, the shore band and the ground SKIRT all legitimately meet the
+ * water -- a crossing flies over it and a bank descends through it (R8 made the
+ * gorge skirt a shore that crosses the surface on purpose). Everything else
+ * standing above the surface is the defect item 10 reports. */
+static int tg_r9_wet_kind_ok(int kind)
+{
+    return kind == TG_GK_DECK || kind == TG_GK_WATER || kind == TG_GK_COAST ||
+           kind == TG_GK_ROAD || kind == TG_GK_BRANCHROAD ||
+           kind == TG_GK_GANTRY || kind == TG_GK_RAIL || kind == TG_GK_TUNNEL ||
+           kind == TG_GK_SKIRT;
+}
+
+/* How far a non-exempt mesh may rise above a water surface before it counts as
+ * standing ON the water. Generous: a verge prop whose base sits a few units
+ * proud of a shoreline is not what the report is about, a building is. */
+#define TD5_TG_R9_WET_LIFT 250.0
+
+/* REJECT, not just report. Default ON. Same argument as the R7 on-road guard:
+ * four rounds of per-emitter placement patches failed because the safety
+ * depended on every emitter remembering to ask, and the cure was one post-emit
+ * pass over the assembled bytes. "Nothing but the crossing stands on water" is
+ * the same kind of rule, so it gets the same kind of enforcement -- and a future
+ * emitter that forgets is caught for free. TD5RE_R9_BRIDGE_WATERGUARD=0 leaves
+ * it report-only. */
+static int tg_r9_waterguard_enabled(void)
+{
+    return td5_env_flag_on("TD5RE_R9_BRIDGE_WATERGUARD");
+}
+static int s_r9_wet_rejected;
+
+/* Per-span water table, built ONCE per track. The first version of this audit
+ * asked tg_span_in_bridge_run / tg_water_side / tg_sea_level_y per (mesh, span)
+ * and generation stopped finishing: those are run-walking accessors, and the
+ * product is tens of millions of calls. The table is the same information,
+ * sampled once, and it also collapses the scan to the handful of spans that
+ * actually carry water. */
+#define TD5_TG_R9_WET_MAX 3000
+static int    s_r9_wet_ready;
+static int    s_r9_wet_span[TD5_TG_R9_WET_MAX];
+static double s_r9_wet_surf[TD5_TG_R9_WET_MAX];
+static double s_r9_wet_out[TD5_TG_R9_WET_MAX];
+static double s_r9_wet_in[TD5_TG_R9_WET_MAX];
+static double s_r9_wet_side[TD5_TG_R9_WET_MAX];  /* 0 = river (both sides) */
+static int    s_r9_wet_count;
+
+static void tg_r9_water_table_build(const TG_NodeList *nl)
+{
+    int s;
+    s_r9_wet_count = 0;
+    s_r9_wet_ready = 1;
+    for (s = 0; s + 1 < nl->count && s_r9_wet_count < TD5_TG_R9_WET_MAX; s++) {
+        double side;
+        if (tg_span_in_bridge_run(s) && tg_water_span_clear(s)) {
+            s_r9_wet_span[s_r9_wet_count] = s;
+            s_r9_wet_surf[s_r9_wet_count] = tg_bridge_water_surf_y(nl, s);
+            s_r9_wet_out [s_r9_wet_count] = TD5_TG_BRIDGE_WATER_HALF;
+            s_r9_wet_in  [s_r9_wet_count] = 0.0;
+            s_r9_wet_side[s_r9_wet_count] = 0.0;
+            s_r9_wet_count++;
+        } else if (tg_biome_span_has_water(s) &&
+                   (side = tg_water_side(s)) != 0.0) {
+            s_r9_wet_span[s_r9_wet_count] = s;
+            s_r9_wet_surf[s_r9_wet_count] = tg_sea_level_y(nl, s);
+            s_r9_wet_out [s_r9_wet_count] = (double)TD5_TG_WATER_EXTENT;
+            s_r9_wet_in  [s_r9_wet_count] = nl->v[s].width * 0.5
+                                          + (double)TD5_TG_WATER_BEACH;
+            s_r9_wet_side[s_r9_wet_count] = side;
+            s_r9_wet_count++;
+        }
+    }
+}
+
+static int tg_r9_water_audit_mesh(const TG_NodeList *nl, const unsigned char *b,
+                                  size_t off, size_t mlen, int kind)
+{
+    /* Same 0x38 header fields tg_guard_mesh_scan parses: count at 0x08, vertex
+     * block offset at 0x30, billboard tag at 0x02 (its vertices are LOCAL about
+     * a 24.8 origin). One XZ bounding box per mesh, tested against the water
+     * table above. */
+    const size_t vtxoff = (size_t)tg_rd_u32(b + off + 0x30);
+    const unsigned vtxcnt = tg_rd_u32(b + off + 0x08);
+    const int tag = (int)tg_rd_u16(b + off + 0x02);
+    double ox = 0.0, oy = 0.0, oz = 0.0;
+    double x0 = 0.0, x1 = 0.0, z0 = 0.0, z1 = 0.0, ytop = -1e30;
+    unsigned vi;
+    int w, have = 0;
+
+    if (!td5_env_flag_on("TD5RE_R9_BRIDGE_REPORT")) return 0;
+    if (tg_r9_wet_kind_ok(kind)) return 0;
+    if (vtxcnt == 0 || vtxcnt > 65536) return 0;
+    if (!s_r9_wet_ready) tg_r9_water_table_build(nl);
+    if (tag) {
+        ox = (double)tg_rd_f32(b + off + 0x1C) / 256.0;
+        oy = (double)tg_rd_f32(b + off + 0x20) / 256.0;
+        oz = (double)tg_rd_f32(b + off + 0x24) / 256.0;
+    }
+    for (vi = 0; vi < vtxcnt; vi++) {
+        const unsigned char *vp = b + off + vtxoff + (size_t)vi * TD5_TG_VTX_SIZE;
+        double vx, vy, vz;
+        if ((size_t)(vp + 12 - b) > off + mlen) break;
+        vx = ox + (double)tg_rd_f32(vp);
+        vy = oy + (double)tg_rd_f32(vp + 4);
+        vz = oz + (double)tg_rd_f32(vp + 8);
+        if (!have) { x0 = x1 = vx; z0 = z1 = vz; ytop = vy; have = 1; }
+        if (vx < x0) x0 = vx;
+        if (vx > x1) x1 = vx;
+        if (vz < z0) z0 = vz;
+        if (vz > z1) z1 = vz;
+        if (vy > ytop) ytop = vy;
+    }
+    if (!have) return 0;
+
+    for (w = 0; w < s_r9_wet_count; w++) {
+        const int s = s_r9_wet_span[w];
+        const TG_Node *n0 = &nl->v[s], *n1 = &nl->v[s + 1];
+        const double surf = s_r9_wet_surf[w];
+        const double outer = s_r9_wet_out[w], inner = s_r9_wet_in[w];
+        const double side = s_r9_wet_side[w];
+        double ax = n1->x - n0->x, az = n1->z - n0->z;
+        double len = sqrt(ax * ax + az * az);
+        int c;
+        if (ytop <= surf + TD5_TG_R9_WET_LIFT) continue;   /* at/under the surface */
+        {   /* cheap reject: the node cannot reach this box at all */
+            const double nx = n0->x < x0 ? x0 : (n0->x > x1 ? x1 : n0->x);
+            const double nz = n0->z < z0 ? z0 : (n0->z > z1 ? z1 : n0->z);
+            const double dd = (nx - n0->x) * (nx - n0->x)
+                            + (nz - n0->z) * (nz - n0->z);
+            if (dd > (outer + len) * (outer + len)) continue;
+        }
+        for (c = 0; c < 4; c++) {
+            const double cx = (c & 1) ? x1 : x0;
+            const double cz = (c & 2) ? z1 : z0;
+            const double dx = cx - n0->x, dz = cz - n0->z;
+            const double along = dx * n0->tx + dz * n0->tz;
+            double lat = dx * n0->tz - dz * n0->tx;
+            if (along < 0.0 || along > len) continue;
+            if (side == 0.0) { if (lat <= -outer || lat >= outer) continue; }
+            else { lat *= side;
+                   if (lat <= inner || lat >= outer) continue; }
+            s_r9_wet_total++;
+            s_r9_wet_kind[kind]++;
+            if (s_r9_wet_first_span < 0) s_r9_wet_first_span = s;
+            if (ytop - surf > s_r9_wet_worst) s_r9_wet_worst = ytop - surf;
+            if (!tg_r9_waterguard_enabled()) return 0;
+            s_r9_wet_rejected++;
+            tg_acct(TG_ACCT_R9_BRIDGE, s);
+            return 1;                          /* one strike per mesh: DROP it */
+        }
+    }
+    return 0;
+}
+
 /* Validate one entry's assembled meshes against the carriageway and drop the
  * ones standing in the road. Rewrites `meshes` and `moff`/`*pnmesh` in place
  * (compacting left, which is always safe: we only remove). Returns the number
@@ -3540,6 +3712,22 @@ static int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
                               k_guard_kind_name[kind], si, depth,
                               tg_rd_u32(b + off + 0x08));
             }
+        }
+
+        /* [R9 BRIDGE item 10] OVER-WATER AUDIT. "On span 1039 there's buildings
+         * in the background that are over the water."
+         *
+         * A frame proves one instance; this is the CLASS test, and it runs here
+         * because this is the one place in the generator that sees the ASSEMBLED
+         * bytes of every mesh together with the KIND that produced it. Any kept
+         * mesh with a vertex inside a bridge run's river rectangle and above its
+         * surface is massing standing on water, whatever emitter made it -- so a
+         * future emitter is audited for free, exactly like the on-road guard.
+         * Counted per kind and per span; reported by tg_r9_bridge_report. */
+        if (keep && mlen > 0 && off + mlen <= meshes->len &&
+            tg_r9_water_audit_mesh(nl, b, off, mlen, kind)) {
+            keep = 0;
+            rejected++;
         }
 
         /* [R8] DIAG: dump every mesh of one entry with its measured footprint.
@@ -6767,9 +6955,8 @@ static int tg_emit_props(const TG_NodeList *nl, int si, const TG_Biome *b,
  * runs far out, a bit below the road. Shipped coastal tracks (level012 sea,
  * level021 coast) do exactly this -- a big flat blue mesh grid below road level.
  * Raw = world*256. */
-#define TD5_TG_WATER_DROP    1200    /* how far below the road the surface sits  */
-#define TD5_TG_WATER_BEACH   8100    /* gap from the road edge to the shoreline  */
-#define TD5_TG_WATER_EXTENT  50000   /* how far out to sea the plane reaches     */
+/* (WATER_DROP / WATER_BEACH / WATER_EXTENT moved up above the R9 over-water
+ * audit in the guard block, which tests the same sea footprint this lays.) */
 /* World units per page repeat. The sea is textured by WORLD POSITION, not by
  * cell, so the page tiles on a single global grid (see tg_emit_water). */
 #define TD5_TG_WATER_TILE    6000.0
@@ -6781,6 +6968,13 @@ static int tg_emit_props(const TG_NodeList *nl, int si, const TG_Biome *b,
  * bit-identical to the old expression; once TD5RE_R8_BIOME_SEA lifts the cap it
  * is what stops a multi-cell coast flipping the sea from left to right halfway
  * along. See the ONE-SIDE SEA note above tg_biome_repeat_max. */
+/* [R9 item 10] Does span si's biome carry a sea plane? Wraps the biome table so
+ * the over-water audit up in the guard block can ask without the table. */
+static int tg_biome_span_has_water(int si)
+{
+    return k_biomes[tg_biome_for_span(si)].water ? 1 : 0;
+}
+
 static double tg_water_side(int si)
 {
     int a;
@@ -7604,6 +7798,122 @@ static int tg_bridge_pier_pitch(int style)
  * is why a pier topped out here can never break the road surface. */
 #define TD5_TG_BRIDGE_UNDER 480.0
 
+/* How far outboard of the drivable edge the parapet line sits. MOVED UP here in
+ * R9 (it used to be declared with tg_emit_bridge_kerb_panel, below) because it
+ * is now the single lateral authority the SUBSTRUCTURE reads too -- see
+ * tg_bridge_column_lateral. */
+#define TD5_TG_BRIDGE_RAIL_OUT 120.0
+
+/* ===================== [R9 BRIDGE item 9] STRUCTURAL TIE =====================
+ * "the structure that goes over the bridge should be connected with the
+ * structure below."
+ *
+ * MEASURED CAUSE, not inherited. The over-deck gantry and the under-deck piers
+ * were authored by two emitters that never shared a number, and they disagreed
+ * on BOTH axes:
+ *
+ *   SPAN.    Piers stand where `si % pitch == 0` (pitch 4 concrete / 3 steel /
+ *            6 masonry). The gantry stood where `si % 6 == 0`. On seed 99991's
+ *            run 1000-1039 that is pitch 4 against 6, so only every third
+ *            gantry (si % 12) had anything under it at all -- and the span the
+ *            user photographed, 1002, is a gantry span with NO pier: 1002 % 6
+ *            == 0 but 1002 % 4 == 2. The TOWER pair is worse: it stands at the
+ *            crown span s0 + (s1-s0)/2 = 1019, and 1019 % 4 == 3, so the
+ *            gateway that is meant to read as the crossing's silhouette had no
+ *            pier under it on ANY run whose crown missed the pitch grid.
+ *   LATERAL. Pier legs sit at `half * legpos` (0.70 / 0.85 of the MAIN half
+ *            width, i.e. under the carriageway). Gantry legs and towers sit at
+ *            the deck EDGE. Even where a pier and a gantry shared a span the
+ *            two columns were 300-900 units apart laterally, which is exactly
+ *            the "two independent structures occupying the same crossing" the
+ *            report describes.
+ *
+ * THE FIX IS ONE SHARED AUTHORITY, in the same shape as tg_carriageway_reach:
+ * a single function says where a vertical structural line stands on a given
+ * side of a given span, and the pier legs, the gantry legs and the tower legs
+ * all ask it. Nothing can drift because there is nothing to keep in sync.
+ * The line chosen is the PARAPET line (drivable reach + RAIL_OUT): it is
+ * outboard of anything drivable (so the on-road guard has no quarrel with it),
+ * it is where the deck edge actually is, and it is where the tower already
+ * stood -- so the column reads bed -> pier -> deck edge -> gantry leg -> beam
+ * as one continuous member.
+ *
+ * Span alignment follows from the same idea: pier spans become RUN-RELATIVE
+ * (s0 + k*pitch) and the CROWN is forced to carry a pier, so the tower always
+ * lands; the gantry is then placed only on pier spans, every second pier.
+ *
+ * TD5RE_R9_BRIDGE_TIE=0 restores the round-8 independent placement for an A/B.
+ * ========================================================================= */
+static int tg_r9_bridge_tie(void)
+{
+    return td5_env_flag_on("TD5RE_R9_BRIDGE_TIE");
+}
+
+/* Defined with the parapet/gantry emitters further down; the gantry PLACEMENT
+ * gate now lives up here with the pier gate so the two cannot drift. */
+static int tg_bridge_overhead_enabled(void);
+
+/* THE shared lateral. `side` is +1 = left of travel, -1 = right, matching
+ * tg_carriageway_reach and tg_emit_bridge_rails. */
+static double tg_bridge_column_lateral(const TG_NodeList *nl, int si,
+                                       double side)
+{
+    if (!tg_r9_bridge_tie())
+        return nl->v[si].width * 0.5;      /* R8: caller applied its own factor */
+    return tg_carriageway_reach(nl, si, side) + TD5_TG_BRIDGE_RAIL_OUT;
+}
+
+/* Does span si carry a PIER? Run-relative under the tie so the crown (where the
+ * towers stand) is always a pier span; the pre-R9 global grid otherwise. */
+static int tg_bridge_pier_here(const TG_NodeList *nl, int si)
+{
+    const int pitch = tg_bridge_pier_pitch(tg_bridge_style(si));
+    int s0, s1;
+    if (!tg_r9_bridge_tie() || !tg_span_in_bridge_run(si))
+        return (si % pitch) == 0;
+    tg_bridge_run_bounds(nl, si, &s0, &s1);
+    if (si == s0 + (s1 - s0) / 2) return 1;          /* crown -> towers land */
+    return ((si - s0) % pitch) == 0;
+}
+
+/* Does span si carry an over-deck GANTRY? Only on a pier span, and only every
+ * SECOND pier so the spacing stays about what `si % 6` gave. MASONRY (style 2)
+ * gets none, for the same reason it gets no towers: a stone arch viaduct is
+ * arches all the way, and its single fat centre pier cannot carry a gantry leg
+ * at the deck edge without inventing a member that is not there. */
+static int tg_bridge_gantry_here(const TG_NodeList *nl, int si)
+{
+    const int style = tg_bridge_style(si);
+    const int pitch = tg_bridge_pier_pitch(style);
+    int s0, s1;
+    if (!tg_bridge_struct_enabled() || !tg_bridge_overhead_enabled()) return 0;
+    if (!tg_r9_bridge_tie()) return (si % 6) == 0;
+    if (style == 2) return 0;
+    if (!tg_span_in_bridge_run(si)) return 0;
+    if (pitch <= 0) return 0;
+    tg_bridge_run_bounds(nl, si, &s0, &s1);
+    return ((si - s0) % (pitch * 2)) == 0;
+}
+
+/* [R9 item 9] Two NEW structural materials, so "the pillars" and "the horizontal
+ * beam" stop sharing the pier's cast concrete:
+ *   +0 PYLON -- the ABOVE-deck verticals (gantry legs, tower legs). Painted
+ *      steel with vertical ribs and rivet lines; deliberately warmer and darker
+ *      than the pier page so the column visibly changes material where it
+ *      leaves the water, the way a real bridge does.
+ *   +1 BEAM  -- the HORIZONTAL members (gantry cross-beam, tower cross-member).
+ *      A lattice/flange girder drawn for a member seen side-on and lengthwise,
+ *      which the pier page (a vertical column texture) never was.
+ * TD5RE_R9_BRIDGE_TEX=0 puts both back on the pier page for an A/B. */
+#define TD5_TG_PAGE_R9_PYLON (TD5_TG_PAGE_R9_BRIDGE + 0)
+#define TD5_TG_PAGE_R9_BEAM  (TD5_TG_PAGE_R9_BRIDGE + 1)
+#define TD5_TG_PAGE_R9_SHORE (TD5_TG_PAGE_R9_BRIDGE + 2)
+
+static int tg_r9_bridge_tex(void)
+{
+    return td5_env_flag_on("TD5RE_R9_BRIDGE_TEX");
+}
+
 /* Bridge: a deck over a river. The road STRIP is the deck; here we add the
  * parapets (side walls) that read as a bridge from the car, plus the structure
  * that carries it. The ground beside a bridge run drops away into the gorge
@@ -7631,7 +7941,6 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
     const double half = n->width * 0.5;
     const int style = tg_bridge_style(si);            /* [R6 item 17] */
     const int pier_page = tg_bridge_pier_page_for(style);
-    const int pitch = tg_bridge_pier_pitch(style);
     /* [R7 item 16] "The texture of the pillar doesn't seem fine." The pier boxes
      * tiled every 3000 world units, but a pier LEG is only ~400 wide, so a side
      * face sampled just U 0..0.13 of the page -- a thin vertical sliver that
@@ -7683,7 +7992,7 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
      * road surface itself, coplanar with the deck. Every pier was drawn into the
      * carriageway, z-fighting the tarmac it was supposed to be holding up. See
      * the item-12 note below for the height fix. */
-    if ((si % pitch) == 0) {
+    if (tg_bridge_pier_here(nl, si)) {
         /* [R6 item 12] Piers span the LOCAL deck underside down INTO the bed.
          *
          * Was: top = run-minimum deck (tg_bridge_deck_y) - UNDER, bottom = water
@@ -7736,20 +8045,34 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
              * stockier with a single brace. */
             const double legw   = (style == 1) ? 200.0 : 300.0;
             const double legpos = (style == 1) ? 0.85 : 0.70;
+            /* [R9 item 9] Lateral comes from the SHARED column authority, so the
+             * pier leg, the gantry leg above it and the tower leg are all one
+             * vertical line. Pre-R9 this was `half * legpos`, which put the leg
+             * under the carriageway while everything above the deck stood at the
+             * deck edge. `legpos` survives only as the A/B path. */
+            const double latl = tg_r9_bridge_tie()
+                              ? tg_bridge_column_lateral(nl, si, 1.0)
+                              : half * legpos;
+            const double latr = tg_r9_bridge_tie()
+                              ? tg_bridge_column_lateral(nl, si, -1.0)
+                              : half * legpos;
+            const double bracehalf = (latl > latr ? latl : latr) + legw;
             for (s = 0; s < 2; s++) {
                 double side = s ? 1.0 : -1.0;
                 double lx = n->tz * side, lz = -n->tx * side;
-                if (!tg_emit_box_mesh(blk, n->x + lx * (half * legpos),
-                                      cy, n->z + lz * (half * legpos),
+                double lat = s ? latl : latr;
+                if (!tg_emit_box_mesh(blk, n->x + lx * lat,
+                                      cy, n->z + lz * lat,
                                       legw, h, legw, n->tx, n->tz,
                                       pier_page, pier_tile, 0xFFFFFFFFu))
                     return 0;
                 (*added)++;
                 tg_acct(TG_ACCT_BRIDGE, si);
+                if (tg_r9_bridge_tie()) tg_acct(TG_ACCT_R9_BRIDGE, si);
             }
             /* Brace across the legs, a third of the way down the pier. */
             if (!tg_emit_box_mesh(blk, n->x, top - h * 0.55, n->z,
-                                  half * legpos + legw, 130.0, 200.0,
+                                  bracehalf, 130.0, 200.0,
                                   n->tx, n->tz, pier_page, pier_tile,
                                   0xFFFFFFFFu))
                 return 0;
@@ -7757,7 +8080,7 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
             tg_acct(TG_ACCT_BRIDGE, si);
             if (style == 1) {                 /* second, upper brace for steel */
                 if (!tg_emit_box_mesh(blk, n->x, top - h * 0.22, n->z,
-                                      half * legpos + legw, 110.0, 180.0,
+                                      bracehalf, 110.0, 180.0,
                                       n->tx, n->tz, pier_page, pier_tile,
                                       0xFFFFFFFFu))
                     return 0;
@@ -7784,21 +8107,39 @@ static int tg_emit_bridge(const TG_NodeList *nl, int si,
         si == s0 + (s1 - s0) / 2) {
         const double th = (style == 1) ? 2200.0 : 1700.0;  /* tower half-height */
         const double tw = (style == 1) ? 170.0 : 240.0;    /* tower half-width  */
+        /* [R9 item 9] Same shared lateral as the pier legs directly below (the
+         * crown is forced to be a pier span by tg_bridge_pier_here), and the
+         * tower now starts at the PIER TOP rather than at deck level, so the
+         * gateway is the visible continuation of the column rather than a
+         * separate object planted on the deck. */
+        const int  tie   = tg_r9_bridge_tie();
+        const double tlatl = tie ? tg_bridge_column_lateral(nl, si, 1.0)
+                                 : half + 300.0;
+        const double tlatr = tie ? tg_bridge_column_lateral(nl, si, -1.0)
+                                 : half + 300.0;
+        const double tfoot = tie ? (n->y - TD5_TG_BRIDGE_UNDER) : n->y;
+        const double thh   = tie ? (n->y + 2.0 * th - tfoot) * 0.5 : th;
+        const double tcy   = tie ? (tfoot + thh) : (n->y + th);
+        const double xhalf = (tlatl > tlatr ? tlatl : tlatr) + 240.0;
+        const int    pyl   = tg_r9_bridge_tex() ? TD5_TG_PAGE_R9_PYLON : pier_page;
+        const int    bmp   = tg_r9_bridge_tex() ? TD5_TG_PAGE_R9_BEAM  : pier_page;
         for (s = 0; s < 2; s++) {
             double side = s ? 1.0 : -1.0;
             double lx = n->tz * side, lz = -n->tx * side;
-            if (!tg_emit_box_mesh(blk, n->x + lx * (half + 300.0),
-                                  n->y + th, n->z + lz * (half + 300.0),
-                                  tw, th, tw, n->tx, n->tz,
-                                  pier_page, pier_tile, 0xFFFFFFFFu))
+            double lat = s ? tlatl : tlatr;
+            if (!tg_emit_box_mesh(blk, n->x + lx * lat,
+                                  tcy, n->z + lz * lat,
+                                  tw, thh, tw, n->tx, n->tz,
+                                  pyl, pier_tile, 0xFFFFFFFFu))
                 return 0;
             (*added)++;
             tg_acct(TG_ACCT_BRIDGE, si);
+            if (tie) tg_acct(TG_ACCT_R9_BRIDGE, si);
         }
         /* Cross-member near the top of the towers, closing the gateway. */
         if (!tg_emit_box_mesh(blk, n->x, n->y + th * 1.7, n->z,
-                              half + 540.0, 160.0, 200.0,
-                              n->tx, n->tz, pier_page, pier_tile,
+                              tie ? xhalf : half + 540.0, 160.0, 200.0,
+                              n->tx, n->tz, bmp, 3000.0,
                               0xFFFFFFFFu))
             return 0;
         (*added)++;
@@ -7893,8 +8234,9 @@ static int tg_emit_bridge_rail_panel(TG_Buf *m,
  * nothing at deck level -- you looked straight down through it to the river.
  * That open strip is the "gap between the guardrails and the road" report. This
  * lays a flat concrete kerb across it at deck level, so the deck reads as solid
- * out to the barrier. Concrete (pier) page, its own recorded offset. */
-#define TD5_TG_BRIDGE_RAIL_OUT 120.0
+ * out to the barrier. Concrete (pier) page, its own recorded offset.
+ * (TD5_TG_BRIDGE_RAIL_OUT itself moved up to the R9 structural-tie block, where
+ * the substructure now reads it too.) */
 static int tg_emit_bridge_kerb_panel(TG_Buf *m,
                                      double ix0, double iz0, double ox0, double oz0,
                                      double ix1, double iz1, double ox1, double oz1,
@@ -8001,35 +8343,48 @@ static int tg_emit_bridge_rails(const TG_NodeList *nl, int si,
      * deck. Build them as solid BOXES instead (tg_emit_box_mesh, six faces each),
      * so the gantry has real depth from every angle. Concrete (pier) page, so it
      * matches the towers. TD5RE_AUTOTRACK_BRIDGE_OVERHEAD=0 removes the gantry. */
-    if (tg_bridge_struct_enabled() && tg_bridge_overhead_enabled() &&
-        (si % 6) == 0) {
+    if (tg_bridge_gantry_here(nl, si)) {
         const int pier_page = tg_bridge_pier_page_for(tg_bridge_style(si));
+        const int tie = tg_r9_bridge_tie();
+        /* [R9 item 9] The gantry legs stand on the same lateral as the pier legs
+         * below (tg_bridge_column_lateral), on a span that tg_bridge_gantry_here
+         * guarantees carries a pier, and they now reach DOWN past the deck edge
+         * to the pier top instead of starting at the parapet. Leg and pier are
+         * one continuous column; there is no longer a joint to misalign. */
+        const int    pyl = tg_r9_bridge_tex() ? TD5_TG_PAGE_R9_PYLON : pier_page;
+        const int    bmp = tg_r9_bridge_tex() ? TD5_TG_PAGE_R9_BEAM  : pier_page;
+        const double latl = tie ? tg_bridge_column_lateral(nl, si,  1.0) : half0;
+        const double latr = tie ? tg_bridge_column_lateral(nl, si, -1.0) : half0;
+        const double beamhalf = tie ? (latl > latr ? latl : latr) : half0;
         const double ry = n0->y + TD5_TG_BRIDGE_RAIL_BASE
                         + TD5_TG_BRIDGE_RAIL_H + 1800.0;   /* clears traffic */
-        /* Legs stand from the parapet top up to the beam. */
-        const double ly = n0->y + TD5_TG_BRIDGE_RAIL_BASE + TD5_TG_BRIDGE_RAIL_H;
+        /* Leg foot: the pier top under the tie, the parapet top without it. */
+        const double ly = tie
+                        ? (n0->y - TD5_TG_BRIDGE_UNDER)
+                        : (n0->y + TD5_TG_BRIDGE_RAIL_BASE + TD5_TG_BRIDGE_RAIL_H);
         const double lx = n0->tz, lz = -n0->tx;            /* left unit  */
         const double fwx = n0->tx, fwz = n0->tz;           /* along-road unit */
-        const double lex = n0->x + lx * half0, lez = n0->z + lz * half0;
-        const double rex = n0->x - lx * half0, rez = n0->z - lz * half0;
+        const double lex = n0->x + lx * latl, lez = n0->z + lz * latl;
+        const double rex = n0->x - lx * latr, rez = n0->z - lz * latr;
         int leg;
         /* Beam: a box spanning both deck edges, 260 tall x 320 deep along road. */
         moff[*pn] = m->len;
-        if (!tg_emit_box_mesh(m, n0->x, ry, n0->z, half0, 130.0, 160.0,
-                              fwx, fwz, pier_page, 3000.0, 0xFFFFFFFFu))
+        if (!tg_emit_box_mesh(m, n0->x, ry, n0->z, beamhalf, 130.0, 160.0,
+                              fwx, fwz, bmp, 3000.0, 0xFFFFFFFFu))
             return 0;
         (*pn)++;
         tg_acct(TG_ACCT_BRIDGE, si);
-        /* Two legs: a solid post at each deck edge, from parapet top to beam. */
+        /* Two legs: a solid post at each deck edge, from pier top to beam. */
         for (leg = 0; leg < 2; leg++) {
             const double ex = leg ? rex : lex, ez = leg ? rez : lez;
             const double cy = (ly + ry) * 0.5, hy = (ry - ly) * 0.5;
             moff[*pn] = m->len;
             if (!tg_emit_box_mesh(m, ex, cy, ez, 150.0, hy, 150.0,
-                                  fwx, fwz, pier_page, 3000.0, 0xFFFFFFFFu))
+                                  fwx, fwz, pyl, 600.0, 0xFFFFFFFFu))
                 return 0;
             (*pn)++;
             tg_acct(TG_ACCT_BRIDGE, si);
+            if (tie) tg_acct(TG_ACCT_R9_BRIDGE, si);
         }
     }
     return 1;
@@ -8085,6 +8440,22 @@ static int tg_emit_bridge_water(const TG_NodeList *nl, int si,
  * slab reaching to the far water edge. */
 #define TD5_TG_COAST_HALF 12000.0
 
+/* One side's terrain CROSS-SECTION at span si: a chain of (distance from the
+ * road edge, drop below the road) points, innermost first. Consecutive points
+ * make one quad, so a plain verge is 2 points / 1 quad and a beach is 3 points /
+ * 2 quads. One function, so the skirt in tg_emit_ground, the far terrain in
+ * tg_emit_fb_terrain and (since R9) the coastline band cannot disagree about
+ * where the skirt ended or how low. The struct lives here rather than with
+ * tg_ground_side because the coastline is emitted earlier in the file. */
+#define TD5_TG_GROUND_MAXPT 3
+typedef struct {
+    double d[TD5_TG_GROUND_MAXPT];
+    double dy[TD5_TG_GROUND_MAXPT];
+    int    n;
+} TG_GroundProf;
+static void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
+                           double water_side, TG_GroundProf *p);
+
 /* [R4 item 20] COASTLINE where the bridge water meets the land, at the two
  * LONGITUDINAL ends of the river rectangle (perpendicular to the bridge). The
  * river is a flat plane under the run; before the run starts and after it ends
@@ -8128,6 +8499,88 @@ static int tg_emit_bridge_coast(const TG_NodeList *nl, int si,
         const double lx = nw->tz, lz = -nw->tx;                /* left unit     */
         double px[4], py[4], pz[4], uu[4], vv[4];
         int seg_page = TD5_TG_PAGE_R4_COAST, seg_nq = 1, i;
+
+        /* ============ [R9 BRIDGE item 9] "the coastline geometry looks wrong"
+         * MEASURED, three faults, all in the four lines above:
+         *
+         * 1. IT IS TOO NARROW BY MORE THAN HALF. The river rectangle is
+         *    TD5_TG_BRIDGE_WATER_HALF = 32000 either side of the centreline;
+         *    this band is TD5_TG_COAST_HALF = 12000. So 20000 units of the
+         *    water's transverse end on EACH side meet the bank with no shore at
+         *    all -- the band ends in mid-air and the water simply stops. That is
+         *    the blocky edge in the report's screenshot: not a bad texture, a
+         *    band that covers 24000 of a 64000-wide seam.
+         * 2. ITS LAND EDGE IS FLAT AT ROAD LEVEL. `gy` is one number applied to
+         *    both land corners, so the whole 24000-wide edge is a level line at
+         *    the road's height. The ground it is supposed to meet is NOT level
+         *    out there -- tg_ground_side drops it by the verge profile and, on a
+         *    seaward run, ramps it through sea level. The band therefore floats
+         *    above the terrain at its outer corners and cuts into it further in.
+         *    This is item 7's principle one element over: the two surfaces never
+         *    asked each other what height they were.
+         * 3. IT IS ON THE WATER PAGE'S AXES. TD5_TG_PAGE_R4_COAST is UV'd by
+         *    world x/z at TD5_TG_WATER_TILE like the river itself, so a tilted
+         *    shore is textured as though it were more river.
+         *
+         * FIX: lay the band as a lateral STRIP of columns out to the river's own
+         * half-width, take each column's land height from tg_ground_side (the
+         * same authority the skirt and the far band read), and texture it on the
+         * R9 SHORE page in the band's own axes -- u across the strip, v from the
+         * waterline to the bank. TD5RE_R9_BRIDGE_COAST=0 restores the R4 band.
+         * ==================================================================== */
+        if (td5_env_flag_on("TD5RE_R9_BRIDGE_COAST")) {
+            const double CW = TD5_TG_BRIDGE_WATER_HALF;
+            const int NC = 8;                      /* columns each side of centre */
+            const TG_Biome *lb = &k_biomes[tg_biome_for_span(lnode[k])];
+            const double wsd = lb->water ? tg_water_side(lnode[k]) : 0.0;
+            TG_GroundProf pl, pr;
+            int c;
+            tg_ground_side(nl, lnode[k], 1, wsd, &pl);
+            tg_ground_side(nl, lnode[k], 0, wsd, &pr);
+            for (c = 0; c < 2 * NC; c++) {
+                const double t0 = -1.0 + (double)c / (double)NC;
+                const double t1 = -1.0 + (double)(c + 1) / (double)NC;
+                double qx[4], qy[4], qz[4], qu[4], qv[4];
+                int sp = TD5_TG_PAGE_R9_SHORE, nq = 1, e;
+                double d[2]; d[0] = t0; d[1] = t1;
+                for (e = 0; e < 2; e++) {
+                    /* Land height at |lateral| from the road edge, read off the
+                     * profile for whichever side this column is on. */
+                    const TG_GroundProf *p = (d[e] >= 0.0) ? &pl : &pr;
+                    const double off = fabs(d[e]) * CW;
+                    double drop = p->dy[p->n - 1];
+                    int j;
+                    for (j = 1; j < p->n; j++) {
+                        if (off <= p->d[j]) {
+                            const double span = p->d[j] - p->d[j - 1];
+                            const double u = span > 1e-6
+                                           ? (off - p->d[j - 1]) / span : 0.0;
+                            drop = p->dy[j - 1] + (p->dy[j] - p->dy[j - 1]) * u;
+                            break;
+                        }
+                    }
+                    /* water corner (e-th), then land corner (e-th) */
+                    qx[e ? 1 : 0] = nw->x + lx * (d[e] * CW);
+                    qz[e ? 1 : 0] = nw->z + lz * (d[e] * CW);
+                    qy[e ? 1 : 0] = wy;
+                    qx[e ? 2 : 3] = nn->x + lx * (d[e] * CW);
+                    qz[e ? 2 : 3] = nn->z + lz * (d[e] * CW);
+                    qy[e ? 2 : 3] = nn->y - drop;
+                }
+                /* u across the strip, v from waterline (0) to bank (1). */
+                qu[0] = t0 * 4.0; qv[0] = 0.0;
+                qu[1] = t1 * 4.0; qv[1] = 0.0;
+                qu[2] = t1 * 4.0; qv[2] = 1.0;
+                qu[3] = t0 * 4.0; qv[3] = 1.0;
+                moff[*pn] = m->len;
+                if (!tg_write_quad_mesh(m, qx, qy, qz, qu, qv, 4, &sp, &nq, 1))
+                    return 0;
+                (*pn)++;
+                tg_acct(TG_ACCT_COASTLINE, wnode[k]);
+                tg_acct(TG_ACCT_R9_BRIDGE, wnode[k]);
+            }
+            continue;
+        }
 
         px[0] = nw->x - lx * CH; py[0] = wy; pz[0] = nw->z - lz * CH;
         px[1] = nn->x - lx * CH; py[1] = gy; pz[1] = nn->z - lz * CH;
@@ -8288,17 +8741,9 @@ static double tg_ground_branch_clear(const TG_NodeList *nl, int si)
     return over + 200.0;                 /* + margin, no shared edge */
 }
 
-/* One side's terrain CROSS-SECTION at span si: a chain of (distance from the
- * road edge, drop below the road) points, innermost first. Consecutive points
- * make one quad, so a plain verge is 2 points / 1 quad and a beach is 3 points /
- * 2 quads. One function, so the skirt in tg_emit_ground and the far terrain in
- * tg_emit_fb_terrain cannot disagree about where the skirt ended or how low. */
-#define TD5_TG_GROUND_MAXPT 3
-typedef struct {
-    double d[TD5_TG_GROUND_MAXPT];
-    double dy[TD5_TG_GROUND_MAXPT];
-    int    n;
-} TG_GroundProf;
+/* (TG_GroundProf and TD5_TG_GROUND_MAXPT moved up above tg_emit_bridge_coast in
+ * R9 -- the coastline band now reads the same cross-section the skirt does, and
+ * it is emitted earlier in the file. tg_ground_side itself stays here.) */
 
 /* [R6 item 6] How far the flat verge (near ground skirt) reaches outward. At the
  * historical 24000 the skirt is a wide, near-flat apron that on a DESCENT
@@ -12137,6 +12582,97 @@ static int tg_far_group_owner(int si)
     return 1;
 }
 
+/* ============ [R9 BRIDGE item 10] NO BACKGROUND MASSING OVER WATER ============
+ * "on span 1039 there's buildings on the background that are over the water."
+ *
+ * MEASURED CAUSE. tg_far_group_over_bridge already suppresses the band for a
+ * group INSIDE a bridge run, and 1036-1039 is such a group, so the offender is
+ * not the group the user is standing on -- it is a NEIGHBOURING group. The river
+ * rectangle is TD5_TG_BRIDGE_WATER_HALF (32000) either side of the centreline
+ * and runs the whole length of the crossing; the far band reaches
+ * TD5_TG_FAR_REACH (30000) sideways from a road edge. A group just past the run
+ * end (1040-1043 on 99991) therefore lays its apron and stands its ridge
+ * STRAIGHT ACROSS the water the crossing flies over, and on a curving approach a
+ * group several spans away does the same. Nothing in the band's gating asks what
+ * surface is underneath it -- the bridge gate is a SPAN test, and the defect is
+ * a SPATIAL one.
+ *
+ * So this is the same shape of rule as R7's "no trees over water" and R8's "no
+ * city backdrop inside a park": a placement-validity predicate over the WORLD
+ * POINT, consulted by the emitter, rather than another span-range special case.
+ * The band is not dropped -- that would undo R8 TERRAIN's extent work, which is
+ * the reason the band now reaches far enough to hit the river at all. Its REACH
+ * is CLAMPED to the last dry sample on that side, so the ground still runs out
+ * as far as there is ground and stops at the shore. A side whose skirt already
+ * ends in water emits nothing.
+ *
+ * TD5RE_R9_BRIDGE_DRYBAND=0 restores the round-8 unclamped band for an A/B.
+ * ========================================================================= */
+/* Keep the band this far clear of the river edge, so the clamp lands on dry
+ * ground rather than exactly on the waterline. */
+#define TD5_TG_R9_WATER_MARGIN 1500.0
+/* How far along the strip the river of another span can reach this point. The
+ * rectangle is 32000 half-wide and a span is TD5_TG_SPAN_LENGTH long, so 45
+ * spans covers any crossing that could possibly overlap a 30000 reach. */
+#define TD5_TG_R9_WATER_WINDOW 45
+
+static int tg_r9_dryband_enabled(void)
+{
+    return td5_env_flag_on("TD5RE_R9_BRIDGE_DRYBAND");
+}
+
+/* Class-level evidence for item 10: how many band sides were clamped, by how
+ * much, and how many were dropped outright. Reported by tg_r9_bridge_report. */
+static int    s_r9_band_tested, s_r9_band_clamped, s_r9_band_dropped;
+static double s_r9_band_clamp_sum;
+
+/* Is world point (wx,wz) inside the river rectangle of any bridge run near
+ * span si0? Same rectangle tg_emit_bridge_water lays, so the two cannot
+ * disagree about where the water is. */
+static int tg_r9_point_over_bridge_water(const TG_NodeList *nl, int si0,
+                                         double wx, double wz)
+{
+    const double BW = TD5_TG_BRIDGE_WATER_HALF + TD5_TG_R9_WATER_MARGIN;
+    int s, lo = si0 - TD5_TG_R9_WATER_WINDOW, hi = si0 + TD5_TG_R9_WATER_WINDOW;
+    if (lo < 0) lo = 0;
+    if (hi > nl->count - 2) hi = nl->count - 2;
+    for (s = lo; s <= hi; s++) {
+        const TG_Node *n0, *n1;
+        double dx, dz, along, lat, ax, az, len;
+        if (!tg_span_in_bridge_run(s) || !tg_water_span_clear(s)) continue;
+        n0 = &nl->v[s]; n1 = &nl->v[s + 1];
+        dx = wx - n0->x; dz = wz - n0->z;
+        /* tg_emit_bridge_water's own axes: left unit is (tz, -tx). */
+        along = dx * n0->tx + dz * n0->tz;
+        lat   = dx * n0->tz - dz * n0->tx;
+        if (lat <= -BW || lat >= BW) continue;
+        ax = n1->x - n0->x; az = n1->z - n0->z;
+        len = sqrt(ax * ax + az * az);
+        if (along < -TD5_TG_R9_WATER_MARGIN ||
+            along > len + TD5_TG_R9_WATER_MARGIN) continue;
+        return 1;
+    }
+    return 0;
+}
+
+/* Largest outward distance from (ox,oz) along unit (ux,uz) that stays off the
+ * river. Sampled rather than solved: the band is four rings, so a sample grid
+ * finer than the ring spacing is all the resolution the result can carry. */
+static double tg_r9_dry_reach(const TG_NodeList *nl, int si,
+                              double ox, double oz, double ux, double uz,
+                              double d0, double dmax)
+{
+    const int N = 40;
+    int k;
+    if (dmax <= d0) return dmax;
+    for (k = 0; k <= N; k++) {
+        const double d = d0 + (dmax - d0) * (double)k / (double)N;
+        if (tg_r9_point_over_bridge_water(nl, si, ox + ux * d, oz + uz * d))
+            return d0 + (dmax - d0) * (double)(k > 0 ? k - 1 : 0) / (double)N;
+    }
+    return dmax;
+}
+
 /* One side's background band: 3 ground quads outward plus the ridge wall.
  *
  * [R8 TERRAIN items 5/15] `ridge_ok` = 0 emits the GROUND apron without the
@@ -12161,9 +12697,46 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
      * blocky skyline -- see the seg_page[1] routing below). */
     const int r5fix = tg_r5_treeline_fix();
     const int r5treeline = !tg_biome_is_snow(h->b) && h->b->urbanity < 2;
+    /* [R9 item 10] Per-side dry reach, decided across BOTH ends so the band
+     * stays a proper quad; see tg_r9_dry_reach. */
+    double band_reach = reach;
 
     if (g1 > nl->count - 2) g1 = nl->count - 2;
     if (g1 < g0) return 1;
+
+    if (tg_r9_dryband_enabled()) {
+        double lim = reach, so_max = 0.0;
+        s_r9_band_tested++;
+        for (e = 0; e < 2; e++) {
+            const int se = e ? g1 : g0;
+            double lx, ly, lz, rx, ry, rz, ux, uz, len, so, d;
+            TG_GroundProf p;
+            tg_road_edge(nl, se, e ? 1.0 : 0.0, 0.0, 1.0,
+                         &lx, &ly, &lz, &rx, &ry, &rz);
+            ux = lx - rx; uz = lz - rz;
+            len = sqrt(ux * ux + uz * uz);
+            if (len < 1e-6) { ux = 1.0; uz = 0.0; } else { ux /= len; uz /= len; }
+            if (!is_left) { ux = -ux; uz = -uz; }
+            tg_ground_side(nl, se, is_left, h->b->water ? tg_water_side(se) : 0.0,
+                           &p);
+            so = p.d[p.n - 1];
+            if (so > so_max) so_max = so;
+            d = tg_r9_dry_reach(nl, h->si, (is_left ? lx : rx), (is_left ? lz : rz),
+                                ux, uz, so - TD5_TG_FAR_TUCK, reach);
+            if (d < lim) lim = d;
+        }
+        if (lim < reach) {
+            /* The skirt itself already ends in the river: there is no dry ground
+             * out here to draw, so draw none. */
+            if (lim <= so_max + TD5_TG_R9_WATER_MARGIN) {
+                s_r9_band_dropped++;
+                return 1;
+            }
+            s_r9_band_clamped++;
+            s_r9_band_clamp_sum += reach - lim;
+            band_reach = lim;
+        }
+    }
 
     for (e = 0; e < 2; e++) {
         const int se = e ? g1 : g0;
@@ -12205,9 +12778,9 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
          * inside it, so the near ground still has detail while three quads
          * still cover ten times the old reach. */
         D[e][0] = so - TD5_TG_FAR_TUCK;
-        D[e][1] = so + (reach - so) * 0.18;
-        D[e][2] = so + (reach - so) * 0.45;
-        D[e][3] = reach;
+        D[e][1] = so + (band_reach - so) * 0.18;
+        D[e][2] = so + (band_reach - so) * 0.45;
+        D[e][3] = band_reach;
 
         for (j = 0; j < 4; j++) {
             const double ex = (is_left ? lx : rx) + ux * D[e][j];
@@ -12470,7 +13043,21 @@ static int tg_emit_far_shore(const TG_FBHook *h, int is_left)
     const TG_NodeList *nl = h->nl;
     const int g0 = (h->si / TD5_TG_FAR_GROUP) * TD5_TG_FAR_GROUP;
     int g1 = g0 + TD5_TG_FAR_GROUP - 1;
-    const double out = (double)TD5_TG_WATER_EXTENT - TD5_TG_SHORE_FAR_INSET;
+    /* [R9 BRIDGE item 10] "On span 1039 there's buildings in the background
+     * that are over the water."
+     *
+     * MEASURED (R9 over-water audit, seed 99991): this wall is the offender, and
+     * the reason it is a BUILDING one is its own page routing five lines below
+     * -- on an urban biome it draws TD5_TG_PAGE_R4_SKYLINE, a city silhouette.
+     * R8 stood it TD5_TG_SHORE_FAR_INSET *inside* the water plane's outer edge,
+     * so a row of towers rose straight out of open sea. A far shore is LAND: put
+     * it just OUTSIDE the plane's edge instead, where the water ends, and it
+     * closes the same horizon while standing on the far bank rather than in the
+     * bay. One sign, and it is the difference between a skyline and a mirage.
+     * TD5RE_R9_BRIDGE_FARSHORE=0 restores the R8 inset for an A/B. */
+    const double out = td5_env_flag_on("TD5RE_R9_BRIDGE_FARSHORE")
+                     ? (double)TD5_TG_WATER_EXTENT + TD5_TG_SHORE_FAR_INSET
+                     : (double)TD5_TG_WATER_EXTENT - TD5_TG_SHORE_FAR_INSET;
     double px[4], py[4], pz[4], uu[4], vv[4];
     double ex[2], ey[2], ez[2];
     int seg_page, seg_nq = 1, e;
@@ -12833,6 +13420,111 @@ static void tg_r8_terrain_extent_report(const TG_NodeList *nl, int nspans)
     s_r8_tl_w = s_r8_tl_h = 0.0; s_r8_tl_n = 0;
     memset(s_r8_tl_pages, 0, sizeof(s_r8_tl_pages));
 }
+
+/* ===================== [R9 BRIDGE] TIE + DRY-BAND EVIDENCE =====================
+ * Round 9's two items are both CLASS claims -- "every over-deck member lands on
+ * a pier, on every run, on both seeds" and "no background massing stands over
+ * water anywhere". A frame can only ever show one span of one run, and the R9
+ * method note is explicit that a count going up is not evidence of correct
+ * placement. So this reports the UNIQUENESS/COVERAGE facts directly:
+ *
+ *   per run: style, pier pitch, pier count, gantry count, crown span, and
+ *            ORPHANS -- over-deck members (gantry or tower) standing on a span
+ *            that carries no pier, and the worst lateral offset between an
+ *            over-deck leg and the pier leg beneath it. Both must be 0.
+ *   overall: far-band sides tested / clamped / dropped by the over-water rule.
+ *
+ * Always logged (it is a handful of lines per track and it is the acceptance
+ * evidence); TD5RE_R9_BRIDGE_REPORT=0 silences it. */
+static void tg_r9_bridge_report(const TG_NodeList *nl)
+{
+    int si, runs = 0, orphan_total = 0;
+    double worst_lat = 0.0;
+
+    if (!td5_env_flag_on("TD5RE_R9_BRIDGE_REPORT")) return;
+
+    for (si = 0; si + 1 < nl->count; si++) {
+        int s0, s1, s, piers = 0, gantries = 0, orphans = 0, crown, style, pitch;
+        double wl = 0.0;
+        if (!tg_span_in_bridge_run(si)) continue;
+        tg_bridge_run_bounds(nl, si, &s0, &s1);
+        if (si != s0) continue;                     /* once per run */
+        if (s1 > nl->count - 2) s1 = nl->count - 2;
+        style = tg_bridge_style(si);
+        pitch = tg_bridge_pier_pitch(style);
+        crown = s0 + (s1 - s0) / 2;
+        for (s = s0; s <= s1; s++) {
+            const int pier = tg_bridge_pier_here(nl, s);
+            const int gan  = tg_bridge_gantry_here(nl, s);
+            const int tower = tg_bridge_struct_enabled() && style != 2 &&
+                              s == crown;
+            if (pier) piers++;
+            if (gan)  gantries++;
+            if ((gan || tower) && !pier) orphans++;
+            if ((gan || tower) && pier) {
+                /* The two laterals written EXACTLY as the two emitters compute
+                 * them, so this measures the real gap rather than asserting it.
+                 * Under the tie both reduce to tg_bridge_column_lateral and the
+                 * difference is 0 by construction; with TD5RE_R9_BRIDGE_TIE=0 it
+                 * reports the round-8 mismatch. */
+                const double half = nl->v[s].width * 0.5;
+                const double pierlat = tg_r9_bridge_tie()
+                    ? tg_bridge_column_lateral(nl, s, 1.0)
+                    : half * ((style == 1) ? 0.85 : 0.70);
+                const double abovelat = tg_r9_bridge_tie()
+                    ? tg_bridge_column_lateral(nl, s, 1.0)
+                    : (gan ? tg_carriageway_reach(nl, s, 1.0)
+                             + TD5_TG_BRIDGE_RAIL_OUT
+                           : half + 300.0);
+                if (fabs(abovelat - pierlat) > wl) wl = fabs(abovelat - pierlat);
+            }
+        }
+        runs++;
+        orphan_total += orphans;
+        if (wl > worst_lat) worst_lat = wl;
+        TD5_LOG_I(LOG_TAG,
+            "R9BRIDGE run=%d-%d style=%d pitch=%d piers=%d gantries=%d "
+            "crown=%d crown_has_pier=%d orphans=%d",
+            s0, s1, style, pitch, piers, gantries, crown,
+            tg_bridge_pier_here(nl, crown), orphans);
+    }
+    TD5_LOG_I(LOG_TAG,
+        "R9BRIDGE tie=%d tex=%d coast=%d dryband=%d | runs=%d "
+        "over_deck_orphans=%d worst_leg_lat=%.0f | farband sides=%d "
+        "clamped=%d dropped=%d mean_clamp=%.0f",
+        tg_r9_bridge_tie(), tg_r9_bridge_tex(),
+        td5_env_flag_on("TD5RE_R9_BRIDGE_COAST"), tg_r9_dryband_enabled(),
+        runs, orphan_total, worst_lat,
+        s_r9_band_tested, s_r9_band_clamped, s_r9_band_dropped,
+        s_r9_band_clamped ? s_r9_band_clamp_sum / (double)s_r9_band_clamped
+                          : 0.0);
+    {   /* [R9 item 10] the CLASS test: nothing but the crossing itself may stand
+         * above the river surface, anywhere on the track. */
+        int k;
+        char kinds[256];
+        size_t w = 0;
+        kinds[0] = 0;
+        for (k = 0; k < TG_GK_COUNT; k++) {
+            if (!s_r9_wet_kind[k]) continue;
+            w += (size_t)snprintf(kinds + w, sizeof(kinds) - w, "%s%s=%d",
+                                  w ? " " : "", k_guard_kind_name[k],
+                                  s_r9_wet_kind[k]);
+            if (w >= sizeof(kinds) - 24) break;
+        }
+        TD5_LOG_I(LOG_TAG,
+            "R9BRIDGE over-water found=%d rejected=%d remaining=%d "
+            "worst_height=%.0f first_span=%d [%s]",
+            s_r9_wet_total, s_r9_wet_rejected,
+            s_r9_wet_total - s_r9_wet_rejected, s_r9_wet_worst,
+            s_r9_wet_first_span, s_r9_wet_total ? kinds : "none");
+    }
+    s_r9_band_tested = s_r9_band_clamped = s_r9_band_dropped = 0;
+    s_r9_band_clamp_sum = 0.0;
+    s_r9_wet_total = 0; s_r9_wet_worst = 0.0; s_r9_wet_first_span = -1;
+    s_r9_wet_ready = 0; s_r9_wet_rejected = 0;
+    memset(s_r9_wet_kind, 0, sizeof(s_r9_wet_kind));
+}
+
 
 /* ===================== [FB] START / FINISH GANTRY =====================
  * Reported: "add start banner" and "there should be a finish banner".
@@ -15122,6 +15814,145 @@ static void tg_emit_texture_page_r4_guardrail(TG_Buf *out)
     }
 }
 
+/* [R9 BRIDGE item 9] PYLON -- the ABOVE-deck verticals (gantry legs, tower
+ * legs). "The texture for these pillars should be different."
+ *
+ * The complaint is real and its cause is that they were on the PIER page: a
+ * bridge whose tower is the same cast concrete as the pier reads as one
+ * extruded lump, and the checkerboard blotching visible in the report's own
+ * screenshot is that page sampled across a narrow post. This is painted STEEL
+ * instead -- a warm dark grey-green with strong VERTICAL ribs (page-X, i.e.
+ * around the post at the 600-unit pier tile) and rivet rows across, so the
+ * member reads as fabricated and as a different material from the concrete it
+ * stands on. That material change at the waterline is exactly what makes a real
+ * bridge legible as "one structure, two parts". */
+static void tg_emit_texture_page_r9_pylon(TG_Buf *out)
+{
+    unsigned int rng = 0x2C71A9D3u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR. 0..3 deep shadow between ribs, 4..10 painted steel body,
+     * 11..15 rib highlight / rivet head. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        if (i < 4)       { b = 40 + i * 5;      g = 46 + i * 5;      r = 44 + i * 5; }
+        else if (i < 11) { b = 86 + (i-4) * 5;  g = 96 + (i-4) * 5;  r = 92 + (i-4) * 5; }
+        else             { b = 138 + (i-11) * 7; g = 150 + (i-11) * 7;
+                           r = 145 + (i-11) * 7; }
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;   /* around the post */
+        const int y = i / TD5_TG_TEX_DIM;   /* up the post     */
+        const int rib = x % 16;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if (rib < 2)                idx = (int)((rng >> 16) % 4);      /* groove */
+        else if (rib == 2 || rib == 13)
+                                    idx = 11 + (int)((rng >> 16) % 3); /* rib lip */
+        else if ((y % 21) < 2 && (rib == 5 || rib == 10))
+                                    idx = 13 + (int)((rng >> 16) % 3); /* rivet  */
+        else                        idx = 4 + (int)((rng >> 16) % 7);  /* paint  */
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
+/* [R9 BRIDGE item 9] BEAM -- the HORIZONTAL members (gantry cross-beam, tower
+ * cross-member). "The horizontal beam should have a different texture as well."
+ *
+ * Its box is 3000-tiled along the road, so page-X runs LENGTHWISE along the beam
+ * and page-Y across its depth. The pier page is authored for a vertical column
+ * and, drawn in these axes, gave the mottled checkerboard the screenshot shows
+ * on the beam. This is a plate girder seen side-on: continuous dark FLANGE bands
+ * top and bottom, a lighter web between, and regular stiffener ribs and bolt
+ * rows down the length -- structure that runs the right way. */
+static void tg_emit_texture_page_r9_beam(TG_Buf *out)
+{
+    unsigned int rng = 0x77B3E509u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR. 0..4 dark flange steel, 5..11 mid web, 12..15 stiffener highlight. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        if (i < 5)       { b = 52 + i * 5;      g = 58 + i * 5;      r = 60 + i * 5; }
+        else if (i < 12) { b = 108 + (i-5) * 6; g = 116 + (i-5) * 6; r = 118 + (i-5) * 6; }
+        else             { b = 160 + (i-12) * 8; g = 168 + (i-12) * 8;
+                           r = 170 + (i-12) * 8; }
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;   /* along the beam  */
+        const int y = i / TD5_TG_TEX_DIM;   /* across its face */
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if (y < 9 || y > 54)        idx = (int)((rng >> 16) % 5);      /* flange  */
+        else if (y < 12 || y > 51)  idx = 12 + (int)((rng >> 16) % 4); /* fillet  */
+        else if ((x % 18) < 3)      idx = 12 + (int)((rng >> 16) % 4); /* stiffener */
+        else if ((x % 18) == 9 && ((y - 12) % 13) < 2)
+                                    idx = 1 + (int)((rng >> 16) % 3);  /* bolt    */
+        else                        idx = 5 + (int)((rng >> 16) % 7);  /* web     */
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
+/* [R9 BRIDGE item 9] SHORE -- the coastline band where the river meets the
+ * bank. "The coastline geometry looks wrong."
+ *
+ * The R4 coast page it replaces is a WATER-tiled page shared with the river, so
+ * the band read as more water lying at a wrong angle rather than as a shore.
+ * This one is authored for the band's own axes -- page-Y runs from the WATERLINE
+ * (y=0) up the beach to the BANK (y=63) -- so the surface actually grades: wet
+ * dark shingle at the water, coarse pebble, then dry sand blending into bank
+ * grass at the top. */
+static void tg_emit_texture_page_r9_shore(TG_Buf *out)
+{
+    unsigned int rng = 0x4D19C7B7u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR. 0..3 wet dark shingle, 4..8 pebble, 9..12 dry sand, 13..15 grass. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int b, g, r;
+        if (i < 4)       { b = 74 + i * 5;      g = 76 + i * 5;      r = 70 + i * 5; }
+        else if (i < 9)  { b = 118 + (i-4) * 7; g = 124 + (i-4) * 7; r = 122 + (i-4) * 7; }
+        else if (i < 13) { b = 150 + (i-9) * 8; g = 172 + (i-9) * 8; r = 190 + (i-9) * 8; }
+        else             { b = 58 + (i-13) * 8; g = 112 + (i-13) * 10;
+                           r = 54 + (i-13) * 8; }
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int y = i / TD5_TG_TEX_DIM;   /* waterline (0) -> bank (63) */
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if (y < 14)      idx = (int)((rng >> 16) % 4);            /* wet shingle */
+        else if (y < 32) idx = 4 + (int)((rng >> 16) % 5);        /* pebble      */
+        else if (y < 50) idx = 9 + (int)((rng >> 16) % 4);        /* dry sand    */
+        else if (y < 56) idx = ((rng >> 20) & 1u) ? 12 : 13;      /* sand/grass  */
+        else             idx = 13 + (int)((rng >> 16) % 3);       /* bank grass  */
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 /* [R4 item 18] PIER / TOWER concrete. Smooth cast concrete for a LIT exterior:
  * a tight pale-grey ramp with faint vertical form-board seams and only sparse
  * grain -- deliberately none of the damp/soot blotching the bore LINING page
@@ -16123,6 +16954,12 @@ static int tg_emit_textures(TG_Buf *out)
     tg_emit_texture_page_r4_cross(&pages[TD5_TG_PAGE_R4_CROSS + 0]);
     /* [R5 STRUCT item 1] solid concrete leg-face page for the gantry uprights. */
     tg_emit_texture_page_r5_leg(&pages[TD5_TG_PAGE_R5_LEG]);
+    /* [R9 item 9] distinct materials for the bridge's ABOVE-deck pillars, its
+     * horizontal beam, and the shore band -- all three previously shared a page
+     * with something authored for other axes. */
+    tg_emit_texture_page_r9_pylon(&pages[TD5_TG_PAGE_R9_PYLON]);
+    tg_emit_texture_page_r9_beam(&pages[TD5_TG_PAGE_R9_BEAM]);
+    tg_emit_texture_page_r9_shore(&pages[TD5_TG_PAGE_R9_SHORE]);
 
     for (i = 0; i < count; i++) {
         if (pages[i].oom) {
@@ -16419,6 +17256,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         }
     }
     tg_acct_report(nspans);
+    tg_r9_bridge_report(&nl);          /* [R9 BRIDGE] tie + dry-band evidence */
     tg_r8_bridge_diag(&nl);            /* [R8 BRIDGE] opt-in measurement dump */
     tg_r8_terrain_extent_report(&nl, nspans);  /* [R8 TERRAIN] opt-in, ditto */
     ok = 1;
