@@ -505,6 +505,25 @@ static int tg_road_page(int si);
 #define TD5_TG_PAGE_R9_TUNNEL (TD5_TG_PAGE_R9_BASE + 8)
 #define TD5_TG_R9_TUNNEL_N    16
 
+/* Slots used, all measured off TD5_TG_PAGE_R9_TUNNEL. 7 of the 16 are spent;
+ * the rest stay free for a later round rather than being filled speculatively.
+ *
+ * +0 and +1 are the two pages ITEM 5 is actually about. Three rounds re-textured
+ * the portal FACE (+2's predecessors) while the band above the lintel and the
+ * wings either side were TD5_TG_PAGE_HILL -- the hillside terrain page -- drawn
+ * by tg_emit_fb_tunnel, a DIFFERENT emitter that no portal round ever touched.
+ * +1 is that surround's own material.
+ *
+ * +3..+6 are ITEM 13's underpass, which is a new element rather than a
+ * re-texture, and which is why this block was reserved wide. */
+#define TD5_TG_PAGE_R9_BORE_CEIL   (TD5_TG_PAGE_R9_TUNNEL + 0)  /* item 5e */
+#define TD5_TG_PAGE_R9_PORTAL_SURR (TD5_TG_PAGE_R9_TUNNEL + 1)  /* item 5a */
+#define TD5_TG_PAGE_R9_PORTAL_FACE (TD5_TG_PAGE_R9_TUNNEL + 2)  /* item 5c */
+#define TD5_TG_PAGE_R9_UP_ABUT     (TD5_TG_PAGE_R9_TUNNEL + 3)  /* item 13  */
+#define TD5_TG_PAGE_R9_UP_SOFFIT   (TD5_TG_PAGE_R9_TUNNEL + 4)  /* item 13  */
+#define TD5_TG_PAGE_R9_UP_DECK     (TD5_TG_PAGE_R9_TUNNEL + 5)  /* item 13  */
+#define TD5_TG_PAGE_R9_UP_PARAPET  (TD5_TG_PAGE_R9_TUNNEL + 6)  /* item 13  */
+
 #define TD5_TG_PAGE_R9_TOPO   (TD5_TG_PAGE_R9_BASE + 26)
 #define TD5_TG_R9_TOPO_N      8
 
@@ -787,7 +806,7 @@ typedef enum {
      * invisible to every mesh COUNT, which is why the R8 checks missed it. */
     TG_ACCT_R9_RAILYIELD,
 
-    TG_ACCT_R9_TUNNEL,      /* TUNNEL  (5,13)               rename in place */
+    TG_ACCT_R9_UNDERPASS,   /* TUNNEL  (5,13)  item 13 city underpass runs  */
 
     TG_ACCT_R9_TOPO,        /* TOPO    (6,7,11)             rename in place */
 
@@ -878,7 +897,7 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
      * LAST entry omits its trailing comma. */
     "rail-yields",          /* RAILFIX */
 
-    "r9-tunnel",            /* TUNNEL  */
+    "r9-underpass",         /* TUNNEL  */
 
     "r9-topo",              /* TOPO    */
 
@@ -5542,10 +5561,20 @@ typedef struct {
 /*                                                clim urb  brdg tunl rpt */
 static const TG_Biome k_biomes[] = {
     /* CITY: ~8.4x11.5 wu cells, ~3 floors, on the curb, big sparse towers.
-     * Few bridges (a city road crosses at grade), the odd underpass. */
+     * Few bridges (a city road crosses at grade), the odd underpass.
+     *
+     * [R9 item 13] w_tunnel 0 -> 70. The comment above always said "the odd
+     * underpass" and the weight always said never, because until this round a
+     * "tunnel" could only be a bored mountain portal and a bore under a city is
+     * absurd -- so zero was right. Item 13 makes a CITY tunnel an UNDERPASS, and
+     * the user named the city specifically ("the tunnels in the city should
+     * represent underpasses"), so leaving this at 0 would have shipped the fix
+     * to every biome EXCEPT the one it was asked for. Safe to raise: an
+     * underpass run returns 0 from tg_span_in_tunnel, so it moves no road, no
+     * elevation and no surface -- it only adds scenery. */
     { "CITY",       9, 2150, 2950, 2, 3, 6000, 350, {0}, 0,
       TD5_TG_PAGE_WALL,   3, 0, TD5_TG_PAGE_GROUND,   6, 1, PP_MONUMENT, -1, 0, RS_TARMAC,
-      1, 3,  40,   0, 3 },
+      1, 3,  40,  70, 3 },
     /* FIELDS: sparse deciduous on an open horizon; grazing sheep; dirt road.
      * COUNTRYSIDE = BRIDGES: open farmland is where the road crosses rivers and
      * dry valleys, which is the user's "if it's a countryside there should be
@@ -6992,7 +7021,61 @@ static int tg_tunnel_run_len(void)
  * (~15000 world units) is a full bridge approach length. */
 #define TD5_TG_BRIDGE_TUNNEL_CLEAR 10
 
-static int tg_span_in_tunnel(int si)
+/* ==========================================================================
+ * [R9 TUNNEL item 13]  BORE  vs  UNDERPASS
+ *
+ * "the tunnels in the city should represent underpasses below highways, build
+ *  it like that, and current tunnels should only be happening in mountains
+ *  biome"
+ *
+ * This is the round's reframe, and it is very probably also the answer to
+ * ITEM 5, which is now on its FOURTH round. R6 built a portal page, R7 built a
+ * projecting concrete portal facade, R8 replaced the banded page with a flat
+ * one and verified the selection at all 12 mouths. Every one of those was a
+ * real fix and the complaint came back each time -- because the element was
+ * wrong, not the art. A bored mountain portal was being built in the middle of
+ * a town, and no portal texture can make a mountain portal look right where
+ * there is no mountain. On seed 99991 there is not one ALPINE cell in 1987
+ * spans, and BOTH bores (480-499 ORIENTAL, 1520-1539 INDUSTRIAL) are urban.
+ *
+ * So the run gate keeps its hash EXACTLY as it was -- the same runs are chosen,
+ * so this is not a rate change -- and what gets BUILT on a chosen run is now
+ * decided by the biome:
+ *
+ *   ALPINE (cold AND wilderness)  -> BORE      a real tunnel through rock
+ *   urbanity >= 1 (everything settled) -> UNDERPASS
+ *   FOREST                        -> NONE      nothing to bore, nothing to span
+ *
+ * See tg_tunnel_kind for why the mountain test is climate AND urbanity rather
+ * than climate alone -- that distinction was forced by a frame, not chosen.
+ * FIELDS, FOREST and COAST carry no bore any more, which is the strict reading
+ * of "only in mountains"; TD5RE_R9_UNDERPASS=0 restores the old biome-blind
+ * bore everywhere for an A/B.
+ *
+ * WHY tg_span_in_tunnel KEEPS ITS MEANING. Twenty-odd call sites ask it, and
+ * every one of them means "is the road ENCLOSED here" -- dry tarmac inside the
+ * bore, no sea plane over the roof, no gantry, no buildings, no flora, the fork
+ * gore on bore-median concrete. An underpass encloses the road for about two
+ * spans out of twenty and a city carries straight on over the top of it, so
+ * NONE of those consumers wants to fire on an underpass run. Narrowing this one
+ * predicate to BORE therefore leaves all of them saying what they already said,
+ * and the underpass gets its own predicate rather than borrowing this one.
+ * ====================================================================== */
+enum { TG_TUN_NONE = 0, TG_TUN_BORE, TG_TUN_UNDERPASS };
+
+/* Cell-level biome, NOT tg_biome_for_span: the blended per-span biome dithers
+ * across a 20-span band, and a run that was half bore and half underpass would
+ * be the worse artifact by far. One run, one decision. */
+static int tg_tunnel_run_biome(int si)
+{
+    const int t0 = (si / TD5_TG_TUNNEL_RUN) * TD5_TG_TUNNEL_RUN;
+    return tg_biome_cell_index(t0 + TD5_TG_TUNNEL_RUN / 2);
+}
+
+/* The ORIGINAL gate, unchanged: hash, biome weight, bridge interlock. Split out
+ * so "which runs are chosen" and "what is built on them" are separately
+ * checkable, and so item 13 provably changes only the second. */
+static int tg_tunnel_run_selected(int si)
 {
     unsigned int h;
     /* OFF BY DEFAULT -- emitted but NEVER VERIFIED IN FRAME. A test run with
@@ -7040,6 +7123,62 @@ static int tg_span_in_tunnel(int si)
             if (tg_span_in_bridge_run(s)) return 0;
     }
     return 1;
+}
+
+/* What a SELECTED run builds. See the item-13 block above for the rule. */
+static int tg_tunnel_kind(int si)
+{
+    const TG_Biome *b;
+    if (!tg_tunnel_run_selected(si)) return TG_TUN_NONE;
+    /* A/B escape: pin the pre-R9 behaviour (every selected run is a bore,
+     * whatever the biome) so the two builds can be compared byte for byte. */
+    if (td5_env_flag_off("TD5RE_R9_UNDERPASS")) return TG_TUN_BORE;
+    b = &k_biomes[tg_tunnel_run_biome(si)];
+    /* MOUNTAINS means ALPINE: climate cold AND urbanity WILDERNESS.
+     *
+     * The obvious rule is climate >= 2, and it is wrong -- MEASURED, not
+     * reasoned. climate 2 also selects ALPTOWN, and the first frame of a bore in
+     * an ALPTOWN run (seed 777 span 473) came out as a stone portal in the
+     * middle of a shopping street with railings and shopfronts either side --
+     * which is the ORIGINAL COMPLAINT, reproduced by the fix meant to end it.
+     * ALPTOWN is cold, but its own table comment calls it a snowy TOWN and it
+     * draws on TD5_TG_PAGE_WALL, the city facade page, so it renders urban
+     * whatever its climate says. A bore belongs where there is nothing but
+     * hillside, and that is urbanity 0 as much as it is climate 2.
+     *
+     * This is the round's own method rule turned on my own first answer: when a
+     * complaint survives an honest measurement, suspect the AXIS. Climate was
+     * the wrong axis on its own. */
+    if (b->climate >= 2 && b->urbanity == 0) return TG_TUN_BORE;
+    /* Anywhere with a settlement -- town, edge, or city -- a crossing road goes
+     * OVER, not through. urbanity >= 1 rather than >= 2 so ALPTOWN, FIELDS and
+     * COAST are served too: a flyover across a village street, a country lane or
+     * a coast road is ordinary, and restricting this to dense urbanity would
+     * leave those three biomes with no crossing of any kind. FOREST (urbanity 0,
+     * temperate) is the one biome that gets neither, which is right -- there is
+     * nothing to tunnel through and nothing to fly over. */
+    if (b->urbanity >= 1) return TG_TUN_UNDERPASS;
+    return TG_TUN_NONE;
+}
+
+/* ENCLOSED: a real bore. Unchanged meaning -- see the item-13 block. */
+static int tg_span_in_tunnel(int si)
+{
+    return tg_tunnel_kind(si) == TG_TUN_BORE;
+}
+
+/* The one span of an underpass RUN that carries the crossing.
+ *
+ * An underpass is not a 20-span enclosure. A road passes over ours, and either
+ * side of it the town simply continues -- which is the whole point of item 13,
+ * and why this returns a single span rather than a range. Centre of the run, so
+ * it lands where the old bore's midpoint was and the approach is symmetric.
+ * Returns -1 when the run containing si is not an underpass. */
+static int tg_underpass_span(int si)
+{
+    const int t0 = (si / TD5_TG_TUNNEL_RUN) * TD5_TG_TUNNEL_RUN;
+    if (tg_tunnel_kind(si) != TG_TUN_UNDERPASS) return -1;
+    return t0 + TD5_TG_TUNNEL_RUN / 2;
 }
 
 /* Lining page for the tunnel RUN containing si (item 16a).
@@ -7163,17 +7302,39 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
      * [R8 item 4] the R7 page IS the reported "grey-ish texture with lighter
      * gray stripes" (dump: log/tgpage_301.ppm). Choose the R8 unbanded headwall
      * instead; TD5RE_R8_PORTAL=0 puts the R7 page back for the A/B. */
+    /* [R9 item 5c] "the gray-ish texture looks wrong here" -- said again, about
+     * the R8 page. R8's page is a legitimately good CAST CONCRETE page and that
+     * is exactly its problem: a flat, even, pale grey wall is what the user keeps
+     * calling grey-ish. Do not build a fourth grey concrete page. R9's face is
+     * BOARD-FORMED and warm, with vertical shutter boards -- a portal reads as
+     * built rather than poured, and the boards give the eye vertical structure
+     * where three rounds of horizontal banding was the exact thing complained
+     * about. Vertical, not horizontal, so the R8 lesson still holds.
+     * TD5RE_R9_PORTAL_FACE=0 falls back to the R8 page for the A/B. */
     const int portal_pg =
         !td5_env_flag_on("TD5RE_AUTOTRACK_R7_PORTAL") ? TD5_TG_PAGE_R6_TUNNEL + 4
+      : td5_env_flag_on("TD5RE_R9_PORTAL_FACE")       ? TD5_TG_PAGE_R9_PORTAL_FACE
       : td5_env_flag_on("TD5RE_R8_PORTAL")            ? TD5_TG_PAGE_R8_BRIDGE + 1
       :                                                 TD5_TG_PAGE_R7_BRIDGE + 0;
     const int lamps_on = td5_env_flag_on("TD5RE_AUTOTRACK_TUNNEL_LAMPS");
+    /* [R9 item 5e] "walls and roofing should have different texture". They were
+     * one page because they are one mesh, not because anyone decided they should
+     * match -- tg_write_quad_mesh_col has carried per-segment pages since R5 and
+     * the roof simply rode along in the wall segment. Give the ceiling its own
+     * page and its own segment. TD5RE_R9_BORE_CEIL=0 puts the roof back on the
+     * lining page for the A/B. */
+    const int ceil_on = td5_env_flag_on("TD5RE_R9_BORE_CEIL");
+    const int ceil_pg = ceil_on ? TD5_TG_PAGE_R9_BORE_CEIL : 0;
+    /* [R9 item 5b/5d] How far the portal frame stands out from the mouth node.
+     * Hoisted out of the portal block because the LINING now has to reach it --
+     * see the mouth-extension note below. */
+    const double proud  = 1600.0;
     const double tile = 3000.0;
     const TG_Node *nd = &nl->v[si];
-    double px[64], py[64], pz[64], uu[64], vv[64];
-    unsigned int col[64];
-    int seg_page[3], seg_nq[3], nseg = 0;
-    int n = 0, n_lin = 0, n_lamp = 0, n_portal = 0;
+    double px[96], py[96], pz[96], uu[96], vv[96];
+    unsigned int col[96];
+    int seg_page[4], seg_nq[4], nseg = 0;
+    int n = 0, n_wall = 0, n_roof = 0, n_lamp = 0, n_portal = 0;
 
     /* +lateral = LEFT of travel: point at lateral t off node = (x + tz*t, y,
      * z - tx*t), the same frame the road/gore/sidewalk use. */
@@ -7183,41 +7344,102 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
         uu[n] = (U); vv[n] = (V); col[n] = (C); n++;             \
     } while (0)
 
-    /* Wall/roof segment [si, si+1]; only when si+1 is bored too, so a run's last
-     * span does not push the tube one span past its mouth. Vertices are grouped
-     * by texture page -- all LINING quads, then all LAMP quads, then the PORTAL
-     * lintel -- because tg_write_quad_mesh_col draws each command's quads from a
-     * contiguous vertex run. */
-    if (tg_span_in_tunnel(si + 1)) {
-        const TG_Node *a = &nl->v[si];
-        const TG_Node *c = &nl->v[si + 1];
-        double ha, sa, hc, sc, dx, dz, seglen, u1, vtop, wv;
-        double al, ar, cl, cr;
-        tg_tunnel_bore(nl, si,     &ha, &sa);
-        tg_tunnel_bore(nl, si + 1, &hc, &sc);
-        al = sa + ha; ar = sa - ha;          /* inner edges at a (L, R) */
-        cl = sc + hc; cr = sc - hc;          /* inner edges at c (L, R) */
-        dx = c->x - a->x; dz = c->z - a->z;
-        seglen = sqrt(dx * dx + dz * dz);
-        u1   = (seglen > 1.0) ? seglen / tile : 0.5;
-        vtop = height / tile;
-        wv   = (2.0 * ha) / tile;
-        /* Left wall inner face */
-        TG_TUN_PUSH(a, al, a->y,          0.0, 0.0,  dim);
-        TG_TUN_PUSH(c, cl, c->y,          u1,  0.0,  dim);
-        TG_TUN_PUSH(c, cl, c->y + height, u1,  vtop, dim);
-        TG_TUN_PUSH(a, al, a->y + height, 0.0, vtop, dim);
-        /* Right wall inner face */
-        TG_TUN_PUSH(a, ar, a->y,          0.0, 0.0,  dim);
-        TG_TUN_PUSH(c, cr, c->y,          u1,  0.0,  dim);
-        TG_TUN_PUSH(c, cr, c->y + height, u1,  vtop, dim);
-        TG_TUN_PUSH(a, ar, a->y + height, 0.0, vtop, dim);
-        /* Roof: near-left, far-left, far-right, near-right at ceiling height */
-        TG_TUN_PUSH(a, al, a->y + height, 0.0, 0.0, dim);
-        TG_TUN_PUSH(c, cl, c->y + height, u1,  0.0, dim);
-        TG_TUN_PUSH(c, cr, c->y + height, u1,  wv,  dim);
-        TG_TUN_PUSH(a, ar, a->y + height, 0.0, wv,  dim);
-        n_lin = n;
+    /* Wall/roof segments. Vertices are grouped by texture page -- all WALL
+     * quads, then all CEILING quads, then all LAMP quads, then the PORTAL --
+     * because tg_write_quad_mesh_col draws each command's quads from a
+     * contiguous vertex run, so a page change means a group boundary. */
+    {
+        TG_Node fn_in, fn_out;      /* synthesised mouth-extension end nodes */
+        struct { const TG_Node *a, *c; double al, ar, cl, cr, u1, hh; } sg[3];
+        int nsg = 0, k, pass;
+        const int at_entry = !tg_span_in_tunnel(si - 1);
+        const int at_exit  = !tg_span_in_tunnel(si + 1);
+        /* [R9 item 5b/5d] MOUTH EXTENSION. This is the root cause of BOTH
+         * remaining geometry complaints in item 5, and it is a hole R7 opened
+         * and nobody looked into afterwards.
+         *
+         * R7 stood the portal frame 1600 units PROUD of the mouth node, so the
+         * Group-C hill mass sitting AT that node could not occlude it. Correct,
+         * and nothing was ever built in those 1600 units. So the lining begins
+         * at the mouth NODE while the frame floats 1600 in front of it, and
+         * between the two there is a strip of road with a concrete frame round
+         * it and OPEN SKY overhead -- "the span that represents the entrance and
+         * exit of the tunnel looks wrong" -- and the jamb, having nothing behind
+         * it, is a single plane seen edge-on -- "something wrong with the depth
+         * of the entrance pillar", a thin slab with no reveal.
+         *
+         * Carry the lining OUT to the frame plane. The bore then reaches the
+         * portal that frames it, the sky strip closes, and the jamb gains 1600
+         * units of visible depth for free because the wall behind it IS the
+         * reveal. One extension fixes both, which is the tell that they were one
+         * defect reported twice. TD5RE_R9_MOUTH=0 restores the R7 gap. */
+        const int mouth_on = td5_env_flag_on("TD5RE_R9_MOUTH");
+        double h0, s0;
+        tg_tunnel_bore(nl, si, &h0, &s0);
+
+        if (mouth_on && at_entry) {          /* step BACK against the tangent */
+            fn_in = *nd;
+            fn_in.x = nd->x - nd->tx * proud;
+            fn_in.z = nd->z - nd->tz * proud;
+            sg[nsg].a = &fn_in; sg[nsg].c = nd;
+            sg[nsg].al = sg[nsg].cl = s0 + h0;
+            sg[nsg].ar = sg[nsg].cr = s0 - h0;
+            sg[nsg].u1 = proud / tile; sg[nsg].hh = h0; nsg++;
+        }
+        if (tg_span_in_tunnel(si + 1)) {     /* ordinary interior segment */
+            double hc, sc, dx, dz, seglen;
+            tg_tunnel_bore(nl, si + 1, &hc, &sc);
+            dx = nl->v[si + 1].x - nd->x; dz = nl->v[si + 1].z - nd->z;
+            seglen = sqrt(dx * dx + dz * dz);
+            sg[nsg].a = nd; sg[nsg].c = &nl->v[si + 1];
+            sg[nsg].al = s0 + h0; sg[nsg].ar = s0 - h0;
+            sg[nsg].cl = sc + hc; sg[nsg].cr = sc - hc;
+            sg[nsg].u1 = (seglen > 1.0) ? seglen / tile : 0.5;
+            sg[nsg].hh = h0; nsg++;
+        }
+        if (mouth_on && at_exit) {           /* step FORWARD along the tangent */
+            fn_out = *nd;
+            fn_out.x = nd->x + nd->tx * proud;
+            fn_out.z = nd->z + nd->tz * proud;
+            sg[nsg].a = nd; sg[nsg].c = &fn_out;
+            sg[nsg].al = sg[nsg].cl = s0 + h0;
+            sg[nsg].ar = sg[nsg].cr = s0 - h0;
+            sg[nsg].u1 = proud / tile; sg[nsg].hh = h0; nsg++;
+        }
+
+        /* pass 0 = the two side WALLS, pass 1 = the ROOF, so the two pages end
+         * up in two contiguous vertex runs without a second vertex array. */
+        for (pass = 0; pass < 2; pass++) {
+            for (k = 0; k < nsg; k++) {
+                const TG_Node *a = sg[k].a, *c = sg[k].c;
+                const double al = sg[k].al, ar = sg[k].ar;
+                const double cl = sg[k].cl, cr = sg[k].cr;
+                const double u1 = sg[k].u1;
+                if (pass == 0) {
+                    const double vtop = height / tile;
+                    /* Left wall inner face */
+                    TG_TUN_PUSH(a, al, a->y,          0.0, 0.0,  dim);
+                    TG_TUN_PUSH(c, cl, c->y,          u1,  0.0,  dim);
+                    TG_TUN_PUSH(c, cl, c->y + height, u1,  vtop, dim);
+                    TG_TUN_PUSH(a, al, a->y + height, 0.0, vtop, dim);
+                    /* Right wall inner face */
+                    TG_TUN_PUSH(a, ar, a->y,          0.0, 0.0,  dim);
+                    TG_TUN_PUSH(c, cr, c->y,          u1,  0.0,  dim);
+                    TG_TUN_PUSH(c, cr, c->y + height, u1,  vtop, dim);
+                    TG_TUN_PUSH(a, ar, a->y + height, 0.0, vtop, dim);
+                } else {
+                    /* Roof: near-left, far-left, far-right, near-right.
+                     * V spans the bore WIDTH so the ceiling page's transverse
+                     * ribs run across the road rather than along it. */
+                    const double wv = (2.0 * sg[k].hh) / tile;
+                    TG_TUN_PUSH(a, al, a->y + height, 0.0, 0.0, dim);
+                    TG_TUN_PUSH(c, cl, c->y + height, u1,  0.0, dim);
+                    TG_TUN_PUSH(c, cr, c->y + height, u1,  wv,  dim);
+                    TG_TUN_PUSH(a, ar, a->y + height, 0.0, wv,  dim);
+                }
+            }
+            if (pass == 0) n_wall = n; else n_roof = n - n_wall;
+        }
 
         /* [item 8d] Emissive lamp strip near the top of each wall, inset a little
          * toward the bore so it does not z-fight the lining. One quad per side per
@@ -7225,17 +7447,22 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
         if (lamps_on) {
             const double ins = 40.0;                 /* lateral inset from wall */
             const double ly0 = 0.70 * height, ly1 = 0.80 * height;
-            /* Left wall lamp */
-            TG_TUN_PUSH(a, al - ins, a->y + ly0, 0.0, 1.0, lampc);
-            TG_TUN_PUSH(c, cl - ins, c->y + ly0, u1,  1.0, lampc);
-            TG_TUN_PUSH(c, cl - ins, c->y + ly1, u1,  0.0, lampc);
-            TG_TUN_PUSH(a, al - ins, a->y + ly1, 0.0, 0.0, lampc);
-            /* Right wall lamp */
-            TG_TUN_PUSH(a, ar + ins, a->y + ly0, 0.0, 1.0, lampc);
-            TG_TUN_PUSH(c, cr + ins, c->y + ly0, u1,  1.0, lampc);
-            TG_TUN_PUSH(c, cr + ins, c->y + ly1, u1,  0.0, lampc);
-            TG_TUN_PUSH(a, ar + ins, a->y + ly1, 0.0, 0.0, lampc);
-            n_lamp = n - n_lin;
+            for (k = 0; k < nsg; k++) {
+                const TG_Node *a = sg[k].a, *c = sg[k].c;
+                const double al = sg[k].al, ar = sg[k].ar;
+                const double cl = sg[k].cl, cr = sg[k].cr, u1 = sg[k].u1;
+                /* Left wall lamp */
+                TG_TUN_PUSH(a, al - ins, a->y + ly0, 0.0, 1.0, lampc);
+                TG_TUN_PUSH(c, cl - ins, c->y + ly0, u1,  1.0, lampc);
+                TG_TUN_PUSH(c, cl - ins, c->y + ly1, u1,  0.0, lampc);
+                TG_TUN_PUSH(a, al - ins, a->y + ly1, 0.0, 0.0, lampc);
+                /* Right wall lamp */
+                TG_TUN_PUSH(a, ar + ins, a->y + ly0, 0.0, 1.0, lampc);
+                TG_TUN_PUSH(c, cr + ins, c->y + ly0, u1,  1.0, lampc);
+                TG_TUN_PUSH(c, cr + ins, c->y + ly1, u1,  0.0, lampc);
+                TG_TUN_PUSH(a, ar + ins, a->y + ly1, 0.0, 0.0, lampc);
+            }
+            n_lamp = n - n_wall - n_roof;
         }
     }
 
@@ -7271,7 +7498,6 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
              * entrance the interior is ahead (+tangent) so we step back, at the
              * exit it is behind so we step forward. */
             const double outsign = tg_span_in_tunnel(si + 1) ? -1.0 : 1.0;
-            const double proud   = 1600.0;
             TG_Node fn = *nd;
             fn.x = nd->x + nd->tx * proud * outsign;
             fn.z = nd->z + nd->tz * proud * outsign;
@@ -7319,12 +7545,16 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
             TG_TUN_PUSH(nd, ro, y1, pw,  0.17, 0xFFFFFFFFu);
             TG_TUN_PUSH(nd, lo, y1, 0.0, 0.17, 0xFFFFFFFFu);
         }
-        n_portal = n - n_lin - n_lamp;
+        n_portal = n - n_wall - n_roof - n_lamp;
     }
     #undef TG_TUN_PUSH
 
     if (n <= 0) return 1;
-    if (n_lin    > 0) { seg_page[nseg] = lining;    seg_nq[nseg] = n_lin / 4;    nseg++; }
+    if (n_wall   > 0) { seg_page[nseg] = lining;    seg_nq[nseg] = n_wall / 4;   nseg++; }
+    /* [R9 item 5e] the roof on its own page. With the knob off it falls back to
+     * the lining page, which is byte-identical to merging the two runs. */
+    if (n_roof   > 0) { seg_page[nseg] = ceil_on ? ceil_pg : lining;
+                        seg_nq[nseg] = n_roof / 4;   nseg++; }
     if (n_lamp   > 0) { seg_page[nseg] = lamp_pg;   seg_nq[nseg] = n_lamp / 4;   nseg++; }
     if (n_portal > 0) { seg_page[nseg] = portal_pg; seg_nq[nseg] = n_portal / 4; nseg++; }
     tg_acct(TG_ACCT_TUNNEL, si);
@@ -7397,6 +7627,162 @@ static int tg_emit_tunnel(const TG_NodeList *nl, int si, TG_Buf *blk,
             return 0;
         (*added)++;
         tg_acct(TG_ACCT_TUNNEL, si);
+    }
+    return 1;
+}
+
+/* ==========================================================================
+ * [R9 TUNNEL item 13]  CITY UNDERPASS -- a road passing OVER ours.
+ *
+ * "the tunnels in the city should represent underpasses below highways, build
+ *  it like that"
+ *
+ * This is a new ELEMENT, not a re-texture, which is the whole reason the round
+ * reserved this area the widest page block. What a bore and an underpass have
+ * in common is only that the road is briefly covered. Everything else differs,
+ * and the differences are the point:
+ *
+ *   bore                              underpass
+ *   ----------------------------      ------------------------------------
+ *   20 spans of enclosure             ONE crossing, ~2 spans of cover
+ *   cut into a hillside               carried on abutments in flat ground
+ *   nothing above it but rock         a HIGHWAY, with its own deck and rails
+ *   portal facade at each end         open ends; you see daylight through
+ *
+ * The pieces, in emit order:
+ *   ABUTMENTS   retaining walls either side of our carriageway, carrying the
+ *               deck and holding back the ground the highway is built on
+ *   DECK        the crossing road itself, built as a quad mesh rather than a
+ *               box so its SOFFIT, its TOP and its FASCIAE can be three
+ *               different materials -- which is also item 5's "walls and
+ *               roofing should have different texture" satisfied by
+ *               construction rather than by a page swap
+ *   PARAPETS    a low wall along each deck edge, so from below the thing
+ *               overhead reads as a road and not as a slab
+ *
+ * GUARD. TD5RE_R7_GUARD exists precisely to reject meshes that sit over the
+ * carriageway, and a deck crossing above our road is the exact silhouette it
+ * hunts. The caller marks this whole element TG_GK_DECK (an EXEMPT kind) for
+ * the same reason the bridge deck and the bore are marked -- authored to be
+ * there. Without that mark the guard eats the underpass and item 13 ships
+ * invisible.
+ * ====================================================================== */
+#define TD5_TG_UP_CLEAR    2600.0   /* clear height under the soffit  */
+#define TD5_TG_UP_THICK     420.0   /* deck structural depth          */
+#define TD5_TG_UP_HALFDEEP 1500.0   /* half the deck's width along OUR road */
+#define TD5_TG_UP_REACH   13000.0   /* how far the crossing runs each side */
+#define TD5_TG_UP_PARAPET   620.0   /* parapet height above the deck   */
+
+/* Takes moff/nmesh directly rather than reporting a count the caller divides
+ * up. The caller's "n equal-sized boxes" recovery is only valid when every mesh
+ * IS the same size, and this element deliberately mixes boxes with a quad mesh,
+ * so each offset is recorded as it is written. */
+static int tg_emit_underpass(const TG_NodeList *nl, int si, TG_Buf *blk,
+                             size_t *moff, int *nmesh, int maxmesh)
+{
+    const TG_Node *n = &nl->v[si];
+    const double lx = n->tz, lz = -n->tx;
+    const double tile = 3000.0;
+    const double dp = TD5_TG_UP_HALFDEEP;
+    const double y_soffit = n->y + TD5_TG_UP_CLEAR;
+    const double y_top    = y_soffit + TD5_TG_UP_THICK;
+    const unsigned int lit  = 0xFFFFFFFFu;
+    const unsigned int dark = 0xFF6A6E76u;    /* under a deck it is shaded */
+    double half, shift, ax, az, wall_off;
+    double px[64], py[64], pz[64], uu[64], vv[64];
+    unsigned int col[64];
+    int seg_page[3], seg_nq[3], nseg = 0, nv = 0;
+    int s;
+
+    /* Same union rule the bore uses: where a fork's branch corridor runs
+     * alongside, the crossing has to clear BOTH carriageways or an abutment
+     * lands in the branch. Reusing it means the two elements cannot disagree
+     * about how wide the road is here. */
+    tg_tunnel_bore(nl, si, &half, &shift);
+    ax = n->x + lx * shift;
+    az = n->z + lz * shift;
+    wall_off = half + 380.0;
+
+    /* --- ABUTMENTS: one retaining wall each side, carrying the deck. Longer
+     * along our road than the deck is wide, so the wall reads as holding back
+     * an embankment rather than as two posts. --- */
+    for (s = 0; s < 2; s++) {
+        const double sgn = s ? 1.0 : -1.0;
+        if (*nmesh + 1 > maxmesh) return 1;      /* budget, not an error */
+        moff[(*nmesh)++] = blk->len;
+        if (!tg_emit_box_mesh(blk, ax + lx * wall_off * sgn,
+                              n->y + TD5_TG_UP_CLEAR * 0.5,
+                              az + lz * wall_off * sgn,
+                              380.0, TD5_TG_UP_CLEAR * 0.5, dp + 1900.0,
+                              n->tx, n->tz, TD5_TG_PAGE_R9_UP_ABUT, 2400.0,
+                              0xFFE0DCD4u))
+            return 0;
+        tg_acct(TG_ACCT_R9_UNDERPASS, si);
+    }
+
+    /* --- DECK: soffit + top + two fasciae in ONE mesh, three pages.
+     * Laterals run from -REACH to +REACH across our road; `dp` is the half
+     * depth along it. --- */
+    #define TG_UP_PUSH(T, D, YY, U, V, C) do {                       \
+        px[nv] = n->x + lx * (T) + n->tx * (D);                      \
+        py[nv] = (YY);                                               \
+        pz[nv] = n->z + lz * (T) + n->tz * (D);                      \
+        uu[nv] = (U); vv[nv] = (V); col[nv] = (C); nv++;             \
+    } while (0)
+    {
+        const double L = shift + TD5_TG_UP_REACH;
+        const double R = shift - TD5_TG_UP_REACH;
+        const double ul = L / tile, ur = R / tile;
+        const double vd = (2.0 * dp) / tile;
+        /* SOFFIT -- the face the driver actually sees, looking up from the
+         * road. Wound so it faces DOWN; scenery draws CULL_NONE anyway, which
+         * is what lets one quad serve as the visible underside. */
+        TG_UP_PUSH(L, -dp, y_soffit, ul, 0.0, dark);
+        TG_UP_PUSH(R, -dp, y_soffit, ur, 0.0, dark);
+        TG_UP_PUSH(R,  dp, y_soffit, ur, vd,  dark);
+        TG_UP_PUSH(L,  dp, y_soffit, ul, vd,  dark);
+        seg_page[nseg] = TD5_TG_PAGE_R9_UP_SOFFIT; seg_nq[nseg] = 1; nseg++;
+        /* TOP -- the highway carriageway. V runs across the deck's own width so
+         * the page's lane marking runs ALONG the crossing road, not across it. */
+        TG_UP_PUSH(L, -dp, y_top, ul, 0.0, lit);
+        TG_UP_PUSH(R, -dp, y_top, ur, 0.0, lit);
+        TG_UP_PUSH(R,  dp, y_top, ur, 1.0, lit);
+        TG_UP_PUSH(L,  dp, y_top, ul, 1.0, lit);
+        seg_page[nseg] = TD5_TG_PAGE_R9_UP_DECK; seg_nq[nseg] = 1; nseg++;
+        /* FASCIAE -- the deck edge beam, near side and far side. This is the
+         * band you read as "a road goes over here" from the approach. */
+        for (s = 0; s < 2; s++) {
+            const double d = s ? dp : -dp;
+            TG_UP_PUSH(L, d, y_top,    ul, 0.0, lit);
+            TG_UP_PUSH(R, d, y_top,    ur, 0.0, lit);
+            TG_UP_PUSH(R, d, y_soffit, ur, 1.0, lit);
+            TG_UP_PUSH(L, d, y_soffit, ul, 1.0, lit);
+        }
+        seg_page[nseg] = TD5_TG_PAGE_R9_UP_PARAPET; seg_nq[nseg] = 2; nseg++;
+    }
+    #undef TG_UP_PUSH
+    if (*nmesh + 1 > maxmesh) return 1;
+    moff[(*nmesh)++] = blk->len;
+    if (!tg_write_quad_mesh_col(blk, px, py, pz, uu, vv, col, nv,
+                                seg_page, seg_nq, nseg))
+        return 0;
+    tg_acct(TG_ACCT_R9_UNDERPASS, si);
+
+    /* --- PARAPETS: a low wall along each deck edge. Boxes, because a parapet
+     * is seen from the side far more often than from above. --- */
+    for (s = 0; s < 2; s++) {
+        const double d = s ? (dp - 130.0) : -(dp - 130.0);
+        if (*nmesh + 1 > maxmesh) return 1;
+        moff[(*nmesh)++] = blk->len;
+        if (!tg_emit_box_mesh(blk,
+                              n->x + lx * shift + n->tx * d,
+                              y_top + TD5_TG_UP_PARAPET * 0.5,
+                              n->z + lz * shift + n->tz * d,
+                              TD5_TG_UP_REACH, TD5_TG_UP_PARAPET * 0.5, 130.0,
+                              n->tx, n->tz, TD5_TG_PAGE_R9_UP_PARAPET, 2000.0,
+                              0xFFFFFFFFu))
+            return 0;
+        tg_acct(TG_ACCT_R9_UNDERPASS, si);
     }
     return 1;
 }
@@ -12224,6 +12610,36 @@ static int tg_emit_fb_tunnel(const TG_FBHook *h)
     const unsigned int shade = 0xFF98A098u;   /* the cut face at the mouth */
     double bore_half, bore_shift, side_x, cx, cz, vis, crown_h, flank_hx;
     int ed, s;
+    /* ==================================================================
+     * [R9 TUNNEL item 5a]  THE OBJECT THREE ROUNDS MISSED.
+     *
+     * "the entrance of the tunnel still have wrong textures on top and on its
+     *  sides" -- fourth round on this sentence.
+     *
+     * R6 built a portal page, R7 built a projecting concrete portal facade, R8
+     * replaced the banded page with a flat one and verified the SELECTION at all
+     * twelve mouths. Every one of those was true and none of them touched the
+     * thing being complained about, because "on top" and "on its sides" are NOT
+     * the portal facade. They are the CROWN slab and the two BUTTRESSES emitted
+     * right here, twenty spans away in the source and on a completely different
+     * page: TD5_TG_PAGE_HILL, the distant-hillside terrain page. The band above
+     * the lintel and the wings either side have been mottled green-grey TERRAIN
+     * this whole time. The portal read wrong because the hill was wearing the
+     * portal's silhouette, and no portal art could ever have fixed that.
+     *
+     * At the mouth (ed <= 1) the crown and the buttresses are not hillside, they
+     * are the CUT FACE and the REVETMENT of the portal, so give them portal
+     * masonry. Deeper in (ed > 1) the crown genuinely is the hill going over the
+     * top and keeps TD5_TG_PAGE_HILL -- the SHOULDERS keep it at every depth for
+     * the same reason: they are the hillside, and they are the pieces the
+     * complaint does NOT name. TD5RE_R9_PORTAL_SURROUND=0 puts the whole lot
+     * back on the terrain page for the A/B. */
+    const int surr_on = td5_env_flag_on("TD5RE_R9_PORTAL_SURROUND");
+    const int mouth_pg = surr_on ? TD5_TG_PAGE_R9_PORTAL_SURR : TD5_TG_PAGE_HILL;
+    /* Masonry reads as masonry, not as a tinted hillside: the HILL page is
+     * green-biased and the rock/shade vertex colours were chosen to sit on it. */
+    const unsigned int mrock  = surr_on ? 0xFFD6D2CAu : rock;
+    const unsigned int mshade = surr_on ? 0xFFB4B0A8u : shade;
 
     /* Default ON (a fix); TD5RE_AUTOTRACK_TUNNEL_MOUNTAIN=0 to disable. */
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_TUNNEL_MOUNTAIN")) return 1;
@@ -12246,11 +12662,16 @@ static int tg_emit_fb_tunnel(const TG_FBHook *h)
     flank_hx = 900.0 + 2200.0 * vis;
 
     /* CROWN: mass stacked directly on the roof slab, overhanging it a little so
-     * no sliver of sky shows between hill and tunnel. */
+     * no sliver of sky shows between hill and tunnel.
+     * [R9 item 5a] AT THE MOUTH this is the band directly above the portal
+     * lintel -- "wrong textures on top" -- so it is portal masonry there and
+     * hillside only once it is behind the facade. */
     h->moff[(*h->nmesh)++] = h->blk->len;
     if (!tg_emit_box_mesh(h->blk, cx, roof_top + crown_h * 0.5, cz,
                           side_x + 900.0, crown_h * 0.5, 780.0,
-                          n->tx, n->tz, TD5_TG_PAGE_HILL, 3000.0, rock))
+                          n->tx, n->tz,
+                          (ed <= 1) ? mouth_pg : TD5_TG_PAGE_HILL, 3000.0,
+                          (ed <= 1) ? mrock : rock))
         return 0;
 
     /* SHOULDERS: one each side, outboard of the roof overhang so they never
@@ -12272,8 +12693,17 @@ static int tg_emit_fb_tunnel(const TG_FBHook *h)
     /* BUTTRESSES: only on the portal span itself. Deeper along the road than a
      * span slab (1400 vs 780) so the mouth sits in a recess rather than flush
      * with the hillside, which is what makes it read as a bore rather than a
-     * hole painted on a wall. */
+     * hole painted on a wall.
+     *
+     * [R9 item 5a] These are the "sides" of the complaint -- the wings either
+     * side of the opening -- and they were terrain. They are now revetment.
+     * [R9 item 5b] Also deepened 1400 -> 1400 + the portal's proud offset, so
+     * the buttress reaches the frame plane instead of stopping 1600 short of it.
+     * A buttress that ends behind the facade is exactly the "thin slab with no
+     * reveal" reading; one that runs out to the facade gives the mouth a jamb
+     * with visible thickness on both sides of the reveal. */
     if (ed <= 1) {
+        const double bdepth = surr_on ? 2200.0 : 1400.0;
         for (s = 0; s < 2; s++) {
             const double sgn = s ? 1.0 : -1.0;
             const double off = side_x + 800.0;
@@ -12281,9 +12711,9 @@ static int tg_emit_fb_tunnel(const TG_FBHook *h)
             h->moff[(*h->nmesh)++] = h->blk->len;
             if (!tg_emit_box_mesh(h->blk, cx + lx * off * sgn, n->y + 900.0,
                                   cz + lz * off * sgn,
-                                  800.0, 2400.0, 1400.0,
-                                  n->tx, n->tz, TD5_TG_PAGE_HILL, 2400.0,
-                                  shade))
+                                  800.0, 2400.0, bdepth,
+                                  n->tx, n->tz, mouth_pg, 2400.0,
+                                  mshade))
                 return 0;
         }
     }
@@ -13921,6 +14351,24 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
                 size_t b0 = meshes.len, b1;
                 int nb = 0;
+                /* [R9 item 13] CITY UNDERPASS. Emitted in the NON-tunnel arm on
+                 * purpose: an underpass does not suppress the town, the town is
+                 * what the highway is built through, so the buildings, flora and
+                 * terrain hooks all still run for this span and should.
+                 *
+                 * MUST be guard-marked EXEMPT. A deck over the carriageway is
+                 * the precise silhouette TD5RE_R7_GUARD was built to reject;
+                 * left unmarked the guard eats it and item 13 ships invisible.
+                 * TG_GK_DECK is the existing exempt kind for "an authored road
+                 * surface above this one", which is exactly what this is. */
+                if (si == tg_underpass_span(si)) {
+                    size_t up0 = meshes.len;
+                    if (!tg_emit_underpass(nl, si, &meshes, moff, &nmesh,
+                                           TG_MAX_MESHES_PER_ENTRY)) {
+                        ok = 0; break;
+                    }
+                    tg_guard_mark(up0, meshes.len, TG_GK_DECK, si);
+                }
                 /* Building: 0 or 1 mesh -- record its offset explicitly. */
                 if (!tg_building_for_span(nl, si, &meshes)) { ok = 0; break; }
                 if (meshes.len > b0) moff[nmesh++] = b0;
@@ -15881,6 +16329,329 @@ static void tg_emit_texture_page_r8_tunnel_portal(TG_Buf *out)
     }
 }
 
+/* ==========================================================================
+ * [R9 TUNNEL] pages. Seven, all dumped and eyeballed via TD5RE_R8_TEXDUMP=1
+ * (log/tgpage_NNN.ppm) rather than trusted from the id written into the mesh --
+ * that is the R8 lesson, and it is what finally moved this item.
+ * ====================================================================== */
+
+/* [item 5c] PORTAL FACE. The fourth page for this surface, so it has to differ
+ * from the previous three by DESIGN and not by tone.
+ *
+ * R7 was banded concrete: rejected as "lighter gray stripes". R8 answered that
+ * by removing every periodic feature, giving a flat even pale-grey pour -- and
+ * the report came back "the gray-ish texture looks wrong here". R8's page is
+ * not a bad concrete page; a flat even pale grey IS what "grey-ish" means, so a
+ * fifth attempt at cleaner grey concrete would be the same answer again.
+ *
+ * So change the material, not the shade. This is BOARD-FORMED concrete: poured
+ * against timber shuttering, which leaves vertical board marks and a joint
+ * every board width, and it is what real portal headwalls of this era look
+ * like. The structure is VERTICAL, which keeps the R8 rule intact -- the thing
+ * that produced the stripes was a horizontal feature repeating up a tall face,
+ * and a vertical feature on a face mapped V 0..1 cannot repeat at all. Warmed
+ * off neutral grey so it separates from the road, the guardrails and the
+ * hillside, none of which it should be confusable with. */
+static void tg_emit_texture_page_r9_portal_face(TG_Buf *out)
+{
+    unsigned int rng = 0x9B10A7C3u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* Warm buff concrete, r > g > b, and a WIDER ramp than R8's 96..171: the
+     * board relief needs contrast to read as relief, and unlike R8's banding
+     * there is no horizontal feature here for contrast to turn into a stripe. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v = 78 + i * 7;
+        int b = v - 16, g = v - 4, r = v + 10;
+        if (b < 0) b = 0;
+        if (g < 0) g = 0;
+        if (r > 255) r = 255;
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;
+        const int board = x / 8;             /* 8 boards across the page */
+        const int inb   = x % 8;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        /* Each board takes its own tone from a hash of the board index, the way
+         * real shuttering does -- no two boards weather alike. */
+        idx = 8 + (int)((((unsigned)board * 2654435761u) >> 29) & 3u) - 1;
+        if (inb == 0)      idx -= 4;         /* shadowed shutter joint      */
+        else if (inb == 1) idx += 2;         /* lit lip beside the joint    */
+        /* Vertical grain WITHIN a board: slowly varying down the board, so the
+         * face has length without gaining any horizontal feature. */
+        idx += (int)((((unsigned)(board * 64 + y / 5) * 2246822519u) >> 30) & 1u);
+        idx += (int)((rng >> 23) & 1u);      /* per-texel grain */
+        if (idx < 0)  idx = 0;
+        if (idx > 15) idx = 15;
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
+/* [item 5a] PORTAL SURROUND -- the crown band above the lintel and the two
+ * buttress wings. THE page this item was always about; see the long note in
+ * tg_emit_fb_tunnel. Coursed rubble-stone revetment: what a real cutting is
+ * faced with either side of a portal, and unmistakably not the mottled green
+ * hillside page that has been there for four rounds. Deliberately COARSER and
+ * darker than the board-formed face above, so the mouth reads as a concrete
+ * portal set into a stone revetment rather than as one continuous slab. */
+static void tg_emit_texture_page_r9_portal_surround(TG_Buf *out)
+{
+    unsigned int rng = 0x5EA10C42u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* Cool grey stone with a faint brown cast. 0..2 are the mortar shadow. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int base = (i < 3) ? (48 + i * 9) : (96 + (i - 3) * 11);
+        if (base > 255) base = 255;
+        tg_put_u8(out, (unsigned)(base > 12 ? base - 12 : 0));  /* b */
+        tg_put_u8(out, (unsigned)(base >  6 ? base -  6 : 0));  /* g */
+        tg_put_u8(out, (unsigned)base);                         /* r */
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;
+        /* Rubble courses: rows of unequal blocks, each course offset, block
+         * widths varying with a hash so no two courses align. */
+        const int course = y / 8;
+        const unsigned int ch = (unsigned)course * 2654435761u;
+        const int cw   = 9 + (int)((ch >> 28) & 3u);        /* 9..12 wide */
+        const int ofs  = (int)((ch >> 21) & 15u);
+        const int inx  = (x + ofs) % cw;
+        const int iny  = y % 8;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if (iny == 0 || inx == 0) {
+            idx = (int)((rng >> 17) % 3u);                  /* mortar joint */
+        } else {
+            const unsigned int bh =
+                (unsigned)(course * 31 + (x + ofs) / cw) * 2246822519u;
+            idx = 6 + (int)((bh >> 29) & 7u);               /* per-block tone */
+            idx += (int)((rng >> 19) % 3u) - 1;             /* stone grain    */
+            /* Top of each block catches the light -- gives the coursing depth
+             * without a page-wide horizontal line, since the block edges are
+             * already staggered by ofs. */
+            if (iny == 1) idx += 2;
+        }
+        if (idx < 0)  idx = 0;
+        if (idx > 15) idx = 15;
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
+/* [item 5e] BORE CEILING. "walls and roofing should have different texture."
+ * A tunnel roof is not a tunnel wall: it carries transverse precast segments
+ * with a joint between each, and it is darker because nothing lights it. This
+ * page's ribs run across V, and the roof quad maps V across the bore WIDTH, so
+ * the ribs cross the road the way real segment joints do. */
+static void tg_emit_texture_page_r9_bore_ceiling(TG_Buf *out)
+{
+    unsigned int rng = 0x33C0FFEEu;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* Dark, faintly blue -- the enclosure vertex colour is already blue-grey
+     * and the ceiling should sit UNDER the walls in value, not beside them. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v = 40 + i * 6;
+        int b = v + 8, g = v + 2, r = v;
+        if (b > 255) b = 255;
+        tg_put_u8(out, (unsigned)b);
+        tg_put_u8(out, (unsigned)g);
+        tg_put_u8(out, (unsigned)r);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;
+        const int rib = y % 16;              /* four segment joints per page */
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if (rib == 0)      idx = 1;          /* the joint itself: near black  */
+        else if (rib == 1) idx = 9;          /* lit edge of the next segment  */
+        else               idx = 5 + (int)((rng >> 21) % 3u);
+        /* Soot streaking along the bore, hashed per column so it does not tile. */
+        if (((((unsigned)x * 2654435761u) >> 28) & 7u) == 0u) idx -= 2;
+        if (idx < 0)  idx = 0;
+        if (idx > 15) idx = 15;
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
+/* [item 13] UNDERPASS ABUTMENT -- the retaining wall carrying the crossing.
+ * Board-marked like the portal face, but grey rather than buff and with a
+ * coarser board, so a city underpass and a mountain portal share a family
+ * without reading as the same object. */
+static void tg_emit_texture_page_r9_up_abutment(TG_Buf *out)
+{
+    unsigned int rng = 0x71B4C0DEu;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v = 84 + i * 8;
+        if (v > 255) v = 255;
+        tg_put_u8(out, (unsigned)v);
+        tg_put_u8(out, (unsigned)v);
+        tg_put_u8(out, (unsigned)(v > 4 ? v - 4 : 0));
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;
+        const int inb = x % 16;              /* wide boards */
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        idx = 8 + (int)((((unsigned)(x / 16) * 2654435761u) >> 30) & 3u) - 1;
+        if (inb == 0) idx -= 5;                          /* shutter joint */
+        idx += (int)((((unsigned)(y / 7) * 2246822519u) >> 30) & 1u);
+        /* Splash staining up from the road: the bottom rows of a wall beside a
+         * carriageway are always dirtier than the top. */
+        if (y > TD5_TG_TEX_DIM - 10) idx -= 2;
+        idx += (int)((rng >> 23) & 1u);
+        if (idx < 0)  idx = 0;
+        if (idx > 15) idx = 15;
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
+/* [item 13] UNDERPASS DECK SOFFIT -- the underside of the crossing, and the
+ * face a driver going under it actually looks at. Longitudinal precast BEAMS
+ * with a shadow gap between them, which is exactly how a short-span road
+ * bridge is built and immediately distinguishes it from the bore ceiling's
+ * transverse segments. Dark: it is permanently in its own shadow. */
+static void tg_emit_texture_page_r9_up_soffit(TG_Buf *out)
+{
+    unsigned int rng = 0x2D19F0A7u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v = 34 + i * 7;
+        if (v > 255) v = 255;
+        tg_put_u8(out, (unsigned)v);
+        tg_put_u8(out, (unsigned)v);
+        tg_put_u8(out, (unsigned)v);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;
+        const int beam = x % 12;             /* beams run along U */
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        if (beam == 0)      idx = 0;         /* shadow gap between beams  */
+        else if (beam == 1) idx = 10;        /* lit arris of the next one */
+        else                idx = 5 + (int)((rng >> 20) % 3u);
+        idx += (int)((((unsigned)(y / 9) * 2654435761u) >> 30) & 1u);
+        if (idx < 0)  idx = 0;
+        if (idx > 15) idx = 15;
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
+/* [item 13] UNDERPASS DECK TOP -- the highway carriageway overhead. Asphalt
+ * with a lane line, so from below and from the approach the thing crossing over
+ * is legible as A ROAD. That legibility is the whole request: "underpasses
+ * BELOW HIGHWAYS". */
+static void tg_emit_texture_page_r9_up_deck(TG_Buf *out)
+{
+    unsigned int rng = 0x48A2C39Bu;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* 0..11 asphalt, 12..15 paint. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v = (i < 12) ? (38 + i * 5) : (196 + (i - 12) * 18);
+        if (v > 255) v = 255;
+        tg_put_u8(out, (unsigned)v);
+        tg_put_u8(out, (unsigned)v);
+        tg_put_u8(out, (unsigned)v);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        idx = 4 + (int)((rng >> 18) % 5u);                  /* asphalt grain */
+        /* Centre lane line, dashed along U (which runs along the crossing). */
+        if (y >= TD5_TG_TEX_DIM / 2 - 1 && y <= TD5_TG_TEX_DIM / 2 &&
+            (x % 20) < 12)
+            idx = 13;
+        /* Edge lines, solid. */
+        if (y < 2 || y > TD5_TG_TEX_DIM - 3) idx = 12;
+        if (idx < 0)  idx = 0;
+        if (idx > 15) idx = 15;
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
+/* [item 13] UNDERPASS PARAPET / DECK FASCIA. Clean precast panel with a
+ * recessed drip groove near the bottom -- the detail that makes a fascia read
+ * as a fascia. Light, because a parapet is the top edge against the sky. */
+static void tg_emit_texture_page_r9_up_parapet(TG_Buf *out)
+{
+    unsigned int rng = 0x6C0FFA31u;
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v = 108 + i * 8;
+        if (v > 255) v = 255;
+        tg_put_u8(out, (unsigned)(v > 3 ? v - 3 : 0));
+        tg_put_u8(out, (unsigned)v);
+        tg_put_u8(out, (unsigned)v);
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        const int y = i / TD5_TG_TEX_DIM;
+        int idx;
+        rng = rng * 1103515245u + 12345u;
+        idx = 10 + (int)((rng >> 19) % 3u) - 1;
+        /* Panel joint every 32 texels, vertical only. */
+        if ((x % 32) == 0) idx -= 5;
+        /* Drip groove: one dark row low on the face. This IS a horizontal
+         * feature, and it is safe where the R7 coping was not, because a
+         * parapet face is mapped once over a 620-unit-tall object -- it can
+         * never repeat up a 4100-unit jamb the way the R7 band did. */
+        if (y == TD5_TG_TEX_DIM - 12) idx -= 6;
+        if (idx < 0)  idx = 0;
+        if (idx > 15) idx = 15;
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 /* [R6 item 17] MASONRY pier face -- warm sandstone ashlar in staggered courses
  * (mortar lines every few rows, vertical joints offset course to course), so a
  * stone-style crossing reads as a masonry viaduct. Opaque. */
@@ -16494,6 +17265,15 @@ static int tg_emit_textures(TG_Buf *out)
     /* [R8 item 4] unbanded cast-concrete portal headwall (replaces the R7 page
      * whose coping band repeated up the jambs as "lighter gray stripes"). */
     tg_emit_texture_page_r8_tunnel_portal(&pages[TD5_TG_PAGE_R8_BRIDGE + 1]);
+    /* [R9 TUNNEL items 5,13] portal face/surround, bore ceiling, and the four
+     * pages of the new city UNDERPASS element. */
+    tg_emit_texture_page_r9_portal_face(&pages[TD5_TG_PAGE_R9_PORTAL_FACE]);
+    tg_emit_texture_page_r9_portal_surround(&pages[TD5_TG_PAGE_R9_PORTAL_SURR]);
+    tg_emit_texture_page_r9_bore_ceiling(&pages[TD5_TG_PAGE_R9_BORE_CEIL]);
+    tg_emit_texture_page_r9_up_abutment(&pages[TD5_TG_PAGE_R9_UP_ABUT]);
+    tg_emit_texture_page_r9_up_soffit(&pages[TD5_TG_PAGE_R9_UP_SOFFIT]);
+    tg_emit_texture_page_r9_up_deck(&pages[TD5_TG_PAGE_R9_UP_DECK]);
+    tg_emit_texture_page_r9_up_parapet(&pages[TD5_TG_PAGE_R9_UP_PARAPET]);
     /* [R4 CROSS item 9] cross-street asphalt with a longitudinal centre line. */
     tg_emit_texture_page_r4_cross(&pages[TD5_TG_PAGE_R4_CROSS + 0]);
     /* [R5 STRUCT item 1] solid concrete leg-face page for the gantry uprights. */
