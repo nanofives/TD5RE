@@ -310,7 +310,42 @@ static int tg_road_page(int si);
 #define TD5_TG_PAGE_R5_FLORA  (TD5_TG_PAGE_R5_BASE + 40)
 #define TD5_TG_R5_FLORA_N     12
 
-#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R5_BASE + 54)
+/* ====================== ROUND-6 PAGE BLOCKS ==========================
+ * Same rule as R3/R4/R5, measured off its OWN base. Use only your own block.
+ *
+ * Owners (see docs/AUTOTRACK_FEEDBACK_R6.md):
+ *   CROSS  items 1,2,15,19   sidewalk stops at intersections, no grass crossings
+ *   CITY   items 3,4,6,11,16 skyline scale, backdrop on road, occluder at 188
+ *   BRANCH items 5,9,10      floor UV swim, see-through gap, span-570 lift
+ *   TUNNEL item 8            entrance/lining art, bore intrusion, wall lights
+ *   BRIDGE items 12,13,14,17 pillars to floor, alpha rails, water, variety
+ *   FLORA  items 7,18        billboard vs treeline, oversized trees on road
+ * ==================================================================== */
+#define TD5_TG_PAGE_R6_BASE   (TD5_TG_PAGE_R5_BASE + 54)
+
+#define TD5_TG_PAGE_R6_CROSS  (TD5_TG_PAGE_R6_BASE + 0)
+#define TD5_TG_R6_CROSS_N     8
+
+#define TD5_TG_PAGE_R6_CITY   (TD5_TG_PAGE_R6_BASE + 10)
+#define TD5_TG_R6_CITY_N      8
+
+#define TD5_TG_PAGE_R6_BRANCH (TD5_TG_PAGE_R6_BASE + 20)
+#define TD5_TG_R6_BRANCH_N    8
+
+/* TUNNEL block is wide: item 8 asks for correct entrance art, a better lining
+ * AND emissive wall lights, so several lining/lamp variants are expected. */
+#define TD5_TG_PAGE_R6_TUNNEL (TD5_TG_PAGE_R6_BASE + 30)
+#define TD5_TG_R6_TUNNEL_N    12
+
+/* BRIDGE block is wide: item 17 asks for pillar VARIETY sourced from the
+ * shipped tracks, so this area is expected to add several new pier pages. */
+#define TD5_TG_PAGE_R6_BRIDGE (TD5_TG_PAGE_R6_BASE + 44)
+#define TD5_TG_R6_BRIDGE_N    12
+
+#define TD5_TG_PAGE_R6_FLORA  (TD5_TG_PAGE_R6_BASE + 58)
+#define TD5_TG_R6_FLORA_N     8
+
+#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R6_BASE + 68)
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
@@ -484,6 +519,19 @@ typedef enum {
     TG_ACCT_BRANCH_VERGE,   /* STRUCT item 10: flat verge band on a branch's outer edge */
 
     TG_ACCT_R5_FLORA,       /* FLORA  (items 16,18)      rename in place */
+    /* [R6] PRE-RESERVED, one per area, own line, blank-line spaced.
+     * RENAME YOUR OWN SLOT IN PLACE. Never append here. */
+    TG_ACCT_R6_CROSS,       /* CROSS  (items 1,2,15,19)   rename in place */
+
+    TG_ACCT_R6_CITY,        /* CITY   (items 3,4,6,11,16) rename in place */
+
+    TG_ACCT_R6_BRANCH,      /* BRANCH (items 5,9,10)      rename in place */
+
+    TG_ACCT_R6_TUNNEL,      /* TUNNEL (item 8)            rename in place */
+
+    TG_ACCT_R6_BRIDGE,      /* BRIDGE (items 12,13,14,17) rename in place */
+
+    TG_ACCT_R6_FLORA,       /* FLORA  (items 7,18)        rename in place */
     TG_ACCT_KIND_COUNT
 } TG_AcctKind;
 
@@ -515,7 +563,20 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
 
     "branch-verge",         /* STRUCT item 10 */
 
-    "r5-flora"              /* FLORA  */
+    "r5-flora",             /* FLORA  */
+    /* [R6] one reserved name per area, in enum order, blank-line spaced.
+     * Rename to match your renamed enum constant; keep every comma. */
+    "r6-cross",             /* CROSS  */
+
+    "r6-city",              /* CITY   */
+
+    "r6-branch",            /* BRANCH */
+
+    "r6-tunnel",            /* TUNNEL */
+
+    "r6-bridge",            /* BRIDGE */
+
+    "r6-flora"              /* FLORA  */
 };
 
 static long s_acct_count[TG_ACCT_KIND_COUNT];
