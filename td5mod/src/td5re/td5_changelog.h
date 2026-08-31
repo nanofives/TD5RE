@@ -37,6 +37,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  zigzag staircase along the wall and ceiling --" },
     { CL_ITEM,    "  the bore now sweeps as a smooth curve instead" },
     { CL_ITEM,    "  of a chain of straight segments" },
+    { CL_ITEM,    "FIXED: where a tunnel narrows towards its exit the" },
+    { CL_ITEM,    "  walls now flare smoothly instead of creasing at" },
+    { CL_ITEM,    "  every span" },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 30 (distant texture quality)" },

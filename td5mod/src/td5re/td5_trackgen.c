@@ -7052,6 +7052,49 @@ static void tg_tunnel_hermite(const TG_Node *a, const TG_Node *c, double m,
     else            { out->tx = a->tx;    out->tz = a->tz;    }
 }
 
+/* [TUNNEL BORE SMOOTHING 2026-08-31] Catmull-Rom the bore profile across
+ * NEIGHBOURING spans instead of interpolating each pair linearly.
+ *
+ * Subdividing the centreline fixed faceting on a constant-width bore, but not
+ * where the bore TAPERS. Measured at seed 99991 spans 493-496 (the reported
+ * location): half goes 4500 -> 4125 -> 3750 -> 3375 -> 3000 in uniform -375
+ * steps as the road narrows 9000 -> 6000 into the portal. Interpolating half
+ * linearly between si and si+1 makes the width profile piecewise-linear, so the
+ * wall has a CORNER at every node -- a C1 break that no amount of subdivision
+ * removes, because subdividing a straight ramp still leaves the kink at its
+ * ends. Catmull-Rom through (si-1, si, si+1, si+2) is C1, so the taper becomes a
+ * smooth flare instead of a chain of creases.
+ *
+ * Endpoints are clamped (p0=p1 / p3=p2) at a run's first/last span so the bore
+ * cannot be bent by geometry outside the tunnel. t=0 and t=1 still reproduce
+ * the exact si / si+1 samples, so spans stay welded and a CONSTANT-width bore is
+ * unchanged (all four control values equal -> the spline is flat). */
+static void tg_tunnel_bore_smooth(const TG_NodeList *nl, int si, double t,
+                                  double *half, double *shift)
+{
+    double h[4], s[4];
+    const int i0 = tg_span_in_tunnel(si - 1) ? si - 1 : si;
+    const int i3 = tg_span_in_tunnel(si + 2) ? si + 2 : si + 1;
+    const double t2 = t * t, t3 = t2 * t;
+    int i;
+    const int idx[4] = { i0, si, si + 1, i3 };
+
+    for (i = 0; i < 4; i++) tg_tunnel_bore(nl, idx[i], &h[i], &s[i]);
+
+    if (!td5_env_flag_on("TD5RE_TUNNEL_BORE_SMOOTH")) {
+        *half  = h[1] + (h[2] - h[1]) * t;      /* previous linear behaviour */
+        *shift = s[1] + (s[2] - s[1]) * t;
+        return;
+    }
+
+    #define TG_CR(p) (0.5 * ((2.0*(p)[1]) + (-(p)[0] + (p)[2]) * t +            \
+                    (2.0*(p)[0] - 5.0*(p)[1] + 4.0*(p)[2] - (p)[3]) * t2 +      \
+                    (-(p)[0] + 3.0*(p)[1] - 3.0*(p)[2] + (p)[3]) * t3))
+    *half  = TG_CR(h);
+    *shift = TG_CR(s);
+    #undef TG_CR
+}
+
 static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
                                 int *added)
 {
@@ -7158,8 +7201,9 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
         for (k = 0; k <= nsub; k++) {
             const double t = (double)k / (double)nsub;
             tg_tunnel_hermite(a0, c0, seglen, t, &sub[k]);
-            subh[k] = ha + (hc - ha) * t;
-            subs[k] = sa + (sc - sa) * t;
+            /* C1 across span boundaries -- a linear ramp here left a crease at
+             * every node wherever the bore tapered (spans 493-496). */
+            tg_tunnel_bore_smooth(nl, si, t, &subh[k], &subs[k]);
         }
         /* U accumulates real arc length so the lining tiles continuously across
          * the sub-pieces instead of restarting at each one. Keeps the original
@@ -7193,6 +7237,29 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
             TG_TUN_PUSH(c, cl, c->y + height, u1, 0.0, dim);
             TG_TUN_PUSH(c, cr, c->y + height, u1, wv,  dim);
             TG_TUN_PUSH(a, ar, a->y + height, u0, wv,  dim);
+
+#ifndef TD5RE_RELEASE
+            /* [TUNNEL VTX DIAG 2026-08-31] TD5RE_TUNNEL_VTX_DIAG=1 dumps the
+             * roof quad's NEAR and FAR left/right corners in world space for
+             * every sub-piece. Purpose: check numerically whether consecutive
+             * pieces actually share an edge. Piece (si, last).FAR must equal
+             * piece (si+1, 0).NEAR exactly; any nonzero delta is a real seam and
+             * would explain steps that survived subdivision, a flat bore, and
+             * every emitter kill-switch. Reading this off screenshots produced
+             * several wrong calls, so read the numbers instead. */
+            if (getenv("TD5RE_TUNNEL_VTX_DIAG")) {
+                const double nlx = a->x + a->tz * al, nlz = a->z - a->tx * al;
+                const double nrx = a->x + a->tz * ar, nrz = a->z - a->tx * ar;
+                const double flx = c->x + c->tz * cl, flz = c->z - c->tx * cl;
+                const double frx = c->x + c->tz * cr, frz = c->z - c->tx * cr;
+                TD5_LOG_I(LOG_TAG,
+                    "tunvtx si=%d k=%d/%d NL=%.2f,%.2f,%.2f NR=%.2f,%.2f,%.2f "
+                    "FL=%.2f,%.2f,%.2f FR=%.2f,%.2f,%.2f",
+                    si, k, nsub,
+                    nlx, a->y + height, nlz,  nrx, a->y + height, nrz,
+                    flx, c->y + height, flz,  frx, c->y + height, frz);
+            }
+#endif
         }
         n_lin = n;
 
