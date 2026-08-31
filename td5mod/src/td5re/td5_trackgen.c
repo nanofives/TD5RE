@@ -7128,6 +7128,28 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
 
         nsub = tg_tunnel_subdiv_count(a0, c0);
 
+#ifndef TD5RE_RELEASE
+        /* [TUNNEL BORE DIAG 2026-08-30] TD5RE_TUNNEL_BORE_DIAG=1 dumps the bore
+         * profile per span. Subdivision is chosen from the TANGENT TURN only,
+         * but the wall's lateral position comes from tg_tunnel_bore, whose half
+         * width / shift track road width and fork geometry, NOT heading. If the
+         * bore steps sharply while the road runs straight, nsub stays 1 and the
+         * wall jumps -- and because half/shift are interpolated LINEARLY between
+         * the two endpoint samples, the width profile is piecewise-linear and
+         * kinks at every node regardless of how finely we subdivide. This prints
+         * the numbers needed to confirm or kill that. */
+        if (getenv("TD5RE_TUNNEL_BORE_DIAG")) {
+            double dot = a0->tx * c0->tx + a0->tz * c0->tz;
+            if (dot >  1.0) dot =  1.0;
+            if (dot < -1.0) dot = -1.0;
+            TD5_LOG_I(LOG_TAG,
+                "tunnel bore: si=%d w=%.0f half=%.1f->%.1f (d=%+.1f) "
+                "shift=%.1f->%.1f (d=%+.1f) turn=%.2fdeg nsub=%d seglen=%.0f",
+                si, a0->width, ha, hc, hc - ha, sa, sc, sc - sa,
+                acos(dot) * 180.0 / 3.14159265358979323846, nsub, seglen);
+        }
+#endif
+
         /* Sample the curve. t=0 and t=1 reproduce a0/c0 EXACTLY (Hermite is
          * interpolating), so a straight bore (nsub==1) emits the same vertices
          * as before and consecutive spans stay welded at the shared node. The
