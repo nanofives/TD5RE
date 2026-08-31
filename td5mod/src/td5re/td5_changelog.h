@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 31 (auto-track props off the road, round 10)" },
+    { CL_ITEM,    "FIXED: a phone box and spectators stood IN THE" },
+    { CL_ITEM,    "  ROAD at a side-street crossing. Furniture is" },
+    { CL_ITEM,    "  set back from the main kerb, but at a crossing" },
+    { CL_ITEM,    "  mouth that setback lands on the side street's" },
+    { CL_ITEM,    "  own tarmac. Placement now refuses a piece that" },
+    { CL_ITEM,    "  would stand on side-street asphalt, and the" },
+    { CL_ITEM,    "  on-road guard measures furniture against the" },
+    { CL_ITEM,    "  side street too, so a stray piece is caught." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 30 (auto-track over-water guard, round 10)" },
     { CL_ITEM,    "FIXED: TRACK GENERATION DIED SILENTLY on some" },
     { CL_ITEM,    "  seeds -- no error, no message, the process just" },
