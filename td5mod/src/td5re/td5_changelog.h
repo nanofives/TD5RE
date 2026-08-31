@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 31 (auto-track wide-avenue sidewalk, r10)" },
+    { CL_ITEM,    "FIXED: on a wide 4-lane avenue the sidewalk was a" },
+    { CL_ITEM,    "  thin 900-wide strip -- ~30% of the half-road --" },
+    { CL_ITEM,    "  and from a low chase cam it read as no pavement" },
+    { CL_ITEM,    "  at all. Pavement width now SCALES with the road:" },
+    { CL_ITEM,    "  a wide avenue carries a wide slab, a normal" },
+    { CL_ITEM,    "  2-lane still sits on the 900 floor. Buildings" },
+    { CL_ITEM,    "  move back to stay on the slab's back edge." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 31 (auto-track crossing sidewalk, round 10)" },
     { CL_ITEM,    "FIXED: at a side-street crossing the buildings sat" },
     { CL_ITEM,    "  HARD AGAINST THE ROAD with no visible sidewalk." },

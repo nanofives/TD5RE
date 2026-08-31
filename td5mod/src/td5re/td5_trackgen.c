@@ -6588,6 +6588,40 @@ static double tg_city_sidewalk_w(const TG_Biome *b)
                                                      : (double)b->sidewalk;
 }
 
+/* [R10 WIDEWALK] Road-width-scaled pavement width. tg_city_sidewalk_w is the
+ * per-BIOME floor/base and stays the boolean gate ("is there a raised pavement
+ * on this biome"); this is the WIDTH the two geometry sites lay -- the main-road
+ * slab (tg_city_emit_sidewalk) and the facade setback (tg_side_geom) -- so the
+ * facade FRONT keeps landing on the slab BACK edge.
+ *
+ * The complaint: on a wide 4-lane avenue (half-road 3000 raw) the 900-raw floor
+ * slab is ~30% of the half-road, foreshortens under a chase cam and reads as "no
+ * sidewalk". Scaling the width with the half-road makes a wide avenue carry a
+ * wide pavement while a normal 2-lane still lands on the 900 floor. Buildings
+ * move further back as a consequence (accepted).
+ *
+ * Returns 0.0 wherever the biome has no pavement (base <= 0) so the "is there
+ * pavement here" answer never changes -- only the width where there already is
+ * one. tg_road_half_width takes the WIDER of the span's two ends, so the slab
+ * and both facade ends (set0/set1) derive one width for the span and nothing
+ * skews. Gated by TD5RE_R10_WIDEWALK (default ON); with it off this returns the
+ * base width and the geometry is byte-identical to before. */
+#define TD5_TG_WIDEWALK_FACTOR 0.40    /* pavement width = half-road * this ...  */
+#define TD5_TG_WIDEWALK_MAX   2000.0   /* ... clamped to a sane ceiling (raw)    */
+
+static double tg_city_sidewalk_w_at(const TG_NodeList *nl, int si,
+                                    const TG_Biome *b)
+{
+    const double base = tg_city_sidewalk_w(b);
+    double w;
+    if (base <= 0.0) return 0.0;                    /* no pavement on this biome */
+    if (!td5_env_flag_on("TD5RE_R10_WIDEWALK")) return base;
+    w = tg_road_half_width(nl, si) * TD5_TG_WIDEWALK_FACTOR;
+    if (w < base) w = base;                         /* never below the floor     */
+    if (w > TD5_TG_WIDEWALK_MAX) w = TD5_TG_WIDEWALK_MAX;
+    return w;
+}
+
 /* Width of the FLAT verge band outside the city: "elevated sidewalks are fine,
  * but when outside the city the sidewalks can be just another texture". Tree
  * biomes get a painted-looking margin drawn on the ground rather than a slab
@@ -6821,7 +6855,8 @@ static void tg_side_geom(const TG_NodeList *nl, int si, int left,
      * step wall, which all derive from set0/set1) off any carriageway. */
     {
         const double gap = tg_carriageway_clear_gap(nl, si, side,
-                               tg_city_sidewalk_w(b), TD5_TG_CARRIAGEWAY_MARGIN);
+                               tg_city_sidewalk_w_at(nl, si, b),
+                               TD5_TG_CARRIAGEWAY_MARGIN);
         set0 = n0->width * 0.5 + gap;
         set1 = n1->width * 0.5 + gap;
     }
@@ -14073,8 +14108,12 @@ static int tg_emit_fb_city(const TG_FBHook *h)
 {
     const int paved = tg_city_span_paved(h);
     /* [R7 item 7] sw from the SAME hardened city edge tg_city_span_paved uses, so
-     * the slab, its kerb height and the railing all agree on where the city is. */
-    const double sw = tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(h->si)]);
+     * the slab, its kerb height and the railing all agree on where the city is.
+     * [R10 WIDEWALK] width scaled to the half-road so a wide avenue reads as a
+     * pavement; the facade setback (tg_side_geom) reads the SAME formula and the
+     * same span, so the facade front stays on the slab back edge. */
+    const double sw = tg_city_sidewalk_w_at(h->nl, h->si,
+                          &k_biomes[tg_scenery_biome_index(h->si)]);
 
     tg_r8_city_sidewalk_diag(h);       /* [R8 CITY item 2] measure, don't guess */
 
