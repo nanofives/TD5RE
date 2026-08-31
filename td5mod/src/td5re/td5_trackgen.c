@@ -4254,8 +4254,66 @@ static int tg_emit_road_quad_taper(const TG_NodeList *nl, int si, double u_scale
          * wscale), so the lane paint keeps a constant world-space pitch along a
          * tapering/widening corridor instead of stretching and jumping. */
         {
-        const double ur0 = u_scale * w0v;
-        const double ur1 = u_scale * w1v;
+        /* [ROAD UV WIDTH FIX 2026-08-31] U must track the PHYSICAL width, which
+         * is (interpolated node width) * wscale -- see tg_road_edge. The old
+         * `u_scale * wscale` only saw wscale, and since u_scale is lanes/wscale
+         * the two cancel: ur was ALWAYS `lanes`, whatever the road did. So a
+         * dual-lane taper, which widens via node->width and leaves wscale at
+         * 1.0, stretched the texture further on every span while U stayed put.
+         *
+         * MEASURED (LAB seed 777, PCT_DUAL=25, the reported spans): width runs
+         * 6000 -> 10500 across spans 105-111 (+750/span, +75% total) while
+         * ur stayed 4.0000 and du stayed 0.00000. The lane pitch therefore
+         * changed span to span and the markings mismatched at every boundary.
+         *
+         * Scaling by nw/nw_ref makes the tile size constant in world space.
+         * nw_ref is the corridor's base width, lanes * LANE_WIDTH, recovered as
+         * (u_scale * wscale) * LANE_WIDTH since that product IS the lane count.
+         * Constant-width road: nw == nw_ref, ratio 1, byte-identical to before.
+         * Fork carriageways (wscale 0.5, node width unchanged): ratio 1, also
+         * unchanged. Only a genuine width taper moves. TD5RE_ROAD_UV_WIDTH=0
+         * restores the old behaviour for A/B. */
+        double ur0 = u_scale * w0v;
+        double ur1 = u_scale * w1v;
+        if (td5_env_flag_on("TD5RE_ROAD_UV_WIDTH")) {
+            const TG_Node *rna = &nl->v[si];
+            const TG_Node *rnb = &nl->v[si + 1];
+            const double nw0    = rna->width + (rnb->width - rna->width) * f0;
+            const double nw1    = rna->width + (rnb->width - rna->width) * f1;
+            const double nw_ref = (double)TD5_TG_LANE_WIDTH * (u_scale * wscale_near);
+            if (nw_ref > 1e-6) { ur0 *= nw0 / nw_ref; ur1 *= nw1 / nw_ref; }
+        }
+#ifndef TD5RE_RELEASE
+        /* [ROAD UV DIAG 2026-08-31] TD5RE_ROAD_UV_DIAG=1 dumps the per-subdiv U
+         * span of each road quad. Reproduced under control on LAB v5 (seed 777,
+         * PCT_DUAL=25) at spans 105-110; three earlier lab tracks with
+         * PCT_DUAL=0 were clean, which points at the WIDTH TAPER rather than
+         * curvature or grade.
+         *
+         * The quad carries U = (0, ur0, ur1, 0). When ur0 != ur1 the UV
+         * rectangle is a TRAPEZOID, and a 2-triangle split cannot represent that
+         * mapping: the UV gradient is discontinuous across the shared diagonal,
+         * which reads as a zigzag along the road. du = ur1-ur0 is the size of
+         * that mismatch, so a nonzero du on exactly the reported spans confirms
+         * the mechanism, and a zero du there kills it. */
+        if (getenv("TD5RE_ROAD_UV_DIAG") && k == 0) {
+            /* du proved ZERO on the reported spans, so the trapezoid idea is
+             * dead. Dump the span's other properties instead and let the diff
+             * against clean neighbours say what is actually different. */
+            const TG_Node *na = &nl->v[si];
+            const TG_Node *nb = &nl->v[(si + 1 < nl->count) ? si + 1 : si];
+            double dot = na->tx * nb->tx + na->tz * nb->tz;
+            double dy  = nb->y - na->y;
+            if (dot >  1.0) dot =  1.0;
+            if (dot < -1.0) dot = -1.0;
+            TD5_LOG_I(LOG_TAG,
+                "roadspan si=%d page=%d w=%.0f turn=%.2fdeg dy=%+.0f y=%.0f "
+                "ur=%.4f V=%.1f..%.1f",
+                si, tg_road_page(si), na->width,
+                acos(dot) * 180.0 / 3.14159265358979323846, dy, na->y,
+                ur0, (double)si, (double)si + 1.0);
+        }
+#endif
         /* Quad loop: near-left, near-right, far-right, far-left. */
         px[n]=nlx; py[n]=nly; pz[n]=nlz; uu[n]=0.0; vv[n]=si+f0; n++;
         px[n]=nrx; py[n]=nry; pz[n]=nrz; uu[n]=ur0; vv[n]=si+f0; n++;

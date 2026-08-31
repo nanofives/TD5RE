@@ -32,6 +32,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 31 (road markings on widening roads)" },
+    { CL_ITEM,    "FIXED: where an auto-track road widens or narrows," },
+    { CL_ITEM,    "  the road texture no longer stretches and the lane" },
+    { CL_ITEM,    "  markings no longer break up into jagged zigzags" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 30 (auto-track tunnels)" },
     { CL_ITEM,    "FIXED: curved auto-track tunnels no longer show a" },
     { CL_ITEM,    "  zigzag staircase along the wall and ceiling --" },
