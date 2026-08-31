@@ -3117,6 +3117,12 @@ static void tg_validate_geometry_safety(const TG_NodeList *nl, int nspans)
  * counted PER KIND, so "did this change start eating road/deck/gantry/tunnel"
  * is a number in the log, not a screenshot.
  */
+/* [R10 SPAN66] Outermost tarmac for the FURNITURE class -- carriageway plus any
+ * side-street asphalt. Owned by the crossstreet emitter (see the block comment
+ * there); forward-declared so the guard tests the SAME street that was laid. */
+static double tg_footway_reach(const TG_NodeList *nl, int si, double side);
+static int tg_r10_xstreet_guard(void);
+
 #define TD5_TG_GUARD_PEN       700.0    /* min intrusion past the road edge to reject */
 #define TD5_TG_GUARD_OVERHEAD 1800.0    /* a vertex this far above road Y is overhead */
 #define TD5_TG_GUARD_UNDER     800.0    /* a vertex this far below road Y is underground */
@@ -3147,8 +3153,15 @@ static const char *const k_guard_kind_name[TG_GK_COUNT] = {
     "deck", "water", "coast", "decal", "city", "block", "cross", "flora",
     "park-tree", "terrain", "building", "prop", "rail", "branch-side"
 };
+/* [R10 SPAN66] FURNITURE is SCENERY judged against a WIDER envelope: it obeys
+ * every scenery rule (coverage, penetration, the overhead and buried gates), but
+ * the tarmac it may not stand on includes a side street's asphalt as well as the
+ * carriageway. It is a separate class rather than a wider tg_carriageway_reach
+ * because a facade, a back row and a pavement arm legitimately BOUND a side
+ * street -- widening the shared authority would have rejected the buildings that
+ * make the street a street. */
 enum { TG_GKC_SCENERY = 0, TG_GKC_EXEMPT = 1, TG_GKC_DECAL = 2,
-       TG_GKC_UNDER = 3 };
+       TG_GKC_UNDER = 3, TG_GKC_FURNITURE = 4 };
 /* [R8] Is this exempt kind's licence SPAN-LOCAL? A bridge deck, a bore, a
  * gantry, a road quad and an end wall are all authored for ONE span and reach
  * barely past it, so their licence is scoped to a span run and cannot cover a
@@ -3200,7 +3213,11 @@ static const unsigned char k_guard_kind_class[TG_GK_COUNT] = {
      * same emitter putting grass ON the road is R7 item 19 and must still go. */
     TG_GKC_UNDER,    /* terrain     */
     TG_GKC_SCENERY,  /* building    */
-    TG_GKC_SCENERY,  /* prop        */
+    /* [R10 SPAN66] Furniture and people. Both PROP-marked emitters (the R9 INFRA
+     * street furniture and the pre-existing spectator/statue/animal layer) set
+     * their piece back from the MAIN road edge, which at a frontage gap is
+     * side-street tarmac. This class is what makes the guard measure that. */
+    TG_GKC_FURNITURE, /* prop       */
     TG_GKC_SCENERY,  /* rail        */
     TG_GKC_SCENERY   /* branch-side */
 };
@@ -3408,6 +3425,15 @@ typedef struct {
     int    si;          /* span it intrudes on */
 } TG_GuardHit;
 
+/* [R10 SPAN66] The tarmac policy class `cls` may not stand on. Everything except
+ * FURNITURE gets the carriageway authority verbatim, so this is bit-identical to
+ * the pre-R10 call for every other kind. */
+static double tg_guard_reach(const TG_NodeList *nl, int si, double side, int cls)
+{
+    if (cls == TG_GKC_FURNITURE) return tg_footway_reach(nl, si, side);
+    return tg_carriageway_reach(nl, si, side);
+}
+
 /* Is a quad with this intrusion, height band and policy class illegal? */
 static int tg_guard_quad_bad(int cls, double intr, double dy_lo, double dy_hi)
 {
@@ -3511,7 +3537,7 @@ static int tg_guard_mesh_scan(const TG_NodeList *nl, int ring,
                 if (vy < nl->v[s2].y - TD5_TG_GUARD_UNDER)    continue;
                 lat = (vx - nl->v[s2].x) * nl->v[s2].tz
                     - (vz - nl->v[s2].z) * nl->v[s2].tx;
-                r = tg_carriageway_reach(nl, s2, (lat >= 0.0) ? 1.0 : -1.0);
+                r = tg_guard_reach(nl, s2, (lat >= 0.0) ? 1.0 : -1.0, cls);
                 d = r - (lat >= 0.0 ? lat : -lat);
                 if (d > worst.intr) {
                     worst.intr = d; worst.si = s2;
@@ -3527,8 +3553,8 @@ static int tg_guard_mesh_scan(const TG_NodeList *nl, int ring,
         roady = nl->v[si].y;
         lateral = (ox - nl->v[si].x) * nl->v[si].tz
                 - (oz - nl->v[si].z) * nl->v[si].tx;
-        rp = tg_carriageway_reach(nl, si, 1.0);
-        rn = tg_carriageway_reach(nl, si, -1.0);
+        rp = tg_guard_reach(nl, si, 1.0, cls);
+        rn = tg_guard_reach(nl, si, -1.0, cls);
         cover = (lateral + half < rp ? lateral + half : rp)
               - (lateral - half > -rn ? lateral - half : -rn);
         pen = (lateral >= 0.0 ? rp : rn) - (lateral >= 0.0 ? lateral : -lateral);
@@ -3574,7 +3600,7 @@ static int tg_guard_mesh_scan(const TG_NodeList *nl, int ring,
             if (si < 0 || si >= ring) continue;
             lateral = (vx - nl->v[si].x) * nl->v[si].tz
                     - (vz - nl->v[si].z) * nl->v[si].tx;
-            r = tg_carriageway_reach(nl, si, (lateral >= 0.0) ? 1.0 : -1.0);
+            r = tg_guard_reach(nl, si, (lateral >= 0.0) ? 1.0 : -1.0, cls);
             if (!(r > 0.0)) continue;
             t[n] = lateral / r;
             dy[n] = vy - nl->v[si].y;
@@ -3888,6 +3914,10 @@ static int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
              * were unconditionally exempt. */
             if (!tg_guard_r8() && cls == TG_GKC_DECAL) cls = TG_GKC_SCENERY;
             if (!tg_guard_r8() && cls == TG_GKC_UNDER) cls = TG_GKC_EXEMPT;
+            /* [R10 SPAN66] A/B pin: with the knob off, furniture is judged by
+             * exactly the rule it was judged by before this round. */
+            if (!tg_r10_xstreet_guard() && cls == TG_GKC_FURNITURE)
+                cls = TG_GKC_SCENERY;
             exempt = (cls == TG_GKC_EXEMPT);
             /* [R8] SPAN-SCOPED EXEMPTION. An exempt mark licenses geometry that
              * crosses the carriageway AT THE SPAN IT WAS EMITTED FOR. Test the
@@ -7152,6 +7182,18 @@ static double tg_pavement_side_width(const TG_NodeList *nl, int si,
     return sw;
 }
 
+/* ===================== [R10 SPAN66] SIDE-STREET OCCUPANCY ==================
+ * Declared here, DEFINED beside tg_city_emit_crossstreet -- the emitter whose
+ * footprint it reports. See the block comment there for the measurement that
+ * made it necessary. `inner_d` is the NEAREST edge of a footprint, measured out
+ * from the MAIN ROAD EDGE, exactly the frame every placement helper in this file
+ * already uses for a setback. */
+static int tg_xstreet_occupies(const TG_NodeList *nl, int si, double side,
+                               double inner_d);
+static void tg_xstreet_audit(const TG_NodeList *nl, int si, double side,
+                             double inner_d, const char *what, int placed);
+static long s_r10_prop_skipped;     /* placements refused: on side-street tarmac */
+
 /* Emit one prop billboard (prop-page index pp) beside span si on `side`, `gap`
  * world units past the road edge, recording its mesh offset. */
 static int tg_prop_one(const TG_NodeList *nl, int si, int pp, double side,
@@ -7165,6 +7207,18 @@ static int tg_prop_one(const TG_NodeList *nl, int si, int pp, double side,
     size_t b0 = m->len;
 
     if (tg_side_blocked(si, side)) return 1;
+    /* [R10 SPAN66 item 1] A spectator's setback is measured from the MAIN road
+     * edge, so at a frontage gap the "pavement" it aims for is side-street
+     * TARMAC. The people in the user's span-66 frame are THESE billboards, not
+     * the R9 furniture -- same frame, same error, two emitters. */
+    if (tg_xstreet_occupies(nl, si, side, gap - (double)P->w * 0.5)) {
+        tg_xstreet_audit(nl, si, side, gap - (double)P->w * 0.5,
+                         pp == PP_LAMP ? "lamp-glow" : "prop-billboard", 0);
+        s_r10_prop_skipped++;
+        return 1;
+    }
+    tg_xstreet_audit(nl, si, side, gap - (double)P->w * 0.5,
+                     pp == PP_LAMP ? "lamp-glow" : "prop-billboard", 1);
     moff[*pn] = b0;
     if (!tg_emit_billboard_mesh(m, cx, n->y + (double)P->y_off, cz,
                                 (double)P->w * 0.5, (double)P->h,
@@ -12163,6 +12217,167 @@ static double tg_xstreet_reach_at(const TG_NodeList *nl, int si, double sg,
     return r;
 }
 
+/* ===================== [R10 SPAN66] SIDE-STREET OCCUPANCY ==================
+ * ROUND 10 item 1: "there's people and a phone booth in the middle of the
+ * street" at span 66, seed 99991, on a build whose on-road guard reported 70
+ * rejects and 0 remaining.
+ *
+ * MEASURED, not reasoned (TD5RE_R8_GUARD_DIAG=66 on the merged build):
+ *   entry@64 mesh 29 kind=prop mark_si=66 verts=20 intr=0    dy=[129,1116]  keep
+ *   entry@64 mesh 23 kind=prop mark_si=65 verts=4  intr=-1018 dy=[-0,699]   keep
+ * The 20-vertex prop is the phone box (2.40 m * TD5_TG_INFRA_M + the 129 kerb),
+ * the 4-vertex ones are the spectator billboards. intr = 0 / negative means the
+ * guard measured them as standing OUTSIDE the carriageway -- and by its own
+ * definition of carriageway they DO. So the guard was not blind to props, and it
+ * was not height-gated or licensed: it answered the question it was asked
+ * correctly, and the question was wrong.
+ *
+ * ROOT CAUSE. tg_carriageway_reach knows about exactly two kinds of drivable
+ * tarmac: the main road, and a fork's branch corridor. It does not know about
+ * the SIDE STREET that tg_city_emit_crossstreet lays across a frontage gap --
+ * asphalt running from the main kerb outward for thousands of units. Every
+ * placement helper in this file sets furniture back from the MAIN ROAD EDGE by a
+ * pavement-sized gap, so at a gap span the setback lands on that asphalt. Span
+ * 66 is a gap-interior span of the 65-68 frontage gap, which is why both the R9
+ * INFRA phone box and the PRE-EXISTING spectator layer put something in it.
+ *
+ * THE FIX IS ONE AUTHORITY WITH TWO CONSUMERS, so placement and enforcement
+ * cannot drift apart the way a placement-only fix did four rounds running:
+ *   - PLACEMENT: tg_prop_one and tg_infra_place refuse a footprint that overlaps
+ *     the street. There is no pavement on a side-street mouth to stand on, so
+ *     the honest answer is to place nothing, not to shove it further out.
+ *   - ENFORCEMENT: TG_GK_PROP gains its own policy class, TG_GKC_FURNITURE, and
+ *     the on-road guard measures that class against main road AND side street.
+ *     A future furniture emitter is caught for free, exactly as the R7 guard
+ *     catches a future scenery emitter.
+ *
+ * The gates below are the crossstreet emitter's OWN gates, read in the same
+ * order, so this reports the street that is actually laid rather than a second
+ * model of it. Default ON; TD5RE_R10_XSTREET_GUARD=0 pins the pre-R10 behaviour
+ * for a single-variable A/B. TD5RE_R10_PROP_AUDIT=1 names every furniture
+ * placement with its measured laterals. */
+#define TD5_TG_R10_XSTREET_MARGIN 300.0   /* clear air kept off side-street tarmac */
+#define TD5_TG_R10_AUDIT_MAX      4000
+
+static int s_r10_audit_n;
+
+/* PER (SPAN, SIDE) MEMO. The guard asks this question once per VERTEX per
+ * candidate span, and the answer's expensive half (tg_xstreet_reach_at) marches
+ * outward sampling a 48-span window at every step. Unmemoised, a run with the
+ * placement half disabled -- the A/B that proves the backstop works -- did not
+ * finish generating seed 777 in 900 s. The answer is a pure function of
+ * (si, side) for a given track, so the memo is exact, not an approximation.
+ * Reset with the rest of the per-build accounting. */
+#define TD5_TG_R10_XS_MAX 4096
+static signed char s_r10_xs_state[TD5_TG_R10_XS_MAX][2];  /* -1 ?, 0 no, 1 yes */
+static double      s_r10_xs_reach[TD5_TG_R10_XS_MAX][2];
+
+static void tg_r10_xs_memo_reset(void)
+{
+    memset(s_r10_xs_state, -1, sizeof(s_r10_xs_state));
+}
+
+static int tg_r10_xstreet_guard(void)
+{
+    return td5_env_flag_on("TD5RE_R10_XSTREET_GUARD");
+}
+
+/* Is a side-street carriageway laid at (si, side), and how far out does it run?
+ * Mirrors tg_emit_fb_city's gate on tg_city_emit_crossstreet, then that
+ * function's own per-side gates. */
+static int tg_xstreet_here(const TG_NodeList *nl, int si, double side,
+                           double *preach)
+{
+    const TG_Biome *b;
+    double sw;
+    int s, memo = (si >= 0 && si < TD5_TG_R10_XS_MAX);
+    const int mi = (side > 0.0) ? 1 : 0;
+
+    if (memo && s_r10_xs_state[si][mi] >= 0) {
+        if (preach) *preach = s_r10_xs_reach[si][mi];
+        return (int)s_r10_xs_state[si][mi];
+    }
+    /* SINGLE EXIT so every answer -- including every early "no" -- is memoised.
+     * `here` stays 0 until the last gate passes. */
+    {
+        int here = 0;
+        double reach = 0.0;
+        s = (side > 0.0) ? 1 : 0;
+        if (nl && si >= 0 && si + 1 < nl->count
+            && td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_STREETS")
+            && !tg_span_in_bridge_run(si)) {
+            b  = &k_biomes[tg_scenery_biome_index(si)];
+            sw = tg_city_sidewalk_w(b);
+            if (sw > 0.0                              /* a city frontage to break */
+                && !(td5_env_flag_on("TD5RE_AUTOTRACK_XBRIDGE_GATE")
+                     && tg_span_near_bridge(si, TD5_TG_XBRIDGE_CLEAR))
+                && !tg_facade_built(si, s)            /* frontage closed          */
+                && !tg_block_is_park(si, s)           /* a lawn, not a street     */
+                && !tg_side_corridor_here(nl, si, side)) {
+                here  = 1;
+                reach = tg_xstreet_reach_at(nl, si, side,
+                                            tg_block_arm_skew(si, s), b, sw);
+            }
+        }
+        if (memo) {
+            s_r10_xs_state[si][mi] = (signed char)here;
+            s_r10_xs_reach[si][mi] = reach;
+        }
+        if (preach) *preach = reach;
+        return here;
+    }
+}
+
+/* Outermost tarmac at (si, side) for geometry that must stand on a FOOTWAY:
+ * the carriageway authority, widened to include a side street's asphalt. Kept
+ * separate from tg_carriageway_reach on purpose -- a facade, a back row and a
+ * pavement arm legitimately BOUND a side street and must keep the narrow
+ * answer; only free-standing furniture and people may not stand in one. */
+static double tg_footway_reach(const TG_NodeList *nl, int si, double side)
+{
+    double r = tg_carriageway_reach(nl, si, side), xr = 0.0;
+    if (tg_r10_xstreet_guard() && tg_xstreet_here(nl, si, side, &xr)) {
+        const double rr = tg_road_half_width(nl, si) + xr
+                        + TD5_TG_R10_XSTREET_MARGIN;
+        if (rr > r) r = rr;
+    }
+    return r;
+}
+
+/* The PLACEMENT half alone. Separate from the master knob so the two halves can
+ * be A/B'd independently -- TD5RE_R10_PROP_PLACE=0 keeps the guard and lets the
+ * old placement stand, which is the run that proves the BACKSTOP would have
+ * caught the shipped defect on its own. */
+static int tg_xstreet_occupies(const TG_NodeList *nl, int si, double side,
+                               double inner_d)
+{
+    double reach = 0.0;
+    if (!tg_r10_xstreet_guard()) return 0;
+    if (!td5_env_flag_on("TD5RE_R10_PROP_PLACE")) return 0;
+    if (!tg_xstreet_here(nl, si, side, &reach)) return 0;
+    return inner_d < reach + TD5_TG_R10_XSTREET_MARGIN;
+}
+
+/* The instrument the diagnosis was made with: every furniture placement with the
+ * laterals it was judged on, so "is this piece on tarmac" is a number per piece
+ * rather than a frame of one of them. */
+static void tg_xstreet_audit(const TG_NodeList *nl, int si, double side,
+                             double inner_d, const char *what, int placed)
+{
+    double reach = 0.0;
+    int here;
+    if (!td5_env_flag_off("TD5RE_R10_PROP_AUDIT")) return;
+    if (s_r10_audit_n >= TD5_TG_R10_AUDIT_MAX) return;
+    s_r10_audit_n++;
+    here = tg_xstreet_here(nl, si, side, &reach);
+    TD5_LOG_I(LOG_TAG, "trackgen: [R10 AUDIT] span %4d %-5s %-15s inner=%.0f "
+              "main-reach=%.0f xstreet=%s reach=%.0f -> %s",
+              si, side > 0.0 ? "left" : "right", what, inner_d,
+              tg_carriageway_reach(nl, si, side) - tg_road_half_width(nl, si),
+              here ? "YES" : "no", here ? reach : 0.0,
+              placed ? "placed" : "SKIPPED");
+}
+
 static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
 {
     double px[8], py[8], pz[8], uu[8], vv[8];
@@ -14048,6 +14263,33 @@ static int tg_infra_place(const TG_FBHook *h, int kind, double side,
 
     if (tg_side_blocked(h->si, side)) return 1;
     if (*h->nmesh + 1 >= h->maxmesh)  return 1;   /* budget, not an error */
+
+    /* [R10 SPAN66] ENFORCEMENT EVIDENCE KNOB, dev only.
+     * TD5RE_R10_PROP_FORCE=<span> plants THAT span's piece on the MAIN
+     * CENTRELINE, so the guard's verdict on furniture is something the log can be
+     * made to SHOW rather than something this file asserts. It bypasses the
+     * placement fix on purpose: the half under test is the backstop. Scoped to
+     * one span because forcing every piece into the road makes the guard reject
+     * ~500 meshes and the build stops being a comparable A/B. */
+    if (h->si > 0 &&
+        td5_env_int("TD5RE_R10_PROP_FORCE", 0, 0, 100000) == h->si) {
+        TD5_LOG_W(LOG_TAG, "trackgen: [R10 SPAN66] FORCING %s onto the "
+                  "centreline at span %d (enforcement test)",
+                  k_infra_names[kind], h->si);
+        return tg_infra_box(h, P, n->x, base_y, n->z, ax, az, lx, lz);
+    }
+
+    /* [R10 SPAN66 item 1] Refuse the piece where the pavement it is aiming for
+     * is actually a side street's asphalt. There is no footway at a crossing
+     * mouth to move it onto, so nothing is placed rather than something being
+     * shoved to the far end of the street. */
+    if (tg_xstreet_occupies(nl, h->si, side, gap - P->w * 0.5)) {
+        tg_xstreet_audit(nl, h->si, side, gap - P->w * 0.5,
+                         k_infra_names[kind], 0);
+        s_r10_prop_skipped++;
+        return 1;
+    }
+    tg_xstreet_audit(nl, h->si, side, gap - P->w * 0.5, k_infra_names[kind], 1);
 
     /* Push the setback out past any branch carriageway bowing into this
      * lateral, exactly as the pavement and the trees do. The half-width of the
@@ -16440,6 +16682,10 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     s_r9_infra_props = 0;
     s_r9_infra_ponds = 0;
     s_r9_infra_reported = 0;
+    /* [R10 SPAN66] side-street occupancy counters, same lifetime. */
+    s_r10_prop_skipped = 0;
+    s_r10_audit_n = 0;
+    tg_r10_xs_memo_reset();
     /* Native-faithful fork: the road SPLITS into two half-width carriageways --
      * MAIN (left, main_half lanes, +width/4) and BRANCH (right, br_lanes, bowed)
      * over the appended corridor. Fork/rejoin spans stay full width. */
@@ -20195,6 +20441,15 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
               td5_env_flag_on("TD5RE_R9_INFRA_PROPS") ? "on" : "off",
               s_r9_infra_ponds,
               td5_env_flag_on("TD5RE_R9_INFRA_PONDS") ? "on" : "off");
+    /* [R10 SPAN66 item 1] The PLACEMENT half's number. The ENFORCEMENT half's
+     * numbers are the guard's own "rejects by kind: prop" and its residual line
+     * -- the residual now re-tests furniture against the widened envelope, so
+     * "0 remaining after the pass" is the class-level zero for this item. */
+    TD5_LOG_I(LOG_TAG,
+              "trackgen: [R10 SPAN66] furniture/people refused on side-street "
+              "tarmac=%ld (knob TD5RE_R10_XSTREET_GUARD=%s)",
+              s_r10_prop_skipped,
+              tg_r10_xstreet_guard() ? "on" : "off");
     tg_r8_bridge_diag(&nl);            /* [R8 BRIDGE] opt-in measurement dump */
     tg_r8_terrain_extent_report(&nl, nspans);  /* [R8 TERRAIN] opt-in, ditto */
     tg_r9_topo_report(&nl, nspans);            /* [R9 TOPO] class sweep, ditto */
