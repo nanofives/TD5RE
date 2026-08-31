@@ -3231,6 +3231,14 @@ static long   s_guard_rejects;          /* running total across the whole build 
 static long   s_guard_residual;         /* on-road meshes STILL present post-drop */
 static long   s_guard_rej_kind[TG_GK_COUNT];   /* [R8] breakdown by kind */
 static long   s_guard_ex_scope_hits;    /* [R8] exempt marks that fell out of scope */
+/* [R10] Two health counters for the compaction pass itself, reported per build.
+ * `unsorted` = mesh offsets an emitter recorded out of ascending order (the R9
+ * underpass/building bug: harmless-looking, and the reason a write cursor that
+ * assumed ascending order ran off the end of the heap block). `unsafe` = meshes
+ * the cursor bound refused to move. Both MUST be 0; they are logged so that a
+ * future emitter which reintroduces either is loud instead of silent. */
+static long   s_guard_unsorted;
+static long   s_guard_unsafe;
 
 /* Default ON -- this is the fix, not an opt-in. TD5RE_R7_GUARD=0 pins the old
  * unguarded output for an A/B, and TD5RE_R7_GUARD_REPORT=1 makes it report-only
@@ -3708,36 +3716,34 @@ static int tg_r9_wet_kind_ok(int kind)
  * emitter that forgets is caught for free. TD5RE_R9_BRIDGE_WATERGUARD=0 leaves
  * it report-only.
  *
- * [ORCHESTRATOR, R9 merge] TEMPORARILY DEFAULTED OFF -- this pass CRASHES seed
- * 777 during track generation in the merged tree. Bisected (merged master,
- * clean env, seed 777, --StartSpanOffset=1690):
+ * [R10] This knob was parked OFF at the R9 merge because turning it on killed
+ * seed 777 during generation -- silently, with race.log frozen mid-build and no
+ * [ERR] line. IT WAS NEVER THIS PASS'S BUG. Measured, not reasoned:
  *
- *   everything on                  -> DIES, race.log frozen at 16208 bytes,
- *                                     "end inventory" never reached, NO [ERR]
- *   TD5RE_R9_BRIDGE_WATERGUARD=0   -> generates, 35503 bytes, inventory reached
- *   COAST=0 / TIE=0 / FARSHORE=0   -> each still dies
- *   all R9 knobs off               -> generates
- *   TOPO/INFRA/TUNNEL/CITY/RAILFIX off, each alone -> each still dies
+ *   - the process died with exit code 0xC0000374 (STATUS_HEAP_CORRUPTION),
+ *     inside free() called from tg_emit_models;
+ *   - a red-zoned TG_Buf allocator caught the write as an UNDERFLOW of the next
+ *     heap block, raised during tg_guard_validate_entry;
+ *   - the compaction cursor there ran to w=34616 in a buffer whose content was
+ *     30264 bytes and whose allocation was 32768 -- 1848 bytes past the end.
  *
- * So this knob alone. Seed 99991 is fine (127 meshes dropped); 777 is where it
- * drops 207, i.e. the seed that exercises the pass hardest. The BRIDGE area's
- * own report was not wrong -- its branch worked in isolation; the failure only
- * exists in the merged tree.
+ * The cursor overran because moff[] was NOT in ascending byte order. R9's city
+ * underpass (item 13) appends its meshes and records their offsets, but the
+ * building offset `b0` next to it had been captured BEFORE that block and was
+ * pushed AFTER it, so on every underpass span moff[] stepped backwards. The
+ * compaction walked moff[] in recorded order with one forward write cursor, so
+ * a backwards offset let the cursor overtake the read position and keep going.
  *
- * LEAD for whoever fixes this, from the R7 guard this pass is modelled on:
- * tg_guard_validate_entry warns that "exempt ranges are ORIGINAL BYTE OFFSETS
- * and stop mapping once compaction moves the bytes". A reject-and-compact pass
- * leaves any pre-compaction offset (exempt ranges, moff[], tg_guard_mark kinds)
- * pointing at moved bytes, and 777 compacts further than 99991. That is the
- * shape of a silent death with no diagnostic.
- *
- * This is OFF only so the merged tree generates on both seeds. It re-opens R9
- * item 10 (background buildings over water), which this pass is the fix for --
- * so turning it back ON after a root-cause fix is REQUIRED, not optional.
- * TD5RE_R9_BRIDGE_WATERGUARD=1 re-enables it (and reproduces the crash). */
+ * That made it look like this knob's fault: the drift only starts once some
+ * mesh is dropped, and how far it runs scales with how many are dropped. Seed
+ * 777 drops 207 and crossed the end of the allocation; seed 99991 drops 127 and
+ * the same latent overrun stayed inside it (harmless, invisible). Guard off,
+ * the overrun was still there on 777 at three other entries -- just short of
+ * the allocation edge. Both the stale `b0` and the compaction's assumption are
+ * fixed; see tg_emit_models (b0) and tg_guard_validate_entry (`ord`). */
 static int tg_r9_waterguard_enabled(void)
 {
-    return td5_env_flag_off("TD5RE_R9_BRIDGE_WATERGUARD");
+    return td5_env_flag_on("TD5RE_R9_BRIDGE_WATERGUARD");
 }
 static int s_r9_wet_rejected;
 
@@ -3865,9 +3871,16 @@ static int tg_r9_water_audit_mesh(const TG_NodeList *nl, const unsigned char *b,
 
 /* Validate one entry's assembled meshes against the carriageway and drop the
  * ones standing in the road. Rewrites `meshes` and `moff`/`*pnmesh` in place
- * (compacting left, which is always safe: we only remove). Returns the number
- * rejected. Corridor-only entries (past the ring) carry only exempt branch road
- * and are skipped. */
+ * (compacting left). Returns the number rejected. Corridor-only entries (past
+ * the ring) carry only exempt branch road and are skipped.
+ *
+ * [R10] "COMPACTING LEFT IS ALWAYS SAFE: WE ONLY REMOVE" WAS NOT TRUE, and it
+ * cost a silent STATUS_HEAP_CORRUPTION kill of the whole generator. It holds
+ * only while moff[] is in ASCENDING byte order -- one forward write cursor over
+ * offsets that step backwards overtakes the read position and walks off the end
+ * of the allocation. An R9 emitter did record two offsets out of order (see the
+ * R10 note above tg_r9_waterguard_enabled), so the walk now runs over a sorted
+ * permutation and the cursor is bounded against the buffer regardless. */
 /* >= TG_MAX_MESHES_PER_ENTRY (4 spans * 96 = 384); a literal so it does not
  * depend on TD5_TG_SPANS_PER_ENTRY, which is defined further down. */
 #define TD5_TG_GUARD_KEPT_MAX 512
@@ -3882,19 +3895,45 @@ static int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
      * exempt ranges are original byte offsets and stop mapping once compaction
      * moves the bytes. */
     static unsigned char kept_exempt[TD5_TG_GUARD_KEPT_MAX];  /* policy class */
-    int win_lo, win_hi, i, nn = 0, rejected = 0;
+    /* [R10] Compaction order. The write cursor below only stays inside the
+     * allocation if the meshes are walked in ASCENDING byte order, so the walk
+     * uses a sorted permutation of moff[] rather than moff[]'s own order, and
+     * the surviving offsets are written back in the ORIGINAL order (draw order
+     * is part of the block's meaning; compaction order is not). When moff[] is
+     * already ascending -- which it is once an emitter records its offsets as
+     * it appends -- ord[j] == j and this is byte-for-byte the old walk. */
+    static int    ord[TD5_TG_GUARD_KEPT_MAX];      /* walk order (by offset)   */
+    static size_t newoff[TD5_TG_GUARD_KEPT_MAX];   /* per ORIGINAL index       */
+    static unsigned char gone[TD5_TG_GUARD_KEPT_MAX];
+    static unsigned char cls_of[TD5_TG_GUARD_KEPT_MAX];
+    int win_lo, win_hi, i, j, nn = 0, rejected = 0;
     size_t w = 0;
 
     if (!tg_guard_enabled() || nmesh <= 0 || ring < 3) return 0;
     if (s0 >= ring) return 0;
+    /* The per-entry mesh budget is well under this; refusing outright beats
+     * compacting a buffer we cannot bookkeep. */
+    if (nmesh > TD5_TG_GUARD_KEPT_MAX) return 0;
 
     win_lo = s0 - TD5_TG_GUARD_WINDOW; if (win_lo < 0) win_lo = 0;
     win_hi = s0 + ns - 1 + TD5_TG_GUARD_WINDOW;
     if (win_hi > ring - 1) win_hi = ring - 1;
     if (win_hi < win_lo) return 0;
 
-    for (i = 0; i < nmesh; i++) {
-        const size_t off = moff[i];
+    for (i = 0; i < nmesh; i++) { ord[i] = i; gone[i] = 0; newoff[i] = moff[i]; }
+    for (i = 1; i < nmesh; i++) {          /* insertion sort, near-sorted input */
+        const int key = ord[i];
+        int k = i - 1;
+        while (k >= 0 && moff[ord[k]] > moff[key]) { ord[k + 1] = ord[k]; k--; }
+        ord[k + 1] = key;
+        if (k + 1 != i) s_guard_unsorted++;
+    }
+
+    for (j = 0; j < nmesh; j++) {
+        const int oi = ord[j];
+        const size_t off = moff[oi];
+        /* The next mesh IN BYTE ORDER, which is what bounds this one. */
+        const size_t nxt = (j + 1 < nmesh) ? moff[ord[j + 1]] : meshes->len;
         size_t mlen = (off <= meshes->len) ? tg_guard_mesh_len(b, off, meshes->len) : 0;
         int keep = 1, exempt, kind = TG_GK_OTHER, cls = TG_GKC_SCENERY;
         int mark_si = -1;
@@ -3902,8 +3941,11 @@ static int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
         int si = -1;
 
         if (mlen == 0 || off + mlen > meshes->len) {
-            /* Unparseable / spans to end: keep verbatim, do not risk corruption. */
-            mlen = (i + 1 < nmesh ? moff[i + 1] : meshes->len) - off;
+            /* Unparseable / spans to end: keep verbatim, do not risk corruption.
+             * [R10] `nxt` is the next offset IN BYTE ORDER, so this subtraction
+             * can no longer underflow into a ~2^64 length the way it did when
+             * moff[] was walked in its recorded (possibly descending) order. */
+            mlen = (nxt > off) ? nxt - off : 0;
             exempt = 1;
         } else {
             kind = tg_guard_kind_of(off, &mark_si);
@@ -3999,7 +4041,7 @@ static int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
                           : (d <= 2 && h.intr > -1e299))
                     TD5_LOG_I(LOG_TAG, "guard-diag: entry@%d mesh %d kind=%s "
                               "cls=%d mark_si=%d verts=%u intr=%.0f si=%d "
-                              "dy=[%.0f,%.0f] %s", s0, i,
+                              "dy=[%.0f,%.0f] %s", s0, oi,
                               k_guard_kind_name[kind], cls, mark_si,
                               tg_rd_u32(b + off + 0x08), h.intr, h.si, h.dy_lo,
                               h.dy_hi, badv ? "REJECT" : "keep");
@@ -4010,15 +4052,35 @@ static int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
          * mode; otherwise (accepted, exempt, unparseable, or report-only) keep
          * the mesh, compacting it left over any gap left by earlier drops. */
         if (keep || tg_guard_report_only()) {
-            if (w != off) memmove(b + w, b + off, mlen);
-            /* Record the POLICY CLASS, not a bare exempt bit: the residual
-             * self-check has to judge each kept mesh by the same rule the drop
-             * pass did, and a decal legally covers the road. */
-            if (nn < TD5_TG_GUARD_KEPT_MAX)
-                kept_exempt[nn] = (unsigned char)(exempt ? TG_GKC_EXEMPT : cls);
-            moff[nn++] = w;
-            w += mlen;
+            /* [R10] LAST LINE OF DEFENCE. Ascending order already guarantees
+             * w <= off, so this can only fire if moff[] carried something the
+             * sort could not repair (overlapping or duplicate ranges). Skipping
+             * the mesh costs one piece of scenery; letting the cursor past the
+             * allocation smashes the next heap block's header and kills the
+             * process inside free() with no diagnostic at all. */
+            if (w + mlen > meshes->len) {
+                s_guard_unsafe++;
+                gone[oi] = 1;
+            } else {
+                if (w != off) memmove(b + w, b + off, mlen);
+                /* Record the POLICY CLASS, not a bare exempt bit: the residual
+                 * self-check has to judge each kept mesh by the same rule the
+                 * drop pass did, and a decal legally covers the road. */
+                cls_of[oi] = (unsigned char)(exempt ? TG_GKC_EXEMPT : cls);
+                newoff[oi] = w;
+                w += mlen;
+            }
+        } else {
+            gone[oi] = 1;
         }
+    }
+
+    /* Write the survivors back in the ORIGINAL recorded order (see the note on
+     * `ord` above): compaction order is a byte-layout detail, draw order is not. */
+    for (i = 0; i < nmesh; i++) {
+        if (gone[i]) continue;
+        kept_exempt[nn] = cls_of[i];
+        moff[nn++] = newoff[i];
     }
 
     meshes->len = w;
@@ -16717,6 +16779,8 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     s_guard_rejects = 0;   /* [R7 GUARD] per-build tally, reported below */
     s_guard_residual = 0;
     s_guard_ex_scope_hits = 0;
+    s_guard_unsorted = 0;  /* [R10] compaction health, reported below */
+    s_guard_unsafe = 0;
     memset(s_guard_rej_kind, 0, sizeof s_guard_rej_kind);
 
     /* [R8 CROSS item 9] Sharp-bend map, built ONCE per generation: the two
@@ -17037,7 +17101,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 tg_guard_mark(before, meshes.len, TG_GK_TUNNEL, si);
             } else {
                 const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
-                size_t b0 = meshes.len, b1;
+                size_t b0, b1;
                 int nb = 0;
                 /* [R9 item 13] CITY UNDERPASS. Emitted in the NON-tunnel arm on
                  * purpose: an underpass does not suppress the town, the town is
@@ -17057,7 +17121,19 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     }
                     tg_guard_mark(up0, meshes.len, TG_GK_DECK, si);
                 }
-                /* Building: 0 or 1 mesh -- record its offset explicitly. */
+                /* Building: 0 or 1 mesh -- record its offset explicitly.
+                 *
+                 * [R10] b0 IS TAKEN HERE, NOT AT THE TOP OF THE ARM. It used to
+                 * be captured before the underpass block above, which made it
+                 * stale on every underpass span: the underpass appends its own
+                 * meshes AND records their (ascending) offsets, so pushing the
+                 * older b0 afterwards left moff[] DESCENDING at that point --
+                 * and pointing at the underpass's first mesh rather than at the
+                 * building. moff[] must stay ascending: tg_guard_validate_entry
+                 * compacts the buffer with a single forward write cursor and a
+                 * backwards offset makes that cursor run off the end of the
+                 * allocation. See the R10 note on that function. */
+                b0 = meshes.len;
                 if (!tg_building_for_span(nl, si, &meshes)) { ok = 0; break; }
                 if (meshes.len > b0) moff[nmesh++] = b0;
                 tg_guard_mark(b0, meshes.len, TG_GK_BUILDING, si);
@@ -17236,6 +17312,19 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     TD5_LOG_I(LOG_TAG, "on-road guard: %ld exempt mesh(es) fell "
                               "outside their own span run and were validated as "
                               "scenery", s_guard_ex_scope_hits);
+                /* [R10] Compaction health. Both zero is the invariant; a
+                 * non-zero `unsorted` names an emitter that records its mesh
+                 * offsets out of order, which is what made the compaction
+                 * cursor overrun the mesh buffer and kill generation inside
+                 * free() with no error line. */
+                if (s_guard_unsorted || s_guard_unsafe)
+                    TD5_LOG_W(LOG_TAG, "on-road guard: compaction UNSORTED=%ld "
+                              "UNSAFE=%ld -- an emitter is recording mesh "
+                              "offsets out of ascending order", s_guard_unsorted,
+                              s_guard_unsafe);
+                else
+                    TD5_LOG_I(LOG_TAG, "on-road guard: compaction clean -- mesh "
+                              "offsets ascending, 0 unsafe moves");
             }
         }
     }
