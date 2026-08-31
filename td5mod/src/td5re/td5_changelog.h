@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 30 (auto-track tunnels)" },
+    { CL_ITEM,    "FIXED: curved auto-track tunnels no longer show a" },
+    { CL_ITEM,    "  zigzag staircase along the wall and ceiling --" },
+    { CL_ITEM,    "  the bore now sweeps as a smooth curve instead" },
+    { CL_ITEM,    "  of a chain of straight segments" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 30 (distant texture quality)" },
     { CL_ITEM,    "FIXED: road, wall and tunnel textures no longer" },
     { CL_ITEM,    "  warp and ripple in the distance -- straight lane" },

@@ -6987,12 +6987,92 @@ static int tg_r5_tunnel_sweep(void)
     return td5_env_flag_on("TD5RE_R5_TUNNEL_SWEEP");   /* default ON */
 }
 
+/* [TUNNEL SUBDIV 2026-08-30] Sub-segments per span, and the largest heading
+ * change any ONE sub-segment may span. The swept bore was emitted as a single
+ * flat piece per span (~1560 units deep): vertices are shared so there are no
+ * gaps, but on a curve each piece is a CHORD, so the surface kinks at every
+ * span boundary. Viewed down the bore at a grazing angle that C1 break reads as
+ * a staircase along the wall/roof junction -- confirmed with
+ * TD5RE_TUNNEL_SEGCOLOR=1: every staircase step landed exactly on a segment
+ * colour boundary, while the lining texture itself stayed smooth. */
+#define TD5_TG_TUNNEL_SUBDIV_MAX 8
+
+/* How many sub-segments [si, si+1] needs: enough that no single piece turns by
+ * more than TD5RE_TUNNEL_SUBDIV_DEG degrees. Straight bores return 1 and are
+ * emitted byte-identically to before, so only curves pay for this. */
+static int tg_tunnel_subdiv_count(const TG_Node *a, const TG_Node *c)
+{
+    double dot, ang, step_deg;
+    int n;
+
+    if (!td5_env_flag_on("TD5RE_TUNNEL_SUBDIV")) return 1;
+
+    dot = a->tx * c->tx + a->tz * c->tz;
+    if (dot >  1.0) dot =  1.0;
+    if (dot < -1.0) dot = -1.0;
+    ang = acos(dot);                                  /* radians turned */
+
+    /* 1 degree per piece. Measured at seed 99991 span 490: at 3 degrees the
+     * wall/roof junction still showed chunky steps, at 1 degree it sweeps as a
+     * smooth curve and only pixel-level edge aliasing remains. Straight bores
+     * are unaffected either way (they return 1). */
+    step_deg = (double)td5_env_int("TD5RE_TUNNEL_SUBDIV_DEG", 1, 1, 45);
+    n = (int)ceil(ang / (step_deg * 3.14159265358979323846 / 180.0));
+    if (n < 1) n = 1;
+    if (n > TD5_TG_TUNNEL_SUBDIV_MAX) n = TD5_TG_TUNNEL_SUBDIV_MAX;
+    return n;
+}
+
+/* Cubic Hermite between two nodes using their unit tangents, scaled by the
+ * chord length. Passes through both nodes with their exact tangents, so the
+ * bore stays welded to the road at every span boundary and only bows BETWEEN
+ * them -- the deviation a chord was missing. Y is interpolated linearly (the
+ * reported artifact is a horizontal curve, and a linear grade keeps the bore
+ * from lifting off a crest). */
+static void tg_tunnel_hermite(const TG_Node *a, const TG_Node *c, double m,
+                              double t, TG_Node *out)
+{
+    const double t2 = t * t, t3 = t2 * t;
+    const double h00 =  2.0*t3 - 3.0*t2 + 1.0, h10 = t3 - 2.0*t2 + t;
+    const double h01 = -2.0*t3 + 3.0*t2,       h11 = t3 - t2;
+    const double d00 =  6.0*t2 - 6.0*t,        d10 = 3.0*t2 - 4.0*t + 1.0;
+    const double d01 = -6.0*t2 + 6.0*t,        d11 = 3.0*t2 - 2.0*t;
+    double tx, tz, len;
+
+    out->x = h00*a->x + h10*m*a->tx + h01*c->x + h11*m*c->tx;
+    out->z = h00*a->z + h10*m*a->tz + h01*c->z + h11*m*c->tz;
+    out->y = a->y + (c->y - a->y) * t;
+    out->width = a->width + (c->width - a->width) * t;
+    out->lanes = a->lanes;
+
+    tx = d00*a->x + d10*m*a->tx + d01*c->x + d11*m*c->tx;
+    tz = d00*a->z + d10*m*a->tz + d01*c->z + d11*m*c->tz;
+    len = sqrt(tx*tx + tz*tz);
+    if (len > 1e-9) { out->tx = tx / len; out->tz = tz / len; }
+    else            { out->tx = a->tx;    out->tz = a->tz;    }
+}
+
 static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
                                 int *added)
 {
     const double wall_t = TD5_TG_TUNNEL_WALL_T;
     const double height = TD5_TG_TUNNEL_HEIGHT;
-    const unsigned int dim = 0xFF585868u;   /* shadowed interior */
+    /* [TUNNEL ZIGZAG DIAG 2026-08-30] TD5RE_TUNNEL_SEGCOLOR=1 tints consecutive
+     * [si, si+1] tunnel segments alternately (red / green / blue by si % 3) so a
+     * frame shows exactly where one swept segment ends and the next begins.
+     * The reported "zigzag/staircase for a few spans" is either (a) chord
+     * faceting -- the bore is a chain of straight segments, so its silhouette
+     * steps on a curve -- in which case every staircase step lands ON a segment
+     * boundary, or (b) something else entirely, in which case the steps ignore
+     * the colour boundaries. Attribution by measurement, after switching the
+     * mountain mass and the lamp strip off both failed to change the artifact.
+     * Diagnostic only; default OFF. */
+    const int segcolor = (getenv("TD5RE_TUNNEL_SEGCOLOR") &&
+                          getenv("TD5RE_TUNNEL_SEGCOLOR")[0] == '1');
+    const unsigned int dim = segcolor
+        ? (((si % 3) == 0) ? 0xFFFF4040u : ((si % 3) == 1) ? 0xFF40FF40u
+                                                           : 0xFF4040FFu)
+        : 0xFF585868u;                      /* shadowed interior */
     const unsigned int lampc = 0xFFFFE8B4u; /* warm-white lamp glow (ARGB) */
     const int lining  = tg_tunnel_lining_page(si);
     const int lamp_pg = TD5_TG_PAGE_R6_TUNNEL + 5;      /* [item 8d] */
@@ -7007,8 +7087,12 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
     const int lamps_on = td5_env_flag_on("TD5RE_AUTOTRACK_TUNNEL_LAMPS");
     const double tile = 3000.0;
     const TG_Node *nd = &nl->v[si];
-    double px[64], py[64], pz[64], uu[64], vv[64];
-    unsigned int col[64];
+    /* [TUNNEL SUBDIV 2026-08-30] Was 64, which fit exactly one span's worth of
+     * lining (12) + lamps (8) + the portal frame. A subdivided curve emits up
+     * to TD5_TG_TUNNEL_SUBDIV_MAX times the lining+lamp quads, so this has to
+     * grow with it or a curved bore would silently overrun the arrays. */
+    double px[256], py[256], pz[256], uu[256], vv[256];
+    unsigned int col[256];
     int seg_page[3], seg_nq[3], nseg = 0;
     int n = 0, n_lin = 0, n_lamp = 0, n_portal = 0;
 
@@ -7026,52 +7110,93 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
      * lintel -- because tg_write_quad_mesh_col draws each command's quads from a
      * contiguous vertex run. */
     if (tg_span_in_tunnel(si + 1)) {
-        const TG_Node *a = &nl->v[si];
-        const TG_Node *c = &nl->v[si + 1];
-        double ha, sa, hc, sc, dx, dz, seglen, u1, vtop, wv;
-        double al, ar, cl, cr;
+        const TG_Node *a0 = &nl->v[si];
+        const TG_Node *c0 = &nl->v[si + 1];
+        /* +1 so the sub-node array holds both endpoints of the last piece. */
+        TG_Node sub[TD5_TG_TUNNEL_SUBDIV_MAX + 1];
+        double  subh[TD5_TG_TUNNEL_SUBDIV_MAX + 1];   /* bore half per sub-node */
+        double  subs[TD5_TG_TUNNEL_SUBDIV_MAX + 1];   /* bore shift per sub-node */
+        double  subu[TD5_TG_TUNNEL_SUBDIV_MAX + 1];   /* U, continuous along run */
+        double  ha, sa, hc, sc, dx, dz, seglen, vtop;
+        int     nsub, k;
+
         tg_tunnel_bore(nl, si,     &ha, &sa);
         tg_tunnel_bore(nl, si + 1, &hc, &sc);
-        al = sa + ha; ar = sa - ha;          /* inner edges at a (L, R) */
-        cl = sc + hc; cr = sc - hc;          /* inner edges at c (L, R) */
-        dx = c->x - a->x; dz = c->z - a->z;
+        dx = c0->x - a0->x; dz = c0->z - a0->z;
         seglen = sqrt(dx * dx + dz * dz);
-        u1   = (seglen > 1.0) ? seglen / tile : 0.5;
         vtop = height / tile;
-        wv   = (2.0 * ha) / tile;
-        /* Left wall inner face */
-        TG_TUN_PUSH(a, al, a->y,          0.0, 0.0,  dim);
-        TG_TUN_PUSH(c, cl, c->y,          u1,  0.0,  dim);
-        TG_TUN_PUSH(c, cl, c->y + height, u1,  vtop, dim);
-        TG_TUN_PUSH(a, al, a->y + height, 0.0, vtop, dim);
-        /* Right wall inner face */
-        TG_TUN_PUSH(a, ar, a->y,          0.0, 0.0,  dim);
-        TG_TUN_PUSH(c, cr, c->y,          u1,  0.0,  dim);
-        TG_TUN_PUSH(c, cr, c->y + height, u1,  vtop, dim);
-        TG_TUN_PUSH(a, ar, a->y + height, 0.0, vtop, dim);
-        /* Roof: near-left, far-left, far-right, near-right at ceiling height */
-        TG_TUN_PUSH(a, al, a->y + height, 0.0, 0.0, dim);
-        TG_TUN_PUSH(c, cl, c->y + height, u1,  0.0, dim);
-        TG_TUN_PUSH(c, cr, c->y + height, u1,  wv,  dim);
-        TG_TUN_PUSH(a, ar, a->y + height, 0.0, wv,  dim);
+
+        nsub = tg_tunnel_subdiv_count(a0, c0);
+
+        /* Sample the curve. t=0 and t=1 reproduce a0/c0 EXACTLY (Hermite is
+         * interpolating), so a straight bore (nsub==1) emits the same vertices
+         * as before and consecutive spans stay welded at the shared node. The
+         * bore half/shift are interpolated linearly between the two endpoint
+         * samples, matching how the span pair was already treated. */
+        for (k = 0; k <= nsub; k++) {
+            const double t = (double)k / (double)nsub;
+            tg_tunnel_hermite(a0, c0, seglen, t, &sub[k]);
+            subh[k] = ha + (hc - ha) * t;
+            subs[k] = sa + (sc - sa) * t;
+        }
+        /* U accumulates real arc length so the lining tiles continuously across
+         * the sub-pieces instead of restarting at each one. Keeps the original
+         * degenerate-length guard. */
+        subu[0] = 0.0;
+        for (k = 1; k <= nsub; k++) {
+            const double sx = sub[k].x - sub[k-1].x, sz = sub[k].z - sub[k-1].z;
+            const double sl = sqrt(sx * sx + sz * sz);
+            subu[k] = subu[k-1] + ((sl > 1.0) ? sl / tile : (0.5 / nsub));
+        }
+
+        for (k = 0; k < nsub; k++) {
+            const TG_Node *a = &sub[k];
+            const TG_Node *c = &sub[k + 1];
+            const double al = subs[k]   + subh[k],   ar = subs[k]   - subh[k];
+            const double cl = subs[k+1] + subh[k+1], cr = subs[k+1] - subh[k+1];
+            const double u0 = subu[k], u1 = subu[k + 1];
+            const double wv = (2.0 * subh[k]) / tile;
+            /* Left wall inner face */
+            TG_TUN_PUSH(a, al, a->y,          u0, 0.0,  dim);
+            TG_TUN_PUSH(c, cl, c->y,          u1, 0.0,  dim);
+            TG_TUN_PUSH(c, cl, c->y + height, u1, vtop, dim);
+            TG_TUN_PUSH(a, al, a->y + height, u0, vtop, dim);
+            /* Right wall inner face */
+            TG_TUN_PUSH(a, ar, a->y,          u0, 0.0,  dim);
+            TG_TUN_PUSH(c, cr, c->y,          u1, 0.0,  dim);
+            TG_TUN_PUSH(c, cr, c->y + height, u1, vtop, dim);
+            TG_TUN_PUSH(a, ar, a->y + height, u0, vtop, dim);
+            /* Roof: near-left, far-left, far-right, near-right at ceiling height */
+            TG_TUN_PUSH(a, al, a->y + height, u0, 0.0, dim);
+            TG_TUN_PUSH(c, cl, c->y + height, u1, 0.0, dim);
+            TG_TUN_PUSH(c, cr, c->y + height, u1, wv,  dim);
+            TG_TUN_PUSH(a, ar, a->y + height, u0, wv,  dim);
+        }
         n_lin = n;
 
         /* [item 8d] Emissive lamp strip near the top of each wall, inset a little
          * toward the bore so it does not z-fight the lining. One quad per side per
-         * segment = a continuous run of side lights down the bore. */
+         * sub-piece = a continuous run of side lights down the bore. */
         if (lamps_on) {
             const double ins = 40.0;                 /* lateral inset from wall */
             const double ly0 = 0.70 * height, ly1 = 0.80 * height;
-            /* Left wall lamp */
-            TG_TUN_PUSH(a, al - ins, a->y + ly0, 0.0, 1.0, lampc);
-            TG_TUN_PUSH(c, cl - ins, c->y + ly0, u1,  1.0, lampc);
-            TG_TUN_PUSH(c, cl - ins, c->y + ly1, u1,  0.0, lampc);
-            TG_TUN_PUSH(a, al - ins, a->y + ly1, 0.0, 0.0, lampc);
-            /* Right wall lamp */
-            TG_TUN_PUSH(a, ar + ins, a->y + ly0, 0.0, 1.0, lampc);
-            TG_TUN_PUSH(c, cr + ins, c->y + ly0, u1,  1.0, lampc);
-            TG_TUN_PUSH(c, cr + ins, c->y + ly1, u1,  0.0, lampc);
-            TG_TUN_PUSH(a, ar + ins, a->y + ly1, 0.0, 0.0, lampc);
+            for (k = 0; k < nsub; k++) {
+                const TG_Node *a = &sub[k];
+                const TG_Node *c = &sub[k + 1];
+                const double al = subs[k]   + subh[k],   ar = subs[k]   - subh[k];
+                const double cl = subs[k+1] + subh[k+1], cr = subs[k+1] - subh[k+1];
+                const double u0 = subu[k], u1 = subu[k + 1];
+                /* Left wall lamp */
+                TG_TUN_PUSH(a, al - ins, a->y + ly0, u0, 1.0, lampc);
+                TG_TUN_PUSH(c, cl - ins, c->y + ly0, u1, 1.0, lampc);
+                TG_TUN_PUSH(c, cl - ins, c->y + ly1, u1, 0.0, lampc);
+                TG_TUN_PUSH(a, al - ins, a->y + ly1, u0, 0.0, lampc);
+                /* Right wall lamp */
+                TG_TUN_PUSH(a, ar + ins, a->y + ly0, u0, 1.0, lampc);
+                TG_TUN_PUSH(c, cr + ins, c->y + ly0, u1, 1.0, lampc);
+                TG_TUN_PUSH(c, cr + ins, c->y + ly1, u1, 0.0, lampc);
+                TG_TUN_PUSH(a, ar + ins, a->y + ly1, u0, 0.0, lampc);
+            }
             n_lamp = n - n_lin;
         }
     }
