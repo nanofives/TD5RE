@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "August 31 (auto-track crossing sidewalk, round 10)" },
+    { CL_ITEM,    "FIXED: at a side-street crossing the buildings sat" },
+    { CL_ITEM,    "  HARD AGAINST THE ROAD with no visible sidewalk." },
+    { CL_ITEM,    "  The frontage walls that line the perpendicular" },
+    { CL_ITEM,    "  street stood on the very kerb, with the pavement" },
+    { CL_ITEM,    "  hidden behind them. They now sit back by the" },
+    { CL_ITEM,    "  sidewalk's width, so the order reading down the" },
+    { CL_ITEM,    "  street is kerb, pavement, then building." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 31 (auto-track props off the road, round 10)" },
     { CL_ITEM,    "FIXED: a phone box and spectators stood IN THE" },
     { CL_ITEM,    "  ROAD at a side-street crossing. Furniture is" },

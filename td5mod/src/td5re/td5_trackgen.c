@@ -832,6 +832,10 @@ typedef enum {
     TG_ACCT_R9_CITY,        /* CITY    (1,2,3,4)            rename in place */
 
     TG_ACCT_R9_INFRA,       /* INFRA   (backlog)            rename in place */
+    /* [R10] PRE-RESERVED, one per area, own line. RENAME YOUR OWN SLOT IN
+     * PLACE. Never append here. The mask is self-sizing off TG_ACCT_KIND_COUNT
+     * (see s_acct_mask), so adding a kind grows the array, never drops a bit. */
+    TG_ACCT_R10_CROSS,      /* CROSS  (99991 66) side-street sidewalk setback */
     TG_ACCT_KIND_COUNT
 } TG_AcctKind;
 
@@ -922,7 +926,10 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
 
     "r9-city",              /* CITY    */
 
-    "r9-infra"              /* INFRA   */
+    "r9-infra",             /* INFRA   */
+    /* [R10] one reserved name per area, in enum order. Rename to match your
+     * renamed enum constant. Only the LAST entry omits its trailing comma. */
+    "r10-cross"             /* CROSS   */
 };
 
 static long s_acct_count[TG_ACCT_KIND_COUNT];
@@ -13328,8 +13335,30 @@ static int tg_cross_emit_sidewalls(const TG_FBHook *h)
             double flen;
             if (!xwall) off = 0.0;
             flen = reach - off;
-            const double cx = (edge ? e[3] : e[0]) + ox * off;
-            const double cz = (edge ? e[5] : e[2]) + oz * off;
+            /* [R10 CROSS 66] SIDEWALK SETBACK ON THE SIDE STREET. The frontage
+             * wall stood at the along-road corner e[0]/e[3] -- which is exactly
+             * the near/far edge of the cross-street carriageway
+             * (tg_city_emit_crossstreet spans e[0]..e[3] and runs outward). So
+             * from inside the mouth the wall rose FLUSH with the tarmac while the
+             * arm pavement (tg_block_emit_arm, width sw, laid on the -/+ along
+             * side of the same corner) lay hidden BEHIND the wall. Looking down
+             * the side street that reads as "buildings flush to the road, no
+             * visible sidewalk" (seed 99991 span 66, the user's item). Push the
+             * wall OUTWARD ALONG THE ROAD by the sidewalk width -- the same sw the
+             * arm slab occupies -- so the lateral order from the carriageway is
+             * kerb -> pavement(sw) -> wall, and the arm sidewalk now shows in
+             * front of the frontage. The offset is purely along-road and strictly
+             * OUTSIDE the carriageway span (edge 0 moves by -along, edge 1 by
+             * +along), so it cannot intrude on either carriageway. Default ON;
+             * TD5RE_R10_XSIDEWALK=0 restores the flush wall for a single-variable
+             * A/B. */
+            double axr = e[3] - e[0], azr = e[5] - e[2];
+            const double alr = sqrt(axr * axr + azr * azr);
+            if (alr > 1e-6) { axr /= alr; azr /= alr; } else { axr = 0.0; azr = 0.0; }
+            const double xset = td5_env_flag_on("TD5RE_R10_XSIDEWALK") ? sw : 0.0;
+            const double xdir = edge ? 1.0 : -1.0;   /* outside the mouth */
+            const double cx = (edge ? e[3] : e[0]) + ox * off + axr * xdir * xset;
+            const double cz = (edge ? e[5] : e[2]) + oz * off + azr * xdir * xset;
             const double cdrop = TD5_TG_GROUND_DROP * off / TD5_TG_GROUND_WIDTH;
             const double by = (edge ? e[4] : e[1]) + TD5_TG_KERB_H - cdrop;
             const double drop = TD5_TG_GROUND_DROP * flen / TD5_TG_GROUND_WIDTH;
@@ -13359,6 +13388,7 @@ static int tg_cross_emit_sidewalls(const TG_FBHook *h)
                                     &page, &seg_nq, 1))
                 return 0;
             tg_acct_n(TG_ACCT_CROSSFURN, h->si, 1);
+            if (xset > 0.0) tg_acct(TG_ACCT_R10_CROSS, h->si);  /* setback fired */
         }
     }
     return 1;
@@ -13629,6 +13659,116 @@ static void tg_r8_cross_report(const TG_NodeList *nl, int nspans)
         mouths, armed, forkm, fork_armed, turns, flanks,
         mouths ? rmin : 0.0, mouths ? rsum / (double)mouths : 0.0,
         mouths ? rmax : 0.0);
+}
+
+/* ============ [R10 CROSS] SIDE-STREET SIDEWALK-SETBACK SWEEP ==============
+ * ROUND 10 item 1, the OPEN remainder after the R10 furniture guard: at a
+ * side-street crossing the frontage buildings sit hard against the tarmac with
+ * no sidewalk (seed 99991 span 66). R9 CITY's assembled massing sweep measures
+ * every upright's |lateral| in the MAIN-ROAD frame and found nothing near the
+ * main pavement line at 66 -- correct, because the offending walls line the
+ * SIDE STREET and run OUTWARD from the main road, so their main-road |lateral|
+ * is large. The defect lives on the side-street axis, which that sweep does not
+ * measure; this one does.
+ *
+ * WHAT IS MEASURED. A side-street mouth's carriageway (tg_city_emit_crossstreet)
+ * spans the gap's two along-road corners e[0]..e[3] and runs outward. The
+ * frontage walls (tg_cross_emit_sidewalls) stand at those same corners. The
+ * SETBACK is the along-road distance from the carriageway edge to the wall base;
+ * the arm sidewalk (tg_block_emit_arm) occupies the first `sw` of it. A wall with
+ * setback < sw stands ON the pavement / flush with the kerb -- the offender. So
+ * the class count is: side-street frontage walls whose setback from the
+ * carriageway edge is under the sidewalk width.
+ *
+ * COVERAGE. Unlike the R8 CROSS mouth sweep, this visits GAP-INTERIOR spans too
+ * (span 66 is interior to the 65-68 gap): each interior span is attributed the
+ * setback of the two corner walls that flank the view down its street, so the
+ * span the user named appears in the windowed dump. The gates below mirror
+ * tg_cross_emit_sidewalls exactly, so the report cannot drift from the emitter.
+ *
+ * Read-only. TD5RE_R10_CROSS_REPORT=1 enables it; TD5RE_R10_CROSS_SPAN=N (+/-
+ * _PAD) dumps every span-side in a window even when it is not an offender. The
+ * SUMMARY (the acceptance number) is always logged when the report is on. */
+static double tg_r10_wall_setback(const TG_Biome *b)
+{
+    /* The along-road setback tg_cross_emit_sidewalls now gives the frontage wall:
+     * the sidewalk width when the R10 fix is on, else flush at the kerb. Read the
+     * SAME knob the emitter reads, so this reports the geometry actually built. */
+    return td5_env_flag_on("TD5RE_R10_XSIDEWALK") ? tg_city_sidewalk_w(b) : 0.0;
+}
+
+static int tg_r10_cross_gates(const TG_NodeList *nl, int si, int s, double sg,
+                              double sw)
+{
+    if (!(sw > 0.0)) return 0;
+    if (tg_span_in_bridge_run(si)) return 0;
+    if (td5_env_flag_on("TD5RE_AUTOTRACK_XBRIDGE_GATE") &&
+        tg_span_near_bridge(si, TD5_TG_XBRIDGE_CLEAR)) return 0;
+    if (tg_branches_enabled() && tg_span_in_fork_clear(si)) return 0;
+    if (tg_facade_built(si, s)) return 0;          /* frontage, not a gap */
+    if (tg_block_is_park(si, s)) return 0;
+    if (tg_side_blocked(si, sg)) return 0;
+    (void)nl;
+    return 1;
+}
+
+static void tg_r10_cross_report(const TG_NodeList *nl, int nspans)
+{
+    const int verbose = td5_env_int("TD5RE_R10_CROSS_REPORT", 0, 0, 1);
+    const int wspan = td5_env_int("TD5RE_R10_CROSS_SPAN", -1, -1, 100000);
+    const int wpad  = td5_env_int("TD5RE_R10_CROSS_PAD", 6, 0, 4000);
+    int si, s, ring = (s_ring_len > 0) ? s_ring_len : nspans;
+    int walls = 0, flush = 0, gapspans = 0;
+    const double margin = 100.0;    /* tolerance: setback within this of sw is OK */
+
+    if (!verbose && wspan < 0) return;
+    if (ring > nspans) ring = nspans;
+    if (ring > TD5_TG_MAX_SPANS) ring = TD5_TG_MAX_SPANS;
+
+    TD5_LOG_I(LOG_TAG, "trackgen: ---- r10cross side-street setback sweep ----");
+    for (si = 1; si < ring; si++) {
+        const TG_Biome *b = &k_biomes[tg_scenery_biome_index(si)];
+        const double sw = tg_city_sidewalk_w(b);
+        for (s = 0; s < 2; s++) {
+            const double sg = s ? 1.0 : -1.0;
+            int near_c, far_c, interior, in_win;
+            double set, reach;
+            if (!tg_r10_cross_gates(nl, si, s, sg, sw)) continue;
+            /* This side is an open gap. Corners emit a wall; interiors inherit. */
+            near_c = tg_facade_built(si - 1, s);
+            far_c  = tg_facade_built(si + 1, s);
+            interior = (!near_c && !far_c);
+            set = tg_r10_wall_setback(b);
+            reach = tg_xstreet_reach_at(nl, si, sg, tg_block_arm_skew(si, s), b, sw);
+            gapspans++;
+            in_win = (wspan >= 0 && si >= wspan - wpad && si <= wspan + wpad);
+            /* Corner walls: count each and flag it if it stands within the
+             * sidewalk of the carriageway (setback under sw). */
+            if (near_c || far_c) {
+                int nw = (near_c ? 1 : 0) + (far_c ? 1 : 0);
+                int nf = (set < sw - margin) ? nw : 0;
+                walls += nw;
+                flush += nf;
+                if ((verbose && nf > 0 && flush <= 80) || in_win)
+                    TD5_LOG_I(LOG_TAG,
+                        "trackgen:   r10cross MOUTH si=%d side=%s reach=%.0f "
+                        "sw=%.0f wall_setback=%.0f walls=%d flush=%d -> %s",
+                        si, s ? "L" : "R", reach, sw, set, nw, nf,
+                        nf ? "FLUSH (no sidewalk)" : "ok");
+            } else if (in_win) {
+                /* Interior span: attribute the flanking corner walls' setback. */
+                TD5_LOG_I(LOG_TAG,
+                    "trackgen:   r10cross INTERIOR si=%d side=%s reach=%.0f "
+                    "sw=%.0f flanking_wall_setback=%.0f -> %s",
+                    si, s ? "L" : "R", reach, sw, set,
+                    (set < sw - margin) ? "FLUSH (no sidewalk)" : "ok");
+            }
+            (void)interior;
+        }
+    }
+    TD5_LOG_I(LOG_TAG,
+        "trackgen: r10cross SUMMARY gap_span_sides=%d frontage_walls=%d "
+        "flush_no_sidewalk=%d", gapspans, walls, flush);
 }
 
 /* ============ [R9 CITY] PAVEMENT UNIQUENESS + MOUTH MASSING SWEEP =========
@@ -16789,6 +16929,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
      * quadratic in the span count. Must precede the first facade query. */
     tg_turn_map_build(nl, nspans);
     tg_r8_cross_report(nl, nspans);   /* [R8 CROSS] class sweep, opt-in */
+    tg_r10_cross_report(nl, nspans);  /* [R10 CROSS] side-street setback, opt-in */
     tg_r9_city_reset();               /* [R9 CITY] pavement/massing sweep */
 
     for (e = 0; e < nentries && ok; e++) {
