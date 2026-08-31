@@ -4255,12 +4255,23 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
          * degenerates to a plain average under uniform alpha. So this reuses the
          * existing chain builder unchanged.
          *
-         * TD5RE_OPAQUE_MIPS=0 disables (A/B kill-switch; default ON). Costs ~33%
-         * VRAM on track pages. */
+         * [DEFAULT OFF 2026-08-31] Shipped OFF after in-game A/B. Mipping the
+         * opaque pages does genuinely reduce distant shimmer, but with every
+         * sampler at MaxAnisotropy=1 the LOD is chosen from the WORST axis, so a
+         * road seen at a grazing angle goes visibly blurry -- judged a worse
+         * trade than the shimmer it removes. It also did NOT fix the artifact
+         * this was originally reached for: that turned out to be the road-U
+         * width bug (tg_emit_road_quad_taper), which is fixed independently.
+         * The proper way to get both sharpness and no shimmer is anisotropic
+         * filtering (SAMP_ANISO_*, TD5RE_ANISO), which is implemented but also
+         * default-off pending its own evaluation.
+         *
+         * TD5RE_OPAQUE_MIPS=1 enables (default OFF). Costs ~33% VRAM on track
+         * pages when on. */
         static int s_opaque_mips = -1;
         if (s_opaque_mips < 0) {
             const char *e = getenv("TD5RE_OPAQUE_MIPS");
-            s_opaque_mips = (e && e[0] == '0') ? 0 : 1;
+            s_opaque_mips = (e && e[0] && e[0] != '0') ? 1 : 0;
         }
         if (s_track_mips && format == 2 && page_index >= 0 && page_index < 700) {
             int t = td5_asset_get_page_transparency(page_index);
