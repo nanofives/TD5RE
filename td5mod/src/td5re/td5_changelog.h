@@ -44,6 +44,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  between the two halves of a split road is now" },
     { CL_ITEM,    "  ploughed snow instead of a band of green grass" },
     { CL_ITEM,    "  when the split starts next to a tunnel exit" },
+    { CL_ITEM,    "FIXED: guardrails are no longer upside down -- the" },
+    { CL_ITEM,    "  beam sits at the top with the posts below it, on" },
+    { CL_ITEM,    "  every barrier, not just the one at span 755" },
+    { CL_ITEM,    "FIXED: guardrails, kerbs and pavements now start and" },
+    { CL_ITEM,    "  stop on one span at a town edge, instead of" },
+    { CL_ITEM,    "  flickering in and out over twenty spans" },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 31 (road markings on widening roads)" },

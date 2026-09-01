@@ -6504,11 +6504,60 @@ static int tg_biome_index_is_city(int idx)
 {
     return !strcmp(k_biomes[idx].name, "CITY");
 }
+
+/* [R11 GUARD item 5] "Does this biome carry a RAISED PAVEMENT?" -- exactly
+ * tg_city_sidewalk_w's `> 0` test, spelled out here because that helper is
+ * defined further down the file. A biome is paved iff it builds facades on a
+ * cell grid rather than billboard trees; the paved set is CITY, INDUSTRIAL and
+ * ALPTOWN, the rest get the flat verge band instead. */
+static int tg_biome_index_is_paved(int idx)
+{
+    return !k_biomes[idx].billboard && k_biomes[idx].cell_w > 0;
+}
+
+/* [R11 GUARD item 5] "Remove the slow transition for guardrails and sidewalks
+ * -- they should start and stop cleanly."
+ *
+ * R7 (above) got the PRINCIPLE right and the SCOPE wrong. It hardened the
+ * structural edge only where CITY was one of the two biomes, so every OTHER
+ * paved/unpaved boundary kept the full 20-span dither. MEASURED on seed
+ * 20260901 (TD5RE_R11_GUARD_REPORT=1): 78 dithered spans, of which
+ * city-boundary dithers = 0 -- i.e. R7's rule fired on NOTHING in this track
+ * and every ramp the user is complaining about ran unchecked.
+ *
+ * What the dither does to a structural edge, spans 745-755 of that run
+ * (ALPTOWN is paved, FIELDS is not):
+ *
+ *     745 ALPTOWN walk=1200 fence=1 1  rail-owner=kerb-fence
+ *     746 FIELDS   walk=0    fence=0 0  rail-owner=roadside
+ *     747 ALPTOWN walk=1200 fence=1 1  rail-owner=kerb-fence
+ *     748 FIELDS   walk=0    fence=0 0  rail-owner=roadside
+ *
+ * So a 1200-wide slab with a 130-high kerb and a pedestrian railing appears,
+ * vanishes, and reappears every other span for twenty spans, and the roadside
+ * armco takes over the edge on exactly the spans the railing skips. That is the
+ * "ramps in and out gradually" report, and it is ONE mechanism behind both
+ * halves of the item: the guardrail and the sidewalk are the same edge.
+ *
+ * A kerb, a pavement and the barrier that owns their edge are per-RUN
+ * STRUCTURE, not a dithered categorical field -- you cannot half-build a
+ * pavement the way you can thin a forest out into a field. So whenever the hard
+ * cell and the dithered span disagree about whether there IS a pavement, the
+ * hard cell wins and the whole structural edge changes on one span.
+ *
+ * Deliberately NOT a blanket "always return hard": a FOREST/FIELDS boundary is
+ * two unpaved biomes and its tree-thinning dither is the good kind of blend --
+ * that one still gets the full 20 spans. Only a boundary that moves STRUCTURE
+ * snaps. Default ON; TD5RE_R11_GUARD_HARDEDGE=0 restores R7's city-only scope
+ * for an A/B. */
 static int tg_scenery_biome_index(int si)
 {
     int hard = tg_biome_cell_index(si);
     int soft = tg_biome_for_span(si);
     if (hard == soft) return soft;
+    if (td5_env_flag_on("TD5RE_R11_GUARD_HARDEDGE") &&
+        tg_biome_index_is_paved(hard) != tg_biome_index_is_paved(soft))
+        return hard;
     if (td5_env_flag_on("TD5RE_R7_CITY_CONT") &&
         (tg_biome_index_is_city(hard) || tg_biome_index_is_city(soft)))
         return hard;
@@ -11214,6 +11263,16 @@ static int tg_rail_page(int si)
     return TD5_TG_PAGE_R8V_RAIL + (((h >> 15) & 1u) ? c : a);
 }
 
+/* [R11 GUARD item 11] One definition of "the roadside rail uses the file's
+ * top-down V convention", asked by BOTH the emitter (which maps the UVs) and
+ * tg_emit_texture_page_rail (which authors the one page that was drawn for the
+ * old bottom-up mapping). They have to move together or the fallback page lands
+ * upside down instead. See the long note in tg_emit_guardrail. */
+static int tg_rail_vflip_on(void)
+{
+    return td5_env_flag_on("TD5RE_R11_RAIL_VFLIP");
+}
+
 static int tg_guardrails_enabled(void)
 {
     /* [R8 merge] Flipped to default ON. The old default was "OFF until a frame
@@ -11499,25 +11558,58 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk,
         const double nyt = ey + n_up * TD5_TG_RAIL_HEIGHT;
         const double fyt = gy + n_up * TD5_TG_RAIL_HEIGHT;
         const double u0 = (double)si, u1 = (double)si + 1.0;
+        /* [R11 GUARD item 11] "The guardrails on span 755 are upside down."
+         *
+         * V CONVENTION. Every page in this generator stores row 0 as the TOP of
+         * the image, and every other emitter that stands art upright therefore
+         * maps v = 1 AT THE BASE -- the facade cells, the kerb railing, the
+         * street-furniture fence page and the branch median all say so in as
+         * many words. This emitter alone mapped v = 0 at the base, i.e. it
+         * sampled the page bottom-up, and its comment claimed that put "the
+         * page's bottom rows at the base". That was true of exactly one page:
+         * the procedural TD5_TG_PAGE_RAIL, which was authored bottom-up to suit
+         * it (its "gutter under the rail" band sits at y < 8) and is now flipped
+         * to the file convention with the rest.
+         *
+         * The four pages a default build actually uses are the R8 VARIETY
+         * photographic rails, and they are top-down like everything else.
+         * VERIFIED by decoding them: page 399 (the timber rail on span 755) has
+         * its post FOOTING in rows 60-63 and open sky in rows 20-27, so v=0 at
+         * the base put the footing at the top of the barrier and the sky at the
+         * bottom. Upside down, exactly as reported.
+         *
+         * This is a CLASS, not a span: span 755 is one of 430 roadside edges on
+         * this seed, and every one of them was flipped. It only became visible
+         * at R8, when tg_rail_page swapped the procedural page (near-uniform
+         * noise, flip-invariant) for real photographs that have a top and a
+         * bottom.
+         *
+         * Fix is the UVs, not the vertex order: the winding is what makes the
+         * inner and outer faces point opposite ways and is correct as it stands.
+         * TD5RE_R11_RAIL_VFLIP=0 restores the old mapping for an A/B. */
+        const double v_base = tg_rail_vflip_on() ? 1.0 : 0.0;
+        const double v_top  = tg_rail_vflip_on() ? 0.0 : 1.0;
+        /* Cap: a sliver of the page taken from just INSIDE the top edge, so the
+         * cap reads as the rail's crown whichever way v runs. */
+        const double v_cap  = tg_rail_vflip_on() ? 0.15 : 0.85;
 
-        /* INNER face (towards the road). U runs along the road, V up the face,
-         * so the page's bottom rows land at the base -- see the page comment. */
-        px[n]=nibb_x; py[n]=nyb; pz[n]=nibb_z; uu[n]=u0; vv[n]=0.0; n++;
-        px[n]=nibt_x; py[n]=nyt; pz[n]=nibt_z; uu[n]=u0; vv[n]=1.0; n++;
-        px[n]=fibt_x; py[n]=fyt; pz[n]=fibt_z; uu[n]=u1; vv[n]=1.0; n++;
-        px[n]=fibb_x; py[n]=fyb; pz[n]=fibb_z; uu[n]=u1; vv[n]=0.0; n++;
+        /* INNER face (towards the road). U runs along the road, V up the face. */
+        px[n]=nibb_x; py[n]=nyb; pz[n]=nibb_z; uu[n]=u0; vv[n]=v_base; n++;
+        px[n]=nibt_x; py[n]=nyt; pz[n]=nibt_z; uu[n]=u0; vv[n]=v_top;  n++;
+        px[n]=fibt_x; py[n]=fyt; pz[n]=fibt_z; uu[n]=u1; vv[n]=v_top;  n++;
+        px[n]=fibb_x; py[n]=fyb; pz[n]=fibb_z; uu[n]=u1; vv[n]=v_base; n++;
 
         /* OUTER face, wound the other way so it faces away from the road. */
-        px[n]=fobb_x; py[n]=fyb; pz[n]=fobb_z; uu[n]=u1; vv[n]=0.0; n++;
-        px[n]=fobt_x; py[n]=fyt; pz[n]=fobt_z; uu[n]=u1; vv[n]=1.0; n++;
-        px[n]=nobt_x; py[n]=nyt; pz[n]=nobt_z; uu[n]=u0; vv[n]=1.0; n++;
-        px[n]=nobb_x; py[n]=nyb; pz[n]=nobb_z; uu[n]=u0; vv[n]=0.0; n++;
+        px[n]=fobb_x; py[n]=fyb; pz[n]=fobb_z; uu[n]=u1; vv[n]=v_base; n++;
+        px[n]=fobt_x; py[n]=fyt; pz[n]=fobt_z; uu[n]=u1; vv[n]=v_top;  n++;
+        px[n]=nobt_x; py[n]=nyt; pz[n]=nobt_z; uu[n]=u0; vv[n]=v_top;  n++;
+        px[n]=nobb_x; py[n]=nyb; pz[n]=nobb_z; uu[n]=u0; vv[n]=v_base; n++;
 
         /* TOP cap, so the barrier reads as solid from a chase camera. */
-        px[n]=nibt_x; py[n]=nyt; pz[n]=nibt_z; uu[n]=u0; vv[n]=1.0; n++;
-        px[n]=nobt_x; py[n]=nyt; pz[n]=nobt_z; uu[n]=u0; vv[n]=0.85; n++;
-        px[n]=fobt_x; py[n]=fyt; pz[n]=fobt_z; uu[n]=u1; vv[n]=0.85; n++;
-        px[n]=fibt_x; py[n]=fyt; pz[n]=fibt_z; uu[n]=u1; vv[n]=1.0; n++;
+        px[n]=nibt_x; py[n]=nyt; pz[n]=nibt_z; uu[n]=u0; vv[n]=v_top; n++;
+        px[n]=nobt_x; py[n]=nyt; pz[n]=nobt_z; uu[n]=u0; vv[n]=v_cap; n++;
+        px[n]=fobt_x; py[n]=fyt; pz[n]=fobt_z; uu[n]=u1; vv[n]=v_cap; n++;
+        px[n]=fibt_x; py[n]=fyt; pz[n]=fibt_z; uu[n]=u1; vv[n]=v_top; n++;
     }
 
     /* [R9 RAILFIX] BOTH sides can now be refused (the left side was previously
@@ -18362,8 +18454,15 @@ static void tg_emit_texture_page_rail(TG_Buf *out)
 
     for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
         int x = i % TD5_TG_TEX_DIM;
+        /* [R11 GUARD item 11] Row 0 is the TOP of a page everywhere else in this
+         * file, and this one page was authored bottom-up because tg_emit_guardrail
+         * used to sample it that way. Now that the emitter maps v = 1 at the base
+         * like the rest of the generator, the page has to turn over with it --
+         * otherwise fixing the four real rails would flip the fallback. Mirrored
+         * rather than re-authored so the A/B knob restores it exactly. */
         int y = i / TD5_TG_TEX_DIM;
         int idx;
+        if (tg_rail_vflip_on()) y = TD5_TG_TEX_DIM - 1 - y;
         rng = rng * 1103515245u + 12345u;
         if (y < 8) {
             idx = 10 + (int)((rng >> 16) % 3);        /* gutter under the rail */
@@ -20915,6 +21014,57 @@ void td5_trackgen_apply_config(TD5_TrackGenSpec *spec)
                     spec->max_grade_x1000, 0, 200);
 }
 
+/* [R11 GUARD] Per-span dump of the STRUCTURAL ROAD EDGE -- everything item 5
+ * ("remove the slow transition for guardrails and sidewalks") can possibly be
+ * about, on one line per span, so the ramp can be MEASURED instead of guessed
+ * at from a frame. Prints the hard cell biome, the dithered biome the scenery
+ * emitters actually ask for, the scenery biome R7 hardened at city edges, the
+ * pavement/verge width per side, whether a kerb railing stands, whether the
+ * roadside barrier gate passes, and which page the barrier wears.
+ *
+ * A "slow transition" shows up here as a run of spans where hard != soft, i.e.
+ * the 20-span dither band around a biome cell boundary, with the pavement width
+ * and the rail page flipping span to span across it.
+ *
+ * Read-only, opt-in via TD5RE_R11_GUARD_REPORT=1, windowed by
+ * TD5RE_R11_GUARD_REPORT_LO/HI so race.log stays legible. */
+static void tg_r11_guard_report(const TG_NodeList *nl, int nspans)
+{
+    int si, lo, hi, band = 0, flips = 0;
+    if (!td5_env_flag_off("TD5RE_R11_GUARD_REPORT")) return;
+    lo = td5_env_int("TD5RE_R11_GUARD_REPORT_LO", 0, 0, 100000);
+    hi = td5_env_int("TD5RE_R11_GUARD_REPORT_HI", 100000, 0, 100000);
+    if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
+
+    TD5_LOG_I(LOG_TAG, "trackgen: ---- [R11 GUARD] structural road edge ----");
+    for (si = 1; si + 2 < nl->count && si < nspans; si++) {
+        const int hard = tg_biome_cell_index(si);
+        const int soft = tg_biome_for_span(si);
+        const int scen = tg_scenery_biome_index(si);
+        const double sw = tg_city_sidewalk_w_at(nl, si, &k_biomes[scen]);
+        const double bw = tg_verge_band_w(&k_biomes[scen]);
+        const double base = (sw > 0.0) ? sw : bw;
+        if (hard != soft) band++;
+        if (hard != soft && tg_biome_index_is_city(hard) != tg_biome_index_is_city(soft))
+            flips++;
+        if (si < lo || si > hi) continue;
+        TD5_LOG_I(LOG_TAG,
+            "r11guard: si=%d hard=%s soft=%s scen=%s dither=%d walk=%.0f "
+            "verge=%.0f paveL=%.0f paveR=%.0f fenceL=%d fenceR=%d "
+            "railgate=%d railpage=%d railL=%u railR=%u",
+            si, k_biomes[hard].name, k_biomes[soft].name, k_biomes[scen].name,
+            hard != soft, sw, bw,
+            tg_pavement_side_width(nl, si,  1.0, base),
+            tg_pavement_side_width(nl, si, -1.0, base),
+            tg_rail_kerbfence_here(si,  1.0), tg_rail_kerbfence_here(si, -1.0),
+            tg_span_needs_guardrail(nl, si, nspans), tg_rail_page(si),
+            (unsigned)s_rail_edge[si][0], (unsigned)s_rail_edge[si][1]);
+    }
+    TD5_LOG_I(LOG_TAG,
+              "r11guard: dithered spans=%d (of %d), city-boundary dithers=%d",
+              band, nspans, flips);
+}
+
 /* ----------------------------------------------------------- build ------- */
 int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
                              int *out_spans)
@@ -21101,6 +21251,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     }
     tg_acct_report(nspans);
     tg_rail_edge_report(&nl, nspans);  /* [R9 RAILFIX] per-edge uniqueness */
+    tg_r11_guard_report(&nl, nspans);  /* [R11 GUARD] structural-edge dump  */
     tg_r9_bridge_report(&nl);          /* [R9 BRIDGE] tie + dry-band evidence */
     /* [R9 INFRA] The two deliverables share one accounting slot, so print the
      * split explicitly. Ponds are accounted as WATER (they are water), which
