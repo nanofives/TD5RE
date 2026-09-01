@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 01 (auto-track city corners, r12)" },
+    { CL_ITEM,    "FIXED: at a generated street crossing, the buildings" },
+    { CL_ITEM,    "  lining the side street grew out of the middle of" },
+    { CL_ITEM,    "  the corner block -- one mass through another. They" },
+    { CL_ITEM,    "  now clear that block's own depth, and they stop" },
+    { CL_ITEM,    "  where the side street and its pavement actually" },
+    { CL_ITEM,    "  stop, so no row of buildings lines bare ground" },
+    { CL_ITEM,    "  (TD5RE_R12_CITY_XDEPTH / _XREACH = 0 to revert)" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 01 (auto-track curve signage, r11)" },
     { CL_ITEM,    "NEW: generated tracks now sign their corners. A blue" },
     { CL_ITEM,    "  direction sign with a left or right arrow stands on" },

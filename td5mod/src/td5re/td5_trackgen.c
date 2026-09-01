@@ -7225,6 +7225,23 @@ static int tg_facade_depth_cols(const TG_Biome *b, unsigned int gh, int rows)
     return base + extra;
 }
 
+/* [R12 CITY item 10] The OUTWARD depth of the run at (si,left) -- what
+ * tg_side_geom actually builds the corner return to, as opposed to the biome
+ * constant tg_facade_depth. Stated once here because a second consumer needs it:
+ * the cross-street frontage wall (tg_cross_emit_sidewalls) has to start BEYOND
+ * the corner block's return or it grows out of the middle of it, and since R8
+ * item 6 that return is per RUN (base + 0..2 extra cells), not per biome. The
+ * caller passes the run's floor count, which it has already paid for. */
+static double tg_facade_run_depth(const TG_Biome *b, int si, int left,
+                                  int floors, int *dcols_out)
+{
+    const int dcols = tg_facade_depth_cols(b, tg_facade_run_id(si, left), floors);
+    if (dcols_out) *dcols_out = dcols;
+    return (b->cell_w > 0 && td5_env_flag_on("TD5RE_AUTOTRACK_FACADE_ASPECT"))
+         ? (double)dcols * tg_facade_cell_w(b)
+         : tg_facade_depth(b);
+}
+
 /* Along-road depth of a run-end corner return, keyed to the facade cell so it
  * scales with the biome's building size. 0.45 of a cell is enough mass to read
  * as a corner block without closing off the side street behind it. */
@@ -7345,10 +7362,7 @@ static void tg_side_geom(const TG_NodeList *nl, int si, int left,
      * and the page use, so a building is one depth end to end. With the knob
      * off tg_facade_depth_cols returns tg_facade_cap_cols and this is exactly
      * the old tg_facade_depth. */
-    g->dcols = tg_facade_depth_cols(b, tg_facade_run_id(si, left), floors);
-    g->depth = (b->cell_w > 0 && td5_env_flag_on("TD5RE_AUTOTRACK_FACADE_ASPECT"))
-             ? (double)g->dcols * tg_facade_cell_w(b)
-             : tg_facade_depth(b);
+    g->depth = tg_facade_run_depth(b, si, left, floors, &g->dcols);
 
     g->lx0 = n0->tz * side; g->lz0 = -n0->tx * side;
     g->lx1 = n1->tz * side; g->lz1 = -n1->tx * side;
@@ -14881,6 +14895,77 @@ static int tg_emit_fb_block(const TG_FBHook *h)
  * FAR edge of its last span. So each edge is now gated to its boundary corner
  * (si-1 built for the near frontage, si+1 built for the far), the same corner
  * test tg_block_emit_intersection uses -- two walls per gap side, no comb. */
+/* ---- [R12 CITY item 10] ONE CROSS-STREET FRONTAGE WALL, decided in one place.
+ *
+ * Both halves of the item are this wall disagreeing with a NEIGHBOUR about the
+ * same number, so both are decided here and the emitter and the read-only sweep
+ * read the identical answer.
+ *
+ * (a) "one building has overlapped geometry" -- a pale slab passing through a
+ *     brick block. The wall is pushed outward past the corner block's return so
+ *     cap and frontage read as one building (R6 CROSS item 1), but the clearance
+ *     it used was tg_facade_depth(b) -- the BIOME depth. Since R8 item 6 a run's
+ *     return is tg_facade_run_depth: base + 0..2 EXTRA cells off a run hash, so
+ *     two runs in three are deeper than the constant and the wall started
+ *     1500-3000 raw INSIDE the block it was meant to stand behind. Clearance now
+ *     comes from that run's own depth. Second hole in the same expression: where
+ *     the street was too short to fit the clearance the code fell back to
+ *     off = 0, i.e. it planted the wall flush at the kerb and drove it through
+ *     the whole block rather than skipping it. A wall with no room is now not
+ *     emitted -- these are decorative extra frontages, and a missing one costs
+ *     nothing next to one growing out of a building.
+ *
+ * (b) "buildings at the end of a road, no crossing street and no sidewalk". The
+ *     wall ran tg_city_crossst_reach -- the MODELLED street length -- while the
+ *     carriageway (tg_city_emit_crossstreet) and the pavement arm
+ *     (tg_block_emit_arm) both run tg_xstreet_reach_at, the R8 per-side clamp
+ *     that stops a street before it re-enters the main road further along the
+ *     ring. Where the clamp bites, the road and its pavement stop and the two
+ *     flanking walls carry on to the modelled length -- buildings lining bare
+ *     ground, facing onto nothing. The wall now takes the SAME clamped reach.
+ *
+ * Returns 0 when no wall stands on this edge. Knobs TD5RE_R12_CITY_XDEPTH (a)
+ * and TD5RE_R12_CITY_XREACH (b), both default ON and independently A/B-able;
+ * with both off this reproduces the R11 expression exactly. */
+static int tg_r12_xwall_geom(const TG_NodeList *nl, int si, int s, int edge,
+                             const TG_Biome *b, double sw,
+                             double *off_out, double *flen_out,
+                             double *blockd_out, double *reach_out)
+{
+    const int xwall  = td5_env_flag_on("TD5RE_AUTOTRACK_XWALL");
+    const int xdepth = td5_env_flag_on("TD5RE_R12_CITY_XDEPTH");
+    const int nbi    = edge ? (si + 1) : (si - 1);
+    const double sg  = s ? 1.0 : -1.0;
+    double reach = tg_city_crossst_reach(b, sw);
+    double blockd, capd, off;
+    int rows;
+
+    if (td5_env_flag_on("TD5RE_R12_CITY_XREACH"))
+        reach = tg_xstreet_reach_at(nl, si, sg, tg_block_arm_skew(si, s), b, sw);
+
+    /* The wall's height is the neighbouring block's floor count (R6 CROSS item
+     * 19) and so is its depth -- one run, one answer. blockd is reported as the
+     * run's TRUE depth whatever the knob says, so the sweep can measure the
+     * penetration of a wall built to the old biome clearance. */
+    rows   = tg_facade_floors(nbi, s, b);
+    if (rows <= 0) rows = b->floors_min + 1;
+    blockd = tg_facade_run_depth(b, nbi, s, rows, NULL);
+    capd   = tg_city_sidewalk_w(b)
+           + (xdepth ? blockd : tg_facade_depth(b));
+
+    if (!xwall) off = 0.0;
+    else if (reach - capd < (double)b->cell_w * 0.5) {
+        if (xdepth) return 0;              /* no room past the block: no wall */
+        off = 0.0;
+    } else off = capd;
+
+    if (off_out)    *off_out    = off;
+    if (flen_out)   *flen_out   = reach - off;
+    if (blockd_out) *blockd_out = blockd;
+    if (reach_out)  *reach_out  = reach;
+    return (reach - off > 1.0);
+}
+
 static int tg_cross_emit_sidewalls(const TG_FBHook *h)
 {
     double px[TD5_TG_FACADE_MAXQUAD * 4], py[TD5_TG_FACADE_MAXQUAD * 4];
@@ -14888,7 +14973,6 @@ static int tg_cross_emit_sidewalls(const TG_FBHook *h)
     double vv[TD5_TG_FACADE_MAXQUAD * 4];
     const TG_Biome *b = h->b;
     const double sw = tg_city_sidewalk_w(b);
-    const double reach = tg_city_crossst_reach(b, sw);
     int s;
 
     if (!(sw > 0.0)) return 1;
@@ -14938,11 +15022,13 @@ static int tg_cross_emit_sidewalls(const TG_FBHook *h)
             /* TD5RE_AUTOTRACK_XWALL=0 reverts both halves (base offset + block
              * height) to the pre-R6 frontage for a single-variable A/B. */
             const int xwall = td5_env_flag_on("TD5RE_AUTOTRACK_XWALL");
-            const double capd = tg_city_sidewalk_w(b) + tg_facade_depth(b);
-            double off = (reach - capd < (double)b->cell_w * 0.5) ? 0.0 : capd;
-            double flen;
-            if (!xwall) off = 0.0;
-            flen = reach - off;
+            /* [R12 CITY item 10] where the wall starts, how long it runs and the
+             * reach it lines -- all three from the shared decision above, so the
+             * read-only sweep measures the wall that is actually emitted. */
+            double off, flen;
+            if (!tg_r12_xwall_geom(h->nl, h->si, s, edge, b, sw,
+                                   &off, &flen, NULL, NULL))
+                continue;
             /* [R10 CROSS 66] SIDEWALK SETBACK ON THE SIDE STREET. The frontage
              * wall stood at the along-road corner e[0]/e[3] -- which is exactly
              * the near/far edge of the cross-street carriageway
@@ -15396,6 +15482,7 @@ static void tg_r11_city_report(const TG_NodeList *nl, int nspans)
     const int wpad  = td5_env_int("TD5RE_R11_CITY_PAD", 10, 0, 4000);
     int si, s, ring = (s_ring_len > 0) ? s_ring_len : nspans;
     int orphan = 0, phantom = 0, overhang = 0, corners = 0;
+    int xwalls = 0, xdive = 0, xnostreet = 0;   /* [R12 CITY item 10] */
 
     if (!td5_env_flag_on("TD5RE_R11_CITY_REPORT")) return;
     if (ring > nspans) ring = nspans;
@@ -15451,6 +15538,44 @@ static void tg_r11_city_report(const TG_NodeList *nl, int nspans)
                     if (dx * nd->tx + dz * nd->tz < sw - 100.0) overhang++;
                 }
             }
+            /* [R12 CITY item 10] CROSS-STREET FRONTAGE WALL vs its two
+             * neighbours -- the corner block behind it and the street it lines.
+             * Gates mirror tg_cross_emit_sidewalls exactly, and the geometry
+             * comes from the emitter's own tg_r12_xwall_geom, so neither counter
+             * can drift from what is built.
+             *   xwall_dive     -- the wall starts INSIDE the corner block's own
+             *                     return: two building masses interpenetrating.
+             *   xwall_nostreet -- the wall outruns the CLAMPED street reach the
+             *                     carriageway and the pavement arm both use, so
+             *                     it lines bare ground past the road's end. */
+            if (!tg_facade_built(si, s) && !tg_block_is_park(si, s) &&
+                !tg_side_blocked(si, sg) && !tg_span_in_bridge_run(si) &&
+                !(td5_env_flag_on("TD5RE_AUTOTRACK_XBRIDGE_GATE") &&
+                  tg_span_near_bridge(si, TD5_TG_XBRIDGE_CLEAR)) &&
+                !(tg_branches_enabled() && tg_span_in_fork_clear(si)) &&
+                td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_SIDEWALLS")) {
+                int edge;
+                for (edge = 0; edge < 2; edge++) {
+                    double off, flen, blockd, reach, clamp, pen;
+                    if (!tg_r11_corner_stands(edge ? si + 1 : si - 1, s))
+                        continue;
+                    if (!tg_r12_xwall_geom(nl, si, s, edge, b, sw,
+                                           &off, &flen, &blockd, &reach))
+                        continue;
+                    xwalls++;
+                    pen = (sw + blockd) - off;
+                    if (pen > 100.0) xdive++;
+                    clamp = tg_xstreet_reach_at(nl, si, sg,
+                                tg_block_arm_skew(si, s), b, sw);
+                    if (reach - clamp > TD5_TG_R8_CLAMP_STEP) xnostreet++;
+                    if (in_win && (pen > 100.0 || reach - clamp > 1.0))
+                        TD5_LOG_I(LOG_TAG,
+                            "trackgen:   r12city XWALL si=%d side=%s edge=%d "
+                            "off=%.0f flen=%.0f blockd=%.0f reach=%.0f "
+                            "clamp=%.0f pen=%.0f", si, s ? "L" : "R", edge,
+                            off, flen, blockd, reach, clamp, pen);
+                }
+            }
             if (!in_win) continue;
             TD5_LOG_I(LOG_TAG,
                 "trackgen:   r11city si=%d side=%s sw=%.0f built=%d stands=%d "
@@ -15473,8 +15598,9 @@ static void tg_r11_city_report(const TG_NodeList *nl, int nspans)
     }
     TD5_LOG_I(LOG_TAG,
         "trackgen: r11city SUMMARY arm_corners=%d orphan_frontage=%d "
-        "phantom_corners=%d overhang_ends=%d",
-        corners, orphan, phantom, overhang);
+        "phantom_corners=%d overhang_ends=%d | xwalls=%d xwall_dive=%d "
+        "xwall_nostreet=%d",
+        corners, orphan, phantom, overhang, xwalls, xdive, xnostreet);
 }
 
 /* ============ [R9 CITY] PAVEMENT UNIQUENESS + MOUTH MASSING SWEEP =========
