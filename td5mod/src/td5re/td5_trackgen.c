@@ -3934,6 +3934,65 @@ static void tg_r9_water_table_build(const TG_NodeList *nl)
     }
 }
 
+/* Is the world point (cx,cz) inside the water rectangle of the span whose near
+ * node is n0? Exactly the predicate the corner loop below used to inline, hoisted
+ * so the AABB sampling and the geometry sampling cannot drift apart. */
+static int tg_r13_wet_point(const TG_Node *n0, double len, double inner,
+                            double outer, double side, double cx, double cz)
+{
+    const double dx = cx - n0->x, dz = cz - n0->z;
+    const double along = dx * n0->tx + dz * n0->tz;
+    double lat = dx * n0->tz - dz * n0->tx;
+    if (along < 0.0 || along > len) return 0;
+    if (side == 0.0) return (lat > -outer && lat < outer);
+    lat *= side;
+    return (lat > inner && lat < outer);
+}
+
+/* [R13 FACES item 6] Does this mesh actually PUT GEOMETRY over the water?
+ *
+ * The audit used to answer that with the four corners of the mesh's axis-aligned
+ * BOUNDING BOX. A bounding-box corner is not a point of the mesh: it is the
+ * furthest-out place the mesh could possibly reach, on both axes at once. So a
+ * building standing squarely on dry land beside a river was condemned whenever
+ * the diagonal of its box happened to poke into the river rectangle, and the
+ * BIGGER the mesh, the more of its box is empty air and the likelier that is.
+ * That bias is the whole defect: a run-END frontage carries its corner returns,
+ * so it is the largest mesh on the street (440 verts against 112 on seed
+ * 20260901 span 1200), and it was the one the audit ate. What survived at a
+ * bridge exit was the first run-INTERIOR span -- a front plane, a roof and no
+ * lateral face anywhere: the reported "flat card".
+ *
+ * The replacement samples the geometry itself: every vertex, plus one centroid
+ * per quad so a face that straddles the rectangle without landing a vertex in it
+ * is still caught. Same rectangle, same height gate, same accounting -- only the
+ * sample points change. TD5RE_R13_FACES_WATERGEOM=0 restores the box corners. */
+static int tg_r13_wet_geom_hit(const unsigned char *b, size_t off, size_t mlen,
+                               size_t vtxoff, unsigned vtxcnt,
+                               double ox, double oz, const TG_Node *n0,
+                               double len, double inner, double outer,
+                               double side)
+{
+    double qx = 0.0, qz = 0.0;
+    unsigned vi, inq = 0;
+
+    for (vi = 0; vi < vtxcnt; vi++) {
+        const unsigned char *vp = b + off + vtxoff + (size_t)vi * TD5_TG_VTX_SIZE;
+        double vx, vz;
+        if ((size_t)(vp + 12 - b) > off + mlen) break;
+        vx = ox + (double)tg_rd_f32(vp);
+        vz = oz + (double)tg_rd_f32(vp + 8);
+        if (tg_r13_wet_point(n0, len, inner, outer, side, vx, vz)) return 1;
+        qx += vx; qz += vz;
+        if (++inq == 4) {
+            if (tg_r13_wet_point(n0, len, inner, outer, side,
+                                 qx * 0.25, qz * 0.25)) return 1;
+            qx = 0.0; qz = 0.0; inq = 0;
+        }
+    }
+    return 0;
+}
+
 static int tg_r9_water_audit_mesh(const TG_NodeList *nl, const unsigned char *b,
                                   size_t off, size_t mlen, int kind)
 {
@@ -3991,16 +4050,17 @@ static int tg_r9_water_audit_mesh(const TG_NodeList *nl, const unsigned char *b,
                             + (nz - n0->z) * (nz - n0->z);
             if (dd > (outer + len) * (outer + len)) continue;
         }
-        for (c = 0; c < 4; c++) {
-            const double cx = (c & 1) ? x1 : x0;
-            const double cz = (c & 2) ? z1 : z0;
-            const double dx = cx - n0->x, dz = cz - n0->z;
-            const double along = dx * n0->tx + dz * n0->tz;
-            double lat = dx * n0->tz - dz * n0->tx;
-            if (along < 0.0 || along > len) continue;
-            if (side == 0.0) { if (lat <= -outer || lat >= outer) continue; }
-            else { lat *= side;
-                   if (lat <= inner || lat >= outer) continue; }
+        {
+            int hit = 0;
+            if (td5_env_flag_on("TD5RE_R13_FACES_WATERGEOM")) {
+                hit = tg_r13_wet_geom_hit(b, off, mlen, vtxoff, vtxcnt, ox, oz,
+                                          n0, len, inner, outer, side);
+            } else {
+                for (c = 0; c < 4 && !hit; c++)
+                    hit = tg_r13_wet_point(n0, len, inner, outer, side,
+                                           (c & 1) ? x1 : x0, (c & 2) ? z1 : z0);
+            }
+            if (!hit) continue;
             s_r9_wet_total++;
             s_r9_wet_kind[kind]++;
             if (s_r9_wet_first_span < 0) s_r9_wet_first_span = s;
@@ -4008,6 +4068,19 @@ static int tg_r9_water_audit_mesh(const TG_NodeList *nl, const unsigned char *b,
             if (!tg_r9_waterguard_enabled()) return 0;
             s_r9_wet_rejected++;
             tg_acct(TG_ACCT_R9_BRIDGE, s);
+            /* [R13 FACES item 6] SAY SO. This is the SECOND path in the
+             * generator that removes an assembled mesh, and it was the silent
+             * one: the on-road guard logs its first eight rejects by kind and
+             * span, this logged nothing at all, so three buildings vanishing at
+             * a bridge exit left a race.log reading "on-road guard: clean". A
+             * removal path that cannot be seen in the log costs a whole round
+             * to rediscover, so it now reports in the same shape as its
+             * sibling. Capped the same way, since the totals and the per-kind
+             * breakdown are already in the R9BRIDGE summary line. */
+            if (s_r9_wet_rejected <= 8)
+                TD5_LOG_W(LOG_TAG, "over-water audit: rejected %s mesh at span "
+                          "%d (%.0f above the surface, %u verts)",
+                          k_guard_kind_name[kind], s, ytop - surf, vtxcnt);
             return 1;                          /* one strike per mesh: DROP it */
         }
     }
@@ -4029,6 +4102,13 @@ static int tg_r9_water_audit_mesh(const TG_NodeList *nl, const unsigned char *b,
 /* >= TG_MAX_MESHES_PER_ENTRY (4 spans * 96 = 384); a literal so it does not
  * depend on TD5_TG_SPANS_PER_ENTRY, which is defined further down. */
 #define TD5_TG_GUARD_KEPT_MAX 512
+/* [R13 FACES item 6] The frontage census lives with the facade emitter, but the
+ * number it has to report is what SURVIVES this pass -- a building dropped here
+ * is a building the driver never sees, and on seed 20260901 span 1200 that is
+ * exactly what turned a capped run end into a flat card. Forward-declared so the
+ * drop is recorded where it happens instead of being inferred afterwards. */
+static void tg_r13_faces_dropped(int si);
+
 static int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
                                    int ns, TG_Buf *meshes, size_t *moff,
                                    int *pnmesh)
@@ -4156,6 +4236,11 @@ static int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
             keep = 0;
             rejected++;
         }
+        /* [R13 FACES item 6] Whichever of the two passes above condemned it, a
+         * dropped BUILDING has to leave the frontage census, or the census keeps
+         * reporting the run end the emitter meant to build rather than the one
+         * the strip carries. */
+        if (!keep && kind == TG_GK_BUILDING) tg_r13_faces_dropped(mark_si);
 
         /* [R8] DIAG: dump every mesh of one entry with its measured footprint.
          * This is the instrument the R8 diagnosis was made with -- it is what
@@ -7578,6 +7663,135 @@ static void tg_side_geom(const TG_NodeList *nl, int si, int left,
     g->built = 1;
 }
 
+/* ===================== [R13 FACES] RUN-END RETURN CENSUS =====================
+ * [R13 item 6 -- "at the end of the bridge these buildings have NO SIDE FACES"]
+ *
+ * Recorded at the EMIT SITE, not re-derived from the model. The R11 report
+ * already prints tg_side_geom's cap_near/cap_far, and on the reported span they
+ * read 1 -- so a model-side sweep would have declared the frontage closed while
+ * the strip on disk carried a single vertical normal per building. What is
+ * counted here is what tg_emit_street_wall actually PUSHED, so the number cannot
+ * disagree with MODELS.DAT.
+ *
+ *   emitted   -- this side of this span really wrote frontage quads.
+ *   capn/capf -- the model's run-end flags for it.
+ *   rets      -- return (side face) quads were pushed for it.
+ *
+ * A RUN is a maximal stretch of consecutive SURVIVING spans on one side, i.e.
+ * one building as the strip carries it. Its two ends are the two places a driver
+ * meets it end-on, so both must carry a corner return. The acceptance number is
+ * MISSING_SIDE_FACES: run ends with no return. FLAT_RUNS is the worst case of
+ * the same measure -- a building open at BOTH ends, which is the flat card the
+ * report names. Survival is what makes this a real measure rather than a restated
+ * intention: the emitter's own cap flags read correct on the reported span. */
+typedef struct {
+    unsigned char emitted, capn, capf, rets;
+    short rows, dcols;
+} TG_R13Face;
+
+static TG_R13Face s_r13_face[TD5_TG_MAX_SPANS][2];
+static unsigned char s_r13_visit[TD5_TG_MAX_SPANS];  /* emitter reached span */
+static int s_r13_nvtx[TD5_TG_MAX_SPANS];             /* vertices written      */
+static unsigned char s_r13_drop[TD5_TG_MAX_SPANS];   /* post-emit pass ate it */
+static long s_r13_dropped;
+
+/* A frontage side that is on the STRIP: emitted and not eaten afterwards. The
+ * drop is per SPAN (one mesh carries both sides), so it takes both with it. */
+#define TG_R13_STANDS(si, s) (s_r13_face[(si)][(s)].emitted && !s_r13_drop[(si)])
+
+static void tg_r13_faces_reset(void)
+{
+    memset(s_r13_face, 0, sizeof s_r13_face);
+    memset(s_r13_visit, 0, sizeof s_r13_visit);
+    memset(s_r13_nvtx, 0, sizeof s_r13_nvtx);
+    memset(s_r13_drop, 0, sizeof s_r13_drop);
+    s_r13_dropped = 0;
+}
+
+static void tg_r13_faces_dropped(int si)
+{
+    if (si < 0 || si >= TD5_TG_MAX_SPANS) return;
+    if (!s_r13_drop[si]) s_r13_dropped++;
+    s_r13_drop[si] = 1;
+}
+
+static void tg_r13_faces_visit(int si)
+{
+    if (si >= 0 && si < TD5_TG_MAX_SPANS) s_r13_visit[si] = 1;
+}
+
+static void tg_r13_faces_wrote(int si, int nvtx)
+{
+    if (si >= 0 && si < TD5_TG_MAX_SPANS) s_r13_nvtx[si] = nvtx;
+}
+
+static void tg_r13_faces_note(int si, int s, const TG_SideGeom *g, int retq)
+{
+    TG_R13Face *f;
+    if (si < 0 || si >= TD5_TG_MAX_SPANS) return;
+    f = &s_r13_face[si][s ? 1 : 0];
+    f->emitted = 1;
+    f->capn  = (unsigned char)(g->cap_near ? 1 : 0);
+    f->capf  = (unsigned char)(g->cap_far ? 1 : 0);
+    f->rets  = (unsigned char)(retq > 0 ? 1 : 0);
+    f->rows  = (short)g->rows;
+    f->dcols = (short)g->dcols;
+}
+
+static void tg_r13_faces_report(int nspans)
+{
+    const int verbose = td5_env_flag_on("TD5RE_R13_FACES_REPORT");
+    const int wspan = td5_env_int("TD5RE_R13_FACES_SPAN", -1, -1, 100000);
+    const int wpad  = td5_env_int("TD5RE_R13_FACES_PAD", 12, 0, 4000);
+    int si, s, ring = (s_ring_len > 0) ? s_ring_len : nspans;
+    long sides = 0, ends = 0, open_ends = 0, runs = 0, flat_runs = 0;
+
+    if (ring > nspans) ring = nspans;
+    if (ring > TD5_TG_MAX_SPANS) ring = TD5_TG_MAX_SPANS;
+
+    for (s = 0; s < 2; s++) {
+        for (si = 0; si < ring; si++) {
+            const TG_R13Face *f = &s_r13_face[si][s];
+            if (verbose && wspan >= 0 && si >= wspan - wpad && si <= wspan + wpad)
+                TD5_LOG_I(LOG_TAG, "r13faces: si=%d side=%s visit=%d emit=%d "
+                          "drop=%d capn=%d capf=%d rets=%d rows=%d dcols=%d "
+                          "nvtx=%d", si, s ? "L" : "R", (int)s_r13_visit[si],
+                          (int)f->emitted, (int)s_r13_drop[si], (int)f->capn,
+                          (int)f->capf, (int)f->rets, (int)f->rows,
+                          (int)f->dcols, s_r13_nvtx[si]);
+            if (!TG_R13_STANDS(si, s)) continue;
+            sides++;
+            if (si > 0 && TG_R13_STANDS(si - 1, s)) continue;
+            {   /* first span of a run ON THE STRIP -- walk it once.
+                 * The two ends of a surviving run are the two places a driver
+                 * sees a building end-on, so they are what must carry a return.
+                 * Measured on the SURVIVING run, not the emitted one: at a
+                 * bridge exit the capped span was emitted and then eaten, and
+                 * the run the strip actually carries starts one span later with
+                 * a bare front plane. */
+                int j = si, last = si, nopen = 0;
+                while (j < ring && TG_R13_STANDS(j, s)) { last = j; j++; }
+                runs++;
+                ends += 2;
+                if (!s_r13_face[si][s].capn) { open_ends++; nopen++; }
+                if (!s_r13_face[last][s].capf) { open_ends++; nopen++; }
+                if (nopen == 2) flat_runs++;
+                if (verbose && nopen)
+                    TD5_LOG_W(LOG_TAG, "r13faces: OPEN END side=%s spans "
+                              "%d..%d (%d) near_cap=%d far_cap=%d rows=%d "
+                              "dcols=%d", s ? "L" : "R", si, last,
+                              last - si + 1, (int)s_r13_face[si][s].capn,
+                              (int)s_r13_face[last][s].capf,
+                              (int)f->rows, (int)f->dcols);
+            }
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "trackgen: r13faces SUMMARY frontage_runs=%ld "
+              "FLAT_RUNS=%ld | span_sides=%ld run_ends=%ld "
+              "MISSING_SIDE_FACES=%ld buildings_dropped=%ld",
+              runs, flat_runs, sides, ends, open_ends, s_r13_dropped);
+}
+
 static int tg_emit_street_wall(const TG_NodeList *nl, int si,
                                const TG_Biome *b, TG_Buf *blk)
 {
@@ -7594,9 +7808,11 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
      * the whole mesh; it now lives on each side's TG_SideGeom as `dcols`,
      * because the two sides belong to different runs and so to different
      * depths. Nothing mesh-wide is left to compute. */
-    int n = 0, n_store, s, nseg, seg_page[2], seg_nq[2], wall_rows, step_max = 0;
+    int n = 0, n_store, n_ret = 0, s, nseg, seg_page[2], seg_nq[2];
+    int wall_rows, step_max = 0;
 
     if (si + 1 >= nl->count) return 1;    /* need the far endpoint to abut */
+    tg_r13_faces_visit(si);
     tg_side_geom(nl, si, 0, b, &sd[0]);
     tg_side_geom(nl, si, 1, b, &sd[1]);
 
@@ -7655,6 +7871,7 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
                                     px, py, pz, uu, vv, &n);
             }
         }
+        n_ret = n;
         if (g->cap_near || g->cap_far) {
             /* Along-road unit, needed to give the corner prism its thickness.
              * Clamped to most of the span so a return can never overrun the
@@ -7677,6 +7894,7 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
                                    g->depth, thick, g->H, g->rows,
                                    g->dcols, px, py, pz, uu, vv, &n);
         }
+        tg_r13_faces_note(si, s, g, n - n_ret);
         /* SIDE WALL at a height STEP (item 1). Two ADJACENT built runs of
          * different height share a flush frontage, but the taller one's flank
          * ABOVE the shorter roof was open air, so a driver looked straight into
@@ -7769,6 +7987,7 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
     tg_acct_n(TG_ACCT_BUILDING, si,
               (sd[0].built ? 1 : 0) + (sd[1].built ? 1 : 0));
     if (n_store > 0) tg_acct(TG_ACCT_SHOPFRONT, si);
+    tg_r13_faces_wrote(si, n);
     return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, seg_page, seg_nq, nseg);
 }
 
@@ -21631,6 +21850,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     tg_r10_cross_report(nl, nspans);  /* [R10 CROSS] side-street setback, opt-in */
     tg_r11_city_report(nl, nspans);   /* [R11 CITY] frontage/junction dump, opt-in */
     tg_r9_city_reset();               /* [R9 CITY] pavement/massing sweep */
+    tg_r13_faces_reset();             /* [R13 FACES] run-end return census */
 
     for (e = 0; e < nentries && ok; e++) {
         const int s0 = e * TD5_TG_SPANS_PER_ENTRY;
@@ -22202,6 +22422,8 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
             /* [R9 CITY] pavement uniqueness + mouth massing, over the whole
              * assembled strip. These are the round's acceptance numbers. */
             tg_r9_city_report(nl, nspans);
+            /* [R13 FACES item 6] run-end returns, counted at the emit site. */
+            tg_r13_faces_report(nspans);
             /* [R8] The acceptance evidence for the precision pass, as numbers.
              * ONE line per kind that was rejected, and an explicit line for the
              * kinds that must NEVER appear: if road / deck / gantry / tunnel /
