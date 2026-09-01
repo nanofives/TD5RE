@@ -88,6 +88,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  concrete nose, leading and trailing, and nothing" },
     { CL_ITEM,    "  is added between spans (TD5RE_R12_MEDIAN_CAP=0" },
     { CL_ITEM,    "  restores the open ends)" },
+    { CL_ITEM,    "FIXED: at a generated street crossing, the buildings" },
+    { CL_ITEM,    "  lining the side street grew out of the middle of" },
+    { CL_ITEM,    "  the corner block -- one mass through another. They" },
+    { CL_ITEM,    "  now clear that block's own depth, and they stop" },
+    { CL_ITEM,    "  where the side street and its pavement actually" },
+    { CL_ITEM,    "  stop, so no row of buildings lines bare ground" },
+    { CL_ITEM,    "  (TD5RE_R12_CITY_XDEPTH / _XREACH = 0 to revert)" },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 01 (auto-track curve signage, r11)" },
