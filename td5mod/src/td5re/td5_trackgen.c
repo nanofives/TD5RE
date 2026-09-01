@@ -34,6 +34,7 @@
 #include "td5_tg_real_tex_r7city.h"   /* [R7 item 4] more city facade variety */
 #include "td5_tg_real_tex_r8var.h"    /* [R8 G1] facades, banners, guardrails */
 #include "td5_tg_furniture_tex.h" /* real TD5 lamp/railing/banner pages     */
+#include "td5_tg_real_tex_r11signs.h" /* [R11 SIGNS] direction arrow panels */
 #include "td5_tg_props_tex.h"     /* [R9 INFRA] TD6 street-furniture pages  */
 #include "td5re.h"
 
@@ -555,7 +556,40 @@ enum {
 typedef char tg_infra_pages_fit[(TD5_TG_PROPS_TEX_COUNT <= TD5_TG_R9_INFRA_N)
                                 ? 1 : -1];
 
-#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R9_BASE + 78)
+/* ====================== ROUND-11 PAGE BLOCKS =========================
+ * Same rule as R3-R9, measured off its OWN base. Use only your own block.
+ * Do NOT move TD5_TG_PAGE_COUNT out from under another area and do NOT
+ * renumber another area's slots.
+ *
+ * Round 10 reserved NO page block (its one area was a placement setback, not
+ * art), so R9_BASE + 78 -- the old TD5_TG_PAGE_COUNT -- is genuinely the next
+ * free base rather than a gap left by a skipped round.
+ *
+ * Owners (see R11_FEEDBACK.md):
+ *   SIGNS   16   direction signage on the approach to a curve
+ * ==================================================================== */
+#define TD5_TG_PAGE_R11_BASE  (TD5_TG_PAGE_R9_BASE + 78)
+
+/* SIGNS: three mined arrow panels plus one procedural post. The R9 INFRA block
+ * could not absorb these -- it reserved 14 slots and td5_tg_props_tex.h already
+ * fills 13, so there was exactly one spare and this area needs four. */
+#define TD5_TG_PAGE_R11_SIGN  (TD5_TG_PAGE_R11_BASE + 0)
+#define TD5_TG_R11_SIGN_N     6
+
+/* Slot layout inside the block. The three panels are in the SAME order as
+ * td5_tg_real_tex_r11signs.h's SIGNS table (LEFT, RIGHT, STRAIGHT) and the
+ * emitter indexes them by that order, so the two must not drift. Slots +4 and
+ * +5 are unused headroom. */
+#define TD5_TG_PAGE_R11_SIGN_LEFT     (TD5_TG_PAGE_R11_SIGN + 0)
+#define TD5_TG_PAGE_R11_SIGN_RIGHT    (TD5_TG_PAGE_R11_SIGN + 1)
+#define TD5_TG_PAGE_R11_SIGN_STRAIGHT (TD5_TG_PAGE_R11_SIGN + 2)
+#define TD5_TG_PAGE_R11_SIGN_POST     (TD5_TG_PAGE_R11_SIGN + 3)
+/* Seam contract with the header, the same shape as tg_infra_pages_fit: if the
+ * mined set ever grows past the panel slots this area reserved, the build stops
+ * instead of quietly walking into the next round's block. */
+typedef char tg_r11_sign_pages_fit[(3 <= TD5_TG_R11_SIGN_N - 1) ? 1 : -1];
+
+#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R11_BASE + 6)
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
@@ -839,6 +873,8 @@ typedef enum {
     /* [R11] PRE-RESERVED, one per area, own line. RENAME YOUR OWN SLOT IN
      * PLACE. Never append here. */
     TG_ACCT_R11_CITY,       /* CITY   (20260901 6,10) corner setback + turn gap */
+
+    TG_ACCT_R11_SIGNS,      /* SIGNS  (20260901 16) curve direction signage  */
     TG_ACCT_KIND_COUNT
 } TG_AcctKind;
 
@@ -935,7 +971,9 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
     "r10-cross",            /* CROSS   */
     /* [R11] one reserved name per area, in enum order. Rename to match your
      * renamed enum constant. Only the LAST entry omits its trailing comma. */
-    "r11-city"              /* CITY    */
+    "r11-city",             /* CITY    */
+
+    "r11-signs"             /* SIGNS   */
 };
 
 static long s_acct_count[TG_ACCT_KIND_COUNT];
@@ -18490,6 +18528,286 @@ static int tg_fork_of_corridor(int si, int *k)
     return -1;
 }
 
+/* ===================== [R11 SIGNS] CURVE DIRECTION SIGNAGE =================
+ * Reported (item 16): "on curves, add street signs indicating where the track
+ * goes; intersections near a curve read as confusing."
+ *
+ * THIS EMITTER BUILDS THE FIRST HALF ONLY. The "confusing intersections" half is
+ * a CROSSING PLACEMENT problem, not a signage one -- the R7 min-spacing thinning
+ * (tg_city_crossing_here, TD5_TG_XMIN_GAP = 8 spans) is curvature-BLIND, so eight
+ * spans of arc separates mouths far less than eight spans of straight and a
+ * cluster on a bend still reads as one fan. That belongs to CROSS this round and
+ * is deliberately untouched here: nothing below reads or writes a crossing
+ * predicate. Annotating a confusing junction is not the same as fixing it.
+ *
+ * IT READS THE EXISTING BEND MAP, IT DOES NOT MEASURE CURVATURE AGAIN.
+ * tg_turn_map_build already classifies bends for the R8 turn continuation, once
+ * per generation, with hysteresis: TD5_TG_R8_TURN_SIN (0.34) on the |cross| of
+ * the tangents TD5_TG_R8_TURN_BASE (3) spans either side, and
+ * TD5_TG_R8_TURN_GAP (16) spans of separation between qualifying turns. It
+ * publishes s_turn_side[] (+1 left of travel, -1 right, 0 none) and
+ * s_turn_skew[]. A second threshold here would be a second opinion about the
+ * same geometry, and the two would drift. The 0.044/0.045 numbers nearby are NOT
+ * classifiers -- TD5_TG_BRIDGE_MAX_TURN and TD5_TG_FORK_MAX_TURN are walk-time
+ * CEILINGS applied inside the centreline loop; they cap a bend, they never
+ * select one, and a threshold built on them would mean nothing.
+ *
+ * WHICH SIDE, AND WHICH ARROW. s_turn_side is by construction the OUTSIDE of the
+ * bend (see tg_turn_map_build: a left turn crosses negative, so sg = -1 and the
+ * continuation belongs on the right). The outside of the bend is also where a
+ * real direction sign stands -- it is the side you would run off toward and it
+ * sits in the driver's forward view through the corner -- so the sign takes that
+ * side directly. The same sign then gives the arrow: s_turn_side == -1 is a LEFT
+ * turn, +1 a RIGHT turn.
+ *
+ * LEAD. The sign is emitted TD5_TG_R11_SIGN_LEAD spans BEFORE the bend it
+ * describes, because a sign level with the corner is not information. The
+ * lookahead direction means the emitter runs at span si and places at span si,
+ * which is what lets it consult the element inventory for si (below).
+ *
+ * SEPARATION FROM EXISTING VERGE FURNITURE, which is the real risk here. The
+ * bands already occupied, measured from the road EDGE in raw units: kerb railing
+ * <= TD5_TG_FENCE_KERB (140); lamp post at sidewalk*0.35, or 300 unpaved;
+ * spectators 400..1700; statue 1500; trees 800..3200; R9 furniture 900..1411 on
+ * a verge or sidewalk*(0.30..0.70) on a pavement; animals 2500..6500. Their
+ * union leaves no free lateral band wide enough for a sign that is still close
+ * enough to the kerb to read, so lateral choice alone cannot solve this.
+ *
+ * HEIGHT is the axis that does, and it is the same discrimination the on-road
+ * guard itself makes (tg_guard_quad_bad separates a lamp arm from a wall by dy,
+ * not by width). The panel hangs at 2.20..4.00 m, clear above every ground-level
+ * piece in k_infra_props -- the tallest is the phone box at 2.40 m and it stands
+ * at a different gap -- and above the spectators, which is what makes the
+ * overlap with the 400..1700 spectator band harmless.
+ *
+ * MEASURED EFFECTIVE BAND, seed 20260901: every sign reports gap = 484, so the
+ * panel footprint is 299..669 out from the road edge. That is NOT the nominal
+ * TD5_TG_R11_SIGN_GAP: the request below asks the carriageway authority about
+ * the footprint's INNER edge (430 - 185 = 245), the authority floors any prop
+ * verge at TD5_TG_CARRIAGEWAY_MARGIN = 300, and the half width is added back to
+ * recover the centre. So the constant is a MINIMUM the shared authority is
+ * allowed to raise, which is the behaviour every other verge emitter gets and
+ * should not be fought. 669 leaves 131 of clearance below the tree band.
+ *
+ * The only things reaching panel height in this lateral band are the lamp head
+ * (TD5_TG_LAMP_H, 2500 raw) and tree canopies, so:
+ *   - the lamp is excluded by the ELEMENT INVENTORY, not by a copy of its
+ *     placement hash: this emitter runs LAST in the per-span sequence, so
+ *     TG_ACCT_MASK_TEST(si, TG_ACCT_LAMP) is already populated for si by the
+ *     time it is asked. Re-deriving `si % 7` here is exactly the hand-rolled
+ *     duplicate that made trees stand on branch carriageways for three rounds.
+ *   - trees sit at gap >= 800 and the panel's footprint ends at 615.
+ *
+ * NOT EXEMPT FROM THE ON-ROAD GUARD. The call site marks these meshes
+ * TG_GK_PROP, whose policy class is TG_GKC_FURNITURE -- judged against
+ * tg_footway_reach, the wider envelope that includes a side street's asphalt. No
+ * byte range is exempted. A sign has no business over the carriageway, and
+ * licensing one would forfeit the backstop that is the reason the R7 guard
+ * exists. Placement goes through the same three authorities the R9 furniture
+ * uses (tg_side_blocked, tg_xstreet_occupies, tg_carriageway_clear_gap) so a
+ * corridor bowing into the lateral pushes the sign out rather than the guard
+ * silently eating it.
+ *
+ * Default ON; TD5RE_R11_SIGNS=0 removes the signage for an A/B.
+ * ======================================================================== */
+
+/* Spans of warning between the sign and the bend. At TD5_TG_SPAN_LEN this is
+ * about 7500 raw of approach -- far enough to be information rather than
+ * decoration, close enough that the bend it describes is the next thing to
+ * happen. Well inside TD5_TG_R8_TURN_GAP (16), so the lookahead can never reach
+ * past one bend into the next. */
+#define TD5_TG_R11_SIGN_LEAD    5
+/* Lateral setback of the PANEL CENTRE from the road edge. Chosen so the panel's
+ * own footprint (centre +/- half its width) spans 245..615: outboard of the kerb
+ * railing and the unpaved lamp post, inboard of the tree and R9 furniture bands.
+ * See the block comment for the full band map. */
+#define TD5_TG_R11_SIGN_GAP     430.0
+/* Panel size. The mined page is the sign's 31x62 panel stretched to fill 64x64,
+ * so the QUAD has to restore the 1:2 aspect or the arrow comes out fat --
+ * height is twice width by construction, not by taste. */
+#define TD5_TG_R11_SIGN_W       (0.90 * TD5_TG_INFRA_M)
+#define TD5_TG_R11_SIGN_H       (2.0 * TD5_TG_R11_SIGN_W)
+/* Underside of the panel. Above the phone box (2.40 m) is not required -- that
+ * stands at a different gap -- but above every piece that could share this band
+ * is, and 2.20 m is also simply where a real sign panel starts. */
+#define TD5_TG_R11_SIGN_LIFT    (2.20 * TD5_TG_INFRA_M)
+/* Post: a 6 cm tube, and it overlaps the panel underside slightly so no seam
+ * opens between the two at a grazing angle. */
+#define TD5_TG_R11_SIGN_POST_W  (0.06 * TD5_TG_INFRA_M)
+#define TD5_TG_R11_SIGN_POST_OV (0.10 * TD5_TG_INFRA_M)
+
+static long s_r11_signs;            /* panels emitted, reported per build */
+static long s_r11_sign_skip_lamp;   /* dropped: a lamp already stands there */
+static long s_r11_sign_skip_street; /* dropped: the mouth of a side street  */
+static long s_r11_sign_skip_side;   /* dropped: fork corridor on that side  */
+static long s_r11_sign_left;        /* arrow census, per page               */
+static long s_r11_sign_right;
+
+static int tg_r11_signs_enabled(void) { return td5_env_flag_on("TD5RE_R11_SIGNS"); }
+
+/* The bend this span's sign describes, or 0 if there is none. Returns the
+ * s_turn_side value at the bend (+1 left of travel, -1 right). */
+static int tg_r11_sign_turn_for(int si, int nspans)
+{
+    const int t = si + TD5_TG_R11_SIGN_LEAD;
+    if (si <= 0 || t >= nspans || t >= TD5_TG_MAX_SPANS) return 0;
+    return (int)s_turn_side[t];
+}
+
+/* One direction sign at span si: a fixed panel facing back down the road, on a
+ * modelled post. Appends 0, or 2 meshes (post then panel) and records both
+ * offsets. Returns 0 only on a buffer failure. */
+static int tg_emit_r11_sign(const TG_NodeList *nl, int si, int nspans,
+                            TG_Buf *blk, size_t *moff, int *nmesh, int maxmesh)
+{
+    const TG_Node *n = &nl->v[si];
+    const TG_Biome *b;
+    double px[8], py[8], pz[8], uu[8], vv[8];
+    double lx, lz, cx, cz, base_y, gap, sw;
+    double hw = TD5_TG_R11_SIGN_W * 0.5;
+    double y0, y1, ptop;
+    int turn, side_i, page, seg_page, seg_nq;
+
+    if (!tg_r11_signs_enabled())          return 1;
+    if (si <= TD5_TG_GRID_SPAN)           return 1;  /* keep the start grid clear */
+    if (si + 1 >= nl->count)              return 1;
+    if (tg_span_in_bridge_run(si))        return 1;  /* deck carries rails only  */
+    if (tg_span_in_tunnel(si))            return 1;  /* no verge inside a bore   */
+    if (tg_up_clear_span(si))             return 1;  /* overpass deck flies here */
+    if (*nmesh + 2 > maxmesh)             return 1;  /* budget, not an error     */
+
+    turn = tg_r11_sign_turn_for(si, nspans);
+    if (!turn) return 1;
+
+    /* s_turn_side IS the outside of the bend, which is both where the sign
+     * belongs and which way the road goes. */
+    side_i = turn;
+    if (tg_side_blocked(si, (double)side_i)) { s_r11_sign_skip_side++; return 1; }
+
+    /* The lamp head is the one other thing at panel height in this band, and the
+     * inventory for si is complete by the time this emitter runs. */
+    if (TG_ACCT_MASK_TEST(si, TG_ACCT_LAMP)) { s_r11_sign_skip_lamp++; return 1; }
+
+    /* No footway at a side-street mouth to stand on, so nothing is placed rather
+     * than a sign being shoved down the street -- the R10 furniture rule. */
+    if (tg_xstreet_occupies(nl, si, (double)side_i,
+                            TD5_TG_R11_SIGN_GAP - hw)) {
+        tg_xstreet_audit(nl, si, (double)side_i,
+                         TD5_TG_R11_SIGN_GAP - hw, "direction-sign", 0);
+        s_r11_sign_skip_street++;
+        return 1;
+    }
+    tg_xstreet_audit(nl, si, (double)side_i, TD5_TG_R11_SIGN_GAP - hw,
+                     "direction-sign", 1);
+
+    /* Push the whole FOOTPRINT clear of any branch carriageway bowing into this
+     * lateral, exactly as the pavement, the trees and the R9 furniture do.
+     *
+     * THE AUTHORITY IS ASKED ABOUT THE FOOTPRINT'S INNER EDGE, and the half
+     * width is added back afterwards to recover the CENTRE. Passing
+     * `centre + hw` and using the result as the centre -- which is what
+     * tg_infra_place does -- silently moves the piece a half width further out
+     * than its own constant says: measured here as gap=614 for a nominal 430,
+     * i.e. a footprint of 430..800 instead of 245..615. That mattered, because
+     * 800 is exactly where the tree band starts, so the "clear of the trees"
+     * property this emitter's band was chosen for was not actually held. */
+    gap = tg_carriageway_clear_gap(nl, si, (double)side_i,
+                                   TD5_TG_R11_SIGN_GAP - hw,
+                                   TD5_TG_CARRIAGEWAY_MARGIN) + hw;
+
+    b  = &k_biomes[tg_scenery_biome_index(si)];
+    sw = tg_city_sidewalk_w_at(nl, si, b);
+    /* Paved: stand on the kerb. Unpaved: the skirt DROPS away from the road, so
+     * road height is the wrong footing and the post would hang in the air --
+     * rest on the sampled terrain, the rule R7 FLORA gave tree trunks. */
+    if (sw > 0.0) base_y = n->y + tg_city_kerb_h(b);
+    else          base_y = n->y - tg_infra_ground_dy(nl, si, (double)side_i,
+                                                     gap, 0.0);
+
+    lx = n->tz * (double)side_i;
+    lz = -n->tx * (double)side_i;
+    cx = n->x + lx * (n->width * 0.5 + gap);
+    cz = n->z + lz * (n->width * 0.5 + gap);
+
+    y0   = base_y + TD5_TG_R11_SIGN_LIFT;
+    y1   = y0 + TD5_TG_R11_SIGN_H;
+    ptop = y0 + TD5_TG_R11_SIGN_POST_OV;
+
+    /* POST: two crossed quads rather than a four-face box. At 6 cm the silhouette
+     * is all a driver can resolve, and a cross halves the geometry of a box for
+     * an identical read. Quad A spans the lateral axis, quad B the along-road
+     * axis; scenery is submitted CULL_NONE so winding only has to be
+     * self-consistent. */
+    {
+        const double ax = n->tx, az = n->tz;
+        const double h  = TD5_TG_R11_SIGN_POST_W * 0.5;
+        int k = 0;
+        px[k] = cx - lx * h; py[k] = base_y; pz[k] = cz - lz * h;
+        uu[k] = 0.0; vv[k] = 1.0; k++;
+        px[k] = cx + lx * h; py[k] = base_y; pz[k] = cz + lz * h;
+        uu[k] = 1.0; vv[k] = 1.0; k++;
+        px[k] = cx + lx * h; py[k] = ptop;   pz[k] = cz + lz * h;
+        uu[k] = 1.0; vv[k] = 0.0; k++;
+        px[k] = cx - lx * h; py[k] = ptop;   pz[k] = cz - lz * h;
+        uu[k] = 0.0; vv[k] = 0.0; k++;
+        px[k] = cx - ax * h; py[k] = base_y; pz[k] = cz - az * h;
+        uu[k] = 0.0; vv[k] = 1.0; k++;
+        px[k] = cx + ax * h; py[k] = base_y; pz[k] = cz + az * h;
+        uu[k] = 1.0; vv[k] = 1.0; k++;
+        px[k] = cx + ax * h; py[k] = ptop;   pz[k] = cz + az * h;
+        uu[k] = 1.0; vv[k] = 0.0; k++;
+        px[k] = cx - ax * h; py[k] = ptop;   pz[k] = cz - az * h;
+        uu[k] = 0.0; vv[k] = 0.0; k++;
+        seg_page = TD5_TG_PAGE_R11_SIGN_POST;
+        seg_nq   = 2;
+        moff[(*nmesh)++] = blk->len;
+        if (!tg_write_quad_mesh(blk, px, py, pz, uu, vv, 8,
+                                &seg_page, &seg_nq, 1))
+            return 0;
+    }
+
+    /* PANEL: a FIXED quad spanning the lateral axis, so its face normal lies
+     * along the road and it presents itself square to an approaching driver.
+     *
+     * FIXED, NOT CAMERA-FACING, and this is a deliberate choice against the
+     * billboard default every other piece of verge scenery here uses. Three
+     * reasons. It is bolted to a post that is modelled and cannot rotate, so a
+     * panel that swivelled while its post stood still would be a visible
+     * artifact rather than a subtle one. A direction sign is read from ONE
+     * approach and that approach is known exactly -- it is the span tangent --
+     * so there is nothing for camera-facing to buy. And scenery is submitted
+     * CULL_NONE, so the back face draws too and the sign never vanishes when
+     * seen from behind; this is the same conclusion the start/finish gantry
+     * reached when it went double-sided instead of camera-facing. */
+    page = (side_i < 0) ? TD5_TG_PAGE_R11_SIGN_LEFT
+                        : TD5_TG_PAGE_R11_SIGN_RIGHT;
+    if (side_i < 0) s_r11_sign_left++; else s_r11_sign_right++;
+
+    px[0] = cx - lx * hw; py[0] = y0; pz[0] = cz - lz * hw;
+    uu[0] = 0.0; vv[0] = 1.0;
+    px[1] = cx + lx * hw; py[1] = y0; pz[1] = cz + lz * hw;
+    uu[1] = 1.0; vv[1] = 1.0;
+    px[2] = cx + lx * hw; py[2] = y1; pz[2] = cz + lz * hw;
+    uu[2] = 1.0; vv[2] = 0.0;
+    px[3] = cx - lx * hw; py[3] = y1; pz[3] = cz - lz * hw;
+    uu[3] = 0.0; vv[3] = 0.0;
+    seg_page = page;
+    seg_nq   = 1;
+    moff[(*nmesh)++] = blk->len;
+    if (!tg_write_quad_mesh(blk, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1))
+        return 0;
+
+    tg_acct_n(TG_ACCT_R11_SIGNS, si, 1);
+    s_r11_signs++;
+    if (td5_env_flag_off("TD5RE_R11_SIGNS_REPORT"))
+        TD5_LOG_I(LOG_TAG, "trackgen: [R11 SIGNS] span %4d %-5s %-8s bend at "
+                  "%4d gap=%.0f base=%.0f biome=%s",
+                  si, side_i > 0 ? "left" : "right",
+                  side_i < 0 ? "LEFT" : "RIGHT", si + TD5_TG_R11_SIGN_LEAD,
+                  gap, base_y, b->name);
+    return 1;
+}
+
 static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                           TG_Buf *out)
 {
@@ -18546,6 +18864,12 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     s_guard_unsorted = 0;  /* [R10] compaction health, reported below */
     s_guard_unsafe = 0;
     memset(s_guard_rej_kind, 0, sizeof s_guard_rej_kind);
+    s_r11_signs = 0;       /* [R11 SIGNS] per-build tally, reported below */
+    s_r11_sign_skip_lamp = 0;
+    s_r11_sign_skip_street = 0;
+    s_r11_sign_skip_side = 0;
+    s_r11_sign_left = 0;
+    s_r11_sign_right = 0;
 
     /* [R8 CROSS item 9] Sharp-bend map, built ONCE per generation: the two
      * predicates that carry the continuation (tg_facade_built, tg_block_arm_skew)
@@ -18966,6 +19290,22 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     /* [R7 GUARD] the sea plane sits beside/below the road. */
                     tg_guard_mark(sw0, meshes.len, TG_GK_WATER, si);
                 }
+                /* [R11 SIGNS item 16] Direction signage, LAST in the span's
+                 * sequence ON PURPOSE: it consults the element inventory for si
+                 * (TG_ACCT_LAMP) to keep a sign off a span whose lamp head
+                 * already occupies panel height, and that bit is only set once
+                 * every earlier emitter for si has run. Marked TG_GK_PROP --
+                 * FURNITURE class, NOT exempt -- so a sign in the carriageway is
+                 * dropped and counted like any other piece of street furniture.
+                 */
+                {
+                    size_t sg0 = meshes.len;
+                    if (!tg_emit_r11_sign(nl, si, nspans, &meshes, moff, &nmesh,
+                                          TG_MAX_MESHES_PER_ENTRY)) {
+                        ok = 0; break;
+                    }
+                    tg_guard_mark(sg0, meshes.len, TG_GK_PROP, si);
+                }
             }
         }
 
@@ -19049,6 +19389,27 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 TD5_LOG_W(LOG_TAG, "on-road guard: RESIDUAL %ld non-exempt "
                           "on-road mesh(es) survived -- parse/compaction bug",
                           s_guard_residual);
+            /* [R11 SIGNS item 16] The round's acceptance number. A count of ZERO
+             * is the failure mode this exists to make loud: a new roadside
+             * emitter that is gated wrong, or judged by the on-road guard,
+             * produces NOTHING and every other number in this log looks
+             * healthy. The per-arrow split is here because a pool that always
+             * resolves to the same page is that same failure one level down
+             * (R7 item 4), and the skip counters say WHICH gate refused. */
+            if (!tg_r11_signs_enabled())
+                TD5_LOG_I(LOG_TAG, "R11 signs: DISABLED (TD5RE_R11_SIGNS=0)");
+            else if (!s_r11_signs)
+                TD5_LOG_W(LOG_TAG, "R11 signs: NONE emitted over %d spans -- "
+                          "the bend map or a placement gate is refusing every "
+                          "candidate (skips: lamp=%ld street=%ld side=%ld)",
+                          nspans, s_r11_sign_skip_lamp,
+                          s_r11_sign_skip_street, s_r11_sign_skip_side);
+            else
+                TD5_LOG_I(LOG_TAG, "R11 signs: %ld panel(s) over %d spans "
+                          "(left=%ld right=%ld) | skips: lamp=%ld street=%ld "
+                          "side=%ld", s_r11_signs, nspans, s_r11_sign_left,
+                          s_r11_sign_right, s_r11_sign_skip_lamp,
+                          s_r11_sign_skip_street, s_r11_sign_skip_side);
             /* [R9 CITY] pavement uniqueness + mouth massing, over the whole
              * assembled strip. These are the round's acceptance numbers. */
             tg_r9_city_report(nl, nspans);
@@ -21359,6 +21720,53 @@ static void tg_emit_texture_page_r9_up_parapet(TG_Buf *out)
     }
 }
 
+/* [R11 SIGNS item 16] SIGN POST -- galvanised steel tube, seen side on.
+ *
+ * WHY THIS PAGE EXISTS AT ALL. The three mined arrow panels come out of the crop
+ * with a key of 0.0%: a rectangular sign is a SOLID panel, so there is no
+ * transparent margin and nothing in the artwork suggests a support. The
+ * pre-existing IP_SIGN sets the precedent of a disc "on a post we do not model"
+ * (see k_infra_props), and at a 0.8 m disc tucked against a frontage that reads
+ * as an omission. At 0.9 x 1.8 m lifted clear of head height it would read as a
+ * blue rectangle hanging in the air, which is worse than no sign. So the post is
+ * modelled, and it needs one page of its own.
+ *
+ * Vertical only: the tube is mapped once over a ~2 m post, so a horizontal
+ * feature could not repeat up it, but there is nothing a real galvanised tube
+ * has to say horizontally either. A bright edge on one side and a shaded one on
+ * the other is what makes an untextured cylinder read as round. */
+static void tg_emit_texture_page_r11_sign_post(TG_Buf *out)
+{
+    int i;
+
+    tg_put_u8(out, 0); tg_put_u8(out, 0); tg_put_u8(out, 0);
+    tg_put_u8(out, 0);                                        /* opaque */
+    tg_put_u32(out, TD5_TG_PAL_COUNT);
+
+    /* BGR, faintly cool: galvanised steel is grey with a blue cast, and a
+     * neutral grey post beside a saturated blue panel reads as brown by
+     * contrast. 0 darkest .. 15 brightest. */
+    for (i = 0; i < TD5_TG_PAL_COUNT; i++) {
+        int v = 96 + i * 9;
+        if (v > 250) v = 250;
+        tg_put_u8(out, (unsigned)(v + 5 > 255 ? 255 : v + 5));   /* B */
+        tg_put_u8(out, (unsigned)v);                             /* G */
+        tg_put_u8(out, (unsigned)(v > 4 ? v - 4 : 0));           /* R */
+    }
+
+    for (i = 0; i < TD5_TG_TEX_TEXELS; i++) {
+        const int x = i % TD5_TG_TEX_DIM;
+        /* Cylindrical shading across the tube: brightest a third of the way in
+         * from the lit edge, falling off to both silhouettes. */
+        const int d  = (x * 3 >= TD5_TG_TEX_DIM)
+                     ? (x * 3 - TD5_TG_TEX_DIM) : (TD5_TG_TEX_DIM - x * 3);
+        int idx = 13 - (d * 11) / (TD5_TG_TEX_DIM * 2);
+        if (idx < 0)  idx = 0;
+        if (idx > 15) idx = 15;
+        tg_put_u8(out, (unsigned)idx);
+    }
+}
+
 /* [R6 item 17] MASONRY pier face -- warm sandstone ashlar in staggered courses
  * (mortar lines every few rows, vertical joints offset course to course), so a
  * stone-style crossing reads as a masonry viaduct. Opaque. */
@@ -21909,6 +22317,22 @@ static int tg_emit_textures(TG_Buf *out)
         for (v = 0; v < TD5_TG_PROPS_TEX_COUNT && v < TD5_TG_R9_INFRA_N; v++)
             tg_emit_real_page(&pages[TD5_TG_INFRA_PAGE(v)], k_props_pal[v],
                               k_props_paln[v], k_props_idx[v], k_props_type[v]);
+    }
+    {   /* [R11 SIGNS item 16] Direction-arrow panels + their post. ALWAYS
+         * emitted, for the same reason as the R9 furniture above: the facade
+         * knob is a taste call, whereas a sign that tells you which way the
+         * road goes has no downside. The loop stops at the smaller of the
+         * header's count and the slots this area owns, so growing the header
+         * cannot walk into the post slot. */
+        int v;
+        for (v = 0; v < k_real_r11sign_arrow_count
+                    && v < TD5_TG_R11_SIGN_N - 1; v++)
+            tg_emit_real_page(&pages[TD5_TG_PAGE_R11_SIGN + v],
+                              k_real_r11sign_arrow_pal[v],
+                              k_real_r11sign_arrow_paln[v],
+                              k_real_r11sign_arrow_idx[v], 1);
+        tg_emit_texture_page_r11_sign_post(
+            &pages[TD5_TG_PAGE_R11_SIGN_POST]);
     }
     tg_emit_texture_page_fb_skyline(&pages[TD5_TG_PAGE_R4_SKYLINE]);  /* [R4 item 5] */
     tg_emit_texture_page_fb_tunnel(&pages[TD5_TG_PAGE_TUNNEL]);

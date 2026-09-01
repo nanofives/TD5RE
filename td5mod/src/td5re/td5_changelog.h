@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 01 (auto-track curve signage, r11)" },
+    { CL_ITEM,    "NEW: generated tracks now sign their corners. A blue" },
+    { CL_ITEM,    "  direction sign with a left or right arrow stands on" },
+    { CL_ITEM,    "  the outside of every sharp bend, five spans before" },
+    { CL_ITEM,    "  it, so a curve is announced instead of discovered" },
+    { CL_ITEM,    "  (TD5RE_R11_SIGNS=0 removes them)" },
+    { CL_ITEM,    "  The arrow artwork is real TD5 art, the only such" },
+    { CL_ITEM,    "  signs in the shipped game (Moscow), on a modelled" },
+    { CL_ITEM,    "  post rather than floating" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 01 (auto-track scenery textures, r11)" },
     { CL_ITEM,    "FIXED: the tree line behind the verge is no longer" },
     { CL_ITEM,    "  smeared into tall grey spikes with a black edge" },
