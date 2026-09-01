@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 01 (snowy medians on auto tracks)" },
+    { CL_ITEM,    "FIXED: on a snowy auto-track stretch, the strip" },
+    { CL_ITEM,    "  between the two halves of a split road is now" },
+    { CL_ITEM,    "  ploughed snow instead of a band of green grass" },
+    { CL_ITEM,    "  when the split starts next to a tunnel exit" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 31 (road markings on widening roads)" },
     { CL_ITEM,    "FIXED: where an auto-track road widens or narrows," },
     { CL_ITEM,    "  the road texture no longer stretches and the lane" },
