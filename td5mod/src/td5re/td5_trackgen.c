@@ -884,6 +884,9 @@ typedef enum {
     /* [R12] PRE-RESERVED, one per area, own line. RENAME YOUR OWN SLOT IN
      * PLACE. Never append here. */
     TG_ACCT_R12_CROSS,      /* CROSS  (20260901 5) forest side road + fold   */
+    /* [R13] PRE-RESERVED, one per area, own line. RENAME YOUR OWN SLOT IN
+     * PLACE. Never append here. */
+    TG_ACCT_R13_FILL,       /* FILL   (20260901 7b) gap-interior infill block */
     TG_ACCT_KIND_COUNT
 } TG_AcctKind;
 
@@ -985,7 +988,10 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
     "r11-signs",            /* SIGNS   */
     /* [R12] one reserved name per area, in enum order. Rename to match your
      * renamed enum constant. Only the LAST entry omits its trailing comma. */
-    "r12-cross"             /* CROSS   */
+    "r12-cross",            /* CROSS   */
+    /* [R13] one reserved name per area, in enum order. Rename to match your
+     * renamed enum constant. Only the LAST entry omits its trailing comma. */
+    "r13-fill"              /* FILL    */
 };
 
 static long s_acct_count[TG_ACCT_KIND_COUNT];
@@ -16568,6 +16574,220 @@ static int tg_cross_emit_street_flank(const TG_FBHook *h)
     return 1;
 }
 
+/* ============== [R13 FILL item 7b] GAP-INTERIOR INFILL BLOCK ================
+ * "The BACK of the buildings of a section after a curve is visible. Fill that
+ * zone with streets and buildings so it reads believably."
+ *
+ * MEASURED CAUSE, not a new city model. A frontage GAP on one side is treated
+ * everywhere in this file as A STREET, and three emitters furnish it:
+ *   tg_city_emit_crossstreet  lays the carriageway outward from the kerb
+ *   tg_cross_emit_street_flank lines the street with blocks -- but ONLY from a
+ *                             CORNER span (`if (!near_corner && !far_corner)
+ *                             continue;`), i.e. the first and last span of the
+ *                             gap
+ *   tg_city_emit_backrows     stands the reveal row, which since R8 CROSS item 1
+ *                             sits at the street's own REACH (19600-21000 raw)
+ *                             so it terminates the vista instead of blocking it
+ * All three are correct for a gap that is one street wide (2-4 spans, 6-8 for an
+ * avenue). They leave nothing at all on a WIDER gap: its interior spans are
+ * neither corner, so no flank is laid, and the only massing anywhere on that
+ * side stands a whole street's reach out. That is CASE A below.
+ *
+ * MEASURED, and it is worth being exact because the first pass at this item got
+ * it wrong. On seed 20260901, standing at the reported span 1677, the backs
+ * actually on show are spans 1709-1712 on side R, 46000-53000 raw across the
+ * chord of the bend. Those sides are BUILT frontage, not gaps -- so CASE A does
+ * not touch them, and no gap-interior fill ever could. What is empty behind them
+ * is empty BY GATE: tg_city_emit_backrows opens with
+ *     if (gate && tg_facade_built(h->si, s)) continue;
+ * on the reasoning that "a solid frontage hides whatever is behind it". True on
+ * a straight -- the road is on the inward side of every frontage. False the
+ * moment the road turns away, which is the whole of the user's viewing
+ * condition. So a built run's rear is the one surface in this file that is
+ * guaranteed to have nothing behind it at any depth, and on a bend it is
+ * broadside to the driver. That is CASE B, and it is the reported zone.
+ *
+ * The zone is therefore (i) GENUINELY EMPTY, not blank-faced and not fogged: the
+ * exposed runs at 1709-1712 report rows=5, so they DO carry a rear sheet
+ * (a frontage run's own missing back sheet is r13-faces' item, not this one),
+ * and they sit inside the draw range. There is simply no geometry behind them.
+ *
+ * Both cases get the same answer, because it is the same missing thing -- the
+ * block that ought to stand one setback back from a street: one solid mass per
+ * span, at the frontage setback plus one service gap, running one span along the
+ * road. It is deliberately NOT frontage -- tg_facade_built is untouched, so the
+ * run/gap pattern, the crossing furniture, the pavement arms and the reveal row
+ * all still read the same opening and none of them moves. The mass is
+ * tg_bg_building_box with solid=1, the same six-sided box the reveal rows and
+ * the street flanks already use, so it reads from behind as well as in front.
+ *
+ * CASE B is deliberately NOT "back rows behind every run" -- that is the
+ * "rows behind rows everywhere" tg_city_emit_backrows' gate exists to prevent,
+ * and it would pay for 993 sides to fix 145. It is gated on the EXPOSURE
+ * predicate instead, so only the sides a driver can see the back of are filled.
+ *
+ * CARRIAGEWAY CLEARANCE. The near face stands at sidewalk + run depth + one
+ * service gap outward of the road edge (>= 7000 raw on the city biomes), and
+ * grows further outward from there, so it can never reach tg_carriageway_reach
+ * and the R7 on-road guard has nothing to drop. Proven by the guard's own reject
+ * count, not by looking at a frame.
+ *
+ * TD5RE_R13_FILL=0 restores the bare interior for an A/B; TD5RE_R13_FILL_REAR=0
+ * keeps case A and drops case B. */
+#define TD5_TG_R13_GAP_KEEP   2      /* spans of the gap left as pure street  */
+#define TD5_TG_R13_SET   1600.0      /* service gap behind the frontage line  */
+#define TD5_TG_R13_SCAN      24      /* spans scanned looking for a corner    */
+/* EXPOSURE constants, shared by the emitter below and the read-only report much
+ * further down. Stated once here because both have to agree on what "the driver
+ * can see the back of this run" means: a report measuring a wider cone than the
+ * emitter fills would print a residue no setting could ever clear. */
+#define TD5_TG_R13_EXPO_BACK  40      /* spans back a camera is tried from   */
+#define TD5_TG_R13_EXPO_NEAR   3      /* ignore cameras this close (own span) */
+#define TD5_TG_R13_EXPO_RANGE 30000.0 /* beyond this the rear is not readable */
+#define TD5_TG_R13_EXPO_COS    0.87   /* forward half-cone, ~30 deg          */
+
+/* Defined with the read-only report below. Forward-declared rather than moved,
+ * so the measurement and the fill cannot drift into two different rules. */
+static int tg_r13_rear_exposed(const TG_NodeList *nl, int si, int left,
+                               const TG_Biome *b, double range, double *far_out);
+
+/* Spans from si to the nearest span on side `s` that carries a standing corner,
+ * walking by `step`. TD5_TG_R13_SCAN if none is found inside the window -- an
+ * opening that long is the end of the city, and its interior is as much a gap
+ * interior as one bounded by two blocks. */
+static int tg_r13_gap_run(int si, int s, int step, int nspans)
+{
+    int k;
+    for (k = 1; k <= TD5_TG_R13_SCAN; k++) {
+        const int j = si + step * k;
+        if (j < 1 || j >= nspans - 1) return TD5_TG_R13_SCAN;
+        if (tg_r11_corner_stands(j, s)) return k;
+    }
+    return TD5_TG_R13_SCAN;
+}
+
+/* Is (si,s) the INTERIOR of a frontage gap -- a side that is open, is not a
+ * park or a branch corridor, and is more than TD5_TG_R13_GAP_KEEP spans from the
+ * nearest standing corner in BOTH directions? Stated once so the emitter below
+ * and the read-only report both answer it from the same rule. */
+static int tg_r13_gap_interior(int si, int s, int nspans)
+{
+    if (tg_facade_built(si, s)) return 0;
+    if (tg_block_is_park(si, s)) return 0;
+    if (tg_side_blocked(si, s ? 1.0 : -1.0)) return 0;
+    if (tg_r13_gap_run(si, s, -1, nspans) <= TD5_TG_R13_GAP_KEEP) return 0;
+    if (tg_r13_gap_run(si, s, +1, nspans) <= TD5_TG_R13_GAP_KEEP) return 0;
+    return 1;
+}
+
+/* THE WHOLE PER-SIDE DECISION, in one place. The emitter and the read-only
+ * report BOTH call this, so "the fill landed at span N" is something the report
+ * can state rather than something a reader has to re-derive from a run summary
+ * and a hash. Returns 0 = nothing here, 1 = CASE A (gap interior), 2 = CASE B
+ * (behind an exposed frontage run). `g` is filled for case B, `rh` is the
+ * per-side hash the caller then reuses for height, page and setback jitter. */
+static int tg_r13_fill_here(const TG_NodeList *nl, int si, int nspans, int s,
+                            const TG_Biome *b, TG_SideGeom *g, unsigned int *rh)
+{
+    int kind;
+
+    *rh = ((unsigned)si * 2654435761u
+         + (unsigned)s * 374761393u) * 2246822519u;
+
+    if (!td5_env_flag_on("TD5RE_R13_FILL")) return 0;
+    if (!(tg_city_sidewalk_w(b) > 0.0)) return 0;
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_INTERSECTIONS")) return 0;
+    if (tg_span_in_bridge_run(si)) return 0;
+    if (tg_up_clear_span(si)) return 0;
+    if (si + 1 >= nl->count) return 0;
+
+    /* CASE A -- GAP INTERIOR. The two spans either side of a corner are the
+     * street mouth the crossing furniture owns; filling them would stand a
+     * block on the junction the R11/R12 corner work just cleared. */
+    if (tg_r13_gap_interior(si, s, nspans)) {
+        kind = 1;
+    } else {
+        /* CASE B -- BEHIND AN EXPOSED FRONTAGE RUN. Measured on seed 20260901:
+         * from the reported span 1677 the backs on show are spans 1709-1712
+         * side R, and those sides are BUILT, not gaps. Behind a built run there
+         * is nothing at all, because tg_city_emit_backrows gates itself off
+         * exactly there ("a solid frontage hides whatever is behind it") --
+         * true on a straight, false the moment the road turns away and the run
+         * is seen broadside across the chord. So the same block this emitter
+         * stands in a gap is stood behind a built run TOO, but only on the
+         * sides a driver can actually see the back of: tg_r13_rear_exposed is
+         * the report's own predicate, so the "exposed=" count it prints is the
+         * population offered here.
+         *
+         * TD5RE_R13_FILL_REAR=0 keeps case A and drops case B, which is the A/B
+         * that separates the two run counts under one accounting slot. */
+        if (!td5_env_flag_on("TD5RE_R13_FILL_REAR")) return 0;
+        tg_side_geom(nl, si, s, b, g);
+        if (!g->built) return 0;
+        if (tg_r13_rear_exposed(nl, si, s, b,
+                                TD5_TG_R13_EXPO_RANGE, NULL) <= 0) return 0;
+        kind = 2;
+    }
+    if ((*rh >> 29) == 0u) return 0;               /* ~12% left as a yard    */
+    return kind;
+}
+
+static int tg_r13_emit_gap_infill(const TG_FBHook *h)
+{
+    const TG_Biome *b = h->b;
+    const double sw = tg_city_sidewalk_w(b);
+    const TG_Node *n0, *n1;
+    int s;
+
+    if (h->si + 1 >= h->nl->count) return 1;
+    n0 = &h->nl->v[h->si];
+    n1 = &h->nl->v[h->si + 1];
+
+    for (s = 0; s < 2; s++) {
+        const double sg = s ? 1.0 : -1.0;
+        const double lx0 = n0->tz * sg, lz0 = -n0->tx * sg;
+        const double lx1 = n1->tz * sg, lz1 = -n1->tx * sg;
+        double set, H, ax, ay, az, bx, by, bz, flen, depth;
+        int rows, cols, page, kind;
+        unsigned int rh;
+        TG_SideGeom g;
+
+        kind = tg_r13_fill_here(h->nl, h->si, h->nspans, s, b, &g, &rh);
+        if (!kind) continue;
+
+        /* Behind a built run the setback must clear THAT run's own depth, which
+         * varies per run (dcols * cell_w, 3000-6000 on this seed) and is not the
+         * biome nominal -- using the nominal would bury the block inside a deep
+         * frontage instead of standing it behind one. */
+        depth = (kind == 2) ? g.depth : tg_facade_depth(b);
+        set   = sw + depth + TD5_TG_R13_SET + (double)(rh % 900u);
+        rows  = b->floors_min + (int)((rh >> 9) % 4u);
+        {   /* [R11 BIOME item 4] thin with the town, like every other mass. */
+            const double tr = tg_town_ramp(h->si);
+            if (tr < 1.0) {
+                int capped = 1 + (int)((double)(rows - 1) * tr + 0.5);
+                if (capped >= 1 && capped < rows) rows = capped;
+            }
+        }
+        H  = (double)rows * tg_facade_floor_h(b);
+        bx = n0->x + lx0 * (n0->width * 0.5 + set);
+        by = n0->y - tg_xstreet_drop(set);
+        bz = n0->z + lz0 * (n0->width * 0.5 + set);
+        ax = (n1->x + lx1 * (n1->width * 0.5 + set)) - bx;
+        ay = (n1->y - tg_xstreet_drop(set)) - by;
+        az = (n1->z + lz1 * (n1->width * 0.5 + set)) - bz;
+        flen = sqrt(ax * ax + az * az);
+        cols = tg_facade_cols_for(flen, (double)b->cell_w, 4);
+        page = tg_facade_page_class(rh, rows);
+        if (!tg_bg_building_box(h->blk, h->moff, h->nmesh, h->maxmesh,
+                                bx, by, bz, ax, ay, az, lx0, lz0, lx1, lz1,
+                                depth, H, cols, rows, page, 1, h->si))
+            return 0;
+        tg_acct(TG_ACCT_R13_FILL, h->si);
+    }
+    return 1;
+}
+
 /* [R8 CROSS] CLASS-LEVEL REPORT. "in this and all crossings" makes the CLASS the
  * acceptance test, and a frame proves one mouth at one span. Every quantity this
  * round changes is a deterministic function of the span index, so the whole class
@@ -16758,6 +16978,236 @@ static void tg_r10_cross_report(const TG_NodeList *nl, int nspans)
     TD5_LOG_I(LOG_TAG,
         "trackgen: r10cross SUMMARY gap_span_sides=%d frontage_walls=%d "
         "flush_no_sidewalk=%d", gapspans, walls, flush);
+}
+
+/* ============ [R13 FILL item 7b] EXPOSED-REAR MEASUREMENT (read-only) =======
+ * "The BACK of the buildings of a section after a curve is visible. Fill that
+ * zone with streets and buildings."
+ *
+ * Three different defects would all look like this from the driver's seat, and
+ * they need three different answers, so the first job is to tell them apart:
+ *   (i)   the zone behind the run is GENUINELY EMPTY -- nothing is emitted there
+ *   (ii)  it is filled, but the rear FACES read as blank (that is r13-faces)
+ *   (iii) it is filled beyond the draw/fog distance
+ * Nothing here decides anything; it prints what the emitters already read.
+ *
+ * EXPOSURE TEST. A run's rear plane sits one run depth outward of its frontage.
+ * Its outward normal is the side's lateral unit. A camera standing on the
+ * centreline at span c sees that rear iff it is on the OUTWARD side of the plane
+ * (dot(C - P, outward) > 0) while the rear is still AHEAD of it along its own
+ * tangent and inside the draw range. On a straight that never happens -- the
+ * road is on the inward side of every frontage. It only happens where the road
+ * has turned away, which is exactly the viewing condition the user described.
+ *
+ * TD5RE_R13_FILL_REPORT=1 turns it on; TD5RE_R13_FILL_SPAN=N (+/- _PAD, default
+ * 12) windows the per-span dump. Off by default. */
+/* The CAM pass is a plain "what is in view" census, so it uses a wider cone and
+ * a longer reach than the exposure predicate and prints the front/rear verdict
+ * per row instead of filtering on it. */
+#define TD5_TG_R13_CAM_RANGE 60000.0
+#define TD5_TG_R13_CAM_COS     0.60   /* ~53 deg half-cone                   */
+
+/* Rear-plane midpoint of the run at (si,left), and its outward unit. Returns 0
+ * when no wall actually stands on that side. */
+static int tg_r13_rear_plane(const TG_NodeList *nl, int si, int left,
+                             const TG_Biome *b, double *px, double *pz,
+                             double *ux, double *uz, double *rows_out)
+{
+    TG_SideGeom g;
+    double ox, oz, len;
+    if (si < 1 || si + 1 >= nl->count) return 0;
+    tg_side_geom(nl, si, left, b, &g);
+    if (!g.built) return 0;
+    ox = (g.lx0 + g.lx1) * 0.5;
+    oz = (g.lz0 + g.lz1) * 0.5;
+    len = sqrt(ox * ox + oz * oz);
+    if (!(len > 1e-9)) return 0;
+    ox /= len; oz /= len;
+    *px = g.bx + g.ax * 0.5 + ox * g.depth;
+    *pz = g.bz + g.az * 0.5 + oz * g.depth;
+    *ux = ox; *uz = oz;
+    if (rows_out) *rows_out = (double)g.rows;
+    return 1;
+}
+
+/* Distance at which the rear plane of the run at (si,left) is visible from a
+ * camera standing on the centreline at span c, or 0.0 if it is not. Four
+ * conditions, all of which the driver's eye imposes:
+ *   OUTWARD  the camera is on the far side of the rear plane
+ *   AHEAD    the rear is in front of a car driving the ring forwards
+ *   CONE     it is inside the forward half-angle, not out of the side window
+ *   RANGE    it is close enough to be drawn rather than fogged out */
+static double tg_r13_rear_seen_from(const TG_NodeList *nl, int si, int left,
+                                    const TG_Biome *b, int c, double range)
+{
+    double p_x, p_z, o_x, o_z, rows, vx, vz, d, fx, fz;
+    const TG_Node *nc;
+    if (c < 1 || c > nl->count - 2) return 0.0;
+    if (c > si - TD5_TG_R13_EXPO_NEAR && c < si + TD5_TG_R13_EXPO_NEAR)
+        return 0.0;
+    if (!tg_r13_rear_plane(nl, si, left, b, &p_x, &p_z, &o_x, &o_z, &rows))
+        return 0.0;
+    nc = &nl->v[c];
+    vx = nc->x - p_x; vz = nc->z - p_z;
+    if (vx * o_x + vz * o_z <= 0.0) return 0.0;        /* camera is inside  */
+    fx = p_x - nc->x; fz = p_z - nc->z;
+    d = sqrt(fx * fx + fz * fz);
+    if (!(d > 1.0) || d > range) return 0.0;
+    if ((fx * nc->tx + fz * nc->tz) / d < TD5_TG_R13_EXPO_COS) return 0.0;
+    return d;
+}
+
+/* From how many centreline spans is that rear plane visible, and from the
+ * furthest such camera, how far away is it? */
+static int tg_r13_rear_exposed(const TG_NodeList *nl, int si, int left,
+                               const TG_Biome *b, double range, double *far_out)
+{
+    int c, lo, hi, n = 0;
+    double fdist = 0.0;
+
+    if (far_out) *far_out = 0.0;
+    lo = si - TD5_TG_R13_EXPO_BACK;   if (lo < 1) lo = 1;
+    hi = si + TD5_TG_R13_EXPO_BACK;   if (hi > nl->count - 2) hi = nl->count - 2;
+    for (c = lo; c <= hi; c++) {
+        const double d = tg_r13_rear_seen_from(nl, si, left, b, c, range);
+        if (!(d > 0.0)) continue;
+        n++;
+        if (d > fdist) fdist = d;
+    }
+    if (far_out) *far_out = fdist;
+    return n;
+}
+
+static void tg_r13_fill_report(const TG_NodeList *nl, int nspans)
+{
+    const int wspan = td5_env_int("TD5RE_R13_FILL_SPAN", -1, -1, 100000);
+    const int wpad  = td5_env_int("TD5RE_R13_FILL_PAD", 12, 0, 4000);
+    int si, s, ring = (s_ring_len > 0) ? s_ring_len : nspans;
+    int fronts = 0, expo = 0, expo_noback = 0, expo_nofill = 0;
+    int gaps = 0, interior = 0, fill_gap = 0, fill_rear = 0;
+    double expo_far_max = 0.0;
+    char win[900];
+    int wpos = 0;
+    win[0] = '\0';
+
+    /* td5_env_flag_on returns 1 when the variable is UNSET, so an "opt-in"
+     * report gated on it is in fact always on (which is why the older dumps in
+     * this file fill race.log on every run and truncated this one). The opt-in
+     * accessor is td5_env_flag_off. */
+    if (!td5_env_flag_off("TD5RE_R13_FILL_REPORT")) return;
+    if (ring > nspans) ring = nspans;
+    if (ring > TD5_TG_MAX_SPANS) ring = TD5_TG_MAX_SPANS;
+
+    TD5_LOG_I(LOG_TAG, "trackgen: ---- r13fill exposed-rear dump ----");
+    for (si = 1; si < ring - 1; si++) {
+        const TG_Biome *b = &k_biomes[tg_scenery_biome_index(si)];
+        const int in_win = (wspan < 0)
+                        || (si >= wspan - wpad && si <= wspan + wpad);
+        if (!(tg_city_sidewalk_w(b) > 0.0)) continue;
+        for (s = 0; s < 2; s++) {
+            TG_SideGeom g, gf;
+            double fdist = 0.0, dep;
+            int nsee, has_back, backrow, kind;
+            unsigned int rh;
+            /* The EMITTER's own decision, not a restatement of it: same
+             * function, same arguments. A "fill=" of 1 or 2 on a row is proof
+             * the block stands at that span-side, which a run summary and a
+             * hash cannot give a reader. */
+            kind = tg_r13_fill_here(nl, si, nspans, s, b, &gf, &rh);
+            if (kind == 1) fill_gap++;
+            else if (kind == 2) fill_rear++;
+            tg_side_geom(nl, si, s, b, &g);
+            if (!g.built) {
+                /* GAP side: count it, and record which of its spans the R13
+                 * infill claims, so "the fill landed in the user's zone" is a
+                 * span list rather than an inference off the run summary. */
+                if (!tg_facade_built(si, s)) {
+                    gaps++;
+                    if (tg_r13_gap_interior(si, s, ring)) interior++;
+                }
+                if (kind && in_win && wpos < (int)sizeof(win) - 16)
+                    wpos += snprintf(win + wpos, sizeof(win) - (size_t)wpos,
+                                     "%s%d%c%d", wpos ? "," : "",
+                                     si, s ? 'L' : 'R', kind);
+                continue;
+            }
+            fronts++;
+            nsee = tg_r13_rear_exposed(nl, si, s, b,
+                                       TD5_TG_R13_EXPO_RANGE, &fdist);
+            has_back = (g.rows >= TD5_TG_FACADE_TALL_ROWS);
+            /* What tg_city_emit_backrows would do on this side: it is GATED
+             * off wherever the frontage stands, so a built run has nothing
+             * behind it at all. */
+            backrow = !(td5_env_flag_on("TD5RE_AUTOTRACK_BACKROW_STREETS")
+                        && tg_facade_built(si, s));
+            dep = g.depth;
+            if (nsee > 0) {
+                expo++;
+                if (!has_back)  expo_noback++;
+                if (!backrow)   expo_nofill++;
+                if (fdist > expo_far_max) expo_far_max = fdist;
+            }
+            if (kind && wpos < (int)sizeof(win) - 16 && in_win)
+                wpos += snprintf(win + wpos, sizeof(win) - (size_t)wpos,
+                                 "%s%d%c%d", wpos ? "," : "",
+                                 si, s ? 'L' : 'R', kind);
+            if (in_win)
+                TD5_LOG_I(LOG_TAG,
+                    "trackgen: r13fill si=%-5d side=%c rows=%-2d depth=%-7.0f "
+                    "back=%d backrow=%d seen_from=%-3d fdist=%.0f bend=%.3f "
+                    "fill=%d",
+                    si, s ? 'L' : 'R', g.rows, dep, has_back, backrow,
+                    nsee, fdist, tg_turn_bend(si), kind);
+        }
+    }
+    TD5_LOG_I(LOG_TAG,
+        "trackgen: r13fill SUMMARY fronts=%d exposed=%d exposed_noback=%d "
+        "exposed_nofill=%d far_max=%.0f", fronts, expo, expo_noback,
+        expo_nofill, expo_far_max);
+    TD5_LOG_I(LOG_TAG,
+        "trackgen: r13fill GAPS gap_sides=%d gap_interior=%d fill_gap=%d "
+        "fill_rear=%d fill_total=%d", gaps, interior, fill_gap, fill_rear,
+        fill_gap + fill_rear);
+    TD5_LOG_I(LOG_TAG,
+        "trackgen: r13fill FILLED window[%d+/-%d] (span/side/case): %s",
+        wspan, wpad, win[0] ? win : "-");
+
+    /* CAMERA-CENTRIC pass: stand at TD5RE_R13_FILL_CAM and list every rear the
+     * driver can actually see from there. This is the screenshot's own viewing
+     * condition, so it is the one that has to reproduce the complaint. */
+    {
+        const int cam = td5_env_int("TD5RE_R13_FILL_CAM", wspan, -1, 100000);
+        int seen = 0;
+        if (cam > 0 && cam < ring - 1) {
+            for (si = 1; si < ring - 1; si++) {
+                const TG_Biome *b = &k_biomes[tg_scenery_biome_index(si)];
+                if (!(tg_city_sidewalk_w(b) > 0.0)) continue;
+                for (s = 0; s < 2; s++) {
+                    const TG_Node *nc = &nl->v[cam];
+                    TG_SideGeom g;
+                    double p_x, p_z, o_x, o_z, rows, fx, fz, d, cosf, rear;
+                    if (!tg_r13_rear_plane(nl, si, s, b, &p_x, &p_z,
+                                           &o_x, &o_z, &rows)) continue;
+                    fx = p_x - nc->x; fz = p_z - nc->z;
+                    d = sqrt(fx * fx + fz * fz);
+                    if (!(d > 1.0) || d > TD5_TG_R13_CAM_RANGE) continue;
+                    cosf = (fx * nc->tx + fz * nc->tz) / d;
+                    if (cosf < TD5_TG_R13_CAM_COS) continue;
+                    rear = (nc->x - p_x) * o_x + (nc->z - p_z) * o_z;
+                    tg_side_geom(nl, si, s, b, &g);
+                    seen++;
+                    TD5_LOG_I(LOG_TAG,
+                        "trackgen: r13fill CAM=%d sees si=%-5d side=%c rows=%-2d "
+                        "d=%-7.0f cos=%.3f face=%s back=%d",
+                        cam, si, s ? 'L' : 'R', g.rows, d, cosf,
+                        rear > 0.0 ? "REAR" : "front",
+                        g.rows >= TD5_TG_FACADE_TALL_ROWS);
+                }
+            }
+            TD5_LOG_I(LOG_TAG,
+                "trackgen: r13fill CAM=%d rears_visible=%d", cam, seen);
+        }
+    }
 }
 
 /* ============== [R11 CITY] FRONTAGE / JUNCTION DUMP (read-only) =============
@@ -17428,6 +17878,7 @@ static int tg_emit_fb_cross(const TG_FBHook *h)
     if (!tg_cross_emit_sidewalls(h)) return 0;
     if (!tg_cross_emit_join_zebra(h)) return 0;
     if (!tg_cross_emit_street_flank(h)) return 0;   /* [R8 CROSS item 1] */
+    if (!tg_r13_emit_gap_infill(h)) return 0;       /* [R13 FILL item 7b] */
     return 1;
 }
 
@@ -22218,6 +22669,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     tg_r10_cross_report(nl, nspans);  /* [R10 CROSS] side-street setback, opt-in */
     tg_r11_city_report(nl, nspans);   /* [R11 CITY] frontage/junction dump, opt-in */
     tg_r13_junc_report(nl, nspans);   /* [R13 JUNCTION] bend-fold sweep, opt-in */
+    tg_r13_fill_report(nl, nspans);   /* [R13 FILL] exposed-rear sweep, opt-in */
     tg_r9_city_reset();               /* [R9 CITY] pavement/massing sweep */
     tg_r13_faces_reset();             /* [R13 FACES] run-end return census */
 
