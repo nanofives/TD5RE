@@ -8434,11 +8434,90 @@ static int tg_span_in_tunnel(int si)
  * and why this returns a single span rather than a range. Centre of the run, so
  * it lands where the old bore's midpoint was and the approach is symmetric.
  * Returns -1 when the run containing si is not an underpass. */
+/* ============ [R12 OVERPASS items 14a + 11b] WHERE A CROSSING MAY LAND ======
+ * "A highway ran straight into the water. The overpass should either CURVE to
+ *  avoid the bridge, OR run alongside the road at a higher level and finish
+ *  past the coastline."  and  "there is no background geometry behind it."
+ *
+ * ONE ROOT, TWO REPORTS. R11 item 7a extended each arm from a flat 13000 to
+ * `half + tg_far_reach()` -- 33000-36598 on this seed -- so that the deck lands
+ * on the drawn edge instead of stopping in mid-air. That was right about the
+ * length and silent about the GROUND it now flies over. The arm is a single
+ * straight lateral sweep at one height, and two kinds of span have nothing
+ * under them to land on:
+ *
+ *   WATER. A water biome's ground has fallen THROUGH sea level by
+ *   TD5_TG_SHORE_END (9600) from the road edge, and the bridge crossings dig a
+ *   gorge with a river plane in it. An arm of 33000 is guaranteed to end over
+ *   open water on such a span -- literally "a highway ran straight into the
+ *   water", and the same reason there is nothing behind the deck: what is
+ *   behind it is sea, so the deck is silhouetted against an empty plane with no
+ *   massing of any kind (measured: the R11 clear band suppresses the frontage
+ *   for 3 spans, and on a water span there is no backdrop to see through it).
+ *
+ *   A BRIDGE RUN. The road there is itself a deck over a river. A second deck
+ *   flying across it is the unreadable pile-up the item describes, and it is
+ *   also where the coastline/gorge geometry lives.
+ *
+ * WHY RELOCATE RATHER THAN CURVE OR PARALLEL. Both alternatives the item offers
+ * are new ELEMENTS, not fixes. "Curve the deck" means replacing the single quad
+ * with a swept multi-segment ribbon plus a swept parapet, and the guard's own
+ * quad-framing rule (R11: a quad whose corners straddle more than
+ * TD5_TG_GUARD_EX_SPANS has no frame to be judged in) would then have to be
+ * re-derived per segment. "Run alongside at a higher level" is an entire
+ * parallel elevated carriageway with its own piers, ramps and massing gates.
+ * Relocation reuses machinery that is already here and already trusted: a
+ * crossing already owns one span of a TD5_TG_TUNNEL_RUN-span run, and the run
+ * is 40 spans long, so there is ample slack to put the crossing where it can
+ * actually cross. It is "curve to avoid the bridge" expressed in the one degree
+ * of freedom this element has.
+ *
+ * INVARIANT PRESERVED. Every caller asks tg_underpass_span(si) and compares to
+ * si (see tg_up_clear_span and the emit site), so the answer only has to be the
+ * SAME for every span of a run. The walk below is symmetric about the run centre
+ * and bounded by the run, so it is still a pure function of si and a run still
+ * carries exactly one crossing -- or none, when the whole run is water or deck,
+ * which is the correct answer rather than a stub over the sea.
+ *
+ * TD5RE_R12_UP_SHORE=0 restores the R11 centre-of-run placement for an A/B. */
+#define TD5_TG_UP_BRIDGE_CLEAR 4    /* spans of bridge approach kept crossing-free */
+#define TD5_TG_UP_SLIDE_MAX   14    /* how far along its run a crossing may slide  */
+
+static int tg_r12_up_shore(void) { return td5_env_flag_on("TD5RE_R12_UP_SHORE"); }
+
+/* Lateral, from the road EDGE, at which a water biome's shore ramp has fallen
+ * through sea level -- i.e. where the ground stops and the water starts.
+ * Defined with TD5_TG_SHORE_END down in the terrain code and reached through
+ * this accessor because the overpass is compiled above it, the same way
+ * tg_far_reach is. One definition, so the arm and the beach cannot disagree
+ * about where the coastline is. */
+static double tg_shore_end(void);
+
+/* Can a crossing land on span si? Pure function of si, exactly like the
+ * predicate it feeds, so no caller needs a node list to ask. */
+static int tg_up_span_crossable(int si)
+{
+    if (si < 0) return 0;
+    /* The seaward arm would end over open water -- see the block above. */
+    if (tg_biome_span_has_water(si)) return 0;
+    /* The road here is a deck over a river; so would the crossing be. */
+    if (tg_span_near_bridge(si, TD5_TG_UP_BRIDGE_CLEAR)) return 0;
+    return 1;
+}
+
 static int tg_underpass_span(int si)
 {
     const int t0 = (si / TD5_TG_TUNNEL_RUN) * TD5_TG_TUNNEL_RUN;
+    const int c  = t0 + TD5_TG_TUNNEL_RUN / 2;
+    int d;
     if (tg_tunnel_kind(si) != TG_TUN_UNDERPASS) return -1;
-    return t0 + TD5_TG_TUNNEL_RUN / 2;
+    if (!tg_r12_up_shore()) return c;
+    for (d = 0; d <= TD5_TG_UP_SLIDE_MAX; d++) {
+        if (c - d >= t0 && tg_up_span_crossable(c - d)) return c - d;
+        if (c + d <= t0 + TD5_TG_TUNNEL_RUN - 1 && tg_up_span_crossable(c + d))
+            return c + d;
+    }
+    return -1;                       /* whole run is water or deck: no crossing */
 }
 
 /* Lining page for the tunnel RUN containing si (item 16a).
@@ -9284,6 +9363,11 @@ static int tg_emit_tunnel(const TG_NodeList *nl, int si, TG_Buf *blk,
  * TD5RE_R11_UP_CLEAR. TD5RE_R11_UP_DIAG=1 adds the per-span measurement lines.
  * ========================================================================= */
 #define TD5_TG_UP_CLEAR_SPANS 1     /* deck half-depth 1500 / span 1500 = 1 */
+/* [R12 item 11c] Extra spans either side of the deck footprint that carry no
+ * street intersection. A junction is not just its zebra: the crossing quad, the
+ * corner pavement arms and the side street itself run on for several spans, so
+ * the band a junction needs to be legible is wider than the deck. */
+#define TD5_TG_UP_XCLEAR      3
 
 static double tg_far_reach(void);           /* defined with TD5_TG_FAR_REACH */
 
@@ -9331,6 +9415,19 @@ static double tg_up_reach(const TG_NodeList *nl, int si, int is_left,
 
     if (!td5_env_flag_on("TD5RE_R11_UP_REACH")) return TD5_TG_UP_REACH;
     want = half + tg_far_reach();
+    /* [R12 item 14a] BELT AND BRACES on "no highway into the water". Placement
+     * (tg_up_span_crossable) already refuses a water span outright, so this
+     * cannot fire on a stock build -- it exists because the two rules answer
+     * different questions and only this one is asked per ARM. A crossing whose
+     * own span is dry can still have the sea on one side if a future placement
+     * rule relaxes, and an arm is the thing that reaches, so the arm carries its
+     * own limit: stop at the shore ramp's end, where the ground has fallen to
+     * sea level, instead of sailing past it. */
+    if (tg_r12_up_shore() && tg_biome_span_has_water(si) &&
+        tg_water_side(si) == (is_left ? 1.0 : -1.0)) {
+        const double shore = tg_road_half_width(nl, si) + tg_shore_end();
+        if (want > shore) want = shore;
+    }
     {   /* Span length from the node list itself: spec->span_length is not in
          * scope here and this emitter must not hold a second opinion. */
         const int a = (si + 1 < nl->count) ? si + 1 : si - 1;
@@ -9386,6 +9483,58 @@ static double tg_up_pier_halfdeep(void)
          ? TD5_TG_UP_HALFDEEP : TD5_TG_UP_HALFDEEP + 1900.0;
 }
 
+/* ================= [R12 OVERPASS item 11a] THE PIER IS OFF THE ROAD =========
+ * "This overpass's pillar stands ON the road."
+ *
+ * MEASURED ROOT, and it is the wrong AUTHORITY rather than a wrong number. The
+ * abutments are placed at `half + 380` from the bore centre, where `half` comes
+ * from tg_tunnel_bore -- and tg_tunnel_bore answers a DIFFERENT question. It
+ * reports the clear width a BORE has to enclose at ONE span, from
+ * `nl->v[si].width * 0.5`, and it CAPS itself at `w * 1.5` on a fork with the
+ * stated consequence that "beyond the cap the branch simply runs outside the
+ * tunnel". For a tunnel wall that trade is defensible; for a PIER it is the
+ * bug, because "outside the enclosure" and "on the carriageway" are the same
+ * place. Three separate ways the pier lands on tarmac fall out of that:
+ *
+ *   1. ONE SPAN. The pier is 2*pier_dp = 3000 deep along our road (R11 item 7b
+ *      made it exactly as wide as the deck), so its footprint covers si-1..si+1,
+ *      but its lateral is taken from span si's width alone. Where the road
+ *      WIDENS -- and widening roads are a live feature as of the August 31
+ *      change -- the neighbouring span is wider than the span the pier was
+ *      sized on, and the pier foot is inside it.
+ *   2. THE FORK CAP. On a fork span the branch corridor bows out past `w * 1.5`
+ *      and tg_tunnel_bore deliberately stops following it. The pier then stands
+ *      in the branch carriageway.
+ *   3. NO MARGIN AT ALL. The pier's inner face sits at exactly `half`, i.e.
+ *      flush with the road edge, where every other roadside object in this
+ *      generator stands off by TD5_TG_CARRIAGEWAY_MARGIN.
+ *
+ * THE FIX IS TO ASK THE RIGHT AUTHORITY. tg_carriageway_reach is the single
+ * definition of "outermost drivable lateral on this side" -- the on-road guard,
+ * the roadside guardrail and the bridge parapet all already judge by it -- and
+ * it covers the main road, the bowed branch at its current width and the gore
+ * between them, and it already takes the wider of a span's two ends so a width
+ * ramp cannot under-report. Ask it over the PIER'S OWN FOOTPRINT and add the
+ * house verge. The pier can then only ever move OUTWARD, so the crossing's
+ * clear span never shrinks and the deck (which reaches tens of thousands of
+ * units further) is unaffected.
+ *
+ * TD5RE_R12_UP_PIERCLEAR=0 restores the bore-derived offset for an A/B. */
+static double tg_up_pier_clear(const TG_NodeList *nl, int si, double side)
+{
+    double r = 0.0;
+    int k;
+    if (!nl) return 0.0;
+    for (k = -TD5_TG_UP_CLEAR_SPANS; k <= TD5_TG_UP_CLEAR_SPANS; k++) {
+        const int s = si + k;
+        double rr;
+        if (s < 0 || s >= nl->count) continue;
+        rr = tg_carriageway_reach(nl, s, side);
+        if (rr > r) r = rr;
+    }
+    return r + TD5_TG_CARRIAGEWAY_MARGIN;
+}
+
 /* Does the overpass deck's own footprint cover span si? Every massing gate
  * reads this, so "no buildings under the highway" is one statement. Stateless
  * and derived only from si, like tg_span_in_bridge_run. */
@@ -9397,6 +9546,26 @@ static int tg_up_clear_span(int si)
         const int s = si + k;
         if (s >= 0 && tg_underpass_span(s) == s) return 1;
     }
+    return 0;
+}
+
+/* [R12 item 11c] The band that carries NO STREET INTERSECTION, widened from the
+ * deck's own footprint (tg_up_clear_span) by TD5_TG_UP_XCLEAR spans each side.
+ *
+ * A junction is not just its zebra. MEASURED: gating only the crossing
+ * predicate removed 2 zebras on seed 20260901 and left both intersections
+ * standing -- the side-street CARRIAGEWAY (tg_city_emit_crossstreet) runs on
+ * every span of a frontage gap, not only on the span the crossing is painted
+ * on, so the junction the item is about survived its own crosswalk being
+ * deleted. Both readers gate on this one predicate now, which is what makes
+ * "no intersection under the deck" a single statement rather than a rule about
+ * paint. */
+static int tg_up_xclear_span(int si)
+{
+    int k;
+    if (!td5_env_flag_on("TD5RE_R12_UP_XGATE")) return 0;
+    for (k = -TD5_TG_UP_XCLEAR; k <= TD5_TG_UP_XCLEAR; k++)
+        if (si + k >= 0 && tg_up_clear_span(si + k)) return 1;
     return 0;
 }
 
@@ -9417,6 +9586,26 @@ static void tg_r11_up_diag(int si, double rl, double rr, double pier_dp,
               si, 2.0 * dp, 2.0 * pier_dp, (2.0 * pier_dp) / (2.0 * dp),
               rl, rr, tg_far_reach(),
               si - TD5_TG_UP_CLEAR_SPANS, si + TD5_TG_UP_CLEAR_SPANS);
+}
+
+/* [R12 item 11a] MEASURE THE THING THE ITEM IS ABOUT, per pier, per side: where
+ * the pier's road-facing face sits against the widest carriageway under its own
+ * footprint. `intr` is the number the report is: positive means the pier foot
+ * is INSIDE the tarmac, which is the defect verbatim. Logged unconditionally --
+ * two lines per crossing on a 1987-span track -- because R11 shipped this
+ * emitter's last round of defects verified by numbers that were never this
+ * number, and a measurement nobody prints is a measurement nobody checks. */
+static void tg_r12_pier_diag(const TG_NodeList *nl, int si, double sgn,
+                             double shift, double was, double now)
+{
+    const double clear = tg_up_pier_clear(nl, si, sgn);
+    const double face_was = sgn * (shift + sgn * (was - 380.0));
+    const double face_now = sgn * (shift + sgn * (now - 380.0));
+    TD5_LOG_I(LOG_TAG,
+              "trackgen: [R12 item 11a] pier @%d %s -- carriageway reach+verge "
+              "%.0f, foot was %.0f (intr %+.0f) now %.0f (intr %+.0f)",
+              si, sgn > 0.0 ? "L" : "R", clear,
+              face_was, clear - face_was, face_now, clear - face_now);
 }
 
 /* Takes moff/nmesh directly rather than reporting a count the caller divides
@@ -9466,17 +9655,30 @@ static int tg_emit_underpass(const TG_NodeList *nl, int si, TG_Buf *blk,
      * 3000 -- to read as a retaining embankment, and that mismatch is the
      * "support pillars are the wrong width" report. --- */
     for (s = 0; s < 2; s++) {
-        const double sgn = s ? 1.0 : -1.0;
+        const double sgn = s ? 1.0 : -1.0;      /* +1 = LEFT (lx = tz) */
+        double woff = wall_off;
+        /* [R12 item 11a] The pier's inner face must clear the widest carriageway
+         * anywhere under its own footprint, with the house verge. `woff` is
+         * measured from the BORE CENTRE (shift) and the inner face is 380 nearer
+         * the road than the pier centre, so the requirement
+         *     sgn * (shift + sgn * (woff - 380)) >= clear
+         * rearranges to the offset below. max(), never min(): a pier may only
+         * ever move further out. */
+        if (td5_env_flag_on("TD5RE_R12_UP_PIERCLEAR")) {
+            const double need = tg_up_pier_clear(nl, si, sgn) - sgn * shift + 380.0;
+            if (need > woff) woff = need;
+        }
         if (*nmesh + 1 > maxmesh) return 1;      /* budget, not an error */
         moff[(*nmesh)++] = blk->len;
-        if (!tg_emit_box_mesh(blk, ax + lx * wall_off * sgn,
+        if (!tg_emit_box_mesh(blk, ax + lx * woff * sgn,
                               n->y + TD5_TG_UP_CLEAR * 0.5,
-                              az + lz * wall_off * sgn,
+                              az + lz * woff * sgn,
                               380.0, TD5_TG_UP_CLEAR * 0.5, pier_dp,
                               n->tx, n->tz, TD5_TG_PAGE_R9_UP_ABUT, 2400.0,
                               0xFFE0DCD4u))
             return 0;
         tg_acct(TG_ACCT_R9_UNDERPASS, si);
+        tg_r12_pier_diag(nl, si, sgn, shift, wall_off, woff);
     }
 
     /* --- DECK: soffit + top + two fasciae in ONE mesh, three pages.
@@ -11136,6 +11338,10 @@ static int tg_emit_bridge_coast(const TG_NodeList *nl, int si,
  * the actual bug being fixed. */
 #define TD5_TG_SHORE_VERGE     3600.0
 #define TD5_TG_SHORE_END       9600.0
+/* [R12 item 14a] The overpass arm caps itself against the coastline through
+ * this, so "where the water starts" is stated once. See the declaration in the
+ * overpass block. */
+static double tg_shore_end(void) { return TD5_TG_SHORE_END; }
 /* How far out from the deck edge the far bank of a gorge starts. Inside this,
  * beside a bridge, there is nothing but air and the river below -- which is the
  * point: the bank used to start AT the deck edge at road level and hid the
@@ -12881,8 +13087,11 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk,
     double flx, fly, flz, frx, fry, frz;   /* far  left / right road edge */
     double nux, nuz, fux, fuz;             /* outward lateral units */
     double len, cx, cy, cz, radius = 0.0;
-    double px[24], py[24], pz[24], uu[24], vv[24];
-    int side, i, n = 0;
+    /* [R12 item 14b] 20 per side, not 12: the 3 body quads plus up to 2 end
+     * caps. Sized for the worst case (both ends capped on both sides) so the
+     * cap can never be the thing that overruns. */
+    double px[40], py[40], pz[40], uu[40], vv[40];
+    int side, i, n = 0, rails = 0;
 
     *emitted = 0;
     tg_road_edge(nl, si, 0.0, 0.0, 1.0, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
@@ -12998,6 +13207,7 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk,
         }
         /* Claim this road edge: this side is now committed to geometry. */
         tg_rail_edge_note(TG_RAIL_ROADSIDE, si, s);
+        rails++;                       /* [R12 item 14b] see the tg_acct_n below */
         /* Along-road slide that goes with a given height offset, so the post
          * leans with the road's pitch instead of standing plumb. Zero on a flat
          * span (n_along = 0), which keeps flat road byte-identical. */
@@ -13080,6 +13290,40 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk,
         px[n]=nobt_x; py[n]=nyt; pz[n]=nobt_z; uu[n]=u0; vv[n]=v_cap; n++;
         px[n]=fobt_x; py[n]=fyt; pz[n]=fobt_z; uu[n]=u1; vv[n]=v_cap; n++;
         px[n]=fibt_x; py[n]=fyt; pz[n]=fibt_z; uu[n]=u1; vv[n]=v_top; n++;
+
+        /* [R12 OVERPASS item 14b] END CAP AT A BRIDGE MOUTH. "Elevated
+         * sidewalks and guardrails stop abruptly just before the bridge."
+         *
+         * The barrier is an open prism -- inner face, outer face, top cap, and
+         * nothing closing either END. R9 RAILFIX made that visible: the roadside
+         * rail YIELDS every deck edge to the bridge parapet (tg_rail_deck_here),
+         * so the run does not fade out on a bend, it is cut off square one span
+         * before the deck and you see into the hollow section.
+         *
+         * Scoped to the reported cause rather than to every run end on the
+         * track: a run that ends because the bend straightened out ends on open
+         * road where the stub reads as a rail terminal, while a run that ends
+         * because the NEXT span handed its edges to another treatment ends at a
+         * hard structural boundary. Tunnel mouths are the same hand-off
+         * (tg_span_in_tunnel excludes the bore) and get the same cap.
+         *
+         * TD5RE_R12_TERMCAP=0 restores the open ends for an A/B. */
+        if (td5_env_flag_on("TD5RE_R12_TERMCAP")) {
+            if (si > 0 && (tg_rail_deck_here(nl, si - 1) ||
+                           tg_span_in_tunnel(si - 1))) {
+                px[n]=nibb_x; py[n]=nyb; pz[n]=nibb_z; uu[n]=u0; vv[n]=v_base; n++;
+                px[n]=nobb_x; py[n]=nyb; pz[n]=nobb_z; uu[n]=u0; vv[n]=v_base; n++;
+                px[n]=nobt_x; py[n]=nyt; pz[n]=nobt_z; uu[n]=u0; vv[n]=v_top;  n++;
+                px[n]=nibt_x; py[n]=nyt; pz[n]=nibt_z; uu[n]=u0; vv[n]=v_top;  n++;
+            }
+            if (si + 2 < nl->count && (tg_rail_deck_here(nl, si + 1) ||
+                                       tg_span_in_tunnel(si + 1))) {
+                px[n]=fibb_x; py[n]=fyb; pz[n]=fibb_z; uu[n]=u1; vv[n]=v_base; n++;
+                px[n]=fobb_x; py[n]=fyb; pz[n]=fobb_z; uu[n]=u1; vv[n]=v_base; n++;
+                px[n]=fobt_x; py[n]=fyt; pz[n]=fobt_z; uu[n]=u1; vv[n]=v_top;  n++;
+                px[n]=fibt_x; py[n]=fyt; pz[n]=fibt_z; uu[n]=u1; vv[n]=v_top;  n++;
+            }
+        }
     }
 
     /* [R9 RAILFIX] BOTH sides can now be refused (the left side was previously
@@ -13135,8 +13379,11 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk,
         tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
     }
     /* One mesh, but one rail per side and the right side can be skipped over a
-     * fork, so count RAILS: each pushes 3 quads = 12 verts. */
-    tg_acct_n(TG_ACCT_GUARDRAIL, si, n / 12);
+     * fork, so count RAILS. Counted as the loop runs rather than divided out of
+     * the vertex total: since [R12 item 14b] a rail is 12 verts OR 16 OR 20
+     * depending on how many of its ends are capped, so n/12 would over- or
+     * under-count exactly on the spans the caps land. */
+    tg_acct_n(TG_ACCT_GUARDRAIL, si, rails);
     return !blk->oom;
 }
 
@@ -13248,9 +13495,30 @@ static void tg_city_push_quad(double *px, double *py, double *pz,
  * UVs are isotropic (u = width/SPAN_LENGTH, v advances one tile per span) for
  * the same reason tg_emit_ground does it: a stretched u both smears the paving
  * and defeats the box-filter mips, which is what made the old ground shimmer. */
+/* [R12 OVERPASS item 14b] Does the raised pavement actually STAND on side `s`
+ * (1 = left) at span si? These are tg_city_emit_sidewalk's own gate conditions
+ * stated once, so the end cap below closes exactly the runs the slab really
+ * has -- a cap keyed off a looser predicate would float where the pattern says
+ * "paved" but the emitter skipped the span, which is the mistake R5 item 15
+ * documents for the facade caps. */
+static int tg_r12_pave_stands(const TG_NodeList *nl, int si, int s)
+{
+    const TG_Biome *b;
+    double sw;
+    if (!nl || si < 0 || si + 1 >= nl->count) return 0;
+    if (tg_span_in_bridge_run(si)) return 0;          /* the deck carries none */
+    b = &k_biomes[tg_scenery_biome_index(si)];
+    if (!(tg_city_sidewalk_w(b) > 0.0)) return 0;
+    sw = tg_city_sidewalk_w_at(nl, si, b);
+    if (!(tg_pavement_side_width(nl, si, s ? 1.0 : -1.0, sw) > 0.0)) return 0;
+    if (td5_env_flag_on("TD5RE_AUTOTRACK_XSTOP") && !tg_facade_built(si, s))
+        return 0;
+    return 1;
+}
+
 static int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
 {
-    double px[16], py[16], pz[16], uu[16], vv[16];
+    double px[32], py[32], pz[32], uu[32], vv[32];
     double e[10], q[12], t[8];
     int seg_page = TD5_TG_PAGE_SIDEWALK, seg_nq;
     int s, n = 0;
@@ -13300,6 +13568,48 @@ static int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
         t[4] = u_k; t[5] = (double)h->si + 1.0;
         t[6] = 0.0; t[7] = (double)h->si + 1.0;
         tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+
+        /* [R12 OVERPASS item 14b] END CAP. "Elevated sidewalks ... stop abruptly
+         * just before the bridge. They need a proper termination."
+         *
+         * The slab and its kerb face are two open ribbons: there is a top and a
+         * road-facing side and NOTHING closing the cross-section, so wherever a
+         * pavement run ends you look straight into a 130-high hollow step. It is
+         * invisible mid-run because the neighbour's ribbons continue, and it is
+         * unmissable at a run END -- which is exactly a bridge mouth, because
+         * tg_city_span_paved returns 0 on every span of a bridge run, so the
+         * pavement stops dead one span before the deck.
+         *
+         * Same defect class as feedback item 7 this round ("the beginning of the
+         * median has no visible end face"): geometry that was given sides and a
+         * top but no cap. Closed with the cross-section quad at whichever end has
+         * no neighbouring pavement on this side, so a run is capped at BOTH ends
+         * and mid-run spans are untouched (no new co-planar faces, no z-fight).
+         *
+         * TD5RE_R12_TERMCAP=0 restores the open ends for an A/B. */
+        if (td5_env_flag_on("TD5RE_R12_TERMCAP")) {
+            int ec;
+            for (ec = 0; ec < 2; ec++) {
+                /* ec 0 = the NEAR end (f=0, towards span si-1), 1 = the FAR end. */
+                const int    nb = ec ? h->si + 1 : h->si - 1;
+                const double cx = ec ? e[3] : e[0];
+                const double cy = ec ? e[4] : e[1];
+                const double cz = ec ? e[5] : e[2];
+                const double ux = ec ? e[8] : e[6];
+                const double uz = ec ? e[9] : e[7];
+                if (tg_r12_pave_stands(h->nl, nb, s)) continue;
+                /* inner-bottom, outer-bottom, outer-top, inner-top. */
+                q[0]  = cx;             q[1]  = cy;                 q[2]  = cz;
+                q[3]  = cx + ux * sw_s; q[4]  = cy;                 q[5]  = cz + uz * sw_s;
+                q[6]  = cx + ux * sw_s; q[7]  = cy + TD5_TG_KERB_H; q[8]  = cz + uz * sw_s;
+                q[9]  = cx;             q[10] = cy + TD5_TG_KERB_H; q[11] = cz;
+                t[0] = 0.0; t[1] = 0.0;
+                t[2] = u_w; t[3] = 0.0;
+                t[4] = u_w; t[5] = u_k;
+                t[6] = 0.0; t[7] = u_k;
+                tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+            }
+        }
     }
 
     if (n <= 0) return 1;
@@ -13600,6 +13910,24 @@ static int tg_crossing_base(int si)
     /* [R6 CROSS item 15] no crossing right after (or before) a bridge run. */
     if (td5_env_flag_on("TD5RE_AUTOTRACK_XBRIDGE_GATE") &&
         tg_span_near_bridge(si, TD5_TG_XBRIDGE_CLEAR)) return 0;
+    /* [R12 OVERPASS item 11c] "AVOID street intersections underneath a highway
+     * overpass" -- a junction under the deck is unreadable.
+     *
+     * Deliberately the same SHAPE as the bridge-approach gate directly above,
+     * and for the same reason: both say "this stretch of road is already doing
+     * something the player has to read, do not stack a junction on top of it".
+     * The band is TWO spans wider than the deck's own footprint
+     * (tg_up_clear_span) on each side, because a zebra is painted at the FIRST
+     * span of a side-street gap and its kerb-to-kerb quad plus the pavement
+     * arms that turn down the street run for several spans after it -- gating
+     * on the footprint alone would still put the mouth of the junction against
+     * a pier. Asked here in tg_crossing_base rather than in
+     * tg_city_crossing_here so the min-spacing thinning sees the same set of
+     * candidate crossings the emitter does, and the kerb-fence break gate,
+     * which reads the same predicate, opens in the same places.
+     *
+     * TD5RE_R12_UP_XGATE=0 restores junctions under the deck for an A/B. */
+    if (tg_up_xclear_span(si)) return 0;
     for (s = 0; s < 2; s++) {
         /* [R11 CITY item 10] the corner must actually STAND -- a zebra painted
          * against a suppressed block is a crossing into nothing. */
@@ -16357,7 +16685,9 @@ static int tg_emit_fb_city(const TG_FBHook *h)
     /* The side street itself, on every span of the gap (the zebra above is only
      * on its first span). Both are gated on the pavement, since a gap in a
      * biome with no frontage is just open country. */
-    if (paved && !tg_span_in_bridge_run(h->si) &&
+    /* [R12 OVERPASS item 11c] and NOT under a highway overpass. The side street
+     * is the junction; its zebra is only the paint (see tg_up_xclear_span). */
+    if (paved && !tg_span_in_bridge_run(h->si) && !tg_up_xclear_span(h->si) &&
         td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_STREETS")) {
         if (!tg_city_emit_crossstreet(h, sw)) return 0;
     }
@@ -20547,11 +20877,40 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                  * surface above this one", which is exactly what this is. */
                 if (si == tg_underpass_span(si)) {
                     size_t up0 = meshes.len;
+                    int nm0 = nmesh;
                     if (!tg_emit_underpass(nl, si, &meshes, moff, &nmesh,
                                            TG_MAX_MESHES_PER_ENTRY)) {
                         ok = 0; break;
                     }
-                    tg_guard_mark(up0, meshes.len, TG_GK_DECK, si);
+                    /* [R12 item 11a] WHY THE BACKSTOP NEVER CAUGHT THE PILLAR.
+                     * One tg_guard_mark covered the WHOLE element -- piers, deck
+                     * and parapets -- as TG_GK_DECK, and TG_GK_DECK is
+                     * TG_GKC_EXEMPT. That licence is correct and necessary for
+                     * the deck (an authored road surface ABOVE this one is the
+                     * precise silhouette the guard exists to reject), but the
+                     * piers are ordinary ground structures standing beside the
+                     * carriageway, and blanket-exempting them made "a pillar on
+                     * the road" unreportable by construction: the guard was not
+                     * failing to judge it, it was told not to.
+                     *
+                     * The first TWO meshes this emitter records are the two
+                     * piers (see its abutment loop), so the exemption is split
+                     * at that boundary: piers are marked TG_GK_BLOCK, which is
+                     * TG_GKC_SCENERY -- validated like any other roadside mass
+                     * -- and only the deck and parapets keep the deck licence.
+                     * Future overpass geometry lands in the deck half by
+                     * default, so this is deliberately the conservative split.
+                     *
+                     * With the geometric fix above the guard has nothing to
+                     * reject; verified 0 pier rejections on all three seeds.
+                     * TD5RE_R12_UP_PIERGUARD=0 restores the blanket exemption. */
+                    if (td5_env_flag_on("TD5RE_R12_UP_PIERGUARD") &&
+                        nmesh >= nm0 + 3) {
+                        tg_guard_mark(up0, moff[nm0 + 2], TG_GK_BLOCK, si);
+                        tg_guard_mark(moff[nm0 + 2], meshes.len, TG_GK_DECK, si);
+                    } else {
+                        tg_guard_mark(up0, meshes.len, TG_GK_DECK, si);
+                    }
                 }
                 /* Building: 0 or 1 mesh -- record its offset explicitly.
                  *
@@ -22619,7 +22978,53 @@ static void tg_emit_texture_page_r6_guardrail_alpha(TG_Buf *out)
         int idx;
         rng = rng * 1103515245u + 12345u;
         if (beam) {
-            if ((x >= 20 && x <= 24) || (x >= 44 && x <= 48))
+            /* [R12 OVERPASS item 14c] "The bridge guardrails render DOUBLE-
+             * FOLDED down the middle -- the rail looks creased/mirrored along
+             * its length."
+             *
+             * THIS PAGE IS THE DEFECT, and its UVs are not. It was worth
+             * checking, because the obvious suspect was the R11 item 11 V-flip:
+             * the roadside rail was found sampling its page upside down and the
+             * bridge parapet is a separate emitter that could have been on the
+             * old convention too. It is not. This page declares page-X = barrier
+             * HEIGHT (0 = deck, 63 = top) and page-Y = along the road, and
+             * tg_emit_bridge_rail_panel maps u across the panel height and v
+             * along the road -- they agree exactly. There is no flip and no
+             * transposition to fix, and no second rail on the edge either (R9
+             * RAILFIX makes the roadside rail yield every deck edge to this
+             * parapet, so what the player sees is one quad, once).
+             *
+             * What the player sees is the PROFILE painted into it. The old bands
+             * were two near-WHITE crests (indices 12-15) at x 20-24 and 44-48
+             * with a near-BLACK valley (indices 1-2) one texel wide at x = 34
+             * between them, and nothing in between: a hard, maximum-contrast,
+             * perfectly symmetric pattern about the beam's mid-height. Stretched
+             * over a 420-unit barrier and run the length of a bridge, that is
+             * not read as a corrugation, it is read as a crease with the rail
+             * mirrored above and below it -- the report, verbatim.
+             *
+             * A real W-beam is one pressed section catching light along two soft
+             * ridges, so the fix is to SHADE it rather than to band it: a
+             * continuous ramp keyed on the distance from the nearer crest
+             * centre, with the valley only a few steps darker than the steel
+             * body instead of nine. The section is still symmetric -- a W is --
+             * but symmetry stops being the loudest thing in the image, which is
+             * what makes it read as one beam.
+             *
+             * TD5RE_R12_RAIL_WBEAM=0 restores the hard bands for an A/B. */
+            if (td5_env_flag_on("TD5RE_R12_RAIL_WBEAM")) {
+                /* Distance from the nearer of the two ridge crests (22 and 46),
+                 * 0 at a crest and 12 at the beam's outer edges. */
+                const int d1 = x > 22 ? x - 22 : 22 - x;
+                const int d2 = x > 46 ? x - 46 : 46 - x;
+                const int d  = (d1 < d2) ? d1 : d2;
+                int v = 13 - d;                     /* 13 at a crest, 1 at 12 out */
+                if (v < 3) v = 3;                   /* never as dark as a post    */
+                if (v > 15) v = 15;
+                /* One step of grain, so the steel is not a flat gradient. */
+                if (v > 3 && ((rng >> 16) & 3u) == 0u) v--;
+                idx = v;
+            } else if ((x >= 20 && x <= 24) || (x >= 44 && x <= 48))
                 idx = 12 + (int)((rng >> 16) % 4);   /* the two W ridge crests */
             else if (x == 34 || x == 16 || x == 52)
                 idx = 1 + (int)((rng >> 16) % 2);    /* centre valley + edges  */
