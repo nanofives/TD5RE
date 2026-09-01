@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 01 (auto-track tunnel portal, r12)" },
+    { CL_ITEM,    "FIXED: at a tunnel mouth the stone beam over the road" },
+    { CL_ITEM,    "  no longer floats clear of the two pillars under it." },
+    { CL_ITEM,    "  The beam was 200 units short of each pillar's outer" },
+    { CL_ITEM,    "  edge and sat 600 units behind their front faces, so" },
+    { CL_ITEM,    "  you saw daylight through the join. Both gaps are" },
+    { CL_ITEM,    "  now zero: beam and pillars are one frame, at every" },
+    { CL_ITEM,    "  tunnel on the track (TD5RE_R12_TUNNEL_PORTAL_JOIN=0" },
+    { CL_ITEM,    "  restores the old split portal)" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 01 (auto-track curve signage, r11)" },
     { CL_ITEM,    "NEW: generated tracks now sign their corners. A blue" },
     { CL_ITEM,    "  direction sign with a left or right arrow stands on" },
