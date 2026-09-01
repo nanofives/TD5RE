@@ -44,6 +44,7 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  between the two halves of a split road is now" },
     { CL_ITEM,    "  ploughed snow instead of a band of green grass" },
     { CL_ITEM,    "  when the split starts next to a tunnel exit" },
+
     { CL_ITEM,    "FIXED: guardrails are no longer upside down -- the" },
     { CL_ITEM,    "  beam sits at the top with the posts below it, on" },
     { CL_ITEM,    "  every barrier, not just the one at span 755" },
@@ -84,6 +85,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "FIXED: two bridges that met end to end are now" },
     { CL_ITEM,    "  one long bridge, with no dip and no second set" },
     { CL_ITEM,    "  of end pillars at the join" },
+    { CL_BLANK,   "" },
+
+    { CL_ITEM,    "FIXED: on a snowy auto-track stretch, the strip" },
+    { CL_ITEM,    "  between the two halves of a split road is now" },
+    { CL_ITEM,    "  ploughed snow instead of a band of green grass" },
+    { CL_ITEM,    "  when the split starts next to a tunnel exit" },
+    { CL_ITEM,    "NEW: driving out of open country into a town now" },
+    { CL_ITEM,    "  passes through its outskirts first -- scattered" },
+    { CL_ITEM,    "  low buildings that grow taller and closer" },
+    { CL_ITEM,    "  together over the next few blocks, instead of" },
+    { CL_ITEM,    "  a full street canyon starting on one span" },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 31 (road markings on widening roads)" },
