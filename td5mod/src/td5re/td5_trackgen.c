@@ -609,6 +609,12 @@ static int tg_city_crossing_here(int si);   /* [R3 item 7] fence break gate */
 /* [R4 CROSS item 4] a zebra must not mark a PARK frontage, so tg_city_crossing_here
  * (defined above the park block) needs the park predicate forward-declared. */
 static int tg_block_is_park(int si, int left);
+/* [R11 BIOME item 4] "Does the outskirts ramp OPEN this frontage?" -- the town
+ * DENSITY axis. Asked by tg_side_built (here) and by tg_side_geom (with the rest
+ * of that predicate's siblings); defined down with the biome block because it
+ * needs the run bounds and the paved test. Deliberately NOT asked by
+ * tg_facade_built: see the long note at its definition. */
+static int tg_town_ramp_open(int si, int left);
 /* Same reason: the finish-line placer below has to keep the finish (and its
  * gantry) out of a tunnel run, and the tunnel test is defined with the tunnel
  * emitters much further down. */
@@ -5522,6 +5528,13 @@ static int tg_side_built(int si, int left)
      * predicate for an A/B. */
     if (td5_env_flag_on("TD5RE_AUTOTRACK_EDGE_CAP") && !tg_facade_stands(si))
         return 0;
+    /* [R11 BIOME item 4] The outskirts ramp opens some frontages at a
+     * wilderness-to-town edge. Asked HERE, alongside the fork clearance and the
+     * bridge/biome test, because those are the other two "the pattern says
+     * built but no wall stands" cases -- so the corner returns, the step walls
+     * and the no-lone-stub rule all treat a ramped-out run as a run boundary
+     * and close it properly. */
+    if (tg_town_ramp_open(si, left)) return 0;
     return 1;
 }
 
@@ -6106,6 +6119,12 @@ static const TG_Biome k_biomes[] = {
 #define TD5_TG_BIOME_COUNT 7
 /* Biomes drawable once a seed has been declared snowy (adds ALPTOWN). */
 #define TD5_TG_BIOME_COUNT_SNOW 8
+/* [R11 BIOME] How many biome ROWS the table actually has -- the correct size for
+ * anything INDEXED BY a biome index (tg_biome_cell_index can return 7). The two
+ * COUNTs above are draw MODULI, not array bounds, and using one as a bound is
+ * an out-of-bounds write on every snow seed. Kept as its own name so the
+ * distinction is stated once instead of being rediscovered. */
+#define TD5_TG_BIOME_KINDS ((int)(sizeof(k_biomes) / sizeof(k_biomes[0])))
 #define TD5_TG_BIOME_ALPINE  4    /* index of ALPINE in k_biomes */
 #define TD5_TG_BIOME_RUN   150
 
@@ -6515,6 +6534,126 @@ static int tg_biome_index_is_paved(int idx)
     return !k_biomes[idx].billboard && k_biomes[idx].cell_w > 0;
 }
 
+/* ==========================================================================
+ * [R11 BIOME item 4] OUTSKIRTS -- THE WILDERNESS-TO-TOWN EDGE
+ *
+ * THE REPORT: "the transition park/green/snowy/scenery -> city should pass
+ * through a SMALL TOWN band first, then city."
+ *
+ * WHAT THE USER ACTUALLY DROVE, which is what this implements. The round-11
+ * seed (20260901) is snow-coherent and contains NO CITY and NO INDUSTRIAL at
+ * all -- its runs are FOREST / ALPINE / ALPTOWN / FIELDS / ALPINE / ALPTOWN /
+ * ALPINE / ALPTOWN / ALPINE / ALPTOWN. So the "city" in the report is ALPTOWN,
+ * the snowy TOWN biome, and the transitions being complained about are the
+ * ALPINE -> ALPTOWN edges at spans 450, 1050, 1650 and 1950. The adjacency
+ * rules already guarantee a graduated SEQUENCE of biomes (Rule 2 makes a
+ * wilderness->city step illegal, which is why INDUSTRIAL or ORIENTAL always
+ * stands between open country and a CITY); what is missing is a gradient
+ * WITHIN the town, so the town's first span is as dense as its core.
+ *
+ * So the fix is not a new biome and it is emphatically NOT a change to the draw
+ * modulus: TD5_TG_BIOME_COUNT is the modulus of every seed's layout, and this
+ * round's feedback plus seven sibling branches are all pinned to the current
+ * grid. Instead the town's BUILT-UP CHARACTER ramps in across its leading
+ * spans, so you drive wilderness -> sparse low outskirts -> town.
+ *
+ * WHAT RAMPS AND WHAT SNAPS. This is the whole design, and it is a direct
+ * consequence of what R11 GUARD just landed one function above: the raised
+ * pavement, the kerb height, the pedestrian railing and the ownership of the
+ * road edge now change on ONE span at a paved/unpaved boundary, precisely
+ * because a half-built kerb is not a transition, it is a flicker.
+ *
+ *   SNAPS (untouched here): pavement presence and width, kerb, kerb railing,
+ *   roadside barrier hand-off, ground/verge page, road surface and grip. All of
+ *   these live downstream of tg_scenery_biome_index, which this does not touch.
+ *
+ *   RAMPS (this block): how MUCH town there is -- how many frontages stand, how
+ *   tall they are, and how tall the blocks behind them are.
+ *
+ * Density and height are exactly the quantities you CAN half-build: a town's
+ * edge really does have detached low buildings with gaps between them, and
+ * scaling them is not a flicker because the ramp is monotone in distance and
+ * quantised to the block grid (below), so nothing alternates.
+ *
+ * WHY THIS IS NOT ROUTED THROUGH tg_facade_built. That predicate is the
+ * run/gap PATTERN, and it is the single definition of "there is a SIDE STREET
+ * here" -- the cross-street carriageway, the pavement arms, the back rows, the
+ * reveal row and the pedestrian ZEBRA all read it, and tg_crossing_base fires
+ * on its built->gap EDGE. Thinning frontages through it would therefore invent
+ * a side street and paint a zebra crossing at every gap the ramp opened, which
+ * is R11's items 9 and 15 rather than a fix for item 4. The correct seam is
+ * tg_side_built / tg_side_geom -- "does a wall actually STAND here" -- which is
+ * where the fork-corridor clearance and the R6 no-lone-stub rule already live,
+ * and which no crossing reads. So the ramp removes BUILDINGS and leaves the
+ * street grid, the pavement and the crossings exactly where they were.
+ * ========================================================================== */
+
+/* Length of the outskirts band, in spans. Three facade superblocks: the ramp is
+ * quantised to TD5_TG_FACADE_PERIOD (see tg_town_ramp) so that every span of one
+ * building shares one ramp value, which makes three blocks the shortest band
+ * that can actually show a gradient rather than a single step. 66 spans is
+ * ~230 m at the scale the biome block derives. */
+#define TD5_TG_TOWN_RAMP (3 * TD5_TG_FACADE_PERIOD)
+
+/* How built-up is span si, 0.0 (bare outskirt) .. 1.0 (full town character)?
+ *
+ * 1.0 everywhere except the leading TD5_TG_TOWN_RAMP spans of a PAVED biome run
+ * whose predecessor run is UNPAVED -- i.e. exactly the wilderness-to-town edges,
+ * and not the town-to-town or country-to-country ones. Keyed on the MERGED run
+ * (tg_biome_run_bounds) so a 300-span two-cell ALPTOWN ramps once, at its true
+ * start, rather than again at its internal cell line; and on the HARD cell, so
+ * it agrees span for span with the structural edge R11 GUARD hardened.
+ *
+ * QUANTISED to the facade period. A per-span ramp would change a run's height
+ * halfway along it and saw-tooth its roofline, which is the identical mistake
+ * tg_facade_floors keys on the RUN hash to avoid. Snapping the distance to whole
+ * superblocks makes the ramp constant across any one building.
+ *
+ * Default ON; TD5RE_R11_TOWN_RAMP=0 restores the hard switch-on for an A/B. */
+static double tg_town_ramp(int si)
+{
+    int a, z, d;
+
+    if (!td5_env_flag_on("TD5RE_R11_TOWN_RAMP")) return 1.0;
+    if (si < 0) return 1.0;
+    if (!tg_biome_index_is_paved(tg_biome_cell_index(si))) return 1.0;
+    tg_biome_run_bounds(si, &a, &z);
+    /* A town that starts at span 0 has no wilderness before it to ease out of,
+     * and TD5RE_AUTOTRACK_START_CITY deliberately forces a solid frontage
+     * there. */
+    if (a <= 0) return 1.0;
+    if (tg_biome_index_is_paved(tg_biome_cell_index(a - 1))) return 1.0;
+    d = si - a;
+    if (d >= TD5_TG_TOWN_RAMP) return 1.0;
+    if (d < 0) d = 0;
+    /* Quantise to the block, then take the block's MIDPOINT, not its leading
+     * edge. Measured: with the leading edge the first block sits at exactly
+     * r = 0.0, which opens EVERY frontage and empties the town's first 22 spans
+     * outright -- that is not a ramp, it is the same hard edge moved 22 spans
+     * along. The midpoint gives 0.17 / 0.50 / 0.83 across the three blocks, so
+     * the first block keeps a few low buildings and the density climbs from
+     * there. */
+    d = (d / TD5_TG_FACADE_PERIOD) * TD5_TG_FACADE_PERIOD
+      + TD5_TG_FACADE_PERIOD / 2;
+    if (d > TD5_TG_TOWN_RAMP) d = TD5_TG_TOWN_RAMP;
+    return (double)d / (double)TD5_TG_TOWN_RAMP;
+}
+
+/* DENSITY axis: does the ramp open the frontage of the run at (si, left)?
+ *
+ * Keyed on the RUN id, not the span, so a whole building drops out and the ones
+ * that remain are still full-length runs with proper corner returns -- a
+ * per-span roll would punch a one-span hole in the middle of a block, which is
+ * the R6 item 16 defect. At the boundary span the ramp is 0.0 and every run is
+ * open; by the end of the band it is 1.0 and none is. */
+static int tg_town_ramp_open(int si, int left)
+{
+    const double r = tg_town_ramp(si);
+    if (r >= 1.0) return 0;
+    return (int)((tg_facade_run_id(si, left) >> 19) % 1000u)
+           >= (int)(r * 1000.0);
+}
+
 /* [R11 GUARD item 5] "Remove the slow transition for guardrails and sidewalks
  * -- they should start and stop cleanly."
  *
@@ -6887,6 +7026,25 @@ static int tg_facade_floors(int si, int left, const TG_Biome *b)
     tg_facade_block(si, left, &blk, &ph, &gs, &gl, &av);
     floors += tg_city_district_floors(blk);
     if (floors > TD5_TG_FACADE_MAX_ROWS) floors = TD5_TG_FACADE_MAX_ROWS;
+    /* [R11 BIOME item 4] HEIGHT axis of the outskirts ramp. Applied LAST, after
+     * the tower cluster and the downtown climb, so it caps whatever those
+     * produced rather than racing them -- a tower cluster that rolls on the
+     * first block of a town is exactly the lurch being fixed.
+     *
+     * The floor is one storey, never zero: a run the ramp keeps is a real
+     * building, and "no building" is the DENSITY axis' job (tg_town_ramp_open),
+     * not a zero-height wall. Ramping height also switches the ART for free --
+     * tg_facade_page_class splits its palette at TD5_TG_FACADE_TALL_ROWS, so a
+     * ramped-down run draws from the low-rise masonry pages instead of the
+     * glass curtain-wall ones without this having to know that. */
+    {
+        const double r = tg_town_ramp(si);
+        if (r < 1.0) {
+            int capped = 1 + (int)((double)(floors - 1) * r + 0.5);
+            if (capped < 1) capped = 1;
+            if (capped < floors) floors = capped;
+        }
+    }
     return floors;
 }
 
@@ -6916,6 +7074,12 @@ static void tg_side_geom(const TG_NodeList *nl, int si, int left,
     g->built = 0;
     if (!tg_facade_built(si, left)) return;
     if (tg_branches_enabled() && side < 0.0 && tg_span_in_fork_clear(si)) return;
+    /* [R11 BIOME item 4] Outskirts ramp -- the same gate tg_side_built asks, so
+     * the wall that is not emitted here is the wall the caps and step walls
+     * already believe is absent. Placed before the lone-stub test so a run left
+     * isolated BY the ramp is dropped too, instead of standing alone in the
+     * gap the ramp just opened. */
+    if (tg_town_ramp_open(si, left)) return;
     /* [R6 item 16] Never a lone one-span building (both neighbours unbuilt). */
     if (td5_env_flag_on("TD5RE_AUTOTRACK_NO_STUB") && tg_facade_isolated(si, left))
         return;
@@ -12453,6 +12617,19 @@ static int tg_city_emit_backrows(const TG_FBHook *h, double sw)
                     + (tg_facade_depth(b) + TD5_TG_BACKROW_GAP) * (double)r
                     + (double)(rh % 1800u);
             rows = b->floors_min + (int)((rh >> 9) % 5u) + ((gate && av) ? 1 : 0);
+            /* [R11 BIOME item 4] Third axis of the outskirts ramp: the massing
+             * BEHIND the street. Ramping only the frontage would leave a full
+             * town standing one block back, visible straight down every side
+             * street, so the depth of the town has to thin with its face. Same
+             * ramp value the front wall used at this span, so the two cannot
+             * disagree about how built-up this stretch is. */
+            {
+                const double tr = tg_town_ramp(h->si);
+                if (tr < 1.0) {
+                    int capped = 1 + (int)((double)(rows - 1) * tr + 0.5);
+                    if (capped >= 1 && capped < rows) rows = capped;
+                }
+            }
             H    = (double)rows * tg_facade_floor_h(b);
 
             bx = n0->x + lx0 * (n0->width * 0.5 + set);
@@ -16663,9 +16840,19 @@ static void tg_r9_topo_report(const TG_NodeList *nl, int nspans)
 
 static void tg_r8_terrain_extent_report(const TG_NodeList *nl, int nspans)
 {
-    /* Per-biome-kind accumulators of the effective extent, both sides. */
-    double sum[TD5_TG_BIOME_COUNT], worst[TD5_TG_BIOME_COUNT];
-    int    cnt[TD5_TG_BIOME_COUNT], narrow[TD5_TG_BIOME_COUNT];
+    /* Per-biome-kind accumulators of the effective extent, both sides.
+     *
+     * [R11 BIOME] Sized off TD5_TG_BIOME_KINDS, not TD5_TG_BIOME_COUNT. The two
+     * are DIFFERENT NUMBERS and the difference is a stack overwrite: COUNT is 7
+     * because it is the MODULUS of the normal biome draw (ALPTOWN is
+     * deliberately excluded from it -- see the note on its table row), but these
+     * four arrays are indexed by tg_biome_cell_index, which returns 7 for
+     * ALPTOWN on every snow-coherent seed. So on any seed with snow this loop
+     * wrote one past the end of four stack arrays and the summary below could
+     * never print ALPTOWN's row. Opt-in dev diagnostic only, but it is a real
+     * out-of-bounds write and it is triggered by a knob this round uses. */
+    double sum[TD5_TG_BIOME_KINDS], worst[TD5_TG_BIOME_KINDS];
+    int    cnt[TD5_TG_BIOME_KINDS], narrow[TD5_TG_BIOME_KINDS];
     int    blocked_fork = 0, blocked_bridge = 0, blocked_tunnel = 0;
     int    blocked_sea = 0, blocked_off = 0, sides = 0, narrow_all = 0;
     int    noridge = 0;
@@ -16677,7 +16864,7 @@ static void tg_r8_terrain_extent_report(const TG_NodeList *nl, int nspans)
      * the idiom the other trackgen DIAG knobs use (see the farband log). */
     if (!td5_env_flag_off("TD5RE_R8_TERRAIN_EXTENT_LOG")) return;
 
-    for (k = 0; k < TD5_TG_BIOME_COUNT; k++) {
+    for (k = 0; k < TD5_TG_BIOME_KINDS; k++) {
         sum[k] = 0.0; worst[k] = 1e30; cnt[k] = 0; narrow[k] = 0;
     }
     /* Every number below is only meaningful together with the knobs that were
@@ -16737,7 +16924,7 @@ static void tg_r8_terrain_extent_report(const TG_NodeList *nl, int nspans)
                               - tg_road_half_width(nl, si));
         }
     }
-    for (k = 0; k < TD5_TG_BIOME_COUNT; k++) {
+    for (k = 0; k < TD5_TG_BIOME_KINDS; k++) {
         if (!cnt[k]) continue;
         TD5_LOG_I(LOG_TAG,
                   "  extent BIOME %-11s sides=%5d mean=%8.0f min=%8.0f "
@@ -16831,6 +17018,52 @@ static void tg_r8_terrain_extent_report(const TG_NodeList *nl, int nspans)
                       "anchor_in_bore=%d page=%d (anchor-tested=%d) %s",
                       f, fs, fb->name, tg_biome_is_snow(fb), bore, now, old,
                       (now != old) ? "<- R11 item 3 fixed here" : "");
+        }
+    }
+
+    /* [R11 BIOME item 4] The OUTSKIRTS ramp, measured rather than described.
+     * One line per wilderness-to-town edge naming the boundary span and the
+     * band, then a per-block breakdown of the three ramped quantities -- how
+     * many of the 2 x PERIOD candidate frontages the ramp opened, and the mean
+     * front-wall height -- so "it ramps" is a table and not a claim. Also prints
+     * the FIRST CORE block past the band as the control row. */
+    {
+        int cell;
+        for (cell = 1; cell * TD5_TG_BIOME_RUN < nspans; cell++) {
+            const int cs = cell * TD5_TG_BIOME_RUN;
+            int a, z, blk;
+            if (!tg_biome_index_is_paved(tg_biome_cell_index(cs))) continue;
+            tg_biome_run_bounds(cs, &a, &z);
+            if (a != cs) continue;                  /* not this run's first cell */
+            if (tg_biome_index_is_paved(tg_biome_cell_index(a - 1))) continue;
+            TD5_LOG_I(LOG_TAG,
+                      "  town edge at span %4d: %-11s after %-11s, ramp band "
+                      "%d-%d (knob TD5RE_R11_TOWN_RAMP=%s)",
+                      a, k_biomes[tg_biome_cell_index(a)].name,
+                      k_biomes[tg_biome_cell_index(a - 1)].name,
+                      a, a + TD5_TG_TOWN_RAMP - 1,
+                      td5_env_flag_on("TD5RE_R11_TOWN_RAMP") ? "on" : "off");
+            for (blk = 0; blk <= TD5_TG_TOWN_RAMP / TD5_TG_FACADE_PERIOD; blk++) {
+                const int b0 = a + blk * TD5_TG_FACADE_PERIOD;
+                int si, s, open = 0, cand = 0, hsum = 0, hn = 0;
+                for (si = b0; si < b0 + TD5_TG_FACADE_PERIOD && si < nspans; si++)
+                    for (s = 0; s < 2; s++) {
+                        if (!tg_facade_built(si, s)) continue;
+                        cand++;
+                        if (tg_town_ramp_open(si, s)) { open++; continue; }
+                        hsum += tg_facade_floors(si, s,
+                                    &k_biomes[tg_scenery_biome_index(si)]);
+                        hn++;
+                    }
+                TD5_LOG_I(LOG_TAG,
+                          "    block %d spans %4d-%4d ramp=%.2f frontages "
+                          "%d/%d open (%d stand) mean_floors=%.2f%s",
+                          blk, b0, b0 + TD5_TG_FACADE_PERIOD - 1,
+                          tg_town_ramp(b0), open, cand, hn,
+                          hn ? (double)hsum / (double)hn : 0.0,
+                          (blk * TD5_TG_FACADE_PERIOD >= TD5_TG_TOWN_RAMP)
+                              ? "  <- CORE (control row)" : "");
+            }
         }
     }
 
