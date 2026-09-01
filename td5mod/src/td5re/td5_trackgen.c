@@ -2004,16 +2004,35 @@ static void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
      * ever trigger the global rescale, and terrain outside the runs is
      * untouched. */
     {
-        int runs = 0, clamped = 0, r0;
+        const int run = TD5_TG_BRIDGE_RUN;
+        const int coalesce = td5_env_flag_on("TD5RE_R11_BRIDGE_COALESCE");
+        int runs = 0, clamped = 0, r0, joined = 0, longest = 0;
         double lowest = TD5_TG_BRIDGE_HEIGHT;
-        for (r0 = 0; r0 < nl->count; r0 += TD5_TG_BRIDGE_RUN) {
-            int s0 = r0, s1 = r0 + TD5_TG_BRIDGE_RUN - 1, k;
+        for (r0 = 0; r0 < nl->count; r0 += run) {
+            int s0 = r0, s1 = r0 + run - 1, k, len;
             double yb0, yb1, chord, allowed, hrun;
 
+            /* One hash per run, so the crown is a fair representative. */
+            if (!tg_span_in_bridge_run(s0 + run / 2)) continue;
+            /* [R11 item 12] COALESCE. Two adjacent selected runs used to get one
+             * raised cosine EACH, and a raised cosine returns to the terrain line
+             * with zero slope at both ends -- so the road dipped back down at the
+             * join and climbed again, which is the "a bridge finishes and another
+             * starts" the user saw at span 837. Skip a run whose predecessor is
+             * also selected (the chain that owns it was already humped), and hump
+             * the whole chain in one piece from its first run. The SET of bridge
+             * spans is untouched, so no span reference moves. */
+            if (coalesce) {
+                if (r0 - run >= 0 && tg_span_in_bridge_run(r0 - run)) continue;
+                while (s1 + 1 <= nl->count - 1 && tg_span_in_bridge_run(s1 + 1)) {
+                    s1 += run;
+                    joined++;
+                }
+            }
             if (s1 > nl->count - 1) s1 = nl->count - 1;
             if (s1 <= s0) continue;
-            /* One hash per run, so the crown is a fair representative. */
-            if (!tg_span_in_bridge_run(s0 + TD5_TG_BRIDGE_RUN / 2)) continue;
+            len = s1 - s0 + 1;
+            if (len > longest) longest = len;
 
             yb0 = nl->v[s0].y;
             yb1 = nl->v[s1].y;
@@ -2030,12 +2049,12 @@ static void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
             } else {
                 allowed = max_grade * (double)spec->span_length - fabs(chord);
                 if (allowed < 0.0) allowed = 0.0;
-                hrun = allowed * (double)TD5_TG_BRIDGE_RUN / TD5_TG_PI;
+                hrun = allowed * (double)len / TD5_TG_PI;
                 if (hrun > TD5_TG_BRIDGE_HEIGHT) hrun = TD5_TG_BRIDGE_HEIGHT;
             }
 
             for (k = s0; k <= s1; k++) {
-                double t = ((double)(k - s0) + 0.5) / (double)TD5_TG_BRIDGE_RUN;
+                double t = ((double)(k - s0) + 0.5) / (double)len;
                 nl->v[k].y += hrun * 0.5 * (1.0 - cos(2.0 * TD5_TG_PI * t));
             }
             runs++;
@@ -2043,10 +2062,12 @@ static void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
             if (hrun < lowest) lowest = hrun;
         }
         if (runs)
-            TD5_LOG_I(LOG_TAG, "trackgen: %d deliberate bridge run(s) of %d "
-                      "spans, crown +%.0f (%d grade-clamped, lowest +%.0f)",
-                      runs, TD5_TG_BRIDGE_RUN, TD5_TG_BRIDGE_HEIGHT,
-                      clamped, lowest);
+            TD5_LOG_I(LOG_TAG, "trackgen: %d deliberate bridge crossing(s), run "
+                      "%d spans, longest %d spans, %d run(s) coalesced away "
+                      "(R11 item 12 coalesce=%d), crown +%.0f (%d grade-clamped, "
+                      "lowest +%.0f)",
+                      runs, run, longest, joined, coalesce,
+                      TD5_TG_BRIDGE_HEIGHT, clamped, lowest);
     }
 
     /* Anchor the profile to y=0 at the start line. The grid spawn places cars
@@ -3420,6 +3441,36 @@ static size_t tg_guard_mesh_len(const unsigned char *b, size_t off, size_t cap)
 /* Nearest main-ring node to world (wx,wz), searched in a window around the
  * entry's spans so a far-band vertex reaching tens of thousands of units OUT
  * still resolves to the span it stands beside, not a curve several spans away. */
+/* [R11 BRIDGE item 7a] How far a vertex may be from the nearest node in the
+ * search window and still be judged AS road geometry.
+ *
+ * The search is over a +/-TD5_TG_GUARD_WINDOW span window and had NO distance
+ * bound, so it always returned a node -- the best one available, however far
+ * away. That was harmless while nothing reached far: every mesh the guard had
+ * ever seen sat within a few thousand units of some node in its own window.
+ *
+ * MEASURED FAILURE. Extending the overpass arms to the drawn edge (30000)
+ * broke it. On seed 20260901 the entry holding span 1130 has window 1088..1171,
+ * and the deck's far corners -- 33000 units out to the side, over open ground --
+ * were attributed to nodes 1089 and 1167, i.e. THE TWO ENDS OF THE WINDOW,
+ * simply because nothing nearer was allowed to be considered. Their lateral in
+ * those spans' frames then landed inside the carriageway, the mesh read as
+ * covering 6000 units of road at a span 40 away from its own, the span-scoped
+ * exemption (TD5_TG_GUARD_EX_SPANS = 8) refused to license it, and the guard
+ * REJECTED the deck: three "the guard is eating the track" warnings, all three
+ * marked @1130. THERE WAS NO ACTUAL OVERLAP -- two earlier fixes that shortened
+ * the arm against another carriageway found nothing to shorten against,
+ * which is what pointed at the attribution rather than the geometry.
+ *
+ * 12000 is chosen against the thing being tested, not tuned: the widest
+ * carriageway on this generator is a 4-lane avenue plus a branch corridor,
+ * comfortably under 6000 of reach per side, so a vertex more than 12000 from
+ * every node in its window cannot be over any carriageway and has no business
+ * being normalised into one's frame. Returning "no node" makes the callers skip
+ * it, which they already do for an out-of-ring index.
+ *
+ * TD5RE_R11_GUARD_NEAR=0 restores the unbounded search for an A/B. */
+#define TD5_TG_GUARD_NEAR_MAX 12000.0
 static int tg_guard_nearest_node(const TG_NodeList *nl, int lo, int hi,
                                  double wx, double wz)
 {
@@ -3430,6 +3481,9 @@ static int tg_guard_nearest_node(const TG_NodeList *nl, int lo, int hi,
         double d2 = dx * dx + dz * dz;
         if (d2 < bd) { bd = d2; best = i; }
     }
+    if (bd > TD5_TG_GUARD_NEAR_MAX * TD5_TG_GUARD_NEAR_MAX &&
+        td5_env_flag_on("TD5RE_R11_GUARD_NEAR"))
+        return -1;
     return best;
 }
 
@@ -3606,7 +3660,7 @@ static int tg_guard_mesh_scan(const TG_NodeList *nl, int ring,
         double t[4], dy[4];
         double t_lo, t_hi, dy_lo, dy_hi, r_rep = 0.0, t_best = 1e300;
         double cover, pen;
-        int k, n = 0, si0 = -1;
+        int k, n = 0, si0 = -1, qs_lo = -1, qs_hi = -1;
 
         for (k = 0; k < 4 && vi + (unsigned)k < vtxcnt; k++) {
             const unsigned char *vp = b + off + vtxoff
@@ -3632,9 +3686,37 @@ static int tg_guard_mesh_scan(const TG_NodeList *nl, int ring,
                 t_best = (lateral >= 0.0 ? t[n] : -t[n]);
                 si0 = si;
             }
+            if (qs_lo < 0 || si < qs_lo) qs_lo = si;
+            if (qs_hi < 0 || si > qs_hi) qs_hi = si;
             n++;
         }
         if (n <= 0) continue;
+        /* [R11 BRIDGE item 7a] A QUAD MUST BE SMALL ENOUGH TO FRAME.
+         *
+         * The per-vertex normalisation above is what makes `cover` meaningful,
+         * and it rests on an assumption nobody had had to state: that a quad's
+         * four corners resolve to spans NEAR EACH OTHER, so mixing their t
+         * values describes one stretch of road. Extending the overpass arms to
+         * the drawn edge broke that assumption for the first time. The deck is
+         * one quad 66000 units wide; on seed 20260901 its left corner resolved
+         * into span 1089's frame and its right corner into span 1167's, forty
+         * spans apart. t_lo came from one road and t_hi from the other, cover
+         * came out at a full 6000 of carriageway, and the guard REJECTED the
+         * deck at a span its own emitter never touched -- three "the guard is
+         * eating the track" warnings, all marked @1130, with no actual overlap
+         * anywhere (two separate geometric caps were built to find one and
+         * found nothing).
+         *
+         * So: if a quad's corners straddle more spans than the exemption scope
+         * itself covers, there is no single frame in which to judge it, and a
+         * number computed across two frames is not evidence. Skip it. This is
+         * strictly a refusal to make a claim, not a new licence -- the guard
+         * already skips any vertex it cannot place (si < 0 above).
+         *
+         * TD5RE_R11_GUARD_NEAR=0 restores the unframed judgement for an A/B. */
+        if (qs_hi - qs_lo > TD5_TG_GUARD_EX_SPANS &&
+            td5_env_flag_on("TD5RE_R11_GUARD_NEAR"))
+            continue;
         r_rep /= (double)n;
         t_lo = t_hi = t[0];
         dy_lo = dy_hi = dy[0];
@@ -4003,9 +4085,9 @@ static int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
                 tg_acct(TG_ACCT_R8_GUARD, si);
                 if (rejected <= 8)
                     TD5_LOG_W(LOG_TAG, "on-road guard: rejected %s mesh at span "
-                              "%d (coverage %.0f, %u verts)",
+                              "%d (coverage %.0f, %u verts, marked @%d)",
                               k_guard_kind_name[kind], si, depth,
-                              tg_rd_u32(b + off + 0x08));
+                              tg_rd_u32(b + off + 0x08), mark_si);
             }
         }
 
@@ -7344,10 +7426,16 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
  * cleared), and in a facade biome (tg_city_sidewalk_w > 0 -- CITY / INDUSTRIAL,
  * not the tree-billboard biomes). tg_side_built uses this so caps and step walls
  * treat a bridge span or a non-facade neighbour as a run boundary. */
+/* [R11 item 7c] "the overpass must NOT touch other buildings" -- the deck's own
+ * footprint clears the frontage. Declared here because the massing gates read it
+ * well before the underpass geometry that defines it. */
+static int tg_up_clear_span(int si);
+
 static int tg_facade_stands(int si)
 {
     if (si <= 0) return 0;
     if (tg_span_in_bridge_run(si)) return 0;
+    if (tg_up_clear_span(si)) return 0;      /* [R11 item 7c] under the highway */
     return tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(si)]) > 0.0;
 }
 
@@ -7375,6 +7463,10 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
      * the clearance; it only needs somewhere for the near cap to end. */
     if (si <= 0) return 1;
     if (tg_span_in_bridge_run(si)) return 1;   /* deck is clear -- see the river */
+    /* [R11 item 7c] Nothing stands where the overpass deck flies over. The deck
+     * is 3000 deep along the road and sweeps out to the drawn edge, so a facade
+     * on this span intersects it -- "it must not touch other buildings". */
+    if (tg_up_clear_span(si)) return 1;
     /* [R7 item 7] wall-vs-tree keyed on the hardened city edge so the frontage
      * ends cleanly with its sidewalk, not a span early/late (see the helper). */
     b = &k_biomes[tg_scenery_biome_index(si)];
@@ -8683,8 +8775,184 @@ static int tg_emit_tunnel(const TG_NodeList *nl, int si, TG_Buf *blk,
 #define TD5_TG_UP_CLEAR    2600.0   /* clear height under the soffit  */
 #define TD5_TG_UP_THICK     420.0   /* deck structural depth          */
 #define TD5_TG_UP_HALFDEEP 1500.0   /* half the deck's width along OUR road */
-#define TD5_TG_UP_REACH   13000.0   /* how far the crossing runs each side */
+#define TD5_TG_UP_REACH   13000.0   /* R9 reach each side (A/B baseline)   */
 #define TD5_TG_UP_PARAPET   620.0   /* parapet height above the deck   */
+
+/* ================== [R11 BRIDGE item 7] THE OVERPASS, MEASURED ==============
+ * "the highway overpass must be LONGER on the sides, extending to the end of
+ *  the drawn area. It must NOT touch other buildings. Its support pillars must
+ *  be exactly as wide as the highway itself."
+ *
+ * Three separate defects, all measurable off the constants above and all
+ * confirmed against the emitted geometry (see tg_r11_up_diag, which logs the
+ * numbers on every underpass span so the before/after is a log diff, not a
+ * frame impression).
+ *
+ * 7a REACH. The crossing ran 13000 each side of the bore centre. The drawn
+ *    ground beside the road is the verge skirt (tg_verge_reach, 12000 from the
+ *    road edge) and then the background band, which reaches
+ *    TD5RE_AUTOTRACK_TERRAIN_REACH / TD5_TG_FAR_REACH = 30000 from the same
+ *    edge. So the deck stopped roughly 1000 units past the skirt and some
+ *    18000 short of where the scenery actually ends -- it read as a stub, which
+ *    is the report. Reach is now DERIVED from those two, not a constant: the
+ *    bore half-width plus the far-band reach, so it lands on the drawn edge and
+ *    keeps landing there if the terrain reach is ever raised by its knob.
+ *
+ * 7b PILLARS. The abutment box was emitted with half-depth `dp + 1900` along
+ *    OUR road, i.e. 6800 wide, while the deck it carries is `2*dp` = 3000 wide.
+ *    The support was 2.27x the width of the thing it supports, which is exactly
+ *    "the pillars are the wrong width". They now take `dp`, so pillar width ==
+ *    highway width to the unit. (The 1900 was there to make the wall read as a
+ *    retaining embankment; a pillar flush with its own deck reads as a pier,
+ *    which is what was asked for.)
+ *
+ * 7c BUILDINGS. Nothing ever told the town the highway was there. The deck is
+ *    3000 deep along our road -- two span-lengths at 1500 -- and it now sweeps
+ *    laterally straight through the frontage line, the backrows and the
+ *    fork-back massing, so facades intersected the deck and the parapets. The
+ *    fix is a CLEARANCE BAND in the same shape as tg_span_near_bridge: the
+ *    spans the deck's own footprint covers stand no buildings. It is stated
+ *    once (tg_up_clear_span) and read by every massing gate, so the frontage
+ *    cannot come back through a route that did not know about it.
+ *
+ * Knobs, all default ON: TD5RE_R11_UP_REACH, TD5RE_R11_UP_PIER,
+ * TD5RE_R11_UP_CLEAR. TD5RE_R11_UP_DIAG=1 adds the per-span measurement lines.
+ * ========================================================================= */
+#define TD5_TG_UP_CLEAR_SPANS 1     /* deck half-depth 1500 / span 1500 = 1 */
+
+static double tg_far_reach(void);           /* defined with TD5_TG_FAR_REACH */
+
+/* Lateral reach of one ARM, measured from the bore centre: the bore half-width
+ * the abutments stand on, plus the background band's own reach, so the deck
+ * ends exactly where the drawn ground does -- CAPPED so it never flies over
+ * another leg of the ring.
+ *
+ * BOTH halves are needed and it took three measured rounds to establish that,
+ * because the item hides TWO different failures behind one symptom.
+ *
+ *  - REAL reach-over. Seed 99991: a 33000 arm from span 1530 lands on the road
+ *    at span 1495, 35 spans away. The guard rejects the deck and it is RIGHT to
+ *    -- a motorway overpass crosses THIS road, it does not sail over the back
+ *    straight. That is what the walk below stops.
+ *  - Guard MIS-ATTRIBUTION, which looks identical in the log. Seed 20260901:
+ *    the deck at 1130 was rejected at spans 1089 and 1167 with NO overlap
+ *    anywhere -- the guard's own quad framing was mixing two spans' frames.
+ *    That one is fixed in tg_guard_mesh_scan, not here; a cap can never fix it,
+ *    and the first two attempts wasted a round trying (tg_topo_road_cap's ray
+ *    and an earlier version of this walk both found nothing to shorten).
+ *
+ * The walk samples the arm and stops one step before the slab's footprint comes
+ * within another carriageway's own reach (tg_carriageway_reach -- the same
+ * authority the guard judges by, so the two cannot disagree). "Another" is an
+ * INDEX separation on the main ring, plus a distance test for fork corridors,
+ * whose nodes live past s_ring_len and have no meaningful index. */
+#define TD5_TG_UP_ARM_STEPS    48
+/* Deliberately the numbers TOPO's C3 cap uses (TD5_TG_TOPO_SELF_SPANS /
+ * TD5_TG_TOPO_ROAD_MARGIN, declared further down with the terrain code), so
+ * "another leg of the ring" means one thing on this track. Restated here only
+ * because this emitter is compiled above those definitions. */
+#define TD5_TG_UP_SELF_SPANS   14
+#define TD5_TG_UP_ROAD_MARGIN 600.0
+static double tg_up_reach(const TG_NodeList *nl, int si, int is_left,
+                          double half, double dp)
+{
+    const int ring = (s_ring_len > 1 && s_ring_len <= nl->count)
+                   ? s_ring_len : nl->count;
+    const TG_Node *n = &nl->v[si];
+    const double ux = n->tz * (is_left ? 1.0 : -1.0);
+    const double uz = -n->tx * (is_left ? 1.0 : -1.0);
+    double want, selfr;
+    int k;
+
+    if (!td5_env_flag_on("TD5RE_R11_UP_REACH")) return TD5_TG_UP_REACH;
+    want = half + tg_far_reach();
+    {   /* Span length from the node list itself: spec->span_length is not in
+         * scope here and this emitter must not hold a second opinion. */
+        const int a = (si + 1 < nl->count) ? si + 1 : si - 1;
+        const double dx = nl->v[a].x - n->x, dz = nl->v[a].z - n->z;
+        double sl = sqrt(dx * dx + dz * dz);
+        if (!(sl > 1.0)) sl = 1500.0;
+        selfr = (double)TD5_TG_UP_SELF_SPANS * sl;
+    }
+    if (want <= half) return want;
+
+    for (k = 1; k <= TD5_TG_UP_ARM_STEPS; k++) {
+        const double d = half + (want - half) * (double)k
+                       / (double)TD5_TG_UP_ARM_STEPS;
+        const double px = n->x + ux * d, pz = n->z + uz * d;
+        int j;
+        for (j = 0; j < nl->count; j++) {
+            double dx, dz, rr;
+            int sep = j - si;
+            if (sep < 0) sep = -sep;
+            if (ring - sep < sep) sep = ring - sep;      /* around the ring */
+            if (j < ring) {
+                if (sep <= TD5_TG_UP_SELF_SPANS) continue;   /* my own road */
+            } else {
+                const double ox = nl->v[j].x - n->x;
+                const double oz = nl->v[j].z - n->z;
+                if (ox * ox + oz * oz < selfr * selfr) continue;  /* my fork */
+            }
+            dx = nl->v[j].x - px; dz = nl->v[j].z - pz;
+            rr = tg_carriageway_reach(nl, j, 1.0);
+            {
+                const double r2 = tg_carriageway_reach(nl, j, -1.0);
+                if (r2 > rr) rr = r2;
+            }
+            rr += dp + TD5_TG_UP_ROAD_MARGIN;
+            if (dx * dx + dz * dz < rr * rr) {
+                const double got = half + (want - half) * (double)(k - 1)
+                                 / (double)TD5_TG_UP_ARM_STEPS;
+                TD5_LOG_I(LOG_TAG, "trackgen: [R11 item 7a] overpass @%d arm "
+                          "%s capped %.0f -> %.0f (span %d's carriageway is "
+                          "%.0f out)", si, is_left ? "L" : "R", want, got, j, d);
+                return got;
+            }
+        }
+    }
+    return want;
+}
+
+/* Half-depth of an abutment along OUR road. Under item 7b this IS the deck's
+ * half-depth, so the pillar is exactly as wide as the highway. */
+static double tg_up_pier_halfdeep(void)
+{
+    return td5_env_flag_on("TD5RE_R11_UP_PIER")
+         ? TD5_TG_UP_HALFDEEP : TD5_TG_UP_HALFDEEP + 1900.0;
+}
+
+/* Does the overpass deck's own footprint cover span si? Every massing gate
+ * reads this, so "no buildings under the highway" is one statement. Stateless
+ * and derived only from si, like tg_span_in_bridge_run. */
+static int tg_up_clear_span(int si)
+{
+    int k;
+    if (!td5_env_flag_on("TD5RE_R11_UP_CLEAR")) return 0;
+    for (k = -TD5_TG_UP_CLEAR_SPANS; k <= TD5_TG_UP_CLEAR_SPANS; k++) {
+        const int s = si + k;
+        if (s >= 0 && tg_underpass_span(s) == s) return 1;
+    }
+    return 0;
+}
+
+/* MEASURE, DON'T GUESS. One line per emitted overpass with the three numbers
+ * item 7 is about, so the fix is verified by diffing two logs rather than by
+ * looking at a frame: HIGHWAY width (along our road), PILLAR width (the same
+ * axis -- these two must be equal), and ARM length each side against where the
+ * drawn ground actually ends. Logged unconditionally: one line per underpass
+ * span is a handful of lines on a 1987-span track, and a silent measurement is
+ * a measurement nobody checks. */
+static void tg_r11_up_diag(int si, double rl, double rr, double pier_dp,
+                           double dp)
+{
+    TD5_LOG_I(LOG_TAG,
+              "trackgen: [R11 item 7] overpass @%d -- highway width %.0f, "
+              "pillar width %.0f (ratio %.2f), arm L %.0f R %.0f "
+              "(drawn edge %.0f), buildings cleared on spans %d..%d",
+              si, 2.0 * dp, 2.0 * pier_dp, (2.0 * pier_dp) / (2.0 * dp),
+              rl, rr, tg_far_reach(),
+              si - TD5_TG_UP_CLEAR_SPANS, si + TD5_TG_UP_CLEAR_SPANS);
+}
 
 /* Takes moff/nmesh directly rather than reporting a count the caller divides
  * up. The caller's "n equal-sized boxes" recovery is only valid when every mesh
@@ -8697,6 +8965,8 @@ static int tg_emit_underpass(const TG_NodeList *nl, int si, TG_Buf *blk,
     const double lx = n->tz, lz = -n->tx;
     const double tile = 3000.0;
     const double dp = TD5_TG_UP_HALFDEEP;
+    const double pier_dp = tg_up_pier_halfdeep();      /* [R11 item 7b] */
+    double reach_l, reach_r;                           /* [R11 item 7a] */
     const double y_soffit = n->y + TD5_TG_UP_CLEAR;
     const double y_top    = y_soffit + TD5_TG_UP_THICK;
     const unsigned int lit  = 0xFFFFFFFFu;
@@ -8715,10 +8985,21 @@ static int tg_emit_underpass(const TG_NodeList *nl, int si, TG_Buf *blk,
     ax = n->x + lx * shift;
     az = n->z + lz * shift;
     wall_off = half + 380.0;
+    /* +lateral is LEFT here (lx = tz, lz = -tx), matching tg_up_reach's
+     * is_left, so each arm takes its own cap. */
+    reach_l = tg_up_reach(nl, si, 1, half, dp);
+    reach_r = tg_up_reach(nl, si, 0, half, dp);
 
-    /* --- ABUTMENTS: one retaining wall each side, carrying the deck. Longer
-     * along our road than the deck is wide, so the wall reads as holding back
-     * an embankment rather than as two posts. --- */
+    /* [R11 item 7] The numbers the item is judged on, logged BEFORE the
+     * geometry is written so the A/B is a log diff. */
+    tg_r11_up_diag(si, reach_l, reach_r, pier_dp, dp);
+
+    /* --- ABUTMENTS: one pier each side, carrying the deck.
+     *
+     * [R11 item 7b] Exactly as wide along our road as the deck above it
+     * (2*pier_dp == 2*dp). It used to run dp + 1900 -- 6800 against the deck's
+     * 3000 -- to read as a retaining embankment, and that mismatch is the
+     * "support pillars are the wrong width" report. --- */
     for (s = 0; s < 2; s++) {
         const double sgn = s ? 1.0 : -1.0;
         if (*nmesh + 1 > maxmesh) return 1;      /* budget, not an error */
@@ -8726,7 +9007,7 @@ static int tg_emit_underpass(const TG_NodeList *nl, int si, TG_Buf *blk,
         if (!tg_emit_box_mesh(blk, ax + lx * wall_off * sgn,
                               n->y + TD5_TG_UP_CLEAR * 0.5,
                               az + lz * wall_off * sgn,
-                              380.0, TD5_TG_UP_CLEAR * 0.5, dp + 1900.0,
+                              380.0, TD5_TG_UP_CLEAR * 0.5, pier_dp,
                               n->tx, n->tz, TD5_TG_PAGE_R9_UP_ABUT, 2400.0,
                               0xFFE0DCD4u))
             return 0;
@@ -8743,8 +9024,8 @@ static int tg_emit_underpass(const TG_NodeList *nl, int si, TG_Buf *blk,
         uu[nv] = (U); vv[nv] = (V); col[nv] = (C); nv++;             \
     } while (0)
     {
-        const double L = shift + TD5_TG_UP_REACH;
-        const double R = shift - TD5_TG_UP_REACH;
+        const double L = shift + reach_l;
+        const double R = shift - reach_r;
         const double ul = L / tile, ur = R / tile;
         const double vd = (2.0 * dp) / tile;
         /* SOFFIT -- the face the driver actually sees, looking up from the
@@ -8785,13 +9066,18 @@ static int tg_emit_underpass(const TG_NodeList *nl, int si, TG_Buf *blk,
      * is seen from the side far more often than from above. --- */
     for (s = 0; s < 2; s++) {
         const double d = s ? (dp - 130.0) : -(dp - 130.0);
+        /* The two arms cap independently, so the parapet centres on the
+         * MIDPOINT of the deck rather than on the bore -- otherwise a short
+         * arm's rail would overhang its own deck. */
+        const double mid  = shift + (reach_l - reach_r) * 0.5;
+        const double hrch = (reach_l + reach_r) * 0.5;
         if (*nmesh + 1 > maxmesh) return 1;
         moff[(*nmesh)++] = blk->len;
         if (!tg_emit_box_mesh(blk,
-                              n->x + lx * shift + n->tx * d,
+                              n->x + lx * mid + n->tx * d,
                               y_top + TD5_TG_UP_PARAPET * 0.5,
-                              n->z + lz * shift + n->tz * d,
-                              TD5_TG_UP_REACH, TD5_TG_UP_PARAPET * 0.5, 130.0,
+                              n->z + lz * mid + n->tz * d,
+                              hrch, TD5_TG_UP_PARAPET * 0.5, 130.0,
                               n->tx, n->tz, TD5_TG_PAGE_R9_UP_PARAPET, 2000.0,
                               0xFFFFFFFFu))
             return 0;
@@ -8848,13 +9134,71 @@ static double tg_local_ground_y(const TG_NodeList *nl, int si)
     return (nl->v[a].y + nl->v[b].y) * 0.5;
 }
 
-/* The span range of the bridge run containing si. Partitioned exactly the way
- * tg_apply_elevation partitions it (fixed RUN-sized blocks from span 0), so the
- * deck hump, the river level and the gorge all describe the same crossing. */
+/* ===================== [R11 BRIDGE item 12] RUN COALESCE =====================
+ * "on span 837 a bridge finishes and another one starts immediately -- emit ONE
+ *  longer bridge instead of two abutting ones."
+ *
+ * ROOT CAUSE, and it is partitioning, not emission. Runs are fixed RUN-sized
+ * blocks from span 0 and each block is selected independently by hashing its own
+ * index (tg_span_in_bridge_run). Nothing ever looked at the NEIGHBOUR, so two
+ * consecutive blocks drawing "yes" produced two complete crossings sharing a
+ * span boundary: the elevation pass laid a raised cosine over each, and a raised
+ * cosine is zero-valued AND zero-sloped at both ends, so the road came back DOWN
+ * to the terrain line at the join and climbed again -- a visible dip with a deck
+ * end, a deck start, two sets of end piers and two river rectangles butted
+ * together. Seed 20260901 span 837 is exactly that boundary.
+ *
+ * THE FIX PRESERVES SPAN NUMBERING, which was the constraint on this item.
+ * tg_span_in_bridge_run is UNTOUCHED -- the set of bridge spans on the track is
+ * bit-identical before and after. What changes is only what a bridge span
+ * considers to be ITS OWN crossing: the maximal CHAIN of adjacent selected runs
+ * instead of the single block. Two abutting 40-span runs become one 80-span
+ * bridge over the same 80 spans. Nothing moves, nothing is added or removed, so
+ * every other span reference in this feedback round stays valid.
+ *
+ * Because tg_bridge_run_bounds is the single authority the deck-Y, the river
+ * level, the gorge phase, the pier grid, the gantry grid, the emitter and the
+ * coastline all read, widening it here is the whole geometric change; the only
+ * two things keyed on the run index directly are the STYLE (below, moved onto
+ * the chain so one crossing is one style end to end) and the elevation hump.
+ *
+ * GRADE. A raised cosine of height H over L spans peaks at H*PI/L, so a longer
+ * chain is GENTLER, not steeper: 2000*PI/80 = 78.5/span (grade 0.052) against
+ * 2000*PI/40 = 157 (grade 0.105) and the 0.120 cap. Coalescing can therefore
+ * never trip tg_apply_elevation's global rescale.
+ *
+ * TD5RE_R11_BRIDGE_COALESCE=0 restores the per-block crossings for an A/B.
+ * ========================================================================= */
+static int tg_r11_coalesce(void)
+{
+    return td5_env_flag_on("TD5RE_R11_BRIDGE_COALESCE");
+}
+
+/* First span of the CHAIN of adjacent selected runs containing si.
+ *
+ * Needs no node list (the backward walk is bounded by span 0 and by the grid
+ * clearance inside tg_span_in_bridge_run), which is what lets tg_bridge_style --
+ * which only ever gets an si -- key on the chain too. */
+static int tg_bridge_chain_first(int si)
+{
+    const int run = TD5_TG_BRIDGE_RUN;
+    int a = (si / run) * run;
+    if (!tg_r11_coalesce() || !tg_span_in_bridge_run(si)) return a;
+    while (a - run >= 0 && tg_span_in_bridge_run(a - run)) a -= run;
+    return a;
+}
+
+/* The span range of the bridge CROSSING containing si -- one run, or the whole
+ * chain of abutting runs under item 12. Partitioned exactly the way
+ * tg_apply_elevation partitions it, so the deck hump, the river level and the
+ * gorge all describe the same crossing. */
 static void tg_bridge_run_bounds(const TG_NodeList *nl, int si, int *s0, int *s1)
 {
-    int a = (si / TD5_TG_BRIDGE_RUN) * TD5_TG_BRIDGE_RUN;
-    int b = a + TD5_TG_BRIDGE_RUN - 1;
+    const int run = TD5_TG_BRIDGE_RUN;
+    int a = tg_bridge_chain_first(si);
+    int b = a + run - 1;
+    if (tg_r11_coalesce() && tg_span_in_bridge_run(si))
+        while (b + 1 <= nl->count - 1 && tg_span_in_bridge_run(b + 1)) b += run;
     if (b > nl->count - 1) b = nl->count - 1;
     if (a > b) a = b;
     *s0 = a; *s1 = b;
@@ -9049,7 +9393,10 @@ static int tg_bridge_style(int si)
 {
     unsigned int h;
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_BRIDGE_VARIETY")) return 0;
-    h = (unsigned)(si / TD5_TG_BRIDGE_RUN) * 2654435761u;
+    /* [R11 item 12] Keyed on the CHAIN, not the block. Two coalesced runs are
+     * one crossing, and one crossing has to be one style end to end or the
+     * "single longer bridge" changes material halfway across. */
+    h = (unsigned)(tg_bridge_chain_first(si) / TD5_TG_BRIDGE_RUN) * 2654435761u;
     return (int)((h >> 12) % (unsigned)TD5_TG_BRIDGE_STYLES);
 }
 
@@ -15115,14 +15462,17 @@ static int tg_emit_fb_city(const TG_FBHook *h)
         td5_env_flag_on("TD5RE_AUTOTRACK_LAMP_POSTS")) {
         if (!tg_city_emit_lamp(h, sw)) return 0;
     }
-    if (paved && !tg_span_in_bridge_run(h->si) &&
+    /* [R11 item 7c] Backrows stand out to sw + depth + 2*3200 and the fork-back
+     * massing further still -- both squarely inside the overpass arms now that
+     * they reach the drawn edge. Cleared on the deck's own spans. */
+    if (paved && !tg_span_in_bridge_run(h->si) && !tg_up_clear_span(h->si) &&
         td5_env_flag_on("TD5RE_AUTOTRACK_BACKROWS")) {
         if (!tg_city_emit_backrows(h, sw)) return 0;
     }
     /* [R4 item 6] Fill the bare flank a fork clears on the right with background
      * park/buildings set beyond the corridor. Runs on paved (city) fork spans
      * only; a no-op everywhere else. */
-    if (paved) {
+    if (paved && !tg_up_clear_span(h->si)) {
         if (!tg_city_emit_forkback(h)) return 0;
     }
     return 1;
@@ -16081,6 +16431,18 @@ static int tg_emit_fb_tunnel(const TG_FBHook *h)
 #define TD5_TG_FAR_REACH       30000
 #define TD5_TG_RIDGE_BASE      4500.0  /* mean ridge height above the far plain */
 
+/* [R11 item 7a] The band's reach as ONE number, knob included. The overpass
+ * sizes its arms off this so "the end of the drawn area" means the same thing
+ * to the highway and to the ground it is drawn over.
+ *
+ * [R11 integration] tg_r11_wet_reach below reads it too, so the shoreline, the
+ * river and the overpass arms all take "the drawn edge" from this one place. */
+static double tg_far_reach(void)
+{
+    return (double)td5_env_int("TD5RE_AUTOTRACK_TERRAIN_REACH",
+                               TD5_TG_FAR_REACH, 30000, 400000);
+}
+
 /* [R11 WATER item 14] How far out from the centreline the river and its
  * coastline reach beside node si.
  *
@@ -16107,9 +16469,7 @@ static double tg_r11_wet_reach(const TG_NodeList *nl, int si)
     if (!td5_env_flag_on("TD5RE_R11_WATER")) return bw;
     if (si < 0) si = 0;
     if (si > nl->count - 1) si = nl->count - 1;
-    r = nl->v[si].width * 0.5
-      + (double)td5_env_int("TD5RE_AUTOTRACK_TERRAIN_REACH",
-                            TD5_TG_FAR_REACH, 30000, 400000);
+    r = nl->v[si].width * 0.5 + tg_far_reach();
     return r > bw ? r : bw;
 }
 
@@ -16378,8 +16738,7 @@ static double tg_r9_dry_reach(const TG_NodeList *nl, int si,
 static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
 {
     const TG_NodeList *nl = h->nl;
-    const double base_reach = (double)td5_env_int("TD5RE_AUTOTRACK_TERRAIN_REACH",
-                                                  TD5_TG_FAR_REACH, 30000, 400000);
+    const double base_reach = tg_far_reach();
     double reach = base_reach;
     /* [R9 TOPO C2/C3] This band's own reach, decided by the continuity rule
      * rather than by a single global constant. Filled in below once the seam
@@ -17090,8 +17449,7 @@ static void tg_topo_chain(const TG_NodeList *nl, int si, int is_left,
 {
     const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
     const double wsd = b->water ? tg_water_side(si) : 0.0;
-    const double base_reach = (double)td5_env_int("TD5RE_AUTOTRACK_TERRAIN_REACH",
-                                                  TD5_TG_FAR_REACH, 30000, 400000);
+    const double base_reach = tg_far_reach();
     const int sink = td5_env_flag_on("TD5RE_AUTOTRACK_TERRAIN_SINK");
     const double floor_drop = nl->v[si].y
                             - (tg_track_min_y(nl) - TD5_TG_FAR_SINK_AT);
