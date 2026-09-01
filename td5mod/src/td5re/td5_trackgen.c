@@ -6116,6 +6116,108 @@ static double tg_flora_gap_clear(const TG_NodeList *nl, int si, double side,
                                     TD5_TG_FLORA_BRANCH_MARGIN);
 }
 
+/* ---- [R12 FLORA] plant ledger + tree-line coverage ledger ----------------
+ * R12 items 4 ("some billboard trees fight over which one draws in front") and
+ * 9 ("no tree background for a few spans") are both claims about WHAT WAS
+ * EMITTED, so both are answered by recording every plant and every tree-line
+ * band decision as the level is built and reporting on the whole track
+ * afterwards (tg_r12_flora_report). Recording is unconditional and costs one
+ * struct store per tree; the REPORT is opt-in.
+ *
+ * Why a ledger and not a per-emitter print: four separate emitters plant tree
+ * billboards (near verge, park canopy, R9 slope, R7 branch verge) and item 4 is
+ * a claim about a PAIR, which no single emitter can see. */
+#define TD5_TG_R12_FLORA_MAX 6000
+typedef struct {
+    int    si, page;
+    double side, cx, cz, tw, th;
+    const char *kind;
+} TG_R12FloraRec;
+static TG_R12FloraRec s_r12_flora[TD5_TG_R12_FLORA_MAX];
+static int s_r12_flora_n;
+
+/* Why did the tree-line band not stand on span si? One code per side. */
+enum {
+    TG_R12_BAND_OK = 0, TG_R12_BAND_OFF, TG_R12_BAND_GRID, TG_R12_BAND_END,
+    TG_R12_BAND_BRIDGE, TG_R12_BAND_BIOME, TG_R12_BAND_SLOTS
+};
+static unsigned char s_r12_band_why[TD5_TG_MAX_SPANS];
+static int s_r12_band_seen;
+
+static void tg_r12_flora_note(int si, const char *kind, int page, double side,
+                              double cx, double cz, double tw, double th)
+{
+    TG_R12FloraRec *r;
+    if (s_r12_flora_n >= TD5_TG_R12_FLORA_MAX) return;
+    r = &s_r12_flora[s_r12_flora_n++];
+    r->si = si; r->kind = kind; r->page = page; r->side = side;
+    r->cx = cx; r->cz = cz; r->tw = tw; r->th = th;
+}
+
+/* [R12 FLORA item 4] "some billboard trees fight over which one draws in front."
+ *
+ * MECHANISM, measured off the ledger above (TD5RE_R12_FLORA_REPORT=1, seed
+ * 20260901): 1279 tree billboards, of which 49 PAIRS stand closer together than
+ * a quarter of the narrower canopy's width and 9 pairs closer than 300 raw --
+ * e.g. si=952 park/near d=123 on canopies 4185 and 3328 wide, si=321
+ * near/branch d=199, si=132/135 r9slope/r9slope d=182. Every kind of pair is
+ * present (park/near 15, near/near 14, near/branch 9, r9slope/r9slope 6,
+ * park/park 5), i.e. FOUR emitters plant into the same verge with no shared
+ * view of what is already there, and the near-verge band (gap 800..3200) and
+ * the park canopy band (2600..5800) overlap outright.
+ *
+ * It is NOT depth-buffer precision and NOT a sort instability, both of which
+ * were checked first: tree billboards are mesh tag 1, which takes the immediate
+ * FOLIAGE_CUTOUT path (alpha-tested OPAQUE, z-write ON) and never enters the
+ * 4096-bucket billboard depth sort, and the depth target is D32_FLOAT with 1/z
+ * distribution, which resolves well under a raw unit at treeline distance. What
+ * actually happens is geometric: camera-facing quads are all PARALLEL planes, so
+ * two trunks 123 raw apart carry two 4000-wide canopies that overlap over
+ * essentially their whole area, and which one is in front flips the instant the
+ * camera crosses the pair's bisector -- twice a second at racing speed. The two
+ * pages swap places, which is exactly "they fight over which draws in front".
+ *
+ * So the fix is spacing, and it belongs in ONE place rather than in each of the
+ * four emitters: a trunk may not stand inside a quarter of an already-planted
+ * canopy's width, measured against every plant within +/-3 spans. A quarter is
+ * the measured gap in the population -- ordinary forest density (one tree per
+ * span, 1500 apart, d/narrow 0.3..0.5) is untouched, and 3.8% of plants are
+ * rejected. Rejected means DROPPED, not nudged: a nudge would only re-run the
+ * same lottery against the next neighbour, and one tree in 26 is invisible in a
+ * forest whereas a moved trunk can land on a verge that was cleared for a
+ * reason. Default ON; TD5RE_R12_FLORA_SPACE=0 restores the coincident plants. */
+#define TD5_TG_R12_SEP_FRAC 0.25
+static int s_r12_flora_rejects;
+
+static int tg_r12_flora_accept(int si, const char *kind, int page, double side,
+                               double cx, double cz, double tw, double th)
+{
+    if (td5_env_flag_on("TD5RE_R12_FLORA_SPACE")) {
+        int i;
+        for (i = 0; i < s_r12_flora_n; i++) {
+            const TG_R12FloraRec *r = &s_r12_flora[i];
+            double dx, dz, narrow, min_d;
+            if (r->si < si - 3 || r->si > si + 3) continue;
+            narrow = (r->tw < tw) ? r->tw : tw;
+            min_d  = narrow * TD5_TG_R12_SEP_FRAC;
+            dx = cx - r->cx; dz = cz - r->cz;
+            if (dx * dx + dz * dz < min_d * min_d) {
+                s_r12_flora_rejects++;
+                return 0;
+            }
+        }
+    }
+    tg_r12_flora_note(si, kind, page, side, cx, cz, tw, th);
+    return 1;
+}
+
+static void tg_r12_band_note(int si, int why)
+{
+    if (si < 0 || si >= TD5_TG_MAX_SPANS) return;
+    s_r12_band_why[si] = (unsigned char)why;
+    s_r12_band_seen = 1;
+}
+
 /* [R6 FLORA diag, dev-only] A camera-facing tree billboard is a DISC of radius
  * tw/2 about its plant point, so "clears the verge at span si" is not the same
  * as "clears the road": where the road CURVES back under a wide tree, or on a
@@ -7728,6 +7830,9 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
         if (!tg_flora_plant(nl, si, b, side, gap, tw, &cx, &cz, &base_y))
             return 1;
 
+        /* [R12 item 4] not on top of a tree another emitter already planted. */
+        if (!tg_r12_flora_accept(si, "near", tg_tree_slot(tv), side,
+                                 cx, cz, tw, th)) return 1;
         tg_flora_diag(nl, si, "near", tg_tree_slot(tv), side, tw, th, cx, cz);
         tg_acct(TG_ACCT_TREE, si);
         return tg_emit_billboard_mesh(blk, cx, base_y, cz, tw * 0.5, th,
@@ -11968,6 +12073,10 @@ static int tg_emit_branch_flora(const TG_NodeList *nl, int mb,
      * (n->x + n->tz*t, n->y, n->z - n->tx*t). */
     cx = n->x + n->tz * (-set);
     cz = n->z - n->tx * (-set);
+    /* [R12 item 4] the one tree emitter that does not go through tg_flora_diag;
+     * it takes the same shared spacing rule -- see tg_r12_flora_accept. */
+    if (!tg_r12_flora_accept(mb, "branch", tg_tree_slot(tv), -1.0,
+                             cx, cz, tw, th)) return 1;
     tg_acct_n(TG_ACCT_R7_BRANCH, acct_si, 1);
     moff[(*nmesh)++] = blk->len;
     return tg_emit_billboard_mesh(blk, cx, n->y, cz, tw * 0.5, th,
@@ -15981,21 +16090,121 @@ static double tg_treeline_back(const TG_Biome *b)
     return (!strcmp(b->name, "FIELDS")) ? 22000.0 : 11000.0;
 }
 
+/* [R12 FLORA item 9] "on this curve there was NO tree background for a few
+ * spans."
+ *
+ * MEASURED (TD5RE_R12_FLORA_REPORT=1, seed 20260901; the ALPINE cell 300..449
+ * runs into ALPTOWN at 450): the band is ABSENT on spans 432, 440, 441 and 446
+ * -- isolated one and two-span holes punched in a 14000-tall wall -- and
+ * PRESENT on 450, 451, 452, 455 and 459, i.e. five isolated walls standing
+ * inside the town. Every one of those spans reports hard=ALPINE soft=ALPTOWN or
+ * the reverse, so the hole is the ~20-span biome DITHER and nothing else:
+ * tg_biome_for_span assigns a boundary span to either biome by a per-span hash,
+ * ALPTOWN carries no tree line, and a dithered span therefore deletes its
+ * segment of the wall. Whole-track: 16 such dither holes.
+ *
+ * This is R11 GUARD's argument one emitter further out. A backdrop whose own
+ * contract is "one unbroken wall" is per-RUN STRUCTURE -- you cannot half-build
+ * it, and a missing span is not a thinner forest, it is a hole in the horizon.
+ * R11 GUARD hardened the paved road edge for exactly this reason, but it
+ * hardens tg_scenery_biome_index, and this emitter reads the RAW dither
+ * (hook.b = tg_biome_for_span), so the fix never reached it.
+ *
+ * WHAT SNAPS AND WHAT RAMPS, the same split R11 GUARD drew: PRESENCE comes from
+ * the HARD cell, so the wall runs unbroken to the last span of its own run.
+ * HEIGHT and SETBACK are continuous quantities, so they interpolate -- toward
+ * the neighbour's own values where the neighbour also carries a band (FOREST
+ * 12000 / ALPINE 14000 / FIELDS 7000 at a 22000 setback), and down to zero over
+ * the last TD5_TG_R12_BAND_TAPER spans where it does not, so the wall sinks
+ * into the ground at the town line rather than ending on a 14000 face.
+ * Evaluated per NODE, so consecutive quads share their endpoint height and
+ * setback exactly and the wall stays one run -- which also cures the FIELDS
+ * boundary, where the dithered 11000/22000 setback zigzagged the wall 11000
+ * units in and out span by span.
+ *
+ * Default ON; TD5RE_R12_FLORA_BAND=0 restores the dithered band for an A/B. */
+#define TD5_TG_R12_BAND_TAPER 8
+
+static void tg_r12_band_params(int si, double *out_h, double *out_back)
+{
+    int cell, off, other, dist, own;
+    double h, back, ho, bo;
+
+    if (si < 0) si = 0;
+    own  = tg_biome_cell_index(si);
+    h    = tg_treeline_height(&k_biomes[own]);
+    back = tg_treeline_back(&k_biomes[own]);
+    *out_back = back;
+    *out_h    = 0.0;
+    if (!(h > 0.0)) return;               /* this run carries no tree line */
+
+    cell = si / TD5_TG_BIOME_RUN;
+    off  = si - cell * TD5_TG_BIOME_RUN;
+    if (off < TD5_TG_BIOME_BLEND) {
+        other = tg_biome_cell_index((cell - 1) * TD5_TG_BIOME_RUN);
+        dist  = off;
+    } else if (off >= TD5_TG_BIOME_RUN - TD5_TG_BIOME_BLEND) {
+        other = tg_biome_cell_index((cell + 1) * TD5_TG_BIOME_RUN);
+        dist  = TD5_TG_BIOME_RUN - 1 - off;
+    } else {
+        *out_h = h; return;               /* solid core of the run */
+    }
+    if (other == own) { *out_h = h; return; }
+
+    ho = tg_treeline_height(&k_biomes[other]);
+    bo = tg_treeline_back(&k_biomes[other]);
+    if (ho > 0.0) {
+        /* Halfway at the boundary, own value at the band's far edge. The
+         * neighbouring cell computes the mirror of this, so both height and
+         * setback are continuous ACROSS the boundary as well as along it. */
+        const double t = (double)(TD5_TG_BIOME_BLEND - dist)
+                       / (double)(2 * TD5_TG_BIOME_BLEND);
+        *out_h    = h    + (ho - h)    * t;
+        *out_back = back + (bo - back) * t;
+        return;
+    }
+    *out_h = (dist < TD5_TG_R12_BAND_TAPER)
+           ? h * (double)dist / (double)TD5_TG_R12_BAND_TAPER : h;
+}
+
 static int tg_emit_fb_flora(const TG_FBHook *h)
 {
     const TG_NodeList *nl = h->nl;
     const int si = h->si;
-    double band, back;
-    int s;
+    /* [R12 item 9] band height and setback at the quad's TWO nodes. */
+    double bh[2] = { 0.0, 0.0 }, bk[2] = { 0.0, 0.0 };
+    double band;
+    int s, sj;
 
     /* Default ON (2026-08-26); TD5RE_AUTOTRACK_TREELINE=0 disables the band. */
-    if (!td5_env_flag_on("TD5RE_AUTOTRACK_TREELINE")) return 1;
-    if (si <= TD5_TG_GRID_SPAN) return 1;        /* keep the grid area clear */
-    if (si + 1 >= nl->count) return 1;
-    if (tg_span_in_bridge_run(si)) return 1;     /* see the river from the deck */
-    band = tg_treeline_height(h->b);
-    if (!(band > 0.0)) return 1;
-    back = tg_treeline_back(h->b);
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_TREELINE"))
+        { tg_r12_band_note(si, TG_R12_BAND_OFF); return 1; }
+    if (si <= TD5_TG_GRID_SPAN)                  /* keep the grid area clear */
+        { tg_r12_band_note(si, TG_R12_BAND_GRID); return 1; }
+    if (si + 1 >= nl->count)
+        { tg_r12_band_note(si, TG_R12_BAND_END); return 1; }
+    if (tg_span_in_bridge_run(si))               /* see the river from the deck */
+        { tg_r12_band_note(si, TG_R12_BAND_BRIDGE); return 1; }
+    /* [R12 item 9] Per-NODE height/setback off the HARD cell; see
+     * tg_r12_band_params. Knob off = the dithered per-span pair, unchanged. */
+    if (td5_env_flag_on("TD5RE_R12_FLORA_BAND")) {
+        tg_r12_band_params(si,     &bh[0], &bk[0]);
+        tg_r12_band_params(si + 1, &bh[1], &bk[1]);
+        /* u tiling comes from the RUN's own height, never the ramped one: du has
+         * to match on both sides of every shared edge or the wall shows a u
+         * seam where the ramp changes it. */
+        band = tg_treeline_height(&k_biomes[tg_biome_cell_index(si)]);
+    } else {
+        bh[0] = bh[1] = band = tg_treeline_height(h->b);
+        bk[0] = bk[1] = tg_treeline_back(h->b);
+    }
+    if (!(bh[0] > 0.0) && !(bh[1] > 0.0))
+        { tg_r12_band_note(si, TG_R12_BAND_BIOME); return 1; }
+    if (!(band > 0.0)) band = (bh[0] > bh[1]) ? bh[0] : bh[1];
+    /* the far node's own span index, clamped so the clearance query stays in
+     * range on the last quad of the list. */
+    sj = (si + 2 < nl->count) ? si + 1 : si;
+    tg_r12_band_note(si, TG_R12_BAND_OK);
 
     /* ONE MESH PER SIDE, not one for both: a mesh spanning both verges has a
      * bounding sphere wider than the band is far away, so the culler could
@@ -16009,9 +16218,13 @@ static int tg_emit_fb_flora(const TG_FBHook *h)
         const TG_Node *n1 = &nl->v[si + 1];
         const double lx0 = n0->tz * side, lz0 = -n0->tx * side;
         const double lx1 = n1->tz * side, lz1 = -n1->tx * side;
-        /* Clear of any branch carriageway, same rule as the trees. */
-        const double d = tg_flora_gap_clear(nl, si, side, back);
-        const double e0 = n0->width * 0.5 + d, e1 = n1->width * 0.5 + d;
+        /* Clear of any branch carriageway, same rule as the trees. [R12 item 9]
+         * PER NODE: the far end takes span si+1's own setback, which is the
+         * value the NEXT quad computes for its near end, so the two abut
+         * exactly even where the setback or the fork clearance changes. */
+        const double d  = tg_flora_gap_clear(nl, si, side, bk[0]);
+        const double d1 = tg_flora_gap_clear(nl, sj, side, bk[1]);
+        const double e0 = n0->width * 0.5 + d, e1 = n1->width * 0.5 + d1;
         const double bx = n0->x + lx0 * e0, bz = n0->z + lz0 * e0;
         const double fx = n1->x + lx1 * e1, fz = n1->z + lz1 * e1;
         const double by = n0->y - TD5_TG_TREELINE_SINK;
@@ -16031,26 +16244,35 @@ static int tg_emit_fb_flora(const TG_FBHook *h)
         int seg_page = TD5_TG_PAGE_TREELINE, seg_nq = 1;
         int n = 0;
 
-        if (*h->nmesh + 1 >= h->maxmesh) return 1;   /* out of slots this entry */
+        if (*h->nmesh + 1 >= h->maxmesh)             /* out of slots this entry */
+            { tg_r12_band_note(si, TG_R12_BAND_SLOTS); return 1; }
         if (fit && tg_r12_treeline_density()) {
-            /* [R12 TEX item 1] Crown + K mirrored body strips; see the block
-             * comment on tg_r12_treeline_density. */
+            /* [R12 TEX item 1 + R12 FLORA item 9, merged] Crown + K mirrored
+             * body strips, expressed as FRACTIONS of the wall rather than as
+             * absolute heights, so FLORA's per-node heights bh[0] (near) and
+             * bh[1] (far) still apply. That matters at a biome edge, where the
+             * band tapers to zero over the last spans and the two ends of one
+             * quad are deliberately different heights: a strip stack built on a
+             * single `band` would step instead of taper, and neighbouring spans
+             * would stop sharing their endpoint heights.
+             *
+             * kb and the tile size come from `band`, the run's representative
+             * height, so TEXEL DENSITY is set by the wall itself and does not
+             * collapse on a tapering end. */
             const double du12 = (double)TD5_TG_SPAN_LENGTH / TD5_TG_TL_TILE_U;
             const double ua   = tg_r12_tl_fold((double)si       * du12);
             const double ub2  = tg_r12_tl_fold((double)(si + 1) * du12);
             const double bodyf = 1.0 - TD5_TG_TL_CROWN_V;
             int kb = (int)floor((band / TD5_TG_TL_TILE_U - TD5_TG_TL_CROWN_V)
                                 / bodyf + 0.5);
-            double tile_v, crown_h, body_h, y0;
+            double total, fc;
             int j;
             if (kb < 1) kb = 1;
             if (kb > TD5_TG_TL_MAX_BODY) kb = TD5_TG_TL_MAX_BODY;
-            tile_v  = band / (TD5_TG_TL_CROWN_V + (double)kb * bodyf);
-            crown_h = tile_v * TD5_TG_TL_CROWN_V;
-            body_h  = tile_v * bodyf;
+            total = TD5_TG_TL_CROWN_V + (double)kb * bodyf;
             /* Body strips from the BASE up, alternating v direction so each
-             * join shares a row with its neighbour. Strip j spans
-             * [j*body_h, (j+1)*body_h]; strip 0 sits on the ground. */
+             * join shares a row with its neighbour. Strip j spans fractions
+             * [j*bodyf, (j+1)*bodyf] of `total`; strip 0 sits on the ground. */
             for (j = 0; j < kb; j++) {
                 /* Strip kb-1 is the one that meets the crown, and its TOP must
                  * read v = CROWN_V. Parity from the distance to that strip. */
@@ -16059,28 +16281,30 @@ static int tg_emit_fb_flora(const TG_FBHook *h)
                                       : TD5_TG_TL_CROWN_V;      /* at strip base */
                 const double vhi = up ? TD5_TG_TL_CROWN_V
                                       : 1.0 - TD5_TG_FACADE_UV_INSET; /* at top  */
-                const double h0 = (double)j * body_h, h1 = h0 + body_h;
-                px[n]=bx; py[n]=by+h0; pz[n]=bz; uu[n]=ua;  vv[n]=vlo; n++;
-                px[n]=fx; py[n]=fy+h0; pz[n]=fz; uu[n]=ub2; vv[n]=vlo; n++;
-                px[n]=fx; py[n]=fy+h1; pz[n]=fz; uu[n]=ub2; vv[n]=vhi; n++;
-                px[n]=bx; py[n]=by+h1; pz[n]=bz; uu[n]=ua;  vv[n]=vhi; n++;
+                const double f0 = (double)j * bodyf / total;
+                const double f1 = (double)(j + 1) * bodyf / total;
+                px[n]=bx; py[n]=by+bh[0]*f0; pz[n]=bz; uu[n]=ua;  vv[n]=vlo; n++;
+                px[n]=fx; py[n]=fy+bh[1]*f0; pz[n]=fz; uu[n]=ub2; vv[n]=vlo; n++;
+                px[n]=fx; py[n]=fy+bh[1]*f1; pz[n]=fz; uu[n]=ub2; vv[n]=vhi; n++;
+                px[n]=bx; py[n]=by+bh[0]*f1; pz[n]=bz; uu[n]=ua;  vv[n]=vhi; n++;
             }
             /* CROWN on top: page rows 0..23, keyed silhouette against the sky.
              * Its base v must equal the top v of the last body strip, which the
-             * parity above forces to CROWN_V. */
-            y0 = (double)kb * body_h;
-            px[n]=bx; py[n]=by+y0;         pz[n]=bz; uu[n]=ua;  vv[n]=TD5_TG_TL_CROWN_V; n++;
-            px[n]=fx; py[n]=fy+y0;         pz[n]=fz; uu[n]=ub2; vv[n]=TD5_TG_TL_CROWN_V; n++;
-            px[n]=fx; py[n]=fy+y0+crown_h; pz[n]=fz; uu[n]=ub2; vv[n]=vt; n++;
-            px[n]=bx; py[n]=by+y0+crown_h; pz[n]=bz; uu[n]=ua;  vv[n]=vt; n++;
+             * parity above forces to CROWN_V; its top is the wall's own height
+             * at each end, so the crown line tapers with the band. */
+            fc = (double)kb * bodyf / total;
+            px[n]=bx; py[n]=by+bh[0]*fc; pz[n]=bz; uu[n]=ua;  vv[n]=TD5_TG_TL_CROWN_V; n++;
+            px[n]=fx; py[n]=fy+bh[1]*fc; pz[n]=fz; uu[n]=ub2; vv[n]=TD5_TG_TL_CROWN_V; n++;
+            px[n]=fx; py[n]=fy+bh[1];    pz[n]=fz; uu[n]=ub2; vv[n]=vt; n++;
+            px[n]=bx; py[n]=by+bh[0];    pz[n]=bz; uu[n]=ua;  vv[n]=vt; n++;
             seg_nq = n / 4;
         } else {
             /* quad loop: near-bottom, far-bottom, far-top, near-top; v=1 at the
              * base, matching the page convention that row 0 is the TOP. */
-            px[0] = bx; py[0] = by;        pz[0] = bz; uu[0] = u0; vv[0] = vb;
-            px[1] = fx; py[1] = fy;        pz[1] = fz; uu[1] = u1; vv[1] = vb;
-            px[2] = fx; py[2] = fy + band; pz[2] = fz; uu[2] = u1; vv[2] = vt;
-            px[3] = bx; py[3] = by + band; pz[3] = bz; uu[3] = u0; vv[3] = vt;
+            px[0] = bx; py[0] = by;         pz[0] = bz; uu[0] = u0; vv[0] = vb;
+            px[1] = fx; py[1] = fy;         pz[1] = fz; uu[1] = u1; vv[1] = vb;
+            px[2] = fx; py[2] = fy + bh[1]; pz[2] = fz; uu[2] = u1; vv[2] = vt;
+            px[3] = bx; py[3] = by + bh[0]; pz[3] = bz; uu[3] = u0; vv[3] = vt;
             n = 4;
         }
 
@@ -16159,6 +16383,9 @@ static int tg_emit_fb_park_trees(const TG_FBHook *h)
         if (!tg_flora_plant(nl, si, b, side, gap, tw, &cx, &cz, &base_y))
             return 1;
 
+        /* [R12 item 4] shared spacing rule -- see tg_r12_flora_accept. */
+        if (!tg_r12_flora_accept(si, "park", page, side, cx, cz, tw, th))
+            return 1;
         tg_flora_diag(nl, si, "park", page, side, tw, th, cx, cz);
         h->moff[*h->nmesh] = h->blk->len;
         if (!tg_emit_billboard_mesh(h->blk, cx, base_y, cz, tw * 0.5, th, page, 1))
@@ -18262,6 +18489,9 @@ static int tg_emit_fb_slope_flora(const TG_FBHook *h)
     }
     base_y = nl->v[si].y - drop_in;      /* ON the slope, not on its lip */
 
+    /* [R12 item 4] shared spacing rule -- see tg_r12_flora_accept. */
+    if (!tg_r12_flora_accept(si, "r9slope", page, side, cx, cz, tw, th))
+        return 1;
     tg_flora_diag(nl, si, "r9slope", page, side, tw, th, cx, cz);
     h->moff[*h->nmesh] = h->blk->len;
     if (!tg_emit_billboard_mesh(h->blk, cx, base_y, cz, tw * 0.5, th, page, 1))
@@ -23398,6 +23628,90 @@ static void tg_r12_tex_report(const TG_NodeList *nl, int nspans)
     (void)nl;
 }
 
+/* [R12 FLORA] Report on the two ledgers filled during the build.
+ *
+ * PART 1 (item 4, "billboard trees fight over which draws in front"): every
+ * PAIR of tree plants within a few spans of each other whose centres are close
+ * enough that the two camera-facing quads overlap on screen. Camera-facing
+ * billboards are all PARALLEL vertical planes, so a pair whose centres are d
+ * apart differs in depth by at most d -- when d is small next to the quads'
+ * width the two nearly-coplanar quads overlap over most of their area with a
+ * depth difference in the last bits of the depth buffer, and which one wins
+ * flips with the camera. That is the z-fight, and it is measurable here without
+ * a frame: report d, the widths, and d as a fraction of the narrower quad.
+ *
+ * PART 2 (item 9, "no tree background for a few spans"): the per-span tree-line
+ * band decision, with the span's hard cell biome next to the dithered biome the
+ * emitter actually asked, so a hole can be attributed rather than guessed at.
+ *
+ * Read-only, opt-in via TD5RE_R12_FLORA_REPORT=1, windowed by
+ * TD5RE_R12_FLORA_REPORT_LO/HI. */
+static void tg_r12_flora_report(const TG_NodeList *nl, int nspans)
+{
+    static const char *k_why[] = { "OK", "treeline-off", "grid", "list-end",
+                                   "bridge", "biome-has-no-band", "no-slots" };
+    int i, j, si, lo, hi, pairs = 0, holes = 0, dither_holes = 0, runs = 0;
+    int prev_hole = 0;
+
+    if (!td5_env_flag_on("TD5RE_R12_FLORA_REPORT")) return;
+    lo = td5_env_int("TD5RE_R12_FLORA_REPORT_LO", 0, 0, 100000);
+    hi = td5_env_int("TD5RE_R12_FLORA_REPORT_HI", 100000, 0, 100000);
+    if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
+
+    TD5_LOG_I(LOG_TAG, "trackgen: ---- [R12 FLORA] plants=%d ----",
+              s_r12_flora_n);
+    for (i = 0; i < s_r12_flora_n; i++) {
+        const TG_R12FloraRec *a = &s_r12_flora[i];
+        for (j = i + 1; j < s_r12_flora_n; j++) {
+            const TG_R12FloraRec *b = &s_r12_flora[j];
+            double dx, dz, d, narrow;
+            /* Emitters run in several passes, so the ledger is only roughly in
+             * span order -- window on the span NUMBER, never on ledger index. */
+            if (b->si < a->si - 3 || b->si > a->si + 3) continue;
+            dx = b->cx - a->cx; dz = b->cz - a->cz;
+            d  = sqrt(dx * dx + dz * dz);
+            narrow = (a->tw < b->tw) ? a->tw : b->tw;
+            if (!(d < narrow * 0.5)) continue; /* quads do not overlap on screen */
+            pairs++;
+            if (a->si < lo || a->si > hi) continue;
+            TD5_LOG_I(LOG_TAG,
+                "r12flora-pair: si=%d/%d %s/%s page=%d/%d d=%.0f "
+                "tw=%.0f/%.0f d/narrow=%.2f",
+                a->si, b->si, a->kind, b->kind, a->page, b->page, d,
+                a->tw, b->tw, d / (narrow > 0.0 ? narrow : 1.0));
+        }
+    }
+    if (s_r12_band_seen) {
+        for (si = 1; si < nspans && si + 2 < nl->count; si++) {
+            const int why = s_r12_band_why[si];
+            const int hard = tg_biome_cell_index(si);
+            const int soft = tg_biome_for_span(si);
+            const int hole = (why != TG_R12_BAND_OK);
+            if (hole) {
+                holes++;
+                if (!prev_hole) runs++;
+                /* A hole the HARD cell disagrees with is a dither artefact:
+                 * the run this span belongs to does carry a tree line. */
+                if (why == TG_R12_BAND_BIOME &&
+                    tg_treeline_height(&k_biomes[hard]) > 0.0)
+                    dither_holes++;
+            }
+            prev_hole = hole;
+            if (si < lo || si > hi) continue;
+            TD5_LOG_I(LOG_TAG,
+                "r12flora-band: si=%d why=%s hard=%s soft=%s hardband=%.0f "
+                "softband=%.0f",
+                si, k_why[why], k_biomes[hard].name, k_biomes[soft].name,
+                tg_treeline_height(&k_biomes[hard]),
+                tg_treeline_height(&k_biomes[soft]));
+        }
+    }
+    TD5_LOG_I(LOG_TAG,
+              "r12flora: overlap-pairs=%d spacing-rejects=%d band-holes=%d "
+              "runs=%d dither-holes=%d (of %d spans)",
+              pairs, s_r12_flora_rejects, holes, runs, dither_holes, nspans);
+}
+
 /* ----------------------------------------------------------- build ------- */
 int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
                              int *out_spans)
@@ -23417,6 +23731,9 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
      * reason tg_acct_reset is: a direct build_level call must see its own seed.
      * Read only through tg_gen_seed(). */
     s_gen_seed = spec->seed;
+    /* [R12 FLORA] the ledgers are per-BUILD, same argument as tg_acct_reset. */
+    s_r12_flora_n = 0; s_r12_band_seen = 0; s_r12_flora_rejects = 0;
+    memset(s_r12_band_why, 0, sizeof(s_r12_band_why));
 
     memset(&nl, 0, sizeof(nl));
     memset(&strip, 0, sizeof(strip));
@@ -23585,6 +23902,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     tg_acct_report(nspans);
     tg_rail_edge_report(&nl, nspans);  /* [R9 RAILFIX] per-edge uniqueness */
     tg_r11_guard_report(&nl, nspans);  /* [R11 GUARD] structural-edge dump  */
+    tg_r12_flora_report(&nl, nspans);  /* [R12 FLORA] plant/band ledgers    */
     tg_r9_bridge_report(&nl);          /* [R9 BRIDGE] tie + dry-band evidence */
     /* [R9 INFRA] The two deliverables share one accounting slot, so print the
      * split explicitly. Ponds are accounted as WATER (they are water), which
