@@ -8083,6 +8083,13 @@ static int tg_people_density(const TG_Biome *b)
     return 1;
 }
 
+/* [R13 PROPS item 7a] Animal-context share counters. Declared with the layer
+ * that moves them rather than with the rest of the round's counters (which live
+ * with the R9 INFRA furniture, 9000 lines further down) so the number and the
+ * decision that produces it stay in one place. */
+static long s_r13_animal_kept;     /* animal picks on an un-paved biome       */
+static long s_r13_animal_town;     /* dropped: a town street is not a pasture */
+
 /* Roadside prop layer for span si (spectators, streetlamps, statues, animals),
  * additional to the trees/facades. Each emitted billboard records its own mesh
  * offset, so props may be a variable count of differently-sized meshes. */
@@ -8119,10 +8126,40 @@ static int tg_emit_props(const TG_NodeList *nl, int si, const TG_Biome *b,
         if (!tg_prop_one(nl, si, b->prop_statue, side, 1500.0, m, moff, pn))
             return 0;
     }
-    /* Animals: low density, set well back off the verge. */
+    /* Animals: low density, set well back off the verge.
+     *
+     * [R13 PROPS item 7a] "Do not put ANIMAL textures in cities." Same CLASS of
+     * bug as R12's no-entry disc and the same machinery, not a second gate: a
+     * grazing animal is a claim about its surroundings, and on a paved street
+     * with kerbs and shop fronts that claim is false, so no density makes it
+     * right. Instrumented rather than guessed -- the deer in the frame are at
+     * span 1677, which TD5RE_R9_INFRA_REPORT names ALPTOWN/pavement, and
+     * k_biomes gives ALPTOWN (the R8 snow TOWN, sidewalk 400, facade frontage)
+     * prop_animal = PP_DEER. It is the only settled biome carrying an animal.
+     *
+     * The discriminator is the PAVEMENT, not urbanity and not the biome name:
+     * FIELDS is urbanity 1 as well and its sheep are correct, and what separates
+     * the two is that FIELDS has no kerb. tg_city_sidewalk_w is the generator's
+     * single answer to "is there a real street here", which is the same
+     * predicate tg_infra_sign_biome_ok uses -- so this reads it rather than
+     * inventing a parallel one, and any future town biome is covered free.
+     *
+     * DENSITY IS NEUTRAL. A refused animal is SUBSTITUTED by a townsperson at
+     * the same side and the same setback, so the prop count, the element
+     * inventory and TG_ACCT_PROP are unchanged and only the animal SHARE moves.
+     * A pedestrian across a plaza is what belongs where the deer were standing.
+     * TD5RE_R13_ANIMAL_CTX=0 restores the unconditional animal. */
     if (b->prop_animal >= 0 && (int)(h >> 28) <= 2 && *pn < cap) {
+        int pp = b->prop_animal;
         side = ((h >> 11) & 1) ? 1.0 : -1.0;
-        if (!tg_prop_one(nl, si, b->prop_animal, side,
+        if (td5_env_flag_on("TD5RE_R13_ANIMAL_CTX")
+            && tg_city_sidewalk_w(b) > 0.0) {
+            pp = PP_PERSON0 + (int)((h >> 15) & 1);
+            s_r13_animal_town++;
+        } else {
+            s_r13_animal_kept++;
+        }
+        if (!tg_prop_one(nl, si, pp, side,
                          2500.0 + (double)((h >> 12) % 4000), m, moff, pn))
             return 0;
     }
@@ -17574,6 +17611,15 @@ static long s_r12_sign_kept;       /* sign picks that survived both gates     */
 static long s_r12_sign_ctx;        /* dropped: no road-network reason here    */
 static long s_r12_sign_rate;       /* dropped: allowed biome, thinned by rate */
 
+/* [R13 PROPS] Same shape as the R12 pair above: every one of this round's items
+ * changes a SHARE of the furniture total, never the total, so s_r9_infra_props
+ * and the element inventory are blind to all of them. These are the numbers. */
+static long s_r13_bench_end_uv;    /* benches whose FAR end took the fixed u  */
+static long s_r13_plank_crop;      /* barrier planks built from the sub-rect  */
+static long s_r13_awn_form;        /* awnings emitted as a wall-hung awning   */
+static long s_r13_awn_kept;        /* awning picks with a frontage to hang on */
+static long s_r13_awn_ctx;         /* dropped: nothing to hang the awning off */
+
 /* page_end / page_side / page_top: the three texture segments of the box, or
  * -1 in page_top to mean "billboard, page_side is the page". w = across the
  * road, d = along it, hgt = up; lift raises the piece off its footing (an
@@ -17738,15 +17784,41 @@ static int tg_infra_bench(const TG_FBHook *h, const TG_InfraProp *P,
         kx[e] = cx + lx * (cl[e] * hw) + ax * (cd[e] * hd);
         kz[e] = cz + lz * (cl[e] * hw) + az * (cd[e] * hd);
     }
-    /* Ends first (segment 0): edges 0 and 2, each spanning the lateral axis at
-     * one end of the length -- byte-for-byte the mapping tg_infra_box used, so
-     * the cast-iron profile keeps the orientation it was mined at. */
+    /* Ends (segment 0): edges 0 and 2, each spanning the lateral axis at one end
+     * of the length.
+     *
+     * [R13 PROPS item 2] "on the OUTER side of the bench the texture is
+     * MIRRORED". R12 kept tg_infra_box's mapping byte-for-byte, and that mapping
+     * is a WRAP: the corner walk is anticlockwise, so every edge runs u 0->1
+     * around the box and the two ends therefore point their u axes at OPPOSITE
+     * lateral directions. On a closed box that is correct -- the page wraps and
+     * meets itself. On a bench it is not, because the two ends are not two faces
+     * of one wrapped skin, they are two copies of ONE asymmetric cutout.
+     *
+     * Measured, not assumed: td6_bench.png q2 (TG_INFRA_BENCHEND) decodes to
+     * 1011 opaque texels of ornate cast iron whose mirror agreement about the
+     * page centre is 75%, with the tall backrest post packed against the u=1
+     * edge (opaque x range 1..63, right half 540 texels vs left 471). So u=1 is
+     * the BACK of the profile, and the back of the bench is the OUTBOARD (+w)
+     * lateral -- that is where the backrest quad below stands.
+     *
+     * The wrap gave u=1 at +w on edge 0 and u=1 at -w on edge 2, so exactly ONE
+     * of the two ends had its cast-iron back turned to the road: the outer end
+     * read as the mirror of the inner one. u is now pinned to the LATERAL, not
+     * to the walk, so both ends carry the same profile the same way round.
+     * TD5RE_R13_BENCH_UV=0 restores the wrap for an A/B. */
     for (e = 0; e < 4; e += 2) {
         const int f = (e + 1) & 3;
-        px[n] = kx[e]; py[n] = y0; pz[n] = kz[e]; uu[n] = 0.0; vv[n] = 1.0; n++;
-        px[n] = kx[f]; py[n] = y0; pz[n] = kz[f]; uu[n] = 1.0; vv[n] = 1.0; n++;
-        px[n] = kx[f]; py[n] = y1; pz[n] = kz[f]; uu[n] = 1.0; vv[n] = 0.0; n++;
-        px[n] = kx[e]; py[n] = y1; pz[n] = kz[e]; uu[n] = 0.0; vv[n] = 0.0; n++;
+        /* Corner 1 and 2 are the +w (outboard) pair, so on edge 2 the endpoints
+         * arrive in the other lateral order and u has to be swapped to match. */
+        const double ue = (e == 2 && td5_env_flag_on("TD5RE_R13_BENCH_UV"))
+                          ? 1.0 : 0.0;
+        const double uf = 1.0 - ue;
+        if (ue > 0.0) s_r13_bench_end_uv++;
+        px[n] = kx[e]; py[n] = y0; pz[n] = kz[e]; uu[n] = ue; vv[n] = 1.0; n++;
+        px[n] = kx[f]; py[n] = y0; pz[n] = kz[f]; uu[n] = uf; vv[n] = 1.0; n++;
+        px[n] = kx[f]; py[n] = y1; pz[n] = kz[f]; uu[n] = uf; vv[n] = 0.0; n++;
+        px[n] = kx[e]; py[n] = y1; pz[n] = kz[e]; uu[n] = ue; vv[n] = 0.0; n++;
     }
     /* SEAT (segment 1, quad 1): horizontal at ys, corners walked along the
      * length first so u is the 1.70 m axis and the slats run down the bench. */
@@ -17772,6 +17844,187 @@ static int tg_infra_bench(const TG_FBHook *h, const TG_InfraProp *P,
     tg_acct(TG_ACCT_R9_INFRA, h->si);
     s_r9_infra_props++;
     s_r12_bench_form++;
+    return 1;
+}
+
+/* ===== [R13 PROPS item 4a] The barrier plank is a CROP, not a wrong object ====
+ *
+ * "A prop texture CUT IN THE MIDDLE (looks like it needs its other half)."
+ * Instrumented first: TD5RE_R9_INFRA_REPORT puts a `barrier-plank` at span 992
+ * on an ALPINE verge, which is the red/white piece on snow in the frame, so the
+ * page under test is td6_redtape.png q0 (TG_INFRA_REDTAPE).
+ *
+ * The page was decoded independently of the game, and it does NOT hold one
+ * plank filling its cell. It holds TWO unrelated pieces of a 128x128 atlas
+ * quadrant plus dead space:
+ *
+ *      y  0..1    x 0..6 only   grey post cap
+ *      y  2..14   x 6..63       the red/white diagonal-banded PLANK
+ *      y 15..44   x 0..6 only   a grey POST with a white stripe
+ *      y 45..63   nothing (keyed on index 0)
+ *
+ * 1064 of 4096 texels are opaque and 648 of those are in the left half, which is
+ * the post, not the plank. Mapping the whole cell to one billboard therefore
+ * squeezed the plank into the TOP FIFTH of the quad, hung the unrelated post
+ * down the quad's LEFT EDGE as a stray column, and left the bottom third empty
+ * -- "cut in the middle, needs its other half", exactly.
+ *
+ * So this is a CROP bug and not a context bug. The piece is not rebuilt from
+ * imagination either: the leftover column IS the plank's own post, so the honest
+ * object is what the page actually contains -- a banded plank carried on two
+ * posts, each drawn from its own sub-rectangle. The quad aspect follows the
+ * sub-rectangle's texel aspect rather than the old prop box, so the bands stay
+ * diagonal instead of being stretched flat.
+ *
+ * It also stops being camera-facing. A 2.6 m plank that swivels to face the car
+ * is a billboard's answer to a problem a barrier does not have; it now lies
+ * ALONG the road like the bench does, which additionally keeps its footprint out
+ * of the lateral the carriageway authority polices.
+ *
+ * TD5RE_R13_PLANK_CROP=0 restores the whole-cell billboard. */
+#define TD5_TG_PLANK_U0   ( 6.0 / 64.0)   /* plank sub-rect, measured off the  */
+#define TD5_TG_PLANK_U1   ( 1.0)          /* decoded page (see the map above)  */
+#define TD5_TG_PLANK_V0   ( 2.0 / 64.0)
+#define TD5_TG_PLANK_V1   (15.0 / 64.0)
+#define TD5_TG_POST_U0    ( 0.0)          /* post sub-rect                     */
+#define TD5_TG_POST_U1    ( 7.0 / 64.0)
+#define TD5_TG_POST_V0    (16.0 / 64.0)
+#define TD5_TG_POST_V1    (45.0 / 64.0)
+
+static int tg_infra_plank(const TG_FBHook *h, const TG_InfraProp *P,
+                          double cx, double base_y, double cz,
+                          double ax, double az, double lx, double lz)
+{
+    double px[12], py[12], pz[12], uu[12], vv[12];
+    /* The 2.60 m width lies ALONG the road; the piece has no lateral depth. */
+    const double ha = P->w * 0.5;
+    const double y0 = base_y + P->lift, y1 = y0 + P->hgt;
+    /* Plank height from the sub-rect's own aspect: 13 texels tall over 58 wide
+     * at 2.60 m gives 0.58 m, which is a real barrier board. It hangs from the
+     * top of the piece so the posts show below it. */
+    const double plank_h = P->w * (TD5_TG_PLANK_V1 - TD5_TG_PLANK_V0)
+                                / (TD5_TG_PLANK_U1 - TD5_TG_PLANK_U0);
+    /* Post width the same way: 7 texels over 29 tall at the full piece height. */
+    const double post_w  = P->hgt * (TD5_TG_POST_U1 - TD5_TG_POST_U0)
+                                  / (TD5_TG_POST_V1 - TD5_TG_POST_V0);
+    int seg_page = TD5_TG_INFRA_PAGE(P->page_side), seg_nq = 3, n = 0, q;
+    double yp = y1 - plank_h;
+
+    if (yp < y0) yp = y0;
+    /* PLANK, then the two POSTS, all one page so the mesh stays one command. */
+    for (q = 0; q < 3; q++) {
+        /* q0 = the plank across the whole length; q1/q2 = a post at each end,
+         * inset by its own half width so it sits under the plank, not past it. */
+        const double c  = (q == 0) ? 0.0 : (q == 1 ? -(ha - post_w * 0.5)
+                                                   :  (ha - post_w * 0.5));
+        const double hh = (q == 0) ? ha : post_w * 0.5;
+        const double ly0 = (q == 0) ? yp : y0;
+        const double ly1 = (q == 0) ? y1 : y1;
+        const double u0 = (q == 0) ? TD5_TG_PLANK_U0 : TD5_TG_POST_U0;
+        const double u1 = (q == 0) ? TD5_TG_PLANK_U1 : TD5_TG_POST_U1;
+        const double v0 = (q == 0) ? TD5_TG_PLANK_V0 : TD5_TG_POST_V0;
+        const double v1 = (q == 0) ? TD5_TG_PLANK_V1 : TD5_TG_POST_V1;
+        const double x0 = cx + ax * (c - hh), z0 = cz + az * (c - hh);
+        const double x1 = cx + ax * (c + hh), z1 = cz + az * (c + hh);
+        px[n] = x0; py[n] = ly0; pz[n] = z0; uu[n] = u0; vv[n] = v1; n++;
+        px[n] = x1; py[n] = ly0; pz[n] = z1; uu[n] = u1; vv[n] = v1; n++;
+        px[n] = x1; py[n] = ly1; pz[n] = z1; uu[n] = u1; vv[n] = v0; n++;
+        px[n] = x0; py[n] = ly1; pz[n] = z0; uu[n] = u0; vv[n] = v0; n++;
+    }
+    (void)lx; (void)lz;
+
+    h->moff[*h->nmesh] = h->blk->len;
+    if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1))
+        return 0;
+    (*h->nmesh)++;
+    tg_acct(TG_ACCT_R9_INFRA, h->si);
+    s_r9_infra_props++;
+    s_r13_plank_crop++;
+    return 1;
+}
+
+/* ===== [R13 PROPS item 5a] The awning is not a floating box =================
+ *
+ * "A prop that looks like an UMBRELLA is FLOATING IN THE AIR, with wrong folding
+ * of its textures." The silhouette was not trusted: TD5RE_R9_INFRA_REPORT names
+ * `awning` at spans 1145 / 1149 / 1158 on the ALPTOWN pavement around the span
+ * in the frame, so the piece is IP_CANOPY, td6_canopy.png q2 -- a shop awning
+ * valance. Decoded, the page is a fabric field down to y=21, a broad white
+ * scalloped skirt to y=42 and a striped fringe below that: read as one flat
+ * quad in mid-air, the scallop is exactly an umbrella dome. So the report is
+ * accurate and the object is misidentified by its presentation, not by the user.
+ *
+ * TWO SEPARATE DEFECTS, diagnosed separately as required:
+ *
+ *   BASE HEIGHT. IP_CANOPY is the only k_infra_props entry with a non-zero
+ *   `lift` (2.20 m) -- the table's own comment says it "hangs off a frontage".
+ *   Nothing ever made that true. tg_emit_fb_infra hands every paved piece the
+ *   SAME setback, sw*(0.30..0.70), which is the middle of the pavement, and
+ *   tg_infra_place then lifts this one 2.20 m off it. There is no wall within a
+ *   metre of it in any direction, so the awning hangs in clear air. This is not
+ *   the sloping-ground fold hazard the R12 CROSS agent flagged: the footing here
+ *   is a flat kerb (base_y = n->y + tg_city_kerb_h) and it is correct. The bug
+ *   is that a wall-mounted piece was never given a wall.
+ *
+ *   FORM. tg_infra_box pastes one page on four upright faces AND the lid, so the
+ *   valance -- a page with a top, a skirt and a fringe -- came out wrapped round
+ *   a slab and repeated on its roof. That is the "wrong folding".
+ *
+ * FIX. The awning is CONTEXT-GATED to spans where a facade actually stands on
+ * that side (tg_facade_stands + tg_facade_built, the generator's own frontage
+ * authority, not a copy of its hash), ANCHORED so its back edge lands on the
+ * facade line instead of mid-pavement, and built as an awning: a sheet sloping
+ * down from the wall to a free edge over the pavement, plus the valance hanging
+ * at that free edge. The sheet takes only the fabric band of the page (v 0 ..
+ * TD5_TG_AWN_FABRIC_V) so the fringe cannot appear on a roof; the valance takes
+ * the whole page, which is the one surface the art was drawn for.
+ *
+ * Refused picks are SUBSTITUTED exactly as R12 does for the disc sign, so the
+ * furniture total and the r9-infra run list are unchanged and only the awning
+ * SHARE moves. TD5RE_R13_AWNING=0 restores the lifted box.
+ * ========================================================================== */
+#define TD5_TG_AWN_FABRIC_V  (21.0 / 64.0)  /* fabric band of the valance page  */
+#define TD5_TG_AWN_VALANCE   (0.35 * TD5_TG_INFRA_M)  /* hanging skirt depth    */
+#define TD5_TG_AWN_FALL      (0.30 * TD5_TG_INFRA_M)  /* wall-to-free-edge drop */
+
+static int tg_infra_awning(const TG_FBHook *h, const TG_InfraProp *P,
+                           double cx, double base_y, double cz,
+                           double ax, double az, double lx, double lz)
+{
+    double px[8], py[8], pz[8], uu[8], vv[8];
+    const double hw = P->w * 0.5, hd = P->d * 0.5;
+    /* lx/lz points AWAY from the road, so +w is the wall and -w the free edge. */
+    const double y_wall = base_y + P->lift + P->hgt;
+    const double y_free = y_wall - TD5_TG_AWN_FALL;
+    const double y_hem  = y_free - TD5_TG_AWN_VALANCE;
+    int seg_page = TD5_TG_INFRA_PAGE(P->page_side), seg_nq = 2, n = 0;
+    /* Four ground-plan corners: (lateral, along) = wall/free x near/far. */
+    const double wx0 = cx + lx * hw - ax * hd, wz0 = cz + lz * hw - az * hd;
+    const double wx1 = cx + lx * hw + ax * hd, wz1 = cz + lz * hw + az * hd;
+    const double fx0 = cx - lx * hw - ax * hd, fz0 = cz - lz * hw - az * hd;
+    const double fx1 = cx - lx * hw + ax * hd, fz1 = cz - lz * hw + az * hd;
+
+    /* SHEET: sloping, u along the frontage, v across from the wall (0) to the
+     * free edge, stopping inside the fabric band so no fringe lands on top. */
+    px[n] = wx0; py[n] = y_wall; pz[n] = wz0; uu[n] = 0.0; vv[n] = 0.0; n++;
+    px[n] = wx1; py[n] = y_wall; pz[n] = wz1; uu[n] = 1.0; vv[n] = 0.0; n++;
+    px[n] = fx1; py[n] = y_free; pz[n] = fz1; uu[n] = 1.0;
+    vv[n] = TD5_TG_AWN_FABRIC_V; n++;
+    px[n] = fx0; py[n] = y_free; pz[n] = fz0; uu[n] = 0.0;
+    vv[n] = TD5_TG_AWN_FABRIC_V; n++;
+    /* VALANCE: hangs at the free edge, whole page top to fringe. */
+    px[n] = fx0; py[n] = y_hem;  pz[n] = fz0; uu[n] = 0.0; vv[n] = 1.0; n++;
+    px[n] = fx1; py[n] = y_hem;  pz[n] = fz1; uu[n] = 1.0; vv[n] = 1.0; n++;
+    px[n] = fx1; py[n] = y_free; pz[n] = fz1; uu[n] = 1.0; vv[n] = 0.0; n++;
+    px[n] = fx0; py[n] = y_free; pz[n] = fz0; uu[n] = 0.0; vv[n] = 0.0; n++;
+
+    h->moff[*h->nmesh] = h->blk->len;
+    if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1))
+        return 0;
+    (*h->nmesh)++;
+    tg_acct(TG_ACCT_R9_INFRA, h->si);
+    s_r9_infra_props++;
+    s_r13_awn_form++;
     return 1;
 }
 
@@ -17825,7 +18078,12 @@ static int tg_infra_place(const TG_FBHook *h, int kind, double side,
     cz = n->z + lz * (n->width * 0.5 + out);
 
     if (P->page_top < 0) {
-        size_t b0 = h->blk->len;
+        size_t b0;
+        /* [R13 PROPS item 4a] The plank is the one billboard on this menu whose
+         * page holds a sub-rectangle rather than a whole piece. */
+        if (kind == IP_REDTAPE && td5_env_flag_on("TD5RE_R13_PLANK_CROP"))
+            return tg_infra_plank(h, P, cx, base_y, cz, ax, az, lx, lz);
+        b0 = h->blk->len;
         h->moff[*h->nmesh] = b0;
         if (!tg_emit_billboard_mesh(h->blk, cx, base_y + P->lift, cz,
                                     P->w * 0.5, P->hgt,
@@ -17842,6 +18100,10 @@ static int tg_infra_place(const TG_FBHook *h, int kind, double side,
      * closed volume, so it gets its own assembly. Everything else stays a box. */
     if (kind == IP_BENCH && td5_env_flag_on("TD5RE_R12_BENCH_FORM"))
         return tg_infra_bench(h, P, cx, base_y, cz, ax, az, lx, lz);
+    /* [R13 PROPS item 5a] An awning is not a closed volume either -- it is a
+     * sheet hung on a wall. Same exception, same reason. */
+    if (kind == IP_CANOPY && td5_env_flag_on("TD5RE_R13_AWNING"))
+        return tg_infra_awning(h, P, cx, base_y, cz, ax, az, lx, lz);
     return tg_infra_box(h, P, cx, base_y, cz, ax, az, lx, lz);
 }
 
@@ -17957,6 +18219,30 @@ static int tg_infra_sign_filter(const TG_Biome *b, int paved, int kind,
     }
     if (paved) return IP_BIN;
     return ((hh >> 3) & 1u) ? IP_BIN : IP_BENCH;
+}
+
+/* [R13 PROPS item 5a] The awning's half of the same rule: an awning is a claim
+ * that there is a SHOP FRONT immediately behind it, so it may only be picked
+ * where a facade actually stands on this side. The frontage authority is asked
+ * (tg_facade_stands for the span, tg_facade_built for the side) rather than a
+ * biome name or a re-derived hash -- the mistake that made trees stand on branch
+ * carriageways for three rounds. Refused picks SUBSTITUTE, so the furniture
+ * total and the r9-infra run list are unchanged, exactly as R12's sign does.
+ * `side` follows tg_emit_fb_infra's convention: > 0 is the left kerb. */
+static int tg_infra_awning_filter(int si, double side, int paved, int kind,
+                                  unsigned int hh)
+{
+    if (kind != IP_CANOPY) return kind;
+    if (!td5_env_flag_on("TD5RE_R13_AWNING")) { s_r13_awn_kept++; return kind; }
+    if (tg_facade_stands(si) && tg_facade_built(si, side > 0.0 ? 1 : 0)) {
+        s_r13_awn_kept++;
+        return kind;
+    }
+    s_r13_awn_ctx++;
+    /* Bit 4 is untouched by every other decision on this span (see the sign
+     * filter's bit map), so the stand-in is independent of all of them. */
+    if (paved) return ((hh >> 4) & 1u) ? IP_BIN : IP_BENCH;
+    return IP_BIN;
 }
 
 /* ===================== [R9 INFRA] PONDS =====================
@@ -18132,6 +18418,7 @@ static int tg_emit_fb_infra(const TG_FBHook *h)
         /* Roadworks replace the menu pick occasionally, on ONE side only, so
          * they read as a works site rather than a decoration. */
         kind = tg_infra_sign_filter(sb, paved, kind, hh);
+        kind = tg_infra_awning_filter(si, side, paved, kind, hh);
         if (((hh >> 13) & 0x3Fu) == 0u) kind = IP_WORKY;
         else if (((hh >> 19) & 0x3Fu) == 0u) kind = IP_REDTAPE;
 
@@ -18151,6 +18438,15 @@ static int tg_emit_fb_infra(const TG_FBHook *h)
              * of the kerb face on one side and of the frontage on the other. */
             gap = sw * (0.30 + 0.40 * (double)((hh >> 8) & 0xFFu) / 255.0);
             base_y = n->y + tg_city_kerb_h(sb);
+            /* [R13 PROPS item 5a] ANCHOR. Everything else on this menu stands
+             * on the pavement, so the shared setback is right for it. An awning
+             * hangs on the wall, so it takes the FRONTAGE setback instead: the
+             * pavement WIDTH at this span (the same tg_city_sidewalk_w_at the
+             * facade itself is set back by) less its own half depth, which puts
+             * its back edge on the facade line rather than in mid-air. */
+            if (kind == IP_CANOPY && td5_env_flag_on("TD5RE_R13_AWNING"))
+                gap = tg_city_sidewalk_w_at(nl, si, sb)
+                    - k_infra_props[IP_CANOPY].w * 0.5;
         } else {
             /* On a verge there is no kerb to stand on, and the skirt DROPS
              * away from the road -- so road height is the wrong footing and a
@@ -20839,6 +21135,14 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     s_r12_sign_kept = 0;
     s_r12_sign_ctx = 0;
     s_r12_sign_rate = 0;
+    /* [R13 PROPS] this round's four share counters, same lifetime. */
+    s_r13_bench_end_uv = 0;
+    s_r13_plank_crop = 0;
+    s_r13_awn_form = 0;
+    s_r13_awn_kept = 0;
+    s_r13_awn_ctx = 0;
+    s_r13_animal_kept = 0;
+    s_r13_animal_town = 0;
     /* [R10 SPAN66] side-street occupancy counters, same lifetime. */
     s_r10_prop_skipped = 0;
     s_r10_audit_n = 0;
@@ -25153,6 +25457,28 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
               s_r12_sign_kept + s_r12_sign_ctx + s_r12_sign_rate,
               s_r12_sign_kept, s_r12_sign_ctx, s_r12_sign_rate,
               td5_env_flag_on("TD5RE_R12_SIGN_CTX") ? "on" : "off");
+    /* [R13 PROPS] Same rule as the R12 line above: every item here moves a SHARE
+     * of the furniture/prop totals, never a total, so this line is the round's
+     * only evidence. Awning kept+ctx equals the OLD awning count and animal
+     * kept+town equals the OLD animal count, which is what makes each of them a
+     * subtraction rather than two runs that happen to differ. */
+    TD5_LOG_I(LOG_TAG,
+              "trackgen: [R13 PROPS] bench-end-uv=%ld (knob "
+              "TD5RE_R13_BENCH_UV=%s); planks=%ld (knob "
+              "TD5RE_R13_PLANK_CROP=%s); awning picks=%ld -> kept=%ld, "
+              "dropped no-frontage=%ld, built=%ld (knob TD5RE_R13_AWNING=%s); "
+              "animal picks=%ld -> kept=%ld, dropped town=%ld (knob "
+              "TD5RE_R13_ANIMAL_CTX=%s)",
+              s_r13_bench_end_uv,
+              td5_env_flag_on("TD5RE_R13_BENCH_UV") ? "on" : "off",
+              s_r13_plank_crop,
+              td5_env_flag_on("TD5RE_R13_PLANK_CROP") ? "on" : "off",
+              s_r13_awn_kept + s_r13_awn_ctx, s_r13_awn_kept, s_r13_awn_ctx,
+              s_r13_awn_form,
+              td5_env_flag_on("TD5RE_R13_AWNING") ? "on" : "off",
+              s_r13_animal_kept + s_r13_animal_town,
+              s_r13_animal_kept, s_r13_animal_town,
+              td5_env_flag_on("TD5RE_R13_ANIMAL_CTX") ? "on" : "off");
     /* [R10 SPAN66 item 1] The PLACEMENT half's number. The ENFORCEMENT half's
      * numbers are the guard's own "rejects by kind: prop" and its residual line
      * -- the residual now re-tests furniture against the widened envelope, so
