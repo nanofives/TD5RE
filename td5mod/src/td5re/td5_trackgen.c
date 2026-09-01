@@ -16208,6 +16208,16 @@ static int tg_emit_fb_park_trees(const TG_FBHook *h)
 static long s_r9_infra_props;      /* furniture pieces emitted */
 static long s_r9_infra_ponds;      /* pond sheets emitted      */
 
+/* [R12 PROPS] The two deliverables of this round, both of which change a
+ * SHARE of the same total rather than the total itself -- so the inventory
+ * count and even s_r9_infra_props are blind to them. These are the numbers the
+ * round is judged on: benches built as a bench (item 2) and discs the sign
+ * context/rate gate turned away (item 3), logged beside the R9 split. */
+static long s_r12_bench_form;      /* benches emitted in the new bench form  */
+static long s_r12_sign_kept;       /* sign picks that survived both gates     */
+static long s_r12_sign_ctx;        /* dropped: no road-network reason here    */
+static long s_r12_sign_rate;       /* dropped: allowed biome, thinned by rate */
+
 /* page_end / page_side / page_top: the three texture segments of the box, or
  * -1 in page_top to mean "billboard, page_side is the page". w = across the
  * road, d = along it, hgt = up; lift raises the piece off its footing (an
@@ -16327,6 +16337,88 @@ static int tg_infra_box(const TG_FBHook *h, const TG_InfraProp *P,
     return 1;
 }
 
+/* ===== [R12 PROPS item 2] The bench is NOT a box =====
+ *
+ * MECHANISM, measured not guessed. td6_bench.png q0 (TG_INFRA_BENCH) decodes --
+ * verified by decoding the header arrays independently of the game -- as SIX
+ * horizontal wooden SLATS with the gaps between them keyed on index 0 (the
+ * header's own "type 1, key 29%"), plus one narrow cross-brace bridging them.
+ * It is a slatted PANEL cutout, and it was being pasted on the two UPRIGHT LONG
+ * SIDES of a solid box, where two things went wrong at once:
+ *
+ *   - the 29% keyed slat gaps punched see-through holes down the whole side, so
+ *     the near face and the far face both showed and the piece read as HALF a
+ *     bench rather than a solid object;
+ *   - a slat is a line of constant v, so on an upright face the slats came out
+ *     as horizontal bars climbing a wall -- "slats in the wrong places" -- and
+ *     on the lid they ran ACROSS the 0.50 m depth instead of ALONG the 1.70 m
+ *     length.
+ *
+ * So this is a MESH-FORM defect, not a crop and not a bad sub-rectangle: the
+ * page is correct art applied to surfaces that do not exist on a bench. The fix
+ * builds the bench a bench is: two ornate END cutouts (TG_INFRA_BENCHEND,
+ * unchanged -- its u=1 edge is the backrest post and the box already mapped the
+ * ends that way), one horizontal SEAT at TD5_TG_BENCH_SEAT of the height, and
+ * one upright BACKREST above the seat on the OUTBOARD edge so the bench faces
+ * the road. Seat and backrest both take u ALONG the length, which is the axis
+ * the slats run down. There are no long side faces left for the cutout to see
+ * through. Knob TD5RE_R12_BENCH_FORM (default ON) falls back to the box. */
+#define TD5_TG_BENCH_SEAT  0.53   /* seat plane, fraction of the piece height */
+
+static int tg_infra_bench(const TG_FBHook *h, const TG_InfraProp *P,
+                          double cx, double base_y, double cz,
+                          double ax, double az, double lx, double lz)
+{
+    double px[16], py[16], pz[16], uu[16], vv[16];
+    const double hw = P->w * 0.5, hd = P->d * 0.5;
+    const double y0 = base_y + P->lift, y1 = y0 + P->hgt;
+    const double ys = y0 + P->hgt * TD5_TG_BENCH_SEAT;
+    int seg_page[2], seg_nq[2], n = 0, e;
+    static const double cl[4] = { -1.0,  1.0, 1.0, -1.0 };
+    static const double cd[4] = { -1.0, -1.0, 1.0,  1.0 };
+    double kx[4], kz[4];
+
+    for (e = 0; e < 4; e++) {
+        kx[e] = cx + lx * (cl[e] * hw) + ax * (cd[e] * hd);
+        kz[e] = cz + lz * (cl[e] * hw) + az * (cd[e] * hd);
+    }
+    /* Ends first (segment 0): edges 0 and 2, each spanning the lateral axis at
+     * one end of the length -- byte-for-byte the mapping tg_infra_box used, so
+     * the cast-iron profile keeps the orientation it was mined at. */
+    for (e = 0; e < 4; e += 2) {
+        const int f = (e + 1) & 3;
+        px[n] = kx[e]; py[n] = y0; pz[n] = kz[e]; uu[n] = 0.0; vv[n] = 1.0; n++;
+        px[n] = kx[f]; py[n] = y0; pz[n] = kz[f]; uu[n] = 1.0; vv[n] = 1.0; n++;
+        px[n] = kx[f]; py[n] = y1; pz[n] = kz[f]; uu[n] = 1.0; vv[n] = 0.0; n++;
+        px[n] = kx[e]; py[n] = y1; pz[n] = kz[e]; uu[n] = 0.0; vv[n] = 0.0; n++;
+    }
+    /* SEAT (segment 1, quad 1): horizontal at ys, corners walked along the
+     * length first so u is the 1.70 m axis and the slats run down the bench. */
+    px[n] = kx[0]; py[n] = ys; pz[n] = kz[0]; uu[n] = 0.0; vv[n] = 0.0; n++;
+    px[n] = kx[3]; py[n] = ys; pz[n] = kz[3]; uu[n] = 1.0; vv[n] = 0.0; n++;
+    px[n] = kx[2]; py[n] = ys; pz[n] = kz[2]; uu[n] = 1.0; vv[n] = 1.0; n++;
+    px[n] = kx[1]; py[n] = ys; pz[n] = kz[1]; uu[n] = 0.0; vv[n] = 1.0; n++;
+    /* BACKREST (segment 1, quad 2): upright from the seat to the top on the
+     * OUTBOARD lateral edge (corners 1 and 2 are at +w, and lx/lz points away
+     * from the road), so the bench looks at the carriageway. u along again. */
+    px[n] = kx[1]; py[n] = ys; pz[n] = kz[1]; uu[n] = 0.0; vv[n] = 1.0; n++;
+    px[n] = kx[2]; py[n] = ys; pz[n] = kz[2]; uu[n] = 1.0; vv[n] = 1.0; n++;
+    px[n] = kx[2]; py[n] = y1; pz[n] = kz[2]; uu[n] = 1.0; vv[n] = 0.0; n++;
+    px[n] = kx[1]; py[n] = y1; pz[n] = kz[1]; uu[n] = 0.0; vv[n] = 0.0; n++;
+
+    seg_page[0] = TD5_TG_INFRA_PAGE(P->page_end);  seg_nq[0] = 2;
+    seg_page[1] = TD5_TG_INFRA_PAGE(P->page_side); seg_nq[1] = 2;
+
+    h->moff[*h->nmesh] = h->blk->len;
+    if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, seg_page, seg_nq, 2))
+        return 0;
+    (*h->nmesh)++;
+    tg_acct(TG_ACCT_R9_INFRA, h->si);
+    s_r9_infra_props++;
+    s_r12_bench_form++;
+    return 1;
+}
+
 /* One furniture piece, box or billboard, at `gap` out from the road edge. */
 static int tg_infra_place(const TG_FBHook *h, int kind, double side,
                           double gap, double base_y)
@@ -16390,6 +16482,10 @@ static int tg_infra_place(const TG_FBHook *h, int kind, double side,
         }
         return 1;
     }
+    /* [R12 PROPS item 2] A bench is the one piece on this menu that is not a
+     * closed volume, so it gets its own assembly. Everything else stays a box. */
+    if (kind == IP_BENCH && td5_env_flag_on("TD5RE_R12_BENCH_FORM"))
+        return tg_infra_bench(h, P, cx, base_y, cz, ax, az, lx, lz);
     return tg_infra_box(h, P, cx, base_y, cz, ax, az, lx, lz);
 }
 
@@ -16446,6 +16542,65 @@ static int tg_infra_menu(const TG_Biome *b, int paved, int *out)
         out[n++] = IP_BENCH;
     }
     return n;
+}
+
+/* ===== [R12 PROPS item 3] Where a disc sign belongs, and how often =====
+ *
+ * IP_SIGN is td6_1bollard.png q1: one specific piece of art, a RED NO-ENTRY
+ * DISC, placed as a billboard lifted 1.90 m on a post this generator does not
+ * model. Two separate faults, and the frequency one is the smaller:
+ *
+ *   CONTEXT. A no-entry disc means "you may not drive down there", which is a
+ *   statement about a road NETWORK. On a forest or alpine verge with nothing to
+ *   forbid, it is not a sparse detail, it is a wrong object -- and no rate makes
+ *   a wrong object right. So the disc is now confined to biomes with a street
+ *   to speak about: anything with a real pavement, plus ORIENTAL and INDUSTRIAL,
+ *   which are billboard-frontage biomes but settled ones with gated yards. The
+ *   wild verges are NOT left unsigned: R11 SIGNS owns the direction-arrow
+ *   panels (TD5_TG_PAGE_R11_SIGN), which is the signage an open road actually
+ *   carries, and that layer is untouched here.
+ *
+ *   RATE. Even on a street the disc came up on every menu pick that landed on
+ *   it -- one in nmenu of ~19% of spans per side, which on the paved menu is a
+ *   disc every few hundred metres. Kept at one pick in TD5_TG_SIGN_KEEP_1_IN.
+ *
+ * A refused pick is SUBSTITUTED, not skipped: total furniture density is
+ * deliberately unchanged, so the element inventory and s_r9_infra_props stay
+ * comparable across the A/B and the only thing that moved is the sign SHARE.
+ * The stand-in is chosen by place -- a bin on a pavement, a bin or a bench on a
+ * verge -- rather than "the next menu entry", which on the unpaved menu would
+ * have turned every refused disc into a third crate in a wood.
+ *
+ * Knob TD5RE_R12_SIGN_CTX (default ON) restores the old unconditional pick. */
+#define TD5_TG_SIGN_KEEP_1_IN  4u
+
+static int tg_infra_sign_biome_ok(const TG_Biome *b, int paved)
+{
+    if (paved) return 1;                       /* a pavement means a street  */
+    return !strcmp(b->name, "ORIENTAL") || !strcmp(b->name, "INDUSTRIAL");
+}
+
+/* Resolve a menu pick. Returns the kind to place; only IP_SIGN can change. */
+static int tg_infra_sign_filter(const TG_Biome *b, int paved, int kind,
+                                unsigned int hh)
+{
+    if (kind != IP_SIGN) return kind;
+    if (!td5_env_flag_on("TD5RE_R12_SIGN_CTX")) { s_r12_sign_kept++; return kind; }
+    if (tg_infra_sign_biome_ok(b, paved)) {
+        /* Bits 25-27 are the only span of this hash no other decision on this
+         * span reads (28-31 density, 19-24 red tape, 13-18 roadworks, 8-15
+         * setback, 5-7 the menu pick), so the thinning is independent of all
+         * of them instead of correlated with whichever it shared bits with. */
+        if (((hh >> 25) & (TD5_TG_SIGN_KEEP_1_IN - 1u)) == 0u) {
+            s_r12_sign_kept++;
+            return kind;
+        }
+        s_r12_sign_rate++;
+    } else {
+        s_r12_sign_ctx++;
+    }
+    if (paved) return IP_BIN;
+    return ((hh >> 3) & 1u) ? IP_BIN : IP_BENCH;
 }
 
 /* ===================== [R9 INFRA] PONDS =====================
@@ -16620,6 +16775,7 @@ static int tg_emit_fb_infra(const TG_FBHook *h)
         kind = menu[(hh >> 5) % (unsigned)nmenu];
         /* Roadworks replace the menu pick occasionally, on ONE side only, so
          * they read as a works site rather than a decoration. */
+        kind = tg_infra_sign_filter(sb, paved, kind, hh);
         if (((hh >> 13) & 0x3Fu) == 0u) kind = IP_WORKY;
         else if (((hh >> 19) & 0x3Fu) == 0u) kind = IP_REDTAPE;
 
@@ -19315,6 +19471,11 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     s_r9_infra_props = 0;
     s_r9_infra_ponds = 0;
     s_r9_infra_reported = 0;
+    /* [R12 PROPS] this round's two share counters, same lifetime. */
+    s_r12_bench_form = 0;
+    s_r12_sign_kept = 0;
+    s_r12_sign_ctx = 0;
+    s_r12_sign_rate = 0;
     /* [R10 SPAN66] side-street occupancy counters, same lifetime. */
     s_r10_prop_skipped = 0;
     s_r10_audit_n = 0;
@@ -23438,6 +23599,22 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
               td5_env_flag_on("TD5RE_R9_INFRA_PROPS") ? "on" : "off",
               s_r9_infra_ponds,
               td5_env_flag_on("TD5RE_R9_INFRA_PONDS") ? "on" : "off");
+    /* [R12 PROPS] Both of this round's items change a SHARE of the furniture
+     * total above, not the total, so neither shows up in it or in the element
+     * inventory. This line is the round's evidence: how many benches were built
+     * as a bench, and how the disc picks split into kept / wrong-place /
+     * thinned. Sign totals across the three counters equal the OLD sign count,
+     * which is what makes the before/after a subtraction rather than two runs
+     * that happen to differ. */
+    TD5_LOG_I(LOG_TAG,
+              "trackgen: [R12 PROPS] bench-form=%ld (knob "
+              "TD5RE_R12_BENCH_FORM=%s); sign picks=%ld -> kept=%ld, "
+              "dropped ctx=%ld rate=%ld (knob TD5RE_R12_SIGN_CTX=%s)",
+              s_r12_bench_form,
+              td5_env_flag_on("TD5RE_R12_BENCH_FORM") ? "on" : "off",
+              s_r12_sign_kept + s_r12_sign_ctx + s_r12_sign_rate,
+              s_r12_sign_kept, s_r12_sign_ctx, s_r12_sign_rate,
+              td5_env_flag_on("TD5RE_R12_SIGN_CTX") ? "on" : "off");
     /* [R10 SPAN66 item 1] The PLACEMENT half's number. The ENFORCEMENT half's
      * numbers are the guard's own "rejects by kind: prop" and its residual line
      * -- the residual now re-tests furniture against the widened envelope, so
