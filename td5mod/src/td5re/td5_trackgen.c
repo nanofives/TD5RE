@@ -881,6 +881,9 @@ typedef enum {
     TG_ACCT_R11_CITY,       /* CITY   (20260901 6,10) corner setback + turn gap */
 
     TG_ACCT_R11_SIGNS,      /* SIGNS  (20260901 16) curve direction signage  */
+    /* [R12] PRE-RESERVED, one per area, own line. RENAME YOUR OWN SLOT IN
+     * PLACE. Never append here. */
+    TG_ACCT_R12_CROSS,      /* CROSS  (20260901 5) forest side road + fold   */
     TG_ACCT_KIND_COUNT
 } TG_AcctKind;
 
@@ -979,7 +982,10 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
      * renamed enum constant. Only the LAST entry omits its trailing comma. */
     "r11-city",             /* CITY    */
 
-    "r11-signs"             /* SIGNS   */
+    "r11-signs",            /* SIGNS   */
+    /* [R12] one reserved name per area, in enum order. Rename to match your
+     * renamed enum constant. Only the LAST entry omits its trailing comma. */
+    "r12-cross"             /* CROSS   */
 };
 
 static long s_acct_count[TG_ACCT_KIND_COUNT];
@@ -7797,6 +7803,13 @@ static int tg_flora_plant(const TG_NodeList *nl, int si, const TG_Biome *b,
                           double side, double gap, double tw,
                           double *cx, double *cz, double *base_y);
 
+/* [R12 CROSS item 5] "Is a FOREST side road laid at this span, and on which side
+ * / how far out?" -- the single definition of the forest crossing. The verge-tree
+ * emitter just below must not plant a trunk in the new carriageway, so it is
+ * forward-declared here, the same way tg_city_crossing_here is. */
+static int tg_r12_fcross_at(const TG_NodeList *nl, int si,
+                            double *pside, double *preach);
+
 static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
 {
     unsigned int h = (unsigned)si * 2654435761u;
@@ -7830,6 +7843,15 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
     if ((int)(h >> 28) > b->density) return 1;
 
     side = ((h >> 3) & 1) ? 1.0 : -1.0;
+    /* [R12 CROSS item 5] A verge tree plants at 800..3200 lateral -- inside a
+     * forest side road's carriageway. The on-road guard cannot see that lane
+     * (tg_carriageway_reach does not know about it), so the trunk is suppressed
+     * here at the placement, the same way tg_flora_gap_clear keeps trees off a
+     * branch corridor. */
+    {
+        double fs = 0.0, fr = 0.0;
+        if (tg_r12_fcross_at(nl, si, &fs, &fr) && fs == side) return 1;
+    }
     tv  = b->tree_set[(h >> 13) % (unsigned)b->tree_n];
     tp  = &k_tree_pages[tv];
 
@@ -16939,6 +16961,330 @@ static void tg_r12_band_params(int si, double *out_h, double *out_back)
            ? h * (double)dist / (double)TD5_TG_R12_BAND_TAPER : h;
 }
 
+/* ==========================================================================
+ * [R12 CROSS item 5] FOREST SIDE ROADS -- "add very occasional street crossings
+ * in the FOREST biome. The roads must be long enough not to cut off abruptly,
+ * and the tree background must be cut and folded over the road."
+ *
+ * WHY THE CITY MODEL CANNOT BE REUSED. Every side street on the track today is
+ * gated on tg_city_sidewalk_w(b) > 0 -- a raised pavement is the signal "there is
+ * a city frontage here to break". FOREST is a billboard biome with cell_w 0, so
+ * that helper returns 0 for it (see its definition) and the WHOLE city junction
+ * stack -- tg_crossing_base, tg_xstreet_here, tg_city_emit_crossstreet,
+ * tg_block_emit_arm -- is a no-op in a forest by construction. Widening that gate
+ * would not add a forest lane, it would add pavements, kerbs, zebras, corner arms
+ * and flanking massing to a wilderness. So this is a SEPARATE, deliberately
+ * minimal element: one carriageway and the tree wall folded around it.
+ *
+ * VERY OCCASIONAL, AND A PURE FUNCTION OF si. One CANDIDATE per
+ * TD5_TG_R12_FCROSS_PERIOD spans, positioned inside its own block by the block's
+ * hash, and it only becomes a crossing if every span it touches is forest and
+ * clear. No cross-call state and no dependence on span order, because the
+ * predicate is asked out of order (the tree-line emitter asks it per span, the
+ * verge-tree emitter asks it from a different pass) -- exactly the constraint
+ * tg_city_crossing_here documents for itself.
+ *
+ * LONG ENOUGH, BY CONSTRUCTION. The tree wall stands at tg_treeline_back (11000
+ * out in FOREST), so a road that stops short of that reads as a stub cut off by
+ * a hedge -- the "cuts off abruptly" complaint. The modelled reach is 16000, PAST
+ * the wall, and the reach is clamped by the same outward re-entry test the city
+ * street uses (tg_xstreet_reach_at): step out along the bearing and stop short of
+ * any nearby span's carriageway. The difference is the FLOOR. The city street
+ * floors the clamp and accepts a short street; here a clamped reach below
+ * TD5_TG_R12_FCROSS_MIN (13000, i.e. still clear of the wall) REJECTS the whole
+ * crossing. "Very occasional" is what makes that affordable: it is cheaper to
+ * skip a candidate than to ship a stub, and the result is that nothing this
+ * emitter lays can re-enter drivable tarmac and nothing it lays is too short.
+ *
+ * CUT AND FOLDED. The band is one alpha quad per side per span at lateral
+ * `back`. Suppressing it on the crossing spans alone would leave a hole with
+ * open sky and far terrain behind it -- a cut, no fold. So the band is cut AND
+ * the two cut ends are folded 90 degrees to run OUTWARD along the new road's two
+ * along-road edges, from just inside the wall line (TD5_TG_R12_FOLD_LEAD) all the
+ * way to the road's far end. From the racing line the mouth reads as a corridor
+ * of trees receding to the horizon rather than a notch in a backdrop. Same page,
+ * same base sink and the same square-tile u rule as the band it continues, and
+ * double-wound so the corridor closes seen from either direction.
+ *
+ * GUARD. The carriageway is marked TG_GK_ROAD at its own emit site (an authored
+ * road surface touching the road edge would otherwise be dropped by
+ * tg_guard_validate_entry); the fold walls are marked TG_GK_FLORA, i.e. ordinary
+ * SCENERY that must earn its place -- they stand at >= 8400 lateral, so they pass
+ * on merit rather than on a licence.
+ *
+ * Gate TD5RE_R12_FOREST_CROSS (default ON); =0 restores the pre-R12 forest.
+ * ========================================================================== */
+#define TD5_TG_R12_FCROSS_PERIOD   60    /* one CANDIDATE per this many spans  */
+/* Clear of the opening stretch, not merely of the grid. TD5_TG_GRID_SPAN alone
+ * put a candidate at span 27 on seed 20260901 -- 40 m past the start line, where
+ * the frontage layer already keeps itself out of the way for a full
+ * TD5_TG_FACADE_START_RUN. Same 60-span courtesy here. */
+#define TD5_TG_R12_FCROSS_CLEAR (TD5_TG_GRID_SPAN + TD5_TG_FACADE_START_RUN)
+#define TD5_TG_R12_FCROSS_WIDTH     2    /* street width in spans (3000 raw)   */
+#define TD5_TG_R12_FCROSS_WANT  16000.0  /* modelled outward reach, raw        */
+#define TD5_TG_R12_FCROSS_MIN   13000.0  /* below this the candidate is dropped */
+#define TD5_TG_R12_FCROSS_STEP    600.0  /* outward clamp sampling step        */
+#define TD5_TG_R12_FCROSS_MARGIN 1400.0  /* clear air kept off any carriageway */
+#define TD5_TG_R12_FCROSS_SKIP      4    /* spans either side excluded         */
+#define TD5_TG_R12_FCROSS_WIN      48    /* spans either side tested           */
+#define TD5_TG_R12_FCROSS_CMIN   4200.0  /* clamp starts out here, not at kerb */
+#define TD5_TG_R12_FOLD_LEAD     2600.0  /* fold starts inside the wall line   */
+
+static int tg_r12_fcross_on(void)
+{
+    return td5_env_flag_on("TD5RE_R12_FOREST_CROSS");   /* default ON */
+}
+
+static int tg_r12_fcross_forest(int si)
+{
+    return !strcmp(k_biomes[tg_scenery_biome_index(si)].name, "FOREST");
+}
+
+/* First span of the candidate street in block `blk`. The offset stops
+ * TD5_TG_R12_FCROSS_WIDTH short of the block end so a street never straddles two
+ * blocks -- one block, at most one candidate, no interaction between them. */
+static int tg_r12_fcross_start(int blk)
+{
+    const unsigned int h = (unsigned)blk * 2654435761u + 0x9E3779B9u;
+    const int room = TD5_TG_R12_FCROSS_PERIOD - TD5_TG_R12_FCROSS_WIDTH;
+    return blk * TD5_TG_R12_FCROSS_PERIOD + (int)(h % (unsigned)room);
+}
+
+/* Clamped outward reach for the mouth at (si, sg): the R8 street rule with no
+ * floor. Returns 0 when the ray cannot get clear of the road corridor at all. */
+static double tg_r12_fcross_reach(const TG_NodeList *nl, int si, double sg)
+{
+    double e[10], d;
+    int lo, hi;
+
+    tg_city_edge_frame(nl, si, sg, e);
+    lo = si - TD5_TG_R12_FCROSS_WIN; if (lo < 0) lo = 0;
+    hi = si + TD5_TG_R12_FCROSS_WIN;
+    if (hi > nl->count - 1) hi = nl->count - 1;
+
+    for (d = TD5_TG_R12_FCROSS_CMIN; d <= TD5_TG_R12_FCROSS_WANT;
+         d += TD5_TG_R12_FCROSS_STEP) {
+        const double px = e[0] + e[6] * d, pz = e[2] + e[7] * d;
+        double lat, best = 1e300;
+        int i, ni = -1;
+        for (i = lo; i <= hi; i++) {
+            double dx, dz, d2;
+            if (i > si - TD5_TG_R12_FCROSS_SKIP &&
+                i < si + TD5_TG_R12_FCROSS_SKIP) continue;
+            dx = px - nl->v[i].x; dz = pz - nl->v[i].z;
+            d2 = dx * dx + dz * dz;
+            if (d2 < best) { best = d2; ni = i; }
+        }
+        if (ni < 0) break;
+        lat = (px - nl->v[ni].x) * nl->v[ni].tz
+            - (pz - nl->v[ni].z) * nl->v[ni].tx;
+        {
+            const double lim = tg_carriageway_reach(nl, ni,
+                                   (lat >= 0.0) ? 1.0 : -1.0)
+                             + TD5_TG_R12_FCROSS_MARGIN;
+            if ((lat < 0.0 ? -lat : lat) < lim)
+                return d - TD5_TG_R12_FCROSS_STEP;   /* last sample known clear */
+        }
+    }
+    return TD5_TG_R12_FCROSS_WANT;
+}
+
+/* Is span si part of a forest side road? Writes the side (+1 = left of travel)
+ * and the reach both spans agree on. Cheap gates first: everything but the two
+ * candidate spans per block is rejected before the clamp runs. */
+static int tg_r12_fcross_at(const TG_NodeList *nl, int si,
+                            double *pside, double *preach)
+{
+    int c, j;
+    double side, reach = TD5_TG_R12_FCROSS_WANT;
+
+    if (!tg_r12_fcross_on() || !nl || si <= TD5_TG_R12_FCROSS_CLEAR) return 0;
+    if (!tg_r12_fcross_forest(si)) return 0;
+    c = tg_r12_fcross_start(si / TD5_TG_R12_FCROSS_PERIOD);
+    if (si < c || si >= c + TD5_TG_R12_FCROSS_WIDTH) return 0;
+    /* SIDE from the same block hash, so both spans of one street agree. */
+    side = ((unsigned)(si / TD5_TG_R12_FCROSS_PERIOD) * 2654435761u
+            + 0x9E3779B9u) & 0x10000u ? 1.0 : -1.0;
+    /* One span of shoulder either side of the street is checked too: the fold
+     * walls stand on the street's outer nodes, which belong to c-1 and c+W. */
+    for (j = c - 1; j <= c + TD5_TG_R12_FCROSS_WIDTH; j++) {
+        double r;
+        if (j <= TD5_TG_R12_FCROSS_CLEAR || j + 1 >= nl->count) return 0;
+        if (!tg_r12_fcross_forest(j)) return 0;
+        if (tg_span_in_tunnel(j) || tg_span_in_bridge_run(j)) return 0;
+        if (tg_span_near_bridge(j, TD5_TG_XBRIDGE_CLEAR)) return 0;
+        if (tg_branches_enabled() && tg_span_in_fork_clear(j)) return 0;
+        if (tg_side_corridor_here(nl, j, side)) return 0;
+        r = tg_r12_fcross_reach(nl, j, side);
+        if (r < reach) reach = r;
+    }
+    /* LONG ENOUGH OR NOT AT ALL: a road that stops short of the tree wall is
+     * the "cuts off abruptly" defect, so the candidate is dropped instead. */
+    if (reach < TD5_TG_R12_FCROSS_MIN) return 0;
+    if (pside)  *pside  = side;
+    if (preach) *preach = reach;
+    return 1;
+}
+
+/* The carriageway: one quad per crossing span, kerb outward, no skew (a straight
+ * lane is the readable shape -- see item 13). Purely OUTWARD from the road edge,
+ * so the main carriageway is untouched. */
+static int tg_r12_fcross_emit_road(const TG_FBHook *h, double sg, double reach)
+{
+    double px[4], py[4], pz[4], uu[4], vv[4];
+    double e[10], q[12], t[8];
+    const int marks = td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_MARKINGS");
+    int seg_page = marks ? (TD5_TG_PAGE_R4_CROSS + 0) : tg_road_page(h->si);
+    int seg_nq = 1, n = 0;
+    const double drop = tg_xstreet_drop(reach);
+    const double u_r  = reach / (double)TD5_TG_LANE_WIDTH;
+
+    if (*h->nmesh >= h->maxmesh) return 1;
+    tg_city_edge_frame(h->nl, h->si, sg, e);
+    q[0]  = e[0];                q[1]  = e[1] + TD5_TG_VERGE_LIFT;
+    q[2]  = e[2];
+    q[3]  = e[0] + e[6] * reach; q[4]  = e[1] + TD5_TG_VERGE_LIFT - drop;
+    q[5]  = e[2] + e[7] * reach;
+    q[6]  = e[3] + e[8] * reach; q[7]  = e[4] + TD5_TG_VERGE_LIFT - drop;
+    q[8]  = e[5] + e[9] * reach;
+    q[9]  = e[3];                q[10] = e[4] + TD5_TG_VERGE_LIFT;
+    q[11] = e[5];
+    t[0] = 0.0; t[1] = (double)h->si;
+    t[2] = u_r; t[3] = (double)h->si;
+    t[4] = u_r; t[5] = (double)h->si + 1.0;
+    t[6] = 0.0; t[7] = (double)h->si + 1.0;
+    tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+
+    tg_acct(TG_ACCT_R12_CROSS, h->si);          /* forest carriageway quad */
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                             &seg_page, &seg_nq, 1);
+}
+
+/* The FOLD: the two cut ends of the tree wall turned to run outward along the
+ * street's own edges. Emitted once, on the street's FIRST span, as one mesh --
+ * the two walls face each other a street apart, so a single bounding sphere is
+ * still tight. Each wall is wound twice (front and back) because the corridor is
+ * seen from the racing line on the way in and from the far end on the way out. */
+static int tg_r12_fcross_emit_fold(const TG_FBHook *h, double sg, double reach)
+{
+    const TG_NodeList *nl = h->nl;
+    const int c = h->si, cf = c + TD5_TG_R12_FCROSS_WIDTH - 1;
+    const double band = tg_treeline_height(h->b);
+    const double back = tg_treeline_back(h->b);
+    double d0 = back - TD5_TG_R12_FOLD_LEAD;
+    double px[16], py[16], pz[16], uu[16], vv[16];
+    double en[10], ef[10];
+    /* One page, but the writer wants a per-QUAD segment list. */
+    int seg_page[4], seg_nq[4], nseg = 0, n = 0, w;
+
+    if (!(band > 0.0)) return 1;
+    if (cf + 1 >= nl->count) return 1;
+    if (*h->nmesh >= h->maxmesh) return 1;
+    if (d0 < 0.0) d0 = 0.0;
+    if (reach <= d0 + 1.0) return 1;
+
+    tg_city_edge_frame(nl, c,  sg, en);
+    tg_city_edge_frame(nl, cf, sg, ef);
+
+    for (w = 0; w < 2; w++) {
+        /* w 0 = the wall on the street's NEAR along-road edge (node c),
+         * w 1 = the wall on its FAR edge (node cf+1). */
+        const double ox = w ? ef[8] : en[6], oz = w ? ef[9] : en[7];
+        const double bx = w ? ef[3] : en[0], bz = w ? ef[5] : en[2];
+        const double by = nl->v[w ? cf + 1 : c].y - TD5_TG_TREELINE_SINK;
+        const double x0 = bx + ox * d0,    z0 = bz + oz * d0;
+        const double x1 = bx + ox * reach, z1 = bz + oz * reach;
+        /* Square tiles, the same rule the band it continues uses: one tile is
+         * `band` wide, so the page is never stretched along the corridor. */
+        const double uw = (reach - d0) / band;
+        const double vt = TD5_TG_FACADE_UV_INSET;
+        const double vb = 1.0 - TD5_TG_FACADE_UV_INSET;
+        int f;
+        for (f = 0; f < 2; f++) {           /* both windings */
+            double q[12], t[8];
+            if (n + 4 > 16 || nseg >= 4) break;
+            if (!f) {
+                q[0]=x0; q[1]=by;        q[2]=z0;
+                q[3]=x1; q[4]=by;        q[5]=z1;
+                q[6]=x1; q[7]=by + band; q[8]=z1;
+                q[9]=x0; q[10]=by + band; q[11]=z0;
+                t[0]=0.0; t[1]=vb; t[2]=uw; t[3]=vb;
+                t[4]=uw;  t[5]=vt; t[6]=0.0; t[7]=vt;
+            } else {
+                q[0]=x0; q[1]=by + band; q[2]=z0;
+                q[3]=x1; q[4]=by + band; q[5]=z1;
+                q[6]=x1; q[7]=by;        q[8]=z1;
+                q[9]=x0; q[10]=by;        q[11]=z0;
+                t[0]=0.0; t[1]=vt; t[2]=uw; t[3]=vt;
+                t[4]=uw;  t[5]=vb; t[6]=0.0; t[7]=vb;
+            }
+            tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+            seg_page[nseg] = TD5_TG_PAGE_TREELINE;
+            seg_nq[nseg] = 1;
+            nseg++;
+        }
+    }
+    if (n <= 0) return 1;
+    tg_acct_n(TG_ACCT_R12_CROSS, c, nseg);      /* fold wall quads */
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                             seg_page, seg_nq, nseg);
+}
+
+/* Group R12-CROSS dispatcher. Marks its two halves SEPARATELY -- the enclosing
+ * mark in the scenery loop is wider, and tg_guard_kind_of takes the NARROWEST
+ * matching mark, so these win. */
+static int tg_emit_fb_forest_cross(const TG_FBHook *h)
+{
+    double sg = 1.0, reach = 0.0;
+    size_t m0;
+
+    if (!tg_r12_fcross_at(h->nl, h->si, &sg, &reach)) return 1;
+
+    m0 = h->blk->len;
+    if (!tg_r12_fcross_emit_road(h, sg, reach)) return 0;
+    tg_guard_mark(m0, h->blk->len, TG_GK_ROAD, h->si);
+
+    /* The fold belongs to the STREET, not to a span, so it is laid once. */
+    if (tg_r12_fcross_start(h->si / TD5_TG_R12_FCROSS_PERIOD) == h->si) {
+        m0 = h->blk->len;
+        if (!tg_r12_fcross_emit_fold(h, sg, reach)) return 0;
+        tg_guard_mark(m0, h->blk->len, TG_GK_FLORA, h->si);
+    }
+    return 1;
+}
+
+/* [R12 CROSS item 5] THE INSTRUMENT. Every candidate block, why it was accepted
+ * or rejected, so "how many forest crossings does this seed carry" is a number
+ * in race.log rather than a frame. TD5RE_R12_FCROSS_DIAG=1. */
+static void tg_r12_fcross_report(const TG_NodeList *nl, int nspans)
+{
+    int blk, kept = 0, cand = 0;
+    if (!td5_env_flag_off("TD5RE_R12_FCROSS_DIAG")) return;
+    for (blk = 0; blk * TD5_TG_R12_FCROSS_PERIOD < nspans; blk++) {
+        const int c = tg_r12_fcross_start(blk);
+        double sg = 1.0, reach = 0.0;
+        if (c + TD5_TG_R12_FCROSS_WIDTH >= nspans) continue;
+        cand++;
+        if (tg_r12_fcross_at(nl, c, &sg, &reach)) {
+            kept++;
+            TD5_LOG_I(LOG_TAG, "trackgen: [R12 FCROSS] block %2d span %4d KEPT "
+                      "side=%s reach=%.0f (wall at %.0f)", blk, c,
+                      sg > 0.0 ? "left" : "right", reach, 11000.0);
+        } else {
+            TD5_LOG_I(LOG_TAG, "trackgen: [R12 FCROSS] block %2d span %4d "
+                      "dropped (forest=%d tunnel=%d bridge=%d fork=%d)", blk, c,
+                      tg_r12_fcross_forest(c), tg_span_in_tunnel(c),
+                      tg_span_in_bridge_run(c),
+                      tg_branches_enabled() && tg_span_in_fork_clear(c));
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "trackgen: [R12 FCROSS] forest crossings kept=%d of %d "
+              "candidate blocks (knob TD5RE_R12_FOREST_CROSS=%s)",
+              kept, cand, tg_r12_fcross_on() ? "on" : "off");
+}
+
 static int tg_emit_fb_flora(const TG_FBHook *h)
 {
     const TG_NodeList *nl = h->nl;
@@ -16947,6 +17293,11 @@ static int tg_emit_fb_flora(const TG_FBHook *h)
     double bh[2] = { 0.0, 0.0 }, bk[2] = { 0.0, 0.0 };
     double band;
     int s, sj;
+    /* [R12 CROSS item 5] Where a forest side road passes, THIS side's band is
+     * cut; tg_r12_fcross_emit_fold lays the folded return walls that close the
+     * opening, so the cut is never a hole. */
+    double fx_side = 0.0, fx_reach = 0.0;
+    const int fxc = tg_r12_fcross_at(nl, si, &fx_side, &fx_reach);
 
     /* Default ON (2026-08-26); TD5RE_AUTOTRACK_TREELINE=0 disables the band. */
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_TREELINE"))
@@ -17016,6 +17367,7 @@ static int tg_emit_fb_flora(const TG_FBHook *h)
         int seg_page = TD5_TG_PAGE_TREELINE, seg_nq = 1;
         int n = 0;
 
+        if (fxc && side == fx_side) continue;     /* [R12 CROSS item 5] the CUT */
         if (*h->nmesh + 1 >= h->maxmesh)             /* out of slots this entry */
             { tg_r12_band_note(si, TG_R12_BAND_SLOTS); return 1; }
         if (fit && tg_r12_treeline_density()) {
@@ -17125,6 +17477,11 @@ static int tg_emit_fb_park_trees(const TG_FBHook *h)
 
     side = ((hh >> 4) & 1) ? 1.0 : -1.0;
     if (tg_side_blocked(si, side)) return 1;
+    {   /* [R12 CROSS item 5] never in a forest side road's lane, same reason as
+         * the verge tree above (these plant at 2600..5800 lateral). */
+        double fs = 0.0, fr = 0.0;
+        if (tg_r12_fcross_at(nl, si, &fs, &fr) && fs == side) return 1;
+    }
 
     /* [R6 items 7/18] Default ON; TD5RE_R6_FLORA=0 restores the R5 park tree
      * (grove-wall page in the upright rotation + 4200-wide billboards) for A/B. */
@@ -20804,6 +21161,14 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     tg_guard_mark(g0, meshes.len, TG_GK_CROSS, si);
                     g0 = meshes.len;
                     if (!tg_emit_fb_flora(&hook))   { ok = 0; break; }
+                    tg_guard_mark(g0, meshes.len, TG_GK_FLORA, si);
+                    /* [R12 CROSS item 5] The forest side road runs AFTER the
+                     * tree-line band, whose cut it fills. Its own dispatcher
+                     * marks the carriageway and the fold walls separately (see
+                     * tg_emit_fb_forest_cross); the enclosing mark here is only
+                     * the fail-safe, and tg_guard_kind_of prefers the narrower. */
+                    g0 = meshes.len;
+                    if (!tg_emit_fb_forest_cross(&hook)) { ok = 0; break; }
                     tg_guard_mark(g0, meshes.len, TG_GK_FLORA, si);
                     g0 = meshes.len;
                     if (!tg_emit_fb_park_trees(&hook)) { ok = 0; break; }
@@ -24813,6 +25178,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     tg_r8_terrain_extent_report(&nl, nspans);  /* [R8 TERRAIN] opt-in, ditto */
     tg_r9_topo_report(&nl, nspans);            /* [R9 TOPO] class sweep, ditto */
     tg_r11_xcurve_report(nspans);        /* [R11 CROSS item 16] opt-in, ditto */
+    tg_r12_fcross_report(&nl, nspans);   /* [R12 CROSS item 5]  opt-in, ditto */
     tg_r11_water_diag(&nl, nspans);            /* [R11 WATER] wet footprint    */
     tg_r12_tex_report(&nl, nspans);            /* [R12 TEX] page-per-surface   */
     ok = 1;
