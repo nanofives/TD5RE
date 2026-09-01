@@ -15890,6 +15890,75 @@ static int tg_r11_treeline_fit(void)
     return td5_env_flag_on("TD5RE_R11_TREELINE_FIT");   /* default ON */
 }
 
+/* ==== [R12 TEX item 1] "the HEIGHT is right now, but it is WAY too pixelated
+ * and has rough sloped (stair-stepped) edges" ===============================
+ *
+ * The follow-on to R11 item 1, which fixed the ASPECT (one tile drawn 1500 wide
+ * by the full band tall, a 1:8 vertical smear) by tiling u at the band's own
+ * height. That left ONE page tile covering the whole wall, so:
+ *
+ *   world units per texel = band / 64 = 12000/64 = 187 (FOREST), 219 (ALPINE).
+ *
+ * The band stands tg_treeline_back = 11000 units out. At a ~60 degree fov and
+ * 1920 px across, the world width one pixel covers at 11000 is about 6.6 units,
+ * so ONE TEXEL IS ROUGHLY 28 SCREEN PIXELS WIDE. That is the whole report: at
+ * 28x magnification the page reads as pixels, and because the crown is a 1-bit
+ * cutout resolved by an alpha test (the band is world geometry, so
+ * td5_render_apply_page_blend_preset gives it TD5_PRESET_OPAQUE_LINEAR --
+ * mag_filter 2, i.e. bilinear is ALREADY on, alpha_ref 1) the cutout edge
+ * follows texel diagonals in 28-pixel steps: the "rough sloped edges".
+ *
+ * FILTERING IS NOT THE LEVER. Magnification is already linear, and mipmaps are
+ * a MINIFICATION tool -- irrelevant at 28 px/texel. (Noted while measuring: no
+ * page on an auto-track gets a mip chain at all. td5_platform_win32.c routes
+ * mips for type-2 pages only, s_foliage_mips and s_opaque_mips both default
+ * off, and every trackgen page is type 0 or type 1 -- zero "track mips" lines
+ * in engine.log for a full generation. That is a separate question from this
+ * item and is left alone.)
+ *
+ * DENSITY IS THE LEVER: draw the page smaller in world space and repeat it.
+ * Two things stop a naive "tile v as well as u":
+ *   1. THE PAGE IS NOT VERTICALLY TILEABLE. Measured on the decoded page (47):
+ *      rows 0..23 carry the transparent key (the ragged crown), rows 24..63 are
+ *      100% opaque foliage mass. Letting v run past 1 would wrap the keyed
+ *      crown back into the MIDDLE of the wall -- holes with sky through them.
+ *   2. THE PAGE DOES NOT TILE AT x=63 -> 0 either; R11 recorded that, and more
+ *      u repeats would make that seam MORE frequent, not less.
+ *
+ * So the band becomes a STACK of quads inside the same mesh:
+ *   - one CROWN quad at the top carrying page rows 0..23 (v 0 .. TL_CROWN_V);
+ *   - K BODY quads below it, each carrying rows 24..63 (v TL_CROWN_V .. 1) and
+ *     each MIRRORED against its neighbour in v, so consecutive strips meet on a
+ *     shared row and the joins are continuous by construction -- no seam and no
+ *     wrap into the crown.
+ * and u advances half a tile per span through a TRIANGLE wave of period 2
+ * tiles, so the horizontal repeat is a mirror about the tile edge and the
+ * x=63 -> 0 seam never occurs. A span is exactly half a leg of that wave, so
+ * every quad's u interval is linear and no quad straddles a fold.
+ *
+ * Tile size: TD5_TG_TL_TILE_U (3000) horizontally = 2 spans, exact. Vertically
+ * K is chosen to put the tile height nearest the same 3000, which lands at
+ * 2909 (FOREST) / 2947 (ALPINE) / 3111 (FIELDS) -- within 4% of square, so the
+ * R11 aspect rule survives. Texel size drops from 187 to 45.5 world units, a
+ * 4.1x density gain, i.e. ~7 screen pixels per texel instead of 28.
+ * TD5RE_R12_TREELINE_DENSITY=0 restores the R11 single-tile band. */
+#define TD5_TG_TL_TILE_U   3000.0
+#define TD5_TG_TL_CROWN_V  0.375     /* rows 0..23 of 64, measured on page 47 */
+#define TD5_TG_TL_MAX_BODY 10
+static int tg_r12_treeline_density(void)
+{
+    return td5_env_flag_on("TD5RE_R12_TREELINE_DENSITY");   /* default ON */
+}
+
+/* Triangle wave of period 2 on t, so u mirrors about every tile edge instead of
+ * wrapping. t is in TILES; a span advances t by SPAN_LENGTH / TILE_U = 0.5. */
+static double tg_r12_tl_fold(double t)
+{
+    double m = fmod(t, 2.0);
+    if (m < 0.0) m += 2.0;
+    return (m <= 1.0) ? m : (2.0 - m);
+}
+
 /* Band height for biome b, 0 = no backdrop. A forest wall stands above the
  * 5400..7200-raw billboards in front of it; alpine conifers read taller; open
  * FIELDS get a low far hedgerow line instead of a wall, which is what keeps the
@@ -15932,7 +16001,9 @@ static int tg_emit_fb_flora(const TG_FBHook *h)
      * bounding sphere wider than the band is far away, so the culler could
      * never reject it. Two tight spheres cull properly. */
     for (s = 0; s < 2; s++) {
-        double px[4], py[4], pz[4], uu[4], vv[4];
+        double px[4 * (TD5_TG_TL_MAX_BODY + 1)], py[4 * (TD5_TG_TL_MAX_BODY + 1)];
+        double pz[4 * (TD5_TG_TL_MAX_BODY + 1)], uu[4 * (TD5_TG_TL_MAX_BODY + 1)];
+        double vv[4 * (TD5_TG_TL_MAX_BODY + 1)];
         const double side = s ? 1.0 : -1.0;
         const TG_Node *n0 = &nl->v[si];
         const TG_Node *n1 = &nl->v[si + 1];
@@ -15958,17 +16029,63 @@ static int tg_emit_fb_flora(const TG_FBHook *h)
         const double vt  = fit ? TD5_TG_FACADE_UV_INSET       : 0.0;
         const double vb  = fit ? 1.0 - TD5_TG_FACADE_UV_INSET : 1.0;
         int seg_page = TD5_TG_PAGE_TREELINE, seg_nq = 1;
+        int n = 0;
 
         if (*h->nmesh + 1 >= h->maxmesh) return 1;   /* out of slots this entry */
-        /* quad loop: near-bottom, far-bottom, far-top, near-top; v=1 at the
-         * base, matching the page convention that row 0 is the TOP. */
-        px[0] = bx; py[0] = by;        pz[0] = bz; uu[0] = u0; vv[0] = vb;
-        px[1] = fx; py[1] = fy;        pz[1] = fz; uu[1] = u1; vv[1] = vb;
-        px[2] = fx; py[2] = fy + band; pz[2] = fz; uu[2] = u1; vv[2] = vt;
-        px[3] = bx; py[3] = by + band; pz[3] = bz; uu[3] = u0; vv[3] = vt;
+        if (fit && tg_r12_treeline_density()) {
+            /* [R12 TEX item 1] Crown + K mirrored body strips; see the block
+             * comment on tg_r12_treeline_density. */
+            const double du12 = (double)TD5_TG_SPAN_LENGTH / TD5_TG_TL_TILE_U;
+            const double ua   = tg_r12_tl_fold((double)si       * du12);
+            const double ub2  = tg_r12_tl_fold((double)(si + 1) * du12);
+            const double bodyf = 1.0 - TD5_TG_TL_CROWN_V;
+            int kb = (int)floor((band / TD5_TG_TL_TILE_U - TD5_TG_TL_CROWN_V)
+                                / bodyf + 0.5);
+            double tile_v, crown_h, body_h, y0;
+            int j;
+            if (kb < 1) kb = 1;
+            if (kb > TD5_TG_TL_MAX_BODY) kb = TD5_TG_TL_MAX_BODY;
+            tile_v  = band / (TD5_TG_TL_CROWN_V + (double)kb * bodyf);
+            crown_h = tile_v * TD5_TG_TL_CROWN_V;
+            body_h  = tile_v * bodyf;
+            /* Body strips from the BASE up, alternating v direction so each
+             * join shares a row with its neighbour. Strip j spans
+             * [j*body_h, (j+1)*body_h]; strip 0 sits on the ground. */
+            for (j = 0; j < kb; j++) {
+                /* Strip kb-1 is the one that meets the crown, and its TOP must
+                 * read v = CROWN_V. Parity from the distance to that strip. */
+                const int up = ((kb - 1 - j) & 1) == 0;
+                const double vlo = up ? 1.0 - TD5_TG_FACADE_UV_INSET
+                                      : TD5_TG_TL_CROWN_V;      /* at strip base */
+                const double vhi = up ? TD5_TG_TL_CROWN_V
+                                      : 1.0 - TD5_TG_FACADE_UV_INSET; /* at top  */
+                const double h0 = (double)j * body_h, h1 = h0 + body_h;
+                px[n]=bx; py[n]=by+h0; pz[n]=bz; uu[n]=ua;  vv[n]=vlo; n++;
+                px[n]=fx; py[n]=fy+h0; pz[n]=fz; uu[n]=ub2; vv[n]=vlo; n++;
+                px[n]=fx; py[n]=fy+h1; pz[n]=fz; uu[n]=ub2; vv[n]=vhi; n++;
+                px[n]=bx; py[n]=by+h1; pz[n]=bz; uu[n]=ua;  vv[n]=vhi; n++;
+            }
+            /* CROWN on top: page rows 0..23, keyed silhouette against the sky.
+             * Its base v must equal the top v of the last body strip, which the
+             * parity above forces to CROWN_V. */
+            y0 = (double)kb * body_h;
+            px[n]=bx; py[n]=by+y0;         pz[n]=bz; uu[n]=ua;  vv[n]=TD5_TG_TL_CROWN_V; n++;
+            px[n]=fx; py[n]=fy+y0;         pz[n]=fz; uu[n]=ub2; vv[n]=TD5_TG_TL_CROWN_V; n++;
+            px[n]=fx; py[n]=fy+y0+crown_h; pz[n]=fz; uu[n]=ub2; vv[n]=vt; n++;
+            px[n]=bx; py[n]=by+y0+crown_h; pz[n]=bz; uu[n]=ua;  vv[n]=vt; n++;
+            seg_nq = n / 4;
+        } else {
+            /* quad loop: near-bottom, far-bottom, far-top, near-top; v=1 at the
+             * base, matching the page convention that row 0 is the TOP. */
+            px[0] = bx; py[0] = by;        pz[0] = bz; uu[0] = u0; vv[0] = vb;
+            px[1] = fx; py[1] = fy;        pz[1] = fz; uu[1] = u1; vv[1] = vb;
+            px[2] = fx; py[2] = fy + band; pz[2] = fz; uu[2] = u1; vv[2] = vt;
+            px[3] = bx; py[3] = by + band; pz[3] = bz; uu[3] = u0; vv[3] = vt;
+            n = 4;
+        }
 
         h->moff[*h->nmesh] = h->blk->len;
-        if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, 4,
+        if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
                                 &seg_page, &seg_nq, 1)) return 0;
         (*h->nmesh)++;
         tg_acct(TG_ACCT_TREE, si);   /* tree-line band, one per side */
@@ -19865,6 +19982,82 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
 #define TD5_TG_TEX_TEXELS  (TD5_TG_TEX_DIM * TD5_TG_TEX_DIM)
 #define TD5_TG_PAL_COUNT   16
 
+/* ==== [R12 TEX items 8b + 12b] THE "TILE TEXTURE" ==========================
+ *
+ * "The snow FLOOR reads as tiles -- do not use that texture" (span 407) and
+ * "stop using the tile texture for the coastline and the bridge pillars"
+ * (span 523). The round brief's hypothesis was that all three roles share ONE
+ * page. MEASURED, with tg_r12_tex_report on seed 20260901, they do NOT:
+ *   span 407  snow floor  -> page 373 (R8 snow-ground variant 2)
+ *   span 523  bank/shore  -> page 5   (GROUND, the gorge skirt beside a run)
+ *   span 523  pillars     -> page 128 (R4 cast-concrete pier, bridge style 0)
+ * Three different pages, and the coastline's own R9 SHORE page (473) decodes as
+ * a clean graded beach, so it is not the surface being complained about at all.
+ *
+ * What the three DO share is one AUTHORING IDIOM. Every one of them picks its
+ * coarse tone from a mask of the form
+ *     patch = ((x >> k) + (y >> k) * C) * hash;   if ((patch >> 30) ... )
+ * i.e. a hard two-state decision taken per AXIS-ALIGNED CELL. Decoded (the PPM
+ * dump, TD5RE_R8_TEXDUMP=1) page 373 is literally a chequerboard of 8x8-texel
+ * squares, page 5 a grid of dark 8x8 squares, page 128 a run of 16-texel bands.
+ * Each page is then drawn at a SHORT world period -- the ground skirt tiles once
+ * per span (1500 units, tg_emit_ground), the pier at 600 -- so the cell grid
+ * repeats every few metres and the eye reads a tiled floor.
+ *
+ * So the fix is a PROPERTY fix, not a blacklist: keep every page's palette and
+ * its intent (drifts on snow, gravel stains on concrete, form-board grain on a
+ * pier) and only replace the hard cell mask with a SMOOTH one. This is
+ * wrapping value noise: a hash per cell CORNER, smoothstep-interpolated across
+ * the cell, summed over two octaves. Its level sets are irregular curves that
+ * cross cell boundaries, so no square survives, and because the corner hash
+ * wraps modulo the cell count the page still tiles exactly as before.
+ *
+ * Returns 0..255. TD5RE_R12_TEX_BLOTCH=0 restores the hard cell masks. */
+static int tg_r12_tex_blotch_on(void)
+{
+    return td5_env_flag_on("TD5RE_R12_TEX_BLOTCH");   /* default ON */
+}
+
+static unsigned tg_r12_corner(int cx, int cy, int n, unsigned seed)
+{
+    unsigned h;
+    cx = ((cx % n) + n) % n;                 /* wrap, so the page still tiles */
+    cy = ((cy % n) + n) % n;
+    h = (unsigned)cx * 374761393u + (unsigned)cy * 668265263u + seed;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return (h ^ (h >> 16)) & 0xFFu;
+}
+
+/* One octave: bilinear-with-smoothstep value noise on a `cell`-texel grid. */
+static int tg_r12_octave(int x, int y, int cell, unsigned seed)
+{
+    const int n  = TD5_TG_TEX_DIM / (cell > 0 ? cell : 1);
+    const int cx = x / cell, cy = y / cell;
+    const int fx = x - cx * cell, fy = y - cy * cell;
+    /* smoothstep(t) on 0..256 fixed point, t = f / cell. */
+    const int tx = (fx * 256) / cell, ty = (fy * 256) / cell;
+    const int sx = (tx * tx * (768 - 2 * tx)) >> 17;   /* 3t^2-2t^3, 0..256 */
+    const int sy = (ty * ty * (768 - 2 * ty)) >> 17;
+    const unsigned a = tg_r12_corner(cx,     cy,     n, seed);
+    const unsigned b = tg_r12_corner(cx + 1, cy,     n, seed);
+    const unsigned c = tg_r12_corner(cx,     cy + 1, n, seed);
+    const unsigned d = tg_r12_corner(cx + 1, cy + 1, n, seed);
+    const int top = (int)a + (((int)b - (int)a) * sx >> 8);
+    const int bot = (int)c + (((int)d - (int)c) * sx >> 8);
+    return top + ((bot - top) * sy >> 8);
+}
+
+/* Two octaves, the second at half the cell and a third of the weight, so a
+ * drift has a ragged edge instead of a mathematically smooth one. */
+static int tg_r12_blotch(int x, int y, int cell, unsigned seed)
+{
+    int c2 = cell / 2;
+    int v  = tg_r12_octave(x, y, cell, seed);
+    if (c2 < 2) return v;
+    v = (v * 3 + tg_r12_octave(x, y, c2, seed ^ 0x9E3779B9u)) / 4;
+    return v < 0 ? 0 : (v > 255 ? 255 : v);
+}
+
 /* Page 0: asphalt with a lane line down one edge of the tile. The road mesh's
  * UVs run u = 0..lanes and tile, so a tile edge lands exactly on every lane
  * boundary -- a stripe at u=0 therefore draws lane dividers AND both road
@@ -20342,8 +20535,15 @@ static void tg_emit_texture_page_ground(TG_Buf *out)
          * no axis-aligned lines, so nothing to shear over a slope. */
         unsigned int patch = (unsigned)((x >> 3) + (y >> 3) * 9) * 2654435761u;
         int idx;
+        /* [R12 TEX item 12b] The gorge skirt beside a bridge run is this page
+         * (tg_ground_page_for_span returns GROUND over a run), tiled once per
+         * span, and the 8x8 cell mask below drew it as a grid of dark squares.
+         * Same ink, smooth mask -- see tg_r12_blotch. */
+        const int dark = tg_r12_tex_blotch_on()
+                       ? (tg_r12_blotch(x, y, 8, 0x2545F491u) < 84)
+                       : ((patch >> 29) == 0);
         rng = rng * 1103515245u + 12345u;
-        if ((patch >> 29) == 0)
+        if (dark)
             idx = 12 + (int)((rng >> 16) % 4);           /* gravel/stain */
         else
             idx = (int)((rng >> 16) % 12);               /* concrete grain */
@@ -20819,9 +21019,23 @@ static void tg_emit_texture_page_r8_snow_ground(TG_Buf *out, int variant)
         const unsigned int patch = (unsigned)((x / k_var[vi].cell)
                                  + (y / k_var[vi].cell) * 11) * 2654435761u;
         int idx;
+        /* [R12 TEX item 8b] "the snow FLOOR reads as tiles -- do not use that
+         * texture". It is not the texture, it is this mask. `patch >> 30` has
+         * four values, so `% 2` shades HALF the cells and `% 3` shades two in
+         * four -- a hard 50/50 decision per axis-aligned cell, decoded (page
+         * 373 in the TEXDUMP) as a literal chequerboard of 8x8-texel squares,
+         * tiled once per 1500-unit span by tg_emit_ground. The drift INTENT is
+         * right and the palette is right; the mask has to stop being a grid.
+         * Threshold picked per variant to land near the old shaded fraction. */
+        const int shaded = tg_r12_tex_blotch_on()
+                         ? (tg_r12_blotch(x, y, k_var[vi].cell * 4 > 32
+                                                ? 32 : k_var[vi].cell * 4,
+                                          k_var[vi].seed)
+                            < (k_var[vi].shade >= 4 ? 96 : 120))
+                         : (((patch >> 30) % (unsigned)k_var[vi].shade) == 0);
         rng = rng * 1103515245u + 12345u;
         idx = 6 + (int)((rng >> 16) % 10);                    /* sunlit crust */
-        if ((patch >> 30) % (unsigned)k_var[vi].shade == 0)
+        if (shaded)
             idx = (int)((rng >> 18) % 6);                     /* drift shade  */
         tg_put_u8(out, (unsigned)idx);
     }
@@ -21416,9 +21630,17 @@ static void tg_emit_texture_page_r4_pier(TG_Buf *out)
         const int y = i / TD5_TG_TEX_DIM;
         unsigned int patch = (unsigned)((x >> 4) + (y >> 4) * 5) * 2654435761u;
         int idx;
+        /* [R12 TEX item 12b] The 16-texel cell mask below banded the whole page
+         * into four columns, and at the 600-unit pier tile that grid repeats up
+         * a leg as stacked squares -- the "tile texture" on the pillars. The
+         * form-board SEAMS stay (they are the material); only the grain patches
+         * move to the smooth mask. */
+        const int grain = tg_r12_tex_blotch_on()
+                        ? (tg_r12_blotch(x, y, 16, 0x9A31C7E5u) < 116)
+                        : ((patch >> 30) == 0);
         rng = rng * 1103515245u + 12345u;
         if ((x % 16) == 0)          idx = 12 + (int)((rng >> 16) % 3); /* seam */
-        else if ((patch >> 30) == 0) idx = 6 + (int)((rng >> 16) % 3); /* grain*/
+        else if (grain)             idx = 6 + (int)((rng >> 16) % 3);  /* grain*/
         else                        idx = (int)((rng >> 16) % 12);     /* face */
         tg_put_u8(out, (unsigned)idx);
     }
@@ -22229,8 +22451,13 @@ static void tg_emit_texture_page_fb_terrain(TG_Buf *out, int which)
         int idx;
         rng = rng * 1103515245u + 12345u;
         if (!which) {
+            /* [R12 TEX item 8b] Same grid mask as the R8 snow variants; this is
+             * the base SNOW page they fall back to. See tg_r12_blotch. */
+            const int shaded = tg_r12_tex_blotch_on()
+                             ? (tg_r12_blotch(x, y, 32, 0x4222FEEDu) < 96)
+                             : ((patch >> 30) == 0);
             idx = 6 + (int)((rng >> 16) % 10);                /* sunlit crust */
-            if ((patch >> 30) == 0) idx = (int)((rng >> 18) % 6);  /* drift shade */
+            if (shaded) idx = (int)((rng >> 18) % 6);         /* drift shade */
         } else {
             /* Snowline over the top ~14 rows, ragged so it is not a hard band. */
             const int line = 10 + (int)((patch >> 29) % 5);
@@ -22962,6 +23189,54 @@ static void tg_r11_guard_report(const TG_NodeList *nl, int nspans)
               band, nspans, flips);
 }
 
+/* [R12 TEX] Which PAGE does each complained-about surface actually sample?
+ *
+ * Round 12 items 8b and 12b describe "the tile texture" in THREE roles (snow
+ * floor, coastline, bridge pillars) and the round brief's hypothesis was that
+ * one shared page is behind all three. A page claim must be measured, not read
+ * off a name: this prints, per span in a window, the page index every one of
+ * those surfaces resolves to, plus the world size one page tile is drawn at, so
+ * the shared-root question is answered by three columns of numbers.
+ *
+ * Read-only; opt-in via TD5RE_R12_TEX_REPORT=1, windowed by
+ * TD5RE_R12_TEX_SPAN (+/- TD5RE_R12_TEX_PAD, default 6). Pair it with
+ * TD5RE_R8_TEXDUMP=1 to look at the pages the indices name. */
+static void tg_r12_tex_report(const TG_NodeList *nl, int nspans)
+{
+    int si, lo, hi, mid, pad;
+
+    if (!td5_env_flag_off("TD5RE_R12_TEX_REPORT")) return;
+    mid = td5_env_int("TD5RE_R12_TEX_SPAN", -1, -1, 100000);
+    pad = td5_env_int("TD5RE_R12_TEX_PAD", 6, 0, 200);
+    if (mid < 0) { lo = 0; hi = nspans - 1; }
+    else { lo = mid - pad; hi = mid + pad; }
+    if (lo < 0) lo = 0;
+    if (hi > nspans - 1) hi = nspans - 1;
+
+    TD5_LOG_I(LOG_TAG, "R12TEX hdr si,biome,snow,bridge,surf_page,gnd_page,"
+                       "median_page,pier_style,pier_page,pylon_page,coast_page,"
+                       "tl_page,tl_band,tl_tilew");
+    for (si = lo; si <= hi; si++) {
+        const TG_Biome *b = &k_biomes[tg_biome_cell_index(si)];
+        const int inbr = tg_span_in_bridge_run(si);
+        const int style = tg_bridge_style(si);
+        const double band = tg_treeline_height(b);
+        TD5_LOG_I(LOG_TAG,
+                  "R12TEX %d,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.0f,%.0f",
+                  si, b->name, tg_biome_is_snow(b), inbr,
+                  tg_topo_surface_page(si),
+                  tg_ground_page_for_span(si, b),
+                  tg_r8_median_page_ex(si, -1, 1),
+                  style, tg_bridge_pier_page_for(style),
+                  TD5_TG_PAGE_R9_PYLON,
+                  td5_env_flag_on("TD5RE_R9_BRIDGE_COAST")
+                      ? TD5_TG_PAGE_R9_SHORE : TD5_TG_PAGE_R4_COAST,
+                  tg_r8_treeline_page(si), band,
+                  band > 0.0 ? band : 0.0);
+    }
+    (void)nl;
+}
+
 /* ----------------------------------------------------------- build ------- */
 int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
                              int *out_spans)
@@ -23177,6 +23452,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     tg_r9_topo_report(&nl, nspans);            /* [R9 TOPO] class sweep, ditto */
     tg_r11_xcurve_report(nspans);        /* [R11 CROSS item 16] opt-in, ditto */
     tg_r11_water_diag(&nl, nspans);            /* [R11 WATER] wet footprint    */
+    tg_r12_tex_report(&nl, nspans);            /* [R12 TEX] page-per-surface   */
     ok = 1;
 
 done:
