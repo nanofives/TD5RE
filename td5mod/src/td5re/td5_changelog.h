@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 01 (auto-track median end faces, r12)" },
+    { CL_ITEM,    "FIXED: the raised avenue median was an open box. It" },
+    { CL_ITEM,    "  was built as three quads -- a top and two side" },
+    { CL_ITEM,    "  walls -- with no end faces at all, so driving at" },
+    { CL_ITEM,    "  one you looked straight into its hollow inside." },
+    { CL_ITEM,    "  Every island run now closes both ends with a" },
+    { CL_ITEM,    "  concrete nose, leading and trailing, and nothing" },
+    { CL_ITEM,    "  is added between spans (TD5RE_R12_MEDIAN_CAP=0" },
+    { CL_ITEM,    "  restores the open ends)" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 01 (auto-track curve signage, r11)" },
     { CL_ITEM,    "NEW: generated tracks now sign their corners. A blue" },
     { CL_ITEM,    "  direction sign with a left or right arrow stands on" },
