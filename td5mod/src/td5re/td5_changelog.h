@@ -59,6 +59,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  a raised island instead of a flat stripe lying" },
     { CL_ITEM,    "  in the road surface -- every divided stretch" },
     { CL_ITEM,    "  gets one, not just the narrow avenues" },
+    { CL_ITEM,    "FIXED: the last building before a side street now" },
+    { CL_ITEM,    "  ends short of the corner, so it no longer stands" },
+    { CL_ITEM,    "  on the pavement that turns down the street" },
+    { CL_ITEM,    "FIXED: on sharp bends the city no longer opens a" },
+    { CL_ITEM,    "  second street beside an existing one, which left" },
+    { CL_ITEM,    "  stray facades with no building behind them and" },
+    { CL_ITEM,    "  two crossings a single span apart" },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 31 (road markings on widening roads)" },

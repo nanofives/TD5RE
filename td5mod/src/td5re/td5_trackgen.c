@@ -836,6 +836,9 @@ typedef enum {
      * PLACE. Never append here. The mask is self-sizing off TG_ACCT_KIND_COUNT
      * (see s_acct_mask), so adding a kind grows the array, never drops a bit. */
     TG_ACCT_R10_CROSS,      /* CROSS  (99991 66) side-street sidewalk setback */
+    /* [R11] PRE-RESERVED, one per area, own line. RENAME YOUR OWN SLOT IN
+     * PLACE. Never append here. */
+    TG_ACCT_R11_CITY,       /* CITY   (20260901 6,10) corner setback + turn gap */
     TG_ACCT_KIND_COUNT
 } TG_AcctKind;
 
@@ -929,7 +932,10 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
     "r9-infra",             /* INFRA   */
     /* [R10] one reserved name per area, in enum order. Rename to match your
      * renamed enum constant. Only the LAST entry omits its trailing comma. */
-    "r10-cross"             /* CROSS   */
+    "r10-cross",            /* CROSS   */
+    /* [R11] one reserved name per area, in enum order. Rename to match your
+     * renamed enum constant. Only the LAST entry omits its trailing comma. */
+    "r11-city"              /* CITY    */
 };
 
 static long s_acct_count[TG_ACCT_KIND_COUNT];
@@ -5423,6 +5429,19 @@ static void tg_facade_block(int si, int left, unsigned int *block,
 #define TD5_TG_R8_TURN_BASE   3      /* spans either side used to read the bend */
 #define TD5_TG_R8_TURN_SIN 0.34      /* |sin| of the heading change to qualify  */
 #define TD5_TG_R8_TURN_GAP   16      /* min spans between two continuations     */
+/* [R11 CITY item 10] spans either side of a continuation that must already be
+ * unbroken frontage. 2 is the minimum that makes stranding impossible: with the
+ * opening at si, spans si-1 and si+1 must be built, so neither neighbour can be
+ * a gap edge and no one-span block can be left between two mouths. */
+#define TD5_TG_R11_TURN_CLEAR 2
+
+/* [R11 CITY item 10] The gap guard below reads the run/gap pattern around a
+ * candidate bend, and tg_facade_built is defined just under the map (it consults
+ * the map, which is why it comes after). Reading it here is safe and not
+ * circular: the guard only looks TD5_TG_R11_TURN_CLEAR spans either side, and
+ * TD5_TG_R8_TURN_GAP keeps any already-marked continuation 16 spans away, so no
+ * entry the guard reads has been written by this pass. */
+static int tg_facade_built(int si, int left);
 
 static signed char s_turn_side[TD5_TG_MAX_SPANS];   /* 0 none, +1 left, -1 right */
 static float       s_turn_skew[TD5_TG_MAX_SPANS];   /* normal -> incoming heading */
@@ -5454,6 +5473,37 @@ static void tg_turn_map_build(const TG_NodeList *nl, int nspans)
         dot = ux * a->tx + uz * a->tz;
         if (dot < 0.30) continue;
         det = ux * a->tz - uz * a->tx;
+        /* [R11 CITY item 10] A continuation may only open UNBROKEN frontage.
+         * The feature exists to explain a bend that would otherwise turn in a
+         * void, so opening one beside a street the block pattern already put
+         * there explains nothing and costs a great deal: on seed 20260901 the
+         * bend at 706 opened the LEFT frontage one span before the natural gap
+         * at 708, stranding span 707 as a one-span block. tg_facade_isolated
+         * (R6 item 16) then suppressed that block's wall -- correctly -- but
+         * every junction emitter still reads the raw run/gap PATTERN, which
+         * still said "built". So the arms, the crossing base and the
+         * cross-street frontage walls all anchored themselves to a building
+         * that was never emitted: free-standing walls with no body behind them
+         * and two side streets on different bearings a single span apart. That
+         * is both halves of item 10 -- "buildings with only a facade" and "a
+         * weird mixture of crossings" -- from one cause.
+         *
+         * The guard is stated at the source rather than taught to each consumer:
+         * require the pattern to be BUILT and STANDING across the whole window
+         * the opening would sit in, so a continuation can never abut a gap and
+         * can never strand a block. Rejecting it leaves the ordinary side
+         * street next door doing the explaining, which is what a driver reads
+         * anyway. TD5RE_R11_CITY_TURNGAP=0 restores the ungated map. */
+        if (td5_env_flag_on("TD5RE_R11_CITY_TURNGAP")) {
+            const int lf = (sg > 0.0);
+            int j, clear = 1;
+            for (j = si - TD5_TG_R11_TURN_CLEAR;
+                 j <= si + TD5_TG_R11_TURN_CLEAR && clear; j++) {
+                if (j <= 0 || j >= nspans) { clear = 0; break; }
+                if (!tg_facade_built(j, lf) || !tg_facade_stands(j)) clear = 0;
+            }
+            if (!clear) continue;
+        }
         s_turn_side[si] = (signed char)(sg > 0.0 ? 1 : -1);
         s_turn_skew[si] = (float)atan2(det, dot);
         last = si;
@@ -5539,6 +5589,31 @@ static int tg_facade_isolated(int si, int left)
 {
     if (!tg_side_built(si, left)) return 0;
     return !tg_side_built(si - 1, left) && !tg_side_built(si + 1, left);
+}
+
+/* [R11 CITY item 10] Is there a CORNER BLOCK on side `left` at span si -- a
+ * frontage that is actually emitted, not merely one the run/gap pattern claims?
+ * This is tg_side_geom's own `built` condition, stated once here so the junction
+ * emitters can read it. They all keyed on the raw pattern, which outlives three
+ * separate suppressions -- a fork-cleared lateral, a bridge or non-facade biome
+ * span (tg_side_built folds both in), and the R6 one-span-block rule -- so a
+ * pavement arm, a crossing base or a cross-street frontage wall could anchor
+ * itself to a building that was never emitted. That is the "buildings with only
+ * a facade, no body" half of item 10: the side-street walls are real geometry,
+ * height-matched to a block that does not exist, standing on their own.
+ *
+ * Stated as one predicate rather than patched into each emitter, so the whole
+ * family is covered and a future junction emitter inherits it. Nothing here can
+ * ADD geometry: a corner either stands or the junction furniture that leaned on
+ * it is not emitted. TD5RE_R11_CITY_CORNER=0 restores the pattern-only corner. */
+static int tg_r11_corner_stands(int si, int left)
+{
+    if (!td5_env_flag_on("TD5RE_R11_CITY_CORNER"))
+        return tg_facade_built(si, left);
+    if (!tg_side_built(si, left)) return 0;
+    if (td5_env_flag_on("TD5RE_AUTOTRACK_NO_STUB") &&
+        tg_facade_isolated(si, left)) return 0;
+    return 1;
 }
 
 /* Hash identifying the RUN span si belongs to on this side. A superblock now
@@ -6902,6 +6977,24 @@ static int tg_lamp_glow_from_props(const TG_Biome *b)
     return b->prop_lamp && !td5_env_flag_on("TD5RE_AUTOTRACK_LAMP_POSTS");
 }
 
+/* [R11 CITY item 6] "Does span si lay a pedestrian-pavement ARM on side s?" --
+ * the single definition of tg_block_emit_intersection's placement, factored out
+ * so the FRONTAGE below can end short of an arm instead of standing on it.
+ * Returns a bitmask: 1 = arm at the near node (the previous span's far end),
+ * 2 = arm at the far node (the next span's near end), 0 = no junction on that
+ * side. Forward-declared: the gates it reads live with the junction emitters
+ * much further down, but tg_side_geom below needs the answer. */
+static int tg_r11_arm_side(const TG_NodeList *nl, int si, int s);
+
+/* Largest share of one span's frontage the two corner setbacks may take between
+ * them. A single setback is one sidewalk width (900 of a 1500-raw span, 60%), so
+ * this only ever binds on a one-span block flanked by streets on both sides,
+ * where it splits what is left rather than inverting the segment. */
+#define TD5_TG_R11_CORNER_KEEP 0.65
+/* Shortest frontage a corner setback may leave standing, raw. Below this the
+ * wall reads as a splinter rather than a building end, so the setback yields. */
+#define TD5_TG_R11_CORNER_MIN 400.0
+
 /* Geometry for one side (0=right,1=left) of the wall at span si. built=0 when
  * the run/gap pattern or the branch-corridor exclusion skips this side. */
 static void tg_side_geom(const TG_NodeList *nl, int si, int left,
@@ -6974,6 +7067,65 @@ static void tg_side_geom(const TG_NodeList *nl, int si, int left,
     g->ax = (n1->x + g->lx1 * set1) - g->bx;
     g->ay = n1->y - n0->y;
     g->az = (n1->z + g->lz1 * set1) - g->bz;
+
+    /* [R11 CITY item 6] CORNER SETBACK. "The last building of the main road
+     * before the intersection should end EARLIER, so it stops spawning over the
+     * sidewalk" (20260901 span 466). The pavement ARM that turns the kerb down a
+     * side street (tg_block_emit_arm) is a slab `sw` wide laid on the BUILT side
+     * of the mouth -- it runs BACK along the main road from the corner node, by
+     * exactly the sidewalk width, and outward down the street. The frontage ran
+     * to that same corner node, so its last `sw` of wall, roof, mass and corner
+     * prism stood ON that slab: the building overhung the side street's pavement.
+     *
+     * R10 already fixed the OTHER half of the same corner: tg_cross_emit_sidewalls
+     * pushes the side street's own frontage wall along-road by `sw` for exactly
+     * this reason ("the arm sidewalk now shows in front of the frontage"). The
+     * main-road frontage was never given the matching setback, so the two walls
+     * of one corner block disagreed by sw -- the main one sticking out past its
+     * own return. Trimming the frontage by the same sw closes the corner: the two
+     * walls now meet, and the arm pavement is clear from kerb to building line.
+     *
+     * The trim is applied only at an end where a junction arm ACTUALLY stands,
+     * read from the shared tg_r11_arm_side rather than from the run/gap pattern,
+     * so a run that ends at a bridge, a biome edge or a park keeps its full
+     * frontage. Both ends can trim at once (a one-span block between two
+     * streets), so the total is clamped: at most TD5_TG_R11_CORNER_KEEP of the
+     * span may be given away, scaled proportionally, and the geometry after it
+     * is a pure re-parametrisation of the same straight frontage segment --
+     * caps, roof, mass and step wall all derive from bx/ax and follow it.
+     * TD5RE_R11_CITY_CORNER=0 restores the flush frontage for an A/B. */
+    if (td5_env_flag_on("TD5RE_R11_CITY_CORNER")) {
+        const double al = sqrt(g->ax * g->ax + g->az * g->az);
+        const double sw = tg_city_sidewalk_w(b);
+        double tn = (tg_r11_arm_side(nl, si - 1, left) & 2) ? sw : 0.0;
+        double tf = (tg_r11_arm_side(nl, si + 1, left) & 1) ? sw : 0.0;
+        if (al > 1.0 && (tn > 0.0 || tf > 0.0)) {
+            /* Two clamps, both measured on this span's OWN frontage length,
+             * because that length is not the span length on a bend: the inside
+             * kerb of a curve compresses the setback line (seed 20260901 span
+             * 707 side R is 347 raw of a 1500 span). A share cap alone would
+             * leave a 121-raw splinter of wall there, so the absolute floor
+             * takes precedence -- below it the corner keeps its flush frontage,
+             * which on such a span overhangs by less than it is long anyway. */
+            const double room = al - TD5_TG_R11_CORNER_MIN;
+            double cap = al * TD5_TG_R11_CORNER_KEEP;
+            double fn, ff;
+            if (cap > room) cap = room;
+            if (cap <= 0.0) { tn = 0.0; tf = 0.0; }
+            else if (tn + tf > cap) {
+                const double k = cap / (tn + tf);
+                tn *= k; tf *= k;
+            }
+            fn = tn / al; ff = tf / al;
+            g->bx += g->ax * fn;
+            g->by += g->ay * fn;
+            g->bz += g->az * fn;
+            g->ax *= 1.0 - fn - ff;
+            g->ay *= 1.0 - fn - ff;
+            g->az *= 1.0 - fn - ff;
+            tg_acct(TG_ACCT_R11_CITY, si);
+        }
+    }
 
     flen = sqrt(g->ax * g->ax + g->az * g->az);
     if (flen < 1.0) flen = 1.0;
@@ -12298,7 +12450,10 @@ static int tg_crossing_base(int si)
     if (td5_env_flag_on("TD5RE_AUTOTRACK_XBRIDGE_GATE") &&
         tg_span_near_bridge(si, TD5_TG_XBRIDGE_CLEAR)) return 0;
     for (s = 0; s < 2; s++) {
-        if (!(!tg_facade_built(si, s) && tg_facade_built(si - 1, s))) continue;
+        /* [R11 CITY item 10] the corner must actually STAND -- a zebra painted
+         * against a suppressed block is a crossing into nothing. */
+        if (!(!tg_facade_built(si, s) && tg_r11_corner_stands(si - 1, s)))
+            continue;
         /* [R4 CROSS item 4] A zebra marks a road you cross INTO A STREET. On
          * seed 99991 one gap in four is a PARK (a green lawn + hedge from the
          * kerb out, tg_block_is_park), and painting a pedestrian crossing in
@@ -13596,6 +13751,37 @@ static int tg_block_emit_arm(const TG_FBHook *h,
  * built) -- the interior of the gap is the carriageway itself. Parks and forks
  * are skipped: a park has no through street, and a fork's half-width road has no
  * room for a junction. */
+/* [R11 CITY item 6] The SPAN-level half of tg_block_emit_intersection's gate --
+ * everything that decides "can this span host a junction at all", with no side
+ * in it. Split out (rather than duplicated) so tg_r11_arm_side below and the
+ * emitter itself read one authority and cannot drift. */
+static int tg_block_arm_span_ok(int si)
+{
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_INTERSECTIONS")) return 0;
+    if (tg_span_in_bridge_run(si)) return 0;
+    if (td5_env_flag_on("TD5RE_AUTOTRACK_XBRIDGE_GATE") &&   /* item 15 */
+        tg_span_near_bridge(si, TD5_TG_XBRIDGE_CLEAR)) return 0;
+    if (tg_branches_enabled() && tg_span_in_fork_clear(si) &&
+        !td5_env_flag_on("TD5RE_R8_CROSS_FORKARM")) return 0;
+    return 1;
+}
+
+/* Which arms stand on side `s` of span si -- see the forward declaration. The
+ * per-side gates and the two corner tests are exactly the emitter's, below. */
+static int tg_r11_arm_side(const TG_NodeList *nl, int si, int s)
+{
+    const double sg = s ? 1.0 : -1.0;
+    if (si <= 0) return 0;
+    if (!(tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(si)]) > 0.0))
+        return 0;
+    if (!tg_block_arm_span_ok(si)) return 0;
+    if (tg_facade_built(si, s)) return 0;          /* built = no junction */
+    if (tg_block_is_park(si, s)) return 0;         /* a park, not a street */
+    if (tg_side_corridor_here(nl, si, sg)) return 0;
+    return (tg_r11_corner_stands(si - 1, s) ? 1 : 0)
+         | (tg_r11_corner_stands(si + 1, s) ? 2 : 0);
+}
+
 static int tg_block_emit_intersection(const TG_FBHook *h)
 {
     double e[10];
@@ -13603,10 +13789,7 @@ static int tg_block_emit_intersection(const TG_FBHook *h)
     int s;
 
     if (!(sw > 0.0)) return 1;
-    if (!td5_env_flag_on("TD5RE_AUTOTRACK_INTERSECTIONS")) return 1;
-    if (tg_span_in_bridge_run(h->si)) return 1;
-    if (td5_env_flag_on("TD5RE_AUTOTRACK_XBRIDGE_GATE") &&   /* item 15 */
-        tg_span_near_bridge(h->si, TD5_TG_XBRIDGE_CLEAR)) return 1;
+    if (!tg_block_arm_span_ok(h->si)) return 1;
     /* [R8 CROSS, carried-in open item] "8 side-street mouths inside forks lack
      * flanking pavement." This blanket return was the cause and it was never
      * matched by the emitter it flanks: tg_city_emit_crossstreet gates on
@@ -13617,22 +13800,20 @@ static int tg_block_emit_intersection(const TG_FBHook *h)
      * the reported symptom. Dropping the blanket gate leaves the per-side
      * tg_side_blocked test in the loop below as the single authority, so the two
      * emitters now agree span for span on where a junction exists.
-     * TD5RE_R8_CROSS_FORKARM=0 restores the blanket fork drop for an A/B. */
-    if (tg_branches_enabled() && tg_span_in_fork_clear(h->si) &&
-        !td5_env_flag_on("TD5RE_R8_CROSS_FORKARM")) return 1;
+     * TD5RE_R8_CROSS_FORKARM=0 restores the blanket fork drop for an A/B.
+     * [R11 CITY item 6] Both that gate and the four per-side tests below now
+     * live in tg_block_arm_span_ok / tg_r11_arm_side above; this loop reads the
+     * shared answer so the frontage trim can never disagree with the arm. */
 
     for (s = 0; s < 2; s++) {
+        const int arms = tg_r11_arm_side(h->nl, h->si, s);
         const double sg = s ? 1.0 : -1.0;
         double reach, ang, ax, az, alen, ox, oz;
         int near_corner, far_corner;
 
-        if (tg_facade_built(h->si, s)) continue;      /* built = no junction */
-        if (tg_block_is_park(h->si, s)) continue;     /* a park, not a street */
-        /* [R9 CITY item 4] measured, not blanket -- see tg_side_corridor_here */
-        if (tg_side_corridor_here(h->nl, h->si, sg)) continue;
-        near_corner = tg_facade_built(h->si - 1, s);  /* gap starts here */
-        far_corner  = tg_facade_built(h->si + 1, s);  /* gap ends here */
-        if (!near_corner && !far_corner) continue;    /* gap interior */
+        if (!arms) continue;
+        near_corner = (arms & 1);                     /* gap starts here */
+        far_corner  = (arms & 2);                     /* gap ends here   */
 
         tg_city_edge_frame(h->nl, h->si, sg, e);
         ang   = tg_block_arm_skew(h->si, s);
@@ -13934,8 +14115,12 @@ static int tg_cross_emit_sidewalls(const TG_FBHook *h)
         if (tg_side_blocked(h->si, sg)) continue;
         /* Emit a frontage only at the gap's own boundary spans, so one wide gap
          * grows exactly its two flanking frontages, not one per span. */
-        near_corner = tg_facade_built(h->si - 1, s);  /* gap starts here */
-        far_corner  = tg_facade_built(h->si + 1, s);  /* gap ends here   */
+        /* [R11 CITY item 10] the corner block must actually STAND: this wall
+         * takes its height from that block (tg_facade_floors below), so keyed on
+         * the raw pattern it becomes a free-standing facade with nothing behind
+         * it wherever the block was suppressed. */
+        near_corner = tg_r11_corner_stands(h->si - 1, s);  /* gap starts here */
+        far_corner  = tg_r11_corner_stands(h->si + 1, s);  /* gap ends here   */
         if (!near_corner && !far_corner) continue;    /* gap interior: no wall */
         tg_city_edge_frame(h->nl, h->si, sg, e);
         ang = tg_block_arm_skew(h->si, s);
@@ -14400,6 +14585,104 @@ static void tg_r10_cross_report(const TG_NodeList *nl, int nspans)
     TD5_LOG_I(LOG_TAG,
         "trackgen: r10cross SUMMARY gap_span_sides=%d frontage_walls=%d "
         "flush_no_sidewalk=%d", gapspans, walls, flush);
+}
+
+/* ============== [R11 CITY] FRONTAGE / JUNCTION DUMP (read-only) =============
+ * Items 6 and 10 are both "what does the frontage do next to a junction", one at
+ * an ordinary intersection and one on a curve, so both need the same per-span
+ * facts: the run/gap pattern, whether a sharp-bend TURN CONTINUATION opened this
+ * side, the frontage segment the wall is actually built on, its caps, and which
+ * of the junction emitters claim the span. Nothing here decides anything -- it
+ * only prints what the emitters read, so a conclusion can be measured instead of
+ * inferred.
+ *
+ * TD5RE_R11_CITY_REPORT=1 turns it on; TD5RE_R11_CITY_SPAN=N (+/- _PAD, default
+ * 10) windows the dump. Off by default, so a normal build logs nothing. */
+static void tg_r11_city_report(const TG_NodeList *nl, int nspans)
+{
+    const int wspan = td5_env_int("TD5RE_R11_CITY_SPAN", -1, -1, 100000);
+    const int wpad  = td5_env_int("TD5RE_R11_CITY_PAD", 10, 0, 4000);
+    int si, s, ring = (s_ring_len > 0) ? s_ring_len : nspans;
+    int orphan = 0, phantom = 0, overhang = 0, corners = 0;
+
+    if (!td5_env_flag_on("TD5RE_R11_CITY_REPORT")) return;
+    if (ring > nspans) ring = nspans;
+    if (ring > TD5_TG_MAX_SPANS) ring = TD5_TG_MAX_SPANS;
+
+    TD5_LOG_I(LOG_TAG, "trackgen: ---- r11city frontage/junction dump ----");
+    for (si = 1; si < ring - 1; si++) {
+        const TG_Biome *b = &k_biomes[tg_scenery_biome_index(si)];
+        const double sw = tg_city_sidewalk_w(b);
+        const int in_win = (wspan < 0)
+                        || (si >= wspan - wpad && si <= wspan + wpad);
+        /* tg_side_geom is only ever called on a facade biome (tg_emit_street_wall
+         * is the tree-billboard branch's alternative), and tg_facade_floors
+         * divides by that biome's floors_extra -- 0 outside the city table. */
+        if (!(sw > 0.0)) continue;
+        for (s = 0; s < 2; s++) {
+            const double sg = s ? 1.0 : -1.0;
+            TG_SideGeom g;
+            double flen;
+            tg_side_geom(nl, si, s, b, &g);
+            flen = g.built ? sqrt(g.ax * g.ax + g.az * g.az) : 0.0;
+            /* CLASS COUNTERS, whole ring, window-independent.
+             *  orphan   -- the run/gap pattern says BUILT but no wall stands, so
+             *              every junction emitter keyed on the pattern anchors
+             *              itself to a building that is not there (item 10).
+             *  phantom  -- an arm corner claimed against such a span.
+             *  overhang -- a standing frontage whose end runs into the pavement
+             *              arm of the junction next door (item 6). */
+            if (tg_facade_built(si, s) && tg_facade_isolated(si, s)) orphan++;
+            {
+                const int arms = tg_r11_arm_side(nl, si, s);
+                TG_SideGeom gn, gf;
+                tg_side_geom(nl, si - 1, s, b, &gn);
+                tg_side_geom(nl, si + 1, s, b, &gf);
+                if ((arms & 1) && !gn.built) phantom++;
+                if ((arms & 2) && !gf.built) phantom++;
+                if (arms & 1) corners++;
+                if (arms & 2) corners++;
+                /* RESIDUAL overhang, measured on the built geometry rather than
+                 * counted as an opportunity: the along-road distance from the
+                 * frontage's end to the corner node it retreats from. The arm
+                 * slab occupies sw of that, so anything materially short of sw
+                 * is still standing on the pavement. */
+                if ((arms & 1) && gn.built) {
+                    const TG_Node *nd = &nl->v[si];
+                    const double dx = nd->x - (gn.bx + gn.ax);
+                    const double dz = nd->z - (gn.bz + gn.az);
+                    if (dx * nd->tx + dz * nd->tz < sw - 100.0) overhang++;
+                }
+                if ((arms & 2) && gf.built) {
+                    const TG_Node *nd = &nl->v[si + 1];
+                    const double dx = gf.bx - nd->x, dz = gf.bz - nd->z;
+                    if (dx * nd->tx + dz * nd->tz < sw - 100.0) overhang++;
+                }
+            }
+            if (!in_win) continue;
+            TD5_LOG_I(LOG_TAG,
+                "trackgen:   r11city si=%d side=%s sw=%.0f built=%d stands=%d "
+                "turn=%d park=%d isol=%d nb=%d/%d | wall=%d rows=%d cols=%d "
+                "flen=%.0f depth=%.0f capn=%d capf=%d | arm=%d xbase=%d "
+                "xhere=%d skew=%.1f reach=%.0f",
+                si, s ? "L" : "R", sw,
+                tg_facade_built(si, s), tg_facade_stands(si),
+                tg_turn_open(si, s), tg_block_is_park(si, s),
+                tg_facade_isolated(si, s),
+                tg_side_built(si - 1, s), tg_side_built(si + 1, s),
+                g.built, g.built ? g.rows : 0, g.built ? g.cols : 0,
+                flen, g.built ? g.depth : 0.0,
+                g.built ? g.cap_near : 0, g.built ? g.cap_far : 0,
+                tg_r11_arm_side(nl, si, s),
+                tg_crossing_base(si), tg_city_crossing_here(si),
+                tg_block_arm_skew(si, s) * 180.0 / TD5_TG_PI,
+                tg_xstreet_reach_at(nl, si, sg, tg_block_arm_skew(si, s), b, sw));
+        }
+    }
+    TD5_LOG_I(LOG_TAG,
+        "trackgen: r11city SUMMARY arm_corners=%d orphan_frontage=%d "
+        "phantom_corners=%d overhang_ends=%d",
+        corners, orphan, phantom, overhang);
 }
 
 /* ============ [R9 CITY] PAVEMENT UNIQUENESS + MOUTH MASSING SWEEP =========
@@ -17679,6 +17962,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     tg_turn_map_build(nl, nspans);
     tg_r8_cross_report(nl, nspans);   /* [R8 CROSS] class sweep, opt-in */
     tg_r10_cross_report(nl, nspans);  /* [R10 CROSS] side-street setback, opt-in */
+    tg_r11_city_report(nl, nspans);   /* [R11 CITY] frontage/junction dump, opt-in */
     tg_r9_city_reset();               /* [R9 CITY] pavement/massing sweep */
 
     for (e = 0; e < nentries && ok; e++) {
