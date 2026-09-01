@@ -10543,6 +10543,93 @@ static int tg_rail_deck_here(const TG_NodeList *nl, int si)
     return tg_span_is_bridge_deck(nl, si);
 }
 
+/* ============ [R13 RAIL item 5b] THE BRIDGE APPROACH RAMP IS THE CROSSING ===
+ * "Between the road and the bridge, the GUARDRAILS and the SIDEWALK
+ *  DISAPPEAR."   -- reported against span 1155, and R12 item 14b reported this
+ *  class fixed by CAPPING both runs at a hand-off. The first job was to decide
+ *  whether that cap misses this hand-off (a missing END FACE) or whether the
+ *  report is about a real missing LENGTH. It is the LENGTH, so the R12 cap is
+ *  not extended here: it closes cross-sections, and nothing measured below is
+ *  an open cross-section.
+ *
+ * MEASURED (tg_r13_rail_mouth_report, seed 20260901, all 14 mouths). What every
+ * mouth has in common is a RAMP: the road leaves local ground and pitches down
+ * into the gorge for several spans before the deck starts. Nothing owns that
+ * ramp, and it shows up in two different ways depending on the biome:
+ *
+ *   UNPAVED mouths (160, 800, 1000). The roadside gate's elevation rule is
+ *   `lift >= +900` and a ramp into a gorge has NEGATIVE lift, so it never
+ *   fires; a straight approach fails the bend rule too. The only thing that
+ *   rails the ramp at all is the +/-3 span dilation pad reaching back out of
+ *   the deck. Measured at mouth 160: spans 148-156 carry no rail on either edge
+ *   and no pavement on either side -- a NINE-SPAN, 13500-unit bare descent --
+ *   and the rail appears only at 157.
+ *
+ *   PAVED mouths (1320). The pavement and its kerb railing run to 1314 and then
+ *   the LEFT side loses both for spans 1315-1318, gets a roadside guardrail for
+ *   two of those four, and gets the pavement back for exactly one span (1319)
+ *   before the deck. Attributed to ONE sub-predicate by the report: sw, the
+ *   pavement width, tg_side_blocked and tg_city_crossing_here are all constant
+ *   across the window and only tg_facade_built(si, LEFT) goes 1,0,0,0,0,1. It
+ *   is a FRONTAGE GAP -- the city block model opening a side street -- that
+ *   happens to land on the ramp. And because the side street runs on every span
+ *   of a frontage gap, that gap is also laying a street off the side of a road
+ *   which is by then 206 units below local ground and falling.
+ *
+ * So the root is not the pavement emitter and not the rail emitter: it is that
+ * a ramp is treated as ordinary road by every roadside rule, while structurally
+ * it is part of the crossing. ONE predicate, stated once, with three
+ * consequences that follow from it:
+ *
+ *   1. a ramp span always carries a barrier (the guardrail gate returns 1);
+ *   2. a frontage gap may not break the pavement or its kerb railing on a ramp,
+ *      so a run that reaches the ramp reaches the deck;
+ *   3. no side street opens onto a ramp -- the same statement as (2) seen from
+ *      the other side, and the reason (2) does not lay a kerb across a street.
+ *
+ * The test is "the road has measurably left local ground within reach of a
+ * deck", not "N spans from a deck": the ramp's LENGTH is set by the bridge's
+ * own elevation profile and varies from 3 spans to 10 on one seed, so a fixed
+ * count would either miss the long ones or rail flat road at the short ones.
+ * |lift| because a deck is reached by climbing on some mouths and by the ground
+ * falling away on others, and both are ramps.
+ *
+ * Held in a mask rather than recomputed, so it is a PURE function of si like
+ * tg_span_in_bridge_run -- the pavement and kerb-fence gates take no node list
+ * and all three consequences must read the identical set of spans or they will
+ * disagree at the ends, which is the failure mode R9 RAILFIX documents for the
+ * roadside/kerb-fence hand-off.
+ *
+ * TD5RE_R13_APPROACH=0 restores the unowned ramp for an A/B. */
+#define TD5_TG_R13_APPROACH      10    /* furthest a ramp may reach from a deck */
+#define TD5_TG_R13_APPROACH_LIFT 25.0  /* road has measurably left the ground   */
+
+static unsigned char s_r13_approach[TD5_TG_MAX_SPANS];
+
+static int tg_r13_approach_span(int si)
+{
+    if (si < 0 || si >= TD5_TG_MAX_SPANS) return 0;
+    return s_r13_approach[si] != 0;
+}
+
+/* Filled once, as soon as the node list and s_ring_len are final. */
+static void tg_r13_approach_build(const TG_NodeList *nl, int nspans)
+{
+    int si;
+    memset(s_r13_approach, 0, sizeof(s_r13_approach));
+    if (!nl || !td5_env_flag_on("TD5RE_R13_APPROACH")) return;
+    if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
+    for (si = 0; si < nspans && si < nl->count; si++) {
+        double lift;
+        if (tg_span_in_bridge_run(si)) continue;   /* the deck, not its ramp */
+        if (tg_span_in_tunnel(si)) continue;       /* a bore owns its own edges */
+        if (!tg_span_near_bridge(si, TD5_TG_R13_APPROACH)) continue;
+        lift = nl->v[si].y - tg_local_ground_y(nl, si);
+        if (lift < 0.0) lift = -lift;
+        if (lift >= TD5_TG_R13_APPROACH_LIFT) s_r13_approach[si] = 1;
+    }
+}
+
 /* FROZEN round-8 coverage rule, used ONLY as the report's baseline.
  *
  * Deliberately a SECOND COPY of the live rule rather than a call into it, which
@@ -10909,6 +10996,25 @@ static int tg_emit_bridge_rail_panel(TG_Buf *m,
     px[2] = x1; py[2] = y1 + base + h; pz[2] = z1; uu[2] = 1.0; vv[2] = (double)(si + 1);
     px[3] = x0; py[3] = y0 + base + h; pz[3] = z0; uu[3] = 1.0; vv[3] = (double)si;
 
+    /* [R13 RAIL item 4b] The parapet's actual emitted vertices and UVs, so
+     * "the mirroring is painted, not geometric" is a measurement rather than a
+     * reading of this function. What it has to show is ONE quad per edge with
+     * MONOTONIC u and v -- no triangle-wave fold (the R12 tree-line idiom), no
+     * transposition, and no second panel on the same edge. Windowed, opt-in via
+     * TD5RE_R13_RAIL_VERTS=<span>. */
+    {
+        const int want = td5_env_int("TD5RE_R13_RAIL_VERTS", -1, -1, 100000);
+        if (want >= 0 && si >= want - 1 && si <= want + 1) {
+            int k;
+            TD5_LOG_I(LOG_TAG,
+                      "trackgen: [R13 4b] parapet si=%d page=%d nq=%d", si,
+                      seg_page, seg_nq);
+            for (k = 0; k < 4; k++)
+                TD5_LOG_I(LOG_TAG,
+                          "trackgen: [R13 4b]   v%d pos=(%.0f,%.0f,%.0f) uv=(%.3f,%.3f)",
+                          k, px[k], py[k], pz[k], uu[k], vv[k]);
+        }
+    }
     moff[*pn] = m->len;
     if (!tg_write_quad_mesh(m, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1))
         return 0;
@@ -13071,6 +13177,11 @@ static int tg_span_needs_guardrail_raw(const TG_NodeList *nl, int si, int nspans
     if (td5_env_flag_off("TD5RE_R9_RAILFIX_SPANDECK") && tg_rail_deck_here(nl, si))
         return 0;
     if (tg_span_in_bridge_run(si)) return 1;
+    /* [R13 RAIL item 5b] CONSEQUENCE 1. The rule directly above is `lift >=
+     * +900`, and a ramp DOWN into a gorge has negative lift, so the approach to
+     * every gorge crossing on the track fell through to the bend test and a
+     * straight one got nothing. See the block at tg_r13_approach_build. */
+    if (tg_r13_approach_span(si)) return 1;
     if (nl->v[si].y - tg_local_ground_y(nl, si) >= TD5_TG_BRIDGE_MIN_LIFT)
         return 1;
 
@@ -13570,7 +13681,11 @@ static int tg_r12_pave_stands(const TG_NodeList *nl, int si, int s)
     if (!(tg_city_sidewalk_w(b) > 0.0)) return 0;
     sw = tg_city_sidewalk_w_at(nl, si, b);
     if (!(tg_pavement_side_width(nl, si, s ? 1.0 : -1.0, sw) > 0.0)) return 0;
-    if (td5_env_flag_on("TD5RE_AUTOTRACK_XSTOP") && !tg_facade_built(si, s))
+    /* [R13 RAIL item 5b] mirrors the emitter's own ramp exception above -- this
+     * predicate exists to be the emitter's gate stated once, so it has to move
+     * with it or the R12 end cap floats where the slab is not. */
+    if (td5_env_flag_on("TD5RE_AUTOTRACK_XSTOP") && !tg_facade_built(si, s) &&
+        !tg_r13_approach_span(si))
         return 0;
     return 1;
 }
@@ -13600,8 +13715,12 @@ static int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
          * the mouth side leaves the carriageway flush and the corner pavement
          * arms (tg_block_emit_intersection) turn the sidewalk down the side
          * street instead. The built side keeps its pavement. */
+        /* [R13 RAIL item 5b] ... except on a bridge ramp, where consequence 3
+         * has already removed the side street this rule is dropping the slab
+         * FOR. Without the exception the pavement is deleted for a mouth that
+         * no longer exists and the run stops short of the deck. */
         if (td5_env_flag_on("TD5RE_AUTOTRACK_XSTOP") &&
-            !tg_facade_built(h->si, s))
+            !tg_facade_built(h->si, s) && !tg_r13_approach_span(h->si))
             continue;
         tg_city_edge_frame(h->nl, h->si, sg, e);
 
@@ -13836,7 +13955,12 @@ static int tg_rail_kerbfence_here(int si, double sg)
     if (!(tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(si)]) > 0.0))
         return 0;                                        /* not a facade biome   */
     if (tg_city_crossing_here(si)) return 0;              /* pedestrians cross    */
-    if (!tg_facade_built(si, sg > 0.0)) return 0;         /* side-street mouth    */
+    /* [R13 RAIL item 5b] CONSEQUENCE 2. A frontage gap breaks the railing
+     * because a gap is a side-street MOUTH -- but no street opens onto a bridge
+     * ramp (consequence 3 removes it), so on a ramp there is no mouth to break
+     * for and the run carries through to the deck. Measured: this and the
+     * pavement below are what went 1,0,0,0,0,1 on the left at 1314-1319. */
+    if (!tg_facade_built(si, sg > 0.0) && !tg_r13_approach_span(si)) return 0;
     if (tg_biome_cell_index(si) != tg_biome_cell_index(si - 1)) return 0;
     if (tg_side_blocked(si, sg)) return 0;                /* fork corridor        */
     return 1;
@@ -13987,6 +14111,14 @@ static int tg_crossing_base(int si)
      *
      * TD5RE_R12_UP_XGATE=0 restores junctions under the deck for an A/B. */
     if (tg_up_xclear_span(si)) return 0;
+    /* [R13 RAIL item 5b] ...and not on a bridge RAMP, for the same reason the
+     * side street is refused there (tg_emit_fb_city): a zebra is a place people
+     * walk ACROSS, and the ramp has no pavement on the far side to walk to. It
+     * is also the last hole in the ramp's barrier: R11 CROSS deliberately drops
+     * the roadside rail at a zebra, so a crossing painted on a ramp re-opened
+     * the gap this item is about. MEASURED on seed 777 -- span 834, cross=1,
+     * both edges bare, the only 2 of 105 ramp edges still unrailed; 0 after. */
+    if (tg_r13_approach_span(si)) return 0;
     for (s = 0; s < 2; s++) {
         /* [R11 CITY item 10] the corner must actually STAND -- a zebra painted
          * against a suppressed block is a crossing into nothing. */
@@ -16746,7 +16878,15 @@ static int tg_emit_fb_city(const TG_FBHook *h)
      * biome with no frontage is just open country. */
     /* [R12 OVERPASS item 11c] and NOT under a highway overpass. The side street
      * is the junction; its zebra is only the paint (see tg_up_xclear_span). */
+    /* [R13 RAIL item 5b] CONSEQUENCE 3, and the same shape as the two gates
+     * beside it: a bridge RAMP is not a place a side street can leave from. The
+     * road there is already tens or hundreds of units below local ground and
+     * still falling, so the street was being laid off the shoulder of a descent
+     * into a gorge. Removing it is also what licenses consequence 2 -- with no
+     * mouth on the ramp there is nothing for the pavement to open for, so
+     * carrying the slab through cannot lay a kerb across a street. */
     if (paved && !tg_span_in_bridge_run(h->si) && !tg_up_xclear_span(h->si) &&
+        !tg_r13_approach_span(h->si) &&
         td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_STREETS")) {
         if (!tg_city_emit_crossstreet(h, sw)) return 0;
     }
@@ -23903,6 +24043,95 @@ static void tg_emit_texture_page_r5_guardrail(TG_Buf *out)
  * = along the road) so the rail panel UVs are unchanged. The general rule the
  * user stated applies beyond bridges; the sidewalk/branch rail pages are owned
  * by other areas and should move to this same alpha-keyed shape. */
+/* ============ [R13 RAIL item 4b] TWO STACKED RAILS, NOT ONE MIRRORED PANEL ==
+ * "The bridge has a DOUBLE GUARDRAIL with a mirrored texture, instead of the
+ *  rail being STACKED UP."   -- and R12 item 14c reported this same complaint
+ *  fixed, so the first job was to decide whether that reshade LANDED and
+ *  whether the mirroring is painted or geometric. Both were measured, not read:
+ *
+ *  IT LANDED, AND IT DID NOT HELP. Replaying the R12 raster texel for texel and
+ *  drawing it at the parapet's own world aspect (barrier 420 units tall, one
+ *  page tile per 1500-unit span) gives two IDENTICAL bright ridges at 147u and
+ *  307u above the deck, separated by a flat dark plateau at 213-240u. Scored
+ *  against its own reflection about the beam's mid-height, that image is 0.7%
+ *  asymmetric -- a mirror to within the dither noise. R12's ramp did not reduce
+ *  the symmetry, it PERFECTED it: the old hard bands were 1 dark texel at
+ *  x = 34, the ramp's `if (v < 3) v = 3` clamp widened that into a 5-texel,
+ *  33-unit flat dark band, which is the separating line the user is describing.
+ *  So the round-12 diagnosis (contrast) treated the wrong property. The
+ *  offending property is SYMMETRY, and contrast was the only thing it changed.
+ *
+ *  THE MIRRORING IS PAINTED, NOT GEOMETRIC, and no shared fold helper is
+ *  implicated. tg_emit_bridge_rail_panel emits ONE quad per deck edge with
+ *  u = 0,0,1,1 and v = si,si+1,si+1,si -- monotonic on both axes, no triangle
+ *  wave, no second pass; R12's finding that page-X = height agrees with the
+ *  panel's u is correct and is confirmed here. The R12 tree-line idiom
+ *  (tg_r12_tl_fold) is not called from this file's rail path at all. The
+ *  reflection is drawn INTO the page by `d = min(|x-22|, |x-46|)`, which is a
+ *  mirror by construction.
+ *
+ *  WHAT THE USER ASKED FOR IS THE FIX. "Stacked up" is a real barrier: a
+ *  crash beam carried on posts with a slimmer hand rail ABOVE it and daylight
+ *  in between. That is not a symmetric image, and more importantly the gap
+ *  between the two rails is TRANSPARENT rather than dark, so the thing between
+ *  them reads as air you see the sky through instead of as a crease down the
+ *  middle of one panel. Two sections of DIFFERENT height (a 20-texel W with two
+ *  close ridges, an 8-texel round hand rail with one) and posts that run past
+ *  both of them: scored the same way, 67.6% asymmetric.
+ *
+ *  Sizes are in page-X, which this page defines as barrier height, so they are
+ *  stated once here and converted by the same 420/63 the panel uses.
+ *
+ *  TD5RE_R13_RAIL_STACK=0 restores the R12 mirrored profile for an A/B. */
+#define TD5_TG_R13_RAIL_LO0   14   /* crash beam, lower lip   ( 93u)  */
+#define TD5_TG_R13_RAIL_LOA   19   /* its lower ridge crest   (127u)  */
+#define TD5_TG_R13_RAIL_LOB   29   /* its upper ridge crest   (193u)  */
+#define TD5_TG_R13_RAIL_LO1   34   /* crash beam, upper lip   (227u)  */
+#define TD5_TG_R13_RAIL_HI0   42   /* hand rail, lower lip    (280u)  */
+#define TD5_TG_R13_RAIL_HIC   46   /* its single crest        (307u)  */
+#define TD5_TG_R13_RAIL_HI1   50   /* hand rail, upper lip    (333u)  */
+#define TD5_TG_R13_RAIL_POST  52   /* posts stop just above the hand rail */
+
+static int tg_r13_rail_stack(void)
+{
+    return td5_env_flag_on("TD5RE_R13_RAIL_STACK");
+}
+
+/* One texel of the stacked profile. `rng` is the caller's already-advanced
+ * stream, so switching the knob does not reshuffle the rest of the page. */
+static int tg_r13_rail_stack_idx(int x, int y, unsigned int rng)
+{
+    const int post = (y % 18) < 3;
+    int v;
+
+    if (x >= TD5_TG_R13_RAIL_LO0 && x <= TD5_TG_R13_RAIL_LO1) {
+        /* Pressed lips read as shadow, so the section has a defined edge
+         * instead of fading into the air around it. */
+        if (x == TD5_TG_R13_RAIL_LO0 || x == TD5_TG_R13_RAIL_LO1)
+            return 1 + (int)((rng >> 16) % 3);
+        {   const int d1 = x > TD5_TG_R13_RAIL_LOA
+                         ? x - TD5_TG_R13_RAIL_LOA : TD5_TG_R13_RAIL_LOA - x;
+            const int d2 = x > TD5_TG_R13_RAIL_LOB
+                         ? x - TD5_TG_R13_RAIL_LOB : TD5_TG_R13_RAIL_LOB - x;
+            v = 12 - ((d1 < d2) ? d1 : d2);
+        }
+    } else if (x >= TD5_TG_R13_RAIL_HI0 && x <= TD5_TG_R13_RAIL_HI1) {
+        if (x == TD5_TG_R13_RAIL_HI0 || x == TD5_TG_R13_RAIL_HI1)
+            return 1 + (int)((rng >> 16) % 3);
+        v = 13 - (x > TD5_TG_R13_RAIL_HIC
+                ? x - TD5_TG_R13_RAIL_HIC : TD5_TG_R13_RAIL_HIC - x);
+    } else if (post && x <= TD5_TG_R13_RAIL_POST) {
+        return 1 + (int)((rng >> 16) % 3);
+    } else {
+        return 0;                        /* transparent -- this is the point */
+    }
+
+    if (v < 4)  v = 4;                   /* steel body, never post-dark      */
+    if (v > 15) v = 15;
+    if (v > 4 && ((rng >> 16) & 3u) == 0u) v--;   /* one step of grain       */
+    return v;
+}
+
 static void tg_emit_texture_page_r6_guardrail_alpha(TG_Buf *out)
 {
     unsigned int rng = 0x6A1CD00Du;
@@ -23934,7 +24163,9 @@ static void tg_emit_texture_page_r6_guardrail_alpha(TG_Buf *out)
         const int beam = (x >= 16 && x <= 52);    /* the W-beam's vertical run */
         int idx;
         rng = rng * 1103515245u + 12345u;
-        if (beam) {
+        if (tg_r13_rail_stack()) {
+            idx = tg_r13_rail_stack_idx(x, y, rng);
+        } else if (beam) {
             /* [R12 OVERPASS item 14c] "The bridge guardrails render DOUBLE-
              * FOLDED down the middle -- the rail looks creased/mirrored along
              * its length."
@@ -25392,6 +25623,108 @@ static void tg_r11_guard_report(const TG_NodeList *nl, int nspans)
               band, nspans, flips);
 }
 
+/* ============ [R13 RAIL item 5b] WHAT ACTUALLY STANDS AT A BRIDGE MOUTH =====
+ * "Between the road and the bridge, the guardrails and the sidewalk
+ *  DISAPPEAR."  -- and R12 already reported this class fixed, so the first job
+ *  is to decide WHICH claim is true rather than to extend that fix:
+ *
+ *   (a) the R12 termination CAP does not reach this hand-off, i.e. the
+ *       cross-section is still open at 1155 -- an END FACE is missing; or
+ *   (b) the cap fires and the report is about something else entirely: a real
+ *       LENGTH of road that carries no barrier and no pavement at all.
+ *
+ * Those have opposite fixes, and no amount of reading decides between them,
+ * because the two treatments are gated by four different predicates that only
+ * coincide by construction. So print all four, per span, across every mouth on
+ * the track: whether the span is inside the bridge run, its lift over local
+ * ground, whether the PARAPET stands (tg_rail_deck_here -- the only thing that
+ * can own a deck edge), whether the ROADSIDE gate passes, what each edge
+ * actually ended up carrying (s_rail_edge, recorded at emit time, so this is
+ * what was written and not what was intended), and whether the raised pavement
+ * stands per side (tg_r12_pave_stands -- the sidewalk emitter's own gate).
+ *
+ * A run of spans with rail=0 on both edges and pave=0 on both sides IS answer
+ * (b), stated as a length. Mouths are found rather than passed in, so this
+ * measures every bridge on the track and not the two spans in the report.
+ *
+ * Read-only, opt-in via TD5RE_R13_RAIL_REPORT=1. */
+static void tg_r13_rail_mouth_report(const TG_NodeList *nl, int nspans)
+{
+    int si, gap_run = 0, gap_worst = 0, gap_at = -1, mouths = 0;
+    if (!td5_env_flag_off("TD5RE_R13_RAIL_REPORT")) return;
+    if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
+
+    TD5_LOG_I(LOG_TAG, "trackgen: ---- [R13 RAIL 5b] bridge-mouth cross-section ----");
+    for (si = 1; si + 2 < nl->count && si < nspans; si++) {
+        const int in0 = tg_span_in_bridge_run(si - 1);
+        const int in1 = tg_span_in_bridge_run(si);
+        int k;
+        if (in0 == in1) continue;
+        mouths++;
+        TD5_LOG_I(LOG_TAG, "trackgen: [R13 5b] mouth @%d (%s)", si,
+                  in1 ? "road -> deck" : "deck -> road");
+        for (k = -10; k <= 10; k++) {
+            const int s = si + k;
+            double lift;
+            if (s < 1 || s + 2 >= nl->count || s >= nspans) continue;
+            lift = nl->v[s].y - tg_local_ground_y(nl, s);
+            {   /* The sub-predicates the pavement gate is made of, so a hole is
+                 * attributed to ONE of them instead of to "the sidewalk". */
+                const TG_Biome *bb = &k_biomes[tg_scenery_biome_index(s)];
+                const double swb = tg_city_sidewalk_w_at(nl, s, bb);
+                TD5_LOG_I(LOG_TAG,
+                    "trackgen: [R13 5b]   si=%d run=%d lift=%.0f deck=%d rgate=%d "
+                    "railL=%u railR=%u paveL=%d paveR=%d fenceL=%d fenceR=%d "
+                    "| biome=%s sw=%.0f wL=%.0f wR=%.0f fbL=%d fbR=%d "
+                    "blkL=%d blkR=%d cross=%d",
+                    s, tg_span_in_bridge_run(s), lift, tg_rail_deck_here(nl, s),
+                    tg_span_needs_guardrail(nl, s, nspans),
+                    (unsigned)s_rail_edge[s][0], (unsigned)s_rail_edge[s][1],
+                    tg_r12_pave_stands(nl, s, 1), tg_r12_pave_stands(nl, s, 0),
+                    tg_rail_kerbfence_here(s, 1.0), tg_rail_kerbfence_here(s, -1.0),
+                    bb->name, swb,
+                    tg_pavement_side_width(nl, s,  1.0, swb),
+                    tg_pavement_side_width(nl, s, -1.0, swb),
+                    tg_facade_built(s, 1), tg_facade_built(s, 0),
+                    tg_side_blocked(s, 1.0), tg_side_blocked(s, -1.0),
+                    tg_city_crossing_here(s));
+            }
+        }
+    }
+    /* The number the item is: the longest unbroken length of road where NEITHER
+     * edge carries a rail of any class AND neither side carries a pavement. */
+    for (si = 1; si + 2 < nl->count && si < nspans; si++) {
+        const int bare = !s_rail_edge[si][0] && !s_rail_edge[si][1] &&
+                         !tg_r12_pave_stands(nl, si, 1) &&
+                         !tg_r12_pave_stands(nl, si, 0);
+        if (bare && tg_span_near_bridge(si, 12)) {
+            gap_run++;
+            if (gap_run > gap_worst) { gap_worst = gap_run; gap_at = si; }
+        } else {
+            gap_run = 0;
+        }
+    }
+    TD5_LOG_I(LOG_TAG,
+              "trackgen: [R13 5b] mouths=%d  longest bare stretch near a bridge "
+              "= %d spans, ending @%d", mouths, gap_worst, gap_at);
+    /* The number the FIX is: ramp spans, and how many of their edges ended up
+     * with no rail of any class. The second must be 0 with TD5RE_R13_APPROACH
+     * on -- that pair is the A/B. */
+    {
+        int ramp = 0, bare_edge = 0;
+        for (si = 1; si + 2 < nl->count && si < nspans; si++) {
+            if (!tg_r13_approach_span(si)) continue;
+            ramp++;
+            if (!s_rail_edge[si][0]) bare_edge++;
+            if (!s_rail_edge[si][1]) bare_edge++;
+        }
+        TD5_LOG_I(LOG_TAG,
+                  "trackgen: [R13 5b] ramp spans=%d, ramp edges with NO rail=%d "
+                  "(knob TD5RE_R13_APPROACH=%s)", ramp, bare_edge,
+                  td5_env_flag_on("TD5RE_R13_APPROACH") ? "on" : "off");
+    }
+}
+
 /* [R12 TEX] Which PAGE does each complained-about surface actually sample?
  *
  * Round 12 items 8b and 12b describe "the tile texture" in THREE roles (snow
@@ -25592,6 +25925,9 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     /* [R3 item 17] Surface any floor/road-overlap or suspect fork geometry now
      * that the strip (and s_ring_len) exist -- read-only, one-off. */
     tg_validate_geometry_safety(&nl, nspans);
+    /* [R13 RAIL item 5b] The ramp mask, as soon as the node list, the elevation
+     * profile and s_ring_len are all final and BEFORE any scenery reads it. */
+    tg_r13_approach_build(&nl, nspans);
     /* Routes must cover exactly the ring the strip header declares. */
     /* byte0 is the lateral corridor position (0 = left rail, 255 = right).
      * Straddle the centreline symmetrically so the AI's racing line runs down
@@ -25716,6 +26052,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     tg_acct_report(nspans);
     tg_rail_edge_report(&nl, nspans);  /* [R9 RAILFIX] per-edge uniqueness */
     tg_r11_guard_report(&nl, nspans);  /* [R11 GUARD] structural-edge dump  */
+    tg_r13_rail_mouth_report(&nl, nspans); /* [R13 RAIL 5b] mouth cross-section */
     tg_r12_flora_report(&nl, nspans);  /* [R12 FLORA] plant/band ledgers    */
     tg_r9_bridge_report(&nl);          /* [R9 BRIDGE] tie + dry-band evidence */
     /* [R9 INFRA] The two deliverables share one accounting slot, so print the
