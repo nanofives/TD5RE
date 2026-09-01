@@ -40,6 +40,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "FIXED: the hillside beside a tunnel mouth no longer" },
     { CL_ITEM,    "  wears a pale mountain-snowline stripe -- it now" },
     { CL_ITEM,    "  matches the ground around it, grass or snow" },
+    { CL_ITEM,    "FIXED: on a snowy auto-track stretch, the strip" },
+    { CL_ITEM,    "  between the two halves of a split road is now" },
+    { CL_ITEM,    "  ploughed snow instead of a band of green grass" },
+    { CL_ITEM,    "  when the split starts next to a tunnel exit" },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "August 31 (road markings on widening roads)" },

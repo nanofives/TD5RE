@@ -9929,15 +9929,26 @@ static int tg_ground_page_for_span(int si, const TG_Biome *b)
  * directly, bypassing the SNOW override in tg_ground_page_for_span) -- so a snow
  * run had a green strip down the middle of its avenues. Returns the ploughed-snow
  * page, which is deliberately NOT the snow GROUND page: the user asked for the
- * median to be snowy "but a different texture". Returns `fallback` off snow. */
-static int tg_r8_median_page(int si, int fallback)
+ * median to be snowy "but a different texture". Returns `fallback` off snow.
+ *
+ * `tunnel_exempt` says whether "si is inside a bore" may veto the snow page.
+ * TRUE is right when si is the span BEING DRAWN (no snow falls indoors); it is
+ * wrong when si is only an ANCHOR standing for a whole fork -- see
+ * tg_fork_gore_page and the [R11 BIOME item 3] note there. */
+static int tg_r8_median_page_ex(int si, int fallback, int tunnel_exempt)
 {
     const TG_Biome *b = &k_biomes[tg_biome_cell_index(si)];
     if (!td5_env_flag_on("TD5RE_R8_TERRAIN_SNOW")) return fallback;
     if (!tg_biome_is_snow(b)) return fallback;
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_SNOW")) return fallback;
-    if (tg_span_in_tunnel(si)) return fallback;
+    if (tunnel_exempt && tg_span_in_tunnel(si)) return fallback;
     return TD5_TG_PAGE_R8_SNOWMED;
+}
+
+/* Per-SPAN form: si is the span being drawn, so the bore exemption applies. */
+static int tg_r8_median_page(int si, int fallback)
+{
+    return tg_r8_median_page_ex(si, fallback, 1);
 }
 
 static int tg_topo_enabled(void);
@@ -10719,8 +10730,35 @@ static int tg_fork_gore_page(int fork_index)
      * summer page -- this reads k_biomes directly and so never saw the SNOW
      * override. Route it to the ploughed-snow median page instead. Keyed on the
      * fork's HARD start cell exactly as the rest of this function is, so the
-     * median stays ONE material for the whole fork (the R7 item 12 contract). */
-    return tg_r8_median_page(si, page);
+     * median stays ONE material for the whole fork (the R7 item 12 contract).
+     *
+     * [R11 BIOME item 3] "On span 331 everything is snowy but the median is
+     * green." NOT a missing lookup -- the lookup above is exactly right and
+     * fires. The defect is WHICH SPAN IT IS ASKED ABOUT.
+     *
+     * `si` here is an ANCHOR, not a location. It stands for the whole fork so
+     * that ONE material runs its length, and every property this function reads
+     * off it is genuinely a whole-fork property: the biome cell is 150 spans,
+     * the snow decision is the biome's. But tg_r8_median_page ALSO tests "is si
+     * inside a bore", and that is not a whole-fork property -- a bore is a
+     * 20-span enclosure and a fork is up to 120 spans. Seed 20260901 puts bore
+     * run 300-319 nose to tail with fork 1 at F=319, so the anchor lands on the
+     * single enclosed span of a 40-span fork, the exemption fires, and all 40
+     * spans of median -- every one of them outdoors, in ALPINE -- fall back to
+     * ALPINE's summer ground_page, which is green grass. One indoor span
+     * de-snowed the whole median.
+     *
+     * The bore is handled where a bore can be handled correctly: PER SPAN, at
+     * the gore emit site, which already swaps in the bore-floor concrete for
+     * the spans actually enclosed ([R8 item 17], TD5RE_R8_BORE_MEDIAN). So the
+     * anchor lookup must not carry the tunnel test at all -- it would only ever
+     * be answering it about the wrong span. Same shape as the R8 TERRAIN slab
+     * bug (one cross-section sampled for both edges of a slab) and the R7 item
+     * 12 bug this function was written for: a per-span fact used as a per-run
+     * one. TD5RE_R11_BIOME_MEDIAN=0 restores the anchor-tests-the-bore
+     * behaviour for an A/B. */
+    return tg_r8_median_page_ex(
+        si, page, td5_env_flag_on("TD5RE_R11_BIOME_MEDIAN") ? 0 : 1);
 }
 
 /* `half_n` / `half_f` are the branch carriageway's OWN half width at each end of
@@ -16769,6 +16807,28 @@ static void tg_r8_terrain_extent_report(const TG_NodeList *nl, int nspans)
                       "variant0=%d variant1=%d variant2=%d legacy=%d",
                       nsnow, nmed_ok, nvar[0], nvar[1], nvar[2],
                       nvar[TD5_TG_R8_SNOWGND_N]);
+    }
+
+    /* [R11 BIOME item 3] The MEDIAN of every fork, and the fact the R8 snow-cell
+     * report above cannot see: that report probes the first NON-tunnel span of a
+     * cell, so a cell reads "median-distinct" while a fork anchored ON a tunnel
+     * span inside it paints its whole gore green. One line per fork -- anchor,
+     * whether the anchor is enclosed, and the page actually chosen -- so the
+     * failure is readable straight from the log instead of inferred. */
+    {
+        int f;
+        for (f = 0; f < s_fork_count; f++) {
+            const int    fs = s_forks[f].F;
+            const TG_Biome *fb = &k_biomes[tg_biome_cell_index(fs)];
+            const int    bore = tg_span_in_tunnel(fs);
+            const int    now  = tg_fork_gore_page(f);
+            const int    old  = tg_r8_median_page(fs, fb->ground_page);
+            TD5_LOG_I(LOG_TAG,
+                      "  median fork %d anchor=%4d %-11s snow=%d "
+                      "anchor_in_bore=%d page=%d (anchor-tested=%d) %s",
+                      f, fs, fb->name, tg_biome_is_snow(fb), bore, now, old,
+                      (now != old) ? "<- R11 item 3 fixed here" : "");
+        }
     }
 
     /* A race launch builds the level more than once; clear so the second report
