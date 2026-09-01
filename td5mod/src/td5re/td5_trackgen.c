@@ -5009,6 +5009,99 @@ static void tg_road_edge(const TG_NodeList *nl, int si, double f, double shift,
     *rx = x - tz * (w * 0.5); *ry = y; *rz = z + tx * (w * 0.5);
 }
 
+/* ================== [R13 JUNCTION] BEND-FOLD AUTHORITY =====================
+ * Round 13 item 3, span 709: "improve the algorithm for folding geometry on
+ * close curves when intersections happen right after, to avoid DOUBLE GROUND
+ * and BUILDINGS OVERLAPPING INTO THE ROAD". Rounds 11 and 12 both fixed
+ * junction FURNITURE at a bend and it came back, so this round measured the
+ * surfaces instead (tg_r13_junc_report).
+ *
+ * MEASURED, seed 20260901: 165 of 1987 spans emit a ground slab whose OUTER
+ * edge runs BACKWARDS along the road, and 25 emit a side-street mouth that
+ * does. At the complaint neighbourhood spans 705-707 the ground slab's outer
+ * edge is 3.87x the inner edge long IN REVERSE, and span 708 -- the mouth of
+ * the junction the user is standing in at 709 -- lays a 19500-long street quad
+ * at -2.03. Those are bowties: the surface past the crossing point lies on top
+ * of what the neighbouring spans laid, which is the doubled ground.
+ *
+ * WHY. Every lateral surface here is a ruled quad between the cross-section at
+ * node si and the one at node si+1, each a STRAIGHT ray off its own kerb point.
+ * On a bend those two rays are not parallel: they converge on the inside at the
+ * centre of curvature. Past that point the quad has crossed itself. Nothing in
+ * the generator knew where that point was, so every emitter picked its reach
+ * from a table (12000 of verge, 19500 of street, a biome's block depth) and the
+ * bend was free to be tighter than the reach.
+ *
+ * This states the limit ONCE, from the emitters' own frame rather than from a
+ * curvature model, so ground, street and massing cannot disagree about where a
+ * bend folds. `keep` is the share of the inner edge's along-road length that
+ * survives at the outer edge -- 1 on a straight, 0 exactly at the convergence
+ * point, negative once folded -- and it is LINEAR in the reach, so the bound is
+ * exact and needs no search:
+ *
+ *     keep(d) = 1 + d * ((far_out - near_out) . inner_unit) / inner_len
+ *
+ * Returns 1e30 where the rays are parallel or diverge (a straight, and the
+ * OUTSIDE of every bend), which is why straight track is untouched. `ang`
+ * is the emitter's own skew, so a skewed side street is judged on the bearing
+ * it is actually laid at. */
+#define TD5_TG_R13_KEEP  0.0    /* de-overlap only: the degenerate tip is legal */
+
+static double tg_r13_fold_reach(const TG_NodeList *nl, int si, double side,
+                                double ang)
+{
+    double nlx, nly, nlz, nrx, nry, nrz, flx, fly, flz, frx, fry, frz;
+    double nux, nuz, fux, fuz, ex, ez, fx2, fz2, ix, iz, ilen, slope, len;
+    const double c = cos(ang), s = sin(ang);
+    double rn_x, rn_z, rf_x, rf_z;
+
+    if (!nl || si < 0 || si + 1 >= nl->count) return 1e30;
+    tg_road_edge(nl, si, 0.0, 0.0, 1.0, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
+    tg_road_edge(nl, si, 1.0, 0.0, 1.0, &flx, &fly, &flz, &frx, &fry, &frz);
+    nux = nlx - nrx; nuz = nlz - nrz;
+    len = sqrt(nux * nux + nuz * nuz);
+    if (len < 1e-6) return 1e30;
+    nux /= len; nuz /= len;
+    fux = flx - frx; fuz = flz - frz;
+    len = sqrt(fux * fux + fuz * fuz);
+    if (len < 1e-6) return 1e30;
+    fux /= len; fuz /= len;
+    if (side > 0.0) { ex = nlx; ez = nlz; fx2 = flx; fz2 = flz; }
+    else { ex = nrx; ez = nrz; fx2 = frx; fz2 = frz;
+           nux = -nux; nuz = -nuz; fux = -fux; fuz = -fuz; }
+    rn_x = nux * c - nuz * s; rn_z = nux * s + nuz * c;
+    rf_x = fux * c - fuz * s; rf_z = fux * s + fuz * c;
+
+    ix = fx2 - ex; iz = fz2 - ez;
+    ilen = sqrt(ix * ix + iz * iz);
+    if (ilen < 1e-6) return 1e30;
+    slope = ((rf_x - rn_x) * (ix / ilen) + (rf_z - rn_z) * (iz / ilen)) / ilen;
+    if (slope > -1e-12) return 1e30;                  /* parallel or diverging */
+    return (TD5_TG_R13_KEEP - 1.0) / slope;
+}
+
+/* Shortest reach the fold cap may impose. A hairpin's convergence point can sit
+ * a few hundred units off the kerb, and collapsing a verge or a street to that
+ * trades a doubled surface for a bare one. Below this the cap yields: the fold
+ * is then confined to a strip narrower than one pavement, which is not what the
+ * complaint is about. */
+#define TD5_TG_R13_FLOOR 2600.0
+/* A block still has to be a block. Below this the cap yields and the massing
+ * keeps a minimum body rather than degenerating into the zero-thickness sheet
+ * the FACADE_MASS pass exists to remove. */
+#define TD5_TG_R13_MIN_DEPTH 900.0
+
+static double tg_r13_fold_cap(const TG_NodeList *nl, int si, double side,
+                              double ang, double want, const char *knob)
+{
+    double lim;
+    if (!td5_env_flag_on("TD5RE_R13_FOLD")) return want;
+    if (knob && !td5_env_flag_on(knob)) return want;
+    lim = tg_r13_fold_reach(nl, si, side, ang);
+    if (lim < TD5_TG_R13_FLOOR) lim = TD5_TG_R13_FLOOR;
+    return want > lim ? lim : want;
+}
+
 /* One road mesh for span si, laterally offset by shift_near..shift_far AND
  * width-scaled wscale_near..wscale_far across the span. Appended to blk.
  *
@@ -7582,6 +7675,25 @@ static void tg_side_geom(const TG_NodeList *nl, int si, int left,
                                TD5_TG_CARRIAGEWAY_MARGIN);
         set0 = n0->width * 0.5 + gap;
         set1 = n1->width * 0.5 + gap;
+        /* [R13 JUNCTION item 3] "BUILDINGS OVERLAPPING INTO THE ROAD" on a
+         * close curve. The block's body is the frontage plane pushed `depth`
+         * further along the SAME inward ray on both ends, so on the inside of a
+         * bend the back face is the ruled quad that folds first: MEASURED, 25
+         * spans of seed 20260901 carry a block whose back face lies past the
+         * bend's convergence point, which puts it on the far limb of the bend
+         * -- over the carriageway, over the pavement, or inside the block
+         * opposite. Cap the depth at the room the bend actually leaves past the
+         * pavement. Front, caps, roof and step wall all derive from bx/ax and
+         * this depth, so the whole body follows one number. */
+        {
+            const double cap = tg_r13_fold_cap(nl, si, side, 0.0, 1e30,
+                                               "TD5RE_R13_FOLD_MASS") - gap;
+            /* Assigned only where the cap BINDS, so a run the bend does not
+             * reach is bit-identical to the pre-R13 depth. */
+            if (cap < g->depth)
+                g->depth = (cap > TD5_TG_R13_MIN_DEPTH) ? cap
+                                                        : TD5_TG_R13_MIN_DEPTH;
+        }
     }
 
     g->bx = n0->x + g->lx0 * set0;
@@ -12280,9 +12392,22 @@ static void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
     int k;
 
     tg_ground_side_raw(nl, si, is_left, water_side, p);
-    if (!tg_topo_enabled()) return;
-    cap = tg_topo_road_cap(nl, si, is_left);
-    if (cap >= p->d[p->n - 1]) return;
+    /* [R13 JUNCTION item 3] BEND FOLD, applied in the same place and the same
+     * way as the R9 topo cap: the outer point is pulled in, its drop
+     * interpolated along the segment it landed in, and every consumer of the
+     * cross-section -- the skirt slab, the far band's seam, the flora planter --
+     * inherits it, so the backdrop comes in WITH the ground rather than leaving
+     * a bare ring on the inside of a bend. Taken as a min with the topo cap
+     * rather than as a separate pass, so there is still exactly one clamp. */
+    cap = tg_r13_fold_cap(nl, si, is_left ? 1.0 : -1.0, 0.0, 1e30,
+                          "TD5RE_R13_FOLD_GROUND");
+    if (!tg_topo_enabled()) {
+        if (cap >= p->d[p->n - 1]) return;
+    } else {
+        const double tcap = tg_topo_road_cap(nl, si, is_left);
+        if (tcap < cap) cap = tcap;
+        if (cap >= p->d[p->n - 1]) return;
+    }
     if (cap < p->d[0] + TD5_TG_TOPO_GAP_TOL) cap = p->d[0] + TD5_TG_TOPO_GAP_TOL;
     for (k = 1; k < p->n; k++) {
         if (p->d[k] <= cap) continue;
@@ -15034,11 +15159,18 @@ static double tg_xstreet_reach_at(const TG_NodeList *nl, int si, double sg,
                              + TD5_TG_R8_CLAMP_MARGIN;
             if ((lat < 0.0 ? -lat : lat) < lim) {
                 d -= TD5_TG_R8_CLAMP_STEP;     /* last sample known clear */
-                return d < floor_r ? floor_r : d;
+                if (d < floor_r) d = floor_r;
+                /* [R13 item 3] The R8 clamp asks "does this ray come back onto
+                 * a carriageway"; it cannot see a street folding over ITSELF,
+                 * which is what a mouth laid on a bend does. Applied after the
+                 * floor because the floor is a model minimum and the fold is a
+                 * geometric fact. */
+                return tg_r13_fold_cap(nl, si, sg, ang, d,
+                                       "TD5RE_R13_FOLD_STREET");
             }
         }
     }
-    return r;
+    return tg_r13_fold_cap(nl, si, sg, ang, r, "TD5RE_R13_FOLD_STREET");
 }
 
 /* ===================== [R10 SPAN66] SIDE-STREET OCCUPANCY ==================
@@ -16764,6 +16896,242 @@ static void tg_r11_city_report(const TG_NodeList *nl, int nspans)
         "phantom_corners=%d overhang_ends=%d | xwalls=%d xwall_dive=%d "
         "xwall_nostreet=%d",
         corners, orphan, phantom, overhang, xwalls, xdive, xnostreet);
+}
+
+/* ================= [R13 JUNCTION] BEND-FOLD MEASUREMENT ====================
+ * Item 3 ("double ground and buildings overlapping into the road at an
+ * intersection right after a curve", span 709) is the THIRD round on that
+ * neighbourhood, so this round measures the GEOMETRY rather than adding a
+ * fourth placement predicate.
+ *
+ * Every lateral this generator lays -- the ground skirt, the facade setback +
+ * its massing depth, a side street -- is a STRAIGHT ray off the centreline. A
+ * bend of local radius R turns those rays into a pencil that converges at the
+ * centre of curvature. Any ray longer than R passes THROUGH that centre and
+ * comes out the other side, where it lies on top of the surface the spans
+ * around the far limb of the bend laid, and on top of the carriageway itself.
+ * That is one mechanism producing both halves of the complaint, and it is a
+ * property of (reach, radius) alone -- no junction has to be involved.
+ *
+ * So this prints, per span: the local turn radius and which side is INSIDE,
+ * the inside reach of each of the three lateral families, and -- for the
+ * ground slab and the building mass -- the WORST measured intrusion of their
+ * actual emitted corners onto some carriageway, found by a brute-force nearest
+ * node sweep with NO straddle skip and NO distance bound. That last part is
+ * deliberately the on-road guard's test with the guard's two refusals removed,
+ * so a mesh the guard declines to judge still shows up here as a number.
+ *
+ * TD5RE_R13_JUNC_REPORT=1; TD5RE_R13_JUNC_SPAN=N (+/- _PAD, default 12)
+ * windows the per-span dump. Read-only, opt-in, decides nothing. */
+#define TD5_TG_R13_WIN 64
+
+/* Carriageway intrusion of world point (wx,wz), judged in the frame of the
+ * NEAREST node over a +/-WIN window with the point's own +/-3 spans excluded.
+ * Positive = the point stands on that span's tarmac by that many units.
+ *
+ * Nearest, not deepest: a first cut took the max intrusion over the window and
+ * reported hits at nodes 50000 units away, because a far point that happens to
+ * lie near some distant span's tangent LINE has a small lateral in that span's
+ * frame. That is the same frame misattribution the R11 guard fix names, and it
+ * is why TD5_TG_GUARD_NEAR_MAX exists. *pnear reports the distance so a hit the
+ * guard would have refused to judge is still visible here as a number. */
+static double tg_r13_probe(const TG_NodeList *nl, int ring, int si0,
+                           double wx, double wz, int *pspan, double *pnear)
+{
+    int lo = si0 - TD5_TG_R13_WIN, hi = si0 + TD5_TG_R13_WIN, i;
+    double best = -1e30;
+    if (lo < 0) lo = 0;
+    if (hi > ring - 1) hi = ring - 1;
+    if (pspan) *pspan = -1;
+    if (pnear) *pnear = 0.0;
+    for (i = lo; i <= hi; i++) {
+        double dx, dz, d2, lat, r, intr;
+        if (i > si0 - 3 && i < si0 + 3) continue;   /* its own span, by design */
+        dx = wx - nl->v[i].x; dz = wz - nl->v[i].z;
+        d2 = dx * dx + dz * dz;
+        /* Bounded exactly like the guard's own nearest-node search: past this
+         * distance no lateral computed in that span's frame describes anything
+         * real, and an unbounded search reported hits at nodes 50000 away. */
+        if (d2 > TD5_TG_GUARD_NEAR_MAX * TD5_TG_GUARD_NEAR_MAX) continue;
+        lat = (wx - nl->v[i].x) * nl->v[i].tz - (wz - nl->v[i].z) * nl->v[i].tx;
+        r = tg_carriageway_reach(nl, i, (lat >= 0.0) ? 1.0 : -1.0);
+        intr = r - (lat < 0.0 ? -lat : lat);
+        if (intr > best) {
+            best = intr;
+            if (pspan) *pspan = i;
+            if (pnear) *pnear = sqrt(d2);
+        }
+    }
+    return best;
+}
+
+/* SELF-FOLD of an outward-laid quad. Every lateral surface this generator emits
+ * -- the ground slab, a side-street mouth -- is built as a ruled quad between
+ * the cross-section at node si and the one at node si+1, each a straight ray of
+ * length `reach` off its own kerb point. The two rays converge on the inside of
+ * a bend. Once `reach` passes the convergence point the quad's OUTER edge runs
+ * BACKWARDS along the road, the quad is a bowtie, and the surface beyond that
+ * point lies on top of what its neighbours laid.
+ *
+ * Measured directly on the two emitted corners rather than inferred from a
+ * radius: the fraction of the inner edge's along-road length that survives at
+ * the outer edge. 1 on a straight, 0 exactly at the convergence point, NEGATIVE
+ * once the quad has folded. */
+static double tg_r13_quad_fold(double nx, double nz, double fx, double fz,
+                               double ox, double oz, double gx, double gz,
+                               double reach)
+{
+    const double ix = fx - nx, iz = fz - nz;
+    const double ilen = sqrt(ix * ix + iz * iz);
+    double ux, uz;
+    if (ilen < 1e-6) return 1.0;
+    ux = ix / ilen; uz = iz / ilen;
+    return (((fx + gx * reach) - (nx + ox * reach)) * ux
+          + ((fz + gz * reach) - (nz + oz * reach)) * uz) / ilen;
+}
+
+/* Local turn radius at span si, and which side of travel is the INSIDE.
+ * *pinside is +1 when the LEFT kerb is the inside of the bend. Returns 1e30 on
+ * a straight. Sign convention matches tg_turn_map_build: a LEFT turn makes the
+ * tangent cross product NEGATIVE. */
+static double tg_r13_radius(const TG_NodeList *nl, int si, double *pinside)
+{
+    const TG_Node *a = &nl->v[si], *c = &nl->v[si + 1];
+    const double cr = a->tx * c->tz - a->tz * c->tx;
+    const double dx = c->x - a->x, dz = c->z - a->z;
+    const double seg = sqrt(dx * dx + dz * dz);
+    const double s = (cr < 0.0) ? -cr : cr;
+    if (pinside) *pinside = (cr < 0.0) ? 1.0 : -1.0;
+    if (s < 1e-9 || seg < 1e-6) return 1e30;
+    return seg / s;
+}
+
+static void tg_r13_junc_report(const TG_NodeList *nl, int nspans)
+{
+    const int wspan = td5_env_int("TD5RE_R13_JUNC_SPAN", -1, -1, 100000);
+    const int wpad  = td5_env_int("TD5RE_R13_JUNC_PAD", 12, 0, 4000);
+    int si, ring = (s_ring_len > 0) ? s_ring_len : nspans;
+    int gfold = 0, mfold = 0, xfold = 0;         /* reach exceeds the radius   */
+    int gon = 0, mon = 0;                        /* measured on some tarmac    */
+    int blind_straddle = 0, blind_far = 0;       /* why the guard said nothing */
+    int gsev = 0, xsev = 0;                      /* SEVERE folds, keep < -0.25 */
+    double worst_g = -1e300, worst_m = -1e300;
+    double gkmin = 1e30, xkmin = 1e30;
+    int worst_gs = -1, worst_ms = -1, gkmins = -1, xkmins = -1;
+
+    if (!td5_env_flag_on("TD5RE_R13_JUNC_REPORT")) return;
+    if (ring > nspans) ring = nspans;
+    if (ring > TD5_TG_MAX_SPANS) ring = TD5_TG_MAX_SPANS;
+
+    TD5_LOG_I(LOG_TAG, "trackgen: ---- r13junc bend-fold dump ----");
+    for (si = 1; si < ring - 2; si++) {
+        const TG_Biome *b = &k_biomes[tg_scenery_biome_index(si)];
+        const double sw = tg_city_sidewalk_w(b);
+        const int in_win = (wspan < 0)
+                        || (si >= wspan - wpad && si <= wspan + wpad);
+        double inside, R = tg_r13_radius(nl, si, &inside);
+        double e[10], gx, gz, greach = 0.0, gintr = -1e300, xr = 0.0;
+        double gkeep = 1.0, xkeep = 1.0;
+        double mreach = 0.0, mintr = -1e300;
+        int gsp = -1, msp = -1, mstr_lo = 0, mstr_hi = 0, xhere;
+        double gnear = 0.0, mnear = 0.0;
+        TG_GroundProf gp;
+        TG_SideGeom g;
+        const int isl = (inside > 0.0) ? 1 : 0;
+
+        g.built = 0;
+        /* GROUND SKIRT, inside kerb. Same frame tg_emit_ground builds the slab
+         * from: kerb point and outward unit at BOTH ends, profile outer point
+         * for the reach. */
+        tg_ground_side(nl, si, isl, tg_water_side(si), &gp);
+        greach = gp.d[gp.n - 1];
+        tg_city_edge_frame(nl, si, inside, e);
+        gx = e[0] + e[6] * greach;
+        gz = e[2] + e[7] * greach;
+        gintr = tg_r13_probe(nl, ring, si, gx, gz, &gsp, &gnear);
+        gkeep = tg_r13_quad_fold(e[0], e[2], e[3], e[5],
+                                 e[6], e[7], e[8], e[9], greach);
+        if (gkeep <= 0.0) gfold++;
+        if (gkeep < -0.25) gsev++;
+        if (gkeep < gkmin) { gkmin = gkeep; gkmins = si; }
+        if (gintr > TD5_TG_GUARD_PEN) {
+            gon++;
+            if (gintr > worst_g) { worst_g = gintr; worst_gs = si; }
+        }
+
+        /* BUILDING MASS, inside kerb: the BACK face of the block, which is the
+         * frontage line pushed `depth` further along the same inward ray. */
+        if (sw > 0.0) {
+            tg_side_geom(nl, si, isl, b, &g);
+            if (g.built) {
+                const double bx = g.bx + g.lx0 * g.depth;
+                const double bz = g.bz + g.lz0 * g.depth;
+                const double fx = g.bx + g.ax + g.lx1 * g.depth;
+                const double fz = g.bz + g.az + g.lz1 * g.depth;
+                int s1, s2;
+                double n1, n2, i1, i2;
+                mreach = tg_road_half_width(nl, si) + g.depth
+                       + tg_city_sidewalk_w_at(nl, si, b);
+                i1 = tg_r13_probe(nl, ring, si, bx, bz, &s1, &n1);
+                i2 = tg_r13_probe(nl, ring, si, fx, fz, &s2, &n2);
+                if (i2 > i1) { mintr = i2; msp = s2; mnear = n2; }
+                else         { mintr = i1; msp = s1; mnear = n1; }
+                mstr_lo = (s1 < s2) ? s1 : s2;
+                mstr_hi = (s1 > s2) ? s1 : s2;
+                if (mreach > R) mfold++;
+                if (mintr > TD5_TG_GUARD_PEN) {
+                    mon++;
+                    if (mintr > worst_m) { worst_m = mintr; worst_ms = si; }
+                    /* WHY THE GUARD SAID NOTHING. Its two R11 refusals: a quad
+                     * whose corners straddle more than the exemption scope is
+                     * skipped outright, and a vertex further than
+                     * TD5_TG_GUARD_NEAR_MAX from every node in its window is
+                     * not placed at all. Both are silent. */
+                    if (mstr_hi - mstr_lo > TD5_TG_GUARD_EX_SPANS)
+                        blind_straddle++;
+                    if (mnear > TD5_TG_GUARD_NEAR_MAX) blind_far++;
+                }
+            }
+        }
+        /* SIDE STREET, inside kerb: the same fold test on the mouth quad the
+         * crossstreet emitter lays, with that emitter's own skew and clamped
+         * reach so this measures the street that is actually built. */
+        xhere = tg_xstreet_here(nl, si, inside, &xr);
+        if (xhere) {
+            const double ang = tg_block_arm_skew(si, isl);
+            double nox, noz, fox, foz;
+            tg_city_edge_frame(nl, si, inside, e);
+            tg_block_rot2(e[6], e[7], ang, &nox, &noz);
+            tg_block_rot2(e[8], e[9], ang, &fox, &foz);
+            xkeep = tg_r13_quad_fold(e[0], e[2], e[3], e[5],
+                                     nox, noz, fox, foz, xr);
+            if (xkeep <= 0.0) xfold++;
+            if (xkeep < -0.25) xsev++;
+            if (xkeep < xkmin) { xkmin = xkeep; xkmins = si; }
+        }
+
+        if (!in_win) continue;
+        TD5_LOG_I(LOG_TAG,
+            "trackgen:   r13junc si=%d R=%.0f inside=%s bend=%.3f | "
+            "g_reach=%.0f g_keep=%.2f g_intr=%.0f@%d near=%.0f | m_built=%d "
+            "m_reach=%.0f m_intr=%.0f@%d near=%.0f straddle=%d | x_here=%d "
+            "x_reach=%.0f x_keep=%.2f",
+            si, R > 9e29 ? 999999.0 : R, isl ? "L" : "R", tg_turn_bend(si),
+            greach, gkeep, gintr, gsp, gnear,
+            (sw > 0.0 && g.built), mreach,
+            mintr < -1e29 ? 0.0 : mintr, msp, mnear,
+            mstr_hi - mstr_lo, xhere, xr, xkeep);
+    }
+    TD5_LOG_I(LOG_TAG,
+        "trackgen: r13junc SUMMARY ground_fold=%d (severe %d, worst keep %.2f "
+        "@%d) mass_fold=%d xstreet_fold=%d (severe %d, worst keep %.2f @%d) "
+        "| ground_on_road=%d (worst %.0f @%d) mass_on_road=%d (worst %.0f @%d) "
+        "| guard_blind_straddle=%d guard_blind_far=%d",
+        gfold, gsev, gkmin < 1e29 ? gkmin : 1.0, gkmins, mfold,
+        xfold, xsev, xkmin < 1e29 ? xkmin : 1.0, xkmins,
+        gon, worst_g > -1e299 ? worst_g : 0.0, worst_gs,
+        mon, worst_m > -1e299 ? worst_m : 0.0, worst_ms,
+        blind_straddle, blind_far);
 }
 
 /* ============ [R9 CITY] PAVEMENT UNIQUENESS + MOUTH MASSING SWEEP =========
@@ -21849,6 +22217,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     tg_r8_cross_report(nl, nspans);   /* [R8 CROSS] class sweep, opt-in */
     tg_r10_cross_report(nl, nspans);  /* [R10 CROSS] side-street setback, opt-in */
     tg_r11_city_report(nl, nspans);   /* [R11 CITY] frontage/junction dump, opt-in */
+    tg_r13_junc_report(nl, nspans);   /* [R13 JUNCTION] bend-fold sweep, opt-in */
     tg_r9_city_reset();               /* [R9 CITY] pavement/massing sweep */
     tg_r13_faces_reset();             /* [R13 FACES] run-end return census */
 
