@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 01 (auto-track city corners)" },
+    { CL_ITEM,    "FIXED: the last building before a side street now" },
+    { CL_ITEM,    "  ends short of the corner, so it no longer stands" },
+    { CL_ITEM,    "  on the pavement that turns down the street" },
+    { CL_ITEM,    "FIXED: on sharp bends the city no longer opens a" },
+    { CL_ITEM,    "  second street beside an existing one, which left" },
+    { CL_ITEM,    "  stray facades with no building behind them and" },
+    { CL_ITEM,    "  two crossings a single span apart" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 31 (road markings on widening roads)" },
     { CL_ITEM,    "FIXED: where an auto-track road widens or narrows," },
     { CL_ITEM,    "  the road texture no longer stretches and the lane" },
