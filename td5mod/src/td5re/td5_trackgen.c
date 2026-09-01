@@ -8458,6 +8458,88 @@ static int tg_tunnel_lining_page(int si)
 #define TD5_TG_TUNNEL_HEIGHT  2600.0
 #define TD5_TG_TUNNEL_WALL_T   300.0
 
+/* ================= [R12 TUNNEL item 6] PORTAL FRAME vs BUTTRESS ============
+ * "the vertical pillars and the horizontal beam are not connected -- extend the
+ *  beam so it reaches the OUTER EDGES of the pillars"
+ *
+ * The mouth is built by TWO emitters that never agreed on where the portal is:
+ *
+ *   tg_emit_tunnel_swept   the FRAME -- header + jambs, flat quads standing
+ *                          `proud` (1600) out along the road from the mouth
+ *                          node, jamb width JW past the opening edge
+ *   tg_emit_fb_tunnel      the BUTTRESSES -- solid boxes hugging the opening,
+ *                          half-width 800 at lateral offset side_x + 800, and
+ *                          half-DEPTH 2200 along the road
+ *
+ * The "pillars" of the report are the BUTTRESSES (the frame's own jambs are
+ * buried inside them: a 1600-deep quad inside a 2200-deep box). So the two
+ * numbers the user is comparing are the buttress and the HEADER, and they
+ * disagree on BOTH axes:
+ *
+ *   lateral  header reaches side_x + JW (1400); buttress outer face is at
+ *            side_x + 800 + 800 = 1600. The beam stops 200 short of each
+ *            pillar's outer edge -- verbatim the report.
+ *   depth    the buttress front face stands at 2200 while the frame plane is
+ *            at 1600, so the beam is recessed 600 BEHIND the pillars it is
+ *            meant to sit on. At a driver's eye height that recess is the
+ *            "visible gap": you see past the end of the header, over the top
+ *            of the pillar, to whatever is behind.
+ *
+ * Fix by DERIVING both from one statement of where the portal is, instead of
+ * three independent literals:
+ *
+ *   TD5_TG_PORTAL_PROUD      the frame plane (unchanged 1600 -- it exists so
+ *                            the Group-C hill mass at the node cannot occlude
+ *                            the facade, and must NOT be reduced)
+ *   TD5_TG_PORTAL_WING       lateral reach of BOTH the buttress and the frame
+ *                            past the opening edge -> beam ends exactly on the
+ *                            pillar's outer edge
+ *   buttress half-depth      pulled back to just behind the frame plane, so the
+ *                            pillar's front face and the beam are flush. This
+ *                            is what R9 item 5b asked for in the first place
+ *                            ("the buttress reaches the frame plane"); 2200
+ *                            overshot it, and the overshoot is the gap.
+ *
+ * Pulling the buttress back also EXPOSES the frame's jamb quad, which has been
+ * invisible inside the box since R9. That is a second win from the same edit:
+ * the pillar's front face now wears the portal FACE page, the same page as the
+ * header, so the frame reads as one object rather than as a concrete beam
+ * floating in front of two stone wings.
+ *
+ * TD5RE_R12_TUNNEL_PORTAL_JOIN=0 restores the R11 numbers for the A/B; the
+ * measurement below logs whichever set is live, so "before" and "after" are two
+ * runs of one build. TD5RE_R12_TUNNEL_DIAG=1 turns the measurement on.
+ * ========================================================================= */
+#define TD5_TG_PORTAL_PROUD   1600.0   /* frame plane, out along the road   */
+#define TD5_TG_BUTT_INSET      800.0   /* buttress inner offset past side_x */
+#define TD5_TG_BUTT_HALFW      800.0   /* buttress half width               */
+/* Outer edge of a pillar, measured past the opening edge. ONE definition, read
+ * by the buttress emitter and by the frame's jamb width. */
+#define TD5_TG_PORTAL_WING    (TD5_TG_BUTT_INSET + TD5_TG_BUTT_HALFW)
+#define TD5_TG_PORTAL_WING_R11 1400.0  /* the jamb width that fell 200 short */
+/* Frame-to-pillar clearance: the pillar stops this far BEHIND the frame plane
+ * so the two are flush without co-planar z-fighting. */
+#define TD5_TG_PORTAL_SKIN      80.0
+#define TD5_TG_BUTT_DEEP_R11  2200.0   /* the depth that overshot the frame  */
+
+static int tg_r12_portal_join(void)
+{
+    return td5_env_flag_on("TD5RE_R12_TUNNEL_PORTAL_JOIN");
+}
+
+/* Jamb width past the opening edge == the pillar's own outer edge. */
+static double tg_portal_wing(void)
+{
+    return tg_r12_portal_join() ? TD5_TG_PORTAL_WING : TD5_TG_PORTAL_WING_R11;
+}
+
+/* Half-depth of a mouth buttress along the road. */
+static double tg_portal_butt_deep(void)
+{
+    return tg_r12_portal_join()
+         ? TD5_TG_PORTAL_PROUD - TD5_TG_PORTAL_SKIN : TD5_TG_BUTT_DEEP_R11;
+}
+
 /* Fork whose MAIN half-carriageway covers a main-ring span. Owned by the branch
  * area and defined further down, forward-declared here because the bore has to
  * know whether a branch runs alongside it. READ ONLY from the tunnel code. */
@@ -8697,7 +8779,7 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
     /* [R9 item 5b/5d] How far the portal frame stands out from the mouth node.
      * Hoisted out of the portal block because the LINING now has to reach it --
      * see the mouth-extension note below. */
-    const double proud  = 1600.0;
+    const double proud  = TD5_TG_PORTAL_PROUD;
     const double tile = 3000.0;
     const TG_Node *nd = &nl->v[si];
     /* [TUNNEL SUBDIV port 2026-08-31] Was 96, which fit the two mouth segments
@@ -8926,7 +9008,10 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
         lo = psh + ph + wall_t;              /* left opening edge  */
         ro = psh - ph - wall_t;              /* right opening edge */
         if (td5_env_flag_on("TD5RE_AUTOTRACK_R7_PORTAL")) {
-            const double JW  = 1400.0;       /* jamb width beyond the opening */
+            /* [R12 item 6] Was a bare 1400 while the pillar's outer edge sat at
+             * 1600, so the beam stopped 200 short of it on each side. Derived
+             * from the pillar now -- see the PORTAL FRAME vs BUTTRESS block. */
+            const double JW  = tg_portal_wing();
             const double HDR = 1500.0;       /* header height above the opening */
             const double fl  = lo + JW;      /* frame outer left  */
             const double fr  = ro - JW;      /* frame outer right */
@@ -8980,6 +9065,33 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
             TG_PORTAL_FACE(ro, fr, yb, yt);      /* right jamb */
             #undef TG_PORTAL_FACE
             #undef TG_PORTAL_V
+#ifndef TD5RE_RELEASE
+            /* [R12 item 6] THE MEASUREMENT. Both objects the report compares,
+             * in the same units, on the same line: the BEAM's outer lateral and
+             * depth-out, and the PILLAR's. The two "gap" columns are the numbers
+             * the item is judged on, and they are logged for whichever knob
+             * state is live, so before/after is a log diff of one build. */
+            if (getenv("TD5RE_R12_TUNNEL_DIAG")) {
+                /* All laterals RELATIVE TO THE BORE CENTRE, which is the frame
+                 * tg_emit_fb_tunnel measures its buttress offsets in. */
+                const double side_x = ph + wall_t;            /* opening edge   */
+                const double butt_out = side_x + TD5_TG_BUTT_INSET
+                                                + TD5_TG_BUTT_HALFW;
+                const double beam_out = fl;                   /* == side_x + JW */
+                const double butt_deep = tg_portal_butt_deep();
+                TD5_LOG_I(LOG_TAG,
+                    "R12TDIAG mouth si=%d join=%d bore_half=%.0f shift=%.0f "
+                    "opening_edge=%.0f beam_outer=%.0f pillar_outer=%.0f "
+                    "LATERAL_GAP=%.0f beam_proud=%.0f pillar_front=%.0f "
+                    "DEPTH_GAP=%.0f beam_y=%.0f..%.0f pillar_y=%.0f..%.0f "
+                    "outsign=%.0f",
+                    si, tg_r12_portal_join(), ph, psh,
+                    side_x, beam_out - psh, butt_out,
+                    butt_out - (beam_out - psh),
+                    proud, butt_deep, butt_deep - proud,
+                    hb - nd->y, yt - nd->y, -1500.0, 3300.0, outsign);
+            }
+#endif
             tg_acct(TG_ACCT_R7_BRIDGE, si);
         } else {
             const double y0 = nd->y + height, y1 = y0 + 500.0;
@@ -11593,6 +11705,54 @@ static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
  * Read-only: it re-evaluates the same pure functions the emitters call and
  * writes a CSV-ish line per span. TD5RE_R8_BRIDGE_DIAG=1 (opt-in; off by
  * default so ordinary runs are not slowed by ~200 log lines). */
+/* [R12 TUNNEL item 8a] SPAN QUERY -- "what stands at span N at all".
+ *
+ * Identifying an unknown object in a screenshot starts with the candidate list,
+ * and the element inventory already holds it; it just reports the relation the
+ * other way round (kind -> spans). Invert it for one span band, and add the two
+ * facts that decide which emitters could even have fired there: the BIOME cell
+ * and the tunnel kind. TD5RE_R12_SPANQ=407 dumps 407 +/- 3.
+ *
+ * Lives here rather than inside tg_acct_report because the biome table and
+ * tg_tunnel_kind are both defined further down the file. Read-only, opt-in,
+ * dev builds only. */
+static double tg_treeline_height(const TG_Biome *b);   /* [R12 8a] read-only */
+static double tg_treeline_back(const TG_Biome *b);     /* [R12 8a] read-only */
+
+static void tg_r12_spanq(int nspans)
+{
+#ifndef TD5RE_RELEASE
+    int q, s;
+    if (!getenv("TD5RE_R12_SPANQ")) return;
+    q = atoi(getenv("TD5RE_R12_SPANQ"));
+    if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
+    for (s = q - 3; s <= q + 3; s++) {
+        char kinds[512];
+        int pos = 0, k;
+        if (s < 0 || s >= nspans) continue;
+        kinds[0] = '\0';
+        for (k = 0; k < TG_ACCT_KIND_COUNT; k++) {
+            if (!TG_ACCT_MASK_TEST(s, k)) continue;
+            if (pos < (int)sizeof(kinds) - 20)
+                pos += snprintf(kinds + pos, sizeof(kinds) - (size_t)pos,
+                                "%s%s", pos ? " " : "", k_acct_names[k]);
+        }
+        {
+            const TG_Biome *b = &k_biomes[tg_biome_cell_index(s)];
+            TD5_LOG_I(LOG_TAG,
+                      "R12SPANQ span=%d biome=%s tunkind=%d "
+                      "treeline_band=%.0f back=%.0f page=%d: %s",
+                      s, b->name, tg_tunnel_kind(s),
+                      tg_treeline_height(b), tg_treeline_back(b),
+                      TD5_TG_PAGE_TREELINE,
+                      kinds[0] ? kinds : "(nothing accounted)");
+        }
+    }
+#else
+    (void)nspans;
+#endif
+}
+
 static void tg_r8_bridge_diag(const TG_NodeList *nl)
 {
     int si;
@@ -17222,15 +17382,19 @@ static int tg_emit_fb_tunnel(const TG_FBHook *h)
      * reveal" reading; one that runs out to the facade gives the mouth a jamb
      * with visible thickness on both sides of the reveal. */
     if (ed <= 1) {
-        const double bdepth = surr_on ? 2200.0 : 1400.0;
+        /* [R12 item 6] 2200 stood the pillar's front face 600 in FRONT of the
+         * frame plane, so the beam was recessed behind the pillars it sits on --
+         * the reported gap. Pull it back to just behind the frame, which is
+         * what R9 item 5b asked for and what the overshoot broke. */
+        const double bdepth = surr_on ? tg_portal_butt_deep() : 1400.0;
         for (s = 0; s < 2; s++) {
             const double sgn = s ? 1.0 : -1.0;
-            const double off = side_x + 800.0;
+            const double off = side_x + TD5_TG_BUTT_INSET;
             if (*h->nmesh + 1 > h->maxmesh) break;
             h->moff[(*h->nmesh)++] = h->blk->len;
             if (!tg_emit_box_mesh(h->blk, cx + lx * off * sgn, n->y + 900.0,
                                   cz + lz * off * sgn,
-                                  800.0, 2400.0, bdepth,
+                                  TD5_TG_BUTT_HALFW, 2400.0, bdepth,
                                   n->tx, n->tz, mouth_pg, 2400.0,
                                   mshade))
                 return 0;
@@ -23943,6 +24107,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
               s_r10_prop_skipped,
               tg_r10_xstreet_guard() ? "on" : "off");
     tg_r8_bridge_diag(&nl);            /* [R8 BRIDGE] opt-in measurement dump */
+    tg_r12_spanq(nspans);              /* [R12 item 8a] opt-in span query     */
     tg_r8_terrain_extent_report(&nl, nspans);  /* [R8 TERRAIN] opt-in, ditto */
     tg_r9_topo_report(&nl, nspans);            /* [R9 TOPO] class sweep, ditto */
     tg_r11_xcurve_report(nspans);        /* [R11 CROSS item 16] opt-in, ditto */
