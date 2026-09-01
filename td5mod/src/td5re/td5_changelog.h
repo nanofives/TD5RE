@@ -32,6 +32,18 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 01 (auto-track tree line + spacing, r12)" },
+    { CL_ITEM,    "FIX: the tree wall behind a forest no longer drops out" },
+    { CL_ITEM,    "  for a span or two near a town. Its presence now comes" },
+    { CL_ITEM,    "  from the biome run, not the dithered edge, and its" },
+    { CL_ITEM,    "  height and setback ramp into the neighbour instead of" },
+    { CL_ITEM,    "  flickering (TD5RE_R12_FLORA_BAND=0 for the old band)" },
+    { CL_ITEM,    "FIX: two tree billboards no longer stand on the same" },
+    { CL_ITEM,    "  spot and swap which one is in front as you drive past." },
+    { CL_ITEM,    "  All four tree emitters share one spacing rule now" },
+    { CL_ITEM,    "  (TD5RE_R12_FLORA_SPACE=0 restores the old placement)" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 01 (auto-track curve signage, r11)" },
     { CL_ITEM,    "NEW: generated tracks now sign their corners. A blue" },
     { CL_ITEM,    "  direction sign with a left or right arrow stands on" },
