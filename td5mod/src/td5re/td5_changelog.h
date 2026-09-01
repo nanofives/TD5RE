@@ -32,6 +32,18 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 01 (auto-track crossings and medians)" },
+    { CL_ITEM,    "FIXED: pedestrian crossings and side-street" },
+    { CL_ITEM,    "  junctions no longer have a wooden crash barrier" },
+    { CL_ITEM,    "  fencing them in -- the kerb is open where a" },
+    { CL_ITEM,    "  street actually crosses, and the far side of" },
+    { CL_ITEM,    "  the road keeps its barrier as before" },
+    { CL_ITEM,    "FIXED: the median between two carriageways is now" },
+    { CL_ITEM,    "  a raised island instead of a flat stripe lying" },
+    { CL_ITEM,    "  in the road surface -- every divided stretch" },
+    { CL_ITEM,    "  gets one, not just the narrow avenues" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 31 (road markings on widening roads)" },
     { CL_ITEM,    "FIXED: where an auto-track road widens or narrows," },
     { CL_ITEM,    "  the road texture no longer stretches and the lane" },
