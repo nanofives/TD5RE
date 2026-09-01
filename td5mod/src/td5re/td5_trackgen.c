@@ -5527,6 +5527,15 @@ static int tg_facade_built(int si, int left);
 
 static signed char s_turn_side[TD5_TG_MAX_SPANS];   /* 0 none, +1 left, -1 right */
 static float       s_turn_skew[TD5_TG_MAX_SPANS];   /* normal -> incoming heading */
+/* [R11 CROSS item 16] |sin| of the heading change across +/-TD5_TG_R8_TURN_BASE
+ * spans, for EVERY span. This is not a new curvature test: it is the value the
+ * continuation loop below already computes and then throws away, recorded
+ * BEFORE that loop's dedup (TURN_GAP) and frontage gate so it stays a plain
+ * measurement of the ROAD rather than an answer about street openings. The
+ * crossing thinner reads it through tg_turn_bend; s_turn_side / s_turn_skew
+ * keep their existing meaning ("a continuation opens here"), which is a
+ * different question and must not be confused with this one. */
+static float       s_turn_bend[TD5_TG_MAX_SPANS];
 
 static void tg_turn_map_build(const TG_NodeList *nl, int nspans)
 {
@@ -5535,15 +5544,27 @@ static void tg_turn_map_build(const TG_NodeList *nl, int nspans)
 
     memset(s_turn_side, 0, sizeof(s_turn_side));
     memset(s_turn_skew, 0, sizeof(s_turn_skew));
-    if (!td5_env_flag_on("TD5RE_R8_CROSS_TURN")) return;
+    memset(s_turn_bend, 0, sizeof(s_turn_bend));
     if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
+
+    /* [R11 CROSS item 16] Bend magnitude first, unconditionally -- it is filled
+     * even with TD5RE_R8_CROSS_TURN=0, because how bent the road is does not
+     * depend on whether turn continuations are enabled. */
+    for (si = k; si < nspans - k; si++) {
+        const TG_Node *a = &nl->v[si - k], *c = &nl->v[si + k];
+        s_turn_bend[si] = (float)fabs(a->tx * c->tz - a->tz * c->tx);
+    }
+
+    if (!td5_env_flag_on("TD5RE_R8_CROSS_TURN")) return;
 
     for (si = k; si < nspans - k; si++) {
         const TG_Node *a = &nl->v[si - k], *c = &nl->v[si + k];
         double cross, sg, ux, uz, dot, det;
         if (si - last < TD5_TG_R8_TURN_GAP) continue;
         cross = a->tx * c->tz - a->tz * c->tx;
-        if (fabs(cross) < TD5_TG_R8_TURN_SIN) continue;
+        /* Same number, read from the map instead of recomputed, so the
+         * continuation decision is bit-identical to before. */
+        if ((double)s_turn_bend[si] < TD5_TG_R8_TURN_SIN) continue;
         /* A LEFT turn rotates the tangent toward the left normal (tz,-tx), which
          * makes this cross product NEGATIVE; the continuation belongs on the
          * OUTSIDE of the bend, so left turn -> right side and vice versa. */
@@ -5598,6 +5619,17 @@ static int tg_turn_open(int si, int left)
 {
     if (si <= 0 || si >= TD5_TG_MAX_SPANS) return 0;
     return s_turn_side[si] == (signed char)(left ? 1 : -1);
+}
+
+/* [R11 CROSS item 16] How bent the road is at span si, as |sin| of the heading
+ * change over the turn map's own +/-TD5_TG_R8_TURN_BASE window. 0 on a
+ * straight; TD5_TG_R8_TURN_SIN is the bend the R8 continuation test calls sharp
+ * enough for a street to leave the road, so it is the natural full-scale point
+ * for anything that wants to react to a bend. */
+static double tg_turn_bend(int si)
+{
+    if (si <= 0 || si >= TD5_TG_MAX_SPANS) return 0.0;
+    return (double)s_turn_bend[si];
 }
 
 static int tg_facade_built(int si, int left)
@@ -12869,6 +12901,49 @@ static int tg_city_emit_fence(const TG_FBHook *h, double sw)
  * inside it resets the state, and city gaps that long are common. */
 #define TD5_TG_XMIN_LOOK  48
 
+/* [R11 CROSS item 16] "On curves ... intersections near a curve read as
+ * confusing." The R7 thinning above is the right mechanism and the wrong
+ * MEASURE: its gap is a flat 8 spans and completely curvature-blind, even
+ * though its own comment names a tight bend after a fork as the case it exists
+ * for. Eight spans of separation reads fine on a straight; the same eight spans
+ * of ARC on a bend is much less visual separation, and the mouths foreshorten
+ * into one another, which is the fan the user is describing.
+ *
+ * So the gap scales with how bent the road is, from TD5_TG_XMIN_GAP on a
+ * straight up to TD5_TG_R11_XGAP_MAX at TD5_TG_R8_TURN_SIN -- the bend the R8
+ * continuation test already calls sharp. The curvature comes from
+ * tg_turn_bend, i.e. from tg_turn_map_build's own measurement; there is no
+ * second curvature test and no new threshold. Bends thin harder, straights are
+ * byte-identical.
+ *
+ * The gap of a PAIR is decided by the bent-er of its two ends: a crossing on a
+ * straight sitting 9 spans from one on a bend is still a crossing you read
+ * against a curve. TD5_TG_XMIN_LOOK (48) is still 3x the widest gap, which is
+ * what keeps the greedy simulation's backward window valid. */
+#define TD5_TG_R11_XGAP_MAX 16
+
+static int tg_r11_xcurve(void) { return td5_env_flag_on("TD5RE_R11_XCURVE"); }
+
+/* The widened gap for the pair (a, b), IGNORING the knob. Split out from the
+ * gate below so the report can ask "what would the widened rule have wanted
+ * here" on a knob-OFF run -- that is what makes the before and the after two
+ * readings of one formula instead of two models of it. */
+static int tg_r11_xgap_wide(int a, int b)
+{
+    double bend = tg_turn_bend(b), f;
+    if (a > 0 && tg_turn_bend(a) > bend) bend = tg_turn_bend(a);
+    f = bend / TD5_TG_R8_TURN_SIN;
+    if (f > 1.0) f = 1.0;
+    if (f < 0.0) f = 0.0;
+    return TD5_TG_XMIN_GAP
+         + (int)((double)(TD5_TG_R11_XGAP_MAX - TD5_TG_XMIN_GAP) * f + 0.5);
+}
+
+static int tg_r11_xgap(int a, int b)
+{
+    return tg_r11_xcurve() ? tg_r11_xgap_wide(a, b) : TD5_TG_XMIN_GAP;
+}
+
 /* The crossing predicate WITHOUT the min-spacing thinning: the FIRST span of a
  * non-park side-street gap on either kerb, off forks and bridge approaches.
  * Both sides are tested, so a street opening on the left gets one too. */
@@ -12914,10 +12989,77 @@ static int tg_city_crossing_here(int si)
     /* DEFAULT ON; TD5RE_AUTOTRACK_XMIN=0 restores the un-thinned behaviour. */
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_XMIN")) return 1;
     for (j = si - TD5_TG_XMIN_LOOK; j < si; j++) {
-        if (j > 1 && tg_crossing_base(j) && j - last >= TD5_TG_XMIN_GAP)
+        if (j > 1 && tg_crossing_base(j) && j - last >= tg_r11_xgap(last, j))
             last = j;                 /* j is a KEPT crossing */
     }
-    return si - last >= TD5_TG_XMIN_GAP;
+    return si - last >= tg_r11_xgap(last, si);
+}
+
+/* [R11 CROSS item 16] THE INSTRUMENT the diagnosis was made with, and the same
+ * one that measures the result: every crossing this build actually paints, with
+ * the gap to its predecessor and the bend at both ends. Reflects whatever the
+ * knob is set to, so the knob-off run IS the "before" count and the knob-on run
+ * the "after" -- one report, two numbers, no second model of the rule.
+ * TD5RE_R11_XCURVE_DIAG=1. */
+static void tg_r11_xcurve_report(int nspans)
+{
+    int si, prev = -1, kept = 0, tight = 0, tight_bend = 0;
+    /* THE CONTROL. "14 of 19 tight pairs are on a bend" only means something
+     * beside the same figure for the pairs that are NOT tight -- if the whole
+     * track is bent then curvature discriminates nothing and this rule is a
+     * second thinner stacked on a wrong theory. So both populations are
+     * summarised, and so is the bend of every span that carries a crossing at
+     * all. */
+    int loose = 0, loose_bend = 0;
+    double tight_sum = 0.0, loose_sum = 0.0, all_sum = 0.0;
+    int all_n = 0, all_bend = 0;
+    if (!td5_env_flag_off("TD5RE_R11_XCURVE_DIAG")) return;
+    if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
+
+    for (si = 0; si < nspans; si++) {
+        int gap, wide;
+        double pb, sb, mb;
+        if (!tg_city_crossing_here(si)) continue;
+        kept++;
+        all_n++;
+        all_sum += tg_turn_bend(si);
+        if (tg_turn_bend(si) >= TD5_TG_R8_TURN_SIN) all_bend++;
+        if (prev < 0) { prev = si; continue; }
+        gap  = si - prev;
+        wide = tg_r11_xgap_wide(prev, si);
+        pb   = tg_turn_bend(prev);
+        sb   = tg_turn_bend(si);
+        mb   = (sb > pb) ? sb : pb;
+        if (gap >= wide) {
+            loose++;
+            loose_sum += mb;
+            if (mb >= TD5_TG_R8_TURN_SIN) loose_bend++;
+        } else {
+            tight_sum += mb;
+        }
+        if (gap < wide) {
+            tight++;
+            if (tg_turn_bend(si) >= TD5_TG_R8_TURN_SIN
+                || tg_turn_bend(prev) >= TD5_TG_R8_TURN_SIN) tight_bend++;
+            TD5_LOG_I(LOG_TAG, "trackgen: [R11 XCURVE] pair %4d->%4d gap=%2d "
+                      "widened=%2d bend=%.3f/%.3f UNDER",
+                      prev, si, gap, wide,
+                      tg_turn_bend(prev), tg_turn_bend(si));
+        }
+        prev = si;
+    }
+    TD5_LOG_I(LOG_TAG,
+              "trackgen: [R11 XCURVE] crossings kept=%d, pairs under the "
+              "widened gap=%d (of which at a sharp bend=%d) "
+              "(knob TD5RE_R11_XCURVE=%s)",
+              kept, tight, tight_bend, tg_r11_xcurve() ? "on" : "off");
+    TD5_LOG_I(LOG_TAG,
+              "trackgen: [R11 XCURVE] control: UNDER pairs n=%d mean-bend=%.3f "
+              "sharp=%d/%d | OK pairs n=%d mean-bend=%.3f sharp=%d/%d | all "
+              "crossing spans n=%d mean-bend=%.3f sharp=%d",
+              tight, tight ? tight_sum / (double)tight : 0.0, tight_bend, tight,
+              loose, loose ? loose_sum / (double)loose : 0.0, loose_bend, loose,
+              all_n, all_n ? all_sum / (double)all_n : 0.0, all_bend);
 }
 
 /* ZEBRA CROSSING: one flat quad lying on the road, kerb to kerb.
@@ -22376,6 +22518,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     tg_r8_bridge_diag(&nl);            /* [R8 BRIDGE] opt-in measurement dump */
     tg_r8_terrain_extent_report(&nl, nspans);  /* [R8 TERRAIN] opt-in, ditto */
     tg_r9_topo_report(&nl, nspans);            /* [R9 TOPO] class sweep, ditto */
+    tg_r11_xcurve_report(nspans);        /* [R11 CROSS item 16] opt-in, ditto */
     tg_r11_water_diag(&nl, nspans);            /* [R11 WATER] wet footprint    */
     ok = 1;
 
