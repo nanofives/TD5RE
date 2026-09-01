@@ -10354,6 +10354,112 @@ static int tg_r11_median_rise(void)
     return td5_env_flag_on("TD5RE_R11_MEDIAN_RISE");
 }
 
+/* ============== [R12 GEOM item 7] THE MEDIAN'S END FACES ====================
+ * "The BEGINNING of the median has no visible end face -- it reads as an open
+ * box, you can see into the hollow interior of the raised island."
+ *
+ * DIRECT consequence of R11 item 8 above, and the source says so before any
+ * frame does: tg_emit_avenue_divider builds the island as a THREE-quad prism --
+ * one up-facing TOP and the two road-facing SIDE WALLS -- and there is no
+ * fourth or fifth quad anywhere in it. A prism with walls and a lid and no ends
+ * is an open box by construction. Pre-R11 the island only ran on avenue forks
+ * and was capped at 520 half-width with a 150..360 rise, so the open end was a
+ * small dark notch; R11 widened it to fill the gore (up to ~1000 half-width) and
+ * stood it 296 above the tarmac, which turned that notch into a mouth you drive
+ * straight at.
+ *
+ * The ends are the ONLY open faces, and that is a property of the arithmetic
+ * rather than an observation: span si builds its near cross-section from
+ * corridor step j and its far cross-section from j+1, and span si-1 builds its
+ * far cross-section from that same j with the same expressions on the same node.
+ * Two consecutive island spans therefore share an exactly coincident
+ * cross-section and need nothing between them. Only the FIRST span of a run
+ * (nothing at j-1) and the LAST (nothing at j+2) have an unclosed section.
+ *
+ * So: cap the leading and the trailing end of every run, and cap NOTHING in
+ * between -- an interior cap would be a vertical quad coincident with its
+ * neighbour's, i.e. z-fighting plus two wasted quads per span on 100+ spans.
+ *
+ * Deciding "does the neighbour have an island" is the only new question, and it
+ * is answered by ONE predicate (tg_r12_median_at) that the emitter also uses on
+ * ITSELF, so placement and capping cannot drift -- the same single-authority
+ * shape as tg_bridge_column_lateral and tg_carriageway_reach.
+ *
+ * The gore FLOOR is untouched, as R11 requires: it underlaps both carriageways
+ * by TD5_TG_GORE_OVERLAP to close the fork-mouth slit, and the caps live inside
+ * the island's own inset footprint, so nothing new enters a live lane.
+ *
+ * TD5RE_R12_MEDIAN_CAP=0 restores the open ends for a single-variable A/B.
+ * ========================================================================= */
+static int tg_r12_median_cap(void)
+{
+    return td5_env_flag_on("TD5RE_R12_MEDIAN_CAP");
+}
+
+/* Opt-in vertex-level dump of the island prism (per-quad corners + the face
+ * normal each winding produces), which is how "the end face is absent" was
+ * confirmed as a fact about emitted geometry rather than inferred from a
+ * screenshot. TD5RE_R12_GEOM_DIAG=1. */
+static int tg_r12_geom_diag(void)
+{
+    return td5_env_flag_off("TD5RE_R12_GEOM_DIAG");
+}
+
+static long s_r12_median_caps;      /* end faces emitted (leading + trailing) */
+static long s_r12_median_runs;      /* island runs seen (leading caps)        */
+
+/* THE fill test, lifted out of tg_emit_avenue_divider verbatim so the neighbour
+ * query below and the emitter itself cannot answer it differently. */
+static int tg_r12_median_fill(double gw0, double gw1)
+{
+    return tg_r11_median_rise()
+        && gw0 <= TD5_TG_R11_MEDIAN_MAX
+        && gw1 <= TD5_TG_R11_MEDIAN_MAX
+        && (gw0 > TD5_TG_R11_MEDIAN_SLIM || gw1 > TD5_TG_R11_MEDIAN_SLIM);
+}
+
+/* Gore widths at both ends of MAIN-road span si of fork fi, by the same
+ * expressions tg_emit_models uses at the divider call site (branch shift +
+ * branch half width, both from the fork's own separation). `br_lanes` is passed
+ * from that call site rather than re-derived, so this is the caller's number and
+ * not a second opinion about how many lanes the branch carries. */
+static void tg_r12_median_gore_w(const TG_NodeList *nl, int si, int fi,
+                                 int br_lanes, double *gw0, double *gw1)
+{
+    const int    L   = s_forks[fi].len;
+    const int    j   = si - s_forks[fi].F - 1;
+    const double sep = s_forks[fi].sep;
+    const double sh0 = tg_branch_shift_s(j,     L, nl->v[si].width,     sep);
+    const double sh1 = tg_branch_shift_s(j + 1, L, nl->v[si + 1].width, sep);
+    const double h0  = nl->v[si].width
+                     * tg_branch_wscale_s(j,     L, br_lanes, sep) * 0.5;
+    const double h1  = nl->v[si + 1].width
+                     * tg_branch_wscale_s(j + 1, L, br_lanes, sep) * 0.5;
+    *gw0 = -(sh0 + h0);
+    *gw1 = -(sh1 + h1);
+}
+
+/* Does a raised median island stand on MAIN-road span si? Mirrors every gate on
+ * the path to tg_write_quad_mesh inside the divider: the call site's fork /
+ * avenue / knob gates, then the emitter's sliver and fill gates. Asked by the
+ * emitter about si-1 and si+1 to find a run's ends, and about si itself as a
+ * self-check (logged under the diag knob), which is what keeps this from
+ * becoming a stale copy of the placement rule. */
+static int tg_r12_median_at(const TG_NodeList *nl, int si, int br_lanes)
+{
+    int fi;
+    double gw0, gw1;
+    if (!nl || si < 0 || si + 1 >= nl->count) return 0;
+    fi = tg_fork_of_main(si);
+    if (fi < 0) return 0;
+    if (!tg_fork_is_avenue(fi) && !tg_r11_median_rise()) return 0;
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_AVENUE_DIVIDER")) return 0;
+    tg_r12_median_gore_w(nl, si, fi, br_lanes, &gw0, &gw1);
+    if (gw0 < 200.0 && gw1 < 200.0) return 0;              /* sliver */
+    if (!tg_r12_median_fill(gw0, gw1) && !tg_fork_is_avenue(fi)) return 0;
+    return 1;
+}
+
 /* [R11 CROSS items 9+15] "A street crosses this road edge" -- defined with the
  * guardrail block far below, asked here so the zero-rail invariant can tell an
  * intentional gap at a crossing from an edge that lost its only barrier. */
@@ -12262,8 +12368,8 @@ static int tg_emit_branch_flora(const TG_NodeList *nl, int mb,
  * and half width at the span's two ends, exactly as passed to tg_emit_gore. */
 static int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
                                   double sh0, double sh1, double half0,
-                                  double half1, TG_Buf *blk, size_t *moff,
-                                  int *nmesh)
+                                  double half1, int br_lanes, TG_Buf *blk,
+                                  size_t *moff, int *nmesh)
 {
     const TG_Node *a = &nl->v[si];
     const TG_Node *c = &nl->v[si + 1];
@@ -12304,11 +12410,7 @@ static int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
      * raising it would put a kerb lip 240 units into each live lane. The island
      * is inset from both edges by TD5_TG_R11_MEDIAN_INSET (> that overlap)
      * instead, which keeps every raised face inside the gore. */
-    const int    fill   = tg_r11_median_rise()
-                       && gw0 <= TD5_TG_R11_MEDIAN_MAX
-                       && gw1 <= TD5_TG_R11_MEDIAN_MAX
-                       && (gw0 > TD5_TG_R11_MEDIAN_SLIM
-                           || gw1 > TD5_TG_R11_MEDIAN_SLIM);
+    const int    fill   = tg_r12_median_fill(gw0, gw1);
     /* A CONCRETE BARRIER is narrow by nature, so filling a 2000-unit median
      * with one would be a lie about what the material is. Where the fill
      * applies, the treatment rolls between planted and kerbed only -- and a
@@ -12338,9 +12440,14 @@ static int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
      * quad on `page`, seg 1 = the two side-wall quads on `side_page`. */
     const int    side_page = (treat == 1) ? TD5_TG_PAGE_RAIL : TD5_TG_PAGE_BRANCH_KERB;
     double mc0, mc1, mw0, mw1, cl0, cr0, cl1, cr1, base0, base1;
-    double px[12], py[12], pz[12], uu[12], vv[12];
+    /* [R12 GEOM item 7] 12 -> 20: room for the two END CAP quads. */
+    double px[20], py[20], pz[20], uu[20], vv[20];
     int seg_page[2], seg_nq[2];
     int n = 0;
+    /* [R12 GEOM item 7] Run ends, from the shared placement predicate. */
+    const int cap    = tg_r12_median_cap();
+    const int cap_in = cap && !tg_r12_median_at(nl, si - 1, br_lanes);
+    const int cap_out= cap && !tg_r12_median_at(nl, si + 1, br_lanes);
 
     /* [R11 CROSS item 8] INSTRUMENT the height question before touching it:
      * what actually stands proud of the road on this median span, and by how
@@ -12408,11 +12515,60 @@ static int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
     px[n]=c->x+c->tz*cr1; py[n]=base1+H; pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=0.0; n++;
     px[n]=a->x+a->tz*cr0; py[n]=base0+H; pz[n]=a->z-a->tx*cr0; uu[n]=0.0; vv[n]=0.0; n++;
 
-    /* TOP quad (verts 0..3) on `page`; the two side walls (verts 4..11) on
-     * `side_page`. Segments consume quads sequentially in vertex order, so this
-     * split matches the emit order above exactly. */
+    /* [R12 GEOM item 7] LEADING END CAP -- the face the report is about. Only
+     * where the previous span carries no island, so an interior section stays a
+     * single continuous prism with nothing coincident inside it.
+     *
+     * WINDING, derived rather than tried: the emitted faces above establish the
+     * convention as normal = (v1-v0) x (v2-v1). Check it on the road-side wall
+     * with the tangent along +X (tx=1, tz=0, so lateral t maps to z = -t): its
+     * corners give (0,H,0) x (L,0,0) = (0,0,-HL), i.e. -Z = +lateral, exactly
+     * what its own comment claims. A cap facing BACK down the road therefore
+     * needs -X, and going base-road -> base-branch -> top-branch -> top-road
+     * gives (0,0,2mw) x (0,H,0) = (-2mw*H,0,0). Correct by construction.
+     *
+     * Concrete `side_page`, not the top's page: the nose of a median is the same
+     * cast face as its walls, and a grass or paving-slab end cap is the R8
+     * item-8 "grass as walls" mistake seen end-on. */
+    if (cap_in) {
+        px[n]=a->x+a->tz*cl0; py[n]=base0;   pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=1.0; n++;
+        px[n]=a->x+a->tz*cr0; py[n]=base0;   pz[n]=a->z-a->tx*cr0; uu[n]=1.0; vv[n]=1.0; n++;
+        px[n]=a->x+a->tz*cr0; py[n]=base0+H; pz[n]=a->z-a->tx*cr0; uu[n]=1.0; vv[n]=0.0; n++;
+        px[n]=a->x+a->tz*cl0; py[n]=base0+H; pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=0.0; n++;
+        s_r12_median_caps++;
+        s_r12_median_runs++;
+    }
+    /* [R12 GEOM item 7] TRAILING END CAP, faces +X (the mirror order). The
+     * report only names the beginning, but the trailing section is open by the
+     * same three-quad construction, and it is what a driver sees in the mirror
+     * and on any reverse or circuit lap -- so the CLASS is "cap every island
+     * end", not "cap the one the screenshot showed". */
+    if (cap_out) {
+        px[n]=c->x+c->tz*cl1; py[n]=base1+H; pz[n]=c->z-c->tx*cl1; uu[n]=0.0; vv[n]=0.0; n++;
+        px[n]=c->x+c->tz*cr1; py[n]=base1+H; pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=0.0; n++;
+        px[n]=c->x+c->tz*cr1; py[n]=base1;   pz[n]=c->z-c->tx*cr1; uu[n]=1.0; vv[n]=1.0; n++;
+        px[n]=c->x+c->tz*cl1; py[n]=base1;   pz[n]=c->z-c->tx*cl1; uu[n]=0.0; vv[n]=1.0; n++;
+        s_r12_median_caps++;
+    }
+
+    /* TOP quad (verts 0..3) on `page`; the two side walls (verts 4..11) and the
+     * end caps (12..19) on `side_page`. Segments consume quads sequentially in
+     * vertex order, so this split matches the emit order above exactly. */
     seg_page[0] = page;      seg_nq[0] = 1;
-    seg_page[1] = side_page; seg_nq[1] = 2;
+    seg_page[1] = side_page; seg_nq[1] = 2 + (cap_in ? 1 : 0) + (cap_out ? 1 : 0);
+    /* [R12 GEOM item 7] VERTEX-LEVEL EVIDENCE. Dumps the prism this call is
+     * about to write: how many quads it has, which ends it closes, and the
+     * near-end cross-section corners. Also self-checks the shared predicate --
+     * tg_r12_median_at(si) must agree with the fact that this call reached the
+     * write, or the neighbour queries above are asking a stale question. */
+    if (tg_r12_geom_diag())
+        TD5_LOG_I(LOG_TAG, "trackgen: [R12 MEDIAN] span %4d fork %d quads=%d "
+                  "(top 1 + walls 2 + caps %d) cap_in=%d cap_out=%d self=%d "
+                  "near cl=%.0f cr=%.0f base=%.0f top=%.0f",
+                  si, fork_index, n / 4,
+                  (cap_in ? 1 : 0) + (cap_out ? 1 : 0), cap_in, cap_out,
+                  tg_r12_median_at(nl, si, br_lanes),
+                  cl0, cr0, base0, base0 + H);
     /* Accounted as a FENCE (a linear median structure) rather than a new
      * inventory kind, to keep the shared enum untouched for the parallel batch. */
     tg_acct_n(TG_ACCT_FENCE, si, 1);
@@ -19877,6 +20033,9 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     /* [R11 CROSS] crossing/street-mouth barrier counters, same lifetime. */
     s_r11_rail_on_cross   = 0;
     s_r11_rail_on_xstreet = 0;
+    /* [R12 GEOM] median end-cap counters, same lifetime. */
+    s_r12_median_caps = 0;
+    s_r12_median_runs = 0;
     /* Native-faithful fork: the road SPLITS into two half-width carriageways --
      * MAIN (left, main_half lanes, +width/4) and BRANCH (right, br_lanes, bowed)
      * over the appended corridor. Fork/rejoin spans stay full width. */
@@ -20114,8 +20273,9 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                                    || tg_r11_median_rise()) &&
                             td5_env_flag_on("TD5RE_AUTOTRACK_AVENUE_DIVIDER"))
                             if (!tg_emit_avenue_divider(nl, si, fi, sh0, sh1,
-                                                        gw0, gw1, &meshes,
-                                                        moff, &nmesh)) ok = 0;
+                                                        gw0, gw1, br_lanes,
+                                                        &meshes, moff, &nmesh))
+                                ok = 0;
                     }
                 } else if (!tg_emit_road_mesh(nl, si, lanes, &meshes)) {
                     ok = 0;
@@ -24106,6 +24266,17 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
               "tarmac=%ld (knob TD5RE_R10_XSTREET_GUARD=%s)",
               s_r10_prop_skipped,
               tg_r10_xstreet_guard() ? "on" : "off");
+    /* [R12 GEOM item 7] The CLASS-level number for "cap every island end": how
+     * many median RUNS the track has and how many end faces closed them. Two
+     * caps per run is the whole property -- a leading and a trailing face -- so
+     * caps == 2 * runs is the assertion, and any run that only got one cap means
+     * the neighbour predicate disagreed with the emitter at one end. Both are 0
+     * with TD5RE_R12_MEDIAN_CAP=0, which is the A/B. */
+    TD5_LOG_I(LOG_TAG,
+              "trackgen: [R12 GEOM] median island runs=%ld, end faces "
+              "capped=%ld (expect 2x runs) (knob TD5RE_R12_MEDIAN_CAP=%s)",
+              s_r12_median_runs, s_r12_median_caps,
+              tg_r12_median_cap() ? "on" : "off");
     tg_r8_bridge_diag(&nl);            /* [R8 BRIDGE] opt-in measurement dump */
     tg_r12_spanq(nspans);              /* [R12 item 8a] opt-in span query     */
     tg_r8_terrain_extent_report(&nl, nspans);  /* [R8 TERRAIN] opt-in, ditto */
