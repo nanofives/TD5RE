@@ -17285,6 +17285,119 @@ static void tg_r12_fcross_report(const TG_NodeList *nl, int nspans)
               kept, cand, tg_r12_fcross_on() ? "on" : "off");
 }
 
+/* ==== [R13 BAND item 1a] "the first line of trees must START BEFORE the START
+ * banner" ==================================================================
+ *
+ * CONFIRMED, not assumed. The START gantry is emitted by tg_emit_fb_track at
+ * EXACTLY span TD5_TG_GRID_SPAN (24) -- `if (h->si != TD5_TG_GRID_SPAN &&
+ * h->si != finish) return 1`. The band's own gate is `si <= TD5_TG_GRID_SPAN`,
+ * so the first quad it lays is span 25. The wall therefore begins ONE SPAN
+ * PAST the banner, which is the report verbatim: from the grid you look down a
+ * bare corridor and the tree line switches on just after the gantry. The band
+ * ledger (TD5RE_R12_FLORA_REPORT=1, TG_R12_BAND_GRID) prints the absent run as
+ * spans 0..24 with reason "grid", which is the measurement.
+ *
+ * WHY THE GUARD EXISTS, AND WHY IT IS NOT SIMPLY DELETED. Every emitter in the
+ * grid stretch carries some form of this gate, and for the ON-ROAD ones it is
+ * load-bearing: the starting grid has to be clear of furniture the cars would
+ * be parked inside. The band is not one of those. It stands
+ * tg_treeline_back (11000) out from the road EDGE plus the fork clearance --
+ * further out than any grid car, any gantry leg (GANTRY_OUT2 360) and the
+ * ground skirt's own inner rings. tg_building_for_span already made exactly
+ * this argument in an earlier round and narrowed its own copy of the gate to
+ * `si <= 0`, noting "nothing here is ever ON the road ... it only needs
+ * somewhere for the near cap to end". This is the same emitter class, so it
+ * takes the same rule rather than losing its gate altogether: span 0 stays
+ * clear (the wall needs a node pair and a near end to close against), spans
+ * 1..24 gain the wall, and the tree line now runs THROUGH the banner instead
+ * of starting after it.
+ *
+ * TD5RE_R13_BAND_GRID=0 restores the R12 band that starts at span 25. */
+static int tg_r13_band_grid(void)
+{
+    return td5_env_flag_on("TD5RE_R13_BAND_GRID");    /* default ON */
+}
+
+/* First span the band may NOT stand on. */
+static int tg_r13_band_first_span(void)
+{
+    return tg_r13_band_grid() ? 0 : TD5_TG_GRID_SPAN;
+}
+
+/* ==== [R13 BAND item 1b] "everything behind a line of trees is invisible to
+ * the player, so there should not be anything there unless it's buildings" ===
+ *
+ * The single predicate for "does the tree-line wall stand on this (span,
+ * side)?", mirroring tg_emit_fb_flora's own gate chain so the two cannot
+ * disagree about where the wall is. Writes the wall's WORST case over the
+ * quad -- the LOWEST of its two node heights (above the road, i.e. already net
+ * of TD5_TG_TREELINE_SINK) and the FURTHEST of its two lateral setbacks
+ * (measured from the road EDGE, the same origin the far band's own D[] uses,
+ * and through tg_flora_gap_clear so a branch corridor that pulls the wall in
+ * is reflected). Worst case in both, so an occlusion test built on it is
+ * conservative at every point of the span.
+ *
+ * Returns 0 when TD5RE_R12_FLORA_BAND is off: the per-node height/setback pair
+ * only exists on that path, and the R12-off band is the dithered one whose
+ * presence is exactly what R12 item 9 called unreliable. No band model, no
+ * culling -- the A/B stays single-variable. */
+static int tg_r13_band_side(const TG_NodeList *nl, int si, double side,
+                            double *out_top, double *out_lat)
+{
+    double bh[2], bk[2], fx_side = 0.0, fx_reach = 0.0, d0, d1;
+    int sj;
+
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_TREELINE"))   return 0;
+    if (!td5_env_flag_on("TD5RE_R12_FLORA_BAND"))       return 0;
+    if (si <= tg_r13_band_first_span())                 return 0;
+    if (si + 1 >= nl->count)                            return 0;
+    if (tg_span_in_bridge_run(si))                      return 0;
+    if (tg_r12_fcross_at(nl, si, &fx_side, &fx_reach) && fx_side == side)
+        return 0;                                  /* the forest-crossing CUT */
+
+    tg_r12_band_params(si,     &bh[0], &bk[0]);
+    tg_r12_band_params(si + 1, &bh[1], &bk[1]);
+    /* BOTH ends must carry wall. One tapering to zero is a sinking end, and a
+     * sinking end hides nothing. */
+    if (!(bh[0] > 0.0) || !(bh[1] > 0.0)) return 0;
+
+    sj = (si + 2 < nl->count) ? si + 1 : si;
+    d0 = tg_flora_gap_clear(nl, si, side, bk[0]);
+    d1 = tg_flora_gap_clear(nl, sj, side, bk[1]);
+
+    *out_lat = (d0 > d1) ? d0 : d1;
+    *out_top = ((bh[0] < bh[1]) ? bh[0] : bh[1]) - TD5_TG_TREELINE_SINK;
+    return (*out_top > 0.0);
+}
+
+/* Does an UNBROKEN wall stand on this side over the whole far-group, with a
+ * whole group of margin either end? The margin is the reason this is not just
+ * "is there a wall on my four spans": dropping a far band leaves the
+ * NEIGHBOURING group's apron ending in an open cut edge, so the drop has to sit
+ * at least one group deep inside the walled run for that edge to be hidden too.
+ * Writes the worst-case wall top/setback across the whole tested range. */
+static int tg_r13_band_covers(const TG_NodeList *nl, int g0, int g1,
+                              int is_left, double *out_top, double *out_lat)
+{
+    const double side = is_left ? 1.0 : -1.0;
+    /* TD5_TG_FAR_GROUP is TD5_TG_SPANS_PER_ENTRY, spelled that way here because
+     * the far-band block that names it sits further down the file. */
+    int s, lo = g0 - TD5_TG_SPANS_PER_ENTRY, hi = g1 + TD5_TG_SPANS_PER_ENTRY;
+    double top = 1e30, lat = 0.0;
+
+    if (lo < 0) lo = 0;
+    if (hi > nl->count - 2) hi = nl->count - 2;
+    for (s = lo; s <= hi; s++) {
+        double t, l;
+        if (!tg_r13_band_side(nl, s, side, &t, &l)) return 0;
+        if (t < top) top = t;
+        if (l > lat) lat = l;
+    }
+    *out_top = top;
+    *out_lat = lat;
+    return 1;
+}
+
 static int tg_emit_fb_flora(const TG_FBHook *h)
 {
     const TG_NodeList *nl = h->nl;
@@ -17302,7 +17415,9 @@ static int tg_emit_fb_flora(const TG_FBHook *h)
     /* Default ON (2026-08-26); TD5RE_AUTOTRACK_TREELINE=0 disables the band. */
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_TREELINE"))
         { tg_r12_band_note(si, TG_R12_BAND_OFF); return 1; }
-    if (si <= TD5_TG_GRID_SPAN)                  /* keep the grid area clear */
+    /* [R13 BAND item 1a] The wall stands 11000 out; the grid needs no clearance
+     * from it. Only span 0 stays bare -- see tg_r13_band_grid. */
+    if (si <= tg_r13_band_first_span())
         { tg_r12_band_note(si, TG_R12_BAND_GRID); return 1; }
     if (si + 1 >= nl->count)
         { tg_r12_band_note(si, TG_R12_BAND_END); return 1; }
@@ -18721,6 +18836,74 @@ static double tg_r9_dry_reach(const TG_NodeList *nl, int si,
     return dmax;
 }
 
+/* ==== [R13 BAND item 1b] NOTHING BEHIND A TREE LINE BUT BUILDINGS ==========
+ *
+ * "The valley and the SECOND row of background trees are unnecessary.
+ * Everything behind a line of trees is invisible to the player."
+ *
+ * WHAT THE TWO NAMES ARE. Both are tg_emit_far_band, one mesh per side per
+ * TD5_TG_FAR_GROUP: three APRON rings running out to tg_far_reach (30000) which
+ * the R8 sink descends toward the track's global floor -- the "valley" -- and,
+ * standing on the outermost ring, the RIDGE wall drawn on a tree-canopy page
+ * (tg_r8_treeline_page) -- the "second row of background trees". The near wall
+ * the user is looking at is tg_emit_fb_flora, at tg_treeline_back.
+ *
+ * THE OCCLUSION ARITHMETIC, which is what decides this rather than taste. The
+ * wall top stands TOP above the road at LAT out from the road edge; the ridge
+ * crest stands RTOP above the road at D[3] out. Both are seen from an eye
+ * TD5_TG_R13_EYE_Y above the road, so the ridge is hidden when
+ *
+ *     (TOP - eye) / LAT  >=  (RTOP - eye) / D[3]
+ *
+ * with a TD5_TG_R13_OCCL_MARGIN safety factor on the right. In FOREST that is
+ * (12000-600-2000)/11450 = 0.82 against a crest bounded by RIDGE_BASE (4500)
+ * plus the hill roll (3600) at 30000, i.e. at most 0.20 -- hidden four times
+ * over, and never close. Everything the apron draws sits at or BELOW road level
+ * (its base is road - GROUND_DROP - FAR_SINK and the sink only descends), so
+ * any apron ring BEYOND the wall is hidden by the same wall for free: the test
+ * for it is purely `LAT < D[0]`, no angles needed.
+ *
+ * THE TWO OUTCOMES, and why they are separate:
+ *   - wall in front of the apron's inner ring AND crest hidden -> the whole
+ *     mesh is invisible; emit nothing.
+ *   - crest hidden but the wall stands OUTSIDE the inner ring -> FIELDS, whose
+ *     hedgerow line sits at 22000 with the apron starting near 10000, so the
+ *     near half of that apron is in FRONT of the hedge and is the open ground
+ *     the FIELDS biome exists to show. Drop the RIDGE only (ridge_ok = 0, the
+ *     split R8 TERRAIN already built) and keep the ground.
+ *
+ * THE BUILDINGS CARVE-OUT the user asked for holds BY CONSTRUCTION, and is
+ * asserted rather than assumed: a band only qualifies where an unbroken tree
+ * wall stands, tg_treeline_height returns 0 for every urban biome, so a group
+ * that qualifies can never be one whose ridge routes to TD5_TG_PAGE_R4_SKYLINE
+ * (urbanity >= 2) -- the city skyline behind a frontage is untouched, and so is
+ * every facade, forkback and far-shore emitter, none of which this touches.
+ * The assert below states it as code so a future biome that carries both a tree
+ * line and a skyline cannot silently delete the skyline.
+ *
+ * PRESENCE IS PER SPAN AND PER SIDE. Towns, bridges and the forest-crossing cut
+ * carry no wall, and tg_r13_band_covers demands a whole group of margin either
+ * end, so a band is only dropped deep inside a walled run and never where its
+ * removal could open a hole in the horizon.
+ *
+ * TD5RE_R13_BAND_CULL=0 restores the R12 far band for an A/B;
+ * TD5RE_R13_BAND_REPORT=1 prints the class-level inventory (meshes, bytes,
+ * share of MODELS.DAT) that this item is argued from. */
+#define TD5_TG_R13_EYE_Y        2000.0  /* chase-cam eye above the road, raw */
+#define TD5_TG_R13_OCCL_MARGIN     1.25 /* safety factor on the crest angle  */
+
+static int tg_r13_band_cull(void)
+{
+    return td5_env_flag_on("TD5RE_R13_BAND_CULL");   /* default ON */
+}
+
+/* Class-level ledger. Counted on EVERY run, acted on only when the knob is on,
+ * so the report-only run measures the exact bytes the acting run removes. */
+static long s_r13_far_meshes, s_r13_far_bytes;   /* far bands actually written */
+static long s_r13_far_hidden, s_r13_far_hidden_bytes;  /* whole mesh invisible */
+static long s_r13_far_ridge;                     /* crest hidden, apron kept   */
+static long s_r13_far_skyline_kept;              /* the buildings carve-out    */
+
 /* One side's background band: 3 ground quads outward plus the ridge wall.
  *
  * [R8 TERRAIN items 5/15] `ridge_ok` = 0 emits the GROUND apron without the
@@ -18753,6 +18936,9 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
     /* [R9 item 10] Per-side dry reach, decided across BOTH ends so the band
      * stays a proper quad; see tg_r9_dry_reach. */
     double band_reach = reach;
+    /* [R13 BAND item 1b] Set on a report-only run when this mesh was judged
+     * wholly invisible, so its bytes can be billed after it is written. */
+    int r13_hidden = 0;
 
     if (g1 > nl->count - 2) g1 = nl->count - 2;
     if (g1 < g0) return 1;
@@ -18955,6 +19141,56 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
                       Y[e][0], Y[e][3], Y[e][0] - nl->v[se].y);
     }
 
+    /* [R13 BAND item 1b] Is this whole mesh standing behind an unbroken tree
+     * wall? Evaluated on every run so the report-only run measures the acting
+     * run's saving exactly; only ACTED on when the knob is on. */
+    {
+        double wtop = 0.0, wlat = 0.0;
+        if (tg_r13_band_covers(nl, g0, g1, is_left, &wtop, &wlat) &&
+            wtop > TD5_TG_R13_EYE_Y && wlat > 1.0) {
+            /* Upper bound on the crest, relative to the road it is seen from:
+             * the hill roll cannot exceed its own amplitude, and the crest is
+             * floored at RIDGE_MIN_UP above that road. Bounded rather than
+             * recomputed so the answer cannot drift from the block below. */
+            const double dr = (D[0][3] < D[1][3]) ? D[0][3] : D[1][3];
+            /* The apron's INNER ring is deliberately TUCKED under the skirt
+             * (D[0] = so - FAR_TUCK), so the first apron point the player can
+             * actually see is the skirt's own outer edge `so`, not D[0]. Testing
+             * against D[0] measured whole=0 on seed 20260901: the FOREST wall at
+             * 11000 stands 1000 units OUTSIDE the tucked ring but 1000 units
+             * INSIDE the 12000 skirt edge, so every band was scored "apron in
+             * front" when in fact its only exposed ground is behind the wall. */
+            const double d0 = ((D[0][0] < D[1][0]) ? D[0][0] : D[1][0])
+                            + TD5_TG_FAR_TUCK;
+            double rtop = TD5_TG_RIDGE_MIN_UP;
+            int hides_ridge;
+            for (e = 0; e < 2; e++) {
+                const int se = e ? g1 : g0;
+                const double r = Y[e][3] + TD5_TG_RIDGE_BASE + 3600.0
+                               - nl->v[se].y;
+                if (r > rtop) rtop = r;
+            }
+            hides_ridge = dr > 1.0 &&
+                (wtop - TD5_TG_R13_EYE_Y) * dr >=
+                TD5_TG_R13_OCCL_MARGIN * (rtop - TD5_TG_R13_EYE_Y) * wlat;
+            /* The carve-out, stated as code: a group that qualifies must not be
+             * one whose ridge is the city skyline. Urban biomes carry no tree
+             * line, so this can only fire if a future biome grows both. */
+            if (hides_ridge && tg_r4_city_skyline() && h->b->urbanity >= 2) {
+                s_r13_far_skyline_kept++;
+                hides_ridge = 0;
+            }
+            if (hides_ridge && wlat < d0) {
+                s_r13_far_hidden++;
+                if (tg_r13_band_cull()) return 1;   /* wholly behind the wall */
+                r13_hidden = 1;         /* report-only: emit, bill the bytes */
+            } else if (hides_ridge && ridge_ok && tg_terrain_ridge_enabled()) {
+                s_r13_far_ridge++;
+                if (tg_r13_band_cull()) ridge_ok = 0;
+            }
+        }
+    }
+
     /* Apron quads, same ring order as the skirt (near-in, near-out, far-out,
      * far-in) so the winding matches geometry that is known to draw. U is the
      * outward distance in span-lengths, matching the skirt's square tiling. */
@@ -19085,6 +19321,15 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
     if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n, seg_page, seg_nq, nseg))
         return 0;
     (*h->nmesh)++;
+    /* [R13 BAND item 1b] Byte attribution: what a far band actually costs, and
+     * (report-only runs) what the hidden ones cost. The hidden accumulator was
+     * charged the pre-write length above, so this closes it. */
+    {
+        const long bytes = (long)h->blk->len - (long)h->moff[*h->nmesh - 1];
+        s_r13_far_meshes++;
+        s_r13_far_bytes += bytes;
+        if (r13_hidden) s_r13_far_hidden_bytes += bytes;
+    }
     /* One band covers the whole far-group, not just its owner span. */
     tg_acct_range(TG_ACCT_FARBAND, g0, g1);
     return 1;
@@ -19349,6 +19594,49 @@ static int tg_emit_fb_terrain(const TG_FBHook *h)
             tg_acct(TG_ACCT_R8_TERRAIN, h->si);
     }
     return 1;
+}
+
+/* [R13 BAND] MODELS.DAT total, recorded at the write so the band report can
+ * state its saving as a SHARE rather than as a bare byte count. */
+static long s_r13_models_bytes;
+
+/* [R13 BAND] The class-level inventory both items are argued from. Always
+ * printed (this is the round's evidence, not an opt-in trace); the per-group
+ * detail lines are behind TD5RE_R13_BAND_REPORT=1. */
+static void tg_r13_band_report(const TG_NodeList *nl, int nspans)
+{
+    int si, walled = 0, grid_walled = 0;
+
+    for (si = 0; si < nspans && si + 1 < nl->count; si++) {
+        double t, l;
+        int sides = (tg_r13_band_side(nl, si,  1.0, &t, &l) ? 1 : 0)
+                  + (tg_r13_band_side(nl, si, -1.0, &t, &l) ? 1 : 0);
+        if (sides) {
+            walled++;
+            if (si <= TD5_TG_GRID_SPAN) grid_walled++;
+        }
+    }
+    TD5_LOG_I(LOG_TAG,
+              "trackgen: [R13 BAND 1a] tree-line spans=%d of %d, of which "
+              "grid spans 0..%d walled=%d (banner sits on span %d) "
+              "(knob TD5RE_R13_BAND_GRID=%s)",
+              walled, nspans, TD5_TG_GRID_SPAN, grid_walled, TD5_TG_GRID_SPAN,
+              tg_r13_band_grid() ? "on" : "off");
+    TD5_LOG_I(LOG_TAG,
+              "trackgen: [R13 BAND 1b] far bands written=%ld (%ld bytes); "
+              "behind the wall: whole=%ld (%ld bytes) ridge-only=%ld; "
+              "skyline kept=%ld; far-band share of MODELS.DAT=%.2f%%, "
+              "hidden share=%.2f%% (knob TD5RE_R13_BAND_CULL=%s)",
+              s_r13_far_meshes, s_r13_far_bytes,
+              s_r13_far_hidden, s_r13_far_hidden_bytes, s_r13_far_ridge,
+              s_r13_far_skyline_kept,
+              s_r13_models_bytes > 0
+                ? 100.0 * (double)s_r13_far_bytes
+                        / (double)s_r13_models_bytes : 0.0,
+              s_r13_models_bytes > 0
+                ? 100.0 * (double)s_r13_far_hidden_bytes
+                        / (double)s_r13_models_bytes : 0.0,
+              tg_r13_band_cull() ? "on" : "off");
 }
 
 /* ===================== [R8 TERRAIN items 5/15] EXTENT DIAGNOSTIC =====================
@@ -25038,8 +25326,10 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
             TG_Buf models, tex;
             memset(&models, 0, sizeof(models));
             memset(&tex, 0, sizeof(tex));
-            if (tg_emit_models(&nl, nspans, spec->lanes, &models))
+            if (tg_emit_models(&nl, nspans, spec->lanes, &models)) {
+                s_r13_models_bytes = (long)models.len;   /* [R13 BAND] share */
                 tg_write_file(dir, "MODELS.DAT", models.b, models.len);
+            }
             else
                 TD5_LOG_W(LOG_TAG, "trackgen: models emit failed; "
                           "falling back to the ribbon renderer");
@@ -25179,6 +25469,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     tg_r9_topo_report(&nl, nspans);            /* [R9 TOPO] class sweep, ditto */
     tg_r11_xcurve_report(nspans);        /* [R11 CROSS item 16] opt-in, ditto */
     tg_r12_fcross_report(&nl, nspans);   /* [R12 CROSS item 5]  opt-in, ditto */
+    tg_r13_band_report(&nl, nspans);     /* [R13 BAND items 1a/1b] ledger  */
     tg_r11_water_diag(&nl, nspans);            /* [R11 WATER] wet footprint    */
     tg_r12_tex_report(&nl, nspans);            /* [R12 TEX] page-per-surface   */
     ok = 1;
