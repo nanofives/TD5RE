@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 01 (auto-track guardrails, round 11)" },
+    { CL_ITEM,    "FIXED: guardrails are no longer upside down -- the" },
+    { CL_ITEM,    "  beam sits at the top with the posts below it, on" },
+    { CL_ITEM,    "  every barrier, not just the one at span 755" },
+    { CL_ITEM,    "FIXED: guardrails, kerbs and pavements now start and" },
+    { CL_ITEM,    "  stop on one span at a town edge, instead of" },
+    { CL_ITEM,    "  flickering in and out over twenty spans" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 31 (road markings on widening roads)" },
     { CL_ITEM,    "FIXED: where an auto-track road widens or narrows," },
     { CL_ITEM,    "  the road texture no longer stretches and the lane" },
