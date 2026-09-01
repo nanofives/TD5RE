@@ -7544,6 +7544,20 @@ static int tg_water_span_clear(int si)
     return !tg_span_in_tunnel(si) && !tg_span_in_tunnel(si + 1);
 }
 
+/* [R11 WATER] How far out from the CENTRELINE the sea plane reaches at node si
+ * -- the outer edge tg_emit_water lays, expressed in the same axis the bridge
+ * river's BRIDGE_WATER_HALF is expressed in, so the two footprints can be
+ * compared and matched instead of being two unrelated numbers. Single
+ * definition: the emitter below, the diagnostic and the R11 widening all read
+ * it, so "as far as the sea" cannot drift from what the sea actually does. */
+static double tg_r11_sea_outer(const TG_NodeList *nl, int si)
+{
+    if (si < 0) si = 0;
+    if (si > nl->count - 1) si = nl->count - 1;
+    return nl->v[si].width * 0.5 + (double)TD5_TG_WATER_BEACH
+         + (double)TD5_TG_WATER_EXTENT;
+}
+
 /* Emit the sea plane beside span si on `side`, recording its mesh offset.
  *
  * ONE quad, and its UVs come from the WORLD x/z of each corner rather than
@@ -9630,6 +9644,10 @@ static int tg_emit_bridge_rails(const TG_NodeList *nl, int si,
  * tg_emit_water: a cell grid seamed and marched, a world projection is
  * continuous across spans and across the two water emitters (same tile size, so
  * a river and a sea meeting at a biome edge stay on one texture grid). */
+/* [R11 WATER] Outward reach of the river and its coastline beside node si --
+ * see the definition below TD5_TG_FAR_REACH, whose value it reads. */
+static double tg_r11_wet_reach(const TG_NodeList *nl, int si);
+
 static int tg_emit_bridge_water(const TG_NodeList *nl, int si,
                                 TG_Buf *m, size_t *moff, int *pn)
 {
@@ -9651,10 +9669,45 @@ static int tg_emit_bridge_water(const TG_NodeList *nl, int si,
      * hides under it cannot be computed from two different water tests. */
     wy = tg_bridge_water_surf_y(nl, si);
 
-    px[0] = n0->x - lx * BW; pz[0] = n0->z - lz * BW;
-    px[1] = n1->x - lx * BW; pz[1] = n1->z - lz * BW;
-    px[2] = n1->x + lx * BW; pz[2] = n1->z + lz * BW;
-    px[3] = n0->x + lx * BW; pz[3] = n0->z + lz * BW;
+    /* ============ [R11 WATER item 13] "GAPS IN THE WATER ON SPAN 848"
+     * MEASURED. All four corners used to be swept along n0's normal alone, so
+     * span si's FAR edge left node si+1 along n0's normal while span si+1's
+     * NEAR edge left that same node along n1's. Wherever the road turns the two
+     * edges diverge and open a wedge -- zero at the centreline, BW*dheading at
+     * the rim, so 1.72 degrees of turn is ~960 units of open water 32000 out.
+     * Over a bridge run tg_emit_fb_terrain returns before BOTH the far band and
+     * the far shore, so the river IS the drawn world out there and that wedge is
+     * not a seam in a puddle: it is a hole straight through to the sky.
+     * Measured on seed 20260901: 238 of 320 river span-seams open more than 200
+     * units, mean 720, worst 3925 at span 1359; 959 at the reported span 848.
+     *
+     * tg_emit_water -- the SEA -- never had this, and the difference is the
+     * whole proof that it is a defect rather than a choice: it sweeps each
+     * corner along its OWN node's normal, so neighbouring spans share their two
+     * boundary points exactly and the surface is watertight by construction.
+     * Give the river the same rule. The second half of the same line answers
+     * item 14: take the reach from tg_r11_wet_reach (the far band's own reach)
+     * instead of a fixed gorge half-width, so the water ends where the drawn
+     * world ends rather than 1000 units inside it. Purely lateral -- every
+     * corner keeps the same `wy`, so piers, the submerged gorge skirt and the
+     * relief system are untouched.
+     * TD5RE_R11_WATER=0 restores the single-normal parallelogram.
+     * ==================================================================== */
+    if (td5_env_flag_on("TD5RE_R11_WATER")) {
+        const double lx0 = n0->tz, lz0 = -n0->tx;
+        const double lx1 = n1->tz, lz1 = -n1->tx;
+        const double b0 = tg_r11_wet_reach(nl, si);
+        const double b1 = tg_r11_wet_reach(nl, si + 1);
+        px[0] = n0->x - lx0 * b0; pz[0] = n0->z - lz0 * b0;
+        px[1] = n1->x - lx1 * b1; pz[1] = n1->z - lz1 * b1;
+        px[2] = n1->x + lx1 * b1; pz[2] = n1->z + lz1 * b1;
+        px[3] = n0->x + lx0 * b0; pz[3] = n0->z + lz0 * b0;
+    } else {
+        px[0] = n0->x - lx * BW; pz[0] = n0->z - lz * BW;
+        px[1] = n1->x - lx * BW; pz[1] = n1->z - lz * BW;
+        px[2] = n1->x + lx * BW; pz[2] = n1->z + lz * BW;
+        px[3] = n0->x + lx * BW; pz[3] = n0->z + lz * BW;
+    }
     for (i = 0; i < 4; i++) {
         py[i] = wy;
         uu[i] = px[i] / TD5_TG_WATER_TILE;
@@ -9764,7 +9817,42 @@ static int tg_emit_bridge_coast(const TG_NodeList *nl, int si,
          * waterline to the bank. TD5RE_R9_BRIDGE_COAST=0 restores the R4 band.
          * ==================================================================== */
         if (td5_env_flag_on("TD5RE_R9_BRIDGE_COAST")) {
-            const double CW = TD5_TG_BRIDGE_WATER_HALF;
+            /* ======== [R11 WATER item 14] "AT THE END OF THE BRIDGE THE
+             * COASTLINE SHOULD REACH THE END OF THE DRAWN AREA -- IT STOPS
+             * SHORT, LEAVING A VISIBLE EDGE." Two measured faults, and NEITHER
+             * is item 13's seam (the road is straight at the reported run end,
+             * so the divergence there is 0.000 degrees -- these are two
+             * different bugs that happen to share an emitter pair).
+             *
+             * 1. THE BAND IS NARROWER THAN THE WORLD BEHIND IT. R9 sized it to
+             *    TD5_TG_BRIDGE_WATER_HALF (32000), but the group just past the
+             *    run is not over a bridge, so its far band IS drawn, out to
+             *    width/2 + FAR_REACH = 33000. The shore therefore ends 1000
+             *    units inside the ground it is meant to close onto and the rim
+             *    shows as an open edge. tg_r11_wet_reach sizes both the band
+             *    and the river it grows out of from that same far-band reach,
+             *    which is what "the end of the drawn area" means here.
+             * 2. ITS LAND EDGE IS ON THE WRONG NORMAL. Both the water corners
+             *    AND the land corners were swept along the WATER node's normal
+             *    `lx`, so at the rim the land edge misses the land node's own
+             *    cross-section by CW*dheading -- measured 959 units at the run
+             *    end at span 839 on seed 20260901. That is R9's own fault #2
+             *    ("the two surfaces never asked each other what height they
+             *    were") one axis over: they never asked what DIRECTION either.
+             *    Sweep each end along its own node's normal and the band lands
+             *    on the terrain the profile was sampled from.
+             *
+             * Lateral only -- every corner keeps the height it already had (wy
+             * at the waterline, nn->y - drop on the bank), so piers, the gorge
+             * skirt and the relief system are untouched.
+             * TD5RE_R11_WATER=0 restores the R9 band. ================ */
+            const int r11 = td5_env_flag_on("TD5RE_R11_WATER");
+            const double CW = r11 ? tg_r11_wet_reach(nl, wnode[k])
+                                  : TD5_TG_BRIDGE_WATER_HALF;
+            const double CL = r11 ? tg_r11_wet_reach(nl, lnode[k])
+                                  : TD5_TG_BRIDGE_WATER_HALF;
+            const double nlx = r11 ? nn->tz : lx;   /* land node's left unit */
+            const double nlz = r11 ? -nn->tx : lz;
             const int NC = 8;                      /* columns each side of centre */
             const TG_Biome *lb = &k_biomes[tg_biome_for_span(lnode[k])];
             const double wsd = lb->water ? tg_water_side(lnode[k]) : 0.0;
@@ -9782,7 +9870,7 @@ static int tg_emit_bridge_coast(const TG_NodeList *nl, int si,
                     /* Land height at |lateral| from the road edge, read off the
                      * profile for whichever side this column is on. */
                     const TG_GroundProf *p = (d[e] >= 0.0) ? &pl : &pr;
-                    const double off = fabs(d[e]) * CW;
+                    const double off = fabs(d[e]) * CL;   /* LAND distance */
                     double drop = p->dy[p->n - 1];
                     int j;
                     for (j = 1; j < p->n; j++) {
@@ -9795,11 +9883,11 @@ static int tg_emit_bridge_coast(const TG_NodeList *nl, int si,
                         }
                     }
                     /* water corner (e-th), then land corner (e-th) */
-                    qx[e ? 1 : 0] = nw->x + lx * (d[e] * CW);
-                    qz[e ? 1 : 0] = nw->z + lz * (d[e] * CW);
+                    qx[e ? 1 : 0] = nw->x + lx  * (d[e] * CW);
+                    qz[e ? 1 : 0] = nw->z + lz  * (d[e] * CW);
                     qy[e ? 1 : 0] = wy;
-                    qx[e ? 2 : 3] = nn->x + lx * (d[e] * CW);
-                    qz[e ? 2 : 3] = nn->z + lz * (d[e] * CW);
+                    qx[e ? 2 : 3] = nn->x + nlx * (d[e] * CL);
+                    qz[e ? 2 : 3] = nn->z + nlz * (d[e] * CL);
                     qy[e ? 2 : 3] = nn->y - drop;
                 }
                 /* u across the strip, v from waterline (0) to bank (1). */
@@ -15281,6 +15369,38 @@ static int tg_emit_fb_tunnel(const TG_FBHook *h)
 #define TD5_TG_FAR_REACH       30000
 #define TD5_TG_RIDGE_BASE      4500.0  /* mean ridge height above the far plain */
 
+/* [R11 WATER item 14] How far out from the centreline the river and its
+ * coastline reach beside node si.
+ *
+ * "The coastline should reach the end of the drawn area" needs a definition of
+ * that end, and the far band above IS it: off a bridge run it is the outermost
+ * ground on the side, and the reach knob moves it. R9 sized the river and the
+ * shore band to TD5_TG_BRIDGE_WATER_HALF instead, an unrelated gorge constant,
+ * so where a bridge run abuts a group that still draws its band the water
+ * stopped 1000 units inside the terrain behind it and the rim read as an open
+ * edge. Reading the band's own reach ties the two together, so a later change to
+ * TD5RE_AUTOTRACK_TERRAIN_REACH moves the shoreline with the horizon instead of
+ * silently reopening this.
+ *
+ * Never SHRINKS the footprint (max with the old half-width), so no existing
+ * water gets narrower, and it is a purely lateral quantity -- no caller derives
+ * a height from it, which is what keeps piers, the submerged gorge skirt and the
+ * relief system out of its blast radius. TD5RE_R11_WATER=0 pins it to the R9
+ * constant. */
+static double tg_r11_wet_reach(const TG_NodeList *nl, int si)
+{
+    const double bw = TD5_TG_BRIDGE_WATER_HALF;
+    double r;
+
+    if (!td5_env_flag_on("TD5RE_R11_WATER")) return bw;
+    if (si < 0) si = 0;
+    if (si > nl->count - 1) si = nl->count - 1;
+    r = nl->v[si].width * 0.5
+      + (double)td5_env_int("TD5RE_AUTOTRACK_TERRAIN_REACH",
+                            TD5_TG_FAR_REACH, 30000, 400000);
+    return r > bw ? r : bw;
+}
+
 /* THE CURE for the ceiling above, replacing the reach cut that only hid it.
  *
  * The band was flat: all four of its rings sat at the emitting span's own road
@@ -16529,6 +16649,120 @@ static void tg_r9_topo_report(const TG_NodeList *nl, int nspans)
         sides, v_gap, v_open, worst_open, v_road, worst_road, v_mat,
         sides ? sum_h / (double)sides : 0.0,
         sides ? sum_s / (double)sides : 0.0);
+}
+
+/* ===================== [R11 WATER] RIVER SEAM DIAGNOSTIC =====================
+ * "Gaps in the water on span 848, on the right" and "at the end of the bridge
+ * around span 878 the coastline should reach the end of the drawn area".
+ *
+ * Both spans sit in a bridge run (800-839 and 840-879 on seed 20260901, two
+ * abutting runs over a DRY gorge -- no sea biome anywhere near, so the only wet
+ * surface out there is tg_emit_bridge_water's river) and over a bridge group
+ * tg_emit_fb_terrain returns before both the far band and the far shore. The
+ * river IS therefore the drawn area on those spans, which is why a hole in it
+ * reads as a hole in the world rather than as a puddle with a missing corner.
+ *
+ * MEASURED HERE: the river is one quad per span, and all four of its corners
+ * are swept along ONE node's normal (n0's). tg_emit_water -- the sea -- sweeps
+ * each corner along its OWN node's normal, so its shared edge at node si+1 is
+ * literally the same two points for both spans and the surface is watertight by
+ * construction. The river's is not: span si's far edge leaves node si+1 along
+ * n0's normal while span si+1's near edge leaves the same node along n1's, so
+ * wherever the road turns the two edges diverge, opening a wedge that is zero at
+ * the centreline and widest at the rim. That is a per-span number:
+ *
+ *     seam = BRIDGE_WATER_HALF * |left(n0) - left(n1)|  ~= BW * dheading
+ *
+ * so a degree of turn between two nodes is ~560 units of open water at the rim.
+ * tg_emit_bridge_coast has the same defect one element over -- its LAND corners
+ * are swept along the WATER node's normal -- so its outer corners land off the
+ * terrain they are supposed to close onto.
+ *
+ * Read-only; re-evaluates the same pure functions the emitters call.
+ * TD5RE_R11_WATER_LOG=1 (opt-in, same idiom as the other trackgen DIAG knobs). */
+static double tg_r11_sea_outer(const TG_NodeList *nl, int si);
+static void tg_r11_water_diag(const TG_NodeList *nl, int nspans)
+{
+    const int ring = (s_ring_len > 0 && s_ring_len < nspans) ? s_ring_len : nspans;
+    const int at0 = td5_env_int("TD5RE_R11_WATER_AT1", 848, 0, TD5_TG_MAX_SPANS);
+    const int at1 = td5_env_int("TD5RE_R11_WATER_AT2", 878, 0, TD5_TG_MAX_SPANS);
+    const int pad = td5_env_int("TD5RE_R11_WATER_PAD",   8, 0, 200);
+    const double BW = TD5_TG_BRIDGE_WATER_HALF;
+    int si, worst_si = -1, nseam = 0, nbad = 0;
+    double worst = 0.0, sum = 0.0;
+
+    if (!td5_env_flag_off("TD5RE_R11_WATER_LOG")) return;
+
+    TD5_LOG_I(LOG_TAG, "trackgen: R11WATER hdr si,biome,inrun,run0,run1,runwater,"
+              "halfw,sea_outer,river_half,drawn_half,dheading_deg,seam_open,"
+              "seam_side,coast_land_err");
+    for (si = 0; si + 1 < ring; si++) {
+        const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
+        const TG_Node *n0 = &nl->v[si];
+        const TG_Node *n1 = &nl->v[si + 1];
+        /* Left unit at each node, exactly as both emitters form it. */
+        const double lx0 = n0->tz, lz0 = -n0->tx;
+        const double lx1 = n1->tz, lz1 = -n1->tx;
+        /* With the fix in force each corner rides its own node's normal, so the
+         * two spans meeting at node si+1 share their boundary points exactly and
+         * the open seam is 0 by construction. Report what the CURRENT build
+         * actually lays, so the same line is the before AND the after. */
+        const double dl  = td5_env_flag_on("TD5RE_R11_WATER") ? 0.0
+                         : sqrt((lx0 - lx1) * (lx0 - lx1) +
+                                (lz0 - lz1) * (lz0 - lz1));
+        const double dl_raw = sqrt((lx0 - lx1) * (lx0 - lx1) +
+                                   (lz0 - lz1) * (lz0 - lz1));
+        /* Which side the wedge OPENS on: the cross product of the two tangents
+         * says which way the road turned, and the outside of the turn is the
+         * side that loses coverage (the inside merely overlaps, and an overlap
+         * of two coplanar quads at one y is invisible). */
+        const double cross = n0->tx * n1->tz - n0->tz * n1->tx;
+        const int inrun = tg_span_in_bridge_run(si);
+        int run0 = -1, run1 = -1;
+        double coast_err = 0.0, coast_reach = 0.0;
+
+        if (!inrun) continue;                        /* only the river matters */
+        tg_bridge_run_bounds(nl, si, &run0, &run1);
+        if (!tg_water_span_clear(si)) continue;      /* no quad laid at all    */
+
+        /* Coastline: its land corners are swept along the WATER node's normal,
+         * so at the rim they miss the land node's own cross-section by this. */
+        if (si == run1 && run1 + 2 < nl->count) {
+            const TG_Node *nw = &nl->v[run1 + 1];
+            const TG_Node *nn = &nl->v[run1 + 2];
+            const double wx = nw->tz, wz = -nw->tx;
+            const double nx = nn->tz, nz = -nn->tx;
+            coast_err = td5_env_flag_on("TD5RE_R11_WATER") ? 0.0
+                      : BW * sqrt((wx - nx) * (wx - nx) + (wz - nz) * (wz - nz));
+        }
+        coast_reach = tg_r11_wet_reach(nl, si);
+
+        nseam++;
+        sum += tg_r11_wet_reach(nl, si) * dl;
+        if (tg_r11_wet_reach(nl, si) * dl > 200.0) nbad++;
+        if (tg_r11_wet_reach(nl, si) * dl > worst) {
+            worst = tg_r11_wet_reach(nl, si) * dl;
+            worst_si = si;
+        }
+
+        if ((si >= at0 - pad && si <= at0 + pad) ||
+            (si >= at1 - pad && si <= at1 + pad))
+            TD5_LOG_I(LOG_TAG,
+                "trackgen: R11WATER %d,%s,%d,%d,%d,%d,%.0f,%.0f,%.0f,%.0f,"
+                "%.3f,%.0f,%s,%.0f",
+                si, b->name, inrun, run0, run1, tg_bridge_run_is_water(nl, si),
+                n0->width * 0.5, tg_r11_sea_outer(nl, si),
+                coast_reach, coast_reach,
+                2.0 * asin(dl_raw * 0.5 > 1.0 ? 1.0 : dl_raw * 0.5)
+                    * 180.0 / TD5_TG_PI,
+                coast_reach * dl,
+                cross > 0.0 ? "R" : (cross < 0.0 ? "L" : "-"),
+                coast_err);
+    }
+    TD5_LOG_I(LOG_TAG,
+        "trackgen: R11WATER SUMMARY river-span-seams=%d | open seam at the rim "
+        "(BW=%.0f): mean=%.0f worst=%.0f at si=%d | seams over 200u=%d",
+        nseam, BW, nseam ? sum / (double)nseam : 0.0, worst, worst_si, nbad);
 }
 
 static void tg_r8_terrain_extent_report(const TG_NodeList *nl, int nspans)
@@ -20978,6 +21212,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     tg_r8_bridge_diag(&nl);            /* [R8 BRIDGE] opt-in measurement dump */
     tg_r8_terrain_extent_report(&nl, nspans);  /* [R8 TERRAIN] opt-in, ditto */
     tg_r9_topo_report(&nl, nspans);            /* [R9 TOPO] class sweep, ditto */
+    tg_r11_water_diag(&nl, nspans);            /* [R11 WATER] wet footprint    */
     ok = 1;
 
 done:

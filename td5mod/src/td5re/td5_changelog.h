@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 01 (water under auto-track bridges)" },
+    { CL_ITEM,    "FIXED: the river under an auto-track bridge no longer" },
+    { CL_ITEM,    "  tears open on curves -- consecutive spans used to" },
+    { CL_ITEM,    "  drift apart the further out you looked, leaving" },
+    { CL_ITEM,    "  wedge-shaped holes straight through to the sky" },
+    { CL_ITEM,    "FIXED: the shoreline at each end of a bridge now" },
+    { CL_ITEM,    "  reaches the edge of the drawn world and lands on" },
+    { CL_ITEM,    "  the bank instead of stopping short of it" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 31 (road markings on widening roads)" },
     { CL_ITEM,    "FIXED: where an auto-track road widens or narrows," },
     { CL_ITEM,    "  the road texture no longer stretches and the lane" },
