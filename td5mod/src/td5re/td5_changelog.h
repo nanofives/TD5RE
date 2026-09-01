@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 01 (auto-track scenery textures, r11)" },
+    { CL_ITEM,    "FIXED: the tree line behind the verge is no longer" },
+    { CL_ITEM,    "  smeared into tall grey spikes with a black edge" },
+    { CL_ITEM,    "  along the top -- it now reads as a wall of green" },
+    { CL_ITEM,    "  foliage at the size the artwork was drawn at" },
+    { CL_ITEM,    "FIXED: the hillside beside a tunnel mouth no longer" },
+    { CL_ITEM,    "  wears a pale mountain-snowline stripe -- it now" },
+    { CL_ITEM,    "  matches the ground around it, grass or snow" },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "August 31 (road markings on widening roads)" },
     { CL_ITEM,    "FIXED: where an auto-track road widens or narrows," },
     { CL_ITEM,    "  the road texture no longer stretches and the lane" },

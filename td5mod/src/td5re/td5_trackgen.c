@@ -14428,13 +14428,49 @@ static int tg_emit_fb_city(const TG_FBHook *h)
  *   - NO POP: the band uses nodes si and si+1, and consecutive spans SHARE that
  *     endpoint, so the segments abut into one unbroken wall rather than
  *     appearing and disappearing per span.
- *   - NO SEAM: u runs 0..1 across a span but ALTERNATES direction per span, so
- *     at every shared edge the same texel column meets itself. A plain repeat
- *     would butt u=1 against u=0, which is only seamless if the page tiles
- *     horizontally, and a noise-built page does not.
+ *   - NO SEAM: consecutive quads meet at the same u. As written this was a
+ *     per-span 0..1 ALTERNATION (mirroring the page at every shared edge);
+ *     [R11 item 1] replaced it with one CUMULATIVE u whose two ends are derived
+ *     from the same per-span step, which meets the same requirement without
+ *     forcing the whole 0..1 range into one span (see tg_r11_treeline_fit).
  * The band base is sunk below road level so it sits IN the ground skirt rather
  * than floating on it. */
 #define TD5_TG_TREELINE_SINK   600.0   /* base below road level, raw */
+
+/* [R11 TEX item 1] "the tree background texture looks very tall and stretched
+ * out, has a black line at the top, and reads cold/wintry -- replace it with a
+ * different page from the pool."
+ *
+ * The page is NOT the defect, so it is not replaced. MEASURED off the emitter
+ * below, as it shipped:
+ *   - u ran 0..1 across ONE span and v ran 0..1 over the WHOLE wall, so a single
+ *     64x64 page tile was drawn TD5_TG_SPAN_LENGTH (1500) wide by `band` tall --
+ *     12000 in FOREST, 14000 in ALPINE, 7000 in FIELDS. That is a 1:8 (1:8.5,
+ *     1:4.7) VERTICAL stretch of a square page. Smearing a leaf canopy 8x up
+ *     turns its texels into tall spikes and averages its greens toward grey,
+ *     which is both "tall and stretched out" and "reads cold" -- the SAME page,
+ *     drawn near 1:1 on the far ridge (tg_r8_tl_note: mean ratio 0.85), reads as
+ *     a green forest skyline.
+ *   - v reached EXACTLY 0.0 at the crest. Under the wrapped sampler that fetches
+ *     the page's opposite edge row -- the dark foliage base -- which is the
+ *     "black line at the top". The far ridge was given a half-texel V inset for
+ *     precisely this at R4 item 5; this band never got it.
+ * So the two reported symptoms are one UV bug and one edge-sampling bug, and
+ * both already have a fix precedent on the sibling emitter.
+ *
+ * ASPECT: tile u by the wall's OWN height, the R8 item 14 rule, so a square page
+ * is drawn square (one tile = `band` wide = band/1500 spans). u is CUMULATIVE in
+ * span index rather than alternating 0/1 per span, so consecutive quads share
+ * their edge u exactly and the wall stays one unbroken run; it is reduced modulo
+ * one tile per quad to keep the float small, which is seam-free because the
+ * sampler wraps. This drops the old per-span mirror trick: mirroring only hides
+ * a page that does not tile, and it can only do so while the whole 0..1 range is
+ * shown, which is exactly what causes the stretch.
+ * TD5RE_R11_TREELINE_FIT=0 restores the stretched, un-inset band for an A/B. */
+static int tg_r11_treeline_fit(void)
+{
+    return td5_env_flag_on("TD5RE_R11_TREELINE_FIT");   /* default ON */
+}
 
 /* Band height for biome b, 0 = no backdrop. A forest wall stands above the
  * 5400..7200-raw billboards in front of it; alpine conifers read taller; open
@@ -14491,18 +14527,27 @@ static int tg_emit_fb_flora(const TG_FBHook *h)
         const double fx = n1->x + lx1 * e1, fz = n1->z + lz1 * e1;
         const double by = n0->y - TD5_TG_TREELINE_SINK;
         const double fy = n1->y - TD5_TG_TREELINE_SINK;
-        /* u alternates per span -- see the seam note above. */
-        const double u0 = ((si & 1) == 0) ? 0.0 : 1.0;
-        const double u1 = 1.0 - u0;
+        /* [R11 item 1] Square tiles, cumulative u; see tg_r11_treeline_fit.
+         * flag off = the shipped alternating 0..1 tile (a 1:8 stretch). */
+        const int    fit = tg_r11_treeline_fit();
+        const double du  = (double)TD5_TG_SPAN_LENGTH / band;
+        const double ub  = floor((double)si * du);      /* whole tiles, dropped */
+        const double u0  = fit ? ((double)si * du - ub)
+                               : (((si & 1) == 0) ? 0.0 : 1.0);
+        const double u1  = fit ? ((double)(si + 1) * du - ub) : (1.0 - u0);
+        /* [R11 item 1] Half-texel V inset, the R4 item 5 cure for the "black
+         * line at the top" the wrapped sampler paints at v = 0. */
+        const double vt  = fit ? TD5_TG_FACADE_UV_INSET       : 0.0;
+        const double vb  = fit ? 1.0 - TD5_TG_FACADE_UV_INSET : 1.0;
         int seg_page = TD5_TG_PAGE_TREELINE, seg_nq = 1;
 
         if (*h->nmesh + 1 >= h->maxmesh) return 1;   /* out of slots this entry */
         /* quad loop: near-bottom, far-bottom, far-top, near-top; v=1 at the
          * base, matching the page convention that row 0 is the TOP. */
-        px[0] = bx; py[0] = by;        pz[0] = bz; uu[0] = u0; vv[0] = 1.0;
-        px[1] = fx; py[1] = fy;        pz[1] = fz; uu[1] = u1; vv[1] = 1.0;
-        px[2] = fx; py[2] = fy + band; pz[2] = fz; uu[2] = u1; vv[2] = 0.0;
-        px[3] = bx; py[3] = by + band; pz[3] = bz; uu[3] = u0; vv[3] = 0.0;
+        px[0] = bx; py[0] = by;        pz[0] = bz; uu[0] = u0; vv[0] = vb;
+        px[1] = fx; py[1] = fy;        pz[1] = fz; uu[1] = u1; vv[1] = vb;
+        px[2] = fx; py[2] = fy + band; pz[2] = fz; uu[2] = u1; vv[2] = vt;
+        px[3] = bx; py[3] = by + band; pz[3] = bz; uu[3] = u0; vv[3] = vt;
 
         h->moff[*h->nmesh] = h->blk->len;
         if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, 4,
@@ -15093,6 +15138,47 @@ static int tg_tunnel_edge_dist(int si, int cap)
     return cap + 1;
 }
 
+/* [R11 TEX item 2] "at the tunnel entrance near span 294 there is a gray-ish
+ * stripe texture beside the tunnel -- remove that page from the pool it is
+ * being drawn from."
+ *
+ * It is not a pool: the piece beside the mouth is the SHOULDER box below, and it
+ * has one hard-coded page, TD5_TG_PAGE_HILL. That page is built by
+ * tg_emit_texture_page_fb_terrain(which=1), which paints a pale near-white
+ * SNOWLINE over its top ~10..14 rows and cool grey rock below -- so every quad
+ * drawn on it carries a light horizontal band across a grey field. That is the
+ * "gray-ish stripe", and it is there in FOREST at span 294 exactly as it is on a
+ * peak, because the page is chosen per PIECE and never per span.
+ *
+ * The page was authored as the DISTANT hillside, and a snowline is right for a
+ * distant summit. It stopped being distant at R3, when the far ridge was moved
+ * off it (see the R3 item 8 note on the ridge) and the tunnel massing became its
+ * only consumer -- a flank standing at ROAD level, metres from the camera, in
+ * whatever biome the mouth happens to sit in.
+ *
+ * Fix by the piece's own property rather than by a page blacklist: a shoulder IS
+ * the hillside the bore is cut into, and the hillside it seams to is the ground
+ * the terrain pass already laid at the mouth, so read THAT page -- the R9 TOPO
+ * C4 rule the far-band apron follows. Sampled at the nearest span OUTSIDE the
+ * run, because tg_ground_page_for_span deliberately suppresses the snow override
+ * on tunnel spans (snow inside a bore would glow through the lining) and the
+ * flank is outside. A snow biome therefore gets snow, a green one gets its own
+ * ground, and no biome gets a snowline band it did not earn.
+ * TD5RE_R11_TUNNEL_FLANK=0 restores TD5_TG_PAGE_HILL for an A/B. */
+static int tg_tunnel_flank_page(int si)
+{
+    int d;
+
+    if (!td5_env_flag_on("TD5RE_R11_TUNNEL_FLANK")) return TD5_TG_PAGE_HILL;
+    /* Walk out to the first span that is not in the bore. The massing only ever
+     * runs TD5_TG_TUNNEL_MASS_SPANS from a mouth, so this is a short walk. */
+    for (d = 0; d <= TD5_TG_TUNNEL_MASS_SPANS + 1; d++) {
+        if (!tg_span_in_tunnel(si - d)) return tg_topo_surface_page(si - d);
+        if (!tg_span_in_tunnel(si + d)) return tg_topo_surface_page(si + d);
+    }
+    return tg_topo_surface_page(si);
+}
+
 /* Group C -- tunnels: portal surrounds, mountain massing, width for branches.
  * Called INSIDE the tunnel branch, where no buildings/props are emitted.
  *
@@ -15152,6 +15238,9 @@ static int tg_emit_fb_tunnel(const TG_FBHook *h)
      * green-biased and the rock/shade vertex colours were chosen to sit on it. */
     const unsigned int mrock  = surr_on ? 0xFFD6D2CAu : rock;
     const unsigned int mshade = surr_on ? 0xFFB4B0A8u : shade;
+    /* [R11 item 2] The hillside pieces read the ground page of the terrain they
+     * meet instead of the snowline-banded TD5_TG_PAGE_HILL. See the helper. */
+    const int flank_pg = tg_tunnel_flank_page(h->si);
 
     /* Default ON (a fix); TD5RE_AUTOTRACK_TUNNEL_MOUNTAIN=0 to disable. */
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_TUNNEL_MOUNTAIN")) return 1;
@@ -15182,7 +15271,7 @@ static int tg_emit_fb_tunnel(const TG_FBHook *h)
     if (!tg_emit_box_mesh(h->blk, cx, roof_top + crown_h * 0.5, cz,
                           side_x + 900.0, crown_h * 0.5, 780.0,
                           n->tx, n->tz,
-                          (ed <= 1) ? mouth_pg : TD5_TG_PAGE_HILL, 3000.0,
+                          (ed <= 1) ? mouth_pg : flank_pg, 3000.0,
                           (ed <= 1) ? mrock : rock))
         return 0;
 
@@ -15198,7 +15287,7 @@ static int tg_emit_fb_tunnel(const TG_FBHook *h)
         if (!tg_emit_box_mesh(h->blk, cx + lx * off * sgn, (top + bot) * 0.5,
                               cz + lz * off * sgn,
                               flank_hx, (top - bot) * 0.5, 780.0,
-                              n->tx, n->tz, TD5_TG_PAGE_HILL, 3000.0, rock))
+                              n->tx, n->tz, flank_pg, 3000.0, rock))
             return 0;
     }
 
