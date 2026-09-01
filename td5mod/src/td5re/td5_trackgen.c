@@ -9345,6 +9345,56 @@ static int tg_rail_r8_baseline(const TG_NodeList *nl, int si)
     return 0;
 }
 
+/* ===================== [R11 CROSS] shared knobs / counters =================
+ * Items 8, 9 and 15 are read by the rail-edge report, the median block and
+ * the guardrail block, in that file order, so the knobs and the counters
+ * they share sit above all three. */
+/* Diagnostic: name every roadside barrier that lands on a span carrying a
+ * pedestrian crossing or a side-street mouth, and every median span with the
+ * height it actually stands at. TD5RE_R11_CROSS_DIAG=1 (default off). */
+static long s_r11_rail_on_cross;      /* rails standing on a zebra span       */
+static long s_r11_rail_on_xstreet;    /* rails standing across a street mouth */
+
+static int tg_r11_cross_diag(void)
+{
+    return td5_env_flag_off("TD5RE_R11_CROSS_DIAG");
+}
+
+/* Items 9 + 15 fix knob: the roadside barrier exempts crossing / intersection
+ * spans. Default ON; TD5RE_R11_XGUARD=0 pins the pre-R11 behaviour for a
+ * single-variable A/B. */
+static int tg_r11_xguard(void) { return td5_env_flag_on("TD5RE_R11_XGUARD"); }
+
+/* Item 8 geometry. SLIM: a gore this narrow already reads as a median (the
+ * shipped 0.32 island covers most of it), so it is left byte-identical. MAX: a
+ * gore wider than this is a genuine road split with scenery between the two
+ * carriageways, not a median, and is left alone at the other end. INSET: clear
+ * air kept between a raised face and the tarmac beside it -- deliberately
+ * larger than TD5_TG_GORE_OVERLAP (240), which is how far the FLOOR underlaps
+ * that same tarmac. */
+#define TD5_TG_R11_MEDIAN_SLIM   900.0
+#define TD5_TG_R11_MEDIAN_MAX   2600.0
+#define TD5_TG_R11_MEDIAN_INSET  300.0
+/* Height of a FILLED median above the gore floor. The kerbed treatment's own
+ * 150 clears the road by 146, which is a pavement kerb (TD5_TG_KERB_H = 130) --
+ * enough to be a step, not enough to answer "it needs a real height
+ * difference" from a car. 300 puts the top 296 above the tarmac, a bit over
+ * twice a kerb, which reads as a median at driving speed and still lets you see
+ * the oncoming carriageway over it. */
+#define TD5_TG_R11_MEDIAN_H      300.0
+
+/* Item 8 fix knob: a median must stand proud of the carriageway it divides.
+ * Default ON; TD5RE_R11_MEDIAN_RISE=0 pins the pre-R11 heights. */
+static int tg_r11_median_rise(void)
+{
+    return td5_env_flag_on("TD5RE_R11_MEDIAN_RISE");
+}
+
+/* [R11 CROSS items 9+15] "A street crosses this road edge" -- defined with the
+ * guardrail block far below, asked here so the zero-rail invariant can tell an
+ * intentional gap at a crossing from an edge that lost its only barrier. */
+static int tg_r11_street_crosses_here(const TG_NodeList *nl, int si, double sg);
+
 /* Number of edges carrying more than one rail class, with the offenders named.
  * Returns doubled + zero-rail regressions, i.e. every violation of "exactly one
  * rail per edge", so a caller can assert on a single number. */
@@ -9375,7 +9425,13 @@ static int tg_rail_edge_report(const TG_NodeList *nl, int nspans)
              * baseline rather than against anything this build recorded. The
              * round-8 rules said this span must carry a barrier, and it now
              * carries none on this edge. */
-            if (n == 0 && tg_rail_r8_baseline(nl, si)) {
+            /* [R11 CROSS items 9+15] An edge where a street crosses is meant
+             * to carry nothing, so it is NOT a zero-rail regression -- it is
+             * the fix. Excluded here and reported on its own line below, so the
+             * invariant keeps meaning "an edge lost its only rail by accident"
+             * instead of quietly absorbing an intentional gap. */
+            if (n == 0 && tg_rail_r8_baseline(nl, si)
+                && !tg_r11_street_crosses_here(nl, si, s ? -1.0 : 1.0)) {
                 zero++;
                 if (zlisted < 12 && zpos < (int)sizeof(zfirst) - 24) {
                     zpos += snprintf(zfirst + zpos,
@@ -9439,7 +9495,17 @@ static int tg_rail_edge_report(const TG_NodeList *nl, int nspans)
               would, own[TG_RAIL_ROADSIDE],
               s_acct_count[TG_ACCT_R9_RAILYIELD],
               would - own[TG_RAIL_ROADSIDE]
-                    - s_acct_count[TG_ACCT_R9_RAILYIELD]);
+                    - s_acct_count[TG_ACCT_R9_RAILYIELD]
+                    - s_r11_rail_on_cross - s_r11_rail_on_xstreet);
+    /* [R11 CROSS items 9+15] The third bucket of the same reconciliation: edges
+     * the round-8 rules would have railed and that are now deliberately bare
+     * because a street crosses them. Both numbers must be 0 with
+     * TD5RE_R11_XGUARD=0 and non-zero with it on -- that pair is the A/B. */
+    TD5_LOG_I(LOG_TAG,
+              "trackgen:   [R11 CROSS] rails dropped at a zebra=%ld, at a "
+              "side-street mouth=%ld (knob TD5RE_R11_XGUARD=%s)",
+              s_r11_rail_on_cross, s_r11_rail_on_xstreet,
+              tg_r11_xguard() ? "on" : "off");
     return dup + zero;
 }
 
@@ -10840,6 +10906,14 @@ static int tg_emit_gore(const TG_NodeList *nl, int si,
     double un = 1.0, uf = 1.0;
     int i;
 
+    /* [R11 CROSS item 8] INSTRUMENT: the gore floor is THE median surface, and
+     * it is laid at road level minus TD5_TG_GORE_DROP on every fork. Log its
+     * width and its rise so "flush with the road" is a number, not a guess. */
+    if (tg_r11_cross_diag())
+        TD5_LOG_I(LOG_TAG, "trackgen: [R11 GORE] span %4d width=%.0f "
+                  "rise=%.0f (road level minus drop)", si,
+                  fabs(shift_n + half_n), -drop);
+
     if (tg_r8_longbranch_enabled()) {
         un = fabs(tnr - ov) / (double)TD5_TG_SPAN_LENGTH;
         uf = fabs(tfr - ov) / (double)TD5_TG_SPAN_LENGTH;
@@ -11114,12 +11188,50 @@ static int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
      * actually enclosed -- the swap lands on the portal line, where a material
      * change belongs. Only the planted treatment is affected; a kerbed island
      * indoors is fine. */
-    const int    treat = (tg_span_in_tunnel(si) &&
-                          td5_env_flag_on("TD5RE_R8_BORE_MEDIAN") &&
-                          (((unsigned)fork_index) % 3) == 0)
-                       ? 1 : (int)(((unsigned)fork_index) % 3);
-    const double mw_cap = (treat == 1) ? 260.0 : 520.0;  /* island half width  */
-    const double H      = (treat == 1) ? 360.0 : (treat == 0 ? 220.0 : 150.0);
+    const int    treat0 = (tg_span_in_tunnel(si) &&
+                           td5_env_flag_on("TD5RE_R8_BORE_MEDIAN") &&
+                           (((unsigned)fork_index) % 3) == 0)
+                        ? 1 : (int)(((unsigned)fork_index) % 3);
+    /* [R11 CROSS item 8] "Avoid medians at the same height as the road."
+     *
+     * MEASURED first, on seed 20260901: the median SURFACE is tg_emit_gore's
+     * floor, and it is laid at road level minus TD5_TG_GORE_DROP -- 4 units --
+     * on every fork span of the track (logged rise=-4 for all of forks 0/1/2,
+     * gore widths 0..5698). It is not approximately flush, it IS flush; the
+     * only thing that ever stood proud of it was this island, and this island
+     * ran on AVENUE forks only. Forks 1 and 2 got no island at all, so their
+     * whole median was a strip of ground texture lying in the road surface --
+     * the report, verbatim.
+     *
+     * So the island now runs on every fork (see the call site), and where the
+     * gore is MEDIAN-SIZED it is widened to fill it instead of leaving flush
+     * margins either side. A gore wider than TD5_TG_R11_MEDIAN_MAX is not a
+     * median at all -- it is a genuine split with scenery living between the
+     * two carriageways -- and is left exactly as it was.
+     *
+     * The FLOOR stays put, byte for byte: it underlaps both carriageways by
+     * TD5_TG_GORE_OVERLAP to close the see-through slit at the fork mouth, so
+     * raising it would put a kerb lip 240 units into each live lane. The island
+     * is inset from both edges by TD5_TG_R11_MEDIAN_INSET (> that overlap)
+     * instead, which keeps every raised face inside the gore. */
+    const int    fill   = tg_r11_median_rise()
+                       && gw0 <= TD5_TG_R11_MEDIAN_MAX
+                       && gw1 <= TD5_TG_R11_MEDIAN_MAX
+                       && (gw0 > TD5_TG_R11_MEDIAN_SLIM
+                           || gw1 > TD5_TG_R11_MEDIAN_SLIM);
+    /* A CONCRETE BARRIER is narrow by nature, so filling a 2000-unit median
+     * with one would be a lie about what the material is. Where the fill
+     * applies, the treatment rolls between planted and kerbed only -- and a
+     * planted top is still illegal in a bore, exactly as above. */
+    const int    treat  = !fill ? treat0
+                        : ((((unsigned)fork_index) & 1u)
+                           || (tg_span_in_tunnel(si)
+                               && td5_env_flag_on("TD5RE_R8_BORE_MEDIAN")))
+                          ? 2 : 0;
+    const double mw_cap = (treat == 1) ? 260.0 : (fill ? 1e9 : 520.0);
+    const double H      = (treat == 1) ? 360.0
+                        : fill         ? TD5_TG_R11_MEDIAN_H
+                        : (treat == 0) ? 220.0 : 150.0;
     /* [R8 TERRAIN item 16] A PLANTED median (treat 0, grass top) in a snow biome
      * is a green strip between two icy carriageways -- the verbatim complaint.
      * Snow it over with the ploughed-snow page, which is distinct from the snow
@@ -11140,13 +11252,48 @@ static int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
     int seg_page[2], seg_nq[2];
     int n = 0;
 
+    /* [R11 CROSS item 8] INSTRUMENT the height question before touching it:
+     * what actually stands proud of the road on this median span, and by how
+     * much? `rise` is the island top relative to the carriageway it divides --
+     * the number the complaint is about ("flush with the road reads as a
+     * texture stripe"). A skipped island leaves only the gore floor, which sits
+     * TD5_TG_GORE_DROP *below* road level, i.e. rise = -4. */
+    if (tg_r11_cross_diag())
+        TD5_LOG_I(LOG_TAG, "trackgen: [R11 MEDIAN] span %4d fork %d treat %d "
+                  "gw=%.0f/%.0f mw_cap=%.0f H=%.0f rise=%.0f%s",
+                  si, fork_index, treat, gw0, gw1, mw_cap, H,
+                  H - TD5_TG_GORE_DROP,
+                  (gw0 < 200.0 && gw1 < 200.0) ? " SKIPPED(sliver)"
+                                               : (fill ? " FILL" : ""));
+
     /* No island where the gore is a mere sliver (near the mouths): a 100-unit
      * strip of raised concrete popping in and out reads worse than nothing. */
     if (gw0 < 200.0 && gw1 < 200.0) return 1;
+    /* [R11 CROSS item 8] A fork that is NOT an avenue only gains an island
+     * where the fill applies. Without this the widened call site would also
+     * drop the shipped 0.32-capped island into the middle of a 5000-unit
+     * SPLIT, which is a different thing from a median and was never asked for.
+     * The avenue path is unchanged, fill or no fill. */
+    if (!fill && !tg_fork_is_avenue(fork_index)) return 1;
 
     mc0 = bl0 * 0.5; mc1 = bl1 * 0.5;                    /* median centre lateral */
-    mw0 = gw0 * 0.32; if (mw0 > mw_cap) mw0 = mw_cap; if (mw0 < 0.0) mw0 = 0.0;
-    mw1 = gw1 * 0.32; if (mw1 > mw_cap) mw1 = mw_cap; if (mw1 < 0.0) mw1 = 0.0;
+    /* [R11 CROSS item 8] FILL: half the gore less the inset, i.e. the island's
+     * faces stand TD5_TG_R11_MEDIAN_INSET clear of each carriageway edge. Never
+     * NARROWER than the shipped 0.32 rule, so widening can only ever add
+     * raised median; the max() is what makes that a property rather than an
+     * arithmetic accident at some particular width. */
+    mw0 = gw0 * 0.32;
+    mw1 = gw1 * 0.32;
+    if (fill) {
+        const double f0 = gw0 * 0.5 - TD5_TG_R11_MEDIAN_INSET;
+        const double f1 = gw1 * 0.5 - TD5_TG_R11_MEDIAN_INSET;
+        if (f0 > mw0) mw0 = f0;
+        if (f1 > mw1) mw1 = f1;
+    }
+    if (mw0 > mw_cap) mw0 = mw_cap;
+    if (mw0 < 0.0)    mw0 = 0.0;
+    if (mw1 > mw_cap) mw1 = mw_cap;
+    if (mw1 < 0.0)    mw1 = 0.0;
     cl0 = mc0 + mw0; cr0 = mc0 - mw0;                    /* road side / branch side */
     cl1 = mc1 + mw1; cr1 = mc1 - mw1;
     /* Sit the base at the gore's own level (4 below road) so the island rises
@@ -11271,6 +11418,50 @@ static int tg_rail_page(int si)
 static int tg_rail_vflip_on(void)
 {
     return td5_env_flag_on("TD5RE_R11_RAIL_VFLIP");
+}
+
+/* [R11 CROSS items 9+15] "Is a SIDE STREET carriageway laid at (si, side)?" --
+ * the single definition of the crossstreet emitter's placement. It lives with
+ * the city block far below, but the ROADSIDE guardrail (right here) has to ask
+ * it in order NOT to wall off an intersection mouth, exactly as it already asks
+ * tg_rail_kerbfence_here in order to yield a kerbed footway. Forward-declared
+ * rather than duplicated so placement and exemption cannot drift. */
+static int tg_xstreet_here(const TG_NodeList *nl, int si, double side,
+                           double *preach);
+
+/* [R11 CROSS items 9+15] ONE root cause, stated once: "a STREET crosses the
+ * road at this edge". Items 9 (wooden armco on both sides of a marked
+ * crossing) and 15 (a barrier exactly where the streets meet at span 1110)
+ * were the same defect seen from two angles -- tg_emit_guardrail has gates for
+ * tunnels, decks, forks and kerb footways, and none at all for the two places a
+ * road is meant to be OPEN sideways.
+ *
+ * It is worse than a plain omission, because the R9 railfix made the roadside
+ * armco the FALLBACK owner of a city kerb: tg_rail_kerbfence_here breaks the
+ * pedestrian railing at a crossing and at a street mouth (`pedestrians cross`,
+ * `side-street mouth`), so on exactly those spans the railing stands down, the
+ * armco stops yielding, and the gap the railing opened is filled with crash
+ * barrier. MEASURED on seed 20260901 before this gate: 50 roadside rails on a
+ * zebra span and 78 across a street mouth, every one of them with kerbfence=0.
+ * Span 1110 is one of them (right side, xstreet=1) -- item 15 is not a separate
+ * mechanism, it is one entry in item 9's list.
+ *
+ * PAD: a zebra is painted on ONE span, but a barrier that stops dead on the
+ * bar line still reads as fencing the crossing in. TD5_TG_R11_XPAD spans of
+ * clear air either side let the run end short of the paint.
+ *
+ * Per SIDE for the street mouth (an intersection opens one kerb at a time, and
+ * the far kerb legitimately keeps its barrier); per SPAN for the crossing (it
+ * runs kerb to kerb, so a pedestrian must not walk into armco on either end). */
+#define TD5_TG_R11_XPAD 1
+
+static int tg_r11_street_crosses_here(const TG_NodeList *nl, int si, double sg)
+{
+    int k;
+    if (!tg_r11_xguard()) return 0;
+    for (k = -TD5_TG_R11_XPAD; k <= TD5_TG_R11_XPAD; k++)
+        if (si + k > 1 && tg_city_crossing_here(si + k)) return 1;
+    return tg_xstreet_here(nl, si, sg, NULL) ? 1 : 0;
 }
 
 static int tg_guardrails_enabled(void)
@@ -11524,6 +11715,25 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk,
         if (tg_railfix_on() &&
             (tg_rail_deck_here(nl, si) || tg_rail_kerbfence_here(si, s))) {
             tg_acct(TG_ACCT_R9_RAILYIELD, si);
+            continue;
+        }
+        /* [R11 CROSS items 9+15] A street crosses here -- no barrier, and
+         * nothing else claims the edge either: this is a DELIBERATE hole, not a
+         * hand-off, so it is counted in its own bucket rather than through the
+         * R9 yield (which means "another emitter rails this edge instead").
+         * Counted at the single point the edge would have been claimed, so the
+         * numbers are of rails really dropped, not of candidate spans. */
+        if (tg_r11_street_crosses_here(nl, si, s)) {
+            if (tg_city_crossing_here(si)) s_r11_rail_on_cross++;
+            else                           s_r11_rail_on_xstreet++;
+            if (tg_r11_cross_diag())
+                TD5_LOG_I(LOG_TAG, "trackgen: [R11 CROSS] rail span %4d %-5s "
+                          "DROPPED zebra=%d xstreet=%d kerbfence=%d deck=%d",
+                          si, s > 0.0 ? "left" : "right",
+                          tg_city_crossing_here(si),
+                          tg_xstreet_here(nl, si, s, NULL),
+                          tg_rail_kerbfence_here(si, s),
+                          tg_rail_deck_here(nl, si));
             continue;
         }
         /* Claim this road edge: this side is now committed to geometry. */
@@ -17424,6 +17634,9 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     s_r10_prop_skipped = 0;
     s_r10_audit_n = 0;
     tg_r10_xs_memo_reset();
+    /* [R11 CROSS] crossing/street-mouth barrier counters, same lifetime. */
+    s_r11_rail_on_cross   = 0;
+    s_r11_rail_on_xstreet = 0;
     /* Native-faithful fork: the road SPLITS into two half-width carriageways --
      * MAIN (left, main_half lanes, +width/4) and BRANCH (right, br_lanes, bowed)
      * over the appended corridor. Fork/rejoin spans stay full width. */
@@ -17642,7 +17855,16 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                          * it a raised divider so the two carriageways read as one
                          * divided avenue. Treatment varies per fork. Emitted on
                          * the MAIN fork span alongside the gore it sits on. */
-                        if (ok && tg_fork_is_avenue(fi) &&
+                        /* [R11 CROSS item 8] ... and on EVERY fork, not just
+                         * the ones classified as an avenue. The island is the
+                         * only thing that ever stands proud of the median
+                         * floor, so "avenues only" meant every other fork's
+                         * median was flush with the road. The emitter decides
+                         * per span whether the gore is median-sized; a wide
+                         * split still emits nothing new (its widths fail
+                         * tg_emit_avenue_divider's own fill test). */
+                        if (ok && (tg_fork_is_avenue(fi)
+                                   || tg_r11_median_rise()) &&
                             td5_env_flag_on("TD5RE_AUTOTRACK_AVENUE_DIVIDER"))
                             if (!tg_emit_avenue_divider(nl, si, fi, sh0, sh1,
                                                         gw0, gw1, &meshes,
