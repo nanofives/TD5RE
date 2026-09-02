@@ -22606,6 +22606,46 @@ static int tg_emit_r11_sign(const TG_NodeList *nl, int si, int nspans,
     return 1;
 }
 
+/* [PERF] Per-emitter microsecond accumulators for tg_emit_models.
+ *
+ * tg_emit_models is 99.4 percent of a build (measured: 55780 ms of a 56121 ms
+ * total at 1987 spans, against 291 ms with TD5RE_AUTOTRACK_SCENERY=0), so the
+ * only question that matters is which of the dozen per-span emitters inside it
+ * owns that time. Knob-bisecting costs a 60-80 s run per hypothesis and is
+ * noisy; accumulating per emitter answers it in ONE run, and the internal
+ * proportions are immune to whole-run noise.
+ *
+ * QPC-backed (td5_plat_time_us). td5_plat_time_ms is timeGetTime and far too
+ * coarse: individual emitter calls are well under a millisecond. */
+typedef enum {
+    TG_PF_RAIL = 0, TG_PF_TUNNEL, TG_PF_CITY, TG_PF_BLOCK, TG_PF_CROSS,
+    TG_PF_FLORA, TG_PF_FORESTX, TG_PF_PARKTREE, TG_PF_SLOPEFLORA,
+    TG_PF_TERRAIN, TG_PF_INFRA, TG_PF_TRACK, TG_PF_GUARDVAL,
+    TG_PF_COUNT
+} TG_PerfPhase;
+
+static unsigned long long s_pf_us[TG_PF_COUNT];
+static const char *const k_pf_names[TG_PF_COUNT] = {
+    "rail", "tunnel", "city", "block", "cross", "flora", "forestx",
+    "parktree", "slopeflora", "terrain", "infra", "track", "guardval"
+};
+
+static void tg_perf_reset(void) { memset(s_pf_us, 0, sizeof(s_pf_us)); }
+
+static void tg_perf_report(void)
+{
+    unsigned long long tot = 0;
+    int i;
+    for (i = 0; i < TG_PF_COUNT; i++) tot += s_pf_us[i];
+    if (tot == 0) return;
+    TD5_LOG_I(LOG_TAG, "trackgen PERF models breakdown, total %llu ms:",
+              tot / 1000ull);
+    for (i = 0; i < TG_PF_COUNT; i++)
+        TD5_LOG_I(LOG_TAG, "trackgen PERF   %-11s %7llu ms  %5.1f%%",
+                  k_pf_names[i], s_pf_us[i] / 1000ull,
+                  100.0 * (double)s_pf_us[i] / (double)tot);
+}
+
 static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                           TG_Buf *out)
 {
@@ -22935,11 +22975,14 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 hook.b = &k_biomes[tg_biome_for_span(si)];
                 hook.blk = &meshes; hook.moff = moff; hook.nmesh = &nmesh;
                 hook.maxmesh = TG_MAX_MESHES_PER_ENTRY;
+                unsigned long long pft;
                 if (tg_span_in_tunnel(si)) {
                     /* [R7 GUARD] the tunnel-portal mountain massing sits above and
                      * beside the bore on purpose. */
                     size_t t0 = meshes.len;
+                    pft = td5_plat_time_us();
                     if (!tg_emit_fb_tunnel(&hook)) { ok = 0; break; }
+                    s_pf_us[TG_PF_TUNNEL] += td5_plat_time_us() - pft;
                     tg_guard_mark(t0, meshes.len, TG_GK_TUNNEL, si);
                 } else {
                     /* [R8 GUARD] Kind marks on the NON-exempt hooks too. These
@@ -22949,16 +22992,24 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                      * kind, and zero of them road/deck/gantry/tunnel" a number
                      * in the log rather than a claim. */
                     size_t g0 = meshes.len;
+                    pft = td5_plat_time_us();
                     if (!tg_emit_fb_city(&hook))    { ok = 0; break; }
+                    s_pf_us[TG_PF_CITY] += td5_plat_time_us() - pft;
                     tg_guard_mark(g0, meshes.len, TG_GK_CITY, si);
                     g0 = meshes.len;
+                    pft = td5_plat_time_us();
                     if (!tg_emit_fb_block(&hook))   { ok = 0; break; }
+                    s_pf_us[TG_PF_BLOCK] += td5_plat_time_us() - pft;
                     tg_guard_mark(g0, meshes.len, TG_GK_BLOCK, si);
                     g0 = meshes.len;
+                    pft = td5_plat_time_us();
                     if (!tg_emit_fb_cross(&hook))   { ok = 0; break; }
+                    s_pf_us[TG_PF_CROSS] += td5_plat_time_us() - pft;
                     tg_guard_mark(g0, meshes.len, TG_GK_CROSS, si);
                     g0 = meshes.len;
+                    pft = td5_plat_time_us();
                     if (!tg_emit_fb_flora(&hook))   { ok = 0; break; }
+                    s_pf_us[TG_PF_FLORA] += td5_plat_time_us() - pft;
                     tg_guard_mark(g0, meshes.len, TG_GK_FLORA, si);
                     /* [R12 CROSS item 5] The forest side road runs AFTER the
                      * tree-line band, whose cut it fills. Its own dispatcher
@@ -22966,34 +23017,46 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                      * tg_emit_fb_forest_cross); the enclosing mark here is only
                      * the fail-safe, and tg_guard_kind_of prefers the narrower. */
                     g0 = meshes.len;
+                    pft = td5_plat_time_us();
                     if (!tg_emit_fb_forest_cross(&hook)) { ok = 0; break; }
+                    s_pf_us[TG_PF_FORESTX] += td5_plat_time_us() - pft;
                     tg_guard_mark(g0, meshes.len, TG_GK_FLORA, si);
                     g0 = meshes.len;
+                    pft = td5_plat_time_us();
                     if (!tg_emit_fb_park_trees(&hook)) { ok = 0; break; }
+                    s_pf_us[TG_PF_PARKTREE] += td5_plat_time_us() - pft;
                     tg_guard_mark(g0, meshes.len, TG_GK_PARKTREE, si);
                     g0 = meshes.len;
                     /* [R9 TOPO item 6] trees ON the slope, not on its lip.
                      * Marked FLORA so the on-road guard validates it exactly as
                      * it validates every other billboard -- a new emitter must
                      * inherit R7's authority, not be exempted from it. */
+                    pft = td5_plat_time_us();
                     if (!tg_emit_fb_slope_flora(&hook)) { ok = 0; break; }
+                    s_pf_us[TG_PF_SLOPEFLORA] += td5_plat_time_us() - pft;
                     tg_guard_mark(g0, meshes.len, TG_GK_FLORA, si);
                     g0 = meshes.len;
+                    pft = td5_plat_time_us();
                     if (!tg_emit_fb_terrain(&hook)) { ok = 0; break; }
+                    s_pf_us[TG_PF_TERRAIN] += td5_plat_time_us() - pft;
                     tg_guard_mark(g0, meshes.len, TG_GK_TERRAIN, si);
                     /* [R9 INFRA] street furniture. Marked TG_GK_PROP, which is
                      * SCENERY class -- deliberately NOT exempt from the on-road
                      * guard, so a bin standing in the carriageway is dropped
                      * and counted rather than licensed. */
                     g0 = meshes.len;
+                    pft = td5_plat_time_us();
                     if (!tg_emit_fb_infra(&hook))   { ok = 0; break; }
+                    s_pf_us[TG_PF_INFRA] += td5_plat_time_us() - pft;
                     tg_guard_mark(g0, meshes.len, TG_GK_PROP, si);
                 }
                 /* [R7 GUARD] the start/finish gantry legs stand at the road edge
                  * and its beam spans overhead -- authored across the road. */
                 {
                     size_t k0 = meshes.len;
+                    pft = td5_plat_time_us();
                     if (!tg_emit_fb_track(&hook)) { ok = 0; break; }
+                    s_pf_us[TG_PF_TRACK] += td5_plat_time_us() - pft;
                     tg_guard_mark(k0, meshes.len, TG_GK_GANTRY, si);
                 }
             }
@@ -23175,7 +23238,11 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
         if (ok)
             tg_r9_city_scan_entry(nl, ring, s0, ns, &meshes, moff, nmesh);
         if (ok)
-            tg_guard_validate_entry(nl, ring, s0, ns, &meshes, moff, &nmesh);
+            {
+                unsigned long long gvt = td5_plat_time_us();
+                tg_guard_validate_entry(nl, ring, s0, ns, &meshes, moff, &nmesh);
+                s_pf_us[TG_PF_GUARDVAL] += td5_plat_time_us() - gvt;
+            }
 
         if (ok) {
             const unsigned int hdr = (unsigned)(4 + nmesh * 4);
@@ -26934,8 +27001,18 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     TG_Buf strip, left, right, info;
     int tally[TD5_TG_SECTION_COUNT];
     int nspans = 0, ok = 0;
+    /* [PERF] Per-phase wall clock. The module shipped with no timing at all,
+     * so "the build is slow" had no attribution -- and the phase costs turn
+     * out to be wildly uneven, which is the whole basis for deciding what is
+     * worth threading. Cheap (one clock read per phase) and always on: the
+     * build already costs seconds, so a dozen ms reads are free. */
+    unsigned int t_beg, t_biome, t_center, t_elev, t_strip, t_route, t_info;
+    unsigned int t_wr1, t_models, t_tex, t_wr2, t_sky;
 
     if (!spec) return 0;
+    t_beg = t_biome = t_center = t_elev = t_strip = t_route = t_info = 0;
+    t_wr1 = t_models = t_tex = t_wr2 = t_sky = 0;
+    t_beg = td5_plat_time_ms();
 
     /* [R8 G1] Latch the build seed for the emitters that need a whole-TRACK
      * choice rather than a per-span one -- the start/finish banner set is one
@@ -26967,6 +27044,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
      * the road. Laid out for the whole cell array rather than for nspans, so a
      * span past the ring (an appended branch corridor) still has a biome. */
     tg_biome_layout(spec->seed, spec->target_spans);
+    t_biome = td5_plat_time_ms();
 
     tg_srand(spec->seed);
 
@@ -26977,7 +27055,9 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         TD5_LOG_E(LOG_TAG, "trackgen: centerline build failed");
         goto done;
     }
+    t_center = td5_plat_time_ms();
     tg_apply_elevation(spec, &nl);
+    t_elev = td5_plat_time_ms();
 
     if (td5_env_flag_off("TD5RE_AUTOTRACK_SELFCHECK")) {
         tg_selfcheck_ranges(&nl, spec->lanes,
@@ -26990,6 +27070,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         TD5_LOG_E(LOG_TAG, "trackgen: strip emit failed (spans=%d)", nspans);
         goto done;
     }
+    t_strip = td5_plat_time_ms();
     /* [R3 item 17] Surface any floor/road-overlap or suspect fork geometry now
      * that the strip (and s_ring_len) exist -- read-only, one-off. */
     tg_validate_geometry_safety(&nl, nspans);
@@ -27005,10 +27086,12 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         TD5_LOG_E(LOG_TAG, "trackgen: route emit failed");
         goto done;
     }
+    t_route = td5_plat_time_ms();
     if (!tg_emit_levelinf(spec, nspans, &info) || info.len != 100) {
         TD5_LOG_E(LOG_TAG, "trackgen: levelinf emit failed (len=%zu)", info.len);
         goto done;
     }
+    t_info = td5_plat_time_ms();
 
     if (!tg_write_file(dir, "STRIP.DAT", strip.b, strip.len) ||
         !tg_write_file(dir, "LEFT.TRK",  left.b,  left.len)  ||
@@ -27016,6 +27099,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         !tg_write_file(dir, "LEVELINF.DAT", info.b, info.len)) {
         goto done;
     }
+    t_wr1 = td5_plat_time_ms();
 
     /* MODELS.DAT is OPT-IN (TD5RE_AUTOTRACK_SCENERY=1) and all-or-nothing:
      * its mere presence disables the procedural ribbon renderer, so if the
@@ -27034,17 +27118,21 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
             TG_Buf models, tex;
             memset(&models, 0, sizeof(models));
             memset(&tex, 0, sizeof(tex));
+            tg_perf_reset();
             if (tg_emit_models(&nl, nspans, spec->lanes, &models)) {
                 s_r13_models_bytes = (long)models.len;   /* [R13 BAND] share */
+                t_models = td5_plat_time_ms();
                 tg_write_file(dir, "MODELS.DAT", models.b, models.len);
             }
             else
                 TD5_LOG_W(LOG_TAG, "trackgen: models emit failed; "
                           "falling back to the ribbon renderer");
+            t_wr2 = td5_plat_time_ms();
             /* Texture pages are only referenced by the mesh, so they follow
              * the same gate -- without MODELS.DAT nothing samples them. */
             if (tg_emit_textures(&tex))
                 tg_write_file(dir, "TEXTURES.DAT", tex.b, tex.len);
+            t_tex = td5_plat_time_ms();
             tg_buf_free(&models);
             tg_buf_free(&tex);
         } else {
@@ -27056,10 +27144,29 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     }
 
     tg_install_sky(dir, spec->seed);
+    t_sky = td5_plat_time_ms();
 
     TD5_LOG_I(LOG_TAG, "trackgen: seed=%u level=%d spans=%d len=%.0f world units",
               spec->seed, level_num, nspans,
               (double)nspans * (double)spec->span_length);
+    /* [PERF] Phase attribution. Reads as "phase=ms"; TOTAL is the whole call.
+     * A zero phase means it was skipped (e.g. models/tex when SCENERY=0). */
+    TD5_LOG_I(LOG_TAG, "trackgen PERF spans=%d TOTAL=%ums | biome=%u "
+              "centerline=%u elevation=%u strip=%u routes=%u levelinf=%u "
+              "write_strip=%u models=%u write_models=%u textures=%u sky=%u",
+              nspans, t_sky - t_beg,
+              t_biome  ? t_biome  - t_beg   : 0,
+              t_center ? t_center - t_biome : 0,
+              t_elev   ? t_elev   - t_center: 0,
+              t_strip  ? t_strip  - t_elev  : 0,
+              t_route  ? t_route  - t_strip : 0,
+              t_info   ? t_info   - t_route : 0,
+              t_wr1    ? t_wr1    - t_info  : 0,
+              t_models ? t_models - t_wr1   : 0,
+              t_wr2 && t_models ? t_wr2 - t_models : 0,
+              t_tex    ? t_tex    - t_wr2   : 0,
+              t_sky && t_tex ? t_sky - t_tex : 0);
+    tg_perf_report();
     {
         int s;
         for (s = 0; s < TD5_TG_SECTION_COUNT; s++)
