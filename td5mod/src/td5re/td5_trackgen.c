@@ -703,6 +703,176 @@ static unsigned int s_last_seed = 0;
 static unsigned int s_gen_seed = 0;
 static unsigned int tg_gen_seed(void) { return s_gen_seed; }
 
+/* ------------------------------------------------------------------------
+ * [R14 GENPERF] Generation zone timers.
+ *
+ * Generation blocks the main thread for its whole duration, so the window sits
+ * at "Not Responding" until it finishes and a user reasonably reads that as a
+ * crash. Round 13 roughly doubled the wall clock (seed 20260901: 91 s on the
+ * r12-integration build, 170 s on r13-integration) and NOTHING in the log said
+ * where the time went -- the per-area reports count what was EMITTED, never
+ * what it COST. Every optimisation attempt without this is a guess.
+ *
+ * Deliberately dumb: a microsecond accumulator per named zone, summed over the
+ * whole build and printed once. QueryPerformanceCounter is ~25 ns, so the
+ * per-mesh zones below cost single-digit ms across a full track -- under 0.01%
+ * of the number they are measuring, which is what makes it safe to leave the
+ * accumulation permanently on rather than behind a knob.
+ *
+ * TIMING CANNOT CHANGE OUTPUT: no zone reads a clock into a generator decision,
+ * so MODELS.DAT stays byte-identical with the instrumentation in place. That is
+ * verified in this round rather than asserted.
+ * ------------------------------------------------------------------------ */
+enum {
+    TG_ZONE_CENTERLINE, TG_ZONE_STRIP, TG_ZONE_ROUTES, TG_ZONE_PREPASS,
+    TG_ZONE_EMIT, TG_ZONE_CITYSCAN, TG_ZONE_GUARD_ROAD, TG_ZONE_GUARD_WATER,
+    TG_ZONE_ASSEMBLE, TG_ZONE_TEX, TG_ZONE_REPORTS, TG_ZONE_COUNT
+};
+static const char *const k_tg_zone_name[TG_ZONE_COUNT] = {
+    "centerline", "strip", "routes", "models prepass",
+    "models emit", "r9 city scan", "guard on-road", "guard over-water",
+    "models assemble", "textures", "reports"
+};
+static uint64_t s_tg_zone_us[TG_ZONE_COUNT];
+static long     s_tg_zone_n[TG_ZONE_COUNT];
+static uint64_t s_tg_build_t0 = 0;   /* whole-build wall clock, for the % column */
+static uint64_t s_tg_reports_t0 = 0; /* diagnostic block, spans many call sites  */
+static uint64_t s_tg_emit_t0 = 0;    /* per-span emit loop, one entry at a time  */
+static uint64_t s_tg_guard_t0 = 0;   /* on-road guard, per mesh                  */
+static uint64_t s_tg_wet_t0 = 0;     /* over-water audit, per mesh               */
+
+#define TG_ZONE_BEGIN(z) const uint64_t z##_t0 = td5_plat_time_us()
+#define TG_ZONE_END(z)   do { s_tg_zone_us[z] += td5_plat_time_us() - z##_t0; \
+                              s_tg_zone_n[z]++; } while (0)
+
+/* Second level: inside the per-span emit loop, one bucket per emitter. The
+ * top-level zones say "88% is models emit" and stop there, which names a loop
+ * rather than a cost. These name the emitter. Wrapping is a comma expression so
+ * a call site changes from `f(...)` to `TG_SUB(z, f(...))` and keeps its value,
+ * its short-circuiting and its place in the `if` exactly as written -- the
+ * single-threaded generator makes the shared scratch temp safe. */
+enum {
+    TG_SUB_GROUND, TG_SUB_ROAD, TG_SUB_RAIL, TG_SUB_CITY, TG_SUB_BLOCK,
+    TG_SUB_CROSS, TG_SUB_FLORA, TG_SUB_FCROSS, TG_SUB_PARKTREE,
+    TG_SUB_SLOPEFLORA, TG_SUB_TERRAIN, TG_SUB_INFRA, TG_SUB_TRACK,
+    TG_SUB_TUNNEL, TG_SUB_BRIDGE, TG_SUB_PROPS, TG_SUB_SIGN, TG_SUB_OTHER,
+    TG_SUB_COUNT
+};
+static const char *const k_tg_sub_name[TG_SUB_COUNT] = {
+    "ground skirt", "road quad", "guardrail", "fb city", "fb block",
+    "fb cross", "fb flora", "fb forest-cross", "fb park trees",
+    "fb slope flora", "fb terrain", "fb infra", "fb track",
+    "tunnel", "bridge", "props", "signs", "other"
+};
+static uint64_t s_tg_sub_us[TG_SUB_COUNT];
+static long     s_tg_sub_n[TG_SUB_COUNT];
+static uint64_t s_tg_sub_t0 = 0;
+static int      s_tg_sub_r  = 0;
+
+#define TG_SUB(z, expr) (s_tg_sub_t0 = td5_plat_time_us(), \
+                         s_tg_sub_r = (expr), \
+                         s_tg_sub_us[z] += td5_plat_time_us() - s_tg_sub_t0, \
+                         s_tg_sub_n[z]++, s_tg_sub_r)
+
+/* Third level: the children of the two emitters level 2 indicts. It needs its
+ * OWN scratch temp -- these calls sit INSIDE a level-2 bucket, and a shared t0
+ * would be overwritten by the inner timer and bill the outer one a few
+ * nanoseconds instead of its true span. */
+enum {
+    TG_SUB2_XWALLS, TG_SUB2_XZEBRA, TG_SUB2_XFLANK, TG_SUB2_XINFILL,
+    TG_SUB2_FARBAND, TG_SUB2_FARSHORE, TG_SUB2_PAVED, TG_SUB2_COUNT
+};
+static const char *const k_tg_sub2_name[TG_SUB2_COUNT] = {
+    "cross/sidewalls", "cross/join-zebra", "cross/street-flank",
+    "cross/gap-infill", "terrain/far-band", "terrain/far-shore",
+    "cross/span-paved"
+};
+static uint64_t s_tg_sub2_us[TG_SUB2_COUNT];
+static long     s_tg_sub2_n[TG_SUB2_COUNT];
+static uint64_t s_tg_sub2_t0 = 0;
+static int      s_tg_sub2_r  = 0;
+
+#define TG_SUB2(z, expr) (s_tg_sub2_t0 = td5_plat_time_us(), \
+                          s_tg_sub2_r = (expr), \
+                          s_tg_sub2_us[z] += td5_plat_time_us() - s_tg_sub2_t0, \
+                          s_tg_sub2_n[z]++, s_tg_sub2_r)
+
+/* Fourth level: inside tg_emit_far_band, which level 3 indicts. Same reason for
+ * its own temp as level 3 had -- these sit inside a level-3 bucket. */
+enum {
+    TG_SUB3_GROUNDSIDE, TG_SUB3_DRYREACH, TG_SUB3_ROADCAP, TG_SUB3_ROADEDGE,
+    TG_SUB3_COUNT
+};
+static const char *const k_tg_sub3_name[TG_SUB3_COUNT] = {
+    "band/ground-side", "band/dry-reach", "band/road-cap", "band/road-edge"
+};
+static uint64_t s_tg_sub3_us[TG_SUB3_COUNT];
+static long     s_tg_sub3_n[TG_SUB3_COUNT];
+static uint64_t s_tg_sub3_t0 = 0;
+static double   s_tg_sub3_d  = 0.0;
+
+/* void-valued calls (tg_ground_side, tg_road_edge) need a statement form. */
+#define TG_SUB3V(z, stmt) do { s_tg_sub3_t0 = td5_plat_time_us(); stmt; \
+                               s_tg_sub3_us[z] += td5_plat_time_us() - s_tg_sub3_t0; \
+                               s_tg_sub3_n[z]++; } while (0)
+#define TG_SUB3D(z, expr) (s_tg_sub3_t0 = td5_plat_time_us(), \
+                           s_tg_sub3_d = (expr), \
+                           s_tg_sub3_us[z] += td5_plat_time_us() - s_tg_sub3_t0, \
+                           s_tg_sub3_n[z]++, s_tg_sub3_d)
+
+static void tg_zone_reset(void)
+{
+    memset(s_tg_sub3_us, 0, sizeof s_tg_sub3_us);
+    memset(s_tg_sub3_n,  0, sizeof s_tg_sub3_n);
+    memset(s_tg_sub2_us, 0, sizeof s_tg_sub2_us);
+    memset(s_tg_sub2_n,  0, sizeof s_tg_sub2_n);
+    memset(s_tg_zone_us, 0, sizeof s_tg_zone_us);
+    memset(s_tg_zone_n,  0, sizeof s_tg_zone_n);
+    memset(s_tg_sub_us,  0, sizeof s_tg_sub_us);
+    memset(s_tg_sub_n,   0, sizeof s_tg_sub_n);
+}
+
+/* WARN, not INFO: the shipped td5re.ini runs MinLevel=1, so an INFO report is
+ * dropped exactly on the configuration a user would be timing. */
+static void tg_zone_report(uint64_t total_us)
+{
+    int z;
+    if (!td5_env_flag_on("TD5RE_R14_GENPROF")) return;
+    TD5_LOG_W(LOG_TAG, "[R14 GENPERF] generation took %.1f s", total_us / 1e6);
+    for (z = 0; z < TG_ZONE_COUNT; z++) {
+        if (!s_tg_zone_n[z]) continue;
+        TD5_LOG_W(LOG_TAG, "[R14 GENPERF]   %-17s %8.1f ms  %5.1f%%  (n=%ld)",
+                  k_tg_zone_name[z], s_tg_zone_us[z] / 1e3,
+                  total_us ? 100.0 * (double)s_tg_zone_us[z] / (double)total_us
+                           : 0.0,
+                  s_tg_zone_n[z]);
+    }
+    for (z = 0; z < TG_SUB_COUNT; z++) {
+        if (!s_tg_sub_n[z]) continue;
+        TD5_LOG_W(LOG_TAG, "[R14 GENPERF]     emit/%-15s %8.1f ms  %5.1f%%  (n=%ld)",
+                  k_tg_sub_name[z], s_tg_sub_us[z] / 1e3,
+                  total_us ? 100.0 * (double)s_tg_sub_us[z] / (double)total_us
+                           : 0.0,
+                  s_tg_sub_n[z]);
+    }
+    for (z = 0; z < TG_SUB2_COUNT; z++) {
+        if (!s_tg_sub2_n[z]) continue;
+        TD5_LOG_W(LOG_TAG, "[R14 GENPERF]       %-19s %8.1f ms  %5.1f%%  (n=%ld)",
+                  k_tg_sub2_name[z], s_tg_sub2_us[z] / 1e3,
+                  total_us ? 100.0 * (double)s_tg_sub2_us[z] / (double)total_us
+                           : 0.0,
+                  s_tg_sub2_n[z]);
+    }
+    for (z = 0; z < TG_SUB3_COUNT; z++) {
+        if (!s_tg_sub3_n[z]) continue;
+        TD5_LOG_W(LOG_TAG, "[R14 GENPERF]         %-21s %8.1f ms  %5.1f%%  (n=%ld)",
+                  k_tg_sub3_name[z], s_tg_sub3_us[z] / 1e3,
+                  total_us ? 100.0 * (double)s_tg_sub3_us[z] / (double)total_us
+                           : 0.0,
+                  s_tg_sub3_n[z]);
+    }
+}
+
 static void tg_srand(unsigned int seed)
 {
     s_rng = seed ? seed : 0x9E3779B9u;
@@ -4294,6 +4464,7 @@ static int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
         const size_t nxt = (j + 1 < nmesh) ? moff[ord[j + 1]] : meshes->len;
         size_t mlen = (off <= meshes->len) ? tg_guard_mesh_len(b, off, meshes->len) : 0;
         int keep = 1, exempt, kind = TG_GK_OTHER, cls = TG_GKC_SCENERY;
+        int onroad = 0;                        /* [R14 GENPERF] timed separately */
         int mark_si = -1;
         double depth = 0.0;
         int si = -1;
@@ -4337,9 +4508,17 @@ static int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
                 }
             }
             depth = 0.0; si = -1;
-            if (!exempt &&
-                tg_guard_mesh_on_road_cls(nl, ring, b, off, mlen, win_lo, win_hi,
-                                          cls, &depth, &si)) {
+            /* [R14 GENPERF] The on-road guard's own cost, separated from the
+             * over-water audit below: they are the two per-mesh passes and only
+             * a measurement says which one the round paid for. */
+            s_tg_guard_t0 = td5_plat_time_us();
+            onroad = (!exempt &&
+                      tg_guard_mesh_on_road_cls(nl, ring, b, off, mlen,
+                                                win_lo, win_hi, cls,
+                                                &depth, &si));
+            s_tg_zone_us[TG_ZONE_GUARD_ROAD] += td5_plat_time_us() - s_tg_guard_t0;
+            s_tg_zone_n[TG_ZONE_GUARD_ROAD]++;
+            if (onroad) {
                 keep = 0;
                 rejected++;
                 s_guard_rejects++;
@@ -4364,10 +4543,16 @@ static int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
          * surface is massing standing on water, whatever emitter made it -- so a
          * future emitter is audited for free, exactly like the on-road guard.
          * Counted per kind and per span; reported by tg_r9_bridge_report. */
-        if (keep && mlen > 0 && off + mlen <= meshes->len &&
-            tg_r9_water_audit_mesh(nl, b, off, mlen, kind)) {
-            keep = 0;
-            rejected++;
+        if (keep && mlen > 0 && off + mlen <= meshes->len) {
+            int wet;
+            s_tg_wet_t0 = td5_plat_time_us();      /* [R14 GENPERF] */
+            wet = tg_r9_water_audit_mesh(nl, b, off, mlen, kind);
+            s_tg_zone_us[TG_ZONE_GUARD_WATER] += td5_plat_time_us() - s_tg_wet_t0;
+            s_tg_zone_n[TG_ZONE_GUARD_WATER]++;
+            if (wet) {
+                keep = 0;
+                rejected++;
+            }
         }
         /* [R14 COAST item 5a] The straddle census -- meshes that CROSS the
          * water surface rather than stand over it. Report-only; see the
@@ -17868,15 +18053,21 @@ static int tg_r13_rear_plane(const TG_NodeList *nl, int si, int left,
  *   AHEAD    the rear is in front of a car driving the ring forwards
  *   CONE     it is inside the forward half-angle, not out of the side window
  *   RANGE    it is close enough to be drawn rather than fogged out */
-static double tg_r13_rear_seen_from(const TG_NodeList *nl, int si, int left,
-                                    const TG_Biome *b, int c, double range)
+/* [R14 GENPERF] THE PLANE IS A PARAMETER, NOT A RECOMPUTATION. It is a function
+ * of (si,left,b) alone and the caller's camera sweep holds all three fixed, so
+ * deriving it here cost 81 identical tg_r13_rear_plane calls per exposure test
+ * -- and each one runs tg_side_geom, which is the facade pipeline (built/ramp/
+ * isolated predicates, floors, per-run depth, carriageway clearance). Measured
+ * at 44% of the whole generation. Hoisted into tg_r13_rear_exposed below; the
+ * arithmetic that remains is what actually varies with the camera. */
+static double tg_r13_rear_seen_from(const TG_NodeList *nl, int si, int c,
+                                    double range, double p_x, double p_z,
+                                    double o_x, double o_z)
 {
-    double p_x, p_z, o_x, o_z, rows, vx, vz, d, fx, fz;
+    double vx, vz, d, fx, fz;
     const TG_Node *nc;
     if (c < 1 || c > nl->count - 2) return 0.0;
     if (c > si - TD5_TG_R13_EXPO_NEAR && c < si + TD5_TG_R13_EXPO_NEAR)
-        return 0.0;
-    if (!tg_r13_rear_plane(nl, si, left, b, &p_x, &p_z, &o_x, &o_z, &rows))
         return 0.0;
     nc = &nl->v[c];
     vx = nc->x - p_x; vz = nc->z - p_z;
@@ -17895,12 +18086,19 @@ static int tg_r13_rear_exposed(const TG_NodeList *nl, int si, int left,
 {
     int c, lo, hi, n = 0;
     double fdist = 0.0;
+    double p_x, p_z, o_x, o_z, rows;
 
     if (far_out) *far_out = 0.0;
+    /* [R14 GENPERF] ONCE, not once per camera. No wall on that side means no
+     * camera can see one, which is exactly the answer every iteration of the
+     * old loop computed independently before returning 0.0. */
+    if (!tg_r13_rear_plane(nl, si, left, b, &p_x, &p_z, &o_x, &o_z, &rows))
+        return 0;
     lo = si - TD5_TG_R13_EXPO_BACK;   if (lo < 1) lo = 1;
     hi = si + TD5_TG_R13_EXPO_BACK;   if (hi > nl->count - 2) hi = nl->count - 2;
     for (c = lo; c <= hi; c++) {
-        const double d = tg_r13_rear_seen_from(nl, si, left, b, c, range);
+        const double d = tg_r13_rear_seen_from(nl, si, c, range,
+                                               p_x, p_z, o_x, o_z);
         if (!(d > 0.0)) continue;
         n++;
         if (d > fdist) fdist = d;
@@ -19053,11 +19251,12 @@ static void tg_r14_branch_report(const TG_NodeList *nl, int nspans)
  * R5 item 3 removed the raised kerb break that used to run here. */
 static int tg_emit_fb_cross(const TG_FBHook *h)
 {
-    if (!tg_city_span_paved(h)) return 1;      /* only where the city is */
-    if (!tg_cross_emit_sidewalls(h)) return 0;
-    if (!tg_cross_emit_join_zebra(h)) return 0;
-    if (!tg_cross_emit_street_flank(h)) return 0;   /* [R8 CROSS item 1] */
-    if (!tg_r13_emit_gap_infill(h)) return 0;       /* [R13 FILL item 7b] */
+    if (!TG_SUB2(TG_SUB2_PAVED, tg_city_span_paved(h)))
+        return 1;                              /* only where the city is */
+    if (!TG_SUB2(TG_SUB2_XWALLS, tg_cross_emit_sidewalls(h))) return 0;
+    if (!TG_SUB2(TG_SUB2_XZEBRA, tg_cross_emit_join_zebra(h))) return 0;
+    if (!TG_SUB2(TG_SUB2_XFLANK, tg_cross_emit_street_flank(h))) return 0;  /* [R8 CROSS item 1] */
+    if (!TG_SUB2(TG_SUB2_XINFILL, tg_r13_emit_gap_infill(h))) return 0;     /* [R13 FILL item 7b] */
     return 1;
 }
 
@@ -21853,17 +22052,35 @@ static double s_r9_band_clamp_sum;
 /* Is world point (wx,wz) inside the river rectangle of any bridge run near
  * span si0? Same rectangle tg_emit_bridge_water lays, so the two cannot
  * disagree about where the water is. */
-static int tg_r9_point_over_bridge_water(const TG_NodeList *nl, int si0,
+/* [R14 GENPERF] WHICH SPANS CARRY RIVER, decided once for a whole sample sweep.
+ * The window scan below is a function of si0 alone -- the sample point never
+ * enters it -- yet it used to run inside the point test, so tg_r9_dry_reach
+ * re-derived the same 91-span answer for each of its 41 samples: 3731
+ * tg_span_in_bridge_run + tg_water_span_clear pairs per call, measured at 43%
+ * of the entire generation. Collected once here and handed to the point test.
+ * Ascending order is preserved, so the point test still returns on the same
+ * first match it always did. */
+static int tg_r9_wet_window_spans(const TG_NodeList *nl, int si0, int *out)
+{
+    int s, lo = si0 - TD5_TG_R9_WATER_WINDOW, hi = si0 + TD5_TG_R9_WATER_WINDOW;
+    int n = 0;
+    if (lo < 0) lo = 0;
+    if (hi > nl->count - 2) hi = nl->count - 2;
+    for (s = lo; s <= hi; s++)
+        if (tg_span_in_bridge_run(s) && tg_water_span_clear(s)) out[n++] = s;
+    return n;
+}
+
+static int tg_r9_point_over_bridge_water(const TG_NodeList *nl,
+                                         const int *wet, int nwet,
                                          double wx, double wz)
 {
     const double BW = TD5_TG_BRIDGE_WATER_HALF + TD5_TG_R9_WATER_MARGIN;
-    int s, lo = si0 - TD5_TG_R9_WATER_WINDOW, hi = si0 + TD5_TG_R9_WATER_WINDOW;
-    if (lo < 0) lo = 0;
-    if (hi > nl->count - 2) hi = nl->count - 2;
-    for (s = lo; s <= hi; s++) {
+    int i;
+    for (i = 0; i < nwet; i++) {
+        const int s = wet[i];
         const TG_Node *n0, *n1;
         double dx, dz, along, lat, ax, az, len;
-        if (!tg_span_in_bridge_run(s) || !tg_water_span_clear(s)) continue;
         n0 = &nl->v[s]; n1 = &nl->v[s + 1];
         dx = wx - n0->x; dz = wz - n0->z;
         /* tg_emit_bridge_water's own axes: left unit is (tz, -tx). */
@@ -21887,11 +22104,20 @@ static double tg_r9_dry_reach(const TG_NodeList *nl, int si,
                               double d0, double dmax)
 {
     const int N = 40;
-    int k;
+    int wet[2 * TD5_TG_R9_WATER_WINDOW + 1];
+    int k, nwet;
     if (dmax <= d0) return dmax;
+    /* [R14 GENPERF] ONCE per sweep, not once per sample. With no river span in
+     * the window at all -- which is the common case, since a bridge is a rare
+     * feature and this runs on every band on the track -- nwet is 0, every
+     * sample below answers "dry" without touching a node, and the whole sweep
+     * collapses to the loop counter. That is the same answer the old code
+     * reached by scanning 91 spans 41 times over. */
+    nwet = tg_r9_wet_window_spans(nl, si, wet);
     for (k = 0; k <= N; k++) {
         const double d = d0 + (dmax - d0) * (double)k / (double)N;
-        if (tg_r9_point_over_bridge_water(nl, si, ox + ux * d, oz + uz * d))
+        if (tg_r9_point_over_bridge_water(nl, wet, nwet,
+                                          ox + ux * d, oz + uz * d))
             return d0 + (dmax - d0) * (double)(k > 0 ? k - 1 : 0) / (double)N;
     }
     return dmax;
@@ -22038,10 +22264,11 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
         for (e = 0; e < 2; e++) {
             const int se = e ? g1 : g0;
             const double wsd = h->b->water ? tg_water_side(se) : 0.0;
-            const double c = tg_topo_road_cap(nl, se, is_left);
+            const double c = TG_SUB3D(TG_SUB3_ROADCAP,
+                                      tg_topo_road_cap(nl, se, is_left));
             TG_GroundProf pp;
             double seam, d;
-            tg_ground_side(nl, se, is_left, wsd, &pp);
+            TG_SUB3V(TG_SUB3_GROUNDSIDE, tg_ground_side(nl, se, is_left, wsd, &pp));
             seam = nl->v[se].y - pp.dy[pp.n - 1] - TD5_TG_FAR_SINK;
             d = seam - floor_y;
             if (d > drop_max) drop_max = d;
@@ -22083,18 +22310,22 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
             const int se = e ? g1 : g0;
             double lx, ly, lz, rx, ry, rz, ux, uz, len, so, d;
             TG_GroundProf p;
-            tg_road_edge(nl, se, e ? 1.0 : 0.0, 0.0, 1.0,
-                         &lx, &ly, &lz, &rx, &ry, &rz);
+            TG_SUB3V(TG_SUB3_ROADEDGE,
+                     tg_road_edge(nl, se, e ? 1.0 : 0.0, 0.0, 1.0,
+                                  &lx, &ly, &lz, &rx, &ry, &rz));
             ux = lx - rx; uz = lz - rz;
             len = sqrt(ux * ux + uz * uz);
             if (len < 1e-6) { ux = 1.0; uz = 0.0; } else { ux /= len; uz /= len; }
             if (!is_left) { ux = -ux; uz = -uz; }
-            tg_ground_side(nl, se, is_left, h->b->water ? tg_water_side(se) : 0.0,
-                           &p);
+            TG_SUB3V(TG_SUB3_GROUNDSIDE,
+                     tg_ground_side(nl, se, is_left,
+                                    h->b->water ? tg_water_side(se) : 0.0, &p));
             so = p.d[p.n - 1];
             if (so > dry_so_max) dry_so_max = so;
-            d = tg_r9_dry_reach(nl, h->si, (is_left ? lx : rx), (is_left ? lz : rz),
-                                ux, uz, so - TD5_TG_FAR_TUCK, reach);
+            d = TG_SUB3D(TG_SUB3_DRYREACH,
+                         tg_r9_dry_reach(nl, h->si, (is_left ? lx : rx),
+                                         (is_left ? lz : rz), ux, uz,
+                                         so - TD5_TG_FAR_TUCK, reach));
             if (d < lim) lim = d;
         }
         if (lim < reach) {
@@ -22130,7 +22361,7 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
             const double wsd = h->b->water ? tg_water_side(se) : 0.0;
             double drop;
 
-            tg_ground_side(nl, se, is_left, wsd, &p);
+            TG_SUB3V(TG_SUB3_GROUNDSIDE, tg_ground_side(nl, se, is_left, wsd, &p));
             so   = p.d[p.n - 1];
             drop = p.dy[p.n - 1];
             /* Belt and braces on top of the clamp in tg_ground_side: this band
@@ -22639,7 +22870,7 @@ static int tg_emit_fb_terrain(const TG_FBHook *h)
              * grass band -- one wall standing on the sea surface at the water
              * plane's own outer edge, so the ocean ends in a coastline rather
              * than in nothing. */
-            if (!tg_emit_far_shore(h, is_left)) return 0;
+            if (!TG_SUB2(TG_SUB2_FARSHORE, tg_emit_far_shore(h, is_left))) return 0;
             continue;
         }
         /* [R6 item 4] The RIGHT band's ridge over a fork lands on the branch;
@@ -22650,7 +22881,7 @@ static int tg_emit_fb_terrain(const TG_FBHook *h)
             side_ridge = 0;
         }
         if (*h->nmesh + 2 >= h->maxmesh) break;
-        if (!tg_emit_far_band(h, is_left, side_ridge)) return 0;
+        if (!TG_SUB2(TG_SUB2_FARBAND, tg_emit_far_band(h, is_left, side_ridge))) return 0;
         if (side_ridge != ridge_ok || !side_ridge)
             tg_acct(TG_ACCT_R8_TERRAIN, h->si);
     }
@@ -24492,14 +24723,18 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
      * predicates that carry the continuation (tg_facade_built, tg_block_arm_skew)
      * take a span index and no node list, and a per-call rescan would be
      * quadratic in the span count. Must precede the first facade query. */
-    tg_turn_map_build(nl, nspans);
-    tg_r8_cross_report(nl, nspans);   /* [R8 CROSS] class sweep, opt-in */
-    tg_r10_cross_report(nl, nspans);  /* [R10 CROSS] side-street setback, opt-in */
-    tg_r11_city_report(nl, nspans);   /* [R11 CITY] frontage/junction dump, opt-in */
-    tg_r13_junc_report(nl, nspans);   /* [R13 JUNCTION] bend-fold sweep, opt-in */
-    tg_r13_fill_report(nl, nspans);   /* [R13 FILL] exposed-rear sweep, opt-in */
-    tg_r9_city_reset();               /* [R9 CITY] pavement/massing sweep */
-    tg_r13_faces_reset();             /* [R13 FACES] run-end return census */
+    {
+        TG_ZONE_BEGIN(TG_ZONE_PREPASS);
+        tg_turn_map_build(nl, nspans);
+        tg_r8_cross_report(nl, nspans);   /* [R8 CROSS] class sweep, opt-in */
+        tg_r10_cross_report(nl, nspans);  /* [R10 CROSS] side-street setback, opt-in */
+        tg_r11_city_report(nl, nspans);   /* [R11 CITY] frontage/junction dump, opt-in */
+        tg_r13_junc_report(nl, nspans);   /* [R13 JUNCTION] bend-fold sweep, opt-in */
+        tg_r13_fill_report(nl, nspans);   /* [R13 FILL] exposed-rear sweep, opt-in */
+        tg_r9_city_reset();               /* [R9 CITY] pavement/massing sweep */
+        tg_r13_faces_reset();             /* [R13 FACES] run-end return census */
+        TG_ZONE_END(TG_ZONE_PREPASS);
+    }
 
     for (e = 0; e < nentries && ok; e++) {
         const int s0 = e * TD5_TG_SPANS_PER_ENTRY;
@@ -24516,6 +24751,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
         /* Ground skirt then road, per span. Offsets are RECORDED as meshes are
          * appended -- sizes differ once ground, buildings and road quads are
          * mixed, so they cannot come from a uniform stride. */
+        s_tg_emit_t0 = td5_plat_time_us();     /* [R14 GENPERF] per-span emit */
         for (i = 0; i < ns && ok; i++) {
             const int si = s0 + i;
 
@@ -24624,7 +24860,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
             {
                 const TG_Biome *gb = &k_biomes[tg_biome_for_span(si)];
                 double wsd = gb->water ? tg_water_side(si) : 0.0;
-                if (!tg_emit_ground(nl, si, &meshes, wsd)) { ok = 0; break; }
+                if (!TG_SUB(TG_SUB_GROUND, tg_emit_ground(nl, si, &meshes, wsd))) { ok = 0; break; }
             }
             /* [R7 GUARD] the ground skirt underlaps the road by design. */
             tg_guard_mark(moff[nmesh - 1], meshes.len, TG_GK_SKIRT, si);
@@ -24705,7 +24941,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                                                         &meshes, moff, &nmesh))
                                 ok = 0;
                     }
-                } else if (!tg_emit_road_mesh(nl, si, lanes, &meshes)) {
+                } else if (!TG_SUB(TG_SUB_ROAD, tg_emit_road_mesh(nl, si, lanes, &meshes))) {
                     ok = 0;
                 }
             }
@@ -24728,7 +24964,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                  * zero bytes is read as garbage geometry, not as a missing
                  * rail. */
                 moff[nmesh] = meshes.len;
-                if (!tg_emit_guardrail(nl, si, &meshes, &emitted)) ok = 0;
+                if (!TG_SUB(TG_SUB_RAIL, tg_emit_guardrail(nl, si, &meshes, &emitted))) ok = 0;
                 else if (emitted) { nmesh++; nrails++; }
                 tg_guard_mark(r0, meshes.len, TG_GK_RAIL, si);
             }
@@ -24756,7 +24992,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     /* [R7 GUARD] the tunnel-portal mountain massing sits above and
                      * beside the bore on purpose. */
                     size_t t0 = meshes.len;
-                    if (!tg_emit_fb_tunnel(&hook)) { ok = 0; break; }
+                    if (!TG_SUB(TG_SUB_TUNNEL, tg_emit_fb_tunnel(&hook))) { ok = 0; break; }
                     tg_guard_mark(t0, meshes.len, TG_GK_TUNNEL, si);
                 } else {
                     /* [R8 GUARD] Kind marks on the NON-exempt hooks too. These
@@ -24766,16 +25002,16 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                      * kind, and zero of them road/deck/gantry/tunnel" a number
                      * in the log rather than a claim. */
                     size_t g0 = meshes.len;
-                    if (!tg_emit_fb_city(&hook))    { ok = 0; break; }
+                    if (!TG_SUB(TG_SUB_CITY, tg_emit_fb_city(&hook)))    { ok = 0; break; }
                     tg_guard_mark(g0, meshes.len, TG_GK_CITY, si);
                     g0 = meshes.len;
-                    if (!tg_emit_fb_block(&hook))   { ok = 0; break; }
+                    if (!TG_SUB(TG_SUB_BLOCK, tg_emit_fb_block(&hook)))   { ok = 0; break; }
                     tg_guard_mark(g0, meshes.len, TG_GK_BLOCK, si);
                     g0 = meshes.len;
-                    if (!tg_emit_fb_cross(&hook))   { ok = 0; break; }
+                    if (!TG_SUB(TG_SUB_CROSS, tg_emit_fb_cross(&hook)))   { ok = 0; break; }
                     tg_guard_mark(g0, meshes.len, TG_GK_CROSS, si);
                     g0 = meshes.len;
-                    if (!tg_emit_fb_flora(&hook))   { ok = 0; break; }
+                    if (!TG_SUB(TG_SUB_FLORA, tg_emit_fb_flora(&hook)))   { ok = 0; break; }
                     tg_guard_mark(g0, meshes.len, TG_GK_FLORA, si);
                     /* [R12 CROSS item 5] The forest side road runs AFTER the
                      * tree-line band, whose cut it fills. Its own dispatcher
@@ -24783,34 +25019,34 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                      * tg_emit_fb_forest_cross); the enclosing mark here is only
                      * the fail-safe, and tg_guard_kind_of prefers the narrower. */
                     g0 = meshes.len;
-                    if (!tg_emit_fb_forest_cross(&hook)) { ok = 0; break; }
+                    if (!TG_SUB(TG_SUB_FCROSS, tg_emit_fb_forest_cross(&hook))) { ok = 0; break; }
                     tg_guard_mark(g0, meshes.len, TG_GK_FLORA, si);
                     g0 = meshes.len;
-                    if (!tg_emit_fb_park_trees(&hook)) { ok = 0; break; }
+                    if (!TG_SUB(TG_SUB_PARKTREE, tg_emit_fb_park_trees(&hook))) { ok = 0; break; }
                     tg_guard_mark(g0, meshes.len, TG_GK_PARKTREE, si);
                     g0 = meshes.len;
                     /* [R9 TOPO item 6] trees ON the slope, not on its lip.
                      * Marked FLORA so the on-road guard validates it exactly as
                      * it validates every other billboard -- a new emitter must
                      * inherit R7's authority, not be exempted from it. */
-                    if (!tg_emit_fb_slope_flora(&hook)) { ok = 0; break; }
+                    if (!TG_SUB(TG_SUB_SLOPEFLORA, tg_emit_fb_slope_flora(&hook))) { ok = 0; break; }
                     tg_guard_mark(g0, meshes.len, TG_GK_FLORA, si);
                     g0 = meshes.len;
-                    if (!tg_emit_fb_terrain(&hook)) { ok = 0; break; }
+                    if (!TG_SUB(TG_SUB_TERRAIN, tg_emit_fb_terrain(&hook))) { ok = 0; break; }
                     tg_guard_mark(g0, meshes.len, TG_GK_TERRAIN, si);
                     /* [R9 INFRA] street furniture. Marked TG_GK_PROP, which is
                      * SCENERY class -- deliberately NOT exempt from the on-road
                      * guard, so a bin standing in the carriageway is dropped
                      * and counted rather than licensed. */
                     g0 = meshes.len;
-                    if (!tg_emit_fb_infra(&hook))   { ok = 0; break; }
+                    if (!TG_SUB(TG_SUB_INFRA, tg_emit_fb_infra(&hook)))   { ok = 0; break; }
                     tg_guard_mark(g0, meshes.len, TG_GK_PROP, si);
                 }
                 /* [R7 GUARD] the start/finish gantry legs stand at the road edge
                  * and its beam spans overhead -- authored across the road. */
                 {
                     size_t k0 = meshes.len;
-                    if (!tg_emit_fb_track(&hook)) { ok = 0; break; }
+                    if (!TG_SUB(TG_SUB_TRACK, tg_emit_fb_track(&hook))) { ok = 0; break; }
                     tg_guard_mark(k0, meshes.len, TG_GK_GANTRY, si);
                 }
             }
@@ -24835,7 +25071,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                  * appended span. */
                 size_t before = meshes.len;
                 int n_added = 0;
-                if (!tg_emit_tunnel(nl, si, &meshes, &n_added)) { ok = 0; break; }
+                if (!TG_SUB(TG_SUB_TUNNEL, tg_emit_tunnel(nl, si, &meshes, &n_added))) { ok = 0; break; }
                 for (k = 0; k < n_added; k++)
                     moff[nmesh++] = before + (size_t)k *
                                     ((meshes.len - before) / (size_t)n_added);
@@ -24912,7 +25148,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                  * [R7 GUARD] the deck IS the road and the piers descend from it;
                  * the parapets/ribs sit on the deck edge or overhead. */
                 b1 = meshes.len;
-                if (!tg_emit_bridge(nl, si, &meshes, &nb)) { ok = 0; break; }
+                if (!TG_SUB(TG_SUB_BRIDGE, tg_emit_bridge(nl, si, &meshes, &nb))) { ok = 0; break; }
                 for (k = 0; k < nb; k++)
                     moff[nmesh++] = b1 + (size_t)k *
                                     ((meshes.len - b1) / (size_t)nb);
@@ -24946,8 +25182,8 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 /* Prop billboards: variable count/size, each records its own. */
                 {
                     size_t p0 = meshes.len;
-                    if (!tg_emit_props(nl, si, b, &meshes, moff, &nmesh,
-                                       TG_MAX_MESHES_PER_ENTRY)) { ok = 0; break; }
+                    if (!TG_SUB(TG_SUB_PROPS, tg_emit_props(nl, si, b, &meshes, moff, &nmesh,
+                                       TG_MAX_MESHES_PER_ENTRY))) { ok = 0; break; }
                     tg_guard_mark(p0, meshes.len, TG_GK_PROP, si);
                 }
                 /* Sea plane on coastal runs. [R6 item 14] NOT on a bridge run:
@@ -24972,8 +25208,8 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                  */
                 {
                     size_t sg0 = meshes.len;
-                    if (!tg_emit_r11_sign(nl, si, nspans, &meshes, moff, &nmesh,
-                                          TG_MAX_MESHES_PER_ENTRY)) {
+                    if (!TG_SUB(TG_SUB_SIGN, tg_emit_r11_sign(nl, si, nspans, &meshes, moff, &nmesh,
+                                          TG_MAX_MESHES_PER_ENTRY))) {
                         ok = 0; break;
                     }
                     tg_guard_mark(sg0, meshes.len, TG_GK_PROP, si);
@@ -24985,16 +25221,22 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
          * carriageway, over ALL of this entry's assembled geometry, whatever
          * emitter produced it. Runs before the block header so the rejected
          * meshes never reach the offset table. */
+        s_tg_zone_us[TG_ZONE_EMIT] += td5_plat_time_us() - s_tg_emit_t0;
+        s_tg_zone_n[TG_ZONE_EMIT]++;
         /* [R9 CITY] Measure BEFORE the guard compacts the buffer -- the pavement
          * marks are byte offsets into it. Pavement is never a guard reject
          * (rejects-by-kind reports zero sidewalk/city kinds), so measuring here
          * and shipping after describe the same geometry. */
-        if (ok)
+        if (ok) {
+            TG_ZONE_BEGIN(TG_ZONE_CITYSCAN);
             tg_r9_city_scan_entry(nl, ring, s0, ns, &meshes, moff, nmesh);
+            TG_ZONE_END(TG_ZONE_CITYSCAN);
+        }
         if (ok)
             tg_guard_validate_entry(nl, ring, s0, ns, &meshes, moff, &nmesh);
 
         if (ok) {
+            TG_ZONE_BEGIN(TG_ZONE_ASSEMBLE);
             const unsigned int hdr = (unsigned)(4 + nmesh * 4);
             tg_put_u32(&blocks[e], (unsigned)nmesh);
             for (i = 0; i < nmesh; i++)
@@ -25004,6 +25246,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 memcpy(blocks[e].b + blocks[e].len, meshes.b, meshes.len);
                 blocks[e].len += meshes.len;
             }
+            TG_ZONE_END(TG_ZONE_ASSEMBLE);
         }
         tg_buf_free(&meshes);
     }
@@ -28793,11 +29036,18 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     snprintf(dir, sizeof(dir), "re/assets/levels/level%03d", level_num);
     _mkdir(dir);
 
-    if (!tg_build_centerline(spec, &nl, tally)) {
-        TD5_LOG_E(LOG_TAG, "trackgen: centerline build failed");
-        goto done;
+    tg_zone_reset();                      /* [R14 GENPERF] per-BUILD, like tg_acct_reset */
+    s_tg_build_t0 = td5_plat_time_us();
+
+    {
+        TG_ZONE_BEGIN(TG_ZONE_CENTERLINE);
+        if (!tg_build_centerline(spec, &nl, tally)) {
+            TD5_LOG_E(LOG_TAG, "trackgen: centerline build failed");
+            goto done;
+        }
+        tg_apply_elevation(spec, &nl);
+        TG_ZONE_END(TG_ZONE_CENTERLINE);
     }
-    tg_apply_elevation(spec, &nl);
 
     if (td5_env_flag_off("TD5RE_AUTOTRACK_SELFCHECK")) {
         tg_selfcheck_ranges(&nl, spec->lanes,
@@ -28806,9 +29056,13 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         s_selfcheck_regen_seed = spec->seed;   /* run after the build completes */
     }
 
-    if (!tg_emit_strip(&nl, &strip, &nspans) || nspans < 8) {
-        TD5_LOG_E(LOG_TAG, "trackgen: strip emit failed (spans=%d)", nspans);
-        goto done;
+    {
+        TG_ZONE_BEGIN(TG_ZONE_STRIP);
+        if (!tg_emit_strip(&nl, &strip, &nspans) || nspans < 8) {
+            TD5_LOG_E(LOG_TAG, "trackgen: strip emit failed (spans=%d)", nspans);
+            goto done;
+        }
+        TG_ZONE_END(TG_ZONE_STRIP);
     }
     /* [R3 item 17] Surface any floor/road-overlap or suspect fork geometry now
      * that the strip (and s_ring_len) exist -- read-only, one-off. */
@@ -28820,10 +29074,14 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     /* byte0 is the lateral corridor position (0 = left rail, 255 = right).
      * Straddle the centreline symmetrically so the AI's racing line runs down
      * the middle of a road whose width varies from section to section. */
-    if (!tg_emit_routes(&nl, nspans, 96,  &left) ||
-        !tg_emit_routes(&nl, nspans, 160, &right)) {
-        TD5_LOG_E(LOG_TAG, "trackgen: route emit failed");
-        goto done;
+    {
+        TG_ZONE_BEGIN(TG_ZONE_ROUTES);
+        if (!tg_emit_routes(&nl, nspans, 96,  &left) ||
+            !tg_emit_routes(&nl, nspans, 160, &right)) {
+            TD5_LOG_E(LOG_TAG, "trackgen: route emit failed");
+            goto done;
+        }
+        TG_ZONE_END(TG_ZONE_ROUTES);
     }
     if (!tg_emit_levelinf(spec, nspans, &info) || info.len != 100) {
         TD5_LOG_E(LOG_TAG, "trackgen: levelinf emit failed (len=%zu)", info.len);
@@ -28863,8 +29121,12 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
                           "falling back to the ribbon renderer");
             /* Texture pages are only referenced by the mesh, so they follow
              * the same gate -- without MODELS.DAT nothing samples them. */
-            if (tg_emit_textures(&tex))
-                tg_write_file(dir, "TEXTURES.DAT", tex.b, tex.len);
+            {
+                TG_ZONE_BEGIN(TG_ZONE_TEX);
+                if (tg_emit_textures(&tex))
+                    tg_write_file(dir, "TEXTURES.DAT", tex.b, tex.len);
+                TG_ZONE_END(TG_ZONE_TEX);
+            }
             tg_buf_free(&models);
             tg_buf_free(&tex);
         } else {
@@ -28937,6 +29199,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
                           s_forks[f].cbase + s_forks[f].len - 1);
         }
     }
+    s_tg_reports_t0 = td5_plat_time_us();  /* [R14 GENPERF] diagnostic block */
     tg_acct_report(nspans);
     tg_rail_edge_report(&nl, nspans);  /* [R9 RAILFIX] per-edge uniqueness */
     tg_r11_guard_report(&nl, nspans);  /* [R11 GUARD] structural-edge dump  */
@@ -29026,6 +29289,13 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     tg_r11_water_diag(&nl, nspans);            /* [R11 WATER] wet footprint    */
     tg_r12_tex_report(&nl, nspans);            /* [R12 TEX] page-per-surface   */
     tg_r14_coast_report();                   /* [R14 COAST item 5a] straddles */
+    /* [R14 integration] the coast report is INSIDE the REPORTS zone on purpose:
+     * closing the zone above it would leave its cost out of its own timing. */
+    s_tg_zone_us[TG_ZONE_REPORTS] += td5_plat_time_us() - s_tg_reports_t0;
+    s_tg_zone_n[TG_ZONE_REPORTS]++;
+    /* [R14 GENPERF] Last thing the build does, so the total covers everything
+     * above it including the file writes. */
+    tg_zone_report(td5_plat_time_us() - s_tg_build_t0);
     ok = 1;
 
 done:
