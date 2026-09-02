@@ -32,6 +32,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 02 (internet radio)" },
+    { CL_ITEM,    "FIX: the radio no longer kills itself at startup. A" },
+    { CL_ITEM,    "  dev-only fault-injection test was reading a bad" },
+    { CL_ITEM,    "  address on EVERY dev build, because its knob was" },
+    { CL_ITEM,    "  wired default-ON instead of opt-in. Every session" },
+    { CL_ITEM,    "  crashed its own radio thread and lost music." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 02 (auto-track build speed, part 2)" },
     { CL_ITEM,    "PERF: generating a track is 3.5x faster. Race-launch" },
     { CL_ITEM,    "  generation 104 s -> 30 s, and the track it builds is" },
