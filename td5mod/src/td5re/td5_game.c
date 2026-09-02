@@ -12,6 +12,7 @@
 #include "td5_track.h"
 #include "td5_rt.h"
 #include "td5_track_registry.h"
+#include "td5_trackgen_stream.h" /* streamed scenery: completion passes + countdown hold */
 #include "td5_fmv.h"
 #include "td5_sound.h"
 #include "td5_input.h"
@@ -1324,6 +1325,12 @@ int td5_game_tick(void) {
 
     /* Poll network subsystem (discovery, connection management) */
     td5_net_tick();
+
+    /* [SCENERY STREAMING] Main-thread half of the scenery worker: notices when
+     * it has finished and runs the four table-walking passes InitRace normally
+     * does at step 8 (they ran at load against an empty table). Inert unless a
+     * generated track is streaming. */
+    td5_tgstream_tick();
 
     switch (g_td5.game_state) {
 
@@ -7084,7 +7091,12 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
              * [PORT 2026-06] While the first-race tutorial overlay is up, DO NOT
              * tick the countdown — freezing g_td5.paused at 1 holds the grid
              * until the player dismisses the overlay (td5_tutorial.c). */
-            if (!td5_tutorial_is_active())
+            /* [SCENERY STREAMING] ...and hold it the same way while the road
+             * ahead of the grid has no scenery yet, so the race does not start
+             * looking at the untextured fallback ribbon. Bounded, unlike the
+             * tutorial hold beside it, because a wedged worker has nobody to
+             * press a button (see td5_tgstream_hold). */
+            if (!td5_tutorial_is_active() && !td5_tgstream_hold())
                 tick_race_countdown();
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
@@ -7160,7 +7172,8 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
          * then hides cleanly at timer==0. Mirrors orig's per-frame call to
          * UpdateRaceCameraTransitionTimer @ 0x0040A490 which is invoked
          * regardless of paused state. */
-        if (g_cameraTransitionActive > 0 && !td5_tutorial_is_active()) {
+        if (g_cameraTransitionActive > 0 && !td5_tutorial_is_active() &&
+            !td5_tgstream_hold()) {
             tick_race_countdown();
         }
 

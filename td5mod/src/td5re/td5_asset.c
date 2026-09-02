@@ -34,6 +34,7 @@
 #include "td5_track_registry.h" /* custom-track registry: level/finish-span lookups */
 #include "td5_trackgen.h"       /* AUTO-GENERATED track: per-race regeneration */
 #include "td5_trackgen_preview.h"  /* ...and the preview worker we must join first */
+#include "td5_trackgen_stream.h"   /* ...and the scenery worker, same reason */
 #include "td5_platform.h"
 #include "td5re.h"
 #include "td5_render.h"
@@ -2374,7 +2375,22 @@ int td5_asset_load_level(int track_index)
          * overlap this build would corrupt the track being raced, so join it
          * first -- unconditionally, and before the regenerate, not after. */
         td5_tgprev_cancel_join();
-        if (!td5_trackgen_regenerate(0))
+        /* [SCENERY STREAMING] Same reason, one worker further: a stream from
+         * the PREVIOUS race may still be publishing into the table this load
+         * is about to replace, and it reads the generator statics the build
+         * below overwrites. Join it before anything else. */
+        td5_tgstream_cancel_join();
+        /* Streamed: geometry + textures now, scenery on the worker once the
+         * level is loaded (see td5_tgstream_begin below). The scenery is 99.4
+         * percent of the build and the simulation never reads it, so this is
+         * what makes a generated race start in under a second instead of ~21 s.
+         * TD5RE_AUTOTRACK_STREAM=0 restores the synchronous path. */
+        if (td5_tgstream_enabled()) {
+            if (!td5_trackgen_regenerate_streamed(0))
+                TD5_LOG_W(LOG_TAG, "load_level: auto-track streamed regenerate "
+                          "failed; reusing the previous generated track");
+        }
+        else if (!td5_trackgen_regenerate(0))
             TD5_LOG_W(LOG_TAG, "load_level: auto-track regenerate failed; "
                       "reusing the previous generated track");
     }
@@ -2490,6 +2506,15 @@ int td5_asset_load_level(int track_index)
             TD5_LOG_I(LOG_TAG, "parsed MODELS.DAT: %d meshes from %s", parsed, models_source);
         }
     }
+
+    /* [SCENERY STREAMING] Reserve the scenery table and start the worker.
+     * MUST be here, AFTER the parse above: td5_track_parse_models_dat opens
+     * with free_models_dat_runtime, so reserving any earlier would have the
+     * load free everything the worker is about to publish into. A streamed
+     * build writes no MODELS.DAT, so the parse above found nothing and the
+     * table is empty at this point -- which is exactly what reserve wants.
+     * No-op for every non-streamed load. */
+    td5_tgstream_begin();
 
     {
         static const char *s_levelinf_names[1] = { "LEVELINF.DAT" };

@@ -697,6 +697,23 @@ static unsigned long long s_pf_n_xhere, s_pf_n_xbase, s_pf_n_ground;
  * emit. Reset to 1 after each use so only the boot path is ever affected. */
 static int s_want_scenery = 1;
 
+/* [SCENERY STREAMING] Does THIS build hand its scenery to a worker instead of
+ * emitting it inline?
+ *
+ * A streamed build does the geometry (about 300 ms) plus TEXTURES.DAT, writes
+ * NO MODELS.DAT, and parks everything the scenery phases need -- the node list
+ * above all -- for td5_trackgen_stream_scenery to pick up on the streaming
+ * worker after the level has loaded. Same three-way relationship as
+ * s_want_scenery: independent of the player's TD5RE_AUTOTRACK_SCENERY choice,
+ * and reset after each use so only the path that asked for it is affected.
+ *
+ * THE NODE LIST IS OWNED HERE, not by build_level. build_level frees nl.v at
+ * its `done:` label; a streamed build transfers the pointer out first and this
+ * module frees it when the worker finishes or is cancelled. */
+static int         s_want_stream = 0;
+/* The rest of the stash needs TG_NodeList, so it lives just below that
+ * typedef -- search s_stream_nl. */
+
 /* [PERF LEVER 2] Per-build memo for the two crossing predicates.
  *
  * Measured: 22246 tg_crossing_base calls cost 17392 ms of a 129945 ms build
@@ -1460,6 +1477,15 @@ typedef struct {
     int      count;
     int      cap;
 } TG_NodeList;
+
+/* [SCENERY STREAMING] The stash a streamed build leaves for the worker (see
+ * s_want_stream above). THE NODE LIST IS OWNED HERE, not by build_level, which
+ * frees nl.v at its `done:` label -- a streamed build transfers the pointer out
+ * first and td5_trackgen_stream_discard frees it. */
+static TG_NodeList s_stream_nl;         /* .v owned here while pending */
+static int         s_stream_nspans, s_stream_lanes;
+static int         s_stream_pending;    /* geometry done, scenery not started */
+static char        s_stream_dir[256];   /* level dir, for the deferred write */
 
 static int tg_nodes_reserve(TG_NodeList *nl, int need)
 {
@@ -27901,7 +27927,46 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
          * build writes a NEW strip under a NEW seed, so a MODELS.DAT left over
          * from a previous session would no longer match its geometry, and a
          * mismatched mesh file disables the ribbon and hides the road. */
-        if (s_want_scenery && td5_env_flag_on("TD5RE_AUTOTRACK_SCENERY")) {
+        /* [SCENERY STREAMING] Geometry + textures now, scenery on a worker
+         * after the level load. MODELS.DAT is REMOVED rather than left: it does
+         * not exist yet, and a stale one from the previous race would be parsed
+         * against this build's brand-new strip -- wrong meshes, and its mere
+         * presence switches off the ribbon that is meant to cover the road
+         * until the real scenery arrives. The node list transfers out of
+         * build_level's ownership here (see s_stream_nl). */
+        if (s_want_stream && s_want_scenery &&
+            td5_env_flag_on("TD5RE_AUTOTRACK_SCENERY")) {
+            TG_Buf tex;
+            char tex_path[320];
+            memset(&tex, 0, sizeof(tex));
+            remove(models_path);
+
+            s_stream_nl     = nl;
+            nl.v            = NULL;   /* ownership moved; `done:` must not free */
+            nl.count        = 0;
+            nl.cap          = 0;
+            s_stream_nspans = nspans;
+            s_stream_lanes  = spec->lanes;
+            s_stream_pending = 1;
+            snprintf(s_stream_dir, sizeof s_stream_dir, "%s", dir);
+
+            /* Texture pages must exist BEFORE the level load, because the
+             * streamed meshes reference them by page id and the load is what
+             * uploads them. They are cheap (~155 ms) and independent of the
+             * mesh emit, so they stay synchronous. */
+            snprintf(tex_path, sizeof tex_path, "%s/TEXTURES.DAT", dir);
+            tg_perf_reset();
+            if (tg_emit_textures(&tex))
+                tg_write_file(dir, "TEXTURES.DAT", tex.b, tex.len);
+            else
+                remove(tex_path);   /* stale pages would mis-texture the meshes */
+            t_tex = td5_plat_time_ms();
+            tg_buf_free(&tex);
+            TD5_LOG_I(LOG_TAG, "trackgen: STREAMED build -- geometry + textures "
+                      "done, %d spans of scenery deferred to the worker",
+                      nspans);
+        }
+        else if (s_want_scenery && td5_env_flag_on("TD5RE_AUTOTRACK_SCENERY")) {
             TG_Buf models, tex;
             memset(&models, 0, sizeof(models));
             memset(&tex, 0, sizeof(tex));
@@ -28424,4 +28489,93 @@ int td5_trackgen_regenerate_geometry_only(unsigned int seed)
     r = td5_trackgen_regenerate(seed);
     s_want_scenery = 1;     /* restore before any race-launch build */
     return r;
+}
+
+/* ===================== SECTION: streamed scenery producer ==================
+ * The consumer half of this lives in td5_trackgen_stream.c, which owns the
+ * worker thread and the lifecycle. Everything here is the generator's side:
+ * a build that stops after the geometry, and a driver that runs the scenery
+ * phases later, publishing each entry as it is assembled.
+ *
+ * SINGLE INSTANCE, STILL. The generator has ~102 mutable file-scope statics
+ * and the stashed node list is read by the worker, so between the streamed
+ * build and td5_trackgen_stream_discard NOTHING else may run a build or a
+ * route preview. td5_asset_load_level joins both workers before regenerating;
+ * the studio screen joins them too. */
+
+int td5_trackgen_regenerate_streamed(unsigned int seed)
+{
+    int r;
+    s_want_stream = 1;
+    r = td5_trackgen_regenerate(seed);
+    s_want_stream = 0;      /* one build only; every other path is unaffected */
+    if (!r) td5_trackgen_stream_discard();
+    return r;
+}
+
+int td5_trackgen_stream_pending(void)    { return s_stream_pending; }
+int td5_trackgen_stream_span_count(void) { return s_stream_nspans; }
+
+int td5_trackgen_stream_entry_count(void)
+{
+    if (!s_stream_pending) return 0;
+    return (s_stream_nspans + TD5_TG_SPANS_PER_ENTRY - 1)
+           / TD5_TG_SPANS_PER_ENTRY;
+}
+
+void td5_trackgen_stream_discard(void)
+{
+    free(s_stream_nl.v);
+    memset(&s_stream_nl, 0, sizeof(s_stream_nl));
+    s_stream_pending = 0;
+    s_stream_nspans = 0;
+    s_stream_lanes = 0;
+}
+
+/* Run the scenery phases for the stashed build, publishing each entry to the
+ * track module as soon as it exists. Called ONLY from the streaming worker.
+ *
+ * `cancel` is polled between entries, which is the only place it is safe to
+ * stop: an entry is the unit the flora rule makes indivisible, and a
+ * half-assembled block must never be published.
+ *
+ * Still writes MODELS.DAT at the end, which is not bookkeeping -- it is what
+ * keeps the byte-identity gate available. The same blocks assembled in the
+ * same order must produce the same file as the non-streamed path, so a
+ * streamed build can be sha256-compared against TD5RE_AUTOTRACK_STREAM=0.
+ *
+ * Returns 1 only when the whole table was published. */
+int td5_trackgen_stream_scenery(volatile int *cancel)
+{
+    TG_Buf models;
+    int e, nentries, ok = 1;
+
+    if (!s_stream_pending) return 0;
+    memset(&models, 0, sizeof(models));
+    tg_perf_reset();
+
+    if (!tg_scenery_begin(&s_stream_nl, s_stream_nspans, s_stream_lanes)) {
+        TD5_LOG_W(LOG_TAG, "trackgen: streamed scenery begin failed");
+        return 0;
+    }
+    nentries = s_scn.nentries;
+
+    for (e = 0; e < nentries && s_scn.ok; e++) {
+        if (cancel && *cancel) { ok = 0; break; }
+        tg_scenery_entry(e);
+        if (!s_scn.ok) { ok = 0; break; }
+        td5_track_scenery_publish_entry(e, s_scn.blocks[e].b,
+                                        s_scn.blocks[e].len);
+    }
+
+    /* _end runs even after a cancel: it owns the per-entry buffers, and
+     * skipping it would leak every one of them plus the side-terrain table. */
+    if (!tg_scenery_end(&models))
+        ok = 0;
+    else if (ok)
+        tg_write_file(s_stream_dir, "MODELS.DAT", models.b, models.len);
+    tg_buf_free(&models);
+
+    if (ok) tg_perf_report();
+    return ok;
 }

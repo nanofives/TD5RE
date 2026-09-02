@@ -149,6 +149,27 @@ int td5_trackgen_regenerate(unsigned int seed);
  * Independent of TD5RE_AUTOTRACK_SCENERY, which stays the player's choice. */
 int td5_trackgen_regenerate_geometry_only(unsigned int seed);
 
+/* --- Streamed scenery: producer side ---------------------------------------
+ * A streamed build does the geometry (~300 ms) plus TEXTURES.DAT, writes NO
+ * MODELS.DAT, and parks what the scenery phases need so the worker in
+ * td5_trackgen_stream.c can run them after the level has loaded. That is what
+ * lets a generated track start racing on geometry alone and decorate itself as
+ * the player drives; scenery is 99.4 percent of a build and the simulation
+ * never reads it.
+ *
+ * SINGLE INSTANCE: between the streamed build and _discard, nothing else may
+ * run a build or a route preview -- the generator keeps ~102 mutable statics
+ * and the worker reads the stashed node list. Join both workers first. */
+int  td5_trackgen_regenerate_streamed(unsigned int seed);
+int  td5_trackgen_stream_pending(void);        /* geometry done, scenery owed */
+int  td5_trackgen_stream_entry_count(void);
+int  td5_trackgen_stream_span_count(void);
+/* Worker-thread only. Publishes each entry via td5_track_scenery_publish_entry
+ * as it is assembled; polls *cancel between entries. Returns 1 only if the
+ * whole table was published. */
+int  td5_trackgen_stream_scenery(volatile int *cancel);
+void td5_trackgen_stream_discard(void);        /* frees the stashed node list */
+
 /* [S2 / Phase 2 streaming] Rebuild the main-road span records for `seed` and
  * return them as a blob of 24-byte records for the caller to free. Lets the
  * track module overwrite a region of its LIVE span array with bytes that

@@ -604,6 +604,23 @@ static int rt_feed_billboard(const TD5_MeshHeader *mesh)
  * one static world BLAS each (rt_build_actor_mesh, identity instance); billboard
  * meshes -> cutout crossed quads. Deduped by pointer; capped at RT_MAX_SCENERY.
  * Gated: TD5RE_RT_SCENERY (default 1), TD5RE_RT_BILLBOARDS (default 1). */
+/* [SCENERY STREAMING] Is the scenery table still filling in?
+ *
+ * rt_feed_world_scenery must run EXACTLY ONCE per level, and it is not
+ * re-entrant in the way a second call would need: it resets its dedup set
+ * (s_seen_count = 0) at the top but NOT s_scenery_count / s_scenery_handles[],
+ * so calling it again re-feeds every mesh, doubles every BLAS and runs at
+ * RT_MAX_SCENERY. So on a streamed track we do not feed a partial table and
+ * top it up later -- we wait and feed once, complete.
+ *
+ * The cost is that td5_rt_warmup_prepare exists specifically to put the BLAS
+ * wave on the loading splash, and streaming defeats that by design: expect the
+ * wave during the first seconds of the drive instead. */
+static int rt_scenery_still_streaming(void)
+{
+    return td5_track_scenery_undecorated_from_span() >= 0;
+}
+
 static void rt_feed_world_scenery(void)
 {
     static int s_scenery_on = -1, s_bb_on = -1;
@@ -771,7 +788,7 @@ int td5_rt_warmup_prepare(void)
     if (s_track_chunk_count == 0)
         td5_rt_level_build();
     /* Full-scene scenery feed -- the wave that otherwise hits race frame 1. */
-    if (!s_scenery_fed) {
+    if (!s_scenery_fed && !rt_scenery_still_streaming()) {
         rt_feed_world_scenery();
         s_scenery_fed = 1;
     }
@@ -813,7 +830,7 @@ void td5_rt_frame(int vp, int pane_x, int pane_y, int pane_w, int pane_h)
      * InitRace has parsed MODELS.DAT (the level_build hook ran too early). The
      * wrapper chunks the BLAS builds across frames so a big track warms up over
      * a few frames without a TDR. */
-    if (vp == 0 && !s_scenery_fed) {
+    if (vp == 0 && !s_scenery_fed && !rt_scenery_still_streaming()) {
         rt_feed_world_scenery();
         s_scenery_fed = 1;
     }
