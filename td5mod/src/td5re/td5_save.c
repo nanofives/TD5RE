@@ -2418,8 +2418,13 @@ static int cfgini_write_progress(void)
     cfgini_add(&w, "Count = %d\r\n", s_favseed_count);
     for (int i = 0; i < s_favseed_count; i++) {
         const TD5_FavSeed *fs = &s_favseeds[i];
-        char nm[32];
-        snprintf(nm, sizeof nm, "%s", fs->name);
+        /* Fixed-width copy rather than snprintf("%s"): the source is a fixed
+         * char[32] field, not a string, so nothing guarantees a terminator
+         * inside it and the compiler is right to say so. Copy the field and
+         * force the last byte instead. */
+        char nm[sizeof fs->name];
+        memcpy(nm, fs->name, sizeof nm);
+        nm[sizeof nm - 1] = '\0';
         /* Defensively strip any control byte so it cannot break the INI. */
         for (int c = 0; c < (int)sizeof nm; c++) {
             if (nm[c] == '\0') break;

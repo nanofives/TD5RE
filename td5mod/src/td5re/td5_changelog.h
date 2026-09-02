@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 02 (streamed scenery groundwork)" },
+    { CL_ITEM,    "INTERNAL: the track module can now take a generated" },
+    { CL_ITEM,    "  track's scenery one chunk at a time, while a race is" },
+    { CL_ITEM,    "  already running, instead of needing all of it built" },
+    { CL_ITEM,    "  before the level loads. Nothing uses it yet, so no" },
+    { CL_ITEM,    "  visible change; it is what will let an auto-generated" },
+    { CL_ITEM,    "  track start in under a second and decorate itself as" },
+    { CL_ITEM,    "  you drive. The road ahead of the filled-in part falls" },
+    { CL_ITEM,    "  back to plain grey tarmac rather than empty sky." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 02 (internet radio)" },
     { CL_ITEM,    "FIX: the radio no longer kills itself at startup. A" },
     { CL_ITEM,    "  dev-only fault-injection test was reading a bad" },

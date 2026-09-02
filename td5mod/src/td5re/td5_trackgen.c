@@ -26,6 +26,7 @@
  */
 #include "td5_trackgen.h"
 #include "td5_track_registry.h"
+#include "td5_track.h"          /* streamed-scenery ingest (td5_track_scenery_*) */
 #include "td5_platform.h"
 #include "td5_config.h"
 #include "td5_jobs.h"          /* parallel terrain pre-pass (see the side buffers) */
@@ -23249,7 +23250,8 @@ static int tg_scenery_begin(const TG_NodeList *nl, int nspans, int lanes)
      * only has the main-ring nodes, so a corridor span takes its geometry from
      * the base main node nl->v[F+1+k] plus the branch shift. */
     const int branch_active = tg_branches_enabled() && s_fork_count > 0;
-    unsigned long long rt_ = 0;   /* [PERF] post-loop bracket */
+    /* (the [PERF] post-loop bracket that used to open here now lives with the
+     * post-loop itself, in tg_scenery_end) */
     const int ring = branch_active ? s_ring_len : nspans;
 
     /* [R9 INFRA] per-build counters, reset with the rest of the accounting. */
@@ -24113,10 +24115,50 @@ static int tg_scenery_end(TG_Buf *out)
 
     for (e = 0; e < nentries; e++) tg_buf_free(&blocks[e]);
     free(blocks);
-    return ok && !out->oom;
+    /* Clearing these is not bookkeeping: blocks[] has just been freed, so
+     * leaving s_scn.blocks set hands the next caller a dangling pointer. (The
+     * split originally kept an early `return` here, which made both these
+     * stores unreachable -- no reader today, but the streaming driver polls
+     * s_scn.active.) */
     s_scn.active = 0;
     s_scn.blocks = NULL;
-    return ok && out && !out->oom;
+    return ok && !out->oom;
+}
+
+/* Blob headroom per span for a streamed table, which cannot know the real
+ * total until the last entry is assembled. Measured ~6 KB/span across three
+ * configs (MARATHON: 19,098,312 B over 3187 spans); 8 KB carries the slack. */
+enum { TG_STREAM_BYTES_PER_SPAN = 8192 };
+
+/* [STREAMED SCENERY] Equivalence check for the streaming ingest path, run on
+ * the blocks this build just assembled (dev knob, off by default).
+ *
+ * The point is to exercise td5_track_scenery_reserve/publish_entry against
+ * REAL generated blocks and print totals that must match the parse path's own
+ * "runtime display lists: N blocks, M mesh slots, K mesh records" line for the
+ * same seed. Publishing here is throwaway: the level load that follows parses
+ * MODELS.DAT and calls free_models_dat_runtime, which drops this table.
+ *
+ * (stream_done rebuilds the span mapping against whatever span array is
+ * current, which during a build is the PREVIOUS level's. Harmless -- the real
+ * load rebuilds it again -- but it is why this is a knob and not always on.) */
+static void tg_scenery_stream_selfcheck(int nspans)
+{
+    int e, geom = 0;
+
+    if (!td5_track_scenery_reserve(s_scn.nentries,
+                                   (size_t)nspans * TG_STREAM_BYTES_PER_SPAN)) {
+        TD5_LOG_W(LOG_TAG, "stream selfcheck: reserve failed for %d entries",
+                  s_scn.nentries);
+        return;
+    }
+    for (e = 0; e < s_scn.nentries; e++)
+        geom += td5_track_scenery_publish_entry(e, s_scn.blocks[e].b,
+                                                s_scn.blocks[e].len);
+    TD5_LOG_I(LOG_TAG, "stream selfcheck: %d/%d entries carried geometry, "
+              "%d settled", geom, s_scn.nentries,
+              td5_track_scenery_ready_entries());
+    td5_track_scenery_stream_done();
 }
 
 /* The original whole-build entry point, now a driver over the three phases. */
@@ -24127,6 +24169,9 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     if (!tg_scenery_begin(nl, nspans, lanes)) return 0;
     for (e = 0; e < s_scn.nentries && s_scn.ok; e++)
         tg_scenery_entry(e);
+    /* Before tg_scenery_end, which frees blocks[]. */
+    if (s_scn.ok && td5_env_flag_off("TD5RE_AUTOTRACK_STREAM_SELFCHECK"))
+        tg_scenery_stream_selfcheck(nspans);
     return tg_scenery_end(out);
 }
 

@@ -7078,11 +7078,9 @@ static const char *const k_at_safe_n[] = { "TIGHT", "NARROW", "STANDARD",
 static const int  k_at_grade_v[] = { 0, 60, 120, 160, 200 };
 static const char *const k_at_grade_n[] = { "FLAT", "GENTLE", "STANDARD",
                                             "STEEP", "SEVERE" };
-static const int  k_at_bgain_v[] = { 0, 1, 2, 3, 4 };
-static const char *const k_at_bgain_n[] = { "0", "1", "2", "3", "4" };
-static const int  k_at_bmin_v[] = { 8, 16, 24, 60, 120 };
-static const char *const k_at_bmin_n[] = { "TINY", "SHORT", "STANDARD",
-                                           "LONG", "VERY LONG" };
+/* (branch-gain and branch-min-length had value tables here; the curated
+ * 46-row set does not expose either, so they were dead. git history has them
+ * if a ROUTE-section row ever wants them back.) */
 static const int  k_at_runoff_v[] = { 0, 50, 100, 200, 400 };
 static const char *const k_at_runoff_n[] = { "NONE", "SHORT", "STANDARD",
                                              "LONG", "VERY LONG" };
