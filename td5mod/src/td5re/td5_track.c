@@ -324,19 +324,98 @@ void free_models_dat_runtime(void)
  * POINTERS for identity (s_drag_gantry_mesh, DamageSlot.mesh, the render
  * dedup). Allocating per-slot would silently break all of them.
  */
-static TD5_MeshHeader *s_models_mesh = NULL;      /* runtime headers          */
+/* STORED IN CHUNKS, NOT ONE REALLOC'D ARRAY. Two reasons, and the first is a
+ * latent bug fix rather than a refactor:
+ *
+ *  1. s_models_dl_meshes[] stores &s_models_mesh[i] (see the runtime display
+ *     lists below). A realloc of a flat array MOVES every element, dangling
+ *     every pointer already published to the renderer. Today that is survived
+ *     only because the whole table is built before anything reads it; it makes
+ *     incremental publication (streaming scenery while driving) impossible.
+ *     Chunks never move an existing element, so a published pointer stays
+ *     valid however much the table grows.
+ *  2. No capacity guess is needed. A flat pre-allocation would have to be
+ *     sized from blob_size / TD5_MESH_DISK_SIZE, which is ~209k records for a
+ *     12 MB blob against the ~2000 a real track actually uses.
+ *
+ * Lookup is a hash rather than the former linear scan over every record: that
+ * scan made table construction O(n^2), and any incremental use would pay an
+ * O(n) probe per slot resolution.
+ *
+ * DEDUPLICATED BY SOURCE OFFSET exactly as before -- see the note above on why
+ * pointer identity is load-bearing. */
+#define TD5_MESH_CHUNK_SHIFT 8
+#define TD5_MESH_CHUNK       (1 << TD5_MESH_CHUNK_SHIFT)
+#define TD5_MESH_CHUNK_MASK  (TD5_MESH_CHUNK - 1)
+
+static TD5_MeshHeader **s_mesh_chunks = NULL;     /* elements never move      */
+static int             s_mesh_chunk_count = 0;
 static uint32_t       *s_models_mesh_src = NULL;  /* blob offset each came from */
 static int             s_models_mesh_count = 0;
 static int             s_models_mesh_cap = 0;
+/* Open addressed blob_off -> index+1. 0 means empty, so index 0 is storable. */
+static int            *s_mesh_hash = NULL;
+static unsigned        s_mesh_hash_mask = 0;
+
+static TD5_MeshHeader *mesh_slot(int i)
+{
+    return &s_mesh_chunks[i >> TD5_MESH_CHUNK_SHIFT][i & TD5_MESH_CHUNK_MASK];
+}
 
 static void free_models_mesh_table(void)
 {
-    free(s_models_mesh);
-    s_models_mesh = NULL;
+    int c;
+    for (c = 0; c < s_mesh_chunk_count; c++) free(s_mesh_chunks[c]);
+    free(s_mesh_chunks);
+    s_mesh_chunks = NULL;
+    s_mesh_chunk_count = 0;
     free(s_models_mesh_src);
     s_models_mesh_src = NULL;
+    free(s_mesh_hash);
+    s_mesh_hash = NULL;
+    s_mesh_hash_mask = 0;
     s_models_mesh_count = 0;
     s_models_mesh_cap = 0;
+}
+
+/* Index for blob_off, or -1. Terminates because the table is kept below a 0.7
+ * load factor, so there is always an empty slot to stop on. */
+static int mesh_hash_find(uint32_t blob_off)
+{
+    unsigned h;
+    if (!s_mesh_hash) return -1;
+    h = (unsigned)(blob_off * 2654435761u) & s_mesh_hash_mask;
+    for (;;) {
+        const int slot = s_mesh_hash[h];
+        if (slot == 0) return -1;
+        if (s_models_mesh_src[slot - 1] == blob_off) return slot - 1;
+        h = (h + 1u) & s_mesh_hash_mask;
+    }
+}
+
+static void mesh_hash_put(uint32_t blob_off, int idx)
+{
+    unsigned h = (unsigned)(blob_off * 2654435761u) & s_mesh_hash_mask;
+    while (s_mesh_hash[h] != 0) h = (h + 1u) & s_mesh_hash_mask;
+    s_mesh_hash[h] = idx + 1;
+}
+
+/* Grow (or create) the hash and reinsert. Safe to rehash at any time: it holds
+ * INDICES, not pointers, so nothing the renderer sees is affected. */
+static int mesh_hash_reserve(int want)
+{
+    unsigned cap = 256;
+    int *tab, i;
+    while ((int)(cap - (cap >> 2)) < want) cap <<= 1;   /* keep load < 0.75 */
+    if (s_mesh_hash && cap == s_mesh_hash_mask + 1u) return 1;
+    tab = (int *)calloc(cap, sizeof(*tab));
+    if (!tab) return 0;
+    free(s_mesh_hash);
+    s_mesh_hash = tab;
+    s_mesh_hash_mask = cap - 1u;
+    for (i = 0; i < s_models_mesh_count; i++)
+        mesh_hash_put(s_models_mesh_src[i], i);
+    return 1;
 }
 
 /* Convert (or return the existing) runtime header for the mesh record at
@@ -346,29 +425,37 @@ TD5_MeshHeader *td5_track_runtime_mesh_for(uint32_t blob_off)
     const uint8_t *rec;
     TD5_MeshHeader *dst;
     uint32_t cmd_off, vtx_off, nrm_off;
-    int i;
+    int hit;
 
     if (!s_models_blob || blob_off == 0) return NULL;
     if ((size_t)blob_off + TD5_MESH_DISK_SIZE > s_models_blob_size) return NULL;
 
-    for (i = 0; i < s_models_mesh_count; i++)
-        if (s_models_mesh_src[i] == blob_off)
-            return &s_models_mesh[i];
+    hit = mesh_hash_find(blob_off);
+    if (hit >= 0) return mesh_slot(hit);
 
     if (s_models_mesh_count == s_models_mesh_cap) {
-        int ncap = s_models_mesh_cap ? s_models_mesh_cap * 2 : 256;
-        TD5_MeshHeader *nm = (TD5_MeshHeader *)realloc(s_models_mesh,
-                                (size_t)ncap * sizeof(*nm));
-        uint32_t *ns = (uint32_t *)realloc(s_models_mesh_src,
-                                (size_t)ncap * sizeof(*ns));
-        if (nm) s_models_mesh = nm;
-        if (ns) s_models_mesh_src = ns;
-        if (!nm || !ns) return NULL;
-        s_models_mesh_cap = ncap;
+        /* Append ONE chunk. Existing chunks are untouched, so every pointer
+         * already handed out stays valid -- that is the whole point. */
+        TD5_MeshHeader **nc = (TD5_MeshHeader **)realloc(s_mesh_chunks,
+                                (size_t)(s_mesh_chunk_count + 1) * sizeof(*nc));
+        TD5_MeshHeader *chunk;
+        uint32_t *ns;
+        if (!nc) return NULL;
+        s_mesh_chunks = nc;
+        chunk = (TD5_MeshHeader *)calloc(TD5_MESH_CHUNK, sizeof(*chunk));
+        if (!chunk) return NULL;
+        /* s_models_mesh_src may move freely: nothing holds a pointer into it. */
+        ns = (uint32_t *)realloc(s_models_mesh_src,
+                (size_t)(s_models_mesh_cap + TD5_MESH_CHUNK) * sizeof(*ns));
+        if (!ns) { free(chunk); return NULL; }
+        s_models_mesh_src = ns;
+        s_mesh_chunks[s_mesh_chunk_count++] = chunk;
+        s_models_mesh_cap += TD5_MESH_CHUNK;
     }
+    if (!mesh_hash_reserve(s_models_mesh_count + 1)) return NULL;
 
     rec = s_models_blob + blob_off;
-    dst = &s_models_mesh[s_models_mesh_count];
+    dst = mesh_slot(s_models_mesh_count);
 
     /* Region 1: everything up to the link words is byte-identical on both
      * arches (render_type .. reserved_28/runtime_flags). */
@@ -385,6 +472,7 @@ TD5_MeshHeader *td5_track_runtime_mesh_for(uint32_t blob_off)
     dst->runtime_flags = 0;   /* never inherit runtime bits from file data */
 
     s_models_mesh_src[s_models_mesh_count] = blob_off;
+    mesh_hash_put(blob_off, s_models_mesh_count);
     s_models_mesh_count++;
     return dst;
 }
@@ -392,7 +480,7 @@ TD5_MeshHeader *td5_track_runtime_mesh_for(uint32_t blob_off)
 int td5_track_runtime_mesh_count(void) { return s_models_mesh_count; }
 TD5_MeshHeader *td5_track_runtime_mesh_at(int i)
 {
-    return (i >= 0 && i < s_models_mesh_count) ? &s_models_mesh[i] : NULL;
+    return (i >= 0 && i < s_models_mesh_count) ? mesh_slot(i) : NULL;
 }
 
 static void free_models_runtime_lists(void)
@@ -463,9 +551,20 @@ int td5_track_build_models_runtime_lists(void)
         cursor += sub_count;
     }
 
+    /* Slots counts display-list REFERENCES, records counts DISTINCT meshes, so
+     * records <= slots always. MEASURED: on both a generated track and a
+     * shipped one the two are EQUAL (auto seed 20260901: 14864 / 14864), i.e.
+     * 1:1 is the normal case here and sharing is the exception the dedup
+     * exists to handle rather than the rule. So equality is NOT a fault
+     * signal -- what would be is records EXCEEDING slots, or the figure moving
+     * for a track whose geometry did not, either of which means dedup stopped
+     * collapsing shared records and pointer identity (s_drag_gantry_mesh,
+     * damage slots, the render dedup) has silently broken. */
     TD5_LOG_I("track",
-              "runtime display lists: %d blocks, %u mesh slots",
-              s_models_dl_count, (unsigned)total_slots);
+              "runtime display lists: %d blocks, %u mesh slots, %d mesh records"
+              " (chunks of %d)",
+              s_models_dl_count, (unsigned)total_slots,
+              td5_track_runtime_mesh_count(), TD5_MESH_CHUNK);
     return 1;
 }
 
