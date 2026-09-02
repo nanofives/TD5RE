@@ -659,6 +659,7 @@ typedef enum {
      * xhere is the crossing predicate charged inside cross (and others). */
     TG_PF_FARSHORE, TG_PF_FARBAND, TG_PF_XHERE, TG_PF_GROUND,
     TG_PF_XPAVED, TG_PF_XWALL, TG_PF_XZEBRA, TG_PF_XFLANK, TG_PF_XINFILL,
+    TG_PF_TOPOCAP, TG_PF_DRYREACH, TG_PF_BANDCOV,
     TG_PF_COUNT
 } TG_PerfPhase;
 /* First nested slot; everything from here down is excluded from the total. */
@@ -669,7 +670,8 @@ static const char *const k_pf_names[TG_PF_COUNT] = {
     "rail", "tunnel", "city", "block", "cross", "flora", "forestx",
     "parktree", "slopeflora", "terrain", "infra", "track", "guardval",
     ".farshore", ".farband", ".xhere", ".ground",
-    ".xpaved", ".xwall", ".xzebra", ".xflank", ".xinfill"
+    ".xpaved", ".xwall", ".xzebra", ".xflank", ".xinfill",
+    ".topocap", ".dryreach", ".bandcov"
 };
 
 /* Call counts for the two crossing predicates. The COUNT is the actionable
@@ -12351,7 +12353,8 @@ static double tg_topo_drop_at(const TG_TopoChain *c, double d);
  * ring and is already cleared by tg_carriageway_reach / tg_ground_branch_clear,
  * which know its bow. Span separation is measured AROUND the ring so the
  * start/finish join does not read as a foreign road. */
-static double tg_topo_road_cap(const TG_NodeList *nl, int si, int is_left)
+static double tg_topo_road_cap_inner(const TG_NodeList *nl, int si,
+                                    int is_left)
 {
     const int ring = (s_ring_len > 1 && s_ring_len <= nl->count)
                    ? s_ring_len : nl->count;
@@ -12395,6 +12398,20 @@ static double tg_topo_road_cap(const TG_NodeList *nl, int si, int is_left)
         if (lim < best) best = lim;
     }
     return best;
+}
+
+/* [PERF] Timed + counted. This is a pure function of (si, is_left) that scans
+ * the WHOLE ring on every call, and it has five call sites -- one of them
+ * inside tg_ground_side, which ran 14684 times. Prime suspect for far_band. */
+static unsigned long long s_pf_n_topocap;
+static double tg_topo_road_cap(const TG_NodeList *nl, int si, int is_left)
+{
+    unsigned long long t0 = td5_plat_time_us();
+    double r;
+    s_pf_n_topocap++;
+    r = tg_topo_road_cap_inner(nl, si, is_left);
+    s_pf_us[TG_PF_TOPOCAP] += td5_plat_time_us() - t0;
+    return r;
 }
 
 /* [C2] Where a falling side must reach before it is allowed to end unwalled.
@@ -18885,7 +18902,7 @@ static int tg_r13_band_side(const TG_NodeList *nl, int si, double side,
  * NEIGHBOURING group's apron ending in an open cut edge, so the drop has to sit
  * at least one group deep inside the walled run for that edge to be hidden too.
  * Writes the worst-case wall top/setback across the whole tested range. */
-static int tg_r13_band_covers(const TG_NodeList *nl, int g0, int g1,
+static int tg_r13_band_covers_inner(const TG_NodeList *nl, int g0, int g1,
                               int is_left, double *out_top, double *out_lat)
 {
     const double side = is_left ? 1.0 : -1.0;
@@ -18905,6 +18922,15 @@ static int tg_r13_band_covers(const TG_NodeList *nl, int g0, int g1,
     *out_top = top;
     *out_lat = lat;
     return 1;
+}
+
+static int tg_r13_band_covers(const TG_NodeList *nl, int g0, int g1,
+                              int is_left, double *out_top, double *out_lat)
+{
+    unsigned long long t0 = td5_plat_time_us();
+    int r = tg_r13_band_covers_inner(nl, g0, g1, is_left, out_top, out_lat);
+    s_pf_us[TG_PF_BANDCOV] += td5_plat_time_us() - t0;
+    return r;
 }
 
 static int tg_emit_fb_flora(const TG_FBHook *h)
@@ -20560,17 +20586,22 @@ static double s_r9_band_clamp_sum;
 /* Is world point (wx,wz) inside the river rectangle of any bridge run near
  * span si0? Same rectangle tg_emit_bridge_water lays, so the two cannot
  * disagree about where the water is. */
-static int tg_r9_point_over_bridge_water(const TG_NodeList *nl, int si0,
-                                         double wx, double wz)
+/* [PERF] Geometry half only. The per-SPAN half of the old predicate -- "is s a
+ * bridge run with clear water" -- depends on s ALONE and not on the sample
+ * point, but it used to be re-evaluated for all 91 spans of the window on
+ * every one of the 41 march samples. The caller now resolves the wet spans
+ * once and passes them here, so the same test runs 91 times per march instead
+ * of ~7500. Ascending order is preserved, so the first-match early return is
+ * unchanged and the answer is bit-identical. */
+static int tg_r9_point_over_wet(const TG_NodeList *nl, const int *wet, int nwet,
+                                double wx, double wz)
 {
     const double BW = TD5_TG_BRIDGE_WATER_HALF + TD5_TG_R9_WATER_MARGIN;
-    int s, lo = si0 - TD5_TG_R9_WATER_WINDOW, hi = si0 + TD5_TG_R9_WATER_WINDOW;
-    if (lo < 0) lo = 0;
-    if (hi > nl->count - 2) hi = nl->count - 2;
-    for (s = lo; s <= hi; s++) {
+    int i;
+    for (i = 0; i < nwet; i++) {
+        const int s = wet[i];
         const TG_Node *n0, *n1;
         double dx, dz, along, lat, ax, az, len;
-        if (!tg_span_in_bridge_run(s) || !tg_water_span_clear(s)) continue;
         n0 = &nl->v[s]; n1 = &nl->v[s + 1];
         dx = wx - n0->x; dz = wz - n0->z;
         /* tg_emit_bridge_water's own axes: left unit is (tz, -tx). */
@@ -20589,19 +20620,53 @@ static int tg_r9_point_over_bridge_water(const TG_NodeList *nl, int si0,
 /* Largest outward distance from (ox,oz) along unit (ux,uz) that stays off the
  * river. Sampled rather than solved: the band is four rings, so a sample grid
  * finer than the ring spacing is all the resolution the result can carry. */
-static double tg_r9_dry_reach(const TG_NodeList *nl, int si,
+static double tg_r9_dry_reach_inner(const TG_NodeList *nl, int si,
                               double ox, double oz, double ux, double uz,
                               double d0, double dmax)
 {
     const int N = 40;
-    int k;
+    int wet[2 * TD5_TG_R9_WATER_WINDOW + 1];
+    int nwet = 0, s, lo, hi, k;
+
     if (dmax <= d0) return dmax;
+
+    /* [PERF] Resolve the WET SPANS once, not once per march sample.
+     *
+     * This function was 27995 ms of far_band's 28240 ms -- 99 percent of the
+     * emitter and the dominant cost of the whole build after the R13 fill-gate
+     * hoist. The reason was the same defect one level down: the per-span half
+     * of the water test ("is s a bridge run with clear water") depends on s
+     * alone, but it sat inside tg_r9_point_over_bridge_water and so ran for all
+     * 91 spans of the window on each of the 41 samples -- about 7500 predicate
+     * evaluations per call where 91 suffice.
+     *
+     * Bit-identical: same predicate, same spans, ascending order preserved, so
+     * each sample still returns on its first geometric match. */
+    lo = si - TD5_TG_R9_WATER_WINDOW; if (lo < 0) lo = 0;
+    hi = si + TD5_TG_R9_WATER_WINDOW; if (hi > nl->count - 2) hi = nl->count - 2;
+    for (s = lo; s <= hi; s++)
+        if (tg_span_in_bridge_run(s) && tg_water_span_clear(s))
+            wet[nwet++] = s;
+    /* No bridge water anywhere near: no sample can be over any, so the march
+     * cannot shorten the reach. This is the common case on most tracks. */
+    if (nwet == 0) return dmax;
+
     for (k = 0; k <= N; k++) {
         const double d = d0 + (dmax - d0) * (double)k / (double)N;
-        if (tg_r9_point_over_bridge_water(nl, si, ox + ux * d, oz + uz * d))
+        if (tg_r9_point_over_wet(nl, wet, nwet, ox + ux * d, oz + uz * d))
             return d0 + (dmax - d0) * (double)(k > 0 ? k - 1 : 0) / (double)N;
     }
     return dmax;
+}
+
+static double tg_r9_dry_reach(const TG_NodeList *nl, int si,
+                              double ox, double oz, double ux, double uz,
+                              double d0, double dmax)
+{
+    unsigned long long t0 = td5_plat_time_us();
+    double r = tg_r9_dry_reach_inner(nl, si, ox, oz, ux, uz, d0, dmax);
+    s_pf_us[TG_PF_DRYREACH] += td5_plat_time_us() - t0;
+    return r;
 }
 
 /* ==== [R13 BAND item 1b] NOTHING BEHIND A TREE LINE BUT BUILDINGS ==========
@@ -22905,7 +22970,8 @@ static void tg_perf_report(void)
         TD5_LOG_I(LOG_TAG, "trackgen PERF   %-11s %7llu ms  %5.1f%%",
                   k_pf_names[i], s_pf_us[i] / 1000ull,
                   100.0 * (double)s_pf_us[i] / (double)tot);
-    TD5_LOG_I(LOG_TAG, "trackgen PERF   ground_side calls=%llu", s_pf_n_ground);
+    TD5_LOG_I(LOG_TAG, "trackgen PERF   ground_side calls=%llu  "
+              "topo_road_cap calls=%llu", s_pf_n_ground, s_pf_n_topocap);
     TD5_LOG_I(LOG_TAG, "trackgen PERF   crossing calls: here=%llu base=%llu "
               "(base/here=%.1f)", s_pf_n_xhere, s_pf_n_xbase,
               s_pf_n_xhere ? (double)s_pf_n_xbase / (double)s_pf_n_xhere : 0.0);
