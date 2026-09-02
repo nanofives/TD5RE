@@ -634,6 +634,46 @@ static TG_Fork s_forks[TD5_TG_BRANCH_MAX];
 static int s_fork_count;
 static int s_ring_len;
 
+/* [PERF] Per-emitter accumulators for the scenery build.
+ *
+ * tg_emit_models is 99.4 percent of a build (measured: 55780 ms of a 56121 ms
+ * total at 1987 spans, against 291 ms with TD5RE_AUTOTRACK_SCENERY=0), so the
+ * only question worth asking is which of the dozen per-span emitters inside it
+ * owns that time. Knob-bisecting costs a 60-80 s run per hypothesis and is
+ * noisy (each boot rolls a fresh seed and the biome mix drives the work);
+ * accumulating per emitter answers it in ONE run, and the internal proportions
+ * are immune to whole-run noise.
+ *
+ * QPC-backed (td5_plat_time_us). td5_plat_time_ms is timeGetTime and far too
+ * coarse: individual emitter calls are well under a millisecond.
+ *
+ * Declared here, up with the other build-scope statics, because the crossing
+ * predicates that feed it live far above tg_emit_models in this file. */
+typedef enum {
+    TG_PF_RAIL = 0, TG_PF_TUNNEL, TG_PF_CITY, TG_PF_BLOCK, TG_PF_CROSS,
+    TG_PF_FLORA, TG_PF_FORESTX, TG_PF_PARKTREE, TG_PF_SLOPEFLORA,
+    TG_PF_TERRAIN, TG_PF_INFRA, TG_PF_TRACK, TG_PF_GUARDVAL,
+    /* Sub-slots, NESTED inside a parent above, so they are reported but must
+     * not be added into the total: terrain = farshore + farband + gates, and
+     * xhere is the crossing predicate charged inside cross (and others). */
+    TG_PF_FARSHORE, TG_PF_FARBAND, TG_PF_XHERE,
+    TG_PF_COUNT
+} TG_PerfPhase;
+/* First nested slot; everything from here down is excluded from the total. */
+#define TG_PF_NESTED_FIRST TG_PF_FARSHORE
+
+static unsigned long long s_pf_us[TG_PF_COUNT];
+static const char *const k_pf_names[TG_PF_COUNT] = {
+    "rail", "tunnel", "city", "block", "cross", "flora", "forestx",
+    "parktree", "slopeflora", "terrain", "infra", "track", "guardval",
+    ".farshore", ".farband", ".xhere"
+};
+
+/* Call counts for the two crossing predicates. The COUNT is the actionable
+ * number: it is the multiplier a memoised table would remove. Counting is
+ * nearly free, where timing a function called millions of times is not. */
+static unsigned long long s_pf_n_xhere, s_pf_n_xbase;
+
 /* Fork lookups live down in the [FB] block (three other work areas read them
  * from there); forward-declared here because the strip emitters above need
  * them to map an APPENDED corridor span back to its main-ring node. */
@@ -14459,6 +14499,7 @@ static int tg_r11_xgap(int a, int b)
 static int tg_crossing_base(int si)
 {
     int s;
+    s_pf_n_xbase++;
     if (si <= 1) return 0;
     /* Over a fork the main carriageway is HALF width and shifted, so a
      * kerb-to-kerb quad would float across the gore. The pavements survive it
@@ -14520,14 +14561,25 @@ static int tg_crossing_base(int si)
 static int tg_city_crossing_here(int si)
 {
     int j, last = -1000000;
-    if (!tg_crossing_base(si)) return 0;
+    unsigned long long pf0 = td5_plat_time_us();
+    int result;
+    s_pf_n_xhere++;
+    if (!tg_crossing_base(si)) {
+        s_pf_us[TG_PF_XHERE] += td5_plat_time_us() - pf0;
+        return 0;
+    }
     /* DEFAULT ON; TD5RE_AUTOTRACK_XMIN=0 restores the un-thinned behaviour. */
-    if (!td5_env_flag_on("TD5RE_AUTOTRACK_XMIN")) return 1;
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_XMIN")) {
+        s_pf_us[TG_PF_XHERE] += td5_plat_time_us() - pf0;
+        return 1;
+    }
     for (j = si - TD5_TG_XMIN_LOOK; j < si; j++) {
         if (j > 1 && tg_crossing_base(j) && j - last >= tg_r11_xgap(last, j))
             last = j;                 /* j is a KEPT crossing */
     }
-    return si - last >= tg_r11_xgap(last, si);
+    result = si - last >= tg_r11_xgap(last, si);
+    s_pf_us[TG_PF_XHERE] += td5_plat_time_us() - pf0;
+    return result;
 }
 
 /* [R11 CROSS item 16] THE INSTRUMENT the diagnosis was made with, and the same
@@ -21077,7 +21129,12 @@ static int tg_emit_fb_terrain(const TG_FBHook *h)
              * grass band -- one wall standing on the sea surface at the water
              * plane's own outer edge, so the ocean ends in a coastline rather
              * than in nothing. */
-            if (!tg_emit_far_shore(h, is_left)) return 0;
+            {
+                unsigned long long ft = td5_plat_time_us();
+                int fr = tg_emit_far_shore(h, is_left);
+                s_pf_us[TG_PF_FARSHORE] += td5_plat_time_us() - ft;
+                if (!fr) return 0;
+            }
             continue;
         }
         /* [R6 item 4] The RIGHT band's ridge over a fork lands on the branch;
@@ -21088,7 +21145,12 @@ static int tg_emit_fb_terrain(const TG_FBHook *h)
             side_ridge = 0;
         }
         if (*h->nmesh + 2 >= h->maxmesh) break;
-        if (!tg_emit_far_band(h, is_left, side_ridge)) return 0;
+        {
+            unsigned long long bt = td5_plat_time_us();
+            int br = tg_emit_far_band(h, is_left, side_ridge);
+            s_pf_us[TG_PF_FARBAND] += td5_plat_time_us() - bt;
+            if (!br) return 0;
+        }
         if (side_ridge != ridge_ok || !side_ridge)
             tg_acct(TG_ACCT_R8_TERRAIN, h->si);
     }
@@ -22606,44 +22668,29 @@ static int tg_emit_r11_sign(const TG_NodeList *nl, int si, int nspans,
     return 1;
 }
 
-/* [PERF] Per-emitter microsecond accumulators for tg_emit_models.
- *
- * tg_emit_models is 99.4 percent of a build (measured: 55780 ms of a 56121 ms
- * total at 1987 spans, against 291 ms with TD5RE_AUTOTRACK_SCENERY=0), so the
- * only question that matters is which of the dozen per-span emitters inside it
- * owns that time. Knob-bisecting costs a 60-80 s run per hypothesis and is
- * noisy; accumulating per emitter answers it in ONE run, and the internal
- * proportions are immune to whole-run noise.
- *
- * QPC-backed (td5_plat_time_us). td5_plat_time_ms is timeGetTime and far too
- * coarse: individual emitter calls are well under a millisecond. */
-typedef enum {
-    TG_PF_RAIL = 0, TG_PF_TUNNEL, TG_PF_CITY, TG_PF_BLOCK, TG_PF_CROSS,
-    TG_PF_FLORA, TG_PF_FORESTX, TG_PF_PARKTREE, TG_PF_SLOPEFLORA,
-    TG_PF_TERRAIN, TG_PF_INFRA, TG_PF_TRACK, TG_PF_GUARDVAL,
-    TG_PF_COUNT
-} TG_PerfPhase;
-
-static unsigned long long s_pf_us[TG_PF_COUNT];
-static const char *const k_pf_names[TG_PF_COUNT] = {
-    "rail", "tunnel", "city", "block", "cross", "flora", "forestx",
-    "parktree", "slopeflora", "terrain", "infra", "track", "guardval"
-};
-
-static void tg_perf_reset(void) { memset(s_pf_us, 0, sizeof(s_pf_us)); }
+static void tg_perf_reset(void)
+{
+    memset(s_pf_us, 0, sizeof(s_pf_us));
+    s_pf_n_xhere = s_pf_n_xbase = 0;
+}
 
 static void tg_perf_report(void)
 {
     unsigned long long tot = 0;
     int i;
-    for (i = 0; i < TG_PF_COUNT; i++) tot += s_pf_us[i];
+    /* Nested slots are already counted inside their parent. */
+    for (i = 0; i < TG_PF_NESTED_FIRST; i++) tot += s_pf_us[i];
     if (tot == 0) return;
-    TD5_LOG_I(LOG_TAG, "trackgen PERF models breakdown, total %llu ms:",
+    TD5_LOG_I(LOG_TAG, "trackgen PERF models breakdown, total %llu ms "
+              "(rows prefixed '.' are NESTED in the row above them):",
               tot / 1000ull);
     for (i = 0; i < TG_PF_COUNT; i++)
         TD5_LOG_I(LOG_TAG, "trackgen PERF   %-11s %7llu ms  %5.1f%%",
                   k_pf_names[i], s_pf_us[i] / 1000ull,
                   100.0 * (double)s_pf_us[i] / (double)tot);
+    TD5_LOG_I(LOG_TAG, "trackgen PERF   crossing calls: here=%llu base=%llu "
+              "(base/here=%.1f)", s_pf_n_xhere, s_pf_n_xbase,
+              s_pf_n_xhere ? (double)s_pf_n_xbase / (double)s_pf_n_xhere : 0.0);
 }
 
 static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
