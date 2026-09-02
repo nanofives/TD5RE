@@ -8313,11 +8313,7 @@ static int tg_r12_fcross_at(const TG_NodeList *nl, int si,
 
 static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
 {
-    unsigned int h = (unsigned)si * 2654435761u;
     const TG_Biome *b;
-    const TG_TreePage *tp;
-    double side, gap, tw, th, jit, cx, cz;
-    int tv;
 
     /* Only span 0 is kept clear, not the whole grid stretch. The old
      * `si <= TD5_TG_GRID_SPAN` skipped 24 spans -- 36000 raw, the entire
@@ -8337,6 +8333,40 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
 
     if (!b->billboard || b->tree_n <= 0)
         return tg_emit_street_wall(nl, si, b, blk);
+
+    /* [S2] A verge TREE belongs on this span instead of a wall, but it is
+     * emitted by tg_building_verge_tree below rather than here.
+     *
+     * Split out because this was one of only FOUR callers of
+     * tg_r12_flora_accept, whose +/-3 span rejection window is the single
+     * cross-entry order dependency in the whole scenery build. Isolating the
+     * flora callers as leaf emitters is what lets their DECISIONS be taken in
+     * span order independently of where the mesh eventually lands.
+     *
+     * MESH ORDER IS UNCHANGED by the split, which is why it can be verified
+     * byte-for-byte: the tree was the TAIL of this function, and the
+     * street-wall branch above returns, so wall and tree are mutually
+     * exclusive -- at most one of them emits for any given span. */
+    return 1;
+}
+
+/* [S2] The verge tree for `si`, lifted verbatim out of tg_building_for_span.
+ * Re-derives that function's cheap pure gates instead of being handed them, so
+ * the two can be called in sequence sharing no state. */
+static int tg_building_verge_tree(const TG_NodeList *nl, int si, TG_Buf *blk)
+{
+    unsigned int h = (unsigned)si * 2654435761u;
+    const TG_Biome *b;
+    const TG_TreePage *tp;
+    double side, gap, tw, th, jit, cx, cz;
+    int tv;
+
+    if (si <= 0) return 1;
+    if (tg_span_in_bridge_run(si)) return 1;
+    if (tg_up_clear_span(si)) return 1;
+    b = &k_biomes[tg_scenery_biome_index(si)];
+    /* The wall branch owns this span; tg_building_for_span already emitted it. */
+    if (!b->billboard || b->tree_n <= 0) return 1;
 
     /* Trees: density-gated camera-facing billboards. Each biome MIXES several
      * species (tree_set) picked per-tree, each with its own shipped size, and a
@@ -23348,6 +23378,13 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                  * allocation. See the R10 note on that function. */
                 b0 = meshes.len;
                 if (!tg_building_for_span(nl, si, &meshes)) { ok = 0; break; }
+                /* [S2] The verge tree, split out of the call above. Wall and
+                 * tree are mutually exclusive per span, so at most one of the
+                 * two emits and the single moff entry below still describes
+                 * exactly one mesh -- the offsets stay ascending, which
+                 * tg_guard_validate_entry's forward compaction cursor
+                 * requires. */
+                if (!tg_building_verge_tree(nl, si, &meshes)) { ok = 0; break; }
                 if (meshes.len > b0) moff[nmesh++] = b0;
                 tg_guard_mark(b0, meshes.len, TG_GK_BUILDING, si);
                 /* Bridge: 0..N equal-sized boxes among themselves.
