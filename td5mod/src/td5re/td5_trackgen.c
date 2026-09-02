@@ -22852,6 +22852,163 @@ static void tg_perf_report(void)
               s_pf_n_xhere ? (double)s_pf_n_xbase / (double)s_pf_n_xhere : 0.0);
 }
 
+/* ============ SECTION: per-span side buffers (parallel groundwork) =========
+ * `terrain` is ~31 percent of a build and every byte of it comes from
+ * tg_emit_far_band, which contains no caller of tg_r12_flora_accept -- so it
+ * has no cross-entry order dependency and can be computed for all spans up
+ * front, eventually in parallel.
+ *
+ * The point of doing it as a SIDE BUFFER spliced back in at the same position,
+ * rather than restructuring the entry loop, is that the mesh SEQUENCE inside
+ * each entry is unchanged -- so the result is verifiable byte-for-byte against
+ * the serial build, which is the only test strong enough to trust here.
+ *
+ * Two things travel with the bytes and must be re-based on splice:
+ *   - moff[]: the emitter records each mesh's start offset. Offsets are stored
+ *     RELATIVE to the side buffer and get +base added on splice, which keeps
+ *     moff ascending -- tg_guard_validate_entry compacts the entry buffer with
+ *     a single forward write cursor and its own comment records that a
+ *     descending offset walks that cursor off the end of the allocation.
+ *   - guard marks: tg_emit_far_band marks byte ranges of its own output.
+ *     Captured by snapshotting s_guard_ex_n around the emit, stored relative,
+ *     and re-marked on splice. Getting these wrong would make the on-road
+ *     guard mis-classify a mesh and drop or keep the wrong geometry, so they
+ *     are as load-bearing as the bytes.
+ */
+static int tg_buf_append(TG_Buf *buf, const unsigned char *src, size_t n)
+{
+    if (n == 0) return 1;
+    if (!tg_buf_need(buf, n)) return 0;
+    memcpy(buf->b + buf->len, src, n);
+    buf->len += n;
+    return 1;
+}
+
+/* Terrain emits at most a couple of meshes per span; this is headroom, and the
+ * emitter's own budget check is asserted against it below. */
+#define TG_SIDE_MAX_MESH 32
+
+typedef struct {
+    TG_Buf buf;                       /* bytes this span emitted */
+    size_t moff[TG_SIDE_MAX_MESH];    /* mesh starts, RELATIVE to buf */
+    int    nmoff;
+    size_t mlo[TG_SIDE_MAX_MESH];     /* guard marks, RELATIVE to buf */
+    size_t mhi[TG_SIDE_MAX_MESH];
+    unsigned char mkind[TG_SIDE_MAX_MESH];
+    int    msi[TG_SIDE_MAX_MESH];
+    int    nmark;
+    int    ok;
+} TG_SideRec;
+
+static TG_SideRec *s_side_terr;
+static int         s_side_terr_n;
+/* Non-zero would mean the pre-pass and the real run could have disagreed about
+ * the mesh budget, i.e. the side buffer is no longer a faithful substitute.
+ * Reported as a WARNING because it is a silent-wrong-output condition. */
+static long        s_side_budget_risk;
+static long        s_side_overflow;
+/* Latched once per build from TD5RE_AUTOTRACK_SIDEBUF so the hot dispatch does
+ * not do a getenv per span. */
+static int         s_side_use;
+
+static void tg_side_terrain_free(void)
+{
+    int i;
+    if (!s_side_terr) return;
+    for (i = 0; i < s_side_terr_n; i++) tg_buf_free(&s_side_terr[i].buf);
+    free(s_side_terr);
+    s_side_terr = NULL;
+    s_side_terr_n = 0;
+}
+
+/* Serial for now. Each span writes only into its OWN record, which is what
+ * makes this loop safe to hand to td5_jobs later without further change. */
+static int tg_side_terrain_build(const TG_NodeList *nl, int nspans, int lanes)
+{
+    const int ring = (s_ring_len > 0) ? s_ring_len : nspans;
+    int si;
+
+    s_side_budget_risk = 0;
+    s_side_overflow = 0;
+    s_side_terr = (TG_SideRec *)calloc((size_t)nspans, sizeof(TG_SideRec));
+    if (!s_side_terr) return 0;
+    s_side_terr_n = nspans;
+
+    for (si = 0; si < nspans; si++) {
+        TG_SideRec *r = &s_side_terr[si];
+        TG_FBHook hook;
+        size_t scratch[TG_SIDE_MAX_MESH];
+        int nm = 0, snap, i;
+
+        r->ok = 1;
+        /* The same two gates the real dispatcher applies before it would ever
+         * reach the terrain hook: appended corridor/pad spans carry road only,
+         * and a tunnel span takes the tunnel branch instead. */
+        if (si >= ring) continue;
+        if (tg_span_in_tunnel(si)) continue;
+
+        hook.nl = nl; hook.si = si; hook.nspans = nspans; hook.lanes = lanes;
+        hook.b = &k_biomes[tg_biome_for_span(si)];
+        hook.blk = &r->buf; hook.moff = scratch; hook.nmesh = &nm;
+        hook.maxmesh = TG_SIDE_MAX_MESH;
+
+        snap = s_guard_ex_n;
+        r->ok = tg_emit_fb_terrain(&hook);
+
+        if (nm > TG_SIDE_MAX_MESH || (s_guard_ex_n - snap) > TG_SIDE_MAX_MESH) {
+            s_side_overflow++;            /* would truncate -- refuse instead */
+            s_guard_ex_n = snap;
+            return 0;
+        }
+        for (i = 0; i < nm; i++) r->moff[i] = scratch[i];
+        r->nmoff = nm;
+        for (i = snap; i < s_guard_ex_n; i++) {
+            const int k = i - snap;
+            r->mlo[k]   = s_guard_ex_lo[i];
+            r->mhi[k]   = s_guard_ex_hi[i];
+            r->mkind[k] = s_guard_ex_kind[i];
+            r->msi[k]   = s_guard_ex_si[i];
+        }
+        r->nmark = s_guard_ex_n - snap;
+        /* The marks belong to the ENTRY that splices these bytes, not to the
+         * pre-pass, so unwind them here and re-mark at the splice with the
+         * real offsets. */
+        s_guard_ex_n = snap;
+
+        if (!r->ok) return 0;
+    }
+    return 1;
+}
+
+/* Splice span `si`'s pre-built terrain into the live entry buffer. */
+static int tg_side_terrain_splice(int si, TG_Buf *meshes, size_t *moff,
+                                  int *nmesh, int maxmesh)
+{
+    const TG_SideRec *r;
+    size_t base;
+    int i;
+
+    if (!s_side_terr || si < 0 || si >= s_side_terr_n) return 1;
+    r = &s_side_terr[si];
+    if (!r->ok) return 0;
+    if (r->buf.len == 0) return 1;               /* this span emits nothing */
+
+    /* Faithfulness check, not a safety net: the emitter skipped itself when
+     * *nmesh + 2 >= maxmesh, and the pre-pass evaluated that against an empty
+     * record. If the live count is high enough that the real run would have
+     * skipped, the two disagree and the splice is not equivalent. */
+    if (*nmesh + 2 >= maxmesh) { s_side_budget_risk++; return 1; }
+    if (*nmesh + r->nmoff > maxmesh) { s_side_budget_risk++; return 1; }
+
+    base = meshes->len;
+    if (!tg_buf_append(meshes, r->buf.b, r->buf.len)) return 0;
+    for (i = 0; i < r->nmoff; i++) moff[(*nmesh)++] = base + r->moff[i];
+    for (i = 0; i < r->nmark; i++)
+        tg_guard_mark(base + r->mlo[i], base + r->mhi[i],
+                      (int)r->mkind[i], r->msi[i]);
+    return 1;
+}
+
 static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                           TG_Buf *out)
 {
@@ -22963,6 +23120,19 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     (void)tg_track_min_y(nl);         /* lazy double + separate valid flag */
     if (td5_env_flag_on("TD5RE_R9_BRIDGE_REPORT"))
         tg_r9_water_table_build(nl);  /* same knob its only reader is gated on */
+
+    /* [PARALLEL GROUNDWORK] Build every span's terrain up front. Still serial;
+     * the loop inside only ever writes a span's own record, so turning it into
+     * a td5_jobs_parallel_for is a later change with no new sharing.
+     * TD5RE_AUTOTRACK_SIDEBUF=0 falls back to emitting terrain inline. */
+    s_side_use = td5_env_flag_on("TD5RE_AUTOTRACK_SIDEBUF");
+    if (s_side_use && !tg_side_terrain_build(nl, nspans, lanes)) {
+        TD5_LOG_W(LOG_TAG, "trackgen: terrain side-buffer build failed "
+                  "(overflow=%ld); falling back to inline terrain",
+                  s_side_overflow);
+        tg_side_terrain_free();
+        s_side_use = 0;
+    }
 
     for (e = 0; e < nentries && ok; e++) {
         const int s0 = e * TD5_TG_SPANS_PER_ENTRY;
@@ -23263,7 +23433,16 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                     tg_guard_mark(g0, meshes.len, TG_GK_FLORA, si);
                     g0 = meshes.len;
                     pft = td5_plat_time_us();
-                    if (!tg_emit_fb_terrain(&hook)) { ok = 0; break; }
+                    /* Pre-built by tg_side_terrain_build unless the knob is
+                     * off or that build bailed. Either way the bytes, the moff
+                     * entries and the marks land exactly where the inline emit
+                     * would have put them. */
+                    if (s_side_use) {
+                        if (!tg_side_terrain_splice(si, &meshes, moff, &nmesh,
+                                                    TG_MAX_MESHES_PER_ENTRY)) {
+                            ok = 0; break;
+                        }
+                    } else if (!tg_emit_fb_terrain(&hook)) { ok = 0; break; }
                     s_pf_us[TG_PF_TERRAIN] += td5_plat_time_us() - pft;
                     tg_guard_mark(g0, meshes.len, TG_GK_TERRAIN, si);
                     /* [R9 INFRA] street furniture. Marked TG_GK_PROP, which is
@@ -23621,6 +23800,20 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
             }
         }
     }
+
+    /* [PARALLEL GROUNDWORK] A non-zero risk count means the pre-pass and the
+     * inline emit could have made different budget decisions for some span, so
+     * the side buffer is no longer a faithful substitute there. WARN, because
+     * the symptom would be missing scenery and nothing else would say so. */
+    if (s_side_use && s_side_budget_risk)
+        TD5_LOG_W(LOG_TAG, "trackgen: terrain side-buffer skipped %ld span(s) "
+                  "on mesh budget -- those spans lost terrain (raise "
+                  "TG_MAX_MESHES_PER_ENTRY or set TD5RE_AUTOTRACK_SIDEBUF=0)",
+                  s_side_budget_risk);
+    else if (s_side_use)
+        TD5_LOG_I(LOG_TAG, "trackgen: terrain side-buffer used for %d spans, "
+                  "0 budget skips", s_side_terr_n);
+    tg_side_terrain_free();
 
     for (e = 0; e < nentries; e++) tg_buf_free(&blocks[e]);
     free(blocks);
