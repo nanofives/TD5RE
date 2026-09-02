@@ -28,6 +28,7 @@
 #include "td5_track_registry.h"
 #include "td5_platform.h"
 #include "td5_config.h"
+#include "td5_jobs.h"          /* parallel terrain pre-pass (see the side buffers) */
 #include "td5_tg_real_tex.h"   /* real TD5 texture pages (level014), opt-in */
 #include "td5_tg_real_tex_city.h"  /* extra city facades: SF/Tokyo/Moscow */
 #include "td5_tg_real_tex_r5flora.h"  /* [R5 item 18] tall Moscow park trees */
@@ -22898,6 +22899,7 @@ typedef struct {
     int    msi[TG_SIDE_MAX_MESH];
     int    nmark;
     int    ok;
+    int    overflow;                  /* exceeded TG_SIDE_MAX_MESH */
 } TG_SideRec;
 
 static TG_SideRec *s_side_terr;
@@ -22921,12 +22923,78 @@ static void tg_side_terrain_free(void)
     s_side_terr_n = 0;
 }
 
-/* Serial for now. Each span writes only into its OWN record, which is what
- * makes this loop safe to hand to td5_jobs later without further change. */
+typedef struct {
+    const TG_NodeList *nl;
+    int nspans, lanes, ring;
+} TG_SideCtx;
+
+/* One span's terrain, into that span's OWN record and nothing else.
+ *
+ * What this touches that is shared, and why each is safe:
+ *   - s_guard_ex_* : static TG_TLS, so each worker has its own copy. The
+ *     snapshot/unwind below therefore leaves every worker's array as it found
+ *     it, and the marks are handed to the splice as relative ranges.
+ *   - s_acct_mask  : relaxed atomic OR (TG_ACCT_MASK_SET). Only the FARBAND
+ *     and R8_TERRAIN bits are set here and both are read only by post-loop
+ *     reports.
+ *   - s_r10_xs_*, s_xbase/xhere_memo, s_track_min_y : order-independent
+ *     values; the first is publish-ordered and the last is pre-warmed (S0).
+ *   - report counters (s_acct_count, s_r13_far_*, s_r8_tl_*, s_pf_us) : plain
+ *     ++/+= and therefore APPROXIMATE under threading. Deliberate: nothing
+ *     reads them before the loop joins, and none feeds a geometry decision.
+ *     TD5RE_AUTOTRACK_SIDEBUF_MT=0 restores exact counts for diagnosis.
+ * No RNG: emit never draws (every tg_rand site is in the centerline or
+ * elevation phase), which is what makes this parallelisable at all.
+ */
+static void tg_side_terrain_job(int si, void *vctx)
+{
+    const TG_SideCtx *c = (const TG_SideCtx *)vctx;
+    TG_SideRec *r = &s_side_terr[si];
+    TG_FBHook hook;
+    size_t scratch[TG_SIDE_MAX_MESH];
+    int nm = 0, snap, i;
+
+    r->ok = 1;
+    /* The same two gates the real dispatcher applies before it would ever
+     * reach the terrain hook: appended corridor/pad spans carry road only,
+     * and a tunnel span takes the tunnel branch instead. */
+    if (si >= c->ring) return;
+    if (tg_span_in_tunnel(si)) return;
+
+    hook.nl = c->nl; hook.si = si; hook.nspans = c->nspans;
+    hook.lanes = c->lanes;
+    hook.b = &k_biomes[tg_biome_for_span(si)];
+    hook.blk = &r->buf; hook.moff = scratch; hook.nmesh = &nm;
+    hook.maxmesh = TG_SIDE_MAX_MESH;
+
+    snap = s_guard_ex_n;
+    r->ok = tg_emit_fb_terrain(&hook);
+
+    if (nm > TG_SIDE_MAX_MESH || (s_guard_ex_n - snap) > TG_SIDE_MAX_MESH) {
+        r->overflow = 1;                  /* would truncate -- refuse instead */
+        r->ok = 0;
+        s_guard_ex_n = snap;
+        return;
+    }
+    for (i = 0; i < nm; i++) r->moff[i] = scratch[i];
+    r->nmoff = nm;
+    for (i = snap; i < s_guard_ex_n; i++) {
+        const int k = i - snap;
+        r->mlo[k]   = s_guard_ex_lo[i];
+        r->mhi[k]   = s_guard_ex_hi[i];
+        r->mkind[k] = s_guard_ex_kind[i];
+        r->msi[k]   = s_guard_ex_si[i];
+    }
+    r->nmark = s_guard_ex_n - snap;
+    /* The marks belong to the ENTRY that splices these bytes, not to this
+     * worker, so unwind them and re-mark at the splice with real offsets. */
+    s_guard_ex_n = snap;
+}
+
 static int tg_side_terrain_build(const TG_NodeList *nl, int nspans, int lanes)
 {
-    const int ring = (s_ring_len > 0) ? s_ring_len : nspans;
-    int si;
+    TG_SideCtx ctx;
+    int si, mt;
 
     s_side_budget_risk = 0;
     s_side_overflow = 0;
@@ -22934,48 +23002,50 @@ static int tg_side_terrain_build(const TG_NodeList *nl, int nspans, int lanes)
     if (!s_side_terr) return 0;
     s_side_terr_n = nspans;
 
+    ctx.nl = nl; ctx.nspans = nspans; ctx.lanes = lanes;
+    ctx.ring = (s_ring_len > 0) ? s_ring_len : nspans;
+
+    /* DEFAULT OFF, and it is going to stay off until the two findings below
+     * are answered. Threading this pre-pass was MEASURED and it is both wrong
+     * and slower:
+     *
+     *   serial      : models 101232 ms, MODELS.DAT 76C843ED...84F9
+     *   threaded #1 : models 139076 ms, 92BE9062...F63B
+     *   threaded #2 : models ~131000 ms, 5424089D...390F
+     *
+     * Three runs, three different outputs, so there is a real race -- the
+     * audit's conclusion that far_band touches only order-independent state
+     * and report counters is wrong somewhere, and the byte test is the only
+     * reason that was caught.
+     *
+     * The performance result matters more, because it is structural rather
+     * than a bug to patch: .farband burned 761447 ms of CPU across 14 workers
+     * plus main against 27448 ms serial, a 28x blow-up. tg_emit_far_band is
+     * only fast because of the LAZILY built shared s_r10_xs_* memo, whose
+     * expensive half marches a 48-span window per (span, side). Fifteen
+     * threads cold-starting all miss and all recompute it. A lazily built
+     * shared memo is precisely the thing that does not parallelise, and
+     * pre-warming it is what S0 deliberately refused: filling all 4096x2 slots
+     * does far more work than a build asks for (the memo's own note records an
+     * unmemoised run failing to finish seed 777 in 900 s).
+     *
+     * So the honest state is: the side-buffer HOIST is byte-identical and kept;
+     * the threading of it is not viable without first solving the memo, and
+     * solving the memo may cost more than the threading wins. */
+    mt = td5_env_flag_off("TD5RE_AUTOTRACK_SIDEBUF_MT");
+    if (mt) {
+        /* Runs across the pool AND the calling thread, and blocks. Safe with a
+         * zero-worker pool: it then simply runs everything here. */
+        td5_jobs_parallel_for(nspans, tg_side_terrain_job, &ctx);
+    } else {
+        for (si = 0; si < nspans; si++) tg_side_terrain_job(si, &ctx);
+    }
+    TD5_LOG_I(LOG_TAG, "trackgen: terrain pre-pass %s (%d workers + main)",
+              mt ? "THREADED" : "serial", td5_jobs_worker_count());
+
     for (si = 0; si < nspans; si++) {
-        TG_SideRec *r = &s_side_terr[si];
-        TG_FBHook hook;
-        size_t scratch[TG_SIDE_MAX_MESH];
-        int nm = 0, snap, i;
-
-        r->ok = 1;
-        /* The same two gates the real dispatcher applies before it would ever
-         * reach the terrain hook: appended corridor/pad spans carry road only,
-         * and a tunnel span takes the tunnel branch instead. */
-        if (si >= ring) continue;
-        if (tg_span_in_tunnel(si)) continue;
-
-        hook.nl = nl; hook.si = si; hook.nspans = nspans; hook.lanes = lanes;
-        hook.b = &k_biomes[tg_biome_for_span(si)];
-        hook.blk = &r->buf; hook.moff = scratch; hook.nmesh = &nm;
-        hook.maxmesh = TG_SIDE_MAX_MESH;
-
-        snap = s_guard_ex_n;
-        r->ok = tg_emit_fb_terrain(&hook);
-
-        if (nm > TG_SIDE_MAX_MESH || (s_guard_ex_n - snap) > TG_SIDE_MAX_MESH) {
-            s_side_overflow++;            /* would truncate -- refuse instead */
-            s_guard_ex_n = snap;
-            return 0;
-        }
-        for (i = 0; i < nm; i++) r->moff[i] = scratch[i];
-        r->nmoff = nm;
-        for (i = snap; i < s_guard_ex_n; i++) {
-            const int k = i - snap;
-            r->mlo[k]   = s_guard_ex_lo[i];
-            r->mhi[k]   = s_guard_ex_hi[i];
-            r->mkind[k] = s_guard_ex_kind[i];
-            r->msi[k]   = s_guard_ex_si[i];
-        }
-        r->nmark = s_guard_ex_n - snap;
-        /* The marks belong to the ENTRY that splices these bytes, not to the
-         * pre-pass, so unwind them here and re-mark at the splice with the
-         * real offsets. */
-        s_guard_ex_n = snap;
-
-        if (!r->ok) return 0;
+        if (s_side_terr[si].overflow) s_side_overflow++;
+        if (!s_side_terr[si].ok) return 0;
     }
     return 1;
 }
