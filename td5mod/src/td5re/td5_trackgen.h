@@ -56,6 +56,54 @@ typedef struct {
     int  max_grade_x1000;           /* steepest |dY/d(arc)|, x1000 */
 } TD5_TrackGenSpec;
 
+/* ---------------------------------------------------------------- preview --
+ * Mesh-free 2D route preview (PORT-ONLY). Runs only the PURE half of a build
+ * -- biome layout, centerline walk, elevation profile, strip emit -- and hands
+ * the caller the route as it is walked. It emits no scenery, bakes no texture
+ * pages and writes no file, so it costs a fraction of a real build.
+ *
+ * The strip emit is included on purpose. Branch corridors are NOT part of the
+ * centerline: tg_emit_strip is what fills s_forks[] and s_ring_len, so without
+ * it a preview would draw the main ring, silently omit every branch, and not
+ * know where the finish line falls.
+ *
+ * NOT re-entrant, and NOT safe to run concurrently with a real build -- both
+ * walk the same module statics (the private RNG, the biome grid). The caller
+ * owns mutual exclusion. td5_trackgen_preview.c provides it: one worker thread,
+ * which td5_asset_load_level joins before it calls td5_trackgen_regenerate.
+ */
+typedef struct {
+    float x, z;      /* raw world units; the caller normalises for display */
+    int   lanes;
+    int   branch;    /* 0 = main ring, 1..N = branch corridor index */
+} TD5_TrackGenPoint;
+
+typedef struct {
+    /* Newly walked points, in order. Called many times per build. */
+    void (*on_points)(const TD5_TrackGenPoint *pts, int n, void *ctx);
+    /* Polled per node; returning non-zero aborts the walk promptly. */
+    int  (*should_cancel)(void *ctx);
+    void *ctx;
+} TD5_TrackGenPreviewSink;
+
+typedef struct {
+    unsigned int seed;
+    int node_count;                      /* centerline nodes walked */
+    int span_count;                      /* strip spans incl. branch corridors */
+    int ring_len;                        /* main-ring spans; finish lives here */
+    int fork_count;
+    int tally[TD5_TG_SECTION_COUNT];     /* sections actually placed */
+    int min_y, max_y;                    /* elevation range, world units */
+    int cancelled;                       /* 1 = aborted via should_cancel */
+} TD5_TrackGenPreviewStats;
+
+/* Returns 1 when a full route was produced, 0 on failure OR cancellation
+ * (check out_stats->cancelled to tell them apart). `sink` may be NULL, in
+ * which case this is just a silent dry-run that fills out_stats. */
+int td5_trackgen_preview_route(const TD5_TrackGenSpec *spec,
+                               const TD5_TrackGenPreviewSink *sink,
+                               TD5_TrackGenPreviewStats *out_stats);
+
 /* Module lifecycle (registered in g_td5re_modules, after "trackreg"). Init
  * builds a first track so the selector entry exists from the main menu on. */
 int  td5_trackgen_init(void);
@@ -64,8 +112,10 @@ void td5_trackgen_shutdown(void);
 /* Fill spec with the shipped defaults (seed 0, balanced section mix). */
 void td5_trackgen_default_spec(TD5_TrackGenSpec *spec);
 
-/* Apply the [AutoTrack] INI section / TD5RE_AUTOTRACK_* env knobs on top of a
- * spec that has already been defaulted. */
+/* Apply the TD5RE_AUTOTRACK_* env knobs on top of a spec that has already been
+ * defaulted. Env ONLY -- there is no [AutoTrack] INI section, and the AUTO
+ * TRACK options screen deliberately keeps these per-session (it writes them
+ * with _putenv_s; see the header comment on k_at_rows in td5_fe_race.c). */
 void td5_trackgen_apply_config(TD5_TrackGenSpec *spec);
 
 /* Synthesise a track and write its level entries into

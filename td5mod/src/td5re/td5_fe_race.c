@@ -23,6 +23,7 @@
 #include "td5_track.h"
 #include "td5_track_registry.h"  /* custom-track registry: selector bound + has-slot */
 #include "td5_trackgen.h"        /* [R2 item 25] auto-track slot test + last seed */
+#include "td5_trackgen_preview.h" /* AUTO TRACK STUDIO: background route preview */
 #include "td5_types.h"
 #include "td5re.h"
 #include "td5_snk_strings.h"
@@ -6992,12 +6993,46 @@ void Screen_RaceOptions(void) {
  * precedent instead, which solved the same problem with a tighter base/step. */
 #define AT_BASE_Y 62
 #define AT_STEP_Y 32
-#define AT_ROWS   12
+/* Rows shown at once. The section selector takes the top slot, so a section
+ * may hold at most AT_VIS_ROWS entries; row AT_VIS_ROWS-1 lands at
+ * 62 + 32*9 = 350, leaving the action row and the OK button on screen. */
+#define AT_VIS_ROWS 9
+
+/* Sections. The generator exposes ~100 knobs; these seven group the ones that
+ * change how a track FEELS. The ~190 per-round R7_/R12_/R13_ toggles are
+ * regression fixes, not creative settings, and are deliberately not here --
+ * they stay at their defaults where the rounds that added them left them. */
+typedef enum {
+    AT_SECT_ROUTE = 0,
+    AT_SECT_TERRAIN,
+    AT_SECT_STRUCTURES,
+    AT_SECT_CITY,
+    AT_SECT_JUNCTIONS,
+    AT_SECT_NATURE,
+    AT_SECT_MOOD,
+    AT_SECT_COUNT
+} AT_Section;
+
+static const char *const k_at_sect_n[AT_SECT_COUNT] = {
+    "ROUTE", "TERRAIN", "STRUCTURES", "CITY", "JUNCTIONS", "NATURE", "MOOD"
+};
+
+/* Row kinds. SEED is the one free-text field; everything else cycles a fixed
+ * list of values. */
+typedef enum { AT_KIND_OPTION = 0, AT_KIND_SEED } AT_Kind;
 
 /* A row is a label, an env knob, and the discrete values it cycles through.
  * Values are the literal integers written to the knob, so the option list and
- * the knob's own clamp range can never drift apart. */
+ * the knob's own clamp range can never drift apart.
+ *
+ * `def` MUST match what the generator does when the knob is unset. Getting it
+ * wrong makes the screen lie: at_row_index falls back to def, so a row whose
+ * def says 0 while the generator reads the knob with td5_env_flag_on displays
+ * OFF for a feature that is actually ON. GUARDRAILS and REAL TEXTURES shipped
+ * with exactly that defect; every def below is checked against its call site. */
 typedef struct {
+    unsigned char sect;
+    unsigned char kind;
     const char *label;
     const char *knob;            /* NULL = composite row, handled by index */
     const int  *values;
@@ -7033,28 +7068,131 @@ static const char *const k_at_blend_n[] = { "SHARP", "SHORT", "NORMAL", "LONG" }
 static const int  k_at_off_on_v[] = { 0, 1 };
 static const char *const k_at_off_on_n[] = { "OFF", "ON" };
 
-#define AT_ROW_TWIST 3
+/* --- ROUTE ------------------------------------------------------------- */
+static const int  k_at_dual_v[] = { 0, 5, 10, 20, 35 };
+static const char *const k_at_dual_n[] = { "NONE", "RARE", "SOME", "OFTEN",
+                                           "CONSTANT" };
+static const int  k_at_safe_v[] = { 120, 150, 180, 240, 320 };
+static const char *const k_at_safe_n[] = { "TIGHT", "NARROW", "STANDARD",
+                                           "WIDE", "SWEEPING" };
+static const int  k_at_grade_v[] = { 0, 60, 120, 160, 200 };
+static const char *const k_at_grade_n[] = { "FLAT", "GENTLE", "STANDARD",
+                                            "STEEP", "SEVERE" };
+static const int  k_at_bgain_v[] = { 0, 1, 2, 3, 4 };
+static const char *const k_at_bgain_n[] = { "0", "1", "2", "3", "4" };
+static const int  k_at_bmin_v[] = { 8, 16, 24, 60, 120 };
+static const char *const k_at_bmin_n[] = { "TINY", "SHORT", "STANDARD",
+                                           "LONG", "VERY LONG" };
+static const int  k_at_runoff_v[] = { 0, 50, 100, 200, 400 };
+static const char *const k_at_runoff_n[] = { "NONE", "SHORT", "STANDARD",
+                                             "LONG", "VERY LONG" };
+/* --- TERRAIN ----------------------------------------------------------- */
+static const int  k_at_reach_v[] = { 30000, 80000, 160000, 300000 };
+static const char *const k_at_reach_n[] = { "NEAR", "MEDIUM", "FAR",
+                                            "VERY FAR" };
+/* --- STRUCTURES -------------------------------------------------------- */
+static const int  k_at_rail_v[] = { 20, 35, 50, 90, 160 };
+static const char *const k_at_rail_n[] = { "EVERYWHERE", "FREQUENT",
+                                           "STANDARD", "SPARSE",
+                                           "TIGHT BENDS ONLY" };
+/* --- MOOD -------------------------------------------------------------- */
+static const int  k_at_sky_v[] = { -1, 12, 24, 36, 48, 60 };
+static const char *const k_at_sky_n[] = { "NONE", "12", "24", "36", "48",
+                                          "60" };
 
-static const AT_Row k_at_rows[AT_ROWS] = {
-    { "LENGTH",      "TD5RE_AUTOTRACK_SPANS",       k_at_len_v,    k_at_len_n,    5, 1800 },
-    { "LANES",       "TD5RE_AUTOTRACK_LANES",       k_at_lane_v,   k_at_lane_n,   3, 4    },
-    { "HILLS",       "TD5RE_AUTOTRACK_ELEVATION",   k_at_elev_v,   k_at_elev_n,   5, 6000 },
-    { "TWISTINESS",  NULL,                          NULL,          k_at_twist_n,  4, 1    },
-    { "TIME OF DAY", "TD5RE_AUTOTRACK_NIGHT",       k_at_night_v,  k_at_night_n,  3, 2    },
-    { "TRANSITIONS", "TD5RE_AUTOTRACK_BIOME_BLEND", k_at_blend_v,  k_at_blend_n,  4, 20   },
-    { "SCENERY",     "TD5RE_AUTOTRACK_SCENERY",     k_at_off_on_v, k_at_off_on_n, 2, 1    },
-    { "BRIDGES",     "TD5RE_AUTOTRACK_BRIDGES",     k_at_off_on_v, k_at_off_on_n, 2, 1    },
-    { "TUNNELS",     "TD5RE_AUTOTRACK_TUNNELS",     k_at_off_on_v, k_at_off_on_n, 2, 1    },
-    { "BRANCHES",    "TD5RE_AUTOTRACK_BRANCHES",    k_at_off_on_v, k_at_off_on_n, 2, 1    },
-    { "GUARDRAILS",  "TD5RE_AUTOTRACK_GUARDRAILS",  k_at_off_on_v, k_at_off_on_n, 2, 0    },
-    { "REAL TEXTURES","TD5RE_AUTOTRACK_REAL_TEX",   k_at_off_on_v, k_at_off_on_n, 2, 0    }
+#define AT_ROW_TWIST 3   /* index within k_at_rows, asserted at init */
+
+/* Every `def` below is the generator's own unset behaviour, verified against
+ * the call site in td5_trackgen.c: td5_env_flag_on -> 1, td5_env_flag_off -> 0,
+ * td5_env_int -> its stated default. */
+static const AT_Row k_at_rows[] = {
+    /* ---------------------------------------------------------- ROUTE --- */
+    { AT_SECT_ROUTE, AT_KIND_SEED,   "SEED",         "TD5RE_AUTOTRACK_SEED",        NULL,          NULL,          0, 0    },
+    { AT_SECT_ROUTE, AT_KIND_OPTION, "LENGTH",       "TD5RE_AUTOTRACK_SPANS",       k_at_len_v,    k_at_len_n,    5, 1800 },
+    { AT_SECT_ROUTE, AT_KIND_OPTION, "LANES",        "TD5RE_AUTOTRACK_LANES",       k_at_lane_v,   k_at_lane_n,   3, 4    },
+    { AT_SECT_ROUTE, AT_KIND_OPTION, "TWISTINESS",   NULL,                          NULL,          k_at_twist_n,  4, 1    },
+    { AT_SECT_ROUTE, AT_KIND_OPTION, "DUAL LANES",   "TD5RE_AUTOTRACK_PCT_DUAL",    k_at_dual_v,   k_at_dual_n,   5, 10   },
+    { AT_SECT_ROUTE, AT_KIND_OPTION, "CORNERS",      "TD5RE_AUTOTRACK_CURVESAFE",   k_at_safe_v,   k_at_safe_n,   5, 180  },
+    { AT_SECT_ROUTE, AT_KIND_OPTION, "GRADIENT",     "TD5RE_AUTOTRACK_GRADE",       k_at_grade_v,  k_at_grade_n,  5, 120  },
+    { AT_SECT_ROUTE, AT_KIND_OPTION, "BRANCHES",     "TD5RE_AUTOTRACK_BRANCHES",    k_at_off_on_v, k_at_off_on_n, 2, 1    },
+    { AT_SECT_ROUTE, AT_KIND_OPTION, "RUN-OFF",      "TD5RE_AUTOTRACK_RUNOFF",      k_at_runoff_v, k_at_runoff_n, 5, 100  },
+    /* -------------------------------------------------------- TERRAIN --- */
+    { AT_SECT_TERRAIN, AT_KIND_OPTION, "HILLS",       "TD5RE_AUTOTRACK_ELEVATION",     k_at_elev_v,   k_at_elev_n,   5, 6000  },
+    { AT_SECT_TERRAIN, AT_KIND_OPTION, "TERRAIN",     "TD5RE_AUTOTRACK_TERRAIN_HILLS", k_at_off_on_v, k_at_off_on_n, 2, 1     },
+    { AT_SECT_TERRAIN, AT_KIND_OPTION, "BACKDROP",    "TD5RE_AUTOTRACK_TERRAIN_FAR",   k_at_off_on_v, k_at_off_on_n, 2, 1     },
+    { AT_SECT_TERRAIN, AT_KIND_OPTION, "VIEW REACH",  "TD5RE_AUTOTRACK_TERRAIN_REACH", k_at_reach_v,  k_at_reach_n,  4, 30000 },
+    { AT_SECT_TERRAIN, AT_KIND_OPTION, "COASTLINE",   "TD5RE_AUTOTRACK_COASTLINE",     k_at_off_on_v, k_at_off_on_n, 2, 1     },
+    { AT_SECT_TERRAIN, AT_KIND_OPTION, "TRANSITIONS", "TD5RE_AUTOTRACK_BIOME_BLEND",   k_at_blend_v,  k_at_blend_n,  4, 20    },
+    /* ----------------------------------------------------- STRUCTURES --- */
+    { AT_SECT_STRUCTURES, AT_KIND_OPTION, "BRIDGES",      "TD5RE_AUTOTRACK_BRIDGES",         k_at_off_on_v, k_at_off_on_n, 2, 1  },
+    { AT_SECT_STRUCTURES, AT_KIND_OPTION, "BRIDGE STYLE", "TD5RE_AUTOTRACK_BRIDGE_VARIETY",  k_at_off_on_v, k_at_off_on_n, 2, 1  },
+    { AT_SECT_STRUCTURES, AT_KIND_OPTION, "OVERHEADS",    "TD5RE_AUTOTRACK_BRIDGE_OVERHEAD", k_at_off_on_v, k_at_off_on_n, 2, 1  },
+    { AT_SECT_STRUCTURES, AT_KIND_OPTION, "TUNNELS",      "TD5RE_AUTOTRACK_TUNNELS",         k_at_off_on_v, k_at_off_on_n, 2, 1  },
+    { AT_SECT_STRUCTURES, AT_KIND_OPTION, "TUNNEL LAMPS", "TD5RE_AUTOTRACK_TUNNEL_LAMPS",    k_at_off_on_v, k_at_off_on_n, 2, 1  },
+    { AT_SECT_STRUCTURES, AT_KIND_OPTION, "MOUNTAINS",    "TD5RE_AUTOTRACK_TUNNEL_MOUNTAIN", k_at_off_on_v, k_at_off_on_n, 2, 1  },
+    /* GUARDRAILS shipped with def=0 while the generator reads it flag_ON. */
+    { AT_SECT_STRUCTURES, AT_KIND_OPTION, "GUARDRAILS",   "TD5RE_AUTOTRACK_GUARDRAILS",      k_at_off_on_v, k_at_off_on_n, 2, 1  },
+    { AT_SECT_STRUCTURES, AT_KIND_OPTION, "RAIL DENSITY", "TD5RE_AUTOTRACK_RAIL_DEG10",      k_at_rail_v,   k_at_rail_n,   5, 50 },
+    { AT_SECT_STRUCTURES, AT_KIND_OPTION, "ARMCO",        "TD5RE_AUTOTRACK_ARMCO",           k_at_off_on_v, k_at_off_on_n, 2, 1  },
+    /* ------------------------------------------------------------ CITY --- */
+    { AT_SECT_CITY, AT_KIND_OPTION, "DISTRICTS",    "TD5RE_AUTOTRACK_DISTRICTS",      k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    { AT_SECT_CITY, AT_KIND_OPTION, "START IN TOWN","TD5RE_AUTOTRACK_START_CITY",     k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    { AT_SECT_CITY, AT_KIND_OPTION, "BUILDING MASS","TD5RE_AUTOTRACK_FACADE_MASS",    k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    { AT_SECT_CITY, AT_KIND_OPTION, "BACK ROWS",    "TD5RE_AUTOTRACK_BACKROWS",       k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    { AT_SECT_CITY, AT_KIND_OPTION, "AVENUES",      "TD5RE_AUTOTRACK_AVENUE_DIVIDER", k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    /* PARKS is td5_env_int(..., 0, 0, 1) -- genuinely default OFF. */
+    { AT_SECT_CITY, AT_KIND_OPTION, "PARKS",        "TD5RE_AUTOTRACK_PARKS",          k_at_off_on_v, k_at_off_on_n, 2, 0 },
+    { AT_SECT_CITY, AT_KIND_OPTION, "PARK HOUSES",  "TD5RE_AUTOTRACK_PARK_HOUSES",    k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    { AT_SECT_CITY, AT_KIND_OPTION, "PARK HEDGES",  "TD5RE_AUTOTRACK_PARK_HEDGE",     k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    /* ------------------------------------------------------- JUNCTIONS --- */
+    { AT_SECT_JUNCTIONS, AT_KIND_OPTION, "CROSSINGS",    "TD5RE_AUTOTRACK_CROSSINGS",      k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    { AT_SECT_JUNCTIONS, AT_KIND_OPTION, "SIDE STREETS", "TD5RE_AUTOTRACK_CROSS_STREETS",  k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    { AT_SECT_JUNCTIONS, AT_KIND_OPTION, "ROAD MARKS",   "TD5RE_AUTOTRACK_CROSS_MARKINGS", k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    { AT_SECT_JUNCTIONS, AT_KIND_OPTION, "INTERSECTIONS","TD5RE_AUTOTRACK_INTERSECTIONS",  k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    { AT_SECT_JUNCTIONS, AT_KIND_OPTION, "SIDEWALKS",    "TD5RE_AUTOTRACK_SIDEWALKS",      k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    /* ---------------------------------------------------------- NATURE --- */
+    { AT_SECT_NATURE, AT_KIND_OPTION, "SCENERY",      "TD5RE_AUTOTRACK_SCENERY",     k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    { AT_SECT_NATURE, AT_KIND_OPTION, "TREE LINE",    "TD5RE_AUTOTRACK_TREELINE",    k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    { AT_SECT_NATURE, AT_KIND_OPTION, "CLEAR VERGES", "TD5RE_AUTOTRACK_FLORA_CLEAR", k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    { AT_SECT_NATURE, AT_KIND_OPTION, "MIRROR TREES", "TD5RE_AUTOTRACK_TREE_MIRROR", k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    /* ------------------------------------------------------------ MOOD --- */
+    { AT_SECT_MOOD, AT_KIND_OPTION, "TIME OF DAY",  "TD5RE_AUTOTRACK_NIGHT",          k_at_night_v,  k_at_night_n,  3, 2 },
+    { AT_SECT_MOOD, AT_KIND_OPTION, "SNOW",         "TD5RE_AUTOTRACK_SNOW",           k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    { AT_SECT_MOOD, AT_KIND_OPTION, "SKY",          "TD5RE_AUTOTRACK_SKY_ANIM",       k_at_sky_v,    k_at_sky_n,    6, 36 },
+    { AT_SECT_MOOD, AT_KIND_OPTION, "LAMP POSTS",   "TD5RE_AUTOTRACK_LAMP_POSTS",     k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    { AT_SECT_MOOD, AT_KIND_OPTION, "BANNERS",      "TD5RE_AUTOTRACK_BANNERS",        k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    /* REAL TEXTURES shipped with def=0 while the generator reads it flag_ON. */
+    { AT_SECT_MOOD, AT_KIND_OPTION, "REAL TEXTURES","TD5RE_AUTOTRACK_REAL_TEX",       k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    { AT_SECT_MOOD, AT_KIND_OPTION, "REAL FURNITURE","TD5RE_AUTOTRACK_REAL_FURNITURE",k_at_off_on_v, k_at_off_on_n, 2, 1 }
 };
+
+#define AT_ROWS ((int)(sizeof(k_at_rows) / sizeof(k_at_rows[0])))
 
 static void at_setenv(const char *knob, int value)
 {
     char buf[24];
     snprintf(buf, sizeof(buf), "%d", value);
     _putenv_s(knob, buf);
+}
+
+/* ---- section view -------------------------------------------------------
+ * Only the active section's rows are built as buttons, so the existing
+ * 62/32 grid keeps working and no scrolling-list widget is needed (the
+ * frontend does not have one -- every list in it is hand-rolled). */
+static int s_at_sect;                    /* current AT_Section */
+static int s_at_view[AT_VIS_ROWS];       /* row indices shown, in order */
+static int s_at_view_n;
+/* Declared up here because the overlay renderer (above the favourites block)
+ * has to know whether the picker is open. */
+static int s_at_fav_mode;                /* 1 = the favourites picker is open */
+
+static void at_rebuild_view(void)
+{
+    int r;
+    s_at_view_n = 0;
+    for (r = 0; r < AT_ROWS && s_at_view_n < AT_VIS_ROWS; r++)
+        if (k_at_rows[r].sect == (unsigned char)s_at_sect)
+            s_at_view[s_at_view_n++] = r;
 }
 
 /* Current option index for a row. Reads the LIVE env var so a knob set on the
@@ -7067,6 +7205,8 @@ static int at_row_index(int row)
     const AT_Row *r = &k_at_rows[row];
     const char *e;
     int cur, i, best = 0;
+
+    if (r->kind == AT_KIND_SEED) return 0;   /* not an option list */
 
     if (row == AT_ROW_TWIST) {
         int st = td5_env_int("TD5RE_AUTOTRACK_PCT_STRAIGHT", -1, -1, 100);
@@ -7090,8 +7230,11 @@ static int at_row_index(int row)
 static void at_row_apply(int row, int delta)
 {
     const AT_Row *r = &k_at_rows[row];
-    int idx = at_row_index(row) + delta;
+    int idx;
 
+    if (r->kind == AT_KIND_SEED) return;   /* edited, not cycled */
+
+    idx = at_row_index(row) + delta;
     while (idx < 0) idx += r->n;
     idx %= r->n;
 
@@ -7106,45 +7249,406 @@ static void at_row_apply(int row, int delta)
               r->label, r->names[idx]);
 }
 
+/* ---- live route preview -------------------------------------------------
+ * The generator runs on a worker thread (td5_trackgen_preview.c) and publishes
+ * centerline points as it walks them. This screen keeps a mirror, tops it up
+ * every frame, and plots it. Nothing here ever calls into td5_trackgen.c
+ * directly -- that is the worker's job alone. */
+/* Layout: the rows are narrowed and pulled left so the value column and the
+ * preview panel each get their own band. The stock 120/224 button column put
+ * the value column (x=348) underneath the panel, which hid every value except
+ * the rows that happened to fall below it. */
+#define AT_BTN_X 16
+#define AT_BTN_W 180
+/* Centre of the value band, which sits between the buttons and the panel. The
+ * widest value is a 10-digit seed, so the band needs the room. */
+#define AT_VAL_X (AT_BTN_X + AT_BTN_W + 62)
+#define AT_PV_X  324
+#define AT_PV_Y  96
+#define AT_PV_W  268
+#define AT_PV_H  272
+/* An axis-aligned quad is the only primitive available, so the route is
+ * plotted as a run of small squares rather than stroked as a polyline. At the
+ * panel size that reads as a continuous line. Capped so a 3000-span marathon
+ * costs the same number of draws as a short track. */
+#define AT_PV_MAX_DOTS 600
+
+static TD5_TrackGenPoint s_at_pts[TD5_TGPREV_MAX_POINTS];
+static int   s_at_pts_n;
+static int   s_at_pts_gen;               /* generation the mirror belongs to */
+static float s_at_min_x, s_at_max_x, s_at_min_z, s_at_max_z;
+static int   s_at_dirty_ms;              /* debounce deadline, 0 = clean */
+static TD5_TgPrevStatus s_at_status;
+
+/* Rebuilding on every arrow press would restart the walk faster than it can
+ * finish, so changes settle for a moment first. */
+#define AT_DEBOUNCE_MS 300
+
+/* Roll a concrete seed the same way td5_trackgen_regenerate does when the knob
+ * is 0, and WRITE IT BACK. Pinning matters: with the knob left at 0 the preview
+ * would walk literal seed 0 while the race rolls a clock seed, so the screen
+ * would be showing a track the player is not going to get. Entering the studio
+ * therefore fixes the seed; GENERATE rolls a new one on demand. */
+static unsigned int at_roll_seed(void)
+{
+    unsigned int s = (unsigned int)(td5_plat_time_ms() * 2654435761u
+                                    + 0x9E3779B9u) & 0x7FFFFFFFu;
+    return s ? s : 1u;
+}
+
+static void at_preview_request(void)
+{
+    TD5_TrackGenSpec spec;
+    int seed = td5_env_int("TD5RE_AUTOTRACK_SEED", 0, 0, 0x7FFFFFFF);
+
+    if (seed == 0) {
+        seed = (int)at_roll_seed();
+        at_setenv("TD5RE_AUTOTRACK_SEED", seed);
+    }
+
+    td5_trackgen_default_spec(&spec);
+    td5_trackgen_apply_config(&spec);   /* reads the env knobs the rows wrote */
+    /* apply_config deliberately does NOT carry the seed -- td5_trackgen_regenerate
+     * owns that knob (it is also where "0 = roll from the clock" lives). The
+     * preview must therefore set it itself, or every preview would walk seed 0
+     * no matter what the SEED row says. */
+    spec.seed = (unsigned int)seed;
+
+    s_at_pts_n = 0;
+    s_at_pts_gen = td5_tgprev_request(&spec);
+    s_at_dirty_ms = 0;
+}
+
+static void at_mark_dirty(void)
+{
+    s_at_dirty_ms = (int)td5_plat_time_ms() + AT_DEBOUNCE_MS;
+    if (s_at_dirty_ms == 0) s_at_dirty_ms = 1;   /* 0 is the "clean" sentinel */
+}
+
+/* Called once per frame from the screen handler. */
+static void at_preview_tick(void)
+{
+    int got;
+
+    if (s_at_dirty_ms != 0 &&
+        (int)td5_plat_time_ms() - s_at_dirty_ms >= 0)
+        at_preview_request();
+
+    td5_tgprev_status(&s_at_status);
+    if (s_at_status.generation != s_at_pts_gen) return;   /* not ours */
+
+    do {
+        got = td5_tgprev_fetch(s_at_pts_n, &s_at_pts[s_at_pts_n],
+                               TD5_TGPREV_MAX_POINTS - s_at_pts_n);
+        if (got <= 0) break;
+        /* Extend the bounds with the new tail only. Points never move once
+         * published, so the box is exact without a full rescan. */
+        while (got-- > 0) {
+            const TD5_TrackGenPoint *p = &s_at_pts[s_at_pts_n];
+            if (s_at_pts_n == 0) {
+                s_at_min_x = s_at_max_x = p->x;
+                s_at_min_z = s_at_max_z = p->z;
+            } else {
+                if (p->x < s_at_min_x) s_at_min_x = p->x;
+                if (p->x > s_at_max_x) s_at_max_x = p->x;
+                if (p->z < s_at_min_z) s_at_min_z = p->z;
+                if (p->z > s_at_max_z) s_at_max_z = p->z;
+            }
+            s_at_pts_n++;
+        }
+    } while (s_at_pts_n < TD5_TGPREV_MAX_POINTS);
+}
+
+static void at_draw_preview(float sx, float sy)
+{
+    const float bx = AT_PV_X * sx, by = AT_PV_Y * sy;
+    const float bw = AT_PV_W * sx, bh = AT_PV_H * sy;
+    float span, scale, ox, oz, dot;
+    int i, stride;
+    char line[80];
+
+    /* Panel backing so the outline reads against the menu art. */
+    fe_draw_quad(bx, by, bw, bh, 0x60000000, -1, 0, 0, 1, 1);
+
+    if (s_at_pts_n < 2) {
+        fe_draw_small_text(bx + 8 * sx, by + bh * 0.5f,
+                           s_at_status.running ? "GENERATING..." : "NO ROUTE",
+                           0xFF8899AA, sx, sy);
+        return;
+    }
+
+    /* Uniform scale on the larger axis keeps the route's real proportions --
+     * a long thin track must not be stretched to fill a square panel. */
+    span = (s_at_max_x - s_at_min_x);
+    if ((s_at_max_z - s_at_min_z) > span) span = (s_at_max_z - s_at_min_z);
+    if (span < 1.0f) span = 1.0f;
+    scale = (AT_PV_W - 16.0f) / span;
+    ox = (s_at_min_x + s_at_max_x) * 0.5f;
+    oz = (s_at_min_z + s_at_max_z) * 0.5f;
+
+    stride = s_at_pts_n / AT_PV_MAX_DOTS;
+    if (stride < 1) stride = 1;
+    dot = 2.0f * sx;
+    if (dot < 1.0f) dot = 1.0f;
+
+    for (i = 0; i < s_at_pts_n; i += stride) {
+        const TD5_TrackGenPoint *p = &s_at_pts[i];
+        /* +Z is into the screen in world space, so flip it for a top-down map
+         * that matches the track-select previews. */
+        float px = bx + bw * 0.5f + (p->x - ox) * scale * sx;
+        float py = by + bh * 0.5f - (p->z - oz) * scale * sy;
+        uint32_t col;
+        if (p->branch)                        col = 0xFF39C0D8;  /* corridor */
+        else if (i >= s_at_pts_n - stride * 8 && s_at_status.running)
+                                              col = 0xFF7CFF6A;  /* build head */
+        else                                  col = 0xFFE3D708;  /* main ring */
+        fe_draw_quad(px, py, dot, dot, col, -1, 0, 0, 1, 1);
+    }
+
+    /* Start marker. The finish sits at the end of the MAIN RING, not at the
+     * end of the point list -- branch corridors are published after it. */
+    {
+        float px = bx + bw * 0.5f + (s_at_pts[0].x - ox) * scale * sx;
+        float py = by + bh * 0.5f - (s_at_pts[0].z - oz) * scale * sy;
+        fe_draw_quad(px - 2 * sx, py - 2 * sy, 5 * sx, 5 * sy,
+                     0xFF20FF20, -1, 0, 0, 1, 1);
+    }
+    if (s_at_status.done && s_at_status.stats.ring_len > 0) {
+        int fi = s_at_status.stats.ring_len;
+        if (fi >= s_at_pts_n) fi = s_at_pts_n - 1;
+        {
+            float px = bx + bw * 0.5f + (s_at_pts[fi].x - ox) * scale * sx;
+            float py = by + bh * 0.5f - (s_at_pts[fi].z - oz) * scale * sy;
+            fe_draw_quad(px - 2 * sx, py - 2 * sy, 5 * sx, 5 * sy,
+                         0xFFFFFFFF, -1, 0, 0, 1, 1);
+        }
+    }
+
+    /* Read-out under the panel. */
+    if (s_at_status.done && s_at_status.ok) {
+        const TD5_TrackGenPreviewStats *st = &s_at_status.stats;
+        snprintf(line, sizeof(line), "%d SPANS  %.1f KM  %d FORKS",
+                 st->span_count,
+                 (double)st->span_count * (double)TD5_TG_SPAN_LENGTH
+                     / 256.0 / 1000.0,
+                 st->fork_count);
+        fe_draw_small_text(bx, by + bh + 6 * sy, line, 0xFFFFFFFF, sx, sy);
+        snprintf(line, sizeof(line), "CLIMB %d  SEED %u",
+                 st->max_y - st->min_y, st->seed);
+        fe_draw_small_text(bx, by + bh + 20 * sy, line, 0xFF8899AA, sx, sy);
+    } else if (s_at_status.running) {
+        snprintf(line, sizeof(line), "GENERATING  %d", s_at_pts_n);
+        fe_draw_small_text(bx, by + bh + 6 * sy, line, 0xFF7CFF6A, sx, sy);
+    }
+}
+
 /* Drawn by the td5_frontend.c render dispatch, like every other option screen. */
 void frontend_render_autotrack_options_overlay(float sx, float sy)
 {
-    int r;
+    int i;
     if (!s_anim_complete) return;
-    for (r = 0; r < AT_ROWS; r++)
-        frontend_draw_value_centered(sx, sy, AT_BASE_Y + AT_STEP_Y * r + 6,
-                                     k_at_rows[r].names[at_row_index(r)],
-                                     0xFFFFFFFF);
+
+    /* The favourites picker replaces the row buttons, so the row values must
+     * go with them -- otherwise the old section's values hang over the list.
+     * The preview panel stays: it is what the picked favourite will change. */
+    if (s_at_fav_mode) {
+        at_draw_preview(sx, sy);
+        return;
+    }
+
+    /* Row 0 is the section selector; the section's own rows follow it.
+     * Drawn in this screen's own value band (AT_VAL_X) rather than through
+     * frontend_draw_value_centered, whose column is fixed at x=348 -- which is
+     * underneath the preview panel. */
+    fe_draw_text_centered(AT_VAL_X * sx, (AT_BASE_Y + 6) * sy,
+                          k_at_sect_n[s_at_sect], 0xFFE3D708, sx, sy);
+
+    for (i = 0; i < s_at_view_n; i++) {
+        const int row = s_at_view[i];
+        const int y = AT_BASE_Y + AT_STEP_Y * (i + 1) + 6;
+        const char *txt;
+        char buf[16];
+        if (k_at_rows[row].kind == AT_KIND_SEED) {
+            snprintf(buf, sizeof(buf), "%u", (unsigned int)td5_env_int(
+                         "TD5RE_AUTOTRACK_SEED", 0, 0, 0x7FFFFFFF));
+            txt = buf;
+        } else {
+            txt = k_at_rows[row].names[at_row_index(row)];
+        }
+        fe_draw_text_centered(AT_VAL_X * sx, y * sy, txt, 0xFFFFFFFF, sx, sy);
+    }
+
+    at_draw_preview(sx, sy);
 }
 
-int td5_autotrack_opts_row_count(void) { return AT_ROWS; }
+/* Buttons the shared nav builds arrows for: the section selector plus the
+ * option rows. The action buttons below them are plain presses. */
+int td5_autotrack_opts_row_count(void) { return s_at_view_n + 1; }
+
+/* ---- seed field ---------------------------------------------------------
+ * Modelled on td5_raceopts_span_edit_* (td5_frontend.c): Enter opens the
+ * shared single-field editor, the tick swallows all other input while it is
+ * open, Enter commits and ESC cancels. */
+static char s_at_seed_buf[12];
+static int  s_at_seed_editing;
+
+static void at_seed_edit_begin(void)
+{
+    unsigned int cur = (unsigned int)td5_env_int("TD5RE_AUTOTRACK_SEED",
+                                                 0, 0, 0x7FFFFFFF);
+    snprintf(s_at_seed_buf, sizeof(s_at_seed_buf), "%u", cur);
+    s_at_seed_editing = 1;
+    frontend_reset_text_input();
+    frontend_begin_text_input(s_at_seed_buf, (int)sizeof(s_at_seed_buf));
+}
+
+/* Returns 1 while the field owns the input. */
+static int at_seed_edit_tick(void)
+{
+    if (!s_at_seed_editing) return 0;
+
+    if (frontend_check_escape()) {          /* cancel, keep the old seed */
+        s_at_seed_editing = 0;
+        frontend_reset_text_input();
+        return 1;
+    }
+    frontend_handle_text_input_key();
+    if (frontend_text_input_confirmed()) {
+        /* 0 is meaningful: it is the generator's "roll one from the clock". */
+        long v = strtol(s_at_seed_buf, NULL, 10);
+        if (v < 0) v = 0;
+        at_setenv("TD5RE_AUTOTRACK_SEED", (int)v);
+        s_at_seed_editing = 0;
+        frontend_reset_text_input();
+        at_preview_request();               /* a new seed is worth showing now */
+        frontend_play_sfx(3);
+    }
+    return 1;
+}
+
+/* ---- favourites --------------------------------------------------------- */
+static int  s_at_fav_n;
+
+/* Serialise the curated rows as knob=value pairs. Storing NAMES rather than
+ * row indices means reordering or inserting rows later cannot silently
+ * reinterpret an already-saved favourite. */
+static void at_fav_capture(TD5_FavSeed *f)
+{
+    int r;
+    size_t used = 0;
+
+    memset(f, 0, sizeof(*f));
+    f->seed = (unsigned int)td5_env_int("TD5RE_AUTOTRACK_SEED", 0, 0, 0x7FFFFFFF);
+
+    for (r = 0; r < AT_ROWS; r++) {
+        const AT_Row *row = &k_at_rows[r];
+        const char *e;
+        int n;
+        if (row->kind == AT_KIND_SEED || !row->knob) continue;
+        e = getenv(row->knob);
+        if (!e || !e[0]) continue;          /* unset = generator default */
+        n = snprintf(f->params + used, sizeof(f->params) - used,
+                     "%s=%s;", row->knob, e);
+        if (n < 0 || (size_t)n >= sizeof(f->params) - used) break;
+        used += (size_t)n;
+    }
+    snprintf(f->name, sizeof(f->name), "SEED %u", f->seed);
+}
+
+static void at_fav_apply(const TD5_FavSeed *f)
+{
+    const char *p = f->params;
+    char knob[64], val[24];
+
+    at_setenv("TD5RE_AUTOTRACK_SEED", (int)f->seed);
+    while (*p) {
+        const char *eq = strchr(p, '=');
+        const char *sc = strchr(p, ';');
+        size_t kl, vl;
+        if (!eq || !sc || eq > sc) break;
+        kl = (size_t)(eq - p);
+        vl = (size_t)(sc - eq - 1);
+        if (kl < sizeof(knob) && vl < sizeof(val)) {
+            memcpy(knob, p, kl); knob[kl] = 0;
+            memcpy(val, eq + 1, vl); val[vl] = 0;
+            _putenv_s(knob, val);
+        }
+        p = sc + 1;
+    }
+    TD5_LOG_I(LOG_TAG, "AutoTrackStudio: applied favourite '%s' (seed %u)",
+              f->name, f->seed);
+}
+
+static void at_build_buttons(void)
+{
+    int i;
+    frontend_reset_buttons();
+
+    if (s_at_fav_mode) {
+        TD5_FavSeed f;
+        s_at_fav_n = td5_save_favseed_count();
+        for (i = 0; i < s_at_fav_n; i++) {
+            if (td5_save_favseed_get(i, &f))
+                frontend_create_button(f.name, AT_BTN_X,
+                                       AT_BASE_Y + AT_STEP_Y * i, AT_BTN_W, 28);
+            else
+                frontend_create_button("?", AT_BTN_X,
+                                       AT_BASE_Y + AT_STEP_Y * i, AT_BTN_W, 28);
+        }
+        frontend_create_button(TR("BACK"), AT_BTN_X,
+                               AT_BASE_Y + AT_STEP_Y * (s_at_fav_n + 1),
+                               AT_BTN_W, 28);
+        return;
+    }
+
+    at_rebuild_view();
+    frontend_create_button(TR("SECTION"), AT_BTN_X, AT_BASE_Y, AT_BTN_W, 28);
+    for (i = 0; i < s_at_view_n; i++)
+        frontend_create_button(TR(k_at_rows[s_at_view[i]].label), AT_BTN_X,
+                               AT_BASE_Y + AT_STEP_Y * (i + 1), AT_BTN_W, 28);
+    /* Actions sit below the deepest possible row so they never move as the
+     * section changes -- a button that jumps under the cursor is a misclick. */
+    {
+        const int ya = AT_BASE_Y + AT_STEP_Y * (AT_VIS_ROWS + 1);
+        const int yb = AT_BASE_Y + AT_STEP_Y * (AT_VIS_ROWS + 2);
+        const int hw = (AT_BTN_W - 8) / 2;
+        frontend_create_button(TR("GENERATE"),   AT_BTN_X,          ya, hw, 28);
+        frontend_create_button(TR("SAVE FAV"),   AT_BTN_X + hw + 8, ya, hw, 28);
+        frontend_create_button(TR("FAVOURITES"), AT_BTN_X,          yb, hw, 28);
+        frontend_create_button(SNK_OkButTxt,     AT_BTN_X + hw + 8, yb, hw, 28);
+    }
+}
 
 void Screen_AutoTrackOptions(void) {
+    /* Button layout, non-favourite mode: 0 = section, 1..N = rows,
+     * then GENERATE, SAVE FAV, FAVOURITES, OK. */
+    const int b_gen  = s_at_view_n + 1;
+    const int b_save = s_at_view_n + 2;
+    const int b_favs = s_at_view_n + 3;
+    const int b_ok   = s_at_view_n + 4;
+
     switch (s_inner_state) {
-    case 0: {
-        int r;
+    case 0:
         frontend_init_return_screen(TD5_SCREEN_AUTOTRACK_OPTIONS);
-        frontend_reset_buttons();
-        for (r = 0; r < AT_ROWS; r++)
-            frontend_create_button(TR(k_at_rows[r].label), 120,
-                                   AT_BASE_Y + AT_STEP_Y * r, 224, 28);
-        frontend_create_button(SNK_OkButTxt, 200,
-                               AT_BASE_Y + AT_STEP_Y * AT_ROWS, 96, 28);
+        s_at_fav_mode     = 0;
+        s_at_seed_editing = 0;
+        at_build_buttons();
         frontend_set_cursor_visible(1);
         s_return_screen   = TD5_SCREEN_TRACK_SELECTION;
         s_selected_button = 0;
         s_anim_complete   = 0;
         frontend_begin_timed_animation();
         s_inner_state = 1;
-        TD5_LOG_I(LOG_TAG, "AutoTrackOptions: init (seed of last build=%u)",
+        at_preview_request();
+        TD5_LOG_I(LOG_TAG, "AutoTrackStudio: init (seed of last build=%u)",
                   td5_trackgen_last_seed());
         break;
-    }
     case 1: case 2:
         frontend_present_buffer();
         s_inner_state++;
         break;
     case 3:
+        at_preview_tick();
         if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
             s_anim_complete = 1;
             s_inner_state = 4;
@@ -7154,22 +7658,98 @@ void Screen_AutoTrackOptions(void) {
         s_inner_state = 6;
         break;
     case 6:
+        at_preview_tick();
+
+        /* The seed field owns everything while it is open. */
+        if (at_seed_edit_tick()) break;
+
         /* ESC consumed here for the same reason RACE OPTIONS does it: the screen
          * dispatch runs before the central back handler, which would navigate
          * without logging the exit. */
         if (frontend_check_escape()) {
+            if (s_at_fav_mode) {            /* back out of the picker only */
+                s_at_fav_mode = 0;
+                at_build_buttons();
+                s_selected_button = 0;
+                break;
+            }
             s_inner_state = 7;
             break;
         }
-        if (s_input_ready) {
+        if (!s_input_ready) break;
+
+        if (s_at_fav_mode) {
+            if (s_button_index >= 0 && s_button_index < s_at_fav_n) {
+                TD5_FavSeed f;
+                if (td5_save_favseed_get(s_button_index, &f)) {
+                    at_fav_apply(&f);
+                    at_preview_request();
+                    frontend_play_sfx(3);
+                }
+                s_at_fav_mode = 0;
+                at_build_buttons();
+                s_selected_button = 0;
+            } else if (s_button_index == s_at_fav_n) {
+                s_at_fav_mode = 0;
+                at_build_buttons();
+                s_selected_button = 0;
+                frontend_play_sfx(5);
+            }
+            break;
+        }
+
+        {
             int delta  = frontend_option_delta();
             int active = (s_button_index >= 0) ? s_button_index : s_selected_button;
-            if (delta != 0 && active >= 0 && active < AT_ROWS) {
-                at_row_apply(active, delta);
+
+            if (delta != 0 && active == 0) {            /* section selector */
+                s_at_sect += delta;
+                while (s_at_sect < 0) s_at_sect += AT_SECT_COUNT;
+                s_at_sect %= AT_SECT_COUNT;
+                at_build_buttons();
                 frontend_play_sfx(2);
+                break;
             }
-            if (s_button_index == AT_ROWS)      /* OK */
-                s_inner_state = 7;
+            if (delta != 0 && active >= 1 && active <= s_at_view_n) {
+                const int row = s_at_view[active - 1];
+                if (k_at_rows[row].kind != AT_KIND_SEED) {
+                    at_row_apply(row, delta);
+                    at_mark_dirty();
+                    frontend_play_sfx(2);
+                }
+                break;
+            }
+        }
+
+        if (s_button_index >= 1 && s_button_index <= s_at_view_n &&
+            k_at_rows[s_at_view[s_button_index - 1]].kind == AT_KIND_SEED) {
+            at_seed_edit_begin();
+            frontend_play_sfx(3);
+        } else if (s_button_index == b_gen) {
+            at_setenv("TD5RE_AUTOTRACK_SEED", (int)at_roll_seed());
+            at_preview_request();
+            frontend_play_sfx(3);
+        } else if (s_button_index == b_save) {
+            TD5_FavSeed f;
+            at_fav_capture(&f);
+            if (td5_save_favseed_save(&f)) {
+                TD5_LOG_I(LOG_TAG, "AutoTrackStudio: saved favourite '%s'",
+                          f.name);
+                frontend_play_sfx(3);
+            } else {
+                frontend_play_sfx(10);
+            }
+        } else if (s_button_index == b_favs) {
+            if (td5_save_favseed_count() > 0) {
+                s_at_fav_mode = 1;
+                at_build_buttons();
+                s_selected_button = 0;
+                frontend_play_sfx(3);
+            } else {
+                frontend_play_sfx(10);
+            }
+        } else if (s_button_index == b_ok) {
+            s_inner_state = 7;
         }
         break;
     case 7:
@@ -7181,6 +7761,9 @@ void Screen_AutoTrackOptions(void) {
             s_inner_state = 9;
         break;
     case 9:
+        /* Leaving the screen must not leave a worker walking the generator
+         * that the race launch is about to use. */
+        td5_tgprev_cancel_join();
         td5_frontend_set_screen(TD5_SCREEN_TRACK_SELECTION);
         break;
     }

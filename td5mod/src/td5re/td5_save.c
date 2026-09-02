@@ -86,6 +86,7 @@ static int  cup_load_binary_file(const char *path);   /* legacy CupData.td5 read
 static int  cup_is_binary_valid(const char *path);    /* legacy CRC self-check */
 static void profiles_ensure_loaded(void);             /* lazy [Profiles] read */
 static void profiles_read(void);                      /* read [Profiles] from progress.ini */
+static void favseeds_ensure_loaded(void);             /* lazy [FavoriteSeeds] read */
 static void td6_records_ensure_loaded(void);          /* lazy [TD6Records] read */
 static void td6_records_read(void);                   /* read [TD6Records] from progress.ini */
 
@@ -915,6 +916,12 @@ static uint32_t s_cup_cross_ref_3;                            /* 0x48F378 */
 static TD5_Profile s_profiles[TD5_MAX_PROFILES];
 static int         s_profile_count;
 static int         s_profiles_loaded;
+
+/* AUTO TRACK STUDIO favourites -- same lazy-load/rewrite shape as the profile
+ * store above; see the contract on TD5_FavSeed in td5_save.h. */
+static TD5_FavSeed s_favseeds[TD5_MAX_FAVSEEDS];
+static int         s_favseed_count;
+static int         s_favseeds_loaded;
 
 /* -- TD6 high-score records (port enhancement #2b) --
  * One TD5_NpcGroup-shaped record table per TD6 level, holding ONLY genuine
@@ -2400,6 +2407,30 @@ static int cfgini_write_progress(void)
     }
     cfgini_add(&w, "\r\n");
 
+    /* AUTO TRACK STUDIO favourites. Loaded first for the same reason the
+     * profiles are: an unrelated td5_save_write_config() must not clobber the
+     * on-disk favourites with an empty in-memory set. */
+    favseeds_ensure_loaded();
+    cfgini_add(&w, "[FavoriteSeeds]\r\n");
+    cfgini_add(&w, "; Saved AUTO TRACK seeds plus the generator settings they were made with.\r\n");
+    cfgini_add(&w, "; Params is a ';'-terminated list of TD5RE_AUTOTRACK_* knob=value pairs;\r\n");
+    cfgini_add(&w, "; knobs left at the generator default are absent.\r\n");
+    cfgini_add(&w, "Count = %d\r\n", s_favseed_count);
+    for (int i = 0; i < s_favseed_count; i++) {
+        const TD5_FavSeed *fs = &s_favseeds[i];
+        char nm[32];
+        snprintf(nm, sizeof nm, "%s", fs->name);
+        /* Defensively strip any control byte so it cannot break the INI. */
+        for (int c = 0; c < (int)sizeof nm; c++) {
+            if (nm[c] == '\0') break;
+            if ((unsigned char)nm[c] < 0x20) { nm[c] = '\0'; break; }
+        }
+        cfgini_add(&w, "Fav%dName = %s\r\n", i, nm);
+        cfgini_add(&w, "Fav%dSeed = %u\r\n", i, fs->seed);
+        cfgini_add(&w, "Fav%dParams = %s\r\n", i, fs->params);
+    }
+    cfgini_add(&w, "\r\n");
+
     /* [#2b] TD6 per-track high-score records — genuine player runs only. Same
      * entry layout as the TD5 high-score groups; header -1 = no records yet, so
      * those levels are skipped here (nothing to persist). Loaded first so an
@@ -2568,6 +2599,95 @@ static void profiles_ensure_loaded(void)
     if (s_profiles_loaded) return;
     s_profiles_loaded = 1;
     profiles_read();
+}
+
+/* ---- AUTO TRACK STUDIO favourites -------------------------------------- */
+
+/* Read [FavoriteSeeds] from td5re_progress.ini. Tolerates a missing file or
+ * absent section (leaves count 0), same as profiles_read. */
+static void favseeds_read(void)
+{
+    s_favseed_count = 0;
+    memset(s_favseeds, 0, sizeof(s_favseeds));
+
+    const char *f = cfgini_progress_path();
+    if (!td5_plat_file_exists(f)) return;
+
+    int n = td5_plat_ini_get_int(f, "FavoriteSeeds", "Count", 0);
+    if (n < 0) n = 0;
+    if (n > TD5_MAX_FAVSEEDS) n = TD5_MAX_FAVSEEDS;
+
+    char key[32];
+    int out = 0;
+    for (int i = 0; i < n; i++) {
+        TD5_FavSeed *fs = &s_favseeds[out];
+        char name[32];
+        snprintf(key, sizeof key, "Fav%dName", i);
+        if (td5_plat_ini_get_str(f, "FavoriteSeeds", key, "", name,
+                                 sizeof name) <= 0)
+            continue;                       /* skip nameless / missing slots */
+        if (name[0] == '\0') continue;
+        memset(fs, 0, sizeof(*fs));
+        snprintf(fs->name, sizeof fs->name, "%s", name);
+        snprintf(key, sizeof key, "Fav%dSeed", i);
+        fs->seed = (unsigned int)cfgini_get_i32(f, "FavoriteSeeds", key, 0);
+        snprintf(key, sizeof key, "Fav%dParams", i);
+        td5_plat_ini_get_str(f, "FavoriteSeeds", key, "", fs->params,
+                             (int)sizeof fs->params);
+        out++;
+    }
+    s_favseed_count = out;
+}
+
+static void favseeds_ensure_loaded(void)
+{
+    if (s_favseeds_loaded) return;
+    s_favseeds_loaded = 1;
+    favseeds_read();
+}
+
+int td5_save_favseed_count(void)
+{
+    favseeds_ensure_loaded();
+    return s_favseed_count;
+}
+
+int td5_save_favseed_get(int idx, TD5_FavSeed *out)
+{
+    favseeds_ensure_loaded();
+    if (!out || idx < 0 || idx >= s_favseed_count) return 0;
+    *out = s_favseeds[idx];
+    return 1;
+}
+
+int td5_save_favseed_save(const TD5_FavSeed *f)
+{
+    favseeds_ensure_loaded();
+    if (!f || f->name[0] == '\0') return 0;
+
+    /* UPSERT by name, matching the profile store's contract. */
+    for (int i = 0; i < s_favseed_count; i++) {
+        if (_stricmp(s_favseeds[i].name, f->name) == 0) {
+            s_favseeds[i] = *f;
+            cfgini_write_progress();   /* persist whole progress file */
+            return 1;
+        }
+    }
+    if (s_favseed_count >= TD5_MAX_FAVSEEDS) return 0;
+    s_favseeds[s_favseed_count++] = *f;
+    cfgini_write_progress();   /* persist whole progress file */
+    return 1;
+}
+
+int td5_save_favseed_delete(int idx)
+{
+    favseeds_ensure_loaded();
+    if (idx < 0 || idx >= s_favseed_count) return 0;
+    for (int i = idx; i < s_favseed_count - 1; i++)
+        s_favseeds[i] = s_favseeds[i + 1];
+    memset(&s_favseeds[--s_favseed_count], 0, sizeof(s_favseeds[0]));
+    cfgini_write_progress();   /* persist whole progress file */
+    return 1;
 }
 
 int td5_save_profile_count(void)
