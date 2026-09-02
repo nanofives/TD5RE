@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 02 (determinism fix, all threads)" },
+    { CL_ITEM,    "FIX: the background worker pool did not inherit the" },
+    { CL_ITEM,    "  game's floating-point rounding mode, so anything it" },
+    { CL_ITEM,    "  computed could differ in the last digit from the same" },
+    { CL_ITEM,    "  code on the main thread. Every worker now adopts it." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 02 (auto tracks start almost instantly)" },
     { CL_ITEM,    "An AUTO-GENERATED race no longer waits for the whole" },
     { CL_ITEM,    "  track to be decorated. The road, route and finish are" },

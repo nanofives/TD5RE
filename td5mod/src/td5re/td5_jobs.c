@@ -43,6 +43,18 @@ static struct {
     int                count;
     int                next;      /* next index to claim                       */
     int                done;      /* completed indices                         */
+
+    /* The main thread's FP control state, captured at init and installed on
+     * every worker. NOT optional, and not specific to any one job: the FP
+     * control state is PER-THREAD on Windows and this port runs
+     * _RC_DOWN|_PC_64 to match the original binary (main.c, verified against
+     * the original's CW 0x077F), so a worker left on the process default
+     * rounds to nearest instead. Identical code then produces results one
+     * unit in the last place apart, and any job that decides something on a
+     * threshold can decide it DIFFERENTLY depending on which thread ran the
+     * index -- i.e. non-deterministic output from a deterministic job.
+     * See the FP-environment section in td5_platform.h. */
+    TD5_FpEnv          fpenv;
 } g;
 
 /* Drain remaining indices of the current batch. MUST be called with `lock`
@@ -66,6 +78,9 @@ static void jobs_run_current_locked(void)
 static DWORD WINAPI jobs_worker_main(LPVOID arg)
 {
     (void)arg;
+    /* FIRST, before this worker can run any job body: adopt the main thread's
+     * rounding/precision mode (see g.fpenv). */
+    td5_plat_fpenv_apply(&g.fpenv);
     EnterCriticalSection(&g.lock);
     unsigned long seen = g.generation;
     for (;;) {
@@ -121,6 +136,11 @@ int td5_jobs_init(int requested_workers)
     g.running = 1;
     g.generation = 0;
     g.fn = NULL; g.ctx = NULL; g.count = 0; g.next = 0; g.done = 0;
+
+    /* Snapshot BEFORE the first CreateThread, so no worker can start without
+     * it. td5_jobs_init runs on the main thread from main.c, after the
+     * _controlfp call there. */
+    td5_plat_fpenv_capture(&g.fpenv);
 
     int created = 0;
     for (int i = 0; i < n; i++) {
