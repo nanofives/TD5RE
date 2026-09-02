@@ -17289,15 +17289,18 @@ static int tg_r13_rear_plane(const TG_NodeList *nl, int si, int left,
  *   AHEAD    the rear is in front of a car driving the ring forwards
  *   CONE     it is inside the forward half-angle, not out of the side window
  *   RANGE    it is close enough to be drawn rather than fogged out */
-static double tg_r13_rear_seen_from(const TG_NodeList *nl, int si, int left,
-                                    const TG_Biome *b, int c, double range)
+/* Takes the rear plane rather than deriving it: it depends only on (si, left)
+ * and so is INVARIANT across the camera loop that calls this. Deriving it here
+ * meant tg_r13_rear_plane -- and through it tg_side_geom, 163 lines -- ran once
+ * per camera span instead of once per run. See tg_r13_rear_exposed. */
+static double tg_r13_rear_seen_from(const TG_NodeList *nl, int si, int c,
+                                    double range, double p_x, double p_z,
+                                    double o_x, double o_z)
 {
-    double p_x, p_z, o_x, o_z, rows, vx, vz, d, fx, fz;
+    double vx, vz, d, fx, fz;
     const TG_Node *nc;
     if (c < 1 || c > nl->count - 2) return 0.0;
     if (c > si - TD5_TG_R13_EXPO_NEAR && c < si + TD5_TG_R13_EXPO_NEAR)
-        return 0.0;
-    if (!tg_r13_rear_plane(nl, si, left, b, &p_x, &p_z, &o_x, &o_z, &rows))
         return 0.0;
     nc = &nl->v[c];
     vx = nc->x - p_x; vz = nc->z - p_z;
@@ -17315,13 +17318,39 @@ static int tg_r13_rear_exposed(const TG_NodeList *nl, int si, int left,
                                const TG_Biome *b, double range, double *far_out)
 {
     int c, lo, hi, n = 0;
-    double fdist = 0.0;
+    double fdist = 0.0, p_x, p_z, o_x, o_z, rows;
 
     if (far_out) *far_out = 0.0;
+
+    /* [PERF] LOOP-INVARIANT HOIST, and it is worth roughly half the build.
+     *
+     * The rear plane is a function of (si, left) alone, but it used to be
+     * derived inside tg_r13_rear_seen_from, which runs once per camera span
+     * across a +/-TD5_TG_R13_EXPO_BACK window -- 81 spans. So tg_side_geom
+     * (163 lines) was called 81 times per (span, side) where once suffices:
+     * ~322000 calls instead of ~4000 on a 1987-span track.
+     *
+     * Measured before: tg_r13_emit_gap_infill 50929 ms, which was 99.7 percent
+     * of the `cross` emitter and ~50 percent of the whole build, at ~12.7 ms
+     * per gate query. Memoising was NOT the answer -- each (si, side) is asked
+     * exactly once per build, so there is nothing to re-use; the call itself
+     * was the problem.
+     *
+     * Identical arithmetic: the same plane value is used for every camera, it
+     * is simply computed once. If the plane cannot be built no camera could
+     * ever have seen it, so returning 0 here matches the old all-cameras-fail
+     * path. The one behavioural difference is confined to a REPORT counter:
+     * tg_side_geom calls tg_acct(TG_ACCT_R11_CITY), so that inventory count
+     * stops being inflated ~81x by redundant queries. The mask bit it sets is
+     * idempotent per span, and it is read only by reports. */
+    if (!tg_r13_rear_plane(nl, si, left, b, &p_x, &p_z, &o_x, &o_z, &rows))
+        return 0;
+
     lo = si - TD5_TG_R13_EXPO_BACK;   if (lo < 1) lo = 1;
     hi = si + TD5_TG_R13_EXPO_BACK;   if (hi > nl->count - 2) hi = nl->count - 2;
     for (c = lo; c <= hi; c++) {
-        const double d = tg_r13_rear_seen_from(nl, si, left, b, c, range);
+        const double d = tg_r13_rear_seen_from(nl, si, c, range,
+                                               p_x, p_z, o_x, o_z);
         if (!(d > 0.0)) continue;
         n++;
         if (d > fdist) fdist = d;
