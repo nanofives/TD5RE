@@ -625,6 +625,10 @@ static void rt_feed_world_scenery(void)
 {
     static int s_scenery_on = -1, s_bb_on = -1;
     int span_count, sp, solid = 0, bb = 0, dropped = 0, big = 0;
+    /* [COVERAGE DIAG] WHERE the budget runs out, not just how much was
+     * dropped. The walk is ascending by entry, so if it exhausts early the
+     * ray-traced set covers only the START of the track. */
+    int budget_sp = -1, last_fed_sp = -1;
     if (s_scenery_on < 0) s_scenery_on = td5_env_int("TD5RE_RT_SCENERY",    1, 0, 1);
     if (s_bb_on      < 0) s_bb_on      = td5_env_int("TD5RE_RT_BILLBOARDS", 1, 0, 1);
     if (!s_scenery_on) return;
@@ -656,7 +660,10 @@ static void rt_feed_world_scenery(void)
             if (!mesh->commands || !mesh->vertices) continue;
             if ((uintptr_t)mesh->commands < 0x10000u || (uintptr_t)mesh->vertices < 0x10000u) continue;
             if (rt_seen(mesh)) continue;
-            if (s_scenery_count >= RT_MAX_SCENERY) { dropped++; continue; }
+            if (s_scenery_count >= RT_MAX_SCENERY) {
+                if (budget_sp < 0) budget_sp = sp;
+                dropped++; continue;
+            }
             is_bb = (mesh->texture_page_id == 1 || mesh->texture_page_id == 2);
             if (rt_diag_on() && s_seen_count < 40) {
                 const TD5_PrimitiveCmd *c0 = mesh->commands;
@@ -666,19 +673,28 @@ static void rt_feed_world_scenery(void)
                         c0[0].triangle_count, c0[0].quad_count, is_bb);
             }
             if (is_bb) {
-                if (s_bb_on && rt_feed_billboard(mesh)) bb++;
+                if (s_bb_on && rt_feed_billboard(mesh)) { bb++; last_fed_sp = sp; }
             } else if (mesh->total_vertex_count > 65535) {
                 big++;                                 /* u16 index limit; skip (rare) */
             } else {
                 unsigned char smask = 0xFFu;
                 int h = rt_build_scenery_mesh(mesh, rt_scenery_matid(mesh), &smask);
                 if (h) { s_scenery_mask[s_scenery_count] = smask;
-                         s_scenery_handles[s_scenery_count++] = h; solid++; }
+                         s_scenery_handles[s_scenery_count++] = h; solid++;
+                         last_fed_sp = sp; }
             }
         }
     }
     rt_diag("SCENERY_FEED spans=%d seen=%d solid=%d billboards=%d handles=%d big_skipped=%d dropped=%d",
             span_count, s_seen_count, solid, bb, s_scenery_count, big, dropped);
+    /* COVERAGE is the number that matters when dropped > 0: the walk is
+     * ascending by entry, so an early exhaustion means the ray-traced set is a
+     * PREFIX of the track and everything past it has no RT scenery at all. */
+    rt_diag("SCENERY_COVERAGE budget_exhausted_at_entry=%d last_fed_entry=%d "
+            "of %d entries (%d%% of the ring; seen_set_saturated=%d)",
+            budget_sp, last_fed_sp, span_count,
+            span_count ? ((last_fed_sp + 1) * 100 / span_count) : 0,
+            s_seen_count >= (int)(sizeof(s_seen)/sizeof(s_seen[0])));
 }
 
 /* ---- per-frame driver ----------------------------------------------------- */
