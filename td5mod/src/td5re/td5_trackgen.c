@@ -660,6 +660,8 @@ typedef enum {
     TG_PF_FARSHORE, TG_PF_FARBAND, TG_PF_XHERE, TG_PF_GROUND,
     TG_PF_XPAVED, TG_PF_XWALL, TG_PF_XZEBRA, TG_PF_XFLANK, TG_PF_XINFILL,
     TG_PF_TOPOCAP, TG_PF_DRYREACH, TG_PF_BANDCOV,
+    TG_PF_BUILD, TG_PF_GROUNDQ, TG_PF_BRIDGE,
+    TG_PF_LOOP1, TG_PF_LOOP2,
     TG_PF_COUNT
 } TG_PerfPhase;
 /* First nested slot; everything from here down is excluded from the total. */
@@ -671,7 +673,8 @@ static const char *const k_pf_names[TG_PF_COUNT] = {
     "parktree", "slopeflora", "terrain", "infra", "track", "guardval",
     ".farshore", ".farband", ".xhere", ".ground",
     ".xpaved", ".xwall", ".xzebra", ".xflank", ".xinfill",
-    ".topocap", ".dryreach", ".bandcov"
+    ".topocap", ".dryreach", ".bandcov",
+    "build", "groundq", "bridge", "LOOP1_road", "LOOP2_scenery"
 };
 
 /* Call counts for the two crossing predicates. The COUNT is the actionable
@@ -23337,12 +23340,14 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
 
         if (ns > TD5_TG_SPANS_PER_ENTRY) ns = TD5_TG_SPANS_PER_ENTRY;
         memset(&meshes, 0, sizeof(meshes));
+        unsigned long long lt_;
         tg_guard_ex_reset();   /* [R7 GUARD] exempt ranges are per-entry */
         tg_pave_mark_reset();  /* [R9 CITY] pavement provenance, per-entry */
 
         /* Ground skirt then road, per span. Offsets are RECORDED as meshes are
          * appended -- sizes differ once ground, buildings and road quads are
          * mixed, so they cannot come from a uniform stride. */
+        lt_ = td5_plat_time_us();
         for (i = 0; i < ns && ok; i++) {
             const int si = s0 + i;
 
@@ -23437,7 +23442,9 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
             {
                 const TG_Biome *gb = &k_biomes[tg_biome_for_span(si)];
                 double wsd = gb->water ? tg_water_side(si) : 0.0;
+                { unsigned long long p_ = td5_plat_time_us();
                 if (!tg_emit_ground(nl, si, &meshes, wsd)) { ok = 0; break; }
+                s_pf_us[TG_PF_GROUNDQ] += td5_plat_time_us() - p_; }
             }
             /* [R7 GUARD] the ground skirt underlaps the road by design. */
             tg_guard_mark(moff[nmesh - 1], meshes.len, TG_GK_SKIRT, si);
@@ -23541,11 +23548,17 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                  * zero bytes is read as garbage geometry, not as a missing
                  * rail. */
                 moff[nmesh] = meshes.len;
-                if (!tg_emit_guardrail(nl, si, &meshes, &emitted)) ok = 0;
-                else if (emitted) { nmesh++; nrails++; }
+                {   /* the else belongs to the if, so both go inside the timer */
+                    unsigned long long p_ = td5_plat_time_us();
+                    if (!tg_emit_guardrail(nl, si, &meshes, &emitted)) ok = 0;
+                    else if (emitted) { nmesh++; nrails++; }
+                    s_pf_us[TG_PF_RAIL] += td5_plat_time_us() - p_;
+                }
                 tg_guard_mark(r0, meshes.len, TG_GK_RAIL, si);
             }
         }
+        s_pf_us[TG_PF_LOOP1] += td5_plat_time_us() - lt_;
+        lt_ = td5_plat_time_us();
         for (i = 0; i < ns && ok; i++) {
             const int si = s0 + i;
             int k;
@@ -23750,7 +23763,9 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                  * backwards offset makes that cursor run off the end of the
                  * allocation. See the R10 note on that function. */
                 b0 = meshes.len;
+                { unsigned long long p_ = td5_plat_time_us();
                 if (!tg_building_for_span(nl, si, &meshes)) { ok = 0; break; }
+                s_pf_us[TG_PF_BUILD] += td5_plat_time_us() - p_; }
                 /* [S2] The verge tree, split out of the call above. Wall and
                  * tree are mutually exclusive per span, so at most one of the
                  * two emits and the single moff entry below still describes
@@ -23764,7 +23779,9 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                  * [R7 GUARD] the deck IS the road and the piers descend from it;
                  * the parapets/ribs sit on the deck edge or overhead. */
                 b1 = meshes.len;
+                { unsigned long long p_ = td5_plat_time_us();
                 if (!tg_emit_bridge(nl, si, &meshes, &nb)) { ok = 0; break; }
+                s_pf_us[TG_PF_BRIDGE] += td5_plat_time_us() - p_; }
                 for (k = 0; k < nb; k++)
                     moff[nmesh++] = b1 + (size_t)k *
                                     ((meshes.len - b1) / (size_t)nb);
@@ -23832,6 +23849,8 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 }
             }
         }
+
+        s_pf_us[TG_PF_LOOP2] += td5_plat_time_us() - lt_;
 
         /* [R7 GUARD] Post-emit backstop: reject any scenery mesh standing in the
          * carriageway, over ALL of this entry's assembled geometry, whatever
