@@ -139,6 +139,16 @@ int td5_trackgen_is_auto_slot(int slot);
  * gets new geometry). Returns 1 on success. */
 int td5_trackgen_regenerate(unsigned int seed);
 
+/* As above but GEOMETRY ONLY: strip, routes, levelinf and sky, with no
+ * MODELS.DAT and no texture pages. Used by td5_trackgen_init, because the boot
+ * build exists only to register the selector entry and every race launch
+ * regenerates from scratch -- so boot scenery is written and then thrown away
+ * unread. Measured at 99.4 percent of boot cost. The registry entry is
+ * identical either way: the finish span comes from the strip, not the scenery.
+ *
+ * Independent of TD5RE_AUTOTRACK_SCENERY, which stays the player's choice. */
+int td5_trackgen_regenerate_geometry_only(unsigned int seed);
+
 /* [S2 / Phase 2 streaming] Rebuild the main-road span records for `seed` and
  * return them as a blob of 24-byte records for the caller to free. Lets the
  * track module overwrite a region of its LIVE span array with bytes that

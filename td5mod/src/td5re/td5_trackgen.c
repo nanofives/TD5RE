@@ -674,6 +674,51 @@ static const char *const k_pf_names[TG_PF_COUNT] = {
  * nearly free, where timing a function called millions of times is not. */
 static unsigned long long s_pf_n_xhere, s_pf_n_xbase;
 
+/* [PERF LEVER 1] Does THIS build want scenery?
+ *
+ * Boot needs the AUTO-GENERATED entry to EXIST in the selector, not to have
+ * buildings: every race launch regenerates with a fresh seed anyway
+ * (td5_asset_load_level), so the boot build's MODELS.DAT is thrown away
+ * unread. Measured, that discarded work is 99.4 percent of a 30-130 s boot.
+ *
+ * Separate from TD5RE_AUTOTRACK_SCENERY, which is the player's choice of
+ * ribbon-vs-scenery and must keep working independently. Both must be true to
+ * emit. Reset to 1 after each use so only the boot path is ever affected. */
+static int s_want_scenery = 1;
+
+/* [PERF LEVER 2] Per-build memo for the two crossing predicates.
+ *
+ * Measured: 22246 tg_crossing_base calls cost 17392 ms of a 129945 ms build
+ * (~0.78 ms each). The predicates are PURE within the scenery phase -- the
+ * chain (tg_span_in_fork_clear, tg_up_xclear_span, tg_r13_approach_span,
+ * tg_facade_built, tg_r11_corner_stands, tg_block_is_park) reads the node
+ * list, the biome grid, the fork table and the approach mask, all of which are
+ * final before tg_emit_models runs, and NONE of them draws from the RNG
+ * stream (tg_block_is_park hashes; tg_facade_stands is pure). So a value
+ * cached on first query cannot differ from a recomputation.
+ *
+ * Lazy rather than a precomputed sweep, deliberately: a lazy cache preserves
+ * the exact call ORDER of the uncached build, so if any dependency were ever
+ * to become impure the A/B below would still be comparing like with like.
+ *
+ * -1 = not yet computed. Reset at the top of tg_emit_models, which is the
+ * tightest correct scope: every crossing query happens inside it, and by then
+ * every dependency is frozen.
+ *
+ * TD5RE_AUTOTRACK_XCACHE=0 disables it, which is how the byte-identical A/B is
+ * run. Latched per build (s_xcache_on) so the knob read stays out of the hot
+ * path -- a getenv per query would defeat the point. */
+static signed char s_xbase_memo[TD5_TG_MAX_SPANS];
+static signed char s_xhere_memo[TD5_TG_MAX_SPANS];
+static int         s_xcache_on;
+
+static void tg_xcache_reset(void)
+{
+    s_xcache_on = td5_env_flag_on("TD5RE_AUTOTRACK_XCACHE");
+    memset(s_xbase_memo, -1, sizeof(s_xbase_memo));
+    memset(s_xhere_memo, -1, sizeof(s_xhere_memo));
+}
+
 /* Fork lookups live down in the [FB] block (three other work areas read them
  * from there); forward-declared here because the strip emitters above need
  * them to map an APPENDED corridor span back to its main-ring node. */
@@ -14496,7 +14541,7 @@ static int tg_r11_xgap(int a, int b)
 /* The crossing predicate WITHOUT the min-spacing thinning: the FIRST span of a
  * non-park side-street gap on either kerb, off forks and bridge approaches.
  * Both sides are tested, so a street opening on the left gets one too. */
-static int tg_crossing_base(int si)
+static int tg_crossing_base_calc(int si)
 {
     int s;
     s_pf_n_xbase++;
@@ -14553,12 +14598,23 @@ static int tg_crossing_base(int si)
     return 0;
 }
 
+/* Memoised front door; see s_xbase_memo. Out-of-range spans bypass the cache
+ * rather than clamp into a neighbour's slot. */
+static int tg_crossing_base(int si)
+{
+    if (!s_xcache_on || si < 0 || si >= TD5_TG_MAX_SPANS)
+        return tg_crossing_base_calc(si);
+    if (s_xbase_memo[si] < 0)
+        s_xbase_memo[si] = (signed char)(tg_crossing_base_calc(si) ? 1 : 0);
+    return s_xbase_memo[si];
+}
+
 /* Where a pedestrian crossing is actually painted: a base crossing span that
  * survives the min-spacing thinning. The thinning is a greedy left-to-right
  * keep/drop simulated over a bounded backward window, so the decision is a pure
  * function of si with no cross-call state (this is called from both the zebra
  * emitter and the kerb-fence break gate, possibly out of span order). */
-static int tg_city_crossing_here(int si)
+static int tg_city_crossing_here_calc(int si)
 {
     int j, last = -1000000;
     unsigned long long pf0 = td5_plat_time_us();
@@ -14580,6 +14636,17 @@ static int tg_city_crossing_here(int si)
     result = si - last >= tg_r11_xgap(last, si);
     s_pf_us[TG_PF_XHERE] += td5_plat_time_us() - pf0;
     return result;
+}
+
+/* Memoised front door; see s_xhere_memo. This is the one that carries the
+ * 48-span thinning window, so a repeat query is the expensive one to avoid. */
+static int tg_city_crossing_here(int si)
+{
+    if (!s_xcache_on || si < 0 || si >= TD5_TG_MAX_SPANS)
+        return tg_city_crossing_here_calc(si);
+    if (s_xhere_memo[si] < 0)
+        s_xhere_memo[si] = (signed char)(tg_city_crossing_here_calc(si) ? 1 : 0);
+    return s_xhere_memo[si];
 }
 
 /* [R11 CROSS item 16] THE INSTRUMENT the diagnosis was made with, and the same
@@ -22777,6 +22844,11 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
      * take a span index and no node list, and a per-call rescan would be
      * quadratic in the span count. Must precede the first facade query. */
     tg_turn_map_build(nl, nspans);
+    /* [PERF LEVER 2] Crossing memo. Placed HERE, not earlier: this is the
+     * tightest scope that still covers every crossing query, and by this point
+     * the node list, the fork table, the biome grid, the turn map and the R13
+     * approach mask are all final, so a cached answer cannot go stale. */
+    tg_xcache_reset();
     tg_r8_cross_report(nl, nspans);   /* [R8 CROSS] class sweep, opt-in */
     tg_r10_cross_report(nl, nspans);  /* [R10 CROSS] side-street setback, opt-in */
     tg_r11_city_report(nl, nspans);   /* [R11 CITY] frontage/junction dump, opt-in */
@@ -27161,7 +27233,13 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
          * biomes, tree billboards -- all verified in frame). Set
          * TD5RE_AUTOTRACK_SCENERY=0 to fall back to the untextured procedural
          * ribbon. */
-        if (td5_env_flag_on("TD5RE_AUTOTRACK_SCENERY")) {
+        /* s_want_scenery is the BOOT suppression (see its declaration); the
+         * env knob is the player's ribbon-vs-scenery choice. Both must hold.
+         * When suppressed we still fall through to the removal below: the boot
+         * build writes a NEW strip under a NEW seed, so a MODELS.DAT left over
+         * from a previous session would no longer match its geometry, and a
+         * mismatched mesh file disables the ribbon and hides the road. */
+        if (s_want_scenery && td5_env_flag_on("TD5RE_AUTOTRACK_SCENERY")) {
             TG_Buf models, tex;
             memset(&models, 0, sizeof(models));
             memset(&tex, 0, sizeof(tex));
@@ -27577,8 +27655,13 @@ int td5_trackgen_init(void)
     /* Build one track at boot so the AUTO-GENERATED entry is present (and
      * loadable) from the main menu onwards. Each race launch regenerates with
      * a fresh seed -- see td5_asset_load_level. A failure here is non-fatal:
-     * the entry simply never registers and the selector skips it. */
-    if (!td5_trackgen_regenerate(0))
+     * the entry simply never registers and the selector skips it.
+     *
+     * [PERF LEVER 1] GEOMETRY ONLY. The boot build exists to register the
+     * selector entry, and every race launch regenerates from scratch anyway,
+     * so its scenery was written and then thrown away unread -- measured at
+     * 99.4 percent of a 30-130 s boot. */
+    if (!td5_trackgen_regenerate_geometry_only(0))
         TD5_LOG_W(LOG_TAG, "trackgen: boot generation failed; "
                   "AUTO-GENERATED will not be selectable");
     return 1;
@@ -27666,4 +27749,17 @@ int td5_trackgen_regenerate(unsigned int seed)
     TD5_LOG_I(LOG_TAG, "trackgen: auto track ready (slot %d, level %d, "
               "seed %u, %d spans)", TD5_TG_SLOT, TD5_TG_LEVEL_NUM, seed, spans);
     return 1;
+}
+
+/* [PERF LEVER 1] Geometry only: strip, routes, levelinf, sky -- no MODELS.DAT
+ * and no texture pages. See s_want_scenery for why boot does not need them.
+ * The registry entry this produces is identical, because the finish span comes
+ * from s_ring_len (the strip), not from the scenery. */
+int td5_trackgen_regenerate_geometry_only(unsigned int seed)
+{
+    int r;
+    s_want_scenery = 0;
+    r = td5_trackgen_regenerate(seed);
+    s_want_scenery = 1;     /* restore before any race-launch build */
+    return r;
 }
