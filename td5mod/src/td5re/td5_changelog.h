@@ -48,6 +48,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  A pause-menu Restart, or a pinned seed, reuses the build" },
     { CL_ITEM,    "  already on disk: 8 s to the green light instead of 34." },
 
+    { CL_DATE,    "September 02 (determinism fix, all threads)" },
+    { CL_ITEM,    "FIX: the background worker pool did not inherit the" },
+    { CL_ITEM,    "  game's floating-point rounding mode, so anything it" },
+    { CL_ITEM,    "  computed could differ in the last digit from the same" },
+    { CL_ITEM,    "  code on the main thread. Every worker now adopts it." },
+    { CL_BLANK,   "" },
+
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 03 (auto-track frame rate with HIGH lighting)" },
