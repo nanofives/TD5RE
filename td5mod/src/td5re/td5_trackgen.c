@@ -657,7 +657,8 @@ typedef enum {
     /* Sub-slots, NESTED inside a parent above, so they are reported but must
      * not be added into the total: terrain = farshore + farband + gates, and
      * xhere is the crossing predicate charged inside cross (and others). */
-    TG_PF_FARSHORE, TG_PF_FARBAND, TG_PF_XHERE,
+    TG_PF_FARSHORE, TG_PF_FARBAND, TG_PF_XHERE, TG_PF_GROUND,
+    TG_PF_XPAVED, TG_PF_XWALL, TG_PF_XZEBRA, TG_PF_XFLANK, TG_PF_XINFILL,
     TG_PF_COUNT
 } TG_PerfPhase;
 /* First nested slot; everything from here down is excluded from the total. */
@@ -667,13 +668,14 @@ static unsigned long long s_pf_us[TG_PF_COUNT];
 static const char *const k_pf_names[TG_PF_COUNT] = {
     "rail", "tunnel", "city", "block", "cross", "flora", "forestx",
     "parktree", "slopeflora", "terrain", "infra", "track", "guardval",
-    ".farshore", ".farband", ".xhere"
+    ".farshore", ".farband", ".xhere", ".ground",
+    ".xpaved", ".xwall", ".xzebra", ".xflank", ".xinfill"
 };
 
 /* Call counts for the two crossing predicates. The COUNT is the actionable
  * number: it is the multiplier a memoised table would remove. Counting is
  * nearly free, where timing a function called millions of times is not. */
-static unsigned long long s_pf_n_xhere, s_pf_n_xbase;
+static unsigned long long s_pf_n_xhere, s_pf_n_xbase, s_pf_n_ground;
 
 /* [PERF LEVER 1] Does THIS build want scenery?
  *
@@ -12586,8 +12588,12 @@ static void tg_ground_side_raw(const TG_NodeList *nl, int si, int is_left,
  * any point beyond it) is pulled in to the neighbouring carriageway's edge and
  * its drop is interpolated along the segment it landed in, so the surface keeps
  * its shape and simply stops earlier. */
-static void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
-                           double water_side, TG_GroundProf *p)
+/* [PERF] Timed through a wrapper so the whole ground-sampling subtree
+ * (tg_ground_side_raw + tg_topo_road_cap + the profile walk) is attributed in
+ * one number. far_band calls this three times per side per group and it is the
+ * likeliest owner of that emitter's per-mesh cost. */
+static void tg_ground_side_inner(const TG_NodeList *nl, int si, int is_left,
+                                 double water_side, TG_GroundProf *p)
 {
     double cap;
     int k;
@@ -12621,6 +12627,15 @@ static void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
         p->n = k + 1;
         break;
     }
+}
+
+static void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
+                           double water_side, TG_GroundProf *p)
+{
+    unsigned long long t0 = td5_plat_time_us();
+    s_pf_n_ground++;
+    tg_ground_side_inner(nl, si, is_left, water_side, p);
+    s_pf_us[TG_PF_GROUND] += td5_plat_time_us() - t0;
 }
 
 static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
@@ -18109,13 +18124,26 @@ static void tg_r9_city_report(const TG_NodeList *nl, int nspans)
 /* Group CROSS dispatcher (feedback R4 items 10, 14; R5 items 2, 3, 4, 12).
  * Wired into the scenery loop next to tg_emit_fb_block; city spans only.
  * R5 item 3 removed the raised kerb break that used to run here. */
+/* [PERF] Sub-timed: `cross` is ~52 percent of a build and only 0.6 s of that
+ * is the crossing predicate, so the cost is in one of these four. */
+#define TG_PF_SUB(slot, call)                                                 \
+    do {                                                                      \
+        unsigned long long t0_ = td5_plat_time_us();                          \
+        int r_ = (call);                                                      \
+        s_pf_us[slot] += td5_plat_time_us() - t0_;                            \
+        if (!r_) return 0;                                                    \
+    } while (0)
+
 static int tg_emit_fb_cross(const TG_FBHook *h)
 {
-    if (!tg_city_span_paved(h)) return 1;      /* only where the city is */
-    if (!tg_cross_emit_sidewalls(h)) return 0;
-    if (!tg_cross_emit_join_zebra(h)) return 0;
-    if (!tg_cross_emit_street_flank(h)) return 0;   /* [R8 CROSS item 1] */
-    if (!tg_r13_emit_gap_infill(h)) return 0;       /* [R13 FILL item 7b] */
+    unsigned long long tg0 = td5_plat_time_us();
+    int paved = tg_city_span_paved(h);
+    s_pf_us[TG_PF_XPAVED] += td5_plat_time_us() - tg0;
+    if (!paved) return 1;                      /* only where the city is */
+    TG_PF_SUB(TG_PF_XWALL,   tg_cross_emit_sidewalls(h));
+    TG_PF_SUB(TG_PF_XZEBRA,  tg_cross_emit_join_zebra(h));
+    TG_PF_SUB(TG_PF_XFLANK,  tg_cross_emit_street_flank(h));   /* [R8 CROSS item 1] */
+    TG_PF_SUB(TG_PF_XINFILL, tg_r13_emit_gap_infill(h));       /* [R13 FILL item 7b] */
     return 1;
 }
 
@@ -22831,7 +22859,7 @@ static int tg_emit_r11_sign(const TG_NodeList *nl, int si, int nspans,
 static void tg_perf_reset(void)
 {
     memset(s_pf_us, 0, sizeof(s_pf_us));
-    s_pf_n_xhere = s_pf_n_xbase = 0;
+    s_pf_n_xhere = s_pf_n_xbase = s_pf_n_ground = 0;
 }
 
 static void tg_perf_report(void)
@@ -22848,6 +22876,7 @@ static void tg_perf_report(void)
         TD5_LOG_I(LOG_TAG, "trackgen PERF   %-11s %7llu ms  %5.1f%%",
                   k_pf_names[i], s_pf_us[i] / 1000ull,
                   100.0 * (double)s_pf_us[i] / (double)tot);
+    TD5_LOG_I(LOG_TAG, "trackgen PERF   ground_side calls=%llu", s_pf_n_ground);
     TD5_LOG_I(LOG_TAG, "trackgen PERF   crossing calls: here=%llu base=%llu "
               "(base/here=%.1f)", s_pf_n_xhere, s_pf_n_xbase,
               s_pf_n_xhere ? (double)s_pf_n_xbase / (double)s_pf_n_xhere : 0.0);
