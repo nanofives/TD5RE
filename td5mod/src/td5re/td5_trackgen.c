@@ -5053,6 +5053,49 @@ static void tg_road_edge(const TG_NodeList *nl, int si, double f, double shift,
  * it is actually laid at. */
 #define TD5_TG_R13_KEEP  0.0    /* de-overlap only: the degenerate tip is legal */
 
+/* [R14 JUNCTION item 4] THE SURVIVING SHARE THE CAP AIMS FOR.
+ *
+ * R13 set this to 0 and flagged the consequence it did not measure: keep == 0
+ * is the CONVERGENCE POINT itself, so the cap stops the quad exactly where its
+ * two rays MEET. The outer edge is then a single degenerate point sitting at
+ * the centre of curvature -- and on a bend tight enough, that centre is not out
+ * in the scenery, it is over the OPPOSITE carriageway. So the R13 clamp removed
+ * the bowtie (a fold is by definition gone once keep >= 0) and left the tip,
+ * which is why `mass_on_road` moved the WRONG way while every fold counter went
+ * to zero. Both halves of that trade are reported together by
+ * tg_r14_junc_report; neither number is allowed to move alone.
+ *
+ * A keep above 0 stops the quad SHORT of the convergence point, so its outer
+ * edge is a real segment on the same side of the road as its inner edge.
+ *
+ * MEASURED, AND THE HYPOTHESIS IS WRONG. R14 swept this on seed 99991 with the
+ * geometry probe below reporting the real footprint rather than two corners:
+ *
+ *   config              mass_on_road  mass_on_road_geom  fold/tip  sev g/x fold
+ *   R13_FOLD=0                     2                190     25/165     129/25
+ *   shipped (keep 0)              12                190     17/173        0/0
+ *   keep 0.14                     12                190     17/173        0/0
+ *   keep 0.29                     13                190     17/173        0/0
+ *   keep 0.50                     16                190     15/175        0/0
+ *
+ * mass_on_road_geom is 190 in EVERY configuration, worst intrusion 2990-2996
+ * throughout. Raising keep does not remove one intruding block; it makes the
+ * two-corner count and ground_on_road WORSE (12->16 and 62->78) by pulling the
+ * ground in. So the tip is not what puts mass on the road, R13's "one-constant
+ * fix" is not one, and this stays at 0 -- bit-identical to R13 -- rather than
+ * shipping a change that trades a real regression for no measured gain.
+ *
+ * Kept as a live instrument (TD5RE_R14_KEEP, needs TD5RE_R14_KEEP_ON=1) so the
+ * next round can re-run the sweep in one command instead of rebuilding. */
+#define TD5_TG_R14_KEEP  0.0f
+
+static double tg_r14_keep(void)
+{
+    if (!td5_env_flag_on("TD5RE_R14_KEEP_ON")) return TD5_TG_R13_KEEP;
+    return (double)td5_env_float("TD5RE_R14_KEEP", TD5_TG_R14_KEEP,
+                                 -1.0f, 0.95f);
+}
+
 static double tg_r13_fold_reach(const TG_NodeList *nl, int si, double side,
                                 double ang)
 {
@@ -5083,7 +5126,7 @@ static double tg_r13_fold_reach(const TG_NodeList *nl, int si, double side,
     if (ilen < 1e-6) return 1e30;
     slope = ((rf_x - rn_x) * (ix / ilen) + (rf_z - rn_z) * (iz / ilen)) / ilen;
     if (slope > -1e-12) return 1e30;                  /* parallel or diverging */
-    return (TD5_TG_R13_KEEP - 1.0) / slope;
+    return (tg_r14_keep() - 1.0) / slope;
 }
 
 /* Shortest reach the fold cap may impose. A hairpin's convergence point can sit
@@ -5750,6 +5793,51 @@ static void tg_facade_block(int si, int left, unsigned int *block,
  * opening at si, spans si-1 and si+1 must be built, so neither neighbour can be
  * a gap edge and no one-span block can be left between two mouths. */
 #define TD5_TG_R11_TURN_CLEAR 2
+/* Steepest angle any side street may lean off its side's outward normal. Stated
+ * here rather than beside tg_block_arm_skew because BOTH of that function's two
+ * branches have to respect it, and until [R14 item 4] only one of them did.
+ *
+ * The decorative-diagonal branch has been capped at this since R8, with the
+ * reason written down: "capped well under 45 deg so a leaning arm can never
+ * double back across the main carriageway (which would put a side street on top
+ * of the road)". The TURN CONTINUATION branch returns s_turn_skew[] instead, and
+ * that value is the full angle from the outward normal to the incoming heading,
+ * bounded only by the `dot < 0.30` rejection above -- which admits up to ~72.5
+ * deg. So the one construction this file says must never happen was reachable
+ * by the one path that was never asked to obey the rule, and it was reachable
+ * ONLY at a sharp bend, because that is the only place continuations exist.
+ * That is the "road intersections placed on a curve" half of item 4. */
+#define TD5_TG_DIAG_MAX_DEG   28.0    /* steepest diagonal side street, deg */
+/* The continuation's OWN ceiling, and NOT TD5_TG_DIAG_MAX_DEG, even though both
+ * are the same quantity (degrees off that side's outward normal) and the larger
+ * value is the looser rule. The two branches sample opposite ends of it:
+ *
+ *   decorative diagonal - skew is drawn from a hash, 0 is the common case, and
+ *     28 deg is a lean applied to an otherwise square street.
+ *   turn continuation   - skew is 90 deg MINUS the turn the road makes over the
+ *     map's own +/-3 span window, so it runs the other way: a 90 deg corner
+ *     gives skew 0, and the `dot < 0.30` test above admits everything up to
+ *     ~72.5 deg, i.e. a bend of only ~17.5 deg. Capping this branch at 28 deg
+ *     would demand a 62 deg corner and refuse essentially every continuation on
+ *     every seed -- that is not a safeguard, it is deleting the feature.
+ *
+ * So the ceiling cuts the near-parallel tail -- the arms that leave the kerb
+ * almost ALONG the road and so lay their carriageway, pavements, crossing and
+ * flanking massing back over it -- while leaving the honest corner-turn
+ * continuations the feature exists for.
+ *
+ * Derived from TD5_TG_DIAG_MAX_DEG rather than tuned, so the two branches stay
+ * one decision: an ordinary diagonal may lean 28 deg off the normal, i.e. it
+ * always meets the road at >= 62 deg. A continuation is held to meeting the
+ * road at least as steeply as that same 28 deg -- the mirror of the ordinary
+ * rule, and far more permissive than it, since 62 deg of lean would be refused
+ * outright as an ordinary street.
+ *
+ * MEASURED, seed 99991, 99 candidates: skews run 45.9 to 72.4 deg (median
+ * 59.5) and NOT ONE is under 45 deg, which is why the ordinary 28 deg ceiling
+ * could not be reused -- it would have refused all 99. This ceiling refuses 44
+ * and keeps 55. TD5RE_R14_TURN_SKEW_MAX overrides it; =90 disables in effect. */
+#define TD5_TG_R14_SKEW_MAX_DEG (90.0 - TD5_TG_DIAG_MAX_DEG)
 
 /* [R11 CITY item 10] The gap guard below reads the run/gap pattern around a
  * candidate bend, and tg_facade_built is defined just under the map (it consults
@@ -5770,6 +5858,20 @@ static float       s_turn_skew[TD5_TG_MAX_SPANS];   /* normal -> incoming headin
  * keep their existing meaning ("a continuation opens here"), which is a
  * different question and must not be confused with this one. */
 static float       s_turn_bend[TD5_TG_MAX_SPANS];
+/* [R14 item 4] Continuation census: candidates that cleared the bend and `dot`
+ * tests, how many the skew ceiling then refused, and the steepest lean seen.
+ * Read-only bookkeeping for tg_r14_junc_report -- nothing places on them. */
+static int    s_r14_turn_cand;
+static int    s_r14_turn_refused;
+static double s_r14_turn_worst;
+/* Continuations actually OPENED, which is NOT cand - refused. A refusal takes
+ * the `continue` above without advancing `last`, so the TD5_TG_R8_TURN_GAP
+ * dedup no longer suppresses the spans just after it and they re-enter as
+ * fresh candidates: on seed 20260901 the candidate pool itself moves 95 -> 123
+ * when the ceiling is switched on. The frontage gate below can also still
+ * reject a candidate that cleared the ceiling. So the only honest measure of
+ * "how many junctions did this remove" is counted where the map is written. */
+static int    s_r14_turn_opened;
 
 static void tg_turn_map_build(const TG_NodeList *nl, int nspans)
 {
@@ -5779,6 +5881,10 @@ static void tg_turn_map_build(const TG_NodeList *nl, int nspans)
     memset(s_turn_side, 0, sizeof(s_turn_side));
     memset(s_turn_skew, 0, sizeof(s_turn_skew));
     memset(s_turn_bend, 0, sizeof(s_turn_bend));
+    s_r14_turn_cand = 0;
+    s_r14_turn_refused = 0;
+    s_r14_turn_worst = 0.0;
+    s_r14_turn_opened = 0;
     if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
 
     /* [R11 CROSS item 16] Bend magnitude first, unconditionally -- it is filled
@@ -5810,6 +5916,47 @@ static void tg_turn_map_build(const TG_NodeList *nl, int nspans)
         dot = ux * a->tx + uz * a->tz;
         if (dot < 0.30) continue;
         det = ux * a->tz - uz * a->tx;
+        /* [R14 JUNCTION item 4] "SAFEGUARDS AGAINST ROAD INTERSECTIONS PLACED
+         * ON A CURVE." Deliberately NOT a third spacing rule: R11 CROSS already
+         * scales crossing spacing with curvature and R12 CROSS proved that
+         * premise with a control group, and the complaint survived both. This
+         * gates on the ARM'S OWN BEARING instead, which is a different quantity
+         * and the one the geometry actually fails on.
+         *
+         * A continuation is the only junction this generator places BECAUSE of
+         * a bend, and it leans by the full turn angle. Past TD5_TG_DIAG_MAX_DEG
+         * that lean is the doubling-back this file has forbidden since R8 --
+         * the arm, its pavements, its crossing and its flanking massing all
+         * take their bearing from this one number (tg_block_arm_skew), so a
+         * skew over the ceiling puts the whole junction across the road it
+         * leaves. Refusing the opening leaves the frontage BUILT and lets the
+         * ordinary side street next door do the explaining, which is the same
+         * fallback the R11 TURNGAP guard above already takes.
+         *
+         * Refused here rather than clamped: clamping would keep the junction
+         * and point it somewhere that is neither the incoming heading (so it no
+         * longer continues anything) nor square to the road, which is a third
+         * kind of junction to explain rather than one fewer. */
+        {
+            const double sk = atan2(det, dot);
+            const double mx = (double)td5_env_float("TD5RE_R14_TURN_SKEW_MAX",
+                                  (float)TD5_TG_R14_SKEW_MAX_DEG, 0.0f, 90.0f)
+                            * TD5_TG_PI / 180.0;
+            const double mag = (sk < 0.0 ? -sk : sk);
+            const int refuse = td5_env_flag_on("TD5RE_R14_TURN_SKEW")
+                            && mag > mx;
+            s_r14_turn_cand++;
+            if (mag > s_r14_turn_worst) s_r14_turn_worst = mag;
+            /* Per-candidate, so the ceiling above is chosen from a printed
+             * distribution rather than from a guess about one seed. */
+            if (td5_env_flag_on("TD5RE_R13_JUNC_REPORT"))
+                TD5_LOG_I(LOG_TAG, "trackgen:   r14junc cont si=%d side=%s "
+                          "skew=%.1fdeg bend=%.3f %s", si,
+                          (sg > 0.0) ? "L" : "R", mag * 180.0 / TD5_TG_PI,
+                          (double)s_turn_bend[si],
+                          refuse ? "REFUSED" : "open");
+            if (refuse) { s_r14_turn_refused++; continue; }
+        }
         /* [R11 CITY item 10] A continuation may only open UNBROKEN frontage.
          * The feature exists to explain a bend that would otherwise turn in a
          * void, so opening one beside a street the block pattern already put
@@ -5841,6 +5988,7 @@ static void tg_turn_map_build(const TG_NodeList *nl, int nspans)
             }
             if (!clear) continue;
         }
+        s_r14_turn_opened++;          /* [R14] counted where the map is WRITTEN */
         s_turn_side[si] = (signed char)(sg > 0.0 ? 1 : -1);
         s_turn_skew[si] = (float)atan2(det, dot);
         last = si;
@@ -14962,7 +15110,9 @@ static int tg_city_emit_backrows(const TG_FBHook *h, double sw)
  * is capped well under 45 deg so a leaning arm can never double back across the
  * main carriageway (which would put a side street on top of the road).
  * ========================================================================== */
-#define TD5_TG_DIAG_MAX_DEG   28.0    /* steepest diagonal side street, deg */
+/* TD5_TG_DIAG_MAX_DEG is stated with the turn map (tg_turn_map_build), because
+ * [R14 item 4] the continuation path has to honour the same ceiling and the two
+ * must not be able to drift apart. */
 
 static double tg_block_arm_skew(int si, int left)
 {
@@ -17440,6 +17590,86 @@ static double tg_r13_quad_fold(double nx, double nz, double fx, double fz,
           + ((fz + gz * reach) - (nz + oz * reach)) * uz) / ilen;
 }
 
+/* ============ [R14 JUNCTION item 4] MASS PROBE OVER REAL GEOMETRY ==========
+ * R13 measured a block's on-road intrusion at its two BACK corners, and said so:
+ * "the probe tests only the two back CORNERS, ... so it is a lower bound".
+ * R13 FACES had already proved what that class of shortcut costs -- the water
+ * audit judged buildings by their bounding box's corners and silently condemned
+ * correct ones, because a corner is not a point of the mesh.
+ *
+ * Here the error runs the other way and HIDES intrusions. A block's footprint is
+ * the bilinear quad between the frontage segment (bx,bz)..(bx+ax,bz+az) and the
+ * back segment that same segment pushed `depth` along each end's own inward ray.
+ * Those two rays are NOT parallel on a bend, so the quad is a trapezium at best
+ * and a bowtie past the convergence point -- and a bowtie's deepest incursion is
+ * in its INTERIOR, nowhere near either back corner. Sampling two corners of that
+ * shape and calling the result "mass on road" understates it by construction.
+ *
+ * So sample the footprint itself, the same way R13 FACES fixed the water audit:
+ * a TD5_TG_R14_GRID x TD5_TG_R14_GRID bilinear lattice over (u,v), which
+ * includes all four corners, both back-edge midpoints and the centroid. Same
+ * probe, same reach, same penetration threshold as R13 -- only the sample points
+ * change, so the two numbers are directly comparable and the report prints BOTH.
+ * TD5RE_R14_MASSGEOM=0 restores the two-corner probe for the A/B.
+ *
+ * WHAT THE 190 IS AND IS NOT. It is NOT a count of buildings visibly parked on
+ * the tarmac, and it must not be quoted as one. tg_r13_probe judges a point by
+ * the LATERAL it has in some other span's frame and ignores the ALONG-track
+ * coordinate entirely, bounded only by TD5_TG_GUARD_NEAR_MAX (12000) and a +/-3
+ * span exclusion. On a ring that doubles back on itself, a block standing
+ * correctly beside its own kerb can score a small lateral in the frame of a
+ * node up to 12000 away that the road has since curved away from -- the exact
+ * frame misattribution R13 documented when it explained why the probe takes the
+ * NEAREST node rather than the deepest. So:
+ *     two corners (12)  = a genuine LOWER bound; it misses the quad interior.
+ *     this lattice (190) = an UPPER bound; it inherits the frame error above.
+ * The true count is between, and closing the gap needs an along-track
+ * containment test this probe does not do. Both numbers are printed rather than
+ * one being picked, because picking either would be a claim neither supports. */
+#define TD5_TG_R14_GRID 5
+
+static double tg_r14_mass_probe(const TG_NodeList *nl, int ring, int si,
+                                const TG_SideGeom *g, int *pspan, double *pnear,
+                                int *plo, int *phi)
+{
+    const double n0x = g->bx,         n0z = g->bz;
+    const double f0x = g->bx + g->ax, f0z = g->bz + g->az;
+    const double n1x = n0x + g->lx0 * g->depth, n1z = n0z + g->lz0 * g->depth;
+    const double f1x = f0x + g->lx1 * g->depth, f1z = f0z + g->lz1 * g->depth;
+    double best = -1e30;
+    int iu, iv;
+
+    if (pspan) *pspan = -1;
+    if (pnear) *pnear = 0.0;
+    if (plo) *plo = -1;
+    if (phi) *phi = -1;
+    for (iv = 0; iv < TD5_TG_R14_GRID; iv++) {
+        const double v = (double)iv / (double)(TD5_TG_R14_GRID - 1);
+        /* Front and back edge points at the same along-street parameter, then
+         * the segment between them: this walks the quad the emitter actually
+         * lays, including the interior a folded footprint sweeps backwards. */
+        const double ax2 = n0x + (f0x - n0x) * v, az2 = n0z + (f0z - n0z) * v;
+        const double bx2 = n1x + (f1x - n1x) * v, bz2 = n1z + (f1z - n1z) * v;
+        for (iu = 0; iu < TD5_TG_R14_GRID; iu++) {
+            const double u = (double)iu / (double)(TD5_TG_R14_GRID - 1);
+            const double px = ax2 + (bx2 - ax2) * u;
+            const double pz = az2 + (bz2 - az2) * u;
+            int sp; double nr;
+            const double intr = tg_r13_probe(nl, ring, si, px, pz, &sp, &nr);
+            if (sp >= 0) {
+                if (plo && (*plo < 0 || sp < *plo)) *plo = sp;
+                if (phi && (*phi < 0 || sp > *phi)) *phi = sp;
+            }
+            if (intr > best) {
+                best = intr;
+                if (pspan) *pspan = sp;
+                if (pnear) *pnear = nr;
+            }
+        }
+    }
+    return best;
+}
+
 /* Local turn radius at span si, and which side of travel is the INSIDE.
  * *pinside is +1 when the LEFT kerb is the inside of the bend. Returns 1e30 on
  * a straight. Sign convention matches tg_turn_map_build: a LEFT turn makes the
@@ -17468,6 +17698,27 @@ static void tg_r13_junc_report(const TG_NodeList *nl, int nspans)
     double worst_g = -1e300, worst_m = -1e300;
     double gkmin = 1e30, xkmin = 1e30;
     int worst_gs = -1, worst_ms = -1, gkmins = -1, xkmins = -1;
+    /* [R14 item 4] The same mass measurement over the real footprint rather
+     * than its two back corners, carried BESIDE the R13 number so the size of
+     * the lower bound is itself reported instead of asserted. */
+    int mon_geom = 0, worst_mgs = -1;
+    double worst_mg = -1e300;
+    /* [R14 item 4] ATTRIBUTION for whatever mass is still on the road. R13
+     * measured a `keep` for the ground slab and for the side street but never
+     * for the block body, so there was no way to tell WHICH of two mechanisms
+     * a surviving intrusion came from:
+     *   keep <  0  the footprint is still a bowtie, i.e. the cap did not bind.
+     *              It cannot bind below TD5_TG_R13_FLOOR / TD5_TG_R13_MIN_DEPTH,
+     *              which are deliberate escape hatches, so a hairpin keeps a
+     *              folded block by design.
+     *   keep == 0  the cap bound exactly, and the intrusion is the degenerate
+     *              TIP at the centre of curvature that TD5_TG_R13_KEEP = 0
+     *              leaves behind -- the mechanism R13 flagged and did not fix.
+     * Without this split, raising KEEP could be credited with fixing spans it
+     * never touched. */
+    int mon_fold = 0, mon_tip = 0;
+    double mkmin = 1e30;
+    int mkmins = -1;
 
     if (!td5_env_flag_on("TD5RE_R13_JUNC_REPORT")) return;
     if (ring > nspans) ring = nspans;
@@ -17481,7 +17732,7 @@ static void tg_r13_junc_report(const TG_NodeList *nl, int nspans)
                         || (si >= wspan - wpad && si <= wspan + wpad);
         double inside, R = tg_r13_radius(nl, si, &inside);
         double e[10], gx, gz, greach = 0.0, gintr = -1e300, xr = 0.0;
-        double gkeep = 1.0, xkeep = 1.0;
+        double gkeep = 1.0, xkeep = 1.0, mkeep = 1.0;
         double mreach = 0.0, mintr = -1e300;
         int gsp = -1, msp = -1, mstr_lo = 0, mstr_hi = 0, xhere;
         double gnear = 0.0, mnear = 0.0;
@@ -17519,7 +17770,7 @@ static void tg_r13_junc_report(const TG_NodeList *nl, int nspans)
                 const double fx = g.bx + g.ax + g.lx1 * g.depth;
                 const double fz = g.bz + g.az + g.lz1 * g.depth;
                 int s1, s2;
-                double n1, n2, i1, i2;
+                double n1, n2, i1, i2, mcorner;
                 mreach = tg_road_half_width(nl, si) + g.depth
                        + tg_city_sidewalk_w_at(nl, si, b);
                 i1 = tg_r13_probe(nl, ring, si, bx, bz, &s1, &n1);
@@ -17528,10 +17779,44 @@ static void tg_r13_junc_report(const TG_NodeList *nl, int nspans)
                 else         { mintr = i1; msp = s1; mnear = n1; }
                 mstr_lo = (s1 < s2) ? s1 : s2;
                 mstr_hi = (s1 > s2) ? s1 : s2;
+                /* R13's own number, kept AS IT WAS so mass_on_road stays
+                 * comparable across rounds no matter what the geometry probe
+                 * finds. mass_on_road_geom is the honest count beside it. */
+                mcorner = mintr;
+                /* [R14 item 4] The block footprint's own fold, in the same
+                 * terms tg_r13_quad_fold reports for the ground and the street:
+                 * inner edge = the frontage segment, outward units = the two
+                 * ends' inward rays, reach = the depth the cap actually left. */
+                mkeep = tg_r13_quad_fold(g.bx, g.bz, g.bx + g.ax, g.bz + g.az,
+                                         g.lx0, g.lz0, g.lx1, g.lz1, g.depth);
+                if (mkeep < mkmin) { mkmin = mkeep; mkmins = si; }
+                /* [R14 item 4] Real footprint, same threshold. Replaces the
+                 * two-corner values in the per-span dump and the span-level
+                 * blindness attribution, and is counted separately in the
+                 * summary so the gap to the R13 number is visible. */
+                if (td5_env_flag_on("TD5RE_R14_MASSGEOM")) {
+                    int glo = -1, ghi = -1, gsp = -1;
+                    double gnr = 0.0;
+                    const double gi = tg_r14_mass_probe(nl, ring, si, &g,
+                                                        &gsp, &gnr, &glo, &ghi);
+                    if (gi > TD5_TG_GUARD_PEN) {
+                        mon_geom++;
+                        if (gi > worst_mg) { worst_mg = gi; worst_mgs = si; }
+                        /* Which mechanism put it there. -1e-6 rather than 0
+                         * because a bound cap lands on keep == 0 only up to
+                         * rounding, and calling that a fold would blame the
+                         * escape hatches for the tip. */
+                        if (mkeep < -1e-6) mon_fold++; else mon_tip++;
+                    }
+                    if (gi > mintr) {
+                        mintr = gi; msp = gsp; mnear = gnr;
+                        mstr_lo = glo; mstr_hi = ghi;
+                    }
+                }
                 if (mreach > R) mfold++;
-                if (mintr > TD5_TG_GUARD_PEN) {
+                if (mcorner > TD5_TG_GUARD_PEN) {
                     mon++;
-                    if (mintr > worst_m) { worst_m = mintr; worst_ms = si; }
+                    if (mcorner > worst_m) { worst_m = mcorner; worst_ms = si; }
                     /* WHY THE GUARD SAID NOTHING. Its two R11 refusals: a quad
                      * whose corners straddle more than the exemption scope is
                      * skipped outright, and a vertex further than
@@ -17576,12 +17861,24 @@ static void tg_r13_junc_report(const TG_NodeList *nl, int nspans)
         "trackgen: r13junc SUMMARY ground_fold=%d (severe %d, worst keep %.2f "
         "@%d) mass_fold=%d xstreet_fold=%d (severe %d, worst keep %.2f @%d) "
         "| ground_on_road=%d (worst %.0f @%d) mass_on_road=%d (worst %.0f @%d) "
+        "mass_on_road_geom=%d (worst %.0f @%d, fold %d tip %d, worst mkeep "
+        "%.2f @%d) keep=%.2f "
         "| guard_blind_straddle=%d guard_blind_far=%d",
         gfold, gsev, gkmin < 1e29 ? gkmin : 1.0, gkmins, mfold,
         xfold, xsev, xkmin < 1e29 ? xkmin : 1.0, xkmins,
         gon, worst_g > -1e299 ? worst_g : 0.0, worst_gs,
         mon, worst_m > -1e299 ? worst_m : 0.0, worst_ms,
+        mon_geom, worst_mg > -1e299 ? worst_mg : 0.0, worst_mgs,
+        mon_fold, mon_tip, mkmin < 1e29 ? mkmin : 1.0, mkmins,
+        tg_r14_keep(),
         blind_straddle, blind_far);
+    TD5_LOG_I(LOG_TAG,
+        "trackgen: r14junc CONTINUATIONS cand=%d refused_skew=%d opened=%d "
+        "worst_skew=%.1fdeg ceiling=%.1fdeg",
+        s_r14_turn_cand, s_r14_turn_refused, s_r14_turn_opened,
+        s_r14_turn_worst * 180.0 / TD5_TG_PI,
+        (double)td5_env_float("TD5RE_R14_TURN_SKEW_MAX",
+                              (float)TD5_TG_R14_SKEW_MAX_DEG, 0.0f, 90.0f));
 }
 
 /* ============ [R9 CITY] PAVEMENT UNIQUENESS + MOUTH MASSING SWEEP =========

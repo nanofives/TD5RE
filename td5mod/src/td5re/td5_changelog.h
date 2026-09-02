@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 01 (auto-track curve junctions, r14)" },
+    { CL_ITEM,    "FIX: no more side street leaving the kerb almost ALONG" },
+    { CL_ITEM,    "  the road at a sharp bend. A turn continuation took" },
+    { CL_ITEM,    "  its bearing straight from the turn, up to 72 deg of" },
+    { CL_ITEM,    "  lean, while every ordinary side street is capped at" },
+    { CL_ITEM,    "  28 deg off square to stop precisely that. The two" },
+    { CL_ITEM,    "  now share one ceiling instead of one obeying it." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 01 (auto-track backdrop band, r13)" },
     { CL_ITEM,    "FIX: the tree line now starts BEFORE the start banner." },
     { CL_ITEM,    "  The band skipped the first 24 spans while the START" },
