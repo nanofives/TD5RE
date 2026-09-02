@@ -47,6 +47,7 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  26 s launch to race. Output is byte-identical to before." },
     { CL_ITEM,    "  A pause-menu Restart, or a pinned seed, reuses the build" },
     { CL_ITEM,    "  already on disk: 8 s to the green light instead of 34." },
+
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 03 (auto-track frame rate with HIGH lighting)" },
@@ -70,6 +71,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  as solid; sun shadows keep their leaf-shaped holes." },
     { CL_ITEM,    "  Native tracks get the same window (Moscow: ~260 meshes" },
     { CL_ITEM,    "  in reach instead of all 1600)." },
+    { CL_BLANK,   "" },
+
+    { CL_DATE,    "September 02 (internet radio)" },
+    { CL_ITEM,    "FIX: the radio no longer kills itself at startup. A" },
+    { CL_ITEM,    "  dev-only fault-injection test was reading a bad" },
+    { CL_ITEM,    "  address on EVERY dev build, because its knob was" },
+    { CL_ITEM,    "  wired default-ON instead of opt-in. Every session" },
+    { CL_ITEM,    "  crashed its own radio thread and lost music." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 02 (auto-track generation speed, r14)" },

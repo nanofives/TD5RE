@@ -156,7 +156,14 @@ static unsigned __stdcall radio_worker(void *arg)
      * worker AV rather than assuming it does. TD5RE_RADIO_FAULT_TEST=1 reads
      * the same near-null address the real webio.dll fault reported (+0x2C1).
      * With the guard working, the game survives and the radio goes silent. */
-    if (td5_env_flag_on("TD5RE_RADIO_FAULT_TEST")) {
+    /* flag_OFF, not flag_on: td5_env_flag_on returns 1 unless the value is
+     * literally "0", so with flag_on this fault injection fired on EVERY dev
+     * build -- the comment above says "=1" and means opt-in. The effect was
+     * that every dev session deliberately crashed its radio worker at startup,
+     * lost music for the session, and logged an ERROR that failed a selftest
+     * step (race-r1-baseline-min, dWARN/dERR 537/1) for a reason that had
+     * nothing to do with the step. */
+    if (td5_env_flag_off("TD5RE_RADIO_FAULT_TEST")) {
         /* Address kept in a volatile so the compiler cannot fold it and warn
          * (-Warray-bounds) about the deliberate bad access. */
         static volatile ULONG_PTR s_fault_addr = 0x2C1;
