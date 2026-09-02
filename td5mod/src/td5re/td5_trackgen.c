@@ -8147,6 +8147,30 @@ static int tg_flora_plant(const TG_NodeList *nl, int si, const TG_Biome *b,
 static int tg_r12_fcross_at(const TG_NodeList *nl, int si,
                             double *pside, double *preach);
 
+/* [R14 FCROSS items 1c/1d] The three questions the REST of the file is allowed
+ * to ask about a forest crossing. Everything else about the element stays inside
+ * the R14 block beside its emitter; these are the narrow seams:
+ *
+ *   _clear_side  "is a forest crossing lying on this (span, side)?" -- the
+ *                one-span-either-side window, because a billboard or a crate is
+ *                a FOOTPRINT and a piece placed at the shoulder span still
+ *                overhangs the mouth. Trees and animals ask this.
+ *   _occupies    the same question in the frame every placement helper already
+ *                uses (nearest edge of a footprint, measured out from the main
+ *                road edge) -- deliberately the signature of tg_xstreet_occupies,
+ *                so the two sit side by side at each placement site instead of
+ *                one growing a forest special case.
+ *   _pave_stop   "must the pavement RUN END here?" -- asked by
+ *                tg_pavement_side_width, the single width authority both the
+ *                raised city slab and the out-of-town verge band already share.
+ *                That is the whole coupling to the pavement layer: no city
+ *                junction gate is widened and no city emitter learns about
+ *                forests. */
+static int tg_r14_fcross_clear_side(const TG_NodeList *nl, int si, double side);
+static int tg_r14_fcross_occupies(const TG_NodeList *nl, int si, double side,
+                                  double inner_d);
+static int tg_r14_fcross_pave_stop(const TG_NodeList *nl, int si, double side);
+
 static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
 {
     unsigned int h = (unsigned)si * 2654435761u;
@@ -8185,10 +8209,12 @@ static int tg_building_for_span(const TG_NodeList *nl, int si, TG_Buf *blk)
      * (tg_carriageway_reach does not know about it), so the trunk is suppressed
      * here at the placement, the same way tg_flora_gap_clear keeps trees off a
      * branch corridor. */
-    {
-        double fs = 0.0, fr = 0.0;
-        if (tg_r12_fcross_at(nl, si, &fs, &fr) && fs == side) return 1;
-    }
+    /* [R14 FCROSS item 1c] "a forest crossing must not be TOUCHED by trees."
+     * R12's gate asked only about THIS span, so a trunk planted on the shoulder
+     * span still leaned its billboard over the mouth -- a billboard is up to
+     * ~2400 raw wide against a 1500-raw span, so half of it lands on the lane.
+     * The window helper widens the same question by one span either side. */
+    if (tg_r14_fcross_clear_side(nl, si, side)) return 1;
     tv  = b->tree_set[(h >> 13) % (unsigned)b->tree_n];
     tp  = &k_tree_pages[tv];
 
@@ -8332,6 +8358,16 @@ static double tg_pavement_side_width(const TG_NodeList *nl, int si,
 {
     double over, half, reach;
     if (!(sw > 0.0)) return 0.0;
+    /* [R14 FCROSS item 1d] "the sidewalk must STOP where the street is." The
+     * forest verge band ran straight across the crossing mouth, so the lane
+     * came out with a paved stripe painted over its throat. This is the ONLY
+     * place the forest crossing touches the pavement layer: the run-end
+     * authority both pavements already share is asked one more question, rather
+     * than the city junction stack being re-gated to fire in a wilderness (see
+     * the R12 CROSS block for why that gate must stay shut). A city biome can
+     * never answer yes -- tg_r12_fcross_at requires FOREST -- so the raised slab
+     * is bit-identical and only the band changes. */
+    if (tg_r14_fcross_pave_stop(nl, si, side)) return 0.0;
     if (!tg_branches_enabled() || side >= 0.0) return sw;
     if (!tg_span_in_fork_clear(si)) return sw;
     if (!td5_env_flag_on("TD5RE_R7_PRE_BRANCH_PAVE")) return 0.0;
@@ -8360,6 +8396,13 @@ static int tg_xstreet_occupies(const TG_NodeList *nl, int si, double side,
 static void tg_xstreet_audit(const TG_NodeList *nl, int si, double side,
                              double inner_d, const char *what, int placed);
 static long s_r10_prop_skipped;     /* placements refused: on side-street tarmac */
+/* [R14 FCROSS] The round's four items as four counters, declared here because
+ * the first of them is incremented by tg_prop_one just below. */
+static long s_r14_fcross_animal_moved; /* animals sent to the far verge        */
+static long s_r14_fcross_side_hit;     /* "crossing on this side?" answered yes */
+static long s_r14_fcross_prop_skip;    /* furniture / billboards refused       */
+static long s_r14_fcross_pave_stop;    /* pavement span-sides ended at a mouth */
+static long s_r14_fcross_worn;         /* crossings given the worn dirt page   */
 
 /* Emit one prop billboard (prop-page index pp) beside span si on `side`, `gap`
  * world units past the road edge, recording its mesh offset. */
@@ -8382,6 +8425,14 @@ static int tg_prop_one(const TG_NodeList *nl, int si, int pp, double side,
         tg_xstreet_audit(nl, si, side, gap - (double)P->w * 0.5,
                          pp == PP_LAMP ? "lamp-glow" : "prop-billboard", 0);
         s_r10_prop_skipped++;
+        return 1;
+    }
+    /* [R14 FCROSS item 1c] The forest lane is the same error one biome over: a
+     * setback measured from the MAIN road edge lands on side-street tarmac. It
+     * gets its own predicate rather than a branch inside the city one, because
+     * the two streets are separate elements with separate reaches. */
+    if (tg_r14_fcross_occupies(nl, si, side, gap - (double)P->w * 0.5)) {
+        s_r14_fcross_prop_skip++;
         return 1;
     }
     tg_xstreet_audit(nl, si, side, gap - (double)P->w * 0.5,
@@ -8495,6 +8546,21 @@ static int tg_emit_props(const TG_NodeList *nl, int si, const TG_Biome *b,
             s_r13_animal_town++;
         } else {
             s_r13_animal_kept++;
+        }
+        /* [R14 FCROSS item 1c] "a forest crossing must not be touched by props"
+         * -- the deer standing in the lane in the span-88 frame are THESE
+         * billboards. Same SUBSTITUTION discipline R13 used for the town deer,
+         * one axis over: a deer in a forest is right, it is only the SIDE that
+         * is wrong, so the animal moves to the other verge instead of being
+         * deleted. Prop count, TG_ACCT_PROP and the element inventory are
+         * unchanged; only which verge it grazes on moves. If BOTH sides are
+         * blocked (they never are -- a crossing has one side) the flip is left
+         * alone and tg_prop_one's own gate refuses it. */
+        if (td5_env_flag_on("TD5RE_R14_FCROSS_CLEAR")
+            && tg_r14_fcross_clear_side(nl, si, side)
+            && !tg_r14_fcross_clear_side(nl, si, -side)) {
+            side = -side;
+            s_r14_fcross_animal_moved++;
         }
         if (!tg_prop_one(nl, si, pp, side,
                          2500.0 + (double)((h >> 12) % 4000), m, moff, pn))
@@ -15303,6 +15369,18 @@ static double tg_footway_reach(const TG_NodeList *nl, int si, double side)
                         + TD5_TG_R10_XSTREET_MARGIN;
         if (rr > r) r = rr;
     }
+    /* [R14 FCROSS item 1c] A FOREST side road is tarmac by the same argument, so
+     * the footway envelope has to include it or the on-road guard has no opinion
+     * about a crate standing in a forest lane. Adding it here rather than to
+     * tg_carriageway_reach keeps the narrow answer for the things that
+     * legitimately BOUND a street (the fold walls stand on its edges). */
+    if (td5_env_flag_on("TD5RE_R14_FCROSS_CLEAR")) {
+        double fs = 0.0, fr = 0.0;
+        if (tg_r12_fcross_at(nl, si, &fs, &fr) && fs == side) {
+            const double rr = tg_road_half_width(nl, si) + fr;
+            if (rr > r) r = rr;
+        }
+    }
     return r;
 }
 
@@ -18341,6 +18419,138 @@ static int tg_r12_fcross_at(const TG_NodeList *nl, int si,
     return 1;
 }
 
+/* ==========================================================================
+ * [R14 FCROSS items 1a/1b/1c/1d] FEEDBACK ON THE R12 FOREST CROSSING
+ *
+ * Four reports against the element R12 CROSS built, all read off span 88 of
+ * seed 20260901. Nothing here re-opens R12's central decision (a forest lane is
+ * a SEPARATE minimal element, not the city junction stack widened into a
+ * wilderness); three of the four are tuning of this emitter and the fourth is a
+ * single new question asked of one shared helper.
+ *
+ * 1a UP TO TWO LANES. The street is TD5_TG_R12_FCROSS_WIDTH (2) spans wide, and
+ *    a span is TD5_TG_SPAN_LENGTH (1500) == TD5_TG_LANE_WIDTH, so on paper it is
+ *    already 2.00 lanes. It is not, because the two edges are nodes c and c+2
+ *    and the width the driver sees is the CHORD between them: on any curved
+ *    forest span that chord is shorter than the arc the span count promises, and
+ *    the tighter the bend the narrower the mouth. So the width is not assumed
+ *    from the span count, it is MEASURED and then PADDED back up to the two-lane
+ *    goal by pushing the street's two along-road edges apart. Capped at the goal
+ *    -- "UP TO two lanes" is a ceiling, so a straight-line crossing that already
+ *    measures 3000 gets a pad of zero and is bit-identical.
+ *
+ * 1b RUSTY / WORN SURFACE, MORE OFTEN. Every crossing took the R4 marked-asphalt
+ *    page (a painted centre line), because TD5RE_AUTOTRACK_CROSS_MARKINGS
+ *    defaults on -- a city cross-street's surface on a forest track. A share of
+ *    crossings now take the DIRT road page instead (RS_DIRT: brown, with
+ *    down-track ruts and no paint), which is the worn unmade lane the report
+ *    asks for and is a page the generator already builds for the dirt biomes, so
+ *    this costs no new art. The share is a per-BLOCK hash so both spans of one
+ *    street always agree and the same seed always lays the same surface.
+ *
+ * 1c NOTHING TOUCHES THE LANE. Three placement layers could put something on the
+ *    new tarmac and none of them knew about it -- see the three seams declared
+ *    next to tg_r12_fcross_at, and the note in tg_infra_place for why the on-road
+ *    guard was not going to save us.
+ *
+ * 1d THE PAVEMENT STOPS AT THE STREET. See tg_pavement_side_width.
+ * ========================================================================== */
+/* Two lanes is the CEILING the report names, not a target to overshoot. */
+#define TD5_TG_R14_FCROSS_LANES   2.0
+/* A pad is a correction for chord shortening, not a licence to build a plaza:
+ * more than this and the mouth would start eating its own shoulder spans. */
+#define TD5_TG_R14_FCROSS_PAD_MAX 500.0
+/* Share of crossings taking the worn dirt surface, in 1/256ths. 144/256 = 56%,
+ * i.e. the worn lane is the COMMON case in a forest and the made-up marked one
+ * is the exception -- which is the direction the report asks for. */
+#define TD5_TG_R14_FCROSS_WORN_P  144
+/* The crossing asphalt is laid at TD5_TG_VERGE_LIFT, exactly where the verge
+ * band lies. Item 1d removes the band from the crossing spans, but the 1a pad
+ * pushes the street a little past them, so lift the lane a hair further to win
+ * the depth test against the band it overhangs. Well under the 70-raw skirt
+ * drop, so it still reads as flat ground rather than a step. */
+#define TD5_TG_R14_FCROSS_LIFT    6.0
+
+/* [item 1a] Extra length added at EACH along-road edge so the measured mouth
+ * reaches the two-lane goal. Zero when it already does. */
+static double tg_r14_fcross_pad(const TG_NodeList *nl, int c)
+{
+    const int cf = c + TD5_TG_R12_FCROSS_WIDTH;
+    double dx, dz, w, pad;
+
+    if (!td5_env_flag_on("TD5RE_R14_FCROSS_WIDE")) return 0.0;
+    if (c < 0 || cf >= nl->count) return 0.0;
+    dx = nl->v[cf].x - nl->v[c].x;
+    dz = nl->v[cf].z - nl->v[c].z;
+    w  = sqrt(dx * dx + dz * dz);
+    pad = (TD5_TG_R14_FCROSS_LANES * (double)TD5_TG_LANE_WIDTH - w) * 0.5;
+    if (pad <= 0.0) return 0.0;                       /* already two lanes */
+    if (pad > TD5_TG_R14_FCROSS_PAD_MAX) pad = TD5_TG_R14_FCROSS_PAD_MAX;
+    return pad;
+}
+
+/* [item 1b] Surface page for the crossing that STARTS at span c. */
+static int tg_r14_fcross_page(int c)
+{
+    const int blk = c / TD5_TG_R12_FCROSS_PERIOD;
+    const unsigned int h = (unsigned)blk * 0x27220A95u ^ 0x5BD1E995u;
+
+    if (td5_env_flag_on("TD5RE_R14_FCROSS_WORN")
+        && ((h >> 12) & 0xFFu) < (unsigned)TD5_TG_R14_FCROSS_WORN_P)
+        return tg_road_slot(k_road_surf[RS_DIRT].page_var);
+    return td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_MARKINGS")
+           ? (TD5_TG_PAGE_R4_CROSS + 0) : tg_road_page(c);
+}
+
+/* [item 1c] Is a forest crossing lying on (si, side), counting one span either
+ * side? A prop is a footprint, not a point: a billboard planted on the shoulder
+ * span still hangs over the mouth. */
+static int tg_r14_fcross_clear_side(const TG_NodeList *nl, int si, double side)
+{
+    int j;
+    if (!td5_env_flag_on("TD5RE_R14_FCROSS_CLEAR")) {
+        double fs = 0.0, fr = 0.0;      /* R12 behaviour: this span only */
+        return tg_r12_fcross_at(nl, si, &fs, &fr) && fs == side;
+    }
+    for (j = si - 1; j <= si + 1; j++) {
+        double fs = 0.0, fr = 0.0;
+        if (j < 0) continue;
+        if (tg_r12_fcross_at(nl, j, &fs, &fr) && fs == side) {
+            s_r14_fcross_side_hit++;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* [item 1c] The same question in the placement frame: `inner_d` is the nearest
+ * edge of a footprint measured out from the MAIN road edge. */
+static int tg_r14_fcross_occupies(const TG_NodeList *nl, int si, double side,
+                                  double inner_d)
+{
+    int j;
+    if (!td5_env_flag_on("TD5RE_R14_FCROSS_CLEAR")) return 0;
+    for (j = si - 1; j <= si + 1; j++) {
+        double fs = 0.0, fr = 0.0;
+        if (j < 0) continue;
+        if (tg_r12_fcross_at(nl, j, &fs, &fr) && fs == side
+            && inner_d < fr) return 1;
+    }
+    return 0;
+}
+
+/* [item 1d] Must the pavement run END on this (span, side)? Exactly the crossing
+ * spans -- one span either way would leave a 1500-raw hole in the verge beside
+ * the mouth, which is a second defect, not a fix. */
+static int tg_r14_fcross_pave_stop(const TG_NodeList *nl, int si, double side)
+{
+    double fs = 0.0, fr = 0.0;
+    if (!td5_env_flag_on("TD5RE_R14_FCROSS_PAVESTOP")) return 0;
+    if (!tg_r12_fcross_at(nl, si, &fs, &fr) || fs != side) return 0;
+    s_r14_fcross_pave_stop++;
+    return 1;
+}
+
 /* The carriageway: one quad per crossing span, kerb outward, no skew (a straight
  * lane is the readable shape -- see item 13). Purely OUTWARD from the road edge,
  * so the main carriageway is untouched. */
@@ -18348,21 +18558,38 @@ static int tg_r12_fcross_emit_road(const TG_FBHook *h, double sg, double reach)
 {
     double px[4], py[4], pz[4], uu[4], vv[4];
     double e[10], q[12], t[8];
-    const int marks = td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_MARKINGS");
-    int seg_page = marks ? (TD5_TG_PAGE_R4_CROSS + 0) : tg_road_page(h->si);
+    /* [R14 items 1a/1b] one page decision and one width correction, both taken
+     * from the street's FIRST span so the two quads of one street agree. */
+    const int c0 = tg_r12_fcross_start(h->si / TD5_TG_R12_FCROSS_PERIOD);
+    const double pad = tg_r14_fcross_pad(h->nl, c0);
+    const double lift = TD5_TG_VERGE_LIFT
+                      + (pad > 0.0 ? TD5_TG_R14_FCROSS_LIFT : 0.0);
+    int seg_page = tg_r14_fcross_page(c0);
     int seg_nq = 1, n = 0;
     const double drop = tg_xstreet_drop(reach);
     const double u_r  = reach / (double)TD5_TG_LANE_WIDTH;
 
     if (*h->nmesh >= h->maxmesh) return 1;
     tg_city_edge_frame(h->nl, h->si, sg, e);
-    q[0]  = e[0];                q[1]  = e[1] + TD5_TG_VERGE_LIFT;
+    /* The pad only moves the street's OUTER edges (the first span's near edge
+     * and the last span's far edge), never the seam between the two quads. */
+    if (pad > 0.0) {
+        if (h->si == c0) {
+            const TG_Node *n0 = &h->nl->v[h->si];
+            e[0] -= n0->tx * pad; e[2] -= n0->tz * pad;
+        }
+        if (h->si == c0 + TD5_TG_R12_FCROSS_WIDTH - 1) {
+            const TG_Node *n1 = &h->nl->v[h->si + 1];
+            e[3] += n1->tx * pad; e[5] += n1->tz * pad;
+        }
+    }
+    q[0]  = e[0];                q[1]  = e[1] + lift;
     q[2]  = e[2];
-    q[3]  = e[0] + e[6] * reach; q[4]  = e[1] + TD5_TG_VERGE_LIFT - drop;
+    q[3]  = e[0] + e[6] * reach; q[4]  = e[1] + lift - drop;
     q[5]  = e[2] + e[7] * reach;
-    q[6]  = e[3] + e[8] * reach; q[7]  = e[4] + TD5_TG_VERGE_LIFT - drop;
+    q[6]  = e[3] + e[8] * reach; q[7]  = e[4] + lift - drop;
     q[8]  = e[5] + e[9] * reach;
-    q[9]  = e[3];                q[10] = e[4] + TD5_TG_VERGE_LIFT;
+    q[9]  = e[3];                q[10] = e[4] + lift;
     q[11] = e[5];
     t[0] = 0.0; t[1] = (double)h->si;
     t[2] = u_r; t[3] = (double)h->si;
@@ -18401,6 +18628,15 @@ static int tg_r12_fcross_emit_fold(const TG_FBHook *h, double sg, double reach)
 
     tg_city_edge_frame(nl, c,  sg, en);
     tg_city_edge_frame(nl, cf, sg, ef);
+    /* [R14 item 1a] The fold walls ARE the street's two edges, so they take the
+     * same pad the carriageway does or the corridor stops matching its road. */
+    {
+        const double pad = tg_r14_fcross_pad(nl, c);
+        if (pad > 0.0) {
+            en[0] -= nl->v[c].tx * pad;      en[2] -= nl->v[c].tz * pad;
+            ef[3] += nl->v[cf + 1].tx * pad; ef[5] += nl->v[cf + 1].tz * pad;
+        }
+    }
 
     for (w = 0; w < 2; w++) {
         /* w 0 = the wall on the street's NEAR along-road edge (node c),
@@ -18484,9 +18720,29 @@ static void tg_r12_fcross_report(const TG_NodeList *nl, int nspans)
         cand++;
         if (tg_r12_fcross_at(nl, c, &sg, &reach)) {
             kept++;
-            TD5_LOG_I(LOG_TAG, "trackgen: [R12 FCROSS] block %2d span %4d KEPT "
-                      "side=%s reach=%.0f (wall at %.0f)", blk, c,
-                      sg > 0.0 ? "left" : "right", reach, 11000.0);
+            {   /* [R14 FCROSS item 1a] MEASURED width, not the span count: the
+                 * street's two along-road edges are nodes c and c+WIDTH, so the
+                 * carriageway is the chord between them. Printed in LANES so
+                 * "up to two lanes" is a number rather than an impression. */
+                const int cf = c + TD5_TG_R12_FCROSS_WIDTH;
+                const double dx = nl->v[cf].x - nl->v[c].x;
+                const double dz = nl->v[cf].z - nl->v[c].z;
+                const double w   = sqrt(dx * dx + dz * dz);
+                const double pad = tg_r14_fcross_pad(nl, c);
+                const double we  = w + 2.0 * pad;
+                const int page   = tg_r14_fcross_page(c);
+                const int worn   = (page == tg_road_slot(
+                                        k_road_surf[RS_DIRT].page_var));
+                if (worn) s_r14_fcross_worn++;
+                TD5_LOG_I(LOG_TAG, "trackgen: [R12 FCROSS] block %2d span %4d "
+                          "KEPT side=%s reach=%.0f (wall at %.0f) width=%.0f "
+                          "(%.2f lanes) +pad=%.0f -> %.0f (%.2f lanes) "
+                          "main=%.0f page=%d %s", blk, c,
+                          sg > 0.0 ? "left" : "right", reach, 11000.0, w,
+                          w / (double)TD5_TG_LANE_WIDTH, pad, we,
+                          we / (double)TD5_TG_LANE_WIDTH, nl->v[c].width,
+                          page, worn ? "WORN" : "marked");
+            }
         } else {
             TD5_LOG_I(LOG_TAG, "trackgen: [R12 FCROSS] block %2d span %4d "
                       "dropped (forest=%d tunnel=%d bridge=%d fork=%d)", blk, c,
@@ -18498,6 +18754,15 @@ static void tg_r12_fcross_report(const TG_NodeList *nl, int nspans)
     TD5_LOG_I(LOG_TAG, "trackgen: [R12 FCROSS] forest crossings kept=%d of %d "
               "candidate blocks (knob TD5RE_R12_FOREST_CROSS=%s)",
               kept, cand, tg_r12_fcross_on() ? "on" : "off");
+    /* [R14 FCROSS] The round's four items as four numbers, so "did it fire" is
+     * never read off a frame. worn/kept is item 1b's rate; the rest are 1c/1d. */
+    TD5_LOG_I(LOG_TAG, "trackgen: [R14 FCROSS] worn=%ld of %d kept (%.0f%%) "
+              "props-refused=%ld animals-moved=%ld pavement-stops=%ld "
+              "side-hits=%ld",
+              s_r14_fcross_worn, kept,
+              kept > 0 ? 100.0 * (double)s_r14_fcross_worn / (double)kept : 0.0,
+              s_r14_fcross_prop_skip, s_r14_fcross_animal_moved,
+              s_r14_fcross_pave_stop, s_r14_fcross_side_hit);
 }
 
 /* ==== [R13 BAND item 1a] "the first line of trees must START BEFORE the START
@@ -19361,6 +19626,18 @@ static int tg_infra_place(const TG_FBHook *h, int kind, double side,
         return 1;
     }
     tg_xstreet_audit(nl, h->si, side, gap - P->w * 0.5, k_infra_names[kind], 1);
+
+    /* [R14 FCROSS item 1c] The CRATE in the span-88 frame is this emitter: a
+     * verge setback of TD5_TG_VERGE_W + 200 + 0..511 (~1900 raw at most) against
+     * a forest lane reaching 13000+, so the piece stands squarely on the new
+     * tarmac. tg_guard_validate_entry does NOT catch it -- furniture is judged
+     * against tg_footway_reach, and until this round that reach knew about city
+     * side streets only. Both halves are fixed: refused HERE at the placement,
+     * and tg_footway_reach widened so the backstop would have caught it too. */
+    if (tg_r14_fcross_occupies(nl, h->si, side, gap - P->w * 0.5)) {
+        s_r14_fcross_prop_skip++;
+        return 1;
+    }
 
     /* Push the setback out past any branch carriageway bowing into this
      * lateral, exactly as the pavement and the trees do. The half-width of the
@@ -22609,6 +22886,12 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     s_r13_awn_ctx = 0;
     s_r13_animal_kept = 0;
     s_r13_animal_town = 0;
+    /* [R14 FCROSS] forest-crossing clearance counters, same lifetime. */
+    s_r14_fcross_animal_moved = 0;
+    s_r14_fcross_side_hit = 0;
+    s_r14_fcross_prop_skip = 0;
+    s_r14_fcross_pave_stop = 0;
+    s_r14_fcross_worn = 0;
     /* [R10 SPAN66] side-street occupancy counters, same lifetime. */
     s_r10_prop_skipped = 0;
     s_r10_audit_n = 0;
