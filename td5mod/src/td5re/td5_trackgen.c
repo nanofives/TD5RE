@@ -661,7 +661,8 @@ typedef enum {
     TG_PF_XPAVED, TG_PF_XWALL, TG_PF_XZEBRA, TG_PF_XFLANK, TG_PF_XINFILL,
     TG_PF_TOPOCAP, TG_PF_DRYREACH, TG_PF_BANDCOV,
     TG_PF_BUILD, TG_PF_GROUNDQ, TG_PF_BRIDGE,
-    TG_PF_LOOP1, TG_PF_LOOP2,
+    TG_PF_LOOP1, TG_PF_LOOP2, TG_PF_CITYSCAN, TG_PF_ASSEMBLE,
+    TG_PF_REPORTS,
     TG_PF_COUNT
 } TG_PerfPhase;
 /* First nested slot; everything from here down is excluded from the total. */
@@ -674,7 +675,8 @@ static const char *const k_pf_names[TG_PF_COUNT] = {
     ".farshore", ".farband", ".xhere", ".ground",
     ".xpaved", ".xwall", ".xzebra", ".xflank", ".xinfill",
     ".topocap", ".dryreach", ".bandcov",
-    "build", "groundq", "bridge", "LOOP1_road", "LOOP2_scenery"
+    "build", "groundq", "bridge", "LOOP1_road", "LOOP2_scenery",
+    "cityscan", "assemble", "post_reports"
 };
 
 /* Call counts for the two crossing predicates. The COUNT is the actionable
@@ -23215,6 +23217,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
      * only has the main-ring nodes, so a corridor span takes its geometry from
      * the base main node nl->v[F+1+k] plus the branch shift. */
     const int branch_active = tg_branches_enabled() && s_fork_count > 0;
+    unsigned long long rt_ = 0;   /* [PERF] post-loop bracket */
     const int ring = branch_active ? s_ring_len : nspans;
 
     /* [R9 INFRA] per-build counters, reset with the rest of the accounting. */
@@ -23860,8 +23863,11 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
          * marks are byte offsets into it. Pavement is never a guard reject
          * (rejects-by-kind reports zero sidewalk/city kinds), so measuring here
          * and shipping after describe the same geometry. */
-        if (ok)
+        if (ok) {
+            unsigned long long cs_ = td5_plat_time_us();
             tg_r9_city_scan_entry(nl, ring, s0, ns, &meshes, moff, nmesh);
+            s_pf_us[TG_PF_CITYSCAN] += td5_plat_time_us() - cs_;
+        }
         if (ok)
             {
                 unsigned long long gvt = td5_plat_time_us();
@@ -23869,6 +23875,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 s_pf_us[TG_PF_GUARDVAL] += td5_plat_time_us() - gvt;
             }
 
+        lt_ = td5_plat_time_us();
         if (ok) {
             const unsigned int hdr = (unsigned)(4 + nmesh * 4);
             tg_put_u32(&blocks[e], (unsigned)nmesh);
@@ -23881,8 +23888,10 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
             }
         }
         tg_buf_free(&meshes);
+        s_pf_us[TG_PF_ASSEMBLE] += td5_plat_time_us() - lt_;
     }
 
+    rt_ = td5_plat_time_us();
     if (ok) {
         /* Header: count, then (offset,size) pairs. Block 0 must begin exactly
          * at 4 + count*8 -- the strict-format-A autodetect requires it. */
@@ -24013,6 +24022,8 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
             }
         }
     }
+
+    s_pf_us[TG_PF_REPORTS] += td5_plat_time_us() - rt_;
 
     /* [PARALLEL GROUNDWORK] A non-zero risk count means the pre-pass and the
      * inline emit could have made different budget decisions for some span, so
