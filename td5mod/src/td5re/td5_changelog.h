@@ -94,6 +94,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  yard roll, since the ask is ALWAYS fill. A fork" },
     { CL_ITEM,    "  corridor or a park still refuses, as it should." },
     { CL_ITEM,    "  Knobs TD5RE_R14_UP_FLOOR / TD5RE_R14_UP_FILL." },
+    { CL_ITEM,    "FIX: no more side street leaving the kerb almost ALONG" },
+    { CL_ITEM,    "  the road at a sharp bend. A turn continuation took" },
+    { CL_ITEM,    "  its bearing straight from the turn, up to 72 deg of" },
+    { CL_ITEM,    "  lean, while every ordinary side street is capped at" },
+    { CL_ITEM,    "  28 deg off square to stop precisely that. The two" },
+    { CL_ITEM,    "  now share one ceiling instead of one obeying it." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 01 (auto-track backdrop band, r13)" },
