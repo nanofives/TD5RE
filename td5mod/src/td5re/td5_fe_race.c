@@ -7299,7 +7299,8 @@ static unsigned int at_roll_seed(void)
 static void at_preview_request(void)
 {
     TD5_TrackGenSpec spec;
-    int seed = td5_env_int("TD5RE_AUTOTRACK_SEED", 0, 0, 0x7FFFFFFF);
+    const int knob = td5_env_int("TD5RE_AUTOTRACK_SEED", 0, 0, 0x7FFFFFFF);
+    int seed = knob;
 
     if (seed == 0) {
         seed = (int)at_roll_seed();
@@ -7317,6 +7318,9 @@ static void at_preview_request(void)
     s_at_pts_n = 0;
     s_at_pts_gen = td5_tgprev_request(&spec);
     s_at_dirty_ms = 0;
+    TD5_LOG_I(LOG_TAG, "AutoTrackStudio: preview request knob=%d seed=%u "
+              "spans=%d gen=%d", knob, spec.seed, spec.target_spans,
+              s_at_pts_gen);
 }
 
 static void at_mark_dirty(void)
@@ -7726,6 +7730,8 @@ void Screen_AutoTrackOptions(void) {
             at_seed_edit_begin();
             frontend_play_sfx(3);
         } else if (s_button_index == b_gen) {
+            TD5_LOG_I(LOG_TAG, "AutoTrackStudio: GENERATE pressed (btn=%d)",
+                      s_button_index);
             at_setenv("TD5RE_AUTOTRACK_SEED", (int)at_roll_seed());
             at_preview_request();
             frontend_play_sfx(3);
