@@ -887,6 +887,9 @@ typedef enum {
     /* [R13] PRE-RESERVED, one per area, own line. RENAME YOUR OWN SLOT IN
      * PLACE. Never append here. */
     TG_ACCT_R13_FILL,       /* FILL   (20260901 7b) gap-interior infill block */
+    /* [R14] PRE-RESERVED, one per area, own line. RENAME YOUR OWN SLOT IN
+     * PLACE. Never append here. */
+    TG_ACCT_R14_COAST,      /* COAST  (20260901 5b) tree line wrapping water */
     TG_ACCT_KIND_COUNT
 } TG_AcctKind;
 
@@ -991,7 +994,10 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
     "r12-cross",            /* CROSS   */
     /* [R13] one reserved name per area, in enum order. Rename to match your
      * renamed enum constant. Only the LAST entry omits its trailing comma. */
-    "r13-fill"              /* FILL    */
+    "r13-fill",             /* FILL    */
+    /* [R14] one reserved name per area, in enum order. Rename to match your
+     * renamed enum constant. Only the LAST entry omits its trailing comma. */
+    "r14-coast"             /* COAST   */
 };
 
 static long s_acct_count[TG_ACCT_KIND_COUNT];
@@ -4093,6 +4099,125 @@ static int tg_r9_water_audit_mesh(const TG_NodeList *nl, const unsigned char *b,
     return 0;
 }
 
+/* ==== [R14 COAST item 5a] "on the LEFT side of the bridge, polygons collide
+ * with the water below and with the coastline" ================ SECTION:r14coast
+ *
+ * The R9 over-water audit above answers a DIFFERENT question: does a mesh stand
+ * ABOVE the surface (ytop > surf + LIFT) inside the river rectangle. A polygon
+ * that COLLIDES with the water is one that STRADDLES the surface -- some of its
+ * vertices above it and some below -- and the R9 audit is blind to that by
+ * construction, because it only ever looks at the highest vertex and it exempts
+ * every kind that legitimately meets the water (SKIRT, COAST, DECK, RAIL).
+ * Interpenetration is exactly a defect BETWEEN two of those exempt surfaces, so
+ * the audit that would catch it has to include them.
+ *
+ * Report-only, and deliberately so: this is the measurement, not the fix.
+ * Straddle depth is reported per kind and per span with the lateral sign, so
+ * "the LEFT side" is a number rather than a reading of a screenshot.
+ * TD5RE_R14_COAST_REPORT=1 turns it on; it costs nothing when off. */
+#define TD5_TG_R14_STRADDLE 60.0   /* ignore a z-fight-scale overlap */
+static long   s_r14_str_total;
+static long   s_r14_str_kind[TG_GK_COUNT];
+static double s_r14_str_worst;
+static int    s_r14_str_worst_span = -1;
+static int    s_r14_str_worst_kind = TG_GK_OTHER;
+static int    s_r14_str_logged;
+
+static void tg_r14_coast_audit_mesh(const TG_NodeList *nl, const unsigned char *b,
+                                    size_t off, size_t mlen, int kind)
+{
+    const size_t vtxoff = (size_t)tg_rd_u32(b + off + 0x30);
+    const unsigned vtxcnt = tg_rd_u32(b + off + 0x08);
+    const int tag = (int)tg_rd_u16(b + off + 0x02);
+    double ox = 0.0, oy = 0.0, oz = 0.0;
+    unsigned vi;
+    int w, cap = 24;
+
+    if (!td5_env_flag_off("TD5RE_R14_COAST_REPORT")) return;   /* default OFF */
+    if (vtxcnt == 0 || vtxcnt > 65536) return;
+    if (!s_r9_wet_ready) tg_r9_water_table_build(nl);
+    if (tag) {
+        ox = (double)tg_rd_f32(b + off + 0x1C) / 256.0;
+        oy = (double)tg_rd_f32(b + off + 0x20) / 256.0;
+        oz = (double)tg_rd_f32(b + off + 0x24) / 256.0;
+    }
+
+    for (w = 0; w < s_r9_wet_count; w++) {
+        const int s = s_r9_wet_span[w];
+        const TG_Node *n0 = &nl->v[s], *n1 = &nl->v[s + 1];
+        const double surf = s_r9_wet_surf[w];
+        const double outer = s_r9_wet_out[w], inner = s_r9_wet_in[w];
+        const double side = s_r9_wet_side[w];
+        const double ax = n1->x - n0->x, az = n1->z - n0->z;
+        const double len = sqrt(ax * ax + az * az);
+        double hi = -1e30, lo = 1e30, latsum = 0.0;
+        int nin = 0;
+
+        /* Vertices of THIS mesh that lie inside THIS span's water rectangle. */
+        for (vi = 0; vi < vtxcnt; vi++) {
+            const unsigned char *vp = b + off + vtxoff
+                                    + (size_t)vi * TD5_TG_VTX_SIZE;
+            double vx, vy, vz, dx, dz;
+            if ((size_t)(vp + 12 - b) > off + mlen) break;
+            vx = ox + (double)tg_rd_f32(vp);
+            vy = oy + (double)tg_rd_f32(vp + 4);
+            vz = oz + (double)tg_rd_f32(vp + 8);
+            if (!tg_r13_wet_point(n0, len, inner, outer, side, vx, vz)) continue;
+            dx = vx - n0->x; dz = vz - n0->z;
+            latsum += dx * n0->tz - dz * n0->tx;
+            if (vy > hi) hi = vy;
+            if (vy < lo) lo = vy;
+            nin++;
+        }
+        if (nin < 2) continue;
+        /* STRADDLE: geometry on both sides of the surface plane. */
+        if (!(hi > surf + TD5_TG_R14_STRADDLE &&
+              lo < surf - TD5_TG_R14_STRADDLE)) continue;
+        s_r14_str_total++;
+        s_r14_str_kind[kind]++;
+        if (hi - surf > s_r14_str_worst) {
+            s_r14_str_worst = hi - surf;
+            s_r14_str_worst_span = s;
+            s_r14_str_worst_kind = kind;
+        }
+        /* A window pins the dump to the span the user is standing on; without
+         * one the first two dozen lines are always the FIRST bridge run and the
+         * reported span is never the one the complaint is about. Inside a
+         * window the cap is wide, because the point is the whole picture there. */
+        {
+            const int w0 = td5_env_int("TD5RE_R14_COAST_SPAN0", -1, -1, 100000);
+            const int w1 = td5_env_int("TD5RE_R14_COAST_SPAN1", -1, -1, 100000);
+            if (w0 >= 0 && (s < w0 || s > w1)) return;
+            cap = (w0 >= 0) ? 400 : 24;
+        }
+        if (s_r14_str_logged < cap) {
+            s_r14_str_logged++;
+            TD5_LOG_W(LOG_TAG, "R14COAST straddle: %s span %d lat %+.0f "
+                      "(%s) y %.0f..%.0f surf %.0f up %.0f down %.0f",
+                      k_guard_kind_name[kind], s, latsum / (double)nin,
+                      (latsum >= 0.0) ? "LEFT" : "RIGHT",
+                      lo, hi, surf, hi - surf, surf - lo);
+        }
+        return;                       /* one report per mesh */
+    }
+}
+
+static void tg_r14_coast_report(void)
+{
+    int k;
+    if (!td5_env_flag_off("TD5RE_R14_COAST_REPORT")) return;
+    TD5_LOG_I(LOG_TAG, "R14COAST: %ld meshes straddle a water surface; "
+              "worst %s at span %d, %.0f above",
+              s_r14_str_total,
+              (s_r14_str_worst_span >= 0)
+                  ? k_guard_kind_name[s_r14_str_worst_kind] : "-",
+              s_r14_str_worst_span, s_r14_str_worst);
+    for (k = 0; k < TG_GK_COUNT; k++)
+        if (s_r14_str_kind[k])
+            TD5_LOG_I(LOG_TAG, "R14COAST   %-12s %ld",
+                      k_guard_kind_name[k], s_r14_str_kind[k]);
+}
+
 /* Validate one entry's assembled meshes against the carriageway and drop the
  * ones standing in the road. Rewrites `meshes` and `moff`/`*pnmesh` in place
  * (compacting left). Returns the number rejected. Corridor-only entries (past
@@ -4242,6 +4367,11 @@ static int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
             keep = 0;
             rejected++;
         }
+        /* [R14 COAST item 5a] The straddle census -- meshes that CROSS the
+         * water surface rather than stand over it. Report-only; see the
+         * function for why the R9 audit above cannot see these. */
+        if (keep && mlen > 0 && off + mlen <= meshes->len)
+            tg_r14_coast_audit_mesh(nl, b, off, mlen, kind);
         /* [R13 FACES item 6] Whichever of the two passes above condemned it, a
          * dropped BUILDING has to leave the frontage census, or the census keeps
          * reporting the run end the emitter meant to build rather than the one
@@ -11633,6 +11763,38 @@ typedef struct {
 static void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
                            double water_side, TG_GroundProf *p);
 
+/* ONE span-side's whole ground surface, near skirt and far band concatenated
+ * into a single outward polyline: `d` = horizontal distance from the road edge,
+ * `dy` = drop BELOW the road edge (positive down, TG_GroundProf's convention).
+ * Built by tg_topo_chain, which lives with the far-band constants further down.
+ *
+ * `horiz` is R8's number, kept so before/after is comparable. `surf` is the arc
+ * length along the same polyline -- the distance the ground actually covers --
+ * and is the number R9 TOPO reports, because a falling side spends its reach
+ * vertically and a horizontal extent cannot see that.
+ *
+ * [R14 COAST item 5a] Hoisted above the coastline emitter for the same reason
+ * TG_GroundProf above it was: the coast band reaches PAST the near skirt, so
+ * the near cross-section is not the authority for the ground it lands on --
+ * this chain is, and the band has to be able to ask it. */
+#define TD5_TG_TOPO_MAXPT 8
+typedef struct {
+    double d[TD5_TG_TOPO_MAXPT];
+    double dy[TD5_TG_TOPO_MAXPT];
+    int    n;
+    int    closed;      /* C2: far end closed by a wall, the sea or a gorge */
+    double horiz;       /* outward extent ACROSS THE MAP                    */
+    double surf;        /* outward extent ALONG THE SURFACE                 */
+    double drop;        /* total fall from the road edge to the outer point */
+    double end_grade;   /* grade of the last segment -- the run-out test    */
+    double gap;         /* C1: worst unexplained lateral discontinuity      */
+    double road_cap;    /* C3: where a neighbouring carriageway intervenes  */
+} TG_TopoChain;
+
+static void tg_topo_chain(const TG_NodeList *nl, int si, int is_left,
+                          TG_TopoChain *c);
+static double tg_topo_drop_at(const TG_TopoChain *c, double d);
+
 /* [R4 item 20] COASTLINE where the bridge water meets the land, at the two
  * LONGITUDINAL ends of the river rectangle (perpendicular to the bridge). The
  * river is a flat plane under the run; before the run starts and after it ends
@@ -11745,10 +11907,44 @@ static int tg_emit_bridge_coast(const TG_NodeList *nl, int si,
             const int NC = 8;                      /* columns each side of centre */
             const TG_Biome *lb = &k_biomes[tg_biome_for_span(lnode[k])];
             const double wsd = lb->water ? tg_water_side(lnode[k]) : 0.0;
+            /* ======== [R14 COAST item 5a] "on the LEFT side of the bridge,
+             * polygons collide with the water below and with the coastline."
+             *
+             * MEASURED at this emit site on seed 20260901, all 7 runs x 2 ends x
+             * 2 sides: the near skirt reaches 12000 and the band reaches 33000,
+             * and over the shared footprint the flat skirt sits 1270..3944 units
+             * ABOVE the band (1603 at the reported bridge's entry span 1319,
+             * 1303 at its exit span 1360). Two surfaces own that ground and they
+             * never asked each other what height they were -- R9's own fault #2,
+             * recurring between a DIFFERENT pair of emitters. It is NOT the
+             * own-normal sweep class R11 WATER fixed here: R11's defect was
+             * lateral (which DIRECTION a corner leaves its node), this one is
+             * vertical, and R11's fix is what exposed it by taking the band's
+             * reach out from 32000 to the far band's 33000.
+             *
+             * ROOT CAUSE: the band asks tg_ground_side, which is the NEAR
+             * cross-section and only defined out to the verge. Past that the
+             * loop below clamps to the profile's last point, so 21000 of the
+             * band's 33000 width is pinned flat at road level while the world
+             * actually out there -- the far band -- has descended. At the verge
+             * edge that leaves a 1270..3944 unit cliff between the two.
+             *
+             * FIX: ask the authority that covers the WHOLE width. tg_topo_chain
+             * is exactly that -- "one span-side's whole ground surface, near
+             * skirt and far band concatenated" -- and it is what the far band
+             * itself is built from, so the band now lands on the terrain rather
+             * than on an extrapolation of the terrain's first 12000 units.
+             * TD5RE_R14_COAST_GROUND=0 restores the clamped near profile. */
+            const int r14g = td5_env_flag_on("TD5RE_R14_COAST_GROUND");
             TG_GroundProf pl, pr;
+            TG_TopoChain tl, tr;
             int c;
             tg_ground_side(nl, lnode[k], 1, wsd, &pl);
             tg_ground_side(nl, lnode[k], 0, wsd, &pr);
+            if (r14g) {
+                tg_topo_chain(nl, lnode[k], 1, &tl);
+                tg_topo_chain(nl, lnode[k], 0, &tr);
+            }
             for (c = 0; c < 2 * NC; c++) {
                 const double t0 = -1.0 + (double)c / (double)NC;
                 const double t1 = -1.0 + (double)(c + 1) / (double)NC;
@@ -11762,13 +11958,19 @@ static int tg_emit_bridge_coast(const TG_NodeList *nl, int si,
                     const double off = fabs(d[e]) * CL;   /* LAND distance */
                     double drop = p->dy[p->n - 1];
                     int j;
-                    for (j = 1; j < p->n; j++) {
-                        if (off <= p->d[j]) {
-                            const double span = p->d[j] - p->d[j - 1];
-                            const double u = span > 1e-6
-                                           ? (off - p->d[j - 1]) / span : 0.0;
-                            drop = p->dy[j - 1] + (p->dy[j] - p->dy[j - 1]) * u;
-                            break;
+                    if (r14g) {
+                        /* [R14 COAST 5a] The whole-width authority. */
+                        drop = tg_topo_drop_at((d[e] >= 0.0) ? &tl : &tr, off);
+                    } else {
+                        for (j = 1; j < p->n; j++) {
+                            if (off <= p->d[j]) {
+                                const double sw = p->d[j] - p->d[j - 1];
+                                const double u = sw > 1e-6
+                                               ? (off - p->d[j - 1]) / sw : 0.0;
+                                drop = p->dy[j - 1]
+                                     + (p->dy[j] - p->dy[j - 1]) * u;
+                                break;
+                            }
                         }
                     }
                     /* water corner (e-th), then land corner (e-th) */
@@ -11790,6 +11992,48 @@ static int tg_emit_bridge_coast(const TG_NodeList *nl, int si,
                 (*pn)++;
                 tg_acct(TG_ACCT_COASTLINE, wnode[k]);
                 tg_acct(TG_ACCT_R9_BRIDGE, wnode[k]);
+            }
+            /* [R14 COAST item 5a] TWO SURFACES OWN THIS GROUND. The band lies
+             * over the span BETWEEN its two nodes, and that span also lays an
+             * ordinary ground SKIRT -- it is outside the bridge run, so its
+             * gorge phase is 0 and its skirt is the flat road-level verge. The
+             * band ramps from the water surface up to the bank across the same
+             * footprint, so over the skirt's whole reach the flat verge caps it
+             * and past that reach the band is suddenly the only surface. That
+             * step is what "polygons collide with the water and the coastline"
+             * looks like from the deck. Measured here, at the emit site, so the
+             * number is the geometry actually written. */
+            if (td5_env_flag_off("TD5RE_R14_COAST_REPORT")) {
+                const int fs = (wnode[k] < lnode[k]) ? wnode[k] : lnode[k];
+                int sd;
+                for (sd = 0; sd < 2; sd++) {
+                    const TG_GroundProf *p = sd ? &pl : &pr;
+                    TG_TopoChain tc;
+                    /* The CLIFF: how far the band's land edge is from the ground
+                     * that is actually there, sampled just OUTSIDE the near
+                     * skirt (where the old clamp starts extrapolating) and at
+                     * the band's own outer rim. Zero on both = the band lands on
+                     * the terrain. */
+                    const double so = p->d[p->n - 1];
+                    const double o1 = so + 1000.0, o2 = CL;
+                    double b1, b2, g1, g2;
+                    int j;
+                    tg_topo_chain(nl, lnode[k], sd, &tc);
+                    g1 = tg_topo_drop_at(&tc, o1);
+                    g2 = tg_topo_drop_at(&tc, o2);
+                    if (r14g) { b1 = g1; b2 = g2; }
+                    else {
+                        b1 = b2 = p->dy[p->n - 1];
+                        for (j = 1; j < p->n; j++)
+                            if (o1 <= p->d[j]) { b1 = p->dy[j]; break; }
+                    }
+                    TD5_LOG_W(LOG_TAG, "R14COAST cap: run-end node %d (span %d) "
+                              "%s skirt=%.0f band=%.0f | at %.0f band drop %.0f "
+                              "ground %.0f cliff %.0f | at rim band drop %.0f "
+                              "ground %.0f cliff %.0f",
+                              wnode[k], fs, sd ? "LEFT" : "RIGHT", so, CL,
+                              o1, b1, g1, g1 - b1, b2, g2, g2 - b2);
+                }
             }
             continue;
         }
@@ -12105,32 +12349,8 @@ static int tg_topo_enabled(void)
     return td5_env_flag_on("TD5RE_R9_TOPO");
 }
 
-/* ONE span-side's whole ground surface, near skirt and far band concatenated
- * into a single outward polyline: `d` = horizontal distance from the road edge,
- * `dy` = drop BELOW the road edge (positive down, TG_GroundProf's convention).
- * Built by tg_topo_chain, which lives with the far-band constants further down.
- *
- * `horiz` is R8's number, kept so before/after is comparable. `surf` is the arc
- * length along the same polyline -- the distance the ground actually covers --
- * and is the number this round reports, because a falling side spends its reach
- * vertically and a horizontal extent cannot see that. */
-#define TD5_TG_TOPO_MAXPT 8
-typedef struct {
-    double d[TD5_TG_TOPO_MAXPT];
-    double dy[TD5_TG_TOPO_MAXPT];
-    int    n;
-    int    closed;      /* C2: far end closed by a wall, the sea or a gorge */
-    double horiz;       /* outward extent ACROSS THE MAP                    */
-    double surf;        /* outward extent ALONG THE SURFACE                 */
-    double drop;        /* total fall from the road edge to the outer point */
-    double end_grade;   /* grade of the last segment -- the run-out test    */
-    double gap;         /* C1: worst unexplained lateral discontinuity      */
-    double road_cap;    /* C3: where a neighbouring carriageway intervenes  */
-} TG_TopoChain;
-
-static void tg_topo_chain(const TG_NodeList *nl, int si, int is_left,
-                          TG_TopoChain *c);
-static double tg_topo_drop_at(const TG_TopoChain *c, double d);
+/* TG_TopoChain, tg_topo_chain and tg_topo_drop_at are declared UP with
+ * TG_GroundProf (above the coastline emitter) -- see the note there. */
 
 /* [C3] How far this span-side's ground may reach before another part of the
  * track intervenes, as a distance from THIS span's road edge. Returns a huge
@@ -18613,6 +18833,211 @@ static int tg_r13_band_covers(const TG_NodeList *nl, int g0, int g1,
     return 1;
 }
 
+/* ==== [R14 COAST item 5b] "in the background the FOREST ENDS ABRUPTLY -- the
+ * tree line should WRAP AROUND THE COASTLINE instead of stopping flat."
+ * ============================================================ SECTION:r14wrap
+ *
+ * MEASURED (TD5RE_R14_COAST_REPORT=1, seed 20260901): of 17 tree-wall run ends
+ * on the whole track, SEVENTEEN end on a full-height face and ZERO taper to
+ * nothing -- and 10 of the 17 end because the next span is a BRIDGE RUN. The
+ * band emitter deletes itself outright over a bridge (TG_R12_BAND_BRIDGE, "see
+ * the river from the deck"), with no taper and no setback, so a 12000/14000-tall
+ * wall stops dead on a vertical face at one bridge mouth and reappears at full
+ * height at the other. At the reported span (1351, inside the 1320-1359 run) the
+ * ALPINE cell starts at 1350 but its wall cannot begin until 1360, so what the
+ * driver sees off the bridge is exactly that: a 14000 face arriving flat.
+ *
+ * WHY NOT JUST TAPER IT. R12's taper sinks a wall into the GROUND over its last
+ * spans, and it is the right answer at a biome line because there IS ground
+ * there. At a bridge there is not: over a run tg_emit_fb_terrain returns before
+ * both the far band and the far shore (R11 WATER's finding), so the river is the
+ * drawn world all the way out to tg_r11_wet_reach. A wall tapering across a
+ * bridge run would be a wall standing in the water.
+ *
+ * WHAT THE USER ASKED FOR IS A FOLD, and this file already has one:
+ * tg_r12_fcross_emit_fold turns the two cut ends of the tree wall to run OUTWARD
+ * along a forest side road so the cut never reads as a hole. A bridge cut is the
+ * same shape of problem, so it gets the same shape of answer -- the wall turns
+ * at the run boundary and runs outward ALONG THE SHORE, tapering to nothing
+ * where the ground meets the water. That is "wrap around the coastline"
+ * literally: the tree line follows the shoreline away from the bridge instead of
+ * ending on a face.
+ *
+ * IT ADDS GEOMETRY AND CHANGES NO PRESENCE. The wrap starts exactly at the
+ * band's own end point at the boundary node, using the same setback, base and
+ * height the band computed there, so the two share an edge by construction. It
+ * never touches tg_r12_band_params, so tg_r13_band_side -- and therefore R13
+ * BAND's per-span/per-side cull decision -- is bit-for-bit what it was.
+ *
+ * The base follows tg_topo_chain (the whole-width ground authority item 5a gave
+ * the coast band) rather than road level, so the wrap descends the bank instead
+ * of floating over it, and it STOPS at the first sample where that ground has
+ * reached the water surface. TD5RE_R14_COAST_WRAP=0 removes it. */
+#define TD5_TG_R14_WRAP_COLS   6        /* columns from the band out to the shore */
+/* How far PAST THE BAND'S OWN SETBACK the wrap may run before it gives up
+ * looking for the shore. Measured as a length from the band, not as an absolute
+ * lateral distance: FIELDS sets its hedgerow line back 22000 (tg_treeline_back)
+ * against 11000 everywhere else, so an absolute cap sized for an 11000 band
+ * leaves a FIELDS band no room at all and the wrap silently never fires. That
+ * is exactly what happened -- 12 wraps on seed 20260901, ZERO on 20260902,
+ * whose three water bridges all sit in FIELDS. */
+#define TD5_TG_R14_WRAP_LEN 15000.0
+static long   s_r14_wraps;
+static double s_r14_wrap_reach;
+
+/* One wrap wall: from the band's end at `node` on `side`, outward to the shore.
+ * `surf` is the water surface the wall is wrapping around -- a river's under a
+ * bridge run, a sea's at a water biome. The emitter does not care which: it
+ * walks outward along the ground and stops where the ground reaches `surf`. */
+static int tg_r14_emit_wrap(const TG_FBHook *h, int node, double surf,
+                            double side)
+{
+    const TG_NodeList *nl = h->nl;
+    const TG_Node *n = &nl->v[node];
+    double px[4 * TD5_TG_R14_WRAP_COLS * 2], py[4 * TD5_TG_R14_WRAP_COLS * 2];
+    double pz[4 * TD5_TG_R14_WRAP_COLS * 2], uu[4 * TD5_TG_R14_WRAP_COLS * 2];
+    double vv[4 * TD5_TG_R14_WRAP_COLS * 2];
+    int seg_page[TD5_TG_R14_WRAP_COLS * 2], seg_nq[TD5_TG_R14_WRAP_COLS * 2];
+    TG_TopoChain tc;
+    size_t m0;
+    double bh = 0.0, bk = 0.0, e0, reach, d0drop;
+    const double lx = n->tz * side, lz = -n->tx * side;
+    const double vt = TD5_TG_FACADE_UV_INSET, vb = 1.0 - TD5_TG_FACADE_UV_INSET;
+    int nseg = 0, nv = 0, c;
+
+    tg_r12_band_params(node, &bh, &bk);
+    if (!(bh > 0.0)) return 1;                    /* no wall ends here */
+    if (*h->nmesh + 1 >= h->maxmesh) return 1;
+
+    e0 = n->width * 0.5 + tg_flora_gap_clear(nl, node, side, bk);
+    tg_topo_chain(nl, node, side > 0.0 ? 1 : 0, &tc);
+    d0drop = tg_topo_drop_at(&tc, e0);
+
+    /* Where the ground meets the water: march out and stop at the first sample
+     * at or below the surface. No crossing inside the reach = run the full
+     * reach and taper anyway, so the wrap never ends on a face either. */
+    reach = e0 + TD5_TG_R14_WRAP_LEN;
+    for (c = 1; c <= TD5_TG_R14_WRAP_COLS * 4; c++) {
+        const double t = e0 + TD5_TG_R14_WRAP_LEN
+                            * (double)c / (double)(TD5_TG_R14_WRAP_COLS * 4);
+        if (n->y - tg_topo_drop_at(&tc, t) <= surf) { reach = t; break; }
+    }
+    if (reach <= e0 + 2000.0) return 1;           /* no shore to wrap around */
+
+    for (c = 0; c < TD5_TG_R14_WRAP_COLS; c++) {
+        const double f0 = (double)c / (double)TD5_TG_R14_WRAP_COLS;
+        const double f1 = (double)(c + 1) / (double)TD5_TG_R14_WRAP_COLS;
+        const double t0 = e0 + (reach - e0) * f0;
+        const double t1 = e0 + (reach - e0) * f1;
+        /* Base on the terrain, height tapering linearly to 0 at the shore. */
+        const double y0 = n->y - TD5_TG_TREELINE_SINK
+                        - (tg_topo_drop_at(&tc, t0) - d0drop);
+        const double y1 = n->y - TD5_TG_TREELINE_SINK
+                        - (tg_topo_drop_at(&tc, t1) - d0drop);
+        const double h0 = bh * (1.0 - f0), h1 = bh * (1.0 - f1);
+        const double x0 = n->x + lx * t0, z0 = n->z + lz * t0;
+        const double x1 = n->x + lx * t1, z1 = n->z + lz * t1;
+        /* Square tiles, the rule the band and the forest-crossing fold share. */
+        const double u0 = (t0 - e0) / bh, u1 = (t1 - e0) / bh;
+        int f;
+        for (f = 0; f < 2; f++) {       /* both windings: seen in and seen out */
+            if (nv + 4 > 4 * TD5_TG_R14_WRAP_COLS * 2) break;
+            if (!f) {
+                px[nv]=x0; py[nv]=y0;    pz[nv]=z0; uu[nv]=u0; vv[nv]=vb; nv++;
+                px[nv]=x1; py[nv]=y1;    pz[nv]=z1; uu[nv]=u1; vv[nv]=vb; nv++;
+                px[nv]=x1; py[nv]=y1+h1; pz[nv]=z1; uu[nv]=u1; vv[nv]=vt; nv++;
+                px[nv]=x0; py[nv]=y0+h0; pz[nv]=z0; uu[nv]=u0; vv[nv]=vt; nv++;
+            } else {
+                px[nv]=x0; py[nv]=y0+h0; pz[nv]=z0; uu[nv]=u0; vv[nv]=vt; nv++;
+                px[nv]=x1; py[nv]=y1+h1; pz[nv]=z1; uu[nv]=u1; vv[nv]=vt; nv++;
+                px[nv]=x1; py[nv]=y1;    pz[nv]=z1; uu[nv]=u1; vv[nv]=vb; nv++;
+                px[nv]=x0; py[nv]=y0;    pz[nv]=z0; uu[nv]=u0; vv[nv]=vb; nv++;
+            }
+            seg_page[nseg] = TD5_TG_PAGE_TREELINE;
+            seg_nq[nseg] = 1;
+            nseg++;
+        }
+    }
+    if (nv <= 0) return 1;
+    s_r14_wraps++;
+    s_r14_wrap_reach += reach - e0;
+    tg_acct_n(TG_ACCT_R14_COAST, node, nseg);
+    tg_acct_n(TG_ACCT_TREE, node, nseg);
+    m0 = h->blk->len;
+    h->moff[(*h->nmesh)++] = m0;
+    if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, nv,
+                            seg_page, seg_nq, nseg)) return 0;
+    /* Marked COAST, and the exemption is EARNED rather than smuggled: the wrap
+     * stands on the boundary node, which is the river rectangle's own near
+     * edge, so every column is inside that rectangle and the R9 over-water
+     * audit would drop the whole mesh as massing on water. It is not massing --
+     * it is shore geometry that descends the bank and reaches ZERO HEIGHT
+     * exactly at the waterline by construction, which is the same claim
+     * TG_GK_COAST already licenses for the shore band beside it. The mark is
+     * span-scoped to `node`, so it licenses nothing anywhere else. */
+    tg_guard_mark(m0, h->blk->len, TG_GK_COAST, node);
+    return 1;
+}
+
+/* Fire the wrap on a LAND span whose neighbour carries WATER, at the node the
+ * band's own last (or first) quad ends on. Asked for every span, before the
+ * band's early-outs, because the wrap belongs to the span BESIDE the water and
+ * the water's own spans return early.
+ *
+ * TWO KINDS OF WATER END A TREE LINE, and the user's item names both: the
+ * RIVER under a bridge run (the reported span 1351) and the SEA of a water
+ * biome (a COAST run, which carries no tree line of its own so every band
+ * meeting it stops). They differ only in where the surface is and in whether
+ * there is a shore on one side or both -- a river gorge has banks on both, a
+ * coast has sea on one side and dry land on the other, and wrapping the dry
+ * side around nothing would be a wall turning a corner for no reason. */
+static int tg_r14_wrap_here(const TG_FBHook *h)
+{
+    const int si = h->si;
+    const TG_NodeList *nl = h->nl;
+    double t, l, ws;
+    int s;
+
+    if (!td5_env_flag_on("TD5RE_R14_COAST_WRAP")) return 1;   /* default ON */
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_TREELINE")) return 1;
+    if (!td5_env_flag_on("TD5RE_R12_FLORA_BAND")) return 1;
+    if (si <= tg_r13_band_first_span() || si + 1 >= nl->count) return 1;
+    if (tg_span_in_bridge_run(si)) return 1;                  /* not a land span */
+
+    /* RIVER. Entry mouth: the band's far end sits on node si+1. Exit mouth: its
+     * near end sits on node si. Both banks, so both sides. */
+    if (si + 1 < nl->count && tg_span_in_bridge_run(si + 1)
+        && tg_water_span_clear(si + 1)) {
+        ws = tg_bridge_water_surf_y(nl, si + 1);
+        if (!tg_r14_emit_wrap(h, si + 1, ws,  1.0)) return 0;
+        if (!tg_r14_emit_wrap(h, si + 1, ws, -1.0)) return 0;
+    }
+    if (si - 1 >= 0 && tg_span_in_bridge_run(si - 1)
+        && tg_water_span_clear(si - 1)) {
+        ws = tg_bridge_water_surf_y(nl, si - 1);
+        if (!tg_r14_emit_wrap(h, si, ws,  1.0)) return 0;
+        if (!tg_r14_emit_wrap(h, si, ws, -1.0)) return 0;
+    }
+
+    /* SEA. Fire where the wall this span carries is the LAST one before a water
+     * biome (or the first one after it), and only on the side the sea is on.
+     * Presence is read through tg_r13_band_side, the same predicate R13 BAND's
+     * cull uses, so "a wall ends here" means the same thing to both. */
+    for (s = si - 1; s <= si + 1; s += 2) {
+        double sd;
+        if (s < 0 || s + 1 >= nl->count) continue;
+        if (tg_span_in_bridge_run(s)) continue;        /* the river case above */
+        if (!tg_biome_span_has_water(s)) continue;
+        sd = tg_water_side(s);
+        if (sd == 0.0) continue;
+        if (!tg_r13_band_side(nl, si, sd, &t, &l)) continue;  /* no wall to turn */
+        if (tg_r13_band_side(nl, s, sd, &t, &l)) continue;    /* not an end     */
+        if (!tg_r14_emit_wrap(h, (s > si) ? si + 1 : si,
+                              tg_sea_level_y(nl, s), sd)) return 0;
+    }
+    return 1;
+}
+
 static int tg_emit_fb_flora(const TG_FBHook *h)
 {
     const TG_NodeList *nl = h->nl;
@@ -18626,6 +19051,10 @@ static int tg_emit_fb_flora(const TG_FBHook *h)
      * opening, so the cut is never a hole. */
     double fx_side = 0.0, fx_reach = 0.0;
     const int fxc = tg_r12_fcross_at(nl, si, &fx_side, &fx_reach);
+
+    /* [R14 COAST item 5b] Asked FIRST, because the wrap closes the cut a bridge
+     * run makes and the run's own spans return early below. */
+    if (!tg_r14_wrap_here(h)) return 0;
 
     /* Default ON (2026-08-26); TD5RE_AUTOTRACK_TREELINE=0 disables the band. */
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_TREELINE"))
@@ -21111,6 +21540,60 @@ static void tg_r13_band_report(const TG_NodeList *nl, int nspans)
                 ? 100.0 * (double)s_r13_far_hidden_bytes
                         / (double)s_r13_models_bytes : 0.0,
               tg_r13_band_cull() ? "on" : "off");
+}
+
+/* [R14 COAST item 5b] "in the background the forest ends abruptly -- the tree
+ * line should wrap around the coastline."
+ *
+ * The ledger above counts how MANY spans are walled. This one reports WHERE each
+ * wall run ENDS and WHY, per side, with the height the wall still had on its
+ * last span. A run that ends on a full-height face is the "abrupt end"; a run
+ * that ends at 0 has tapered. Always printed while a run ends tall, because that
+ * is the defect this area is measuring. */
+static void tg_r14_band_report(const TG_NodeList *nl, int nspans)
+{
+    int s, side_i, abrupt = 0, tapered = 0, logged = 0, wrapped = 0;
+
+    for (side_i = 0; side_i < 2; side_i++) {
+        const double side = side_i ? 1.0 : -1.0;
+        int prev = 0;
+        for (s = 0; s < nspans && s + 1 < nl->count; s++) {
+            double t, l, h = 0.0, back = 0.0;
+            const int now = tg_r13_band_side(nl, s, side, &t, &l);
+            if (prev && !now) {
+                const int e = s - 1;               /* last walled span */
+                const int cell = tg_biome_cell_index(e);
+                const int nxt = tg_biome_cell_index(s);
+                tg_r12_band_params(e, &h, &back);
+                if (h > 1000.0) abrupt++; else tapered++;
+                /* A tall end whose cut is a WATER BRIDGE RUN is the class item
+                 * 5b reports, and it is the class the wrap closes. Counted
+                 * separately because the wrap deliberately does not change
+                 * PRESENCE, so `abrupt` cannot move even when it is fixed. */
+                if (h > 1000.0 && tg_span_in_bridge_run(s) &&
+                    tg_water_span_clear(s)) wrapped++;
+                if (logged < 24) {
+                    logged++;
+                    TD5_LOG_W(LOG_TAG,
+                              "R14BAND end: %s side, run ends at span %d "
+                              "h=%.0f back=%.0f biome %s -> %s next-span "
+                              "bridge=%d water=%d",
+                              side > 0.0 ? "LEFT" : "RIGHT", e, h, back,
+                              k_biomes[cell].name, k_biomes[nxt].name,
+                              tg_span_in_bridge_run(s) ? 1 : 0,
+                              tg_biome_span_has_water(s) ? 1 : 0);
+                }
+            }
+            prev = now;
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "R14BAND: wall runs ending TALL (h>1000)=%d, of which "
+              "cut by a WATER BRIDGE RUN=%d; ending tapered=%d; "
+              "wraps emitted=%ld (mean reach %.0f) "
+              "(knob TD5RE_R14_COAST_WRAP=%s)",
+              abrupt, wrapped, tapered, s_r14_wraps,
+              s_r14_wraps ? s_r14_wrap_reach / (double)s_r14_wraps : 0.0,
+              td5_env_flag_on("TD5RE_R14_COAST_WRAP") ? "on" : "off");
 }
 
 /* ===================== [R8 TERRAIN items 5/15] EXTENT DIAGNOSTIC =====================
@@ -27176,8 +27659,10 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     tg_r11_xcurve_report(nspans);        /* [R11 CROSS item 16] opt-in, ditto */
     tg_r12_fcross_report(&nl, nspans);   /* [R12 CROSS item 5]  opt-in, ditto */
     tg_r13_band_report(&nl, nspans);     /* [R13 BAND items 1a/1b] ledger  */
+    tg_r14_band_report(&nl, nspans);     /* [R14 COAST item 5b] run ends   */
     tg_r11_water_diag(&nl, nspans);            /* [R11 WATER] wet footprint    */
     tg_r12_tex_report(&nl, nspans);            /* [R12 TEX] page-per-surface   */
+    tg_r14_coast_report();                   /* [R14 COAST item 5a] straddles */
     ok = 1;
 
 done:
