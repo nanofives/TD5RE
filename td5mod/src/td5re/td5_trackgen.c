@@ -887,6 +887,9 @@ typedef enum {
     /* [R13] PRE-RESERVED, one per area, own line. RENAME YOUR OWN SLOT IN
      * PLACE. Never append here. */
     TG_ACCT_R13_FILL,       /* FILL   (20260901 7b) gap-interior infill block */
+    /* [R14] PRE-RESERVED, one per area, own line. RENAME YOUR OWN SLOT IN
+     * PLACE. Never append here. */
+    TG_ACCT_R14_UP,         /* OVERPASS (20260901 3) crossing surround floor + fill */
     TG_ACCT_KIND_COUNT
 } TG_AcctKind;
 
@@ -991,7 +994,10 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
     "r12-cross",            /* CROSS   */
     /* [R13] one reserved name per area, in enum order. Rename to match your
      * renamed enum constant. Only the LAST entry omits its trailing comma. */
-    "r13-fill"              /* FILL    */
+    "r13-fill",             /* FILL    */
+    /* [R14] one reserved name per area, in enum order. Rename to match your
+     * renamed enum constant. Only the LAST entry omits its trailing comma. */
+    "r14-overpass"          /* OVERPASS */
 };
 
 static long s_acct_count[TG_ACCT_KIND_COUNT];
@@ -10121,6 +10127,79 @@ static int tg_up_xclear_span(int si)
     return 0;
 }
 
+/* ================= [R14 OVERPASS item 3] THE CROSSING SURROUND ==============
+ * "Wherever there is an overpass, always fill the nearby area with buildings and
+ *  floor. Here the floor ends early and there is nothing behind it but
+ *  background."  (seed 20260901, span 528; the crossing is at 530)
+ *
+ * MEASURED FIRST (tg_r14_up_report, all six crossings on the seed). Three causes
+ * were plausible and the numbers pick exactly one of them:
+ *
+ *   NOT the deck outrunning the drawn world. `OVER = arm - ground horiz` is
+ *   <= 0 at every crossing and every side: R11 item 7a already tied the arm to
+ *   `half + tg_far_reach()`, and the ground chain reaches the same 30000. In
+ *   PLAN the floor stops exactly where the deck does.
+ *
+ *   NOT a R13 fold clamp. tg_r13_fold_reach binds on 2 of 12 crossing sides and
+ *   its answer there is 30336 -- outside the 30000 the ground already reaches,
+ *   so it never truncates anything at a crossing.
+ *
+ *   IT IS THE FLOOR'S ELEVATION, not its extent. The skirt is flat only to
+ *   tg_verge_reach (12000); past that the far band SINKS toward the track floor
+ *   to push its cut edge onto the horizon. The deck does not sink -- it is one
+ *   flat plane at road + TD5_TG_UP_CLEAR. Measured soffit-to-ground under the
+ *   deck at 0/25/50/75/100% of the arm, span 530 left:
+ *       2600  2643  15715  33795  33795
+ *   The floor is under the deck for the first quarter of it and then falls 30000
+ *   units away. That is "the floor ends early ... the deck stands over a void",
+ *   verbatim, and it is an ELEVATION reading of a complaint that sounds like an
+ *   extent one. Reporting the extent again is how it would have survived a
+ *   fourth round.
+ *
+ * THE FIX IS TO HOLD THE FLOOR FLAT UNDER THE CROSSING, and it is a change to
+ * the existing cross-section rather than a new element: the skirt's outer point
+ * runs out to tg_far_reach instead of tg_verge_reach on the spans a deck covers,
+ * tapered back to the ordinary verge over TD5_TG_R14_UP_TAPER spans so no two
+ * adjacent slabs step laterally (the R8 item 11 defect). It costs ZERO new
+ * meshes -- the same slab, further points -- and it inherits the R9 topo road
+ * cap and the R13 fold cap for free, because tg_ground_side applies both to
+ * whatever profile it is handed. The reach is taken from tg_far_reach, the SAME
+ * authority the arm takes its length from, so the deck and the floor under it
+ * cannot disagree about where the crossing ends.
+ *
+ * THE CLEAR CORRIDOR STAYS. tg_up_clear_span is why nothing stands on the deck's
+ * own three spans, and that is correct -- a facade there intersects the deck
+ * (R11 item 7c). Measured, it costs 22 wall sides over six crossings. What the
+ * surround gets instead is r13-fill's block, on the spans just OUTSIDE the deck
+ * footprint whose frontage happens to be open: see CASE C in tg_r13_fill_here.
+ * At the reported crossing that is spans 526-527 left, an open run the gap-
+ * interior rule refused because a corner stands two spans away.
+ *
+ * Knobs, both default ON: TD5RE_R14_UP_FLOOR (the flat floor),
+ * TD5RE_R14_UP_FILL (the surround massing). Accounted TG_ACCT_R14_UP.
+ * ========================================================================= */
+/* Spans of skirt either side of a crossing that ramp between the widened floor
+ * and the ordinary verge. One more than the no-intersection band, so the ramp
+ * has finished by the time the ordinary town furniture resumes. */
+#define TD5_TG_R14_UP_TAPER  (TD5_TG_UP_XCLEAR + 1)
+
+/* Distance in spans from si to the nearest overpass crossing inside `win`, or
+ * -1. Pure function of si, like every other predicate this element owns, and
+ * deliberately NOT routed through tg_up_clear_span: R14's two consumers must
+ * answer the same way whether or not the R11/R12 corridor knobs are on. */
+static int tg_r14_up_dist(int si, int win)
+{
+    int k, best = -1;
+    for (k = -win; k <= win; k++) {
+        const int s = si + k;
+        const int d = (k < 0) ? -k : k;
+        if (s < 0) continue;
+        if (tg_underpass_span(s) != s) continue;
+        if (best < 0 || d < best) best = d;
+    }
+    return best;
+}
+
 /* MEASURE, DON'T GUESS. One line per emitted overpass with the three numbers
  * item 7 is about, so the fix is verified by diffing two logs rather than by
  * looking at a frame: HIGHWAY width (along our road), PILLAR width (the same
@@ -12389,6 +12468,29 @@ static double tg_verge_reach(void)
          ? TD5_TG_VERGE_REACH : TD5_TG_GROUND_WIDTH;
 }
 
+/* [R14 OVERPASS item 3] How far the FLAT skirt must reach at span si so the
+ * ground stays under the deck instead of sinking away from it. 0 = this span is
+ * not near a crossing and the ordinary verge stands.
+ *
+ * tg_far_reach, not the arm's own capped length: the arm is capped per SIDE
+ * against other legs of the ring, and a floor that inherited that cap would
+ * differ between the two kerbs of one slab for a reason that has nothing to do
+ * with this span's ground. The cap belongs to tg_ground_side (the R9 topo road
+ * cap says the same thing, per side, and is applied to whatever this returns),
+ * so asking for the uncapped reach here and letting the existing clamp cut it is
+ * both cheaper and one authority rather than two. */
+static double tg_r14_up_ground_reach(int si)
+{
+    const double v = tg_verge_reach();
+    const double f = tg_far_reach();
+    int d;
+    if (!td5_env_flag_on("TD5RE_R14_UP_FLOOR")) return 0.0;
+    if (!(f > v)) return 0.0;
+    d = tg_r14_up_dist(si, TD5_TG_R14_UP_TAPER);
+    if (d < 0) return 0.0;
+    return v + (f - v) * (1.0 - (double)d / (double)(TD5_TG_R14_UP_TAPER + 1));
+}
+
 static void tg_ground_side_raw(const TG_NodeList *nl, int si, int is_left,
                                double water_side, TG_GroundProf *p)
 {
@@ -12538,6 +12640,22 @@ static void tg_ground_side_raw(const TG_NodeList *nl, int si, int is_left,
         if (p->d[0] > p->d[1] - 1000.0)
             p->d[0] = p->d[1] - 1000.0;
     }
+
+    /* [R14 OVERPASS item 3] HOLD THE FLOOR FLAT UNDER A CROSSING. Applied LAST
+     * in the ordinary branch and as a max(), so it can only ever push the outer
+     * point further out: the branch-corridor clearance above and the widened
+     * long-fork apron keep whatever they decided, and the seaward beach and the
+     * gorge (which returned above) are untouched -- a crossing never lands on
+     * either, tg_up_span_crossable refuses both outright.
+     *
+     * The drop at the outer point is left at TD5_TG_GROUND_DROP, which is what
+     * makes this a floor rather than a ramp: the skirt stays near road level all
+     * the way across the deck's footprint, and the far band then tucks under its
+     * new outer edge and sinks from THERE, off past the end of the deck. */
+    {
+        const double up = tg_r14_up_ground_reach(si);
+        if (up > p->d[p->n - 1]) p->d[p->n - 1] = up;
+    }
 }
 
 /* [R9 TOPO C3] Every consumer of the near cross-section -- the skirt slab, the
@@ -12686,6 +12804,12 @@ static int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
 
     seg_nq = n / 4;
     tg_acct(TG_ACCT_TERRAIN, si);      /* one slab covering both verges */
+    /* [R14 OVERPASS item 3] The widened floor changes THIS slab rather than
+     * adding one, so its accounting run is recorded where the slab is written.
+     * Without it the fix would be invisible to the element inventory and the
+     * only proof it fired would be a frame, which is what the round is trying
+     * not to argue from. */
+    if (tg_r14_up_ground_reach(si) > 0.0) tg_acct(TG_ACCT_R14_UP, si);
     return tg_write_quad_mesh(blk, px, py, pz, uu, vv, n, &seg_page, &seg_nq, 1);
 }
 
@@ -16962,6 +17086,58 @@ static int tg_r13_gap_interior(int si, int s, int nspans)
     return 1;
 }
 
+/* [R14 OVERPASS item 3] CASE C -- THE CROSSING SURROUND.
+ *
+ * The deck's own three spans stay clear (tg_up_clear_span, R11 item 7c: a facade
+ * there intersects the deck) and this deliberately does not touch them. What it
+ * fills is the ring JUST OUTSIDE that corridor, out to the same band the R12
+ * no-intersection rule uses, so a crossing stands in a built-up place instead of
+ * at the near end of a hole.
+ *
+ * It is a RELAXATION of case A, not a new emitter: the same block, the same
+ * setback, the same page and height rules. The only thing it drops is case A's
+ * corner-distance test (tg_r13_gap_interior's TD5_TG_R13_GAP_KEEP), which is
+ * what refused the reported zone -- measured at seed 20260901 crossing 530, the
+ * left kerb reads B B . . p x x x B B B B B over spans 524-536, so the open run
+ * at 526-527 has a standing corner exactly two spans behind it and case A leaves
+ * it as street. Two spans of street is right in the middle of a town and wrong
+ * at the mouth of an overpass, which is the whole of this case.
+ *
+ * Every other refusal case A makes is kept verbatim -- a park, a fork-cleared
+ * side (tg_side_blocked, which is why the reported crossing's right kerb inside
+ * fork 2 gets nothing and should), and a side whose frontage already stands.
+ *
+ * TWO DELIBERATE DEPARTURES, both measured rather than guessed. The first pass
+ * of this case fired on 2 sides across the whole track and on ZERO sides at the
+ * reported crossing, and the per-side trace says why:
+ *
+ *   surround @530 span 527 L near=1 built=0 park=0 blocked=0 yard=1 -> 0
+ *   surround @530 span 528 L near=1 built=1 park=0 blocked=0 yard=0 -> 0
+ *
+ *   1. WHAT STANDS, NOT WHAT THE PATTERN CLAIMS. Case A asks tg_facade_built,
+ *      the raw run/gap pattern, because a "gap" is a pattern gap by definition.
+ *      Span 528 left is pattern-built and nothing stands on it (the town map
+ *      reads B B . . p x x x B B B B B over 524-536), so the pattern test
+ *      refuses to fill a side that is visibly empty. tg_r11_corner_stands is the
+ *      predicate for "a block is actually emitted here", and it is the right one
+ *      for a case whose whole subject is a visible hole. Every reason a side can
+ *      be pattern-built yet empty is a reason to fill BEHIND it, and the fork is
+ *      not one of them -- tg_side_blocked already refused that two lines up.
+ *   2. NO YARD ROLL. tg_r13_fill_here leaves ~12% of its blocks out as a yard,
+ *      which is variety in the middle of a town and a dice throw at the mouth of
+ *      a crossing: it is what left span 527 empty above. "ALWAYS fill the nearby
+ *      area" is the item, so case 3 is exempted from the roll at the call site.
+ */
+static int tg_r14_up_surround(int si, int s)
+{
+    if (!td5_env_flag_on("TD5RE_R14_UP_FILL")) return 0;
+    if (tg_r14_up_dist(si, TD5_TG_UP_XCLEAR) < 0) return 0;
+    if (tg_r11_corner_stands(si, s)) return 0;  /* a block already stands    */
+    if (tg_block_is_park(si, s)) return 0;
+    if (tg_side_blocked(si, s ? 1.0 : -1.0)) return 0;   /* branch corridor  */
+    return 1;
+}
+
 /* THE WHOLE PER-SIDE DECISION, in one place. The emitter and the read-only
  * report BOTH call this, so "the fill landed at span N" is something the report
  * can state rather than something a reader has to re-derive from a run summary
@@ -16988,6 +17164,8 @@ static int tg_r13_fill_here(const TG_NodeList *nl, int si, int nspans, int s,
      * block on the junction the R11/R12 corner work just cleared. */
     if (tg_r13_gap_interior(si, s, nspans)) {
         kind = 1;
+    } else if (tg_r14_up_surround(si, s)) {
+        kind = 3;                  /* [R14 item 3] overpass surround */
     } else {
         /* CASE B -- BEHIND AN EXPOSED FRONTAGE RUN. Measured on seed 20260901:
          * from the reported span 1677 the backs on show are spans 1709-1712
@@ -17010,7 +17188,10 @@ static int tg_r13_fill_here(const TG_NodeList *nl, int si, int nspans, int s,
                                 TD5_TG_R13_EXPO_RANGE, NULL) <= 0) return 0;
         kind = 2;
     }
-    if ((*rh >> 29) == 0u) return 0;               /* ~12% left as a yard    */
+    /* [R14 item 3] The yard roll is variety inside a town and a dice throw at a
+     * crossing mouth -- measured, it is what left span 527 left empty beside the
+     * reported deck. Case 3 is "ALWAYS fill", so it is exempt. */
+    if (kind != 3 && (*rh >> 29) == 0u) return 0;  /* ~12% left as a yard    */
     return kind;
 }
 
@@ -17065,7 +17246,9 @@ static int tg_r13_emit_gap_infill(const TG_FBHook *h)
                                 bx, by, bz, ax, ay, az, lx0, lz0, lx1, lz1,
                                 depth, H, cols, rows, page, 1, h->si))
             return 0;
-        tg_acct(TG_ACCT_R13_FILL, h->si);
+        /* Accounted to the case that produced it, so the inventory separates
+         * R13's two cases from R14's surround under one emitter. */
+        tg_acct(kind == 3 ? TG_ACCT_R14_UP : TG_ACCT_R13_FILL, h->si);
     }
     return 1;
 }
@@ -17366,7 +17549,7 @@ static void tg_r13_fill_report(const TG_NodeList *nl, int nspans)
     const int wpad  = td5_env_int("TD5RE_R13_FILL_PAD", 12, 0, 4000);
     int si, s, ring = (s_ring_len > 0) ? s_ring_len : nspans;
     int fronts = 0, expo = 0, expo_noback = 0, expo_nofill = 0;
-    int gaps = 0, interior = 0, fill_gap = 0, fill_rear = 0;
+    int gaps = 0, interior = 0, fill_gap = 0, fill_rear = 0, fill_up = 0;
     double expo_far_max = 0.0;
     char win[900];
     int wpos = 0;
@@ -17398,6 +17581,7 @@ static void tg_r13_fill_report(const TG_NodeList *nl, int nspans)
             kind = tg_r13_fill_here(nl, si, nspans, s, b, &gf, &rh);
             if (kind == 1) fill_gap++;
             else if (kind == 2) fill_rear++;
+            else if (kind == 3) fill_up++;   /* [R14 item 3] surround */
             tg_side_geom(nl, si, s, b, &g);
             if (!g.built) {
                 /* GAP side: count it, and record which of its spans the R13
@@ -17448,8 +17632,8 @@ static void tg_r13_fill_report(const TG_NodeList *nl, int nspans)
         expo_nofill, expo_far_max);
     TD5_LOG_I(LOG_TAG,
         "trackgen: r13fill GAPS gap_sides=%d gap_interior=%d fill_gap=%d "
-        "fill_rear=%d fill_total=%d", gaps, interior, fill_gap, fill_rear,
-        fill_gap + fill_rear);
+        "fill_rear=%d fill_up=%d fill_total=%d", gaps, interior, fill_gap,
+        fill_rear, fill_up, fill_gap + fill_rear + fill_up);
     TD5_LOG_I(LOG_TAG,
         "trackgen: r13fill FILLED window[%d+/-%d] (span/side/case): %s",
         wspan, wpad, win[0] ? win : "-");
@@ -22155,6 +22339,187 @@ static void tg_r9_topo_report(const TG_NodeList *nl, int nspans)
         sides, v_gap, v_open, worst_open, v_road, worst_road, v_mat,
         sides ? sum_h / (double)sides : 0.0,
         sides ? sum_s / (double)sides : 0.0);
+}
+
+/* ================= [R14 OVERPASS item 3] THE SURROUND, MEASURED ==============
+ * "Wherever there is an overpass, always fill the nearby area with buildings and
+ *  floor. Here the floor ends early and there is nothing behind it but
+ *  background."  (seed 20260901, span 528)
+ *
+ * Three candidate causes were named before any of them was measured, so this
+ * prints all three side by side, per crossing, per side, and lets the numbers
+ * choose:
+ *
+ *   (a) THE R12 CLEAR CORRIDOR. tg_up_clear_span suppresses frontage, back rows,
+ *       forkback and r13-fill over the deck footprint, and tg_up_xclear_span
+ *       suppresses street intersections over a wider band. `sup=` counts the
+ *       span-SIDES the corridor removed a wall from, so "the town is missing"
+ *       can be attributed to the corridor or ruled out.
+ *   (b) A R13 FOLD CLAMP on the ground reach. `fold=` is tg_r13_fold_reach's own
+ *       answer at this span-side (1e30 on a straight and on the outside of every
+ *       bend), so a truncated floor next to a bend is attributable rather than
+ *       assumed.
+ *   (c) GENUINELY UNOWNED GROUND. `arm=` is the deck's own lateral reach and
+ *       `horiz=` is where the drawn ground actually stops (the whole topo chain:
+ *       verge skirt plus far-band rings, the same authority the flora and the
+ *       band read). `over=` is arm - horiz: how far the deck flies past the last
+ *       drawn floor. That is the item's own words expressed as one number.
+ *
+ * Read-only: every quantity is a pure function of the span index and this calls
+ * only predicates. Printed unconditionally -- a track carries a handful of
+ * crossings and a measurement nobody prints is a measurement nobody checks. */
+static double tg_r14_up_ground_horiz(const TG_NodeList *nl, int si, int is_left)
+{
+    TG_TopoChain c;
+    tg_topo_chain(nl, si, is_left, &c);
+    return (c.n > 0) ? c.horiz : 0.0;
+}
+
+/* The VERTICAL half of "the deck stands over a void". The soffit is a flat plane
+ * TD5_TG_UP_CLEAR above the road, and the ground beneath it is not flat at all:
+ * it drops TD5_TG_GROUND_DROP over the verge and then sinks toward the track
+ * floor across the far-band rings. Sample the chain at quarters of the arm and
+ * print the AIR GAP -- soffit height above the ground directly under it -- so
+ * "there is nothing under the deck" is a height in units, not an impression. */
+static void tg_r14_up_gap_line(const TG_NodeList *nl, int si, int is_left,
+                               double arm_edge)
+{
+    TG_TopoChain c;
+    double g[5];
+    int k;
+    tg_topo_chain(nl, si, is_left, &c);
+    if (c.n <= 0) return;
+    for (k = 0; k < 5; k++)
+        g[k] = TD5_TG_UP_CLEAR
+             + tg_topo_drop_at(&c, arm_edge * (double)k * 0.25);
+    TD5_LOG_I(LOG_TAG,
+        "trackgen: [R14 item 3] airgap @%d %s under-deck soffit-to-ground at "
+        "0/25/50/75/100%% of arm (%.0f): %.0f %.0f %.0f %.0f %.0f",
+        si, is_left ? "L" : "R", arm_edge, g[0], g[1], g[2], g[3], g[4]);
+}
+
+static void tg_r14_up_report(const TG_NodeList *nl, int nspans)
+{
+    const int ring = (s_ring_len > 0 && s_ring_len < nspans) ? s_ring_len : nspans;
+    int si, crossings = 0, sup_total = 0, folded = 0;
+    double worst_over = 0.0;
+    int worst_si = -1;
+
+    for (si = 1; si + 1 < ring; si++) {
+        const TG_Biome *bs = &k_biomes[tg_scenery_biome_index(si)];
+        double half, shift;
+        int s, sup = 0, fillsup = 0, k;
+
+        if (tg_underpass_span(si) != si) continue;
+        crossings++;
+        tg_tunnel_bore(nl, si, &half, &shift);
+
+        /* (a) what the clear corridor took out, span-side by span-side. */
+        for (k = -TD5_TG_UP_CLEAR_SPANS; k <= TD5_TG_UP_CLEAR_SPANS; k++) {
+            const int c = si + k;
+            const TG_Biome *cb;
+            if (c <= 0 || c + 1 >= ring) continue;
+            cb = &k_biomes[tg_scenery_biome_index(c)];
+            if (!(tg_city_sidewalk_w(cb) > 0.0)) continue;
+            if (tg_span_in_bridge_run(c)) continue;
+            for (s = 0; s < 2; s++) {
+                if (tg_facade_built(c, s)) sup++;
+                fillsup++;              /* r13-fill returns 0 on this whole band */
+            }
+        }
+        sup_total += sup;
+
+        for (s = 0; s < 2; s++) {
+            const int is_left = s ? 1 : 0;
+            const double arm  = tg_up_reach(nl, si, is_left, half, TD5_TG_UP_HALFDEEP);
+            const double horiz = tg_r14_up_ground_horiz(nl, si, is_left);
+            const double fold = tg_r13_fold_reach(nl, si, is_left ? 1.0 : -1.0, 0.0);
+            const double tcap = tg_topo_road_cap(nl, si, is_left);
+            /* The arm is measured from the BORE CENTRE and the ground from the
+             * ROAD EDGE, so put the arm on the ground's own axis before
+             * subtracting -- otherwise `over` carries the fork shift as error. */
+            const double arm_edge = arm + (is_left ? shift : -shift)
+                                  - tg_road_half_width(nl, si);
+            const double over = arm_edge - horiz;
+            int ridge = 1;
+            const char *why = tg_r8_far_block_reason(nl, si,
+                                  &k_biomes[tg_biome_for_span(si)], is_left, &ridge);
+            if (fold < 1e29) folded++;
+            if (over > worst_over) { worst_over = over; worst_si = si; }
+            TD5_LOG_I(LOG_TAG,
+                "trackgen: [R14 item 3] overpass @%d %s biome=%s sidewalk=%.0f "
+                "arm=%.0f arm_edge=%.0f GROUND horiz=%.0f OVER=%.0f "
+                "verge=%.0f far=%.0f fold=%.0f topo_cap=%.0f farband=%s ridge=%d "
+                "corridor=%d..%d sup_sides=%d fill_sides=%d",
+                si, is_left ? "L" : "R", bs->name, tg_city_sidewalk_w(bs),
+                arm, arm_edge, horiz, over,
+                tg_verge_reach(), tg_far_reach(),
+                fold < 1e29 ? fold : -1.0, tcap,
+                why ? why : "yes", ridge,
+                si - TD5_TG_UP_CLEAR_SPANS, si + TD5_TG_UP_CLEAR_SPANS,
+                sup, fillsup);
+            tg_r14_up_gap_line(nl, si, is_left, arm_edge);
+        }
+        {   /* Occupancy map either side of the crossing: for each span in the
+             * neighbourhood, what actually STANDS on each kerb. 'B' = a corner
+             * block stands, 'p' = the run/gap pattern says built but something
+             * suppressed it, '.' = open frontage, 'x' = the clear corridor. Read
+             * left-to-right from si-6 to si+6, so "the deck sits in a hole in the
+             * town" is a picture made of predicates rather than of pixels. */
+            char mapL[16], mapR[16];
+            int i;
+            for (i = 0; i <= 12; i++) {
+                const int c = si - 6 + i;
+                for (s = 0; s < 2; s++) {
+                    char *m = s ? mapL : mapR;
+                    char v;
+                    if (c <= 0 || c + 1 >= ring)        v = '?';
+                    else if (tg_up_clear_span(c))       v = 'x';
+                    else if (tg_r11_corner_stands(c, s))v = 'B';
+                    else if (tg_facade_built(c, s))     v = 'p';
+                    else                                v = '.';
+                    m[i] = v;
+                }
+            }
+            mapL[13] = mapR[13] = '\0';
+            TD5_LOG_I(LOG_TAG,
+                "trackgen: [R14 item 3] town @%d spans %d..%d L[%s] R[%s] "
+                "(x=clear corridor, B=block stands, p=pattern only, .=open)",
+                si, si - 6, si + 6, mapL, mapR);
+            /* Why CASE C did or did not take each side of the band, per span.
+             * The emitter's own clauses, in its own order -- a count alone
+             * cannot say whether a refusal was the park test, the fork or the
+             * yard roll, and the first two are correct while the third is a
+             * dice throw the emitter may not want at a crossing mouth. This is
+             * 14 lines per crossing, so it is the one part of the round's
+             * evidence that is opt-in. td5_env_flag_OFF, not flag_on: the
+             * latter returns 1 when the variable is UNSET and would make an
+             * "opt-in" dump unconditional. */
+            if (!td5_env_flag_off("TD5RE_R14_UP_REPORT")) continue;
+            for (i = -TD5_TG_UP_XCLEAR; i <= TD5_TG_UP_XCLEAR; i++) {
+                const int c = si + i;
+                if (c <= 0 || c + 1 >= ring) continue;
+                for (s = 0; s < 2; s++) {
+                    const unsigned int rh = ((unsigned)c * 2654435761u
+                                          + (unsigned)s * 374761393u) * 2246822519u;
+                    TD5_LOG_I(LOG_TAG,
+                        "trackgen: [R14 item 3] surround @%d span %d %s "
+                        "near=%d stands=%d park=%d blocked=%d clear=%d yard=%d "
+                        "-> %d",
+                        si, c, s ? "L" : "R",
+                        tg_r14_up_dist(c, TD5_TG_UP_XCLEAR) >= 0,
+                        tg_r11_corner_stands(c, s), tg_block_is_park(c, s),
+                        tg_side_blocked(c, s ? 1.0 : -1.0),
+                        tg_up_clear_span(c), (rh >> 29) == 0u,
+                        !tg_up_clear_span(c) && tg_r14_up_surround(c, s));
+                }
+            }
+        }
+    }
+    TD5_LOG_I(LOG_TAG,
+        "trackgen: [R14 item 3] SUMMARY crossings=%d suppressed_wall_sides=%d "
+        "fold-clamped_sides=%d worst_deck_overhang=%.0f @%d",
+        crossings, sup_total, folded, worst_over, worst_si);
 }
 
 /* ===================== [R11 WATER] RIVER SEAM DIAGNOSTIC =====================
@@ -27877,6 +28242,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     tg_r12_spanq(nspans);              /* [R12 item 8a] opt-in span query     */
     tg_r8_terrain_extent_report(&nl, nspans);  /* [R8 TERRAIN] opt-in, ditto */
     tg_r9_topo_report(&nl, nspans);            /* [R9 TOPO] class sweep, ditto */
+    tg_r14_up_report(&nl, nspans);       /* [R14 item 3] overpass surround     */
     tg_r11_xcurve_report(nspans);        /* [R11 CROSS item 16] opt-in, ditto */
     tg_r12_fcross_report(&nl, nspans);   /* [R12 CROSS item 5]  opt-in, ditto */
     tg_r13_band_report(&nl, nspans);     /* [R13 BAND items 1a/1b] ledger  */
