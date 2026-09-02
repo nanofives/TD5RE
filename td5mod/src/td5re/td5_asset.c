@@ -33,6 +33,7 @@
 #include "td5_track.h"
 #include "td5_track_registry.h" /* custom-track registry: level/finish-span lookups */
 #include "td5_trackgen.h"       /* AUTO-GENERATED track: per-race regeneration */
+#include "td5_trackgen_preview.h"  /* ...and the preview worker we must join first */
 #include "td5_platform.h"
 #include "td5re.h"
 #include "td5_render.h"
@@ -2368,6 +2369,11 @@ int td5_asset_load_level(int track_index)
      * continues, so a generator hiccup degrades to "same track again" rather
      * than a failed race launch. */
     if (td5_trackgen_is_auto_slot(track_index)) {
+        /* The STUDIO screen's route preview walks the SAME generator statics
+         * (the private RNG, the biome grid) on a worker thread. Letting it
+         * overlap this build would corrupt the track being raced, so join it
+         * first -- unconditionally, and before the regenerate, not after. */
+        td5_tgprev_cancel_join();
         if (!td5_trackgen_regenerate(0))
             TD5_LOG_W(LOG_TAG, "load_level: auto-track regenerate failed; "
                       "reusing the previous generated track");

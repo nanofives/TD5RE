@@ -1334,6 +1334,13 @@ static int tg_nodes_reserve(TG_NodeList *nl, int need)
     return 1;
 }
 
+/* [PREVIEW] Progress/cancel hook for td5_trackgen_preview_route. NULL for every
+ * normal build, so the walk stays bit-identical when no preview is running --
+ * which is what lets the preview share this code path with the real generator
+ * instead of drifting from it. Set and cleared by preview_route alone. */
+static const TD5_TrackGenPreviewSink *s_preview_sink;
+static int s_preview_cancelled;
+
 static int tg_nodes_push(TG_NodeList *nl, double x, double z,
                          double width, int lanes)
 {
@@ -1344,6 +1351,24 @@ static int tg_nodes_push(TG_NodeList *nl, double x, double z,
         n->width = width;
         n->lanes = lanes;
         n->tx = 0.0; n->tz = 1.0;
+    }
+    /* Every centerline node passes through here, so one hook covers the whole
+     * walk. Cancelling returns 0, which the three push sites already propagate
+     * as a build failure -- no new control flow in the walk itself. */
+    if (s_preview_sink) {
+        const TG_Node *n = &nl->v[nl->count - 1];
+        TD5_TrackGenPoint p;
+        p.x = (float)n->x;
+        p.z = (float)n->z;
+        p.lanes = n->lanes;
+        p.branch = 0;
+        if (s_preview_sink->on_points)
+            s_preview_sink->on_points(&p, 1, s_preview_sink->ctx);
+        if (s_preview_sink->should_cancel &&
+            s_preview_sink->should_cancel(s_preview_sink->ctx)) {
+            s_preview_cancelled = 1;
+            return 0;
+        }
     }
     return 1;
 }
@@ -27206,6 +27231,115 @@ done:
  *
  * Caller frees *out_bytes. Returns 1 on success.
  */
+/* =============================== SECTION: route preview (PORT-ONLY) =========
+ * Mesh-free route walk for the AUTO TRACK STUDIO screen. See the contract on
+ * td5_trackgen_preview_route in td5_trackgen.h -- in particular that this is
+ * NOT safe to run concurrently with a real build, because both walk s_rng and
+ * the biome grid.
+ *
+ * Deliberately built from the SAME functions td5_trackgen_build_level uses, in
+ * the same order, stopping at the point where the build starts emitting bytes.
+ * Any other arrangement would let the preview and the real track disagree,
+ * which is the one failure this feature cannot have. */
+static void tg_preview_emit_forks(const TG_NodeList *nl,
+                                  const TD5_TrackGenPreviewSink *sink)
+{
+    int i;
+    if (!sink || !sink->on_points) return;
+
+    /* Corridors are not separate nodes: tg_emit_strip lays each one over the
+     * main-ring nodes F..R, pushed sideways by tg_branch_shift_s. Rebuilding
+     * them the same way keeps the preview and the strip in agreement. */
+    for (i = 0; i < s_fork_count; i++) {
+        const int F = s_forks[i].F;
+        const int R = s_forks[i].R;
+        const int L = s_forks[i].len;
+        int si;
+        if (F < 0 || R >= nl->count) continue;
+        for (si = F; si <= R; si++) {
+            const TG_Node *n = &nl->v[si];
+            const double lx = n->tz, lz = -n->tx;
+            const double sh = tg_branch_shift_s(si - F, L, n->width,
+                                                s_forks[i].sep);
+            TD5_TrackGenPoint p;
+            p.x = (float)(n->x + lx * sh);
+            p.z = (float)(n->z + lz * sh);
+            p.lanes = n->lanes;
+            p.branch = i + 1;
+            sink->on_points(&p, 1, sink->ctx);
+        }
+    }
+}
+
+int td5_trackgen_preview_route(const TD5_TrackGenSpec *spec,
+                               const TD5_TrackGenPreviewSink *sink,
+                               TD5_TrackGenPreviewStats *out_stats)
+{
+    TG_NodeList nl;
+    TG_Buf strip;
+    int tally[TD5_TG_SECTION_COUNT];
+    int nspans = 0, ok = 0;
+
+    if (!spec) return 0;
+
+    memset(&nl, 0, sizeof(nl));
+    memset(&strip, 0, sizeof(strip));
+    memset(tally, 0, sizeof(tally));
+    if (out_stats) memset(out_stats, 0, sizeof(*out_stats));
+
+    /* Same preamble as build_level, minus the _mkdir. */
+    s_gen_seed = spec->seed;
+    tg_acct_reset();
+    tg_biome_layout(spec->seed, spec->target_spans);
+    tg_srand(spec->seed);
+
+    s_preview_cancelled = 0;
+    s_preview_sink = sink;
+
+    if (tg_build_centerline(spec, &nl, tally)) {
+        tg_apply_elevation(spec, &nl);
+        /* Points are already published by the push hook; the strip emit is
+         * what makes s_forks[] and s_ring_len real, so it runs even though the
+         * buffer is thrown away. */
+        if (tg_emit_strip(&nl, &strip, &nspans) && nspans >= 8) {
+            tg_preview_emit_forks(&nl, sink);
+            ok = 1;
+        }
+    }
+
+    s_preview_sink = NULL;
+
+    if (out_stats) {
+        int s;
+        out_stats->seed       = spec->seed;
+        out_stats->node_count = nl.count;
+        out_stats->span_count = nspans;
+        out_stats->ring_len   = s_ring_len;
+        out_stats->fork_count = s_fork_count;
+        out_stats->cancelled  = s_preview_cancelled;
+        for (s = 0; s < TD5_TG_SECTION_COUNT; s++)
+            out_stats->tally[s] = tally[s];
+        if (nl.count > 0) {
+            double lo = nl.v[0].y, hi = nl.v[0].y;
+            int i;
+            for (i = 1; i < nl.count; i++) {
+                if (nl.v[i].y < lo) lo = nl.v[i].y;
+                if (nl.v[i].y > hi) hi = nl.v[i].y;
+            }
+            out_stats->min_y = tg_round(lo);
+            out_stats->max_y = tg_round(hi);
+        }
+    }
+
+    free(nl.v);
+    tg_buf_free(&strip);
+
+    if (!ok && !s_preview_cancelled)
+        TD5_LOG_W(LOG_TAG, "trackgen: preview route for seed %u FAILED",
+                  spec->seed);
+    return ok;
+}
+
 int td5_trackgen_regenerate_main_spans(unsigned int seed,
                                       unsigned char **out_bytes,
                                       int *out_span_count)

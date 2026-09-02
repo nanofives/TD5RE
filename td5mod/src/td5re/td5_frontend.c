@@ -1573,7 +1573,7 @@ static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_TWO_PLAYER_OPTIONS: return "MULTIPLAYER OPTIONS";
     case TD5_SCREEN_LANGUAGE_OPTIONS:   return TR("LANGUAGE");
     case TD5_SCREEN_LIGHTING_OPTIONS:   return "LIGHTING OPTIONS";
-    case TD5_SCREEN_AUTOTRACK_OPTIONS:  return "AUTO TRACK OPTIONS"; /* [R2 item 25] */
+    case TD5_SCREEN_AUTOTRACK_OPTIONS:  return "AUTO TRACK STUDIO"; /* [R2 item 25] */
     case TD5_SCREEN_CONTROLLER_BINDING: return "CONTROLLER SETUP";
     case TD5_SCREEN_CAR_SELECTION:      return "SELECT CAR";
     case TD5_SCREEN_TRACK_SELECTION:    return "SELECT TRACK";

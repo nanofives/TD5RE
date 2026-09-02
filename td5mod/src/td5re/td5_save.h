@@ -337,6 +337,42 @@ int td5_save_profile_get(int idx, TD5_Profile *out);
  *  full, p is NULL, or the name is empty. */
 int td5_save_profile_save(const TD5_Profile *p);
 
+/* ---------------------------------------------------------------------------
+ * AUTO TRACK STUDIO favourites -- a named seed PLUS the generator settings it
+ * was made with. The seed alone does not reproduce a track: the same seed under
+ * different knobs walks a different centerline, so a favourite that stored only
+ * the number would recall the wrong route.
+ *
+ * `params` is a ";"-terminated list of "TD5RE_AUTOTRACK_KNOB=value" pairs, so
+ * reordering or inserting rows on the STUDIO screen later cannot silently
+ * reinterpret an already-saved favourite. Knobs left at their generator default
+ * are simply absent.
+ *
+ * Stored in td5re_progress.ini [FavoriteSeeds], modelled on [Profiles] above.
+ * This is deliberately separate from the generator knobs themselves, which stay
+ * per-session and env-driven (see the header comment on k_at_rows).
+ * ------------------------------------------------------------------------- */
+typedef struct TD5_FavSeed {
+    char         name[32];
+    unsigned int seed;
+    char         params[2048];
+} TD5_FavSeed;
+#define TD5_MAX_FAVSEEDS 8
+
+/** Number of stored favourites (0..TD5_MAX_FAVSEEDS). */
+int td5_save_favseed_count(void);
+
+/** Fetch favourite idx into *out. Returns 1 on success, 0 if idx is out of
+ *  range or out is NULL. */
+int td5_save_favseed_get(int idx, TD5_FavSeed *out);
+
+/** UPSERT by name (case-insensitive), same contract as the profile store.
+ *  Persists immediately. Returns 1 on success, 0 if the store is full. */
+int td5_save_favseed_save(const TD5_FavSeed *f);
+
+/** Delete favourite idx (slots after it shift down). Persists to disk. */
+int td5_save_favseed_delete(int idx);
+
 /** Delete profile idx (slots after it shift down). Persists to disk.
  *  Returns 1 on success, 0 if idx out of range. */
 int td5_save_profile_delete(int idx);
