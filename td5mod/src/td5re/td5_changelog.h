@@ -32,6 +32,18 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 02 (ray-traced scenery on auto tracks)" },
+    { CL_ITEM,    "FIX: on an auto-generated track, ray-traced shadows and" },
+    { CL_ITEM,    "  reflections from buildings and trees only existed for" },
+    { CL_ITEM,    "  the first 12% of the lap, then stopped dead. The" },
+    { CL_ITEM,    "  scene budget was filled from the start line forward" },
+    { CL_ITEM,    "  and ran out; the rest of the track got nothing." },
+    { CL_ITEM,    "  It now follows the car, so scenery is ray-traced" },
+    { CL_ITEM,    "  everywhere -- while building FEWER objects than" },
+    { CL_ITEM,    "  before. Shipped tracks already fit and are unchanged." },
+    { CL_ITEM,    "  Needs Lighting Quality = HIGH to be visible." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 02 (determinism fix, all threads)" },
     { CL_ITEM,    "FIX: the background worker pool did not inherit the" },
     { CL_ITEM,    "  game's floating-point rounding mode, so anything it" },

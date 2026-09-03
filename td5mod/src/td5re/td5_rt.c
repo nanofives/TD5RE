@@ -189,7 +189,83 @@ static unsigned char s_scenery_mask[RT_MAX_SCENERY];  /* [road-cast] per-mesh TL
 static int      s_scenery_count;
 static int      s_scenery_fed;             /* one-shot: MODELS ready by frame 1 */
 
+/* ---- [RT WINDOW] sliding player-relative scenery -------------------------
+ * The full-ring feed walks display-list entries ASCENDING and stops adding at
+ * RT_MAX_SCENERY, so on a mesh-dense track the ray-traced set is a PREFIX of
+ * the track rather than a sample of it. MEASURED on a generated track (seed
+ * 20260901): the budget was exhausted at entry 56 of 450, and nothing past
+ * entry 56 ever got a handle -- RT scenery for the first ~12 percent of the
+ * ring and NONE for the rest, with a hard boundary rather than a fade. A
+ * shipped track (Sydney) has ~3.5 distinct meshes per entry and fits the same
+ * budget with room to spare (1744 of 1900, 99 percent coverage); the generated
+ * track has ~32, roughly 9x.
+ *
+ * The renderer only draws VIEW_DIST_FWD_SPANS (64 spans = 16 entries) each
+ * way, so feeding the whole ring was never necessary: a +/-16-entry window is
+ * about 1062 meshes on that track, INSIDE the existing budget with headroom.
+ * Windowing therefore gives full density everywhere while building FEWER
+ * BLASes than the prefix did -- no cap increase anywhere.
+ *
+ * ONLY USED WHEN THE WHOLE RING WOULD NOT FIT. A track whose table fits keeps
+ * the original one-shot full feed exactly, with zero per-frame churn: there is
+ * nothing to gain from sliding a window over a set that is already complete,
+ * and plenty to lose. */
+static const TD5_MeshHeader *s_scn_src[RT_MAX_SCENERY];  /* slot -> source mesh */
+static unsigned s_scn_mark[RT_MAX_SCENERY];              /* mark-and-sweep stamp */
+static unsigned s_scn_gen;                               /* current stamp        */
+static int      s_scn_windowed;      /* this level slides a window             */
+static int      s_scn_center;        /* last window centre, in entries         */
+static int      s_scn_have_center;
+
+/* mesh pointer -> slot+1. Fixed capacity: slots are capped at RT_MAX_SCENERY,
+ * so the load factor cannot exceed 1900/4096 = 0.46. */
+#define RT_SLOT_HASH_CAP 4096
+static const void *s_slot_key[RT_SLOT_HASH_CAP];
+static int         s_slot_val[RT_SLOT_HASH_CAP];
+
+/* Shares the dedup set's pointer mixer, which is defined further down with
+ * rt_seen(); both hash the same kind of key. */
+static unsigned rt_seen_hash(const void *p);
+
+static void rt_slot_hash_clear(void)
+{
+    memset(s_slot_key, 0, sizeof(s_slot_key));
+    memset(s_slot_val, 0, sizeof(s_slot_val));
+}
+
+static int rt_slot_find(const void *mesh)
+{
+    unsigned h = rt_seen_hash(mesh) & (RT_SLOT_HASH_CAP - 1u);
+    for (;;) {
+        if (!s_slot_key[h]) return -1;
+        if (s_slot_key[h] == mesh) return s_slot_val[h] - 1;
+        h = (h + 1u) & (RT_SLOT_HASH_CAP - 1u);
+    }
+}
+
+static void rt_slot_put(const void *mesh, int slot)
+{
+    unsigned h = rt_seen_hash(mesh) & (RT_SLOT_HASH_CAP - 1u);
+    while (s_slot_key[h] && s_slot_key[h] != mesh)
+        h = (h + 1u) & (RT_SLOT_HASH_CAP - 1u);
+    s_slot_key[h] = mesh;
+    s_slot_val[h] = slot + 1;
+}
+
+/* Rebuilt from scratch after a sweep rather than deleting entries: open
+ * addressing makes deletion fiddly (tombstones or backward shift), the table
+ * is at most 1900 live entries, and one clean pass has no edge cases. */
+static void rt_slot_hash_rebuild(void)
+{
+    int i;
+    rt_slot_hash_clear();
+    for (i = 0; i < s_scenery_count; i++)
+        if (s_scn_src[i]) rt_slot_put(s_scn_src[i], i);
+}
+
 static void rt_feed_world_scenery(void);   /* defined below td5_rt_level_build */
+static void rt_seen_free(void);             /* dedup set; defined with rt_seen */
+static void rt_scenery_tick(void);          /* feed driver, defined below   */
 static struct { const TD5_MeshHeader *mesh; int handle; } s_actor_cache[RT_ACTOR_CACHE];
 static int      s_actor_cache_count;
 static unsigned s_rt_generation;         /* last observed Backend_RTGeneration   */
@@ -211,6 +287,11 @@ static void rt_destroy_meshes(void)
         if (s_scenery_handles[i]) td5_plat_rt_mesh_destroy(s_scenery_handles[i]);
     s_scenery_count = 0;
     s_scenery_fed = 0;                      /* re-feed after unload / device-lost */
+    /* [RT WINDOW] the slot bookkeeping describes handles that no longer exist */
+    memset(s_scn_src, 0, sizeof(s_scn_src));
+    rt_slot_hash_clear();
+    s_scn_windowed = 0;
+    s_scn_have_center = 0;
     for (i = 0; i < s_actor_cache_count; i++)
         if (s_actor_cache[i].handle) td5_plat_rt_mesh_destroy(s_actor_cache[i].handle);
     s_actor_cache_count = 0;
@@ -316,6 +397,7 @@ void td5_rt_level_build(void)
 void td5_rt_level_unload(void)
 {
     rt_destroy_meshes();
+    rt_seen_free();
 }
 
 /* ---- actor mesh feed: TD5_MeshHeader (object space) -> RT mesh ------------- */
@@ -411,15 +493,95 @@ static int rt_actor_mesh_handle(const TD5_MeshHeader *mesh)
  * ======================================================================== */
 
 /* Dedup set: a display-list mesh appears in many span entries (the renderer
- * dedups the same way). Bounded; overflow just re-emits (harmless, rare). */
-static const void *s_seen[8192];
-static int         s_seen_count;
+ * dedups the same way), and one block is reachable from several entries.
+ *
+ * OPEN-ADDRESSED AND GROWABLE, replacing a fixed 8192-entry array walked
+ * linearly. That had two faults and the second is the serious one:
+ *
+ *  1. O(n) per probe, called once per display list AND once per mesh -- on a
+ *     generated track roughly 14.5k probes against up to 8192 entries.
+ *  2. It SATURATED IN SILENCE. Past 8192 distinct pointers it kept testing but
+ *     stopped inserting, so every later mesh read back as "not seen" and dedup
+ *     simply stopped working. A generated track saturates it. Today that is
+ *     masked because the scenery budget drops everything past RT_MAX_SCENERY
+ *     anyway, but a feed that revisits meshes (the player-relative window)
+ *     needs this set to be CORRECT, not approximate -- a false "not seen"
+ *     there means building a second BLAS for a mesh that already has one.
+ *
+ * Load factor kept under 0.75. Holds pointers only, so a rehash is free of
+ * consequences for anything else. */
+static const void **s_seen;
+static unsigned      s_seen_cap;     /* power of two, 0 = not allocated */
+static int           s_seen_count;   /* distinct pointers inserted */
+
+static unsigned rt_seen_hash(const void *p)
+{
+    uintptr_t v = (uintptr_t)p;
+    v ^= v >> 33;
+    v *= (uintptr_t)0xFF51AFD7ED558CCDull;
+    v ^= v >> 33;
+    return (unsigned)v;
+}
+
+/* Insert with no growth check and no duplicate check. Caller guarantees room
+ * and (for the rehash path) that `p` is not already present. */
+static void rt_seen_put_raw(const void *p)
+{
+    unsigned h = rt_seen_hash(p) & (s_seen_cap - 1u);
+    while (s_seen[h]) h = (h + 1u) & (s_seen_cap - 1u);
+    s_seen[h] = p;
+}
+
+static int rt_seen_reserve(int want)
+{
+    unsigned cap = 1024, old_cap = s_seen_cap;
+    const void **tab, **old = s_seen;
+    unsigned i;
+
+    while (cap - (cap >> 2) < (unsigned)want) cap <<= 1;
+    if (s_seen && cap == s_seen_cap) return 1;
+
+    tab = (const void **)calloc(cap, sizeof(*tab));
+    if (!tab) return 0;
+    s_seen = tab;
+    s_seen_cap = cap;
+    for (i = 0; i < old_cap; i++)
+        if (old[i]) rt_seen_put_raw(old[i]);
+    free(old);
+    return 1;
+}
+
+static void rt_seen_reset(void)
+{
+    if (s_seen) memset(s_seen, 0, (size_t)s_seen_cap * sizeof(*s_seen));
+    s_seen_count = 0;
+}
+
+static void rt_seen_free(void)
+{
+    free(s_seen);
+    s_seen = NULL;
+    s_seen_cap = 0;
+    s_seen_count = 0;
+}
+
+/* 1 if `p` was already in the set, else insert and return 0.
+ * On allocation failure returns 0 without inserting -- i.e. degrades to the
+ * old overflow behaviour (re-emit, wasteful but not wrong) rather than
+ * claiming something was seen when it was not. */
 static int rt_seen(const void *p)
 {
-    int i;
-    for (i = 0; i < s_seen_count; i++) if (s_seen[i] == p) return 1;
-    if (s_seen_count < (int)(sizeof(s_seen)/sizeof(s_seen[0]))) s_seen[s_seen_count++] = p;
-    return 0;
+    unsigned h;
+
+    if (s_seen_count + 1 > (int)(s_seen_cap - (s_seen_cap >> 2)))
+        if (!rt_seen_reserve(s_seen_count + 1)) return 0;
+
+    h = rt_seen_hash(p) & (s_seen_cap - 1u);
+    for (;;) {
+        if (!s_seen[h]) { s_seen[h] = p; s_seen_count++; return 0; }
+        if (s_seen[h] == p) return 1;
+        h = (h + 1u) & (s_seen_cap - 1u);
+    }
 }
 
 /* Material id + CUTOUT flag from a scenery mesh's texture page. */
@@ -621,6 +783,49 @@ static int rt_scenery_still_streaming(void)
     return td5_track_scenery_undecorated_from_span() >= 0;
 }
 
+/* The validity chain the feed applies to every candidate mesh, factored so the
+ * full-ring walk and the sliding window cannot drift apart. */
+static int rt_scenery_mesh_usable(const TD5_MeshHeader *mesh)
+{
+    if (!mesh || (uintptr_t)mesh < 0x100000u) return 0;
+    if (mesh->command_count <= 0 || mesh->command_count > 4096) return 0;
+    if (mesh->total_vertex_count <= 0 || mesh->total_vertex_count > 131072) return 0;
+    if (!mesh->commands || !mesh->vertices) return 0;
+    if ((uintptr_t)mesh->commands < 0x10000u) return 0;
+    if ((uintptr_t)mesh->vertices < 0x10000u) return 0;
+    return 1;
+}
+
+/* Build one usable mesh into a scenery slot. Caller has already validated it,
+ * deduped it and checked the budget.
+ * Returns 1 = solid added, 2 = billboard added, 3 = skipped (too many verts),
+ * 0 = nothing added. Records the source pointer so the window can find and
+ * evict this slot later; the full-ring path simply never reads that back. */
+static int rt_scenery_add(TD5_MeshHeader *mesh, int bb_on)
+{
+    int slot = s_scenery_count;
+
+    if (mesh->texture_page_id == 1 || mesh->texture_page_id == 2) {
+        if (!bb_on || !rt_feed_billboard(mesh)) return 0;
+        /* rt_feed_billboard fills the slot and bumps the count itself. */
+        s_scn_src[slot]  = mesh;
+        s_scn_mark[slot] = s_scn_gen;
+        return 2;
+    }
+    if (mesh->total_vertex_count > 65535) return 3;   /* u16 index limit (rare) */
+    {
+        unsigned char smask = 0xFFu;
+        int h = rt_build_scenery_mesh(mesh, rt_scenery_matid(mesh), &smask);
+        if (!h) return 0;
+        s_scenery_mask[slot]    = smask;
+        s_scenery_handles[slot] = h;
+        s_scn_src[slot]         = mesh;
+        s_scn_mark[slot]        = s_scn_gen;
+        s_scenery_count         = slot + 1;
+        return 1;
+    }
+}
+
 static void rt_feed_world_scenery(void)
 {
     static int s_scenery_on = -1, s_bb_on = -1;
@@ -640,7 +845,7 @@ static void rt_feed_world_scenery(void)
      * per-command vertex_data_ptr is a TRUNCATED x64 pointer the renderer itself
      * skips -- not the geometry we want.) ring_entries = (ring+3)>>2 (TD5 span>>2
      * map); iterate a generous bound and let the getter NULL past the table. */
-    s_seen_count = 0;
+    rt_seen_reset();
     {
         int ring = td5_track_get_ring_length();
         span_count = (ring > 0) ? ((ring + 3) >> 2) : 0;
@@ -653,36 +858,25 @@ static void rt_feed_world_scenery(void)
         if (rt_seen(dl)) continue;                 /* block already walked */
         for (i = 0; i < (int)dl->count; i++) {
             TD5_MeshHeader *mesh = dl->meshes[i];
-            int is_bb;
-            if (!mesh || (uintptr_t)mesh < 0x100000u) continue;
-            if (mesh->command_count <= 0 || mesh->command_count > 4096) continue;
-            if (mesh->total_vertex_count <= 0 || mesh->total_vertex_count > 131072) continue;
-            if (!mesh->commands || !mesh->vertices) continue;
-            if ((uintptr_t)mesh->commands < 0x10000u || (uintptr_t)mesh->vertices < 0x10000u) continue;
+            int r;
+            if (!rt_scenery_mesh_usable(mesh)) continue;
             if (rt_seen(mesh)) continue;
             if (s_scenery_count >= RT_MAX_SCENERY) {
                 if (budget_sp < 0) budget_sp = sp;
                 dropped++; continue;
             }
-            is_bb = (mesh->texture_page_id == 1 || mesh->texture_page_id == 2);
             if (rt_diag_on() && s_seen_count < 40) {
                 const TD5_PrimitiveCmd *c0 = mesh->commands;
                 rt_diag("  MESH page=%d cmds=%d nv=%d cmd0(op=%d vp=0x%X tri=%d quad=%d) is_bb=%d",
                         mesh->texture_page_id, mesh->command_count, mesh->total_vertex_count,
                         c0[0].dispatch_type, (unsigned)c0[0].vertex_data_ptr,
-                        c0[0].triangle_count, c0[0].quad_count, is_bb);
+                        c0[0].triangle_count, c0[0].quad_count,
+                        (mesh->texture_page_id == 1 || mesh->texture_page_id == 2));
             }
-            if (is_bb) {
-                if (s_bb_on && rt_feed_billboard(mesh)) { bb++; last_fed_sp = sp; }
-            } else if (mesh->total_vertex_count > 65535) {
-                big++;                                 /* u16 index limit; skip (rare) */
-            } else {
-                unsigned char smask = 0xFFu;
-                int h = rt_build_scenery_mesh(mesh, rt_scenery_matid(mesh), &smask);
-                if (h) { s_scenery_mask[s_scenery_count] = smask;
-                         s_scenery_handles[s_scenery_count++] = h; solid++;
-                         last_fed_sp = sp; }
-            }
+            r = rt_scenery_add(mesh, s_bb_on);
+            if      (r == 1) { solid++; last_fed_sp = sp; }
+            else if (r == 2) { bb++;    last_fed_sp = sp; }
+            else if (r == 3) { big++; }
         }
     }
     rt_diag("SCENERY_FEED spans=%d seen=%d solid=%d billboards=%d handles=%d big_skipped=%d dropped=%d",
@@ -691,10 +885,10 @@ static void rt_feed_world_scenery(void)
      * ascending by entry, so an early exhaustion means the ray-traced set is a
      * PREFIX of the track and everything past it has no RT scenery at all. */
     rt_diag("SCENERY_COVERAGE budget_exhausted_at_entry=%d last_fed_entry=%d "
-            "of %d entries (%d%% of the ring; seen_set_saturated=%d)",
+            "of %d entries (%d%% of the ring; dedup_set=%d/%u)",
             budget_sp, last_fed_sp, span_count,
             span_count ? ((last_fed_sp + 1) * 100 / span_count) : 0,
-            s_seen_count >= (int)(sizeof(s_seen)/sizeof(s_seen[0])));
+            s_seen_count, s_seen_cap);
 }
 
 /* ---- per-frame driver ----------------------------------------------------- */
@@ -804,11 +998,174 @@ int td5_rt_warmup_prepare(void)
     if (s_track_chunk_count == 0)
         td5_rt_level_build();
     /* Full-scene scenery feed -- the wave that otherwise hits race frame 1. */
-    if (!s_scenery_fed && !rt_scenery_still_streaming()) {
-        rt_feed_world_scenery();
-        s_scenery_fed = 1;
-    }
+    /* Also does the FIRST windowed fill when the table is too big for a
+     * one-shot feed, so that initial wave still lands on the loading splash. */
+    rt_scenery_tick();
     return 1;
+}
+
+/* Half-width of the sliding window, in display-list entries. The renderer
+ * reaches VIEW_DIST_FWD_SPANS (64 spans = 16 entries) each way, so 16 is the
+ * value that matches what is actually drawn. 0 disables windowing entirely
+ * (full-ring feed as before) and is the A/B. */
+static int rt_window_half(void)
+{
+    static int s_half = -1;
+    if (s_half < 0) s_half = td5_env_int("TD5RE_RT_SCENERY_WINDOW", 16, 0, 512);
+    return s_half;
+}
+
+/* How far the player must move, in entries, before the window is rebuilt.
+ * Pure hysteresis: without it the set churns every time the player crosses an
+ * entry boundary, which is every ~4 spans. */
+static int rt_window_hyst(void)
+{
+    static int s_h = -1;
+    if (s_h < 0) s_h = td5_env_int("TD5RE_RT_SCENERY_HYST", 4, 1, 256);
+    return s_h;
+}
+
+/* The player's position as a FORWARD display-list entry index -- the space the
+ * MODELS.DAT table is indexed in. Mirrors the reverse-direction remap that
+ * td5_track_get_display_list applies, because MODELS.DAT is authored forward
+ * and shared across directions. */
+static int rt_player_entry(void)
+{
+    int ring = td5_track_get_ring_length();
+    int span = td5_game_get_slot_span(0);
+    int eff  = span;
+    if (span < 0) return -1;
+    if (g_td5.reverse_direction && ring > 0 && span < ring)
+        eff = ring - 1 - span;
+    return eff >> 2;
+}
+
+/* Shortest distance between two entry indices, respecting circuit wrap. */
+static int rt_entry_dist(int a, int b, int nent, int circuit)
+{
+    int d = a - b;
+    if (circuit && nent > 0) {
+        while (d >  nent / 2) d -= nent;
+        while (d < -nent / 2) d += nent;
+    }
+    return d < 0 ? -d : d;
+}
+
+/* Rebuild the scenery set for a window centred on `center`, by mark-and-sweep:
+ * walk the window stamping every mesh already present and building the ones
+ * that are not, then destroy every slot the walk did not stamp.
+ *
+ * Cost is proportional to how far the window MOVED, not to its size -- meshes
+ * still inside are found in the slot hash and only restamped. */
+static void rt_scenery_window_update(int center)
+{
+    const int half    = rt_window_half();
+    const int ring    = td5_track_get_ring_length();
+    const int nent    = (ring > 0) ? ((ring + 3) >> 2) : 0;
+    const int circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
+    static int s_bb_on = -1;
+    int k, i, added = 0, evicted = 0, budget_hit = 0;
+
+    if (s_bb_on < 0) s_bb_on = td5_env_int("TD5RE_RT_BILLBOARDS", 1, 0, 1);
+    s_scn_gen++;
+
+    for (k = -half; k <= half; k++) {
+        int e = center + k, j;
+        const TD5_SpanDisplayList *dl;
+
+        if (nent > 0) {
+            if (circuit) {
+                while (e < 0)     e += nent;
+                while (e >= nent) e -= nent;
+            } else if (e < 0 || e >= nent) continue;
+        } else if (e < 0) continue;
+
+        dl = td5_track_get_display_list_entry(e);
+        if (!dl || !dl->meshes) continue;
+
+        for (j = 0; j < (int)dl->count; j++) {
+            TD5_MeshHeader *mesh = dl->meshes[j];
+            int slot, before, r;
+
+            if (!rt_scenery_mesh_usable(mesh)) continue;
+            slot = rt_slot_find(mesh);
+            if (slot >= 0) { s_scn_mark[slot] = s_scn_gen; continue; }
+            if (s_scenery_count >= RT_MAX_SCENERY) { budget_hit++; continue; }
+
+            before = s_scenery_count;
+            r = rt_scenery_add(mesh, s_bb_on);
+            if (r == 1 || r == 2) { rt_slot_put(mesh, before); added++; }
+        }
+    }
+
+    /* Sweep. Swap-with-last, so the loop re-tests the slot it just filled. */
+    for (i = 0; i < s_scenery_count; ) {
+        int last;
+        if (s_scn_mark[i] == s_scn_gen) { i++; continue; }
+        if (s_scenery_handles[i]) td5_plat_rt_mesh_destroy(s_scenery_handles[i]);
+        evicted++;
+        last = --s_scenery_count;
+        if (i != last) {
+            s_scenery_handles[i] = s_scenery_handles[last];
+            s_scenery_mask[i]    = s_scenery_mask[last];
+            s_scn_src[i]         = s_scn_src[last];
+            s_scn_mark[i]        = s_scn_mark[last];
+        }
+        s_scenery_handles[last] = 0;
+        s_scn_src[last]         = NULL;
+    }
+    rt_slot_hash_rebuild();
+
+    rt_diag("SCENERY_WINDOW center=%d half=%d live=%d added=%d evicted=%d "
+            "budget_hit=%d", center, half, s_scenery_count, added, evicted,
+            budget_hit);
+}
+
+/* Decide the feed mode once per level, then keep it fed.
+ *
+ * Mode is chosen from the TABLE'S OWN SIZE rather than by trying the full feed
+ * and seeing it overflow: a track whose meshes all fit keeps the original
+ * one-shot behaviour byte for byte and pays no per-frame cost, and only a
+ * track that would have been truncated gets the window. */
+static void rt_scenery_tick(void)
+{
+    int center, nent, ring, circuit;
+
+    if (rt_scenery_still_streaming()) return;   /* wait for a complete table */
+
+    if (!s_scenery_fed) {
+        s_scn_windowed = rt_window_half() > 0 &&
+                         td5_track_runtime_mesh_count() > RT_MAX_SCENERY;
+        if (!s_scn_windowed) {
+            rt_feed_world_scenery();            /* unchanged full-ring path */
+            s_scenery_fed = 1;
+            return;
+        }
+        rt_slot_hash_clear();
+        s_scn_have_center = 0;
+        TD5_LOG_I("render", "RT scenery: %d meshes exceeds the %d-handle budget "
+                  "-- using a player-relative window of +/-%d entries instead "
+                  "of the first %d that fit",
+                  td5_track_runtime_mesh_count(), RT_MAX_SCENERY,
+                  rt_window_half(), RT_MAX_SCENERY);
+    }
+    if (!s_scn_windowed) return;
+
+    center = rt_player_entry();
+    if (center < 0) return;
+
+    ring    = td5_track_get_ring_length();
+    nent    = (ring > 0) ? ((ring + 3) >> 2) : 0;
+    circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
+
+    if (s_scn_have_center &&
+        rt_entry_dist(center, s_scn_center, nent, circuit) < rt_window_hyst())
+        return;
+
+    rt_scenery_window_update(center);
+    s_scn_center      = center;
+    s_scn_have_center = 1;
+    s_scenery_fed     = 1;
 }
 
 void td5_rt_frame(int vp, int pane_x, int pane_y, int pane_w, int pane_h)
@@ -846,10 +1203,7 @@ void td5_rt_frame(int vp, int pane_x, int pane_y, int pane_w, int pane_h)
      * InitRace has parsed MODELS.DAT (the level_build hook ran too early). The
      * wrapper chunks the BLAS builds across frames so a big track warms up over
      * a few frames without a TDR. */
-    if (vp == 0 && !s_scenery_fed && !rt_scenery_still_streaming()) {
-        rt_feed_world_scenery();
-        s_scenery_fed = 1;
-    }
+    if (vp == 0) rt_scenery_tick();
 
     /* TLAS is world-space and shared across panes: build once per frame (vp 0). */
     if (vp == 0) {

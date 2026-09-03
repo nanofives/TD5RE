@@ -248,6 +248,9 @@ void td5_track_register_lamp_lights(void);
 void td5_track_scan_banner_pages(void);
 int  td5_track_is_native_banner_page(int page);
 int  td5_track_get_models_display_list_count(void);
+/* Distinct MODELS.DAT mesh records materialised for this level. td5_rt.c uses
+ * it to decide whether the whole table fits its ray-tracing budget. */
+int  td5_track_runtime_mesh_count(void);
 /* NOTE: no caller in the tree uses this, and the table behind it is written
  * only by rebuild_span_display_list_mapping. The render walk resolves a span
  * to an entry arithmetically (span >> 2) instead. Kept because it is the port

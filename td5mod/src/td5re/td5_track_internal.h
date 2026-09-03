@@ -74,7 +74,8 @@ int  td5_track_build_models_runtime_lists(void);
  * write over neighbouring blob data. Deduplicated by source offset, because a
  * lot of code compares mesh POINTERS for identity. */
 TD5_MeshHeader *td5_track_runtime_mesh_for(uint32_t blob_off);
-int             td5_track_runtime_mesh_count(void);
+/* td5_track_runtime_mesh_count is PUBLIC (td5_track.h): td5_rt.c sizes its
+ * scenery feed from it. */
 TD5_MeshHeader *td5_track_runtime_mesh_at(int index);
 
 #endif /* TD5_TRACK_INTERNAL_H */
