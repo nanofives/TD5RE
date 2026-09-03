@@ -1051,54 +1051,64 @@ static int rt_entry_dist(int a, int b, int nent, int circuit)
     return d < 0 ? -d : d;
 }
 
-/* Rebuild the scenery set for a window centred on `center`, by mark-and-sweep:
- * walk the window stamping every mesh already present and building the ones
- * that are not, then destroy every slot the walk did not stamp.
- *
- * Cost is proportional to how far the window MOVED, not to its size -- meshes
- * still inside are found in the slot hash and only restamped. */
-static void rt_scenery_window_update(int center)
+/* [RT WINDOW] The window feed is split into a cheap RECENTER (evict what left,
+ * stamp what stayed) and a bounded BUILD PUMP (build a few of the not-yet-built
+ * in-window meshes each frame). This is the whole reason the drive is smooth:
+ * building a window in one call cost ~392 ms for the first fill and ~55 ms for
+ * every slide (measured, seed 20260901), which landed as a hitch every ~16
+ * spans. Spread over frames at a fixed per-frame budget, no single frame pays
+ * more than that budget's worth of BLAS builds. The feed also works on a
+ * PARTIAL table -- td5_track_get_display_list_entry returns nothing for an
+ * entry the streaming worker has not published yet, so the pump simply builds
+ * those later, which lets the initial fill happen during the countdown hold
+ * instead of in one freeze after the whole track finishes. */
+
+/* Builds per frame. At ~0.44 ms/BLAS a budget of 24 adds ~10 ms worst-case to
+ * a frame while building ~1400/sec -- far ahead of what driving reveals. */
+static int rt_window_budget(void)
+{
+    static int s_b = -1;
+    if (s_b < 0) s_b = td5_env_int("TD5RE_RT_SCENERY_BUILD", 6, 1, 4096);
+    return s_b;
+}
+
+/* Clamp/wrap the entry for step k in [-half,half]; -1 = out of range, skip. */
+static int rt_window_entry(int center, int k, int nent, int circuit)
+{
+    int e = center + k;
+    if (nent > 0) {
+        if (circuit) { while (e < 0) e += nent; while (e >= nent) e -= nent; }
+        else if (e < 0 || e >= nent) return -1;
+    } else if (e < 0) return -1;
+    return e;
+}
+
+/* Evict everything no longer in the window and stamp everything that stayed.
+ * No building here -- cheap (hash lookups + the odd destroy), so it can run the
+ * instant the player crosses the hysteresis threshold. */
+static void rt_scenery_window_recenter(int center)
 {
     const int half    = rt_window_half();
     const int ring    = td5_track_get_ring_length();
     const int nent    = (ring > 0) ? ((ring + 3) >> 2) : 0;
     const int circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
-    static int s_bb_on = -1;
-    int k, i, added = 0, evicted = 0, budget_hit = 0;
+    int k, i, evicted = 0;
 
-    if (s_bb_on < 0) s_bb_on = td5_env_int("TD5RE_RT_BILLBOARDS", 1, 0, 1);
     s_scn_gen++;
-
     for (k = -half; k <= half; k++) {
-        int e = center + k, j;
+        int e = rt_window_entry(center, k, nent, circuit), j;
         const TD5_SpanDisplayList *dl;
-
-        if (nent > 0) {
-            if (circuit) {
-                while (e < 0)     e += nent;
-                while (e >= nent) e -= nent;
-            } else if (e < 0 || e >= nent) continue;
-        } else if (e < 0) continue;
-
+        if (e < 0) continue;
         dl = td5_track_get_display_list_entry(e);
         if (!dl || !dl->meshes) continue;
-
         for (j = 0; j < (int)dl->count; j++) {
             TD5_MeshHeader *mesh = dl->meshes[j];
-            int slot, before, r;
-
+            int slot;
             if (!rt_scenery_mesh_usable(mesh)) continue;
             slot = rt_slot_find(mesh);
-            if (slot >= 0) { s_scn_mark[slot] = s_scn_gen; continue; }
-            if (s_scenery_count >= RT_MAX_SCENERY) { budget_hit++; continue; }
-
-            before = s_scenery_count;
-            r = rt_scenery_add(mesh, s_bb_on);
-            if (r == 1 || r == 2) { rt_slot_put(mesh, before); added++; }
+            if (slot >= 0) s_scn_mark[slot] = s_scn_gen;   /* stays in window */
         }
     }
-
-    /* Sweep. Swap-with-last, so the loop re-tests the slot it just filled. */
     for (i = 0; i < s_scenery_count; ) {
         int last;
         if (s_scn_mark[i] == s_scn_gen) { i++; continue; }
@@ -1114,40 +1124,86 @@ static void rt_scenery_window_update(int center)
         s_scenery_handles[last] = 0;
         s_scn_src[last]         = NULL;
     }
-    rt_slot_hash_rebuild();
-
-    rt_diag("SCENERY_WINDOW center=%d half=%d live=%d added=%d evicted=%d "
-            "budget_hit=%d", center, half, s_scenery_count, added, evicted,
-            budget_hit);
+    if (evicted) rt_slot_hash_rebuild();
 }
+
+/* Build up to `budget` not-yet-present, usable, in-window meshes, stamping each
+ * with the current generation so the next recenter keeps them. Returns the
+ * number built; a return below `budget` means the window is fully realised. */
+static int rt_scenery_window_build(int center, int budget)
+{
+    const int half    = rt_window_half();
+    const int ring    = td5_track_get_ring_length();
+    const int nent    = (ring > 0) ? ((ring + 3) >> 2) : 0;
+    const int circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
+    static int s_bb_on = -1;
+    int k, built = 0;
+
+    if (s_bb_on < 0) s_bb_on = td5_env_int("TD5RE_RT_BILLBOARDS", 1, 0, 1);
+
+    for (k = -half; k <= half && built < budget; k++) {
+        int e = rt_window_entry(center, k, nent, circuit), j;
+        const TD5_SpanDisplayList *dl;
+        if (e < 0) continue;
+        dl = td5_track_get_display_list_entry(e);
+        if (!dl || !dl->meshes) continue;
+        for (j = 0; j < (int)dl->count && built < budget; j++) {
+            TD5_MeshHeader *mesh = dl->meshes[j];
+            int before, r;
+            if (!rt_scenery_mesh_usable(mesh)) continue;
+            if (rt_slot_find(mesh) >= 0) continue;              /* already built */
+            if (s_scenery_count >= RT_MAX_SCENERY) return budget; /* full: never settle */
+            before = s_scenery_count;
+            r = rt_scenery_add(mesh, s_bb_on);
+            if (r == 1 || r == 2) {
+                s_scn_mark[before] = s_scn_gen;
+                rt_slot_put(mesh, before);
+                built++;
+            }
+        }
+    }
+    return built;
+}
+
+static int s_scn_settled;          /* window fully built for the current centre */
+static int s_scn_win_ready;        /* the near window has been built at least once */
 
 /* Decide the feed mode once per level, then keep it fed.
  *
- * Mode is chosen from the TABLE'S OWN SIZE rather than by trying the full feed
- * and seeing it overflow: a track whose meshes all fit keeps the original
- * one-shot behaviour byte for byte and pays no per-frame cost, and only a
- * track that would have been truncated gets the window. */
+ * A track whose whole mesh table fits RT_MAX_SCENERY keeps the original
+ * one-shot full-ring feed (s_scn_windowed = 0) and pays no per-frame cost. A
+ * track that would overflow -- every streamed auto track -- uses the windowed
+ * feed above. A STREAMED track is windowed from the first frame it is asked,
+ * without waiting for the whole table, because the window only needs the
+ * entries near the player and those stream in first; a non-streamed (shipped)
+ * track has its whole table at load, so the size test is exact. */
 static void rt_scenery_tick(void)
 {
-    int center, nent, ring, circuit;
+    int center, moved, nent, ring, circuit, streaming;
+    const int budget = rt_window_budget();
 
-    if (rt_scenery_still_streaming()) return;   /* wait for a complete table */
+    streaming = td5_track_scenery_streaming();
 
     if (!s_scenery_fed) {
+        if (!streaming && rt_scenery_still_streaming()) return;
         s_scn_windowed = rt_window_half() > 0 &&
-                         td5_track_runtime_mesh_count() > RT_MAX_SCENERY;
+                         (streaming ||
+                          td5_track_runtime_mesh_count() > RT_MAX_SCENERY);
         if (!s_scn_windowed) {
-            rt_feed_world_scenery();            /* unchanged full-ring path */
+            if (rt_scenery_still_streaming()) return;   /* full feed needs it all */
+            rt_feed_world_scenery();
             s_scenery_fed = 1;
             return;
         }
         rt_slot_hash_clear();
         s_scn_have_center = 0;
-        TD5_LOG_I("render", "RT scenery: %d meshes exceeds the %d-handle budget "
-                  "-- using a player-relative window of +/-%d entries instead "
-                  "of the first %d that fit",
-                  td5_track_runtime_mesh_count(), RT_MAX_SCENERY,
-                  rt_window_half(), RT_MAX_SCENERY);
+        s_scn_settled = 0;
+        s_scn_win_ready = 0;
+        s_scenery_fed = 1;                 /* entered windowed mode */
+        TD5_LOG_I("render", "RT scenery: windowed feed +/-%d entries, %d builds/"
+                  "frame (table has %d meshes so far%s)",
+                  rt_window_half(), budget, td5_track_runtime_mesh_count(),
+                  streaming ? ", still streaming" : "");
     }
     if (!s_scn_windowed) return;
 
@@ -1158,14 +1214,36 @@ static void rt_scenery_tick(void)
     nent    = (ring > 0) ? ((ring + 3) >> 2) : 0;
     circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
 
-    if (s_scn_have_center &&
-        rt_entry_dist(center, s_scn_center, nent, circuit) < rt_window_hyst())
-        return;
+    moved = !s_scn_have_center ||
+            rt_entry_dist(center, s_scn_center, nent, circuit) >= rt_window_hyst();
+    if (moved) {
+        rt_scenery_window_recenter(center);
+        s_scn_center      = center;
+        s_scn_have_center = 1;
+        s_scn_settled     = 0;
+    }
 
-    rt_scenery_window_update(center);
-    s_scn_center      = center;
-    s_scn_have_center = 1;
-    s_scenery_fed     = 1;
+    /* While streaming, a settled window can unsettle as entries near the
+     * leading edge arrive, so re-arm the pump when the published set grows. */
+    if (s_scn_settled && streaming) {
+        static int s_last_ready;
+        int ready = td5_track_scenery_ready_entries();
+        if (ready != s_last_ready) { s_scn_settled = 0; s_last_ready = ready; }
+    }
+    if (!s_scn_settled) {
+        int built = rt_scenery_window_build(center, budget);
+        if (built < budget) { s_scn_settled = 1; s_scn_win_ready = 1; }
+    }
+}
+
+/* 1 once the near window has been built at least once (or windowing is not in
+ * use), so the countdown can hold until the grid's RT shadows exist. */
+int td5_rt_scenery_window_ready(void)
+{
+    if (!td5_rt_active()) return 1;         /* RT off -> nothing to wait for */
+    if (!s_scenery_fed) return 0;           /* not started feeding yet */
+    if (!s_scn_windowed) return 1;          /* full feed: ready once fed */
+    return s_scn_win_ready;
 }
 
 void td5_rt_frame(int vp, int pane_x, int pane_y, int pane_w, int pane_h)

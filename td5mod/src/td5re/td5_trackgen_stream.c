@@ -22,6 +22,7 @@
 #include "td5_config.h"
 #include "td5_track.h"
 #include "td5_race_state.h"  /* read-only: the player's live span */
+#include "td5_rt.h"          /* the RT-window-ready gate for the hold */
 #include "td5_trackgen.h"
 #include "td5_trackgen_stream.h"
 
@@ -49,6 +50,7 @@ static int  s_active;        /* between _begin and the deferred passes        */
 static int  s_nentries;
 static int  s_passes_done;
 static int  s_caught_up_warned;
+static int  s_geom_ready;    /* near-grid road decorated (for the loading readout) */
 static unsigned int s_hold_start_ms;
 static unsigned int s_begin_ms;
 
@@ -257,7 +259,7 @@ void td5_tgstream_tick(void)
 
 int td5_tgstream_hold(void)
 {
-    int ready, need, start_entry;
+    int ready, need, start_entry, geom_ready, rt_ready;
 
     if (!s_active) return 0;
     /* Worker finished but _tick has not run its passes yet: nothing left to
@@ -270,7 +272,16 @@ int td5_tgstream_hold(void)
     if (need > s_nentries) need = s_nentries;
 
     ready = td5_track_scenery_ready_entries();
-    if (ready >= need) {
+    /* Two gates, both must clear before the lights go green:
+     *  - geometry: the road around the grid is decorated (published);
+     *  - RT: its ray-traced shadows are BUILT. Without this the window's first
+     *    fill happened as a hitch in the first seconds of driving; now it fills
+     *    here, on the loading screen, while the camera flies in. Reads 1 with RT
+     *    off or on a track small enough not to window. */
+    geom_ready = (ready >= need);
+    rt_ready   = td5_rt_scenery_window_ready();
+    s_geom_ready = geom_ready;
+    if (geom_ready && rt_ready) {
         if (s_hold_start_ms) {
             TD5_LOG_I(LOG_TAG, "scenery stream: countdown held %u ms for "
                       "%d entries of lead", td5_plat_time_ms() - s_hold_start_ms,
@@ -302,6 +313,18 @@ int td5_tgstream_hold(void)
 }
 
 int td5_tgstream_active(void) { return s_active; }
+
+/* Loading-screen readout. Fills whichever non-NULL pointers the HUD passes:
+ * entries published so far, total entries, and the two hold gates (near road
+ * decorated / near RT shadows built). Returns 1 while a stream is in flight. */
+int td5_tgstream_progress(int *ready, int *total, int *geom, int *rt)
+{
+    if (ready) *ready = s_active ? td5_track_scenery_ready_entries() : 0;
+    if (total) *total = s_nentries;
+    if (geom)  *geom  = s_geom_ready;
+    if (rt)    *rt    = td5_rt_scenery_window_ready();
+    return s_active;
+}
 
 void td5_tgstream_cancel_join(void)
 {

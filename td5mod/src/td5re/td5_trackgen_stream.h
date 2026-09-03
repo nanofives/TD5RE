@@ -62,6 +62,12 @@ int  td5_tgstream_hold(void);
 /* Is a stream in flight (worker running, or finished but passes not yet run)? */
 int  td5_tgstream_active(void);
 
+/* Loading-screen readout for the countdown-hold overlay. Fills whichever
+ * non-NULL pointers are passed: `ready`/`total` scenery entries, and the two
+ * hold gates `geom` (near road decorated) and `rt` (near RT shadows built).
+ * Returns 1 while a stream is in flight. */
+int  td5_tgstream_progress(int *ready, int *total, int *geom, int *rt);
+
 /* Cancel and join. MUST be called before any generator build or route preview,
  * and on level teardown. Safe to call when idle. */
 void td5_tgstream_cancel_join(void);

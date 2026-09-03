@@ -52,6 +52,13 @@ void td5_rt_level_unload(void);
  * RT is LOW/unavailable (nothing to warm). */
 int td5_rt_warmup_prepare(void);
 
+/* [RT WINDOW] 1 once the player-relative scenery window has been built at least
+ * once, or windowing is not in use (RT off / full feed). The streamed-track
+ * countdown hold waits on this so the road around the grid has its ray-traced
+ * shadows before the lights go green, rather than building them as a hitch in
+ * the first seconds of the drive. Cheap; safe to call every frame. */
+int td5_rt_scenery_window_ready(void);
+
 /* [Phase 1] Per-pane RT frame driver. Called once per viewport `vp` from the
  * render loop BEFORE the deferred passes, with the pane rect. On vp==0 it
  * (re)builds the TLAS from the track + active actors; every pane it uploads the
