@@ -2419,7 +2419,9 @@ static int cfgini_write_progress(void)
     for (int i = 0; i < s_favseed_count; i++) {
         const TD5_FavSeed *fs = &s_favseeds[i];
         char nm[32];
-        snprintf(nm, sizeof nm, "%s", fs->name);
+        /* Bounded on purpose (a 32-byte INI field). The precision states that
+         * to the compiler, so this is not a possible-truncation warning. */
+        snprintf(nm, sizeof nm, "%.*s", (int)(sizeof nm - 1), fs->name);
         /* Defensively strip any control byte so it cannot break the INI. */
         for (int c = 0; c < (int)sizeof nm; c++) {
             if (nm[c] == '\0') break;

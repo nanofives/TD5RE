@@ -16,6 +16,9 @@
  * lookups) is also bridged through td5_platform_internal.h.
  */
 
+#include <float.h>       /* _controlfp: see the FP-environment section */
+#include <xmmintrin.h>   /* _mm_getcsr / _mm_setcsr */
+
 #define WIN32_LEAN_AND_MEAN
 #define COBJMACROS
 #include <windows.h>
@@ -1171,6 +1174,39 @@ void td5_plat_get_chosen_resolution(int *w, int *h)
 /* ========================================================================
  * Timing
  * ======================================================================== */
+
+/* ========================================================================
+ * Floating-point environment
+ *
+ * See the contract note in td5_platform.h. The short version: the FP control
+ * state is PER-THREAD, this port deliberately runs round-down / 64-bit
+ * precision to match the original binary, and a thread created later starts
+ * with the process default instead -- which silently costs one unit in the
+ * last place on every float, and flips outright any decision made on a
+ * threshold. These two calls are how a worker adopts the main thread's mode.
+ *
+ * Both halves are set explicitly rather than trusting one to imply the other:
+ * _controlfp and MXCSR are separate registers, whether a CRT's _controlfp
+ * also writes MXCSR on x86_64 is an implementation detail, and getting this
+ * subtly wrong is invisible until someone byte-compares two builds.
+ * ======================================================================== */
+
+void td5_plat_fpenv_capture(TD5_FpEnv *out)
+{
+    if (!out) return;
+    out->mxcsr = (unsigned int)_mm_getcsr();
+    out->x87cw = (unsigned int)_controlfp(0, 0);
+}
+
+void td5_plat_fpenv_apply(const TD5_FpEnv *env)
+{
+    if (!env) return;
+    /* Rounding + precision + exception masks + denormal handling: everything
+     * that can change a result, and nothing that cannot. */
+    _controlfp(env->x87cw, _MCW_RC | _MCW_PC | _MCW_EM | _MCW_DN);
+    /* MXCSR last, so it is authoritative if _controlfp also touched it. */
+    _mm_setcsr(env->mxcsr);
+}
 
 uint64_t td5_plat_time_us(void)
 {

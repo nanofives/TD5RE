@@ -7078,10 +7078,16 @@ static const char *const k_at_safe_n[] = { "TIGHT", "NARROW", "STANDARD",
 static const int  k_at_grade_v[] = { 0, 60, 120, 160, 200 };
 static const char *const k_at_grade_n[] = { "FLAT", "GENTLE", "STANDARD",
                                             "STEEP", "SEVERE" };
-static const int  k_at_bgain_v[] = { 0, 1, 2, 3, 4 };
-static const char *const k_at_bgain_n[] = { "0", "1", "2", "3", "4" };
-static const int  k_at_bmin_v[] = { 8, 16, 24, 60, 120 };
-static const char *const k_at_bmin_n[] = { "TINY", "SHORT", "STANDARD",
+/* [merge 2026-09-03] Branch-gain and branch-min-length rows: the value/label
+ * tables were authored but no STUDIO row was wired to them, so they are dead
+ * data today. Kept rather than deleted (they are the intended rows' contents)
+ * and marked with the file-local unused idiom used elsewhere in the port
+ * (td5_render.c, td5_save.c), so the no-new-warnings ratchet stays clean until
+ * the rows are added. */
+static const int  k_at_bgain_v[] __attribute__((unused)) = { 0, 1, 2, 3, 4 };
+static const char *const k_at_bgain_n[] __attribute__((unused)) = { "0", "1", "2", "3", "4" };
+static const int  k_at_bmin_v[] __attribute__((unused)) = { 8, 16, 24, 60, 120 };
+static const char *const k_at_bmin_n[] __attribute__((unused)) = { "TINY", "SHORT", "STANDARD",
                                            "LONG", "VERY LONG" };
 static const int  k_at_runoff_v[] = { 0, 50, 100, 200, 400 };
 static const char *const k_at_runoff_n[] = { "NONE", "SHORT", "STANDARD",

@@ -13,8 +13,10 @@
  *     while a preview is running.
  *   - A real build (td5_trackgen_regenerate, at race launch) walks the SAME
  *     module statics -- the private RNG and the biome grid -- so it must never
- *     overlap a preview. td5_asset_load_level calls td5_tgprev_cancel_join()
- *     before it regenerates. That join is not optional.
+ *     overlap a preview. td5_game.c's autotrack_generate_under_splash calls
+ *     td5_tgprev_cancel_join() before it starts the generation worker (it was
+ *     td5_asset_load_level while the build was synchronous and inline there).
+ *     That join is not optional.
  *
  * Points are published incrementally and are append-only within one build, so
  * the caller keeps its own mirror and asks for the tail via td5_tgprev_fetch.

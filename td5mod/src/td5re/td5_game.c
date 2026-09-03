@@ -19,7 +19,7 @@
 #include "td5_ai_driver.h"   /* [AI DRIVER MODEL] driver trace-row accessors */
 #include "td5_asset.h"
 #include "td5_trackgen.h"   /* [R14 GENPERF] auto-track build under the splash */
-#include <float.h>           /* [R14 GENPERF] _controlfp_s: worker inherits the FP environment */
+#include "td5_trackgen_preview.h" /* [STUDIO] join the route preview before we build */
 #include "td5_physics.h"
 #include "td5_render.h"
 #include "td5_jobs.h"     /* Phase B Stage 2b: threaded pane recording */
@@ -3090,20 +3090,18 @@ static void init_race_slot_states(void)
  * only the generator's own state, the level files and the track registry, and
  * the main thread touches NONE of those until the join -- it only redraws the
  * already-uploaded splash texture. Logging is mutex-protected. */
-typedef struct { int restart; int ok; unsigned fp_cw; unsigned fp_cw_seen; } AutoTrackGenJob;
+typedef struct { int restart; int ok; TD5_FpEnv fp; } AutoTrackGenJob;
 
 static void autotrack_gen_thread(void *arg)
 {
     AutoTrackGenJob *job = (AutoTrackGenJob *)arg;
     /* [R14 GENPERF] The generator's output must not depend on WHICH thread
-     * builds it. The floating-point environment (rounding mode, denormal
-     * handling: MXCSR on x64) is per-thread, and a fresh thread starts from the
-     * CRT default while the main thread's state is whatever the game, the D3D
-     * runtime and the driver left it in. Copy the main thread's control word
-     * onto the worker so a threaded build is bit-identical to the synchronous
-     * one (the seed goldens were all recorded on the main thread). */
-    _controlfp_s(&job->fp_cw_seen, 0, 0);
-    _controlfp_s(NULL, job->fp_cw, _MCW_DN | _MCW_RC | _MCW_PC | _MCW_EM);
+     * builds it: the FP control state is per-thread and this port runs a
+     * non-default one. Adopt the main thread's environment before touching
+     * anything else -- see the contract in td5_platform.h. (This was raw
+     * _controlfp_s until the td5_plat_fpenv pair landed; same two registers,
+     * one owner.) */
+    td5_plat_fpenv_apply(&job->fp);
     job->ok = td5_trackgen_prepare_race(job->restart);
 }
 
@@ -3121,8 +3119,17 @@ static void autotrack_generate_under_splash(void)
     job.restart = s_race_reinit_is_restart;
     job.ok = 0;
     s_race_reinit_is_restart = 0;
-    job.fp_cw = 0; job.fp_cw_seen = 0;
-    _controlfp_s(&job.fp_cw, 0, 0);
+    td5_plat_fpenv_capture(&job.fp);
+
+    /* [STUDIO x R14 GENPERF] The AUTO TRACK STUDIO screen builds its route
+     * preview on its own worker, walking the SAME generator statics (private
+     * RNG, biome grid) a real build does. That join used to sit in
+     * td5_asset_load_level, immediately before the synchronous regenerate;
+     * generation now happens here instead, so the join moves with it -- and
+     * it must happen on THIS thread BEFORE the generation worker starts, or
+     * the two workers would race over those statics. Not optional (see the
+     * threading contract in td5_trackgen_preview.h). */
+    td5_tgprev_cancel_join();
 
     td5_plat_get_window_size(&screen_w, &screen_h);
     {
@@ -3192,8 +3199,9 @@ static void autotrack_generate_under_splash(void)
     if (pixels) free(pixels);
     if (!job.ok)
         TD5_LOG_W(LOG_TAG, "Auto track: generation FAILED; reusing the previous build on disk");
-    TD5_LOG_W(LOG_TAG, "Auto track: ready in %d ms (%d splash frames, restart=%d, fp_cw main=%08x worker-initial=%08x)",
-              td5_plat_time_ms() - start_ms, frames, job.restart, job.fp_cw, job.fp_cw_seen);
+    TD5_LOG_W(LOG_TAG, "Auto track: ready in %d ms (%d splash frames, restart=%d, fp mxcsr=%04x cw=%04x)",
+              td5_plat_time_ms() - start_ms, frames, job.restart,
+              job.fp.mxcsr, job.fp.x87cw);
 }
 
 static void init_race_level_and_assets(void)

@@ -88,6 +88,40 @@ void td5_plat_set_fullscreen(int fullscreen);
 void *td5_plat_get_native_window(void);
 
 /* ========================================================================
+ * Floating-point environment
+ *
+ * THE FP CONTROL STATE IS PER-THREAD ON WINDOWS, and this port does not use
+ * the default one: main.c sets _controlfp(_RC_DOWN | _PC_64) at WinMain
+ * because the original binary runs with CW 0x077F (round-down, 64-bit
+ * precision), verified via tools/frida_fpu_state_probe.js -- the RC=RDN side
+ * alone moved a pilot from 49.05 to 99.82 percent match.
+ *
+ * A THREAD CREATED LATER DOES NOT INHERIT IT. It starts with the process
+ * default (round-to-nearest, MXCSR 0x1F80), so identical code on a worker
+ * produces results that differ from the main thread by one unit in the last
+ * place -- and anywhere a value straddles a geometric threshold, that flips
+ * the decision outright. MEASURED TWICE, INDEPENDENTLY: the scenery generator
+ * on an unsynchronised worker produced a MODELS.DAT 492 bytes different from
+ * the same seed built on the main thread, and so did the whole-track build
+ * when it moved onto a worker (2026-09-03).
+ *
+ * So ANY worker thread that does float or double math whose result must match
+ * the main thread MUST capture on the main thread and apply on the worker,
+ * before touching anything else.
+ * ======================================================================== */
+
+typedef struct TD5_FpEnv {
+    unsigned int mxcsr;    /* SSE control/status: rounding, FTZ/DAZ, masks */
+    unsigned int x87cw;    /* _controlfp view: rounding + precision control */
+} TD5_FpEnv;
+
+/** Snapshot the CALLING thread's FP control state. */
+void td5_plat_fpenv_capture(TD5_FpEnv *out);
+
+/** Install `env` on the CALLING thread. Call it first thing in a worker. */
+void td5_plat_fpenv_apply(const TD5_FpEnv *env);
+
+/* ========================================================================
  * Timing
  * ======================================================================== */
 
