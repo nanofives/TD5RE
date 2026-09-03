@@ -100,6 +100,11 @@ uint32_t td5_plat_time_ms(void);
 /** Sleep for the specified number of milliseconds. */
 void td5_plat_sleep(uint32_t ms);
 
+/* Plain OS thread (td5_platform_win32_log.c). create returns an opaque handle
+ * (NULL on failure); join waits for the function to return and releases it. */
+void *td5_plat_thread_create(void (*func)(void *), void *arg);
+int   td5_plat_thread_join(void *thread_handle);
+
 /* ========================================================================
  * File I/O
  * ======================================================================== */
