@@ -100,6 +100,11 @@ uint32_t td5_plat_time_ms(void);
 /** Sleep for the specified number of milliseconds. */
 void td5_plat_sleep(uint32_t ms);
 
+/* Plain OS thread (td5_platform_win32_log.c). create returns an opaque handle
+ * (NULL on failure); join waits for the function to return and releases it. */
+void *td5_plat_thread_create(void (*func)(void *), void *arg);
+int   td5_plat_thread_join(void *thread_handle);
+
 /* ========================================================================
  * File I/O
  * ======================================================================== */
@@ -835,6 +840,9 @@ void td5_plat_rt_set_view(const float cam_pos[3], const float basis9[9],
                           const float sun_dir[3]);
 void td5_plat_rt_debug_view(void);
 unsigned td5_plat_rt_generation(void);
+/* [RT WINDOW 2026-09-03] RT pool occupancy for the scene-feed diag line. */
+void td5_plat_rt_pool_stats(unsigned *vb_used, unsigned *vb_cap, unsigned *ib_used,
+                            unsigned *ib_cap, unsigned *meshes);
 /* [P2b] HIGH mode: deferred shadow/light passes run the RT dispatch+composite. */
 void td5_plat_rt_set_mode(int high);
 /* [P3] Register the just-bound texture page into the RT bindless table (index =

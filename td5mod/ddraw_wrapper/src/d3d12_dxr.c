@@ -121,7 +121,12 @@ static void dxr_log(const char *fmt, ...)
  * full-scene feed: a dense track (Moscow) has ~1600 MODELS.DAT scenery meshes +
  * billboards. TLAS build stays sub-ms at 2k (double-buffered, PREFER_FAST_BUILD).
  * Instance-desc + GeoRecord buffers scale with this but are tiny (64B / 16B). */
-#define DXR_MAX_INSTANCES     2048
+/* [RT WINDOW 2026-09-03] 2048 -> 4096. The game now feeds ONE merged BLAS per
+ * MODELS.DAT display-list entry (all of an entry's scenery meshes as separate
+ * geometry ranges of one BLAS) inside a span window around the player, so the
+ * instance count is bounded by window entries + track chunks + actors, not by
+ * the track's mesh total. The head-room is for split-screen (a window per pane). */
+#define DXR_MAX_INSTANCES     4096
 /* TDR guard: BLAS triangles built per frame during the warmup window. */
 #define DXR_BLAS_TRIS_PER_FRAME 500000
 /* [RT WARMUP 2026-08-08] Extra cap on BLAS COUNT per loading-screen warmup frame
@@ -129,8 +134,17 @@ static void dxr_log(const char *fmt, ...)
  * tri budget; capping the count spreads them over ~6-7 fence-throttled frames so
  * no single warmup submit can approach the TDR watchdog on a slow GPU. */
 #define DXR_WARMUP_MESHES_PER_FRAME 256
-/* [RT2-P2] raised 512 -> 2048: one BLAS per scenery mesh + track chunks + actors. */
-#define DXR_MAX_MESHES        2048
+/* [RT2-P2] raised 512 -> 2048: one BLAS per scenery mesh + track chunks + actors.
+ * [RT WINDOW 2026-09-03] 2048 -> 4096 (see DXR_MAX_INSTANCES). */
+#define DXR_MAX_MESHES        4096
+/* [RT WINDOW 2026-09-03] GeoRecord pool. One record per (mesh, range): a merged
+ * entry BLAS carries one range per scenery mesh, so records are no longer 1:1
+ * with mesh slots. InstanceID = the mesh's first record; the hit shaders index
+ * g_geo[InstanceID() + GeometryIndex()]. 32k records * 16 B = 512 KB. */
+#define DXR_GEO_MAX           32768
+/* Free-list capacity for the VB / IB / GeoRecord range allocators. Ranges are
+ * coalesced on free, so this is the number of HOLES, not allocations. */
+#define DXR_FREE_MAX          4096
 /* [RT2-P2] matid_flags bit: this range is alpha-tested cutout geometry -> build
  * its BLAS geometry NON-opaque so anyhit_cutout runs (mirror in td5_rt.c). */
 #define DXR_MATID_CUTOUT      0x100u
@@ -144,6 +158,7 @@ typedef struct {
     UINT   nverts, nidx;
     UINT   nranges;
     BackendRTRange *ranges;        /* nranges entries (malloc'd copy)           */
+    UINT   geo_base;               /* first GeoRecord (nranges consecutive)      */
     UINT   tri_count;
     int    used;                   /* slot occupied                             */
     int    built;                  /* BLAS built (else pending)                 */
@@ -222,8 +237,17 @@ typedef struct {
     /* Pooled VB/IB (DEFAULT ByteAddressBuffers; grown geometrically). */
     ID3D12Resource             *vb_pool, *ib_pool;
     UINT                        vb_cap, ib_cap;    /* bytes                        */
-    UINT                        vb_used, ib_used;
+    UINT                        vb_used, ib_used;  /* live payload bytes (stats)   */
     D3D12_RESOURCE_STATES       vb_state, ib_state;
+    /* [RT WINDOW 2026-09-03] Range allocators over the pools + the GeoRecord
+     * table. The pools used to be a bump allocator that only rewound when EVERY
+     * mesh was gone; a scene that streams meshes in and out as the player
+     * advances would have exhausted 128 MB within a lap. */
+    struct DxrRangeAlloc {
+        struct { UINT off, size; } r[DXR_FREE_MAX];   /* sorted free holes  */
+        UINT n;                                        /* live holes         */
+        UINT cap;                                      /* total capacity     */
+    } vb_alloc, ib_alloc, geo_alloc;
 
     /* Shared growable BLAS scratch. */
     ID3D12Resource             *blas_scratch;
@@ -780,6 +804,69 @@ static void dxr_refresh_tlas_srv(ID3D12Resource *tlas)
     ID3D12Device_CreateShaderResourceView((ID3D12Device *)g_dxr.device5, NULL, &srv, dxr_cpu(g_dxr.heap, DXR_SLOT_TLAS_SRV));
 }
 
+/* ---- [RT WINDOW 2026-09-03] first-fit range allocator ----------------------
+ * Sorted free-hole list with coalescing on free. First-fit is fine here: the
+ * scene feed allocates in track order and frees the entries that fall behind
+ * the window, so holes stay few and large. Alignment pad is left in the free
+ * list (the hole keeps its head), never lost. */
+static void dxr_ra_init(struct DxrRangeAlloc *a, UINT cap)
+{
+    a->n = 1; a->r[0].off = 0; a->r[0].size = cap; a->cap = cap;
+}
+
+static int dxr_ra_alloc(struct DxrRangeAlloc *a, UINT size, UINT align, UINT *out_off)
+{
+    UINT i;
+    if (size == 0) { *out_off = 0; return 1; }
+    if (align == 0) align = 1;
+    for (i = 0; i < a->n; i++) {
+        UINT off  = (a->r[i].off + align - 1) & ~(align - 1);
+        UINT pad  = off - a->r[i].off;
+        UINT end  = a->r[i].off + a->r[i].size;
+        UINT tail;
+        if (off < a->r[i].off || a->r[i].size < pad + size) continue;   /* (overflow-safe) */
+        tail = end - (off + size);
+        if (pad == 0 && tail == 0) {
+            memmove(&a->r[i], &a->r[i + 1], (size_t)(a->n - i - 1) * sizeof(a->r[0]));
+            a->n--;
+        } else if (pad == 0) {
+            a->r[i].off = off + size; a->r[i].size = tail;
+        } else if (tail == 0) {
+            a->r[i].size = pad;
+        } else {
+            if (a->n >= DXR_FREE_MAX) continue;      /* cannot split -- try the next hole */
+            memmove(&a->r[i + 2], &a->r[i + 1], (size_t)(a->n - i - 1) * sizeof(a->r[0]));
+            a->r[i].size = pad;
+            a->r[i + 1].off = off + size; a->r[i + 1].size = tail;
+            a->n++;
+        }
+        *out_off = off;
+        return 1;
+    }
+    return 0;
+}
+
+static void dxr_ra_free(struct DxrRangeAlloc *a, UINT off, UINT size)
+{
+    UINT i;
+    int merged = 0;
+    if (size == 0) return;
+    for (i = 0; i < a->n && a->r[i].off < off; i++) ;
+    if (i > 0 && a->r[i - 1].off + a->r[i - 1].size == off) {   /* merge with previous */
+        a->r[i - 1].size += size; i--; merged = 1;
+    }
+    if (!merged) {
+        if (a->n >= DXR_FREE_MAX) { dxr_log("range free-list full -- %u bytes leaked", size); return; }
+        memmove(&a->r[i + 1], &a->r[i], (size_t)(a->n - i) * sizeof(a->r[0]));
+        a->r[i].off = off; a->r[i].size = size; a->n++;
+    }
+    if (i + 1 < a->n && a->r[i].off + a->r[i].size == a->r[i + 1].off) {   /* merge with next */
+        a->r[i].size += a->r[i + 1].size;
+        memmove(&a->r[i + 1], &a->r[i + 2], (size_t)(a->n - i - 2) * sizeof(a->r[0]));
+        a->n--;
+    }
+}
+
 static int dxr_ensure_pools(void)
 {
     if (g_dxr.vb_pool && g_dxr.ib_pool) return 1;
@@ -794,6 +881,9 @@ static int dxr_ensure_pools(void)
     g_dxr.vb_cap = DXR_VB_POOL_BYTES; g_dxr.ib_cap = DXR_IB_POOL_BYTES;
     g_dxr.vb_used = g_dxr.ib_used = 0;
     g_dxr.vb_state = g_dxr.ib_state = D3D12_RESOURCE_STATE_COMMON;
+    dxr_ra_init(&g_dxr.vb_alloc,  DXR_VB_POOL_BYTES);
+    dxr_ra_init(&g_dxr.ib_alloc,  DXR_IB_POOL_BYTES);
+    dxr_ra_init(&g_dxr.geo_alloc, DXR_GEO_MAX);
     return 1;
 }
 
@@ -808,64 +898,51 @@ static void dxr_ensure_geo_buf(void)
     ZeroMemory(&hp, sizeof(hp)); hp.Type = D3D12_HEAP_TYPE_UPLOAD;
     ZeroMemory(&bd, sizeof(bd));
     bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    bd.Width = (UINT64)DXR_MAX_MESHES * sizeof(DxrGeoRecord);
+    bd.Width = (UINT64)DXR_GEO_MAX * sizeof(DxrGeoRecord);
     bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1; bd.Format = DXGI_FORMAT_UNKNOWN;
     bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     if (FAILED(ID3D12Device_CreateCommittedResource((ID3D12Device *)g_dxr.device5, &hp, D3D12_HEAP_FLAG_NONE, &bd,
             D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, (void **)&g_dxr.geo_buf))) { dxr_log("geo_buf alloc FAILED"); return; }
     { D3D12_RANGE r; r.Begin = 0; r.End = 0; ID3D12Resource_Map(g_dxr.geo_buf, 0, &r, &g_dxr.geo_mapped); }
-    if (g_dxr.geo_mapped) memset(g_dxr.geo_mapped, 0, (size_t)DXR_MAX_MESHES * sizeof(DxrGeoRecord));
+    if (g_dxr.geo_mapped) memset(g_dxr.geo_mapped, 0, (size_t)DXR_GEO_MAX * sizeof(DxrGeoRecord));
 }
 
-/* Write the GeoRecord for mesh slot (its single range r=0). */
-static void dxr_write_geo(int slot, const DxrMesh *m)
+/* Write the mesh's GeoRecords: one per range, consecutive from m->geo_base.
+ * [RT WINDOW 2026-09-03] Was "slot's single range r=0" -- a merged entry BLAS
+ * carries one range per scenery mesh, each with its own page + material. */
+static void dxr_write_geo(const DxrMesh *m)
 {
     DxrGeoRecord *g;
+    UINT r;
     dxr_ensure_geo_buf();
-    if (!g_dxr.geo_mapped || slot < 0 || slot >= DXR_MAX_MESHES) return;
-    g = &((DxrGeoRecord *)g_dxr.geo_mapped)[slot];
-    g->vb_byte_off   = m->vb_offset;
-    g->ib_byte_off   = m->ib_offset + (m->nranges ? m->ranges[0].first_index * 2u : 0u);
-    g->texture_index = m->nranges ? m->ranges[0].texture_id : 0u;
-    g->matid         = m->nranges ? m->ranges[0].matid_flags : 0u;
+    if (!g_dxr.geo_mapped || !m->nranges) return;
+    if ((UINT64)m->geo_base + m->nranges > DXR_GEO_MAX) return;
+    g = &((DxrGeoRecord *)g_dxr.geo_mapped)[m->geo_base];
+    for (r = 0; r < m->nranges; r++) {
+        g[r].vb_byte_off   = m->vb_offset;
+        g[r].ib_byte_off   = m->ib_offset + m->ranges[r].first_index * 2u;
+        g[r].texture_index = m->ranges[r].texture_id;
+        g[r].matid         = m->ranges[r].matid_flags;
+    }
 }
 
-/* [POOL REWIND 2026-08-28] The VB/IB pools are a bump allocator with no free
- * list: Backend_RTMeshCreate only ever advances vb_used/ib_used, dxr_free_mesh
- * never gave the bytes back, and dxr_ensure_pools() early-returns once the pools
- * exist, so the counters used to reset ONLY at pool creation. Every in-place race
- * restart therefore burned another whole track's worth of pool -- race 2
- * allocated from wherever race 1 stopped -- and on exhaustion the failure is
- * quiet and nasty: "pool overflow -- mesh dropped", after which that mesh is
- * simply absent from every ray-traced pass with no crash to point at it.
- *
- * Rewinding is safe EXACTLY when no mesh occupies the pool any more, since
- * nothing then holds a vb_offset/ib_offset into it. td5_rt_level_unload() frees
- * the whole mesh set in one go, so that condition is genuinely reached on every
- * level teardown -- which is the case that was leaking.
- *
- * NOT the cause of the RT-HIGH restart wedge (measured 0 overflows across a
- * restart on the auto track: 128 MB VB / 48 MB IB absorbs ~1900 small meshes
- * twice over). This is a latent leak that a denser track or a long session of
- * restarts would hit. */
-static void dxr_pool_rewind_if_empty(void)
-{
-    UINT i;
-    for (i = 0; i < DXR_MAX_MESHES; i++)
-        if (g_dxr.meshes[i].used) return;      /* someone still holds an offset */
-    if (g_dxr.vb_used || g_dxr.ib_used)
-        dxr_log("pool rewind: all meshes freed, vb %u ib %u -> 0",
-                g_dxr.vb_used, g_dxr.ib_used);
-    g_dxr.vb_used = g_dxr.ib_used = 0;
-}
-
+/* [RT WINDOW 2026-09-03] Give the mesh's pool ranges back to the allocators.
+ * Replaces the 2026-08-28 "rewind when every mesh is gone" scheme: with the
+ * scene feed streaming entries in and out per frame the pool is never empty,
+ * so bump-plus-rewind would exhaust 128 MB within a lap. The GPU may still be
+ * reading the old bytes this frame, but nothing can be written into the freed
+ * range before Backend_RTMeshCreate stages a copy that lands in a LATER frame's
+ * command list (the copy runs in dxr_build_pending on that frame's list, after
+ * the fence-throttled frame that used the old mesh has retired its TLAS). */
 static void dxr_free_mesh(DxrMesh *m)
 {
     if (m->blas)    { d3d12_priv_retire(m->blas); m->blas = NULL; }
     if (m->staging) { d3d12_priv_retire(m->staging); m->staging = NULL; }
+    if (m->vb_bytes) { dxr_ra_free(&g_dxr.vb_alloc, m->vb_offset, m->vb_bytes); g_dxr.vb_used -= m->vb_bytes; }
+    if (m->ib_bytes) { dxr_ra_free(&g_dxr.ib_alloc, m->ib_offset, m->ib_bytes); g_dxr.ib_used -= m->ib_bytes; }
+    if (m->nranges)  dxr_ra_free(&g_dxr.geo_alloc, m->geo_base, m->nranges);
     free(m->ranges); m->ranges = NULL;
     ZeroMemory(m, sizeof(*m));
-    dxr_pool_rewind_if_empty();
 }
 
 int Backend_RTMeshCreate(const BackendRTVertex *verts, unsigned nverts,
@@ -889,12 +966,27 @@ int Backend_RTMeshCreate(const BackendRTVertex *verts, unsigned nverts,
 
     vb_bytes = nverts * (UINT)sizeof(BackendRTVertex);
     ib_bytes = nidx * 2u;
-    vb_off = (g_dxr.vb_used + 15u) & ~15u;
-    ib_off = (g_dxr.ib_used + 3u)  & ~3u;
-    if ((UINT64)vb_off + vb_bytes > g_dxr.vb_cap || (UINT64)ib_off + ib_bytes > g_dxr.ib_cap) {
-        dxr_log("pool overflow (vb %u/%u ib %u/%u) -- mesh dropped",
-                vb_off + vb_bytes, g_dxr.vb_cap, ib_off + ib_bytes, g_dxr.ib_cap);
-        return 0;
+    /* [RT WINDOW 2026-09-03] first-fit ranges (16 B / 4 B aligned as before) +
+     * one consecutive GeoRecord per range. */
+    {
+        UINT geo_base = 0;
+        if (!dxr_ra_alloc(&g_dxr.vb_alloc, vb_bytes, 16u, &vb_off) ) {
+            dxr_log("pool overflow (vb %u live/%u, need %u) -- mesh dropped", g_dxr.vb_used, g_dxr.vb_cap, vb_bytes);
+            return 0;
+        }
+        if (!dxr_ra_alloc(&g_dxr.ib_alloc, ib_bytes, 4u, &ib_off)) {
+            dxr_ra_free(&g_dxr.vb_alloc, vb_off, vb_bytes);
+            dxr_log("pool overflow (ib %u live/%u, need %u) -- mesh dropped", g_dxr.ib_used, g_dxr.ib_cap, ib_bytes);
+            return 0;
+        }
+        if (!dxr_ra_alloc(&g_dxr.geo_alloc, nranges, 1u, &geo_base)) {
+            dxr_ra_free(&g_dxr.vb_alloc, vb_off, vb_bytes);
+            dxr_ra_free(&g_dxr.ib_alloc, ib_off, ib_bytes);
+            dxr_log("GeoRecord pool full (need %u) -- mesh dropped", nranges);
+            return 0;
+        }
+        /* geo_base is carried through the local below into the DxrMesh. */
+        i = geo_base;
     }
 
     /* Staging UPLOAD buffer: [verts | indices], copied into the pools at build. */
@@ -905,10 +997,10 @@ int Backend_RTMeshCreate(const BackendRTVertex *verts, unsigned nverts,
     bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     if (FAILED(ID3D12Device_CreateCommittedResource((ID3D12Device *)g_dxr.device5, &hp, D3D12_HEAP_FLAG_NONE, &bd,
             D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, (void **)&staging))) {
-        dxr_log("mesh staging alloc FAILED"); return 0;
+        dxr_log("mesh staging alloc FAILED"); goto fail_ranges;
     }
     { D3D12_RANGE r; r.Begin = 0; r.End = 0; ID3D12Resource_Map(staging, 0, &r, (void **)&map); }
-    if (!map) { ID3D12Resource_Release(staging); return 0; }
+    if (!map) { ID3D12Resource_Release(staging); goto fail_ranges; }
     memcpy(map, verts, vb_bytes);
     memcpy(map + vb_bytes, idx, ib_bytes);
     { D3D12_RANGE wr; wr.Begin = 0; wr.End = vb_bytes + ib_bytes; ID3D12Resource_Unmap(staging, 0, &wr); }
@@ -916,19 +1008,39 @@ int Backend_RTMeshCreate(const BackendRTVertex *verts, unsigned nverts,
     m = &g_dxr.meshes[slot];
     ZeroMemory(m, sizeof(*m));
     m->ranges = (BackendRTRange *)malloc((size_t)nranges * sizeof(BackendRTRange));
-    if (!m->ranges) { ID3D12Resource_Release(staging); return 0; }
+    if (!m->ranges) { ID3D12Resource_Release(staging); goto fail_ranges; }
     memcpy(m->ranges, ranges, (size_t)nranges * sizeof(BackendRTRange));
     m->staging = staging;
     m->vb_offset = vb_off; m->ib_offset = ib_off;
     m->vb_bytes = vb_bytes; m->ib_bytes = ib_bytes;
     m->nverts = nverts; m->nidx = nidx; m->nranges = nranges;
+    m->geo_base = i;
     m->tri_count = nidx / 3;
     m->used = 1; m->built = 0; m->needs_copy = 1;
 
-    g_dxr.vb_used = vb_off + vb_bytes;
-    g_dxr.ib_used = ib_off + ib_bytes;
-    dxr_write_geo(slot, m);   /* P3: GeoRecord for the reflection hit shading */
+    g_dxr.vb_used += vb_bytes;
+    g_dxr.ib_used += ib_bytes;
+    dxr_write_geo(m);   /* P3: GeoRecords for the reflection / cutout hit shading */
     return slot + 1;   /* handle */
+
+fail_ranges:
+    dxr_ra_free(&g_dxr.vb_alloc, vb_off, vb_bytes);
+    dxr_ra_free(&g_dxr.ib_alloc, ib_off, ib_bytes);
+    dxr_ra_free(&g_dxr.geo_alloc, i, nranges);
+    return 0;
+}
+
+/* [RT WINDOW 2026-09-03] Pool occupancy for the game's diag line. */
+void Backend_RTPoolStats(unsigned *vb_used, unsigned *vb_cap, unsigned *ib_used,
+                         unsigned *ib_cap, unsigned *meshes)
+{
+    UINT i, n = 0;
+    for (i = 0; i < DXR_MAX_MESHES; i++) if (g_dxr.meshes[i].used) n++;
+    if (vb_used) *vb_used = g_dxr.vb_used;
+    if (vb_cap)  *vb_cap  = g_dxr.vb_cap;
+    if (ib_used) *ib_used = g_dxr.ib_used;
+    if (ib_cap)  *ib_cap  = g_dxr.ib_cap;
+    if (meshes)  *meshes  = n;
 }
 
 void Backend_RTMeshDestroy(int handle)
@@ -1087,7 +1199,9 @@ void Backend_RTSceneInstance(int mesh, const float m3x4[12], unsigned flags)
 
     d = &g_dxr.scene_inst[g_dxr.scene_count];
     memcpy(d->Transform, m3x4, 12 * sizeof(float));   /* row-major 3x4 */
-    d->InstanceID = (UINT)(mesh - 1);                  /* P3: GeoRecord index = mesh slot */
+    /* [RT WINDOW 2026-09-03] InstanceID = the mesh's first GeoRecord; the hit
+     * shaders add GeometryIndex() (SM 6.5) to reach the range's record. */
+    d->InstanceID = m->geo_base & 0x00FFFFFFu;
     /* [ROAD-CAST FIX 2026-08-03] `flags` = the TLAS InstanceMask (0 -> 0xFF for
      * back-compat). Bit 0 (0x01) = "sun-shadow caster"; the sun-shadow ray traces
      * with InstanceInclusionMask 0x01, so an instance fed with bit 0 CLEARED is
@@ -1126,7 +1240,11 @@ void Backend_RTSceneEnd(void)
     ZeroMemory(&inputs, sizeof(inputs));
     inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
     inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-    inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+    /* [RT WINDOW 2026-09-03] PREFER_FAST_BUILD -> PREFER_FAST_TRACE. The
+     * windowed feed keeps the instance count in the low hundreds (was ~1900),
+     * so a higher-quality per-frame TLAS build is still ~0.2 ms, and every
+     * shadow / GI / reflection ray then traverses the better tree. */
+    inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
     inputs.NumDescs = g_dxr.scene_count;
     inputs.InstanceDescs = ID3D12Resource_GetGPUVirtualAddress(g_dxr.inst_upload[cur]);
 
@@ -1300,7 +1418,7 @@ static int dxr_ensure_p3_srvs(void)
     srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Format = DXGI_FORMAT_UNKNOWN;
-    srv.Buffer.NumElements = DXR_MAX_MESHES;
+    srv.Buffer.NumElements = DXR_GEO_MAX;
     srv.Buffer.StructureByteStride = sizeof(DxrGeoRecord);
     ID3D12Device_CreateShaderResourceView((ID3D12Device *)g_dxr.device5, g_dxr.geo_buf, &srv, dxr_cpu(g_dxr.heap, DXR_SLOT_GEO_SRV));
     g_dxr.p3_srvs_ready = 1;

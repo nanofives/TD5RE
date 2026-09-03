@@ -2361,17 +2361,13 @@ int td5_asset_load_level(int track_index)
     char zip_path[256];
     char strip_source[256];
 
-    /* AUTO-GENERATED track: rebuild its level directory with a fresh seed so
-     * every race gets new geometry. Done here rather than in the frontend so
-     * every entry path is covered (menu, --AutoRace, selftest, control socket).
-     * On failure the stale previous build is left in place and the load
-     * continues, so a generator hiccup degrades to "same track again" rather
-     * than a failed race launch. */
-    if (td5_trackgen_is_auto_slot(track_index)) {
-        if (!td5_trackgen_regenerate(0))
-            TD5_LOG_W(LOG_TAG, "load_level: auto-track regenerate failed; "
-                      "reusing the previous generated track");
-    }
+    /* AUTO-GENERATED track: the level directory is (re)built with a fresh seed
+     * before this call, by td5_game.c's init_race_level_and_assets, on a
+     * worker thread under the loading screen. It used to be rebuilt HERE,
+     * synchronously; every entry path still reaches that hook because this
+     * function has exactly one caller (InitRace). On a build failure the stale
+     * previous build is left in place and the load continues, so a generator
+     * hiccup degrades to "same track again" rather than a failed race launch. */
 
     td5_asset_build_level_zip_path(track_index, zip_path, sizeof(zip_path));
 

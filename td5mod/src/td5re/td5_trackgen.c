@@ -43,6 +43,7 @@
 #include <string.h>
 #include <math.h>
 #include <direct.h>
+#include <sys/stat.h>   /* [R14 GENPERF] build stamp: exe identity */
 
 #define LOG_TAG "track"
 
@@ -640,6 +641,18 @@ static int s_ring_len;
 static int tg_fork_of_main(int si);
 static int tg_fork_of_corridor(int si, int *k);
 static int tg_city_crossing_here(int si);   /* [R3 item 7] fence break gate */
+/* [R14 GENPERF] crossing-predicate memo (see tg_city_crossing_here). */
+static signed char s_xhere_memo[TD5_TG_MAX_SPANS];
+static signed char s_xbase_memo[TD5_TG_MAX_SPANS];
+static int         s_xmemo_armed;
+static void tg_xmemo_reset(int armed)
+{
+    memset(s_xhere_memo, -1, sizeof(s_xhere_memo));
+    memset(s_xbase_memo, -1, sizeof(s_xbase_memo));
+    /* TD5RE_TG_XMEMO=0: A/B the cache against the recomputing path. */
+    s_xmemo_armed = armed && td5_env_flag_on("TD5RE_TG_XMEMO");
+}
+
 /* [R4 CROSS item 4] a zebra must not mark a PARK frontage, so tg_city_crossing_here
  * (defined above the park block) needs the park predicate forward-declared. */
 static int tg_block_is_park(int si, int left);
@@ -820,8 +833,83 @@ static double   s_tg_sub3_d  = 0.0;
                            s_tg_sub3_us[z] += td5_plat_time_us() - s_tg_sub3_t0, \
                            s_tg_sub3_n[z]++, s_tg_sub3_d)
 
+/* [R14 GENPERF 2026-09-03] Fifth level: named CALLEE timers, nestable. The
+ * four levels above name loops and emitters; these name the predicates and
+ * sub-emitters the two remaining heavy zones (guardrail 6 ms/span, fb city
+ * 4 ms/span, models prepass 10 s) are made of, plus every diagnostic report.
+ * A depth-indexed t0 stack makes them safe to nest (a timed predicate may
+ * call another timed predicate); the shared result temps are safe because an
+ * inner timer finishes before the outer assignment reads its own value. */
+enum {
+    TG_T_RAIL_CLEARGAP, TG_T_RAIL_ONCW, TG_T_RAIL_EDGEWOULD, TG_T_RAIL_DECK,
+    TG_T_RAIL_KERB, TG_T_RAIL_XSTREET,
+    TG_T_CITY_PAVED, TG_T_CITY_SIDEWALK, TG_T_CITY_FENCE, TG_T_CITY_VERGE,
+    TG_T_CITY_CROSSING, TG_T_CITY_XSTREET, TG_T_CITY_LAMP, TG_T_CITY_BACKROWS,
+    TG_T_CITY_FORKBACK, TG_T_CITY_DIAG,
+    TG_T_PRE_TURNMAP, TG_T_PRE_R8CROSS, TG_T_PRE_R10CROSS, TG_T_PRE_R11CITY,
+    TG_T_PRE_R13JUNC, TG_T_PRE_R13FILL,
+    TG_T_RPT_ACCT, TG_T_RPT_RAILEDGE, TG_T_RPT_R11GUARD, TG_T_RPT_R13MOUTH,
+    TG_T_RPT_R12FLORA, TG_T_RPT_R9BRIDGE, TG_T_RPT_R8BRIDGE, TG_T_RPT_R12SPANQ,
+    TG_T_RPT_R8TERRAIN, TG_T_RPT_R9TOPO, TG_T_RPT_R11XCURVE, TG_T_RPT_R12FCROSS,
+    TG_T_RPT_R13BAND, TG_T_RPT_R11WATER, TG_T_RPT_R12TEX,
+    TG_T_RPT_R14UP, TG_T_RPT_R14BAND, TG_T_RPT_R14COAST,
+    TG_T_COUNT
+};
+static const char *const k_tg_t_name[TG_T_COUNT] = {
+    "rail/clear-gap", "rail/on-carriageway", "rail/edge-would", "rail/deck-here",
+    "rail/kerbfence-here", "rail/street-crosses",
+    "city/span-paved", "city/sidewalk", "city/fence", "city/verge-band",
+    "city/crossing", "city/cross-street", "city/lamp", "city/backrows",
+    "city/forkback", "city/r8-diag",
+    "pre/turn-map", "pre/r8-cross-report", "pre/r10-cross-report", "pre/r11-city-report",
+    "pre/r13-junc-report", "pre/r13-fill-report",
+    "rpt/acct", "rpt/rail-edge", "rpt/r11-guard", "rpt/r13-rail-mouth",
+    "rpt/r12-flora", "rpt/r9-bridge", "rpt/r8-bridge-diag", "rpt/r12-spanq",
+    "rpt/r8-terrain-extent", "rpt/r9-topo", "rpt/r11-xcurve", "rpt/r12-fcross",
+    "rpt/r13-band", "rpt/r11-water", "rpt/r12-tex",
+    "rpt/r14-up", "rpt/r14-band", "rpt/r14-coast"
+};
+static uint64_t s_tg_t_us[TG_T_COUNT];
+static long     s_tg_t_n[TG_T_COUNT];
+static uint64_t s_tg_t_t0[8];
+static int      s_tg_t_depth;
+static int      s_tg_t_ri;
+static double   s_tg_t_rd;
+#define TG_T_BEGIN()  (s_tg_t_t0[s_tg_t_depth++ & 7] = td5_plat_time_us())
+#define TG_T_END(id)  (s_tg_t_us[id] += td5_plat_time_us() - s_tg_t_t0[--s_tg_t_depth & 7], \
+                       s_tg_t_n[id]++)
+#define TG_TI(id, expr) (TG_T_BEGIN(), s_tg_t_ri = (expr), TG_T_END(id), s_tg_t_ri)
+#define TG_TD(id, expr) (TG_T_BEGIN(), s_tg_t_rd = (expr), TG_T_END(id), s_tg_t_rd)
+#define TG_TV(id, stmt) do { TG_T_BEGIN(); stmt; TG_T_END(id); } while (0)
+
+/* [R14 GENPERF 2026-09-03] Master gate for the per-area diagnostic REPORTS.
+ * Several of them were "opt-in" on td5_env_flag_on, which returns 1 when the
+ * variable is UNSET -- so they ran on every build, for every player, and cost
+ * seconds (the r11-city and r13-junction sweeps alone were most of the 10 s
+ * "models prepass"). Rule: a report runs when its OWN variable is explicitly
+ * "1", is skipped when it is explicitly "0", and otherwise follows the master
+ * TD5RE_TG_REPORTS (default OFF). The verify scripts that need a report set
+ * either the master or the specific variable. */
+static int tg_report_wanted(const char *own)
+{
+    const char *o = getenv(own);
+    const char *m;
+    if (o && o[0] == '1') return 1;
+    if (o && o[0] == '0') return 0;
+    m = getenv("TD5RE_TG_REPORTS");
+    return (m && m[0] == '1') ? 1 : 0;
+}
+
+/* [R14 GENPERF 2026-09-03] Build progress 0..100 for the loading-screen bar,
+ * written by the generator (worker thread) and read by the pump. */
+static volatile int s_tg_progress;
+int td5_trackgen_progress(void) { return s_tg_progress; }
+
 static void tg_zone_reset(void)
 {
+    memset(s_tg_t_us, 0, sizeof s_tg_t_us);
+    memset(s_tg_t_n,  0, sizeof s_tg_t_n);
+    s_tg_t_depth = 0;
     memset(s_tg_sub3_us, 0, sizeof s_tg_sub3_us);
     memset(s_tg_sub3_n,  0, sizeof s_tg_sub3_n);
     memset(s_tg_sub2_us, 0, sizeof s_tg_sub2_us);
@@ -870,6 +958,14 @@ static void tg_zone_report(uint64_t total_us)
                   total_us ? 100.0 * (double)s_tg_sub3_us[z] / (double)total_us
                            : 0.0,
                   s_tg_sub3_n[z]);
+    }
+    for (z = 0; z < TG_T_COUNT; z++) {
+        if (!s_tg_t_n[z]) continue;
+        TD5_LOG_W(LOG_TAG, "[R14 GENPERF]   callee %-22s %8.1f ms  %5.1f%%  (n=%ld)",
+                  k_tg_t_name[z], s_tg_t_us[z] / 1e3,
+                  total_us ? 100.0 * (double)s_tg_t_us[z] / (double)total_us
+                           : 0.0,
+                  s_tg_t_n[z]);
     }
 }
 
@@ -14545,9 +14641,9 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk,
          * span off a fork, so ordinary road is bit-identical. Near and far are
          * asked separately so the rail follows the bow instead of stepping. */
         const double push_n = side
-            ? tg_carriageway_clear_gap(nl, si, -1.0, 0.0, 0.0) : 0.0;
+            ? TG_TD(TG_T_RAIL_CLEARGAP, tg_carriageway_clear_gap(nl, si, -1.0, 0.0, 0.0)) : 0.0;
         const double push_f = side
-            ? tg_carriageway_clear_gap(nl, si + 1, -1.0, 0.0, 0.0) : 0.0;
+            ? TG_TD(TG_T_RAIL_CLEARGAP, tg_carriageway_clear_gap(nl, si + 1, -1.0, 0.0, 0.0)) : 0.0;
         const double o0 = TD5_TG_RAIL_OFFSET;
         const double o1 = TD5_TG_RAIL_OFFSET + TD5_TG_RAIL_THICK;
 
@@ -14560,10 +14656,11 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk,
          * across a live lane is a wall. The LEFT side can never trip it (no
          * corridor bows left, so left reach IS the road edge), which is what
          * keeps the mesh non-empty and the quad count below >= 3. */
-        if (tg_on_carriageway(nl, si, s * (tg_road_half_width(nl, si)
-                                           + o0 + push_n), 0.0) ||
-            tg_on_carriageway(nl, si + 1, s * (tg_road_half_width(nl, si + 1)
-                                               + o0 + push_f), 0.0))
+        if (TG_TI(TG_T_RAIL_ONCW,
+                  tg_on_carriageway(nl, si, s * (tg_road_half_width(nl, si)
+                                                 + o0 + push_n), 0.0) ||
+                  tg_on_carriageway(nl, si + 1, s * (tg_road_half_width(nl, si + 1)
+                                                     + o0 + push_f), 0.0)))
             continue;
         /* [R9 RAILFIX, item 8] YIELD to the pedestrian kerb railing. A city span
          * on a bend satisfies both gates, so an armco prism at road half width
@@ -14585,7 +14682,7 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk,
          * edge that had a rail end up with none?"), and recording it at the same
          * single point where the yield is decided is what makes the two numbers
          * reconcile by construction instead of by argument. */
-        tg_rail_edge_would(si, s);
+        TG_TV(TG_T_RAIL_EDGEWOULD, tg_rail_edge_would(si, s));
 
         /* OWNERSHIP, decided here and ONLY here, per side. Both predicates
          * answer "does that emitter actually run on this edge" -- see the ring
@@ -14593,7 +14690,8 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk,
          * must never end up with zero rails, which is the other half of the
          * invariant and the half a doubling fix is most likely to break. */
         if (tg_railfix_on() &&
-            (tg_rail_deck_here(nl, si) || tg_rail_kerbfence_here(si, s))) {
+            (TG_TI(TG_T_RAIL_DECK, tg_rail_deck_here(nl, si)) ||
+             TG_TI(TG_T_RAIL_KERB, tg_rail_kerbfence_here(si, s)))) {
             tg_acct(TG_ACCT_R9_RAILYIELD, si);
             continue;
         }
@@ -14603,7 +14701,7 @@ static int tg_emit_guardrail(const TG_NodeList *nl, int si, TG_Buf *blk,
          * R9 yield (which means "another emitter rails this edge instead").
          * Counted at the single point the edge would have been claimed, so the
          * numbers are of rails really dropped, not of candidate spans. */
-        if (tg_r11_street_crosses_here(nl, si, s)) {
+        if (TG_TI(TG_T_RAIL_XSTREET, tg_r11_street_crosses_here(nl, si, s))) {
             if (tg_city_crossing_here(si)) s_r11_rail_on_cross++;
             else                           s_r11_rail_on_xstreet++;
             if (tg_r11_cross_diag())
@@ -15374,7 +15472,20 @@ static int tg_r11_xgap(int a, int b)
 /* The crossing predicate WITHOUT the min-spacing thinning: the FIRST span of a
  * non-park side-street gap on either kerb, off forks and bridge approaches.
  * Both sides are tested, so a street opening on the left gets one too. */
+static int tg_crossing_base_raw(int si);
 static int tg_crossing_base(int si)
+{
+    int r;
+    if (s_xmemo_armed && si >= 0 && si < TD5_TG_MAX_SPANS) {
+        if (s_xbase_memo[si] >= 0) return s_xbase_memo[si];
+        r = tg_crossing_base_raw(si);
+        s_xbase_memo[si] = (signed char)r;
+        return r;
+    }
+    return tg_crossing_base_raw(si);
+}
+
+static int tg_crossing_base_raw(int si)
 {
     int s;
     if (si <= 1) return 0;
@@ -15435,7 +15546,30 @@ static int tg_crossing_base(int si)
  * keep/drop simulated over a bounded backward window, so the decision is a pure
  * function of si with no cross-call state (this is called from both the zebra
  * emitter and the kerb-fence break gate, possibly out of span order). */
+/* [R14 GENPERF 2026-09-03] Per-build memo for the two crossing predicates.
+ * tg_city_crossing_here rescans TD5_TG_XMIN_LOOK (48) earlier spans through
+ * tg_crossing_base on EVERY call, and it is asked several times per span-side
+ * by the kerb fence, the roadside rail, the crossing emitters and the
+ * rail-edge report -- measured 0.6 s (rail/street-crosses) + most of the kerb
+ * fence's 1.3 s on one build. Both answers depend only on tables that are
+ * final once tg_emit_models' prepass has run (forks, bridge runs, the R12/R13
+ * clear tables, the turn map, the facade block pattern), so they are cached
+ * from that point: tg_xmemo_reset(0) at build start disarms the cache,
+ * tg_xmemo_reset(1) after the prepass arms it. -1 = not yet computed. */
+static int tg_city_crossing_here_raw(int si);
 static int tg_city_crossing_here(int si)
+{
+    int r;
+    if (s_xmemo_armed && si >= 0 && si < TD5_TG_MAX_SPANS) {
+        if (s_xhere_memo[si] >= 0) return s_xhere_memo[si];
+        r = tg_city_crossing_here_raw(si);
+        s_xhere_memo[si] = (signed char)r;
+        return r;
+    }
+    return tg_city_crossing_here_raw(si);
+}
+
+static int tg_city_crossing_here_raw(int si)
 {
     int j, last = -1000000;
     if (!tg_crossing_base(si)) return 0;
@@ -18259,7 +18393,7 @@ static void tg_r11_city_report(const TG_NodeList *nl, int nspans)
     int orphan = 0, phantom = 0, overhang = 0, corners = 0;
     int xwalls = 0, xdive = 0, xnostreet = 0;   /* [R12 CITY item 10] */
 
-    if (!td5_env_flag_on("TD5RE_R11_CITY_REPORT")) return;
+    if (!tg_report_wanted("TD5RE_R11_CITY_REPORT")) return;
     if (ring > nspans) ring = nspans;
     if (ring > TD5_TG_MAX_SPANS) ring = TD5_TG_MAX_SPANS;
 
@@ -18600,7 +18734,7 @@ static void tg_r13_junc_report(const TG_NodeList *nl, int nspans)
     double mkmin = 1e30;
     int mkmins = -1;
 
-    if (!td5_env_flag_on("TD5RE_R13_JUNC_REPORT")) return;
+    if (!tg_report_wanted("TD5RE_R13_JUNC_REPORT")) return;
     if (ring > nspans) ring = nspans;
     if (ring > TD5_TG_MAX_SPANS) ring = TD5_TG_MAX_SPANS;
 
@@ -19263,7 +19397,7 @@ static int tg_emit_fb_cross(const TG_FBHook *h)
 /* Group A -- city: sidewalks, kerb fences, crossings, deeper building rows. */
 static int tg_emit_fb_city(const TG_FBHook *h)
 {
-    const int paved = tg_city_span_paved(h);
+    const int paved = TG_TI(TG_T_CITY_PAVED, tg_city_span_paved(h));
     /* [R7 item 7] sw from the SAME hardened city edge tg_city_span_paved uses, so
      * the slab, its kerb height and the railing all agree on where the city is.
      * [R10 WIDEWALK] width scaled to the half-road so a wide avenue reads as a
@@ -19272,22 +19406,22 @@ static int tg_emit_fb_city(const TG_FBHook *h)
     const double sw = tg_city_sidewalk_w_at(h->nl, h->si,
                           &k_biomes[tg_scenery_biome_index(h->si)]);
 
-    tg_r8_city_sidewalk_diag(h);       /* [R8 CITY item 2] measure, don't guess */
+    TG_TV(TG_T_CITY_DIAG, tg_r8_city_sidewalk_diag(h));       /* [R8 CITY item 2] measure, don't guess */
 
     if (paved && td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS")) {
-        if (!tg_city_emit_sidewalk(h, sw)) return 0;
-        if (!tg_city_emit_fence(h, sw)) return 0;
+        if (!TG_TI(TG_T_CITY_SIDEWALK, tg_city_emit_sidewalk(h, sw))) return 0;
+        if (!TG_TI(TG_T_CITY_FENCE, tg_city_emit_fence(h, sw))) return 0;
     }
     /* Outside the city the same margin is a texture band, not a slab. Bridge
      * decks are excluded exactly as the pavement is -- there is no ground beside
      * a deck for a band to lie on. */
     if (!paved && !tg_span_in_bridge_run(h->si) &&
         tg_verge_band_w(h->b) > 0.0) {
-        if (!tg_city_emit_verge_band(h, tg_verge_band_w(h->b))) return 0;
+        if (!TG_TI(TG_T_CITY_VERGE, tg_city_emit_verge_band(h, tg_verge_band_w(h->b)))) return 0;
     }
     if (paved && tg_city_crossing_here(h->si) &&
         td5_env_flag_on("TD5RE_AUTOTRACK_CROSSINGS")) {
-        if (!tg_city_emit_crossing(h)) return 0;
+        if (!TG_TI(TG_T_CITY_CROSSING, tg_city_emit_crossing(h))) return 0;
     }
     /* The side street itself, on every span of the gap (the zebra above is only
      * on its first span). Both are gated on the pavement, since a gap in a
@@ -19304,7 +19438,7 @@ static int tg_emit_fb_city(const TG_FBHook *h)
     if (paved && !tg_span_in_bridge_run(h->si) && !tg_up_xclear_span(h->si) &&
         !tg_r13_approach_span(h->si) &&
         td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_STREETS")) {
-        if (!tg_city_emit_crossstreet(h, sw)) return 0;
+        if (!TG_TI(TG_T_CITY_XSTREET, tg_city_emit_crossstreet(h, sw))) return 0;
     }
     /* Lamps follow the biome's prop_lamp flag (city/industrial/coast), on the
      * same 1-in-7 beat the prop layer used, so the spacing is unchanged -- only
@@ -19313,20 +19447,20 @@ static int tg_emit_fb_city(const TG_FBHook *h)
     if (h->b->prop_lamp && (h->si % 7) == 0 && !tg_span_in_bridge_run(h->si) &&
         td5_trackgen_is_night() &&
         td5_env_flag_on("TD5RE_AUTOTRACK_LAMP_POSTS")) {
-        if (!tg_city_emit_lamp(h, sw)) return 0;
+        if (!TG_TI(TG_T_CITY_LAMP, tg_city_emit_lamp(h, sw))) return 0;
     }
     /* [R11 item 7c] Backrows stand out to sw + depth + 2*3200 and the fork-back
      * massing further still -- both squarely inside the overpass arms now that
      * they reach the drawn edge. Cleared on the deck's own spans. */
     if (paved && !tg_span_in_bridge_run(h->si) && !tg_up_clear_span(h->si) &&
         td5_env_flag_on("TD5RE_AUTOTRACK_BACKROWS")) {
-        if (!tg_city_emit_backrows(h, sw)) return 0;
+        if (!TG_TI(TG_T_CITY_BACKROWS, tg_city_emit_backrows(h, sw))) return 0;
     }
     /* [R4 item 6] Fill the bare flank a fork clears on the right with background
      * park/buildings set beyond the corridor. Runs on paved (city) fork spans
      * only; a no-op everywhere else. */
     if (paved && !tg_up_clear_span(h->si)) {
-        if (!tg_city_emit_forkback(h)) return 0;
+        if (!TG_TI(TG_T_CITY_FORKBACK, tg_city_emit_forkback(h))) return 0;
     }
     return 1;
 }
@@ -23898,7 +24032,7 @@ static void tg_r9_bridge_report(const TG_NodeList *nl)
     int si, runs = 0, orphan_total = 0;
     double worst_lat = 0.0;
 
-    if (!td5_env_flag_on("TD5RE_R9_BRIDGE_REPORT")) return;
+    if (!tg_report_wanted("TD5RE_R9_BRIDGE_REPORT")) return;
 
     for (si = 0; si + 1 < nl->count; si++) {
         int s0, s1, s, piers = 0, gantries = 0, orphans = 0, crown, style, pitch;
@@ -24725,15 +24859,17 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
      * quadratic in the span count. Must precede the first facade query. */
     {
         TG_ZONE_BEGIN(TG_ZONE_PREPASS);
-        tg_turn_map_build(nl, nspans);
-        tg_r8_cross_report(nl, nspans);   /* [R8 CROSS] class sweep, opt-in */
-        tg_r10_cross_report(nl, nspans);  /* [R10 CROSS] side-street setback, opt-in */
-        tg_r11_city_report(nl, nspans);   /* [R11 CITY] frontage/junction dump, opt-in */
-        tg_r13_junc_report(nl, nspans);   /* [R13 JUNCTION] bend-fold sweep, opt-in */
-        tg_r13_fill_report(nl, nspans);   /* [R13 FILL] exposed-rear sweep, opt-in */
+        s_tg_progress = 10;
+        TG_TV(TG_T_PRE_TURNMAP,  tg_turn_map_build(nl, nspans));
+        TG_TV(TG_T_PRE_R8CROSS,  tg_r8_cross_report(nl, nspans));   /* [R8 CROSS] class sweep, opt-in */
+        TG_TV(TG_T_PRE_R10CROSS, tg_r10_cross_report(nl, nspans));  /* [R10 CROSS] side-street setback, opt-in */
+        TG_TV(TG_T_PRE_R11CITY,  tg_r11_city_report(nl, nspans));   /* [R11 CITY] frontage/junction dump, TD5RE_TG_REPORTS */
+        TG_TV(TG_T_PRE_R13JUNC,  tg_r13_junc_report(nl, nspans));   /* [R13 JUNCTION] bend-fold sweep, TD5RE_TG_REPORTS */
+        TG_TV(TG_T_PRE_R13FILL,  tg_r13_fill_report(nl, nspans));   /* [R13 FILL] exposed-rear sweep, opt-in */
         tg_r9_city_reset();               /* [R9 CITY] pavement/massing sweep */
         tg_r13_faces_reset();             /* [R13 FACES] run-end return census */
         TG_ZONE_END(TG_ZONE_PREPASS);
+        tg_xmemo_reset(1);                /* [R14 GENPERF] tables final -> cache the crossing predicates */
     }
 
     for (e = 0; e < nentries && ok; e++) {
@@ -24742,6 +24878,8 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
         size_t moff[TG_MAX_MESHES_PER_ENTRY];
         TG_Buf meshes;
         int nmesh = 0, i;
+
+        s_tg_progress = 12 + (80 * e) / (nentries > 0 ? nentries : 1);   /* loading bar */
 
         if (ns > TD5_TG_SPANS_PER_ENTRY) ns = TD5_TG_SPANS_PER_ENTRY;
         memset(&meshes, 0, sizeof(meshes));
@@ -28929,7 +29067,7 @@ static void tg_r12_flora_report(const TG_NodeList *nl, int nspans)
     int i, j, si, lo, hi, pairs = 0, holes = 0, dither_holes = 0, runs = 0;
     int prev_hole = 0;
 
-    if (!td5_env_flag_on("TD5RE_R12_FLORA_REPORT")) return;
+    if (!tg_report_wanted("TD5RE_R12_FLORA_REPORT")) return;
     lo = td5_env_int("TD5RE_R12_FLORA_REPORT_LO", 0, 0, 100000);
     hi = td5_env_int("TD5RE_R12_FLORA_REPORT_HI", 100000, 0, 100000);
     if (nspans > TD5_TG_MAX_SPANS) nspans = TD5_TG_MAX_SPANS;
@@ -29038,6 +29176,8 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
 
     tg_zone_reset();                      /* [R14 GENPERF] per-BUILD, like tg_acct_reset */
     s_tg_build_t0 = td5_plat_time_us();
+    s_tg_progress = 2;
+    tg_xmemo_reset(0);                    /* [R14 GENPERF] crossing memo: disarmed until the prepass */
 
     {
         TG_ZONE_BEGIN(TG_ZONE_CENTERLINE);
@@ -29200,12 +29340,13 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         }
     }
     s_tg_reports_t0 = td5_plat_time_us();  /* [R14 GENPERF] diagnostic block */
-    tg_acct_report(nspans);
-    tg_rail_edge_report(&nl, nspans);  /* [R9 RAILFIX] per-edge uniqueness */
-    tg_r11_guard_report(&nl, nspans);  /* [R11 GUARD] structural-edge dump  */
-    tg_r13_rail_mouth_report(&nl, nspans); /* [R13 RAIL 5b] mouth cross-section */
-    tg_r12_flora_report(&nl, nspans);  /* [R12 FLORA] plant/band ledgers    */
-    tg_r9_bridge_report(&nl);          /* [R9 BRIDGE] tie + dry-band evidence */
+    s_tg_progress = 96;
+    TG_TV(TG_T_RPT_ACCT,     tg_acct_report(nspans));
+    TG_TV(TG_T_RPT_RAILEDGE, tg_rail_edge_report(&nl, nspans));  /* [R9 RAILFIX] per-edge uniqueness */
+    TG_TV(TG_T_RPT_R11GUARD, tg_r11_guard_report(&nl, nspans));  /* [R11 GUARD] structural-edge dump  */
+    TG_TV(TG_T_RPT_R13MOUTH, tg_r13_rail_mouth_report(&nl, nspans)); /* [R13 RAIL 5b] mouth cross-section */
+    TG_TV(TG_T_RPT_R12FLORA, tg_r12_flora_report(&nl, nspans));  /* [R12 FLORA] plant/band ledgers, TD5RE_TG_REPORTS */
+    TG_TV(TG_T_RPT_R9BRIDGE, tg_r9_bridge_report(&nl));          /* [R9 BRIDGE] tie + dry-band evidence, TD5RE_TG_REPORTS */
     /* [R9 INFRA] The two deliverables share one accounting slot, so print the
      * split explicitly. Ponds are accounted as WATER (they are water), which
      * means the r9-infra row is the FURNITURE row -- this line is what says so,
@@ -29277,18 +29418,18 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
               "capped=%ld (expect 2x runs) (knob TD5RE_R12_MEDIAN_CAP=%s)",
               s_r12_median_runs, s_r12_median_caps,
               tg_r12_median_cap() ? "on" : "off");
-    tg_r8_bridge_diag(&nl);            /* [R8 BRIDGE] opt-in measurement dump */
-    tg_r12_spanq(nspans);              /* [R12 item 8a] opt-in span query     */
-    tg_r8_terrain_extent_report(&nl, nspans);  /* [R8 TERRAIN] opt-in, ditto */
-    tg_r9_topo_report(&nl, nspans);            /* [R9 TOPO] class sweep, ditto */
-    tg_r14_up_report(&nl, nspans);       /* [R14 item 3] overpass surround     */
-    tg_r11_xcurve_report(nspans);        /* [R11 CROSS item 16] opt-in, ditto */
-    tg_r12_fcross_report(&nl, nspans);   /* [R12 CROSS item 5]  opt-in, ditto */
-    tg_r13_band_report(&nl, nspans);     /* [R13 BAND items 1a/1b] ledger  */
-    tg_r14_band_report(&nl, nspans);     /* [R14 COAST item 5b] run ends   */
-    tg_r11_water_diag(&nl, nspans);            /* [R11 WATER] wet footprint    */
-    tg_r12_tex_report(&nl, nspans);            /* [R12 TEX] page-per-surface   */
-    tg_r14_coast_report();                   /* [R14 COAST item 5a] straddles */
+    TG_TV(TG_T_RPT_R8BRIDGE,  tg_r8_bridge_diag(&nl));            /* [R8 BRIDGE] opt-in measurement dump */
+    TG_TV(TG_T_RPT_R12SPANQ,  tg_r12_spanq(nspans));              /* [R12 item 8a] opt-in span query     */
+    TG_TV(TG_T_RPT_R8TERRAIN, tg_r8_terrain_extent_report(&nl, nspans));  /* [R8 TERRAIN] opt-in, ditto */
+    TG_TV(TG_T_RPT_R9TOPO,    tg_r9_topo_report(&nl, nspans));    /* [R9 TOPO] class sweep, TD5RE_TG_REPORTS */
+    TG_TV(TG_T_RPT_R14UP,     tg_r14_up_report(&nl, nspans));     /* [R14 item 3] overpass surround     */
+    TG_TV(TG_T_RPT_R11XCURVE, tg_r11_xcurve_report(nspans));      /* [R11 CROSS item 16] opt-in, ditto */
+    TG_TV(TG_T_RPT_R12FCROSS, tg_r12_fcross_report(&nl, nspans)); /* [R12 CROSS item 5]  opt-in, ditto */
+    TG_TV(TG_T_RPT_R13BAND,   tg_r13_band_report(&nl, nspans));   /* [R13 BAND items 1a/1b] ledger, TD5RE_TG_REPORTS */
+    TG_TV(TG_T_RPT_R14BAND,   tg_r14_band_report(&nl, nspans));   /* [R14 COAST item 5b] run ends   */
+    TG_TV(TG_T_RPT_R11WATER,  tg_r11_water_diag(&nl, nspans));    /* [R11 WATER] wet footprint    */
+    TG_TV(TG_T_RPT_R12TEX,    tg_r12_tex_report(&nl, nspans));    /* [R12 TEX] page-per-surface   */
+    TG_TV(TG_T_RPT_R14COAST,  tg_r14_coast_report());             /* [R14 COAST item 5a] straddles */
     /* [R14 integration] the coast report is INSIDE the REPORTS zone on purpose:
      * closing the zone above it would leave its cost out of its own timing. */
     s_tg_zone_us[TG_ZONE_REPORTS] += td5_plat_time_us() - s_tg_reports_t0;
@@ -29404,14 +29545,137 @@ static void tg_selfcheck_regen(unsigned int seed)
 /* ------------------------------------------------------- lifecycle ------- */
 int td5_trackgen_init(void)
 {
-    /* Build one track at boot so the AUTO-GENERATED entry is present (and
-     * loadable) from the main menu onwards. Each race launch regenerates with
-     * a fresh seed -- see td5_asset_load_level. A failure here is non-fatal:
-     * the entry simply never registers and the selector skips it. */
-    if (!td5_trackgen_regenerate(0))
-        TD5_LOG_W(LOG_TAG, "trackgen: boot generation failed; "
-                  "AUTO-GENERATED will not be selectable");
+    /* [R14 GENPERF 2026-09-03] No build at boot. This used to generate a whole
+     * track here "so the entry is loadable from the main menu onwards", and
+     * every race entry then threw it away and generated AGAIN with a fresh
+     * seed (td5_game.c). Measured: 19.8 s of a 76 s launch-to-green-light was
+     * this discarded build, paid by every player, including those who never
+     * pick the auto track. The selector needs only the REGISTRY entry (name,
+     * circuit flag, start span); the finish span is re-registered by the real
+     * build before the level is loaded, and the frontend never reads the
+     * level files themselves. */
+    TD5_TrackGenSpec spec;
+    td5_trackgen_default_spec(&spec);
+    td5_trackgen_apply_config(&spec);
+    td5_track_registry_set_auto(TD5_TG_SLOT, TD5_TG_LEVEL_NUM, "AUTO-GENERATED",
+                               spec.circuit, TD5_TG_GRID_SPAN, 0);
+    TD5_LOG_I(LOG_TAG, "trackgen: AUTO-GENERATED registered (slot %d, level %d); "
+              "built on race entry", TD5_TG_SLOT, TD5_TG_LEVEL_NUM);
     return 1;
+}
+
+/* ---- [R14 GENPERF 2026-09-03] build stamp: reuse an identical build ------
+ * The level directory is rebuilt on every race entry because each race gets a
+ * fresh seed. When the seed is NOT fresh -- a pinned TD5RE_AUTOTRACK_SEED, a
+ * pause-menu RESTART of the same race, a harness A/B -- the previous build is
+ * byte-identical and 20-35 s of generation is wasted. The stamp records what
+ * the on-disk level was built FROM: seed, the spec, every TD5RE_* knob (the
+ * emitters read dozens of them through getenv), and the identity of the exe
+ * that built it (size + mtime: any rebuild of the generator invalidates the
+ * cache, so a stale build can never hide a code change). Reuse also needs the
+ * few generator statics the runtime asks for after the build, which is why the
+ * stamp carries the ring length / finish span / circuit flag. */
+#define TG_STAMP_VERSION 1u
+
+typedef struct {
+    unsigned int version, seed, spec_hash, env_hash;
+    unsigned long long exe_id;
+    int spans, ring, finish, circuit, night;
+} TG_Stamp;
+
+static unsigned int tg_fnv1a(unsigned int h, const void *p, size_t n)
+{
+    const unsigned char *b = (const unsigned char *)p;
+    size_t i;
+    for (i = 0; i < n; i++) { h ^= b[i]; h *= 16777619u; }
+    return h;
+}
+
+static unsigned int tg_env_hash(void)
+{
+    unsigned int h = 2166136261u;
+    char **e;
+    for (e = _environ; e && *e; e++)
+        if (strncmp(*e, "TD5RE_", 6) == 0 && strncmp(*e, "TD5RE_CONTROL_PORT", 18) != 0
+            && strncmp(*e, "TD5RE_WINDOW_TITLE", 18) != 0 && strncmp(*e, "TD5RE_RT_", 9) != 0
+            && strncmp(*e, "TD5RE_FRAME_CAP", 15) != 0 && strncmp(*e, "TD5RE_FRAMEDUMP", 15) != 0
+            && strncmp(*e, "TD5RE_D3D12_", 12) != 0 && strncmp(*e, "TD5RE_TG_REPORTS", 16) != 0
+            && strncmp(*e, "TD5RE_R14_GENPROF", 17) != 0)
+            h = tg_fnv1a(h, *e, strlen(*e));
+    return h;
+}
+
+static unsigned long long tg_exe_id(void)
+{
+    char *path = NULL;
+    struct stat st;
+    if (_get_pgmptr(&path) != 0 || !path || stat(path, &st) != 0) return 0ull;
+    return ((unsigned long long)st.st_mtime << 20) ^ (unsigned long long)st.st_size;
+}
+
+static void tg_stamp_path(char *out, size_t n)
+{
+    snprintf(out, n, "re/assets/levels/level%03d/GENSTAMP.TXT", TD5_TG_LEVEL_NUM);
+}
+
+static int tg_stamp_read(TG_Stamp *st)
+{
+    char path[256];
+    FILE *f;
+    int n;
+    tg_stamp_path(path, sizeof(path));
+    f = fopen(path, "r");
+    if (!f) return 0;
+    memset(st, 0, sizeof(*st));
+    n = fscanf(f, "v%u seed=%u spec=%x env=%x exe=%llx spans=%d ring=%d finish=%d circuit=%d night=%d",
+               &st->version, &st->seed, &st->spec_hash, &st->env_hash, &st->exe_id,
+               &st->spans, &st->ring, &st->finish, &st->circuit, &st->night);
+    fclose(f);
+    return n == 10;
+}
+
+static void tg_stamp_write(const TG_Stamp *st)
+{
+    char path[256];
+    FILE *f;
+    tg_stamp_path(path, sizeof(path));
+    f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "v%u seed=%u spec=%x env=%x exe=%llx spans=%d ring=%d finish=%d circuit=%d night=%d\n",
+            st->version, st->seed, st->spec_hash, st->env_hash, st->exe_id,
+            st->spans, st->ring, st->finish, st->circuit, st->night);
+    fclose(f);
+}
+
+static int tg_level_files_present(void)
+{
+    static const char *const k_files[] = { "STRIP.DAT", "MODELS.DAT", "LEVELINF.DAT",
+                                           "LEFT.TRK", "RIGHT.TRK", "TEXTURES.DAT" };
+    char path[256];
+    size_t i;
+    for (i = 0; i < sizeof(k_files) / sizeof(k_files[0]); i++) {
+        snprintf(path, sizeof(path), "re/assets/levels/level%03d/%s", TD5_TG_LEVEL_NUM, k_files[i]);
+        if (!td5_plat_file_exists(path)) return 0;
+    }
+    return 1;
+}
+
+int td5_trackgen_prepare_race(int restart)
+{
+    /* A pause-menu RESTART re-enters the same race: keep the seed (and, via
+     * the stamp, skip the rebuild). Any other entry rolls a new one, unless
+     * TD5RE_AUTOTRACK_SEED pins it (handled inside regenerate). */
+    unsigned int seed = (restart && s_last_seed) ? s_last_seed : 0u;
+    /* Dev A/B: TD5RE_TG_DOUBLE_BUILD=1 builds twice (second build wins), the
+     * way the old boot+race flow did, to expose generator state that leaks
+     * from one build into the next. */
+    if (td5_env_flag_off("TD5RE_TG_DOUBLE_BUILD")) {
+        unsigned int pinned = (unsigned int)td5_env_int("TD5RE_AUTOTRACK_SEED", 0, 0, 0x7FFFFFFF);
+        _putenv_s("TD5RE_AUTOTRACK_REUSE", "0");
+        td5_trackgen_regenerate(seed ? seed : pinned);
+        return td5_trackgen_regenerate(seed ? seed : pinned);
+    }
+    return td5_trackgen_regenerate(seed);
 }
 
 void td5_trackgen_shutdown(void)
@@ -29450,6 +29714,37 @@ int td5_trackgen_regenerate(unsigned int seed)
      * launch calls, so this is "on entering the race" -- and BEFORE the build,
      * so every emitter that asks td5_trackgen_is_night() during it agrees. */
     tg_decide_night(seed);
+
+    /* [R14 GENPERF 2026-09-03] Identical build already on disk? Then the only
+     * work is the cheap prologue the runtime depends on (biome grid, night,
+     * seed latch, ring length) and the registry line. */
+    {
+        TG_Stamp want, have;
+        memset(&want, 0, sizeof(want));
+        want.version   = TG_STAMP_VERSION;
+        want.seed      = seed;
+        want.spec_hash = tg_fnv1a(2166136261u, &spec, sizeof(spec));
+        want.env_hash  = tg_env_hash();
+        want.exe_id    = tg_exe_id();
+        if (td5_env_flag_on("TD5RE_AUTOTRACK_REUSE") && tg_stamp_read(&have) &&
+            have.version == want.version && have.seed == want.seed &&
+            have.spec_hash == want.spec_hash && have.env_hash == want.env_hash &&
+            have.exe_id == want.exe_id && have.exe_id != 0ull &&
+            have.spans > 0 && have.ring > 0 && tg_level_files_present()) {
+            tg_biome_layout(seed, spec.target_spans);
+            s_gen_seed  = seed;
+            s_last_seed = seed;
+            s_ring_len  = have.ring;
+            s_tg_progress = 100;
+            td5_track_registry_set_auto(TD5_TG_SLOT, TD5_TG_LEVEL_NUM,
+                                       "AUTO-GENERATED", have.circuit,
+                                       TD5_TG_GRID_SPAN, have.finish);
+            TD5_LOG_W(LOG_TAG, "trackgen: REUSED the on-disk build for seed %u "
+                      "(%d spans, ring %d, finish %d) -- generation skipped",
+                      seed, have.spans, have.ring, have.finish);
+            return 1;
+        }
+    }
 
     if (!td5_trackgen_build_level(&spec, TD5_TG_LEVEL_NUM, &spans)) {
         TD5_LOG_E(LOG_TAG, "trackgen: regenerate failed; auto track unavailable");
@@ -29491,6 +29786,20 @@ int td5_trackgen_regenerate(unsigned int seed)
         TD5_LOG_I(LOG_TAG, "trackgen: registry finish span=%d (main ring=%d, full "
                   "strip=%d; old spans-4 would be %d)", finish, ring, spans,
                   spans > 8 ? spans - 4 : spans - 1);
+        /* [R14 GENPERF] Stamp what this build was made from (see TG_Stamp). */
+        {
+            TG_Stamp st;
+            memset(&st, 0, sizeof(st));
+            st.version   = TG_STAMP_VERSION;
+            st.seed      = seed;
+            st.spec_hash = tg_fnv1a(2166136261u, &spec, sizeof(spec));
+            st.env_hash  = tg_env_hash();
+            st.exe_id    = tg_exe_id();
+            st.spans = spans; st.ring = ring; st.finish = finish;
+            st.circuit = spec.circuit; st.night = s_is_night;
+            tg_stamp_write(&st);
+        }
+        s_tg_progress = 100;
     }
 
     TD5_LOG_I(LOG_TAG, "trackgen: auto track ready (slot %d, level %d, "

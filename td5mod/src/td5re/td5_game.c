@@ -18,6 +18,8 @@
 #include "td5_ai.h"
 #include "td5_ai_driver.h"   /* [AI DRIVER MODEL] driver trace-row accessors */
 #include "td5_asset.h"
+#include "td5_trackgen.h"   /* [R14 GENPERF] auto-track build under the splash */
+#include <float.h>           /* [R14 GENPERF] _controlfp_s: worker inherits the FP environment */
 #include "td5_physics.h"
 #include "td5_render.h"
 #include "td5_jobs.h"     /* Phase B Stage 2b: threaded pane recording */
@@ -759,6 +761,9 @@ static int      s_prev_right;          /* edge detector: pause-menu RIGHT (slide
 static int      s_prev_enter;          /* edge detector: pause-menu CONFIRM (Enter / pad A) */
 static int      s_prev_jb;             /* edge detector: pause-menu pad B = back/continue */
 static int      s_pause_exit_pending;  /* 1 = ESC exit fade in progress, return 2 when fade done */
+#define LOADSCREEN_SCRATCH_TEXTURE_PAGE 598   /* loading splash page (splash + auto-track pump) */
+static int      s_race_reinit_is_restart;   /* [R14 GENPERF] see autotrack_generate_under_splash */
+static int      s_loadscreen_index;         /* defined (initialised) below, used by the splash pump */
 static int      s_pause_restart_pending; /* [REWORK 2026-06-05/S15] 1 = pause-menu RESTART RACE fade in progress, return 3 when fade done */
 static int      s_pause_options_dirty; /* 1 = a pause volume slider changed; flush to td5re.ini on close [PART B] */
 static int      s_pause_endrace_confirm; /* [END RACE NOW 2026-06-30] 1 = force-finish confirm prompt up in the pause menu */
@@ -1481,6 +1486,7 @@ int td5_game_tick(void) {
              * menu->race entry path's init call without rebuilding the AI
              * schedule, so opponents/track/laps are identical. */
             TD5_LOG_I(LOG_TAG, "Pause RESTART RACE: re-initializing race session (same params)");
+            s_race_reinit_is_restart = 1;   /* [R14 GENPERF] auto track keeps its seed */
             td5_game_init_race_session();
             g_td5.game_state = TD5_GAMESTATE_RACE;
             return 0;
@@ -3075,9 +3081,129 @@ static void init_race_slot_states(void)
     }
 }
 
+/* [R14 GENPERF 2026-09-03] Auto-track generation on a WORKER THREAD under the
+ * loading screen. The build takes 20-35 s and used to run synchronously inside
+ * td5_asset_load_level, so the window sat "Not Responding" for the whole wait
+ * and users read it as a crash. Now the main thread keeps the splash on screen,
+ * pumps window messages and draws a progress bar fed by td5_trackgen_progress()
+ * while the worker generates. What makes the split safe: the worker touches
+ * only the generator's own state, the level files and the track registry, and
+ * the main thread touches NONE of those until the join -- it only redraws the
+ * already-uploaded splash texture. Logging is mutex-protected. */
+typedef struct { int restart; int ok; unsigned fp_cw; unsigned fp_cw_seen; } AutoTrackGenJob;
+
+static void autotrack_gen_thread(void *arg)
+{
+    AutoTrackGenJob *job = (AutoTrackGenJob *)arg;
+    /* [R14 GENPERF] The generator's output must not depend on WHICH thread
+     * builds it. The floating-point environment (rounding mode, denormal
+     * handling: MXCSR on x64) is per-thread, and a fresh thread starts from the
+     * CRT default while the main thread's state is whatever the game, the D3D
+     * runtime and the driver left it in. Copy the main thread's control word
+     * onto the worker so a threaded build is bit-identical to the synchronous
+     * one (the seed goldens were all recorded on the main thread). */
+    _controlfp_s(&job->fp_cw_seen, 0, 0);
+    _controlfp_s(NULL, job->fp_cw, _MCW_DN | _MCW_RC | _MCW_PC | _MCW_EM);
+    job->ok = td5_trackgen_prepare_race(job->restart);
+}
+
+static void autotrack_generate_under_splash(void)
+{
+    AutoTrackGenJob job;
+    void *thread;
+    char png_path[128];
+    void *pixels = NULL;
+    int img_w = 0, img_h = 0, screen_w = 0, screen_h = 0;
+    int start_ms, frames = 0, done = 0;
+    TD5_D3DVertex verts[4], bar[4];
+    uint16_t indices[6] = {0,1,2, 0,2,3};
+
+    job.restart = s_race_reinit_is_restart;
+    job.ok = 0;
+    s_race_reinit_is_restart = 0;
+    job.fp_cw = 0; job.fp_cw_seen = 0;
+    _controlfp_s(&job.fp_cw, 0, 0);
+
+    td5_plat_get_window_size(&screen_w, &screen_h);
+    {
+        float sw = (float)screen_w, sh = (float)screen_h;
+        int i;
+        for (i = 0; i < 4; i++) {
+            verts[i].depth_z = 0.0f; verts[i].rhw = 1.0f;
+            verts[i].diffuse = 0xFFFFFFFF; verts[i].specular = 0;
+            bar[i] = verts[i];
+        }
+        verts[0].screen_x = 0.0f; verts[0].screen_y = 0.0f; verts[0].tex_u = 0.0f; verts[0].tex_v = 0.0f;
+        verts[1].screen_x = sw;   verts[1].screen_y = 0.0f; verts[1].tex_u = 1.0f; verts[1].tex_v = 0.0f;
+        verts[2].screen_x = sw;   verts[2].screen_y = sh;   verts[2].tex_u = 1.0f; verts[2].tex_v = 1.0f;
+        verts[3].screen_x = 0.0f; verts[3].screen_y = sh;   verts[3].tex_u = 0.0f; verts[3].tex_v = 1.0f;
+    }
+    /* Same splash as step 1 (no extra rand() -- see s_loadscreen_index). */
+    snprintf(png_path, sizeof(png_path), "re/assets/loading/load%02d.png", s_loadscreen_index);
+    if (!td5_asset_load_png_to_buffer(png_path, TD5_COLORKEY_NONE, &pixels, &img_w, &img_h))
+        pixels = NULL;
+    if (pixels)
+        td5_plat_render_upload_texture(LOADSCREEN_SCRATCH_TEXTURE_PAGE, pixels, img_w, img_h, 2);
+
+    start_ms = td5_plat_time_ms();
+    TD5_LOG_I(LOG_TAG, "Auto track: generating on a worker thread (restart=%d)", job.restart);
+    thread = td5_env_flag_off("TD5RE_TG_SYNC") ? NULL : td5_plat_thread_create(autotrack_gen_thread, &job);
+    if (!thread) {
+        TD5_LOG_W(LOG_TAG, "Auto track: thread create failed -- generating synchronously");
+        autotrack_gen_thread(&job);
+        done = 1;
+    }
+    while (!done) {
+        int pct = td5_trackgen_progress();
+        float bx0 = (float)screen_w * 0.20f, bx1 = (float)screen_w * 0.80f;
+        float by0 = (float)screen_h * 0.92f, by1 = by0 + (float)screen_h * 0.012f;
+        float bxp = bx0 + (bx1 - bx0) * (float)(pct < 0 ? 0 : pct > 100 ? 100 : pct) / 100.0f;
+
+        td5_plat_render_clear(0x00000000);
+        td5_plat_render_begin_scene();
+        td5_plat_render_set_viewport(0, 0, screen_w, screen_h);
+        if (pixels) {
+            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+            td5_plat_render_bind_texture(LOADSCREEN_SCRATCH_TEXTURE_PAGE);
+            td5_plat_render_draw_tris(verts, 4, indices, 6);
+        }
+        /* Progress bar: dim track + bright fill, drawn with the 1x1 white page. */
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        td5_plat_render_bind_texture(899);   /* SHARED_PAGE_WHITE (td5_frontend_internal.h) */
+        bar[0].screen_x = bx0; bar[0].screen_y = by0; bar[1].screen_x = bx1; bar[1].screen_y = by0;
+        bar[2].screen_x = bx1; bar[2].screen_y = by1; bar[3].screen_x = bx0; bar[3].screen_y = by1;
+        { int i; for (i = 0; i < 4; i++) bar[i].diffuse = 0xFF303030u; }
+        td5_plat_render_draw_tris(bar, 4, indices, 6);
+        bar[1].screen_x = bxp; bar[2].screen_x = bxp;
+        { int i; for (i = 0; i < 4; i++) bar[i].diffuse = 0xFFE0C060u; }
+        td5_plat_render_draw_tris(bar, 4, indices, 6);
+        td5_plat_render_end_scene();
+        td5_plat_present(0);
+        td5_plat_pump_messages();
+        frames++;
+        if (pct >= 100 || td5_plat_time_ms() - start_ms > 600000) {
+            /* progress 100 is set by the worker at the very end; join to be sure */
+            done = 1;
+        } else {
+            td5_plat_sleep(16);
+        }
+    }
+    if (thread) td5_plat_thread_join(thread);
+    if (pixels) free(pixels);
+    if (!job.ok)
+        TD5_LOG_W(LOG_TAG, "Auto track: generation FAILED; reusing the previous build on disk");
+    TD5_LOG_W(LOG_TAG, "Auto track: ready in %d ms (%d splash frames, restart=%d, fp_cw main=%08x worker-initial=%08x)",
+              td5_plat_time_ms() - start_ms, frames, job.restart, job.fp_cw, job.fp_cw_seen);
+}
+
 static void init_race_level_and_assets(void)
 {
     /* ---- Step 4: Load track runtime data ---- */
+    /* [R14 GENPERF] AUTO-GENERATED: (re)build the level under the splash first. */
+    if (td5_trackgen_is_auto_slot(g_td5.track_index))
+        autotrack_generate_under_splash();
+    else
+        s_race_reinit_is_restart = 0;
     /* NOTE: td5_asset_load_level sets g_td5.track_type from LEVELINF.DAT,
      * so g_track_is_circuit / g_track_type_mode must be derived after this call. */
     td5_asset_load_level(g_td5.track_index);
@@ -10848,7 +10974,6 @@ static int s_loadscreen_index = 0;
  * scratch-page pattern (FMV_SCRATCH_TEXTURE_PAGE 599) and keep page 0 clean.
  * 598 is free: below the static atlas (700+), car (800+), frontend (900+) and
  * sky/fallback (1020/1021) ranges, adjacent to the FMV scratch. */
-#define LOADSCREEN_SCRATCH_TEXTURE_PAGE 598
 
 static void display_loading_screen_tga(void) {
     char png_path[128];

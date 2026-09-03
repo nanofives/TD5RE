@@ -320,6 +320,11 @@ void Backend_RTSceneEnd(void);
  * handles (they were destroyed with the old device). */
 unsigned Backend_RTGeneration(void);
 
+/* [RT WINDOW 2026-09-03] Pool occupancy (live payload bytes / capacity) + live
+ * mesh count, for the game's scene-feed diag line. Any pointer may be NULL. */
+void Backend_RTPoolStats(unsigned *vb_used, unsigned *vb_cap, unsigned *ib_used,
+                         unsigned *ib_cap, unsigned *meshes);
+
 /* [RT WARMUP 2026-08-08] Loading-screen pre-warm so the FIRST race frame never
  * pays the RT first-frame cost stack that TDR'd slower GPUs (e.g. RTX 3070 froze
  * after one non-RT frame): the state-object / composite / denoise PSO creates,

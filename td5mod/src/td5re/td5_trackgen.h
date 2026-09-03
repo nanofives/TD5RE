@@ -102,6 +102,17 @@ int td5_trackgen_regenerate_main_spans(unsigned int seed,
  * surfaced in the HUD/log so a good random track can be reproduced. */
 unsigned int td5_trackgen_last_seed(void);
 
+/* [R14 GENPERF 2026-09-03] Race-entry build. restart=1 keeps the last seed (a
+ * pause-menu RESTART of the same race); otherwise a fresh seed unless
+ * TD5RE_AUTOTRACK_SEED pins one. An identical build already on disk (same
+ * seed, spec, TD5RE_* knobs and exe) is REUSED without regenerating
+ * (TD5RE_AUTOTRACK_REUSE=0 disables). Safe to call from a worker thread while
+ * the main thread only draws the loading screen (see td5_game.c). */
+int td5_trackgen_prepare_race(int restart);
+
+/* Build progress 0..100 for the loading-screen bar (readable from any thread). */
+int td5_trackgen_progress(void);
+
 /* Is the auto-generated track a NIGHT track? Decided ONCE per race entry (in
  * td5_trackgen_regenerate, which every race launch calls) and latched, so every
  * emitter and every renderer that asks during a build gets the same answer --
