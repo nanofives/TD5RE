@@ -176,20 +176,68 @@ int td5_rt_active(void)
 #define RT_MAX_TRACK_CHUNKS    256
 #define RT_ACTOR_CACHE         128
 #define RT_INV256              (1.0f / 256.0f)
-/* [RT2-P2] full-scene world feed. Static "world" BLAS set built once at level
- * load: one BLAS per display-list scenery mesh + per billboard-chunk. Capped so
- * track chunks + scenery + actors stay under the wrapper's 1024 instance cap. */
-#define RT_MAX_SCENERY         1900
 #define RT_MATID_CUTOUT        0x100u   /* mirror of DXR_MATID_CUTOUT (d3d12_dxr.c) */
+
+/* [RT WINDOW 2026-09-03] Windowed, per-entry MERGED world feed.
+ *
+ * The [RT2-P2] feed walked the WHOLE MODELS.DAT display list once at level load
+ * and built one BLAS per scenery mesh, capped at 1900. That cap was sized for
+ * Moscow (~1600 meshes). An auto-generated track has ~14000 (seed 20260901:
+ * 1493 buildings, 2607 sidewalks, 1859 trees, 1800 terrain skirts, ...), so the
+ * feed filled its 1900 slots with the first ~60 entries (~240 spans) and
+ * DROPPED 12052 meshes: past span ~240 the ray-traced scene was empty -- no
+ * building / tree shadows, nothing to reflect -- and (measured) the town at
+ * span 500 ran FASTER with RT than the track start, because there was nothing
+ * left to trace against.
+ *
+ * Now: the scene is a WINDOW of display-list entries around each pane's player
+ * (fwd/back span reach below), re-evaluated every frame. Entries entering the
+ * window are fed, entries leaving it (plus a hysteresis margin) are freed, at
+ * most RT_FEED_PER_FRAME entries per frame (the loading-screen warmup feeds the
+ * whole initial window). Each entry becomes ONE merged BLAS -- every scenery
+ * mesh of the entry is a separate geometry RANGE (own page + material, own
+ * OPAQUE/cutout flag) of that BLAS, split only at the u16 vertex limit -- so the
+ * TLAS holds ~100-200 well-built BVHs instead of thousands of tiny overlapping
+ * per-mesh instances. The wrapper resolves a hit's range through
+ * InstanceID() + GeometryIndex() (SM 6.5) into the per-range GeoRecord.
+ *
+ * Bounds: 4096 entries covers MODELS_DAT_MAX_ENTRIES (2048); 8 chunk handles
+ * per entry covers a 480k-vertex entry (none observed; the densest auto-track
+ * town entry is ~2k vertices). */
+#define RT_ENTRY_MAX           4096
+#define RT_ENTRY_CHUNKS        8
+#define RT_WIN_FWD_SPANS_DEF   400     /* == the render walk's max forward reach   */
+#define RT_WIN_BACK_SPANS_DEF  120
+#define RT_WIN_MARGIN_ENTRIES  8       /* evict only this far OUTSIDE the window   */
+#define RT_FEED_PER_FRAME_DEF  2
+#define RT_ACC_VERT_CAP        65535   /* u16 indices                              */
+#define RT_ACC_IDX_CAP         196608  /* quads: 6 idx per 4 verts -> 1.5x + slack */
+#define RT_ACC_RANGE_CAP       2048    /* meshes per chunk                         */
+
+typedef struct {
+    const TD5_SpanDisplayList *dl;     /* block fed (NULL = empty entry)           */
+    int   owner;                       /* entry holding the chunks (== self, or an
+                                        * alias when two entries share one block)  */
+    int   handle[RT_ENTRY_CHUNKS];
+    int   nchunks;
+    int   fed;                         /* 1 = processed (even when 0 chunks)       */
+    int   meshes;                      /* diag: meshes merged                      */
+} RTEntry;
 
 static int      s_track_handles[RT_MAX_TRACK_CHUNKS];
 static int      s_track_chunk_count;
-static int      s_scenery_handles[RT_MAX_SCENERY];
-static unsigned char s_scenery_mask[RT_MAX_SCENERY];  /* [road-cast] per-mesh TLAS InstanceMask */
-static int      s_scenery_count;
-static int      s_scenery_fed;             /* one-shot: MODELS ready by frame 1 */
+static RTEntry  s_entries[RT_ENTRY_MAX];
+static int      s_entry_count;         /* display-list entries of the loaded level */
+static int      s_fed_entries, s_fed_chunks, s_fed_meshes;   /* live counts (diag) */
+static unsigned s_feed_frames;         /* frames since the level's first feed      */
 
-static void rt_feed_world_scenery(void);   /* defined below td5_rt_level_build */
+/* Per-chunk accumulator (one entry's meshes merged; flushed at the u16 limit). */
+static TD5_RTVertex   s_acc_verts[RT_ACC_VERT_CAP + 8];
+static unsigned short s_acc_idx[RT_ACC_IDX_CAP + 16];
+static TD5_RTRange    s_acc_ranges[RT_ACC_RANGE_CAP];
+static int            s_acc_nv, s_acc_ni, s_acc_nr;
+
+static void rt_scene_update(int budget);   /* defined below td5_rt_level_build */
 static struct { const TD5_MeshHeader *mesh; int handle; } s_actor_cache[RT_ACTOR_CACHE];
 static int      s_actor_cache_count;
 static unsigned s_rt_generation;         /* last observed Backend_RTGeneration   */
@@ -201,16 +249,31 @@ static int rt_debugview_enabled(void)
     return s_debugview;
 }
 
+/* [RT WINDOW] Free every fed entry's chunks and forget the level's entry table.
+ * The next rt_scene_update re-feeds the window from scratch (level change,
+ * unload, device-lost generation bump). */
+static void rt_entries_destroy_all(void)
+{
+    int e, c;
+    for (e = 0; e < s_entry_count && e < RT_ENTRY_MAX; e++) {
+        RTEntry *E = &s_entries[e];
+        if (E->fed && E->owner == e)
+            for (c = 0; c < E->nchunks; c++)
+                if (E->handle[c]) td5_plat_rt_mesh_destroy(E->handle[c]);
+        memset(E, 0, sizeof(*E));
+    }
+    s_entry_count = 0;
+    s_fed_entries = s_fed_chunks = s_fed_meshes = 0;
+    s_feed_frames = 0;
+}
+
 static void rt_destroy_meshes(void)
 {
     int i;
     for (i = 0; i < s_track_chunk_count; i++)
         if (s_track_handles[i]) td5_plat_rt_mesh_destroy(s_track_handles[i]);
     s_track_chunk_count = 0;
-    for (i = 0; i < s_scenery_count; i++)
-        if (s_scenery_handles[i]) td5_plat_rt_mesh_destroy(s_scenery_handles[i]);
-    s_scenery_count = 0;
-    s_scenery_fed = 0;                      /* re-feed after unload / device-lost */
+    rt_entries_destroy_all();               /* re-fed by the next scene update */
     for (i = 0; i < s_actor_cache_count; i++)
         if (s_actor_cache[i].handle) td5_plat_rt_mesh_destroy(s_actor_cache[i].handle);
     s_actor_cache_count = 0;
@@ -295,7 +358,7 @@ void td5_rt_level_build(void)
     /* NB: the full-scene scenery feed is NOT done here. This level_build hook
      * runs from the track loader (td5_track.c) BEFORE MODELS.DAT is parsed, so
      * the display-list table is empty here. td5_rt_frame feeds scenery on the
-     * first HIGH frame instead (s_scenery_fed), by which point MODELS is ready. */
+     * first HIGH frame instead (rt_scene_update), by which point MODELS is ready. */
 
     if (rt_diag_on()) {
         float q[4][3];
@@ -410,74 +473,90 @@ static int rt_actor_mesh_handle(const TD5_MeshHeader *mesh)
  *  [RT2-P2] Full-scene world feed: MODELS.DAT display-list scenery + billboards
  * ======================================================================== */
 
-/* Dedup set: a display-list mesh appears in many span entries (the renderer
- * dedups the same way). Bounded; overflow just re-emits (harmless, rare). */
-static const void *s_seen[8192];
-static int         s_seen_count;
-static int rt_seen(const void *p)
+/* Material id + CUTOUT flag from a scenery mesh's texture page.
+ * [RT WINDOW 2026-09-03] TD5RE_RT_CUTOUT_OPAQUE=1 (dev A/B) feeds alpha-tested
+ * pages as OPAQUE geometry: no any-hit shader, canopies/fences occlude as solid
+ * quads. Measures what the cutout any-hit costs on a given track. */
+static int rt_cutout_opaque(void)
 {
-    int i;
-    for (i = 0; i < s_seen_count; i++) if (s_seen[i] == p) return 1;
-    if (s_seen_count < (int)(sizeof(s_seen)/sizeof(s_seen[0]))) s_seen[s_seen_count++] = p;
-    return 0;
+    static int v = -1;
+    if (v < 0) v = td5_env_int("TD5RE_RT_CUTOUT_OPAQUE", 0, 0, 1);
+    return v;
 }
-
-/* Material id + CUTOUT flag from a scenery mesh's texture page. */
 static unsigned rt_scenery_matid(const TD5_MeshHeader *mesh)
 {
     int page = mesh->texture_page_id;
     unsigned mat = td5_material_id_for_page(page);
-    if (td5_asset_get_page_transparency(page) == 1) mat |= RT_MATID_CUTOUT;   /* alpha-test */
+    if (td5_asset_get_page_transparency(page) == 1 && !rt_cutout_opaque())
+        mat |= RT_MATID_CUTOUT;   /* alpha-test */
     return mat;
 }
 
-/* Build a static world BLAS from a MODELS.DAT display-list mesh. Unlike the car
- * path (rt_build_actor_mesh, sequential base vertices), scenery commands carry a
+/* ---- [RT WINDOW] per-entry chunk accumulator ------------------------------ */
+
+static int  s_acc_entry = -1;   /* entry being accumulated (diag)             */
+
+static void rt_acc_reset(void) { s_acc_nv = s_acc_ni = s_acc_nr = 0; }
+
+/* Create the accumulated chunk as one RT mesh handle on the entry. */
+static void rt_acc_flush(RTEntry *E)
+{
+    int h;
+    if (s_acc_nv < 3 || s_acc_ni < 3 || s_acc_nr < 1) { rt_acc_reset(); return; }
+    if (E->nchunks >= RT_ENTRY_CHUNKS) {
+        static int s_warned = 0;
+        if (!s_warned) {
+            TD5_LOG_W("rt", "RT WINDOW: entry %d exceeds %d chunks -- extra geometry dropped",
+                      s_acc_entry, RT_ENTRY_CHUNKS);
+            s_warned = 1;
+        }
+        rt_acc_reset(); return;
+    }
+    h = td5_plat_rt_mesh_create(s_acc_verts, (unsigned)s_acc_nv, s_acc_idx, (unsigned)s_acc_ni,
+                                s_acc_ranges, (unsigned)s_acc_nr);
+    if (h) { E->handle[E->nchunks++] = h; s_fed_chunks++; }
+    rt_acc_reset();
+}
+
+/* Append one solid MODELS.DAT scenery mesh as a geometry range. Commands carry a
  * per-command vertex base in vertex_data_ptr -- resolved here exactly as the
  * renderer does (td5_render_span_display_list) -- so buildings/walls/bridges/
  * terrain extract correctly. Vertices are already WORLD space -> identity
  * instance. Topology is tri_count tris + quad_count quads per command for every
- * opcode (opcode selects render state, not topology). Returns a mesh handle. */
-static int rt_build_scenery_mesh(const TD5_MeshHeader *mesh, unsigned matid_flags,
-                                 unsigned char *out_mask)
+ * opcode (opcode selects render state, not topology). Returns 1 if appended. */
+static int rt_acc_add_solid(RTEntry *E, const TD5_MeshHeader *mesh)
 {
-    int c, nvo, nidx, cap_v, cap_i, cursor, handle;
+    int c, need_v = 0, need_i = 0, cursor = 0, first_idx, vbase0;
     const TD5_MeshVertex   *base = mesh->vertices;
     const TD5_PrimitiveCmd *cmds = mesh->commands;
-    TD5_RTVertex   *verts;
-    unsigned short *idx;
-    TD5_RTRange range;
-    float bbmin[3] = { 1e30f, 1e30f, 1e30f }, bbmax[3] = { -1e30f, -1e30f, -1e30f };
+    unsigned matid;
 
-    if (out_mask) *out_mask = 0xFFu;
     if (!cmds || mesh->command_count <= 0) return 0;
-
-    /* Output verts = sum of each command's consumed verts (they live in the
-     * blob at per-command bases, NOT in mesh->vertices), collected sequentially
-     * so u16 indices reference our own buffer. Cap at the u16 limit. */
-    cap_v = cap_i = 0;
     for (c = 0; c < mesh->command_count; c++) {
-        cap_v += (int)cmds[c].triangle_count * 3 + (int)cmds[c].quad_count * 4;
-        cap_i += (int)cmds[c].triangle_count * 3 + (int)cmds[c].quad_count * 6;
+        need_v += (int)cmds[c].triangle_count * 3 + (int)cmds[c].quad_count * 4;
+        need_i += (int)cmds[c].triangle_count * 3 + (int)cmds[c].quad_count * 6;
     }
-    if (cap_v < 3 || cap_v > 65535 || cap_i < 3) return 0;
-    verts = (TD5_RTVertex *)malloc((size_t)cap_v * sizeof(TD5_RTVertex));
-    idx   = (unsigned short *)malloc((size_t)cap_i * sizeof(unsigned short));
-    if (!verts || !idx) { free(verts); free(idx); return 0; }
+    if (need_v < 3 || need_i < 3) return 0;
+    if (need_v > RT_ACC_VERT_CAP || need_i > RT_ACC_IDX_CAP) return 0;   /* u16 limit: skip (rare) */
+    /* Does not fit in the open chunk -> flush and start a new one. */
+    if (s_acc_nv + need_v > RT_ACC_VERT_CAP || s_acc_ni + need_i > RT_ACC_IDX_CAP ||
+        s_acc_nr >= RT_ACC_RANGE_CAP)
+        rt_acc_flush(E);
 
-    nvo = 0; nidx = 0; cursor = 0;
+    matid = rt_scenery_matid(mesh);
+    first_idx = s_acc_ni;
+    vbase0 = s_acc_nv;
     for (c = 0; c < mesh->command_count; c++) {
         const TD5_PrimitiveCmd *cmd = &cmds[c];
         int tris = cmd->triangle_count, quads = cmd->quad_count;
         int need = tris * 3 + quads * 4, vbase, qb, t, q, j;
         const TD5_MeshVertex *cv;
         if (need <= 0) continue;
-        /* Resolve this command's vertex base EXACTLY as the renderer does
-         * (td5_render_span_display_list): a small value is a byte offset from the
-         * mesh header; a large value is an absolute pointer ONLY IF it lands in
-         * the models blob. NOTE: vertex_data_ptr is a uint32_t (on-disk record),
-         * so on x64 a stray non-zero value is a TRUNCATED pointer -- must be
-         * blob-bounds-checked before any deref or it faults (0xC0000005). */
+        /* Resolve this command's vertex base EXACTLY as the renderer does: a
+         * small value is a byte offset from the mesh header; a large value is an
+         * absolute pointer ONLY IF it lands in the models blob. vertex_data_ptr
+         * is a uint32_t (on-disk record), so on x64 a stray non-zero value is a
+         * TRUNCATED pointer -- blob-bounds-check before any deref. */
         if (cmd->vertex_data_ptr != 0) {
             uintptr_t vp = (uintptr_t)cmd->vertex_data_ptr;
             size_t vneed = (size_t)need * sizeof(TD5_MeshVertex);
@@ -490,178 +569,259 @@ static int rt_build_scenery_mesh(const TD5_MeshHeader *mesh, unsigned matid_flag
                 continue;                                  /* truncated/bad ptr */
             }
         } else {
-            if (!base || cursor + need > mesh->total_vertex_count) { if (!base) continue; else break; }
+            if (!base) continue;
+            if (cursor + need > mesh->total_vertex_count) break;
             cv = base + cursor; cursor += need;
         }
-        if (nvo + need > cap_v) break;                     /* safety */
-        vbase = nvo;
+        if (s_acc_nv + need > RT_ACC_VERT_CAP || s_acc_ni + tris * 3 + quads * 6 > RT_ACC_IDX_CAP) break;
+        vbase = s_acc_nv;
         for (j = 0; j < need; j++) {
-            float px = cv[j].pos_x, py = cv[j].pos_y, pz = cv[j].pos_z;
-            verts[nvo].pos[0] = px; verts[nvo].pos[1] = py; verts[nvo].pos[2] = pz;
-            verts[nvo].uv[0] = cv[j].tex_u;  verts[nvo].uv[1] = cv[j].tex_v;
-            verts[nvo].color = cv[j].lighting;
-            if (px < bbmin[0]) bbmin[0] = px;
-            if (px > bbmax[0]) bbmax[0] = px;
-            if (py < bbmin[1]) bbmin[1] = py;
-            if (py > bbmax[1]) bbmax[1] = py;
-            if (pz < bbmin[2]) bbmin[2] = pz;
-            if (pz > bbmax[2]) bbmax[2] = pz;
-            nvo++;
+            TD5_RTVertex *o = &s_acc_verts[s_acc_nv++];
+            o->pos[0] = cv[j].pos_x; o->pos[1] = cv[j].pos_y; o->pos[2] = cv[j].pos_z;
+            o->uv[0] = cv[j].tex_u;  o->uv[1] = cv[j].tex_v;
+            o->color = cv[j].lighting;
         }
         for (t = 0; t < tris; t++) {
             int a = vbase + t * 3;
-            idx[nidx++] = (unsigned short)(a + 0);
-            idx[nidx++] = (unsigned short)(a + 1);
-            idx[nidx++] = (unsigned short)(a + 2);
+            s_acc_idx[s_acc_ni++] = (unsigned short)(a + 0);
+            s_acc_idx[s_acc_ni++] = (unsigned short)(a + 1);
+            s_acc_idx[s_acc_ni++] = (unsigned short)(a + 2);
         }
         qb = vbase + tris * 3;
         for (q = 0; q < quads; q++) {
             int a = qb + q * 4;
-            idx[nidx++] = (unsigned short)(a + 0); idx[nidx++] = (unsigned short)(a + 1); idx[nidx++] = (unsigned short)(a + 2);
-            idx[nidx++] = (unsigned short)(a + 0); idx[nidx++] = (unsigned short)(a + 2); idx[nidx++] = (unsigned short)(a + 3);
+            s_acc_idx[s_acc_ni++] = (unsigned short)(a + 0); s_acc_idx[s_acc_ni++] = (unsigned short)(a + 1); s_acc_idx[s_acc_ni++] = (unsigned short)(a + 2);
+            s_acc_idx[s_acc_ni++] = (unsigned short)(a + 0); s_acc_idx[s_acc_ni++] = (unsigned short)(a + 2); s_acc_idx[s_acc_ni++] = (unsigned short)(a + 3);
         }
     }
-
-    handle = 0;
-    if (nidx >= 3 && nvo >= 3) {
-        range.first_index = 0; range.index_count = (unsigned)nidx;
-        range.texture_id = (unsigned)mesh->texture_page_id; range.matid_flags = matid_flags;
-        handle = td5_plat_rt_mesh_create(verts, (unsigned)nvo, idx, (unsigned)nidx, &range, 1);
+    if (s_acc_ni - first_idx < 3) { s_acc_nv = vbase0; s_acc_ni = first_idx; return 0; }
+    {
+        TD5_RTRange *r = &s_acc_ranges[s_acc_nr++];
+        r->first_index = (unsigned)first_idx;
+        r->index_count = (unsigned)(s_acc_ni - first_idx);
+        r->texture_id  = (unsigned)mesh->texture_page_id;
+        r->matid_flags = matid;
     }
-    /* [ROAD-CAST FIX 2026-08-03] Classify a horizontal SLAB (road / ground / kerb):
-     * vertical (Y) extent small vs BOTH horizontal extents. A flat surface is a
-     * shadow RECEIVER, not a meaningful sun-shadow caster, and per-span road/ground
-     * slabs were the source of the alternating near-camera self/cross-shadow
-     * stripes (proven: TD5RE_RT_ONLYCARS, which drops all world casters, clears
-     * them). Feed such meshes with InstanceMask bit 0 cleared (0xFE) so shadow rays
-     * (mask 0x01) skip them; walls/buildings/posts (tall) keep 0xFF and cast.
-     * TD5RE_RT_FLATSHADOW=1 restores flat meshes as casters (A/B). */
-    /* [2026-08-03] Default: flat scenery meshes DO cast now. The per-span
-     * self-shadow stripe this exclusion originally suppressed was really the
-     * screen-linear (non-perspective) depth reconstruction bug — fixed by the
-     * perspective-depth work + shadow back-face cull. With that fixed, excluding
-     * "flat" meshes only mis-fired on real wall/kerb chunks whose bbox happens to
-     * be long+wide+low (a wide-based barrier along the road), so some road spans
-     * lost their wall shadow. Set TD5RE_RT_FLATSHADOW=0 to restore the old
-     * flat-slab exclusion (heuristic below) for A/B. */
-    if (out_mask && handle) {
-        static int s_flatshadow = -1;
-        if (s_flatshadow < 0) s_flatshadow = td5_env_int("TD5RE_RT_FLATSHADOW", 1, 0, 1);
-        if (!s_flatshadow) {
-            float hx = bbmax[0]-bbmin[0], hy = bbmax[1]-bbmin[1], hz = bbmax[2]-bbmin[2];
-            int flat = (hx > 200.0f && hz > 200.0f && hy < 0.25f*hx && hy < 0.25f*hz);
-            if (flat) *out_mask = 0xFEu;   /* not a sun-shadow caster */
-        }
-    }
-    free(verts); free(idx);
-    return handle;
+    return 1;
 }
 
-/* Feed one billboard-tag mesh (header page 1/2) as a static CUTOUT crossed-quad
- * pair at its world bounding centre, sized by its bounding radius. Static (NOT
- * camera-facing) so the shadow is stable under camera motion. Real texture page
- * comes from the mesh's first command (the header id is just the billboard tag).
- * +Y is DOWN in world, so the canopy top is at cy - h (smaller Y). */
-static int rt_feed_billboard(const TD5_MeshHeader *mesh)
+/* Append one billboard-tag mesh (header page 1/2) as a static CUTOUT crossed-
+ * quad pair at its world bounding centre, sized by its bounding radius. Static
+ * (NOT camera-facing) so the shadow is stable under camera motion. Real texture
+ * page comes from the mesh's first command (the header id is just the billboard
+ * tag). +Y is DOWN in world, so the canopy top is at cy - h (smaller Y). */
+static int rt_acc_add_billboard(RTEntry *E, const TD5_MeshHeader *mesh)
 {
-    TD5_RTVertex v[8];
-    unsigned short idx[12] = { 0,1,2, 0,2,3, 4,5,6, 4,6,7 };
-    TD5_RTRange range;
+    static const unsigned short k_idx[12] = { 0,1,2, 0,2,3, 4,5,6, 4,6,7 };
     float cx = mesh->bounding_center_x, cy = mesh->bounding_center_y, cz = mesh->bounding_center_z;
     float r  = mesh->bounding_radius;
-    int page, h, i;
+    int page, i, vb;
+    TD5_RTVertex *v;
+    TD5_RTRange *rg;
 
     if (r != r || r <= 1.0f) return 0;
     if (cx != cx || cy != cy || cz != cz) return 0;
-    if (s_scenery_count >= RT_MAX_SCENERY) return 0;
     page = (mesh->command_count > 0 && mesh->commands) ? mesh->commands[0].texture_page_id : 0;
     if (page <= 2) return 0;                 /* no real page id to alpha-test against */
+    if (s_acc_nv + 8 > RT_ACC_VERT_CAP || s_acc_ni + 12 > RT_ACC_IDX_CAP || s_acc_nr >= RT_ACC_RANGE_CAP)
+        rt_acc_flush(E);
 
+    vb = s_acc_nv;
+    v = &s_acc_verts[vb];
     {
         float e = r * 0.7071f;               /* half-extent: quad diagonal ~ radius   */
-        /* Quad A: XY plane at z=cz (faces ±Z). u across X, v down Y (top=cy-e). */
+        /* Quad A: XY plane at z=cz (faces +/-Z). u across X, v down Y (top=cy-e). */
         v[0].pos[0]=cx-e; v[0].pos[1]=cy-e; v[0].pos[2]=cz;  v[0].uv[0]=0; v[0].uv[1]=0;
         v[1].pos[0]=cx-e; v[1].pos[1]=cy+e; v[1].pos[2]=cz;  v[1].uv[0]=0; v[1].uv[1]=1;
         v[2].pos[0]=cx+e; v[2].pos[1]=cy+e; v[2].pos[2]=cz;  v[2].uv[0]=1; v[2].uv[1]=1;
         v[3].pos[0]=cx+e; v[3].pos[1]=cy-e; v[3].pos[2]=cz;  v[3].uv[0]=1; v[3].uv[1]=0;
-        /* Quad B: YZ plane at x=cx (faces ±X). u across Z, v down Y. */
+        /* Quad B: YZ plane at x=cx (faces +/-X). u across Z, v down Y. */
         v[4].pos[0]=cx; v[4].pos[1]=cy-e; v[4].pos[2]=cz-e;  v[4].uv[0]=0; v[4].uv[1]=0;
         v[5].pos[0]=cx; v[5].pos[1]=cy+e; v[5].pos[2]=cz-e;  v[5].uv[0]=0; v[5].uv[1]=1;
         v[6].pos[0]=cx; v[6].pos[1]=cy+e; v[6].pos[2]=cz+e;  v[6].uv[0]=1; v[6].uv[1]=1;
         v[7].pos[0]=cx; v[7].pos[1]=cy-e; v[7].pos[2]=cz+e;  v[7].uv[0]=1; v[7].uv[1]=0;
         for (i = 0; i < 8; i++) v[i].color = 0xFF808080u;   /* mid-grey; tex modulates */
     }
-    range.first_index = 0; range.index_count = 12;
-    range.texture_id  = (unsigned)page;
-    range.matid_flags = td5_material_id_for_page(page) | RT_MATID_CUTOUT;
-    h = td5_plat_rt_mesh_create(v, 8, idx, 12, &range, 1);
-    if (h) { s_scenery_mask[s_scenery_count] = 0xFFu;   /* billboards cast (cutout leaf shadows) */
-             s_scenery_handles[s_scenery_count++] = h; }
-    return h != 0;
+    rg = &s_acc_ranges[s_acc_nr++];
+    rg->first_index = (unsigned)s_acc_ni;
+    rg->index_count = 12;
+    rg->texture_id  = (unsigned)page;
+    rg->matid_flags = td5_material_id_for_page(page) | (rt_cutout_opaque() ? 0u : RT_MATID_CUTOUT);
+    for (i = 0; i < 12; i++) s_acc_idx[s_acc_ni++] = (unsigned short)(vb + k_idx[i]);
+    s_acc_nv += 8;
+    return 1;
 }
 
-/* Enumerate every display-list scenery mesh once at level load. Solid meshes ->
- * one static world BLAS each (rt_build_actor_mesh, identity instance); billboard
- * meshes -> cutout crossed quads. Deduped by pointer; capped at RT_MAX_SCENERY.
- * Gated: TD5RE_RT_SCENERY (default 1), TD5RE_RT_BILLBOARDS (default 1). */
-static void rt_feed_world_scenery(void)
-{
-    static int s_scenery_on = -1, s_bb_on = -1;
-    int span_count, sp, solid = 0, bb = 0, dropped = 0, big = 0;
-    if (s_scenery_on < 0) s_scenery_on = td5_env_int("TD5RE_RT_SCENERY",    1, 0, 1);
-    if (s_bb_on      < 0) s_bb_on      = td5_env_int("TD5RE_RT_BILLBOARDS", 1, 0, 1);
-    if (!s_scenery_on) return;
+/* ---- [RT WINDOW] entry feed / evict --------------------------------------- */
 
-    /* Enumerate the MODELS.DAT display-list ENTRIES the renderer's main walk uses
-     * (td5_track_get_display_list_entry over [0, ring_entries)) -- these carry
-     * the real building/wall/bridge/terrain meshes with resolved vertex pointers.
-     * (td5_track_get_display_list(span) instead returns STRIP road blocks whose
-     * per-command vertex_data_ptr is a TRUNCATED x64 pointer the renderer itself
-     * skips -- not the geometry we want.) ring_entries = (ring+3)>>2 (TD5 span>>2
-     * map); iterate a generous bound and let the getter NULL past the table. */
-    s_seen_count = 0;
-    {
-        int ring = td5_track_get_ring_length();
-        span_count = (ring > 0) ? ((ring + 3) >> 2) : 0;
-        if (span_count <= 0 || span_count > 65536) span_count = 65536;
+static int rt_scenery_on(void)   { static int v = -1; if (v < 0) v = td5_env_int("TD5RE_RT_SCENERY",    1, 0, 1); return v; }
+static int rt_billboards_on(void){ static int v = -1; if (v < 0) v = td5_env_int("TD5RE_RT_BILLBOARDS", 1, 0, 1); return v; }
+
+/* Feed entry e: merge every valid scenery mesh of its block into chunk BLASes.
+ * A block shared with an already-fed entry (TD6 tracks reuse blocks) is not
+ * duplicated: the new entry aliases the owner. */
+static void rt_entry_feed(int e)
+{
+    RTEntry *E = &s_entries[e];
+    const TD5_SpanDisplayList *dl;
+    int i, x;
+
+    memset(E, 0, sizeof(*E));
+    E->fed = 1; E->owner = e;
+    s_fed_entries++;
+    if (!rt_scenery_on()) return;
+    dl = td5_track_get_display_list_entry(e);
+    E->dl = dl;
+    if (!dl || !dl->meshes) return;
+    for (x = 0; x < s_entry_count; x++) {
+        if (x == e || !s_entries[x].fed || s_entries[x].dl != dl) continue;
+        E->owner = s_entries[x].owner;          /* alias the block's owner */
+        return;
     }
-    for (sp = 0; sp < span_count; sp++) {
-        const TD5_SpanDisplayList *dl = td5_track_get_display_list_entry(sp);
-        int i;
-        if (!dl || !dl->meshes) continue;
-        if (rt_seen(dl)) continue;                 /* block already walked */
-        for (i = 0; i < (int)dl->count; i++) {
-            TD5_MeshHeader *mesh = dl->meshes[i];
-            int is_bb;
-            if (!mesh || (uintptr_t)mesh < 0x100000u) continue;
-            if (mesh->command_count <= 0 || mesh->command_count > 4096) continue;
-            if (mesh->total_vertex_count <= 0 || mesh->total_vertex_count > 131072) continue;
-            if (!mesh->commands || !mesh->vertices) continue;
-            if ((uintptr_t)mesh->commands < 0x10000u || (uintptr_t)mesh->vertices < 0x10000u) continue;
-            if (rt_seen(mesh)) continue;
-            if (s_scenery_count >= RT_MAX_SCENERY) { dropped++; continue; }
-            is_bb = (mesh->texture_page_id == 1 || mesh->texture_page_id == 2);
-            if (rt_diag_on() && s_seen_count < 40) {
-                const TD5_PrimitiveCmd *c0 = mesh->commands;
-                rt_diag("  MESH page=%d cmds=%d nv=%d cmd0(op=%d vp=0x%X tri=%d quad=%d) is_bb=%d",
-                        mesh->texture_page_id, mesh->command_count, mesh->total_vertex_count,
-                        c0[0].dispatch_type, (unsigned)c0[0].vertex_data_ptr,
-                        c0[0].triangle_count, c0[0].quad_count, is_bb);
-            }
-            if (is_bb) {
-                if (s_bb_on && rt_feed_billboard(mesh)) bb++;
-            } else if (mesh->total_vertex_count > 65535) {
-                big++;                                 /* u16 index limit; skip (rare) */
-            } else {
-                unsigned char smask = 0xFFu;
-                int h = rt_build_scenery_mesh(mesh, rt_scenery_matid(mesh), &smask);
-                if (h) { s_scenery_mask[s_scenery_count] = smask;
-                         s_scenery_handles[s_scenery_count++] = h; solid++; }
+
+    rt_acc_reset();
+    s_acc_entry = e;
+    for (i = 0; i < (int)dl->count; i++) {
+        TD5_MeshHeader *mesh = dl->meshes[i];
+        int is_bb;
+        if (!mesh || (uintptr_t)mesh < 0x100000u) continue;
+        if (mesh->command_count <= 0 || mesh->command_count > 4096) continue;
+        if (mesh->total_vertex_count <= 0 || mesh->total_vertex_count > 131072) continue;
+        if (!mesh->commands || !mesh->vertices) continue;
+        if ((uintptr_t)mesh->commands < 0x10000u || (uintptr_t)mesh->vertices < 0x10000u) continue;
+        is_bb = (mesh->texture_page_id == 1 || mesh->texture_page_id == 2);
+        if (is_bb) {
+            if (rt_billboards_on() && rt_acc_add_billboard(E, mesh)) { E->meshes++; s_fed_meshes++; }
+        } else if (rt_acc_add_solid(E, mesh)) {
+            E->meshes++; s_fed_meshes++;
+        }
+    }
+    rt_acc_flush(E);
+    s_acc_entry = -1;
+}
+
+static void rt_entry_evict(int e)
+{
+    RTEntry *E = &s_entries[e];
+    int c, x, heir = -1;
+    if (!E->fed) return;
+    s_fed_entries--;
+    if (E->owner == e && E->nchunks > 0) {
+        /* Another fed entry aliasing this block inherits the chunks. */
+        for (x = 0; x < s_entry_count; x++)
+            if (x != e && s_entries[x].fed && s_entries[x].owner == e) { heir = x; break; }
+        if (heir >= 0) {
+            RTEntry *H = &s_entries[heir];
+            memcpy(H->handle, E->handle, sizeof(H->handle));
+            H->nchunks = E->nchunks; H->meshes = E->meshes; H->owner = heir;
+            for (x = 0; x < s_entry_count; x++)
+                if (s_entries[x].fed && s_entries[x].owner == e) s_entries[x].owner = heir;
+        } else {
+            for (c = 0; c < E->nchunks; c++)
+                if (E->handle[c]) { td5_plat_rt_mesh_destroy(E->handle[c]); s_fed_chunks--; }
+            s_fed_meshes -= E->meshes;
+        }
+    }
+    memset(E, 0, sizeof(*E));
+}
+
+/* ---- [RT WINDOW] the window ----------------------------------------------- */
+
+typedef struct { int lo, hi, center; } RTWin;   /* entry indices; may run outside [0,n) */
+
+static int rt_win_fwd(void)  { static int v = -1; if (v < 0) v = td5_env_int("TD5RE_RT_WIN_FWD",  RT_WIN_FWD_SPANS_DEF,  16, 4096); return v; }
+static int rt_win_back(void) { static int v = -1; if (v < 0) v = td5_env_int("TD5RE_RT_WIN_BACK", RT_WIN_BACK_SPANS_DEF, 16, 4096); return v; }
+static int rt_feed_budget(void){ static int v = -1; if (v < 0) v = td5_env_int("TD5RE_RT_FEED_PER_FRAME", RT_FEED_PER_FRAME_DEF, 1, 64); return v; }
+
+/* Same span->entry mapping as the render walk (td5_render_actors_for_view):
+ * faithful TD5 layout = span>>2; TD6 = proportional over the real entry count.
+ * Centre = the pane's player on its NORMALISED ring span (branch spans fold
+ * onto the main ring), mirrored in reverse like every MODELS.DAT consumer. */
+static void rt_view_window(int vp, int n, int ring, RTWin *w)
+{
+    TD5_Actor *a = td5_game_get_actor(td5_game_get_player_slot(vp));
+    int span = a ? (int)a->track_span_normalized : 0;
+    int fwd = rt_win_fwd(), back = rt_win_back(), lo_s, hi_s;
+    if (ring > 0) { if (span < 0) span = 0; else if (span >= ring) span = ring - 1; }
+    if (g_td5.reverse_direction && ring > 0) {
+        span = ring - 1 - span;
+        lo_s = span - fwd; hi_s = span + back;     /* travel = decreasing entry index */
+    } else {
+        lo_s = span - back; hi_s = span + fwd;
+    }
+    if (g_active_td6_level > 0 && ring > 0) {
+        long long re = (long long)n;
+        w->lo = (int)(((long long)lo_s * re) / ring);
+        w->hi = (int)((((long long)hi_s * re) + (ring - 1)) / ring);
+        w->center = (int)(((long long)span * re) / ring);
+    } else {
+        w->lo = lo_s >> 2; w->hi = hi_s >> 2; w->center = span >> 2;
+    }
+    if (w->hi < w->lo) w->hi = w->lo;
+}
+
+/* Is entry e inside window w widened by `margin` entries? Circuits wrap. */
+static int rt_win_contains(int e, const RTWin *w, int margin, int n, int circuit)
+{
+    int lo = w->lo - margin, hi = w->hi + margin, d;
+    if (!circuit) return e >= lo && e <= hi;
+    if (hi - lo >= n - 1) return 1;
+    d = (e - lo) % n; if (d < 0) d += n;
+    return d <= hi - lo;
+}
+
+/* Re-evaluate the window(s) and stream entries in/out. `budget` = max entries
+ * fed this call (the warmup passes RT_ENTRY_MAX to fill the whole window). */
+static void rt_scene_update(int budget)
+{
+    int n = td5_track_get_models_display_list_count();
+    int ring = td5_track_get_ring_length();
+    int circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT) ? 1 : 0;
+    int views = (g_td5.viewport_count > 0) ? g_td5.viewport_count : 1;
+    RTWin w[TD5_MAX_VIEWPORTS];
+    int v, e, k, reach = 0, fed_now = 0;
+
+    if (n <= 0 || n > RT_ENTRY_MAX) { if (s_entry_count) rt_entries_destroy_all(); return; }
+    if (s_entry_count != n) { rt_entries_destroy_all(); s_entry_count = n; }
+    if (views > TD5_MAX_VIEWPORTS) views = TD5_MAX_VIEWPORTS;
+    for (v = 0; v < views; v++) {
+        rt_view_window(v, n, ring, &w[v]);
+        if (w[v].hi - w[v].lo > reach) reach = w[v].hi - w[v].lo;
+    }
+    s_feed_frames++;
+
+    /* Evict everything outside every window (+ hysteresis margin). */
+    for (e = 0; e < n; e++) {
+        int keep = 0;
+        if (!s_entries[e].fed) continue;
+        for (v = 0; v < views && !keep; v++)
+            keep = rt_win_contains(e, &w[v], RT_WIN_MARGIN_ENTRIES, n, circuit);
+        if (!keep) rt_entry_evict(e);
+    }
+    /* Feed nearest-first around each pane's player, forward before back. */
+    for (k = 0; k <= reach && fed_now < budget; k++) {
+        for (v = 0; v < views && fed_now < budget; v++) {
+            int s;
+            for (s = 0; s < 2 && fed_now < budget; s++) {
+                int c = w[v].center + (s == 0 ? k : -k);
+                if (k == 0 && s == 1) continue;
+                if (circuit) { c %= n; if (c < 0) c += n; }
+                else if (c < 0 || c >= n) continue;
+                if (!rt_win_contains(c, &w[v], 0, n, circuit)) continue;
+                if (s_entries[c].fed) continue;
+                rt_entry_feed(c);
+                fed_now++;
             }
         }
     }
-    rt_diag("SCENERY_FEED spans=%d seen=%d solid=%d billboards=%d handles=%d big_skipped=%d dropped=%d",
-            span_count, s_seen_count, solid, bb, s_scenery_count, big, dropped);
+
+    if (rt_diag_on() && (fed_now || (s_feed_frames % 300u) == 1u)) {
+        unsigned vbu = 0, vbc = 0, ibu = 0, ibc = 0, nm = 0;
+        td5_plat_rt_pool_stats(&vbu, &vbc, &ibu, &ibc, &nm);
+        rt_diag("SCENE_WINDOW frame=%u entries=%d win0=[%d..%d] c=%d fed=%d chunks=%d meshes=%d fed_now=%d pool vb=%u/%uMB ib=%u/%uMB meshes=%u",
+                s_feed_frames, n, w[0].lo, w[0].hi, w[0].center, s_fed_entries, s_fed_chunks, s_fed_meshes,
+                fed_now, vbu >> 20, vbc >> 20, ibu >> 20, ibc >> 20, nm);
+    }
 }
 
 /* ---- per-frame driver ----------------------------------------------------- */
@@ -685,9 +845,15 @@ static void rt_build_tlas(void)
          * the default 0xFF and cast onto the road normally. */
         for (i = 0; i < s_track_chunk_count; i++)
             if (s_track_handles[i]) td5_plat_rt_scene_instance(s_track_handles[i], identity, 0xFEu);
-        /* [RT2-P2] Static world scenery + billboards (world-space verts -> identity). */
-        for (i = 0; i < s_scenery_count; i++)
-            if (s_scenery_handles[i]) td5_plat_rt_scene_instance(s_scenery_handles[i], identity, s_scenery_mask[i]);
+        /* [RT WINDOW] Merged per-entry scenery chunks of the live window
+         * (world-space verts -> identity instance, full caster mask). */
+        for (i = 0; i < s_entry_count; i++) {
+            const RTEntry *E = &s_entries[i];
+            int c;
+            if (!E->fed || E->owner != i) continue;
+            for (c = 0; c < E->nchunks; c++)
+                if (E->handle[c]) td5_plat_rt_scene_instance(E->handle[c], identity, 0xFFu);
+        }
     }
 
     total = td5_game_get_total_actor_count();
@@ -770,11 +936,9 @@ int td5_rt_warmup_prepare(void)
      * exist here in case that hook ran before RT went active. */
     if (s_track_chunk_count == 0)
         td5_rt_level_build();
-    /* Full-scene scenery feed -- the wave that otherwise hits race frame 1. */
-    if (!s_scenery_fed) {
-        rt_feed_world_scenery();
-        s_scenery_fed = 1;
-    }
+    /* [RT WINDOW] Feed the whole initial window now (unbounded budget) so the
+     * loading-screen pump drains its BLAS wave before the first race frame. */
+    rt_scene_update(RT_ENTRY_MAX);
     return 1;
 }
 
@@ -813,10 +977,12 @@ void td5_rt_frame(int vp, int pane_x, int pane_y, int pane_w, int pane_h)
      * InitRace has parsed MODELS.DAT (the level_build hook ran too early). The
      * wrapper chunks the BLAS builds across frames so a big track warms up over
      * a few frames without a TDR. */
-    if (vp == 0 && !s_scenery_fed) {
-        rt_feed_world_scenery();
-        s_scenery_fed = 1;
-    }
+    /* [RT WINDOW] Stream the scenery window: evict entries the players left
+     * behind, feed the ones coming into reach (a few per frame; the wrapper
+     * chunks their BLAS builds by tri budget). Also the lazy first feed after a
+     * LOW->HIGH switch or device-lost rebuild (the entry table is empty then). */
+    if (vp == 0)
+        rt_scene_update(rt_feed_budget());
 
     /* TLAS is world-space and shared across panes: build once per frame (vp 0). */
     if (vp == 0) {

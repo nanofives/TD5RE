@@ -133,8 +133,13 @@ REM miss/chit/anyhit added by later phases), emitted as a BYTE array header
 REM (g_rt_pipeline) that d3d12_dxr.c #includes. dxc requires <windows.h> types;
 REM the header is pure data (no MinGW linking implications).
 REM ===========================================================================
-%DXC% -nologo -T lib_6_3 -Fh rt_pipeline_bytes.h -Vn g_rt_pipeline rt_pipeline.hlsl
-if errorlevel 1 (echo FAILED: rt_pipeline ^(dxil lib_6_3^) && exit /b 1)
-echo   rt_pipeline (DXIL lib_6_3) OK
+REM [RT WINDOW 2026-09-03] lib_6_3 -> lib_6_5: the hit shaders index the
+REM GeoRecord table by InstanceID() + GeometryIndex() (one merged BLAS per
+REM display-list entry, one geometry range per scenery mesh). GeometryIndex()
+REM needs SM 6.5 + DXR 1.1 hardware (any RTX / RDNA2+; tier is logged in
+REM log/d3d12_init.log as "DXR: tier=").
+%DXC% -nologo -T lib_6_5 -Fh rt_pipeline_bytes.h -Vn g_rt_pipeline rt_pipeline.hlsl
+if errorlevel 1 (echo FAILED: rt_pipeline ^(dxil lib_6_5^) && exit /b 1)
+echo   rt_pipeline (DXIL lib_6_5) OK
 
 echo All shaders compiled successfully.

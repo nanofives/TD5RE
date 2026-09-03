@@ -194,7 +194,13 @@ float rt_hash_world(float3 world, float k)
  * never self-shadow (the per-span near-camera stripe acne); walls/buildings/props/
  * cars keep bit 0 set (0xFF) and cast normally. Reflection/primary rays still
  * trace 0xFF and see the road. */
-float rt_shadow_ray(float3 origin, float3 dir, float tmin, float tmax)
+/* [RT WINDOW 2026-09-03] `extra` ORs additional ray flags. RAY_FLAG_FORCE_OPAQUE
+ * makes cutout geometry (billboard trees, fences) block as SOLID quads: no
+ * any-hit alpha test per candidate hit. On the auto track's tree-lined start
+ * the any-hit was ~1 ms/frame at 2560x1351 (measured 200 -> 247 fps with
+ * every cutout fed opaque); the sun-shadow rays keep it (leaf-shaped shadows
+ * are the feature), the sky-visibility GI rays don't need it. */
+float rt_shadow_ray_ex(float3 origin, float3 dir, float tmin, float tmax, uint extra)
 {
     RayDesc ray; ray.Origin = origin; ray.Direction = dir; ray.TMin = tmin; ray.TMax = tmax;
     ShadowPayload p; p.visible = 0;
@@ -203,9 +209,13 @@ float rt_shadow_ray(float3 origin, float3 dir, float tmin, float tmax)
      * the back of the wall's own triangle), this removes them. */
     TraceRay(g_tlas,
              RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
-             | RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+             | RAY_FLAG_CULL_BACK_FACING_TRIANGLES | extra,
              0x01, /*hitGroup*/0, /*mult*/0, /*miss*/0, ray, p);
     return (float)p.visible;
+}
+float rt_shadow_ray(float3 origin, float3 dir, float tmin, float tmax)
+{
+    return rt_shadow_ray_ex(origin, dir, tmin, tmax, RAY_FLAG_NONE);
 }
 
 /* ---- P3 vertex fetch (BackendRTVertex: pos@0, uv@12, color@20; 24 bytes) --- */

@@ -74,9 +74,10 @@ void chit_refl(inout RayPayload p, in BuiltInTriangleIntersectionAttributes attr
      * term (world normal = object normal * the rigid instance transform). Used by
      * both the reflection raygen and the debug view. (Textured shading + a sun
      * shadow ray are owed refinements.) */
-    /* One range per mesh (Phase 1 feed) -> GeoRecord index = InstanceID().
-     * (GeometryIndex() would need SM6.5; not available in lib_6_3.) */
-    GeoRecord rec = g_geo[InstanceID()];
+    /* [RT WINDOW 2026-09-03] InstanceID() = the mesh's FIRST GeoRecord; a merged
+     * entry BLAS carries one geometry range per scenery mesh, so the hit range's
+     * record is InstanceID() + GeometryIndex() (SM 6.5 / DXR 1.1; lib_6_5). */
+    GeoRecord rec = g_geo[InstanceID() + GeometryIndex()];
     uint3 idx = rt_load_tri_indices(rec.ib_byte_off, PrimitiveIndex());
     float3 p0 = rt_vertex_pos(rec.vb_byte_off, idx.x);
     float3 p1 = rt_vertex_pos(rec.vb_byte_off, idx.y);
@@ -123,7 +124,7 @@ void chit_refl(inout RayPayload p, in BuiltInTriangleIntersectionAttributes attr
 [shader("anyhit")]
 void anyhit_cutout(inout RayPayload p, in BuiltInTriangleIntersectionAttributes attr)
 {
-    GeoRecord rec = g_geo[InstanceID()];
+    GeoRecord rec = g_geo[InstanceID() + GeometryIndex()];   /* [RT WINDOW] per-range record */
     if (rec.texture_index == 0u || rec.texture_index >= 1024u) return;   /* no page -> accept */
     uint3 idx = rt_load_tri_indices(rec.ib_byte_off, PrimitiveIndex());
     float2 uv0 = rt_vertex_uv(rec.vb_byte_off, idx.x);
@@ -321,7 +322,11 @@ void rgen_ao()
         float r  = sqrt(u1);
         float ang = 6.2831853f * u2;
         float3 dir = normalize(T * (r * cos(ang)) + Bv * (r * sin(ang)) + N * sqrt(saturate(1.0f - u1)));
-        visSum += rt_shadow_ray(origin, dir, 1.0f, tmax);             /* 1 = reached sky   */
+        /* [RT WINDOW 2026-09-03] FORCE_OPAQUE: a tree canopy / fence counts as
+         * solid cover for sky visibility (no per-hit alpha test). Under a tree
+         * IS covered; the leaf-hole detail the sun-shadow rays keep is
+         * invisible in a soft hemispheric AO term. */
+        visSum += rt_shadow_ray_ex(origin, dir, 1.0f, tmax, RAY_FLAG_FORCE_OPAQUE); /* 1 = reached sky */
     }
     float skyvis = visSum / (float)Kc;
     g_gi[fp] = lerp(floorv, 1.0f, skyvis);

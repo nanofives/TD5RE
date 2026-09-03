@@ -3982,6 +3982,11 @@ void td5_plat_rt_set_view(const float cam_pos[3], const float basis9[9],
 }
 void td5_plat_rt_debug_view(void) { Backend_RTDebugView(); }
 unsigned td5_plat_rt_generation(void) { return Backend_RTGeneration(); }
+void td5_plat_rt_pool_stats(unsigned *vb_used, unsigned *vb_cap, unsigned *ib_used,
+                            unsigned *ib_cap, unsigned *meshes)
+{
+    Backend_RTPoolStats(vb_used, vb_cap, ib_used, ib_cap, meshes);
+}
 void td5_plat_rt_set_mode(int high) { Backend_RTSetMode(high); }
 void td5_plat_rt_register_page(unsigned page_id) { Backend_RTRegisterBoundPage(page_id); }
 void td5_plat_rt_warmup_begin(void) { Backend_RTWarmupBegin(); }
