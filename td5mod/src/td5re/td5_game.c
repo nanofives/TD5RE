@@ -12,6 +12,7 @@
 #include "td5_track.h"
 #include "td5_rt.h"
 #include "td5_track_registry.h"
+#include "td5_trackgen_stream.h" /* streamed scenery: completion passes + countdown hold */
 #include "td5_fmv.h"
 #include "td5_sound.h"
 #include "td5_input.h"
@@ -1329,6 +1330,12 @@ int td5_game_tick(void) {
 
     /* Poll network subsystem (discovery, connection management) */
     td5_net_tick();
+
+    /* [SCENERY STREAMING] Main-thread half of the scenery worker: notices when
+     * it has finished and runs the four table-walking passes InitRace normally
+     * does at step 8 (they ran at load against an empty table). Inert unless a
+     * generated track is streaming. */
+    td5_tgstream_tick();
 
     switch (g_td5.game_state) {
 
@@ -3090,7 +3097,7 @@ static void init_race_slot_states(void)
  * only the generator's own state, the level files and the track registry, and
  * the main thread touches NONE of those until the join -- it only redraws the
  * already-uploaded splash texture. Logging is mutex-protected. */
-typedef struct { int restart; int ok; TD5_FpEnv fp; } AutoTrackGenJob;
+typedef struct { int restart; int streamed; int ok; TD5_FpEnv fp; } AutoTrackGenJob;
 
 static void autotrack_gen_thread(void *arg)
 {
@@ -3102,7 +3109,7 @@ static void autotrack_gen_thread(void *arg)
      * _controlfp_s until the td5_plat_fpenv pair landed; same two registers,
      * one owner.) */
     td5_plat_fpenv_apply(&job->fp);
-    job->ok = td5_trackgen_prepare_race(job->restart);
+    job->ok = td5_trackgen_prepare_race(job->restart, job->streamed);
 }
 
 static void autotrack_generate_under_splash(void)
@@ -3117,6 +3124,11 @@ static void autotrack_generate_under_splash(void)
     uint16_t indices[6] = {0,1,2, 0,2,3};
 
     job.restart = s_race_reinit_is_restart;
+    /* [SCENERY STREAMING] Decided HERE, not in the generator: this module sees
+     * both the producer and the consumer, so it is the one place that may ask.
+     * Streamed = geometry only now (~0.4 s), scenery on the worker once the
+     * level has loaded. TD5RE_AUTOTRACK_STREAM=0 restores the whole build. */
+    job.streamed = td5_tgstream_enabled();
     job.ok = 0;
     s_race_reinit_is_restart = 0;
     td5_plat_fpenv_capture(&job.fp);
@@ -3130,6 +3142,12 @@ static void autotrack_generate_under_splash(void)
      * the two workers would race over those statics. Not optional (see the
      * threading contract in td5_trackgen_preview.h). */
     td5_tgprev_cancel_join();
+    /* [SCENERY STREAMING] Same reason, one worker further out: the PREVIOUS
+     * race's scenery stream may still be publishing into the table this load is
+     * about to replace, and it reads the same generator statics the build below
+     * overwrites. Join it here, before the generation worker starts, for the
+     * same reason the preview join is here and not in td5_asset_load_level. */
+    td5_tgstream_cancel_join();
 
     td5_plat_get_window_size(&screen_w, &screen_h);
     {
@@ -7218,7 +7236,12 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
              * [PORT 2026-06] While the first-race tutorial overlay is up, DO NOT
              * tick the countdown — freezing g_td5.paused at 1 holds the grid
              * until the player dismisses the overlay (td5_tutorial.c). */
-            if (!td5_tutorial_is_active())
+            /* [SCENERY STREAMING] ...and hold it the same way while the road
+             * ahead of the grid has no scenery yet, so the race does not start
+             * looking at the untextured fallback ribbon. Bounded, unlike the
+             * tutorial hold beside it, because a wedged worker has nobody to
+             * press a button (see td5_tgstream_hold). */
+            if (!td5_tutorial_is_active() && !td5_tgstream_hold())
                 tick_race_countdown();
             g_td5.sim_time_accumulator -= TD5_TICK_ACCUMULATOR_ONE;
             ticks_this_frame++;
@@ -7294,7 +7317,8 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
          * then hides cleanly at timer==0. Mirrors orig's per-frame call to
          * UpdateRaceCameraTransitionTimer @ 0x0040A490 which is invoked
          * regardless of paused state. */
-        if (g_cameraTransitionActive > 0 && !td5_tutorial_is_active()) {
+        if (g_cameraTransitionActive > 0 && !td5_tutorial_is_active() &&
+            !td5_tgstream_hold()) {
             tick_race_countdown();
         }
 

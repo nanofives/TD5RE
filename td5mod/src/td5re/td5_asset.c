@@ -33,6 +33,7 @@
 #include "td5_track.h"
 #include "td5_track_registry.h" /* custom-track registry: level/finish-span lookups */
 #include "td5_trackgen.h"       /* AUTO-GENERATED track: per-race regeneration */
+#include "td5_trackgen_stream.h" /* ...and the scenery worker this load starts */
 #include "td5_platform.h"
 #include "td5re.h"
 #include "td5_render.h"
@@ -2367,7 +2368,14 @@ int td5_asset_load_level(int track_index)
      * synchronously; every entry path still reaches that hook because this
      * function has exactly one caller (InitRace). On a build failure the stale
      * previous build is left in place and the load continues, so a generator
-     * hiccup degrades to "same track again" rather than a failed race launch. */
+     * hiccup degrades to "same track again" rather than a failed race launch.
+     *
+     * [SCENERY STREAMING] The build that ran under the splash is GEOMETRY ONLY
+     * when streaming is on; the scenery worker is started below, once the level
+     * is actually loaded, by td5_tgstream_begin(). The two joins that used to
+     * guard a regenerate from here (the STUDIO preview worker and a previous
+     * race's still-publishing scenery stream) now live with the build itself,
+     * in autotrack_generate_under_splash. */
 
     td5_asset_build_level_zip_path(track_index, zip_path, sizeof(zip_path));
 
@@ -2480,6 +2488,15 @@ int td5_asset_load_level(int track_index)
             TD5_LOG_I(LOG_TAG, "parsed MODELS.DAT: %d meshes from %s", parsed, models_source);
         }
     }
+
+    /* [SCENERY STREAMING] Reserve the scenery table and start the worker.
+     * MUST be here, AFTER the parse above: td5_track_parse_models_dat opens
+     * with free_models_dat_runtime, so reserving any earlier would have the
+     * load free everything the worker is about to publish into. A streamed
+     * build writes no MODELS.DAT, so the parse above found nothing and the
+     * table is empty at this point -- which is exactly what reserve wants.
+     * No-op for every non-streamed load. */
+    td5_tgstream_begin();
 
     {
         static const char *s_levelinf_names[1] = { "LEVELINF.DAT" };

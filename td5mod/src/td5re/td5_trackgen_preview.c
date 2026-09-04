@@ -38,6 +38,13 @@ static TD5_TrackGenPreviewStats s_stats;
  * it afterwards, so it needs no lock. */
 static TD5_TrackGenSpec s_spec;
 
+/* Main thread's FP control state, captured at request time. The preview walks
+ * the SAME centerline code a real build does, so without this it rounds
+ * differently from the race it is previewing -- the route drawn would be
+ * subtly not the route generated. Span counts survive a 1-ULP difference,
+ * which is why an earlier check comparing only span counts passed. */
+static TD5_FpEnv s_fpenv;
+
 /* ------------------------------------------------------------ sink hooks -- */
 
 static void tgprev_on_points(const TD5_TrackGenPoint *pts, int n, void *ctx)
@@ -71,6 +78,11 @@ static DWORD WINAPI tgprev_thread_proc(LPVOID param)
     int ok;
 
     (void)param;
+
+    /* FIRST, before the walk: adopt the main thread's rounding mode
+     * (td5_platform.h -- the port runs _RC_DOWN|_PC_64 to match the original
+     * binary, and a new thread does not inherit it). */
+    td5_plat_fpenv_apply(&s_fpenv);
 
     sink.on_points     = tgprev_on_points;
     sink.should_cancel = tgprev_should_cancel;
@@ -167,6 +179,7 @@ int td5_tgprev_request(const TD5_TrackGenSpec *spec)
     memset(&s_stats, 0, sizeof(s_stats));
     LeaveCriticalSection(&s_lock);
 
+    td5_plat_fpenv_capture(&s_fpenv);
     s_thread = CreateThread(NULL, 0, tgprev_thread_proc, NULL, 0, NULL);
     if (!s_thread) {
         TD5_LOG_E(LOG_TAG, "tgprev: CreateThread failed");

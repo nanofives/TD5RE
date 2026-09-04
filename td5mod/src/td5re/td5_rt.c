@@ -671,6 +671,25 @@ static void rt_entry_feed(int e)
     s_fed_entries++;
     if (!rt_scenery_on()) return;
     dl = td5_track_get_display_list_entry(e);
+    /* [SCENERY STREAMING] Do NOT latch `fed` on an entry whose geometry has not
+     * been published yet. A streamed table reserves its ENTRY COUNT up front
+     * (td5_track_scenery_reserve sets s_models_display_list_count = nentries),
+     * so `n` here is the FULL count from the first frame while the per-entry
+     * meshes fill in ascending order behind the player. The initial window is
+     * RT_WIN_FWD_SPANS_DEF/TD5_TG_SPANS_PER_ENTRY = 100 entries, and the worker
+     * publishes only ~24 of them a second, so most of that window is genuinely
+     * empty at race start. Latching it would leave those entries permanently
+     * without ray-traced geometry -- shadows and reflections would be missing
+     * from the road ahead for the whole race. Leave it unfed so the next
+     * rt_scene_update retries it.
+     *
+     * Gated on _streaming() so a track that is simply FINISHED with an empty
+     * entry still latches once and is not re-examined every frame. */
+    if ((!dl || dl->count == 0) && td5_track_scenery_streaming()) {
+        E->fed = 0;
+        s_fed_entries--;
+        return;
+    }
     E->dl = dl;
     if (!dl || !dl->meshes) return;
     for (x = 0; x < s_entry_count; x++) {

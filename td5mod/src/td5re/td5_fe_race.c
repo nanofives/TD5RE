@@ -24,6 +24,7 @@
 #include "td5_track_registry.h"  /* custom-track registry: selector bound + has-slot */
 #include "td5_trackgen.h"        /* [R2 item 25] auto-track slot test + last seed */
 #include "td5_trackgen_preview.h" /* AUTO TRACK STUDIO: background route preview */
+#include "td5_trackgen_stream.h"  /* ...which must not overlap the scenery worker */
 #include "td5_types.h"
 #include "td5re.h"
 #include "td5_snk_strings.h"
@@ -7319,6 +7320,12 @@ static void at_preview_request(void)
      * preview must therefore set it itself, or every preview would walk seed 0
      * no matter what the SEED row says. */
     spec.seed = (unsigned int)seed;
+
+    /* The scenery worker walks the SAME generator statics (the private RNG,
+     * the biome grid, the node list), so a preview must never overlap one --
+     * exactly the invariant that already forces the join in td5_asset_load_level.
+     * Reaching the studio from a post-race menu is enough to hit this. */
+    td5_tgstream_cancel_join();
 
     s_at_pts_n = 0;
     s_at_pts_gen = td5_tgprev_request(&spec);
