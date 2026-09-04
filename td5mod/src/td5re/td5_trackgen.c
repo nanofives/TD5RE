@@ -635,6 +635,55 @@ static TG_Fork s_forks[TD5_TG_BRANCH_MAX];
 static int s_fork_count;
 static int s_ring_len;
 
+/* ==========================================================================
+ * [PARALLEL S0/S1, from autotrack-studio ba8423da] Groundwork for running the
+ * per-entry emit loop on more than one thread. All three are INERT
+ * single-threaded, which is why they can land ahead of the threading itself.
+ * ========================================================================== */
+
+/* [S0] Stop the COMPILER reordering two stores across this point. Not a CPU
+ * fence and deliberately not pretending to be one: every publish it guards
+ * writes the payload first and a validity flag second, and x86-64 does not
+ * reorder store-store, so a compiler barrier is the whole requirement here.
+ * Used where a lazily-filled build-scope cache is published to what will
+ * become parallel readers. */
+#if defined(__GNUC__)
+#  define TG_COMPILER_BARRIER() __asm__ __volatile__("" ::: "memory")
+#else
+#  define TG_COMPILER_BARRIER() ((void)0)
+#endif
+
+/* [S1] PER-ENTRY state that becomes PER-THREAD once the entry loop is
+ * parallel. Single-threaded this changes nothing: the main thread simply gets
+ * its own copy, and every one of these is already reset at the top of each
+ * entry, so no value is ever carried between entries anyway.
+ *
+ * GCC __thread per-worker isolation on this project's job pool is not assumed:
+ * td5_jobs_selftest_tls (td5_jobs.c) exists specifically to assert it. */
+#if defined(__GNUC__)
+#  define TG_TLS __thread
+#else
+#  define TG_TLS
+#endif
+
+/* [S1] Relaxed atomic OR for the element-inventory mask.
+ *
+ * Needed because ONE bit in this mask feeds a geometry decision -- the R11
+ * sign emitter skips a span whose LAMP bit is set -- while tg_acct_range
+ * writes ROWS THE ENTRY DOES NOT OWN (`si, si+1` at the WATER sites), so two
+ * entries can hit the same 64-bit word. A plain |= is a read-modify-write, so
+ * a lost update there could drop a LAMP bit and put a sign where none belongs.
+ *
+ * Relaxed is sufficient: the bits are independent flags, and the only bit read
+ * during emit (LAMP) is set and tested for the same span inside a single
+ * entry, i.e. by one thread in program order. Everything else is read after
+ * the loop joins. */
+#if defined(__GNUC__)
+#  define TG_ATOMIC_OR64(p, v) __atomic_fetch_or((p), (v), __ATOMIC_RELAXED)
+#else
+#  define TG_ATOMIC_OR64(p, v) (*(p) |= (v))
+#endif
+
 /* Fork lookups live down in the [FB] block (three other work areas read them
  * from there); forward-declared here because the strip emitters above need
  * them to map an APPENDED corridor span back to its main-ring node. */
@@ -1300,8 +1349,11 @@ static long s_acct_count[TG_ACCT_KIND_COUNT];
 static unsigned long long s_acct_mask[TD5_TG_MAX_SPANS][TG_ACCT_MASK_WORDS];
 typedef char tg_acct_mask_fits[(TG_ACCT_MASK_WORDS * 64 >= (int)TG_ACCT_KIND_COUNT) ? 1 : -1];
 
+/* Atomic OR, not |= -- see TG_ATOMIC_OR64 for why one bit in here makes that
+ * mandatory once entries run in parallel. */
 #define TG_ACCT_MASK_SET(si, k)                                               \
-    (s_acct_mask[(si)][(unsigned)(k) >> 6] |= 1ull << ((unsigned)(k) & 63u))
+    TG_ATOMIC_OR64(&s_acct_mask[(si)][(unsigned)(k) >> 6],                    \
+                   1ull << ((unsigned)(k) & 63u))
 #define TG_ACCT_MASK_TEST(si, k)                                              \
     ((s_acct_mask[(si)][(unsigned)(k) >> 6] >> ((unsigned)(k) & 63u)) & 1ull)
 
@@ -3618,11 +3670,11 @@ static const unsigned char k_guard_kind_class[TG_GK_COUNT] = {
     TG_GKC_SCENERY   /* branch-side */
 };
 
-static size_t s_guard_ex_lo[TD5_TG_GUARD_EX_MAX];
-static size_t s_guard_ex_hi[TD5_TG_GUARD_EX_MAX];
-static unsigned char s_guard_ex_kind[TD5_TG_GUARD_EX_MAX];
-static int    s_guard_ex_si[TD5_TG_GUARD_EX_MAX];
-static int    s_guard_ex_n;
+static TG_TLS size_t s_guard_ex_lo[TD5_TG_GUARD_EX_MAX];
+static TG_TLS size_t s_guard_ex_hi[TD5_TG_GUARD_EX_MAX];
+static TG_TLS unsigned char s_guard_ex_kind[TD5_TG_GUARD_EX_MAX];
+static TG_TLS int    s_guard_ex_si[TD5_TG_GUARD_EX_MAX];
+static TG_TLS int    s_guard_ex_n;
 static long   s_guard_rejects;          /* running total across the whole build */
 static long   s_guard_residual;         /* on-road meshes STILL present post-drop */
 static long   s_guard_rej_kind[TG_GK_COUNT];   /* [R8] breakdown by kind */
@@ -3730,11 +3782,11 @@ static const char *const k_pave_src_name[TG_PVS_COUNT] = {
 };
 
 #define TD5_TG_PAVE_MARK_MAX 512
-static size_t        s_pave_mark_lo[TD5_TG_PAVE_MARK_MAX];
-static size_t        s_pave_mark_hi[TD5_TG_PAVE_MARK_MAX];
-static unsigned char s_pave_mark_src[TD5_TG_PAVE_MARK_MAX];
-static int           s_pave_mark_si[TD5_TG_PAVE_MARK_MAX];
-static int           s_pave_mark_n;
+static TG_TLS size_t        s_pave_mark_lo[TD5_TG_PAVE_MARK_MAX];
+static TG_TLS size_t        s_pave_mark_hi[TD5_TG_PAVE_MARK_MAX];
+static TG_TLS unsigned char s_pave_mark_src[TD5_TG_PAVE_MARK_MAX];
+static TG_TLS int           s_pave_mark_si[TD5_TG_PAVE_MARK_MAX];
+static TG_TLS int           s_pave_mark_n;
 
 static void tg_pave_mark_reset(void) { s_pave_mark_n = 0; }
 
@@ -4223,7 +4275,6 @@ static void tg_r9_water_table_build(const TG_NodeList *nl)
 {
     int s;
     s_r9_wet_count = 0;
-    s_r9_wet_ready = 1;
     for (s = 0; s + 1 < nl->count && s_r9_wet_count < TD5_TG_R9_WET_MAX; s++) {
         double side;
         if (tg_span_in_bridge_run(s) && tg_water_span_clear(s)) {
@@ -4244,6 +4295,15 @@ static void tg_r9_water_table_build(const TG_NodeList *nl)
             s_r9_wet_count++;
         }
     }
+    /* [S0] READY LAST. This used to be set at the TOP of the function, before
+     * a single element existed, which is the one publish order that cannot
+     * work: a parallel entry seeing ready==1 would read a table that is still
+     * being filled, and this table decides whether a mesh is DROPPED
+     * (tg_r9_water_audit_mesh), so a torn read silently deletes or keeps
+     * buildings. Single-threaded the old order was harmless because the
+     * function ran to completion before anything read it. */
+    TG_COMPILER_BARRIER();
+    s_r9_wet_ready = 1;
 }
 
 /* Is the world point (cx,cz) inside the water rectangle of the span whose near
@@ -16393,8 +16453,23 @@ static int tg_xstreet_here(const TG_NodeList *nl, int si, double side,
             }
         }
         if (memo) {
-            s_r10_xs_state[si][mi] = (signed char)here;
+            /* [S0] PUBLISH ORDER: reach FIRST, state LAST. state is the
+             * "is this slot valid" flag, so a reader that sees it set must be
+             * guaranteed to see the reach that goes with it. Written the other
+             * way round (as it was), a parallel entry could read state>=0 with
+             * a stale or half-written reach and place furniture against the
+             * wrong carriageway. Harmless single-threaded; this is the
+             * ordering the per-entry parallel build needs.
+             *
+             * This memo stays LAZY on purpose. Precomputing all slots would do
+             * far more work than a build asks for -- its expensive half
+             * marches a 48-span window outward per (span, side), and the
+             * branch's own note records an unmemoised run failing to finish
+             * seed 777 in 900 s -- so it is made safe by ORDER, not by being
+             * made eager. */
             s_r10_xs_reach[si][mi] = reach;
+            TG_COMPILER_BARRIER();
+            s_r10_xs_state[si][mi] = (signed char)here;
         }
         if (preach) *preach = reach;
         return here;
@@ -24908,6 +24983,22 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
         tg_r13_faces_reset();             /* [R13 FACES] run-end return census */
         TG_ZONE_END(TG_ZONE_PREPASS);
         tg_xmemo_reset(1);                /* [R14 GENPERF] tables final -> cache the crossing predicates */
+        /* [S0] WARM THE CHEAP BUILD-SCOPE LAZY CACHES HERE, while this is
+         * still the only thread. Both are pure functions of state already
+         * frozen at this point (the node list, the elevation profile, the
+         * biome grid, the fork table), so computing them now cannot change an
+         * answer -- it only moves the work out of the region that is about to
+         * become parallel, and removes two lazy first-touch writes from it.
+         *
+         * The water table is warmed UNCONDITIONALLY, which is a deliberate
+         * deviation from ba8423da (it warms only when TD5RE_R9_BRIDGE_REPORT
+         * is set). Its reader tg_r9_water_audit_mesh DROPS MESHES, so the
+         * table is a geometry input, not a report input: with the report off
+         * it would still be built, just lazily and inside the parallel
+         * region, which is the thing being removed. One pass over the node
+         * list, so warming it costs nothing measurable. */
+        (void)tg_track_min_y(nl);
+        if (!s_r9_wet_ready) tg_r9_water_table_build(nl);
     }
 
     for (e = 0; e < nentries && ok; e++) {
