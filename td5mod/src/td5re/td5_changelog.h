@@ -47,6 +47,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  silently dropped, 199 detail notes were cut at 1023" },
     { CL_ITEM,    "  chars, and one SUPR would have saved that back over the" },
     { CL_ITEM,    "  545-row file. Rows and buffers are now sized from data." },
+    { CL_ITEM,    "DEV: root and tracked pending CSVs unified (591 rows)." },
+    { CL_ITEM,    "  46 rows written only to root copies since Aug 25 (R8-R10" },
+    { CL_ITEM,    "  autotrack, arcade/cop consolidations, Aug 27-28 autotrack)" },
+    { CL_ITEM,    "  now live in the seed; both root copies are mirrors of it." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 03 (auto-track start-up and build time)" },
