@@ -804,6 +804,11 @@ enum {
     TG_ZONE_BIOME, TG_ZONE_ELEVATION, TG_ZONE_LEVELINF,
     TG_ZONE_WRITE_STRIP, TG_ZONE_WRITE_MODELS, TG_ZONE_SKY,
     TG_ZONE_SIDEBUILD,
+    /* [2026-09-04] NESTED inside TG_ZONE_EMIT, not disjoint from it: the
+     * emitter buckets sum to 9707 ms of a 14870 ms "models emit", so a
+     * quarter of the build was inside that loop and unattributed. These three
+     * say WHICH part of the entry body it is. */
+    TG_ZONE_ENTRY_L1, TG_ZONE_ENTRY_L2, TG_ZONE_GUARDVAL,
     TG_ZONE_COUNT
 };
 static const char *const k_tg_zone_name[TG_ZONE_COUNT] = {
@@ -812,7 +817,8 @@ static const char *const k_tg_zone_name[TG_ZONE_COUNT] = {
     "models assemble", "textures", "reports",
     "biome layout", "elevation", "levelinf emit",
     "write strip+trk", "write models", "sky install",
-    "terrain pre-pass"
+    "terrain pre-pass",
+    "[in emit] loop 1", "[in emit] loop 2", "[in emit] guard validate"
 };
 static uint64_t s_tg_zone_us[TG_ZONE_COUNT];
 static long     s_tg_zone_n[TG_ZONE_COUNT];
@@ -25458,6 +25464,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
          * appended -- sizes differ once ground, buildings and road quads are
          * mixed, so they cannot come from a uniform stride. */
         s_tg_emit_t0 = td5_plat_time_us();     /* [R14 GENPERF] per-span emit */
+        TG_ZONE_BEGIN(TG_ZONE_ENTRY_L1);
         for (i = 0; i < ns && ok; i++) {
             const int si = s0 + i;
 
@@ -25675,6 +25682,8 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
                 tg_guard_mark(r0, meshes.len, TG_GK_RAIL, si);
             }
         }
+        TG_ZONE_END(TG_ZONE_ENTRY_L1);
+        TG_ZONE_BEGIN(TG_ZONE_ENTRY_L2);
         for (i = 0; i < ns && ok; i++) {
             const int si = s0 + i;
             int k;
@@ -25947,6 +25956,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
          * carriageway, over ALL of this entry's assembled geometry, whatever
          * emitter produced it. Runs before the block header so the rejected
          * meshes never reach the offset table. */
+        TG_ZONE_END(TG_ZONE_ENTRY_L2);
         s_tg_zone_us[TG_ZONE_EMIT] += td5_plat_time_us() - s_tg_emit_t0;
         s_tg_zone_n[TG_ZONE_EMIT]++;
         /* [R9 CITY] Measure BEFORE the guard compacts the buffer -- the pavement
@@ -25958,8 +25968,11 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
             tg_r9_city_scan_entry(nl, ring, s0, ns, &meshes, moff, nmesh);
             TG_ZONE_END(TG_ZONE_CITYSCAN);
         }
-        if (ok)
+        if (ok) {
+            TG_ZONE_BEGIN(TG_ZONE_GUARDVAL);
             tg_guard_validate_entry(nl, ring, s0, ns, &meshes, moff, &nmesh);
+            TG_ZONE_END(TG_ZONE_GUARDVAL);
+        }
 
         if (ok) {
             TG_ZONE_BEGIN(TG_ZONE_ASSEMBLE);
