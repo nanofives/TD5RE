@@ -6,8 +6,21 @@
  * with three columns:  summary , detail , status
  *   - summary : the one-line item (also the right-edge overlay text)
  *   - detail  : the longer test-focus note shown by the ENTER-key modal
- *   - status  : "pending" (or blank) = shown;  anything else ("tested",
- *               "wontfix", ...) = hidden from the list & overlay
+ *   - status  : "pending" (or blank) = shown;  anything else = hidden from
+ *               the list & overlay. Values in use (2026-09-02 triage):
+ *               "tested" (drive-verified), "merged" (folded into a later
+ *               row), "superseded" (contradicted by a later change), "info"
+ *               (log-only / script-verified, not drive-testable), "open"
+ *               (known NOT fixed; a drive test would be a false failure),
+ *               "duplicate".
+ *
+ * [2026-09-04] Sizes are no longer fixed. The file used to be read into a
+ * 256 KB static buffer with 512 rows x (160 summary + 1024 detail) chars, and
+ * every limit was hit silently: the CSV crossed 256 KB on 2026-08-25
+ * (92eae845), so the screen showed only the first ~58 rows, 199 details were
+ * longer than 1023 chars, and a SUPR/DELETE would have written that truncated
+ * picture back over the 545-row file. Rows now hold heap strings and both the
+ * load and save buffers are sized from the data.
  *
  * This CSV is the SINGLE SOURCE OF TRUTH -- it replaces the old compiled-in
  * k_seed[] / k_pending_detail[] arrays and the untracked td5re_pending.txt.
@@ -35,18 +48,17 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define LOG_TAG "pending"
 
-#define PENDING_MAX         512   /* > row count, room to grow */
-#define PENDING_TEXT_MAX    160   /* summary column                     */
-#define PENDING_DETAIL_MAX  1024  /* detail column (long test note)     */
+#define PENDING_MAX         2048  /* > row count, room to grow (545 rows 2026-09-04) */
 #define PENDING_STATUS_MAX  24    /* status column                      */
 
 typedef struct {
-    char summary[PENDING_TEXT_MAX];
-    char detail [PENDING_DETAIL_MAX];
-    char status [PENDING_STATUS_MAX];
+    char *summary;                    /* heap, any length (was char[160])  */
+    char *detail;                     /* heap, any length (was char[1024]) */
+    char  status[PENDING_STATUS_MAX];
 } PendingItem;
 
 /* ALL rows exactly as loaded, every status. */
@@ -151,21 +163,51 @@ static int is_header_line(const char *p) {
     return 1;
 }
 
+static char *dup_str(const char *s) {
+    size_t n = strlen(s) + 1;
+    char  *d = (char *)malloc(n);
+    if (d) memcpy(d, s, n);
+    return d;
+}
+
+static void pending_free_items(void) {
+    int i;
+    for (i = 0; i < s_count; i++) {
+        free(s_items[i].summary);
+        free(s_items[i].detail);
+        s_items[i].summary = s_items[i].detail = NULL;
+    }
+    s_count = 0;
+}
+
+/* Whole file into a heap buffer sized from the file itself, plus one scratch
+ * buffer of the same size that any single field is guaranteed to fit in
+ * (a field can never be longer than the file). */
 static void pending_load_file(void) {
     const char *path = pending_path();
     TD5_File   *f    = td5_plat_file_open(path, "rb");
-    static char buf[262144];         /* whole file; must match td5_pending_save */
-    size_t      n;
-    char       *line;
+    int64_t     sz;
+    size_t      cap, n;
+    char       *buf, *scratch, *line;
     int         first = 1;
     if (!f) { TD5_LOG_W(LOG_TAG, "no CSV at %s (empty list)", path); return; }
-    n = td5_plat_file_read(f, buf, sizeof buf - 1);
+    sz  = td5_plat_file_size(f);
+    if (sz < 0) sz = 0;
+    cap = (size_t)sz + 1;
+    buf     = (char *)malloc(cap);
+    scratch = (char *)malloc(cap);
+    if (!buf || !scratch) {
+        free(buf); free(scratch);
+        td5_plat_file_close(f);
+        TD5_LOG_W(LOG_TAG, "load: out of memory for %lu bytes (%s)", (unsigned long)sz, path);
+        return;
+    }
+    n = td5_plat_file_read(f, buf, cap - 1);
     td5_plat_file_close(f);
-    if (n == 0) return;
     buf[n] = '\0';
 
     line = buf;
-    while (line && *line) {
+    while (n && line && *line) {
         char *nl = strpbrk(line, "\r\n");
         if (nl) *nl = '\0';
         {
@@ -177,13 +219,16 @@ static void pending_load_file(void) {
             } else if (*p && s_count < PENDING_MAX) {
                 PendingItem *it = &s_items[s_count];
                 first = 0;
-                csv_field(&p, it->summary, sizeof it->summary);
-                csv_field(&p, it->detail,  sizeof it->detail);
-                csv_field(&p, it->status,  sizeof it->status);
-                if (it->summary[0]) {
+                csv_field(&p, scratch, cap);
+                if (scratch[0]) {
+                    it->summary = dup_str(scratch);
+                    csv_field(&p, scratch, cap);
+                    it->detail  = dup_str(scratch);
+                    csv_field(&p, it->status, sizeof it->status);
                     if (!it->status[0])
                         strcpy(it->status, "pending");
-                    s_count++;
+                    if (it->summary && it->detail) s_count++;
+                    else { free(it->summary); free(it->detail); it->summary = it->detail = NULL; }
                 }
             }
         }
@@ -191,6 +236,10 @@ static void pending_load_file(void) {
         line = nl + 1;
         while (*line == '\r' || *line == '\n') line++;
     }
+    if (s_count >= PENDING_MAX)
+        TD5_LOG_W(LOG_TAG, "load: row cap PENDING_MAX=%d reached, later rows dropped (%s)", PENDING_MAX, path);
+    free(scratch);
+    free(buf);
 }
 
 static void rebuild_view(void) {
@@ -217,28 +266,36 @@ static int csv_put(char *buf, int len, int cap, const char *s, char sep) {
 
 void td5_pending_save(void) {
     const char *path = pending_path();
-    TD5_File   *f    = td5_plat_file_open(path, "wb");
-    static char buf[262144];
+    TD5_File   *f;
+    char       *buf;
+    size_t      cap  = 64;               /* header + slack */
     int         len  = 0, i;
-    if (!f) { TD5_LOG_W(LOG_TAG, "save: cannot open %s", path); return; }
-    len += snprintf(buf + len, sizeof buf - (size_t)len, "summary,detail,status\r\n");
-    for (i = 0; i < s_count && len < (int)sizeof buf - (PENDING_TEXT_MAX + PENDING_DETAIL_MAX + 32); i++) {
-        len = csv_put(buf, len, (int)sizeof buf, s_items[i].summary, ',');
-        len = csv_put(buf, len, (int)sizeof buf, s_items[i].detail,  ',');
-        len = csv_put(buf, len, (int)sizeof buf,
+    /* Worst case every char is a quote that gets doubled, plus quotes/seps. */
+    for (i = 0; i < s_count; i++)
+        cap += 2 * (strlen(s_items[i].summary) + strlen(s_items[i].detail) + PENDING_STATUS_MAX) + 16;
+    buf = (char *)malloc(cap);
+    if (!buf) { TD5_LOG_W(LOG_TAG, "save: out of memory for %lu bytes", (unsigned long)cap); return; }
+    f = td5_plat_file_open(path, "wb");
+    if (!f) { free(buf); TD5_LOG_W(LOG_TAG, "save: cannot open %s", path); return; }
+    len += snprintf(buf + len, cap - (size_t)len, "summary,detail,status\r\n");
+    for (i = 0; i < s_count; i++) {
+        len = csv_put(buf, len, (int)cap, s_items[i].summary, ',');
+        len = csv_put(buf, len, (int)cap, s_items[i].detail,  ',');
+        len = csv_put(buf, len, (int)cap,
                       s_items[i].status[0] ? s_items[i].status : "pending", '\r');
-        if (len < (int)sizeof buf) buf[len++] = '\n';
+        if (len < (int)cap) buf[len++] = '\n';
     }
     if (len < 0) len = 0;
-    if (len > (int)sizeof buf) len = (int)sizeof buf;
+    if (len > (int)cap) len = (int)cap;
     td5_plat_file_write(f, buf, (size_t)len);
     td5_plat_file_close(f);
+    free(buf);
 }
 
 /* ---- lifecycle ---------------------------------------------------------- */
 
 int td5_pending_init(void) {
-    s_count = 0;
+    pending_free_items();
     pending_load_file();
     rebuild_view();
     TD5_LOG_I(LOG_TAG, "pending-test: %d shown / %d total (%s)",
