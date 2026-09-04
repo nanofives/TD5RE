@@ -70,6 +70,11 @@ static DWORD WINAPI thread_trampoline(LPVOID param)
     return 0;
 }
 
+unsigned td5_plat_thread_id(void)
+{
+    return (unsigned)GetCurrentThreadId();
+}
+
 void *td5_plat_thread_create(void (*func)(void *), void *arg)
 {
     TD5_ThreadCtx *tc;

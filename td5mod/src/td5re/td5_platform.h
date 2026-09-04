@@ -134,6 +134,12 @@ uint32_t td5_plat_time_ms(void);
 /** Sleep for the specified number of milliseconds. */
 void td5_plat_sleep(uint32_t ms);
 
+/** Calling thread's OS id. Cheap (a thread-control-block read, no lock), so it
+ *  is usable as a per-thread array index in a hot path -- which is the point:
+ *  __thread on the MinGW toolchain compiles to emutls, whose accessor takes a
+ *  global lock and serialises every worker that touches it. */
+unsigned td5_plat_thread_id(void);
+
 /* Plain OS thread (td5_platform_win32_log.c). create returns an opaque handle
  * (NULL on failure); join waits for the function to return and releases it. */
 void *td5_plat_thread_create(void (*func)(void *), void *arg);

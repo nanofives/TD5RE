@@ -1388,21 +1388,49 @@ typedef struct {
     long c[TG_ACCT_KIND_COUNT];
 } __attribute__((aligned(64))) TG_AcctRow;
 static TG_AcctRow s_acct_rows[TG_ACCT_SLOTS];
-static int        s_acct_slot_next;          /* atomically claimed */
-static TG_TLS int s_acct_slot = -1;          /* this thread's row  */
+/* [S2h] THREAD SLOT, without __thread.
+ *
+ * Every per-thread datum in this file is indexed by this. It used to be a
+ * __thread int, which on this toolchain is emutls: an accessor call behind a
+ * global lock, taken several times per span by every worker. That is what made
+ * the threaded terrain pre-pass burn 21x the CPU of the serial one for
+ * identical output (69565 ms vs 3329 ms), and it is immune to every other fix
+ * because the serialisation is inside the accessor, not the data.
+ *
+ * Instead: an open-addressed table keyed on the OS thread id, claimed once per
+ * thread with a compare-exchange and never released (threads outlive builds).
+ * A reader pays a thread-id read -- a thread-control-block load, no lock -- and
+ * a probe that hits on the first slot in the steady state. Slot 0 is the
+ * fallback if the table is ever full: contended, never wrong. */
+static unsigned s_tslot_tid[TG_ACCT_SLOTS];   /* 0 = free */
 
-static int tg_acct_row(void)
+static int tg_tslot(void)
 {
-    if (s_acct_slot < 0) {
+    const unsigned tid = td5_plat_thread_id();
+    unsigned h = (tid * 2654435761u) % (unsigned)TG_ACCT_SLOTS;
+    int i;
+    for (i = 0; i < TG_ACCT_SLOTS; i++) {
+        const int k = (int)((h + (unsigned)i) % (unsigned)TG_ACCT_SLOTS);
+        unsigned cur = s_tslot_tid[k];
+        if (cur == tid) return k;
+        if (cur == 0) {
 #if defined(__GNUC__)
-        int n = __atomic_fetch_add(&s_acct_slot_next, 1, __ATOMIC_RELAXED);
+            unsigned expect = 0;
+            if (__atomic_compare_exchange_n(&s_tslot_tid[k], &expect, tid, 0,
+                                            __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+                return k;
+            if (expect == tid) return k;   /* lost the race to ourselves */
 #else
-        int n = s_acct_slot_next++;
+            s_tslot_tid[k] = tid;
+            return k;
 #endif
-        s_acct_slot = (n < TG_ACCT_SLOTS) ? n : 0;
+        }
     }
-    return s_acct_slot;
+    return 0;
 }
+
+/* Kept as the name the counter rows are indexed by. */
+static int tg_acct_row(void) { return tg_tslot(); }
 
 /* Sum of every thread's row for one kind. Call only after a join. */
 static long tg_acct_total(int kind)
@@ -3759,11 +3787,18 @@ static const unsigned char k_guard_kind_class[TG_GK_COUNT] = {
     TG_GKC_SCENERY   /* branch-side */
 };
 
-static TG_TLS size_t s_guard_ex_lo[TD5_TG_GUARD_EX_MAX];
-static TG_TLS size_t s_guard_ex_hi[TD5_TG_GUARD_EX_MAX];
-static TG_TLS unsigned char s_guard_ex_kind[TD5_TG_GUARD_EX_MAX];
-static TG_TLS int    s_guard_ex_si[TD5_TG_GUARD_EX_MAX];
-static TG_TLS int    s_guard_ex_n;
+/* [S2h] One row per thread slot (was __thread -- see tg_tslot). */
+static size_t s_guard_ex_lo[TG_ACCT_SLOTS][TD5_TG_GUARD_EX_MAX];
+static size_t s_guard_ex_hi[TG_ACCT_SLOTS][TD5_TG_GUARD_EX_MAX];
+static unsigned char s_guard_ex_kind[TG_ACCT_SLOTS][TD5_TG_GUARD_EX_MAX];
+static int    s_guard_ex_si[TG_ACCT_SLOTS][TD5_TG_GUARD_EX_MAX];
+/* [S2i] One CACHE LINE per slot, not one int. As a plain int[] the first 16
+ * slots share a single line, and this counter is incremented on every guard
+ * mark by every worker -- so the array that was meant to remove contention
+ * would have reintroduced it as false sharing. */
+typedef struct { int v; } __attribute__((aligned(64))) TG_SlotInt;
+static TG_SlotInt s_guard_ex_nx[TG_ACCT_SLOTS];
+#define s_guard_ex_n(t) (s_guard_ex_nx[(t)].v)
 static long   s_guard_rejects;          /* running total across the whole build */
 static long   s_guard_residual;         /* on-road meshes STILL present post-drop */
 static long   s_guard_rej_kind[TG_GK_COUNT];   /* [R8] breakdown by kind */
@@ -3798,7 +3833,7 @@ static int tg_guard_diag_span(void)
     return td5_env_int("TD5RE_R8_GUARD_DIAG", 0, 0, 100000);
 }
 
-static void tg_guard_ex_reset(void) { s_guard_ex_n = 0; }
+static void tg_guard_ex_reset(void) { s_guard_ex_n(tg_tslot()) = 0; }
 
 /* Record [lo, hi) of the current entry's mesh buffer as geometry of `kind`
  * emitted for span `si`. Called at the emit sites in tg_emit_models; ranges the
@@ -3806,13 +3841,16 @@ static void tg_guard_ex_reset(void) { s_guard_ex_n = 0; }
  * fail-safe direction (validated, not licensed). */
 static void tg_guard_mark(size_t lo, size_t hi, int kind, int si)
 {
+    int t, e;
     if (hi <= lo) return;
-    if (s_guard_ex_n < TD5_TG_GUARD_EX_MAX) {
-        s_guard_ex_lo[s_guard_ex_n] = lo;
-        s_guard_ex_hi[s_guard_ex_n] = hi;
-        s_guard_ex_kind[s_guard_ex_n] = (unsigned char)kind;
-        s_guard_ex_si[s_guard_ex_n] = si;
-        s_guard_ex_n++;
+    t = tg_tslot();                       /* [S2h] this thread's row */
+    if (s_guard_ex_n(t) < TD5_TG_GUARD_EX_MAX) {
+        e = s_guard_ex_n(t);
+        s_guard_ex_lo[t][e] = lo;
+        s_guard_ex_hi[t][e] = hi;
+        s_guard_ex_kind[t][e] = (unsigned char)kind;
+        s_guard_ex_si[t][e] = si;
+        s_guard_ex_n(t)++;
     }
 }
 
@@ -3826,13 +3864,14 @@ static int tg_guard_kind_of(size_t off, int *pmark_si)
     int i, kind = TG_GK_OTHER;
     size_t best = (size_t)-1;
     if (pmark_si) *pmark_si = -1;
-    for (i = 0; i < s_guard_ex_n; i++)
-        if (off >= s_guard_ex_lo[i] && off < s_guard_ex_hi[i]) {
-            const size_t w = s_guard_ex_hi[i] - s_guard_ex_lo[i];
+    const int t = tg_tslot();
+    for (i = 0; i < s_guard_ex_n(t); i++)
+        if (off >= s_guard_ex_lo[t][i] && off < s_guard_ex_hi[t][i]) {
+            const size_t w = s_guard_ex_hi[t][i] - s_guard_ex_lo[t][i];
             if (w <= best) {
                 best = w;
-                kind = (int)s_guard_ex_kind[i];
-                if (pmark_si) *pmark_si = s_guard_ex_si[i];
+                kind = (int)s_guard_ex_kind[t][i];
+                if (pmark_si) *pmark_si = s_guard_ex_si[t][i];
             }
         }
     return kind;
@@ -3871,22 +3910,27 @@ static const char *const k_pave_src_name[TG_PVS_COUNT] = {
 };
 
 #define TD5_TG_PAVE_MARK_MAX 512
-static TG_TLS size_t        s_pave_mark_lo[TD5_TG_PAVE_MARK_MAX];
-static TG_TLS size_t        s_pave_mark_hi[TD5_TG_PAVE_MARK_MAX];
-static TG_TLS unsigned char s_pave_mark_src[TD5_TG_PAVE_MARK_MAX];
-static TG_TLS int           s_pave_mark_si[TD5_TG_PAVE_MARK_MAX];
-static TG_TLS int           s_pave_mark_n;
+/* [S2h] One row per thread slot (was __thread -- see tg_tslot). */
+static size_t        s_pave_mark_lo[TG_ACCT_SLOTS][TD5_TG_PAVE_MARK_MAX];
+static size_t        s_pave_mark_hi[TG_ACCT_SLOTS][TD5_TG_PAVE_MARK_MAX];
+static unsigned char s_pave_mark_src[TG_ACCT_SLOTS][TD5_TG_PAVE_MARK_MAX];
+static int           s_pave_mark_si[TG_ACCT_SLOTS][TD5_TG_PAVE_MARK_MAX];
+static TG_SlotInt    s_pave_mark_nx[TG_ACCT_SLOTS];
+#define s_pave_mark_n(t) (s_pave_mark_nx[(t)].v)
 
-static void tg_pave_mark_reset(void) { s_pave_mark_n = 0; }
+static void tg_pave_mark_reset(void) { s_pave_mark_n(tg_tslot()) = 0; }
 
 static void tg_pave_mark(size_t lo, size_t hi, int src, int si)
 {
-    if (hi <= lo || s_pave_mark_n >= TD5_TG_PAVE_MARK_MAX) return;
-    s_pave_mark_lo[s_pave_mark_n]  = lo;
-    s_pave_mark_hi[s_pave_mark_n]  = hi;
-    s_pave_mark_src[s_pave_mark_n] = (unsigned char)src;
-    s_pave_mark_si[s_pave_mark_n]  = si;
-    s_pave_mark_n++;
+    const int t = tg_tslot();
+    int e;
+    if (hi <= lo || s_pave_mark_n(t) >= TD5_TG_PAVE_MARK_MAX) return;
+    e = s_pave_mark_n(t);
+    s_pave_mark_lo[t][e]  = lo;
+    s_pave_mark_hi[t][e]  = hi;
+    s_pave_mark_src[t][e] = (unsigned char)src;
+    s_pave_mark_si[t][e]  = si;
+    s_pave_mark_n(t)++;
 }
 
 /* Which pavement emitter produced the mesh at byte offset `off`, or -1. */
@@ -3895,13 +3939,14 @@ static int tg_pave_src_of(size_t off, int *pmark_si)
     int i, src = -1;
     size_t best = (size_t)-1;
     if (pmark_si) *pmark_si = -1;
-    for (i = 0; i < s_pave_mark_n; i++)
-        if (off >= s_pave_mark_lo[i] && off < s_pave_mark_hi[i]) {
-            const size_t w = s_pave_mark_hi[i] - s_pave_mark_lo[i];
+    const int t = tg_tslot();
+    for (i = 0; i < s_pave_mark_n(t); i++)
+        if (off >= s_pave_mark_lo[t][i] && off < s_pave_mark_hi[t][i]) {
+            const size_t w = s_pave_mark_hi[t][i] - s_pave_mark_lo[t][i];
             if (w <= best) {
                 best = w;
-                src = (int)s_pave_mark_src[i];
-                if (pmark_si) *pmark_si = s_pave_mark_si[i];
+                src = (int)s_pave_mark_src[t][i];
+                if (pmark_si) *pmark_si = s_pave_mark_si[t][i];
             }
         }
     return src;
@@ -25082,9 +25127,8 @@ static void tg_side_terrain_free(void)
  * loop and the job-pool worker, which is what makes the two comparable
  * byte-for-byte.
  *
- * The guard-exempt stack it snapshots and unwinds (s_guard_ex_*) is __thread,
- * so each worker manipulates its own; that is exactly why cdda5b53 had to land
- * first. Returns 0 to REFUSE the whole pre-pass (the caller then falls back to
+ * The guard-exempt stack it snapshots and unwinds (s_guard_ex_*) is indexed by
+ * this thread's slot, so each worker manipulates its own row. Returns 0 to REFUSE the whole pre-pass (the caller then falls back to
  * inline terrain); ctx carries the refusal out because a job cannot return. */
 typedef struct {
     const TG_NodeList *nl;
@@ -25134,29 +25178,29 @@ static int tg_side_terrain_one(TG_SideJob *j, int si)
     hook.blk = &r->buf; hook.moff = scratch; hook.nmesh = &nm;
     hook.maxmesh = TG_SIDE_MAX_MESH;
 
-    snap = s_guard_ex_n;
+    snap = s_guard_ex_n(slot);
     r->ok = tg_emit_fb_terrain(&hook);
 
-    if (nm > TG_SIDE_MAX_MESH || (s_guard_ex_n - snap) > TG_SIDE_MAX_MESH) {
+    if (nm > TG_SIDE_MAX_MESH || (s_guard_ex_n(slot) - snap) > TG_SIDE_MAX_MESH) {
         TG_ATOMIC_ADD_LONG(&j->overflow, 1L);   /* would truncate -- refuse */
-        s_guard_ex_n = snap;
+        s_guard_ex_n(slot) = snap;
         rc = 0;
         goto done;
     }
     for (i = 0; i < nm; i++) r->moff[i] = scratch[i];
     r->nmoff = nm;
-    for (i = snap; i < s_guard_ex_n; i++) {
+    for (i = snap; i < s_guard_ex_n(slot); i++) {
         const int k = i - snap;
-        r->mlo[k]   = s_guard_ex_lo[i];
-        r->mhi[k]   = s_guard_ex_hi[i];
-        r->mkind[k] = s_guard_ex_kind[i];
-        r->msi[k]   = s_guard_ex_si[i];
+        r->mlo[k]   = s_guard_ex_lo[slot][i];
+        r->mhi[k]   = s_guard_ex_hi[slot][i];
+        r->mkind[k] = s_guard_ex_kind[slot][i];
+        r->msi[k]   = s_guard_ex_si[slot][i];
     }
-    r->nmark = s_guard_ex_n - snap;
+    r->nmark = s_guard_ex_n(slot) - snap;
     /* The marks belong to the ENTRY that splices these bytes, not to the
      * pre-pass, so unwind them here and re-mark at the splice with the
      * real offsets. */
-    s_guard_ex_n = snap;
+    s_guard_ex_n(slot) = snap;
 
     rc = r->ok ? 1 : 0;
 
