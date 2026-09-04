@@ -803,6 +803,7 @@ enum {
      * the report accounts for the whole call instead of ~95% of it. */
     TG_ZONE_BIOME, TG_ZONE_ELEVATION, TG_ZONE_LEVELINF,
     TG_ZONE_WRITE_STRIP, TG_ZONE_WRITE_MODELS, TG_ZONE_SKY,
+    TG_ZONE_SIDEBUILD,
     TG_ZONE_COUNT
 };
 static const char *const k_tg_zone_name[TG_ZONE_COUNT] = {
@@ -810,7 +811,8 @@ static const char *const k_tg_zone_name[TG_ZONE_COUNT] = {
     "models emit", "r9 city scan", "guard on-road", "guard over-water",
     "models assemble", "textures", "reports",
     "biome layout", "elevation", "levelinf emit",
-    "write strip+trk", "write models", "sky install"
+    "write strip+trk", "write models", "sky install",
+    "terrain pre-pass"
 };
 static uint64_t s_tg_zone_us[TG_ZONE_COUNT];
 static long     s_tg_zone_n[TG_ZONE_COUNT];
@@ -1368,7 +1370,48 @@ static const char *const k_acct_names[TG_ACCT_KIND_COUNT] = {
     "r14-coast"             /* COAST   */
 };
 
-static long s_acct_count[TG_ACCT_KIND_COUNT];
+/* [S2d] PER-THREAD element counters.
+ *
+ * Was one shared long[] incremented by every emitted element. Single-threaded
+ * that is free; with the entry loop (or the terrain pre-pass) on the job pool
+ * it is 16 threads writing the same few cache lines thousands of times per
+ * build, which is the standing suspect for the threaded pre-pass measuring
+ * SLOWER than serial (2576 ms -> 4392 ms).
+ *
+ * One cache-line-aligned row per thread, claimed on first write and never
+ * released; reads sum the rows, which is exact because every counter is read
+ * after the parallel region has joined. 40 rows covers the main thread plus
+ * TD5_JOBS_MAX_WORKERS (32); a thread that cannot get a row falls back to row
+ * 0, which is merely contended rather than wrong. */
+#define TG_ACCT_SLOTS 40
+typedef struct {
+    long c[TG_ACCT_KIND_COUNT];
+} __attribute__((aligned(64))) TG_AcctRow;
+static TG_AcctRow s_acct_rows[TG_ACCT_SLOTS];
+static int        s_acct_slot_next;          /* atomically claimed */
+static TG_TLS int s_acct_slot = -1;          /* this thread's row  */
+
+static int tg_acct_row(void)
+{
+    if (s_acct_slot < 0) {
+#if defined(__GNUC__)
+        int n = __atomic_fetch_add(&s_acct_slot_next, 1, __ATOMIC_RELAXED);
+#else
+        int n = s_acct_slot_next++;
+#endif
+        s_acct_slot = (n < TG_ACCT_SLOTS) ? n : 0;
+    }
+    return s_acct_slot;
+}
+
+/* Sum of every thread's row for one kind. Call only after a join. */
+static long tg_acct_total(int kind)
+{
+    long t = 0;
+    int i;
+    for (i = 0; i < TG_ACCT_SLOTS; i++) t += s_acct_rows[i].c[kind];
+    return t;
+}
 /* Presence bitmap: bit k of s_acct_mask[si] = kind k stands at span si. One
  * word per span costs 24 KB at TD5_TG_MAX_SPANS and buys exact run extraction,
  * which a running min/max pair cannot give (a kind present at spans 0-40 and
@@ -1524,7 +1567,9 @@ static void tg_rail_edge_would(int si, double lateral_sign)
 
 static void tg_acct_reset(void)
 {
-    memset(s_acct_count, 0, sizeof(s_acct_count));
+    /* Rows only -- slot ASSIGNMENTS persist for the process, so a worker that
+     * already owns a row keeps it across builds. */
+    memset(s_acct_rows, 0, sizeof(s_acct_rows));
     memset(s_acct_mask,  0, sizeof(s_acct_mask));
     memset(s_rail_edge,  0, sizeof(s_rail_edge));
     memset(s_rail_would, 0, sizeof(s_rail_would));
@@ -1541,7 +1586,7 @@ static void tg_acct_reset(void)
 static void tg_acct_n(TG_AcctKind kind, int si, int n)
 {
     if ((unsigned)kind >= TG_ACCT_KIND_COUNT || n <= 0) return;
-    s_acct_count[kind] += n;
+    s_acct_rows[tg_acct_row()].c[kind] += n;
     if (si >= 0 && si < TD5_TG_MAX_SPANS)
         TG_ACCT_MASK_SET(si, kind);
 }
@@ -1556,7 +1601,7 @@ static void tg_acct_range(TG_AcctKind kind, int si0, int si1)
     int s;
     if ((unsigned)kind >= TG_ACCT_KIND_COUNT) return;
     if (si1 < si0) { s = si0; si0 = si1; si1 = s; }
-    s_acct_count[kind] += 1;
+    s_acct_rows[tg_acct_row()].c[kind] += 1;
     if (si0 < 0) si0 = 0;
     if (si1 >= TD5_TG_MAX_SPANS) si1 = TD5_TG_MAX_SPANS - 1;
     for (s = si0; s <= si1; s++)
@@ -1578,7 +1623,7 @@ static void tg_acct_report(int nspans)
         int  pos = 0, nruns = 0, touched = 0, first = -1, last = -1;
         int  s = 0;
 
-        if (s_acct_count[k] == 0) continue;
+        if (tg_acct_total(k) == 0) continue;
         runs[0] = '\0';
         while (s < nspans) {
             int a;
@@ -1599,7 +1644,7 @@ static void tg_acct_report(int nspans)
                      ",+%d more", nruns - TD5_TG_ACCT_MAX_RUNS);
         TD5_LOG_I(LOG_TAG,
                   "trackgen:   %-14s n=%-6ld spans=%-5d first=%-5d last=%-5d runs[%d]: %s",
-                  k_acct_names[k], s_acct_count[k], touched, first, last,
+                  k_acct_names[k], tg_acct_total(k), touched, first, last,
                   nruns, runs[0] ? runs : "-");
     }
     /* Empty kinds are reported as a single line rather than skipped silently:
@@ -1609,7 +1654,7 @@ static void tg_acct_report(int nspans)
         char none[320];
         int pos = 0;
         for (k = 0; k < TG_ACCT_KIND_COUNT; k++) {
-            if (s_acct_count[k] != 0) continue;
+            if (tg_acct_total(k) != 0) continue;
             if (pos < (int)sizeof(none) - 20)
                 pos += snprintf(none + pos, sizeof(none) - (size_t)pos,
                                 "%s%s", pos ? " " : "", k_acct_names[k]);
@@ -12218,9 +12263,9 @@ static int tg_rail_edge_report(const TG_NodeList *nl, int nspans)
     TD5_LOG_I(LOG_TAG,
               "trackgen:   roadside would=%ld now=%ld yielded=%ld residual=%ld",
               would, own[TG_RAIL_ROADSIDE],
-              s_acct_count[TG_ACCT_R9_RAILYIELD],
+              tg_acct_total(TG_ACCT_R9_RAILYIELD),
               would - own[TG_RAIL_ROADSIDE]
-                    - s_acct_count[TG_ACCT_R9_RAILYIELD]
+                    - tg_acct_total(TG_ACCT_R9_RAILYIELD)
                     - s_r11_rail_on_cross - s_r11_rail_on_xstreet);
     /* [R11 CROSS items 9+15] The third bucket of the same reconciliation: edges
      * the round-8 rules would have railed and that are now deliberately bare
@@ -25294,6 +25339,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
      * TD5RE_AUTOTRACK_SIDEBUF_MT=1 runs it across the job pool. */
     s_side_use = td5_env_flag_on("TD5RE_AUTOTRACK_SIDEBUF");
     s_xs_phase = 1;   /* [MEASURE] attribute memo traffic to the terrain phase */
+    TG_ZONE_BEGIN(TG_ZONE_SIDEBUILD);
     if (s_side_use && !tg_side_terrain_build(nl, nspans, lanes)) {
         TD5_LOG_W(LOG_TAG, "trackgen: terrain side-buffer build failed "
                   "(overflow=%ld); falling back to inline terrain",
@@ -25301,6 +25347,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
         tg_side_terrain_free();
         s_side_use = 0;
     }
+    TG_ZONE_END(TG_ZONE_SIDEBUILD);
     s_xs_phase = 0;
 
     for (e = 0; e < nentries && ok; e++) {
