@@ -25308,8 +25308,40 @@ static int tg_side_terrain_splice(int si, TG_Buf *meshes, size_t *moff,
     return 1;
 }
 
-static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
-                          TG_Buf *out)
+
+/* Per-entry mesh-slot budget. File scope because tg_scenery_begin sizes the
+ * offset table with it and tg_scenery_entry enforces it. */
+enum { TG_MAX_MESHES_PER_ENTRY = TD5_TG_SPANS_PER_ENTRY * 96 };
+
+/* ===================== SECTION: scenery in three phases ====================
+ * tg_emit_models split into begin / entry / end so its per-ENTRY loop can be
+ * driven one entry at a time. That is what lets the scenery be STREAMED while
+ * the player drives: geometry costs ~300 ms and the race can start on it,
+ * while MODELS.DAT (99.4 percent of the build) fills in behind.
+ *
+ * The three functions are the original function's three regions, unmoved --
+ * the pre-loop, the loop body and the post-loop. The body is reproduced
+ * VERBATIM and reads its enclosing-scope values through an alias prologue, so
+ * the split cannot change behaviour by transcription. The old whole-build path
+ * is now begin -> all entries -> end, in the same order, and must stay
+ * byte-identical.
+ *
+ * ENTRIES MUST BE DRIVEN IN ASCENDING ORDER. tg_r12_flora_accept rejects a
+ * plant against every accepted plant within +/-3 spans and an entry is 4
+ * spans, so acceptance at entry N depends on N-1 and N+1. Any other order
+ * changes which trees exist. */
+typedef struct {
+    const TG_NodeList *nl;
+    int nspans, lanes, ring, main_half, br_lanes, nentries, rails;
+    int branch_active;
+    int nrails, nbudget;
+    TG_Buf *blocks;
+    int ok, active;
+} TG_ScnCtx;
+
+static TG_ScnCtx s_scn;
+
+static int tg_scenery_begin(const TG_NodeList *nl, int nspans, int lanes)
 {
     /* `nspans` is the FULL strip span count. With branches it INCLUDES each
      * fork's pad + corridor tail; the main ring is s_ring_len and the corridors
@@ -25369,13 +25401,10 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
      * four such spans in a row. Overflow is SILENT (the loop just stops adding
      * scenery), which is why it is counted and logged below rather than trusted.
      * Cost is stack only: moff is 96*4*8 = 3 KB. */
-    enum { TG_MAX_MESHES_PER_ENTRY = TD5_TG_SPANS_PER_ENTRY * 96 };
     const int rails = tg_guardrails_enabled();
     int nrails = 0;
     int nbudget = 0;                /* entries that ran out of mesh slots */
     TG_Buf *blocks;
-    unsigned int cursor;
-    int e, ok = 1;
 
     blocks = (TG_Buf *)calloc((size_t)nentries, sizeof(TG_Buf));
     if (!blocks) return 0;
@@ -25446,7 +25475,32 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     TG_ZONE_END(TG_ZONE_SIDEBUILD);
     s_xs_phase = 0;
 
-    for (e = 0; e < nentries && ok; e++) {
+    int ok = 1;
+
+    /* publish the derived setup for tg_scenery_entry / _end */
+    s_scn.nl = nl; s_scn.nspans = nspans; s_scn.lanes = lanes;
+    s_scn.ring = ring; s_scn.main_half = main_half; s_scn.br_lanes = br_lanes;
+    s_scn.nentries = nentries; s_scn.rails = rails;
+    s_scn.branch_active = branch_active;
+    s_scn.nrails = nrails; s_scn.nbudget = nbudget;
+    s_scn.blocks = blocks; s_scn.ok = ok; s_scn.active = 1;
+    return ok;
+}
+
+static int tg_scenery_entry(int e)
+{
+    /* Alias prologue: the body below is the original loop body verbatim, so
+     * it must see the same names its enclosing scope used. */
+    const TG_NodeList *nl = s_scn.nl;
+    const int nspans = s_scn.nspans, lanes = s_scn.lanes, ring = s_scn.ring;
+    const int main_half = s_scn.main_half, br_lanes = s_scn.br_lanes;
+    const int nentries = s_scn.nentries, rails = s_scn.rails;
+    const int branch_active = s_scn.branch_active;
+    TG_Buf *blocks = s_scn.blocks;
+    int nrails = s_scn.nrails, nbudget = s_scn.nbudget;
+    int ok = 1;
+    (void)nentries;
+
         const int s0 = e * TD5_TG_SPANS_PER_ENTRY;
         int ns = nspans - s0;
         size_t moff[TG_MAX_MESHES_PER_ENTRY];
@@ -25988,7 +26042,24 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
             TG_ZONE_END(TG_ZONE_ASSEMBLE);
         }
         tg_buf_free(&meshes);
-    }
+    /* carry the cross-entry tallies back */
+    s_scn.nrails = nrails; s_scn.nbudget = nbudget;
+    if (!ok) s_scn.ok = 0;
+    return ok;
+}
+
+static int tg_scenery_end(TG_Buf *out)
+{
+    const TG_NodeList *nl = s_scn.nl;
+    const int nspans = s_scn.nspans, ring = s_scn.ring;
+    const int nentries = s_scn.nentries;
+    TG_Buf *blocks = s_scn.blocks;
+    const int rails = s_scn.rails;
+    int nrails = s_scn.nrails, nbudget = s_scn.nbudget;
+    int ok = s_scn.ok, e;
+    unsigned int cursor;
+    unsigned long long rt_ = 0;
+    (void)nl; (void)nspans; (void)ring; (void)rt_;
 
     if (ok) {
         /* Header: count, then (offset,size) pairs. Block 0 must begin exactly
@@ -26141,6 +26212,20 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     for (e = 0; e < nentries; e++) tg_buf_free(&blocks[e]);
     free(blocks);
     return ok && !out->oom;
+    s_scn.active = 0;
+    s_scn.blocks = NULL;
+    return ok && out && !out->oom;
+}
+
+/* The original whole-build entry point, now a driver over the three phases. */
+static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
+                          TG_Buf *out)
+{
+    int e;
+    if (!tg_scenery_begin(nl, nspans, lanes)) return 0;
+    for (e = 0; e < s_scn.nentries && s_scn.ok; e++)
+        tg_scenery_entry(e);
+    return tg_scenery_end(out);
 }
 
 /* ==========================================================================
