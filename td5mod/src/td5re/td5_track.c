@@ -257,9 +257,15 @@ _Static_assert(offsetof(TD5_FallbackDisplayList, dl) == 0,
 
 static void free_models_runtime_lists(void);
 static void free_models_mesh_table(void);
+static void scenery_stream_reset(void);
 
 void free_models_dat_runtime(void)
 {
+    /* Must precede the frees: it drops the streaming watermark, and a reader
+     * that still saw s_scn_reserved set would keep trusting a published
+     * entry whose blob is about to go away. */
+    scenery_stream_reset();
+
     /* Runtime mesh headers point INTO the blob (their command/vertex streams
      * still live there), so they must die with it. */
     free_models_mesh_table();
@@ -566,6 +572,265 @@ int td5_track_build_models_runtime_lists(void)
               s_models_dl_count, (unsigned)total_slots,
               td5_track_runtime_mesh_count(), TD5_MESH_CHUNK);
     return 1;
+}
+
+/* ===================== SECTION: streamed scenery ingest ====================
+ * Accept MODELS.DAT display-list blocks ONE ENTRY AT A TIME, after the level
+ * has already loaded and the race has already started.
+ *
+ * Why this exists: for a generated track, geometry (STRIP + route tables + sky)
+ * costs ~300 ms while scenery costs ~20 s -- 99.4 percent of the build. The
+ * simulation never reads scenery (no s_models_* reference exists in physics,
+ * collision, AI, traffic, HUD or camera), so the race can start on the geometry
+ * and have the decoration fill in behind the player.
+ *
+ * Three invariants make it safe to publish into a table the renderer is already
+ * walking, and all three are properties of the ALLOCATION, not of locking:
+ *
+ *  1. NOTHING IS EVER REALLOCATED. The blob, the offset/size tables, the block
+ *     table and the mesh-pointer backing array are all sized once here. Mesh
+ *     headers hold raw pointers into the blob and td5_track_is_valid_mesh_ptr
+ *     range-checks it every frame, so a moving blob is not survivable. (The
+ *     runtime mesh table itself grows, but it grows in CHUNKS -- see the note
+ *     above it -- so an existing record never moves either.)
+ *  2. EACH ENTRY OWNS A FIXED SLICE of the mesh-pointer array,
+ *     TD5_SCN_SLOTS_PER_ENTRY wide. The load-time builder packs slices back to
+ *     back with a running cursor, which requires knowing every entry's slot
+ *     count up front; streaming does not know them, and a fixed stride removes
+ *     the question. The stride is the readers' own validity cap (a block with
+ *     more than 256 sub-meshes is rejected everywhere), so it cannot truncate.
+ *  3. `.count` IS WRITTEN LAST, behind a release fence. It is the only gate
+ *     every reader applies (`count == 0` means "no geometry here"), so a
+ *     non-zero count must imply the whole entry is resolved. Readers are job
+ *     -pool workers on threaded panes, not just the main thread.
+ *
+ * ENTRIES ARRIVE IN ASCENDING ORDER. The generator has no choice about this
+ * (flora acceptance at entry N depends on N+/-1), and it is worth relying on:
+ * the unpublished set is then always a contiguous SUFFIX, which is what lets
+ * the renderer paint the fallback ribbon over exactly the undecorated tail. */
+
+/* The readers' own cap: every block validator rejects sub_count > 256. */
+enum { TD5_SCN_SLOTS_PER_ENTRY = 256 };
+/* One display-list entry covers four spans -- this is the `span >> 2` the
+ * render walk and td5_track_get_display_list both use, named. */
+enum { TD5_SCN_SPANS_PER_ENTRY = 4 };
+
+#if defined(__GNUC__)
+/* Release: everything written above it is visible before what follows. */
+#  define TD5_SCN_PUBLISH_FENCE() __atomic_thread_fence(__ATOMIC_RELEASE)
+/* Its reader-side pair, applied to the `.count` gate. On x86_64 this is a
+ * plain load; what it actually buys is stopping the COMPILER hoisting a
+ * dependent `.meshes` read above the gate. */
+#  define TD5_SCN_ACQUIRE(p)      __atomic_load_n((p), __ATOMIC_ACQUIRE)
+#else
+#  define TD5_SCN_PUBLISH_FENCE() do { } while (0)
+#  define TD5_SCN_ACQUIRE(p)      (*(p))
+#endif
+
+static size_t s_scn_cursor;     /* next free blob offset                    */
+static int    s_scn_reserved;   /* entries reserved; 0 = not streaming      */
+static int    s_scn_ready;      /* entries SETTLED (published or rejected)  */
+static int    s_scn_geom;       /* of those, how many carried geometry      */
+static int    s_scn_overflow;   /* blob ran out; logged once                */
+
+static void scenery_stream_reset(void)
+{
+    s_scn_cursor = 0;
+    s_scn_reserved = 0;
+    s_scn_ready = 0;
+    s_scn_geom = 0;
+    s_scn_overflow = 0;
+}
+
+int td5_track_scenery_reserve(int nentries, size_t blob_bytes)
+{
+    if (nentries <= 0 || blob_bytes < 64)
+        return 0;
+
+    free_models_dat_runtime();
+
+    s_models_blob = (uint8_t *)calloc(blob_bytes, 1);
+    s_models_entry_offsets = (uint32_t *)calloc((size_t)nentries, sizeof(uint32_t));
+    s_models_entry_sizes   = (uint32_t *)calloc((size_t)nentries, sizeof(uint32_t));
+    s_models_dl = (TD5_SpanDisplayList *)calloc((size_t)nentries,
+                                                sizeof(*s_models_dl));
+    s_models_dl_meshes = (TD5_MeshHeader **)calloc(
+        (size_t)nentries * TD5_SCN_SLOTS_PER_ENTRY, sizeof(*s_models_dl_meshes));
+    if (!s_models_blob || !s_models_entry_offsets || !s_models_entry_sizes ||
+        !s_models_dl || !s_models_dl_meshes) {
+        TD5_LOG_W("track", "streamed scenery: reserve failed (%d entries, "
+                  "%zu B blob)", nentries, blob_bytes);
+        free_models_dat_runtime();
+        return 0;
+    }
+
+    s_models_blob_size = blob_bytes;
+    s_models_dl_count = nentries;
+    scenery_stream_reset();
+    /* Offset 0 is the universal "this entry has no block" marker, so no real
+     * block may be placed there. */
+    s_scn_cursor = TD5_SCN_SPANS_PER_ENTRY * 2;
+    s_scn_reserved = nentries;
+    /* Published at its FINAL value straight away: this is the table's SIZE,
+     * not its fill level. An entry nobody has published yet reads back as
+     * count == 0, which every reader already treats as "no geometry". */
+    s_models_display_list_count = nentries;
+
+    TD5_LOG_I("track", "streamed scenery: reserved %d entries, %zu B blob, "
+              "%d mesh slots/entry", nentries, blob_bytes,
+              TD5_SCN_SLOTS_PER_ENTRY);
+    return 1;
+}
+
+/* Take one generated display-list block. The bytes are the generator's own
+ * self-contained block image -- {u32 sub_count, u32 rec_off[sub_count], mesh
+ * records} with rec_off relative to the BLOCK -- which is exactly what the
+ * parser sees in a file, so the relocation below is the parser's, unchanged.
+ *
+ * Returns 1 if the entry ended up with geometry. A rejected block still counts
+ * as SETTLED: "this entry has nothing" is a legitimate answer (the load path
+ * leaves such entries zeroed too), and stalling the watermark on it would
+ * strand the whole tail of the track. */
+int td5_track_scenery_publish_entry(int e, const void *bytes, size_t len)
+{
+    uint8_t *blk;
+    size_t off;
+    uint32_t sub_count, j;
+    TD5_MeshHeader **slots;
+    int kept = 0;
+
+    if (!s_scn_reserved || e < 0 || e >= s_scn_reserved)
+        return 0;
+    /* Ascending order is the generator's contract (see the section note). Out
+     * of order would silently mis-report the watermark, so say so. */
+    if (e != s_scn_ready) {
+        static int s_warned;
+        if (!s_warned++)
+            TD5_LOG_W("track", "streamed scenery: entry %d published out of "
+                      "order (expected %d) -- the undecorated-tail watermark "
+                      "is no longer meaningful", e, s_scn_ready);
+    }
+
+    if (!bytes || len < 8u)
+        goto settled;
+
+    sub_count = *(const uint32_t *)bytes;
+    if (sub_count == 0 || sub_count > TD5_SCN_SLOTS_PER_ENTRY)
+        goto settled;
+    if (len < 4u + (size_t)sub_count * 4u)
+        goto settled;
+
+    off = (s_scn_cursor + 3u) & ~(size_t)3u;
+    if (off + len > s_models_blob_size) {
+        /* WARN once, then keep going: the rest of the track simply stays
+         * undecorated, which is visible but not fatal. Silence here would
+         * read as "the generator stopped emitting". */
+        if (!s_scn_overflow++)
+            TD5_LOG_W("track", "streamed scenery: blob full at entry %d/%d "
+                      "(%zu B reserved) -- the remaining spans stay "
+                      "undecorated", e, s_scn_reserved, s_models_blob_size);
+        goto settled;
+    }
+
+    blk = s_models_blob + off;
+    memcpy(blk, bytes, len);
+    s_scn_cursor = off + len;
+    s_models_entry_offsets[e] = (uint32_t)off;
+    s_models_entry_sizes[e]   = (uint32_t)len;
+
+    slots = s_models_dl_meshes + (size_t)e * TD5_SCN_SLOTS_PER_ENTRY;
+    for (j = 0; j < sub_count; j++) {
+        uint32_t *slot = (uint32_t *)(void *)(blk + 4 + j * 4);
+        uint32_t mesh_off = *slot, rec_off;
+        const uint8_t *rec;
+        TD5_MeshHeader *mesh;
+
+        slots[j] = NULL;
+        if (mesh_off == 0)
+            continue;
+
+        /* Normalise to a BLOB offset, block-relative first then blob-relative,
+         * the same two-step the parser uses. */
+        if (mesh_off < len && (size_t)mesh_off + TD5_MESH_DISK_SIZE <= len)
+            rec_off = (uint32_t)(off + mesh_off);
+        else if ((size_t)mesh_off + TD5_MESH_DISK_SIZE <= s_models_blob_size)
+            rec_off = mesh_off;
+        else { *slot = 0; continue; }
+        *slot = rec_off;
+
+        /* A wild commands/vertices link is the usual crash vector, so check
+         * the link words before materialising the record. */
+        rec = s_models_blob + rec_off;
+        {
+            const uintptr_t rec_abs  = (uintptr_t)rec;
+            const uintptr_t blob_end = (uintptr_t)s_models_blob + s_models_blob_size;
+            const uint32_t cmd_off = td5_mesh_disk_link(rec, TD5_MESH_DISK_OFF_COMMANDS);
+            const uint32_t vtx_off = td5_mesh_disk_link(rec, TD5_MESH_DISK_OFF_VERTICES);
+            if ((cmd_off && rec_abs + cmd_off >= blob_end) ||
+                (vtx_off && rec_abs + vtx_off >= blob_end)) { *slot = 0; continue; }
+        }
+
+        mesh = td5_track_runtime_mesh_for(rec_off);
+        if (!mesh ||
+            mesh->command_count < 0 || mesh->command_count > 4096 ||
+            mesh->total_vertex_count < 0 || mesh->total_vertex_count > 65536) {
+            *slot = 0;
+            continue;
+        }
+        slots[j] = mesh;
+    }
+
+    s_models_dl[e].meshes = slots;
+    TD5_SCN_PUBLISH_FENCE();
+    s_models_dl[e].count = sub_count;   /* LAST -- the readers' only gate */
+    kept = 1;
+    s_scn_geom++;
+
+settled:
+    TD5_SCN_PUBLISH_FENCE();
+    if (e == s_scn_ready)
+        s_scn_ready = e + 1;
+    return kept;
+}
+
+int td5_track_scenery_ready_entries(void)
+{
+    return s_scn_reserved ? s_scn_ready : 0;
+}
+
+int td5_track_scenery_streaming(void)
+{
+    return s_scn_reserved != 0;
+}
+
+/* First span whose scenery has not arrived, or -1 when there is nothing
+ * outstanding (not streaming, or already complete). The renderer paints the
+ * fallback ribbon from here on: the global "no mesh table" ribbon gate is
+ * false the moment the table is reserved, so without this the undecorated
+ * tail would render as VOID -- sky and nothing. */
+int td5_track_scenery_undecorated_from_span(void)
+{
+    if (!s_scn_reserved || s_scn_ready >= s_scn_reserved)
+        return -1;
+    return s_scn_ready * TD5_SCN_SPANS_PER_ENTRY;
+}
+
+void td5_track_scenery_stream_done(void)
+{
+    if (!s_scn_reserved)
+        return;
+    TD5_LOG_I("track", "streamed scenery: %d/%d entries settled, %d with "
+              "geometry, %zu/%zu B blob used, %d mesh records",
+              s_scn_ready, s_scn_reserved, s_scn_geom, s_scn_cursor,
+              s_models_blob_size, td5_track_runtime_mesh_count());
+    /* The span -> display-list mapping is rebuilt once here rather than
+     * incrementally. It is safe to leave until the end because nothing reads
+     * it during the drive: the render walk resolves an entry ARITHMETICALLY
+     * (span >> 2) and gates on the entry's own count, and the table's only
+     * reader is td5_track_get_span_display_list_index, which no caller in the
+     * tree uses. */
+    if (s_span_count > 0)
+        rebuild_span_display_list_mapping();
 }
 
 static void free_display_lists(void)
@@ -9340,8 +9605,14 @@ const TD5_SpanDisplayList *td5_track_get_display_list_entry(int entry_index)
         return NULL;
     /* An entry with no blob offset, or one whose count failed validation,
      * was left zeroed by the builder -- same "no geometry here" answer the
-     * old `off == 0` test gave. */
-    if (s_models_dl[entry_index].count == 0)
+     * old `off == 0` test gave.
+     *
+     * ACQUIRE, to pair with the release fence the streaming publisher writes
+     * `.count` behind: a non-zero count must imply this reader also sees the
+     * resolved `.meshes` slice. Readers run on job-pool workers, so relying on
+     * x86 load ordering alone would still leave the COMPILER free to hoist the
+     * `.meshes` read above this test. Compiles to a plain load. */
+    if (TD5_SCN_ACQUIRE(&s_models_dl[entry_index].count) == 0)
         return NULL;
     return &s_models_dl[entry_index];
 }
@@ -9392,7 +9663,8 @@ const TD5_SpanDisplayList *td5_track_get_display_list(int span_index)
             eff_index = ring - 1 - span_index;
         int dl_index = eff_index >> 2;  /* ~4 spans per display list block */
         if (dl_index >= 0 && dl_index < s_models_dl_count) {
-            if (s_models_dl[dl_index].count != 0)
+            /* ACQUIRE -- see td5_track_get_display_list_entry. */
+            if (TD5_SCN_ACQUIRE(&s_models_dl[dl_index].count) != 0)
                 return &s_models_dl[dl_index];
         }
         /* Don't return NULL here — branch spans (>= ring_length) may have

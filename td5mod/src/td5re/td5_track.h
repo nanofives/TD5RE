@@ -248,8 +248,30 @@ void td5_track_register_lamp_lights(void);
 void td5_track_scan_banner_pages(void);
 int  td5_track_is_native_banner_page(int page);
 int  td5_track_get_models_display_list_count(void);
+/* NOTE: no caller in the tree uses this, and the table behind it is written
+ * only by rebuild_span_display_list_mapping. The render walk resolves a span
+ * to an entry arithmetically (span >> 2) instead. Kept because it is the port
+ * surface for the original's per-span lookup; do not assume anything depends
+ * on the mapping table being current. */
 int  td5_track_get_span_display_list_index(int span_index);
 const void *td5_track_get_models_display_list_raw(int index, size_t *size_out);
+
+/* --- Streamed scenery (generated tracks) -----------------------------------
+ * Fill the MODELS.DAT display-list table ONE ENTRY AT A TIME while the race is
+ * already running, instead of building all of it before the level loads. See
+ * the "streamed scenery ingest" section in td5_track.c for the invariants that
+ * make publishing into a table the renderer is walking safe.
+ *
+ * Reserve once, then publish entries in ASCENDING order, then call _done.
+ * Both reserve and publish run on the producer; the getters are for readers. */
+int  td5_track_scenery_reserve(int nentries, size_t blob_bytes);
+int  td5_track_scenery_publish_entry(int e, const void *bytes, size_t len);
+void td5_track_scenery_stream_done(void);
+int  td5_track_scenery_ready_entries(void);
+int  td5_track_scenery_streaming(void);
+/* First span with no scenery yet, or -1 if nothing is outstanding. The
+ * renderer paints the fallback ribbon from here on. */
+int  td5_track_scenery_undecorated_from_span(void);
 
 /* --- Actor track position --- */
 void td5_track_update_actor_position(TD5_Actor *actor);

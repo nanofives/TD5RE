@@ -2670,12 +2670,29 @@ void td5_render_actors_for_view(int view_index)
          * road vanishes a short way ahead). A circuit draws the whole ring (cheap
          * for the small tracks the converter makes); point-to-point uses a large
          * fixed reach. Behind-camera spans self-cull in the projector. */
-        if (!s_photobooth_active && td5_track_get_models_display_list_count() == 0) {
-            int ribbon_win = 256;
-            if (is_circuit && ring > 0 && (ring / 2 + 1) < ribbon_win)
-                ribbon_win = ring / 2 + 1;
-            td5_render_fallback_strip_ribbon(eff_player, ribbon_win, ring,
-                                             total_spans, is_circuit, 0, 0);
+        /* [STREAMED SCENERY] The gate above is GLOBAL -- it asks whether the
+         * mesh table is entirely empty. A streamed table is non-empty from the
+         * first frame (its size is published up front, its contents fill in
+         * behind the player), so that test alone would switch the ribbon off
+         * for the whole track and the not-yet-decorated tail would render as
+         * VOID: sky and nothing. Undecorated entries are always a contiguous
+         * suffix, so painting the ribbon from the watermark span onward covers
+         * exactly them, and min_span keeps it off the decorated road.
+         *
+         * Not free visually: the fallback ribbon is untextured by design (flat
+         * grey, road_page = -1), so the watermark shows as a grey seam if
+         * generation ever falls behind the player. */
+        {
+            int scn_from = td5_track_scenery_undecorated_from_span();
+            if (!s_photobooth_active &&
+                (td5_track_get_models_display_list_count() == 0 || scn_from >= 0)) {
+                int ribbon_win = 256;
+                if (is_circuit && ring > 0 && (ring / 2 + 1) < ribbon_win)
+                    ribbon_win = ring / 2 + 1;
+                td5_render_fallback_strip_ribbon(eff_player, ribbon_win, ring,
+                                                 total_spans, is_circuit,
+                                                 scn_from > 0 ? scn_from : 0, 0);
+            }
         }
         /* [DRAG LENGTHEN] The inserted/shifted spans (>= insert point) have NO
          * matching MODELS.DAT road (those chunks are baked at the ORIGINAL
