@@ -739,12 +739,19 @@ static unsigned int tg_gen_seed(void) { return s_gen_seed; }
 enum {
     TG_ZONE_CENTERLINE, TG_ZONE_STRIP, TG_ZONE_ROUTES, TG_ZONE_PREPASS,
     TG_ZONE_EMIT, TG_ZONE_CITYSCAN, TG_ZONE_GUARD_ROAD, TG_ZONE_GUARD_WATER,
-    TG_ZONE_ASSEMBLE, TG_ZONE_TEX, TG_ZONE_REPORTS, TG_ZONE_COUNT
+    TG_ZONE_ASSEMBLE, TG_ZONE_TEX, TG_ZONE_REPORTS,
+    /* [2026-09-04] The phases b2323ece measured and these zones did not, so
+     * the report accounts for the whole call instead of ~95% of it. */
+    TG_ZONE_BIOME, TG_ZONE_ELEVATION, TG_ZONE_LEVELINF,
+    TG_ZONE_WRITE_STRIP, TG_ZONE_WRITE_MODELS, TG_ZONE_SKY,
+    TG_ZONE_COUNT
 };
 static const char *const k_tg_zone_name[TG_ZONE_COUNT] = {
     "centerline", "strip", "routes", "models prepass",
     "models emit", "r9 city scan", "guard on-road", "guard over-water",
-    "models assemble", "textures", "reports"
+    "models assemble", "textures", "reports",
+    "biome layout", "elevation", "levelinf emit",
+    "write strip+trk", "write models", "sky install"
 };
 static uint64_t s_tg_zone_us[TG_ZONE_COUNT];
 static long     s_tg_zone_n[TG_ZONE_COUNT];
@@ -23567,6 +23574,12 @@ static void tg_r14_up_gap_line(const TG_NodeList *nl, int si, int is_left,
 static void tg_r14_up_report(const TG_NodeList *nl, int nspans)
 {
     const int ring = (s_ring_len > 0 && s_ring_len < nspans) ? s_ring_len : nspans;
+    /* [2026-09-04] MEASURED 3462 ms of a 22.8 s build (15.1%) -- the single
+     * most expensive thing left in a generation, and it was ungated, so every
+     * generated track paid for an overpass diagnostic nobody asked for. Now on
+     * the same master gate as the other per-area sweeps (TD5RE_TG_REPORTS=1, or
+     * TD5RE_R14_UP_REPORT=1 for this one alone). */
+    if (!tg_report_wanted("TD5RE_R14_UP_REPORT")) return;
     int si, crossings = 0, sup_total = 0, folded = 0;
     double worst_over = 0.0;
     int worst_si = -1;
@@ -29181,6 +29194,14 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     memset(&info, 0, sizeof(info));
     memset(tally, 0, sizeof(tally));
 
+    /* [R14 GENPERF] Per-BUILD timer reset FIRST, so the reported total covers
+     * the whole call and the phases before the mkdir (biome layout) are not
+     * zeroed after they run -- which is exactly what hid the biome number. */
+    tg_zone_reset();
+    s_tg_build_t0 = td5_plat_time_us();
+    s_tg_progress = 2;
+    tg_xmemo_reset(0);                    /* crossing memo: disarmed until the prepass */
+
     /* [R2 item 24] Clear the inventory BEFORE anything is emitted. Placed here
      * rather than in regenerate so a direct build_level call (the S2 regen
      * self-check, a future editor) reports its own elements and not the
@@ -29192,17 +29213,17 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
      * then. Driven by the seed, not by the geometry RNG, so it never perturbs
      * the road. Laid out for the whole cell array rather than for nspans, so a
      * span past the ring (an appended branch corridor) still has a biome. */
-    tg_biome_layout(spec->seed, spec->target_spans);
+    {
+        TG_ZONE_BEGIN(TG_ZONE_BIOME);
+        tg_biome_layout(spec->seed, spec->target_spans);
+        TG_ZONE_END(TG_ZONE_BIOME);
+    }
 
     tg_srand(spec->seed);
 
     snprintf(dir, sizeof(dir), "re/assets/levels/level%03d", level_num);
     _mkdir(dir);
 
-    tg_zone_reset();                      /* [R14 GENPERF] per-BUILD, like tg_acct_reset */
-    s_tg_build_t0 = td5_plat_time_us();
-    s_tg_progress = 2;
-    tg_xmemo_reset(0);                    /* [R14 GENPERF] crossing memo: disarmed until the prepass */
 
     {
         TG_ZONE_BEGIN(TG_ZONE_CENTERLINE);
@@ -29210,8 +29231,11 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
             TD5_LOG_E(LOG_TAG, "trackgen: centerline build failed");
             goto done;
         }
-        tg_apply_elevation(spec, &nl);
         TG_ZONE_END(TG_ZONE_CENTERLINE);
+        /* Disjoint from the walk above so the two numbers still sum. */
+        TG_ZONE_BEGIN(TG_ZONE_ELEVATION);
+        tg_apply_elevation(spec, &nl);
+        TG_ZONE_END(TG_ZONE_ELEVATION);
     }
 
     if (td5_env_flag_off("TD5RE_AUTOTRACK_SELFCHECK")) {
@@ -29248,16 +29272,28 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         }
         TG_ZONE_END(TG_ZONE_ROUTES);
     }
-    if (!tg_emit_levelinf(spec, nspans, &info) || info.len != 100) {
-        TD5_LOG_E(LOG_TAG, "trackgen: levelinf emit failed (len=%zu)", info.len);
-        goto done;
+    {
+        int linf_ok;
+        TG_ZONE_BEGIN(TG_ZONE_LEVELINF);
+        linf_ok = tg_emit_levelinf(spec, nspans, &info);
+        TG_ZONE_END(TG_ZONE_LEVELINF);
+        if (!linf_ok || info.len != 100) {
+            TD5_LOG_E(LOG_TAG, "trackgen: levelinf emit failed (len=%zu)", info.len);
+            goto done;
+        }
     }
 
-    if (!tg_write_file(dir, "STRIP.DAT", strip.b, strip.len) ||
-        !tg_write_file(dir, "LEFT.TRK",  left.b,  left.len)  ||
-        !tg_write_file(dir, "RIGHT.TRK", right.b, right.len) ||
-        !tg_write_file(dir, "LEVELINF.DAT", info.b, info.len)) {
-        goto done;
+    {
+        int wok;
+        TG_ZONE_BEGIN(TG_ZONE_WRITE_STRIP);
+        wok = tg_write_file(dir, "STRIP.DAT", strip.b, strip.len)
+           && tg_write_file(dir, "LEFT.TRK",  left.b,  left.len)
+           && tg_write_file(dir, "RIGHT.TRK", right.b, right.len)
+           && tg_write_file(dir, "LEVELINF.DAT", info.b, info.len);
+        TG_ZONE_END(TG_ZONE_WRITE_STRIP);
+        if (!wok) {
+            goto done;
+        }
     }
 
     /* MODELS.DAT is OPT-IN (TD5RE_AUTOTRACK_SCENERY=1) and all-or-nothing:
@@ -29279,7 +29315,9 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
             memset(&tex, 0, sizeof(tex));
             if (tg_emit_models(&nl, nspans, spec->lanes, &models)) {
                 s_r13_models_bytes = (long)models.len;   /* [R13 BAND] share */
+                TG_ZONE_BEGIN(TG_ZONE_WRITE_MODELS);
                 tg_write_file(dir, "MODELS.DAT", models.b, models.len);
+                TG_ZONE_END(TG_ZONE_WRITE_MODELS);
             }
             else
                 TD5_LOG_W(LOG_TAG, "trackgen: models emit failed; "
@@ -29302,7 +29340,11 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         }
     }
 
-    tg_install_sky(dir, spec->seed);
+    {
+        TG_ZONE_BEGIN(TG_ZONE_SKY);
+        tg_install_sky(dir, spec->seed);
+        TG_ZONE_END(TG_ZONE_SKY);
+    }
 
     TD5_LOG_I(LOG_TAG, "trackgen: seed=%u level=%d spans=%d len=%.0f world units",
               spec->seed, level_num, nspans,
