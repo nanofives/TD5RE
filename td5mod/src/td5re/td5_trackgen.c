@@ -25093,8 +25093,31 @@ typedef struct {
     int   failed;        /* set (never cleared) if any span refused */
 } TG_SideJob;
 
+/* [S2f] WORK TIME vs WALL TIME for the pre-pass.
+ *
+ * A sampling profiler needs admin on this box (xperf/wpr/nsys all want kernel
+ * ETW), but the question that separates the remaining suspects does not need
+ * stacks -- it needs to know whether the parallel region does MORE WORK or
+ * merely takes longer:
+ *
+ *   sum(job) ~= serial sum, wall >> sum/threads  -> synchronisation or load
+ *                                                   imbalance; the work itself
+ *                                                   is fine.
+ *   sum(job) >> serial sum                       -> each unit genuinely got
+ *                                                   slower: contention, false
+ *                                                   sharing or memory
+ *                                                   bandwidth.
+ *
+ * Accumulated per thread on the same slot rows the counters use, so measuring
+ * cannot itself contend. Written once per span, so the timer cost is noise. */
+static uint64_t s_side_job_us[TG_ACCT_SLOTS];
+static long     s_side_job_n[TG_ACCT_SLOTS];
+
 static int tg_side_terrain_one(TG_SideJob *j, int si)
 {
+    const uint64_t t0 = td5_plat_time_us();
+    const int slot = tg_acct_row();
+    int rc = 1;
     TG_SideRec *r = &s_side_terr[si];
     TG_FBHook hook;
     size_t scratch[TG_SIDE_MAX_MESH];
@@ -25104,8 +25127,7 @@ static int tg_side_terrain_one(TG_SideJob *j, int si)
     /* The same two gates the real dispatcher applies before it would ever
      * reach the terrain hook: appended corridor/pad spans carry road only,
      * and a tunnel span takes the tunnel branch instead. */
-    if (si >= j->ring) return 1;
-    if (tg_span_in_tunnel(si)) return 1;
+    if (si >= j->ring || tg_span_in_tunnel(si)) goto done;
 
     hook.nl = j->nl; hook.si = si; hook.nspans = j->nspans; hook.lanes = j->lanes;
     hook.b = &k_biomes[tg_biome_for_span(si)];
@@ -25118,7 +25140,8 @@ static int tg_side_terrain_one(TG_SideJob *j, int si)
     if (nm > TG_SIDE_MAX_MESH || (s_guard_ex_n - snap) > TG_SIDE_MAX_MESH) {
         TG_ATOMIC_ADD_LONG(&j->overflow, 1L);   /* would truncate -- refuse */
         s_guard_ex_n = snap;
-        return 0;
+        rc = 0;
+        goto done;
     }
     for (i = 0; i < nm; i++) r->moff[i] = scratch[i];
     r->nmoff = nm;
@@ -25135,7 +25158,13 @@ static int tg_side_terrain_one(TG_SideJob *j, int si)
      * real offsets. */
     s_guard_ex_n = snap;
 
-    return r->ok ? 1 : 0;
+    rc = r->ok ? 1 : 0;
+
+done:
+    /* [S2f] This thread's share of the pre-pass work, whichever way it exited. */
+    s_side_job_us[slot] += td5_plat_time_us() - t0;
+    s_side_job_n[slot]++;
+    return rc;
 }
 
 static void tg_side_terrain_job(int si, void *ctx)
@@ -25168,6 +25197,9 @@ static int tg_side_terrain_build(const TG_NodeList *nl, int nspans, int lanes)
     if (!s_side_terr) return 0;
     s_side_terr_n = nspans;
 
+    memset(s_side_job_us, 0, sizeof(s_side_job_us));
+    memset(s_side_job_n,  0, sizeof(s_side_job_n));
+
     job.nl = nl; job.nspans = nspans; job.lanes = lanes;
     job.ring = (s_ring_len > 0) ? s_ring_len : nspans;
     job.overflow = 0; job.failed = 0;
@@ -25180,6 +25212,20 @@ static int tg_side_terrain_build(const TG_NodeList *nl, int nspans, int lanes)
     }
 
     s_side_overflow = job.overflow;
+    /* [S2f] Work vs wall. threads>1 with sum ~= the serial sum means the
+     * parallelism is sound and the wall time is synchronisation; sum far ABOVE
+     * the serial sum means each unit got slower, which is contention, false
+     * sharing or bandwidth -- and no amount of scheduling fixes that. */
+    {
+        uint64_t sum = 0; long n = 0; int i, threads = 0;
+        for (i = 0; i < TG_ACCT_SLOTS; i++) {
+            if (!s_side_job_n[i]) continue;
+            threads++; sum += s_side_job_us[i]; n += s_side_job_n[i];
+        }
+        TD5_LOG_W(LOG_TAG, "[R14 GENPERF] side-prepass: %s, %ld spans over %d "
+                  "thread(s), work-sum %.0f ms", tg_side_mt() ? "THREADED" : "serial",
+                  n, threads, sum / 1000.0);
+    }
     return job.failed ? 0 : 1;
 }
 
