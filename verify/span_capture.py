@@ -10,18 +10,39 @@ and prints the trackgen guard/audit lines from race.log.
   env TD5RE_CAM_TOPDOWN=9000 TD5RE_CAM_TOPDOWN_BACKDIV=2   oblique top-down instead of chase cam
   env TD5RE_AUTOTRACK_PARKS=0 etc. pass straight through to the game
 
-Gotchas learned 2026-09-04: hold_action expires after 60 frames unless frames=0; the
-window is pushed to HWND_BOTTOM so the run never steals focus; the exe is the one at the
-repo root above this script, so run it from the tree whose build you want to test.
+Gotchas learned 2026-09-04:
+  - hold_action expires after 60 frames unless frames=0.
+  - The window is pushed to HWND_BOTTOM so the run never steals focus.
+  - The exe is the one at the repo root above this script, so run it from the tree
+    whose build you want to test.
+  - CAMERA LIMIT: the top-down camera follows the CAR'S HEADING, so it always looks
+    along the road being driven. It can never look DOWN a side street, which means
+    it cannot answer "how deep does this perpendicular street run". Altitude does not
+    help; 9000 clips through tall buildings, 6000 usually clears, 4500 clears the
+    worst but crops the far side of a roadside gap out of frame. Depth-of-side-street
+    questions need a camera that can be aimed independently, not this one.
+  - StartSpanOffset SNAPS FORWARD: --StartSpanOffset=85 spawned the car at span 100,
+    already past a gap at 94-96. Start earlier and drive in.
+  - The 0.6 s settle after each framedump costs several spans at 130k+ speed, so
+    tightly-spaced targets overshoot. Space targets out, or accept the drift (the
+    filename records the span actually reached).
 """
 import os, sys, time, subprocess, ctypes, json, re
 WT=os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-S=sys.argv[1]; PORT=37072; TITLE="TD5RE-a1-37072"; SEED=sys.argv[2] if len(sys.argv)>2 else "99991"
+S=sys.argv[1]; PORT=int(os.environ.get("TD5RE_CONTROL_PORT","37072")); TITLE="TD5RE-a1-%d"%PORT; SEED=sys.argv[2] if len(sys.argv)>2 else "99991"
 START=int(sys.argv[3]) if len(sys.argv)>3 else 51
 TARGETS=[int(x) for x in (sys.argv[4].split(',') if len(sys.argv)>4 else "66,75,95,115,145,150,160,311,358,361".split(','))]
 sys.path.insert(0, os.path.join(WT,"scripts","td5re_mcp")); from game_client import GameClient
+# Autotrack knobs default ON for the A-rounds but ALWAYS yield to the environment.
+# dict(os.environ, KEY=val) lets the kwarg WIN, so a forced kwarg here silently
+# overrides the caller -- which is exactly the bug this replaces. Knobs not listed
+# (TUNNELS, BRANCHES, R8_*, R9_*, CAM_*) already pass through untouched via os.environ.
+def knob(name, default): return os.environ.get(name, default)
 env=dict(os.environ, TD5RE_CONTROL_PORT=str(PORT), TD5RE_WINDOW_TITLE=TITLE, TD5RE_D3D12_CAPTURE="1",
-         TD5RE_AUTOTRACK_SEED=SEED, TD5RE_AUTOTRACK_SCENERY="1", TD5RE_AUTOTRACK_BRIDGES="1", TD5RE_AUTOTRACK_PARKS="1")
+         TD5RE_AUTOTRACK_SEED=SEED,
+         TD5RE_AUTOTRACK_SCENERY=knob("TD5RE_AUTOTRACK_SCENERY","1"),
+         TD5RE_AUTOTRACK_BRIDGES=knob("TD5RE_AUTOTRACK_BRIDGES","1"),
+         TD5RE_AUTOTRACK_PARKS  =knob("TD5RE_AUTOTRACK_PARKS",  "1"))
 for f in ("race.log","engine.log"):
     p=os.path.join(WT,"log",f)
     if os.path.exists(p):
