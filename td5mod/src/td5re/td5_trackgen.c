@@ -26,6 +26,7 @@
  */
 #include "td5_trackgen.h"
 #include "td5_track_registry.h"
+#include "td5_jobs.h"          /* [S2c] parallel terrain pre-pass */
 #include "td5_platform.h"
 #include "td5_config.h"
 #include "td5_tg_real_tex.h"   /* real TD5 texture pages (level014), opt-in */
@@ -684,6 +685,15 @@ static int s_ring_len;
 #  define TG_ATOMIC_OR64(p, v) (*(p) |= (v))
 #endif
 
+/* [S2c] Relaxed atomic add for the one counter a parallel terrain worker can
+ * touch (the overflow refusal count). Relaxed is enough: it is read after the
+ * loop joins, and it only has to be non-zero for the caller to refuse. */
+#if defined(__GNUC__)
+#  define TG_ATOMIC_ADD_LONG(p, v) __atomic_fetch_add((p), (v), __ATOMIC_RELAXED)
+#else
+#  define TG_ATOMIC_ADD_LONG(p, v) (*(p) += (v))
+#endif
+
 /* Fork lookups live down in the [FB] block (three other work areas read them
  * from there); forward-declared here because the strip emitters above need
  * them to map an APPENDED corridor span back to its main-ring node. */
@@ -976,6 +986,27 @@ static void tg_zone_reset(void)
     memset(s_tg_sub_n,   0, sizeof s_tg_sub_n);
 }
 
+/* [MEASURE 2026-09-04] How much of this memo does a build actually use?
+ *
+ * The question decides the threading design and two sources disagree on it.
+ * 41c01090's note says precomputing every slot "would do far more work than
+ * the build actually asks for", so the memo must stay lazy and be made safe by
+ * publish order. The later session's finding is that threading the terrain
+ * pre-pass is slow precisely BECAUSE the memo is lazy and shared, so every
+ * worker cold-misses it. Both cannot be acted on at once, and neither states
+ * the fill DENSITY, which is the number that settles it:
+ *
+ *   density high  -> a serial pre-warm costs about what the build pays anyway,
+ *                    the memo becomes read-only for workers, blocker gone.
+ *   density low   -> pre-warming is real extra work; the memo needs per-thread
+ *                    copies (or the terrain path needs its own narrow cache).
+ *
+ * s_xs_phase marks the region about to be threaded, so the terrain pre-pass's
+ * own share is separated from the rest of the build. Counters only. */
+static long s_xs_fill, s_xs_hit;            /* whole build   */
+static long s_xs_fill_terr, s_xs_hit_terr;  /* terrain phase */
+static int  s_xs_phase;                     /* 1 = inside the terrain pre-pass */
+
 /* WARN, not INFO: the shipped td5re.ini runs MinLevel=1, so an INFO report is
  * dropped exactly on the configuration a user would be timing. */
 static void tg_zone_report(uint64_t total_us)
@@ -983,6 +1014,19 @@ static void tg_zone_report(uint64_t total_us)
     int z;
     if (!td5_env_flag_on("TD5RE_R14_GENPROF")) return;
     TD5_LOG_W(LOG_TAG, "[R14 GENPERF] generation took %.1f s", total_us / 1e6);
+    /* [MEASURE 2026-09-04] side-street memo density -- see the counters. */
+    {
+        /* Slots the build could possibly fill: two sides per main-ring span.
+         * (The memo's own array bound, TD5_TG_R10_XS_MAX, is declared much
+         * later in this file; the ring is always the smaller of the two.) */
+        long slots = 2L * (long)(s_ring_len > 0 ? s_ring_len : 0);
+        TD5_LOG_W(LOG_TAG, "[R14 GENPERF] xs-memo: filled %ld of %ld slots "
+                  "(%.1f%%), hits %ld (%.1fx reuse); terrain phase: filled %ld "
+                  "hits %ld",
+                  s_xs_fill, slots, slots ? 100.0 * (double)s_xs_fill / (double)slots : 0.0,
+                  s_xs_hit, s_xs_fill ? (double)s_xs_hit / (double)s_xs_fill : 0.0,
+                  s_xs_fill_terr, s_xs_hit_terr);
+    }
     for (z = 0; z < TG_ZONE_COUNT; z++) {
         if (!s_tg_zone_n[z]) continue;
         TD5_LOG_W(LOG_TAG, "[R14 GENPERF]   %-17s %8.1f ms  %5.1f%%  (n=%ld)",
@@ -16437,6 +16481,8 @@ static double      s_r10_xs_reach[TD5_TG_R10_XS_MAX][2];
 
 static void tg_r10_xs_memo_reset(void)
 {
+    s_xs_fill = s_xs_hit = s_xs_fill_terr = s_xs_hit_terr = 0;
+    s_xs_phase = 0;
     memset(s_r10_xs_state, -1, sizeof(s_r10_xs_state));
 }
 
@@ -16457,6 +16503,8 @@ static int tg_xstreet_here(const TG_NodeList *nl, int si, double side,
     const int mi = (side > 0.0) ? 1 : 0;
 
     if (memo && s_r10_xs_state[si][mi] >= 0) {
+        s_xs_hit++;
+        if (s_xs_phase) s_xs_hit_terr++;
         if (preach) *preach = s_r10_xs_reach[si][mi];
         return (int)s_r10_xs_state[si][mi];
     }
@@ -16500,6 +16548,8 @@ static int tg_xstreet_here(const TG_NodeList *nl, int si, double side,
             s_r10_xs_reach[si][mi] = reach;
             TG_COMPILER_BARRIER();
             s_r10_xs_state[si][mi] = (signed char)here;
+            s_xs_fill++;
+            if (s_xs_phase) s_xs_fill_terr++;
         }
         if (preach) *preach = reach;
         return here;
@@ -24982,9 +25032,89 @@ static void tg_side_terrain_free(void)
 
 /* Serial for now. Each span writes only into its OWN record, which is what
  * makes this loop safe to hand to td5_jobs later without further change. */
+/* [S2c] One span's terrain, written into that span's own record and nothing
+ * else. Split out of tg_side_terrain_build so the same body serves the serial
+ * loop and the job-pool worker, which is what makes the two comparable
+ * byte-for-byte.
+ *
+ * The guard-exempt stack it snapshots and unwinds (s_guard_ex_*) is __thread,
+ * so each worker manipulates its own; that is exactly why cdda5b53 had to land
+ * first. Returns 0 to REFUSE the whole pre-pass (the caller then falls back to
+ * inline terrain); ctx carries the refusal out because a job cannot return. */
+typedef struct {
+    const TG_NodeList *nl;
+    int   nspans, lanes, ring;
+    long  overflow;      /* atomically incremented on a refusal */
+    int   failed;        /* set (never cleared) if any span refused */
+} TG_SideJob;
+
+static int tg_side_terrain_one(TG_SideJob *j, int si)
+{
+    TG_SideRec *r = &s_side_terr[si];
+    TG_FBHook hook;
+    size_t scratch[TG_SIDE_MAX_MESH];
+    int nm = 0, snap, i;
+
+    r->ok = 1;
+    /* The same two gates the real dispatcher applies before it would ever
+     * reach the terrain hook: appended corridor/pad spans carry road only,
+     * and a tunnel span takes the tunnel branch instead. */
+    if (si >= j->ring) return 1;
+    if (tg_span_in_tunnel(si)) return 1;
+
+    hook.nl = j->nl; hook.si = si; hook.nspans = j->nspans; hook.lanes = j->lanes;
+    hook.b = &k_biomes[tg_biome_for_span(si)];
+    hook.blk = &r->buf; hook.moff = scratch; hook.nmesh = &nm;
+    hook.maxmesh = TG_SIDE_MAX_MESH;
+
+    snap = s_guard_ex_n;
+    r->ok = tg_emit_fb_terrain(&hook);
+
+    if (nm > TG_SIDE_MAX_MESH || (s_guard_ex_n - snap) > TG_SIDE_MAX_MESH) {
+        TG_ATOMIC_ADD_LONG(&j->overflow, 1L);   /* would truncate -- refuse */
+        s_guard_ex_n = snap;
+        return 0;
+    }
+    for (i = 0; i < nm; i++) r->moff[i] = scratch[i];
+    r->nmoff = nm;
+    for (i = snap; i < s_guard_ex_n; i++) {
+        const int k = i - snap;
+        r->mlo[k]   = s_guard_ex_lo[i];
+        r->mhi[k]   = s_guard_ex_hi[i];
+        r->mkind[k] = s_guard_ex_kind[i];
+        r->msi[k]   = s_guard_ex_si[i];
+    }
+    r->nmark = s_guard_ex_n - snap;
+    /* The marks belong to the ENTRY that splices these bytes, not to the
+     * pre-pass, so unwind them here and re-mark at the splice with the
+     * real offsets. */
+    s_guard_ex_n = snap;
+
+    return r->ok ? 1 : 0;
+}
+
+static void tg_side_terrain_job(int si, void *ctx)
+{
+    TG_SideJob *j = (TG_SideJob *)ctx;
+    /* A refusal cannot stop the other spans mid-flight the way the serial
+     * loop's early return did, so it is recorded and the caller refuses the
+     * whole pre-pass afterwards. Same outcome (inline terrain), just reached
+     * after the remaining spans have run. */
+    if (!tg_side_terrain_one(j, si)) j->failed = 1;
+}
+
+/* Threading the pre-pass is OPT-IN (TD5RE_AUTOTRACK_SIDEBUF_MT), because the
+ * last attempt at it produced three different tracks from three runs. The byte
+ * test is the gate, not the reasoning. */
+static int tg_side_mt(void)
+{
+    return td5_env_flag_off("TD5RE_AUTOTRACK_SIDEBUF_MT")
+           && td5_jobs_worker_count() > 0;
+}
+
 static int tg_side_terrain_build(const TG_NodeList *nl, int nspans, int lanes)
 {
-    const int ring = (s_ring_len > 0) ? s_ring_len : nspans;
+    TG_SideJob job;
     int si;
 
     s_side_budget_risk = 0;
@@ -24993,50 +25123,19 @@ static int tg_side_terrain_build(const TG_NodeList *nl, int nspans, int lanes)
     if (!s_side_terr) return 0;
     s_side_terr_n = nspans;
 
-    for (si = 0; si < nspans; si++) {
-        TG_SideRec *r = &s_side_terr[si];
-        TG_FBHook hook;
-        size_t scratch[TG_SIDE_MAX_MESH];
-        int nm = 0, snap, i;
+    job.nl = nl; job.nspans = nspans; job.lanes = lanes;
+    job.ring = (s_ring_len > 0) ? s_ring_len : nspans;
+    job.overflow = 0; job.failed = 0;
 
-        r->ok = 1;
-        /* The same two gates the real dispatcher applies before it would ever
-         * reach the terrain hook: appended corridor/pad spans carry road only,
-         * and a tunnel span takes the tunnel branch instead. */
-        if (si >= ring) continue;
-        if (tg_span_in_tunnel(si)) continue;
-
-        hook.nl = nl; hook.si = si; hook.nspans = nspans; hook.lanes = lanes;
-        hook.b = &k_biomes[tg_biome_for_span(si)];
-        hook.blk = &r->buf; hook.moff = scratch; hook.nmesh = &nm;
-        hook.maxmesh = TG_SIDE_MAX_MESH;
-
-        snap = s_guard_ex_n;
-        r->ok = tg_emit_fb_terrain(&hook);
-
-        if (nm > TG_SIDE_MAX_MESH || (s_guard_ex_n - snap) > TG_SIDE_MAX_MESH) {
-            s_side_overflow++;            /* would truncate -- refuse instead */
-            s_guard_ex_n = snap;
-            return 0;
-        }
-        for (i = 0; i < nm; i++) r->moff[i] = scratch[i];
-        r->nmoff = nm;
-        for (i = snap; i < s_guard_ex_n; i++) {
-            const int k = i - snap;
-            r->mlo[k]   = s_guard_ex_lo[i];
-            r->mhi[k]   = s_guard_ex_hi[i];
-            r->mkind[k] = s_guard_ex_kind[i];
-            r->msi[k]   = s_guard_ex_si[i];
-        }
-        r->nmark = s_guard_ex_n - snap;
-        /* The marks belong to the ENTRY that splices these bytes, not to the
-         * pre-pass, so unwind them here and re-mark at the splice with the
-         * real offsets. */
-        s_guard_ex_n = snap;
-
-        if (!r->ok) return 0;
+    if (tg_side_mt()) {
+        td5_jobs_parallel_for(nspans, tg_side_terrain_job, &job);
+    } else {
+        for (si = 0; si < nspans; si++)
+            if (!tg_side_terrain_one(&job, si)) { job.failed = 1; break; }
     }
-    return 1;
+
+    s_side_overflow = job.overflow;
+    return job.failed ? 0 : 1;
 }
 
 /* Splice span `si`'s pre-built terrain into the live entry buffer. */
@@ -25191,8 +25290,10 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
     /* [PARALLEL GROUNDWORK] Build every span's terrain up front. Still serial;
      * the loop inside only ever writes a span's own record, so turning it into
      * a td5_jobs_parallel_for is a later change with no new sharing.
-     * TD5RE_AUTOTRACK_SIDEBUF=0 falls back to emitting terrain inline. */
+     * TD5RE_AUTOTRACK_SIDEBUF=0 falls back to emitting terrain inline;
+     * TD5RE_AUTOTRACK_SIDEBUF_MT=1 runs it across the job pool. */
     s_side_use = td5_env_flag_on("TD5RE_AUTOTRACK_SIDEBUF");
+    s_xs_phase = 1;   /* [MEASURE] attribute memo traffic to the terrain phase */
     if (s_side_use && !tg_side_terrain_build(nl, nspans, lanes)) {
         TD5_LOG_W(LOG_TAG, "trackgen: terrain side-buffer build failed "
                   "(overflow=%ld); falling back to inline terrain",
@@ -25200,6 +25301,7 @@ static int tg_emit_models(const TG_NodeList *nl, int nspans, int lanes,
         tg_side_terrain_free();
         s_side_use = 0;
     }
+    s_xs_phase = 0;
 
     for (e = 0; e < nentries && ok; e++) {
         const int s0 = e * TD5_TG_SPANS_PER_ENTRY;
