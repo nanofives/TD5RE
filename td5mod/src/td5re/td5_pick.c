@@ -189,6 +189,8 @@ void td5_pick_finish_frame(void)
         float r = s_best_r;
         int   is_auto = td5_trackgen_is_auto_slot(g_td5.track_index);
         const char *pgname = is_auto ? td5_trackgen_page_name(primary) : NULL;
+        const char *kind = (is_auto && entry >= 0)
+                           ? td5_trackgen_mesh_kind_name(entry, s_best_slot) : NULL;
         uint32_t col = (s_flash > 0) ? 0xFF33FF33u : 0xFFFFEE00u;  /* green flash / yellow */
 
         pick_draw_box(s_best_cx - r, s_best_cy - r, s_best_cz - r,
@@ -198,13 +200,16 @@ void td5_pick_finish_frame(void)
         {
             char pgextra[16];
             char pgn[40];
+            char kindstr[24];
             pgextra[0] = '\0';
             if (npages > 1) snprintf(pgextra, sizeof pgextra, " +%d", npages - 1);
             if (pgname) snprintf(pgn, sizeof pgn, " (%s)", pgname);
             else        pgn[0] = '\0';
+            if (kind) snprintf(kindstr, sizeof kindstr, " %s", kind);
+            else      kindstr[0] = '\0';
             snprintf(s_hud_line, sizeof s_hud_line,
-                     "PICK entry %d slot %d  page %d%s%s  pos %.1f %.1f %.1f  r %.1f  [LMB=copy]",
-                     entry, s_best_slot, primary, pgn, pgextra,
+                     "PICK entry %d slot %d%s  page %d%s%s  pos %.1f %.1f %.1f  r %.1f  [LMB=copy]",
+                     entry, s_best_slot, kindstr, primary, pgn, pgextra,
                      s_best_cx, s_best_cy, s_best_cz, r);
         }
 
@@ -214,6 +219,9 @@ void td5_pick_finish_frame(void)
             off = snprintf(s_json, sizeof s_json,
                      "{\"track\":\"AUTO\",\"entry\":%d,\"slot\":%d,\"page\":%d,",
                      entry, s_best_slot, primary);
+            if (kind && off > 0 && off < (int)sizeof s_json)
+                off += snprintf(s_json + off, sizeof s_json - off,
+                                "\"kind\":\"%s\",", kind);
             if (pgname && off > 0 && off < (int)sizeof s_json)
                 off += snprintf(s_json + off, sizeof s_json - off,
                                 "\"page_name\":\"%s\",", pgname);

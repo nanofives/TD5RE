@@ -670,6 +670,10 @@ const char *td5_trackgen_page_name(int page)
 
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
+/* Down-track spans per MODELS.DAT display-list entry (entry = span >> 2).
+ * Defined here (early) so the guard/meshtag code above the emitters can map a
+ * span to its entry. */
+#define TD5_TG_SPANS_PER_ENTRY 4
 
 /* Minimum turn radius as a multiple of the road's half-width. Mirrors
  * td5_trackgen.py's CURVE_SAFETY_DEFAULT (1.5); the extra 1.2 is headroom so
@@ -3996,6 +4000,155 @@ static int tg_guard_kind_of(size_t off, int *pmark_si)
     return kind;
 }
 
+/* ===================== [PICK MESHTAG] emitter-kind provenance ==============
+ * Per-(entry, slot) emitter kind (TG_GK_*), captured during scenery assembly
+ * and written to level<NN>/MESHTAG.BIN NEXT TO MODELS.DAT -- a SEPARATE file,
+ * so MODELS.DAT stays byte-identical (the trackgen A/B invariant). It exists
+ * only to let the dev free-cam geometry picker name a hovered mesh
+ * ("flora"/"guardrail"/"building"). Dev-only; a no-op in RELEASE.
+ *
+ * The kind is the same value tg_guard_validate_entry already computes per kept
+ * mesh (tg_guard_kind_of); we capture it there, in FINAL slot order. Entries
+ * the guard never validates (guard off, or branch-corridor entries s0>=ring)
+ * are filled by a fallback at block assembly, where moff[] is still the
+ * uncompacted offset the guard marks are keyed by. Runtime index == generator
+ * slot == on-disk slot, so (entry, slot) round-trips to the render walk. */
+#ifndef TD5RE_RELEASE
+#define TD5_TG_MESHTAG_STRIDE 256          /* slots/entry (renderer's block cap) */
+#define TD5_TG_MESHTAG_MAGIC  0x4741544Du  /* 'MTAG' */
+#define TD5_TG_MESHTAG_NONE   0xFFu
+static unsigned char *s_meshtag = NULL;    /* [entry*STRIDE + slot] = TG_GK_* */
+static int            s_meshtag_nentries = 0;
+
+static void tg_meshtag_reset(int nentries)
+{
+    free(s_meshtag);
+    s_meshtag = NULL;
+    s_meshtag_nentries = 0;
+    if (nentries <= 0) return;
+    s_meshtag = (unsigned char *)malloc((size_t)nentries * TD5_TG_MESHTAG_STRIDE);
+    if (s_meshtag) {
+        memset(s_meshtag, TD5_TG_MESHTAG_NONE,
+               (size_t)nentries * TD5_TG_MESHTAG_STRIDE);
+        s_meshtag_nentries = nentries;
+    }
+}
+
+static void tg_meshtag_set(int entry, int slot, int kind)
+{
+    if (!s_meshtag || entry < 0 || entry >= s_meshtag_nentries) return;
+    if (slot < 0 || slot >= TD5_TG_MESHTAG_STRIDE) return;
+    if (kind < 0 || kind > 0xFE) return;
+    s_meshtag[(size_t)entry * TD5_TG_MESHTAG_STRIDE + slot] = (unsigned char)kind;
+}
+
+/* Fill a slot the guard did not (still NONE) from the live guard marks, using
+ * the UNCOMPACTED offset. Called at block assembly; no-op if already set. */
+static void tg_meshtag_fallback(int entry, int slot, size_t off)
+{
+    int msi;
+    if (!s_meshtag || entry < 0 || entry >= s_meshtag_nentries) return;
+    if (slot < 0 || slot >= TD5_TG_MESHTAG_STRIDE) return;
+    if (s_meshtag[(size_t)entry * TD5_TG_MESHTAG_STRIDE + slot] != TD5_TG_MESHTAG_NONE)
+        return;
+    s_meshtag[(size_t)entry * TD5_TG_MESHTAG_STRIDE + slot] =
+        (unsigned char)tg_guard_kind_of(off, &msi);
+}
+
+static void tg_meshtag_write(const char *dir)
+{
+    char path[512];
+    FILE *f;
+    unsigned int hdr[5];
+    if (!s_meshtag || s_meshtag_nentries <= 0 || !dir) return;
+    snprintf(path, sizeof path, "%s/MESHTAG.BIN", dir);
+    f = fopen(path, "wb");
+    if (!f) return;
+    hdr[0] = TD5_TG_MESHTAG_MAGIC;
+    hdr[1] = 1;                              /* version */
+    hdr[2] = td5_trackgen_last_seed();
+    hdr[3] = (unsigned)s_meshtag_nentries;
+    hdr[4] = TD5_TG_MESHTAG_STRIDE;
+    fwrite(hdr, sizeof hdr, 1, f);
+    fwrite(s_meshtag, (size_t)s_meshtag_nentries * TD5_TG_MESHTAG_STRIDE, 1, f);
+    fclose(f);
+}
+
+/* --- runtime side: lazily load the sidecar and name a (entry, slot) --------- */
+static unsigned char *s_meshtag_rt = NULL;
+static int            s_meshtag_rt_nentries = 0;
+static int            s_meshtag_rt_stride = 0;
+static unsigned int   s_meshtag_rt_seed = 0xFFFFFFFFu;
+static int            s_meshtag_rt_loaded = 0;
+
+static void tg_meshtag_rt_load(void)
+{
+    char path[320];
+    FILE *f;
+    unsigned int hdr[5];
+    unsigned int seed = td5_trackgen_last_seed();
+    long need;
+
+    if (s_meshtag_rt_loaded && s_meshtag_rt_seed == seed) return;  /* current */
+
+    free(s_meshtag_rt);
+    s_meshtag_rt = NULL;
+    s_meshtag_rt_nentries = 0;
+    s_meshtag_rt_stride = 0;
+    s_meshtag_rt_seed = seed;
+    s_meshtag_rt_loaded = 1;
+
+    snprintf(path, sizeof path, "re/assets/levels/level%03d/MESHTAG.BIN",
+             td5_trackgen_level_number());
+    f = fopen(path, "rb");
+    if (!f) return;
+    if (fread(hdr, sizeof hdr, 1, f) != 1 || hdr[0] != TD5_TG_MESHTAG_MAGIC) {
+        fclose(f);
+        return;
+    }
+    s_meshtag_rt_nentries = (int)hdr[3];
+    s_meshtag_rt_stride   = (int)hdr[4];
+    need = (long)s_meshtag_rt_nentries * s_meshtag_rt_stride;
+    if (s_meshtag_rt_nentries <= 0 || s_meshtag_rt_stride <= 0 ||
+        need <= 0 || need > (64L << 20)) {
+        s_meshtag_rt_nentries = 0;
+        fclose(f);
+        return;
+    }
+    s_meshtag_rt = (unsigned char *)malloc((size_t)need);
+    if (!s_meshtag_rt) {
+        s_meshtag_rt_nentries = 0;
+        fclose(f);
+        return;
+    }
+    if (fread(s_meshtag_rt, (size_t)need, 1, f) != 1) {
+        free(s_meshtag_rt);
+        s_meshtag_rt = NULL;
+        s_meshtag_rt_nentries = 0;
+    }
+    fclose(f);
+}
+
+const char *td5_trackgen_mesh_kind_name(int entry, int slot)
+{
+    unsigned char k;
+    tg_meshtag_rt_load();
+    if (!s_meshtag_rt) return NULL;
+    if (entry < 0 || entry >= s_meshtag_rt_nentries) return NULL;
+    if (slot < 0 || slot >= s_meshtag_rt_stride) return NULL;
+    k = s_meshtag_rt[(size_t)entry * s_meshtag_rt_stride + slot];
+    if (k == TD5_TG_MESHTAG_NONE || k >= TG_GK_COUNT) return NULL;
+    return k_guard_kind_name[k];
+}
+#else  /* TD5RE_RELEASE -- feature compiled out */
+#define tg_meshtag_reset(n)          ((void)0)
+#define tg_meshtag_set(e, s, k)      ((void)0)
+#define tg_meshtag_fallback(e, s, o) ((void)0)
+#define tg_meshtag_write(dir)        ((void)0)
+const char *td5_trackgen_mesh_kind_name(int entry, int slot)
+{ (void)entry; (void)slot; return NULL; }
+#endif /* TD5RE_RELEASE */
+
 /* ===================== [R9 CITY] PAVEMENT PROVENANCE MARKS =================
  * Round 9 item 2 ("the right track on span 150 branch has double sidewalk") is a
  * UNIQUENESS defect: two emitters each lay a legal-looking pavement on the SAME
@@ -4875,6 +5028,7 @@ static int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
     static size_t newoff[TD5_TG_GUARD_KEPT_MAX];   /* per ORIGINAL index       */
     static unsigned char gone[TD5_TG_GUARD_KEPT_MAX];
     static unsigned char cls_of[TD5_TG_GUARD_KEPT_MAX];
+    static unsigned char kind_of[TD5_TG_GUARD_KEPT_MAX];  /* [PICK] emitter kind */
     int win_lo, win_hi, i, j, nn = 0, rejected = 0;
     size_t w = 0;
 
@@ -5042,6 +5196,10 @@ static int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
             }
         }
 
+        /* [PICK] Remember this mesh's kind by ORIGINAL index; the survivor
+         * write-back below records it against the FINAL slot. */
+        kind_of[oi] = (unsigned char)kind;
+
         /* Drop the bytes only on a real rejection AND when NOT in report-only
          * mode; otherwise (accepted, exempt, unparseable, or report-only) keep
          * the mesh, compacting it left over any gap left by earlier drops. */
@@ -5074,6 +5232,8 @@ static int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
     for (i = 0; i < nmesh; i++) {
         if (gone[i]) continue;
         kept_exempt[nn] = cls_of[i];
+        /* [PICK] tag the FINAL slot nn with this survivor's emitter kind. */
+        tg_meshtag_set(s0 / TD5_TG_SPANS_PER_ENTRY, nn, (int)kind_of[i]);
         moff[nn++] = newoff[i];
     }
 
@@ -5737,7 +5897,8 @@ static int tg_emit_levelinf(const TD5_TrackGenSpec *spec, int nspans,
 /* Down-track sub-quads per span. A single 1500-unit quad shimmers at distance;
  * the Python emitter uses 3 for the same reason. */
 #define TD5_TG_ROAD_SUBDIV     3
-#define TD5_TG_SPANS_PER_ENTRY 4     /* entry = span >> 2 */
+/* TD5_TG_SPANS_PER_ENTRY moved up near TD5_TG_MAX_SPANS (the guard/meshtag code
+ * needs it too); entry = span >> 2. */
 
 static void tg_put_f32(TG_Buf *buf, double v)
 {
@@ -25522,6 +25683,8 @@ static int tg_scenery_begin(const TG_NodeList *nl, int nspans, int lanes)
     blocks = (TG_Buf *)calloc((size_t)nentries, sizeof(TG_Buf));
     if (!blocks) return 0;
 
+    tg_meshtag_reset(nentries);   /* [PICK] per-(entry,slot) kind sidecar */
+
     s_guard_rejects = 0;   /* [R7 GUARD] per-build tally, reported below */
     s_guard_residual = 0;
     s_guard_ex_scope_hits = 0;
@@ -26145,8 +26308,14 @@ static int tg_scenery_entry(int e)
             TG_ZONE_BEGIN(TG_ZONE_ASSEMBLE);
             const unsigned int hdr = (unsigned)(4 + nmesh * 4);
             tg_put_u32(&blocks[e], (unsigned)nmesh);
-            for (i = 0; i < nmesh; i++)
+            for (i = 0; i < nmesh; i++) {
                 tg_put_u32(&blocks[e], hdr + (unsigned)moff[i]);
+                /* [PICK] entries the guard never validated (guard off, or a
+                 * branch-corridor entry s0>=ring) still need a kind; here moff[]
+                 * is the uncompacted offset the guard marks are keyed by. No-op
+                 * when validate already tagged the slot. */
+                tg_meshtag_fallback(e, i, moff[i]);
+            }
             if (!tg_buf_need(&blocks[e], meshes.len)) ok = 0;
             else {
                 memcpy(blocks[e].b + blocks[e].len, meshes.b, meshes.len);
@@ -30178,6 +30347,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
                 s_r13_models_bytes = (long)models.len;   /* [R13 BAND] share */
                 TG_ZONE_BEGIN(TG_ZONE_WRITE_MODELS);
                 tg_write_file(dir, "MODELS.DAT", models.b, models.len);
+                tg_meshtag_write(dir);   /* [PICK] sidecar, separate file */
                 TG_ZONE_END(TG_ZONE_WRITE_MODELS);
             }
             else
@@ -30948,8 +31118,10 @@ int td5_trackgen_stream_scenery(volatile int *cancel)
      * skipping it would leak every one of them plus the side-terrain table. */
     if (!tg_scenery_end(&models))
         ok = 0;
-    else if (ok)
+    else if (ok) {
         tg_write_file(s_stream_dir, "MODELS.DAT", models.b, models.len);
+        tg_meshtag_write(s_stream_dir);   /* [PICK] sidecar, separate file */
+    }
     tg_buf_free(&models);
 
     /* (No per-build report here. The incoming commit called its TG_PF

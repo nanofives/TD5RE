@@ -38,8 +38,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  scenery: the mesh under the cursor is boxed and named" },
     { CL_ITEM,    "  (entry/slot, texture page + name, world pos). Left-click" },
     { CL_ITEM,    "  copies that identity as JSON to the clipboard, so a" },
-    { CL_ITEM,    "  change can be asked for precisely. Dev builds only;" },
-    { CL_ITEM,    "  TD5RE_PICK=0 disables. Page names are auto-track only." },
+    { CL_ITEM,    "  change can be asked for precisely. On the auto track it" },
+    { CL_ITEM,    "  also names the emitter kind (flora/building/guardrail)" },
+    { CL_ITEM,    "  via a MESHTAG.BIN sidecar (MODELS.DAT byte-identical)." },
+    { CL_ITEM,    "  Dev builds only; TD5RE_PICK=0 disables." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 04 (pending list)" },

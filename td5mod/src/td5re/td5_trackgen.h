@@ -138,6 +138,13 @@ int td5_trackgen_is_auto_slot(int slot);
  * the auto track (page ids are per-track). Used by the dev geometry picker. */
 const char *td5_trackgen_page_name(int page);
 
+/* [PICK] Emitter-kind name for an auto-track mesh at (entry, slot), e.g.
+ * "flora", "building", "guardrail" -- read from the level's MESHTAG.BIN sidecar
+ * (written next to MODELS.DAT; MODELS.DAT itself is unchanged). NULL if the
+ * sidecar is absent (older cached build) or the slot has no recorded kind.
+ * Lazily (re)loads per seed. Auto track only; dev builds only (NULL in RELEASE). */
+const char *td5_trackgen_mesh_kind_name(int entry, int slot);
+
 /* Regenerate the auto track with a fresh seed and (re)register it so the
  * frontend + asset loader can see it. Called once at boot (so the selector
  * entry exists) and again at every race launch that selected it (so each race
