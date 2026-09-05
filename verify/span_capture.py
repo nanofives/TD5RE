@@ -48,7 +48,17 @@ for f in ("race.log","engine.log"):
     if os.path.exists(p):
         try: os.replace(p, p+".prev")
         except OSError: pass
+# SEED PINNING (default ON). TD5RE_AUTOTRACK_SEED fixes the road SPINE only --
+# centerline, span count, biome runs. Scenery/junction decisions draw from the CRT
+# rand(), which td5_game.c seeds from GetTickCount() unless race_trace_enabled or
+# selftest_deterministic is set, in which case it is the fixed 0x1A2B3C4D. Without
+# this flag two runs of the SAME seed decorate differently (measured 2026-09-04:
+# paved_span_sides 1172 vs 1157, outer_faces 420 vs 405, two extra junction
+# continuations), which silently invalidates every A/B. Set TD5RE_CAPTURE_PIN=0
+# only if you deliberately want the clock-seeded variation.
+PIN = os.environ.get("TD5RE_CAPTURE_PIN","1") != "0"
 args=[os.path.join(WT,"td5re.exe"),"--SkipIntro=1","--AutoRace=1","--DefaultTrack=60",f"--StartSpanOffset={START}","--DefaultOpponents=0","--Control=1","--LaneAssist=1"]
+if PIN: args.append("--RaceTrace=1")
 proc=subprocess.Popen(args, cwd=WT, env=env); print("pid",proc.pid,"seed",SEED,"start",START,"targets",TARGETS)
 u=ctypes.windll.user32; back=False
 def send_back():
@@ -87,4 +97,18 @@ c.command("release_action",{"slot":0})
 try: print("quit ->", c.command("quit")); proc.wait(30)
 except Exception as e: print("quit/wait err",e); proc.kill()
 log=open(os.path.join(WT,"log","race.log"),encoding="utf-8",errors="replace").read()
+# GENERATION FINGERPRINT. Seed pinning (above) is NOT sufficient: measured
+# 2026-09-04 on fa761b51, three identical seed-777 runs with the CRT seed pinned
+# still produced 2 matching + 1 divergent generation (paved_span_sides 1172/1172/
+# 1164, outer_faces 420/420/412). Generation runs on a worker thread and has a
+# residual nondeterminism that is NOT the RNG seed. CONSEQUENCE: an A/B pair whose
+# two runs generated different tracks is worthless -- the difference you see may be
+# generation variance, not the knob. Compare this fingerprint between the two runs
+# of every pair and DISCARD the pair unless it matches.
+fp=[]
+for pat in (r"spans=(\d+) len=(\d+)", r"paved_span_sides=(\d+)", r"outer_faces=(\d+)",
+            r"frontage_runs=(\d+)", r"MISSING_SIDE_FACES=(\d+)", r"buildings_dropped=(\d+)"):
+    m=re.search(pat, log); fp.append(m.group(0) if m else "?")
+print("GENFP:", " | ".join(fp))
+print("GENFP: compare this line between the two runs of an A/B pair; if it differs, the pair is INVALID")
 for m in re.findall(r".*(?:SUMMARY|summary:|on-road guard|r10cross|r8cross|r9city|flush_no_sidewalk|rejected).*", log)[:40]: print("LOG:", m.strip()[:230])
