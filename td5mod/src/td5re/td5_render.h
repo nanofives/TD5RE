@@ -218,6 +218,17 @@ void td5_render_recompute_frustum_for_trackside(void);
 int td5_render_transform_and_project(float mx, float my, float mz,
                                      float *sx, float *sy, float *sz, float *rhw);
 
+/**
+ * Project a WORLD-space point (render-float space, world/256 -- the same space
+ * as mesh bounding centres and s_camera_pos during the opaque pass) to screen
+ * pixels. Returns 1 on success, 0 if behind the near clip. `rhw` (= 1/view_z)
+ * is returned so callers can size screen-space extents (px = size*focal*rhw).
+ * Thin public wrapper over the debug-line projector; valid only during a pane's
+ * world pass, when the camera state is bound. Used by the dev geometry picker.
+ */
+int td5_render_project_world(float wx, float wy, float wz,
+                             float *sx, float *sy, float *rhw);
+
 /* --- Debug line overlay (collision wireframe) ---
  * Submits world-space line segments. Each call appends one segment to an
  * internal batch. Call td5_render_debug_lines_flush() once per frame after

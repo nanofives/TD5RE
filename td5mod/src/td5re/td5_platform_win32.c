@@ -995,6 +995,69 @@ int td5_plat_input_key_pressed(int scancode)
     return (s_keyboard[scancode] & 0x80) ? 1 : 0;
 }
 
+/* --- Absolute cursor position (dev free-cam geometry picker) --------------
+ * The in-race input layer carries only mouse *deltas* (DirectInput relative
+ * mode), and the OS cursor is force-hidden over the client area, so there is no
+ * absolute cursor for a screen-space pick. Read it straight from Win32 the same
+ * way the frontend does (GetCursorPos -> ScreenToClient) and also report the
+ * client size so the caller can scale into render pixels. Returns 1 on success.
+ */
+int td5_plat_input_get_mouse_pos(int *client_x, int *client_y,
+                                 int *client_w, int *client_h)
+{
+    POINT pt;
+    RECT  rc;
+    if (!s_hwnd) return 0;
+    if (!GetCursorPos(&pt)) return 0;
+    ScreenToClient(s_hwnd, &pt);
+    if (!GetClientRect(s_hwnd, &rc)) return 0;
+    if (client_x) *client_x = (int)pt.x;
+    if (client_y) *client_y = (int)pt.y;
+    if (client_w) *client_w = (int)(rc.right - rc.left);
+    if (client_h) *client_h = (int)(rc.bottom - rc.top);
+    return 1;
+}
+
+/* Current physical left-mouse-button state (for the picker's own click-edge
+ * detection). Independent of td5_plat_input_poll's read-and-clear latch, so the
+ * free camera's own input poll and the picker don't fight over the click. */
+int td5_plat_input_mouse_left_down(void)
+{
+    return (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0;
+}
+
+/* Copy UTF-8 text onto the Windows clipboard as CF_UNICODETEXT. Returns 1 on
+ * success. Used by the dev geometry picker to hand the hovered mesh's identity
+ * back for pasting. */
+int td5_plat_clipboard_set_text(const char *utf8)
+{
+    int wlen;
+    HGLOBAL hmem;
+    wchar_t *wbuf;
+
+    if (!utf8 || !s_hwnd) return 0;
+    wlen = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
+    if (wlen <= 0) return 0;
+
+    hmem = GlobalAlloc(GMEM_MOVEABLE, (size_t)wlen * sizeof(wchar_t));
+    if (!hmem) return 0;
+    wbuf = (wchar_t *)GlobalLock(hmem);
+    if (!wbuf) { GlobalFree(hmem); return 0; }
+    MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wbuf, wlen);
+    GlobalUnlock(hmem);
+
+    if (!OpenClipboard(s_hwnd)) { GlobalFree(hmem); return 0; }
+    EmptyClipboard();
+    if (!SetClipboardData(CF_UNICODETEXT, hmem)) {
+        /* Ownership only transfers on success; free on failure. */
+        CloseClipboard();
+        GlobalFree(hmem);
+        return 0;
+    }
+    CloseClipboard();   /* clipboard now owns hmem */
+    return 1;
+}
+
 /* [INPUTSCRIPT 2026-07-03] Scripted-key injection (dev harness + StartScreen
  * nav walker). Press/release a DIK scancode as if it were a physical key:
  *  - the overlay is merged into s_keyboard after each hardware fill (and

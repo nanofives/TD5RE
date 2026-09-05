@@ -32,6 +32,7 @@
 #include "td5_laneassist.h" /* lane-assist per-viewport indicator */
 #include "td5_track.h"
 #include "td5_camera.h"
+#include "td5_pick.h"     /* dev free-cam geometry picker HUD label */
 #include "td5_game.h"
 #include "td5_net.h"      /* [S31] td5_net_get_slot_name for the PAUSED BY overlay */
 #include "td5_save.h"
@@ -5947,6 +5948,12 @@ void td5_hud_render_overlays(float dt)
           } }
         td5_hud_queue_text(0, fps_x, fps_y, 0, "%s", fps_buf);
     }
+
+#ifndef TD5RE_RELEASE
+    /* [PICK] Free-cam geometry picker label (no-op unless the free camera is
+     * flying). Queued into the same text batch flushed just below. */
+    td5_pick_hud_draw();
+#endif
 
     /* Flush queued text glyphs */
     td5_hud_flush_text();

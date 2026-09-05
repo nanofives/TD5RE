@@ -3604,6 +3604,17 @@ int debug_line_project(float wx, float wy, float wz, uint32_t argb,
     return 1;
 }
 
+/* Public world->screen projection for the dev geometry picker. See header. */
+int td5_render_project_world(float wx, float wy, float wz,
+                             float *sx, float *sy, float *rhw) {
+    TD5_D3DVertex v;
+    if (!debug_line_project(wx, wy, wz, 0, &v)) return 0;
+    if (sx)  *sx  = v.screen_x;
+    if (sy)  *sy  = v.screen_y;
+    if (rhw) *rhw = v.rhw;
+    return 1;
+}
+
 void td5_render_debug_line_world(float x0, float y0, float z0,
                                  float x1, float y1, float z1,
                                  uint32_t argb) {

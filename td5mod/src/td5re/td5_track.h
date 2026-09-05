@@ -212,6 +212,10 @@ const TD5_SpanDisplayList *td5_track_get_display_list(int span_index);
  * (orig 0x0042BBBC SHR). Replaces per-span iteration's 4× redundant block
  * submission with orig's per-entry walk shape. */
 const TD5_SpanDisplayList *td5_track_get_display_list_entry(int entry_index);
+/* Recover the entry index of a block the getters above returned (pointer
+ * arithmetic over the contiguous runtime array). -1 if not one of ours. Used by
+ * the dev free-cam geometry picker. */
+int td5_track_display_list_index(const TD5_SpanDisplayList *block);
 
 /* --- MODELS.DAT --- */
 int  td5_track_parse_models_dat(const void *data, size_t size);

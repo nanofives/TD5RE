@@ -594,6 +594,80 @@ typedef char tg_r11_sign_pages_fit[(3 <= TD5_TG_R11_SIGN_N - 1) ? 1 : -1];
 
 #define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R11_BASE + 6)
 
+/* [PICK] Human name for an auto-track texture page id, for the dev geometry
+ * picker's HUD/clipboard. Defined ENTIRELY in terms of the TD5_TG_PAGE_*
+ * constants above (and their variant counts), so it can never drift out of sync
+ * with the numbering the way a hardcoded table would. Covers the named leaf
+ * pages and the main variant ranges -- the pages you actually hover; returns
+ * NULL for reserved/spare slots so the picker falls back to the bare number.
+ * Valid ONLY for the auto slot (page ids are per-track). */
+const char *td5_trackgen_page_name(int page)
+{
+    switch (page) {
+    case TD5_TG_PAGE_ROAD:          return "ROAD";
+    case TD5_TG_PAGE_WALL:          return "WALL";
+    case TD5_TG_PAGE_GREEN:         return "GREEN";
+    case TD5_TG_PAGE_TREE:          return "TREE";
+    case TD5_TG_PAGE_RAIL:          return "RAIL";
+    case TD5_TG_PAGE_GROUND:        return "GROUND";
+    case TD5_TG_PAGE_WATER:         return "WATER";
+    case TD5_TG_PAGE_SIDEWALK:      return "SIDEWALK";
+    case TD5_TG_PAGE_CROSSING:      return "CROSSING";
+    case TD5_TG_PAGE_FENCE:         return "FENCE";
+    case TD5_TG_PAGE_TREELINE:      return "TREELINE";
+    case TD5_TG_PAGE_TUNNEL:        return "TUNNEL";
+    case TD5_TG_PAGE_SNOW:          return "SNOW";
+    case TD5_TG_PAGE_HILL:          return "HILL";
+    case TD5_TG_PAGE_BANNER:        return "BANNER_LEG";
+    case TD5_TG_PAGE_LAMPPOST:      return "LAMPPOST";
+    case TD5_TG_PAGE_START_L:       return "START_L";
+    case TD5_TG_PAGE_START_R:       return "START_R";
+    case TD5_TG_PAGE_FINISH_L:      return "FINISH_L";
+    case TD5_TG_PAGE_FINISH_R:      return "FINISH_R";
+    case TD5_TG_PAGE_BRIDGE_DECK:   return "BRIDGE_DECK";
+    case TD5_TG_PAGE_BRANCH_KERB:   return "BRANCH_KERB";
+    case TD5_TG_PAGE_R4_GUARDRAIL:  return "GUARDRAIL";
+    case TD5_TG_PAGE_R4_PIER:       return "PIER";
+    case TD5_TG_PAGE_R4_COAST:      return "COAST";
+    case TD5_TG_PAGE_R4_SKYLINE:    return "SKYLINE";
+    case TD5_TG_PAGE_R5_LEG:        return "GANTRY_LEG";
+    case TD5_TG_PAGE_R9_BORE_CEIL:  return "TUNNEL_CEIL";
+    case TD5_TG_PAGE_R9_PORTAL_SURR:return "PORTAL_SURROUND";
+    case TD5_TG_PAGE_R9_PORTAL_FACE:return "PORTAL_FACE";
+    case TD5_TG_PAGE_R9_UP_ABUT:    return "UNDERPASS_ABUT";
+    case TD5_TG_PAGE_R9_UP_SOFFIT:  return "UNDERPASS_SOFFIT";
+    case TD5_TG_PAGE_R9_UP_DECK:    return "UNDERPASS_DECK";
+    case TD5_TG_PAGE_R9_UP_PARAPET: return "UNDERPASS_PARAPET";
+    case TD5_TG_PAGE_R11_SIGN_LEFT: return "SIGN_LEFT";
+    case TD5_TG_PAGE_R11_SIGN_RIGHT:return "SIGN_RIGHT";
+    case TD5_TG_PAGE_R11_SIGN_STRAIGHT:return "SIGN_STRAIGHT";
+    case TD5_TG_PAGE_R11_SIGN_POST: return "SIGN_POST";
+    default: break;
+    }
+    /* Variant ranges (each a group of consecutive pages). */
+    if (page >= TD5_TG_PAGE_WALL_EXTRA &&
+        page <  TD5_TG_PAGE_WALL_EXTRA + TD5_TG_WALL_VARIANTS - 1) return "WALL_VARIANT";
+    if (page >= TD5_TG_PAGE_STORE &&
+        page <  TD5_TG_PAGE_STORE + TD5_TG_STORE_VARIANTS)        return "STORE";
+    if (page >= TD5_TG_PAGE_TREE_EXTRA &&
+        page <  TD5_TG_PAGE_TREE_EXTRA + TD5_TG_TREE_VARIANTS)    return "TREE_VARIANT";
+    if (page >= TD5_TG_PAGE_PROP &&
+        page <  TD5_TG_PAGE_PROP + TD5_TG_PROP_COUNT)             return "PROP";
+    if (page >= TD5_TG_PAGE_ROAD_EXTRA &&
+        page <  TD5_TG_PAGE_ROAD_EXTRA + TD5_TG_ROAD_VARIANTS - 1) return "ROAD_VARIANT";
+    if (page >= TD5_TG_PAGE_TUNNEL_VAR &&
+        page <  TD5_TG_PAGE_TUNNEL_VAR + TD5_TG_TUNNEL_VARIANTS - 1) return "TUNNEL_VARIANT";
+    if (page >= TD5_TG_PAGE_R5_FLORA &&
+        page <  TD5_TG_PAGE_R5_FLORA + TD5_TG_R5_FLORA_N)         return "FLORA";
+    if (page >= TD5_TG_PAGE_R7_WALL_LOW &&
+        page <  TD5_TG_PAGE_R7_WALL_LOW + TD5_TG_R7_WALL_LOW_N)   return "WALL_LOW";
+    if (page >= TD5_TG_PAGE_R7_WALL_TOWER &&
+        page <  TD5_TG_PAGE_R7_WALL_TOWER + TD5_TG_R7_WALL_TOWER_N) return "WALL_TOWER";
+    if (page >= TD5_TG_PAGE_R8V_RAIL &&
+        page <  TD5_TG_PAGE_R8V_RAIL + TD5_TG_R8V_RAIL_N)         return "GUARDRAIL_VAR";
+    return NULL;
+}
+
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
 

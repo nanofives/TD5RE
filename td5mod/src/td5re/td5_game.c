@@ -37,6 +37,7 @@
 #include "../../../re/include/td5_actor_struct.h"
 #include "td5_carparam.h"   /* car mass/accel offsets + td5cp_heaviness_q8 (get_state) */
 #include "td5_camera.h"
+#include "td5_pick.h"   /* dev free-cam geometry picker */
 #include "td5_frontend.h"
 #include "td5_laneassist.h"   /* seed each human's lane-assist enable at race start */
 #include "td5_hud.h"
@@ -7720,6 +7721,15 @@ static void frame_render(void)
         }
     }
 
+#ifndef TD5RE_RELEASE
+    /* [PICK] Arm the dev free-cam geometry picker for this frame (captures the
+     * cursor; no-op unless the free camera is flying). The per-mesh collection
+     * runs inside the render walk; the resolve/highlight is in the serial path
+     * below. Freecam is always single-pane, so it never takes the threaded
+     * path. */
+    td5_pick_begin_frame();
+#endif
+
     /* [Phase B Stage 2b] Decide whether to record panes on worker threads.
      * Gated: dev-only [Render] ThreadedPanes, >2 panes, a live worker pool, the
      * per-pane g_rs + deferred-context pools available, AND past a 2-frame warmup
@@ -7944,6 +7954,14 @@ static void frame_render(void)
                 td5_render_debug_lines_flush();
             }
         }
+
+#ifndef TD5RE_RELEASE
+        /* [PICK] Resolve the hovered mesh, draw the highlight box, handle the
+         * copy click. Own debug-line batch; runs on viewport 0 only (the free
+         * camera is single-pane). No-op unless the free camera is flying. */
+        if (vp == 0)
+            td5_pick_finish_frame();
+#endif
 
         /* [task#14] Visible TD6 breakable-prop boxes — solid scene geometry,
          * after track + actors, before translucent VFX (single-view path). */

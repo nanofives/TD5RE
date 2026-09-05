@@ -23,6 +23,7 @@
 #include "td5_profile.h"
 #include "td5_track.h"
 #include "td5_game.h"
+#include "td5_pick.h"   /* dev free-cam geometry picker (consider hook) */
 #include "td5_input.h"   /* td5_input_is_playback_active */
 #include "td5_sound.h"   /* td5_sound_siren_is_enabled */
 #include "td5_asset.h"
@@ -1658,6 +1659,13 @@ void td5_render_span_display_list(const TD5_SpanDisplayList *display_list_block)
             if (dbg_is_bb) s_dbg_bb_culled++;   /* [task#7] */
             continue;
         }
+
+#ifndef TD5RE_RELEASE
+        /* [PICK] Offer this visible mesh to the dev free-cam geometry picker.
+         * Gated so it costs nothing unless the free camera is flying. */
+        if (td5_pick_collecting())
+            td5_pick_consider(block, i, mesh, cx, cy, cz + s_dl_z_offset, r);
+#endif
 
         /* Build world-to-view basis from mesh origin — origin is in integer-
            coordinate space, must scale by 1/256 to match camera (render-float

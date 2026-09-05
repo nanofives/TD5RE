@@ -9617,6 +9617,21 @@ const TD5_SpanDisplayList *td5_track_get_display_list_entry(int entry_index)
     return &s_models_dl[entry_index];
 }
 
+/* Reverse of the getters above: recover the MODELS.DAT entry index of a block
+ * the render walk is holding. s_models_dl is one contiguous array (both the
+ * load-time and the streaming builders size it once), so the entry index is
+ * simple pointer arithmetic. Used by the dev geometry picker to name a hovered
+ * mesh by (entry, slot). Returns -1 if the block is not one of ours (e.g. the
+ * drag finish gantry's stack-synthesized one-entry block). */
+int td5_track_display_list_index(const TD5_SpanDisplayList *block)
+{
+    if (!s_models_dl || s_models_dl_count <= 0 || !block)
+        return -1;
+    if (block < s_models_dl || block >= s_models_dl + s_models_dl_count)
+        return -1;
+    return (int)(block - s_models_dl);
+}
+
 /**
  * GetTrackSpanDisplayListEntry (0x431260). L5 promotion sweep audit (2026-05-18).
  * Returns the display list (pre-built render command buffer) for a span.

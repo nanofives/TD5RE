@@ -133,6 +133,11 @@ int td5_trackgen_slot(void);           /* its frontend schedule slot */
 /* Is this frontend schedule slot the auto-generated track? */
 int td5_trackgen_is_auto_slot(int slot);
 
+/* [PICK] Human name for an auto-track texture page id (e.g. "GUARDRAIL",
+ * "FLORA", "WALL_TOWER"), or NULL for reserved/unnamed slots. Valid only for
+ * the auto track (page ids are per-track). Used by the dev geometry picker. */
+const char *td5_trackgen_page_name(int page);
+
 /* Regenerate the auto track with a fresh seed and (re)register it so the
  * frontend + asset loader can see it. Called once at boot (so the selector
  * entry exists) and again at every race launch that selected it (so each race

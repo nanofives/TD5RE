@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 05 (dev tools)" },
+    { CL_ITEM,    "DEV: free-cam GEOMETRY PICKER. In the free camera" },
+    { CL_ITEM,    "  (pause -> FREE CAMERA), hover the mouse over track or" },
+    { CL_ITEM,    "  scenery: the mesh under the cursor is boxed and named" },
+    { CL_ITEM,    "  (entry/slot, texture page + name, world pos). Left-click" },
+    { CL_ITEM,    "  copies that identity as JSON to the clipboard, so a" },
+    { CL_ITEM,    "  change can be asked for precisely. Dev builds only;" },
+    { CL_ITEM,    "  TD5RE_PICK=0 disables. Page names are auto-track only." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 04 (pending list)" },
     { CL_ITEM,    "DEV: the 2026-09-02 PENDING TO TEST refactor is now" },
     { CL_ITEM,    "  applied to the live list. It had been run against the" },

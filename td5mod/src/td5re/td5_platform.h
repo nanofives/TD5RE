@@ -288,6 +288,16 @@ void td5_plat_input_inject_clear(void);
  *  is ±120 (WHEEL_DELTA); positive = wheel-up/away from the user. */
 int td5_plat_input_get_mouse_wheel(void);
 
+/** Absolute cursor position in client pixels + client size (dev geometry picker).
+ *  Returns 1 on success. The in-race input path only carries deltas, so this is
+ *  the way to get a screen-space cursor for hover/pick. */
+int td5_plat_input_get_mouse_pos(int *client_x, int *client_y,
+                                 int *client_w, int *client_h);
+/** Physical left-mouse-button state (1 = down). Independent of the poll latch. */
+int td5_plat_input_mouse_left_down(void);
+/** Copy UTF-8 text to the Windows clipboard (CF_UNICODETEXT). 1 on success. */
+int td5_plat_clipboard_set_text(const char *utf8);
+
 /** Pop the next queued typed character (WM_CHAR); 0 if none. Frame-rate
  *  independent so text input is never dropped by slow frames / poll contention. */
 int  td5_plat_input_get_char(void);
