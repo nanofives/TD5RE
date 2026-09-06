@@ -3615,6 +3615,39 @@ int td5_render_project_world(float wx, float wy, float wz,
     return 1;
 }
 
+/* Inverse of the projector: the world-space ray (render-float space) through a
+ * screen pixel, for the dev geometry picker's raycast. origin = camera eye,
+ * dir = normalized. Uses the same file-static camera state as debug_line_project
+ * (valid only during a pane's world pass). See header. */
+void td5_render_screen_ray(float sx, float sy, float origin[3], float dir[3]) {
+    /* debug_line_project: screen = -v * focal / vz + center, with
+     * v = M*(world-cam), M rows = {right, up, fwd}. Fix vz=1 and invert:
+     * vx = (center_x - sx)/focal, vy = (center_y - sy)/focal, then
+     * world_dir = vx*right + vy*up + fwd  (M orthonormal -> d = M^T v). */
+    float inv_f = (s_focal_length != 0.0f) ? (1.0f / s_focal_length) : 0.0f;
+    float vx = (s_center_x - sx) * inv_f;
+    float vy = (s_center_y - sy) * inv_f;
+    const float *b = s_camera_basis;   /* b0..2 right, b3..5 up, b6..8 fwd */
+    float dx = vx*b[0] + vy*b[3] + b[6];
+    float dy = vx*b[1] + vy*b[4] + b[7];
+    float dz = vx*b[2] + vy*b[5] + b[8];
+    float len = sqrtf(dx*dx + dy*dy + dz*dz);
+    if (len > 0.0f) { dx /= len; dy /= len; dz /= len; }
+    origin[0] = s_camera_pos[0];
+    origin[1] = s_camera_pos[1];
+    origin[2] = s_camera_pos[2];
+    dir[0] = dx; dir[1] = dy; dir[2] = dz;
+}
+
+/* Camera basis rows (render-float world): right, up, forward. For the picker's
+ * camera-facing billboard test. NULL args are skipped. */
+void td5_render_get_camera_axes(float right[3], float up[3], float fwd[3]) {
+    const float *b = s_camera_basis;
+    if (right) { right[0]=b[0]; right[1]=b[1]; right[2]=b[2]; }
+    if (up)    { up[0]=b[3];    up[1]=b[4];    up[2]=b[5]; }
+    if (fwd)   { fwd[0]=b[6];   fwd[1]=b[7];   fwd[2]=b[8]; }
+}
+
 void td5_render_debug_line_world(float x0, float y0, float z0,
                                  float x1, float y1, float z1,
                                  uint32_t argb) {

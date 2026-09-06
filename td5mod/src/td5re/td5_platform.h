@@ -297,6 +297,12 @@ int td5_plat_input_get_mouse_pos(int *client_x, int *client_y,
 int td5_plat_input_mouse_left_down(void);
 /** Copy UTF-8 text to the Windows clipboard (CF_UNICODETEXT). 1 on success. */
 int td5_plat_clipboard_set_text(const char *utf8);
+/** Show (1) or hide (0) the OS cursor over the client area. Normally hidden
+ *  in-race; the dev geometry picker turns it on (a crosshair) while flying. */
+void td5_plat_set_os_cursor_visible(int visible);
+/** Read-and-clear the dev geometry picker's real-left-click latch (set only on a
+ *  WM_LBUTTONDOWN to this window). 1 if a click occurred since the last call. */
+int  td5_plat_pick_take_click(void);
 
 /** Pop the next queued typed character (WM_CHAR); 0 if none. Frame-rate
  *  independent so text input is never dropped by slow frames / poll contention. */

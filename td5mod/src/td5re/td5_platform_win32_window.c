@@ -121,6 +121,18 @@ volatile int s_esc_latch = 0;
  * polling it every ~90 frames (the dominant frontend frame-time spike). */
 volatile int s_devices_dirty = 0;
 
+/* [PICK] When set, WM_SETCURSOR shows a crosshair over the client area instead
+ * of hiding the cursor. Driven by the dev geometry picker (free camera only) so
+ * the user can see where they are selecting. */
+static int s_os_cursor_show = 0;
+void td5_plat_set_os_cursor_visible(int visible) { s_os_cursor_show = visible ? 1 : 0; }
+
+/* [PICK] Real left-click latch: set ONLY on a WM_LBUTTONDOWN delivered to this
+ * window (so it respects focus and never fires on a stray global button read the
+ * way GetAsyncKeyState did). Read-and-cleared by the picker each frame. */
+static int s_pick_click_latch = 0;
+int td5_plat_pick_take_click(void) { int c = s_pick_click_latch; s_pick_click_latch = 0; return c; }
+
 LRESULT CALLBACK TD5_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
@@ -155,6 +167,13 @@ LRESULT CALLBACK TD5_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
     case WM_SETCURSOR:
         if (LOWORD(lParam) == HTCLIENT) {
+            /* [PICK] The client cursor is normally hidden; the dev geometry
+             * picker asks for a visible crosshair so the user can see exactly
+             * where they are selecting. */
+            if (s_os_cursor_show) {
+                SetCursor(LoadCursor(NULL, IDC_CROSS));
+                return TRUE;
+            }
             SetCursor(NULL);
             return TRUE;
         }
@@ -176,7 +195,7 @@ LRESULT CALLBACK TD5_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         break;
     /* Latch mouse clicks so a quick click released within one 33ms frame is not missed */
-    case WM_LBUTTONDOWN: s_mouse_click_latch |= 1; break;
+    case WM_LBUTTONDOWN: s_mouse_click_latch |= 1; s_pick_click_latch = 1; break;
     case WM_RBUTTONDOWN: s_mouse_click_latch |= 2; break;
     case WM_MBUTTONDOWN: s_mouse_click_latch |= 4; break;
     /* Queue genuine nav-key presses (auto-repeat filtered via lParam bit 30) so

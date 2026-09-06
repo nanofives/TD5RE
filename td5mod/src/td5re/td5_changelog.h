@@ -32,6 +32,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 06 (dev tools)" },
+    { CL_ITEM,    "DEV: geometry picker polish. It now casts a ray from the" },
+    { CL_ITEM,    "  crosshair and highlights the FIRST surface hit (a tree" },
+    { CL_ITEM,    "  in front of terrain wins), with a crosshair cursor, a" },
+    { CL_ITEM,    "  perspective-correct outline+hatch that hugs the mesh," },
+    { CL_ITEM,    "  and copy on left-click only (COPIED confirmation)." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 05 (dev tools)" },
     { CL_ITEM,    "DEV: free-cam GEOMETRY PICKER. In the free camera" },
     { CL_ITEM,    "  (pause -> FREE CAMERA), hover the mouse over track or" },

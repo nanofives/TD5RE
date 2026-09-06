@@ -229,6 +229,17 @@ int td5_render_transform_and_project(float mx, float my, float mz,
 int td5_render_project_world(float wx, float wy, float wz,
                              float *sx, float *sy, float *rhw);
 
+/**
+ * Inverse of the projector: the world-space ray (render-float space) through a
+ * screen pixel. origin = camera eye, dir = unit direction. Valid only during a
+ * pane's world pass. Used by the dev geometry picker's raycast.
+ */
+void td5_render_screen_ray(float sx, float sy, float origin[3], float dir[3]);
+
+/** Camera basis rows (render-float world): right, up, forward. NULL args skipped.
+ *  Used by the dev geometry picker's camera-facing billboard test. */
+void td5_render_get_camera_axes(float right[3], float up[3], float fwd[3]);
+
 /* --- Debug line overlay (collision wireframe) ---
  * Submits world-space line segments. Each call appends one segment to an
  * internal batch. Call td5_render_debug_lines_flush() once per frame after
