@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 06 (dev tools)" },
+    { CL_ITEM,    "DEV: the debug SPAN/LANE overlay and the race trace's wall" },
+    { CL_ITEM,    "  clearance now read the span the car is physically on, so" },
+    { CL_ITEM,    "  a car on a branch corridor shows 'SPAN: n (corridor m)'," },
+    { CL_ITEM,    "  the corridor's lane count and a real clearance." },
     { CL_ITEM,    "RANDOM TRACK: six fork shapes instead of one. Divided" },
     { CL_ITEM,    "  avenues, short traffic islands, wide splits, slip" },
     { CL_ITEM,    "  roads (1-2 lanes peel off) and major branches (the" },

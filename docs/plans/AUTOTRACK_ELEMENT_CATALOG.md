@@ -274,9 +274,11 @@ window, which the walk currently straightens).
 Diagnostic gotcha found while verifying: the race trace's `wall_clear` column
 and the HUD's `LANE: lanes=N` line both read the NORMALIZED main span, so on a
 car that took a corridor they report the main road's rails and lane count (the
-clearance goes negative by exactly the corridor's bow). Check `span_raw >=
-ring` before reading either. The AI does take corridors (about 1 fork in 3 in
-the drive tests) and follows them. The original list:
+clearance went negative by exactly the corridor's bow). FIXED the same day:
+both now read the physical span (`span_raw` when it is a valid strip index),
+and the HUD prints `SPAN: n (corridor m)` on a branch. The AI does take
+corridors (about 1 fork in 3 in the drive tests) and follows them. The
+original list:
 
 1. **Divided carriageway** (parallel, symmetric split, 4..12 wide, 20..60 spans,
    avenue divider already exists): the most common shipped shape and the one

@@ -5489,7 +5489,14 @@ static void td5_game_trace_stage_impl(const char *stage, unsigned int stage_bit,
                 r.wall_clear = -1;
                 {
                     int lx, lz, rx, rz;
-                    if (td5_track_get_span_route_frame((int)r.span_norm, &lx, &lz, &rx, &rz)) {
+                    /* [FORK KINDS 2026-09-06] Measure against the span the car is
+                     * PHYSICALLY on. span_norm is the normalized main-ring index;
+                     * on a branch corridor (span_raw >= ring) it names the main
+                     * road beside the corridor, so the clearance came out as
+                     * minus the corridor's bow and read as an off-road car. */
+                    int phys = (int)r.span_raw;
+                    if (phys < 0 || phys >= td5_track_get_span_count()) phys = (int)r.span_norm;
+                    if (td5_track_get_span_route_frame(phys, &lx, &lz, &rx, &rz)) {
                         double axx = (double)(rx - lx), axz = (double)(rz - lz);
                         double len = sqrt(axx * axx + axz * axz);
                         if (len > 1.0) {

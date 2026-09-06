@@ -6070,11 +6070,21 @@ void td5_hud_render_overlays(float dt)
          * sub_lane = actor+0x8C (ACTOR_SUB_LANE_INDEX, signed); lane count is the
          * current span's geometry nibble via td5_track_get_span_lane_count. */
         int16_t span = *(int16_t *)(dbg_a + 0x82);
-        td5_hud_queue_text(0, 8, dbg_y, 0, "SPAN: %d", (int)span);
+        int16_t span_raw = *(int16_t *)(dbg_a + 0x80);
+        /* [FORK KINDS 2026-09-06] On a branch corridor the raw span (>= ring)
+         * is the one the car is physically on; the normalized span names the
+         * main road beside it. Show both, and take the lane count from the
+         * physical span so the line matches the road under the car. */
+        int phys = ((int)span_raw >= 0 && (int)span_raw < td5_track_get_span_count())
+                 ? (int)span_raw : (int)span;
+        if (phys != (int)span)
+            td5_hud_queue_text(0, 8, dbg_y, 0, "SPAN: %d (corridor %d)", (int)span, phys);
+        else
+            td5_hud_queue_text(0, 8, dbg_y, 0, "SPAN: %d", (int)span);
         dbg_y += dbg_dy;
 
         int cur_sub_lane  = (int)*(int8_t *)(dbg_a + 0x8C);
-        int cur_lane_cnt  = td5_track_get_span_lane_count((int)span);
+        int cur_lane_cnt  = td5_track_get_span_lane_count(phys);
         td5_hud_queue_text(0, 8, dbg_y, 0, "LANE: sub=%d  lanes=%d", cur_sub_lane, cur_lane_cnt);
 
         td5_hud_flush_text();
