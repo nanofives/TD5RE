@@ -1048,6 +1048,418 @@ void tg_r14_coast_report(void)
                       k_guard_kind_name[k], s_r14_str_kind[k]);
 }
 
+/* ================= [R15 PAIR] SCENERY-vs-SCENERY ARBITRATION ================
+ * "this guardrail is clipping over the main road as well as this building"
+ * (R15 items 10 + 11: a FENCE quad and a WALL_LOW flank in the same entry).
+ *
+ * WHY THE EXISTING GUARDS CANNOT SEE THIS, measured rather than assumed. The
+ * on-road guard DOES test the fence -- TG_GK_BLOCK is TG_GKC_SCENERY -- and
+ * does not reject it, so the road half of the report is an intrusion below
+ * TD5_TG_GUARD_PEN. The building half is invisible to every guard in this file
+ * by construction: both meshes stand OUTSIDE the carriageway and overlap EACH
+ * OTHER, and the only pairwise geometry test that existed was
+ * tg_validate_geometry_safety, which compares road centrelines. The R15 lateral
+ * authority cannot express it either -- both are legally placed at their own
+ * (span, side) laterals; they collide in world space, not in the lateral model.
+ *
+ * So this is the one case in the round that genuinely needs mesh-vs-mesh, and
+ * it goes HERE for the reason the R9 water audit states: this is the one place
+ * that sees the ASSEMBLED bytes of every mesh in an entry together with the
+ * KIND that produced it, so a future emitter is arbitrated for free.
+ *
+ * FOUR DELIBERATE NARROWINGS, because a pass that DROPS geometry is far more
+ * dangerous than one that measures it:
+ *   1. ONLY FOUR KINDS participate (building / city / cross / block). Road,
+ *      deck, terrain, water and the rest are never tested and never dropped.
+ *   2. BILLBOARDS ARE EXCLUDED (tag != 0). A tree or a prop is camera-facing,
+ *      so it has no fixed footprint and overlapping a wall is what it is FOR.
+ *   3. PEERS ARE NEVER ARBITRATED. Two meshes of equal priority (a sidewalk and
+ *      a crossstreet, both TG_GK_CITY) leave each other alone -- with equal
+ *      authority there is no principled loser, and picking one by index would
+ *      make the output depend on emit order.
+ *   4. DEEP OVERLAP ONLY, in ALL THREE axes. Abutting is legal and common: a
+ *      pavement arm bounds a flank wall, a facade stands on a kerb. The XZ
+ *      threshold is ~40% of a lane; the Y threshold is separate and smaller
+ *      because scenery is thin vertically -- at 600 a 520-high fence railing
+ *      could never be caught at all, and at 200 a 130-high kerb slab still
+ *      cannot be, which is exactly the discrimination wanted.
+ * Sweep-and-prune on X, not the naive O(n^2): the per-entry budget is 384
+ * meshes, so all-pairs would be ~73M tests across a track against a 0.5 s
+ * streamed build.
+ * ========================================================================== */
+#define TD5_TG_PAIR_PEN_XZ  600.0   /* min horizontal interpenetration to act */
+#define TD5_TG_PAIR_PEN_Y   200.0   /* min vertical; scenery is thin          */
+
+/* [R15 PAIR] AN AABB ALONE IS NOT A FOOTPRINT, and measuring proved it before
+ * this shipped. A first cut that acted on box-vs-box overlap dropped 299 meshes
+ * on the reported seed -- 220 of them `city` -- at consecutive spans 0,1,2,3,4,
+ * which is the signature of a systematic false positive rather than occasional
+ * clipping. The reason is the geometry this generator makes: a crossstreet quad
+ * runs up to 22800 units OUTWARD on a diagonal, so its axis-aligned box sweeps
+ * a huge region and "overlaps" facades tens of thousands of units away that it
+ * never touches. That is the same lesson the R8 guard already paid for when it
+ * replaced vertex sampling with per-quad area coverage.
+ *
+ * So the box is kept only as a cheap PREFILTER for the sweep, and a pair that
+ * survives it is confirmed by a real per-QUAD separating-axis test in XZ, which
+ * also yields the penetration depth the threshold is applied to. */
+typedef struct {
+    double x0, x1, y0, y1, z0, z1;
+    size_t off, mlen;
+    int    idx, kind, pri, nq;
+} TG_PairBox;
+
+/* Penetration depth of two convex XZ quads, 0 when a separating axis exists. */
+static double tg_pair_sat_xz(const double *A, const double *B)
+{
+    double best = 1e300;
+    int poly, e, i;
+
+    for (poly = 0; poly < 2; poly++) {
+        const double *P = poly ? B : A;
+        for (e = 0; e < 4; e++) {
+            const double x0 = P[e * 2],           z0 = P[e * 2 + 1];
+            const double x1 = P[((e + 1) & 3) * 2], z1 = P[((e + 1) & 3) * 2 + 1];
+            double nx = -(z1 - z0), nz = (x1 - x0);
+            double len = sqrt(nx * nx + nz * nz);
+            double amin = 1e300, amax = -1e300, bmin = 1e300, bmax = -1e300, ov;
+            if (len < 1e-9) continue;
+            nx /= len; nz /= len;
+            for (i = 0; i < 4; i++) {
+                const double pa = A[i * 2] * nx + A[i * 2 + 1] * nz;
+                const double pb = B[i * 2] * nx + B[i * 2 + 1] * nz;
+                if (pa < amin) amin = pa;
+                if (pa > amax) amax = pa;
+                if (pb < bmin) bmin = pb;
+                if (pb > bmax) bmax = pb;
+            }
+            ov = ((amax < bmax) ? amax : bmax) - ((amin > bmin) ? amin : bmin);
+            if (ov <= 0.0) return 0.0;          /* separated: done */
+            if (ov < best) best = ov;
+        }
+    }
+    return (best < 1e299) ? best : 0.0;
+}
+
+/* [R15 PAIR] AND AN AREA TEST CANNOT SEE A FENCE, which the first SAT cut
+ * proved: it dropped 0 meshes over 985 pair tests. A railing panel is a
+ * VERTICAL quad -- its four vertices collapse to TWO distinct XZ points -- so
+ * its footprint has zero area and tg_pair_sat_xz returns "separated" for it
+ * every time, by construction. Exactly the mesh items 10/11 are about.
+ *
+ * So a quad is classified by its XZ AREA and the right test is chosen:
+ *   AREA vs AREA     -> separating axis, penetration depth (a wall in a wall).
+ *   SEGMENT vs AREA  -> clip the panel's ground line against the polygon's
+ *                       half-planes and measure how much of it lies INSIDE.
+ *                       That is the honest reading of "the guardrail is driven
+ *                       600 units into this building".
+ *   SEGMENT vs SEGMENT -> not judged. Two thin panels crossing is a line-line
+ *                       case with no meaningful depth, and guessing one would
+ *                       be the false-positive trap all over again. */
+#define TD5_TG_PAIR_FLAT  10000.0   /* XZ area below this is a flat panel */
+
+static double tg_pair_xz_area(const double *Q)
+{
+    double a = 0.0;
+    int e;
+    for (e = 0; e < 4; e++) {
+        const int f = (e + 1) & 3;
+        a += Q[e * 2] * Q[f * 2 + 1] - Q[f * 2] * Q[e * 2 + 1];
+    }
+    return fabs(a) * 0.5;
+}
+
+static void tg_pair_chord(const double *Q, double *p0, double *p1)
+{
+    double best = -1.0;
+    int i, j;
+    p0[0] = Q[0]; p0[1] = Q[1]; p1[0] = Q[2]; p1[1] = Q[3];
+    for (i = 0; i < 4; i++) {
+        for (j = i + 1; j < 4; j++) {
+            const double dx = Q[j * 2] - Q[i * 2];
+            const double dz = Q[j * 2 + 1] - Q[i * 2 + 1];
+            const double d  = dx * dx + dz * dz;
+            if (d > best) {
+                best = d;
+                p0[0] = Q[i * 2]; p0[1] = Q[i * 2 + 1];
+                p1[0] = Q[j * 2]; p1[1] = Q[j * 2 + 1];
+            }
+        }
+    }
+}
+
+/* Length of segment p0->p1 lying inside convex quad Q (Liang-Barsky against
+ * the quad's half-planes; winding taken from the signed area so the inward
+ * normal is right whichever way the emitter wound it). */
+static double tg_pair_seg_in_quad(const double *p0, const double *p1,
+                                  const double *Q)
+{
+    const double dx = p1[0] - p0[0], dz = p1[1] - p0[1];
+    double t0 = 0.0, t1 = 1.0, sarea = 0.0;
+    double sgn;
+    int e;
+
+    for (e = 0; e < 4; e++) {
+        const int f = (e + 1) & 3;
+        sarea += Q[e * 2] * Q[f * 2 + 1] - Q[f * 2] * Q[e * 2 + 1];
+    }
+    if (fabs(sarea) < 1e-6) return 0.0;
+    sgn = (sarea > 0.0) ? 1.0 : -1.0;
+
+    for (e = 0; e < 4; e++) {
+        const int f = (e + 1) & 3;
+        const double ex = Q[f * 2] - Q[e * 2], ez = Q[f * 2 + 1] - Q[e * 2 + 1];
+        double nx = -ez * sgn, nz = ex * sgn;
+        double len = sqrt(nx * nx + nz * nz), num, den;
+        if (len < 1e-9) continue;
+        nx /= len; nz /= len;
+        num = (p0[0] - Q[e * 2]) * nx + (p0[1] - Q[e * 2 + 1]) * nz;
+        den = dx * nx + dz * nz;
+        if (fabs(den) < 1e-12) {
+            if (num < 0.0) return 0.0;      /* parallel and outside */
+            continue;
+        }
+        {
+            const double t = -num / den;
+            if (den > 0.0) { if (t > t0) t0 = t; }
+            else           { if (t < t1) t1 = t; }
+        }
+        if (t0 > t1) return 0.0;
+    }
+    return (t1 - t0) * sqrt(dx * dx + dz * dz);
+}
+
+/* The dispatcher: how deeply do these two quads interpenetrate in XZ? */
+static double tg_pair_xz_depth(const double *A, const double *B)
+{
+    const double aa = tg_pair_xz_area(A), ab = tg_pair_xz_area(B);
+    const int fa = (aa < TD5_TG_PAIR_FLAT), fb = (ab < TD5_TG_PAIR_FLAT);
+    double s0[2], s1[2];
+
+    if (!fa && !fb) return tg_pair_sat_xz(A, B);
+    if (fa && fb)   return 0.0;
+    if (fa) { tg_pair_chord(A, s0, s1); return tg_pair_seg_in_quad(s0, s1, B); }
+    tg_pair_chord(B, s0, s1);
+    return tg_pair_seg_in_quad(s0, s1, A);
+}
+
+/* [R15 PAIR] VALIDATE THE DETECTOR BEFORE TRUSTING ITS NULL RESULT.
+ * The census reports 0 intersecting quad pairs on the reported seed, and a test
+ * that always answers "no" is indistinguishable from one that correctly finds
+ * nothing. So three cases with hand-computed answers are run against the very
+ * same entry point the guard uses, and the numbers are logged rather than
+ * asserted -- if a future change breaks the geometry the log says so on the
+ * next build. TD5RE_R15_PAIR_SELFTEST=1 (default OFF, it is a fixed cost with
+ * nothing to say on a normal run). */
+static void tg_pair_selftest(void)
+{
+    /* 1. AREA vs AREA. Two 1000x1000 squares offset 400 in X: the minimum
+     *    separating-axis penetration is the X overlap, 600. */
+    static const double a1[8] = {    0,0, 1000,0, 1000,1000,    0,1000 };
+    static const double b1[8] = {  400,0, 1400,0, 1400,1000,  400,1000 };
+    /* 2. SEGMENT vs AREA. A vertical panel's footprint is the line x=500 from
+     *    z=-500 to z=1500 (verts wound base,base,top,top so XZ repeats).
+     *    Clipped to the unit square's z range [0,1000] that is 1000 inside. */
+    static const double a2[8] = {  500,-500, 500,1500, 500,1500, 500,-500 };
+    /* 3. DISJOINT. Nothing in common, must be exactly 0. */
+    static const double b3[8] = { 5000,0, 6000,0, 6000,1000, 5000,1000 };
+
+    if (!td5_env_flag_off("TD5RE_R15_PAIR_SELFTEST")) return;
+    TD5_LOG_W(LOG_TAG, "[R15 PAIR SELFTEST] area/area=%.0f (expect 600), "
+              "segment/area=%.0f (expect 1000), disjoint=%.0f (expect 0), "
+              "flat-area(panel)=%.0f (expect 0), area(square)=%.0f "
+              "(expect 1000000)",
+              tg_pair_xz_depth(a1, b1),
+              tg_pair_xz_depth(a2, b1),
+              tg_pair_xz_depth(a1, b3),
+              tg_pair_xz_area(a2),
+              tg_pair_xz_area(a1));
+}
+
+/* Read quad q of a mesh into xz[8] + its y range. 0 when q is out of range. */
+static int tg_pair_quad(const unsigned char *b, size_t off, size_t mlen, int q,
+                        double *xz, double *y0, double *y1)
+{
+    const unsigned int vtxoff = tg_rd_u32(b + off + 0x30);
+    int i;
+    for (i = 0; i < 4; i++) {
+        const unsigned char *vp = b + off + vtxoff
+                                + (size_t)(q * 4 + i) * TD5_TG_VTX_SIZE;
+        double vy;
+        if ((size_t)(vp + 12 - b) > off + mlen) return 0;
+        xz[i * 2]     = (double)tg_rd_f32(vp);
+        xz[i * 2 + 1] = (double)tg_rd_f32(vp + 8);
+        vy = (double)tg_rd_f32(vp + 4);
+        if (!i) {
+            *y0 = *y1 = vy;
+        } else {
+            if (vy < *y0) *y0 = vy;
+            if (vy > *y1) *y1 = vy;
+        }
+    }
+    return 1;
+}
+
+static long s_r15_pair_drop;
+static long s_r15_pair_tests;
+static long s_r15_pair_kind[TG_GK_COUNT];
+static long s_r15_pair_isect;      /* quad pairs that intersect AT ALL      */
+static long s_r15_pair_h[4];       /* depth >= 100 / 200 / 400 / 600        */
+static double s_r15_pair_maxd;     /* deepest interpenetration seen         */
+
+/* Higher wins. 0 = does not participate at all. Ordered by how structural the
+ * element is: massing outranks street furniture, so a railing yields to the
+ * wall it is driven through rather than the other way about. */
+static int tg_pair_pri(int kind)
+{
+    switch (kind) {
+    case TG_GK_BUILDING: return 40;
+    case TG_GK_CITY:     return 35;
+    case TG_GK_CROSS:    return 30;
+    case TG_GK_BLOCK:    return 20;
+    default:             return 0;
+    }
+}
+
+static int tg_pair_box(const unsigned char *b, size_t off, size_t mlen,
+                       TG_PairBox *o)
+{
+    const int tag = (int)tg_rd_u16(b + off + 0x02);
+    const unsigned int vtxcnt = tg_rd_u32(b + off + 0x08);
+    const unsigned int vtxoff = tg_rd_u32(b + off + 0x30);
+    unsigned int vi;
+    int n = 0;
+
+    if (tag) return 0;                      /* narrowing 2: no billboards */
+    for (vi = 0; vi < vtxcnt; vi++) {
+        const unsigned char *vp = b + off + vtxoff + (size_t)vi * TD5_TG_VTX_SIZE;
+        double vx, vy, vz;
+        if ((size_t)(vp + 12 - b) > off + mlen) break;
+        vx = (double)tg_rd_f32(vp);
+        vy = (double)tg_rd_f32(vp + 4);
+        vz = (double)tg_rd_f32(vp + 8);
+        if (!n) {
+            o->x0 = o->x1 = vx;
+            o->y0 = o->y1 = vy;
+            o->z0 = o->z1 = vz;
+        } else {
+            if (vx < o->x0) o->x0 = vx;
+            if (vx > o->x1) o->x1 = vx;
+            if (vy < o->y0) o->y0 = vy;
+            if (vy > o->y1) o->y1 = vy;
+            if (vz < o->z0) o->z0 = vz;
+            if (vz > o->z1) o->z1 = vz;
+        }
+        n++;
+    }
+    o->off = off; o->mlen = mlen; o->nq = n / 4;
+    return n >= 4;
+}
+
+static double tg_pair_ov(double a0, double a1, double b0, double b1)
+{
+    const double lo = (a0 > b0) ? a0 : b0;
+    const double hi = (a1 < b1) ? a1 : b1;
+    return hi - lo;
+}
+
+/* Fills drop[] (indexed by the ORIGINAL mesh index) with the losers. */
+static void tg_pair_arbitrate(const unsigned char *b, size_t buflen,
+                              const size_t *moff, const int *ord, int nmesh,
+                              unsigned char *drop)
+{
+    static TG_PairBox box[TD5_TG_GUARD_KEPT_MAX];
+    static int sx[TD5_TG_GUARD_KEPT_MAX];
+    int nb = 0, i, k;
+
+    if (!td5_env_flag_on("TD5RE_R15_PAIR")) return;
+    if (nmesh <= 1 || nmesh > TD5_TG_GUARD_KEPT_MAX) return;
+
+    for (i = 0; i < nmesh; i++) {
+        const int oi = ord[i];
+        const size_t off = moff[oi];
+        size_t mlen;
+        int kind, mark_si = -1, pri;
+        TG_PairBox bx;
+        if (off >= buflen) continue;
+        mlen = tg_guard_mesh_len(b, off, buflen);
+        if (mlen == 0 || off + mlen > buflen) continue;
+        kind = tg_guard_kind_of(off, &mark_si);
+        pri  = tg_pair_pri(kind);
+        if (!pri) continue;                 /* narrowing 1 */
+        if (!tg_pair_box(b, off, mlen, &bx)) continue;
+        bx.idx = oi; bx.kind = kind; bx.pri = pri;
+        box[nb++] = bx;
+    }
+    if (nb <= 1) return;
+
+    for (i = 0; i < nb; i++) sx[i] = i;
+    for (i = 1; i < nb; i++) {              /* insertion sort by x0 */
+        const int key = sx[i];
+        int m = i - 1;
+        while (m >= 0 && box[sx[m]].x0 > box[key].x0) { sx[m + 1] = sx[m]; m--; }
+        sx[m + 1] = key;
+    }
+
+    for (i = 0; i < nb; i++) {
+        const TG_PairBox *A = &box[sx[i]];
+        for (k = i + 1; k < nb; k++) {
+            const TG_PairBox *B = &box[sx[k]];
+            int lose;
+            int qa, qb, hit = 0;
+            if (B->x0 > A->x1) break;       /* sweep: sorted, so we are done */
+            if (A->pri == B->pri) continue; /* narrowing 3 */
+            /* PREFILTER only -- see the block comment. A box pair that fails
+             * here certainly does not touch; one that passes still has to be
+             * confirmed, because a 22800-long diagonal quad's box is mostly
+             * empty air. */
+            if (tg_pair_ov(A->x0, A->x1, B->x0, B->x1) <= 0.0) continue;
+            if (tg_pair_ov(A->z0, A->z1, B->z0, B->z1) <= 0.0) continue;
+            if (tg_pair_ov(A->y0, A->y1, B->y0, B->y1) < TD5_TG_PAIR_PEN_Y)
+                continue;
+            s_r15_pair_tests++;
+            /* CONFIRM per quad, in the plane the collision actually happens in.
+             * Capped so a pathological mesh cannot make this quadratic. */
+            for (qa = 0; qa < A->nq && qa < 16 && !hit; qa++) {
+                double az[8], ay0, ay1;
+                if (!tg_pair_quad(b, A->off, A->mlen, qa, az, &ay0, &ay1))
+                    break;
+                for (qb = 0; qb < B->nq && qb < 16; qb++) {
+                    double bz[8], by0, by1;
+                    if (!tg_pair_quad(b, B->off, B->mlen, qb, bz, &by0, &by1))
+                        break;
+                    double d;
+                    if (tg_pair_ov(ay0, ay1, by0, by1) < TD5_TG_PAIR_PEN_Y)
+                        continue;
+                    d = tg_pair_xz_depth(az, bz);
+                    /* [R15 PAIR] Distribution, not just the verdict: without it
+                     * a "0 dropped" result cannot be told apart from "the test
+                     * never fires". */
+                    if (d > 0.0) {
+                        s_r15_pair_isect++;
+                        if (d > s_r15_pair_maxd) s_r15_pair_maxd = d;
+                        if (d >= 100.0) s_r15_pair_h[0]++;
+                        if (d >= 200.0) s_r15_pair_h[1]++;
+                        if (d >= 400.0) s_r15_pair_h[2]++;
+                        if (d >= 600.0) s_r15_pair_h[3]++;
+                    }
+                    if (d >= TD5_TG_PAIR_PEN_XZ) {
+                        hit = 1;
+                        break;
+                    }
+                }
+            }
+            if (!hit) continue;             /* narrowing 4 */
+            lose = (A->pri < B->pri) ? sx[i] : sx[k];
+            if (!drop[box[lose].idx]) {
+                drop[box[lose].idx] = 1;
+                s_r15_pair_drop++;
+                s_r15_pair_kind[box[lose].kind]++;
+            }
+        }
+    }
+}
+
 int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
                                    int ns, TG_Buf *meshes, size_t *moff,
                                    int *pnmesh)
@@ -1069,6 +1481,9 @@ int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
     static int    ord[TD5_TG_GUARD_KEPT_MAX];      /* walk order (by offset)   */
     static size_t newoff[TD5_TG_GUARD_KEPT_MAX];   /* per ORIGINAL index       */
     static unsigned char gone[TD5_TG_GUARD_KEPT_MAX];
+    /* [R15 PAIR] Losers of the scenery-vs-scenery pass, decided before the walk
+     * below so its keep/compact logic stays a single forward pass. */
+    static unsigned char pair_drop[TD5_TG_GUARD_KEPT_MAX];
     static unsigned char cls_of[TD5_TG_GUARD_KEPT_MAX];
     static unsigned char kind_of[TD5_TG_GUARD_KEPT_MAX];  /* [PICK] emitter kind */
     int win_lo, win_hi, i, j, nn = 0, rejected = 0;
@@ -1093,6 +1508,13 @@ int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
         ord[k + 1] = key;
         if (k + 1 != i) s_guard_unsorted++;
     }
+
+    /* [R15 PAIR] Decide the scenery-vs-scenery losers up front. It needs the
+     * sorted order (its sweep depends on it) and it must run BEFORE the walk,
+     * because that walk compacts bytes as it goes and cannot revisit a mesh it
+     * has already written. */
+    memset(pair_drop, 0, (size_t)nmesh);
+    tg_pair_arbitrate(b, meshes->len, moff, ord, nmesh, pair_drop);
 
     for (j = 0; j < nmesh; j++) {
         const int oi = ord[j];
@@ -1190,6 +1612,19 @@ int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
                 keep = 0;
                 rejected++;
             }
+        }
+        /* [R15 PAIR items 10 + 11] The scenery-vs-scenery verdict, decided
+         * before this walk started. Applied here, alongside the water audit,
+         * so a mesh condemned by it goes through the SAME drop bookkeeping --
+         * including tg_r13_faces_dropped below, which the frontage census
+         * depends on being told about every building that does not ship. */
+        if (keep && pair_drop[oi]) {
+            keep = 0;
+            rejected++;
+            if (s_r15_pair_drop <= 8)
+                TD5_LOG_W(LOG_TAG, "pair guard: dropped %s mesh at span %d "
+                          "(overlapped a higher-priority neighbour)",
+                          k_guard_kind_name[kind], mark_si);
         }
         /* [R14 COAST item 5a] The straddle census -- meshes that CROSS the
          * water surface rather than stand over it. Report-only; see the
@@ -1305,4 +1740,38 @@ int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0,
     }
 
     return rejected;
+}
+
+/* [R15] Per-module half of the round-15 report. Split out of the single
+ * tg_r15_sky_report the work was first written against: after the trackgen
+ * split its counters live in four different modules, and a file-static
+ * cannot be read from another translation unit. One report per owning
+ * module keeps the counters static where they belong.  */
+void tg_r15_pair_report(void)
+{
+    {   /* [R15 PAIR items 10+11] per-kind, so "did this start eating city or
+         * buildings" is a number rather than a screenshot. */
+        char kb[256];
+        int ki, kn = 0;
+        kb[0] = '\0';
+        for (ki = 0; ki < TG_GK_COUNT; ki++) {
+            if (!s_r15_pair_kind[ki]) continue;
+            kn += snprintf(kb + kn, sizeof(kb) - (size_t)kn, "%s%s:%ld",
+                           kn ? " " : "", k_guard_kind_name[ki],
+                           s_r15_pair_kind[ki]);
+            if (kn >= (int)sizeof(kb) - 1) break;
+        }
+        TD5_LOG_I(LOG_TAG, "[R15 PAIR items 10+11] scenery-vs-scenery: %ld "
+                  "mesh(es) dropped over %ld pair test(s) [%s] (knob "
+                  "TD5RE_R15_PAIR=%s, pen xz=%.0f y=%.0f)", s_r15_pair_drop,
+                  s_r15_pair_tests, kn ? kb : "-",
+                  td5_env_flag_on("TD5RE_R15_PAIR") ? "on" : "off",
+                  TD5_TG_PAIR_PEN_XZ, TD5_TG_PAIR_PEN_Y);
+        tg_pair_selftest();
+        TD5_LOG_I(LOG_TAG, "[R15 PAIR] interpenetration census: %ld quad pair(s) "
+                  "intersect, deepest %.0f; depth >=100:%ld >=200:%ld >=400:%ld "
+                  ">=600:%ld", s_r15_pair_isect, s_r15_pair_maxd,
+                  s_r15_pair_h[0], s_r15_pair_h[1], s_r15_pair_h[2],
+                  s_r15_pair_h[3]);
+    }
 }

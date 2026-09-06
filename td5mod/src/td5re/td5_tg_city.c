@@ -991,11 +991,65 @@ int tg_facade_page_class(unsigned int gh, int rows)
     }
 }
 
+/* [R15 TEX item 2] storefront anti-repeat rerolls. Declared here rather than
+ * with the other R15 counters below because tg_store_page_reset needs it and
+ * that sits with the page picker, not with the emitters. */
+static long s_r15_store_reroll;
+
 /* Which shop page a run's ground floor uses -- a different hash bit than the
  * wall page so the storefront and the tower above are chosen independently. */
-static int tg_store_page(unsigned int gh)
+static int tg_store_page_raw(unsigned int gh)
 {
     return TD5_TG_PAGE_STORE + (int)((gh >> 23) % (unsigned)TD5_TG_STORE_VARIANTS);
+}
+
+/* [R15 TEX item 2] "a facade with a lot of chinese repeated elements ... this
+ * in particular strike worse because it has text, we need to avoid repetition
+ * on text textures."
+ *
+ * The pick above is a bare modulo over a SIX-page pool with no memory, so by
+ * the birthday bound two consecutive facade runs land on the same storefront
+ * about one time in six -- and a storefront is the surface at eye level, the
+ * one carrying signage, so a repeat there reads as a copy-paste in a way a
+ * repeated brick wall never does.
+ *
+ * Anti-repeat rather than a bigger pool: there are only 3+3 real source pages
+ * (k_real_store + k_real_city_store), so "more variety" is not available
+ * without new art. What IS available is never spending two ADJACENT runs on the
+ * same page. One reroll on a different hash slice, then a forced step if the
+ * reroll collides too -- so the result is still a pure function of the run hash
+ * and the previous pick, and generation stays deterministic.
+ *
+ * One memory, not one per side: both sides of a span share a single mesh and
+ * therefore a single storefront page (block_gh is tg_facade_run_id(si, 0)), so
+ * the sequence a driver sees IS the span order this is called in. Reset per
+ * build by tg_store_page_reset.
+ * Knob TD5RE_R15_STORE_VARY (default ON) restores the memoryless pick. */
+static int  s_r15_store_last = -1;
+
+void tg_store_page_reset(void)
+{
+    s_r15_store_last = -1;
+    s_r15_store_reroll = 0;
+}
+
+static int tg_store_page(unsigned int gh)
+{
+    int p = tg_store_page_raw(gh);
+    if (!td5_env_flag_on("TD5RE_R15_STORE_VARY")) return p;
+    if (p == s_r15_store_last) {
+        /* Bits 11-13 are not read by any other facade decision on this run
+         * (23-25 the store pick itself, 17-22 the wall class, 0-10 the block
+         * pattern), so the reroll is independent of the pick it replaces. */
+        const int alt = TD5_TG_PAGE_STORE
+                      + (int)((gh >> 11) % (unsigned)TD5_TG_STORE_VARIANTS);
+        p = (alt != p) ? alt
+                       : TD5_TG_PAGE_STORE
+                         + (((p - TD5_TG_PAGE_STORE) + 1) % TD5_TG_STORE_VARIANTS);
+        s_r15_store_reroll++;
+    }
+    s_r15_store_last = p;
+    return p;
 }
 
 /* Usable pavement width for a biome, 0 = "no raised pavement here" (the signal
@@ -1419,6 +1473,27 @@ static void tg_r13_faces_visit(int si)
     if (si >= 0 && si < TD5_TG_MAX_SPANS) s_r13_visit[si] = 1;
 }
 
+/* [R15] Round-15 counters OWNED BY THIS MODULE. They were one block in the
+ * pre-split monolith, sitting next to the single report that read them; after
+ * the trackgen split that report is per-module (tg_r15_city_report at the foot
+ * of this file), so the counters live with the emitters that move them and stay
+ * file-static where they belong.
+ *   item 8b  blocks closed at the back
+ *   item 1   no-entry disc posts modelled / picks moved off a non-junction span
+ *   item 2   storefront anti-repeat rerolls
+ *   item 5   monuments skipped for having frontage on both sides
+ *   items 4+7+8a  back rows refused / pushed clear / pulled in to terminate */
+static long s_r15_back_closed;
+static long s_r15_sign_posts;
+static long s_r15_sign_xing;
+static long s_r15_statue_walled;
+static long s_r15_backrow_nostreet;
+static long s_r15_backrow_push;
+static long s_r15_backrow_close;
+
+/* Defined further down, beside tg_city_emit_backrows; used by it. */
+static void tg_r15_occ_diag(const TG_FBHook *h, double sw);
+
 static void tg_r13_faces_wrote(int si, int nvtx)
 {
     if (si >= 0 && si < TD5_TG_MAX_SPANS) s_r13_nvtx[si] = nvtx;
@@ -1569,6 +1644,36 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
                                     0.0, g->H, 0.0, g->cols, g->rows, 0, g->rows,
                                     px, py, pz, uu, vv, &n);
             }
+            /* [R15 CITY item 8b] "this building ... has no side to it, it looks
+             * hollow."
+             *
+             * MEASURED CONTRADICTION, not a new rule. The TALL_ROWS gate above
+             * is justified by "a low block is hidden by the back rows behind
+             * it" -- but tg_city_emit_backrows refuses on exactly the opposite
+             * condition: `if (gate && tg_facade_built(si, s)) continue`. Back
+             * rows fill STREET GAPS only. A span whose frontage IS built (which
+             * is every span that reaches this code) therefore has NOTHING
+             * behind it, so a sub-TALL_ROWS block was open at the back down
+             * every cross street and from every rise -- the reported hollow.
+             *
+             * Closed with ONE flat quad rather than the tower's full window
+             * grid: that answers the see-through without spending a cols x rows
+             * budget on massing nobody reads windows on. The tower keeps its
+             * grid above. Same four corners as that grid's plane, wound
+             * near-bottom / far-bottom / far-top / near-top to match
+             * tg_facade_push_quad's u/v tables. */
+            else if (td5_env_flag_on("TD5RE_R15_BACK_CLOSE")) {
+                const double bx2 = g->bx + g->lx0 * d, bz2 = g->bz + g->lz0 * d;
+                const double fx2 = g->bx + g->ax + g->lx1 * d;
+                const double fz2 = g->bz + g->az + g->lz1 * d;
+                double qb[12];
+                qb[0] = bx2;  qb[1]  = g->by;                qb[2]  = bz2;
+                qb[3] = fx2;  qb[4]  = g->by + g->ay;        qb[5]  = fz2;
+                qb[6] = fx2;  qb[7]  = g->by + g->ay + g->H; qb[8]  = fz2;
+                qb[9] = bx2;  qb[10] = g->by + g->H;         qb[11] = bz2;
+                tg_facade_push_quad(qb, px, py, pz, uu, vv, &n);
+                s_r15_back_closed++;
+            }
         }
         n_ret = n;
         if (g->cap_near || g->cap_far) {
@@ -1680,6 +1785,12 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
         tg_var_note(TG_VAR_FACADE, wall);
         if (sd[0].built) tg_var_note(TG_VAR_DEPTH, sd[0].dcols);
         if (sd[1].built) tg_var_note(TG_VAR_DEPTH, sd[1].dcols);
+        /* [R15 TEX item 2] ... and the storefront, which the line above
+         * deliberately skipped ("a separate pool this area does not touch").
+         * That exclusion is why a repeated shop sign never showed up in any
+         * report. n_store > 0 is the same test the seg_page assignment uses,
+         * so this counts exactly the runs that actually got a storefront. */
+        if (n_store > 0) tg_var_note(TG_VAR_STORE, seg_page[0]);
     }
     /* One mesh, but up to one frontage per side, and a ground-floor storefront
      * command only when the run actually got one. */
@@ -2085,7 +2196,37 @@ int tg_emit_props(const TG_NodeList *nl, int si, const TG_Biome *b,
     /* Statue / monument: sparse landmark. */
     if (b->prop_statue >= 0 && (si % 29) == 0 && *pn < cap) {
         side = ((h >> 9) & 1) ? 1.0 : -1.0;
-        if (!tg_prop_one(nl, si, b->prop_statue, side, 1500.0, m, moff, pn))
+        /* [R15 PROPS item 5] "this billboard sometimes clips into buildings, it
+         * should be placed only on plazas."
+         *
+         * The monument is a 1800 x 4200 billboard planted at a FIXED gap of
+         * 1500 (below), and tg_prop_one's three refusals (tg_side_blocked,
+         * tg_xstreet_occupies, tg_r14_fcross_occupies) are all about ROAD
+         * surfaces -- none of them knows where a facade wall stands. In CITY the
+         * frontage setback is well inside 1500 + half the billboard, so on any
+         * span with built frontage the landmark is planted through the shop
+         * wall. It also skips tg_carriageway_clear_gap, which every other piece
+         * of verge scenery goes through.
+         *
+         * "Only on plazas" as an implementable rule: a plaza is an OPENING in
+         * the frontage, and tg_facade_built is this generator's single answer to
+         * "is there a wall on this side here" -- the same predicate the back
+         * rows, the cross street and the corner arms all key off. So prefer the
+         * hashed side, fall back to the other, and if BOTH sides are walled
+         * there is no plaza at this span and the landmark is skipped. Skipped,
+         * not substituted: unlike the R12 disc this is a 1-in-29 LANDMARK, so
+         * there is no density to preserve and a stand-in bin would be a
+         * different object rather than the same object placed better. */
+        int plaza = 1;
+        if (td5_env_flag_on("TD5RE_R15_PLAZA_ONLY")) {
+            const int want = (side > 0.0) ? 1 : 0;
+            if (tg_facade_built(si, want)) {
+                if (!tg_facade_built(si, want ^ 1)) side = -side;
+                else { plaza = 0; s_r15_statue_walled++; }
+            }
+        }
+        if (plaza &&
+            !tg_prop_one(nl, si, b->prop_statue, side, 1500.0, m, moff, pn))
             return 0;
     }
     /* Animals: low density, set well back off the verge.
@@ -2252,6 +2393,9 @@ int tg_r12_pave_stands(const TG_NodeList *nl, int si, int s)
     return 1;
 }
 
+/* [R15 CITY item 6] Raised slabs dropped because a crossing is painted here. */
+long s_r15_pave_xing;
+
 int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
 {
     double px[48], py[48], pz[48], uu[48], vv[48];
@@ -2292,6 +2436,23 @@ int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
             !tg_facade_built(h->si, s) && !tg_r13_approach_span(h->si) &&
             !tg_r14_fork_nostreet(h->si))
             continue;
+        /* [R15 CITY item 6] "this sidewalk is on top of another crossing."
+         *
+         * The R6 rule above is the right rule applied to only half its cases:
+         * it drops the raised slab at a SIDE-STREET MOUTH (frontage gap) but
+         * never asks tg_city_crossing_here, so at a painted crossing the slab
+         * still runs through at TD5_TG_KERB_H over a decal that
+         * tg_city_emit_crossing authors edge-to-edge AT ROAD LEVEL -- the same
+         * "pavement lifted during the crossing" geometry the R6 comment
+         * describes, reached by the other door. A crossing is an intersection
+         * for this purpose too, so it gets the same answer. The corner arms
+         * (tg_block_emit_intersection) carry the footway through, exactly as
+         * they do at a mouth. */
+        if (td5_env_flag_on("TD5RE_R15_XING_PAVE") &&
+            tg_city_crossing_here(h->si) && !tg_r13_approach_span(h->si)) {
+            s_r15_pave_xing++;
+            continue;
+        }
         tg_city_edge_frame(h->nl, h->si, sg, e);
 
         /* Top slab: near-in, near-out, far-out, far-in. */
@@ -2996,6 +3157,43 @@ int tg_bg_building_box(TG_Buf *blk, size_t *moff, int *nmesh, int maxmesh,
     return 1;
 }
 
+/* [R15 OCC] THE INSTRUMENT. TD5RE_R15_OCC_DIAG=<span> dumps a +/-8 window of
+ * every input the three placement decisions read, per (span, side), so the
+ * picker's world position can be turned into a decision trace instead of a
+ * hypothesis. Added because the first cut of the fix reported nostreet=0 and
+ * only 3 pushes on the reported seed -- i.e. it was not firing where the user
+ * is looking, and the honest next step is to measure which input disagrees
+ * rather than to widen the rule until the counter moves. Read-only, opt-in. */
+static void tg_r15_occ_diag(const TG_FBHook *h, double sw)
+{
+    const int c = td5_env_int("TD5RE_R15_OCC_DIAG", -1, -1, 100000);
+    int s;
+    if (c < 0 || h->si < c - 8 || h->si > c + 8) return;
+    for (s = 0; s < 2; s++) {
+        const double sg = s ? 1.0 : -1.0;
+        double xr = 0.0;
+        const int here  = tg_xstreet_here(h->nl, h->si, sg, &xr);
+        const double hw = tg_road_half_width(h->nl, h->si);
+        const double pw = tg_pavement_side_width(h->nl, h->si, sg,
+                              tg_city_sidewalk_w_at(h->nl, h->si, h->b));
+        TD5_LOG_W(LOG_TAG, "[R15 OCC DIAG] si=%4d %-5s node=(%.0f,%.0f,%.0f) "
+                  "built=%d park=%d "
+                  "blocked=%d xhere=%d xreach=%.0f half=%.0f pave=%.0f "
+                  "occ(road)=%.0f occ(all)=%.0f xreach_at=%.0f sw=%.0f",
+                  h->si, s ? "left" : "right",
+                  h->nl->v[h->si].x, h->nl->v[h->si].y, h->nl->v[h->si].z,
+                  tg_facade_built(h->si, s),
+                  tg_block_is_park(h->si, s), tg_side_blocked(h->si, sg),
+                  here, xr, hw, pw,
+                  tg_occ_reach(h->nl, h->si, sg, TG_OCC_ROAD),
+                  tg_occ_reach(h->nl, h->si, sg, TG_OCC_ALL),
+                  tg_xstreet_reach_at(h->nl, h->si, sg,
+                                      tg_block_arm_skew(h->si, s), h->b, sw),
+                  sw);
+    }
+}
+
+
 int tg_city_emit_backrows(const TG_FBHook *h, double sw)
 {
     const TG_Biome *b = h->b;
@@ -3005,6 +3203,7 @@ int tg_city_emit_backrows(const TG_FBHook *h, double sw)
 
     if (h->si + 1 >= h->nl->count) return 1;
     n1 = &h->nl->v[h->si + 1];
+    tg_r15_occ_diag(h, sw);
 
     /* Default ON (gated to real streets); TD5RE_AUTOTRACK_BACKROW_STREETS=0
      * restores the old "a row behind every span, both sides" behaviour for an
@@ -3052,6 +3251,39 @@ int tg_city_emit_backrows(const TG_FBHook *h, double sw)
             tg_acct(TG_ACCT_R8_CITY, h->si);   /* backdrop refused: park gap */
             continue;
         }
+        /* [R15 CITY item 4] "this building is next to no road at the end of the
+         * crossing street, you must add a street and a sidewalk before showing
+         * this building."
+         *
+         * A frontage GAP is necessary but not sufficient. This emitter's own
+         * purpose, stated above, is that "the back row exists to fill the view
+         * down a street mouth" -- and since R8 CROSS item 1 its setback is
+         * literally rebased on tg_xstreet_reach_at, i.e. it is positioned as the
+         * thing that TERMINATES a vista. But its gates are a strict subset of
+         * the street's: tg_emit_fb_city refuses the carriageway on a bridge run,
+         * an overpass clear span and a ramp approach, and the emitter itself
+         * refuses on tg_span_near_bridge and tg_side_corridor_here -- none of
+         * which stop the back row. On any such gap the reveal building stood at
+         * the far end of a street that was never laid, terminating nothing.
+         *
+         * tg_xstreet_here is the authority that reads the crossstreet emitter's
+         * OWN gates in its own order (see its block comment), so asking it is
+         * asking the street itself rather than modelling it a second time.
+         *
+         * MEASURED (TD5RE_R15_OCC_DIAG=65 on the reported seed): at span 65 left
+         * the street IS laid -- xhere=1, reaching 22800 from the centreline --
+         * so refusing the building on "no street" fires ZERO times and was the
+         * wrong reading of the report. The defect is the GAP, handled at the
+         * setback below. This gate is kept for the genuine case (a frontage gap
+         * the street emitter refused for a bridge run / clear span / ramp) where
+         * it is still the right answer, but it is correctly rare. */
+        if (td5_env_flag_on("TD5RE_R15_BACKROW_STREET")) {
+            double xr15 = 0.0;
+            if (!tg_xstreet_here(h->nl, h->si, sg, &xr15)) {
+                s_r15_backrow_nostreet++;
+                continue;
+            }
+        }
         /* Street WIDTH CLASS (item 2). An avenue opens both kerbs and carries
          * traffic, so it reveals a deeper, taller block receding; a narrow
          * pedestrian side street reveals a single closer, lower row. Read-only
@@ -3097,6 +3329,77 @@ int tg_city_emit_backrows(const TG_FBHook *h, double sw)
                     + TD5_TG_BACKROW_GAP
                     + (tg_facade_depth(b) + TD5_TG_BACKROW_GAP) * (double)r
                     + (double)(rh % 1800u);
+            /* [R15 CITY item 4] "this building is next to no road at the end of
+             * the crossing street, you must add a street and a sidewalk before
+             * showing this building."
+             *
+             * MEASURED, and it is not the building being unwanted -- it is a
+             * VOID in front of it. TD5RE_R15_OCC_DIAG=65 on the reported seed,
+             * span 65 left: the street is laid to 22800 from the centreline
+             * (xhere=1, xreach_at 19800 off a 3000 half-width), while row 0 sets
+             * back xreach_at + BACKROW_GAP(3200) + rh%1800, i.e. it stands at
+             * 26000..27800. So 3200 to 5000 units of bare ground sit between the
+             * end of the tarmac and the block that is supposed to CLOSE it --
+             * which is exactly "no road at the end of the crossing street".
+             *
+             * R8's own words for this row are "a reveal building belongs at the
+             * FAR END of the vista it reveals, TERMINATING the street the way a
+             * real block closes a view". A 3200+ gap does not terminate
+             * anything. So row 0 is pulled in to sit one PAVEMENT width past the
+             * tarmac -- which is both the smallest honest gap and, literally,
+             * the sidewalk the report asks for in front of the building -- and
+             * the 0..1800 jitter is dropped for that row only, since it is the
+             * jitter that makes the void variable and can never help a row whose
+             * job is to line up with the street's end. Rows 1+ keep the full
+             * block-per-row walk and their jitter: they are depth behind the
+             * terminating block, not the terminator. */
+            if (r == 0 && td5_env_flag_on("TD5RE_R15_BACKROW_CLOSE") &&
+                !tg_facade_built(h->si, s) && !tg_block_is_park(h->si, s)) {
+                const double pw = tg_pavement_side_width(h->nl, h->si, sg, sw);
+                const double term = tg_xstreet_reach_at(h->nl, h->si, sg,
+                                        tg_block_arm_skew(h->si, s), b, sw)
+                                  + (pw > 0.0 ? pw : sw);
+                if (term < set) { set = term; s_r15_backrow_close++; }
+            }
+            /* [R15 CITY items 7 + 8a] "this building is on top of a street" /
+             * "on top of a sidewalk".
+             *
+             * The R8 rebase above already aims this row past the street -- but
+             * it re-derives the reach PRIVATELY, with this emitter's own `sw`
+             * (the biome base width) where the street and the pavement use
+             * tg_city_sidewalk_w_at and the per-side tg_pavement_side_width. The
+             * two answers are equal only when neither narrowing applies, and
+             * where they differ the row lands on the very surface it is meant to
+             * stand behind. Nothing here consults the pavement at all, which is
+             * item 8a: the raised slab is in no envelope in this generator.
+             *
+             * So take the FLOOR from the shared authority instead of trusting a
+             * private derivation: whatever road, street or pavement actually
+             * reaches at this (span, side), stand a clear BACKROW_GAP beyond it
+             * and step out one block per row from there. tg_occ_reach measures
+             * from the centreline and `set` from the kerb, hence the half-width
+             * subtraction. Only ever pushes OUTWARD -- max(), never a move in --
+             * so a row already clear of everything keeps its hashed position and
+             * this cannot shuffle geometry it was not aimed at. */
+            if (td5_env_flag_on("TD5RE_R15_BACKROW_OCC")) {
+                const double occ = tg_occ_reach(h->nl, h->si, sg, TG_OCC_ALL);
+                if (occ > 0.0) {
+                    /* The floor is "not standing ON any of it", NOT "a clear
+                     * BACKROW_GAP behind it". tg_occ_reach already carries the
+                     * street's own TD5_TG_R10_XSTREET_MARGIN of clear air, and
+                     * adding a second 3200 here would push row 0 back out past
+                     * the terminating position item 4 just pulled it in to --
+                     * the two rules would fight and the void would return. Rows
+                     * 1+ still walk one block out each, which is their own
+                     * spacing, not a clearance. */
+                    const double floor_set = occ - n0->width * 0.5
+                        + (tg_facade_depth(b) + TD5_TG_BACKROW_GAP) * (double)r;
+                    if (floor_set > set) {
+                        if (r == 0) s_r15_backrow_push++;
+                        set = floor_set;
+                    }
+                }
+            }
             rows = b->floors_min + (int)((rh >> 9) % 5u) + ((gate && av) ? 1 : 0);
             /* [R11 BIOME item 4] Third axis of the outskirts ramp: the massing
              * BEHIND the street. Ramping only the frontage would leave a full
@@ -3521,6 +3824,49 @@ int tg_infra_place(const TG_FBHook *h, int kind, double side,
          * page holds a sub-rectangle rather than a whole piece. */
         if (kind == IP_REDTAPE && td5_env_flag_on("TD5RE_R13_PLANK_CROP"))
             return tg_infra_plank(h, P, cx, base_y, cz, ax, az, lx, lz);
+        /* [R15 PROPS item 1] "this stop sign should be placed alongside a stick
+         * that holds it."
+         *
+         * The table row for IP_SIGN says so itself: "flat disc on a post we do
+         * not model, so it is lifted". A 0.80 m disc floating 1.90 m up with
+         * nothing under it is the whole complaint. Model the post, using the
+         * SAME two-crossed-quads form and page tg_emit_r11_sign already uses --
+         * at 6 cm the silhouette is all a driver resolves, and a cross is half
+         * the geometry of a box for an identical read. Only the lifted disc
+         * needs one; every other billboard on this menu (plank, rickshaw) sits
+         * on the ground with lift 0. */
+        if (kind == IP_SIGN && P->lift > 1.0 &&
+            td5_env_flag_on("TD5RE_R15_SIGN_POST")) {
+            if (*h->nmesh + 2 >= h->maxmesh) return 1;   /* budget for both */
+            {
+                double ppx[8], ppy[8], ppz[8], puu[8], pvv[8];
+                const double hw = TD5_TG_R11_SIGN_POST_W * 0.5;
+                const double ptop = base_y + P->lift + TD5_TG_R11_SIGN_POST_OV;
+                int sp = TD5_TG_PAGE_R11_SIGN_POST, sq = 2, k = 0;
+                size_t pb0 = h->blk->len;
+                ppx[k]=cx-lx*hw; ppy[k]=base_y; ppz[k]=cz-lz*hw;
+                puu[k]=0.0; pvv[k]=1.0; k++;
+                ppx[k]=cx+lx*hw; ppy[k]=base_y; ppz[k]=cz+lz*hw;
+                puu[k]=1.0; pvv[k]=1.0; k++;
+                ppx[k]=cx+lx*hw; ppy[k]=ptop;   ppz[k]=cz+lz*hw;
+                puu[k]=1.0; pvv[k]=0.0; k++;
+                ppx[k]=cx-lx*hw; ppy[k]=ptop;   ppz[k]=cz-lz*hw;
+                puu[k]=0.0; pvv[k]=0.0; k++;
+                ppx[k]=cx-ax*hw; ppy[k]=base_y; ppz[k]=cz-az*hw;
+                puu[k]=0.0; pvv[k]=1.0; k++;
+                ppx[k]=cx+ax*hw; ppy[k]=base_y; ppz[k]=cz+az*hw;
+                puu[k]=1.0; pvv[k]=1.0; k++;
+                ppx[k]=cx+ax*hw; ppy[k]=ptop;   ppz[k]=cz+az*hw;
+                puu[k]=1.0; pvv[k]=0.0; k++;
+                ppx[k]=cx-ax*hw; ppy[k]=ptop;   ppz[k]=cz-az*hw;
+                puu[k]=0.0; pvv[k]=0.0; k++;
+                h->moff[*h->nmesh] = pb0;
+                if (!tg_write_quad_mesh(h->blk, ppx, ppy, ppz, puu, pvv, 8,
+                                        &sp, &sq, 1))
+                    return 0;
+                if (h->blk->len > pb0) { (*h->nmesh)++; s_r15_sign_posts++; }
+            }
+        }
         b0 = h->blk->len;
         h->moff[*h->nmesh] = b0;
         if (!tg_emit_billboard_mesh(h->blk, cx, base_y + P->lift, cz,
@@ -3606,25 +3952,71 @@ static int tg_infra_sign_biome_ok(const TG_Biome *b, int paved)
     return !strcmp(b->name, "ORIENTAL") || !strcmp(b->name, "INDUSTRIAL");
 }
 
+/* [R15 PROPS item 1] "only on the crossing streets."
+ *
+ * R12 above narrowed the disc from "any verge" to "any settled biome", which
+ * still leaves it standing along open frontage where there is no junction to
+ * forbid a turn into. A no-entry disc is a statement about a JUNCTION, so the
+ * span itself has to be one. tg_city_crossing_here is the generator's single
+ * answer to "is a crossing laid at this span" (memoised, span-only), and the
+ * +/-1 window puts the disc on the CORNER rather than in the mouth -- the mouth
+ * itself is refused later by tg_xstreet_occupies, which would otherwise make
+ * this gate and that refusal cancel out to nothing placed at all.
+ *
+ * Same SUBSTITUTE-don't-skip discipline as R12: the refused pick becomes a bin
+ * or a bench, so furniture density and s_r9_infra_props stay comparable across
+ * the A/B and only the sign SHARE moves. */
+int tg_r15_sign_at_crossing(int si, double side)
+{
+    const int sidx = (side > 0.0) ? 1 : 0;
+    if (!td5_env_flag_on("TD5RE_R15_SIGN_XING")) return 1;
+    /* A "crossing street" is, for this purpose, either a painted crossing or a
+     * SIDE-STREET MOUTH. Both are needed: painted crossings are thinned hard by
+     * TD5RE_AUTOTRACK_XMIN, so keying on them alone put ONE disc on the whole
+     * 1987-span seed-1459285111 track (measured). A frontage GAP is the same
+     * thing the cross-street carriageway, the back rows and the corner arms all
+     * key off -- tg_facade_built == 0 on this side IS the opening the street
+     * runs through -- and there are far more of them. The +/-1 window keeps the
+     * disc on the CORNER; the mouth itself is refused later by
+     * tg_xstreet_occupies. */
+    if (!tg_facade_built(si, sidx)) return 1;
+    if (si > 0 && !tg_facade_built(si - 1, sidx)) return 1;
+    if (!tg_facade_built(si + 1, sidx)) return 1;
+    return tg_city_crossing_here(si)
+        || (si > 0 && tg_city_crossing_here(si - 1))
+        || tg_city_crossing_here(si + 1);
+}
+
 /* Resolve a menu pick. Returns the kind to place; only IP_SIGN can change. */
-int tg_infra_sign_filter(const TG_Biome *b, int paved, int kind,
-                                unsigned int hh)
+int tg_infra_sign_filter(const TG_Biome *b, int si, double side,
+                                int paved, int kind, unsigned int hh)
 {
     if (kind != IP_SIGN) return kind;
     if (!td5_env_flag_on("TD5RE_R12_SIGN_CTX")) { s_r12_sign_kept++; return kind; }
-    if (tg_infra_sign_biome_ok(b, paved)) {
-        /* Bits 25-27 are the only span of this hash no other decision on this
-         * span reads (28-31 density, 19-24 red tape, 13-18 roadworks, 8-15
-         * setback, 5-7 the menu pick), so the thinning is independent of all
-         * of them instead of correlated with whichever it shared bits with. */
-        if (((hh >> 25) & (TD5_TG_SIGN_KEEP_1_IN - 1u)) == 0u) {
-            s_r12_sign_kept++;
-            return kind;
-        }
-        s_r12_sign_rate++;
-    } else {
-        s_r12_sign_ctx++;
+    if (!tg_r15_sign_at_crossing(si, side)) {
+        s_r15_sign_xing++;
+        return paved ? IP_BIN : (((hh >> 3) & 1u) ? IP_BIN : IP_BENCH);
     }
+    /* [R15 PROPS item 1] At a junction, DROP the R12 rate thinning.
+     *
+     * MEASURED, not assumed: with the crossing gate stacked on top of R12's
+     * 1-in-4 rate (itself on top of ~1 span in 5 carrying furniture and a
+     * 1-in-6 menu pick), seed 1459285111 produced 178 substitutions and ZERO
+     * discs -- the sign was gated out of existence and no post was ever built.
+     * R12's rate exists because the disc was appearing where there was nothing
+     * to forbid; now that CONTEXT selects the junctions, the rate is doing that
+     * job a second time. Keep the biome gate, drop the dice. */
+    if (tg_infra_sign_biome_ok(b, paved)) {
+        /* The crossing gate has already done the thinning R12's 1-in-4 rate
+         * (TD5_TG_SIGN_KEEP_1_IN, bits 25-27) used to do, so the disc is kept
+         * outright here. With TD5RE_R15_SIGN_XING=0 the gate above passes every
+         * span and this becomes R12's "allowed biome" arm unthinned -- which is
+         * why that knob is an A/B for the CONTEXT rule, not a full R12 restore;
+         * TD5RE_R12_SIGN_CTX=0 above is the full restore. */
+        s_r12_sign_kept++;
+        return kind;
+    }
+    s_r12_sign_ctx++;
     if (paved) return IP_BIN;
     return ((hh >> 3) & 1u) ? IP_BIN : IP_BENCH;
 }
@@ -3651,4 +4043,42 @@ int tg_infra_awning_filter(int si, double side, int paved, int kind,
      * filter's bit map), so the stand-in is independent of all of them. */
     if (paved) return ((hh >> 4) & 1u) ? IP_BIN : IP_BENCH;
     return IP_BIN;
+}
+
+/* [R15] Per-module half of the round-15 report. Split out of the single
+ * tg_r15_sky_report the work was first written against: after the trackgen
+ * split its counters live in four different modules, and a file-static
+ * cannot be read from another translation unit. One report per owning
+ * module keeps the counters static where they belong.  */
+void tg_r15_city_report(void)
+{
+    TD5_LOG_I(LOG_TAG, "[R15 CITY item 8b] sub-TALL_ROWS blocks closed at the "
+              "back = %ld (knob TD5RE_R15_BACK_CLOSE=%s)", s_r15_back_closed,
+              td5_env_flag_on("TD5RE_R15_BACK_CLOSE") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[R15 PROPS item 1] no-entry discs: posts modelled=%ld, "
+              "picks substituted away from a non-junction span=%ld (knobs "
+              "TD5RE_R15_SIGN_POST=%s TD5RE_R15_SIGN_XING=%s)",
+              s_r15_sign_posts, s_r15_sign_xing,
+              td5_env_flag_on("TD5RE_R15_SIGN_POST") ? "on" : "off",
+              td5_env_flag_on("TD5RE_R15_SIGN_XING") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[R15 TEX item 2] storefront anti-repeat: rerolls=%ld "
+              "(knob TD5RE_R15_STORE_VARY=%s); see the store-pages census for "
+              "the resulting spread", s_r15_store_reroll,
+              td5_env_flag_on("TD5RE_R15_STORE_VARY") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[R15 PROPS item 5] monuments skipped, frontage both "
+              "sides so no plaza = %ld (knob TD5RE_R15_PLAZA_ONLY=%s)",
+              s_r15_statue_walled,
+              td5_env_flag_on("TD5RE_R15_PLAZA_ONLY") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[R15 CITY item 6] raised slabs dropped at a painted "
+              "crossing = %ld (knob TD5RE_R15_XING_PAVE=%s)", s_r15_pave_xing,
+              td5_env_flag_on("TD5RE_R15_XING_PAVE") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[R15 OCC items 4+7+8a] back rows refused (gap with no "
+              "street laid)=%ld, span-sides pushed clear of road/street/"
+              "pavement=%ld, row-0 pulled in to terminate the street=%ld "
+              "(knobs TD5RE_R15_BACKROW_STREET=%s TD5RE_R15_BACKROW_OCC=%s "
+              "TD5RE_R15_BACKROW_CLOSE=%s)", s_r15_backrow_nostreet,
+              s_r15_backrow_push, s_r15_backrow_close,
+              td5_env_flag_on("TD5RE_R15_BACKROW_STREET") ? "on" : "off",
+              td5_env_flag_on("TD5RE_R15_BACKROW_OCC") ? "on" : "off",
+              td5_env_flag_on("TD5RE_R15_BACKROW_CLOSE") ? "on" : "off");
 }
