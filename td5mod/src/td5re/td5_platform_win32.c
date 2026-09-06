@@ -4331,6 +4331,35 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
             const char *e = getenv("TD5RE_FOLIAGE_MIPS");
             s_foliage_mips = (e && e[0] && e[0] != '0') ? 1 : 0;
         }
+        /* [R15 items 10/11 2026-09-06] THE ABOVE EXCLUSION HAD A CAUSE, AND IT
+         * WAS THE mip_ref, NOT MIPPING ITSELF.
+         *
+         * The chain below asked for coverage preservation at mip_ref = 1 for
+         * every type-1 page, while BOTH presets that draw a type-1 page test at
+         * alpha_ref 0x80 -- FOLIAGE_CUTOUT always has, and WORLD_CUTOUT (added
+         * this round for non-billboard railings/fences/signs) does too. The
+         * backend's d3d12_tex_upload_mipped measures level 0's coverage AT ref
+         * and then rescales every mip to match it, so preserving at 1 means
+         * "keep the fraction of texels with alpha >= 1/255" while the shader
+         * discards everything below 128. Each mip therefore kept a mass of
+         * low-alpha texels that the test then threw away unevenly -- which is
+         * precisely the "semi-opaque dark" band the 2026-08-17 note describes
+         * above the canopy. Mipping was blamed for a mismatch in its argument.
+         *
+         * So: preserve coverage at the ref the page is ACTUALLY tested at, and
+         * mip type-1 like everything else. This also repairs the measured half
+         * of items 10/11 that the WORLD_CUTOUT preset alone did not -- with no
+         * mip chain a 64x64 balustrade minifies by point-sampling and its
+         * 2-texel balusters alias in and out at distance.
+         *
+         * TD5RE_R15_CUTOUT_MIPS=0 restores the unmipped behaviour;
+         * TD5RE_FOLIAGE_MIPS=1 still forces them on independently, so the old
+         * A/B keeps working. */
+        static int s_cutout_mips = -1;
+        if (s_cutout_mips < 0) {
+            const char *e = getenv("TD5RE_R15_CUTOUT_MIPS");
+            s_cutout_mips = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        }
         /* [FAR-SPAN ALIASING FIX 2026-08-30] Opaque (type-0) track pages -- road
          * asphalt, lane markings, tunnel masonry, building walls -- were the one
          * class NEVER mipped: the branch below only ever matched t==1/t==2, so
@@ -4368,7 +4397,10 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
         if (s_track_mips && format == 2 && page_index >= 0 && page_index < 700) {
             int t = td5_asset_get_page_transparency(page_index);
             if (t == 0)      { want_track_mips = s_opaque_mips;  mip_ref = 0x80; }
-            else if (t == 1) { want_track_mips = s_foliage_mips; mip_ref = 1;    }
+            /* [R15] ref 0x80 = what FOLIAGE_CUTOUT and WORLD_CUTOUT both test
+             * at; see the block comment above for why the old 1 was the bug. */
+            else if (t == 1) { want_track_mips = (s_cutout_mips || s_foliage_mips);
+                               mip_ref = 0x80; }
             else if (t == 2) { want_track_mips = 1;              mip_ref = 0x80; }
         }
         if (want_track_mips)
