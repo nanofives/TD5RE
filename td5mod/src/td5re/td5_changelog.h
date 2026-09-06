@@ -62,6 +62,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "Railings, fences and signs are see-through again. They" },
     { CL_ITEM,    "  were filling in solid and blocking the road and the" },
     { CL_ITEM,    "  buildings behind them." },
+    { CL_ITEM,    "Cut-out scenery (railings, fences, foliage) no longer" },
+    { CL_ITEM,    "  shimmers and crawls in the distance." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 06 (dev tools)" },
