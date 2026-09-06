@@ -44,6 +44,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "Monuments are placed in open squares rather than being" },
     { CL_ITEM,    "  planted through a shop wall." },
     { CL_ITEM,    "Raised pavement no longer runs over a painted crossing." },
+    { CL_ITEM,    "Buildings that close a side street now sit at the end of" },
+    { CL_ITEM,    "  it, instead of floating past a strip of bare ground." },
+    { CL_ITEM,    "No more blocks standing in the middle of a side street." },
+    { CL_ITEM,    "Wide multi-lane crossings now carry a kerbed median." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 06 (dev tools)" },
