@@ -928,6 +928,17 @@ void frontend_render_lighting_options_overlay(float sx, float sy);
  * which is the creation-vs-rendering gap that has bitten this file before. */
 void frontend_render_autotrack_options_overlay(float sx, float sy);
 int  td5_autotrack_opts_row_count(void);
+/* Plots the studio's last generated route into an arbitrary rect (screen px),
+ * in the same red-line-plus-start/finish-dot format the shipped trak*.tga
+ * previews use. Returns 0 when there is no route to draw, so the caller can
+ * fall back to its own placeholder. Shared so SELECT TRACK can show the same
+ * map for the auto slot, which has no pre-rendered TGA of its own. */
+int  td5_autotrack_draw_route(float bx, float by, float bw, float bh,
+                              float sx, float sy);
+/* Preview start/finish marker (td5_frontend.c). kind 0 = START (green),
+ * 1 = FINISH (black/white checker). Shared with the auto-track route plot so
+ * both previews mark their ends identically. */
+void frontend_draw_marker_dot(float cx, float cy, float sx, float sy, int kind);
 void Screen_LocalizationInit(void);
 void Screen_MainMenu(void);
 void Screen_MusicTestExtras(void);

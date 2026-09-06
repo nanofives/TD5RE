@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 06 (auto track studio)" },
+    { CL_ITEM,    "AUTO TRACK STUDIO is now called that everywhere. The" },
+    { CL_ITEM,    "  track list, the SELECT TRACK button and the screen" },
+    { CL_ITEM,    "  title used to disagree (AUTO-GENERATED / AUTO TRACK)." },
+    { CL_ITEM,    "The studio's route preview now reads like a normal" },
+    { CL_ITEM,    "  track map: one red line, thinner, no dark panel" },
+    { CL_ITEM,    "  behind it, same START and FINISH markers." },
+    { CL_ITEM,    "SELECT TRACK shows that map for the generated track" },
+    { CL_ITEM,    "  instead of an empty preview panel." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 06 (dev tools)" },
     { CL_ITEM,    "DEV: geometry picker polish. It now casts a ray from the" },
     { CL_ITEM,    "  crosshair and highlights the FIRST surface hit (a tree" },
