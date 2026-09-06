@@ -12,6 +12,7 @@
 #include "td5_math_util.h"
 #include "td5_asset.h"
 #include "td5_track_registry.h"  /* custom-track registry: name/slot lookups + slot headroom */
+#include "td5_trackgen.h"        /* auto-track slot test: the generated track has no trak*.tga */
 #include "td5_game.h"
 #include "td5_profile.h"
 #include "td5_input.h"
@@ -164,7 +165,7 @@ static const ScreenDesc s_screens[TD5_SCREEN_COUNT] = {
     /* [49] */ { "MP CAR GRID",          Screen_CarSelection },   /* MP setup phase 1 (car grid) */
     /* [50] */ { "CUP INTERMISSION",     Screen_MpPostRace },     /* cup-between post-race menu */
     /* [51] */ { "LIGHTING",             Screen_LightingOptions },/* [RT2 P8] RT lighting per-feature options */
-    /* [52] */ { "AUTO TRACK",           Screen_AutoTrackOptions },/* [AUTOTRACK R2 item 25] generator knobs */
+    /* [52] */ { "AUTO TRACK STUDIO",    Screen_AutoTrackOptions },/* [AUTOTRACK R2 item 25] generator knobs */
 };
 
 /* [SUB-SCREEN PROMOTION 2026-07-27] Map an identity screen number back to the
@@ -1573,7 +1574,7 @@ static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_TWO_PLAYER_OPTIONS: return "MULTIPLAYER OPTIONS";
     case TD5_SCREEN_LANGUAGE_OPTIONS:   return TR("LANGUAGE");
     case TD5_SCREEN_LIGHTING_OPTIONS:   return "LIGHTING OPTIONS";
-    case TD5_SCREEN_AUTOTRACK_OPTIONS:  return "AUTO TRACK STUDIO"; /* [R2 item 25] */
+    case TD5_SCREEN_AUTOTRACK_OPTIONS:  return TR("AUTO TRACK STUDIO"); /* [R2 item 25] */
     case TD5_SCREEN_CONTROLLER_BINDING: return "CONTROLLER SETUP";
     case TD5_SCREEN_CAR_SELECTION:      return "SELECT CAR";
     case TD5_SCREEN_TRACK_SELECTION:    return "SELECT TRACK";
@@ -7726,7 +7727,7 @@ static void frontend_load_track_markers_td6(void) {
 /* Draw one preview marker dot centered at (cx,cy) screen px. kind 0 = START
  * (green), kind 1 = FINISH (black/white 2x2 checker). A black outline keeps it
  * legible over the red track line. */
-static void frontend_draw_marker_dot(float cx, float cy, float sx, float sy, int kind) {
+void frontend_draw_marker_dot(float cx, float cy, float sx, float sy, int kind) {
     float scale = (sx + sy) * 0.5f;
     float r = 4.0f * scale;
     float h;
@@ -7784,7 +7785,11 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
      * Original: state 8 @ 0x427630 uses single counter _DAT_0049522c (0..0x10=16 frames).
      * Preview slides in from right: x_offset = (16 - tick) * 16px [CONFIRMED @ 0x427b80-ish].
      * Text slides in from above:  y_offset = (tick - 16) * 16px [CONFIRMED @ 0x427957 formula]. */
-    float img_x_off = (s_track_switch_tick < 16) ? (16 - s_track_switch_tick) * 16.0f * sx : 0.0f;
+    /* Canvas-unit slide offset; the px form below is what the blit path wants,
+     * the canvas form is what the auto-track route plot wants (it scales by
+     * sx/sy itself). Same animation either way. */
+    float img_x_off_c = (s_track_switch_tick < 16) ? (16 - s_track_switch_tick) * 16.0f : 0.0f;
+    float img_x_off = img_x_off_c * sx;
     float txt_y_off = (s_track_switch_tick < 16) ? (s_track_switch_tick - 16) * 16.0f * sy : 0.0f;
 
     if (!s_anim_complete) return;
@@ -7884,6 +7889,16 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
                 td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
             }
         }
+    } else if (td5_trackgen_is_auto_slot(s_selected_track)) {
+        /* The generated track is slot 60 and has no trak*.tga, so the blit path
+         * above leaves the panel empty -- the player used to pick it blind.
+         * Plot the studio's last route into the SAME rect instead, so it slides
+         * in and reads like every other track's map. Silent (draws nothing)
+         * until the studio has produced a route this session. */
+        td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+        td5_autotrack_draw_route(412.0f + img_x_off_c, 135.0f, 152.0f, 224.0f,
+                                 sx, sy);
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
     }
     /* [FIXED 2026-06-01] Arrows only on the Track selector (slot 0). Orig
      * (0x427630) arms InitializeFrontendDisplayModeArrows(0,1) for the Track

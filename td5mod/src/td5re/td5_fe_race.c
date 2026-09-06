@@ -6734,7 +6734,7 @@ static void trksel_build_main_buttons(void) {
      * number. */
     s_trksel_auto_btn = -1;
     if (td5_trackgen_is_auto_slot(s_selected_track))
-        s_trksel_auto_btn = frontend_create_button(TR("Auto Track"),
+        s_trksel_auto_btn = frontend_create_button(TR("AUTO TRACK STUDIO"),
                                                    120, 306, 224, 32);
 
     s_trksel_dyn_btn = -1;   /* DYNAMICS moved onto the RACE OPTIONS screen */
@@ -7277,8 +7277,18 @@ static void at_row_apply(int row, int delta)
 /* An axis-aligned quad is the only primitive available, so the route is
  * plotted as a run of small squares rather than stroked as a polyline. At the
  * panel size that reads as a continuous line. Capped so a 3000-span marathon
- * costs the same number of draws as a short track. */
-#define AT_PV_MAX_DOTS 600
+ * costs the same number of draws as a short track.
+ *
+ * The cap is what keeps the trail continuous, not the dot size: at a 1px dot
+ * (matched to the shipped previews) 600 points break into visible dashes on a
+ * long route, so the budget doubled when the line got thinner. */
+#define AT_PV_MAX_DOTS 1200
+/* Breathing room inside the plot rect, canvas units, applied on both axes. */
+#define AT_PV_MARGIN   8.0f
+/* The shipped trak*.tga previews are drawn in one flat red
+ * (re/tools/track_preview_render.py: RED = (255, 0, 0)). The route matches it
+ * so a generated track reads the same as every other track's map. */
+#define AT_PV_ROUTE_COL 0xFFFF0000u
 
 static TD5_TrackGenPoint s_at_pts[TD5_TGPREV_MAX_POINTS];
 static int   s_at_pts_n;
@@ -7372,69 +7382,82 @@ static void at_preview_tick(void)
     } while (s_at_pts_n < TD5_TGPREV_MAX_POINTS);
 }
 
-static void at_draw_preview(float sx, float sy)
+/* Shared with SELECT TRACK -- see the contract in td5_frontend_internal.h.
+ * bx/by/bw/bh are CANVAS units (640x480); this scales by sx/sy itself, like
+ * every other draw in this file. Caller owns the render preset. */
+int td5_autotrack_draw_route(float bx, float by, float bw, float bh,
+                             float sx, float sy)
 {
-    const float bx = AT_PV_X * sx, by = AT_PV_Y * sy;
-    const float bw = AT_PV_W * sx, bh = AT_PV_H * sy;
-    float span, scale, ox, oz, dot;
+    float ext_x, ext_z, sc_x, sc_z, scale, ox, oz, cx, cy, dot;
     int i, stride;
-    char line[80];
 
-    /* Panel backing so the outline reads against the menu art. */
-    fe_draw_quad(bx, by, bw, bh, 0x60000000, -1, 0, 0, 1, 1);
+    if (s_at_pts_n < 2) return 0;
 
-    if (s_at_pts_n < 2) {
-        fe_draw_small_text(bx + 8 * sx, by + bh * 0.5f,
-                           s_at_status.running ? "GENERATING..." : "NO ROUTE",
-                           0xFF8899AA, sx, sy);
-        return;
-    }
-
-    /* Uniform scale on the larger axis keeps the route's real proportions --
-     * a long thin track must not be stretched to fill a square panel. */
-    span = (s_at_max_x - s_at_min_x);
-    if ((s_at_max_z - s_at_min_z) > span) span = (s_at_max_z - s_at_min_z);
-    if (span < 1.0f) span = 1.0f;
-    scale = (AT_PV_W - 16.0f) / span;
+    /* Uniform scale keeps the route's real proportions -- a long thin track
+     * must not be stretched to fill the panel. Fit BOTH axes and take the
+     * tighter one: the studio panel is near-square, but the track-select panel
+     * is 152x224 portrait, where a width-only fit would run off the top and
+     * bottom. Mirrors the offline renderer's Projector
+     * (re/tools/track_preview_render.py). */
+    ext_x = s_at_max_x - s_at_min_x;
+    ext_z = s_at_max_z - s_at_min_z;
+    if (ext_x < 1.0f) ext_x = 1.0f;
+    if (ext_z < 1.0f) ext_z = 1.0f;
+    sc_x = (bw - AT_PV_MARGIN * 2.0f) / ext_x;
+    sc_z = (bh - AT_PV_MARGIN * 2.0f) / ext_z;
+    scale = (sc_x < sc_z) ? sc_x : sc_z;
+    if (scale <= 0.0f) return 0;   /* rect smaller than its own margins */
     ox = (s_at_min_x + s_at_max_x) * 0.5f;
     oz = (s_at_min_z + s_at_max_z) * 0.5f;
+    cx = bx + bw * 0.5f;
+    cy = by + bh * 0.5f;
 
     stride = s_at_pts_n / AT_PV_MAX_DOTS;
     if (stride < 1) stride = 1;
-    dot = 2.0f * sx;
+    dot = 1.0f * sx;
     if (dot < 1.0f) dot = 1.0f;
 
+    /* One flat colour for every point. Branch corridors and the still-building
+     * head are deliberately NOT called out: a shipped preview draws its whole
+     * route in one red, and matching that is the point. */
     for (i = 0; i < s_at_pts_n; i += stride) {
         const TD5_TrackGenPoint *p = &s_at_pts[i];
         /* +Z is into the screen in world space, so flip it for a top-down map
          * that matches the track-select previews. */
-        float px = bx + bw * 0.5f + (p->x - ox) * scale * sx;
-        float py = by + bh * 0.5f - (p->z - oz) * scale * sy;
-        uint32_t col;
-        if (p->branch)                        col = 0xFF39C0D8;  /* corridor */
-        else if (i >= s_at_pts_n - stride * 8 && s_at_status.running)
-                                              col = 0xFF7CFF6A;  /* build head */
-        else                                  col = 0xFFE3D708;  /* main ring */
-        fe_draw_quad(px, py, dot, dot, col, -1, 0, 0, 1, 1);
+        fe_draw_quad((cx + (p->x - ox) * scale) * sx,
+                     (cy - (p->z - oz) * scale) * sy,
+                     dot, dot, AT_PV_ROUTE_COL, -1, 0, 0, 1, 1);
     }
 
     /* Start marker. The finish sits at the end of the MAIN RING, not at the
-     * end of the point list -- branch corridors are published after it. */
-    {
-        float px = bx + bw * 0.5f + (s_at_pts[0].x - ox) * scale * sx;
-        float py = by + bh * 0.5f - (s_at_pts[0].z - oz) * scale * sy;
-        fe_draw_quad(px - 2 * sx, py - 2 * sy, 5 * sx, 5 * sy,
-                     0xFF20FF20, -1, 0, 0, 1, 1);
-    }
+     * end of the point list -- branch corridors are published after it. Same
+     * helper the shipped previews use, so the ends read identically. */
+    frontend_draw_marker_dot((cx + (s_at_pts[0].x - ox) * scale) * sx,
+                             (cy - (s_at_pts[0].z - oz) * scale) * sy,
+                             sx, sy, 0);
     if (s_at_status.done && s_at_status.stats.ring_len > 0) {
         int fi = s_at_status.stats.ring_len;
         if (fi >= s_at_pts_n) fi = s_at_pts_n - 1;
-        {
-            float px = bx + bw * 0.5f + (s_at_pts[fi].x - ox) * scale * sx;
-            float py = by + bh * 0.5f - (s_at_pts[fi].z - oz) * scale * sy;
-            fe_draw_quad(px - 2 * sx, py - 2 * sy, 5 * sx, 5 * sy,
-                         0xFFFFFFFF, -1, 0, 0, 1, 1);
-        }
+        frontend_draw_marker_dot((cx + (s_at_pts[fi].x - ox) * scale) * sx,
+                                 (cy - (s_at_pts[fi].z - oz) * scale) * sy,
+                                 sx, sy, 1);
+    }
+    return 1;
+}
+
+static void at_draw_preview(float sx, float sy)
+{
+    const float bx = AT_PV_X * sx, by = AT_PV_Y * sy;
+    const float bh = AT_PV_H * sy;
+    char line[80];
+
+    /* No backing panel: the shipped previews are transparent over the menu
+     * art, and this one now matches them. */
+    if (!td5_autotrack_draw_route(AT_PV_X, AT_PV_Y, AT_PV_W, AT_PV_H, sx, sy)) {
+        fe_draw_small_text(bx + 8 * sx, by + bh * 0.5f,
+                           s_at_status.running ? "GENERATING..." : "NO ROUTE",
+                           0xFF8899AA, sx, sy);
+        return;
     }
 
     /* Read-out under the panel. */
@@ -7774,6 +7797,11 @@ void Screen_AutoTrackOptions(void) {
             s_inner_state = 9;
         break;
     case 9:
+        /* Drain whatever the worker published since the last frame BEFORE
+         * killing it: track-select now draws this same mirror, so backing out
+         * mid-build would otherwise carry a route truncated at the last
+         * rendered frame rather than at the last generated point. */
+        at_preview_tick();
         /* Leaving the screen must not leave a worker walking the generator
          * that the race launch is about to use. */
         td5_tgprev_cancel_join();

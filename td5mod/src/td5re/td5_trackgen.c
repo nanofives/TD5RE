@@ -55,6 +55,11 @@
 #define TD5_TG_LEVEL_NUM   90
 /* Last custom slot, so manifest-loaded tracks keep the low slots. */
 #define TD5_TG_SLOT        (TD5_CUSTOM_TRACK_SLOT_BASE + TD5_CUSTOM_TRACK_MAX - 1)
+/* Name shown in the track selector. Defined once: the registry is re-set on
+ * every regenerate, and three call sites drifting apart is how the feature
+ * ended up with four different names in the first place. Must match the
+ * screen-52 title in td5_frontend.c. */
+#define TD5_TG_TRACK_NAME  "AUTO TRACK STUDIO"
 
 /* Span the start/finish line sits on. The grid places the six racers STAGGERED
  * BEHIND the start line, so starting at span 0 puts the back of the grid on
@@ -30764,9 +30769,9 @@ int td5_trackgen_init(void)
     TD5_TrackGenSpec spec;
     td5_trackgen_default_spec(&spec);
     td5_trackgen_apply_config(&spec);
-    td5_track_registry_set_auto(TD5_TG_SLOT, TD5_TG_LEVEL_NUM, "AUTO-GENERATED",
+    td5_track_registry_set_auto(TD5_TG_SLOT, TD5_TG_LEVEL_NUM, TD5_TG_TRACK_NAME,
                                spec.circuit, TD5_TG_GRID_SPAN, 0);
-    TD5_LOG_I(LOG_TAG, "trackgen: AUTO-GENERATED registered (slot %d, level %d); "
+    TD5_LOG_I(LOG_TAG, "trackgen: " TD5_TG_TRACK_NAME " registered (slot %d, level %d); "
               "built on race entry", TD5_TG_SLOT, TD5_TG_LEVEL_NUM);
     return 1;
 }
@@ -30955,7 +30960,7 @@ int td5_trackgen_regenerate(unsigned int seed)
             s_ring_len  = have.ring;
             s_tg_progress = 100;
             td5_track_registry_set_auto(TD5_TG_SLOT, TD5_TG_LEVEL_NUM,
-                                       "AUTO-GENERATED", have.circuit,
+                                       TD5_TG_TRACK_NAME, have.circuit,
                                        TD5_TG_GRID_SPAN, have.finish);
             TD5_LOG_W(LOG_TAG, "trackgen: REUSED the on-disk build for seed %u "
                       "(%d spans, ring %d, finish %d) -- generation skipped",
@@ -30999,7 +31004,7 @@ int td5_trackgen_regenerate(unsigned int seed)
         if (finish <= 0)   /* ring too short for a placed finish: last-resort */
             finish = (spans > 8) ? spans - 4 : spans - 1;
         td5_track_registry_set_auto(TD5_TG_SLOT, TD5_TG_LEVEL_NUM,
-                                   "AUTO-GENERATED", spec.circuit,
+                                   TD5_TG_TRACK_NAME, spec.circuit,
                                    TD5_TG_GRID_SPAN, finish);
         TD5_LOG_I(LOG_TAG, "trackgen: registry finish span=%d (main ring=%d, full "
                   "strip=%d; old spans-4 would be %d)", finish, ring, spans,
