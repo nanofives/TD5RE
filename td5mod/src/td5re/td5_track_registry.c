@@ -195,7 +195,7 @@ int td5_track_registry_set_auto(int slot, int level, const char *name,
         strncpy(t->name, name, sizeof(t->name) - 1);
         t->name[sizeof(t->name) - 1] = '\0';
     } else {
-        snprintf(t->name, sizeof(t->name), "AUTO TRACK %d", slot);
+        snprintf(t->name, sizeof(t->name), "AUTO TRACK STUDIO %d", slot);
     }
     if (slot + 1 > s_slot_max) s_slot_max = slot + 1;
 

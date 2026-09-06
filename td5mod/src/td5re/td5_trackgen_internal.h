@@ -68,6 +68,11 @@
 #define TD5_TG_LEVEL_NUM   90
 /* Last custom slot, so manifest-loaded tracks keep the low slots. */
 #define TD5_TG_SLOT        (TD5_CUSTOM_TRACK_SLOT_BASE + TD5_CUSTOM_TRACK_MAX - 1)
+/* Name shown in the track selector. Defined once: the registry is re-set on
+ * every regenerate, and three call sites drifting apart is how the feature
+ * ended up with four different names in the first place. Must match the
+ * screen-52 title in td5_frontend.c. (Merged from master a648b65d.) */
+#define TD5_TG_TRACK_NAME  "AUTO TRACK STUDIO"
 /* Span the start/finish line sits on. The grid places the six racers STAGGERED
  * BEHIND the start line, so starting at span 0 puts the back of the grid on
  * negative spans that do not exist on a point-to-point track (observed:
