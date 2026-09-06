@@ -3170,11 +3170,12 @@ void td5_trackgen_apply_config(TD5_TrackGenSpec *spec)
     if (!spec) return;
     spec->target_spans = td5_env_int("TD5RE_AUTOTRACK_SPANS",
                                      spec->target_spans, 60, TD5_TG_MAX_SPANS);
-    /* 2..4 only: shipped tracks never exceed 4 lanes, so the rail LUTs
-     * (td5_track.c:1315), edge masks and suspension paths are only exercised
-     * in that range. Road WIDTH still varies freely. */
+    /* [LANES] BASE lane count. The old 2..4 clamp cited "shipped tracks
+     * never exceed 4 lanes"; the census (docs/plans/AUTOTRACK_TRACK_CENSUS.md)
+     * shows 2..10 per span, and the rail / edge LUTs are per span TYPE, not
+     * per lane count. Sections vary around this base (TD5RE_AUTOTRACK_LANE_*). */
     spec->lanes        = td5_env_int("TD5RE_AUTOTRACK_LANES",
-                                     spec->lanes, 2, 4);
+                                     spec->lanes, 2, 8);
     spec->elevation_amplitude =
         td5_env_int("TD5RE_AUTOTRACK_ELEVATION",
                     spec->elevation_amplitude, 0, 40000);
@@ -3558,9 +3559,8 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     }
 
     if (td5_env_flag_off("TD5RE_AUTOTRACK_SELFCHECK")) {
-        tg_selfcheck_ranges(&nl, spec->lanes,
-                            td5_env_int("TD5RE_AUTOTRACK_BLOCK",
-                                        TD5_TG_ORIGIN_BLOCK, 1, 20));
+        tg_selfcheck_ranges(&nl, td5_env_int("TD5RE_AUTOTRACK_BLOCK",
+                                             TD5_TG_ORIGIN_BLOCK, 1, 20));
         s_selfcheck_regen_seed = spec->seed;   /* run after the build completes */
     }
 

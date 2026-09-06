@@ -206,7 +206,20 @@ port's LUTs, which were verified against the binary:
   2..7 (they are shipped data); what is untested is the GENERATOR's guardrail
   and pavement emitters on such spans (TG:14854 says so).
 
-Implementation sketch for the generator (next `/fix`, its own worktree):
+IMPLEMENTED 2026-09-06 (same branch, after the split): `tg_build_centerline`
+draws a lane count per section (knobs `TD5RE_AUTOTRACK_LANE_VARY`, `LANES_MIN`,
+`LANES_MAX`, `LANE_PCT`; base `TD5RE_AUTOTRACK_LANES` now 2..8), commits the
+change at the section's first node with its side and the lane-base nibble, and
+jogs the walk half a lane on one-sided changes (the tangent pass subtracts the
+jog). `tg_emit_span_range` sizes each shared row to the narrower span
+(`tg_row_points`) and types the wider span 2..7 (`tg_span_type_for`); forks
+read their lane count at F and are skipped if the count changes inside their
+window. Changes never land on the grid, the last 60 spans, fork windows, bridge
+decks or tunnel bores. Proof for seed 20260901: VARY=0 byte-identical to the
+pre-lanes build; VARY=1 gives 17 seams, all invariants hold, AI drive clean.
+Audit any STRIP.DAT with `python re/tools/tg_strip_audit.py <file>` (exit 1 on a
+violation).
+The original sketch, kept for the record:
 
 1. `TG_Node.lanes` per node already exists (TG:1876, "1..12"); let the section
    picker assign lane count per section (2..8 in steps of 1 or 2) instead of

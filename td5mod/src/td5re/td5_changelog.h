@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 06 (dev tools)" },
+    { CL_ITEM,    "RANDOM TRACK: real lane management. Roads now gain and" },
+    { CL_ITEM,    "  lose lanes along the way (2 to 8) the way the shipped" },
+    { CL_ITEM,    "  tracks do: one-sided drops and merges, symmetric" },
+    { CL_ITEM,    "  widenings, lane paint and AI following the count." },
+    { CL_ITEM,    "  TD5RE_AUTOTRACK_LANE_VARY=0 restores the fixed 4 lanes." },
     { CL_ITEM,    "DEV: the 31k-line auto-track generator source is now 9" },
     { CL_ITEM,    "  themed modules (branches, guard, city, streets, terrain," },
     { CL_ITEM,    "  bridges, furniture, pages). Generated tracks are byte-" },

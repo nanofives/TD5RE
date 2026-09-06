@@ -574,7 +574,7 @@ extern unsigned int s_selfcheck_regen_seed;
  * by a central median); large = a road that genuinely diverges in two. Stored
  * on the fork so the strip rows, the road mesh, the clearance query and the
  * divider all read ONE value and cannot drift. */
-typedef struct { int F, len, cbase, R; double sep; } TG_Fork;
+typedef struct { int F, len, cbase, R; double sep; int lanes; } TG_Fork;   /* lanes: full count at F ([LANES]) */
 extern TG_Fork s_forks[TD5_TG_BRANCH_MAX];
 extern int s_fork_count;
 extern int s_ring_len;
@@ -1139,14 +1139,31 @@ int td5_trackgen_is_night(void);
 typedef struct {
     double x, y, z;      /* world units */
     double width;        /* full road width, world units */
-    int    lanes;        /* 1..12 */
+    int    lanes;        /* 1..12: lane count of the SPAN that starts here */
+    /* [LANES] lane management (see tg_row_points / tg_span_type_for):
+     *   lane_base  high nibble of the span's packed byte 3, the walker's
+     *              cross-span lane-index shift (shipped baseline 8);
+     *   lane_side  which edge changed at the seam ON this node: +1 left,
+     *              -1 right, 2 both, 0 no change. */
+    int    lane_base;
+    int    lane_side;
+    /* [LANES] cumulative sideways jog the walk applied up to this node (a
+     * one-sided lane change moves the centre by half a lane). The tangent
+     * pass subtracts it so a jog never kinks the row direction. */
+    double jx, jz;
     double tx, tz;       /* unit tangent (filled after the walk) */
 } TG_Node;
+/* Largest origin block the row table of tg_emit_span_range can hold; the
+ * TD5RE_AUTOTRACK_BLOCK knob is clamped to it. */
+#define TD5_TG_ORIGIN_BLOCK_MAX 20
 typedef struct {
     TG_Node *v;
     int      count;
     int      cap;
 } TG_NodeList;
+/* [LANES] per-node lane management readers (defined in td5_trackgen.c). */
+int tg_row_points(const TG_NodeList *nl, int node);
+int tg_span_type_for(const TG_NodeList *nl, int si);
 extern TG_NodeList s_stream_nl;
 extern int s_stream_nspans, s_stream_lanes;
 extern int s_stream_pending;
@@ -1850,7 +1867,7 @@ void tg_r14_coast_report(void);
  * drop is recorded where it happens instead of being inferred afterwards. */
 void tg_r13_faces_dropped(int si);
 int tg_guard_validate_entry(const TG_NodeList *nl, int ring, int s0, int ns, TG_Buf *meshes, size_t *moff, int *pnmesh);
-void tg_selfcheck_ranges(const TG_NodeList *nl, int lanes, int block);
+void tg_selfcheck_ranges(const TG_NodeList *nl, int block);
 int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans);
 int tg_emit_routes(const TG_NodeList *nl, int nspans, int lateral, TG_Buf *out);
 /* ------------------------------------------------- FINISH LINE + RUN-OFF ---

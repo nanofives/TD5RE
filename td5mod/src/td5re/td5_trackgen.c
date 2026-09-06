@@ -821,6 +821,9 @@ static int tg_nodes_push(TG_NodeList *nl, double x, double z,
         n->x = x; n->y = 0.0; n->z = z;
         n->width = width;
         n->lanes = lanes;
+        n->lane_base = TD5_TG_HEIGHT_NIBBLE;   /* [LANES] shipped baseline 8 */
+        n->lane_side = 0;                      /* [LANES] no change at this seam */
+        n->jx = 0.0; n->jz = 0.0;
         n->tx = 0.0; n->tz = 1.0;
     }
     /* Every centerline node passes through here, so one hook covers the whole
@@ -985,6 +988,28 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
     /* Max width change per span so widenings taper instead of stepping. */
     const double width_ramp = (double)spec->lane_width * 0.5;
 
+    /* [LANES] Lane management. Shipped tracks change lane count 18..88 times
+     * per track (2..10 lanes per span), always inside ONE span: the wider span
+     * is a type 2..7 transition and the shared row is sized to the narrower
+     * side (docs/plans/AUTOTRACK_ELEMENT_CATALOG.md section 4). Here each
+     * SECTION draws a lane count; a change is committed at the section's
+     * first node (the seam) with its side, and the lane BASE nibble follows
+     * the left edge. One-sided changes JOG the walk by half a lane so the
+     * unchanged edge stays straight, the way a real lane drop does.
+     *
+     * TD5RE_AUTOTRACK_LANE_VARY=0 restores the constant lane count and draws
+     * nothing extra from the RNG, so a seed built with it off is byte-identical
+     * to the pre-lanes generator. */
+    const int    lane_vary = td5_env_flag_on("TD5RE_AUTOTRACK_LANE_VARY");
+    const int    lanes_min = td5_env_int("TD5RE_AUTOTRACK_LANES_MIN", 2, 1, TD5_TG_MAX_LANES);
+    const int    lanes_max = td5_env_int("TD5RE_AUTOTRACK_LANES_MAX", 8, 1, TD5_TG_MAX_LANES);
+    const int    lane_pct  = td5_env_int("TD5RE_AUTOTRACK_LANE_PCT", 35, 0, 100);
+    const double lane_w    = (double)spec->lane_width;
+    int    cur_lanes = spec->lanes;   /* lane count of the road being walked */
+    int    cur_base  = TD5_TG_HEIGHT_NIBBLE;
+    long   lane_changes = 0, lane_skipped = 0;
+    double cum_jx = 0.0, cum_jz = 0.0;   /* sideways jog applied so far */
+
     /* Heading budgets and the adjacent-skip derived from them. ACUTE sections
      * get a sharper budget (see TD5_TG_ACUTE_HEADING_DEG); the derived skip is
      * sized off the LARGER budget so the non-trapping / no-self-intersection
@@ -1102,6 +1127,78 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
         const double heading_limit = (sec == TD5_TG_ACUTE)
                                    ? acute_limit : TD5_TG_HEADING_LIMIT;
 
+        /* [LANES] This section's lane count. sec_side is the edge that changes
+         * at the seam (+1 left, -1 right, 2 both); jog_at is the node index
+         * that takes the half-lane sideways step (the first node of the
+         * NARROWER geometry: the seam for a drop, the node after it for an
+         * add), jog is that step in world units along the left axis. */
+        const int save_lanes = cur_lanes, save_base = cur_base;
+        const double save_jx = cum_jx, save_jz = cum_jz;
+        int    sec_lanes = cur_lanes, sec_side = 0, sec_base = cur_base;
+        int    jog_at = -1;
+        double jog = 0.0;
+        if (lane_vary) {
+            const int seam = nl->count;      /* index of the seam node */
+            int want = cur_lanes, side = 0;
+            if (sec == TD5_TG_DUAL_LANE) {
+                want = cur_lanes + 2; side = 2;
+            } else if (tg_range(0, 99) < lane_pct) {
+                /* Random walk, biased back toward the base count so a long
+                 * track does not ratchet to the ceiling or the floor. */
+                const int up = (cur_lanes < spec->lanes) ? (tg_range(0, 99) < 70)
+                             : (cur_lanes > spec->lanes) ? (tg_range(0, 99) < 30)
+                             : (tg_rand() & 1);
+                const int both = (tg_range(0, 99) < 30);
+                want = cur_lanes + (up ? 1 : -1) * (both ? 2 : 1);
+                side = both ? 2 : ((tg_rand() & 1) ? 1 : -1);
+            }
+            if (want < lanes_min) want = lanes_min;
+            if (want > lanes_max) want = lanes_max;
+            if (want != cur_lanes) {
+                const int d = want - cur_lanes;
+                int ok_here = 1, q;
+                if (d > 2 || d < -2) { want = cur_lanes + (d > 0 ? 2 : -2); }
+                if (want - cur_lanes == 2 || want - cur_lanes == -2) side = 2;
+                /* Where a change may NOT land: the grid, the last spans (the
+                 * finish gantry and run-off), a fork's widened approach or
+                 * corridor, a bridge deck or a tunnel bore (their walls and
+                 * rails are built to one width). +/-2 spans of margin. */
+                if (seam < TD5_TG_GRID_SPAN + 40) ok_here = 0;
+                if (seam > want_nodes - 60) ok_here = 0;
+                for (q = seam - 2; ok_here && q <= seam + 2; q++)
+                    if (tg_span_in_fork_run(q) || tg_span_in_bridge_run(q) ||
+                        tg_span_in_tunnel(q)) ok_here = 0;
+                /* The base nibble must stay inside 0..15 with room for the
+                 * walker's neighbours; shipped tracks sit in 5..9. A left or
+                 * two-sided change that would leave [5,11] becomes a right one. */
+                if (ok_here) {
+                    int nb = cur_base;
+                    if (side == 2)       nb += (want > cur_lanes) ? -1 : 1;
+                    else if (side == 1)  nb += (want > cur_lanes) ? -1 : 1;
+                    if (nb < 5 || nb > 11) {
+                        if (side == 2) want = cur_lanes + (want > cur_lanes ? 1 : -1);
+                        side = -1; nb = cur_base;
+                    }
+                    sec_lanes = want; sec_side = side; sec_base = nb;
+                    if (side != 2) {
+                        /* drop: the seam row is already the narrow one; add: the
+                         * row after the seam is the first wide one. Left unit is
+                         * (tz, -tx) = (cos h, -sin h): a lane lost on the RIGHT
+                         * moves the centre LEFT (+), etc. */
+                        const int drop = (want < cur_lanes);
+                        jog_at = drop ? seam : seam + 1;
+                        jog = (lane_w * 0.5) * ((drop ? 1.0 : -1.0) * (side < 0 ? 1.0 : -1.0));
+                    }
+                } else {
+                    lane_skipped++;
+                }
+            }
+            /* [LANES] the width follows the lane count; the DUAL taper of the
+             * constant-lane generator is replaced by the transition span. */
+            target_width = (double)sec_lanes * lane_w;
+            width = target_width;
+        }
+
         {
             int i;
             for (i = 0; i < len_spans && nl->count < want_nodes; i++) {
@@ -1165,26 +1262,43 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
                 x += sin(heading) * span_len;
                 z += cos(heading) * span_len;
 
-                /* Lane COUNT is constant for the whole track; only the WIDTH
-                 * varies. Two reasons: (a) consecutive spans must SHARE a
-                 * vertex row (see tg_emit_strip) and a shared row has one
-                 * point count; (b) shipped tracks only ever use 2-4 lanes, so
-                 * the rail LUTs and suspension paths are only exercised there.
-                 * A "dual-lane" section is therefore a visibly WIDER road, not
-                 * a different subdivision -- which is the visual intent anyway,
-                 * since the lane count is really a surface-grid stride. */
-                lanes_here = spec->lanes;
-
-                /* Would this node put road on top of earlier road? */
-                if (tg_too_close(nl, x, z, width, (double)spec->lane_width,
-                                 skip)) {
-                    rejected = 1;
-                    break;
+                /* [LANES] With lane variation OFF the lane count is constant
+                 * and only the WIDTH varies (the old DUAL taper); ON, each
+                 * section carries its own count and the seam node's row is the
+                 * narrower of the two spans it joins (tg_row_points), so the
+                 * seam node's width is that row's width. */
+                lanes_here = lane_vary ? sec_lanes : spec->lanes;
+                if (lane_vary && nl->count == jog_at) {
+                    x += cos(heading) * jog;   cum_jx += cos(heading) * jog;
+                    z -= sin(heading) * jog;   cum_jz -= sin(heading) * jog;
                 }
+                {
+                    double w_here = width;
+                    if (lane_vary && i == 0 && sec_lanes != save_lanes)
+                        w_here = (double)(sec_lanes < save_lanes ? sec_lanes
+                                                                 : save_lanes) * lane_w;
 
-                if (!tg_nodes_push(nl, x, z, width, lanes_here)) return 0;
+                    /* Would this node put road on top of earlier road? */
+                    if (tg_too_close(nl, x, z, w_here, (double)spec->lane_width,
+                                     skip)) {
+                        rejected = 1;
+                        break;
+                    }
+
+                    if (!tg_nodes_push(nl, x, z, w_here, lanes_here)) return 0;
+                }
+                if (lane_vary) {
+                    TG_Node *nn = &nl->v[nl->count - 1];
+                    nn->jx = cum_jx; nn->jz = cum_jz;
+                    nn->lane_base = sec_base;
+                    if (i == 0 && sec_lanes != save_lanes) {
+                        nn->lane_side = sec_side;
+                        lane_changes++;
+                    }
+                }
             }
         }
+        if (lane_vary && !rejected) { cur_lanes = sec_lanes; cur_base = sec_base; }
 
         if (rejected) {
             /* Roll the whole section back and try a different one. */
@@ -1193,6 +1307,10 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
             z         = save_z;
             heading   = save_heading;
             width     = save_width;
+            cur_lanes = save_lanes;
+            cur_base  = save_base;
+            cum_jx    = save_jx;
+            cum_jz    = save_jz;
             attempts++;
             if (attempts >= 24) {
                 TD5_LOG_W(LOG_TAG, "trackgen: boxed in after %d spans; ending "
@@ -1207,14 +1325,29 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
         section_tally[sec]++;
     }
 
+    if (lane_vary) {
+        int i, lo = 99, hi = 0;
+        for (i = 0; i + 1 < nl->count; i++) {
+            if (nl->v[i].lanes < lo) lo = nl->v[i].lanes;
+            if (nl->v[i].lanes > hi) hi = nl->v[i].lanes;
+        }
+        TD5_LOG_I(LOG_TAG, "trackgen: [LANES] %ld lane changes (%ld sections "
+                  "skipped: grid/fork/bridge/tunnel/finish), lanes %d..%d "
+                  "(base %d, min %d, max %d, pct %d)", lane_changes,
+                  lane_skipped, lo, hi, spec->lanes, lanes_min, lanes_max,
+                  lane_pct);
+    }
+
     /* Unit tangents by central difference (endpoints one-sided). */
     {
         int i;
         for (i = 0; i < nl->count; i++) {
             int a = (i > 0) ? i - 1 : i;
             int b = (i < nl->count - 1) ? i + 1 : i;
-            double dx = nl->v[b].x - nl->v[a].x;
-            double dz = nl->v[b].z - nl->v[a].z;
+            /* [LANES] difference of the UNJOGGED positions, so a half-lane
+             * sideways step at a lane change does not rotate the rows. */
+            double dx = (nl->v[b].x - nl->v[b].jx) - (nl->v[a].x - nl->v[a].jx);
+            double dz = (nl->v[b].z - nl->v[b].jz) - (nl->v[a].z - nl->v[a].jz);
             double len = sqrt(dx * dx + dz * dz);
             if (len < 1e-6) { dx = 0.0; dz = 1.0; len = 1.0; }
             nl->v[i].tx = dx / len;
@@ -1692,6 +1825,49 @@ int tg_round(double v)
     return (int)(v >= 0.0 ? (v + 0.5) : (v - 0.5));
 }
 
+/* ===================== [LANES] LANE MANAGEMENT ============================
+ * Per-span lane count, the way shipped tracks do it (docs/plans/
+ * AUTOTRACK_ELEMENT_CATALOG.md section 4, from a census of all 36 levels):
+ *   - a span's lane count is its own (low nibble of packed byte 3);
+ *   - the row two spans SHARE has min(lanes) + 1 points;
+ *   - the WIDER span at a change is the transition span: type 2 (+1 lane on
+ *     the right), 3 (+1 left), 4 (+1 each side) when it is wider than the span
+ *     before it; type 5 (-1 right), 6 (-1 left), 7 (-1 each side) when it is
+ *     wider than the span after it;
+ *   - the high nibble is a lane BASE: a lane gained on the LEFT shifts every
+ *     lane index by one, so the base drops by one (and rises by one when the
+ *     left lane goes), which is what keeps resolve_neighbor's
+ *     `sub_lane += h_off - dest_h` continuous across the seam.
+ * The walk decides WHERE lanes change (tg_build_centerline); these helpers
+ * only read the nodes, so the strip, the road mesh and every scenery emitter
+ * see one answer. */
+int tg_row_points(const TG_NodeList *nl, int node)
+{
+    int la, lb;
+    if (node <= 0) return nl->v[0].lanes + 1;
+    if (node >= nl->count - 1) return nl->v[nl->count - 2].lanes + 1;
+    la = nl->v[node - 1].lanes;             /* span ending on this row  */
+    lb = nl->v[node].lanes;                 /* span starting on this row */
+    return (la < lb ? la : lb) + 1;
+}
+
+int tg_span_type_for(const TG_NodeList *nl, int si)
+{
+    const int L = nl->v[si].lanes;
+    const int nspans = nl->count - 1;
+    if (si > 0 && L > nl->v[si - 1].lanes) {
+        const int d = L - nl->v[si - 1].lanes;
+        if (d >= 2) return 4;                       /* ADD2: one each side */
+        return nl->v[si].lane_side > 0 ? 3 : 2;     /* ADD1_L : ADD1_R */
+    }
+    if (si + 1 < nspans && L > nl->v[si + 1].lanes) {
+        const int d = L - nl->v[si + 1].lanes;
+        if (d >= 2) return 7;                       /* DROP2 */
+        return nl->v[si + 1].lane_side > 0 ? 6 : 5; /* DROP1_L : DROP1_R */
+    }
+    return 1;
+}
+
 /* ===================== [S1] RANGE EMITTER =====================
  * Emit spans [first_span, first_span+span_count) and their vertex rows into
  * CALLER-OWNED buffers, with vertex indices continuing from *vtx_count.
@@ -1709,11 +1885,11 @@ int tg_round(double v)
  * reason. Asserted below rather than assumed.
  */
 static int tg_emit_span_range(const TG_NodeList *nl, int first_span,
-                              int span_count, int lanes, int block,
+                              int span_count, int block,
                               TG_Buf *spans, TG_Buf *verts, int *vtx_count)
 {
-    const int row_pts = lanes + 1;
     const int range_end = first_span + span_count;
+    const int nspans_all = nl->count - 1;
     int s0, ok = 1;
 
     if (block <= 0 || span_count <= 0) return 0;
@@ -1723,9 +1899,9 @@ static int tg_emit_span_range(const TG_NodeList *nl, int first_span,
                   "change geometry)", first_span, block);
         return 0;
     }
-    if (range_end > nl->count - 1) {
+    if (range_end > nspans_all) {
         TD5_LOG_E(LOG_TAG, "trackgen: emit range [%d,%d) exceeds %d spans",
-                  first_span, range_end, nl->count - 1);
+                  first_span, range_end, nspans_all);
         return 0;
     }
 
@@ -1735,9 +1911,29 @@ static int tg_emit_span_range(const TG_NodeList *nl, int first_span,
         const int oy  = tg_round(nl->v[s0].y);
         const int oz  = tg_round(nl->v[s0].z);
         const int base = *vtx_count;
-        int k;
+        /* [LANES] Row k of this block (node s0+k) is SHARED by span s0+k-1
+         * (its far row) and span s0+k (its near row). Shipped tracks size a
+         * shared row to the NARROWER of the two spans it joins (Keswick span
+         * 1536: type 7, lanes 4, near row 5 points, far row 3 points, then
+         * span 1537 lanes 2 starts on that 3-point row), so a lane change
+         * costs no row break: the wider span is the TRANSITION span and its
+         * type (2..7) tells the walker which edge gained or lost the lane.
+         * Row start indices are therefore cumulative, not k * row_pts. */
+        int row_start[TD5_TG_ORIGIN_BLOCK_MAX + 1];
+        int row_pts[TD5_TG_ORIGIN_BLOCK_MAX + 1];
+        int need = 0, k;
 
-        if (*vtx_count + (ns + 1) * row_pts > TD5_TG_MAX_VERTICES) {
+        if (ns > TD5_TG_ORIGIN_BLOCK_MAX) {
+            TD5_LOG_E(LOG_TAG, "trackgen: origin block %d exceeds the %d-span "
+                      "row table", ns, TD5_TG_ORIGIN_BLOCK_MAX);
+            return 0;
+        }
+        for (k = 0; k <= ns; k++) {
+            row_pts[k]   = tg_row_points(nl, s0 + k);
+            row_start[k] = base + need;
+            need += row_pts[k];
+        }
+        if (*vtx_count + need > TD5_TG_MAX_VERTICES) {
             TD5_LOG_W(LOG_TAG, "trackgen: vertex ceiling hit at span %d "
                       "(%d verts); truncating", s0, *vtx_count);
             break;
@@ -1749,10 +1945,12 @@ static int tg_emit_span_range(const TG_NodeList *nl, int first_span,
         for (k = 0; k <= ns; k++) {
             const TG_Node *n = &nl->v[s0 + k];
             const double lx = n->tz, lz = -n->tx;
+            const int pts = row_pts[k];
+            const int rl  = pts - 1;               /* lanes across THIS row */
             int j;
-            for (j = 0; j < row_pts; j++) {
+            for (j = 0; j < pts; j++) {
                 double t  = (n->width * 0.5)
-                          - (n->width * (double)j / (double)lanes);
+                          - (n->width * (double)j / (double)rl);
                 int dx = tg_round(n->x + lx * t) - ox;
                 int dy = tg_round(n->y) - oy;
                 int dz = tg_round(n->z + lz * t) - oz;
@@ -1767,24 +1965,30 @@ static int tg_emit_span_range(const TG_NodeList *nl, int first_span,
                 tg_put_u16(verts, (unsigned)(dy & 0xFFFF));
                 tg_put_u16(verts, (unsigned)(dz & 0xFFFF));
             }
-            *vtx_count += row_pts;
+            *vtx_count += pts;
         }
 
         for (k = 0; k < ns; k++) {
-            tg_put_u8 (spans, 1);                        /* span_type QUAD_A */
-            tg_put_u8 (spans, (unsigned)tg_surface_attr(s0 + k));
+            const int si = s0 + k;
+            const TG_Node *n = &nl->v[si];
+            tg_put_u8 (spans, (unsigned)tg_span_type_for(nl, si));
+            tg_put_u8 (spans, (unsigned)tg_surface_attr(si));
             /* Lane bitmask 0 = every lane is the low-nibble surface (dry asphalt,
-         * full grip). The old `1 | (1<<(lanes-1))` marked the OUTER lanes, which
-         * surface_type_for_span_lane turns into the 0x10 "alternate/off-road"
-         * surface -- td5_track_surface_is_slow returns 1 for anything with 0x10
-         * set, so those lanes silently SLOWED the car while textured identically
-         * to the fast lanes (reported as "lanes that make the car slower look the
-         * same as the road"). A generated arcade road is uniformly drivable. */
-        tg_put_u8 (spans, 0);
-            tg_put_u8 (spans, (unsigned)((TD5_TG_HEIGHT_NIBBLE << 4)
-                                         | (lanes & 0x0F)));
-            tg_put_u16(spans, (unsigned)(base + k * row_pts));
-            tg_put_u16(spans, (unsigned)(base + (k + 1) * row_pts));
+             * full grip). The old `1 | (1<<(lanes-1))` marked the OUTER lanes,
+             * which surface_type_for_span_lane turns into the 0x10
+             * "alternate/off-road" surface -- td5_track_surface_is_slow returns
+             * 1 for anything with 0x10 set, so those lanes silently SLOWED the
+             * car while textured identically to the fast lanes (reported as
+             * "lanes that make the car slower look the same as the road"). A
+             * generated arcade road is uniformly drivable. */
+            tg_put_u8 (spans, 0);
+            /* [LANES] high nibble = lane BASE (the walker's cross-span lane
+             * index shift, td5_track.c resolve_neighbor: sub_lane += h_off -
+             * dest_h), low nibble = this span's own lane count. */
+            tg_put_u8 (spans, (unsigned)(((n->lane_base & 0x0F) << 4)
+                                         | (n->lanes & 0x0F)));
+            tg_put_u16(spans, (unsigned)row_start[k]);
+            tg_put_u16(spans, (unsigned)row_start[k + 1]);
             tg_put_u16(spans, 0xFFFF);                   /* link_next = -1 */
             tg_put_u16(spans, 0xFFFF);                   /* link_prev = -1 */
             tg_put_i32(spans, ox);
@@ -1799,7 +2003,7 @@ static int tg_emit_span_range(const TG_NodeList *nl, int first_span,
  * block-aligned CHUNKS must be byte-identical to emitting it in one call. If
  * that does not hold, streaming would silently produce different geometry from
  * the same seed. Runs only when TD5RE_AUTOTRACK_SELFCHECK=1. */
-void tg_selfcheck_ranges(const TG_NodeList *nl, int lanes, int block)
+void tg_selfcheck_ranges(const TG_NodeList *nl, int block)
 {
     const int nspans = nl->count - 1;
     TG_Buf one_s, one_v, many_s, many_v;
@@ -1809,14 +2013,12 @@ void tg_selfcheck_ranges(const TG_NodeList *nl, int lanes, int block)
     memset(&one_s, 0, sizeof(one_s));   memset(&one_v, 0, sizeof(one_v));
     memset(&many_s, 0, sizeof(many_s)); memset(&many_v, 0, sizeof(many_v));
 
-    if (!tg_emit_span_range(nl, 0, nspans, lanes, block, &one_s, &one_v,
-                            &vc_one))
+    if (!tg_emit_span_range(nl, 0, nspans, block, &one_s, &one_v, &vc_one))
         ok = 0;
 
     for (s0 = 0; ok && s0 < nspans; s0 += chunk) {
         int n = (s0 + chunk <= nspans) ? chunk : (nspans - s0);
-        if (!tg_emit_span_range(nl, s0, n, lanes, block, &many_s, &many_v,
-                                &vc_many))
+        if (!tg_emit_span_range(nl, s0, n, block, &many_s, &many_v, &vc_many))
             ok = 0;
     }
 
@@ -1859,7 +2061,8 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
      * adjacency, which resolve_neighbor (td5_track.c:4013) detects by vertex
      * INDEX -- contact then fails at every seam and the car sinks through the
      * road (measured: wheel_mask=0 for 343/385 ticks, even dead flat). */
-    const int lanes   = nl->v[0].lanes;
+    /* [LANES] The lane count is per span now; each fork reads its own at F
+     * (uniform over the fork window by construction, checked below). */
     /* Reset per-call: a failed or branch-less build must not leave stale fork
      * records from a previous generation in the header. */
     s_fork_count = 0;
@@ -1889,8 +2092,7 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
     /* [S1] Whole track = one block-aligned range. The emitter below can write
      * any block-aligned range into caller buffers, which is what Phase 2
      * streaming needs to rewrite a region in place. */
-    if (!tg_emit_span_range(nl, 0, nspans, lanes, block, &spans, &verts,
-                            &vtx_count))
+    if (!tg_emit_span_range(nl, 0, nspans, block, &spans, &verts, &vtx_count))
         ok = 0;
 
     /* ---- BRANCHES (opt-in): multiple forks, each a split-and-rejoin ---- */
@@ -1899,8 +2101,6 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
         s_fork_count = 0;
 
         if (ok && tg_branches_enabled()) {
-            const int main_half = lanes / 2;
-            const int br_lanes  = lanes - main_half;
             /* Varied corridor lengths give the shipped topologies: a short
              * chicane, a canonical split, a long alternate route. The first
              * entry USED to be 8 spans, which is the "very small branch" that
@@ -1916,8 +2116,23 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                 int L = kl < min_len ? min_len : kl;
                 int F = pos;
                 int R = F + 1 + L;
+                const int lanes = nl->v[F].lanes;
+                const int main_half = lanes / 2;
+                const int br_lanes  = lanes - main_half;
+                int q, uniform = 1;
                 if (main_half < 1 || br_lanes < 1) break;
                 if (R + 24 >= ring) break;           /* must fit on the ring */
+                /* [LANES] fork arithmetic (lanes(F) = lanes(F+1) + lanes(B0),
+                 * all 147 shipped forks obey it) needs ONE lane count across
+                 * the widened approach, the split and the rejoin. */
+                for (q = F - TD5_TG_BRANCH_WIDEN - 2; q <= R + 2; q++)
+                    if (q >= 0 && q < nl->count && nl->v[q].lanes != lanes) uniform = 0;
+                if (!uniform) {
+                    TD5_LOG_W(LOG_TAG, "trackgen: fork %u at F=%d skipped: lane "
+                              "count changes inside its window", i, F);
+                    pos = R + 150;
+                    continue;
+                }
                 /* [R6 item 10] Verify the walk-time straightening (tg_span_in_fork_run
                  * clamp) actually gentled this fork's span range: a fork left on a
                  * sharp bend folds its shifted/bowed carriageways and lifts a car
@@ -1939,6 +2154,7 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                 /* Separation is keyed to the fork's ORDINAL, not its span, so it
                  * is stable across a regen and varied across the track. */
                 s_forks[s_fork_count].sep = tg_fork_sep_for(s_fork_count);
+                s_forks[s_fork_count].lanes = lanes;
                 s_fork_count++;
                 off += 1 + L;
                 pos = R + 150;                        /* gap before the next fork */
@@ -1950,6 +2166,9 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                 const int F = s_forks[i].F, L = s_forks[i].len;
                 const int b0 = s_forks[i].cbase, R = s_forks[i].R;
                 const int sentinel_end = b0 + L - 1;
+                const int lanes = s_forks[i].lanes;          /* [LANES] */
+                const int main_half = lanes / 2;
+                const int br_lanes  = lanes - main_half;
                 int k;
 
                 /* 1. FORK span F: full width, type 8, link_next -> corridor. */
@@ -2400,7 +2619,7 @@ static int tg_side_terrain_one(TG_SideJob *j, int si)
      * and a tunnel span takes the tunnel branch instead. */
     if (si >= j->ring || tg_span_in_tunnel(si)) goto done;
 
-    hook.nl = j->nl; hook.si = si; hook.nspans = j->nspans; hook.lanes = j->lanes;
+    hook.nl = j->nl; hook.si = si; hook.nspans = j->nspans; hook.lanes = j->nl->v[si].lanes;   /* [LANES] */
     hook.b = &k_biomes[tg_biome_for_span(si)];
     hook.blk = &r->buf; hook.moff = scratch; hook.nmesh = &nm;
     hook.maxmesh = TG_SIDE_MAX_MESH;
@@ -2689,6 +2908,10 @@ static int tg_scenery_entry(int e)
     const int nentries = s_scn.nentries, rails = s_scn.rails;
     const int branch_active = s_scn.branch_active;
     TG_Buf *blocks = s_scn.blocks;
+    /* [LANES] the track-wide trio is kept for the alias prologue's shape; the
+     * body now reads per-span (nl->v[si].lanes) and per-fork (s_forks[fi])
+     * counts, so these three are only referenced here. */
+    (void)lanes; (void)main_half; (void)br_lanes;
     int nrails = s_scn.nrails, nbudget = s_scn.nbudget;
     int ok = 1;
     (void)nentries;
@@ -2722,6 +2945,9 @@ static int tg_scenery_entry(int e)
                 if (fi >= 0) {
                     const int mb = s_forks[fi].F + 1 + ck;  /* base main node */
                     const int L  = s_forks[fi].len;
+                    const int main_half = s_forks[fi].lanes / 2;             /* [LANES] this fork's */
+                    const int br_lanes  = s_forks[fi].lanes - main_half;
+                    (void)main_half; (void)br_lanes;
                     /* Same lane/width helpers the STRIP rows used, so the
                      * surface you see is the surface you collide with even where
                      * the corridor gains a lane. */
@@ -2833,6 +3059,9 @@ static int tg_scenery_entry(int e)
                 int fi = branch_active ? tg_fork_of_main(si) : -1;
                 if (fi >= 0) {
                     const int L = s_forks[fi].len;
+                    const int main_half = s_forks[fi].lanes / 2;             /* [LANES] this fork's */
+                    const int br_lanes  = s_forks[fi].lanes - main_half;
+                    (void)main_half; (void)br_lanes;
                     const int j = si - s_forks[fi].F - 1;   /* corridor step */
                     if (!tg_emit_road_quad(nl, si, main_half,
                                            TD5_TG_MAIN_SHIFT(nl->v[si].width),
@@ -2900,7 +3129,7 @@ static int tg_scenery_entry(int e)
                                                         &meshes, moff, &nmesh))
                                 ok = 0;
                     }
-                } else if (!TG_SUB(TG_SUB_ROAD, tg_emit_road_mesh(nl, si, lanes, &meshes))) {
+                } else if (!TG_SUB(TG_SUB_ROAD, tg_emit_road_mesh(nl, si, nl->v[si].lanes, &meshes))) {
                     ok = 0;
                 }
             }
@@ -2945,7 +3174,7 @@ static int tg_scenery_entry(int e)
                  * per span so *nmesh always tracks the live counter. */
                 TG_FBHook hook;
                 hook.nl = nl; hook.si = si; hook.nspans = nspans;
-                hook.lanes = lanes;
+                hook.lanes = nl->v[si].lanes;   /* [LANES] per span */
                 hook.b = &k_biomes[tg_biome_for_span(si)];
                 hook.blk = &meshes; hook.moff = moff; hook.nmesh = &nmesh;
                 hook.maxmesh = TG_MAX_MESHES_PER_ENTRY;
@@ -3618,7 +3847,7 @@ int td5_trackgen_regenerate_main_spans(unsigned int seed,
         memset(tally, 0, sizeof(tally));
         if (tg_build_centerline(&spec, &nl, tally)) {
             tg_apply_elevation(&spec, &nl);
-            if (tg_emit_span_range(&nl, 0, nl.count - 1, spec.lanes, block,
+            if (tg_emit_span_range(&nl, 0, nl.count - 1, block,
                                    &spans, &verts, &vtx_count)) {
                 *out_bytes = spans.b;          /* hand the buffer over */
                 *out_span_count = (int)(spans.len / 24);
