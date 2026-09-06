@@ -174,19 +174,104 @@ int tg_r8_longbranch_enabled(void)
  * consulted by the centreline walk BEFORE s_forks exists) and the placement
  * loop in tg_emit_strip read it, and they MUST agree -- a mismatch straightens
  * the wrong span range. One function so they cannot drift. */
-int tg_branch_len_for(int index)
+/* [FORK KINDS] The plan ladder. Six shapes in census proportions (the
+ * symmetric ones are the majority), rotated by the seed so two tracks do not
+ * open with the same fork. The seed is captured by tg_srand, which every build
+ * path calls before the centreline walk, so the rotation is known before
+ * s_forks exists. TD5RE_AUTOTRACK_BRANCH_COUNT (default 6, 0..8) sets how
+ * many of the ladder are placed; TD5RE_AUTOTRACK_BRANCH_KINDS=0 pins the
+ * pre-kinds ladder (3 symmetric forks of 24/40/120 spans) for an A/B. */
+unsigned int s_fork_plan_seed;
+
+static const struct { int kind; int len; double sep; } k_fork_plan[6] = {
+    { TG_FORK_AVENUE, 40,  0.20 },
+    { TG_FORK_ISLAND,  6,  0.16 },
+    { TG_FORK_WIDE,  120,  1.00 },
+    { TG_FORK_SLIP,   32,  0.55 },
+    { TG_FORK_MAJOR,  60,  0.45 },
+    { TG_FORK_ISLAND,  5,  0.16 },
+};
+
+const char *tg_fork_kind_name(int kind)
 {
-    static const int k_lens[3] = { 8, 40, 120 };
-    int L;
-    if (index < 0 || index >= 3) return 0;
-    L = k_lens[index];
-    if (index == 2 && tg_r8_longbranch_enabled())
-        L = td5_env_int("TD5RE_R8_SHAPE_LONGBRANCH_LEN",
-                        TD5_TG_R8_LONG_LEN, 24, 400);
-    return L;
+    static const char *const k_names[TG_FORK_KIND_COUNT] =
+        { "AVENUE", "ISLAND", "WIDE", "SLIP", "MAJOR" };
+    return (kind >= 0 && kind < TG_FORK_KIND_COUNT) ? k_names[kind] : "?";
 }
 
-int tg_branch_count_max(void) { return 3; }
+static int tg_fork_kinds_enabled(void)
+{
+    return td5_env_flag_on("TD5RE_AUTOTRACK_BRANCH_KINDS");
+}
+
+int tg_fork_count_planned(void)
+{
+    if (!tg_fork_kinds_enabled()) return 3;
+    return td5_env_int("TD5RE_AUTOTRACK_BRANCH_COUNT", 6, 0, TD5_TG_BRANCH_MAX);
+}
+
+void tg_fork_plan(int index, int *kind, int *len, double *sep)
+{
+    if (!tg_fork_kinds_enabled()) {
+        /* pre-kinds ladder: three symmetric forks, the old sep ladder */
+        static const int k_lens[3] = { 8, 40, 120 };
+        int L = (index >= 0 && index < 3) ? k_lens[index] : 0;
+        if (index == 2 && tg_r8_longbranch_enabled())
+            L = td5_env_int("TD5RE_R8_SHAPE_LONGBRANCH_LEN",
+                            TD5_TG_R8_LONG_LEN, 24, 400);
+        if (kind) *kind = TG_FORK_WIDE;
+        if (len)  *len  = L;
+        if (sep)  *sep  = tg_fork_sep_for(index);
+        return;
+    }
+    {
+        const int n = (int)(sizeof(k_fork_plan) / sizeof(k_fork_plan[0]));
+        const int rot = (int)((s_fork_plan_seed * 2654435761u) >> 29);   /* 0..7 */
+        const int e = ((index < 0 ? 0 : index) + rot) % n;
+        int L = k_fork_plan[e].len;
+        if (k_fork_plan[e].kind == TG_FORK_WIDE && tg_r8_longbranch_enabled())
+            L = td5_env_int("TD5RE_R8_SHAPE_LONGBRANCH_LEN",
+                            TD5_TG_R8_LONG_LEN, 24, 400);
+        if (kind) *kind = k_fork_plan[e].kind;
+        if (len)  *len  = L;
+        if (sep)  *sep  = k_fork_plan[e].sep;
+    }
+}
+
+/* Corridor length after the taper floor. Only the shapes that BOW need the
+ * TD5_TG_BRANCH_MIN_LEN floor (it is what lets the bow taper within the
+ * lateral-rate limit); an island barely bows (sep 0.16 over a handful of
+ * spans keeps the derived bow to a few hundred units), so it keeps its length. */
+static int tg_fork_len_floored(int kind, int L)
+{
+    const int min_len = tg_branch_min_len();
+    if (kind == TG_FORK_ISLAND) return (L < 3) ? 3 : L;
+    return L < min_len ? min_len : L;
+}
+
+/* How the lanes split at a fork of `kind` on a road of `lanes` lanes. Every
+ * shipped fork obeys lanes(F) = lanes(F+1) + lanes(B0); these do too. */
+void tg_fork_split_lanes(int kind, int lanes, int *main_lanes, int *br_lanes)
+{
+    int m, bl;
+    switch (kind) {
+    case TG_FORK_SLIP:   bl = (lanes >= 5) ? 2 : 1; m = lanes - bl; break;
+    case TG_FORK_MAJOR:  m  = (lanes >= 4) ? 2 : 1; bl = lanes - m; break;
+    default:             m  = lanes / 2;            bl = lanes - m; break;
+    }
+    if (m < 1)  { m = 1;  bl = lanes - 1; }
+    if (bl < 1) { bl = 1; m  = lanes - 1; }
+    if (main_lanes) *main_lanes = m;
+    if (br_lanes)   *br_lanes   = bl;
+}
+
+int tg_branch_len_for(int index)
+{
+    int kind, L;
+    tg_fork_plan(index, &kind, &L, NULL);
+    return L;
+}
+int tg_branch_count_max(void) { return tg_fork_count_planned(); }
 
 /* Is `len` a LONG corridor (i.e. one entitled to the raised bow ceiling)? */
 int tg_branch_is_long(int len)
@@ -204,13 +289,14 @@ int tg_branch_is_long(int len)
  * gentle road, no harm. Mirrors the bridge-run gate exactly. */
 int tg_span_in_fork_run(int si)
 {
-    int min_len, pos, i;
+    int pos, i;
     if (!tg_branches_enabled()) return 0;
-    min_len = tg_branch_min_len();
     pos = TD5_TG_GRID_SPAN + 120;
     for (i = 0; i < tg_branch_count_max(); i++) {
-        int kl = tg_branch_len_for(i);
-        int L = kl < min_len ? min_len : kl;
+        int kind, kl;
+        tg_fork_plan(i, &kind, &kl, NULL);
+        {
+        int L = tg_fork_len_floored(kind, kl);
         int F = pos;
         int R = F + 1 + L;
         /* +/-2 spans of margin past the widened approach and the rejoin so the
@@ -218,8 +304,82 @@ int tg_span_in_fork_run(int si)
          * bend right where the carriageways start to split / merge. */
         if (si >= F - TD5_TG_BRANCH_WIDEN - 2 && si <= R + 2) return 1;
         pos = R + 150;
+        }
     }
     return 0;
+}
+
+static double tg_branch_gain_f(int k, int len, int base_lanes);
+static int tg_branch_lane_gain(int k, int len, int base_lanes);
+
+/* [FORK KINDS] Lanes a fork of `kind` needs on the road at F to read as its
+ * kind: a slip road or a major branch needs 5 (so the narrow side is 2 and the
+ * wide side 3+), everything else 4 (2+2). */
+int tg_fork_kind_min_lanes(int kind)
+{
+    return (kind == TG_FORK_SLIP || kind == TG_FORK_MAJOR) ? 5 : 4;
+}
+
+/* Does a fork window (widened approach through rejoin) START within `within`
+ * spans after span si? Returns the planned kind, or -1. Stateless like
+ * tg_span_in_fork_run, so the centreline walk can widen the road ahead of a
+ * fork instead of arriving at it with too few lanes to split. */
+int tg_fork_window_ahead(int si, int within)
+{
+    int pos, i;
+    if (!tg_branches_enabled()) return -1;
+    pos = TD5_TG_GRID_SPAN + 120;
+    for (i = 0; i < tg_branch_count_max(); i++) {
+        int kind, kl;
+        tg_fork_plan(i, &kind, &kl, NULL);
+        {
+        const int L = tg_fork_len_floored(kind, kl);
+        const int F = pos, R = F + 1 + L;
+        const int w0 = F - TD5_TG_BRANCH_WIDEN - 2;
+        if (si <= w0 && w0 - si <= within) return kind;
+        pos = R + 150;
+        }
+    }
+    return -1;
+}
+
+/* [FORK KINDS] Fork-aware carriageway geometry. The symmetric case (fm = fb =
+ * 0.5) reproduces the pre-kinds numbers exactly: main at +w/4 with half the
+ * width, branch at -w/4 minus the bow. An asymmetric split keeps both
+ * carriageways INSIDE the road's own footprint at the mouth (main centre at
+ * +w(1-fm)/2, branch centre at -w(1-fb)/2, so main's left edge and branch's
+ * right edge are the road's edges) and the bow carries the branch out from
+ * there. Lane GAIN is a WIDE-only trait: an avenue or island must keep its
+ * fixed half (the median is slim), and a slip road or a major branch is
+ * defined by its lane split, so widening it would undo the shape. */
+static double tg_fork_fm(int fi) { return (fi >= 0 && fi < s_fork_count) ? s_forks[fi].fm : 0.5; }
+static double tg_fork_fb(int fi) { return (fi >= 0 && fi < s_fork_count) ? s_forks[fi].fb : 0.5; }
+static int    tg_fork_gains(int fi)
+{
+    return fi >= 0 && fi < s_fork_count && s_forks[fi].kind == TG_FORK_WIDE
+        && s_forks[fi].sep > TD5_TG_AVENUE_SEP_MAX;
+}
+double tg_fork_main_shift(int fi, double w)  { return w * (1.0 - tg_fork_fm(fi)) * 0.5; }
+double tg_fork_main_wscale(int fi)           { return tg_fork_fm(fi); }
+double tg_fork_br_shift(int fi, int k, double w)
+{
+    const int    len = (fi >= 0 && fi < s_fork_count) ? s_forks[fi].len : 1;
+    const double sep = (fi >= 0 && fi < s_fork_count) ? s_forks[fi].sep : 1.0;
+    const double f   = (len > 0) ? (double)k / (double)len : 0.0;
+    const double bow = sin(f * TD5_TG_PI);
+    return -w * (1.0 - tg_fork_fb(fi)) * 0.5 - w * tg_branch_bow(len, w) * sep * bow;
+}
+double tg_fork_br_wscale(int fi, int k)
+{
+    const double base = tg_fork_fb(fi);
+    if (!tg_fork_gains(fi)) return base;
+    return base + 0.25 * tg_branch_gain_f(k, s_forks[fi].len, s_forks[fi].br_lanes);
+}
+int tg_fork_br_lanes_at(int fi, int k)
+{
+    const int base = (fi >= 0 && fi < s_fork_count) ? s_forks[fi].br_lanes : 0;
+    if (!tg_fork_gains(fi)) return base;
+    return base + tg_branch_lane_gain(k, s_forks[fi].len, base);
 }
 
 /* Bow amplitude (x width) usable over a corridor of `len` spans without the
@@ -277,6 +437,8 @@ double tg_fork_sep_for(int fork_index)
  * two separate roads and a central island would just float in open ground. */
 int tg_fork_is_avenue(int fork_index)
 {
+    if (fork_index >= 0 && fork_index < s_fork_count)
+        return s_forks[fork_index].sep <= TD5_TG_AVENUE_SEP_MAX;
     return tg_fork_sep_for(fork_index) <= TD5_TG_AVENUE_SEP_MAX;
 }
 
@@ -343,7 +505,7 @@ static double tg_branch_gain_f(int k, int len, int base_lanes)
     /* Keep the widened corridor inside the lane range the rail LUTs, edge masks
      * and suspension paths are exercised in (see td5_trackgen_apply_config's
      * 2..4 clamp): never take the branch past 4 lanes. */
-    if (base_lanes + gain_max > 4) gain_max = 4 - base_lanes;
+    if (base_lanes + gain_max > 8) gain_max = 8 - base_lanes;   /* [LANES] was 4 */
     if (gain_max <= 0) return 0.0;
     /* Half sine over the INTERIOR of the corridor, so the widening grows in and
      * out over several spans instead of stepping at k=1. */
@@ -423,8 +585,6 @@ double tg_carriageway_reach(const TG_NodeList *nl, int si, double side)
 
     for (i = 0; i < s_fork_count; i++) {
         const int F = s_forks[i].F, L = s_forks[i].len;
-        const int lanes = nl->v[si].lanes;
-        const int br    = lanes - lanes / 2;   /* branch half, as tg_emit_strip */
         int k, e;
         /* One span of slack past each mouth: at the fork and the rejoin the
          * corridor is still lined up with the road, but a caller asking about
@@ -444,8 +604,8 @@ double tg_carriageway_reach(const TG_NodeList *nl, int si, double side)
              * further half carriageway-width right of that. Uses the fork's OWN
              * separation (item 10) so a tight avenue reports a nearer reach than
              * a wide split and scenery clears the branch at its ACTUAL width. */
-            const double out = -tg_branch_shift_s(kk, L, w, s_forks[i].sep)
-                             + w * tg_branch_wscale_s(kk, L, br, s_forks[i].sep) * 0.5;
+            const double out = -tg_fork_br_shift(i, kk, w)
+                             + w * tg_fork_br_wscale(i, kk) * 0.5;
             if (out > reach) reach = out;
         }
     }
@@ -640,7 +800,7 @@ int tg_r14_pave_face(void)
  * pavement at the corridor spans (>= ring) -- that is what proves, without a
  * frame, that scenery now reaches the branch. */
 int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
-                                    double sep, int br_lanes, const TG_Biome *b,
+                                    int fi, const TG_Biome *b,
                                     TG_Buf *blk, size_t *moff, int *nmesh,
                                     int acct_si)
 {
@@ -649,10 +809,11 @@ int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
     const double sw = tg_city_sidewalk_w(b);
     const double kh = tg_city_kerb_h(b);
     /* Branch centre and half width at each end, from the shared helpers. */
-    const double sh0 = tg_branch_shift_s(k,     L, a->width, sep);
-    const double sh1 = tg_branch_shift_s(k + 1, L, c->width, sep);
-    const double h0  = a->width * tg_branch_wscale_s(k,     L, br_lanes, sep) * 0.5;
-    const double h1  = c->width * tg_branch_wscale_s(k + 1, L, br_lanes, sep) * 0.5;
+    const double sh0 = tg_fork_br_shift(fi, k,     a->width);
+    const double sh1 = tg_fork_br_shift(fi, k + 1, c->width);
+    const double h0  = a->width * tg_fork_br_wscale(fi, k)     * 0.5;
+    const double h1  = c->width * tg_fork_br_wscale(fi, k + 1) * 0.5;
+    (void)L;
     const double e0  = sh0 - h0;                 /* outer (right) edge, near */
     const double e1  = sh1 - h1;                 /* outer (right) edge, far  */
     const double u_w = sw / (double)TD5_TG_SPAN_LENGTH;
@@ -724,16 +885,17 @@ int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
  * the shipped sidewalk page. Frame and outer-edge derivation identical to
  * tg_emit_branch_sidewalk. Default ON; TD5RE_R5_BRANCH_VERGE=0 for an A/B. */
 int tg_emit_branch_verge(const TG_NodeList *nl, int mb, int k, int L,
-                                double sep, int br_lanes, double bw,
+                                int fi, double bw,
                                 TG_Buf *blk, size_t *moff, int *nmesh,
                                 int acct_si)
 {
     const TG_Node *a = &nl->v[mb];
     const TG_Node *c = &nl->v[mb + 1];
-    const double sh0 = tg_branch_shift_s(k,     L, a->width, sep);
-    const double sh1 = tg_branch_shift_s(k + 1, L, c->width, sep);
-    const double h0  = a->width * tg_branch_wscale_s(k,     L, br_lanes, sep) * 0.5;
-    const double h1  = c->width * tg_branch_wscale_s(k + 1, L, br_lanes, sep) * 0.5;
+    const double sh0 = tg_fork_br_shift(fi, k,     a->width);
+    const double sh1 = tg_fork_br_shift(fi, k + 1, c->width);
+    const double h0  = a->width * tg_fork_br_wscale(fi, k)     * 0.5;
+    const double h1  = c->width * tg_fork_br_wscale(fi, k + 1) * 0.5;
+    (void)L;
     const double e0  = sh0 - h0;                 /* outer (right) edge, near */
     const double e1  = sh1 - h1;                 /* outer (right) edge, far  */
     const double lift = TD5_TG_VERGE_LIFT;

@@ -2178,15 +2178,14 @@ int tg_r12_median_fill(double gw0, double gw1)
 static void tg_r12_median_gore_w(const TG_NodeList *nl, int si, int fi,
                                  int br_lanes, double *gw0, double *gw1)
 {
-    const int    L   = s_forks[fi].len;
+    (void)br_lanes;   /* [FORK KINDS] the fork's own split is read via fi */
     const int    j   = si - s_forks[fi].F - 1;
-    const double sep = s_forks[fi].sep;
-    const double sh0 = tg_branch_shift_s(j,     L, nl->v[si].width,     sep);
-    const double sh1 = tg_branch_shift_s(j + 1, L, nl->v[si + 1].width, sep);
+    const double sh0 = tg_fork_br_shift(fi, j,     nl->v[si].width);
+    const double sh1 = tg_fork_br_shift(fi, j + 1, nl->v[si + 1].width);
     const double h0  = nl->v[si].width
-                     * tg_branch_wscale_s(j,     L, br_lanes, sep) * 0.5;
+                     * tg_fork_br_wscale(fi, j) * 0.5;
     const double h1  = nl->v[si + 1].width
-                     * tg_branch_wscale_s(j + 1, L, br_lanes, sep) * 0.5;
+                     * tg_fork_br_wscale(fi, j + 1) * 0.5;
     *gw0 = -(sh0 + h0);
     *gw1 = -(sh1 + h1);
 }

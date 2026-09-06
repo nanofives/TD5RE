@@ -57,20 +57,33 @@ for i in range(ring - 1):
         ok_b = (bb - ba) == exp_db
         # shared row point count = min lanes + 1 : near row size of the wider span
         # near row size for b = b.rvi - b.lvi only valid if b's far row follows; use:
+        # Row sizes. At an origin-block boundary the shared row is re-emitted
+        # under the new origin (a.rvi != b.lvi), which is legal and what shipped
+        # tracks do, so only check sizes when the row really is shared.
         rows_ok = True
-        if lb > la:
-            rows_ok = (b[5] - b[4]) == min(la, lb) + 1
-        else:
-            rows_ok = (b[4] - a[4]) == la + 1 if a[4] < b[4] else True
+        if a[5] == b[4]:
+            if lb > la:
+                rows_ok = (b[5] - b[4]) == min(la, lb) + 1
+            else:
+                rows_ok = (b[4] - a[4]) == la + 1
         changes.append((i, la, lb, got, ba, bb, ok and ok_b and rows_ok))
         if not (ok and ok_b and rows_ok):
             bad += 1
 print('lane-change seams on ring:', len(changes), 'violations:', bad)
 for c in changes[:40]:
     print('  seam %4d: %d->%d type %d base %d->%d %s' % (c[0], c[1], c[2], c[3], c[4], c[5], 'ok' if c[6] else 'BAD'))
-# fork sum rule
+# fork sum rule + shape (same classes as re/tools/tg_track_census.py)
 for lo, hi, base in jumps:
     F = base - 1
-    print('fork F=%d lanes %d -> %d + %d  %s' % (F, sp[F][3] & 0xF, sp[F + 1][3] & 0xF, sp[lo][3] & 0xF,
-          'sum OK' if (sp[F][3] & 0xF) == (sp[F + 1][3] & 0xF) + (sp[lo][3] & 0xF) else 'SUM MISMATCH'))
+    t9 = [i for i in range(lo, hi + 1) if sp[i][0] == 9]; t10 = [i for i in range(lo, hi + 1) if sp[i][0] == 10]
+    R = sp[t10[0]][6] if t10 else None
+    L = (t10[0] - t9[0] + 1) if (t9 and t10) else hi - lo + 1
+    D = (R - F) % ring if R is not None else None
+    kind = 'dangling' if D is None else ('SHORTCUT' if L < 0.85 * D else 'DETOUR' if L > 1.15 * D else 'PARALLEL')
+    a, b, c = sp[F][3] & 0xF, sp[F + 1][3] & 0xF, sp[lo][3] & 0xF
+    shape = 'symmetric' if b == c else ('slip-road' if c < b else 'main-narrower')
+    ok = a == b + c
+    if not ok: bad += 1
+    print('fork F=%d L=%d D=%s rejoin=%s(type %s) split %d->%d+%d %s %s %s' % (
+        F, L, D, R, sp[R][0] if R is not None else '?', a, b, c, shape, kind, 'sum OK' if ok else 'SUM MISMATCH'))
 sys.exit(1 if bad else 0)

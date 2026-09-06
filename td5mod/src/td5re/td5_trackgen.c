@@ -375,6 +375,7 @@ void tg_zone_report(uint64_t total_us)
 
 void tg_srand(unsigned int seed)
 {
+    s_fork_plan_seed = seed;   /* [FORK KINDS] plan rotation, known before the walk */
     s_rng = seed ? seed : 0x9E3779B9u;
 }
 
@@ -1140,7 +1141,17 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
         if (lane_vary) {
             const int seam = nl->count;      /* index of the seam node */
             int want = cur_lanes, side = 0;
-            if (sec == TD5_TG_DUAL_LANE) {
+            const int ahead = tg_fork_window_ahead(seam, 90);
+            int pre_fork = 0;
+            if (ahead >= 0 && cur_lanes < tg_fork_kind_min_lanes(ahead)) {
+                pre_fork = 1;
+                /* [FORK KINDS] a fork window opens within the next ~2 sections
+                 * and the road is too narrow for the planned split: widen
+                 * toward what the kind needs (at most 2 lanes per section). */
+                const int need = tg_fork_kind_min_lanes(ahead);
+                want = (need - cur_lanes >= 2) ? cur_lanes + 2 : need;
+                side = (want - cur_lanes == 2) ? 2 : ((tg_rand() & 1) ? 1 : -1);
+            } else if (sec == TD5_TG_DUAL_LANE) {
                 want = cur_lanes + 2; side = 2;
             } else if (tg_range(0, 99) < lane_pct) {
                 /* Random walk, biased back toward the base count so a long
@@ -1151,6 +1162,9 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
                 const int both = (tg_range(0, 99) < 30);
                 want = cur_lanes + (up ? 1 : -1) * (both ? 2 : 1);
                 side = both ? 2 : ((tg_rand() & 1) ? 1 : -1);
+                /* [FORK KINDS] hold the count the upcoming fork needs: the
+                 * random walk may not narrow the road below it on the way in. */
+                if (ahead >= 0 && want < tg_fork_kind_min_lanes(ahead)) want = cur_lanes;
             }
             if (want < lanes_min) want = lanes_min;
             if (want > lanes_max) want = lanes_max;
@@ -1191,6 +1205,11 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
                     }
                 } else {
                     lane_skipped++;
+                    if (pre_fork)
+                        TD5_LOG_I(LOG_TAG, "trackgen: [LANES] pre-fork widening to %d "
+                                  "at seam %d blocked (grid/fork/bridge/tunnel/finish "
+                                  "window); fork kind %s ahead", want, seam,
+                                  tg_fork_kind_name(ahead));
                 }
             }
             /* [LANES] the width follows the lane count; the DUAL taper of the
@@ -2112,15 +2131,27 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
 
             for (i = 0; i < (unsigned int)tg_branch_count_max() &&
                         s_fork_count < TD5_TG_BRANCH_MAX; i++) {
-                int kl = tg_branch_len_for((int)i);
-                int L = kl < min_len ? min_len : kl;
+                int kind, kl; double ksep;
+                tg_fork_plan((int)i, &kind, &kl, &ksep);
+                /* [FORK KINDS] same floor rule as tg_span_in_fork_run */
+                int L = (kind == TG_FORK_ISLAND) ? (kl < 3 ? 3 : kl)
+                                                 : (kl < min_len ? min_len : kl);
                 int F = pos;
                 int R = F + 1 + L;
                 const int lanes = nl->v[F].lanes;
-                const int main_half = lanes / 2;
-                const int br_lanes  = lanes - main_half;
+                int main_half, br_lanes;
                 int q, uniform = 1;
+                tg_fork_split_lanes(kind, lanes, &main_half, &br_lanes);
                 if (main_half < 1 || br_lanes < 1) break;
+                if (lanes < tg_fork_kind_min_lanes(kind)) {
+                    /* [FORK KINDS] backstop: the walk widens the road ahead of a
+                     * fork window, but a rejected section can leave it narrow. */
+                    TD5_LOG_W(LOG_TAG, "trackgen: fork %u %s at F=%d skipped: %d "
+                              "lanes, needs %d", i, tg_fork_kind_name(kind), F,
+                              lanes, tg_fork_kind_min_lanes(kind));
+                    pos = R + 150;
+                    continue;
+                }
                 if (R + 24 >= ring) break;           /* must fit on the ring */
                 /* [LANES] fork arithmetic (lanes(F) = lanes(F+1) + lanes(B0),
                  * all 147 shipped forks obey it) needs ONE lane count across
@@ -2137,24 +2168,26 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                  * clamp) actually gentled this fork's span range: a fork left on a
                  * sharp bend folds its shifted/bowed carriageways and lifts a car
                  * (the "span 570" report). Should read <= TD5_TG_FORK_MAX_TURN. */
-                TD5_LOG_I(LOG_TAG, "trackgen: fork %u F=%d L=%d R=%d region "
-                          "maxcurve=%.4f (cap %.3f) long=%d sep=%.2f bow=%.2f "
-                          "maxsep=%.0f", i, F, L, R,
+                TD5_LOG_I(LOG_TAG, "trackgen: fork %u %s F=%d L=%d R=%d split "
+                          "%d->%d+%d region maxcurve=%.4f (cap %.3f) long=%d "
+                          "sep=%.2f bow=%.2f", i, tg_fork_kind_name(kind), F, L, R,
+                          lanes, main_half, br_lanes,
                           tg_fork_region_max_curve(nl, F, L, ring),
-                          TD5_TG_FORK_MAX_TURN, tg_branch_is_long(L),
-                          tg_fork_sep_for(s_fork_count),
-                          tg_branch_bow(L, nl->v[F].width),
-                          -tg_branch_shift_s(L / 2, L, nl->v[F].width,
-                                             tg_fork_sep_for(s_fork_count))
-                          + TD5_TG_MAIN_SHIFT(nl->v[F].width));
+                          TD5_TG_FORK_MAX_TURN, tg_branch_is_long(L), ksep,
+                          tg_branch_bow(L, nl->v[F].width));
                 s_forks[s_fork_count].F = F;
                 s_forks[s_fork_count].len = L;
                 s_forks[s_fork_count].cbase = off + 1;  /* pad@off, corridor off+1.. */
                 s_forks[s_fork_count].R = R;
-                /* Separation is keyed to the fork's ORDINAL, not its span, so it
+                /* [FORK KINDS] shape comes from the plan (ordinal + seed), so it
                  * is stable across a regen and varied across the track. */
-                s_forks[s_fork_count].sep = tg_fork_sep_for(s_fork_count);
+                s_forks[s_fork_count].sep = ksep;
                 s_forks[s_fork_count].lanes = lanes;
+                s_forks[s_fork_count].kind = kind;
+                s_forks[s_fork_count].main_lanes = main_half;
+                s_forks[s_fork_count].br_lanes = br_lanes;
+                s_forks[s_fork_count].fm = (double)main_half / (double)lanes;
+                s_forks[s_fork_count].fb = (double)br_lanes / (double)lanes;
                 s_fork_count++;
                 off += 1 + L;
                 pos = R + 150;                        /* gap before the next fork */
@@ -2167,8 +2200,9 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                 const int b0 = s_forks[i].cbase, R = s_forks[i].R;
                 const int sentinel_end = b0 + L - 1;
                 const int lanes = s_forks[i].lanes;          /* [LANES] */
-                const int main_half = lanes / 2;
-                const int br_lanes  = lanes - main_half;
+                const int main_half = s_forks[i].main_lanes;  /* [FORK KINDS] */
+                const int br_lanes  = s_forks[i].br_lanes;
+                const int fi = (int)i;
                 int k;
 
                 /* 1. FORK span F: full width, type 8, link_next -> corridor. */
@@ -2187,10 +2221,12 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                     const TG_Node *a = &nl->v[si], *b = &nl->v[si + 1];
                     int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
                     int lvi = tg_append_row(&verts, &vtx_count, a, main_half,
-                                            a->width * 0.5, TD5_TG_MAIN_SHIFT(a->width),
+                                            a->width * tg_fork_main_wscale(fi),
+                                            tg_fork_main_shift(fi, a->width),
                                             ox, oy, oz);
                     int rvi = tg_append_row(&verts, &vtx_count, b, main_half,
-                                            b->width * 0.5, TD5_TG_MAIN_SHIFT(b->width),
+                                            b->width * tg_fork_main_wscale(fi),
+                                            tg_fork_main_shift(fi, b->width),
                                             ox, oy, oz);
                     tg_patch_span(&spans, si, 1, main_half, lvi, rvi, -1, -1,
                                   ox, oy, oz);
@@ -2200,9 +2236,9 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                     const TG_Node *a = &nl->v[F];
                     int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
                     int lvi = tg_append_row(&verts, &vtx_count, a, br_lanes,
-                                            a->width * 0.5, 0.0, ox, oy, oz);
+                                            a->width * s_forks[i].fb, 0.0, ox, oy, oz);
                     int rvi = tg_append_row(&verts, &vtx_count, a, br_lanes,
-                                            a->width * 0.5, 0.0, ox, oy, oz);
+                                            a->width * s_forks[i].fb, 0.0, ox, oy, oz);
                     tg_append_span(&spans, 1, tg_surface_attr(F), br_lanes,
                                    lvi, rvi, -1, -1, ox, oy, oz);
                 }
@@ -2212,11 +2248,10 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                  *    uses, so strip and mesh cannot drift apart. */
                 for (k = 0; k < L; k++) {
                     const TG_Node *a = &nl->v[F + 1 + k], *b = &nl->v[F + 2 + k];
-                    const double bsep = s_forks[i].sep;
-                    const int ln = br_lanes + tg_branch_lane_gain_s(k, L, br_lanes, bsep);
-                    const double wn = tg_branch_wscale_s(k, L, br_lanes, bsep);
-                    const int lnf = br_lanes + tg_branch_lane_gain_s(k + 1, L, br_lanes, bsep);
-                    const double wf = tg_branch_wscale_s(k + 1, L, br_lanes, bsep);
+                    const int ln = tg_fork_br_lanes_at(fi, k);
+                    const double wn = tg_fork_br_wscale(fi, k);
+                    const int lnf = tg_fork_br_lanes_at(fi, k + 1);
+                    const double wf = tg_fork_br_wscale(fi, k + 1);
                     int ox = tg_round(a->x), oy = tg_round(a->y), oz = tg_round(a->z);
                     /* A span's two rows must have the same POINT COUNT (they are
                      * the two edges of one quad grid), so a span where the gain
@@ -2234,11 +2269,11 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                     const int lanes_here = (lnf > ln) ? lnf : ln;
                     int lvi = tg_append_row(&verts, &vtx_count, a, lanes_here,
                                             a->width * wn,
-                                            tg_branch_shift_s(k, L, a->width, bsep),
+                                            tg_fork_br_shift(fi, k, a->width),
                                             ox, oy, oz);
                     int rvi = tg_append_row(&verts, &vtx_count, b, lanes_here,
                                             b->width * wf,
-                                            tg_branch_shift_s(k + 1, L, b->width, bsep),
+                                            tg_fork_br_shift(fi, k + 1, b->width),
                                             ox, oy, oz);
                     int type = (k == 0) ? 9 : ((k == L - 1) ? 10 : 1);
                     int nxt  = (k == L - 1) ? R : -1;
@@ -2258,10 +2293,11 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                         tg_patch_span(&spans, R, 11, lanes, lvi, rvi, -1,
                                       sentinel_end, ox, oy, oz);
                 }
-                TD5_LOG_I(LOG_TAG, "trackgen: fork %u F=%d len=%d corridor=%d..%d "
-                          "rejoin=%d sep=%.2f%s (ring=%d)", i, F, L, b0,
-                          sentinel_end, R, s_forks[i].sep,
-                          tg_fork_is_avenue((int)i) ? " AVENUE" : "", ring);
+                TD5_LOG_I(LOG_TAG, "trackgen: fork %u %s F=%d len=%d corridor=%d..%d "
+                          "rejoin=%d sep=%.2f split %d->%d+%d%s (ring=%d)", i,
+                          tg_fork_kind_name(s_forks[i].kind), F, L, b0,
+                          sentinel_end, R, s_forks[i].sep, lanes, main_half, br_lanes,
+                          tg_fork_is_avenue((int)i) ? " divider" : "", ring);
             }
         }
         s_ring_len = ring;
@@ -2945,15 +2981,16 @@ static int tg_scenery_entry(int e)
                 if (fi >= 0) {
                     const int mb = s_forks[fi].F + 1 + ck;  /* base main node */
                     const int L  = s_forks[fi].len;
-                    const int main_half = s_forks[fi].lanes / 2;             /* [LANES] this fork's */
-                    const int br_lanes  = s_forks[fi].lanes - main_half;
-                    (void)main_half; (void)br_lanes;
+                    const int main_half = s_forks[fi].main_lanes;   /* [FORK KINDS] */
+                    const int br_lanes  = s_forks[fi].br_lanes;
+                    (void)main_half;
                     /* Same lane/width helpers the STRIP rows used, so the
                      * surface you see is the surface you collide with even where
                      * the corridor gains a lane. */
                     const double sep = s_forks[fi].sep;
-                    const double wn = tg_branch_wscale_s(ck, L, br_lanes, sep);
-                    const double wf = tg_branch_wscale_s(ck + 1, L, br_lanes, sep);
+                    const double wn = tg_fork_br_wscale(fi, ck);
+                    const double wf = tg_fork_br_wscale(fi, ck + 1);
+                    (void)sep;
                     /* Items 7 & 11: u_scale is CONSTANT along the corridor -- the
                      * base half carriageway (wscale 0.5) carries br_lanes lanes,
                      * so u_scale = br_lanes/0.5 = 2*br_lanes gives U = br_lanes at
@@ -2961,15 +2998,17 @@ static int tg_scenery_entry(int e)
                      * widens. It does NOT depend on this span's lane count, so the
                      * paint neither stretches with the width taper nor jumps when
                      * a lane is gained (both were the old flat max(ln,lnf) U). */
-                    const double u_scale = 2.0 * (double)br_lanes;
+                    /* [FORK KINDS] the base carriageway (wscale fb) carries
+                     * br_lanes lanes, so U = br_lanes there: u_scale = br/fb. */
+                    const double u_scale = (double)br_lanes / s_forks[fi].fb;
                     moff[nmesh++] = meshes.len;
                     /* Widths near/far, NOT the wider of the two: the strip rows
                      * taper across the span (see the corridor loop in
                      * tg_emit_strip) and the mesh has to taper with them or the
                      * surface you see stops being the surface you collide with. */
                     if (!tg_emit_road_quad_taper(nl, mb, u_scale,
-                                           tg_branch_shift_s(ck, L, nl->v[mb].width, sep),
-                                           tg_branch_shift_s(ck + 1, L, nl->v[mb + 1].width, sep),
+                                           tg_fork_br_shift(fi, ck, nl->v[mb].width),
+                                           tg_fork_br_shift(fi, ck + 1, nl->v[mb + 1].width),
                                            wn, wf, tg_road_page(mb), &meshes))
                         ok = 0;
                     /* [R7 GUARD] the branch carriageway is drivable; it sits deep
@@ -3011,8 +3050,8 @@ static int tg_scenery_entry(int e)
                                       : tg_biome_for_span(mb)];
                         if (tg_city_sidewalk_w(cb) > 0.0 &&
                             td5_env_flag_on("TD5RE_AUTOTRACK_SIDEWALKS")) {
-                            if (!tg_emit_branch_sidewalk(nl, mb, ck, L, sep,
-                                                         br_lanes, cb, &meshes,
+                            if (!tg_emit_branch_sidewalk(nl, mb, ck, L, fi,
+                                                         cb, &meshes,
                                                          moff, &nmesh, si)) ok = 0;
                         /* [R5 item 10] Out-of-town corridor: no city pavement, so
                          * give the outer edge the SAME flat verge band the main
@@ -3022,8 +3061,8 @@ static int tg_scenery_entry(int e)
                          * branch". */
                         } else if (tg_verge_band_w(cb) > 0.0 &&
                                    td5_env_flag_on("TD5RE_R5_BRANCH_VERGE")) {
-                            if (!tg_emit_branch_verge(nl, mb, ck, L, sep,
-                                                      br_lanes, tg_verge_band_w(cb),
+                            if (!tg_emit_branch_verge(nl, mb, ck, L, fi,
+                                                      tg_verge_band_w(cb),
                                                       &meshes, moff, &nmesh, si)) ok = 0;
                         }
                         /* [R7 item 10] Dress the grass verge with the biome's own
@@ -3058,27 +3097,25 @@ static int tg_scenery_entry(int e)
             {
                 int fi = branch_active ? tg_fork_of_main(si) : -1;
                 if (fi >= 0) {
-                    const int L = s_forks[fi].len;
-                    const int main_half = s_forks[fi].lanes / 2;             /* [LANES] this fork's */
-                    const int br_lanes  = s_forks[fi].lanes - main_half;
-                    (void)main_half; (void)br_lanes;
+                    const int L = s_forks[fi].len;  (void)L;   /* [FORK KINDS] geometry now comes from the fork helpers */
+                    const int main_half = s_forks[fi].main_lanes;   /* [FORK KINDS] */
+                    const int br_lanes  = s_forks[fi].br_lanes;
                     const int j = si - s_forks[fi].F - 1;   /* corridor step */
                     if (!tg_emit_road_quad(nl, si, main_half,
-                                           TD5_TG_MAIN_SHIFT(nl->v[si].width),
-                                           TD5_TG_MAIN_SHIFT(nl->v[si + 1].width),
-                                           0.5, tg_road_page(si), &meshes))
+                                           tg_fork_main_shift(fi, nl->v[si].width),
+                                           tg_fork_main_shift(fi, nl->v[si + 1].width),
+                                           tg_fork_main_wscale(fi), tg_road_page(si), &meshes))
                         ok = 0;
                     if (ok) {
                         /* Branch half widths from the SAME helper the corridor
                          * strip rows and mesh use, so the gore always meets the
                          * branch's left edge however wide the taper has made it. */
-                        const double sep = s_forks[fi].sep;
-                        const double sh0 = tg_branch_shift_s(j, L, nl->v[si].width, sep);
-                        const double sh1 = tg_branch_shift_s(j + 1, L, nl->v[si + 1].width, sep);
+                        const double sh0 = tg_fork_br_shift(fi, j, nl->v[si].width);
+                        const double sh1 = tg_fork_br_shift(fi, j + 1, nl->v[si + 1].width);
                         const double gw0 = nl->v[si].width
-                            * tg_branch_wscale_s(j, L, br_lanes, sep) * 0.5;
+                            * tg_fork_br_wscale(fi, j) * 0.5;
                         const double gw1 = nl->v[si + 1].width
-                            * tg_branch_wscale_s(j + 1, L, br_lanes, sep) * 0.5;
+                            * tg_fork_br_wscale(fi, j + 1) * 0.5;
                         moff[nmesh++] = meshes.len;
                         /* [R7 item 12] Median surface stable per fork, not the
                          * blended per-span biome that dithered grass/tiles at a
@@ -3731,14 +3768,13 @@ static void tg_preview_emit_forks(const TG_NodeList *nl,
     for (i = 0; i < s_fork_count; i++) {
         const int F = s_forks[i].F;
         const int R = s_forks[i].R;
-        const int L = s_forks[i].len;
+        const int L = s_forks[i].len;  (void)L;   /* [FORK KINDS] geometry now comes from the fork helpers */
         int si;
         if (F < 0 || R >= nl->count) continue;
         for (si = F; si <= R; si++) {
             const TG_Node *n = &nl->v[si];
             const double lx = n->tz, lz = -n->tx;
-            const double sh = tg_branch_shift_s(si - F, L, n->width,
-                                                s_forks[i].sep);
+            const double sh = tg_fork_br_shift(i, si - F, n->width);
             TD5_TrackGenPoint p;
             p.x = (float)(n->x + lx * sh);
             p.z = (float)(n->z + lz * sh);

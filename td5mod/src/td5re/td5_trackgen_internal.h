@@ -567,15 +567,55 @@ extern unsigned int s_selfcheck_regen_seed;
  * at span F into a main half [F+1..F+len] and a corridor appended after the ring
  * at [cbase..cbase+len-1], rejoining at span R. The loader (td5_track.c) already
  * iterates an N-entry jump table, so the whole chain is multi-fork. */
-#define TD5_TG_BRANCH_MAX 4
+#define TD5_TG_BRANCH_MAX 8   /* [FORK KINDS] was 4; the plan ladder has 6 entries */
 /* sep = per-fork separation scale in [0,1] (item 10): how far the branch bows
  * away from the main carriageway, as a fraction of the widest bow tg_branch_bow
  * allows. Small = a divided AVENUE (the two carriageways stay close, split only
  * by a central median); large = a road that genuinely diverges in two. Stored
  * on the fork so the strip rows, the road mesh, the clearance query and the
  * divider all read ONE value and cannot drift. */
-typedef struct { int F, len, cbase, R; double sep; int lanes; } TG_Fork;   /* lanes: full count at F ([LANES]) */
+/* [FORK KINDS] What shape a fork takes. From the census of the 147 shipped
+ * forks (docs/plans/AUTOTRACK_ELEMENT_CATALOG.md section 5): 103 are
+ * SYMMETRIC splits (8->4+4, 6->3+3, 4->2+2), 20 are SLIP roads (corridor
+ * narrower: 8->6+2), 24 have the MAIN road narrower than the corridor
+ * (8->2+6), 37 corridors are 8 spans or shorter (traffic ISLANDS), and every
+ * one runs PARALLEL to or SHORTER than its main stretch -- the old single
+ * bow-and-rejoin DETOUR is the one shape shipped tracks never use. */
+typedef enum {
+    TG_FORK_AVENUE = 0,   /* symmetric, tight separation, central divider   */
+    TG_FORK_ISLAND,       /* symmetric, 4..8 spans, slim island             */
+    TG_FORK_WIDE,         /* symmetric, wide separation, corridor gains lanes */
+    TG_FORK_SLIP,         /* corridor 1-2 lanes peels off, main keeps the rest */
+    TG_FORK_MAJOR,        /* main narrows to 1-2 lanes, corridor takes the rest */
+    TG_FORK_KIND_COUNT
+} TG_ForkKind;
+typedef struct {
+    int F, len, cbase, R;
+    double sep;
+    int lanes;            /* full count at F ([LANES])                       */
+    int kind;             /* TG_ForkKind                                     */
+    int main_lanes;       /* lanes(F+1): what the main ring keeps            */
+    int br_lanes;         /* lanes(B0):  what the corridor takes             */
+    double fm, fb;        /* main_lanes/lanes, br_lanes/lanes (0.5 symmetric) */
+} TG_Fork;
+const char *tg_fork_kind_name(int kind);
+/* Stateless plan for fork ordinal `index`: kind, corridor length and
+ * separation. Read by the centreline walk (tg_span_in_fork_run) BEFORE
+ * s_forks exists and by the placement loop, so both see the same forks. */
+void tg_fork_plan(int index, int *kind, int *len, double *sep);
+int  tg_fork_count_planned(void);
+int  tg_fork_kind_min_lanes(int kind);
+int  tg_fork_window_ahead(int si, int within);
+void tg_fork_split_lanes(int kind, int lanes, int *main_lanes, int *br_lanes);
+/* Fork-aware carriageway geometry (fork fi = index into s_forks). Shifts are
+ * lateral, +ve = left of travel; wscale multiplies the road's full width. */
+double tg_fork_main_shift(int fi, double w);
+double tg_fork_main_wscale(int fi);
+double tg_fork_br_shift(int fi, int k, double w);
+double tg_fork_br_wscale(int fi, int k);
+int    tg_fork_br_lanes_at(int fi, int k);
 extern TG_Fork s_forks[TD5_TG_BRANCH_MAX];
+extern unsigned int s_fork_plan_seed;   /* [FORK KINDS] set by tg_srand */
 extern int s_fork_count;
 extern int s_ring_len;
 extern int s_want_scenery;
@@ -3648,8 +3688,8 @@ int tg_fork_gore_page(int fork_index);
 int tg_emit_gore(const TG_NodeList *nl, int si, double shift_n, double shift_f, double half_n, double half_f, int ground_page, TG_Buf *blk);
 extern long s_r14_outer_faces;
 int tg_r14_pave_face(void);
-int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L, double sep, int br_lanes, const TG_Biome *b, TG_Buf *blk, size_t *moff, int *nmesh, int acct_si);
-int tg_emit_branch_verge(const TG_NodeList *nl, int mb, int k, int L, double sep, int br_lanes, double bw, TG_Buf *blk, size_t *moff, int *nmesh, int acct_si);
+int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L, int fi, const TG_Biome *b, TG_Buf *blk, size_t *moff, int *nmesh, int acct_si);
+int tg_emit_branch_verge(const TG_NodeList *nl, int mb, int k, int L, int fi, double bw, TG_Buf *blk, size_t *moff, int *nmesh, int acct_si);
 int tg_emit_branch_flora(const TG_NodeList *nl, int mb, const TG_Biome *b, TG_Buf *blk, size_t *moff, int *nmesh, int acct_si);
 int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index, double sh0, double sh1, double half0, double half1, int br_lanes, TG_Buf *blk, size_t *moff, int *nmesh);
 /* ===================== GUARDRAILS =====================

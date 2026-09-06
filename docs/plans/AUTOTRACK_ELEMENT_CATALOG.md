@@ -258,8 +258,25 @@ Every shipped fork rejoins through a type-11 span whose lane count equals the
 fork's. Corridor length: min 3, median 32, max 1125 spans (Sydney's single
 fork runs 1126 spans, longer than a third of the ring).
 
-Branch kinds worth adding, each a variation of the existing fork emitter (the
-topology is already correct; only the centerline of the corridor changes):
+IMPLEMENTED 2026-09-06 (same branch): `tg_fork_plan` in `td5_tg_branch.c` is a
+six-entry ladder rotated by the seed (AVENUE 40 spans sep 0.20, ISLAND 6 spans
+sep 0.16, WIDE 120 spans sep 1.0, SLIP 32 spans, MAJOR 60 spans, ISLAND 5
+spans); `tg_fork_split_lanes` gives the census lane splits (symmetric, slip
+= 1-2 lanes off, major = main keeps 1-2); the fork-aware helpers
+`tg_fork_main_shift/wscale` and `tg_fork_br_shift/wscale/lanes_at` feed the strip
+rows, the road quads, the gore, the pavement, the clearance query and the
+preview from the one per-fork record, so an asymmetric split cannot drift
+between them. Knobs `TD5RE_AUTOTRACK_BRANCH_KINDS` (1) and `BRANCH_COUNT` (6).
+Not done: true SHORTCUT geometry (a corridor with fewer spans than its main
+stretch needs its own centreline and a curved main road inside the fork
+window, which the walk currently straightens).
+
+Diagnostic gotcha found while verifying: the race trace's `wall_clear` column
+and the HUD's `LANE: lanes=N` line both read the NORMALIZED main span, so on a
+car that took a corridor they report the main road's rails and lane count (the
+clearance goes negative by exactly the corridor's bow). Check `span_raw >=
+ring` before reading either. The AI does take corridors (about 1 fork in 3 in
+the drive tests) and follows them. The original list:
 
 1. **Divided carriageway** (parallel, symmetric split, 4..12 wide, 20..60 spans,
    avenue divider already exists): the most common shipped shape and the one
