@@ -4055,6 +4055,27 @@ void td5_render_apply_page_blend_preset(int page_id)
      * still gated by the same foliage-AA signal. Non-billboard type-1 world geometry
      * (s_bb_foliage_aa==0) stays OPAQUE_LINEAR — faithful hard cutout, unchanged. */
     else if (t == 1 && s_bb_foliage_aa) p = TD5_PRESET_FOLIAGE_CUTOUT;
+    /* [R15 items 10/11 2026-09-06] A type-1 page drawn as ordinary WORLD
+     * geometry -- a city railing, fence or sign -- used to fall through to
+     * OPAQUE_LINEAR, whose alpha_ref of 1 keeps every LINEAR-interpolated texel
+     * with alpha >= 1/255. On the balustrade page that is measurably fatal:
+     * median baluster 2 texels, 97% of runs <= 3, and a one-texel bilinear
+     * dilation lifts coverage 43% -> 69%, so the gaps close and the railing
+     * renders near-solid, OCCLUDING the road and the wall behind it. That is
+     * the reported "clipping over" -- a validated per-quad SAT pass proved
+     * there is no geometric interpenetration to explain it.
+     *
+     * WORLD_CUTOUT is OPAQUE_LINEAR at alpha_ref 0x80, which keeps a 2-texel
+     * bar 2 texels wide. Cached, not read per draw: this runs once per drawn
+     * page per frame. */
+    else if (t == 1) {
+        static int s_world_cutout = -1;
+        if (s_world_cutout < 0) {
+            const char *e = getenv("TD5RE_R15_WORLD_CUTOUT");
+            s_world_cutout = (e && e[0] == '0') ? 0 : 1;   /* default ON */
+        }
+        p = s_world_cutout ? TD5_PRESET_WORLD_CUTOUT : TD5_PRESET_OPAQUE_LINEAR;
+    }
     else             p = TD5_PRESET_OPAQUE_LINEAR;
     /* [dynamic-traffic] A fading car body must alpha-blend regardless of page
      * type. Additive pages keep ONE/ONE (the fade is folded into their RGB by
