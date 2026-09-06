@@ -9,6 +9,14 @@ td5_track.c
 td5_track_parser.c
 td5_track_registry.c
 td5_trackgen.c
+td5_tg_branch.c
+td5_tg_guard.c
+td5_tg_city.c
+td5_tg_streets.c
+td5_tg_terrain.c
+td5_tg_bridge.c
+td5_tg_furniture.c
+td5_tg_pages.c
 td5_trackgen_preview.c
 td5_trackgen_stream.c
 td5_ai.c

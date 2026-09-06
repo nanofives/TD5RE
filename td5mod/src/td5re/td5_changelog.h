@@ -33,6 +33,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 06 (dev tools)" },
+    { CL_ITEM,    "DEV: the 31k-line auto-track generator source is now 9" },
+    { CL_ITEM,    "  themed modules (branches, guard, city, streets, terrain," },
+    { CL_ITEM,    "  bridges, furniture, pages). Generated tracks are byte-" },
+    { CL_ITEM,    "  identical for a given seed; nothing changes in play." },
+    { CL_ITEM,    "Auto-track tunnels: fixed a latent overflow in the bore" },
+    { CL_ITEM,    "  emitter (colour array 96 vs 320 points) that the split" },
+    { CL_ITEM,    "  exposed; long lit tunnel spans could corrupt two verts." },
     { CL_ITEM,    "DEV: auto-track element catalogue. A census tool sweeps" },
     { CL_ITEM,    "  every TD5/TD6 level for lanes, span types, surfaces and" },
     { CL_ITEM,    "  fork shapes (shipped roads run 2-10 lanes; all 147 forks" },

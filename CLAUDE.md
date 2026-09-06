@@ -172,8 +172,20 @@ comment — regenerate after adding/splitting modules with
 | `td5_track.c` | Track geometry, segment contacts, strip data |
 | `td5_track_parser.c` | MODELS.DAT parsing (S6 module split, see REFACTOR_PLAN.md) |
 | `td5_track_registry.c` | runtime registry for custom (user-built) tracks. |
+| `td5_trackgen.c` | procedural (AUTO-GENERATED) track builder: spec, RNG, centerline, elevation, strip + routes, scenery orchestration, build/regenerate entry points (PORT-ONLY) |
+| `td5_tg_branch.c` | auto-track BRANCHES: fork corridors, long diverging branch, carriageway query, branch pavement + avenue divider |
+| `td5_tg_guard.c` | auto-track GUARD: on-road geometry backstop, MESHTAG sidecar, pavement provenance marks, over-water / coast audits |
+| `td5_tg_city.c` | auto-track CITY: bend-fold authority, facade walls, turn continuation, pavement geometry, run-end census, side-street occupancy, street furniture |
+| `td5_tg_streets.c` | auto-track SIDE STREETS: direction, occupancy, intersections, parks + houses, real intersections, infill, measurement sweeps |
+| `td5_tg_terrain.c` | auto-track TERRAIN + BIOMES: trees, props, road surfaces, biome table + adjacency, snow, sea, outskirts, topo authority, forest side roads, tree bands, ponds, ground chain, gantry/sign context |
+| `td5_tg_bridge.c` | auto-track BRIDGES, TUNNELS, OVERPASSES and WATER: water plane, bore vs underpass, portal, overpass, run coalesce, structural tie, median faces, measurement harness |
+| `td5_tg_furniture.c` | auto-track roadside FURNITURE: guardrails, start/finish gantry, curve direction signage |
+| `td5_tg_pages.c` | auto-track TEXTURES.DAT: every page emitter (procedural + real shipped pages) |
+| `td5_trackgen_preview.c` | background route-preview worker (PORT-ONLY). |
+| `td5_trackgen_stream.c` | streamed scenery worker (PORT-ONLY). |
 | `td5_ai.c` | AI routing, rubber-banding, traffic, script VM |
 | `td5_ai_traffic.c` | Traffic subsystem (S5 module split, see REFACTOR_PLAN.md) |
+| `td5_ai_driver.c` | closed-loop "Driver Model" AI (PORT-ONLY) |
 | `td5_render.c` | Scene setup, mesh transform, frustum cull |
 | `td5_render_effects.c` | Per-actor render effects & world billboards |
 | `td5_render_mesh.c` | Scene rendering: meshes, actors, spans, texture cache |
@@ -194,6 +206,7 @@ comment — regenerate after adding/splitting modules with
 | `td5_input.c` | Input polling, controller config, force feedback, |
 | `td5_asset.c` | ZIP archive reading, TGA decoding, mesh parsing, asset loading |
 | `td5_assetsrc.c` | Editable-source "pack-on-load" asset layer. |
+| `td5_carbalance.c` | tracked per-car carparam corrections (PORT-ONLY). |
 | `td5_customcar.c` | drop-in custom-car discovery (see td5_customcar.h). |
 | `cJSON.c` | (vendored third-party) |
 | `td5_inflate.c` | DEFLATE decompressor bridge |
@@ -204,11 +217,13 @@ comment — regenerate after adding/splitting modules with
 | `td5_net.c` | Multiplayer protocol, lockstep sync |
 | `td5_upnp.c` | Minimal UPnP IGD port-mapping client (see td5_upnp.h). |
 | `td5_camera.c` | Chase cam, trackside cam, spline cam, camera transforms |
+| `td5_pick.c` | dev-only free-cam geometry/texture PICKER. See td5_pick.h. |
 | `td5_replay.c` | full ghost-state "View Replay" recorder (PORT-ONLY). |
 | `td5_vfx.c` | Particles, tire tracks, smoke, weather, billboards, taillights |
 | `td5_light.c` | Dynamic light system (foundation) + vehicle headlight emitter |
 | `td5_light2.c` | Lighting rework v2 (P0 infrastructure) |
-| `td5_material.c` | Material identity table (lighting rework P0) |
+| `td5_material.c` | Material identity table (lighting rework P0 / RT2-P5) |
+| `td5_rt.c` | game-side ray-traced lighting layer (LIGHTING QUALITY: HIGH). |
 | `td5_arcade.c` | ARCADE mode: 3x-collision launch + collectible road power-ups |
 | `td5_damage.c` | GTA4-style car damage system (PORT-ONLY) |
 | `td5_tutorial.c` | First-race controller-tutorial overlay (PORT ENHANCEMENT). |

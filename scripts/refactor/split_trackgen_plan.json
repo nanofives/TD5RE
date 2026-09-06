@@ -1,0 +1,154 @@
+{
+  "header": "td5_trackgen_internal.h",
+  "tex_include_module": null,
+  "tex_include_pattern": "td5_tg_(real_tex|furniture_tex|props_tex)",
+  "manual_header": {
+    "names": [
+      "tg_meshtag_reset",
+      "tg_meshtag_set",
+      "tg_meshtag_fallback",
+      "tg_meshtag_write"
+    ],
+    "text": "/* [PICK MESHTAG] dev-only sidecar (td5_tg_guard.c). Compiled out of RELEASE:\n * the macros below match the #else branch of the block that defines them. */\n#ifndef TD5RE_RELEASE\nvoid tg_meshtag_reset(int nentries);\nvoid tg_meshtag_set(int entry, int slot, int kind);\nvoid tg_meshtag_fallback(int entry, int slot, size_t off);\nvoid tg_meshtag_write(const char *dir);\n#else\n#define tg_meshtag_reset(n)          ((void)0)\n#define tg_meshtag_set(e, s, k)      ((void)0)\n#define tg_meshtag_fallback(e, s, o) ((void)0)\n#define tg_meshtag_write(dir)        ((void)0)\n#endif\n"
+  },
+  "modules": [
+    {
+      "file": "td5_trackgen.c",
+      "banner": "procedural (AUTO-GENERATED) track builder: spec, RNG, centerline, elevation, strip + routes, scenery orchestration, build/regenerate entry points (PORT-ONLY)",
+      "ranges": [
+        [
+          1,
+          2972
+        ],
+        [
+          5268,
+          5936
+        ],
+        [
+          25334,
+          26555
+        ],
+        [
+          30550,
+          31134
+        ]
+      ]
+    },
+    {
+      "file": "td5_tg_branch.c",
+      "banner": "auto-track BRANCHES: fork corridors, long diverging branch, carriageway query, branch pavement + avenue divider",
+      "ranges": [
+        [
+          2973,
+          3719
+        ],
+        [
+          14355,
+          14836
+        ]
+      ]
+    },
+    {
+      "file": "td5_tg_guard.c",
+      "banner": "auto-track GUARD: on-road geometry backstop, MESHTAG sidecar, pavement provenance marks, over-water / coast audits",
+      "ranges": [
+        [
+          3720,
+          5267
+        ]
+      ]
+    },
+    {
+      "file": "td5_tg_city.c",
+      "banner": "auto-track CITY: bend-fold authority, facade walls, turn continuation, pavement geometry, run-end census, side-street occupancy, street furniture",
+      "ranges": [
+        [
+          5937,
+          7206
+        ],
+        [
+          8389,
+          9758
+        ],
+        [
+          15435,
+          16564
+        ],
+        [
+          21322,
+          22017
+        ]
+      ]
+    },
+    {
+      "file": "td5_tg_streets.c",
+      "banner": "auto-track SIDE STREETS: direction, occupancy, intersections, parks + houses, real intersections, infill, measurement sweeps",
+      "ranges": [
+        [
+          16565,
+          20247
+        ]
+      ]
+    },
+    {
+      "file": "td5_tg_terrain.c",
+      "banner": "auto-track TERRAIN + BIOMES: trees, props, road surfaces, biome table + adjacency, snow, sea, outskirts, topo authority, forest side roads, tree bands, ponds, ground chain, gantry/sign context",
+      "ranges": [
+        [
+          7207,
+          8388
+        ],
+        [
+          13460,
+          13996
+        ],
+        [
+          20248,
+          21321
+        ],
+        [
+          22018,
+          24682
+        ]
+      ]
+    },
+    {
+      "file": "td5_tg_bridge.c",
+      "banner": "auto-track BRIDGES, TUNNELS, OVERPASSES and WATER: water plane, bore vs underpass, portal, overpass, run coalesce, structural tie, median faces, measurement harness",
+      "ranges": [
+        [
+          9759,
+          13459
+        ],
+        [
+          13997,
+          14354
+        ]
+      ]
+    },
+    {
+      "file": "td5_tg_furniture.c",
+      "banner": "auto-track roadside FURNITURE: guardrails, start/finish gantry, curve direction signage",
+      "ranges": [
+        [
+          14837,
+          15434
+        ],
+        [
+          24683,
+          25333
+        ]
+      ]
+    },
+    {
+      "file": "td5_tg_pages.c",
+      "banner": "auto-track TEXTURES.DAT: every page emitter (procedural + real shipped pages)",
+      "ranges": [
+        [
+          26556,
+          30549
+        ]
+      ]
+    }
+  ]
+}
