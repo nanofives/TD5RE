@@ -48,6 +48,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  it, instead of floating past a strip of bare ground." },
     { CL_ITEM,    "No more blocks standing in the middle of a side street." },
     { CL_ITEM,    "Wide multi-lane crossings now carry a kerbed median." },
+    { CL_ITEM,    "Railings, fences and signs are see-through again. They" },
+    { CL_ITEM,    "  were filling in solid and blocking the road and the" },
+    { CL_ITEM,    "  buildings behind them." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 06 (dev tools)" },

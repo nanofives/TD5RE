@@ -3619,6 +3619,30 @@ void td5_plat_render_set_preset(TD5_RenderPreset preset)
         s->alpha_ref         = 1; /* discard alpha < 1/255 (color-keyed pixels) */
         break;
 
+    case TD5_PRESET_WORLD_CUTOUT:
+        /* [R15 items 10/11 2026-09-06] OPAQUE_LINEAR with the alpha test raised
+         * to 0x80, for NON-billboard type-1 world geometry (city railings,
+         * fences, signs). See the enum comment in td5_types.h for the measured
+         * cause; in short, at alpha_ref 1 every LINEAR-interpolated texel with
+         * alpha >= 1/255 survives, which on a page whose median baluster is TWO
+         * texels lifts coverage 43% -> 69% and turns a see-through railing into
+         * a near-solid panel.
+         *
+         * A SEPARATE preset rather than raising OPAQUE_LINEAR's own ref: that
+         * preset is also what type-0 opaque pages and every page whose
+         * transparency is still -1 fall back to, so changing it in place would
+         * move draws this evidence says nothing about. */
+        s->blend_enable = 0;
+        s->z_enable     = 1;
+        s->z_write      = 1;
+        s->z_func       = 0;
+        s->mag_filter   = 2;
+        s->min_filter   = 2;
+        s->texblend_mode = D3DTBLEND_MODULATE;
+        s->alpha_test_enable = 1;
+        s->alpha_ref         = 0x80;
+        break;
+
     case TD5_PRESET_FOLIAGE_CUTOUT:
         /* [foliage occlusion 2026-08-17] Billboard tree/foliage cutout drawn as
          * ALPHA-TESTED OPAQUE with z-write ON so it occludes (and is occluded by)
