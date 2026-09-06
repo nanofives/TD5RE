@@ -29,6 +29,7 @@
 #include "td5_render.h"
 #include "td5_track.h"
 #include "td5_trackgen.h"   /* auto-track page-name lookup */
+#include "td5_asset.h"      /* shipped-level number for the import handle */
 #include "td5_hud.h"
 
 #define LOG_TAG "render"
@@ -487,6 +488,17 @@ void td5_pick_finish_frame(void)
         float r = s_best_r;
         int   is_auto = td5_trackgen_is_auto_slot(g_td5.track_index);
         const char *pgname = is_auto ? td5_trackgen_page_name(primary) : NULL;
+        /* [IMPORT HANDLE] On a SHIPPED track the pick names the level the
+         * page lives in ("level014" page 276), which is exactly the
+         * (level, page) key re/tools/gen_tg_pages.py --from-pick consumes to
+         * bake that art into the auto-track. The auto track keeps "AUTO"
+         * (its pages are already generator pages, so there is nothing to
+         * import). level_num mirrors td5_asset_level_number: TD5 zip number
+         * 1..39, or the converted TD6 level (7..12, 18..22). */
+        int   level_num = is_auto ? 0 : td5_asset_level_number(g_td5.track_index);
+        char  trackid[16];
+        if (is_auto) snprintf(trackid, sizeof trackid, "AUTO");
+        else         snprintf(trackid, sizeof trackid, "level%03d", level_num);
         const char *kind = (is_auto && entry >= 0)
                            ? td5_trackgen_mesh_kind_name(entry, s_best_slot) : NULL;
         uint32_t col = (s_flash > 0) ? 0xFF33FF33u : 0xFFFFFF00u;  /* green flash / yellow */
@@ -505,8 +517,8 @@ void td5_pick_finish_frame(void)
             if (kind) snprintf(kindstr, sizeof kindstr, " %s", kind);
             else      kindstr[0] = '\0';
             snprintf(s_hud_line, sizeof s_hud_line,
-                     "PICK entry %d slot %d%s  page %d%s%s  pos %.1f %.1f %.1f  r %.1f  [LMB=copy]",
-                     entry, s_best_slot, kindstr, primary, pgn, pgextra,
+                     "PICK %s entry %d slot %d%s  page %d%s%s  pos %.1f %.1f %.1f  r %.1f  [LMB=copy]",
+                     trackid, entry, s_best_slot, kindstr, primary, pgn, pgextra,
                      s_best_cx, s_best_cy, s_best_cz, r);
         }
 
@@ -514,8 +526,8 @@ void td5_pick_finish_frame(void)
         {
             int off, i;
             off = snprintf(s_json, sizeof s_json,
-                     "{\"track\":\"AUTO\",\"entry\":%d,\"slot\":%d,\"page\":%d,",
-                     entry, s_best_slot, primary);
+                     "{\"track\":\"%s\",\"level\":%d,\"entry\":%d,\"slot\":%d,\"page\":%d,",
+                     trackid, level_num, entry, s_best_slot, primary);
             if (kind && off > 0 && off < (int)sizeof s_json)
                 off += snprintf(s_json + off, sizeof s_json - off,
                                 "\"kind\":\"%s\",", kind);

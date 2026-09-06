@@ -33,6 +33,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 06 (dev tools)" },
+    { CL_ITEM,    "DEV: auto-track element catalogue. A census tool sweeps" },
+    { CL_ITEM,    "  every TD5/TD6 level for lanes, span types, surfaces and" },
+    { CL_ITEM,    "  fork shapes (shipped roads run 2-10 lanes; all 147 forks" },
+    { CL_ITEM,    "  rejoin, 126 run parallel). Shipped art now imports from" },
+    { CL_ITEM,    "  a JSON manifest (gen_tg_pages.py) instead of a script" },
+    { CL_ITEM,    "  per round, with a duplicate-page guard. The picker on a" },
+    { CL_ITEM,    "  shipped track copies its level + page as an import key." },
     { CL_ITEM,    "DEV: geometry picker polish. It now casts a ray from the" },
     { CL_ITEM,    "  crosshair and highlights the FIRST surface hit (a tree" },
     { CL_ITEM,    "  in front of terrain wins), with a crosshair cursor, a" },
