@@ -1131,6 +1131,12 @@ typedef char tg_acct_mask_fits[(TG_ACCT_MASK_WORDS * 64 >= (int)TG_ACCT_KIND_COU
  * Depth is a fifth axis and is NOT a page, so it is censused by cell count. */
 typedef enum {
     TG_VAR_FACADE = 0, TG_VAR_BANNER, TG_VAR_RAIL, TG_VAR_DEPTH,
+    /* [R15 TEX item 2] The STOREFRONT pool, which until this round was the one
+     * facade surface with NO census at all -- tg_var_note was called on the
+     * wall page only, so "the same shop sign over and over" was invisible to
+     * every report this generator emits. It is also the pool that carries TEXT,
+     * which is what makes a repeat read as a repeat. */
+    TG_VAR_STORE,
     TG_VAR_AXIS_COUNT
 } TG_VarAxis;
 #define TD5_TG_VAR_SLOTS 64     /* distinct ids tracked per axis before spill */
@@ -1687,6 +1693,49 @@ void tg_validate_geometry_safety(const TG_NodeList *nl, int nspans);
  * there); forward-declared so the guard tests the SAME street that was laid. */
 double tg_footway_reach(const TG_NodeList *nl, int si, double side);
 int tg_r10_xstreet_guard(void);
+
+/* ===================== [R15 OCC] LATERAL OCCUPANCY AUTHORITY =================
+ * "this building is on top of a street" / "on top of a sidewalk" / "next to no
+ * road at the end of the crossing street" (R15 items 7, 8a, 4).
+ *
+ * ROOT CAUSE, measured by reading every reach helper in the generator: there
+ * are authorities for the MAIN ROAD (tg_carriageway_reach) and, since R10, for
+ * SIDE-STREET ASPHALT (tg_footway_reach) -- but the raised PAVEMENT is in no
+ * envelope at all, and tg_footway_reach is consulted only for the FURNITURE
+ * policy class. So a massing emitter asking "how far out is taken here" had
+ * nowhere to ask, and tg_city_emit_backrows answered it privately by
+ * re-deriving tg_xstreet_reach_at with its OWN sw. Where its answer and the
+ * street's disagree, the reveal building lands on the street it should close.
+ *
+ * Deliberately NOT a mesh-vs-mesh overlap engine. Every element in this
+ * generator is placed as a LATERAL OFFSET from the centreline at a (span,
+ * side), so the honest shared question is "what is the outermost lateral
+ * already spoken for here", and the answer composes from authorities that
+ * already exist. A pure function of them -- no ledger, no reservation order,
+ * nothing to keep in sync -- which is why it cannot drift the way a second
+ * model would.
+ *
+ * ONE AUTHORITY, TWO CONSUMERS, the rule the R10 block comment states:
+ *   - PLACEMENT: tg_city_emit_backrows stands its rows beyond tg_occ_reach.
+ *   - ENFORCEMENT: the on-road guard keeps its OWN narrower envelope. It is
+ *     NOT widened to include pavement, because a facade, a back row and a
+ *     pavement arm legitimately BOUND a street and stand ON the kerb -- exactly
+ *     the false positive the R10 comment warns about. Massing is corrected
+ *     where it is PLACED; the guard still catches anything reaching the road.
+ * Mask bits so a caller says which surfaces it may not stand on: a back row may
+ * not stand on road, street or pavement; a railing only cares about road.
+ * ========================================================================== */
+#define TG_OCC_ROAD    1u      /* main carriageway + fork branch corridor   */
+#define TG_OCC_STREET  2u      /* side-street / forest-lane asphalt         */
+#define TG_OCC_PAVE    4u      /* the raised sidewalk slab                  */
+#define TG_OCC_ALL     (TG_OCC_ROAD | TG_OCC_STREET | TG_OCC_PAVE)
+
+/* Outermost lateral (from the CENTRELINE, not the kerb) already spoken for at
+ * (si, side) by any of the masked surfaces. 0 when nothing is. Defined in
+ * td5_tg_streets.c beside tg_footway_reach, which it generalises. */
+double tg_occ_reach(const TG_NodeList *nl, int si, double side,
+                    unsigned int mask);
+
 #define TD5_TG_GUARD_PEN       700.0    /* min intrusion past the road edge to reject */
 #define TD5_TG_GUARD_OVERHEAD 1800.0    /* a vertex this far above road Y is overhead */
 #define TD5_TG_GUARD_UNDER     800.0    /* a vertex this far below road Y is underground */
@@ -1890,6 +1939,19 @@ void tg_r9_water_table_build(const TG_NodeList *nl);
  * TD5RE_R14_COAST_REPORT=1 turns it on; it costs nothing when off. */
 #define TD5_TG_R14_STRADDLE 60.0   /* ignore a z-fight-scale overlap */
 void tg_r14_coast_report(void);
+
+/* [R15] Round-15 reporting. FOUR functions rather than the one the work was
+ * written against: after the trackgen split the counters are file-statics in
+ * four different modules, and a static cannot be read across a translation
+ * unit -- so each owning module reports its own. All four are O(1) (they only
+ * divide running sums), which is why none is TG_TV-wrapped or span-gated.
+ * tg_store_page_reset is per-BUILD state for the item-2 anti-repeat, reset
+ * beside tg_acct_reset for the same reason. */
+void tg_r15_sky_report(void);      /* item 3      -- td5_tg_terrain.c */
+void tg_r15_city_report(void);     /* 1,2,5,6,8b,4,7,8a -- td5_tg_city.c */
+void tg_r15_streets_report(void);  /* items 7 + 9 -- td5_tg_streets.c */
+void tg_r15_pair_report(void);     /* items 10/11 -- td5_tg_guard.c   */
+void tg_store_page_reset(void);
 /* Validate one entry's assembled meshes against the carriageway and drop the
  * ones standing in the road. Rewrites `meshes` and `moff`/`*pnmesh` in place
  * (compacting left). Returns the number rejected. Corridor-only entries (past
@@ -4919,7 +4981,10 @@ int tg_infra_menu(const TG_Biome *b, int paved, int *out);
  *
  * Knob TD5RE_R12_SIGN_CTX (default ON) restores the old unconditional pick. */
 #define TD5_TG_SIGN_KEEP_1_IN  4u
-int tg_infra_sign_filter(const TG_Biome *b, int paved, int kind, unsigned int hh);
+/* [R15 PROPS item 1] gained (si, side): the disc is now confined to junctions,
+ * which needs the span and the kerb it is being placed on. */
+int tg_infra_sign_filter(const TG_Biome *b, int si, double side,
+                         int paved, int kind, unsigned int hh);
 int tg_infra_awning_filter(int si, double side, int paved, int kind, unsigned int hh);
 /* ===================== [R9 INFRA] PONDS =====================
  * Asked for in ROUND 5 and unbuilt for four rounds. Small standing water away

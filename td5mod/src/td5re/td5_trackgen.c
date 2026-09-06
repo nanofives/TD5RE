@@ -545,7 +545,7 @@ long tg_acct_total(int kind)
 unsigned long long s_acct_mask[TD5_TG_MAX_SPANS][TG_ACCT_MASK_WORDS];
 
 static const char *const k_var_axis[TG_VAR_AXIS_COUNT] = {
-    "facade-pages", "banner-pages", "rail-pages", "depth-cells"
+    "facade-pages", "banner-pages", "rail-pages", "depth-cells", "store-pages"
 };
 
 static int  s_var_id[TG_VAR_AXIS_COUNT][TD5_TG_VAR_SLOTS];

@@ -2389,7 +2389,7 @@ int tg_emit_fb_infra(const TG_FBHook *h)
         kind = menu[(hh >> 5) % (unsigned)nmenu];
         /* Roadworks replace the menu pick occasionally, on ONE side only, so
          * they read as a works site rather than a decoration. */
-        kind = tg_infra_sign_filter(sb, paved, kind, hh);
+        kind = tg_infra_sign_filter(sb, si, side, paved, kind, hh);
         kind = tg_infra_awning_filter(si, side, paved, kind, hh);
         if (((hh >> 13) & 0x3Fu) == 0u) kind = IP_WORKY;
         else if (((hh >> 19) & 0x3Fu) == 0u) kind = IP_REDTAPE;
@@ -2765,6 +2765,20 @@ static int tg_r8_treeline_aspect(void)
     return td5_env_flag_on("TD5RE_R8_TERRAIN_TREELINE_ASPECT");
 }
 
+/* [R15 BAND item 3] "the texture of the city behind is too stretched out and
+ * barely noticeable."
+ *
+ * The R5 item 16 world-width tiling below fixed exactly this complaint for the
+ * TREE LINE, but its gate is `r5treeline` = non-snow AND urbanity < 2, so the
+ * URBAN skyline ridge -- the one branch whose page IS a city -- was left on the
+ * old fixed 4-tile U. Same quad, same TD5_TG_FAR_REACH (30000) fan, same
+ * thousands-of-units-per-tile stretch; only the page differs. This extends the
+ * existing fix to that branch rather than inventing a second rule. */
+static int tg_r15_skyline_uv(void)
+{
+    return td5_env_flag_on("TD5RE_R15_SKYLINE_UV");
+}
+
 static int tg_r8_treeline_vary(void)
 {
     return td5_env_flag_on("TD5RE_R8_TERRAIN_TREELINE_VARY");
@@ -2794,6 +2808,35 @@ static void tg_r8_tl_note(double tile_w, double tile_h, int page)
         s_r8_tl_pages[page - TD5_TG_PAGE_R8_TREELINE]++;
     else
         s_r8_tl_pages[TD5_TG_R8_TREELINE_N]++;   /* the single legacy page */
+}
+
+/* [R15 BAND item 3] The urban skyline's own tile-size census. Deliberately NOT
+ * folded into tg_r8_tl_note above: that one histograms by TREELINE page id, so
+ * every skyline sample would land in its "legacy page" bucket and drag the
+ * tree-line ratio min/max with it. Separate counters keep both reports honest,
+ * and give this round the before/after number for "too stretched out". */
+double s_r15_sky_w, s_r15_sky_h, s_r15_sky_ratio_min, s_r15_sky_ratio_max;
+int    s_r15_sky_n;
+
+void tg_r15_sky_note(double tile_w, double tile_h)
+{
+    const double r = (tile_h > 1.0) ? tile_w / tile_h : 0.0;
+    if (!s_r15_sky_n) { s_r15_sky_ratio_min = r; s_r15_sky_ratio_max = r; }
+    if (r < s_r15_sky_ratio_min) s_r15_sky_ratio_min = r;
+    if (r > s_r15_sky_ratio_max) s_r15_sky_ratio_max = r;
+    s_r15_sky_w += tile_w; s_r15_sky_h += tile_h; s_r15_sky_n++;
+}
+
+void tg_r15_sky_report(void)
+{
+    if (s_r15_sky_n)
+        TD5_LOG_I(LOG_TAG, "[R15 BAND item 3] urban skyline ridge: %d quad(s), "
+                  "mean tile %.0f x %.0f world units, aspect %.2f..%.2f (knob "
+                  "TD5RE_R15_SKYLINE_UV=%s)", s_r15_sky_n,
+                  s_r15_sky_w / (double)s_r15_sky_n,
+                  s_r15_sky_h / (double)s_r15_sky_n,
+                  s_r15_sky_ratio_min, s_r15_sky_ratio_max,
+                  tg_r15_skyline_uv() ? "on" : "off");
 }
 
 int tg_r8_treeline_page(int g0)
@@ -3278,14 +3321,33 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
          * and every quad starts at U=0 and ends on an integer tile count, so the
          * join to the next group's quad stays continuous. */
         double u_near = U[0], u_far = U[1];
-        if (r5fix && r5treeline) {
+        /* [R15 BAND item 3] The urban skyline takes the SAME world-width tiling.
+         * Mirrors the seg_page[1] routing below (snow -> flank, urban -> skyline,
+         * else tree line) so the branch that gets the skyline page is exactly the
+         * branch that gets the skyline's U. */
+        const int r5skyline = !tg_biome_is_snow(h->b) && tg_r4_city_skyline()
+                            && h->b->urbanity >= 2 && tg_r15_skyline_uv();
+        if (r5fix && (r5treeline || r5skyline)) {
             const double w = sqrt((X[1][3]-X[0][3])*(X[1][3]-X[0][3])
                                 + (Z[1][3]-Z[0][3])*(Z[1][3]-Z[0][3]));
             /* [R8 item 14 ASPECT] Tile width = the wall's own crest height, so
              * a square page is drawn square. Was TD5_TG_SPAN_LENGTH (1500)
              * against a ~4500 wall: a 1:3 vertical stretch of a 64x64 page. */
-            const double tw = tg_r8_treeline_aspect()
-                            ? (0.5 * (t0 + t1)) : (double)TD5_TG_SPAN_LENGTH;
+            /* [R15 BAND item 3] The SKYLINE takes the constant-world-width
+             * branch, NOT the crest-height one. MEASURED on seed 1459285111:
+             * the urban ridge averages 8221 wide by 28359 tall per quad, so
+             * "tile width = crest height" gives floor(8221/28359 + 0.5) = 0,
+             * clamped to ONE tile -- 4x WIDER than the fixed 4 tiles it
+             * replaced, i.e. more stretch, the opposite of the report. That
+             * rule is right for a tree line (roughly as wide as it is tall) and
+             * wrong for a ridge four times taller than its own quad. Tiling by
+             * span length keeps a tile the same world size through a bend --
+             * which is what R5 item 16 was actually for -- and gives ~5 tiles
+             * here instead of a fixed 4. */
+            const double tw = (r5skyline && !r5treeline)
+                            ? (double)TD5_TG_SPAN_LENGTH
+                            : (tg_r8_treeline_aspect()
+                               ? (0.5 * (t0 + t1)) : (double)TD5_TG_SPAN_LENGTH);
             double tiles = floor(w / (tw > 1.0 ? tw : 1.0) + 0.5);
             if (tiles < 1.0) tiles = 1.0;
             u_near = 0.0; u_far = tiles;
@@ -3342,6 +3404,16 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
                                 + (Z[1][3]-Z[0][3])*(Z[1][3]-Z[0][3]));
             const double nt = (u_far - u_near);
             if (nt > 0.0) tg_r8_tl_note(w / nt, 0.5 * (t0 + t1), seg_page[1]);
+        }
+        /* [R15 BAND item 3] Same measurement for the skyline branch, which the
+         * line above deliberately skips. Before this round nt was a fixed 4
+         * tiles across a quad fanned out to TD5_TG_FAR_REACH, so this reports
+         * the stretch the user saw and, with the knob on, its correction. */
+        else if (seg_page[1] == TD5_TG_PAGE_R4_SKYLINE) {
+            const double w = sqrt((X[1][3]-X[0][3])*(X[1][3]-X[0][3])
+                                + (Z[1][3]-Z[0][3])*(Z[1][3]-Z[0][3]));
+            const double nt = (u_far - u_near);
+            if (nt > 0.0) tg_r15_sky_note(w / nt, 0.5 * (t0 + t1));
         }
         seg_nq[1]   = 1;
         nseg = 2;

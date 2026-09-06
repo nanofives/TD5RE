@@ -3521,6 +3521,11 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     s_tg_build_t0 = td5_plat_time_us();
     s_tg_progress = 2;
     tg_xmemo_reset(0);                    /* crossing memo: disarmed until the prepass */
+    /* [R15 TEX item 2] The storefront anti-repeat carries one page of state
+     * across spans, so it is per-BUILD for the same reason tg_acct_reset is:
+     * a second build in one session must not inherit the first's last pick or
+     * two runs of the same seed would not be identical. */
+    tg_store_page_reset();
 
     /* [R2 item 24] Clear the inventory BEFORE anything is emitted. Placed here
      * rather than in regenerate so a direct build_level call (the S2 regen
@@ -3860,6 +3865,14 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     TG_TV(TG_T_RPT_R11WATER,  tg_r11_water_diag(&nl, nspans));    /* [R11 WATER] wet footprint    */
     TG_TV(TG_T_RPT_R12TEX,    tg_r12_tex_report(&nl, nspans));    /* [R12 TEX] page-per-surface   */
     TG_TV(TG_T_RPT_R14COAST,  tg_r14_coast_report());             /* [R14 COAST item 5a] straddles */
+    /* [R15 BAND item 3] Not TG_TV-wrapped and not span-gated: this one only
+     * divides four running sums and emits a single line -- it has no per-span
+     * loop to pay for, unlike the reports above. (Cf. the R14 finding that an
+     * UNGATED report with a span walk cost 3462 ms of a 22.8 s build.) */
+    tg_r15_sky_report();
+    tg_r15_city_report();
+    tg_r15_streets_report();
+    tg_r15_pair_report();
     /* [R14 integration] the coast report is INSIDE the REPORTS zone on purpose:
      * closing the zone above it would leave its cost out of its own timing. */
     s_tg_zone_us[TG_ZONE_REPORTS] += td5_plat_time_us() - s_tg_reports_t0;

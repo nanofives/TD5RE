@@ -249,6 +249,39 @@ double tg_footway_reach(const TG_NodeList *nl, int si, double side)
     return r;
 }
 
+/* [R15 OCC] See the block comment at the forward declaration for why this is a
+ * pure composition of the reaches above rather than a reservation ledger. The
+ * PAVE arm is the one genuinely new surface: it is the same pair the sidewalk
+ * emitter itself uses to decide the slab's width (tg_city_sidewalk_w_at for the
+ * biome width, tg_pavement_side_width for the per-side narrowing over a branch
+ * corridor), so this reports the slab that is actually laid rather than a
+ * second model of it -- the same discipline tg_xstreet_here follows for the
+ * street. */
+double tg_occ_reach(const TG_NodeList *nl, int si, double side,
+                    unsigned int mask)
+{
+    double r = 0.0;
+
+    if (!nl || si < 0 || si >= nl->count) return 0.0;
+    /* STREET implies ROAD: tg_footway_reach is carriageway-or-wider by
+     * construction, so asking for it answers both. */
+    if (mask & TG_OCC_STREET)      r = tg_footway_reach(nl, si, side);
+    else if (mask & TG_OCC_ROAD)   r = tg_carriageway_reach(nl, si, side);
+
+    if (mask & TG_OCC_PAVE) {
+        const TG_Biome *pb = &k_biomes[tg_scenery_biome_index(si)];
+        const double bw = tg_city_sidewalk_w_at(nl, si, pb);
+        if (bw > 0.0) {
+            const double w = tg_pavement_side_width(nl, si, side, bw);
+            if (w > 0.0) {
+                const double p = tg_road_half_width(nl, si) + w;
+                if (p > r) r = p;
+            }
+        }
+    }
+    return r;
+}
+
 /* The PLACEMENT half alone. Separate from the master knob so the two halves can
  * be A/B'd independently -- TD5RE_R10_PROP_PLACE=0 keeps the guard and lets the
  * old placement stand, which is the run that proves the BACKSTOP would have
@@ -281,6 +314,51 @@ void tg_xstreet_audit(const TG_NodeList *nl, int si, double side,
               tg_carriageway_reach(nl, si, side) - tg_road_half_width(nl, si),
               here ? "YES" : "no", here ? reach : 0.0,
               placed ? "placed" : "SKIPPED");
+}
+
+/* ===== [R15 CROSS item 9] A WIDE CROSSING NEEDS A MEDIAN =====
+ * "this crossing street is too wide (it has too many lanes) if you want to make
+ * wide lanes like this it has to be crossing on both sides and have a median."
+ *
+ * MEASURED (TD5RE_R15_OCC_DIAG=253, seed 1459285111): the width is not one
+ * emitter drawing a wide quad -- it is N ADJACENT SPANS each laying their own
+ * one-span-wide carriageway across the same frontage gap. Spans 248..252 all
+ * report xhere=1 with the same 19500 reach on the same side, so five quads sit
+ * edge to edge and the street is 5 * TD5_TG_LANE_WIDTH = 7500 wide. That is
+ * exactly "too many lanes", and it is why the picker saw one 8-vertex mesh with
+ * a 22606 radius: the radius is the street's LENGTH, not its width.
+ *
+ * The report also states the acceptance test, so it is implemented literally:
+ * a wide street must (a) cross on BOTH sides and (b) carry a median. (a) is
+ * already true wherever both kerbs are open (the diag shows both sides open on
+ * every span of that run), so this adds (b) and asserts (a) rather than
+ * assuming it. The island is emitted ONCE, on the run's centre span, so it runs
+ * down the middle of the street instead of once per lane.
+ *
+ * tg_emit_avenue_divider is NOT reused: it is reachable only from the fork gore
+ * path, takes branch-corridor parameters (sh0/sh1/half0/half1/br_lanes) and
+ * returns early unless tg_fork_is_avenue, so it has no crossing entry point at
+ * all. This is the same shape of island expressed in the crossing's own frame. */
+#define TD5_TG_R15_MEDIAN_MIN   3       /* spans of width before one is owed  */
+#define TD5_TG_R15_MEDIAN_HW  260.0     /* half width, matches the avenue cap */
+#define TD5_TG_R15_MEDIAN_H   150.0     /* kerbed island, not a barrier       */
+
+static long s_r15_medians;
+
+/* Is si the centre span of a contiguous cross-street run on this side, and how
+ * many spans wide is that run? Reads tg_xstreet_here, which is the crossstreet
+ * emitter's own gate set, so the run measured is the street actually laid. */
+static int tg_r15_xrun_centre(const TG_NodeList *nl, int si, double sg,
+                              int *plen)
+{
+    int lo = si, hi = si;
+    double r = 0.0;
+
+    if (!tg_xstreet_here(nl, si, sg, &r)) return 0;
+    while (lo > 0 && tg_xstreet_here(nl, lo - 1, sg, &r)) lo--;
+    while (hi + 1 < nl->count && tg_xstreet_here(nl, hi + 1, sg, &r)) hi++;
+    if (plen) *plen = hi - lo + 1;
+    return si == (lo + hi) / 2;
 }
 
 static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
@@ -345,8 +423,98 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
     tg_acct_n(TG_ACCT_CROSSING, h->si, n / 4);   /* side-street mouths */
     if (marks) tg_acct_n(TG_ACCT_CROSSFURN, h->si, n / 4);  /* item 9 markings fired */
     h->moff[(*h->nmesh)++] = h->blk->len;
-    return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
-                              &seg_page, &seg_nq, 1);
+    if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                            &seg_page, &seg_nq, 1))
+        return 0;
+
+    /* [R15 CROSS item 9] The median. Its own mesh because it is a different
+     * page from the lane markings above, and its own SIDE loop because a run
+     * can be wide on one kerb and narrow on the other. */
+    if (td5_env_flag_on("TD5RE_R15_XWIDE_MEDIAN")) {
+        double mp[12], mt[8];
+        int ms;
+        for (ms = 0; ms < 2; ms++) {
+            const double sg = ms ? 1.0 : -1.0;
+            double ang, nox, noz, fox, foz, reach, drop;
+            double ax, az, alen, oxm, ozm, olen, cx, cy, cz;
+            double mpx[12], mpy[12], mpz[12], muu[12], mvv[12];
+            int mn = 0, mpage = TD5_TG_PAGE_SIDEWALK, mnq;
+            int len = 0;
+            double rr = 0.0;
+
+            /* (b) the run must be genuinely wide, and this the centre of it. */
+            if (!tg_r15_xrun_centre(h->nl, h->si, sg, &len)) continue;
+            if (len < TD5_TG_R15_MEDIAN_MIN) continue;
+            /* (a) the report's own condition: it must cross on BOTH sides. */
+            if (!tg_xstreet_here(h->nl, h->si, -sg, &rr)) continue;
+            if (*h->nmesh >= h->maxmesh) break;
+
+            tg_city_edge_frame(h->nl, h->si, sg, e);
+            ang   = tg_block_arm_skew(h->si, ms);
+            reach = tg_xstreet_reach_at(h->nl, h->si, sg, ang, h->b, sw);
+            drop  = tg_xstreet_drop(reach);
+            tg_block_rot2(e[6], e[7], ang, &nox, &noz);
+            tg_block_rot2(e[8], e[9], ang, &fox, &foz);
+
+            /* Along-road unit and the kerb-line midpoint of this span: the
+             * centre span's midpoint is the middle of the whole run. */
+            ax = e[3] - e[0]; az = e[5] - e[2];
+            alen = sqrt(ax * ax + az * az);
+            if (alen < 1.0) continue;
+            ax /= alen; az /= alen;
+            oxm = 0.5 * (nox + fox); ozm = 0.5 * (noz + foz);
+            olen = sqrt(oxm * oxm + ozm * ozm);
+            if (olen < 0.001) continue;
+            oxm /= olen; ozm /= olen;
+            cx = 0.5 * (e[0] + e[3]);
+            cy = 0.5 * (e[1] + e[4]) + TD5_TG_VERGE_LIFT;
+            cz = 0.5 * (e[2] + e[5]);
+
+            {
+                const double hw = TD5_TG_R15_MEDIAN_HW;
+                const double H  = TD5_TG_R15_MEDIAN_H;
+                const double ur = reach / (double)TD5_TG_SPAN_LENGTH;
+                const double uw = (2.0 * hw) / (double)TD5_TG_SPAN_LENGTH;
+                int k;
+                /* TOP */
+                mp[0] = cx - ax*hw;              mp[1]  = cy + H;
+                mp[2] = cz - az*hw;
+                mp[3] = cx + ax*hw;              mp[4]  = cy + H;
+                mp[5] = cz + az*hw;
+                mp[6] = cx + ax*hw + oxm*reach;  mp[7]  = cy + H - drop;
+                mp[8] = cz + az*hw + ozm*reach;
+                mp[9] = cx - ax*hw + oxm*reach;  mp[10] = cy + H - drop;
+                mp[11] = cz - az*hw + ozm*reach;
+                mt[0]=0.0; mt[1]=0.0; mt[2]=uw; mt[3]=0.0;
+                mt[4]=uw;  mt[5]=ur;  mt[6]=0.0; mt[7]=ur;
+                tg_city_push_quad(mpx, mpy, mpz, muu, mvv, &mn, mp, mt);
+                /* Two flanks, so the island reads as a kerb and not a decal. */
+                for (k = 0; k < 2; k++) {
+                    const double sw2 = k ? hw : -hw;
+                    mp[0] = cx + ax*sw2;             mp[1]  = cy;
+                    mp[2] = cz + az*sw2;
+                    mp[3] = cx + ax*sw2 + oxm*reach; mp[4]  = cy - drop;
+                    mp[5] = cz + az*sw2 + ozm*reach;
+                    mp[6] = cx + ax*sw2 + oxm*reach; mp[7]  = cy - drop + H;
+                    mp[8] = cz + az*sw2 + ozm*reach;
+                    mp[9] = cx + ax*sw2;             mp[10] = cy + H;
+                    mp[11] = cz + az*sw2;
+                    mt[0]=0.0; mt[1]=0.0; mt[2]=ur; mt[3]=0.0;
+                    mt[4]=ur;  mt[5]=H/(double)TD5_TG_SPAN_LENGTH;
+                    mt[6]=0.0; mt[7]=H/(double)TD5_TG_SPAN_LENGTH;
+                    tg_city_push_quad(mpx, mpy, mpz, muu, mvv, &mn, mp, mt);
+                }
+                mnq = mn / 4;
+                h->moff[(*h->nmesh)++] = h->blk->len;
+                if (!tg_write_quad_mesh(h->blk, mpx, mpy, mpz, muu, mvv, mn,
+                                        &mpage, &mnq, 1))
+                    return 0;
+                tg_acct(TG_ACCT_CROSSFURN, h->si);
+                s_r15_medians++;
+            }
+        }
+    }
+    return 1;
 }
 
 /* ==========================================================================
@@ -1535,6 +1703,9 @@ static int tg_r13_fill_here(const TG_NodeList *nl, int si, int nspans, int s,
     return kind;
 }
 
+/* [R15 CITY item 7] Gap-interior blocks refused because the gap is a street. */
+static long s_r15_fill_street;
+
 static int tg_r13_emit_gap_infill(const TG_FBHook *h)
 {
     const TG_Biome *b = h->b;
@@ -1564,6 +1735,34 @@ static int tg_r13_emit_gap_infill(const TG_FBHook *h)
          * frontage instead of standing it behind one. */
         depth = (kind == 2) ? g.depth : tg_facade_depth(b);
         set   = sw + depth + TD5_TG_R13_SET + (double)(rh % 900u);
+        /* [R15 CITY item 7] "this building is on top of a street."
+         *
+         * MEASURED, and this emitter -- not the back rows -- is the one. The
+         * picker's mesh (entry 34, page 383, 40 verts, kind "city") projects
+         * onto the centreline at span ~136 RIGHT, lateral ~14800; back rows are
+         * skipped there (TD5RE_R15_OCC_DIAG=137 reports blocked=1 on that side)
+         * and 40 verts is tg_bg_building_box, which has SIX call sites, not one.
+         * The setback above lands squarely on it: sw(1200) + depth + R13_SET +
+         * 0..900 puts the box around lateral 13000-14000, while the side street
+         * at that span runs out to 22800. Note the `sw` here is the biome
+         * NOMINAL (tg_city_sidewalk_w at the top of this function), not the
+         * per-span/per-side width the pavement and the street actually use --
+         * but even the right width would not have saved it, because nothing in
+         * this emitter asks about the street at all.
+         *
+         * REFUSE rather than push out. This block exists to fill a gap that
+         * would otherwise read as bare ground; a gap with a side street running
+         * down it is not bare, and shoving the box out past 22800 would just
+         * duplicate the reveal row that already terminates that vista. Same
+         * answer, and the same reasoning, as tg_prop_one's refusal on
+         * side-street tarmac: "there is no pavement on a side-street mouth to
+         * stand on, so the honest answer is to place nothing". Reuses that very
+         * predicate so the street this consults is the street that was laid. */
+        if (td5_env_flag_on("TD5RE_R15_FILL_STREET") &&
+            tg_xstreet_occupies(h->nl, h->si, sg, set)) {
+            s_r15_fill_street++;
+            continue;
+        }
         rows  = b->floors_min + (int)((rh >> 9) % 4u);
         {   /* [R11 BIOME item 4] thin with the town, like every other mass. */
             const double tr = tg_town_ramp(h->si);
@@ -3079,4 +3278,22 @@ void tg_r12_band_params(int si, double *out_h, double *out_back)
     }
     *out_h = (dist < TD5_TG_R12_BAND_TAPER)
            ? h * (double)dist / (double)TD5_TG_R12_BAND_TAPER : h;
+}
+
+/* [R15] Per-module half of the round-15 report. Split out of the single
+ * tg_r15_sky_report the work was first written against: after the trackgen
+ * split its counters live in four different modules, and a file-static
+ * cannot be read from another translation unit. One report per owning
+ * module keeps the counters static where they belong.  */
+void tg_r15_streets_report(void)
+{
+    TD5_LOG_I(LOG_TAG, "[R15 CITY item 7] gap-interior infill blocks refused "
+              "(the gap is a side street) = %ld (knob TD5RE_R15_FILL_STREET=%s)",
+              s_r15_fill_street,
+              td5_env_flag_on("TD5RE_R15_FILL_STREET") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG, "[R15 CROSS item 9] medians laid down wide crossings "
+              "(>= %d spans of width, both kerbs open) = %ld (knob "
+              "TD5RE_R15_XWIDE_MEDIAN=%s)", TD5_TG_R15_MEDIAN_MIN,
+              s_r15_medians,
+              td5_env_flag_on("TD5RE_R15_XWIDE_MEDIAN") ? "on" : "off");
 }
