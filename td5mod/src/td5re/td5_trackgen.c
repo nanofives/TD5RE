@@ -3158,8 +3158,15 @@ static int tg_scenery_entry(int e)
                          * per span whether the gore is median-sized; a wide
                          * split still emits nothing new (its widths fail
                          * tg_emit_avenue_divider's own fill test). */
+                        /* [MEDIAN/BRIDGE 2026-09-07] ... and never as a stub on
+                         * a bridge. A fork that only overlaps the head of a
+                         * bridge run used to start a median on the deck and drop
+                         * it mid-crossing; it is now all spans of the run or
+                         * none (tg_median_bridge_uniform). Off a bridge this is
+                         * always 1, so nothing else changes. */
                         if (ok && (tg_fork_is_avenue(fi)
                                    || tg_r11_median_rise()) &&
+                            tg_median_bridge_uniform(nl, si, br_lanes) &&
                             td5_env_flag_on("TD5RE_AUTOTRACK_AVENUE_DIVIDER"))
                             if (!tg_emit_avenue_divider(nl, si, fi, sh0, sh1,
                                                         gw0, gw1, br_lanes,

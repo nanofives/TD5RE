@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 07 (generated tracks)" },
+    { CL_ITEM,    "Terrain no longer shows through behind a tree line when" },
+    { CL_ITEM,    "  the trees have a gap further along." },
+    { CL_ITEM,    "A central median never starts on a bridge and quits" },
+    { CL_ITEM,    "  halfway: it covers the whole crossing or none of it." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 06 (generated tracks)" },
     { CL_ITEM,    "Roadside ponds are off. They were a flat water tile laid" },
     { CL_ITEM,    "  straight on grass, with no bank to sit in." },

@@ -1226,6 +1226,39 @@ void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
     }
 }
 
+/* [SKIRT/COAST 2026-09-07] Is this side's ground skirt redundant because the
+ * bridge's own water + coast already cover it?
+ *
+ * Reported, on two consecutive bridge spans (kind=skirt, page 5 GROUND):
+ * "this geometry at the side of the bridge should be deleted if there's already
+ * a coastline".
+ *
+ * tg_emit_ground is the unconditional first mesh of EVERY ring span. On a bridge
+ * run it is reshaped -- the gorge pulls the bank back and (with SUBMERGE on)
+ * drives it under the river surface -- but it is never dropped, and it never
+ * consults tg_emit_bridge_coast or the water plane. Beside a coast bridge that
+ * leaves a GROUND slab in the same place the coast band and the water already
+ * describe, which is the doubled geometry that was picked.
+ *
+ * Deliberately narrow, so it cannot punch a hole in the terrain:
+ *   - SEAWARD side only. `seaward` uses the identical expression as
+ *     tg_ground_side_raw, and water_side is +1/-1 for the biome run, so at most
+ *     ONE of the two sides can ever match. The landward skirt is untouched.
+ *   - When water_side is 0.0 (no sea in this biome) `seaward` is false on both
+ *     sides, so a non-coastal bridge keeps both skirts exactly as before.
+ *   - Bridge runs only, and only where the water is actually clear there.
+ * Knob TD5RE_BRIDGE_SKIRT_COAST=0 restores the old both-sides behaviour. */
+static int tg_bridge_skirt_redundant(int si, int is_left, double water_side)
+{
+    const int seaward = (water_side > 0.0 && is_left) ||
+                        (water_side < 0.0 && !is_left);
+    if (!seaward)                        return 0;
+    if (!tg_span_in_bridge_run(si))      return 0;
+    if (!tg_water_span_clear(si))        return 0;
+    if (!td5_env_flag_on("TD5RE_BRIDGE_SKIRT_COAST")) return 0;
+    return 1;
+}
+
 int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
                           double water_side)
 {
@@ -1300,6 +1333,12 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
          * beach and the gorge) the index is clamped, which pairs the last real
          * point with itself and closes the seam with a degenerate quad rather
          * than a hole. */
+        /* [SKIRT/COAST 2026-09-07] Drop the seaward skirt where the bridge's own
+         * water + coast already cover that ground. At most one side can match
+         * (see tg_bridge_skirt_redundant), so `n` always keeps the landward
+         * side's quads and the mesh is never emitted empty. */
+        if (tg_bridge_skirt_redundant(si, is_left, water_side)) continue;
+
         tg_ground_side(nl, si, is_left, water_side, &pa);
         if (tg_r8_bridge_water() && si + 1 < nl->count)
             tg_ground_side(nl, si + 1, is_left, water_side, &pb);
@@ -1827,14 +1866,41 @@ static int tg_r13_band_covers(const TG_NodeList *nl, int g0, int g1,
     int s, lo = g0 - TD5_TG_SPANS_PER_ENTRY, hi = g1 + TD5_TG_SPANS_PER_ENTRY;
     double top = 1e30, lat = 0.0;
 
+    /* [BAND CULL 2026-09-07] The window is the band's own extent [g0,g1] PLUS a
+     * one-entry margin either side (the margin exists because a band can be seen
+     * obliquely, from past the end of the tree wall that hides it head-on).
+     *
+     * This used to bail on the FIRST span anywhere in that window without a tree
+     * band, margin included. A tree line with a single gap four spans beyond the
+     * band therefore disabled the cull completely and the band was drawn in full,
+     * behind the trees -- which is the reported "this geometry is under existing
+     * trees".
+     *
+     * Split the requirement instead of loosening it:
+     *   - over the band's OWN spans the wall must still be unbroken (hard: those
+     *     are the spans the band is actually seen at, head-on);
+     *   - in the MARGIN a small number of gaps is tolerated, because one missing
+     *     tree beyond the band's end does not expose the band behind it.
+     * The measured top/lat still come only from spans that HAVE a wall, so a
+     * tolerated gap can never loosen the height or lateral test itself.
+     * TD5RE_R13_BAND_MARGIN=0 restores the old all-or-nothing window. */
+    int misses = 0;
+    const int margin_slack =
+        td5_env_flag_on("TD5RE_R13_BAND_MARGIN") ? 1 : 0;
+
     if (lo < 0) lo = 0;
     if (hi > nl->count - 2) hi = nl->count - 2;
     for (s = lo; s <= hi; s++) {
         double t, l;
-        if (!tg_r13_band_side(nl, s, side, &t, &l)) return 0;
+        if (!tg_r13_band_side(nl, s, side, &t, &l)) {
+            if (s >= g0 && s <= g1) return 0;      /* band's own extent: hard */
+            if (++misses > margin_slack) return 0; /* margin: bounded slack */
+            continue;
+        }
         if (t < top) top = t;
         if (l > lat) lat = l;
     }
+    if (top > 1e29) return 0;         /* nothing measured -- do not cull blind */
     *out_top = top;
     *out_lat = lat;
     return 1;
