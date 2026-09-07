@@ -3253,6 +3253,17 @@ static int tg_scenery_entry(int e)
                             if (td5_env_flag_on("TD5RE_R17_GORE_ROAD") &&
                                 tg_gore_reads_as_median(nl, si, br_lanes))
                                 gore_page = tg_road_page(si);
+                            /* [R19 FORK THROAT] A sliver gore at a fork mouth /
+                             * rejoin (the pinched throat, one span past the
+                             * split) is a tiny GREEN patch hemmed by tarmac and
+                             * reads as a void where the road should be whole.
+                             * Pave it road so the pinch looks like the road
+                             * briefly splitting -- the R17 case R17_GORE_ROAD's
+                             * median-width test misses on a non-avenue fork.
+                             * TD5RE_R19_GORE_THROAT_ROAD=0 = A/B. */
+                            if (td5_env_flag_on("TD5RE_R19_GORE_THROAT_ROAD") &&
+                                tg_gore_throat_sliver(nl, si, br_lanes))
+                                gore_page = tg_road_page(si);
                             if (tg_span_in_tunnel(si) &&
                                 td5_env_flag_on("TD5RE_R8_BORE_MEDIAN"))
                                 gore_page = TD5_TG_PAGE_R8_BRIDGE + 0;

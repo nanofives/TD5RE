@@ -2555,6 +2555,45 @@ int tg_gore_reads_as_median(const TG_NodeList *nl, int si, int br_lanes)
     return 1;
 }
 
+/* [R19 FORK THROAT 2026-09-07] "on the left track near the median ... there's
+ * nothing." The picked mesh (AUTO e224 s11) is a 4-vertex / 1-command GREEN quad
+ * -- tg_emit_gore's structural gore FLOOR -- sitting one span past a MAJOR fork's
+ * split point (seed 771144 fork 3, F=895; entry 224 = spans 896..899, i.e. the
+ * fork THROAT). At the throat the two carriageways have only just parted, so the
+ * gore between them is PINCHED to a sliver (measured: gw0/gw1 both < 0 at k=0,
+ * still under ~100 through k=3 -- the branch's inner edge is at or right of the
+ * road centre, which is the TD5_TG_GORE_OVERLAP that closes the mouth slit). The
+ * floor is therefore a tiny GREEN patch dropped TD5_TG_GORE_DROP below the road,
+ * hemmed by tarmac on all sides -- it reads as a small green void where the road
+ * should simply be whole.
+ *
+ * R17_GORE_ROAD already paves a MEDIAN-WIDTH gore as road, but the throat sliver
+ * falls outside its median-width test (a MAJOR fork is not an avenue, and a
+ * sliver fails tg_r12_median_fill), so it stayed ground. This names exactly the
+ * complementary case: a sliver gore, at a fork's mouth or rejoin, where the two
+ * carriageways are (nearly) one road. Paving it with the ROAD page makes the
+ * pinch read as the road briefly splitting -- the same "looks like the road
+ * widening" logic R17 uses for a short unmediated split, applied at the throat.
+ *
+ * SLIVER is the island's own reject threshold verbatim (gw0 < 200 && gw1 < 200),
+ * so this fires exactly where the island refuses to stand for being too pinched
+ * and nowhere the wide body of a split (gw >= 200, genuine ground between two
+ * diverging roads) lives. Avenue throats were already handled by R17 (an avenue
+ * with the island sliver-rejected passes tg_gore_reads_as_median), so this is
+ * the missing NON-avenue case. Same gore-width authority (tg_r12_median_gore_w)
+ * as every other gore predicate, so it cannot disagree about the width. The bore
+ * override at the call site still wins indoors. */
+int tg_gore_throat_sliver(const TG_NodeList *nl, int si, int br_lanes)
+{
+    int fi;
+    double gw0, gw1;
+    if (!nl || si < 0 || si + 1 >= nl->count) return 0;
+    fi = tg_fork_of_main(si);
+    if (fi < 0) return 0;
+    tg_r12_median_gore_w(nl, si, fi, br_lanes, &gw0, &gw1);
+    return gw0 < 200.0 && gw1 < 200.0;
+}
+
 /* Number of edges carrying more than one rail class, with the offenders named.
  * Returns doubled + zero-rail regressions, i.e. every violation of "exactly one
  * rail per edge", so a caller can assert on a single number. */
