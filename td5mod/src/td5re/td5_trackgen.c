@@ -3136,6 +3136,16 @@ static int tg_scenery_entry(int e)
                              * what is legal inside it, the same rule that keeps
                              * sidewalks and guardrails out of a tunnel; a bore
                              * floor is made surface. */
+                            /* [R17 MEDIAN item 2] "Avoid medians without a
+                             * height difference." A median-width gore with no
+                             * raised island (a fork too short for one, R16) is a
+                             * flat ground strip that reads as a flush median.
+                             * Pave it as ROAD so the fork throat looks like the
+                             * road widening, not a median. Bore override below
+                             * still wins indoors. TD5RE_R17_GORE_ROAD=0 = A/B. */
+                            if (td5_env_flag_on("TD5RE_R17_GORE_ROAD") &&
+                                tg_gore_reads_as_median(nl, si, br_lanes))
+                                gore_page = tg_road_page(si);
                             if (tg_span_in_tunnel(si) &&
                                 td5_env_flag_on("TD5RE_R8_BORE_MEDIAN"))
                                 gore_page = TD5_TG_PAGE_R8_BRIDGE + 0;
