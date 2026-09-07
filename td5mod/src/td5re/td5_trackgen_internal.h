@@ -4588,6 +4588,17 @@ int tg_r11_treeline_fit(void);
 #define TD5_TG_TL_TILE_U   3000.0
 #define TD5_TG_TL_CROWN_V  0.375     /* rows 0..23 of 64, measured on page 47 */
 #define TD5_TG_TL_MAX_BODY 10
+/* [R16 item C 2026-09-07] Vertical tile SCALE for the treeline body stack.
+ * Reported (p47 TREELINE): "a lot of vertical repetition ... a better way to
+ * represent a taller texture for a lot of forest". The R12 density stack tiles
+ * the page body (rows 24..63) every TD5_TG_TL_TILE_U (3000) world units up the
+ * wall, so a tall band shows many identical mirrored repeats. Scaling ONLY the
+ * VERTICAL tile size up (the horizontal du12 tiling is left at TILE_U so the
+ * square-tile aspect and the u wrap are untouched) makes each body tile taller
+ * and drops the repeat count. 1.8 keeps ~135 world/texel vertically, still finer
+ * than R11's single-tile 187 but with ~1.8x fewer repeats.
+ * Gated OFF (factor 1.0) by default via TD5RE_R16_TREELINE_VSCALE. */
+#define TD5_TG_R16_TREELINE_VSCALE 1.8
 int tg_r12_treeline_density(void);
 double tg_r12_tl_fold(double t);
 double tg_treeline_height(const TG_Biome *b);

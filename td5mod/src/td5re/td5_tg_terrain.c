@@ -1259,6 +1259,49 @@ static int tg_bridge_skirt_redundant(int si, int is_left, double water_side)
     return 1;
 }
 
+/* [R16 item B 2026-09-07] Is this side's ground skirt hidden by an UNBROKEN city
+ * frontage, so the grass under it can never be seen from the road?
+ *
+ * Reported (kind=skirt, page 2 GREEN, seed 20260907 e67 = spans 268-271): "this
+ * grass is never visible". On a paved CITY span the skirt is covered end to end
+ * on that side:
+ *   - the NEAR strip [road edge .. sidewalk_w] lies under the RAISED PAVEMENT
+ *     slab (tg_r12_pave_stands), whose kerb face closes the step to the asphalt;
+ *   - the FAR strip [sidewalk_w .. verge] stands behind the FACADE WALL, whose
+ *     base sits flush at the kerb (tg_side_geom starts the wall at KERB_H) and
+ *     whose buildings run outward past the verge.
+ * With both present there is opaque geometry over the whole skirt on that side.
+ *
+ * Modelled on tg_r13_band_covers (the far-band tree-wall cull in this file):
+ * the wall must be UNBROKEN over the slab AND one span of margin either side,
+ * because a single gap at the slab's end would expose the grass behind it to an
+ * oblique view down the street. Uses the generator's own frontage predicate
+ * (tg_facade_stands + tg_facade_built) exactly as the R13 apron/edge rules do,
+ * so this cannot disagree with where the wall actually is.
+ *
+ * Deliberately narrow, and UNVERIFIED at runtime (this build has no game
+ * assets), so it is gated OFF by default -- TD5RE_R16_CITY_SKIRT_CULL=1 to A/B
+ * it. tg_facade_stands is 0 on bridge runs and under overpass decks, so this
+ * never fires there; a tree-band biome has no sidewalk (tg_city_sidewalk_w==0)
+ * so tg_facade_stands is 0 and the far-band cull keeps its own domain. */
+static int tg_city_skirt_hidden(const TG_NodeList *nl, int si, int is_left)
+{
+    const int left = is_left ? 1 : 0;
+    int k;
+    if (!td5_env_flag_off("TD5RE_R16_CITY_SKIRT_CULL")) return 0;
+    if (si <= 0 || si + 1 >= nl->count)                 return 0;
+    /* NEAR strip: raised pavement on this side over both ends of the slab. */
+    if (!tg_r12_pave_stands(nl, si,     left)) return 0;
+    if (!tg_r12_pave_stands(nl, si + 1, left)) return 0;
+    /* FAR strip: an unbroken frontage over the slab plus one span of margin. */
+    for (k = si - 1; k <= si + 2; k++) {
+        if (k < 0 || k >= nl->count)              return 0;
+        if (!tg_facade_stands(k))                 return 0;
+        if (!tg_facade_built(k, left))            return 0;
+    }
+    return 1;
+}
+
 int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
                           double water_side)
 {
@@ -1274,6 +1317,14 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
      * not from this span's dithered biome roll. See tg_topo_ground_index. */
     int seg_page = tg_topo_surface_page(si), seg_nq;
     int s, k, n = 0;
+    /* [R16 item B] Drop a side's grass skirt where a city frontage hides it end
+     * to end. Precomputed for both sides so that if BOTH would cull we keep the
+     * left one: the mesh must never come out empty (the skirt is the span's
+     * first/ground model, and a zero-vert mesh would shift every later model
+     * index for the span). At most a wasted hidden slab on one side then. */
+    int cull_l = tg_city_skirt_hidden(nl, si, 1);
+    int cull_r = tg_city_skirt_hidden(nl, si, 0);
+    if (cull_l && cull_r) cull_l = 0;
 
     tg_road_edge(nl, si, 0.0, 0.0, 1.0, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
     tg_road_edge(nl, si, 1.0, 0.0, 1.0, &flx, &fly, &flz, &frx, &fry, &frz);
@@ -1338,6 +1389,8 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
          * (see tg_bridge_skirt_redundant), so `n` always keeps the landward
          * side's quads and the mesh is never emitted empty. */
         if (tg_bridge_skirt_redundant(si, is_left, water_side)) continue;
+        /* [R16 item B] hidden behind an unbroken city frontage on this side. */
+        if (is_left ? cull_l : cull_r) continue;
 
         tg_ground_side(nl, si, is_left, water_side, &pa);
         if (tg_r8_bridge_water() && si + 1 < nl->count)
@@ -2171,7 +2224,14 @@ int tg_emit_fb_flora(const TG_FBHook *h)
             const double ua   = tg_r12_tl_fold((double)si       * du12);
             const double ub2  = tg_r12_tl_fold((double)(si + 1) * du12);
             const double bodyf = 1.0 - TD5_TG_TL_CROWN_V;
-            int kb = (int)floor((band / TD5_TG_TL_TILE_U - TD5_TG_TL_CROWN_V)
+            /* [R16 item C] VERTICAL tile size only -- du12 above keeps TILE_U so
+             * the horizontal square-tile aspect and the u wrap are unchanged. A
+             * taller vertical tile means fewer mirrored body repeats up the wall
+             * (the reported vertical repetition). Gated OFF (factor 1.0). */
+            const double tile_v = TD5_TG_TL_TILE_U *
+                (td5_env_flag_off("TD5RE_R16_TREELINE_VSCALE")
+                     ? TD5_TG_R16_TREELINE_VSCALE : 1.0);
+            int kb = (int)floor((band / tile_v - TD5_TG_TL_CROWN_V)
                                 / bodyf + 0.5);
             double total, fc;
             int j;
