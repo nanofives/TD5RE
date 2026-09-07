@@ -3487,6 +3487,10 @@ extern long s_r12_median_caps;
 extern long s_r12_median_runs;
 int tg_r12_median_fill(double gw0, double gw1);
 int tg_r12_median_at(const TG_NodeList *nl, int si, int br_lanes);
+/* [MEDIAN/BRIDGE 2026-09-07] 1 unless si is on a bridge run the median cannot
+ * cover end to end. See the definition in td5_tg_bridge.c for why a partial
+ * median cannot simply be extended. */
+int tg_median_bridge_uniform(const TG_NodeList *nl, int si, int br_lanes);
 /* [R11 CROSS items 9+15] "A street crosses this road edge" -- defined with the
  * guardrail block far below, asked here so the zero-rail invariant can tell an
  * intentional gap at a crossing from an edge that lost its only barrier. */

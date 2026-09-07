@@ -3434,8 +3434,10 @@ static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
         return TD5_SCREEN_OPTIONS_HUB;
     case TD5_SCREEN_LIGHTING_OPTIONS:   /* [RT2 P8] entered from GRAPHICS OPTIONS -> BACK there */
         return TD5_SCREEN_DISPLAY_OPTIONS;
-    case TD5_SCREEN_AUTOTRACK_OPTIONS:  /* [R2 item 25] only reachable from track-select */
-        return TD5_SCREEN_TRACK_SELECTION;
+    case TD5_SCREEN_AUTOTRACK_OPTIONS:  /* [R2 item 25] track-select OR quick race */
+        /* [AUTOTRACK QUICKRACE 2026-09-06] No longer track-select-only: Quick Race
+         * grew its own STUDIO chip, so BACK follows whoever opened it. */
+        return frontend_autotrack_parent_screen();
 
     case TD5_SCREEN_CONTROLLER_BINDING:
         return TD5_SCREEN_CONTROL_OPTIONS;

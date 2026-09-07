@@ -2196,7 +2196,7 @@ static void tg_r12_median_gore_w(const TG_NodeList *nl, int si, int fi,
  * emitter about si-1 and si+1 to find a run's ends, and about si itself as a
  * self-check (logged under the diag knob), which is what keeps this from
  * becoming a stale copy of the placement rule. */
-int tg_r12_median_at(const TG_NodeList *nl, int si, int br_lanes)
+static int tg_median_at_raw(const TG_NodeList *nl, int si, int br_lanes)
 {
     int fi;
     double gw0, gw1;
@@ -2209,6 +2209,51 @@ int tg_r12_median_at(const TG_NodeList *nl, int si, int br_lanes)
     if (gw0 < 200.0 && gw1 < 200.0) return 0;              /* sliver */
     if (!tg_r12_median_fill(gw0, gw1) && !tg_fork_is_avenue(fi)) return 0;
     return 1;
+}
+
+/* [MEDIAN/BRIDGE 2026-09-07] A median may only appear on a bridge run if it
+ * covers EVERY span of that run.
+ *
+ * Reported: "I see this median during a bridge and just the beginning -- if you
+ * want to add a median to a bridge keep it in all its duration."
+ *
+ * The median is not a bridge feature. It is the raised island standing on the
+ * GORE between a fork's two carriageways, so it exists exactly where a fork
+ * exists (tg_fork_of_main) and its geometry is the fork's gore widths. Where a
+ * fork region overlaps only the head of a bridge run, the median starts on the
+ * deck and stops mid-span, which is what was seen.
+ *
+ * Literally extending it to the rest of the run is not possible: past the fork
+ * there is only one carriageway, so there is no gore for an island to stand on
+ * and no gw0/gw1 to build it from. Holding the fork's end widths would be
+ * fabricated geometry -- a divider splitting a road that is not split.
+ *
+ * So uniformity is enforced the only way the geometry allows: all spans of the
+ * run, or none. A fork long enough to span the whole bridge still draws its
+ * median across the whole bridge; a fork that only clips the end draws none
+ * there and stays a normal divided avenue on solid ground either side.
+ *
+ * Off a bridge there is no constraint -- returns 1. */
+int tg_median_bridge_uniform(const TG_NodeList *nl, int si, int br_lanes)
+{
+    int s0 = 0, s1 = 0, s;
+    if (!nl) return 1;
+    if (!td5_env_flag_on("TD5RE_MEDIAN_BRIDGE_UNIFORM")) return 1;  /* =0 for A/B */
+    if (!tg_span_in_bridge_run(si)) return 1;
+    tg_bridge_run_bounds(nl, si, &s0, &s1);
+    if (s1 < s0) return 1;                                 /* degenerate bounds */
+    for (s = s0; s <= s1; s++)
+        if (!tg_median_at_raw(nl, s, br_lanes)) return 0;
+    return 1;
+}
+
+/* Public predicate = the placement rule AND the bridge-uniformity rule, so the
+ * emitter's end-cap probes of si-1 / si+1 keep agreeing with what is actually
+ * emitted. The uniformity loop calls the _raw form, so this does not recurse. */
+int tg_r12_median_at(const TG_NodeList *nl, int si, int br_lanes)
+{
+    return tg_median_at_raw(nl, si, br_lanes) &&
+           tg_median_bridge_uniform(nl, si, br_lanes);
 }
 
 /* Number of edges carrying more than one rail class, with the offenders named.
