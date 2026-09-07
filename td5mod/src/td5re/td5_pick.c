@@ -531,8 +531,17 @@ void td5_pick_finish_frame(void)
          * [PICK 2026-09-06] user request: "make the copied coordinates fit in one line". */
         {
             int off, i;
-            off = snprintf(s_json, sizeof s_json, "%s L%d e%d s%d",
-                           trackid, level_num, entry, s_best_slot);
+            /* [PICK 2026-09-07 item A] The AUTO track's level_num is a fixed 0
+             * (it has no shipped-zip level number), so "L0" was meaningless
+             * noise the user kept pasting. Omit the L<n> field entirely for the
+             * auto track; keep it for shipped tracks where it is the real
+             * (level, page) import key gen_tg_pages.py --from-pick consumes. */
+            if (is_auto)
+                off = snprintf(s_json, sizeof s_json, "%s e%d s%d",
+                               trackid, entry, s_best_slot);
+            else
+                off = snprintf(s_json, sizeof s_json, "%s L%d e%d s%d",
+                               trackid, level_num, entry, s_best_slot);
             if (kind && off > 0 && off < (int)sizeof s_json)
                 off += snprintf(s_json + off, sizeof s_json - off, " %s", kind);
             if (off > 0 && off < (int)sizeof s_json)
