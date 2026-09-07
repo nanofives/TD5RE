@@ -933,8 +933,12 @@ int tg_r11_arm_side(const TG_NodeList *nl, int si, int s)
     if (tg_facade_built(si, s)) return 0;          /* built = no junction */
     if (tg_block_is_park(si, s)) return 0;         /* a park, not a street */
     if (tg_side_corridor_here(nl, si, sg)) return 0;
-    return (tg_r11_corner_stands(si - 1, s) ? 1 : 0)
-         | (tg_r11_corner_stands(si + 1, s) ? 2 : 0);
+    /* [R16 CITY item 1] pavement corner, blind to the outskirts density ramp:
+     * a ramp-retracted frontage still carries the raised pavement, so its arm
+     * still wraps the sidewalk down the side street (tg_r16_pave_corner_stands
+     * == tg_r11_corner_stands when TD5RE_R16_RAMP_JUNCTION is off). */
+    return (tg_r16_pave_corner_stands(si - 1, s) ? 1 : 0)
+         | (tg_r16_pave_corner_stands(si + 1, s) ? 2 : 0);
 }
 
 static int tg_block_emit_intersection(const TG_FBHook *h)
@@ -1158,6 +1162,121 @@ static int tg_block_emit_park(const TG_FBHook *h)
     return 1;
 }
 
+/* [R16 CITY item 2] "if you want to create big plazas where buildings are
+ * retracted ... add some elements to these plazas so they look more alive like
+ * park sections."
+ *
+ * The outskirts DENSITY ramp (tg_town_ramp_open) retracts a run's buildings
+ * across the leading spans of a wilderness-to-town run, leaving the raised
+ * pavement in place (tg_facade_built is still 1, so the sidewalk hook keeps the
+ * slab) but BARE GROUND where the wall would have stood -- the empty ground
+ * slab the user picked (skirt / GROUND). This dresses that freed footprint with
+ * a park section: a lawn from the pavement back edge out to where the wall would
+ * have been, a boundary hedge at the back, and the occasional house -- reusing
+ * the R3 park geometry rather than inventing any. Everything sits BEHIND the
+ * raised pavement (setback >= sw) and stops at the wall line (sw + facade
+ * depth), which is well inside where the back rows stand (sw + depth + 2*3200),
+ * so it overlaps neither the road nor the backrow band.
+ *
+ * ONLY on ramp-retracted, pattern-built, paved sides -- never a side-street
+ * mouth (tg_facade_built == 0, handled by the intersection/park emitters) and
+ * never where a real building actually stands (tg_town_ramp_open == 0). Default
+ * ON; TD5RE_R16_PLAZA_PARK=0 leaves the plaza bare for an A/B. */
+static int tg_r16_emit_outskirt_park(const TG_FBHook *h)
+{
+    /* Hardened scenery biome, the same one tg_city_span_paved, tg_facade_built
+     * and tg_town_ramp_open key off, so the dressing lands exactly where the
+     * pavement and the retracted-frontage decision do (h->b is the BLENDED
+     * biome and can disagree over the leading blend band). */
+    const TG_Biome *b = &k_biomes[tg_scenery_biome_index(h->si)];
+    const double sw = tg_city_sidewalk_w(b);
+    const double depth = tg_facade_depth(b);
+    int s;
+
+    if (!td5_env_flag_on("TD5RE_R16_PLAZA_PARK")) return 1;
+    if (!(sw > 0.0) || !(depth > 0.0)) return 1;
+    if (tg_span_in_bridge_run(h->si)) return 1;
+    if (tg_branches_enabled() && tg_span_in_fork_clear(h->si)) return 1;
+
+    for (s = 0; s < 2; s++) {
+        const double sg = s ? 1.0 : -1.0;
+        double e[10], q[12], t[8], px[8], py[8], pz[8], uu[8], vv[8];
+        const double inner = sw;                 /* behind the raised slab      */
+        const double outer = sw + depth;         /* the retracted wall line     */
+        const double d_in  = TD5_TG_GROUND_DROP * inner / TD5_TG_GROUND_WIDTH;
+        const double d_out = TD5_TG_GROUND_DROP * outer / TD5_TG_GROUND_WIDTH;
+        const double u_d = depth / (double)TD5_TG_SPAN_LENGTH;
+        int seg_page, seg_nq, n;
+
+        /* Only a slot the ramp emptied: pattern built, wall retracted. */
+        if (!tg_facade_built(h->si, s)) continue;
+        if (!tg_town_ramp_open(h->si, s)) continue;
+        if (tg_side_blocked(h->si, sg)) continue;
+        tg_city_edge_frame(h->nl, h->si, sg, e);
+
+        /* Lawn, pavement back edge -> wall line, sinking with the skirt. */
+        n = 0; seg_page = TD5_TG_PAGE_R3_BLOCK + 0;   /* park lawn */
+        q[0]  = e[0] + e[6] * inner; q[1]  = e[1] + TD5_TG_VERGE_LIFT - d_in;
+        q[2]  = e[2] + e[7] * inner;
+        q[3]  = e[0] + e[6] * outer; q[4]  = e[1] + TD5_TG_VERGE_LIFT - d_out;
+        q[5]  = e[2] + e[7] * outer;
+        q[6]  = e[3] + e[8] * outer; q[7]  = e[4] + TD5_TG_VERGE_LIFT - d_out;
+        q[8]  = e[5] + e[9] * outer;
+        q[9]  = e[3] + e[8] * inner; q[10] = e[4] + TD5_TG_VERGE_LIFT - d_in;
+        q[11] = e[5] + e[9] * inner;
+        t[0] = 0.0; t[1] = (double)h->si;
+        t[2] = u_d; t[3] = (double)h->si;
+        t[4] = u_d; t[5] = (double)h->si + 1.0;
+        t[6] = 0.0; t[7] = (double)h->si + 1.0;
+        tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+        if (*h->nmesh >= h->maxmesh) return 1;
+        seg_nq = n / 4;
+        tg_acct(TG_ACCT_PARK, h->si);
+        h->moff[(*h->nmesh)++] = h->blk->len;
+        if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                                &seg_page, &seg_nq, 1))
+            return 0;
+
+        /* Boundary hedge at the back, on the sloped lawn -- same page and height
+         * as the R3 park hedge, so a former building line reads as a garden
+         * boundary rather than bare ground. */
+        if (td5_env_flag_on("TD5RE_AUTOTRACK_PARK_HEDGE")) {
+            const double hset  = sw + depth * 0.85;
+            const double hdrop = TD5_TG_GROUND_DROP * hset / TD5_TG_GROUND_WIDTH;
+            const double hy    = TD5_TG_VERGE_LIFT - hdrop;
+            n = 0; seg_page = TD5_TG_PAGE_R3_BLOCK + 1;   /* park hedge */
+            q[0]  = e[0] + e[6] * hset; q[1]  = e[1] + hy;
+            q[2]  = e[2] + e[7] * hset;
+            q[3]  = e[3] + e[8] * hset; q[4]  = e[4] + hy;
+            q[5]  = e[5] + e[9] * hset;
+            q[6]  = e[3] + e[8] * hset; q[7]  = e[4] + hy + TD5_TG_HEDGE_H;
+            q[8]  = e[5] + e[9] * hset;
+            q[9]  = e[0] + e[6] * hset; q[10] = e[1] + hy + TD5_TG_HEDGE_H;
+            q[11] = e[2] + e[7] * hset;
+            t[0] = 0.0; t[1] = 1.0; t[2] = 1.0; t[3] = 1.0;
+            t[4] = 1.0; t[5] = 0.0; t[6] = 0.0; t[7] = 0.0;
+            tg_city_push_quad(px, py, pz, uu, vv, &n, q, t);
+            if (*h->nmesh >= h->maxmesh) return 1;
+            seg_nq = n / 4;
+            tg_acct(TG_ACCT_PARK, h->si);
+            h->moff[(*h->nmesh)++] = h->blk->len;
+            if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, n,
+                                    &seg_page, &seg_nq, 1))
+                return 0;
+        }
+
+        /* A house on ~1 dressed span in 4, set back in the middle of the lawn --
+         * the same beat and emitter the R3 park uses. */
+        if (td5_env_flag_on("TD5RE_AUTOTRACK_PARK_HOUSES")) {
+            const unsigned int hh = ((unsigned)h->si * 2654435761u
+                                     + (unsigned)s * 40503u) * 0x9E3779B9u;
+            if ((hh >> 30) == 0u)
+                if (!tg_block_emit_house(h, e, sw + depth * 0.5)) return 0;
+        }
+    }
+    return 1;
+}
+
 /* Group BLOCK dispatcher (feedback R3 items 3-6). Wired into the scenery loop
  * next to tg_emit_fb_city; keeps all BLOCK-area emitters out of another area's
  * dispatcher. */
@@ -1166,6 +1285,7 @@ int tg_emit_fb_block(const TG_FBHook *h)
     if (!tg_city_span_paved(h)) return 1;      /* only where the city is */
     if (!tg_block_emit_intersection(h)) return 0;
     if (!tg_block_emit_park(h)) return 0;
+    if (!tg_r16_emit_outskirt_park(h)) return 0;   /* [R16 CITY item 2] */
     return 1;
 }
 
