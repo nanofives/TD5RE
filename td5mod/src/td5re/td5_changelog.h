@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 07 (generated tracks, night)" },
+    { CL_ITEM,    "Where a road splits, the narrow throat reads as road" },
+    { CL_ITEM,    "  instead of a small green hole in the tarmac." },
+    { CL_ITEM,    "Distant tree lines can render from a full-resolution" },
+    { CL_ITEM,    "  page, giving a clean crown edge (off by default)." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 07 (generated tracks, evening)" },
     { CL_ITEM,    "The tunnel walkway sits on a shoulder beside the road" },
     { CL_ITEM,    "  instead of on the carriageway." },
