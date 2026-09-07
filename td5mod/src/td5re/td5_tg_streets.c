@@ -766,11 +766,27 @@ static int tg_city_emit_forkback(const TG_FBHook *h)
         double px[4], py[4], pz[4], uu[4], vv[4], q[12];
         const double d = small ? TD5_TG_FORKBACK_DEPTH : TD5_TG_FORKBACK_DEPTH_TALL;
         int seg_page = TD5_TG_PAGE_R3_BLOCK + 0, seg_nq, n = 0;
-        const double u_d = d / (double)TD5_TG_SPAN_LENGTH;
-        q[0] = bx;              q[1] = by;  q[2] = bz;
-        q[3] = bx + lx0 * d;    q[4] = by;  q[5] = bz + lz0 * d;
+        /* [R17 CITY item 3] "floating grass -- is this supposed to be a park?"
+         * The lawn's front edge sat at the block front (set0, ~14000 out) with a
+         * bare gap back to the 12000 verge skirt, so it hung FLAT over the sunk
+         * far band as an isolated island. The BUILDING branch already solved the
+         * identical "does not reach the floor" problem by laying a plaza floor
+         * from the skirt reach out (tg_city_emit_forkback_plaza, inner =
+         * tg_verge_reach()-1000); do the same here by pulling the lawn's own inner
+         * edge back to that reach, so the green apron abuts the ordinary ground
+         * with no gap instead of floating. TD5RE_R17_FORKPARK_FLOOR=0 restores the
+         * island for an A/B. */
+        const double fin = td5_env_flag_on("TD5RE_R17_FORKPARK_FLOOR")
+                         ? tg_verge_reach() - 1000.0 : set0;
+        const double fnx = n0->x + lx0 * (n0->width * 0.5 + fin);
+        const double fnz = n0->z + lz0 * (n0->width * 0.5 + fin);
+        const double ffx = n1->x + lx1 * (n1->width * 0.5 + fin);
+        const double ffz = n1->z + lz1 * (n1->width * 0.5 + fin);
+        const double u_d = (set0 + d - fin) / (double)TD5_TG_SPAN_LENGTH;
+        q[0] = fnx;             q[1] = by;      q[2] = fnz;
+        q[3] = bx + lx0 * d;    q[4] = by;      q[5] = bz + lz0 * d;
         q[6] = bx + ax + lx1*d; q[7] = by + ay; q[8] = bz + az + lz1 * d;
-        q[9] = bx + ax;         q[10] = by + ay; q[11] = bz + az;
+        q[9] = ffx;             q[10] = by + ay; q[11] = ffz;
         px[0]=q[0]; py[0]=q[1]; pz[0]=q[2];  uu[0]=0.0;  vv[0]=(double)si;
         px[1]=q[3]; py[1]=q[4]; pz[1]=q[5];  uu[1]=u_d;  vv[1]=(double)si;
         px[2]=q[6]; py[2]=q[7]; pz[2]=q[8];  uu[2]=u_d;  vv[2]=(double)si + 1.0;
@@ -1086,6 +1102,20 @@ static int tg_block_emit_park(const TG_FBHook *h)
         tg_city_edge_frame(h->nl, h->si, sg, e);
 
         reach = tg_city_crossst_reach(h->b, sw);
+        /* [R17 CITY item 1] "avoid this grass, this should be a street crossing."
+         * A park is a bounded SQUARE, not a through-street corridor, but this lawn
+         * borrowed tg_city_crossst_reach -- the R8 side-STREET reach, up to
+         * TD5_TG_R8_XSTREET_MAX (21000). Past the 12000 verge skirt the lawn hung
+         * near-FLAT (its drop uses the 24000 GROUND_WIDTH, ~61 units at 21000)
+         * over the far band that has sunk toward the track floor, so a park read
+         * as a giant floating green "side street". Bound it to one block's depth,
+         * which is also inside the skirt, so the park sits on the ground as a
+         * compact square. TD5RE_R17_PARK_REACH=0 restores the street-length reach
+         * for an A/B. */
+        if (td5_env_flag_on("TD5RE_R17_PARK_REACH")) {
+            const double sq = sw + tg_facade_depth(h->b) + TD5_TG_BACKROW_GAP;
+            if (reach > sq) reach = sq;
+        }
         drop  = TD5_TG_GROUND_DROP * reach / TD5_TG_GROUND_WIDTH;
         u_r   = reach / (double)TD5_TG_SPAN_LENGTH;
 
@@ -1624,6 +1654,19 @@ static int tg_cross_emit_street_flank(const TG_FBHook *h)
         tg_city_edge_frame(h->nl, h->si, sg, e);
         ang = tg_block_arm_skew(h->si, s);
         reach = tg_xstreet_reach_at(h->nl, h->si, sg, ang, b, sw);
+        /* [R17 CITY item 2] "these buildings are floating." A flank block's base
+         * tracks tg_xstreet_drop, which stays FLAT past the 12000 verge skirt --
+         * but the far band there sinks toward the track floor, so a block placed
+         * beyond the skirt hangs in the air (measured mechanism: tg_topo_drop_at's
+         * own note, "planted past the skirt stands at the LIP height while the
+         * ground under it has descended"). Only a fork backdrop lays a plaza floor
+         * out there; an ordinary side street has none, so keep the block row on
+         * ground that supports it. TD5RE_R17_FLANK_GROUND_CAP=0 restores the full
+         * reach for an A/B. */
+        if (td5_env_flag_on("TD5RE_R17_FLANK_GROUND_CAP")) {
+            const double gcap = tg_verge_reach();
+            if (reach > gcap) reach = gcap;
+        }
         ax = e[3] - e[0]; az = e[5] - e[2];
         alen = sqrt(ax * ax + az * az);
         if (alen < 1e-6) continue;
