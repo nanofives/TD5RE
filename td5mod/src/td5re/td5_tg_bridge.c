@@ -567,6 +567,31 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
     const int rail_pg  = TD5_TG_PAGE_FENCE;         /* sidewalk railing */
     const unsigned int swalkc = 0xFFB0B0B8u;        /* lit pale concrete curb */
     const unsigned int railc  = 0xFFC0C0C8u;        /* lit rail               */
+    /* [R18 TUNNEL] "the sidewalk and guardrail within the tunnel is rendered
+     * partly over the road." ROOT CAUSE, measured: tg_tunnel_bore returns
+     * half = width*0.5, which is EXACTLY the carriageway half-width
+     * (tg_carriageway_reach == tg_road_half_width == width*0.5), so the bore
+     * WALL INNER FACE (al = s+half) coincides with the road edge -- there is no
+     * shoulder. R16 then built the walkway INBOARD of the wall (al - sww), i.e.
+     * entirely on the carriageway, and put the rail 500 units into the lane. On
+     * a 2-lane bore (half = 1500) that is a third of the half-width.
+     *
+     * The fix does NOT narrow the road and does NOT move any scenery. The band
+     * between the road edge (bore_half) and bore_half + WALL_T is already empty
+     * space behind the R16 wall: the tunnel mountain mass, roof overhang and
+     * carve are ALL built around side_x = bore_half + WALL_T (td5_tg_terrain.c
+     * tg_emit_fb_tunnel, tg_emit_tunnel). So push the visible wall (plus roof,
+     * lamps, portal jambs and the mouth extension) OUT by exactly WALL_T to sit
+     * on that reference line, and let the walkway fill the [road edge .. wall]
+     * shoulder it opens. The carriageway keeps its full width; the rail lands on
+     * the road edge (inner lip), clear of the lane. One outboard offset (wshift)
+     * carries every affected piece so nothing unwelds -- in particular the R16
+     * mouth-gap weld, whose jamb inner edge tracks the same widened wall.
+     * No new vertices: the 512-vert / 8-group ceiling is untouched.
+     * TD5RE_R18_TUNNEL_WALKWAY_CLEAR=0 restores the R16 inboard walkway. */
+    const int    swalk_clear = swalk_on &&
+                               td5_env_flag_on("TD5RE_R18_TUNNEL_WALKWAY_CLEAR");
+    const double wshift = swalk_clear ? wall_t : 0.0;  /* wall outboard shift */
     /* [R9 item 5e] "walls and roofing should have different texture". They were
      * one page because they are one mesh, not because anyone decided they should
      * match -- tg_write_quad_mesh_col has carried per-segment pages since R5 and
@@ -756,27 +781,33 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
                 const double al = sg[k].al, ar = sg[k].ar;
                 const double cl = sg[k].cl, cr = sg[k].cr;
                 const double u1 = sg[k].u1;
+                /* [R18] wshift pushes the visible wall (and the roof that caps
+                 * it) OUT to the bore_half + WALL_T reference line so the
+                 * walkway below has a shoulder to sit in; 0 in R16 mode. LEFT
+                 * laterals grow (+), RIGHT laterals shrink (-). */
+                const double alw = al + wshift, clw = cl + wshift;
+                const double arw = ar - wshift, crw = cr - wshift;
                 if (pass == 0) {
                     const double vtop = height / tile;
                     /* Left wall inner face */
-                    TG_TUN_PUSH(a, al, a->y,          0.0, 0.0,  dim);
-                    TG_TUN_PUSH(c, cl, c->y,          u1,  0.0,  dim);
-                    TG_TUN_PUSH(c, cl, c->y + height, u1,  vtop, dim);
-                    TG_TUN_PUSH(a, al, a->y + height, 0.0, vtop, dim);
+                    TG_TUN_PUSH(a, alw, a->y,          0.0, 0.0,  dim);
+                    TG_TUN_PUSH(c, clw, c->y,          u1,  0.0,  dim);
+                    TG_TUN_PUSH(c, clw, c->y + height, u1,  vtop, dim);
+                    TG_TUN_PUSH(a, alw, a->y + height, 0.0, vtop, dim);
                     /* Right wall inner face */
-                    TG_TUN_PUSH(a, ar, a->y,          0.0, 0.0,  dim);
-                    TG_TUN_PUSH(c, cr, c->y,          u1,  0.0,  dim);
-                    TG_TUN_PUSH(c, cr, c->y + height, u1,  vtop, dim);
-                    TG_TUN_PUSH(a, ar, a->y + height, 0.0, vtop, dim);
+                    TG_TUN_PUSH(a, arw, a->y,          0.0, 0.0,  dim);
+                    TG_TUN_PUSH(c, crw, c->y,          u1,  0.0,  dim);
+                    TG_TUN_PUSH(c, crw, c->y + height, u1,  vtop, dim);
+                    TG_TUN_PUSH(a, arw, a->y + height, 0.0, vtop, dim);
                 } else {
                     /* Roof: near-left, far-left, far-right, near-right.
                      * V spans the bore WIDTH so the ceiling page's transverse
                      * ribs run across the road rather than along it. */
-                    const double wv = (2.0 * sg[k].hh) / tile;
-                    TG_TUN_PUSH(a, al, a->y + height, 0.0, 0.0, dim);
-                    TG_TUN_PUSH(c, cl, c->y + height, u1,  0.0, dim);
-                    TG_TUN_PUSH(c, cr, c->y + height, u1,  wv,  dim);
-                    TG_TUN_PUSH(a, ar, a->y + height, 0.0, wv,  dim);
+                    const double wv = (2.0 * (sg[k].hh + wshift)) / tile;
+                    TG_TUN_PUSH(a, alw, a->y + height, 0.0, 0.0, dim);
+                    TG_TUN_PUSH(c, clw, c->y + height, u1,  0.0, dim);
+                    TG_TUN_PUSH(c, crw, c->y + height, u1,  wv,  dim);
+                    TG_TUN_PUSH(a, arw, a->y + height, 0.0, wv,  dim);
                 }
             }
             if (pass == 0) n_wall = n; else n_roof = n - n_wall;
@@ -792,16 +823,19 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
                 const TG_Node *a = sg[k].a, *c = sg[k].c;
                 const double al = sg[k].al, ar = sg[k].ar;
                 const double cl = sg[k].cl, cr = sg[k].cr, u1 = sg[k].u1;
+                /* [R18] inset from the (possibly widened) wall face. */
+                const double alw = al + wshift, clw = cl + wshift;
+                const double arw = ar - wshift, crw = cr - wshift;
                 /* Left wall lamp */
-                TG_TUN_PUSH(a, al - ins, a->y + ly0, 0.0, 1.0, lampc);
-                TG_TUN_PUSH(c, cl - ins, c->y + ly0, u1,  1.0, lampc);
-                TG_TUN_PUSH(c, cl - ins, c->y + ly1, u1,  0.0, lampc);
-                TG_TUN_PUSH(a, al - ins, a->y + ly1, 0.0, 0.0, lampc);
+                TG_TUN_PUSH(a, alw - ins, a->y + ly0, 0.0, 1.0, lampc);
+                TG_TUN_PUSH(c, clw - ins, c->y + ly0, u1,  1.0, lampc);
+                TG_TUN_PUSH(c, clw - ins, c->y + ly1, u1,  0.0, lampc);
+                TG_TUN_PUSH(a, alw - ins, a->y + ly1, 0.0, 0.0, lampc);
                 /* Right wall lamp */
-                TG_TUN_PUSH(a, ar + ins, a->y + ly0, 0.0, 1.0, lampc);
-                TG_TUN_PUSH(c, cr + ins, c->y + ly0, u1,  1.0, lampc);
-                TG_TUN_PUSH(c, cr + ins, c->y + ly1, u1,  0.0, lampc);
-                TG_TUN_PUSH(a, ar + ins, a->y + ly1, 0.0, 0.0, lampc);
+                TG_TUN_PUSH(a, arw + ins, a->y + ly0, 0.0, 1.0, lampc);
+                TG_TUN_PUSH(c, crw + ins, c->y + ly0, u1,  1.0, lampc);
+                TG_TUN_PUSH(c, crw + ins, c->y + ly1, u1,  0.0, lampc);
+                TG_TUN_PUSH(a, arw + ins, a->y + ly1, 0.0, 0.0, lampc);
             }
             n_lamp = n - n_wall - n_roof;
         }
@@ -815,13 +849,21 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
          * span boundary exactly as the wall/roof/lamp runs do.
          *
          * COSMETIC ONLY: tunnel scenery does not carry collision (collision comes
-         * from the STRIP), and sww is small against the bore half-width, so the
-         * walkway sits between the drivable road edge and the wall without
-         * narrowing what the car can use. Grouped after the lamps so SIDEWALK and
-         * FENCE pages each form one contiguous vertex run.
-         * TD5RE_R16_TUNNEL_SIDEWALK=0 removes the walkway for an A/B. */
+         * from the STRIP). Grouped after the lamps so SIDEWALK and FENCE pages
+         * each form one contiguous vertex run.
+         *
+         * [R18 TUNNEL] R16 built this INBOARD of the wall (al - sww), i.e. on the
+         * carriageway, because the bore wall inner face IS the road edge -- see
+         * the wshift note above. Now the wall has been pushed out by wshift
+         * (= WALL_T in the clear mode), so the walkway fills the [road edge ..
+         * wall] shoulder instead. In clear mode the shoulder is exactly wshift
+         * wide, so sww tracks it and the inner lip (and the rail on it) lands on
+         * the road edge, clear of the lane. With the knob off wshift = 0 and
+         * sww = 500 reproduces the R16 geometry byte-for-byte.
+         * TD5RE_R16_TUNNEL_SIDEWALK=0 removes the walkway for an A/B;
+         * TD5RE_R18_TUNNEL_WALKWAY_CLEAR=0 restores the R16 over-road placement. */
         if (swalk_on) {
-            const double sww   = 500.0;              /* narrow walkway width */
+            const double sww   = swalk_clear ? wall_t : 500.0; /* walkway width  */
             const double swh   = 250.0;              /* curb height above road */
             const double railh = 420.0;              /* rail height above curb */
             const double wv = sww / tile, kv = swh / tile;
@@ -829,26 +871,32 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
                 const TG_Node *a = sg[k].a, *c = sg[k].c;
                 const double al = sg[k].al, ar = sg[k].ar;
                 const double cl = sg[k].cl, cr = sg[k].cr, u1 = sg[k].u1;
-                /* LEFT walkway top (horizontal, wall edge -> inner edge) */
-                TG_TUN_PUSH(a, al,       a->y + swh, 0.0, 0.0, swalkc);
-                TG_TUN_PUSH(c, cl,       c->y + swh, u1,  0.0, swalkc);
-                TG_TUN_PUSH(c, cl - sww, c->y + swh, u1,  wv,  swalkc);
-                TG_TUN_PUSH(a, al - sww, a->y + swh, 0.0, wv,  swalkc);
-                /* LEFT curb riser (vertical, inner edge, road -> top) */
-                TG_TUN_PUSH(a, al - sww, a->y,       0.0, 0.0, swalkc);
-                TG_TUN_PUSH(c, cl - sww, c->y,       u1,  0.0, swalkc);
-                TG_TUN_PUSH(c, cl - sww, c->y + swh, u1,  kv,  swalkc);
-                TG_TUN_PUSH(a, al - sww, a->y + swh, 0.0, kv,  swalkc);
+                /* Outer edge sits at the (widened) wall foot; inner edge/lip is
+                 * sww toward the bore. LEFT is +lateral, RIGHT is -lateral. */
+                const double aLo = al + wshift,       cLo = cl + wshift;
+                const double aLi = al + wshift - sww, cLi = cl + wshift - sww;
+                const double aRo = ar - wshift,       cRo = cr - wshift;
+                const double aRi = ar - wshift + sww, cRi = cr - wshift + sww;
+                /* LEFT walkway top (horizontal, wall foot -> inner lip) */
+                TG_TUN_PUSH(a, aLo, a->y + swh, 0.0, 0.0, swalkc);
+                TG_TUN_PUSH(c, cLo, c->y + swh, u1,  0.0, swalkc);
+                TG_TUN_PUSH(c, cLi, c->y + swh, u1,  wv,  swalkc);
+                TG_TUN_PUSH(a, aLi, a->y + swh, 0.0, wv,  swalkc);
+                /* LEFT curb riser (vertical, inner lip, road -> top) */
+                TG_TUN_PUSH(a, aLi, a->y,       0.0, 0.0, swalkc);
+                TG_TUN_PUSH(c, cLi, c->y,       u1,  0.0, swalkc);
+                TG_TUN_PUSH(c, cLi, c->y + swh, u1,  kv,  swalkc);
+                TG_TUN_PUSH(a, aLi, a->y + swh, 0.0, kv,  swalkc);
                 /* RIGHT walkway top */
-                TG_TUN_PUSH(a, ar,       a->y + swh, 0.0, 0.0, swalkc);
-                TG_TUN_PUSH(c, cr,       c->y + swh, u1,  0.0, swalkc);
-                TG_TUN_PUSH(c, cr + sww, c->y + swh, u1,  wv,  swalkc);
-                TG_TUN_PUSH(a, ar + sww, a->y + swh, 0.0, wv,  swalkc);
+                TG_TUN_PUSH(a, aRo, a->y + swh, 0.0, 0.0, swalkc);
+                TG_TUN_PUSH(c, cRo, c->y + swh, u1,  0.0, swalkc);
+                TG_TUN_PUSH(c, cRi, c->y + swh, u1,  wv,  swalkc);
+                TG_TUN_PUSH(a, aRi, a->y + swh, 0.0, wv,  swalkc);
                 /* RIGHT curb riser */
-                TG_TUN_PUSH(a, ar + sww, a->y,       0.0, 0.0, swalkc);
-                TG_TUN_PUSH(c, cr + sww, c->y,       u1,  0.0, swalkc);
-                TG_TUN_PUSH(c, cr + sww, c->y + swh, u1,  kv,  swalkc);
-                TG_TUN_PUSH(a, ar + sww, a->y + swh, 0.0, kv,  swalkc);
+                TG_TUN_PUSH(a, aRi, a->y,       0.0, 0.0, swalkc);
+                TG_TUN_PUSH(c, cRi, c->y,       u1,  0.0, swalkc);
+                TG_TUN_PUSH(c, cRi, c->y + swh, u1,  kv,  swalkc);
+                TG_TUN_PUSH(a, aRi, a->y + swh, 0.0, kv,  swalkc);
             }
             n_swalk = n - n_wall - n_roof - n_lamp;
             /* Guardrail run on the inner lip of each walkway (FENCE page). */
@@ -856,16 +904,18 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
                 const TG_Node *a = sg[k].a, *c = sg[k].c;
                 const double al = sg[k].al, ar = sg[k].ar;
                 const double cl = sg[k].cl, cr = sg[k].cr, u1 = sg[k].u1;
+                const double aLi = al + wshift - sww, cLi = cl + wshift - sww;
+                const double aRi = ar - wshift + sww, cRi = cr - wshift + sww;
                 /* LEFT rail */
-                TG_TUN_PUSH(a, al - sww, a->y + swh,         0.0, 1.0, railc);
-                TG_TUN_PUSH(c, cl - sww, c->y + swh,         u1,  1.0, railc);
-                TG_TUN_PUSH(c, cl - sww, c->y + swh + railh, u1,  0.0, railc);
-                TG_TUN_PUSH(a, al - sww, a->y + swh + railh, 0.0, 0.0, railc);
+                TG_TUN_PUSH(a, aLi, a->y + swh,         0.0, 1.0, railc);
+                TG_TUN_PUSH(c, cLi, c->y + swh,         u1,  1.0, railc);
+                TG_TUN_PUSH(c, cLi, c->y + swh + railh, u1,  0.0, railc);
+                TG_TUN_PUSH(a, aLi, a->y + swh + railh, 0.0, 0.0, railc);
                 /* RIGHT rail */
-                TG_TUN_PUSH(a, ar + sww, a->y + swh,         0.0, 1.0, railc);
-                TG_TUN_PUSH(c, cr + sww, c->y + swh,         u1,  1.0, railc);
-                TG_TUN_PUSH(c, cr + sww, c->y + swh + railh, u1,  0.0, railc);
-                TG_TUN_PUSH(a, ar + sww, a->y + swh + railh, 0.0, 0.0, railc);
+                TG_TUN_PUSH(a, aRi, a->y + swh,         0.0, 1.0, railc);
+                TG_TUN_PUSH(c, cRi, c->y + swh,         u1,  1.0, railc);
+                TG_TUN_PUSH(c, cRi, c->y + swh + railh, u1,  0.0, railc);
+                TG_TUN_PUSH(a, aRi, a->y + swh + railh, 0.0, 0.0, railc);
             }
             n_rail = n - n_wall - n_roof - n_lamp - n_swalk;
         }
@@ -884,8 +934,12 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
     if (!tg_span_in_tunnel(si - 1) || !tg_span_in_tunnel(si + 1)) {
         double ph, psh, lo, ro;
         tg_tunnel_bore(nl, si, &ph, &psh);
-        lo = psh + ph + wall_t;              /* left opening edge  */
-        ro = psh - ph - wall_t;              /* right opening edge */
+        /* [R18] wshift widens the visible bore wall (see the wshift note above),
+         * so the portal opening edge and every jamb reference follow it out by
+         * the same amount; the frame keeps welding to the wall and frames the
+         * widened opening. wshift = 0 in R16 mode, so lo/ro are unchanged. */
+        lo = psh + ph + wshift + wall_t;     /* left opening edge  */
+        ro = psh - ph - wshift - wall_t;     /* right opening edge */
         if (td5_env_flag_on("TD5RE_AUTOTRACK_R7_PORTAL")) {
             /* [R12 item 6] Was a bare 1400 while the pillar's outer edge sat at
              * 1600, so the beam stopped 200 short of it on each side. Derived
@@ -905,11 +959,13 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
              * tunnel". The mouth-extension already carries the bore wall out to
              * this same frame plane, so pulling each jamb inward to the bore wall
              * edge welds jamb to wall and the sliver closes with no new geometry.
-             * The opening itself stays exactly the bore opening (ph..-ph), so the
-             * mouth is not narrowed. TD5RE_R16_TUNNEL_MOUTH_GAP=0 restores lo/ro. */
+             * The opening itself stays exactly the (R18-widened) bore opening
+             * (ph+wshift .. -(ph+wshift)), so the mouth is not narrowed.
+             * TD5RE_R16_TUNNEL_MOUTH_GAP=0 restores lo/ro. */
             const int    gapfix = td5_env_flag_on("TD5RE_R16_TUNNEL_MOUTH_GAP");
-            const double jl = gapfix ? (psh + ph) : lo;  /* left jamb inner edge  */
-            const double jr = gapfix ? (psh - ph) : ro;  /* right jamb inner edge */
+            /* [R18] jamb inner welds to the widened wall face (psh +/- (ph+wshift)). */
+            const double jl = gapfix ? (psh + ph + wshift) : lo; /* left jamb inner  */
+            const double jr = gapfix ? (psh - ph - wshift) : ro; /* right jamb inner */
             /* Stand the headwall PROUD of the cutting: the Group-C mountain mass
              * (crown slab + buttresses, TD5_TG_PAGE_HILL) sits AT the mouth node
              * and would occlude a facade drawn in the node plane -- the R7 frame
@@ -966,7 +1022,7 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
             if (getenv("TD5RE_R12_TUNNEL_DIAG")) {
                 /* All laterals RELATIVE TO THE BORE CENTRE, which is the frame
                  * tg_emit_fb_tunnel measures its buttress offsets in. */
-                const double side_x = ph + wall_t;            /* opening edge   */
+                const double side_x = ph + wshift + wall_t;   /* opening edge (R18) */
                 const double butt_out = side_x + TD5_TG_BUTT_INSET
                                                 + TD5_TG_BUTT_HALFW;
                 const double beam_out = fl;                   /* == side_x + JW */
