@@ -843,6 +843,48 @@ int tg_r11_corner_stands(int si, int left)
     return 1;
 }
 
+/* [R16 CITY item 1] "there's no sidewalk" between two sidewalks at the town
+ * edge. Does the raised PAVEMENT / street grid stand on side `left` at span si,
+ * as opposed to a building WALL?
+ *
+ * The outskirts DENSITY ramp (tg_town_ramp_open) retracts buildings across the
+ * leading spans of a wilderness-to-town run. Its own design note is explicit
+ * that it "removes BUILDINGS and leaves the street grid, the pavement and the
+ * crossings exactly where they were" (see the R11 BIOME block in
+ * td5_trackgen_internal.h). But tg_side_built folds the ramp in (so a retracted
+ * run's WALL caps close cleanly -- correct for geometry), and
+ * tg_r11_corner_stands reads tg_side_built, and the junction furniture reads
+ * tg_r11_corner_stands. So at a side-street mouth whose flanking frontages were
+ * ramp-retracted, tg_r11_arm_side found no corner, no pavement arm turned the
+ * sidewalk down the street, tg_crossing_base painted no zebra, and the main
+ * raised sidewalk stopped dead at the mouth with a raw gap -- exactly the
+ * reported hole, and it clusters in the outskirts ramp band by construction.
+ *
+ * This is tg_r11_corner_stands WITHOUT the ramp gate: the pavement stands
+ * wherever the run/gap PATTERN is built and a wall could actually stand there
+ * (fork clearance and bridge/non-facade-biome edges DO remove the pavement, so
+ * those two suppressions are kept), regardless of how many buildings the ramp
+ * thinned. It is read ONLY by the pavement ARM (tg_r11_arm_side) and the
+ * crossing base (tg_crossing_base) -- never by a wall emitter -- so a retracted
+ * frontage still stands no lone side-street wall (R11 CITY item 10 is
+ * untouched). TD5RE_R16_RAMP_JUNCTION=0 restores the ramp-blind junction. */
+int tg_r16_pave_corner_stands(int si, int left)
+{
+    if (!td5_env_flag_on("TD5RE_R16_RAMP_JUNCTION"))
+        return tg_r11_corner_stands(si, left);
+    if (!td5_env_flag_on("TD5RE_R11_CITY_CORNER"))
+        return tg_facade_built(si, left);
+    if (!tg_facade_built(si, left)) return 0;
+    /* The two suppressions that remove the PAVEMENT itself, mirrored from
+     * tg_side_built; the ramp check there is deliberately NOT copied. */
+    if (td5_env_flag_on("TD5RE_AUTOTRACK_SIDE_CLOSE") &&
+        tg_branches_enabled() && !left && tg_span_in_fork_clear(si))
+        return 0;
+    if (td5_env_flag_on("TD5RE_AUTOTRACK_EDGE_CAP") && !tg_facade_stands(si))
+        return 0;
+    return 1;
+}
+
 /* Hash identifying the RUN span si belongs to on this side. A superblock now
  * holds up to TWO runs (before and after its side street), so keying pages and
  * floor counts on the superblock alone would give one texture and one height to
@@ -1431,6 +1473,20 @@ void tg_side_geom(const TG_NodeList *nl, int si, int left,
 
     flen = sqrt(g->ax * g->ax + g->az * g->az);
     if (flen < 1.0) flen = 1.0;
+    /* [R16 CITY item 4] "this building is too small and looks distorted."
+     * On a tight inside bend, or after the R11 corner trim, the as-built
+     * frontage flen can fall well below one authored cell wide (measured 347
+     * raw against a 1500 span). tg_facade_cols_for still rounds that up to a
+     * single cell, so the wall page is squeezed to a fraction of its authored
+     * width -- and the aspect correction does NOT compensate, because
+     * tg_facade_cell_w keys on the NOMINAL span length, not this flen. The
+     * result is a narrow, distorted stub. Below a sane minimum footprint, stand
+     * no building at all: the kerb and raised pavement are emitted by other
+     * hooks and remain, and the R16 outskirts park dressing fills the freed
+     * ground. TD5RE_R16_MIN_FOOTPRINT=0 restores the squeezed stub for an A/B. */
+    if (td5_env_flag_on("TD5RE_R16_MIN_FOOTPRINT") &&
+        flen < 0.5 * tg_facade_cell_w(b))
+        return;                                   /* g->built stays 0 */
     g->cols = tg_facade_cols_for(flen, (double)b->cell_w, 4);
 
     /* A cap closes a flank whose neighbour side is NOT actually built -- which
@@ -2859,8 +2915,12 @@ static int tg_crossing_base_raw(int si)
     if (tg_r13_approach_span(si)) return 0;
     for (s = 0; s < 2; s++) {
         /* [R11 CITY item 10] the corner must actually STAND -- a zebra painted
-         * against a suppressed block is a crossing into nothing. */
-        if (!(!tg_facade_built(si, s) && tg_r11_corner_stands(si - 1, s)))
+         * against a suppressed block is a crossing into nothing.
+         * [R16 CITY item 1] but a ramp-retracted frontage still carries the
+         * pavement and the street grid, so the crossing forms there too (the
+         * pave-corner predicate == tg_r11_corner_stands when the R16 knob is
+         * off). */
+        if (!(!tg_facade_built(si, s) && tg_r16_pave_corner_stands(si - 1, s)))
             continue;
         /* [R4 CROSS item 4] A zebra marks a road you cross INTO A STREET. On
          * seed 99991 one gap in four is a PARK (a green lawn + hedge from the

@@ -2322,6 +2322,12 @@ int tg_facade_built(int si, int left);
 int tg_side_built(int si, int left);
 int tg_facade_isolated(int si, int left);
 int tg_r11_corner_stands(int si, int left);
+/* [R16 CITY item 1] Does the raised PAVEMENT / street grid (as opposed to a
+ * building WALL) stand on side `left` at span si? Like tg_r11_corner_stands but
+ * blind to the outskirts density ramp -- used only by JUNCTION furniture
+ * (pavement arms, crossing base) so a ramp-retracted frontage still wraps the
+ * sidewalk down its side street. See the definition in td5_tg_city.c. */
+int tg_r16_pave_corner_stands(int si, int left);
 unsigned int tg_facade_run_id(int si, int left);
 /* DOWNTOWN GRADIENT. Height was a per-run hash alone, so a "city" was a random
  * jumble of 2..4-storey blocks with the odd tower and no sense of place. A real
