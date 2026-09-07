@@ -949,6 +949,239 @@ static void tg_emit_texture_page_fb_treeline(TG_Buf *out, int variant)
     else                            tg_emit_texture_page_fb_treeline_proc(out);
 }
 
+/* ==== [R19 TREELINE PNG] native-resolution loose-PNG override =============
+ *
+ * The distant tree line is one 64x64 alpha-keyed page (TD5_TG_PAGE_TREELINE +
+ * the four TD5_TG_PAGE_R8_TREELINE variants) drawn as a single tall ridge-wall
+ * quad in tg_emit_far_band, at ~70 world-units per texel -- the worst-magnified
+ * page on the whole track (see re/analysis/r18_treeline_pixelation.md). The DAT
+ * format is locked at 64x64, but the asset loader already has a native-res
+ * loose-PNG override (tpage_decode_one in td5_asset.c): if a page has a
+ * re/assets/levels/levelNNN/textures/tex_PPP.png it uploads THAT at native
+ * resolution instead of the 64x64 DAT page. That path was gated to migrated TD6
+ * tracks only. This block renders those five pages at native resolution and
+ * writes them as PNGs so the loader picks them up; the loader-side opt-in below
+ * (td5_trackgen_treeline_png_page) scopes the un-gating to exactly these pages
+ * on the auto-track level, leaving shipped tracks and TD6 untouched.
+ *
+ * WHAT ACTUALLY IMPROVES (honest scope): the *crown silhouette* is procedural
+ * (a per-column analytic crown line), so rendering it at native resolution as a
+ * smooth, sub-texel, ANTI-ALIASED alpha edge is a genuine gain -- the 64x64
+ * type-1 DAT page can only carry a hard binary key, which is the blocky stepped
+ * edge the report calls "pixelated". The *foliage body*, however, is sampled
+ * from the shipped 64x64 canopy source (k_real_tree_*), so upscaling it is
+ * bilinear BLUR, not new detail: it stops looking blocky but gains no real
+ * texel information. So the win is the ridge silhouette, not the leaves.
+ *
+ * Knob TD5RE_AUTOTRACK_TREELINE_PNG (DEFAULT OFF): the render is unverifiable in
+ * a worktree with no game assets, and it changes how the page is uploaded, so it
+ * ships off for the parent (who has assets) to A/B. With it off, no PNG is
+ * written and the loader opt-in returns 0, so the 64x64 DAT path is unchanged
+ * byte-for-byte. Only fires when tg_real_textures_enabled() (the render samples
+ * the shipped canopy source). ======================================== */
+
+/* Master enable, DEFAULT OFF. */
+static int tg_treeline_png_enabled(void)
+{
+    static int v = -1;
+    if (v < 0) v = td5_env_flag_off("TD5RE_AUTOTRACK_TREELINE_PNG");
+    return v;
+}
+
+/* Native PNG dimension (square). 256 = 4x the 64x64 page -> ~17.5 wu/texel from
+ * ~70. Clamped so a typo cannot ask for a multi-MB page. */
+static int tg_treeline_png_dim(void)
+{
+    static int v = -1;
+    if (v < 0) v = td5_env_int("TD5RE_AUTOTRACK_TREELINE_PNG_DIM", 256, 128, 512);
+    return v;
+}
+
+/* Resolve one source-page index to BGR; returns 1 if keyed (index 0). */
+static int tg_tree_src_bgr(const unsigned char *sidx, const unsigned char *spal,
+                           int paln, int sx, int sy, int *B, int *G, int *R)
+{
+    int v;
+    if (sx < 0) sx = 0; else if (sx >= TD5_TG_TEX_DIM) sx = TD5_TG_TEX_DIM - 1;
+    if (sy < 0) sy = 0; else if (sy >= TD5_TG_TEX_DIM) sy = TD5_TG_TEX_DIM - 1;
+    v = sidx[sy * TD5_TG_TEX_DIM + sx];
+    if (v <= 0 || v >= paln) { *B = *G = *R = 0; return 1; }
+    *B = spal[v * 3 + 0]; *G = spal[v * 3 + 1]; *R = spal[v * 3 + 2];
+    return 0;
+}
+
+/* Render treeline variant `vi` at dim x dim into an RGBA buffer (byte order
+ * R,G,B,A -- the PNG convention; td5_asset_decode_png_rgba32 swaps R<->B to BGRA
+ * on load, matching the DAT path's BGRA output). Mirrors the crown formula and
+ * source-window mapping of tg_emit_texture_page_fb_treeline_real, evaluated at
+ * native scale with a smoothly interpolated, anti-aliased crown line. */
+static void tg_treeline_native_render(int vi, int dim, unsigned char *rgba)
+{
+    const int vsrc = (k_r8_treeline_var[vi].src < k_real_tree_count)
+                   ? k_r8_treeline_var[vi].src : TG_TREELINE_SRC;
+    const int vcell = k_r8_treeline_var[vi].cell;
+    const unsigned char *sidx = k_real_tree_idx[vsrc];
+    const unsigned char *spal = k_real_tree_pal[vsrc];
+    const int paln = k_real_tree_paln[vsrc];
+    const int wy   = tg_treeline_src_window(sidx);
+    const int fill = tg_treeline_src_fill(sidx, wy);
+    int fillB, fillG, fillR;
+    int cutc[TD5_TG_TEX_DIM];      /* crown cut row (page space) per texel column */
+    int sxc[TD5_TG_TEX_DIM];       /* source column offset per texel column       */
+    int x, X, Y;
+    const double s = (double)dim / (double)TD5_TG_TEX_DIM;
+
+    tg_tree_src_bgr(sidx, spal, paln, fill, wy, &fillB, &fillG, &fillR);
+
+    for (x = 0; x < TD5_TG_TEX_DIM; x++) {
+        const unsigned int c = (unsigned)(x / vcell) * 2654435761u;
+        const int crown = 12 + (int)((c >> 28) % 10);          /* 12..21 */
+        const int xm    = x % vcell;
+        const int top   = crown + ((xm < 2 || xm > vcell - 3) ? 3 : 0);
+        /* One deterministic jitter per COLUMN (the 64x64 emitter jitters per
+         * texel, which just dithers the edge by a row; a per-column value gives
+         * a clean line to interpolate). */
+        unsigned int h = (unsigned)x * 2654435761u + k_r8_treeline_var[vi].seed;
+        int cut;
+        h = (h ^ (h >> 13)) * 1274126177u;
+        cut = top - (int)((h >> 22) % 3);
+        if (cut < 1) cut = 1;
+        cutc[x] = cut;
+        sxc[x] = (int)(((c >> 8) + (unsigned)(x % vcell)) % (unsigned)TD5_TG_TEX_DIM);
+    }
+
+    for (Y = 0; Y < dim; Y++) {
+        const double fyp = ((double)Y + 0.5) / s;              /* page rows 0..64 */
+        for (X = 0; X < dim; X++) {
+            const double fxp = ((double)X + 0.5) / s;          /* page cols 0..64 */
+            int xi = (int)fxp; double xf;
+            int xi1;
+            double cutf, cov, span, syf, sxf;
+            unsigned char *o = rgba + ((size_t)Y * dim + X) * 4;
+            if (xi > TD5_TG_TEX_DIM - 1) xi = TD5_TG_TEX_DIM - 1;
+            xf = fxp - xi;
+            xi1 = (xi + 1 < TD5_TG_TEX_DIM) ? xi + 1 : xi;
+
+            /* Smooth crown line + 1-page-row anti-aliased alpha edge. */
+            cutf = cutc[xi] * (1.0 - xf) + cutc[xi1] * xf;
+            cov  = (fyp - cutf) + 0.5;                          /* 0 above, 1 below */
+            if (cov <= 0.0) {                                   /* sky (keyed) */
+                o[0] = (unsigned char)fillR; o[1] = (unsigned char)fillG;
+                o[2] = (unsigned char)fillB; o[3] = 0;          /* RGB=fill: no black fringe */
+                continue;
+            }
+
+            /* Foliage sample, source window mapped like the 64x64 emitter. */
+            span = (double)(TD5_TG_TEX_DIM - 1) - cutf;
+            if (span < 1.0) span = 1.0;
+            syf = (double)wy + (fyp - cutf) * (double)(TG_TREELINE_WIN - 1) / span;
+            sxf = sxc[xi] * (1.0 - xf) + sxc[xi1] * xf;
+            {
+                /* Alpha-weighted bilinear over 4 source taps; keyed taps carry no
+                 * weight so a leaf gap does not bleed the key colour. */
+                int sx0 = (int)sxf, sy0 = (int)syf;
+                double fx = sxf - sx0, fy = syf - sy0;
+                double aB = 0, aG = 0, aR = 0, aw = 0;
+                int dy, dx;
+                for (dy = 0; dy < 2; dy++) for (dx = 0; dx < 2; dx++) {
+                    int B, G, R;
+                    double w = (dx ? fx : 1.0 - fx) * (dy ? fy : 1.0 - fy);
+                    int keyed = tg_tree_src_bgr(sidx, spal, paln,
+                                                sx0 + dx, sy0 + dy, &B, &G, &R);
+                    if (keyed || w <= 0.0) continue;
+                    aB += B * w; aG += G * w; aR += R * w; aw += w;
+                }
+                if (aw > 1e-6) { aB /= aw; aG /= aw; aR /= aw; }
+                else { aB = fillB; aG = fillG; aR = fillR; }
+                o[0] = (unsigned char)(aR + 0.5);
+                o[1] = (unsigned char)(aG + 0.5);
+                o[2] = (unsigned char)(aB + 0.5);
+                o[3] = (cov >= 1.0) ? 255 : (unsigned char)(cov * 255.0 + 0.5);
+            }
+        }
+    }
+}
+
+/* The five page ids that carry the distant tree line: the base continuous-canopy
+ * page and the four R8 variants tg_r8_treeline_page selects between. */
+static const int k_treeline_png_pages[1 + TD5_TG_R8_TREELINE_N] = {
+    TD5_TG_PAGE_TREELINE,
+    TD5_TG_PAGE_R8_TREELINE + 0, TD5_TG_PAGE_R8_TREELINE + 1,
+    TD5_TG_PAGE_R8_TREELINE + 2, TD5_TG_PAGE_R8_TREELINE + 3
+};
+
+/* Variant index each of those pages renders (base TREELINE + R8_TREELINE[0] both
+ * use variant 0, matching tg_emit_texture_page_fb_treeline calls in
+ * tg_emit_textures). */
+static const int k_treeline_png_variant[1 + TD5_TG_R8_TREELINE_N] = { 0, 0, 1, 2, 3 };
+
+/* Remove the treeline PNG overrides under `dir` (the level's textures/ subdir).
+ * Always called before a build's TEXTURES.DAT is written so a knob-OFF run
+ * cannot inherit stale PNGs from a previous knob-ON build. */
+static void tg_treeline_pngs_remove(const char *dir)
+{
+    size_t i;
+    for (i = 0; i < sizeof k_treeline_png_pages / sizeof k_treeline_png_pages[0]; i++) {
+        char p[352];
+        snprintf(p, sizeof p, "%s/textures/tex_%03d.png", dir, k_treeline_png_pages[i]);
+        remove(p);
+    }
+}
+
+/* Render + write the treeline PNG overrides under `dir`. No-op (and clears any
+ * stale files) unless the knob is on and real textures are in use. */
+static void tg_treeline_pngs_write(const char *dir)
+{
+    char texdir[336];
+    int dim, prev_vi, i;
+    unsigned char *rgba = NULL;
+
+    tg_treeline_pngs_remove(dir);
+    if (!tg_treeline_png_enabled() || !tg_real_textures_enabled())
+        return;
+
+    snprintf(texdir, sizeof texdir, "%s/textures", dir);
+    _mkdir(texdir);
+
+    dim = tg_treeline_png_dim();
+    rgba = (unsigned char *)malloc((size_t)dim * dim * 4);
+    if (!rgba) {
+        TD5_LOG_W(LOG_TAG, "treeline PNG: out of memory (dim=%d)", dim);
+        return;
+    }
+
+    prev_vi = -1;
+    for (i = 0; i < (int)(sizeof k_treeline_png_pages / sizeof k_treeline_png_pages[0]); i++) {
+        char path[352];
+        int vi = k_treeline_png_variant[i];
+        if (vi != prev_vi) {              /* variant 0 is shared by two pages */
+            tg_treeline_native_render(vi, dim, rgba);
+            prev_vi = vi;
+        }
+        snprintf(path, sizeof path, "%s/tex_%03d.png", texdir, k_treeline_png_pages[i]);
+        if (!td5_plat_write_png_rgba(path, rgba, dim, dim))
+            TD5_LOG_W(LOG_TAG, "treeline PNG: write failed %s", path);
+    }
+    free(rgba);
+    TD5_LOG_I(LOG_TAG, "treeline PNG: wrote %d pages at %dx%d (~%.1f wu/texel)",
+              (int)(sizeof k_treeline_png_pages / sizeof k_treeline_png_pages[0]),
+              dim, dim, 4500.0 / dim);
+}
+
+/* Loader opt-in (declared in td5_trackgen.h, called by tpage_decode_one). True
+ * only when the knob is on, the level is the auto-track, and the page is one of
+ * the treeline pages -- so the native-res PNG override never fires for shipped
+ * tracks or unrelated pages even if a stray tex_NNN.png existed. */
+int td5_trackgen_treeline_png_page(int level_number, int page)
+{
+    size_t i;
+    if (!tg_treeline_png_enabled()) return 0;
+    if (level_number != TD5_TG_LEVEL_NUM) return 0;
+    for (i = 0; i < sizeof k_treeline_png_pages / sizeof k_treeline_png_pages[0]; i++)
+        if (k_treeline_png_pages[i] == page) return 1;
+    return 0;
+}
+
 /* ---- [R8 TERRAIN item 16] SNOW APPEARANCE ----
  * "if there's snow the median should be snowy too but a different texture, and
  * use different snow ground textures too."
@@ -3667,10 +3900,13 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
              * uploads them. They are cheap (~155 ms) and independent of the
              * mesh emit, so they stay synchronous. */
             snprintf(tex_path, sizeof tex_path, "%s/TEXTURES.DAT", dir);
-            if (tg_emit_textures(&tex))
+            if (tg_emit_textures(&tex)) {
                 tg_write_file(dir, "TEXTURES.DAT", tex.b, tex.len);
-            else
+                tg_treeline_pngs_write(dir);   /* [R19] native-res override, knob-gated */
+            } else {
                 remove(tex_path);   /* stale pages would mis-texture the meshes */
+                tg_treeline_pngs_remove(dir);
+            }
             tg_buf_free(&tex);
             TD5_LOG_I(LOG_TAG, "trackgen: STREAMED build -- geometry + textures "
                       "done, %d spans of scenery deferred to the worker",
@@ -3694,8 +3930,10 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
              * the same gate -- without MODELS.DAT nothing samples them. */
             {
                 TG_ZONE_BEGIN(TG_ZONE_TEX);
-                if (tg_emit_textures(&tex))
+                if (tg_emit_textures(&tex)) {
                     tg_write_file(dir, "TEXTURES.DAT", tex.b, tex.len);
+                    tg_treeline_pngs_write(dir);   /* [R19] native-res override, knob-gated */
+                }
                 TG_ZONE_END(TG_ZONE_TEX);
             }
             tg_buf_free(&models);
@@ -3705,6 +3943,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
             snprintf(tex_path, sizeof(tex_path), "%s/TEXTURES.DAT", dir);
             remove(models_path);
             remove(tex_path);
+            tg_treeline_pngs_remove(dir);   /* [R19] no scenery -> no override PNGs */
         }
     }
 
