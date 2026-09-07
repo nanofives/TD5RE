@@ -1007,8 +1007,40 @@ int tg_emit_branch_flora(const TG_NodeList *nl, int mb,
                              cx, cz, tw, th)) return 1;
     tg_acct_n(TG_ACCT_R7_BRANCH, acct_si, 1);
     moff[(*nmesh)++] = blk->len;
-    return tg_emit_billboard_mesh(blk, cx, n->y, cz, tw * 0.5, th,
-                                  tg_tree_slot(tv), 1);
+    /* [R18 EDGE item 1] "these trees are floating near the road" on a branch
+     * CORRIDOR. This emitter planted the trunk at n->y -- the MAIN node's ROAD
+     * height -- exactly the bug tg_flora_plant (R7 item 18 / R9 topo item 6)
+     * fixed for the main-road roadside trees, but this branch-corridor emitter
+     * never inherited the same drop sampling. The trunk sits out past the bowed
+     * branch (set = half road + clear_gap + half canopy), where the outboard
+     * skirt/far-band terrain has already fallen away from the road, so a tree
+     * pinned at road height hangs in the air above it.
+     *
+     * Sample the ground drop at the trunk's lateral distance from the SAME
+     * right-side (-1) cross-section the branch's own skirt/far-band are built
+     * from, on the MAIN node mb (< ring, so tg_topo_road_cap is honoured), and
+     * stand the tree on it. Uses the whole topo chain (skirt + far-band descent)
+     * where topo is on -- the trunk lands past the branch clearance, i.e. out in
+     * the far band -- and the plain skirt profile otherwise. Can only ever LOWER
+     * the base onto terrain, never raise it. Default ON, mirroring the main-road
+     * flora that already ships this behaviour; TD5RE_R18_BRANCH_FLORA_DROP=0
+     * restores the flat road-height plant for an A/B. */
+    {
+        double base_y = n->y;
+        if (td5_env_flag_on("TD5RE_R18_BRANCH_FLORA_DROP")) {
+            const double d = set - n->width * 0.5;   /* trunk dist from road edge */
+            if (tg_topo_enabled()) {
+                TG_TopoChain c;
+                tg_topo_chain(nl, mb, 0 /*right of travel*/, &c);
+                base_y = n->y - tg_topo_drop_at(&c, d);
+            } else {
+                const double wsd = b->water ? tg_water_side(mb) : 0.0;
+                base_y = n->y - tg_infra_ground_dy(nl, mb, -1.0, d, wsd);
+            }
+        }
+        return tg_emit_billboard_mesh(blk, cx, base_y, cz, tw * 0.5, th,
+                                      tg_tree_slot(tv), 1);
+    }
 }
 
 /* ===================== AVENUE DIVIDER (items 9c / 10) =====================

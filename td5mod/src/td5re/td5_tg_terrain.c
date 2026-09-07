@@ -1264,6 +1264,51 @@ static void tg_ground_side_raw(const TG_NodeList *nl, int si, int is_left,
     }
 }
 
+/* [R18 EDGE item 4] The distance at which the inside-of-a-bend skirt quad folds
+ * over itself. "there's a sharp turn where part of the grass nearby is spilling
+ * over the road" (kind=skirt). tg_emit_ground sweeps one slab between the road
+ * cross-sections at si (near) and si+1 (far). On the inside of the bend the two
+ * outward rays converge; once the reach passes their intersection the far corner
+ * crosses back over the near one and the grass laps across the inside of the
+ * carriageway. Solve E0 + s*u0 = E1 + t*u1 for the near-ray forward distance s;
+ * on the inside both s,t come out positive and s is the fold point. Returns a
+ * huge number on a straight (parallel rays) or the OUTSIDE of a bend (rays cross
+ * behind), so it is inert everywhere but a genuine inside bend. Applied as one
+ * more min() in the tg_ground_side clamp below, so every consumer of the
+ * cross-section -- skirt, far band, flora -- pulls in together and no gap opens
+ * (the far band starts where the skirt ends). */
+static double tg_r18_inside_bend_cap(const TG_NodeList *nl, int si, int is_left)
+{
+    double lx0, ly0, lz0, rx0, ry0, rz0;
+    double lx1, ly1, lz1, rx1, ry1, rz1;
+    double e0x, e0z, e1x, e1z, u0x, u0z, u1x, u1z;
+    double sgn, det, s, t, dx, dz;
+    const TG_Node *a, *b;
+
+    if (!td5_env_flag_on("TD5RE_R18_BEND_SKIRT_CAP")) return 1e30;
+    if (!nl || si < 0 || si + 1 >= nl->count)         return 1e30;
+    a = &nl->v[si];
+    b = &nl->v[si + 1];
+    /* Road edge points on THIS side at the slab's two ends (f=0 at si, f=1 at
+     * si+1), the same points tg_emit_ground sweeps the slab between. */
+    tg_road_edge(nl, si, 0.0, 0.0, 1.0, &lx0, &ly0, &lz0, &rx0, &ry0, &rz0);
+    tg_road_edge(nl, si, 1.0, 0.0, 1.0, &lx1, &ly1, &lz1, &rx1, &ry1, &rz1);
+    sgn = is_left ? 1.0 : -1.0;
+    if (is_left) { e0x = lx0; e0z = lz0; e1x = lx1; e1z = lz1; }
+    else         { e0x = rx0; e0z = rz0; e1x = rx1; e1z = rz1; }
+    /* Outward lateral unit per end, same convention as tg_topo_road_cap. */
+    u0x = a->tz * sgn; u0z = -a->tx * sgn;
+    u1x = b->tz * sgn; u1z = -b->tx * sgn;
+    /* Cramer: [u0x -u1x; u0z -u1z] (s,t)^T = (E1-E0). */
+    dx = e1x - e0x; dz = e1z - e0z;
+    det = u1x * u0z - u0x * u1z;
+    if (det > -1e-9 && det < 1e-9) return 1e30;        /* parallel: straight */
+    s = (u1x * dz - dx * u1z) / det;
+    t = (u0x * dz - u0z * dx) / det;
+    if (s <= 0.0 || t <= 0.0) return 1e30;             /* outside bend / diverges */
+    return s * TD5_TG_R18_BEND_FRAC;
+}
+
 /* [R9 TOPO C3] Every consumer of the near cross-section -- the skirt slab, the
  * far band's seam, the flora planter -- goes through here, so the "another road
  * is closer than my ground reaches" rule cannot be honoured by one of them and
@@ -1287,6 +1332,14 @@ void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
      * rather than as a separate pass, so there is still exactly one clamp. */
     cap = tg_r13_fold_cap(nl, si, is_left ? 1.0 : -1.0, 0.0, 1e30,
                           "TD5RE_R13_FOLD_GROUND");
+    /* [R18 EDGE item 4] Inside-of-a-bend fold cap, folded into the same single
+     * clamp so it inherits the shared interpolation and the d[0]+GAP_TOL floor
+     * below (the skirt can never be pulled inside its own road edge). Independent
+     * of topo, so computed and min'd before the topo/non-topo split. */
+    {
+        const double bcap = tg_r18_inside_bend_cap(nl, si, is_left);
+        if (bcap < cap) cap = bcap;
+    }
     if (!tg_topo_enabled()) {
         if (cap >= p->d[p->n - 1]) return;
     } else {
