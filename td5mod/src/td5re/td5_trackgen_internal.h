@@ -3508,6 +3508,12 @@ extern long s_r12_median_caps;
 extern long s_r12_median_runs;
 int tg_r12_median_fill(double gw0, double gw1);
 int tg_r12_median_at(const TG_NodeList *nl, int si, int br_lanes);
+/* [R17 MEDIAN item 2] 1 where the gore floor on MAIN span si is MEDIAN-WIDTH
+ * (an avenue or a fill-eligible gore) yet NO raised island stands on it, so the
+ * flush gore reads as "a median without a height difference". Used at the gore
+ * emit site to pave that strip as road instead of ground. See the definition in
+ * td5_tg_bridge.c. */
+int tg_gore_reads_as_median(const TG_NodeList *nl, int si, int br_lanes);
 /* [MEDIAN/BRIDGE 2026-09-07] 1 unless si is on a bridge run the median cannot
  * cover end to end. See the definition in td5_tg_bridge.c for why a partial
  * median cannot simply be extended. */

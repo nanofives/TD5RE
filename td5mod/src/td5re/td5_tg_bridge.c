@@ -2382,6 +2382,45 @@ int tg_r12_median_at(const TG_NodeList *nl, int si, int br_lanes)
            tg_median_bridge_uniform(nl, si, br_lanes);
 }
 
+/* [R17 MEDIAN item 2] "Avoid medians without a height difference."
+ *
+ * The gore floor (tg_emit_gore) is a flat quad on the biome GROUND page, laid at
+ * road level minus TD5_TG_GORE_DROP (4 units) between a fork's two carriageways.
+ * On a WIDE split that reads as ground between two diverging roads, which is
+ * correct. On a MEDIAN-WIDTH gore -- an avenue, or a fill-eligible gore -- the
+ * raised island (tg_emit_avenue_divider) normally stands proud of it and gives
+ * the height difference. But R16's tg_median_fork_long_enough suppresses the
+ * island on a fork too short to carry one, leaving ONLY the flush gore floor:
+ * a distinct flat strip of ground the width of a median, at road level. That is
+ * the verbatim complaint.
+ *
+ * This names exactly that case -- median-width gore, no island -- so the caller
+ * can pave the strip with the ROAD page instead of GROUND. With no island to
+ * give height, matching the road surface removes the "median" read entirely
+ * (the fork throat looks like the road briefly widening, which is what a short
+ * unmediated split is). It does NOT touch the island's placement tests, so
+ * MEDIAN_MIN_RUN / the sliver reject / the placement mirror are all preserved.
+ *
+ * Uses the SAME gore-width authority (tg_r12_median_gore_w) and the SAME island
+ * predicate (tg_r12_median_at) the divider uses, so it cannot disagree with what
+ * is actually emitted. A wide split fails both median-width tests and returns 0,
+ * so its gore keeps the ground page. */
+int tg_gore_reads_as_median(const TG_NodeList *nl, int si, int br_lanes)
+{
+    int fi;
+    double gw0, gw1;
+    if (!nl || si < 0 || si + 1 >= nl->count) return 0;
+    fi = tg_fork_of_main(si);
+    if (fi < 0) return 0;
+    /* Median-width? An avenue by classification, or a gore inside the fill band.
+     * A genuine wide split is neither, so its ground floor is left alone. */
+    tg_r12_median_gore_w(nl, si, fi, br_lanes, &gw0, &gw1);
+    if (!tg_fork_is_avenue(fi) && !tg_r12_median_fill(gw0, gw1)) return 0;
+    /* A raised island already stands here -> there IS a height difference. */
+    if (tg_r12_median_at(nl, si, br_lanes)) return 0;
+    return 1;
+}
+
 /* Number of edges carrying more than one rail class, with the offenders named.
  * Returns doubled + zero-rail regressions, i.e. every violation of "exactly one
  * rail per edge", so a caller can assert on a single number. */

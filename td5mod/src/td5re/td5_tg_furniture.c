@@ -46,7 +46,24 @@ int tg_rail_page(int si)
     case 2:  a = 3; c = 0; break;   /* edge of town white armco / W-beam  */
     default: a = 2; c = 3; break;   /* dense urban dark rail / white armco*/
     }
-    return TD5_TG_PAGE_R8V_RAIL + (((h >> 15) & 1u) ? c : a);
+    {
+        int off = ((h >> 15) & 1u) ? c : a;
+        /* [R17 FURNITURE item 1] "This guardrail looks like TWO stacked on top
+         * of each other" (page 399). MEASURED from the R8V rail pages' own alpha
+         * silhouettes: index 0 (Sydney, page 399) is #x20 .x8 #x20 and index 2
+         * (Moscow, page 401) is #x21 .x11 #x21 -- two separate opaque beam bands
+         * with keyed sky between, i.e. a TWO-RAIL fence. On the ~760u guardrail
+         * prism that gap reads as two rails stacked, exactly as reported. Only
+         * index 3 (Waikiki white armco, #x44) is a single continuous beam; index
+         * 1 (timber post-and-rail) is a distinct multi-rail fence, not a doubled
+         * beam, and is left alone. Route the two-beam METAL pages to the single
+         * beam so a guardrail reads as one rail. Variety survives: wilderness /
+         * rural still roll timber vs armco; town / urban settle on white armco.
+         * TD5RE_R17_RAIL_SINGLE=0 restores the two-beam pages for an A/B. */
+        if (td5_env_flag_on("TD5RE_R17_RAIL_SINGLE") && (off == 0 || off == 2))
+            off = 3;
+        return TD5_TG_PAGE_R8V_RAIL + off;
+    }
 }
 
 /* [R11 GUARD item 11] One definition of "the roadside rail uses the file's
