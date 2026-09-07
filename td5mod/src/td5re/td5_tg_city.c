@@ -134,8 +134,39 @@ int tg_emit_road_quad_taper(const TG_NodeList *nl, int si, double u_scale,
             const TG_Node *rnb = &nl->v[si + 1];
             const double nw0    = rna->width + (rnb->width - rna->width) * f0;
             const double nw1    = rna->width + (rnb->width - rna->width) * f1;
-            const double nw_ref = (double)TD5_TG_LANE_WIDTH * (u_scale * wscale_near);
-            if (nw_ref > 1e-6) { ur0 *= nw0 / nw_ref; ur1 *= nw1 / nw_ref; }
+            /* [R17 ROADMARK items 1&2] The carriageway's width in LANES is its
+             * physical width over one lane width, i.e. (node width * wscale) /
+             * LANE_WIDTH, and U must equal exactly that so one texture tile is
+             * one lane at a constant world pitch. The nw/nw_ref form below did
+             * that correctly ONLY for a full-width road: there nw_ref =
+             * LANE_WIDTH*(u_scale*wscale_near) reduces to the road's own width
+             * and the ratio collapses to nw/LANE_WIDTH. But on a width-SCALED
+             * carriageway -- a fork's MAIN HALF or a BRANCH CORRIDOR, where the
+             * centreline node keeps the FULL road width and `wscale` carries the
+             * fraction -- nw is the full width while nw_ref is only the half
+             * carriageway's width, so the ratio came out ~2 and, worse, keyed on
+             * the per-span `wscale_near`. That DOUBLED the lane-line density on a
+             * fork carriageway (the "lane markings not consistent when the branch
+             * is finished" report at a rejoin, where a double-density main half
+             * meets the normal full road) and made it JUMP at every corridor span
+             * whose wscale differed from its neighbour's (the "lane markings not
+             * continuous when the road widens" report), because adjacent spans
+             * divided by different wscale_near references.
+             *
+             * nw*wscale/LANE_WIDTH has neither fault: it is BYTE-IDENTICAL on the
+             * main ring (wscale == 1 -> nw/LANE_WIDTH, exactly the old ratio
+             * form's result there, including the dual-lane width taper this block
+             * was written for) and continuous through a fork/corridor taper.
+             * TD5RE_R17_ROADMARK_UV=0 restores the old nw/nw_ref ratio for A/B. */
+            if (td5_env_flag_on("TD5RE_R17_ROADMARK_UV")
+                && TD5_TG_LANE_WIDTH > 0) {
+                ur0 = nw0 * w0v / (double)TD5_TG_LANE_WIDTH;
+                ur1 = nw1 * w1v / (double)TD5_TG_LANE_WIDTH;
+            } else {
+                const double nw_ref =
+                    (double)TD5_TG_LANE_WIDTH * (u_scale * wscale_near);
+                if (nw_ref > 1e-6) { ur0 *= nw0 / nw_ref; ur1 *= nw1 / nw_ref; }
+            }
         }
 #ifndef TD5RE_RELEASE
         /* [ROAD UV DIAG 2026-08-31] TD5RE_ROAD_UV_DIAG=1 dumps the per-subdiv U

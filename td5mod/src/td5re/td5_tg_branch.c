@@ -1157,8 +1157,28 @@ int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
     mw0 = gw0 * 0.32;
     mw1 = gw1 * 0.32;
     if (fill) {
-        const double f0 = gw0 * 0.5 - TD5_TG_R11_MEDIAN_INSET;
-        const double f1 = gw1 * 0.5 - TD5_TG_R11_MEDIAN_INSET;
+        /* [R17 ROADMARK item 3] "this grass is overlapping with road ... the
+         * median should be the same width." The gore FLOOR (tg_emit_gore, a
+         * single GREEN quad) spans the whole visible gore -- road inner edge
+         * (lateral 0) to branch inner edge (lateral bl) -- and underlaps each
+         * carriageway a further TD5_TG_GORE_OVERLAP. The filled island stood
+         * TD5_TG_R11_MEDIAN_INSET (300) clear of each edge, so a flat 300-unit
+         * strip of that GREEN floor was left EXPOSED at road level on each side
+         * of the raised island: grass lying beside (and, via the overlap,
+         * lapping onto) the tarmac. Reaching the carriageway edge (inset 0)
+         * makes the raised island cover the whole visible gore floor, so the
+         * only GREEN the driver sees beside the lane is the island's own raised
+         * top -- the floor's overlap now hides UNDER the main road quad on the
+         * road side and UNDER the branch road quad on the branch side. The
+         * raised kerb face then sits AT the lane edge (lateral 0 / bl), not in
+         * the lane: those are the carriageways' own inner edges, so nothing new
+         * enters a live lane. Height and placement are untouched, so the R16
+         * MIN_H floor and the tg_median_at_raw end-cap mirror still agree.
+         * TD5RE_R17_MEDIAN_FLUSH=0 restores the 300-unit inset for an A/B. */
+        const double inset = td5_env_flag_on("TD5RE_R17_MEDIAN_FLUSH")
+                           ? 0.0 : TD5_TG_R11_MEDIAN_INSET;
+        const double f0 = gw0 * 0.5 - inset;
+        const double f1 = gw1 * 0.5 - inset;
         if (f0 > mw0) mw0 = f0;
         if (f1 > mw1) mw1 = f1;
     }
