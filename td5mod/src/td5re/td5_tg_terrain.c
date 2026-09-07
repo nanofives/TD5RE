@@ -3301,7 +3301,22 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
      * actual tree line: non-snow, non-urban (snow keeps its flank, urban gets the
      * blocky skyline -- see the seg_page[1] routing below). */
     const int r5fix = tg_r5_treeline_fix();
-    const int r5treeline = !tg_biome_is_snow(h->b) && h->b->urbanity < 2;
+    /* [R18 TERRAIN item 4] "part of the texture is background for city ... it
+     * should not happen here" -- a city SKYLINE ridge drawn behind a COAST span
+     * (seed 771144 span 1044, page R4_SKYLINE). The skyline is per-RUN structure,
+     * not a per-span categorical field, but the ridge routing below keyed off
+     * h->b->urbanity, and h->b is the DITHERED per-span biome (tg_biome_for_span):
+     * within the ~6-span blend band of the urban cell that starts at span 1050 a
+     * COAST span resolves to the urban neighbour and gets its skyline. Decide the
+     * skyline/tree-line choice from the owner span's HARD biome cell instead --
+     * the same R11 hard-edge rule the road surface, grip class and pavement
+     * already use for structural (non-dithered) decisions. TD5RE_R18_SKYLINE_HARDEDGE=0
+     * restores the dithered h->b urbanity for an A/B. */
+    const int hard_urban =
+        td5_env_flag_on("TD5RE_R18_SKYLINE_HARDEDGE")
+        ? (k_biomes[tg_biome_cell_index(h->si)].urbanity >= 2)
+        : (h->b->urbanity >= 2);
+    const int r5treeline = !tg_biome_is_snow(h->b) && !hard_urban;
     /* [R9 item 10] Per-side dry reach, decided across BOTH ends so the band
      * stays a proper quad; see tg_r9_dry_reach. */
     double band_reach = reach;
@@ -3356,6 +3371,27 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
             if (d > drop_max) drop_max = d;
             if (c < cap) cap = c;
             if (pp.d[pp.n - 1] > so_max) so_max = pp.d[pp.n - 1];
+        }
+        /* [R18 TERRAIN item 2] "this far band is being drawn over that one" --
+         * two ADJACENT groups' bands overlapping (seed 771144 groups ~156 and
+         * ~160, both treeline). R17's road cap (band_reach = reach) flagged the
+         * exact residual: the cap above samples only the two group ENDS (g0,g1),
+         * so where the road doubles back so its opposing carriageway is nearest an
+         * INTERIOR span of the group (the apex of a bend between g0 and g1) the
+         * cap is not seen, this band runs its full reach ACROSS the neighbouring
+         * group's footprint / the far leg, and the two bands z-fight. Sample the
+         * cap at every span of the group (FAR_GROUP = 4, so two extra rays) and
+         * keep the tightest -- the apex now caps this band and the overlap goes.
+         * tg_topo_road_cap already skips its own +/-TOPO_SELF_SPANS, so a group
+         * span never caps against its own near neighbours. Raw call (not the
+         * TG_SUB3D accounting wrapper) so the byte-attribution buckets are
+         * unchanged. TD5RE_R18_FARBAND_ROADCAP_APEX=0 restores ends-only. */
+        if (td5_env_flag_on("TD5RE_R18_FARBAND_ROADCAP_APEX")) {
+            int sa;
+            for (sa = g0 + 1; sa < g1; sa++) {
+                const double c = tg_topo_road_cap(nl, sa, is_left);
+                if (c < cap) cap = c;
+            }
         }
         /* "No wall" means no wall ACTUALLY EMITTED -- ridge_ok is only half of
          * that test, and tg_topo_chain's closure test is the other half, so
@@ -3568,7 +3604,7 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
             /* The carve-out, stated as code: a group that qualifies must not be
              * one whose ridge is the city skyline. Urban biomes carry no tree
              * line, so this can only fire if a future biome grows both. */
-            if (hides_ridge && tg_r4_city_skyline() && h->b->urbanity >= 2) {
+            if (hides_ridge && tg_r4_city_skyline() && hard_urban) {   /* [R18] hard-edge */
                 s_r13_far_skyline_kept++;
                 hides_ridge = 0;
             }
@@ -3645,7 +3681,7 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
          * else tree line) so the branch that gets the skyline page is exactly the
          * branch that gets the skyline's U. */
         const int r5skyline = !tg_biome_is_snow(h->b) && tg_r4_city_skyline()
-                            && h->b->urbanity >= 2 && tg_r15_skyline_uv();
+                            && hard_urban && tg_r15_skyline_uv();   /* [R18] hard-edge */
         if (r5fix && (r5treeline || r5skyline)) {
             const double w = sqrt((X[1][3]-X[0][3])*(X[1][3]-X[0][3])
                                 + (Z[1][3]-Z[0][3])*(Z[1][3]-Z[0][3]));
@@ -3705,7 +3741,7 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
          * so the A/B toggles ONE thing. */
         if (tg_biome_is_snow(h->b))
             seg_page[1] = tg_ground_page_for_span(h->si, h->b);
-        else if (tg_r4_city_skyline() && h->b->urbanity >= 2)
+        else if (tg_r4_city_skyline() && hard_urban)   /* [R18 item 4] hard-edge */
             seg_page[1] = TD5_TG_PAGE_R4_SKYLINE;
         else
             seg_page[1] = tg_r8_treeline_page(g0);   /* [R8 item 14 VARY] */
@@ -3837,6 +3873,27 @@ static int tg_emit_far_shore(const TG_FBHook *h, int is_left)
     if (g1 < g0) return 1;
     if (*h->nmesh + 1 >= h->maxmesh) return 1;
 
+    /* [R18 TERRAIN items 1/3] A far shore only closes an OPEN seaward horizon.
+     * It stands `out` (~62000) from the road edge along the outward normal and,
+     * unlike the far BAND beside it (which caps its ground at the nearest opposing
+     * carriageway via tg_topo_road_cap), the shore ran the full `out`
+     * UNCONDITIONALLY. Where the track doubles back within that reach -- a coastal
+     * hairpin whose opposing leg sits between this road and where the shore would
+     * stand -- the shore's treeline is drawn straight ACROSS that road ("this
+     * background texture is over the road", seed 771144 span ~628) or reads as a
+     * forest wall floating over the near water rather than on an open far bank
+     * ("you shouldn't add this texture as background when there's water nearby",
+     * span ~36). Suppress the shore where a carriageway intervenes within `out`:
+     * there is no open sea to close in that direction. Sample every span of the
+     * group (FAR_GROUP = 4) so a bend apex between the ends is caught, matching
+     * the far band's item-2 apex cap. TD5RE_R18_FARSHORE_ROADCAP=0 restores the
+     * uncapped far shore for an A/B. */
+    if (td5_env_flag_on("TD5RE_R18_FARSHORE_ROADCAP")) {
+        int sa;
+        for (sa = g0; sa <= g1; sa++)
+            if (tg_topo_road_cap(nl, sa, is_left) < out) return 1;
+    }
+
     for (e = 0; e < 2; e++) {
         const int se = e ? g1 : g0;
         double lx, ly, lz, rx, ry, rz, ux, uz, len;
@@ -3870,9 +3927,18 @@ static int tg_emit_far_shore(const TG_FBHook *h, int is_left)
         uu[3]=0.0;   vv[3]=TD5_TG_FACADE_UV_INSET;
     }
 
-    seg_page = tg_biome_is_snow(h->b) ? tg_ground_page_for_span(h->si, h->b)
-             : (h->b->urbanity >= 2  ? TD5_TG_PAGE_R4_SKYLINE
-                                     : tg_r8_treeline_page(g0));
+    /* [R18 TERRAIN item 4] Same hard-edge urbanity rule as the far band: a coast
+     * far shore within an urban cell's dither band must not draw a city skyline.
+     * TD5RE_R18_SKYLINE_HARDEDGE=0 restores the dithered h->b urbanity. */
+    {
+        const int shore_urban =
+            td5_env_flag_on("TD5RE_R18_SKYLINE_HARDEDGE")
+            ? (k_biomes[tg_biome_cell_index(h->si)].urbanity >= 2)
+            : (h->b->urbanity >= 2);
+        seg_page = tg_biome_is_snow(h->b) ? tg_ground_page_for_span(h->si, h->b)
+                 : (shore_urban          ? TD5_TG_PAGE_R4_SKYLINE
+                                         : tg_r8_treeline_page(g0));
+    }
 
     h->moff[(*h->nmesh)] = h->blk->len;
     if (!tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, 4, &seg_page, &seg_nq, 1))
