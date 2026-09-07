@@ -492,6 +492,13 @@ static int td5_write_png_rgba(const char *path, const unsigned char *rgba, int w
     return ok;
 }
 
+/* Public platform wrapper (see td5_platform.h): expose the zlib-free RGBA PNG
+ * encoder to generators/tools (e.g. the auto-track native-res tree-line pages). */
+int td5_plat_write_png_rgba(const char *path, const unsigned char *rgba, int w, int h) {
+    if (!path || !rgba || w <= 0 || h <= 0) return 0;
+    return td5_write_png_rgba(path, rgba, w, h);
+}
+
 static void td5_plat_dump_frame_png(const char *path) {
     int w = 0, h = 0;
     unsigned char *rgba;

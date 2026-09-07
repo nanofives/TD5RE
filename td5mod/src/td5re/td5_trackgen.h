@@ -138,6 +138,14 @@ int td5_trackgen_is_auto_slot(int slot);
  * the auto track (page ids are per-track). Used by the dev geometry picker. */
 const char *td5_trackgen_page_name(int page);
 
+/* [R19 TREELINE PNG] Loader opt-in for the native-resolution tree-line PNG
+ * override. Returns 1 only when TD5RE_AUTOTRACK_TREELINE_PNG is on, `level_number`
+ * is the auto-track level, and `page` is one of the tree-line pages the generator
+ * emits a loose PNG for. The asset loader (tpage_decode_one) uses this to widen
+ * the TD6-only PNG path to the auto-track's tree-line pages without touching
+ * shipped tracks, TD6, or any other page. Default OFF (knob unset -> 0). */
+int td5_trackgen_treeline_png_page(int level_number, int page);
+
 /* [PICK] Emitter-kind name for an auto-track mesh at (entry, slot), e.g.
  * "flora", "building", "guardrail" -- read from the level's MESHTAG.BIN sidecar
  * (written next to MODELS.DAT; MODELS.DAT itself is unchanged). NULL if the

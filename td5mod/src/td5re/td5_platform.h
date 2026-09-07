@@ -181,6 +181,12 @@ int td5_plat_file_delete(const char *path);
 /** Rename/move a file (overwrites the destination). Returns 0 on success. */
 int td5_plat_file_rename(const char *from, const char *to);
 
+/** Write an RGBA8 image (w*h*4 bytes, byte order R,G,B,A) to `path` as a PNG.
+ *  Returns 1 on success, 0 on failure. Uses the port's zlib-free encoder
+ *  (stored DEFLATE blocks -- no compression), so it is intended for tools and
+ *  generators writing a handful of pages, not a per-frame hot path. */
+int td5_plat_write_png_rgba(const char *path, const unsigned char *rgba, int w, int h);
+
 /* ------------------------------------------------------------------------
  * Human-readable INI config (used by td5_save.c after Config.td5/CupData.td5
  * were retired in favour of organized INI files: td5re_input.ini,

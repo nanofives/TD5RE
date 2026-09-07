@@ -2903,8 +2903,15 @@ static void tpage_decode_one(int i, void *vctx)
     r->keyed_pixels = 0;
     r->from_png = 0;
 
-    /* TD6 native-res PNG path (forward-only, no reverse remap). */
-    if (c->td6 > 0) {
+    /* TD6 native-res PNG path (forward-only, no reverse remap).
+     *
+     * [R19 TREELINE PNG] The auto-track opts specific pages into the SAME
+     * override without being a TD6 track: td5_trackgen_treeline_png_page is true
+     * only when TD5RE_AUTOTRACK_TREELINE_PNG is on, this is the auto-track level,
+     * and `pg` is one of the tree-line pages the generator wrote a native-res PNG
+     * for. That keeps the un-gating scoped -- shipped TD5 tracks and TD6 are
+     * unaffected, and a stray tex_NNN.png on any other page is never consulted. */
+    if (c->td6 > 0 || td5_trackgen_treeline_png_page(c->level_number, pg)) {
         char png_path[256];
         void *png_px = NULL;
         int pw = 0, ph = 0;
