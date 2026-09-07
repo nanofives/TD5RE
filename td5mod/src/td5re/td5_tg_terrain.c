@@ -3603,6 +3603,18 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
     seg_page[0] = tg_topo_surface_page(h->si);
     seg_nq[0]   = 3;
 
+    /* [R18 TREELINE] "tree background texture looks very pixelated." MEASURED,
+     * left UNKNOWN by design -- see re/analysis/r18_treeline_pixelation.md. The
+     * ridge is ONE 64x64 page (format-locked: TEXTURES.DAT stores u8
+     * indices[4096], the loader hardcodes 64x64 and reads shipped TD5 tracks with
+     * it) drawn square at ~70 world-units/texel (tg_r8_tl_note = tile/64). Stacked
+     * quads (Option B) add texels only if the page tiles vertically, which stacks
+     * keyed crown lines up the wall and shows sky through the middle -- broken;
+     * subdividing instead adds 0 texels for +208(N-1) B/band. A bigger page needs
+     * the TD6 native-res loose-PNG path (tpage_decode_one, gated td6>0) wired to
+     * the auto-track + a higher-res render, but the foliage source is itself
+     * 64x64 (blur, not detail) and none of it is verifiable without assets. No
+     * change shipped rather than a default-ON unverifiable cosmetic swap. */
     if (ridge_ok && tg_terrain_ridge_enabled()) {
         /* Ridge: a wall standing on the outermost edge, its top sampled from the
          * same hill function so consecutive groups share a crest height and the
