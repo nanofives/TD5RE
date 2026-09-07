@@ -1704,11 +1704,27 @@ double tg_bridge_column_lateral(const TG_NodeList *nl, int si,
 int tg_bridge_pier_here(const TG_NodeList *nl, int si)
 {
     const int pitch = tg_bridge_pier_pitch(tg_bridge_style(si));
-    int s0, s1;
+    int s0, s1, crown;
     if (!tg_r9_bridge_tie() || !tg_span_in_bridge_run(si))
         return (si % pitch) == 0;
     tg_bridge_run_bounds(nl, si, &s0, &s1);
-    if (si == s0 + (s1 - s0) / 2) return 1;          /* crown -> towers land */
+    crown = s0 + (s1 - s0) / 2;
+    if (si == crown) return 1;                       /* crown -> towers land */
+    /* [R16 item a] "this pillar is too close to the pillar of the centre of the
+     * bridge, we only need one." The crown is FORCED to carry a pier (the towers
+     * stand on it), but the rest of the grid was measured from s0. When the crown
+     * is not itself a multiple of pitch from s0 the nearest s0-grid pier lands 1
+     * or 2 spans from the forced crown pier -- two pillars almost touching beside
+     * the centre tower. Anchor the whole grid to the CROWN instead of s0: every
+     * other pier sits a multiple of pitch AWAY from the crown, so the crown is the
+     * single centre pillar and none can ever fall adjacent to it. Span count is
+     * unchanged in the common case where the crown was already on the s0 grid.
+     * TD5RE_R16_PIER_CROWNGRID=0 restores the s0-relative grid. */
+    if (td5_env_flag_on("TD5RE_R16_PIER_CROWNGRID")) {
+        int d = si - crown;
+        if (d < 0) d = -d;
+        return (d % pitch) == 0;
+    }
     return ((si - s0) % pitch) == 0;
 }
 
@@ -1728,6 +1744,15 @@ int tg_bridge_gantry_here(const TG_NodeList *nl, int si)
     if (!tg_span_in_bridge_run(si)) return 0;
     if (pitch <= 0) return 0;
     tg_bridge_run_bounds(nl, si, &s0, &s1);
+    /* [R16 item a] Follow the pier grid's anchor. A gantry stands only on a pier
+     * span (every second pier), so once tg_bridge_pier_here anchors the pier grid
+     * to the crown the gantry grid has to as well, or a gantry leg lands on a span
+     * with no pier under it. Both use "distance from crown mod (2*pitch)". */
+    if (td5_env_flag_on("TD5RE_R16_PIER_CROWNGRID")) {
+        int d = si - (s0 + (s1 - s0) / 2);
+        if (d < 0) d = -d;
+        return (d % (pitch * 2)) == 0;
+    }
     return ((si - s0) % (pitch * 2)) == 0;
 }
 
