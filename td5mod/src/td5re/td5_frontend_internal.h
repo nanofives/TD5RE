@@ -335,6 +335,9 @@ extern int s_mp_host_menu_sel;    /* highlighted MP_HOST_OPT_*                  
  * declared in td5_fe_carstats.h (speed-tier classification for host car options). */
 float frontend_update_timed_animation(int max_tick, uint32_t duration_ms);
 int frontend_check_escape(void);
+/* [AUTOTRACK QUICKRACE 2026-09-06] Screen the AUTO TRACK STUDIO was opened from
+ * (TD5_SCREEN_TRACK_SELECTION or TD5_SCREEN_QUICK_RACE). Defined in td5_fe_race.c. */
+int frontend_autotrack_parent_screen(void);
 /* [splitscreen back-confirm 2026-06-24] Universal "confirm before going back"
  * guard for LOCAL split-screen multiplayer. Any screen's back/cancel routes its
  * back action through frontend_back_confirm_request(action): in split-screen it

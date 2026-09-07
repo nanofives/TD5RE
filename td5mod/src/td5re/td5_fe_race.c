@@ -319,6 +319,16 @@ static int  s_trksel_rand_btn = -1;
 /* [AUTOTRACK R2 item 25] AUTO TRACK OPTIONS button index on the track-select
  * column, or -1 when the current pick is not the auto-generated slot. */
 static int  s_trksel_auto_btn = -1;
+/* [AUTOTRACK QUICKRACE 2026-09-06] AUTO TRACK STUDIO is now reachable from TWO
+ * screens (Track Selection and Quick Race), so the studio can no longer hardcode
+ * its way back to track-select. Whoever opens it records the parent here, and the
+ * studio's return path + td5_frontend.c's parent_of() both read it. Defaults to
+ * track-select so any path that forgets to set it behaves exactly as before. */
+static int  s_at_parent_screen = TD5_SCREEN_TRACK_SELECTION;
+/* Quick Race's own AUTO TRACK STUDIO chip. Unlike the track-select one this is
+ * created unconditionally (so the QR_BTN_* indices above it never shift) and is
+ * shown/hidden per frame by frontend_qr_refresh_auto_btn(). */
+static int  s_qr_auto_btn = -1;
 /* [ARCADE 2026-06-26] ARCADE/SIMULATION selector on Track Selection — APPENDED
  * as the highest button index so the load-bearing 0..8 rows stay put. -1 = not
  * created this entry. Non-static: the value render lives in td5_frontend.c
@@ -1019,6 +1029,21 @@ static void frontend_quickrace_cycle_track(int delta) {
     s_selected_track = start; /* nothing else available — restore (never lands on drag strip / cup) */
 }
 
+/* [AUTOTRACK QUICKRACE 2026-09-06] Show the Quick Race AUTO TRACK STUDIO chip
+ * only while the AUTO-GENERATED slot is the current pick -- the generator knobs
+ * mean nothing on a shipped track. The button always EXISTS (index stability),
+ * so this toggles hidden+disabled together: hidden alone would still let
+ * keyboard/pad focus land on an invisible row.
+ * Cheap enough to call every frame; also called right after creation and after
+ * any track change. */
+static void frontend_qr_refresh_auto_btn(void) {
+    int show;
+    if (s_qr_auto_btn < 0) return;
+    show = td5_trackgen_is_auto_slot(s_selected_track);
+    s_buttons[s_qr_auto_btn].hidden   = show ? 0 : 1;
+    s_buttons[s_qr_auto_btn].disabled = show ? 0 : 1;
+}
+
 /* Clamp the human/AI counts so 1 <= humans <= 6 and 0 <= opponents <= 6-humans.
  * The counts render as value text to the right of the Players/Opponents buttons
  * (frontend_render_quick_race_overlay), so no button labels are touched here. */
@@ -1068,7 +1093,14 @@ void Screen_QuickRaceMenu(void) {
          * (excluded from the selector, see frontend_track_excluded_from_selector). */
         if (s_selected_car < 0) s_selected_car = 0;
         if (s_selected_track < 0) s_selected_track = 0;
-        if (s_selected_track >= 26) s_selected_track = 0;
+        /* [AUTOTRACK QUICKRACE 2026-09-06] The >=26 reset used to fire on the
+         * AUTO-GENERATED slot (60) too, so picking it here and re-entering the
+         * menu silently bounced the selection back to Moscow -- the auto track
+         * was effectively unreachable from Quick Race. Exempt the auto slot; the
+         * registry-backed exclusion check on the next line still rejects it if
+         * the generator never registered a track there. */
+        if (s_selected_track >= 26 && !td5_trackgen_is_auto_slot(s_selected_track))
+            s_selected_track = 0;
         if (frontend_track_excluded_from_selector(s_selected_track)) s_selected_track = 0;
 
         /* Improved layout (PORT ENHANCEMENT): caption selectors with the selected
@@ -1183,6 +1215,18 @@ void Screen_QuickRaceMenu(void) {
          * GAME SPEED, END AT CHKPT). */
         frontend_create_button(SNK_RaceOptionsButTxt, QR_COL_X, QR_ROW_Y(5), QR_BTN_W, 32); /* QR_BTN_RACEOPTS */
 
+        /* [AUTOTRACK QUICKRACE 2026-09-06] AUTO TRACK STUDIO chip, mirroring the
+         * one Track Selection grows when the AUTO-GENERATED slot is picked
+         * (s_trksel_auto_btn). Created LAST and UNCONDITIONALLY so every
+         * hard-coded QR_BTN_* index above stays put; unlike track-select -- which
+         * rebuilds its whole button list on every track change -- Quick Race
+         * cycles the track in place, so visibility is refreshed per frame by
+         * frontend_qr_refresh_auto_btn() instead of at creation time. Row 6 is
+         * free (the AI Screens row that lives there is hidden). */
+        s_qr_auto_btn = frontend_create_button(TR("AUTO TRACK STUDIO"),
+                                               QR_COL_X, QR_ROW_Y(6), QR_BTN_W, 32);
+        frontend_qr_refresh_auto_btn();
+
         /* Reset direction to Forwards on entry (matches TrackSelection); hide the
          * toggle on forward-only/circuit tracks (caption stays "Direction" —
          * manage_label=0). Clamp the player/opponent counts. */
@@ -1250,6 +1294,9 @@ void Screen_QuickRaceMenu(void) {
                 /* Re-evaluate the Direction toggle + Laps row for the new track. */
                 frontend_update_direction_button_visibility(QR_BTN_DIRECTION, 0);
                 frontend_update_laps_button_visibility(QR_BTN_LAPS);
+                /* [AUTOTRACK QUICKRACE 2026-09-06] Grow/drop the STUDIO chip with
+                 * the new pick, same as the other track-dependent rows above. */
+                frontend_qr_refresh_auto_btn();
                 TD5_LOG_I(LOG_TAG, "QuickRace track cycle: s_selected_track=%d level=%d name=%s",
                           s_selected_track, td5_asset_level_number(s_selected_track),
                           frontend_get_track_name(s_selected_track));
@@ -1361,6 +1408,22 @@ void Screen_QuickRaceMenu(void) {
             if (frontend_qr_random_button_on() &&
                 s_button_index == QR_BTN_RAND_TRACK && s_button_count > QR_BTN_RAND_TRACK) {
                 frontend_qr_roll_selector(1);   /* roll TRACK */
+            }
+
+            /* [AUTOTRACK QUICKRACE 2026-09-06] AUTO TRACK STUDIO. Same
+             * focus-agreement guard the track-select chip uses (s_trksel_auto_btn):
+             * this button is created past the fixed rows, so in a flow with fewer
+             * buttons a stray s_button_index could alias it and open the screen on
+             * a focus change. Record the parent so BACK/OK in the studio return
+             * HERE rather than to track-select. */
+            if (s_qr_auto_btn >= 0 &&
+                s_button_index == s_qr_auto_btn &&
+                s_selected_button == s_qr_auto_btn &&
+                !s_buttons[s_qr_auto_btn].disabled) {
+                frontend_play_sfx(3);
+                s_at_parent_screen = TD5_SCREEN_QUICK_RACE;
+                td5_frontend_set_screen(TD5_SCREEN_AUTOTRACK_OPTIONS);
+                return;
             }
 
             /* [QUICK RACE DEBUG 2026-07-21] RACE OPTIONS button opens the dynamic
@@ -7670,7 +7733,7 @@ void Screen_AutoTrackOptions(void) {
         s_at_seed_editing = 0;
         at_build_buttons();
         frontend_set_cursor_visible(1);
-        s_return_screen   = TD5_SCREEN_TRACK_SELECTION;
+        s_return_screen   = s_at_parent_screen;   /* track-select OR quick race */
         s_selected_button = 0;
         s_anim_complete   = 0;
         frontend_begin_timed_animation();
@@ -7805,10 +7868,15 @@ void Screen_AutoTrackOptions(void) {
         /* Leaving the screen must not leave a worker walking the generator
          * that the race launch is about to use. */
         td5_tgprev_cancel_join();
-        td5_frontend_set_screen(TD5_SCREEN_TRACK_SELECTION);
+        td5_frontend_set_screen(s_at_parent_screen);
         break;
     }
 }
+
+/* [AUTOTRACK QUICKRACE 2026-09-06] Which screen the AUTO TRACK STUDIO was opened
+ * from. td5_frontend.c's parent_of() needs it for the generic BACK path, and it
+ * lives here because the two entry points that set it are both in this file. */
+int frontend_autotrack_parent_screen(void) { return s_at_parent_screen; }
 
 void Screen_TrackSelection(void) {
     /* [CUP TRACK SELECT] The same body is registered at TD5_SCREEN_TRACK_SELECTION
@@ -8188,6 +8256,7 @@ void Screen_TrackSelection(void) {
                 s_button_index == s_trksel_auto_btn &&
                 s_selected_button == s_trksel_auto_btn) {
                 frontend_play_sfx(3);
+                s_at_parent_screen = TD5_SCREEN_TRACK_SELECTION;
                 td5_frontend_set_screen(TD5_SCREEN_AUTOTRACK_OPTIONS);
                 break;
             }

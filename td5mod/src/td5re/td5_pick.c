@@ -522,26 +522,29 @@ void td5_pick_finish_frame(void)
                      s_best_cx, s_best_cy, s_best_cz, r);
         }
 
-        /* JSON payload for the clipboard. */
+        /* Clipboard payload -- compact single line. The old JSON ran ~190 chars
+         * and wrapped in every terminal / chat window these picks get pasted
+         * into. Same information in ~70 chars:
+         *   AUTO L90 e13 s13 terrain p2:GREEN+368 pos 92953,-2266,14178 r12005 v16 c2
+         * Positions round to whole units: they are world/256 render floats, so
+         * the two decimals never helped identify a mesh.
+         * [PICK 2026-09-06] user request: "make the copied coordinates fit in one line". */
         {
             int off, i;
-            off = snprintf(s_json, sizeof s_json,
-                     "{\"track\":\"%s\",\"level\":%d,\"entry\":%d,\"slot\":%d,\"page\":%d,",
-                     trackid, level_num, entry, s_best_slot, primary);
+            off = snprintf(s_json, sizeof s_json, "%s L%d e%d s%d",
+                           trackid, level_num, entry, s_best_slot);
             if (kind && off > 0 && off < (int)sizeof s_json)
-                off += snprintf(s_json + off, sizeof s_json - off,
-                                "\"kind\":\"%s\",", kind);
-            if (pgname && off > 0 && off < (int)sizeof s_json)
-                off += snprintf(s_json + off, sizeof s_json - off,
-                                "\"page_name\":\"%s\",", pgname);
+                off += snprintf(s_json + off, sizeof s_json - off, " %s", kind);
             if (off > 0 && off < (int)sizeof s_json)
-                off += snprintf(s_json + off, sizeof s_json - off, "\"pages\":[");
-            for (i = 0; i < npages && off > 0 && off < (int)sizeof s_json; i++)
-                off += snprintf(s_json + off, sizeof s_json - off,
-                                "%s%d", i ? "," : "", pages[i]);
+                off += snprintf(s_json + off, sizeof s_json - off, " p%d", primary);
+            if (pgname && off > 0 && off < (int)sizeof s_json)
+                off += snprintf(s_json + off, sizeof s_json - off, ":%s", pgname);
+            /* pages[0] is the primary and is already printed; list only extras. */
+            for (i = 1; i < npages && off > 0 && off < (int)sizeof s_json; i++)
+                off += snprintf(s_json + off, sizeof s_json - off, "+%d", pages[i]);
             if (off > 0 && off < (int)sizeof s_json)
                 snprintf(s_json + off, sizeof s_json - off,
-                         "],\"pos\":[%.2f,%.2f,%.2f],\"radius\":%.2f,\"verts\":%d,\"cmds\":%d}",
+                         " pos %.0f,%.0f,%.0f r%.0f v%d c%d",
                          s_best_cx, s_best_cy, s_best_cz, r, verts, cmds);
         }
         s_hud_valid = 1;
