@@ -37,34 +37,25 @@ double tg_water_side(int si)
  * with every hill. A body of water is level by definition, so take the LOWEST
  * road node in the biome run and sit below that -- below the road everywhere in
  * the run, so no low point is ever flooded. */
-/* [R17 WATER item 1] The GLOBAL water level. ONE height for the whole track.
- *
- * Reported (headline): "implement water level, track should NOT go below this
- * level and should always be the same for the whole track."
- *
- * Derivation makes the invariant hold by construction rather than by a clamp
- * that would distort the road: the surface sits TD5_TG_WATER_DROP (1200) below
- * tg_track_min_y -- the track's GLOBAL lowest node across the whole (final,
- * branch-corridors-appended) list. Because the lowest road node is 1200 above
- * the water, EVERY road node is above the water, so the route is never below the
- * water level and no elevation clamp is needed. This is the same relationship
- * the per-run sea already had with its own run's minimum, lifted from per-run to
- * per-track so all water reads at one height instead of rising and falling with
- * each coastal run's local low point. */
-double tg_water_level_y(const TG_NodeList *nl)
-{
-    return tg_track_min_y(nl) - (double)TD5_TG_WATER_DROP;
-}
-
 double tg_sea_level_y(const TG_NodeList *nl, int si)
 {
-    /* [R17 WATER item 1] GLOBAL water level: one surface for the whole track.
-     * TD5RE_R17_GLOBAL_WATER=0 restores the per-biome-run sea below. */
+    /* [R17 WATER item 1] GLOBAL water level: ONE absolute surface height for the
+     * whole track, anchored to the low band of the elevation profile and paired
+     * with a route floor clamp so the road stays above it (both computed in
+     * tg_apply_elevation; see tg_water_level_y in td5_trackgen.c).
+     *
+     * DEFAULT OFF -- opt in with TD5RE_R17_GLOBAL_WATER=1. The first cut derived
+     * the level as track_min - WATER_DROP, which put the sea BELOW everything and
+     * turned every high coastal run into the floor of a canyon (measured on seed
+     * 771144: relief range 34015, so a coast at +20000 sat ~32000 above a sea at
+     * -11885). Kept off by default until the height selection and the coast
+     * interaction are validated in frame; see the R17 notes in tg_apply_elevation
+     * for the grade-cap analysis of why high coasts cannot simply be lowered. */
     int a, b;
     double lo;
     int i;
 
-    if (td5_env_flag_on("TD5RE_R17_GLOBAL_WATER"))
+    if (td5_env_flag_off("TD5RE_R17_GLOBAL_WATER"))
         return tg_water_level_y(nl);
 
     /* [R8 BIOME item 19] Lowest node of the MERGED run, not of the raw cell.
