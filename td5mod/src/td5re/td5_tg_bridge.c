@@ -92,6 +92,47 @@ int tg_water_span_clear(int si)
     return !tg_span_in_tunnel(si) && !tg_span_in_tunnel(si + 1);
 }
 
+/* [R18 WATER items 2+3] Is world point (wx,wz) over the RIVER of a bridge run
+ * near span si0?
+ *
+ * The point scenery emitters -- trees (tg_flora_plant) and buildings
+ * (tg_emit_street_wall) -- stand their base at ROAD level and are blind to a
+ * bridge run's river, so anything set back beside a crossing floats over the
+ * water. The far-band cull already answers exactly this question against the
+ * river rectangle (tg_r9_point_over_bridge_water in td5_tg_terrain.c, which is
+ * file-static there); this is the same test, exposed for the point emitters and
+ * using the same rectangle tg_emit_bridge_water lays, so the three cannot
+ * disagree about where the water is. A window of spans is scanned because a
+ * trunk/frontage set back on one span can sit over the river of a neighbour. */
+int tg_point_over_bridge_water(const TG_NodeList *nl, int si0,
+                               double wx, double wz)
+{
+    const double BW = TD5_TG_BRIDGE_WATER_HALF + TD5_TG_R9_WATER_MARGIN;
+    int s, lo, hi;
+    if (!nl) return 0;
+    lo = si0 - TD5_TG_R9_WATER_WINDOW;
+    hi = si0 + TD5_TG_R9_WATER_WINDOW;
+    if (lo < 0) lo = 0;
+    if (hi > nl->count - 2) hi = nl->count - 2;
+    for (s = lo; s <= hi; s++) {
+        const TG_Node *n0, *n1;
+        double dx, dz, along, lat, ax, az, len;
+        if (!tg_span_in_bridge_run(s) || !tg_water_span_clear(s)) continue;
+        n0 = &nl->v[s]; n1 = &nl->v[s + 1];
+        dx = wx - n0->x; dz = wz - n0->z;
+        /* tg_emit_bridge_water's own axes: left unit is (tz, -tx). */
+        along = dx * n0->tx + dz * n0->tz;
+        lat   = dx * n0->tz - dz * n0->tx;
+        if (lat <= -BW || lat >= BW) continue;
+        ax = n1->x - n0->x; az = n1->z - n0->z;
+        len = sqrt(ax * ax + az * az);
+        if (along < -TD5_TG_R9_WATER_MARGIN ||
+            along > len + TD5_TG_R9_WATER_MARGIN) continue;
+        return 1;
+    }
+    return 0;
+}
+
 /* [R11 WATER] How far out from the CENTRELINE the sea plane reaches at node si
  * -- the outer edge tg_emit_water lays, expressed in the same axis the bridge
  * river's BRIDGE_WATER_HALF is expressed in, so the two footprints can be
@@ -125,7 +166,23 @@ int tg_emit_water(const TG_NodeList *nl, int si, double side,
     int i, seg_page = TD5_TG_PAGE_WATER, seg_nq = 1;
 
     if (si + 1 >= nl->count) return 1;
-    if (tg_side_blocked(si, side)) return 1;
+    /* [R18 WATER item 1] "after this span of water there's no more water on the
+     * side." tg_side_blocked is a prop/facade guard: it drops the seaward side
+     * over a fork's cleared region so trunks and facades stay off a branch
+     * corridor. The sea is not on that side of the road at all -- it starts
+     * TD5_TG_WATER_BEACH (8100) OUTBOARD of the road edge and runs another
+     * TD5_TG_WATER_EXTENT to sea, far beyond any branch, which is a road that
+     * stays inside the drivable envelope. Borrowing that guard cut a visible gap
+     * in the sea wherever a fork cleared the seaward side. Refuse the sea only
+     * where the carriageway ACTUALLY reaches its near edge -- which it never does
+     * -- so the sea stays continuous past a fork. TD5RE_R18_SEA_OVER_FORK=0
+     * restores the blanket block. */
+    if (tg_side_blocked(si, side)) {
+        const double sea_near = n0->width * 0.5 + (double)TD5_TG_WATER_BEACH;
+        if (!td5_env_flag_on("TD5RE_R18_SEA_OVER_FORK")
+            || tg_carriageway_reach(nl, si, side) >= sea_near)
+            return 1;
+    }
     if (!tg_water_span_clear(si)) return 1;
     n1 = &nl->v[si + 1];
 
@@ -3421,6 +3478,17 @@ int tg_flora_plant(const TG_NodeList *nl, int si, const TG_Biome *b,
     *cz = n->z + lz * (n->width * 0.5 + gap + tw * 0.5);
     *base_y = n->y;
 
+    /* [R18 WATER item 3] "these trees are floating over water near the bridge."
+     * Rule 2 below only knows the biome SEA (b->water + tg_water_side); a bridge
+     * run's RIVER is a separate surface a set-back trunk can land over, near a
+     * fork/corridor mouth by a crossing. Refuse a trunk whose world point lies
+     * over the river rectangle, the same test the far-band cull uses. Runs
+     * regardless of the R7 A/B gate below, since it is a placement veto not a
+     * height rule. TD5RE_R18_FLORA_OVER_BRIDGE_WATER=0 restores the old planting. */
+    if (td5_env_flag_on("TD5RE_R18_FLORA_OVER_BRIDGE_WATER")
+        && tg_point_over_bridge_water(nl, si, *cx, *cz))
+        return 0;
+
     if (!td5_env_flag_on("TD5RE_R7_FLORA")) return 1;   /* A/B: R6 behaviour */
 
     /* Rule 2: over the seaward beach/sea of a coastal run -> no tree. */
@@ -3521,8 +3589,27 @@ int tg_emit_gore(const TG_NodeList *nl, int si,
                         TG_Buf *blk)
 {
     const TG_Node *a = &nl->v[si], *c = &nl->v[si + 1];
-    const double drop = TD5_TG_GORE_DROP;
-    const double ov   = TD5_TG_GORE_OVERLAP;
+    double drop = TD5_TG_GORE_DROP;
+    double ov   = TD5_TG_GORE_OVERLAP;
+    /* [R18 WATER item 6] "the median is invisible and it shouldn't start in the
+     * middle of the bridge." A gore paged as the bridge DECK (R17_GORE_ROAD
+     * routes a median-width fork gore to tg_road_page, which is BRIDGE_DECK on a
+     * bridge) is the fork throat's floor ON the deck, not a ground median.
+     * Dropped 4 units below the deck and overlapping the carriageways it reads
+     * as a sunken median gutter that begins mid-crossing (the fork only clips the
+     * run, so R16's island-uniformity rule already suppressed the raised island
+     * -- leaving just this flush-but-recessed strip). We cannot remove it (it
+     * fills the throat between the two carriageways), but laying it FLUSH with
+     * the deck (no drop) and ABUTTING the carriageways (no ov band to z-fight)
+     * makes it a seamless part of the deck surface: no median reads and nothing
+     * appears to "start" on the bridge. The raised island (whole-run forks) is a
+     * separate mesh and is untouched. TD5RE_R18_BRIDGE_GORE_FLUSH=0 restores the
+     * dropped ground-style gore. */
+    if (ground_page == TD5_TG_PAGE_BRIDGE_DECK
+        && td5_env_flag_on("TD5RE_R18_BRIDGE_GORE_FLUSH")) {
+        drop = 0.0;
+        ov   = 0.0;
+    }
     /* Branch left edge, pushed a further `ov` to the RIGHT (lateral is +ve to
      * the left of travel, and the branch sits at negative lateral). */
     double tnr = shift_n + half_n - ov;            /* near */

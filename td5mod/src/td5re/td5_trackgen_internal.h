@@ -2951,6 +2951,9 @@ int tg_biome_span_has_water(int si);
 double tg_water_side(int si);
 double tg_sea_level_y(const TG_NodeList *nl, int si);
 int tg_water_span_clear(int si);
+/* [R18 WATER items 2+3] world point (wx,wz) over a bridge run's river near si0 */
+int tg_point_over_bridge_water(const TG_NodeList *nl, int si0,
+                               double wx, double wz);
 double tg_r11_sea_outer(const TG_NodeList *nl, int si);
 int tg_emit_water(const TG_NodeList *nl, int si, double side, TG_Buf *m, size_t *moff, int *pn);
 /* Tunnels come in runs so a whole stretch is enclosed, not isolated spans.
