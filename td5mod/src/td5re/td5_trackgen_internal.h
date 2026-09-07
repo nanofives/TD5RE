@@ -3522,6 +3522,12 @@ int tg_r12_median_at(const TG_NodeList *nl, int si, int br_lanes);
  * emit site to pave that strip as road instead of ground. See the definition in
  * td5_tg_bridge.c. */
 int tg_gore_reads_as_median(const TG_NodeList *nl, int si, int br_lanes);
+/* [R19 FORK THROAT 2026-09-07] 1 where the gore floor on MAIN span si is a
+ * SLIVER (both ends < 200, the island's own sliver-reject width) -- i.e. at a
+ * fork's mouth/rejoin where the two carriageways are nearly one road. The emit
+ * site paves such a throat as road instead of a dropped green patch. See the
+ * definition in td5_tg_bridge.c. */
+int tg_gore_throat_sliver(const TG_NodeList *nl, int si, int br_lanes);
 /* [MEDIAN/BRIDGE 2026-09-07] 1 unless si is on a bridge run the median cannot
  * cover end to end. See the definition in td5_tg_bridge.c for why a partial
  * median cannot simply be extended. */
