@@ -592,12 +592,33 @@ static int tg_city_emit_forkback_plaza(const TG_FBHook *h, double side,
      * point is the region BEYOND the 12000 skirt, where a fork backdrop stands
      * (front ~14000-21000 out, seed 99991 span 137) over the sunk far-band and so
      * "does not reach the floor". */
-    const double inner = tg_verge_reach() - 1000.0;
+    double inner = tg_verge_reach() - 1000.0;
     double dn, df, u_d;
     double px[4], py[4], pz[4], uu[4], vv[4];
     int seg_page = TD5_TG_PAGE_GROUND, seg_nq, pp;
 
     if (!td5_env_flag_on("TD5RE_R7_CITY_PLAZA")) return 1;
+
+    /* [R18 CITY item 1] "these tiles are rendered over the road of the right
+     * track of the branch" (picker `city p5:GROUND r15022`). The inner edge is a
+     * FIXED 11000 past the road edge with no branch test, while the OUTER edge
+     * (set0/set1) already clears the branch through tg_carriageway_clear_gap. So
+     * where a long/wide fork bows its RIGHT carriageway past 11000 (measured
+     * reach - half > 11000 on the widening spans), the strip from inner(11000)
+     * out to the branch's outer edge is paved directly on top of the branch
+     * road. Push the inner edge out to the branch clearance on exactly those
+     * spans, using the same authority the outer edge uses -- bit-identical where
+     * the branch stays inboard of 11000 (short forks, every span off the
+     * widening). Both endpoints are checked because the corridor bows across the
+     * span. TD5RE_R18_FORKBACK_BRANCH=0 restores the fixed inner edge for an A/B. */
+    if (td5_env_flag_on("TD5RE_R18_FORKBACK_BRANCH")) {
+        double bc0 = tg_carriageway_clear_gap(h->nl, si, side, 0.0,
+                                              TD5_TG_CARRIAGEWAY_MARGIN);
+        double bc1 = tg_carriageway_clear_gap(h->nl, si + 1, side, 0.0,
+                                              TD5_TG_CARRIAGEWAY_MARGIN);
+        if (bc1 > bc0) bc0 = bc1;
+        if (bc0 > inner) inner = bc0;
+    }
 
     dn  = n0->width * 0.5 + set0 + depth;      /* near outer = block back */
     df  = n1->width * 0.5 + set1 + depth;      /* far  outer              */
@@ -776,13 +797,30 @@ static int tg_city_emit_forkback(const TG_FBHook *h)
          * edge back to that reach, so the green apron abuts the ordinary ground
          * with no gap instead of floating. TD5RE_R17_FORKPARK_FLOOR=0 restores the
          * island for an A/B. */
-        const double fin = td5_env_flag_on("TD5RE_R17_FORKPARK_FLOOR")
+        /* [R18 CITY item 1] "same with this grass city p65 r11515": the park
+         * lawn shares the plaza's fixed 11000 inner edge and the same branch
+         * blindness, so on a fork that bows its right carriageway past 11000 the
+         * lawn's inner strip laps over the branch road. Push the inner edge out to
+         * the branch clearance on exactly those spans, matching the plaza fix and
+         * the outer edge's own authority. Bit-identical where the branch stays
+         * inboard of 11000. TD5RE_R18_FORKBACK_BRANCH=0 restores the fixed inner
+         * edge for an A/B. */
+        double fin = td5_env_flag_on("TD5RE_R17_FORKPARK_FLOOR")
                          ? tg_verge_reach() - 1000.0 : set0;
-        const double fnx = n0->x + lx0 * (n0->width * 0.5 + fin);
-        const double fnz = n0->z + lz0 * (n0->width * 0.5 + fin);
-        const double ffx = n1->x + lx1 * (n1->width * 0.5 + fin);
-        const double ffz = n1->z + lz1 * (n1->width * 0.5 + fin);
-        const double u_d = (set0 + d - fin) / (double)TD5_TG_SPAN_LENGTH;
+        double fnx, fnz, ffx, ffz, u_d;
+        if (td5_env_flag_on("TD5RE_R18_FORKBACK_BRANCH")) {
+            double bc0 = tg_carriageway_clear_gap(nl, si, side, 0.0,
+                                                  TD5_TG_CARRIAGEWAY_MARGIN);
+            double bc1 = tg_carriageway_clear_gap(nl, si + 1, side, 0.0,
+                                                  TD5_TG_CARRIAGEWAY_MARGIN);
+            if (bc1 > bc0) bc0 = bc1;
+            if (bc0 > fin) fin = bc0;
+        }
+        fnx = n0->x + lx0 * (n0->width * 0.5 + fin);
+        fnz = n0->z + lz0 * (n0->width * 0.5 + fin);
+        ffx = n1->x + lx1 * (n1->width * 0.5 + fin);
+        ffz = n1->z + lz1 * (n1->width * 0.5 + fin);
+        u_d = (set0 + d - fin) / (double)TD5_TG_SPAN_LENGTH;
         q[0] = fnx;             q[1] = by;      q[2] = fnz;
         q[3] = bx + lx0 * d;    q[4] = by;      q[5] = bz + lz0 * d;
         q[6] = bx + ax + lx1*d; q[7] = by + ay; q[8] = bz + az + lz1 * d;

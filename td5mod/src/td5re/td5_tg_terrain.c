@@ -1473,6 +1473,31 @@ static int tg_city_skirt_hidden(const TG_NodeList *nl, int si, int is_left)
         if (!tg_facade_stands(k))                 return 0;
         if (!tg_facade_built(k, left))            return 0;
     }
+    /* [R18 CITY item 2] "between the sidewalk and the GROUND there's an empty
+     * space with no texture or geometry." The cull above drops the WHOLE skirt
+     * (road edge .. verge_reach) on the premise the frontage hides it "out past
+     * the verge". But a facade box is only sw + run_depth deep (measured up to
+     * ~8900 raw against cell widths), while the FAR-BAND apron tucks its inner
+     * edge to verge_reach - FAR_TUCK (= 10000) EXPECTING the skirt to cover under
+     * it. So where the building back stops short of that inner edge, culling the
+     * skirt leaves the strip [building_back .. far-band inner] as bare void --
+     * the reported seam. Cull only when the frontage on this side actually
+     * reaches the far-band inner edge at both slab spans; otherwise keep the
+     * skirt (at worst a wasted hidden slab -- the same trade the empty-mesh guard
+     * below already accepts). Back rows can extend coverage further but are
+     * ignored here, which only ever KEEPS more skirt, never opens a seam.
+     * TD5RE_R18_SKIRT_REACH=0 restores the reach-blind cull for an A/B. */
+    if (td5_env_flag_on("TD5RE_R18_SKIRT_REACH")) {
+        const double need = tg_verge_reach() - TD5_TG_FAR_TUCK;
+        int j;
+        for (j = si; j <= si + 1; j++) {
+            const TG_Biome *b = &k_biomes[tg_scenery_biome_index(j)];
+            const double reach = tg_city_sidewalk_w(b)
+                + tg_facade_run_depth(b, j, left,
+                                      tg_facade_floors(j, left, b), NULL);
+            if (reach < need) return 0;   /* frontage stops short -> keep skirt */
+        }
+    }
     return 1;
 }
 
