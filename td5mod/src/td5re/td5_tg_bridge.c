@@ -546,6 +546,12 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
       : td5_env_flag_on("TD5RE_R8_PORTAL")            ? TD5_TG_PAGE_R8_BRIDGE + 1
       :                                                 TD5_TG_PAGE_R7_BRIDGE + 0;
     const int lamps_on = td5_env_flag_on("TD5RE_AUTOTRACK_TUNNEL_LAMPS");
+    /* [R16 TUNNEL item e] interior maintenance walkway + guardrail. Default ON. */
+    const int swalk_on = td5_env_flag_on("TD5RE_R16_TUNNEL_SIDEWALK");
+    const int swalk_pg = TD5_TG_PAGE_SIDEWALK;      /* paving slabs   */
+    const int rail_pg  = TD5_TG_PAGE_FENCE;         /* sidewalk railing */
+    const unsigned int swalkc = 0xFFB0B0B8u;        /* lit pale concrete curb */
+    const unsigned int railc  = 0xFFC0C0C8u;        /* lit rail               */
     /* [R9 item 5e] "walls and roofing should have different texture". They were
      * one page because they are one mesh, not because anyone decided they should
      * match -- tg_write_quad_mesh_col has carried per-segment pages since R5 and
@@ -564,8 +570,13 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
      * plus one interior segment. A subdivided curve turns that ONE interior
      * segment into up to TD5_TG_TUNNEL_SUBDIV_MAX of them, and each segment
      * costs 8 wall + 4 roof + 8 lamp vertices, so this has to grow with it or a
-     * curved bore silently overruns the arrays. */
-    double px[320], py[320], pz[320], uu[320], vv[320];
+     * curved bore silently overruns the arrays.
+     * [R16 TUNNEL item e] Grown 320 -> 512 for the interior SIDEWALK+GUARDRAIL:
+     * that layer adds 24 vertices per sub-piece (top+kerb+rail, both sides), so a
+     * fully subdivided (SUBDIV_MAX=8) + two-mouth-extension + lit bore now peaks
+     * around 10*(8+4+8+24)=440 vertices plus the 24-vertex portal. 512 clears it
+     * with headroom; the col[] warning below is exactly why this MUST track. */
+    double px[512], py[512], pz[512], uu[512], vv[512];
     /* [SPLIT 2026-09-06] col[] must match the point arrays: the push macro
      * below writes col[n] for EVERY vertex, and a lit bore span emits 160+
      * vertices, so the old col[96] overflowed onto whatever the compiler laid
@@ -573,9 +584,13 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
      * the moment the emitter moved into its own module the overflow landed on
      * px/py/pz and corrupted vertex 100/103 of every long tunnel span (found by
      * the byte-identity check of the module split against the unsplit build). */
-    unsigned int col[320];
-    int seg_page[4], seg_nq[4], nseg = 0;
+    unsigned int col[512];
+    /* [R16 TUNNEL item e] seg_page/seg_nq grown 4 -> 8: the sidewalk and its
+     * guardrail add two more page groups (SIDEWALK, FENCE) beside
+     * wall/roof/lamp/portal. */
+    int seg_page[8], seg_nq[8], nseg = 0;
     int n = 0, n_wall = 0, n_roof = 0, n_lamp = 0, n_portal = 0;
+    int n_swalk = 0, n_rail = 0;
 
     /* +lateral = LEFT of travel: point at lateral t off node = (x + tz*t, y,
      * z - tx*t), the same frame the road/gore/sidewalk use. */
@@ -775,6 +790,70 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
             }
             n_lamp = n - n_wall - n_roof;
         }
+
+        /* [R16 TUNNEL item e] INTERIOR SIDEWALK + GUARDRAIL. Real road tunnels
+         * carry a raised maintenance walkway against each wall with a rail on its
+         * inner lip; the bore had bare walls meeting the road, which reads as a
+         * culvert, not a road tunnel. Add a NARROW (sww) raised curb strip at the
+         * foot of each wall plus a low rail on its inner edge, one quad per side
+         * per sub-piece so it runs continuously down the bore and welds at every
+         * span boundary exactly as the wall/roof/lamp runs do.
+         *
+         * COSMETIC ONLY: tunnel scenery does not carry collision (collision comes
+         * from the STRIP), and sww is small against the bore half-width, so the
+         * walkway sits between the drivable road edge and the wall without
+         * narrowing what the car can use. Grouped after the lamps so SIDEWALK and
+         * FENCE pages each form one contiguous vertex run.
+         * TD5RE_R16_TUNNEL_SIDEWALK=0 removes the walkway for an A/B. */
+        if (swalk_on) {
+            const double sww   = 500.0;              /* narrow walkway width */
+            const double swh   = 250.0;              /* curb height above road */
+            const double railh = 420.0;              /* rail height above curb */
+            const double wv = sww / tile, kv = swh / tile;
+            for (k = 0; k < nsg; k++) {
+                const TG_Node *a = sg[k].a, *c = sg[k].c;
+                const double al = sg[k].al, ar = sg[k].ar;
+                const double cl = sg[k].cl, cr = sg[k].cr, u1 = sg[k].u1;
+                /* LEFT walkway top (horizontal, wall edge -> inner edge) */
+                TG_TUN_PUSH(a, al,       a->y + swh, 0.0, 0.0, swalkc);
+                TG_TUN_PUSH(c, cl,       c->y + swh, u1,  0.0, swalkc);
+                TG_TUN_PUSH(c, cl - sww, c->y + swh, u1,  wv,  swalkc);
+                TG_TUN_PUSH(a, al - sww, a->y + swh, 0.0, wv,  swalkc);
+                /* LEFT curb riser (vertical, inner edge, road -> top) */
+                TG_TUN_PUSH(a, al - sww, a->y,       0.0, 0.0, swalkc);
+                TG_TUN_PUSH(c, cl - sww, c->y,       u1,  0.0, swalkc);
+                TG_TUN_PUSH(c, cl - sww, c->y + swh, u1,  kv,  swalkc);
+                TG_TUN_PUSH(a, al - sww, a->y + swh, 0.0, kv,  swalkc);
+                /* RIGHT walkway top */
+                TG_TUN_PUSH(a, ar,       a->y + swh, 0.0, 0.0, swalkc);
+                TG_TUN_PUSH(c, cr,       c->y + swh, u1,  0.0, swalkc);
+                TG_TUN_PUSH(c, cr + sww, c->y + swh, u1,  wv,  swalkc);
+                TG_TUN_PUSH(a, ar + sww, a->y + swh, 0.0, wv,  swalkc);
+                /* RIGHT curb riser */
+                TG_TUN_PUSH(a, ar + sww, a->y,       0.0, 0.0, swalkc);
+                TG_TUN_PUSH(c, cr + sww, c->y,       u1,  0.0, swalkc);
+                TG_TUN_PUSH(c, cr + sww, c->y + swh, u1,  kv,  swalkc);
+                TG_TUN_PUSH(a, ar + sww, a->y + swh, 0.0, kv,  swalkc);
+            }
+            n_swalk = n - n_wall - n_roof - n_lamp;
+            /* Guardrail run on the inner lip of each walkway (FENCE page). */
+            for (k = 0; k < nsg; k++) {
+                const TG_Node *a = sg[k].a, *c = sg[k].c;
+                const double al = sg[k].al, ar = sg[k].ar;
+                const double cl = sg[k].cl, cr = sg[k].cr, u1 = sg[k].u1;
+                /* LEFT rail */
+                TG_TUN_PUSH(a, al - sww, a->y + swh,         0.0, 1.0, railc);
+                TG_TUN_PUSH(c, cl - sww, c->y + swh,         u1,  1.0, railc);
+                TG_TUN_PUSH(c, cl - sww, c->y + swh + railh, u1,  0.0, railc);
+                TG_TUN_PUSH(a, al - sww, a->y + swh + railh, 0.0, 0.0, railc);
+                /* RIGHT rail */
+                TG_TUN_PUSH(a, ar + sww, a->y + swh,         0.0, 1.0, railc);
+                TG_TUN_PUSH(c, cr + sww, c->y + swh,         u1,  1.0, railc);
+                TG_TUN_PUSH(c, cr + sww, c->y + swh + railh, u1,  0.0, railc);
+                TG_TUN_PUSH(a, ar + sww, a->y + swh + railh, 0.0, 0.0, railc);
+            }
+            n_rail = n - n_wall - n_roof - n_lamp - n_swalk;
+        }
     }
 
     /* [R7 item 9] Portal FACADE across a run mouth (near end at the first bored
@@ -803,6 +882,19 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
             const double yb  = nd->y;                    /* facade foot (road)   */
             const double hb  = nd->y + height;           /* opening top          */
             const double yt  = nd->y + height + HDR;     /* header top (coping)  */
+            /* [R16 TUNNEL item d] CLOSE THE MOUTH GAP. The jamb inner edges stood
+             * at lo/ro = bore-centre +/- (ph + wall_t), while the bore wall inner
+             * faces sit at +/- ph. That left a wall_t (300u) vertical SLIVER on
+             * each side of the opening, between the jamb and the bore wall, open
+             * to whatever is behind the portal -- the "gap at the beginning of the
+             * tunnel". The mouth-extension already carries the bore wall out to
+             * this same frame plane, so pulling each jamb inward to the bore wall
+             * edge welds jamb to wall and the sliver closes with no new geometry.
+             * The opening itself stays exactly the bore opening (ph..-ph), so the
+             * mouth is not narrowed. TD5RE_R16_TUNNEL_MOUTH_GAP=0 restores lo/ro. */
+            const int    gapfix = td5_env_flag_on("TD5RE_R16_TUNNEL_MOUTH_GAP");
+            const double jl = gapfix ? (psh + ph) : lo;  /* left jamb inner edge  */
+            const double jr = gapfix ? (psh - ph) : ro;  /* right jamb inner edge */
             /* Stand the headwall PROUD of the cutting: the Group-C mountain mass
              * (crown slab + buttresses, TD5_TG_PAGE_HILL) sits AT the mouth node
              * and would occlude a facade drawn in the node plane -- the R7 frame
@@ -846,8 +938,8 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
                 TG_TUN_PUSH(&fn,(lb),(yhi), (lb)/tile,v0, 0xFFFFFFFFu);           \
             } while (0)
             TG_PORTAL_FACE(fl, fr, hb, yt);      /* header over the opening */
-            TG_PORTAL_FACE(fl, lo, yb, yt);      /* left jamb  */
-            TG_PORTAL_FACE(ro, fr, yb, yt);      /* right jamb */
+            TG_PORTAL_FACE(fl, jl, yb, yt);      /* left jamb  (item d: to bore wall) */
+            TG_PORTAL_FACE(jr, fr, yb, yt);      /* right jamb (item d: to bore wall) */
             #undef TG_PORTAL_FACE
             #undef TG_PORTAL_V
 #ifndef TD5RE_RELEASE
@@ -886,7 +978,9 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
             TG_TUN_PUSH(nd, ro, y1, pw,  0.17, 0xFFFFFFFFu);
             TG_TUN_PUSH(nd, lo, y1, 0.0, 0.17, 0xFFFFFFFFu);
         }
-        n_portal = n - n_wall - n_roof - n_lamp;
+        /* [R16 TUNNEL item e] sidewalk + rail push AHEAD of the portal, so their
+         * vertex counts come out of the portal remainder too. */
+        n_portal = n - n_wall - n_roof - n_lamp - n_swalk - n_rail;
     }
     #undef TG_TUN_PUSH
 
@@ -897,6 +991,10 @@ static int tg_emit_tunnel_swept(const TG_NodeList *nl, int si, TG_Buf *blk,
     if (n_roof   > 0) { seg_page[nseg] = ceil_on ? ceil_pg : lining;
                         seg_nq[nseg] = n_roof / 4;   nseg++; }
     if (n_lamp   > 0) { seg_page[nseg] = lamp_pg;   seg_nq[nseg] = n_lamp / 4;   nseg++; }
+    /* [R16 TUNNEL item e] SIDEWALK then RAIL groups, in the order the vertices
+     * were pushed (after lamp, before portal). */
+    if (n_swalk  > 0) { seg_page[nseg] = swalk_pg;  seg_nq[nseg] = n_swalk / 4;  nseg++; }
+    if (n_rail   > 0) { seg_page[nseg] = rail_pg;   seg_nq[nseg] = n_rail / 4;   nseg++; }
     if (n_portal > 0) { seg_page[nseg] = portal_pg; seg_nq[nseg] = n_portal / 4; nseg++; }
     tg_acct(TG_ACCT_TUNNEL, si);
     tg_acct(TG_ACCT_R6_TUNNEL, si);
