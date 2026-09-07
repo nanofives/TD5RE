@@ -2289,7 +2289,15 @@ static int tg_emit_pond(const TG_FBHook *h)
     double dy[4], lo, hi, near_d, far_d, e0, e1, y;
     int i, seg_page = TD5_TG_PAGE_WATER, seg_nq = 1;
 
-    if (!td5_env_flag_on("TD5RE_R9_INFRA_PONDS")) return 1;
+    /* [POND 2026-09-06] Default OFF (was flag_on, i.e. default ON).
+     * tg_pond_here deliberately fires on DRY biomes (FIELDS/FOREST/ALPINE) and
+     * the emitter lays a flat 4-vert WATER quad with no basin and no bank --
+     * there is no terrain-carving pass, so a sunk pond would be invisible. The
+     * result reads exactly as reported: a water texture sitting on grass.
+     * Flipped to flag_off rather than deleted so the feature comes back with
+     * TD5RE_R9_INFRA_PONDS=1 once it has a rim/bank to sit in.
+     * [user report 2026-09-06: "there's water geometry over the grass"] */
+    if (!td5_env_flag_off("TD5RE_R9_INFRA_PONDS")) return 1;
     if (!tg_pond_here(h->b, si))    return 1;
     if (tg_side_blocked(si, side))  return 1;
     if (*h->nmesh + 1 >= h->maxmesh) return 1;

@@ -32,6 +32,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 06 (generated tracks)" },
+    { CL_ITEM,    "Roadside ponds are off. They were a flat water tile laid" },
+    { CL_ITEM,    "  straight on grass, with no bank to sit in." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 06 (quick race)" },
     { CL_ITEM,    "QUICK RACE can now pick the generated track, and grows" },
     { CL_ITEM,    "  an AUTO TRACK STUDIO button when you do. Picking it" },
