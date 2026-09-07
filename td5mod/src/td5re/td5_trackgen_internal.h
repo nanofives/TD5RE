@@ -3727,6 +3727,16 @@ double tg_ground_branch_clear(const TG_NodeList *nl, int si);
  * span index and the "other" road is just this road a moment later, whose
  * ground is the same surface by construction. */
 #define TD5_TG_TOPO_SELF_SPANS 14
+/* [R18 EDGE item 4] Fraction of the fold distance the inside-of-a-bend ground
+ * skirt is allowed to reach. The skirt slab is a quad swept between the
+ * cross-sections at si and si+1; on the INSIDE of a bend the two outward rays
+ * converge and the quad folds over itself (and across the carriageway) once the
+ * reach passes their intersection. C3's road cap cannot catch this: the road it
+ * would lap is THIS road a few spans away, inside TD5_TG_TOPO_SELF_SPANS. Cap the
+ * inside reach just short of the geometric fold instead. 0.85 leaves a margin so
+ * the skirt stops before self-intersecting; on a straight or the OUTSIDE of a
+ * bend the rays never converge forward and the cap is inert. */
+#define TD5_TG_R18_BEND_FRAC   0.85
 int tg_topo_enabled(void);
 double tg_verge_reach(void);
 void tg_ground_side(const TG_NodeList *nl, int si, int is_left, double water_side, TG_GroundProf *p);
