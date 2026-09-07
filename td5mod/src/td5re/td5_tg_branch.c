@@ -442,6 +442,23 @@ int tg_fork_is_avenue(int fork_index)
     return tg_fork_sep_for(fork_index) <= TD5_TG_AVENUE_SEP_MAX;
 }
 
+/* [R16 MEDIAN] "should be longer by default ... a handful of spans should
+ * either extend or not exist." A raised median only reads as a divided avenue
+ * over a decent length; on a short fork it is a stub -- exactly the "really
+ * small median" the report picked (seed 20260907 fork 0 was ISLAND len 6). So
+ * a fork shorter than TD5_TG_MEDIAN_MIN_FORK_LEN carries no median island (and
+ * no end caps) at all. Length is a per-fork constant, so the placement mirror
+ * (tg_median_at_raw) and the emitter get the same answer on every span of the
+ * fork and cannot drift. TD5RE_MEDIAN_MIN_RUN=0 restores the old short-fork
+ * medians for a single-variable A/B. */
+int tg_median_fork_long_enough(int fork_index)
+{
+    if (!td5_env_flag_on("TD5RE_MEDIAN_MIN_RUN")) return 1;   /* =0 for A/B */
+    if (fork_index >= 0 && fork_index < s_fork_count)
+        return s_forks[fork_index].len >= TD5_TG_MEDIAN_MIN_FORK_LEN;
+    return 1;
+}
+
 /* Lateral centre of the BRANCH (right) half carriageway at corridor step k with
  * separation scale `sep`: the right-half centre (-width/4) plus an outward bow
  * that is 0 at both ends (so it lines back up with the road halves at the fork
@@ -1066,9 +1083,17 @@ int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
                                && td5_env_flag_on("TD5RE_R8_BORE_MEDIAN")))
                           ? 2 : 0;
     const double mw_cap = (treat == 1) ? 260.0 : (fill ? 1e9 : 520.0);
-    const double H      = (treat == 1) ? 360.0
+    double       H      = (treat == 1) ? 360.0
                         : fill         ? TD5_TG_R11_MEDIAN_H
                         : (treat == 0) ? 220.0 : 150.0;
+    /* [R16 MEDIAN] "always median with height": a surviving median must stand
+     * proud enough to read. Only the kerbed treatment (150) fell below this;
+     * the report's "barely visible" stub. Floor it. Purely vertical -- the top
+     * quad and both side walls just get taller, no lateral change, so no lane
+     * intrusion and the placement mirror (which tests position, not height) is
+     * unaffected. TD5RE_MEDIAN_MIN_H=0 restores the per-treatment heights. */
+    if (td5_env_flag_on("TD5RE_MEDIAN_MIN_H") && H < TD5_TG_MEDIAN_MIN_H)
+        H = TD5_TG_MEDIAN_MIN_H;
     /* [R8 TERRAIN item 16] A PLANTED median (treat 0, grass top) in a snow biome
      * is a green strip between two icy carriageways -- the verbatim complaint.
      * Snow it over with the ploughed-snow page, which is distinct from the snow
@@ -1111,6 +1136,11 @@ int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
     /* No island where the gore is a mere sliver (near the mouths): a 100-unit
      * strip of raised concrete popping in and out reads worse than nothing. */
     if (gw0 < 200.0 && gw1 < 200.0) return 1;
+    /* [R16 MEDIAN] "should be longer by default": a fork too short to carry a
+     * readable median carries none. Mirrored in tg_median_at_raw so end caps
+     * agree. Placed with the sliver reject -- both are "this span emits no
+     * island" gates. */
+    if (!tg_median_fork_long_enough(fork_index)) return 1;
     /* [R11 CROSS item 8] A fork that is NOT an avenue only gains an island
      * where the fill applies. Without this the widened call site would also
      * drop the shipped 0.32-capped island into the middle of a 5000-unit

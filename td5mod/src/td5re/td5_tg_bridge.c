@@ -2205,6 +2205,9 @@ static int tg_median_at_raw(const TG_NodeList *nl, int si, int br_lanes)
     if (fi < 0) return 0;
     if (!tg_fork_is_avenue(fi) && !tg_r11_median_rise()) return 0;
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_AVENUE_DIVIDER")) return 0;
+    /* [R16 MEDIAN] short fork -> no median. True mirror of the emitter's own
+     * tg_median_fork_long_enough early-return, so end caps agree. */
+    if (!tg_median_fork_long_enough(fi)) return 0;
     tg_r12_median_gore_w(nl, si, fi, br_lanes, &gw0, &gw1);
     if (gw0 < 200.0 && gw1 < 200.0) return 0;              /* sliver */
     if (!tg_r12_median_fill(gw0, gw1) && !tg_fork_is_avenue(fi)) return 0;

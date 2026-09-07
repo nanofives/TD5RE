@@ -3486,7 +3486,22 @@ int tg_r11_xguard(void);
  * twice a kerb, which reads as a median at driving speed and still lets you see
  * the oncoming carriageway over it. */
 #define TD5_TG_R11_MEDIAN_H      300.0
+/* [R16 MEDIAN] "avoid really small medians ... should be longer by default" and
+ * "always median with height or guardrails".
+ *  - MIN_FORK_LEN: a fork shorter than this (in spans) carries NO median at all
+ *    -- a handful-of-spans stub reads as a barely-visible flush stripe, not a
+ *    divided avenue, so it should "either extend or not exist".
+ *  - MIN_H: floor the island height so a surviving median always stands proud
+ *    enough to read; the kerbed treatment's own 150 was the "barely visible"
+ *    stub the report named. Purely vertical, no lateral change. */
+#define TD5_TG_MEDIAN_MIN_FORK_LEN 8
+#define TD5_TG_MEDIAN_MIN_H      220.0
 int tg_r11_median_rise(void);
+/* [R16 MEDIAN] 1 unless fork `fork_index` is too short to carry a median (see
+ * tg_median_fork_long_enough in td5_tg_branch.c). Fork length is a per-fork
+ * constant, so every span of a fork gets the same answer -- the placement
+ * predicate and the emitter cannot disagree. TD5RE_MEDIAN_MIN_RUN=0 for A/B. */
+int tg_median_fork_long_enough(int fork_index);
 int tg_r12_median_cap(void);
 int tg_r12_geom_diag(void);
 extern long s_r12_median_caps;
