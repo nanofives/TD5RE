@@ -1111,6 +1111,35 @@ static void tg_ground_side_raw(const TG_NodeList *nl, int si, int is_left,
         return;
     }
 
+    /* [R18 WATER items 4+5] The shore treatments above (R16 coast slope, R17
+     * water shore) fire only ON a run (tg_span_in_bridge_run(si) is a hard
+     * pre-condition of both). The APPROACH span -- the one immediately before or
+     * after the run -- keeps the ordinary flat verge, which juts toward the river
+     * at the mouth: it overhangs the deck/water ("this geometry is affecting the
+     * bridge", item 4) and leaves the entrance uncovered down to the waterline
+     * ("there should be a texture covering the bridge's entrance", item 5).
+     * Extend the shore drop to that one approach span, sampling the ADJACENT run
+     * span's own water surface (rs) so the bank lands on the same river the run
+     * draws. OFF BY DEFAULT and UNVERIFIED (no game assets here): a bridge
+     * approach can also ramp UP onto the deck, in which case dropping the skirt
+     * to the water would open a face -- so it is an A/B lever, not a default.
+     * Scoped to a single approach span each side, so nothing on the run or
+     * deeper inland is touched. TD5RE_R18_BRIDGE_APPROACH_SHORE=1 to enable. */
+    if (td5_env_flag_off("TD5RE_R18_BRIDGE_APPROACH_SHORE")   /* default OFF */
+        && nl && !tg_span_in_bridge_run(si) && tg_water_span_clear(si)) {
+        int rs = -1;
+        if (si + 1 < nl->count && tg_span_in_bridge_run(si + 1)) rs = si + 1;
+        else if (si - 1 >= 0 && tg_span_in_bridge_run(si - 1))   rs = si - 1;
+        if (rs >= 0) {
+            double drop = nl->v[si].y - tg_bridge_water_surf_y(nl, rs);
+            if (drop < TD5_TG_GROUND_DROP) drop = TD5_TG_GROUND_DROP;
+            p->n = 2;
+            p->d[0] = 0.0;                p->dy[0] = 0.0;
+            p->d[1] = TD5_TG_SHORE_VERGE; p->dy[1] = drop;
+            return;
+        }
+    }
+
     /* [R4 item 16a] The GORGE wins over the seaward beach on a bridge run.
      * On a COAST bridge (seed 99991 span 1160-1199) the seaward test fired first
      * and laid a FLAT beach verge alongside the raised deck -- a light concrete

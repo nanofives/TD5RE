@@ -1677,6 +1677,27 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
     tg_side_geom(nl, si, 0, b, &sd[0]);
     tg_side_geom(nl, si, 1, b, &sd[1]);
 
+    /* [R18 WATER item 2] "these buildings are floating over water." A frontage
+     * stands at ROAD level (g->by = node y + kerb) and was blind to a bridge
+     * run's RIVER beside the crossing, so a block set back toward the water hung
+     * over it. This span itself is never a bridge deck (tg_building_for_span
+     * returns early there); the offender is a block on a NEAR span whose lateral
+     * setback reaches the river. Drop a side whose frontage line lies over the
+     * river -- built=0 is exactly how a side is already suppressed, so mesh
+     * accounting is unchanged. Same rectangle the far-band cull and the trees use
+     * (tg_point_over_bridge_water). TD5RE_R18_BUILDING_OVER_BRIDGE_WATER=0
+     * restores the old placement. */
+    if (td5_env_flag_on("TD5RE_R18_BUILDING_OVER_BRIDGE_WATER")) {
+        int sw;
+        for (sw = 0; sw < 2; sw++) {
+            TG_SideGeom *g = &sd[sw];
+            if (!g->built) continue;
+            if (tg_point_over_bridge_water(nl, si, g->bx, g->bz) ||
+                tg_point_over_bridge_water(nl, si, g->bx + g->ax, g->bz + g->az))
+                g->built = 0;
+        }
+    }
+
     /* STOREFRONT pass: the ground floor (row 0) of each front plane goes FIRST
      * in the vertex list, so a leading command can bind the shop page. */
     for (s = 0; s < 2; s++) {
