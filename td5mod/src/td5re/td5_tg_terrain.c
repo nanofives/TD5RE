@@ -3521,6 +3521,34 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
         D[e][2] = so + (band_reach - so) * 0.45;
         D[e][3] = band_reach;
 
+        /* [R18 TERRAIN, entry 141 span ~564: "this geometry is invisible"]
+         * CONFIRMED as the C2 run-out. A 12v/1c apron-only band (ridge
+         * suppressed) whose run-out extended reach to ~140000 -> bounding radius
+         * ~80846. WHY IT RENDERS AS NOTHING, and why a plain reach cut is WRONG:
+         * k_tg_far_sink = {0, 0.45, 1, 1}, so the whole drop to the global floor
+         * is done by ring 2 (at 0.45*reach); rings 2 and 3 are BOTH on the floor,
+         * i.e. the OUTER quad (D[2]..D[3]) is a FLAT floor slab. On a road ~8400
+         * above the global track minimum that slab is edge-on, far below the
+         * sight line -- vast extent, ~0 pixels. Cutting `reach` does not help:
+         * D[2] = 0.45*reach too, so a shorter reach STEEPENS the falling slope
+         * (rings 0..2) and reopens the cut-edge-on-a-slope defect C2 exists to
+         * close -- exactly what the r18-edge sibling declined to risk.
+         *
+         * The one SAFE lever is to shorten the FLAT SLAB ALONE: cap D[3] toward
+         * D[2] while leaving D[0..2] (the entire slope) byte-identical. Rings 2
+         * and 3 stay on the floor, so the outer quad is still flat -- just
+         * shorter -- trimming the invisible padding without touching the slope
+         * grade. How much flat to keep depends on the render far-cull / fog
+         * distance, which cannot be measured here WITHOUT A RENDERED FRAME, so
+         * this is EXPERIMENTAL and DEFAULT OFF. TD5RE_R18_RUNOUT_FLATCAP=1
+         * enables it; TD5RE_R18_RUNOUT_FLAT_KEEP tunes the kept flat length. */
+        if (runout && td5_env_flag_off("TD5RE_R18_RUNOUT_FLATCAP")) {
+            const double keep = (double)td5_env_int("TD5RE_R18_RUNOUT_FLAT_KEEP",
+                                                    30000, 2000, 140000);
+            const double d3cap = D[e][2] + keep;
+            if (D[e][3] > d3cap) D[e][3] = d3cap;
+        }
+
         for (j = 0; j < 4; j++) {
             const double ex = (is_left ? lx : rx) + ux * D[e][j];
             const double ez = (is_left ? lz : rz) + uz * D[e][j];
