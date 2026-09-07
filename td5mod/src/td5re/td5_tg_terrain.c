@@ -2685,6 +2685,24 @@ int tg_emit_fb_tunnel(const TG_FBHook *h)
      * meet instead of the snowline-banded TD5_TG_PAGE_HILL. See the helper. */
     const int flank_pg = tg_tunnel_flank_page(h->si);
 
+    /* [R16 TUNNEL item a/b/c] FOREST WRAP. In a forested wilderness biome
+     * (FOREST/ALPINE: billboard trees, urbanity 0) the mountain massing is the
+     * WRONG answer to "a bare tunnel in open country reads as a shed": there is
+     * no open country here, there is FOREST, and the tree line beside the mouth
+     * is what should wrap the portal. Instead the crown/shoulders/buttresses
+     * stacked rock boxes (p371 hillside flanks -- "these boxes should be deleted")
+     * and PORTAL_SURROUND masonry (p444 -- "is also not necessary") IN FRONT of
+     * that tree line, reading as several facades and hiding the forest the user
+     * wants to see wrap the entrance. Suppress the whole massing in these biomes
+     * so only the swept portal facade remains ("keep one tunnel facade") and the
+     * neighbouring tree line reads as the surround. Non-forest biomes (open
+     * FIELDS, edge-of-town, city underpasses) keep the massing -- there the "hole
+     * in a shed" reading is real and the rock face is what fixes it.
+     * TD5RE_R16_TUNNEL_FOREST_WRAP=0 restores the massing for an A/B. */
+    if (td5_env_flag_on("TD5RE_R16_TUNNEL_FOREST_WRAP") &&
+        h->b->billboard && h->b->urbanity == 0)
+        return 1;
+
     /* Default ON (a fix); TD5RE_AUTOTRACK_TUNNEL_MOUNTAIN=0 to disable. */
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_TUNNEL_MOUNTAIN")) return 1;
 
