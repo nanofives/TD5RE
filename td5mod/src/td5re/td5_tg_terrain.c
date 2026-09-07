@@ -2396,7 +2396,22 @@ int tg_emit_fb_park_trees(const TG_FBHook *h)
 {
     const TG_NodeList *nl = h->nl;
     const int si = h->si;
-    const TG_Biome *b = h->b;
+    /* [R17 TERRAIN item 4] "the whole transition between these two biomes has no
+     * geometry -- remove the logic of transitioning with removals on every other
+     * span." This supplementary park-tree layer gated on the DITHERED per-span
+     * biome (h->b, from tg_biome_for_span), so on a paved<->tree-biome blend band
+     * it emitted nothing on every span the dither resolved to the facade side.
+     * Where the tree biome ALSO carries no hard-keyed tree-line band (COAST and
+     * ORIENTAL have tg_treeline_height==0), that left only the flat ground skirt
+     * across the transition -- geometry present, then gone, every other span.
+     * Take the biome from tg_scenery_biome_index instead, the same R11 hard-edge
+     * source the NEAR verge trees already use: it hard-snaps at a paved/unpaved
+     * boundary (so the trees run continuously to the hard edge and stop cleanly)
+     * while keeping the categorical dither for billboard<->billboard edges, where
+     * the tree-species interleave is the good kind of blend. Default ON;
+     * TD5RE_R17_FLORA_HARDEDGE=0 restores the dithered per-span biome. */
+    const TG_Biome *b = td5_env_flag_on("TD5RE_R17_FLORA_HARDEDGE")
+                      ? &k_biomes[tg_scenery_biome_index(si)] : h->b;
     unsigned int hh;
     double side, gap, tw, th, jit, cx, cz;
     int v, page;
@@ -3318,6 +3333,24 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
             reach = so_max + TD5_TG_FAR_TUCK + 500.0;
     }
 
+    /* [R17 TERRAIN item 2] "this background is crossing through the middle of the
+     * road." The C3 road cap (and the C2 run-out and the min-width floor) above
+     * all land in `reach`, but the apron rings below are built from `band_reach`,
+     * which was snapshotted from the UNCAPPED reach at the top and is only ever
+     * lowered further down by the R9 water dry-band clamp. On a DRY hairpin /
+     * U-turn the cap was therefore computed and thrown away, and the apron ran
+     * the full uncapped reach straight across the opposing carriageway. Carry the
+     * capped reach into band_reach so the ground footprint honours the same road
+     * cap the ridge already does; the water clamp below still lowers it further
+     * where a river is nearer (it re-reads `reach`, not band_reach, so order is
+     * unaffected). RESIDUAL (unfixed here, kept tight): the cap samples only the
+     * two group ENDS (g0,g1), so a hairpin apex between them is missed, and the
+     * min-width floor at :3317 can still nudge the outer ring a few hundred units
+     * past a carriageway that sits inside the skirt. TD5RE_R17_FARBAND_ROADCAP=0
+     * restores the uncapped apron for an A/B. */
+    if (td5_env_flag_on("TD5RE_R17_FARBAND_ROADCAP"))
+        band_reach = reach;
+
     /* [R9 merge] TOPO's run-out EXTENDS reach; BRIDGE's dry-band CLAMPS it off
      * water. They are independent and both wanted, but the ORDER is load-bearing:
      * extend first, then clamp, so a band that ran out over a river is still
@@ -3740,9 +3773,23 @@ static int tg_emit_far_shore(const TG_FBHook *h, int is_left)
      * closes the same horizon while standing on the far bank rather than in the
      * bay. One sign, and it is the difference between a skyline and a mirage.
      * TD5RE_R9_BRIDGE_FARSHORE=0 restores the R8 inset for an A/B. */
-    const double out = td5_env_flag_on("TD5RE_R9_BRIDGE_FARSHORE")
-                     ? (double)TD5_TG_WATER_EXTENT + TD5_TG_SHORE_FAR_INSET
-                     : (double)TD5_TG_WATER_EXTENT - TD5_TG_SHORE_FAR_INSET;
+    /* [R17 TERRAIN item 1] "this forest is at the edge of the screen near the
+     * water." The far-shore treeline stood INSIDE the sea plane. `out` is applied
+     * from the ROAD EDGE (see ex[e] below), but the sea plane runs from its
+     * shoreline gap TD5_TG_WATER_BEACH (8100) out to TD5_TG_WATER_BEACH +
+     * TD5_TG_WATER_EXTENT (58100) from that same edge -- see tg_emit_water /
+     * tg_r11_sea_outer. The R9 placement used WATER_EXTENT +/- INSET, i.e. it
+     * treated WATER_EXTENT as the outer-edge distance and dropped the BEACH term,
+     * so even the "outside" branch (54000) fell ~4100 units SHORT of the real
+     * outer edge and the treeline rose out of open sea. Anchor it a fixed INSET
+     * BEYOND the sea plane's true outer edge so it stands on the far bank.
+     * TD5RE_R17_FARSHORE_OUTSIDE=0 restores the R9 EXTENT-relative value. */
+    const double out = td5_env_flag_on("TD5RE_R17_FARSHORE_OUTSIDE")
+                     ? (double)TD5_TG_WATER_BEACH + (double)TD5_TG_WATER_EXTENT
+                       + TD5_TG_SHORE_FAR_INSET
+                     : (td5_env_flag_on("TD5RE_R9_BRIDGE_FARSHORE")
+                        ? (double)TD5_TG_WATER_EXTENT + TD5_TG_SHORE_FAR_INSET
+                        : (double)TD5_TG_WATER_EXTENT - TD5_TG_SHORE_FAR_INSET);
     double px[4], py[4], pz[4], uu[4], vv[4];
     double ex[2], ey[2], ez[2];
     int seg_page, seg_nq = 1, e;
@@ -4193,7 +4240,12 @@ int tg_emit_fb_slope_flora(const TG_FBHook *h)
 {
     const TG_NodeList *nl = h->nl;
     const int si = h->si;
-    const TG_Biome *b = h->b;
+    /* [R17 TERRAIN item 4] Same continuity fix as tg_emit_fb_park_trees: take the
+     * billboard/species biome from the R11 hard-edge index so this slope planting
+     * does not blink out on the facade-dithered spans of a paved<->tree blend
+     * band. TD5RE_R17_FLORA_HARDEDGE=0 restores the dithered per-span biome. */
+    const TG_Biome *b = td5_env_flag_on("TD5RE_R17_FLORA_HARDEDGE")
+                      ? &k_biomes[tg_scenery_biome_index(si)] : h->b;
     TG_TopoChain c;
     unsigned int hh;
     double side, d, tw, th, jit, cx, cz, lx, lz, drop_in, base_y;
