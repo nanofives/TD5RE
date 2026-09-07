@@ -1085,6 +1085,32 @@ static void tg_ground_side_raw(const TG_NodeList *nl, int si, int is_left,
         }
     }
 
+    /* [R17 WATER item 4] "this grass is wrongly placed ... there's no sidewalk
+     * and it's over water."
+     *
+     * At the two ENDS of a bridge water run phase is exactly 0, so neither the
+     * gorge pull-back (phase > 0, below) nor the seaward beach (needs a biome
+     * water_side, which is 0 on a seed with no coastal biome) fires. The side
+     * then falls through to the default flat verge -- a flat skirt sitting at
+     * road level directly over the river plane, with no sidewalk. That is the
+     * reported grass-over-water. The R16 coast-slope block above already turns
+     * the COAST bank into a shore at every phase; do the same for the OTHER bank
+     * at the run mouths, dropping it straight to the water surface so it meets
+     * the water instead of floating over it. Scoped to phase <= 0 so the tuned
+     * mid-run gorge/submerge profile (phase > 0) is untouched. `seaward` is
+     * excluded so a real biome coast still uses its own tuned beach below.
+     * TD5RE_R17_WATER_SKIRT_SHORE=0 restores the flat verge for an A/B. */
+    if (td5_env_flag_on("TD5RE_R17_WATER_SKIRT_SHORE")
+        && tg_span_in_bridge_run(si) && tg_water_span_clear(si)
+        && phase <= 0.0 && !seaward) {
+        double drop = nl->v[si].y - tg_bridge_water_surf_y(nl, si);
+        if (drop < TD5_TG_GROUND_DROP) drop = TD5_TG_GROUND_DROP;
+        p->n = 2;
+        p->d[0] = 0.0;                p->dy[0] = 0.0;
+        p->d[1] = TD5_TG_SHORE_VERGE; p->dy[1] = drop;
+        return;
+    }
+
     /* [R4 item 16a] The GORGE wins over the seaward beach on a bridge run.
      * On a COAST bridge (seed 99991 span 1160-1199) the seaward test fired first
      * and laid a FLAT beach verge alongside the raised deck -- a light concrete
@@ -1331,9 +1357,21 @@ static int tg_bridge_skirt_redundant(const TG_NodeList *nl, int si,
      * already caps the mouth. Mid-run the coast-side skirt is the steep shore
      * from item c -- the only geometry between the deck edge and the river on
      * that bank -- so dropping it there would open the bank face to the sky.
-     * Only applies to the re-keyed bridge case (biome coast keeps run-wide). */
+     * Only applies to the re-keyed bridge case (biome coast keeps run-wide).
+     *
+     * [R17 WATER item 3] "the geometry on the side of the road while there's a
+     * bridge should be deleted (this is one span, it's alongside the WHOLE
+     * bridge)." TD5RE_R17_BRIDGE_SKIRT_RUNWIDE lifts the end-only restriction so
+     * the seaward skirt is dropped along the whole run. OFF BY DEFAULT and
+     * UNVERIFIED (no game assets here): on a bridge run the far band is not
+     * drawn, so the drawn world ends at the river plane; the coast-side skirt is
+     * the only geometry closing the vertical face between the deck edge and the
+     * water mid-run, and dropping it can open that face to the sky. Provided as
+     * an A/B lever, not a default, precisely because it trades the redundant
+     * shelf the user reported against that risk. */
     if (nl && water_side == 0.0
-        && td5_env_flag_on("TD5RE_R16_BRIDGE_COAST_SIDE")) {
+        && td5_env_flag_on("TD5RE_R16_BRIDGE_COAST_SIDE")
+        && !td5_env_flag_off("TD5RE_R17_BRIDGE_SKIRT_RUNWIDE")) {
         int s0, s1;
         tg_bridge_run_bounds(nl, si, &s0, &s1);
         if (si != s0 && si != s1)        return 0;

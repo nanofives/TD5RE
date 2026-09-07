@@ -37,16 +37,40 @@ double tg_water_side(int si)
  * with every hill. A body of water is level by definition, so take the LOWEST
  * road node in the biome run and sit below that -- below the road everywhere in
  * the run, so no low point is ever flooded. */
+/* [R17 WATER item 1] The GLOBAL water level. ONE height for the whole track.
+ *
+ * Reported (headline): "implement water level, track should NOT go below this
+ * level and should always be the same for the whole track."
+ *
+ * Derivation makes the invariant hold by construction rather than by a clamp
+ * that would distort the road: the surface sits TD5_TG_WATER_DROP (1200) below
+ * tg_track_min_y -- the track's GLOBAL lowest node across the whole (final,
+ * branch-corridors-appended) list. Because the lowest road node is 1200 above
+ * the water, EVERY road node is above the water, so the route is never below the
+ * water level and no elevation clamp is needed. This is the same relationship
+ * the per-run sea already had with its own run's minimum, lifted from per-run to
+ * per-track so all water reads at one height instead of rising and falling with
+ * each coastal run's local low point. */
+double tg_water_level_y(const TG_NodeList *nl)
+{
+    return tg_track_min_y(nl) - (double)TD5_TG_WATER_DROP;
+}
+
 double tg_sea_level_y(const TG_NodeList *nl, int si)
 {
-    /* [R8 BIOME item 19] Lowest node of the MERGED run, not of the raw cell.
-     * A no-op while COAST is capped at one cell; with TD5RE_R8_BIOME_SEA on it
-     * is what keeps one body of water at ONE height across a multi-cell coast
-     * instead of stepping at each cell boundary. */
+    /* [R17 WATER item 1] GLOBAL water level: one surface for the whole track.
+     * TD5RE_R17_GLOBAL_WATER=0 restores the per-biome-run sea below. */
     int a, b;
     double lo;
     int i;
 
+    if (td5_env_flag_on("TD5RE_R17_GLOBAL_WATER"))
+        return tg_water_level_y(nl);
+
+    /* [R8 BIOME item 19] Lowest node of the MERGED run, not of the raw cell.
+     * A no-op while COAST is capped at one cell; with TD5RE_R8_BIOME_SEA on it
+     * is what keeps one body of water at ONE height across a multi-cell coast
+     * instead of stepping at each cell boundary. */
     tg_biome_run_bounds(si, &a, &b);
 
     if (a > nl->count - 1) a = nl->count - 1;
@@ -1642,6 +1666,12 @@ double tg_bridge_water_y(const TG_NodeList *nl, int si)
         }
         return lo;
     }
+    /* [R17 WATER item 1] DRY inland gorge: NOT unified to the global water level.
+     * This is a canyon river kept a fixed depth below its OWN deck, not the sea;
+     * pulling it down to tg_water_level_y would make every inland crossing's
+     * gorge as deep as the track's lowest coastal point. The global-water rule
+     * (item 1) governs the SEA and the water-biome crossings that join it; the
+     * dry gorge is deliberately left as a deck-relative feature. */
     return tg_bridge_deck_y(nl, si) - TD5_TG_BRIDGE_CHASM - 300.0;
 }
 

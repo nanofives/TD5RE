@@ -1900,6 +1900,10 @@ typedef struct {
 int    tg_water_span_clear(int si);
 double tg_bridge_water_surf_y(const TG_NodeList *nl, int si);
 double tg_sea_level_y(const TG_NodeList *nl, int si);
+/* [R17 WATER item 1] GLOBAL water level -- ONE surface height for the whole
+ * track, sitting TD5_TG_WATER_DROP below the track's global lowest node so the
+ * road is above the water everywhere by construction. See td5_tg_bridge.c. */
+double tg_water_level_y(const TG_NodeList *nl);
 double tg_water_side(int si);
 int    tg_biome_for_span(int si);
 int    tg_biome_span_has_water(int si);
