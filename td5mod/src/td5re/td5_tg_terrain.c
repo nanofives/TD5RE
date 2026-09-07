@@ -1015,6 +1015,27 @@ static double tg_r14_up_ground_reach(int si)
     return v + (f - v) * (1.0 - (double)d / (double)(TD5_TG_R14_UP_TAPER + 1));
 }
 
+/* [R16 items b/c] Which bank of a bridge gorge is the COASTLINE. A bridge run
+ * lays a river plane BRIDGE_WATER_HALF either side of the deck, so the gorge has
+ * water on BOTH banks, yet there is no biome sea here to read a side from -- this
+ * seed has no coastal biome, so tg_ground_side's `water_side` is 0.0 everywhere
+ * (which is exactly why the earlier tg_bridge_skirt_redundant sat inert). Pick
+ * ONE bank per run to treat as the coast we keep clean, stable along the whole
+ * run so it cannot flip mid-crossing, from the run's first span -- the same hash
+ * shape tg_water_side uses for a biome coast. Returns +1 (left of travel) or -1;
+ * 0 off a bridge run. The value is used as the seaward sign, so exactly one of
+ * the two sides ever matches -- the property tg_emit_ground relies on to never
+ * skip both halves of its single two-sided mesh. */
+static double tg_bridge_coast_side(const TG_NodeList *nl, int si)
+{
+    int s0, s1;
+    unsigned int h;
+    if (!tg_span_in_bridge_run(si)) return 0.0;
+    tg_bridge_run_bounds(nl, si, &s0, &s1);
+    h = (unsigned)s0 * 2246822519u;
+    return (h & 1u) ? 1.0 : -1.0;
+}
+
 static void tg_ground_side_raw(const TG_NodeList *nl, int si, int is_left,
                                double water_side, TG_GroundProf *p)
 {
@@ -1028,6 +1049,41 @@ static void tg_ground_side_raw(const TG_NodeList *nl, int si, int is_left,
     p->n = 2;
     p->d[0]  = 0.0;                    p->dy[0] = 0.0;
     p->d[1]  = tg_verge_reach();      p->dy[1] = TD5_TG_GROUND_DROP;
+
+    /* [R16 item c] STEEP COASTLINE on the bridge's coast side.
+     *
+     * Reported, on several consecutive bridge-run spans: "this should be an
+     * actual coastline with a steep slope perpendicular to the road ... the way
+     * it is getting sloped to the road looks wrong."
+     *
+     * The gorge bank (below) starts at phase*GORGE_INSET out from the road edge
+     * and ramps its inner point from road level (near the mouths, phase small) to
+     * submerged (at the crown). Near the mouths that inner point sits at road
+     * level a short way out, so the bank reads as ground gently SLOPING INTO THE
+     * ROAD rather than as a shore. A coast meets the water as a bank perpendicular
+     * to the road: drop from the road edge straight down to the water surface
+     * within one shore-verge width, then it is under the river plane.
+     *
+     * Coast side only (tg_bridge_coast_side, +1/-1, never both), so the opposite
+     * bank keeps the tuned gorge profile the earlier rounds shaped, and the change
+     * is confined to the one bank the user is standing beside. The bank descends
+     * to tg_bridge_water_surf_y -- the SAME surface accessor the river plane, the
+     * coast band and the R14 wrap read -- so it lands exactly on the water it
+     * meets, and because tg_topo_chain is built from this profile the R14 tree-line
+     * wrap (item d) follows the new shore automatically instead of the old ramp.
+     * TD5RE_R16_BRIDGE_COAST_SLOPE=0 restores the gorge ramp for an A/B. */
+    if (td5_env_flag_on("TD5RE_R16_BRIDGE_COAST_SLOPE")
+        && tg_span_in_bridge_run(si) && tg_water_span_clear(si)) {
+        const double cs = tg_bridge_coast_side(nl, si);
+        if ((cs > 0.0 && is_left) || (cs < 0.0 && !is_left)) {
+            double drop = nl->v[si].y - tg_bridge_water_surf_y(nl, si);
+            if (drop < TD5_TG_GROUND_DROP) drop = TD5_TG_GROUND_DROP;
+            p->n = 2;
+            p->d[0] = 0.0;                p->dy[0] = 0.0;
+            p->d[1] = TD5_TG_SHORE_VERGE; p->dy[1] = drop;
+            return;
+        }
+    }
 
     /* [R4 item 16a] The GORGE wins over the seaward beach on a bridge run.
      * On a COAST bridge (seed 99991 span 1160-1199) the seaward test fired first
@@ -1248,13 +1304,40 @@ void tg_ground_side(const TG_NodeList *nl, int si, int is_left,
  *     sides, so a non-coastal bridge keeps both skirts exactly as before.
  *   - Bridge runs only, and only where the water is actually clear there.
  * Knob TD5RE_BRIDGE_SKIRT_COAST=0 restores the old both-sides behaviour. */
-static int tg_bridge_skirt_redundant(int si, int is_left, double water_side)
+static int tg_bridge_skirt_redundant(const TG_NodeList *nl, int si,
+                                     int is_left, double water_side)
 {
-    const int seaward = (water_side > 0.0 && is_left) ||
-                        (water_side < 0.0 && !is_left);
-    if (!seaward)                        return 0;
+    double coast = water_side;
+    /* [R16 item b] RE-KEY to the bridge's own coast signal so the suppression
+     * actually fires. As written this helper keyed on the biome `water_side`,
+     * which is +/-1 only where a biome carries a sea. On a seed with no coastal
+     * biome (this one) it is 0 on both sides, so the seaward test never fired and
+     * the whole helper was MEASURED byte-identical on or off. The water beside a
+     * bridge deck is the run's own river, not a biome sea, so take the side from
+     * tg_bridge_coast_side (+/-1 per run, so still exactly one side can match).
+     * TD5RE_R16_BRIDGE_COAST_SIDE=0 keeps the biome-only key. */
+    if (coast == 0.0 && nl && tg_span_in_bridge_run(si)
+        && td5_env_flag_on("TD5RE_R16_BRIDGE_COAST_SIDE"))
+        coast = tg_bridge_coast_side(nl, si);
+    {
+        const int seaward = (coast > 0.0 && is_left) ||
+                            (coast < 0.0 && !is_left);
+        if (!seaward)                    return 0;
+    }
     if (!tg_span_in_bridge_run(si))      return 0;
     if (!tg_water_span_clear(si))        return 0;
+    /* [R16 item b] Drop the coast-side skirt only at the run ENDS, where the
+     * transverse bridge coast band (tg_emit_bridge_coast, fired at s0 and s1)
+     * already caps the mouth. Mid-run the coast-side skirt is the steep shore
+     * from item c -- the only geometry between the deck edge and the river on
+     * that bank -- so dropping it there would open the bank face to the sky.
+     * Only applies to the re-keyed bridge case (biome coast keeps run-wide). */
+    if (nl && water_side == 0.0
+        && td5_env_flag_on("TD5RE_R16_BRIDGE_COAST_SIDE")) {
+        int s0, s1;
+        tg_bridge_run_bounds(nl, si, &s0, &s1);
+        if (si != s0 && si != s1)        return 0;
+    }
     if (!td5_env_flag_on("TD5RE_BRIDGE_SKIRT_COAST")) return 0;
     return 1;
 }
@@ -1324,7 +1407,23 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
      * index for the span). At most a wasted hidden slab on one side then. */
     int cull_l = tg_city_skirt_hidden(nl, si, 1);
     int cull_r = tg_city_skirt_hidden(nl, si, 0);
-    if (cull_l && cull_r) cull_l = 0;
+    /* [R16 MERGE 2026-09-07] There are now TWO independent per-side culls in the
+     * slab loop below: the bridge/coast one (tg_bridge_skirt_redundant -- seaward
+     * side of a bridge run) and the city one (tg_city_skirt_hidden -- a side
+     * hidden end to end behind a frontage). Each was written on its own branch
+     * guaranteeing "at most ONE side can match", and each is correct in
+     * isolation, but neither could see the other. Together they can take one side
+     * EACH: the bridge cull drops the seaward half while the city cull drops the
+     * landward half, both `continue`, and tg_write_quad_mesh is handed n == 0.
+     * That is the empty-mesh case both branches were trying to avoid -- the skirt
+     * is the span's first/ground model, so a zero-vert mesh shifts every later
+     * model index for the span.
+     * So resolve BOTH culls up front and, if between them they would empty the
+     * mesh, keep the left slab (same tie-break the city cull already used). Cost
+     * is at most one wasted hidden slab; the alternative is corrupt indices. */
+    int skip_l = cull_l || tg_bridge_skirt_redundant(nl, si, 1, water_side);
+    int skip_r = cull_r || tg_bridge_skirt_redundant(nl, si, 0, water_side);
+    if (skip_l && skip_r) skip_l = 0;
 
     tg_road_edge(nl, si, 0.0, 0.0, 1.0, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
     tg_road_edge(nl, si, 1.0, 0.0, 1.0, &flx, &fly, &flz, &frx, &fry, &frz);
@@ -1384,13 +1483,10 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
          * beach and the gorge) the index is clamped, which pairs the last real
          * point with itself and closes the seam with a degenerate quad rather
          * than a hole. */
-        /* [SKIRT/COAST 2026-09-07] Drop the seaward skirt where the bridge's own
-         * water + coast already cover that ground. At most one side can match
-         * (see tg_bridge_skirt_redundant), so `n` always keeps the landward
-         * side's quads and the mesh is never emitted empty. */
-        if (tg_bridge_skirt_redundant(si, is_left, water_side)) continue;
-        /* [R16 item B] hidden behind an unbroken city frontage on this side. */
-        if (is_left ? cull_l : cull_r) continue;
+        /* [R16 MERGE] Both per-side culls, already reconciled above so at least
+         * one slab always survives: the bridge/coast seaward drop and the city
+         * hidden-frontage drop. See the skip_l/skip_r note at the top. */
+        if (is_left ? skip_l : skip_r) continue;
 
         tg_ground_side(nl, si, is_left, water_side, &pa);
         if (tg_r8_bridge_water() && si + 1 < nl->count)
