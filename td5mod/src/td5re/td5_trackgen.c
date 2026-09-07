@@ -1471,6 +1471,50 @@ double tg_track_min_y(const TG_NodeList *nl)
     return s_track_min_y;
 }
 
+/* [R17 WATER item 1] The absolute water surface height, and its cache. Unlike
+ * tg_track_min_y this is NOT track_min - offset (that put the sea below the
+ * whole track and made every high coast a canyon). It is a LOW PERCENTILE of the
+ * route's node elevations, so the sea sits INSIDE the terrain's low band and the
+ * low-lying stretches actually meet it. tg_apply_elevation primes the cache and
+ * applies the route floor clamp against it; the lazy path is a fallback. */
+static double s_water_level_y;
+static int    s_water_level_valid;
+
+static int tg_dbl_cmp(const void *a, const void *b)
+{
+    const double x = *(const double *)a, y = *(const double *)b;
+    return (x < y) ? -1 : (x > y) ? 1 : 0;
+}
+
+static double tg_water_level_compute(const TG_NodeList *nl)
+{
+    int n = nl->count, pct, idx;
+    double *ys, sea;
+
+    if (n <= 0) return 0.0;
+    /* TD5RE_R17_WATER_LEVEL_PCT: which percentile of node y the sea sits at.
+     * Higher = sea rises, more of the route is clamped up to meet it. */
+    pct = td5_env_int("TD5RE_R17_WATER_LEVEL_PCT", 10, 0, 100);
+    ys = (double *)malloc((size_t)n * sizeof(double));
+    if (!ys) return tg_track_min_y(nl);          /* OOM: lowest node */
+    for (idx = 0; idx < n; idx++) ys[idx] = nl->v[idx].y;
+    qsort(ys, (size_t)n, sizeof(double), tg_dbl_cmp);
+    idx = (int)((double)pct / 100.0 * (double)(n - 1));
+    if (idx < 0) idx = 0;
+    if (idx > n - 1) idx = n - 1;
+    sea = ys[idx];
+    free(ys);
+    return sea;
+}
+
+double tg_water_level_y(const TG_NodeList *nl)
+{
+    if (s_water_level_valid) return s_water_level_y;
+    s_water_level_y = tg_water_level_compute(nl);   /* fallback path */
+    s_water_level_valid = 1;
+    return s_water_level_y;
+}
+
 static int tg_r8_relief_enabled(void)
 {
     /* DEFAULT ON (td5_env_flag_on answers 1 when the variable is UNSET);
@@ -1500,8 +1544,10 @@ void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
     int waves, i;
 
     /* Every y on the track is about to change (or, on the early-out below, has
-     * just been built fresh) -- either way the cached global floor is stale. */
+     * just been built fresh) -- either way the cached global floor and the
+     * cached R17 water level are stale. */
     s_track_min_valid = 0;
+    s_water_level_valid = 0;
 
     if (amp <= 0.0 || nl->count < 3) return;
 
@@ -1663,6 +1709,67 @@ void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
         TD5_LOG_I(LOG_TAG, "trackgen: [R8 SHAPE] relief=%d height min %.0f max "
                   "%.0f RANGE %.0f, worst grade %.4f (cap %.3f)",
                   tg_r8_relief_enabled(), lo, hi, hi - lo, wg, max_grade);
+    }
+
+    /* [R17 WATER item 1] GLOBAL WATER LEVEL + ROUTE FLOOR CLAMP.
+     *
+     * Two halves of the request: "one uniform sea height" AND "the route must
+     * not go below it." DEFAULT OFF (TD5RE_R17_GLOBAL_WATER=1 to enable) until
+     * validated in frame -- the merged build keeps the per-run sea.
+     *
+     * HEIGHT: an absolute LOW PERCENTILE of the node elevations (not track_min -
+     * offset), so the sea sits in the terrain's own low band and the low-lying
+     * stretches meet it instead of the sea being buried under the whole track.
+     *
+     * CLAMP DIRECTION IS WHY THIS IS SAFE POST-RESCALE. Lifting a node UP to a
+     * floor can only bring it CLOSER to its neighbours, so every clamped span's
+     * |dy| shrinks -- the clamp can only DECREASE grade, never breach the cap.
+     * (The rescale above already guarantees |dy| <= max_grade*span_length, so a
+     * dip is gradual before it is truncated.) The opposite operation -- LOWERING
+     * a high coast down to a low sea -- is the one that fights the cap: at
+     * span_length 1500 and cap 0.120 the budget is 180 units/span, so pulling a
+     * coast from the top of a 34015-range profile down to a low-band sea would
+     * need ~150+ spans of pure max-grade descent with no budget left for relief.
+     * That is a ROUTE-level change (bias coastal biomes toward the low band at
+     * layout time), deliberately NOT attempted here; the clamp only raises the
+     * floor. The log line below reports the numbers to judge it on.
+     *
+     * The floor is capped at 0 so it can never lift the start line (cars spawn
+     * at y~0; a bump there is the free-fall the anchor above exists to prevent). */
+    if (td5_env_flag_off("TD5RE_R17_GLOBAL_WATER") && nl->count > 0) {
+        const double sea    = tg_water_level_compute(nl);
+        double       floor  = sea + (double)TD5_TG_WATER_DROP;
+        int lifted = 0;
+        double max_lift = 0.0, lo2, hi2, wg2 = 0.0;
+
+        if (floor > 0.0) floor = 0.0;            /* never raise the spawn */
+        for (i = 0; i < nl->count; i++) {
+            if (nl->v[i].y < floor) {
+                const double d = floor - nl->v[i].y;
+                if (d > max_lift) max_lift = d;
+                nl->v[i].y = floor;
+                lifted++;
+            }
+        }
+        s_water_level_y = sea;
+        s_water_level_valid = 1;
+
+        lo2 = hi2 = nl->v[0].y;
+        for (i = 0; i < nl->count; i++) {
+            if (nl->v[i].y < lo2) lo2 = nl->v[i].y;
+            if (nl->v[i].y > hi2) hi2 = nl->v[i].y;
+        }
+        for (i = 1; i < nl->count; i++) {
+            double g = fabs(nl->v[i].y - nl->v[i - 1].y)
+                     / (double)spec->span_length;
+            if (g > wg2) wg2 = g;
+        }
+        TD5_LOG_I(LOG_TAG, "trackgen: [R17 WATER] sea=%.0f (P%d) floor=%.0f, "
+                  "clamped %d/%d nodes (max lift %.0f); post-clamp height min "
+                  "%.0f max %.0f RANGE %.0f, worst grade %.4f (cap %.3f)",
+                  sea, td5_env_int("TD5RE_R17_WATER_LEVEL_PCT", 10, 0, 100),
+                  floor, lifted, nl->count, max_lift, lo2, hi2, hi2 - lo2,
+                  wg2, max_grade);
     }
 }
 

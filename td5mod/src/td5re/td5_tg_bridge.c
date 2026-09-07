@@ -39,14 +39,29 @@ double tg_water_side(int si)
  * the run, so no low point is ever flooded. */
 double tg_sea_level_y(const TG_NodeList *nl, int si)
 {
-    /* [R8 BIOME item 19] Lowest node of the MERGED run, not of the raw cell.
-     * A no-op while COAST is capped at one cell; with TD5RE_R8_BIOME_SEA on it
-     * is what keeps one body of water at ONE height across a multi-cell coast
-     * instead of stepping at each cell boundary. */
+    /* [R17 WATER item 1] GLOBAL water level: ONE absolute surface height for the
+     * whole track, anchored to the low band of the elevation profile and paired
+     * with a route floor clamp so the road stays above it (both computed in
+     * tg_apply_elevation; see tg_water_level_y in td5_trackgen.c).
+     *
+     * DEFAULT OFF -- opt in with TD5RE_R17_GLOBAL_WATER=1. The first cut derived
+     * the level as track_min - WATER_DROP, which put the sea BELOW everything and
+     * turned every high coastal run into the floor of a canyon (measured on seed
+     * 771144: relief range 34015, so a coast at +20000 sat ~32000 above a sea at
+     * -11885). Kept off by default until the height selection and the coast
+     * interaction are validated in frame; see the R17 notes in tg_apply_elevation
+     * for the grade-cap analysis of why high coasts cannot simply be lowered. */
     int a, b;
     double lo;
     int i;
 
+    if (td5_env_flag_off("TD5RE_R17_GLOBAL_WATER"))
+        return tg_water_level_y(nl);
+
+    /* [R8 BIOME item 19] Lowest node of the MERGED run, not of the raw cell.
+     * A no-op while COAST is capped at one cell; with TD5RE_R8_BIOME_SEA on it
+     * is what keeps one body of water at ONE height across a multi-cell coast
+     * instead of stepping at each cell boundary. */
     tg_biome_run_bounds(si, &a, &b);
 
     if (a > nl->count - 1) a = nl->count - 1;
@@ -1642,6 +1657,12 @@ double tg_bridge_water_y(const TG_NodeList *nl, int si)
         }
         return lo;
     }
+    /* [R17 WATER item 1] DRY inland gorge: NOT unified to the global water level.
+     * This is a canyon river kept a fixed depth below its OWN deck, not the sea;
+     * pulling it down to tg_water_level_y would make every inland crossing's
+     * gorge as deep as the track's lowest coastal point. The global-water rule
+     * (item 1) governs the SEA and the water-biome crossings that join it; the
+     * dry gorge is deliberately left as a deck-relative feature. */
     return tg_bridge_deck_y(nl, si) - TD5_TG_BRIDGE_CHASM - 300.0;
 }
 
