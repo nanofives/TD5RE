@@ -2535,8 +2535,25 @@ int tg_city_emit_sidewalk(const TG_FBHook *h, double sw)
          * for this purpose too, so it gets the same answer. The corner arms
          * (tg_block_emit_intersection) carry the footway through, exactly as
          * they do at a mouth. */
+        /* [R18 CITY items 3+4] "this building has no sidewalk" / "this sidewalk
+         * is not properly folding into the intersection." R15 drops the raised
+         * slab on BOTH sides of a crossing "expecting the corner arms to carry
+         * the footway through, exactly as at a mouth." But tg_crossing_base only
+         * paints a zebra where at least one side is a MOUTH (!tg_facade_built,
+         * line ~2954), and tg_r11_arm_side ONLY fires on a mouth side too -- so on
+         * the crossing's OTHER, BUILT side R15 removes the slab and no arm ever
+         * replaces it: the built frontage loses its pavement (item 3) and the
+         * footway stops dead at the junction instead of folding through it
+         * (item 4). The zebra is authored road-edge to road-edge, inside the
+         * carriageway; the raised slab sits beyond the kerb, so the two never
+         * overlap and keeping the built side's slab reintroduces no z-fight. So
+         * scope the crossing drop to mouth sides only, exactly where R6's XSTOP
+         * and the arms already agree. TD5RE_R18_XING_BUILT_KEEP=0 restores R15's
+         * blanket both-sides drop for an A/B. */
         if (td5_env_flag_on("TD5RE_R15_XING_PAVE") &&
-            tg_city_crossing_here(h->si) && !tg_r13_approach_span(h->si)) {
+            tg_city_crossing_here(h->si) && !tg_r13_approach_span(h->si) &&
+            (!td5_env_flag_on("TD5RE_R18_XING_BUILT_KEEP") ||
+             !tg_facade_built(h->si, s))) {
             s_r15_pave_xing++;
             continue;
         }
