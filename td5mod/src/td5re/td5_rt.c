@@ -226,6 +226,18 @@ typedef struct {
 
 static int      s_track_handles[RT_MAX_TRACK_CHUNKS];
 static int      s_track_chunk_count;
+/* [TDR FIX 2026-09-07] "has the track feed been built for this level" -- do NOT
+ * use `s_track_chunk_count == 0` as that test. A build that legitimately yields
+ * no chunks (the span table is not parsed yet, or every td5_plat_rt_mesh_create
+ * returned 0 under UPLOAD-heap pressure) left the count at 0, which re-triggered
+ * td5_rt_level_build -- and therefore rt_destroy_meshes() -- on EVERY frame:
+ * a destroy-all/rebuild churn loop that both sustained the allocation pressure
+ * that caused it and recycled D3D12 resource addresses as fast as the driver
+ * would hand them back. See the ddraw_wrapper bindless-invalidation fix, whose
+ * stale-pointer dedup this churn was arming. */
+static int      s_track_built;         /* 1 = a build ran to completion            */
+static int      s_track_build_tries;   /* bounded retries when it yields 0 chunks  */
+#define RT_TRACK_BUILD_MAX_TRIES 3
 static RTEntry  s_entries[RT_ENTRY_MAX];
 static int      s_entry_count;         /* display-list entries of the loaded level */
 static int      s_fed_entries, s_fed_chunks, s_fed_meshes;   /* live counts (diag) */
@@ -293,7 +305,21 @@ static void rt_track_flush(TD5_RTVertex *verts, int nv, unsigned short *idx, int
     range.first_index = 0; range.index_count = (unsigned)ni;
     range.texture_id = 0; range.matid_flags = 0;
     handle = td5_plat_rt_mesh_create(verts, (unsigned)nv, idx, (unsigned)ni, &range, 1);
-    if (handle) s_track_handles[s_track_chunk_count++] = handle;
+    if (handle) {
+        s_track_handles[s_track_chunk_count++] = handle;
+    } else {
+        /* [TDR FIX 2026-09-07] A dropped handle used to vanish silently, which is
+         * how the wrapper's "mesh staging alloc FAILED" reached the game as an
+         * invisible zero chunk count. Rate-limited so a pool-exhausted level
+         * cannot itself flood the log. */
+        static int s_dropped, s_warned;
+        s_dropped++;
+        if (s_warned < 8) {
+            s_warned++;
+            TD5_LOG_W("rt", "RT: track mesh_create FAILED (verts=%d idx=%d) -- chunk dropped (%d total)",
+                      nv, ni, s_dropped);
+        }
+    }
 }
 
 void td5_rt_level_build(void)
@@ -306,11 +332,17 @@ void td5_rt_level_build(void)
      * calls this unconditionally; in LOW it must not build the ASes (td5_rt_frame
      * lazily rebuilds on a later LOW->HIGH switch). See td5_rt_frame. */
     if (!td5_rt_active()) return;
-    rt_destroy_meshes();
-    s_rt_generation = td5_plat_rt_generation();
 
+    /* [TDR FIX 2026-09-07] Probe the guards BEFORE tearing anything down. This
+     * used to destroy every track/scenery/actor BLAS and only then discover it
+     * had nothing to rebuild from, so the caller's retry destroyed the scene
+     * again on the next frame, forever. Nothing to build from now means "keep
+     * what we have and try again when the span table is ready". */
     span_count = td5_track_get_span_count();
     if (span_count <= 0 || !g_strip_vertex_base) return;
+
+    rt_destroy_meshes();
+    s_rt_generation = td5_plat_rt_generation();
 
     /* One chunk buffer, reused; flush + restart when near the u16 vertex cap. */
     cap_v = RT_CHUNK_VERT_BUDGET + 64;
@@ -355,6 +387,17 @@ void td5_rt_level_build(void)
     rt_track_flush(verts, nv, idx, ni);
     free(verts); free(idx);
 
+    /* [TDR FIX 2026-09-07] Latch "built" so the lazy-rebuild callers stop asking.
+     * A build that produced nothing is retried a bounded number of times (the
+     * wrapper's mesh pools may simply have been momentarily full) and then left
+     * alone: an RT scene missing its road is a visual regression, an unbounded
+     * destroy-all/rebuild loop is a device reset. */
+    s_track_build_tries++;
+    s_track_built = (s_track_chunk_count > 0);
+    if (!s_track_built)
+        TD5_LOG_W("rt", "RT: track build produced 0 chunks from %d spans (try %d/%d)",
+                  span_count, s_track_build_tries, RT_TRACK_BUILD_MAX_TRIES);
+
     /* NB: the full-scene scenery feed is NOT done here. This level_build hook
      * runs from the track loader (td5_track.c) BEFORE MODELS.DAT is parsed, so
      * the display-list table is empty here. td5_rt_frame feeds scenery on the
@@ -379,6 +422,9 @@ void td5_rt_level_build(void)
 void td5_rt_level_unload(void)
 {
     rt_destroy_meshes();
+    /* A new level (or a HIGH->LOW->HIGH round trip) gets a fresh retry budget. */
+    s_track_built = 0;
+    s_track_build_tries = 0;
 }
 
 /* ---- actor mesh feed: TD5_MeshHeader (object space) -> RT mesh ------------- */
@@ -514,7 +560,21 @@ static void rt_acc_flush(RTEntry *E)
     }
     h = td5_plat_rt_mesh_create(s_acc_verts, (unsigned)s_acc_nv, s_acc_idx, (unsigned)s_acc_ni,
                                 s_acc_ranges, (unsigned)s_acc_nr);
-    if (h) { E->handle[E->nchunks++] = h; s_fed_chunks++; }
+    if (h) {
+        E->handle[E->nchunks++] = h; s_fed_chunks++;
+    } else {
+        /* [TDR FIX 2026-09-07] The entry was already latched fed=1 by rt_entry_feed,
+         * so a dropped chunk leaves it permanently geometry-less until it leaves the
+         * window. Not silently: this is the game-side face of the wrapper's
+         * "mesh staging alloc FAILED" / "pool overflow -- mesh dropped". */
+        static int s_dropped, s_warned;
+        s_dropped++;
+        if (s_warned < 8) {
+            s_warned++;
+            TD5_LOG_W("rt", "RT WINDOW: entry %d chunk mesh_create FAILED (verts=%d idx=%d ranges=%d) -- dropped (%d total)",
+                      s_acc_entry, s_acc_nv, s_acc_ni, s_acc_nr, s_dropped);
+        }
+    }
     rt_acc_reset();
 }
 
@@ -953,7 +1013,7 @@ int td5_rt_warmup_prepare(void)
     if (!td5_rt_active()) return 0;
     /* Track lane quads: normally built at the MODELS.DAT-parse hook; ensure they
      * exist here in case that hook ran before RT went active. */
-    if (s_track_chunk_count == 0)
+    if (!s_track_built && s_track_build_tries < RT_TRACK_BUILD_MAX_TRIES)
         td5_rt_level_build();
     /* [RT WINDOW] Feed the whole initial window now (unbounded budget) so the
      * loading-screen pump drains its BLAS wave before the first race frame. */
@@ -979,7 +1039,9 @@ void td5_rt_frame(int vp, int pane_x, int pane_y, int pane_w, int pane_h)
     if (!td5_rt_active()) {
         if (vp == 0) {
             td5_plat_rt_set_mode(0);
-            if (s_track_chunk_count > 0) td5_rt_level_unload();  /* HIGH->LOW: reclaim BLAS/meshes */
+            /* [TDR FIX 2026-09-07] Keyed on s_track_built, not the chunk count: a
+             * built-but-empty feed still owns scenery/actor meshes to reclaim. */
+            if (s_track_built || s_track_chunk_count > 0) td5_rt_level_unload();  /* HIGH->LOW: reclaim BLAS/meshes */
         }
         return;
     }
@@ -988,7 +1050,10 @@ void td5_rt_frame(int vp, int pane_x, int pane_y, int pane_w, int pane_h)
      * load), or after a device-lost generation bump, (re)feed the track from the
      * still-loaded span table. */
     gen = td5_plat_rt_generation();
-    if (gen != s_rt_generation || s_track_chunk_count == 0) {
+    /* [TDR FIX 2026-09-07] A device-lost generation bump invalidates everything and
+     * earns a fresh retry budget; otherwise build only until one has completed. */
+    if (gen != s_rt_generation) { s_track_built = 0; s_track_build_tries = 0; }
+    if (!s_track_built && s_track_build_tries < RT_TRACK_BUILD_MAX_TRIES) {
         td5_rt_level_build();
     }
 
