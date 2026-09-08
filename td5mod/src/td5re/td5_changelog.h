@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 08 (loading screen)" },
+    { CL_ITEM,    "The loading screen now names what it is loading -" },
+    { CL_ITEM,    "  track data, cars, textures, sounds - and the bar" },
+    { CL_ITEM,    "  fills as it goes. The window also stays" },
+    { CL_ITEM,    "  responsive instead of freezing during a long load." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 08 (generated tracks)" },
     { CL_ITEM,    "Junctions are no longer in the same place on every" },
     { CL_ITEM,    "  track. Their spacing and layout now vary by seed." },
