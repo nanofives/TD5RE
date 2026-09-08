@@ -1965,11 +1965,63 @@ static int tg_r8_relief_enabled(void)
 /* Two summed sines, a raised-cosine hump over each deliberate bridge run, then
  * a global rescale so no span exceeds MAX_GRADE.
  * Mirrors apply_road_elevation() in td5_trackgen.py, plus the bridge humps. */
+/* ==========================================================================
+ * [R21 GRADE] MAKE THE GRADIENT ROW ACTUALLY PRODUCE CLIMBS
+ *
+ * THE REPORT: "steepness is not making very steep climbs."
+ *
+ * ROOT CAUSE, MEASURED (seed 5150, before this change):
+ *   GRADIENT=STANDARD  worst grade 0.1199 (cap 0.119)  RANGE 34007
+ *   GRADIENT=SEVERE    worst grade 0.1279 (cap 0.199)  RANGE 34007  <- same!
+ * The row is a pure CAP. A cap can only ever REDUCE |dy|; nothing in the
+ * profile drives slope toward it, so moving STANDARD -> SEVERE left the height
+ * range byte-for-byte identical and moved the worst grade by 0.008 -- and even
+ * that came from the bridge crown budget being unclamped, not from terrain.
+ * The old "global rescale" is not the culprit either: it only fires when HILLS
+ * is raised (grep race.log for `rescaled`), which is a different complaint.
+ *
+ * THE FIX IS A GAIN STAGE, and the cap stays as the safety bound:
+ *   1. DRIVE. Measure the profile's p90 per-span slope and scale the whole
+ *      profile so p90 lands on the target the row asked for. p90 and NOT the
+ *      max: keying on the max is exactly what the old rescale did, and one
+ *      freak span then set the scale for the entire track.
+ *   2. SOFT LIMIT. Clip each span's slope with a tanh knee against a per-span
+ *      cap. tanh < 1 means |dy| < cap ALWAYS, so the safety bound becomes a
+ *      theorem instead of something enforced after the fact by a global
+ *      rescale -- which is what stops one steep span from flattening the map.
+ *      Spans under the knee are bit-unchanged, and value and first derivative
+ *      match at the knee so no kink appears there.
+ *   3. PER-BIOME. The cap is scaled by k_biome_road's grade_pct and ramped
+ *      across run edges, so ALPINE keeps steep pitches where CITY is clipped
+ *      gentle. Applying the biome factor to the CAP rather than to the gain is
+ *      what avoids a discontinuity: the limiter is already a smooth per-span
+ *      function, whereas a per-span gain on y would step at every boundary.
+ *
+ * The y=0 start anchor survives untouched: the gain multiplies y[0]=0, and the
+ * limiter integrates from y'[0]=y[0]. The far END of the profile does drift
+ * where clipping bit, which is intended -- a clipped hill is a shorter hill.
+ * ========================================================================== */
+#define TD5_TG_R21_GRADE_HEADROOM 1.15  /* cap sits just above the drive aim  */
+#define TD5_TG_R21_GRADE_KNEE     0.70  /* clip only the top 30% of the band  */
+#define TD5_TG_R21_GRADE_ABSMAX   0.20  /* absolute ceiling, any biome        */
+
+static int tg_r21_grade_drive(void) { return td5_env_flag_off("TD5RE_R21_GRADE"); }
+
+static int tg_grade_cmp(const void *a, const void *b)
+{
+    const double da = *(const double *)a, db = *(const double *)b;
+    return (da > db) - (da < db);
+}
+
 void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
 {
     const double max_grade = spec->max_grade_x1000 / 1000.0;
     double amp = (double)spec->elevation_amplitude;
     double ph1, ph2, worst = 0.0;
+    /* What the [R8 SHAPE] line should call the cap. Once [R21 GRADE] is on,
+     * max_grade is the AIM and the real bound sits HEADROOM above it, so
+     * printing max_grade made a legal 0.1378 read as a breach of "cap 0.119". */
+    double eff_cap = max_grade;
     int waves, i;
 
     /* Every y on the track is about to change (or, on the early-out below, has
@@ -2113,11 +2165,117 @@ void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
         double g  = fabs(dy) / (double)spec->span_length;
         if (g > worst) worst = g;
     }
-    if (max_grade > 0.0 && worst > max_grade) {
-        double k = max_grade / worst;
-        for (i = 0; i < nl->count; i++) nl->v[i].y *= k;
-        TD5_LOG_I(LOG_TAG, "trackgen: elevation rescaled by %.3f (grade %.3f -> %.3f)",
-                  k, worst, max_grade);
+    {
+        int drove = 0;
+
+        if (tg_r21_grade_drive() && max_grade > 0.0 && nl->count > 3) {
+            const double span_len = (double)spec->span_length;
+            const double target   = max_grade;     /* the row is now an AIM.. */
+            const double cap_base = target * TD5_TG_R21_GRADE_HEADROOM;
+                                                   /* ..the cap sits above it */
+            double *g = (double *)malloc(sizeof(double) * (size_t)nl->count);
+
+            eff_cap = (cap_base < TD5_TG_R21_GRADE_ABSMAX)
+                    ? cap_base : TD5_TG_R21_GRADE_ABSMAX;
+
+            if (g) {
+                double p50, p90, p99, gmax, k = 1.0, asc = 0.0, dsc = 0.0;
+                double prev_orig, prev_new;
+                int n = 0, hits = 0, steep = 0, run = 0, longest = 0;
+
+                for (i = 1; i < nl->count; i++)
+                    g[n++] = fabs(nl->v[i].y - nl->v[i - 1].y) / span_len;
+                qsort(g, (size_t)n, sizeof(double), tg_grade_cmp);
+                p50  = g[n / 2];
+                p90  = g[(n * 9) / 10];
+                p99  = g[(n * 99) / 100];
+                gmax = g[n - 1];
+
+                /* 1. DRIVE. Gain the whole profile so its p90 slope lands on
+                 * the target. This is the part that was missing: without it a
+                 * higher GRADIENT only raised a ceiling nothing reached. */
+                if (p90 > 1e-6) k = target / p90;
+                if (k < 0.25) k = 0.25;      /* never violent in either  */
+                if (k > 6.0)  k = 6.0;       /* direction                */
+                for (i = 0; i < nl->count; i++) nl->v[i].y *= k;
+
+                /* 2+3. SOFT LIMIT against a per-biome, per-span cap. Reads the
+                 * ORIGINAL difference and writes the INTEGRATED one, so it has
+                 * to carry both the previous input and the previous output --
+                 * differencing in place would feed each clipped value back in
+                 * and drag the whole tail down. */
+                prev_orig = nl->v[0].y;
+                prev_new  = nl->v[0].y;
+                for (i = 1; i < nl->count; i++) {
+                    const double cur_orig = nl->v[i].y;
+                    double d    = cur_orig - prev_orig;
+                    double capi = cap_base
+                                * (double)tg_shape_lerp_pct(i, TG_SF_GRADE,
+                                              TD5_TG_BIOME_BLEND) / 100.0;
+                    double lim, knee, ad;
+
+                    if (capi > TD5_TG_R21_GRADE_ABSMAX)
+                        capi = TD5_TG_R21_GRADE_ABSMAX;
+                    lim  = capi * span_len;
+                    knee = TD5_TG_R21_GRADE_KNEE * lim;
+                    ad   = fabs(d);
+                    if (ad > knee && lim > knee) {
+                        const double nd = knee + (lim - knee)
+                                        * tanh((ad - knee) / (lim - knee));
+                        d = (d < 0.0) ? -nd : nd;
+                        hits++;
+                    }
+                    prev_new  += d;
+                    nl->v[i].y = prev_new;
+                    prev_orig  = cur_orig;
+
+                    if (d >= 0.0) asc += d; else dsc -= d;
+                    /* A steep CLIMB is a run, not a span -- this is the number
+                     * that matches what a driver feels. */
+                    if (fabs(d) / span_len > TD5_TG_R21_GRADE_KNEE * capi) {
+                        steep++;
+                        if (++run > longest) longest = run;
+                    } else {
+                        run = 0;
+                    }
+                }
+
+                n = 0;
+                for (i = 1; i < nl->count; i++)
+                    g[n++] = fabs(nl->v[i].y - nl->v[i - 1].y) / span_len;
+                qsort(g, (size_t)n, sizeof(double), tg_grade_cmp);
+
+                /* p90 is the number to judge this on. The old [R8 SHAPE] line
+                 * cannot show the win: worst grade was pinned at the cap before
+                 * and is pinned just under it after. */
+                TD5_LOG_I(LOG_TAG, "trackgen: [R21 GRADE] drive x%.2f -> p50 "
+                          "%.4f p90 %.4f p99 %.4f max %.4f (aim %.3f cap %.3f)",
+                          k, g[n / 2], g[(n * 9) / 10], g[(n * 99) / 100],
+                          g[n - 1], target, cap_base);
+                TD5_LOG_I(LOG_TAG, "trackgen: [R21 GRADE] was p50 %.4f p90 "
+                          "%.4f p99 %.4f max %.4f; the old global rescale would "
+                          "have been x%.3f", p50, p90, p99, gmax,
+                          (worst > max_grade) ? max_grade / worst : 1.0);
+                TD5_LOG_I(LOG_TAG, "trackgen: [R21 GRADE] limiter hit %d/%d "
+                          "spans, steep %d, longest steep RUN %d spans, total "
+                          "ascent %.0f descent %.0f", hits, n, steep, longest,
+                          asc, dsc);
+                free(g);
+                drove = 1;
+            } else {
+                TD5_LOG_W(LOG_TAG, "trackgen: [R21 GRADE] allocation failed; "
+                          "falling back to the global rescale");
+            }
+        }
+
+        /* Legacy global max-norm rescale. Kept as the OFF path so the knob is
+         * measurable one change at a time; it is also the fallback above. */
+        if (!drove && max_grade > 0.0 && worst > max_grade) {
+            double k = max_grade / worst;
+            for (i = 0; i < nl->count; i++) nl->v[i].y *= k;
+            TD5_LOG_I(LOG_TAG, "trackgen: elevation rescaled by %.3f (grade %.3f -> %.3f)",
+                      k, worst, max_grade);
+        }
     }
 
     /* [R8 SHAPE] The two NUMBERS this area is judged on, logged unconditionally
@@ -2137,7 +2295,7 @@ void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
         }
         TD5_LOG_I(LOG_TAG, "trackgen: [R8 SHAPE] relief=%d height min %.0f max "
                   "%.0f RANGE %.0f, worst grade %.4f (cap %.3f)",
-                  tg_r8_relief_enabled(), lo, hi, hi - lo, wg, max_grade);
+                  tg_r8_relief_enabled(), lo, hi, hi - lo, wg, eff_cap);
     }
 
     /* [R17 WATER item 1] GLOBAL WATER LEVEL + ROUTE FLOOR CLAMP.
