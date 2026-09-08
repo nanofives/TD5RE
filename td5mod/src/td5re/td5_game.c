@@ -1142,16 +1142,26 @@ static const SSW_NavStep k_ssw_optshub[]    = { { TD5_SCREEN_MAIN_MENU, 4 } };
 static const SSW_NavStep k_ssw_hiscore[]    = { { TD5_SCREEN_MAIN_MENU, 5 } };
 static const SSW_NavStep k_ssw_mp_lobby[]   = { { TD5_SCREEN_MAIN_MENU, 2 } };
 static const SSW_NavStep k_ssw_changelog[]  = { { TD5_SCREEN_MAIN_MENU, 7 } };
-/* Options hub: 0=PlayerName 1=Control 2=Sound 3=Display 4=TwoPlayer.
- * [CONSOLIDATION 2026-07-21] GAME OPTIONS (formerly hub row 0) retired. */
+/* Options hub rows, as actually created by Screen_OptionsHub:
+ *   0=Control 1=Sound 2=Graphics 3=Multiplayer 4=Language 5=OK
+ *
+ * [STARTSCREEN OFF-BY-ONE FIX 2026-09-08] These four routes were all one row
+ * too high. [CONSOLIDATION 2026-07-21] retired GAME OPTIONS (then hub row 0)
+ * and every remaining row shifted up, but the route indices (and the comment
+ * that justified them, which still listed a PlayerName row 0) were left as
+ * they were. Net effect: --StartScreen=15 (SOUND_OPTIONS) clicked hub row 2
+ * and landed on GRAPHICS OPTIONS; CONTROL landed on SOUND; DISPLAY landed on
+ * MULTIPLAYER; TWO_PLAYER landed on LANGUAGE. Dev/QA harness only -- the
+ * player-facing hub was always correct -- but it meant the jump-to-screen
+ * harness could not reach the screen it was asked for. */
 static const SSW_NavStep k_ssw_ctrl_opts[]  = { { TD5_SCREEN_MAIN_MENU, 4 },
-                                                { TD5_SCREEN_OPTIONS_HUB, 1 } };
+                                                { TD5_SCREEN_OPTIONS_HUB, 0 } };
 static const SSW_NavStep k_ssw_sound_opts[] = { { TD5_SCREEN_MAIN_MENU, 4 },
-                                                { TD5_SCREEN_OPTIONS_HUB, 2 } };
+                                                { TD5_SCREEN_OPTIONS_HUB, 1 } };
 static const SSW_NavStep k_ssw_disp_opts[]  = { { TD5_SCREEN_MAIN_MENU, 4 },
-                                                { TD5_SCREEN_OPTIONS_HUB, 3 } };
+                                                { TD5_SCREEN_OPTIONS_HUB, 2 } };
 static const SSW_NavStep k_ssw_2p_opts[]    = { { TD5_SCREEN_MAIN_MENU, 4 },
-                                                { TD5_SCREEN_OPTIONS_HUB, 4 } };
+                                                { TD5_SCREEN_OPTIONS_HUB, 3 } };
 /* Race type menu: 0=Single Race (→ car selection with game_type=0). */
 static const SSW_NavStep k_ssw_car_sel[]    = { { TD5_SCREEN_MAIN_MENU, 0 },
                                                 { TD5_SCREEN_RACE_TYPE_MENU, 0 } };

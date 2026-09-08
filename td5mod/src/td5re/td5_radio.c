@@ -34,6 +34,7 @@
 #include <objbase.h>
 #include <process.h>     /* _beginthreadex */
 #include <string.h>
+#include <stdio.h>       /* snprintf (status snapshot copies) */
 #include <stdlib.h>
 #include "td5_config.h"  /* td5_env_flag_on (dev fault-injection knob) */
 
@@ -56,6 +57,15 @@ static char          s_url[512];
 static wchar_t       s_wurl[512];
 static char          s_label[128];  /* station label for now-playing        */
 static td5_music_backend s_backend;
+
+/* Live-stream state, published by the worker for td5_radio_get_status(). Only
+ * the worker writes these; the main thread reads them for the SOUND OPTIONS
+ * details panel. Interlocked so the read is never a torn value -- a stale
+ * snapshot is fine (it is refreshed every frame), a torn one is not. */
+static volatile LONG s_connected;   /* 1 while the decode loop has a stream */
+static volatile LONG s_rate;        /* PCM format of the live stream        */
+static volatile LONG s_channels;
+static volatile LONG s_bits;
 
 /* ========================================================================
  * Helpers
@@ -114,6 +124,9 @@ static void radio_worker_abort(void)
     InterlockedExchange(&s_aborted, 1);
     InterlockedExchange(&s_stop, 1);
     InterlockedExchange(&s_worker_tid, 0);
+    /* The decode loop's cleanup never runs on this path, so clear the live
+     * format here or the details panel keeps reporting a dead stream. */
+    InterlockedExchange(&s_connected, 0);
     TD5_LOG_E(LOG_TAG, "radio: FAULT inside the Media Foundation / WinHTTP read "
                        "path -- radio thread terminated, game continues (music "
                        "off for this session)");
@@ -234,6 +247,12 @@ static unsigned __stdcall radio_worker(void *arg)
                   s_label, (unsigned)rate, (unsigned)ch, (unsigned)bits);
         backoff = 1000;     /* successful connect resets the backoff */
 
+        /* Publish the live format for the SOUND OPTIONS details panel. */
+        InterlockedExchange(&s_rate,      (LONG)rate);
+        InterlockedExchange(&s_channels,  (LONG)ch);
+        InterlockedExchange(&s_bits,      (LONG)bits);
+        InterlockedExchange(&s_connected, 1);
+
         /* Decode loop. */
         while (!s_stop) {
             DWORD      stream_index = 0, flags = 0;
@@ -275,6 +294,13 @@ static unsigned __stdcall radio_worker(void *arg)
             }
             IMFSample_Release(sample);
         }
+
+        /* Stream is gone (drop, end-of-stream, or a stop request): the details
+         * panel must not keep claiming a live format. */
+        InterlockedExchange(&s_connected, 0);
+        InterlockedExchange(&s_rate,     0);
+        InterlockedExchange(&s_channels, 0);
+        InterlockedExchange(&s_bits,     0);
 
         IMFSourceReader_Release(reader);
         if (!s_stop) {
@@ -431,11 +457,129 @@ void td5_radio_set_volume_pct(int volume)
     td5_plat_radio_set_volume(s_volume);
 }
 
+/* ========================================================================
+ * Station selection + status
+ * ======================================================================== */
+
+int td5_radio_url_valid(const char *url)
+{
+    const char *host;
+    size_t len;
+
+    if (!url) return 0;
+    len = strlen(url);
+    if (len == 0 || len >= sizeof(s_url)) return 0;
+
+    /* Scheme: only what Media Foundation's network source will open for us. */
+    if      (!strncmp(url, "http://",  7)) host = url + 7;
+    else if (!strncmp(url, "https://", 8)) host = url + 8;
+    else return 0;
+
+    /* A host must actually be there, and must not start the path/port straight
+     * away ("http://" or "http:///mount" are both rejected). */
+    if (*host == '\0' || *host == '/' || *host == ':') return 0;
+
+    /* No whitespace or control characters anywhere -- the field is typed by
+     * hand, and a stray space silently breaks the MF open with a generic
+     * hr=0x80070057 that looks like a network fault. */
+    for (const char *p = url; *p; p++)
+        if ((unsigned char)*p <= ' ' || (unsigned char)*p > 126) return 0;
+
+    return 1;
+}
+
+int td5_radio_set_url(const char *url)
+{
+    int was_running;
+
+    if (!td5_radio_url_valid(url)) {
+        TD5_LOG_W(LOG_TAG, "radio: station rejected (expected " TD5_RADIO_URL_FORMAT ")");
+        return 0;
+    }
+    if (!s_inited) {
+        TD5_LOG_W(LOG_TAG, "radio: station change ignored -- radio not initialised");
+        return 0;
+    }
+    if (s_aborted) {
+        TD5_LOG_W(LOG_TAG, "radio: station change ignored -- worker faulted this session");
+        return 0;
+    }
+    if (!strcmp(url, s_url)) return 1;          /* already on that station */
+
+    was_running = (s_thread != NULL);
+
+    /* The worker reads s_wurl / s_label, so it must be STOPPED AND JOINED
+     * before we touch them. If it will not join it is wedged inside MF; leave
+     * the station alone rather than mutate strings under a live reader. */
+    if (s_thread) {
+        InterlockedExchange(&s_stop, 1);
+        if (WaitForSingleObject(s_thread, 3000) != WAIT_OBJECT_0) {
+            InterlockedExchange(&s_stop, 0);    /* let it carry on as it was */
+            TD5_LOG_W(LOG_TAG, "radio: worker would not join; station unchanged");
+            return 0;
+        }
+        CloseHandle(s_thread);
+        s_thread = NULL;
+    }
+
+    strncpy(s_url, url, sizeof(s_url) - 1);
+    s_url[sizeof(s_url) - 1] = '\0';
+    MultiByteToWideChar(CP_UTF8, 0, s_url, -1, s_wurl,
+                        (int)(sizeof(s_wurl) / sizeof(s_wurl[0])));
+    radio_make_label(s_url, s_label, (int)sizeof(s_label));
+
+    InterlockedExchange(&s_connected, 0);
+    InterlockedExchange(&s_rate,     0);
+    InterlockedExchange(&s_channels, 0);
+    InterlockedExchange(&s_bits,     0);
+    InterlockedExchange(&s_stop,     0);
+
+    /* Only reconnect if music had already been started -- otherwise leave the
+     * lazy-connect contract intact and let the next td5_music_play() do it. */
+    if (was_running) {
+        s_thread = (HANDLE)_beginthreadex(NULL, 0, radio_worker, NULL, 0, NULL);
+        if (!s_thread) {
+            TD5_LOG_E(LOG_TAG, "radio: worker restart failed after station change");
+            return 0;
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "radio: station -> %s (label=%s reconnect=%d)",
+              s_url, s_label, was_running);
+    return 1;
+}
+
+void td5_radio_get_status(td5_radio_status *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    out->inited    = s_inited && s_mf_started;
+    out->connected = (int)s_connected;
+    out->aborted   = (int)s_aborted;
+    out->playing   = (s_thread != NULL);
+    out->volume    = s_volume;
+    out->rate      = (int)s_rate;
+    out->channels  = (int)s_channels;
+    out->bits      = (int)s_bits;
+    /* snprintf, not strncpy: the destinations are the same size as the sources,
+     * so strncpy(dst, src, sizeof-1) trips -Wstringop-truncation. The memset
+     * above already zeroed them, and snprintf always terminates. */
+    snprintf(out->label, sizeof(out->label), "%s", s_label);
+    snprintf(out->url,   sizeof(out->url),   "%s", s_url);
+}
+
 #else  /* !_WIN32 -- radio backend is Win32/Media-Foundation only */
 
 void td5_radio_init(const char *stream_url, int volume) { (void)stream_url; (void)volume; }
 void td5_radio_shutdown(void) {}
 void td5_radio_set_volume_pct(int volume) { (void)volume; }
 const td5_music_backend *td5_radio_get_backend(void) { return 0; }
+int  td5_radio_url_valid(const char *url) { (void)url; return 0; }
+int  td5_radio_set_url(const char *url) { (void)url; return 0; }
+void td5_radio_get_status(td5_radio_status *out)
+{
+    /* Compound-literal zero-init rather than memset: <string.h> is only
+     * included inside the _WIN32 branch above. */
+    if (out) { const td5_radio_status z = { 0 }; *out = z; }
+}
 
 #endif /* _WIN32 */
