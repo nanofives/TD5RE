@@ -539,7 +539,24 @@ Only declare the /fix done after this step prints the success line. If the push 
 >    | `td5mod/deps/mingw64/` | 2 | applied 2026-09-08 |
 >    | `_archive/mingw-i686-toolchain/` | 2 | inherited (see below) |
 >    | `_archive/mingw-i686.7z` | 2 | applied 2026-09-08, `(DENY)(DE)` (no OI/CI on a file) |
->    | `re/assets/` | **0** | ACL-UNPROTECTED — only the `~/bin/rm` wrapper guards it |
+>    | `re/assets/` | 2 per child | applied 2026-09-08, **SCOPED — see the carve-out below** |
+>
+>    **`re/assets/` carve-out (do NOT "simplify" this to a blanket deny).** The deny is
+>    applied to each CHILD of `re/assets/` (52 targets: every top-level entry except
+>    `levels/`, plus every entry under `levels/` except `level090`). `re/assets/` itself
+>    and `re/assets/levels/` deliberately carry NO deny. Reason: `re/assets/levels/level090`
+>    is the AUTO-GENERATED track's output directory, and the generator actively deletes
+>    files there — `remove(models_path)` / `remove(tex_path)` in `td5_trackgen.c` (~:30317,
+>    :30336, :30369-70), commented "stale pages would mis-texture the meshes". The
+>    documented autotrack A/B workflow also deletes the whole `level090` dir before every
+>    run, which needs Delete-Child on `levels/`. A blanket `(OI)(CI)` deny on `re/assets/`
+>    would therefore break auto-track generation AND the A/B loop. Verified 2026-09-08:
+>    deletes under `cars/`, `frontend/`, `static/`, `sound/` and `levels/level001/` are
+>    blocked and the files stay intact; a stale file inside `level090` is still removable;
+>    a directory under `levels/` can still be created and deleted; reads are unaffected.
+>    KNOWN LIMITATION of the per-child approach: a NEW top-level dir added to `re/assets/`
+>    later will NOT inherit the deny (the parent has no inheritable ACE) — re-run the
+>    per-child apply after adding one.
 >
 >    ACEs are icacls DENY `(DE,DC)` for `MARIANO-PC\maria` + `MARIANO-PC\CodexSandboxUsers`,
 >    `(OI)(CI)` inherited (directories). Empirically confirmed 2026-09-08: deleting a file
