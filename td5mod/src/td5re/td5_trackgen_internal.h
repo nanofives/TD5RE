@@ -1198,6 +1198,10 @@ int td5_trackgen_is_night(void);
  * s_is_night is latched rather than re-predicated per call. */
 int  tg_rolls_enabled(void);                       /* TD5RE_R21_ROLL master  */
 void tg_rolls_resolve(unsigned int seed);          /* latch for this build   */
+/* Hand back every value the registry published into the environment. Called at
+ * the top of resolve, and again before a spec is built from the knobs, so a
+ * previous build's roll can never be mistaken for a pin. */
+void tg_rolls_unpublish(void);
 void tg_rolls_apply_spec(TD5_TrackGenSpec *spec);  /* fold into the spec     */
 void tg_rolls_report(void);                        /* the [R21 ROLL] block   */
 int  tg_roll_value(int id);
@@ -2677,6 +2681,7 @@ int  tg_shape_lerp_pct(int si, int field, int ramp_spans);
  * tg_adjacent_skip must be sized with (a min over the WHOLE table, not over
  * the biomes this seed happened to lay out, so the self-intersection window is
  * provably >= every local value the walk can use). */
+int  tg_shape_lane_aim(int si, int base_lanes, int lo, int hi);
 int  tg_shape_safety_x100(int si, int base_x100);
 int  tg_shape_worst_safety_x100(const TD5_TrackGenSpec *spec);
 /* ==========================================================================

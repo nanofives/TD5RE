@@ -254,12 +254,33 @@ int td5_trackgen_is_night(void);
 #define TD5_TG_ROLL_RANDOM (-2)
 
 typedef enum {
+    /* Spec-bearing: folded into TD5_TrackGenSpec by tg_rolls_apply_spec. */
     TD5_TG_ROLL_TWIST = 0,   /* -> weight[STRAIGHT/CURVE/ACUTE] (composite)   */
     TD5_TG_ROLL_CORNERS,     /* -> curve_safety_x100                          */
     TD5_TG_ROLL_GRADE,       /* -> max_grade_x1000                            */
     TD5_TG_ROLL_DUAL,        /* -> weight[DUAL_LANE]                          */
     TD5_TG_ROLL_HILLS,       /* -> elevation_amplitude                        */
-    TD5_TG_ROLL_NIGHT,       /* delegates to tg_decide_night, reported here    */
+    TD5_TG_ROLL_LENGTH,      /* -> target_spans                               */
+    TD5_TG_ROLL_NIGHT,       /* delegates to tg_decide_night, reported here   */
+    /* Published to the environment (see td5_trackgen_roll_is_owned). */
+    TD5_TG_ROLL_LANE_PCT, TD5_TG_ROLL_RUNOFF, TD5_TG_ROLL_TERRAIN_REACH,
+    TD5_TG_ROLL_BIOME_BLEND, TD5_TG_ROLL_RAIL_DEG10, TD5_TG_ROLL_SKY,
+    TD5_TG_ROLL_SNOW, TD5_TG_ROLL_PARKS, TD5_TG_ROLL_PARK_HOUSES,
+    TD5_TG_ROLL_PARK_HEDGE, TD5_TG_ROLL_AVENUE, TD5_TG_ROLL_START_CITY,
+    TD5_TG_ROLL_MOUNTAINS, TD5_TG_ROLL_TUNNEL_LAMPS,
+    TD5_TG_ROLL_BRIDGE_VARIETY, TD5_TG_ROLL_FLORA_CLEAR,
+    TD5_TG_ROLL_TREE_MIRROR,
+    /* PRESENCE rows: in the mechanism and reported, but weighted to today's
+     * value -- see the STYLE vs PRESENCE note in td5_trackgen.c. */
+    TD5_TG_ROLL_BRANCHES, TD5_TG_ROLL_TERRAIN_HILLS, TD5_TG_ROLL_TERRAIN_FAR,
+    TD5_TG_ROLL_COASTLINE, TD5_TG_ROLL_BRIDGES, TD5_TG_ROLL_BRIDGE_OVERHEAD,
+    TD5_TG_ROLL_TUNNELS, TD5_TG_ROLL_GUARDRAILS, TD5_TG_ROLL_ARMCO,
+    TD5_TG_ROLL_DISTRICTS, TD5_TG_ROLL_FACADE_MASS, TD5_TG_ROLL_BACKROWS,
+    TD5_TG_ROLL_CROSSINGS, TD5_TG_ROLL_CROSS_STREETS,
+    TD5_TG_ROLL_CROSS_MARKINGS, TD5_TG_ROLL_INTERSECTIONS,
+    TD5_TG_ROLL_SIDEWALKS, TD5_TG_ROLL_SCENERY, TD5_TG_ROLL_TREELINE,
+    TD5_TG_ROLL_LAMP_POSTS, TD5_TG_ROLL_BANNERS, TD5_TG_ROLL_REAL_TEX,
+    TD5_TG_ROLL_REAL_FURNITURE,
     TD5_TG_ROLL_COUNT
 } TD5_TgRollId;
 
@@ -281,6 +302,14 @@ void td5_trackgen_resolve_rolls(unsigned int seed, TD5_TgRolls *out);
 int         td5_trackgen_roll_choice_count(int id);
 const char *td5_trackgen_roll_choice_name(int id, int choice);
 const char *td5_trackgen_roll_name(int id);
+/* Knob this entry owns, or NULL. The studio needs it to tell "the player
+ * pinned this" from "the generator published its own roll here". */
+const char *td5_trackgen_roll_knob(int id);
+/* Did the LAST build publish this entry's value itself (i.e. the environment
+ * currently holds a rolled value rather than a human's pin)? The studio must
+ * ask, or a published roll would read back as a concrete setting and the row
+ * would stop showing RANDOM after one race. */
+int         td5_trackgen_roll_is_owned(int id);
 /* Straight/curve/acute weights for a TWISTINESS choice. The mix lives with the
  * generator, not the frontend, so the studio and the walk cannot disagree. */
 int         td5_trackgen_twist_mix(int choice, int out3[3]);

@@ -845,15 +845,121 @@ static const unsigned char k_tgr_hills_w[] = { 5, 15, 30, 30, 20 };
 static const int         k_tgr_night_v[] = { 0, 1 };
 static const char *const k_tgr_night_n[] = { "DAY", "NIGHT" };
 
+/* LENGTH is weighted away from both ends: a rolled 3000-span MARATHON triples
+ * build time on a row the player never touched, and 600 is barely a lap. */
+static const int         k_tgr_len_v[] = { 600, 1200, 1800, 2400, 3000 };
+static const char *const k_tgr_len_n[] = { "SHORT", "MEDIUM", "LONG",
+                                           "VERY LONG", "MARATHON" };
+static const unsigned char k_tgr_len_w[] = { 0, 15, 70, 15, 0 };
+
+/* How often a section changes its lane count -- the existing per-section
+ * narrower/wider-lane machinery ([LANES] in tg_build_centerline). This is the
+ * "sections with narrower lanes and wider lanes" dial. */
+static const int         k_tgr_lanepct_v[] = { 0, 15, 35, 60, 85 };
+static const char *const k_tgr_lanepct_n[] = { "UNIFORM", "RARE", "SOME",
+                                               "OFTEN", "CONSTANT" };
+static const unsigned char k_tgr_lanepct_w[] = { 5, 20, 35, 30, 10 };
+
+static const int         k_tgr_runoff_v[] = { 0, 50, 100, 200, 400 };
+static const char *const k_tgr_runoff_n[] = { "NONE", "SHORT", "STANDARD",
+                                              "LONG", "VERY LONG" };
+static const unsigned char k_tgr_runoff_w[] = { 10, 20, 35, 25, 10 };
+
+static const int         k_tgr_reach_v[] = { 30000, 80000, 160000, 300000 };
+static const char *const k_tgr_reach_n[] = { "NEAR", "MEDIUM", "FAR",
+                                             "VERY FAR" };
+static const unsigned char k_tgr_reach_w[] = { 40, 30, 20, 10 };
+
+static const int         k_tgr_blend_v[] = { 0, 10, 20, 40 };
+static const char *const k_tgr_blend_n[] = { "SHARP", "SHORT", "NORMAL",
+                                             "LONG" };
+static const unsigned char k_tgr_blend_w[] = { 10, 25, 40, 25 };
+
+static const int         k_tgr_rail_v[] = { 20, 35, 50, 90, 160 };
+static const char *const k_tgr_rail_n[] = { "EVERYWHERE", "FREQUENT",
+                                            "STANDARD", "SPARSE",
+                                            "TIGHT BENDS ONLY" };
+static const unsigned char k_tgr_rail_w[] = { 15, 20, 30, 20, 15 };
+
+static const int         k_tgr_sky_v[] = { -1, 12, 24, 36, 48, 60 };
+static const char *const k_tgr_sky_n[] = { "NONE", "12", "24", "36", "48",
+                                           "60" };
+static const unsigned char k_tgr_sky_w[] = { 5, 15, 20, 25, 20, 15 };
+
+/* Shared boolean choice set. */
+static const int         k_tgr_bool_v[] = { 0, 1 };
+static const char *const k_tgr_bool_n[] = { "OFF", "ON" };
+/* PRESENCE: the OFF choice removes content. A seed that rolled guardrails,
+ * sidewalks and scenery all off would read as broken rather than varied, so
+ * these resolve to today's value -- while still being IN the mechanism and in
+ * the report, so a later round tunes one byte instead of re-plumbing. */
+static const unsigned char k_tgr_w_keep[]      = {  0, 100 };
+static const unsigned char k_tgr_w_mostly_on[] = { 25,  75 };
+static const unsigned char k_tgr_w_even[]      = { 50,  50 };
+static const unsigned char k_tgr_w_rare[]      = { 70,  30 };
+
+#define TGR_BOOL(nm, kb, slt, wts, leg) \
+    { nm, kb, slt, k_tgr_bool_v, k_tgr_bool_n, wts, 2, leg, 0, 1 }
+
+/* MUST be in TD5_TgRollId order -- the array is indexed by the id. Salts are
+ * independent of position, so the six original entries keep theirs and their
+ * rolls are unchanged by everything appended after them. */
 static const TG_RollEntry k_tg_rolls[TD5_TG_ROLL_COUNT] = {
- /* name        knob                            salt       vals/names/weights            n  leg  lo   hi   */
- { "TWISTINESS", NULL,                          0x21010001u, k_tgr_twist_v, k_tgr_twist_n, k_tgr_twist_w, 4, 1, 0, 3 },
- { "CORNERS",    "TD5RE_AUTOTRACK_CURVESAFE",   0x21010002u, k_tgr_corner_v, k_tgr_corner_n, k_tgr_corner_w, 5, 2, 100, 800 },
- { "GRADIENT",   "TD5RE_AUTOTRACK_GRADE",       0x21010003u, k_tgr_grade_v, k_tgr_grade_n, k_tgr_grade_w, 5, 2, 0, 200 },
- { "DUAL LANES", "TD5RE_AUTOTRACK_PCT_DUAL",    0x21010004u, k_tgr_dual_v,  k_tgr_dual_n,  k_tgr_dual_w,  5, 2, 0, 100 },
- { "HILLS",      "TD5RE_AUTOTRACK_ELEVATION",   0x21010005u, k_tgr_hills_v, k_tgr_hills_n, k_tgr_hills_w, 5, 2, 0, 40000 },
- { "TIME OF DAY","TD5RE_AUTOTRACK_NIGHT",       0x21010006u, k_tgr_night_v, k_tgr_night_n, NULL,          2, 0, 0, 1 }
+ /* name          knob                          salt         vals/names/weights                              n  leg  lo   hi   */
+ { "TWISTINESS",  NULL,                         0x21010001u, k_tgr_twist_v,   k_tgr_twist_n,   k_tgr_twist_w,   4, 1, 0, 3 },
+ { "CORNERS",     "TD5RE_AUTOTRACK_CURVESAFE",  0x21010002u, k_tgr_corner_v,  k_tgr_corner_n,  k_tgr_corner_w,  5, 2, 100, 800 },
+ { "GRADIENT",    "TD5RE_AUTOTRACK_GRADE",      0x21010003u, k_tgr_grade_v,   k_tgr_grade_n,   k_tgr_grade_w,   5, 2, 0, 200 },
+ { "DUAL LANES",  "TD5RE_AUTOTRACK_PCT_DUAL",   0x21010004u, k_tgr_dual_v,    k_tgr_dual_n,    k_tgr_dual_w,    5, 2, 0, 100 },
+ { "HILLS",       "TD5RE_AUTOTRACK_ELEVATION",  0x21010005u, k_tgr_hills_v,   k_tgr_hills_n,   k_tgr_hills_w,   5, 2, 0, 40000 },
+ { "LENGTH",      "TD5RE_AUTOTRACK_SPANS",      0x21010007u, k_tgr_len_v,     k_tgr_len_n,     k_tgr_len_w,     5, 2, 200, 3000 },
+ { "TIME OF DAY", "TD5RE_AUTOTRACK_NIGHT",      0x21010006u, k_tgr_night_v,   k_tgr_night_n,   NULL,            2, 0, 0, 1 },
+ { "LANE VARIETY","TD5RE_AUTOTRACK_LANE_PCT",   0x21010008u, k_tgr_lanepct_v, k_tgr_lanepct_n, k_tgr_lanepct_w, 5, 2, 0, 100 },
+ { "RUN-OFF",     "TD5RE_AUTOTRACK_RUNOFF",     0x21010009u, k_tgr_runoff_v,  k_tgr_runoff_n,  k_tgr_runoff_w,  5, 2, 0, 4000 },
+ { "VIEW REACH",  "TD5RE_AUTOTRACK_TERRAIN_REACH",0x2101000Au,k_tgr_reach_v,  k_tgr_reach_n,   k_tgr_reach_w,   4, 0, 1000, 400000 },
+ { "TRANSITIONS", "TD5RE_AUTOTRACK_BIOME_BLEND",0x2101000Bu, k_tgr_blend_v,   k_tgr_blend_n,   k_tgr_blend_w,   4, 2, 0, 75 },
+ { "RAIL DENSITY","TD5RE_AUTOTRACK_RAIL_DEG10", 0x2101000Cu, k_tgr_rail_v,    k_tgr_rail_n,    k_tgr_rail_w,    5, 2, 0, 3600 },
+ { "SKY",         "TD5RE_AUTOTRACK_SKY_ANIM",   0x2101000Du, k_tgr_sky_v,     k_tgr_sky_n,     k_tgr_sky_w,     6, 3, -1, 240 },
+ TGR_BOOL("SNOW",          "TD5RE_AUTOTRACK_SNOW",           0x2101000Eu, k_tgr_w_rare,      1),
+ TGR_BOOL("PARKS",         "TD5RE_AUTOTRACK_PARKS",          0x2101000Fu, k_tgr_w_even,      0),
+ TGR_BOOL("PARK HOUSES",   "TD5RE_AUTOTRACK_PARK_HOUSES",    0x21010010u, k_tgr_w_mostly_on, 1),
+ TGR_BOOL("PARK HEDGES",   "TD5RE_AUTOTRACK_PARK_HEDGE",     0x21010011u, k_tgr_w_mostly_on, 1),
+ TGR_BOOL("AVENUES",       "TD5RE_AUTOTRACK_AVENUE_DIVIDER", 0x21010012u, k_tgr_w_mostly_on, 1),
+ TGR_BOOL("START IN TOWN", "TD5RE_AUTOTRACK_START_CITY",     0x21010013u, k_tgr_w_even,      1),
+ TGR_BOOL("MOUNTAINS",     "TD5RE_AUTOTRACK_TUNNEL_MOUNTAIN",0x21010014u, k_tgr_w_mostly_on, 1),
+ TGR_BOOL("TUNNEL LAMPS",  "TD5RE_AUTOTRACK_TUNNEL_LAMPS",   0x21010015u, k_tgr_w_mostly_on, 1),
+ TGR_BOOL("BRIDGE STYLE",  "TD5RE_AUTOTRACK_BRIDGE_VARIETY", 0x21010016u, k_tgr_w_mostly_on, 1),
+ TGR_BOOL("CLEAR VERGES",  "TD5RE_AUTOTRACK_FLORA_CLEAR",    0x21010017u, k_tgr_w_mostly_on, 1),
+ TGR_BOOL("MIRROR TREES",  "TD5RE_AUTOTRACK_TREE_MIRROR",    0x21010018u, k_tgr_w_even,      1),
+ /* ---- PRESENCE from here down: weighted to today's value ---------------- */
+ TGR_BOOL("BRANCHES",      "TD5RE_AUTOTRACK_BRANCHES",       0x21010019u, k_tgr_w_keep, 1),
+ TGR_BOOL("TERRAIN",       "TD5RE_AUTOTRACK_TERRAIN_HILLS",  0x2101001Au, k_tgr_w_keep, 1),
+ TGR_BOOL("BACKDROP",      "TD5RE_AUTOTRACK_TERRAIN_FAR",    0x2101001Bu, k_tgr_w_keep, 1),
+ TGR_BOOL("COASTLINE",     "TD5RE_AUTOTRACK_COASTLINE",      0x2101001Cu, k_tgr_w_keep, 1),
+ TGR_BOOL("BRIDGES",       "TD5RE_AUTOTRACK_BRIDGES",        0x2101001Du, k_tgr_w_keep, 1),
+ TGR_BOOL("OVERHEADS",     "TD5RE_AUTOTRACK_BRIDGE_OVERHEAD",0x2101001Eu, k_tgr_w_keep, 1),
+ TGR_BOOL("TUNNELS",       "TD5RE_AUTOTRACK_TUNNELS",        0x2101001Fu, k_tgr_w_keep, 1),
+ TGR_BOOL("GUARDRAILS",    "TD5RE_AUTOTRACK_GUARDRAILS",     0x21010020u, k_tgr_w_keep, 1),
+ TGR_BOOL("ARMCO",         "TD5RE_AUTOTRACK_ARMCO",          0x21010021u, k_tgr_w_keep, 1),
+ TGR_BOOL("DISTRICTS",     "TD5RE_AUTOTRACK_DISTRICTS",      0x21010022u, k_tgr_w_keep, 1),
+ TGR_BOOL("BUILDING MASS", "TD5RE_AUTOTRACK_FACADE_MASS",    0x21010023u, k_tgr_w_keep, 1),
+ TGR_BOOL("BACK ROWS",     "TD5RE_AUTOTRACK_BACKROWS",       0x21010024u, k_tgr_w_keep, 1),
+ TGR_BOOL("CROSSINGS",     "TD5RE_AUTOTRACK_CROSSINGS",      0x21010025u, k_tgr_w_keep, 1),
+ TGR_BOOL("SIDE STREETS",  "TD5RE_AUTOTRACK_CROSS_STREETS",  0x21010026u, k_tgr_w_keep, 1),
+ TGR_BOOL("ROAD MARKS",    "TD5RE_AUTOTRACK_CROSS_MARKINGS", 0x21010027u, k_tgr_w_keep, 1),
+ TGR_BOOL("INTERSECTIONS", "TD5RE_AUTOTRACK_INTERSECTIONS",  0x21010028u, k_tgr_w_keep, 1),
+ TGR_BOOL("SIDEWALKS",     "TD5RE_AUTOTRACK_SIDEWALKS",      0x21010029u, k_tgr_w_keep, 1),
+ TGR_BOOL("SCENERY",       "TD5RE_AUTOTRACK_SCENERY",        0x2101002Au, k_tgr_w_keep, 1),
+ TGR_BOOL("TREE LINE",     "TD5RE_AUTOTRACK_TREELINE",       0x2101002Bu, k_tgr_w_keep, 1),
+ TGR_BOOL("LAMP POSTS",    "TD5RE_AUTOTRACK_LAMP_POSTS",     0x2101002Cu, k_tgr_w_keep, 1),
+ TGR_BOOL("BANNERS",       "TD5RE_AUTOTRACK_BANNERS",        0x2101002Du, k_tgr_w_keep, 1),
+ TGR_BOOL("REAL TEXTURES", "TD5RE_AUTOTRACK_REAL_TEX",       0x2101002Eu, k_tgr_w_keep, 1),
+ TGR_BOOL("REAL FURNITURE","TD5RE_AUTOTRACK_REAL_FURNITURE", 0x2101002Fu, k_tgr_w_keep, 1)
 };
+
+/* The table is indexed by TD5_TgRollId, so a missing or extra row would
+ * silently shift every entry past it onto the wrong knob. */
+typedef char tg_assert_rolls_len[
+    (sizeof(k_tg_rolls) / sizeof(k_tg_rolls[0]) == TD5_TG_ROLL_COUNT) ? 1 : -1];
 
 static TD5_TgRolls s_rolls;      /* latched for the build, like s_is_night */
 static int         s_rolls_valid = 0;
@@ -993,12 +1099,93 @@ void td5_trackgen_resolve_rolls(unsigned int seed, TD5_TgRolls *out)
     }
 }
 
+/* ---- environment publishing ------------------------------------------------
+ * ~40 of these knobs are read by td5_env_* calls scattered across the eight
+ * generator modules. Rather than edit 40 call sites (and get one of them
+ * wrong), the registry PUBLISHES each resolved value into the environment, so
+ * every existing read picks it up unchanged. The studio already writes its
+ * rows the same way (_putenv_s in at_setenv), so this is the established
+ * spelling in this codebase, not a new mechanism.
+ *
+ * OWNERSHIP IS THE WHOLE TRICK. A published value is indistinguishable from a
+ * human's pin by the time getenv sees it, so the registry records what it
+ * wrote and GIVES IT BACK before the next resolve. Without that, the first
+ * build's roll would look pinned forever after and every later build would
+ * reproduce it -- and the studio row would stop showing RANDOM after one race.
+ * td5_trackgen_roll_is_owned is how the studio tells the two apart. */
+static unsigned char s_roll_owned[TD5_TG_ROLL_COUNT];
+
+void tg_rolls_unpublish(void)
+{
+    int i;
+    for (i = 0; i < TD5_TG_ROLL_COUNT; i++) {
+        if (!s_roll_owned[i]) continue;
+        s_roll_owned[i] = 0;
+        if (k_tg_rolls[i].knob) {
+            _putenv_s(k_tg_rolls[i].knob, "");
+        } else if (i == TD5_TG_ROLL_TWIST) {
+            _putenv_s("TD5RE_AUTOTRACK_PCT_STRAIGHT", "");
+            _putenv_s("TD5RE_AUTOTRACK_PCT_CURVE", "");
+            _putenv_s("TD5RE_AUTOTRACK_PCT_ACUTE", "");
+        }
+    }
+}
+
+static void tg_rolls_publish(void)
+{
+    char buf[24];
+    int i;
+
+    if (!tg_rolls_enabled()) return;
+    for (i = 0; i < TD5_TG_ROLL_COUNT; i++) {
+        const TG_RollEntry *e = &k_tg_rolls[i];
+        if (!e->name || s_rolls.pinned[i]) continue;
+        /* TIME OF DAY is the one exception: tg_decide_night owns it and reads
+         * its knob as a tri-state where 2 means "roll it". Publishing 0 or 1
+         * would read back as a PIN on the next build and freeze the time of
+         * day for good. */
+        if (i == TD5_TG_ROLL_NIGHT) continue;
+        if (e->knob) {
+            snprintf(buf, sizeof(buf), "%d", s_rolls.value[i]);
+            _putenv_s(e->knob, buf);
+            s_roll_owned[i] = 1;
+        } else if (i == TD5_TG_ROLL_TWIST) {
+            int mix[3];
+            td5_trackgen_twist_mix(s_rolls.choice[i], mix);
+            snprintf(buf, sizeof(buf), "%d", mix[0]);
+            _putenv_s("TD5RE_AUTOTRACK_PCT_STRAIGHT", buf);
+            snprintf(buf, sizeof(buf), "%d", mix[1]);
+            _putenv_s("TD5RE_AUTOTRACK_PCT_CURVE", buf);
+            snprintf(buf, sizeof(buf), "%d", mix[2]);
+            _putenv_s("TD5RE_AUTOTRACK_PCT_ACUTE", buf);
+            s_roll_owned[i] = 1;
+        }
+    }
+}
+
+const char *td5_trackgen_roll_knob(int id)
+{
+    if (id < 0 || id >= TD5_TG_ROLL_COUNT) return NULL;
+    return k_tg_rolls[id].knob;
+}
+
+int td5_trackgen_roll_is_owned(int id)
+{
+    if (id < 0 || id >= TD5_TG_ROLL_COUNT) return 0;
+    return s_roll_owned[id] ? 1 : 0;
+}
+
 void tg_rolls_resolve(unsigned int seed)
 {
     int i, j;
 
+    /* Give back last build's published values FIRST, so the only thing left in
+     * the environment is what a human or a script actually pinned. */
+    tg_rolls_unpublish();
+
     td5_trackgen_resolve_rolls(seed, &s_rolls);
     s_rolls_valid = 1;
+    tg_rolls_publish();
 
     /* One-shot duplicate-salt scan: two entries on one salt correlate forever
      * and nothing else would ever notice. */
@@ -1082,6 +1269,8 @@ void tg_rolls_apply_spec(TD5_TrackGenSpec *spec)
         spec->weight[TD5_TG_DUAL_LANE] = s_rolls.value[TD5_TG_ROLL_DUAL];
     if (!s_rolls.pinned[TD5_TG_ROLL_HILLS])
         spec->elevation_amplitude = s_rolls.value[TD5_TG_ROLL_HILLS];
+    if (!s_rolls.pinned[TD5_TG_ROLL_LENGTH])
+        spec->target_spans = s_rolls.value[TD5_TG_ROLL_LENGTH];
 }
 
 /* Build identity, not a diagnostic -- logged unconditionally and BEFORE the
@@ -1407,7 +1596,17 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
      * to the pre-lanes generator. */
     const int    lane_vary = td5_env_flag_on("TD5RE_AUTOTRACK_LANE_VARY");
     const int    lanes_min = td5_env_int("TD5RE_AUTOTRACK_LANES_MIN", 2, 1, TD5_TG_MAX_LANES);
-    const int    lanes_max = td5_env_int("TD5RE_AUTOTRACK_LANES_MAX", 8, 1, TD5_TG_MAX_LANES);
+    /* [R21] Ceiling is the int16 VERTEX OFFSET, not the vertex count. The last
+     * row of an origin block sits block*span_length down-track plus half the
+     * widest road, and the hard check in tg_emit_strip fails the whole build
+     * past 32767: at block 16 and span_length 1500 that is
+     * 24000 + width/2 < 32767, i.e. width < 17534 == 11.7 lanes. Clamped to 10
+     * (15000, leaving headroom for rounding and the branch corridor's own bow)
+     * so raising this knob degrades gracefully instead of failing the build
+     * with a message about vertex offsets. Default 8 is unaffected. */
+    const int    lanes_max = td5_env_int("TD5RE_AUTOTRACK_LANES_MAX", 8, 1,
+                                         TD5_TG_MAX_LANES > 10
+                                         ? 10 : TD5_TG_MAX_LANES);
     const int    lane_pct  = td5_env_int("TD5RE_AUTOTRACK_LANE_PCT", 35, 0, 100);
     const double lane_w    = (double)spec->lane_width;
     int    cur_lanes = spec->lanes;   /* lane count of the road being walked */
@@ -1576,9 +1775,16 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
                 want = cur_lanes + 2; side = 2;
             } else if (tg_range(0, 99) < lane_pct) {
                 /* Random walk, biased back toward the base count so a long
-                 * track does not ratchet to the ceiling or the floor. */
-                const int up = (cur_lanes < spec->lanes) ? (tg_range(0, 99) < 70)
-                             : (cur_lanes > spec->lanes) ? (tg_range(0, 99) < 30)
+                 * track does not ratchet to the ceiling or the floor.
+                 *
+                 * [R21 SHAPE] the count it reverts toward is the BIOME's own
+                 * typical width, not one number for the whole track, so city
+                 * stretches settle narrow and highway biomes settle wide. Same
+                 * draws in the same order -- only the comparison target moves. */
+                const int aim = tg_shape_lane_aim(seam, spec->lanes,
+                                                  lanes_min, lanes_max);
+                const int up = (cur_lanes < aim) ? (tg_range(0, 99) < 70)
+                             : (cur_lanes > aim) ? (tg_range(0, 99) < 30)
                              : (tg_rand() & 1);
                 const int both = (tg_range(0, 99) < 30);
                 want = cur_lanes + (up ? 1 : -1) * (both ? 2 : 1);
@@ -4839,6 +5045,11 @@ int td5_trackgen_regenerate(unsigned int seed)
 {
     TD5_TrackGenSpec spec;
     int spans = 0;
+
+    /* [R21 ROLLS] Before the knobs are read: hand back anything the LAST build
+     * published, or apply_config would read a previous roll as if a human had
+     * pinned it. */
+    tg_rolls_unpublish();
 
     td5_trackgen_default_spec(&spec);
     td5_trackgen_apply_config(&spec);

@@ -438,6 +438,25 @@ int tg_shape_lerp_pct(int si, int field, int ramp)
     return cur;
 }
 
+/* [R21 SHAPE] The lane count the per-section random walk should revert TOWARD
+ * at this span. The walk already pulls back to a base count so a long track
+ * does not ratchet to the ceiling; this makes that attractor the BIOME's own
+ * typical width instead of one number for the whole track -- narrow city
+ * streets, wide highway biomes. That is "sections where there's narrower lanes
+ * and wider lanes", expressed through the existing [LANES] machinery rather
+ * than a second, competing width mechanism. */
+int tg_shape_lane_aim(int si, int base_lanes, int lo, int hi)
+{
+    int v;
+
+    if (!tg_r21_road_char()) return base_lanes;
+    v = (base_lanes * tg_shape_lerp_pct(si, TG_SF_WIDTH, TD5_TG_BIOME_BLEND)
+         + 50) / 100;
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    return v;
+}
+
 int tg_shape_safety_x100(int si, int base_x100)
 {
     int v;
