@@ -737,23 +737,390 @@ void tg_acct_report(int nspans)
  * ========================================================================== */
 int s_is_night = 0;
 
+/* The decision itself, so tg_decide_night (which latches it for the build) and
+ * the [R21 ROLLS] registry (which only REPORTS it, and must agree) cannot
+ * drift apart. mode 0/1 = pinned day/night, 2 = derive from the seed. */
+static int tg_night_for(unsigned int seed, int mode)
+{
+    if (mode < 2) return mode;
+    /* Knuth multiplicative hash of the seed, high bit. ~1 in 4 night, which
+     * is roughly the shipped TD5 ratio (5 of the 19 schedule tracks run at
+     * night or dusk) rather than a coin flip. */
+    return ((seed * 2654435761u) >> 29) == 0 ? 1 : 0;
+}
+
 static void tg_decide_night(unsigned int seed)
 {
     int mode = td5_env_int("TD5RE_AUTOTRACK_NIGHT", 2, 0, 2);
-    if (mode < 2) {
-        s_is_night = mode;
-    } else {
-        /* Knuth multiplicative hash of the seed, high bit. ~1 in 4 night, which
-         * is roughly the shipped TD5 ratio (5 of the 19 schedule tracks run at
-         * night or dusk) rather than a coin flip. */
-        unsigned int h = seed * 2654435761u;
-        s_is_night = ((h >> 29) == 0) ? 1 : 0;
-    }
+    s_is_night = tg_night_for(seed, mode);
     TD5_LOG_I(LOG_TAG, "trackgen: time of day = %s (seed=%u knob=%d)",
               s_is_night ? "NIGHT" : "DAY", seed, mode);
 }
 
 int td5_trackgen_is_night(void) { return s_is_night; }
+
+/* ================== [R21 ROLLS] SEED-DERIVED PARAMETER REGISTRY ============
+ *
+ * Placed ABOVE tg_rand() ON PURPOSE. A roll must never consume the geometry
+ * RNG stream, and the only mechanical guarantee of that is being unable to
+ * call it. Rolls HASH instead (tg_roll_hash), exactly as the biome layout does
+ * and for the same reason: one extra tg_rand() draw shifts every later draw
+ * and so moves the road for every existing seed.
+ *
+ * SALT CONVENTION. Each entry owns a hand-picked salt 0x2101xxxx for R21
+ * (0x2201xxxx for R22, ...), low 16 bits incrementing. A roll is keyed by its
+ * SALT ALONE -- there is deliberately no table-index term -- so entries may be
+ * appended, reordered or retired without moving any other entry's roll. Two
+ * rules follow, and both matter:
+ *   1. A salt is NEVER reused and NEVER renumbered. Retire an entry by nulling
+ *      its name, not by compacting the table.
+ *   2. Two entries sharing a salt correlate silently and forever, which is the
+ *      one mistake here that destroys variety without failing anything. The
+ *      duplicate-salt scan in tg_rolls_resolve turns it into a log line.
+ *
+ * STYLE vs PRESENCE. Every choice of a STYLE entry is a legitimate look, so it
+ * carries real weights. A PRESENCE entry has a choice that REMOVES content
+ * (guardrails, sidewalks, scenery): a seed that rolled several of those off at
+ * once reads as broken rather than varied, so those ship weighted to today's
+ * value. RANDOM stays their default and the mechanism stays live and reported,
+ * so a later round tunes one byte instead of re-plumbing. All five entries
+ * below are STYLE.
+ *
+ * PINNED VALUES ARE NOT SNAPPED TO THE TABLE. tg_rolls_apply_spec writes only
+ * the entries the knobs did NOT pin, so a pinned knob keeps exactly whatever
+ * td5_trackgen_apply_config already computed for it -- including out-of-table
+ * dev values like TD5RE_AUTOTRACK_CURVESAFE=250. The table index is then only
+ * used to LABEL it. That is also why the master knob off is byte-identical:
+ * apply_spec writes nothing at all. */
+
+typedef struct {
+    const char          *name;    /* log/UI facing                            */
+    const char          *knob;    /* NULL = composite, resolved specially     */
+    unsigned int         salt;
+    const int           *vals;    /* choice literals                          */
+    const char *const   *cnames;
+    const unsigned char *w;       /* relative weights; NULL = uniform         */
+    short                n;
+    short                legacy;  /* choice index matching PRE-R21 unset      */
+    int                  lo, hi;  /* clamp for a pinned value (display only)  */
+} TG_RollEntry;
+
+/* Choice sets. These MUST match the studio's tables in td5_fe_race.c -- the
+ * arity check in Screen_AutoTrackOptions asserts it, because a silent drift
+ * here shows the player one thing and builds another. */
+static const int         k_tgr_twist_v[] = { 0, 1, 2, 3 };
+static const char *const k_tgr_twist_n[] = { "GENTLE", "BALANCED", "TWISTY",
+                                             "EXTREME" };
+static const unsigned char k_tgr_twist_w[] = { 20, 35, 30, 15 };
+/* straight, curve, acute -- index 1 is the generator's shipped 35/40/15. */
+static const int k_tgr_twist_mix[4][3] = {
+    { 60, 35,  5 }, { 35, 40, 15 }, { 20, 45, 35 }, { 10, 40, 50 }
+};
+
+static const int         k_tgr_corner_v[] = { 120, 150, 180, 240, 320 };
+static const char *const k_tgr_corner_n[] = { "TIGHT", "NARROW", "STANDARD",
+                                              "WIDE", "SWEEPING" };
+static const unsigned char k_tgr_corner_w[] = { 15, 20, 30, 20, 15 };
+
+/* GRADIENT is weighted UP deliberately. Measured on seed 5150: the row is a
+ * CAP, and STANDARD -> SEVERE left the height RANGE identical at 34007 because
+ * nothing drives slope toward the cap. [R21 GRADE] adds the drive; weighting
+ * the low choices down is what makes "steep climbs" the common case. FLAT
+ * keeps a small share because a genuinely flat track is a valid look. */
+static const int         k_tgr_grade_v[] = { 0, 60, 120, 160, 200 };
+static const char *const k_tgr_grade_n[] = { "FLAT", "GENTLE", "STANDARD",
+                                             "STEEP", "SEVERE" };
+static const unsigned char k_tgr_grade_w[] = { 5, 15, 30, 30, 20 };
+
+static const int         k_tgr_dual_v[] = { 0, 5, 10, 20, 35 };
+static const char *const k_tgr_dual_n[] = { "NONE", "RARE", "SOME", "OFTEN",
+                                            "CONSTANT" };
+static const unsigned char k_tgr_dual_w[] = { 10, 25, 30, 25, 10 };
+
+static const int         k_tgr_hills_v[] = { 0, 3000, 6000, 12000, 20000 };
+static const char *const k_tgr_hills_n[] = { "FLAT", "LOW", "MEDIUM", "HIGH",
+                                             "EXTREME" };
+static const unsigned char k_tgr_hills_w[] = { 5, 15, 30, 30, 20 };
+
+static const int         k_tgr_night_v[] = { 0, 1 };
+static const char *const k_tgr_night_n[] = { "DAY", "NIGHT" };
+
+static const TG_RollEntry k_tg_rolls[TD5_TG_ROLL_COUNT] = {
+ /* name        knob                            salt       vals/names/weights            n  leg  lo   hi   */
+ { "TWISTINESS", NULL,                          0x21010001u, k_tgr_twist_v, k_tgr_twist_n, k_tgr_twist_w, 4, 1, 0, 3 },
+ { "CORNERS",    "TD5RE_AUTOTRACK_CURVESAFE",   0x21010002u, k_tgr_corner_v, k_tgr_corner_n, k_tgr_corner_w, 5, 2, 100, 800 },
+ { "GRADIENT",   "TD5RE_AUTOTRACK_GRADE",       0x21010003u, k_tgr_grade_v, k_tgr_grade_n, k_tgr_grade_w, 5, 2, 0, 200 },
+ { "DUAL LANES", "TD5RE_AUTOTRACK_PCT_DUAL",    0x21010004u, k_tgr_dual_v,  k_tgr_dual_n,  k_tgr_dual_w,  5, 2, 0, 100 },
+ { "HILLS",      "TD5RE_AUTOTRACK_ELEVATION",   0x21010005u, k_tgr_hills_v, k_tgr_hills_n, k_tgr_hills_w, 5, 2, 0, 40000 },
+ { "TIME OF DAY","TD5RE_AUTOTRACK_NIGHT",       0x21010006u, k_tgr_night_v, k_tgr_night_n, NULL,          2, 0, 0, 1 }
+};
+
+static TD5_TgRolls s_rolls;      /* latched for the build, like s_is_night */
+static int         s_rolls_valid = 0;
+
+int tg_rolls_enabled(void) { return td5_env_flag_on("TD5RE_R21_ROLL"); }
+
+/* Sibling of tg_biome_hash with its OWN salt namespace and, deliberately, no
+ * index term -- see the salt convention above. */
+unsigned int tg_roll_hash(unsigned int seed, unsigned int salt)
+{
+    unsigned int h = seed ^ (salt * 0x9E3779B9u);
+    h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12; h ^= h >> 16;
+    return h;
+}
+
+/* For decisions made DURING the walk, where the POSITION is the key. */
+unsigned int tg_roll_hash_at(unsigned int salt, int index)
+{
+    unsigned int h = tg_roll_hash(s_gen_seed, salt);
+    h += (unsigned int)index * 2654435761u;
+    h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12;
+    return h;
+}
+
+/* Weighted choice from a hash. Uses the HIGH bits: the low bit of a
+ * multiply-xor mix is its weakest. */
+int tg_roll_pick_w(unsigned int h, const unsigned char *w, int n)
+{
+    unsigned int sum = 0, r;
+    int i;
+
+    if (n <= 1) return 0;
+    if (!w) return (int)((h >> 8) % (unsigned int)n);
+    for (i = 0; i < n; i++) sum += w[i];
+    if (!sum) return 0;                  /* degenerate table -> first choice */
+    r = (h >> 8) % sum;
+    for (i = 0; i < n; i++) {
+        if (r < (unsigned int)w[i]) return i;
+        r -= (unsigned int)w[i];
+    }
+    return n - 1;
+}
+
+/* Nearest choice index to `v`, for LABELLING a pinned value that need not be
+ * a table member (CURVESAFE=250 is legal and pins 250; it just displays as
+ * the closest named choice). */
+static int tg_roll_nearest(const TG_RollEntry *e, int v)
+{
+    int i, best = 0, bd = -1;
+    for (i = 0; i < e->n; i++) {
+        int d = e->vals[i] > v ? e->vals[i] - v : v - e->vals[i];
+        if (bd < 0 || d < bd) { bd = d; best = i; }
+    }
+    return best;
+}
+
+/* Did a knob pin this entry, and to what? Raw getenv rather than
+ * td5_env_int_opt because that helper's contract needs the sentinel to sit
+ * below `lo`, and TD5_TG_ROLL_RANDOM must survive the parse so a dev can write
+ * -2 on a command line to mean "roll it". */
+static int tg_roll_pin_of(const TG_RollEntry *e, int *out)
+{
+    const char *s;
+    int v;
+
+    if (!e->knob) {                      /* TWISTINESS: three PCT_* knobs */
+        const char *st = getenv("TD5RE_AUTOTRACK_PCT_STRAIGHT");
+        const char *cu = getenv("TD5RE_AUTOTRACK_PCT_CURVE");
+        const char *ac = getenv("TD5RE_AUTOTRACK_PCT_ACUTE");
+        int i;
+        if ((!st || !st[0]) && (!cu || !cu[0]) && (!ac || !ac[0])) return 0;
+        /* Reverse-map the mix so the report names what was pinned. */
+        for (i = 0; i < 4; i++) {
+            if (st && atoi(st) == k_tgr_twist_mix[i][0] &&
+                ac && atoi(ac) == k_tgr_twist_mix[i][2]) { *out = i; return 1; }
+        }
+        *out = e->legacy;                /* pinned to a mix we do not name */
+        return 1;
+    }
+    s = getenv(e->knob);
+    if (!s || !s[0]) return 0;                       /* unset  == RANDOM */
+    v = atoi(s);
+    if (v == TD5_TG_ROLL_RANDOM) return 0;           /* explicit RANDOM  */
+    /* TIME OF DAY keeps its long-standing 2 = RANDOM spelling. */
+    if (e->knob && !strcmp(e->knob, "TD5RE_AUTOTRACK_NIGHT")) {
+        if (v >= 2) return 0;
+        *out = v; return 1;
+    }
+    if (v < e->lo) v = e->lo;
+    if (v > e->hi) v = e->hi;
+    *out = v;
+    return 1;
+}
+
+void td5_trackgen_resolve_rolls(unsigned int seed, TD5_TgRolls *out)
+{
+    const int on = tg_rolls_enabled();
+    int i;
+
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    out->seed = seed;
+
+    for (i = 0; i < TD5_TG_ROLL_COUNT; i++) {
+        const TG_RollEntry *e = &k_tg_rolls[i];
+        int pinned = 0, v = 0;
+
+        if (!e->name) continue;                      /* retired slot */
+        pinned = tg_roll_pin_of(e, &v);
+        if (pinned) {
+            out->pinned[i] = 1;
+            /* TWISTINESS and TIME OF DAY pin a CHOICE; the rest pin a value. */
+            if (!e->knob || i == TD5_TG_ROLL_NIGHT) {
+                out->choice[i] = (unsigned char)v;
+                out->value[i]  = e->vals[v < e->n ? v : 0];
+            } else {
+                out->value[i]  = v;
+                out->choice[i] = (unsigned char)tg_roll_nearest(e, v);
+            }
+        } else if (!on) {
+            out->choice[i] = (unsigned char)e->legacy;
+            out->value[i]  = e->vals[e->legacy];
+        } else {
+            int c = tg_roll_pick_w(tg_roll_hash(seed, e->salt), e->w, e->n);
+            out->choice[i] = (unsigned char)c;
+            out->value[i]  = e->vals[c];
+        }
+    }
+    /* TIME OF DAY is owned by tg_decide_night; mirror its answer so the report
+     * cannot contradict the build. */
+    {
+        int mode = td5_env_int("TD5RE_AUTOTRACK_NIGHT", 2, 0, 2);
+        out->value [TD5_TG_ROLL_NIGHT] = tg_night_for(seed, mode);
+        out->choice[TD5_TG_ROLL_NIGHT] =
+            (unsigned char)out->value[TD5_TG_ROLL_NIGHT];
+        out->pinned[TD5_TG_ROLL_NIGHT] = (unsigned char)(mode < 2);
+    }
+}
+
+void tg_rolls_resolve(unsigned int seed)
+{
+    int i, j;
+
+    td5_trackgen_resolve_rolls(seed, &s_rolls);
+    s_rolls_valid = 1;
+
+    /* One-shot duplicate-salt scan: two entries on one salt correlate forever
+     * and nothing else would ever notice. */
+    for (i = 0; i < TD5_TG_ROLL_COUNT; i++) {
+        if (!k_tg_rolls[i].name) continue;
+        for (j = i + 1; j < TD5_TG_ROLL_COUNT; j++) {
+            if (!k_tg_rolls[j].name) continue;
+            if (k_tg_rolls[i].salt == k_tg_rolls[j].salt) {
+                TD5_LOG_E(LOG_TAG, "trackgen: [R21 ROLL] DUPLICATE SALT %#x on "
+                          "'%s' and '%s' -- these two parameters will always "
+                          "roll together", k_tg_rolls[i].salt,
+                          k_tg_rolls[i].name, k_tg_rolls[j].name);
+            }
+        }
+    }
+}
+
+int tg_roll_value(int id)
+{
+    if (!s_rolls_valid || id < 0 || id >= TD5_TG_ROLL_COUNT) return 0;
+    return s_rolls.value[id];
+}
+
+int tg_roll_choice(int id)
+{
+    if (!s_rolls_valid || id < 0 || id >= TD5_TG_ROLL_COUNT) return 0;
+    return s_rolls.choice[id];
+}
+
+int td5_trackgen_roll_choice_count(int id)
+{
+    if (id < 0 || id >= TD5_TG_ROLL_COUNT || !k_tg_rolls[id].name) return 0;
+    return k_tg_rolls[id].n;
+}
+
+const char *td5_trackgen_roll_choice_name(int id, int choice)
+{
+    const TG_RollEntry *e;
+    if (id < 0 || id >= TD5_TG_ROLL_COUNT || !k_tg_rolls[id].name) return "?";
+    e = &k_tg_rolls[id];
+    if (choice < 0 || choice >= e->n) return "?";
+    return e->cnames[choice];
+}
+
+const char *td5_trackgen_roll_name(int id)
+{
+    if (id < 0 || id >= TD5_TG_ROLL_COUNT || !k_tg_rolls[id].name) return "?";
+    return k_tg_rolls[id].name;
+}
+
+int td5_trackgen_twist_mix(int choice, int out3[3])
+{
+    if (!out3) return 0;
+    if (choice < 0 || choice > 3) choice = 1;
+    out3[0] = k_tgr_twist_mix[choice][0];
+    out3[1] = k_tgr_twist_mix[choice][1];
+    out3[2] = k_tgr_twist_mix[choice][2];
+    return 1;
+}
+
+/* Fold the resolved rolls into a spec whose seed is already final. Writes ONLY
+ * the entries no knob pinned, so td5_trackgen_apply_config keeps ownership of
+ * every pinned value (and its clamping). With the master knob off this writes
+ * nothing, which is what makes OFF byte-identical to pre-R21. */
+void tg_rolls_apply_spec(TD5_TrackGenSpec *spec)
+{
+    if (!spec || !s_rolls_valid || !tg_rolls_enabled()) return;
+
+    if (!s_rolls.pinned[TD5_TG_ROLL_TWIST]) {
+        int mix[3];
+        td5_trackgen_twist_mix(s_rolls.choice[TD5_TG_ROLL_TWIST], mix);
+        spec->weight[TD5_TG_STRAIGHT] = mix[0];
+        spec->weight[TD5_TG_CURVE]    = mix[1];
+        spec->weight[TD5_TG_ACUTE]    = mix[2];
+    }
+    if (!s_rolls.pinned[TD5_TG_ROLL_CORNERS])
+        spec->curve_safety_x100 = s_rolls.value[TD5_TG_ROLL_CORNERS];
+    if (!s_rolls.pinned[TD5_TG_ROLL_GRADE])
+        spec->max_grade_x1000 = s_rolls.value[TD5_TG_ROLL_GRADE];
+    if (!s_rolls.pinned[TD5_TG_ROLL_DUAL])
+        spec->weight[TD5_TG_DUAL_LANE] = s_rolls.value[TD5_TG_ROLL_DUAL];
+    if (!s_rolls.pinned[TD5_TG_ROLL_HILLS])
+        spec->elevation_amplitude = s_rolls.value[TD5_TG_ROLL_HILLS];
+}
+
+/* Build identity, not a diagnostic -- logged unconditionally and BEFORE the
+ * GENSTAMP check, so a REUSED build (which prints no inventory at all) still
+ * says what it is. */
+void tg_rolls_report(void)
+{
+    const char *unpinned = tg_rolls_enabled() ? "rolled" : "legacy";
+    int i, rolled = 0, pinned = 0;
+
+    if (!s_rolls_valid) return;
+    TD5_LOG_I(LOG_TAG, "trackgen: [R21 ROLL] ---- randomized parameters "
+              "(seed %u, master=%s) ----", s_rolls.seed,
+              tg_rolls_enabled() ? "on" : "OFF (legacy defaults)");
+    for (i = 0; i < TD5_TG_ROLL_COUNT; i++) {
+        const TG_RollEntry *e = &k_tg_rolls[i];
+        if (!e->name) continue;
+        if (s_rolls.pinned[i]) pinned++; else rolled++;
+        if (i == TD5_TG_ROLL_TWIST) {
+            int mix[3];
+            td5_trackgen_twist_mix(s_rolls.choice[i], mix);
+            TD5_LOG_I(LOG_TAG, "trackgen: [R21 ROLL]   %-12s = %-10s %-6s "
+                      "(%d/%d/%d)", e->name,
+                      td5_trackgen_roll_choice_name(i, s_rolls.choice[i]),
+                      s_rolls.pinned[i] ? "PINNED" : unpinned,
+                      mix[0], mix[1], mix[2]);
+        } else {
+            TD5_LOG_I(LOG_TAG, "trackgen: [R21 ROLL]   %-12s = %-10s %-6s "
+                      "(%d)%s%s", e->name,
+                      td5_trackgen_roll_choice_name(i, s_rolls.choice[i]),
+                      s_rolls.pinned[i] ? "PINNED" : unpinned,
+                      s_rolls.value[i],
+                      s_rolls.pinned[i] && e->knob ? " via " : "",
+                      s_rolls.pinned[i] && e->knob ? e->knob : "");
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "trackgen: [R21 ROLL] ---- %d rolled, %d pinned ----",
+              rolled, pinned);
+}
 
 static unsigned int tg_rand(void)
 {
@@ -3941,6 +4308,7 @@ int td5_trackgen_preview_route(const TD5_TrackGenSpec *spec,
                                const TD5_TrackGenPreviewSink *sink,
                                TD5_TrackGenPreviewStats *out_stats)
 {
+    TD5_TrackGenSpec eff;
     TG_NodeList nl;
     TG_Buf strip;
     int tally[TD5_TG_SECTION_COUNT];
@@ -3952,6 +4320,22 @@ int td5_trackgen_preview_route(const TD5_TrackGenSpec *spec,
     memset(&strip, 0, sizeof(strip));
     memset(tally, 0, sizeof(tally));
     if (out_stats) memset(out_stats, 0, sizeof(*out_stats));
+
+    /* [R21 ROLLS] The preview has to walk the SAME road the race will build, so
+     * it resolves and folds the rolls exactly as td5_trackgen_regenerate does.
+     * Miss this and the studio draws the shipped defaults while the race drives
+     * the rolls, with nothing but a hand comparison to catch it.
+     *
+     * `spec` is const (the studio owns that struct), so fold into a local copy
+     * and re-aim the pointer -- every spec-> read below then sees the folded
+     * values with no further edits. Latching into the shared roll table is safe
+     * here for exactly the reason tg_srand and the biome grid already are: a
+     * preview and a build must never overlap, which the joins in
+     * td5_asset_load_level and td5_tgstream_cancel_join enforce. */
+    eff = *spec;
+    tg_rolls_resolve(eff.seed);
+    tg_rolls_apply_spec(&eff);
+    spec = &eff;
 
     /* Same preamble as build_level, minus the _mkdir. */
     s_gen_seed = spec->seed;
@@ -4022,6 +4406,12 @@ int td5_trackgen_regenerate_main_spans(unsigned int seed,
     td5_trackgen_default_spec(&spec);
     td5_trackgen_apply_config(&spec);
     spec.seed = seed;
+    /* [R21 ROLLS] This path re-derives the main spans for the streaming
+     * consumer and its documented contract is that the bytes provably match
+     * what the seed produced. Without the same fold the road here would be
+     * built from the shipped defaults while the race used the rolls. */
+    tg_rolls_resolve(seed);
+    tg_rolls_apply_spec(&spec);
 
     memset(&nl, 0, sizeof(nl));
     memset(&spans, 0, sizeof(spans));
@@ -4248,6 +4638,23 @@ int td5_trackgen_regenerate(unsigned int seed)
      * launch calls, so this is "on entering the race" -- and BEFORE the build,
      * so every emitter that asks td5_trackgen_is_night() during it agrees. */
     tg_decide_night(seed);
+
+    /* [R21 ROLLS] Resolve the randomized parameters and fold them into the spec
+     * HERE: after the seed is final, before the stamp is hashed, before the
+     * build. Two consequences worth stating.
+     *
+     * spec_hash BELOW COVERS THEM. tg_rolls_apply_spec writes into `spec`, and
+     * want.spec_hash is taken from the finished struct, so a different roll is
+     * a different stamp and the REUSE path can never serve a track that does
+     * not match the seed. That is why the registry needs no TG_STAMP_VERSION
+     * bump -- and why a roll must stay a pure function of seed + environment,
+     * both of which the stamp already covers.
+     *
+     * The report is emitted BEFORE the early return below, so a reused build
+     * still says what it is; it otherwise prints no inventory at all. */
+    tg_rolls_resolve(seed);
+    tg_rolls_apply_spec(&spec);
+    tg_rolls_report();
 
     /* [R14 GENPERF 2026-09-03] Identical build already on disk? Then the only
      * work is the cheap prologue the runtime depends on (biome grid, night,

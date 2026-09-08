@@ -1191,6 +1191,26 @@ void tg_acct_range(TG_AcctKind kind, int si0, int si1);
 void tg_acct_report(int nspans);
 extern int s_is_night;
 int td5_trackgen_is_night(void);
+/* -------------------------------- [R21 ROLLS] ------------------------------
+ * Generator side of the seed-derived parameter registry; the studio-facing
+ * half is in td5_trackgen.h, which carries the design rules. Resolve ONCE per
+ * build, before tg_build_centerline, then read the latch -- same reason
+ * s_is_night is latched rather than re-predicated per call. */
+int  tg_rolls_enabled(void);                       /* TD5RE_R21_ROLL master  */
+void tg_rolls_resolve(unsigned int seed);          /* latch for this build   */
+void tg_rolls_apply_spec(TD5_TrackGenSpec *spec);  /* fold into the spec     */
+void tg_rolls_report(void);                        /* the [R21 ROLL] block   */
+int  tg_roll_value(int id);
+int  tg_roll_choice(int id);
+/* Hash a decision instead of drawing one. NEVER add a tg_rand()/tg_frand()/
+ * tg_range() call for a new parameter: the generator has ONE RNG stream, so an
+ * extra draw shifts every later draw and moves the road for every existing
+ * seed. tg_roll_hash_at mixes the latched build seed with a position, which is
+ * what per-span and per-section decisions want (same discipline, and the same
+ * reasoning, as tg_biome_hash). */
+unsigned int tg_roll_hash(unsigned int seed, unsigned int salt);
+unsigned int tg_roll_hash_at(unsigned int salt, int index);
+int          tg_roll_pick_w(unsigned int h, const unsigned char *w, int n);
 /* ------------------------------------------------------- centerline ------- */
 typedef struct {
     double x, y, z;      /* world units */
