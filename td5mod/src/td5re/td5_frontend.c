@@ -7111,23 +7111,23 @@ static void frontend_render_sound_options_overlay(float sx, float sy) {
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
     /* [PORT REWORK 2026-06-05 / S15] The SFX-mode row (Stereo/Mono/3D icon +
-     * MONAURAL/STEREO/3D SOUND name) was removed.
-     * [SOUND OPTIONS RADIO] Three volume bars now (SFX / Music / Radio), each
-     * with a numeric NN% readout so SFX and RADIO levels are legible and not
-     * just inferred from bar fill. Rows 3 (RADIO STATION) and 4 (OK) carry no
-     * bar. */
+     * MONAURAL/STEREO/3D SOUND name) was removed. Volume levels are indicated
+     * by bar fill only; no numbers.
+     * [SOUND OPTIONS RADIO / 2026-09-08] Two volume bars: SFX and RADIO. The
+     * MUSIC row was removed, and the numeric NN% readouts that briefly sat on
+     * the bars were removed too -- fill-only is the intended presentation.
+     * Rows 2 (RADIO STATION) and 3 (OK) carry no bar. */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
 
-    /* Volume bars: SFX = button[0], Music = button[1], Radio = button[2].
-     * Each bar sits to the right of its button at x=394, vertically centred
-     * in the button height (32px). Bar=12px, fill=10px. */
+    /* Volume bars: SFX = button[0], Radio = button[1]. Each bar sits to the
+     * right of its button at x=394, vertically centred in the button height
+     * (32px). Bar=12px, fill=10px. */
     {
-        int bar_btns[3]  = { 0, 1, 2 }; /* SFX, Music, Radio */
-        int vols[3]      = { s_sound_option_sfx_volume,
-                             s_sound_option_music_volume,
+        int bar_btns[2]  = { SND_BTN_SFX, SND_BTN_RADIO };
+        int vols[2]      = { s_sound_option_sfx_volume,
                              s_sound_option_radio_volume };
 
-        for (int vi = 0; vi < 3; vi++) {
+        for (int vi = 0; vi < 2; vi++) {
             int   btn    = bar_btns[vi];
             float bar_x  = 394.0f * sx; /* panel x = canvasW/2+0x4A [CONFIRMED @ 0x41FF5B] */
             float bar_y  = ((float)s_buttons[btn].y + 10.0f) * sy; /* centre 12px in 32px */
@@ -7153,25 +7153,8 @@ static void frontend_render_sound_options_overlay(float sx, float sy) {
     }
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 
-    /* --- Numeric NN% readout, centred on each bar ------------------------
-     * FE_VALUE_CENTER_X (506) is exactly the bar centre (394 + 224/2), so the
-     * standard row-value helper lands the number on the bar with no bespoke
-     * layout. Drawn AFTER the translucent bar pass so it sits on top. */
-    {
-        int bar_btns[3] = { 0, 1, 2 };
-        int vols[3]     = { s_sound_option_sfx_volume,
-                            s_sound_option_music_volume,
-                            s_sound_option_radio_volume };
-        for (int vi = 0; vi < 3; vi++) {
-            char pct[8];
-            snprintf(pct, sizeof pct, "%d%%", vols[vi]);
-            frontend_draw_value_centered(sx, sy, s_buttons[bar_btns[vi]].y + 6,
-                                         pct, 0xFFFFFFFF);
-        }
-    }
-
     /* --- RADIO STATION row value + details panel -------------------------
-     * Row 3 is the station field; rows below it (up to OK at y=297) are the
+     * Row 2 is the station field; rows below it (up to OK at y=303) are the
      * three-line details block. Case is preserved for both -- a URL that gets
      * uppercase-folded is not the URL the player typed. */
     if (s_button_count > SND_BTN_STATION && s_buttons[SND_BTN_STATION].active) {
@@ -7181,9 +7164,9 @@ static void frontend_render_sound_options_overlay(float sx, float sy) {
         int  prev_case = s_fe_preserve_case;
         char l1[128], l2[128], l3[128];
         /* Line height is ~24px at canvas scale (MEASURED from a framedump --
-         * a first attempt at 14px spacing overlapped). Row 3 ends at 249 and
-         * OK now sits at 343, so three 24px lines fit cleanly in between. */
-        const int y1 = 255, y2 = 279, y3 = 303;
+         * a first attempt at 14px spacing overlapped). Row 2 ends at 209 and
+         * OK sits at 303, so three 24px lines fit cleanly in between. */
+        const int y1 = 215, y2 = 239, y3 = 263;
 
         td5_radio_get_status(&st);
         s_fe_preserve_case = 1;

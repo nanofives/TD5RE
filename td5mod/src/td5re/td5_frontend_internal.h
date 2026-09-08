@@ -851,13 +851,16 @@ extern int             s_sound_option_sfx_volume;
  * loop, so adding a row can never leave one of the three behind -- which is
  * exactly how OK ended up with selector arrows (the loop was hard-coded to
  * "0..2" while OK sat at index 2).
- * Rows 0-2 are ◄► volume selectors; 3 is an Enter-to-edit text field; 4 acts. */
+ * Rows 0-1 are ◄► volume selectors; 2 is an Enter-to-edit text field; 3 acts.
+ * [2026-09-08] The MUSIC VOLUME row was removed at the user's request, so the
+ * two remaining volume rows are SFX and RADIO. music_volume itself is NOT
+ * gone -- it is still seeded from and committed to the INI (and editable from
+ * the pause menu), it just has no row on this screen any more. */
 enum {
     SND_BTN_SFX     = 0,
-    SND_BTN_MUSIC   = 1,
-    SND_BTN_RADIO   = 2,
-    SND_BTN_STATION = 3,
-    SND_BTN_OK      = 4,
+    SND_BTN_RADIO   = 1,
+    SND_BTN_STATION = 2,
+    SND_BTN_OK      = 3,
     SND_BTN_LAST_SELECTOR = SND_BTN_RADIO   /* highest row that gets ◄► arrows */
 };
 
