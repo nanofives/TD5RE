@@ -529,15 +529,34 @@ Only declare the /fix done after this step prints the success line. If the push 
 > backstop for OLDER worktrees that may still contain a junction, and for the
 > `original/` + `re/assets/` copies.
 >
-> 1. **OS-level deny-delete ACL — `original/` ONLY. THE TOOLCHAIN IS NOT PROTECTED.**
->    Verified 2026-09-08: `original/` carries 2 DENY entries (icacls DENY `(DE,DC)` for
->    `MARIANO-PC\maria` + `MARIANO-PC\CodexSandboxUsers`, `(OI)(CI)` inherited), but
->    `td5mod/deps/mingw64` carries **0 DENY entries** — it inherits plain `(M,DC)` Modify.
->    The 2026-05-28 ACL was applied to the i686-era `td5mod/deps/mingw/`; when the
->    toolchain moved to `mingw64/` on 2026-07-30 the old path ceased to exist and the
->    protection was silently lost. So do NOT rely on Access-Denied to stop a
->    toolchain-destroying delete — rely on the no-junction rule above.
->    Where the ACL *is* live (`original/`), a delete that reaches it fails with
+> 1. **OS-level deny-delete ACL. Current surface, measured 2026-09-08 (re-measure with
+>    `icacls <dir> | Select-String '\(DENY\)'`, and pass a REAL path — a broken path
+>    conversion makes icacls report a bogus count that looks reassuring):**
+>
+>    | Path | DENY ACEs | Notes |
+>    |------|-----------|-------|
+>    | `original/` | 2 | protected since 2026-05-28 |
+>    | `td5mod/deps/mingw64/` | 2 | applied 2026-09-08 |
+>    | `_archive/mingw-i686-toolchain/` | 2 | inherited (see below) |
+>    | `_archive/mingw-i686.7z` | 2 | applied 2026-09-08, `(DENY)(DE)` (no OI/CI on a file) |
+>    | `re/assets/` | **0** | ACL-UNPROTECTED — only the `~/bin/rm` wrapper guards it |
+>
+>    ACEs are icacls DENY `(DE,DC)` for `MARIANO-PC\maria` + `MARIANO-PC\CodexSandboxUsers`,
+>    `(OI)(CI)` inherited (directories). Empirically confirmed 2026-09-08: deleting a file
+>    under `mingw64/` raises `UnauthorizedAccessException`, and read/execute are unaffected
+>    (gcc runs, a full `build_standalone.bat` passes) because the deny covers Delete and
+>    Delete-Child ONLY, not write.
+>
+>    **Root cause of the six-week toolchain gap, now confirmed:** the 2026-05-28 ACL was
+>    applied to the i686-era `td5mod/deps/mingw/`. The 2026-07-30 cutover *moved* that
+>    directory to `_archive/mingw-i686-toolchain/`, and a same-volume move PRESERVES ACEs —
+>    so the protection travelled with the RETIRED tree (which is why it still shows 2 DENY
+>    there) while the freshly created `mingw64/` inherited only plain Modify. The same stale
+>    path simultaneously disabled the teardown canary and the `~/bin/rm` wrapper entry.
+>    Lesson: **an ACL follows the directory, not the role.** After any toolchain/asset
+>    relocation, re-assert the deny on the NEW path and re-check the canary + rm wrapper.
+>
+>    Where the ACL is live, a delete that reaches it fails with
 >    **Access Denied — that is the safeguard WORKING.** NEVER strip it to "make teardown
 >    succeed." To *legitimately* replace `original/`, drop the deny then re-apply:
 >    `powershell.exe -NoProfile -Command "icacls '<dir>' /remove:d 'MARIANO-PC\maria' /remove:d 'MARIANO-PC\CodexSandboxUsers'"`
