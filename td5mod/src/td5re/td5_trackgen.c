@@ -2233,7 +2233,25 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
              * glitched -- lengths are now floored at tg_branch_min_len(). */
             const int min_len = tg_branch_min_len();
             int off = ring;                          /* append cursor after ring */
-            int pos = TD5_TG_GRID_SPAN + 120;        /* first fork, past the grid */
+            /* [R20 FORK VARIETY] Placement USED to be constant: first fork at
+             * GRID_SPAN+120 and a fixed 150-span gap, so every seed that shared
+             * a plan rotation produced a byte-identical fork layout. Derive both
+             * the first-fork offset and the inter-fork gap from the plan seed,
+             * within bounds that never start earlier than the old 120 (past the
+             * grid + the F-WIDEN-2 approach window) and never drop the gap below
+             * 130 (comfortably above that same window). The ring-fit guard
+             * (R+24>=ring) still bounds the tail. Knob OFF restores the exact old
+             * constants (120 / 150) for A/B; ON changes span counts and every
+             * fork position on every seed. Deterministic in the plan seed. */
+            int first_off = 120;                     /* old constant (knob OFF) */
+            int fork_gap  = 150;                     /* old constant (knob OFF) */
+            if (td5_env_flag_on("TD5RE_R20_FORK_PLACE")) {
+                const unsigned int h1 = s_fork_plan_seed * 2654435761u;
+                const unsigned int h2 = s_fork_plan_seed * 2246822519u + 3266489917u;
+                first_off = 120 + (int)((h1 >> 13) % 96u);   /* 120..215 */
+                fork_gap  = 130 + (int)((h2 >> 13) % 61u);   /* 130..190 */
+            }
+            int pos = TD5_TG_GRID_SPAN + first_off;  /* first fork, past the grid */
             unsigned int i;
 
             for (i = 0; i < (unsigned int)tg_branch_count_max() &&
@@ -2256,7 +2274,7 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                     TD5_LOG_W(LOG_TAG, "trackgen: fork %u %s at F=%d skipped: %d "
                               "lanes, needs %d", i, tg_fork_kind_name(kind), F,
                               lanes, tg_fork_kind_min_lanes(kind));
-                    pos = R + 150;
+                    pos = R + fork_gap;   /* [R20] same gap rule as the success path */
                     continue;
                 }
                 if (R + 24 >= ring) break;           /* must fit on the ring */
@@ -2268,7 +2286,7 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                 if (!uniform) {
                     TD5_LOG_W(LOG_TAG, "trackgen: fork %u at F=%d skipped: lane "
                               "count changes inside its window", i, F);
-                    pos = R + 150;
+                    pos = R + fork_gap;   /* [R20] same gap rule as the success path */
                     continue;
                 }
                 /* [R6 item 10] Verify the walk-time straightening (tg_span_in_fork_run
@@ -2297,7 +2315,7 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
                 s_forks[s_fork_count].fb = (double)br_lanes / (double)lanes;
                 s_fork_count++;
                 off += 1 + L;
-                pos = R + 150;                        /* gap before the next fork */
+                pos = R + fork_gap;                   /* [R20] gap before the next fork */
             }
 
             /* Emit each fork's strip pieces. Corridors are appended in fork

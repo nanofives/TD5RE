@@ -226,7 +226,18 @@ void tg_fork_plan(int index, int *kind, int *len, double *sep)
     }
     {
         const int n = (int)(sizeof(k_fork_plan) / sizeof(k_fork_plan[0]));
-        const int rot = (int)((s_fork_plan_seed * 2654435761u) >> 29);   /* 0..7 */
+        const unsigned int rng = s_fork_plan_seed * 2654435761u;
+        /* [R20 FORK VARIETY] The old rotation `rng >> 29` yields 0..7 but the
+         * ladder has only n==6 entries, so rot 6 folds onto 0 and rot 7 onto 1
+         * -- rotations 0 and 1 land twice as often, and most seeds picked the
+         * same shape (measured: 4 of 5 test seeds -> effective rotation 1).
+         * Take high bits and take them modulo n (derived from the table) so all
+         * n rotations are equally likely. Knob OFF restores the skewed shift for
+         * A/B; ON changes the chosen shape on most seeds. Deterministic in the
+         * plan seed. */
+        const int rot = td5_env_flag_on("TD5RE_R20_FORK_ROT")
+                            ? (int)((rng >> 16) % (unsigned int)n)   /* 0..n-1 */
+                            : (int)(rng >> 29);                      /* old 0..7 */
         const int e = ((index < 0 ? 0 : index) + rot) % n;
         int L = k_fork_plan[e].len;
         if (k_fork_plan[e].kind == TG_FORK_WIDE && tg_r8_longbranch_enabled())
