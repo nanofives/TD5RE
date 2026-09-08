@@ -173,6 +173,7 @@ comment — regenerate after adding/splitting modules with
 | `td5_track_parser.c` | MODELS.DAT parsing (S6 module split, see REFACTOR_PLAN.md) |
 | `td5_track_registry.c` | runtime registry for custom (user-built) tracks. |
 | `td5_trackgen.c` | procedural (AUTO-GENERATED) track builder: spec, RNG, centerline, elevation, strip + routes, scenery orchestration, build/regenerate entry points (PORT-ONLY) |
+| `td5_tg_world.c` | auto-track WORLD: seeded heightfield (sea, coast, rivers, mountains, flats), sparse conform/occupancy overlay, terrain classes |
 | `td5_tg_branch.c` | auto-track BRANCHES: fork corridors, long diverging branch, carriageway query, branch pavement + avenue divider |
 | `td5_tg_guard.c` | auto-track GUARD: on-road geometry backstop, MESHTAG sidecar, pavement provenance marks, over-water / coast audits |
 | `td5_tg_city.c` | auto-track CITY: bend-fold authority, facade walls, turn continuation, pavement geometry, run-end census, side-street occupancy, street furniture |

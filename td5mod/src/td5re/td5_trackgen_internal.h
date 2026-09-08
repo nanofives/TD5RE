@@ -41,6 +41,7 @@
  * Coordinates are raw signed world units (the renderer divides by 256).
  */
 #include "td5_trackgen.h"
+#include "td5_tg_world.h"
 #include "td5_track_registry.h"
 #include "td5_jobs.h"          /* [S2c] parallel terrain pre-pass */
 #include "td5_track.h"         /* streamed-scenery ingest (td5_track_scenery_*) */
@@ -778,6 +779,8 @@ enum {
      * quarter of the build was inside that loop and unattributed. These three
      * say WHICH part of the entry body it is. */
     TG_ZONE_ENTRY_L1, TG_ZONE_ENTRY_L2, TG_ZONE_GUARDVAL,
+    /* [TOPOLOGY-FIRST 2026-09-08] world heightfield, street network, trim. */
+    TG_ZONE_WORLD, TG_ZONE_NETWORK, TG_ZONE_TRIM,
     TG_ZONE_COUNT
 };
 extern uint64_t s_tg_zone_us[TG_ZONE_COUNT];
@@ -5846,7 +5849,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num, int *o
  * cache, so a stale build can never hide a code change). Reuse also needs the
  * few generator statics the runtime asks for after the build, which is why the
  * stamp carries the ring length / finish span / circuit flag. */
-#define TG_STAMP_VERSION 1u
+#define TG_STAMP_VERSION 2u   /* 2: topology-first world stage */
 typedef struct {
     unsigned int version, seed, spec_hash, env_hash;
     unsigned long long exe_id;

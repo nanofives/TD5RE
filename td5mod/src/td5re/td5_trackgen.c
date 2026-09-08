@@ -164,7 +164,8 @@ static const char *const k_tg_zone_name[TG_ZONE_COUNT] = {
     "biome layout", "elevation", "levelinf emit",
     "write strip+trk", "write models", "sky install",
     "terrain pre-pass",
-    "[in emit] loop 1", "[in emit] loop 2", "[in emit] guard validate"
+    "[in emit] loop 1", "[in emit] loop 2", "[in emit] guard validate",
+    "world heightfield", "street network", "world trim"
 };
 
 uint64_t s_tg_zone_us[TG_ZONE_COUNT];
@@ -5343,6 +5344,7 @@ int td5_trackgen_stream_entry_count(void)
 
 void td5_trackgen_stream_discard(void)
 {
+    tg_world_free();                 /* [TOPOLOGY-FIRST] travelled with nl */
     free(s_stream_nl.v);
     memset(&s_stream_nl, 0, sizeof(s_stream_nl));
     s_stream_pending = 0;
