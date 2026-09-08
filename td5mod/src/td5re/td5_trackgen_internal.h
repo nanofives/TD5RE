@@ -1191,6 +1191,30 @@ void tg_acct_range(TG_AcctKind kind, int si0, int si1);
 void tg_acct_report(int nspans);
 extern int s_is_night;
 int td5_trackgen_is_night(void);
+/* -------------------------------- [R21 ROLLS] ------------------------------
+ * Generator side of the seed-derived parameter registry; the studio-facing
+ * half is in td5_trackgen.h, which carries the design rules. Resolve ONCE per
+ * build, before tg_build_centerline, then read the latch -- same reason
+ * s_is_night is latched rather than re-predicated per call. */
+int  tg_rolls_enabled(void);                       /* TD5RE_R21_ROLL master  */
+void tg_rolls_resolve(unsigned int seed);          /* latch for this build   */
+/* Hand back every value the registry published into the environment. Called at
+ * the top of resolve, and again before a spec is built from the knobs, so a
+ * previous build's roll can never be mistaken for a pin. */
+void tg_rolls_unpublish(void);
+void tg_rolls_apply_spec(TD5_TrackGenSpec *spec);  /* fold into the spec     */
+void tg_rolls_report(void);                        /* the [R21 ROLL] block   */
+int  tg_roll_value(int id);
+int  tg_roll_choice(int id);
+/* Hash a decision instead of drawing one. NEVER add a tg_rand()/tg_frand()/
+ * tg_range() call for a new parameter: the generator has ONE RNG stream, so an
+ * extra draw shifts every later draw and moves the road for every existing
+ * seed. tg_roll_hash_at mixes the latched build seed with a position, which is
+ * what per-span and per-section decisions want (same discipline, and the same
+ * reasoning, as tg_biome_hash). */
+unsigned int tg_roll_hash(unsigned int seed, unsigned int salt);
+unsigned int tg_roll_hash_at(unsigned int salt, int index);
+int          tg_roll_pick_w(unsigned int h, const unsigned char *w, int n);
 /* ------------------------------------------------------- centerline ------- */
 typedef struct {
     double x, y, z;      /* world units */
@@ -2492,9 +2516,11 @@ int tg_road_slot(int v);
  * what makes a stretch of city read differently from open fields without
  * needing separate emitters per biome -- every prop is still a box.
  *
- * Not yet driven by biome: the section mix (straight/curve/acute weighting).
- * The section picker runs during the centerline walk, before any of this, so
- * per-biome cornering needs the picker to know its own position first. */
+ * [R21 SHAPE] The section mix (straight/curve/acute/dual weighting) IS now
+ * driven by biome, and the note that used to sit here saying otherwise had it
+ * backwards: tg_biome_layout runs BEFORE tg_build_centerline, so the grid
+ * already exists when the walk starts. The picker takes the span it is about
+ * to place and reads its own biome -- see TG_BiomeRoad and tg_pick_section. */
 /* Facade/tree sizes below are the SHIPPED-track measurements (level014 city,
  * level005 rural), in raw 24.8 units == world_units * 256. A survey found a
  * facade page-cell is ~8.4 x 11.5 wu (2150 x 2950 raw), a city frontage ~3
@@ -2597,6 +2623,121 @@ int tg_biome_bridge_pct(int si);
 int tg_biome_tunnel_pct(int si);
 int tg_biome_span_is_city(int si);
 int tg_biome_index_is_city(int idx);
+/* ==========================================================================
+ * [R21 SHAPE] PER-BIOME ROAD CHARACTER
+ *
+ * THE REPORT: "twistiness should be random, avoid a lot of twistiness on
+ * cities, each biome should have its own twistiness" / "cities have more tight
+ * corners, forest can be normal" / "sections where there's narrower lanes and
+ * wider lanes".
+ *
+ * A PARALLEL table rather than nine more fields on TG_Biome: those rows are
+ * already ~28 positional initializers each, and C diagnoses nothing if a new
+ * field lands in the wrong column.
+ *
+ * EVERY FIELD IS A PERCENT OF THE GLOBAL VALUE the spec/studio configured --
+ * the tg_biome_bridge_pct pattern, consumed the same way. Percent and not
+ * absolute ON PURPOSE: the studio's TWISTINESS / CORNERS / GRADIENT / HILLS
+ * rows have to stay meaningful, so a player who asks for TWISTY gets a twisty
+ * track whose city stretches are its LEAST twisty part -- not a track where
+ * the biome table quietly overruled the row they set.
+ *
+ * INDEXED BY A BIOME INDEX, so the array length is TD5_TG_BIOME_KINDS and NOT
+ * either draw modulus. The compile-time length assert beside the table is what
+ * keeps that true when a biome is added.
+ *
+ * Read shape through tg_biome_cell_index (the HARD cell owner), NEVER
+ * tg_biome_for_span: that one DITHERS per span inside the blend band, so one
+ * section would take its mix from CITY and its corner floor from FOREST on
+ * alternating spans. Scalars ramp instead, via tg_shape_lerp_pct. */
+typedef struct {
+    const char *name;        /* must equal k_biomes[i].name; checked at init */
+    int w_straight, w_curve, w_acute, w_dual;  /* on spec->weight[]          */
+    int corner_pct;          /* on curve_safety_x100; <100 = TIGHTER corners */
+    int width_pct;           /* the biome's typical road width               */
+    int width_var_pct;       /* +/- this much per section                    */
+    int relief_pct;          /* on the macro relief amplitude                */
+    int grade_pct;           /* on the gradient drive AND its cap            */
+    int block_turn_1_in;     /* 0 = off; else force ACUTE ~1 section in N    */
+} TG_BiomeRoad;
+
+extern const TG_BiomeRoad k_biome_road[];
+
+/* Which field tg_shape_pct / tg_shape_lerp_pct should read. */
+typedef enum {
+    TG_SF_W_STRAIGHT = 0, TG_SF_W_CURVE, TG_SF_W_ACUTE, TG_SF_W_DUAL,
+    TG_SF_CORNER, TG_SF_WIDTH, TG_SF_WIDTH_VAR, TG_SF_RELIEF, TG_SF_GRADE,
+    TG_SF_BLOCK_TURN
+} TG_ShapeField;
+
+int  tg_r21_road_char(void);          /* TD5RE_R21_ROAD_CHAR; OFF == pre-R21 */
+const TG_BiomeRoad *tg_biome_road(int si);
+int  tg_shape_pct(int si, int field);              /* hard cell, no ramp     */
+/* Lerp a SCALAR across a run edge. Uses tg_biome_run_bounds (the MERGED run:
+ * with repeated cells a 300-span city is ONE run, where si/TD5_TG_BIOME_RUN
+ * would see two). ramp<=0 means "no ramp". */
+int  tg_shape_lerp_pct(int si, int field, int ramp_spans);
+/* Effective corner safety at a span, and the track-wide WORST CASE that
+ * tg_adjacent_skip must be sized with (a min over the WHOLE table, not over
+ * the biomes this seed happened to lay out, so the self-intersection window is
+ * provably >= every local value the walk can use). */
+/* ==========================================================================
+ * [R21 MOOD] PER-BUILD MOOD (scaffolding: resolved and logged, consumed by
+ * nothing yet).
+ *
+ * Latched once per build for the same reason s_is_night is: every emitter and
+ * renderer that asks during a build has to get the same answer, and a per-call
+ * predicate is how a track ends up with wet tarmac under one prop and dry
+ * under the next.
+ *
+ * grip_pct FEEDS THE SIMULATION, so it carries a FLOOR rather than a free
+ * roll. The precedent is ALPTOWN's tarmac decision, which caps how much of a
+ * snow seed can be on ice precisely so "the race still finishes" keeps
+ * holding; a mood that made a whole track low-grip would break that in a way
+ * no geometry check would catch. */
+typedef struct {
+    int season;     /* 0 spring, 1 summer, 2 autumn, 3 winter */
+    int weather;    /* 0 clear, 1 overcast, 2 rain, 3 fog     */
+    int wetness;    /* 0..100                                 */
+    int wear;       /* 0..100 road wear                       */
+    int grip_pct;   /* 100 = nominal, floored (see above)     */
+    int fog_pct;    /* 0..100                                 */
+} TG_Mood;
+
+const TG_Mood *tg_mood(void);
+
+/* ==========================================================================
+ * [R21 LANDMARKS] SET-PIECE PLACEMENT REGISTRY (scaffolding: the pass runs,
+ * the table is empty).
+ *
+ * A landmark is a one-per-track (or one-per-run) set piece -- a stadium, an
+ * airport, a signature building -- as opposed to the per-span props the
+ * scenery phases scatter. Placement is a TABLE so a new landmark is a row
+ * rather than another special case inside an emitter.
+ *
+ * Runs on MERGED biome runs via tg_biome_run_bounds, which is the right
+ * primitive: with repeated cells a 300-span city is ONE run, where
+ * si / TD5_TG_BIOME_RUN would see two and could place the same one-per-track
+ * piece twice. Hash-gated, so it consumes no RNG and adding a landmark cannot
+ * move the road. Placed AFTER elevation and BEFORE scenery so needs_flat can
+ * actually be evaluated. */
+typedef struct {
+    const char  *name;
+    unsigned int biome_mask;    /* 1u<<biome_index; 0 = any biome */
+    int          min_run_spans; /* needs a merged run at least this long */
+    int          once_per_track;
+    unsigned char weight;       /* hash-gated propensity, 0..100 */
+    int          needs_flat;
+    int          needs_water;
+    int          needs_night;
+    unsigned int salt;          /* own salt namespace; see the roll registry */
+} TG_Landmark;
+
+void tg_landmarks_place(const TG_NodeList *nl, int nspans);
+
+int  tg_shape_lane_aim(int si, int base_lanes, int lo, int hi);
+int  tg_shape_safety_x100(int si, int base_x100);
+int  tg_shape_worst_safety_x100(const TD5_TrackGenSpec *spec);
 /* ==========================================================================
  * [R11 BIOME item 4] OUTSKIRTS -- THE WILDERNESS-TO-TOWN EDGE
  *

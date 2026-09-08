@@ -737,23 +737,682 @@ void tg_acct_report(int nspans)
  * ========================================================================== */
 int s_is_night = 0;
 
+/* The decision itself, so tg_decide_night (which latches it for the build) and
+ * the [R21 ROLLS] registry (which only REPORTS it, and must agree) cannot
+ * drift apart. mode 0/1 = pinned day/night, 2 = derive from the seed. */
+static int tg_night_for(unsigned int seed, int mode)
+{
+    if (mode < 2) return mode;
+    /* Knuth multiplicative hash of the seed, high bit. ~1 in 4 night, which
+     * is roughly the shipped TD5 ratio (5 of the 19 schedule tracks run at
+     * night or dusk) rather than a coin flip. */
+    return ((seed * 2654435761u) >> 29) == 0 ? 1 : 0;
+}
+
 static void tg_decide_night(unsigned int seed)
 {
     int mode = td5_env_int("TD5RE_AUTOTRACK_NIGHT", 2, 0, 2);
-    if (mode < 2) {
-        s_is_night = mode;
-    } else {
-        /* Knuth multiplicative hash of the seed, high bit. ~1 in 4 night, which
-         * is roughly the shipped TD5 ratio (5 of the 19 schedule tracks run at
-         * night or dusk) rather than a coin flip. */
-        unsigned int h = seed * 2654435761u;
-        s_is_night = ((h >> 29) == 0) ? 1 : 0;
-    }
+    s_is_night = tg_night_for(seed, mode);
     TD5_LOG_I(LOG_TAG, "trackgen: time of day = %s (seed=%u knob=%d)",
               s_is_night ? "NIGHT" : "DAY", seed, mode);
 }
 
 int td5_trackgen_is_night(void) { return s_is_night; }
+
+/* ================== [R21 ROLLS] SEED-DERIVED PARAMETER REGISTRY ============
+ *
+ * Placed ABOVE tg_rand() ON PURPOSE. A roll must never consume the geometry
+ * RNG stream, and the only mechanical guarantee of that is being unable to
+ * call it. Rolls HASH instead (tg_roll_hash), exactly as the biome layout does
+ * and for the same reason: one extra tg_rand() draw shifts every later draw
+ * and so moves the road for every existing seed.
+ *
+ * SALT CONVENTION. Each entry owns a hand-picked salt 0x2101xxxx for R21
+ * (0x2201xxxx for R22, ...), low 16 bits incrementing. A roll is keyed by its
+ * SALT ALONE -- there is deliberately no table-index term -- so entries may be
+ * appended, reordered or retired without moving any other entry's roll. Two
+ * rules follow, and both matter:
+ *   1. A salt is NEVER reused and NEVER renumbered. Retire an entry by nulling
+ *      its name, not by compacting the table.
+ *   2. Two entries sharing a salt correlate silently and forever, which is the
+ *      one mistake here that destroys variety without failing anything. The
+ *      duplicate-salt scan in tg_rolls_resolve turns it into a log line.
+ *
+ * STYLE vs PRESENCE. Every choice of a STYLE entry is a legitimate look, so it
+ * carries real weights. A PRESENCE entry has a choice that REMOVES content
+ * (guardrails, sidewalks, scenery): a seed that rolled several of those off at
+ * once reads as broken rather than varied, so those ship weighted to today's
+ * value. RANDOM stays their default and the mechanism stays live and reported,
+ * so a later round tunes one byte instead of re-plumbing. All five entries
+ * below are STYLE.
+ *
+ * PINNED VALUES ARE NOT SNAPPED TO THE TABLE. tg_rolls_apply_spec writes only
+ * the entries the knobs did NOT pin, so a pinned knob keeps exactly whatever
+ * td5_trackgen_apply_config already computed for it -- including out-of-table
+ * dev values like TD5RE_AUTOTRACK_CURVESAFE=250. The table index is then only
+ * used to LABEL it. That is also why the master knob off is byte-identical:
+ * apply_spec writes nothing at all. */
+
+typedef struct {
+    const char          *name;    /* log/UI facing                            */
+    const char          *knob;    /* NULL = composite, resolved specially     */
+    unsigned int         salt;
+    const int           *vals;    /* choice literals                          */
+    const char *const   *cnames;
+    const unsigned char *w;       /* relative weights; NULL = uniform         */
+    short                n;
+    short                legacy;  /* choice index matching PRE-R21 unset      */
+    int                  lo, hi;  /* clamp for a pinned value (display only)  */
+} TG_RollEntry;
+
+/* Choice sets. These MUST match the studio's tables in td5_fe_race.c -- the
+ * arity check in Screen_AutoTrackOptions asserts it, because a silent drift
+ * here shows the player one thing and builds another. */
+static const int         k_tgr_twist_v[] = { 0, 1, 2, 3 };
+static const char *const k_tgr_twist_n[] = { "GENTLE", "BALANCED", "TWISTY",
+                                             "EXTREME" };
+static const unsigned char k_tgr_twist_w[] = { 20, 35, 30, 15 };
+/* straight, curve, acute -- index 1 is the generator's shipped 35/40/15. */
+static const int k_tgr_twist_mix[4][3] = {
+    { 60, 35,  5 }, { 35, 40, 15 }, { 20, 45, 35 }, { 10, 40, 50 }
+};
+
+static const int         k_tgr_corner_v[] = { 120, 150, 180, 240, 320 };
+static const char *const k_tgr_corner_n[] = { "TIGHT", "NARROW", "STANDARD",
+                                              "WIDE", "SWEEPING" };
+static const unsigned char k_tgr_corner_w[] = { 15, 20, 30, 20, 15 };
+
+/* GRADIENT is weighted UP deliberately. Measured on seed 5150: the row is a
+ * CAP, and STANDARD -> SEVERE left the height RANGE identical at 34007 because
+ * nothing drives slope toward the cap. [R21 GRADE] adds the drive; weighting
+ * the low choices down is what makes "steep climbs" the common case. FLAT
+ * keeps a small share because a genuinely flat track is a valid look. */
+static const int         k_tgr_grade_v[] = { 0, 60, 120, 160, 200 };
+static const char *const k_tgr_grade_n[] = { "FLAT", "GENTLE", "STANDARD",
+                                             "STEEP", "SEVERE" };
+static const unsigned char k_tgr_grade_w[] = { 5, 15, 30, 30, 20 };
+
+static const int         k_tgr_dual_v[] = { 0, 5, 10, 20, 35 };
+static const char *const k_tgr_dual_n[] = { "NONE", "RARE", "SOME", "OFTEN",
+                                            "CONSTANT" };
+static const unsigned char k_tgr_dual_w[] = { 10, 25, 30, 25, 10 };
+
+static const int         k_tgr_hills_v[] = { 0, 3000, 6000, 12000, 20000 };
+static const char *const k_tgr_hills_n[] = { "FLAT", "LOW", "MEDIUM", "HIGH",
+                                             "EXTREME" };
+static const unsigned char k_tgr_hills_w[] = { 5, 15, 30, 30, 20 };
+
+static const int         k_tgr_night_v[] = { 0, 1 };
+static const char *const k_tgr_night_n[] = { "DAY", "NIGHT" };
+
+/* LENGTH is weighted away from both ends: a rolled 3000-span MARATHON triples
+ * build time on a row the player never touched, and 600 is barely a lap. */
+static const int         k_tgr_len_v[] = { 600, 1200, 1800, 2400, 3000 };
+static const char *const k_tgr_len_n[] = { "SHORT", "MEDIUM", "LONG",
+                                           "VERY LONG", "MARATHON" };
+static const unsigned char k_tgr_len_w[] = { 0, 15, 70, 15, 0 };
+
+/* How often a section changes its lane count -- the existing per-section
+ * narrower/wider-lane machinery ([LANES] in tg_build_centerline). This is the
+ * "sections with narrower lanes and wider lanes" dial. */
+static const int         k_tgr_lanepct_v[] = { 0, 15, 35, 60, 85 };
+static const char *const k_tgr_lanepct_n[] = { "UNIFORM", "RARE", "SOME",
+                                               "OFTEN", "CONSTANT" };
+static const unsigned char k_tgr_lanepct_w[] = { 5, 20, 35, 30, 10 };
+
+static const int         k_tgr_runoff_v[] = { 0, 50, 100, 200, 400 };
+static const char *const k_tgr_runoff_n[] = { "NONE", "SHORT", "STANDARD",
+                                              "LONG", "VERY LONG" };
+static const unsigned char k_tgr_runoff_w[] = { 10, 20, 35, 25, 10 };
+
+static const int         k_tgr_reach_v[] = { 30000, 80000, 160000, 300000 };
+static const char *const k_tgr_reach_n[] = { "NEAR", "MEDIUM", "FAR",
+                                             "VERY FAR" };
+static const unsigned char k_tgr_reach_w[] = { 40, 30, 20, 10 };
+
+static const int         k_tgr_blend_v[] = { 0, 10, 20, 40 };
+static const char *const k_tgr_blend_n[] = { "SHARP", "SHORT", "NORMAL",
+                                             "LONG" };
+static const unsigned char k_tgr_blend_w[] = { 10, 25, 40, 25 };
+
+static const int         k_tgr_rail_v[] = { 20, 35, 50, 90, 160 };
+static const char *const k_tgr_rail_n[] = { "EVERYWHERE", "FREQUENT",
+                                            "STANDARD", "SPARSE",
+                                            "BENDS ONLY" };
+static const unsigned char k_tgr_rail_w[] = { 15, 20, 30, 20, 15 };
+
+static const int         k_tgr_sky_v[] = { -1, 12, 24, 36, 48, 60 };
+static const char *const k_tgr_sky_n[] = { "NONE", "12", "24", "36", "48",
+                                           "60" };
+static const unsigned char k_tgr_sky_w[] = { 5, 15, 20, 25, 20, 15 };
+
+/* Shared boolean choice set. */
+static const int         k_tgr_bool_v[] = { 0, 1 };
+static const char *const k_tgr_bool_n[] = { "OFF", "ON" };
+/* PRESENCE: the OFF choice removes content. A seed that rolled guardrails,
+ * sidewalks and scenery all off would read as broken rather than varied, so
+ * these resolve to today's value -- while still being IN the mechanism and in
+ * the report, so a later round tunes one byte instead of re-plumbing. */
+static const unsigned char k_tgr_w_keep[]      = {  0, 100 };
+static const unsigned char k_tgr_w_mostly_on[] = { 25,  75 };
+static const unsigned char k_tgr_w_even[]      = { 50,  50 };
+static const unsigned char k_tgr_w_rare[]      = { 70,  30 };
+
+#define TGR_BOOL(nm, kb, slt, wts, leg) \
+    { nm, kb, slt, k_tgr_bool_v, k_tgr_bool_n, wts, 2, leg, 0, 1 }
+
+/* MUST be in TD5_TgRollId order -- the array is indexed by the id. Salts are
+ * independent of position, so the six original entries keep theirs and their
+ * rolls are unchanged by everything appended after them. */
+static const TG_RollEntry k_tg_rolls[TD5_TG_ROLL_COUNT] = {
+ /* name          knob                          salt         vals/names/weights                              n  leg  lo   hi   */
+ { "TWISTINESS",  NULL,                         0x21010001u, k_tgr_twist_v,   k_tgr_twist_n,   k_tgr_twist_w,   4, 1, 0, 3 },
+ { "CORNERS",     "TD5RE_AUTOTRACK_CURVESAFE",  0x21010002u, k_tgr_corner_v,  k_tgr_corner_n,  k_tgr_corner_w,  5, 2, 100, 800 },
+ { "GRADIENT",    "TD5RE_AUTOTRACK_GRADE",      0x21010003u, k_tgr_grade_v,   k_tgr_grade_n,   k_tgr_grade_w,   5, 2, 0, 200 },
+ { "DUAL LANES",  "TD5RE_AUTOTRACK_PCT_DUAL",   0x21010004u, k_tgr_dual_v,    k_tgr_dual_n,    k_tgr_dual_w,    5, 2, 0, 100 },
+ { "HILLS",       "TD5RE_AUTOTRACK_ELEVATION",  0x21010005u, k_tgr_hills_v,   k_tgr_hills_n,   k_tgr_hills_w,   5, 2, 0, 40000 },
+ { "LENGTH",      "TD5RE_AUTOTRACK_SPANS",      0x21010007u, k_tgr_len_v,     k_tgr_len_n,     k_tgr_len_w,     5, 2, 200, 3000 },
+ { "TIME OF DAY", "TD5RE_AUTOTRACK_NIGHT",      0x21010006u, k_tgr_night_v,   k_tgr_night_n,   NULL,            2, 0, 0, 1 },
+ { "LANE VARIETY","TD5RE_AUTOTRACK_LANE_PCT",   0x21010008u, k_tgr_lanepct_v, k_tgr_lanepct_n, k_tgr_lanepct_w, 5, 2, 0, 100 },
+ { "RUN-OFF",     "TD5RE_AUTOTRACK_RUNOFF",     0x21010009u, k_tgr_runoff_v,  k_tgr_runoff_n,  k_tgr_runoff_w,  5, 2, 0, 4000 },
+ { "VIEW REACH",  "TD5RE_AUTOTRACK_TERRAIN_REACH",0x2101000Au,k_tgr_reach_v,  k_tgr_reach_n,   k_tgr_reach_w,   4, 0, 1000, 400000 },
+ { "TRANSITIONS", "TD5RE_AUTOTRACK_BIOME_BLEND",0x2101000Bu, k_tgr_blend_v,   k_tgr_blend_n,   k_tgr_blend_w,   4, 2, 0, 75 },
+ { "RAIL DENSITY","TD5RE_AUTOTRACK_RAIL_DEG10", 0x2101000Cu, k_tgr_rail_v,    k_tgr_rail_n,    k_tgr_rail_w,    5, 2, 0, 3600 },
+ { "SKY",         "TD5RE_AUTOTRACK_SKY_ANIM",   0x2101000Du, k_tgr_sky_v,     k_tgr_sky_n,     k_tgr_sky_w,     6, 3, -1, 240 },
+ TGR_BOOL("SNOW",          "TD5RE_AUTOTRACK_SNOW",           0x2101000Eu, k_tgr_w_rare,      1),
+ TGR_BOOL("PARKS",         "TD5RE_AUTOTRACK_PARKS",          0x2101000Fu, k_tgr_w_even,      0),
+ TGR_BOOL("PARK HOUSES",   "TD5RE_AUTOTRACK_PARK_HOUSES",    0x21010010u, k_tgr_w_mostly_on, 1),
+ TGR_BOOL("PARK HEDGES",   "TD5RE_AUTOTRACK_PARK_HEDGE",     0x21010011u, k_tgr_w_mostly_on, 1),
+ TGR_BOOL("AVENUES",       "TD5RE_AUTOTRACK_AVENUE_DIVIDER", 0x21010012u, k_tgr_w_mostly_on, 1),
+ TGR_BOOL("START IN TOWN", "TD5RE_AUTOTRACK_START_CITY",     0x21010013u, k_tgr_w_even,      1),
+ TGR_BOOL("MOUNTAINS",     "TD5RE_AUTOTRACK_TUNNEL_MOUNTAIN",0x21010014u, k_tgr_w_mostly_on, 1),
+ TGR_BOOL("TUNNEL LAMPS",  "TD5RE_AUTOTRACK_TUNNEL_LAMPS",   0x21010015u, k_tgr_w_mostly_on, 1),
+ TGR_BOOL("BRIDGE STYLE",  "TD5RE_AUTOTRACK_BRIDGE_VARIETY", 0x21010016u, k_tgr_w_mostly_on, 1),
+ TGR_BOOL("CLEAR VERGES",  "TD5RE_AUTOTRACK_FLORA_CLEAR",    0x21010017u, k_tgr_w_mostly_on, 1),
+ TGR_BOOL("MIRROR TREES",  "TD5RE_AUTOTRACK_TREE_MIRROR",    0x21010018u, k_tgr_w_even,      1),
+ /* ---- PRESENCE from here down: weighted to today's value ---------------- */
+ TGR_BOOL("BRANCHES",      "TD5RE_AUTOTRACK_BRANCHES",       0x21010019u, k_tgr_w_keep, 1),
+ TGR_BOOL("TERRAIN",       "TD5RE_AUTOTRACK_TERRAIN_HILLS",  0x2101001Au, k_tgr_w_keep, 1),
+ TGR_BOOL("BACKDROP",      "TD5RE_AUTOTRACK_TERRAIN_FAR",    0x2101001Bu, k_tgr_w_keep, 1),
+ TGR_BOOL("COASTLINE",     "TD5RE_AUTOTRACK_COASTLINE",      0x2101001Cu, k_tgr_w_keep, 1),
+ TGR_BOOL("BRIDGES",       "TD5RE_AUTOTRACK_BRIDGES",        0x2101001Du, k_tgr_w_keep, 1),
+ TGR_BOOL("OVERHEADS",     "TD5RE_AUTOTRACK_BRIDGE_OVERHEAD",0x2101001Eu, k_tgr_w_keep, 1),
+ TGR_BOOL("TUNNELS",       "TD5RE_AUTOTRACK_TUNNELS",        0x2101001Fu, k_tgr_w_keep, 1),
+ TGR_BOOL("GUARDRAILS",    "TD5RE_AUTOTRACK_GUARDRAILS",     0x21010020u, k_tgr_w_keep, 1),
+ TGR_BOOL("ARMCO",         "TD5RE_AUTOTRACK_ARMCO",          0x21010021u, k_tgr_w_keep, 1),
+ TGR_BOOL("DISTRICTS",     "TD5RE_AUTOTRACK_DISTRICTS",      0x21010022u, k_tgr_w_keep, 1),
+ TGR_BOOL("BUILDING MASS", "TD5RE_AUTOTRACK_FACADE_MASS",    0x21010023u, k_tgr_w_keep, 1),
+ TGR_BOOL("BACK ROWS",     "TD5RE_AUTOTRACK_BACKROWS",       0x21010024u, k_tgr_w_keep, 1),
+ TGR_BOOL("CROSSINGS",     "TD5RE_AUTOTRACK_CROSSINGS",      0x21010025u, k_tgr_w_keep, 1),
+ TGR_BOOL("SIDE STREETS",  "TD5RE_AUTOTRACK_CROSS_STREETS",  0x21010026u, k_tgr_w_keep, 1),
+ TGR_BOOL("ROAD MARKS",    "TD5RE_AUTOTRACK_CROSS_MARKINGS", 0x21010027u, k_tgr_w_keep, 1),
+ TGR_BOOL("INTERSECTIONS", "TD5RE_AUTOTRACK_INTERSECTIONS",  0x21010028u, k_tgr_w_keep, 1),
+ TGR_BOOL("SIDEWALKS",     "TD5RE_AUTOTRACK_SIDEWALKS",      0x21010029u, k_tgr_w_keep, 1),
+ TGR_BOOL("SCENERY",       "TD5RE_AUTOTRACK_SCENERY",        0x2101002Au, k_tgr_w_keep, 1),
+ TGR_BOOL("TREE LINE",     "TD5RE_AUTOTRACK_TREELINE",       0x2101002Bu, k_tgr_w_keep, 1),
+ TGR_BOOL("LAMP POSTS",    "TD5RE_AUTOTRACK_LAMP_POSTS",     0x2101002Cu, k_tgr_w_keep, 1),
+ TGR_BOOL("BANNERS",       "TD5RE_AUTOTRACK_BANNERS",        0x2101002Du, k_tgr_w_keep, 1),
+ TGR_BOOL("REAL TEXTURES", "TD5RE_AUTOTRACK_REAL_TEX",       0x2101002Eu, k_tgr_w_keep, 1),
+ TGR_BOOL("REAL FURNITURE","TD5RE_AUTOTRACK_REAL_FURNITURE", 0x2101002Fu, k_tgr_w_keep, 1)
+};
+
+/* The table is indexed by TD5_TgRollId, so a missing or extra row would
+ * silently shift every entry past it onto the wrong knob. */
+typedef char tg_assert_rolls_len[
+    (sizeof(k_tg_rolls) / sizeof(k_tg_rolls[0]) == TD5_TG_ROLL_COUNT) ? 1 : -1];
+
+static TD5_TgRolls s_rolls;      /* latched for the build, like s_is_night */
+static int         s_rolls_valid = 0;
+
+int tg_rolls_enabled(void) { return td5_env_flag_on("TD5RE_R21_ROLL"); }
+
+/* Sibling of tg_biome_hash with its OWN salt namespace and, deliberately, no
+ * index term -- see the salt convention above. */
+unsigned int tg_roll_hash(unsigned int seed, unsigned int salt)
+{
+    unsigned int h = seed ^ (salt * 0x9E3779B9u);
+    h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12; h ^= h >> 16;
+    return h;
+}
+
+/* For decisions made DURING the walk, where the POSITION is the key. */
+unsigned int tg_roll_hash_at(unsigned int salt, int index)
+{
+    unsigned int h = tg_roll_hash(s_gen_seed, salt);
+    h += (unsigned int)index * 2654435761u;
+    h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12;
+    return h;
+}
+
+/* Weighted choice from a hash. Uses the HIGH bits: the low bit of a
+ * multiply-xor mix is its weakest. */
+int tg_roll_pick_w(unsigned int h, const unsigned char *w, int n)
+{
+    unsigned int sum = 0, r;
+    int i;
+
+    if (n <= 1) return 0;
+    if (!w) return (int)((h >> 8) % (unsigned int)n);
+    for (i = 0; i < n; i++) sum += w[i];
+    if (!sum) return 0;                  /* degenerate table -> first choice */
+    r = (h >> 8) % sum;
+    for (i = 0; i < n; i++) {
+        if (r < (unsigned int)w[i]) return i;
+        r -= (unsigned int)w[i];
+    }
+    return n - 1;
+}
+
+/* Nearest choice index to `v`, for LABELLING a pinned value that need not be
+ * a table member (CURVESAFE=250 is legal and pins 250; it just displays as
+ * the closest named choice). */
+static int tg_roll_nearest(const TG_RollEntry *e, int v)
+{
+    int i, best = 0, bd = -1;
+    for (i = 0; i < e->n; i++) {
+        int d = e->vals[i] > v ? e->vals[i] - v : v - e->vals[i];
+        if (bd < 0 || d < bd) { bd = d; best = i; }
+    }
+    return best;
+}
+
+/* Did a knob pin this entry, and to what? Raw getenv rather than
+ * td5_env_int_opt because that helper's contract needs the sentinel to sit
+ * below `lo`, and TD5_TG_ROLL_RANDOM must survive the parse so a dev can write
+ * -2 on a command line to mean "roll it". */
+static int tg_roll_pin_of(const TG_RollEntry *e, int *out)
+{
+    const char *s;
+    int v;
+
+    if (!e->knob) {                      /* TWISTINESS: three PCT_* knobs */
+        const char *st = getenv("TD5RE_AUTOTRACK_PCT_STRAIGHT");
+        const char *cu = getenv("TD5RE_AUTOTRACK_PCT_CURVE");
+        const char *ac = getenv("TD5RE_AUTOTRACK_PCT_ACUTE");
+        int i;
+        if ((!st || !st[0]) && (!cu || !cu[0]) && (!ac || !ac[0])) return 0;
+        /* Reverse-map the mix so the report names what was pinned. */
+        for (i = 0; i < 4; i++) {
+            if (st && atoi(st) == k_tgr_twist_mix[i][0] &&
+                ac && atoi(ac) == k_tgr_twist_mix[i][2]) { *out = i; return 1; }
+        }
+        *out = e->legacy;                /* pinned to a mix we do not name */
+        return 1;
+    }
+    s = getenv(e->knob);
+    if (!s || !s[0]) return 0;                       /* unset  == RANDOM */
+    v = atoi(s);
+    if (v == TD5_TG_ROLL_RANDOM) return 0;           /* explicit RANDOM  */
+    /* TIME OF DAY keeps its long-standing 2 = RANDOM spelling. */
+    if (e->knob && !strcmp(e->knob, "TD5RE_AUTOTRACK_NIGHT")) {
+        if (v >= 2) return 0;
+        *out = v; return 1;
+    }
+    if (v < e->lo) v = e->lo;
+    if (v > e->hi) v = e->hi;
+    *out = v;
+    return 1;
+}
+
+void td5_trackgen_resolve_rolls(unsigned int seed, TD5_TgRolls *out)
+{
+    const int on = tg_rolls_enabled();
+    int i;
+
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    out->seed = seed;
+
+    for (i = 0; i < TD5_TG_ROLL_COUNT; i++) {
+        const TG_RollEntry *e = &k_tg_rolls[i];
+        int pinned = 0, v = 0;
+
+        if (!e->name) continue;                      /* retired slot */
+        pinned = tg_roll_pin_of(e, &v);
+        if (pinned) {
+            out->pinned[i] = 1;
+            /* TWISTINESS and TIME OF DAY pin a CHOICE; the rest pin a value. */
+            if (!e->knob || i == TD5_TG_ROLL_NIGHT) {
+                out->choice[i] = (unsigned char)v;
+                out->value[i]  = e->vals[v < e->n ? v : 0];
+            } else {
+                out->value[i]  = v;
+                out->choice[i] = (unsigned char)tg_roll_nearest(e, v);
+            }
+        } else if (!on) {
+            out->choice[i] = (unsigned char)e->legacy;
+            out->value[i]  = e->vals[e->legacy];
+        } else {
+            int c = tg_roll_pick_w(tg_roll_hash(seed, e->salt), e->w, e->n);
+            out->choice[i] = (unsigned char)c;
+            out->value[i]  = e->vals[c];
+        }
+    }
+    /* TIME OF DAY is owned by tg_decide_night; mirror its answer so the report
+     * cannot contradict the build. */
+    {
+        int mode = td5_env_int("TD5RE_AUTOTRACK_NIGHT", 2, 0, 2);
+        out->value [TD5_TG_ROLL_NIGHT] = tg_night_for(seed, mode);
+        out->choice[TD5_TG_ROLL_NIGHT] =
+            (unsigned char)out->value[TD5_TG_ROLL_NIGHT];
+        out->pinned[TD5_TG_ROLL_NIGHT] = (unsigned char)(mode < 2);
+    }
+}
+
+/* ---- environment publishing ------------------------------------------------
+ * ~40 of these knobs are read by td5_env_* calls scattered across the eight
+ * generator modules. Rather than edit 40 call sites (and get one of them
+ * wrong), the registry PUBLISHES each resolved value into the environment, so
+ * every existing read picks it up unchanged. The studio already writes its
+ * rows the same way (_putenv_s in at_setenv), so this is the established
+ * spelling in this codebase, not a new mechanism.
+ *
+ * OWNERSHIP IS THE WHOLE TRICK. A published value is indistinguishable from a
+ * human's pin by the time getenv sees it, so the registry records what it
+ * wrote and GIVES IT BACK before the next resolve. Without that, the first
+ * build's roll would look pinned forever after and every later build would
+ * reproduce it -- and the studio row would stop showing RANDOM after one race.
+ * td5_trackgen_roll_is_owned is how the studio tells the two apart. */
+static unsigned char s_roll_owned[TD5_TG_ROLL_COUNT];
+
+void tg_rolls_unpublish(void)
+{
+    int i;
+    for (i = 0; i < TD5_TG_ROLL_COUNT; i++) {
+        if (!s_roll_owned[i]) continue;
+        s_roll_owned[i] = 0;
+        if (k_tg_rolls[i].knob) {
+            _putenv_s(k_tg_rolls[i].knob, "");
+        } else if (i == TD5_TG_ROLL_TWIST) {
+            _putenv_s("TD5RE_AUTOTRACK_PCT_STRAIGHT", "");
+            _putenv_s("TD5RE_AUTOTRACK_PCT_CURVE", "");
+            _putenv_s("TD5RE_AUTOTRACK_PCT_ACUTE", "");
+        }
+    }
+}
+
+static void tg_rolls_publish(void)
+{
+    char buf[24];
+    int i;
+
+    if (!tg_rolls_enabled()) return;
+    for (i = 0; i < TD5_TG_ROLL_COUNT; i++) {
+        const TG_RollEntry *e = &k_tg_rolls[i];
+        if (!e->name || s_rolls.pinned[i]) continue;
+        /* TIME OF DAY is the one exception: tg_decide_night owns it and reads
+         * its knob as a tri-state where 2 means "roll it". Publishing 0 or 1
+         * would read back as a PIN on the next build and freeze the time of
+         * day for good. */
+        if (i == TD5_TG_ROLL_NIGHT) continue;
+        if (e->knob) {
+            snprintf(buf, sizeof(buf), "%d", s_rolls.value[i]);
+            _putenv_s(e->knob, buf);
+            s_roll_owned[i] = 1;
+        } else if (i == TD5_TG_ROLL_TWIST) {
+            int mix[3];
+            td5_trackgen_twist_mix(s_rolls.choice[i], mix);
+            snprintf(buf, sizeof(buf), "%d", mix[0]);
+            _putenv_s("TD5RE_AUTOTRACK_PCT_STRAIGHT", buf);
+            snprintf(buf, sizeof(buf), "%d", mix[1]);
+            _putenv_s("TD5RE_AUTOTRACK_PCT_CURVE", buf);
+            snprintf(buf, sizeof(buf), "%d", mix[2]);
+            _putenv_s("TD5RE_AUTOTRACK_PCT_ACUTE", buf);
+            s_roll_owned[i] = 1;
+        }
+    }
+}
+
+const char *td5_trackgen_roll_knob(int id)
+{
+    if (id < 0 || id >= TD5_TG_ROLL_COUNT) return NULL;
+    return k_tg_rolls[id].knob;
+}
+
+int td5_trackgen_roll_is_owned(int id)
+{
+    if (id < 0 || id >= TD5_TG_ROLL_COUNT) return 0;
+    return s_roll_owned[id] ? 1 : 0;
+}
+
+void td5_trackgen_roll_disown(int id)
+{
+    if (id < 0 || id >= TD5_TG_ROLL_COUNT) return;
+    s_roll_owned[id] = 0;
+}
+
+int td5_trackgen_roll_is_pinned_now(int id)
+{
+    int v = 0;
+    if (id < 0 || id >= TD5_TG_ROLL_COUNT || !k_tg_rolls[id].name) return 0;
+    return tg_roll_pin_of(&k_tg_rolls[id], &v);
+}
+
+/* Defined below, next to the mood table; latched here so the rolls and the
+ * mood always share a lifetime. */
+static void tg_mood_resolve(unsigned int seed);
+
+void tg_rolls_resolve(unsigned int seed)
+{
+    int i, j;
+
+    /* Give back last build's published values FIRST, so the only thing left in
+     * the environment is what a human or a script actually pinned. */
+    tg_rolls_unpublish();
+
+    td5_trackgen_resolve_rolls(seed, &s_rolls);
+    s_rolls_valid = 1;
+    tg_rolls_publish();
+    tg_mood_resolve(seed);   /* latched alongside the rolls, same lifetime */
+
+    /* One-shot duplicate-salt scan: two entries on one salt correlate forever
+     * and nothing else would ever notice. */
+    for (i = 0; i < TD5_TG_ROLL_COUNT; i++) {
+        if (!k_tg_rolls[i].name) continue;
+        for (j = i + 1; j < TD5_TG_ROLL_COUNT; j++) {
+            if (!k_tg_rolls[j].name) continue;
+            if (k_tg_rolls[i].salt == k_tg_rolls[j].salt) {
+                TD5_LOG_E(LOG_TAG, "trackgen: [R21 ROLL] DUPLICATE SALT %#x on "
+                          "'%s' and '%s' -- these two parameters will always "
+                          "roll together", k_tg_rolls[i].salt,
+                          k_tg_rolls[i].name, k_tg_rolls[j].name);
+            }
+        }
+    }
+}
+
+int tg_roll_value(int id)
+{
+    if (!s_rolls_valid || id < 0 || id >= TD5_TG_ROLL_COUNT) return 0;
+    return s_rolls.value[id];
+}
+
+int tg_roll_choice(int id)
+{
+    if (!s_rolls_valid || id < 0 || id >= TD5_TG_ROLL_COUNT) return 0;
+    return s_rolls.choice[id];
+}
+
+int td5_trackgen_roll_choice_count(int id)
+{
+    if (id < 0 || id >= TD5_TG_ROLL_COUNT || !k_tg_rolls[id].name) return 0;
+    return k_tg_rolls[id].n;
+}
+
+const char *td5_trackgen_roll_choice_name(int id, int choice)
+{
+    const TG_RollEntry *e;
+    if (id < 0 || id >= TD5_TG_ROLL_COUNT || !k_tg_rolls[id].name) return "?";
+    e = &k_tg_rolls[id];
+    if (choice < 0 || choice >= e->n) return "?";
+    return e->cnames[choice];
+}
+
+const char *td5_trackgen_roll_name(int id)
+{
+    if (id < 0 || id >= TD5_TG_ROLL_COUNT || !k_tg_rolls[id].name) return "?";
+    return k_tg_rolls[id].name;
+}
+
+int td5_trackgen_twist_mix(int choice, int out3[3])
+{
+    if (!out3) return 0;
+    if (choice < 0 || choice > 3) choice = 1;
+    out3[0] = k_tgr_twist_mix[choice][0];
+    out3[1] = k_tgr_twist_mix[choice][1];
+    out3[2] = k_tgr_twist_mix[choice][2];
+    return 1;
+}
+
+/* Fold the resolved rolls into a spec whose seed is already final. Writes ONLY
+ * the entries no knob pinned, so td5_trackgen_apply_config keeps ownership of
+ * every pinned value (and its clamping). With the master knob off this writes
+ * nothing, which is what makes OFF byte-identical to pre-R21. */
+void tg_rolls_apply_spec(TD5_TrackGenSpec *spec)
+{
+    if (!spec || !s_rolls_valid || !tg_rolls_enabled()) return;
+
+    if (!s_rolls.pinned[TD5_TG_ROLL_TWIST]) {
+        int mix[3];
+        td5_trackgen_twist_mix(s_rolls.choice[TD5_TG_ROLL_TWIST], mix);
+        spec->weight[TD5_TG_STRAIGHT] = mix[0];
+        spec->weight[TD5_TG_CURVE]    = mix[1];
+        spec->weight[TD5_TG_ACUTE]    = mix[2];
+    }
+    if (!s_rolls.pinned[TD5_TG_ROLL_CORNERS])
+        spec->curve_safety_x100 = s_rolls.value[TD5_TG_ROLL_CORNERS];
+    if (!s_rolls.pinned[TD5_TG_ROLL_GRADE])
+        spec->max_grade_x1000 = s_rolls.value[TD5_TG_ROLL_GRADE];
+    if (!s_rolls.pinned[TD5_TG_ROLL_DUAL])
+        spec->weight[TD5_TG_DUAL_LANE] = s_rolls.value[TD5_TG_ROLL_DUAL];
+    if (!s_rolls.pinned[TD5_TG_ROLL_HILLS])
+        spec->elevation_amplitude = s_rolls.value[TD5_TG_ROLL_HILLS];
+    if (!s_rolls.pinned[TD5_TG_ROLL_LENGTH])
+        spec->target_spans = s_rolls.value[TD5_TG_ROLL_LENGTH];
+}
+
+/* Build identity, not a diagnostic -- logged unconditionally and BEFORE the
+ * GENSTAMP check, so a REUSED build (which prints no inventory at all) still
+ * says what it is. */
+void tg_rolls_report(void)
+{
+    const char *unpinned = tg_rolls_enabled() ? "rolled" : "legacy";
+    int i, rolled = 0, pinned = 0;
+
+    if (!s_rolls_valid) return;
+    TD5_LOG_I(LOG_TAG, "trackgen: [R21 ROLL] ---- randomized parameters "
+              "(seed %u, master=%s) ----", s_rolls.seed,
+              tg_rolls_enabled() ? "on" : "OFF (legacy defaults)");
+    for (i = 0; i < TD5_TG_ROLL_COUNT; i++) {
+        const TG_RollEntry *e = &k_tg_rolls[i];
+        if (!e->name) continue;
+        if (s_rolls.pinned[i]) pinned++; else rolled++;
+        if (i == TD5_TG_ROLL_TWIST) {
+            int mix[3];
+            td5_trackgen_twist_mix(s_rolls.choice[i], mix);
+            TD5_LOG_I(LOG_TAG, "trackgen: [R21 ROLL]   %-12s = %-10s %-6s "
+                      "(%d/%d/%d)", e->name,
+                      td5_trackgen_roll_choice_name(i, s_rolls.choice[i]),
+                      s_rolls.pinned[i] ? "PINNED" : unpinned,
+                      mix[0], mix[1], mix[2]);
+        } else {
+            TD5_LOG_I(LOG_TAG, "trackgen: [R21 ROLL]   %-12s = %-10s %-6s "
+                      "(%d)%s%s", e->name,
+                      td5_trackgen_roll_choice_name(i, s_rolls.choice[i]),
+                      s_rolls.pinned[i] ? "PINNED" : unpinned,
+                      s_rolls.value[i],
+                      s_rolls.pinned[i] && e->knob ? " via " : "",
+                      s_rolls.pinned[i] && e->knob ? e->knob : "");
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "trackgen: [R21 ROLL] ---- %d rolled, %d pinned ----",
+              rolled, pinned);
+}
+
+/* ---- [R21 MOOD] -----------------------------------------------------------
+ * Scaffolding: resolved, latched and logged, consumed by nothing yet. See the
+ * TG_Mood block in the internal header for why it is latched and why grip
+ * carries a floor. Salts continue the R21 range. */
+static TG_Mood s_mood;
+
+static const char *const k_mood_season[]  = { "SPRING", "SUMMER", "AUTUMN",
+                                              "WINTER" };
+static const char *const k_mood_weather[] = { "CLEAR", "OVERCAST", "RAIN",
+                                              "FOG" };
+/* Weather leans dry: rain and fog change how a track reads more than any other
+ * mood axis, so they are the exception rather than half of all tracks. */
+static const unsigned char k_mood_weather_w[] = { 50, 30, 13, 7 };
+
+static void tg_mood_resolve(unsigned int seed)
+{
+    memset(&s_mood, 0, sizeof(s_mood));
+    s_mood.season  = tg_roll_pick_w(tg_roll_hash(seed, 0x21012001u), NULL, 4);
+    s_mood.weather = tg_roll_pick_w(tg_roll_hash(seed, 0x21012002u),
+                                    k_mood_weather_w, 4);
+    /* Derived, not independently rolled: a dry CLEAR track with 80% wetness
+     * would be incoherent, and coherence is the whole point of latching. */
+    s_mood.wetness = (s_mood.weather == 2) ? 60 + (int)(tg_roll_hash(seed, 0x21012003u) % 40u)
+                   : (s_mood.weather == 1) ? (int)(tg_roll_hash(seed, 0x21012003u) % 25u)
+                   : 0;
+    s_mood.fog_pct = (s_mood.weather == 3) ? 50 + (int)(tg_roll_hash(seed, 0x21012004u) % 50u)
+                   : 0;
+    s_mood.wear    = (int)(tg_roll_hash(seed, 0x21012005u) % 101u);
+    /* FLOOR, not a free roll -- grip reaches the simulation. 100 dry, and at
+     * most a 25% reduction fully wet, which is the same posture ALPTOWN's
+     * tarmac decision takes for ice. */
+    s_mood.grip_pct = 100 - (s_mood.wetness * 25) / 100;
+    if (s_mood.grip_pct < 75) s_mood.grip_pct = 75;
+
+    TD5_LOG_I(LOG_TAG, "trackgen: [R21 MOOD] season=%s weather=%s wetness=%d "
+              "fog=%d wear=%d grip=%d%% (not yet consumed by any emitter)",
+              k_mood_season[s_mood.season], k_mood_weather[s_mood.weather],
+              s_mood.wetness, s_mood.fog_pct, s_mood.wear, s_mood.grip_pct);
+}
+
+const TG_Mood *tg_mood(void) { return &s_mood; }
+
+/* ---- [R21 LANDMARKS] ------------------------------------------------------
+ * Scaffolding: the pass runs over the merged biome runs and reports, but the
+ * table is empty, so it places nothing and cannot change a build. Adding a
+ * landmark is a row here plus an emitter; see the TG_Landmark block in the
+ * internal header for the placement contract. */
+static const TG_Landmark k_landmarks[] = {
+    /* name, biome_mask, min_run, once, weight, flat, water, night, salt */
+    { NULL, 0u, 0, 0, 0, 0, 0, 0, 0u }   /* deliberately empty */
+};
+#define TG_LANDMARK_N ((int)(sizeof(k_landmarks) / sizeof(k_landmarks[0])))
+
+void tg_landmarks_place(const TG_NodeList *nl, int nspans)
+{
+    int placed = 0, runs = 0, si;
+
+    if (!nl || nspans <= 0) return;
+
+    /* Walk MERGED runs, not cells: a repeated 300-span city is one run, and a
+     * once_per_track piece must not be offered it twice. */
+    for (si = 0; si < nspans; ) {
+        int a = si, b = si, li;
+        tg_biome_run_bounds(si, &a, &b);
+        if (b < a) break;
+        runs++;
+        for (li = 0; li < TG_LANDMARK_N; li++) {
+            const TG_Landmark *L = &k_landmarks[li];
+            if (!L->name) continue;                 /* empty slot */
+            if (b - a + 1 < L->min_run_spans) continue;
+            if (L->biome_mask &&
+                !(L->biome_mask & (1u << tg_biome_cell_index(a)))) continue;
+            if (L->needs_night && !s_is_night) continue;
+            /* Hash-gated so this consumes no RNG: adding a landmark must not
+             * be able to move the road. */
+            if ((tg_roll_hash(s_gen_seed, L->salt) % 100u)
+                >= (unsigned)L->weight) continue;
+            placed++;
+        }
+        si = b + 1;
+    }
+    TD5_LOG_I(LOG_TAG, "trackgen: [R21 LANDMARK] %d run(s), %d table row(s), "
+              "%d placed", runs, TG_LANDMARK_N - 1, placed);
+}
 
 static unsigned int tg_rand(void)
 {
@@ -913,8 +1572,18 @@ static int tg_adjacent_skip(const TD5_TrackGenSpec *spec, double limit_max)
     const double w_max      = (double)TD5_TG_MAX_LANES * lane_width;
     /* Worst-case need in tg_too_close: both roads at the max width. */
     const double need_max   = w_max + lane_width * 0.25;
-    const double safety     = (spec->curve_safety_x100 > 0)
-                            ? (double)spec->curve_safety_x100 / 100.0
+    /* [R21 SHAPE] This window must stay a track-wide WORST CASE, so it is
+     * sized with the TIGHTEST corner any biome can ask for, not with a local
+     * value. Direction of the effect, since it is not obvious: with
+     * f(r) = (N/L)*asin(u)/u and u = N/2r, asin(u)/u increases in u, so a
+     * SMALLER two_r yields a LARGER skip -- tightening corners GROWS the
+     * exemption window, which is the conservative direction and the correct
+     * one (a tighter arc can double back on itself in fewer spans). Expect the
+     * adjacent_skip= number logged below to RISE when road character is on; if
+     * it does not, this is not wired up. */
+    const int    worst_x100 = tg_shape_worst_safety_x100(spec);
+    const double safety     = (worst_x100 > 0)
+                            ? (double)worst_x100 / 100.0
                             : TD5_TG_CURVE_SAFETY;
     const double two_r      = safety * w_max;    /* 2x the tightest legal radius */
     const int    forced     = td5_env_int("TD5RE_AUTOTRACK_ADJ_SKIP", 0, 0, 4000);
@@ -942,20 +1611,47 @@ static int tg_adjacent_skip(const TD5_TrackGenSpec *spec, double limit_max)
 }
 
 /* Pick a section type from the normalised weights. */
-static TD5_TrackGenSection tg_pick_section(const TD5_TrackGenSpec *spec)
+/* [R21 SHAPE] `si` is the span the section will START on, so the mix can be
+ * the biome's own -- "each biome should have its own twistiness".
+ *
+ * DRAW BUDGET IS UNCHANGED: still exactly one tg_range per pick. What changes
+ * is the MAPPING from roll to section, not the number of draws, so this cannot
+ * shift the RNG stream by itself. (Existing seeds still move, because the four
+ * section kinds consume different numbers of draws further down and the mix
+ * changes which kind comes up -- that is expected and already true of any
+ * generator change. What must hold, and is tested, is that OFF is
+ * byte-identical.) */
+static TD5_TrackGenSection tg_pick_section(const TD5_TrackGenSpec *spec, int si)
 {
+    int w[TD5_TG_SECTION_COUNT];
     int total = 0, i, roll;
-    for (i = 0; i < TD5_TG_SECTION_COUNT; i++) {
-        int w = spec->weight[i];
-        if (w > 0) total += w;
+
+    for (i = 0; i < TD5_TG_SECTION_COUNT; i++) w[i] = spec->weight[i];
+
+    if (tg_r21_road_char()) {
+        static const int k_field[TD5_TG_SECTION_COUNT] = {
+            TG_SF_W_STRAIGHT, TG_SF_W_CURVE, TG_SF_W_ACUTE, TG_SF_W_DUAL
+        };
+        for (i = 0; i < TD5_TG_SECTION_COUNT; i++)
+            w[i] = w[i] * tg_shape_lerp_pct(si, k_field[i],
+                                            TD5_TG_BIOME_BLEND) / 100;
+    }
+
+    for (i = 0; i < TD5_TG_SECTION_COUNT; i++) if (w[i] > 0) total += w[i];
+    /* A biome could in principle scale every weight to zero; fall back to the
+     * spec's own mix rather than silently returning nothing but straights. */
+    if (total <= 0) {
+        for (i = 0; i < TD5_TG_SECTION_COUNT; i++) {
+            w[i] = spec->weight[i];
+            if (w[i] > 0) total += w[i];
+        }
     }
     if (total <= 0) return TD5_TG_STRAIGHT;
     roll = tg_range(0, total - 1);
     for (i = 0; i < TD5_TG_SECTION_COUNT; i++) {
-        int w = spec->weight[i];
-        if (w <= 0) continue;
-        if (roll < w) return (TD5_TrackGenSection)i;
-        roll -= w;
+        if (w[i] <= 0) continue;
+        if (roll < w[i]) return (TD5_TrackGenSection)i;
+        roll -= w[i];
     }
     return TD5_TG_STRAIGHT;
 }
@@ -1003,7 +1699,17 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
      * to the pre-lanes generator. */
     const int    lane_vary = td5_env_flag_on("TD5RE_AUTOTRACK_LANE_VARY");
     const int    lanes_min = td5_env_int("TD5RE_AUTOTRACK_LANES_MIN", 2, 1, TD5_TG_MAX_LANES);
-    const int    lanes_max = td5_env_int("TD5RE_AUTOTRACK_LANES_MAX", 8, 1, TD5_TG_MAX_LANES);
+    /* [R21] Ceiling is the int16 VERTEX OFFSET, not the vertex count. The last
+     * row of an origin block sits block*span_length down-track plus half the
+     * widest road, and the hard check in tg_emit_strip fails the whole build
+     * past 32767: at block 16 and span_length 1500 that is
+     * 24000 + width/2 < 32767, i.e. width < 17534 == 11.7 lanes. Clamped to 10
+     * (15000, leaving headroom for rounding and the branch corridor's own bow)
+     * so raising this knob degrades gracefully instead of failing the build
+     * with a message about vertex offsets. Default 8 is unaffected. */
+    const int    lanes_max = td5_env_int("TD5RE_AUTOTRACK_LANES_MAX", 8, 1,
+                                         TD5_TG_MAX_LANES > 10
+                                         ? 10 : TD5_TG_MAX_LANES);
     const int    lane_pct  = td5_env_int("TD5RE_AUTOTRACK_LANE_PCT", 35, 0, 100);
     const double lane_w    = (double)spec->lane_width;
     int    cur_lanes = spec->lanes;   /* lane count of the road being walked */
@@ -1055,7 +1761,7 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
     int attempts = 0;
 
     while (nl->count < want_nodes) {
-        TD5_TrackGenSection sec = tg_pick_section(spec);
+        TD5_TrackGenSection sec = tg_pick_section(spec, nl->count);
         int    len_spans;
         double target_width = base_width;
         double radius = 0.0;
@@ -1085,6 +1791,18 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
             const unsigned int bh = (unsigned)nl->count * 2654435761u;
             if ((bh >> 28) == 0u) sec = TD5_TG_ACUTE;   /* ~1 city section in 16 */
         }
+        /* [R21 SHAPE] The same idea, but driven by k_biome_road's
+         * block_turn_1_in instead of a hardcoded "is it CITY" test and a
+         * hardcoded 1-in-16 -- which is what lets ALPTOWN have block corners
+         * too, at its own rate. Keeps all four properties the R3 charter above
+         * demands: hard cell index, position hash rather than the shared RNG,
+         * the attempts escape hatch still able to win, and a kill knob. */
+        if (attempts < 8 && tg_r21_road_char()) {
+            const int n = tg_shape_pct(nl->count, TG_SF_BLOCK_TURN);
+            if (n > 0 &&
+                (tg_roll_hash_at(0x21010101u, nl->count) % (unsigned)n) == 0u)
+                sec = TD5_TG_ACUTE;
+        }
 
         if (attempts >= 12) sec = TD5_TG_STRAIGHT;   /* try to escape */
 
@@ -1104,7 +1822,12 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
                 /* Tight: sit just above the curvature-safety floor for the
                  * CURRENT width, so a hairpin never self-intersects the road
                  * surface. */
-                radius = (width * 0.5) * (spec->curve_safety_x100 / 100.0)
+                /* [R21 SHAPE] per-BIOME tightness: same tg_frand() draw, a
+                 * biome-scaled multiplier. Cities get hard block corners,
+                 * FIELDS sweeping ones. */
+                radius = (width * 0.5)
+                       * (tg_shape_safety_x100(nl->count,
+                                               spec->curve_safety_x100) / 100.0)
                        * (1.0 + tg_frand() * 0.6);
                 break;
 
@@ -1155,9 +1878,16 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
                 want = cur_lanes + 2; side = 2;
             } else if (tg_range(0, 99) < lane_pct) {
                 /* Random walk, biased back toward the base count so a long
-                 * track does not ratchet to the ceiling or the floor. */
-                const int up = (cur_lanes < spec->lanes) ? (tg_range(0, 99) < 70)
-                             : (cur_lanes > spec->lanes) ? (tg_range(0, 99) < 30)
+                 * track does not ratchet to the ceiling or the floor.
+                 *
+                 * [R21 SHAPE] the count it reverts toward is the BIOME's own
+                 * typical width, not one number for the whole track, so city
+                 * stretches settle narrow and highway biomes settle wide. Same
+                 * draws in the same order -- only the comparison target moves. */
+                const int aim = tg_shape_lane_aim(seam, spec->lanes,
+                                                  lanes_min, lanes_max);
+                const int up = (cur_lanes < aim) ? (tg_range(0, 99) < 70)
+                             : (cur_lanes > aim) ? (tg_range(0, 99) < 30)
                              : (tg_rand() & 1);
                 const int both = (tg_range(0, 99) < 30);
                 want = cur_lanes + (up ? 1 : -1) * (both ? 2 : 1);
@@ -1236,7 +1966,15 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
                  * a bend that was legal at 4 lanes can be illegal once a
                  * dual-lane taper has widened the road under it. */
                 if (radius > 0.0) {
-                    double floor_r = (width * 0.5) * (spec->curve_safety_x100 / 100.0);
+                    /* [R21 SHAPE] Keyed on the node about to be pushed, not on
+                     * the section start: a section can straddle a cell
+                     * boundary, and the floor has to follow the ground it is
+                     * actually on. tg_shape_safety_x100 ramps across the run
+                     * edge so the radius does not step mid-arc. */
+                    double floor_r = (width * 0.5)
+                                   * (tg_shape_safety_x100(
+                                          nl->count,
+                                          spec->curve_safety_x100) / 100.0);
                     double r = radius < floor_r ? floor_r : radius;
                     double dh = (double)dir * (span_len / r);
                     /* [R3 item 15] no sharp turns on a bridge. A deliberate
@@ -1536,11 +2274,66 @@ static int tg_r8_relief_enabled(void)
 /* Two summed sines, a raised-cosine hump over each deliberate bridge run, then
  * a global rescale so no span exceeds MAX_GRADE.
  * Mirrors apply_road_elevation() in td5_trackgen.py, plus the bridge humps. */
+/* ==========================================================================
+ * [R21 GRADE] MAKE THE GRADIENT ROW ACTUALLY PRODUCE CLIMBS
+ *
+ * THE REPORT: "steepness is not making very steep climbs."
+ *
+ * ROOT CAUSE, MEASURED (seed 5150, before this change):
+ *   GRADIENT=STANDARD  worst grade 0.1199 (cap 0.119)  RANGE 34007
+ *   GRADIENT=SEVERE    worst grade 0.1279 (cap 0.199)  RANGE 34007  <- same!
+ * The row is a pure CAP. A cap can only ever REDUCE |dy|; nothing in the
+ * profile drives slope toward it, so moving STANDARD -> SEVERE left the height
+ * range byte-for-byte identical and moved the worst grade by 0.008 -- and even
+ * that came from the bridge crown budget being unclamped, not from terrain.
+ * The old "global rescale" is not the culprit either: it only fires when HILLS
+ * is raised (grep race.log for `rescaled`), which is a different complaint.
+ *
+ * THE FIX IS A GAIN STAGE, and the cap stays as the safety bound:
+ *   1. DRIVE. Measure the profile's p90 per-span slope and scale the whole
+ *      profile so p90 lands on the target the row asked for. p90 and NOT the
+ *      max: keying on the max is exactly what the old rescale did, and one
+ *      freak span then set the scale for the entire track.
+ *   2. SOFT LIMIT. Clip each span's slope with a tanh knee against a per-span
+ *      cap. tanh < 1 means |dy| < cap ALWAYS, so the safety bound becomes a
+ *      theorem instead of something enforced after the fact by a global
+ *      rescale -- which is what stops one steep span from flattening the map.
+ *      Spans under the knee are bit-unchanged, and value and first derivative
+ *      match at the knee so no kink appears there.
+ *   3. PER-BIOME. The cap is scaled by k_biome_road's grade_pct and ramped
+ *      across run edges, so ALPINE keeps steep pitches where CITY is clipped
+ *      gentle. Applying the biome factor to the CAP rather than to the gain is
+ *      what avoids a discontinuity: the limiter is already a smooth per-span
+ *      function, whereas a per-span gain on y would step at every boundary.
+ *
+ * The y=0 start anchor survives untouched: the gain multiplies y[0]=0, and the
+ * limiter integrates from y'[0]=y[0]. The far END of the profile does drift
+ * where clipping bit, which is intended -- a clipped hill is a shorter hill.
+ * ========================================================================== */
+#define TD5_TG_R21_GRADE_HEADROOM 1.15  /* cap sits just above the drive aim  */
+#define TD5_TG_R21_GRADE_KNEE     0.70  /* clip only the top 30% of the band  */
+#define TD5_TG_R21_GRADE_ABSMAX   0.20  /* absolute ceiling, any biome        */
+
+/* DEFAULT ON: without the drive the GRADIENT row cannot make a climb at all,
+ * which is the whole point of the round. TD5RE_R21_GRADE=0 restores the old
+ * cap-only behaviour (and the global rescale) byte-identically. */
+static int tg_r21_grade_drive(void) { return td5_env_flag_on("TD5RE_R21_GRADE"); }
+
+static int tg_grade_cmp(const void *a, const void *b)
+{
+    const double da = *(const double *)a, db = *(const double *)b;
+    return (da > db) - (da < db);
+}
+
 void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
 {
     const double max_grade = spec->max_grade_x1000 / 1000.0;
     double amp = (double)spec->elevation_amplitude;
     double ph1, ph2, worst = 0.0;
+    /* What the [R8 SHAPE] line should call the cap. Once [R21 GRADE] is on,
+     * max_grade is the AIM and the real bound sits HEADROOM above it, so
+     * printing max_grade made a legal 0.1378 read as a breach of "cap 0.119". */
+    double eff_cap = max_grade;
     int waves, i;
 
     /* Every y on the track is about to change (or, on the early-out below, has
@@ -1684,11 +2477,127 @@ void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
         double g  = fabs(dy) / (double)spec->span_length;
         if (g > worst) worst = g;
     }
-    if (max_grade > 0.0 && worst > max_grade) {
-        double k = max_grade / worst;
-        for (i = 0; i < nl->count; i++) nl->v[i].y *= k;
-        TD5_LOG_I(LOG_TAG, "trackgen: elevation rescaled by %.3f (grade %.3f -> %.3f)",
-                  k, worst, max_grade);
+    {
+        int drove = 0;
+
+        if (tg_r21_grade_drive() && max_grade > 0.0 && nl->count > 3) {
+            const double span_len = (double)spec->span_length;
+            const double target   = max_grade;     /* the row is now an AIM.. */
+            const double cap_base = target * TD5_TG_R21_GRADE_HEADROOM;
+                                                   /* ..the cap sits above it */
+            double *g = (double *)malloc(sizeof(double) * (size_t)nl->count);
+
+            eff_cap = (cap_base < TD5_TG_R21_GRADE_ABSMAX)
+                    ? cap_base : TD5_TG_R21_GRADE_ABSMAX;
+
+            if (g) {
+                double p50, p90, p99, gmax, k = 1.0, asc = 0.0, dsc = 0.0;
+                double prev_orig, prev_new;
+                /* The per-span cap is scaled per BIOME, so a single number
+                 * cannot describe it. Track the range actually used: reporting
+                 * only the base made a legal ALPINE span (0.1999 under its own
+                 * 0.200 cap) read as a breach of "cap 0.137". */
+                double cap_lo = 1.0e9, cap_hi = 0.0;
+                int n = 0, hits = 0, steep = 0, run = 0, longest = 0;
+
+                for (i = 1; i < nl->count; i++)
+                    g[n++] = fabs(nl->v[i].y - nl->v[i - 1].y) / span_len;
+                qsort(g, (size_t)n, sizeof(double), tg_grade_cmp);
+                p50  = g[n / 2];
+                p90  = g[(n * 9) / 10];
+                p99  = g[(n * 99) / 100];
+                gmax = g[n - 1];
+
+                /* 1. DRIVE. Gain the whole profile so its p90 slope lands on
+                 * the target. This is the part that was missing: without it a
+                 * higher GRADIENT only raised a ceiling nothing reached. */
+                if (p90 > 1e-6) k = target / p90;
+                if (k < 0.25) k = 0.25;      /* never violent in either  */
+                if (k > 6.0)  k = 6.0;       /* direction                */
+                for (i = 0; i < nl->count; i++) nl->v[i].y *= k;
+
+                /* 2+3. SOFT LIMIT against a per-biome, per-span cap. Reads the
+                 * ORIGINAL difference and writes the INTEGRATED one, so it has
+                 * to carry both the previous input and the previous output --
+                 * differencing in place would feed each clipped value back in
+                 * and drag the whole tail down. */
+                prev_orig = nl->v[0].y;
+                prev_new  = nl->v[0].y;
+                for (i = 1; i < nl->count; i++) {
+                    const double cur_orig = nl->v[i].y;
+                    double d    = cur_orig - prev_orig;
+                    double capi = cap_base
+                                * (double)tg_shape_lerp_pct(i, TG_SF_GRADE,
+                                              TD5_TG_BIOME_BLEND) / 100.0;
+                    double lim, knee, ad;
+
+                    if (capi > TD5_TG_R21_GRADE_ABSMAX)
+                        capi = TD5_TG_R21_GRADE_ABSMAX;
+                    if (capi < cap_lo) cap_lo = capi;
+                    if (capi > cap_hi) cap_hi = capi;
+                    lim  = capi * span_len;
+                    knee = TD5_TG_R21_GRADE_KNEE * lim;
+                    ad   = fabs(d);
+                    if (ad > knee && lim > knee) {
+                        const double nd = knee + (lim - knee)
+                                        * tanh((ad - knee) / (lim - knee));
+                        d = (d < 0.0) ? -nd : nd;
+                        hits++;
+                    }
+                    prev_new  += d;
+                    nl->v[i].y = prev_new;
+                    prev_orig  = cur_orig;
+
+                    if (d >= 0.0) asc += d; else dsc -= d;
+                    /* A steep CLIMB is a run, not a span -- this is the number
+                     * that matches what a driver feels. */
+                    if (fabs(d) / span_len > TD5_TG_R21_GRADE_KNEE * capi) {
+                        steep++;
+                        if (++run > longest) longest = run;
+                    } else {
+                        run = 0;
+                    }
+                }
+
+                n = 0;
+                for (i = 1; i < nl->count; i++)
+                    g[n++] = fabs(nl->v[i].y - nl->v[i - 1].y) / span_len;
+                qsort(g, (size_t)n, sizeof(double), tg_grade_cmp);
+
+                /* p90 is the number to judge this on. The old [R8 SHAPE] line
+                 * cannot show the win: worst grade was pinned at the cap before
+                 * and is pinned just under it after. */
+                if (cap_lo > cap_hi) cap_lo = cap_hi;   /* no spans clipped */
+                eff_cap = cap_hi;   /* the REAL bound, for [R8 SHAPE] below */
+                TD5_LOG_I(LOG_TAG, "trackgen: [R21 GRADE] drive x%.2f -> p50 "
+                          "%.4f p90 %.4f p99 %.4f max %.4f (aim %.3f, per-biome "
+                          "cap %.3f..%.3f)",
+                          k, g[n / 2], g[(n * 9) / 10], g[(n * 99) / 100],
+                          g[n - 1], target, cap_lo, cap_hi);
+                TD5_LOG_I(LOG_TAG, "trackgen: [R21 GRADE] was p50 %.4f p90 "
+                          "%.4f p99 %.4f max %.4f; the old global rescale would "
+                          "have been x%.3f", p50, p90, p99, gmax,
+                          (worst > max_grade) ? max_grade / worst : 1.0);
+                TD5_LOG_I(LOG_TAG, "trackgen: [R21 GRADE] limiter hit %d/%d "
+                          "spans, steep %d, longest steep RUN %d spans, total "
+                          "ascent %.0f descent %.0f", hits, n, steep, longest,
+                          asc, dsc);
+                free(g);
+                drove = 1;
+            } else {
+                TD5_LOG_W(LOG_TAG, "trackgen: [R21 GRADE] allocation failed; "
+                          "falling back to the global rescale");
+            }
+        }
+
+        /* Legacy global max-norm rescale. Kept as the OFF path so the knob is
+         * measurable one change at a time; it is also the fallback above. */
+        if (!drove && max_grade > 0.0 && worst > max_grade) {
+            double k = max_grade / worst;
+            for (i = 0; i < nl->count; i++) nl->v[i].y *= k;
+            TD5_LOG_I(LOG_TAG, "trackgen: elevation rescaled by %.3f (grade %.3f -> %.3f)",
+                      k, worst, max_grade);
+        }
     }
 
     /* [R8 SHAPE] The two NUMBERS this area is judged on, logged unconditionally
@@ -1708,7 +2617,7 @@ void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
         }
         TD5_LOG_I(LOG_TAG, "trackgen: [R8 SHAPE] relief=%d height min %.0f max "
                   "%.0f RANGE %.0f, worst grade %.4f (cap %.3f)",
-                  tg_r8_relief_enabled(), lo, hi, hi - lo, wg, max_grade);
+                  tg_r8_relief_enabled(), lo, hi, hi - lo, wg, eff_cap);
     }
 
     /* [R17 WATER item 1] GLOBAL WATER LEVEL + ROUTE FLOOR CLAMP.
@@ -3941,6 +4850,7 @@ int td5_trackgen_preview_route(const TD5_TrackGenSpec *spec,
                                const TD5_TrackGenPreviewSink *sink,
                                TD5_TrackGenPreviewStats *out_stats)
 {
+    TD5_TrackGenSpec eff;
     TG_NodeList nl;
     TG_Buf strip;
     int tally[TD5_TG_SECTION_COUNT];
@@ -3952,6 +4862,22 @@ int td5_trackgen_preview_route(const TD5_TrackGenSpec *spec,
     memset(&strip, 0, sizeof(strip));
     memset(tally, 0, sizeof(tally));
     if (out_stats) memset(out_stats, 0, sizeof(*out_stats));
+
+    /* [R21 ROLLS] The preview has to walk the SAME road the race will build, so
+     * it resolves and folds the rolls exactly as td5_trackgen_regenerate does.
+     * Miss this and the studio draws the shipped defaults while the race drives
+     * the rolls, with nothing but a hand comparison to catch it.
+     *
+     * `spec` is const (the studio owns that struct), so fold into a local copy
+     * and re-aim the pointer -- every spec-> read below then sees the folded
+     * values with no further edits. Latching into the shared roll table is safe
+     * here for exactly the reason tg_srand and the biome grid already are: a
+     * preview and a build must never overlap, which the joins in
+     * td5_asset_load_level and td5_tgstream_cancel_join enforce. */
+    eff = *spec;
+    tg_rolls_resolve(eff.seed);
+    tg_rolls_apply_spec(&eff);
+    spec = &eff;
 
     /* Same preamble as build_level, minus the _mkdir. */
     s_gen_seed = spec->seed;
@@ -4022,6 +4948,12 @@ int td5_trackgen_regenerate_main_spans(unsigned int seed,
     td5_trackgen_default_spec(&spec);
     td5_trackgen_apply_config(&spec);
     spec.seed = seed;
+    /* [R21 ROLLS] This path re-derives the main spans for the streaming
+     * consumer and its documented contract is that the bytes provably match
+     * what the seed produced. Without the same fold the road here would be
+     * built from the shipped defaults while the race used the rolls. */
+    tg_rolls_resolve(seed);
+    tg_rolls_apply_spec(&spec);
 
     memset(&nl, 0, sizeof(nl));
     memset(&spans, 0, sizeof(spans));
@@ -4230,6 +5162,11 @@ int td5_trackgen_regenerate(unsigned int seed)
     TD5_TrackGenSpec spec;
     int spans = 0;
 
+    /* [R21 ROLLS] Before the knobs are read: hand back anything the LAST build
+     * published, or apply_config would read a previous roll as if a human had
+     * pinned it. */
+    tg_rolls_unpublish();
+
     td5_trackgen_default_spec(&spec);
     td5_trackgen_apply_config(&spec);
 
@@ -4248,6 +5185,23 @@ int td5_trackgen_regenerate(unsigned int seed)
      * launch calls, so this is "on entering the race" -- and BEFORE the build,
      * so every emitter that asks td5_trackgen_is_night() during it agrees. */
     tg_decide_night(seed);
+
+    /* [R21 ROLLS] Resolve the randomized parameters and fold them into the spec
+     * HERE: after the seed is final, before the stamp is hashed, before the
+     * build. Two consequences worth stating.
+     *
+     * spec_hash BELOW COVERS THEM. tg_rolls_apply_spec writes into `spec`, and
+     * want.spec_hash is taken from the finished struct, so a different roll is
+     * a different stamp and the REUSE path can never serve a track that does
+     * not match the seed. That is why the registry needs no TG_STAMP_VERSION
+     * bump -- and why a roll must stay a pure function of seed + environment,
+     * both of which the stamp already covers.
+     *
+     * The report is emitted BEFORE the early return below, so a reused build
+     * still says what it is; it otherwise prints no inventory at all. */
+    tg_rolls_resolve(seed);
+    tg_rolls_apply_spec(&spec);
+    tg_rolls_report();
 
     /* [R14 GENPERF 2026-09-03] Identical build already on disk? Then the only
      * work is the cheap prologue the runtime depends on (biome grid, night,

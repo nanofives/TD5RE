@@ -7161,8 +7161,13 @@ typedef struct {
 static const int  k_at_len_v[]  = { 600, 1200, 1800, 2400, 3000 };
 static const char *const k_at_len_n[] = { "SHORT", "MEDIUM", "LONG",
                                           "VERY LONG", "MARATHON" };
-static const int  k_at_lane_v[] = { 2, 3, 4 };
-static const char *const k_at_lane_n[] = { "2", "3", "4" };
+/* [R21] How often a section changes its lane count -- replaces the old LANES
+ * row, which set one count for the whole track. Values must match
+ * k_tgr_lanepct_v in td5_trackgen.c; the arity check at screen entry asserts
+ * the counts agree. */
+static const int  k_at_lanepct_v[] = { 0, 15, 35, 60, 85 };
+static const char *const k_at_lanepct_n[] = { "UNIFORM", "RARE", "SOME",
+                                              "OFTEN", "CONSTANT" };
 static const int  k_at_elev_v[] = { 0, 3000, 6000, 12000, 20000 };
 static const char *const k_at_elev_n[] = { "FLAT", "LOW", "MEDIUM",
                                            "HIGH", "EXTREME" };
@@ -7178,8 +7183,14 @@ static const int k_at_twist_mix[4][3] = {   /* straight, curve, acute */
     { 20, 45, 35 },
     { 10, 40, 50 }
 };
-static const int  k_at_night_v[] = { 0, 1, 2 };
-static const char *const k_at_night_n[] = { "DAY", "NIGHT", "RANDOM" };
+/* [R21] The explicit third RANDOM value is GONE: every row now gets RANDOM as
+ * a virtual index 0, and keeping this one would have listed it twice. The knob
+ * still accepts its long-standing 2 to mean "roll it" -- the registry owns
+ * that rule, which is why at_row_index asks it rather than testing values
+ * here. The row's `def` stays 2 for the same reason: pre-R21, unset ALREADY
+ * meant random for this one row, so there is no legacy constant to pin. */
+static const int  k_at_night_v[] = { 0, 1 };
+static const char *const k_at_night_n[] = { "DAY", "NIGHT" };
 static const int  k_at_blend_v[] = { 0, 10, 20, 40 };
 static const char *const k_at_blend_n[] = { "SHARP", "SHORT", "NORMAL", "LONG" };
 static const int  k_at_off_on_v[] = { 0, 1 };
@@ -7215,15 +7226,20 @@ static const char *const k_at_reach_n[] = { "NEAR", "MEDIUM", "FAR",
                                             "VERY FAR" };
 /* --- STRUCTURES -------------------------------------------------------- */
 static const int  k_at_rail_v[] = { 20, 35, 50, 90, 160 };
+/* "BENDS ONLY" and not "TIGHT BENDS ONLY": with the '~' marker the value
+ * column fits ~12 characters before it reaches the preview panel. */
 static const char *const k_at_rail_n[] = { "EVERYWHERE", "FREQUENT",
                                            "STANDARD", "SPARSE",
-                                           "TIGHT BENDS ONLY" };
+                                           "BENDS ONLY" };
 /* --- MOOD -------------------------------------------------------------- */
 static const int  k_at_sky_v[] = { -1, 12, 24, 36, 48, 60 };
 static const char *const k_at_sky_n[] = { "NONE", "12", "24", "36", "48",
                                           "60" };
 
-#define AT_ROW_TWIST 3   /* index within k_at_rows, asserted at init */
+/* Index within k_at_rows, asserted at screen entry. [R21] 3 -> 2 when the
+ * LANES row was removed: this is a raw index, so it MUST move whenever a row
+ * before TWISTINESS is added or dropped. */
+#define AT_ROW_TWIST 2
 
 /* Every `def` below is the generator's own unset behaviour, verified against
  * the call site in td5_trackgen.c: td5_env_flag_on -> 1, td5_env_flag_off -> 0,
@@ -7232,8 +7248,16 @@ static const AT_Row k_at_rows[] = {
     /* ---------------------------------------------------------- ROUTE --- */
     { AT_SECT_ROUTE, AT_KIND_SEED,   "SEED",         "TD5RE_AUTOTRACK_SEED",        NULL,          NULL,          0, 0    },
     { AT_SECT_ROUTE, AT_KIND_OPTION, "LENGTH",       "TD5RE_AUTOTRACK_SPANS",       k_at_len_v,    k_at_len_n,    5, 1800 },
-    { AT_SECT_ROUTE, AT_KIND_OPTION, "LANES",        "TD5RE_AUTOTRACK_LANES",       k_at_lane_v,   k_at_lane_n,   3, 4    },
+    /* [R21] The LANES row is GONE. It set one lane count for the whole track,
+     * which is the wrong control: the generator already varies lane count per
+     * SECTION ([LANES] in tg_build_centerline), and R21 makes the count each
+     * section reverts toward the biome's own typical width -- narrow city
+     * streets, wide highway biomes. How often that varies is the LANE VARIETY
+     * row below; the base count stays a dev pin on TD5RE_AUTOTRACK_LANES,
+     * which is clamped to 2..4 for reasons the apply_config comment gives.
+     * Do not re-add this row without reading that. */
     { AT_SECT_ROUTE, AT_KIND_OPTION, "TWISTINESS",   NULL,                          NULL,          k_at_twist_n,  4, 1    },
+    { AT_SECT_ROUTE, AT_KIND_OPTION, "LANE VARIETY", "TD5RE_AUTOTRACK_LANE_PCT",    k_at_lanepct_v,k_at_lanepct_n,5, 35   },
     { AT_SECT_ROUTE, AT_KIND_OPTION, "DUAL LANES",   "TD5RE_AUTOTRACK_PCT_DUAL",    k_at_dual_v,   k_at_dual_n,   5, 10   },
     { AT_SECT_ROUTE, AT_KIND_OPTION, "CORNERS",      "TD5RE_AUTOTRACK_CURVESAFE",   k_at_safe_v,   k_at_safe_n,   5, 180  },
     { AT_SECT_ROUTE, AT_KIND_OPTION, "GRADIENT",     "TD5RE_AUTOTRACK_GRADE",       k_at_grade_v,  k_at_grade_n,  5, 120  },
@@ -7279,7 +7303,7 @@ static const AT_Row k_at_rows[] = {
     { AT_SECT_NATURE, AT_KIND_OPTION, "CLEAR VERGES", "TD5RE_AUTOTRACK_FLORA_CLEAR", k_at_off_on_v, k_at_off_on_n, 2, 1 },
     { AT_SECT_NATURE, AT_KIND_OPTION, "MIRROR TREES", "TD5RE_AUTOTRACK_TREE_MIRROR", k_at_off_on_v, k_at_off_on_n, 2, 1 },
     /* ------------------------------------------------------------ MOOD --- */
-    { AT_SECT_MOOD, AT_KIND_OPTION, "TIME OF DAY",  "TD5RE_AUTOTRACK_NIGHT",          k_at_night_v,  k_at_night_n,  3, 2 },
+    { AT_SECT_MOOD, AT_KIND_OPTION, "TIME OF DAY",  "TD5RE_AUTOTRACK_NIGHT",          k_at_night_v,  k_at_night_n,  2, 2 },
     { AT_SECT_MOOD, AT_KIND_OPTION, "SNOW",         "TD5RE_AUTOTRACK_SNOW",           k_at_off_on_v, k_at_off_on_n, 2, 1 },
     { AT_SECT_MOOD, AT_KIND_OPTION, "SKY",          "TD5RE_AUTOTRACK_SKY_ANIM",       k_at_sky_v,    k_at_sky_n,    6, 36 },
     { AT_SECT_MOOD, AT_KIND_OPTION, "LAMP POSTS",   "TD5RE_AUTOTRACK_LAMP_POSTS",     k_at_off_on_v, k_at_off_on_n, 2, 1 },
@@ -7291,12 +7315,57 @@ static const AT_Row k_at_rows[] = {
 
 #define AT_ROWS ((int)(sizeof(k_at_rows) / sizeof(k_at_rows[0])))
 
+/* ---- [R21 ROLLS] RANDOM as every row's default --------------------------
+ * A row's value list gains RANDOM as a VIRTUAL index 0; the concrete choices
+ * shift to 1..n. Done this way rather than by prepending -2 to a dozen value
+ * tables and bumping a dozen `n` fields, which is the same change spread over
+ * far more places that can go wrong independently.
+ *
+ * The knob's own spelling of RANDOM is ABSENCE. That is what keeps everything
+ * else consistent: every td5_env_* treats unset as its default, at_fav_capture
+ * omits unset knobs, and tg_env_hash skips absent names, so a row left at
+ * RANDOM hashes identically to one never touched and the build cache still
+ * hits.
+ *
+ * `def` in the row table keeps its old meaning -- the generator's PRE-R21
+ * unset behaviour -- but it is no longer what the screen shows. It is now used
+ * for exactly one thing: replaying a favourite saved before R21, where an
+ * omitted knob meant that constant rather than "roll it". */
+#define AT_RANDOM TD5_TG_ROLL_RANDOM
+
 static void at_setenv(const char *knob, int value)
 {
     char buf[24];
+    if (value == AT_RANDOM) { _putenv_s(knob, ""); return; }  /* removes it */
     snprintf(buf, sizeof(buf), "%d", value);
     _putenv_s(knob, buf);
 }
+
+/* Which registry entry owns this row's knob, or -1. Matched by knob NAME so
+ * the row table needs no parallel id column to keep in step. */
+static int at_roll_id_for(int row)
+{
+    const AT_Row *r = &k_at_rows[row];
+    int id;
+
+    if (r->kind == AT_KIND_SEED) return -1;
+    if (!r->knob) return (row == AT_ROW_TWIST) ? TD5_TG_ROLL_TWIST : -1;
+    for (id = 0; id < TD5_TG_ROLL_COUNT; id++) {
+        const char *k = td5_trackgen_roll_knob(id);
+        if (k && !strcmp(k, r->knob)) return id;
+    }
+    return -1;
+}
+
+/* Number of selectable entries including the virtual RANDOM at index 0. A row
+ * with no registry entry cannot be randomized, so it keeps its plain list. */
+static int at_row_n(int row)
+{
+    const AT_Row *r = &k_at_rows[row];
+    return (at_roll_id_for(row) >= 0) ? r->n + 1 : r->n;
+}
+
+static int at_row_has_random(int row) { return at_roll_id_for(row) >= 0; }
 
 /* ---- section view -------------------------------------------------------
  * Only the active section's rows are built as buttons, so the existing
@@ -7311,11 +7380,22 @@ static int s_at_fav_mode;                /* 1 = the favourites picker is open */
 
 static void at_rebuild_view(void)
 {
-    int r;
+    int r, want = 0;
     s_at_view_n = 0;
-    for (r = 0; r < AT_ROWS && s_at_view_n < AT_VIS_ROWS; r++)
-        if (k_at_rows[r].sect == (unsigned char)s_at_sect)
-            s_at_view[s_at_view_n++] = r;
+    for (r = 0; r < AT_ROWS; r++) {
+        if (k_at_rows[r].sect != (unsigned char)s_at_sect) continue;
+        want++;
+        if (s_at_view_n < AT_VIS_ROWS) s_at_view[s_at_view_n++] = r;
+    }
+    /* A section with more rows than slots used to drop the remainder in
+     * SILENCE, so a newly added row simply did not appear and nothing said
+     * why. ROUTE now sits at exactly AT_VIS_ROWS, so the next row added there
+     * would hit this. */
+    if (want > AT_VIS_ROWS)
+        TD5_LOG_E(LOG_TAG, "AutoTrackOptions: section %s has %d rows but only "
+                  "%d fit -- %d row(s) are INVISIBLE; raise AT_VIS_ROWS or "
+                  "split the section", k_at_sect_n[s_at_sect], want,
+                  AT_VIS_ROWS, want - AT_VIS_ROWS);
 }
 
 /* Current option index for a row. Reads the LIVE env var so a knob set on the
@@ -7325,51 +7405,86 @@ static void at_rebuild_view(void)
  * not read as "SHORT". */
 static int at_row_index(int row)
 {
-    const AT_Row *r = &k_at_rows[row];
+    const AT_Row *r  = &k_at_rows[row];
+    const int    id  = at_roll_id_for(row);
+    const int    off = (id >= 0) ? 1 : 0;   /* RANDOM sits at index 0 */
     const char *e;
-    int cur, i, best = 0;
+    int cur, i, best;
 
     if (r->kind == AT_KIND_SEED) return 0;   /* not an option list */
+
+    /* A value the GENERATOR published for its own roll is not a player's pin.
+     * Without this test the rolled value would read back as a concrete setting
+     * and the row would stop saying RANDOM after a single race. */
+    if (id >= 0 && td5_trackgen_roll_is_owned(id)) return 0;
+
+    /* The registry owns every spelling of "random" -- unset, the -2 sentinel,
+     * and TIME OF DAY's 2 -- so ask it instead of reimplementing those rules
+     * here. Reimplementing them is what made the TIME OF DAY row list RANDOM
+     * twice, which the arity check at screen entry caught. */
+    if (id >= 0 && !td5_trackgen_roll_is_pinned_now(id)) return 0;
 
     if (row == AT_ROW_TWIST) {
         int st = td5_env_int("TD5RE_AUTOTRACK_PCT_STRAIGHT", -1, -1, 100);
         int ac = td5_env_int("TD5RE_AUTOTRACK_PCT_ACUTE",    -1, -1, 100);
-        if (st < 0 && ac < 0) return r->def;
         for (i = 0; i < r->n; i++)
             if (k_at_twist_mix[i][0] == st && k_at_twist_mix[i][2] == ac)
-                return i;
-        return r->def;
+                return i + off;
+        return 0;
     }
 
     e = getenv(r->knob);
-    cur = (e && e[0]) ? atoi(e) : r->def;
+    cur  = (e && e[0]) ? atoi(e) : r->def;
+    best = off;                       /* unrecognised -> the def's own index */
     for (i = 0; i < r->n; i++) {
-        if (r->values[i] == cur) return i;
-        if (r->values[i] == r->def) best = i;
+        if (r->values[i] == cur) return i + off;
+        if (r->values[i] == r->def) best = i + off;
     }
     return best;
 }
 
 static void at_row_apply(int row, int delta)
 {
-    const AT_Row *r = &k_at_rows[row];
-    int idx;
+    const AT_Row *r   = &k_at_rows[row];
+    const int     id  = at_roll_id_for(row);
+    const int     off = (id >= 0) ? 1 : 0;
+    const int     n   = at_row_n(row);
+    int idx, vi;
 
     if (r->kind == AT_KIND_SEED) return;   /* edited, not cycled */
+    if (n <= 0) return;
 
     idx = at_row_index(row) + delta;
-    while (idx < 0) idx += r->n;
-    idx %= r->n;
+    while (idx < 0) idx += n;
+    idx %= n;
 
-    if (row == AT_ROW_TWIST) {
-        at_setenv("TD5RE_AUTOTRACK_PCT_STRAIGHT", k_at_twist_mix[idx][0]);
-        at_setenv("TD5RE_AUTOTRACK_PCT_CURVE",    k_at_twist_mix[idx][1]);
-        at_setenv("TD5RE_AUTOTRACK_PCT_ACUTE",    k_at_twist_mix[idx][2]);
-    } else {
-        at_setenv(r->knob, r->values[idx]);
+    /* The player is choosing, so the registry must drop any claim it had on
+     * this knob -- otherwise the next build's unpublish would delete their
+     * choice as one of its own leftovers. Done for RANDOM too: there the knob
+     * is cleared, and a stale claim would just be noise. */
+    if (id >= 0) td5_trackgen_roll_disown(id);
+
+    if (off && idx == 0) {
+        if (row == AT_ROW_TWIST) {
+            at_setenv("TD5RE_AUTOTRACK_PCT_STRAIGHT", AT_RANDOM);
+            at_setenv("TD5RE_AUTOTRACK_PCT_CURVE",    AT_RANDOM);
+            at_setenv("TD5RE_AUTOTRACK_PCT_ACUTE",    AT_RANDOM);
+        } else {
+            at_setenv(r->knob, AT_RANDOM);
+        }
+        TD5_LOG_I(LOG_TAG, "AutoTrackOptions: %s -> RANDOM", r->label);
+        return;
     }
-    TD5_LOG_I(LOG_TAG, "AutoTrackOptions: %s -> %s",
-              r->label, r->names[idx]);
+
+    vi = idx - off;
+    if (row == AT_ROW_TWIST) {
+        at_setenv("TD5RE_AUTOTRACK_PCT_STRAIGHT", k_at_twist_mix[vi][0]);
+        at_setenv("TD5RE_AUTOTRACK_PCT_CURVE",    k_at_twist_mix[vi][1]);
+        at_setenv("TD5RE_AUTOTRACK_PCT_ACUTE",    k_at_twist_mix[vi][2]);
+    } else {
+        at_setenv(r->knob, r->values[vi]);
+    }
+    TD5_LOG_I(LOG_TAG, "AutoTrackOptions: %s -> %s", r->label, r->names[vi]);
 }
 
 /* ---- live route preview -------------------------------------------------
@@ -7386,6 +7501,13 @@ static void at_row_apply(int row, int delta)
 /* Centre of the value band, which sits between the buttons and the panel. The
  * widest value is a 10-digit seed, so the band needs the room. */
 #define AT_VAL_X (AT_BTN_X + AT_BTN_W + 62)
+/* [R21] Values are now LEFT-ALIGNED from just past the buttons instead of
+ * centred on AT_VAL_X. Centring only worked while every value was a short word:
+ * "RANDOM (EXTREME)" centred at 258 spans 158..358 and lands on top of the
+ * button labels at one end and the preview panel at the other. Left-aligning
+ * at 206 pins the collision-prone end and lets the text grow rightwards into
+ * the gap instead. */
+#define AT_VAL_LX (AT_BTN_X + AT_BTN_W + 10)
 #define AT_PV_X  324
 #define AT_PV_Y  96
 #define AT_PV_W  268
@@ -7615,19 +7737,52 @@ void frontend_render_autotrack_options_overlay(float sx, float sy)
     fe_draw_text_centered(AT_VAL_X * sx, (AT_BASE_Y + 6) * sy,
                           k_at_sect_n[s_at_sect], 0xFFE3D708, sx, sy);
 
-    for (i = 0; i < s_at_view_n; i++) {
-        const int row = s_at_view[i];
-        const int y = AT_BASE_Y + AT_STEP_Y * (i + 1) + 6;
-        const char *txt;
-        char buf[16];
-        if (k_at_rows[row].kind == AT_KIND_SEED) {
-            snprintf(buf, sizeof(buf), "%u", (unsigned int)td5_env_int(
-                         "TD5RE_AUTOTRACK_SEED", 0, 0, 0x7FFFFFFF));
-            txt = buf;
-        } else {
-            txt = k_at_rows[row].names[at_row_index(row)];
+    /* [R21 ROLLS] Resolve what THIS seed will actually roll, so a RANDOM row
+     * can show its outcome: forty rows all reading "RANDOM" tell the player
+     * nothing. Resolved here on the main thread rather than read back from the
+     * preview worker -- the resolver is pure and costs a handful of getenv
+     * calls, so it needs no debounce, works before the first preview has
+     * finished, and never reads a generator static while the worker writes it.
+     * Recomputed every frame because a roll depends on the pins too, so
+     * caching on the seed alone would go stale the moment a row is cycled. */
+    {
+        TD5_TgRolls rolls;
+        td5_trackgen_resolve_rolls(
+            (unsigned int)td5_env_int("TD5RE_AUTOTRACK_SEED", 0, 0, 0x7FFFFFFF),
+            &rolls);
+
+        for (i = 0; i < s_at_view_n; i++) {
+            const int row = s_at_view[i];
+            const int y = AT_BASE_Y + AT_STEP_Y * (i + 1) + 6;
+            const int off = at_row_has_random(row) ? 1 : 0;
+            const int idx = at_row_index(row);
+            /* A rolled value is marked with a leading '~' AND tinted, rather
+             * than spelled out as "RANDOM (X)": the word cost ~90px of width
+             * the column does not have, while the marker costs one character
+             * and the tint costs none. Two signals, so the distinction does
+             * not rest on colour alone. */
+            const int rolled = (off && idx == 0);
+            char buf[40];
+
+            if (k_at_rows[row].kind == AT_KIND_SEED) {
+                snprintf(buf, sizeof(buf), "%u", (unsigned int)td5_env_int(
+                             "TD5RE_AUTOTRACK_SEED", 0, 0, 0x7FFFFFFF));
+            } else if (rolled) {
+                const int id = at_roll_id_for(row);
+                snprintf(buf, sizeof(buf), "~%s",
+                         td5_trackgen_roll_choice_name(id, rolls.choice[id]));
+            } else {
+                snprintf(buf, sizeof(buf), "%s",
+                         k_at_rows[row].names[idx - off]);
+            }
+            fe_draw_text(AT_VAL_LX * sx, y * sy, buf,
+                         rolled ? 0xFF8FD8FF : 0xFFFFFFFF, sx, sy);
         }
-        fe_draw_text_centered(AT_VAL_X * sx, y * sy, txt, 0xFFFFFFFF, sx, sy);
+        /* Legend sits on the header line, right of the section name: the
+         * bottom of the frame is already taken by the two button rows and
+         * anything below them is clipped off-screen. */
+        fe_draw_text((AT_VAL_LX + 130) * sx, (AT_BASE_Y + 6) * sy,
+                     "~ = ROLLED FROM THE SEED", 0xFF8FD8FF, sx, sy);
     }
 
     at_draw_preview(sx, sy);
@@ -7692,6 +7847,14 @@ static void at_fav_capture(TD5_FavSeed *f)
     memset(f, 0, sizeof(*f));
     f->seed = (unsigned int)td5_env_int("TD5RE_AUTOTRACK_SEED", 0, 0, 0x7FFFFFFF);
 
+    /* [R21] Format marker, written FIRST. Before R21 an omitted knob meant
+     * "the generator's shipped constant"; now it means "roll it from the
+     * seed". Without a marker, replaying an old favourite would silently
+     * recall a different track -- exactly what the favourites store exists to
+     * prevent. Absence of this key is what at_fav_apply keys the legacy
+     * prefill off, so it must never be dropped. */
+    used += (size_t)snprintf(f->params, sizeof(f->params), "R21=1;");
+
     for (r = 0; r < AT_ROWS; r++) {
         const AT_Row *row = &k_at_rows[r];
         const char *e;
@@ -7710,9 +7873,52 @@ static void at_fav_capture(TD5_FavSeed *f)
 static void at_fav_apply(const TD5_FavSeed *f)
 {
     const char *p = f->params;
+    const int   pre_r21 = (strstr(f->params, "R21=") == NULL);
     char knob[64], val[24];
+    int r;
 
     at_setenv("TD5RE_AUTOTRACK_SEED", (int)f->seed);
+
+    /* [R21] A favourite saved BEFORE this round omitted unset knobs too, but
+     * omission then meant the generator's shipped constant -- not "roll it".
+     * Replay it as saved and every unlisted row would now be randomized, so
+     * the favourite would recall a different track every time. Pin the legacy
+     * constants first; the loop below then re-applies whatever the favourite
+     * actually stored, so explicit choices still win. */
+    if (pre_r21) {
+        TD5_LOG_I(LOG_TAG, "AutoTrackStudio: favourite '%s' predates R21 -- "
+                  "pinning pre-R21 defaults so it still recalls its own track",
+                  f->name);
+        for (r = 0; r < AT_ROWS; r++) {
+            const AT_Row *row = &k_at_rows[r];
+            const int id = at_roll_id_for(r);
+            int m, member = 0;
+            if (row->kind == AT_KIND_SEED || id < 0) continue;
+            /* Skip any row whose `def` is not one of its own values: for those
+             * (TIME OF DAY) unset ALREADY meant "roll it" before R21, so there
+             * is no legacy constant to pin and writing def would pin a value
+             * the list does not contain. */
+            if (row->values) {
+                for (m = 0; m < row->n; m++)
+                    if (row->values[m] == row->def) { member = 1; break; }
+                if (!member) continue;
+            }
+            if (!row->knob) {                       /* composite TWISTINESS */
+                if (r == AT_ROW_TWIST) {
+                    at_setenv("TD5RE_AUTOTRACK_PCT_STRAIGHT",
+                              k_at_twist_mix[row->def][0]);
+                    at_setenv("TD5RE_AUTOTRACK_PCT_CURVE",
+                              k_at_twist_mix[row->def][1]);
+                    at_setenv("TD5RE_AUTOTRACK_PCT_ACUTE",
+                              k_at_twist_mix[row->def][2]);
+                }
+            } else {
+                at_setenv(row->knob, row->def);
+            }
+            td5_trackgen_roll_disown(id);
+        }
+    }
+
     while (*p) {
         const char *eq = strchr(p, '=');
         const char *sc = strchr(p, ';');
@@ -7723,9 +7929,21 @@ static void at_fav_apply(const TD5_FavSeed *f)
         if (kl < sizeof(knob) && vl < sizeof(val)) {
             memcpy(knob, p, kl); knob[kl] = 0;
             memcpy(val, eq + 1, vl); val[vl] = 0;
-            _putenv_s(knob, val);
+            /* Only ever set OUR OWN namespace. This both skips the R21=1
+             * marker and stops a hand-edited td5re_progress.ini from setting
+             * arbitrary environment variables for the process. */
+            if (!strncmp(knob, "TD5RE_", 6)) _putenv_s(knob, val);
         }
         p = sc + 1;
+    }
+
+    /* Anything the favourite pinned is a choice, not a leftover roll. */
+    for (r = 0; r < AT_ROWS; r++) {
+        const int id = at_roll_id_for(r);
+        const char *e;
+        if (id < 0 || !k_at_rows[r].knob) continue;
+        e = getenv(k_at_rows[r].knob);
+        if (e && e[0]) td5_trackgen_roll_disown(id);
     }
     TD5_LOG_I(LOG_TAG, "AutoTrackStudio: applied favourite '%s' (seed %u)",
               f->name, f->seed);
@@ -7782,6 +8000,34 @@ void Screen_AutoTrackOptions(void) {
     switch (s_inner_state) {
     case 0:
         frontend_init_return_screen(TD5_SCREEN_AUTOTRACK_OPTIONS);
+        /* [R21] Self-checks that used to be claimed in a comment and never
+         * actually run. AT_ROW_TWIST is a RAW INDEX into k_at_rows, so it goes
+         * stale the moment a row before TWISTINESS is added or removed -- which
+         * is exactly what happened when the LANES row went. And a row whose
+         * choice count disagrees with its registry entry's would show the
+         * player one label while the generator built another. Logged rather
+         * than fatal: a mislabelled row is not worth refusing to open the
+         * screen over, but it must not pass in silence. */
+        {
+            int r;
+            if (k_at_rows[AT_ROW_TWIST].knob != NULL)
+                TD5_LOG_E(LOG_TAG, "AutoTrackOptions: AT_ROW_TWIST (%d) is not "
+                          "the composite TWISTINESS row -- it points at '%s'. "
+                          "Update the define; row indices moved.",
+                          AT_ROW_TWIST, k_at_rows[AT_ROW_TWIST].label);
+            for (r = 0; r < AT_ROWS; r++) {
+                const int id = at_roll_id_for(r);
+                int want;
+                if (id < 0) continue;
+                want = td5_trackgen_roll_choice_count(id);
+                if (want != k_at_rows[r].n)
+                    TD5_LOG_E(LOG_TAG, "AutoTrackOptions: row '%s' has %d "
+                              "choices but its roll entry '%s' has %d -- the "
+                              "screen and the generator disagree",
+                              k_at_rows[r].label, k_at_rows[r].n,
+                              td5_trackgen_roll_name(id), want);
+            }
+        }
         s_at_fav_mode     = 0;
         s_at_seed_editing = 0;
         at_build_buttons();

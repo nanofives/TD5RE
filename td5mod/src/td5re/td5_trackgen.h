@@ -227,4 +227,101 @@ int td5_trackgen_progress(void);
  * from the seed, default 2). */
 int td5_trackgen_is_night(void);
 
+/* ============ [R21 ROLLS] SEED-DERIVED RANDOMIZED PARAMETERS ===============
+ *
+ * WHY: every AUTO TRACK STUDIO row used to be a fixed value applied uniformly
+ * to the whole track, so two tracks at the same settings differed only in
+ * route. A row's default is now RANDOM: the value is derived from the SEED, so
+ * a seed still reproduces its track exactly while an unattended studio
+ * produces real variety. This generalises what TIME OF DAY has always done
+ * (see td5_trackgen_is_night above) to every parameter.
+ *
+ * RANDOM IS AN EXPLICIT VALUE, NOT THE ABSENCE OF ONE. The knob's own spelling
+ * of RANDOM is "unset" (that is what keeps tg_env_hash, the favourites store
+ * and every td5_env_* default consistent), but the studio's value tables carry
+ * TD5_TG_ROLL_RANDOM as a first-class member so a row can display it, cycle
+ * back to it, and reverse-map it like any other choice.
+ *
+ * -2 rather than -1: k_at_sky_v[0] is already -1 ("SKY = NONE"), so -1 is a
+ * live value in the studio's tables and cannot double as a sentinel.
+ *
+ * PURITY RULE, load-bearing for the on-disk build cache: a roll may depend on
+ * NOTHING but the seed and the TD5RE_* environment. Both already feed the
+ * GENSTAMP (seed directly, knobs via tg_env_hash), so a seed-derived roll needs
+ * no stamp change -- same seed, same roll, same MODELS.DAT, and REUSE stays
+ * correct. A roll that consulted the clock, a frame counter or previous build
+ * state would silently serve a stale track. */
+#define TD5_TG_ROLL_RANDOM (-2)
+
+typedef enum {
+    /* Spec-bearing: folded into TD5_TrackGenSpec by tg_rolls_apply_spec. */
+    TD5_TG_ROLL_TWIST = 0,   /* -> weight[STRAIGHT/CURVE/ACUTE] (composite)   */
+    TD5_TG_ROLL_CORNERS,     /* -> curve_safety_x100                          */
+    TD5_TG_ROLL_GRADE,       /* -> max_grade_x1000                            */
+    TD5_TG_ROLL_DUAL,        /* -> weight[DUAL_LANE]                          */
+    TD5_TG_ROLL_HILLS,       /* -> elevation_amplitude                        */
+    TD5_TG_ROLL_LENGTH,      /* -> target_spans                               */
+    TD5_TG_ROLL_NIGHT,       /* delegates to tg_decide_night, reported here   */
+    /* Published to the environment (see td5_trackgen_roll_is_owned). */
+    TD5_TG_ROLL_LANE_PCT, TD5_TG_ROLL_RUNOFF, TD5_TG_ROLL_TERRAIN_REACH,
+    TD5_TG_ROLL_BIOME_BLEND, TD5_TG_ROLL_RAIL_DEG10, TD5_TG_ROLL_SKY,
+    TD5_TG_ROLL_SNOW, TD5_TG_ROLL_PARKS, TD5_TG_ROLL_PARK_HOUSES,
+    TD5_TG_ROLL_PARK_HEDGE, TD5_TG_ROLL_AVENUE, TD5_TG_ROLL_START_CITY,
+    TD5_TG_ROLL_MOUNTAINS, TD5_TG_ROLL_TUNNEL_LAMPS,
+    TD5_TG_ROLL_BRIDGE_VARIETY, TD5_TG_ROLL_FLORA_CLEAR,
+    TD5_TG_ROLL_TREE_MIRROR,
+    /* PRESENCE rows: in the mechanism and reported, but weighted to today's
+     * value -- see the STYLE vs PRESENCE note in td5_trackgen.c. */
+    TD5_TG_ROLL_BRANCHES, TD5_TG_ROLL_TERRAIN_HILLS, TD5_TG_ROLL_TERRAIN_FAR,
+    TD5_TG_ROLL_COASTLINE, TD5_TG_ROLL_BRIDGES, TD5_TG_ROLL_BRIDGE_OVERHEAD,
+    TD5_TG_ROLL_TUNNELS, TD5_TG_ROLL_GUARDRAILS, TD5_TG_ROLL_ARMCO,
+    TD5_TG_ROLL_DISTRICTS, TD5_TG_ROLL_FACADE_MASS, TD5_TG_ROLL_BACKROWS,
+    TD5_TG_ROLL_CROSSINGS, TD5_TG_ROLL_CROSS_STREETS,
+    TD5_TG_ROLL_CROSS_MARKINGS, TD5_TG_ROLL_INTERSECTIONS,
+    TD5_TG_ROLL_SIDEWALKS, TD5_TG_ROLL_SCENERY, TD5_TG_ROLL_TREELINE,
+    TD5_TG_ROLL_LAMP_POSTS, TD5_TG_ROLL_BANNERS, TD5_TG_ROLL_REAL_TEX,
+    TD5_TG_ROLL_REAL_FURNITURE,
+    TD5_TG_ROLL_COUNT
+} TD5_TgRollId;
+
+/* Resolved table for one build. Rolls are keyed by an entry's private SALT and
+ * never by its position, so appending an id here can never move an existing
+ * entry's roll -- and therefore never changes an existing seed's track. */
+typedef struct {
+    unsigned int  seed;
+    int           value [TD5_TG_ROLL_COUNT];  /* resolved literal (180, 6000) */
+    unsigned char choice[TD5_TG_ROLL_COUNT];  /* index into the choice set     */
+    unsigned char pinned[TD5_TG_ROLL_COUNT];  /* 1 = the knob pinned it        */
+} TD5_TgRolls;
+
+/* PURE: touches no statics, consumes no RNG, safe on any thread. Same
+ * (seed, environment) gives the same result as the build will use, which is how
+ * the studio can label a row "RANDOM (TWISTY)" without waiting for a preview. */
+void td5_trackgen_resolve_rolls(unsigned int seed, TD5_TgRolls *out);
+
+int         td5_trackgen_roll_choice_count(int id);
+const char *td5_trackgen_roll_choice_name(int id, int choice);
+const char *td5_trackgen_roll_name(int id);
+/* Knob this entry owns, or NULL. The studio needs it to tell "the player
+ * pinned this" from "the generator published its own roll here". */
+const char *td5_trackgen_roll_knob(int id);
+/* Did the LAST build publish this entry's value itself (i.e. the environment
+ * currently holds a rolled value rather than a human's pin)? The studio must
+ * ask, or a published roll would read back as a concrete setting and the row
+ * would stop showing RANDOM after one race. */
+int         td5_trackgen_roll_is_owned(int id);
+/* Drop the registry's claim on this entry's knob. The studio MUST call this
+ * when the player sets a row by hand: the knob then holds a pin, and without
+ * dropping the claim the next build's unpublish would delete the player's
+ * choice as if it were its own leftover roll. */
+void        td5_trackgen_roll_disown(int id);
+/* Does the CURRENT environment pin this entry to a concrete value? The
+ * registry owns the tri-state spelling of "random" -- unset, the -2 sentinel,
+ * and TIME OF DAY's long-standing 2 all mean "roll it" -- so the studio asks
+ * instead of reimplementing those rules and getting one of them wrong. */
+int         td5_trackgen_roll_is_pinned_now(int id);
+/* Straight/curve/acute weights for a TWISTINESS choice. The mix lives with the
+ * generator, not the frontend, so the studio and the walk cannot disagree. */
+int         td5_trackgen_twist_mix(int choice, int out3[3]);
+
 #endif /* TD5_TRACKGEN_H */

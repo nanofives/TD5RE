@@ -3794,6 +3794,11 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         TG_ZONE_BEGIN(TG_ZONE_ELEVATION);
         tg_apply_elevation(spec, &nl);
         TG_ZONE_END(TG_ZONE_ELEVATION);
+        /* [R21 LANDMARKS] AFTER elevation (so a needs_flat test can be
+         * evaluated at all) and BEFORE the scenery phases (which are what
+         * would consume the placements). Table is empty today, so this only
+         * reports. */
+        tg_landmarks_place(&nl, nl.count);
     }
 
     if (td5_env_flag_off("TD5RE_AUTOTRACK_SELFCHECK")) {
