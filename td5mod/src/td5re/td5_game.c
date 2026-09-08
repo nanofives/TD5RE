@@ -1142,16 +1142,26 @@ static const SSW_NavStep k_ssw_optshub[]    = { { TD5_SCREEN_MAIN_MENU, 4 } };
 static const SSW_NavStep k_ssw_hiscore[]    = { { TD5_SCREEN_MAIN_MENU, 5 } };
 static const SSW_NavStep k_ssw_mp_lobby[]   = { { TD5_SCREEN_MAIN_MENU, 2 } };
 static const SSW_NavStep k_ssw_changelog[]  = { { TD5_SCREEN_MAIN_MENU, 7 } };
-/* Options hub: 0=PlayerName 1=Control 2=Sound 3=Display 4=TwoPlayer.
- * [CONSOLIDATION 2026-07-21] GAME OPTIONS (formerly hub row 0) retired. */
+/* Options hub rows, as actually created by Screen_OptionsHub:
+ *   0=Control 1=Sound 2=Graphics 3=Multiplayer 4=Language 5=OK
+ *
+ * [STARTSCREEN OFF-BY-ONE FIX 2026-09-08] These four routes were all one row
+ * too high. [CONSOLIDATION 2026-07-21] retired GAME OPTIONS (then hub row 0)
+ * and every remaining row shifted up, but the route indices (and the comment
+ * that justified them, which still listed a PlayerName row 0) were left as
+ * they were. Net effect: --StartScreen=15 (SOUND_OPTIONS) clicked hub row 2
+ * and landed on GRAPHICS OPTIONS; CONTROL landed on SOUND; DISPLAY landed on
+ * MULTIPLAYER; TWO_PLAYER landed on LANGUAGE. Dev/QA harness only -- the
+ * player-facing hub was always correct -- but it meant the jump-to-screen
+ * harness could not reach the screen it was asked for. */
 static const SSW_NavStep k_ssw_ctrl_opts[]  = { { TD5_SCREEN_MAIN_MENU, 4 },
-                                                { TD5_SCREEN_OPTIONS_HUB, 1 } };
+                                                { TD5_SCREEN_OPTIONS_HUB, 0 } };
 static const SSW_NavStep k_ssw_sound_opts[] = { { TD5_SCREEN_MAIN_MENU, 4 },
-                                                { TD5_SCREEN_OPTIONS_HUB, 2 } };
+                                                { TD5_SCREEN_OPTIONS_HUB, 1 } };
 static const SSW_NavStep k_ssw_disp_opts[]  = { { TD5_SCREEN_MAIN_MENU, 4 },
-                                                { TD5_SCREEN_OPTIONS_HUB, 3 } };
+                                                { TD5_SCREEN_OPTIONS_HUB, 2 } };
 static const SSW_NavStep k_ssw_2p_opts[]    = { { TD5_SCREEN_MAIN_MENU, 4 },
-                                                { TD5_SCREEN_OPTIONS_HUB, 4 } };
+                                                { TD5_SCREEN_OPTIONS_HUB, 3 } };
 /* Race type menu: 0=Single Race (→ car selection with game_type=0). */
 static const SSW_NavStep k_ssw_car_sel[]    = { { TD5_SCREEN_MAIN_MENU, 0 },
                                                 { TD5_SCREEN_RACE_TYPE_MENU, 0 } };
@@ -1958,6 +1968,31 @@ int td5_game_get_race_order(int pos)
 int td5_game_slot_is_finished(int slot)
 {
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    return (s_metrics[slot].post_finish_metric_base != 0) ? 1 : 0;
+}
+
+/* [TD5RE HS-DNF] Returns whether a slot reached a GENUINE finish-line crossing,
+ * as opposed to merely being "in a finished state".
+ *
+ * td5_game_slot_is_finished() above is only `post_finish_metric_base != 0`, and
+ * that field is deliberately seeded nonzero by several NON-finish paths so the
+ * results aggregator can still sort every slot:
+ *   - P2P checkpoint-timer expiry (the FAIL/DNF case) sets it to cumulative_timer
+ *     or the sentinel 1 (tick_pending_finish_timer, ~:9005)
+ *   - the aggregator backfills non-crossers with an ESTIMATED pace time (~:9704,
+ *     ~:10265) and the force-finish/bulk-seed paths use `(t > 0) ? t : 1`
+ *     (~:11516, ~:11596)
+ * so a timed-out or force-ended run reads as "finished" and used to be eligible
+ * for a high score. companion_2 is the discriminator (0 = still racing,
+ * 1 = completed-ok, 2 = DNF) and is written ONLY by the three genuine
+ * finish-line sites (~:9315 circuit lap, ~:9426 P2P finish span, ~:9510
+ * checkpoint finish) and by the DNF site (~:9011); none of the backfills touch
+ * it. Requiring companion_2 == 1 is therefore the only reliable "crossed the
+ * line" test. Used to gate high-score posting (SP name entry + MP register). */
+int td5_game_slot_finished_at_line(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    if (s_slot_state[slot].companion_2 != 1) return 0;
     return (s_metrics[slot].post_finish_metric_base != 0) ? 1 : 0;
 }
 

@@ -173,6 +173,13 @@ int td5_save_npc_record_insert(int group_index, const char *full_name,
  *  records yet, the level is out of range, or the feature is disabled. */
 const TD5_NpcGroup *td5_save_get_td6_record_group(int td6_level);
 
+/** 1 if `td6_level` is inside the TD6 record table's capacity, i.e. an insert for
+ *  it CAN be stored. The table is a fixed per-level array, so a key past its end
+ *  (a high custom/auto-generated level number) previously made every insert fail
+ *  with -1 *after* the player had already been prompted for a name. Callers use
+ *  this up front to decide whether a track has a high-score home at all. */
+int td5_save_td6_record_level_valid(int td6_level);
+
 /** Insert a genuine record into the TD6 table for `td6_level`, keeping the 5
  *  entries sorted by `score_type` (0/1/4 = time, lower better; 2 = points,
  *  higher better). Persists to disk. Returns the inserted rank [0..4], or -1

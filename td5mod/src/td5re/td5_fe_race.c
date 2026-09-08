@@ -398,6 +398,11 @@ static int s_postrace_td6_score_type = 0;
  * uses its own live data. Gated by TD5RE_REPLAY_QUIT_FLOW (default on). */
 static int     s_pr_snap_valid    = 0;
 static int     s_pr_snap_finished = 0;
+/* [TD5RE HS-DNF] Was that pre-replay finish a GENUINE finish-line crossing? Captured
+ * alongside s_pr_snap_finished because the replay re-init clears the slot state this
+ * is derived from, and high-score eligibility needs the stricter test (a timed-out
+ * P2P run also sets s_pr_snap_finished). */
+static int     s_pr_snap_at_line  = 0;
 static int32_t s_pr_snap_primary  = 0;   /* result primary metric (finish time)  */
 static int32_t s_pr_snap_secondary= 0;   /* result secondary metric (points/lap) */
 static int32_t s_pr_snap_best_lap = 0;
@@ -422,6 +427,7 @@ static int replay_quit_flow_on(void) {
  * (slot 0) just before a replay re-inits the race and wipes them. */
 static void frontend_postrace_snapshot_capture(void) {
     s_pr_snap_finished  = td5_game_slot_is_finished(0);
+    s_pr_snap_at_line   = td5_game_slot_finished_at_line(0);
     s_pr_snap_primary   = td5_game_get_result_primary(0);
     s_pr_snap_secondary = td5_game_get_result_secondary(0);
     s_pr_snap_best_lap  = td5_game_get_best_lap_time(0);
@@ -441,6 +447,16 @@ static void frontend_postrace_snapshot_capture(void) {
 static int32_t s_post_race_top_speed;
 
 static int32_t s_post_race_avg_speed;
+
+/* [TD5RE HS-WIRE] COLLISIONS + AIR TIME snapshotted at NAME_ENTRY case 0, for the
+ * same reason as the speeds above. These come from g_race_metrics, which survives
+ * until the NEXT race init (td5_physics_reset_metrics) rather than actor teardown —
+ * so the plain case-4 read was correct for a normal finish, but a View Replay
+ * re-inits the race and DOES clear the metrics. On the replay -> quit -> name-entry
+ * path the record was therefore stored with coll=0/air=0 while AVG/TOP survived via
+ * the snapshot. Captured here so both columns match the race-results screen. */
+static int32_t s_post_race_collisions;
+static int32_t s_post_race_air_ticks;
 
 static int  s_car_preview_change_loaded;  /* state-11 load-once guard (a missing
                                            * preview, e.g. a TD6 car with no carpic,
@@ -786,6 +802,43 @@ static int frontend_postrace_td6_level(void) {
         return n > 0 ? n : t;            /* fall back to a stable per-track key */
     }
     return 0;
+}
+
+/* [TD5RE HS-AUTO] Does `track` have a high-score table it can legitimately post
+ * into? Returns 0 for tracks that must be excluded from High Scores entirely.
+ *
+ * Two distinct cases, both of which used to misbehave rather than opt out:
+ *
+ *  1. AUTO TRACK STUDIO (td5_trackgen_is_auto_slot). The generated track is rebuilt
+ *     from a seed and its geometry changes whenever the seed or the generator does,
+ *     so a stored lap time describes a course that no longer exists — the times are
+ *     not comparable between two runs and a "record" is meaningless. It also has no
+ *     home in either store: the TD5 table only spans the 26 authored tracks, and the
+ *     auto slot's level key lands past the TD6 record array's capacity, so the insert
+ *     returned -1 *after* the player had been prompted for and typed a name.
+ *
+ *  2. Any other track whose resolved key is out of the TD6 store's range
+ *     (td5_save_td6_record_level_valid), for the same silent-failure reason.
+ *
+ * Without this, the alternative path was worse: with the TD6 store disabled
+ * (TD5RE_TD6_NO_PLACEHOLDER_SCORES=0) the group index fell through to the
+ * `>= 26 ? 25` clamp and wrote auto-generated-track times into authored group 25's
+ * table, corrupting a real track's scores. Callers now bail instead of clamping. */
+static int frontend_track_has_high_scores(int track) {
+    if (track < 0) return 0;
+    if (td5_trackgen_is_auto_slot(track)) return 0;
+    if (track < 26) return 1;               /* authored TD5 track / cup group */
+    /* Past the authored range: only storable if the TD6 record store can hold the
+     * key. Resolved from the `track` argument (NOT frontend_postrace_td6_level(),
+     * which is hardwired to s_selected_track) so the predicate is honest for any
+     * track the caller asks about. Same key derivation as that function. */
+    if (!td6_no_placeholder_on()) return 0; /* store off => nowhere to put it */
+    int lvl = td5_asset_td6_level_for_slot(track);
+    if (lvl <= 0) {
+        int n = td5_asset_level_number(track);
+        lvl = (n > 0) ? n : track;
+    }
+    return td5_save_td6_record_level_valid(lvl) ? 1 : 0;
 }
 
 /* Canvas-space footprint of the randomize ICON (square chip). Kept here so the
@@ -8721,6 +8774,9 @@ void Screen_PostRaceHighScore(void) {
          * is highlighted here. -1 keeps the shared high-score overlay from golding a
          * stale rank (NAME_ENTRY sets s_score_insert_pos to the real inserted rank). */
         s_score_insert_pos = -1;
+        /* [TD5RE HS-MP] Likewise drop any multi-row highlight left by the last MP
+         * race, or browsing would gold every row that race happened to insert. */
+        s_score_insert_mask = 0;
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -9564,16 +9620,35 @@ static void frontend_mp_register_high_scores(void)
     if (s_selected_game_type >= 1 && s_selected_game_type <= 6)
         return;
 
+    /* [TD5RE HS-AUTO] Auto-generated / non-storable tracks post nothing. */
+    if (!frontend_track_has_high_scores(s_selected_track)) {
+        TD5_LOG_I(LOG_TAG, "MP high-score: skipped — track=%d has no high-score table",
+                  s_selected_track);
+        return;
+    }
+
+    /* [TD5RE HS-MP] Ownership: this path posts for MULTIPLAYER races only. A local
+     * split-screen race has >= 2 humans; a NET race can have a single local human but
+     * is still multiplayer, and its remote players are live slots in the lockstep sim
+     * (so their metrics and roster names are readable here) — they used to be dropped
+     * entirely by a flat `humans < 2` test. A true single-player race is left to
+     * Screen_PostRaceNameEntry, which owns the name prompt; posting here too would
+     * double-insert. */
     int humans = s_num_human_players;
-    if (humans < 2) return;                 /* not split-screen */
     if (humans > TD5_MAX_HUMAN_PLAYERS) humans = TD5_MAX_HUMAN_PLAYERS;
+    if (humans < 1) return;
+    if (humans < 2 && !g_td5.network_active) return;   /* single-player: SP flow owns it */
 
     /* TD6 tracks keep a separate genuine-records store (no fake names); TD5 tracks
      * use the authored NPC group for the track index. Mirrors the SP routing. */
     int td6_level  = frontend_postrace_td6_level();
     int is_circuit = frontend_track_is_circuit(s_selected_track);
     int group_idx  = s_selected_track;
-    if (group_idx < 0) group_idx = 0; else if (group_idx >= 26) group_idx = 25;
+    /* [TD5RE HS-AUTO] Low bound only. The old `>= 26 -> 25` clamp aliased every
+     * TD6 / custom / auto-generated track onto authored group 25, writing their
+     * times into a real track's table. Leaving the index out of range makes
+     * td5_save_get_npc_group() return NULL below, which correctly aborts. */
+    if (group_idx < 0) group_idx = 0;
 
     int group_type;
     if (td6_level > 0) {
@@ -9586,8 +9661,20 @@ static void frontend_mp_register_high_scores(void)
     }
 
     int registered = 0;
+    /* [TD5RE HS-MP] Fresh highlight set for this race — several players can place at
+     * once, so the table marks every row this race produced, not just slot 0's. */
+    s_score_insert_mask = 0;
+    /* Rows of interest for the single-row consumers, tracked separately so
+     * "displaced off the table" is never confused with "not set yet":
+     *   local_row = the LOCAL player's (slot 0) row, the summary's "my result"
+     *   first_row = the first row anyone placed, used only if slot 0 didn't place
+     * Both are rebased on every later insert, same as the mask bits; -1 = gone. */
+    int local_row = -1, first_row = -1;
     for (int sl = 0; sl < humans; sl++) {
-        if (!td5_game_slot_is_finished(sl)) continue;
+        /* [TD5RE HS-DNF] Genuine finish-line crossing only. slot_is_finished() is
+         * also true after a P2P timeout or an aggregator pace backfill, which used
+         * to let a player who never completed the race take a high-score slot. */
+        if (!td5_game_slot_finished_at_line(sl)) continue;
 
         int32_t score;
         if (group_type == 1)      score = td5_game_get_best_lap_time(sl);
@@ -9614,16 +9701,35 @@ static void frontend_mp_register_high_scores(void)
         }
         if (rank >= 0) {
             registered++;
-            if (sl == 0) {                  /* highlight the local player in the summary */
-                s_score_insert_pos = rank;
-                s_score_category_index = (td6_level > 0) ? s_selected_track : group_idx;
-            }
+            /* [TD5RE HS-MP] Record EVERY placed row. An insert at `rank` shifts the
+             * rows at >= rank down one, so rebase the already-marked bits before
+             * adding this one, or a second player's insert would leave the first
+             * player's highlight pointing at the row it was pushed out of. Rows that
+             * fall past 5 drop off the table and out of the mask. */
+            int below = s_score_insert_mask >> rank;          /* bits at >= rank */
+            int above = s_score_insert_mask & ((1 << rank) - 1);
+            s_score_insert_mask = (above | (below << (rank + 1)) | (1 << rank)) & 0x1F;
+
+            /* Same rebase for the tracked single rows: an insert at `rank` pushes
+             * any row at >= rank down one, and past row 4 it leaves the table. */
+            if (local_row >= rank) local_row = (local_row < 4) ? local_row + 1 : -1;
+            if (first_row >= rank) first_row = (first_row < 4) ? first_row + 1 : -1;
+            if (sl == 0)           local_row = rank;
+            if (first_row < 0)     first_row = rank;
+
+            /* Point the overlay at the group that received the inserts. */
+            s_score_category_index = (td6_level > 0) ? s_selected_track : group_idx;
         }
         TD5_LOG_I(LOG_TAG, "MP high-score: slot=%d name='%s' score=%d -> rank=%d",
                   sl, nm, (int)score, rank);
     }
-    TD5_LOG_I(LOG_TAG, "MP high-score registration: %d/%d human(s) placed (group=%d td6=%d type=%d)",
-              registered, humans, group_idx, td6_level, group_type);
+    /* Local player's row drives the summary highlight; fall back to the first row
+     * placed when slot 0 didn't qualify (or was displaced off the table). */
+    s_score_insert_pos = (local_row >= 0) ? local_row : first_row;
+    TD5_LOG_I(LOG_TAG, "MP high-score registration: %d/%d human(s) placed "
+              "(group=%d td6=%d type=%d rows=0x%02X local_row=%d)",
+              registered, humans, group_idx, td6_level, group_type,
+              s_score_insert_mask, s_score_insert_pos);
 }
 
 void Screen_RaceResults(void) {
@@ -10422,6 +10528,14 @@ void Screen_PostRaceNameEntry(void) {
          * the inserted entry (user-reported 2026-05-26). */
         s_post_race_top_speed = td5_game_get_result_top_speed(0);
         s_post_race_avg_speed = td5_game_get_result_avg_speed(0);
+        /* [TD5RE HS-WIRE] Snapshot the results-parity metrics here too, so a View
+         * Replay (which re-inits the race and clears g_race_metrics) can't zero the
+         * COLL/AIR columns of the record inserted at case 4. */
+        {
+            const TD5_RaceMetrics *m_now = td5_game_get_metrics(0);
+            s_post_race_collisions = m_now ? m_now->collisions : 0;
+            s_post_race_air_ticks  = m_now ? m_now->air_ticks  : 0;
+        }
 
         /* [#2b] Detect a TD6 track up front. A single race on a TD6 track has no
          * authored NPC group; the score belongs in the genuine TD6 record store,
@@ -10445,6 +10559,8 @@ void Screen_PostRaceNameEntry(void) {
              * that collapses to the main menu. Consumed here (one shot). Gated by
              * TD5RE_REPLAY_QUIT_FLOW. */
             int     eff_finished  = td5_game_slot_is_finished(0);
+            /* [TD5RE HS-DNF] Stricter companion: genuine finish-line crossing only. */
+            int     eff_at_line   = td5_game_slot_finished_at_line(0);
             int32_t eff_primary   = td5_game_get_result_primary(0);
             int32_t eff_secondary = td5_game_get_result_secondary(0);
             int32_t eff_best_lap  = td5_game_get_best_lap_time(0);
@@ -10453,6 +10569,7 @@ void Screen_PostRaceNameEntry(void) {
                           "using pre-replay snapshot (primary=%d secondary=%d best_lap=%d)",
                           (int)s_pr_snap_primary, (int)s_pr_snap_secondary, (int)s_pr_snap_best_lap);
                 eff_finished  = s_pr_snap_finished;
+                eff_at_line   = s_pr_snap_at_line;
                 eff_primary   = s_pr_snap_primary;
                 eff_secondary = s_pr_snap_secondary;
                 eff_best_lap  = s_pr_snap_best_lap;
@@ -10469,7 +10586,10 @@ void Screen_PostRaceNameEntry(void) {
             } else {
                 group_idx = s_selected_track;
             }
-            group_idx = (group_idx < 0) ? 0 : (group_idx >= 26 ? 25 : group_idx);
+            /* [TD5RE HS-AUTO] Low bound only — see the MP register for why the old
+             * `>= 26 -> 25` clamp was wrong. Out-of-range leaves grp == NULL below,
+             * so qualifies stays 0 instead of targeting a real track's table. */
+            if (group_idx < 0) group_idx = 0;
 
             /* [#2b] For a TD6 track, derive the score type from its genuine record
              * group (if any) instead of the clamped TD5 group: TIME for point-to-
@@ -10553,6 +10673,20 @@ void Screen_PostRaceNameEntry(void) {
             if (s_two_player_mode) qualifies = 0;
             if (!eff_finished) qualifies = 0;
 
+            /* [TD5RE HS-DNF] A "finished" slot is not necessarily a slot that
+             * CROSSED THE LINE: a P2P checkpoint-timer expiry and the results
+             * aggregator's pace backfill both seed a nonzero finish metric so the
+             * standings still sort. Those runs used to be offered a high score (and
+             * a name prompt) for a race they failed or never completed. Require a
+             * genuine crossing. */
+            if (!eff_at_line) {
+                if (qualifies)
+                    TD5_LOG_I(LOG_TAG, "PostRaceNameEntry: score rejected — race did not "
+                              "end at the finish line (finished=%d at_line=%d companion_2=%d)",
+                              eff_finished, eff_at_line, td5_game_get_slot_companion_2(0));
+                qualifies = 0;
+            }
+
             TD5_LOG_I(LOG_TAG, "PostRaceNameEntry: group=%d type=%d score=%d qualifies=%d",
                       group_idx, group_type, (int)s_post_race_score, qualifies);
 
@@ -10572,6 +10706,19 @@ void Screen_PostRaceNameEntry(void) {
                     const char *p = getenv("TD5RE_INJECT_POSTRACE");
                     s_demo_ne = ((e && e[0] && e[0] != '0') || (p && p[0] && p[0] != '0')); }
                 if (s_demo_ne) { qualifies = 1; if (s_post_race_score == 0) s_post_race_score = 1; }
+            }
+
+            /* [TD5RE HS-AUTO] Tracks with no legitimate high-score home never reach
+             * the name prompt. Applied AFTER the dev demo override on purpose: even
+             * the harness must not fabricate a record for an auto-generated track,
+             * because the insert would fail and leave a typed name going nowhere. */
+            if (!frontend_track_has_high_scores(s_selected_track)) {
+                if (qualifies)
+                    TD5_LOG_I(LOG_TAG, "PostRaceNameEntry: high scores disabled for "
+                              "track=%d (auto-generated / no record store) — skipping name entry",
+                              s_selected_track);
+                qualifies = 0;
+                s_postrace_td6_level = 0;   /* don't render a TD6 records table either */
             }
 
             if (!qualifies) {
@@ -10666,9 +10813,17 @@ void Screen_PostRaceNameEntry(void) {
          * COLLISIONS + AIR TIME are now stored alongside the record so the High
          * Scores table shows the same values as the race-results screen. */
         {
+        /* [TD5RE HS-MP] Single-player insert highlights exactly one row; clear any
+         * multi-row mask a previous multiplayer race left behind. */
+        s_score_insert_mask = 0;
+        /* [TD5RE HS-WIRE] Prefer the case-0 snapshot (survives a View Replay's race
+         * re-init, which clears g_race_metrics); fall back to the live metrics if the
+         * snapshot never ran for this flow. */
         const TD5_RaceMetrics *m0 = td5_game_get_metrics(0);
-        int coll0 = m0 ? m0->collisions : 0;
-        int air0  = m0 ? m0->air_ticks  : 0;
+        int coll0 = (s_post_race_collisions != 0) ? (int)s_post_race_collisions
+                                                  : (m0 ? m0->collisions : 0);
+        int air0  = (s_post_race_air_ticks  != 0) ? (int)s_post_race_air_ticks
+                                                  : (m0 ? m0->air_ticks  : 0);
         if (s_postrace_td6_level > 0 && s_post_race_score != 0) {
             /* [#2b] TD6 track: insert into the GENUINE TD6 record store (td5_save),
              * NOT a clamped TD5 NPC group — so no fake names are ever written and
@@ -10697,7 +10852,9 @@ void Screen_PostRaceNameEntry(void) {
             } else {
                 ins_group = s_selected_track;
             }
-            ins_group = (ins_group < 0) ? 0 : (ins_group >= 26 ? 25 : ins_group);
+            /* [TD5RE HS-AUTO] Low bound only — out-of-range makes the insert helper
+             * return -1 rather than overwriting authored group 25's scores. */
+            if (ins_group < 0) ins_group = 0;
 
             /* Average and top speed.
              * Non-cup: direct from slot 0 metrics.

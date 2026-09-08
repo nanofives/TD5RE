@@ -1002,6 +1002,25 @@ static void npc_apply_celebrity_names(char api_names[][16], int api_count)
             } else {
                 all_seed = 0;   /* genuine player entry */
             }
+
+            /* [TD5RE HS-MOCK] Give SEED entries plausible COLLISIONS + AIR values.
+             * The ext block is memset to 0 at init and the authored seed table has
+             * no such data, so every pre-populated row used to render "0" in both
+             * of the columns the race-results screen fills in — which reads as
+             * missing data rather than as a clean lap. Only a recognised seed
+             * identity is touched (def_k/cel_k >= 0), so a genuine player record is
+             * never rewritten, and only when BOTH fields are still 0, so a value
+             * already loaded from td5re_progress.ini stays put (idempotent across
+             * launches). Values are derived from (group, row) alone: deterministic,
+             * identical on every machine, and rank-correlated so the faster rows
+             * look like the cleaner runs. collisions 1..14 rising with rank; air
+             * 6..40 ticks @30fps = 0.2s..1.3s of small jumps. */
+            int seed_k = (def_k >= 0) ? def_k : cel_k;
+            if (seed_k >= 0 && s_npc_ext[g][e].collisions == 0
+                            && s_npc_ext[g][e].air_ticks  == 0) {
+                s_npc_ext[g][e].collisions = 1 + e * 2 + (g * 7 + e * 13) % 5;
+                s_npc_ext[g][e].air_ticks  = 6 + (g * 11 + e * 17) % 35;
+            }
         }
 
         /* Normalize default best times to 5-10 min for fully-unraced TIME groups.
@@ -2901,6 +2920,16 @@ const TD5_NpcGroup *td5_save_get_td6_record_group(int td6_level)
     return &s_td6_records[td6_level];
 }
 
+/* [TD5RE HS-CAP] Is this level key storable at all? The record store is a fixed
+ * s_td6_records[TD5_MAX_TD6_RECORD_LEVELS] array, so a key past its end makes
+ * every insert return -1. Callers test this BEFORE routing a player into the
+ * name-entry flow, instead of discovering it after the name was typed. */
+int td5_save_td6_record_level_valid(int td6_level)
+{
+    if (!td6_records_enabled()) return 0;
+    return (td6_level >= 0 && td6_level < TD5_MAX_TD6_RECORD_LEVELS) ? 1 : 0;
+}
+
 int td5_save_td6_record_insert(int td6_level, int score_type,
                                const char *name, int32_t score,
                                int car_id, int32_t avg_speed, int32_t top_speed,
@@ -3122,6 +3151,27 @@ const TD5_NpcEntryExt *td5_save_get_td6_ext(int td6_level, int entry)
 {
     if (td6_level < 0 || td6_level >= TD5_MAX_TD6_RECORD_LEVELS) return NULL;
     if (entry < 0 || entry >= 5) return NULL;
+
+    /* [TD5RE HS-MOCK] A level with no genuine record renders the PLACEHOLDER group
+     * (td6_placeholder_group), which is copied out of the TD5 seed table and has
+     * no extension data of its own — so its COLL/AIR columns would read 0. Serve a
+     * deterministic mock extension for those rows, on the same (level, row) formula
+     * as the TD5 seeds, so every generic table is populated consistently. Genuine
+     * records (header >= 0) always come from the real, persisted s_td6_ext. */
+    if (s_td6_records[td6_level].header < 0) {
+        static TD5_NpcEntryExt s_ph_ext[TD5_MAX_TD6_RECORD_LEVELS][5];
+        static int s_ph_ext_ready = 0;
+        if (!s_ph_ext_ready) {
+            s_ph_ext_ready = 1;
+            for (int lv = 0; lv < TD5_MAX_TD6_RECORD_LEVELS; lv++)
+                for (int e = 0; e < 5; e++) {
+                    s_ph_ext[lv][e].full_name[0] = '\0';   /* fall back to entry.name */
+                    s_ph_ext[lv][e].collisions = 1 + e * 2 + (lv * 7 + e * 13) % 5;
+                    s_ph_ext[lv][e].air_ticks  = 6 + (lv * 11 + e * 17) % 35;
+                }
+        }
+        return &s_ph_ext[td6_level][entry];
+    }
     return &s_td6_ext[td6_level][entry];
 }
 

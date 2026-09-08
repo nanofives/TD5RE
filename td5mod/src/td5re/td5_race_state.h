@@ -63,6 +63,9 @@ int     td5_game_get_slot_climb(int slot);        /* signed per-tick climb rate 
 int     td5_game_get_player_lap(int slot);
 int     td5_game_get_race_order(int pos);         /* slot index at finish position pos */
 int     td5_game_slot_is_finished(int slot);      /* 1 if post_finish_metric_base != 0 */
+int     td5_game_slot_finished_at_line(int slot); /* 1 ONLY on a genuine finish-line crossing (companion_2==1);
+                                                   * excludes DNF timeouts + aggregator pace backfills, which
+                                                   * also make slot_is_finished() true. High-score eligibility. */
 int     td5_game_slot_finish_place(int slot);     /* 1-based place captured when slot finished (0 = still racing) */
 int     td5_game_get_finish_position(int slot);   /* 0-based finish position (0 = 1st), -1 if not set */
 int     td5_game_get_highest_position(int slot);  /* best (lowest) race_position seen this race; 0=1st, -1 if invalid */

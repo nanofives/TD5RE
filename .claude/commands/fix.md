@@ -520,35 +520,86 @@ Only declare the /fix done after this step prints the success line. If the push 
 > ### 🛡️ TEARDOWN SAFEGUARDS (added 2026-05-28 after a data-loss incident)
 >
 > A worktree teardown that followed junctions into the main tree wiped main's
-> `re/`, `original/`, `td5mod/deps/mingw/`, AND `ddraw_wrapper/build/`. Three
-> protections are now in place — respect ALL three:
+> `re/`, `original/`, the MinGW toolchain, AND `ddraw_wrapper/build/`.
 >
-> 1. **OS-level deny-delete ACL** on `original/` and `td5mod/deps/mingw/`
->    (icacls DENY `(DE,DC)` for `MARIANO-PC\maria` + `MARIANO-PC\CodexSandboxUsers`,
->    `(OI)(CI)` inherited). A teardown/delete that reaches these now fails with
->    **Access Denied — that is the safeguard WORKING.** NEVER strip the ACL to
->    "make teardown succeed." If `git worktree remove` errors Access-Denied on a
->    main-tree path, a junction was still live → unlink it (step 3) and retry.
->    To *legitimately* replace original/mingw, drop the deny first then re-apply:
+> **PRIMARY protection (since 2026-09-08): fresh worktrees create NO junction at all** —
+> the toolchain is reached via the `.td5re_mingw` pointer file (see "Runtime asset +
+> toolchain setup"). A worktree with zero reparse points cannot be followed into main,
+> which removes this whole hazard class at the source. The safeguards below remain as a
+> backstop for OLDER worktrees that may still contain a junction, and for the
+> `original/` + `re/assets/` copies.
+>
+> 1. **OS-level deny-delete ACL. Current surface, measured 2026-09-08 (re-measure with
+>    `icacls <dir> | Select-String '\(DENY\)'`, and pass a REAL path — a broken path
+>    conversion makes icacls report a bogus count that looks reassuring):**
+>
+>    | Path | DENY ACEs | Notes |
+>    |------|-----------|-------|
+>    | `original/` | 2 | protected since 2026-05-28 |
+>    | `td5mod/deps/mingw64/` | 2 | applied 2026-09-08 |
+>    | `_archive/mingw-i686-toolchain/` | 2 | inherited (see below) |
+>    | `_archive/mingw-i686.7z` | 2 | applied 2026-09-08, `(DENY)(DE)` (no OI/CI on a file) |
+>    | `re/assets/` | 2 per child | applied 2026-09-08, **SCOPED — see the carve-out below** |
+>
+>    **`re/assets/` carve-out (do NOT "simplify" this to a blanket deny).** The deny is
+>    applied to each CHILD of `re/assets/` (52 targets: every top-level entry except
+>    `levels/`, plus every entry under `levels/` except `level090`). `re/assets/` itself
+>    and `re/assets/levels/` deliberately carry NO deny. Reason: `re/assets/levels/level090`
+>    is the AUTO-GENERATED track's output directory, and the generator actively deletes
+>    files there — `remove(models_path)` / `remove(tex_path)` in `td5_trackgen.c` (~:30317,
+>    :30336, :30369-70), commented "stale pages would mis-texture the meshes". The
+>    documented autotrack A/B workflow also deletes the whole `level090` dir before every
+>    run, which needs Delete-Child on `levels/`. A blanket `(OI)(CI)` deny on `re/assets/`
+>    would therefore break auto-track generation AND the A/B loop. Verified 2026-09-08:
+>    deletes under `cars/`, `frontend/`, `static/`, `sound/` and `levels/level001/` are
+>    blocked and the files stay intact; a stale file inside `level090` is still removable;
+>    a directory under `levels/` can still be created and deleted; reads are unaffected.
+>    KNOWN LIMITATION of the per-child approach: a NEW top-level dir added to `re/assets/`
+>    later will NOT inherit the deny (the parent has no inheritable ACE) — re-run the
+>    per-child apply after adding one.
+>
+>    ACEs are icacls DENY `(DE,DC)` for `MARIANO-PC\maria` + `MARIANO-PC\CodexSandboxUsers`,
+>    `(OI)(CI)` inherited (directories). Empirically confirmed 2026-09-08: deleting a file
+>    under `mingw64/` raises `UnauthorizedAccessException`, and read/execute are unaffected
+>    (gcc runs, a full `build_standalone.bat` passes) because the deny covers Delete and
+>    Delete-Child ONLY, not write.
+>
+>    **Root cause of the six-week toolchain gap, now confirmed:** the 2026-05-28 ACL was
+>    applied to the i686-era `td5mod/deps/mingw/`. The 2026-07-30 cutover *moved* that
+>    directory to `_archive/mingw-i686-toolchain/`, and a same-volume move PRESERVES ACEs —
+>    so the protection travelled with the RETIRED tree (which is why it still shows 2 DENY
+>    there) while the freshly created `mingw64/` inherited only plain Modify. The same stale
+>    path simultaneously disabled the teardown canary and the `~/bin/rm` wrapper entry.
+>    Lesson: **an ACL follows the directory, not the role.** After any toolchain/asset
+>    relocation, re-assert the deny on the NEW path and re-check the canary + rm wrapper.
+>
+>    Where the ACL is live, a delete that reaches it fails with
+>    **Access Denied — that is the safeguard WORKING.** NEVER strip it to "make teardown
+>    succeed." To *legitimately* replace `original/`, drop the deny then re-apply:
 >    `powershell.exe -NoProfile -Command "icacls '<dir>' /remove:d 'MARIANO-PC\maria' /remove:d 'MARIANO-PC\CodexSandboxUsers'"`
 >    (the READ-ONLY `attrib +R` mentioned later in this doc did NOT hold — the ACL supersedes it.)
 >
-> 2. **Off-disk backup** at `C:\Users\maria\Desktop\TD5RE_backup_2026-05-28\`
->    (`original/` + `mingw-i686.7z`). Recovery if main data vanishes:
->    `re/` tracked files → `git checkout HEAD -- re/`; `original/` + `re/assets`
->    → robocopy from the backup or a sibling worktree; `mingw` → re-extract
->    `td5mod/deps/mingw-i686.7z` (build zlib from source — winlibs omits it);
->    `ddraw_wrapper/build` → recompile `src/*.c` + `ar rcs libddraw_wrapper.a`.
+> 2. **Off-disk backup** at `C:\Users\maria\Desktop\TD5RE_backup_2026-05-28\`.
+>    Recovery if main data vanishes: `re/` tracked files → `git checkout HEAD -- re/`;
+>    `original/` + `re/assets` → robocopy from the backup or a sibling worktree;
+>    the toolchain → re-extract from `_archive/` (`mingw-i686.7z` there is the RETIRED
+>    32-bit tree, NOT today's toolchain — the live one is x86_64 UCRT at
+>    `td5mod/deps/mingw64/mingw64/`, so prefer a copy from a sibling worktree or a fresh
+>    winlibs UCRT download); `ddraw_wrapper/build` → recompile `src/*.c` +
+>    `ar rcs libddraw_wrapper.a`.
 >
-> 3. **Correct junction unlink for THIS host:** `cmd //c "rmdir ..."` FAILS here
->    with a volume-label syntax error (confirmed 2026-05-28), silently leaving the
->    junction live for `--force` to follow. Use PowerShell's reparse-aware delete
->    (removes ONLY the link, never the target), with a ReparsePoint guard.
+> 3. **Correct junction unlink for THIS host** (only needed for a legacy worktree that
+>    still has one): `cmd //c "rmdir ..."` FAILS here with a volume-label syntax error
+>    (confirmed 2026-05-28), silently leaving the junction live for `--force` to follow.
+>    Use PowerShell's reparse-aware delete (removes ONLY the link, never the target),
+>    with a ReparsePoint guard.
 >
 > **Pre/post canary — run around EVERY teardown:** before, confirm
-> `original/TD5_d3d.exe` and `td5mod/deps/mingw/mingw32/bin/gcc.exe` exist; after,
+> `original/TD5_d3d.exe` and `td5mod/deps/mingw64/mingw64/bin/gcc.exe` exist; after,
 > confirm they STILL exist. If either vanished, the teardown followed a junction —
-> STOP and restore from the backup immediately.
+> STOP and restore from the backup immediately. (The old canary named
+> `td5mod/deps/mingw/mingw32/bin/gcc.exe`, a path retired 2026-07-30, so it reported a
+> false alarm on every run and taught agents to ignore it.)
 
 If the fix doesn't pan out and the user wants to throw it away instead of merging:
 
@@ -556,19 +607,25 @@ If the fix doesn't pan out and the user wants to throw it away instead of mergin
 cd C:/Users/maria/Desktop/Proyectos/TD5RE
 
 # CANARY (pre): record that the irreplaceable main-tree markers exist.
-test -f original/TD5_d3d.exe && test -f td5mod/deps/mingw/mingw32/bin/gcc.exe \
+test -f original/TD5_d3d.exe && test -f td5mod/deps/mingw64/mingw64/bin/gcc.exe \
   || { echo "PRECONDITION: main-tree markers already missing — investigate before teardown"; exit 1; }
 
 # Always pre-unlink the mingw junction before teardown — plain `git worktree
 # remove` will refuse (dirty files), and --force follows the junction into main.
 # THIS HOST: cmd //c "rmdir" fails (volume-label error) — use PowerShell reparse delete.
-powershell.exe -NoProfile -Command "\$p='${WORKTREE_DIR}/td5mod/deps/mingw' -replace '/','\\'; if (Test-Path \$p){ \$i=Get-Item \$p -Force; if (\$i.Attributes -band [IO.FileAttributes]::ReparsePoint){ \$i.Delete(); 'unlinked' } else { Write-Error 'NOT a reparse point — refusing'; exit 1 } }"
+# Covers BOTH names: `mingw` (legacy i686-era junction) and `mingw64` (current).
+# A worktree created by the pointer-file recipe has NEITHER, so this is a no-op there.
+for MG in mingw mingw64; do
+  powershell.exe -NoProfile -Command "\$p='${WORKTREE_DIR}/td5mod/deps/${MG}' -replace '/','\\'; if (Test-Path \$p){ \$i=Get-Item \$p -Force; if (\$i.Attributes -band [IO.FileAttributes]::ReparsePoint){ \$i.Delete(); 'unlinked ${MG}' } else { Write-Error 'NOT a reparse point — refusing'; exit 1 } }"
+done
 
-# MANDATORY: abort if the junction is still present — do NOT proceed to --force.
-if [ -d "${WORKTREE_DIR}/td5mod/deps/mingw" ]; then
-    echo "ERROR: pre-unlink failed — junction still live. Do NOT run --force."
-    exit 1
-fi
+# MANDATORY: abort if a junction is still present — do NOT proceed to --force.
+for MG in mingw mingw64; do
+  if [ -d "${WORKTREE_DIR}/td5mod/deps/${MG}" ]; then
+      echo "ERROR: pre-unlink failed — ${MG} still live. Do NOT run --force."
+      exit 1
+  fi
+done
 
 git worktree remove --force "${WORKTREE_DIR}"
 git branch -D "${SESSION_TAG}"          # -D because it was never merged
@@ -576,7 +633,7 @@ git branch -D "${SESSION_TAG}"          # -D because it was never merged
 
 Ask the user to confirm before running the `-D` variant.
 
-**CRITICAL — junction safety:** Teardown must go through `git worktree remove`, never `rm -rf "${WORKTREE_DIR}"`. The worktree contains a junction at `td5mod/deps/mingw/` that points back into the main tree (753 MB MinGW toolchain). A recursive `rm` from git-bash or PowerShell `Remove-Item -Recurse` will follow that junction and **destroy the toolchain in the main tree**.
+**CRITICAL — junction safety:** Teardown must go through `git worktree remove`, never `rm -rf "${WORKTREE_DIR}"`. A LEGACY worktree may contain a junction at `td5mod/deps/mingw/` (or `mingw64/`) pointing back into the main tree (753 MB MinGW toolchain); a recursive `rm` from git-bash or PowerShell `Remove-Item -Recurse` follows it and **destroys the toolchain in the main tree**. Worktrees created by the current pointer-file recipe have no junction, so the risk is confined to older ones — but keep using `git worktree remove` unconditionally, since you cannot tell by eye which kind you are holding.
 
 **`git worktree remove --force` is NOT safe with this junction.** Empirically confirmed on 2026-04-16, 2026-04-20, and 2026-04-22: when a worktree has uncommitted files (td5re.ini tweaks, log/, build artifacts) plain `git worktree remove` refuses, and the agent reaches for `--force` — which traverses the mingw junction and wipes main's toolchain. Before EVERY `git worktree remove --force`, pre-unlink the junction:
 
@@ -585,21 +642,25 @@ Ask the user to confirm before running the `-D` variant.
 # 2026-05-28), silently leaving the junction live for --force to follow. Use the
 # PowerShell reparse-aware delete (removes ONLY the link, never the target) —
 # see the TEARDOWN SAFEGUARDS block above.
-powershell.exe -NoProfile -Command "\$p='${WORKTREE_DIR}/td5mod/deps/mingw' -replace '/','\\'; if (Test-Path \$p){ \$i=Get-Item \$p -Force; if (\$i.Attributes -band [IO.FileAttributes]::ReparsePoint){ \$i.Delete() } else { Write-Error 'NOT a reparse point — refusing'; exit 1 } }"
+for MG in mingw mingw64; do
+  powershell.exe -NoProfile -Command "\$p='${WORKTREE_DIR}/td5mod/deps/${MG}' -replace '/','\\'; if (Test-Path \$p){ \$i=Get-Item \$p -Force; if (\$i.Attributes -band [IO.FileAttributes]::ReparsePoint){ \$i.Delete() } else { Write-Error 'NOT a reparse point — refusing'; exit 1 } }"
+done
 
-# MANDATORY: verify the junction is gone before proceeding. If it still exists,
+# MANDATORY: verify no junction remains before proceeding. If one still exists,
 # the unlink failed — do NOT run --force.
-if [ -d "${WORKTREE_DIR}/td5mod/deps/mingw" ]; then
-    echo "ERROR: pre-unlink failed — ${WORKTREE_DIR}/td5mod/deps/mingw still exists."
-    echo "STOP: do NOT run git worktree remove --force. Investigate the unlink failure."
-    exit 1
-fi
+for MG in mingw mingw64; do
+  if [ -d "${WORKTREE_DIR}/td5mod/deps/${MG}" ]; then
+      echo "ERROR: pre-unlink failed — ${WORKTREE_DIR}/td5mod/deps/${MG} still exists."
+      echo "STOP: do NOT run git worktree remove --force. Investigate the unlink failure."
+      exit 1
+  fi
+done
 
 git worktree remove --force "${WORKTREE_DIR}"   # safe now — junction is gone
 
 # CANARY (post): the deny-delete ACL on original//mingw should block any
 # junction-follow, but verify the irreplaceable markers survived regardless.
-test -f original/TD5_d3d.exe && test -f td5mod/deps/mingw/mingw32/bin/gcc.exe \
+test -f original/TD5_d3d.exe && test -f td5mod/deps/mingw64/mingw64/bin/gcc.exe \
   || { echo "FATAL: main-tree data vanished during teardown — restore from C:\\Users\\maria\\Desktop\\TD5RE_backup_2026-05-28\\ NOW"; exit 1; }
 ```
 
@@ -631,9 +692,11 @@ work and the upside is bounded recovery (single /fix run created
 ~5 MB of orphans before this guard; the historical accumulation was
 ~6 GB by 2026-04-29).
 
-**As of 2026-05-28, main's `td5mod/deps/mingw/` AND `original/` are protected by a deny-delete ACL** (icacls DENY `(DE,DC)` for `MARIANO-PC\maria` + `MARIANO-PC\CodexSandboxUsers`, `(OI)(CI)` inherited) — a junction-follow delete now fails with Access Denied instead of wiping the data. This SUPERSEDES the older `attrib +R /S /D` READ-ONLY approach, which did NOT hold (the toolchain was wiped anyway on 2026-05-28). Do not clear the deny ACL; to legitimately replace these dirs, drop the deny with `icacls '<dir>' /remove:d 'MARIANO-PC\maria' /remove:d 'MARIANO-PC\CodexSandboxUsers'` and re-apply afterward.
+**Deny-delete ACL status (re-verified 2026-09-08): `original/` is protected, the TOOLCHAIN IS NOT.** `original/` carries the deny-delete ACL (icacls DENY `(DE,DC)` for `MARIANO-PC\maria` + `MARIANO-PC\CodexSandboxUsers`, `(OI)(CI)` inherited), so a junction-follow delete of it fails with Access Denied instead of wiping the data. But `td5mod/deps/mingw64` has **zero** DENY entries: the 2026-05-28 ACL was applied to the i686-era `td5mod/deps/mingw/`, and the 2026-07-30 move to `mingw64/` left the new path uncovered. Treat the toolchain as UNPROTECTED and rely on the no-junction worktree rule instead. (This ACL approach SUPERSEDES the older `attrib +R /S /D` READ-ONLY one, which did NOT hold.) Do not clear the deny on `original/`; to legitimately replace it, drop the deny with `icacls '<dir>' /remove:d 'MARIANO-PC\maria' /remove:d 'MARIANO-PC\CodexSandboxUsers'` and re-apply afterward. To extend the same protection to the toolchain: `icacls 'td5mod\deps\mingw64' /deny 'MARIANO-PC\maria:(OI)(CI)(DE,DC)' /deny 'MARIANO-PC\CodexSandboxUsers:(OI)(CI)(DE,DC)'`.
 
-**ALSO CRITICAL — never `rm` a junction inside the worktree, even ad-hoc.** This trap fires outside teardown too: if you see `${WORKTREE_DIR}/td5mod/deps/mingw` listed by MSYS as a `symlink` (because git-bash renders Windows junctions that way), DO NOT `rm -f` it to "clean it up before recreating". Bash's `rm` follows junctions into their target and empties the destination. The 2026-04-15 incident: agent ran `rm -f "${WORKTREE_DIR}/td5mod/deps/mingw"` to recreate a junction → emptied main's `td5mod/deps/mingw/` → had to re-extract `td5mod/deps/mingw-i686.7z` to restore. The `~/bin/rm` wrapper now refuses paths under main's `td5mod/deps/mingw`, but the wrapper resolves through junctions, so the worktree path is also blocked. To unlink a junction safely, use `cmd //c "rmdir <path>"` (no `/s`) — Windows `rmdir` removes the junction without recursing into it. Recovery if the toolchain is wiped: `cd td5mod/deps && rm -rf mingw && 7z x mingw-i686.7z -y && mv mingw32 mingw/`.
+**ALSO CRITICAL — never `rm` a junction inside a worktree, even ad-hoc.** This trap fires outside teardown too: if you see `${WORKTREE_DIR}/td5mod/deps/mingw64` (or the legacy `mingw`) listed by MSYS as a `symlink` (because git-bash renders Windows junctions that way), DO NOT `rm -f` it to "clean it up before recreating". Bash's `rm` follows junctions into their target and empties the destination. The 2026-04-15 incident: agent ran `rm -f "${WORKTREE_DIR}/td5mod/deps/mingw"` to recreate a junction → emptied main's toolchain → had to re-extract to restore. The `~/bin/rm` wrapper refuses paths under main's toolchain dir, but the wrapper resolves through junctions, so a worktree path pointing there is also blocked. To unlink a junction safely, use the PowerShell reparse-delete above (`cmd //c "rmdir"` fails on this host). **Best of all, don't create one** — the pointer-file recipe means a fresh worktree has no junction to mis-handle.
+
+Recovery if the toolchain is wiped: the live one is **x86_64 UCRT** at `td5mod/deps/mingw64/mingw64/`. `_archive/mingw-i686.7z` is the RETIRED 32-bit tree and will NOT build today's sources (they are x86_64-only since 2026-07-30) — restore by robocopying `td5mod/deps/mingw64` from a sibling worktree or the off-disk backup, or re-download a winlibs UCRT x86_64 build. Verify the flavour after restoring: `grep -aoE "x86_64-(ucrt|msvcrt)-posix-seh" td5mod/deps/mingw64/mingw64/bin/gcc.exe | head -1` must report `ucrt`.
 
 ### Worktree janitor (bulk cleanup of abandoned worktrees)
 
@@ -798,11 +861,13 @@ for entry in $(cat "${REPORT_DIR}/merged.txt" "${REPORT_DIR}/stale.txt"); do
 
     # Pre-unlink junction via PowerShell reparse delete (cmd //c "rmdir" fails on
     # this host — see TEARDOWN SAFEGUARDS). Removes only the link, never the target.
-    powershell.exe -NoProfile -Command "\$p='${WT}/td5mod/deps/mingw' -replace '/','\\'; if (Test-Path \$p){ \$i=Get-Item \$p -Force; if (\$i.Attributes -band [IO.FileAttributes]::ReparsePoint){ \$i.Delete() } }" 2>/dev/null
+    for MG in mingw mingw64; do
+      powershell.exe -NoProfile -Command "\$p='${WT}/td5mod/deps/${MG}' -replace '/','\\'; if (Test-Path \$p){ \$i=Get-Item \$p -Force; if (\$i.Attributes -band [IO.FileAttributes]::ReparsePoint){ \$i.Delete() } }" 2>/dev/null
+    done
 
     # Verify junction is gone before --force; if it's still there, SKIP this
     # worktree and continue to the next, do NOT --force through a live junction.
-    if [ -d "${WT}/td5mod/deps/mingw" ]; then
+    if [ -d "${WT}/td5mod/deps/mingw" ] || [ -d "${WT}/td5mod/deps/mingw64" ]; then
         echo "SKIP ${WT}: junction pre-unlink failed; inspect manually"
         continue
     fi
@@ -1057,7 +1122,33 @@ Both are now enforced through the PID the launch harness wrote to `${WORKTREE_DI
 
 A brand-new worktree is missing gitignored runtime bits that the build and the exe need. Set these up once, right after `git worktree add` in Step 0.
 
-**Design rule (2026-04-15): worktrees must be self-contained.** Only the MinGW toolchain is junctioned (read-only, 753 MB, nothing in the workflow tries to mutate it). `original/` and `re/assets/` runtime subdirs are **copied**, not junctioned — a careless `rm -rf` or bad merge inside a worktree can no longer reach main's irreplaceable game data. Known-good snapshot of both lives at `C:/Users/maria/Desktop/TD5RE_backup_2026-04-15/` for disaster recovery.
+**Design rule (2026-04-15, revised 2026-09-08): worktrees must be self-contained, and
+NO junction is created at all.** `original/` and `re/assets/` runtime subdirs are
+**copied**, not junctioned — a careless `rm -rf` or bad merge inside a worktree can no
+longer reach main's irreplaceable game data. Known-good snapshot of both lives at
+`C:/Users/maria/Desktop/TD5RE_backup_2026-04-15/` for disaster recovery.
+
+**The MinGW toolchain is reached by a POINTER FILE, not a junction (corrected 2026-09-08).**
+`build_standalone.bat` resolves the toolchain through a three-tier fallback (see its own
+header comment, ~lines 58-83):
+
+1. `..\..\deps\mingw64\mingw64\bin` — relative, so inside a worktree this resolves to the
+   *worktree's own* (nonexistent) `deps/`, and correctly falls through
+2. `%TD5RE_MINGW%` — one-off / CI override
+3. `.td5re_mingw` at the repo root — an UNTRACKED one-line text file holding the absolute
+   path to the parent tree's `mingw64\bin`
+
+So a fresh worktree only needs tier 3: write the pointer file. This is strictly better than
+the old `mklink /J` recipe, because a worktree containing no reparse point cannot be
+followed into main by `git worktree remove --force` — it removes the entire teardown hazard
+class that destroyed the parent toolchain on 2026-04-16, 04-20, 04-22 and 05-28. The
+long-lived `infra-toolchain-ini` (master) worktree already uses this pointer approach.
+
+**Path note (corrected 2026-09-08):** the toolchain is `td5mod/deps/mingw64/mingw64/bin`
+(x86_64, UCRT). The old i686 layout — `td5mod/deps/mingw/mingw32/bin` and
+`td5mod/deps/mingw-i686.7z` — was RETIRED 2026-07-30 and moved to
+`_archive/mingw-i686-toolchain/` + `_archive/mingw-i686.7z`. `td5mod/deps/mingw/` no longer
+exists; any recipe still naming it silently does nothing.
 
 ```bash
 # Run from inside the worktree so `re\assets` / `original` resolve correctly
@@ -1065,14 +1156,23 @@ A brand-new worktree is missing gitignored runtime bits that the build and the e
 # which has silently dropped commands in the past).
 cd "${WORKTREE_DIR}"
 
-# 1. MinGW toolchain (gitignored, 753 MB, read-only — junction is safe).
-#    Use a plain relative DST; absolute paths with embedded forward slashes
-#    break mklink's "volume label syntax" parser.
-cmd //c 'mklink /J td5mod\deps\mingw C:\Users\maria\Desktop\Proyectos\TD5RE\td5mod\deps\mingw'
-test -d td5mod/deps/mingw/mingw32/bin || {
-    echo "MINGW JUNCTION FAILED: td5mod/deps/mingw is not reachable. Aborting."
+# 1. MinGW toolchain — POINTER FILE, no junction (see the design rule above).
+#    Write it with a heredoc / the Write tool, NOT printf: bash printf eats the
+#    backslashes as escapes (\t -> tab, \b -> backspace, \U -> error) and silently
+#    produces a corrupt path.
+cat > .td5re_mingw <<'MINGWPTR'
+C:\Users\maria\Desktop\Proyectos\TD5RE\td5mod\deps\mingw64\mingw64\bin
+MINGWPTR
+# Verify the PARENT toolchain the pointer names, and that the flavour is UCRT.
+test -f C:/Users/maria/Desktop/Proyectos/TD5RE/td5mod/deps/mingw64/mingw64/bin/gcc.exe || {
+    echo "TOOLCHAIN MISSING in parent tree — aborting before any build."
     exit 1
 }
+grep -aoE "x86_64-(ucrt|msvcrt)-posix-seh" \
+    C:/Users/maria/Desktop/Proyectos/TD5RE/td5mod/deps/mingw64/mingw64/bin/gcc.exe | head -1
+# Confirm no reparse point was created anywhere under the worktree (should be 0).
+cmd //c "dir /AL /S \"$(cygpath -w "${WORKTREE_DIR}")\"" 2>&1 \
+    | grep -ci "JUNCTION\|SYMLINK" | xargs echo "reparse points in worktree:"
 
 # 2. Original game files — COPY, not junction (~113 MB, ~15s).
 #    Previous recipe junctioned main's original/ into the worktree; a recursive
