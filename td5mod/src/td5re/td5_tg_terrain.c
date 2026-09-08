@@ -376,6 +376,27 @@ typedef char tg_assert_biome_road_len[
     (sizeof(k_biome_road) / sizeof(k_biome_road[0]) == TD5_TG_BIOME_KINDS)
     ? 1 : -1];
 
+/* [R21] ADDING A BIOME -- the whole procedure, and the one trap in it.
+ *
+ * 1. Append a row to k_biomes AND a row to k_biome_road. The assert above
+ *    turns "forgot the second one" into a build error.
+ * 2. Decide its DRAW POOL. TD5_TG_BIOME_COUNT and TD5_TG_BIOME_COUNT_SNOW are
+ *    the two draw MODULI; TD5_TG_BIOME_KINDS is the array BOUND and derives
+ *    itself from the table. Bump COUNT to let normal seeds draw the biome --
+ *    which MOVES EVERY EXISTING SEED'S LAYOUT, since it is the modulus every
+ *    cell is drawn through -- or bump only COUNT_SNOW for a snow-only biome,
+ *    the way ALPTOWN was added.
+ * 3. Give it a road_surf, a tree set and pages, or it inherits index 0's.
+ *
+ * THE TRAP: a COUNT larger than the table is an out-of-bounds read on every
+ * cell that draws the missing biome, and it would silently read whatever
+ * follows the table rather than failing. The asserts below make that a build
+ * error too, which is the part that was previously only prose. */
+typedef char tg_assert_biome_count_fits[
+    (TD5_TG_BIOME_COUNT <= TD5_TG_BIOME_KINDS) ? 1 : -1];
+typedef char tg_assert_biome_count_snow_fits[
+    (TD5_TG_BIOME_COUNT_SNOW <= TD5_TG_BIOME_KINDS) ? 1 : -1];
+
 /* DEFAULT OFF this round: a shape change can leave the centerline walk boxed
  * in and the track short (the r2 item-20 lesson), so it is opt-in until it has
  * been driven and checked for "boxed in" in race.log. OFF is byte-identical to

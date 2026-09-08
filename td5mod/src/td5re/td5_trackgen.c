@@ -1188,6 +1188,10 @@ int td5_trackgen_roll_is_pinned_now(int id)
     return tg_roll_pin_of(&k_tg_rolls[id], &v);
 }
 
+/* Defined below, next to the mood table; latched here so the rolls and the
+ * mood always share a lifetime. */
+static void tg_mood_resolve(unsigned int seed);
+
 void tg_rolls_resolve(unsigned int seed)
 {
     int i, j;
@@ -1199,6 +1203,7 @@ void tg_rolls_resolve(unsigned int seed)
     td5_trackgen_resolve_rolls(seed, &s_rolls);
     s_rolls_valid = 1;
     tg_rolls_publish();
+    tg_mood_resolve(seed);   /* latched alongside the rolls, same lifetime */
 
     /* One-shot duplicate-salt scan: two entries on one salt correlate forever
      * and nothing else would ever notice. */
@@ -1322,6 +1327,91 @@ void tg_rolls_report(void)
     }
     TD5_LOG_I(LOG_TAG, "trackgen: [R21 ROLL] ---- %d rolled, %d pinned ----",
               rolled, pinned);
+}
+
+/* ---- [R21 MOOD] -----------------------------------------------------------
+ * Scaffolding: resolved, latched and logged, consumed by nothing yet. See the
+ * TG_Mood block in the internal header for why it is latched and why grip
+ * carries a floor. Salts continue the R21 range. */
+static TG_Mood s_mood;
+
+static const char *const k_mood_season[]  = { "SPRING", "SUMMER", "AUTUMN",
+                                              "WINTER" };
+static const char *const k_mood_weather[] = { "CLEAR", "OVERCAST", "RAIN",
+                                              "FOG" };
+/* Weather leans dry: rain and fog change how a track reads more than any other
+ * mood axis, so they are the exception rather than half of all tracks. */
+static const unsigned char k_mood_weather_w[] = { 50, 30, 13, 7 };
+
+static void tg_mood_resolve(unsigned int seed)
+{
+    memset(&s_mood, 0, sizeof(s_mood));
+    s_mood.season  = tg_roll_pick_w(tg_roll_hash(seed, 0x21012001u), NULL, 4);
+    s_mood.weather = tg_roll_pick_w(tg_roll_hash(seed, 0x21012002u),
+                                    k_mood_weather_w, 4);
+    /* Derived, not independently rolled: a dry CLEAR track with 80% wetness
+     * would be incoherent, and coherence is the whole point of latching. */
+    s_mood.wetness = (s_mood.weather == 2) ? 60 + (int)(tg_roll_hash(seed, 0x21012003u) % 40u)
+                   : (s_mood.weather == 1) ? (int)(tg_roll_hash(seed, 0x21012003u) % 25u)
+                   : 0;
+    s_mood.fog_pct = (s_mood.weather == 3) ? 50 + (int)(tg_roll_hash(seed, 0x21012004u) % 50u)
+                   : 0;
+    s_mood.wear    = (int)(tg_roll_hash(seed, 0x21012005u) % 101u);
+    /* FLOOR, not a free roll -- grip reaches the simulation. 100 dry, and at
+     * most a 25% reduction fully wet, which is the same posture ALPTOWN's
+     * tarmac decision takes for ice. */
+    s_mood.grip_pct = 100 - (s_mood.wetness * 25) / 100;
+    if (s_mood.grip_pct < 75) s_mood.grip_pct = 75;
+
+    TD5_LOG_I(LOG_TAG, "trackgen: [R21 MOOD] season=%s weather=%s wetness=%d "
+              "fog=%d wear=%d grip=%d%% (not yet consumed by any emitter)",
+              k_mood_season[s_mood.season], k_mood_weather[s_mood.weather],
+              s_mood.wetness, s_mood.fog_pct, s_mood.wear, s_mood.grip_pct);
+}
+
+const TG_Mood *tg_mood(void) { return &s_mood; }
+
+/* ---- [R21 LANDMARKS] ------------------------------------------------------
+ * Scaffolding: the pass runs over the merged biome runs and reports, but the
+ * table is empty, so it places nothing and cannot change a build. Adding a
+ * landmark is a row here plus an emitter; see the TG_Landmark block in the
+ * internal header for the placement contract. */
+static const TG_Landmark k_landmarks[] = {
+    /* name, biome_mask, min_run, once, weight, flat, water, night, salt */
+    { NULL, 0u, 0, 0, 0, 0, 0, 0, 0u }   /* deliberately empty */
+};
+#define TG_LANDMARK_N ((int)(sizeof(k_landmarks) / sizeof(k_landmarks[0])))
+
+void tg_landmarks_place(const TG_NodeList *nl, int nspans)
+{
+    int placed = 0, runs = 0, si;
+
+    if (!nl || nspans <= 0) return;
+
+    /* Walk MERGED runs, not cells: a repeated 300-span city is one run, and a
+     * once_per_track piece must not be offered it twice. */
+    for (si = 0; si < nspans; ) {
+        int a = si, b = si, li;
+        tg_biome_run_bounds(si, &a, &b);
+        if (b < a) break;
+        runs++;
+        for (li = 0; li < TG_LANDMARK_N; li++) {
+            const TG_Landmark *L = &k_landmarks[li];
+            if (!L->name) continue;                 /* empty slot */
+            if (b - a + 1 < L->min_run_spans) continue;
+            if (L->biome_mask &&
+                !(L->biome_mask & (1u << tg_biome_cell_index(a)))) continue;
+            if (L->needs_night && !s_is_night) continue;
+            /* Hash-gated so this consumes no RNG: adding a landmark must not
+             * be able to move the road. */
+            if ((tg_roll_hash(s_gen_seed, L->salt) % 100u)
+                >= (unsigned)L->weight) continue;
+            placed++;
+        }
+        si = b + 1;
+    }
+    TD5_LOG_I(LOG_TAG, "trackgen: [R21 LANDMARK] %d run(s), %d table row(s), "
+              "%d placed", runs, TG_LANDMARK_N - 1, placed);
 }
 
 static unsigned int tg_rand(void)

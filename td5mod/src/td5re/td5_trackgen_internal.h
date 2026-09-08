@@ -2681,6 +2681,60 @@ int  tg_shape_lerp_pct(int si, int field, int ramp_spans);
  * tg_adjacent_skip must be sized with (a min over the WHOLE table, not over
  * the biomes this seed happened to lay out, so the self-intersection window is
  * provably >= every local value the walk can use). */
+/* ==========================================================================
+ * [R21 MOOD] PER-BUILD MOOD (scaffolding: resolved and logged, consumed by
+ * nothing yet).
+ *
+ * Latched once per build for the same reason s_is_night is: every emitter and
+ * renderer that asks during a build has to get the same answer, and a per-call
+ * predicate is how a track ends up with wet tarmac under one prop and dry
+ * under the next.
+ *
+ * grip_pct FEEDS THE SIMULATION, so it carries a FLOOR rather than a free
+ * roll. The precedent is ALPTOWN's tarmac decision, which caps how much of a
+ * snow seed can be on ice precisely so "the race still finishes" keeps
+ * holding; a mood that made a whole track low-grip would break that in a way
+ * no geometry check would catch. */
+typedef struct {
+    int season;     /* 0 spring, 1 summer, 2 autumn, 3 winter */
+    int weather;    /* 0 clear, 1 overcast, 2 rain, 3 fog     */
+    int wetness;    /* 0..100                                 */
+    int wear;       /* 0..100 road wear                       */
+    int grip_pct;   /* 100 = nominal, floored (see above)     */
+    int fog_pct;    /* 0..100                                 */
+} TG_Mood;
+
+const TG_Mood *tg_mood(void);
+
+/* ==========================================================================
+ * [R21 LANDMARKS] SET-PIECE PLACEMENT REGISTRY (scaffolding: the pass runs,
+ * the table is empty).
+ *
+ * A landmark is a one-per-track (or one-per-run) set piece -- a stadium, an
+ * airport, a signature building -- as opposed to the per-span props the
+ * scenery phases scatter. Placement is a TABLE so a new landmark is a row
+ * rather than another special case inside an emitter.
+ *
+ * Runs on MERGED biome runs via tg_biome_run_bounds, which is the right
+ * primitive: with repeated cells a 300-span city is ONE run, where
+ * si / TD5_TG_BIOME_RUN would see two and could place the same one-per-track
+ * piece twice. Hash-gated, so it consumes no RNG and adding a landmark cannot
+ * move the road. Placed AFTER elevation and BEFORE scenery so needs_flat can
+ * actually be evaluated. */
+typedef struct {
+    const char  *name;
+    unsigned int biome_mask;    /* 1u<<biome_index; 0 = any biome */
+    int          min_run_spans; /* needs a merged run at least this long */
+    int          once_per_track;
+    unsigned char weight;       /* hash-gated propensity, 0..100 */
+    int          needs_flat;
+    int          needs_water;
+    int          needs_night;
+    unsigned int salt;          /* own salt namespace; see the roll registry */
+} TG_Landmark;
+
+void tg_landmarks_place(const TG_NodeList *nl, int nspans);
+
 int  tg_shape_lane_aim(int si, int base_lanes, int lo, int hi);
 int  tg_shape_safety_x100(int si, int base_x100);
 int  tg_shape_worst_safety_x100(const TD5_TrackGenSpec *spec);
