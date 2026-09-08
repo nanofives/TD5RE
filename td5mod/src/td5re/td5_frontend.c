@@ -25,6 +25,7 @@
 #include "td5_config.h"      /* shared TD5RE_* env-knob accessors */
 #include "td5_ai_driver.h"   /* [AI DRIVER MODEL] td5_ai_driver_mode_name */
 #include "td5_sound.h"
+#include "td5_radio.h"         /* [SOUND OPTIONS RADIO] station select + status */
 #include "td5_hud.h"           /* per-viewport player-identity overlay (race) */
 #include "td5re.h"
 #include "td5_snk_strings.h"   /* byte-exact SNK_ labels baked from Language.dll */
@@ -825,6 +826,10 @@ int             s_game_option_tutorial = 1;   /* [TUTORIAL 2026-06-29] controlle
 int             s_sound_option_sfx_mode;
 int             s_sound_option_sfx_volume = 80;
 int             s_sound_option_music_volume = 80;
+/* [SOUND OPTIONS RADIO] Working copy of [Audio]RadioVolume, edited by the new
+ * RADIO VOLUME row and committed to g_td5.ini on OK. Seeded from the INI in
+ * frontend_seed_sound_options() alongside the other two. */
+int             s_sound_option_radio_volume = 10;
 
 /* Car roster size. The original game has 37 cars (0-36). The source port
  * appends 39 ported Test Drive 6 cars at indices 37-75 (see s_car_zip_paths
@@ -7028,6 +7033,58 @@ int td5_mp_port_edit_tick(void) {
     return 0;
 }
 
+/* ========================================================================
+ * [SOUND OPTIONS RADIO] RADIO STATION row: Enter-to-edit stream URL.
+ *
+ * Modelled on the GAME PORT editor above. Two things differ:
+ *   - mixed case is forced ON. A URL is case-sensitive in its path and the
+ *     scheme must stay lowercase, so the player-name uppercase fold would
+ *     turn every typed station into an unopenable "HTTP://HOST/MOUNT".
+ *   - the value is validated against TD5_RADIO_URL_FORMAT, and a reject keeps
+ *     the previous station instead of storing an URL that can never connect.
+ * ======================================================================== */
+static char s_radio_url_edit[512];
+static int  s_radio_url_edit_bad;    /* 1 = last confirm was rejected */
+
+void td5_radio_url_edit_begin(void) {
+    snprintf(s_radio_url_edit, sizeof s_radio_url_edit, "%s", g_td5.ini.radio_url);
+    frontend_begin_text_input(s_radio_url_edit, (int)sizeof s_radio_url_edit);
+    s_text_input_mixed_case = 1;     /* must be AFTER begin (it clears the flag) */
+    s_radio_url_edit_bad    = 0;
+    TD5_LOG_I(LOG_TAG, "RADIO STATION edit begin (current=%s)", g_td5.ini.radio_url);
+}
+
+int td5_radio_url_edit_tick(void) {
+    frontend_handle_text_input_key();
+    if (frontend_check_escape()) {               /* ESC = cancel, keep station */
+        frontend_reset_text_input();
+        s_radio_url_edit_bad = 0;
+        return 1;
+    }
+    if (frontend_text_input_confirmed()) {
+        if (!td5_radio_url_valid(s_radio_url_edit)) {
+            /* Keep the editor OPEN so the typed text stays on screen next to
+             * the format hint -- closing it would silently discard the attempt
+             * and look like the field simply ignored the player. */
+            s_radio_url_edit_bad = 1;
+            frontend_play_sfx(10);               /* inert/reject blip */
+            TD5_LOG_W(LOG_TAG, "RADIO STATION rejected: '%s' (expected %s)",
+                      s_radio_url_edit, TD5_RADIO_URL_FORMAT);
+            return 0;
+        }
+        /* Accepted: store, persist, and re-point the live worker. */
+        snprintf(g_td5.ini.radio_url, sizeof g_td5.ini.radio_url, "%s", s_radio_url_edit);
+        td5_ini_write_str("Audio", "RadioURL", g_td5.ini.radio_url);
+        td5_radio_set_url(g_td5.ini.radio_url);
+        frontend_play_sfx(5);
+        frontend_reset_text_input();
+        s_radio_url_edit_bad = 0;
+        TD5_LOG_I(LOG_TAG, "RADIO STATION set to %s", g_td5.ini.radio_url);
+        return 1;
+    }
+    return 0;
+}
+
 static void frontend_render_display_options_overlay(float sx, float sy) {
     char damping[16];
     const char *on_off[]     = { "OFF", "ON" };
@@ -7054,18 +7111,23 @@ static void frontend_render_sound_options_overlay(float sx, float sy) {
     if (!s_buttons[0].active) return;
     if (!s_anim_complete) return;
     /* [PORT REWORK 2026-06-05 / S15] The SFX-mode row (Stereo/Mono/3D icon +
-     * MONAURAL/STEREO/3D SOUND name) was removed. Only the two volume bars are
-     * drawn now. Volume levels are indicated by bar fill only; no numbers. */
+     * MONAURAL/STEREO/3D SOUND name) was removed.
+     * [SOUND OPTIONS RADIO] Three volume bars now (SFX / Music / Radio), each
+     * with a numeric NN% readout so SFX and RADIO levels are legible and not
+     * just inferred from bar fill. Rows 3 (RADIO STATION) and 4 (OK) carry no
+     * bar. */
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
 
-    /* Volume bars: SFX = button[0], Music = button[1] (re-indexed after the
-     * SFX Mode row was removed). Each bar sits to the right of its button at
-     * x=394, vertically centred in the button height (32px). Bar=12px, fill=10px. */
+    /* Volume bars: SFX = button[0], Music = button[1], Radio = button[2].
+     * Each bar sits to the right of its button at x=394, vertically centred
+     * in the button height (32px). Bar=12px, fill=10px. */
     {
-        int bar_btns[2]  = { 0, 1 }; /* SFX Volume, Music Volume */
-        int vols[2]      = { s_sound_option_sfx_volume, s_sound_option_music_volume };
+        int bar_btns[3]  = { 0, 1, 2 }; /* SFX, Music, Radio */
+        int vols[3]      = { s_sound_option_sfx_volume,
+                             s_sound_option_music_volume,
+                             s_sound_option_radio_volume };
 
-        for (int vi = 0; vi < 2; vi++) {
+        for (int vi = 0; vi < 3; vi++) {
             int   btn    = bar_btns[vi];
             float bar_x  = 394.0f * sx; /* panel x = canvasW/2+0x4A [CONFIRMED @ 0x41FF5B] */
             float bar_y  = ((float)s_buttons[btn].y + 10.0f) * sy; /* centre 12px in 32px */
@@ -7090,6 +7152,88 @@ static void frontend_render_sound_options_overlay(float sx, float sy) {
         }
     }
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+
+    /* --- Numeric NN% readout, centred on each bar ------------------------
+     * FE_VALUE_CENTER_X (506) is exactly the bar centre (394 + 224/2), so the
+     * standard row-value helper lands the number on the bar with no bespoke
+     * layout. Drawn AFTER the translucent bar pass so it sits on top. */
+    {
+        int bar_btns[3] = { 0, 1, 2 };
+        int vols[3]     = { s_sound_option_sfx_volume,
+                            s_sound_option_music_volume,
+                            s_sound_option_radio_volume };
+        for (int vi = 0; vi < 3; vi++) {
+            char pct[8];
+            snprintf(pct, sizeof pct, "%d%%", vols[vi]);
+            frontend_draw_value_centered(sx, sy, s_buttons[bar_btns[vi]].y + 6,
+                                         pct, 0xFFFFFFFF);
+        }
+    }
+
+    /* --- RADIO STATION row value + details panel -------------------------
+     * Row 3 is the station field; rows below it (up to OK at y=297) are the
+     * three-line details block. Case is preserved for both -- a URL that gets
+     * uppercase-folded is not the URL the player typed. */
+    if (s_button_count > SND_BTN_STATION && s_buttons[SND_BTN_STATION].active) {
+        td5_radio_status st;
+        int  editing   = (s_text_input_state != 0 &&
+                          s_text_input_ctx.buffer == s_radio_url_edit);
+        int  prev_case = s_fe_preserve_case;
+        char l1[128], l2[128], l3[128];
+        /* Line height is ~24px at canvas scale (MEASURED from a framedump --
+         * a first attempt at 14px spacing overlapped). Row 3 ends at 249 and
+         * OK now sits at 343, so three 24px lines fit cleanly in between. */
+        const int y1 = 255, y2 = 279, y3 = 303;
+
+        td5_radio_get_status(&st);
+        s_fe_preserve_case = 1;
+
+        /* Row value: the station host. While typing it says EDITING and the
+         * text itself goes on the details line below -- a station URL is
+         * routinely 40+ characters and would spill right across the screen if
+         * drawn as a centred row value. */
+        frontend_draw_value_centered(sx, sy, s_buttons[SND_BTN_STATION].y + 6,
+                                     editing ? "EDITING..."
+                                             : (st.label[0] ? st.label : "NONE"),
+                                     editing ? 0xFFFFFF80 : 0xFFFFFFFF);
+
+        l1[0] = l2[0] = l3[0] = '\0';
+        if (editing) {
+            /* The ask: show the format the field parses. Shown while typing so
+             * it is in front of the player exactly when it is needed. */
+            snprintf(l1, sizeof l1, "FORMAT: %s  (MP3/AAC)", TD5_RADIO_URL_FORMAT);
+            snprintf(l2, sizeof l2, "%.72s", s_radio_url_edit);
+            snprintf(l3, sizeof l3, "%s",
+                     s_radio_url_edit_bad ? "INVALID URL - CHECK THE FORMAT ABOVE"
+                                          : "ENTER = SAVE     ESC = CANCEL");
+        } else if (s_sound_option_radio_volume != 0) {
+            /* The ask: details of the currently playing radio, only when the
+             * radio volume is not 0 (at 0 there is nothing being played). */
+            const char *state = st.aborted   ? "STOPPED (ERROR)"
+                              : st.connected ? "PLAYING"
+                              : st.playing   ? "CONNECTING..."
+                              : st.inited    ? "IDLE (STARTS IN RACE)"
+                                             : "UNAVAILABLE";
+            /* Explicit display precisions: the label is 128 and the URL 512,
+             * neither of which fits a 640-wide centred line anyway, so cap
+             * them for layout AND to keep snprintf provably non-truncating. */
+            snprintf(l1, sizeof l1, "%.48s - %s",
+                     st.label[0] ? st.label : "NO STATION", state);
+            snprintf(l2, sizeof l2, "%.72s", st.url);
+            if (st.connected && st.rate > 0)
+                snprintf(l3, sizeof l3, "%d HZ  %d CH  %d-BIT",
+                         st.rate, st.channels, st.bits);
+            else
+                snprintf(l3, sizeof l3, "ENTER = CHANGE STATION");
+        }
+
+        if (l1[0]) fe_draw_text_centered(320.0f * sx, (float)y1 * sy, l1, 0xFFFFFFFF, sx, sy);
+        if (l2[0]) fe_draw_text_centered(320.0f * sx, (float)y2 * sy, l2, 0xFFC0C0C0, sx, sy);
+        if (l3[0]) fe_draw_text_centered(320.0f * sx, (float)y3 * sy, l3,
+                                         s_radio_url_edit_bad ? 0xFFFF6060 : 0xFFC0C0C0,
+                                         sx, sy);
+        s_fe_preserve_case = prev_case;
+    }
 }
 
 
@@ -10227,7 +10371,13 @@ void td5_frontend_render_ui_rects(void) {
             for (int i = 0; i <= 5; i++) fe_draw_option_arrows(i, sx, sy);
             break;
         case TD5_SCREEN_SOUND_OPTIONS:
-            for (int i = 0; i <= 2; i++) fe_draw_option_arrows(i, sx, sy);
+            /* [OK ARROWS FIX] Only the volume rows are ◄► selectors. The old
+             * bound was the literal "2", which was OK's index back when the
+             * screen was SFX/MUSIC/OK -- so OK drew selector arrows it can do
+             * nothing with. Bounded by the shared constant now, so the RADIO
+             * STATION field (3) and OK (4) both stay arrow-free. */
+            for (int i = 0; i <= SND_BTN_LAST_SELECTOR; i++)
+                fe_draw_option_arrows(i, sx, sy);
             break;
         case TD5_SCREEN_MP_MODE_VOTE:   /* [MP GAME MODES 2026-06-22] on top of frames */
             { extern void frontend_mp_mode_vote_render(float sx, float sy);
@@ -10740,6 +10890,7 @@ int td5_frontend_init(void) {
         td5_save_set_display_mode(g_td5.ini.display_mode);
         s_sound_option_sfx_volume   = g_td5.ini.sfx_volume;
         s_sound_option_music_volume = g_td5.ini.music_volume;
+        s_sound_option_radio_volume = g_td5.ini.radio_volume;
         s_sound_option_sfx_mode     = g_td5.ini.sfx_mode;
         td5_save_set_sound_mode(g_td5.ini.sfx_mode);
         td5_save_set_sfx_volume(s_sound_option_sfx_volume);

@@ -842,8 +842,30 @@ extern int             s_trksel_dyn_btn;    /* [ARCADE] ARCADE/SIM row index on 
  * surface. [NAME MERGE 2026-07-21] The PLAYER NAME editor was also removed — the
  * single player identity is the multiplayer NICKNAME (Screen_NetNickname). */
 extern int             s_sound_option_music_volume;
+extern int             s_sound_option_radio_volume;
 extern int             s_sound_option_sfx_mode;
 extern int             s_sound_option_sfx_volume;
+
+/* [SOUND OPTIONS RADIO] SOUND OPTIONS row indices. Shared by the screen
+ * (Screen_SoundOptions, td5_fe_menu.c), the value overlay and the ◄► arrow
+ * loop, so adding a row can never leave one of the three behind -- which is
+ * exactly how OK ended up with selector arrows (the loop was hard-coded to
+ * "0..2" while OK sat at index 2).
+ * Rows 0-2 are ◄► volume selectors; 3 is an Enter-to-edit text field; 4 acts. */
+enum {
+    SND_BTN_SFX     = 0,
+    SND_BTN_MUSIC   = 1,
+    SND_BTN_RADIO   = 2,
+    SND_BTN_STATION = 3,
+    SND_BTN_OK      = 4,
+    SND_BTN_LAST_SELECTOR = SND_BTN_RADIO   /* highest row that gets ◄► arrows */
+};
+
+/* [SOUND OPTIONS RADIO] RADIO STATION row editor (Enter-to-edit URL field).
+ * Lives in td5_frontend.c so it can set the mixed-case text-input flag -- a
+ * station URL must NOT be uppercase-folded like a player name. */
+void td5_radio_url_edit_begin(void);
+int  td5_radio_url_edit_tick(void);   /* 1 when editor closed (ok/esc) */
 extern int      s_ctrl_capture_armed;
 extern int      s_ctrl_capturing;
 extern int      s_ctrl_input_source;

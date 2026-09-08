@@ -1986,11 +1986,22 @@ void Screen_SoundOptions(void) {
         /* [PORT REWORK 2026-06-05 / S15] SFX Mode row (was 120,97 + the
          * Controllers.tga icon load) removed. Remaining rows reflowed up one
          * slot, keeping their original 40/80/80 spacing:
-         *   SFX Volume 97, Music Volume 137, Music Test 217, OK 297. */
-        frontend_create_button(SNK_SfxVolumeButTxt,   120,  97, 0x100, 0x20);  /* btn 0 */
-        frontend_create_button(SNK_MusicVolumeButTxt, 120, 137, 0x100, 0x20);  /* btn 1 */
-        /* [CHUNK 5] MUSIC TEST screen removed (no use); OK reflows up to btn 2. */
-        frontend_create_button(SNK_OkButTxt,          200, 217, 0x60,  0x20);  /* btn 2 */
+         *   SFX Volume 97, Music Volume 137, Music Test 217, OK 297.
+         * [SOUND OPTIONS RADIO] RADIO VOLUME (177) and RADIO STATION (217)
+         * added on the standard 40px step. OK moves 297 -> 343 to clear the
+         * three-line radio details block at 255/279/303: MEASURED from a
+         * framedump, the menu font's line height is ~24px, so the first
+         * attempt (3 lines at 249/263/277, 14px apart, with OK left at 297)
+         * had the lines overlapping each other AND the OK button. RADIO
+         * VOLUME/STATION are port-only rows (the internet radio has no
+         * original counterpart) so they use TR() rather than a baked SNK_
+         * label. Indices come from the shared SND_BTN_* enum. */
+        frontend_create_button(SNK_SfxVolumeButTxt,     120,  97, 0x100, 0x20); /* SND_BTN_SFX */
+        frontend_create_button(SNK_MusicVolumeButTxt,   120, 137, 0x100, 0x20); /* SND_BTN_MUSIC */
+        frontend_create_button(TR("RADIO VOLUME"),      120, 177, 0x100, 0x20); /* SND_BTN_RADIO */
+        frontend_create_button(TR("RADIO STATION"),     120, 217, 0x100, 0x20); /* SND_BTN_STATION */
+        /* [CHUNK 5] MUSIC TEST screen removed (no use). */
+        frontend_create_button(SNK_OkButTxt,            200, 343, 0x60,  0x20); /* SND_BTN_OK */
         s_anim_tick = 0;
         s_inner_state = 1;
         break;
@@ -2013,26 +2024,43 @@ void Screen_SoundOptions(void) {
             int delta = frontend_option_delta();
             int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
             /* [PORT REWORK 2026-06-05 / S15] SFX Mode row removed; sliders are
-             * now button 0 (SFX volume) and button 1 (Music volume). */
-            if (delta != 0 && active_button >= 0 && active_button <= 1) {
-                if (active_button == 0) {
+             * now button 0 (SFX volume) and button 1 (Music volume).
+             * [SOUND OPTIONS RADIO] Button 2 (Radio volume) joins them. */
+            if (delta != 0 && active_button >= SND_BTN_SFX &&
+                active_button <= SND_BTN_LAST_SELECTOR) {
+                if (active_button == SND_BTN_SFX) {
                     /* SFX volume. REG-2 fix 2026-05-22: orig step is delta * 10. */
                     s_sound_option_sfx_volume += delta * 10;
                     if (s_sound_option_sfx_volume < 0) s_sound_option_sfx_volume = 0;
                     if (s_sound_option_sfx_volume > 100) s_sound_option_sfx_volume = 100;
                     td5_save_set_sfx_volume(s_sound_option_sfx_volume);
                     td5_sound_set_sfx_volume(s_sound_option_sfx_volume);
-                } else { /* active_button == 1: Music volume */
+                } else if (active_button == SND_BTN_MUSIC) {
                     /* REG-2 fix 2026-05-22: orig step delta * 10. */
                     s_sound_option_music_volume += delta * 10;
                     if (s_sound_option_music_volume < 0) s_sound_option_music_volume = 0;
                     if (s_sound_option_music_volume > 100) s_sound_option_music_volume = 100;
                     td5_save_set_music_volume(s_sound_option_music_volume);
                     td5_sound_set_music_volume(s_sound_option_music_volume);
+                } else { /* SND_BTN_RADIO: internet-radio output volume */
+                    /* Same 10% step as the other two rows. Applied live so the
+                     * player hears the change while the stream is running.
+                     * Goes through the sound seam (not td5_radio_* directly)
+                     * to match the pause-menu RADIO slider. */
+                    s_sound_option_radio_volume += delta * 10;
+                    if (s_sound_option_radio_volume < 0) s_sound_option_radio_volume = 0;
+                    if (s_sound_option_radio_volume > 100) s_sound_option_radio_volume = 100;
+                    td5_sound_set_radio_volume(s_sound_option_radio_volume);
                 }
                 frontend_play_sfx(2);
                 s_inner_state = 4;
-            } else if (s_button_index == 2) { /* OK */
+            } else if (s_button_index == SND_BTN_STATION) {
+                /* [SOUND OPTIONS RADIO] Enter opens the station-URL editor
+                 * (drawn in the value overlay with the format hint; state 10
+                 * ticks it to confirm/cancel). */
+                td5_radio_url_edit_begin();
+                s_inner_state = 10;
+            } else if (s_button_index == SND_BTN_OK) { /* OK */
                 /* Persist sound options to td5re.ini so they survive a relaunch
                  * (see PART B note in Screen_GameOptions). Volume changes already
                  * applied live via td5_save_set_*; sync the committed values into
@@ -2042,6 +2070,11 @@ void Screen_SoundOptions(void) {
                 g_td5.ini.sfx_mode     = s_sound_option_sfx_mode;
                 g_td5.ini.sfx_volume   = s_sound_option_sfx_volume;
                 g_td5.ini.music_volume = s_sound_option_music_volume;
+                /* [SOUND OPTIONS RADIO] RadioVolume commits with the rest.
+                 * RadioURL is NOT written here -- the station editor persists
+                 * it on its own confirm (it has to, to reconnect the worker),
+                 * so re-writing it on OK would only risk clobbering it. */
+                g_td5.ini.radio_volume = s_sound_option_radio_volume;
                 td5_ini_persist_options();
                 s_return_screen = TD5_SCREEN_OPTIONS_HUB;
                 s_inner_state = 7;
@@ -2059,6 +2092,13 @@ void Screen_SoundOptions(void) {
         break;
     case 9:
         td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
+        break;
+    case 10: /* [SOUND OPTIONS RADIO] station-URL editor active -- tick to
+              * confirm (validate + persist [Audio]RadioURL + reconnect the
+              * worker) or cancel. Stays in 10 while a rejected URL is on
+              * screen so the player can correct it. */
+        if (td5_radio_url_edit_tick())
+            s_inner_state = 4;   /* redraw values */
         break;
     }
 }
