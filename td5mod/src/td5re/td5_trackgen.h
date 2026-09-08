@@ -310,6 +310,16 @@ const char *td5_trackgen_roll_knob(int id);
  * ask, or a published roll would read back as a concrete setting and the row
  * would stop showing RANDOM after one race. */
 int         td5_trackgen_roll_is_owned(int id);
+/* Drop the registry's claim on this entry's knob. The studio MUST call this
+ * when the player sets a row by hand: the knob then holds a pin, and without
+ * dropping the claim the next build's unpublish would delete the player's
+ * choice as if it were its own leftover roll. */
+void        td5_trackgen_roll_disown(int id);
+/* Does the CURRENT environment pin this entry to a concrete value? The
+ * registry owns the tri-state spelling of "random" -- unset, the -2 sentinel,
+ * and TIME OF DAY's long-standing 2 all mean "roll it" -- so the studio asks
+ * instead of reimplementing those rules and getting one of them wrong. */
+int         td5_trackgen_roll_is_pinned_now(int id);
 /* Straight/curve/acute weights for a TWISTINESS choice. The mix lives with the
  * generator, not the frontend, so the studio and the walk cannot disagree. */
 int         td5_trackgen_twist_mix(int choice, int out3[3]);

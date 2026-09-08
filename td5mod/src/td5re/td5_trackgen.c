@@ -878,7 +878,7 @@ static const unsigned char k_tgr_blend_w[] = { 10, 25, 40, 25 };
 static const int         k_tgr_rail_v[] = { 20, 35, 50, 90, 160 };
 static const char *const k_tgr_rail_n[] = { "EVERYWHERE", "FREQUENT",
                                             "STANDARD", "SPARSE",
-                                            "TIGHT BENDS ONLY" };
+                                            "BENDS ONLY" };
 static const unsigned char k_tgr_rail_w[] = { 15, 20, 30, 20, 15 };
 
 static const int         k_tgr_sky_v[] = { -1, 12, 24, 36, 48, 60 };
@@ -1173,6 +1173,19 @@ int td5_trackgen_roll_is_owned(int id)
 {
     if (id < 0 || id >= TD5_TG_ROLL_COUNT) return 0;
     return s_roll_owned[id] ? 1 : 0;
+}
+
+void td5_trackgen_roll_disown(int id)
+{
+    if (id < 0 || id >= TD5_TG_ROLL_COUNT) return;
+    s_roll_owned[id] = 0;
+}
+
+int td5_trackgen_roll_is_pinned_now(int id)
+{
+    int v = 0;
+    if (id < 0 || id >= TD5_TG_ROLL_COUNT || !k_tg_rolls[id].name) return 0;
+    return tg_roll_pin_of(&k_tg_rolls[id], &v);
 }
 
 void tg_rolls_resolve(unsigned int seed)
