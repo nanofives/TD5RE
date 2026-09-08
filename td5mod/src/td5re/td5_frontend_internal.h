@@ -526,6 +526,7 @@ extern int      s_mp_pane_substate[TD5_MAX_HUMAN_PLAYERS];
 extern int      s_mp_player_trans[TD5_MAX_HUMAN_PLAYERS];
 extern int      s_mp_player_laneassist[TD5_MAX_HUMAN_PLAYERS];
 extern int     s_score_insert_pos;
+extern int     s_score_insert_mask;  /* [TD5RE HS-MP] bitmask of ALL rows this run inserted */
 extern int  s_car_preview_next_surface;
 extern int  s_car_preview_prev_surface;
 extern int  s_car_spec_car;

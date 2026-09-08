@@ -60,6 +60,7 @@
 #include "td5_backend_capture.h" /* photo-booth framebuffer read-back API */
 #include "td5_inputscript.h" /* scripted-input harness ([Trace] InputScript) */
 #include "td5_control.h"     /* live-control MCP transport (dev builds) */
+#include "td5_font.h"        /* loading-screen phase status line (TTF glyph cache) */
 
 /* [PER-PLAYER TRAFFIC CAP 2026-07-21] The render/per-slot arrays are sized by
  * TD5_ACTOR_MAX_TOTAL_SLOTS (re/include/td5_actor_struct.h) while the actor pool
@@ -802,6 +803,13 @@ static void decay_ultimate_timer(int slot);
 static void adjust_checkpoint_timers(int slot);
 static void display_loading_screen_tga(void);
 static void rt_warmup_loading_pump(void);   /* [RT WARMUP 2026-08-08] */
+/* [LOADSCREEN DETAIL 2026-09-08] per-phase status line on the loading splash */
+static void loadscreen_phase(int step, const char *label);
+static void loadscreen_draw_frame(int pct, int pump);
+static void loadscreen_draw_frame_ex(int pct, int pump, int rt_warmup);
+static void loadscreen_ensure_pixels(void);
+static void loadscreen_upload(void);
+static void loadscreen_release(void);
 static void reset_race_countdown(void);
 static void tick_race_countdown(void);
 static void tick_resume_countdown(void);   /* [RESUME COUNTDOWN 2026-08-05] */
@@ -1963,6 +1971,31 @@ int td5_game_slot_is_finished(int slot)
     return (s_metrics[slot].post_finish_metric_base != 0) ? 1 : 0;
 }
 
+/* [TD5RE HS-DNF] Returns whether a slot reached a GENUINE finish-line crossing,
+ * as opposed to merely being "in a finished state".
+ *
+ * td5_game_slot_is_finished() above is only `post_finish_metric_base != 0`, and
+ * that field is deliberately seeded nonzero by several NON-finish paths so the
+ * results aggregator can still sort every slot:
+ *   - P2P checkpoint-timer expiry (the FAIL/DNF case) sets it to cumulative_timer
+ *     or the sentinel 1 (tick_pending_finish_timer, ~:9005)
+ *   - the aggregator backfills non-crossers with an ESTIMATED pace time (~:9704,
+ *     ~:10265) and the force-finish/bulk-seed paths use `(t > 0) ? t : 1`
+ *     (~:11516, ~:11596)
+ * so a timed-out or force-ended run reads as "finished" and used to be eligible
+ * for a high score. companion_2 is the discriminator (0 = still racing,
+ * 1 = completed-ok, 2 = DNF) and is written ONLY by the three genuine
+ * finish-line sites (~:9315 circuit lap, ~:9426 P2P finish span, ~:9510
+ * checkpoint finish) and by the DNF site (~:9011); none of the backfills touch
+ * it. Requiring companion_2 == 1 is therefore the only reliable "crossed the
+ * line" test. Used to gate high-score posting (SP name entry + MP register). */
+int td5_game_slot_finished_at_line(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    if (s_slot_state[slot].companion_2 != 1) return 0;
+    return (s_metrics[slot].post_finish_metric_base != 0) ? 1 : 0;
+}
+
 /* [MP per-viewport finish 2026-06-13] 1-based finishing place captured when
  * this slot crossed the line, or 0 if it is still racing. The HUD draws this as
  * a per-viewport end-of-race indicator so each split-screen player gets their
@@ -2732,6 +2765,7 @@ static void init_race_modes_and_seed(void)
     CK("ck1_after_loading_screen");
 
     /* ---- Step 2: Reset game heap (0x430CB0, 24 MB pool) ---- */
+    loadscreen_phase(2, "Resetting game heap");
     td5_plat_heap_reset();
     TD5_LOG_I(LOG_TAG, "InitRace step 2/19: heap reset complete");
     CK("ck2_after_heap_reset");
@@ -2745,6 +2779,7 @@ static void init_race_modes_and_seed(void)
 static void init_race_slot_states(void)
 {
     /* ---- Step 3: Configure race slot states (player/AI/disabled) ---- */
+    loadscreen_phase(3, "Configuring race slots");
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         s_slot_state[i].state       = (i == 0) ? 1 : 0;  /* slot 0 = player */
         s_slot_state[i].companion_1 = 0;
@@ -3127,12 +3162,7 @@ static void autotrack_generate_under_splash(void)
 {
     AutoTrackGenJob job;
     void *thread;
-    char png_path[128];
-    void *pixels = NULL;
-    int img_w = 0, img_h = 0, screen_w = 0, screen_h = 0;
     int start_ms, frames = 0, done = 0;
-    TD5_D3DVertex verts[4], bar[4];
-    uint16_t indices[6] = {0,1,2, 0,2,3};
 
     job.restart = s_race_reinit_is_restart;
     /* [SCENERY STREAMING] Decided HERE, not in the generator: this module sees
@@ -3160,26 +3190,15 @@ static void autotrack_generate_under_splash(void)
      * same reason the preview join is here and not in td5_asset_load_level. */
     td5_tgstream_cancel_join();
 
-    td5_plat_get_window_size(&screen_w, &screen_h);
-    {
-        float sw = (float)screen_w, sh = (float)screen_h;
-        int i;
-        for (i = 0; i < 4; i++) {
-            verts[i].depth_z = 0.0f; verts[i].rhw = 1.0f;
-            verts[i].diffuse = 0xFFFFFFFF; verts[i].specular = 0;
-            bar[i] = verts[i];
-        }
-        verts[0].screen_x = 0.0f; verts[0].screen_y = 0.0f; verts[0].tex_u = 0.0f; verts[0].tex_v = 0.0f;
-        verts[1].screen_x = sw;   verts[1].screen_y = 0.0f; verts[1].tex_u = 1.0f; verts[1].tex_v = 0.0f;
-        verts[2].screen_x = sw;   verts[2].screen_y = sh;   verts[2].tex_u = 1.0f; verts[2].tex_v = 1.0f;
-        verts[3].screen_x = 0.0f; verts[3].screen_y = sh;   verts[3].tex_u = 0.0f; verts[3].tex_v = 1.0f;
-    }
-    /* Same splash as step 1 (no extra rand() -- see s_loadscreen_index). */
-    snprintf(png_path, sizeof(png_path), "re/assets/loading/load%02d.png", s_loadscreen_index);
-    if (!td5_asset_load_png_to_buffer(png_path, TD5_COLORKEY_NONE, &pixels, &img_w, &img_h))
-        pixels = NULL;
-    if (pixels)
-        td5_plat_render_upload_texture(LOADSCREEN_SCRATCH_TEXTURE_PAGE, pixels, img_w, img_h, 2);
+    /* Same splash as step 1 (no extra rand() -- see s_loadscreen_index), and the
+     * same status line the other phases use: this build is the longest single
+     * phase of the load (20-35 s), so naming it is what stops it reading as a
+     * hang. The bar is driven by the generator's own 0..100 progress below.
+     * ensure/upload run unconditionally so the splash still shows with the
+     * status line disabled (loadscreen_phase is a no-op in that case). */
+    loadscreen_ensure_pixels();
+    loadscreen_upload();
+    loadscreen_phase(4, "Generating auto track");
 
     start_ms = td5_plat_time_ms();
     TD5_LOG_I(LOG_TAG, "Auto track: generating on a worker thread (restart=%d)", job.restart);
@@ -3191,31 +3210,8 @@ static void autotrack_generate_under_splash(void)
     }
     while (!done) {
         int pct = td5_trackgen_progress();
-        float bx0 = (float)screen_w * 0.20f, bx1 = (float)screen_w * 0.80f;
-        float by0 = (float)screen_h * 0.92f, by1 = by0 + (float)screen_h * 0.012f;
-        float bxp = bx0 + (bx1 - bx0) * (float)(pct < 0 ? 0 : pct > 100 ? 100 : pct) / 100.0f;
 
-        td5_plat_render_clear(0x00000000);
-        td5_plat_render_begin_scene();
-        td5_plat_render_set_viewport(0, 0, screen_w, screen_h);
-        if (pixels) {
-            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-            td5_plat_render_bind_texture(LOADSCREEN_SCRATCH_TEXTURE_PAGE);
-            td5_plat_render_draw_tris(verts, 4, indices, 6);
-        }
-        /* Progress bar: dim track + bright fill, drawn with the 1x1 white page. */
-        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-        td5_plat_render_bind_texture(899);   /* SHARED_PAGE_WHITE (td5_frontend_internal.h) */
-        bar[0].screen_x = bx0; bar[0].screen_y = by0; bar[1].screen_x = bx1; bar[1].screen_y = by0;
-        bar[2].screen_x = bx1; bar[2].screen_y = by1; bar[3].screen_x = bx0; bar[3].screen_y = by1;
-        { int i; for (i = 0; i < 4; i++) bar[i].diffuse = 0xFF303030u; }
-        td5_plat_render_draw_tris(bar, 4, indices, 6);
-        bar[1].screen_x = bxp; bar[2].screen_x = bxp;
-        { int i; for (i = 0; i < 4; i++) bar[i].diffuse = 0xFFE0C060u; }
-        td5_plat_render_draw_tris(bar, 4, indices, 6);
-        td5_plat_render_end_scene();
-        td5_plat_present(0);
-        td5_plat_pump_messages();
+        loadscreen_draw_frame(pct, 1);
         frames++;
         if (pct >= 100 || td5_plat_time_ms() - start_ms > 600000) {
             /* progress 100 is set by the worker at the very end; join to be sure */
@@ -3225,7 +3221,6 @@ static void autotrack_generate_under_splash(void)
         }
     }
     if (thread) td5_plat_thread_join(thread);
-    if (pixels) free(pixels);
     if (!job.ok)
         TD5_LOG_W(LOG_TAG, "Auto track: generation FAILED; reusing the previous build on disk");
     TD5_LOG_W(LOG_TAG, "Auto track: ready in %d ms (%d splash frames, restart=%d, fp mxcsr=%04x cw=%04x)",
@@ -3243,6 +3238,7 @@ static void init_race_level_and_assets(void)
         s_race_reinit_is_restart = 0;
     /* NOTE: td5_asset_load_level sets g_td5.track_type from LEVELINF.DAT,
      * so g_track_is_circuit / g_track_type_mode must be derived after this call. */
+    loadscreen_phase(5, "Loading track data");
     td5_asset_load_level(g_td5.track_index);
     g_track_is_circuit = (g_td5.track_type == TD5_TRACK_CIRCUIT);
     g_track_type_mode = g_track_is_circuit ? 1 : 0;
@@ -3398,6 +3394,7 @@ static void init_race_level_and_assets(void)
     }
 
     /* ---- Step 5: Load vehicle assets and sound banks for all active slots ---- */
+    loadscreen_phase(6, "Loading cars and engine sounds");
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         if (s_slot_state[i].state != 3) {
             /* [S31] Net race: slot 0 must come from the replicated schedule
@@ -3545,6 +3542,7 @@ static void init_race_level_and_assets(void)
          * comment above. The loop below uses g_traffic_slot_base as its base, so
          * it loads the right slots (6..21 legacy / 16..31 big field) either way. */
         int traffic_loaded = 0;
+        loadscreen_phase(7, "Loading traffic and police cars");
         /* [POLICE rewrite 2026-06-19] The per-track POLICE car lives at a fixed
          * traffic-pool slot (TD5 = slot 3, the original cop-slot-9 model; TD6
          * city = slot 5, the city police car). Keep CIVILIAN traffic OFF that
@@ -3690,6 +3688,7 @@ static void init_race_track_resources(void)
     TD5_LOG_I(LOG_TAG, "InitRace step 7/19: MODELS.DAT parsed from level assets");
 
     /* ---- Step 8: Load track textures ---- */
+    loadscreen_phase(8, "Loading track textures");
     td5_asset_load_track_textures(g_td5.track_index);
     /* Must run AFTER textures load so the per-page transparency table is
      * populated. Dims billboard meshes that use a type-3 (additive) page. */
@@ -3730,6 +3729,7 @@ static void init_race_track_resources(void)
 static void init_race_spawn_actors(void)
 {
     /* ---- Step 11: Allocate actors and init vehicle/AI runtime ---- */
+    loadscreen_phase(9, "Spawning cars and AI drivers");
     {
         static uint8_t s_actor_memory[TD5_ACTOR_STRIDE * TD5_MAX_TOTAL_ACTORS];
         /* Racer/traffic slot budget [PORT ENHANCEMENT — original capped at 6
@@ -4597,6 +4597,7 @@ static void init_race_spawn_actors(void)
 static void init_race_race_systems(void)
 {
     /* ---- Step 12: Open input recording/playback ---- */
+    loadscreen_phase(10, "Initializing input");
     if (s_replay_mode) {
         td5_input_read_open("replay.td5");
         td5_input_set_playback_active(1);
@@ -4674,11 +4675,13 @@ static void init_race_race_systems(void)
 
     CK("ck13_before_ambient");
     /* ---- Step 13: Load ambient sounds ---- */
+    loadscreen_phase(11, "Loading ambient sounds");
     td5_sound_load_ambient();
     TD5_LOG_I(LOG_TAG, "InitRace step 13/19: ambient sounds loaded");
     CK("ck13_after_ambient");
 
     /* ---- Step 14: Initialize particles, smoke, tire tracks, weather ---- */
+    loadscreen_phase(12, "Initializing effects and weather");
     td5_vfx_init();
     /* Tier 1 port — cache PoliceLt_red/blue + Police_red/blue atlas UVs
      * and reset marker phase counters. Mirrors orig
@@ -4750,6 +4753,7 @@ static void init_race_race_systems(void)
     }
 
     /* ---- Step 15: Configure force feedback + input mapping ---- */
+    loadscreen_phase(13, "Initializing controllers");
     /* [PORT ENHANCEMENT] N-way split: one input slot per local human. Players
      * 2..N-1 default to joystick index = player (the per-player device picker
      * is a deferred frontend step). Players 0-1 keep their configured devices. */
@@ -4774,6 +4778,7 @@ static void init_race_race_systems(void)
               g_td5.split_screen_mode > 0 ? 2 : 1);
 
     /* ---- Step 16: Start CD audio track ---- */
+    loadscreen_phase(14, "Starting music");
     td5_sound_cd_play(g_td5.track_index % 10 + 1);
     TD5_LOG_I(LOG_TAG, "InitRace step 16/19: CD audio started track=%d",
               g_td5.track_index % 10 + 1);
@@ -4783,6 +4788,7 @@ static void init_race_viewports_and_hud(void)
 {
     CK("ck17_before_viewport");
     /* ---- Step 17: Initialize 3D render state + viewport layout ---- */
+    loadscreen_phase(15, "Initializing viewports");
     td5_render_reset_texture_cache();
     td5_game_init_viewport_layout();
     /* [PORT ENHANCEMENT] Each viewport follows its own local player slot
@@ -4834,11 +4840,13 @@ static void init_race_viewports_and_hud(void)
     CK("ck17_after_viewport");
 
     /* ---- Step 18: Upload race texture pages to GPU ---- */
+    loadscreen_phase(16, "Uploading race textures");
     td5_asset_load_race_texture_pages();
     td5_render_load_environs_textures(td5_asset_level_number(g_td5.track_index));
     TD5_LOG_I(LOG_TAG, "InitRace step 18/19: race texture pages + environs uploaded");
 
     /* ---- Step 19: Initialize HUD, pause menu overlay ---- */
+    loadscreen_phase(17, "Initializing HUD");
     #define DBG_WRITE(msg) TD5_LOG_I(LOG_TAG, "Step19: %s", msg)
     DBG_WRITE("19a_before_overlay");
     /* race_mode arg mirrors orig InitializeRaceOverlayResources param_1:
@@ -4863,6 +4871,7 @@ static void init_race_viewports_and_hud(void)
     TD5_LOG_I(LOG_TAG, "InitRace step 19/19: HUD and pause menu initialized");
 
     /* ---- Load sky texture ---- */
+    loadscreen_phase(18, "Preparing sky");
     {
         char sky_path[256];
         int level_num = td5_asset_level_number(g_td5.track_index);
@@ -5345,6 +5354,10 @@ int td5_game_init_race_session(void) {
      * the sim/camera are seeded but before the countdown -- so it cannot perturb
      * the deterministic simulation, and the loading splash stays on screen. */
     rt_warmup_loading_pump();
+    /* [LOADSCREEN DETAIL] Last user of the cached splash pixels -- free them
+     * here rather than at the end of each helper, so the ~20 phase frames and
+     * the warmup pump all share one decode instead of one decode apiece. */
+    loadscreen_release();
 
     /* [PORT 2026-06] Arm the first-race controller-tutorial overlay. Self-gated:
      * no-op unless enabled by config and the race is a normal local human race
@@ -11042,70 +11055,234 @@ static int s_loadscreen_index = 0;
  * 598 is free: below the static atlas (700+), car (800+), frontend (900+) and
  * sky/fallback (1020/1021) ranges, adjacent to the FMV scratch. */
 
-static void display_loading_screen_tga(void) {
+/* ------------------------------------------------------------------------
+ * [LOADSCREEN DETAIL 2026-09-08] Per-phase status line
+ *
+ * InitRace runs 19 numbered phases (the "InitRace step N/19" logs) and used to
+ * present NOTHING between step 1 and the RT warmup at the very end: the splash
+ * sat frozen for the whole load, with no indication of what was happening and a
+ * window that did not answer messages. loadscreen_phase() now draws ONE frame
+ * per phase -- splash + progress bar + the name of the subsystem about to load
+ * -- and pumps window messages. The auto-track build (step 4a) keeps its own
+ * 0..100 percentage and reuses the same scaffolding instead of duplicating it.
+ *
+ * TD5RE_LOADSCREEN_DETAIL=0 restores the silent single-splash behaviour.
+ * ------------------------------------------------------------------------ */
+/* Bar denominator. This is the count of ANNOUNCED phases, deliberately its own
+ * monotonic ordinal rather than the "InitRace step N/19" log numbering: several
+ * of those steps are log-only no-ops (their work happens in step 4 or 8), and
+ * naming them would put a label on screen for a phase that does nothing. */
+#define LOADSCREEN_PHASE_TOTAL 19
+
+/* Splash pixels cached for the whole load. Deliberately plain malloc and NOT
+ * td5_game_heap_alloc: step 2 calls td5_plat_heap_reset(), which would pull the
+ * buffer out from under every later phase frame. */
+static void  *s_ls_pixels;
+static int    s_ls_w, s_ls_h;
+static int    s_ls_step;                /* 0 = no phase announced yet */
+static char   s_ls_label[64];
+static int    s_ls_screen_w, s_ls_screen_h;
+
+static int loadscreen_detail_on(void)
+{
+    static int cached = -1;
+    if (cached < 0) cached = td5_env_flag_on("TD5RE_LOADSCREEN_DETAIL");
+    return cached;
+}
+
+/* Load (once) the splash step 1 chose into s_ls_pixels. No rand() here --
+ * s_loadscreen_index is reused, so re-reading it never consumes the seed chain
+ * (golden traces depend on that; see the note on s_loadscreen_index). */
+static void loadscreen_ensure_pixels(void)
+{
     char png_path[128];
-    int index = rand() % 20;
-    s_loadscreen_index = index;
-    void *pixels = NULL;
-    int img_w = 0, img_h = 0;
-
-    snprintf(png_path, sizeof(png_path), "re/assets/loading/load%02d.png", index);
-    TD5_LOG_I(LOG_TAG, "Loading screen: %s", png_path);
-
-    if (!td5_asset_load_png_to_buffer(png_path, TD5_COLORKEY_NONE, &pixels, &img_w, &img_h)) {
+    if (s_ls_screen_w <= 0 || s_ls_screen_h <= 0)
+        td5_plat_get_window_size(&s_ls_screen_w, &s_ls_screen_h);
+    if (s_ls_pixels) return;
+    snprintf(png_path, sizeof(png_path), "re/assets/loading/load%02d.png", s_loadscreen_index);
+    if (!td5_asset_load_png_to_buffer(png_path, TD5_COLORKEY_NONE, &s_ls_pixels, &s_ls_w, &s_ls_h)) {
         TD5_LOG_W(LOG_TAG, "Loading screen %s not found", png_path);
-        return;
+        s_ls_pixels = NULL;
+    }
+}
+
+/* (Re)upload the splash to its scratch page. Called once per phase rather than
+ * once per frame: the level/race texture-page loads that run between phases can
+ * evict the scratch page, but a per-frame re-upload would push tens of MB
+ * through the 36-frame dwell and the RT warmup pump for no benefit. */
+static void loadscreen_upload(void)
+{
+    if (s_ls_pixels)
+        td5_plat_render_upload_texture(LOADSCREEN_SCRATCH_TEXTURE_PAGE, s_ls_pixels, s_ls_w, s_ls_h, 2);
+}
+
+static void loadscreen_release(void)
+{
+    if (s_ls_pixels) free(s_ls_pixels);
+    s_ls_pixels = NULL;
+    s_ls_w = s_ls_h = 0;
+    s_ls_step = 0;
+    s_ls_label[0] = '\0';
+}
+
+/* Draw one line of status text with the menu TTF. td5_font is malloc-backed and
+ * lazily initialises on first use, so it works here whether or not the frontend
+ * ever ran (AutoRace boots straight into a race) and survives the step-2 heap
+ * reset. Mirrors fe_draw_text's TTF path without dragging in the frontend's
+ * statics -- the HUD text queue is unusable this early (its glyph table is
+ * allocated from the game heap at step 19). */
+static void loadscreen_draw_text(float x, float baseline, float cap_px,
+                                 const char *text, uint32_t color)
+{
+    float pen = x;
+    int i;
+
+    if (!text || !text[0] || !td5_font_ready()) return;
+
+    for (i = 0; text[i]; i++) {                 /* pass 1: rasterise into the atlas */
+        td5_glyph g;
+        td5_font_get((unsigned char)text[i], cap_px, &g);
+    }
+    td5_font_flush_uploads();                   /* one GPU upload for any new glyphs */
+
+    td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+    for (i = 0; text[i]; i++) {                 /* pass 2: draw (cache hits) */
+        td5_glyph g;
+        td5_font_get((unsigned char)text[i], cap_px, &g);
+        if (g.valid && g.w > 0.0f) {
+            TD5_D3DVertex q[4];
+            uint16_t qi[6] = {0,1,2, 0,2,3};
+            float gx = pen + g.xoff, gy = baseline + g.yoff;
+            int v;
+            memset(q, 0, sizeof(q));
+            q[0].screen_x = gx;       q[0].screen_y = gy;       q[0].tex_u = g.u0; q[0].tex_v = g.v0;
+            q[1].screen_x = gx + g.w; q[1].screen_y = gy;       q[1].tex_u = g.u1; q[1].tex_v = g.v0;
+            q[2].screen_x = gx + g.w; q[2].screen_y = gy + g.h; q[2].tex_u = g.u1; q[2].tex_v = g.v1;
+            q[3].screen_x = gx;       q[3].screen_y = gy + g.h; q[3].tex_u = g.u0; q[3].tex_v = g.v1;
+            for (v = 0; v < 4; v++) { q[v].depth_z = 0.0f; q[v].rhw = 1.0f; q[v].diffuse = color; }
+            td5_plat_render_bind_texture(g.page);
+            td5_plat_render_draw_tris(q, 4, qi, 6);
+        }
+        pen += g.advance;
+    }
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+}
+
+/* One loading frame: splash, progress bar, status line. pct < 0 derives the bar
+ * from the phase number; the auto-track build passes its own 0..100. pump = 1
+ * also drains window messages so the window answers during a long load.
+ *
+ * rt_warmup rides the RT BLAS warmup inside this frame (0 = none, 1 = record one
+ * bounded chunk, 2 = also create the pipeline objects first). Those calls MUST
+ * sit between begin_scene and end_scene, which is the only reason the warmup
+ * pump goes through here instead of owning its own copy of the scaffolding. */
+static void loadscreen_draw_frame_ex(int pct, int pump, int rt_warmup)
+{
+    TD5_D3DVertex quad[4], bar[4];
+    uint16_t indices[6] = {0,1,2, 0,2,3};
+    float sw, sh, bx0, bx1, by0, by1, bxp;
+    int i;
+
+    if (s_ls_screen_w <= 0 || s_ls_screen_h <= 0)
+        td5_plat_get_window_size(&s_ls_screen_w, &s_ls_screen_h);
+    sw = (float)s_ls_screen_w;
+    sh = (float)s_ls_screen_h;
+
+    if (pct < 0)
+        pct = (s_ls_step <= 0) ? 0 : (s_ls_step * 100) / LOADSCREEN_PHASE_TOTAL;
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+
+    for (i = 0; i < 4; i++) {
+        quad[i].depth_z = 0.0f; quad[i].rhw = 1.0f;
+        quad[i].diffuse = 0xFFFFFFFFu; quad[i].specular = 0;
+        bar[i] = quad[i];
+    }
+    quad[0].screen_x = 0.0f; quad[0].screen_y = 0.0f; quad[0].tex_u = 0.0f; quad[0].tex_v = 0.0f;
+    quad[1].screen_x = sw;   quad[1].screen_y = 0.0f; quad[1].tex_u = 1.0f; quad[1].tex_v = 0.0f;
+    quad[2].screen_x = sw;   quad[2].screen_y = sh;   quad[2].tex_u = 1.0f; quad[2].tex_v = 1.0f;
+    quad[3].screen_x = 0.0f; quad[3].screen_y = sh;   quad[3].tex_u = 0.0f; quad[3].tex_v = 1.0f;
+
+    bx0 = sw * 0.20f; bx1 = sw * 0.80f;
+    by0 = sh * 0.92f; by1 = by0 + sh * 0.012f;
+    bxp = bx0 + (bx1 - bx0) * (float)pct / 100.0f;
+
+    td5_plat_render_clear(0x00000000);
+    td5_plat_render_begin_scene();
+    td5_plat_render_set_viewport(0, 0, s_ls_screen_w, s_ls_screen_h);
+    if (s_ls_pixels) {
+        td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+        td5_plat_render_bind_texture(LOADSCREEN_SCRATCH_TEXTURE_PAGE);
+        td5_plat_render_draw_tris(quad, 4, indices, 6);
+    }
+    /* Progress bar: dim track + bright fill, drawn with the 1x1 white page. */
+    td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
+    td5_plat_render_bind_texture(899);   /* SHARED_PAGE_WHITE (td5_frontend_internal.h) */
+    bar[0].screen_x = bx0; bar[0].screen_y = by0; bar[1].screen_x = bx1; bar[1].screen_y = by0;
+    bar[2].screen_x = bx1; bar[2].screen_y = by1; bar[3].screen_x = bx0; bar[3].screen_y = by1;
+    for (i = 0; i < 4; i++) bar[i].diffuse = 0xFF303030u;
+    td5_plat_render_draw_tris(bar, 4, indices, 6);
+    bar[1].screen_x = bxp; bar[2].screen_x = bxp;
+    for (i = 0; i < 4; i++) bar[i].diffuse = 0xFFE0C060u;
+    td5_plat_render_draw_tris(bar, 4, indices, 6);
+
+    if (loadscreen_detail_on() && s_ls_label[0]) {
+        float cap_px = sh * 0.020f;
+        if (cap_px < 11.0f) cap_px = 11.0f;
+        /* Baseline sits just above the bar, left-aligned with it. The bar is the
+         * "how far along" signal, so the line carries only the phase name. */
+        loadscreen_draw_text(bx0, by0 - sh * 0.014f, cap_px, s_ls_label, 0xFFF0F0F0u);
     }
 
-    /* Draw fullscreen quad and present */
-    {
-        int screen_w = 0, screen_h = 0;
-        td5_plat_get_window_size(&screen_w, &screen_h);
-        float sw = (float)screen_w;
-        float sh = (float)screen_h;
-        TD5_D3DVertex verts[4];
-        uint16_t indices[6] = {0,1,2, 0,2,3};
+    if (rt_warmup >= 2)
+        td5_plat_rt_warmup_begin();
+    if (rt_warmup >= 1)
+        td5_plat_rt_warmup_step();
 
-        verts[0].screen_x = 0.0f; verts[0].screen_y = 0.0f;
-        verts[0].depth_z = 0.0f;  verts[0].rhw = 1.0f;
-        verts[0].diffuse = 0xFFFFFFFF; verts[0].specular = 0;
-        verts[0].tex_u = 0.0f;    verts[0].tex_v = 0.0f;
+    td5_plat_render_end_scene();
+    td5_plat_present(0);   /* per-frame fence throttles queued BLAS work */
+    if (pump) td5_plat_pump_messages();
+}
 
-        verts[1].screen_x = sw;   verts[1].screen_y = 0.0f;
-        verts[1].depth_z = 0.0f;  verts[1].rhw = 1.0f;
-        verts[1].diffuse = 0xFFFFFFFF; verts[1].specular = 0;
-        verts[1].tex_u = 1.0f;    verts[1].tex_v = 0.0f;
+static void loadscreen_draw_frame(int pct, int pump)
+{
+    loadscreen_draw_frame_ex(pct, pump, 0);
+}
 
-        verts[2].screen_x = sw;   verts[2].screen_y = sh;
-        verts[2].depth_z = 0.0f;  verts[2].rhw = 1.0f;
-        verts[2].diffuse = 0xFFFFFFFF; verts[2].specular = 0;
-        verts[2].tex_u = 1.0f;    verts[2].tex_v = 1.0f;
+/* Announce the phase that is ABOUT to run and present one frame for it. */
+static void loadscreen_phase(int step, const char *label)
+{
+    if (!loadscreen_detail_on()) return;
+    s_ls_step = step;
+    snprintf(s_ls_label, sizeof(s_ls_label), "%s", label ? label : "");
+    loadscreen_ensure_pixels();
+    loadscreen_upload();
+    loadscreen_draw_frame(-1, 1);
+}
 
-        verts[3].screen_x = 0.0f; verts[3].screen_y = sh;
-        verts[3].depth_z = 0.0f;  verts[3].rhw = 1.0f;
-        verts[3].diffuse = 0xFFFFFFFF; verts[3].specular = 0;
-        verts[3].tex_u = 0.0f;    verts[3].tex_v = 1.0f;
+static void display_loading_screen_tga(void) {
+    int index = rand() % 20;
+    s_loadscreen_index = index;
 
-        td5_plat_render_upload_texture(LOADSCREEN_SCRATCH_TEXTURE_PAGE, pixels, img_w, img_h, 2);
-        /* [D3D12 2026-07-31] Present the splash across MULTIPLE frames, not once.
-         * The D3D12 backend uploads page 0 and samples it in the same present, but
-         * the upload copy isn't GPU-resident on that first frame -> the one-shot
-         * present sampled BLACK and the splash never showed (R10). Re-drawing it
-         * over ~0.6s both guarantees residency (frame 2+ samples the real texels)
-         * AND gives the splash a visible dwell, matching the original which held
-         * the image for the duration of the (here near-instant) track load. */
-        for (int loop = 0; loop < FE_LOADSCREEN_FRAMES; loop++) {
-            td5_plat_render_clear(0x00000000);
-            td5_plat_render_begin_scene();
-            td5_plat_render_set_viewport(0, 0, screen_w, screen_h);
-            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-            td5_plat_render_bind_texture(LOADSCREEN_SCRATCH_TEXTURE_PAGE);
-            td5_plat_render_draw_tris(verts, 4, indices, 6);
-            td5_plat_render_end_scene();
-            td5_plat_present(0);
-            td5_plat_sleep(16);
-        }
-        free(pixels);
+    loadscreen_release();       /* drop the previous race's cache before reloading */
+    s_ls_step = 1;
+    snprintf(s_ls_label, sizeof(s_ls_label), "%s", "Loading screen");
+
+    TD5_LOG_I(LOG_TAG, "Loading screen: re/assets/loading/load%02d.png", index);
+    loadscreen_ensure_pixels();
+    if (!s_ls_pixels) return;
+    loadscreen_upload();
+
+    /* [D3D12 2026-07-31] Present the splash across MULTIPLE frames, not once.
+     * The D3D12 backend uploads page 0 and samples it in the same present, but
+     * the upload copy isn't GPU-resident on that first frame -> the one-shot
+     * present sampled BLACK and the splash never showed (R10). Re-drawing it
+     * over ~0.6s both guarantees residency (frame 2+ samples the real texels)
+     * AND gives the splash a visible dwell, matching the original which held
+     * the image for the duration of the (here near-instant) track load. */
+    for (int loop = 0; loop < FE_LOADSCREEN_FRAMES; loop++) {
+        loadscreen_draw_frame(-1, 0);
+        td5_plat_sleep(16);
     }
 }
 
@@ -11131,68 +11308,36 @@ static void display_loading_screen_tga(void) {
 #define RT_WARMUP_MAX_FRAMES 600   /* safety cap; typical drain is ~10-20 chunks */
 
 static void rt_warmup_loading_pump(void) {
-    char png_path[128];
-    void *pixels = NULL;
-    int img_w = 0, img_h = 0;
-    int screen_w = 0, screen_h = 0;
     int guard, start_ms, pending;
-    TD5_D3DVertex verts[4];
-    uint16_t indices[6] = {0,1,2, 0,2,3};
 
     TD5_LOG_I(LOG_TAG, "RT warmup: gate available=%d quality_high=%d lighting_enabled=%d",
               td5_rt_available(), td5_rt_quality_high(), g_td5.ini.lighting_enabled);
     /* Do the deferred full-scene feed + decide if there's anything to warm. */
     if (!td5_rt_warmup_prepare()) return;   /* LOW / RT unavailable -> nothing to do */
 
-    td5_plat_get_window_size(&screen_w, &screen_h);
-    {
-        float sw = (float)screen_w, sh = (float)screen_h;
-        verts[0].screen_x = 0.0f; verts[0].screen_y = 0.0f; verts[0].depth_z = 0.0f; verts[0].rhw = 1.0f;
-        verts[0].diffuse = 0xFFFFFFFF; verts[0].specular = 0; verts[0].tex_u = 0.0f; verts[0].tex_v = 0.0f;
-        verts[1].screen_x = sw;   verts[1].screen_y = 0.0f; verts[1].depth_z = 0.0f; verts[1].rhw = 1.0f;
-        verts[1].diffuse = 0xFFFFFFFF; verts[1].specular = 0; verts[1].tex_u = 1.0f; verts[1].tex_v = 0.0f;
-        verts[2].screen_x = sw;   verts[2].screen_y = sh;   verts[2].depth_z = 0.0f; verts[2].rhw = 1.0f;
-        verts[2].diffuse = 0xFFFFFFFF; verts[2].specular = 0; verts[2].tex_u = 1.0f; verts[2].tex_v = 1.0f;
-        verts[3].screen_x = 0.0f; verts[3].screen_y = sh;   verts[3].depth_z = 0.0f; verts[3].rhw = 1.0f;
-        verts[3].diffuse = 0xFFFFFFFF; verts[3].specular = 0; verts[3].tex_u = 0.0f; verts[3].tex_v = 1.0f;
-    }
-
     /* Reuse the SAME splash image as step 1 (no extra rand() -- see comment on
      * s_loadscreen_index). A missing PNG is non-fatal: still warm up, blank. */
-    snprintf(png_path, sizeof(png_path), "re/assets/loading/load%02d.png", s_loadscreen_index);
-    if (!td5_asset_load_png_to_buffer(png_path, TD5_COLORKEY_NONE, &pixels, &img_w, &img_h))
-        pixels = NULL;
-    if (pixels)
-        td5_plat_render_upload_texture(LOADSCREEN_SCRATCH_TEXTURE_PAGE, pixels, img_w, img_h, 2);
+    loadscreen_ensure_pixels();
+    loadscreen_upload();
+    s_ls_step = LOADSCREEN_PHASE_TOTAL;
+    snprintf(s_ls_label, sizeof(s_ls_label), "%s", "Warming up ray tracing");
 
     TD5_LOG_I(LOG_TAG, "RT warmup: draining BLAS wave on loading screen (pending=%d)",
               td5_plat_rt_warmup_pending());
     start_ms = td5_plat_time_ms();
 
     for (guard = 0; guard < RT_WARMUP_MAX_FRAMES; guard++) {
-        td5_plat_render_clear(0x00000000);
-        td5_plat_render_begin_scene();
-        td5_plat_render_set_viewport(0, 0, screen_w, screen_h);
-        if (pixels) {
-            td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
-            td5_plat_render_bind_texture(LOADSCREEN_SCRATCH_TEXTURE_PAGE);
-            td5_plat_render_draw_tris(verts, 4, indices, 6);
-        }
-        /* Frame 0: create pipeline objects + force RT-pipeline driver residency.
-         * Every frame: record one bounded BLAS chunk. Both must run inside the
-         * open frame (between begin_scene and end_scene). */
-        if (guard == 0)
-            td5_plat_rt_warmup_begin();
-        td5_plat_rt_warmup_step();
-        td5_plat_render_end_scene();
-        td5_plat_present(0);   /* per-frame fence throttles queued BLAS work */
+        /* The splash/bar/status draw plus its present is the frame the warmup
+         * work rides inside; the RT calls must run between begin_scene and
+         * end_scene, so they are injected through loadscreen_draw_frame's
+         * pre-present hook rather than duplicating the scaffolding here. */
+        loadscreen_draw_frame_ex(-1, 1, (guard == 0) ? 2 : 1);   /* 2 = also _begin() */
 
         pending = td5_plat_rt_warmup_pending();
         if (pending <= 0)
             break;
     }
 
-    if (pixels) free(pixels);
     TD5_LOG_I(LOG_TAG, "RT warmup: done in %d frame(s), %d ms (pending=%d)",
               guard + 1, td5_plat_time_ms() - start_ms, td5_plat_rt_warmup_pending());
 }
