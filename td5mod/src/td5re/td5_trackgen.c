@@ -2234,41 +2234,22 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
             const int min_len = tg_branch_min_len();
             int off = ring;                          /* append cursor after ring */
             /* [R20 FORK VARIETY] Placement USED to be constant: first fork at
-             * GRID_SPAN+120 and a fixed 150-span gap, so every seed that shared
-             * a plan rotation produced a byte-identical fork layout. Derive both
-             * the first-fork offset and the inter-fork gap from the plan seed,
-             * within bounds that never start earlier than the old 120 (past the
-             * grid + the F-WIDEN-2 approach window) and never drop the gap below
-             * 130 (comfortably above that same window). The ring-fit guard
-             * (R+24>=ring) still bounds the tail. Knob OFF restores the exact old
-             * constants (120 / 150) for A/B; ON changes span counts and every
-             * fork position on every seed. Deterministic in the plan seed. */
-            int first_off = 120;                     /* old constant (knob OFF) */
-            int fork_gap  = 150;                     /* old constant (knob OFF) */
-            /* [R20 PLACE] DEFAULT OFF pending a fix -- MEASURED REGRESSION.
-             * Seed-derived fork placement was shipped default ON, but an A/B on
-             * seed 771144 with real assets showed it COSTS forks rather than
-             * adding variety:
-             *     knob OFF: 6 forks, 1 skipped, 2209 spans
-             *     knob ON : 4 forks, 3 skipped, 1907 spans
-             * Root cause is NOT the ring-fit budget. The rejects are all
-             * "lane count changes inside its window", and the lane pass reports
-             * "sections skipped: grid/fork/bridge/tunnel/finish" -- i.e. lane
-             * changes are deliberately kept OUT of fork windows. The old constant
-             * positions (144/301/712/895/1106/1262) therefore sat in lane-uniform
-             * gaps by construction; moving forks to seed-derived positions lands
-             * them where the lane pass already put a change, and the uniformity
-             * guard rightly rejects them. Fixing this means reconciling the two
-             * passes (fork placement must be known to the lane pass, or run
-             * before it), not widening the gap budget.
-             * The rotation half of R20 (TD5RE_R20_FORK_ROT) is independently
-             * verified good and stays default ON. */
-            if (td5_env_flag_off("TD5RE_R20_FORK_PLACE")) {
-                const unsigned int h1 = s_fork_plan_seed * 2654435761u;
-                const unsigned int h2 = s_fork_plan_seed * 2246822519u + 3266489917u;
-                first_off = 120 + (int)((h1 >> 13) % 96u);   /* 120..215 */
-                fork_gap  = 130 + (int)((h2 >> 13) % 61u);   /* 130..190 */
-            }
+             * GRID_SPAN+120 and a fixed 150-span gap, so every seed that shared a
+             * plan rotation produced a byte-identical fork layout. The first-fork
+             * offset and the inter-fork gap now come from tg_fork_first_off() /
+             * tg_fork_gap() -- the SAME helpers the walk's stateless gates
+             * (tg_span_in_fork_run, tg_fork_window_ahead) consult, so the walk
+             * widens the road ahead of and keeps lane changes out of the SAME
+             * seed-varied spans this loop commits to. (The first attempt moved the
+             * loop only and left the gates on the old constants; the walk then
+             * protected the old positions while the loop placed at new ones, and
+             * every moved fork hit a lane change -> "lane count changes inside its
+             * window" rejects, costing forks. Sharing the helpers is the fix.)
+             * Knob OFF pins the old 120/150 (byte-identical). Deterministic in the
+             * plan seed. NB: ON changes span counts and every fork position on
+             * every seed. */
+            const int first_off = tg_fork_first_off();
+            const int fork_gap  = tg_fork_gap();
             int pos = TD5_TG_GRID_SPAN + first_off;  /* first fork, past the grid */
             unsigned int i;
 

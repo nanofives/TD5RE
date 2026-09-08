@@ -290,6 +290,31 @@ int tg_branch_is_long(int len)
     return tg_r8_longbranch_enabled() && len >= TD5_TG_R8_LONG_MIN;
 }
 
+/* [R20 FORK VARIETY] Fork PLACEMENT positions -- the SINGLE SOURCE OF TRUTH.
+ * Three call sites decide where forks sit and they MUST agree, or the walk
+ * protects one set of spans while the placement loop commits to another. That
+ * disagreement was the measured regression: seed-derived positions in the loop
+ * only, while the walk's stateless gates (tg_span_in_fork_run, keeping lane
+ * changes out of fork windows; tg_fork_window_ahead, widening the road before a
+ * fork) still predicted the OLD constants -- so every moved fork landed exactly
+ * where the walk had left a lane change and the uniformity guard rightly
+ * rejected it. Deriving all three from these two helpers makes the walk protect
+ * and widen the SAME spans the loop uses, exactly as the old hardcoded 120/150
+ * did by construction. Knob OFF pins the old constants (byte-identical to
+ * today). Deterministic in the plan seed (set by tg_srand before the walk); the
+ * bounds keep the first fork past the grid + the F-WIDEN-2 approach window and
+ * the gap above that window, so no guard is weakened. */
+int tg_fork_first_off(void)
+{
+    if (!td5_env_flag_off("TD5RE_R20_FORK_PLACE")) return 120;   /* default */
+    return 120 + (int)(((s_fork_plan_seed * 2654435761u) >> 13) % 96u);   /* 120..215 */
+}
+int tg_fork_gap(void)
+{
+    if (!td5_env_flag_off("TD5RE_R20_FORK_PLACE")) return 150;   /* default */
+    return 130 + (int)(((s_fork_plan_seed * 2246822519u + 3266489917u) >> 13) % 61u); /* 130..190 */
+}
+
 /* [R6 item 10] Is span si inside a fork's span range (widened approach through
  * rejoin)? Stateless, derived only from si and the deterministic fork placement
  * constants -- the SAME positions the placement loop in tg_emit_strip commits to
@@ -300,9 +325,10 @@ int tg_branch_is_long(int len)
  * gentle road, no harm. Mirrors the bridge-run gate exactly. */
 int tg_span_in_fork_run(int si)
 {
-    int pos, i;
+    int pos, gap, i;
     if (!tg_branches_enabled()) return 0;
-    pos = TD5_TG_GRID_SPAN + 120;
+    pos = TD5_TG_GRID_SPAN + tg_fork_first_off();   /* [R20] shared with the loop */
+    gap = tg_fork_gap();
     for (i = 0; i < tg_branch_count_max(); i++) {
         int kind, kl;
         tg_fork_plan(i, &kind, &kl, NULL);
@@ -314,7 +340,7 @@ int tg_span_in_fork_run(int si)
          * road eases INTO and OUT of the fork gently rather than meeting a sharp
          * bend right where the carriageways start to split / merge. */
         if (si >= F - TD5_TG_BRANCH_WIDEN - 2 && si <= R + 2) return 1;
-        pos = R + 150;
+        pos = R + gap;
         }
     }
     return 0;
@@ -337,9 +363,10 @@ int tg_fork_kind_min_lanes(int kind)
  * fork instead of arriving at it with too few lanes to split. */
 int tg_fork_window_ahead(int si, int within)
 {
-    int pos, i;
+    int pos, gap, i;
     if (!tg_branches_enabled()) return -1;
-    pos = TD5_TG_GRID_SPAN + 120;
+    pos = TD5_TG_GRID_SPAN + tg_fork_first_off();   /* [R20] shared with the loop */
+    gap = tg_fork_gap();
     for (i = 0; i < tg_branch_count_max(); i++) {
         int kind, kl;
         tg_fork_plan(i, &kind, &kl, NULL);
@@ -348,7 +375,7 @@ int tg_fork_window_ahead(int si, int within)
         const int F = pos, R = F + 1 + L;
         const int w0 = F - TD5_TG_BRANCH_WIDEN - 2;
         if (si <= w0 && w0 - si <= within) return kind;
-        pos = R + 150;
+        pos = R + gap;
         }
     }
     return -1;

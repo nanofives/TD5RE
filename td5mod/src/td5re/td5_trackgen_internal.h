@@ -722,6 +722,11 @@ int tg_rail_kerbfence_here(int si, double sg);
  * collision is LIFTING the car" report + the paired "avoid this kind of curve"
  * request). tg_span_in_fork_run gates it; forward-declared like the bridge one. */
 int tg_span_in_fork_run(int si);
+/* [R20 FORK VARIETY] Seed-derived fork PLACEMENT, shared by tg_span_in_fork_run,
+ * tg_fork_window_ahead and the placement loop in tg_emit_strip so all three
+ * agree on where forks sit. Knob TD5RE_R20_FORK_PLACE OFF pins 120/150. */
+int tg_fork_first_off(void);
+int tg_fork_gap(void);
 /* Largest heading change per span allowed across a fork's span range, radians.
  * 0.045 => turn radius >= ~33000 units, a sweeping curve. Sharper than this and
  * the quarter-road main shift + full-width branch bow overlap on the inside of
