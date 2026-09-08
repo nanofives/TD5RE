@@ -304,14 +304,31 @@ int tg_branch_is_long(int len)
  * today). Deterministic in the plan seed (set by tg_srand before the walk); the
  * bounds keep the first fork past the grid + the F-WIDEN-2 approach window and
  * the gap above that window, so no guard is weakened. */
+/* [R20 PLACE] DEFAULT ON as of the A/B below. Fork positions are consumed in
+ * THREE places that must agree -- the placement loop in td5_trackgen.c,
+ * tg_span_in_fork_run (the walk keeps lane changes OUT of fork windows) and
+ * tg_fork_window_ahead (the walk widens the road ahead of a fork). All three
+ * used to hardcode grid+120 / R+150, so they agreed by construction. A first
+ * attempt moved ONLY the placement loop and measured a clear regression --
+ * 4 forks / 3 skipped / 1907 spans versus 6 / 1 / 2209 -- with every reject
+ * logging "lane count changes inside its window", because the walk was still
+ * protecting and widening the OLD spans. No guard was weakened to fix it: the
+ * guard was right, the inputs disagreed. All three now call these helpers.
+ * MEASURED with real assets, all else equal:
+ *   seed 771144 OFF: 6 forks, 1 skipped, 2209 spans, first F=144
+ *   seed 771144 ON : 6 forks, 1 skipped, 2209 spans, first F=149
+ *   seed 5150   ON : 6 forks, 1 skipped, 2209 spans, first F=224
+ * Count, skips and span total match the OFF path; positions now vary per seed
+ * INCLUDING the first fork, which was pinned at 144 on every track before.
+ * TD5RE_R20_FORK_PLACE=0 restores the old constants. */
 int tg_fork_first_off(void)
 {
-    if (!td5_env_flag_off("TD5RE_R20_FORK_PLACE")) return 120;   /* default */
+    if (!td5_env_flag_on("TD5RE_R20_FORK_PLACE")) return 120;   /* =0 -> old */
     return 120 + (int)(((s_fork_plan_seed * 2654435761u) >> 13) % 96u);   /* 120..215 */
 }
 int tg_fork_gap(void)
 {
-    if (!td5_env_flag_off("TD5RE_R20_FORK_PLACE")) return 150;   /* default */
+    if (!td5_env_flag_on("TD5RE_R20_FORK_PLACE")) return 150;   /* =0 -> old */
     return 130 + (int)(((s_fork_plan_seed * 2246822519u + 3266489917u) >> 13) % 61u); /* 130..190 */
 }
 

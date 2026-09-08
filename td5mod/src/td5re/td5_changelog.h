@@ -32,6 +32,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 08 (generated tracks)" },
+    { CL_ITEM,    "Junctions are no longer in the same place on every" },
+    { CL_ITEM,    "  track. Their spacing and layout now vary by seed." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 07 (generated tracks, night)" },
     { CL_ITEM,    "Where a road splits, the narrow throat reads as road" },
     { CL_ITEM,    "  instead of a small green hole in the tarmac." },
