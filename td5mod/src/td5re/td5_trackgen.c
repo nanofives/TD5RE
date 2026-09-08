@@ -2245,7 +2245,25 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
              * fork position on every seed. Deterministic in the plan seed. */
             int first_off = 120;                     /* old constant (knob OFF) */
             int fork_gap  = 150;                     /* old constant (knob OFF) */
-            if (td5_env_flag_on("TD5RE_R20_FORK_PLACE")) {
+            /* [R20 PLACE] DEFAULT OFF pending a fix -- MEASURED REGRESSION.
+             * Seed-derived fork placement was shipped default ON, but an A/B on
+             * seed 771144 with real assets showed it COSTS forks rather than
+             * adding variety:
+             *     knob OFF: 6 forks, 1 skipped, 2209 spans
+             *     knob ON : 4 forks, 3 skipped, 1907 spans
+             * Root cause is NOT the ring-fit budget. The rejects are all
+             * "lane count changes inside its window", and the lane pass reports
+             * "sections skipped: grid/fork/bridge/tunnel/finish" -- i.e. lane
+             * changes are deliberately kept OUT of fork windows. The old constant
+             * positions (144/301/712/895/1106/1262) therefore sat in lane-uniform
+             * gaps by construction; moving forks to seed-derived positions lands
+             * them where the lane pass already put a change, and the uniformity
+             * guard rightly rejects them. Fixing this means reconciling the two
+             * passes (fork placement must be known to the lane pass, or run
+             * before it), not widening the gap budget.
+             * The rotation half of R20 (TD5RE_R20_FORK_ROT) is independently
+             * verified good and stays default ON. */
+            if (td5_env_flag_off("TD5RE_R20_FORK_PLACE")) {
                 const unsigned int h1 = s_fork_plan_seed * 2654435761u;
                 const unsigned int h2 = s_fork_plan_seed * 2246822519u + 3266489917u;
                 first_off = 120 + (int)((h1 >> 13) % 96u);   /* 120..215 */
