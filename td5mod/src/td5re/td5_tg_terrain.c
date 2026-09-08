@@ -397,13 +397,15 @@ typedef char tg_assert_biome_count_fits[
 typedef char tg_assert_biome_count_snow_fits[
     (TD5_TG_BIOME_COUNT_SNOW <= TD5_TG_BIOME_KINDS) ? 1 : -1];
 
-/* DEFAULT OFF this round: a shape change can leave the centerline walk boxed
- * in and the track short (the r2 item-20 lesson), so it is opt-in until it has
- * been driven and checked for "boxed in" in race.log. OFF is byte-identical to
- * pre-R21, which is what makes each knob measurable on its own. */
+/* DEFAULT ON. It shipped off while being measured, because a shape change can
+ * leave the centerline walk boxed in and the track short (the r2 item-20
+ * lesson) -- then checked across seeds 5150, 777, 99991 and 20260908: no
+ * "boxed in", span counts 2069..2669 with none short, and the per-biome mix
+ * moving as the table predicts. TD5RE_R21_ROAD_CHAR=0 is byte-identical to
+ * pre-R21, which is what keeps it measurable on its own. */
 int tg_r21_road_char(void)
 {
-    return td5_env_flag_off("TD5RE_R21_ROAD_CHAR");
+    return td5_env_flag_on("TD5RE_R21_ROAD_CHAR");
 }
 
 const TG_BiomeRoad *tg_biome_road(int si)

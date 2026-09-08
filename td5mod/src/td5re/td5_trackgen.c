@@ -2314,7 +2314,10 @@ static int tg_r8_relief_enabled(void)
 #define TD5_TG_R21_GRADE_KNEE     0.70  /* clip only the top 30% of the band  */
 #define TD5_TG_R21_GRADE_ABSMAX   0.20  /* absolute ceiling, any biome        */
 
-static int tg_r21_grade_drive(void) { return td5_env_flag_off("TD5RE_R21_GRADE"); }
+/* DEFAULT ON: without the drive the GRADIENT row cannot make a climb at all,
+ * which is the whole point of the round. TD5RE_R21_GRADE=0 restores the old
+ * cap-only behaviour (and the global rescale) byte-identically. */
+static int tg_r21_grade_drive(void) { return td5_env_flag_on("TD5RE_R21_GRADE"); }
 
 static int tg_grade_cmp(const void *a, const void *b)
 {
@@ -2490,6 +2493,11 @@ void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
             if (g) {
                 double p50, p90, p99, gmax, k = 1.0, asc = 0.0, dsc = 0.0;
                 double prev_orig, prev_new;
+                /* The per-span cap is scaled per BIOME, so a single number
+                 * cannot describe it. Track the range actually used: reporting
+                 * only the base made a legal ALPINE span (0.1999 under its own
+                 * 0.200 cap) read as a breach of "cap 0.137". */
+                double cap_lo = 1.0e9, cap_hi = 0.0;
                 int n = 0, hits = 0, steep = 0, run = 0, longest = 0;
 
                 for (i = 1; i < nl->count; i++)
@@ -2525,6 +2533,8 @@ void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
 
                     if (capi > TD5_TG_R21_GRADE_ABSMAX)
                         capi = TD5_TG_R21_GRADE_ABSMAX;
+                    if (capi < cap_lo) cap_lo = capi;
+                    if (capi > cap_hi) cap_hi = capi;
                     lim  = capi * span_len;
                     knee = TD5_TG_R21_GRADE_KNEE * lim;
                     ad   = fabs(d);
@@ -2557,10 +2567,13 @@ void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
                 /* p90 is the number to judge this on. The old [R8 SHAPE] line
                  * cannot show the win: worst grade was pinned at the cap before
                  * and is pinned just under it after. */
+                if (cap_lo > cap_hi) cap_lo = cap_hi;   /* no spans clipped */
+                eff_cap = cap_hi;   /* the REAL bound, for [R8 SHAPE] below */
                 TD5_LOG_I(LOG_TAG, "trackgen: [R21 GRADE] drive x%.2f -> p50 "
-                          "%.4f p90 %.4f p99 %.4f max %.4f (aim %.3f cap %.3f)",
+                          "%.4f p90 %.4f p99 %.4f max %.4f (aim %.3f, per-biome "
+                          "cap %.3f..%.3f)",
                           k, g[n / 2], g[(n * 9) / 10], g[(n * 99) / 100],
-                          g[n - 1], target, cap_base);
+                          g[n - 1], target, cap_lo, cap_hi);
                 TD5_LOG_I(LOG_TAG, "trackgen: [R21 GRADE] was p50 %.4f p90 "
                           "%.4f p99 %.4f max %.4f; the old global rescale would "
                           "have been x%.3f", p50, p90, p99, gmax,
