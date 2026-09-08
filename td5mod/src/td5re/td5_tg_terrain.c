@@ -338,6 +338,134 @@ const TG_Biome k_biomes[] = {
       2, 1, 120, 160, 3 }
 };
 
+/* [R21 SHAPE] Per-biome ROAD CHARACTER -- see TG_BiomeRoad in the internal
+ * header for the rules. Percent of whatever the studio configured; 100 = "as
+ * set", so the FOREST row being all-100 is both "forest reads as normal" (the
+ * report's words) and the neutrality check when this table is first wired.
+ *
+ * CITY's two numbers are not in tension once you separate them: w_straight 140
+ * with w_curve 70 means FEWER turns (grid streets are straight lines), while
+ * w_acute 110 with corner_pct 70 means the turns it does have are SHARP block
+ * corners. Long straights, hard 90s -- which is what block_turn_1_in 16
+ * reproduces from the table instead of by hand. Narrow and low-variance,
+ * because a city street is a fixed width; low relief and a reduced grade,
+ * because cities are built on flat ground and San-Francisco pitches would
+ * break the crossing and zebra emitters.
+ *
+ * FIELDS/INDUSTRIAL are highway character: straight-heavy, dual-carriageway
+ * prone, widest and most variable, sweeping corners, low relief. ALPINE is the
+ * mountain pass and the row that makes "steep climbs" real. COAST is a
+ * corniche: curve-heavy and sweeping. ALPTOWN is a ploughed alpine town, i.e.
+ * city shape on alpine terrain. */
+const TG_BiomeRoad k_biome_road[] = {
+/*   name          str  cur  acu dual  corn  wid  var  rlf  grd  blk */
+  { "CITY",        140,  70, 110,  60,   70,  85,  10,  60,  80,  16 },
+  { "FIELDS",      120, 110,  60, 130,  130, 105,  20,  90,  90,   0 },
+  { "FOREST",      100, 100, 100, 100,  100, 100,  15, 110, 110,   0 },
+  { "INDUSTRIAL",  130,  80,  80, 140,  110, 110,  20,  70,  80,   0 },
+  { "ALPINE",       60, 120, 170,  40,   75,  85,  10, 180, 150,   0 },
+  { "COAST",        90, 140,  90, 110,  110, 100,  15, 100, 100,   0 },
+  { "ORIENTAL",    100, 110, 110,  70,   90,  90,  15, 110, 105,   0 },
+  { "ALPTOWN",     110, 100, 120,  60,   80,  85,  10, 140, 130,  24 }
+};
+
+/* The bound trap made a COMPILE error instead of a memory corruption: adding a
+ * biome without adding its road row would otherwise read past this table on
+ * every span of the new biome. */
+typedef char tg_assert_biome_road_len[
+    (sizeof(k_biome_road) / sizeof(k_biome_road[0]) == TD5_TG_BIOME_KINDS)
+    ? 1 : -1];
+
+/* DEFAULT OFF this round: a shape change can leave the centerline walk boxed
+ * in and the track short (the r2 item-20 lesson), so it is opt-in until it has
+ * been driven and checked for "boxed in" in race.log. OFF is byte-identical to
+ * pre-R21, which is what makes each knob measurable on its own. */
+int tg_r21_road_char(void)
+{
+    return td5_env_flag_off("TD5RE_R21_ROAD_CHAR");
+}
+
+const TG_BiomeRoad *tg_biome_road(int si)
+{
+    int idx = tg_biome_cell_index(si);
+    if (idx < 0 || idx >= TD5_TG_BIOME_KINDS) idx = 0;
+    return &k_biome_road[idx];
+}
+
+static int tg_shape_field_of(const TG_BiomeRoad *b, int field)
+{
+    switch (field) {
+    case TG_SF_W_STRAIGHT: return b->w_straight;
+    case TG_SF_W_CURVE:    return b->w_curve;
+    case TG_SF_W_ACUTE:    return b->w_acute;
+    case TG_SF_W_DUAL:     return b->w_dual;
+    case TG_SF_CORNER:     return b->corner_pct;
+    case TG_SF_WIDTH:      return b->width_pct;
+    case TG_SF_WIDTH_VAR:  return b->width_var_pct;
+    case TG_SF_RELIEF:     return b->relief_pct;
+    case TG_SF_GRADE:      return b->grade_pct;
+    case TG_SF_BLOCK_TURN: return b->block_turn_1_in;
+    default:               return 100;
+    }
+}
+
+int tg_shape_pct(int si, int field)
+{
+    if (!tg_r21_road_char()) return field == TG_SF_BLOCK_TURN ? 0 : 100;
+    return tg_shape_field_of(tg_biome_road(si), field);
+}
+
+int tg_shape_lerp_pct(int si, int field, int ramp)
+{
+    int a = 0, b = 0, cur, edge, d;
+
+    cur = tg_shape_pct(si, field);
+    if (!tg_r21_road_char() || ramp <= 0) return cur;
+
+    tg_biome_run_bounds(si, &a, &b);
+    /* Ramp toward the PREVIOUS run's value on the way in ... */
+    if (si - a < ramp && a > 0) {
+        edge = tg_shape_pct(a - 1, field);
+        d    = si - a;                                  /* 0 .. ramp-1 */
+        return edge + (cur - edge) * (d + 1) / (ramp + 1);
+    }
+    /* ... and toward the NEXT run's on the way out. */
+    if (b - si < ramp && b + 1 < TD5_TG_MAX_SPANS) {
+        edge = tg_shape_pct(b + 1, field);
+        d    = b - si;
+        return edge + (cur - edge) * (d + 1) / (ramp + 1);
+    }
+    return cur;
+}
+
+int tg_shape_safety_x100(int si, int base_x100)
+{
+    int v;
+    if (!tg_r21_road_char()) return base_x100;
+    v = base_x100 * tg_shape_lerp_pct(si, TG_SF_CORNER, TD5_TG_BIOME_BLEND) / 100;
+    return v < 100 ? 100 : v;      /* the apply_config floor still holds */
+}
+
+/* The TIGHTEST corner the walk can produce this build: a min over the WHOLE
+ * table, deliberately NOT over the biomes this seed laid out, so the window
+ * tg_adjacent_skip derives from it is provably >= every local value and does
+ * not depend on which biomes happened to appear. */
+int tg_shape_worst_safety_x100(const TD5_TrackGenSpec *spec)
+{
+    int base = spec ? spec->curve_safety_x100 : 0;
+    int i, worst;
+
+    if (base <= 0) return 0;                   /* caller keeps its fallback */
+    if (!tg_r21_road_char()) return base;
+    worst = base;
+    for (i = 0; i < TD5_TG_BIOME_KINDS; i++) {
+        int v = base * k_biome_road[i].corner_pct / 100;
+        if (v < 100) v = 100;
+        if (v < worst) worst = v;
+    }
+    return worst;
+}
+
 /* ==========================================================================
  * BIOME ADJACENCY  (feedback R2 item 23)
  *

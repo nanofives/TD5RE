@@ -1280,8 +1280,18 @@ static int tg_adjacent_skip(const TD5_TrackGenSpec *spec, double limit_max)
     const double w_max      = (double)TD5_TG_MAX_LANES * lane_width;
     /* Worst-case need in tg_too_close: both roads at the max width. */
     const double need_max   = w_max + lane_width * 0.25;
-    const double safety     = (spec->curve_safety_x100 > 0)
-                            ? (double)spec->curve_safety_x100 / 100.0
+    /* [R21 SHAPE] This window must stay a track-wide WORST CASE, so it is
+     * sized with the TIGHTEST corner any biome can ask for, not with a local
+     * value. Direction of the effect, since it is not obvious: with
+     * f(r) = (N/L)*asin(u)/u and u = N/2r, asin(u)/u increases in u, so a
+     * SMALLER two_r yields a LARGER skip -- tightening corners GROWS the
+     * exemption window, which is the conservative direction and the correct
+     * one (a tighter arc can double back on itself in fewer spans). Expect the
+     * adjacent_skip= number logged below to RISE when road character is on; if
+     * it does not, this is not wired up. */
+    const int    worst_x100 = tg_shape_worst_safety_x100(spec);
+    const double safety     = (worst_x100 > 0)
+                            ? (double)worst_x100 / 100.0
                             : TD5_TG_CURVE_SAFETY;
     const double two_r      = safety * w_max;    /* 2x the tightest legal radius */
     const int    forced     = td5_env_int("TD5RE_AUTOTRACK_ADJ_SKIP", 0, 0, 4000);
@@ -1309,20 +1319,47 @@ static int tg_adjacent_skip(const TD5_TrackGenSpec *spec, double limit_max)
 }
 
 /* Pick a section type from the normalised weights. */
-static TD5_TrackGenSection tg_pick_section(const TD5_TrackGenSpec *spec)
+/* [R21 SHAPE] `si` is the span the section will START on, so the mix can be
+ * the biome's own -- "each biome should have its own twistiness".
+ *
+ * DRAW BUDGET IS UNCHANGED: still exactly one tg_range per pick. What changes
+ * is the MAPPING from roll to section, not the number of draws, so this cannot
+ * shift the RNG stream by itself. (Existing seeds still move, because the four
+ * section kinds consume different numbers of draws further down and the mix
+ * changes which kind comes up -- that is expected and already true of any
+ * generator change. What must hold, and is tested, is that OFF is
+ * byte-identical.) */
+static TD5_TrackGenSection tg_pick_section(const TD5_TrackGenSpec *spec, int si)
 {
+    int w[TD5_TG_SECTION_COUNT];
     int total = 0, i, roll;
-    for (i = 0; i < TD5_TG_SECTION_COUNT; i++) {
-        int w = spec->weight[i];
-        if (w > 0) total += w;
+
+    for (i = 0; i < TD5_TG_SECTION_COUNT; i++) w[i] = spec->weight[i];
+
+    if (tg_r21_road_char()) {
+        static const int k_field[TD5_TG_SECTION_COUNT] = {
+            TG_SF_W_STRAIGHT, TG_SF_W_CURVE, TG_SF_W_ACUTE, TG_SF_W_DUAL
+        };
+        for (i = 0; i < TD5_TG_SECTION_COUNT; i++)
+            w[i] = w[i] * tg_shape_lerp_pct(si, k_field[i],
+                                            TD5_TG_BIOME_BLEND) / 100;
+    }
+
+    for (i = 0; i < TD5_TG_SECTION_COUNT; i++) if (w[i] > 0) total += w[i];
+    /* A biome could in principle scale every weight to zero; fall back to the
+     * spec's own mix rather than silently returning nothing but straights. */
+    if (total <= 0) {
+        for (i = 0; i < TD5_TG_SECTION_COUNT; i++) {
+            w[i] = spec->weight[i];
+            if (w[i] > 0) total += w[i];
+        }
     }
     if (total <= 0) return TD5_TG_STRAIGHT;
     roll = tg_range(0, total - 1);
     for (i = 0; i < TD5_TG_SECTION_COUNT; i++) {
-        int w = spec->weight[i];
-        if (w <= 0) continue;
-        if (roll < w) return (TD5_TrackGenSection)i;
-        roll -= w;
+        if (w[i] <= 0) continue;
+        if (roll < w[i]) return (TD5_TrackGenSection)i;
+        roll -= w[i];
     }
     return TD5_TG_STRAIGHT;
 }
@@ -1422,7 +1459,7 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
     int attempts = 0;
 
     while (nl->count < want_nodes) {
-        TD5_TrackGenSection sec = tg_pick_section(spec);
+        TD5_TrackGenSection sec = tg_pick_section(spec, nl->count);
         int    len_spans;
         double target_width = base_width;
         double radius = 0.0;
@@ -1452,6 +1489,18 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
             const unsigned int bh = (unsigned)nl->count * 2654435761u;
             if ((bh >> 28) == 0u) sec = TD5_TG_ACUTE;   /* ~1 city section in 16 */
         }
+        /* [R21 SHAPE] The same idea, but driven by k_biome_road's
+         * block_turn_1_in instead of a hardcoded "is it CITY" test and a
+         * hardcoded 1-in-16 -- which is what lets ALPTOWN have block corners
+         * too, at its own rate. Keeps all four properties the R3 charter above
+         * demands: hard cell index, position hash rather than the shared RNG,
+         * the attempts escape hatch still able to win, and a kill knob. */
+        if (attempts < 8 && tg_r21_road_char()) {
+            const int n = tg_shape_pct(nl->count, TG_SF_BLOCK_TURN);
+            if (n > 0 &&
+                (tg_roll_hash_at(0x21010101u, nl->count) % (unsigned)n) == 0u)
+                sec = TD5_TG_ACUTE;
+        }
 
         if (attempts >= 12) sec = TD5_TG_STRAIGHT;   /* try to escape */
 
@@ -1471,7 +1520,12 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
                 /* Tight: sit just above the curvature-safety floor for the
                  * CURRENT width, so a hairpin never self-intersects the road
                  * surface. */
-                radius = (width * 0.5) * (spec->curve_safety_x100 / 100.0)
+                /* [R21 SHAPE] per-BIOME tightness: same tg_frand() draw, a
+                 * biome-scaled multiplier. Cities get hard block corners,
+                 * FIELDS sweeping ones. */
+                radius = (width * 0.5)
+                       * (tg_shape_safety_x100(nl->count,
+                                               spec->curve_safety_x100) / 100.0)
                        * (1.0 + tg_frand() * 0.6);
                 break;
 
@@ -1603,7 +1657,15 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
                  * a bend that was legal at 4 lanes can be illegal once a
                  * dual-lane taper has widened the road under it. */
                 if (radius > 0.0) {
-                    double floor_r = (width * 0.5) * (spec->curve_safety_x100 / 100.0);
+                    /* [R21 SHAPE] Keyed on the node about to be pushed, not on
+                     * the section start: a section can straddle a cell
+                     * boundary, and the floor has to follow the ground it is
+                     * actually on. tg_shape_safety_x100 ramps across the run
+                     * edge so the radius does not step mid-arc. */
+                    double floor_r = (width * 0.5)
+                                   * (tg_shape_safety_x100(
+                                          nl->count,
+                                          spec->curve_safety_x100) / 100.0);
                     double r = radius < floor_r ? floor_r : radius;
                     double dh = (double)dir * (span_len / r);
                     /* [R3 item 15] no sharp turns on a bridge. A deliberate

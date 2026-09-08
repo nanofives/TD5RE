@@ -2512,9 +2512,11 @@ int tg_road_slot(int v);
  * what makes a stretch of city read differently from open fields without
  * needing separate emitters per biome -- every prop is still a box.
  *
- * Not yet driven by biome: the section mix (straight/curve/acute weighting).
- * The section picker runs during the centerline walk, before any of this, so
- * per-biome cornering needs the picker to know its own position first. */
+ * [R21 SHAPE] The section mix (straight/curve/acute/dual weighting) IS now
+ * driven by biome, and the note that used to sit here saying otherwise had it
+ * backwards: tg_biome_layout runs BEFORE tg_build_centerline, so the grid
+ * already exists when the walk starts. The picker takes the span it is about
+ * to place and reads its own biome -- see TG_BiomeRoad and tg_pick_section. */
 /* Facade/tree sizes below are the SHIPPED-track measurements (level014 city,
  * level005 rural), in raw 24.8 units == world_units * 256. A survey found a
  * facade page-cell is ~8.4 x 11.5 wu (2150 x 2950 raw), a city frontage ~3
@@ -2617,6 +2619,66 @@ int tg_biome_bridge_pct(int si);
 int tg_biome_tunnel_pct(int si);
 int tg_biome_span_is_city(int si);
 int tg_biome_index_is_city(int idx);
+/* ==========================================================================
+ * [R21 SHAPE] PER-BIOME ROAD CHARACTER
+ *
+ * THE REPORT: "twistiness should be random, avoid a lot of twistiness on
+ * cities, each biome should have its own twistiness" / "cities have more tight
+ * corners, forest can be normal" / "sections where there's narrower lanes and
+ * wider lanes".
+ *
+ * A PARALLEL table rather than nine more fields on TG_Biome: those rows are
+ * already ~28 positional initializers each, and C diagnoses nothing if a new
+ * field lands in the wrong column.
+ *
+ * EVERY FIELD IS A PERCENT OF THE GLOBAL VALUE the spec/studio configured --
+ * the tg_biome_bridge_pct pattern, consumed the same way. Percent and not
+ * absolute ON PURPOSE: the studio's TWISTINESS / CORNERS / GRADIENT / HILLS
+ * rows have to stay meaningful, so a player who asks for TWISTY gets a twisty
+ * track whose city stretches are its LEAST twisty part -- not a track where
+ * the biome table quietly overruled the row they set.
+ *
+ * INDEXED BY A BIOME INDEX, so the array length is TD5_TG_BIOME_KINDS and NOT
+ * either draw modulus. The compile-time length assert beside the table is what
+ * keeps that true when a biome is added.
+ *
+ * Read shape through tg_biome_cell_index (the HARD cell owner), NEVER
+ * tg_biome_for_span: that one DITHERS per span inside the blend band, so one
+ * section would take its mix from CITY and its corner floor from FOREST on
+ * alternating spans. Scalars ramp instead, via tg_shape_lerp_pct. */
+typedef struct {
+    const char *name;        /* must equal k_biomes[i].name; checked at init */
+    int w_straight, w_curve, w_acute, w_dual;  /* on spec->weight[]          */
+    int corner_pct;          /* on curve_safety_x100; <100 = TIGHTER corners */
+    int width_pct;           /* the biome's typical road width               */
+    int width_var_pct;       /* +/- this much per section                    */
+    int relief_pct;          /* on the macro relief amplitude                */
+    int grade_pct;           /* on the gradient drive AND its cap            */
+    int block_turn_1_in;     /* 0 = off; else force ACUTE ~1 section in N    */
+} TG_BiomeRoad;
+
+extern const TG_BiomeRoad k_biome_road[];
+
+/* Which field tg_shape_pct / tg_shape_lerp_pct should read. */
+typedef enum {
+    TG_SF_W_STRAIGHT = 0, TG_SF_W_CURVE, TG_SF_W_ACUTE, TG_SF_W_DUAL,
+    TG_SF_CORNER, TG_SF_WIDTH, TG_SF_WIDTH_VAR, TG_SF_RELIEF, TG_SF_GRADE,
+    TG_SF_BLOCK_TURN
+} TG_ShapeField;
+
+int  tg_r21_road_char(void);          /* TD5RE_R21_ROAD_CHAR; OFF == pre-R21 */
+const TG_BiomeRoad *tg_biome_road(int si);
+int  tg_shape_pct(int si, int field);              /* hard cell, no ramp     */
+/* Lerp a SCALAR across a run edge. Uses tg_biome_run_bounds (the MERGED run:
+ * with repeated cells a 300-span city is ONE run, where si/TD5_TG_BIOME_RUN
+ * would see two). ramp<=0 means "no ramp". */
+int  tg_shape_lerp_pct(int si, int field, int ramp_spans);
+/* Effective corner safety at a span, and the track-wide WORST CASE that
+ * tg_adjacent_skip must be sized with (a min over the WHOLE table, not over
+ * the biomes this seed happened to lay out, so the self-intersection window is
+ * provably >= every local value the walk can use). */
+int  tg_shape_safety_x100(int si, int base_x100);
+int  tg_shape_worst_safety_x100(const TD5_TrackGenSpec *spec);
 /* ==========================================================================
  * [R11 BIOME item 4] OUTSKIRTS -- THE WILDERNESS-TO-TOWN EDGE
  *
