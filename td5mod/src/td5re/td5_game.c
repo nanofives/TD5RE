@@ -1961,6 +1961,31 @@ int td5_game_slot_is_finished(int slot)
     return (s_metrics[slot].post_finish_metric_base != 0) ? 1 : 0;
 }
 
+/* [TD5RE HS-DNF] Returns whether a slot reached a GENUINE finish-line crossing,
+ * as opposed to merely being "in a finished state".
+ *
+ * td5_game_slot_is_finished() above is only `post_finish_metric_base != 0`, and
+ * that field is deliberately seeded nonzero by several NON-finish paths so the
+ * results aggregator can still sort every slot:
+ *   - P2P checkpoint-timer expiry (the FAIL/DNF case) sets it to cumulative_timer
+ *     or the sentinel 1 (tick_pending_finish_timer, ~:9005)
+ *   - the aggregator backfills non-crossers with an ESTIMATED pace time (~:9704,
+ *     ~:10265) and the force-finish/bulk-seed paths use `(t > 0) ? t : 1`
+ *     (~:11516, ~:11596)
+ * so a timed-out or force-ended run reads as "finished" and used to be eligible
+ * for a high score. companion_2 is the discriminator (0 = still racing,
+ * 1 = completed-ok, 2 = DNF) and is written ONLY by the three genuine
+ * finish-line sites (~:9315 circuit lap, ~:9426 P2P finish span, ~:9510
+ * checkpoint finish) and by the DNF site (~:9011); none of the backfills touch
+ * it. Requiring companion_2 == 1 is therefore the only reliable "crossed the
+ * line" test. Used to gate high-score posting (SP name entry + MP register). */
+int td5_game_slot_finished_at_line(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    if (s_slot_state[slot].companion_2 != 1) return 0;
+    return (s_metrics[slot].post_finish_metric_base != 0) ? 1 : 0;
+}
+
 /* [MP per-viewport finish 2026-06-13] 1-based finishing place captured when
  * this slot crossed the line, or 0 if it is still racing. The HUD draws this as
  * a per-viewport end-of-race indicator so each split-screen player gets their

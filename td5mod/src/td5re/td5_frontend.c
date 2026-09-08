@@ -872,6 +872,13 @@ int  s_results_skip_display;     /* g_postRaceRestartSelectedRace */
 int  s_snap_car, s_snap_paint, s_snap_trans, s_snap_config;
 
 int     s_score_insert_pos;      /* 0-4: position in 5-entry table where insert goes */
+/* [TD5RE HS-MP] Bitmask of ALL rows inserted by the run just finished (bit N = row N).
+ * s_score_insert_pos holds a single row, which is all a single-player race needs; a
+ * multiplayer race can place SEVERAL players into the same table at once, and each of
+ * them should be highlighted. Rebased on every insert (an insert at rank r pushes the
+ * previously-marked rows at >= r down one), so it stays correct regardless of the order
+ * players placed in. 0 = nothing from this run. */
+int     s_score_insert_mask;
 
 /* Masters roster (type 5): 15 random car slots, 6 marked AI */
 int  s_masters_roster[15];
@@ -8365,10 +8372,13 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
          * mode defaults to 0 → #1 row; post-insert it's the inserted rank. Port has no bold
          * atlas, so the highlight is rendered YELLOW (user-confirmed). */
         int hl_row = (s_score_insert_pos >= 0) ? s_score_insert_pos : 0;
+        /* [TD5RE HS-MP] A multiplayer race can insert several rows at once; every
+         * row this run placed gets the accent, not just s_score_insert_pos. */
+        int hl_multi = (s_score_insert_mask & (1 << i)) != 0;
         /* [FIXED 2026-06-01] #1/insert row = the GOLD accent (sampled from the rendered
          * original High Scores: #1 row ≈ (208,203,23), title ≈ (217,197,12) — a muted gold,
          * NOT the bright yellow 0xFFFFE000 I'd guessed). */
-        uint32_t row_color = (i == hl_row) ? 0xFFD9C50C : 0xFFE0E0E0;
+        uint32_t row_color = (i == hl_row || hl_multi) ? 0xFFD9C50C : 0xFFE0E0E0;
         char buf[64];
 
         if (e->name[0] == '\0') {

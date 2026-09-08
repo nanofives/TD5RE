@@ -39,6 +39,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  responsive instead of freezing during a long load." },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 08 (high scores)" },
+    { CL_ITEM,    "Auto Track Studio tracks no longer ask for a high" },
+    { CL_ITEM,    "  score name. Their times are not saved." },
+    { CL_ITEM,    "A race you did not finish through the finish line no" },
+    { CL_ITEM,    "  longer counts for a high score." },
+    { CL_ITEM,    "Every player in a multiplayer race can now set a high" },
+    { CL_ITEM,    "  score under their own name, several at once." },
+    { CL_ITEM,    "Default high score rows now show collisions and air" },
+    { CL_ITEM,    "  time instead of a blank zero." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 08 (generated tracks)" },
     { CL_ITEM,    "Junctions are no longer in the same place on every" },
     { CL_ITEM,    "  track. Their spacing and layout now vary by seed." },
