@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 09 (auto track: second-race crash)" },
+    { CL_ITEM,    "Fixed a crash when a second auto track was generated" },
+    { CL_ITEM,    "  in the same session: the water table kept the span" },
+    { CL_ITEM,    "  numbers of the FIRST track and read past the end of" },
+    { CL_ITEM,    "  the second one whenever that track was shorter." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 08 (auto track: topology first)" },
     { CL_ITEM,    "The auto track now builds its WORLD first: a real" },
     { CL_ITEM,    "  heightfield with a sea, coastline, rivers, mountains" },

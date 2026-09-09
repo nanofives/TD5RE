@@ -2007,6 +2007,9 @@ extern int s_r9_wet_rejected;
 #define TD5_TG_R9_WET_MAX 3000
 extern int s_r9_wet_ready;
 void tg_r9_water_table_build(const TG_NodeList *nl);
+/* Does the table need rebuilding for THIS node list? Ready-flag plus identity:
+ * the stored span indices belong to the list they were sampled from. */
+int tg_r9_water_table_stale(const TG_NodeList *nl);
 /* ==== [R14 COAST item 5a] "on the LEFT side of the bridge, polygons collide
  * with the water below and with the coastline" ================ SECTION:r14coast
  *

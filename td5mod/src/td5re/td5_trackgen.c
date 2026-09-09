@@ -2874,7 +2874,15 @@ static int tg_scenery_begin(const TG_NodeList *nl, int nspans, int lanes)
          * region, which is the thing being removed. One pass over the node
          * list, so warming it costs nothing measurable. */
         (void)tg_track_min_y(nl);
-        if (!s_r9_wet_ready) tg_r9_water_table_build(nl);
+        /* [CRASH] Build it OUTRIGHT, not "if stale". The staleness key catches
+         * the case that crashed (a second generation with a SHORTER node list,
+         * indices out of range), but it cannot catch a second generation whose
+         * list happens to land at the same address with the same count: that
+         * table is silently WRONG rather than out of range, and it decides
+         * which meshes get dropped. Warming here is one pass over the node
+         * list, so paying it every generation costs nothing measurable and
+         * removes the whole class. */
+        tg_r9_water_table_build(nl);
     }
 
     /* [PARALLEL GROUNDWORK] Build every span's terrain up front. Still serial;

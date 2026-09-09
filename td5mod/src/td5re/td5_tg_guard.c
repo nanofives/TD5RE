@@ -753,10 +753,33 @@ static double s_r9_wet_side[TD5_TG_R9_WET_MAX];  /* 0 = river (both sides) */
 
 static int    s_r9_wet_count;
 
+/* [CRASH] Which node list the table above was built FROM. The span indices it
+ * stores are only meaningful for that list: every reader dereferences
+ * nl->v[s + 1], and the build loop is the only thing that guarantees
+ * s + 1 < nl->count. s_r9_wet_ready alone could not carry that guarantee
+ * across a SECOND generation in the same process, because the single place
+ * that cleared it (tg_r9_bridge_report) returns early when its report knob is
+ * off, while the warm site in td5_trackgen.c builds the table on every
+ * generation. With the flag stuck at 1, generation 2 kept generation 1's spans
+ * and read one node past the end of a shorter list -- an access violation
+ * inside the over-water audit (crash.1.log, 2026-09-09). Keying the freshness
+ * on the list itself makes the invariant hold no matter who forgets to reset. */
+static const TG_NodeList *s_r9_wet_nl;
+
+static int    s_r9_wet_nl_count;
+
+int tg_r9_water_table_stale(const TG_NodeList *nl)
+{
+    return !s_r9_wet_ready || s_r9_wet_nl != nl || s_r9_wet_nl_count != nl->count;
+}
+
 void tg_r9_water_table_build(const TG_NodeList *nl)
 {
     int s;
+    s_r9_wet_ready = 0;
     s_r9_wet_count = 0;
+    s_r9_wet_nl = nl;
+    s_r9_wet_nl_count = nl->count;
     for (s = 0; s + 1 < nl->count && s_r9_wet_count < TD5_TG_R9_WET_MAX; s++) {
         double side;
         /* [TOPOLOGY-FIRST] from the road module's shore table. */
@@ -867,7 +890,7 @@ static int tg_r9_water_audit_mesh(const TG_NodeList *nl, const unsigned char *b,
     if (!td5_env_flag_on("TD5RE_R9_BRIDGE_REPORT")) return 0;
     if (tg_r9_wet_kind_ok(kind)) return 0;
     if (vtxcnt == 0 || vtxcnt > 65536) return 0;
-    if (!s_r9_wet_ready) tg_r9_water_table_build(nl);
+    if (tg_r9_water_table_stale(nl)) tg_r9_water_table_build(nl);
     if (tag) {
         ox = (double)tg_rd_f32(b + off + 0x1C) / 256.0;
         oy = (double)tg_rd_f32(b + off + 0x20) / 256.0;
@@ -891,7 +914,14 @@ static int tg_r9_water_audit_mesh(const TG_NodeList *nl, const unsigned char *b,
 
     for (w = 0; w < s_r9_wet_count; w++) {
         const int s = s_r9_wet_span[w];
-        const TG_Node *n0 = &nl->v[s], *n1 = &nl->v[s + 1];
+        const TG_Node *n0, *n1;
+        /* [CRASH] Second line of defence for the same defect the freshness key
+         * above fixes: a span index is only ever read together with its far
+         * node, so a table entry that no longer has one is skipped, not
+         * dereferenced. Cheap, and it cannot mask a real hit -- inside a valid
+         * table every entry passes. */
+        if (s < 0 || s + 1 >= nl->count) continue;
+        n0 = &nl->v[s]; n1 = &nl->v[s + 1];
         const double surf = s_r9_wet_surf[w];
         const double outer = s_r9_wet_out[w], inner = s_r9_wet_in[w];
         const double side = s_r9_wet_side[w];
@@ -967,7 +997,7 @@ static void tg_r14_coast_audit_mesh(const TG_NodeList *nl, const unsigned char *
 
     if (!td5_env_flag_off("TD5RE_R14_COAST_REPORT")) return;   /* default OFF */
     if (vtxcnt == 0 || vtxcnt > 65536) return;
-    if (!s_r9_wet_ready) tg_r9_water_table_build(nl);
+    if (tg_r9_water_table_stale(nl)) tg_r9_water_table_build(nl);
     if (tag) {
         ox = (double)tg_rd_f32(b + off + 0x1C) / 256.0;
         oy = (double)tg_rd_f32(b + off + 0x20) / 256.0;
@@ -976,7 +1006,14 @@ static void tg_r14_coast_audit_mesh(const TG_NodeList *nl, const unsigned char *
 
     for (w = 0; w < s_r9_wet_count; w++) {
         const int s = s_r9_wet_span[w];
-        const TG_Node *n0 = &nl->v[s], *n1 = &nl->v[s + 1];
+        const TG_Node *n0, *n1;
+        /* [CRASH] Second line of defence for the same defect the freshness key
+         * above fixes: a span index is only ever read together with its far
+         * node, so a table entry that no longer has one is skipped, not
+         * dereferenced. Cheap, and it cannot mask a real hit -- inside a valid
+         * table every entry passes. */
+        if (s < 0 || s + 1 >= nl->count) continue;
+        n0 = &nl->v[s]; n1 = &nl->v[s + 1];
         const double surf = s_r9_wet_surf[w];
         const double outer = s_r9_wet_out[w], inner = s_r9_wet_in[w];
         const double side = s_r9_wet_side[w];
