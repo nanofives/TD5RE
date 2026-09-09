@@ -1042,19 +1042,22 @@ void tg_rs_latch(void)
                            TD5_TG_RS_PER_CLASS);
 }
 
-/* Surface CLASS -> base of its real-page run. Gravel and cobble share ROUGH:
- * they are not separable by texture statistics (see the note on the page block
- * in td5_trackgen_internal.h), so one pool serves both until a human splits it.
- * PALE (light concrete) has no k_road_surf equivalent yet -- it is emitted and
- * reserved, not selected, so adding a surface class later needs no re-curation. */
+/* Surface CLASS -> base of its real-page run.
+ *
+ * RS_GRAVEL maps to DIRT, not to COBBLE: the shipped corpus has no loose-
+ * aggregate road art worth the name, and unpaved dirt is the closer read for
+ * gravel than laid setts would be. CONCRETE has no k_road_surf equivalent at
+ * all -- it is emitted and reserved so a future light-concrete surface class
+ * needs no re-curation, which is also why it is not an error to find it unused
+ * in a page census. */
 static int tg_rs_real_base(int surf)
 {
     switch (surf) {
     case RS_TARMAC: return TD5_TG_PAGE_RS_TARMAC;
-    case RS_DIRT:   return TD5_TG_PAGE_RS_DIRT;
+    case RS_COBBLE: return TD5_TG_PAGE_RS_COBBLE;
     case RS_ICE:    return TD5_TG_PAGE_RS_ICE;
-    case RS_GRAVEL:
-    case RS_COBBLE: return TD5_TG_PAGE_RS_ROUGH;
+    case RS_DIRT:
+    case RS_GRAVEL: return TD5_TG_PAGE_RS_DIRT;
     default:        return -1;
     }
 }

@@ -339,47 +339,109 @@ def cmd_verify(root, levels):
 # Ranking inside a class is by CARRIAGEWAY face count from the object
 # catalogue, i.e. how much road the shipped game actually paved with it. That
 # is a far better signal than any pixel statistic for "is this a good road".
-ROAD_CLASSES = ("TARMAC", "PALE", "DIRT", "ROUGH", "ICE")
+ROAD_CLASSES = ("TARMAC", "CONCRETE", "COBBLE", "DIRT", "ICE")
+
+# Levels 040-046 are PROP LIBRARIES, not drivable tracks: the object sweep gives
+# them ~1 object per mesh and 0 landmarks, and 042/043 have objects == meshes
+# exactly. Their pages reach the road-role classifier through geometry that is
+# not really carriageway, which is how a piece of machinery (level040 page 001)
+# ended up ranked as a road surface. Excluded by provenance rather than by
+# pixels, because that is what is actually wrong with them.
+NON_TRACK_LEVELS = set(range(40, 47))
+
+# Thresholds fitted to hand-labelled examples rather than guessed. Measured:
+#   good tarmac   sd  9.2..24.1   stripe 0.83..0.94
+#   cobble/setts  sd 12.3..27.7   stripe 0.21..0.68
+#   snow          lum 223..235
+#   arrow marking sd 57.9         <- the white directional arrow, level008 p151
+#   junction tile sd 50.2         <- level004 p186
+#   pink fan slab lum 196         <- level011 p073, decorative plaza
+# No page that survives inspection exceeds sd 28, and nothing good sits between
+# stripe 0.68 and 0.83, so both cuts fall in real gaps.
+RC_PAINT_SD = 40.0      # above this the page is painted geometry, not a surface
+RC_STRIPE = 0.75        # above = longitudinal (road), below = cell/tile pattern
+# 200, not 210: the best snow page (level010 p108, luma 204, 1275 carriageway
+# faces) sits just under 210, and the decorative pink fan slab that must NOT be
+# ice sits at 196. Eight luma apart, so luma alone cannot arbitrate -- what
+# actually excludes the fan is `stripe` 0.46, which routes it to COBBLE where a
+# fan-pattern plaza belongs. The luma cut only has to sit between the two.
+RC_ICE_LUM = 200.0
+RC_SAT_MAX = 0.30       # a road surface is not strongly coloured
+
+# A class ships as many good pages as it HAS, never a fixed quota. Filling every
+# class to 8 dragged in pages carrying 4, 4 and 1 carriageway faces -- art the
+# shipped game barely used, promoted purely to meet a count. TD5 genuinely has
+# few light-concrete or snow road surfaces, and the C side already falls back to
+# the procedural generator for any slot the header does not fill, so a short
+# class costs nothing.
+RC_MIN_FACES = 100
 
 
-def road_class(lum, sat, sd, r, b):
-    """Bucket a road page by colour and detail.
+def road_class(f):
+    """Bucket a road page from its measured features (see _page_stats).
 
-    NOT separated here: gravel from cobble. Peak autocorrelation over the ROUGH
-    bucket runs 0.356..0.953 as a smooth continuum with no bimodality (p25 0.796,
-    p50 0.863), because a 64x64 tiling page is periodic at the tile boundary
-    whatever it depicts. So ROUGH serves both RS_GRAVEL and RS_COBBLE and wants
-    a human split in the studio browser. Recording the failed measurement here
-    so nobody re-derives it.
+    The failure this replaces: ranking by carriageway-face count cannot tell a
+    SURFACE from something PAINTED ON a surface, because an arrow marking
+    legitimately covers carriageway faces. Colour and detail alone then sorted
+    the survivors by brightness, which put the cobbles in a "pale" bucket, a
+    road arrow and a junction tile in "rough", and a decorative plaza in "ice".
+
+    `stripe` is what actually separates a road from paving: a road page's
+    markings run ALONG the road, so one axis explains almost all the variance
+    (0.83..0.94), while setts and brick vary in both axes (0.21..0.68). Note
+    this deliberately KEEPS pages with lane paint -- that is how TD5 draws roads
+    -- and rejects only paint that does not run with the carriageway.
     """
-    if lum >= 185.0 and sat < 0.14:
+    lum, sat, sd, r, _g, b, stripe, _seam, _spec = f
+    if lum <= 1.0 or sat > RC_SAT_MAX:
+        return None
+    if sd >= RC_PAINT_SD:
+        return None                       # arrows, chevrons, junction tiles
+    if lum >= RC_ICE_LUM and sat < 0.14:
         return "ICE"
     if r - b > 14.0 and sat >= 0.12:
         return "DIRT"
-    if sd >= 30.0:
-        return "ROUGH"
-    if lum >= 138.0:
-        return "PALE"
+    if stripe < RC_STRIPE:
+        return "COBBLE"                   # setts, brick, slabs -- cell patterns
+    if lum >= 140.0:
+        return "CONCRETE"
     if lum >= 25.0:
         return "TARMAC"
     return None
 
 
 def _page_stats(path):
+    """(lum, sat, sd, r, g, b, stripe, seam, spec) for one 64x64 page.
+
+    stripe -- how much of the variance ONE axis explains. Longitudinal road
+              paint makes every row alike, so a road page scores high; setts and
+              brick vary both ways and score low.
+    seam   -- wrap discontinuity relative to internal detail. Kept for the
+              report; it turned out not to be needed as a cut, because the sd
+              gate already removes everything it would have caught.
+    spec   -- strongest low-frequency FFT peak, i.e. periodic cell structure.
+    """
+    import numpy as np
     from PIL import Image
     im = Image.open(path).convert("RGB")
-    px = list(im.getdata())
-    n = len(px)
-    r = sum(q[0] for q in px) / n
-    g = sum(q[1] for q in px) / n
-    b = sum(q[2] for q in px) / n
+    arr = np.asarray(im, dtype=float)
+    r, g, b = arr[:, :, 0].mean(), arr[:, :, 1].mean(), arr[:, :, 2].mean()
     lum = 0.299 * r + 0.587 * g + 0.114 * b
     mx, mn = max(r, g, b), min(r, g, b)
     sat = (mx - mn) / mx if mx else 0.0
-    lums = [0.299 * q[0] + 0.587 * q[1] + 0.114 * q[2] for q in px]
-    mean = sum(lums) / n
-    sd = (sum((v - mean) ** 2 for v in lums) / n) ** 0.5
-    return lum, sat, sd, r, g, b
+
+    a = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
+    sd = float(a.std())
+    tot = sd or 1e-6
+    stripe = float(max(a.mean(axis=1).std(), a.mean(axis=0).std()) / tot)
+    inner = (float(np.abs(np.diff(a, axis=1)).mean())
+             + float(np.abs(np.diff(a, axis=0)).mean())) / 2 or 1e-6
+    seam = float(max(np.abs(a[:, 0] - a[:, -1]).mean(),
+                     np.abs(a[0, :] - a[-1, :]).mean()) / inner)
+    F = np.abs(np.fft.fft2(a - a.mean()))
+    F[0, 0] = 0.0
+    spec = float(F[1:12, 1:12].max() / (F.sum() / F.size + 1e-6))
+    return lum, sat, sd, r, g, b, stripe, seam, spec
 
 
 def cmd_roads(root, out, per_class=8):
@@ -402,6 +464,9 @@ def cmd_roads(root, out, per_class=8):
     for p in pages:
         if p["role"] != "road":
             continue
+        if p["level"] in NON_TRACK_LEVELS:
+            drop["non_track_level"] += 1
+            continue
         if p["type"] != 0:
             drop["alpha_keyed"] += 1
             continue
@@ -409,27 +474,27 @@ def cmd_roads(root, out, per_class=8):
         if rf <= 0:
             drop["never_a_carriageway"] += 1
             continue
+        if rf < RC_MIN_FACES:
+            drop["barely_used"] += 1
+            continue
         png = os.path.join(root, "level%03d" % p["level"], "textures.src",
                            "pages", "page_%03d.png" % p["page"])
         if not os.path.isfile(png):
             drop["no_png"] += 1
             continue
-        lum, sat, sd, r, _g, b = _page_stats(png)
-        if lum <= 1.0:
-            drop["degenerate_black"] += 1
-            continue
+        f = _page_stats(png)
         h = hashlib.sha256(open(png, "rb").read()).hexdigest()
         if h in seen:
             drop["duplicate_art"] += 1
             continue
         seen[h] = True
-        k = road_class(lum, sat, sd, r, b)
+        k = road_class(f)
         if not k:
-            drop["unclassified"] += 1
+            drop["rejected_or_unclassified"] += 1
             continue
         buckets[k].append({"level": p["level"], "page": p["page"], "faces": rf,
-                           "luma": round(lum, 1), "sat": round(sat, 2),
-                           "detail": round(sd, 1)})
+                           "luma": round(f[0], 1), "sat": round(f[1], 2),
+                           "detail": round(f[2], 1), "stripe": round(f[6], 2)})
 
     sets = {}
     for k in ROAD_CLASSES:
@@ -451,8 +516,10 @@ def cmd_roads(root, out, per_class=8):
            "regenerate": True,
            "title": "Real shipped ROAD surfaces, curated by re/tools/td5_geomlib.py "
                     "roads. Ranked by how much carriageway each page actually "
-                    "paves in the shipped game. ROUGH serves both gravel and "
-                    "cobble: they are not separable by texture statistics.",
+                    "paves in the shipped game, then classed by measured "
+                    "features: painted geometry (arrows, junction tiles) is "
+                    "rejected on contrast, and COBBLE is split from TARMAC by "
+                    "whether the pattern runs ALONG the road or cells both ways.",
            "sets": sets}
     # The manifest is the header's SOURCE, so it must be tracked -- re/assets is
     # gitignored, and a generated header whose input is not in the repo cannot be

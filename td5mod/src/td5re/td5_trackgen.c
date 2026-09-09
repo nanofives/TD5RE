@@ -81,12 +81,12 @@ const char *td5_trackgen_page_name(int page)
      * pool a surface came from rather than just "some page in the 40". */
     if (page >= TD5_TG_PAGE_RS_TARMAC &&
         page <  TD5_TG_PAGE_RS_TARMAC + TD5_TG_RS_PER_CLASS)      return "RS_TARMAC";
-    if (page >= TD5_TG_PAGE_RS_PALE &&
-        page <  TD5_TG_PAGE_RS_PALE + TD5_TG_RS_PER_CLASS)        return "RS_PALE";
+    if (page >= TD5_TG_PAGE_RS_CONCRETE &&
+        page <  TD5_TG_PAGE_RS_CONCRETE + TD5_TG_RS_PER_CLASS)    return "RS_CONCRETE";
+    if (page >= TD5_TG_PAGE_RS_COBBLE &&
+        page <  TD5_TG_PAGE_RS_COBBLE + TD5_TG_RS_PER_CLASS)      return "RS_COBBLE";
     if (page >= TD5_TG_PAGE_RS_DIRT &&
         page <  TD5_TG_PAGE_RS_DIRT + TD5_TG_RS_PER_CLASS)        return "RS_DIRT";
-    if (page >= TD5_TG_PAGE_RS_ROUGH &&
-        page <  TD5_TG_PAGE_RS_ROUGH + TD5_TG_RS_PER_CLASS)       return "RS_ROUGH";
     if (page >= TD5_TG_PAGE_RS_ICE &&
         page <  TD5_TG_PAGE_RS_ICE + TD5_TG_RS_PER_CLASS)         return "RS_ICE";
     return NULL;

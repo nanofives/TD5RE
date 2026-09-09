@@ -560,23 +560,30 @@ typedef char tg_r11_sign_pages_fit[(3 <= TD5_TG_R11_SIGN_N - 1) ? 1 : -1];
  * from ROAD_EXTRA + ROAD_VARIANTS - 1, so widening the road block in place
  * would renumber every page after it.
  *
- * Five surface classes x 8 pages, curated by re/tools/td5_geomlib.py roads
- * from the 687 road-role pages the shipped corpus actually paves carriageway
- * with, and baked into td5_tg_real_tex_roads.h. Class order here MUST match
- * the manifest's set order -- the emitter indexes by it.
+ * Five surface classes, curated by re/tools/td5_geomlib.py roads from the
+ * road-role pages the shipped corpus actually paves carriageway with, and
+ * baked into td5_tg_real_tex_roads.h. Class order here MUST match the
+ * manifest's set order -- the emitter indexes by it.
  *
- * ROUGH serves both gravel and cobble. They are not separable by texture
- * statistics (peak autocorrelation over the class is a smooth 0.356..0.953,
- * because a 64x64 tiling page is periodic at its tile boundary whatever it
- * depicts), so that split waits on a human.
+ * Each class reserves 8 slots but ships as many pages as it HAS (currently
+ * 8/5/8/8/2): TD5 holds only two usable snow road surfaces and five pale
+ * concrete ones, and padding a class to a quota pulled in art carrying 4 and
+ * even 1 carriageway face. Unfilled slots fall back to the procedural emitter.
+ *
+ * COBBLE was earlier believed inseparable from gravel, on a peak-autocorrelation
+ * test that found a smooth 0.356..0.953 continuum. That test was answering the
+ * wrong question -- a 64x64 tiling page is periodic at its tile boundary
+ * whatever it depicts. What actually separates them is whether the pattern runs
+ * ALONG the road: road paint makes one axis explain 0.83..0.94 of the variance,
+ * while setts and brick vary both ways at 0.21..0.68.
  * ==================================================================== */
-#define TD5_TG_PAGE_RS_BASE   (TD5_TG_PAGE_R11_BASE + 6)
-#define TD5_TG_RS_PER_CLASS   8
-#define TD5_TG_PAGE_RS_TARMAC (TD5_TG_PAGE_RS_BASE + 0 * TD5_TG_RS_PER_CLASS)
-#define TD5_TG_PAGE_RS_PALE   (TD5_TG_PAGE_RS_BASE + 1 * TD5_TG_RS_PER_CLASS)
-#define TD5_TG_PAGE_RS_DIRT   (TD5_TG_PAGE_RS_BASE + 2 * TD5_TG_RS_PER_CLASS)
-#define TD5_TG_PAGE_RS_ROUGH  (TD5_TG_PAGE_RS_BASE + 3 * TD5_TG_RS_PER_CLASS)
-#define TD5_TG_PAGE_RS_ICE    (TD5_TG_PAGE_RS_BASE + 4 * TD5_TG_RS_PER_CLASS)
+#define TD5_TG_PAGE_RS_BASE     (TD5_TG_PAGE_R11_BASE + 6)
+#define TD5_TG_RS_PER_CLASS     8
+#define TD5_TG_PAGE_RS_TARMAC   (TD5_TG_PAGE_RS_BASE + 0 * TD5_TG_RS_PER_CLASS)
+#define TD5_TG_PAGE_RS_CONCRETE (TD5_TG_PAGE_RS_BASE + 1 * TD5_TG_RS_PER_CLASS)
+#define TD5_TG_PAGE_RS_COBBLE   (TD5_TG_PAGE_RS_BASE + 2 * TD5_TG_RS_PER_CLASS)
+#define TD5_TG_PAGE_RS_DIRT     (TD5_TG_PAGE_RS_BASE + 3 * TD5_TG_RS_PER_CLASS)
+#define TD5_TG_PAGE_RS_ICE      (TD5_TG_PAGE_RS_BASE + 4 * TD5_TG_RS_PER_CLASS)
 #define TD5_TG_RS_CLASSES     5
 /* Seam contract with the generated header, same shape as tg_r11_sign_pages_fit.
  * The literal is the manifest's per-class cap: the header's k_road_*_count are

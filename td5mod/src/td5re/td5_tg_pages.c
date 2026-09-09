@@ -3007,9 +3007,9 @@ static void tg_emit_r8var_rail_pages(TG_Buf *pages)
             FALLBACK(&pages[TD5_TG_PAGE_RS_##CLS + v]);                       \
     }
 
-static void tg_emit_rs_gravel(TG_Buf *out)
+static void tg_emit_rs_cobble(TG_Buf *out)
 {
-    tg_emit_texture_page_roadsurf(out, RS_GRAVEL);
+    tg_emit_texture_page_roadsurf(out, RS_COBBLE);
 }
 
 static void tg_emit_rs_dirt(TG_Buf *out)
@@ -3025,11 +3025,11 @@ static void tg_emit_rs_ice(TG_Buf *out)
 static void tg_emit_roadset_pages(TG_Buf *pages)
 {
     int v;
-    TG_RS_EMIT(TARMAC, tarmac, tg_emit_texture_page_asphalt)
-    TG_RS_EMIT(PALE,   pale,   tg_emit_texture_page_asphalt)
-    TG_RS_EMIT(DIRT,   dirt,   tg_emit_rs_dirt)
-    TG_RS_EMIT(ROUGH,  rough,  tg_emit_rs_gravel)
-    TG_RS_EMIT(ICE,    ice,    tg_emit_rs_ice)
+    TG_RS_EMIT(TARMAC,   tarmac,   tg_emit_texture_page_asphalt)
+    TG_RS_EMIT(CONCRETE, concrete, tg_emit_texture_page_asphalt)
+    TG_RS_EMIT(COBBLE,   cobble,   tg_emit_rs_cobble)
+    TG_RS_EMIT(DIRT,     dirt,     tg_emit_rs_dirt)
+    TG_RS_EMIT(ICE,      ice,      tg_emit_rs_ice)
 }
 
 #undef TG_RS_EMIT
