@@ -55,6 +55,7 @@
 #include "td5_tg_furniture_tex.h" /* real TD5 lamp/railing/banner pages     */
 #include "td5_tg_real_tex_r11signs.h" /* [R11 SIGNS] direction arrow panels */
 #include "td5_tg_props_tex.h"     /* [R9 INFRA] TD6 street-furniture pages  */
+#include "td5_tg_real_tex_roads.h" /* [GEOMLIB] curated real ROAD surfaces  */
 #include "td5re.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -551,7 +552,42 @@ typedef char tg_infra_pages_fit[(TD5_TG_PROPS_TEX_COUNT <= TD5_TG_R9_INFRA_N)
  * mined set ever grows past the panel slots this area reserved, the build stops
  * instead of quietly walking into the next round's block. */
 typedef char tg_r11_sign_pages_fit[(3 <= TD5_TG_R11_SIGN_N - 1) ? 1 : -1];
-#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R11_BASE + 6)
+
+/* ================== GEOMLIB: REAL ROAD SURFACE PAGES =================
+ * Same rule as R3-R11, measured off its OWN base.
+ *
+ * NOT taken by growing TD5_TG_ROAD_VARIANTS: TD5_TG_PAGE_FB_BASE is derived
+ * from ROAD_EXTRA + ROAD_VARIANTS - 1, so widening the road block in place
+ * would renumber every page after it.
+ *
+ * Five surface classes x 8 pages, curated by re/tools/td5_geomlib.py roads
+ * from the 687 road-role pages the shipped corpus actually paves carriageway
+ * with, and baked into td5_tg_real_tex_roads.h. Class order here MUST match
+ * the manifest's set order -- the emitter indexes by it.
+ *
+ * ROUGH serves both gravel and cobble. They are not separable by texture
+ * statistics (peak autocorrelation over the class is a smooth 0.356..0.953,
+ * because a 64x64 tiling page is periodic at its tile boundary whatever it
+ * depicts), so that split waits on a human.
+ * ==================================================================== */
+#define TD5_TG_PAGE_RS_BASE   (TD5_TG_PAGE_R11_BASE + 6)
+#define TD5_TG_RS_PER_CLASS   8
+#define TD5_TG_PAGE_RS_TARMAC (TD5_TG_PAGE_RS_BASE + 0 * TD5_TG_RS_PER_CLASS)
+#define TD5_TG_PAGE_RS_PALE   (TD5_TG_PAGE_RS_BASE + 1 * TD5_TG_RS_PER_CLASS)
+#define TD5_TG_PAGE_RS_DIRT   (TD5_TG_PAGE_RS_BASE + 2 * TD5_TG_RS_PER_CLASS)
+#define TD5_TG_PAGE_RS_ROUGH  (TD5_TG_PAGE_RS_BASE + 3 * TD5_TG_RS_PER_CLASS)
+#define TD5_TG_PAGE_RS_ICE    (TD5_TG_PAGE_RS_BASE + 4 * TD5_TG_RS_PER_CLASS)
+#define TD5_TG_RS_CLASSES     5
+/* Seam contract with the generated header, same shape as tg_r11_sign_pages_fit.
+ * The literal is the manifest's per-class cap: the header's k_road_*_count are
+ * `static const int`, which C does not accept as a constant expression, which
+ * is why R11's assert hardcodes its count too. The runtime emitter clamps to
+ * k_road_*_count anyway, so a SHORTER header is safe and only this ceiling
+ * needs to move if re/tools/td5_geomlib.py roads ever keeps more than 8. */
+typedef char tg_rs_pages_fit[(8 <= TD5_TG_RS_PER_CLASS) ? 1 : -1];
+
+#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_RS_BASE + \
+                               TD5_TG_RS_CLASSES * TD5_TG_RS_PER_CLASS)
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
 /* Down-track spans per MODELS.DAT display-list entry (entry = span >> 2).
@@ -2566,6 +2602,10 @@ enum { RS_TARMAC = 0, RS_GRAVEL, RS_DIRT, RS_ICE, RS_COBBLE };
 typedef struct { int grip_class; int page_var; int proc_kind; } TG_RoadSurf;
 extern const TG_RoadSurf k_road_surf[TD5_TG_ROAD_VARIANTS];
 int tg_road_slot(int v);
+/* [GEOMLIB] Latch TD5RE_AUTOTRACK_ROAD_SET for the build. Called from
+ * td5_trackgen_build_level, not from regenerate, for the same reason s_gen_seed
+ * is: a direct build_level call must see its own value. */
+void tg_rs_latch(void);
 /* ===================== BIOMES =====================
  * A biome owns a RUN of spans and drives what stands beside the road: how
  * dense the props are, how tall, how far back, and which texture page. That is

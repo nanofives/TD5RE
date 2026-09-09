@@ -77,6 +77,18 @@ const char *td5_trackgen_page_name(int page)
         page <  TD5_TG_PAGE_R7_WALL_TOWER + TD5_TG_R7_WALL_TOWER_N) return "WALL_TOWER";
     if (page >= TD5_TG_PAGE_R8V_RAIL &&
         page <  TD5_TG_PAGE_R8V_RAIL + TD5_TG_R8V_RAIL_N)         return "GUARDRAIL_VAR";
+    /* [GEOMLIB] real road surfaces, named per class so a picker line says which
+     * pool a surface came from rather than just "some page in the 40". */
+    if (page >= TD5_TG_PAGE_RS_TARMAC &&
+        page <  TD5_TG_PAGE_RS_TARMAC + TD5_TG_RS_PER_CLASS)      return "RS_TARMAC";
+    if (page >= TD5_TG_PAGE_RS_PALE &&
+        page <  TD5_TG_PAGE_RS_PALE + TD5_TG_RS_PER_CLASS)        return "RS_PALE";
+    if (page >= TD5_TG_PAGE_RS_DIRT &&
+        page <  TD5_TG_PAGE_RS_DIRT + TD5_TG_RS_PER_CLASS)        return "RS_DIRT";
+    if (page >= TD5_TG_PAGE_RS_ROUGH &&
+        page <  TD5_TG_PAGE_RS_ROUGH + TD5_TG_RS_PER_CLASS)       return "RS_ROUGH";
+    if (page >= TD5_TG_PAGE_RS_ICE &&
+        page <  TD5_TG_PAGE_RS_ICE + TD5_TG_RS_PER_CLASS)         return "RS_ICE";
     return NULL;
 }
 
@@ -919,6 +931,25 @@ static const unsigned char k_tgr_w_mostly_on[] = { 25,  75 };
 static const unsigned char k_tgr_w_even[]      = { 50,  50 };
 static const unsigned char k_tgr_w_rare[]      = { 70,  30 };
 
+/* [GEOMLIB] ROAD SURFACE. 0 keeps the five procedural pages the generator has
+ * always drawn; 1..8 swap in the Nth curated REAL page of each surface class
+ * from td5_tg_real_tex_roads.h, so the whole track changes surface family at
+ * once rather than per biome (biome still picks WHICH class, and k_road_surf
+ * still owns grip, so physics is untouched by construction).
+ *
+ * Weighted to PROCEDURAL 100, deliberately, following the k_tgr_w_keep
+ * precedent above: the row is in the mechanism, in the studio and in the
+ * report, but a random seed still builds exactly what it built before. Real
+ * road art changes the look of EVERY seed, so that switch is a considered
+ * one-byte weight change after someone has actually looked at the 40 pages,
+ * not a side effect of landing the plumbing. */
+static const int         k_tgr_roadset_v[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8 };
+static const char *const k_tgr_roadset_n[] = { "PROCEDURAL",
+                                               "REAL 1", "REAL 2", "REAL 3",
+                                               "REAL 4", "REAL 5", "REAL 6",
+                                               "REAL 7", "REAL 8" };
+static const unsigned char k_tgr_roadset_w[] = { 100, 0, 0, 0, 0, 0, 0, 0, 0 };
+
 #define TGR_BOOL(nm, kb, slt, wts, leg) \
     { nm, kb, slt, k_tgr_bool_v, k_tgr_bool_n, wts, 2, leg, 0, 1, 0 }
 /* A presence row: same shape plus its restore rank for the budget. */
@@ -986,7 +1017,8 @@ static const TG_RollEntry k_tg_rolls[TD5_TG_ROLL_COUNT] = {
  TGR_PRES("LAMP POSTS",    "TD5RE_AUTOTRACK_LAMP_POSTS",     0x2101002Cu, k_tgr_w_even,      1, 17),
  TGR_PRES("BANNERS",       "TD5RE_AUTOTRACK_BANNERS",        0x2101002Du, k_tgr_w_even,      1, 20),
  TGR_PRES("REAL TEXTURES", "TD5RE_AUTOTRACK_REAL_TEX",       0x2101002Eu, k_tgr_w_scarce,    1,  4),
- TGR_PRES("REAL FURNITURE","TD5RE_AUTOTRACK_REAL_FURNITURE", 0x2101002Fu, k_tgr_w_mostly_on, 1, 21)
+ TGR_PRES("REAL FURNITURE","TD5RE_AUTOTRACK_REAL_FURNITURE", 0x2101002Fu, k_tgr_w_mostly_on, 1, 21),
+ { "ROAD SURFACE", "TD5RE_AUTOTRACK_ROAD_SET",  0x21010030u, k_tgr_roadset_v, k_tgr_roadset_n, k_tgr_roadset_w, 9, 0, 0, 8 , 0 }
 };
 
 /* The table is indexed by TD5_TgRollId, so a missing or extra row would
