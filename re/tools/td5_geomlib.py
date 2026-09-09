@@ -320,10 +320,161 @@ def cmd_verify(root, levels):
     return 0 if (reasons.get(al.SPLIT_OK, 0) == meshes and ok and vin == vout) else 1
 
 
+# ---------------------------------------------------------------------------
+# road-surface curation (feeds gen_tg_pages.py -> td5_tg_real_tex_roads.h)
+# ---------------------------------------------------------------------------
+#
+# tg_road_page (td5_tg_terrain.c:1032) can only ever return 5 pages, all
+# procedural noise. The library finds 687 road-role pages across the shipped
+# corpus. They cannot be bulk-imported: the comment at td5_tg_pages.c:3029
+# records why ROAD stayed procedural, namely that shipped city road pages are
+# sandstone tan and read muddy under the auto-track. So this curates.
+#
+# Three filters, each for a stated reason:
+#   type != 0        -- alpha-keyed pages are markings/decals, not a surface
+#   0 carriageway    -- 185 of 687 are road-role by orientation and proximity
+#     faces             but never actually carry a driving surface
+#   luma <= 1        -- degenerate all-black pages
+#
+# Ranking inside a class is by CARRIAGEWAY face count from the object
+# catalogue, i.e. how much road the shipped game actually paved with it. That
+# is a far better signal than any pixel statistic for "is this a good road".
+ROAD_CLASSES = ("TARMAC", "PALE", "DIRT", "ROUGH", "ICE")
+
+
+def road_class(lum, sat, sd, r, b):
+    """Bucket a road page by colour and detail.
+
+    NOT separated here: gravel from cobble. Peak autocorrelation over the ROUGH
+    bucket runs 0.356..0.953 as a smooth continuum with no bimodality (p25 0.796,
+    p50 0.863), because a 64x64 tiling page is periodic at the tile boundary
+    whatever it depicts. So ROUGH serves both RS_GRAVEL and RS_COBBLE and wants
+    a human split in the studio browser. Recording the failed measurement here
+    so nobody re-derives it.
+    """
+    if lum >= 185.0 and sat < 0.14:
+        return "ICE"
+    if r - b > 14.0 and sat >= 0.12:
+        return "DIRT"
+    if sd >= 30.0:
+        return "ROUGH"
+    if lum >= 138.0:
+        return "PALE"
+    if lum >= 25.0:
+        return "TARMAC"
+    return None
+
+
+def _page_stats(path):
+    from PIL import Image
+    im = Image.open(path).convert("RGB")
+    px = list(im.getdata())
+    n = len(px)
+    r = sum(q[0] for q in px) / n
+    g = sum(q[1] for q in px) / n
+    b = sum(q[2] for q in px) / n
+    lum = 0.299 * r + 0.587 * g + 0.114 * b
+    mx, mn = max(r, g, b), min(r, g, b)
+    sat = (mx - mn) / mx if mx else 0.0
+    lums = [0.299 * q[0] + 0.587 * q[1] + 0.114 * q[2] for q in px]
+    mean = sum(lums) / n
+    sd = (sum((v - mean) ** 2 for v in lums) / n) ** 0.5
+    return lum, sat, sd, r, g, b
+
+
+def cmd_roads(root, out, per_class=8):
+    """Curate the road-role pages into per-surface-class sets and write a
+    gen_tg_pages.py manifest."""
+    import hashlib
+    with open(os.path.join(out, "pages.json"), encoding="utf-8") as f:
+        pages = json.load(f)["pages"]
+
+    carriage = Counter()
+    for f in glob.glob(os.path.join(out, "objects", "level*.jsonl")):
+        for line in open(f, encoding="utf-8"):
+            o = json.loads(line)
+            if o["kind"] != "road":
+                continue
+            for pg, n in o["per_page"].items():
+                carriage[(o["level"], int(pg))] += n
+
+    buckets, seen, drop = defaultdict(list), {}, Counter()
+    for p in pages:
+        if p["role"] != "road":
+            continue
+        if p["type"] != 0:
+            drop["alpha_keyed"] += 1
+            continue
+        rf = carriage[(p["level"], p["page"])]
+        if rf <= 0:
+            drop["never_a_carriageway"] += 1
+            continue
+        png = os.path.join(root, "level%03d" % p["level"], "textures.src",
+                           "pages", "page_%03d.png" % p["page"])
+        if not os.path.isfile(png):
+            drop["no_png"] += 1
+            continue
+        lum, sat, sd, r, _g, b = _page_stats(png)
+        if lum <= 1.0:
+            drop["degenerate_black"] += 1
+            continue
+        h = hashlib.sha256(open(png, "rb").read()).hexdigest()
+        if h in seen:
+            drop["duplicate_art"] += 1
+            continue
+        seen[h] = True
+        k = road_class(lum, sat, sd, r, b)
+        if not k:
+            drop["unclassified"] += 1
+            continue
+        buckets[k].append({"level": p["level"], "page": p["page"], "faces": rf,
+                           "luma": round(lum, 1), "sat": round(sat, 2),
+                           "detail": round(sd, 1)})
+
+    sets = {}
+    for k in ROAD_CLASSES:
+        v = sorted(buckets[k], key=lambda d: -d["faces"])[:per_class]
+        sets[k.lower()] = [
+            ["level%03d" % d["level"], d["page"],
+             "%s, luma %.0f sat %.2f detail %.0f, %d carriageway faces"
+             % (k.lower(), d["luma"], d["sat"], d["detail"], d["faces"])]
+            for d in v]
+        print("  %-7s %3d candidates -> keep %d  (top faces %s)"
+              % (k, len(buckets[k]), len(v),
+                 ", ".join(str(d["faces"]) for d in v[:4])))
+    print("  dropped: %s" % dict(drop))
+
+    # This header is wholly generated from this manifest and has no hand edits,
+    # so re-running is safe. gen_tg_pages.py otherwise refuses to overwrite, to
+    # protect the hand-curated headers from earlier rounds.
+    man = {"header": "td5_tg_real_tex_roads.h", "prefix": "k_road",
+           "regenerate": True,
+           "title": "Real shipped ROAD surfaces, curated by re/tools/td5_geomlib.py "
+                    "roads. Ranked by how much carriageway each page actually "
+                    "paves in the shipped game. ROUGH serves both gravel and "
+                    "cobble: they are not separable by texture statistics.",
+           "sets": sets}
+    # The manifest is the header's SOURCE, so it must be tracked -- re/assets is
+    # gitignored, and a generated header whose input is not in the repo cannot be
+    # regenerated by anyone else. Earlier real_tex headers had their page lists
+    # baked into one-off gen_trackgen_*_tex.py scripts; this keeps the data out
+    # of code instead.
+    mdir = os.path.join(HERE, "manifests")
+    os.makedirs(mdir, exist_ok=True)
+    mp = os.path.join(mdir, "roads.json")
+    with open(mp, "w", newline="\n", encoding="utf-8") as f:
+        json.dump(man, f, indent=2)
+        f.write("\n")
+    print("\nwrote %s -- %d pages in %d sets"
+          % (mp, sum(len(v) for v in sets.values()), len(sets)))
+    return man
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["pages", "objects", "build", "show", "verify"])
+    ap.add_argument("cmd", choices=["pages", "objects", "build", "show", "verify",
+                                    "roads"])
     ap.add_argument("--levels", default="")
     ap.add_argument("--out", default=None)
     ap.add_argument("--level", type=int)
@@ -341,6 +492,9 @@ def main():
         return cmd_verify(root, levels)
     if a.cmd == "pages":
         cmd_pages(root, levels, out)
+        return 0
+    if a.cmd == "roads":
+        cmd_roads(root, out)
         return 0
 
     roles = {}
