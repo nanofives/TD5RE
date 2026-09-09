@@ -297,6 +297,15 @@ double tg_world_water_y(double x, double z)
 int tg_world_is_water(double x, double z)
 {
     if (!s_w.built) return 0;
+    /* A conformed cell is a ROAD BED (main road, corridor, gore, street): it
+     * is never water, even where it lies below a neighbouring river's
+     * surface (a cutting beside a river). Bridges were decided from the
+     * natural ground before any conform, so they are unaffected. */
+    if (s_w_nchunks > 0) {
+        double w, tgt;
+        tg_w_overlay_at(x, z, &w, &tgt);
+        if (w >= 0.5) return 0;
+    }
     return tg_world_h(x, z) < tg_world_water_y(x, z);
 }
 

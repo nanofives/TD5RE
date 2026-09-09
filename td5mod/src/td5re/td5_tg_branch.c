@@ -343,6 +343,7 @@ void tg_fork_place(const TG_NodeList *nl, int ring)
             s_forks[s_fork_count].br_lanes = br_lanes;
             s_forks[s_fork_count].fm = (double)main_half / (double)lanes;
             s_forks[s_fork_count].fb = (double)br_lanes / (double)lanes;
+        s_forks[s_fork_count].side = -1;             /* [TOPOLOGY-FIRST] right unless a bypass goes left */
             s_fork_count++;
             off += 1 + L;
             pos = R + fork_gap;                   /* [R20] gap before the next fork */
@@ -517,10 +518,40 @@ static int    tg_fork_gains(int fi)
     return fi >= 0 && fi < s_fork_count && s_forks[fi].kind == TG_FORK_WIDE
         && s_forks[fi].sep > TD5_TG_AVENUE_SEP_MAX;
 }
-double tg_fork_main_shift(int fi, double w)  { return w * (1.0 - tg_fork_fm(fi)) * 0.5; }
+double tg_fork_main_shift(int fi, double w)  { return -(double)tg_fork_side(fi) * w * (1.0 - tg_fork_fm(fi)) * 0.5; }
 double tg_fork_main_wscale(int fi)           { return tg_fork_fm(fi); }
 int    s_fork_placed;
 double s_bypass_lat[TD5_TG_BRANCH_MAX][TD5_TG_BYPASS_MAXK];
+
+int tg_fork_side(int fi)
+{
+    return (fi >= 0 && fi < s_fork_count && s_forks[fi].side > 0) ? 1 : -1;
+}
+
+int tg_fork_side_at(int si)
+{
+    int f;
+    for (f = 0; f < s_fork_count; f++)
+        if (si >= s_forks[f].F - TD5_TG_BRANCH_WIDEN - 2 && si <= s_forks[f].R + 2)
+            return s_forks[f].side > 0 ? 1 : -1;
+    return -1;
+}
+
+/* Flip the winding of every quad in a list (vertices 1 and 3 swapped) -- the
+ * corridor emitters are written for a corridor on the RIGHT; a LEFT corridor
+ * mirrors every lateral, which mirrors every winding. */
+void tg_quads_mirror(double *px, double *py, double *pz, double *uu, double *vv, int n)
+{
+    int q;
+    for (q = 0; q + 3 < n; q += 4) {
+        double t;
+        t = px[q+1]; px[q+1] = px[q+3]; px[q+3] = t;
+        t = py[q+1]; py[q+1] = py[q+3]; py[q+3] = t;
+        t = pz[q+1]; pz[q+1] = pz[q+3]; pz[q+3] = t;
+        t = uu[q+1]; uu[q+1] = uu[q+3]; uu[q+3] = t;
+        t = vv[q+1]; vv[q+1] = vv[q+3]; vv[q+3] = t;
+    }
+}
 
 int tg_fork_is_bypass(int fi)
 {
@@ -542,7 +573,8 @@ double tg_fork_br_shift(int fi, int k, double w)
     const double sep = (fi >= 0 && fi < s_fork_count) ? s_forks[fi].sep : 1.0;
     const double f   = (len > 0) ? (double)k / (double)len : 0.0;
     const double bow = sin(f * TD5_TG_PI);
-    return -w * (1.0 - tg_fork_fb(fi)) * 0.5 - w * tg_branch_bow(len, w) * sep * bow;
+    return (double)tg_fork_side(fi)
+         * (w * (1.0 - tg_fork_fb(fi)) * 0.5 + w * tg_branch_bow(len, w) * sep * bow);
 }
 double tg_fork_br_wscale(int fi, int k)
 {
@@ -771,7 +803,6 @@ double tg_carriageway_reach(const TG_NodeList *nl, int si, double side)
     double reach = tg_road_half_width(nl, si);
     int i;
 
-    if (side >= 0.0) return reach;            /* no corridor bows LEFT */
     if (!tg_branches_enabled()) return reach;
     if (!nl || si < 0 || si + 1 >= nl->count) return reach;
 
@@ -783,6 +814,7 @@ double tg_carriageway_reach(const TG_NodeList *nl, int si, double side)
          * the mouth span itself must not see a narrower answer than its
          * neighbour or scenery pops in for one span. */
         if (si < F - 1 || si > F + L + 1) continue;
+        if (side * (double)s_forks[i].side < 0.0) continue;   /* corridor is on the other side */
         k = si - F - 1;
         if (k < 0) k = 0;
         if (k > L) k = L;
@@ -796,7 +828,7 @@ double tg_carriageway_reach(const TG_NodeList *nl, int si, double side)
              * further half carriageway-width right of that. Uses the fork's OWN
              * separation (item 10) so a tight avenue reports a nearer reach than
              * a wide split and scenery clears the branch at its ACTUAL width. */
-            const double out = -tg_fork_br_shift(i, kk, w)
+            const double out = fabs(tg_fork_br_shift(i, kk, w))
                              + w * tg_fork_br_wscale(i, kk) * 0.5;
             if (out > reach) reach = out;
         }
@@ -1011,9 +1043,10 @@ int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
     const double sh1 = tg_fork_br_shift(fi, k + 1, c->width);
     const double h0  = a->width * tg_fork_br_wscale(fi, k)     * 0.5;
     const double h1  = c->width * tg_fork_br_wscale(fi, k + 1) * 0.5;
+    const double fs  = (double)tg_fork_side(fi);  /* [TOPOLOGY-FIRST] -1 right / +1 left */
     (void)L;
-    const double e0  = sh0 - h0;                 /* outer (right) edge, near */
-    const double e1  = sh1 - h1;                 /* outer (right) edge, far  */
+    const double e0  = sh0 + fs * h0;            /* outer edge, near */
+    const double e1  = sh1 + fs * h1;            /* outer edge, far  */
     const double u_w = sw / (double)TD5_TG_SPAN_LENGTH;
     const double u_k = kh / (double)TD5_TG_SPAN_LENGTH;
     double px[12], py[12], pz[12], uu[12], vv[12];
@@ -1026,8 +1059,8 @@ int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
      * winding tg_emit_gore uses (near-high-t, near-low-t, far-low-t, far-high-t;
      * the outer point is at LOWER t because the branch is at negative lateral). */
     px[n]=a->x+a->tz*e0;        py[n]=a->y+kh; pz[n]=a->z-a->tx*e0;        uu[n]=0.0;  vv[n]=0.0; n++;
-    px[n]=a->x+a->tz*(e0-sw);   py[n]=a->y+kh; pz[n]=a->z-a->tx*(e0-sw);   uu[n]=u_w;  vv[n]=0.0; n++;
-    px[n]=c->x+c->tz*(e1-sw);   py[n]=c->y+kh; pz[n]=c->z-c->tx*(e1-sw);   uu[n]=u_w;  vv[n]=1.0; n++;
+    px[n]=a->x+a->tz*(e0+fs*sw);   py[n]=a->y+kh; pz[n]=a->z-a->tx*(e0+fs*sw);   uu[n]=u_w;  vv[n]=0.0; n++;
+    px[n]=c->x+c->tz*(e1+fs*sw);   py[n]=c->y+kh; pz[n]=c->z-c->tx*(e1+fs*sw);   uu[n]=u_w;  vv[n]=1.0; n++;
     px[n]=c->x+c->tz*e1;        py[n]=c->y+kh; pz[n]=c->z-c->tx*e1;        uu[n]=0.0;  vv[n]=1.0; n++;
 
     /* Kerb face, facing the branch carriageway (toward +lateral): base on the
@@ -1048,7 +1081,7 @@ int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
      * points away from the carriageway by the identical derivation. The branch
      * lies at negative lateral, so its outer edge is at (e - sw). */
     if (tg_r14_pave_face()) {
-        const double o0 = e0 - sw, o1 = e1 - sw;
+        const double o0 = e0 + fs * sw, o1 = e1 + fs * sw;
         px[n]=a->x+a->tz*o0; py[n]=a->y+kh;                 pz[n]=a->z-a->tx*o0; uu[n]=0.0; vv[n]=0.0; n++;
         px[n]=a->x+a->tz*o0; py[n]=a->y-TD5_TG_GROUND_DROP; pz[n]=a->z-a->tx*o0; uu[n]=u_k; vv[n]=0.0; n++;
         px[n]=c->x+c->tz*o1; py[n]=c->y-TD5_TG_GROUND_DROP; pz[n]=c->z-c->tx*o1; uu[n]=u_k; vv[n]=1.0; n++;
@@ -1056,6 +1089,7 @@ int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
         s_r14_outer_faces++;
     }
 
+    if (fs > 0.0) tg_quads_mirror(px, py, pz, uu, vv, n);
     seg_nq = n / 4;
     tg_acct_n(TG_ACCT_SIDEWALK, acct_si, 1);
     moff[(*nmesh)++] = blk->len;
@@ -1093,9 +1127,10 @@ int tg_emit_branch_verge(const TG_NodeList *nl, int mb, int k, int L,
     const double sh1 = tg_fork_br_shift(fi, k + 1, c->width);
     const double h0  = a->width * tg_fork_br_wscale(fi, k)     * 0.5;
     const double h1  = c->width * tg_fork_br_wscale(fi, k + 1) * 0.5;
+    const double fs  = (double)tg_fork_side(fi);  /* [TOPOLOGY-FIRST] */
     (void)L;
-    const double e0  = sh0 - h0;                 /* outer (right) edge, near */
-    const double e1  = sh1 - h1;                 /* outer (right) edge, far  */
+    const double e0  = sh0 + fs * h0;            /* outer edge, near */
+    const double e1  = sh1 + fs * h1;            /* outer edge, far  */
     const double lift = TD5_TG_VERGE_LIFT;
     const double u_w = bw / (double)TD5_TG_SPAN_LENGTH;
     double px[4], py[4], pz[4], uu[4], vv[4];
@@ -1115,10 +1150,11 @@ int tg_emit_branch_verge(const TG_NodeList *nl, int mb, int k, int L,
      * both. Winding unchanged: near-edge, near-outer, far-outer, far-edge; the
      * branch is at negative lateral so "further out" is t decreasing (e - bw). */
     px[n]=a->x+a->tz*e0;        py[n]=a->y;      pz[n]=a->z-a->tx*e0;        uu[n]=0.0; vv[n]=0.0; n++;
-    px[n]=a->x+a->tz*(e0-bw);   py[n]=a->y+lift; pz[n]=a->z-a->tx*(e0-bw);   uu[n]=u_w; vv[n]=0.0; n++;
-    px[n]=c->x+c->tz*(e1-bw);   py[n]=c->y+lift; pz[n]=c->z-c->tx*(e1-bw);   uu[n]=u_w; vv[n]=1.0; n++;
+    px[n]=a->x+a->tz*(e0+fs*bw);   py[n]=a->y+lift; pz[n]=a->z-a->tx*(e0+fs*bw);   uu[n]=u_w; vv[n]=0.0; n++;
+    px[n]=c->x+c->tz*(e1+fs*bw);   py[n]=c->y+lift; pz[n]=c->z-c->tx*(e1+fs*bw);   uu[n]=u_w; vv[n]=1.0; n++;
     px[n]=c->x+c->tz*e1;        py[n]=c->y;      pz[n]=c->z-c->tx*e1;        uu[n]=0.0; vv[n]=1.0; n++;
 
+    if (fs > 0.0) tg_quads_mirror(px, py, pz, uu, vv, n);
     seg_nq = n / 4;
     tg_acct_n(TG_ACCT_BRANCH_VERGE, acct_si, 1);
     moff[(*nmesh)++] = blk->len;
@@ -1175,13 +1211,15 @@ int tg_emit_branch_flora(const TG_NodeList *nl, int mb,
     /* Base gap past the branch's own grass verge, then clear_gap lifts it past
      * the bowed corridor so the trunk clears the branch at its ACTUAL width. */
     gap = tg_verge_band_w(b) + 500.0 + (double)((h >> 5) % 1800);
-    set = n->width * 0.5
-        + tg_carriageway_clear_gap(nl, mb, -1.0, gap, TD5_TG_CARRIAGEWAY_MARGIN)
-        + tw * 0.5;
-    /* Right of travel is NEGATIVE lateral: point at lateral t off node n is
-     * (n->x + n->tz*t, n->y, n->z - n->tx*t). */
-    cx = n->x + n->tz * (-set);
-    cz = n->z - n->tx * (-set);
+    {
+        const double fs = (double)tg_fork_side_at(mb);   /* [TOPOLOGY-FIRST] */
+        set = n->width * 0.5
+            + tg_carriageway_clear_gap(nl, mb, fs, gap, TD5_TG_CARRIAGEWAY_MARGIN)
+            + tw * 0.5;
+        /* lateral t off node n is (n->x + n->tz*t, n->y, n->z - n->tx*t) */
+        cx = n->x + n->tz * (fs * set);
+        cz = n->z - n->tx * (fs * set);
+    }
     /* [R12 item 4] the one tree emitter that does not go through tg_flora_diag;
      * it takes the same shared spacing rule -- see tg_r12_flora_accept. */
     if (!tg_r12_flora_accept(mb, "branch", tg_tree_slot(tv), -1.0,
@@ -1212,11 +1250,11 @@ int tg_emit_branch_flora(const TG_NodeList *nl, int mb,
             const double d = set - n->width * 0.5;   /* trunk dist from road edge */
             if (tg_topo_enabled()) {
                 TG_TopoChain c;
-                tg_topo_chain(nl, mb, 0 /*right of travel*/, &c);
+                tg_topo_chain(nl, mb, tg_fork_side_at(mb) > 0, &c);
                 base_y = n->y - tg_topo_drop_at(&c, d);
             } else {
                 const double wsd = tg_water_side(mb);
-                base_y = n->y - tg_infra_ground_dy(nl, mb, -1.0, d, wsd);
+                base_y = n->y - tg_infra_ground_dy(nl, mb, (double)tg_fork_side_at(mb), d, wsd);
             }
         }
         return tg_emit_billboard_mesh(blk, cx, base_y, cz, tw * 0.5, th,

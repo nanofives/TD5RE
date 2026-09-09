@@ -3288,7 +3288,7 @@ double tg_ground_branch_clear(const TG_NodeList *nl, int si)
     if (!tg_branches_enabled()) return 0.0;
     /* How far the outermost carriageway reaches PAST the main road edge. Zero
      * on any span no corridor bows across, since reach floors at the half width. */
-    over = tg_carriageway_reach(nl, si, -1.0) - tg_road_half_width(nl, si);
+    over = tg_carriageway_reach(nl, si, (double)tg_fork_side_at(si)) - tg_road_half_width(nl, si);
     if (over <= 0.0) return 0.0;
     return over + 200.0;                 /* + margin, no shared edge */
 }
@@ -3529,8 +3529,9 @@ int tg_fork_gore_page(int fork_index)
 int tg_emit_gore(const TG_NodeList *nl, int si,
                         double shift_n, double shift_f,
                         double half_n, double half_f, int ground_page,
-                        TG_Buf *blk)
+                        TG_Buf *blk, int side)
 {
+    const double fs = (side > 0) ? 1.0 : -1.0;   /* [TOPOLOGY-FIRST] corridor side */
     const TG_Node *a = &nl->v[si], *c = &nl->v[si + 1];
     double drop = TD5_TG_GORE_DROP;
     double ov   = TD5_TG_GORE_OVERLAP;
@@ -3555,8 +3556,9 @@ int tg_emit_gore(const TG_NodeList *nl, int si,
     }
     /* Branch left edge, pushed a further `ov` to the RIGHT (lateral is +ve to
      * the left of travel, and the branch sits at negative lateral). */
-    double tnr = shift_n + half_n - ov;            /* near */
-    double tfr = shift_f + half_f - ov;            /* far  */
+    double tnr = shift_n - fs * half_n + fs * ov;  /* near: branch inner edge, pushed into the branch */
+    double tfr = shift_f - fs * half_f + fs * ov;  /* far  */
+    const double cov = -fs * ov;                   /* road centre pushed into the main carriageway */
     double px[4], py[4], pz[4], uu[4], vv[4];
     double cx = 0, cy = 0, cz = 0, radius = 0;
     /* [R8 SHAPE G5] Lateral texture repeat. V already advances one tile per
@@ -3586,10 +3588,11 @@ int tg_emit_gore(const TG_NodeList *nl, int si,
 
     /* near-left = road centre pushed `ov` INTO the main carriageway,
      * near-right = branch left edge pushed `ov` into the branch, then far. */
-    px[0]=a->x+a->tz*ov;    py[0]=a->y-drop; pz[0]=a->z-a->tx*ov;    uu[0]=0.0; vv[0]=(double)si;
+    px[0]=a->x+a->tz*cov;   py[0]=a->y-drop; pz[0]=a->z-a->tx*cov;   uu[0]=0.0; vv[0]=(double)si;
     px[1]=a->x+a->tz*tnr;   py[1]=a->y-drop; pz[1]=a->z-a->tx*tnr;   uu[1]=un;  vv[1]=(double)si;
     px[2]=c->x+c->tz*tfr;   py[2]=c->y-drop; pz[2]=c->z-c->tx*tfr;   uu[2]=uf;  vv[2]=(double)si+1.0;
-    px[3]=c->x+c->tz*ov;    py[3]=c->y-drop; pz[3]=c->z-c->tx*ov;    uu[3]=0.0; vv[3]=(double)si+1.0;
+    px[3]=c->x+c->tz*cov;   py[3]=c->y-drop; pz[3]=c->z-c->tx*cov;   uu[3]=0.0; vv[3]=(double)si+1.0;
+    if (fs > 0.0) tg_quads_mirror(px, py, pz, uu, vv, 4);
 
     for (i = 0; i < 4; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
     cx /= 4; cy /= 4; cz /= 4;

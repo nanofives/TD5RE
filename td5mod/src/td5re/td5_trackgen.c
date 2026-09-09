@@ -3133,7 +3133,7 @@ static int tg_scenery_entry(int e)
                                 td5_env_flag_on("TD5RE_R8_BORE_MEDIAN"))
                                 gore_page = TD5_TG_PAGE_R8_BRIDGE + 0;
                             if (!tg_emit_gore(nl, si, sh0, sh1, gw0, gw1,
-                                              gore_page, &meshes))
+                                              gore_page, &meshes, tg_fork_side(fi)))
                                 ok = 0;
                             if (tg_span_in_tunnel(si))
                                 tg_acct(TG_ACCT_R8_BRIDGE, si);

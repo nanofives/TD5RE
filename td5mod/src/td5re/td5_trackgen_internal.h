@@ -605,6 +605,8 @@ typedef struct {
     int main_lanes;       /* lanes(F+1): what the main ring keeps            */
     int br_lanes;         /* lanes(B0):  what the corridor takes             */
     double fm, fb;        /* main_lanes/lanes, br_lanes/lanes (0.5 symmetric) */
+    int side;             /* [TOPOLOGY-FIRST] -1 corridor right of travel (the
+                           * shipped shape), +1 left. Only a BYPASS goes left. */
 } TG_Fork;
 const char *tg_fork_kind_name(int kind);
 /* Stateless plan for fork ordinal `index`: kind, corridor length and
@@ -1390,6 +1392,9 @@ extern int s_fork_placed;
 #define TD5_TG_BYPASS_MAXK 512
 extern double s_bypass_lat[TD5_TG_BRANCH_MAX][TD5_TG_BYPASS_MAXK];
 int    tg_fork_is_bypass(int fi);
+int    tg_fork_side(int fi);            /* -1 right (default) / +1 left      */
+int    tg_fork_side_at(int si);         /* side of the fork whose clear region holds si, else -1 */
+void   tg_quads_mirror(double *px, double *py, double *pz, double *uu, double *vv, int n);
 /* the hash-rhythm halves the network validates (were the authorities) */
 int    tg_facade_built_hash(int si, int left);
 double tg_block_arm_skew_hash(int si, int left);
@@ -4001,7 +4006,7 @@ int tg_flora_plant(const TG_NodeList *nl, int si, const TG_Biome *b, double side
 #define TD5_TG_GORE_DROP      4.0    /* below road level, world units */
 #define TD5_TG_GORE_OVERLAP 240.0    /* underlap into each carriageway */
 int tg_fork_gore_page(int fork_index);
-int tg_emit_gore(const TG_NodeList *nl, int si, double shift_n, double shift_f, double half_n, double half_f, int ground_page, TG_Buf *blk);
+int tg_emit_gore(const TG_NodeList *nl, int si, double shift_n, double shift_f, double half_n, double half_f, int ground_page, TG_Buf *blk, int side);
 extern long s_r14_outer_faces;
 int tg_r14_pave_face(void);
 int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L, int fi, const TG_Biome *b, TG_Buf *blk, size_t *moff, int *nmesh, int acct_si);

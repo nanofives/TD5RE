@@ -1230,8 +1230,8 @@ static void tg_ground_side_raw(const TG_NodeList *nl, int si, int is_left,
     int j;
     (void)water_side;
 
-    /* Branch corridor bows into the right verge -- keep off its carriageway. */
-    if (!is_left) dmin = tg_ground_branch_clear(nl, si);
+    /* Branch corridor bows into this side's verge -- keep off its carriageway. */
+    if ((is_left ? 1 : -1) == tg_fork_side_at(si)) dmin = tg_ground_branch_clear(nl, si);
 
     p->n = 5;
     for (j = 0; j < 5; j++) {

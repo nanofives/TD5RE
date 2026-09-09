@@ -1380,7 +1380,7 @@ void tg_side_geom(const TG_NodeList *nl, int si, int left,
 
     g->built = 0;
     if (!tg_facade_built(si, left)) return;
-    if (tg_branches_enabled() && side < 0.0 && tg_span_in_fork_clear(si)) return;
+    if (tg_branches_enabled() && side * (double)tg_fork_side_at(si) > 0.0 && tg_span_in_fork_clear(si)) return;
     /* [R11 BIOME item 4] Outskirts ramp -- the same gate tg_side_built asks, so
      * the wall that is not emitted here is the wall the caps and step walls
      * already believe is absent. Placed before the lone-stub test so a run left
@@ -2038,7 +2038,8 @@ int tg_building_verge_tree(const TG_NodeList *nl, int si, TG_Buf *blk)
  * suppress props there for the same reason as facades/trees. */
 int tg_side_blocked(int si, double side)
 {
-    return tg_branches_enabled() && side < 0.0 && tg_span_in_fork_clear(si);
+    return tg_branches_enabled() && side * (double)tg_fork_side_at(si) > 0.0
+        && tg_span_in_fork_clear(si);
 }
 
 /* [R9 CITY item 4] Does the branch corridor ACTUALLY reach into this side's
@@ -2073,7 +2074,7 @@ int tg_side_corridor_here(const TG_NodeList *nl, int si, double side)
 {
     if (!td5_env_flag_on("TD5RE_R9_CITY_ARM_MEASURED"))
         return tg_side_blocked(si, side);
-    if (!tg_branches_enabled() || side >= 0.0) return 0;
+    if (!tg_branches_enabled() || side * (double)tg_fork_side_at(si) < 0.0) return 0;
     if (!tg_span_in_fork_clear(si)) return 0;
     return (tg_carriageway_reach(nl, si, side)
             - tg_road_half_width(nl, si)) > 1.0;
@@ -2182,7 +2183,7 @@ double tg_pavement_side_width(const TG_NodeList *nl, int si,
      * never answer yes -- tg_r12_fcross_at requires FOREST -- so the raised slab
      * is bit-identical and only the band changes. */
     if (tg_r14_fcross_pave_stop(nl, si, side)) return 0.0;
-    if (!tg_branches_enabled() || side >= 0.0) return sw;
+    if (!tg_branches_enabled() || side * (double)tg_fork_side_at(si) < 0.0) return sw;
     if (!tg_span_in_fork_clear(si)) return sw;
     /* [R14 BRANCH item 2a] the corridor owns this edge -- see above. */
     if (tg_r14_branch_pave_here(si)) return 0.0;

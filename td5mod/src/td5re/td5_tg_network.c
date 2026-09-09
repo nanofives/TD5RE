@@ -406,7 +406,7 @@ static void tg_net_bypass_plan(const TG_NodeList *nl, int nspans)
         const double cap = TD5_TG_R8_LAT_MAX - halfb - 1500.0;
         const double rate = TD5_TG_BRANCH_RATE * (double)TD5_TG_SPAN_LENGTH;
         const unsigned int h = tg_roll_hash_at(0x22050001u, fk->F);
-        double amp, ph, bowmax = 0.0;
+        double amp, ph, bowmax = 0.0, fs;
         int k, pct, a, b, e0, e1;
         TG_NetEdge *ed;
         if (fk->kind == TG_FORK_ISLAND || fk->kind == TG_FORK_AVENUE) continue;
@@ -414,6 +414,16 @@ static void tg_net_bypass_plan(const TG_NodeList *nl, int nspans)
         if (fk->F + L + 1 >= nspans) continue;
         pct = td5_env_int("TD5RE_TG_NET_BYPASS_PCT", 70, 0, 100);
         if ((int)(h % 100u) >= pct) continue;
+        /* Which side. LEFT corridors are OPT-IN (TD5RE_TG_NET_LEFT=1): the
+         * generator, the emitters and the engine's fork decision are mirrored
+         * for them (see fork_left_compute in td5_track.c), and the strip audit
+         * passes, but a lane-assisted drive through seed 20260901's fork 609
+         * ended with the car centred in a MAIN lane by the walker while
+         * physically in the gore between the carriageways (WHEELS --lr,
+         * geo rescue re-snapping it) -- the walker's sub-lane bookkeeping for
+         * a low-lanes branch is not yet right. Parked for the branch rework
+         * (docs/plans/AUTOTRACK_BRANCH_REWORK.md). */
+        fs = (td5_env_flag_off("TD5RE_TG_NET_LEFT") && ((h >> 30) & 1u)) ? 1.0 : -1.0;
         amp = 6000.0 + (double)((h >> 8) % 14000u);           /* 6000..20000 */
         if (amp > cap) amp = cap;
         ph  = (double)((h >> 20) % 1000u) / 1000.0 * TD5_TG_PI;
@@ -427,7 +437,7 @@ static void tg_net_bypass_plan(const TG_NodeList *nl, int nspans)
              * measured from the main centre line; the road edge is at w/2) */
             clr[k] = cap;
             for (d = w * 0.5 + halfb + TG_NET_STEP; d <= cap + halfb; d += TG_NET_STEP) {
-                const double px = n->x - n->tz * d, pz = n->z + n->tx * d;   /* right */
+                const double px = n->x + n->tz * fs * d, pz = n->z - n->tx * fs * d;
                 if (tg_world_occ_near(px, pz, halfb + TG_NET_MARGIN, TG_WO_STREET) ||
                     tg_world_is_water(px, pz) ||
                     tg_world_slope(px, pz) >= TG_WORLD_STEEP_SLOPE) {
@@ -444,30 +454,31 @@ static void tg_net_bypass_plan(const TG_NodeList *nl, int nspans)
         for (k = 0; k <= L; k++) if (mag[k] - mouth > bowmax) bowmax = mag[k] - mouth;
         if (bowmax < 2500.0) continue;                        /* nothing gained */
 
-        for (k = 0; k <= L; k++) s_bypass_lat[f][k] = -mag[k];
+        for (k = 0; k <= L; k++) s_bypass_lat[f][k] = fs * mag[k];
         fk->kind = TG_FORK_BYPASS;
+        fk->side = (fs > 0.0) ? 1 : -1;
         fk->sep  = 1.0;                                       /* never an avenue */
         /* paint, conform, and register the corridor as a drivable edge */
         {
             const TG_Node *n0 = &nl->v[fk->F + 1];
-            a = tg_net_node(n0->x - n0->tz * mag[0], n0->z + n0->tx * mag[0], n0->y, 0, fk->F);
+            a = tg_net_node(n0->x + n0->tz * fs * mag[0], n0->z - n0->tx * fs * mag[0], n0->y, 0, fk->F);
             {
                 const TG_Node *n1 = &nl->v[fk->F + 1 + L];
-                b = tg_net_node(n1->x - n1->tz * mag[L], n1->z + n1->tx * mag[L], n1->y, 0, fk->R);
+                b = tg_net_node(n1->x + n1->tz * fs * mag[L], n1->z - n1->tx * fs * mag[L], n1->y, 0, fk->R);
             }
             ed = tg_net_edge_new(a, b, TG_NE_BYPASS, w * fb);
             if (!ed) return;
-            ed->drivable = 1; ed->mouth_si = fk->F; ed->mouth_left = 0;
+            ed->drivable = 1; ed->mouth_si = fk->F; ed->mouth_left = (fs > 0.0);
             ed->rejoin_si = fk->R;
             ed->npoly = 0;
             for (k = 0; k <= L; k++) {
                 const TG_Node *n = &nl->v[fk->F + 1 + k];
-                const double px = n->x - n->tz * mag[k], pz = n->z + n->tx * mag[k];
+                const double px = n->x + n->tz * fs * mag[k], pz = n->z - n->tx * fs * mag[k];
                 if (k > 0) {
                     const TG_Node *m = &nl->v[fk->F + k];
-                    tg_world_occ_seg(m->x - m->tz * mag[k - 1], m->z + m->tx * mag[k - 1], px, pz,
+                    tg_world_occ_seg(m->x + m->tz * fs * mag[k - 1], m->z - m->tx * fs * mag[k - 1], px, pz,
                                      halfb + 600.0, TG_WO_DRIVABLE);
-                    tg_world_conform_seg(m->x - m->tz * mag[k - 1], m->z + m->tx * mag[k - 1], m->y,
+                    tg_world_conform_seg(m->x + m->tz * fs * mag[k - 1], m->z - m->tx * fs * mag[k - 1], m->y,
                                          px, pz, n->y, halfb + TD5_TG_ROAD_BED_VERGE, 4500.0);
                 }
                 e0 = (L > TG_NET_POLY - 1) ? (L / (TG_NET_POLY - 1) + 1) : 1;
@@ -479,8 +490,9 @@ static void tg_net_bypass_plan(const TG_NodeList *nl, int nspans)
             }
         }
         made++;
-        TD5_LOG_I(LOG_TAG, "trackgen: [NET] fork %d -> BYPASS F=%d L=%d R=%d bow max %.0f "
-                  "(wanted %.0f, world cap %.0f)", f, fk->F, L, fk->R, bowmax, amp, cap);
+        TD5_LOG_I(LOG_TAG, "trackgen: [NET] fork %d -> BYPASS %s F=%d L=%d R=%d bow max %.0f "
+                  "(wanted %.0f, world cap %.0f)", f, fs > 0.0 ? "LEFT" : "right",
+                  fk->F, L, fk->R, bowmax, amp, cap);
     }
     (void)made;
 }
@@ -691,8 +703,8 @@ void tg_network_write(const char *dir, const TG_NodeList *nl, int nspans_main)
     fprintf(fp, "],\n\"forks\":[");
     for (i = 0; i < s_fork_count; i++) {
         const TG_Fork *f = &s_forks[i];
-        fprintf(fp, "%s{\"i\":%d,\"kind\":%d,\"F\":%d,\"L\":%d,\"R\":%d,\"cbase\":%d,\"lat\":[",
-                i ? "," : "", i, f->kind, f->F, f->len, f->R, f->cbase);
+        fprintf(fp, "%s{\"i\":%d,\"kind\":%d,\"side\":%d,\"F\":%d,\"L\":%d,\"R\":%d,\"cbase\":%d,\"lat\":[",
+                i ? "," : "", i, f->kind, f->side, f->F, f->len, f->R, f->cbase);
         for (k = 0; k <= f->len; k++)
             fprintf(fp, "%s%.0f", k ? "," : "", tg_fork_br_shift(i, k, nl->v[f->F + 1].width));
         fprintf(fp, "]}");
