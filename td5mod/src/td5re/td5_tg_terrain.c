@@ -1698,12 +1698,43 @@ static double tg_r12_fcross_reach(const TG_NodeList *nl, int si, double sg)
 /* Is span si part of a forest side road? Writes the side (+1 = left of travel)
  * and the reach both spans agree on. Cheap gates first: everything but the two
  * candidate spans per block is rejected before the clamp runs. */
+/* [TOPOLOGY-FIRST] The candidate half of the forest lane: which spans of
+ * block `blk` and which side the rhythm proposes. The network validates it
+ * on the raster and owns the answer tg_r12_fcross_at gives. */
+int tg_r12_fcross_candidate(const TG_NodeList *nl, int blk, int *c, double *side)
+{
+    int cc, j;
+    if (!tg_r12_fcross_on() || !nl) return 0;
+    cc = tg_r12_fcross_start(blk);
+    if (cc <= TD5_TG_R12_FCROSS_CLEAR) return 0;
+    for (j = cc - 1; j <= cc + TD5_TG_R12_FCROSS_WIDTH; j++) {
+        if (j <= TD5_TG_R12_FCROSS_CLEAR || j + 1 >= nl->count) return 0;
+        if (!tg_r12_fcross_forest(j)) return 0;
+    }
+    *c = cc;
+    *side = ((unsigned)blk * 2654435761u + 0x9E3779B9u) & 0x10000u ? 1.0 : -1.0;
+    return 1;
+}
+
 int tg_r12_fcross_at(const TG_NodeList *nl, int si,
                             double *pside, double *preach)
 {
     int c, j;
     double side, reach = TD5_TG_R12_FCROSS_WANT;
 
+    if (tg_network_built()) {
+        int left;
+        for (left = 1; left >= 0; left--) {
+            double rr = 0.0;
+            if (tg_net_mouth_kind(si, left) == TG_NE_COUNTRY) {
+                tg_net_mouth(si, left, NULL, &rr);
+                if (pside)  *pside  = left ? 1.0 : -1.0;
+                if (preach) *preach = rr;
+                return 1;
+            }
+        }
+        return 0;
+    }
     if (!tg_r12_fcross_on() || !nl || si <= TD5_TG_R12_FCROSS_CLEAR) return 0;
     if (!tg_r12_fcross_forest(si)) return 0;
     c = tg_r12_fcross_start(si / TD5_TG_R12_FCROSS_PERIOD);

@@ -3314,6 +3314,7 @@ static int tg_scenery_entry(int e)
                     tg_guard_mark(g0, meshes.len, TG_GK_BLOCK, si);
                     g0 = meshes.len;
                     if (!TG_SUB(TG_SUB_CROSS, tg_emit_fb_cross(&hook)))   { ok = 0; break; }
+                    if (!TG_SUB(TG_SUB_CROSS, tg_net_emit_entry(&hook)))  { ok = 0; break; }  /* [TOPOLOGY-FIRST] */
                     tg_guard_mark(g0, meshes.len, TG_GK_CROSS, si);
                     g0 = meshes.len;
                     if (!TG_SUB(TG_SUB_FLORA, tg_emit_fb_flora(&hook)))   { ok = 0; break; }

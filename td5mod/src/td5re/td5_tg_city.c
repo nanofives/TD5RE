@@ -771,6 +771,25 @@ double tg_turn_bend(int si)
 
 int tg_facade_built(int si, int left)
 {
+    /* [TOPOLOGY-FIRST] In a paved biome the frontage is open exactly where
+     * the network put a street mouth (a candidate opening the raster refused
+     * stays BUILT -- the fallback every junction emitter understands).
+     * Elsewhere the hash rhythm still shapes what the emitters draw. */
+    if (tg_network_built() && si > 0 &&
+        tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(si)]) > 0.0) {
+        if (si < TD5_TG_FACADE_START_RUN &&
+            td5_env_flag_on("TD5RE_AUTOTRACK_START_CITY"))
+            return 1;
+        {
+            const int k = tg_net_mouth_kind(si, left);
+            return !(k == TG_NE_STREET || k == TG_NE_AVENUE || k == TG_NE_CONTINUATION);
+        }
+    }
+    return tg_facade_built_hash(si, left);
+}
+
+int tg_facade_built_hash(int si, int left)
+{
     unsigned int block, phase, gs, gl;
     int av;
 

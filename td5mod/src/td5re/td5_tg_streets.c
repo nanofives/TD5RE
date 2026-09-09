@@ -10,7 +10,7 @@
  * actually runs, so it can stand BEYOND it instead of across it. Both live
  * further down with the cross-street code; declared here rather than moved so
  * the CROSS rewrite does not shuffle another area's emitter. */
-static double tg_city_crossst_reach(const TG_Biome *b, double sw);
+double tg_city_crossst_reach(const TG_Biome *b, double sw);
 
 /* ===================== [R3 BLOCK] SIDE-STREET DIRECTION =====================
  * (feedback R3 item 3). Shared by the cross-street carriageway and the sidewalk/
@@ -29,7 +29,7 @@ static double tg_city_crossst_reach(const TG_Biome *b, double sw);
  * [R14 item 4] the continuation path has to honour the same ceiling and the two
  * must not be able to drift apart. */
 
-double tg_block_arm_skew(int si, int left)
+double tg_block_arm_skew_hash(int si, int left)
 {
     unsigned int block, phase, gs, gl, h;
     int av;
@@ -47,6 +47,16 @@ double tg_block_arm_skew(int si, int left)
         const double f = (double)((h >> 8) & 0xFFFFu) / 32768.0 - 1.0;
         return f * (TD5_TG_DIAG_MAX_DEG * TD5_TG_PI / 180.0);
     }
+}
+
+/* [TOPOLOGY-FIRST] The bearing of the street that ACTUALLY leaves (si, side):
+ * the network's mouth table. The hash above is what the network validated. */
+double tg_block_arm_skew(int si, int left)
+{
+    double sk = 0.0;
+    if (!tg_network_built()) return tg_block_arm_skew_hash(si, left);
+    if (tg_net_mouth(si, left, &sk, NULL) < 0) return 0.0;
+    return sk;
 }
 
 /* Rotate an outward unit (ux,uz) in the XZ plane by `ang` radians. */
@@ -67,7 +77,7 @@ double tg_xstreet_drop(double d)
     return TD5_TG_GROUND_DROP * (d < w ? d : w) / w;
 }
 
-static double tg_city_crossst_reach(const TG_Biome *b, double sw)
+double tg_city_crossst_reach(const TG_Biome *b, double sw)
 {
     if (td5_env_flag_on("TD5RE_R8_CROSS_REACH")) {
         const double blk = tg_facade_depth(b) + TD5_TG_BACKROW_GAP;
@@ -88,6 +98,13 @@ double tg_xstreet_reach_at(const TG_NodeList *nl, int si, double sg,
     double e[10], ox, oz, floor_r, d;
     int lo, hi;
 
+    /* [TOPOLOGY-FIRST] the network already walked this street on the
+     * occupancy raster; its reach is the answer. */
+    if (tg_network_built()) {
+        double rr = 0.0;
+        if (tg_net_mouth(si, sg > 0.0, NULL, &rr) >= 0) return rr;
+        return r;
+    }
     if (!td5_env_flag_on("TD5RE_R8_CROSS_REACH")) return r;
     if (!td5_env_flag_on("TD5RE_R8_CROSS_CLAMP")) return r;
 
@@ -167,6 +184,20 @@ int tg_xstreet_here(const TG_NodeList *nl, int si, double side,
     int s, memo = (si >= 0 && si < TD5_TG_R10_XS_MAX);
     const int mi = (side > 0.0) ? 1 : 0;
 
+    /* [TOPOLOGY-FIRST] a city street (not a forest lane, not an underpass)
+     * leaves here iff the network put a mouth here. */
+    if (tg_network_built()) {
+        double rr = 0.0;
+        const int k = tg_net_mouth_kind(si, side > 0.0);
+        if (nl && si >= 0 && si + 1 < nl->count &&
+            (k == TG_NE_STREET || k == TG_NE_AVENUE || k == TG_NE_CONTINUATION)) {
+            tg_net_mouth(si, side > 0.0, NULL, &rr);
+            if (preach) *preach = rr;
+            return 1;
+        }
+        if (preach) *preach = 0.0;
+        return 0;
+    }
     if (memo && s_r10_xs_state[si][mi] >= 0) {
         s_xs_hit++;
         if (s_xs_phase) s_xs_hit_terr++;

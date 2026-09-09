@@ -3718,6 +3718,8 @@ static void tg_r12_flora_report(const TG_NodeList *nl, int nspans)
 }
 
 /* ----------------------------------------------------------- build ------- */
+static double s_world_box[4];   /* [TOPOLOGY-FIRST] road bbox + reach, for the stats/dump */
+
 int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
                              int *out_spans)
 {
@@ -3824,9 +3826,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         }
         bx0 -= tg_far_reach(); bz0 -= tg_far_reach();
         bx1 += tg_far_reach(); bz1 += tg_far_reach();
-        tg_world_freeze();
-        tg_world_log_stats("road box", bx0, bz0, bx1, bz1);
-        tg_world_dump(dir, bx0, bz0, bx1, bz1);
+        s_world_box[0] = bx0; s_world_box[1] = bz0; s_world_box[2] = bx1; s_world_box[3] = bz1;
     }
 
     if (td5_env_flag_off("TD5RE_AUTOTRACK_SELFCHECK")) {
@@ -3849,6 +3849,20 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     /* [R13 RAIL item 5b] The ramp mask, as soon as the node list, the elevation
      * profile and s_ring_len are all final and BEFORE any scenery reads it. */
     tg_r13_approach_build(&nl, nspans);
+    /* [TOPOLOGY-FIRST] The STREET NETWORK, on the occupancy raster, after the
+     * strip (fork corridors exist) and before any scenery reads the mouth
+     * table. Then the world freezes: every later read is pure (the MT
+     * terrain prepass needs that). */
+    {
+        TG_ZONE_BEGIN(TG_ZONE_NETWORK);
+        tg_network_build(&nl, s_ring_len);
+        tg_network_write(dir, &nl, s_ring_len);
+        TG_ZONE_END(TG_ZONE_NETWORK);
+        tg_world_freeze();
+        tg_world_log_stats("road box", s_world_box[0], s_world_box[1], s_world_box[2], s_world_box[3]);
+        tg_world_dump(dir, s_world_box[0], s_world_box[1], s_world_box[2], s_world_box[3]);
+        s_tg_progress = 7;
+    }
     /* Routes must cover exactly the ring the strip header declares. */
     /* byte0 is the lateral corridor position (0 = left rail, 255 = right).
      * Straddle the centreline symmetrically so the AI's racing line runs down

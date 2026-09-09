@@ -212,6 +212,11 @@ static void tg_road_classify(const TG_NodeList *nl, int s_a, int s_b)
          * and a revision can have moved a run onto one. */
         for (q = s - 2; q <= e + 3 && q < nl->count; q++)
             if (q >= 0 && nl->v[q].lane_side != 0) { seam = q; break; }
+        /* A WATER crossing keeps its deck whatever the lanes do: a seam on a
+         * deck is a width step, a missing deck is a causeway through the sea. */
+        if (seam >= 0 && k == TG_ST_BRIDGE) {
+            for (q = s; q <= e + 1; q++) if (s_rn[q].wet) { seam = -1; break; }
+        }
         if (seam >= 0) {
             int cut = seam - 3;
             for (q = (cut < s ? s : cut); q <= e; q++) s_struct[q] = TG_ST_NONE;
@@ -239,7 +244,10 @@ static void tg_road_classify(const TG_NodeList *nl, int s_a, int s_b)
             if (s_struct[q] != TG_ST_NONE && s_struct[q] != k) {
                 int o0, o1;
                 tg_struct_run_bounds(q, &o0, &o1);
-                if (o1 - o0 + 1 >= len || o0 < s_struct_fin) {
+                int wet_here = 0, wet_other = 0, w2;
+                if (k == TG_ST_BRIDGE) for (w2 = s; w2 <= e + 1; w2++) if (s_rn[w2].wet) { wet_here = 1; break; }
+                if (s_struct[q] == TG_ST_BRIDGE) for (w2 = o0; w2 <= o1 + 1; w2++) if (s_rn[w2].wet) { wet_other = 1; break; }
+                if ((o1 - o0 + 1 >= len || o0 < s_struct_fin || wet_other) && !wet_here) {
                     int w;
                     for (w = s; w <= e; w++) s_struct[w] = TG_ST_NONE;
                     len = 0;
@@ -1208,6 +1216,12 @@ double tg_road_ground_y(int i)
 {
     if (i < 0 || i >= s_rn_n) return 0.0;
     return s_rn[i].h;
+}
+
+int tg_road_node_forced(int i)
+{
+    if (i < 0 || i >= s_rn_n) return 0;
+    return s_rn[i].force;
 }
 
 int tg_road_node_wet(int i)

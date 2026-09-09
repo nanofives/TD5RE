@@ -1363,6 +1363,7 @@ int  tg_struct_kind(int si);                       /* TG_ST_* for main span si *
 void tg_struct_run_bounds(int si, int *s0, int *s1); /* contiguous same-kind run */
 double tg_road_ground_y(int i);                    /* world ground under node i */
 int    tg_road_node_wet(int i);                    /* water under node i        */
+int    tg_road_node_forced(int i);                 /* terrain-yields conform    */
 void   tg_track_min_y_invalidate(void);
 /* Per-span water / shoreline table (td5_tg_road.c), built after the profile. */
 int    tg_road_wet_any(int si);                    /* water within reach, either side */
@@ -1371,6 +1372,19 @@ double tg_road_shore_y(int si, int is_left);       /* water surface at that shor
 double tg_road_water_side(int si);                 /* +1 left / -1 right / 0 none     */
 double tg_road_node_water_y(int i);
 #define TD5_TG_ROAD_BED_VERGE 2500.0  /* flat, conformed shoulder beside the road */
+/* [TOPOLOGY-FIRST] street network (td5_tg_network.c). */
+enum { TG_NE_STREET = 0, TG_NE_AVENUE, TG_NE_BACKSTREET, TG_NE_CONTINUATION,
+       TG_NE_COUNTRY, TG_NE_UNDERPASS, TG_NE_KIND_COUNT };
+void tg_network_reset(void);
+void tg_network_build(const TG_NodeList *nl, int nspans_main);
+int  tg_network_built(void);
+void tg_network_write(const char *dir, const TG_NodeList *nl, int nspans_main);
+int  tg_net_mouth(int si, int left, double *skew, double *reach);  /* edge id or -1 */
+int  tg_net_mouth_kind(int si, int left);                          /* TG_NE_* or -1  */
+/* the hash-rhythm halves the network validates (were the authorities) */
+int    tg_facade_built_hash(int si, int left);
+double tg_block_arm_skew_hash(int si, int left);
+int    tg_r12_fcross_candidate(const TG_NodeList *nl, int blk, int *c, double *side);
 #define TD5_TG_R21_GRADE_HEADROOM 1.15  /* cap sits just above the drive aim  */
 #define TD5_TG_BRIDGE_HEIGHT  2000.0   /* crown lift; bounded by max_grade */
 #define TD5_TG_BRIDGE_CHASM   2500.0   /* how far the ground/river drops below */
@@ -2909,6 +2923,7 @@ double tg_verge_band_w(const TG_Biome *b);
 double tg_city_kerb_h(const TG_Biome *b);
 int tg_facade_cols_for(double len, double cell_w, int cap);
 double tg_facade_floor_h(const TG_Biome *b);
+double tg_city_crossst_reach(const TG_Biome *b, double sw);   /* [TOPOLOGY-FIRST] */
 double tg_facade_depth(const TG_Biome *b);
 double tg_facade_run_depth(const TG_Biome *b, int si, int left, int floors, int *dcols_out);
 int tg_facade_floors(int si, int left, const TG_Biome *b);
@@ -4711,6 +4726,7 @@ void tg_r9_city_scan_entry(const TG_NodeList *nl, int ring, int s0, int ns, cons
 void tg_r9_city_report(const TG_NodeList *nl, int nspans);
 void tg_r14_branch_report(const TG_NodeList *nl, int nspans);
 int tg_emit_fb_cross(const TG_FBHook *h);
+int tg_net_emit_entry(const TG_FBHook *h);   /* [TOPOLOGY-FIRST] polyline tarmac */
 int tg_emit_fb_city(const TG_FBHook *h);
 /* Group B -- flora & figures: tree placement/backdrop, prop scale & density.
  *
