@@ -44,7 +44,6 @@
 #define TG_ROAD_WATER_MIN     2       /* water crossing min spans (+abutments) */
 #define TG_ROAD_TUNNEL_MIN    6
 #define TG_ROAD_GRADE_ABSMAX  0.20    /* any biome                             */
-#define TG_ROAD_CONFORM_VERGE 2500.0  /* flat shoulder beside the road bed     */
 #define TG_ROAD_CONFORM_BLEND 4500.0  /* base fade back to the natural ground  */
 
 static int tg_road_grade_cmp(const void *a, const void *b)
@@ -956,6 +955,82 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
     return 1;
 }
 
+/* ------------------------------------------------ water / shore table -- */
+
+/* Per main span and side: distance from the road EDGE to the first wet cell
+ * along the outward ray (1e9 = dry to the reach), and the water surface
+ * there. Built once after the profile is final; every water authority in
+ * td5_tg_bridge.c / td5_tg_guard.c reads it, so the sea plane, the water
+ * audits and the skirt cannot disagree about where the shore is. */
+static double s_shore_d[TD5_TG_MAX_SPANS + 8][2];
+static double s_shore_y[TD5_TG_MAX_SPANS + 8][2];
+static unsigned char s_wet_any[TD5_TG_MAX_SPANS + 8];
+static int s_shore_n;
+
+static void tg_road_shore_build(const TG_NodeList *nl)
+{
+    const double reach = tg_far_reach() + 6000.0;
+    int i, side;
+    s_shore_n = nl->count;
+    if (s_shore_n > TD5_TG_MAX_SPANS + 8) s_shore_n = TD5_TG_MAX_SPANS + 8;
+    for (i = 0; i < s_shore_n; i++) {
+        const TG_Node *n = &nl->v[i];
+        const double half = n->width * 0.5;
+        int any = (i < s_rn_n) ? s_rn[i].wet : 0;
+        for (side = 0; side < 2; side++) {
+            const double sgn = side ? -1.0 : 1.0;            /* 0 = left */
+            const double lx = n->tz * sgn, lz = -n->tx * sgn;
+            double d;
+            s_shore_d[i][side] = 1e9;
+            s_shore_y[i][side] = tg_world_sea_y();
+            for (d = 0.0; d <= reach; d += 500.0) {
+                const double wx = n->x + lx * (half + d), wz = n->z + lz * (half + d);
+                const double wy = tg_world_water_y(wx, wz);
+                if (tg_world_h(wx, wz) < wy) {
+                    s_shore_d[i][side] = d;
+                    s_shore_y[i][side] = wy;
+                    any = 1;
+                    break;
+                }
+            }
+        }
+        s_wet_any[i] = (unsigned char)any;
+    }
+}
+
+int tg_road_wet_any(int si)
+{
+    if (si < 0 || si >= s_shore_n) return 0;
+    return s_wet_any[si];
+}
+
+double tg_road_shore_d(int si, int is_left)
+{
+    if (si < 0 || si >= s_shore_n) return 1e9;
+    return s_shore_d[si][is_left ? 0 : 1];
+}
+
+double tg_road_shore_y(int si, int is_left)
+{
+    if (si < 0 || si >= s_shore_n) return tg_world_sea_y();
+    return s_shore_y[si][is_left ? 0 : 1];
+}
+
+double tg_road_water_side(int si)
+{
+    double l, r;
+    if (si < 0 || si >= s_shore_n) return 0.0;
+    l = s_shore_d[si][0]; r = s_shore_d[si][1];
+    if (l > 1e8 && r > 1e8) return 0.0;
+    return (l <= r) ? 1.0 : -1.0;
+}
+
+double tg_road_node_water_y(int i)
+{
+    if (i < 0 || i >= s_rn_n) return tg_world_sea_y();
+    return s_rn[i].wy;
+}
+
 /* ----------------------------------------------------------- elevation -- */
 
 /* Finalise the profile: solve the last window, classify everything, lay
@@ -1076,7 +1151,7 @@ void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
         if (k == TG_ST_NONE) {
             const double half = (a->width > b->width ? a->width : b->width) * 0.5;
             tg_world_conform_seg(a->x, a->z, a->y, b->x, b->z, b->y,
-                                 half + TG_ROAD_CONFORM_VERGE,
+                                 half + TD5_TG_ROAD_BED_VERGE,
                                  TG_ROAD_CONFORM_BLEND + dav * 1.5);
             conform_spans++;
             if (da < -cut_max) cut_max = -da;
@@ -1084,10 +1159,22 @@ void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
         } else {
             const int prev = tg_struct_kind(s - 1), next = tg_struct_kind(s + 1);
             if (prev == TG_ST_NONE)
-                tg_world_conform(a->x, a->z, a->y, a->width * 0.5 + TG_ROAD_CONFORM_VERGE, 3000.0);
+                tg_world_conform(a->x, a->z, a->y, a->width * 0.5 + TD5_TG_ROAD_BED_VERGE, 3000.0);
             if (next == TG_ST_NONE)
-                tg_world_conform(b->x, b->z, b->y, b->width * 0.5 + TG_ROAD_CONFORM_VERGE, 3000.0);
+                tg_world_conform(b->x, b->z, b->y, b->width * 0.5 + TD5_TG_ROAD_BED_VERGE, 3000.0);
         }
+    }
+
+    tg_road_shore_build(nl);
+    {
+        int wet_spans = 0, coast_spans = 0;
+        for (s = 0; s < s_shore_n; s++) {
+            if (s < s_rn_n && s_rn[s].wet) wet_spans++;
+            else if (s_wet_any[s]) coast_spans++;
+        }
+        TD5_LOG_I(LOG_TAG, "trackgen: [WATER] %d span(s) over water, %d with a "
+                  "shore within reach, sea level %.0f", wet_spans, coast_spans,
+                  tg_world_sea_y());
     }
 
     TD5_LOG_I(LOG_TAG, "trackgen: [STRUCT] bridges %d run(s) / %d span(s) (longest %d, "

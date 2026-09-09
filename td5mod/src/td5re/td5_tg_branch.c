@@ -1089,7 +1089,7 @@ int tg_emit_branch_flora(const TG_NodeList *nl, int mb,
                 tg_topo_chain(nl, mb, 0 /*right of travel*/, &c);
                 base_y = n->y - tg_topo_drop_at(&c, d);
             } else {
-                const double wsd = b->water ? tg_water_side(mb) : 0.0;
+                const double wsd = tg_water_side(mb);
                 base_y = n->y - tg_infra_ground_dy(nl, mb, -1.0, d, wsd);
             }
         }

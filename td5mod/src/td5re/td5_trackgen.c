@@ -3133,8 +3133,7 @@ static int tg_scenery_entry(int e)
 
             moff[nmesh++] = meshes.len;
             {
-                const TG_Biome *gb = &k_biomes[tg_biome_for_span(si)];
-                double wsd = gb->water ? tg_water_side(si) : 0.0;
+                double wsd = tg_water_side(si);
                 if (!TG_SUB(TG_SUB_GROUND, tg_emit_ground(nl, si, &meshes, wsd))) { ok = 0; break; }
             }
             /* [R7 GUARD] the ground skirt underlaps the road by design. */
@@ -3497,14 +3496,8 @@ static int tg_scenery_entry(int e)
                     }
                     tg_guard_mark(bw0, meshes.len, TG_GK_WATER, si);
                 }
-                /* [R4 item 20] Coastline at the river's longitudinal ends. */
-                if (tg_span_in_bridge_run(si)) {
-                    size_t bc0 = meshes.len;
-                    if (!tg_emit_bridge_coast(nl, si, &meshes, moff, &nmesh)) {
-                        ok = 0; break;
-                    }
-                    tg_guard_mark(bc0, meshes.len, TG_GK_COAST, si);
-                }
+                /* [TOPOLOGY-FIRST] no coastline band: the banks are the
+                 * world's own ground (tg_ground_side samples it). */
                 /* Prop billboards: variable count/size, each records its own. */
                 {
                     size_t p0 = meshes.len;
@@ -3517,10 +3510,12 @@ static int tg_scenery_entry(int e)
                  * (now at sea level), and laying the one-sided sea plane over it
                  * too gave two overlapping surfaces -- the z-fighting seam and
                  * the level step of "the water is not continuous". */
-                if (b->water && !tg_span_in_bridge_run(si)) {
+                /* [TOPOLOGY-FIRST] wherever the shore table found water on a
+                 * side (sea, lake, river beside the road) -- both sides. */
+                if (!tg_span_in_bridge_run(si) && tg_road_wet_any(si)) {
                     size_t sw0 = meshes.len;
-                    if (!tg_emit_water(nl, si, tg_water_side(si), &meshes,
-                                       moff, &nmesh)) { ok = 0; break; }
+                    if (!tg_emit_water(nl, si,  1.0, &meshes, moff, &nmesh)) { ok = 0; break; }
+                    if (!tg_emit_water(nl, si, -1.0, &meshes, moff, &nmesh)) { ok = 0; break; }
                     /* [R7 GUARD] the sea plane sits beside/below the road. */
                     tg_guard_mark(sw0, meshes.len, TG_GK_WATER, si);
                 }

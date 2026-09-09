@@ -17,55 +17,24 @@
  * the over-water audit up in the guard block can ask without the table. */
 int tg_biome_span_has_water(int si)
 {
-    return k_biomes[tg_biome_for_span(si)].water ? 1 : 0;
+    return tg_road_wet_any(si);           /* [TOPOLOGY-FIRST] the world says */
 }
 
 double tg_water_side(int si)
 {
-    int a;
-    unsigned int h;
-    tg_biome_run_bounds(si, &a, NULL);
-    h = (unsigned)(a / TD5_TG_BIOME_RUN) * 2246822519u;
-    return (h & 1) ? 1.0 : -1.0;
+    return tg_road_water_side(si);
 }
 
-/* Sea level for the coastal run containing span si -- ONE height for the whole
- * run, not per span.
- *
- * Root cause of the "marching" sea: the surface used to be n->y - WATER_DROP,
- * i.e. it followed the road's own elevation profile, so the sea rose and fell
- * with every hill. A body of water is level by definition, so take the LOWEST
- * road node in the biome run and sit below that -- below the road everywhere in
- * the run, so no low point is ever flooded. */
+/* Water surface beside span si: the nearer shore's surface (river or sea),
+ * the water under the road where the road is over water, else sea level. */
 double tg_sea_level_y(const TG_NodeList *nl, int si)
 {
-    /* [R17 WATER item 1] GLOBAL water level: ONE absolute surface height for the
-     * whole track, anchored to the low band of the elevation profile and paired
-     * with a route floor clamp so the road stays above it (both computed in
-     * tg_apply_elevation; see tg_water_level_y in td5_trackgen.c).
-     *
-     * DEFAULT OFF -- opt in with TD5RE_R17_GLOBAL_WATER=1. The first cut derived
-     * the level as track_min - WATER_DROP, which put the sea BELOW everything and
-     * turned every high coastal run into the floor of a canyon (measured on seed
-     * 771144: relief range 34015, so a coast at +20000 sat ~32000 above a sea at
-     * -11885). Kept off by default until the height selection and the coast
-     * interaction are validated in frame; see the R17 notes in tg_apply_elevation
-     * for the grade-cap analysis of why high coasts cannot simply be lowered. */
-    int a, b;
-    double lo;
-    int i;
-
-    /* [R8 BIOME item 19] Lowest node of the MERGED run, not of the raw cell.
-     * A no-op while COAST is capped at one cell; with TD5RE_R8_BIOME_SEA on it
-     * is what keeps one body of water at ONE height across a multi-cell coast
-     * instead of stepping at each cell boundary. */
-    tg_biome_run_bounds(si, &a, &b);
-
-    if (a > nl->count - 1) a = nl->count - 1;
-    if (b > nl->count - 1) b = nl->count - 1;
-    lo = nl->v[a].y;
-    for (i = a + 1; i <= b; i++) if (nl->v[i].y < lo) lo = nl->v[i].y;
-    return lo - (double)TD5_TG_WATER_DROP;
+    double side;
+    (void)nl;
+    if (tg_road_node_wet(si)) return tg_road_node_water_y(si);
+    side = tg_road_water_side(si);
+    if (side == 0.0) return tg_world_sea_y();
+    return tg_road_shore_y(si, side > 0.0);
 }
 
 /* May a water quad be laid across span si at all?
@@ -104,30 +73,8 @@ int tg_water_span_clear(int si)
 int tg_point_over_bridge_water(const TG_NodeList *nl, int si0,
                                double wx, double wz)
 {
-    const double BW = TD5_TG_BRIDGE_WATER_HALF + TD5_TG_R9_WATER_MARGIN;
-    int s, lo, hi;
-    if (!nl) return 0;
-    lo = si0 - TD5_TG_R9_WATER_WINDOW;
-    hi = si0 + TD5_TG_R9_WATER_WINDOW;
-    if (lo < 0) lo = 0;
-    if (hi > nl->count - 2) hi = nl->count - 2;
-    for (s = lo; s <= hi; s++) {
-        const TG_Node *n0, *n1;
-        double dx, dz, along, lat, ax, az, len;
-        if (!tg_span_in_bridge_run(s) || !tg_water_span_clear(s)) continue;
-        n0 = &nl->v[s]; n1 = &nl->v[s + 1];
-        dx = wx - n0->x; dz = wz - n0->z;
-        /* tg_emit_bridge_water's own axes: left unit is (tz, -tx). */
-        along = dx * n0->tx + dz * n0->tz;
-        lat   = dx * n0->tz - dz * n0->tx;
-        if (lat <= -BW || lat >= BW) continue;
-        ax = n1->x - n0->x; az = n1->z - n0->z;
-        len = sqrt(ax * ax + az * az);
-        if (along < -TD5_TG_R9_WATER_MARGIN ||
-            along > len + TD5_TG_R9_WATER_MARGIN) continue;
-        return 1;
-    }
-    return 0;
+    (void)nl; (void)si0;
+    return tg_world_is_water(wx, wz);     /* [TOPOLOGY-FIRST] the world says */
 }
 
 /* [R11 WATER] How far out from the CENTRELINE the sea plane reaches at node si
@@ -156,49 +103,41 @@ double tg_r11_sea_outer(const TG_NodeList *nl, int si)
 int tg_emit_water(const TG_NodeList *nl, int si, double side,
                          TG_Buf *m, size_t *moff, int *pn)
 {
+    /* [TOPOLOGY-FIRST] One quad per span-side from the SHORE (the first wet
+     * cell along the outward ray, per node so neighbouring spans share their
+     * boundary) out to TD5_TG_WATER_EXTENT, at the water surface the shore
+     * table recorded. Rivers beside the road and the sea are the same case. */
     double px[4], py[4], pz[4], uu[4], vv[4];
     const TG_Node *n0 = &nl->v[si];
     const TG_Node *n1;
-    double lx0, lz0, lx1, lz1, e0, e1, wy;
+    const int is_left = side > 0.0;
+    double lx0, lz0, lx1, lz1, e0, e1, d0, d1;
     int i, seg_page = TD5_TG_PAGE_WATER, seg_nq = 1;
 
     if (si + 1 >= nl->count) return 1;
-    /* [R18 WATER item 1] "after this span of water there's no more water on the
-     * side." tg_side_blocked is a prop/facade guard: it drops the seaward side
-     * over a fork's cleared region so trunks and facades stay off a branch
-     * corridor. The sea is not on that side of the road at all -- it starts
-     * TD5_TG_WATER_BEACH (8100) OUTBOARD of the road edge and runs another
-     * TD5_TG_WATER_EXTENT to sea, far beyond any branch, which is a road that
-     * stays inside the drivable envelope. Borrowing that guard cut a visible gap
-     * in the sea wherever a fork cleared the seaward side. Refuse the sea only
-     * where the carriageway ACTUALLY reaches its near edge -- which it never does
-     * -- so the sea stays continuous past a fork. TD5RE_R18_SEA_OVER_FORK=0
-     * restores the blanket block. */
-    if (tg_side_blocked(si, side)) {
-        const double sea_near = n0->width * 0.5 + (double)TD5_TG_WATER_BEACH;
-        if (!td5_env_flag_on("TD5RE_R18_SEA_OVER_FORK")
-            || tg_carriageway_reach(nl, si, side) >= sea_near)
-            return 1;
-    }
     if (!tg_water_span_clear(si)) return 1;
+    d0 = tg_road_shore_d(si, is_left);
+    d1 = tg_road_shore_d(si + 1, is_left);
+    if (d0 > 1e8 && d1 > 1e8) return 1;
+    if (d0 > 1e8) d0 = d1;
+    if (d1 > 1e8) d1 = d0;
     n1 = &nl->v[si + 1];
 
     lx0 = n0->tz * side; lz0 = -n0->tx * side;
     lx1 = n1->tz * side; lz1 = -n1->tx * side;
-    e0 = n0->width * 0.5 + (double)TD5_TG_WATER_BEACH;
-    e1 = n1->width * 0.5 + (double)TD5_TG_WATER_BEACH;
-    wy = tg_sea_level_y(nl, si);
+    /* start a little inside the bank so the plane meets the ground */
+    e0 = n0->width * 0.5 + d0 - 400.0; if (e0 < n0->width * 0.5) e0 = n0->width * 0.5;
+    e1 = n1->width * 0.5 + d1 - 400.0; if (e1 < n1->width * 0.5) e1 = n1->width * 0.5;
 
-    /* shore-near, shore-far, sea-far, sea-near: the same ring order the cell
-     * grid produced, so the face keeps whatever winding was drawing before. */
     px[0] = n0->x + lx0 * e0;                        pz[0] = n0->z + lz0 * e0;
     px[1] = n1->x + lx1 * e1;                        pz[1] = n1->z + lz1 * e1;
     px[2] = px[1] + lx1 * (double)TD5_TG_WATER_EXTENT;
     pz[2] = pz[1] + lz1 * (double)TD5_TG_WATER_EXTENT;
     px[3] = px[0] + lx0 * (double)TD5_TG_WATER_EXTENT;
     pz[3] = pz[0] + lz0 * (double)TD5_TG_WATER_EXTENT;
+    py[0] = py[3] = tg_road_shore_y(si, is_left);
+    py[1] = py[2] = tg_road_shore_y(si + 1, is_left);
     for (i = 0; i < 4; i++) {
-        py[i] = wy;
         uu[i] = px[i] / TD5_TG_WATER_TILE;
         vv[i] = pz[i] / TD5_TG_WATER_TILE;
     }
@@ -1638,11 +1577,10 @@ int tg_r8_bridge_water(void)
 int tg_bridge_run_is_water(const TG_NodeList *nl, int si)
 {
     int s0, s1, k;
-    if (!tg_r8_bridge_water() || !tg_span_in_bridge_run(si))
-        return k_biomes[tg_biome_for_span(si)].water;
+    if (!tg_span_in_bridge_run(si)) return tg_road_wet_any(si);
     tg_bridge_run_bounds(nl, si, &s0, &s1);
-    for (k = s0; k <= s1; k++)
-        if (k_biomes[tg_biome_for_span(k)].water) return 1;
+    for (k = s0; k <= s1 + 1 && k < nl->count; k++)
+        if (tg_road_node_wet(k)) return 1;
     return 0;
 }
 
@@ -1663,17 +1601,21 @@ double tg_bridge_water_y(const TG_NodeList *nl, int si)
      * crossing: at or below every span's own sea, hence never surfacing through
      * a deck or a bank that was built against a lower neighbour. */
     if (tg_bridge_run_is_water(nl, si)) {
-        int s0, s1, k;
-        double lo;
-        if (!tg_r8_bridge_water() || !tg_span_in_bridge_run(si))
-            return tg_sea_level_y(nl, si);
+        /* [TOPOLOGY-FIRST] the LOWEST water surface under the run's wet
+         * nodes: at or below every span's own water, so nothing surfaces
+         * through the deck or a bank built against a lower neighbour. */
+        int s0, s1, k, any = 0;
+        double lo = 1e30;
+        if (!tg_span_in_bridge_run(si)) return tg_sea_level_y(nl, si);
         tg_bridge_run_bounds(nl, si, &s0, &s1);
-        lo = tg_sea_level_y(nl, s0);
-        for (k = s0 + 1; k <= s1; k++) {
-            const double v = tg_sea_level_y(nl, k);
-            if (v < lo) lo = v;
-        }
-        return lo;
+        for (k = s0; k <= s1 + 1 && k < nl->count; k++)
+            if (tg_road_node_wet(k)) {
+                const double v = tg_road_node_water_y(k);
+                if (v < lo) lo = v;
+                any = 1;
+            }
+        if (any) return lo;
+        return tg_sea_level_y(nl, si);
     }
     /* [R17 WATER item 1] DRY inland gorge: NOT unified to the global water level.
      * This is a canyon river kept a fixed depth below its OWN deck, not the sea;
@@ -3035,8 +2977,8 @@ int tg_emit_bridge_coast(const TG_NodeList *nl, int si,
             const double nlx = r11 ? nn->tz : lx;   /* land node's left unit */
             const double nlz = r11 ? -nn->tx : lz;
             const int NC = 8;                      /* columns each side of centre */
-            const TG_Biome *lb = &k_biomes[tg_biome_for_span(lnode[k])];
-            const double wsd = lb->water ? tg_water_side(lnode[k]) : 0.0;
+            const TG_Biome *lb = &k_biomes[tg_biome_for_span(lnode[k])];   (void)lb;
+            const double wsd = tg_water_side(lnode[k]);
             /* ======== [R14 COAST item 5a] "on the LEFT side of the bridge,
              * polygons collide with the water below and with the coastline."
              *
@@ -3469,9 +3411,10 @@ int tg_flora_plant(const TG_NodeList *nl, int si, const TG_Biome *b,
     const TG_Node *n = &nl->v[si];
     const double d  = gap + tw * 0.5;             /* trunk distance from road edge */
     const double lx = n->tz * side, lz = -n->tx * side;
-    const double water_side = b->water ? tg_water_side(si) : 0.0;
+    const double water_side = tg_water_side(si);
     TG_GroundProf p;
     double dy;
+    (void)b;
     int k;
 
     *cx = n->x + lx * (n->width * 0.5 + gap + tw * 0.5);
@@ -3492,7 +3435,7 @@ int tg_flora_plant(const TG_NodeList *nl, int si, const TG_Biome *b,
     if (!td5_env_flag_on("TD5RE_R7_FLORA")) return 1;   /* A/B: R6 behaviour */
 
     /* Rule 2: over the seaward beach/sea of a coastal run -> no tree. */
-    if (b->water && side == tg_water_side(si) && d > (double)TD5_TG_SHORE_VERGE)
+    if (side == tg_water_side(si) && d > (double)TD5_TG_SHORE_VERGE)
         return 0;
 
     /* [R9 TOPO item 6] Rule 1 used to sample the SKIRT only and clamp to its

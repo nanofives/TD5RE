@@ -1364,6 +1364,13 @@ void tg_struct_run_bounds(int si, int *s0, int *s1); /* contiguous same-kind run
 double tg_road_ground_y(int i);                    /* world ground under node i */
 int    tg_road_node_wet(int i);                    /* water under node i        */
 void   tg_track_min_y_invalidate(void);
+/* Per-span water / shoreline table (td5_tg_road.c), built after the profile. */
+int    tg_road_wet_any(int si);                    /* water within reach, either side */
+double tg_road_shore_d(int si, int is_left);       /* edge -> first wet cell, 1e9 = dry */
+double tg_road_shore_y(int si, int is_left);       /* water surface at that shore     */
+double tg_road_water_side(int si);                 /* +1 left / -1 right / 0 none     */
+double tg_road_node_water_y(int i);
+#define TD5_TG_ROAD_BED_VERGE 2500.0  /* flat, conformed shoulder beside the road */
 #define TD5_TG_R21_GRADE_HEADROOM 1.15  /* cap sits just above the drive aim  */
 #define TD5_TG_BRIDGE_HEIGHT  2000.0   /* crown lift; bounded by max_grade */
 #define TD5_TG_BRIDGE_CHASM   2500.0   /* how far the ground/river drops below */
@@ -3732,7 +3739,7 @@ int tg_emit_bridge_water(const TG_NodeList *nl, int si, TG_Buf *m, size_t *moff,
  * tg_emit_fb_terrain and (since R9) the coastline band cannot disagree about
  * where the skirt ended or how low. The struct lives here rather than with
  * tg_ground_side because the coastline is emitted earlier in the file. */
-#define TD5_TG_GROUND_MAXPT 3
+#define TD5_TG_GROUND_MAXPT 5   /* [TOPOLOGY-FIRST] world-sampled */
 typedef struct {
     double d[TD5_TG_GROUND_MAXPT];
     double dy[TD5_TG_GROUND_MAXPT];
