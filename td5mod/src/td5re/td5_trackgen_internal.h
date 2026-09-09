@@ -1211,6 +1211,7 @@ void tg_rolls_resolve(unsigned int seed);          /* latch for this build   */
 void tg_rolls_unpublish(void);
 void tg_rolls_apply_spec(TD5_TrackGenSpec *spec);  /* fold into the spec     */
 void tg_rolls_report(void);                        /* the [R21 ROLL] block   */
+int  tg_rolls_presence_count(void);                /* [R22] presence rows    */
 int  tg_roll_value(int id);
 int  tg_roll_choice(int id);
 /* Hash a decision instead of drawing one. NEVER add a tg_rand()/tg_frand()/
