@@ -111,7 +111,7 @@ int tg_emit_water(const TG_NodeList *nl, int si, double side,
     const TG_Node *n0 = &nl->v[si];
     const TG_Node *n1;
     const int is_left = side > 0.0;
-    double lx0, lz0, lx1, lz1, e0, e1, d0, d1;
+    double lx0, lz0, lx1, lz1, e0, e1, d0, d1, o0, o1, sy0, sy1;
     int i, seg_page = TD5_TG_PAGE_WATER, seg_nq = 1;
 
     if (si + 1 >= nl->count) return 1;
@@ -129,14 +129,39 @@ int tg_emit_water(const TG_NodeList *nl, int si, double side,
     e0 = n0->width * 0.5 + d0 - 400.0; if (e0 < n0->width * 0.5) e0 = n0->width * 0.5;
     e1 = n1->width * 0.5 + d1 - 400.0; if (e1 < n1->width * 0.5) e1 = n1->width * 0.5;
 
+    /* [R22 item 10] Outer edge. The old plane sheeted a fixed
+     * TD5_TG_WATER_EXTENT (50000) out from the near bank -- correct for the sea
+     * (a half-plane: everything seaward is water) but for a RIVER 30000 units
+     * off the road that laid a flat water quad across ~48000 of DRY land at the
+     * near bank's surface, the reported inconsistent water levels / water over
+     * terrain. Clip a river to its far bank (tg_road_shore_far); the sea and any
+     * water running past the search cap keep the full extent. Knob
+     * TD5RE_R22_WATER_CLIP=0 restores the fixed extent (byte-identical). */
+    sy0 = tg_road_shore_y(si, is_left);
+    sy1 = tg_road_shore_y(si + 1, is_left);
+    o0 = e0 + (double)TD5_TG_WATER_EXTENT;
+    o1 = e1 + (double)TD5_TG_WATER_EXTENT;
+    if (td5_env_flag_on("TD5RE_R22_WATER_CLIP")) {
+        const double sea = tg_world_sea_y();
+        const double f0 = tg_road_shore_far(si, is_left);
+        const double f1 = tg_road_shore_far(si + 1, is_left);
+        /* A river is a shore surface above sea level; the sea is at sea level. */
+        if (sy0 > sea + 1.0 && f0 < 1e8) {
+            const double c0 = n0->width * 0.5 + f0 + 400.0;   /* just past the far bank */
+            if (c0 < o0) o0 = c0;
+        }
+        if (sy1 > sea + 1.0 && f1 < 1e8) {
+            const double c1 = n1->width * 0.5 + f1 + 400.0;
+            if (c1 < o1) o1 = c1;
+        }
+    }
+
     px[0] = n0->x + lx0 * e0;                        pz[0] = n0->z + lz0 * e0;
     px[1] = n1->x + lx1 * e1;                        pz[1] = n1->z + lz1 * e1;
-    px[2] = px[1] + lx1 * (double)TD5_TG_WATER_EXTENT;
-    pz[2] = pz[1] + lz1 * (double)TD5_TG_WATER_EXTENT;
-    px[3] = px[0] + lx0 * (double)TD5_TG_WATER_EXTENT;
-    pz[3] = pz[0] + lz0 * (double)TD5_TG_WATER_EXTENT;
-    py[0] = py[3] = tg_road_shore_y(si, is_left);
-    py[1] = py[2] = tg_road_shore_y(si + 1, is_left);
+    px[2] = n1->x + lx1 * o1;                        pz[2] = n1->z + lz1 * o1;
+    px[3] = n0->x + lx0 * o0;                        pz[3] = n0->z + lz0 * o0;
+    py[0] = py[3] = sy0;
+    py[1] = py[2] = sy1;
     for (i = 0; i < 4; i++) {
         uu[i] = px[i] / TD5_TG_WATER_TILE;
         vv[i] = pz[i] / TD5_TG_WATER_TILE;

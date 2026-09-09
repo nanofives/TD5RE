@@ -1375,6 +1375,7 @@ void   tg_track_min_y_invalidate(void);
 int    tg_road_wet_any(int si);                    /* water within reach, either side */
 double tg_road_shore_d(int si, int is_left);       /* edge -> first wet cell, 1e9 = dry */
 double tg_road_shore_y(int si, int is_left);       /* water surface at that shore     */
+double tg_road_shore_far(int si, int is_left);     /* edge -> far bank, 1e9 = open water */
 double tg_road_water_side(int si);                 /* +1 left / -1 right / 0 none     */
 double tg_road_node_water_y(int i);
 #define TD5_TG_ROAD_BED_VERGE 2500.0  /* flat, conformed shoulder beside the road */
