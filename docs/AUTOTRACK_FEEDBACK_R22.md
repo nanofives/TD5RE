@@ -329,3 +329,94 @@ roll is a different `spec_hash`. Seed 2082186171 now rolls BRANCHES off and so
 has no corridors at all -- which is a different track, not a fix for item 4.
 Pin `TD5RE_R21_ROLL=0` when measuring geometry, as the A/B below does, so roll
 changes cannot confound it.
+
+---
+
+# Final state (after the five child sessions)
+
+Everything below supersedes the "Not delivered" section above, which was written
+when only the first six items had landed.
+
+Integration branch `feat/autotrack-r22`, merged from five topic branches. Dev +
+release build clean, structure lint at baseline (`warnings=84, extern_in_c=3,
+game_h_includers=24`), full self-test **58 PASS / 0 WARN / 0 FAIL**.
+
+## Per item
+
+| # | item | outcome |
+|---|---|---|
+| 1 | start/finish indicators | FIXED -- `grid_span`/`finish_span` published by the walk |
+| 2 | options should really be random | FIXED -- 23 presence rows re-weighted + presence budget (cap measured at 8) |
+| 3 | seed as a text input | FIXED -- it already was one; the row never drew the edit buffer |
+| 4 | no geometry on a corridor | FIXED -- corridor flora; corridor mean 8.8 -> **13.5** meshes/entry |
+| 5 | skirt/road height gap | *not separately addressed* -- see below |
+| 6 | road smoothness | FIXED -- profile **curvature** clamp; curvature p99 0.2954 -> **0.0450** |
+| 7 | grass over the road | FIXED -- gore drop 4 -> 70 and the road-side edge subdivided |
+| 8 | triangle without geometry | EXPLAINED BY 12 -- degenerate-slab mechanism real but **inert** on this seed |
+| 9 | inexplicable shadow | CLOSED, NOT A DEFECT -- both mechanisms positively excluded at the reported quad |
+| 10 | water levels / water over road | PARTIAL -- extent clipped to the far bank; "over the road" **not reproducible** |
+| 11 | one-sided median | FIXED -- frame anchored at the main carriageway's inner edge (749 units recovered) |
+| 12 | edges without geometry | FIXED -- far-band group-boundary profile now sampled at the right node |
+| 13 | short sloppy bridges | PARTIAL -- abutment pad shipped; grade relief still needs the pass reorder |
+| 14 | snow beside green grass | FIXED -- far band routed through the hard biome cell |
+| 15 | trim less without buildings | FIXED -- verge +6000 on open unbuilt spans (876 spans) |
+| 16 | topology over tunnels | FIXED -- tunnel spans sample the pre-conform surface |
+| 17 | grass inside tunnels | FIXED -- skirt starts outside the bore wall |
+
+Item 5 (the skirt/road height gap at e8) was never reproduced as a distinct
+defect. Its diagnosed cause -- conform quantisation at cell centres against a
+road-derived inner strip -- is untouched, so it should be re-reported against
+this build rather than assumed fixed.
+
+## Knobs (all default ON; each off position byte-identical to its base)
+
+`TD5RE_R22_TUNNEL_SKIRT`, `_BRIDGE_PAD`, `_PRESENCE_OFF_MAX` (8),
+`_CORRIDOR_SCENERY`, `_GORE_DROP`, `_GORE_SUBDIV`, `_MEDIAN_FRAME`,
+`_FARBAND_SEAM`, `_SNOW_HARDEDGE`, `_OPEN_VERGE`, `_WATER_CLIP`, `_SMOOTH` (45).
+
+Three sessions independently reproduced the same `d7b11c5e` baseline
+`MODELS.DAT` hash `A7AAE9FED3164366` from separate worktrees, which is the
+cross-check that the per-knob attributions were measured and not asserted.
+
+## The one cross-branch interaction, measured
+
+The curvature clamp changes the elevation profile, which changes where corridor
+flora may plant (it is vetoed over water and takes its base height from the
+terrain). Isolated on seed 2082186171, `R21_ROLL=0`:
+
+| | corridor trees | spans |
+|---|---|---|
+| `SMOOTH=0` | 373 | 164 |
+| `SMOOTH=45` (shipped) | **328** | **153** |
+
+Coherent rather than alarming: smoothing dropped the highest fill from 5150 to
+2004, so ground a large fill used to raise now sits lower and the over-water
+veto fires on 11 more spans. It does mean the corridor figure measured in
+isolation (14.1 meshes/entry) overstates the shipped build, which is 13.5.
+
+`WATER_CLIP` and `OPEN_VERGE` were both tested against corridor placement and
+are genuinely orthogonal -- identical tree counts and identical
+nearest-tree-to-carriageway distance (5794) with each on and off, while the
+knob's own byte delta proved it had fired.
+
+## Diagnoses that measurement overturned
+
+Recorded because each would otherwise have shipped as a plausible fix:
+
+1. "The seed pin is broken" -- a contaminated harness in another session's worktree.
+2. "The seed row is not a text input" -- it was; it just never drew the buffer.
+3. The shore-ray bypass -- a real inconsistency with **zero** measured effect.
+4. "Corridors have no ground" -- the far band already covered it; only trees were missing.
+5. Item 8's degenerate-slab mechanism -- real, but never fires on this seed.
+6. Item 9 "it is the cobble page" -- the page is uniform across spans 374-389.
+7. Item 10 "water is over the road" -- 0 of 264 planes have a road edge beneath them.
+
+## Still open
+
+- Item 5, the skirt/road height gap (never reproduced; cause diagnosed only).
+- Item 13's grade relief: there is no path from grade to a structure, and adding
+  one means reordering the profile and structure passes.
+- Item 10's literal over-road plane, if it recurs on another seed.
+- Item 6 is measured, not judged: whether it *feels* less sloppy needs a drive.
+- The left-corridor median (`TD5RE_TG_NET_LEFT=1`, default off) still has no
+  mirror in the divider.
