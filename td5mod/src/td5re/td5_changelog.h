@@ -50,6 +50,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  not the road, and starts outside the bore wall." },
     { CL_ITEM,    "Short bridges gain approach spans, so a stream" },
     { CL_ITEM,    "  crossing reads as a bridge instead of two spans." },
+    { CL_ITEM,    "The distant terrain no longer leaves bare gaps or" },
+    { CL_ITEM,    "  cracks at the seams between its 4-span sections." },
+    { CL_ITEM,    "Snowy mountain sections no longer show green ground" },
+    { CL_ITEM,    "  beside the icy road near their edges." },
+    { CL_ITEM,    "Where nothing is built beside the road the verge" },
+    { CL_ITEM,    "  reaches further, so more scenery is visible." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 09 (auto track: second-race crash)" },
