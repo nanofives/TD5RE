@@ -2979,6 +2979,29 @@ static int tg_emit_corridor_flora(const TG_NodeList *nl, int mb, int ck, int L,
             return 0;
         tg_acct_n(TG_ACCT_R7_BRANCH, acct_si, 1);
         planted++;
+        /* [R22 CORRIDOR DIAG] Prove PLACEMENT, not just count: a tree's count
+         * is equally consistent with it standing out on the corridor and with
+         * it stacked on the main carriageway (the fail-open z-fight). This logs,
+         * per planted tree, the corridor bow at this span and the trunk's
+         * distance to BOTH centrelines. On-corridor means d_main tracks the bow
+         * (large, grows with it) while d_corr stays at the verge setback. `tlat`
+         * is the trunk's signed lateral off the MAIN node along its normal, so
+         * a value near 0 would be a tree ON the main road. Dev-only, gated OFF;
+         * no geometry effect. */
+        if (td5_env_flag_on("TD5RE_R22_CORRIDOR_DIAG")) {
+            const TG_Node *a = &nl->v[mb];
+            const double sh   = tg_fork_br_shift(fi, ck, a->width);  /* bow */
+            const double corx = a->x + a->tz * sh;
+            const double corz = a->z - a->tx * sh;
+            const double dmx  = cx - a->x, dmz = cz - a->z;
+            const double dcx  = cx - corx, dcz = cz - corz;
+            const double tlat = dmx * a->tz - dmz * a->tx;
+            TD5_LOG_I(LOG_TAG, "[R22 CORRIDOR DIAG] si=%d mb=%d bow=%.0f "
+                      "tlat=%.0f d_main=%.0f d_corr=%.0f",
+                      acct_si, mb, sh, tlat,
+                      sqrt(dmx * dmx + dmz * dmz),
+                      sqrt(dcx * dcx + dcz * dcz));
+        }
     }
     if (planted) { s_r22_corr_spans++; s_r22_corr_trees += planted; }
     return 1;
