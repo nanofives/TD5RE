@@ -232,6 +232,40 @@ hr{border:none;border-top:1px solid var(--edge);margin:8px 0}
       <button class="primary" id="lightsSaveBtn">Save lights.json ▸</button>
     </div></details>
 
+    <details><summary>Library</summary><div>
+      <div class="hint">The shipped-geometry catalogue built by
+        <code>re/tools/td5_geomlib.py build</code>: every separable object and
+        texture page across the 38 shipped tracks. Pick one to preview it in its
+        own local frame &mdash; the same frame the generator stamps it in.</div>
+      <div class="row"><span>Level</span><select id="libLevel"></select></div>
+      <div class="row"><span>Kind</span><select id="libKind">
+        <option value="">(any)</option><option>landmark</option><option>building</option>
+        <option>plaza</option><option>facade</option><option>rail</option>
+        <option>road</option><option>sign</option><option>tree</option>
+        <option>post</option><option>verge</option><option>unknown</option>
+      </select></div>
+      <div class="row"><span>Min faces</span><input type="number" id="libMinFaces" value="20" min="1" step="1"></div>
+      <div class="btnrow"><button class="sm" id="libRefresh">↻ list</button>
+        <button class="sm" id="libClearPreview">clear preview</button></div>
+      <div id="libCount" class="hint"></div>
+      <div id="libList" style="max-height:210px;overflow:auto;border:1px solid var(--edge);
+           border-radius:4px;margin-top:4px"></div>
+      <div id="libInfo" class="hint" style="margin-top:6px">No object selected.</div>
+      <div id="libPages" style="display:flex;flex-wrap:wrap;gap:2px;margin-top:4px"></div>
+      <div class="row"><span>Kind override</span><select id="libKindSet">
+        <option value="">(keep)</option><option>landmark</option><option>building</option>
+        <option>plaza</option><option>facade</option><option>rail</option>
+        <option>road</option><option>sign</option><option>tree</option>
+        <option>post</option><option>verge</option><option>unknown</option>
+      </select></div>
+      <div class="row"><span>Note</span><input type="text" id="libNote" maxlength="120" placeholder="why this verdict"></div>
+      <div class="btnrow"><button class="sm" id="libSaveTag">Save tag</button>
+        <button class="sm" id="libClearTag">Clear tag</button></div>
+      <div class="hint">Tags persist to <code>re/assets/library/tags.json</code>,
+        which is separate from the catalogue on purpose: re-running the sweep
+        regenerates the catalogue but must not discard hand corrections.</div>
+    </div></details>
+
     <button class="primary" id="buildBtn">Build &amp; register track ▸</button>
     <div id="status">Ready. Import a level or start from a sample, edit, then Build.</div>
   </div>

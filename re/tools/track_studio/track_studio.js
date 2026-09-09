@@ -984,6 +984,116 @@ $('lightsSaveBtn').addEventListener('click', async () => {
   } catch (e) { setStatus('save failed: ' + e, 'bad'); }
 });
 
+// ---------------------------------------------------------------- library
+// Browser over the shipped-geometry catalogue (re/assets/library). A prefab is
+// previewed in ITS OWN local frame -- centred in XZ, base y=0 -- which is the
+// frame td5_tg_prefab.c stamps it in, so what you see here is what the
+// generator places. It is shown in a dedicated group rather than in envRoot so
+// previewing never disturbs a loaded track.
+const prefabRoot = new THREE.Group(); scene.add(prefabRoot);
+let libIndex = null, libSel = null, libRows = [];
+
+function libClearPreview() {
+  while (prefabRoot.children.length) prefabRoot.remove(prefabRoot.children[0]);
+}
+
+async function libLoad() {
+  try {
+    libIndex = await (await fetch('/api/library')).json();
+  } catch (e) { setStatus('library fetch failed: ' + e, 'bad'); return; }
+  if (!libIndex.ok) { setStatus(libIndex.error || 'no library', 'warn'); return; }
+  const sel = $('libLevel');
+  sel.innerHTML = libIndex.levels.map((l) =>
+    `<option value="${l}">level${String(l).padStart(3, '0')}</option>`).join('');
+  if (libIndex.levels.includes(23)) sel.value = 23;   // Moscow: the worked example
+  libList();
+}
+
+async function libList() {
+  const lvl = $('libLevel').value, kind = $('libKind').value;
+  const mf = $('libMinFaces').value || 0;
+  let r;
+  try {
+    r = await (await fetch(`/api/library/objects?level=${lvl}&kind=${encodeURIComponent(kind)}&min_faces=${mf}&limit=300`)).json();
+  } catch (e) { setStatus('library list failed: ' + e, 'bad'); return; }
+  if (!r.ok) { setStatus(r.error, 'warn'); return; }
+  libRows = r.objects;
+  $('libCount').textContent = `${r.total} object(s) match; showing ${libRows.length}.`;
+  $('libList').innerHTML = libRows.map((o, i) =>
+    `<div class="libitem" data-i="${i}" style="padding:2px 5px;cursor:pointer;
+      border-bottom:1px solid #23262e;font-size:11px">
+      <b>${o.kind}</b>${o.overridden ? ' *' : ''} &middot; ${o.faces}f &middot;
+      ${Math.round(o.extent[0])}&times;${Math.round(o.extent[2])} h${Math.round(o.extent[1])}
+      <span style="color:#78808f">${o.id}</span></div>`).join('');
+  [...document.querySelectorAll('.libitem')].forEach((el) => {
+    el.onclick = () => libShow(libRows[+el.dataset.i]);
+  });
+}
+
+async function libShow(o) {
+  libSel = o;
+  const lvl = o.level;
+  $('libInfo').innerHTML = `<b>${o.id}</b> &mdash; ${o.kind}, ${o.faces} faces,
+    ${o.pages.length} page(s), footprint ${Math.round(o.extent[0])}&times;${Math.round(o.extent[2])},
+    height ${Math.round(o.extent[1])}`;
+  $('libPages').innerHTML = o.pages.slice(0, 24).map((p) =>
+    `<img title="page ${p}" style="width:34px;height:34px;image-rendering:pixelated;
+      border:1px solid #2c313c" src="/api/library/page?level=${lvl}&page=${p}">`).join('');
+  const t = (libIndex && libIndex.tags && libIndex.tags[o.id]) || {};
+  $('libKindSet').value = t.kind || '';
+  $('libNote').value = t.note || '';
+
+  setStatus(`Loading prefab ${o.id}…`);
+  try {
+    const buf = await (await fetch('/api/library/prefab?id=' + encodeURIComponent(o.id))).arrayBuffer();
+    gltfLoader.parse(buf, '', async (gltf) => {
+      const pages = new Set();
+      gltf.scene.traverse((n) => { if (n.isMesh && n.userData && n.userData.page != null) pages.add(n.userData.page); });
+      // Page TYPES come from the source level, so keyed art stays keyed. Without
+      // this a railing or a window renders as a solid panel.
+      let types = {};
+      try { types = (await (await fetch('/api/assets?level=' + lvl)).json()).page_types || {}; } catch {}
+      const texMap = {};
+      await Promise.all([...pages].map(async (p) => {
+        try { texMap[p] = await trackTexture(lvl, `page_${String(p).padStart(3, '0')}.png`, false); }
+        catch { texMap[p] = null; }
+      }));
+      gltf.scene.traverse((n) => {
+        if (n.isMesh) n.material = envMaterial(texMap[n.userData ? n.userData.page : -1],
+                                               types[n.userData ? n.userData.page : -1] | 0);
+      });
+      libClearPreview();
+      prefabRoot.add(gltf.scene);
+      fitCamera(Math.max(o.extent[0], o.extent[1], o.extent[2]) * 0.5);
+      setStatus(`${o.id}: ${o.faces} faces over ${pages.size} page(s).`, 'ok');
+    }, (err) => setStatus('prefab GLB parse error: ' + err, 'bad'));
+  } catch (e) { setStatus('prefab load failed: ' + e, 'bad'); }
+}
+
+async function libTag(clear) {
+  if (!libSel) { setStatus('select an object first', 'warn'); return; }
+  const body = { id: libSel.id, note: $('libNote').value };
+  if (clear) body.clear = true; else body.kind = $('libKindSet').value;
+  try {
+    const r = await (await fetch('/api/library/tags', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body) })).json();
+    if (r.ok) {
+      setStatus(`Tagged ${r.id} (${r.tagged} total) -> ${r.path}`, 'ok');
+      libIndex = await (await fetch('/api/library')).json();
+      libList();
+    } else setStatus(r.error || 'tag failed', 'bad');
+  } catch (e) { setStatus('tag failed: ' + e, 'bad'); }
+}
+
+$('libRefresh').onclick = libList;
+$('libLevel').onchange = libList;
+$('libKind').onchange = libList;
+$('libClearPreview').onclick = () => { libClearPreview(); setStatus('Preview cleared.', 'ok'); };
+$('libSaveTag').onclick = () => libTag(false);
+$('libClearTag').onclick = () => libTag(true);
+
 // ---------------------------------------------------------------- boot
 loadList();
+libLoad();
 $('blankBtn').click();

@@ -324,6 +324,17 @@ def build_model_glb(level):
                 for k in (b, b + 1, b + 2, b, b + 2, b + 3):
                     p = vs[k]["pos"]; P.append([p[0] + ox, p[1] + oy, p[2] + oz]); U.append(vs[k]["tex"])
             cur += tri * 3 + quad * 4
+    glb = glb_from_page_groups(pos_by, uv_by)
+    _glb_cache[level] = glb
+    return glb
+
+
+def glb_from_page_groups(pos_by, uv_by):
+    """Pack {page -> flat triangle positions} + {page -> uvs} into a GLB, one
+    node per page with the page id in mesh extras so the client can fetch the
+    right texture. Shared by the whole-level view and the prefab preview -- they
+    differ only in where the triangles come from."""
+    import numpy as np
     gb = mesh_tool._Glb()
     meshes, nodes = [], []
     for page in sorted(pos_by):
@@ -333,16 +344,153 @@ def build_model_glb(level):
         U = np.array(uv_by[page], np.float32).reshape(-1, 2)
         attrs = {"POSITION": gb.add(P, mesh_tool.COMP_FLOAT, "VEC3", minmax=True),
                  "TEXCOORD_0": gb.add(U, mesh_tool.COMP_FLOAT, "VEC2")}
-        meshes.append({"primitives": [{"attributes": attrs, "mode": 4}], "extras": {"page": int(page)}})
+        meshes.append({"primitives": [{"attributes": attrs, "mode": 4}],
+                       "extras": {"page": int(page)}})
         nodes.append({"mesh": len(meshes) - 1})
     gltf = {"asset": {"version": "2.0", "generator": "td5_track_studio"},
             "buffers": [{"byteLength": len(gb.bin)}],
             "bufferViews": gb.bufferViews, "accessors": gb.accessors,
             "meshes": meshes, "nodes": nodes,
             "scenes": [{"nodes": list(range(len(nodes)))}], "scene": 0}
-    glb = mesh_tool._pack_glb(gltf, bytes(gb.bin))
-    _glb_cache[level] = glb
+    return mesh_tool._pack_glb(gltf, bytes(gb.bin))
+
+
+# --------------------------------------------------------------------------
+# LIBRARY browser -- the shipped-geometry catalogue built by
+# re/tools/td5_geomlib.py. Read-only over library.json / objects/*.jsonl, plus
+# ONE writable file: tags.json, where a human overrides the classifier.
+#
+# Overrides live in their own file rather than being written back into the
+# catalogue, because the catalogue is REGENERABLE -- re-running the sweep must
+# not throw away hand corrections, and a wrong verdict fixed here has to survive
+# the next `td5_geomlib.py build`.
+# --------------------------------------------------------------------------
+LIBRARY_DIR = os.path.join(ASSETS_DIR, "library")
+_prefab_glb_cache = {}
+_geomlib = None
+
+
+def _lib():
+    """td5_geomlib, loaded lazily: it pulls in numpy and PIL, and the studio is
+    still usable for track editing without them."""
+    global _geomlib
+    if _geomlib is None:
+        _geomlib = _load_module("td5_geomlib",
+                                os.path.join(TOOLS_DIR, "td5_geomlib.py"))
+    return _geomlib
+
+
+def _tags_path():
+    return os.path.join(LIBRARY_DIR, "tags.json")
+
+
+def _load_tags():
+    return _load_json(_tags_path()) or {}
+
+
+def library_index():
+    """Catalogue summary + which levels have objects + the curated road sets."""
+    idx = _load_json(os.path.join(LIBRARY_DIR, "library.json"))
+    if not idx:
+        return {"ok": False,
+                "error": "no library at %s -- run: python re/tools/td5_geomlib.py "
+                         "build" % os.path.relpath(LIBRARY_DIR, REPO_ROOT)}
+    levels = []
+    for name in sorted(os.listdir(os.path.join(LIBRARY_DIR, "objects"))
+                       if os.path.isdir(os.path.join(LIBRARY_DIR, "objects")) else []):
+        if name.startswith("level") and name.endswith(".jsonl"):
+            levels.append(int(name[5:8]))
+    pages = (idx.get("pages") or {}).get("levels") or {}
+    return {"ok": True, "levels": levels,
+            "generated": idx.get("generated"),
+            "kind_totals": (idx.get("objects") or {}).get("kind_totals") or {},
+            "page_levels": {str(k): v for k, v in pages.items()},
+            "roads": _load_json(os.path.join(TOOLS_DIR, "manifests", "roads.json")),
+            "tags": _load_tags()}
+
+
+def library_objects(level, kind=None, min_faces=0, limit=400):
+    """Rows for one level, newest classifier verdict with any human override
+    applied on top, biggest first."""
+    path = os.path.join(LIBRARY_DIR, "objects", "level%03d.jsonl" % int(level))
+    if not os.path.isfile(path):
+        return {"ok": False, "error": "no objects for level %s" % level}
+    tags = _load_tags()
+    rows = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            o = json.loads(line)
+            t = tags.get(o["id"])
+            if t and t.get("kind"):
+                o["kind"] = t["kind"]
+                o["overridden"] = True
+            if kind and o["kind"] != kind:
+                continue
+            if o["faces"] < int(min_faces):
+                continue
+            rows.append(o)
+    rows.sort(key=lambda r: -r["faces"])
+    return {"ok": True, "level": int(level), "total": len(rows),
+            "objects": rows[:int(limit)]}
+
+
+def build_prefab_glb(obj_id):
+    """GLB for ONE catalogued object, in its own local frame (centred in XZ,
+    base y=0) -- the same convention the C emitter places it with, so what the
+    browser shows is what the generator will stamp."""
+    if mesh_tool is None:
+        raise RuntimeError("mesh_tool/numpy unavailable")
+    from collections import defaultdict
+    if obj_id in _prefab_glb_cache:
+        return _prefab_glb_cache[obj_id]
+    m = re.match(r"^L(\d+)\.e(\d+)\.s(\d+)\.o(\d+)$", obj_id or "")
+    if not m:
+        raise ValueError("bad object id %r" % obj_id)
+    level, entry, slot, obj = (int(g) for g in m.groups())
+    gl = _lib()
+    model = gl._load_model(gl._levels_dir(), level)
+    g = gl._prefab_geometry(model, {"id": obj_id, "entry": entry,
+                                    "slot": slot, "obj": obj})
+    pos_by, uv_by = defaultdict(list), defaultdict(list)
+    cur = 0
+    for page, tri, quad in g["cmds"]:
+        for t in range(tri):
+            for k in (cur + t * 3, cur + t * 3 + 1, cur + t * 3 + 2):
+                v = g["local"][k]
+                pos_by[page].append([v[0], v[1], v[2]]); uv_by[page].append([v[3], v[4]])
+        qb = cur + tri * 3
+        for q in range(quad):
+            b = qb + q * 4
+            for k in (b, b + 1, b + 2, b, b + 2, b + 3):   # quad -> two tris
+                v = g["local"][k]
+                pos_by[page].append([v[0], v[1], v[2]]); uv_by[page].append([v[3], v[4]])
+        cur += tri * 3 + quad * 4
+    glb = glb_from_page_groups(pos_by, uv_by)
+    _prefab_glb_cache[obj_id] = glb
     return glb
+
+
+def save_library_tags(req):
+    """Persist ONE object's human verdict. Merge, never replace: two people (or
+    two sessions) tagging different objects must not clobber each other."""
+    oid = req.get("id")
+    if not oid:
+        return False, {"error": "need id"}
+    tags = _load_tags()
+    entry = tags.get(oid, {})
+    for k in ("kind", "biomes", "daynight", "fit", "note"):
+        if k in req:
+            entry[k] = req[k]
+    if req.get("clear"):
+        tags.pop(oid, None)
+    else:
+        tags[oid] = entry
+    os.makedirs(LIBRARY_DIR, exist_ok=True)
+    with open(_tags_path(), "w", encoding="utf-8", newline="\n") as f:
+        json.dump(tags, f, indent=1, sort_keys=True)
+        f.write("\n")
+    return True, {"ok": True, "id": oid, "tagged": len(tags),
+                  "path": os.path.relpath(_tags_path(), REPO_ROOT).replace("\\", "/")}
 
 
 # --------------------------------------------------------------------------
@@ -509,6 +657,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, build_model_glb(q.get("level")), "model/gltf-binary")
             elif p == "/api/lights":
                 self._send(200, get_lights(q.get("level")))
+            elif p == "/api/library":
+                self._send(200, library_index())
+            elif p == "/api/library/objects":
+                self._send(200, library_objects(q.get("level"), q.get("kind"),
+                                                q.get("min_faces", 0),
+                                                q.get("limit", 400)))
+            elif p == "/api/library/prefab":
+                self._send(200, build_prefab_glb(q.get("id")), "model/gltf-binary")
+            elif p == "/api/library/page":
+                a = serve_asset(q.get("level"), "page_%03d.png" % int(q.get("page", 0)))
+                if a:
+                    self._send(200, a[0], a[1])
+                else:
+                    self._send(404, {"error": "page not found"})
             else:
                 self._send(404, {"error": "not found"})
         except Exception as e:
@@ -537,6 +699,12 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/lights":
             try:
                 ok, res = save_lights(req)
+                self._send(200 if ok else 400, res)
+            except Exception as e:
+                self._send(500, {"error": str(e), "trace": traceback.format_exc()})
+        elif self.path == "/api/library/tags":
+            try:
+                ok, res = save_library_tags(req)
                 self._send(200 if ok else 400, res)
             except Exception as e:
                 self._send(500, {"error": str(e), "trace": traceback.format_exc()})
