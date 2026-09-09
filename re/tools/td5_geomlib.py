@@ -572,9 +572,15 @@ def _prefab_geometry(model, row):
     base = min(ys)
     local = [(v["pos"][0] - cx, v["pos"][1] - base, v["pos"][2] - cz,
               v["tex"][0], v["tex"][1]) for v in vs]
+    # Baked per-vertex ARGB is NOT decoration here and must not be dropped:
+    # measured over these prefabs it takes 48 distinct values, and the dominant
+    # one is 0xFFA0A0A0 on 1369 of 3084 vertices, with only 390 actually white.
+    # tg_write_quad_mesh hardcodes 0xFFFFFFFF, which would brighten most of this
+    # geometry by about 60% and flatten a night track's shading.
+    light = [int(v["light"]) & 0xFFFFFFFF for v in vs]
     cmds = [(int(c["texture_page_id"]), int(c["tri"]), int(c["quad"]))
             for c in part["mesh"]["commands"]]
-    return {"local": local, "cmds": cmds,
+    return {"local": local, "light": light, "cmds": cmds,
             "fx": max(xs) - min(xs), "fz": max(zs) - min(zs),
             "height": max(ys) - base}
 
@@ -652,6 +658,11 @@ def cmd_prefabs(root, out, level, entries, kinds, min_faces, hdr_path, man_path)
                 f.write("    " + " ".join(
                     "%.1ff,%.1ff,%.1ff,%.5ff,%.5ff," % v for v in chunk) + "\n")
             f.write("};\n")
+            f.write("static const unsigned int %s_l[] = {\n" % sym)
+            for k in range(0, len(g["light"]), 8):
+                f.write("    " + " ".join("0x%08Xu," % x
+                                          for x in g["light"][k:k + 8]) + "\n")
+            f.write("};\n")
             f.write("static const unsigned short %s_c[] = { %s };\n"
                     % (sym, " ".join("%d,%d,%d," % (page_ix[p], t, q)
                                      for p, t, q in g["cmds"])))
@@ -659,6 +670,7 @@ def cmd_prefabs(root, out, level, entries, kinds, min_faces, hdr_path, man_path)
         f.write("typedef struct {\n"
                 "    const char           *name;\n"
                 "    const float          *v;     /* x,y,z,u,v per vertex */\n"
+                "    const unsigned int   *l;     /* baked ARGB per vertex */\n"
                 "    int                   nv;\n"
                 "    const unsigned short *c;     /* page_local,tri,quad */\n"
                 "    int                   ncmd;\n"
@@ -666,8 +678,9 @@ def cmd_prefabs(root, out, level, entries, kinds, min_faces, hdr_path, man_path)
                 "} TG_PrefabDef;\n\n")
         f.write("static const TG_PrefabDef k_tg_prefabs[] = {\n")
         for i, (r, g) in enumerate(prefabs):
-            f.write('    { "%s", k_pf%d_v, %d, k_pf%d_c, %d, %.1ff, %.1ff, %.1ff },\n'
-                    % (r["id"], i, len(g["local"]), i, len(g["cmds"]),
+            f.write('    { "%s", k_pf%d_v, k_pf%d_l, %d, k_pf%d_c, %d, '
+                    '%.1ff, %.1ff, %.1ff },\n'
+                    % (r["id"], i, i, len(g["local"]), i, len(g["cmds"]),
                        g["fx"], g["fz"], g["height"]))
         f.write("};\n#define TD5_TG_PREFAB_N %d\n" % len(prefabs))
         f.write("#define TD5_TG_PREFAB_PAGES %d\n\n" % len(pages))

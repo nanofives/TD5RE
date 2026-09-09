@@ -427,6 +427,90 @@ int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz,
  * vertex order. That is how one building can carry a shop page on the ground
  * floor and a wall page above without a second mesh (which would corrupt the
  * one-mesh-per-building offset accounting in tg_emit_models). */
+/* [GEOMLIB] Write one PREFAB instance: lifted shipped geometry, placed at
+ * (ox,oy,oz) and yawed by (ca,sa).
+ *
+ * Separate from tg_write_quad_mesh for three reasons, each of which it cannot
+ * do: these meshes carry TRIANGLES as well as quads (the Moscow set pieces are
+ * 264 tris and 592 quads, so a quad-only writer would drop a third of the
+ * faces); they carry BAKED per-vertex ARGB that must survive (48 distinct
+ * values across the set, dominant 0xFFA0A0A0, only 390 of 3084 actually white,
+ * so the hardcoded 0xFFFFFFFF would brighten most of the geometry); and their
+ * commands name a LOCAL page index that has to be rebased.
+ *
+ * Vertex layout in `v` is x,y,z,u,v; `cmd` is (page_local, tri, quad) triples.
+ * Vertices are consumed sequentially, TRIS BEFORE QUADS within a command --
+ * the MODELS.DAT rule the whole shipped corpus obeys without exception. */
+int tg_write_prefab_mesh(TG_Buf *blk, const float *v, const unsigned int *light,
+                         int nv, const unsigned short *cmd, int ncmd,
+                         int page_base, double ox, double oy, double oz,
+                         double ca, double sa)
+{
+    double cx = 0.0, cy = 0.0, cz = 0.0, radius = 0.0;
+    int i, s, need = 0;
+
+    if (!v || !light || !cmd || nv <= 0 || ncmd <= 0) return 1;
+    /* The cursor must account for every vertex, exactly as the reader assumes.
+     * A short or long command list would slice the block at the wrong offsets
+     * and texture the wrong faces, silently. */
+    for (s = 0; s < ncmd; s++) need += cmd[s * 3 + 1] * 3 + cmd[s * 3 + 2] * 4;
+    if (need != nv) return 0;
+
+    for (i = 0; i < nv; i++) {
+        const double lx = v[i * 5 + 0], lz = v[i * 5 + 2];
+        cx += ox + lx * ca - lz * sa;
+        cy += oy + v[i * 5 + 1];
+        cz += oz + lx * sa + lz * ca;
+    }
+    cx /= nv; cy /= nv; cz /= nv;
+    for (i = 0; i < nv; i++) {
+        const double lx = v[i * 5 + 0], lz = v[i * 5 + 2];
+        const double wx = ox + lx * ca - lz * sa;
+        const double wy = oy + v[i * 5 + 1];
+        const double wz = oz + lx * sa + lz * ca;
+        const double dx = wx - cx, dy = wy - cy, dz = wz - cz;
+        const double d = sqrt(dx * dx + dy * dy + dz * dz);
+        if (d > radius) radius = d;
+    }
+    if (!(radius > 0.0)) radius = 1.0;
+
+    tg_put_u16(blk, 259);
+    tg_put_u16(blk, 0);                    /* opaque, not a billboard */
+    tg_put_u32(blk, (unsigned)ncmd);
+    tg_put_u32(blk, (unsigned)nv);
+    tg_put_f32(blk, radius);
+    tg_put_f32(blk, cx);
+    tg_put_f32(blk, cy);
+    tg_put_f32(blk, cz);
+    tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+    tg_put_u32(blk, 0);
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE);
+    tg_put_u32(blk, TD5_TG_MESH_DISK_SIZE + ncmd * TD5_TG_CMD_SIZE);
+    tg_put_u32(blk, 0);
+
+    for (s = 0; s < ncmd; s++) {
+        tg_put_u16(blk, 0);                                    /* dispatch 0 */
+        tg_put_u16(blk, (unsigned)(page_base + cmd[s * 3 + 0]));
+        tg_put_u32(blk, 0);
+        tg_put_u16(blk, cmd[s * 3 + 1]);                       /* triangles */
+        tg_put_u16(blk, cmd[s * 3 + 2]);                       /* quads     */
+        tg_put_u32(blk, 0);
+    }
+
+    for (i = 0; i < nv; i++) {
+        const double lx = v[i * 5 + 0], lz = v[i * 5 + 2];
+        tg_put_f32(blk, ox + lx * ca - lz * sa);
+        tg_put_f32(blk, oy + v[i * 5 + 1]);
+        tg_put_f32(blk, oz + lx * sa + lz * ca);
+        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+        tg_put_u32(blk, light[i]);         /* baked ARGB, NOT forced to white */
+        tg_put_f32(blk, v[i * 5 + 3]);
+        tg_put_f32(blk, v[i * 5 + 4]);
+        tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
+    }
+    return !blk->oom;
+}
+
 int tg_write_quad_mesh(TG_Buf *blk, const double *px, const double *py,
                               const double *pz, const double *uu, const double *vv,
                               int n, const int *seg_page, const int *seg_nq,

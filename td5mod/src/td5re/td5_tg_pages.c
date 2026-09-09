@@ -3034,6 +3034,27 @@ static void tg_emit_roadset_pages(TG_Buf *pages)
 
 #undef TG_RS_EMIT
 
+/* [GEOMLIB] The 69 pages the shipped-geometry prefabs are textured with. Laid
+ * down positionally: local index i in td5_tg_prefab_data.h is
+ * TD5_TG_PAGE_LM_BASE + i here.
+ *
+ * Type comes from the SHIPPED page, not a constant. Measured: 65 of the 69 are
+ * opaque but 4 are alpha-keyed (type 1), so forcing 0 would turn those keyed
+ * holes -- railings, windows -- solid. gen_tg_pages.py gained a per-set
+ * k_*_type[] array for this; it did not previously emit one. */
+static void tg_emit_prefab_pages(TG_Buf *pages)
+{
+    int i;
+    for (i = 0; i < TD5_TG_LM_PAGES; i++) {
+        if (i < k_lm_pf_count)
+            tg_emit_real_page(&pages[TD5_TG_PAGE_LM_BASE + i],
+                              k_lm_pf_pal[i], k_lm_pf_paln[i],
+                              k_lm_pf_idx[i], k_lm_pf_type[i]);
+        else
+            tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_LM_BASE + i], 0);
+    }
+}
+
 /* Fill the wall/store/grass/tree/prop pages with REAL TD5 texture data borrowed
  * from shipped tracks instead of the procedural placeholders, so the auto-track
  * reads like an actual TD5 level.
@@ -3235,6 +3256,7 @@ static int tg_emit_textures(TG_Buf *out)
                                           k_road_surf[v].proc_kind);
     }
     tg_emit_roadset_pages(pages);
+    tg_emit_prefab_pages(pages);
     /* [FB 2026-08-26] reserved feedback-batch pages -- one owner each. */
     tg_emit_texture_page_fb_city(&pages[TD5_TG_PAGE_SIDEWALK], 0);
     tg_emit_texture_page_fb_city(&pages[TD5_TG_PAGE_CROSSING], 1);

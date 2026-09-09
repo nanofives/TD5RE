@@ -145,6 +145,14 @@ def emit_set(out, levels, prefix, name, entries):
         emit_array(out, "%s_%s%d_idx" % (prefix, name, i), idx)
     n = len(entries)
     out.write("static const int %s_%s_count = %d;\n" % (prefix, name, n))
+    # Transparency TYPE per page. Callers that lay a whole set down verbatim
+    # (prefab geometry, for one) must pass the SHIPPED type through: a set can
+    # mix opaque with alpha-keyed, and forcing 0 turns every keyed hole -- a
+    # railing, a window -- solid.
+    out.write("static const int %s_%s_type[%d] = { %s };\n"
+              % (prefix, name, max(n, 1),
+                 ", ".join(str(read_page(levels, e[0], int(e[1]))[2])
+                           for e in entries) or "0"))
     out.write("static const int %s_%s_paln[%d] = { %s };\n"
               % (prefix, name, max(n, 1),
                  ", ".join("%s_%s%d_paln" % (prefix, name, i) for i in range(n)) or "0"))

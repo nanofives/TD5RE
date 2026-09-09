@@ -56,6 +56,8 @@
 #include "td5_tg_real_tex_r11signs.h" /* [R11 SIGNS] direction arrow panels */
 #include "td5_tg_props_tex.h"     /* [R9 INFRA] TD6 street-furniture pages  */
 #include "td5_tg_real_tex_roads.h" /* [GEOMLIB] curated real ROAD surfaces  */
+#include "td5_tg_real_tex_landmarks.h" /* [GEOMLIB] pages used by the prefabs */
+#include "td5_tg_prefab_data.h"   /* [GEOMLIB] shipped-geometry PREFABS      */
 #include "td5re.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -593,8 +595,23 @@ typedef char tg_r11_sign_pages_fit[(3 <= TD5_TG_R11_SIGN_N - 1) ? 1 : -1];
  * needs to move if re/tools/td5_geomlib.py roads ever keeps more than 8. */
 typedef char tg_rs_pages_fit[(8 <= TD5_TG_RS_PER_CLASS) ? 1 : -1];
 
-#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_RS_BASE + \
+/* ============= GEOMLIB: PREFAB (shipped set-piece) PAGES =============
+ * Own base, same rule as every block above.
+ *
+ * These are POSITIONAL against td5_tg_prefab_data.h: a prefab command carries a
+ * LOCAL page index, and its real page is TD5_TG_PAGE_LM_BASE + that index. The
+ * geometry header and td5_tg_real_tex_landmarks.h are generated together by
+ * re/tools/td5_geomlib.py prefabs and must be regenerated together -- editing
+ * one alone silently re-textures every prefab.
+ * ==================================================================== */
+#define TD5_TG_PAGE_LM_BASE   (TD5_TG_PAGE_RS_BASE + \
                                TD5_TG_RS_CLASSES * TD5_TG_RS_PER_CLASS)
+#define TD5_TG_LM_PAGES       69
+/* Literal for the same reason tg_r11_sign_pages_fit uses one: k_lm_pf_count is
+ * a `static const int`, which C does not accept in a constant expression. */
+typedef char tg_lm_pages_fit[(TD5_TG_PREFAB_PAGES == TD5_TG_LM_PAGES) ? 1 : -1];
+
+#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_LM_BASE + TD5_TG_LM_PAGES)
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
 /* Down-track spans per MODELS.DAT display-list entry (entry = span >> 2).
@@ -2316,6 +2333,11 @@ int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz, double 
 #define TD5_TG_FACADE_MAX_ROWS 10
 int tg_write_quad_mesh(TG_Buf *blk, const double *px, const double *py, const double *pz, const double *uu, const double *vv, int n, const int *seg_page, const int *seg_nq, int nseg);
 int tg_write_quad_mesh_col(TG_Buf *blk, const double *px, const double *py, const double *pz, const double *uu, const double *vv, const unsigned int *col, int n, const int *seg_page, const int *seg_nq, int nseg);
+/* [GEOMLIB] Place a shipped-geometry PREFAB. Handles triangles as well as
+ * quads, preserves baked per-vertex ARGB, and rebases the prefab's LOCAL page
+ * indices onto page_base. Returns 0 if the command list does not account for
+ * exactly nv vertices. */
+int tg_write_prefab_mesh(TG_Buf *blk, const float *v, const unsigned int *light, int nv, const unsigned short *cmd, int ncmd, int page_base, double ox, double oy, double oz, double ca, double sa);
 void tg_facade_push_grid(double bx, double by, double bz, double ax, double ay, double az, double ux, double uy, double uz, int cols, int rows, int r0, int r1, double *px, double *py, double *pz, double *uu, double *vv, int *pn);
 /* Is a facade wall present at span si on this side? Spans group into
  * SUPERBLOCKS, and each superblock carries ONE side street whose START and
