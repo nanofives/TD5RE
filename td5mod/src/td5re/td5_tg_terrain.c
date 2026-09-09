@@ -1221,6 +1221,7 @@ static void tg_ground_side_raw(const TG_NodeList *nl, int si, int is_left,
     const int ni = (si > nl->count - 1) ? nl->count - 1 : si;
     const TG_Node *n = &nl->v[ni];
     const int open = (tg_struct_kind(si) == TG_ST_NONE);
+    const int tunnel = (tg_struct_kind(si) == TG_ST_TUNNEL);   /* [R22] */
     const double V = tg_verge_reach();
     const double sgn = is_left ? 1.0 : -1.0;
     const double lx = n->tz * sgn, lz = -n->tx * sgn;
@@ -1233,11 +1234,37 @@ static void tg_ground_side_raw(const TG_NodeList *nl, int si, int is_left,
     /* Branch corridor bows into this side's verge -- keep off its carriageway. */
     if ((is_left ? 1 : -1) == tg_fork_side_at(si)) dmin = tg_ground_branch_clear(nl, si);
 
+    /* [R22] Over a TUNNEL the near ground is the HILLSIDE the bore passes
+     * through, not the road's own verge. Two corrections, both tunnel-only:
+     *
+     * 1. Start OUTSIDE the bore. The profile's first point sits at the road
+     *    EDGE (d = 0) while the bore's visible wall is pushed a further
+     *    TD5_TG_TUNNEL_WALL_T outward, so the first quad ran laterally inside
+     *    the tunnel for that thickness and showed as a green sliver along the
+     *    wall/ceiling junction. Forks are excluded from structure runs, so the
+     *    bore is never laterally shifted on a tunnel span and the clearance is
+     *    just the wall thickness.
+     *
+     * 2. Sample the NATURAL surface, not the conformed one -- see the tunnel
+     *    branch in the loop below.
+     *
+     * Together these are also "topology should go over tunnels": with the
+     * natural surface restored the two skirt slabs climb the hill above the
+     * bore instead of stopping level with a road-width slot through it. */
+    if (tunnel && TD5_TG_TUNNEL_WALL_T > dmin) dmin = TD5_TG_TUNNEL_WALL_T;
+
     p->n = 5;
     for (j = 0; j < 5; j++) {
         double d = k_f[j] * V, dy;
         if (d < dmin + 250.0 * j) d = dmin + 250.0 * j;
-        dy = ey - tg_world_h(ex + lx * d, ez + lz * d);
+        /* tg_world_h carries the conform overlay, and tg_apply_elevation
+         * conforms the world to the road bed at each structure run's MOUTH. On
+         * the first and last tunnel span that overlay returns ROAD level, so
+         * the skirt was laid at bore-floor height -- inside the tunnel, and the
+         * largest of the reported grass patches. A tunnel span has no exposed
+         * bed to conform to in the first place: its bed is the bore. */
+        dy = ey - (tunnel ? tg_world_h_base(ex + lx * d, ez + lz * d)
+                          : tg_world_h     (ex + lx * d, ez + lz * d));
         if (open && d <= TD5_TG_ROAD_BED_VERGE) dy = TD5_TG_GROUND_DROP;
         if (open && j == 0) dy = TD5_TG_GROUND_DROP;
         p->d[j] = d;

@@ -7551,6 +7551,13 @@ static unsigned int at_roll_seed(void)
     return s ? s : 1u;
 }
 
+/* [R22 item 3] Seed-field edit state. Declared HERE rather than beside
+ * at_seed_edit_begin below, because the row renderer now draws the live buffer
+ * and sits above it in the file. The editor itself is further down under
+ * "seed field". */
+static char s_at_seed_buf[12];
+static int  s_at_seed_editing;
+
 static void at_preview_request(void)
 {
     TD5_TrackGenSpec spec;
@@ -7667,18 +7674,37 @@ int td5_autotrack_draw_route(float bx, float by, float bw, float bh,
                      dot, dot, AT_PV_ROUTE_COL, -1, 0, 0, 1, 1);
     }
 
-    /* Start marker. The finish sits at the end of the MAIN RING, not at the
-     * end of the point list -- branch corridors are published after it. Same
-     * helper the shipped previews use, so the ends read identically. */
-    frontend_draw_marker_dot((cx + (s_at_pts[0].x - ox) * scale) * sx,
-                             (cy - (s_at_pts[0].z - oz) * scale) * sy,
-                             sx, sy, 0);
-    if (s_at_status.done && s_at_status.stats.ring_len > 0) {
-        int fi = s_at_status.stats.ring_len;
-        if (fi >= s_at_pts_n) fi = s_at_pts_n - 1;
-        frontend_draw_marker_dot((cx + (s_at_pts[fi].x - ox) * scale) * sx,
-                                 (cy - (s_at_pts[fi].z - oz) * scale) * sy,
-                                 sx, sy, 1);
+    /* [R22 item 1] Markers sit on the spans the RACE uses, which are published
+     * by the walk (grid_span / finish_span) rather than guessed here.
+     *
+     * What was wrong: start was drawn at point 0 and finish at `ring_len`. The
+     * grid is an interior span, and the finish is placed RUN-OFF spans before
+     * the end of the ring and then walked further back off any fork gore or
+     * tunnel it lands in. So the finish dot sat past the end of the race by the
+     * whole RUN-OFF row -- 100 spans by default, up to 400 -- which is why the
+     * indicators did not follow the actual end of the track. The point list is
+     * span-indexed for the main ring (branch corridors are appended after it),
+     * so a span index is a point index here.
+     *
+     * The start still falls back to point 0 while the walk is short: the first
+     * frames of a preview have fewer than grid_span points and a marker that
+     * appears late reads as a missing marker. */
+    {
+        const TD5_TrackGenPreviewStats *st = &s_at_status.stats;
+        int gi = (s_at_status.done && st->grid_span > 0) ? st->grid_span : 0;
+        if (gi >= s_at_pts_n) gi = 0;
+        frontend_draw_marker_dot((cx + (s_at_pts[gi].x - ox) * scale) * sx,
+                                 (cy - (s_at_pts[gi].z - oz) * scale) * sy,
+                                 sx, sy, 0);
+        /* finish_span is -1 on a ring too short to hold a race; drawing no dot
+         * is correct then, because there is no finish line in the level either. */
+        if (s_at_status.done && st->finish_span > 0 &&
+            st->finish_span < s_at_pts_n) {
+            const int fi = st->finish_span;
+            frontend_draw_marker_dot((cx + (s_at_pts[fi].x - ox) * scale) * sx,
+                                     (cy - (s_at_pts[fi].z - oz) * scale) * sy,
+                                     sx, sy, 1);
+        }
     }
     return 1;
 }
@@ -7765,8 +7791,22 @@ void frontend_render_autotrack_options_overlay(float sx, float sy)
             char buf[40];
 
             if (k_at_rows[row].kind == AT_KIND_SEED) {
-                snprintf(buf, sizeof(buf), "%u", (unsigned int)td5_env_int(
-                             "TD5RE_AUTOTRACK_SEED", 0, 0, 0x7FFFFFFF));
+                /* [R22 item 3] "The seed should be a text input" -- it already
+                 * WAS one (Enter opens at_seed_edit_begin, and keyboard Enter
+                 * does reach it: td5_frontend.c TD5_NAVKEY_ENTER assigns
+                 * s_button_index = s_selected_button). What was missing is the
+                 * only part the player can see: this row always drew the
+                 * COMMITTED env value, so pressing Enter and typing changed
+                 * nothing on screen and the field read as a dead number.
+                 *
+                 * Draw the live buffer plus a caret while editing -- the same
+                 * idiom td5_raceopts_span_edit uses for its own digit field, so
+                 * the two editable fields in the frontend behave identically. */
+                if (s_at_seed_editing)
+                    snprintf(buf, sizeof(buf), "%s_", s_at_seed_buf);
+                else
+                    snprintf(buf, sizeof(buf), "%u", (unsigned int)td5_env_int(
+                                 "TD5RE_AUTOTRACK_SEED", 0, 0, 0x7FFFFFFF));
             } else if (rolled) {
                 const int id = at_roll_id_for(row);
                 snprintf(buf, sizeof(buf), "~%s",
@@ -7796,8 +7836,7 @@ int td5_autotrack_opts_row_count(void) { return s_at_view_n + 1; }
  * Modelled on td5_raceopts_span_edit_* (td5_frontend.c): Enter opens the
  * shared single-field editor, the tick swallows all other input while it is
  * open, Enter commits and ESC cancels. */
-static char s_at_seed_buf[12];
-static int  s_at_seed_editing;
+/* State hoisted above the row renderer -- see the [R22 item 3] note there. */
 
 static void at_seed_edit_begin(void)
 {

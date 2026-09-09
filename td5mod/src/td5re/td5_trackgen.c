@@ -804,6 +804,10 @@ typedef struct {
     short                n;
     short                legacy;  /* choice index matching PRE-R21 unset      */
     int                  lo, hi;  /* clamp for a pinned value (display only)  */
+    /* [R22] PRESENCE rank, 1 = restore first, 0 = not a presence entry. Rows
+     * that omit it are zero-initialised by C, so only the presence rows carry
+     * one. See the presence budget in td5_trackgen_resolve_rolls. */
+    unsigned char        pres_rank;
 } TG_RollEntry;
 
 /* Choice sets. These MUST match the studio's tables in td5_fe_race.c -- the
@@ -890,36 +894,55 @@ static const unsigned char k_tgr_sky_w[] = { 5, 15, 20, 25, 20, 15 };
 /* Shared boolean choice set. */
 static const int         k_tgr_bool_v[] = { 0, 1 };
 static const char *const k_tgr_bool_n[] = { "OFF", "ON" };
-/* PRESENCE: the OFF choice removes content. A seed that rolled guardrails,
- * sidewalks and scenery all off would read as broken rather than varied, so
- * these resolve to today's value -- while still being IN the mechanism and in
- * the report, so a later round tunes one byte instead of re-plumbing. */
-static const unsigned char k_tgr_w_keep[]      = {  0, 100 };
+/* PRESENCE: the OFF choice removes content.
+ *
+ * [R22] R21 shipped every presence entry on k_tgr_w_keep = { 0, 100 }, i.e.
+ * weighted to today's value, and the round doc called that "a later round tunes
+ * one byte". This is that round: the rows were reported as only PRETENDING to
+ * be random, which is exactly what a 0/100 weight is. They now carry real
+ * weights.
+ *
+ * The reason R21 hedged is still true -- a seed that rolled guardrails,
+ * sidewalks and scenery off at once reads as broken rather than varied -- so
+ * the hedge moved from the weights to a BUDGET (the presence budget in
+ * td5_trackgen_resolve_rolls). Two mechanisms, each doing one job: the weight
+ * says how often this row is absent, the budget says how much can be absent at
+ * once. Weighting alone cannot express the second: 23 independent 15% rolls
+ * still puts several seeds a year at eight things missing simultaneously, and
+ * those are the seeds a player would report as a broken generator.
+ *
+ * OFF rates are graded by how much a row removes, not by taste: k_tgr_w_scarce
+ * for the rows that take away a whole layer of the world, k_tgr_w_mostly_on for
+ * a feature, k_tgr_w_even for a detail nobody would call missing. */
+static const unsigned char k_tgr_w_scarce[]    = { 12,  88 };
 static const unsigned char k_tgr_w_mostly_on[] = { 25,  75 };
 static const unsigned char k_tgr_w_even[]      = { 50,  50 };
 static const unsigned char k_tgr_w_rare[]      = { 70,  30 };
 
 #define TGR_BOOL(nm, kb, slt, wts, leg) \
-    { nm, kb, slt, k_tgr_bool_v, k_tgr_bool_n, wts, 2, leg, 0, 1 }
+    { nm, kb, slt, k_tgr_bool_v, k_tgr_bool_n, wts, 2, leg, 0, 1, 0 }
+/* A presence row: same shape plus its restore rank for the budget. */
+#define TGR_PRES(nm, kb, slt, wts, leg, rank) \
+    { nm, kb, slt, k_tgr_bool_v, k_tgr_bool_n, wts, 2, leg, 0, 1, rank }
 
 /* MUST be in TD5_TgRollId order -- the array is indexed by the id. Salts are
  * independent of position, so the six original entries keep theirs and their
  * rolls are unchanged by everything appended after them. */
 static const TG_RollEntry k_tg_rolls[TD5_TG_ROLL_COUNT] = {
  /* name          knob                          salt         vals/names/weights                              n  leg  lo   hi   */
- { "TWISTINESS",  NULL,                         0x21010001u, k_tgr_twist_v,   k_tgr_twist_n,   k_tgr_twist_w,   4, 1, 0, 3 },
- { "CORNERS",     "TD5RE_AUTOTRACK_CURVESAFE",  0x21010002u, k_tgr_corner_v,  k_tgr_corner_n,  k_tgr_corner_w,  5, 2, 100, 800 },
- { "GRADIENT",    "TD5RE_AUTOTRACK_GRADE",      0x21010003u, k_tgr_grade_v,   k_tgr_grade_n,   k_tgr_grade_w,   5, 2, 0, 200 },
- { "DUAL LANES",  "TD5RE_AUTOTRACK_PCT_DUAL",   0x21010004u, k_tgr_dual_v,    k_tgr_dual_n,    k_tgr_dual_w,    5, 2, 0, 100 },
- { "HILLS",       "TD5RE_AUTOTRACK_ELEVATION",  0x21010005u, k_tgr_hills_v,   k_tgr_hills_n,   k_tgr_hills_w,   5, 2, 0, 40000 },
- { "LENGTH",      "TD5RE_AUTOTRACK_SPANS",      0x21010007u, k_tgr_len_v,     k_tgr_len_n,     k_tgr_len_w,     5, 2, 200, 3000 },
- { "TIME OF DAY", "TD5RE_AUTOTRACK_NIGHT",      0x21010006u, k_tgr_night_v,   k_tgr_night_n,   NULL,            2, 0, 0, 1 },
- { "LANE VARIETY","TD5RE_AUTOTRACK_LANE_PCT",   0x21010008u, k_tgr_lanepct_v, k_tgr_lanepct_n, k_tgr_lanepct_w, 5, 2, 0, 100 },
- { "RUN-OFF",     "TD5RE_AUTOTRACK_RUNOFF",     0x21010009u, k_tgr_runoff_v,  k_tgr_runoff_n,  k_tgr_runoff_w,  5, 2, 0, 4000 },
- { "VIEW REACH",  "TD5RE_AUTOTRACK_TERRAIN_REACH",0x2101000Au,k_tgr_reach_v,  k_tgr_reach_n,   k_tgr_reach_w,   4, 0, 1000, 400000 },
- { "TRANSITIONS", "TD5RE_AUTOTRACK_BIOME_BLEND",0x2101000Bu, k_tgr_blend_v,   k_tgr_blend_n,   k_tgr_blend_w,   4, 2, 0, 75 },
- { "RAIL DENSITY","TD5RE_AUTOTRACK_RAIL_DEG10", 0x2101000Cu, k_tgr_rail_v,    k_tgr_rail_n,    k_tgr_rail_w,    5, 2, 0, 3600 },
- { "SKY",         "TD5RE_AUTOTRACK_SKY_ANIM",   0x2101000Du, k_tgr_sky_v,     k_tgr_sky_n,     k_tgr_sky_w,     6, 3, -1, 240 },
+ { "TWISTINESS",  NULL,                         0x21010001u, k_tgr_twist_v,   k_tgr_twist_n,   k_tgr_twist_w,   4, 1, 0, 3 , 0 },
+ { "CORNERS",     "TD5RE_AUTOTRACK_CURVESAFE",  0x21010002u, k_tgr_corner_v,  k_tgr_corner_n,  k_tgr_corner_w,  5, 2, 100, 800 , 0 },
+ { "GRADIENT",    "TD5RE_AUTOTRACK_GRADE",      0x21010003u, k_tgr_grade_v,   k_tgr_grade_n,   k_tgr_grade_w,   5, 2, 0, 200 , 0 },
+ { "DUAL LANES",  "TD5RE_AUTOTRACK_PCT_DUAL",   0x21010004u, k_tgr_dual_v,    k_tgr_dual_n,    k_tgr_dual_w,    5, 2, 0, 100 , 0 },
+ { "HILLS",       "TD5RE_AUTOTRACK_ELEVATION",  0x21010005u, k_tgr_hills_v,   k_tgr_hills_n,   k_tgr_hills_w,   5, 2, 0, 40000 , 0 },
+ { "LENGTH",      "TD5RE_AUTOTRACK_SPANS",      0x21010007u, k_tgr_len_v,     k_tgr_len_n,     k_tgr_len_w,     5, 2, 200, 3000 , 0 },
+ { "TIME OF DAY", "TD5RE_AUTOTRACK_NIGHT",      0x21010006u, k_tgr_night_v,   k_tgr_night_n,   NULL,            2, 0, 0, 1 , 0 },
+ { "LANE VARIETY","TD5RE_AUTOTRACK_LANE_PCT",   0x21010008u, k_tgr_lanepct_v, k_tgr_lanepct_n, k_tgr_lanepct_w, 5, 2, 0, 100 , 0 },
+ { "RUN-OFF",     "TD5RE_AUTOTRACK_RUNOFF",     0x21010009u, k_tgr_runoff_v,  k_tgr_runoff_n,  k_tgr_runoff_w,  5, 2, 0, 4000 , 0 },
+ { "VIEW REACH",  "TD5RE_AUTOTRACK_TERRAIN_REACH",0x2101000Au,k_tgr_reach_v,  k_tgr_reach_n,   k_tgr_reach_w,   4, 0, 1000, 400000 , 0 },
+ { "TRANSITIONS", "TD5RE_AUTOTRACK_BIOME_BLEND",0x2101000Bu, k_tgr_blend_v,   k_tgr_blend_n,   k_tgr_blend_w,   4, 2, 0, 75 , 0 },
+ { "RAIL DENSITY","TD5RE_AUTOTRACK_RAIL_DEG10", 0x2101000Cu, k_tgr_rail_v,    k_tgr_rail_n,    k_tgr_rail_w,    5, 2, 0, 3600 , 0 },
+ { "SKY",         "TD5RE_AUTOTRACK_SKY_ANIM",   0x2101000Du, k_tgr_sky_v,     k_tgr_sky_n,     k_tgr_sky_w,     6, 3, -1, 240 , 0 },
  TGR_BOOL("SNOW",          "TD5RE_AUTOTRACK_SNOW",           0x2101000Eu, k_tgr_w_rare,      1),
  TGR_BOOL("PARKS",         "TD5RE_AUTOTRACK_PARKS",          0x2101000Fu, k_tgr_w_even,      0),
  TGR_BOOL("PARK HOUSES",   "TD5RE_AUTOTRACK_PARK_HOUSES",    0x21010010u, k_tgr_w_mostly_on, 1),
@@ -931,30 +954,39 @@ static const TG_RollEntry k_tg_rolls[TD5_TG_ROLL_COUNT] = {
  TGR_BOOL("BRIDGE STYLE",  "TD5RE_AUTOTRACK_BRIDGE_VARIETY", 0x21010016u, k_tgr_w_mostly_on, 1),
  TGR_BOOL("CLEAR VERGES",  "TD5RE_AUTOTRACK_FLORA_CLEAR",    0x21010017u, k_tgr_w_mostly_on, 1),
  TGR_BOOL("MIRROR TREES",  "TD5RE_AUTOTRACK_TREE_MIRROR",    0x21010018u, k_tgr_w_even,      1),
- /* ---- PRESENCE from here down: weighted to today's value ---------------- */
- TGR_BOOL("BRANCHES",      "TD5RE_AUTOTRACK_BRANCHES",       0x21010019u, k_tgr_w_keep, 1),
- TGR_BOOL("TERRAIN",       "TD5RE_AUTOTRACK_TERRAIN_HILLS",  0x2101001Au, k_tgr_w_keep, 1),
- TGR_BOOL("BACKDROP",      "TD5RE_AUTOTRACK_TERRAIN_FAR",    0x2101001Bu, k_tgr_w_keep, 1),
- TGR_BOOL("COASTLINE",     "TD5RE_AUTOTRACK_COASTLINE",      0x2101001Cu, k_tgr_w_keep, 1),
- TGR_BOOL("BRIDGES",       "TD5RE_AUTOTRACK_BRIDGES",        0x2101001Du, k_tgr_w_keep, 1),
- TGR_BOOL("OVERHEADS",     "TD5RE_AUTOTRACK_BRIDGE_OVERHEAD",0x2101001Eu, k_tgr_w_keep, 1),
- TGR_BOOL("TUNNELS",       "TD5RE_AUTOTRACK_TUNNELS",        0x2101001Fu, k_tgr_w_keep, 1),
- TGR_BOOL("GUARDRAILS",    "TD5RE_AUTOTRACK_GUARDRAILS",     0x21010020u, k_tgr_w_keep, 1),
- TGR_BOOL("ARMCO",         "TD5RE_AUTOTRACK_ARMCO",          0x21010021u, k_tgr_w_keep, 1),
- TGR_BOOL("DISTRICTS",     "TD5RE_AUTOTRACK_DISTRICTS",      0x21010022u, k_tgr_w_keep, 1),
- TGR_BOOL("BUILDING MASS", "TD5RE_AUTOTRACK_FACADE_MASS",    0x21010023u, k_tgr_w_keep, 1),
- TGR_BOOL("BACK ROWS",     "TD5RE_AUTOTRACK_BACKROWS",       0x21010024u, k_tgr_w_keep, 1),
- TGR_BOOL("CROSSINGS",     "TD5RE_AUTOTRACK_CROSSINGS",      0x21010025u, k_tgr_w_keep, 1),
- TGR_BOOL("SIDE STREETS",  "TD5RE_AUTOTRACK_CROSS_STREETS",  0x21010026u, k_tgr_w_keep, 1),
- TGR_BOOL("ROAD MARKS",    "TD5RE_AUTOTRACK_CROSS_MARKINGS", 0x21010027u, k_tgr_w_keep, 1),
- TGR_BOOL("INTERSECTIONS", "TD5RE_AUTOTRACK_INTERSECTIONS",  0x21010028u, k_tgr_w_keep, 1),
- TGR_BOOL("SIDEWALKS",     "TD5RE_AUTOTRACK_SIDEWALKS",      0x21010029u, k_tgr_w_keep, 1),
- TGR_BOOL("SCENERY",       "TD5RE_AUTOTRACK_SCENERY",        0x2101002Au, k_tgr_w_keep, 1),
- TGR_BOOL("TREE LINE",     "TD5RE_AUTOTRACK_TREELINE",       0x2101002Bu, k_tgr_w_keep, 1),
- TGR_BOOL("LAMP POSTS",    "TD5RE_AUTOTRACK_LAMP_POSTS",     0x2101002Cu, k_tgr_w_keep, 1),
- TGR_BOOL("BANNERS",       "TD5RE_AUTOTRACK_BANNERS",        0x2101002Du, k_tgr_w_keep, 1),
- TGR_BOOL("REAL TEXTURES", "TD5RE_AUTOTRACK_REAL_TEX",       0x2101002Eu, k_tgr_w_keep, 1),
- TGR_BOOL("REAL FURNITURE","TD5RE_AUTOTRACK_REAL_FURNITURE", 0x2101002Fu, k_tgr_w_keep, 1)
+ /* ---- PRESENCE from here down ------------------------------------------
+  * [R22] Real weights + a restore RANK. Rank 1 is restored first when a seed
+  * busts the presence budget, so the ordering is "what would a player miss
+  * most", not the table order. Ranks are unique so the restore is a total
+  * order and therefore deterministic. Salts are untouched: an entry's roll is
+  * a pure function of seed and salt, so re-weighting changes WHICH seeds turn
+  * a row off without renumbering anything. */
+ TGR_PRES("BRANCHES",      "TD5RE_AUTOTRACK_BRANCHES",       0x21010019u, k_tgr_w_mostly_on, 1, 23),
+ TGR_PRES("TERRAIN",       "TD5RE_AUTOTRACK_TERRAIN_HILLS",  0x2101001Au, k_tgr_w_scarce,    1,  2),
+ TGR_PRES("BACKDROP",      "TD5RE_AUTOTRACK_TERRAIN_FAR",    0x2101001Bu, k_tgr_w_scarce,    1,  3),
+ TGR_PRES("COASTLINE",     "TD5RE_AUTOTRACK_COASTLINE",      0x2101001Cu, k_tgr_w_mostly_on, 1, 22),
+ /* BRIDGES/TUNNELS are scarce for a reason beyond looks: with the topology
+  * generator the structures are DETECTED from terrain, so a water-heavy seed
+  * with bridges off falls back to causeways and forced conforms. */
+ TGR_PRES("BRIDGES",       "TD5RE_AUTOTRACK_BRIDGES",        0x2101001Du, k_tgr_w_scarce,    1, 10),
+ TGR_PRES("OVERHEADS",     "TD5RE_AUTOTRACK_BRIDGE_OVERHEAD",0x2101001Eu, k_tgr_w_even,      1, 19),
+ TGR_PRES("TUNNELS",       "TD5RE_AUTOTRACK_TUNNELS",        0x2101001Fu, k_tgr_w_scarce,    1, 11),
+ TGR_PRES("GUARDRAILS",    "TD5RE_AUTOTRACK_GUARDRAILS",     0x21010020u, k_tgr_w_scarce,    1,  6),
+ TGR_PRES("ARMCO",         "TD5RE_AUTOTRACK_ARMCO",          0x21010021u, k_tgr_w_even,      1, 18),
+ TGR_PRES("DISTRICTS",     "TD5RE_AUTOTRACK_DISTRICTS",      0x21010022u, k_tgr_w_scarce,    1,  7),
+ TGR_PRES("BUILDING MASS", "TD5RE_AUTOTRACK_FACADE_MASS",    0x21010023u, k_tgr_w_scarce,    1,  8),
+ TGR_PRES("BACK ROWS",     "TD5RE_AUTOTRACK_BACKROWS",       0x21010024u, k_tgr_w_mostly_on, 1, 15),
+ TGR_PRES("CROSSINGS",     "TD5RE_AUTOTRACK_CROSSINGS",      0x21010025u, k_tgr_w_mostly_on, 1, 12),
+ TGR_PRES("SIDE STREETS",  "TD5RE_AUTOTRACK_CROSS_STREETS",  0x21010026u, k_tgr_w_mostly_on, 1, 13),
+ TGR_PRES("ROAD MARKS",    "TD5RE_AUTOTRACK_CROSS_MARKINGS", 0x21010027u, k_tgr_w_mostly_on, 1, 16),
+ TGR_PRES("INTERSECTIONS", "TD5RE_AUTOTRACK_INTERSECTIONS",  0x21010028u, k_tgr_w_mostly_on, 1, 14),
+ TGR_PRES("SIDEWALKS",     "TD5RE_AUTOTRACK_SIDEWALKS",      0x21010029u, k_tgr_w_scarce,    1,  5),
+ TGR_PRES("SCENERY",       "TD5RE_AUTOTRACK_SCENERY",        0x2101002Au, k_tgr_w_scarce,    1,  1),
+ TGR_PRES("TREE LINE",     "TD5RE_AUTOTRACK_TREELINE",       0x2101002Bu, k_tgr_w_mostly_on, 1,  9),
+ TGR_PRES("LAMP POSTS",    "TD5RE_AUTOTRACK_LAMP_POSTS",     0x2101002Cu, k_tgr_w_even,      1, 17),
+ TGR_PRES("BANNERS",       "TD5RE_AUTOTRACK_BANNERS",        0x2101002Du, k_tgr_w_even,      1, 20),
+ TGR_PRES("REAL TEXTURES", "TD5RE_AUTOTRACK_REAL_TEX",       0x2101002Eu, k_tgr_w_scarce,    1,  4),
+ TGR_PRES("REAL FURNITURE","TD5RE_AUTOTRACK_REAL_FURNITURE", 0x2101002Fu, k_tgr_w_mostly_on, 1, 21)
 };
 
 /* The table is indexed by TD5_TgRollId, so a missing or extra row would
@@ -1089,6 +1121,70 @@ void td5_trackgen_resolve_rolls(unsigned int seed, TD5_TgRolls *out)
             out->value[i]  = e->vals[c];
         }
     }
+    /* [R22] PRESENCE BUDGET -- the hedge that lets the presence weights above
+     * be honest. Each presence row now really rolls, so a seed can legitimately
+     * turn several layers of the world off at once; past a few simultaneous
+     * absences a track stops reading as "varied" and starts reading as "the
+     * generator is broken", which is the complaint R21 avoided by not rolling
+     * these rows at all.
+     *
+     * Restores by RANK, not by seed: given the same set of OFF rows the same
+     * ones come back, so the budget cannot itself become a source of variance.
+     * Runs INSIDE the resolver, which is the only place it can run -- the
+     * resolver is what both the studio display and the build consume, so a
+     * budget applied anywhere else would let the screen promise a row the
+     * track does not have.
+     *
+     * PINNED rows are counted but never restored: if a player switched six
+     * things off by hand that is the track they asked for. They are counted so
+     * their absences still consume the budget, and therefore still hold rolled
+     * rows on -- otherwise pinning three things off and rolling four more would
+     * produce the very seven-holes-at-once track this exists to prevent.
+     *
+     * THE CAP IS MEASURED, NOT PICKED. Over 20000 seeds the raw absence count
+     * averages 5.45 (sd ~1.9), so the cap decides whether this is a tail guard
+     * or a second pinning mechanism:
+     *
+     *   cap   budget binds   a rank<=8 row actually stays OFF
+     *    4        67.8%                18.2%
+     *    6        28.3%                46.6%
+     *    8         6.2%                60.9%
+     *   10         0.7%                63.5%
+     *
+     * At the 4 this first shipped with, the budget fired on two thirds of all
+     * seeds and -- restoring lowest rank first -- held the structural rows ON
+     * almost always, which is exactly the "only pretending to be random"
+     * behaviour R22 exists to remove. 8 fires on 6% of seeds and captures
+     * nearly all the available variety; past 8 the curve is flat (60.9 -> 63.5)
+     * while the number of simultaneous holes keeps growing, so 8 is the knee.
+     * Re-derive with the offline model if the weights above ever move. */
+    if (on) {
+        const int cap = td5_env_int("TD5RE_R22_PRESENCE_OFF_MAX", 8, 0, 64);
+        int off_n = 0;
+
+        for (i = 0; i < TD5_TG_ROLL_COUNT; i++) {
+            const TG_RollEntry *e = &k_tg_rolls[i];
+            if (!e->name || !e->pres_rank) continue;
+            if (out->value[i] == 0) off_n++;
+        }
+        while (off_n > cap) {
+            int best = -1, best_rank = 0;
+            for (i = 0; i < TD5_TG_ROLL_COUNT; i++) {
+                const TG_RollEntry *e = &k_tg_rolls[i];
+                if (!e->name || !e->pres_rank) continue;
+                if (out->pinned[i] || out->value[i] != 0) continue;
+                if (best < 0 || e->pres_rank < best_rank) {
+                    best = i; best_rank = e->pres_rank;
+                }
+            }
+            if (best < 0) break;   /* every remaining absence is a human's pin */
+            out->choice  [best] = 1;
+            out->value   [best] = k_tg_rolls[best].vals[1];
+            out->restored[best] = 1;
+            off_n--;
+        }
+    }
+
     /* TIME OF DAY is owned by tg_decide_night; mirror its answer so the report
      * cannot contradict the build. */
     {
@@ -1298,7 +1394,7 @@ void tg_rolls_apply_spec(TD5_TrackGenSpec *spec)
 void tg_rolls_report(void)
 {
     const char *unpinned = tg_rolls_enabled() ? "rolled" : "legacy";
-    int i, rolled = 0, pinned = 0;
+    int i, rolled = 0, pinned = 0, restored = 0, pres_off = 0;
 
     if (!s_rolls_valid) return;
     TD5_LOG_I(LOG_TAG, "trackgen: [R21 ROLL] ---- randomized parameters "
@@ -1308,6 +1404,8 @@ void tg_rolls_report(void)
         const TG_RollEntry *e = &k_tg_rolls[i];
         if (!e->name) continue;
         if (s_rolls.pinned[i]) pinned++; else rolled++;
+        if (s_rolls.restored[i]) restored++;
+        if (e->pres_rank && s_rolls.value[i] == 0) pres_off++;
         if (i == TD5_TG_ROLL_TWIST) {
             int mix[3];
             td5_trackgen_twist_mix(s_rolls.choice[i], mix);
@@ -1322,12 +1420,31 @@ void tg_rolls_report(void)
                       td5_trackgen_roll_choice_name(i, s_rolls.choice[i]),
                       s_rolls.pinned[i] ? "PINNED" : unpinned,
                       s_rolls.value[i],
-                      s_rolls.pinned[i] && e->knob ? " via " : "",
-                      s_rolls.pinned[i] && e->knob ? e->knob : "");
+                      s_rolls.restored[i] ? " RESTORED by the presence budget"
+                      : s_rolls.pinned[i] && e->knob ? " via " : "",
+                      s_rolls.restored[i] ? ""
+                      : s_rolls.pinned[i] && e->knob ? e->knob : "");
         }
     }
     TD5_LOG_I(LOG_TAG, "trackgen: [R21 ROLL] ---- %d rolled, %d pinned ----",
               rolled, pinned);
+    /* [R22] The presence line is what makes the budget tunable: it says how
+     * much of the world this seed left out and how much the budget put back. */
+    TD5_LOG_I(LOG_TAG, "trackgen: [R22 PRESENCE] %d of %d presence row(s) OFF "
+              "(budget %d), %d restored by rank (knob "
+              "TD5RE_R22_PRESENCE_OFF_MAX)", pres_off,
+              tg_rolls_presence_count(),
+              td5_env_int("TD5RE_R22_PRESENCE_OFF_MAX", 8, 0, 64), restored);
+}
+
+/* How many entries are presence rows -- reported rather than hardcoded as 23,
+ * so adding a presence row cannot make the line lie. */
+int tg_rolls_presence_count(void)
+{
+    int i, n = 0;
+    for (i = 0; i < TD5_TG_ROLL_COUNT; i++)
+        if (k_tg_rolls[i].name && k_tg_rolls[i].pres_rank) n++;
+    return n;
 }
 
 /* ---- [R21 MOOD] -----------------------------------------------------------
@@ -3851,6 +3968,13 @@ int td5_trackgen_preview_route(const TD5_TrackGenSpec *spec,
         out_stats->node_count = nl.count;
         out_stats->span_count = nspans;
         out_stats->ring_len   = s_ring_len;
+        /* [R22 item 1] Published, not derived. tg_finish_span is only correct
+         * AFTER tg_emit_strip has filled s_forks[] and the structure table,
+         * which is exactly here: it consults tg_span_in_fork_clear and
+         * tg_span_in_tunnel to walk the line back off a gore or out of a bore,
+         * so no caller can reproduce it from ring_len and the RUN-OFF knob. */
+        out_stats->grid_span   = TD5_TG_GRID_SPAN;
+        out_stats->finish_span = tg_finish_span(s_ring_len);
         out_stats->fork_count = s_fork_count;
         out_stats->cancelled  = s_preview_cancelled;
         for (s = 0; s < TD5_TG_SECTION_COUNT; s++)

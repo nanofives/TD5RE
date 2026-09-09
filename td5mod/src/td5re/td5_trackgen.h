@@ -90,7 +90,21 @@ typedef struct {
     unsigned int seed;
     int node_count;                      /* centerline nodes walked */
     int span_count;                      /* strip spans incl. branch corridors */
-    int ring_len;                        /* main-ring spans; finish lives here */
+    int ring_len;                        /* main-ring spans (NOT the finish)   */
+    /* [R22 item 1] Where the START and FINISH actually are, in the same span
+     * index space as the published points. Both are published rather than
+     * derived by the caller, because neither is computable outside the
+     * generator: the grid is an interior span, and tg_finish_span walks the
+     * line BACK out of any fork or tunnel run it lands in, so it is a function
+     * of the fork/structure tables and not just of ring_len - runoff.
+     *
+     * The studio used to mark the start at point 0 and the finish at ring_len.
+     * Both were wrong, and the finish was wrong by the whole RUN-OFF row --
+     * 100 spans by default and up to 400 -- which is what "the indicators do
+     * not follow the actual end of the track" was. -1 = no finish placed (a
+     * ring too short to hold a grid, a race and a run-off). */
+    int grid_span;                       /* start line                         */
+    int finish_span;                     /* finish line, or -1                 */
     int fork_count;
     int tally[TD5_TG_SECTION_COUNT];     /* sections actually placed */
     int min_y, max_y;                    /* elevation range, world units */
@@ -292,6 +306,12 @@ typedef struct {
     int           value [TD5_TG_ROLL_COUNT];  /* resolved literal (180, 6000) */
     unsigned char choice[TD5_TG_ROLL_COUNT];  /* index into the choice set     */
     unsigned char pinned[TD5_TG_ROLL_COUNT];  /* 1 = the knob pinned it        */
+    /* [R22] 1 = this presence entry rolled OFF and the presence budget put it
+     * back ON. Recorded rather than silently overwritten so the report and the
+     * studio can say so: a row that reads ON while its roll said OFF is
+     * otherwise indistinguishable from a row that rolled ON, and a budget that
+     * cannot be observed is a budget nobody can tune. */
+    unsigned char restored[TD5_TG_ROLL_COUNT];
 } TD5_TgRolls;
 
 /* PURE: touches no statics, consumes no RNG, safe on any thread. Same

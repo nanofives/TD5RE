@@ -993,10 +993,21 @@ static void tg_road_shore_build(const TG_NodeList *nl)
             s_shore_y[i][side] = tg_world_sea_y();
             for (d = 0.0; d <= reach; d += 500.0) {
                 const double wx = n->x + lx * (half + d), wz = n->z + lz * (half + d);
-                const double wy = tg_world_water_y(wx, wz);
-                if (tg_world_h(wx, wz) < wy) {
+                /* [R22] Ask tg_world_is_water, not the raw height-vs-surface
+                 * comparison it wraps. The raw test misses the one rule the
+                 * world module exists to enforce: a CONFORMED cell is a road
+                 * bed and is never water, "even where it lies below a
+                 * neighbouring river's surface (a cutting beside a river)".
+                 *
+                 * With the raw test, a road cut alongside a river registered as
+                 * the shore at d = 0. tg_emit_water clamps its inner edge to
+                 * the road edge, so the quad was then laid FROM THE ASPHALT at
+                 * the river's surface height -- water rendered over the road.
+                 * Marching on instead finds the real bank, and the plane starts
+                 * beyond the bed where it belongs. */
+                if (tg_world_is_water(wx, wz)) {
                     s_shore_d[i][side] = d;
-                    s_shore_y[i][side] = wy;
+                    s_shore_y[i][side] = tg_world_water_y(wx, wz);
                     any = 1;
                     break;
                 }
@@ -1052,6 +1063,78 @@ double tg_road_node_water_y(int i)
 /* Finalise the profile: solve the last window, classify everything, lay
  * chords over structure runs (with the raised-cosine clearance hump a deck
  * needs over water), report, then conform the world to the road bed. */
+/* [R22] May span `q` be absorbed into a bridge run by the abutment pad? Mirrors
+ * every guard tg_road_classify applies, so padding can never produce a table
+ * the classifier itself would have refused. */
+static int tg_road_pad_ok(int q)
+{
+    int r, lo, hi;
+    if (q < 0 || q >= s_struct_n) return 0;
+    if (s_struct[q] != TG_ST_NONE) return 0;      /* already a structure  */
+    if (q <= TD5_TG_GRID_SPAN + 24) return 0;     /* never off the grid   */
+    if (tg_span_in_fork_run(q)) return 0;         /* fork geometry owns it */
+    /* The bridge/tunnel interlock: a padded span must not bring a deck within
+     * CLEAR spans of a bore, which is the one pairing the classifier resolves
+     * by deleting a whole run. */
+    lo = q - TD5_TG_BRIDGE_TUNNEL_CLEAR; if (lo < 0) lo = 0;
+    hi = q + TD5_TG_BRIDGE_TUNNEL_CLEAR; if (hi > s_struct_n - 1) hi = s_struct_n - 1;
+    for (r = lo; r <= hi; r++) if (s_struct[r] == TG_ST_TUNNEL) return 0;
+    return 1;
+}
+
+/* [R22] ABUTMENT PAD -- "this bridge is too short and looks sloppy; bridges
+ * should be longer".
+ *
+ * A span's kind is the OR of its two end nodes, so a SINGLE wet node yields
+ * exactly two BRIDGE spans, and TG_ROAD_WATER_MIN is 2 -- so that two-span deck
+ * survives as the shortest legal bridge: 3000 units of road, 12 vertices,
+ * crossing a stream nobody can see. The classifier cannot help; it only ever
+ * trims or deletes a run, there is no pass anywhere that lengthens one, and its
+ * own comment on WATER_MIN promises "(+abutments)" that were never written.
+ *
+ * Raising WATER_MIN is the WRONG fix: a run shorter than the minimum is
+ * DELETED, so a higher minimum turns each stream crossing into a causeway
+ * through the water, which is worse than a short deck. Grow the run instead,
+ * from both ends together so the deck stays centred on the water it crosses,
+ * and the crossing gains approach spans that read as abutments.
+ *
+ * Runs AFTER the walk, on the final table: padding during the walk would extend
+ * into spans that a later revision reclassifies. Everything downstream reads
+ * this same table -- the chords and clearance hump below, the ground skirt's
+ * `open` flag, the water emitter, the guard -- so all of them see the padded
+ * run and none of them needs to know padding happened. */
+static void tg_road_pad_bridges(int *out_runs, int *out_spans)
+{
+    const int want = td5_env_int("TD5RE_R22_BRIDGE_PAD", 10, 0, 64);
+    const int cap  = tg_bridge_max_spans();
+    const int target = (want < cap) ? want : cap;
+    int s, runs = 0, added = 0;
+
+    if (want <= 0) return;
+    for (s = 0; s < s_struct_n; ) {
+        int e = s, len;
+        if (s_struct[s] != TG_ST_BRIDGE) { s++; continue; }
+        while (e + 1 < s_struct_n && s_struct[e + 1] == TG_ST_BRIDGE) e++;
+        len = e - s + 1;
+        if (len < target) {
+            runs++;
+            while (len < target) {
+                int grew = 0;
+                if (tg_road_pad_ok(s - 1)) {
+                    s_struct[--s] = TG_ST_BRIDGE; len++; added++; grew = 1;
+                }
+                if (len < target && tg_road_pad_ok(e + 1)) {
+                    s_struct[++e] = TG_ST_BRIDGE; len++; added++; grew = 1;
+                }
+                if (!grew) break;   /* boxed in by grid, fork or a bore */
+            }
+        }
+        s = e + 1;
+    }
+    if (out_runs) *out_runs = runs;
+    if (out_spans) *out_spans = added;
+}
+
 void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
 {
     const double span_len = (double)spec->span_length;
@@ -1065,6 +1148,17 @@ void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
     tg_track_min_y_invalidate();
     tg_road_revise(nl, NULL, NULL);
     s_struct_fin = s_struct_n;
+
+    /* [R22] Grow short decks into abutments before anything reads the table. */
+    {
+        int pad_runs = 0, pad_spans = 0;
+        tg_road_pad_bridges(&pad_runs, &pad_spans);
+        if (pad_runs > 0)
+            TD5_LOG_I(LOG_TAG, "trackgen: [R22 BRIDGE PAD] %d short deck(s) "
+                      "grown by %d abutment span(s) (target %d, knob "
+                      "TD5RE_R22_BRIDGE_PAD)", pad_runs, pad_spans,
+                      td5_env_int("TD5RE_R22_BRIDGE_PAD", 10, 0, 64));
+    }
 
     /* Chords over runs. */
     for (s = 0; s < s_struct_n; ) {
@@ -1183,14 +1277,51 @@ void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
 
     tg_road_shore_build(nl);
     {
-        int wet_spans = 0, coast_spans = 0;
+        int wet_spans = 0, coast_spans = 0, in_bed = 0, in_bed_raw = 0;
         for (s = 0; s < s_shore_n; s++) {
             if (s < s_rn_n && s_rn[s].wet) wet_spans++;
             else if (s_wet_any[s]) coast_spans++;
+            /* [R22] The invariant the shore fix establishes, counted so it can
+             * be checked instead of believed: no OPEN span's shore may sit
+             * inside its own road bed. tg_emit_water clamps a quad's inner edge
+             * to the road edge, so a shore at d < the bed verge is a water plane
+             * laid over the asphalt -- the reported "water rendered over the
+             * road". A conformed bed is not water (tg_world_is_water), so after
+             * the fix this is 0 on every open span; a bridge run has no bed and
+             * is excluded. */
+            if (s < s_struct_n && s_struct[s] == TG_ST_NONE &&
+                (s_shore_d[s][0] < TD5_TG_ROAD_BED_VERGE ||
+                 s_shore_d[s][1] < TD5_TG_ROAD_BED_VERGE)) in_bed++;
+            /* [R22] The same count under the OLD raw test, so one run reports
+             * both and the fix is measured rather than assumed. Reporting only
+             * the post-fix count is a false green: it says the invariant holds,
+             * not that anything was ever wrong. Re-walks the first bed-width of
+             * the ray with the raw comparison the shore build used to make. */
+            if (s < s_struct_n && s_struct[s] == TG_ST_NONE && s < nl->count) {
+                const TG_Node *n = &nl->v[s];
+                const double half = n->width * 0.5;
+                int side2;
+                for (side2 = 0; side2 < 2 && s < s_shore_n; side2++) {
+                    const double sgn = side2 ? -1.0 : 1.0;
+                    const double lx = n->tz * sgn, lz = -n->tx * sgn;
+                    double d2;
+                    for (d2 = 0.0; d2 < TD5_TG_ROAD_BED_VERGE; d2 += 500.0) {
+                        const double wx = n->x + lx * (half + d2);
+                        const double wz = n->z + lz * (half + d2);
+                        if (tg_world_h(wx, wz) < tg_world_water_y(wx, wz)) {
+                            in_bed_raw++;
+                            side2 = 2;      /* count the span once */
+                            break;
+                        }
+                    }
+                }
+            }
         }
         TD5_LOG_I(LOG_TAG, "trackgen: [WATER] %d span(s) over water, %d with a "
-                  "shore within reach, sea level %.0f", wet_spans, coast_spans,
-                  tg_world_sea_y());
+                  "shore within reach, sea level %.0f; %d open span(s) with a "
+                  "shore INSIDE the road bed (must be 0; the pre-R22 raw test "
+                  "found %d)", wet_spans, coast_spans,
+                  tg_world_sea_y(), in_bed, in_bed_raw);
     }
 
     TD5_LOG_I(LOG_TAG, "trackgen: [STRUCT] bridges %d run(s) / %d span(s) (longest %d, "
