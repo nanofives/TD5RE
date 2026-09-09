@@ -491,11 +491,15 @@ def _aabb_gap_xz(a, b):
     return (dx * dx + dz * dz) ** 0.5
 
 
-def structure_prims(model, page_role):
-    """Every primitive in the level that could be part of a built structure --
-    ground, road and foliage held out, because those are what bridge unrelated
-    buildings together."""
-    prims = []
+def level_prims(model, page_role):
+    """(structure, slabs) for a whole level.
+
+    structure -- what a building can be made of.
+    slabs     -- flat ground/road/paving. Held OUT of clustering because they
+                 are what bridges unrelated buildings into one lump, but kept
+                 so attach_slabs can put a landmark's own paving back under it
+                 afterwards."""
+    structure, slabs = [], []
     for mi, mesh in enumerate(model["meshes"]):
         r = split_mesh(mesh, mode="page")
         if r["reason"] != SPLIT_OK:
@@ -503,25 +507,105 @@ def structure_prims(model, page_role):
         for p in r["parts"]:
             dx, dy, dz = p["extent"]
             role = _prim_role(p["pages"], page_role)
-            if dy <= SEG_FLAT_Y and max(dx, dz) > SEG_FLAT_XZ:
-                continue
-            if role in GROUND_ROLES or role in LOOSE_ROLES:
-                continue
-            if dy < SEG_MIN_H:
-                continue
             p["mesh_index"] = mi
             p["role"] = role
-            prims.append(p)
-    return prims
+            flat = dy <= SEG_FLAT_Y and max(dx, dz) > SEG_FLAT_XZ
+            if flat or role in GROUND_ROLES:
+                slabs.append(p)
+            elif role in LOOSE_ROLES or dy < SEG_MIN_H:
+                continue
+            else:
+                structure.append(p)
+    return structure, slabs
+
+
+def structure_prims(model, page_role):
+    return level_prims(model, page_role)[0]
+
+
+# A landmark's PAVING, put back after segmentation. Two gates, both needed:
+#   size  -- a road ribbon runs the length of the track, and attaching one would
+#            turn a 7000-unit building into a track-long prefab. A plaza is
+#            plaza-sized, so cap the slab's own extent.
+#   height-- paving belongs at the building's BASE. Without this the deck of a
+#            flyover passing overhead would be adopted as a forecourt.
+SLAB_PAD = 1200.0        # how far past the footprint a slab CENTRE may sit
+SLAB_Y_TOL = 2500.0
+SLAB_GROWTH = 1.45       # the object may not exceed this x its bare footprint
+
+
+def attach_slabs(landmarks, slabs, pad=SLAB_PAD, y_tol=SLAB_Y_TOL,
+                 growth=SLAB_GROWTH):
+    """Give each landmark the flat paving that sits UNDER it.
+
+    Three gates, and the first two were learned the hard way -- attaching every
+    slab that merely touched the footprint doubled the median object (7051 ->
+    13762) and pushed the largest to 27703, i.e. straight back to the
+    frontage-chunk scale this whole pass exists to escape:
+
+      CENTRE-IN  the slab's centre must lie inside the padded footprint, not
+                 merely overlap its edge. An edge-touching slab is the
+                 neighbour's forecourt, or the road.
+      GROWTH     the object may not exceed `growth` x its bare structural
+                 footprint. This is the real bound: paving DRESSES a building,
+                 it does not redefine how big it is.
+      BASE       paving belongs at the building's base, so a flyover deck
+                 passing overhead is not adopted as a forecourt.
+
+    A slab is claimed once, so two neighbours cannot both take the same court.
+    """
+    if not landmarks or not slabs:
+        return 0
+    taken = [False] * len(slabs)
+    n = 0
+    for o in landmarks:
+        a = list(o["aabb"])
+        base = a[1]
+        lim_x = max((a[3] - a[0]) * growth, 4000.0)
+        lim_z = max((a[5] - a[2]) * growth, 4000.0)
+        box = list(a)
+        add = []
+        for i, s in enumerate(slabs):
+            if taken[i]:
+                continue
+            b = s["aabb"]
+            scx, scz = (b[0] + b[3]) * 0.5, (b[2] + b[5]) * 0.5
+            if not (a[0] - pad <= scx <= a[3] + pad
+                    and a[2] - pad <= scz <= a[5] + pad):
+                continue
+            if abs(b[1] - base) > y_tol:
+                continue
+            nb = [min(box[0], b[0]), min(box[1], b[1]), min(box[2], b[2]),
+                  max(box[3], b[3]), max(box[4], b[4]), max(box[5], b[5])]
+            if (nb[3] - nb[0]) > lim_x or (nb[5] - nb[2]) > lim_z:
+                continue
+            taken[i] = True
+            box = nb
+            add.append(s)
+        if add:
+            merged = _merge_prims(o["prims"] + add, o["kind_hint"])
+            o["prims"] = merged["prims"]
+            o["aabb"] = merged["aabb"]
+            o["extent"] = merged["extent"]
+            o["pages"] = merged["pages"]
+            o["nface"] = merged["nface"]
+            o["slabs"] = len(add)
+            n += len(add)
+    return n
 
 
 def extract_landmarks(model, page_role, rare_max=LM_RARE_MAX,
                       grow_gap=LM_GROW_GAP, max_radius=LM_MAX_RADIUS,
-                      max_extent=LM_MAX_EXTENT, min_faces=LM_MIN_FACES):
+                      max_extent=LM_MAX_EXTENT, min_faces=LM_MIN_FACES,
+                      with_slabs=True):
     """Find the distinctive set pieces in one level. Returns objects sorted by
     rarity then size, each {"prims", "aabb", "extent", "pages", "nface",
-    "rarity", "seed"}."""
-    prims = structure_prims(model, page_role)
+    "rarity", "seed"}.
+
+    Clustering runs on STRUCTURE only -- slabs bridge unrelated buildings -- and
+    the paving is put back afterwards by attach_slabs, which is what makes a
+    piece read as sited rather than dropped on the terrain."""
+    prims, slabs = level_prims(model, page_role)
     if not prims:
         return []
     use = {}
@@ -586,6 +670,8 @@ def extract_landmarks(model, page_role, rare_max=LM_RARE_MAX,
         if o["nface"] >= min_faces and len(o["prims"]) >= LM_MIN_PRIMS:
             out.append(o)
     out.sort(key=lambda o: (o["rarity"], -o["nface"]))
+    if with_slabs:
+        attach_slabs(out, slabs)
     return out
 
 
