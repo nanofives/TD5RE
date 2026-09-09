@@ -1,0 +1,355 @@
+{
+  "header": "td5_tg_real_tex_landmarks.h",
+  "prefix": "k_lm",
+  "regenerate": true,
+  "title": "Texture pages used by the shipped-geometry PREFABS in td5_tg_prefab_data.h. Positional: page i here is local index i there, so the two files must be regenerated together by re/tools/td5_geomlib.py prefabs.",
+  "sets": {
+    "pf": [
+      [
+        "level023",
+        231,
+        "prefab page (local index 0)"
+      ],
+      [
+        "level023",
+        232,
+        "prefab page (local index 1)"
+      ],
+      [
+        "level023",
+        240,
+        "prefab page (local index 2)"
+      ],
+      [
+        "level023",
+        281,
+        "prefab page (local index 3)"
+      ],
+      [
+        "level023",
+        338,
+        "prefab page (local index 4)"
+      ],
+      [
+        "level023",
+        339,
+        "prefab page (local index 5)"
+      ],
+      [
+        "level023",
+        340,
+        "prefab page (local index 6)"
+      ],
+      [
+        "level023",
+        341,
+        "prefab page (local index 7)"
+      ],
+      [
+        "level023",
+        344,
+        "prefab page (local index 8)"
+      ],
+      [
+        "level023",
+        345,
+        "prefab page (local index 9)"
+      ],
+      [
+        "level023",
+        346,
+        "prefab page (local index 10)"
+      ],
+      [
+        "level023",
+        347,
+        "prefab page (local index 11)"
+      ],
+      [
+        "level023",
+        348,
+        "prefab page (local index 12)"
+      ],
+      [
+        "level023",
+        350,
+        "prefab page (local index 13)"
+      ],
+      [
+        "level023",
+        351,
+        "prefab page (local index 14)"
+      ],
+      [
+        "level023",
+        353,
+        "prefab page (local index 15)"
+      ],
+      [
+        "level023",
+        355,
+        "prefab page (local index 16)"
+      ],
+      [
+        "level023",
+        357,
+        "prefab page (local index 17)"
+      ],
+      [
+        "level023",
+        358,
+        "prefab page (local index 18)"
+      ],
+      [
+        "level023",
+        363,
+        "prefab page (local index 19)"
+      ],
+      [
+        "level023",
+        365,
+        "prefab page (local index 20)"
+      ],
+      [
+        "level023",
+        366,
+        "prefab page (local index 21)"
+      ],
+      [
+        "level023",
+        367,
+        "prefab page (local index 22)"
+      ],
+      [
+        "level023",
+        368,
+        "prefab page (local index 23)"
+      ],
+      [
+        "level023",
+        451,
+        "prefab page (local index 24)"
+      ],
+      [
+        "level023",
+        467,
+        "prefab page (local index 25)"
+      ],
+      [
+        "level023",
+        17,
+        "prefab page (local index 26)"
+      ],
+      [
+        "level023",
+        268,
+        "prefab page (local index 27)"
+      ],
+      [
+        "level023",
+        269,
+        "prefab page (local index 28)"
+      ],
+      [
+        "level023",
+        284,
+        "prefab page (local index 29)"
+      ],
+      [
+        "level023",
+        292,
+        "prefab page (local index 30)"
+      ],
+      [
+        "level023",
+        296,
+        "prefab page (local index 31)"
+      ],
+      [
+        "level023",
+        298,
+        "prefab page (local index 32)"
+      ],
+      [
+        "level023",
+        299,
+        "prefab page (local index 33)"
+      ],
+      [
+        "level023",
+        301,
+        "prefab page (local index 34)"
+      ],
+      [
+        "level023",
+        342,
+        "prefab page (local index 35)"
+      ],
+      [
+        "level023",
+        343,
+        "prefab page (local index 36)"
+      ],
+      [
+        "level023",
+        370,
+        "prefab page (local index 37)"
+      ],
+      [
+        "level023",
+        259,
+        "prefab page (local index 38)"
+      ],
+      [
+        "level023",
+        270,
+        "prefab page (local index 39)"
+      ],
+      [
+        "level023",
+        271,
+        "prefab page (local index 40)"
+      ],
+      [
+        "level023",
+        274,
+        "prefab page (local index 41)"
+      ],
+      [
+        "level023",
+        275,
+        "prefab page (local index 42)"
+      ],
+      [
+        "level023",
+        276,
+        "prefab page (local index 43)"
+      ],
+      [
+        "level023",
+        277,
+        "prefab page (local index 44)"
+      ],
+      [
+        "level023",
+        278,
+        "prefab page (local index 45)"
+      ],
+      [
+        "level023",
+        279,
+        "prefab page (local index 46)"
+      ],
+      [
+        "level023",
+        280,
+        "prefab page (local index 47)"
+      ],
+      [
+        "level023",
+        286,
+        "prefab page (local index 48)"
+      ],
+      [
+        "level023",
+        287,
+        "prefab page (local index 49)"
+      ],
+      [
+        "level023",
+        58,
+        "prefab page (local index 50)"
+      ],
+      [
+        "level023",
+        295,
+        "prefab page (local index 51)"
+      ],
+      [
+        "level023",
+        309,
+        "prefab page (local index 52)"
+      ],
+      [
+        "level023",
+        311,
+        "prefab page (local index 53)"
+      ],
+      [
+        "level023",
+        315,
+        "prefab page (local index 54)"
+      ],
+      [
+        "level023",
+        316,
+        "prefab page (local index 55)"
+      ],
+      [
+        "level023",
+        319,
+        "prefab page (local index 56)"
+      ],
+      [
+        "level023",
+        320,
+        "prefab page (local index 57)"
+      ],
+      [
+        "level023",
+        321,
+        "prefab page (local index 58)"
+      ],
+      [
+        "level023",
+        322,
+        "prefab page (local index 59)"
+      ],
+      [
+        "level023",
+        331,
+        "prefab page (local index 60)"
+      ],
+      [
+        "level023",
+        456,
+        "prefab page (local index 61)"
+      ],
+      [
+        "level023",
+        308,
+        "prefab page (local index 62)"
+      ],
+      [
+        "level023",
+        312,
+        "prefab page (local index 63)"
+      ],
+      [
+        "level023",
+        314,
+        "prefab page (local index 64)"
+      ],
+      [
+        "level023",
+        457,
+        "prefab page (local index 65)"
+      ],
+      [
+        "level023",
+        300,
+        "prefab page (local index 66)"
+      ],
+      [
+        "level023",
+        229,
+        "prefab page (local index 67)"
+      ],
+      [
+        "level023",
+        230,
+        "prefab page (local index 68)"
+      ]
+    ]
+  }
+}
