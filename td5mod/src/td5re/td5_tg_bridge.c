@@ -17,58 +17,24 @@
  * the over-water audit up in the guard block can ask without the table. */
 int tg_biome_span_has_water(int si)
 {
-    return k_biomes[tg_biome_for_span(si)].water ? 1 : 0;
+    return tg_road_wet_any(si);           /* [TOPOLOGY-FIRST] the world says */
 }
 
 double tg_water_side(int si)
 {
-    int a;
-    unsigned int h;
-    tg_biome_run_bounds(si, &a, NULL);
-    h = (unsigned)(a / TD5_TG_BIOME_RUN) * 2246822519u;
-    return (h & 1) ? 1.0 : -1.0;
+    return tg_road_water_side(si);
 }
 
-/* Sea level for the coastal run containing span si -- ONE height for the whole
- * run, not per span.
- *
- * Root cause of the "marching" sea: the surface used to be n->y - WATER_DROP,
- * i.e. it followed the road's own elevation profile, so the sea rose and fell
- * with every hill. A body of water is level by definition, so take the LOWEST
- * road node in the biome run and sit below that -- below the road everywhere in
- * the run, so no low point is ever flooded. */
+/* Water surface beside span si: the nearer shore's surface (river or sea),
+ * the water under the road where the road is over water, else sea level. */
 double tg_sea_level_y(const TG_NodeList *nl, int si)
 {
-    /* [R17 WATER item 1] GLOBAL water level: ONE absolute surface height for the
-     * whole track, anchored to the low band of the elevation profile and paired
-     * with a route floor clamp so the road stays above it (both computed in
-     * tg_apply_elevation; see tg_water_level_y in td5_trackgen.c).
-     *
-     * DEFAULT OFF -- opt in with TD5RE_R17_GLOBAL_WATER=1. The first cut derived
-     * the level as track_min - WATER_DROP, which put the sea BELOW everything and
-     * turned every high coastal run into the floor of a canyon (measured on seed
-     * 771144: relief range 34015, so a coast at +20000 sat ~32000 above a sea at
-     * -11885). Kept off by default until the height selection and the coast
-     * interaction are validated in frame; see the R17 notes in tg_apply_elevation
-     * for the grade-cap analysis of why high coasts cannot simply be lowered. */
-    int a, b;
-    double lo;
-    int i;
-
-    if (td5_env_flag_off("TD5RE_R17_GLOBAL_WATER"))
-        return tg_water_level_y(nl);
-
-    /* [R8 BIOME item 19] Lowest node of the MERGED run, not of the raw cell.
-     * A no-op while COAST is capped at one cell; with TD5RE_R8_BIOME_SEA on it
-     * is what keeps one body of water at ONE height across a multi-cell coast
-     * instead of stepping at each cell boundary. */
-    tg_biome_run_bounds(si, &a, &b);
-
-    if (a > nl->count - 1) a = nl->count - 1;
-    if (b > nl->count - 1) b = nl->count - 1;
-    lo = nl->v[a].y;
-    for (i = a + 1; i <= b; i++) if (nl->v[i].y < lo) lo = nl->v[i].y;
-    return lo - (double)TD5_TG_WATER_DROP;
+    double side;
+    (void)nl;
+    if (tg_road_node_wet(si)) return tg_road_node_water_y(si);
+    side = tg_road_water_side(si);
+    if (side == 0.0) return tg_world_sea_y();
+    return tg_road_shore_y(si, side > 0.0);
 }
 
 /* May a water quad be laid across span si at all?
@@ -107,30 +73,8 @@ int tg_water_span_clear(int si)
 int tg_point_over_bridge_water(const TG_NodeList *nl, int si0,
                                double wx, double wz)
 {
-    const double BW = TD5_TG_BRIDGE_WATER_HALF + TD5_TG_R9_WATER_MARGIN;
-    int s, lo, hi;
-    if (!nl) return 0;
-    lo = si0 - TD5_TG_R9_WATER_WINDOW;
-    hi = si0 + TD5_TG_R9_WATER_WINDOW;
-    if (lo < 0) lo = 0;
-    if (hi > nl->count - 2) hi = nl->count - 2;
-    for (s = lo; s <= hi; s++) {
-        const TG_Node *n0, *n1;
-        double dx, dz, along, lat, ax, az, len;
-        if (!tg_span_in_bridge_run(s) || !tg_water_span_clear(s)) continue;
-        n0 = &nl->v[s]; n1 = &nl->v[s + 1];
-        dx = wx - n0->x; dz = wz - n0->z;
-        /* tg_emit_bridge_water's own axes: left unit is (tz, -tx). */
-        along = dx * n0->tx + dz * n0->tz;
-        lat   = dx * n0->tz - dz * n0->tx;
-        if (lat <= -BW || lat >= BW) continue;
-        ax = n1->x - n0->x; az = n1->z - n0->z;
-        len = sqrt(ax * ax + az * az);
-        if (along < -TD5_TG_R9_WATER_MARGIN ||
-            along > len + TD5_TG_R9_WATER_MARGIN) continue;
-        return 1;
-    }
-    return 0;
+    (void)nl; (void)si0;
+    return tg_world_is_water(wx, wz);     /* [TOPOLOGY-FIRST] the world says */
 }
 
 /* [R11 WATER] How far out from the CENTRELINE the sea plane reaches at node si
@@ -159,49 +103,41 @@ double tg_r11_sea_outer(const TG_NodeList *nl, int si)
 int tg_emit_water(const TG_NodeList *nl, int si, double side,
                          TG_Buf *m, size_t *moff, int *pn)
 {
+    /* [TOPOLOGY-FIRST] One quad per span-side from the SHORE (the first wet
+     * cell along the outward ray, per node so neighbouring spans share their
+     * boundary) out to TD5_TG_WATER_EXTENT, at the water surface the shore
+     * table recorded. Rivers beside the road and the sea are the same case. */
     double px[4], py[4], pz[4], uu[4], vv[4];
     const TG_Node *n0 = &nl->v[si];
     const TG_Node *n1;
-    double lx0, lz0, lx1, lz1, e0, e1, wy;
+    const int is_left = side > 0.0;
+    double lx0, lz0, lx1, lz1, e0, e1, d0, d1;
     int i, seg_page = TD5_TG_PAGE_WATER, seg_nq = 1;
 
     if (si + 1 >= nl->count) return 1;
-    /* [R18 WATER item 1] "after this span of water there's no more water on the
-     * side." tg_side_blocked is a prop/facade guard: it drops the seaward side
-     * over a fork's cleared region so trunks and facades stay off a branch
-     * corridor. The sea is not on that side of the road at all -- it starts
-     * TD5_TG_WATER_BEACH (8100) OUTBOARD of the road edge and runs another
-     * TD5_TG_WATER_EXTENT to sea, far beyond any branch, which is a road that
-     * stays inside the drivable envelope. Borrowing that guard cut a visible gap
-     * in the sea wherever a fork cleared the seaward side. Refuse the sea only
-     * where the carriageway ACTUALLY reaches its near edge -- which it never does
-     * -- so the sea stays continuous past a fork. TD5RE_R18_SEA_OVER_FORK=0
-     * restores the blanket block. */
-    if (tg_side_blocked(si, side)) {
-        const double sea_near = n0->width * 0.5 + (double)TD5_TG_WATER_BEACH;
-        if (!td5_env_flag_on("TD5RE_R18_SEA_OVER_FORK")
-            || tg_carriageway_reach(nl, si, side) >= sea_near)
-            return 1;
-    }
     if (!tg_water_span_clear(si)) return 1;
+    d0 = tg_road_shore_d(si, is_left);
+    d1 = tg_road_shore_d(si + 1, is_left);
+    if (d0 > 1e8 && d1 > 1e8) return 1;
+    if (d0 > 1e8) d0 = d1;
+    if (d1 > 1e8) d1 = d0;
     n1 = &nl->v[si + 1];
 
     lx0 = n0->tz * side; lz0 = -n0->tx * side;
     lx1 = n1->tz * side; lz1 = -n1->tx * side;
-    e0 = n0->width * 0.5 + (double)TD5_TG_WATER_BEACH;
-    e1 = n1->width * 0.5 + (double)TD5_TG_WATER_BEACH;
-    wy = tg_sea_level_y(nl, si);
+    /* start a little inside the bank so the plane meets the ground */
+    e0 = n0->width * 0.5 + d0 - 400.0; if (e0 < n0->width * 0.5) e0 = n0->width * 0.5;
+    e1 = n1->width * 0.5 + d1 - 400.0; if (e1 < n1->width * 0.5) e1 = n1->width * 0.5;
 
-    /* shore-near, shore-far, sea-far, sea-near: the same ring order the cell
-     * grid produced, so the face keeps whatever winding was drawing before. */
     px[0] = n0->x + lx0 * e0;                        pz[0] = n0->z + lz0 * e0;
     px[1] = n1->x + lx1 * e1;                        pz[1] = n1->z + lz1 * e1;
     px[2] = px[1] + lx1 * (double)TD5_TG_WATER_EXTENT;
     pz[2] = pz[1] + lz1 * (double)TD5_TG_WATER_EXTENT;
     px[3] = px[0] + lx0 * (double)TD5_TG_WATER_EXTENT;
     pz[3] = pz[0] + lz0 * (double)TD5_TG_WATER_EXTENT;
+    py[0] = py[3] = tg_road_shore_y(si, is_left);
+    py[1] = py[2] = tg_road_shore_y(si + 1, is_left);
     for (i = 0; i < 4; i++) {
-        py[i] = wy;
         uu[i] = px[i] / TD5_TG_WATER_TILE;
         vv[i] = pz[i] / TD5_TG_WATER_TILE;
     }
@@ -214,115 +150,39 @@ int tg_emit_water(const TG_NodeList *nl, int si, double side,
     return 1;
 }
 
-int tg_tunnel_run_len(void)
+/* [TOPOLOGY-FIRST] A BORE is a terrain structure (td5_tg_road.c decided it
+ * from the ground). An UNDERPASS is a crossing road passing OVER the main
+ * road: still placed on a 32-span period by hash + biome urbanity until the
+ * street network (td5_tg_network.c) owns crossings, and never on or next to
+ * a detected bridge or bore. */
+static int tg_underpass_run_selected(int si)
 {
-    /* Opt-in, paired with tg_bridge_run_len -- see the reasoning there. */
-    return td5_env_flag_off("TD5RE_R8_LONGRUN")
-         ? TD5_TG_TUNNEL_RUN_R8 : TD5_TG_TUNNEL_RUN_R3;
-}
-
-/* Cell-level biome, NOT tg_biome_for_span: the blended per-span biome dithers
- * across a 20-span band, and a run that was half bore and half underpass would
- * be the worse artifact by far. One run, one decision. */
-static int tg_tunnel_run_biome(int si)
-{
-    const int t0 = (si / TD5_TG_TUNNEL_RUN) * TD5_TG_TUNNEL_RUN;
-    return tg_biome_cell_index(t0 + TD5_TG_TUNNEL_RUN / 2);
-}
-
-/* The ORIGINAL gate, unchanged: hash, biome weight, bridge interlock. Split out
- * so "which runs are chosen" and "what is built on them" are separately
- * checkable, and so item 13 provably changes only the second. */
-static int tg_tunnel_run_selected(int si)
-{
-    unsigned int h;
-    /* OFF BY DEFAULT -- emitted but NEVER VERIFIED IN FRAME. A test run with
-     * tunnels on showed a dark slab near the road that turned out to be a tall
-     * BUILDING (tunnels off, still present), so no frame has yet confirmed a
-     * tunnel appearing at all -- neither working nor broken. Off until someone
-     * drives into a known tunnel run and looks.
-     *
-     * Known RISK, from the format survey rather than observation: there is no
-     * engine support for interior darkening or occlusion, so the roof will be
-     * lit from outside; and every span in the run gets an identical section,
-     * so there is no MOUTH and the near end may read as a wall.
-     * Enable with TD5RE_AUTOTRACK_TUNNELS=1 to work on them. */
-    /* Default ON (2026-08-26); set TD5RE_AUTOTRACK_TUNNELS=0 to disable. */
-    unsigned int thresh;
+    unsigned int h, thresh;
+    const TG_Biome *b;
+    int t0, t1, s, lo, hi;
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_TUNNELS")) return 0;
-    if (si <= TD5_TG_GRID_SPAN + 40) return 0;      /* not right off the grid */
-    h = (unsigned)(si / TD5_TG_TUNNEL_RUN) * 2246822519u;
-    /* Same shape as the bridge gate: 125/1000 is the old ~1-in-8, scaled by the
-     * biome weight, so ALPINE at 230 bores ~29% of runs and FIELDS at 10 gets
-     * ~1% ("mountains = tunnels"). */
+    if (si <= TD5_TG_GRID_SPAN + 40) return 0;
+    t0 = (si / TD5_TG_UNDERPASS_RUN) * TD5_TG_UNDERPASS_RUN;
+    t1 = t0 + TD5_TG_UNDERPASS_RUN - 1;
+    h = (unsigned)(si / TD5_TG_UNDERPASS_RUN) * 2246822519u;
     thresh = (125u * (unsigned)tg_biome_tunnel_pct(si)) / 100u;
     if (thresh > 1000u) thresh = 1000u;
-    if (((h >> 8) % 1000u) >= thresh) return 0;     /* this run does not bore */
-
-    /* [R4 item 19] INTERLOCK. The bridge gate (tg_span_in_bridge_run) and this
-     * one are independent hash draws with no shared state, so nothing stopped a
-     * bridge run and a tunnel run from overlapping -- seed 99991 has bridge run
-     * 1320-1359 and tunnel run 1340-1359 both firing, and the raised deck drives
-     * straight into the bore, which is illegal terrain. Resolve it one way: the
-     * BRIDGE is the authored crossing and keeps its span; the tunnel YIELDS. A
-     * tunnel run is suppressed if any span within CLEAR of it lies in a bridge
-     * run, which forbids the overlap AND leaves a flat approach band between the
-     * two. Stateless and derived only from si, so the elevation pass, the strip
-     * builder and every scenery gate agree without passing anything around. A
-     * bridge weight tweak could only make the collision rarer; this makes it
-     * impossible. */
-    {
-        const int t0 = (si / TD5_TG_TUNNEL_RUN) * TD5_TG_TUNNEL_RUN;
-        const int t1 = t0 + TD5_TG_TUNNEL_RUN - 1;
-        int s, lo = t0 - TD5_TG_BRIDGE_TUNNEL_CLEAR;
-        const int hi = t1 + TD5_TG_BRIDGE_TUNNEL_CLEAR;
-        if (lo < 0) lo = 0;
-        for (s = lo; s <= hi; s++)
-            if (tg_span_in_bridge_run(s)) return 0;
-    }
+    if (((h >> 8) % 1000u) >= thresh) return 0;
+    b = &k_biomes[tg_biome_cell_index(t0 + TD5_TG_UNDERPASS_RUN / 2)];
+    if (b->urbanity < 1) return 0;
+    lo = t0 - TD5_TG_BRIDGE_TUNNEL_CLEAR; if (lo < 0) lo = 0;
+    hi = t1 + TD5_TG_BRIDGE_TUNNEL_CLEAR;
+    for (s = lo; s <= hi; s++)
+        if (tg_struct_kind(s) != TG_ST_NONE) return 0;
     return 1;
 }
 
-/* What a SELECTED run builds. See the item-13 block above for the rule. */
 static int tg_tunnel_kind(int si)
 {
-    const TG_Biome *b;
-    if (!tg_tunnel_run_selected(si)) return TG_TUN_NONE;
-    /* A/B escape: pin the pre-R9 behaviour (every selected run is a bore,
-     * whatever the biome) so the two builds can be compared byte for byte. */
-    if (td5_env_flag_off("TD5RE_R9_UNDERPASS")) return TG_TUN_BORE;
-    b = &k_biomes[tg_tunnel_run_biome(si)];
-    /* MOUNTAINS means ALPINE: climate cold AND urbanity WILDERNESS.
-     *
-     * The obvious rule is climate >= 2, and it is wrong -- MEASURED, not
-     * reasoned. climate 2 also selects ALPTOWN, and the first frame of a bore in
-     * an ALPTOWN run (seed 777 span 473) came out as a stone portal in the
-     * middle of a shopping street with railings and shopfronts either side --
-     * which is the ORIGINAL COMPLAINT, reproduced by the fix meant to end it.
-     * ALPTOWN is cold, but its own table comment calls it a snowy TOWN and it
-     * draws on TD5_TG_PAGE_WALL, the city facade page, so it renders urban
-     * whatever its climate says. A bore belongs where there is nothing but
-     * hillside, and that is urbanity 0 as much as it is climate 2.
-     *
-     * This is the round's own method rule turned on my own first answer: when a
-     * complaint survives an honest measurement, suspect the AXIS. Climate was
-     * the wrong axis on its own. */
-    if (b->climate >= 2 && b->urbanity == 0) return TG_TUN_BORE;
-    /* Anywhere with a settlement -- town, edge, or city -- a crossing road goes
-     * OVER, not through. urbanity >= 1 rather than >= 2 so ALPTOWN, FIELDS and
-     * COAST are served too: a flyover across a village street, a country lane or
-     * a coast road is ordinary, and restricting this to dense urbanity would
-     * leave those three biomes with no crossing of any kind. FOREST (urbanity 0,
-     * temperate) is the one biome that gets neither, which is right -- there is
-     * nothing to tunnel through and nothing to fly over. */
-    if (b->urbanity >= 1) return TG_TUN_UNDERPASS;
+    if (tg_span_in_tunnel(si)) return TG_TUN_BORE;
+    if (td5_env_flag_off("TD5RE_R9_UNDERPASS")) return TG_TUN_NONE;   /* A/B: bores only */
+    if (tg_underpass_run_selected(si)) return TG_TUN_UNDERPASS;
     return TG_TUN_NONE;
-}
-
-/* ENCLOSED: a real bore. Unchanged meaning -- see the item-13 block. */
-int tg_span_in_tunnel(int si)
-{
-    return tg_tunnel_kind(si) == TG_TUN_BORE;
 }
 
 static int tg_r12_up_shore(void) { return td5_env_flag_on("TD5RE_R12_UP_SHORE"); }
@@ -349,14 +209,14 @@ static int tg_up_span_crossable(int si)
 
 int tg_underpass_span(int si)
 {
-    const int t0 = (si / TD5_TG_TUNNEL_RUN) * TD5_TG_TUNNEL_RUN;
-    const int c  = t0 + TD5_TG_TUNNEL_RUN / 2;
+    const int t0 = (si / TD5_TG_UNDERPASS_RUN) * TD5_TG_UNDERPASS_RUN;
+    const int c  = t0 + TD5_TG_UNDERPASS_RUN / 2;
     int d;
     if (tg_tunnel_kind(si) != TG_TUN_UNDERPASS) return -1;
     if (!tg_r12_up_shore()) return c;
     for (d = 0; d <= TD5_TG_UP_SLIDE_MAX; d++) {
         if (c - d >= t0 && tg_up_span_crossable(c - d)) return c - d;
-        if (c + d <= t0 + TD5_TG_TUNNEL_RUN - 1 && tg_up_span_crossable(c + d))
+        if (c + d <= t0 + TD5_TG_UNDERPASS_RUN - 1 && tg_up_span_crossable(c + d))
             return c + d;
     }
     return -1;                       /* whole run is water or deck: no crossing */
@@ -378,7 +238,7 @@ static int tg_tunnel_lining_page(int si)
      * TD5_TG_PAGE_TUNNEL(_VAR) pages. Still one lining per RUN (keyed on
      * si/RUN) so a bore is a single lining end to end. TD5RE_AUTOTRACK_
      * TUNNEL_OLDLINING=1 restores the old pages for an A/B. */
-    unsigned int h = (unsigned)(si / TD5_TG_TUNNEL_RUN) * 2654435761u;
+    unsigned int h = (unsigned)(si / TD5_TG_UNDERPASS_RUN) * 2654435761u;
     if (td5_env_flag_off("TD5RE_AUTOTRACK_TUNNEL_OLDLINING")) {
         unsigned int ov = (h >> 13) % (unsigned)TD5_TG_TUNNEL_VARIANTS;
         if (ov == 0) return TD5_TG_PAGE_TUNNEL;
@@ -1625,36 +1485,20 @@ double tg_local_ground_y(const TG_NodeList *nl, int si)
  *
  * TD5RE_R11_BRIDGE_COALESCE=0 restores the per-block crossings for an A/B.
  * ========================================================================= */
-static int tg_r11_coalesce(void)
-{
-    return td5_env_flag_on("TD5RE_R11_BRIDGE_COALESCE");
-}
-
-/* First span of the CHAIN of adjacent selected runs containing si.
- *
- * Needs no node list (the backward walk is bounded by span 0 and by the grid
- * clearance inside tg_span_in_bridge_run), which is what lets tg_bridge_style --
- * which only ever gets an si -- key on the chain too. */
+/* [TOPOLOGY-FIRST] The crossing containing si is the contiguous BRIDGE run
+ * of the structure table (td5_tg_road.c). One authority for the deck-Y, the
+ * river level, the piers and the style. */
 static int tg_bridge_chain_first(int si)
 {
-    const int run = TD5_TG_BRIDGE_RUN;
-    int a = (si / run) * run;
-    if (!tg_r11_coalesce() || !tg_span_in_bridge_run(si)) return a;
-    while (a - run >= 0 && tg_span_in_bridge_run(a - run)) a -= run;
-    return a;
+    int s0, s1;
+    tg_struct_run_bounds(si, &s0, &s1);
+    return s0;
 }
 
-/* The span range of the bridge CROSSING containing si -- one run, or the whole
- * chain of abutting runs under item 12. Partitioned exactly the way
- * tg_apply_elevation partitions it, so the deck hump, the river level and the
- * gorge all describe the same crossing. */
 void tg_bridge_run_bounds(const TG_NodeList *nl, int si, int *s0, int *s1)
 {
-    const int run = TD5_TG_BRIDGE_RUN;
-    int a = tg_bridge_chain_first(si);
-    int b = a + run - 1;
-    if (tg_r11_coalesce() && tg_span_in_bridge_run(si))
-        while (b + 1 <= nl->count - 1 && tg_span_in_bridge_run(b + 1)) b += run;
+    int a, b;
+    tg_struct_run_bounds(si, &a, &b);
     if (b > nl->count - 1) b = nl->count - 1;
     if (a > b) a = b;
     *s0 = a; *s1 = b;
@@ -1733,11 +1577,10 @@ int tg_r8_bridge_water(void)
 int tg_bridge_run_is_water(const TG_NodeList *nl, int si)
 {
     int s0, s1, k;
-    if (!tg_r8_bridge_water() || !tg_span_in_bridge_run(si))
-        return k_biomes[tg_biome_for_span(si)].water;
+    if (!tg_span_in_bridge_run(si)) return tg_road_wet_any(si);
     tg_bridge_run_bounds(nl, si, &s0, &s1);
-    for (k = s0; k <= s1; k++)
-        if (k_biomes[tg_biome_for_span(k)].water) return 1;
+    for (k = s0; k <= s1 + 1 && k < nl->count; k++)
+        if (tg_road_node_wet(k)) return 1;
     return 0;
 }
 
@@ -1758,17 +1601,21 @@ double tg_bridge_water_y(const TG_NodeList *nl, int si)
      * crossing: at or below every span's own sea, hence never surfacing through
      * a deck or a bank that was built against a lower neighbour. */
     if (tg_bridge_run_is_water(nl, si)) {
-        int s0, s1, k;
-        double lo;
-        if (!tg_r8_bridge_water() || !tg_span_in_bridge_run(si))
-            return tg_sea_level_y(nl, si);
+        /* [TOPOLOGY-FIRST] the LOWEST water surface under the run's wet
+         * nodes: at or below every span's own water, so nothing surfaces
+         * through the deck or a bank built against a lower neighbour. */
+        int s0, s1, k, any = 0;
+        double lo = 1e30;
+        if (!tg_span_in_bridge_run(si)) return tg_sea_level_y(nl, si);
         tg_bridge_run_bounds(nl, si, &s0, &s1);
-        lo = tg_sea_level_y(nl, s0);
-        for (k = s0 + 1; k <= s1; k++) {
-            const double v = tg_sea_level_y(nl, k);
-            if (v < lo) lo = v;
-        }
-        return lo;
+        for (k = s0; k <= s1 + 1 && k < nl->count; k++)
+            if (tg_road_node_wet(k)) {
+                const double v = tg_road_node_water_y(k);
+                if (v < lo) lo = v;
+                any = 1;
+            }
+        if (any) return lo;
+        return tg_sea_level_y(nl, si);
     }
     /* [R17 WATER item 1] DRY inland gorge: NOT unified to the global water level.
      * This is a canyon river kept a fixed depth below its OWN deck, not the sea;
@@ -1847,7 +1694,7 @@ int tg_bridge_style(int si)
     /* [R11 item 12] Keyed on the CHAIN, not the block. Two coalesced runs are
      * one crossing, and one crossing has to be one style end to end or the
      * "single longer bridge" changes material halfway across. */
-    h = (unsigned)(tg_bridge_chain_first(si) / TD5_TG_BRIDGE_RUN) * 2654435761u;
+    h = (unsigned)tg_bridge_chain_first(si) * 2654435761u;
     return (int)((h >> 12) % (unsigned)TD5_TG_BRIDGE_STYLES);
 }
 
@@ -3130,8 +2977,8 @@ int tg_emit_bridge_coast(const TG_NodeList *nl, int si,
             const double nlx = r11 ? nn->tz : lx;   /* land node's left unit */
             const double nlz = r11 ? -nn->tx : lz;
             const int NC = 8;                      /* columns each side of centre */
-            const TG_Biome *lb = &k_biomes[tg_biome_for_span(lnode[k])];
-            const double wsd = lb->water ? tg_water_side(lnode[k]) : 0.0;
+            const TG_Biome *lb = &k_biomes[tg_biome_for_span(lnode[k])];   (void)lb;
+            const double wsd = tg_water_side(lnode[k]);
             /* ======== [R14 COAST item 5a] "on the LEFT side of the bridge,
              * polygons collide with the water below and with the coastline."
              *
@@ -3441,7 +3288,7 @@ double tg_ground_branch_clear(const TG_NodeList *nl, int si)
     if (!tg_branches_enabled()) return 0.0;
     /* How far the outermost carriageway reaches PAST the main road edge. Zero
      * on any span no corridor bows across, since reach floors at the half width. */
-    over = tg_carriageway_reach(nl, si, -1.0) - tg_road_half_width(nl, si);
+    over = tg_carriageway_reach(nl, si, (double)tg_fork_side_at(si)) - tg_road_half_width(nl, si);
     if (over <= 0.0) return 0.0;
     return over + 200.0;                 /* + margin, no shared edge */
 }
@@ -3564,9 +3411,10 @@ int tg_flora_plant(const TG_NodeList *nl, int si, const TG_Biome *b,
     const TG_Node *n = &nl->v[si];
     const double d  = gap + tw * 0.5;             /* trunk distance from road edge */
     const double lx = n->tz * side, lz = -n->tx * side;
-    const double water_side = b->water ? tg_water_side(si) : 0.0;
+    const double water_side = tg_water_side(si);
     TG_GroundProf p;
     double dy;
+    (void)b;
     int k;
 
     *cx = n->x + lx * (n->width * 0.5 + gap + tw * 0.5);
@@ -3587,7 +3435,7 @@ int tg_flora_plant(const TG_NodeList *nl, int si, const TG_Biome *b,
     if (!td5_env_flag_on("TD5RE_R7_FLORA")) return 1;   /* A/B: R6 behaviour */
 
     /* Rule 2: over the seaward beach/sea of a coastal run -> no tree. */
-    if (b->water && side == tg_water_side(si) && d > (double)TD5_TG_SHORE_VERGE)
+    if (side == tg_water_side(si) && d > (double)TD5_TG_SHORE_VERGE)
         return 0;
 
     /* [R9 TOPO item 6] Rule 1 used to sample the SKIRT only and clamp to its
@@ -3681,8 +3529,9 @@ int tg_fork_gore_page(int fork_index)
 int tg_emit_gore(const TG_NodeList *nl, int si,
                         double shift_n, double shift_f,
                         double half_n, double half_f, int ground_page,
-                        TG_Buf *blk)
+                        TG_Buf *blk, int side)
 {
+    const double fs = (side > 0) ? 1.0 : -1.0;   /* [TOPOLOGY-FIRST] corridor side */
     const TG_Node *a = &nl->v[si], *c = &nl->v[si + 1];
     double drop = TD5_TG_GORE_DROP;
     double ov   = TD5_TG_GORE_OVERLAP;
@@ -3707,8 +3556,9 @@ int tg_emit_gore(const TG_NodeList *nl, int si,
     }
     /* Branch left edge, pushed a further `ov` to the RIGHT (lateral is +ve to
      * the left of travel, and the branch sits at negative lateral). */
-    double tnr = shift_n + half_n - ov;            /* near */
-    double tfr = shift_f + half_f - ov;            /* far  */
+    double tnr = shift_n - fs * half_n + fs * ov;  /* near: branch inner edge, pushed into the branch */
+    double tfr = shift_f - fs * half_f + fs * ov;  /* far  */
+    const double cov = -fs * ov;                   /* road centre pushed into the main carriageway */
     double px[4], py[4], pz[4], uu[4], vv[4];
     double cx = 0, cy = 0, cz = 0, radius = 0;
     /* [R8 SHAPE G5] Lateral texture repeat. V already advances one tile per
@@ -3738,10 +3588,11 @@ int tg_emit_gore(const TG_NodeList *nl, int si,
 
     /* near-left = road centre pushed `ov` INTO the main carriageway,
      * near-right = branch left edge pushed `ov` into the branch, then far. */
-    px[0]=a->x+a->tz*ov;    py[0]=a->y-drop; pz[0]=a->z-a->tx*ov;    uu[0]=0.0; vv[0]=(double)si;
+    px[0]=a->x+a->tz*cov;   py[0]=a->y-drop; pz[0]=a->z-a->tx*cov;   uu[0]=0.0; vv[0]=(double)si;
     px[1]=a->x+a->tz*tnr;   py[1]=a->y-drop; pz[1]=a->z-a->tx*tnr;   uu[1]=un;  vv[1]=(double)si;
     px[2]=c->x+c->tz*tfr;   py[2]=c->y-drop; pz[2]=c->z-c->tx*tfr;   uu[2]=uf;  vv[2]=(double)si+1.0;
-    px[3]=c->x+c->tz*ov;    py[3]=c->y-drop; pz[3]=c->z-c->tx*ov;    uu[3]=0.0; vv[3]=(double)si+1.0;
+    px[3]=c->x+c->tz*cov;   py[3]=c->y-drop; pz[3]=c->z-c->tx*cov;   uu[3]=0.0; vv[3]=(double)si+1.0;
+    if (fs > 0.0) tg_quads_mirror(px, py, pz, uu, vv, 4);
 
     for (i = 0; i < 4; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
     cx /= 4; cy /= 4; cz /= 4;

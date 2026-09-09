@@ -1209,257 +1209,49 @@ static double tg_bridge_coast_side(const TG_NodeList *nl, int si)
 static void tg_ground_side_raw(const TG_NodeList *nl, int si, int is_left,
                                double water_side, TG_GroundProf *p)
 {
-    const double phase = tg_bridge_gorge_phase(nl, si);
-    const int seaward = (water_side > 0.0 && is_left) ||
-                        (water_side < 0.0 && !is_left);
+    /* [TOPOLOGY-FIRST] The cross-section IS the world. Five points from the
+     * road edge to the verge reach, each the ground height the heightfield
+     * has there. On an OPEN span the bed is conformed flat to the road out to
+     * TD5_TG_ROAD_BED_VERGE, so the inner points sit GROUND_DROP under the
+     * asphalt (no lip, no z-fight); on a bridge or tunnel span the terrain is
+     * whatever lies under the deck / over the bore, sampled from d = 0.
+     * The gorge/shore/beach special cases of R4..R18 are gone: a river bank,
+     * a coast and a valley are all just the ground being lower out there. */
+    static const double k_f[5] = { 0.0, 0.2, 0.45, 0.7, 1.0 };
+    const int ni = (si > nl->count - 1) ? nl->count - 1 : si;
+    const TG_Node *n = &nl->v[ni];
+    const int open = (tg_struct_kind(si) == TG_ST_NONE);
+    const double V = tg_verge_reach();
+    const double sgn = is_left ? 1.0 : -1.0;
+    const double lx = n->tz * sgn, lz = -n->tx * sgn;
+    const double half = n->width * 0.5;
+    const double ex = n->x + lx * half, ez = n->z + lz * half, ey = n->y;
+    double dmin = 0.0;
+    int j;
+    (void)water_side;
 
-    /* Default: flush with the asphalt at the road edge, a gentle embankment
-     * outward. The INNER point stays at road level on purpose -- dropping the
-     * whole skirt left a thin void/lip between road and grass. */
-    p->n = 2;
-    p->d[0]  = 0.0;                    p->dy[0] = 0.0;
-    p->d[1]  = tg_verge_reach();      p->dy[1] = TD5_TG_GROUND_DROP;
+    /* Branch corridor bows into this side's verge -- keep off its carriageway. */
+    if ((is_left ? 1 : -1) == tg_fork_side_at(si)) dmin = tg_ground_branch_clear(nl, si);
 
-    /* [R16 item c] STEEP COASTLINE on the bridge's coast side.
-     *
-     * Reported, on several consecutive bridge-run spans: "this should be an
-     * actual coastline with a steep slope perpendicular to the road ... the way
-     * it is getting sloped to the road looks wrong."
-     *
-     * The gorge bank (below) starts at phase*GORGE_INSET out from the road edge
-     * and ramps its inner point from road level (near the mouths, phase small) to
-     * submerged (at the crown). Near the mouths that inner point sits at road
-     * level a short way out, so the bank reads as ground gently SLOPING INTO THE
-     * ROAD rather than as a shore. A coast meets the water as a bank perpendicular
-     * to the road: drop from the road edge straight down to the water surface
-     * within one shore-verge width, then it is under the river plane.
-     *
-     * Coast side only (tg_bridge_coast_side, +1/-1, never both), so the opposite
-     * bank keeps the tuned gorge profile the earlier rounds shaped, and the change
-     * is confined to the one bank the user is standing beside. The bank descends
-     * to tg_bridge_water_surf_y -- the SAME surface accessor the river plane, the
-     * coast band and the R14 wrap read -- so it lands exactly on the water it
-     * meets, and because tg_topo_chain is built from this profile the R14 tree-line
-     * wrap (item d) follows the new shore automatically instead of the old ramp.
-     * TD5RE_R16_BRIDGE_COAST_SLOPE=0 restores the gorge ramp for an A/B. */
-    if (td5_env_flag_on("TD5RE_R16_BRIDGE_COAST_SLOPE")
-        && tg_span_in_bridge_run(si) && tg_water_span_clear(si)) {
-        const double cs = tg_bridge_coast_side(nl, si);
-        if ((cs > 0.0 && is_left) || (cs < 0.0 && !is_left)) {
-            double drop = nl->v[si].y - tg_bridge_water_surf_y(nl, si);
-            if (drop < TD5_TG_GROUND_DROP) drop = TD5_TG_GROUND_DROP;
-            p->n = 2;
-            p->d[0] = 0.0;                p->dy[0] = 0.0;
-            p->d[1] = TD5_TG_SHORE_VERGE; p->dy[1] = drop;
-            return;
-        }
+    p->n = 5;
+    for (j = 0; j < 5; j++) {
+        double d = k_f[j] * V, dy;
+        if (d < dmin + 250.0 * j) d = dmin + 250.0 * j;
+        dy = ey - tg_world_h(ex + lx * d, ez + lz * d);
+        if (open && d <= TD5_TG_ROAD_BED_VERGE) dy = TD5_TG_GROUND_DROP;
+        if (open && j == 0) dy = TD5_TG_GROUND_DROP;
+        p->d[j] = d;
+        p->dy[j] = dy;
     }
 
-    /* [R17 WATER item 4] "this grass is wrongly placed ... there's no sidewalk
-     * and it's over water."
-     *
-     * At the two ENDS of a bridge water run phase is exactly 0, so neither the
-     * gorge pull-back (phase > 0, below) nor the seaward beach (needs a biome
-     * water_side, which is 0 on a seed with no coastal biome) fires. The side
-     * then falls through to the default flat verge -- a flat skirt sitting at
-     * road level directly over the river plane, with no sidewalk. That is the
-     * reported grass-over-water. The R16 coast-slope block above already turns
-     * the COAST bank into a shore at every phase; do the same for the OTHER bank
-     * at the run mouths, dropping it straight to the water surface so it meets
-     * the water instead of floating over it. Scoped to phase <= 0 so the tuned
-     * mid-run gorge/submerge profile (phase > 0) is untouched. `seaward` is
-     * excluded so a real biome coast still uses its own tuned beach below.
-     * TD5RE_R17_WATER_SKIRT_SHORE=0 restores the flat verge for an A/B. */
-    if (td5_env_flag_on("TD5RE_R17_WATER_SKIRT_SHORE")
-        && tg_span_in_bridge_run(si) && tg_water_span_clear(si)
-        && phase <= 0.0 && !seaward) {
-        double drop = nl->v[si].y - tg_bridge_water_surf_y(nl, si);
-        if (drop < TD5_TG_GROUND_DROP) drop = TD5_TG_GROUND_DROP;
-        p->n = 2;
-        p->d[0] = 0.0;                p->dy[0] = 0.0;
-        p->d[1] = TD5_TG_SHORE_VERGE; p->dy[1] = drop;
-        return;
-    }
-
-    /* [R18 WATER items 4+5] The shore treatments above (R16 coast slope, R17
-     * water shore) fire only ON a run (tg_span_in_bridge_run(si) is a hard
-     * pre-condition of both). The APPROACH span -- the one immediately before or
-     * after the run -- keeps the ordinary flat verge, which juts toward the river
-     * at the mouth: it overhangs the deck/water ("this geometry is affecting the
-     * bridge", item 4) and leaves the entrance uncovered down to the waterline
-     * ("there should be a texture covering the bridge's entrance", item 5).
-     * Extend the shore drop to that one approach span, sampling the ADJACENT run
-     * span's own water surface (rs) so the bank lands on the same river the run
-     * draws. OFF BY DEFAULT and UNVERIFIED (no game assets here): a bridge
-     * approach can also ramp UP onto the deck, in which case dropping the skirt
-     * to the water would open a face -- so it is an A/B lever, not a default.
-     * Scoped to a single approach span each side, so nothing on the run or
-     * deeper inland is touched. TD5RE_R18_BRIDGE_APPROACH_SHORE=1 to enable. */
-    if (td5_env_flag_off("TD5RE_R18_BRIDGE_APPROACH_SHORE")   /* default OFF */
-        && nl && !tg_span_in_bridge_run(si) && tg_water_span_clear(si)) {
-        int rs = -1;
-        if (si + 1 < nl->count && tg_span_in_bridge_run(si + 1)) rs = si + 1;
-        else if (si - 1 >= 0 && tg_span_in_bridge_run(si - 1))   rs = si - 1;
-        if (rs >= 0) {
-            double drop = nl->v[si].y - tg_bridge_water_surf_y(nl, rs);
-            if (drop < TD5_TG_GROUND_DROP) drop = TD5_TG_GROUND_DROP;
-            p->n = 2;
-            p->d[0] = 0.0;                p->dy[0] = 0.0;
-            p->d[1] = TD5_TG_SHORE_VERGE; p->dy[1] = drop;
-            return;
-        }
-    }
-
-    /* [R4 item 16a] The GORGE wins over the seaward beach on a bridge run.
-     * On a COAST bridge (seed 99991 span 1160-1199) the seaward test fired first
-     * and laid a FLAT beach verge alongside the raised deck -- a light concrete
-     * strip hanging at deck height, which reads as "a bridge with a sidewalk on
-     * the left". A raised deck crosses the water; there is no beach beside it, so
-     * inside the run (phase > 0) the bank must pull back and drop to the river on
-     * BOTH sides. phase is 0 exactly at the run ends, so the beach still applies
-     * there and the two treatments stay continuous at the boundary. */
-    if (seaward && phase <= 0.0) {
-        const double d = nl->v[si].y - tg_sea_level_y(nl, si);
-        const double fall = (d > 0.0 ? d : (double)TD5_TG_WATER_DROP)
-                          - TD5_TG_GROUND_DROP;
-        p->n = 3;
-        p->d[1]  = TD5_TG_SHORE_VERGE;  p->dy[1] = TD5_TG_GROUND_DROP;
-        p->d[2]  = TD5_TG_SHORE_END;
-        p->dy[2] = TD5_TG_GROUND_DROP
-                 + fall * (TD5_TG_SHORE_END - TD5_TG_SHORE_VERGE)
-                        / ((double)TD5_TG_WATER_BEACH - TD5_TG_SHORE_VERGE);
-        return;
-    }
-    if (phase > 0.0) {
-        /* Gorge: the bank pulls back from the deck; the pull-back scales with the
-         * run phase so the terrain is continuous with the ordinary skirt at the
-         * run ends. `bed` is the R6 drop target (just under the river bed); it is
-         * clamped non-negative because a river plane above its road node is not a
-         * gorge and a negative drop would lift the terrain above the road. */
-        double bed = nl->v[si].y - (tg_bridge_water_y(nl, si) - 150.0);
-        if (bed < 0.0) bed = 0.0;
-        p->d[0]  = phase * TD5_TG_GORGE_INSET;
-        /* [R6 item 14] The OUTER edge used to stay at the ordinary 24000 verge,
-         * so once the inner point dropped, the whole skirt was a wide near-flat
-         * GROUND (concrete-tile) shelf lying ACROSS the river. Bring the outer
-         * edge in to a narrow band at the crown, lerping back to the ordinary
-         * verge at the run ends so it stays continuous with the plain skirt.
-         *
-         * [R8 item 11] "Back to the ordinary verge" was written as the literal
-         * 24000, and R6 CITY item 6 then narrowed the ordinary verge to 12000
-         * without this line hearing about it. MEASURED (seed 99991, R8BDIAG):
-         * span 1000 outer edge 12000, span 1001 outer edge 23864 -- an 11864
-         * lateral jump between two adjacent slabs at the run mouth. Take the
-         * base from tg_verge_reach() so the gorge lands on whatever the plain
-         * skirt actually reaches, by construction rather than by coincidence. */
-        p->d[1]  = tg_verge_reach()
-                 + phase * (phase * TD5_TG_GORGE_INSET + 3000.0
-                            - tg_verge_reach());
-        /* [R7 item 17] "Below bridges only water should be rendered", still not
-         * true after R6. R6 dropped the skirt to the river BED (wy-150) but ramped
-         * there LINEARLY with phase, so across the whole INTERIOR of the run the
-         * concrete skirt sat ABOVE the water surface (wy+100) -- the "tiles at one
-         * height and water at a lower height on alternated spans" the user still
-         * sees. The bed was never the right target: the bridge-water plane
-         * (BRIDGE_WATER_HALF 32000) already covers the entire gorge, so anything
-         * at or above the water surface pokes through it. Drop the skirt just
-         * BELOW the water surface on a FAST ramp (fully submerged by ~30% into the
-         * run), so the interior shows only water while the run ENDS (phase -> 0)
-         * still rise to the bank as a shore. Both profile points share the depth,
-         * so the submerged strip is flat and wholly hidden by the water plane.
-         * TD5RE_AUTOTRACK_BRIDGE_SUBMERGE=0 restores the R6 bed ramp for an A/B. */
-        if (td5_env_flag_on("TD5RE_AUTOTRACK_BRIDGE_SUBMERGE")) {
-            /* [R8 item 11] R7's ramp was applied to BOTH profile points at once,
-             * so the bank was a FLAT SHELF whose single height ramped from road
-             * level to below the water and back. A flat shelf is above the water
-             * for every span where the ramp has not finished, and the ramp is
-             * symmetric in phase, so it is unfinished at BOTH ends of every run.
-             *
-             * MEASURED (seed 99991, run 1000-1039, R8BDIAG skirt vs surf):
-             * spans 1000-1007 and 1033-1039 -- 15 of 40 -- carried the shelf
-             * ABOVE the river surface, by up to 4782 at the mouth and 754 at
-             * span 1033. Span 1031 is where the user is standing when they
-             * report "alternation between water spans and tile spans at
-             * different height", and it is two spans before the shelf surfaces.
-             *
-             * The shelf is the wrong SHAPE, not the wrong height. A bank meets
-             * water by descending THROUGH the surface -- the rule
-             * TD5_TG_SHORE_VERGE/SHORE_END already encodes for the sea. So make
-             * the gorge a shore too: the INNER point carries the phase ramp (it
-             * is the bank top, at road level near the mouths and submerged at
-             * the crown), and everything beyond one bank-face width is pinned
-             * FULLY SUBMERGED regardless of phase. Then no span can show a flat
-             * horizontal slab above the water: the only ground above the surface
-             * is the sloping bank face, which is what a shore looks like. */
-            const double surf = tg_bridge_water_surf_y(nl, si);
-            double sub = nl->v[si].y - surf + 250.0;   /* 250 below the surface */
-            double r   = phase * (1.0 / 0.30);
-            double face;
-            if (sub < TD5_TG_GROUND_DROP) sub = TD5_TG_GROUND_DROP;
-            if (r > 1.0) r = 1.0;
-            p->dy[0] = TD5_TG_GROUND_DROP + r * (sub - TD5_TG_GROUND_DROP);
-            /* Bank face: wide enough that the descent is a slope and not a
-             * cliff, and short enough that it is over well inside the river
-             * half-width (32000) at every phase. */
-            face = TD5_TG_SHORE_END - TD5_TG_SHORE_VERGE;   /* 6000 */
-            if (!tg_r8_bridge_water()) {
-                p->dy[1] = p->dy[0];        /* R7 flat shelf, for the A/B */
-            } else if (p->d[0] + face < p->d[1]) {
-                p->n     = 3;
-                p->d[2]  = p->d[1];
-                p->dy[2] = sub;
-                p->d[1]  = p->d[0] + face;
-                p->dy[1] = sub;
-            } else {
-                p->dy[1] = sub;      /* no room for a face: outer point is bed */
-            }
-        } else {
-            p->dy[0] = phase * bed;
-            p->dy[1] = TD5_TG_GROUND_DROP + phase * (bed - TD5_TG_GROUND_DROP);
-        }
-        return;
-    }
-    if (!is_left) {
-        /* Branch corridor bows into the right verge -- keep off its carriageway. */
-        p->d[0] = tg_ground_branch_clear(nl, si);
-        /* [R8 SHAPE G5] ...but the skirt still has to END somewhere OUTBOARD of
-         * the corridor, and the clamp below is what decides that. Before R8 the
-         * widest a corridor ever reached (bow 1.20) was ~7400 past the road edge
-         * and the 12000 verge covered it. A long fork bows past 18000, so the
-         * clamp would drag the skirt's INNER point back to 11000 and lay a
-         * 1000-wide sliver of ground in the open air between the two
-         * carriageways -- with the branch itself, and everything beyond it,
-         * standing on nothing. So push the OUTER point out to clear the corridor
-         * first and keep an apron beyond it.
-         *
-         * The apron is deliberately narrower than the ordinary 12000 verge: a
-         * wide near-flat skirt on a descent projects over the road ahead and
-         * hides it (the R6 item-6 finding that cut the verge from 24000), and
-         * this one sits on the far side of the branch where it would hide the
-         * CORRIDOR. 4000 reaches past the branch's own pavement without
-         * becoming that apron again. */
-        if (tg_r8_longbranch_enabled()) {
-            const double need = p->d[0] + TD5_TG_R8_LONG_APRON;
-            if (need > p->d[1]) p->d[1] = need;
-        }
-        if (p->d[0] > p->d[1] - 1000.0)
-            p->d[0] = p->d[1] - 1000.0;
-    }
-
-    /* [R14 OVERPASS item 3] HOLD THE FLOOR FLAT UNDER A CROSSING. Applied LAST
-     * in the ordinary branch and as a max(), so it can only ever push the outer
-     * point further out: the branch-corridor clearance above and the widened
-     * long-fork apron keep whatever they decided, and the seaward beach and the
-     * gorge (which returned above) are untouched -- a crossing never lands on
-     * either, tg_up_span_crossable refuses both outright.
-     *
-     * The drop at the outer point is left at TD5_TG_GROUND_DROP, which is what
-     * makes this a floor rather than a ramp: the skirt stays near road level all
-     * the way across the deck's footprint, and the far band then tucks under its
-     * new outer edge and sinks from THERE, off past the end of the deck. */
+    /* [R14 OVERPASS item 3] hold the floor flat under a crossing: the outer
+     * point reaches at least the crossing's ground, at road level. */
     {
         const double up = tg_r14_up_ground_reach(si);
         if (up > p->d[p->n - 1]) p->d[p->n - 1] = up;
+        for (j = 0; j < p->n; j++)
+            if (up > 0.0 && p->d[j] <= up && p->dy[j] > TD5_TG_GROUND_DROP)
+                p->dy[j] = TD5_TG_GROUND_DROP;
     }
 }
 
@@ -1586,6 +1378,10 @@ static int tg_bridge_skirt_redundant(const TG_NodeList *nl, int si,
                                      int is_left, double water_side)
 {
     double coast = water_side;
+    /* [TOPOLOGY-FIRST] the skirt is real ground everywhere (the bank of a
+     * river is the terrain itself); nothing replaces it, so it is never
+     * redundant. */
+    if (nl) return 0;
     /* [R16 item b] RE-KEY to the bridge's own coast signal so the suppression
      * actually fires. As written this helper keyed on the biome `water_side`,
      * which is +/-1 only where a biome carries a sea. On a seed with no coastal
@@ -1902,12 +1698,43 @@ static double tg_r12_fcross_reach(const TG_NodeList *nl, int si, double sg)
 /* Is span si part of a forest side road? Writes the side (+1 = left of travel)
  * and the reach both spans agree on. Cheap gates first: everything but the two
  * candidate spans per block is rejected before the clamp runs. */
+/* [TOPOLOGY-FIRST] The candidate half of the forest lane: which spans of
+ * block `blk` and which side the rhythm proposes. The network validates it
+ * on the raster and owns the answer tg_r12_fcross_at gives. */
+int tg_r12_fcross_candidate(const TG_NodeList *nl, int blk, int *c, double *side)
+{
+    int cc, j;
+    if (!tg_r12_fcross_on() || !nl) return 0;
+    cc = tg_r12_fcross_start(blk);
+    if (cc <= TD5_TG_R12_FCROSS_CLEAR) return 0;
+    for (j = cc - 1; j <= cc + TD5_TG_R12_FCROSS_WIDTH; j++) {
+        if (j <= TD5_TG_R12_FCROSS_CLEAR || j + 1 >= nl->count) return 0;
+        if (!tg_r12_fcross_forest(j)) return 0;
+    }
+    *c = cc;
+    *side = ((unsigned)blk * 2654435761u + 0x9E3779B9u) & 0x10000u ? 1.0 : -1.0;
+    return 1;
+}
+
 int tg_r12_fcross_at(const TG_NodeList *nl, int si,
                             double *pside, double *preach)
 {
     int c, j;
     double side, reach = TD5_TG_R12_FCROSS_WANT;
 
+    if (tg_network_built()) {
+        int left;
+        for (left = 1; left >= 0; left--) {
+            double rr = 0.0;
+            if (tg_net_mouth_kind(si, left) == TG_NE_COUNTRY) {
+                tg_net_mouth(si, left, NULL, &rr);
+                if (pside)  *pside  = left ? 1.0 : -1.0;
+                if (preach) *preach = rr;
+                return 1;
+            }
+        }
+        return 0;
+    }
     if (!tg_r12_fcross_on() || !nl || si <= TD5_TG_R12_FCROSS_CLEAR) return 0;
     if (!tg_r12_fcross_forest(si)) return 0;
     c = tg_r12_fcross_start(si / TD5_TG_R12_FCROSS_PERIOD);
@@ -2820,7 +2647,7 @@ double tg_infra_ground_dy(const TG_NodeList *nl, int si, double side,
  * puddle chain along a verge would read as a leak, not as landscape. */
 static int tg_pond_here(const TG_Biome *b, int si)
 {
-    if (b->water)               return 0;   /* already beside sea or river */
+    if (tg_road_wet_any(si))    return 0;   /* already beside sea or river */
     if (tg_city_sidewalk_w(b) > 0.0) return 0;  /* not on a paved street   */
     if (strcmp(b->name, "FIELDS") && strcmp(b->name, "FOREST")
         && strcmp(b->name, "ALPINE")) return 0;
@@ -3487,25 +3314,8 @@ static int tg_r9_point_over_bridge_water(const TG_NodeList *nl,
                                          const int *wet, int nwet,
                                          double wx, double wz)
 {
-    const double BW = TD5_TG_BRIDGE_WATER_HALF + TD5_TG_R9_WATER_MARGIN;
-    int i;
-    for (i = 0; i < nwet; i++) {
-        const int s = wet[i];
-        const TG_Node *n0, *n1;
-        double dx, dz, along, lat, ax, az, len;
-        n0 = &nl->v[s]; n1 = &nl->v[s + 1];
-        dx = wx - n0->x; dz = wz - n0->z;
-        /* tg_emit_bridge_water's own axes: left unit is (tz, -tx). */
-        along = dx * n0->tx + dz * n0->tz;
-        lat   = dx * n0->tz - dz * n0->tx;
-        if (lat <= -BW || lat >= BW) continue;
-        ax = n1->x - n0->x; az = n1->z - n0->z;
-        len = sqrt(ax * ax + az * az);
-        if (along < -TD5_TG_R9_WATER_MARGIN ||
-            along > len + TD5_TG_R9_WATER_MARGIN) continue;
-        return 1;
-    }
-    return 0;
+    (void)nl; (void)wet; (void)nwet;
+    return tg_world_is_water(wx, wz);      /* [TOPOLOGY-FIRST] the world says */
 }
 
 /* Largest outward distance from (ox,oz) along unit (ux,uz) that stays off the
@@ -3637,7 +3447,7 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
         double cap = 1e30, drop_max = 0.0;
         for (e = 0; e < 2; e++) {
             const int se = e ? g1 : g0;
-            const double wsd = h->b->water ? tg_water_side(se) : 0.0;
+            const double wsd = tg_water_side(se);
             const double c = TG_SUB3D(TG_SUB3_ROADCAP,
                                       tg_topo_road_cap(nl, se, is_left));
             TG_GroundProf pp;
@@ -3732,7 +3542,7 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
             if (!is_left) { ux = -ux; uz = -uz; }
             TG_SUB3V(TG_SUB3_GROUNDSIDE,
                      tg_ground_side(nl, se, is_left,
-                                    h->b->water ? tg_water_side(se) : 0.0, &p));
+                                    tg_water_side(se), &p));
             so = p.d[p.n - 1];
             if (so > dry_so_max) dry_so_max = so;
             d = TG_SUB3D(TG_SUB3_DRYREACH,
@@ -3771,7 +3581,7 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
          * tg_emit_ground passes the real side, so on a coastal run the band and
          * the skirt disagreed about where the ground was. */
         {
-            const double wsd = h->b->water ? tg_water_side(se) : 0.0;
+            const double wsd = tg_water_side(se);
             double drop;
 
             TG_SUB3V(TG_SUB3_GROUNDSIDE, tg_ground_side(nl, se, is_left, wsd, &p));
@@ -3784,7 +3594,8 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
              * road and the player drove under its underside, which read in frame
              * as the sky being replaced by a dark ceiling. The far terrain is
              * never allowed above the road edge. */
-            if (drop < 0.0) drop = 0.0;
+            /* [TOPOLOGY-FIRST] the skirt may rise above the road (a cutting,
+             * a hillside); the seam follows it. */
             base = (is_left ? ly : ry) - drop - TD5_TG_FAR_SINK;
         }
         U[e] = (double)se + (e ? 1.0 : 0.0);
@@ -3854,9 +3665,10 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
             }
             X[e][j] = ex;
             Z[e][j] = ez;
-            Y[e][j] = yb + tg_terrain_hill_y(ex, ez, ampj);
-            if (r5fix && r5treeline && j >= 2 && !runout && Y[e][j] > base)
-                Y[e][j] = base;
+            /* [TOPOLOGY-FIRST] ring 0 is the seam under the skirt; every
+             * other ring is the world's own ground there. */
+            Y[e][j] = (j == 0) ? base : tg_world_h(ex, ez);
+            (void)yb; (void)ampj;
         }
 
         /* [DIAG] Every term that decides how high this band sits, so the large
@@ -4335,7 +4147,7 @@ int tg_emit_fb_terrain(const TG_FBHook *h)
 
     /* Seaward side is the sea's, not the plain's -- the water plane already
      * reaches 50000 out there and a grass band would float over it. */
-    wsd = h->b->water ? tg_water_side(h->si) : 0.0;
+    wsd = tg_water_side(h->si);
 
     for (s = 0; s < 2; s++) {
         const int is_left = s ? 1 : 0;
@@ -4498,7 +4310,7 @@ static const char *tg_r8_far_block_reason(const TG_NodeList *nl, int si,
 {
     const int rg = td5_env_flag_on("TD5RE_R8_TERRAIN_EXTENT");
     double wsd;
-    (void)nl;
+    (void)nl; (void)b;
     *ridge = 1;
     if (!tg_terrain_far_enabled())                       return k_r8_why_off;
     if (td5_env_flag_on("TD5RE_AUTOTRACK_BRIDGE_CLEARFAR") &&
@@ -4508,7 +4320,7 @@ static const char *tg_r8_far_block_reason(const TG_NodeList *nl, int si,
         if (!rg) return k_r8_why_tunnel;
         *ridge = 0;
     }
-    wsd = b->water ? tg_water_side(si) : 0.0;
+    wsd = tg_water_side(si);
     if ((wsd > 0.0 && is_left) || (wsd < 0.0 && !is_left)) return k_r8_why_sea;
     if (!is_left && td5_env_flag_on("TD5RE_AUTOTRACK_FORK_CLEARFAR") &&
         tg_far_group_over_fork(si)) {
@@ -4555,7 +4367,7 @@ void tg_topo_chain(const TG_NodeList *nl, int si, int is_left,
                           TG_TopoChain *c)
 {
     const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
-    const double wsd = b->water ? tg_water_side(si) : 0.0;
+    const double wsd = tg_water_side(si);
     const double base_reach = tg_far_reach();
     const int sink = td5_env_flag_on("TD5RE_AUTOTRACK_TERRAIN_SINK");
     const double floor_drop = nl->v[si].y
@@ -4586,14 +4398,23 @@ void tg_topo_chain(const TG_NodeList *nl, int si, int is_left,
         if (cap < reach) reach = cap;
         if (reach < so + TD5_TG_FAR_TUCK + 500.0)
             reach = so + TD5_TG_FAR_TUCK + 500.0;
-        for (k = 1; k < 4 && c->n < TD5_TG_TOPO_MAXPT; k++) {
-            const double dd = so + (reach - so) * k_ring[k];
-            double dy = sink ? seam + (floor_drop - seam) * k_tg_far_sink[k]
-                             : seam;
-            if (dy < seam) dy = seam;
-            c->d[c->n]  = dd;
-            c->dy[c->n] = dy;
-            c->n++;
+        /* [TOPOLOGY-FIRST] the rings are the world's ground; a ring under
+         * water closes the horizon (the water plane stands on it). */
+        {
+            const int ni = (si > nl->count - 1) ? nl->count - 1 : si;
+            const TG_Node *nn = &nl->v[ni];
+            const double sgn = is_left ? 1.0 : -1.0;
+            const double lx = nn->tz * sgn, lz = -nn->tx * sgn;
+            const double ex = nn->x + lx * nn->width * 0.5, ez = nn->z + lz * nn->width * 0.5;
+            (void)seam; (void)sink; (void)floor_drop;
+            for (k = 1; k < 4 && c->n < TD5_TG_TOPO_MAXPT; k++) {
+                const double dd = so + (reach - so) * k_ring[k];
+                const double wx = ex + lx * dd, wz = ez + lz * dd;
+                c->d[c->n]  = dd;
+                c->dy[c->n] = nn->y - tg_world_h(wx, wz);
+                if (tg_world_is_water(wx, wz)) c->closed = 1;
+                c->n++;
+            }
         }
     }
 
@@ -4688,7 +4509,7 @@ int tg_emit_fb_slope_flora(const TG_FBHook *h)
     s    = (int)((hh >> 4) & 1u);
     side = s ? 1.0 : -1.0;
     if (tg_side_blocked(si, side)) return 1;
-    if (b->water && side == tg_water_side(si)) return 1; /* never over the sea */
+    if (side == tg_water_side(si)) return 1; /* never over the sea */
 
     tg_topo_chain(nl, si, side > 0.0, &c);
     if (c.n < 2) return 1;
@@ -5132,7 +4953,7 @@ void tg_r8_terrain_extent_report(const TG_NodeList *nl, int nspans)
     for (si = 0; si < nspans - 1 && si < TD5_TG_MAX_SPANS; si++) {
         const TG_Biome *b = &k_biomes[tg_biome_for_span(si)];
         const int bk = tg_biome_cell_index(si);
-        const double wsd = b->water ? tg_water_side(si) : 0.0;
+        const double wsd = tg_water_side(si);
         for (s = 0; s < 2; s++) {
             const int is_left = s ? 1 : 0;
             const char *why;

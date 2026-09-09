@@ -160,6 +160,21 @@ static uint8_t         *s_jump_entries = NULL; /* 6-byte entries */
  *  the branch lane count = the lateral boundary that wall_contact walls off so a
  *  car cannot straddle the main/branch divide. Sized s_span_count, NULL otherwise. */
 static int8_t          *s_fork_divider = NULL;
+/* [TOPOLOGY-FIRST 2026-09-08] Per-span: 1 where a type-8 fork's corridor (or a
+ * type-11 rejoin's) lies on the LEFT of travel. The type-8 decision in the
+ * walker sends the HIGH sub-lane (right) into link_next [CONFIRMED @
+ * 0x004440F0]; a left corridor inverts that, exactly as a mirrored reverse
+ * native circuit does, so the same geometric decision path is taken. Decided
+ * from the strip's own rows at load, native tracks only (shipped forks are
+ * all on the right, so they resolve to 0 and keep the confirmed path). */
+static int8_t          *s_fork_left = NULL;
+
+static void fork_left_compute(void);
+
+static inline int fork_is_left(int span_idx)
+{
+    return s_fork_left && span_idx >= 0 && span_idx < s_span_count && s_fork_left[span_idx];
+}
 
 /** [task#15] TD6 per-lane SURFACE GRID (strip header[6]): 8 cells/row; a span's
  * surf byte (+0x01) selects the row, the wheel's lateral fraction>>5 the column,
@@ -1010,6 +1025,49 @@ static inline int span_lane_count(const TD5_StripSpan *sp)
     uint8_t packed = ((const uint8_t *)sp)[3]; /* byte +0x03 */
     return packed & 0x0F;
 }
+
+static void fork_left_compute(void)
+{
+    int i, ring;
+    free(s_fork_left);
+    s_fork_left = NULL;
+    if (g_active_td6_level != 0 || s_span_count <= 0 || !s_span_array || !s_vertex_table) return;
+    s_fork_left = (int8_t *)calloc((size_t)s_span_count, 1);
+    if (!s_fork_left) return;
+    ring = g_td5.track_span_ring_length;
+    if (ring <= 0 || ring > s_span_count) ring = s_span_count;
+    for (i = 0; i < ring; i++) {
+        const int t = s_span_array[i].span_type;
+        int mn, br;
+        if (t == 8)       { mn = i + 1; br = (int)s_span_array[i].link_next; }
+        else if (t == 11) { mn = i - 1; br = (int)s_span_array[i].link_prev; }
+        else continue;
+        if (mn < 0 || mn >= s_span_count || br < 0 || br >= s_span_count) continue;
+        {
+            /* row centres of the main neighbour and the corridor end, and this
+             * span's own left direction (left vertex minus right vertex) */
+            const TD5_StripSpan *sp = &s_span_array[i], *sm = &s_span_array[mn], *sb = &s_span_array[br];
+            const int lp = span_lane_count(sp), lm = span_lane_count(sm), lb = span_lane_count(sb);
+            const TD5_StripVertex *pl = vertex_at((int)sp->left_vertex_index);
+            const TD5_StripVertex *pr = vertex_at((int)sp->left_vertex_index + lp);
+            const TD5_StripVertex *ml = vertex_at((int)sm->left_vertex_index);
+            const TD5_StripVertex *mr = vertex_at((int)sm->left_vertex_index + lm);
+            const TD5_StripVertex *bl = vertex_at((int)sb->left_vertex_index);
+            const TD5_StripVertex *brr = vertex_at((int)sb->left_vertex_index + lb);
+            const double nx = (double)pl->x - (double)pr->x, nz = (double)pl->z - (double)pr->z;
+            const double mcx = sm->origin_x + 0.5 * ((double)ml->x + (double)mr->x);
+            const double mcz = sm->origin_z + 0.5 * ((double)ml->z + (double)mr->z);
+            const double bcx = sb->origin_x + 0.5 * ((double)bl->x + (double)brr->x);
+            const double bcz = sb->origin_z + 0.5 * ((double)bl->z + (double)brr->z);
+            const double d = (bcx - mcx) * nx + (bcz - mcz) * nz;
+            if (d > 0.0) {
+                s_fork_left[i] = 1;
+                TD5_LOG_I(LOG_TAG, "fork span %d (type %d): corridor on the LEFT", i, t);
+            }
+        }
+    }
+}
+
 
 /** Get height offset nibble from packed byte. */
 static inline int span_height_offset(const TD5_StripSpan *sp)
@@ -2880,12 +2938,16 @@ static int laneassist_step_forward(int span_idx, int sub_lane, int fork_commit,
         int next_idx = span_idx + 1;
         if (next_idx >= 0 && next_idx < s_span_count) {
             int next_lanes = span_lane_count(&s_span_array[next_idx]);
-            if (!fork_commit || sub_lane < next_lanes) {
+            int b = (int)sp->link_next;              /* branch corridor */
+            int bl = (b >= 0 && b < s_span_count) ? span_lane_count(&s_span_array[b]) : 0;
+            if (fork_commit && fork_is_left(span_idx) && bl > 0) {
+                /* [TOPOLOGY-FIRST] LEFT corridor: the LOW lanes are the branch. */
+                if (sub_lane < bl) { new_span = b; }
+                else { new_span = next_idx; sub_lane -= bl; }
+            } else if (!fork_commit || sub_lane < next_lanes) {
                 new_span = next_idx;                 /* main road, no lane delta */
             } else {
-                int b = (int)sp->link_next;          /* branch corridor */
                 if (b >= 0 && b < s_span_count) {
-                    int bl = span_lane_count(&s_span_array[b]);
                     sub_lane += bl - cur_lanes;       /* carry lane across fork */
                     new_span = b;
                 } else {
@@ -3082,8 +3144,16 @@ int td5_track_laneassist_target(int from_span, int from_sub_lane,
                 int nidx = ssp + 1;
                 if (nidx >= 0 && nidx < s_span_count) {
                     int nlanes = span_lane_count(&s_span_array[nidx]);
+                    /* [TOPOLOGY-FIRST] a LEFT corridor owns the LOW lanes: the
+                     * divider index is the branch lane count, and "side 0" is
+                     * then the branch band. The aim only cares which band. */
+                    if (fork_is_left(ssp)) {
+                        int bb = (int)s_span_array[ssp].link_next;
+                        int bl = (bb >= 0 && bb < s_span_count) ? span_lane_count(&s_span_array[bb]) : 0;
+                        if (bl > 0) nlanes = bl;
+                    }
                     fork_thresh = nlanes;
-                    fork_side   = (ssub < nlanes) ? 0 : 1;   /* main : branch */
+                    fork_side   = (ssub < nlanes) ? 0 : 1;   /* low band : high band */
                     fork_step   = k;
                     TD5_LOG_I(LOG_TAG,
                         "laneassist_fork: from=%d ahead_step=%d fork_span=%d "
@@ -4131,6 +4201,7 @@ int td5_track_load_strip(const void *data, size_t size)
      * makes; forward + TD6 leave s_fork_divider NULL). */
     free(s_fork_divider);
     s_fork_divider = NULL;
+    fork_left_compute();                    /* [TOPOLOGY-FIRST] left corridors */
     if (g_td5.reverse_direction && g_active_td6_level == 0 && s_span_count > 0) {
         s_fork_divider = (int8_t *)calloc((size_t)s_span_count, 1);
         if (s_fork_divider) {
@@ -4668,7 +4739,8 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
                  * down the branch and vice versa -> the car can't traverse either
                  * fork. Invert the test (branch when sub_lane < branch_lanes) for
                  * reverse native circuits; forward + TD6 keep the original path. */
-                int rev_native = g_td5.reverse_direction && (g_active_td6_level == 0);
+                int rev_native = (g_td5.reverse_direction && (g_active_td6_level == 0))
+                               ^ (fork_is_left(span_idx) ? 1 : 0);   /* [TOPOLOGY-FIRST] */
                 int br_idx = (int)sp->link_next;
                 int br_lanes = (br_idx >= 0 && br_idx < s_span_count)
                                ? span_lane_count(&s_span_array[br_idx]) : 0;
@@ -4745,7 +4817,8 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
                  * right step then routed the car down the wrong corridor. Use the same
                  * geometric (branch-vs-main) decision as case 0x01, sub_lane heuristic
                  * inverted for reverse as a fallback. */
-                int rev_native = g_td5.reverse_direction && (g_active_td6_level == 0);
+                int rev_native = (g_td5.reverse_direction && (g_active_td6_level == 0))
+                               ^ (fork_is_left(span_idx) ? 1 : 0);   /* [TOPOLOGY-FIRST] */
                 int br_idx = (int)sp->link_next;
                 int br_lanes = (br_idx >= 0 && br_idx < s_span_count)
                                ? span_lane_count(&s_span_array[br_idx]) : 0;
@@ -4813,6 +4886,19 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
                     * walker appends +1 post-step [CONFIRMED] */
             int prev_idx = span_idx - 1;
             int sl = *sub_lane;
+            if (prev_idx >= 0 && prev_idx < s_span_count && fork_is_left(span_idx)) {
+                /* [TOPOLOGY-FIRST] LEFT corridor: the LOW sub-lanes are the
+                 * branch (mirror of the confirmed rule); geometry decides where
+                 * it can, the mirrored sub-lane test is the fallback. */
+                int br_idx = (int)sp->link_prev;
+                int br_lanes = (br_idx >= 0 && br_idx < s_span_count)
+                               ? span_lane_count(&s_span_array[br_idx]) : 0;
+                int take_branch;
+                if (br_lanes <= 0 || !geo_fork_decide(prev_idx, br_idx, pos_x, pos_z, &take_branch))
+                    take_branch = (br_lanes > 0) && (sl < br_lanes);
+                if (take_branch) new_span = br_idx;
+                else { new_span = prev_idx; *sub_lane = sl - br_lanes; }
+            } else
             if (prev_idx >= 0 && prev_idx < s_span_count) {
                 int prev_lanes = span_lane_count(&s_span_array[prev_idx]);
                 if (sl >= prev_lanes) {
@@ -4854,6 +4940,19 @@ static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
         case 11: { /* JUNCTION_BWD: same branch decision as 0x04 [CONFIRMED @ 0x004440F0] */
             int prev_idx = span_idx - 1;
             int sl = *sub_lane;
+            if (prev_idx >= 0 && prev_idx < s_span_count && fork_is_left(span_idx)) {
+                /* [TOPOLOGY-FIRST] LEFT corridor: the LOW sub-lanes are the
+                 * branch (mirror of the confirmed rule); geometry decides where
+                 * it can, the mirrored sub-lane test is the fallback. */
+                int br_idx = (int)sp->link_prev;
+                int br_lanes = (br_idx >= 0 && br_idx < s_span_count)
+                               ? span_lane_count(&s_span_array[br_idx]) : 0;
+                int take_branch;
+                if (br_lanes <= 0 || !geo_fork_decide(prev_idx, br_idx, pos_x, pos_z, &take_branch))
+                    take_branch = (br_lanes > 0) && (sl < br_lanes);
+                if (take_branch) new_span = br_idx;
+                else { new_span = prev_idx; *sub_lane = sl - br_lanes; }
+            } else
             if (prev_idx >= 0 && prev_idx < s_span_count) {
                 int prev_lanes = span_lane_count(&s_span_array[prev_idx]);
                 if (sl >= prev_lanes) {

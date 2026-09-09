@@ -771,6 +771,25 @@ double tg_turn_bend(int si)
 
 int tg_facade_built(int si, int left)
 {
+    /* [TOPOLOGY-FIRST] In a paved biome the frontage is open exactly where
+     * the network put a street mouth (a candidate opening the raster refused
+     * stays BUILT -- the fallback every junction emitter understands).
+     * Elsewhere the hash rhythm still shapes what the emitters draw. */
+    if (tg_network_built() && si > 0 &&
+        tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(si)]) > 0.0) {
+        if (si < TD5_TG_FACADE_START_RUN &&
+            td5_env_flag_on("TD5RE_AUTOTRACK_START_CITY"))
+            return 1;
+        {
+            const int k = tg_net_mouth_kind(si, left);
+            return !(k == TG_NE_STREET || k == TG_NE_AVENUE || k == TG_NE_CONTINUATION);
+        }
+    }
+    return tg_facade_built_hash(si, left);
+}
+
+int tg_facade_built_hash(int si, int left)
+{
     unsigned int block, phase, gs, gl;
     int av;
 
@@ -1361,7 +1380,7 @@ void tg_side_geom(const TG_NodeList *nl, int si, int left,
 
     g->built = 0;
     if (!tg_facade_built(si, left)) return;
-    if (tg_branches_enabled() && side < 0.0 && tg_span_in_fork_clear(si)) return;
+    if (tg_branches_enabled() && side * (double)tg_fork_side_at(si) > 0.0 && tg_span_in_fork_clear(si)) return;
     /* [R11 BIOME item 4] Outskirts ramp -- the same gate tg_side_built asks, so
      * the wall that is not emitted here is the wall the caps and step walls
      * already believe is absent. Placed before the lone-stub test so a run left
@@ -1437,8 +1456,12 @@ void tg_side_geom(const TG_NodeList *nl, int si, int left,
     }
 
     g->bx = n0->x + g->lx0 * set0;
-    g->by = n0->y + tg_city_kerb_h(b);
     g->bz = n0->z + g->lz0 * set0;
+    /* [TOPOLOGY-FIRST] the wall stands on the WORLD's ground under its own
+     * frontage line (the conformed bed beside an open span, the valley floor
+     * beside a viaduct), never on the deck. */
+    g->by = tg_world_h(g->bx, g->bz) + tg_city_kerb_h(b);
+    if (g->by > n0->y + tg_city_kerb_h(b) + 400.0) g->by = n0->y + tg_city_kerb_h(b) + 400.0;
     g->ax = (n1->x + g->lx1 * set1) - g->bx;
     g->ay = n1->y - n0->y;
     g->az = (n1->z + g->lz1 * set1) - g->bz;
@@ -2019,7 +2042,8 @@ int tg_building_verge_tree(const TG_NodeList *nl, int si, TG_Buf *blk)
  * suppress props there for the same reason as facades/trees. */
 int tg_side_blocked(int si, double side)
 {
-    return tg_branches_enabled() && side < 0.0 && tg_span_in_fork_clear(si);
+    return tg_branches_enabled() && side * (double)tg_fork_side_at(si) > 0.0
+        && tg_span_in_fork_clear(si);
 }
 
 /* [R9 CITY item 4] Does the branch corridor ACTUALLY reach into this side's
@@ -2054,7 +2078,7 @@ int tg_side_corridor_here(const TG_NodeList *nl, int si, double side)
 {
     if (!td5_env_flag_on("TD5RE_R9_CITY_ARM_MEASURED"))
         return tg_side_blocked(si, side);
-    if (!tg_branches_enabled() || side >= 0.0) return 0;
+    if (!tg_branches_enabled() || side * (double)tg_fork_side_at(si) < 0.0) return 0;
     if (!tg_span_in_fork_clear(si)) return 0;
     return (tg_carriageway_reach(nl, si, side)
             - tg_road_half_width(nl, si)) > 1.0;
@@ -2163,7 +2187,7 @@ double tg_pavement_side_width(const TG_NodeList *nl, int si,
      * never answer yes -- tg_r12_fcross_at requires FOREST -- so the raised slab
      * is bit-identical and only the band changes. */
     if (tg_r14_fcross_pave_stop(nl, si, side)) return 0.0;
-    if (!tg_branches_enabled() || side >= 0.0) return sw;
+    if (!tg_branches_enabled() || side * (double)tg_fork_side_at(si) < 0.0) return sw;
     if (!tg_span_in_fork_clear(si)) return sw;
     /* [R14 BRANCH item 2a] the corridor owns this edge -- see above. */
     if (tg_r14_branch_pave_here(si)) return 0.0;
@@ -3546,8 +3570,9 @@ int tg_city_emit_backrows(const TG_FBHook *h, double sw)
             H    = (double)rows * tg_facade_floor_h(b);
 
             bx = n0->x + lx0 * (n0->width * 0.5 + set);
-            by = n0->y;
             bz = n0->z + lz0 * (n0->width * 0.5 + set);
+            by = tg_world_h(bx, bz);               /* [TOPOLOGY-FIRST] */
+            if (by > n0->y + 400.0) by = n0->y + 400.0;
             ax = (n1->x + lx1 * (n1->width * 0.5 + set)) - bx;
             ay = n1->y - n0->y;
             az = (n1->z + lz1 * (n1->width * 0.5 + set)) - bz;

@@ -759,20 +759,22 @@ void tg_r9_water_table_build(const TG_NodeList *nl)
     s_r9_wet_count = 0;
     for (s = 0; s + 1 < nl->count && s_r9_wet_count < TD5_TG_R9_WET_MAX; s++) {
         double side;
-        if (tg_span_in_bridge_run(s) && tg_water_span_clear(s)) {
+        /* [TOPOLOGY-FIRST] from the road module's shore table. */
+        if (tg_span_in_bridge_run(s) && tg_bridge_run_is_water(nl, s) &&
+            tg_water_span_clear(s)) {
             s_r9_wet_span[s_r9_wet_count] = s;
             s_r9_wet_surf[s_r9_wet_count] = tg_bridge_water_surf_y(nl, s);
-            s_r9_wet_out [s_r9_wet_count] = TD5_TG_BRIDGE_WATER_HALF;
+            s_r9_wet_out [s_r9_wet_count] = tg_r11_wet_reach(nl, s);
             s_r9_wet_in  [s_r9_wet_count] = 0.0;
             s_r9_wet_side[s_r9_wet_count] = 0.0;
             s_r9_wet_count++;
-        } else if (tg_biome_span_has_water(s) &&
-                   (side = tg_water_side(s)) != 0.0) {
+        } else if ((side = tg_water_side(s)) != 0.0) {
             s_r9_wet_span[s_r9_wet_count] = s;
-            s_r9_wet_surf[s_r9_wet_count] = tg_sea_level_y(nl, s);
-            s_r9_wet_out [s_r9_wet_count] = (double)TD5_TG_WATER_EXTENT;
+            s_r9_wet_surf[s_r9_wet_count] = tg_road_shore_y(s, side > 0.0);
+            s_r9_wet_out [s_r9_wet_count] = (double)TD5_TG_WATER_EXTENT
+                                          + tg_road_shore_d(s, side > 0.0);
             s_r9_wet_in  [s_r9_wet_count] = nl->v[s].width * 0.5
-                                          + (double)TD5_TG_WATER_BEACH;
+                                          + tg_road_shore_d(s, side > 0.0);
             s_r9_wet_side[s_r9_wet_count] = side;
             s_r9_wet_count++;
         }

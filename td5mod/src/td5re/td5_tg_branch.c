@@ -195,7 +195,7 @@ static const struct { int kind; int len; double sep; } k_fork_plan[6] = {
 const char *tg_fork_kind_name(int kind)
 {
     static const char *const k_names[TG_FORK_KIND_COUNT] =
-        { "AVENUE", "ISLAND", "WIDE", "SLIP", "MAJOR" };
+        { "AVENUE", "ISLAND", "WIDE", "SLIP", "MAJOR", "BYPASS" };
     return (kind >= 0 && kind < TG_FORK_KIND_COUNT) ? k_names[kind] : "?";
 }
 
@@ -247,6 +247,110 @@ void tg_fork_plan(int index, int *kind, int *len, double *sep)
         if (len)  *len  = L;
         if (sep)  *sep  = k_fork_plan[e].sep;
     }
+}
+
+
+/* [TOPOLOGY-FIRST] Fork PLACEMENT, moved out of tg_emit_strip so it can run
+ * before the street network (which paints the corridors into the raster and
+ * may turn a fork into a BYPASS). Fills s_forks / s_fork_count for a main
+ * ring of `ring` spans; corridors are appended after the ring in fork order,
+ * which is what cbase records. Sets s_fork_placed so tg_emit_strip keeps the
+ * table instead of placing again. */
+void tg_fork_place(const TG_NodeList *nl, int ring)
+{
+    s_fork_count = 0;
+    s_fork_placed = 0;
+    if (!nl || !tg_branches_enabled()) { s_fork_placed = 1; return; }
+    {
+        const int min_len = tg_branch_min_len();
+        int off = ring;                          /* append cursor after ring */
+        /* [R20 FORK VARIETY] Placement USED to be constant: first fork at
+         * GRID_SPAN+120 and a fixed 150-span gap, so every seed that shared a
+         * plan rotation produced a byte-identical fork layout. The first-fork
+         * offset and the inter-fork gap now come from tg_fork_first_off() /
+         * tg_fork_gap() -- the SAME helpers the walk's stateless gates
+         * (tg_span_in_fork_run, tg_fork_window_ahead) consult, so the walk
+         * widens the road ahead of and keeps lane changes out of the SAME
+         * seed-varied spans this loop commits to. (The first attempt moved the
+         * loop only and left the gates on the old constants; the walk then
+         * protected the old positions while the loop placed at new ones, and
+         * every moved fork hit a lane change -> "lane count changes inside its
+         * window" rejects, costing forks. Sharing the helpers is the fix.)
+         * Knob OFF pins the old 120/150 (byte-identical). Deterministic in the
+         * plan seed. NB: ON changes span counts and every fork position on
+         * every seed. */
+        const int first_off = tg_fork_first_off();
+        const int fork_gap  = tg_fork_gap();
+        int pos = TD5_TG_GRID_SPAN + first_off;  /* first fork, past the grid */
+        unsigned int i;
+
+        for (i = 0; i < (unsigned int)tg_branch_count_max() &&
+                    s_fork_count < TD5_TG_BRANCH_MAX; i++) {
+            int kind, kl; double ksep;
+            tg_fork_plan((int)i, &kind, &kl, &ksep);
+            /* [FORK KINDS] same floor rule as tg_span_in_fork_run */
+            int L = (kind == TG_FORK_ISLAND) ? (kl < 3 ? 3 : kl)
+                                             : (kl < min_len ? min_len : kl);
+            int F = pos;
+            int R = F + 1 + L;
+            const int lanes = nl->v[F].lanes;
+            int main_half, br_lanes;
+            int q, uniform = 1;
+            tg_fork_split_lanes(kind, lanes, &main_half, &br_lanes);
+            if (main_half < 1 || br_lanes < 1) break;
+            if (lanes < tg_fork_kind_min_lanes(kind)) {
+                /* [FORK KINDS] backstop: the walk widens the road ahead of a
+                 * fork window, but a rejected section can leave it narrow. */
+                TD5_LOG_W(LOG_TAG, "trackgen: fork %u %s at F=%d skipped: %d "
+                          "lanes, needs %d", i, tg_fork_kind_name(kind), F,
+                          lanes, tg_fork_kind_min_lanes(kind));
+                pos = R + fork_gap;   /* [R20] same gap rule as the success path */
+                continue;
+            }
+            if (R + 24 >= ring) break;           /* must fit on the ring */
+            /* [LANES] fork arithmetic (lanes(F) = lanes(F+1) + lanes(B0),
+             * all 147 shipped forks obey it) needs ONE lane count across
+             * the widened approach, the split and the rejoin. */
+            for (q = F - TD5_TG_BRANCH_WIDEN - 2; q <= R + 2; q++)
+                if (q >= 0 && q < nl->count && nl->v[q].lanes != lanes) uniform = 0;
+            if (!uniform) {
+                TD5_LOG_W(LOG_TAG, "trackgen: fork %u at F=%d skipped: lane "
+                          "count changes inside its window", i, F);
+                pos = R + fork_gap;   /* [R20] same gap rule as the success path */
+                continue;
+            }
+            /* [R6 item 10] Verify the walk-time straightening (tg_span_in_fork_run
+             * clamp) actually gentled this fork's span range: a fork left on a
+             * sharp bend folds its shifted/bowed carriageways and lifts a car
+             * (the "span 570" report). Should read <= TD5_TG_FORK_MAX_TURN. */
+            TD5_LOG_I(LOG_TAG, "trackgen: fork %u %s F=%d L=%d R=%d split "
+                      "%d->%d+%d region maxcurve=%.4f (cap %.3f) long=%d "
+                      "sep=%.2f bow=%.2f", i, tg_fork_kind_name(kind), F, L, R,
+                      lanes, main_half, br_lanes,
+                      tg_fork_region_max_curve(nl, F, L, ring),
+                      TD5_TG_FORK_MAX_TURN, tg_branch_is_long(L), ksep,
+                      tg_branch_bow(L, nl->v[F].width));
+            s_forks[s_fork_count].F = F;
+            s_forks[s_fork_count].len = L;
+            s_forks[s_fork_count].cbase = off + 1;  /* pad@off, corridor off+1.. */
+            s_forks[s_fork_count].R = R;
+            /* [FORK KINDS] shape comes from the plan (ordinal + seed), so it
+             * is stable across a regen and varied across the track. */
+            s_forks[s_fork_count].sep = ksep;
+            s_forks[s_fork_count].lanes = lanes;
+            s_forks[s_fork_count].kind = kind;
+            s_forks[s_fork_count].main_lanes = main_half;
+            s_forks[s_fork_count].br_lanes = br_lanes;
+            s_forks[s_fork_count].fm = (double)main_half / (double)lanes;
+            s_forks[s_fork_count].fb = (double)br_lanes / (double)lanes;
+        s_forks[s_fork_count].side = -1;             /* [TOPOLOGY-FIRST] right unless a bypass goes left */
+            s_fork_count++;
+            off += 1 + L;
+            pos = R + fork_gap;                   /* [R20] gap before the next fork */
+        }
+
+    }
+    s_fork_placed = 1;
 }
 
 /* Corridor length after the taper floor. Only the shapes that BOW need the
@@ -414,15 +518,63 @@ static int    tg_fork_gains(int fi)
     return fi >= 0 && fi < s_fork_count && s_forks[fi].kind == TG_FORK_WIDE
         && s_forks[fi].sep > TD5_TG_AVENUE_SEP_MAX;
 }
-double tg_fork_main_shift(int fi, double w)  { return w * (1.0 - tg_fork_fm(fi)) * 0.5; }
+double tg_fork_main_shift(int fi, double w)  { return -(double)tg_fork_side(fi) * w * (1.0 - tg_fork_fm(fi)) * 0.5; }
 double tg_fork_main_wscale(int fi)           { return tg_fork_fm(fi); }
+int    s_fork_placed;
+double s_bypass_lat[TD5_TG_BRANCH_MAX][TD5_TG_BYPASS_MAXK];
+
+int tg_fork_side(int fi)
+{
+    return (fi >= 0 && fi < s_fork_count && s_forks[fi].side > 0) ? 1 : -1;
+}
+
+int tg_fork_side_at(int si)
+{
+    int f;
+    for (f = 0; f < s_fork_count; f++)
+        if (si >= s_forks[f].F - TD5_TG_BRANCH_WIDEN - 2 && si <= s_forks[f].R + 2)
+            return s_forks[f].side > 0 ? 1 : -1;
+    return -1;
+}
+
+/* Flip the winding of every quad in a list (vertices 1 and 3 swapped) -- the
+ * corridor emitters are written for a corridor on the RIGHT; a LEFT corridor
+ * mirrors every lateral, which mirrors every winding. */
+void tg_quads_mirror(double *px, double *py, double *pz, double *uu, double *vv, int n)
+{
+    int q;
+    for (q = 0; q + 3 < n; q += 4) {
+        double t;
+        t = px[q+1]; px[q+1] = px[q+3]; px[q+3] = t;
+        t = py[q+1]; py[q+1] = py[q+3]; py[q+3] = t;
+        t = pz[q+1]; pz[q+1] = pz[q+3]; pz[q+3] = t;
+        t = uu[q+1]; uu[q+1] = uu[q+3]; uu[q+3] = t;
+        t = vv[q+1]; vv[q+1] = vv[q+3]; vv[q+3] = t;
+    }
+}
+
+int tg_fork_is_bypass(int fi)
+{
+    return fi >= 0 && fi < s_fork_count && s_forks[fi].kind == TG_FORK_BYPASS;
+}
+
 double tg_fork_br_shift(int fi, int k, double w)
 {
     const int    len = (fi >= 0 && fi < s_fork_count) ? s_forks[fi].len : 1;
+    /* [TOPOLOGY-FIRST] a BYPASS corridor is a planned lateral (world units,
+     * right of travel negative), not a bow off the road width. */
+    if (tg_fork_is_bypass(fi)) {
+        if (k < 0) k = 0;
+        if (k > len) k = len;
+        if (k >= TD5_TG_BYPASS_MAXK) k = TD5_TG_BYPASS_MAXK - 1;
+        (void)w;
+        return s_bypass_lat[fi][k];
+    }
     const double sep = (fi >= 0 && fi < s_fork_count) ? s_forks[fi].sep : 1.0;
     const double f   = (len > 0) ? (double)k / (double)len : 0.0;
     const double bow = sin(f * TD5_TG_PI);
-    return -w * (1.0 - tg_fork_fb(fi)) * 0.5 - w * tg_branch_bow(len, w) * sep * bow;
+    return (double)tg_fork_side(fi)
+         * (w * (1.0 - tg_fork_fb(fi)) * 0.5 + w * tg_branch_bow(len, w) * sep * bow);
 }
 double tg_fork_br_wscale(int fi, int k)
 {
@@ -651,7 +803,6 @@ double tg_carriageway_reach(const TG_NodeList *nl, int si, double side)
     double reach = tg_road_half_width(nl, si);
     int i;
 
-    if (side >= 0.0) return reach;            /* no corridor bows LEFT */
     if (!tg_branches_enabled()) return reach;
     if (!nl || si < 0 || si + 1 >= nl->count) return reach;
 
@@ -663,6 +814,7 @@ double tg_carriageway_reach(const TG_NodeList *nl, int si, double side)
          * the mouth span itself must not see a narrower answer than its
          * neighbour or scenery pops in for one span. */
         if (si < F - 1 || si > F + L + 1) continue;
+        if (side * (double)s_forks[i].side < 0.0) continue;   /* corridor is on the other side */
         k = si - F - 1;
         if (k < 0) k = 0;
         if (k > L) k = L;
@@ -676,7 +828,7 @@ double tg_carriageway_reach(const TG_NodeList *nl, int si, double side)
              * further half carriageway-width right of that. Uses the fork's OWN
              * separation (item 10) so a tight avenue reports a nearer reach than
              * a wide split and scenery clears the branch at its ACTUAL width. */
-            const double out = -tg_fork_br_shift(i, kk, w)
+            const double out = fabs(tg_fork_br_shift(i, kk, w))
                              + w * tg_fork_br_wscale(i, kk) * 0.5;
             if (out > reach) reach = out;
         }
@@ -765,7 +917,13 @@ void tg_validate_geometry_safety(const TG_NodeList *nl, int nspans)
         const double w = nl->v[i].width;
         const double bowmax = tg_r8_longbranch_enabled() ? TD5_TG_R8_BOW_LONG
                                                          : TD5_TG_BRANCH_BOW;
-        const double lim = hi + w * (0.25 + bowmax + 0.5) + 1.0;
+        double lim = hi + w * (0.25 + bowmax + 0.5) + 1.0;
+        {   /* [TOPOLOGY-FIRST] a bypass may reach the int16 ceiling */
+            int f;
+            for (f = 0; f < s_fork_count; f++)
+                if (tg_fork_is_bypass(f) && i >= s_forks[f].F - 1 && i <= s_forks[f].R + 1)
+                    lim = TD5_TG_R8_LAT_MAX + w + 1.0;
+        }
         if (rr < hi - 1.0 || rr > lim) {
             if (bad_reach < 8)
                 TD5_LOG_W(LOG_TAG, "geometry-safety: span %d carriageway reach "
@@ -885,9 +1043,10 @@ int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
     const double sh1 = tg_fork_br_shift(fi, k + 1, c->width);
     const double h0  = a->width * tg_fork_br_wscale(fi, k)     * 0.5;
     const double h1  = c->width * tg_fork_br_wscale(fi, k + 1) * 0.5;
+    const double fs  = (double)tg_fork_side(fi);  /* [TOPOLOGY-FIRST] -1 right / +1 left */
     (void)L;
-    const double e0  = sh0 - h0;                 /* outer (right) edge, near */
-    const double e1  = sh1 - h1;                 /* outer (right) edge, far  */
+    const double e0  = sh0 + fs * h0;            /* outer edge, near */
+    const double e1  = sh1 + fs * h1;            /* outer edge, far  */
     const double u_w = sw / (double)TD5_TG_SPAN_LENGTH;
     const double u_k = kh / (double)TD5_TG_SPAN_LENGTH;
     double px[12], py[12], pz[12], uu[12], vv[12];
@@ -900,8 +1059,8 @@ int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
      * winding tg_emit_gore uses (near-high-t, near-low-t, far-low-t, far-high-t;
      * the outer point is at LOWER t because the branch is at negative lateral). */
     px[n]=a->x+a->tz*e0;        py[n]=a->y+kh; pz[n]=a->z-a->tx*e0;        uu[n]=0.0;  vv[n]=0.0; n++;
-    px[n]=a->x+a->tz*(e0-sw);   py[n]=a->y+kh; pz[n]=a->z-a->tx*(e0-sw);   uu[n]=u_w;  vv[n]=0.0; n++;
-    px[n]=c->x+c->tz*(e1-sw);   py[n]=c->y+kh; pz[n]=c->z-c->tx*(e1-sw);   uu[n]=u_w;  vv[n]=1.0; n++;
+    px[n]=a->x+a->tz*(e0+fs*sw);   py[n]=a->y+kh; pz[n]=a->z-a->tx*(e0+fs*sw);   uu[n]=u_w;  vv[n]=0.0; n++;
+    px[n]=c->x+c->tz*(e1+fs*sw);   py[n]=c->y+kh; pz[n]=c->z-c->tx*(e1+fs*sw);   uu[n]=u_w;  vv[n]=1.0; n++;
     px[n]=c->x+c->tz*e1;        py[n]=c->y+kh; pz[n]=c->z-c->tx*e1;        uu[n]=0.0;  vv[n]=1.0; n++;
 
     /* Kerb face, facing the branch carriageway (toward +lateral): base on the
@@ -922,7 +1081,7 @@ int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
      * points away from the carriageway by the identical derivation. The branch
      * lies at negative lateral, so its outer edge is at (e - sw). */
     if (tg_r14_pave_face()) {
-        const double o0 = e0 - sw, o1 = e1 - sw;
+        const double o0 = e0 + fs * sw, o1 = e1 + fs * sw;
         px[n]=a->x+a->tz*o0; py[n]=a->y+kh;                 pz[n]=a->z-a->tx*o0; uu[n]=0.0; vv[n]=0.0; n++;
         px[n]=a->x+a->tz*o0; py[n]=a->y-TD5_TG_GROUND_DROP; pz[n]=a->z-a->tx*o0; uu[n]=u_k; vv[n]=0.0; n++;
         px[n]=c->x+c->tz*o1; py[n]=c->y-TD5_TG_GROUND_DROP; pz[n]=c->z-c->tx*o1; uu[n]=u_k; vv[n]=1.0; n++;
@@ -930,6 +1089,7 @@ int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L,
         s_r14_outer_faces++;
     }
 
+    if (fs > 0.0) tg_quads_mirror(px, py, pz, uu, vv, n);
     seg_nq = n / 4;
     tg_acct_n(TG_ACCT_SIDEWALK, acct_si, 1);
     moff[(*nmesh)++] = blk->len;
@@ -967,9 +1127,10 @@ int tg_emit_branch_verge(const TG_NodeList *nl, int mb, int k, int L,
     const double sh1 = tg_fork_br_shift(fi, k + 1, c->width);
     const double h0  = a->width * tg_fork_br_wscale(fi, k)     * 0.5;
     const double h1  = c->width * tg_fork_br_wscale(fi, k + 1) * 0.5;
+    const double fs  = (double)tg_fork_side(fi);  /* [TOPOLOGY-FIRST] */
     (void)L;
-    const double e0  = sh0 - h0;                 /* outer (right) edge, near */
-    const double e1  = sh1 - h1;                 /* outer (right) edge, far  */
+    const double e0  = sh0 + fs * h0;            /* outer edge, near */
+    const double e1  = sh1 + fs * h1;            /* outer edge, far  */
     const double lift = TD5_TG_VERGE_LIFT;
     const double u_w = bw / (double)TD5_TG_SPAN_LENGTH;
     double px[4], py[4], pz[4], uu[4], vv[4];
@@ -989,10 +1150,11 @@ int tg_emit_branch_verge(const TG_NodeList *nl, int mb, int k, int L,
      * both. Winding unchanged: near-edge, near-outer, far-outer, far-edge; the
      * branch is at negative lateral so "further out" is t decreasing (e - bw). */
     px[n]=a->x+a->tz*e0;        py[n]=a->y;      pz[n]=a->z-a->tx*e0;        uu[n]=0.0; vv[n]=0.0; n++;
-    px[n]=a->x+a->tz*(e0-bw);   py[n]=a->y+lift; pz[n]=a->z-a->tx*(e0-bw);   uu[n]=u_w; vv[n]=0.0; n++;
-    px[n]=c->x+c->tz*(e1-bw);   py[n]=c->y+lift; pz[n]=c->z-c->tx*(e1-bw);   uu[n]=u_w; vv[n]=1.0; n++;
+    px[n]=a->x+a->tz*(e0+fs*bw);   py[n]=a->y+lift; pz[n]=a->z-a->tx*(e0+fs*bw);   uu[n]=u_w; vv[n]=0.0; n++;
+    px[n]=c->x+c->tz*(e1+fs*bw);   py[n]=c->y+lift; pz[n]=c->z-c->tx*(e1+fs*bw);   uu[n]=u_w; vv[n]=1.0; n++;
     px[n]=c->x+c->tz*e1;        py[n]=c->y;      pz[n]=c->z-c->tx*e1;        uu[n]=0.0; vv[n]=1.0; n++;
 
+    if (fs > 0.0) tg_quads_mirror(px, py, pz, uu, vv, n);
     seg_nq = n / 4;
     tg_acct_n(TG_ACCT_BRANCH_VERGE, acct_si, 1);
     moff[(*nmesh)++] = blk->len;
@@ -1049,13 +1211,15 @@ int tg_emit_branch_flora(const TG_NodeList *nl, int mb,
     /* Base gap past the branch's own grass verge, then clear_gap lifts it past
      * the bowed corridor so the trunk clears the branch at its ACTUAL width. */
     gap = tg_verge_band_w(b) + 500.0 + (double)((h >> 5) % 1800);
-    set = n->width * 0.5
-        + tg_carriageway_clear_gap(nl, mb, -1.0, gap, TD5_TG_CARRIAGEWAY_MARGIN)
-        + tw * 0.5;
-    /* Right of travel is NEGATIVE lateral: point at lateral t off node n is
-     * (n->x + n->tz*t, n->y, n->z - n->tx*t). */
-    cx = n->x + n->tz * (-set);
-    cz = n->z - n->tx * (-set);
+    {
+        const double fs = (double)tg_fork_side_at(mb);   /* [TOPOLOGY-FIRST] */
+        set = n->width * 0.5
+            + tg_carriageway_clear_gap(nl, mb, fs, gap, TD5_TG_CARRIAGEWAY_MARGIN)
+            + tw * 0.5;
+        /* lateral t off node n is (n->x + n->tz*t, n->y, n->z - n->tx*t) */
+        cx = n->x + n->tz * (fs * set);
+        cz = n->z - n->tx * (fs * set);
+    }
     /* [R12 item 4] the one tree emitter that does not go through tg_flora_diag;
      * it takes the same shared spacing rule -- see tg_r12_flora_accept. */
     if (!tg_r12_flora_accept(mb, "branch", tg_tree_slot(tv), -1.0,
@@ -1086,11 +1250,11 @@ int tg_emit_branch_flora(const TG_NodeList *nl, int mb,
             const double d = set - n->width * 0.5;   /* trunk dist from road edge */
             if (tg_topo_enabled()) {
                 TG_TopoChain c;
-                tg_topo_chain(nl, mb, 0 /*right of travel*/, &c);
+                tg_topo_chain(nl, mb, tg_fork_side_at(mb) > 0, &c);
                 base_y = n->y - tg_topo_drop_at(&c, d);
             } else {
-                const double wsd = b->water ? tg_water_side(mb) : 0.0;
-                base_y = n->y - tg_infra_ground_dy(nl, mb, -1.0, d, wsd);
+                const double wsd = tg_water_side(mb);
+                base_y = n->y - tg_infra_ground_dy(nl, mb, (double)tg_fork_side_at(mb), d, wsd);
             }
         }
         return tg_emit_billboard_mesh(blk, cx, base_y, cz, tw * 0.5, th,

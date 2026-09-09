@@ -30,8 +30,26 @@ Gotchas learned 2026-09-04:
 import os, sys, time, subprocess, ctypes, json, re
 WT=os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 S=sys.argv[1]; PORT=int(os.environ.get("TD5RE_CONTROL_PORT","37072")); TITLE="TD5RE-a1-%d"%PORT; SEED=sys.argv[2] if len(sys.argv)>2 else "99991"
-START=int(sys.argv[3]) if len(sys.argv)>3 else 51
-TARGETS=[int(x) for x in (sys.argv[4].split(',') if len(sys.argv)>4 else "66,75,95,115,145,150,160,311,358,361".split(','))]
+START=sys.argv[3] if len(sys.argv)>3 else "51"
+TARGETS=sys.argv[4] if len(sys.argv)>4 else "66,75,95,115,145,150,160,311,358,361"
+# [TOPOLOGY-FIRST] targets=auto: read the level's NETWORK.JSON (from a previous
+# generation of the same seed, e.g. verify/topo_gen.ps1) and capture the first
+# span of every structure run (+3, so the car is inside), each drivable fork's
+# mouth (+4) and the first three street mouths (+1). start=auto = 12 spans
+# before the first target.
+if TARGETS == "auto":
+    import json as _json
+    _nj = os.path.join(WT, "re", "assets", "levels", "level090", "NETWORK.JSON")
+    _d = _json.load(open(_nj))
+    _t = [st["s0"] + 3 for st in _d["structs"]]
+    _t += [e["mouth"]["si"] + 4 for e in _d["edges"] if e["kind"] == "bypass"]
+    _m = sorted(e["mouth"]["si"] + 1 for e in _d["edges"] if e["kind"] in ("street", "avenue") and e["mouth"]["si"] > 60)
+    _t += _m[:3]
+    TARGETS = ",".join(str(x) for x in sorted(set(_t)))
+    print("auto targets:", TARGETS)
+TARGETS=[int(x) for x in TARGETS.split(',')]
+START=(min(TARGETS) - 12) if START == "auto" else int(START)
+if START < 1: START = 1
 sys.path.insert(0, os.path.join(WT,"scripts","td5re_mcp")); from game_client import GameClient
 # Autotrack knobs default ON for the A-rounds but ALWAYS yield to the environment.
 # dict(os.environ, KEY=val) lets the kwarg WIN, so a forced kwarg here silently

@@ -41,6 +41,7 @@
  * Coordinates are raw signed world units (the renderer divides by 256).
  */
 #include "td5_trackgen.h"
+#include "td5_tg_world.h"
 #include "td5_track_registry.h"
 #include "td5_jobs.h"          /* [S2c] parallel terrain pre-pass */
 #include "td5_track.h"         /* streamed-scenery ingest (td5_track_scenery_*) */
@@ -592,6 +593,8 @@ typedef enum {
     TG_FORK_WIDE,         /* symmetric, wide separation, corridor gains lanes */
     TG_FORK_SLIP,         /* corridor 1-2 lanes peels off, main keeps the rest */
     TG_FORK_MAJOR,        /* main narrows to 1-2 lanes, corridor takes the rest */
+    TG_FORK_BYPASS,       /* [TOPOLOGY-FIRST] corridor follows a planned lateral
+                           * profile (a real street of the network), not a bow */
     TG_FORK_KIND_COUNT
 } TG_ForkKind;
 typedef struct {
@@ -602,6 +605,8 @@ typedef struct {
     int main_lanes;       /* lanes(F+1): what the main ring keeps            */
     int br_lanes;         /* lanes(B0):  what the corridor takes             */
     double fm, fb;        /* main_lanes/lanes, br_lanes/lanes (0.5 symmetric) */
+    int side;             /* [TOPOLOGY-FIRST] -1 corridor right of travel (the
+                           * shipped shape), +1 left. Only a BYPASS goes left. */
 } TG_Fork;
 const char *tg_fork_kind_name(int kind);
 /* Stateless plan for fork ordinal `index`: kind, corridor length and
@@ -778,6 +783,8 @@ enum {
      * quarter of the build was inside that loop and unattributed. These three
      * say WHICH part of the entry body it is. */
     TG_ZONE_ENTRY_L1, TG_ZONE_ENTRY_L2, TG_ZONE_GUARDVAL,
+    /* [TOPOLOGY-FIRST 2026-09-08] world heightfield, street network, trim. */
+    TG_ZONE_WORLD, TG_ZONE_NETWORK, TG_ZONE_TRIM,
     TG_ZONE_COUNT
 };
 extern uint64_t s_tg_zone_us[TG_ZONE_COUNT];
@@ -1353,10 +1360,46 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl, int secti
  * rate, so a longer RUN means fewer draws over the same track. That is the
  * intended trade (fewer, bigger crossings), but it is also why this is verified
  * by the element inventory on both seeds rather than assumed. */
-#define TD5_TG_BRIDGE_RUN_R3  40       /* pre-R8 run length (A/B baseline)    */
-#define TD5_TG_BRIDGE_RUN_R8  56       /* [R8 item 18] longer crossing        */
-int tg_bridge_run_len(void);
-#define TD5_TG_BRIDGE_RUN     (tg_bridge_run_len())
+/* [TOPOLOGY-FIRST] Bridge runs are DETECTED from the terrain by
+ * td5_tg_road.c and held in a per-span table; there is no run stride. */
+enum { TG_ST_NONE = 0, TG_ST_BRIDGE, TG_ST_TUNNEL };
+int  tg_struct_kind(int si);                       /* TG_ST_* for main span si */
+void tg_struct_run_bounds(int si, int *s0, int *s1); /* contiguous same-kind run */
+double tg_road_ground_y(int i);                    /* world ground under node i */
+int    tg_road_node_wet(int i);                    /* water under node i        */
+int    tg_road_node_forced(int i);                 /* terrain-yields conform    */
+void   tg_road_shore_rebuild(const TG_NodeList *nl);
+void   tg_track_min_y_invalidate(void);
+/* Per-span water / shoreline table (td5_tg_road.c), built after the profile. */
+int    tg_road_wet_any(int si);                    /* water within reach, either side */
+double tg_road_shore_d(int si, int is_left);       /* edge -> first wet cell, 1e9 = dry */
+double tg_road_shore_y(int si, int is_left);       /* water surface at that shore     */
+double tg_road_water_side(int si);                 /* +1 left / -1 right / 0 none     */
+double tg_road_node_water_y(int i);
+#define TD5_TG_ROAD_BED_VERGE 2500.0  /* flat, conformed shoulder beside the road */
+/* [TOPOLOGY-FIRST] street network (td5_tg_network.c). */
+enum { TG_NE_STREET = 0, TG_NE_AVENUE, TG_NE_BACKSTREET, TG_NE_CONTINUATION,
+       TG_NE_COUNTRY, TG_NE_UNDERPASS, TG_NE_BYPASS, TG_NE_KIND_COUNT };
+void tg_network_reset(void);
+void tg_network_build(const TG_NodeList *nl, int nspans_main);
+int  tg_network_built(void);
+void tg_network_write(const char *dir, const TG_NodeList *nl, int nspans_main);
+int  tg_net_mouth(int si, int left, double *skew, double *reach);  /* edge id or -1 */
+int  tg_net_mouth_kind(int si, int left);                          /* TG_NE_* or -1  */
+/* fork placement (was inline in tg_emit_strip) and the bypass lateral table */
+void   tg_fork_place(const TG_NodeList *nl, int ring);
+extern int s_fork_placed;
+#define TD5_TG_BYPASS_MAXK 512
+extern double s_bypass_lat[TD5_TG_BRANCH_MAX][TD5_TG_BYPASS_MAXK];
+int    tg_fork_is_bypass(int fi);
+int    tg_fork_side(int fi);            /* -1 right (default) / +1 left      */
+int    tg_fork_side_at(int si);         /* side of the fork whose clear region holds si, else -1 */
+void   tg_quads_mirror(double *px, double *py, double *pz, double *uu, double *vv, int n);
+/* the hash-rhythm halves the network validates (were the authorities) */
+int    tg_facade_built_hash(int si, int left);
+double tg_block_arm_skew_hash(int si, int left);
+int    tg_r12_fcross_candidate(const TG_NodeList *nl, int blk, int *c, double *side);
+#define TD5_TG_R21_GRADE_HEADROOM 1.15  /* cap sits just above the drive aim  */
 #define TD5_TG_BRIDGE_HEIGHT  2000.0   /* crown lift; bounded by max_grade */
 #define TD5_TG_BRIDGE_CHASM   2500.0   /* how far the ground/river drops below */
 /* Half-width of the river channel. Unlike the sea (which starts outboard of the
@@ -1401,6 +1444,16 @@ double tg_track_min_y(const TG_NodeList *nl);
 #define TD5_TG_R8_MACRO_AMP    18000.0  /* macro half-amplitude at 1 wave      */
 #define TD5_TG_R8_DETAIL_SCALE 0.5      /* shrink the old high-frequency term  */
 void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl);
+/* Walk helpers shared with td5_tg_road.c (were file-static in the monolith). */
+unsigned int tg_rand(void);
+int    tg_range(int lo, int hi);
+double tg_frand(void);
+int    tg_nodes_push(TG_NodeList *nl, double x, double z, double width, int lanes);
+int    tg_too_close(const TG_NodeList *nl, double x, double z, double width,
+                    double lane_width, int skip);
+double tg_acute_heading_limit(void);
+int    tg_adjacent_skip(const TD5_TrackGenSpec *spec, double limit_max);
+TD5_TrackGenSection tg_pick_section(const TD5_TrackGenSpec *spec, int si);
 /* ------------------------------------------------------ byte emitters ----- */
 typedef struct {
     unsigned char *b;
@@ -1933,7 +1986,6 @@ double tg_sea_level_y(const TG_NodeList *nl, int si);
  * whole track, a LOW PERCENTILE of the route's node elevations so the sea sits
  * in the terrain's low band; paired with a route floor clamp in
  * tg_apply_elevation so the road stays above it. Defined in td5_trackgen.c. */
-double tg_water_level_y(const TG_NodeList *nl);
 double tg_water_side(int si);
 int    tg_biome_for_span(int si);
 int    tg_biome_span_has_water(int si);
@@ -2885,6 +2937,7 @@ double tg_verge_band_w(const TG_Biome *b);
 double tg_city_kerb_h(const TG_Biome *b);
 int tg_facade_cols_for(double len, double cell_w, int cap);
 double tg_facade_floor_h(const TG_Biome *b);
+double tg_city_crossst_reach(const TG_Biome *b, double sw);   /* [TOPOLOGY-FIRST] */
 double tg_facade_depth(const TG_Biome *b);
 double tg_facade_run_depth(const TG_Biome *b, int si, int left, int floors, int *dcols_out);
 int tg_facade_floors(int si, int left, const TG_Biome *b);
@@ -3111,10 +3164,10 @@ int tg_emit_water(const TG_NodeList *nl, int si, double side, TG_Buf *m, size_t 
  * constraint on going further: a tunnel run yields to any bridge run within
  * CLEAR spans, and both runs just got longer, so tunnel COUNT is the number to
  * watch in the element inventory rather than to assume. */
-#define TD5_TG_TUNNEL_RUN_R3  20      /* pre-R8 bore length (A/B baseline) */
-#define TD5_TG_TUNNEL_RUN_R8  32      /* [R8 item 18] longer bore          */
-int tg_tunnel_run_len(void);
-#define TD5_TG_TUNNEL_RUN  (tg_tunnel_run_len())
+/* [TOPOLOGY-FIRST] Bores are DETECTED (td5_tg_road.c). The 32-span stride
+ * survives only as the UNDERPASS placement period (a crossing road passing
+ * over the main road is a network feature, not a terrain one). */
+#define TD5_TG_UNDERPASS_RUN  32
 /* [R4 item 19] Spans of ordinary ground a tunnel run must keep clear of any
  * bridge run, on either side. A deck runs into a bore with zero clearance today
  * (seed 99991: bridge 1320-1359 overlaps tunnel 1340-1359), so this both forbids
@@ -3715,7 +3768,7 @@ int tg_emit_bridge_water(const TG_NodeList *nl, int si, TG_Buf *m, size_t *moff,
  * tg_emit_fb_terrain and (since R9) the coastline band cannot disagree about
  * where the skirt ended or how low. The struct lives here rather than with
  * tg_ground_side because the coastline is emitted earlier in the file. */
-#define TD5_TG_GROUND_MAXPT 3
+#define TD5_TG_GROUND_MAXPT 5   /* [TOPOLOGY-FIRST] world-sampled */
 typedef struct {
     double d[TD5_TG_GROUND_MAXPT];
     double dy[TD5_TG_GROUND_MAXPT];
@@ -3953,7 +4006,7 @@ int tg_flora_plant(const TG_NodeList *nl, int si, const TG_Biome *b, double side
 #define TD5_TG_GORE_DROP      4.0    /* below road level, world units */
 #define TD5_TG_GORE_OVERLAP 240.0    /* underlap into each carriageway */
 int tg_fork_gore_page(int fork_index);
-int tg_emit_gore(const TG_NodeList *nl, int si, double shift_n, double shift_f, double half_n, double half_f, int ground_page, TG_Buf *blk);
+int tg_emit_gore(const TG_NodeList *nl, int si, double shift_n, double shift_f, double half_n, double half_f, int ground_page, TG_Buf *blk, int side);
 extern long s_r14_outer_faces;
 int tg_r14_pave_face(void);
 int tg_emit_branch_sidewalk(const TG_NodeList *nl, int mb, int k, int L, int fi, const TG_Biome *b, TG_Buf *blk, size_t *moff, int *nmesh, int acct_si);
@@ -4687,6 +4740,7 @@ void tg_r9_city_scan_entry(const TG_NodeList *nl, int ring, int s0, int ns, cons
 void tg_r9_city_report(const TG_NodeList *nl, int nspans);
 void tg_r14_branch_report(const TG_NodeList *nl, int nspans);
 int tg_emit_fb_cross(const TG_FBHook *h);
+int tg_net_emit_entry(const TG_FBHook *h);   /* [TOPOLOGY-FIRST] polyline tarmac */
 int tg_emit_fb_city(const TG_FBHook *h);
 /* Group B -- flora & figures: tree placement/backdrop, prop scale & density.
  *
@@ -5846,7 +5900,7 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num, int *o
  * cache, so a stale build can never hide a code change). Reuse also needs the
  * few generator statics the runtime asks for after the build, which is why the
  * stamp carries the ring length / finish span / circuit flag. */
-#define TG_STAMP_VERSION 1u
+#define TG_STAMP_VERSION 2u   /* 2: topology-first world stage */
 typedef struct {
     unsigned int version, seed, spec_hash, env_hash;
     unsigned long long exe_id;

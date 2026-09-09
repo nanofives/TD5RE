@@ -3718,6 +3718,8 @@ static void tg_r12_flora_report(const TG_NodeList *nl, int nspans)
 }
 
 /* ----------------------------------------------------------- build ------- */
+static double s_world_box[4];   /* [TOPOLOGY-FIRST] road bbox + reach, for the stats/dump */
+
 int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
                              int *out_spans)
 {
@@ -3777,6 +3779,16 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
         TG_ZONE_END(TG_ZONE_BIOME);
     }
 
+    /* [TOPOLOGY-FIRST] The WORLD exists before the road: heightfield, sea,
+     * rivers, mountains. Seed + knobs only (its own hash stream), placed
+     * BEFORE tg_srand so it can never move the walk's RNG. */
+    {
+        TG_ZONE_BEGIN(TG_ZONE_WORLD);
+        tg_world_build(spec->seed, spec->target_spans);
+        TG_ZONE_END(TG_ZONE_WORLD);
+        s_tg_progress = 3;
+    }
+
     tg_srand(spec->seed);
 
     snprintf(dir, sizeof(dir), "re/assets/levels/level%03d", level_num);
@@ -3799,6 +3811,39 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
          * would consume the placements). Table is empty today, so this only
          * reports. */
         tg_landmarks_place(&nl, nl.count);
+    }
+    /* [TOPOLOGY-FIRST] World statistics + dev heightmap over the road's
+     * bounding box (+ FAR_REACH), then freeze: from here on every read is
+     * pure, which the MT terrain prepass requires. */
+    {
+        double bx0 = 1e30, bz0 = 1e30, bx1 = -1e30, bz1 = -1e30;
+        int bi;
+        for (bi = 0; bi < nl.count; bi++) {
+            if (nl.v[bi].x < bx0) bx0 = nl.v[bi].x;
+            if (nl.v[bi].x > bx1) bx1 = nl.v[bi].x;
+            if (nl.v[bi].z < bz0) bz0 = nl.v[bi].z;
+            if (nl.v[bi].z > bz1) bz1 = nl.v[bi].z;
+        }
+        bx0 -= tg_far_reach(); bz0 -= tg_far_reach();
+        bx1 += tg_far_reach(); bz1 += tg_far_reach();
+        s_world_box[0] = bx0; s_world_box[1] = bz0; s_world_box[2] = bx1; s_world_box[3] = bz1;
+    }
+
+    /* [TOPOLOGY-FIRST] Forks are PLACED before the strip so the STREET
+     * NETWORK can plan bypass corridors for them; the network runs on the
+     * occupancy raster before any scenery reads the mouth table. Then the
+     * world freezes: every later read is pure (the MT terrain prepass needs
+     * that). tg_emit_strip keeps the placed table. */
+    {
+        TG_ZONE_BEGIN(TG_ZONE_NETWORK);
+        tg_fork_place(&nl, nl.count - 1);
+        tg_network_build(&nl, nl.count - 1);
+        tg_network_write(dir, &nl, nl.count - 1);
+        TG_ZONE_END(TG_ZONE_NETWORK);
+        tg_world_freeze();
+        tg_world_log_stats("road box", s_world_box[0], s_world_box[1], s_world_box[2], s_world_box[3]);
+        tg_world_dump(dir, s_world_box[0], s_world_box[1], s_world_box[2], s_world_box[3]);
+        s_tg_progress = 7;
     }
 
     if (td5_env_flag_off("TD5RE_AUTOTRACK_SELFCHECK")) {
@@ -4129,6 +4174,10 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
 done:
     if (out_spans) *out_spans = nspans;
     free(nl.v);
+    /* [TOPOLOGY-FIRST] The world follows the node list: a STREAMED build
+     * hands both to the scenery worker (freed by td5_trackgen_stream_discard),
+     * every other path is done with it here. */
+    if (!s_stream_pending) tg_world_free();
     tg_buf_free(&strip);
     tg_buf_free(&left);
     tg_buf_free(&right);

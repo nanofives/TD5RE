@@ -147,6 +147,9 @@ small file instead of a fan-out over ~145k LOC:
 | Netplay, lockstep, desync | `td5_net.c` + `td5_msvc_rand.c` (determinism); restart/seed: `td5_game.c` pause path |
 | Texture/blend/z render states, foliage AA | `ddraw_wrapper/src/d3d12_backend.c` (state cache; `Backend_IsFoliageAA`) |
 | Mesh draw, culling, banners, billboards | `td5_render*.c` |
+| Auto track: world heightfield, sea, rivers, occupancy raster | `td5_tg_world.c` (docs/plans/AUTOTRACK_TOPOLOGY.md) |
+| Auto track: road walk, steering, bridge/tunnel detection, grade profile | `td5_tg_road.c` (`[STRUCT]`/`[STEER]` log lines; `TD5RE_TG_BRIDGE_MAX`/`_TUNNEL_MAX`) |
+| Auto track: side streets, back streets, loops, bypass corridors, NETWORK.JSON | `td5_tg_network.c` (mouth table; audit `re/tools/tg_network_audit.py`) |
 | Asset loading (zips, TGA, levels, cars) | `td5_asset.c` (+ `td5_assetsrc.c` pack-on-load) |
 | Sound / music / internet radio | `td5_sound.c` / `td5_music.c` / `td5_radio.c` |
 | "Is this behavior a bug?" | `EXPECTED_BEHAVIOR.md` |
@@ -173,6 +176,9 @@ comment — regenerate after adding/splitting modules with
 | `td5_track_parser.c` | MODELS.DAT parsing (S6 module split, see REFACTOR_PLAN.md) |
 | `td5_track_registry.c` | runtime registry for custom (user-built) tracks. |
 | `td5_trackgen.c` | procedural (AUTO-GENERATED) track builder: spec, RNG, centerline, elevation, strip + routes, scenery orchestration, build/regenerate entry points (PORT-ONLY) |
+| `td5_tg_world.c` | auto-track WORLD: seeded heightfield (sea, coast, rivers, mountains, flats), sparse conform/occupancy overlay, terrain classes |
+| `td5_tg_road.c` | auto-track ROAD on the WORLD: terrain-steered centerline walk, structure table (bridge/tunnel by terrain, not by hash), grade-limited terrain-following elevation, road-bed conform |
+| `td5_tg_network.c` | auto-track STREET NETWORK: planar road graph (city streets, avenues, back streets, bend continuations, country loops, underpass crossings) validated on the world occupancy raster; the (span,side) street authority; NETWORK.JSON |
 | `td5_tg_branch.c` | auto-track BRANCHES: fork corridors, long diverging branch, carriageway query, branch pavement + avenue divider |
 | `td5_tg_guard.c` | auto-track GUARD: on-road geometry backstop, MESHTAG sidecar, pavement provenance marks, over-water / coast audits |
 | `td5_tg_city.c` | auto-track CITY: bend-fold authority, facade walls, turn continuation, pavement geometry, run-end census, side-street occupancy, street furniture |
