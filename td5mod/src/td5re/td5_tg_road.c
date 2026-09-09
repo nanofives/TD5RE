@@ -1087,9 +1087,16 @@ static void tg_road_shore_build(const TG_NodeList *nl)
 /* [TOPOLOGY-FIRST] Public rebuild: the street network conforms the world
  * (corridors, gores, back streets) after the profile, so the shore table is
  * rebuilt once the network is done. */
+static void tg_r22_water_diag(const TG_NodeList *nl);
+
 void tg_road_shore_rebuild(const TG_NodeList *nl)
 {
     if (nl) tg_road_shore_build(nl);
+    /* [R22 item 10] Run the water-plane scan HERE, not in tg_apply_elevation:
+     * the planes actually emitted use this post-network shore table, and the
+     * facade authority (tg_facade_built) is only valid once the street network
+     * has built its mouths. */
+    if (nl) tg_r22_water_diag(nl);
 }
 
 int tg_road_wet_any(int si)
@@ -1220,26 +1227,49 @@ static void tg_r22_water_diag(const TG_NodeList *nl)
                 if (r > rad) rad = r;
             }
             cy = (py0 < py1 ? py0 : py1);
+            {
+            int fac_hits = 0, fac_j = -1;      /* quad over a CITY FACADE frontage */
+            double fac_depth = 0.0;            /* deepest flood at a covered facade */
             /* Scan road EDGE points (both sides of every span's centreline)
              * covered by this plane and below its surface: this is the road the
              * water is laid over, not the centreline node the plane starts
-             * outboard of. */
+             * outboard of. Also test the FACADE frontage (a band out to the verge
+             * reach on any span/side that stands buildings) so "water near
+             * buildings" is caught, not only water on the tarmac. */
             for (j = 0; j + 1 < nl->count; j++) {
                 const TG_Node *nj = &nl->v[j];
+                const double pyj = (py0 < py1 ? py0 : py1);   /* conservative flat plane */
                 int e;
                 if (j == si || j == si + 1) continue;
                 for (e = 0; e < 2; e++) {
                     const double es = e ? -1.0 : 1.0;
                     const double ex = nj->x + nj->tz * es * nj->width * 0.5;
                     const double ez = nj->z - nj->tx * es * nj->width * 0.5;
-                    double pyj, dist;
+                    double dist;
                     if (!tg_r22_pt_in_quad(ex, ez, px, pz)) continue;
-                    pyj = (py0 < py1 ? py0 : py1);   /* conservative flat plane */
                     if (nj->y >= pyj - 200.0) continue;
                     covered++;
                     dist = pyj - nj->y;
                     if (dist > worst_delta) { worst_delta = dist; worst_j = j; }
                     break;
+                }
+                /* Facade frontage: on a paved span that stands buildings, the
+                 * facade line sits out beyond the road edge; sample the band. */
+                if (tg_facade_stands(j)) {
+                    for (e = 0; e < 2; e++) {
+                        const double es = e ? -1.0 : 1.0;   /* e0 -> left(+1) */
+                        double off;
+                        if (!tg_facade_built(j, e == 0 ? 1 : 0)) continue;
+                        for (off = nj->width * 0.5; off <= nj->width * 0.5 + 8000.0; off += 1500.0) {
+                            const double fx = nj->x + nj->tz * es * off;
+                            const double fz = nj->z - nj->tx * es * off;
+                            if (!tg_r22_pt_in_quad(fx, fz, px, pz)) continue;
+                            if (nj->y >= pyj - 200.0) continue;   /* facade base ~ road y */
+                            fac_hits++; if (fac_j < 0) fac_j = j;
+                            if (pyj - nj->y > fac_depth) fac_depth = pyj - nj->y;
+                            break;
+                        }
+                    }
                 }
             }
             target = (si >= 380 && si <= 391);
@@ -1248,16 +1278,17 @@ static void tg_r22_water_diag(const TG_NodeList *nl)
             {
                 const double own = (n0->y < n1->y ? n0->y : n1->y);
                 const double over_own = cy - own;
-                if (over_own > 200.0 || covered > 0 || target)
+                const int is_sea = !(py0 > sea + 1.0 || py1 > sea + 1.0);
+                if (over_own > 200.0 || covered > 0 || fac_hits > 0 || target)
                     TD5_LOG_I(LOG_TAG, "trackgen: [R22 WDIAG] span %d %s: surf %.0f "
-                              "(%s) d=%.0f/%.0f, road.y %.0f/%.0f (over own edge "
-                              "%.0f), ctr %.0f,%.0f r%.0f; %d road edge(s) UNDER "
-                              "plane, worst j=%d dy=%.0f |dj|=%d",
-                              si, is_left ? "L" : "R", cy,
-                              (py0 > sea + 1.0 || py1 > sea + 1.0) ? "river" : "sea",
-                              d0, d1, n0->y, n1->y, over_own, cx, cz, rad,
-                              covered, worst_j, worst_delta,
+                              "(%s) d=%.0f far=%.0f, road.y %.0f (over own %.0f), "
+                              "r%.0f; %d road + %d FACADE pt(s) UNDER plane (fac span "
+                              "%d flood %.0f), worst j=%d dy=%.0f |dj|=%d",
+                              si, is_left ? "L" : "R", cy, is_sea ? "SEA" : "river",
+                              d0, tg_road_shore_far(si, is_left), n0->y, over_own, rad,
+                              covered, fac_hits, fac_j, fac_depth, worst_j, worst_delta,
                               worst_j >= 0 ? (worst_j > si ? worst_j - si : si - worst_j) : 0);
+            }
             }
         }
     }
@@ -1641,7 +1672,6 @@ void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
                   "50000 sheet; knob TD5RE_R22_WATER_CLIP)", rivers, clipped,
                   clipped ? red_sum / clipped : 0.0, red_max);
     }
-    tg_r22_water_diag(nl);
 
     TD5_LOG_I(LOG_TAG, "trackgen: [STRUCT] bridges %d run(s) / %d span(s) (longest %d, "
               "cap %d, %d over water), tunnels %d run(s) / %d span(s) (longest %d, cap "
