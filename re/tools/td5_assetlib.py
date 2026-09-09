@@ -51,6 +51,240 @@ def _world_verts(mesh):
             for v in mesh["vertices"]]
 
 
+# ---------------------------------------------------------------------------
+# Intra-mesh splitting (one sub-mesh -> its separable parts)
+# ---------------------------------------------------------------------------
+#
+# extract_prototype above works at WHOLE SUB-MESH granularity, which is as fine
+# as the picker can point: a pick line names `e<entry> s<slot>`, and one slot is
+# one sub-mesh. Shipped sub-meshes are routinely fused -- level023 e29 s0 is 29
+# commands over 6+ pages, so "the guardrail" and whatever it shares a slot with
+# are one indivisible lump to every existing tool.
+#
+# The format gives us exactly one exact seam and one approximate one:
+#   EXACT   -- the per-command texture_page_id. There is no per-face record at
+#              all; a face inherits everything from its command, so the page id
+#              IS the material. Vertices are de-indexed and consumed by a running
+#              cursor, so command k owns a contiguous, unambiguous vertex range.
+#   APPROX  -- spatial connectivity. Shipped buildings are flat arrays of
+#              unconnected road-facing quads (survey note, td5_trackgen_internal.h
+#              :2179), so welding shared positions separates repeated instances
+#              (rail segment 1 vs rail segment 2) but will NOT reassemble a
+#              facade into one solid. That is a property of the shipped data, not
+#              a bug here.
+
+SPLIT_OK = "ok"
+SPLIT_CURSOR = "cursor_mismatch"
+SPLIT_VPTR = "explicit_vptr"
+SPLIT_EMPTY = "empty"
+
+
+def mesh_faces(mesh):
+    """Walk the sequential vertex cursor. Returns (faces, reason).
+
+    faces: [{"cmd", "page", "dispatch", "vi": [vertex indices]}], tris then quads
+    per command (the order td5_render_mesh.c and mesh_tool both read).
+
+    The cursor is only trustworthy if it accounts for EVERY vertex, so a mesh
+    whose commands do not sum to len(vertices) is REJECTED rather than sliced --
+    td5_pick.c:139 bails on the same condition because the stride is then
+    unknown, and a silent mis-slice is the worst failure this module can have.
+    """
+    cmds = mesh.get("commands") or []
+    nv = len(mesh.get("vertices") or [])
+    if not cmds or not nv:
+        return [], SPLIT_EMPTY
+    if any(int(c.get("vptr", 0)) != 0 for c in cmds):
+        return [], SPLIT_VPTR          # explicit pointers: cursor does not apply
+    if sum(int(c["tri"]) * 3 + int(c["quad"]) * 4 for c in cmds) != nv:
+        return [], SPLIT_CURSOR
+    faces, cur = [], 0
+    for ci, c in enumerate(cmds):
+        tri, quad = int(c["tri"]), int(c["quad"])
+        page, disp = int(c["texture_page_id"]), int(c["dispatch_type"])
+        for t in range(tri):
+            b = cur + t * 3
+            faces.append({"cmd": ci, "page": page, "dispatch": disp,
+                          "vi": [b, b + 1, b + 2]})
+        qb = cur + tri * 3
+        for q in range(quad):
+            b = qb + q * 4
+            faces.append({"cmd": ci, "page": page, "dispatch": disp,
+                          "vi": [b, b + 1, b + 2, b + 3]})
+        cur += tri * 3 + quad * 4
+    return faces, SPLIT_OK
+
+
+class _UF:
+    def __init__(self, n):
+        self.p = list(range(n))
+
+    def find(self, a):
+        while self.p[a] != a:
+            self.p[a] = self.p[self.p[a]]
+            a = self.p[a]
+        return a
+
+    def union(self, a, b):
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self.p[rb] = ra
+
+
+def _cluster_faces(faces, verts, weld):
+    """Union-find over faces that share a welded vertex position. `weld` is the
+    quantisation cell in render-float world units (the same space the picker
+    prints, i.e. raw/256). Returns a list of face-index lists."""
+    uf = _UF(len(faces))
+    seen = {}
+    inv = 1.0 / weld if weld > 0 else 0.0
+    for fi, f in enumerate(faces):
+        for vi in f["vi"]:
+            p = verts[vi]
+            key = (round(p[0] * inv), round(p[1] * inv), round(p[2] * inv)) if inv \
+                else (p[0], p[1], p[2])
+            prev = seen.get(key)
+            if prev is None:
+                seen[key] = fi
+            else:
+                uf.union(prev, fi)
+    groups = {}
+    for fi in range(len(faces)):
+        groups.setdefault(uf.find(fi), []).append(fi)
+    return list(groups.values())
+
+
+def _part_from_faces(mesh, faces, fidx, verts):
+    """Rebuild one mesh_tool-shaped mesh from a subset of faces, in WORLD space.
+    Faces are regrouped into one command per (page, dispatch), tris before quads,
+    so the sequential cursor of the result is valid by construction."""
+    buckets = {}
+    for fi in fidx:
+        f = faces[fi]
+        buckets.setdefault((f["page"], f["dispatch"]), {"tri": [], "quad": []})[
+            "tri" if len(f["vi"]) == 3 else "quad"].append(f)
+    cmds, out_v, pts = [], [], []
+    for (page, disp), b in sorted(buckets.items()):
+        for f in b["tri"] + b["quad"]:
+            for vi in f["vi"]:
+                src = mesh["vertices"][vi]
+                wx, wy, wz = verts[vi]
+                out_v.append({"pos": [wx, wy, wz], "view": [0.0, 0.0, 0.0],
+                              "light": src["light"], "tex": list(src["tex"]),
+                              "proj": [0.0, 0.0]})
+                pts.append((wx, wy, wz))
+        cmds.append({"dispatch_type": disp, "texture_page_id": page,
+                     "reserved_04": 0, "tri": len(b["tri"]), "quad": len(b["quad"]),
+                     "vptr": 0})
+    return {"render_type": mesh["render_type"], "texture_page_id": 0,
+            "bounding": _bounds(pts), "origin": [0.0, 0.0, 0.0], "reserved_28": 0,
+            "commands": cmds, "vertices": out_v, "normals": None}
+
+
+SPLIT_MODES = ("page", "weld", "object")
+
+# A flat slab is anything under this world-Y extent and wider than this in XZ.
+# Slabs matter because in `object` mode they are the WRONG thing to merge
+# through: measured on level023, plain spatial welding produces one 20..30-page,
+# ~24000x12000x29000 blob per entry, because the ground slab physically touches
+# the facades, which touch the rails, which touch the next slab. Excluding slabs
+# from the merge graph is what turns "one lump per entry" into real objects --
+# and it is free, because the plazas we want as their own pieces ARE the slabs.
+OBJ_FLAT_Y = 60.0
+OBJ_FLAT_XZ = 2000.0
+OBJ_GAP = 200.0            # AABB dilation when merging non-flat primitives
+
+
+def _aabb_of(faces, fidx, verts):
+    pts = [verts[vi] for fi in fidx for vi in faces[fi]["vi"]]
+    mn = [min(p[i] for p in pts) for i in range(3)]
+    mx = [max(p[i] for p in pts) for i in range(3)]
+    return mn + mx
+
+
+def _is_flat(bb):
+    return (bb[4] - bb[1]) <= OBJ_FLAT_Y and max(bb[3] - bb[0], bb[5] - bb[2]) > OBJ_FLAT_XZ
+
+
+def _overlap(a, b, gap):
+    return all(a[i] - gap <= b[i + 3] and b[i] - gap <= a[i + 3] for i in range(3))
+
+
+def _groups_page(faces, verts, weld):
+    by = {}
+    for fi, f in enumerate(faces):
+        by.setdefault(f["page"], []).append(fi)
+    out = []
+    for _page, fis in sorted(by.items()):
+        sub = [faces[i] for i in fis]
+        for cl in _cluster_faces(sub, verts, weld):
+            out.append([fis[i] for i in cl])
+    return out
+
+
+def _groups_object(faces, verts, weld, gap):
+    """Exact page split first, then merge the NON-FLAT primitives that sit on top
+    of each other back into whole objects. Flat slabs stay separate."""
+    prim = _groups_page(faces, verts, weld)
+    boxes = [_aabb_of(faces, g, verts) for g in prim]
+    solid = [i for i, b in enumerate(boxes) if not _is_flat(b)]
+    uf = _UF(len(prim))
+    for ai in range(len(solid)):
+        for bi in range(ai + 1, len(solid)):
+            i, j = solid[ai], solid[bi]
+            if _overlap(boxes[i], boxes[j], gap):
+                uf.union(i, j)
+    merged = {}
+    for i in range(len(prim)):
+        merged.setdefault(uf.find(i) if i in set(solid) else ("flat", i), []).extend(prim[i])
+    return list(merged.values())
+
+
+def split_mesh(mesh, weld=1.0, mode="object", gap=OBJ_GAP):
+    """Split ONE sub-mesh into its separable parts.
+
+    Returns {"reason": SPLIT_*, "parts": [...]}. Each part is
+    {"mesh": <mesh_tool mesh, world space>, "pages": [...], "aabb": [...],
+     "nface": n, "extent": [dx,dy,dz]}.
+
+    mode:
+      "page"   -- cut on the exact per-command page seam, then cluster spatially
+                  inside each page group. The finest honest split, and the one
+                  that un-fuses a slot (level023 e29 s0 -> the guardrail pair
+                  comes out as its own low ribbon). Shatters facades, which
+                  ship as flat arrays of unconnected quads.
+      "weld"   -- cluster spatially across pages. Keeps a multi-page building in
+                  one piece, but slabs bridge everything: one blob per entry.
+      "object" -- page split, then merge overlapping NON-FLAT primitives.
+                  The catalogue default.
+    """
+    if mode not in SPLIT_MODES:
+        raise ValueError("mode must be one of %s" % (SPLIT_MODES,))
+    faces, reason = mesh_faces(mesh)
+    if reason != SPLIT_OK:
+        return {"reason": reason, "parts": []}
+    verts = _world_verts(mesh)
+    if mode == "page":
+        groups = _groups_page(faces, verts, weld)
+    elif mode == "weld":
+        groups = _cluster_faces(faces, verts, weld)
+    else:
+        groups = _groups_object(faces, verts, weld, gap)
+
+    parts = []
+    for fidx in groups:
+        m = _part_from_faces(mesh, faces, fidx, verts)
+        pts = [v["pos"] for v in m["vertices"]]
+        mn = [min(p[i] for p in pts) for i in range(3)]
+        mx = [max(p[i] for p in pts) for i in range(3)]
+        parts.append({"mesh": m, "pages": sorted({int(c["texture_page_id"])
+                                                  for c in m["commands"]}),
+                      "aabb": mn + mx, "nface": len(fidx),
+                      "extent": [mx[i] - mn[i] for i in range(3)]})
+    parts.sort(key=lambda p: -p["nface"])
+    return {"reason": SPLIT_OK, "parts": parts}
+
+
 def _select_whole(cand, cx, cz, seed_gap, max_extent):
     """Connected-component growth from the mesh nearest (cx,cz): repeatedly add
     any candidate whose (approx) footprint is within seed_gap of the growing
