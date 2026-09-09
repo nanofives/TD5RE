@@ -606,7 +606,7 @@ typedef char tg_rs_pages_fit[(8 <= TD5_TG_RS_PER_CLASS) ? 1 : -1];
  * ==================================================================== */
 #define TD5_TG_PAGE_LM_BASE   (TD5_TG_PAGE_RS_BASE + \
                                TD5_TG_RS_CLASSES * TD5_TG_RS_PER_CLASS)
-#define TD5_TG_LM_PAGES       144
+#define TD5_TG_LM_PAGES       191
 /* Literal for the same reason tg_r11_sign_pages_fit uses one: k_lm_pf_count is
  * a `static const int`, which C does not accept in a constant expression. */
 typedef char tg_lm_pages_fit[(TD5_TG_PREFAB_PAGES == TD5_TG_LM_PAGES) ? 1 : -1];

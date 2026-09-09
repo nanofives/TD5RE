@@ -472,6 +472,24 @@ def _merge_prims(members, kind_hint):
 # the box is what lets a cluster walk: each addition moves the box, which admits
 # the next neighbour, and the run only stops at the extent limit.
 
+# Structure primitives that are NOT building fabric. Measured on level023's
+# 9339 structure primitives: 531 ribbons and 12 posts. Both must go -- a
+# guardrail dragged into a landmark is furniture, not architecture, and the
+# guardrail page (451) primitives all measure like 1055 x 508 x 5906, i.e.
+# exactly this ribbon shape.
+def _struct_shape(p):
+    dx, dy, dz = p["extent"]
+    lo, hi = min(dx, dz), max(dx, dz)
+    if dy > 1500.0 and hi < 600.0:
+        return "post"                       # lamp post, sign pole
+    if dy <= 900.0 and hi > 2500.0 and hi > lo * 3.0:
+        return "ribbon"                     # guardrail, kerb rail, fence run
+    if dy < 400.0:
+        return "detail"
+    return "wall"
+
+
+LM_SEED_MERGE = 5000.0   # two rare primitives this close seed the SAME building
 LM_RARE_MAX = 3          # a page used by <= this many primitives is distinctive
 LM_GROW_GAP = 900.0      # how close an unclaimed primitive must be to join
 # Tuned by LOOKING at top-down footprints, not by a statistic. At radius 9000 /
@@ -479,8 +497,8 @@ LM_GROW_GAP = 900.0      # how close an unclaimed primitive must be to join
 # frontage around them. At 4000 / 11000 they come out compact and roughly square
 # at 5000..8500 units, many showing the nested-rectangle signature of outer
 # walls plus inner detail -- i.e. buildings.
-LM_MAX_RADIUS = 4000.0   # from the SEED centre -- the anti-chaining constraint
-LM_MAX_EXTENT = 11000.0
+LM_MAX_RADIUS = 8000.0   # ownership reach from the SEED centre
+LM_MAX_EXTENT = 11000.0   # (unused by the nearest-seed path; kept for callers)
 LM_MIN_FACES = 20        # below this it is a wall fragment, not a set piece
 LM_MIN_PRIMS = 3         # a single quad group is never a landmark
 
@@ -568,6 +586,12 @@ def attach_slabs(landmarks, slabs, pad=SLAB_PAD, y_tol=SLAB_Y_TOL,
         for i, s in enumerate(slabs):
             if taken[i]:
                 continue
+            # ROAD is never context. Sidewalk and grass ARE -- a landmark should
+            # arrive with the ground it stood on so it sits in a plausible
+            # setting -- but carriageway dragged along with a building reads as
+            # a piece of street torn out with it.
+            if s.get("role") == "road":
+                continue
             b = s["aabb"]
             scx, scz = (b[0] + b[3]) * 0.5, (b[2] + b[5]) * 0.5
             if not (a[0] - pad <= scx <= a[3] + pad
@@ -594,6 +618,164 @@ def attach_slabs(landmarks, slabs, pad=SLAB_PAD, y_tol=SLAB_Y_TOL,
     return n
 
 
+# ---------------------------------------------------------------------------
+# ROAD-CORRIDOR segmentation
+# ---------------------------------------------------------------------------
+#
+# Geometry alone cannot say where one building ends: TD5 frontage is per-span
+# wall quads that physically touch, so neither adjacency nor texture identity
+# marks a boundary. The road does. Buildings FRONT ONTO a street, so the street
+# supplies the cut lines a person would use -- a corner, or a break in the
+# frontage where a side street comes in.
+#
+# The corner signal is unusually clean. Measured on level023's 2789 ring spans,
+# per-span heading change is p50 0.51 deg, p90 3.75 deg, but p99 71.34 deg: the
+# road is either essentially straight or it genuinely turns, with nothing in
+# between, so any threshold in the middle of that gap behaves the same.
+#
+# *** MEASURED AND REJECTED -- NOT WIRED INTO extract_landmarks. ***
+#
+# Kept because the idea is sound and someone will think of it again. It loses to
+# the nearest-seed segmentation on every measure, for two reasons the numbers
+# make plain:
+#
+#   * A long STRAIGHT street with unbroken frontage carries no corner and no
+#     gap, so it comes out as ONE run: p90 111320, max 264633. Capping the run
+#     by span count then makes things worse, not better -- p50 rises from 9594
+#     to 22727 and 100 runs still exceed 30000 -- because a span count does not
+#     bound spatial extent, and bucketing everything within 20000 laterally
+#     makes a run a wide swath rather than a building line.
+#   * 3326 of level023's 8796 wall primitives (38%) sit too far from the ring to
+#     belong to any frontage at all, so a corridor-only pass simply cannot see
+#     more than half the fabric.
+#
+# For comparison, nearest-seed with the furniture exclusions gives p50 12352.
+CORRIDOR_CORNER_DEG = 25.0
+CORRIDOR_GAP_SPANS = 6      # this many empty spans = a side street or a gap
+CORRIDOR_MAX_DIST = 20000.0
+CORRIDOR_MAX_RUN = 20      # spans; the fallback cut once corners and gaps run out
+
+
+def _corridor_index(centerline, cell=6000.0):
+    grid = {}
+    for i, c in enumerate(centerline["centers"]):
+        if c:
+            grid.setdefault((int(c[0] // cell), int(c[2] // cell)), []).append(i)
+    return grid, cell
+
+
+def _corridor_nearest(centerline, grid, cell, x, z):
+    C = centerline["centers"]
+    bi, bd = -1, 1e30
+    cx, cz = int(x // cell), int(z // cell)
+    for dx in (-1, 0, 1):
+        for dz in (-1, 0, 1):
+            for i in grid.get((cx + dx, cz + dz), ()):
+                c = C[i]
+                d = (c[0] - x) ** 2 + (c[2] - z) ** 2
+                if d < bd:
+                    bd, bi = d, i
+    if bi < 0:
+        return -1, 0.0, 0
+    c = C[bi]
+    n = C[(bi + 1) % len(C)] or c
+    dx, dz = n[0] - c[0], n[2] - c[2]
+    dl = math.hypot(dx, dz) or 1.0
+    cross = (dx / dl) * (z - c[2]) - (dz / dl) * (x - c[0])
+    return bi, math.sqrt(bd), (1 if cross >= 0 else -1)
+
+
+def _corridor_corners(centerline, corner_deg):
+    """Span indices where the road turns hard enough to end a frontage run."""
+    C = centerline["centers"]
+    hd = []
+    for i, c in enumerate(C):
+        if c is None:
+            hd.append(None)
+            continue
+        n = C[(i + 1) % len(C)] or c
+        hd.append(math.degrees(math.atan2(n[2] - c[2], n[0] - c[0])))
+    corners = set()
+    for i in range(len(hd)):
+        a, b = hd[i], hd[(i + 1) % len(hd)]
+        if a is None or b is None:
+            continue
+        if abs((b - a + 180.0) % 360.0 - 180.0) >= corner_deg:
+            corners.add(i)
+    return corners
+
+
+def segment_by_corridor(model, page_role, level_dir,
+                        corner_deg=CORRIDOR_CORNER_DEG,
+                        gap_spans=CORRIDOR_GAP_SPANS,
+                        max_dist=CORRIDOR_MAX_DIST,
+                        max_run_spans=CORRIDOR_MAX_RUN):
+    """Segment building fabric into frontage RUNS along the road.
+
+    A run is a maximal stretch of one side of the street carrying wall fabric,
+    ended by a corner or by a gap of `gap_spans` empty spans. That is the same
+    cut a person makes reading a street, and unlike clustering it does not need
+    the buildings to be physically separated -- which they are not.
+
+    Returns (objects, unmatched): objects are runs; unmatched are wall
+    primitives too far from the ring to belong to any frontage (back rows and
+    off-ring geometry), returned rather than silently dropped."""
+    mtr = _mod("td5_maptrace")
+    cl = mtr._load_centerline(level_dir)
+    if not cl:
+        return [], []
+    allp, _slabs = level_prims(model, page_role)
+    walls = [p for p in allp if _struct_shape(p) == "wall"]
+    grid, cell = _corridor_index(cl)
+    corners = _corridor_corners(cl, corner_deg)
+
+    bucket, unmatched = {}, []
+    for p in walls:
+        b = p["aabb"]
+        x, z = (b[0] + b[3]) * 0.5, (b[2] + b[5]) * 0.5
+        si, d, side = _corridor_nearest(cl, grid, cell, x, z)
+        if si < 0 or d > max_dist:
+            unmatched.append(p)
+            continue
+        bucket.setdefault((side, si), []).append(p)
+
+    out = []
+    for side in (-1, 1):
+        spans = sorted(s for (sd, s) in bucket if sd == side)
+        if not spans:
+            continue
+        run, prev = [], None
+        def flush(r):
+            # A long STRAIGHT street with unbroken frontage carries no corner and
+            # no gap, so it comes out as one run spanning the whole street --
+            # measured p90 111320, max 264633. There is no boundary signal left
+            # in the data there, so the run is chopped into equal blocks. That
+            # cut is admittedly arbitrary; it is bounded and repeatable, which is
+            # the most the source supports once corners and gaps are used up.
+            if len(r) <= max_run_spans:
+                return [r]
+            n = (len(r) + max_run_spans - 1) // max_run_spans
+            step = (len(r) + n - 1) // n
+            return [r[i:i + step] for i in range(0, len(r), step)]
+        for s in spans:
+            brk = (prev is not None
+                   and (s - prev > gap_spans
+                        or any(k in corners for k in range(prev, s + 1))))
+            if brk and run:
+                for part in flush(run):
+                    out.append(_merge_prims(
+                        [p for k in part for p in bucket[(side, k)]], "frontage"))
+                run = []
+            run.append(s)
+            prev = s
+        if run:
+            for part in flush(run):
+                out.append(_merge_prims(
+                    [p for k in part for p in bucket[(side, k)]], "frontage"))
+    out.sort(key=lambda o: -o["nface"])
+    return out, unmatched
+
+
 def extract_landmarks(model, page_role, rare_max=LM_RARE_MAX,
                       grow_gap=LM_GROW_GAP, max_radius=LM_MAX_RADIUS,
                       max_extent=LM_MAX_EXTENT, min_faces=LM_MIN_FACES,
@@ -605,7 +787,11 @@ def extract_landmarks(model, page_role, rare_max=LM_RARE_MAX,
     Clustering runs on STRUCTURE only -- slabs bridge unrelated buildings -- and
     the paving is put back afterwards by attach_slabs, which is what makes a
     piece read as sited rather than dropped on the terrain."""
-    prims, slabs = level_prims(model, page_role)
+    allprims, slabs = level_prims(model, page_role)
+    # Building FABRIC only. Guardrails, kerb rails and lamp posts are furniture
+    # that happens to stand next to architecture; dragged into a landmark they
+    # make it look like a chunk of street.
+    prims = [p for p in allprims if _struct_shape(p) == "wall"]
     if not prims:
         return []
     use = {}
@@ -616,57 +802,66 @@ def extract_landmarks(model, page_role, rare_max=LM_RARE_MAX,
     # A primitive's rarity is its RAREST page: one distinctive texture is enough
     # to mark a piece as special even when the rest of it is ordinary brick.
     rarity = [min((use[q] for q in p["pages"]), default=10 ** 6) for p in prims]
-    order = sorted((i for i in range(len(prims)) if rarity[i] <= rare_max),
-                   key=lambda i: (rarity[i], -prims[i]["nface"]))
+    seeds = [i for i in range(len(prims)) if rarity[i] <= rare_max]
+    if not seeds:
+        return []
 
-    cell = max(grow_gap * 2.0, 1.0)
-    grid = {}
+    # SEED CLUSTERS. Several rare primitives usually belong to ONE building (a
+    # spire, its clock face, its doorway), so merge nearby seeds before growing
+    # or the same building is claimed three times and comes out in thirds.
+    seed_items = [{"aabb": prims[i]["aabb"], "pages": prims[i]["pages"]}
+                  for i in seeds]
+    centres = []
+    for g in _agglomerate(seed_items, LM_SEED_MERGE, LM_SEED_MERGE * 2.0):
+        xs = [(seed_items[k]["aabb"][0] + seed_items[k]["aabb"][3]) * 0.5 for k in g]
+        zs = [(seed_items[k]["aabb"][2] + seed_items[k]["aabb"][5]) * 0.5 for k in g]
+        best = min(g, key=lambda k: rarity[seeds[k]])
+        centres.append({"cx": sum(xs) / len(xs), "cz": sum(zs) / len(zs),
+                        "rarity": rarity[seeds[best]], "members": []})
+
+    # NEAREST-SEED assignment, not greedy claiming. Greedy first-come lets one
+    # seed swallow its neighbour as soon as the radius is generous, which is
+    # what kept the radius small and the buildings fragmented. Assigning each
+    # primitive to its NEAREST seed splits two adjacent landmarks at the
+    # midpoint between them, so the radius can be widened without them merging.
     for i, p in enumerate(prims):
         b = p["aabb"]
-        for cx in range(int(b[0] // cell), int(b[3] // cell) + 1):
-            for cz in range(int(b[2] // cell), int(b[5] // cell) + 1):
-                grid.setdefault((cx, cz), []).append(i)
+        px, pz = (b[0] + b[3]) * 0.5, (b[2] + b[5]) * 0.5
+        best, bestd = -1, max_radius
+        for ci, c in enumerate(centres):
+            d = ((px - c["cx"]) ** 2 + (pz - c["cz"]) ** 2) ** 0.5
+            if d < bestd:
+                best, bestd = ci, d
+        if best >= 0:
+            centres[best]["members"].append(i)
 
-    claimed = [False] * len(prims)
+    # CONTIGUITY, applied inside each owner set. Nearest-seed alone assigns every
+    # primitive to some seed however far away it is, which produced sparse cells
+    # of scattered fragments spread over 18000..26000 -- a Voronoi partition of
+    # the city, not buildings. Ownership decides WHICH landmark may claim a
+    # primitive; adjacency decides whether it is actually part of it. Keeping
+    # only the component reachable from the seed drops the strays and leaves the
+    # coherent fabric, which is what lets the radius be generous.
     out = []
-    for s in order:
-        if claimed[s]:
+    for c in centres:
+        if not c["members"]:
             continue
-        sb = prims[s]["aabb"]
-        scx, scz = (sb[0] + sb[3]) * 0.5, (sb[2] + sb[5]) * 0.5
-        group = [s]
-        claimed[s] = True
-        box = list(sb)
-        frontier = [s]
+        mem = c["members"]
+        boxes = {i: prims[i]["aabb"] for i in mem}
+        start = min(mem, key=lambda i: ((boxes[i][0] + boxes[i][3]) * 0.5 - c["cx"]) ** 2
+                    + ((boxes[i][2] + boxes[i][5]) * 0.5 - c["cz"]) ** 2)
+        seen, frontier = {start}, [start]
         while frontier:
             cur = frontier.pop()
-            cb = prims[cur]["aabb"]
-            near = set()
-            for cx in range(int((cb[0] - grow_gap) // cell),
-                            int((cb[3] + grow_gap) // cell) + 1):
-                for cz in range(int((cb[2] - grow_gap) // cell),
-                                int((cb[5] + grow_gap) // cell) + 1):
-                    near.update(grid.get((cx, cz), ()))
-            for j in sorted(near):
-                if claimed[j]:
+            cb = boxes[cur]
+            for j in mem:
+                if j in seen:
                     continue
-                jb = prims[j]["aabb"]
-                if _aabb_gap_xz(cb, jb) > grow_gap:
-                    continue
-                jx, jz = (jb[0] + jb[3]) * 0.5, (jb[2] + jb[5]) * 0.5
-                if ((jx - scx) ** 2 + (jz - scz) ** 2) ** 0.5 > max_radius:
-                    continue                       # anti-chaining: seed-anchored
-                nb = [min(box[0], jb[0]), min(box[1], jb[1]), min(box[2], jb[2]),
-                      max(box[3], jb[3]), max(box[4], jb[4]), max(box[5], jb[5])]
-                if (nb[3] - nb[0]) > max_extent or (nb[5] - nb[2]) > max_extent:
-                    continue
-                claimed[j] = True
-                group.append(j)
-                frontier.append(j)
-                box = nb
-        o = _merge_prims([prims[i] for i in group], "landmark")
-        o["rarity"] = rarity[s]
-        o["seed"] = s
+                if _aabb_gap_xz(cb, boxes[j]) <= grow_gap:
+                    seen.add(j)
+                    frontier.append(j)
+        o = _merge_prims([prims[i] for i in sorted(seen)], "landmark")
+        o["rarity"] = c["rarity"]
         if o["nface"] >= min_faces and len(o["prims"]) >= LM_MIN_PRIMS:
             out.append(o)
     out.sort(key=lambda o: (o["rarity"], -o["nface"]))
