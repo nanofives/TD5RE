@@ -434,6 +434,68 @@ def library_objects(level, kind=None, min_faces=0, limit=400):
             "objects": rows[:int(limit)]}
 
 
+_lm_cache = {}          # level -> segmented landmark objects
+
+
+def _landmarks(level):
+    """Rarity-seeded set pieces for one level, segmented over the WHOLE track.
+
+    Distinct from the object catalogue on purpose: catalogue objects are chunks
+    of street frontage (TD5 streetscape is per-span wall quads and neighbours
+    share wall pages, so anything grown by proximity chains along the kerb).
+    These are the pieces the generator actually ships. Cached -- segmentation
+    re-splits every mesh in the level."""
+    level = int(level)
+    if level in _lm_cache:
+        return _lm_cache[level]
+    gl = _lib()
+    with open(os.path.join(LIBRARY_DIR, "pages.json"), encoding="utf-8") as f:
+        pages_doc = json.load(f)
+    role = {p["page"]: p["role"] for p in pages_doc["pages"]
+            if p["level"] == level}
+    model = gl._load_model(gl._levels_dir(), level)
+    _lm_cache[level] = gl.al.extract_landmarks(model, role)
+    return _lm_cache[level]
+
+
+def library_landmarks(level):
+    out = []
+    for i, o in enumerate(_landmarks(level)):
+        out.append({"id": "L%d.lm%02d" % (int(level), i), "level": int(level),
+                    "kind": "landmark", "faces": o["nface"],
+                    "pages": o["pages"], "slabs": o.get("slabs", 0),
+                    "rarity": o.get("rarity", 0),
+                    "extent": [round(v, 1) for v in o["extent"]],
+                    "aabb": [round(v, 1) for v in o["aabb"]],
+                    "prims": len(o["prims"])})
+    return {"ok": True, "level": int(level), "total": len(out), "objects": out}
+
+
+def build_landmark_glb(level, idx):
+    """GLB for one segmented landmark, in the local frame the C emitter uses."""
+    from collections import defaultdict
+    gl = _lib()
+    found = _landmarks(level)
+    if not (0 <= idx < len(found)):
+        raise ValueError("no landmark %d on level %s" % (idx, level))
+    g = gl._prefab_from_landmark(found[idx], "L%s.lm%02d" % (level, idx))
+    pos_by, uv_by = defaultdict(list), defaultdict(list)
+    cur = 0
+    for page, tri, quad in g["cmds"]:
+        for t in range(tri):
+            for k in (cur + t * 3, cur + t * 3 + 1, cur + t * 3 + 2):
+                v = g["local"][k]
+                pos_by[page].append([v[0], v[1], v[2]]); uv_by[page].append([v[3], v[4]])
+        qb = cur + tri * 3
+        for q in range(quad):
+            b = qb + q * 4
+            for k in (b, b + 1, b + 2, b, b + 2, b + 3):
+                v = g["local"][k]
+                pos_by[page].append([v[0], v[1], v[2]]); uv_by[page].append([v[3], v[4]])
+        cur += tri * 3 + quad * 4
+    return glb_from_page_groups(pos_by, uv_by)
+
+
 def build_prefab_glb(obj_id):
     """GLB for ONE catalogued object, in its own local frame (centred in XZ,
     base y=0) -- the same convention the C emitter places it with, so what the
@@ -663,8 +725,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, library_objects(q.get("level"), q.get("kind"),
                                                 q.get("min_faces", 0),
                                                 q.get("limit", 400)))
+            elif p == "/api/library/landmarks":
+                self._send(200, library_landmarks(q.get("level")))
             elif p == "/api/library/prefab":
-                self._send(200, build_prefab_glb(q.get("id")), "model/gltf-binary")
+                # Two id shapes: catalogue objects (L23.e53.s0.o0) and segmented
+                # landmarks (L23.lm00). They come from different passes, so the
+                # id has to say which.
+                oid = q.get("id") or ""
+                m = re.match(r"^L(\d+)\.lm(\d+)$", oid)
+                if m:
+                    self._send(200, build_landmark_glb(int(m.group(1)),
+                                                       int(m.group(2))),
+                               "model/gltf-binary")
+                else:
+                    self._send(200, build_prefab_glb(oid), "model/gltf-binary")
             elif p == "/api/library/page":
                 a = serve_asset(q.get("level"), "page_%03d.png" % int(q.get("page", 0)))
                 if a:

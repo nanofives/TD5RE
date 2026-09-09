@@ -1014,7 +1014,12 @@ async function libList() {
   const mf = $('libMinFaces').value || 0;
   let r;
   try {
-    r = await (await fetch(`/api/library/objects?level=${lvl}&kind=${encodeURIComponent(kind)}&min_faces=${mf}&limit=300`)).json();
+    // "__lm" = the rarity-segmented SET PIECES, which is a different pass from
+    // the object catalogue: catalogue objects are chunks of street frontage,
+    // these are the whole pieces the generator actually stamps.
+    r = (kind === '__lm')
+      ? await (await fetch(`/api/library/landmarks?level=${lvl}`)).json()
+      : await (await fetch(`/api/library/objects?level=${lvl}&kind=${encodeURIComponent(kind)}&min_faces=${mf}&limit=300`)).json();
   } catch (e) { setStatus('library list failed: ' + e, 'bad'); return; }
   if (!r.ok) { setStatus(r.error, 'warn'); return; }
   libRows = r.objects;
