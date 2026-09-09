@@ -1231,7 +1231,20 @@ static void tg_ground_side_raw(const TG_NodeList *nl, int si, int is_left,
      * switch throws away every location the last round of feedback named. */
     const int tunnel = (tg_struct_kind(si) == TG_ST_TUNNEL) &&
                        td5_env_flag_on("TD5RE_R22_TUNNEL_SKIRT");
-    const double V = tg_verge_reach();
+    /* [R22 item 15] Widen the flat verge on an OPEN span with nothing built on
+     * it, so the skirt -- and the flora that plants on it (tg_flora_plant clamps
+     * to the skirt's last point) -- reaches further where there is no facade to
+     * hide the view. Every consumer of the cross-section shares this one call, so
+     * the skirt, far band and flora stay in agreement (the far band starts where
+     * the skirt ends). The road cap and fold caps in tg_ground_side still clamp
+     * it against a near carriageway or an inside bend, so it can only grow into
+     * genuinely open ground. tg_facade_stands is false off the paved biomes, so
+     * this is the whole rural track. TD5RE_R22_OPEN_VERGE=0 restores the flat
+     * reach; the per-span count and its timing live in tg_emit_ground. */
+    const double V = (td5_env_flag_on("TD5RE_R22_OPEN_VERGE")
+                      && open && !tg_facade_stands(si))
+                   ? tg_verge_reach() + TD5_TG_R22_OPEN_VERGE_BONUS
+                   : tg_verge_reach();
     const double sgn = is_left ? 1.0 : -1.0;
     const double lx = n->tz * sgn, lz = -n->tx * sgn;
     const double half = n->width * 0.5;
@@ -1532,6 +1545,53 @@ static int tg_city_skirt_hidden(const TG_NodeList *nl, int si, int is_left)
     return 1;
 }
 
+/* [R22] Class-level evidence for the R22 terrain items, all accumulated during
+ * the models-emit phase and reported+reset in tg_r9_bridge_report (which shares
+ * the far-band lifecycle). None feed a generator decision, so MODELS.DAT is
+ * byte-identical with them in place.
+ *  - item 14: s_r22_snow_mismatch = far-band group-sides where the DITHERED
+ *    biome (h->b) disagrees with the HARD cell about snow, i.e. where the apron
+ *    would draw the wrong ground page beside an icy road. Counted
+ *    unconditionally so the old-rule number shows in the same run the fix acts.
+ *  - item 8: s_r22_degen_seen = skirt slab-sides whose ground profile collapsed
+ *    to a sub-area sliver; s_r22_degen_skip = of those, how many were dropped
+ *    (never both sides of one span -- the mesh must stay non-empty).
+ *  - item 15: s_r22_trim_relax / s_r22_trim_tight = open facade-free spans whose
+ *    verge was widened vs kept tight (per span, main thread, TG_ZONE_TRIM). */
+static long   s_r22_snow_mismatch;
+static long   s_r22_degen_seen, s_r22_degen_skip;
+static long   s_r22_trim_relax, s_r22_trim_tight;
+
+/* [R22 item 8] "a triangle without geometry near ... skirt p2:GREEN." Where a
+ * fold cap (tg_r18_inside_bend_cap / tg_r13_fold_cap) drives the ground
+ * profile's outer point in to the road edge, tg_ground_side floors the whole
+ * cross-section at p->d[0] + TD5_TG_TOPO_GAP_TOL (1 unit) and truncates it to
+ * two points, so tg_emit_ground sweeps a ~1-unit-wide slab: an edge-on,
+ * zero-area triangle that renders as a hole but still carries a skirt label,
+ * which is exactly what the picker reported. A tight inside bend genuinely has
+ * no lateral room there, so widening the slab back would lap grass over the
+ * carriageway (the very thing the fold cap exists to stop). Detect the
+ * degenerate side instead and let the caller drop it -- but only where the
+ * OTHER side survives, reusing the skip_l/skip_r non-empty-mesh invariant.
+ *
+ * Computes the SAME pa/pb the slab loop does (identical tg_r8_bridge_water
+ * branch), so "degenerate" is measured on the profile that would actually be
+ * emitted. Returns 1 when BOTH ends collapse below TD5_TG_TOPO_MIN_SLAB. */
+static int tg_slab_degenerate(const TG_NodeList *nl, int si, int is_left,
+                              double water_side)
+{
+    TG_GroundProf pa, pb;
+    double wa, wb;
+    tg_ground_side(nl, si, is_left, water_side, &pa);
+    if (tg_r8_bridge_water() && si + 1 < nl->count)
+        tg_ground_side(nl, si + 1, is_left, water_side, &pb);
+    else
+        pb = pa;
+    wa = pa.d[pa.n - 1] - pa.d[0];
+    wb = pb.d[pb.n - 1] - pb.d[0];
+    return (wa < TD5_TG_TOPO_MIN_SLAB) && (wb < TD5_TG_TOPO_MIN_SLAB);
+}
+
 int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
                           double water_side)
 {
@@ -1568,9 +1628,37 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
      * So resolve BOTH culls up front and, if between them they would empty the
      * mesh, keep the left slab (same tie-break the city cull already used). Cost
      * is at most one wasted hidden slab; the alternative is corrupt indices. */
-    int skip_l = cull_l || tg_bridge_skirt_redundant(nl, si, 1, water_side);
-    int skip_r = cull_r || tg_bridge_skirt_redundant(nl, si, 0, water_side);
-    if (skip_l && skip_r) skip_l = 0;
+    /* [R22 item 8] Fold degenerate (zero-area) slab-sides into the same cull.
+     * Detected UNCONDITIONALLY so s_r22_degen_seen reports the old-rule count in
+     * the same run; ACTED on only under TD5RE_R22_SKIP_DEGEN (default on), so
+     * knob=0 is byte-identical. Detection is side-effect free (tg_ground_side is
+     * a pure query), so counting it never changes MODELS.DAT. */
+    int degen_l = 0, degen_r = 0;
+    {
+        const int dl = tg_slab_degenerate(nl, si, 1, water_side);
+        const int dr = tg_slab_degenerate(nl, si, 0, water_side);
+        s_r22_degen_seen += dl + dr;
+        if (td5_env_flag_on("TD5RE_R22_SKIP_DEGEN")) { degen_l = dl; degen_r = dr; }
+    }
+    int skip_l = cull_l || tg_bridge_skirt_redundant(nl, si, 1, water_side) || degen_l;
+    int skip_r = cull_r || tg_bridge_skirt_redundant(nl, si, 0, water_side) || degen_r;
+    if (skip_l && skip_r) skip_l = 0;   /* keep left: the mesh must never be empty */
+    if (degen_l && skip_l) s_r22_degen_skip++;
+    if (degen_r && skip_r) s_r22_degen_skip++;
+
+    /* [R22 item 15] Count the open, facade-free spans whose verge was widened
+     * (see tg_ground_side_raw), once per span on the main emit thread, and wire
+     * TG_ZONE_TRIM around the facade query so the "world trim" GENPERF row -- an
+     * always-zero placeholder until now -- measures real work. Counting only;
+     * the widening itself happens in tg_ground_side_raw. */
+    {
+        TG_ZONE_BEGIN(TG_ZONE_TRIM);
+        const int relax = td5_env_flag_on("TD5RE_R22_OPEN_VERGE")
+                        && (tg_struct_kind(si) == TG_ST_NONE)
+                        && !tg_facade_stands(si);
+        if (relax) s_r22_trim_relax++; else s_r22_trim_tight++;
+        TG_ZONE_END(TG_ZONE_TRIM);
+    }
 
     tg_road_edge(nl, si, 0.0, 0.0, 1.0, &nlx, &nly, &nlz, &nrx, &nry, &nrz);
     tg_road_edge(nl, si, 1.0, 0.0, 1.0, &flx, &fly, &flz, &frx, &fry, &frz);
@@ -3420,6 +3508,7 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
     double px[16], py[16], pz[16], uu[16], vv[16];
     int seg_page[2], seg_nq[2];
     int e, j, n = 0, nseg = 1;
+    int seam_fix;   /* [R22 item 12] far-band group-boundary seam fix, set below */
     /* [R5 item 16] The height/stretch cure only applies where the ridge is an
      * actual tree line: non-snow, non-urban (snow keeps its flank, urban gets the
      * blocky skyline -- see the seg_page[1] routing below). */
@@ -3439,7 +3528,31 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
         td5_env_flag_on("TD5RE_R18_SKYLINE_HARDEDGE")
         ? (k_biomes[tg_biome_cell_index(h->si)].urbanity >= 2)
         : (h->b->urbanity >= 2);
-    const int r5treeline = !tg_biome_is_snow(h->b) && !hard_urban;
+    /* [R22 item 14] "snow road near green grass should be incompatible."
+     *
+     * The ROAD SURFACE (ice, page p42) keys on the HARD biome cell, but the far
+     * band's snow decision keyed on `h->b` -- the DITHERED per-span biome
+     * (tg_biome_for_span), which within TD5_TG_BIOME_BLEND (~20 spans) of an
+     * ALPINE edge assigns a span to the temperate (green-ground) neighbour by a
+     * per-span hash. So an icy ALPINE road span could get a GREEN apron from its
+     * neighbour, and adjacent far-band groups alternate snow/green. The SKIRT
+     * already avoids this: tg_topo_surface_page routes through the HARD cell
+     * (tg_topo_ground_index, the R9 item-11 "ground surface is not a dithered
+     * category" rule) -- the far band is the one ground consumer that still
+     * dithered. Route it through the same hard cell so a mesh is snow-or-not as
+     * a whole, and agrees with the skirt and the road surface. Foliage that
+     * STANDS on the ground (the ridge tree line / skyline height choice below)
+     * keeps whatever biome it already read; only the snow/ground-page decision
+     * moves, matching what R18 already did for the urban skyline (hard_urban).
+     *
+     * `gb` is the biome the far band's snow decision reads: the hard cell under
+     * the fix, `h->b` when off. The mismatch is counted UNCONDITIONALLY (not
+     * gated on the knob) so the old-rule count is visible in the same run the
+     * fix acts. TD5RE_R22_SNOW_HARDEDGE=0 restores the dithered decision. */
+    const TG_Biome *gb =
+        td5_env_flag_on("TD5RE_R22_SNOW_HARDEDGE")
+        ? &k_biomes[tg_biome_cell_index(h->si)] : h->b;
+    const int r5treeline = !tg_biome_is_snow(gb) && !hard_urban;
     /* [R9 item 10] Per-side dry reach, decided across BOTH ends so the band
      * stays a proper quad; see tg_r9_dry_reach. */
     double band_reach = reach;
@@ -3449,6 +3562,45 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
 
     if (g1 > nl->count - 2) g1 = nl->count - 2;
     if (g1 < g0) return 1;
+
+    /* [R22 item 12] "topology left some edges without geometry" -- a bare ring
+     * or a vertical crack at every 4-span GROUP boundary of the far band.
+     *
+     * A group spans nodes [g0 .. g1+1]. Its far end (e == 1) is POSITIONED at
+     * node g1+1 (tg_road_edge(g1, f=1) interpolates onto that node), but the
+     * PROFILE it samples -- tg_ground_side(nl, se=g1, ...), giving the inner
+     * ring distance `so`, the seam drop and the seam base -- is span g1's
+     * cross-section, one span BEHIND the position. The skirt at that same node
+     * (tg_emit_ground sweeps profile(si)..profile(si+1)) ends on profile g1+1,
+     * and the NEXT group's near end (e == 0, se = g1+1) also uses profile g1+1
+     * there. So the band's own two ends, the two adjacent groups, and the skirt
+     * disagree about the cross-section at every boundary node. Where the per-
+     * span difference in `so` exceeds TD5_TG_FAR_TUCK (2000, the designed
+     * overlap under the skirt) a bare RING opens between the skirt's outer edge
+     * and the band's inner ring; a smaller difference is a vertical CRACK from
+     * the seam-height (`base`) mismatch. PROVEN by TD5RE_AUTOTRACK_FAR_LOG:
+     * (si=336,e=1) logs road_y/base for node 339 while the adjacent (si=340,e=0)
+     * at the identical node 340 logs different road_y/base -- the far end is
+     * reading one node behind where it sits.
+     *
+     * This is the same bug class the R8 bridge-water skirt fix already closed by
+     * sampling BOTH slab ends (see the note in tg_emit_ground): a ruled surface
+     * whose two ends are the same profile at the same node agree by construction.
+     * Sample the far end's profile at g1+1 (the node it is actually at, and the
+     * profile the skirt and next group already use) so the seam closes -- see the
+     * `sp` (sample-profile span) local in each of the three sampling loops below.
+     * Position and UV stay on `se` via the existing tg_road_edge(g1, f=1) call,
+     * which is bounds-safe (g1 <= count-2); tg_ground_side clamps its own index,
+     * and g1+1 <= count-1 always, so the profile sample never reads out of range.
+     * TD5RE_R22_FARBAND_SEAM=0 restores the one-span-behind sampling for an A/B. */
+    seam_fix = td5_env_flag_on("TD5RE_R22_FARBAND_SEAM");
+
+    /* [R22 item 14] Count where the dithered biome and the hard cell disagree
+     * about snow (see the `gb` note above) -- unconditionally, so a run reports
+     * the old-rule number whether or not TD5RE_R22_SNOW_HARDEDGE routed it. */
+    if (tg_biome_is_snow(h->b) !=
+        tg_biome_is_snow(&k_biomes[tg_biome_cell_index(h->si)]))
+        s_r22_snow_mismatch++;
 
     /* ---------------- [R9 TOPO C2/C3] RUN-OUT AND ROAD CAP ----------------
      *
@@ -3483,13 +3635,14 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
         double cap = 1e30, drop_max = 0.0;
         for (e = 0; e < 2; e++) {
             const int se = e ? g1 : g0;
-            const double wsd = tg_water_side(se);
+            const int sp = (seam_fix && e) ? g1 + 1 : se;   /* [R22] see boundary note */
+            const double wsd = tg_water_side(sp);
             const double c = TG_SUB3D(TG_SUB3_ROADCAP,
-                                      tg_topo_road_cap(nl, se, is_left));
+                                      tg_topo_road_cap(nl, sp, is_left));
             TG_GroundProf pp;
             double seam, d;
-            TG_SUB3V(TG_SUB3_GROUNDSIDE, tg_ground_side(nl, se, is_left, wsd, &pp));
-            seam = nl->v[se].y - pp.dy[pp.n - 1] - TD5_TG_FAR_SINK;
+            TG_SUB3V(TG_SUB3_GROUNDSIDE, tg_ground_side(nl, sp, is_left, wsd, &pp));
+            seam = nl->v[sp].y - pp.dy[pp.n - 1] - TD5_TG_FAR_SINK;
             d = seam - floor_y;
             if (d > drop_max) drop_max = d;
             if (c < cap) cap = c;
@@ -3567,6 +3720,7 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
         s_r9_band_tested++;
         for (e = 0; e < 2; e++) {
             const int se = e ? g1 : g0;
+            const int sp = (seam_fix && e) ? g1 + 1 : se;   /* [R22] see boundary note */
             double lx, ly, lz, rx, ry, rz, ux, uz, len, so, d;
             TG_GroundProf p;
             TG_SUB3V(TG_SUB3_ROADEDGE,
@@ -3577,8 +3731,8 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
             if (len < 1e-6) { ux = 1.0; uz = 0.0; } else { ux /= len; uz /= len; }
             if (!is_left) { ux = -ux; uz = -uz; }
             TG_SUB3V(TG_SUB3_GROUNDSIDE,
-                     tg_ground_side(nl, se, is_left,
-                                    tg_water_side(se), &p));
+                     tg_ground_side(nl, sp, is_left,
+                                    tg_water_side(sp), &p));
             so = p.d[p.n - 1];
             if (so > dry_so_max) dry_so_max = so;
             d = TG_SUB3D(TG_SUB3_DRYREACH,
@@ -3602,6 +3756,7 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
 
     for (e = 0; e < 2; e++) {
         const int se = e ? g1 : g0;
+        const int sp = (seam_fix && e) ? g1 + 1 : se;   /* [R22] see boundary note */
         double lx, ly, lz, rx, ry, rz, ux, uz, len, so, base;
         TG_GroundProf p;
 
@@ -3617,10 +3772,10 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
          * tg_emit_ground passes the real side, so on a coastal run the band and
          * the skirt disagreed about where the ground was. */
         {
-            const double wsd = tg_water_side(se);
+            const double wsd = tg_water_side(sp);
             double drop;
 
-            TG_SUB3V(TG_SUB3_GROUNDSIDE, tg_ground_side(nl, se, is_left, wsd, &p));
+            TG_SUB3V(TG_SUB3_GROUNDSIDE, tg_ground_side(nl, sp, is_left, wsd, &p));
             so   = p.d[p.n - 1];
             drop = p.dy[p.n - 1];
             /* Belt and braces on top of the clamp in tg_ground_side: this band
@@ -3717,7 +3872,7 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
                       "prof_n=%d prof_dy_last=%.0f base=%.0f floor=%.0f sink=%d "
                       "| Y0=%.0f Y3=%.0f | lift_vs_road=%.0f",
                       h->si, is_left ? "L" : "R", e, h->b->name,
-                      nl->v[se].y, (is_left ? ly : ry),
+                      nl->v[sp].y, (is_left ? ly : ry),
                       p.n, p.dy[p.n - 1], base, floor_y, sink,
                       Y[e][0], Y[e][3], Y[e][0] - nl->v[se].y);
     }
@@ -3845,8 +4000,8 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
          * Mirrors the seg_page[1] routing below (snow -> flank, urban -> skyline,
          * else tree line) so the branch that gets the skyline page is exactly the
          * branch that gets the skyline's U. */
-        const int r5skyline = !tg_biome_is_snow(h->b) && tg_r4_city_skyline()
-                            && hard_urban && tg_r15_skyline_uv();   /* [R18] hard-edge */
+        const int r5skyline = !tg_biome_is_snow(gb) && tg_r4_city_skyline()
+                            && hard_urban && tg_r15_skyline_uv();   /* [R18] hard-edge; [R22] gb */
         if (r5fix && (r5treeline || r5skyline)) {
             const double w = sqrt((X[1][3]-X[0][3])*(X[1][3]-X[0][3])
                                 + (Z[1][3]-Z[0][3])*(Z[1][3]-Z[0][3]));
@@ -3904,8 +4059,8 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
          * urban biomes (urbanity >= 2: CITY, INDUSTRIAL, ORIENTAL) get the blocky
          * building-tops skyline page; everything else keeps the tree line. Gated
          * so the A/B toggles ONE thing. */
-        if (tg_biome_is_snow(h->b))
-            seg_page[1] = tg_ground_page_for_span(h->si, h->b);
+        if (tg_biome_is_snow(gb))                       /* [R22] gb = hard cell */
+            seg_page[1] = tg_ground_page_for_span(h->si, gb);
         else if (tg_r4_city_skyline() && hard_urban)   /* [R18 item 4] hard-edge */
             seg_page[1] = TD5_TG_PAGE_R4_SKYLINE;
         else
@@ -3919,7 +4074,7 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
             tg_acct(TG_ACCT_R4_FLOW, h->si);
         /* [R8 item 14] Record the world size one page tile is drawn at, on the
          * tree-line ridges only -- the ones the report is about. */
-        if (seg_page[1] != TD5_TG_PAGE_R4_SKYLINE && !tg_biome_is_snow(h->b)) {
+        if (seg_page[1] != TD5_TG_PAGE_R4_SKYLINE && !tg_biome_is_snow(gb)) {
             const double w = sqrt((X[1][3]-X[0][3])*(X[1][3]-X[0][3])
                                 + (Z[1][3]-Z[0][3])*(Z[1][3]-Z[0][3]));
             const double nt = (u_far - u_near);
@@ -4100,7 +4255,11 @@ static int tg_emit_far_shore(const TG_FBHook *h, int is_left)
             td5_env_flag_on("TD5RE_R18_SKYLINE_HARDEDGE")
             ? (k_biomes[tg_biome_cell_index(h->si)].urbanity >= 2)
             : (h->b->urbanity >= 2);
-        seg_page = tg_biome_is_snow(h->b) ? tg_ground_page_for_span(h->si, h->b)
+        /* [R22 item 14] Same hard-cell snow authority the far band now uses, so
+         * a shore inside an ALPINE cell's dither band cannot draw a green page. */
+        const TG_Biome *gb = td5_env_flag_on("TD5RE_R22_SNOW_HARDEDGE")
+            ? &k_biomes[tg_biome_cell_index(h->si)] : h->b;
+        seg_page = tg_biome_is_snow(gb) ? tg_ground_page_for_span(h->si, gb)
                  : (shore_urban          ? TD5_TG_PAGE_R4_SKYLINE
                                          : tg_r8_treeline_page(g0));
     }
@@ -5278,6 +5437,25 @@ void tg_r9_bridge_report(const TG_NodeList *nl)
             s_r9_wet_total - s_r9_wet_rejected, s_r9_wet_worst,
             s_r9_wet_first_span, s_r9_wet_total ? kinds : "none");
     }
+    /* [R22 items 8, 14] Counters accumulated over the models-emit phase, both
+     * reporting the OLD-rule number (what WAS wrong) beside the action taken, in
+     * the one run -- a lone post-fix 0 would only say the invariant holds now. */
+    TD5_LOG_I(LOG_TAG,
+        "trackgen: [R22 DEGEN] %ld degenerate skirt slab-side(s) seen, "
+        "%ld dropped (knob=%s)", s_r22_degen_seen, s_r22_degen_skip,
+        td5_env_flag_on("TD5RE_R22_SKIP_DEGEN") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG,
+        "trackgen: [R22 SNOW] %ld far-band group-side(s) where dithered biome "
+        "disagreed with the hard cell on snow (routed to hard cell, knob=%s)",
+        s_r22_snow_mismatch,
+        td5_env_flag_on("TD5RE_R22_SNOW_HARDEDGE") ? "on" : "off");
+    TD5_LOG_I(LOG_TAG,
+        "trackgen: [R22 TRIM] verge widened on %ld open facade-free span(s), "
+        "kept tight on %ld (knob=%s)", s_r22_trim_relax, s_r22_trim_tight,
+        td5_env_flag_on("TD5RE_R22_OPEN_VERGE") ? "on" : "off");
+    s_r22_snow_mismatch = 0;
+    s_r22_degen_seen = s_r22_degen_skip = 0;
+    s_r22_trim_relax = s_r22_trim_tight = 0;
     s_r9_band_tested = s_r9_band_clamped = s_r9_band_dropped = 0;
     s_r9_band_clamp_sum = 0.0;
     s_r9_wet_total = 0; s_r9_wet_worst = 0.0; s_r9_wet_first_span = -1;

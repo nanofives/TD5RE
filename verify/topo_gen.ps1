@@ -3,7 +3,7 @@
 # Regenerates the auto track (slot 60 / level090) for one seed under the
 # byte-identity protocol (STREAM=0, REUSE=0, RaceTrace on), waits for the
 # generation to finish, quits the game CLEANLY over the control socket so
-# race.log flushes, then prints the [WORLD]/[STRUCT]/[NET]/[TRIM] lines and
+# race.log flushes, then prints the [WORLD]/[STRUCT]/[NET]/[R22 TRIM] lines and
 # the sha256 of every level file. Run it N times with the same seed: the
 # hashes must be identical (determinism gate). Compare across builds to see
 # WHAT changed.
@@ -66,7 +66,7 @@ $out = Join-Path $wt "log\race_topo_$Tag.log"
 Copy-Item $log $out -Force -ErrorAction SilentlyContinue
 Write-Host "### $Tag seed=$Seed"
 if (Test-Path $out) {
-    Select-String -Path $out -Pattern "\[WORLD\]|\[STRUCT\]|\[NET\]|\[TRIM\]|\[R21 GRADE\]|\[R8 SHAPE\]|boxed in|guard.*reject|centerline build failed|strip emit failed" |
+    Select-String -Path $out -Pattern "\[WORLD\]|\[STRUCT\]|\[NET\]|\[R22 TRIM\]|\[R21 GRADE\]|\[R8 SHAPE\]|boxed in|guard.*reject|centerline build failed|strip emit failed" |
         ForEach-Object { Write-Host ("  " + $_.Line) }
 } else { Write-Host "  NO LOG" }
 foreach ($f in @("STRIP.DAT","LEFT.TRK","RIGHT.TRK","LEVELINF.DAT","MODELS.DAT","TEXTURES.DAT","MESHTAG.BIN","NETWORK.JSON","GENSTAMP.TXT")) {

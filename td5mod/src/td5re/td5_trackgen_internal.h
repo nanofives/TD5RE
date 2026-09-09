@@ -3931,10 +3931,24 @@ double tg_ground_branch_clear(const TG_NodeList *nl, int si);
 #define TD5_TG_TOPO_MAX_REACH  140000.0
 /* C1 tolerance: a lateral step smaller than this is a shared edge, not a gap. */
 #define TD5_TG_TOPO_GAP_TOL    1.0
+/* [R22 item 8] A ground-skirt slab-side whose whole cross-section is narrower
+ * than this has collapsed to an edge-on, zero-area sliver (a fold cap pulled the
+ * outer point to the road edge and tg_ground_side floored it at GAP_TOL). It
+ * renders as a hole; tg_slab_degenerate drops it where the other side survives. */
+#define TD5_TG_TOPO_MIN_SLAB   60.0
 /* C3: clearance kept off a neighbouring carriageway's own edge, and the
  * narrowest verge the cap is ever allowed to leave. */
 #define TD5_TG_TOPO_ROAD_MARGIN 600.0
 #define TD5_TG_TOPO_MIN_VERGE  1200.0
+/* [R22 item 15] "if there's no buildings around you should trim less of the
+ * topology near the road so more scenery can be seen." Extra flat-verge reach
+ * granted on an OPEN span with no facade standing, so the skirt (and therefore
+ * the flora that plants on it) runs further out where there is nothing built to
+ * hide. Bounded well under the historical 24000 apron that item 6 pulled in for
+ * hiding the road on a descent; the road cap + fold caps still clamp it against
+ * any near carriageway or inside bend. tg_facade_stands gates it, so a city
+ * span keeps the tight verge. TD5RE_R22_OPEN_VERGE=0 restores the flat reach. */
+#define TD5_TG_R22_OPEN_VERGE_BONUS 6000.0
 /* C3 only looks at road that is FAR AWAY ALONG THE TRACK. Nearer than this in
  * span index and the "other" road is just this road a moment later, whose
  * ground is the same surface by construction. */

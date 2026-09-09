@@ -64,6 +64,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  line along the outer flank, standing on the ground" },
     { CL_ITEM,    "  already there. They used to carry only road and a" },
     { CL_ITEM,    "  verge, with no trees or scenery beside them." },
+    { CL_ITEM,    "The distant terrain no longer leaves bare gaps or" },
+    { CL_ITEM,    "  cracks at the seams between its 4-span sections." },
+    { CL_ITEM,    "Snowy mountain sections no longer show green ground" },
+    { CL_ITEM,    "  beside the icy road near their edges." },
+    { CL_ITEM,    "Where nothing is built beside the road the verge" },
+    { CL_ITEM,    "  reaches further, so more scenery is visible." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 09 (auto track: second-race crash)" },
