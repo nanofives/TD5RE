@@ -1291,6 +1291,27 @@ int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
      * far that edge is from the road centre. */
     const double bl0 = sh0 + half0, bl1 = sh1 + half1;   /* branch left edges */
     const double gw0 = -bl0, gw1 = -bl1;                 /* gore widths (>=0)  */
+    /* [R22 item 11] "median only near the right track, none near the left." The
+     * frame above measures the gore from lateral 0 (the ROAD CENTRE), but an
+     * asymmetric split (fm != 0.5) shifts the main carriageway so its inner edge
+     * sits at main_shift + fs*main_half (== w(0.5-fm) for a right fork), NOT the
+     * centre. Anchoring the island at 0 left a bare strip w(0.5-fm) wide beside
+     * the main carriageway -- a full lane on a 6-lane MAJOR fork. mi0/mi1 are that
+     * inner edge at the span's two ends; the island is re-centred into the FULL
+     * gore span [branch inner .. main inner] below. mi == 0 on a symmetric fork,
+     * so every derived value is unchanged and the prism is byte-identical. The
+     * DECISION gates (sliver / fill eligibility) keep reading gw = -bl so they
+     * stay consistent with tg_median_at_raw's end-cap predicate; only the placed
+     * geometry widens. The gore FLOOR under the island moves to the same edge in
+     * tg_emit_gore under this same knob, so floor and island stay aligned.
+     * TD5RE_R22_MEDIAN_FRAME=0 restores the centre-anchored island for an A/B. */
+    const int    ms  = tg_fork_side(fork_index);
+    const int    mfr = td5_env_flag_on("TD5RE_R22_MEDIAN_FRAME");
+    const double mws = mfr ? tg_fork_main_wscale(fork_index) : 0.0;
+    const double mi0 = mfr
+        ? tg_fork_main_shift(fork_index, a->width) + ms * a->width * mws * 0.5 : 0.0;
+    const double mi1 = mfr
+        ? tg_fork_main_shift(fork_index, c->width) + ms * c->width * mws * 0.5 : 0.0;
     /* [R8 item 17] Same rule as the gore surface: a PLANTED median (treat 0,
      * grass top) is not legal inside a bore. Substitute the concrete barrier,
      * which is what a real divided tunnel carries, for the spans that are
@@ -1399,7 +1420,9 @@ int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
      * The avenue path is unchanged, fill or no fill. */
     if (!fill && !tg_fork_is_avenue(fork_index)) return 1;
 
-    mc0 = bl0 * 0.5; mc1 = bl1 * 0.5;                    /* median centre lateral */
+    /* [R22 item 11] Median centre = midpoint of the FULL gore span [bl .. mi],
+     * not [bl .. 0]. mi == 0 on a symmetric fork -> bl*0.5, the shipped value. */
+    mc0 = (bl0 + mi0) * 0.5; mc1 = (bl1 + mi1) * 0.5;    /* median centre lateral */
     /* [R11 CROSS item 8] FILL: half the gore less the inset, i.e. the island's
      * faces stand TD5_TG_R11_MEDIAN_INSET clear of each carriageway edge. Never
      * NARROWER than the shipped 0.32 rule, so widening can only ever add
@@ -1428,8 +1451,11 @@ int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
          * TD5RE_R17_MEDIAN_FLUSH=0 restores the 300-unit inset for an A/B. */
         const double inset = td5_env_flag_on("TD5RE_R17_MEDIAN_FLUSH")
                            ? 0.0 : TD5_TG_R11_MEDIAN_INSET;
-        const double f0 = gw0 * 0.5 - inset;
-        const double f1 = gw1 * 0.5 - inset;
+        /* [R22 item 11] Fill the FULL gore span [bl .. mi], so the road-side
+         * face reaches the main carriageway's inner edge. (mi0-bl0)*0.5 reduces
+         * to gw0*0.5 on a symmetric fork (mi == 0), keeping it byte-identical. */
+        const double f0 = (mi0 - bl0) * 0.5 - inset;
+        const double f1 = (mi1 - bl1) * 0.5 - inset;
         if (f0 > mw0) mw0 = f0;
         if (f1 > mw1) mw1 = f1;
     }
@@ -1439,9 +1465,16 @@ int tg_emit_avenue_divider(const TG_NodeList *nl, int si, int fork_index,
     if (mw1 < 0.0)    mw1 = 0.0;
     cl0 = mc0 + mw0; cr0 = mc0 - mw0;                    /* road side / branch side */
     cl1 = mc1 + mw1; cr1 = mc1 - mw1;
-    /* Sit the base at the gore's own level (4 below road) so the island rises
-     * out of the median rather than floating a hair above it. */
-    base0 = a->y - TD5_TG_GORE_DROP; base1 = c->y - TD5_TG_GORE_DROP;
+    /* Sit the base at the gore's own level so the island rises out of the median
+     * rather than floating a hair above it. [R22 item 7] Track the gore FLOOR's
+     * deepened drop under the same knob (tg_emit_gore lowers the floor to
+     * TD5_TG_GROUND_DROP), or the island would float 66 units above it.
+     * TD5RE_R22_GORE_DROP=0 keeps the shipped 4-unit base. */
+    {
+        const double gore_drop = td5_env_flag_on("TD5RE_R22_GORE_DROP")
+                               ? TD5_TG_GROUND_DROP : (double)TD5_TG_GORE_DROP;
+        base0 = a->y - gore_drop; base1 = c->y - gore_drop;
+    }
 
     /* TOP (up-facing): near-road, near-branch, far-branch, far-road. */
     px[n]=a->x+a->tz*cl0; py[n]=base0+H; pz[n]=a->z-a->tx*cl0; uu[n]=0.0; vv[n]=0.0; n++;

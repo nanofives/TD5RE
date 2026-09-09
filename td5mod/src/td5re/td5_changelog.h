@@ -32,6 +32,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 09 (auto track: round 22 -- gore/median)" },
+    { CL_ITEM,    "Fork medians now reach BOTH carriageways. On an" },
+    { CL_ITEM,    "  uneven split the median hugged the branch side and" },
+    { CL_ITEM,    "  left a bare lane-wide strip by the main road." },
+    { CL_ITEM,    "Grass no longer rides over the road at a fork on a" },
+    { CL_ITEM,    "  bend: the median floor follows the curve instead" },
+    { CL_ITEM,    "  of cutting straight across, and sits deeper so it" },
+    { CL_ITEM,    "  no longer z-fights the tarmac." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 09 (auto track: feedback round 22)" },
     { CL_ITEM,    "AUTO TRACK STUDIO: the START and FINISH dots on the" },
     { CL_ITEM,    "  route preview now sit where the race actually starts" },

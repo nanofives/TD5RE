@@ -3554,13 +3554,47 @@ int tg_emit_gore(const TG_NodeList *nl, int si,
         drop = 0.0;
         ov   = 0.0;
     }
+    /* [R22 item 7] "part of the grass ... is rendered over the road." The gore
+     * floor underlaps each carriageway by `ov` (240) to close the fork-mouth
+     * slit, but it sat only TD5_TG_GORE_DROP (4) below the road -- 4/256 render
+     * units, so the 240-wide underlap band is a Z-FIGHT, not a hidden underlap,
+     * and the grass flickers up through the tarmac. The ground skirt solves the
+     * identical "underlap without z-fight" job with TD5_TG_GROUND_DROP (70) and
+     * does not fight, so match it. Deliberately NOT applied on the R18
+     * bridge-deck-FLUSH path above, which wants the gore laid flush (drop 0) with
+     * the deck. The raised island's base is coupled to this same knob in
+     * tg_emit_avenue_divider, so the island never floats above a deepened floor.
+     * NOTE: a deeper drop alone does NOT fix item 7 on a bend -- see the SUBDIV
+     * knob below for the bulge. TD5RE_R22_GORE_DROP=0 restores the 4-unit drop. */
+    else if (td5_env_flag_on("TD5RE_R22_GORE_DROP"))
+        drop = TD5_TG_GROUND_DROP;
+    /* [R22 item 11] "median only near the right track, none near the left." The
+     * gore/median frame anchored its road-side edge at lateral 0 (cov = -fs*ov),
+     * i.e. the ROAD CENTRE. But an asymmetric split (fm != 0.5) shifts the main
+     * carriageway so its inner edge sits at w(0.5-fm), NOT the centre; a floor
+     * that stopped a hair past the centre left a bare strip w(0.5-fm) wide beside
+     * the main carriageway (a full lane on a 6-lane MAJOR fork). Pull the
+     * road-side edge out to the main carriageway's inner edge instead, still
+     * pushed `ov` INTO the carriageway to keep the underlap that closes the slit.
+     *   main inner edge = main_shift + fs*main_half, main_half = w*fm*0.5.
+     * A symmetric fork has main_inner == 0, so cov is unchanged and the mesh is
+     * byte-identical. The raised island (tg_emit_avenue_divider) is widened to
+     * the same edge under the same knob so floor and island stay aligned.
+     * TD5RE_R22_MEDIAN_FRAME=0 restores the centre-anchored edge for an A/B. */
+    const int    fi    = tg_fork_of_main(si);
+    const int    frame = (fi >= 0) && td5_env_flag_on("TD5RE_R22_MEDIAN_FRAME");
+    const double mws   = frame ? tg_fork_main_wscale(fi) : 0.0;
+    const double mi_n  = frame
+        ? tg_fork_main_shift(fi, a->width) + fs * a->width * mws * 0.5 : 0.0;
+    const double mi_f  = frame
+        ? tg_fork_main_shift(fi, c->width) + fs * c->width * mws * 0.5 : 0.0;
     /* Branch left edge, pushed a further `ov` to the RIGHT (lateral is +ve to
      * the left of travel, and the branch sits at negative lateral). */
-    double tnr = shift_n - fs * half_n + fs * ov;  /* near: branch inner edge, pushed into the branch */
-    double tfr = shift_f - fs * half_f + fs * ov;  /* far  */
-    const double cov = -fs * ov;                   /* road centre pushed into the main carriageway */
-    double px[4], py[4], pz[4], uu[4], vv[4];
-    double cx = 0, cy = 0, cz = 0, radius = 0;
+    const double tnr = shift_n - fs * half_n + fs * ov;  /* near: branch inner edge, pushed into the branch */
+    const double tfr = shift_f - fs * half_f + fs * ov;  /* far  */
+    const double cov_n = mi_n - fs * ov;   /* road-side edge (near): main inner, pushed into the carriageway */
+    const double cov_f = mi_f - fs * ov;   /* road-side edge (far)  */
+    const int    subdiv = td5_env_flag_on("TD5RE_R22_GORE_SUBDIV");
     /* [R8 SHAPE G5] Lateral texture repeat. V already advances one tile per
      * span, so U spanning 0..1 across the WHOLE gore only matched the V density
      * while the gore was about a span wide -- which it was, at bow 1.20. A long
@@ -3569,15 +3603,22 @@ int tg_emit_gore(const TG_NodeList *nl, int si,
      * the same texel density however wide it gets. Floored at 1.0 so a narrow
      * avenue gore is byte-identical to the shipped one. */
     double un = 1.0, uf = 1.0;
-    int i;
+    /* [R22 item 7] Room for TD5_TG_ROAD_SUBDIV sub-quads (the non-subdiv path
+     * uses only the first four slots and stays byte-identical). */
+    double px[TD5_TG_ROAD_SUBDIV * 4], py[TD5_TG_ROAD_SUBDIV * 4];
+    double pz[TD5_TG_ROAD_SUBDIV * 4], uu[TD5_TG_ROAD_SUBDIV * 4];
+    double vv[TD5_TG_ROAD_SUBDIV * 4];
+    double cx = 0, cy = 0, cz = 0, radius = 0;
+    int i, nv = 0;
 
     /* [R11 CROSS item 8] INSTRUMENT: the gore floor is THE median surface, and
-     * it is laid at road level minus TD5_TG_GORE_DROP on every fork. Log its
-     * width and its rise so "flush with the road" is a number, not a guess. */
+     * it is laid at road level minus the drop on every fork. Log its width, its
+     * rise, and (R22) the main carriageway inner edge vs the road-side edge so
+     * "median only on one side" is a number, not a guess. */
     if (tg_r11_cross_diag())
         TD5_LOG_I(LOG_TAG, "trackgen: [R11 GORE] span %4d width=%.0f "
-                  "rise=%.0f (road level minus drop)", si,
-                  fabs(shift_n + half_n), -drop);
+                  "rise=%.0f mi=%.0f cov=%.0f (main inner / road-side edge)", si,
+                  fabs(shift_n + half_n), -drop, mi_n, cov_n);
 
     if (tg_r8_longbranch_enabled()) {
         un = fabs(tnr - ov) / (double)TD5_TG_SPAN_LENGTH;
@@ -3586,17 +3627,52 @@ int tg_emit_gore(const TG_NodeList *nl, int si,
         if (uf < 1.0) uf = 1.0;
     }
 
-    /* near-left = road centre pushed `ov` INTO the main carriageway,
-     * near-right = branch left edge pushed `ov` into the branch, then far. */
-    px[0]=a->x+a->tz*cov;   py[0]=a->y-drop; pz[0]=a->z-a->tx*cov;   uu[0]=0.0; vv[0]=(double)si;
-    px[1]=a->x+a->tz*tnr;   py[1]=a->y-drop; pz[1]=a->z-a->tx*tnr;   uu[1]=un;  vv[1]=(double)si;
-    px[2]=c->x+c->tz*tfr;   py[2]=c->y-drop; pz[2]=c->z-c->tx*tfr;   uu[2]=uf;  vv[2]=(double)si+1.0;
-    px[3]=c->x+c->tz*cov;   py[3]=c->y-drop; pz[3]=c->z-c->tx*cov;   uu[3]=0.0; vv[3]=(double)si+1.0;
-    if (fs > 0.0) tg_quads_mirror(px, py, pz, uu, vv, 4);
+    if (!subdiv) {
+        /* BYTE-IDENTICAL path: one flat quad, RAW node frames. With the R22
+         * frame knob off cov_n == cov_f == -fs*ov, and with the drop knob off
+         * drop == 4, so these four vertices are exactly the shipped gore.
+         * near-left = road-side edge, near-right = branch inner edge, then far. */
+        px[0]=a->x+a->tz*cov_n; py[0]=a->y-drop; pz[0]=a->z-a->tx*cov_n; uu[0]=0.0; vv[0]=(double)si;
+        px[1]=a->x+a->tz*tnr;   py[1]=a->y-drop; pz[1]=a->z-a->tx*tnr;   uu[1]=un;  vv[1]=(double)si;
+        px[2]=c->x+c->tz*tfr;   py[2]=c->y-drop; pz[2]=c->z-c->tx*tfr;   uu[2]=uf;  vv[2]=(double)si+1.0;
+        px[3]=c->x+c->tz*cov_f; py[3]=c->y-drop; pz[3]=c->z-c->tx*cov_f; uu[3]=0.0; vv[3]=(double)si+1.0;
+        nv = 4;
+    } else {
+        /* [R22 item 7] Subdivide the gore's road-side edge along the curve with
+         * the SAME TD5_TG_ROAD_SUBDIV sampling the road quad uses (tg_road_edge
+         * with wscale 0 returns the point at a given lateral). A single flat quad
+         * chords between the two node frames while the road is 3 curve
+         * subdivisions, so on a bend the gore's straight road-side edge bulges
+         * toward the inside of the bend past `ov` and rides up OVER the tarmac --
+         * grass genuinely above the road, which no drop can hide. Sampling the
+         * curve makes the gore edge track the road's inner edge exactly (the road
+         * quad is built from the same primitive), so the bulge is gone. */
+        int k;
+        for (k = 0; k < TD5_TG_ROAD_SUBDIV; k++) {
+            const double f0  = (double)k / (double)TD5_TG_ROAD_SUBDIV;
+            const double f1  = (double)(k + 1) / (double)TD5_TG_ROAD_SUBDIV;
+            const double rl0 = cov_n + (cov_f - cov_n) * f0;   /* road-side lateral */
+            const double rl1 = cov_n + (cov_f - cov_n) * f1;
+            const double bl0 = tnr + (tfr - tnr) * f0;         /* branch-side lateral */
+            const double bl1 = tnr + (tfr - tnr) * f1;
+            const double ub0 = un + (uf - un) * f0;            /* branch-side U */
+            const double ub1 = un + (uf - un) * f1;
+            double x, y, z, rx, ry, rz;
+            tg_road_edge(nl, si, f0, rl0, 0.0, &x, &y, &z, &rx, &ry, &rz);
+            px[nv]=x; py[nv]=y-drop; pz[nv]=z; uu[nv]=0.0; vv[nv]=(double)si+f0; nv++;
+            tg_road_edge(nl, si, f0, bl0, 0.0, &x, &y, &z, &rx, &ry, &rz);
+            px[nv]=x; py[nv]=y-drop; pz[nv]=z; uu[nv]=ub0; vv[nv]=(double)si+f0; nv++;
+            tg_road_edge(nl, si, f1, bl1, 0.0, &x, &y, &z, &rx, &ry, &rz);
+            px[nv]=x; py[nv]=y-drop; pz[nv]=z; uu[nv]=ub1; vv[nv]=(double)si+f1; nv++;
+            tg_road_edge(nl, si, f1, rl1, 0.0, &x, &y, &z, &rx, &ry, &rz);
+            px[nv]=x; py[nv]=y-drop; pz[nv]=z; uu[nv]=0.0; vv[nv]=(double)si+f1; nv++;
+        }
+    }
+    if (fs > 0.0) tg_quads_mirror(px, py, pz, uu, vv, nv);
 
-    for (i = 0; i < 4; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
-    cx /= 4; cy /= 4; cz /= 4;
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < nv; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
+    cx /= nv; cy /= nv; cz /= nv;
+    for (i = 0; i < nv; i++) {
         double dx=px[i]-cx, dy=py[i]-cy, dz=pz[i]-cz;
         double d = sqrt(dx*dx+dy*dy+dz*dz);
         if (d > radius) radius = d;
@@ -3606,7 +3682,7 @@ int tg_emit_gore(const TG_NodeList *nl, int si,
     tg_put_u16(blk, 259);
     tg_put_u16(blk, 0);
     tg_put_u32(blk, 1);
-    tg_put_u32(blk, 4);
+    tg_put_u32(blk, (unsigned)nv);
     tg_put_f32(blk, radius);
     tg_put_f32(blk, cx); tg_put_f32(blk, cy); tg_put_f32(blk, cz);
     tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
@@ -3618,9 +3694,9 @@ int tg_emit_gore(const TG_NodeList *nl, int si,
     tg_put_u16(blk, (unsigned)ground_page);
     tg_put_u32(blk, 0);
     tg_put_u16(blk, 0);
-    tg_put_u16(blk, 1);                    /* one quad */
+    tg_put_u16(blk, (unsigned)(nv / 4));   /* quad_count */
     tg_put_u32(blk, 0);
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < nv; i++) {
         tg_put_f32(blk, px[i]); tg_put_f32(blk, py[i]); tg_put_f32(blk, pz[i]);
         tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0); tg_put_f32(blk, 0.0);
         tg_put_u32(blk, 0xFFFFFFFFu);
