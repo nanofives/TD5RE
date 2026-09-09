@@ -1526,49 +1526,65 @@ const TG_Mood *tg_mood(void) { return &s_mood; }
  * table is empty, so it places nothing and cannot change a build. Adding a
  * landmark is a row here plus an emitter; see the TG_Landmark block in the
  * internal header for the placement contract. */
-/* [GEOMLIB] The table is no longer empty. Every row names a PREFAB -- real
- * Moscow geometry lifted by re/tools/td5_geomlib.py prefabs -- and the four
- * kinds differ only in how far back they stand and how often they appear.
+/* [GEOMLIB] Real Moscow set pieces, segmented out of the whole track by
+ * re/tools/td5_geomlib.py landmarks and exported to td5_tg_prefab_data.h.
+ *
+ * WHY THESE ARE UNNAMED. An earlier version of this table called its rows
+ * CATHEDRAL, MINISTRY and so on. Those names were invented, and they described
+ * objects that turned out to be chunks of street FRONTAGE rather than
+ * buildings: segmentation then ran inside one sub-mesh, which cannot produce a
+ * whole object because a landmark can span several sub-meshes and one sub-mesh
+ * can hold several unrelated buildings. Nothing here knows what any of these
+ * buildings is, so nothing here claims to. Identifying them is a job for the
+ * studio Library browser, and the names should be replaced when someone has
+ * actually looked.
  *
  * BUILT-UP biomes only. A Moscow ministry in a forest run would read as a bug,
  * and the biome mask is the cheapest place to say so -- but CITY alone was far
  * too narrow. Measured on seed 20260901: with snow coherence on the layout is
  * FOREST/ALPINE/ALPTOWN/FIELDS, and with it off, INDUSTRIAL/COAST/FIELDS/
  * FOREST/ALPINE. Neither drew CITY at all across ten runs, so a CITY-only row
- * would have made the whole feature dead in practice rather than rare.
+ * would have made the whole feature dead in practice rather than rare. The
+ * three biomes that carry facades and urbanity >= 1 are CITY (0), INDUSTRIAL
+ * (3) and ALPTOWN (7).
  *
- * The three biomes that actually carry facades and urbanity >= 1 are CITY (0),
- * INDUSTRIAL (3) and ALPTOWN (7); those are where built architecture belongs.
- * Weights are deliberately low for the big pieces: one cathedral per track is a
- * landmark, four is a skyline.
+ * NO PLAZAS in this set. The segmenter holds flat slabs out of the structure
+ * pass on purpose -- ground and road primitives are exactly what bridge
+ * unrelated buildings into one lump -- so the paving that surrounds these
+ * pieces is not exported with them yet. They will read as sited only once it
+ * is; see the round doc.
  *
  * Clearance is the standoff PAST the road edge, before the piece's own half
- * depth is added, so a plaza at 200 abuts the verge while a landmark at 2600
- * sits back behind it. Plazas are flat slabs (heights 0..23) and are what makes
- * the big pieces read as sited rather than dropped.
+ * depth is added. The first six are once-per-track at a lower weight and stand
+ * further back, because they are the largest.
  */
-/* CITY | INDUSTRIAL | ALPTOWN -- the three biomes with facades and
- * urbanity >= 1. See the note above for why CITY alone was not enough. */
 #define TG_LM_URBAN ((1u << 0) | (1u << 3) | (1u << 7))
 static const TG_Landmark k_landmarks[] = {
-    /* name          biome       min once wt flat wtr nt salt         prefab clear */
-    { "CATHEDRAL",   TG_LM_URBAN,  40, 1, 30, 0, 0, 0, 0x21014000u,  0, 2600.0 },
-    { "MINISTRY",    TG_LM_URBAN,  40, 1, 25, 0, 0, 0, 0x21014001u,  1, 3000.0 },
-    { "TERMINAL",    TG_LM_URBAN,  40, 1, 25, 0, 0, 0, 0x21014002u,  2, 3000.0 },
-    { "GREAT HALL",  TG_LM_URBAN,  40, 1, 30, 0, 0, 0, 0x21014003u,  3, 2600.0 },
-    { "TOWER BLOCK", TG_LM_URBAN,  20, 0, 45, 0, 0, 0, 0x21014004u,  4, 1400.0 },
-    { "SPIRE",       TG_LM_URBAN,  20, 0, 40, 0, 0, 0, 0x21014005u,  5, 1400.0 },
-    { "CIVIC BLOCK", TG_LM_URBAN,  20, 0, 45, 0, 0, 0, 0x21014006u,  7, 1400.0 },
-    { "OFFICE A",    TG_LM_URBAN,  16, 0, 50, 0, 0, 0, 0x21014007u,  8, 1200.0 },
-    { "OFFICE B",    TG_LM_URBAN,  16, 0, 50, 0, 0, 0, 0x21014008u,  9, 1200.0 },
-    { "LOW BLOCK A", TG_LM_URBAN,  16, 0, 50, 0, 0, 0, 0x21014009u, 10, 1200.0 },
-    { "LOW BLOCK B", TG_LM_URBAN,  16, 0, 50, 0, 0, 0, 0x2101400Au, 11, 1200.0 },
-    { "PLAZA A",     TG_LM_URBAN,  16, 0, 55, 1, 0, 0, 0x2101400Bu,  6,  200.0 },
-    { "PLAZA B",     TG_LM_URBAN,  16, 0, 55, 1, 0, 0, 0x2101400Cu, 12,  200.0 },
-    { "PLAZA C",     TG_LM_URBAN,  16, 0, 50, 1, 0, 0, 0x2101400Du, 13,  200.0 },
-    { "PLAZA D",     TG_LM_URBAN,  16, 0, 50, 1, 0, 0, 0x2101400Eu, 14,  200.0 },
-    { "PLAZA E",     TG_LM_URBAN,  16, 0, 50, 1, 0, 0, 0x2101400Fu, 15,  200.0 },
-    { "PLAZA F",     TG_LM_URBAN,  16, 0, 50, 1, 0, 0, 0x21014010u, 16,  200.0 }
+    /* name          biome  min once wt fl wt nt salt        pf  clear */
+    { "SET PIECE 00", TG_LM_URBAN, 20, 1, 30, 0, 0, 0, 0x21014000u,  0, 2200.0 },
+    { "SET PIECE 01", TG_LM_URBAN, 20, 1, 30, 0, 0, 0, 0x21014001u,  1, 2200.0 },
+    { "SET PIECE 02", TG_LM_URBAN, 20, 1, 30, 0, 0, 0, 0x21014002u,  2, 2200.0 },
+    { "SET PIECE 03", TG_LM_URBAN, 20, 1, 30, 0, 0, 0, 0x21014003u,  3, 2200.0 },
+    { "SET PIECE 04", TG_LM_URBAN, 20, 1, 30, 0, 0, 0, 0x21014004u,  4, 2200.0 },
+    { "SET PIECE 05", TG_LM_URBAN, 20, 1, 30, 0, 0, 0, 0x21014005u,  5, 2200.0 },
+    { "SET PIECE 06", TG_LM_URBAN, 16, 0, 45, 0, 0, 0, 0x21014006u,  6, 1500.0 },
+    { "SET PIECE 07", TG_LM_URBAN, 16, 0, 45, 0, 0, 0, 0x21014007u,  7, 1500.0 },
+    { "SET PIECE 08", TG_LM_URBAN, 16, 0, 45, 0, 0, 0, 0x21014008u,  8, 1500.0 },
+    { "SET PIECE 09", TG_LM_URBAN, 16, 0, 45, 0, 0, 0, 0x21014009u,  9, 1500.0 },
+    { "SET PIECE 10", TG_LM_URBAN, 16, 0, 45, 0, 0, 0, 0x2101400Au, 10, 1500.0 },
+    { "SET PIECE 11", TG_LM_URBAN, 16, 0, 45, 0, 0, 0, 0x2101400Bu, 11, 1500.0 },
+    { "SET PIECE 12", TG_LM_URBAN, 16, 0, 45, 0, 0, 0, 0x2101400Cu, 12, 1500.0 },
+    { "SET PIECE 13", TG_LM_URBAN, 16, 0, 45, 0, 0, 0, 0x2101400Du, 13, 1500.0 },
+    { "SET PIECE 14", TG_LM_URBAN, 16, 0, 50, 0, 0, 0, 0x2101400Eu, 14, 1200.0 },
+    { "SET PIECE 15", TG_LM_URBAN, 16, 0, 50, 0, 0, 0, 0x2101400Fu, 15, 1200.0 },
+    { "SET PIECE 16", TG_LM_URBAN, 16, 0, 50, 0, 0, 0, 0x21014010u, 16, 1200.0 },
+    { "SET PIECE 17", TG_LM_URBAN, 16, 0, 50, 0, 0, 0, 0x21014011u, 17, 1200.0 },
+    { "SET PIECE 18", TG_LM_URBAN, 16, 0, 50, 0, 0, 0, 0x21014012u, 18, 1200.0 },
+    { "SET PIECE 19", TG_LM_URBAN, 16, 0, 50, 0, 0, 0, 0x21014013u, 19, 1200.0 },
+    { "SET PIECE 20", TG_LM_URBAN, 16, 0, 50, 0, 0, 0, 0x21014014u, 20, 1200.0 },
+    { "SET PIECE 21", TG_LM_URBAN, 16, 0, 50, 0, 0, 0, 0x21014015u, 21, 1200.0 },
+    { "SET PIECE 22", TG_LM_URBAN, 16, 0, 50, 0, 0, 0, 0x21014016u, 22, 1200.0 },
+    { "SET PIECE 23", TG_LM_URBAN, 16, 0, 50, 0, 0, 0, 0x21014017u, 23, 1200.0 },
 };
 #define TG_LANDMARK_N ((int)(sizeof(k_landmarks) / sizeof(k_landmarks[0])))
 

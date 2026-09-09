@@ -285,6 +285,310 @@ def split_mesh(mesh, weld=1.0, mode="object", gap=OBJ_GAP):
     return {"reason": SPLIT_OK, "parts": parts}
 
 
+# ---------------------------------------------------------------------------
+# LEVEL-WIDE segmentation (whole objects, not per-sub-mesh pieces)
+# ---------------------------------------------------------------------------
+#
+# split_mesh works inside ONE sub-mesh, which cannot produce whole objects even
+# in principle: a landmark can span several sub-meshes, and one sub-mesh can
+# hold several unrelated buildings. Measured on level023, its "landmark" objects
+# sprawl across 15..28 XZ cells of 4000 units where a single building occupies
+# 2..6 -- they are chunks of streetscape, not buildings.
+#
+# So segmentation has to see the whole track at once, and it has to use the
+# TEXTURE ROLE as well as the geometry:
+#
+#   * GROUND and ROAD primitives are what silently bridge unrelated buildings
+#     into one lump -- a pavement slab touches the facade on either side of it.
+#     They are 68% of level023's primitives, they are never part of a building,
+#     and holding them out of the clustering is what makes the rest work. They
+#     become their own plaza / road objects.
+#   * FOLIAGE (billboard trees) never belongs to a building either.
+#   * What is left -- walls, roofs, signs -- is the building material, and it is
+#     agglomerated nearest-pair-first under a hard extent cap so a terrace of
+#     touching houses cannot collapse into one object.
+#
+# There is no ground truth to recover here. The shipped format carries no object
+# grouping at all (buildings are flat arrays of unconnected road-facing quads),
+# so this is a reconstruction, not a decode. It gets the big pieces right and
+# leaves a tail for the studio inspector.
+
+SEG_FLAT_Y = 60.0          # world-Y extent under which a primitive is a slab
+SEG_FLAT_XZ = 1500.0
+SEG_GAP = 500.0            # XZ dilation when deciding two primitives touch
+SEG_MAX_EXTENT = 26000.0   # a single object may not exceed this in X or Z
+SEG_MIN_H = 400.0          # below this a non-slab is detail, not structure
+
+GROUND_ROLES = ("road", "ground")
+LOOSE_ROLES = ("foliage",)
+
+
+def _prim_role(pages, page_role):
+    if not page_role:
+        return "?"
+    c = {}
+    for p in pages:
+        r = page_role.get(p, "?")
+        c[r] = c.get(r, 0) + 1
+    return max(c.items(), key=lambda kv: kv[1])[0]
+
+
+def _agglomerate(items, gap, max_extent, require_shared_page=False):
+    """Greedy nearest-pair-first merge under an extent cap.
+
+    Plain union-find cannot express "objects may not exceed N": whether a chain
+    of touching primitives collapses into one blob then depends on the order
+    pairs happen to be visited. Sorting candidate pairs by centre distance and
+    refusing any merge that would burst the cap makes the result deterministic
+    and bounds object size, which is the property that separates a terrace into
+    houses instead of one 36000-unit lump.
+
+    items: [{"aabb":[minx,miny,minz,maxx,maxy,maxz], ...}]. Returns groups of
+    indices."""
+    n = len(items)
+    box = [list(it["aabb"]) for it in items]
+    uf = _UF(n)
+    cell = max(gap * 2.0, 1.0)
+    grid = {}
+    for i, b in enumerate(box):
+        for cx in range(int((b[0] - gap) // cell), int((b[3] + gap) // cell) + 1):
+            for cz in range(int((b[2] - gap) // cell), int((b[5] + gap) // cell) + 1):
+                grid.setdefault((cx, cz), []).append(i)
+
+    pairs, seen = [], set()
+    for bucket in grid.values():
+        for a in range(len(bucket)):
+            for b in range(a + 1, len(bucket)):
+                i, j = bucket[a], bucket[b]
+                if i > j:
+                    i, j = j, i
+                if (i, j) in seen:
+                    continue
+                seen.add((i, j))
+                bi, bj = box[i], box[j]
+                if bi[0] - gap > bj[3] or bj[0] - gap > bi[3]:
+                    continue
+                if bi[2] - gap > bj[5] or bj[2] - gap > bi[5]:
+                    continue
+                if require_shared_page and not (
+                        set(items[i]["pages"]) & set(items[j]["pages"])):
+                    continue           # different wall art => different building
+                dx = (bi[0] + bi[3] - bj[0] - bj[3]) * 0.5
+                dz = (bi[2] + bi[5] - bj[2] - bj[5]) * 0.5
+                pairs.append((dx * dx + dz * dz, i, j))
+    pairs.sort()
+
+    merged = {i: list(box[i]) for i in range(n)}
+    for _d, i, j in pairs:
+        ri, rj = uf.find(i), uf.find(j)
+        if ri == rj:
+            continue
+        a, b = merged[ri], merged[rj]
+        nb = [min(a[0], b[0]), min(a[1], b[1]), min(a[2], b[2]),
+              max(a[3], b[3]), max(a[4], b[4]), max(a[5], b[5])]
+        if (nb[3] - nb[0]) > max_extent or (nb[5] - nb[2]) > max_extent:
+            continue                       # would burst the cap -- keep apart
+        uf.union(ri, rj)
+        merged[uf.find(ri)] = nb
+    groups = {}
+    for i in range(n):
+        groups.setdefault(uf.find(i), []).append(i)
+    return list(groups.values())
+
+
+def segment_level(model, page_role=None, weld=1.0, gap=SEG_GAP,
+                  max_extent=SEG_MAX_EXTENT):
+    """Segment a WHOLE level into objects. Returns a list of
+    {"kind_hint", "prims":[...], "aabb", "pages", "nface"}.
+
+    kind_hint is coarse and structural -- "structure", "slab", "loose" -- not the
+    catalogue's final verdict; classify() still names it."""
+    prims = []
+    for mi, mesh in enumerate(model["meshes"]):
+        r = split_mesh(mesh, mode="page")
+        if r["reason"] != SPLIT_OK:
+            continue
+        for p in r["parts"]:
+            dx, dy, dz = p["extent"]
+            role = _prim_role(p["pages"], page_role)
+            if dy <= SEG_FLAT_Y and max(dx, dz) > SEG_FLAT_XZ:
+                kind = "slab"
+            elif role in LOOSE_ROLES:
+                kind = "loose"
+            elif role in GROUND_ROLES:
+                kind = "slab"          # road/ground art is never a building
+            elif dy < SEG_MIN_H:
+                kind = "loose"
+            else:
+                kind = "structure"
+            p["mesh_index"] = mi
+            p["role"] = role
+            p["kind_hint"] = kind
+            prims.append(p)
+
+    out = []
+    structure = [p for p in prims if p["kind_hint"] == "structure"]
+    for g in _agglomerate(structure, gap, max_extent):
+        members = [structure[i] for i in g]
+        out.append(_merge_prims(members, "structure"))
+    for p in prims:
+        if p["kind_hint"] != "structure":
+            out.append(_merge_prims([p], p["kind_hint"]))
+    out.sort(key=lambda o: -o["nface"])
+    return out
+
+
+def _merge_prims(members, kind_hint):
+    mn = [min(m["aabb"][i] for m in members) for i in range(3)]
+    mx = [max(m["aabb"][i + 3] for m in members) for i in range(3)]
+    pages = sorted({p for m in members for p in m["pages"]})
+    return {"kind_hint": kind_hint, "prims": members, "aabb": mn + mx,
+            "extent": [mx[i] - mn[i] for i in range(3)], "pages": pages,
+            "nface": sum(m["nface"] for m in members)}
+
+
+# ---------------------------------------------------------------------------
+# RARITY-SEEDED landmark extraction
+# ---------------------------------------------------------------------------
+#
+# Free agglomeration does not work on this data and the reason is worth keeping.
+# TD5 streetscape is per-span wall quads forming CONTINUOUS FRONTAGE, and
+# neighbouring buildings share wall pages, so clustering on proximity (or on
+# shared pages) chains along the street: measured on level023 it produced
+# objects with a median 17801-unit footprint whose top-down outlines were
+# diagonal staircases of quads following the road, not buildings. There is no
+# building boundary in the source to recover -- the format carries no object
+# grouping at all.
+#
+# What IS recoverable is the DISTINCTIVE architecture, because page usage is
+# sharply bimodal. Measured on level023's structure primitives:
+#     page 371 .............. 636 primitives  (generic wall, every street)
+#     110 pages ............. <= 3 primitives (distinctive art, 191 prims)
+# A landmark carries art used almost nowhere else; frontage carries art repeated
+# everywhere. So SEED on rare pages and grow a bounded neighbourhood around the
+# seed, rather than letting a cluster wander down the road.
+#
+# Growth is capped against the SEED CENTRE, not the growing box. Capping against
+# the box is what lets a cluster walk: each addition moves the box, which admits
+# the next neighbour, and the run only stops at the extent limit.
+
+LM_RARE_MAX = 3          # a page used by <= this many primitives is distinctive
+LM_GROW_GAP = 900.0      # how close an unclaimed primitive must be to join
+# Tuned by LOOKING at top-down footprints, not by a statistic. At radius 9000 /
+# extent 20000 the outputs pinned to the cap (p50 16980) and were seeds plus the
+# frontage around them. At 4000 / 11000 they come out compact and roughly square
+# at 5000..8500 units, many showing the nested-rectangle signature of outer
+# walls plus inner detail -- i.e. buildings.
+LM_MAX_RADIUS = 4000.0   # from the SEED centre -- the anti-chaining constraint
+LM_MAX_EXTENT = 11000.0
+LM_MIN_FACES = 20        # below this it is a wall fragment, not a set piece
+LM_MIN_PRIMS = 3         # a single quad group is never a landmark
+
+
+def _aabb_gap_xz(a, b):
+    dx = max(0.0, max(a[0] - b[3], b[0] - a[3]))
+    dz = max(0.0, max(a[2] - b[5], b[2] - a[5]))
+    return (dx * dx + dz * dz) ** 0.5
+
+
+def structure_prims(model, page_role):
+    """Every primitive in the level that could be part of a built structure --
+    ground, road and foliage held out, because those are what bridge unrelated
+    buildings together."""
+    prims = []
+    for mi, mesh in enumerate(model["meshes"]):
+        r = split_mesh(mesh, mode="page")
+        if r["reason"] != SPLIT_OK:
+            continue
+        for p in r["parts"]:
+            dx, dy, dz = p["extent"]
+            role = _prim_role(p["pages"], page_role)
+            if dy <= SEG_FLAT_Y and max(dx, dz) > SEG_FLAT_XZ:
+                continue
+            if role in GROUND_ROLES or role in LOOSE_ROLES:
+                continue
+            if dy < SEG_MIN_H:
+                continue
+            p["mesh_index"] = mi
+            p["role"] = role
+            prims.append(p)
+    return prims
+
+
+def extract_landmarks(model, page_role, rare_max=LM_RARE_MAX,
+                      grow_gap=LM_GROW_GAP, max_radius=LM_MAX_RADIUS,
+                      max_extent=LM_MAX_EXTENT, min_faces=LM_MIN_FACES):
+    """Find the distinctive set pieces in one level. Returns objects sorted by
+    rarity then size, each {"prims", "aabb", "extent", "pages", "nface",
+    "rarity", "seed"}."""
+    prims = structure_prims(model, page_role)
+    if not prims:
+        return []
+    use = {}
+    for p in prims:
+        for q in p["pages"]:
+            use[q] = use.get(q, 0) + 1
+
+    # A primitive's rarity is its RAREST page: one distinctive texture is enough
+    # to mark a piece as special even when the rest of it is ordinary brick.
+    rarity = [min((use[q] for q in p["pages"]), default=10 ** 6) for p in prims]
+    order = sorted((i for i in range(len(prims)) if rarity[i] <= rare_max),
+                   key=lambda i: (rarity[i], -prims[i]["nface"]))
+
+    cell = max(grow_gap * 2.0, 1.0)
+    grid = {}
+    for i, p in enumerate(prims):
+        b = p["aabb"]
+        for cx in range(int(b[0] // cell), int(b[3] // cell) + 1):
+            for cz in range(int(b[2] // cell), int(b[5] // cell) + 1):
+                grid.setdefault((cx, cz), []).append(i)
+
+    claimed = [False] * len(prims)
+    out = []
+    for s in order:
+        if claimed[s]:
+            continue
+        sb = prims[s]["aabb"]
+        scx, scz = (sb[0] + sb[3]) * 0.5, (sb[2] + sb[5]) * 0.5
+        group = [s]
+        claimed[s] = True
+        box = list(sb)
+        frontier = [s]
+        while frontier:
+            cur = frontier.pop()
+            cb = prims[cur]["aabb"]
+            near = set()
+            for cx in range(int((cb[0] - grow_gap) // cell),
+                            int((cb[3] + grow_gap) // cell) + 1):
+                for cz in range(int((cb[2] - grow_gap) // cell),
+                                int((cb[5] + grow_gap) // cell) + 1):
+                    near.update(grid.get((cx, cz), ()))
+            for j in sorted(near):
+                if claimed[j]:
+                    continue
+                jb = prims[j]["aabb"]
+                if _aabb_gap_xz(cb, jb) > grow_gap:
+                    continue
+                jx, jz = (jb[0] + jb[3]) * 0.5, (jb[2] + jb[5]) * 0.5
+                if ((jx - scx) ** 2 + (jz - scz) ** 2) ** 0.5 > max_radius:
+                    continue                       # anti-chaining: seed-anchored
+                nb = [min(box[0], jb[0]), min(box[1], jb[1]), min(box[2], jb[2]),
+                      max(box[3], jb[3]), max(box[4], jb[4]), max(box[5], jb[5])]
+                if (nb[3] - nb[0]) > max_extent or (nb[5] - nb[2]) > max_extent:
+                    continue
+                claimed[j] = True
+                group.append(j)
+                frontier.append(j)
+                box = nb
+        o = _merge_prims([prims[i] for i in group], "landmark")
+        o["rarity"] = rarity[s]
+        o["seed"] = s
+        if o["nface"] >= min_faces and len(o["prims"]) >= LM_MIN_PRIMS:
+            out.append(o)
+    out.sort(key=lambda o: (o["rarity"], -o["nface"]))
+    return out
+
+
 def _select_whole(cand, cx, cz, seed_gap, max_extent):
     """Connected-component growth from the mesh nearest (cx,cz): repeatedly add
     any candidate whose (approx) footprint is within seed_gap of the growing
