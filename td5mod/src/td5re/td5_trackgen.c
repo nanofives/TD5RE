@@ -1576,6 +1576,18 @@ void tg_landmarks_place(const TG_NodeList *nl, int nspans)
 {
     unsigned char used[TG_LANDMARK_N];
     int placed = 0, runs = 0, refused = 0, si;
+    /* [GEOMLIB] DEV: force every row past its weight gate, so one run exercises
+     * all 17 set pieces instead of the handful a seed's rolls happen to pick.
+     * Not a gameplay knob -- a track with every landmark on it is not a track
+     * anyone should race -- but the only practical way to see the big pieces,
+     * which are once_per_track at weight 25-30 and so miss entirely on a seed
+     * with one built-up run. TD5RE_-prefixed, so it feeds the GENSTAMP env hash
+     * and cannot leave a forced build cached as if it were a normal one.
+     *
+     * NOT td5_env_flag_on: that helper defaults to ON when the variable is
+     * unset, which would have shipped this forced on. td5_env_int with a 0
+     * default is the opt-in form. */
+    const int force = td5_env_int("TD5RE_PREFAB_FORCE_ALL", 0, 0, 1);
 
     tg_prefab_reset();
     memset(used, 0, sizeof(used));
@@ -1602,7 +1614,8 @@ void tg_landmarks_place(const TG_NodeList *nl, int nspans)
              * be able to move the road. Mixed with the RUN START, or a
              * per-run row would resolve identically in every run and either
              * appear in all of them or none. */
-            if ((tg_roll_hash(s_gen_seed, L->salt ^ ((unsigned)a * 2654435761u))
+            if (!force &&
+                (tg_roll_hash(s_gen_seed, L->salt ^ ((unsigned)a * 2654435761u))
                  % 100u) >= (unsigned)L->weight) continue;
             if (L->prefab < 0) { placed++; used[li] = 1; continue; }
 
