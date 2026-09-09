@@ -50,6 +50,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  not the road, and starts outside the bore wall." },
     { CL_ITEM,    "Short bridges gain approach spans, so a stream" },
     { CL_ITEM,    "  crossing reads as a bridge instead of two spans." },
+    { CL_ITEM,    "Fork and bypass corridors now grow their own tree" },
+    { CL_ITEM,    "  line along the outer flank, standing on the ground" },
+    { CL_ITEM,    "  already there. They used to carry only road and a" },
+    { CL_ITEM,    "  verge, with no trees or scenery beside them." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 09 (auto track: second-race crash)" },

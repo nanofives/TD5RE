@@ -2876,6 +2876,114 @@ static int tg_side_terrain_splice(int si, TG_Buf *meshes, size_t *moff,
 
 static TG_ScnCtx s_scn;
 
+/* ===================== [R22 CORRIDOR item 4] FORK-CORRIDOR SCENERY ==========
+ * "there's basically no geometry rendered here, only tiles at the side of the
+ * road, no buildings, no scenery or trees" -- driving a fork/bypass corridor.
+ *
+ * MEASURED (seed 2082186171, TD5RE_R21_ROLL=0, per display-list entry): the
+ * main ring runs 29 meshes/entry, the 68 appended corridor entries only 8.6,
+ * and every entry on the whole track with <= 8 meshes is a corridor. The L2
+ * scenery loop below is gated `if (si >= ring) continue;`, so a corridor span
+ * gets its road quad, a branch verge/sidewalk and one sparse roadside tree
+ * (tg_emit_branch_flora) and nothing else: no tree line, no roadside density.
+ *
+ * WHY NOT JUST RUN THE L2 HOOKS FOR CORRIDOR SPANS. Every L2 emitter takes a
+ * TG_FBHook keyed by `si` and both indexes nl->v[si] AND runs span-scoped
+ * lookups (biome, tunnel, water) on that same si -- and a corridor span has NO
+ * node in the centreline (nl->v only holds the ring). Its road is built from
+ * the base MAIN node mb = F+1+ck plus a lateral bow (tg_fork_br_shift). Feeding
+ * an emitter mb without the bow would place its scenery on the MAIN road and
+ * z-fight it; feeding it a synthetic node would still break every span-scoped
+ * lookup that reuses si as an index. So corridor scenery needs a corridor FRAME
+ * (main node + lateral offset) that the emitter honours, and the emitters in
+ * td5_tg_terrain.c cannot be handed one without rewriting their si contract.
+ *
+ * WHY TREES, NOT GROUND. The outboard side of the fork is a RIDGE GATE, not a
+ * ground gate (tg_emit_fb_terrain, R8 TERRAIN): over a fork the main road still
+ * lays its far-band GROUND out to tg_far_reach() (30000) across and past the
+ * corridor -- tg_topo_road_cap is ring-only and never caps at a corridor -- but
+ * SUPPRESSES the tree wall there so a distant skyline does not land on the
+ * branch. So the ground under a corridor already exists; a ground apron here
+ * would z-fight it (the single biggest risk this round was warned about). What
+ * is genuinely missing is the VERTICAL scenery, so this plants a corridor tree
+ * line and nothing else -- fail closed, standing on ground that is already there.
+ *
+ * FRAME. Reuses the exact placement authority the branch flora and the main
+ * road's own roadside trees use: tg_carriageway_clear_gap(nl, mb, fs, ...)
+ * pushes a setback measured from the MAIN road edge out past the bowed corridor
+ * at its ACTUAL width, and tg_flora_plant(nl, mb, b, fs, gap, tw, ...) turns
+ * that into a trunk world point + a base_y sampled off the SAME topo chain the
+ * far-band ground is built from (so the trunk sits ON the terrain, not at road
+ * height) and vetoes a trunk over water. Because mb < ring, both are honoured.
+ * An outboard band: `base` clears the corridor once, then each tree steps a
+ * further TD5_TG_R22_CORR_STEP out so the flank reads as a receding line, not a
+ * single hedge, all within the 30000 the far-band ground already reaches.
+ *
+ * DETERMINISM. No tg_rand() draw (that would shift every later draw and move
+ * every seed's road); tg_roll_hash_at mixes the build seed with mb, exactly the
+ * discipline the rest of the generator uses for per-position decisions.
+ *
+ * Billboard biomes only: a paved corridor wants buildings, which are keyed to
+ * the street graph and left for a later round, so emitting nothing there is the
+ * fail-closed choice, not a bare grass strip. TD5RE_R22_CORRIDOR_SCENERY=0
+ * restores d7b11c5e byte-for-byte. */
+#define TD5_TG_SALT_R22_CORRIDOR  0x22040400u   /* round 22, item 4 */
+#define TD5_TG_R22_CORR_TREES     3      /* trees attempted per corridor span */
+#define TD5_TG_R22_CORR_GAP0    600.0    /* base setback the clear-gap floors  */
+#define TD5_TG_R22_CORR_STEP   2600.0    /* outward step per tree in the line  */
+
+static long s_r22_corr_spans;    /* corridor spans that gained >=1 tree */
+static long s_r22_corr_trees;    /* corridor trees planted this build   */
+
+static int tg_emit_corridor_flora(const TG_NodeList *nl, int mb, int ck, int L,
+                                   int fi, const TG_Biome *b, TG_Buf *blk,
+                                   size_t *moff, int *nmesh, int acct_si)
+{
+    const double fs = (double)tg_fork_side(fi);
+    double base;
+    int i, planted = 0;
+
+    (void)ck; (void)L;
+    if (!td5_env_flag_on("TD5RE_R22_CORRIDOR_SCENERY")) return 1;
+    if (!b->billboard || b->tree_n <= 0) return 1;   /* fail closed: no trees here */
+    if (mb < 0 || mb + 1 >= nl->count) return 1;
+
+    /* One cleared setback shared by the whole line, then step out from it: the
+     * clear-gap would floor every tree to the SAME distance (it returns the max
+     * of the requested gap and the reach past the corridor), so the band step
+     * has to be added ON TOP of the cleared base, not inside the request. */
+    base = tg_carriageway_clear_gap(nl, mb, fs, TD5_TG_R22_CORR_GAP0,
+                                    TD5_TG_CARRIAGEWAY_MARGIN);
+
+    for (i = 0; i < TD5_TG_R22_CORR_TREES; i++) {
+        const unsigned int h =
+            tg_roll_hash_at(TD5_TG_SALT_R22_CORRIDOR + (unsigned)i, mb);
+        const int    tv  = b->tree_set[(h >> 13) % (unsigned)b->tree_n];
+        const double jit = 0.8 + (double)((h >> 9) % 41) * 0.01;   /* 0.80..1.20 */
+        const double tw  = (double)k_tree_pages[tv].w * jit;
+        const double th  = (double)k_tree_pages[tv].h * jit;
+        const double gap = base + (double)i * TD5_TG_R22_CORR_STEP
+                         + (double)((h >> 5) % 700);
+        double cx, cz, base_y;
+
+        if (*nmesh + 2 >= TG_MAX_MESHES_PER_ENTRY) break;   /* keep headroom */
+        /* Placement + ground drop + water veto, all off the main node mb. */
+        if (!tg_flora_plant(nl, mb, b, fs, gap, tw, &cx, &cz, &base_y))
+            continue;                                       /* over water etc. */
+        if (!tg_r12_flora_accept(mb, "corridor", tg_tree_slot(tv), fs,
+                                 cx, cz, tw, th))
+            continue;                                       /* spacing dedup   */
+        moff[(*nmesh)++] = blk->len;
+        if (!tg_emit_billboard_mesh(blk, cx, base_y, cz, tw * 0.5, th,
+                                    tg_tree_slot(tv), 1))
+            return 0;
+        tg_acct_n(TG_ACCT_R7_BRANCH, acct_si, 1);
+        planted++;
+    }
+    if (planted) { s_r22_corr_spans++; s_r22_corr_trees += planted; }
+    return 1;
+}
+
 static int tg_scenery_begin(const TG_NodeList *nl, int nspans, int lanes)
 {
     /* `nspans` is the FULL strip span count. With branches it INCLUDES each
@@ -2886,6 +2994,9 @@ static int tg_scenery_begin(const TG_NodeList *nl, int nspans, int lanes)
     const int branch_active = tg_branches_enabled() && s_fork_count > 0;
     const int ring = branch_active ? s_ring_len : nspans;
 
+    /* [R22 CORRIDOR item 4] per-build corridor-scenery counters. */
+    s_r22_corr_spans = 0;
+    s_r22_corr_trees = 0;
     /* [R9 INFRA] per-build counters, reset with the rest of the accounting. */
     s_r9_infra_props = 0;
     s_r9_infra_ponds = 0;
@@ -3168,6 +3279,12 @@ static int tg_scenery_entry(int e)
                          * and inherently clear of the branch (clear_gap). */
                         if (ok && !tg_emit_branch_flora(nl, mb, cb, &meshes,
                                                         moff, &nmesh, si)) ok = 0;
+                        /* [R22 CORRIDOR item 4] the corridor's own tree line,
+                         * standing on the far-band ground the main road already
+                         * lays past the fork. See tg_emit_corridor_flora. */
+                        if (ok && !tg_emit_corridor_flora(nl, mb, ck, L, fi, cb,
+                                                          &meshes, moff, &nmesh,
+                                                          si)) ok = 0;
                     }
                 }
                 /* The other appended span is the PAD (si == cbase-1). It is
@@ -3672,6 +3789,16 @@ static int tg_scenery_end(TG_Buf *out)
                 TD5_LOG_I(LOG_TAG, "trackgen: guardrails on %d/%d spans (%d%%)",
                           nrails, nspans,
                           nspans ? (nrails * 100 / nspans) : 0);
+            /* [R22 CORRIDOR item 4] how much scenery reached the fork corridors,
+             * the number the density sweep is checked against. Kinds is `tree`
+             * only for now (ground is already carried by the main road's far
+             * band; see tg_emit_corridor_flora). Always printed when branches
+             * ran, so a zero (biome with no trees, or the knob off) is legible
+             * rather than a silent absence. */
+            if (s_scn.branch_active)
+                TD5_LOG_I(LOG_TAG, "trackgen: [R22 CORRIDOR] %ld tree(s) on %ld "
+                          "corridor span(s) (kinds: tree)",
+                          s_r22_corr_trees, s_r22_corr_spans);
             /* WARN, not INFO: any non-zero count means some spans are missing
              * scenery they were meant to have, and nothing else would say so. */
             if (nbudget)
