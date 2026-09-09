@@ -131,10 +131,27 @@ static void tg_road_node_fill(int i, const TG_Node *n)
     r->force = 0;
 }
 
+/* [R22 item 6] Curvature (grade-change) cap in y-units per span, or 0 = off.
+ * The slope limiter below bounds the GRADE but not how fast the grade changes,
+ * so it permits kinks -- the "sloppy" ride the item is about. This caps the
+ * per-span change in grade so the profile bends into and out of a slope instead
+ * of snapping, without touching the walk's X/Z (topology stays). Knob
+ * TD5RE_R22_SMOOTH is that cap in thousandths of a grade unit per span; 0
+ * restores the pure slope limiter (byte-identical). */
+static double tg_road_curv_cap(void)
+{
+    int v;
+    if (!s_spec) return 0.0;
+    v = td5_env_int("TD5RE_R22_SMOOTH", 45, 0, 1000);
+    if (v <= 0) return 0.0;
+    return (double)v / 1000.0 * (double)s_spec->span_length;
+}
+
 /* Forward / backward / forward grade limiter over nodes [a, n) with y[a]
  * fixed. Writes nl->v[i].y for i in (a, n). */
 static void tg_road_solve(TG_NodeList *nl, int a, int n)
 {
+    const double curv = tg_road_curv_cap();
     int i;
     if (n - a < 2) return;
     for (i = a + 1; i < n; i++) {
@@ -142,6 +159,16 @@ static void tg_road_solve(TG_NodeList *nl, int a, int n)
         double y = s_rn[i].t;
         if (y < lo) y = lo;
         if (y > hi) y = hi;
+        /* Curvature clamp: keep this span's grade within `curv` of the last
+         * span's grade, then re-honour the slope cap (the hard limit). */
+        if (curv > 0.0 && i >= 2) {
+            const double pg = nl->v[i - 1].y - nl->v[i - 2].y;
+            const double clo = nl->v[i - 1].y + pg - curv, chi = nl->v[i - 1].y + pg + curv;
+            if (y < clo) y = clo;
+            if (y > chi) y = chi;
+            if (y < lo) y = lo;
+            if (y > hi) y = hi;
+        }
         nl->v[i].y = y;
     }
     for (i = n - 2; i > a; i--) {
@@ -149,6 +176,14 @@ static void tg_road_solve(TG_NodeList *nl, int a, int n)
         double y = nl->v[i].y;
         if (y < lo) y = lo;
         if (y > hi) y = hi;
+        if (curv > 0.0 && i + 2 < n) {
+            const double ng = nl->v[i + 1].y - nl->v[i + 2].y;
+            const double clo = nl->v[i + 1].y + ng - curv, chi = nl->v[i + 1].y + ng + curv;
+            if (y < clo) y = clo;
+            if (y > chi) y = chi;
+            if (y < lo) y = lo;
+            if (y > hi) y = hi;
+        }
         nl->v[i].y = y;
     }
     for (i = a + 1; i < n; i++) {
@@ -156,6 +191,14 @@ static void tg_road_solve(TG_NodeList *nl, int a, int n)
         double y = nl->v[i].y;
         if (y < lo) y = lo;
         if (y > hi) y = hi;
+        if (curv > 0.0 && i >= 2) {
+            const double pg = nl->v[i - 1].y - nl->v[i - 2].y;
+            const double clo = nl->v[i - 1].y + pg - curv, chi = nl->v[i - 1].y + pg + curv;
+            if (y < clo) y = clo;
+            if (y > chi) y = chi;
+            if (y < lo) y = lo;
+            if (y > hi) y = hi;
+        }
         nl->v[i].y = y;
     }
 }
@@ -972,12 +1015,23 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
  * audits and the skirt cannot disagree about where the shore is. */
 static double s_shore_d[TD5_TG_MAX_SPANS + 8][2];
 static double s_shore_y[TD5_TG_MAX_SPANS + 8][2];
+/* [R22 item 10] Distance from the road edge to the FAR bank of the near water
+ * body (first dry cell past the wet run), so tg_emit_water can clip a river
+ * plane to the water instead of sheeting a fixed 50000 across the dry land
+ * beyond it. 1e9 = the water runs past the search cap (open water: keep the
+ * full extent). */
+static double s_shore_far[TD5_TG_MAX_SPANS + 8][2];
 static unsigned char s_wet_any[TD5_TG_MAX_SPANS + 8];
 static int s_shore_n;
 
 static void tg_road_shore_build(const TG_NodeList *nl)
 {
     const double reach = tg_far_reach() + 6000.0;
+    /* The far bank may lie past the near-shore search reach; march for it up to
+     * one old plane width (TD5_TG_WATER_EXTENT) past the near bank, so a clip
+     * can never widen a plane beyond what it was. */
+    const double far_cap = (double)TD5_TG_WATER_EXTENT;
+    const double far_step = 1000.0;
     int i, side;
     s_shore_n = nl->count;
     if (s_shore_n > TD5_TG_MAX_SPANS + 8) s_shore_n = TD5_TG_MAX_SPANS + 8;
@@ -991,6 +1045,7 @@ static void tg_road_shore_build(const TG_NodeList *nl)
             double d;
             s_shore_d[i][side] = 1e9;
             s_shore_y[i][side] = tg_world_sea_y();
+            s_shore_far[i][side] = 1e9;
             for (d = 0.0; d <= reach; d += 500.0) {
                 const double wx = n->x + lx * (half + d), wz = n->z + lz * (half + d);
                 /* [R22] Ask tg_world_is_water, not the raw height-vs-surface
@@ -1010,6 +1065,18 @@ static void tg_road_shore_build(const TG_NodeList *nl)
                     s_shore_y[i][side] = tg_world_water_y(wx, wz);
                     any = 1;
                     break;
+                }
+            }
+            /* Once a near bank is found, march on for the far bank: the first
+             * dry cell ends the near water body. If the water runs to the cap
+             * (open water, e.g. the sea) leave 1e9 = "use the full extent". */
+            if (s_shore_d[i][side] < 1e8) {
+                double fd;
+                for (fd = s_shore_d[i][side] + far_step;
+                     fd <= s_shore_d[i][side] + far_cap; fd += far_step) {
+                    const double wx = n->x + lx * (half + fd);
+                    const double wz = n->z + lz * (half + fd);
+                    if (!tg_world_is_water(wx, wz)) { s_shore_far[i][side] = fd; break; }
                 }
             }
         }
@@ -1043,6 +1110,14 @@ double tg_road_shore_y(int si, int is_left)
     return s_shore_y[si][is_left ? 0 : 1];
 }
 
+/* [R22 item 10] Distance from the road edge to the far bank of the near water
+ * body, or 1e9 if the water runs past the search cap (open water). */
+double tg_road_shore_far(int si, int is_left)
+{
+    if (si < 0 || si >= s_shore_n) return 1e9;
+    return s_shore_far[si][is_left ? 0 : 1];
+}
+
 double tg_road_water_side(int si)
 {
     double l, r;
@@ -1056,6 +1131,118 @@ double tg_road_node_water_y(int i)
 {
     if (i < 0 || i >= s_rn_n) return tg_world_sea_y();
     return s_rn[i].wy;
+}
+
+/* [R22 item 10 DIAGNOSTIC] Which of the four water authorities put a water
+ * plane OVER the road, and is it a height error or the 50000-extent plane
+ * crossing a road that curves back on itself?
+ *
+ * Reconstructs exactly the quad tg_emit_water lays for every wet span-side,
+ * then scans every road node to find any that lies inside that quad's XZ
+ * footprint with its road surface BELOW the plane -- water rendered over the
+ * road. Reports the plane's source (sea vs river surface), its bounding centre
+ * + radius (so the picked e<N> mesh can be matched), and the worst offender
+ * node with its span distance (|j-si| large = the plane reached a DIFFERENT
+ * part of the loop = an extent defect, not a height one). Gated, read-only. */
+static int tg_r22_pt_in_quad(double x, double z,
+                             const double *px, const double *pz)
+{
+    int i, pos = 0, neg = 0;
+    for (i = 0; i < 4; i++) {
+        const int j = (i + 1) & 3;
+        const double cross = (px[j] - px[i]) * (z - pz[i])
+                           - (pz[j] - pz[i]) * (x - px[i]);
+        if (cross > 0.0) pos = 1; else if (cross < 0.0) neg = 1;
+    }
+    return !(pos && neg);
+}
+
+static void tg_r22_water_diag(const TG_NodeList *nl)
+{
+    const double sea = tg_world_sea_y();
+    int si;
+    if (!td5_env_flag_on("TD5RE_R22_WATER_DIAG")) return;
+    TD5_LOG_I(LOG_TAG, "trackgen: [R22 WDIAG] sea level %.0f, extent %d, "
+              "spans %d", sea, (int)TD5_TG_WATER_EXTENT, nl->count);
+    for (si = 0; si + 1 < nl->count && si < s_shore_n - 1; si++) {
+        int side_i;
+        for (side_i = 0; side_i < 2; side_i++) {
+            const int is_left = (side_i == 0);
+            const double side = is_left ? 1.0 : -1.0;
+            const TG_Node *n0 = &nl->v[si];
+            const TG_Node *n1 = &nl->v[si + 1];
+            double d0 = tg_road_shore_d(si, is_left);
+            double d1 = tg_road_shore_d(si + 1, is_left);
+            double px[4], pz[4], py0, py1, lx0, lz0, lx1, lz1, e0, e1;
+            double cx = 0, cz = 0, rad = 0, cy;
+            int j, worst_j = -1, covered = 0, target;
+            double worst_delta = 0;
+            if (!tg_water_span_clear(si)) continue;
+            if (d0 > 1e8 && d1 > 1e8) continue;
+            if (d0 > 1e8) d0 = d1;
+            if (d1 > 1e8) d1 = d0;
+            lx0 = n0->tz * side; lz0 = -n0->tx * side;
+            lx1 = n1->tz * side; lz1 = -n1->tx * side;
+            e0 = n0->width * 0.5 + d0 - 400.0;
+            if (e0 < n0->width * 0.5) e0 = n0->width * 0.5;
+            e1 = n1->width * 0.5 + d1 - 400.0;
+            if (e1 < n1->width * 0.5) e1 = n1->width * 0.5;
+            px[0] = n0->x + lx0 * e0; pz[0] = n0->z + lz0 * e0;
+            px[1] = n1->x + lx1 * e1; pz[1] = n1->z + lz1 * e1;
+            px[2] = px[1] + lx1 * (double)TD5_TG_WATER_EXTENT;
+            pz[2] = pz[1] + lz1 * (double)TD5_TG_WATER_EXTENT;
+            px[3] = px[0] + lx0 * (double)TD5_TG_WATER_EXTENT;
+            pz[3] = pz[0] + lz0 * (double)TD5_TG_WATER_EXTENT;
+            py0 = tg_road_shore_y(si, is_left);
+            py1 = tg_road_shore_y(si + 1, is_left);
+            for (j = 0; j < 4; j++) { cx += px[j] * 0.25; cz += pz[j] * 0.25; }
+            for (j = 0; j < 4; j++) {
+                const double dx = px[j] - cx, dz = pz[j] - cz;
+                const double r = sqrt(dx * dx + dz * dz);
+                if (r > rad) rad = r;
+            }
+            cy = (py0 < py1 ? py0 : py1);
+            /* Scan road EDGE points (both sides of every span's centreline)
+             * covered by this plane and below its surface: this is the road the
+             * water is laid over, not the centreline node the plane starts
+             * outboard of. */
+            for (j = 0; j + 1 < nl->count; j++) {
+                const TG_Node *nj = &nl->v[j];
+                int e;
+                if (j == si || j == si + 1) continue;
+                for (e = 0; e < 2; e++) {
+                    const double es = e ? -1.0 : 1.0;
+                    const double ex = nj->x + nj->tz * es * nj->width * 0.5;
+                    const double ez = nj->z - nj->tx * es * nj->width * 0.5;
+                    double pyj, dist;
+                    if (!tg_r22_pt_in_quad(ex, ez, px, pz)) continue;
+                    pyj = (py0 < py1 ? py0 : py1);   /* conservative flat plane */
+                    if (nj->y >= pyj - 200.0) continue;
+                    covered++;
+                    dist = pyj - nj->y;
+                    if (dist > worst_delta) { worst_delta = dist; worst_j = j; }
+                    break;
+                }
+            }
+            target = (si >= 380 && si <= 391);
+            /* Direct "over my own road edge" test: the plane's inner edge sits
+             * at span si's road edge, so compare the surface to that road. */
+            {
+                const double own = (n0->y < n1->y ? n0->y : n1->y);
+                const double over_own = cy - own;
+                if (over_own > 200.0 || covered > 0 || target)
+                    TD5_LOG_I(LOG_TAG, "trackgen: [R22 WDIAG] span %d %s: surf %.0f "
+                              "(%s) d=%.0f/%.0f, road.y %.0f/%.0f (over own edge "
+                              "%.0f), ctr %.0f,%.0f r%.0f; %d road edge(s) UNDER "
+                              "plane, worst j=%d dy=%.0f |dj|=%d",
+                              si, is_left ? "L" : "R", cy,
+                              (py0 > sea + 1.0 || py1 > sea + 1.0) ? "river" : "sea",
+                              d0, d1, n0->y, n1->y, over_own, cx, cz, rad,
+                              covered, worst_j, worst_delta,
+                              worst_j >= 0 ? (worst_j > si ? worst_j - si : si - worst_j) : 0);
+            }
+        }
+    }
 }
 
 /* ----------------------------------------------------------- elevation -- */
@@ -1247,6 +1434,40 @@ void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
                   "%.0f RANGE %.0f, worst grade %.4f (cap %.3f)", lo, hi, hi - lo, wg, caphi);
     }
 
+    /* [R22 item 6] Smoothness: the per-span change in grade (curvature -- the
+     * kink metric TD5RE_R22_SMOOTH bounds) and the cut/fill depth distribution
+     * (how deep the road is trenched into the terrain), both as p50/p90/p99 so
+     * the smoothing can be measured against the number to judge it on -- not the
+     * worst value, which the caps pin. Cut/fill on OPEN spans only; structures
+     * ride above/below the ground by design. */
+    {
+        double *cv, *cf; int nc = 0, nf = 0, cut_span = -1; double cut_worst = 0.0;
+        cv = (double *)malloc(sizeof(double) * (size_t)(nl->count + 1));
+        cf = (double *)malloc(sizeof(double) * (size_t)(nl->count + 1));
+        for (i = 2; i < nl->count; i++) {
+            const double g0 = (nl->v[i - 1].y - nl->v[i - 2].y) / span_len;
+            const double g1 = (nl->v[i].y - nl->v[i - 1].y) / span_len;
+            if (cv) cv[nc++] = fabs(g1 - g0);
+        }
+        for (i = 0; i < nl->count; i++)
+            if (tg_struct_kind(i) == TG_ST_NONE && i < s_rn_n && cf) {
+                const double cd = fabs(nl->v[i].y - s_rn[i].h);
+                cf[nf++] = cd;
+                if (cd > cut_worst) { cut_worst = cd; cut_span = i; }
+            }
+        if (cv && nc > 0) qsort(cv, (size_t)nc, sizeof(double), tg_road_grade_cmp);
+        if (cf && nf > 0) qsort(cf, (size_t)nf, sizeof(double), tg_road_grade_cmp);
+        TD5_LOG_I(LOG_TAG, "trackgen: [R22 SMOOTH] curvature (d-grade/span) p50 "
+                  "%.4f p90 %.4f p99 %.4f max %.4f; cut/fill p50 %.0f p90 %.0f "
+                  "p99 %.0f max %.0f at span %d (curv cap knob TD5RE_R22_SMOOTH=%d)",
+                  nc ? cv[nc / 2] : 0.0, nc ? cv[(nc * 9) / 10] : 0.0,
+                  nc ? cv[(nc * 99) / 100] : 0.0, nc ? cv[nc - 1] : 0.0,
+                  nf ? cf[nf / 2] : 0.0, nf ? cf[(nf * 9) / 10] : 0.0,
+                  nf ? cf[(nf * 99) / 100] : 0.0, nf ? cf[nf - 1] : 0.0, cut_span,
+                  td5_env_int("TD5RE_R22_SMOOTH", 45, 0, 1000));
+        free(cv); free(cf);
+    }
+
     /* Conform the world to the road bed on open spans; structures leave the
      * ground alone except at their mouths, so the terrain meets the deck end
      * / portal. */
@@ -1323,6 +1544,46 @@ void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
                   "found %d)", wet_spans, coast_spans,
                   tg_world_sea_y(), in_bed, in_bed_raw);
     }
+    /* [R22 item 10] Water-plane extent: how many river span-sides the far-bank
+     * clip shortens, and by how much. The OLD rule sheeted every plane a fixed
+     * TD5_TG_WATER_EXTENT (50000) from the near bank; a river 30000 off the road
+     * then laid a flat water quad across ~48000 of DRY land -- the reported
+     * inconsistent levels / water over terrain. Reported under both rules in one
+     * run so the change is measured, not asserted: N of M river span-sides
+     * clipped, mean/max reduction; open water (sea, or water past the search
+     * cap) is unchanged. */
+    {
+        const double sea = tg_world_sea_y();
+        int rivers = 0, clipped = 0;
+        double red_sum = 0.0, red_max = 0.0;
+        for (s = 0; s + 1 < nl->count && s < s_shore_n; s++) {
+            int side2;
+            for (side2 = 0; side2 < 2; side2++) {
+                const int is_left = (side2 == 0);
+                const double d = s_shore_d[s][side2];
+                const double sy = s_shore_y[s][side2];
+                const double fbank = s_shore_far[s][side2];
+                double old_out, new_out;
+                if (d > 1e8) continue;                 /* no water this side   */
+                if (sy <= sea + 1.0) continue;         /* sea: never clipped   */
+                rivers++;
+                if (fbank > 1e8) continue;             /* runs past cap: kept  */
+                old_out = d + (double)TD5_TG_WATER_EXTENT;
+                new_out = fbank + 400.0;
+                if (new_out < old_out) {
+                    const double red = old_out - new_out;
+                    clipped++; red_sum += red;
+                    if (red > red_max) red_max = red;
+                }
+                (void)is_left;
+            }
+        }
+        TD5_LOG_I(LOG_TAG, "trackgen: [R22 WATER CLIP] %d river span-side(s), "
+                  "%d clipped to the far bank (mean %.0f, max %.0f units off a "
+                  "50000 sheet; knob TD5RE_R22_WATER_CLIP)", rivers, clipped,
+                  clipped ? red_sum / clipped : 0.0, red_max);
+    }
+    tg_r22_water_diag(nl);
 
     TD5_LOG_I(LOG_TAG, "trackgen: [STRUCT] bridges %d run(s) / %d span(s) (longest %d, "
               "cap %d, %d over water), tunnels %d run(s) / %d span(s) (longest %d, cap "

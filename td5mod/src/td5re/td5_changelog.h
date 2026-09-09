@@ -40,6 +40,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  bend: the median floor follows the curve instead" },
     { CL_ITEM,    "  of cutting straight across, and sits deeper so it" },
     { CL_ITEM,    "  no longer z-fights the tarmac." },
+    { CL_DATE,    "September 09 (auto track: water levels + smoothness)" },
+    { CL_ITEM,    "Water no longer sheets over the land beside a distant" },
+    { CL_ITEM,    "  river. A river's plane now stops at its far bank" },
+    { CL_ITEM,    "  instead of running a fixed 50000 across dry ground." },
+    { CL_ITEM,    "The road tackles the terrain more smoothly. A cap on" },
+    { CL_ITEM,    "  how fast the grade may change removes the kinks that" },
+    { CL_ITEM,    "  made the ride feel sloppy, without moving the route." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 09 (auto track: feedback round 22)" },
