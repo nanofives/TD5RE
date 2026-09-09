@@ -4234,6 +4234,10 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     TG_TV(TG_T_RPT_R14BAND,   tg_r14_band_report(&nl, nspans));   /* [R14 COAST item 5b] run ends   */
     TG_TV(TG_T_RPT_R11WATER,  tg_r11_water_diag(&nl, nspans));    /* [R11 WATER] wet footprint    */
     TG_TV(TG_T_RPT_R12TEX,    tg_r12_tex_report(&nl, nspans));    /* [R12 TEX] page-per-surface   */
+    /* [GEOMLIB] Unconditional, unlike the opt-in diagnostics above: "how many
+     * set pieces did this seed get" is a one-line build fact, and if the guard
+     * rejects them the placed/emitted gap is the first thing worth seeing. */
+    tg_prefab_report();
     TG_TV(TG_T_RPT_R14COAST,  tg_r14_coast_report());             /* [R14 COAST item 5a] straddles */
     /* [R15 BAND item 3] Not TG_TV-wrapped and not span-gated: this one only
      * divides four running sums and emits a single line -- it has no per-span

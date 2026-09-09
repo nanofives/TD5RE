@@ -1526,16 +1526,59 @@ const TG_Mood *tg_mood(void) { return &s_mood; }
  * table is empty, so it places nothing and cannot change a build. Adding a
  * landmark is a row here plus an emitter; see the TG_Landmark block in the
  * internal header for the placement contract. */
+/* [GEOMLIB] The table is no longer empty. Every row names a PREFAB -- real
+ * Moscow geometry lifted by re/tools/td5_geomlib.py prefabs -- and the four
+ * kinds differ only in how far back they stand and how often they appear.
+ *
+ * BUILT-UP biomes only. A Moscow ministry in a forest run would read as a bug,
+ * and the biome mask is the cheapest place to say so -- but CITY alone was far
+ * too narrow. Measured on seed 20260901: with snow coherence on the layout is
+ * FOREST/ALPINE/ALPTOWN/FIELDS, and with it off, INDUSTRIAL/COAST/FIELDS/
+ * FOREST/ALPINE. Neither drew CITY at all across ten runs, so a CITY-only row
+ * would have made the whole feature dead in practice rather than rare.
+ *
+ * The three biomes that actually carry facades and urbanity >= 1 are CITY (0),
+ * INDUSTRIAL (3) and ALPTOWN (7); those are where built architecture belongs.
+ * Weights are deliberately low for the big pieces: one cathedral per track is a
+ * landmark, four is a skyline.
+ *
+ * Clearance is the standoff PAST the road edge, before the piece's own half
+ * depth is added, so a plaza at 200 abuts the verge while a landmark at 2600
+ * sits back behind it. Plazas are flat slabs (heights 0..23) and are what makes
+ * the big pieces read as sited rather than dropped.
+ */
+/* CITY | INDUSTRIAL | ALPTOWN -- the three biomes with facades and
+ * urbanity >= 1. See the note above for why CITY alone was not enough. */
+#define TG_LM_URBAN ((1u << 0) | (1u << 3) | (1u << 7))
 static const TG_Landmark k_landmarks[] = {
-    /* name, biome_mask, min_run, once, weight, flat, water, night, salt */
-    { NULL, 0u, 0, 0, 0, 0, 0, 0, 0u }   /* deliberately empty */
+    /* name          biome       min once wt flat wtr nt salt         prefab clear */
+    { "CATHEDRAL",   TG_LM_URBAN,  40, 1, 30, 0, 0, 0, 0x21014000u,  0, 2600.0 },
+    { "MINISTRY",    TG_LM_URBAN,  40, 1, 25, 0, 0, 0, 0x21014001u,  1, 3000.0 },
+    { "TERMINAL",    TG_LM_URBAN,  40, 1, 25, 0, 0, 0, 0x21014002u,  2, 3000.0 },
+    { "GREAT HALL",  TG_LM_URBAN,  40, 1, 30, 0, 0, 0, 0x21014003u,  3, 2600.0 },
+    { "TOWER BLOCK", TG_LM_URBAN,  20, 0, 45, 0, 0, 0, 0x21014004u,  4, 1400.0 },
+    { "SPIRE",       TG_LM_URBAN,  20, 0, 40, 0, 0, 0, 0x21014005u,  5, 1400.0 },
+    { "CIVIC BLOCK", TG_LM_URBAN,  20, 0, 45, 0, 0, 0, 0x21014006u,  7, 1400.0 },
+    { "OFFICE A",    TG_LM_URBAN,  16, 0, 50, 0, 0, 0, 0x21014007u,  8, 1200.0 },
+    { "OFFICE B",    TG_LM_URBAN,  16, 0, 50, 0, 0, 0, 0x21014008u,  9, 1200.0 },
+    { "LOW BLOCK A", TG_LM_URBAN,  16, 0, 50, 0, 0, 0, 0x21014009u, 10, 1200.0 },
+    { "LOW BLOCK B", TG_LM_URBAN,  16, 0, 50, 0, 0, 0, 0x2101400Au, 11, 1200.0 },
+    { "PLAZA A",     TG_LM_URBAN,  16, 0, 55, 1, 0, 0, 0x2101400Bu,  6,  200.0 },
+    { "PLAZA B",     TG_LM_URBAN,  16, 0, 55, 1, 0, 0, 0x2101400Cu, 12,  200.0 },
+    { "PLAZA C",     TG_LM_URBAN,  16, 0, 50, 1, 0, 0, 0x2101400Du, 13,  200.0 },
+    { "PLAZA D",     TG_LM_URBAN,  16, 0, 50, 1, 0, 0, 0x2101400Eu, 14,  200.0 },
+    { "PLAZA E",     TG_LM_URBAN,  16, 0, 50, 1, 0, 0, 0x2101400Fu, 15,  200.0 },
+    { "PLAZA F",     TG_LM_URBAN,  16, 0, 50, 1, 0, 0, 0x21014010u, 16,  200.0 }
 };
 #define TG_LANDMARK_N ((int)(sizeof(k_landmarks) / sizeof(k_landmarks[0])))
 
 void tg_landmarks_place(const TG_NodeList *nl, int nspans)
 {
-    int placed = 0, runs = 0, si;
+    unsigned char used[TG_LANDMARK_N];
+    int placed = 0, runs = 0, refused = 0, si;
 
+    tg_prefab_reset();
+    memset(used, 0, sizeof(used));
     if (!nl || nspans <= 0) return;
 
     /* Walk MERGED runs, not cells: a repeated 300-span city is one run, and a
@@ -1547,21 +1590,45 @@ void tg_landmarks_place(const TG_NodeList *nl, int nspans)
         runs++;
         for (li = 0; li < TG_LANDMARK_N; li++) {
             const TG_Landmark *L = &k_landmarks[li];
+            const int len = b - a + 1;
+            int tries;
             if (!L->name) continue;                 /* empty slot */
-            if (b - a + 1 < L->min_run_spans) continue;
+            if (L->once_per_track && used[li]) continue;
+            if (len < L->min_run_spans) continue;
             if (L->biome_mask &&
                 !(L->biome_mask & (1u << tg_biome_cell_index(a)))) continue;
             if (L->needs_night && !s_is_night) continue;
             /* Hash-gated so this consumes no RNG: adding a landmark must not
-             * be able to move the road. */
-            if ((tg_roll_hash(s_gen_seed, L->salt) % 100u)
-                >= (unsigned)L->weight) continue;
-            placed++;
+             * be able to move the road. Mixed with the RUN START, or a
+             * per-run row would resolve identically in every run and either
+             * appear in all of them or none. */
+            if ((tg_roll_hash(s_gen_seed, L->salt ^ ((unsigned)a * 2654435761u))
+                 % 100u) >= (unsigned)L->weight) continue;
+            if (L->prefab < 0) { placed++; used[li] = 1; continue; }
+
+            /* Try a few hash-chosen spans in the run. A refusal is ordinary --
+             * bridges and tunnels have no ground to stand a building on -- so
+             * give up quietly rather than forcing a bad site. */
+            for (tries = 0; tries < 6; tries++) {
+                const unsigned int h =
+                    tg_roll_hash(s_gen_seed,
+                                 L->salt + 0x9E3779B9u * (unsigned)(tries + 1));
+                const int cand = a + (int)(h % (unsigned)len);
+                const int side = (h & 0x10000u) ? 1 : -1;
+                if (tg_prefab_place(nl, nspans, cand, L->prefab, side,
+                                    L->clearance)) {
+                    placed++;
+                    used[li] = 1;
+                    break;
+                }
+            }
+            if (tries == 6) refused++;
         }
         si = b + 1;
     }
     TD5_LOG_I(LOG_TAG, "trackgen: [R21 LANDMARK] %d run(s), %d table row(s), "
-              "%d placed", runs, TG_LANDMARK_N - 1, placed);
+              "%d placed, %d refused (no usable span in run)",
+              runs, TG_LANDMARK_N, placed, refused);
 }
 
 unsigned int tg_rand(void)
@@ -3350,6 +3417,12 @@ static int tg_scenery_entry(int e)
                 else if (emitted) { nmesh++; nrails++; }
                 tg_guard_mark(r0, meshes.len, TG_GK_RAIL, si);
             }
+
+            /* [GEOMLIB] Shipped set pieces recorded for this span by
+             * tg_landmarks_place. Last in the span so a landmark never
+             * displaces road, rail or pavement geometry when the entry runs
+             * up against TG_MAX_MESHES_PER_ENTRY. */
+            if (ok && !tg_prefab_emit_span(si, &meshes, moff, &nmesh, e)) ok = 0;
         }
         TG_ZONE_END(TG_ZONE_ENTRY_L1);
         TG_ZONE_BEGIN(TG_ZONE_ENTRY_L2);

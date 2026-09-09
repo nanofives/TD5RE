@@ -2856,9 +2856,31 @@ typedef struct {
     int          needs_water;
     int          needs_night;
     unsigned int salt;          /* own salt namespace; see the roll registry */
+    /* [GEOMLIB] index into k_tg_prefabs (td5_tg_prefab_data.h), or -1 for a row
+     * that selects but has nothing to draw yet. Splitting the row from the
+     * geometry keeps the placement RULES readable next to each other instead of
+     * buried in a 3000-vertex generated header. */
+    int          prefab;
+    double       clearance;     /* extra standoff from the road edge, world u */
 } TG_Landmark;
 
 void tg_landmarks_place(const TG_NodeList *nl, int nspans);
+
+/* ---- [GEOMLIB] PREFABS: shipped set-piece geometry (td5_tg_prefab.c) ------
+ * Two phases: tg_landmarks_place DECIDES and calls tg_prefab_place, then
+ * tg_scenery_entry EMITS by calling tg_prefab_emit_span per span. See the
+ * module header for why they cannot be the same pass. */
+void tg_prefab_reset(void);
+int  tg_prefab_count(void);
+int  tg_prefab_add(int si, int pf, double ox, double oy, double oz,
+                   double yaw_c, double yaw_s);
+int  tg_prefab_place(const TG_NodeList *nl, int nspans, int si, int pf,
+                     int side, double clearance);
+int  tg_prefab_emit_span(int si, TG_Buf *meshes, size_t *moff, int *nmesh,
+                         int entry);
+double      tg_prefab_half_depth(int pf);
+const char *tg_prefab_name(int pf);
+void        tg_prefab_report(void);
 
 int  tg_shape_lane_aim(int si, int base_lanes, int lo, int hi);
 int  tg_shape_safety_x100(int si, int base_x100);
