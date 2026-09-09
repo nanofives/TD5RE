@@ -147,6 +147,9 @@ small file instead of a fan-out over ~145k LOC:
 | Netplay, lockstep, desync | `td5_net.c` + `td5_msvc_rand.c` (determinism); restart/seed: `td5_game.c` pause path |
 | Texture/blend/z render states, foliage AA | `ddraw_wrapper/src/d3d12_backend.c` (state cache; `Backend_IsFoliageAA`) |
 | Mesh draw, culling, banners, billboards | `td5_render*.c` |
+| Auto track: world heightfield, sea, rivers, occupancy raster | `td5_tg_world.c` (docs/plans/AUTOTRACK_TOPOLOGY.md) |
+| Auto track: road walk, steering, bridge/tunnel detection, grade profile | `td5_tg_road.c` (`[STRUCT]`/`[STEER]` log lines; `TD5RE_TG_BRIDGE_MAX`/`_TUNNEL_MAX`) |
+| Auto track: side streets, back streets, loops, bypass corridors, NETWORK.JSON | `td5_tg_network.c` (mouth table; audit `re/tools/tg_network_audit.py`) |
 | Asset loading (zips, TGA, levels, cars) | `td5_asset.c` (+ `td5_assetsrc.c` pack-on-load) |
 | Sound / music / internet radio | `td5_sound.c` / `td5_music.c` / `td5_radio.c` |
 | "Is this behavior a bug?" | `EXPECTED_BEHAVIOR.md` |

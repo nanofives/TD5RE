@@ -1456,8 +1456,12 @@ void tg_side_geom(const TG_NodeList *nl, int si, int left,
     }
 
     g->bx = n0->x + g->lx0 * set0;
-    g->by = n0->y + tg_city_kerb_h(b);
     g->bz = n0->z + g->lz0 * set0;
+    /* [TOPOLOGY-FIRST] the wall stands on the WORLD's ground under its own
+     * frontage line (the conformed bed beside an open span, the valley floor
+     * beside a viaduct), never on the deck. */
+    g->by = tg_world_h(g->bx, g->bz) + tg_city_kerb_h(b);
+    if (g->by > n0->y + tg_city_kerb_h(b) + 400.0) g->by = n0->y + tg_city_kerb_h(b) + 400.0;
     g->ax = (n1->x + g->lx1 * set1) - g->bx;
     g->ay = n1->y - n0->y;
     g->az = (n1->z + g->lz1 * set1) - g->bz;
@@ -3566,8 +3570,9 @@ int tg_city_emit_backrows(const TG_FBHook *h, double sw)
             H    = (double)rows * tg_facade_floor_h(b);
 
             bx = n0->x + lx0 * (n0->width * 0.5 + set);
-            by = n0->y;
             bz = n0->z + lz0 * (n0->width * 0.5 + set);
+            by = tg_world_h(bx, bz);               /* [TOPOLOGY-FIRST] */
+            if (by > n0->y + 400.0) by = n0->y + 400.0;
             ax = (n1->x + lx1 * (n1->width * 0.5 + set)) - bx;
             ay = n1->y - n0->y;
             az = (n1->z + lz1 * (n1->width * 0.5 + set)) - bz;
