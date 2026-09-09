@@ -477,10 +477,18 @@ def _merge_prims(members, kind_hint):
 # guardrail dragged into a landmark is furniture, not architecture, and the
 # guardrail page (451) primitives all measure like 1055 x 508 x 5906, i.e.
 # exactly this ribbon shape.
+POST_ASPECT = 1.5
+
+
 def _struct_shape(p):
     dx, dy, dz = p["extent"]
     lo, hi = min(dx, dz), max(dx, dz)
-    if dy > 1500.0 and hi < 600.0:
+    # POST by ASPECT, not by absolute width. The first version tested
+    # `max(dx,dz) < 600` and let every lamp through: a level023 lamp measures
+    # 562 x 1516 x 3430, narrow in one axis but 1516 deep because of its arm.
+    # Height-over-footprint separates cleanly instead -- that lamp scores 2.26
+    # while every facade in the same piece scores 0.12..0.67.
+    if dy > 1500.0 and dy > hi * POST_ASPECT:
         return "post"                       # lamp post, sign pole
     if dy <= 900.0 and hi > 2500.0 and hi > lo * 3.0:
         return "ribbon"                     # guardrail, kerb rail, fence run
@@ -654,6 +662,95 @@ CORRIDOR_CORNER_DEG = 25.0
 CORRIDOR_GAP_SPANS = 6      # this many empty spans = a side street or a gap
 CORRIDOR_MAX_DIST = 20000.0
 CORRIDOR_MAX_RUN = 20      # spans; the fallback cut once corners and gaps run out
+CROSSING_MARGIN = 900.0    # past the kerb, still "over the road"
+OVERHEAD_MIN_Y = 2500.0    # above local ground before "overhead" can apply
+SUPPORT_TOL = 300.0        # fabric this much lower counts as holding it up
+
+
+def _ground_grid(slabs, cell=4000.0):
+    """Local ground height per XZ cell, from the flat primitives."""
+    g = {}
+    for s in slabs:
+        b = s["aabb"]
+        for cx in range(int(b[0] // cell), int(b[3] // cell) + 1):
+            for cz in range(int(b[2] // cell), int(b[5] // cell) + 1):
+                k = (cx, cz)
+                if k not in g or b[1] < g[k]:
+                    g[k] = b[1]
+    return g, cell
+
+
+def _ground_under(g, cell, b):
+    vals = [g[(cx, cz)]
+            for cx in range(int(b[0] // cell), int(b[3] // cell) + 1)
+            for cz in range(int(b[2] // cell), int(b[5] // cell) + 1)
+            if (cx, cz) in g]
+    return min(vals) if vals else None
+
+
+def overhead_mask(walls, slabs, cl, grid, cell):
+    """Indices of wall primitives that are OVERHEAD FURNITURE, not architecture.
+
+    Two independent signals, both measured on level023 rather than assumed:
+
+    UNSUPPORTED -- a building's upper storey has building beneath it; a lamp
+      glow or a hanging sign has only air. 235 of 7904 walls are elevated with
+      nothing under them, and 150 of those are ONE page (474), which is a
+      radial light halo with median extent 1000 x 0, i.e. a flat billboard.
+      The post itself is already caught by aspect; this catches its glow.
+
+    STRADDLING -- a banner or gantry spans the carriageway, a facade stands
+      beside it. 200 walls straddle the centreline, but most are road-level
+      medians (page 371 at h=625, page 418 at h=680), so straddling ALONE is
+      not enough; it has to be elevated too. That combination is what isolates
+      the banner (page 196, straddling at h=4477).
+    """
+    gg, gcell = _ground_grid(slabs)
+    idx = {}
+    for i, p in enumerate(walls):
+        b = p["aabb"]
+        for cx in range(int(b[0] // gcell), int(b[3] // gcell) + 1):
+            for cz in range(int(b[2] // gcell), int(b[5] // gcell) + 1):
+                idx.setdefault((cx, cz), []).append(i)
+
+    drop = set()
+    for i, p in enumerate(walls):
+        b = p["aabb"]
+        gnd = _ground_under(gg, gcell, b)
+        if gnd is None or b[1] - gnd < OVERHEAD_MIN_Y:
+            continue                                  # not elevated: keep
+
+        cand = set()
+        for cx in range(int(b[0] // gcell), int(b[3] // gcell) + 1):
+            for cz in range(int(b[2] // gcell), int(b[5] // gcell) + 1):
+                cand.update(idx.get((cx, cz), ()))
+        supported = False
+        for j in cand:
+            if j == i:
+                continue
+            q = walls[j]["aabb"]
+            if q[0] > b[3] or b[0] > q[3] or q[2] > b[5] or b[2] > q[5]:
+                continue
+            if q[1] < b[1] - SUPPORT_TOL:
+                supported = True
+                break
+        if not supported:
+            drop.add(i)
+            continue
+
+        if cl:                                        # straddles the carriageway?
+            sides = set()
+            ok = True
+            for x in (b[0], b[3]):
+                for z in (b[2], b[5]):
+                    si, d, sd = _corridor_nearest(cl, grid, cell, x, z)
+                    if si < 0 or d > 15000.0:
+                        ok = False
+                    else:
+                        sides.add(sd)
+            if ok and len(sides) == 2:
+                drop.add(i)
+    return drop
 
 
 def _corridor_index(centerline, cell=6000.0):
@@ -779,7 +876,7 @@ def segment_by_corridor(model, page_role, level_dir,
 def extract_landmarks(model, page_role, rare_max=LM_RARE_MAX,
                       grow_gap=LM_GROW_GAP, max_radius=LM_MAX_RADIUS,
                       max_extent=LM_MAX_EXTENT, min_faces=LM_MIN_FACES,
-                      with_slabs=True):
+                      with_slabs=True, level_dir=None):
     """Find the distinctive set pieces in one level. Returns objects sorted by
     rarity then size, each {"prims", "aabb", "extent", "pages", "nface",
     "rarity", "seed"}.
@@ -791,7 +888,25 @@ def extract_landmarks(model, page_role, rare_max=LM_RARE_MAX,
     # Building FABRIC only. Guardrails, kerb rails and lamp posts are furniture
     # that happens to stand next to architecture; dragged into a landmark they
     # make it look like a chunk of street.
-    prims = [p for p in allprims if _struct_shape(p) == "wall"]
+    # Building fabric is WALL and ROOF art. SIGN art is not architecture -- it
+    # is signage, banners and lamp glows. Measured on level023: 1288 of the
+    # wall-shaped primitives carry sign pages, 245 of them page 474 alone, which
+    # is a radial light halo of median extent 1000 x 0 (a flat billboard sprite
+    # hanging above the lamp posts that the aspect filter already removed).
+    # Excluding the role is cleaner than chasing each sprite by shape.
+    prims = [p for p in allprims
+             if _struct_shape(p) == "wall" and p.get("role") != "sign"]
+    # OVERHEAD CROSSINGS -- banners, gantries, signs spanning the carriageway.
+    # Not separable by height: a banner's underside sits 4508 above the local
+    # base, but so do a building's upper floors (measured 3031 and 6023 in the
+    # same piece), because multi-storey facades put quads at every floor. What
+    # distinguishes a banner is WHERE it is: over the road. A facade stands
+    # beside the carriageway, a crossing stands on top of it.
+    cl = _mod("td5_maptrace")._load_centerline(level_dir) if level_dir else None
+    grid, cell = _corridor_index(cl) if cl else ({}, 1.0)
+    drop = overhead_mask(prims, slabs, cl, grid, cell)
+    if drop:
+        prims = [p for i, p in enumerate(prims) if i not in drop]
     if not prims:
         return []
     use = {}

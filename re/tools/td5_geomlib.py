@@ -631,7 +631,8 @@ def cmd_landmarks(root, out, level, hdr_path, man_path, limit=24):
     role = {p["page"]: p["role"] for p in pages_doc["pages"]
             if p["level"] == int(level)}
     model = _load_model(root, level)
-    found = al.extract_landmarks(model, role)
+    found = al.extract_landmarks(
+        model, role, level_dir=os.path.join(root, "level%03d" % int(level)))
     print("  level%03d: %d distinctive set piece(s)" % (int(level), len(found)))
     prefabs = [_prefab_from_landmark(o, "L%d.lm%02d" % (int(level), i))
                for i, o in enumerate(found[:limit])]
