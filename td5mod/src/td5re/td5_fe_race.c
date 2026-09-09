@@ -7529,7 +7529,13 @@ static void at_row_apply(int row, int delta)
 #define AT_PV_ROUTE_COL 0xFFFF0000u
 
 static TD5_TrackGenPoint s_at_pts[TD5_TGPREV_MAX_POINTS];
-static int   s_at_pts_n;
+static int   s_at_pts_n;                 /* RING points held = max node + 1   */
+/* [R22 item 1 fix] The stream cursor is no longer the same thing as the number
+ * of points held: the stream republishes rolled-back candidates, so it is
+ * longer than the route. s_at_tail_n counts branch-corridor points, stacked
+ * down from the top of the array. */
+static int   s_at_fetched;               /* stream points consumed            */
+static int   s_at_tail_n;                /* corridor points at the array top  */
 static int   s_at_pts_gen;               /* generation the mirror belongs to */
 static float s_at_min_x, s_at_max_x, s_at_min_z, s_at_max_z;
 static int   s_at_dirty_ms;              /* debounce deadline, 0 = clean */
@@ -7583,6 +7589,8 @@ static void at_preview_request(void)
     td5_tgstream_cancel_join();
 
     s_at_pts_n = 0;
+    s_at_fetched = 0;      /* [R22 item 1 fix] cursor and count reset together */
+    s_at_tail_n = 0;
     s_at_pts_gen = td5_tgprev_request(&spec);
     s_at_dirty_ms = 0;
 }
@@ -7605,26 +7613,69 @@ static void at_preview_tick(void)
     td5_tgprev_status(&s_at_status);
     if (s_at_status.generation != s_at_pts_gen) return;   /* not ours */
 
+    /* [R22 item 1 fix] Store the stream BY NODE, not in arrival order.
+     *
+     * The stream is not a polyline: the walk publishes a point whenever a node
+     * is appended and it simulates several candidate directions per section,
+     * rolling back the losers -- 5468 points for 1801 nodes on seed 2082186171.
+     * Keeping them in arrival order drew every rejected candidate as a spur off
+     * the route, and left the array un-indexable by span, so the START and
+     * FINISH dots (which are span indices) landed about a third of the way
+     * along. Writing each node's LAST publish to its own slot fixes both: the
+     * surviving route overwrites the rejects, and s_at_pts[span] is the point
+     * for that span.
+     *
+     * Branch-corridor points carry node == -1 (they are a main node displaced
+     * by the fork bow, so they own no ring slot). They are published once, after
+     * the walk, and are stacked DOWN from the top of the array so they cannot
+     * collide with a ring slot no matter how the ring grows. */
     do {
-        got = td5_tgprev_fetch(s_at_pts_n, &s_at_pts[s_at_pts_n],
-                               TD5_TGPREV_MAX_POINTS - s_at_pts_n);
+        TD5_TrackGenPoint tmp[128];
+        int i;
+
+        got = td5_tgprev_fetch(s_at_fetched, tmp,
+                               (int)(sizeof(tmp) / sizeof(tmp[0])));
         if (got <= 0) break;
-        /* Extend the bounds with the new tail only. Points never move once
-         * published, so the box is exact without a full rescan. */
-        while (got-- > 0) {
-            const TD5_TrackGenPoint *p = &s_at_pts[s_at_pts_n];
-            if (s_at_pts_n == 0) {
-                s_at_min_x = s_at_max_x = p->x;
-                s_at_min_z = s_at_max_z = p->z;
+        for (i = 0; i < got; i++) {
+            const TD5_TrackGenPoint *p = &tmp[i];
+            if (p->node >= 0) {
+                if (p->node >= TD5_TGPREV_MAX_POINTS) continue;
+                s_at_pts[p->node] = *p;
+                if (p->node + 1 > s_at_pts_n) s_at_pts_n = p->node + 1;
             } else {
-                if (p->x < s_at_min_x) s_at_min_x = p->x;
-                if (p->x > s_at_max_x) s_at_max_x = p->x;
-                if (p->z < s_at_min_z) s_at_min_z = p->z;
-                if (p->z > s_at_max_z) s_at_max_z = p->z;
+                if (s_at_pts_n + s_at_tail_n >= TD5_TGPREV_MAX_POINTS) continue;
+                s_at_pts[TD5_TGPREV_MAX_POINTS - 1 - s_at_tail_n] = *p;
+                s_at_tail_n++;
             }
-            s_at_pts_n++;
         }
-    } while (s_at_pts_n < TD5_TGPREV_MAX_POINTS);
+        s_at_fetched += got;
+        /* Rescan for the bounding box rather than extending it incrementally.
+         * A slot can now be OVERWRITTEN by a later publish, so an incremental
+         * box would keep the extent of a rolled-back candidate that is no
+         * longer drawn. 8k points is nothing once per fetch. */
+        {
+            int k, first = 1;
+            /* Ring slots 0..n-1, then the corridor tail stacked down from the
+             * top. The tail must be in the box: a corridor bows up to ~25000
+             * units off the main line, so leaving it out would scale the plot to
+             * the ring and then draw the branches outside the panel. */
+            for (k = 0; k < s_at_pts_n + s_at_tail_n; k++) {
+                const TD5_TrackGenPoint *q = (k < s_at_pts_n)
+                    ? &s_at_pts[k]
+                    : &s_at_pts[TD5_TGPREV_MAX_POINTS - 1 - (k - s_at_pts_n)];
+                if (first) {
+                    s_at_min_x = s_at_max_x = q->x;
+                    s_at_min_z = s_at_max_z = q->z;
+                    first = 0;
+                } else {
+                    if (q->x < s_at_min_x) s_at_min_x = q->x;
+                    if (q->x > s_at_max_x) s_at_max_x = q->x;
+                    if (q->z < s_at_min_z) s_at_min_z = q->z;
+                    if (q->z > s_at_max_z) s_at_max_z = q->z;
+                }
+            }
+        }
+    } while (1);
 }
 
 /* Shared with SELECT TRACK -- see the contract in td5_frontend_internal.h.
@@ -7669,6 +7720,17 @@ int td5_autotrack_draw_route(float bx, float by, float bw, float bh,
         const TD5_TrackGenPoint *p = &s_at_pts[i];
         /* +Z is into the screen in world space, so flip it for a top-down map
          * that matches the track-select previews. */
+        fe_draw_quad((cx + (p->x - ox) * scale) * sx,
+                     (cy - (p->z - oz) * scale) * sy,
+                     dot, dot, AT_PV_ROUTE_COL, -1, 0, 0, 1, 1);
+    }
+    /* [R22 item 1 fix] The corridor points live at the TOP of the array, so
+     * they need their own pass -- the ring loop above stops at the ring count.
+     * Same colour and dot size: a shipped preview draws its whole route in one
+     * red, and a branch is still route. */
+    for (i = 0; i < s_at_tail_n; i += stride) {
+        const TD5_TrackGenPoint *p =
+            &s_at_pts[TD5_TGPREV_MAX_POINTS - 1 - i];
         fe_draw_quad((cx + (p->x - ox) * scale) * sx,
                      (cy - (p->z - oz) * scale) * sy,
                      dot, dot, AT_PV_ROUTE_COL, -1, 0, 0, 1, 1);

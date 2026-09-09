@@ -76,6 +76,25 @@ typedef struct {
     float x, z;      /* raw world units; the caller normalises for display */
     int   lanes;
     int   branch;    /* 0 = main ring, 1..N = branch corridor index */
+    /* [R22 item 1 fix] Centerline NODE index this point belongs to, or -1 for a
+     * branch-corridor point that has no ring node.
+     *
+     * Why this exists: the hook fires every time a node is APPENDED, and the
+     * walk simulates several candidate directions per section (a straight also
+     * tries a gentle bend either way) then ROLLS BACK the losers. So the stream
+     * carries every rejected candidate as well as the surviving route -- 5468
+     * points for 1801 nodes on seed 2082186171, a ratio of 3.04. Two
+     * consequences, both visible on the studio screen: the rejected candidates
+     * are drawn as little spurs off the route, and the array is NOT indexable by
+     * span, so a span index (grid_span / finish_span) addresses roughly the
+     * wrong third of the route. The first R22 attempt at the finish marker fixed
+     * WHICH span the finish is and still indexed this array with it, so the dot
+     * barely moved.
+     *
+     * With the node index published, a consumer keeps one entry per node
+     * (last write wins) and gets both a clean polyline and a node-indexed
+     * array that a span index can address. */
+    int   node;
 } TD5_TrackGenPoint;
 
 typedef struct {

@@ -1614,6 +1614,10 @@ int tg_nodes_push(TG_NodeList *nl, double x, double z,
         p.z = (float)n->z;
         p.lanes = n->lanes;
         p.branch = 0;
+        /* [R22 item 1 fix] Which node this is. The walk rolls back rejected
+         * candidate directions, so the same index is published more than once
+         * and the LAST publish is the surviving route. See the field comment. */
+        p.node = nl->count - 1;
         if (s_preview_sink->on_points)
             s_preview_sink->on_points(&p, 1, s_preview_sink->ctx);
         if (s_preview_sink->should_cancel &&
@@ -4052,6 +4056,11 @@ static void tg_preview_emit_forks(const TG_NodeList *nl,
             p.z = (float)(n->z + lz * sh);
             p.lanes = n->lanes;
             p.branch = i + 1;
+            /* [R22 item 1 fix] A corridor point has no ring node of its own --
+             * it is the main node displaced by the fork's lateral bow -- so it
+             * is APPENDED after the ring rather than indexed into it. These are
+             * published once each, after the walk, so no dedup applies. */
+            p.node = -1;
             sink->on_points(&p, 1, sink->ctx);
         }
     }
