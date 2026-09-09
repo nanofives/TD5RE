@@ -1187,14 +1187,32 @@ static void tg_r22_water_diag(const TG_NodeList *nl)
             if (e0 < n0->width * 0.5) e0 = n0->width * 0.5;
             e1 = n1->width * 0.5 + d1 - 400.0;
             if (e1 < n1->width * 0.5) e1 = n1->width * 0.5;
-            px[0] = n0->x + lx0 * e0; pz[0] = n0->z + lz0 * e0;
-            px[1] = n1->x + lx1 * e1; pz[1] = n1->z + lz1 * e1;
-            px[2] = px[1] + lx1 * (double)TD5_TG_WATER_EXTENT;
-            pz[2] = pz[1] + lz1 * (double)TD5_TG_WATER_EXTENT;
-            px[3] = px[0] + lx0 * (double)TD5_TG_WATER_EXTENT;
-            pz[3] = pz[0] + lz0 * (double)TD5_TG_WATER_EXTENT;
             py0 = tg_road_shore_y(si, is_left);
             py1 = tg_road_shore_y(si + 1, is_left);
+            /* Outer edge, mirroring tg_emit_water EXACTLY (including the far-bank
+             * clip) so this scan reflects what actually ships: with the clip on
+             * a river plane stops at its far bank, so a plane that used to reach
+             * a loop-back road no longer covers it. */
+            {
+                double o0 = e0 + (double)TD5_TG_WATER_EXTENT;
+                double o1 = e1 + (double)TD5_TG_WATER_EXTENT;
+                if (td5_env_flag_on("TD5RE_R22_WATER_CLIP")) {
+                    const double f0 = tg_road_shore_far(si, is_left);
+                    const double f1 = tg_road_shore_far(si + 1, is_left);
+                    if (py0 > sea + 1.0 && f0 < 1e8) {
+                        const double c0 = n0->width * 0.5 + f0 + 400.0;
+                        if (c0 < o0) o0 = c0;
+                    }
+                    if (py1 > sea + 1.0 && f1 < 1e8) {
+                        const double c1 = n1->width * 0.5 + f1 + 400.0;
+                        if (c1 < o1) o1 = c1;
+                    }
+                }
+                px[0] = n0->x + lx0 * e0; pz[0] = n0->z + lz0 * e0;
+                px[1] = n1->x + lx1 * e1; pz[1] = n1->z + lz1 * e1;
+                px[2] = n1->x + lx1 * o1; pz[2] = n1->z + lz1 * o1;
+                px[3] = n0->x + lx0 * o0; pz[3] = n0->z + lz0 * o0;
+            }
             for (j = 0; j < 4; j++) { cx += px[j] * 0.25; cz += pz[j] * 0.25; }
             for (j = 0; j < 4; j++) {
                 const double dx = px[j] - cx, dz = pz[j] - cz;
@@ -1466,6 +1484,46 @@ void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl)
                   nf ? cf[(nf * 99) / 100] : 0.0, nf ? cf[nf - 1] : 0.0, cut_span,
                   td5_env_int("TD5RE_R22_SMOOTH", 45, 0, 1000));
         free(cv); free(cf);
+    }
+
+    /* [R22 item 13b MEASUREMENT] The grade-relief OPPORTUNITY: contiguous open
+     * (TG_ST_NONE) runs whose solved profile sits far enough above the natural
+     * ground to have qualified as a viaduct (> TG_ROAD_BRIDGE_LIFT) but which
+     * are NOT structures -- i.e. dips the limiter held the road high across, that
+     * the classifier then left as embankments because the run was shorter than
+     * TG_ROAD_BRIDGE_MIN. Same for would-be tunnels (cuttings). Bucketed by run
+     * length so "a handful of 2-span dips" is distinguishable from a real
+     * population. Gated, read-only -- decides whether 13b is worth building. */
+    if (td5_env_flag_on("TD5RE_R22_RELIEF_DIAG")) {
+        int b12 = 0, b35 = 0, b6 = 0, t12 = 0, t35 = 0, t6 = 0;
+        int b_spans = 0, t_spans = 0;
+        double b_max = 0.0, t_max = 0.0;
+        int s2;
+        for (s2 = 0; s2 < nl->count; ) {
+            int e2 = s2, kind = 0;         /* 1 = would-be bridge, -1 = tunnel */
+            double d = (s2 < s_rn_n) ? nl->v[s2].y - s_rn[s2].h : 0.0;
+            if (tg_struct_kind(s2) == TG_ST_NONE && d > TG_ROAD_BRIDGE_LIFT) kind = 1;
+            else if (tg_struct_kind(s2) == TG_ST_NONE && -d > TG_ROAD_TUNNEL_DEPTH) kind = -1;
+            if (!kind) { s2++; continue; }
+            while (e2 + 1 < nl->count && tg_struct_kind(e2 + 1) == TG_ST_NONE) {
+                const double dn = (e2 + 1 < s_rn_n) ? nl->v[e2 + 1].y - s_rn[e2 + 1].h : 0.0;
+                if (kind == 1 && dn > TG_ROAD_BRIDGE_LIFT) { if (dn > b_max) b_max = dn; e2++; }
+                else if (kind == -1 && -dn > TG_ROAD_TUNNEL_DEPTH) { if (-dn > t_max) t_max = -dn; e2++; }
+                else break;
+            }
+            {
+                const int len = e2 - s2 + 1;
+                if (kind == 1) { b_spans += len; if (len <= 2) b12++; else if (len <= 5) b35++; else b6++; }
+                else           { t_spans += len; if (len <= 2) t12++; else if (len <= 5) t35++; else t6++; }
+            }
+            s2 = e2 + 1;
+        }
+        TD5_LOG_I(LOG_TAG, "trackgen: [R22 RELIEF] would-be VIADUCTS (open, lift>%d): "
+                  "%d run(s) / %d span(s) [1-2:%d 3-5:%d 6+:%d] max lift %.0f; "
+                  "would-be TUNNELS (cut>%d): %d run(s) / %d span(s) [1-2:%d 3-5:%d 6+:%d] "
+                  "max cut %.0f", (int)TG_ROAD_BRIDGE_LIFT, b12 + b35 + b6, b_spans,
+                  b12, b35, b6, b_max, (int)TG_ROAD_TUNNEL_DEPTH, t12 + t35 + t6,
+                  t_spans, t12, t35, t6, t_max);
     }
 
     /* Conform the world to the road bed on open spans; structures leave the
