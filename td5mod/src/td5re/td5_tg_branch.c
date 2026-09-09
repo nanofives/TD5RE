@@ -195,7 +195,7 @@ static const struct { int kind; int len; double sep; } k_fork_plan[6] = {
 const char *tg_fork_kind_name(int kind)
 {
     static const char *const k_names[TG_FORK_KIND_COUNT] =
-        { "AVENUE", "ISLAND", "WIDE", "SLIP", "MAJOR" };
+        { "AVENUE", "ISLAND", "WIDE", "SLIP", "MAJOR", "BYPASS" };
     return (kind >= 0 && kind < TG_FORK_KIND_COUNT) ? k_names[kind] : "?";
 }
 
@@ -247,6 +247,109 @@ void tg_fork_plan(int index, int *kind, int *len, double *sep)
         if (len)  *len  = L;
         if (sep)  *sep  = k_fork_plan[e].sep;
     }
+}
+
+
+/* [TOPOLOGY-FIRST] Fork PLACEMENT, moved out of tg_emit_strip so it can run
+ * before the street network (which paints the corridors into the raster and
+ * may turn a fork into a BYPASS). Fills s_forks / s_fork_count for a main
+ * ring of `ring` spans; corridors are appended after the ring in fork order,
+ * which is what cbase records. Sets s_fork_placed so tg_emit_strip keeps the
+ * table instead of placing again. */
+void tg_fork_place(const TG_NodeList *nl, int ring)
+{
+    s_fork_count = 0;
+    s_fork_placed = 0;
+    if (!nl || !tg_branches_enabled()) { s_fork_placed = 1; return; }
+    {
+        const int min_len = tg_branch_min_len();
+        int off = ring;                          /* append cursor after ring */
+        /* [R20 FORK VARIETY] Placement USED to be constant: first fork at
+         * GRID_SPAN+120 and a fixed 150-span gap, so every seed that shared a
+         * plan rotation produced a byte-identical fork layout. The first-fork
+         * offset and the inter-fork gap now come from tg_fork_first_off() /
+         * tg_fork_gap() -- the SAME helpers the walk's stateless gates
+         * (tg_span_in_fork_run, tg_fork_window_ahead) consult, so the walk
+         * widens the road ahead of and keeps lane changes out of the SAME
+         * seed-varied spans this loop commits to. (The first attempt moved the
+         * loop only and left the gates on the old constants; the walk then
+         * protected the old positions while the loop placed at new ones, and
+         * every moved fork hit a lane change -> "lane count changes inside its
+         * window" rejects, costing forks. Sharing the helpers is the fix.)
+         * Knob OFF pins the old 120/150 (byte-identical). Deterministic in the
+         * plan seed. NB: ON changes span counts and every fork position on
+         * every seed. */
+        const int first_off = tg_fork_first_off();
+        const int fork_gap  = tg_fork_gap();
+        int pos = TD5_TG_GRID_SPAN + first_off;  /* first fork, past the grid */
+        unsigned int i;
+
+        for (i = 0; i < (unsigned int)tg_branch_count_max() &&
+                    s_fork_count < TD5_TG_BRANCH_MAX; i++) {
+            int kind, kl; double ksep;
+            tg_fork_plan((int)i, &kind, &kl, &ksep);
+            /* [FORK KINDS] same floor rule as tg_span_in_fork_run */
+            int L = (kind == TG_FORK_ISLAND) ? (kl < 3 ? 3 : kl)
+                                             : (kl < min_len ? min_len : kl);
+            int F = pos;
+            int R = F + 1 + L;
+            const int lanes = nl->v[F].lanes;
+            int main_half, br_lanes;
+            int q, uniform = 1;
+            tg_fork_split_lanes(kind, lanes, &main_half, &br_lanes);
+            if (main_half < 1 || br_lanes < 1) break;
+            if (lanes < tg_fork_kind_min_lanes(kind)) {
+                /* [FORK KINDS] backstop: the walk widens the road ahead of a
+                 * fork window, but a rejected section can leave it narrow. */
+                TD5_LOG_W(LOG_TAG, "trackgen: fork %u %s at F=%d skipped: %d "
+                          "lanes, needs %d", i, tg_fork_kind_name(kind), F,
+                          lanes, tg_fork_kind_min_lanes(kind));
+                pos = R + fork_gap;   /* [R20] same gap rule as the success path */
+                continue;
+            }
+            if (R + 24 >= ring) break;           /* must fit on the ring */
+            /* [LANES] fork arithmetic (lanes(F) = lanes(F+1) + lanes(B0),
+             * all 147 shipped forks obey it) needs ONE lane count across
+             * the widened approach, the split and the rejoin. */
+            for (q = F - TD5_TG_BRANCH_WIDEN - 2; q <= R + 2; q++)
+                if (q >= 0 && q < nl->count && nl->v[q].lanes != lanes) uniform = 0;
+            if (!uniform) {
+                TD5_LOG_W(LOG_TAG, "trackgen: fork %u at F=%d skipped: lane "
+                          "count changes inside its window", i, F);
+                pos = R + fork_gap;   /* [R20] same gap rule as the success path */
+                continue;
+            }
+            /* [R6 item 10] Verify the walk-time straightening (tg_span_in_fork_run
+             * clamp) actually gentled this fork's span range: a fork left on a
+             * sharp bend folds its shifted/bowed carriageways and lifts a car
+             * (the "span 570" report). Should read <= TD5_TG_FORK_MAX_TURN. */
+            TD5_LOG_I(LOG_TAG, "trackgen: fork %u %s F=%d L=%d R=%d split "
+                      "%d->%d+%d region maxcurve=%.4f (cap %.3f) long=%d "
+                      "sep=%.2f bow=%.2f", i, tg_fork_kind_name(kind), F, L, R,
+                      lanes, main_half, br_lanes,
+                      tg_fork_region_max_curve(nl, F, L, ring),
+                      TD5_TG_FORK_MAX_TURN, tg_branch_is_long(L), ksep,
+                      tg_branch_bow(L, nl->v[F].width));
+            s_forks[s_fork_count].F = F;
+            s_forks[s_fork_count].len = L;
+            s_forks[s_fork_count].cbase = off + 1;  /* pad@off, corridor off+1.. */
+            s_forks[s_fork_count].R = R;
+            /* [FORK KINDS] shape comes from the plan (ordinal + seed), so it
+             * is stable across a regen and varied across the track. */
+            s_forks[s_fork_count].sep = ksep;
+            s_forks[s_fork_count].lanes = lanes;
+            s_forks[s_fork_count].kind = kind;
+            s_forks[s_fork_count].main_lanes = main_half;
+            s_forks[s_fork_count].br_lanes = br_lanes;
+            s_forks[s_fork_count].fm = (double)main_half / (double)lanes;
+            s_forks[s_fork_count].fb = (double)br_lanes / (double)lanes;
+            s_fork_count++;
+            off += 1 + L;
+            pos = R + fork_gap;                   /* [R20] gap before the next fork */
+        }
+
+    }
+    s_fork_placed = 1;
 }
 
 /* Corridor length after the taper floor. Only the shapes that BOW need the
@@ -416,9 +519,26 @@ static int    tg_fork_gains(int fi)
 }
 double tg_fork_main_shift(int fi, double w)  { return w * (1.0 - tg_fork_fm(fi)) * 0.5; }
 double tg_fork_main_wscale(int fi)           { return tg_fork_fm(fi); }
+int    s_fork_placed;
+double s_bypass_lat[TD5_TG_BRANCH_MAX][TD5_TG_BYPASS_MAXK];
+
+int tg_fork_is_bypass(int fi)
+{
+    return fi >= 0 && fi < s_fork_count && s_forks[fi].kind == TG_FORK_BYPASS;
+}
+
 double tg_fork_br_shift(int fi, int k, double w)
 {
     const int    len = (fi >= 0 && fi < s_fork_count) ? s_forks[fi].len : 1;
+    /* [TOPOLOGY-FIRST] a BYPASS corridor is a planned lateral (world units,
+     * right of travel negative), not a bow off the road width. */
+    if (tg_fork_is_bypass(fi)) {
+        if (k < 0) k = 0;
+        if (k > len) k = len;
+        if (k >= TD5_TG_BYPASS_MAXK) k = TD5_TG_BYPASS_MAXK - 1;
+        (void)w;
+        return s_bypass_lat[fi][k];
+    }
     const double sep = (fi >= 0 && fi < s_fork_count) ? s_forks[fi].sep : 1.0;
     const double f   = (len > 0) ? (double)k / (double)len : 0.0;
     const double bow = sin(f * TD5_TG_PI);
@@ -765,7 +885,13 @@ void tg_validate_geometry_safety(const TG_NodeList *nl, int nspans)
         const double w = nl->v[i].width;
         const double bowmax = tg_r8_longbranch_enabled() ? TD5_TG_R8_BOW_LONG
                                                          : TD5_TG_BRANCH_BOW;
-        const double lim = hi + w * (0.25 + bowmax + 0.5) + 1.0;
+        double lim = hi + w * (0.25 + bowmax + 0.5) + 1.0;
+        {   /* [TOPOLOGY-FIRST] a bypass may reach the int16 ceiling */
+            int f;
+            for (f = 0; f < s_fork_count; f++)
+                if (tg_fork_is_bypass(f) && i >= s_forks[f].F - 1 && i <= s_forks[f].R + 1)
+                    lim = TD5_TG_R8_LAT_MAX + w + 1.0;
+        }
         if (rr < hi - 1.0 || rr > lim) {
             if (bad_reach < 8)
                 TD5_LOG_W(LOG_TAG, "geometry-safety: span %d carriageway reach "

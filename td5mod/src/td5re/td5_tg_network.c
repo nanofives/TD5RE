@@ -64,7 +64,7 @@ static int s_nn, s_ne, s_net_built, s_net_nspans;
 static long s_stat_cand, s_stat_short, s_stat_tjunc, s_stat_water, s_stat_road;
 
 static const char *const k_ne_name[TG_NE_KIND_COUNT] = {
-    "street", "avenue", "backstreet", "continuation", "country", "underpass"
+    "street", "avenue", "backstreet", "continuation", "country", "underpass", "bypass"
 };
 
 /* ------------------------------------------------------------ helpers -- */
@@ -380,6 +380,111 @@ static void tg_net_country(const TG_NodeList *nl, int nspans)
     }
 }
 
+/* ------------------------------------------------------------- bypass -- */
+
+/* [TOPOLOGY-FIRST] A long fork becomes a BYPASS: its corridor is a planned
+ * street of the network rather than a half-sine bow. The lateral profile
+ * (right of travel, magnitude from the corridor centre to the main centre
+ * line) is the bow the fork wanted, clipped by what the world allows beside
+ * each main node -- other streets, water, ground the road cannot climb --
+ * and then rate-limited like the height profile so the corridor never bends
+ * faster than TD5_TG_BRANCH_RATE. Both mouths are pinned to the ordinary
+ * fork geometry so the type 8/11 spans are untouched. The world is conformed
+ * under the corridor to the main road's y (rows take y from the main node). */
+static void tg_net_bypass_plan(const TG_NodeList *nl, int nspans)
+{
+    static double mag[TD5_TG_BYPASS_MAXK], clr[TD5_TG_BYPASS_MAXK];
+    int f, made = 0;
+    if (!td5_env_flag_on("TD5RE_TG_NET_BYPASS")) return;
+    for (f = 0; f < s_fork_count; f++) {
+        TG_Fork *fk = &s_forks[f];
+        const int L = fk->len;
+        const double w  = nl->v[fk->F].width;
+        const double fb = fk->fb;
+        const double mouth = w * (1.0 - fb) * 0.5;            /* centre offset at the mouths */
+        const double halfb = w * fb * 0.5;                    /* corridor half width */
+        const double cap = TD5_TG_R8_LAT_MAX - halfb - 1500.0;
+        const double rate = TD5_TG_BRANCH_RATE * (double)TD5_TG_SPAN_LENGTH;
+        const unsigned int h = tg_roll_hash_at(0x22050001u, fk->F);
+        double amp, ph, bowmax = 0.0;
+        int k, pct, a, b, e0, e1;
+        TG_NetEdge *ed;
+        if (fk->kind == TG_FORK_ISLAND || fk->kind == TG_FORK_AVENUE) continue;
+        if (L < 24 || L + 1 > TD5_TG_BYPASS_MAXK) continue;
+        if (fk->F + L + 1 >= nspans) continue;
+        pct = td5_env_int("TD5RE_TG_NET_BYPASS_PCT", 70, 0, 100);
+        if ((int)(h % 100u) >= pct) continue;
+        amp = 6000.0 + (double)((h >> 8) % 14000u);           /* 6000..20000 */
+        if (amp > cap) amp = cap;
+        ph  = (double)((h >> 20) % 1000u) / 1000.0 * TD5_TG_PI;
+        for (k = 0; k <= L; k++) {
+            const int mb = fk->F + 1 + k;
+            const TG_Node *n = &nl->v[mb];
+            const double fr = (double)k / (double)L;
+            const double shape = sin(fr * TD5_TG_PI) * (0.8 + 0.2 * sin(2.0 * TD5_TG_PI * fr + ph));
+            double d, want = mouth + amp * (shape < 0.0 ? 0.0 : shape);
+            /* what the world allows on the RIGHT of this node (lateral is
+             * measured from the main centre line; the road edge is at w/2) */
+            clr[k] = cap;
+            for (d = w * 0.5 + halfb + TG_NET_STEP; d <= cap + halfb; d += TG_NET_STEP) {
+                const double px = n->x - n->tz * d, pz = n->z + n->tx * d;   /* right */
+                if (tg_world_occ_near(px, pz, halfb + TG_NET_MARGIN, TG_WO_STREET) ||
+                    tg_world_is_water(px, pz) ||
+                    tg_world_slope(px, pz) >= TG_WORLD_STEEP_SLOPE) {
+                    clr[k] = d - halfb - TG_NET_MARGIN - TG_NET_STEP;
+                    break;
+                }
+            }
+            if (clr[k] < mouth) clr[k] = mouth;
+            mag[k] = (want < clr[k]) ? want : clr[k];
+        }
+        mag[0] = mouth; mag[L] = mouth;
+        for (k = 1; k <= L; k++)  if (mag[k] > mag[k - 1] + rate) mag[k] = mag[k - 1] + rate;
+        for (k = L - 1; k >= 0; k--) if (mag[k] > mag[k + 1] + rate) mag[k] = mag[k + 1] + rate;
+        for (k = 0; k <= L; k++) if (mag[k] - mouth > bowmax) bowmax = mag[k] - mouth;
+        if (bowmax < 2500.0) continue;                        /* nothing gained */
+
+        for (k = 0; k <= L; k++) s_bypass_lat[f][k] = -mag[k];
+        fk->kind = TG_FORK_BYPASS;
+        fk->sep  = 1.0;                                       /* never an avenue */
+        /* paint, conform, and register the corridor as a drivable edge */
+        {
+            const TG_Node *n0 = &nl->v[fk->F + 1];
+            a = tg_net_node(n0->x - n0->tz * mag[0], n0->z + n0->tx * mag[0], n0->y, 0, fk->F);
+            {
+                const TG_Node *n1 = &nl->v[fk->F + 1 + L];
+                b = tg_net_node(n1->x - n1->tz * mag[L], n1->z + n1->tx * mag[L], n1->y, 0, fk->R);
+            }
+            ed = tg_net_edge_new(a, b, TG_NE_BYPASS, w * fb);
+            if (!ed) return;
+            ed->drivable = 1; ed->mouth_si = fk->F; ed->mouth_left = 0;
+            ed->rejoin_si = fk->R;
+            ed->npoly = 0;
+            for (k = 0; k <= L; k++) {
+                const TG_Node *n = &nl->v[fk->F + 1 + k];
+                const double px = n->x - n->tz * mag[k], pz = n->z + n->tx * mag[k];
+                if (k > 0) {
+                    const TG_Node *m = &nl->v[fk->F + k];
+                    tg_world_occ_seg(m->x - m->tz * mag[k - 1], m->z + m->tx * mag[k - 1], px, pz,
+                                     halfb + 600.0, TG_WO_DRIVABLE);
+                    tg_world_conform_seg(m->x - m->tz * mag[k - 1], m->z + m->tx * mag[k - 1], m->y,
+                                         px, pz, n->y, halfb + TD5_TG_ROAD_BED_VERGE, 4500.0);
+                }
+                e0 = (L > TG_NET_POLY - 1) ? (L / (TG_NET_POLY - 1) + 1) : 1;
+                e1 = (k % e0 == 0) || (k == L);
+                if (e1 && ed->npoly < TG_NET_POLY) {
+                    ed->px[ed->npoly] = px; ed->pz[ed->npoly] = pz; ed->py[ed->npoly] = n->y;
+                    ed->npoly++;
+                }
+            }
+        }
+        made++;
+        TD5_LOG_I(LOG_TAG, "trackgen: [NET] fork %d -> BYPASS F=%d L=%d R=%d bow max %.0f "
+                  "(wanted %.0f, world cap %.0f)", f, fk->F, L, fk->R, bowmax, amp, cap);
+    }
+    (void)made;
+}
+
 /* Underpass crossings (a road passing OVER the main road): registered so the
  * raster and the audit know the tarmac is there; no mouth, no frontage. */
 static void tg_net_underpasses(const TG_NodeList *nl, int nspans)
@@ -420,7 +525,7 @@ int tg_network_built(void) { return s_net_built; }
 
 void tg_network_build(const TG_NodeList *nl, int nspans_main)
 {
-    int f, k, counts[TG_NE_KIND_COUNT], i, loops = 0, junc = 0;
+    int f, k, counts[TG_NE_KIND_COUNT], i, loops = 0, junc = 0, byp = 0;
     tg_network_reset();
     if (!nl || nspans_main < 2) return;
     if (nspans_main > TD5_TG_MAX_SPANS) nspans_main = TD5_TG_MAX_SPANS;
@@ -430,7 +535,10 @@ void tg_network_build(const TG_NodeList *nl, int nspans_main)
      * below read through tg_facade_built_hash. */
     tg_turn_map_build(nl, nspans_main);
 
-    /* Fork corridors into the raster, so no street lands on one. */
+    /* Bypass corridors are planned on the empty raster (they are the widest
+     * thing beside the road), then every corridor -- bowed or planned -- is
+     * painted so no street lands on one. */
+    tg_net_bypass_plan(nl, nspans_main);
     for (f = 0; f < s_fork_count; f++) {
         const TG_Fork *fk = &s_forks[f];
         for (k = 0; k <= fk->len; k++) {
@@ -442,6 +550,14 @@ void tg_network_build(const TG_NodeList *nl, int nspans_main)
             lat = tg_fork_br_shift(f, k, n->width);
             w = n->width * tg_fork_br_wscale(f, k);
             tg_world_occ_disc(n->x + n->tz * lat, n->z - n->tx * lat, w * 0.5 + 600.0, TG_WO_DRIVABLE);
+            /* The GORE between the two carriageways is road bed too: conform
+             * the whole lateral band from the main centre line to the
+             * corridor's outer edge at the main road's height, so a low-lying
+             * gore is never below the sea (a bowed fork over a marsh read as a
+             * lake between the lanes). */
+            tg_world_conform_seg(n->x, n->z, n->y,
+                                 n->x + n->tz * lat, n->z - n->tx * lat, n->y,
+                                 w * 0.5 + TD5_TG_ROAD_BED_VERGE, 3500.0);
         }
     }
 
@@ -452,20 +568,23 @@ void tg_network_build(const TG_NodeList *nl, int nspans_main)
     tg_net_back_streets();
     tg_net_country(nl, nspans_main);
     s_net_built = 1;
+    /* the conforms above moved ground: the shore table must see the result */
+    tg_road_shore_rebuild(nl);
 
     memset(counts, 0, sizeof(counts));
     for (i = 0; i < s_ne; i++) {
         counts[s_edges[i].kind]++;
-        if (s_edges[i].rejoin_si >= 0) loops++;
+        if (s_edges[i].kind == TG_NE_BYPASS) byp++;
+        else if (s_edges[i].rejoin_si >= 0) loops++;
     }
     for (i = 0; i < s_nn; i++) if (s_nodes[i].kind == 1) junc++;
     TD5_LOG_I(LOG_TAG, "trackgen: [NET] %d node(s) %d edge(s): street %d avenue %d "
-              "backstreet %d continuation %d country %d (loops %d) underpass %d; "
-              "%d junction(s); candidates %ld, dropped short %ld; stops: road %ld "
-              "street %ld water/steep %ld",
+              "backstreet %d continuation %d country %d (loops %d) underpass %d "
+              "bypass %d (drivable); %d junction(s); candidates %ld, dropped short %ld; "
+              "stops: road %ld street %ld water/steep %ld",
               s_nn, s_ne, counts[TG_NE_STREET], counts[TG_NE_AVENUE],
               counts[TG_NE_BACKSTREET], counts[TG_NE_CONTINUATION],
-              counts[TG_NE_COUNTRY], loops, counts[TG_NE_UNDERPASS], junc,
+              counts[TG_NE_COUNTRY], loops, counts[TG_NE_UNDERPASS], byp, junc,
               s_stat_cand, s_stat_short, s_stat_road, s_stat_tjunc, s_stat_water);
 }
 
@@ -572,8 +691,11 @@ void tg_network_write(const char *dir, const TG_NodeList *nl, int nspans_main)
     fprintf(fp, "],\n\"forks\":[");
     for (i = 0; i < s_fork_count; i++) {
         const TG_Fork *f = &s_forks[i];
-        fprintf(fp, "%s{\"i\":%d,\"kind\":%d,\"F\":%d,\"L\":%d,\"R\":%d,\"cbase\":%d}",
+        fprintf(fp, "%s{\"i\":%d,\"kind\":%d,\"F\":%d,\"L\":%d,\"R\":%d,\"cbase\":%d,\"lat\":[",
                 i ? "," : "", i, f->kind, f->F, f->len, f->R, f->cbase);
+        for (k = 0; k <= f->len; k++)
+            fprintf(fp, "%s%.0f", k ? "," : "", tg_fork_br_shift(i, k, nl->v[f->F + 1].width));
+        fprintf(fp, "]}");
     }
     fprintf(fp, "],\n\"nodes\":[");
     for (i = 0; i < s_nn; i++)

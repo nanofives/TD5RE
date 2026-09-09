@@ -2118,7 +2118,7 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
      * (uniform over the fork window by construction, checked below). */
     /* Reset per-call: a failed or branch-less build must not leave stale fork
      * records from a previous generation in the header. */
-    s_fork_count = 0;
+    if (!s_fork_placed) s_fork_count = 0;
     s_ring_len = 0;
     /* Spans per shared origin. Tunable so the effect of origin granularity on
      * ground contact is measurable: the ground probe appears to read a span's
@@ -2151,98 +2151,20 @@ int tg_emit_strip(const TG_NodeList *nl, TG_Buf *out, int *out_spans)
     /* ---- BRANCHES (opt-in): multiple forks, each a split-and-rejoin ---- */
     {
         const int ring = (int)(spans.len / 24);   /* main ring span count */
-        s_fork_count = 0;
+        if (!s_fork_placed) s_fork_count = 0;
 
         if (ok && tg_branches_enabled()) {
             /* Varied corridor lengths give the shipped topologies: a short
              * chicane, a canonical split, a long alternate route. The first
              * entry USED to be 8 spans, which is the "very small branch" that
              * glitched -- lengths are now floored at tg_branch_min_len(). */
-            const int min_len = tg_branch_min_len();
-            int off = ring;                          /* append cursor after ring */
-            /* [R20 FORK VARIETY] Placement USED to be constant: first fork at
-             * GRID_SPAN+120 and a fixed 150-span gap, so every seed that shared a
-             * plan rotation produced a byte-identical fork layout. The first-fork
-             * offset and the inter-fork gap now come from tg_fork_first_off() /
-             * tg_fork_gap() -- the SAME helpers the walk's stateless gates
-             * (tg_span_in_fork_run, tg_fork_window_ahead) consult, so the walk
-             * widens the road ahead of and keeps lane changes out of the SAME
-             * seed-varied spans this loop commits to. (The first attempt moved the
-             * loop only and left the gates on the old constants; the walk then
-             * protected the old positions while the loop placed at new ones, and
-             * every moved fork hit a lane change -> "lane count changes inside its
-             * window" rejects, costing forks. Sharing the helpers is the fix.)
-             * Knob OFF pins the old 120/150 (byte-identical). Deterministic in the
-             * plan seed. NB: ON changes span counts and every fork position on
-             * every seed. */
-            const int first_off = tg_fork_first_off();
-            const int fork_gap  = tg_fork_gap();
-            int pos = TD5_TG_GRID_SPAN + first_off;  /* first fork, past the grid */
+            /* [TOPOLOGY-FIRST] Placement lives in tg_fork_place (td5_tg_branch.c)
+             * so build_level can place the forks BEFORE the street network
+             * plans bypass corridors for them; a caller that did not (the
+             * preview, the regen self-check) places here. */
             unsigned int i;
-
-            for (i = 0; i < (unsigned int)tg_branch_count_max() &&
-                        s_fork_count < TD5_TG_BRANCH_MAX; i++) {
-                int kind, kl; double ksep;
-                tg_fork_plan((int)i, &kind, &kl, &ksep);
-                /* [FORK KINDS] same floor rule as tg_span_in_fork_run */
-                int L = (kind == TG_FORK_ISLAND) ? (kl < 3 ? 3 : kl)
-                                                 : (kl < min_len ? min_len : kl);
-                int F = pos;
-                int R = F + 1 + L;
-                const int lanes = nl->v[F].lanes;
-                int main_half, br_lanes;
-                int q, uniform = 1;
-                tg_fork_split_lanes(kind, lanes, &main_half, &br_lanes);
-                if (main_half < 1 || br_lanes < 1) break;
-                if (lanes < tg_fork_kind_min_lanes(kind)) {
-                    /* [FORK KINDS] backstop: the walk widens the road ahead of a
-                     * fork window, but a rejected section can leave it narrow. */
-                    TD5_LOG_W(LOG_TAG, "trackgen: fork %u %s at F=%d skipped: %d "
-                              "lanes, needs %d", i, tg_fork_kind_name(kind), F,
-                              lanes, tg_fork_kind_min_lanes(kind));
-                    pos = R + fork_gap;   /* [R20] same gap rule as the success path */
-                    continue;
-                }
-                if (R + 24 >= ring) break;           /* must fit on the ring */
-                /* [LANES] fork arithmetic (lanes(F) = lanes(F+1) + lanes(B0),
-                 * all 147 shipped forks obey it) needs ONE lane count across
-                 * the widened approach, the split and the rejoin. */
-                for (q = F - TD5_TG_BRANCH_WIDEN - 2; q <= R + 2; q++)
-                    if (q >= 0 && q < nl->count && nl->v[q].lanes != lanes) uniform = 0;
-                if (!uniform) {
-                    TD5_LOG_W(LOG_TAG, "trackgen: fork %u at F=%d skipped: lane "
-                              "count changes inside its window", i, F);
-                    pos = R + fork_gap;   /* [R20] same gap rule as the success path */
-                    continue;
-                }
-                /* [R6 item 10] Verify the walk-time straightening (tg_span_in_fork_run
-                 * clamp) actually gentled this fork's span range: a fork left on a
-                 * sharp bend folds its shifted/bowed carriageways and lifts a car
-                 * (the "span 570" report). Should read <= TD5_TG_FORK_MAX_TURN. */
-                TD5_LOG_I(LOG_TAG, "trackgen: fork %u %s F=%d L=%d R=%d split "
-                          "%d->%d+%d region maxcurve=%.4f (cap %.3f) long=%d "
-                          "sep=%.2f bow=%.2f", i, tg_fork_kind_name(kind), F, L, R,
-                          lanes, main_half, br_lanes,
-                          tg_fork_region_max_curve(nl, F, L, ring),
-                          TD5_TG_FORK_MAX_TURN, tg_branch_is_long(L), ksep,
-                          tg_branch_bow(L, nl->v[F].width));
-                s_forks[s_fork_count].F = F;
-                s_forks[s_fork_count].len = L;
-                s_forks[s_fork_count].cbase = off + 1;  /* pad@off, corridor off+1.. */
-                s_forks[s_fork_count].R = R;
-                /* [FORK KINDS] shape comes from the plan (ordinal + seed), so it
-                 * is stable across a regen and varied across the track. */
-                s_forks[s_fork_count].sep = ksep;
-                s_forks[s_fork_count].lanes = lanes;
-                s_forks[s_fork_count].kind = kind;
-                s_forks[s_fork_count].main_lanes = main_half;
-                s_forks[s_fork_count].br_lanes = br_lanes;
-                s_forks[s_fork_count].fm = (double)main_half / (double)lanes;
-                s_forks[s_fork_count].fb = (double)br_lanes / (double)lanes;
-                s_fork_count++;
-                off += 1 + L;
-                pos = R + fork_gap;                   /* [R20] gap before the next fork */
-            }
+            if (!s_fork_placed) tg_fork_place(nl, ring);
+            s_fork_placed = 0;
 
             /* Emit each fork's strip pieces. Corridors are appended in fork
              * order, so their indices match the cbase computed above. */

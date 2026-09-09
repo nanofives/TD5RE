@@ -593,6 +593,8 @@ typedef enum {
     TG_FORK_WIDE,         /* symmetric, wide separation, corridor gains lanes */
     TG_FORK_SLIP,         /* corridor 1-2 lanes peels off, main keeps the rest */
     TG_FORK_MAJOR,        /* main narrows to 1-2 lanes, corridor takes the rest */
+    TG_FORK_BYPASS,       /* [TOPOLOGY-FIRST] corridor follows a planned lateral
+                           * profile (a real street of the network), not a bow */
     TG_FORK_KIND_COUNT
 } TG_ForkKind;
 typedef struct {
@@ -1364,6 +1366,7 @@ void tg_struct_run_bounds(int si, int *s0, int *s1); /* contiguous same-kind run
 double tg_road_ground_y(int i);                    /* world ground under node i */
 int    tg_road_node_wet(int i);                    /* water under node i        */
 int    tg_road_node_forced(int i);                 /* terrain-yields conform    */
+void   tg_road_shore_rebuild(const TG_NodeList *nl);
 void   tg_track_min_y_invalidate(void);
 /* Per-span water / shoreline table (td5_tg_road.c), built after the profile. */
 int    tg_road_wet_any(int si);                    /* water within reach, either side */
@@ -1374,13 +1377,19 @@ double tg_road_node_water_y(int i);
 #define TD5_TG_ROAD_BED_VERGE 2500.0  /* flat, conformed shoulder beside the road */
 /* [TOPOLOGY-FIRST] street network (td5_tg_network.c). */
 enum { TG_NE_STREET = 0, TG_NE_AVENUE, TG_NE_BACKSTREET, TG_NE_CONTINUATION,
-       TG_NE_COUNTRY, TG_NE_UNDERPASS, TG_NE_KIND_COUNT };
+       TG_NE_COUNTRY, TG_NE_UNDERPASS, TG_NE_BYPASS, TG_NE_KIND_COUNT };
 void tg_network_reset(void);
 void tg_network_build(const TG_NodeList *nl, int nspans_main);
 int  tg_network_built(void);
 void tg_network_write(const char *dir, const TG_NodeList *nl, int nspans_main);
 int  tg_net_mouth(int si, int left, double *skew, double *reach);  /* edge id or -1 */
 int  tg_net_mouth_kind(int si, int left);                          /* TG_NE_* or -1  */
+/* fork placement (was inline in tg_emit_strip) and the bypass lateral table */
+void   tg_fork_place(const TG_NodeList *nl, int ring);
+extern int s_fork_placed;
+#define TD5_TG_BYPASS_MAXK 512
+extern double s_bypass_lat[TD5_TG_BRANCH_MAX][TD5_TG_BYPASS_MAXK];
+int    tg_fork_is_bypass(int fi);
 /* the hash-rhythm halves the network validates (were the authorities) */
 int    tg_facade_built_hash(int si, int left);
 double tg_block_arm_skew_hash(int si, int left);

@@ -56,7 +56,7 @@ def main(path):
         return -1
     onroad = 0
     for e in edges:
-        if e["kind"] == "underpass": continue
+        if e["kind"] in ("underpass", "bypass"): continue   # both ARE carriageways
         poly = e["poly"]
         for k in range(len(poly)-1):
             if k == 0 and e["mouth"]["si"] >= 0:

@@ -1006,6 +1006,14 @@ static void tg_road_shore_build(const TG_NodeList *nl)
     }
 }
 
+/* [TOPOLOGY-FIRST] Public rebuild: the street network conforms the world
+ * (corridors, gores, back streets) after the profile, so the shore table is
+ * rebuilt once the network is done. */
+void tg_road_shore_rebuild(const TG_NodeList *nl)
+{
+    if (nl) tg_road_shore_build(nl);
+}
+
 int tg_road_wet_any(int si)
 {
     if (si < 0 || si >= s_shore_n) return 0;
