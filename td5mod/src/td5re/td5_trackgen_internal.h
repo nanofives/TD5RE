@@ -1356,10 +1356,15 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl, int secti
  * rate, so a longer RUN means fewer draws over the same track. That is the
  * intended trade (fewer, bigger crossings), but it is also why this is verified
  * by the element inventory on both seeds rather than assumed. */
-#define TD5_TG_BRIDGE_RUN_R3  40       /* pre-R8 run length (A/B baseline)    */
-#define TD5_TG_BRIDGE_RUN_R8  56       /* [R8 item 18] longer crossing        */
-int tg_bridge_run_len(void);
-#define TD5_TG_BRIDGE_RUN     (tg_bridge_run_len())
+/* [TOPOLOGY-FIRST] Bridge runs are DETECTED from the terrain by
+ * td5_tg_road.c and held in a per-span table; there is no run stride. */
+enum { TG_ST_NONE = 0, TG_ST_BRIDGE, TG_ST_TUNNEL };
+int  tg_struct_kind(int si);                       /* TG_ST_* for main span si */
+void tg_struct_run_bounds(int si, int *s0, int *s1); /* contiguous same-kind run */
+double tg_road_ground_y(int i);                    /* world ground under node i */
+int    tg_road_node_wet(int i);                    /* water under node i        */
+void   tg_track_min_y_invalidate(void);
+#define TD5_TG_R21_GRADE_HEADROOM 1.15  /* cap sits just above the drive aim  */
 #define TD5_TG_BRIDGE_HEIGHT  2000.0   /* crown lift; bounded by max_grade */
 #define TD5_TG_BRIDGE_CHASM   2500.0   /* how far the ground/river drops below */
 /* Half-width of the river channel. Unlike the sea (which starts outboard of the
@@ -1404,6 +1409,16 @@ double tg_track_min_y(const TG_NodeList *nl);
 #define TD5_TG_R8_MACRO_AMP    18000.0  /* macro half-amplitude at 1 wave      */
 #define TD5_TG_R8_DETAIL_SCALE 0.5      /* shrink the old high-frequency term  */
 void tg_apply_elevation(const TD5_TrackGenSpec *spec, TG_NodeList *nl);
+/* Walk helpers shared with td5_tg_road.c (were file-static in the monolith). */
+unsigned int tg_rand(void);
+int    tg_range(int lo, int hi);
+double tg_frand(void);
+int    tg_nodes_push(TG_NodeList *nl, double x, double z, double width, int lanes);
+int    tg_too_close(const TG_NodeList *nl, double x, double z, double width,
+                    double lane_width, int skip);
+double tg_acute_heading_limit(void);
+int    tg_adjacent_skip(const TD5_TrackGenSpec *spec, double limit_max);
+TD5_TrackGenSection tg_pick_section(const TD5_TrackGenSpec *spec, int si);
 /* ------------------------------------------------------ byte emitters ----- */
 typedef struct {
     unsigned char *b;
@@ -1936,7 +1951,6 @@ double tg_sea_level_y(const TG_NodeList *nl, int si);
  * whole track, a LOW PERCENTILE of the route's node elevations so the sea sits
  * in the terrain's low band; paired with a route floor clamp in
  * tg_apply_elevation so the road stays above it. Defined in td5_trackgen.c. */
-double tg_water_level_y(const TG_NodeList *nl);
 double tg_water_side(int si);
 int    tg_biome_for_span(int si);
 int    tg_biome_span_has_water(int si);
@@ -3114,10 +3128,10 @@ int tg_emit_water(const TG_NodeList *nl, int si, double side, TG_Buf *m, size_t 
  * constraint on going further: a tunnel run yields to any bridge run within
  * CLEAR spans, and both runs just got longer, so tunnel COUNT is the number to
  * watch in the element inventory rather than to assume. */
-#define TD5_TG_TUNNEL_RUN_R3  20      /* pre-R8 bore length (A/B baseline) */
-#define TD5_TG_TUNNEL_RUN_R8  32      /* [R8 item 18] longer bore          */
-int tg_tunnel_run_len(void);
-#define TD5_TG_TUNNEL_RUN  (tg_tunnel_run_len())
+/* [TOPOLOGY-FIRST] Bores are DETECTED (td5_tg_road.c). The 32-span stride
+ * survives only as the UNDERPASS placement period (a crossing road passing
+ * over the main road is a network feature, not a terrain one). */
+#define TD5_TG_UNDERPASS_RUN  32
 /* [R4 item 19] Spans of ordinary ground a tunnel run must keep clear of any
  * bridge run, on either side. A deck runs into a bore with zero clearance today
  * (seed 99991: bridge 1320-1359 overlaps tunnel 1340-1359), so this both forbids

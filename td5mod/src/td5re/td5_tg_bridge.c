@@ -55,9 +55,6 @@ double tg_sea_level_y(const TG_NodeList *nl, int si)
     double lo;
     int i;
 
-    if (td5_env_flag_off("TD5RE_R17_GLOBAL_WATER"))
-        return tg_water_level_y(nl);
-
     /* [R8 BIOME item 19] Lowest node of the MERGED run, not of the raw cell.
      * A no-op while COAST is capped at one cell; with TD5RE_R8_BIOME_SEA on it
      * is what keeps one body of water at ONE height across a multi-cell coast
@@ -214,115 +211,39 @@ int tg_emit_water(const TG_NodeList *nl, int si, double side,
     return 1;
 }
 
-int tg_tunnel_run_len(void)
+/* [TOPOLOGY-FIRST] A BORE is a terrain structure (td5_tg_road.c decided it
+ * from the ground). An UNDERPASS is a crossing road passing OVER the main
+ * road: still placed on a 32-span period by hash + biome urbanity until the
+ * street network (td5_tg_network.c) owns crossings, and never on or next to
+ * a detected bridge or bore. */
+static int tg_underpass_run_selected(int si)
 {
-    /* Opt-in, paired with tg_bridge_run_len -- see the reasoning there. */
-    return td5_env_flag_off("TD5RE_R8_LONGRUN")
-         ? TD5_TG_TUNNEL_RUN_R8 : TD5_TG_TUNNEL_RUN_R3;
-}
-
-/* Cell-level biome, NOT tg_biome_for_span: the blended per-span biome dithers
- * across a 20-span band, and a run that was half bore and half underpass would
- * be the worse artifact by far. One run, one decision. */
-static int tg_tunnel_run_biome(int si)
-{
-    const int t0 = (si / TD5_TG_TUNNEL_RUN) * TD5_TG_TUNNEL_RUN;
-    return tg_biome_cell_index(t0 + TD5_TG_TUNNEL_RUN / 2);
-}
-
-/* The ORIGINAL gate, unchanged: hash, biome weight, bridge interlock. Split out
- * so "which runs are chosen" and "what is built on them" are separately
- * checkable, and so item 13 provably changes only the second. */
-static int tg_tunnel_run_selected(int si)
-{
-    unsigned int h;
-    /* OFF BY DEFAULT -- emitted but NEVER VERIFIED IN FRAME. A test run with
-     * tunnels on showed a dark slab near the road that turned out to be a tall
-     * BUILDING (tunnels off, still present), so no frame has yet confirmed a
-     * tunnel appearing at all -- neither working nor broken. Off until someone
-     * drives into a known tunnel run and looks.
-     *
-     * Known RISK, from the format survey rather than observation: there is no
-     * engine support for interior darkening or occlusion, so the roof will be
-     * lit from outside; and every span in the run gets an identical section,
-     * so there is no MOUTH and the near end may read as a wall.
-     * Enable with TD5RE_AUTOTRACK_TUNNELS=1 to work on them. */
-    /* Default ON (2026-08-26); set TD5RE_AUTOTRACK_TUNNELS=0 to disable. */
-    unsigned int thresh;
+    unsigned int h, thresh;
+    const TG_Biome *b;
+    int t0, t1, s, lo, hi;
     if (!td5_env_flag_on("TD5RE_AUTOTRACK_TUNNELS")) return 0;
-    if (si <= TD5_TG_GRID_SPAN + 40) return 0;      /* not right off the grid */
-    h = (unsigned)(si / TD5_TG_TUNNEL_RUN) * 2246822519u;
-    /* Same shape as the bridge gate: 125/1000 is the old ~1-in-8, scaled by the
-     * biome weight, so ALPINE at 230 bores ~29% of runs and FIELDS at 10 gets
-     * ~1% ("mountains = tunnels"). */
+    if (si <= TD5_TG_GRID_SPAN + 40) return 0;
+    t0 = (si / TD5_TG_UNDERPASS_RUN) * TD5_TG_UNDERPASS_RUN;
+    t1 = t0 + TD5_TG_UNDERPASS_RUN - 1;
+    h = (unsigned)(si / TD5_TG_UNDERPASS_RUN) * 2246822519u;
     thresh = (125u * (unsigned)tg_biome_tunnel_pct(si)) / 100u;
     if (thresh > 1000u) thresh = 1000u;
-    if (((h >> 8) % 1000u) >= thresh) return 0;     /* this run does not bore */
-
-    /* [R4 item 19] INTERLOCK. The bridge gate (tg_span_in_bridge_run) and this
-     * one are independent hash draws with no shared state, so nothing stopped a
-     * bridge run and a tunnel run from overlapping -- seed 99991 has bridge run
-     * 1320-1359 and tunnel run 1340-1359 both firing, and the raised deck drives
-     * straight into the bore, which is illegal terrain. Resolve it one way: the
-     * BRIDGE is the authored crossing and keeps its span; the tunnel YIELDS. A
-     * tunnel run is suppressed if any span within CLEAR of it lies in a bridge
-     * run, which forbids the overlap AND leaves a flat approach band between the
-     * two. Stateless and derived only from si, so the elevation pass, the strip
-     * builder and every scenery gate agree without passing anything around. A
-     * bridge weight tweak could only make the collision rarer; this makes it
-     * impossible. */
-    {
-        const int t0 = (si / TD5_TG_TUNNEL_RUN) * TD5_TG_TUNNEL_RUN;
-        const int t1 = t0 + TD5_TG_TUNNEL_RUN - 1;
-        int s, lo = t0 - TD5_TG_BRIDGE_TUNNEL_CLEAR;
-        const int hi = t1 + TD5_TG_BRIDGE_TUNNEL_CLEAR;
-        if (lo < 0) lo = 0;
-        for (s = lo; s <= hi; s++)
-            if (tg_span_in_bridge_run(s)) return 0;
-    }
+    if (((h >> 8) % 1000u) >= thresh) return 0;
+    b = &k_biomes[tg_biome_cell_index(t0 + TD5_TG_UNDERPASS_RUN / 2)];
+    if (b->urbanity < 1) return 0;
+    lo = t0 - TD5_TG_BRIDGE_TUNNEL_CLEAR; if (lo < 0) lo = 0;
+    hi = t1 + TD5_TG_BRIDGE_TUNNEL_CLEAR;
+    for (s = lo; s <= hi; s++)
+        if (tg_struct_kind(s) != TG_ST_NONE) return 0;
     return 1;
 }
 
-/* What a SELECTED run builds. See the item-13 block above for the rule. */
 static int tg_tunnel_kind(int si)
 {
-    const TG_Biome *b;
-    if (!tg_tunnel_run_selected(si)) return TG_TUN_NONE;
-    /* A/B escape: pin the pre-R9 behaviour (every selected run is a bore,
-     * whatever the biome) so the two builds can be compared byte for byte. */
-    if (td5_env_flag_off("TD5RE_R9_UNDERPASS")) return TG_TUN_BORE;
-    b = &k_biomes[tg_tunnel_run_biome(si)];
-    /* MOUNTAINS means ALPINE: climate cold AND urbanity WILDERNESS.
-     *
-     * The obvious rule is climate >= 2, and it is wrong -- MEASURED, not
-     * reasoned. climate 2 also selects ALPTOWN, and the first frame of a bore in
-     * an ALPTOWN run (seed 777 span 473) came out as a stone portal in the
-     * middle of a shopping street with railings and shopfronts either side --
-     * which is the ORIGINAL COMPLAINT, reproduced by the fix meant to end it.
-     * ALPTOWN is cold, but its own table comment calls it a snowy TOWN and it
-     * draws on TD5_TG_PAGE_WALL, the city facade page, so it renders urban
-     * whatever its climate says. A bore belongs where there is nothing but
-     * hillside, and that is urbanity 0 as much as it is climate 2.
-     *
-     * This is the round's own method rule turned on my own first answer: when a
-     * complaint survives an honest measurement, suspect the AXIS. Climate was
-     * the wrong axis on its own. */
-    if (b->climate >= 2 && b->urbanity == 0) return TG_TUN_BORE;
-    /* Anywhere with a settlement -- town, edge, or city -- a crossing road goes
-     * OVER, not through. urbanity >= 1 rather than >= 2 so ALPTOWN, FIELDS and
-     * COAST are served too: a flyover across a village street, a country lane or
-     * a coast road is ordinary, and restricting this to dense urbanity would
-     * leave those three biomes with no crossing of any kind. FOREST (urbanity 0,
-     * temperate) is the one biome that gets neither, which is right -- there is
-     * nothing to tunnel through and nothing to fly over. */
-    if (b->urbanity >= 1) return TG_TUN_UNDERPASS;
+    if (tg_span_in_tunnel(si)) return TG_TUN_BORE;
+    if (td5_env_flag_off("TD5RE_R9_UNDERPASS")) return TG_TUN_NONE;   /* A/B: bores only */
+    if (tg_underpass_run_selected(si)) return TG_TUN_UNDERPASS;
     return TG_TUN_NONE;
-}
-
-/* ENCLOSED: a real bore. Unchanged meaning -- see the item-13 block. */
-int tg_span_in_tunnel(int si)
-{
-    return tg_tunnel_kind(si) == TG_TUN_BORE;
 }
 
 static int tg_r12_up_shore(void) { return td5_env_flag_on("TD5RE_R12_UP_SHORE"); }
@@ -349,14 +270,14 @@ static int tg_up_span_crossable(int si)
 
 int tg_underpass_span(int si)
 {
-    const int t0 = (si / TD5_TG_TUNNEL_RUN) * TD5_TG_TUNNEL_RUN;
-    const int c  = t0 + TD5_TG_TUNNEL_RUN / 2;
+    const int t0 = (si / TD5_TG_UNDERPASS_RUN) * TD5_TG_UNDERPASS_RUN;
+    const int c  = t0 + TD5_TG_UNDERPASS_RUN / 2;
     int d;
     if (tg_tunnel_kind(si) != TG_TUN_UNDERPASS) return -1;
     if (!tg_r12_up_shore()) return c;
     for (d = 0; d <= TD5_TG_UP_SLIDE_MAX; d++) {
         if (c - d >= t0 && tg_up_span_crossable(c - d)) return c - d;
-        if (c + d <= t0 + TD5_TG_TUNNEL_RUN - 1 && tg_up_span_crossable(c + d))
+        if (c + d <= t0 + TD5_TG_UNDERPASS_RUN - 1 && tg_up_span_crossable(c + d))
             return c + d;
     }
     return -1;                       /* whole run is water or deck: no crossing */
@@ -378,7 +299,7 @@ static int tg_tunnel_lining_page(int si)
      * TD5_TG_PAGE_TUNNEL(_VAR) pages. Still one lining per RUN (keyed on
      * si/RUN) so a bore is a single lining end to end. TD5RE_AUTOTRACK_
      * TUNNEL_OLDLINING=1 restores the old pages for an A/B. */
-    unsigned int h = (unsigned)(si / TD5_TG_TUNNEL_RUN) * 2654435761u;
+    unsigned int h = (unsigned)(si / TD5_TG_UNDERPASS_RUN) * 2654435761u;
     if (td5_env_flag_off("TD5RE_AUTOTRACK_TUNNEL_OLDLINING")) {
         unsigned int ov = (h >> 13) % (unsigned)TD5_TG_TUNNEL_VARIANTS;
         if (ov == 0) return TD5_TG_PAGE_TUNNEL;
@@ -1625,36 +1546,20 @@ double tg_local_ground_y(const TG_NodeList *nl, int si)
  *
  * TD5RE_R11_BRIDGE_COALESCE=0 restores the per-block crossings for an A/B.
  * ========================================================================= */
-static int tg_r11_coalesce(void)
-{
-    return td5_env_flag_on("TD5RE_R11_BRIDGE_COALESCE");
-}
-
-/* First span of the CHAIN of adjacent selected runs containing si.
- *
- * Needs no node list (the backward walk is bounded by span 0 and by the grid
- * clearance inside tg_span_in_bridge_run), which is what lets tg_bridge_style --
- * which only ever gets an si -- key on the chain too. */
+/* [TOPOLOGY-FIRST] The crossing containing si is the contiguous BRIDGE run
+ * of the structure table (td5_tg_road.c). One authority for the deck-Y, the
+ * river level, the piers and the style. */
 static int tg_bridge_chain_first(int si)
 {
-    const int run = TD5_TG_BRIDGE_RUN;
-    int a = (si / run) * run;
-    if (!tg_r11_coalesce() || !tg_span_in_bridge_run(si)) return a;
-    while (a - run >= 0 && tg_span_in_bridge_run(a - run)) a -= run;
-    return a;
+    int s0, s1;
+    tg_struct_run_bounds(si, &s0, &s1);
+    return s0;
 }
 
-/* The span range of the bridge CROSSING containing si -- one run, or the whole
- * chain of abutting runs under item 12. Partitioned exactly the way
- * tg_apply_elevation partitions it, so the deck hump, the river level and the
- * gorge all describe the same crossing. */
 void tg_bridge_run_bounds(const TG_NodeList *nl, int si, int *s0, int *s1)
 {
-    const int run = TD5_TG_BRIDGE_RUN;
-    int a = tg_bridge_chain_first(si);
-    int b = a + run - 1;
-    if (tg_r11_coalesce() && tg_span_in_bridge_run(si))
-        while (b + 1 <= nl->count - 1 && tg_span_in_bridge_run(b + 1)) b += run;
+    int a, b;
+    tg_struct_run_bounds(si, &a, &b);
     if (b > nl->count - 1) b = nl->count - 1;
     if (a > b) a = b;
     *s0 = a; *s1 = b;
@@ -1847,7 +1752,7 @@ int tg_bridge_style(int si)
     /* [R11 item 12] Keyed on the CHAIN, not the block. Two coalesced runs are
      * one crossing, and one crossing has to be one style end to end or the
      * "single longer bridge" changes material halfway across. */
-    h = (unsigned)(tg_bridge_chain_first(si) / TD5_TG_BRIDGE_RUN) * 2654435761u;
+    h = (unsigned)tg_bridge_chain_first(si) * 2654435761u;
     return (int)((h >> 12) % (unsigned)TD5_TG_BRIDGE_STYLES);
 }
 

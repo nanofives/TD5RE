@@ -538,9 +538,10 @@ int tg_world_build(unsigned int seed, int target_spans)
     if (river_pct < 0) river_pct = (int)(tg_roll_hash_at(0x22010005u, 0) % 101u);
 
     s_w.relief   = 15000.0 * (double)relief_pct / 100.0;
-    /* Sea level as a fraction of the continental amplitude (+-0.8 relief):
-     * -35% = little water, +34% = archipelago. */
-    s_w.sea_abs  = s_w.relief * 0.8 * ((double)sea_pct / 100.0);
+    /* Sea level against the continental term (+-0.8 relief): the roll maps
+     * -35% -> sea at -0.81 (almost no water), 0 -> -0.25 (~30% water),
+     * +34% -> +0.29 (archipelago). */
+    s_w.sea_abs  = s_w.relief * 0.8 * (((double)sea_pct / 100.0) * 1.6 - 0.25);
     s_w.mtn_bias = -0.20 + 0.7 * (double)mtn_pct / 100.0;      /* -0.20..0.50 */
     s_w.river_w  = (river_pct < 15) ? 0.0 : 0.006 + 0.014 * (double)river_pct / 100.0;
     s_w.built    = 1;                       /* tg_w_raw needs the params */
