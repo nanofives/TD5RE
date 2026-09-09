@@ -1221,7 +1221,16 @@ static void tg_ground_side_raw(const TG_NodeList *nl, int si, int is_left,
     const int ni = (si > nl->count - 1) ? nl->count - 1 : si;
     const TG_Node *n = &nl->v[ni];
     const int open = (tg_struct_kind(si) == TG_ST_NONE);
-    const int tunnel = (tg_struct_kind(si) == TG_ST_TUNNEL);   /* [R22] */
+    /* [R22] Knobbed, and it MUST be. Every other R22 change ships with a knob
+     * whose off position restores the previous geometry byte for byte, and this
+     * one shipped without: it was unconditional, so once it landed there was no
+     * way to rebuild the geometry the feedback was captured on. That cost a
+     * sibling session its repro of the reported mesh -- with the reporting
+     * seed's track silently shifted by ~80 spans, a picker label from the
+     * report no longer points at the same quad. A generator change with no off
+     * switch throws away every location the last round of feedback named. */
+    const int tunnel = (tg_struct_kind(si) == TG_ST_TUNNEL) &&
+                       td5_env_flag_on("TD5RE_R22_TUNNEL_SKIRT");
     const double V = tg_verge_reach();
     const double sgn = is_left ? 1.0 : -1.0;
     const double lx = n->tz * sgn, lz = -n->tx * sgn;
