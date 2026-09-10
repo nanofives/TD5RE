@@ -585,6 +585,85 @@ def _prefab_geometry(model, row):
             "height": max(ys) - base}
 
 
+def _pt_in_quad(px, pz, quad):
+    """Even-odd point-in-polygon over a 4-gon's XZ footprint."""
+    inside = False
+    n = len(quad)
+    j = n - 1
+    for i in range(n):
+        xi, zi = quad[i]
+        xj, zj = quad[j]
+        if (zi > pz) != (zj > pz) and \
+           px < (xj - xi) * (pz - zi) / ((zj - zi) or 1e-9) + xi:
+            inside = not inside
+        j = i
+    return inside
+
+
+def fill_landmark_holes(o, cell=1500.0, tile=3000.0):
+    """Close the gaps in a landmark's ground plane with a tiled grass plane.
+
+    The rarity-seeded segmenter grabs the distinctive architecture plus whatever
+    ground quads happen to be welded to it, which leaves the plaza a patchwork:
+    grass tiles round the edges with holes between them (visible in the studio as
+    a checkerboard the building floats over). This lays a continuous grass grid
+    across the whole footprint AT the existing ground plane, skipping cells an
+    existing tile already covers, so the holes fill and the real tiles still win
+    where they exist. Grass under the building is hidden by the building.
+
+    Returns a synthetic prim in the same shape as a real one (role/pages/nface/
+    mesh), or None if the landmark has no ground plane to extend. Placed 4 units
+    BELOW the real tiles (y-down: +4) so any overlap z-fights in the real tile's
+    favour rather than the fill's."""
+    gq = []          # existing ground quads, XZ
+    gy = []          # existing ground y values
+    gpage = None
+    glight = 0xFFE8E8E8
+    for p in o["prims"]:
+        if p.get("role") != "ground":
+            continue
+        gpage = gpage or p["pages"][0]
+        vs = p["mesh"]["vertices"]
+        cur = 0
+        for c in p["mesh"]["commands"]:
+            tri, quad = int(c["tri"]), int(c["quad"])
+            qb = cur + tri * 3
+            for q in range(quad):
+                b = qb + q * 4
+                gq.append([(vs[b + k]["pos"][0], vs[b + k]["pos"][2]) for k in range(4)])
+                glight = vs[b]["light"]
+            for v in vs:
+                gy.append(v["pos"][1])
+            cur += tri * 3 + quad * 4
+    if gpage is None or not gy:
+        return None
+    gy.sort()
+    plane = gy[len(gy) // 2] + 4.0        # 4 below the real tiles
+    xs, zs = [], []
+    for p in o["prims"]:
+        for v in p["mesh"]["vertices"]:
+            xs.append(v["pos"][0]); zs.append(v["pos"][2])
+    x0, x1, z0, z1 = min(xs), max(xs), min(zs), max(zs)
+    verts, nq = [], 0
+    x = x0
+    while x < x1 - 1.0:
+        z = z0
+        while z < z1 - 1.0:
+            if not any(_pt_in_quad(x + cell / 2, z + cell / 2, q) for q in gq):
+                for vx, vz in ((x, z), (x + cell, z), (x + cell, z + cell), (x, z + cell)):
+                    verts.append({"pos": [vx, plane, vz],
+                                  "tex": [(vx - x0) / tile, (vz - z0) / tile],
+                                  "light": glight})
+                nq += 1
+            z += cell
+        x += cell
+    if not nq:
+        return None
+    return {"role": "ground", "pages": [gpage], "nface": nq,
+            "mesh": {"vertices": verts,
+                     "commands": [{"texture_page_id": gpage, "tri": 0, "quad": nq}]}}
+
+
 def _prefab_from_landmark(o, name):
     """Localise a segmented landmark (many world-space primitives) into one
     prefab, same convention as _prefab_geometry: centred in XZ, base y=0."""

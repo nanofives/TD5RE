@@ -1063,7 +1063,10 @@ async function libShow(o) {
 
   setStatus(`Loading prefab ${o.id}…`);
   try {
-    const buf = await (await fetch('/api/library/prefab?id=' + encodeURIComponent(o.id))).arrayBuffer();
+    // fill=1 only affects segmented set pieces (L..lm..); harmless on catalogue
+    // objects, which ignore it.
+    const fill = $('libFill') && $('libFill').checked ? '&fill=1' : '';
+    const buf = await (await fetch('/api/library/prefab?id=' + encodeURIComponent(o.id) + fill)).arrayBuffer();
     gltfLoader.parse(buf, '', async (gltf) => {
       const pages = new Set();
       gltf.scene.traverse((n) => { if (n.isMesh && n.userData && n.userData.page != null) pages.add(n.userData.page); });
@@ -1118,6 +1121,7 @@ $('libRefresh').onclick = libList;
 $('libLevel').onchange = () => { $('selLevel').value = $('libLevel').value; libList(); };
 $('libKind').onchange = libList;
 $('libClearPreview').onclick = () => { libClearPreview(); setStatus('Preview cleared.', 'ok'); };
+$('libFill').onchange = () => { if (libSel) libShow(libSel); };
 $('libSaveTag').onclick = () => libTag(false);
 $('libClearTag').onclick = () => libTag(true);
 

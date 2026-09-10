@@ -183,6 +183,9 @@ hr{border:none;border-top:1px solid var(--edge);margin:8px 0}
         <div class="row"><span>Min faces</span><input type="number" id="libMinFaces" value="20" min="1" step="1"></div>
         <div class="btnrow"><button class="sm" id="libRefresh">↻ list</button>
           <button class="sm" id="libClearPreview">clear preview</button></div>
+        <label class="row"><span>Fill holes</span><input type="checkbox" id="libFill"></label>
+        <div class="hint">Set pieces only: lays a continuous grass plane across the
+          footprint to close the gaps the segmenter leaves in the plaza.</div>
         <div id="libCount" class="hint"></div>
         <div id="libList" style="max-height:210px;overflow:auto;border:1px solid var(--edge);
              border-radius:4px;margin-top:4px"></div>

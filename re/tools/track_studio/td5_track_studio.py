@@ -726,14 +726,25 @@ def library_landmarks(level):
     return {"ok": True, "level": int(level), "total": len(out), "objects": out}
 
 
-def build_landmark_glb(level, idx):
-    """GLB for one segmented landmark, in the local frame the C emitter uses."""
+def build_landmark_glb(level, idx, fill=False):
+    """GLB for one segmented landmark, in the local frame the C emitter uses.
+
+    fill=True lays a continuous grass plane across the footprint to close the
+    holes the segmenter leaves in the plaza (fill_landmark_holes)."""
     from collections import defaultdict
+    import copy
     gl = _lib()
     found = _landmarks(level)
     if not (0 <= idx < len(found)):
         raise ValueError("no landmark %d on level %s" % (idx, level))
-    g = gl._prefab_from_landmark(found[idx], "L%s.lm%02d" % (level, idx))
+    lm = found[idx]
+    if fill:
+        patch = gl.fill_landmark_holes(lm)
+        if patch:
+            lm = dict(lm)
+            lm["prims"] = list(lm["prims"]) + [patch]
+            lm["nface"] = lm.get("nface", 0) + patch["nface"]
+    g = gl._prefab_from_landmark(lm, "L%s.lm%02d" % (level, idx))
     pos_by, uv_by = defaultdict(list), defaultdict(list)
     cur = 0
     for page, tri, quad in g["cmds"]:
@@ -1004,7 +1015,8 @@ class Handler(BaseHTTPRequestHandler):
                 m = re.match(r"^L(\d+)\.lm(\d+)$", oid)
                 if m:
                     self._send(200, build_landmark_glb(int(m.group(1)),
-                                                       int(m.group(2))),
+                                                       int(m.group(2)),
+                                                       fill=q.get("fill") == "1"),
                                "model/gltf-binary")
                 else:
                     self._send(200, build_prefab_glb(oid), "model/gltf-binary")
