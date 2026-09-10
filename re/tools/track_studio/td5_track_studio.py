@@ -434,6 +434,161 @@ def library_objects(level, kind=None, min_faces=0, limit=400):
             "objects": rows[:int(limit)]}
 
 
+# --------------------------------------------------------------------------
+# FREE SELECTION over a whole track.
+#
+# Automatic segmentation gets the big pieces right and is wrong at the edges --
+# where one building ends and its neighbour begins is not recoverable from the
+# format, which carries no object grouping at all. So the browser lets a human
+# select geometry directly and say what it is.
+#
+# The selectable unit is the PRIMITIVE: one page-exact run of faces, the finest
+# thing the format has an unambiguous seam for. level023 is 31,570 of them but
+# only 109,269 triangles, so the whole track fits in one scene and selection
+# needs no region streaming.
+#
+# Picking works by carrying a per-vertex _PRIMID through the GLB. Geometry is
+# still grouped one node per page (458 draw calls, same as the env view), and a
+# raycast hit gives a face index, which reads back the id. That is much cheaper
+# than 31,570 separate meshes.
+# --------------------------------------------------------------------------
+_prims_cache = {}       # level -> (prims, glb, index)
+
+
+def _level_prims_cached(level):
+    level = int(level)
+    if level in _prims_cache:
+        return _prims_cache[level]
+    gl = _lib()
+    with open(os.path.join(LIBRARY_DIR, "pages.json"), encoding="utf-8") as f:
+        pages_doc = json.load(f)
+    role = {p["page"]: p["role"] for p in pages_doc["pages"]
+            if p["level"] == level}
+    model = gl._load_model(gl._levels_dir(), level)
+    st, sl = gl.al.level_prims(model, role)
+    # Structure first, then slabs, so a primitive's id also says which it is
+    # without carrying a second list around.
+    prims = st + sl
+    for i, p in enumerate(prims):
+        p["_pid"] = i
+        p["_struct"] = i < len(st)
+    _prims_cache[level] = (prims, None, None)
+    return _prims_cache[level]
+
+
+def build_prims_glb(level):
+    """Whole level as pickable geometry: one node per page, every vertex tagged
+    with its primitive id in _PRIMID."""
+    import numpy as np
+    from collections import defaultdict
+    level = int(level)
+    prims, glb, idx = _level_prims_cached(level)
+    if glb is not None:
+        return glb
+    pos_by, uv_by, id_by = defaultdict(list), defaultdict(list), defaultdict(list)
+    for p in prims:
+        pid = float(p["_pid"])
+        vs = p["mesh"]["vertices"]
+        cur = 0
+        for c in p["mesh"]["commands"]:
+            tri, quad, page = int(c["tri"]), int(c["quad"]), int(c["texture_page_id"])
+            for t in range(tri):
+                for k in (cur + t * 3, cur + t * 3 + 1, cur + t * 3 + 2):
+                    v = vs[k]
+                    pos_by[page].append(v["pos"]); uv_by[page].append(v["tex"])
+                    id_by[page].append([pid])
+            qb = cur + tri * 3
+            for q in range(quad):
+                b = qb + q * 4
+                for k in (b, b + 1, b + 2, b, b + 2, b + 3):
+                    v = vs[k]
+                    pos_by[page].append(v["pos"]); uv_by[page].append(v["tex"])
+                    id_by[page].append([pid])
+            cur += tri * 3 + quad * 4
+
+    gb = mesh_tool._Glb()
+    meshes, nodes = [], []
+    for page in sorted(pos_by):
+        P = np.array(pos_by[page], np.float32).reshape(-1, 3)
+        U = np.array(uv_by[page], np.float32).reshape(-1, 2)
+        I = np.array(id_by[page], np.float32).reshape(-1, 1)
+        attrs = {"POSITION": gb.add(P, mesh_tool.COMP_FLOAT, "VEC3", minmax=True),
+                 "TEXCOORD_0": gb.add(U, mesh_tool.COMP_FLOAT, "VEC2"),
+                 "_PRIMID": gb.add(I, mesh_tool.COMP_FLOAT, "SCALAR")}
+        meshes.append({"primitives": [{"attributes": attrs, "mode": 4}],
+                       "extras": {"page": int(page)}})
+        nodes.append({"mesh": len(meshes) - 1})
+    gltf = {"asset": {"version": "2.0", "generator": "td5_track_studio"},
+            "buffers": [{"byteLength": len(gb.bin)}],
+            "bufferViews": gb.bufferViews, "accessors": gb.accessors,
+            "meshes": meshes, "nodes": nodes,
+            "scenes": [{"nodes": list(range(len(nodes)))}], "scene": 0}
+    glb = mesh_tool._pack_glb(gltf, bytes(gb.bin))
+    _prims_cache[level] = (prims, glb, idx)
+    return glb
+
+
+def library_prim_index(level):
+    """Metadata for every selectable primitive, parallel to _PRIMID."""
+    prims, glb, idx = _level_prims_cached(level)
+    if idx is None:
+        idx = [{"id": p["_pid"], "page": p["pages"][0], "pages": p["pages"],
+                "role": p.get("role"), "faces": p["nface"],
+                "structure": bool(p["_struct"]),
+                "aabb": [round(v, 1) for v in p["aabb"]],
+                "extent": [round(v, 1) for v in p["extent"]]}
+               for p in prims]
+        _prims_cache[int(level)] = (prims, glb, idx)
+    return {"ok": True, "level": int(level), "count": len(idx), "prims": idx}
+
+
+# Categories a selection can be filed under. These are the kinds the auto-track
+# side already understands, so a hand-made selection lands in the same taxonomy
+# the segmenter and the generator use -- not a parallel vocabulary.
+SELECTION_KINDS = ("landmark", "building", "facade", "plaza", "verge",
+                   "rail", "post", "sign", "tree", "road", "exclude")
+
+
+def _selections_path():
+    return os.path.join(LIBRARY_DIR, "selections.json")
+
+
+def save_selection(req):
+    """Persist one hand-made selection: a set of primitive ids plus the category
+    the user filed it under. Merged by name, so re-saving edits in place."""
+    level = int(req.get("level", -1))
+    name = (req.get("name") or "").strip()
+    kind = req.get("kind")
+    ids = req.get("ids") or []
+    if level <= 0 or not name:
+        return False, {"error": "need level + name"}
+    if kind not in SELECTION_KINDS and not req.get("delete"):
+        return False, {"error": "kind must be one of %s" % (SELECTION_KINDS,)}
+    doc = _load_json(_selections_path()) or {"_format": "td5_selections",
+                                             "_version": 1, "selections": []}
+    sel = [s for s in doc["selections"]
+           if not (s["level"] == level and s["name"] == name)]
+    if not req.get("delete"):
+        sel.append({"level": level, "name": name, "kind": kind,
+                    "ids": sorted(int(i) for i in ids)})
+    doc["selections"] = sorted(sel, key=lambda s: (s["level"], s["name"]))
+    os.makedirs(LIBRARY_DIR, exist_ok=True)
+    with open(_selections_path(), "w", encoding="utf-8", newline="\n") as f:
+        json.dump(doc, f, indent=1)
+        f.write("\n")
+    return True, {"ok": True, "name": name, "kind": kind, "prims": len(ids),
+                  "total": len(doc["selections"]),
+                  "path": os.path.relpath(_selections_path(), REPO_ROOT).replace("\\", "/")}
+
+
+def list_selections(level=None):
+    doc = _load_json(_selections_path()) or {"selections": []}
+    sel = doc["selections"]
+    if level is not None:
+        sel = [s for s in sel if s["level"] == int(level)]
+    return {"ok": True, "kinds": list(SELECTION_KINDS), "selections": sel}
+
+
 _lm_cache = {}          # level -> segmented landmark objects
 
 
@@ -727,6 +882,12 @@ class Handler(BaseHTTPRequestHandler):
                                                 q.get("limit", 400)))
             elif p == "/api/library/landmarks":
                 self._send(200, library_landmarks(q.get("level")))
+            elif p == "/api/library/prims":
+                self._send(200, build_prims_glb(q.get("level")), "model/gltf-binary")
+            elif p == "/api/library/primindex":
+                self._send(200, library_prim_index(q.get("level")))
+            elif p == "/api/library/selections":
+                self._send(200, list_selections(q.get("level")))
             elif p == "/api/library/prefab":
                 # Two id shapes: catalogue objects (L23.e53.s0.o0) and segmented
                 # landmarks (L23.lm00). They come from different passes, so the
@@ -773,6 +934,12 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/lights":
             try:
                 ok, res = save_lights(req)
+                self._send(200 if ok else 400, res)
+            except Exception as e:
+                self._send(500, {"error": str(e), "trace": traceback.format_exc()})
+        elif self.path == "/api/library/selection":
+            try:
+                ok, res = save_selection(req)
                 self._send(200 if ok else 400, res)
             except Exception as e:
                 self._send(500, {"error": str(e), "trace": traceback.format_exc()})

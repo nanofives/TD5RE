@@ -267,6 +267,35 @@ hr{border:none;border-top:1px solid var(--edge);margin:8px 0}
         regenerates the catalogue but must not discard hand corrections.</div>
     </div></details>
 
+    <details class="grp"><summary>10 &middot; Select geometry</summary><div class="body">
+      <div class="hint">Load a whole shipped track as pickable geometry and file
+        your own selections under the auto-track categories. The unit is a
+        PRIMITIVE (one page-exact run of faces) &mdash; the finest seam the
+        format actually has. Automatic segmentation is right about the big
+        pieces and wrong at the edges; this is how you fix it.</div>
+      <div class="row"><span>Level</span><select id="selLevel"></select></div>
+      <div class="btnrow">
+        <button class="sm" id="selLoad">Load track ▸</button>
+        <button class="sm" id="selClearGeom">unload</button>
+      </div>
+      <div class="hint">Click = select &middot; Shift+click = add/remove &middot;
+        drag on empty space = box select &middot; Esc = clear.
+        Only works while <b>pick mode</b> is on.</div>
+      <label class="row"><span>Pick mode</span><input type="checkbox" id="selPick"></label>
+      <label class="row"><span>Structure only</span><input type="checkbox" id="selStructOnly" checked></label>
+      <div id="selInfo" class="hint">Nothing loaded.</div>
+      <div class="row"><span>Name</span><input type="text" id="selName" maxlength="40" placeholder="e.g. cathedral"></div>
+      <div class="row"><span>Category</span><select id="selKind"></select></div>
+      <div class="btnrow">
+        <button class="sm" id="selSave">Save selection</button>
+        <button class="sm" id="selDelete">Delete by name</button>
+        <button class="sm" id="selRefresh">↻ list</button>
+      </div>
+      <div id="selList" class="hint">No saved selections.</div>
+      <div class="hint">Saved to <code>re/assets/library/selections.json</code>.
+        The exporter prefers a hand-made selection over the segmenter's guess.</div>
+    </div></details>
+
     <button class="primary" id="buildBtn">Build &amp; register track ▸</button>
     <div id="status">Ready. Import a level or start from a sample, edit, then Build.</div>
   </div>

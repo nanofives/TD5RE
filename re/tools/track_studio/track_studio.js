@@ -1006,6 +1006,11 @@ async function libLoad() {
   sel.innerHTML = libIndex.levels.map((l) =>
     `<option value="${l}">level${String(l).padStart(3, '0')}</option>`).join('');
   if (libIndex.levels.includes(23)) sel.value = 23;   // Moscow: the worked example
+  const ssel = $('selLevel');
+  if (ssel) {
+    ssel.innerHTML = sel.innerHTML;
+    ssel.value = sel.value;
+  }
   libList();
 }
 
@@ -1098,7 +1103,168 @@ $('libClearPreview').onclick = () => { libClearPreview(); setStatus('Preview cle
 $('libSaveTag').onclick = () => libTag(false);
 $('libClearTag').onclick = () => libTag(true);
 
+// -------------------------------------------------------- free selection
+// Whole track as pickable geometry. Geometry stays grouped one node per page
+// (458 draw calls, not 31,570 meshes) and every vertex carries its primitive id
+// in _PRIMID, so a raycast hit reads the id back off the hit face. Highlight is
+// drawn as wireframe boxes from the index AABBs rather than by recolouring,
+// because a primitive is a slice of a merged buffer, not its own mesh.
+const selRoot = new THREE.Group(); scene.add(selRoot);
+const selHi = new THREE.Group(); scene.add(selHi);
+let selPrims = null, selChosen = new Set(), selLevelNum = null;
+let selDragFrom = null;
+
+function selSetInfo(msg) {
+  $('selInfo').innerHTML = msg || (selPrims
+    ? `${selPrims.length} primitives loaded · ${selChosen.size} selected`
+    : 'Nothing loaded.');
+}
+
+function selRedrawHighlight() {
+  while (selHi.children.length) selHi.remove(selHi.children[0]);
+  if (!selPrims) return;
+  for (const id of selChosen) {
+    const a = selPrims[id].aabb;
+    const box = new THREE.Box3(new THREE.Vector3(a[0], a[1], a[2]),
+                               new THREE.Vector3(a[3], a[4], a[5]));
+    selHi.add(new THREE.Box3Helper(box, 0x46c46a));
+  }
+  selHi.position.copy(selRoot.position);
+  selSetInfo();
+}
+
+async function selLoadTrack() {
+  const lvl = parseInt($('selLevel').value, 10);
+  selLevelNum = lvl;
+  setStatus(`Loading level${String(lvl).padStart(3, '0')} as pickable geometry…`);
+  try {
+    const ix = await (await fetch('/api/library/primindex?level=' + lvl)).json();
+    selPrims = ix.prims;
+    const buf = await (await fetch('/api/library/prims?level=' + lvl)).arrayBuffer();
+    gltfLoader.parse(buf, '', async (gltf) => {
+      const pages = new Set();
+      gltf.scene.traverse((o) => { if (o.isMesh && o.userData && o.userData.page != null) pages.add(o.userData.page); });
+      let types = {};
+      try { types = (await (await fetch('/api/assets?level=' + lvl)).json()).page_types || {}; } catch {}
+      const texMap = {};
+      await Promise.all([...pages].map(async (p) => {
+        try { texMap[p] = await trackTexture(lvl, `page_${String(p).padStart(3, '0')}.png`, false); }
+        catch { texMap[p] = null; }
+      }));
+      gltf.scene.traverse((o) => {
+        if (o.isMesh) o.material = envMaterial(texMap[o.userData.page], types[o.userData.page] | 0);
+      });
+      while (selRoot.children.length) selRoot.remove(selRoot.children[0]);
+      selRoot.add(gltf.scene);
+      selChosen.clear(); selRedrawHighlight();
+      setStatus(`level${String(lvl).padStart(3, '0')}: ${selPrims.length} selectable primitives.`, 'ok');
+    }, (err) => setStatus('prims GLB parse error: ' + err, 'bad'));
+  } catch (e) { setStatus('load failed: ' + e, 'bad'); }
+}
+
+function selPidAt(ev) {
+  const r = renderer.domElement.getBoundingClientRect();
+  const m = new THREE.Vector2(((ev.clientX - r.left) / r.width) * 2 - 1,
+                              -((ev.clientY - r.top) / r.height) * 2 + 1);
+  const rc = new THREE.Raycaster(); rc.setFromCamera(m, camera);
+  const hits = rc.intersectObject(selRoot, true);
+  for (const h of hits) {
+    const attr = h.object.geometry && h.object.geometry.attributes
+              && h.object.geometry.attributes._PRIMID;
+    if (attr && h.face) return Math.round(attr.getX(h.face.a));
+  }
+  return -1;
+}
+
+function selAllowed(id) {
+  if (id < 0 || !selPrims || !selPrims[id]) return false;
+  return !($('selStructOnly').checked) || selPrims[id].structure;
+}
+
+renderer.domElement.addEventListener('pointerdown', (ev) => {
+  if (!$('selPick').checked || !selPrims) return;
+  selDragFrom = { x: ev.clientX, y: ev.clientY, shift: ev.shiftKey };
+});
+
+renderer.domElement.addEventListener('pointerup', (ev) => {
+  if (!$('selPick').checked || !selPrims || !selDragFrom) return;
+  const dx = Math.abs(ev.clientX - selDragFrom.x), dy = Math.abs(ev.clientY - selDragFrom.y);
+  const shift = selDragFrom.shift || ev.shiftKey;
+  if (dx < 5 && dy < 5) {
+    const id = selPidAt(ev);
+    if (!selAllowed(id)) { if (!shift) { selChosen.clear(); selRedrawHighlight(); } selDragFrom = null; return; }
+    if (shift) { selChosen.has(id) ? selChosen.delete(id) : selChosen.add(id); }
+    else { selChosen.clear(); selChosen.add(id); }
+  } else {
+    // BOX SELECT: project each primitive's AABB centre to screen space and take
+    // what lands inside the dragged rectangle. Centre-in is enough here -- the
+    // pieces are small relative to the box a user drags.
+    const r = renderer.domElement.getBoundingClientRect();
+    const x0 = Math.min(selDragFrom.x, ev.clientX), x1 = Math.max(selDragFrom.x, ev.clientX);
+    const y0 = Math.min(selDragFrom.y, ev.clientY), y1 = Math.max(selDragFrom.y, ev.clientY);
+    if (!shift) selChosen.clear();
+    const v = new THREE.Vector3();
+    for (let i = 0; i < selPrims.length; i++) {
+      if (!selAllowed(i)) continue;
+      const a = selPrims[i].aabb;
+      v.set((a[0] + a[3]) / 2, (a[1] + a[4]) / 2, (a[2] + a[5]) / 2)
+       .add(selRoot.position).project(camera);
+      if (v.z > 1) continue;
+      const sx = r.left + (v.x * 0.5 + 0.5) * r.width;
+      const sy = r.top + (-v.y * 0.5 + 0.5) * r.height;
+      if (sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1) selChosen.add(i);
+    }
+  }
+  selRedrawHighlight();
+  selDragFrom = null;
+});
+
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && selPrims) { selChosen.clear(); selRedrawHighlight(); }
+});
+
+async function selRefreshList() {
+  try {
+    const r = await (await fetch('/api/library/selections?level=' + (selLevelNum || ''))).json();
+    if ($('selKind').options.length === 0) {
+      $('selKind').innerHTML = r.kinds.map((k) => `<option>${k}</option>`).join('');
+    }
+    $('selList').innerHTML = r.selections.length
+      ? r.selections.map((s) => `<div><b>${s.kind}</b> · ${s.name} · ${s.ids.length} prims</div>`).join('')
+      : 'No saved selections.';
+  } catch (e) { setStatus('selection list failed: ' + e, 'bad'); }
+}
+
+async function selSave(del) {
+  const name = $('selName').value.trim();
+  if (!name) { setStatus('name the selection first', 'warn'); return; }
+  if (!del && !selChosen.size) { setStatus('select some geometry first', 'warn'); return; }
+  const body = { level: selLevelNum, name, kind: $('selKind').value,
+                 ids: [...selChosen] };
+  if (del) body.delete = true;
+  try {
+    const r = await (await fetch('/api/library/selection', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body) })).json();
+    if (r.ok) { setStatus(`${del ? 'Deleted' : 'Saved'} "${name}" (${r.total} total) -> ${r.path}`, 'ok'); selRefreshList(); }
+    else setStatus(r.error || 'save failed', 'bad');
+  } catch (e) { setStatus('save failed: ' + e, 'bad'); }
+}
+
+$('selLoad').onclick = selLoadTrack;
+$('selClearGeom').onclick = () => {
+  while (selRoot.children.length) selRoot.remove(selRoot.children[0]);
+  selPrims = null; selChosen.clear(); selRedrawHighlight(); selSetInfo();
+};
+$('selSave').onclick = () => selSave(false);
+$('selDelete').onclick = () => selSave(true);
+$('selRefresh').onclick = selRefreshList;
+// Orbit and box-select both want a left drag, so pick mode takes it. Orbit is
+// restored the moment pick mode is off; WASD fly still works either way.
+$('selPick').onchange = (e) => { controls.enabled = !e.target.checked; };
+
 // ---------------------------------------------------------------- boot
 loadList();
 libLoad();
+selRefreshList();
 $('blankBtn').click();
