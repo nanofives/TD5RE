@@ -1159,7 +1159,11 @@ function tickExtras() {
   for (const set of selBillSets) {
     for (let i = 0; i < set.items.length; i++) {
       const it = set.items[i];
-      p.set(it.c[0] - selCenter.x, it.c[1] - selCenter.y, it.c[2] - selCenter.z);
+      // RAW world centre. selBill.position already carries -selCenter (set in
+      // applyViewOffset, same as selRoot), and the instance mesh is a child of
+      // selBill, so subtracting selCenter here too double-offset every tree and
+      // lamp glow by ~selCenter and scattered them far outside the track.
+      p.set(it.c[0], it.c[1], it.c[2]);
       s.set(it.w || 1, it.h || 1, 1);
       m.compose(p, q, s);
       set.mesh.setMatrixAt(i, m);
