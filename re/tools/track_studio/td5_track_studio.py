@@ -739,11 +739,15 @@ def build_landmark_glb(level, idx, fill=False):
         raise ValueError("no landmark %d on level %s" % (idx, level))
     lm = found[idx]
     if fill:
-        patch = gl.fill_landmark_holes(lm)
-        if patch:
+        patches = []
+        gp = gl.fill_landmark_holes(lm)
+        if gp:
+            patches.append(gp)
+        patches.extend(gl.fill_landmark_walls(lm))
+        if patches:
             lm = dict(lm)
-            lm["prims"] = list(lm["prims"]) + [patch]
-            lm["nface"] = lm.get("nface", 0) + patch["nface"]
+            lm["prims"] = list(lm["prims"]) + patches
+            lm["nface"] = lm.get("nface", 0) + sum(p["nface"] for p in patches)
     g = gl._prefab_from_landmark(lm, "L%s.lm%02d" % (level, idx))
     pos_by, uv_by = defaultdict(list), defaultdict(list)
     cur = 0

@@ -664,6 +664,189 @@ def fill_landmark_holes(o, cell=1500.0, tile=3000.0):
                      "commands": [{"texture_page_id": gpage, "tri": 0, "quad": nq}]}}
 
 
+def _wall_quads(o):
+    """Every wall-role quad as (nx_axis, coord, a0, a1, y0, y1, page, light),
+    where the quad lies in a vertical plane whose normal is nx_axis ('x'|'z')
+    at `coord`, spanning [a0,a1] along the OTHER horizontal axis and [y0,y1]
+    vertically. Near-horizontal quads (copings, floors) are dropped."""
+    out = []
+    for p in o["prims"]:
+        if p.get("role") != "wall":
+            continue
+        vs = p["mesh"]["vertices"]
+        cur = 0
+        for c in p["mesh"]["commands"]:
+            tri, quad = int(c["tri"]), int(c["quad"])
+            qb = cur + tri * 3
+            for q in range(quad):
+                b = qb + q * 4
+                pts = [vs[b + k]["pos"] for k in range(4)]
+                xs = [v[0] for v in pts]; ys = [v[1] for v in pts]; zs = [v[2] for v in pts]
+                dx, dy, dz = max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs)
+                if dy < 800:                       # horizontal (coping / floor)
+                    continue
+                if dx <= dz:                       # plane normal ~ x, runs along z
+                    out.append(("x", (min(xs) + max(xs)) / 2, min(zs), max(zs),
+                                min(ys), max(ys), c["texture_page_id"], vs[b]["light"]))
+                else:                              # plane normal ~ z, runs along x
+                    out.append(("z", (min(zs) + max(zs)) / 2, min(xs), max(xs),
+                                min(ys), max(ys), c["texture_page_id"], vs[b]["light"]))
+            cur += tri * 3 + quad * 4
+    return out
+
+
+def fill_landmark_walls(o, along=1500.0, tile=1500.0,
+                        min_len=3000.0, base_below=1000.0, top_below=1500.0):
+    """Close the gaps in a landmark's low perimeter WALL (the Kremlin courtyard
+    wall round St Basil's, and its analogues), the vertical-plane counterpart of
+    fill_landmark_holes.
+
+    A TD5 wall is horizontal brick bands (a lower page and an upper page) under a
+    coping; the segmenter drops bands unevenly, so the wall top and coping float
+    over gaps where the brick beneath is missing. This groups wall quads into
+    vertical planes, and for each LOW (base near the ground) and LONG plane fills
+    the missing (along-axis x height) cells with the band page that already sits
+    at that height. Restricting to low+long planes targets the perimeter wall and
+    never the cathedral's curved tower facets.
+
+    Returns a synthetic prim per page, or [] if there is no such wall."""
+    quads = _wall_quads(o)
+    if not quads:
+        return []
+    # group by plane (axis, coord snapped to 300)
+    planes = {}
+    for ax, coord, a0, a1, y0, y1, page, light in quads:
+        planes.setdefault((ax, round(coord / 300.0) * 300.0), []).append(
+            (a0, a1, y0, y1, page, light, coord))
+    # band pages by height: read the page that already occupies each y-band from
+    # the whole wall, so the fill uses the wall's own lower/upper brick.
+    band_page = {}      # snapped y-floor -> (page, light)
+    for _ax, _c, a0, a1, y0, y1, page, light in quads:
+        band_page[round((y0 + y1) / 2 / 875.0)] = (page, light)
+    def page_at(yc):
+        key = round(yc / 875.0)
+        for d in (0, -1, 1, -2, 2):
+            if key + d in band_page:
+                return band_page[key + d]
+        return (quads[0][6], quads[0][7])
+
+    # Keep only the LOW, LONG planes -- the perimeter wall, never a tower facet.
+    keep = {}
+    for key, rects in planes.items():
+        a_lo = min(r[0] for r in rects); a_hi = max(r[1] for r in rects)
+        y_lo = min(r[2] for r in rects); y_hi = max(r[3] for r in rects)
+        if (a_hi - a_lo) < min_len or y_lo > base_below or y_hi > top_below:
+            continue
+        keep[key] = (rects, a_lo, a_hi, y_lo, y_hi)
+    if not keep:
+        return []
+    # Courtyard rectangle: an x-normal plane (runs along z) should reach the full
+    # z-span of the wall, and vice versa. Extending each plane to this rectangle
+    # is what closes the CORNERS -- two perpendicular wings that stop short of
+    # meeting -- which per-plane hole-filling alone cannot do.
+    x_coords = [sum(r[6] for r in rects) / len(rects)
+                for (ax, _s), (rects, *_2) in keep.items() if ax == "x"]
+    z_coords = [sum(r[6] for r in rects) / len(rects)
+                for (ax, _s), (rects, *_2) in keep.items() if ax == "z"]
+    x_along = [(al, ah) for (ax, _s), (_r, al, ah, _yl, _yh) in keep.items() if ax == "z"]
+    z_along = [(al, ah) for (ax, _s), (_r, al, ah, _yl, _yh) in keep.items() if ax == "x"]
+    X0 = min(x_coords + [a for a, _ in x_along]); X1 = max(x_coords + [b for _, b in x_along])
+    Z0 = min(z_coords + [a for a, _ in z_along]); Z1 = max(z_coords + [b for _, b in z_along])
+    Ylo = min(v[3] for v in keep.values()); Yhi = max(v[4] for v in keep.values())
+
+    per_page = {}       # page -> list[verts]
+    for (ax, _snap), (rects, _al, _ah, _yl, _yh) in keep.items():
+        coord = sum(r[6] for r in rects) / len(rects)
+        a_lo, a_hi = (Z0, Z1) if ax == "x" else (X0, X1)   # extend to courtyard
+        y_lo, y_hi = Ylo, Yhi
+        a = a_lo
+        while a < a_hi - 1.0:
+            y = y_lo
+            while y < y_hi - 1.0:
+                ac, yc = a + along / 2, y + tile / 2
+                covered = any(r[0] - 1 <= ac <= r[1] + 1 and r[2] - 1 <= yc <= r[3] + 1
+                              for r in rects)
+                if not covered:
+                    page, light = page_at(yc)
+                    a2, y2 = min(a + along, a_hi), min(y + tile, y_hi)
+                    if ax == "x":
+                        corners = [(coord, y, a), (coord, y, a2),
+                                   (coord, y2, a2), (coord, y2, a)]
+                    else:
+                        corners = [(a, y, coord), (a2, y, coord),
+                                   (a2, y2, coord), (a, y2, coord)]
+                    vv = per_page.setdefault(page, [])
+                    for (vx, vy, vz) in corners:
+                        u = (a - a_lo) / tile if ax != "x" else (a - a_lo) / tile
+                        vv.append({"pos": [vx, vy, vz],
+                                   "tex": [(a - a_lo) / tile, (y - y_lo) / tile],
+                                   "light": light})
+                y += tile
+            a += along
+    # COPING: cap the extended wall top with the wall's own coping page so the
+    # new brick is not a raw open top (its "roofing"). One horizontal strip per
+    # plane along the courtyard edge, ~500 wide, at the height the real coping
+    # sits. Page/height taken from an existing horizontal wall-role quad if the
+    # landmark has one, else skipped.
+    # The coping is the WIDE horizontal wall-role slab sitting just above the
+    # brick top (page 281 on lm00). Pick it by largest horizontal area in the
+    # band above Yhi so a small horizontal tower quad at a similar height is not
+    # mistaken for it.
+    cop_page = cop_light = None
+    cop_top = Yhi
+    best_area = 2.0e5
+    for p in o["prims"]:
+        if p.get("role") != "wall":
+            continue
+        vs = p["mesh"]["vertices"]; cur = 0
+        for c in p["mesh"]["commands"]:
+            tri, quad = int(c["tri"]), int(c["quad"]); qb = cur + tri * 3
+            for q in range(quad):
+                b = qb + q * 4
+                pts = [vs[b + k]["pos"] for k in range(4)]
+                ys = [v[1] for v in pts]
+                cy = sum(ys) / 4
+                if max(ys) - min(ys) >= 400 or not (Yhi - 200 <= cy <= Yhi + 1200):
+                    continue
+                area = (max(v[0] for v in pts) - min(v[0] for v in pts)) * \
+                       (max(v[2] for v in pts) - min(v[2] for v in pts))
+                if area > best_area:
+                    best_area = area
+                    cop_page = c["texture_page_id"]; cop_light = vs[b]["light"]
+                    cop_top = cy
+            cur += tri * 3 + quad * 4
+    if cop_page is not None:
+        cv = []
+        half = 260.0
+        for (ax, _snap), (rects, _al, _ah, _yl, _yh) in keep.items():
+            coord = sum(r[6] for r in rects) / len(rects)
+            a_lo, a_hi = (Z0, Z1) if ax == "x" else (X0, X1)
+            if ax == "x":
+                corners = [(coord - half, cop_top, a_lo), (coord + half, cop_top, a_lo),
+                           (coord + half, cop_top, a_hi), (coord - half, cop_top, a_hi)]
+            else:
+                corners = [(a_lo, cop_top, coord - half), (a_hi, cop_top, coord - half),
+                           (a_hi, cop_top, coord + half), (a_lo, cop_top, coord + half)]
+            for j, (vx, vy, vz) in enumerate(corners):
+                cv.append({"pos": [vx, vy, vz],
+                           "tex": [(j in (1, 2)) * 1.0, (j in (2, 3)) * 1.0],
+                           "light": cop_light})
+        if cv:
+            per_page.setdefault(cop_page, [])
+            per_page[cop_page].extend(cv)
+
+    out = []
+    for page, verts in per_page.items():
+        nq = len(verts) // 4
+        if not nq:
+            continue
+        out.append({"role": "wall", "pages": [page], "nface": nq,
+                    "mesh": {"vertices": verts,
+                             "commands": [{"texture_page_id": page,
+                                           "tri": 0, "quad": nq}]}})
+    return out
+
+
 def _prefab_from_landmark(o, name):
     """Localise a segmented landmark (many world-space primitives) into one
     prefab, same convention as _prefab_geometry: centred in XZ, base y=0."""
