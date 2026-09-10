@@ -600,6 +600,73 @@ def _pt_in_quad(px, pz, quad):
     return inside
 
 
+def _authored_fills_path():
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(here, "..", "assets", "library", "authored_fills.json")
+
+
+def load_authored_fills(landmark_id):
+    """Hand/AI-AUTHORED fill geometry for one landmark, from
+    re/assets/library/authored_fills.json. This is the contract the account3
+    'Claude authoring with web reference' pass writes into: geometry it INVENTS
+    (a missing tower, a mirrored wing) that the deterministic edge-bridge cannot,
+    kept out of the code so re-running the segmenter never discards it.
+
+    JSON shape:
+        {"_format":"td5_authored_fills","_version":1,
+         "fills":{
+           "L23.lm00":{"note":"...","faces":[
+              {"page":351,"role":"wall",
+               "v":[{"pos":[x,y,z],"uv":[u,v],"light":4290822336}, ...3-or-4...]}
+           ]}}}
+    Positions are WORLD coordinates (same frame as the landmark prims), so they
+    localise identically through _prefab_from_landmark. Returns a list of
+    synthetic prims (one per page), or [] if none authored."""
+    import json
+    import os
+    from collections import defaultdict
+    path = _authored_fills_path()
+    if not os.path.isfile(path):
+        return []
+    try:
+        doc = json.load(open(path, encoding="utf-8"))
+    except Exception:
+        return []
+    entry = (doc.get("fills") or {}).get(landmark_id)
+    if not entry:
+        return []
+
+    def mkv(v):
+        return {"pos": [float(v["pos"][0]), float(v["pos"][1]), float(v["pos"][2])],
+                "tex": [float(v["uv"][0]), float(v["uv"][1])],
+                "light": int(v.get("light", 0xFFA0A0A0)) & 0xFFFFFFFF}
+
+    # Per page keep tris and quads separate; the MODELS.DAT cursor rule the whole
+    # corpus obeys is tris-before-quads within a mesh, so the vertex list and the
+    # command must follow it.
+    tris = defaultdict(list)
+    quads = defaultdict(list)
+    for f in entry.get("faces", []):
+        page = int(f["page"])
+        vs = f["v"]
+        if len(vs) == 3:
+            tris[page].extend(mkv(v) for v in vs)
+        elif len(vs) == 4:
+            quads[page].extend(mkv(v) for v in vs)
+    out = []
+    for page in set(tris) | set(quads):
+        nt = len(tris[page]) // 3
+        nq = len(quads[page]) // 4
+        if not (nt or nq):
+            continue
+        out.append({"role": "wall", "pages": [page], "nface": nt + nq,
+                    "mesh": {"vertices": tris[page] + quads[page],
+                             "commands": [{"texture_page_id": page,
+                                           "tri": nt, "quad": nq}]}})
+    return out
+
+
 def fill_landmark_holes(o, cell=1500.0, tile=3000.0):
     """Close the gaps in a landmark's ground plane with a tiled grass plane.
 

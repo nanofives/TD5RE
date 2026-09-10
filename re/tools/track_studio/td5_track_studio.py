@@ -738,16 +738,20 @@ def build_landmark_glb(level, idx, fill=False):
     if not (0 <= idx < len(found)):
         raise ValueError("no landmark %d on level %s" % (idx, level))
     lm = found[idx]
+    lm_id = "L%s.lm%02d" % (level, idx)
+    patches = []
+    # AUTHORED fills (account3 'Claude authoring with web reference') are curated
+    # truth, so they always load -- they are not the deterministic guess.
+    patches.extend(gl.load_authored_fills(lm_id))
     if fill:
-        patches = []
         gp = gl.fill_landmark_holes(lm)
         if gp:
             patches.append(gp)
         patches.extend(gl.fill_landmark_walls(lm))
-        if patches:
-            lm = dict(lm)
-            lm["prims"] = list(lm["prims"]) + patches
-            lm["nface"] = lm.get("nface", 0) + sum(p["nface"] for p in patches)
+    if patches:
+        lm = dict(lm)
+        lm["prims"] = list(lm["prims"]) + patches
+        lm["nface"] = lm.get("nface", 0) + sum(p["nface"] for p in patches)
     g = gl._prefab_from_landmark(lm, "L%s.lm%02d" % (level, idx))
     pos_by, uv_by = defaultdict(list), defaultdict(list)
     cur = 0

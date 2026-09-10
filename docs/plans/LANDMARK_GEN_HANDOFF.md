@@ -62,9 +62,31 @@ prefab frame (`_prefab_from_landmark`: centred in XZ, base y=0).
    constrained. Needs API keys and budget. Highest effort, most "generative",
    least faithful to the original look.
 
+## CHOSEN APPROACH: Claude authoring with web reference (built)
+
+The contract account3 works against is in place:
+
+1. **Inspect** a landmark:
+   `python re/tools/dump_landmark.py --level 23 --idx 0 --out DIR`
+   → `DIR/faces.json` (every face: role, page, world verts, uv, light, plus
+   `free_edges` = the hole boundaries) and `DIR/page_NNN.png` for every page.
+2. **Reference**: WebSearch / WebFetch the real building (this is why it runs on
+   account3 — account2 cannot). Reason about the missing structure.
+3. **Author** new faces into `re/assets/library/authored_fills.json` under
+   `fills["L23.lm00"].faces` — world coords, 3 or 4 verts each, `V=0 is the top`
+   of the page. A worked one-quad example sits under `_example` (inert).
+4. **Preview**: the studio always loads authored fills
+   (`td5_geomlib.load_authored_fills`, wired into `build_landmark_glb`), so open
+   LIBRARY → the set piece and it shows — no toggle needed. The deterministic
+   grass/wall fill is still behind the **Fill holes** checkbox, additive.
+5. **Verify**: it must round-trip through `mesh_tool.build_dat()`; render with
+   Playwright as this session did.
+
+Authored fills are curated truth kept OUT of code, so re-running the segmenter
+never discards them — the same rule as `tags.json` / `selections.json`.
+
 ## Handoff mechanics
 
-1. This session's context + memory are synced to account3 via `/sync 2 3`.
+1. This session's context + memory sync to account3 via `/sync 2 3`.
 2. Open a Claude Code session in this folder with
    `CLAUDE_CONFIG_DIR=C:\Users\maria\.claude-account3` and continue there.
-3. The chosen approach is recorded in the memory note this doc is paired with.
