@@ -185,7 +185,12 @@ function rebuild(fit) {
   while (root.children.length) root.remove(root.children[0]);
   handles = [];
   if (grid) { scene.remove(grid); grid = null; }
-  if (!spec.nodes.length) { updatePanel(); return; }
+  if (!spec.nodes.length) {
+    // No centerline: still give the viewport a floor reference, because the
+    // studio now opens empty (authoring is parked) instead of on a sample loop.
+    grid = new THREE.GridHelper(200000, 20, 0x2c3340, 0x1e2430); scene.add(grid);
+    updatePanel(); return;
+  }
 
   // recenter
   const c = new THREE.Vector3(); let miny = 1e18, maxr = 0;
@@ -1074,8 +1079,16 @@ async function libShow(o) {
       });
       libClearPreview();
       prefabRoot.add(gltf.scene);
-      fitCamera(Math.max(o.extent[0], o.extent[1], o.extent[2]) * 0.5);
-      setStatus(`${o.id}: ${o.faces} faces over ${pages.size} page(s).`, 'ok');
+      // The generator-kit list has no catalogue row behind it (it is parsed out
+      // of a C header), so fall back to the GLB's own bounds rather than
+      // fitting the camera to an extent of zero.
+      let r = Math.max(o.extent[0] || 0, o.extent[1] || 0, o.extent[2] || 0) * 0.5;
+      if (!r) {
+        const b = new THREE.Box3().setFromObject(gltf.scene), s = new THREE.Vector3();
+        b.getSize(s); r = Math.max(s.x, s.y, s.z) * 0.5;
+      }
+      fitCamera(r);
+      setStatus(`${o.id}: ${o.faces || '?'} faces over ${pages.size} page(s).`, 'ok');
     }, (err) => setStatus('prefab GLB parse error: ' + err, 'bad'));
   } catch (e) { setStatus('prefab load failed: ' + e, 'bad'); }
 }
@@ -1097,7 +1110,9 @@ async function libTag(clear) {
 }
 
 $('libRefresh').onclick = libList;
-$('libLevel').onchange = libList;
+// The picker reads selLevel, which is now a hidden mirror of the one visible
+// level control -- two level dropdowns in one tab was the bug waiting to happen.
+$('libLevel').onchange = () => { $('selLevel').value = $('libLevel').value; libList(); };
 $('libKind').onchange = libList;
 $('libClearPreview').onclick = () => { libClearPreview(); setStatus('Preview cleared.', 'ok'); };
 $('libSaveTag').onclick = () => libTag(false);
@@ -1114,6 +1129,12 @@ const selBill = new THREE.Group(); scene.add(selBill);   // camera-facing sprite
 const selHi = new THREE.Group(); scene.add(selHi);
 let selPrims = null, selChosen = new Set(), selLevelNum = null;
 let selDragFrom = null, selCenter = new THREE.Vector3();
+// pid -> [{mesh, start, count}] vertex ranges inside the merged page buffers,
+// recovered from _PRIMID at load. Needed for two things the AABB index cannot
+// do: highlighting the REAL triangles, and addressing a single face.
+let selRanges = null;
+let selFaces = new Map();      // pid -> Set(face index within that primitive)
+let selFlashUntil = 0;
 // `var`, not `let`, and guarded below: the render loop is an IIFE near the top
 // of this module and calls tickExtras on frame one, which is BEFORE a `let`
 // here is initialised. That is a temporal-dead-zone ReferenceError thrown
@@ -1127,6 +1148,8 @@ var selBillSets = [];      // [{mesh, items}] one InstancedMesh per page
 // One InstancedMesh per page keeps this to ~50 draw calls for level023's 1406
 // billboards instead of 1406.
 function tickExtras() {
+  // hoisted `var` (see its declaration): undefined on frame one, never a TDZ throw
+  if (selHatchMat) selHatchMat.uniforms.uPhase.value = (performance.now() * 0.03) % 16.0;
   if (!selBillSets || !selBillSets.length) return;   // undefined on frame one
   const q = camera.quaternion, m = new THREE.Matrix4();
   const s = new THREE.Vector3(), p = new THREE.Vector3();
@@ -1143,25 +1166,110 @@ function tickExtras() {
 }
 
 function selSetInfo(msg) {
-  $('selInfo').innerHTML = msg || (selPrims
-    ? `${selPrims.length} primitives loaded · ${selChosen.size} selected`
-    : 'Nothing loaded.');
+  if (msg) { $('selInfo').innerHTML = msg; return; }
+  if (!selPrims) { $('selInfo').innerHTML = 'Nothing loaded.'; return; }
+  let nf = 0; for (const s of selFaces.values()) nf += s.size;
+  const what = selGran() === 'face'
+    ? `${nf} face(s) over ${selFaces.size} primitive(s)`
+    : `${selChosen.size} primitive(s)`;
+  $('selInfo').innerHTML = `${selPrims.length} primitives loaded &middot; ${what} selected`;
+}
+
+const selGran = () => $('selGran').value;
+
+// ---- highlight, ported from the in-game free-cam picker -------------------
+// td5_pick.c:305 outlines the picked mesh's REAL faces and fills them with
+// marching 45-degree lines, always on top. The AABB wireframe this replaces
+// was a lie about the shape: a cathedral and the block of air around it look
+// identical as a box. Here the outline is EdgesGeometry over the actual
+// triangles (which drops the quad diagonals, so quads read as quads like they
+// do in-game) and the hatch is the same x+y screen-space march done in a
+// fragment shader instead of by clipping lines on the CPU.
+const SEL_HL = 0xffff00, SEL_HL_FLASH = 0x33ff33;   // yellow / green flash
+// `var`, like selBillSets below: the render loop is an IIFE near the top of
+// this module and calls tickExtras on frame one, before a `let`/`const` down
+// here exists. `typeof` does NOT rescue that -- it throws for a const in its
+// temporal dead zone, unlike an undeclared name -- so the guard has to be a
+// plain truthiness test on a hoisted `var`.
+var selHatchMat = new THREE.ShaderMaterial({
+  uniforms: { uColor: { value: new THREE.Color(SEL_HL) }, uPhase: { value: 0 } },
+  vertexShader: 'void main(){gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
+  fragmentShader: `uniform vec3 uColor; uniform float uPhase;
+    void main(){
+      if (mod(gl_FragCoord.x + gl_FragCoord.y + uPhase, 16.0) > 2.0) discard;
+      gl_FragColor = vec4(uColor, 1.0);
+    }`,
+  side: THREE.DoubleSide, depthTest: false, depthWrite: false, transparent: true,
+});
+var selEdgeMat = new THREE.LineBasicMaterial({
+  color: SEL_HL, depthTest: false, transparent: true });
+
+function selHlColor() {
+  const c = performance.now() < selFlashUntil ? SEL_HL_FLASH : SEL_HL;
+  selHatchMat.uniforms.uColor.value.setHex(c);
+  selEdgeMat.color.setHex(c);
+}
+
+// Every selected face's three positions, pulled straight out of the merged page
+// buffers via the _PRIMID ranges.
+function selHlPositions() {
+  const out = [];
+  const push = (r, f0, f1) => {
+    const p = r.mesh.geometry.getAttribute('position');
+    for (let v = r.start + f0 * 3; v < r.start + f1 * 3; v++)
+      out.push(p.getX(v), p.getY(v), p.getZ(v));
+  };
+  if (selGran() === 'face') {
+    for (const [pid, faces] of selFaces) {
+      const rs = selRanges && selRanges.get(pid); if (!rs) continue;
+      for (const f of faces) {
+        // face index is primitive-local and runs across the ranges in order
+        let base = 0;
+        for (const r of rs) {
+          const n = r.count / 3;
+          if (f < base + n) { push(r, f - base, f - base + 1); break; }
+          base += n;
+        }
+      }
+    }
+  } else {
+    for (const pid of selChosen) {
+      const rs = selRanges && selRanges.get(pid); if (!rs) continue;
+      for (const r of rs) push(r, 0, r.count / 3);
+    }
+  }
+  return out;
 }
 
 function selRedrawHighlight() {
-  while (selHi.children.length) selHi.remove(selHi.children[0]);
-  if (!selPrims) return;
-  for (const id of selChosen) {
-    const a = selPrims[id].aabb;
-    const box = new THREE.Box3(new THREE.Vector3(a[0], a[1], a[2]),
-                               new THREE.Vector3(a[3], a[4], a[5]));
-    const h = new THREE.Box3Helper(box, 0x46ff6a);
-    // Drawn ON TOP: a selection box buried inside the geometry it outlines is
-    // invisible exactly when you need it.
-    h.material.depthTest = false;
-    h.material.transparent = true;
-    h.renderOrder = 999;
-    selHi.add(h);
+  while (selHi.children.length) {
+    const c = selHi.children[0];
+    if (c.geometry) c.geometry.dispose();
+    selHi.remove(c);
+  }
+  if (!selPrims) { selSetInfo(); return; }
+  selHlColor();
+  const pos = selHlPositions();
+  if (pos.length) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    const fill = new THREE.Mesh(g, selHatchMat); fill.renderOrder = 998;
+    fill.frustumCulled = false; selHi.add(fill);
+    // thresholdAngle 1 deg: the two halves of a source quad are coplanar, so
+    // their shared diagonal drops out and the outline follows the real face.
+    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(g, 1), selEdgeMat);
+    edges.renderOrder = 999; edges.frustumCulled = false; selHi.add(edges);
+  }
+  // Billboards live in selBill (rebuilt against the camera each frame), not in
+  // the merged buffers, so they have no triangles to outline here -- fall back
+  // to a box for those.
+  for (const pid of selChosen) {
+    if (!selPrims[pid] || !selPrims[pid].billboard) continue;
+    const a = selPrims[pid].aabb;
+    const h = new THREE.Box3Helper(new THREE.Box3(
+      new THREE.Vector3(a[0], a[1], a[2]), new THREE.Vector3(a[3], a[4], a[5])), SEL_HL);
+    h.material.depthTest = false; h.material.transparent = true;
+    h.renderOrder = 999; selHi.add(h);
   }
   selHi.position.copy(selRoot.position);
   selSetInfo();
@@ -1196,7 +1304,8 @@ async function selLoadTrack() {
       });
       while (selRoot.children.length) selRoot.remove(selRoot.children[0]);
       selRoot.add(gltf.scene);
-      selChosen.clear(); selRedrawHighlight();
+      selIndexRanges(gltf.scene);
+      selChosen.clear(); selFaces.clear(); selRedrawHighlight();
       await selLoadBillboards(lvl, types);
       const a = selPrims.reduce((acc, p) => {
         for (let k = 0; k < 3; k++) {
@@ -1242,18 +1351,57 @@ async function selLoadBillboards(lvl, types) {
   }
 }
 
-function selPidAt(ev) {
+// One pass over _PRIMID recovering where each primitive's vertices live. Every
+// primitive in the corpus is single-page (measured: 32,444 of 32,444 on
+// level023), so this is normally one contiguous run per id -- but it is stored
+// as a list so a future multi-page split does not silently mis-slice.
+// GLTFLoader LOWERCASES any attribute it does not recognise ("_PRIMID" ->
+// "_primid"), so reading it back under the name the exporter wrote silently
+// yields undefined. That is why click-to-select and the geometry highlight both
+// did nothing while box select -- which works off the AABB index instead --
+// looked fine. Accept both spellings.
+const primIdAttr = (geo) => geo.getAttribute('_primid') || geo.getAttribute('_PRIMID');
+
+function selIndexRanges(rootObj) {
+  selRanges = new Map();
+  const add = (pid, mesh, start, count) => {
+    if (!selRanges.has(pid)) selRanges.set(pid, []);
+    selRanges.get(pid).push({ mesh, start, count });
+  };
+  rootObj.traverse((o) => {
+    if (!o.isMesh) return;
+    const a = primIdAttr(o.geometry); if (!a) return;
+    let cur = -1, start = 0;
+    for (let i = 0; i < a.count; i++) {
+      const v = Math.round(a.getX(i));
+      if (v !== cur) { if (cur >= 0) add(cur, o, start, i - start); cur = v; start = i; }
+    }
+    if (cur >= 0) add(cur, o, start, a.count - start);
+  });
+}
+
+// Ray hit -> {pid, face} where `face` is the triangle index WITHIN the
+// primitive (see save_selection: primitive-local, so it survives a repack).
+function selHitAt(ev) {
   const r = renderer.domElement.getBoundingClientRect();
   const m = new THREE.Vector2(((ev.clientX - r.left) / r.width) * 2 - 1,
                               -((ev.clientY - r.top) / r.height) * 2 + 1);
   const rc = new THREE.Raycaster(); rc.setFromCamera(m, camera);
-  const hits = rc.intersectObject(selRoot, true);
-  for (const h of hits) {
-    const attr = h.object.geometry && h.object.geometry.attributes
-              && h.object.geometry.attributes._PRIMID;
-    if (attr && h.face) return Math.round(attr.getX(h.face.a));
+  for (const h of rc.intersectObject(selRoot, true)) {
+    const attr = h.object.geometry && primIdAttr(h.object.geometry);
+    if (!attr || !h.face) continue;
+    const pid = Math.round(attr.getX(h.face.a));
+    const rs = (selRanges && selRanges.get(pid)) || [];
+    let face = -1, base = 0;
+    for (const rg of rs) {
+      if (rg.mesh === h.object && h.face.a >= rg.start && h.face.a < rg.start + rg.count) {
+        face = base + Math.floor((h.face.a - rg.start) / 3); break;
+      }
+      base += rg.count / 3;
+    }
+    return { pid, face };
   }
-  return -1;
+  return null;
 }
 
 function selAllowed(id) {
@@ -1261,47 +1409,134 @@ function selAllowed(id) {
   return !($('selStructOnly').checked) || selPrims[id].structure;
 }
 
+function selClearAll() { selChosen.clear(); selFaces.clear(); }
+function selToggleFace(pid, face, remove) {
+  if (!selFaces.has(pid)) selFaces.set(pid, new Set());
+  const s = selFaces.get(pid);
+  if (remove === true || (remove === undefined && s.has(face))) s.delete(face); else s.add(face);
+  if (!s.size) selFaces.delete(pid);
+}
+
+// Left drag is box select, so orbit moves to the RIGHT button and dolly to the
+// middle -- rather than disabling the controls outright, which is what made
+// pick mode feel like the camera had seized up.
+const ORBIT_PICK = { LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+const ORBIT_FREE = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+function selApplyPickMode() {
+  const on = $('selPick').checked;
+  controls.mouseButtons = on ? ORBIT_PICK : ORBIT_FREE;
+  $('hudHelp').textContent = on
+    ? 'PICK MODE · left-drag = box select · right-drag = orbit · middle/wheel = zoom · WASD = fly · Shift = add · Ctrl = remove · Esc = clear'
+    : 'WASD = fly · Q/E = down/up · Shift = faster · drag = orbit · wheel = zoom';
+}
+
+function selShowBox(a, b) {
+  const el = $('dragBox'), r = renderer.domElement.getBoundingClientRect();
+  if (!a) { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  el.style.left = (Math.min(a.x, b.x) - r.left) + 'px';
+  el.style.top = (Math.min(a.y, b.y) - r.top) + 'px';
+  el.style.width = Math.abs(b.x - a.x) + 'px';
+  el.style.height = Math.abs(b.y - a.y) + 'px';
+}
+
 renderer.domElement.addEventListener('pointerdown', (ev) => {
-  if (!$('selPick').checked || !selPrims) return;
-  selDragFrom = { x: ev.clientX, y: ev.clientY, shift: ev.shiftKey };
+  if (ev.button !== 0 || !$('selPick').checked || !selPrims) return;
+  selDragFrom = { x: ev.clientX, y: ev.clientY, shift: ev.shiftKey, ctrl: ev.ctrlKey };
+});
+renderer.domElement.addEventListener('pointermove', (ev) => {
+  if (!selDragFrom) return;
+  const d = Math.hypot(ev.clientX - selDragFrom.x, ev.clientY - selDragFrom.y);
+  if (d > 5) selShowBox(selDragFrom, { x: ev.clientX, y: ev.clientY });
 });
 
 renderer.domElement.addEventListener('pointerup', (ev) => {
-  if (!$('selPick').checked || !selPrims || !selDragFrom) return;
-  const dx = Math.abs(ev.clientX - selDragFrom.x), dy = Math.abs(ev.clientY - selDragFrom.y);
-  const shift = selDragFrom.shift || ev.shiftKey;
+  if (ev.button !== 0 || !$('selPick').checked || !selPrims || !selDragFrom) return;
+  const from = selDragFrom; selDragFrom = null; selShowBox(null);
+  const dx = Math.abs(ev.clientX - from.x), dy = Math.abs(ev.clientY - from.y);
+  const add = from.shift || ev.shiftKey, sub = from.ctrl || ev.ctrlKey;
+  const faceMode = selGran() === 'face';
+
   if (dx < 5 && dy < 5) {
-    const id = selPidAt(ev);
-    if (!selAllowed(id)) { if (!shift) { selChosen.clear(); selRedrawHighlight(); } selDragFrom = null; return; }
-    if (shift) { selChosen.has(id) ? selChosen.delete(id) : selChosen.add(id); }
-    else { selChosen.clear(); selChosen.add(id); }
+    const hit = selHitAt(ev);
+    if (!hit || !selAllowed(hit.pid)) {
+      if (!add && !sub) { selClearAll(); selRedrawHighlight(); }
+      return;
+    }
+    if (faceMode) {
+      if (!add && !sub) selClearAll();
+      selToggleFace(hit.pid, hit.face, sub ? true : (add ? undefined : false));
+    } else {
+      if (!add && !sub) selChosen.clear();
+      if (sub) selChosen.delete(hit.pid);
+      else if (add) selChosen.has(hit.pid) ? selChosen.delete(hit.pid) : selChosen.add(hit.pid);
+      else selChosen.add(hit.pid);
+    }
+    selFlashUntil = performance.now() + 180;   // click flash, as td5_pick.c does
   } else {
-    // BOX SELECT: project each primitive's AABB centre to screen space and take
-    // what lands inside the dragged rectangle. Centre-in is enough here -- the
-    // pieces are small relative to the box a user drags.
+    // BOX SELECT. Primitive mode tests each primitive's AABB centre; face mode
+    // tests every face centroid, which is the only way a drag can carve a
+    // window out of one wall rather than taking the whole wall.
     const r = renderer.domElement.getBoundingClientRect();
-    const x0 = Math.min(selDragFrom.x, ev.clientX), x1 = Math.max(selDragFrom.x, ev.clientX);
-    const y0 = Math.min(selDragFrom.y, ev.clientY), y1 = Math.max(selDragFrom.y, ev.clientY);
-    if (!shift) selChosen.clear();
+    const x0 = Math.min(from.x, ev.clientX), x1 = Math.max(from.x, ev.clientX);
+    const y0 = Math.min(from.y, ev.clientY), y1 = Math.max(from.y, ev.clientY);
     const v = new THREE.Vector3();
-    for (let i = 0; i < selPrims.length; i++) {
-      if (!selAllowed(i)) continue;
-      const a = selPrims[i].aabb;
-      v.set((a[0] + a[3]) / 2, (a[1] + a[4]) / 2, (a[2] + a[5]) / 2)
-       .add(selRoot.position).project(camera);
-      if (v.z > 1) continue;
+    const inBox = () => {
+      v.add(selRoot.position).project(camera);
+      if (v.z > 1) return false;
       const sx = r.left + (v.x * 0.5 + 0.5) * r.width;
       const sy = r.top + (-v.y * 0.5 + 0.5) * r.height;
-      if (sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1) selChosen.add(i);
+      return sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1;
+    };
+    if (!add && !sub) selClearAll();
+    if (faceMode) {
+      for (const [pid, rs] of (selRanges || new Map())) {
+        if (!selAllowed(pid)) continue;
+        let base = 0;
+        for (const rg of rs) {
+          const p = rg.mesh.geometry.getAttribute('position');
+          for (let f = 0; f * 3 < rg.count; f++) {
+            const i = rg.start + f * 3;
+            v.set((p.getX(i) + p.getX(i + 1) + p.getX(i + 2)) / 3,
+                  (p.getY(i) + p.getY(i + 1) + p.getY(i + 2)) / 3,
+                  (p.getZ(i) + p.getZ(i + 1) + p.getZ(i + 2)) / 3);
+            if (inBox()) selToggleFace(pid, base + f, sub);
+          }
+          base += rg.count / 3;
+        }
+      }
+    } else {
+      for (let i = 0; i < selPrims.length; i++) {
+        if (!selAllowed(i)) continue;
+        const a = selPrims[i].aabb;
+        v.set((a[0] + a[3]) / 2, (a[1] + a[4]) / 2, (a[2] + a[5]) / 2);
+        if (inBox()) { if (sub) selChosen.delete(i); else selChosen.add(i); }
+      }
     }
   }
   selRedrawHighlight();
-  selDragFrom = null;
 });
 
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && selPrims) { selChosen.clear(); selRedrawHighlight(); }
+  if (inField(e.target)) return;
+  if (e.key === 'Escape' && selPrims) { selClearAll(); selRedrawHighlight(); }
 });
+
+$('selGran').onchange = () => { selRedrawHighlight(); };
+// Promote whatever faces are picked to their whole primitives -- the usual move
+// after using face mode to find which piece a detail belongs to.
+$('selGrow').onclick = () => {
+  if (!selPrims) return;
+  for (const pid of selFaces.keys()) selChosen.add(pid);
+  selFaces.clear(); $('selGran').value = 'prim'; selRedrawHighlight();
+};
+$('selInvert').onclick = () => {
+  if (!selPrims) return;
+  const keep = selChosen;
+  selChosen = new Set();
+  for (let i = 0; i < selPrims.length; i++) if (selAllowed(i) && !keep.has(i)) selChosen.add(i);
+  selFaces.clear(); selRedrawHighlight();
+};
 
 async function selRefreshList() {
   try {
@@ -1318,15 +1553,24 @@ async function selRefreshList() {
 async function selSave(del) {
   const name = $('selName').value.trim();
   if (!name) { setStatus('name the selection first', 'warn'); return; }
-  if (!del && !selChosen.size) { setStatus('select some geometry first', 'warn'); return; }
+  // Face picks are saved as their own list AND as their owning primitive ids,
+  // so a consumer that only understands whole primitives still sees the piece.
+  const faces = [];
+  const ids = new Set(selChosen);
+  for (const [pid, fs] of selFaces) { ids.add(pid); for (const f of fs) faces.push([pid, f]); }
+  if (!del && !ids.size) { setStatus('select some geometry first', 'warn'); return; }
   const body = { level: selLevelNum, name, kind: $('selKind').value,
-                 ids: [...selChosen] };
+                 ids: [...ids], faces };
   if (del) body.delete = true;
   try {
     const r = await (await fetch('/api/library/selection', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body) })).json();
-    if (r.ok) { setStatus(`${del ? 'Deleted' : 'Saved'} "${name}" (${r.total} total) -> ${r.path}`, 'ok'); selRefreshList(); }
+    if (r.ok) {
+      setStatus(`${del ? 'Deleted' : 'Saved'} "${name}" — ${r.prims} prim(s)`
+        + (r.faces ? `, ${r.faces} face(s)` : '') + ` (${r.total} total) -> ${r.path}`, 'ok');
+      selRefreshList();
+    }
     else setStatus(r.error || 'save failed', 'bad');
   } catch (e) { setStatus('save failed: ' + e, 'bad'); }
 }
@@ -1336,7 +1580,7 @@ $('selClearGeom').onclick = () => {
   while (selRoot.children.length) selRoot.remove(selRoot.children[0]);
   while (selBill.children.length) selBill.remove(selBill.children[0]);
   selBillSets = [];
-  selPrims = null; selChosen.clear(); selRedrawHighlight(); selSetInfo();
+  selPrims = null; selRanges = null; selClearAll(); selRedrawHighlight(); selSetInfo();
 };
 
 // ---- library overview: what is actually ON DISK right now ----------------
@@ -1368,13 +1612,80 @@ async function libOverview() {
 $('selSave').onclick = () => selSave(false);
 $('selDelete').onclick = () => selSave(true);
 $('selRefresh').onclick = selRefreshList;
-// Orbit and box-select both want a left drag, so pick mode takes it. Orbit is
-// restored the moment pick mode is off; WASD fly still works either way.
-$('selPick').onchange = (e) => { controls.enabled = !e.target.checked; };
+$('selPick').onchange = selApplyPickMode;
+
+// ---------------------------------------------------------------- tabs
+// TRACKS looks at one shipped track. LIBRARY looks at the catalogue -- either
+// per level, or the subset the generator actually compiled in. They are
+// different questions over the same data, which is why the library stopped
+// being a section inside the track panel.
+function showTab(which) {
+  const lib = which === 'library';
+  $('tabTracks').style.display = lib ? 'none' : '';
+  $('tabLibrary').style.display = lib ? '' : 'none';
+  $('tabTracksBtn').classList.toggle('on', !lib);
+  $('tabLibraryBtn').classList.toggle('on', lib);
+}
+$('tabTracksBtn').onclick = () => showTab('tracks');
+$('tabLibraryBtn').onclick = () => showTab('library');
+
+function libApplySource() {
+  const gen = $('libSource').value === 'gen';
+  $('libLevelRow').style.display = gen ? 'none' : '';
+  $('libLevelPanes').style.display = gen ? 'none' : '';
+  $('libGenPanes').style.display = gen ? '' : 'none';
+  if (gen) genLoad();
+}
+$('libSource').onchange = libApplySource;
+
+// ---------------------------------------------------------------- generator kit
+// What is compiled into td5re.exe, parsed back out of the generated headers, as
+// opposed to the 205k-object catalogue on disk. The generator can only place
+// what is in here, and the two drift apart every time the catalogue is re-swept
+// without re-running the exporters.
+async function genLoad() {
+  let g;
+  try { g = await (await fetch('/api/library/genkit')).json(); }
+  catch (e) { $('genSummary').textContent = 'genkit failed: ' + e; return; }
+  if (!g.ok) { $('genSummary').textContent = g.error || 'no generator kit'; return; }
+  const roadN = Object.values(g.roads).reduce((a, v) => a + v.length, 0);
+  $('genSummary').innerHTML = `
+    <div><b>${g.prefab_count}</b> set piece(s) &middot; <b>${g.landmark_pages}</b> landmark
+      texture page(s) &middot; <b>${roadN}</b> road page(s)</div>
+    <div style="color:#78808f">${g.header}</div>`;
+
+  $('genPrefabs').innerHTML = g.prefabs.length
+    ? g.prefabs.map((p, i) => `<div class="genpf" data-id="${p.id}" style="padding:2px 5px;
+        cursor:pointer;border-bottom:1px solid #23262e;font-size:11px">
+        <b>SET PIECE ${String(i).padStart(2, '0')}</b> &middot; ${p.faces}f &middot;
+        ${p.footprint[0]}&times;${p.footprint[1]} h${p.height}
+        <span style="color:#78808f">${p.id}</span></div>`).join('')
+    : 'No prefabs in the build.';
+  [...document.querySelectorAll('.genpf')].forEach((el) => {
+    el.onclick = () => libShow({ id: el.dataset.id, level: +el.dataset.id.match(/^L(\d+)/)[1],
+                                 kind: 'set piece', faces: 0, pages: [], extent: [0, 0, 0] });
+  });
+
+  $('genRoads').innerHTML = Object.entries(g.roads).map(([set, rows]) => `
+    <div style="margin-bottom:6px"><b>${set.toUpperCase()}</b> (${rows.length})<br>
+    ${rows.map((r) => `<img title="level${String(r.level).padStart(3, '0')} p${r.page} — ${r.desc}"
+        style="width:40px;height:40px;image-rendering:pixelated;margin:1px;
+               border:1px solid #2c313c"
+        src="/api/library/page?level=${r.level}&page=${r.page}">`).join('')}</div>`).join('');
+}
+
+// A handle on the live scene for the console and for headless UI tests, which
+// otherwise have no way to aim a click at a specific piece of geometry --
+// clicking the middle of a fit-to-whole-level view hits sky and proves nothing.
+window.__studio = { THREE, scene, camera, controls, selRoot, selHi,
+                    get selPrims() { return selPrims; },
+                    get selChosen() { return selChosen; },
+                    get selFaces() { return selFaces; } };
 
 // ---------------------------------------------------------------- boot
 loadList();
 libLoad();
 libOverview();
 selRefreshList();
-$('blankBtn').click();
+selApplyPickMode();
+rebuild(true);          // empty scene + reference grid; authoring is parked

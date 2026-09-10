@@ -648,11 +648,19 @@ def _selections_path():
 
 def save_selection(req):
     """Persist one hand-made selection: a set of primitive ids plus the category
-    the user filed it under. Merged by name, so re-saving edits in place."""
+    the user filed it under. Merged by name, so re-saving edits in place.
+
+    A selection may optionally carry FACES as [prim_id, face_index_within_prim]
+    pairs. The index is local to the primitive, not to the merged page buffer
+    the viewer draws, because that buffer is a rendering detail that changes
+    whenever the GLB packer changes -- a primitive's own face order is the
+    MODELS.DAT command order and is stable. An empty `faces` means "the whole
+    primitive", which is the common case."""
     level = int(req.get("level", -1))
     name = (req.get("name") or "").strip()
     kind = req.get("kind")
     ids = req.get("ids") or []
+    faces = req.get("faces") or []
     if level <= 0 or not name:
         return False, {"error": "need level + name"}
     if kind not in SELECTION_KINDS and not req.get("delete"):
@@ -662,16 +670,55 @@ def save_selection(req):
     sel = [s for s in doc["selections"]
            if not (s["level"] == level and s["name"] == name)]
     if not req.get("delete"):
-        sel.append({"level": level, "name": name, "kind": kind,
-                    "ids": sorted(int(i) for i in ids)})
+        row = {"level": level, "name": name, "kind": kind,
+               "ids": sorted(int(i) for i in ids)}
+        if faces:
+            row["faces"] = sorted([int(a), int(b)] for a, b in faces)
+        sel.append(row)
     doc["selections"] = sorted(sel, key=lambda s: (s["level"], s["name"]))
     os.makedirs(LIBRARY_DIR, exist_ok=True)
     with open(_selections_path(), "w", encoding="utf-8", newline="\n") as f:
         json.dump(doc, f, indent=1)
         f.write("\n")
     return True, {"ok": True, "name": name, "kind": kind, "prims": len(ids),
-                  "total": len(doc["selections"]),
+                  "faces": len(faces), "total": len(doc["selections"]),
                   "path": os.path.relpath(_selections_path(), REPO_ROOT).replace("\\", "/")}
+
+
+def library_genkit():
+    """What the AUTO TRACK GENERATOR can actually place, as opposed to what the
+    catalogue on disk holds.
+
+    The distinction matters and is easy to lose: the catalogue is ~205k objects
+    swept out of 38 shipped levels, but the generator only reaches the subset
+    that was baked into generated headers and compiled in. Everything reported
+    here is parsed back out of those headers, so it cannot drift from the build
+    the way a hand-maintained list would."""
+    src = os.path.join(REPO_ROOT, "td5mod", "src", "td5re")
+    prefabs, count = [], 0
+    hdr = os.path.join(src, "td5_tg_prefab_data.h")
+    if os.path.isfile(hdr):
+        # Provenance lives in the per-prefab banner comment the exporter emits,
+        # e.g. "/* L23.lm00  258 faces, 975 verts, 48 cmds, footprint AxB, height H */"
+        pat = re.compile(r"^/\*\s+(L\d+\.\w+)\s+(\d+) faces, (\d+) verts, (\d+) cmds, "
+                         r"footprint (\d+)x(\d+), height (\d+)")
+        with open(hdr, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if line.startswith("#define TD5_TG_PREFAB_N"):
+                    count = int(line.split()[-1])
+                m = pat.match(line)
+                if m:
+                    prefabs.append({"id": m.group(1), "faces": int(m.group(2)),
+                                    "verts": int(m.group(3)), "cmds": int(m.group(4)),
+                                    "footprint": [int(m.group(5)), int(m.group(6))],
+                                    "height": int(m.group(7))})
+    roads = (_load_json(os.path.join(TOOLS_DIR, "manifests", "roads.json")) or {}).get("sets") or {}
+    lms = (_load_json(os.path.join(TOOLS_DIR, "manifests", "landmarks.json")) or {}).get("sets") or {}
+    return {"ok": True, "prefab_count": count, "prefabs": prefabs,
+            "roads": {k: [{"level": int(str(a)[5:]), "page": b, "desc": c}
+                          for a, b, c in v] for k, v in roads.items()},
+            "landmark_pages": len(lms.get("pf", [])),
+            "header": os.path.relpath(hdr, REPO_ROOT).replace("\\", "/")}
 
 
 def list_selections(level=None):
@@ -983,6 +1030,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, library_billboards(q.get("level")))
             elif p == "/api/library/overview":
                 self._send(200, library_overview())
+            elif p == "/api/library/genkit":
+                self._send(200, library_genkit())
             elif p == "/api/library/selections":
                 self._send(200, list_selections(q.get("level")))
             elif p == "/api/library/prefab":
