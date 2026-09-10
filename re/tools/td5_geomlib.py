@@ -649,7 +649,16 @@ def fill_landmark_holes(o, cell=1500.0, tile=3000.0):
     while x < x1 - 1.0:
         z = z0
         while z < z1 - 1.0:
-            if not any(_pt_in_quad(x + cell / 2, z + cell / 2, q) for q in gq):
+            # Skip the cell if ANY of its centre / corners / edge-midpoints lands
+            # inside an existing tile, not just its centre. Testing the centre
+            # alone let a cell whose centre missed a tile but whose body overlaps
+            # it slip through, which is the doubled grass face that was showing.
+            probes = ((x + cell / 2, z + cell / 2),
+                      (x + 20, z + 20), (x + cell - 20, z + 20),
+                      (x + cell - 20, z + cell - 20), (x + 20, z + cell - 20),
+                      (x + cell / 2, z + 20), (x + cell / 2, z + cell - 20),
+                      (x + 20, z + cell / 2), (x + cell - 20, z + cell / 2))
+            if not any(_pt_in_quad(px, pz, q) for px, pz in probes for q in gq):
                 for vx, vz in ((x, z), (x + cell, z), (x + cell, z + cell), (x, z + cell)):
                     verts.append({"pos": [vx, plane, vz],
                                   "tex": [(vx - x0) / tile, (vz - z0) / tile],
@@ -664,34 +673,79 @@ def fill_landmark_holes(o, cell=1500.0, tile=3000.0):
                      "commands": [{"texture_page_id": gpage, "tri": 0, "quad": nq}]}}
 
 
+def _tri_normal(a, b, c):
+    ux, uy, uz = b[0]-a[0], b[1]-a[1], b[2]-a[2]
+    vx, vy, vz = c[0]-a[0], c[1]-a[1], c[2]-a[2]
+    n = (uy*vz-uz*vy, uz*vx-ux*vz, ux*vy-uy*vx)
+    L = (n[0]**2+n[1]**2+n[2]**2) ** 0.5 or 1.0
+    return (n[0]/L, n[1]/L, n[2]/L)
+
+
+def _affine_uv(poly):
+    """A 2x3 world->uv Jacobian for a face, so uv = A(w - w0) + uv0 in-plane and
+    no uv change along the normal. poly is [(pos, uv), ...]. None if degenerate."""
+    (w0, uv0) = poly[0]
+    e1 = e2 = du1 = du2 = None
+    for (w, _uv) in poly[1:]:
+        d = (w[0]-w0[0], w[1]-w0[1], w[2]-w0[2])
+        if (d[0]**2+d[1]**2+d[2]**2) ** 0.5 < 1.0:
+            continue
+        if e1 is None:
+            e1, du1 = d, (_uv[0]-uv0[0], _uv[1]-uv0[1])
+        else:
+            cr = (e1[1]*d[2]-e1[2]*d[1], e1[2]*d[0]-e1[0]*d[2], e1[0]*d[1]-e1[1]*d[0])
+            if (cr[0]**2+cr[1]**2+cr[2]**2) ** 0.5 > 1.0:
+                e2, du2 = d, (_uv[0]-uv0[0], _uv[1]-uv0[1])
+                break
+    if e1 is None or e2 is None:
+        return None
+    n = (e1[1]*e2[2]-e1[2]*e2[1], e1[2]*e2[0]-e1[0]*e2[2], e1[0]*e2[1]-e1[1]*e2[0])
+    M = [[e1[0], e2[0], n[0]], [e1[1], e2[1], n[1]], [e1[2], e2[2], n[2]]]
+    det = (M[0][0]*(M[1][1]*M[2][2]-M[1][2]*M[2][1])
+           - M[0][1]*(M[1][0]*M[2][2]-M[1][2]*M[2][0])
+           + M[0][2]*(M[1][0]*M[2][1]-M[1][1]*M[2][0]))
+    if abs(det) < 1e-6:
+        return None
+    inv = [[0.0]*3 for _ in range(3)]
+    inv[0][0] = (M[1][1]*M[2][2]-M[1][2]*M[2][1])/det
+    inv[0][1] = (M[0][2]*M[2][1]-M[0][1]*M[2][2])/det
+    inv[0][2] = (M[0][1]*M[1][2]-M[0][2]*M[1][1])/det
+    inv[1][0] = (M[1][2]*M[2][0]-M[1][0]*M[2][2])/det
+    inv[1][1] = (M[0][0]*M[2][2]-M[0][2]*M[2][0])/det
+    inv[1][2] = (M[0][2]*M[1][0]-M[0][0]*M[1][2])/det
+    inv[2][0] = (M[1][0]*M[2][1]-M[1][1]*M[2][0])/det
+    inv[2][1] = (M[0][1]*M[2][0]-M[0][0]*M[2][1])/det
+    inv[2][2] = (M[0][0]*M[1][1]-M[0][1]*M[1][0])/det
+    RHS = [[du1[0], du2[0], 0.0], [du1[1], du2[1], 0.0]]
+    A = [[sum(RHS[r][k]*inv[k][col] for k in range(3)) for col in range(3)]
+         for r in range(2)]
+    return (A, w0, uv0)
+
+
+def _uv_at(aff, w):
+    A, w0, uv0 = aff
+    d = (w[0]-w0[0], w[1]-w0[1], w[2]-w0[2])
+    return (uv0[0] + A[0][0]*d[0]+A[0][1]*d[1]+A[0][2]*d[2],
+            uv0[1] + A[1][0]*d[0]+A[1][1]*d[1]+A[1][2]*d[2])
+
+
 def fill_landmark_walls(o, roles=("wall", "roof"), maxgap=3000.0,
                         tile=1500.0, ground_frac=0.30):
-    """Close the gaps in a landmark's walls and roofs by BRIDGING FREE EDGES.
+    """Close a landmark's wall gaps by BRIDGING FREE EDGES, taking the texture
+    from the real neighbouring face.
 
-    A landmark's walls are open quad strips; where the segmenter cut one, the cut
-    leaves a FREE edge -- an edge used by exactly one face. The two wings of the
-    Kremlin wall each end in a free vertical edge, and those two edges face each
-    other across the corner gap. This finds every free edge and bridges facing
-    pairs with a quad whose four corners ARE those existing vertices, so the fill
-    lands exactly on the real geometry instead of on an invented rectangle.
-
-    Guards against filling a solid panel:
-    - only PARALLEL free edges of SIMILAR length are paired;
-    - the bridge must point OUTWARD from each edge's owner face (away from its
-      centroid), so an edge is only ever zipped to something across open space,
-      never back over the panel it belongs to;
-    - nearest pair wins, each edge used once.
-
-    Returns one synthetic prim per page (empty list if nothing bridges)."""
+    A wall is an open quad strip; a cut leaves a FREE edge (used by one face).
+    The two Kremlin-wall wings each end in a free vertical edge facing the other
+    across the corner gap. This bridges facing free-edge pairs with a quad whose
+    four corners ARE those existing vertices, and whose UVs are read from the
+    OWNER FACE via its affine world->uv map, not invented. The old invented UVs
+    mapped V=0 (the top of the page) to the bottom vertex, so every bridge came
+    out vertically MIRRORED; continuing the neighbour's real UVs fixes the
+    orientation for free. A bridge that would overlap an existing face (e.g. lie
+    flat on the grass) is dropped."""
     import math
     from collections import defaultdict
 
-    # Only bridge free edges that reach the GROUND BAND -- the bottom `ground_frac`
-    # of the landmark's height. The perimeter wall stands on the grass; the
-    # cathedral towers sit on a raised base, so this cleanly separates the wall
-    # corner (which must close) from the gaps between separate towers (which must
-    # NOT web together). Without it, parallel tower edges within maxgap bridge
-    # across the central open space and star the model shut.
     all_y = [v["pos"][1] for p in o["prims"] if p.get("role") in roles
              for v in p["mesh"]["vertices"]]
     if not all_y:
@@ -700,47 +754,60 @@ def fill_landmark_walls(o, roles=("wall", "roof"), maxgap=3000.0,
 
     def key(pos):
         return (round(pos[0]), round(pos[1]), round(pos[2]))
+    def sub(u, v):
+        return (u[0]-v[0], u[1]-v[1], u[2]-v[2])
+    def dot(u, v):
+        return u[0]*v[0]+u[1]*v[1]+u[2]*v[2]
+    def norm(u):
+        L = math.sqrt(dot(u, u)) or 1.0
+        return (u[0]/L, u[1]/L, u[2]/L)
 
+    exist = []
     edge_count = defaultdict(int)
-    edge_data = {}           # boundary edge -> (page, light, owner_centroid)
+    edge_data = {}
     for p in o["prims"]:
-        if p.get("role") not in roles:
-            continue
-        vs = p["mesh"]["vertices"]
-        cur = 0
+        vs = p["mesh"]["vertices"]; cur = 0
         for c in p["mesh"]["commands"]:
             tri, quad = int(c["tri"]), int(c["quad"])
             polys = []
             for t in range(tri):
-                polys.append([vs[cur + t * 3 + k] for k in range(3)])
-            qb = cur + tri * 3
+                polys.append([vs[cur+t*3+k] for k in range(3)])
+            qb = cur + tri*3
             for q in range(quad):
-                b = qb + q * 4
-                polys.append([vs[b + k] for k in range(4)])
-            cur += tri * 3 + quad * 4
+                b = qb+q*4
+                polys.append([vs[b+k] for k in range(4)])
+            cur += tri*3+quad*4
             page = c["texture_page_id"]
             for poly in polys:
                 pts = [v["pos"] for v in poly]
-                cen = (sum(v[0] for v in pts) / len(pts),
-                       sum(v[1] for v in pts) / len(pts),
-                       sum(v[2] for v in pts) / len(pts))
+                cen = tuple(sum(v[k] for v in pts)/len(pts) for k in range(3))
+                nrm = _tri_normal(pts[0], pts[1], pts[2])
+                span = max(math.dist(cen, v) for v in pts)
+                exist.append((nrm, pts[0], cen, span))
+                if p.get("role") not in roles:
+                    continue
+                ppoly = [(v["pos"], v["tex"]) for v in poly]
                 ids = [key(v) for v in pts]
-                n = len(ids)
-                for i in range(n):
-                    a, bb = ids[i], ids[(i + 1) % n]
+                for i in range(len(ids)):
+                    a, bb = ids[i], ids[(i+1) % len(ids)]
                     if a == bb:
                         continue
                     e = frozenset((a, bb))
                     edge_count[e] += 1
-                    edge_data.setdefault(e, (page, poly[0]["light"], cen))
+                    edge_data.setdefault(e, {"page": page, "light": poly[0]["light"],
+                                             "cen": cen, "poly": ppoly})
 
-    def sub(u, v):
-        return (u[0] - v[0], u[1] - v[1], u[2] - v[2])
-    def dot(u, v):
-        return u[0] * v[0] + u[1] * v[1] + u[2] * v[2]
-    def norm(u):
-        L = math.sqrt(dot(u, u)) or 1.0
-        return (u[0] / L, u[1] / L, u[2] / L)
+    def overlaps_existing(corners):
+        c = tuple(sum(v[k] for v in corners)/len(corners) for k in range(3))
+        nrm = _tri_normal(corners[0], corners[1], corners[2])
+        for (en, ep, ecen, espan) in exist:
+            if abs(dot(nrm, en)) < 0.9:
+                continue
+            if abs(dot(nrm, sub(c, ep))) > 60.0:
+                continue
+            if math.dist(c, ecen) < 0.5 * espan:
+                return True
+        return False
 
     E = []
     for e, cnt in edge_count.items():
@@ -750,37 +817,28 @@ def fill_landmark_walls(o, roles=("wall", "roof"), maxgap=3000.0,
         pa = (float(a[0]), float(a[1]), float(a[2]))
         pb = (float(b[0]), float(b[1]), float(b[2]))
         L = math.dist(pa, pb)
-        if L < 1.0:
+        if L < 1.0 or min(pa[1], pb[1]) > ground_band:
             continue
-        if min(pa[1], pb[1]) > ground_band:     # not a ground-standing wall edge
-            continue
-        page, light, cen = edge_data[e]
-        mid = ((pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2, (pa[2] + pb[2]) / 2)
+        d = edge_data[e]
+        mid = tuple((pa[k]+pb[k])/2 for k in range(3))
         E.append(dict(a=pa, b=pb, u=norm(sub(pb, pa)), mid=mid, L=L,
-                      page=page, light=light,
-                      out=norm(sub(mid, cen))))   # outward from owner face
+                      page=d["page"], light=d["light"],
+                      aff=_affine_uv(d["poly"]),
+                      out=norm(sub(mid, d["cen"]))))
 
-    # candidate bridges: parallel, similar length, within maxgap, and each edge
-    # sees the other on its OUTWARD side (into open space).
     cands = []
     for i in range(len(E)):
-        for j in range(i + 1, len(E)):
+        for j in range(i+1, len(E)):
             e1, e2 = E[i], E[j]
             if abs(dot(e1["u"], e2["u"])) < 0.85:
                 continue
             gap = math.dist(e1["mid"], e2["mid"])
             if gap < 40.0 or gap > maxgap:
                 continue
-            if min(e1["L"], e2["L"]) / max(e1["L"], e2["L"]) < 0.55:
+            if min(e1["L"], e2["L"])/max(e1["L"], e2["L"]) < 0.55:
                 continue
-            # Reject only bridges that fold BACK OVER a panel (toward its
-            # centroid) -- that would duplicate an existing face. A perpendicular
-            # bridge (a wall END reaching sideways to a perpendicular wing) is
-            # exactly the corner we want, so it must pass.
             d12 = norm(sub(e2["mid"], e1["mid"]))
-            if dot(d12, e1["out"]) < -0.25:         # bridge folds over e1's face
-                continue
-            if dot(d12, e2["out"]) > 0.25:          # bridge folds over e2's face
+            if dot(d12, e1["out"]) < -0.25 or dot(d12, e2["out"]) > 0.25:
                 continue
             cands.append((gap, i, j))
     cands.sort()
@@ -791,7 +849,6 @@ def fill_landmark_walls(o, roles=("wall", "roof"), maxgap=3000.0,
         if i in used or j in used:
             continue
         e1, e2 = E[i], E[j]
-        # orient e2 so the quad does not self-cross
         if (math.dist(e1["b"], e2["b"]) + math.dist(e1["a"], e2["a"])) <= \
            (math.dist(e1["b"], e2["a"]) + math.dist(e1["a"], e2["b"])):
             qA, qB = e2["a"], e2["b"]
@@ -799,24 +856,50 @@ def fill_landmark_walls(o, roles=("wall", "roof"), maxgap=3000.0,
             qA, qB = e2["b"], e2["a"]
         if math.dist(e1["a"], qA) > maxgap or math.dist(e1["b"], qB) > maxgap:
             continue
-        used.add(i); used.add(j)
         corners = [e1["a"], e1["b"], qB, qA]
-        across = math.dist(e1["a"], qA) or 1.0
-        uv = [(0.0, 0.0), (0.0, e1["L"] / tile),
-              (across / tile, e1["L"] / tile), (across / tile, 0.0)]
-        for c, (uu, vv) in zip(corners, uv):
+        # Reject a collapsed quad: if a far corner coincides with a near one the
+        # bridge is a sliver and its texture stretches to a line.
+        if (math.dist(qA, e1["a"]) < 60.0 or math.dist(qB, e1["b"]) < 60.0 or
+                math.dist(qA, qB) < 60.0):
+            continue
+        if overlaps_existing(corners):
+            continue
+        used.add(i); used.add(j)
+        aff = e1["aff"]
+        across = (math.dist(e1["a"], qA) or 1.0) / tile
+        if aff:
+            uvA = _uv_at(aff, e1["a"]); uvB = _uv_at(aff, e1["b"])
+            uvqA = _uv_at(aff, qA); uvqB = _uv_at(aff, qB)
+            # PERPENDICULAR corner: the owner face's uv map has no gradient out of
+            # its plane, so the across direction collapses onto the SAME uv axis
+            # as the edge and the quad has ~zero UV area -- the texture smears to
+            # a line. Detect it by the uv-space cross product, and tile the across
+            # direction along the OTHER uv axis by world distance, keeping the near
+            # edge (the shared, real uvs) exact so orientation is preserved.
+            cross = (uvB[0]-uvA[0])*(uvqA[1]-uvA[1]) - (uvB[1]-uvA[1])*(uvqA[0]-uvA[0])
+            if abs(cross) < 0.02:
+                if abs(uvB[0]-uvA[0]) >= abs(uvB[1]-uvA[1]):   # near edge runs in U
+                    uvqA = (uvA[0], uvA[1]+across); uvqB = (uvB[0], uvB[1]+across)
+                else:                                          # near edge runs in V
+                    uvqA = (uvA[0]+across, uvA[1]); uvqB = (uvB[0]+across, uvB[1])
+            uvs = [uvA, uvB, uvqB, uvqA]
+        else:
+            uvs = [(0.0, 0.0), (0.0, e1["L"]/tile),
+                   (across, e1["L"]/tile), (across, 0.0)]
+        for c, uv in zip(corners, uvs):
             per_page[e1["page"]].append(
-                {"pos": [c[0], c[1], c[2]], "tex": [uu, vv], "light": e1["light"]})
+                {"pos": [c[0], c[1], c[2]], "tex": [uv[0], uv[1]], "light": e1["light"]})
 
     out = []
     for page, verts in per_page.items():
-        nq = len(verts) // 4
+        nq = len(verts)//4
         if nq:
             out.append({"role": "wall", "pages": [page], "nface": nq,
                         "mesh": {"vertices": verts,
                                  "commands": [{"texture_page_id": page,
                                                "tri": 0, "quad": nq}]}})
     return out
+
 def _prefab_from_landmark(o, name):
     """Localise a segmented landmark (many world-space primitives) into one
     prefab, same convention as _prefab_geometry: centred in XZ, base y=0."""
