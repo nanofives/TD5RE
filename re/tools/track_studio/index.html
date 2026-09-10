@@ -97,12 +97,14 @@ hr{border:none;border-top:1px solid var(--edge);margin:8px 0}
       <hr>
       <div class="hint">Scenery &amp; sky come from the loaded track:</div>
       <div class="btnrow">
-        <button class="sm" id="loadEnvBtn">Load environment</button>
+        <button class="sm" id="loadEnvBtn">Load geometry</button>
         <button class="sm" id="skyTrackBtn">Sky from track</button>
-        <button class="sm" id="clearEnvBtn">Clear env</button>
+        <button class="sm" id="clearEnvBtn">Unload</button>
       </div>
-      <div class="hint">"Load environment" decodes models.bin and its texture
-        pages &mdash; the whole shipped track as you see it in-game.</div>
+      <div class="hint">The whole shipped track as you see it in-game. This is
+        the <b>same</b> load as LIBRARY &rarr; Pick geometry &mdash; one
+        endpoint, one offset, always pickable &mdash; so the two tabs can never
+        show a different version of the same level.</div>
       <hr>
       <label class="row"><span>Show lanes</span><input type="checkbox" id="showLanes"></label>
       <label class="row"><span>Checkpoint gates</span><input type="checkbox" id="cpGates" checked></label>
@@ -201,14 +203,15 @@ hr{border:none;border-top:1px solid var(--edge);margin:8px 0}
       </div></details>
 
       <details class="grp"><summary>Pick geometry</summary><div class="body">
-        <div class="hint">Load the whole level as pickable geometry and file your
-          own selections under the auto-track categories. Automatic segmentation
-          is right about the big pieces and wrong at the edges; this is how you
-          fix it.</div>
+        <div class="hint">File your own selections under the auto-track
+          categories. Automatic segmentation is right about the big pieces and
+          wrong at the edges; this is how you fix it.</div>
         <div class="btnrow">
           <button class="sm" id="selLoad">Load geometry ▸</button>
-          <button class="sm" id="selClearGeom">unload</button>
+          <button class="sm" id="selClearGeom">Unload</button>
         </div>
+        <div class="hint">Same load as TRACKS section 1. If the level is already
+          loaded there, just tick Pick mode.</div>
         <label class="row"><span>Pick mode</span><input type="checkbox" id="selPick"></label>
         <div class="row"><span>Granularity</span>
           <select id="selGran">

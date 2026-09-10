@@ -57,7 +57,6 @@ try:
     mesh_tool = _load_module("mesh_tool", os.path.join(TOOLS_DIR, "mesh_tool.py"))  # needs numpy
 except Exception as _e:  # noqa
     mesh_tool = None
-_glb_cache = {}    # level -> glb bytes (env geometry; built once)
 _page_cache = {}   # (level, page) -> rgba png bytes with transparency baked
 
 
@@ -280,53 +279,14 @@ def serve_asset(level, name):
     return None
 
 
-def build_model_glb(level):
-    """Decode the level's models.bin and export a GLB grouped by per-command texture
-    page (one node per page, page id in mesh extras) so each surface gets its real
-    page from textures.src/pages/. The mesh-level page id is only a default; the
-    per-command page ids are the faithful per-surface textures. Cached."""
-    if mesh_tool is None:
-        raise RuntimeError("mesh_tool/numpy unavailable")
-    import numpy as np
-    from collections import defaultdict
-    level = int(level)
-    if level in _glb_cache:
-        return _glb_cache[level]
-    path = os.path.join(_level_dir(level), "models.bin")
-    if not os.path.isfile(path):
-        raise FileNotFoundError("no models.bin for level %d" % level)
-    model = mesh_tool.decode(open(path, "rb").read(), "models")
-    pos_by, uv_by = defaultdict(list), defaultdict(list)
-    for m in model["meshes"]:
-        vs, cur = m["vertices"], 0
-        # Billboard/prop meshes (trees, signs, checkpoint banners) store their
-        # vertices around 0 and are placed in the world at their bounding centre;
-        # structural meshes already carry world-space vertices. Distinguish by
-        # comparing vertex magnitude to the bounding-centre magnitude, then shift
-        # the local ones so everything lands in its real place (not piled at 0,0).
-        bnd = m["bounding"]            # [radius, cx, cy, cz]
-        bmag = abs(bnd[1]) + abs(bnd[3])
-        vmax = max((abs(v["pos"][0]) + abs(v["pos"][2]) for v in vs), default=0)
-        # Billboard/prop meshes store LOCAL vertices (extent ~ bounding radius)
-        # and place at bounding centre; structural meshes carry world vertices
-        # (extent ~ centre magnitude). The old bmag > 100000 gate missed props
-        # near the world origin (Moscow glow quads at bmag ~30k piled at 0,0).
-        ox, oy, oz = (bnd[1], bnd[2], bnd[3]) if (bmag > 1000 and vmax < bmag * 0.5) else (0.0, 0.0, 0.0)
-        for c in m["commands"]:
-            tri, quad, page = c["tri"], c["quad"], c["texture_page_id"]
-            P, U = pos_by[page], uv_by[page]
-            for t in range(tri):
-                for k in (cur + t * 3, cur + t * 3 + 1, cur + t * 3 + 2):
-                    p = vs[k]["pos"]; P.append([p[0] + ox, p[1] + oy, p[2] + oz]); U.append(vs[k]["tex"])
-            qb = cur + tri * 3
-            for q in range(quad):
-                b = qb + q * 4
-                for k in (b, b + 1, b + 2, b, b + 2, b + 3):
-                    p = vs[k]["pos"]; P.append([p[0] + ox, p[1] + oy, p[2] + oz]); U.append(vs[k]["tex"])
-            cur += tri * 3 + quad * 4
-    glb = glb_from_page_groups(pos_by, uv_by)
-    _glb_cache[level] = glb
-    return glb
+# NOTE: there was a second, separate whole-level exporter here
+# (build_model_glb). It decoded models.bin again, told billboards from
+# structural meshes by comparing vertex magnitude against bounding-centre
+# magnitude, and baked the billboards FLAT -- so the track view and the library
+# view of the same level did not agree, and only one of them was pickable.
+# build_prims_glb is now the single source: it splits page-exactly, tags every
+# vertex with _PRIMID, and leaves billboards to the client to draw
+# camera-facing off the mesh HEADER TAG rather than a magnitude heuristic.
 
 
 def glb_from_page_groups(pos_by, uv_by):
@@ -1011,7 +971,9 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._send(404, {"error": "asset not found"})
             elif p == "/api/model":
-                self._send(200, build_model_glb(q.get("level")), "model/gltf-binary")
+                # Kept as an alias so a bookmarked URL still works; the track
+                # view and the library view must resolve to the SAME bytes.
+                self._send(200, build_prims_glb(q.get("level")), "model/gltf-binary")
             elif p == "/api/lights":
                 self._send(200, get_lights(q.get("level")))
             elif p == "/api/library":

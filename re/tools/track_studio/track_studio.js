@@ -20,7 +20,12 @@ controls.enableDamping = true;
 scene.add(new THREE.HemisphereLight(0xffffff, 0x36404f, 1.15));
 const sun = new THREE.DirectionalLight(0xffffff, 1.1); sun.position.set(1, 2, 1); scene.add(sun);
 const root = new THREE.Group(); scene.add(root);   // track geometry, centered on `center`
-const envRoot = new THREE.Group(); scene.add(envRoot);   // imported environment geometry
+// The ONE loaded-level geometry group. Both the TRACKS tab ("load
+// environment") and the LIBRARY tab ("load geometry") fill this, from the same
+// endpoint, at the same offset -- they used to be two loaders over two
+// endpoints and disagreed about billboards, centring and pickability.
+// `selRoot` further down is an alias for it, not a second group.
+const envRoot = new THREE.Group(); scene.add(envRoot);
 const lightsRoot = new THREE.Group(); scene.add(lightsRoot); // curated street-light markers
 const gltfLoader = new GLTFLoader();
 let grid = null;
@@ -77,6 +82,21 @@ let handles = [];                   // node handle meshes (index-aligned to spec
 let drawingBranch = null;           // {lanes, nodes:[]} while drawing
 let roadTex = null, groundTex = null;   // preview textures
 let showLanes = false, editNodes = false, showCpGates = true;
+// AABB centre of the loaded level geometry, or null. Single source of truth for
+// the view offset while a level is loaded, so the scenery, the billboards, the
+// highlight and the centerline all sit in one frame.
+let geomCenter = null;
+function applyViewOffset() {
+  const off = new THREE.Vector3(-center.x, -center.y, -center.z);
+  envRoot.position.copy(off);      // == selRoot
+  lightsRoot.position.copy(off);   // lights share raw engine coords
+  // selBill/selHi are consts declared further down; safe because every call
+  // site runs after module evaluation (the boot rebuild() is the last
+  // statement). Do NOT add a `typeof` guard here -- typeof THROWS for a const
+  // in its temporal dead zone, so it would hide nothing and break everything.
+  selBill.position.copy(off);
+  selHi.position.copy(off);
+}
 let currentLevel = null, currentAssets = null;   // imported track's source + its assets
 let envLoaded = false;                            // environment geometry present -> hide ribbon fill
 const raycaster = new THREE.Raycaster();
@@ -185,6 +205,7 @@ function rebuild(fit) {
   while (root.children.length) root.remove(root.children[0]);
   handles = [];
   if (grid) { scene.remove(grid); grid = null; }
+  if (!spec.nodes.length && geomCenter) { center.copy(geomCenter); applyViewOffset(); }
   if (!spec.nodes.length) {
     // No centerline: still give the viewport a floor reference, because the
     // studio now opens empty (authoring is parked) instead of on a sample loop.
@@ -195,9 +216,13 @@ function rebuild(fit) {
   // recenter
   const c = new THREE.Vector3(); let miny = 1e18, maxr = 0;
   for (const n of spec.nodes) { c.x += n.x; c.z += n.z; c.y += (n.y || 0); miny = Math.min(miny, n.y || 0); }
-  c.multiplyScalar(1 / spec.nodes.length); center.copy(c);
-  envRoot.position.set(-center.x, -center.y, -center.z);   // keep env aligned to track
-  lightsRoot.position.copy(envRoot.position);              // lights share raw engine coords
+  c.multiplyScalar(1 / spec.nodes.length);
+  // Loaded geometry wins the offset. Otherwise rebuild() would keep resetting
+  // it to the centerline centroid and shunt the scenery off the road, since
+  // the two centres are not the same point.
+  if (geomCenter) c.copy(geomCenter);
+  center.copy(c);
+  applyViewOffset();
   for (const n of spec.nodes) maxr = Math.max(maxr, Math.hypot(n.x - c.x, n.z - c.z));
 
   // grid sized to the track
@@ -598,7 +623,8 @@ $('skyTrackBtn').onclick = async () => {
   catch { setStatus('skybox load failed', 'bad'); }
 };
 $('cpGates').onchange = (e) => { showCpGates = e.target.checked; rebuild(false); };
-$('clearEnvBtn').onclick = () => { while (envRoot.children.length) envRoot.remove(envRoot.children[0]); envLoaded = false; rebuild(false); setStatus('Cleared environment.', 'ok'); };
+// Same unload behind both buttons, for the same reason the load is shared.
+$('clearEnvBtn').onclick = () => { unloadLevelGeometry(); setStatus('Cleared level geometry.', 'ok'); };
 function envMaterial(tex, type) {   // unlit; transparency per page type (0 opaque,1 keyed,2 semi,3 additive)
   const base = { map: tex || null, color: tex ? 0xffffff : 0x8b9099, side: THREE.DoubleSide };
   if (!tex) return new THREE.MeshBasicMaterial(base);
@@ -607,35 +633,12 @@ function envMaterial(tex, type) {   // unlit; transparency per page type (0 opaq
   if (type === 3) return new THREE.MeshBasicMaterial({ ...base, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
   return new THREE.MeshBasicMaterial(base);
 }
-$('loadEnvBtn').onclick = async () => {
-  if (currentLevel == null) { setStatus('Import a track first.', 'warn'); return; }
-  setStatus('Loading environment (decoding models.bin, may take a moment)…');
-  try {
-    const buf = await (await fetch('/api/model?level=' + currentLevel)).arrayBuffer();
-    gltfLoader.parse(buf, '', async (gltf) => {
-      // each node carries its real per-command texture page in extras; load just
-      // those pages (textures.src/pages/page_NNN.png) in parallel, then assign.
-      const pages = new Set();
-      gltf.scene.traverse((o) => { if (o.isMesh && o.userData && o.userData.page != null) pages.add(o.userData.page); });
-      setStatus(`Loading environment textures (${pages.size} pages)…`);
-      const types = (currentAssets && currentAssets.page_types) || {};
-      const texMap = {};
-      await Promise.all([...pages].map(async (p) => {
-        try { texMap[p] = await trackTexture(currentLevel, `page_${String(p).padStart(3, '0')}.png`, false); }
-        catch { texMap[p] = null; }
-      }));
-      gltf.scene.traverse((o) => {
-        if (o.isMesh) {
-          const page = o.userData ? o.userData.page : -1;
-          o.material = envMaterial(texMap[page], types[page] | 0);
-        }
-      });
-      while (envRoot.children.length) envRoot.remove(envRoot.children[0]);
-      envRoot.add(gltf.scene); envRoot.position.set(-center.x, -center.y, -center.z);
-      envLoaded = true; rebuild(false);
-      setStatus(`Environment loaded (${pages.size} texture pages).`, 'ok');
-    }, (err) => setStatus('GLB parse error: ' + err, 'bad'));
-  } catch (e) { setStatus('environment load failed: ' + e, 'bad'); }
+// Same call the LIBRARY tab makes -- see loadLevelGeometry. "Load environment"
+// and "Load geometry" are one operation reached from two places, so the two
+// tabs cannot show a different version of the same level.
+$('loadEnvBtn').onclick = () => {
+  if (currentLevel == null) { setStatus('Load a track first.', 'warn'); return; }
+  loadLevelGeometry(currentLevel);
 };
 
 // ---------------------------------------------------------------- lights editor
@@ -827,13 +830,13 @@ function rebuildGlowMarkers() {
     `Grey = backdrop/off-road (skipped by "+ lights at fixtures").`, 'ok');
 }
 $('glowShowBtn').addEventListener('click', () => {
-  if (!envLoaded) { setStatus('Load environment first (7 · View / textures).', 'warn'); return; }
+  if (!envLoaded) { setStatus('Load level geometry first (TRACKS section 1, or LIBRARY > Pick geometry).', 'warn'); return; }
   showGlowFixtures = !showGlowFixtures;
   $('glowShowBtn').textContent = showGlowFixtures ? 'hide glow fixtures' : 'show glow fixtures';
   rebuildGlowMarkers();
 });
 $('glowGenBtn').addEventListener('click', () => {
-  if (!envLoaded) { setStatus('Load environment first (7 · View / textures).', 'warn'); return; }
+  if (!envLoaded) { setStatus('Load level geometry first (TRACKS section 1, or LIBRARY > Pick geometry).', 'warn'); return; }
   computeGlowClusters();
   if (!lightsData) lightsData = blankLights();
   let added = 0;
@@ -1124,7 +1127,7 @@ $('libClearTag').onclick = () => libTag(true);
 // in _PRIMID, so a raycast hit reads the id back off the hit face. Highlight is
 // drawn as wireframe boxes from the index AABBs rather than by recolouring,
 // because a primitive is a slice of a merged buffer, not its own mesh.
-const selRoot = new THREE.Group(); scene.add(selRoot);
+const selRoot = envRoot;   // alias: one group, see its declaration at the top
 const selBill = new THREE.Group(); scene.add(selBill);   // camera-facing sprites
 const selHi = new THREE.Group(); scene.add(selHi);
 let selPrims = null, selChosen = new Set(), selLevelNum = null;
@@ -1275,10 +1278,17 @@ function selRedrawHighlight() {
   selSetInfo();
 }
 
-async function selLoadTrack() {
-  const lvl = parseInt($('selLevel').value, 10);
+// THE loader. Both tabs call this: TRACKS via "Load environment", LIBRARY via
+// "Load geometry". One endpoint, one offset, one group, always pickable --
+// previously the track view decoded models.bin through a second exporter that
+// baked billboards flat and emitted no _PRIMID, so the same level looked
+// different and could not be selected depending on which button you pressed.
+async function loadLevelGeometry(level) {
+  const lvl = parseInt(level, 10);
+  if (!Number.isFinite(lvl)) { setStatus('pick a level first', 'warn'); return; }
   selLevelNum = lvl;
-  setStatus(`Loading level${String(lvl).padStart(3, '0')} as pickable geometry…`);
+  if ($('selLevel')) $('selLevel').value = String(lvl);
+  setStatus(`Loading level${String(lvl).padStart(3, '0')} geometry…`);
   try {
     const ix = await (await fetch('/api/library/primindex?level=' + lvl)).json();
     selPrims = ix.prims;
@@ -1286,8 +1296,9 @@ async function selLoadTrack() {
     // (623121, -344, 295836) -- so without this offset it loads hundreds of
     // thousands of units from the camera and looks like nothing happened.
     selCenter.set(ix.center[0], ix.center[1], ix.center[2]);
-    const off = selCenter.clone().negate();
-    selRoot.position.copy(off); selBill.position.copy(off); selHi.position.copy(off);
+    geomCenter = selCenter.clone();
+    center.copy(selCenter);
+    applyViewOffset();
     const buf = await (await fetch('/api/library/prims?level=' + lvl)).arrayBuffer();
     gltfLoader.parse(buf, '', async (gltf) => {
       const pages = new Set();
@@ -1305,8 +1316,13 @@ async function selLoadTrack() {
       while (selRoot.children.length) selRoot.remove(selRoot.children[0]);
       selRoot.add(gltf.scene);
       selIndexRanges(gltf.scene);
-      selChosen.clear(); selFaces.clear(); selRedrawHighlight();
+      selChosen.clear(); selFaces.clear();
       await selLoadBillboards(lvl, types);
+      // envLoaded hides the schematic ribbon: the real road is now here at full
+      // resolution. rebuild() re-runs with geomCenter set, so the centerline
+      // markers land in the same frame as the scenery.
+      envLoaded = true; rebuild(false);
+      selRedrawHighlight();
       const a = selPrims.reduce((acc, p) => {
         for (let k = 0; k < 3; k++) {
           acc[k] = Math.min(acc[k], p.aabb[k]); acc[k + 3] = Math.max(acc[k + 3], p.aabb[k + 3]);
@@ -1316,9 +1332,20 @@ async function selLoadTrack() {
       const k = ix.kinds || {};
       setStatus(`level${String(lvl).padStart(3, '0')}: ${selPrims.length} selectable primitives `
         + `(${k.structure || 0} structure, ${k.slab || 0} slab, ${k.billboard || 0} billboard, `
-        + `${k.post || 0} post, ${k.ribbon || 0} rail).`, 'ok');
+        + `${k.post || 0} post, ${k.ribbon || 0} rail). `
+        + `Same geometry in both tabs; tick Pick mode in LIBRARY to select it.`, 'ok');
     }, (err) => setStatus('prims GLB parse error: ' + err, 'bad'));
   } catch (e) { setStatus('load failed: ' + e, 'bad'); }
+}
+
+function unloadLevelGeometry() {
+  while (selRoot.children.length) selRoot.remove(selRoot.children[0]);
+  while (selBill.children.length) selBill.remove(selBill.children[0]);
+  selBillSets = [];
+  selPrims = null; selRanges = null; selClearAll();
+  geomCenter = null; envLoaded = false;
+  selRedrawHighlight(); selSetInfo();
+  rebuild(false);        // back to the centerline offset and the schematic ribbon
 }
 
 async function selLoadBillboards(lvl, types) {
@@ -1575,13 +1602,8 @@ async function selSave(del) {
   } catch (e) { setStatus('save failed: ' + e, 'bad'); }
 }
 
-$('selLoad').onclick = selLoadTrack;
-$('selClearGeom').onclick = () => {
-  while (selRoot.children.length) selRoot.remove(selRoot.children[0]);
-  while (selBill.children.length) selBill.remove(selBill.children[0]);
-  selBillSets = [];
-  selPrims = null; selRanges = null; selClearAll(); selRedrawHighlight(); selSetInfo();
-};
+$('selLoad').onclick = () => loadLevelGeometry($('libLevel').value);
+$('selClearGeom').onclick = unloadLevelGeometry;
 
 // ---- library overview: what is actually ON DISK right now ----------------
 // The library is built by several independent passes (catalogue sweep, road
