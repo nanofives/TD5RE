@@ -549,6 +549,44 @@ def structure_prims(model, page_role):
     return level_prims(model, page_role)[0]
 
 
+def all_prims(model, page_role):
+    """EVERY primitive in the level, nothing dropped, each tagged with what it
+    is. level_prims discards 874 of level023's 32,444 -- foliage and small
+    detail it has no use for -- which is right for segmentation and wrong for a
+    selection view, where anything invisible is anything unselectable.
+
+    `billboard` comes from the source mesh's header tag (1 or 2), which is how
+    the engine marks a camera-facing sprite. Those store their world position in
+    `origin` and their vertices LOCALLY, so they must be rebuilt against the
+    camera to look right -- 1406 of level023's primitives are billboards."""
+    out = []
+    for mi, mesh in enumerate(model["meshes"]):
+        r = split_mesh(mesh, mode="page")
+        if r["reason"] != SPLIT_OK:
+            continue
+        bb = int(mesh.get("texture_page_id", 0)) in (1, 2)
+        for p in r["parts"]:
+            dx, dy, dz = p["extent"]
+            role = _prim_role(p["pages"], page_role)
+            p["mesh_index"] = mi
+            p["role"] = role
+            p["billboard"] = bb
+            if bb:
+                p["kind_hint"] = "billboard"
+            elif dy <= SEG_FLAT_Y and max(dx, dz) > SEG_FLAT_XZ:
+                p["kind_hint"] = "slab"
+            elif role in GROUND_ROLES:
+                p["kind_hint"] = "slab"
+            elif role in LOOSE_ROLES or dy < SEG_MIN_H:
+                p["kind_hint"] = "loose"
+            elif _struct_shape(p) != "wall":
+                p["kind_hint"] = _struct_shape(p)      # post / ribbon / detail
+            else:
+                p["kind_hint"] = "structure"
+            out.append(p)
+    return out
+
+
 # A landmark's PAVING, put back after segmentation. Two gates, both needed:
 #   size  -- a road ribbon runs the length of the track, and attaching one would
 #            turn a 7000-unit building into a track-long prefab. A plaza is

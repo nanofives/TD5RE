@@ -465,15 +465,26 @@ def _level_prims_cached(level):
     role = {p["page"]: p["role"] for p in pages_doc["pages"]
             if p["level"] == level}
     model = gl._load_model(gl._levels_dir(), level)
-    st, sl = gl.al.level_prims(model, role)
-    # Structure first, then slabs, so a primitive's id also says which it is
-    # without carrying a second list around.
-    prims = st + sl
+    # EVERY primitive, not just the ones segmentation cares about: in a
+    # selection view, geometry you cannot see is geometry you cannot pick.
+    prims = gl.al.all_prims(model, role)
     for i, p in enumerate(prims):
         p["_pid"] = i
-        p["_struct"] = i < len(st)
     _prims_cache[level] = (prims, None, None)
     return _prims_cache[level]
+
+
+def _prims_center(prims):
+    """Track centre. The whole level sits in raw world coordinates -- level023
+    is centred near (623121, -344, 295836) -- so geometry added at the scene
+    origin lands hundreds of thousands of units from the camera and looks like
+    nothing loaded at all. The env view already offsets by -centre; the
+    selection view has to do the same."""
+    if not prims:
+        return [0.0, 0.0, 0.0]
+    mn = [min(p["aabb"][i] for p in prims) for i in range(3)]
+    mx = [max(p["aabb"][i + 3] for p in prims) for i in range(3)]
+    return [round((mn[i] + mx[i]) * 0.5, 1) for i in range(3)]
 
 
 def build_prims_glb(level):
@@ -487,6 +498,8 @@ def build_prims_glb(level):
         return glb
     pos_by, uv_by, id_by = defaultdict(list), defaultdict(list), defaultdict(list)
     for p in prims:
+        if p.get("billboard"):
+            continue          # drawn camera-facing by the client, not baked here
         pid = float(p["_pid"])
         vs = p["mesh"]["vertices"]
         cur = 0
@@ -528,18 +541,98 @@ def build_prims_glb(level):
     return glb
 
 
+def library_overview():
+    """Everything the library currently HOLDS, in one answer.
+
+    Deliberately reports what is on disk rather than what could be regenerated,
+    because the interesting question is "is my catalogue stale" -- the pieces
+    come from several passes (catalogue sweep, road curation, landmark export,
+    hand selections) that are regenerated independently and can drift apart."""
+    idx = _load_json(os.path.join(LIBRARY_DIR, "library.json")) or {}
+    roads = _load_json(os.path.join(TOOLS_DIR, "manifests", "roads.json")) or {}
+    lms = _load_json(os.path.join(TOOLS_DIR, "manifests", "landmarks.json")) or {}
+    tags = _load_tags()
+    sels = (_load_json(_selections_path()) or {}).get("selections", [])
+
+    objdir = os.path.join(LIBRARY_DIR, "objects")
+    levels = sorted(int(n[5:8]) for n in os.listdir(objdir)
+                    if n.startswith("level") and n.endswith(".jsonl")) \
+        if os.path.isdir(objdir) else []
+
+    sel_by_kind = {}
+    for s in sels:
+        sel_by_kind[s["kind"]] = sel_by_kind.get(s["kind"], 0) + 1
+
+    hdr = os.path.join(REPO_ROOT, "td5mod", "src", "td5re", "td5_tg_prefab_data.h")
+    prefab_n = 0
+    if os.path.isfile(hdr):
+        with open(hdr, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if line.startswith("#define TD5_TG_PREFAB_N"):
+                    prefab_n = int(line.split()[-1])
+                    break
+    return {
+        "ok": True,
+        "generated": idx.get("generated"),
+        "levels": levels,
+        "objects_total": sum((idx.get("objects") or {}).get("kind_totals", {}).values()),
+        "kind_totals": (idx.get("objects") or {}).get("kind_totals", {}),
+        "page_total": (idx.get("pages") or {}).get("page_total"),
+        "page_roles": (idx.get("pages") or {}).get("role_totals", {}),
+        "night": (idx.get("pages") or {}).get("night_measured", []),
+        "road_sets": {k: len(v) for k, v in (roads.get("sets") or {}).items()},
+        "landmark_pages": len((lms.get("sets") or {}).get("pf", [])),
+        "prefabs_in_build": prefab_n,
+        "tags": len(tags),
+        "selections": len(sels),
+        "selections_by_kind": sel_by_kind,
+    }
+
+
+def library_billboards(level):
+    """Billboard primitives as centre + size + page, for the client to draw
+    camera-facing.
+
+    They cannot be baked into the merged geometry like everything else: the
+    engine rebuilds a billboard against the camera basis every frame
+    (td5_render_mesh.c), storing its world position in `origin` and its
+    vertices locally. Baked flat they show edge-on or face an arbitrary
+    direction. 1406 of level023's primitives are billboards -- trees, signs,
+    lamp glows -- so this is not a rounding error in the view."""
+    prims, _glb, _idx = _level_prims_cached(level)
+    out = []
+    for p in prims:
+        if not p.get("billboard"):
+            continue
+        a = p["aabb"]
+        out.append({"id": p["_pid"], "page": p["pages"][0],
+                    "role": p.get("role"),
+                    "c": [round((a[0] + a[3]) * 0.5, 1), round((a[1] + a[4]) * 0.5, 1),
+                          round((a[2] + a[5]) * 0.5, 1)],
+                    "w": round(max(a[3] - a[0], a[5] - a[2]), 1),
+                    "h": round(a[4] - a[1], 1)})
+    return {"ok": True, "level": int(level), "count": len(out),
+            "center": _prims_center(prims), "billboards": out}
+
+
 def library_prim_index(level):
     """Metadata for every selectable primitive, parallel to _PRIMID."""
     prims, glb, idx = _level_prims_cached(level)
     if idx is None:
         idx = [{"id": p["_pid"], "page": p["pages"][0], "pages": p["pages"],
                 "role": p.get("role"), "faces": p["nface"],
-                "structure": bool(p["_struct"]),
+                "kind": p.get("kind_hint"),
+                "structure": p.get("kind_hint") == "structure",
+                "billboard": bool(p.get("billboard")),
                 "aabb": [round(v, 1) for v in p["aabb"]],
                 "extent": [round(v, 1) for v in p["extent"]]}
                for p in prims]
         _prims_cache[int(level)] = (prims, glb, idx)
-    return {"ok": True, "level": int(level), "count": len(idx), "prims": idx}
+    kinds = {}
+    for p in idx:
+        kinds[p["kind"]] = kinds.get(p["kind"], 0) + 1
+    return {"ok": True, "level": int(level), "count": len(idx),
+            "center": _prims_center(prims), "kinds": kinds, "prims": idx}
 
 
 # Categories a selection can be filed under. These are the kinds the auto-track
@@ -886,6 +979,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, build_prims_glb(q.get("level")), "model/gltf-binary")
             elif p == "/api/library/primindex":
                 self._send(200, library_prim_index(q.get("level")))
+            elif p == "/api/library/billboards":
+                self._send(200, library_billboards(q.get("level")))
+            elif p == "/api/library/overview":
+                self._send(200, library_overview())
             elif p == "/api/library/selections":
                 self._send(200, list_selections(q.get("level")))
             elif p == "/api/library/prefab":

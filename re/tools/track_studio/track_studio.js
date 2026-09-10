@@ -67,7 +67,7 @@ function applyWASD() {
   if (vy) { camera.position.y += vy * speed; controls.target.y += vy * speed; }
 }
 
-(function loop() { requestAnimationFrame(loop); applyWASD(); controls.update(); renderer.render(scene, camera); })();
+(function loop() { requestAnimationFrame(loop); applyWASD(); controls.update(); tickExtras(); renderer.render(scene, camera); })();
 
 // ---------------------------------------------------------------- state
 let spec = blankSpec();
@@ -1110,9 +1110,37 @@ $('libClearTag').onclick = () => libTag(true);
 // drawn as wireframe boxes from the index AABBs rather than by recolouring,
 // because a primitive is a slice of a merged buffer, not its own mesh.
 const selRoot = new THREE.Group(); scene.add(selRoot);
+const selBill = new THREE.Group(); scene.add(selBill);   // camera-facing sprites
 const selHi = new THREE.Group(); scene.add(selHi);
 let selPrims = null, selChosen = new Set(), selLevelNum = null;
-let selDragFrom = null;
+let selDragFrom = null, selCenter = new THREE.Vector3();
+// `var`, not `let`, and guarded below: the render loop is an IIFE near the top
+// of this module and calls tickExtras on frame one, which is BEFORE a `let`
+// here is initialised. That is a temporal-dead-zone ReferenceError thrown
+// during module evaluation, which kills every statement after it -- the symptom
+// is the whole panel silently failing to populate, not an obvious crash.
+var selBillSets = [];      // [{mesh, items}] one InstancedMesh per page
+
+// Billboards are rebuilt against the camera every frame, which is what the
+// engine itself does (td5_render_mesh.c): they store a world position and LOCAL
+// vertices, so baked flat they show edge-on or face an arbitrary direction.
+// One InstancedMesh per page keeps this to ~50 draw calls for level023's 1406
+// billboards instead of 1406.
+function tickExtras() {
+  if (!selBillSets || !selBillSets.length) return;   // undefined on frame one
+  const q = camera.quaternion, m = new THREE.Matrix4();
+  const s = new THREE.Vector3(), p = new THREE.Vector3();
+  for (const set of selBillSets) {
+    for (let i = 0; i < set.items.length; i++) {
+      const it = set.items[i];
+      p.set(it.c[0] - selCenter.x, it.c[1] - selCenter.y, it.c[2] - selCenter.z);
+      s.set(it.w || 1, it.h || 1, 1);
+      m.compose(p, q, s);
+      set.mesh.setMatrixAt(i, m);
+    }
+    set.mesh.instanceMatrix.needsUpdate = true;
+  }
+}
 
 function selSetInfo(msg) {
   $('selInfo').innerHTML = msg || (selPrims
@@ -1127,7 +1155,13 @@ function selRedrawHighlight() {
     const a = selPrims[id].aabb;
     const box = new THREE.Box3(new THREE.Vector3(a[0], a[1], a[2]),
                                new THREE.Vector3(a[3], a[4], a[5]));
-    selHi.add(new THREE.Box3Helper(box, 0x46c46a));
+    const h = new THREE.Box3Helper(box, 0x46ff6a);
+    // Drawn ON TOP: a selection box buried inside the geometry it outlines is
+    // invisible exactly when you need it.
+    h.material.depthTest = false;
+    h.material.transparent = true;
+    h.renderOrder = 999;
+    selHi.add(h);
   }
   selHi.position.copy(selRoot.position);
   selSetInfo();
@@ -1140,6 +1174,12 @@ async function selLoadTrack() {
   try {
     const ix = await (await fetch('/api/library/primindex?level=' + lvl)).json();
     selPrims = ix.prims;
+    // The level lives in raw world coordinates -- level023 is centred near
+    // (623121, -344, 295836) -- so without this offset it loads hundreds of
+    // thousands of units from the camera and looks like nothing happened.
+    selCenter.set(ix.center[0], ix.center[1], ix.center[2]);
+    const off = selCenter.clone().negate();
+    selRoot.position.copy(off); selBill.position.copy(off); selHi.position.copy(off);
     const buf = await (await fetch('/api/library/prims?level=' + lvl)).arrayBuffer();
     gltfLoader.parse(buf, '', async (gltf) => {
       const pages = new Set();
@@ -1157,9 +1197,49 @@ async function selLoadTrack() {
       while (selRoot.children.length) selRoot.remove(selRoot.children[0]);
       selRoot.add(gltf.scene);
       selChosen.clear(); selRedrawHighlight();
-      setStatus(`level${String(lvl).padStart(3, '0')}: ${selPrims.length} selectable primitives.`, 'ok');
+      await selLoadBillboards(lvl, types);
+      const a = selPrims.reduce((acc, p) => {
+        for (let k = 0; k < 3; k++) {
+          acc[k] = Math.min(acc[k], p.aabb[k]); acc[k + 3] = Math.max(acc[k + 3], p.aabb[k + 3]);
+        } return acc;
+      }, [1e30, 1e30, 1e30, -1e30, -1e30, -1e30]);
+      fitCamera(Math.max(a[3] - a[0], a[5] - a[2]) * 0.5);
+      const k = ix.kinds || {};
+      setStatus(`level${String(lvl).padStart(3, '0')}: ${selPrims.length} selectable primitives `
+        + `(${k.structure || 0} structure, ${k.slab || 0} slab, ${k.billboard || 0} billboard, `
+        + `${k.post || 0} post, ${k.ribbon || 0} rail).`, 'ok');
     }, (err) => setStatus('prims GLB parse error: ' + err, 'bad'));
   } catch (e) { setStatus('load failed: ' + e, 'bad'); }
+}
+
+async function selLoadBillboards(lvl, types) {
+  while (selBill.children.length) selBill.remove(selBill.children[0]);
+  selBillSets = [];
+  let r;
+  try { r = await (await fetch('/api/library/billboards?level=' + lvl)).json(); }
+  catch { return; }
+  if (!r.ok || !r.count) return;
+  const byPage = new Map();
+  for (const b of r.billboards) {
+    if (!byPage.has(b.page)) byPage.set(b.page, []);
+    byPage.get(b.page).push(b);
+  }
+  const geo = new THREE.PlaneGeometry(1, 1);
+  for (const [page, items] of byPage) {
+    let tex = null;
+    try { tex = await trackTexture(lvl, `page_${String(page).padStart(3, '0')}.png`, false); }
+    catch { /* untextured is still selectable */ }
+    // Billboards are keyed art (trees, glows), so alphaTest rather than opaque:
+    // page type 0 here would draw the sprite's whole quad as a solid rectangle.
+    const mat = new THREE.MeshBasicMaterial({
+      map: tex, color: 0xffffff, side: THREE.DoubleSide,
+      transparent: true, alphaTest: (types && types[page] === 2) ? 0.02 : 0.35,
+      depthWrite: true });
+    const mesh = new THREE.InstancedMesh(geo, mat, items.length);
+    mesh.frustumCulled = false;    // matrices are rewritten every frame
+    selBill.add(mesh);
+    selBillSets.push({ mesh, items });
+  }
 }
 
 function selPidAt(ev) {
@@ -1254,8 +1334,37 @@ async function selSave(del) {
 $('selLoad').onclick = selLoadTrack;
 $('selClearGeom').onclick = () => {
   while (selRoot.children.length) selRoot.remove(selRoot.children[0]);
+  while (selBill.children.length) selBill.remove(selBill.children[0]);
+  selBillSets = [];
   selPrims = null; selChosen.clear(); selRedrawHighlight(); selSetInfo();
 };
+
+// ---- library overview: what is actually ON DISK right now ----------------
+// The library is built by several independent passes (catalogue sweep, road
+// curation, landmark export, hand selections) that are regenerated separately,
+// so the useful question is not "what could exist" but "what is here, and is it
+// stale relative to the rest".
+async function libOverview() {
+  let o;
+  try { o = await (await fetch('/api/library/overview')).json(); }
+  catch (e) { $('libOverview').textContent = 'overview failed: ' + e; return; }
+  if (!o.ok) { $('libOverview').textContent = o.error || 'no library'; return; }
+  const rs = Object.entries(o.road_sets || {}).map(([k, v]) => `${k} ${v}`).join(' · ');
+  const kt = Object.entries(o.kind_totals || {}).sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${k} ${v.toLocaleString()}`).join(' · ');
+  const pr = Object.entries(o.page_roles || {}).sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${k} ${v}`).join(' · ');
+  $('libOverview').innerHTML = `
+    <div><b>Catalogue</b> · built ${o.generated || '?'} · ${o.levels.length} levels</div>
+    <div>${(o.objects_total || 0).toLocaleString()} objects &mdash; ${kt}</div>
+    <div><b>Pages</b> ${o.page_total} &mdash; ${pr}</div>
+    <div><b>Night tracks</b> ${(o.night || []).join(', ') || 'none'}</div>
+    <div><b>Curated roads</b> ${rs || 'none'}</div>
+    <div><b>Landmark pages</b> ${o.landmark_pages} · <b>prefabs in build</b> ${o.prefabs_in_build}</div>
+    <div><b>Hand work</b> ${o.tags} tag(s), ${o.selections} selection(s)
+      ${Object.keys(o.selections_by_kind || {}).length
+        ? '(' + Object.entries(o.selections_by_kind).map(([k, v]) => `${k} ${v}`).join(', ') + ')' : ''}</div>`;
+}
 $('selSave').onclick = () => selSave(false);
 $('selDelete').onclick = () => selSave(true);
 $('selRefresh').onclick = selRefreshList;
@@ -1266,5 +1375,6 @@ $('selPick').onchange = (e) => { controls.enabled = !e.target.checked; };
 // ---------------------------------------------------------------- boot
 loadList();
 libLoad();
+libOverview();
 selRefreshList();
 $('blankBtn').click();
