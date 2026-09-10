@@ -218,7 +218,14 @@ hr{border:none;border-top:1px solid var(--edge);margin:8px 0}
             <option value="prim">Primitive (page-exact run of faces)</option>
             <option value="face">Face (single triangle)</option>
           </select></div>
-        <label class="row"><span>Structure only</span><input type="checkbox" id="selStructOnly" checked></label>
+        <div class="row"><span>Pickable</span>
+          <select id="selFilter">
+            <option value="all">Everything</option>
+            <option value="structure">Buildings / walls / roofs</option>
+            <option value="slab">Ground / floor / road slabs</option>
+            <option value="rail">Guardrails / posts / fences</option>
+            <option value="billboard">Billboards (trees, signs)</option>
+          </select></div>
         <div class="hint">In pick mode: <b>left-drag</b> = box select ·
           <b>right-drag</b> = orbit · <b>middle-drag</b> / wheel = zoom ·
           WASD still flies. Click = select · Shift+click / Shift+drag = add ·

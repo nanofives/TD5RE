@@ -1414,26 +1414,62 @@ function selHitAt(ev) {
   const m = new THREE.Vector2(((ev.clientX - r.left) / r.width) * 2 - 1,
                               -((ev.clientY - r.top) / r.height) * 2 + 1);
   const rc = new THREE.Raycaster(); rc.setFromCamera(m, camera);
+  // Hits from BOTH the merged solid geometry (selRoot) and the camera-facing
+  // billboards (selBill, instanced), tagged with distance so they interleave
+  // correctly -- a tree sprite in front of a wall must win. Billboards carry no
+  // per-face detail, so their whole quad is one "face".
+  const hits = [];
   for (const h of rc.intersectObject(selRoot, true)) {
     const attr = h.object.geometry && primIdAttr(h.object.geometry);
     if (!attr || !h.face) continue;
-    const pid = Math.round(attr.getX(h.face.a));
-    const rs = (selRanges && selRanges.get(pid)) || [];
+    hits.push({ dist: h.distance, obj: h.object, faceA: h.face.a,
+                pid: Math.round(attr.getX(h.face.a)) });
+  }
+  for (const set of selBillSets) {
+    for (const bh of rc.intersectObject(set.mesh, true)) {
+      const it = set.items[bh.instanceId];
+      if (it) hits.push({ dist: bh.distance, bill: true, pid: it.id, faceA: -1 });
+    }
+  }
+  hits.sort((a, b) => a.dist - b.dist);
+  // Walk front-to-back and return the first hit the filter ALLOWS, not simply
+  // the frontmost. A guardrail is a thin ribbon that usually sits in front of a
+  // wall or over a slab; with the filter narrowed to rails, the frontmost hit
+  // is often the very thing being excluded, and returning it would make the
+  // click select nothing.
+  for (const h of hits) {
+    if (!selAllowed(h.pid)) continue;
+    if (h.bill) return { pid: h.pid, face: 0 };   // one quad, one "face"
+    const rs = (selRanges && selRanges.get(h.pid)) || [];
     let face = -1, base = 0;
     for (const rg of rs) {
-      if (rg.mesh === h.object && h.face.a >= rg.start && h.face.a < rg.start + rg.count) {
-        face = base + Math.floor((h.face.a - rg.start) / 3); break;
+      if (rg.mesh === h.obj && h.faceA >= rg.start && h.faceA < rg.start + rg.count) {
+        face = base + Math.floor((h.faceA - rg.start) / 3); break;
       }
       base += rg.count / 3;
     }
-    return { pid, face };
+    return { pid: h.pid, face };
   }
   return null;
 }
 
+// The segmenter's kind_hint vocabulary (td5_assetlib.all_prims) is finer than
+// the four groups the filter offers, so map it. "rail" gathers the roadside
+// furniture the old "structure only" gate silently hid -- guardrails are
+// `ribbon`, their poles are `post`, fences are `ribbon` too -- which is what
+// made them unpickable. "structure" here also takes `detail` (small attached
+// trim) so a balustrade on a building is not orphaned from it.
+function selGroupOf(p) {
+  const k = p.kind;
+  if (p.billboard || k === 'billboard') return 'billboard';
+  if (k === 'slab') return 'slab';
+  if (k === 'ribbon' || k === 'post') return 'rail';
+  return 'structure';   // structure, detail, loose, wall, anything else
+}
 function selAllowed(id) {
   if (id < 0 || !selPrims || !selPrims[id]) return false;
-  return !($('selStructOnly').checked) || selPrims[id].structure;
+  const f = $('selFilter') ? $('selFilter').value : 'all';
+  return f === 'all' || selGroupOf(selPrims[id]) === f;
 }
 
 function selClearAll() { selChosen.clear(); selFaces.clear(); }
@@ -1550,6 +1586,10 @@ window.addEventListener('keydown', (e) => {
 });
 
 $('selGran').onchange = () => { selRedrawHighlight(); };
+// Changing the filter is a lens on what a CLICK can hit; it does not retro-drop
+// what is already selected, which would silently erase a careful selection when
+// you narrow the lens to inspect one group.
+$('selFilter').onchange = () => selSetInfo();
 // Promote whatever faces are picked to their whole primitives -- the usual move
 // after using face mode to find which piece a detail belongs to.
 $('selGrow').onclick = () => {
