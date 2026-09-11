@@ -16,20 +16,29 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
 #app{display:flex;height:100vh;width:100vw;overflow:hidden}
 #view{flex:1 1 auto;position:relative;min-width:0}
 #canvasWrap{position:absolute;inset:0}
+#dragBox{position:absolute;display:none;pointer-events:none;
+  border:1px solid var(--accent);background:rgba(58,160,255,.12)}
 #hud{position:absolute;left:10px;bottom:8px;color:var(--muted);font-size:12px;
   pointer-events:none;text-shadow:0 1px 2px #000}
 #hud b{color:var(--fg)}
-#panel{flex:0 0 360px;background:var(--panel);border-left:1px solid var(--edge);
+#panel{flex:0 0 380px;background:var(--panel);border-left:1px solid var(--edge);
   overflow-y:auto;padding:12px 14px}
 h1{font-size:16px;margin:2px 0 10px}
 h1 small{color:var(--muted);font-weight:400;font-size:11px}
+#tabs{display:flex;gap:4px;margin:0 0 10px}
+#tabs button{flex:1;padding:7px 0;font-weight:700;letter-spacing:.5px;
+  background:#11141a;border:1px solid var(--edge);color:var(--muted)}
+#tabs button.on{background:var(--accent);border-color:var(--accent);color:#06121f}
 .grp{border:1px solid var(--edge);border-radius:8px;margin:8px 0;background:#191c23}
 .grp>summary{cursor:pointer;padding:8px 10px;font-weight:600;list-style:none;
   color:var(--fg);user-select:none}
 .grp>summary::-webkit-details-marker{display:none}
 .grp>summary:before{content:"▸ ";color:var(--muted)}
 .grp[open]>summary:before{content:"▾ "}
+.grp.gated>summary{color:var(--muted)}
 .grp .body{padding:8px 10px;border-top:1px solid var(--edge)}
+.gate{border-left:2px solid var(--warn);padding:2px 0 2px 8px;color:var(--muted);
+  font-size:12px;line-height:1.5}
 .row{display:flex;align-items:center;gap:8px;margin:6px 0}
 .row>span:first-child{flex:0 0 96px;color:var(--muted)}
 input,select,button{font:inherit;color:var(--fg);background:#11141a;
@@ -60,8 +69,9 @@ hr{border:none;border-top:1px solid var(--edge);margin:8px 0}
 <div id="app">
   <div id="view">
     <div id="canvasWrap"></div>
+    <div id="dragBox"></div>
     <div id="hud">
-      <div>WASD = fly · Q/E = down/up · Shift = faster · drag empty = orbit · wheel = zoom · drag a node to move it</div>
+      <div id="hudHelp">left-click = select · right-drag = orbit · middle-drag = pan · wheel = zoom · WASD = fly · Q/E = down/up</div>
       <div id="hudStats"></div>
     </div>
   </div>
@@ -69,173 +79,276 @@ hr{border:none;border-top:1px solid var(--edge);margin:8px 0}
   <div id="panel">
     <h1>TD5 Track Studio <small id="ver"></small></h1>
 
-    <details class="grp" open><summary>1 · Track</summary><div class="body">
-      <div class="row"><span>Import level</span>
+    <div id="tabs">
+      <button id="tabTracksBtn" class="on">TRACKS</button>
+      <button id="tabLibraryBtn">LIBRARY</button>
+    </div>
+
+    <!-- ============================================================ TRACKS -->
+    <div id="tabTracks">
+
+    <details class="grp"><summary>1 &middot; Load a track</summary><div class="body">
+      <div class="row"><span>Level</span>
         <select id="importSel"></select></div>
       <div class="btnrow">
-        <button class="sm" id="importBtn">Import ▸</button>
+        <button class="sm" id="importBtn">Load centerline ▸</button>
         <button class="sm" id="refreshBtn">↻ list</button>
       </div>
-      <div class="hint">…or start from a sample / blank:</div>
-      <div class="btnrow">
-        <button class="sm" data-sample="oval">Oval</button>
-        <button class="sm" data-sample="figure8">Figure-8</button>
-        <button class="sm" data-sample="straight">Straight</button>
-        <button class="sm" id="blankBtn">Blank</button>
-      </div>
-      <div class="hint">…or load an external centerline file (auto-detects lanes &amp; branches):</div>
-      <div class="btnrow">
-        <button class="sm" id="loadFileBtn">Load file (CSV/JSON)…</button>
-      </div>
-      <input type="file" id="trackFile" accept=".csv,.json,.txt" style="display:none">
-    </div></details>
-
-    <details class="grp" open><summary>2 · Identity</summary><div class="body">
-      <div class="row"><span>Name</span><input type="text" id="name" maxlength="30" value="MY TRACK"></div>
-      <div class="row"><span>Type</span>
-        <select id="circuit">
-          <option value="1">Circuit (laps)</option>
-          <option value="0">Point-to-point</option>
-        </select></div>
-      <div class="row"><span>Lane width</span><input type="number" id="laneWidth" value="1500" min="400" step="100"></div>
-    </div></details>
-
-    <details class="grp" open><summary>3 · Selected node</summary><div class="body">
-      <div id="nodeInfo">Click a node to select it.</div>
-      <div class="row"><span>Lanes</span><input type="number" id="nLanes" value="4" min="1" max="12"></div>
-      <div class="row"><span>Width</span><input type="number" id="nWidth" value="6000" min="800" step="100"></div>
-      <div class="row"><span>Surface</span>
-        <select id="nSurface">
-          <option value="0">Dry asphalt</option><option value="1">Wet</option>
-          <option value="2">Dirt</option><option value="3">Gravel</option>
-        </select></div>
-      <div class="btnrow">
-        <button class="sm" id="addNode">+ node after</button>
-        <button class="sm" id="delNode">– delete node</button>
-      </div>
-      <div class="hint">Shift-click an edge to insert a node there. Apply-to-all below.</div>
-      <div class="btnrow">
-        <button class="sm" id="applyAll">apply lanes/width to all</button>
-        <button class="sm" id="detectLanes">detect lanes from width</button>
-      </div>
-    </div></details>
-
-    <details class="grp"><summary>4 · Branches</summary><div class="body">
-      <div id="branchList" class="hint">No branches.</div>
-      <div class="btnrow">
-        <button class="sm" id="addBranch">+ draw branch</button>
-        <button class="sm" id="delBranch">– last branch</button>
-      </div>
-      <div class="hint">Click "draw branch", then click points across the track and Finish. Branches peel off the right side and rejoin where they end.</div>
-      <div class="btnrow" id="branchDrawCtl" style="display:none">
-        <input type="number" id="branchLanes" value="3" min="1" max="8" title="branch lanes">
-        <button class="sm" id="finishBranch">Finish branch</button>
-        <button class="sm" id="cancelBranch">Cancel</button>
-      </div>
-    </div></details>
-
-    <details class="grp"><summary>5 · Checkpoints</summary><div class="body">
-      <div class="row"><span>Mode</span>
-        <select id="cpMode"><option value="auto">Auto (evenly)</option>
-          <option value="manual">Manual (pick nodes)</option></select></div>
-      <div class="row" id="cpAutoRow"><span>Count</span><input type="number" id="cpCount" value="4" min="1" max="7"></div>
-      <div id="cpManual" class="hint" style="display:none">Shift+C on a selected node to toggle a checkpoint there.</div>
-    </div></details>
-
-    <details class="grp"><summary>6 · Environment</summary><div class="body">
-      <div class="row"><span>Weather</span>
-        <select id="weather"><option value="2">Clear</option><option value="0">Rain</option>
-          <option value="1">Snow (cut)</option></select></div>
-      <div class="row"><span>Traffic</span>
-        <select id="traffic"><option value="0">Off</option><option value="1">On</option></select></div>
-      <div class="row"><span>Fog</span>
-        <select id="fog"><option value="0">Off</option><option value="1">On</option></select></div>
-      <div class="row" id="fogColorRow" style="display:none"><span>Fog color</span>
-        <input type="color" id="fogColor" value="#9aa6b4"></div>
-      <label class="row"><span>Textured road</span><input type="checkbox" id="texturedRoad" checked></label>
-      <div class="hint">On: the build generates a textured road (models.bin + asphalt) shown
-        in-game. Off: flat fallback road.</div>
-    </div></details>
-
-    <details class="grp"><summary>7 · View / textures</summary><div class="body">
-      <label class="row"><span>Edit nodes</span><input type="checkbox" id="editNodes"></label>
-      <label class="row"><span>Show lanes</span><input type="checkbox" id="showLanes"></label>
-      <div class="btnrow">
-        <button class="sm" id="roadTexBtn">Road texture…</button>
-        <button class="sm" id="groundTexBtn">Ground texture…</button>
-      </div>
-      <div class="btnrow">
-        <button class="sm" id="skyTexBtn">Skybox…</button>
-        <button class="sm" id="clearTexBtn">Clear textures</button>
-      </div>
-      <input type="file" id="roadTexFile" accept="image/*" style="display:none">
-      <input type="file" id="groundTexFile" accept="image/*" style="display:none">
-      <input type="file" id="skyTexFile" accept="image/*" style="display:none">
       <hr>
-      <div class="hint">From the selected (imported) track:</div>
+      <div class="hint">Scenery &amp; sky come from the loaded track:</div>
       <div class="btnrow">
-        <button class="sm" id="loadEnvBtn">Load environment</button>
+        <button class="sm" id="loadEnvBtn">Load geometry</button>
         <button class="sm" id="skyTrackBtn">Sky from track</button>
-        <button class="sm" id="clearEnvBtn">Clear env</button>
+        <button class="sm" id="clearEnvBtn">Unload</button>
       </div>
+      <div class="hint">The whole shipped track as you see it in-game. This is
+        the <b>same</b> load as LIBRARY &rarr; Pick geometry &mdash; one
+        endpoint, one offset, always pickable &mdash; so the two tabs can never
+        show a different version of the same level.</div>
+      <hr>
+      <label class="row"><span>Show lanes</span><input type="checkbox" id="showLanes"></label>
       <label class="row"><span>Checkpoint gates</span><input type="checkbox" id="cpGates" checked></label>
-      <div class="hint">"Load environment" pulls the track's scenery (models.bin) + its
-        texture pages; the dropdowns apply a track texture to the road / ground.
-        Textures &amp; skybox are preview-only. Turn off "Edit nodes" to look around freely.</div>
     </div></details>
 
-    <details class="grp"><summary>8 · Lights (street lamps)</summary><div class="body">
-      <div class="hint">Curated per-level street lights (td5mod/src/td5re/lights/).
-        Load env geometry first to place lights against the real scenery.</div>
-      <div class="btnrow">
-        <button class="sm" id="lightsLoadBtn">Load lights</button>
-        <button class="sm" id="lightsSeedBtn">Import captured seed</button>
-      </div>
-      <label class="row"><span>Edit lights</span><input type="checkbox" id="editLights"></label>
-      <div id="lightInfo" class="hint">No lights loaded.</div>
-      <div class="row"><span>Position</span>
-        <div class="xyz">
-          <input type="number" id="lX" step="10" title="x">
-          <input type="number" id="lY" step="10" title="y (engine: smaller = higher)">
-          <input type="number" id="lZ" step="10" title="z">
-        </div></div>
-      <div class="row"><span>Range</span><input type="number" id="lRange" step="100" min="0" placeholder="default"></div>
-      <div class="row"><span>Intensity</span><input type="number" id="lIntensity" step="0.05" min="0" placeholder="default"></div>
-      <div class="row"><span>Colour</span><input type="color" id="lColor" value="#ffd18c">
-        <button class="sm" id="lColorClear" title="use file defaults">default</button></div>
-      <div class="btnrow">
-        <button class="sm" id="addLight">+ light</button>
-        <button class="sm" id="dupLight">duplicate</button>
-        <button class="sm" id="delLight">– delete</button>
-        <button class="sm" id="clearLights">clear ALL</button>
-      </div>
-      <div class="hint">Shift-click ground to drop a light (head height above the
-        nearest road node). Drag a marker to move it. Delete removes it.</div>
-      <hr>
-      <div class="row"><span>Defaults</span>
-        <input type="number" id="ldRange" step="100" value="2400" title="default range">
-        <input type="number" id="ldIntensity" step="0.05" value="1.0" title="default intensity" style="width:64px">
-        <input type="color" id="ldColor" value="#ffd18c" title="default colour"></div>
-      <hr>
-      <div class="hint">Emissive glow pages (additive) — tick <b>suppress</b> to retire the
-        painted circle in-game (the real light replaces it):</div>
-      <div id="glowPages" class="hint">Import a level to list its additive pages.</div>
-      <div class="btnrow">
-        <button class="sm" id="glowShowBtn">show glow fixtures</button>
-        <button class="sm" id="glowGenBtn">+ lights at glow fixtures</button>
-      </div>
-      <div class="hint">Click a texture above to select it as the <b>fixture source</b>
-        (e.g. the lamp-head glow), then "show glow fixtures" / "+ lights at glow
-        fixtures" cluster THAT page's scenery geometry into fixtures (no selection =
-        the emissive candidates). Cyan markers = near the road; grey (backdrop /
-        off-level) are skipped by "+ lights". Env must be loaded first.</div>
-      <button class="primary" id="lightsSaveBtn">Save lights.json ▸</button>
+    <details class="grp gated"><summary>2 &middot; Identity</summary><div class="body">
+      <div class="gate"><b>Read-only for now.</b> Naming a track, switching it
+        between circuit and point-to-point and setting its lane width are
+        <i>authoring</i> controls, and authoring is parked &mdash; this studio
+        currently loads and inspects shipped tracks rather than making new
+        ones.</div>
     </div></details>
 
-    <button class="primary" id="buildBtn">Build &amp; register track ▸</button>
-    <div id="status">Ready. Import a level or start from a sample, edit, then Build.</div>
+    <details class="grp gated"><summary>3 &middot; Nodes</summary><div class="body">
+      <div class="gate"><b>Read-only for now.</b> Moving, inserting and deleting
+        centerline nodes, and per-node lanes / width / surface, rewrite the track
+        &mdash; parked with the rest of authoring.</div>
+    </div></details>
+
+    <details class="grp gated"><summary>4 &middot; Branches</summary><div class="body">
+      <div class="gate"><b>Read-only for now.</b> Drawing a branch that peels off
+        the main ring and rejoins it is authoring &mdash; parked.</div>
+    </div></details>
+
+    <details class="grp gated"><summary>5 &middot; Checkpoints</summary><div class="body">
+      <div class="gate"><b>Read-only for now.</b> Checkpoint placement is
+        authoring &mdash; parked. A loaded track still <i>draws</i> its own
+        checkpoints; the gate toggle is in section 1.</div>
+    </div></details>
+
+    <details class="grp gated"><summary>6 &middot; Environment</summary><div class="body">
+      <div class="gate"><b>Read-only for now.</b> Weather, traffic and fog are
+        written into a track being built &mdash; parked. Loading a shipped
+        track's own environment is in section 1.</div>
+    </div></details>
+
+    <div class="hint" style="margin-top:10px">Authoring (build &amp; register a
+      track, node editing, samples, CSV import) and the street-lamp editor are
+      parked, not deleted &mdash; their controls still exist and are wired, they
+      are just not shown. See <code>PARKED</code> in
+      <code>index.html</code>.</div>
+
+    </div><!-- /tabTracks -->
+
+    <!-- =========================================================== LIBRARY -->
+    <div id="tabLibrary" style="display:none">
+
+      <div class="row"><span>Source</span>
+        <select id="libSource">
+          <option value="level">A shipped level</option>
+          <option value="gen">The auto track generator</option>
+        </select></div>
+
+      <div id="libLevelRow" class="row"><span>Level</span><select id="libLevel"></select></div>
+      <select id="selLevel" style="display:none"></select>
+
+      <!-- ---------------------------------------------------- level source -->
+      <div id="libLevelPanes">
+
+      <details class="grp"><summary>What is on disk</summary><div class="body">
+        <div id="libOverview" class="hint" style="line-height:1.5">Loading…</div>
+        <div class="hint">Reported from the files, not recomputed: the catalogue,
+          the road curation, the landmark export and your hand selections are
+          four passes that regenerate independently, so the useful question is
+          whether they have drifted apart.</div>
+      </div></details>
+
+      <details class="grp"><summary>Browse catalogue</summary><div class="body">
+        <div class="row"><span>Kind</span><select id="libKind">
+          <option value="__lm">SET PIECES (what the generator ships)</option>
+          <option value="">(any catalogue object)</option><option>landmark</option><option>building</option>
+          <option>plaza</option><option>facade</option><option>rail</option>
+          <option>road</option><option>sign</option><option>tree</option>
+          <option>post</option><option>verge</option><option>unknown</option>
+        </select></div>
+        <div class="row"><span>Min faces</span><input type="number" id="libMinFaces" value="20" min="1" step="1"></div>
+        <div class="btnrow"><button class="sm" id="libRefresh">↻ list</button>
+          <button class="sm" id="libClearPreview">clear preview</button></div>
+        <label class="row"><span>Fill holes</span><input type="checkbox" id="libFill"></label>
+        <div class="hint">Set pieces only: lays a continuous grass plane across the
+          footprint to close the gaps the segmenter leaves in the plaza.</div>
+        <div id="libCount" class="hint"></div>
+        <div id="libList" style="max-height:210px;overflow:auto;border:1px solid var(--edge);
+             border-radius:4px;margin-top:4px"></div>
+        <div id="libInfo" class="hint" style="margin-top:6px">No object selected.</div>
+        <div id="libPages" style="display:flex;flex-wrap:wrap;gap:2px;margin-top:4px"></div>
+        <div class="row"><span>Kind override</span><select id="libKindSet">
+          <option value="">(keep)</option><option>landmark</option><option>building</option>
+          <option>plaza</option><option>facade</option><option>rail</option>
+          <option>road</option><option>sign</option><option>tree</option>
+          <option>post</option><option>verge</option><option>unknown</option>
+        </select></div>
+        <div class="row"><span>Note</span><input type="text" id="libNote" maxlength="120" placeholder="why this verdict"></div>
+        <div class="btnrow"><button class="sm" id="libSaveTag">Save tag</button>
+          <button class="sm" id="libClearTag">Clear tag</button></div>
+        <div class="hint">Tags persist to <code>re/assets/library/tags.json</code>,
+          separate from the catalogue on purpose: re-running the sweep
+          regenerates the catalogue but must not discard hand corrections.</div>
+      </div></details>
+
+      <details class="grp"><summary>Pick geometry</summary><div class="body">
+        <div class="hint">File your own selections under the auto-track
+          categories. Automatic segmentation is right about the big pieces and
+          wrong at the edges; this is how you fix it.</div>
+        <div class="btnrow">
+          <button class="sm" id="selLoad">Load geometry ▸</button>
+          <button class="sm" id="selClearGeom">Unload</button>
+        </div>
+        <div class="hint">Same load as TRACKS section 1. If the level is already
+          loaded there, just tick Pick mode.</div>
+        <label class="row"><span>Pick mode</span><input type="checkbox" id="selPick"></label>
+        <div class="row"><span>Granularity</span>
+          <select id="selGran">
+            <option value="prim">Primitive (page-exact run of faces)</option>
+            <option value="face">Face (single triangle)</option>
+          </select></div>
+        <div class="row"><span>Pickable</span>
+          <select id="selFilter">
+            <option value="all">Everything</option>
+            <option value="structure">Buildings / walls / roofs</option>
+            <option value="slab">Ground / floor / road slabs</option>
+            <option value="rail">Guardrails / posts / fences</option>
+            <option value="billboard">Billboards (trees, signs)</option>
+          </select></div>
+        <div class="hint">In pick mode: <b>left-drag</b> = box select ·
+          <b>right-drag</b> = orbit · <b>middle-drag</b> / wheel = zoom ·
+          WASD still flies. Click = select · Shift+click / Shift+drag = add ·
+          Ctrl+click / Ctrl+drag = remove · Esc = clear.</div>
+        <div id="selInfo" class="hint">Nothing loaded.</div>
+        <div class="btnrow">
+          <button class="sm" id="selGrow">select whole primitive</button>
+          <button class="sm" id="selInvert">invert</button>
+        </div>
+        <div class="row"><span>Name</span><input type="text" id="selName" maxlength="40" placeholder="e.g. cathedral"></div>
+        <div class="row"><span>Category</span><select id="selKind"></select></div>
+        <div class="btnrow">
+          <button class="sm" id="selSave">Save selection</button>
+          <button class="sm" id="selDelete">Delete by name</button>
+          <button class="sm" id="selRefresh">↻ list</button>
+        </div>
+        <div id="selList" class="hint">No saved selections.</div>
+        <div class="hint">Saved to <code>re/assets/library/selections.json</code>.
+          NOT yet read by the exporter &mdash; selecting and filing works, having
+          the generator prefer a hand-made selection over the segmenter's guess
+          is the next step.</div>
+      </div></details>
+
+      </div><!-- /libLevelPanes -->
+
+      <!-- ------------------------------------------------ generator source -->
+      <div id="libGenPanes" style="display:none">
+        <details class="grp" open><summary>What the generator ships</summary><div class="body">
+          <div id="genSummary" class="hint" style="line-height:1.5">Loading…</div>
+          <div class="hint">This is the kit baked into <code>td5re.exe</code>, not
+            the catalogue on disk: the set pieces in
+            <code>td5_tg_prefab_data.h</code> and the texture pages in
+            <code>td5_tg_real_tex_*.h</code>. If it is not here, the generator
+            cannot place it.</div>
+        </div></details>
+
+        <details class="grp"><summary>Set pieces in the build</summary><div class="body">
+          <div id="genPrefabs" class="hint">Loading…</div>
+          <div class="hint">Click one to preview it in the frame the generator
+            stamps it in &mdash; centred in XZ, base at y=0.</div>
+        </div></details>
+
+        <details class="grp"><summary>Road surface pool</summary><div class="body">
+          <div id="genRoads" class="hint">Loading…</div>
+          <div class="hint">Curated per surface class. The biome still decides
+            grip; this decides which real page is drawn.</div>
+        </div></details>
+      </div>
+
+    </div><!-- /tabLibrary -->
+
+    <div id="status">Ready. Load a level to look at it, or open the LIBRARY tab.</div>
   </div>
 </div>
+
+<!-- ===========================================================================
+     PARKED CONTROLS
+     Authoring (sections 2-6 + build), the texture overrides and the whole
+     street-lamp editor are hidden rather than deleted. Every one of these
+     controls is still queried and wired by track_studio.js, so removing the
+     markup would throw on load; keeping it here means restoring a feature is a
+     CSS change, not a rewrite.
+     ======================================================================== -->
+<div id="parked" style="display:none" aria-hidden="true">
+  <!-- 2 -->
+  <input type="text" id="name" maxlength="30" value="MY TRACK">
+  <select id="circuit"><option value="1">Circuit (laps)</option><option value="0">Point-to-point</option></select>
+  <input type="number" id="laneWidth" value="1500">
+  <!-- 1 (samples / file import) -->
+  <button data-sample="oval">Oval</button><button data-sample="figure8">Figure-8</button>
+  <button data-sample="straight">Straight</button><button id="blankBtn">Blank</button>
+  <button id="loadFileBtn">Load file</button>
+  <input type="file" id="trackFile" accept=".csv,.json,.txt">
+  <!-- 3 -->
+  <div id="nodeInfo"></div>
+  <input type="number" id="nLanes" value="4"><input type="number" id="nWidth" value="6000">
+  <select id="nSurface"><option value="0">Dry asphalt</option><option value="1">Wet</option>
+    <option value="2">Dirt</option><option value="3">Gravel</option></select>
+  <button id="addNode"></button><button id="delNode"></button>
+  <button id="applyAll"></button><button id="detectLanes"></button>
+  <label><input type="checkbox" id="editNodes"></label>
+  <!-- 4 -->
+  <div id="branchList"></div>
+  <button id="addBranch"></button><button id="delBranch"></button>
+  <div id="branchDrawCtl" style="display:none"><input type="number" id="branchLanes" value="3">
+    <button id="finishBranch"></button><button id="cancelBranch"></button></div>
+  <!-- 5 -->
+  <select id="cpMode"><option value="auto">Auto</option><option value="manual">Manual</option></select>
+  <div id="cpAutoRow"><input type="number" id="cpCount" value="4"></div>
+  <div id="cpManual"></div>
+  <!-- 6 -->
+  <select id="weather"><option value="2">Clear</option><option value="0">Rain</option><option value="1">Snow</option></select>
+  <select id="traffic"><option value="0">Off</option><option value="1">On</option></select>
+  <select id="fog"><option value="0">Off</option><option value="1">On</option></select>
+  <div id="fogColorRow"><input type="color" id="fogColor" value="#9aa6b4"></div>
+  <input type="checkbox" id="texturedRoad" checked>
+  <!-- 7 (texture overrides) -->
+  <button id="roadTexBtn"></button><button id="groundTexBtn"></button>
+  <button id="skyTexBtn"></button><button id="clearTexBtn"></button>
+  <input type="file" id="roadTexFile" accept="image/*">
+  <input type="file" id="groundTexFile" accept="image/*">
+  <input type="file" id="skyTexFile" accept="image/*">
+  <!-- 8 (street lamps -- reworked another time) -->
+  <button id="lightsLoadBtn"></button><button id="lightsSeedBtn"></button>
+  <input type="checkbox" id="editLights">
+  <div id="lightInfo"></div>
+  <input type="number" id="lX"><input type="number" id="lY"><input type="number" id="lZ">
+  <input type="number" id="lRange"><input type="number" id="lIntensity">
+  <input type="color" id="lColor" value="#ffd18c"><button id="lColorClear"></button>
+  <button id="addLight"></button><button id="dupLight"></button>
+  <button id="delLight"></button><button id="clearLights"></button>
+  <input type="number" id="ldRange" value="2400"><input type="number" id="ldIntensity" value="1.0">
+  <input type="color" id="ldColor" value="#ffd18c">
+  <div id="glowPages"></div>
+  <button id="glowShowBtn"></button><button id="glowGenBtn"></button>
+  <button id="lightsSaveBtn"></button>
+  <!-- build -->
+  <button id="buildBtn"></button>
+</div>
+
 <script type="module" src="/track_studio.js"></script>
 </body>
 </html>

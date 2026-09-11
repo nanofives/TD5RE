@@ -7196,6 +7196,16 @@ static const char *const k_at_blend_n[] = { "SHARP", "SHORT", "NORMAL", "LONG" }
 static const int  k_at_off_on_v[] = { 0, 1 };
 static const char *const k_at_off_on_n[] = { "OFF", "ON" };
 
+/* [GEOMLIB] ROAD SURFACE. Must stay the same arity as k_tgr_roadset_v in
+ * td5_trackgen.c -- the arity check at screen entry asserts it. PROCEDURAL is
+ * what the generator has always drawn; REAL N picks the Nth curated shipped
+ * road page of whichever surface class each biome asks for. */
+static const int  k_at_roadset_v[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8 };
+static const char *const k_at_roadset_n[] = { "PROCEDURAL",
+                                              "REAL 1", "REAL 2", "REAL 3",
+                                              "REAL 4", "REAL 5", "REAL 6",
+                                              "REAL 7", "REAL 8" };
+
 /* --- ROUTE ------------------------------------------------------------- */
 static const int  k_at_dual_v[] = { 0, 5, 10, 20, 35 };
 static const char *const k_at_dual_n[] = { "NONE", "RARE", "SOME", "OFTEN",
@@ -7310,7 +7320,8 @@ static const AT_Row k_at_rows[] = {
     { AT_SECT_MOOD, AT_KIND_OPTION, "BANNERS",      "TD5RE_AUTOTRACK_BANNERS",        k_at_off_on_v, k_at_off_on_n, 2, 1 },
     /* REAL TEXTURES shipped with def=0 while the generator reads it flag_ON. */
     { AT_SECT_MOOD, AT_KIND_OPTION, "REAL TEXTURES","TD5RE_AUTOTRACK_REAL_TEX",       k_at_off_on_v, k_at_off_on_n, 2, 1 },
-    { AT_SECT_MOOD, AT_KIND_OPTION, "REAL FURNITURE","TD5RE_AUTOTRACK_REAL_FURNITURE",k_at_off_on_v, k_at_off_on_n, 2, 1 }
+    { AT_SECT_MOOD, AT_KIND_OPTION, "REAL FURNITURE","TD5RE_AUTOTRACK_REAL_FURNITURE",k_at_off_on_v, k_at_off_on_n, 2, 1 },
+    { AT_SECT_MOOD, AT_KIND_OPTION, "ROAD SURFACE", "TD5RE_AUTOTRACK_ROAD_SET",      k_at_roadset_v,k_at_roadset_n,9, 0 }
 };
 
 #define AT_ROWS ((int)(sizeof(k_at_rows) / sizeof(k_at_rows[0])))

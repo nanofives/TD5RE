@@ -1028,6 +1028,53 @@ int tg_surface_attr(int si)
     return 0x10 | (k_road_surf[b->road_surf].grip_class & 0x0F);
 }
 
+/* [GEOMLIB] Which REAL road-surface set this build uses: 0 = the procedural
+ * pages the generator has always drawn, 1..TD5_TG_RS_PER_CLASS = the Nth
+ * curated shipped page of each surface class.
+ *
+ * Latched once per build by tg_rs_latch rather than read per call, because
+ * tg_road_page runs per span per emitter. */
+static int s_rs_set;
+
+void tg_rs_latch(void)
+{
+    s_rs_set = td5_env_int("TD5RE_AUTOTRACK_ROAD_SET", 0, 0,
+                           TD5_TG_RS_PER_CLASS);
+}
+
+/* Surface CLASS -> base of its real-page run.
+ *
+ * RS_GRAVEL maps to DIRT, not to COBBLE: the shipped corpus has no loose-
+ * aggregate road art worth the name, and unpaved dirt is the closer read for
+ * gravel than laid setts would be. CONCRETE has no k_road_surf equivalent at
+ * all -- it is emitted and reserved so a future light-concrete surface class
+ * needs no re-curation, which is also why it is not an error to find it unused
+ * in a page census. */
+static int tg_rs_real_base(int surf)
+{
+    switch (surf) {
+    case RS_TARMAC: return TD5_TG_PAGE_RS_TARMAC;
+    case RS_COBBLE: return TD5_TG_PAGE_RS_COBBLE;
+    case RS_ICE:    return TD5_TG_PAGE_RS_ICE;
+    case RS_DIRT:
+    case RS_GRAVEL: return TD5_TG_PAGE_RS_DIRT;
+    default:        return -1;
+    }
+}
+
+/* The page for one surface class. Grip is NOT routed through here: callers
+ * still read k_road_surf[surf].grip_class, so swapping the art cannot move the
+ * physics. With s_rs_set == 0 this is exactly tg_road_slot(...page_var), i.e.
+ * byte-identical to before the real pages existed. */
+static int tg_road_page_for(int surf)
+{
+    if (s_rs_set > 0) {
+        const int base = tg_rs_real_base(surf);
+        if (base >= 0) return base + (s_rs_set - 1);
+    }
+    return tg_road_slot(k_road_surf[surf].page_var);
+}
+
 /* Road texture page for span si, from the biome's surface. */
 int tg_road_page(int si)
 {
@@ -1045,12 +1092,13 @@ int tg_road_page(int si)
     if (tg_span_in_bridge_run(si) && !tg_span_in_tunnel(si))
         return TD5_TG_PAGE_BRIDGE_DECK;
     if (tg_span_tunnel_tarmac(si))
-        return tg_road_slot(k_road_surf[RS_TARMAC].page_var);
+        return tg_road_page_for(RS_TARMAC);
     /* Same hard index as tg_surface_attr -- the TEXTURE the car drives over and
      * the GRIP it feels must never disagree, which is only guaranteed while both
-     * read the same function. */
+     * read the same function. tg_road_page_for changes only WHICH page depicts
+     * a surface class, never which class this span is, so the pairing holds. */
     b = &k_biomes[tg_biome_cell_index(si)];
-    return tg_road_slot(k_road_surf[b->road_surf].page_var);
+    return tg_road_page_for(b->road_surf);
 }
 
 int tg_topo_enabled(void)
@@ -1913,7 +1961,12 @@ static int tg_r14_fcross_page(int c)
 
     if (td5_env_flag_on("TD5RE_R14_FCROSS_WORN")
         && ((h >> 12) & 0xFFu) < (unsigned)TD5_TG_R14_FCROSS_WORN_P)
-        return tg_road_slot(k_road_surf[RS_DIRT].page_var);
+        /* [GEOMLIB] through the class helper, not the raw procedural slot, so a
+         * worn crossing is worn in the REAL dirt art too. Paired with the worn
+         * DETECTION below, which compares against this same helper -- changing
+         * only one of the two would leave the counter reading 0 and every worn
+         * crossing logged as "marked". */
+        return tg_road_page_for(RS_DIRT);
     return td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_MARKINGS")
            ? (TD5_TG_PAGE_R4_CROSS + 0) : tg_road_page(c);
 }
@@ -2147,8 +2200,10 @@ void tg_r12_fcross_report(const TG_NodeList *nl, int nspans)
                 const double pad = tg_r14_fcross_pad(nl, c);
                 const double we  = w + 2.0 * pad;
                 const int page   = tg_r14_fcross_page(c);
-                const int worn   = (page == tg_road_slot(
-                                        k_road_surf[RS_DIRT].page_var));
+                /* [GEOMLIB] same helper the producer uses -- see the note in
+                 * tg_r14_fcross_page. Comparing against the raw procedural slot
+                 * here would silently report worn=0 under a real road set. */
+                const int worn   = (page == tg_road_page_for(RS_DIRT));
                 if (worn) s_r14_fcross_worn++;
                 TD5_LOG_I(LOG_TAG, "trackgen: [R12 FCROSS] block %2d span %4d "
                           "KEPT side=%s reach=%.0f (wall at %.0f) width=%.0f "

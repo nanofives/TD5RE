@@ -77,6 +77,18 @@ const char *td5_trackgen_page_name(int page)
         page <  TD5_TG_PAGE_R7_WALL_TOWER + TD5_TG_R7_WALL_TOWER_N) return "WALL_TOWER";
     if (page >= TD5_TG_PAGE_R8V_RAIL &&
         page <  TD5_TG_PAGE_R8V_RAIL + TD5_TG_R8V_RAIL_N)         return "GUARDRAIL_VAR";
+    /* [GEOMLIB] real road surfaces, named per class so a picker line says which
+     * pool a surface came from rather than just "some page in the 40". */
+    if (page >= TD5_TG_PAGE_RS_TARMAC &&
+        page <  TD5_TG_PAGE_RS_TARMAC + TD5_TG_RS_PER_CLASS)      return "RS_TARMAC";
+    if (page >= TD5_TG_PAGE_RS_CONCRETE &&
+        page <  TD5_TG_PAGE_RS_CONCRETE + TD5_TG_RS_PER_CLASS)    return "RS_CONCRETE";
+    if (page >= TD5_TG_PAGE_RS_COBBLE &&
+        page <  TD5_TG_PAGE_RS_COBBLE + TD5_TG_RS_PER_CLASS)      return "RS_COBBLE";
+    if (page >= TD5_TG_PAGE_RS_DIRT &&
+        page <  TD5_TG_PAGE_RS_DIRT + TD5_TG_RS_PER_CLASS)        return "RS_DIRT";
+    if (page >= TD5_TG_PAGE_RS_ICE &&
+        page <  TD5_TG_PAGE_RS_ICE + TD5_TG_RS_PER_CLASS)         return "RS_ICE";
     return NULL;
 }
 
@@ -919,6 +931,25 @@ static const unsigned char k_tgr_w_mostly_on[] = { 25,  75 };
 static const unsigned char k_tgr_w_even[]      = { 50,  50 };
 static const unsigned char k_tgr_w_rare[]      = { 70,  30 };
 
+/* [GEOMLIB] ROAD SURFACE. 0 keeps the five procedural pages the generator has
+ * always drawn; 1..8 swap in the Nth curated REAL page of each surface class
+ * from td5_tg_real_tex_roads.h, so the whole track changes surface family at
+ * once rather than per biome (biome still picks WHICH class, and k_road_surf
+ * still owns grip, so physics is untouched by construction).
+ *
+ * Weighted to PROCEDURAL 100, deliberately, following the k_tgr_w_keep
+ * precedent above: the row is in the mechanism, in the studio and in the
+ * report, but a random seed still builds exactly what it built before. Real
+ * road art changes the look of EVERY seed, so that switch is a considered
+ * one-byte weight change after someone has actually looked at the 40 pages,
+ * not a side effect of landing the plumbing. */
+static const int         k_tgr_roadset_v[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8 };
+static const char *const k_tgr_roadset_n[] = { "PROCEDURAL",
+                                               "REAL 1", "REAL 2", "REAL 3",
+                                               "REAL 4", "REAL 5", "REAL 6",
+                                               "REAL 7", "REAL 8" };
+static const unsigned char k_tgr_roadset_w[] = { 100, 0, 0, 0, 0, 0, 0, 0, 0 };
+
 #define TGR_BOOL(nm, kb, slt, wts, leg) \
     { nm, kb, slt, k_tgr_bool_v, k_tgr_bool_n, wts, 2, leg, 0, 1, 0 }
 /* A presence row: same shape plus its restore rank for the budget. */
@@ -986,7 +1017,8 @@ static const TG_RollEntry k_tg_rolls[TD5_TG_ROLL_COUNT] = {
  TGR_PRES("LAMP POSTS",    "TD5RE_AUTOTRACK_LAMP_POSTS",     0x2101002Cu, k_tgr_w_even,      1, 17),
  TGR_PRES("BANNERS",       "TD5RE_AUTOTRACK_BANNERS",        0x2101002Du, k_tgr_w_even,      1, 20),
  TGR_PRES("REAL TEXTURES", "TD5RE_AUTOTRACK_REAL_TEX",       0x2101002Eu, k_tgr_w_scarce,    1,  4),
- TGR_PRES("REAL FURNITURE","TD5RE_AUTOTRACK_REAL_FURNITURE", 0x2101002Fu, k_tgr_w_mostly_on, 1, 21)
+ TGR_PRES("REAL FURNITURE","TD5RE_AUTOTRACK_REAL_FURNITURE", 0x2101002Fu, k_tgr_w_mostly_on, 1, 21),
+ { "ROAD SURFACE", "TD5RE_AUTOTRACK_ROAD_SET",  0x21010030u, k_tgr_roadset_v, k_tgr_roadset_n, k_tgr_roadset_w, 9, 0, 0, 8 , 0 }
 };
 
 /* The table is indexed by TD5_TgRollId, so a missing or extra row would
@@ -1494,16 +1526,87 @@ const TG_Mood *tg_mood(void) { return &s_mood; }
  * table is empty, so it places nothing and cannot change a build. Adding a
  * landmark is a row here plus an emitter; see the TG_Landmark block in the
  * internal header for the placement contract. */
+/* [GEOMLIB] Real Moscow set pieces, segmented out of the whole track by
+ * re/tools/td5_geomlib.py landmarks and exported to td5_tg_prefab_data.h.
+ *
+ * WHY THESE ARE UNNAMED. An earlier version of this table called its rows
+ * CATHEDRAL, MINISTRY and so on. Those names were invented, and they described
+ * objects that turned out to be chunks of street FRONTAGE rather than
+ * buildings: segmentation then ran inside one sub-mesh, which cannot produce a
+ * whole object because a landmark can span several sub-meshes and one sub-mesh
+ * can hold several unrelated buildings. Nothing here knows what any of these
+ * buildings is, so nothing here claims to. Identifying them is a job for the
+ * studio Library browser, and the names should be replaced when someone has
+ * actually looked.
+ *
+ * BUILT-UP biomes only. A Moscow ministry in a forest run would read as a bug,
+ * and the biome mask is the cheapest place to say so -- but CITY alone was far
+ * too narrow. Measured on seed 20260901: with snow coherence on the layout is
+ * FOREST/ALPINE/ALPTOWN/FIELDS, and with it off, INDUSTRIAL/COAST/FIELDS/
+ * FOREST/ALPINE. Neither drew CITY at all across ten runs, so a CITY-only row
+ * would have made the whole feature dead in practice rather than rare. The
+ * three biomes that carry facades and urbanity >= 1 are CITY (0), INDUSTRIAL
+ * (3) and ALPTOWN (7).
+ *
+ * NO PLAZAS in this set. The segmenter holds flat slabs out of the structure
+ * pass on purpose -- ground and road primitives are exactly what bridge
+ * unrelated buildings into one lump -- so the paving that surrounds these
+ * pieces is not exported with them yet. They will read as sited only once it
+ * is; see the round doc.
+ *
+ * Clearance is the standoff PAST the road edge, before the piece's own half
+ * depth is added. The first six are once-per-track at a lower weight and stand
+ * further back, because they are the largest.
+ */
+#define TG_LM_URBAN ((1u << 0) | (1u << 3) | (1u << 7))
 static const TG_Landmark k_landmarks[] = {
-    /* name, biome_mask, min_run, once, weight, flat, water, night, salt */
-    { NULL, 0u, 0, 0, 0, 0, 0, 0, 0u }   /* deliberately empty */
+    /* name          biome  min once wt fl wt nt salt        pf  clear */
+    { "SET PIECE 00", TG_LM_URBAN, 20, 1, 30, 0, 0, 0, 0x21014000u,  0, 2200.0 },
+    { "SET PIECE 01", TG_LM_URBAN, 20, 1, 30, 0, 0, 0, 0x21014001u,  1, 2200.0 },
+    { "SET PIECE 02", TG_LM_URBAN, 20, 1, 30, 0, 0, 0, 0x21014002u,  2, 2200.0 },
+    { "SET PIECE 03", TG_LM_URBAN, 20, 1, 30, 0, 0, 0, 0x21014003u,  3, 2200.0 },
+    { "SET PIECE 04", TG_LM_URBAN, 20, 1, 30, 0, 0, 0, 0x21014004u,  4, 2200.0 },
+    { "SET PIECE 05", TG_LM_URBAN, 20, 1, 30, 0, 0, 0, 0x21014005u,  5, 2200.0 },
+    { "SET PIECE 06", TG_LM_URBAN, 16, 0, 45, 0, 0, 0, 0x21014006u,  6, 1500.0 },
+    { "SET PIECE 07", TG_LM_URBAN, 16, 0, 45, 0, 0, 0, 0x21014007u,  7, 1500.0 },
+    { "SET PIECE 08", TG_LM_URBAN, 16, 0, 45, 0, 0, 0, 0x21014008u,  8, 1500.0 },
+    { "SET PIECE 09", TG_LM_URBAN, 16, 0, 45, 0, 0, 0, 0x21014009u,  9, 1500.0 },
+    { "SET PIECE 10", TG_LM_URBAN, 16, 0, 45, 0, 0, 0, 0x2101400Au, 10, 1500.0 },
+    { "SET PIECE 11", TG_LM_URBAN, 16, 0, 45, 0, 0, 0, 0x2101400Bu, 11, 1500.0 },
+    { "SET PIECE 12", TG_LM_URBAN, 16, 0, 45, 0, 0, 0, 0x2101400Cu, 12, 1500.0 },
+    { "SET PIECE 13", TG_LM_URBAN, 16, 0, 45, 0, 0, 0, 0x2101400Du, 13, 1500.0 },
+    { "SET PIECE 14", TG_LM_URBAN, 16, 0, 50, 0, 0, 0, 0x2101400Eu, 14, 1200.0 },
+    { "SET PIECE 15", TG_LM_URBAN, 16, 0, 50, 0, 0, 0, 0x2101400Fu, 15, 1200.0 },
+    { "SET PIECE 16", TG_LM_URBAN, 16, 0, 50, 0, 0, 0, 0x21014010u, 16, 1200.0 },
+    { "SET PIECE 17", TG_LM_URBAN, 16, 0, 50, 0, 0, 0, 0x21014011u, 17, 1200.0 },
+    { "SET PIECE 18", TG_LM_URBAN, 16, 0, 50, 0, 0, 0, 0x21014012u, 18, 1200.0 },
+    { "SET PIECE 19", TG_LM_URBAN, 16, 0, 50, 0, 0, 0, 0x21014013u, 19, 1200.0 },
+    { "SET PIECE 20", TG_LM_URBAN, 16, 0, 50, 0, 0, 0, 0x21014014u, 20, 1200.0 },
+    { "SET PIECE 21", TG_LM_URBAN, 16, 0, 50, 0, 0, 0, 0x21014015u, 21, 1200.0 },
+    { "SET PIECE 22", TG_LM_URBAN, 16, 0, 50, 0, 0, 0, 0x21014016u, 22, 1200.0 },
+    { "SET PIECE 23", TG_LM_URBAN, 16, 0, 50, 0, 0, 0, 0x21014017u, 23, 1200.0 },
 };
 #define TG_LANDMARK_N ((int)(sizeof(k_landmarks) / sizeof(k_landmarks[0])))
 
 void tg_landmarks_place(const TG_NodeList *nl, int nspans)
 {
-    int placed = 0, runs = 0, si;
+    unsigned char used[TG_LANDMARK_N];
+    int placed = 0, runs = 0, refused = 0, si;
+    /* [GEOMLIB] DEV: force every row past its weight gate, so one run exercises
+     * all 17 set pieces instead of the handful a seed's rolls happen to pick.
+     * Not a gameplay knob -- a track with every landmark on it is not a track
+     * anyone should race -- but the only practical way to see the big pieces,
+     * which are once_per_track at weight 25-30 and so miss entirely on a seed
+     * with one built-up run. TD5RE_-prefixed, so it feeds the GENSTAMP env hash
+     * and cannot leave a forced build cached as if it were a normal one.
+     *
+     * NOT td5_env_flag_on: that helper defaults to ON when the variable is
+     * unset, which would have shipped this forced on. td5_env_int with a 0
+     * default is the opt-in form. */
+    const int force = td5_env_int("TD5RE_PREFAB_FORCE_ALL", 0, 0, 1);
 
+    tg_prefab_reset();
+    memset(used, 0, sizeof(used));
     if (!nl || nspans <= 0) return;
 
     /* Walk MERGED runs, not cells: a repeated 300-span city is one run, and a
@@ -1515,21 +1618,46 @@ void tg_landmarks_place(const TG_NodeList *nl, int nspans)
         runs++;
         for (li = 0; li < TG_LANDMARK_N; li++) {
             const TG_Landmark *L = &k_landmarks[li];
+            const int len = b - a + 1;
+            int tries;
             if (!L->name) continue;                 /* empty slot */
-            if (b - a + 1 < L->min_run_spans) continue;
+            if (L->once_per_track && used[li]) continue;
+            if (len < L->min_run_spans) continue;
             if (L->biome_mask &&
                 !(L->biome_mask & (1u << tg_biome_cell_index(a)))) continue;
             if (L->needs_night && !s_is_night) continue;
             /* Hash-gated so this consumes no RNG: adding a landmark must not
-             * be able to move the road. */
-            if ((tg_roll_hash(s_gen_seed, L->salt) % 100u)
-                >= (unsigned)L->weight) continue;
-            placed++;
+             * be able to move the road. Mixed with the RUN START, or a
+             * per-run row would resolve identically in every run and either
+             * appear in all of them or none. */
+            if (!force &&
+                (tg_roll_hash(s_gen_seed, L->salt ^ ((unsigned)a * 2654435761u))
+                 % 100u) >= (unsigned)L->weight) continue;
+            if (L->prefab < 0) { placed++; used[li] = 1; continue; }
+
+            /* Try a few hash-chosen spans in the run. A refusal is ordinary --
+             * bridges and tunnels have no ground to stand a building on -- so
+             * give up quietly rather than forcing a bad site. */
+            for (tries = 0; tries < 6; tries++) {
+                const unsigned int h =
+                    tg_roll_hash(s_gen_seed,
+                                 L->salt + 0x9E3779B9u * (unsigned)(tries + 1));
+                const int cand = a + (int)(h % (unsigned)len);
+                const int side = (h & 0x10000u) ? 1 : -1;
+                if (tg_prefab_place(nl, nspans, cand, L->prefab, side,
+                                    L->clearance)) {
+                    placed++;
+                    used[li] = 1;
+                    break;
+                }
+            }
+            if (tries == 6) refused++;
         }
         si = b + 1;
     }
     TD5_LOG_I(LOG_TAG, "trackgen: [R21 LANDMARK] %d run(s), %d table row(s), "
-              "%d placed", runs, TG_LANDMARK_N - 1, placed);
+              "%d placed, %d refused (no usable span in run)",
+              runs, TG_LANDMARK_N, placed, refused);
 }
 
 unsigned int tg_rand(void)
@@ -3462,6 +3590,12 @@ static int tg_scenery_entry(int e)
                 else if (emitted) { nmesh++; nrails++; }
                 tg_guard_mark(r0, meshes.len, TG_GK_RAIL, si);
             }
+
+            /* [GEOMLIB] Shipped set pieces recorded for this span by
+             * tg_landmarks_place. Last in the span so a landmark never
+             * displaces road, rail or pavement geometry when the entry runs
+             * up against TG_MAX_MESHES_PER_ENTRY. */
+            if (ok && !tg_prefab_emit_span(si, &meshes, moff, &nmesh, e)) ok = 0;
         }
         TG_ZONE_END(TG_ZONE_ENTRY_L1);
         TG_ZONE_BEGIN(TG_ZONE_ENTRY_L2);

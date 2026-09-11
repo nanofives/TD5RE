@@ -43,10 +43,15 @@ unless --allow-dup is given. That keeps the existing elements intact: this
 tool never rewrites an existing header, it only adds new ones.
 
 A pick from the in-game free-cam geometry picker (dev build, F-cam, left
-click) copies {"track":"level014","level":14,"page":276,...} to the
-clipboard; --from-pick reads one or more such JSON objects (file or stdin)
-and appends them to a manifest set, so "I like that wall" -> manifest entry
-is one paste.
+click) copies a line like
+
+    level023 L23 e29 s0 p451+320+321 pos 30312,1441,-122016 r20444 v476 c29
+
+to the clipboard; --from-pick reads one or more of those (file or stdin) and
+appends every page they name to a manifest set, so "I like that wall" ->
+manifest entry is one paste. The pre-2026-09-06 JSON pick payload
+({"track":"level014","level":14,"page":276,...}) is still accepted, so older
+notes keep working. Several picks may share one line.
 
 Usage:
     python re/tools/gen_tg_pages.py --list-mined [--levels DIR]
@@ -140,6 +145,14 @@ def emit_set(out, levels, prefix, name, entries):
         emit_array(out, "%s_%s%d_idx" % (prefix, name, i), idx)
     n = len(entries)
     out.write("static const int %s_%s_count = %d;\n" % (prefix, name, n))
+    # Transparency TYPE per page. Callers that lay a whole set down verbatim
+    # (prefab geometry, for one) must pass the SHIPPED type through: a set can
+    # mix opaque with alpha-keyed, and forcing 0 turns every keyed hole -- a
+    # railing, a window -- solid.
+    out.write("static const int %s_%s_type[%d] = { %s };\n"
+              % (prefix, name, max(n, 1),
+                 ", ".join(str(read_page(levels, e[0], int(e[1]))[2])
+                           for e in entries) or "0"))
     out.write("static const int %s_%s_paln[%d] = { %s };\n"
               % (prefix, name, max(n, 1),
                  ", ".join("%s_%s%d_paln" % (prefix, name, i) for i in range(n)) or "0"))
@@ -205,16 +218,56 @@ def build(manifest_path, levels, allow_dup, dry_run):
           len(m["sets"]), "set(s)")
 
 
-def from_pick(manifest_path, set_name, pick_path):
-    text = open(pick_path).read() if pick_path else sys.stdin.read()
+# The picker emitted a JSON blob until 2026-09-06 and a compact one-liner after
+# (td5_pick.c:525-558). Both are accepted: pasted history and old notes still
+# work, and a fresh clipboard paste works, which is the whole point of the flag.
+#
+#   level023 L23 e29 s0 p451+320+321 pos 30312,1441,-122016 r20444 v476 c29
+#   AUTO e12 s3 guardrail p107:RAIL+44 pos 1,2,3 r900 v48 c2
+#
+# `L<n>` is absent on the AUTO track and a mesh-kind word is present there
+# instead; page ids may carry a ":NAME" suffix on AUTO. `c` is the COMMAND
+# count, not a face count, and the page list is capped at 6 by the picker, so a
+# busy mesh silently reports only its first six distinct pages.
+PICK_LINE = re.compile(
+    r"(?P<track>level\d{3}|AUTO)"
+    r"(?:\s+L(?P<lvl>\d+))?"
+    r"\s+e(?P<entry>\d+)"
+    r"\s+s(?P<slot>\d+)"
+    r"(?:\s+(?P<kind>[A-Za-z_][A-Za-z0-9_]*))?"
+    r"\s+p(?P<pages>\d+(?::[A-Za-z0-9_]+)?(?:\+\d+(?::[A-Za-z0-9_]+)?)*)"
+    r"\s+pos\s+(?P<pos>-?\d+,\s*-?\d+,\s*-?\d+)"
+    r"\s+r(?P<r>-?\d+)\s+v(?P<v>\d+)\s+c(?P<c>\d+)")
+
+
+def parse_picks(text):
+    """Parse either pick format into the dict shape the manifest writer wants."""
     picks = []
     for chunk in re.findall(r"\{[^{}]*\}", text):
         try:
             picks.append(json.loads(chunk))
         except ValueError:
             pass
+    for m in PICK_LINE.finditer(text):
+        picks.append({
+            "track": m.group("track"),
+            "level": int(m.group("lvl")) if m.group("lvl") else None,
+            "entry": int(m.group("entry")), "slot": int(m.group("slot")),
+            "kind": m.group("kind") or "pick",
+            "pages": [int(p.split(":")[0]) for p in m.group("pages").split("+")],
+            "pos": m.group("pos"), "r": int(m.group("r")),
+            "verts": int(m.group("v")), "cmds": int(m.group("c")),
+        })
+    return picks
+
+
+def from_pick(manifest_path, set_name, pick_path):
+    text = open(pick_path).read() if pick_path else sys.stdin.read()
+    picks = parse_picks(text)
     if not picks:
-        sys.exit("no JSON pick objects found")
+        sys.exit("no picks found (expected a picker line such as "
+                 "'level023 L23 e29 s0 p451+320 pos 1,2,3 r10 v4 c1', "
+                 "or a legacy {...} JSON pick)")
     m = json.load(open(manifest_path)) if os.path.exists(manifest_path) else {
         "header": "td5_tg_real_tex_%s.h" % os.path.splitext(
             os.path.basename(manifest_path))[0],

@@ -55,6 +55,9 @@
 #include "td5_tg_furniture_tex.h" /* real TD5 lamp/railing/banner pages     */
 #include "td5_tg_real_tex_r11signs.h" /* [R11 SIGNS] direction arrow panels */
 #include "td5_tg_props_tex.h"     /* [R9 INFRA] TD6 street-furniture pages  */
+#include "td5_tg_real_tex_roads.h" /* [GEOMLIB] curated real ROAD surfaces  */
+#include "td5_tg_real_tex_landmarks.h" /* [GEOMLIB] pages used by the prefabs */
+#include "td5_tg_prefab_data.h"   /* [GEOMLIB] shipped-geometry PREFABS      */
 #include "td5re.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -551,7 +554,64 @@ typedef char tg_infra_pages_fit[(TD5_TG_PROPS_TEX_COUNT <= TD5_TG_R9_INFRA_N)
  * mined set ever grows past the panel slots this area reserved, the build stops
  * instead of quietly walking into the next round's block. */
 typedef char tg_r11_sign_pages_fit[(3 <= TD5_TG_R11_SIGN_N - 1) ? 1 : -1];
-#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_R11_BASE + 6)
+
+/* ================== GEOMLIB: REAL ROAD SURFACE PAGES =================
+ * Same rule as R3-R11, measured off its OWN base.
+ *
+ * NOT taken by growing TD5_TG_ROAD_VARIANTS: TD5_TG_PAGE_FB_BASE is derived
+ * from ROAD_EXTRA + ROAD_VARIANTS - 1, so widening the road block in place
+ * would renumber every page after it.
+ *
+ * Five surface classes, curated by re/tools/td5_geomlib.py roads from the
+ * road-role pages the shipped corpus actually paves carriageway with, and
+ * baked into td5_tg_real_tex_roads.h. Class order here MUST match the
+ * manifest's set order -- the emitter indexes by it.
+ *
+ * Each class reserves 8 slots but ships as many pages as it HAS (currently
+ * 8/5/8/8/2): TD5 holds only two usable snow road surfaces and five pale
+ * concrete ones, and padding a class to a quota pulled in art carrying 4 and
+ * even 1 carriageway face. Unfilled slots fall back to the procedural emitter.
+ *
+ * COBBLE was earlier believed inseparable from gravel, on a peak-autocorrelation
+ * test that found a smooth 0.356..0.953 continuum. That test was answering the
+ * wrong question -- a 64x64 tiling page is periodic at its tile boundary
+ * whatever it depicts. What actually separates them is whether the pattern runs
+ * ALONG the road: road paint makes one axis explain 0.83..0.94 of the variance,
+ * while setts and brick vary both ways at 0.21..0.68.
+ * ==================================================================== */
+#define TD5_TG_PAGE_RS_BASE     (TD5_TG_PAGE_R11_BASE + 6)
+#define TD5_TG_RS_PER_CLASS     8
+#define TD5_TG_PAGE_RS_TARMAC   (TD5_TG_PAGE_RS_BASE + 0 * TD5_TG_RS_PER_CLASS)
+#define TD5_TG_PAGE_RS_CONCRETE (TD5_TG_PAGE_RS_BASE + 1 * TD5_TG_RS_PER_CLASS)
+#define TD5_TG_PAGE_RS_COBBLE   (TD5_TG_PAGE_RS_BASE + 2 * TD5_TG_RS_PER_CLASS)
+#define TD5_TG_PAGE_RS_DIRT     (TD5_TG_PAGE_RS_BASE + 3 * TD5_TG_RS_PER_CLASS)
+#define TD5_TG_PAGE_RS_ICE      (TD5_TG_PAGE_RS_BASE + 4 * TD5_TG_RS_PER_CLASS)
+#define TD5_TG_RS_CLASSES     5
+/* Seam contract with the generated header, same shape as tg_r11_sign_pages_fit.
+ * The literal is the manifest's per-class cap: the header's k_road_*_count are
+ * `static const int`, which C does not accept as a constant expression, which
+ * is why R11's assert hardcodes its count too. The runtime emitter clamps to
+ * k_road_*_count anyway, so a SHORTER header is safe and only this ceiling
+ * needs to move if re/tools/td5_geomlib.py roads ever keeps more than 8. */
+typedef char tg_rs_pages_fit[(8 <= TD5_TG_RS_PER_CLASS) ? 1 : -1];
+
+/* ============= GEOMLIB: PREFAB (shipped set-piece) PAGES =============
+ * Own base, same rule as every block above.
+ *
+ * These are POSITIONAL against td5_tg_prefab_data.h: a prefab command carries a
+ * LOCAL page index, and its real page is TD5_TG_PAGE_LM_BASE + that index. The
+ * geometry header and td5_tg_real_tex_landmarks.h are generated together by
+ * re/tools/td5_geomlib.py prefabs and must be regenerated together -- editing
+ * one alone silently re-textures every prefab.
+ * ==================================================================== */
+#define TD5_TG_PAGE_LM_BASE   (TD5_TG_PAGE_RS_BASE + \
+                               TD5_TG_RS_CLASSES * TD5_TG_RS_PER_CLASS)
+#define TD5_TG_LM_PAGES       161
+/* Literal for the same reason tg_r11_sign_pages_fit uses one: k_lm_pf_count is
+ * a `static const int`, which C does not accept in a constant expression. */
+typedef char tg_lm_pages_fit[(TD5_TG_PREFAB_PAGES == TD5_TG_LM_PAGES) ? 1 : -1];
+
+#define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_LM_BASE + TD5_TG_LM_PAGES)
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
 /* Down-track spans per MODELS.DAT display-list entry (entry = span >> 2).
@@ -2274,6 +2334,11 @@ int tg_emit_billboard_mesh(TG_Buf *blk, double wx, double wy, double wz, double 
 #define TD5_TG_FACADE_MAX_ROWS 10
 int tg_write_quad_mesh(TG_Buf *blk, const double *px, const double *py, const double *pz, const double *uu, const double *vv, int n, const int *seg_page, const int *seg_nq, int nseg);
 int tg_write_quad_mesh_col(TG_Buf *blk, const double *px, const double *py, const double *pz, const double *uu, const double *vv, const unsigned int *col, int n, const int *seg_page, const int *seg_nq, int nseg);
+/* [GEOMLIB] Place a shipped-geometry PREFAB. Handles triangles as well as
+ * quads, preserves baked per-vertex ARGB, and rebases the prefab's LOCAL page
+ * indices onto page_base. Returns 0 if the command list does not account for
+ * exactly nv vertices. */
+int tg_write_prefab_mesh(TG_Buf *blk, const float *v, const unsigned int *light, int nv, const unsigned short *cmd, int ncmd, int page_base, double ox, double oy, double oz, double ca, double sa);
 void tg_facade_push_grid(double bx, double by, double bz, double ax, double ay, double az, double ux, double uy, double uz, int cols, int rows, int r0, int r1, double *px, double *py, double *pz, double *uu, double *vv, int *pn);
 /* Is a facade wall present at span si on this side? Spans group into
  * SUPERBLOCKS, and each superblock carries ONE side street whose START and
@@ -2567,6 +2632,10 @@ enum { RS_TARMAC = 0, RS_GRAVEL, RS_DIRT, RS_ICE, RS_COBBLE };
 typedef struct { int grip_class; int page_var; int proc_kind; } TG_RoadSurf;
 extern const TG_RoadSurf k_road_surf[TD5_TG_ROAD_VARIANTS];
 int tg_road_slot(int v);
+/* [GEOMLIB] Latch TD5RE_AUTOTRACK_ROAD_SET for the build. Called from
+ * td5_trackgen_build_level, not from regenerate, for the same reason s_gen_seed
+ * is: a direct build_level call must see its own value. */
+void tg_rs_latch(void);
 /* ===================== BIOMES =====================
  * A biome owns a RUN of spans and drives what stands beside the road: how
  * dense the props are, how tall, how far back, and which texture page. That is
@@ -2788,9 +2857,31 @@ typedef struct {
     int          needs_water;
     int          needs_night;
     unsigned int salt;          /* own salt namespace; see the roll registry */
+    /* [GEOMLIB] index into k_tg_prefabs (td5_tg_prefab_data.h), or -1 for a row
+     * that selects but has nothing to draw yet. Splitting the row from the
+     * geometry keeps the placement RULES readable next to each other instead of
+     * buried in a 3000-vertex generated header. */
+    int          prefab;
+    double       clearance;     /* extra standoff from the road edge, world u */
 } TG_Landmark;
 
 void tg_landmarks_place(const TG_NodeList *nl, int nspans);
+
+/* ---- [GEOMLIB] PREFABS: shipped set-piece geometry (td5_tg_prefab.c) ------
+ * Two phases: tg_landmarks_place DECIDES and calls tg_prefab_place, then
+ * tg_scenery_entry EMITS by calling tg_prefab_emit_span per span. See the
+ * module header for why they cannot be the same pass. */
+void tg_prefab_reset(void);
+int  tg_prefab_count(void);
+int  tg_prefab_add(int si, int pf, double ox, double oy, double oz,
+                   double yaw_c, double yaw_s);
+int  tg_prefab_place(const TG_NodeList *nl, int nspans, int si, int pf,
+                     int side, double clearance);
+int  tg_prefab_emit_span(int si, TG_Buf *meshes, size_t *moff, int *nmesh,
+                         int entry);
+double      tg_prefab_half_depth(int pf);
+const char *tg_prefab_name(int pf);
+void        tg_prefab_report(void);
 
 int  tg_shape_lane_aim(int si, int base_lanes, int lo, int hi);
 int  tg_shape_safety_x100(int si, int base_x100);

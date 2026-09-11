@@ -17,10 +17,24 @@ const camera = new THREE.PerspectiveCamera(50, 1, 1, 8_000_000);
 camera.position.set(0, 90000, 90000);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
+// ONE mouse scheme for the whole app: LEFT is reserved for selection (node
+// handles, box select, the LIBRARY gap picker), so orbit lives on the RIGHT
+// button and pan moves to the middle -- the wheel still zooms. Previously this
+// mapping existed only inside pick mode, so the buttons changed meaning
+// depending on a checkbox, which is exactly the kind of thing you relearn every
+// time you come back to the tool. OrbitControls suppresses the context menu on
+// its own element, so right-drag does not pop the browser menu.
+const ORBIT_SCHEME = { LEFT: null, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE };
+controls.mouseButtons = ORBIT_SCHEME;
 scene.add(new THREE.HemisphereLight(0xffffff, 0x36404f, 1.15));
 const sun = new THREE.DirectionalLight(0xffffff, 1.1); sun.position.set(1, 2, 1); scene.add(sun);
 const root = new THREE.Group(); scene.add(root);   // track geometry, centered on `center`
-const envRoot = new THREE.Group(); scene.add(envRoot);   // imported environment geometry
+// The ONE loaded-level geometry group. Both the TRACKS tab ("load
+// environment") and the LIBRARY tab ("load geometry") fill this, from the same
+// endpoint, at the same offset -- they used to be two loaders over two
+// endpoints and disagreed about billboards, centring and pickability.
+// `selRoot` further down is an alias for it, not a second group.
+const envRoot = new THREE.Group(); scene.add(envRoot);
 const lightsRoot = new THREE.Group(); scene.add(lightsRoot); // curated street-light markers
 const gltfLoader = new GLTFLoader();
 let grid = null;
@@ -67,7 +81,7 @@ function applyWASD() {
   if (vy) { camera.position.y += vy * speed; controls.target.y += vy * speed; }
 }
 
-(function loop() { requestAnimationFrame(loop); applyWASD(); controls.update(); renderer.render(scene, camera); })();
+(function loop() { requestAnimationFrame(loop); applyWASD(); controls.update(); tickExtras(); renderer.render(scene, camera); })();
 
 // ---------------------------------------------------------------- state
 let spec = blankSpec();
@@ -77,6 +91,21 @@ let handles = [];                   // node handle meshes (index-aligned to spec
 let drawingBranch = null;           // {lanes, nodes:[]} while drawing
 let roadTex = null, groundTex = null;   // preview textures
 let showLanes = false, editNodes = false, showCpGates = true;
+// AABB centre of the loaded level geometry, or null. Single source of truth for
+// the view offset while a level is loaded, so the scenery, the billboards, the
+// highlight and the centerline all sit in one frame.
+let geomCenter = null;
+function applyViewOffset() {
+  const off = new THREE.Vector3(-center.x, -center.y, -center.z);
+  envRoot.position.copy(off);      // == selRoot
+  lightsRoot.position.copy(off);   // lights share raw engine coords
+  // selBill/selHi are consts declared further down; safe because every call
+  // site runs after module evaluation (the boot rebuild() is the last
+  // statement). Do NOT add a `typeof` guard here -- typeof THROWS for a const
+  // in its temporal dead zone, so it would hide nothing and break everything.
+  selBill.position.copy(off);
+  selHi.position.copy(off);
+}
 let currentLevel = null, currentAssets = null;   // imported track's source + its assets
 let envLoaded = false;                            // environment geometry present -> hide ribbon fill
 const raycaster = new THREE.Raycaster();
@@ -185,14 +214,24 @@ function rebuild(fit) {
   while (root.children.length) root.remove(root.children[0]);
   handles = [];
   if (grid) { scene.remove(grid); grid = null; }
-  if (!spec.nodes.length) { updatePanel(); return; }
+  if (!spec.nodes.length && geomCenter) { center.copy(geomCenter); applyViewOffset(); }
+  if (!spec.nodes.length) {
+    // No centerline: still give the viewport a floor reference, because the
+    // studio now opens empty (authoring is parked) instead of on a sample loop.
+    grid = new THREE.GridHelper(200000, 20, 0x2c3340, 0x1e2430); scene.add(grid);
+    updatePanel(); return;
+  }
 
   // recenter
   const c = new THREE.Vector3(); let miny = 1e18, maxr = 0;
   for (const n of spec.nodes) { c.x += n.x; c.z += n.z; c.y += (n.y || 0); miny = Math.min(miny, n.y || 0); }
-  c.multiplyScalar(1 / spec.nodes.length); center.copy(c);
-  envRoot.position.set(-center.x, -center.y, -center.z);   // keep env aligned to track
-  lightsRoot.position.copy(envRoot.position);              // lights share raw engine coords
+  c.multiplyScalar(1 / spec.nodes.length);
+  // Loaded geometry wins the offset. Otherwise rebuild() would keep resetting
+  // it to the centerline centroid and shunt the scenery off the road, since
+  // the two centres are not the same point.
+  if (geomCenter) c.copy(geomCenter);
+  center.copy(c);
+  applyViewOffset();
   for (const n of spec.nodes) maxr = Math.max(maxr, Math.hypot(n.x - c.x, n.z - c.z));
 
   // grid sized to the track
@@ -593,7 +632,8 @@ $('skyTrackBtn').onclick = async () => {
   catch { setStatus('skybox load failed', 'bad'); }
 };
 $('cpGates').onchange = (e) => { showCpGates = e.target.checked; rebuild(false); };
-$('clearEnvBtn').onclick = () => { while (envRoot.children.length) envRoot.remove(envRoot.children[0]); envLoaded = false; rebuild(false); setStatus('Cleared environment.', 'ok'); };
+// Same unload behind both buttons, for the same reason the load is shared.
+$('clearEnvBtn').onclick = () => { unloadLevelGeometry(); setStatus('Cleared level geometry.', 'ok'); };
 function envMaterial(tex, type) {   // unlit; transparency per page type (0 opaque,1 keyed,2 semi,3 additive)
   const base = { map: tex || null, color: tex ? 0xffffff : 0x8b9099, side: THREE.DoubleSide };
   if (!tex) return new THREE.MeshBasicMaterial(base);
@@ -602,35 +642,12 @@ function envMaterial(tex, type) {   // unlit; transparency per page type (0 opaq
   if (type === 3) return new THREE.MeshBasicMaterial({ ...base, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
   return new THREE.MeshBasicMaterial(base);
 }
-$('loadEnvBtn').onclick = async () => {
-  if (currentLevel == null) { setStatus('Import a track first.', 'warn'); return; }
-  setStatus('Loading environment (decoding models.bin, may take a moment)…');
-  try {
-    const buf = await (await fetch('/api/model?level=' + currentLevel)).arrayBuffer();
-    gltfLoader.parse(buf, '', async (gltf) => {
-      // each node carries its real per-command texture page in extras; load just
-      // those pages (textures.src/pages/page_NNN.png) in parallel, then assign.
-      const pages = new Set();
-      gltf.scene.traverse((o) => { if (o.isMesh && o.userData && o.userData.page != null) pages.add(o.userData.page); });
-      setStatus(`Loading environment textures (${pages.size} pages)…`);
-      const types = (currentAssets && currentAssets.page_types) || {};
-      const texMap = {};
-      await Promise.all([...pages].map(async (p) => {
-        try { texMap[p] = await trackTexture(currentLevel, `page_${String(p).padStart(3, '0')}.png`, false); }
-        catch { texMap[p] = null; }
-      }));
-      gltf.scene.traverse((o) => {
-        if (o.isMesh) {
-          const page = o.userData ? o.userData.page : -1;
-          o.material = envMaterial(texMap[page], types[page] | 0);
-        }
-      });
-      while (envRoot.children.length) envRoot.remove(envRoot.children[0]);
-      envRoot.add(gltf.scene); envRoot.position.set(-center.x, -center.y, -center.z);
-      envLoaded = true; rebuild(false);
-      setStatus(`Environment loaded (${pages.size} texture pages).`, 'ok');
-    }, (err) => setStatus('GLB parse error: ' + err, 'bad'));
-  } catch (e) { setStatus('environment load failed: ' + e, 'bad'); }
+// Same call the LIBRARY tab makes -- see loadLevelGeometry. "Load environment"
+// and "Load geometry" are one operation reached from two places, so the two
+// tabs cannot show a different version of the same level.
+$('loadEnvBtn').onclick = () => {
+  if (currentLevel == null) { setStatus('Load a track first.', 'warn'); return; }
+  loadLevelGeometry(currentLevel);
 };
 
 // ---------------------------------------------------------------- lights editor
@@ -822,13 +839,13 @@ function rebuildGlowMarkers() {
     `Grey = backdrop/off-road (skipped by "+ lights at fixtures").`, 'ok');
 }
 $('glowShowBtn').addEventListener('click', () => {
-  if (!envLoaded) { setStatus('Load environment first (7 · View / textures).', 'warn'); return; }
+  if (!envLoaded) { setStatus('Load level geometry first (TRACKS section 1, or LIBRARY > Pick geometry).', 'warn'); return; }
   showGlowFixtures = !showGlowFixtures;
   $('glowShowBtn').textContent = showGlowFixtures ? 'hide glow fixtures' : 'show glow fixtures';
   rebuildGlowMarkers();
 });
 $('glowGenBtn').addEventListener('click', () => {
-  if (!envLoaded) { setStatus('Load environment first (7 · View / textures).', 'warn'); return; }
+  if (!envLoaded) { setStatus('Load level geometry first (TRACKS section 1, or LIBRARY > Pick geometry).', 'warn'); return; }
   computeGlowClusters();
   if (!lightsData) lightsData = blankLights();
   let added = 0;
@@ -984,6 +1001,886 @@ $('lightsSaveBtn').addEventListener('click', async () => {
   } catch (e) { setStatus('save failed: ' + e, 'bad'); }
 });
 
+// ---------------------------------------------------------------- library
+// Browser over the shipped-geometry catalogue (re/assets/library). A prefab is
+// previewed in ITS OWN local frame -- centred in XZ, base y=0 -- which is the
+// frame td5_tg_prefab.c stamps it in, so what you see here is what the
+// generator places. It is shown in a dedicated group rather than in envRoot so
+// previewing never disturbs a loaded track.
+const prefabRoot = new THREE.Group(); scene.add(prefabRoot);
+let libIndex = null, libSel = null, libRows = [];
+
+function libClearPreview() {
+  while (prefabRoot.children.length) prefabRoot.remove(prefabRoot.children[0]);
+}
+
+async function libLoad() {
+  try {
+    libIndex = await (await fetch('/api/library')).json();
+  } catch (e) { setStatus('library fetch failed: ' + e, 'bad'); return; }
+  if (!libIndex.ok) { setStatus(libIndex.error || 'no library', 'warn'); return; }
+  const sel = $('libLevel');
+  sel.innerHTML = libIndex.levels.map((l) =>
+    `<option value="${l}">level${String(l).padStart(3, '0')}</option>`).join('');
+  if (libIndex.levels.includes(23)) sel.value = 23;   // Moscow: the worked example
+  const ssel = $('selLevel');
+  if (ssel) {
+    ssel.innerHTML = sel.innerHTML;
+    ssel.value = sel.value;
+  }
+  libList();
+}
+
+async function libList() {
+  const lvl = $('libLevel').value, kind = $('libKind').value;
+  const mf = $('libMinFaces').value || 0;
+  let r;
+  try {
+    // "__lm" = the rarity-segmented SET PIECES, which is a different pass from
+    // the object catalogue: catalogue objects are chunks of street frontage,
+    // these are the whole pieces the generator actually stamps.
+    r = (kind === '__lm')
+      ? await (await fetch(`/api/library/landmarks?level=${lvl}`)).json()
+      : await (await fetch(`/api/library/objects?level=${lvl}&kind=${encodeURIComponent(kind)}&min_faces=${mf}&limit=300`)).json();
+  } catch (e) { setStatus('library list failed: ' + e, 'bad'); return; }
+  if (!r.ok) { setStatus(r.error, 'warn'); return; }
+  libRows = r.objects;
+  $('libCount').textContent = `${r.total} object(s) match; showing ${libRows.length}.`;
+  $('libList').innerHTML = libRows.map((o, i) =>
+    `<div class="libitem" data-i="${i}" style="padding:2px 5px;cursor:pointer;
+      border-bottom:1px solid #23262e;font-size:11px">
+      <b>${o.kind}</b>${o.overridden ? ' *' : ''} &middot; ${o.faces}f &middot;
+      ${Math.round(o.extent[0])}&times;${Math.round(o.extent[2])} h${Math.round(o.extent[1])}
+      <span style="color:#78808f">${o.id}</span></div>`).join('');
+  [...document.querySelectorAll('.libitem')].forEach((el) => {
+    el.onclick = () => libShow(libRows[+el.dataset.i]);
+  });
+}
+
+async function libShow(o) {
+  libSel = o;
+  const lvl = o.level;
+  $('libInfo').innerHTML = `<b>${o.id}</b> &mdash; ${o.kind}, ${o.faces} faces,
+    ${o.pages.length} page(s), footprint ${Math.round(o.extent[0])}&times;${Math.round(o.extent[2])},
+    height ${Math.round(o.extent[1])}`;
+  $('libPages').innerHTML = o.pages.slice(0, 24).map((p) =>
+    `<img title="page ${p}" style="width:34px;height:34px;image-rendering:pixelated;
+      border:1px solid #2c313c" src="/api/library/page?level=${lvl}&page=${p}">`).join('');
+  const t = (libIndex && libIndex.tags && libIndex.tags[o.id]) || {};
+  $('libKindSet').value = t.kind || '';
+  $('libNote').value = t.note || '';
+
+  setStatus(`Loading prefab ${o.id}…`);
+  try {
+    // fill=1 only affects segmented set pieces (L..lm..); harmless on catalogue
+    // objects, which ignore it.
+    const fill = $('libFill') && $('libFill').checked ? '&fill=1' : '';
+    const buf = await (await fetch('/api/library/prefab?id=' + encodeURIComponent(o.id) + fill)).arrayBuffer();
+    gltfLoader.parse(buf, '', async (gltf) => {
+      const pages = new Set();
+      gltf.scene.traverse((n) => { if (n.isMesh && n.userData && n.userData.page != null) pages.add(n.userData.page); });
+      // Page TYPES come from the source level, so keyed art stays keyed. Without
+      // this a railing or a window renders as a solid panel.
+      let types = {};
+      try { types = (await (await fetch('/api/assets?level=' + lvl)).json()).page_types || {}; } catch {}
+      const texMap = {};
+      await Promise.all([...pages].map(async (p) => {
+        try { texMap[p] = await trackTexture(lvl, `page_${String(p).padStart(3, '0')}.png`, false); }
+        catch { texMap[p] = null; }
+      }));
+      gltf.scene.traverse((n) => {
+        if (n.isMesh) n.material = envMaterial(texMap[n.userData ? n.userData.page : -1],
+                                               types[n.userData ? n.userData.page : -1] | 0);
+      });
+      libClearPreview();
+      prefabRoot.add(gltf.scene);
+      // The generator-kit list has no catalogue row behind it (it is parsed out
+      // of a C header), so fall back to the GLB's own bounds rather than
+      // fitting the camera to an extent of zero.
+      let r = Math.max(o.extent[0] || 0, o.extent[1] || 0, o.extent[2] || 0) * 0.5;
+      if (!r) {
+        const b = new THREE.Box3().setFromObject(gltf.scene), s = new THREE.Vector3();
+        b.getSize(s); r = Math.max(s.x, s.y, s.z) * 0.5;
+      }
+      fitCamera(r);
+      setStatus(`${o.id}: ${o.faces || '?'} faces over ${pages.size} page(s).`, 'ok');
+    }, (err) => setStatus('prefab GLB parse error: ' + err, 'bad'));
+  } catch (e) { setStatus('prefab load failed: ' + e, 'bad'); }
+}
+
+async function libTag(clear) {
+  if (!libSel) { setStatus('select an object first', 'warn'); return; }
+  const body = { id: libSel.id, note: $('libNote').value };
+  if (clear) body.clear = true; else body.kind = $('libKindSet').value;
+  try {
+    const r = await (await fetch('/api/library/tags', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body) })).json();
+    if (r.ok) {
+      setStatus(`Tagged ${r.id} (${r.tagged} total) -> ${r.path}`, 'ok');
+      libIndex = await (await fetch('/api/library')).json();
+      libList();
+    } else setStatus(r.error || 'tag failed', 'bad');
+  } catch (e) { setStatus('tag failed: ' + e, 'bad'); }
+}
+
+$('libRefresh').onclick = libList;
+// The picker reads selLevel, which is now a hidden mirror of the one visible
+// level control -- two level dropdowns in one tab was the bug waiting to happen.
+$('libLevel').onchange = () => { $('selLevel').value = $('libLevel').value; libList(); };
+$('libKind').onchange = libList;
+$('libClearPreview').onclick = () => { libClearPreview(); setStatus('Preview cleared.', 'ok'); };
+$('libFill').onchange = () => { if (libSel) libShow(libSel); };
+$('libSaveTag').onclick = () => libTag(false);
+$('libClearTag').onclick = () => libTag(true);
+
+// -------------------------------------------------------- free selection
+// Whole track as pickable geometry. Geometry stays grouped one node per page
+// (458 draw calls, not 31,570 meshes) and every vertex carries its primitive id
+// in _PRIMID, so a raycast hit reads the id back off the hit face. Highlight is
+// drawn as wireframe boxes from the index AABBs rather than by recolouring,
+// because a primitive is a slice of a merged buffer, not its own mesh.
+const selRoot = envRoot;   // alias: one group, see its declaration at the top
+const selBill = new THREE.Group(); scene.add(selBill);   // camera-facing sprites
+const selHi = new THREE.Group(); scene.add(selHi);
+let selPrims = null, selChosen = new Set(), selLevelNum = null;
+let selDragFrom = null, selCenter = new THREE.Vector3();
+// pid -> [{mesh, start, count}] vertex ranges inside the merged page buffers,
+// recovered from _PRIMID at load. Needed for two things the AABB index cannot
+// do: highlighting the REAL triangles, and addressing a single face.
+let selRanges = null;
+let selFaces = new Map();      // pid -> Set(face index within that primitive)
+let selFlashUntil = 0;
+// `var`, not `let`, and guarded below: the render loop is an IIFE near the top
+// of this module and calls tickExtras on frame one, which is BEFORE a `let`
+// here is initialised. That is a temporal-dead-zone ReferenceError thrown
+// during module evaluation, which kills every statement after it -- the symptom
+// is the whole panel silently failing to populate, not an obvious crash.
+var selBillSets = [];      // [{mesh, items}] one InstancedMesh per page
+
+// Billboards are rebuilt against the camera every frame, which is what the
+// engine itself does (td5_render_mesh.c): they store a world position and LOCAL
+// vertices, so baked flat they show edge-on or face an arbitrary direction.
+// One InstancedMesh per page keeps this to ~50 draw calls for level023's 1406
+// billboards instead of 1406.
+function tickExtras() {
+  // hoisted `var` (see its declaration): undefined on frame one, never a TDZ throw
+  if (selHatchMat) selHatchMat.uniforms.uPhase.value = (performance.now() * 0.03) % 16.0;
+  if (!selBillSets || !selBillSets.length) return;   // undefined on frame one
+  const q = camera.quaternion, m = new THREE.Matrix4();
+  const s = new THREE.Vector3(), p = new THREE.Vector3();
+  for (const set of selBillSets) {
+    for (let i = 0; i < set.items.length; i++) {
+      const it = set.items[i];
+      // RAW world centre. selBill.position already carries -selCenter (set in
+      // applyViewOffset, same as selRoot), and the instance mesh is a child of
+      // selBill, so subtracting selCenter here too double-offset every tree and
+      // lamp glow by ~selCenter and scattered them far outside the track.
+      p.set(it.c[0], it.c[1], it.c[2]);
+      s.set(it.w || 1, it.h || 1, 1);
+      m.compose(p, q, s);
+      set.mesh.setMatrixAt(i, m);
+    }
+    set.mesh.instanceMatrix.needsUpdate = true;
+  }
+}
+
+function selSetInfo(msg) {
+  if (msg) { $('selInfo').innerHTML = msg; return; }
+  if (!selPrims) { $('selInfo').innerHTML = 'Nothing loaded.'; return; }
+  let nf = 0; for (const s of selFaces.values()) nf += s.size;
+  const what = selGran() === 'face'
+    ? `${nf} face(s) over ${selFaces.size} primitive(s)`
+    : `${selChosen.size} primitive(s)`;
+  $('selInfo').innerHTML = `${selPrims.length} primitives loaded &middot; ${what} selected`;
+}
+
+const selGran = () => $('selGran').value;
+
+// ---- highlight, ported from the in-game free-cam picker -------------------
+// td5_pick.c:305 outlines the picked mesh's REAL faces and fills them with
+// marching 45-degree lines, always on top. The AABB wireframe this replaces
+// was a lie about the shape: a cathedral and the block of air around it look
+// identical as a box. Here the outline is EdgesGeometry over the actual
+// triangles (which drops the quad diagonals, so quads read as quads like they
+// do in-game) and the hatch is the same x+y screen-space march done in a
+// fragment shader instead of by clipping lines on the CPU.
+const SEL_HL = 0xffff00, SEL_HL_FLASH = 0x33ff33;   // yellow / green flash
+// `var`, like selBillSets below: the render loop is an IIFE near the top of
+// this module and calls tickExtras on frame one, before a `let`/`const` down
+// here exists. `typeof` does NOT rescue that -- it throws for a const in its
+// temporal dead zone, unlike an undeclared name -- so the guard has to be a
+// plain truthiness test on a hoisted `var`.
+var selHatchMat = new THREE.ShaderMaterial({
+  uniforms: { uColor: { value: new THREE.Color(SEL_HL) }, uPhase: { value: 0 } },
+  vertexShader: 'void main(){gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
+  fragmentShader: `uniform vec3 uColor; uniform float uPhase;
+    void main(){
+      if (mod(gl_FragCoord.x + gl_FragCoord.y + uPhase, 16.0) > 2.0) discard;
+      gl_FragColor = vec4(uColor, 1.0);
+    }`,
+  side: THREE.DoubleSide, depthTest: false, depthWrite: false, transparent: true,
+});
+var selEdgeMat = new THREE.LineBasicMaterial({
+  color: SEL_HL, depthTest: false, transparent: true });
+
+function selHlColor() {
+  const c = performance.now() < selFlashUntil ? SEL_HL_FLASH : SEL_HL;
+  selHatchMat.uniforms.uColor.value.setHex(c);
+  selEdgeMat.color.setHex(c);
+}
+
+// Every selected face's three positions, pulled straight out of the merged page
+// buffers via the _PRIMID ranges.
+function selHlPositions() {
+  const out = [];
+  const push = (r, f0, f1) => {
+    const p = r.mesh.geometry.getAttribute('position');
+    for (let v = r.start + f0 * 3; v < r.start + f1 * 3; v++)
+      out.push(p.getX(v), p.getY(v), p.getZ(v));
+  };
+  if (selGran() === 'face') {
+    for (const [pid, faces] of selFaces) {
+      const rs = selRanges && selRanges.get(pid); if (!rs) continue;
+      for (const f of faces) {
+        // face index is primitive-local and runs across the ranges in order
+        let base = 0;
+        for (const r of rs) {
+          const n = r.count / 3;
+          if (f < base + n) { push(r, f - base, f - base + 1); break; }
+          base += n;
+        }
+      }
+    }
+  } else {
+    for (const pid of selChosen) {
+      const rs = selRanges && selRanges.get(pid); if (!rs) continue;
+      for (const r of rs) push(r, 0, r.count / 3);
+    }
+  }
+  return out;
+}
+
+function selRedrawHighlight() {
+  while (selHi.children.length) {
+    const c = selHi.children[0];
+    if (c.geometry) c.geometry.dispose();
+    selHi.remove(c);
+  }
+  if (!selPrims) { selSetInfo(); return; }
+  selHlColor();
+  const pos = selHlPositions();
+  if (pos.length) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    const fill = new THREE.Mesh(g, selHatchMat); fill.renderOrder = 998;
+    fill.frustumCulled = false; selHi.add(fill);
+    // thresholdAngle 1 deg: the two halves of a source quad are coplanar, so
+    // their shared diagonal drops out and the outline follows the real face.
+    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(g, 1), selEdgeMat);
+    edges.renderOrder = 999; edges.frustumCulled = false; selHi.add(edges);
+  }
+  // Billboards live in selBill (rebuilt against the camera each frame), not in
+  // the merged buffers, so they have no triangles to outline here -- fall back
+  // to a box for those.
+  for (const pid of selChosen) {
+    if (!selPrims[pid] || !selPrims[pid].billboard) continue;
+    const a = selPrims[pid].aabb;
+    const h = new THREE.Box3Helper(new THREE.Box3(
+      new THREE.Vector3(a[0], a[1], a[2]), new THREE.Vector3(a[3], a[4], a[5])), SEL_HL);
+    h.material.depthTest = false; h.material.transparent = true;
+    h.renderOrder = 999; selHi.add(h);
+  }
+  selHi.position.copy(selRoot.position);
+  selSetInfo();
+}
+
+// THE loader. Both tabs call this: TRACKS via "Load environment", LIBRARY via
+// "Load geometry". One endpoint, one offset, one group, always pickable --
+// previously the track view decoded models.bin through a second exporter that
+// baked billboards flat and emitted no _PRIMID, so the same level looked
+// different and could not be selected depending on which button you pressed.
+async function loadLevelGeometry(level) {
+  const lvl = parseInt(level, 10);
+  if (!Number.isFinite(lvl)) { setStatus('pick a level first', 'warn'); return; }
+  selLevelNum = lvl;
+  if ($('selLevel')) $('selLevel').value = String(lvl);
+  setStatus(`Loading level${String(lvl).padStart(3, '0')} geometry…`);
+  try {
+    const ix = await (await fetch('/api/library/primindex?level=' + lvl)).json();
+    selPrims = ix.prims;
+    // The level lives in raw world coordinates -- level023 is centred near
+    // (623121, -344, 295836) -- so without this offset it loads hundreds of
+    // thousands of units from the camera and looks like nothing happened.
+    selCenter.set(ix.center[0], ix.center[1], ix.center[2]);
+    geomCenter = selCenter.clone();
+    center.copy(selCenter);
+    applyViewOffset();
+    const buf = await (await fetch('/api/library/prims?level=' + lvl)).arrayBuffer();
+    gltfLoader.parse(buf, '', async (gltf) => {
+      const pages = new Set();
+      gltf.scene.traverse((o) => { if (o.isMesh && o.userData && o.userData.page != null) pages.add(o.userData.page); });
+      let types = {};
+      try { types = (await (await fetch('/api/assets?level=' + lvl)).json()).page_types || {}; } catch {}
+      const texMap = {};
+      await Promise.all([...pages].map(async (p) => {
+        try { texMap[p] = await trackTexture(lvl, `page_${String(p).padStart(3, '0')}.png`, false); }
+        catch { texMap[p] = null; }
+      }));
+      gltf.scene.traverse((o) => {
+        if (o.isMesh) o.material = envMaterial(texMap[o.userData.page], types[o.userData.page] | 0);
+      });
+      while (selRoot.children.length) selRoot.remove(selRoot.children[0]);
+      selRoot.add(gltf.scene);
+      selIndexRanges(gltf.scene);
+      selChosen.clear(); selFaces.clear();
+      await selLoadBillboards(lvl, types);
+      // envLoaded hides the schematic ribbon: the real road is now here at full
+      // resolution. rebuild() re-runs with geomCenter set, so the centerline
+      // markers land in the same frame as the scenery.
+      envLoaded = true; rebuild(false);
+      selRedrawHighlight();
+      const a = selPrims.reduce((acc, p) => {
+        for (let k = 0; k < 3; k++) {
+          acc[k] = Math.min(acc[k], p.aabb[k]); acc[k + 3] = Math.max(acc[k + 3], p.aabb[k + 3]);
+        } return acc;
+      }, [1e30, 1e30, 1e30, -1e30, -1e30, -1e30]);
+      fitCamera(Math.max(a[3] - a[0], a[5] - a[2]) * 0.5);
+      const k = ix.kinds || {};
+      setStatus(`level${String(lvl).padStart(3, '0')}: ${selPrims.length} selectable primitives `
+        + `(${k.structure || 0} structure, ${k.slab || 0} slab, ${k.billboard || 0} billboard, `
+        + `${k.post || 0} post, ${k.ribbon || 0} rail). `
+        + `Same geometry in both tabs; tick Pick mode in LIBRARY to select it.`, 'ok');
+    }, (err) => setStatus('prims GLB parse error: ' + err, 'bad'));
+  } catch (e) { setStatus('load failed: ' + e, 'bad'); }
+}
+
+function unloadLevelGeometry() {
+  while (selRoot.children.length) selRoot.remove(selRoot.children[0]);
+  while (selBill.children.length) selBill.remove(selBill.children[0]);
+  selBillSets = [];
+  selPrims = null; selRanges = null; selClearAll();
+  geomCenter = null; envLoaded = false;
+  selRedrawHighlight(); selSetInfo();
+  rebuild(false);        // back to the centerline offset and the schematic ribbon
+}
+
+async function selLoadBillboards(lvl, types) {
+  while (selBill.children.length) selBill.remove(selBill.children[0]);
+  selBillSets = [];
+  let r;
+  try { r = await (await fetch('/api/library/billboards?level=' + lvl)).json(); }
+  catch { return; }
+  if (!r.ok || !r.count) return;
+  const byPage = new Map();
+  for (const b of r.billboards) {
+    if (!byPage.has(b.page)) byPage.set(b.page, []);
+    byPage.get(b.page).push(b);
+  }
+  const geo = new THREE.PlaneGeometry(1, 1);
+  for (const [page, items] of byPage) {
+    let tex = null;
+    try { tex = await trackTexture(lvl, `page_${String(page).padStart(3, '0')}.png`, false); }
+    catch { /* untextured is still selectable */ }
+    // Billboards are keyed art (trees, glows), so alphaTest rather than opaque:
+    // page type 0 here would draw the sprite's whole quad as a solid rectangle.
+    const mat = new THREE.MeshBasicMaterial({
+      map: tex, color: 0xffffff, side: THREE.DoubleSide,
+      transparent: true, alphaTest: (types && types[page] === 2) ? 0.02 : 0.35,
+      depthWrite: true });
+    const mesh = new THREE.InstancedMesh(geo, mat, items.length);
+    mesh.frustumCulled = false;    // matrices are rewritten every frame
+    selBill.add(mesh);
+    selBillSets.push({ mesh, items });
+  }
+}
+
+// One pass over _PRIMID recovering where each primitive's vertices live. Every
+// primitive in the corpus is single-page (measured: 32,444 of 32,444 on
+// level023), so this is normally one contiguous run per id -- but it is stored
+// as a list so a future multi-page split does not silently mis-slice.
+// GLTFLoader LOWERCASES any attribute it does not recognise ("_PRIMID" ->
+// "_primid"), so reading it back under the name the exporter wrote silently
+// yields undefined. That is why click-to-select and the geometry highlight both
+// did nothing while box select -- which works off the AABB index instead --
+// looked fine. Accept both spellings.
+const primIdAttr = (geo) => geo.getAttribute('_primid') || geo.getAttribute('_PRIMID');
+
+function selIndexRanges(rootObj) {
+  selRanges = new Map();
+  const add = (pid, mesh, start, count) => {
+    if (!selRanges.has(pid)) selRanges.set(pid, []);
+    selRanges.get(pid).push({ mesh, start, count });
+  };
+  rootObj.traverse((o) => {
+    if (!o.isMesh) return;
+    const a = primIdAttr(o.geometry); if (!a) return;
+    let cur = -1, start = 0;
+    for (let i = 0; i < a.count; i++) {
+      const v = Math.round(a.getX(i));
+      if (v !== cur) { if (cur >= 0) add(cur, o, start, i - start); cur = v; start = i; }
+    }
+    if (cur >= 0) add(cur, o, start, a.count - start);
+  });
+}
+
+// Ray hit -> {pid, face} where `face` is the triangle index WITHIN the
+// primitive (see save_selection: primitive-local, so it survives a repack).
+function selHitAt(ev) {
+  const r = renderer.domElement.getBoundingClientRect();
+  const m = new THREE.Vector2(((ev.clientX - r.left) / r.width) * 2 - 1,
+                              -((ev.clientY - r.top) / r.height) * 2 + 1);
+  const rc = new THREE.Raycaster(); rc.setFromCamera(m, camera);
+  // Hits from BOTH the merged solid geometry (selRoot) and the camera-facing
+  // billboards (selBill, instanced), tagged with distance so they interleave
+  // correctly -- a tree sprite in front of a wall must win. Billboards carry no
+  // per-face detail, so their whole quad is one "face".
+  const hits = [];
+  for (const h of rc.intersectObject(selRoot, true)) {
+    const attr = h.object.geometry && primIdAttr(h.object.geometry);
+    if (!attr || !h.face) continue;
+    hits.push({ dist: h.distance, obj: h.object, faceA: h.face.a,
+                pid: Math.round(attr.getX(h.face.a)) });
+  }
+  for (const set of selBillSets) {
+    for (const bh of rc.intersectObject(set.mesh, true)) {
+      const it = set.items[bh.instanceId];
+      if (it) hits.push({ dist: bh.distance, bill: true, pid: it.id, faceA: -1 });
+    }
+  }
+  hits.sort((a, b) => a.dist - b.dist);
+  // Walk front-to-back and return the first hit the filter ALLOWS, not simply
+  // the frontmost. A guardrail is a thin ribbon that usually sits in front of a
+  // wall or over a slab; with the filter narrowed to rails, the frontmost hit
+  // is often the very thing being excluded, and returning it would make the
+  // click select nothing.
+  for (const h of hits) {
+    if (!selAllowed(h.pid)) continue;
+    if (h.bill) return { pid: h.pid, face: 0 };   // one quad, one "face"
+    const rs = (selRanges && selRanges.get(h.pid)) || [];
+    let face = -1, base = 0;
+    for (const rg of rs) {
+      if (rg.mesh === h.obj && h.faceA >= rg.start && h.faceA < rg.start + rg.count) {
+        face = base + Math.floor((h.faceA - rg.start) / 3); break;
+      }
+      base += rg.count / 3;
+    }
+    return { pid: h.pid, face };
+  }
+  return null;
+}
+
+// The segmenter's kind_hint vocabulary (td5_assetlib.all_prims) is finer than
+// the four groups the filter offers, so map it. "rail" gathers the roadside
+// furniture the old "structure only" gate silently hid -- guardrails are
+// `ribbon`, their poles are `post`, fences are `ribbon` too -- which is what
+// made them unpickable. "structure" here also takes `detail` (small attached
+// trim) so a balustrade on a building is not orphaned from it.
+function selGroupOf(p) {
+  const k = p.kind;
+  if (p.billboard || k === 'billboard') return 'billboard';
+  if (k === 'slab') return 'slab';
+  if (k === 'ribbon' || k === 'post') return 'rail';
+  return 'structure';   // structure, detail, loose, wall, anything else
+}
+function selAllowed(id) {
+  if (id < 0 || !selPrims || !selPrims[id]) return false;
+  const f = $('selFilter') ? $('selFilter').value : 'all';
+  return f === 'all' || selGroupOf(selPrims[id]) === f;
+}
+
+function selClearAll() { selChosen.clear(); selFaces.clear(); }
+function selToggleFace(pid, face, remove) {
+  if (!selFaces.has(pid)) selFaces.set(pid, new Set());
+  const s = selFaces.get(pid);
+  if (remove === true || (remove === undefined && s.has(face))) s.delete(face); else s.add(face);
+  if (!s.size) selFaces.delete(pid);
+}
+
+// The buttons no longer change meaning with the mode -- see ORBIT_SCHEME at the
+// top. Pick mode only changes what a LEFT drag selects, and the hint text.
+function selApplyPickMode() {
+  const on = $('selPick').checked;
+  controls.mouseButtons = ORBIT_SCHEME;
+  $('hudHelp').textContent = on
+    ? 'PICK MODE · left-drag = box select · right-drag = orbit · middle-drag = pan · wheel = zoom · WASD = fly · Shift = add · Ctrl = remove · Esc = clear'
+    : 'left-click = select · right-drag = orbit · middle-drag = pan · wheel = zoom · WASD = fly · Q/E = down/up · Shift = faster';
+}
+
+function selShowBox(a, b) {
+  const el = $('dragBox'), r = renderer.domElement.getBoundingClientRect();
+  if (!a) { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  el.style.left = (Math.min(a.x, b.x) - r.left) + 'px';
+  el.style.top = (Math.min(a.y, b.y) - r.top) + 'px';
+  el.style.width = Math.abs(b.x - a.x) + 'px';
+  el.style.height = Math.abs(b.y - a.y) + 'px';
+}
+
+renderer.domElement.addEventListener('pointerdown', (ev) => {
+  if (ev.button !== 0 || !$('selPick').checked || !selPrims) return;
+  selDragFrom = { x: ev.clientX, y: ev.clientY, shift: ev.shiftKey, ctrl: ev.ctrlKey };
+});
+renderer.domElement.addEventListener('pointermove', (ev) => {
+  if (!selDragFrom) return;
+  const d = Math.hypot(ev.clientX - selDragFrom.x, ev.clientY - selDragFrom.y);
+  if (d > 5) selShowBox(selDragFrom, { x: ev.clientX, y: ev.clientY });
+});
+
+renderer.domElement.addEventListener('pointerup', (ev) => {
+  if (ev.button !== 0 || !$('selPick').checked || !selPrims || !selDragFrom) return;
+  const from = selDragFrom; selDragFrom = null; selShowBox(null);
+  const dx = Math.abs(ev.clientX - from.x), dy = Math.abs(ev.clientY - from.y);
+  const add = from.shift || ev.shiftKey, sub = from.ctrl || ev.ctrlKey;
+  const faceMode = selGran() === 'face';
+
+  if (dx < 5 && dy < 5) {
+    const hit = selHitAt(ev);
+    if (!hit || !selAllowed(hit.pid)) {
+      if (!add && !sub) { selClearAll(); selRedrawHighlight(); }
+      return;
+    }
+    if (faceMode) {
+      if (!add && !sub) selClearAll();
+      selToggleFace(hit.pid, hit.face, sub ? true : (add ? undefined : false));
+    } else {
+      if (!add && !sub) selChosen.clear();
+      if (sub) selChosen.delete(hit.pid);
+      else if (add) selChosen.has(hit.pid) ? selChosen.delete(hit.pid) : selChosen.add(hit.pid);
+      else selChosen.add(hit.pid);
+    }
+    selFlashUntil = performance.now() + 180;   // click flash, as td5_pick.c does
+  } else {
+    // BOX SELECT. Primitive mode tests each primitive's AABB centre; face mode
+    // tests every face centroid, which is the only way a drag can carve a
+    // window out of one wall rather than taking the whole wall.
+    const r = renderer.domElement.getBoundingClientRect();
+    const x0 = Math.min(from.x, ev.clientX), x1 = Math.max(from.x, ev.clientX);
+    const y0 = Math.min(from.y, ev.clientY), y1 = Math.max(from.y, ev.clientY);
+    const v = new THREE.Vector3();
+    const inBox = () => {
+      v.add(selRoot.position).project(camera);
+      if (v.z > 1) return false;
+      const sx = r.left + (v.x * 0.5 + 0.5) * r.width;
+      const sy = r.top + (-v.y * 0.5 + 0.5) * r.height;
+      return sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1;
+    };
+    if (!add && !sub) selClearAll();
+    if (faceMode) {
+      for (const [pid, rs] of (selRanges || new Map())) {
+        if (!selAllowed(pid)) continue;
+        let base = 0;
+        for (const rg of rs) {
+          const p = rg.mesh.geometry.getAttribute('position');
+          for (let f = 0; f * 3 < rg.count; f++) {
+            const i = rg.start + f * 3;
+            v.set((p.getX(i) + p.getX(i + 1) + p.getX(i + 2)) / 3,
+                  (p.getY(i) + p.getY(i + 1) + p.getY(i + 2)) / 3,
+                  (p.getZ(i) + p.getZ(i + 1) + p.getZ(i + 2)) / 3);
+            if (inBox()) selToggleFace(pid, base + f, sub);
+          }
+          base += rg.count / 3;
+        }
+      }
+    } else {
+      for (let i = 0; i < selPrims.length; i++) {
+        if (!selAllowed(i)) continue;
+        const a = selPrims[i].aabb;
+        v.set((a[0] + a[3]) / 2, (a[1] + a[4]) / 2, (a[2] + a[5]) / 2);
+        if (inBox()) { if (sub) selChosen.delete(i); else selChosen.add(i); }
+      }
+    }
+  }
+  selRedrawHighlight();
+});
+
+window.addEventListener('keydown', (e) => {
+  if (inField(e.target)) return;
+  if (e.key === 'Escape' && selPrims) { selClearAll(); selRedrawHighlight(); }
+});
+
+$('selGran').onchange = () => { selRedrawHighlight(); };
+// Changing the filter is a lens on what a CLICK can hit; it does not retro-drop
+// what is already selected, which would silently erase a careful selection when
+// you narrow the lens to inspect one group.
+$('selFilter').onchange = () => selSetInfo();
+// Promote whatever faces are picked to their whole primitives -- the usual move
+// after using face mode to find which piece a detail belongs to.
+$('selGrow').onclick = () => {
+  if (!selPrims) return;
+  for (const pid of selFaces.keys()) selChosen.add(pid);
+  selFaces.clear(); $('selGran').value = 'prim'; selRedrawHighlight();
+};
+$('selInvert').onclick = () => {
+  if (!selPrims) return;
+  const keep = selChosen;
+  selChosen = new Set();
+  for (let i = 0; i < selPrims.length; i++) if (selAllowed(i) && !keep.has(i)) selChosen.add(i);
+  selFaces.clear(); selRedrawHighlight();
+};
+
+async function selRefreshList() {
+  try {
+    const r = await (await fetch('/api/library/selections?level=' + (selLevelNum || ''))).json();
+    if ($('selKind').options.length === 0) {
+      $('selKind').innerHTML = r.kinds.map((k) => `<option>${k}</option>`).join('');
+    }
+    $('selList').innerHTML = r.selections.length
+      ? r.selections.map((s) => `<div><b>${s.kind}</b> · ${s.name} · ${s.ids.length} prims</div>`).join('')
+      : 'No saved selections.';
+  } catch (e) { setStatus('selection list failed: ' + e, 'bad'); }
+}
+
+async function selSave(del) {
+  const name = $('selName').value.trim();
+  if (!name) { setStatus('name the selection first', 'warn'); return; }
+  // Face picks are saved as their own list AND as their owning primitive ids,
+  // so a consumer that only understands whole primitives still sees the piece.
+  const faces = [];
+  const ids = new Set(selChosen);
+  for (const [pid, fs] of selFaces) { ids.add(pid); for (const f of fs) faces.push([pid, f]); }
+  if (!del && !ids.size) { setStatus('select some geometry first', 'warn'); return; }
+  const body = { level: selLevelNum, name, kind: $('selKind').value,
+                 ids: [...ids], faces };
+  if (del) body.delete = true;
+  try {
+    const r = await (await fetch('/api/library/selection', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body) })).json();
+    if (r.ok) {
+      setStatus(`${del ? 'Deleted' : 'Saved'} "${name}" — ${r.prims} prim(s)`
+        + (r.faces ? `, ${r.faces} face(s)` : '') + ` (${r.total} total) -> ${r.path}`, 'ok');
+      selRefreshList();
+    }
+    else setStatus(r.error || 'save failed', 'bad');
+  } catch (e) { setStatus('save failed: ' + e, 'bad'); }
+}
+
+$('selLoad').onclick = () => loadLevelGeometry($('libLevel').value);
+$('selClearGeom').onclick = unloadLevelGeometry;
+
+// ---- library overview: what is actually ON DISK right now ----------------
+// The library is built by several independent passes (catalogue sweep, road
+// curation, landmark export, hand selections) that are regenerated separately,
+// so the useful question is not "what could exist" but "what is here, and is it
+// stale relative to the rest".
+async function libOverview() {
+  let o;
+  try { o = await (await fetch('/api/library/overview')).json(); }
+  catch (e) { $('libOverview').textContent = 'overview failed: ' + e; return; }
+  if (!o.ok) { $('libOverview').textContent = o.error || 'no library'; return; }
+  const rs = Object.entries(o.road_sets || {}).map(([k, v]) => `${k} ${v}`).join(' · ');
+  const kt = Object.entries(o.kind_totals || {}).sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${k} ${v.toLocaleString()}`).join(' · ');
+  const pr = Object.entries(o.page_roles || {}).sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${k} ${v}`).join(' · ');
+  $('libOverview').innerHTML = `
+    <div><b>Catalogue</b> · built ${o.generated || '?'} · ${o.levels.length} levels</div>
+    <div>${(o.objects_total || 0).toLocaleString()} objects &mdash; ${kt}</div>
+    <div><b>Pages</b> ${o.page_total} &mdash; ${pr}</div>
+    <div><b>Night tracks</b> ${(o.night || []).join(', ') || 'none'}</div>
+    <div><b>Curated roads</b> ${rs || 'none'}</div>
+    <div><b>Landmark pages</b> ${o.landmark_pages} · <b>prefabs in build</b> ${o.prefabs_in_build}</div>
+    <div><b>Hand work</b> ${o.tags} tag(s), ${o.selections} selection(s)
+      ${Object.keys(o.selections_by_kind || {}).length
+        ? '(' + Object.entries(o.selections_by_kind).map(([k, v]) => `${k} ${v}`).join(', ') + ')' : ''}</div>`;
+}
+$('selSave').onclick = () => selSave(false);
+$('selDelete').onclick = () => selSave(true);
+$('selRefresh').onclick = selRefreshList;
+$('selPick').onchange = selApplyPickMode;
+
+// ---------------------------------------------------------------- tabs
+// TRACKS looks at one shipped track. LIBRARY looks at the catalogue -- either
+// per level, or the subset the generator actually compiled in. They are
+// different questions over the same data, which is why the library stopped
+// being a section inside the track panel.
+function showTab(which) {
+  const lib = which === 'library';
+  $('tabTracks').style.display = lib ? 'none' : '';
+  $('tabLibrary').style.display = lib ? '' : 'none';
+  $('tabTracksBtn').classList.toggle('on', !lib);
+  $('tabLibraryBtn').classList.toggle('on', lib);
+}
+$('tabTracksBtn').onclick = () => showTab('tracks');
+$('tabLibraryBtn').onclick = () => showTab('library');
+
+function libApplySource() {
+  const gen = $('libSource').value === 'gen';
+  $('libLevelRow').style.display = gen ? 'none' : '';
+  $('libLevelPanes').style.display = gen ? 'none' : '';
+  $('libGenPanes').style.display = gen ? '' : 'none';
+  if (gen) genLoad();
+}
+$('libSource').onchange = libApplySource;
+
+// ---------------------------------------------------------------- generator kit
+// What is compiled into td5re.exe, parsed back out of the generated headers, as
+// opposed to the 205k-object catalogue on disk. The generator can only place
+// what is in here, and the two drift apart every time the catalogue is re-swept
+// without re-running the exporters.
+async function genLoad() {
+  let g;
+  try { g = await (await fetch('/api/library/genkit')).json(); }
+  catch (e) { $('genSummary').textContent = 'genkit failed: ' + e; return; }
+  if (!g.ok) { $('genSummary').textContent = g.error || 'no generator kit'; return; }
+  const roadN = Object.values(g.roads).reduce((a, v) => a + v.length, 0);
+  $('genSummary').innerHTML = `
+    <div><b>${g.prefab_count}</b> set piece(s) &middot; <b>${g.landmark_pages}</b> landmark
+      texture page(s) &middot; <b>${roadN}</b> road page(s)</div>
+    <div style="color:#78808f">${g.header}</div>`;
+
+  $('genPrefabs').innerHTML = g.prefabs.length
+    ? g.prefabs.map((p, i) => `<div class="genpf" data-id="${p.id}" style="padding:2px 5px;
+        cursor:pointer;border-bottom:1px solid #23262e;font-size:11px">
+        <b>SET PIECE ${String(i).padStart(2, '0')}</b> &middot; ${p.faces}f &middot;
+        ${p.footprint[0]}&times;${p.footprint[1]} h${p.height}
+        <span style="color:#78808f">${p.id}</span></div>`).join('')
+    : 'No prefabs in the build.';
+  [...document.querySelectorAll('.genpf')].forEach((el) => {
+    el.onclick = () => libShow({ id: el.dataset.id, level: +el.dataset.id.match(/^L(\d+)/)[1],
+                                 kind: 'set piece', faces: 0, pages: [], extent: [0, 0, 0] });
+  });
+
+  $('genRoads').innerHTML = Object.entries(g.roads).map(([set, rows]) => `
+    <div style="margin-bottom:6px"><b>${set.toUpperCase()}</b> (${rows.length})<br>
+    ${rows.map((r) => `<img title="level${String(r.level).padStart(3, '0')} p${r.page} — ${r.desc}"
+        style="width:40px;height:40px;image-rendering:pixelated;margin:1px;
+               border:1px solid #2c313c"
+        src="/api/library/page?level=${r.level}&page=${r.page}">`).join('')}</div>`).join('');
+}
+
+// A handle on the live scene for the console and for headless UI tests, which
+// otherwise have no way to aim a click at a specific piece of geometry --
+// clicking the middle of a fit-to-whole-level view hits sky and proves nothing.
+window.__studio = { THREE, scene, camera, controls, selRoot, selHi,
+                    get selPrims() { return selPrims; },
+                    get selChosen() { return selChosen; },
+                    get selFaces() { return selFaces; } };
+
 // ---------------------------------------------------------------- boot
 loadList();
-$('blankBtn').click();
+libLoad();
+libOverview();
+selRefreshList();
+selApplyPickMode();
+rebuild(true);          // empty scene + reference grid; authoring is parked
+
+// ---------------------------------------------------------------- gap picker
+// DOUBLE-CLICK a set piece in the LIBRARY preview to mark exactly where you
+// clicked: the triangle lights up, a marker drops on the hit point, and a
+// readout pinned to the TOP of the viewport gives the WORLD coordinates.
+//
+// Why it exists: automatic hole-finding on these landmarks kept measuring the
+// wrong thing -- a ray metric counted legitimate sky between spires and real
+// window openings as holes -- so the reliable way to locate a gap is for a
+// human to look at it and point. This turns "there is a hole over there" into
+// numbers that can be authored against. Double-click (not click) so
+// OrbitControls and the track-node handle picking are untouched.
+//
+// The preview is in the PREFAB frame (centred in XZ, base y=0); world =
+// local + (cx, minY, cz) taken from the catalogue row's aabb.
+const pickRoot = new THREE.Group();
+scene.add(pickRoot);
+
+const pickBox = document.createElement('div');
+pickBox.id = 'pickBox';
+pickBox.style.cssText = 'position:absolute;left:50%;top:8px;transform:translateX(-50%);' +
+  'z-index:20;display:none;max-width:94%;padding:6px 10px;border-radius:4px;' +
+  'border:1px solid var(--edge,#2c313c);background:rgba(14,17,23,.92);' +
+  'font:12px/1.45 ui-monospace,Consolas,monospace;color:#d7dce5;' +
+  'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none';
+if (wrap) {
+  if (getComputedStyle(wrap).position === 'static') wrap.style.position = 'relative';
+  wrap.appendChild(pickBox);
+}
+
+function pickClear() {
+  while (pickRoot.children.length) {
+    const c = pickRoot.children.pop();
+    if (c.geometry) c.geometry.dispose();
+    if (c.material) c.material.dispose();
+  }
+}
+
+function pickShow(html, cls) {
+  pickBox.style.display = 'block';
+  pickBox.style.borderColor = cls === 'hole' ? '#c9863f' : '#3f6ec9';
+  pickBox.innerHTML = html;
+}
+
+// keep the old clear-preview behaviour honest: no stale marker on an empty stage
+const _libClearPreviewBtn = $('libClearPreview');
+if (_libClearPreviewBtn) _libClearPreviewBtn.addEventListener('click', () => {
+  pickClear(); pickBox.style.display = 'none';
+});
+
+renderer.domElement.addEventListener('dblclick', (ev) => {
+  if (!prefabRoot.children.length || !libSel || !libSel.aabb) return;
+  const r = renderer.domElement.getBoundingClientRect();
+  const m = new THREE.Vector2(((ev.clientX - r.left) / r.width) * 2 - 1,
+                              -((ev.clientY - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(m, camera);
+  const hits = raycaster.intersectObjects(prefabRoot.children, true);
+  const A = libSel.aabb;
+  const off = new THREE.Vector3((A[0] + A[3]) / 2, A[1], (A[2] + A[5]) / 2);
+  const big = Math.max(libSel.extent[0] || 0, libSel.extent[1] || 0, libSel.extent[2] || 0);
+  pickClear();
+
+  if (!hits.length) {
+    // Pointing at a HOLE is the useful case, so say so rather than going quiet,
+    // and draw the ray that went through so the hole is visible on screen.
+    const d = raycaster.ray.direction.clone();
+    const a = raycaster.ray.origin.clone();
+    const b = a.clone().add(d.clone().multiplyScalar(big * 3));
+    const ln = new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]),
+      new THREE.LineBasicMaterial({ color: 0xffa04a, depthTest: false, transparent: true }));
+    ln.renderOrder = 999; pickRoot.add(ln);
+    const line = `${libSel.id} HOLE — ray dir (${d.x.toFixed(4)}, ${d.y.toFixed(4)}, ${d.z.toFixed(4)})`;
+    pickShow(`<b style="color:#ffa04a">HOLE</b> &nbsp;${libSel.id}&nbsp; ` +
+      `ray origin (${a.clone().add(off).toArray().map((v) => v.toFixed(0)).join(', ')}) ` +
+      `dir (${d.toArray().map((v) => v.toFixed(4)).join(', ')})`, 'hole');
+    setStatus('no geometry under the cursor — that is a HOLE (ray drawn)', 'warn');
+    console.log('[gap] MISS ' + libSel.id
+      + ' ray origin (' + a.clone().add(off).toArray().map((v) => v.toFixed(0)).join(', ')
+      + ') dir (' + d.toArray().map((v) => v.toFixed(4)).join(', ') + ')');
+    try { navigator.clipboard.writeText(line); } catch (e) {}
+    return;
+  }
+
+  const h = hits[0];
+  const w = h.point.clone().add(off);
+  const page = (h.object.userData && h.object.userData.page != null) ? h.object.userData.page : '?';
+
+  // highlight the exact triangle, drawn over the top so it reads at any angle
+  let verts = '(unavailable)';
+  try {
+    const pos = h.object.geometry.getAttribute('position');
+    const P = [h.face.a, h.face.b, h.face.c].map((i) =>
+      h.object.localToWorld(new THREE.Vector3().fromBufferAttribute(pos, i)));
+    const g = new THREE.BufferGeometry().setFromPoints(P);
+    const tri = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+      color: 0x35d6ff, side: THREE.DoubleSide, transparent: true, opacity: 0.55,
+      depthTest: false }));
+    tri.renderOrder = 998; pickRoot.add(tri);
+    const out = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(P),
+      new THREE.LineBasicMaterial({ color: 0x7ef2ff, depthTest: false, transparent: true }));
+    out.renderOrder = 999; pickRoot.add(out);
+    verts = P.map((v) => {
+      const q = v.clone().add(off);
+      return `(${q.x.toFixed(0)},${q.y.toFixed(0)},${q.z.toFixed(0)})`;
+    }).join(' ');
+  } catch (e) { /* highlight is a nicety; the numbers still go out */ }
+
+  const dot = new THREE.Mesh(new THREE.SphereGeometry(Math.max(20, big * 0.012), 12, 8),
+    new THREE.MeshBasicMaterial({ color: 0xffe36e, depthTest: false }));
+  dot.position.copy(h.point); dot.renderOrder = 1000; pickRoot.add(dot);
+
+  const line = `${libSel.id} world (${w.x.toFixed(0)}, ${w.y.toFixed(0)}, ${w.z.toFixed(0)}) page ${page} tri ${verts}`;
+  pickShow(`<b style="color:#7ef2ff">PICK</b> &nbsp;${libSel.id}&nbsp; ` +
+    `world <b>(${w.x.toFixed(0)}, ${w.y.toFixed(0)}, ${w.z.toFixed(0)})</b> ` +
+    `page <b>${page}</b> &nbsp;tri ${verts}`);
+  setStatus('picked — copied to clipboard', 'ok');
+  console.log('[gap] ' + line);
+  try { navigator.clipboard.writeText(line); } catch (e) {}
+});

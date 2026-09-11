@@ -2981,6 +2981,80 @@ static void tg_emit_r8var_rail_pages(TG_Buf *pages)
     }
 }
 
+/* [GEOMLIB] Real shipped ROAD surfaces: 5 classes x TD5_TG_RS_PER_CLASS slots,
+ * from td5_tg_real_tex_roads.h (curated by re/tools/td5_geomlib.py roads out of
+ * the pages the shipped game actually paves carriageway with).
+ *
+ * These are emitted UNCONDITIONALLY, unlike the wall/tree borrowings gated on
+ * tg_real_textures_enabled(): they occupy their own page block and nothing
+ * selects them unless the ROAD SURFACE roll asks for them, so emitting them
+ * costs container bytes and changes no geometry. The base ROAD page and the
+ * four ROAD_EXTRA variants are untouched, so a seed that does not pick a real
+ * set is byte-identical to before this block existed.
+ *
+ * Each class falls back to its procedural generator when the header carries
+ * fewer pages than the block reserves -- same shape as tg_emit_r8var_rail_pages.
+ * Note the fallback for TARMAC/PALE is the asphalt emitter, not
+ * tg_emit_texture_page_roadsurf(RS_TARMAC): roadsurf switches on DIRT/ICE/
+ * COBBLE and lets everything else fall through to gravel. */
+#define TG_RS_EMIT(CLS, cls, FALLBACK)                                        \
+    for (v = 0; v < TD5_TG_RS_PER_CLASS; v++) {                               \
+        if (v < k_road_##cls##_count)                                         \
+            tg_emit_real_page(&pages[TD5_TG_PAGE_RS_##CLS + v],               \
+                              k_road_##cls##_pal[v], k_road_##cls##_paln[v],  \
+                              k_road_##cls##_idx[v], 0);                      \
+        else                                                                  \
+            FALLBACK(&pages[TD5_TG_PAGE_RS_##CLS + v]);                       \
+    }
+
+static void tg_emit_rs_cobble(TG_Buf *out)
+{
+    tg_emit_texture_page_roadsurf(out, RS_COBBLE);
+}
+
+static void tg_emit_rs_dirt(TG_Buf *out)
+{
+    tg_emit_texture_page_roadsurf(out, RS_DIRT);
+}
+
+static void tg_emit_rs_ice(TG_Buf *out)
+{
+    tg_emit_texture_page_roadsurf(out, RS_ICE);
+}
+
+static void tg_emit_roadset_pages(TG_Buf *pages)
+{
+    int v;
+    TG_RS_EMIT(TARMAC,   tarmac,   tg_emit_texture_page_asphalt)
+    TG_RS_EMIT(CONCRETE, concrete, tg_emit_texture_page_asphalt)
+    TG_RS_EMIT(COBBLE,   cobble,   tg_emit_rs_cobble)
+    TG_RS_EMIT(DIRT,     dirt,     tg_emit_rs_dirt)
+    TG_RS_EMIT(ICE,      ice,      tg_emit_rs_ice)
+}
+
+#undef TG_RS_EMIT
+
+/* [GEOMLIB] The 69 pages the shipped-geometry prefabs are textured with. Laid
+ * down positionally: local index i in td5_tg_prefab_data.h is
+ * TD5_TG_PAGE_LM_BASE + i here.
+ *
+ * Type comes from the SHIPPED page, not a constant. Measured: 65 of the 69 are
+ * opaque but 4 are alpha-keyed (type 1), so forcing 0 would turn those keyed
+ * holes -- railings, windows -- solid. gen_tg_pages.py gained a per-set
+ * k_*_type[] array for this; it did not previously emit one. */
+static void tg_emit_prefab_pages(TG_Buf *pages)
+{
+    int i;
+    for (i = 0; i < TD5_TG_LM_PAGES; i++) {
+        if (i < k_lm_pf_count)
+            tg_emit_real_page(&pages[TD5_TG_PAGE_LM_BASE + i],
+                              k_lm_pf_pal[i], k_lm_pf_paln[i],
+                              k_lm_pf_idx[i], k_lm_pf_type[i]);
+        else
+            tg_emit_texture_page_wall(&pages[TD5_TG_PAGE_LM_BASE + i], 0);
+    }
+}
+
 /* Fill the wall/store/grass/tree/prop pages with REAL TD5 texture data borrowed
  * from shipped tracks instead of the procedural placeholders, so the auto-track
  * reads like an actual TD5 level.
@@ -3181,6 +3255,8 @@ static int tg_emit_textures(TG_Buf *out)
             tg_emit_texture_page_roadsurf(&pages[tg_road_slot(v)],
                                           k_road_surf[v].proc_kind);
     }
+    tg_emit_roadset_pages(pages);
+    tg_emit_prefab_pages(pages);
     /* [FB 2026-08-26] reserved feedback-batch pages -- one owner each. */
     tg_emit_texture_page_fb_city(&pages[TD5_TG_PAGE_SIDEWALK], 0);
     tg_emit_texture_page_fb_city(&pages[TD5_TG_PAGE_CROSSING], 1);
@@ -3738,6 +3814,11 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
      * reason tg_acct_reset is: a direct build_level call must see its own seed.
      * Read only through tg_gen_seed(). */
     s_gen_seed = spec->seed;
+    /* [GEOMLIB] ROAD SURFACE is a whole-TRACK choice like the banner set, and
+     * tg_road_page runs per span per emitter, so the knob is read ONCE here.
+     * The REUSE path in regenerate skips this function, which is correct: it
+     * skips every tg_road_page caller too, so there is no stale value to read. */
+    tg_rs_latch();
     /* [R12 FLORA] the ledgers are per-BUILD, same argument as tg_acct_reset. */
     s_r12_flora_n = 0; s_r12_band_seen = 0; s_r12_flora_rejects = 0;
     memset(s_r12_band_why, 0, sizeof(s_r12_band_why));
@@ -4153,6 +4234,10 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
     TG_TV(TG_T_RPT_R14BAND,   tg_r14_band_report(&nl, nspans));   /* [R14 COAST item 5b] run ends   */
     TG_TV(TG_T_RPT_R11WATER,  tg_r11_water_diag(&nl, nspans));    /* [R11 WATER] wet footprint    */
     TG_TV(TG_T_RPT_R12TEX,    tg_r12_tex_report(&nl, nspans));    /* [R12 TEX] page-per-surface   */
+    /* [GEOMLIB] Unconditional, unlike the opt-in diagnostics above: "how many
+     * set pieces did this seed get" is a one-line build fact, and if the guard
+     * rejects them the placed/emitted gap is the first thing worth seeing. */
+    tg_prefab_report();
     TG_TV(TG_T_RPT_R14COAST,  tg_r14_coast_report());             /* [R14 COAST item 5a] straddles */
     /* [R15 BAND item 3] Not TG_TV-wrapped and not span-gated: this one only
      * divides four running sums and emits a single line -- it has no per-span

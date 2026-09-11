@@ -57,7 +57,6 @@ try:
     mesh_tool = _load_module("mesh_tool", os.path.join(TOOLS_DIR, "mesh_tool.py"))  # needs numpy
 except Exception as _e:  # noqa
     mesh_tool = None
-_glb_cache = {}    # level -> glb bytes (env geometry; built once)
 _page_cache = {}   # (level, page) -> rgba png bytes with transparency baked
 
 
@@ -280,50 +279,22 @@ def serve_asset(level, name):
     return None
 
 
-def build_model_glb(level):
-    """Decode the level's models.bin and export a GLB grouped by per-command texture
-    page (one node per page, page id in mesh extras) so each surface gets its real
-    page from textures.src/pages/. The mesh-level page id is only a default; the
-    per-command page ids are the faithful per-surface textures. Cached."""
-    if mesh_tool is None:
-        raise RuntimeError("mesh_tool/numpy unavailable")
+# NOTE: there was a second, separate whole-level exporter here
+# (build_model_glb). It decoded models.bin again, told billboards from
+# structural meshes by comparing vertex magnitude against bounding-centre
+# magnitude, and baked the billboards FLAT -- so the track view and the library
+# view of the same level did not agree, and only one of them was pickable.
+# build_prims_glb is now the single source: it splits page-exactly, tags every
+# vertex with _PRIMID, and leaves billboards to the client to draw
+# camera-facing off the mesh HEADER TAG rather than a magnitude heuristic.
+
+
+def glb_from_page_groups(pos_by, uv_by):
+    """Pack {page -> flat triangle positions} + {page -> uvs} into a GLB, one
+    node per page with the page id in mesh extras so the client can fetch the
+    right texture. Shared by the whole-level view and the prefab preview -- they
+    differ only in where the triangles come from."""
     import numpy as np
-    from collections import defaultdict
-    level = int(level)
-    if level in _glb_cache:
-        return _glb_cache[level]
-    path = os.path.join(_level_dir(level), "models.bin")
-    if not os.path.isfile(path):
-        raise FileNotFoundError("no models.bin for level %d" % level)
-    model = mesh_tool.decode(open(path, "rb").read(), "models")
-    pos_by, uv_by = defaultdict(list), defaultdict(list)
-    for m in model["meshes"]:
-        vs, cur = m["vertices"], 0
-        # Billboard/prop meshes (trees, signs, checkpoint banners) store their
-        # vertices around 0 and are placed in the world at their bounding centre;
-        # structural meshes already carry world-space vertices. Distinguish by
-        # comparing vertex magnitude to the bounding-centre magnitude, then shift
-        # the local ones so everything lands in its real place (not piled at 0,0).
-        bnd = m["bounding"]            # [radius, cx, cy, cz]
-        bmag = abs(bnd[1]) + abs(bnd[3])
-        vmax = max((abs(v["pos"][0]) + abs(v["pos"][2]) for v in vs), default=0)
-        # Billboard/prop meshes store LOCAL vertices (extent ~ bounding radius)
-        # and place at bounding centre; structural meshes carry world vertices
-        # (extent ~ centre magnitude). The old bmag > 100000 gate missed props
-        # near the world origin (Moscow glow quads at bmag ~30k piled at 0,0).
-        ox, oy, oz = (bnd[1], bnd[2], bnd[3]) if (bmag > 1000 and vmax < bmag * 0.5) else (0.0, 0.0, 0.0)
-        for c in m["commands"]:
-            tri, quad, page = c["tri"], c["quad"], c["texture_page_id"]
-            P, U = pos_by[page], uv_by[page]
-            for t in range(tri):
-                for k in (cur + t * 3, cur + t * 3 + 1, cur + t * 3 + 2):
-                    p = vs[k]["pos"]; P.append([p[0] + ox, p[1] + oy, p[2] + oz]); U.append(vs[k]["tex"])
-            qb = cur + tri * 3
-            for q in range(quad):
-                b = qb + q * 4
-                for k in (b, b + 1, b + 2, b, b + 2, b + 3):
-                    p = vs[k]["pos"]; P.append([p[0] + ox, p[1] + oy, p[2] + oz]); U.append(vs[k]["tex"])
-            cur += tri * 3 + quad * 4
     gb = mesh_tool._Glb()
     meshes, nodes = [], []
     for page in sorted(pos_by):
@@ -333,7 +304,192 @@ def build_model_glb(level):
         U = np.array(uv_by[page], np.float32).reshape(-1, 2)
         attrs = {"POSITION": gb.add(P, mesh_tool.COMP_FLOAT, "VEC3", minmax=True),
                  "TEXCOORD_0": gb.add(U, mesh_tool.COMP_FLOAT, "VEC2")}
-        meshes.append({"primitives": [{"attributes": attrs, "mode": 4}], "extras": {"page": int(page)}})
+        meshes.append({"primitives": [{"attributes": attrs, "mode": 4}],
+                       "extras": {"page": int(page)}})
+        nodes.append({"mesh": len(meshes) - 1})
+    gltf = {"asset": {"version": "2.0", "generator": "td5_track_studio"},
+            "buffers": [{"byteLength": len(gb.bin)}],
+            "bufferViews": gb.bufferViews, "accessors": gb.accessors,
+            "meshes": meshes, "nodes": nodes,
+            "scenes": [{"nodes": list(range(len(nodes)))}], "scene": 0}
+    return mesh_tool._pack_glb(gltf, bytes(gb.bin))
+
+
+# --------------------------------------------------------------------------
+# LIBRARY browser -- the shipped-geometry catalogue built by
+# re/tools/td5_geomlib.py. Read-only over library.json / objects/*.jsonl, plus
+# ONE writable file: tags.json, where a human overrides the classifier.
+#
+# Overrides live in their own file rather than being written back into the
+# catalogue, because the catalogue is REGENERABLE -- re-running the sweep must
+# not throw away hand corrections, and a wrong verdict fixed here has to survive
+# the next `td5_geomlib.py build`.
+# --------------------------------------------------------------------------
+LIBRARY_DIR = os.path.join(ASSETS_DIR, "library")
+_prefab_glb_cache = {}
+_geomlib = None
+
+
+def _lib():
+    """td5_geomlib, loaded lazily: it pulls in numpy and PIL, and the studio is
+    still usable for track editing without them."""
+    global _geomlib
+    if _geomlib is None:
+        _geomlib = _load_module("td5_geomlib",
+                                os.path.join(TOOLS_DIR, "td5_geomlib.py"))
+    return _geomlib
+
+
+def _tags_path():
+    return os.path.join(LIBRARY_DIR, "tags.json")
+
+
+def _load_tags():
+    return _load_json(_tags_path()) or {}
+
+
+def library_index():
+    """Catalogue summary + which levels have objects + the curated road sets."""
+    idx = _load_json(os.path.join(LIBRARY_DIR, "library.json"))
+    if not idx:
+        return {"ok": False,
+                "error": "no library at %s -- run: python re/tools/td5_geomlib.py "
+                         "build" % os.path.relpath(LIBRARY_DIR, REPO_ROOT)}
+    levels = []
+    for name in sorted(os.listdir(os.path.join(LIBRARY_DIR, "objects"))
+                       if os.path.isdir(os.path.join(LIBRARY_DIR, "objects")) else []):
+        if name.startswith("level") and name.endswith(".jsonl"):
+            levels.append(int(name[5:8]))
+    pages = (idx.get("pages") or {}).get("levels") or {}
+    return {"ok": True, "levels": levels,
+            "generated": idx.get("generated"),
+            "kind_totals": (idx.get("objects") or {}).get("kind_totals") or {},
+            "page_levels": {str(k): v for k, v in pages.items()},
+            "roads": _load_json(os.path.join(TOOLS_DIR, "manifests", "roads.json")),
+            "tags": _load_tags()}
+
+
+def library_objects(level, kind=None, min_faces=0, limit=400):
+    """Rows for one level, newest classifier verdict with any human override
+    applied on top, biggest first."""
+    path = os.path.join(LIBRARY_DIR, "objects", "level%03d.jsonl" % int(level))
+    if not os.path.isfile(path):
+        return {"ok": False, "error": "no objects for level %s" % level}
+    tags = _load_tags()
+    rows = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            o = json.loads(line)
+            t = tags.get(o["id"])
+            if t and t.get("kind"):
+                o["kind"] = t["kind"]
+                o["overridden"] = True
+            if kind and o["kind"] != kind:
+                continue
+            if o["faces"] < int(min_faces):
+                continue
+            rows.append(o)
+    rows.sort(key=lambda r: -r["faces"])
+    return {"ok": True, "level": int(level), "total": len(rows),
+            "objects": rows[:int(limit)]}
+
+
+# --------------------------------------------------------------------------
+# FREE SELECTION over a whole track.
+#
+# Automatic segmentation gets the big pieces right and is wrong at the edges --
+# where one building ends and its neighbour begins is not recoverable from the
+# format, which carries no object grouping at all. So the browser lets a human
+# select geometry directly and say what it is.
+#
+# The selectable unit is the PRIMITIVE: one page-exact run of faces, the finest
+# thing the format has an unambiguous seam for. level023 is 31,570 of them but
+# only 109,269 triangles, so the whole track fits in one scene and selection
+# needs no region streaming.
+#
+# Picking works by carrying a per-vertex _PRIMID through the GLB. Geometry is
+# still grouped one node per page (458 draw calls, same as the env view), and a
+# raycast hit gives a face index, which reads back the id. That is much cheaper
+# than 31,570 separate meshes.
+# --------------------------------------------------------------------------
+_prims_cache = {}       # level -> (prims, glb, index)
+
+
+def _level_prims_cached(level):
+    level = int(level)
+    if level in _prims_cache:
+        return _prims_cache[level]
+    gl = _lib()
+    with open(os.path.join(LIBRARY_DIR, "pages.json"), encoding="utf-8") as f:
+        pages_doc = json.load(f)
+    role = {p["page"]: p["role"] for p in pages_doc["pages"]
+            if p["level"] == level}
+    model = gl._load_model(gl._levels_dir(), level)
+    # EVERY primitive, not just the ones segmentation cares about: in a
+    # selection view, geometry you cannot see is geometry you cannot pick.
+    prims = gl.al.all_prims(model, role)
+    for i, p in enumerate(prims):
+        p["_pid"] = i
+    _prims_cache[level] = (prims, None, None)
+    return _prims_cache[level]
+
+
+def _prims_center(prims):
+    """Track centre. The whole level sits in raw world coordinates -- level023
+    is centred near (623121, -344, 295836) -- so geometry added at the scene
+    origin lands hundreds of thousands of units from the camera and looks like
+    nothing loaded at all. The env view already offsets by -centre; the
+    selection view has to do the same."""
+    if not prims:
+        return [0.0, 0.0, 0.0]
+    mn = [min(p["aabb"][i] for p in prims) for i in range(3)]
+    mx = [max(p["aabb"][i + 3] for p in prims) for i in range(3)]
+    return [round((mn[i] + mx[i]) * 0.5, 1) for i in range(3)]
+
+
+def build_prims_glb(level):
+    """Whole level as pickable geometry: one node per page, every vertex tagged
+    with its primitive id in _PRIMID."""
+    import numpy as np
+    from collections import defaultdict
+    level = int(level)
+    prims, glb, idx = _level_prims_cached(level)
+    if glb is not None:
+        return glb
+    pos_by, uv_by, id_by = defaultdict(list), defaultdict(list), defaultdict(list)
+    for p in prims:
+        if p.get("billboard"):
+            continue          # drawn camera-facing by the client, not baked here
+        pid = float(p["_pid"])
+        vs = p["mesh"]["vertices"]
+        cur = 0
+        for c in p["mesh"]["commands"]:
+            tri, quad, page = int(c["tri"]), int(c["quad"]), int(c["texture_page_id"])
+            for t in range(tri):
+                for k in (cur + t * 3, cur + t * 3 + 1, cur + t * 3 + 2):
+                    v = vs[k]
+                    pos_by[page].append(v["pos"]); uv_by[page].append(v["tex"])
+                    id_by[page].append([pid])
+            qb = cur + tri * 3
+            for q in range(quad):
+                b = qb + q * 4
+                for k in (b, b + 1, b + 2, b, b + 2, b + 3):
+                    v = vs[k]
+                    pos_by[page].append(v["pos"]); uv_by[page].append(v["tex"])
+                    id_by[page].append([pid])
+            cur += tri * 3 + quad * 4
+
+    gb = mesh_tool._Glb()
+    meshes, nodes = [], []
+    for page in sorted(pos_by):
+        P = np.array(pos_by[page], np.float32).reshape(-1, 3)
+        U = np.array(uv_by[page], np.float32).reshape(-1, 2)
+        I = np.array(id_by[page], np.float32).reshape(-1, 1)
+        attrs = {"POSITION": gb.add(P, mesh_tool.COMP_FLOAT, "VEC3", minmax=True),
+                 "TEXCOORD_0": gb.add(U, mesh_tool.COMP_FLOAT, "VEC2"),
+                 "_PRIMID": gb.add(I, mesh_tool.COMP_FLOAT, "SCALAR")}
+        meshes.append({"primitives": [{"attributes": attrs, "mode": 4}],
+                       "extras": {"page": int(page)}})
         nodes.append({"mesh": len(meshes) - 1})
     gltf = {"asset": {"version": "2.0", "generator": "td5_track_studio"},
             "buffers": [{"byteLength": len(gb.bin)}],
@@ -341,8 +497,336 @@ def build_model_glb(level):
             "meshes": meshes, "nodes": nodes,
             "scenes": [{"nodes": list(range(len(nodes)))}], "scene": 0}
     glb = mesh_tool._pack_glb(gltf, bytes(gb.bin))
-    _glb_cache[level] = glb
+    _prims_cache[level] = (prims, glb, idx)
     return glb
+
+
+def library_overview():
+    """Everything the library currently HOLDS, in one answer.
+
+    Deliberately reports what is on disk rather than what could be regenerated,
+    because the interesting question is "is my catalogue stale" -- the pieces
+    come from several passes (catalogue sweep, road curation, landmark export,
+    hand selections) that are regenerated independently and can drift apart."""
+    idx = _load_json(os.path.join(LIBRARY_DIR, "library.json")) or {}
+    roads = _load_json(os.path.join(TOOLS_DIR, "manifests", "roads.json")) or {}
+    lms = _load_json(os.path.join(TOOLS_DIR, "manifests", "landmarks.json")) or {}
+    tags = _load_tags()
+    sels = (_load_json(_selections_path()) or {}).get("selections", [])
+
+    objdir = os.path.join(LIBRARY_DIR, "objects")
+    levels = sorted(int(n[5:8]) for n in os.listdir(objdir)
+                    if n.startswith("level") and n.endswith(".jsonl")) \
+        if os.path.isdir(objdir) else []
+
+    sel_by_kind = {}
+    for s in sels:
+        sel_by_kind[s["kind"]] = sel_by_kind.get(s["kind"], 0) + 1
+
+    hdr = os.path.join(REPO_ROOT, "td5mod", "src", "td5re", "td5_tg_prefab_data.h")
+    prefab_n = 0
+    if os.path.isfile(hdr):
+        with open(hdr, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if line.startswith("#define TD5_TG_PREFAB_N"):
+                    prefab_n = int(line.split()[-1])
+                    break
+    return {
+        "ok": True,
+        "generated": idx.get("generated"),
+        "levels": levels,
+        "objects_total": sum((idx.get("objects") or {}).get("kind_totals", {}).values()),
+        "kind_totals": (idx.get("objects") or {}).get("kind_totals", {}),
+        "page_total": (idx.get("pages") or {}).get("page_total"),
+        "page_roles": (idx.get("pages") or {}).get("role_totals", {}),
+        "night": (idx.get("pages") or {}).get("night_measured", []),
+        "road_sets": {k: len(v) for k, v in (roads.get("sets") or {}).items()},
+        "landmark_pages": len((lms.get("sets") or {}).get("pf", [])),
+        "prefabs_in_build": prefab_n,
+        "tags": len(tags),
+        "selections": len(sels),
+        "selections_by_kind": sel_by_kind,
+    }
+
+
+def library_billboards(level):
+    """Billboard primitives as centre + size + page, for the client to draw
+    camera-facing.
+
+    They cannot be baked into the merged geometry like everything else: the
+    engine rebuilds a billboard against the camera basis every frame
+    (td5_render_mesh.c), storing its world position in `origin` and its
+    vertices locally. Baked flat they show edge-on or face an arbitrary
+    direction. 1406 of level023's primitives are billboards -- trees, signs,
+    lamp glows -- so this is not a rounding error in the view."""
+    prims, _glb, _idx = _level_prims_cached(level)
+    out = []
+    for p in prims:
+        if not p.get("billboard"):
+            continue
+        a = p["aabb"]
+        out.append({"id": p["_pid"], "page": p["pages"][0],
+                    "role": p.get("role"),
+                    "c": [round((a[0] + a[3]) * 0.5, 1), round((a[1] + a[4]) * 0.5, 1),
+                          round((a[2] + a[5]) * 0.5, 1)],
+                    "w": round(max(a[3] - a[0], a[5] - a[2]), 1),
+                    "h": round(a[4] - a[1], 1)})
+    return {"ok": True, "level": int(level), "count": len(out),
+            "center": _prims_center(prims), "billboards": out}
+
+
+def library_prim_index(level):
+    """Metadata for every selectable primitive, parallel to _PRIMID."""
+    prims, glb, idx = _level_prims_cached(level)
+    if idx is None:
+        idx = [{"id": p["_pid"], "page": p["pages"][0], "pages": p["pages"],
+                "role": p.get("role"), "faces": p["nface"],
+                "kind": p.get("kind_hint"),
+                "structure": p.get("kind_hint") == "structure",
+                "billboard": bool(p.get("billboard")),
+                "aabb": [round(v, 1) for v in p["aabb"]],
+                "extent": [round(v, 1) for v in p["extent"]]}
+               for p in prims]
+        _prims_cache[int(level)] = (prims, glb, idx)
+    kinds = {}
+    for p in idx:
+        kinds[p["kind"]] = kinds.get(p["kind"], 0) + 1
+    return {"ok": True, "level": int(level), "count": len(idx),
+            "center": _prims_center(prims), "kinds": kinds, "prims": idx}
+
+
+# Categories a selection can be filed under. These are the kinds the auto-track
+# side already understands, so a hand-made selection lands in the same taxonomy
+# the segmenter and the generator use -- not a parallel vocabulary.
+SELECTION_KINDS = ("landmark", "building", "facade", "plaza", "verge",
+                   "rail", "post", "sign", "tree", "road", "exclude")
+
+
+def _selections_path():
+    return os.path.join(LIBRARY_DIR, "selections.json")
+
+
+def save_selection(req):
+    """Persist one hand-made selection: a set of primitive ids plus the category
+    the user filed it under. Merged by name, so re-saving edits in place.
+
+    A selection may optionally carry FACES as [prim_id, face_index_within_prim]
+    pairs. The index is local to the primitive, not to the merged page buffer
+    the viewer draws, because that buffer is a rendering detail that changes
+    whenever the GLB packer changes -- a primitive's own face order is the
+    MODELS.DAT command order and is stable. An empty `faces` means "the whole
+    primitive", which is the common case."""
+    level = int(req.get("level", -1))
+    name = (req.get("name") or "").strip()
+    kind = req.get("kind")
+    ids = req.get("ids") or []
+    faces = req.get("faces") or []
+    if level <= 0 or not name:
+        return False, {"error": "need level + name"}
+    if kind not in SELECTION_KINDS and not req.get("delete"):
+        return False, {"error": "kind must be one of %s" % (SELECTION_KINDS,)}
+    doc = _load_json(_selections_path()) or {"_format": "td5_selections",
+                                             "_version": 1, "selections": []}
+    sel = [s for s in doc["selections"]
+           if not (s["level"] == level and s["name"] == name)]
+    if not req.get("delete"):
+        row = {"level": level, "name": name, "kind": kind,
+               "ids": sorted(int(i) for i in ids)}
+        if faces:
+            row["faces"] = sorted([int(a), int(b)] for a, b in faces)
+        sel.append(row)
+    doc["selections"] = sorted(sel, key=lambda s: (s["level"], s["name"]))
+    os.makedirs(LIBRARY_DIR, exist_ok=True)
+    with open(_selections_path(), "w", encoding="utf-8", newline="\n") as f:
+        json.dump(doc, f, indent=1)
+        f.write("\n")
+    return True, {"ok": True, "name": name, "kind": kind, "prims": len(ids),
+                  "faces": len(faces), "total": len(doc["selections"]),
+                  "path": os.path.relpath(_selections_path(), REPO_ROOT).replace("\\", "/")}
+
+
+def library_genkit():
+    """What the AUTO TRACK GENERATOR can actually place, as opposed to what the
+    catalogue on disk holds.
+
+    The distinction matters and is easy to lose: the catalogue is ~205k objects
+    swept out of 38 shipped levels, but the generator only reaches the subset
+    that was baked into generated headers and compiled in. Everything reported
+    here is parsed back out of those headers, so it cannot drift from the build
+    the way a hand-maintained list would."""
+    src = os.path.join(REPO_ROOT, "td5mod", "src", "td5re")
+    prefabs, count = [], 0
+    hdr = os.path.join(src, "td5_tg_prefab_data.h")
+    if os.path.isfile(hdr):
+        # Provenance lives in the per-prefab banner comment the exporter emits,
+        # e.g. "/* L23.lm00  258 faces, 975 verts, 48 cmds, footprint AxB, height H */"
+        pat = re.compile(r"^/\*\s+(L\d+\.\w+)\s+(\d+) faces, (\d+) verts, (\d+) cmds, "
+                         r"footprint (\d+)x(\d+), height (\d+)")
+        with open(hdr, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if line.startswith("#define TD5_TG_PREFAB_N"):
+                    count = int(line.split()[-1])
+                m = pat.match(line)
+                if m:
+                    prefabs.append({"id": m.group(1), "faces": int(m.group(2)),
+                                    "verts": int(m.group(3)), "cmds": int(m.group(4)),
+                                    "footprint": [int(m.group(5)), int(m.group(6))],
+                                    "height": int(m.group(7))})
+    roads = (_load_json(os.path.join(TOOLS_DIR, "manifests", "roads.json")) or {}).get("sets") or {}
+    lms = (_load_json(os.path.join(TOOLS_DIR, "manifests", "landmarks.json")) or {}).get("sets") or {}
+    return {"ok": True, "prefab_count": count, "prefabs": prefabs,
+            "roads": {k: [{"level": int(str(a)[5:]), "page": b, "desc": c}
+                          for a, b, c in v] for k, v in roads.items()},
+            "landmark_pages": len(lms.get("pf", [])),
+            "header": os.path.relpath(hdr, REPO_ROOT).replace("\\", "/")}
+
+
+def list_selections(level=None):
+    doc = _load_json(_selections_path()) or {"selections": []}
+    sel = doc["selections"]
+    if level is not None:
+        sel = [s for s in sel if s["level"] == int(level)]
+    return {"ok": True, "kinds": list(SELECTION_KINDS), "selections": sel}
+
+
+_lm_cache = {}          # level -> segmented landmark objects
+
+
+def _landmarks(level):
+    """Rarity-seeded set pieces for one level, segmented over the WHOLE track.
+
+    Distinct from the object catalogue on purpose: catalogue objects are chunks
+    of street frontage (TD5 streetscape is per-span wall quads and neighbours
+    share wall pages, so anything grown by proximity chains along the kerb).
+    These are the pieces the generator actually ships. Cached -- segmentation
+    re-splits every mesh in the level."""
+    level = int(level)
+    if level in _lm_cache:
+        return _lm_cache[level]
+    gl = _lib()
+    with open(os.path.join(LIBRARY_DIR, "pages.json"), encoding="utf-8") as f:
+        pages_doc = json.load(f)
+    role = {p["page"]: p["role"] for p in pages_doc["pages"]
+            if p["level"] == level}
+    model = gl._load_model(gl._levels_dir(), level)
+    _lm_cache[level] = gl.al.extract_landmarks(model, role)
+    return _lm_cache[level]
+
+
+def library_landmarks(level):
+    out = []
+    for i, o in enumerate(_landmarks(level)):
+        out.append({"id": "L%d.lm%02d" % (int(level), i), "level": int(level),
+                    "kind": "landmark", "faces": o["nface"],
+                    "pages": o["pages"], "slabs": o.get("slabs", 0),
+                    "rarity": o.get("rarity", 0),
+                    "extent": [round(v, 1) for v in o["extent"]],
+                    "aabb": [round(v, 1) for v in o["aabb"]],
+                    "prims": len(o["prims"])})
+    return {"ok": True, "level": int(level), "total": len(out), "objects": out}
+
+
+def build_landmark_glb(level, idx, fill=False):
+    """GLB for one segmented landmark, in the local frame the C emitter uses.
+
+    fill=True lays a continuous grass plane across the footprint to close the
+    holes the segmenter leaves in the plaza (fill_landmark_holes)."""
+    from collections import defaultdict
+    import copy
+    gl = _lib()
+    found = _landmarks(level)
+    if not (0 <= idx < len(found)):
+        raise ValueError("no landmark %d on level %s" % (idx, level))
+    lm = found[idx]
+    lm_id = "L%s.lm%02d" % (level, idx)
+    patches = []
+    # AUTHORED fills (account3 'Claude authoring with web reference') are curated
+    # truth, so they always load -- they are not the deterministic guess.
+    patches.extend(gl.load_authored_fills(lm_id))
+    if fill:
+        gp = gl.fill_landmark_holes(lm)
+        if gp:
+            patches.append(gp)
+        patches.extend(gl.fill_landmark_walls(lm))
+    if patches:
+        lm = dict(lm)
+        lm["prims"] = list(lm["prims"]) + patches
+        lm["nface"] = lm.get("nface", 0) + sum(p["nface"] for p in patches)
+    g = gl._prefab_from_landmark(lm, "L%s.lm%02d" % (level, idx))
+    pos_by, uv_by = defaultdict(list), defaultdict(list)
+    cur = 0
+    for page, tri, quad in g["cmds"]:
+        for t in range(tri):
+            for k in (cur + t * 3, cur + t * 3 + 1, cur + t * 3 + 2):
+                v = g["local"][k]
+                pos_by[page].append([v[0], v[1], v[2]]); uv_by[page].append([v[3], v[4]])
+        qb = cur + tri * 3
+        for q in range(quad):
+            b = qb + q * 4
+            for k in (b, b + 1, b + 2, b, b + 2, b + 3):
+                v = g["local"][k]
+                pos_by[page].append([v[0], v[1], v[2]]); uv_by[page].append([v[3], v[4]])
+        cur += tri * 3 + quad * 4
+    return glb_from_page_groups(pos_by, uv_by)
+
+
+def build_prefab_glb(obj_id):
+    """GLB for ONE catalogued object, in its own local frame (centred in XZ,
+    base y=0) -- the same convention the C emitter places it with, so what the
+    browser shows is what the generator will stamp."""
+    if mesh_tool is None:
+        raise RuntimeError("mesh_tool/numpy unavailable")
+    from collections import defaultdict
+    if obj_id in _prefab_glb_cache:
+        return _prefab_glb_cache[obj_id]
+    m = re.match(r"^L(\d+)\.e(\d+)\.s(\d+)\.o(\d+)$", obj_id or "")
+    if not m:
+        raise ValueError("bad object id %r" % obj_id)
+    level, entry, slot, obj = (int(g) for g in m.groups())
+    gl = _lib()
+    model = gl._load_model(gl._levels_dir(), level)
+    g = gl._prefab_geometry(model, {"id": obj_id, "entry": entry,
+                                    "slot": slot, "obj": obj})
+    pos_by, uv_by = defaultdict(list), defaultdict(list)
+    cur = 0
+    for page, tri, quad in g["cmds"]:
+        for t in range(tri):
+            for k in (cur + t * 3, cur + t * 3 + 1, cur + t * 3 + 2):
+                v = g["local"][k]
+                pos_by[page].append([v[0], v[1], v[2]]); uv_by[page].append([v[3], v[4]])
+        qb = cur + tri * 3
+        for q in range(quad):
+            b = qb + q * 4
+            for k in (b, b + 1, b + 2, b, b + 2, b + 3):   # quad -> two tris
+                v = g["local"][k]
+                pos_by[page].append([v[0], v[1], v[2]]); uv_by[page].append([v[3], v[4]])
+        cur += tri * 3 + quad * 4
+    glb = glb_from_page_groups(pos_by, uv_by)
+    _prefab_glb_cache[obj_id] = glb
+    return glb
+
+
+def save_library_tags(req):
+    """Persist ONE object's human verdict. Merge, never replace: two people (or
+    two sessions) tagging different objects must not clobber each other."""
+    oid = req.get("id")
+    if not oid:
+        return False, {"error": "need id"}
+    tags = _load_tags()
+    entry = tags.get(oid, {})
+    for k in ("kind", "biomes", "daynight", "fit", "note"):
+        if k in req:
+            entry[k] = req[k]
+    if req.get("clear"):
+        tags.pop(oid, None)
+    else:
+        tags[oid] = entry
+    os.makedirs(LIBRARY_DIR, exist_ok=True)
+    with open(_tags_path(), "w", encoding="utf-8", newline="\n") as f:
+        json.dump(tags, f, indent=1, sort_keys=True)
+        f.write("\n")
+    return True, {"ok": True, "id": oid, "tagged": len(tags),
+                  "path": os.path.relpath(_tags_path(), REPO_ROOT).replace("\\", "/")}
 
 
 # --------------------------------------------------------------------------
@@ -463,6 +947,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        # This is a live dev tool edited constantly; without an explicit policy
+        # the browser heuristically caches track_studio.js and index.html and
+        # keeps running yesterday's code after a reload (the "I don't see the
+        # change" trap). Always revalidate.
+        self.send_header("Cache-Control", "no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(body)
 
@@ -506,9 +995,50 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._send(404, {"error": "asset not found"})
             elif p == "/api/model":
-                self._send(200, build_model_glb(q.get("level")), "model/gltf-binary")
+                # Kept as an alias so a bookmarked URL still works; the track
+                # view and the library view must resolve to the SAME bytes.
+                self._send(200, build_prims_glb(q.get("level")), "model/gltf-binary")
             elif p == "/api/lights":
                 self._send(200, get_lights(q.get("level")))
+            elif p == "/api/library":
+                self._send(200, library_index())
+            elif p == "/api/library/objects":
+                self._send(200, library_objects(q.get("level"), q.get("kind"),
+                                                q.get("min_faces", 0),
+                                                q.get("limit", 400)))
+            elif p == "/api/library/landmarks":
+                self._send(200, library_landmarks(q.get("level")))
+            elif p == "/api/library/prims":
+                self._send(200, build_prims_glb(q.get("level")), "model/gltf-binary")
+            elif p == "/api/library/primindex":
+                self._send(200, library_prim_index(q.get("level")))
+            elif p == "/api/library/billboards":
+                self._send(200, library_billboards(q.get("level")))
+            elif p == "/api/library/overview":
+                self._send(200, library_overview())
+            elif p == "/api/library/genkit":
+                self._send(200, library_genkit())
+            elif p == "/api/library/selections":
+                self._send(200, list_selections(q.get("level")))
+            elif p == "/api/library/prefab":
+                # Two id shapes: catalogue objects (L23.e53.s0.o0) and segmented
+                # landmarks (L23.lm00). They come from different passes, so the
+                # id has to say which.
+                oid = q.get("id") or ""
+                m = re.match(r"^L(\d+)\.lm(\d+)$", oid)
+                if m:
+                    self._send(200, build_landmark_glb(int(m.group(1)),
+                                                       int(m.group(2)),
+                                                       fill=q.get("fill") == "1"),
+                               "model/gltf-binary")
+                else:
+                    self._send(200, build_prefab_glb(oid), "model/gltf-binary")
+            elif p == "/api/library/page":
+                a = serve_asset(q.get("level"), "page_%03d.png" % int(q.get("page", 0)))
+                if a:
+                    self._send(200, a[0], a[1])
+                else:
+                    self._send(404, {"error": "page not found"})
             else:
                 self._send(404, {"error": "not found"})
         except Exception as e:
@@ -537,6 +1067,18 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/lights":
             try:
                 ok, res = save_lights(req)
+                self._send(200 if ok else 400, res)
+            except Exception as e:
+                self._send(500, {"error": str(e), "trace": traceback.format_exc()})
+        elif self.path == "/api/library/selection":
+            try:
+                ok, res = save_selection(req)
+                self._send(200 if ok else 400, res)
+            except Exception as e:
+                self._send(500, {"error": str(e), "trace": traceback.format_exc()})
+        elif self.path == "/api/library/tags":
+            try:
+                ok, res = save_library_tags(req)
                 self._send(200 if ok else 400, res)
             except Exception as e:
                 self._send(500, {"error": str(e), "trace": traceback.format_exc()})

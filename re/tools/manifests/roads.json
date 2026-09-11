@@ -1,0 +1,173 @@
+{
+  "header": "td5_tg_real_tex_roads.h",
+  "prefix": "k_road",
+  "regenerate": true,
+  "title": "Real shipped ROAD surfaces, curated by re/tools/td5_geomlib.py roads. Ranked by how much carriageway each page actually paves in the shipped game, then classed by measured features: painted geometry (arrows, junction tiles) is rejected on contrast, and COBBLE is split from TARMAC by whether the pattern runs ALONG the road or cells both ways.",
+  "sets": {
+    "tarmac": [
+      [
+        "level012",
+        13,
+        "tarmac, luma 88 sat 0.05 detail 24, 11172 carriageway faces"
+      ],
+      [
+        "level009",
+        14,
+        "tarmac, luma 115 sat 0.04 detail 14, 6726 carriageway faces"
+      ],
+      [
+        "level008",
+        60,
+        "tarmac, luma 105 sat 0.07 detail 9, 6183 carriageway faces"
+      ],
+      [
+        "level010",
+        332,
+        "tarmac, luma 79 sat 0.12 detail 13, 5510 carriageway faces"
+      ],
+      [
+        "level008",
+        61,
+        "tarmac, luma 106 sat 0.07 detail 10, 4718 carriageway faces"
+      ],
+      [
+        "level010",
+        31,
+        "tarmac, luma 77 sat 0.07 detail 6, 3495 carriageway faces"
+      ],
+      [
+        "level008",
+        59,
+        "tarmac, luma 111 sat 0.07 detail 26, 3420 carriageway faces"
+      ],
+      [
+        "level011",
+        187,
+        "tarmac, luma 118 sat 0.09 detail 20, 2927 carriageway faces"
+      ]
+    ],
+    "concrete": [
+      [
+        "level011",
+        143,
+        "concrete, luma 144 sat 0.04 detail 34, 2280 carriageway faces"
+      ],
+      [
+        "level020",
+        40,
+        "concrete, luma 154 sat 0.06 detail 14, 1486 carriageway faces"
+      ],
+      [
+        "level020",
+        21,
+        "concrete, luma 151 sat 0.07 detail 13, 1419 carriageway faces"
+      ],
+      [
+        "level015",
+        153,
+        "concrete, luma 146 sat 0.00 detail 30, 948 carriageway faces"
+      ],
+      [
+        "level019",
+        12,
+        "concrete, luma 166 sat 0.07 detail 27, 529 carriageway faces"
+      ]
+    ],
+    "cobble": [
+      [
+        "level008",
+        11,
+        "cobble, luma 143 sat 0.02 detail 15, 6682 carriageway faces"
+      ],
+      [
+        "level005",
+        15,
+        "cobble, luma 98 sat 0.10 detail 17, 2999 carriageway faces"
+      ],
+      [
+        "level008",
+        63,
+        "cobble, luma 141 sat 0.09 detail 12, 2713 carriageway faces"
+      ],
+      [
+        "level009",
+        23,
+        "cobble, luma 146 sat 0.01 detail 34, 2633 carriageway faces"
+      ],
+      [
+        "level006",
+        11,
+        "cobble, luma 151 sat 0.07 detail 25, 1939 carriageway faces"
+      ],
+      [
+        "level005",
+        16,
+        "cobble, luma 97 sat 0.11 detail 18, 1880 carriageway faces"
+      ],
+      [
+        "level005",
+        13,
+        "cobble, luma 87 sat 0.12 detail 20, 1818 carriageway faces"
+      ],
+      [
+        "level008",
+        154,
+        "cobble, luma 150 sat 0.09 detail 18, 1532 carriageway faces"
+      ]
+    ],
+    "dirt": [
+      [
+        "level005",
+        10,
+        "dirt, luma 170 sat 0.16 detail 33, 4126 carriageway faces"
+      ],
+      [
+        "level023",
+        83,
+        "dirt, luma 87 sat 0.24 detail 14, 2831 carriageway faces"
+      ],
+      [
+        "level005",
+        17,
+        "dirt, luma 89 sat 0.17 detail 25, 898 carriageway faces"
+      ],
+      [
+        "level005",
+        19,
+        "dirt, luma 100 sat 0.15 detail 22, 892 carriageway faces"
+      ],
+      [
+        "level005",
+        20,
+        "dirt, luma 100 sat 0.15 detail 23, 880 carriageway faces"
+      ],
+      [
+        "level022",
+        12,
+        "dirt, luma 155 sat 0.12 detail 22, 546 carriageway faces"
+      ],
+      [
+        "level004",
+        200,
+        "dirt, luma 168 sat 0.13 detail 15, 318 carriageway faces"
+      ],
+      [
+        "level004",
+        29,
+        "dirt, luma 87 sat 0.19 detail 5, 261 carriageway faces"
+      ]
+    ],
+    "ice": [
+      [
+        "level010",
+        108,
+        "ice, luma 204 sat 0.07 detail 2, 1275 carriageway faces"
+      ],
+      [
+        "level019",
+        15,
+        "ice, luma 201 sat 0.10 detail 23, 202 carriageway faces"
+      ]
+    ]
+  }
+}

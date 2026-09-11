@@ -19,6 +19,7 @@ td5_tg_streets.c
 td5_tg_terrain.c
 td5_tg_bridge.c
 td5_tg_furniture.c
+td5_tg_prefab.c
 td5_tg_pages.c
 td5_trackgen_preview.c
 td5_trackgen_stream.c
