@@ -642,6 +642,43 @@ void d3d12_dxr_register_texture(unsigned index, ID3D12Resource *res, DXGI_FORMAT
     { static int n = 0; if (n < 8) { n++; dxr_log("bindless register page %u (res %p)", index, (void *)res); } }
 }
 
+/* [TDR FIX 2026-09-07] Drop every bindless slot that describes `res`, restoring
+ * the 1x1 fallback SRV, and clear the dedup cache entry.
+ *
+ * MUST be called before a texture resource is released. Without it the heap slot
+ * kept an SRV for freed memory and chit_refl sampled it on every RT pass -- and
+ * because the dedup above compares a RAW POINTER, a new texture allocated at the
+ * recycled address matched the dead entry and returned early, so the slot was
+ * never repaired. That is an unrecoverable device removal (DXGI_ERROR_DEVICE_
+ * REMOVED at Present, then DRIVER_INTERNAL_ERROR on every recreate attempt).
+ *
+ * Writing the fallback here is safe with frames in flight: tex_fallback outlives
+ * every frame (released only in shutdown), so a command list still executing sees
+ * either the old valid SRV or the fallback, never freed memory. */
+void d3d12_dxr_unregister_texture(ID3D12Resource *res)
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvd;
+    unsigned i;
+    if (!res) return;
+    ZeroMemory(&srvd, sizeof(srvd));
+    srvd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    srvd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvd.Texture2D.MipLevels = 1;
+    for (i = 0; i < DXR_BINDLESS_MAX; i++) {
+        if (g_dxr.bindless_res[i] != (const void *)res) continue;
+        /* Repoint the slot at the fallback when the heap is live; either way the
+         * dedup cache must forget this address so the next page id re-registers. */
+        if (g_dxr.bindless_ready && g_dxr.device5 && g_dxr.tex_fallback) {
+            ID3D12Device_CreateShaderResourceView((ID3D12Device *)g_dxr.device5,
+                g_dxr.tex_fallback, &srvd, dxr_cpu(g_dxr.heap, DXR_BINDLESS_BASE + i));
+            g_dxr.bindless_res[i] = g_dxr.tex_fallback;
+        } else {
+            g_dxr.bindless_res[i] = NULL;
+        }
+    }
+}
+
 static int dxr_create_blit(void)
 {
     D3D12_DESCRIPTOR_RANGE srv_range;

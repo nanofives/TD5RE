@@ -687,18 +687,30 @@ static void d3d12_write_draw_ring(FILE *f, const char *tag)
 int Backend_NoteDeviceRemoved(HRESULT hr, const char *where)
 {
     if (FAILED(hr)) {
+        /* [TDR FIX 2026-09-07] The post-mortem is now ALWAYS written, not gated on
+         * TD5RE_D3D_DEBUG. Three unrecoverable device removals were investigated
+         * with nothing but this one bare hr= line, because the forensics were
+         * opt-in and a user hitting the crash in normal play never has the knob
+         * set. A device removal is terminal and happens once per process, so the
+         * cost of dumping here is irrelevant. (DRED breadcrumbs / page-fault data
+         * still need TD5RE_D3D_DEBUG at device-creation time -- see the DRED
+         * enablement in d3d12_create_device -- but the removal REASON and our own
+         * draw/frame/RTMARK rings cost nothing and are what actually localise it.) */
+        HRESULT rr = (g_d3d12.device ? ID3D12Device_GetDeviceRemovedReason(g_d3d12.device) : hr);
+        FILE *f;
         g_backend.device_removed = 1;
-        WRAPPER_LOG("D3D12 DEVICE REMOVED at %s: hr=0x%08lX", where ? where : "?", hr);
-        /* Dump the draw ring + frame history for the TDR post-mortem (opt-in). */
-        if (Backend_D3DDebugEnabled()) {
-            FILE *f = fopen("log/gpu_d3d_debug.log", "a");
-            if (f) {
-                HRESULT rr = (g_d3d12.device ? ID3D12Device_GetDeviceRemovedReason(g_d3d12.device) : hr);
-                fprintf(f, "==== D3D12 DEVICE REMOVED at %s hr=0x%08lX removed_reason=0x%08lX ====\n",
-                        where ? where : "?", hr, rr);
-                d3d12_write_draw_ring(f, "device-removed");
-                fflush(f); fclose(f);
-            }
+        WRAPPER_LOG("D3D12 DEVICE REMOVED at %s: hr=0x%08lX removed_reason=0x%08lX",
+                    where ? where : "?", hr, rr);
+        f = fopen("log/gpu_d3d_debug.log", "a");
+        if (f) {
+            fprintf(f, "==== D3D12 DEVICE REMOVED at %s hr=0x%08lX removed_reason=0x%08lX ====\n",
+                    where ? where : "?", hr, rr);
+            if (!Backend_D3DDebugEnabled())
+                fprintf(f, "(TD5RE_D3D_DEBUG was NOT set: no DRED breadcrumbs / page-fault data,\n"
+                           " and the per-vertex NaN/extent scan in Backend_NoteVerts was inactive,\n"
+                           " so the frame-history min/max columns below are unpopulated.)\n");
+            d3d12_write_draw_ring(f, "device-removed");
+            fflush(f); fclose(f);
         }
     }
     return g_backend.device_removed;
@@ -1819,22 +1831,67 @@ static void d3d12_tex_upload(BackendTexture *bt, const void *px, UINT bytes_per_
         ID3D12GraphicsCommandList *cl;
         D3D12_TEXTURE_COPY_LOCATION dst, src;
         D3D12_RESOURCE_BARRIER b;
-        d3d12_copy_ensure();
-        cl = s_copy_list;
+        D3D12_RESOURCE_STATES before, after;
+        const D3D12_RESOURCE_STATES readable =
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        int on_frame;
+
+        /* [TDR FIX 2026-09-07] Record the transitions on the SAME list that will
+         * execute them, and never misreport StateBefore.
+         *
+         * This always used s_copy_list while taking StateBefore from bt->rstate --
+         * but bt->rstate is also mutated by barriers recorded on the FRAME list
+         * (Backend_RTRegisterBoundPage transitions a page to PIXEL|NON_PIXEL for
+         * the DXR bindless table), and the two lists are submitted independently
+         * (d3d12_flush_uploads vs d3d12_frame_end). The copy list could therefore
+         * declare a StateBefore the resource was not actually in yet, which is
+         * undefined behavior and a device removal.
+         *
+         * With a frame open the frame list is also the CORRECT place for ordering:
+         * one DIRECT queue, so the copy provably completes before that frame's
+         * draws / DispatchRays sample the texture. The copy list still serves the
+         * no-frame-open case (frontend asset load: hundreds of uploads, no stall). */
+        on_frame = (g_d3d12.frame_open && g_d3d12.list) ? 1 : 0;
+        before = bt->rstate;
+        after  = before;
+        /* Restore the state we found rather than forcing PIXEL_SHADER_RESOURCE, so a
+         * bindless-registered page keeps its NON_PIXEL bit -- a DXR hit-shader read
+         * is a compute read, and PIXEL-only is illegal for it. The font atlas
+         * (ATLAS_PAGE 984 < DXR_BINDLESS_MAX) is exactly such a page and is
+         * re-uploaded whole (16 MB) whenever a new glyph is rasterised. Anything
+         * that was not shader-readable settles on PSR, as before. */
+        if (!(after & readable)) after = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+        if (on_frame) {
+            cl = g_d3d12.list;
+        } else {
+            d3d12_copy_ensure();
+            cl = s_copy_list;
+        }
         ZeroMemory(&dst, sizeof(dst)); dst.pResource=bt->res; dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex=0;
         ZeroMemory(&src, sizeof(src)); src.pResource=staging; src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; src.PlacedFootprint=fp;
         ZeroMemory(&b, sizeof(b)); b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         b.Transition.pResource=bt->res; b.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore=bt->rstate; b.Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_DEST;
+        b.Transition.StateBefore=before; b.Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_DEST;
         ID3D12GraphicsCommandList_ResourceBarrier(cl, 1, &b);
         ID3D12GraphicsCommandList_CopyTextureRegion(cl, &dst, 0, 0, 0, &src, NULL);
-        b.Transition.StateBefore=D3D12_RESOURCE_STATE_COPY_DEST; b.Transition.StateAfter=D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        b.Transition.StateBefore=D3D12_RESOURCE_STATE_COPY_DEST; b.Transition.StateAfter=after;
         ID3D12GraphicsCommandList_ResourceBarrier(cl, 1, &b);
-        bt->rstate = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;   /* effective after flush */
-        d3d12_up_track(staging, total);                            /* keep staging alive until flush */
+        bt->rstate = after;
+
+        /* Staging lifetime follows the list it was recorded on: the frame list
+         * signals the frame fence (plain retire), the copy list retires its whole
+         * batch behind s_copy_fence in d3d12_flush_uploads. Tracking a frame-list
+         * upload in s_up_staging would strand it -- d3d12_flush_uploads returns
+         * early when !s_copy_open and would never drain it. */
+        if (on_frame) {
+            d3d12_retire(staging);          /* freed once this frame's GPU work completes */
+        } else {
+            d3d12_up_track(staging, total); /* keep alive until the copy batch flushes */
+            /* Bound the batch so staging memory doesn't grow without limit during load. */
+            if (s_up_count >= 128 || s_up_bytes > (96ull << 20)) d3d12_flush_uploads();
+        }
     }
-    /* Bound the batch so staging memory doesn't grow without limit during load. */
-    if (s_up_count >= 128 || s_up_bytes > (96ull << 20)) d3d12_flush_uploads();
 }
 
 /* ---- [SF FENCE MIPS 2026-08-10] coverage-preserving mipmaps for track cutout
@@ -1959,7 +2016,18 @@ static int d3d12_tex_make_mipped(BackendTexture *bt, UINT n)
     hr = ID3D12Device_CreateCommittedResource(g_d3d12.device, &hp, D3D12_HEAP_FLAG_NONE, &td,
             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, NULL, &IID_ID3D12Resource, (void **)&nr);
     if (FAILED(hr)) { WRAPPER_LOG("D3D12 mip tex create 0x%08lX", hr); return 0; }
-    if (bt->res) ID3D12Resource_Release(bt->res);
+    if (bt->res) {
+        /* [TDR FIX 2026-09-07] Was an IMMEDIATE Release here, which breaks the
+         * deferred-deletion contract at the top of this file: a queued command list
+         * may still reference the old resource. Route it through the retire queue,
+         * and drop it from the DXR bindless table first -- otherwise the reflection
+         * slot describes freed memory, and since the replacement is created just
+         * above (very likely at the recycled address) the raw-pointer dedup in
+         * d3d12_dxr_register_texture would match the dead entry and never rebuild
+         * the SRV for the new MipLevels. */
+        d3d12_dxr_unregister_texture(bt->res);
+        d3d12_retire(bt->res);
+    }
     bt->res = nr;
     bt->rstate = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     bt->mip_levels = n;
@@ -3423,7 +3491,16 @@ void Backend_TextureRelease(BackendTexture *bt)
         /* Defer the GPU resource free until the in-flight frame that may still
          * reference this texture (e.g. the mid-frame recreate path) completes.
          * The CPU-side struct is safe to free now -- nothing on the GPU touches it. */
-        if (bt->res) d3d12_retire(bt->res);
+        if (bt->res) {
+            /* [TDR FIX 2026-09-07] Drop this resource from the DXR bindless table
+             * FIRST. The retire below frees it once the GPU passes the fence, but
+             * the bindless heap slot and its raw-pointer dedup entry would outlive
+             * it -- chit_refl then samples freed memory, and a texture recreated at
+             * the same address dedups against the dead pointer so the slot is never
+             * repaired. Unrecoverable device removal. */
+            d3d12_dxr_unregister_texture(bt->res);
+            d3d12_retire(bt->res);
+        }
         free(bt);
     }
 }

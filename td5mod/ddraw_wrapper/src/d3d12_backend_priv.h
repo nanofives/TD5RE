@@ -99,5 +99,10 @@ int   d3d12_dxr_sunvis_ready(void);          /* 1 = allocated + in PSR state thi
 /* [P3] Bindless: write a page's SRV into the bindless heap slot (index = page
  * id). Deduped on the resource; res must be in a shader-readable state. */
 void  d3d12_dxr_register_texture(unsigned index, ID3D12Resource *res, DXGI_FORMAT fmt);
+/* [P3] Bindless: forget `res` -- restore the fallback SRV in every slot that
+ * describes it and clear the dedup cache. MUST be called before releasing a
+ * texture resource, or the RT reflection table samples freed memory (and the
+ * raw-pointer dedup then refuses to repair the slot when the address is reused). */
+void  d3d12_dxr_unregister_texture(ID3D12Resource *res);
 
 #endif /* D3D12_BACKEND_PRIV_H */
