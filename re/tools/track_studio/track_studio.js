@@ -17,6 +17,15 @@ const camera = new THREE.PerspectiveCamera(50, 1, 1, 8_000_000);
 camera.position.set(0, 90000, 90000);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
+// ONE mouse scheme for the whole app: LEFT is reserved for selection (node
+// handles, box select, the LIBRARY gap picker), so orbit lives on the RIGHT
+// button and pan moves to the middle -- the wheel still zooms. Previously this
+// mapping existed only inside pick mode, so the buttons changed meaning
+// depending on a checkbox, which is exactly the kind of thing you relearn every
+// time you come back to the tool. OrbitControls suppresses the context menu on
+// its own element, so right-drag does not pop the browser menu.
+const ORBIT_SCHEME = { LEFT: null, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE };
+controls.mouseButtons = ORBIT_SCHEME;
 scene.add(new THREE.HemisphereLight(0xffffff, 0x36404f, 1.15));
 const sun = new THREE.DirectionalLight(0xffffff, 1.1); sun.position.set(1, 2, 1); scene.add(sun);
 const root = new THREE.Group(); scene.add(root);   // track geometry, centered on `center`
@@ -1488,17 +1497,14 @@ function selToggleFace(pid, face, remove) {
   if (!s.size) selFaces.delete(pid);
 }
 
-// Left drag is box select, so orbit moves to the RIGHT button and dolly to the
-// middle -- rather than disabling the controls outright, which is what made
-// pick mode feel like the camera had seized up.
-const ORBIT_PICK = { LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
-const ORBIT_FREE = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+// The buttons no longer change meaning with the mode -- see ORBIT_SCHEME at the
+// top. Pick mode only changes what a LEFT drag selects, and the hint text.
 function selApplyPickMode() {
   const on = $('selPick').checked;
-  controls.mouseButtons = on ? ORBIT_PICK : ORBIT_FREE;
+  controls.mouseButtons = ORBIT_SCHEME;
   $('hudHelp').textContent = on
-    ? 'PICK MODE · left-drag = box select · right-drag = orbit · middle/wheel = zoom · WASD = fly · Shift = add · Ctrl = remove · Esc = clear'
-    : 'WASD = fly · Q/E = down/up · Shift = faster · drag = orbit · wheel = zoom';
+    ? 'PICK MODE · left-drag = box select · right-drag = orbit · middle-drag = pan · wheel = zoom · WASD = fly · Shift = add · Ctrl = remove · Esc = clear'
+    : 'left-click = select · right-drag = orbit · middle-drag = pan · wheel = zoom · WASD = fly · Q/E = down/up · Shift = faster';
 }
 
 function selShowBox(a, b) {
@@ -1759,3 +1765,122 @@ libOverview();
 selRefreshList();
 selApplyPickMode();
 rebuild(true);          // empty scene + reference grid; authoring is parked
+
+// ---------------------------------------------------------------- gap picker
+// DOUBLE-CLICK a set piece in the LIBRARY preview to mark exactly where you
+// clicked: the triangle lights up, a marker drops on the hit point, and a
+// readout pinned to the TOP of the viewport gives the WORLD coordinates.
+//
+// Why it exists: automatic hole-finding on these landmarks kept measuring the
+// wrong thing -- a ray metric counted legitimate sky between spires and real
+// window openings as holes -- so the reliable way to locate a gap is for a
+// human to look at it and point. This turns "there is a hole over there" into
+// numbers that can be authored against. Double-click (not click) so
+// OrbitControls and the track-node handle picking are untouched.
+//
+// The preview is in the PREFAB frame (centred in XZ, base y=0); world =
+// local + (cx, minY, cz) taken from the catalogue row's aabb.
+const pickRoot = new THREE.Group();
+scene.add(pickRoot);
+
+const pickBox = document.createElement('div');
+pickBox.id = 'pickBox';
+pickBox.style.cssText = 'position:absolute;left:50%;top:8px;transform:translateX(-50%);' +
+  'z-index:20;display:none;max-width:94%;padding:6px 10px;border-radius:4px;' +
+  'border:1px solid var(--edge,#2c313c);background:rgba(14,17,23,.92);' +
+  'font:12px/1.45 ui-monospace,Consolas,monospace;color:#d7dce5;' +
+  'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none';
+if (wrap) {
+  if (getComputedStyle(wrap).position === 'static') wrap.style.position = 'relative';
+  wrap.appendChild(pickBox);
+}
+
+function pickClear() {
+  while (pickRoot.children.length) {
+    const c = pickRoot.children.pop();
+    if (c.geometry) c.geometry.dispose();
+    if (c.material) c.material.dispose();
+  }
+}
+
+function pickShow(html, cls) {
+  pickBox.style.display = 'block';
+  pickBox.style.borderColor = cls === 'hole' ? '#c9863f' : '#3f6ec9';
+  pickBox.innerHTML = html;
+}
+
+// keep the old clear-preview behaviour honest: no stale marker on an empty stage
+const _libClearPreviewBtn = $('libClearPreview');
+if (_libClearPreviewBtn) _libClearPreviewBtn.addEventListener('click', () => {
+  pickClear(); pickBox.style.display = 'none';
+});
+
+renderer.domElement.addEventListener('dblclick', (ev) => {
+  if (!prefabRoot.children.length || !libSel || !libSel.aabb) return;
+  const r = renderer.domElement.getBoundingClientRect();
+  const m = new THREE.Vector2(((ev.clientX - r.left) / r.width) * 2 - 1,
+                              -((ev.clientY - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(m, camera);
+  const hits = raycaster.intersectObjects(prefabRoot.children, true);
+  const A = libSel.aabb;
+  const off = new THREE.Vector3((A[0] + A[3]) / 2, A[1], (A[2] + A[5]) / 2);
+  const big = Math.max(libSel.extent[0] || 0, libSel.extent[1] || 0, libSel.extent[2] || 0);
+  pickClear();
+
+  if (!hits.length) {
+    // Pointing at a HOLE is the useful case, so say so rather than going quiet,
+    // and draw the ray that went through so the hole is visible on screen.
+    const d = raycaster.ray.direction.clone();
+    const a = raycaster.ray.origin.clone();
+    const b = a.clone().add(d.clone().multiplyScalar(big * 3));
+    const ln = new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]),
+      new THREE.LineBasicMaterial({ color: 0xffa04a, depthTest: false, transparent: true }));
+    ln.renderOrder = 999; pickRoot.add(ln);
+    const line = `${libSel.id} HOLE — ray dir (${d.x.toFixed(4)}, ${d.y.toFixed(4)}, ${d.z.toFixed(4)})`;
+    pickShow(`<b style="color:#ffa04a">HOLE</b> &nbsp;${libSel.id}&nbsp; ` +
+      `ray origin (${a.clone().add(off).toArray().map((v) => v.toFixed(0)).join(', ')}) ` +
+      `dir (${d.toArray().map((v) => v.toFixed(4)).join(', ')})`, 'hole');
+    setStatus('no geometry under the cursor — that is a HOLE (ray drawn)', 'warn');
+    console.log('[gap] MISS ' + libSel.id
+      + ' ray origin (' + a.clone().add(off).toArray().map((v) => v.toFixed(0)).join(', ')
+      + ') dir (' + d.toArray().map((v) => v.toFixed(4)).join(', ') + ')');
+    try { navigator.clipboard.writeText(line); } catch (e) {}
+    return;
+  }
+
+  const h = hits[0];
+  const w = h.point.clone().add(off);
+  const page = (h.object.userData && h.object.userData.page != null) ? h.object.userData.page : '?';
+
+  // highlight the exact triangle, drawn over the top so it reads at any angle
+  let verts = '(unavailable)';
+  try {
+    const pos = h.object.geometry.getAttribute('position');
+    const P = [h.face.a, h.face.b, h.face.c].map((i) =>
+      h.object.localToWorld(new THREE.Vector3().fromBufferAttribute(pos, i)));
+    const g = new THREE.BufferGeometry().setFromPoints(P);
+    const tri = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+      color: 0x35d6ff, side: THREE.DoubleSide, transparent: true, opacity: 0.55,
+      depthTest: false }));
+    tri.renderOrder = 998; pickRoot.add(tri);
+    const out = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(P),
+      new THREE.LineBasicMaterial({ color: 0x7ef2ff, depthTest: false, transparent: true }));
+    out.renderOrder = 999; pickRoot.add(out);
+    verts = P.map((v) => {
+      const q = v.clone().add(off);
+      return `(${q.x.toFixed(0)},${q.y.toFixed(0)},${q.z.toFixed(0)})`;
+    }).join(' ');
+  } catch (e) { /* highlight is a nicety; the numbers still go out */ }
+
+  const dot = new THREE.Mesh(new THREE.SphereGeometry(Math.max(20, big * 0.012), 12, 8),
+    new THREE.MeshBasicMaterial({ color: 0xffe36e, depthTest: false }));
+  dot.position.copy(h.point); dot.renderOrder = 1000; pickRoot.add(dot);
+
+  const line = `${libSel.id} world (${w.x.toFixed(0)}, ${w.y.toFixed(0)}, ${w.z.toFixed(0)}) page ${page} tri ${verts}`;
+  pickShow(`<b style="color:#7ef2ff">PICK</b> &nbsp;${libSel.id}&nbsp; ` +
+    `world <b>(${w.x.toFixed(0)}, ${w.y.toFixed(0)}, ${w.z.toFixed(0)})</b> ` +
+    `page <b>${page}</b> &nbsp;tri ${verts}`);
+  setStatus('picked — copied to clipboard', 'ok');
+  console.log('[gap] ' + line);
+  try { navigator.clipboard.writeText(line); } catch (e) {}
+});
