@@ -54,6 +54,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  the livery you picked." },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 12 (wheels)" },
+    { CL_ITEM,    "Wheels no longer poke up into the bodywork on hard" },
+    { CL_ITEM,    "  bumps -- the rendered wheel is capped at the arch." },
+    { CL_ITEM,    "The inner face of each wheel is now a round disc that" },
+    { CL_ITEM,    "  matches the tyre and spins/steers with it." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 09 (auto track: round 22 -- gore/median)" },
     { CL_ITEM,    "Fork medians now reach BOTH carriageways. On an" },
     { CL_ITEM,    "  uneven split the median hugged the branch side and" },
