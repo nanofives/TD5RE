@@ -1356,6 +1356,15 @@ void Screen_RaceTypeCategory(void) {
 
     case 8: /* Cup sub-menu tick */
         if (frontend_advance_tick()) {
+            /* [SELECT CUP ANIM 2026-09-12] The cup sub-menu never raised
+             * s_anim_complete, so the SELECT CUP screen (47) stayed "not settled":
+             * the button-slide guard, the post-button overlays, and
+             * td5_frontend_harness_ready() (StartScreen walk / self-test) all key
+             * off it — with it stuck at 0 the screen looked frozen / never-ready
+             * (the reported "hang"). Raise it here, mirroring the top-level state 2,
+             * and play the same slide-in settle chime every other screen has. */
+            s_anim_complete = 1;
+            frontend_play_sfx(4);
             s_inner_state = 9;
         }
         break;
@@ -1407,6 +1416,11 @@ void Screen_RaceTypeCategory(void) {
         break;
 
     case 10: /* Cup sub-menu slide-out -> Car Selection */
+        /* [SELECT CUP ANIM 2026-09-12] Arm the timed animation so the shared
+         * state-0x14 slide-out actually animates for SELECT CUP. Without this the
+         * OUT step reuses the stale slide-in start time, so t is already >=1 and it
+         * navigates instantly (no slide-out). Mirrors the top-level state 5. */
+        frontend_begin_timed_animation();
         s_anim_tick = 0;
         s_inner_state = 0x14;
         break;
