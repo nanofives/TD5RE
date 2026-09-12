@@ -41,6 +41,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  TRACK as its track name." },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 12 (auto track)" },
+    { CL_ITEM,    "Buildings are no longer see-through: every building" },
+    { CL_ITEM,    "  now has sides and a back, even on seeds that" },
+    { CL_ITEM,    "  rolled building mass off." },
+    { CL_ITEM,    "Hills and terrain changes now use grass, not the" },
+    { CL_ITEM,    "  paved tile texture." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 12 (lighting)" },
     { CL_ITEM,    "Cloudy tracks: cars now cast a soft contact shadow" },
     { CL_ITEM,    "  on the ground at HIGH lighting quality." },

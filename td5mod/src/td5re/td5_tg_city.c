@@ -1678,6 +1678,13 @@ static void tg_r13_faces_visit(int si)
  *   item 5   monuments skipped for having frontage on both sides
  *   items 4+7+8a  back rows refused / pushed clear / pulled in to terminate */
 static long s_r15_back_closed;
+/* [R23 item 2] "buildings with no side faces ... you see through it." A built
+ * facade side that got NO massing (roof/back) -- because BUILDING MASS rolled off
+ * for this seed, or the depth collapsed -- is a lone front plane. s_r23_close_seen
+ * counts those front-only sides (the OLD-rule number, so a lone post-fix count
+ * can't read as a false green); s_r23_closed counts the ones the fix closed with
+ * a back + roof. Reported by tg_r23_close_report, unconditional. */
+static long s_r23_close_seen, s_r23_closed;
 static long s_r15_sign_posts;
 static long s_r15_sign_xing;
 static long s_r15_statue_walled;
@@ -1838,6 +1845,7 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
          *            it, but a tower stands over them and was see-through from
          *            behind and down every cross street. Gated by height so the
          *            quad budget is only spent where it shows. */
+        const int n_pre_mass = n;   /* [R23 item 2] faces before the mass pass */
         if (g->depth > 1.0 && td5_env_flag_on("TD5RE_AUTOTRACK_FACADE_MASS")) {
             const double d = g->depth;
             double q[12];
@@ -1888,6 +1896,47 @@ static int tg_emit_street_wall(const TG_NodeList *nl, int si,
                 qb[9] = bx2;  qb[10] = g->by + g->H;         qb[11] = bz2;
                 tg_facade_push_quad(qb, px, py, pz, uu, vv, &n);
                 s_r15_back_closed++;
+            }
+        }
+        /* [R23 item 2] "buildings with no side faces ... a front face with
+         * nothing on its sides, so you see through it." A built side that came
+         * out of the mass pass with NO new faces (n unchanged) is a lone front
+         * plane: BUILDING MASS rolled OFF for this seed (a scarce-weight presence
+         * roll, ~12% of seeds -- td5_trackgen.c k_tg_rolls), or the depth
+         * collapsed. That is not a style, it is a see-through building. Close it
+         * with a back wall + a roof, the same two quads the FACADE_MASS pass
+         * would have laid, so the block is solid from every angle. Detection is
+         * on the ACTUAL emitted face count for this side, so it catches any cause,
+         * not just the roll. Run ends still get their corner prisms below (caps
+         * fire regardless of FACADE_MASS); interior spans are hidden laterally by
+         * the abutting neighbour, exactly as a mass-on run relies on.
+         * TD5RE_R23_BUILDING_CLOSE=0 restores the see-through build byte-for-byte. */
+        if (g->depth > 1.0 && n == n_pre_mass) {
+            s_r23_close_seen++;
+            if (td5_env_flag_on("TD5RE_R23_BUILDING_CLOSE")) {
+                const double d = g->depth;
+                const double bx2 = g->bx + g->lx0 * d, bz2 = g->bz + g->lz0 * d;
+                const double fx2 = g->bx + g->ax + g->lx1 * d;
+                const double fz2 = g->bz + g->az + g->lz1 * d;
+                double qb[12], qr[12];
+                /* BACK wall: near-bottom, far-bottom, far-top, near-top (matches
+                 * tg_facade_push_quad's u/v tables), same corners as R15's close. */
+                qb[0] = bx2;  qb[1]  = g->by;                qb[2]  = bz2;
+                qb[3] = fx2;  qb[4]  = g->by + g->ay;        qb[5]  = fz2;
+                qb[6] = fx2;  qb[7]  = g->by + g->ay + g->H; qb[8]  = fz2;
+                qb[9] = bx2;  qb[10] = g->by + g->H;         qb[11] = bz2;
+                tg_facade_push_quad(qb, px, py, pz, uu, vv, &n);
+                /* ROOF deck: front line to back line, same as the mass roof. */
+                qr[0]  = g->bx;                qr[1]  = g->by + g->H;
+                qr[2]  = g->bz;
+                qr[3]  = g->bx + g->ax;        qr[4]  = g->by + g->ay + g->H;
+                qr[5]  = g->bz + g->az;
+                qr[6]  = fx2;                  qr[7]  = g->by + g->ay + g->H;
+                qr[8]  = fz2;
+                qr[9]  = bx2;                  qr[10] = g->by + g->H;
+                qr[11] = bz2;
+                tg_facade_push_quad(qr, px, py, pz, uu, vv, &n);
+                s_r23_closed++;
             }
         }
         n_ret = n;
@@ -4281,6 +4330,18 @@ int tg_infra_awning_filter(int si, double side, int paved, int kind,
      * filter's bit map), so the stand-in is independent of all of them. */
     if (paved) return ((hh >> 4) & 1u) ? IP_BIN : IP_BENCH;
     return IP_BIN;
+}
+
+/* [R23 item 2] Unconditional one-line build fact: how many facade sides came out
+ * front-only (see-through), and how many were closed with a back + roof. */
+void tg_r23_close_report(void)
+{
+    TD5_LOG_I(LOG_TAG,
+        "trackgen: [R23 BUILDING CLOSE] %ld front-only facade side(s) seen "
+        "(BUILDING MASS off / depth collapse), %ld closed with back+roof "
+        "(knob=%s)", s_r23_close_seen, s_r23_closed,
+        td5_env_flag_on("TD5RE_R23_BUILDING_CLOSE") ? "on" : "off");
+    s_r23_close_seen = s_r23_closed = 0;
 }
 
 /* [R15] Per-module half of the round-15 report. Split out of the single

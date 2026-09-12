@@ -327,6 +327,21 @@ double tg_world_slope_along(double x, double z, double dx, double dz)
          / (2.0 * d);
 }
 
+/* Slope of the PRE-CONFORM natural surface (tg_world_h_base), i.e. the terrain
+ * as it was before the road bed was flattened into it. tg_world_slope samples the
+ * CONFORMED height, so on a road bed it reads ~flat even where the road cut
+ * through a hill -- useless for asking "is this span on a hill". The ground page
+ * selector needs the underlying terrain's slope, which this reports. */
+double tg_world_slope_base(double x, double z)
+{
+    const double d = TG_WORLD_CELL * 0.5;
+    double gx, gz;
+    if (!s_w.built) return 0.0;
+    gx = (tg_world_h_base(x + d, z) - tg_world_h_base(x - d, z)) / (2.0 * d);
+    gz = (tg_world_h_base(x, z + d) - tg_world_h_base(x, z - d)) / (2.0 * d);
+    return sqrt(gx * gx + gz * gz);
+}
+
 TG_WorldClass tg_world_class(double x, double z)
 {
     double h, wy, s;

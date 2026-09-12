@@ -86,6 +86,10 @@ double tg_world_slope(double x, double z);
 /* Directional slope of the BASE terrain along unit (dx,dz): (h(p+d)-h(p-d))/2d.
  * Signed: positive = rising in that direction. */
 double tg_world_slope_along(double x, double z, double dx, double dz);
+/* |grad h| of the PRE-CONFORM natural surface (tg_world_h_base): the terrain
+ * slope BEFORE the road bed was flattened in. Use this (not tg_world_slope) to
+ * ask "is this span on a hill", since the conformed height reads flat on a bed. */
+double tg_world_slope_base(double x, double z);
 TG_WorldClass tg_world_class(double x, double z);
 
 /* Conform: ask the terrain to meet height y at (x,z), fully inside r_flat and
