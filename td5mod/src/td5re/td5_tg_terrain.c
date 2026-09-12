@@ -1610,6 +1610,13 @@ static long   s_r22_snow_mismatch;
 static long   s_r22_degen_seen, s_r22_degen_skip;
 static long   s_r22_trim_relax, s_r22_trim_tight;
 
+/* [R23 item 3] "hills and terrain changes are using the tiles texture." Count of
+ * ground/apron slab-page picks where a paved (tile) ground page was swapped for
+ * grass because the underlying terrain is a hill. s_r23_slope_seen is the same
+ * count under the OLD rule (no swap), so a lone post-fix number can't read as a
+ * false green. Reported by tg_r23_slope_report, unconditional. */
+static long   s_r23_slope_seen, s_r23_slope_grass;
+
 /* [R22 item 8] "a triangle without geometry near ... skirt p2:GREEN." Where a
  * fold cap (tg_r18_inside_bend_cap / tg_r13_fold_cap) drives the ground
  * profile's outer point in to the road edge, tg_ground_side floors the whole
@@ -1640,6 +1647,57 @@ static int tg_slab_degenerate(const TG_NodeList *nl, int si, int is_left,
     return (wa < TD5_TG_TOPO_MIN_SLAB) && (wb < TD5_TG_TOPO_MIN_SLAB);
 }
 
+/* [R23 item 3] The ground page for span si, with a SLOPE override.
+ *
+ * "Hills and terrain changes are using the tiles texture." The urban biomes
+ * (CITY, INDUSTRIAL, ALPTOWN) carry TD5_TG_PAGE_GROUND -- the concrete/tile grid
+ * page -- as their ground_page, which is right for flat city ground but wrong on
+ * a hill: paving does not drape a slope. tg_topo_surface_page keyed only on the
+ * biome, so a hill or a terrain transition inside an urban biome got tiled.
+ *
+ * Swap the tile page for grass (TD5_TG_PAGE_GREEN) when the span sits on sloped
+ * terrain. The slope is read from the PRE-CONFORM natural surface
+ * (tg_world_slope_base) at the node itself: the road bed is conformed FLAT, so
+ * tg_world_slope there would always read flat -- the base surface is the only
+ * honest "is this a hill" signal. Keyed on si + the node coords, so the skirt
+ * (tg_emit_ground) and the far-band apron, which both call this, pick the SAME
+ * page and cannot seam.
+ *
+ * Only the tile page is ever swapped, and bridge-run gorge banks
+ * (tg_span_in_bridge_run returns GROUND deliberately) and tunnel spans are left
+ * alone -- their page is set by their own rule. TD5RE_R23_SLOPE_GROUND=0 restores
+ * the tile-on-slope output byte-for-byte. */
+int tg_topo_surface_page_sloped(const TG_NodeList *nl, int si)
+{
+    int page = tg_topo_surface_page(si);
+    if (page != TD5_TG_PAGE_GROUND) return page;   /* only the tile page leaks */
+    if (tg_span_in_bridge_run(si) || tg_span_in_tunnel(si)) return page;
+    if (si < 0 || si >= nl->count) return page;
+    /* Counted unconditionally so the OLD-rule number (how many tile slabs sat on
+     * a slope) shows in the same run the fix acts -- a lone post-fix count would
+     * only say the invariant holds, not that anything was ever wrong. */
+    if (tg_world_slope_base(nl->v[si].x, nl->v[si].z) >= TG_WORLD_HILL_SLOPE) {
+        s_r23_slope_seen++;
+        if (td5_env_flag_on("TD5RE_R23_SLOPE_GROUND")) {
+            s_r23_slope_grass++;
+            return TD5_TG_PAGE_GREEN;
+        }
+    }
+    return page;
+}
+
+/* [R23 item 3] Unconditional one-line build fact: how many ground/apron slab
+ * pages were on a slope, and how many were switched to grass. */
+void tg_r23_slope_report(void)
+{
+    TD5_LOG_I(LOG_TAG,
+        "trackgen: [R23 SLOPE GROUND] %ld tile ground/apron slab(s) on sloped "
+        "terrain, %ld switched to grass (knob=%s)",
+        s_r23_slope_seen, s_r23_slope_grass,
+        td5_env_flag_on("TD5RE_R23_SLOPE_GROUND") ? "on" : "off");
+    s_r23_slope_seen = s_r23_slope_grass = 0;
+}
+
 int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
                           double water_side)
 {
@@ -1653,7 +1711,7 @@ int tg_emit_ground(const TG_NodeList *nl, int si, TG_Buf *blk,
     double vv[(TD5_TG_GROUND_MAXPT - 1) * 8];
     /* [R9 TOPO C4] The SURFACE material comes from the ground-run authority,
      * not from this span's dithered biome roll. See tg_topo_ground_index. */
-    int seg_page = tg_topo_surface_page(si), seg_nq;
+    int seg_page = tg_topo_surface_page_sloped(nl, si), seg_nq;
     int s, k, n = 0;
     /* [R16 item B] Drop a side's grass skirt where a city frontage hides it end
      * to end. Precomputed for both sides so that if BOTH would cull we keep the
@@ -3999,7 +4057,7 @@ static int tg_emit_far_band(const TG_FBHook *h, int is_left, int ridge_ok)
      * it reads the same ground-run material. It used to read the far-group
      * owner's DITHERED biome, which at a boundary could put a tile apron behind
      * a grass skirt (or the reverse) at the very seam they share. */
-    seg_page[0] = tg_topo_surface_page(h->si);
+    seg_page[0] = tg_topo_surface_page_sloped(nl, h->si);
     seg_nq[0]   = 3;
 
     /* [R18 TREELINE] "tree background texture looks very pixelated." MEASURED,

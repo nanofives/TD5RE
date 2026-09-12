@@ -4238,6 +4238,11 @@ int td5_trackgen_build_level(const TD5_TrackGenSpec *spec, int level_num,
      * set pieces did this seed get" is a one-line build fact, and if the guard
      * rejects them the placed/emitted gap is the first thing worth seeing. */
     tg_prefab_report();
+    /* [R23] Unconditional, like tg_prefab_report: the see-through-building close
+     * (item 2) and the tile-on-slope ground swap (item 3) are one-line build
+     * facts and a bad seed's count is the first thing worth seeing. */
+    tg_r23_close_report();
+    tg_r23_slope_report();
     TG_TV(TG_T_RPT_R14COAST,  tg_r14_coast_report());             /* [R14 COAST item 5a] straddles */
     /* [R15 BAND item 3] Not TG_TV-wrapped and not span-gated: this one only
      * divides four running sums and emits a single line -- it has no per-span

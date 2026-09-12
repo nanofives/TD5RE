@@ -2100,6 +2100,7 @@ void tg_r14_coast_report(void);
  * beside tg_acct_reset for the same reason. */
 void tg_r15_sky_report(void);      /* item 3      -- td5_tg_terrain.c */
 void tg_r15_city_report(void);     /* 1,2,5,6,8b,4,7,8a -- td5_tg_city.c */
+void tg_r23_close_report(void);    /* [R23 item 2] see-through building close */
 void tg_r15_streets_report(void);  /* items 7 + 9 -- td5_tg_streets.c */
 void tg_r15_pair_report(void);     /* items 10/11 -- td5_tg_guard.c   */
 void tg_store_page_reset(void);
@@ -3944,6 +3945,10 @@ int tg_r8_median_page(int si, int fallback);
 int tg_topo_enabled(void);
 int tg_topo_ground_index(int si);
 int tg_topo_surface_page(int si);
+/* [R23 item 3] tg_topo_surface_page with a slope override (tile -> grass on a
+ * hill); tg_r23_slope_report logs the swap count. Both in td5_tg_terrain.c. */
+int tg_topo_surface_page_sloped(const TG_NodeList *nl, int si);
+void tg_r23_slope_report(void);
 double tg_ground_branch_clear(const TG_NodeList *nl, int si);
 /* (TG_GroundProf and TD5_TG_GROUND_MAXPT moved up above tg_emit_bridge_coast in
  * R9 -- the coastline band now reads the same cross-section the skirt does, and
