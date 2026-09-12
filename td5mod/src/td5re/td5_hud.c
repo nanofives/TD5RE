@@ -5155,6 +5155,13 @@ void td5_hud_render_overlays(float dt)
         if (flags & TD5_HUD_CIRCUIT_LAPS) {
             int cur_lap = td5_game_get_player_lap(actor_slot) + 1;
             int total_laps = g_td5.circuit_lap_count;
+            /* [LAP CLAMP 2026-09-12] td5_game_get_player_lap returns COMPLETED laps
+             * (checkpoint_index). When the player crosses the finish line of the
+             * final lap the counter increments one past the total, so on a 1-lap
+             * circuit the end-of-race animation showed "LAP 2/1". You are never
+             * legitimately STARTING a lap beyond the last, so clamp the displayed
+             * current lap to the total. Display-only — no sim state touched. */
+            if (cur_lap > total_laps) cur_lap = total_laps;
             td5_hud_queue_text(0,
                 (int)(vl->vp_int_left + 8.0f),
                 (int)(vl->vp_int_top + 40.0f),

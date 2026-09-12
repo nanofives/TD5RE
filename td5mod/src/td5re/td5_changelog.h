@@ -69,6 +69,16 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  inert for lights and collision." },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 12 (post-race flow)" },
+    { CL_ITEM,    "Winning a single-player drag race now plays the" },
+    { CL_ITEM,    "  victory star and records a high score, kept per" },
+    { CL_ITEM,    "  drag length (Short/Medium/Long/Epic)." },
+    { CL_ITEM,    "Restarting a Time Trial from pause plays the normal" },
+    { CL_ITEM,    "  race-start countdown, not the victory star." },
+    { CL_ITEM,    "One-lap circuits no longer flash LAP 2/1 at the" },
+    { CL_ITEM,    "  finish; the lap counter stops at the last lap." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 09 (auto track: round 22 -- gore/median)" },
     { CL_ITEM,    "Fork medians now reach BOTH carriageways. On an" },
     { CL_ITEM,    "  uneven split the median hugged the branch side and" },

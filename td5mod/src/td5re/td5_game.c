@@ -10012,6 +10012,14 @@ static int drag_length_level(void)
     return v;
 }
 
+/* [DRAG HS 2026-09-12] Public accessor for the chosen drag LENGTH level (0=SHORT
+ * 1=MEDIUM 2=LONG 3=EPIC). Used by the SP post-race high-score flow to key the
+ * drag record table by length. */
+int td5_game_drag_length_level(void)
+{
+    return drag_length_level();
+}
+
 /* [DRAG DISTANCE 2x 2026-06-30] Clean straight spans to INSERT mid-strip so the
  * drivable strip physically extends beyond its ~300-span data. SHORT is unchanged;
  * MEDIUM/LONG/EPIC are 100% LONGER than their original race distance, which overruns
@@ -10527,10 +10535,18 @@ void td5_game_begin_fade_out(int param) {
      * g_td5.split_screen_mode. We additionally require slot-0 race_position
      * == 0 so the pulse only triggers on a 1st-place finish, matching
      * orig's actor+0x383 check. */
+    /* [DRAG STAR 2026-09-12] An SP drag WIN now earns the victory star too, the
+     * same 1st-place burst every other single-player mode gets (previously drag
+     * was excluded outright, so a drag win had no celebration). Restricted to
+     * single-player drag: MP/net drag (td5_game_drag_mp_active) has no single
+     * local winner and keeps the plain fade. Runtime game_type stays 9 for drag
+     * (unlike TT which coerces to SINGLE_RACE), so this is a dedicated arm. */
+    int sp_single_race = (g_td5.game_type == TD5_GAMETYPE_SINGLE_RACE &&
+                          !g_td5.drag_race_enabled);
+    int sp_drag = (g_td5.drag_race_enabled && !td5_game_drag_mp_active());
     if (param == 0 &&
         !g_td5.network_active &&
-        g_td5.game_type == TD5_GAMETYPE_SINGLE_RACE &&
-        !g_td5.drag_race_enabled) {
+        (sp_single_race || sp_drag)) {
         TD5_Actor *player = td5_game_get_actor(0);
         int rp = player ? (int)player->race_position : -1;
         /* Never fire the victory star during a cinematic (View Replay / attract
@@ -10550,15 +10566,24 @@ void td5_game_begin_fade_out(int param) {
          * timeout, so gate explicitly on the DNF marker the timeout path sets
          * (tick_pending_finish_timer: companion_2 = 2; a real finish sets it to 1). */
         int local_dnf = (s_slot_state[0].companion_2 == 2);
+        /* [RESTART STAR FIX 2026-09-12] RESTART RACE from the pause menu also
+         * routes through begin_fade_out(0). It is NOT a win — the same race is
+         * about to re-init — so the victory star must be suppressed on it just
+         * like QUIT (s_pause_exit_pending) and BACK TO LOBBY (s_pause_lobby_pending).
+         * Without this, a solo mode where the player is always race_position 0
+         * (Time Trial — solo_mode_synth, so no opponents) fired the star during
+         * the restart fade instead of the normal race-start countdown animation.
+         * The restart path sets s_pause_restart_pending before the fade. */
         int star_fired = (player && player->race_position == 0 && !local_dnf &&
                           !s_pause_exit_pending && !s_pause_lobby_pending &&
+                          !s_pause_restart_pending &&
                           !td5_game_is_cinematic_race());
         /* DIAG (race-finish-transition /fix): make the star-gate decision observable. */
         TD5_LOG_I(LOG_TAG,
-                  "STAR-GATE: param=%d net=%d gt=%d drag=%d race_position=%d pause_exit=%d dnf=%d -> star=%s",
+                  "STAR-GATE: param=%d net=%d gt=%d drag=%d race_position=%d pause_exit=%d restart=%d dnf=%d -> star=%s",
                   param, (int)g_td5.network_active, (int)g_td5.game_type,
                   (int)g_td5.drag_race_enabled, rp, (int)s_pause_exit_pending,
-                  local_dnf, star_fired ? "FIRED" : "skipped");
+                  (int)s_pause_restart_pending, local_dnf, star_fired ? "FIRED" : "skipped");
         if (star_fired) {
             td5_hud_reset_radial_pulse();
             /* [CONFIRMED @ 0x0042cc74] orig sets g_raceEndRadialPulseEnabled=1
