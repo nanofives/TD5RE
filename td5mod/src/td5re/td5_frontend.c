@@ -1641,6 +1641,22 @@ typedef struct {
 } TD6_PaintAxis;
 static TD6_PaintAxis s_paint_axis[TD6_PREVIEW_VIEWS];
 
+/* On-screen band geometry (canvas px) the overlay is drawn into by
+ * fe_draw_paint_overlay_regions: the full preview is 408x280, stacked into
+ * TD6_PREVIEW_VIEWS bands. The band is far wider than it is tall, so a fitted
+ * axis looks flatter on screen than its band-normalised angle; the flat-snap
+ * test below is judged in this on-screen space. */
+#define TD6_PAINT_PREVIEW_W       408.0
+#define TD6_PAINT_PREVIEW_BAND_H  (280.0 / (double)TD6_PREVIEW_VIEWS)
+/* Snap a near-horizontal fit back to DEAD FLAT so the straight-on SIDE view
+ * keeps its confirmed-good horizontal split (the user tested and approved the
+ * flat side view; a few-degree tilt there is a regression). Measured across the
+ * shipped cars the side-view fits land at <=8 deg on screen while every angled
+ * (3/4) view sits at >=8.7 deg, so 6 deg cleanly flattens the clearly-flat side
+ * views without ever touching an angled view's real diagonal. No env knob by
+ * design. */
+#define TD6_PAINT_FLAT_SNAP_DEG   6.0
+
 /* Fit the body silhouette's principal axis for each stacked view from the
  * (binarised) overlay alpha. bgra is BGRA32 (byte3 = alpha). Fills s_paint_axis;
  * a view with too few body texels or a degenerate fit is marked invalid, and the
@@ -1679,6 +1695,16 @@ static void frontend_compute_paint_axes(const unsigned char *bgra, int w, int h)
         double eLx = cos(theta), eLy = sin(theta);
         if (eLx < 0.0) { eLx = -eLx; eLy = -eLy; }   /* major points +u (right) */
         double eTx = -eLy, eTy = eLx;                 /* minor points +v (down) */
+
+        /* Flat-snap: if the fitted major axis is within TD6_PAINT_FLAT_SNAP_DEG
+         * of horizontal ON SCREEN, force it dead flat (and eT vertical) so the
+         * side view stays exactly as before. Extents (Pass 3) then refit against
+         * these snapped axes. */
+        double screen_deg = atan2(fabs(eLy) * TD6_PAINT_PREVIEW_BAND_H,
+                                  fabs(eLx) * TD6_PAINT_PREVIEW_W) * (180.0 / 3.14159265358979);
+        if (screen_deg <= TD6_PAINT_FLAT_SNAP_DEG) {
+            eLx = 1.0; eLy = 0.0; eTx = 0.0; eTy = 1.0;
+        }
 
         /* Pass 3: body extents along the fitted axes. */
         double sMin = 1e30, sMax = -1e30, tMin = 1e30, tMax = -1e30;
