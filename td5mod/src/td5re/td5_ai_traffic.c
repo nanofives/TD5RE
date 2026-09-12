@@ -24,6 +24,7 @@
 #include <math.h>
 #include <limits.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #define LOG_TAG "ai"
 
@@ -2636,6 +2637,36 @@ static int trf_dyn_spawn_period(void)
     return p / 2 + (int)(trf_dyn_rand() % (uint32_t)p);
 }
 
+/* [VERY-HIGH REFILL 2026-09-12] Per-tick spawn BURST budget. The cadence below
+ * fires at most one spawn per SpawnPeriod tick. That is fine while the road is
+ * near the cap, but at VERY HIGH the whole init wave despawns together as the
+ * player drives through it (they were all seeded in one ~100-span window near the
+ * start), opening a large deficit (up to cap = 16 slots) that a one-per-period
+ * trickle cannot refill fast enough -- the road stays thin for many seconds after
+ * the opening ("density collapses after the first wave"). Allowing a small burst
+ * when a deficit exists re-arms the density in a few periods instead of ~cap
+ * periods. Scaled by volume so Low/Medium keep the faithful one-per-period cadence
+ * (byte-identical), High refills 2/tick, VeryHigh 4/tick. Each spawned car still
+ * FADE_INs over FadeTicks and rolls its own span, so they don't pop in stacked.
+ * TD5RE_TRAFFIC_SPAWN_BURST overrides (>0 = explicit; 0 = auto). */
+static int trf_dyn_spawn_burst(void)
+{
+    static int cached = -2;   /* -2 unread; -1 auto; >=1 explicit */
+    int b;
+    if (cached == -2) {
+        cached = td5_env_int("TD5RE_TRAFFIC_SPAWN_BURST", 0, 0, TD5_MAX_TRAFFIC_SLOTS);
+        if (cached == 0) cached = -1;   /* 0 = auto */
+    }
+    if (cached >= 1) return cached;
+    if (!trf_dyn_density_enabled()) return 1;   /* legacy: strictly one per period */
+    switch (trf_dyn_volume()) {
+        case 4:  b = 4; break;   /* VERY HIGH — relentless refill */
+        case 3:  b = 2; break;   /* HIGH */
+        default: b = 1; break;   /* Low/Medium — unchanged one-per-period */
+    }
+    return b;
+}
+
 /* [PER-VIEWPORT TRAFFIC] Per-viewport on-road cap: a normal per-player density,
  * bounded by the partition size so it never overflows a viewport's slot range. */
 static int trf_per_viewport_cap(void)
@@ -2762,6 +2793,30 @@ static int trf_dyn_cluster_max(void)
     }
     if (cached >= 0) return cached;
     return (trf_dyn_volume() >= 4) ? 4 : 2;   /* VERY HIGH packs tighter */
+}
+
+/* [KEEP-A-LANE-FREE 2026-09-12] On a narrow road (fewer than 3 lanes at the spawn
+ * span) never let traffic occupy EVERY lane — a 2-lane road fully walled by cars
+ * is unfair and unpassable. When on, a spawn is rejected if placing it would leave
+ * no clear lane on that span. Wide roads (>= 3 lanes) are unaffected. Default ON;
+ * TD5RE_TRAFFIC_KEEP_LANE=0 restores the old fill-every-lane behaviour for A/B. */
+static int trf_keep_lane_free_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) s = td5_env_flag_on("TD5RE_TRAFFIC_KEEP_LANE");
+    return s;
+}
+
+/* Count lanes on `span` (over [0,lane_count)) that are currently CLEAR of traffic
+ * in the local window (traffic_lane_is_clear, forward polarity). Used by the
+ * keep-a-lane-free rule so a narrow road always retains a passable lane. */
+static int trf_dyn_clear_lane_count(int self_slot, int span, int lane_count)
+{
+    int clear = 0;
+    for (int lane = 0; lane < lane_count; lane++)
+        if (traffic_lane_is_clear(self_slot, span, lane, 0))
+            clear++;
+    return clear;
 }
 
 /* [item#10 2026-06-15] Live-spawn anchor for the consistent-density goal. In a
@@ -3675,6 +3730,20 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
         lane = trf_dyn_pick_lane_dir(slot, span, lane_count, cross_pol, &polarity);
         if (lane < 0) continue;
 
+        /* [KEEP-A-LANE-FREE 2026-09-12] Narrow road (<3 lanes): never fill every
+         * lane. The picked lane is currently clear, so require at least TWO clear
+         * lanes now — placing here consumes one and still leaves one open. A
+         * 1-lane road is exempt (there is no other lane to keep free, and a lone
+         * car on it is normal traffic, not a wall). Wide roads (>=3) skip this. */
+        if (trf_keep_lane_free_enabled() && lane_count >= 2 && lane_count < 3) {
+            if (trf_dyn_clear_lane_count(slot, span, lane_count) < 2) {
+                TD5_LOG_I(LOG_TAG,
+                          "traffic_keep_lane: slot=%d span=%d lane_count=%d "
+                          "would wall the road -> skip", slot, span, lane_count);
+                continue;
+            }
+        }
+
         trf_dyn_place(slot, span, lane, polarity);
         TD5_LOG_I(LOG_TAG,
                   "traffic_dyn_spawn: slot=%d span=%d (main=%d) lane=%d/%d oncoming=%d "
@@ -4142,30 +4211,40 @@ void td5_ai_traffic_dynamic_tick(void)
     }
 
     /* Spawn cadence. Prefer slot 9 (the cop-capable slot) so speeding
-     * pursuits can still trigger; round-robin the rest. */
+     * pursuits can still trigger; round-robin the rest.
+     * [VERY-HIGH REFILL 2026-09-12] When a deficit exists, spawn a BURST of up to
+     * trf_dyn_spawn_burst() cars this tick (1 for Low/Medium == the old cadence),
+     * so a big post-wave deficit is refilled in a few periods instead of one car
+     * per period. Cooldown is still set ONCE after the burst, so the gap between
+     * bursts is unchanged. */
     if (s_trf_dyn_cooldown > 0) s_trf_dyn_cooldown--;
     if (on_road < trf_dyn_cap() && s_trf_dyn_cooldown <= 0) {
-        int pick = -1;
-        if (9 >= t_base && 9 < t_end && s_trf_dyn_state[9] == TRF_DYN_INACTIVE)
-            pick = 9;
-        if (pick < 0) {
-            for (int slot = t_base; slot < t_end; slot++) {
-                if (s_trf_dyn_state[slot] == TRF_DYN_INACTIVE) { pick = slot; break; }
-            }
-        }
         static int s_trf_dyn_starved = 0;
+        int cap    = trf_dyn_cap();
+        int budget = trf_dyn_spawn_burst();
+        int spawned = 0;
         /* [task#13] Spawn FURTHER from the player: the per-tick window is scaled by
          * TD5RE_TRAFFIC_SPAWN_DIST (default 2x) so traffic appears in the distance
          * instead of popping in nearby. Race-init seeding (above) keeps the stock
          * close window — those cars were "always there" near the start. */
         int spawn_lo, spawn_hi;
         trf_dyn_effective_spawn_window(&spawn_lo, &spawn_hi);
-        if (pick >= 0 &&
-            trf_dyn_spawn_in_window(pick, -1, spawn_lo, spawn_hi)) {
+        while (spawned < budget && on_road < cap) {
+            int pick = -1;
+            if (9 >= t_base && 9 < t_end && s_trf_dyn_state[9] == TRF_DYN_INACTIVE)
+                pick = 9;
+            if (pick < 0) {
+                for (int slot = t_base; slot < t_end; slot++) {
+                    if (s_trf_dyn_state[slot] == TRF_DYN_INACTIVE) { pick = slot; break; }
+                }
+            }
+            if (pick < 0) break;   /* no free slot */
+            if (!trf_dyn_spawn_in_window(pick, -1, spawn_lo, spawn_hi))
+                break;             /* nothing placeable now — stop the burst */
             s_trf_dyn_state[pick] = TRF_DYN_FADE_IN;
             s_trf_dyn_alpha[pick] = 0;
-            s_trf_dyn_cooldown = trf_dyn_spawn_period();
-            s_trf_dyn_starved = 0;
+            on_road++;
+            spawned++;
             /* Police 1-in-CopRatio cadence (deterministic: counter advances on
              * each successful spawn, identical on every lockstep peer). A fresh
              * spawn is an ordinary traffic car; after CopRatio regular cars the
@@ -4184,6 +4263,10 @@ void td5_ai_traffic_dynamic_tick(void)
                     s_cop_spawn_counter++;
                 }
             }
+        }
+        if (spawned > 0) {
+            s_trf_dyn_cooldown = trf_dyn_spawn_period();
+            s_trf_dyn_starved  = 0;
         } else {
             s_trf_dyn_cooldown = 10;   /* nothing placeable right now — retry soon */
             /* Persistent failure is a data/window problem worth surfacing
@@ -4209,8 +4292,15 @@ void td5_ai_traffic_dynamic_tick(void)
      * cars, the cap collapsing, or attempts simply never being made. Default ON in
      * dev (cheap: one line per 5 s); TD5RE_TRAFFIC_CENSUS=0 silences it.
      * Counts are over the whole traffic slot range, not just this cluster. */
+    {
+        /* [TRAFFIC CENSUS interval override] Default 150 ticks (~5 s). Set
+         * TD5RE_TRAFFIC_CENSUS_EVERY to sample the pool composition finer (e.g. 30
+         * = ~1 s) when diagnosing a density collapse. */
+        static int s_census_every = -1;
+        if (s_census_every < 0)
+            s_census_every = td5_env_int("TD5RE_TRAFFIC_CENSUS_EVERY", 150, 1, 100000);
     if (td5_env_flag_on("TD5RE_TRAFFIC_CENSUS") &&
-        (g_td5.simulation_tick_counter % 150u) == 0u) {
+        (g_td5.simulation_tick_counter % (unsigned)s_census_every) == 0u) {
         int n_inact = 0, n_fin = 0, n_act = 0, n_fout = 0, n_stuck = 0, n_broken = 0;
         for (int i = g_traffic_slot_base;
              i < g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS &&
@@ -4232,6 +4322,29 @@ void td5_ai_traffic_dynamic_tick(void)
                   n_inact, n_fin, n_act, n_fout, n_stuck, n_broken,
                   trf_dyn_cap(), s_trf_dyn_cooldown,
                   ai_player_span_lead());
+        /* [TRAFFIC CENSUS CSV] Optional flushed-per-write CSV so a live-traffic
+         * count series survives even without a clean shutdown (race.log only
+         * flushes on close). TD5RE_TRAFFIC_CENSUS_CSV=<path>. */
+        {
+            static FILE *s_census_csv = NULL;
+            static int   s_census_csv_tried = 0;
+            const char  *cp = getenv("TD5RE_TRAFFIC_CENSUS_CSV");
+            if (cp && cp[0] && !s_census_csv_tried) {
+                s_census_csv_tried = 1;
+                s_census_csv = fopen(cp, "w");
+                if (s_census_csv)
+                    fprintf(s_census_csv,
+                            "tick,on_road,active,fadein,fadeout,inactive,stuck,broken,cap,cooldown\n");
+            }
+            if (s_census_csv) {
+                fprintf(s_census_csv, "%u,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                        (unsigned)g_td5.simulation_tick_counter,
+                        n_fin + n_act + n_fout, n_act, n_fin, n_fout, n_inact,
+                        n_stuck, n_broken, trf_dyn_cap(), s_trf_dyn_cooldown);
+                fflush(s_census_csv);
+            }
+        }
+    }
     }
 }
 
@@ -4365,6 +4478,45 @@ void td5_ai_update_traffic_route_plan(int slot) {
                   s_smart_stat.ease_lane_change, s_smart_stat.blocked_single_lane,
                   s_smart_stat.no_clear_lane, s_smart_stat.slow_lane_change,
                   s_smart_stat.wall_nudges);
+    }
+
+    /* [BRANCH MERGE REALIGN 2026-09-12] A traffic car that has just crossed the
+     * corridor<->main-road boundary (SPAN_RAW crossing the ring threshold: a
+     * branch car has SPAN_RAW >= ring, a main-road car < ring) inherits its old
+     * heading from the road it was on. At the merge the new span's route heading
+     * can differ from the car's integrated yaw by more than 90 deg, which makes
+     * Stage 2 below arm the heading-recovery latch and Stage 3 then brakes the car
+     * until recycle -- the reported "cars leaving a branch stall / go off-road /
+     * snap / jump lanes" at the branch->main merge. Snap the yaw to the new span's
+     * tangent (exactly as placement does) and clear any recovery/stuck latch so
+     * the car re-joins the flow smoothly on the crossing tick instead of tripping
+     * the recovery brake. Traffic-only; shares the existing branch-traffic knob
+     * (TD5RE_BRANCH_TRAFFIC_FIX=0 restores the old behaviour for A/B). Fires only
+     * on the single tick the boundary is crossed. */
+    if (branch_traffic_fix_enabled() && td5_ai_traffic_dynamic_active() &&
+        slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
+        static int16_t s_prev_span_raw[TD5_MAX_TOTAL_ACTORS];
+        static uint8_t s_prev_valid[TD5_MAX_TOTAL_ACTORS];
+        int ring = td5_track_get_ring_length();
+        int cur  = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
+        if (ring > 0 && s_prev_valid[slot]) {
+            int prev = (int)s_prev_span_raw[slot];
+            /* corridor<->main crossing = the ">= ring" side changed */
+            if ((prev >= ring) != (cur >= ring)) {
+                td5_track_compute_heading((TD5_Actor *)actor);
+                if (rs[RS_ROUTE_DIRECTION_POLARITY])
+                    ACTOR_I32(actor, ACTOR_YAW_ACCUM) += 0x80000;  /* oncoming 180 flip */
+                g_traffic_recovery_stage[slot] = 0;
+                rs[RS_RECOVERY_STAGE]          = 0;
+                if (slot < TD5_MAX_TOTAL_ACTORS) s_traffic_stuck_frames[slot] = 0;
+                TD5_LOG_I(LOG_TAG,
+                          "traffic_branch_merge_realign: slot=%d prev_raw=%d cur_raw=%d "
+                          "ring=%d polarity=%d (yaw snapped to new span tangent)",
+                          slot, prev, cur, ring, (int)rs[RS_ROUTE_DIRECTION_POLARITY]);
+            }
+        }
+        s_prev_span_raw[slot] = (int16_t)cur;
+        s_prev_valid[slot]    = 1;
     }
 
     /* --- Stage 2: Heading misalignment check ---

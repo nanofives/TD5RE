@@ -79,6 +79,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  finish; the lap counter stops at the last lap." },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 12 (traffic)" },
+    { CL_ITEM,    "VERY HIGH traffic stays dense the whole race. It used" },
+    { CL_ITEM,    "  to thin out badly after the first wave; the road now" },
+    { CL_ITEM,    "  refills quickly instead of one car at a time." },
+    { CL_ITEM,    "Traffic leaving a branch back onto the main road no" },
+    { CL_ITEM,    "  longer stalls, veers off-road or snaps -- it lines up" },
+    { CL_ITEM,    "  with the road it is joining." },
+    { CL_ITEM,    "On a two-lane road traffic always leaves one lane open," },
+    { CL_ITEM,    "  so you are never fully blocked in." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 09 (auto track: round 22 -- gore/median)" },
     { CL_ITEM,    "Fork medians now reach BOTH carriageways. On an" },
     { CL_ITEM,    "  uneven split the median hugged the branch side and" },
