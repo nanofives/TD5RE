@@ -6239,10 +6239,16 @@ void Screen_CarSelection(void) {
                 /* Drag race locks the transmission to Manual [CONFIRMED @
                  * 0x0040e167 — orig makes the button a non-interactive Preview
                  * for game_type 7 (=drag there); port drag == game_type 9].
-                 * The pre-existing `!= 7` guard keeps the port's Time-Trial
-                 * behavior unchanged; the added drag guard is the faithful fix. */
+                 * [TIME TRIAL TRANS 2026-09-12] The old `s_selected_game_type != 7`
+                 * guard was a stale carry-over of the ORIGINAL's numbering (7=drag).
+                 * In the port game_type 7 is TIME TRIAL, so that guard silently
+                 * blocked the AUTO/MANUAL toggle in time trial — the row responded
+                 * but never changed s_selected_transmission (read back by
+                 * td5_frontend_get_player_manual at race start), so the choice had no
+                 * effect. Drag is still locked by the g_td5.drag_race_enabled guard;
+                 * time trial now toggles like every other single-player mode. */
                 if (!g_td5.drag_race_enabled &&
-                    s_selected_game_type != 7 && (s_button_index >= 0 || delta != 0)) {
+                    (s_button_index >= 0 || delta != 0)) {
                     s_selected_transmission = !s_selected_transmission;
                     strncpy(s_buttons[3].label,
                             s_selected_transmission ? TR("Manual") : TR("Automatic"),
@@ -9949,6 +9955,19 @@ void Screen_RaceResults(void) {
         s_results_cup_complete = 0;
         s_results_skip_display = 0;
         s_anim_tick = 0;
+        /* [VIEW RACE DATA FLASH 2026-09-12] Arm the slide-in panel OFF-SCREEN
+         * before the first draw. States 0/1/2 each present a frame before case 3
+         * starts the slide, and the summary render (DrawRaceDataSummaryPanel) keys
+         * its column offset off s_results_panel_slide_x. On re-entry via the "View
+         * Race Data" button (set_screen resets s_inner_state but NOT this module
+         * static, which the interactive state left at 0 = rest), those frames drew
+         * the whole table AT REST — a visible flash — before the panel jumped
+         * off-right to slide in. Pre-seed the off-screen start (matches case 3's
+         * +0x220 right-edge origin) so the very first rendered frame already has the
+         * panel off-screen. Only when the animation is active (else sum_slide is
+         * forced to 0 and there is nothing to arm). */
+        if (results_anim_on())
+            s_results_panel_slide_x = 0x220;
         /* [FIXED 2026-06-02] Faithful rest positions (orig RunRaceResultsScreen case 3
          * MoveFrontendSpriteRect at counter==0x27, halfW=320/halfH=240):
          *   btn0 selector nav bar (520x32) slides to (115,97) — shows the car name +

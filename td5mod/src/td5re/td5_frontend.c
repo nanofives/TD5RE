@@ -6851,8 +6851,15 @@ int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
         return !(c->is_drag && c->is_mp);
     case RO_POLICE:      /* player IS the pursuit in cop chase; none in drag */
         return !(c->is_cop_chase || c->is_drag);
-    case RO_DIFFICULTY:  /* AI difficulty: opponent-gated except drag's own 1v1 rule */
-        if (c->is_cup || c->is_quick_race) return 0;
+    case RO_DIFFICULTY:  /* AI difficulty: opponent-gated except drag's own 1v1 rule.
+                          * [DIFFICULTY RESTORE 2026-09-12] The `is_quick_race`
+                          * exclusion was hiding this row in the main-menu QUICK
+                          * RACE flow (which stamps s_flow_context==2 -> is_quick_race
+                          * even though it is an ordinary single race with default 5
+                          * AI opponents). Quick race has AI opponents, so it must
+                          * offer DIFFICULTY too — gate it on the opponent count like
+                          * every other mode, not on the flow. */
+        if (c->is_cup) return 0;                     /* cup fixes difficulty per series */
         if (tb) return 0;
         if (c->is_mp && c->is_cop_chase) return 0;   /* MP cop chase */
         if (c->is_drag) return 1;                    /* drag: always shown */
@@ -6870,9 +6877,19 @@ int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
         return !c->is_mp && !c->is_cop_chase && !c->is_drag;
     case RO_POWERUPS:    /* road power-ups everywhere but drag */
         return !c->is_drag;
-    case RO_AI_MODEL:    /* opponent-AI mode — meaningful in any race with AI
-                          * opponents; not on the drag strip (dedicated driver) */
-        return !c->is_drag;
+    case RO_AI_MODEL:    /* opponent-AI mode — only meaningful when the race
+                          * actually has AI opponents. [AI MODEL OPP-GATE
+                          * 2026-09-12] Hide it whenever the effective opponent
+                          * count is 0: always in time trial (a solo run), in
+                          * traffic battle (PvP, no AI opponents), and in any mode
+                          * where OPPONENTS is set to 0 (rebuilt live when OPPONENTS
+                          * changes, mirroring DIFFICULTY). Never on the drag strip
+                          * (dedicated driver). Cup fills the grid, so it always has
+                          * AI opponents. */
+        if (c->is_drag || c->is_time_trial) return 0;
+        if (c->is_cup) return 1;
+        if (tb) return 0;
+        return c->opponents > 0;
     case RO_TOUGHNESS:
     case RO_DEFORM:
     case RO_COLLISIONS:
@@ -7547,6 +7564,17 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
      * working ◄► arrows (TD5) / modal colour picker (TD6). */
     if (s_button_count > 1 && s_buttons[1].active)
         s_buttons[1].disabled = !frontend_car_has_paint(actual_car);
+
+    /* [SP DRAG MANUAL LOCK 2026-09-12] SP drag forces MANUAL transmission, so the
+     * AUTO/MANUAL row (slot 3) is non-interactive: grey it out so nav/mouse skip it
+     * and it renders in the disabled (bb_state==2) style while still showing
+     * "Manual". The value is forced at button creation (Screen_CarSelection case 4)
+     * and the toggle (case 3) refuses; this is the visual + nav-skip half. Idempotent
+     * per-frame sync like the PAINT row above. MP drag uses the per-player
+     * transmission row on the MP setup screen (handled by the s_mp_simul return
+     * above), so this SP render path only greys the single-player drag toggle. */
+    if (s_button_count > 3 && s_buttons[3].active)
+        s_buttons[3].disabled = g_td5.drag_race_enabled ? 1 : 0;
 
     /* [PORT ENHANCEMENT 2026-06] Multiplayer flow: show whose turn it is to pick. */
     if (s_mp_flow && s_anim_complete) {
