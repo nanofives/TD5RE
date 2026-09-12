@@ -931,9 +931,19 @@ static int         s_favseeds_loaded;
  * cleared time group whose header is 0). TD6 levels number up to ~39 (the
  * highest level<NN>.zip); 48 gives headroom. */
 #define TD5_MAX_TD6_RECORD_LEVELS 48
-static TD5_NpcGroup s_td6_records[TD5_MAX_TD6_RECORD_LEVELS];
+/* [DRAG HS 2026-09-12] Single-player drag-strip high-score records, one table per
+ * drag LENGTH (0=SHORT 1=MEDIUM 2=LONG 3=EPIC). They share the s_td6_records
+ * machinery (insert / get / ext / high-score overlay), keyed ABOVE the real
+ * level-key range: td5_save_td6_record_level_valid caps real level keys at
+ * TD5_MAX_TD6_RECORD_LEVELS, so no track (TD6 or custom) can ever address these
+ * slots, and they never render placeholder/celebrity names (genuine runs only).
+ * Persisted under their own [DragRecords.LenNN] section. */
+#define TD5_DRAG_RECORD_LENGTHS 4
+#define TD5_DRAG_RECORD_BASE    TD5_MAX_TD6_RECORD_LEVELS
+#define TD5_TD6_RECORD_SLOTS    (TD5_MAX_TD6_RECORD_LEVELS + TD5_DRAG_RECORD_LENGTHS)
+static TD5_NpcGroup s_td6_records[TD5_TD6_RECORD_SLOTS];
 /* TD5RE parallel extension to s_td6_records entries (see s_npc_ext). */
-static TD5_NpcEntryExt s_td6_ext[TD5_MAX_TD6_RECORD_LEVELS][5];
+static TD5_NpcEntryExt s_td6_ext[TD5_TD6_RECORD_SLOTS][5];
 static int          s_td6_records_loaded;
 
 /* Apply celebrity (or API-fetched) names to NPC slots that still hold the
@@ -1062,7 +1072,7 @@ int td5_save_init(void)
      * lazy loader (td6_records_ensure_loaded) fills genuine runs from disk. */
     memset(s_td6_records, 0, sizeof(s_td6_records));
     memset(s_td6_ext, 0, sizeof(s_td6_ext));
-    for (i = 0; i < TD5_MAX_TD6_RECORD_LEVELS; i++)
+    for (i = 0; i < TD5_TD6_RECORD_SLOTS; i++)  /* incl. the 4 drag-length slots */
         s_td6_records[i].header = -1;
     s_td6_records_loaded = 0;
 
@@ -2493,6 +2503,43 @@ static int cfgini_write_progress(void)
         cfgini_add(&w, "\r\n");
     }
 
+    /* [DRAG HS 2026-09-12] Single-player drag-strip records, keyed by LENGTH
+     * (shares the s_td6_records store above TD5_DRAG_RECORD_BASE). Same entry
+     * layout as the TD6 records; header -1 = no records yet, so those lengths
+     * are skipped. TIME type (header 0). */
+    for (int ln = 0; ln < TD5_DRAG_RECORD_LENGTHS; ln++) {
+        const TD5_NpcGroup *grp = &s_td6_records[TD5_DRAG_RECORD_BASE + ln];
+        if (grp->header < 0) continue;
+        cfgini_add(&w, "[DragRecords.Len%02d]\r\n", ln);
+        cfgini_add(&w, "Header = %d\r\n", grp->header);
+        for (int e = 0; e < 5; e++) {
+            const TD5_NpcEntry *en = &grp->entries[e];
+            char nm[17];
+            memcpy(nm, en->name, 16);
+            nm[16] = '\0';
+            for (int c = 0; c < 16; c++) {
+                if ((unsigned char)nm[c] < 0x20) { nm[c] = '\0'; break; }
+            }
+            cfgini_add(&w, "Entry%d.Name = %s\r\n", e, nm);
+            cfgini_add(&w, "Entry%d.Score = %d\r\n", e, en->score);
+            cfgini_add(&w, "Entry%d.Car = %d\r\n", e, en->car_id);
+            cfgini_add(&w, "Entry%d.AvgSpeed = %d\r\n", e, en->avg_speed);
+            cfgini_add(&w, "Entry%d.TopSpeed = %d\r\n", e, en->top_speed);
+            {
+                const TD5_NpcEntryExt *ex = &s_td6_ext[TD5_DRAG_RECORD_BASE + ln][e];
+                if (ex->full_name[0]) {
+                    char fn[32]; snprintf(fn, sizeof fn, "%s", ex->full_name);
+                    for (int c = 0; c < (int)sizeof(fn); c++)
+                        if ((unsigned char)fn[c] < 0x20) { fn[c] = '\0'; break; }
+                    cfgini_add(&w, "Entry%d.FullName = %s\r\n", e, fn);
+                }
+                cfgini_add(&w, "Entry%d.Collisions = %d\r\n", e, ex->collisions);
+                cfgini_add(&w, "Entry%d.Air = %d\r\n", e, ex->air_ticks);
+            }
+        }
+        cfgini_add(&w, "\r\n");
+    }
+
     return cfgini_flush(&w, cfgini_progress_path());
 }
 
@@ -2817,7 +2864,7 @@ static int td6_records_enabled(void)
  * Tolerates a missing file / absent sections (those levels stay header -1). */
 static void td6_records_read(void)
 {
-    for (int lv = 0; lv < TD5_MAX_TD6_RECORD_LEVELS; lv++) {
+    for (int lv = 0; lv < TD5_TD6_RECORD_SLOTS; lv++) {  /* incl. drag-length slots */
         memset(&s_td6_records[lv], 0, sizeof(s_td6_records[lv]));
         s_td6_records[lv].header = -1;
         memset(&s_td6_ext[lv], 0, sizeof(s_td6_ext[lv]));
@@ -2856,6 +2903,41 @@ static void td6_records_read(void)
                 if (td5_plat_ini_get_str(f, sec, key, "", val, sizeof val) > 0) {
                     memset(ex->full_name, 0, sizeof(ex->full_name));
                     strncpy(ex->full_name, val, sizeof(ex->full_name) - 1);
+                }
+                snprintf(key, sizeof key, "Entry%d.Collisions", e); ex->collisions = cfgini_get_i32(f, sec, key, 0);
+                snprintf(key, sizeof key, "Entry%d.Air", e);        ex->air_ticks  = cfgini_get_i32(f, sec, key, 0);
+            }
+        }
+    }
+
+    /* [DRAG HS 2026-09-12] Read the [DragRecords.LenNN] sections into the drag
+     * slots (shares the store above TD5_DRAG_RECORD_BASE). */
+    for (int ln = 0; ln < TD5_DRAG_RECORD_LENGTHS; ln++) {
+        snprintf(sec, sizeof sec, "DragRecords.Len%02d", ln);
+        int hdr = cfgini_get_i32(f, sec, "Header", -1);
+        if (hdr < 0) continue;
+        TD5_NpcGroup *grp = &s_td6_records[TD5_DRAG_RECORD_BASE + ln];
+        grp->header = hdr;
+        for (int e = 0; e < 5; e++) {
+            TD5_NpcEntry *en = &grp->entries[e];
+            snprintf(key, sizeof key, "Entry%d.Name", e);
+            if (td5_plat_ini_get_str(f, sec, key, "", val, sizeof val) > 0) {
+                size_t nlen = strlen(val);
+                if (nlen > 15) nlen = 15;
+                memset(en->name, 0, 16);
+                memcpy(en->name, val, nlen);
+            }
+            snprintf(key, sizeof key, "Entry%d.Score", e);    en->score     = cfgini_get_i32(f, sec, key, 0);
+            snprintf(key, sizeof key, "Entry%d.Car", e);      en->car_id    = cfgini_get_i32(f, sec, key, 0);
+            snprintf(key, sizeof key, "Entry%d.AvgSpeed", e); en->avg_speed = cfgini_get_i32(f, sec, key, 0);
+            snprintf(key, sizeof key, "Entry%d.TopSpeed", e); en->top_speed = cfgini_get_i32(f, sec, key, 0);
+            {
+                TD5_NpcEntryExt *ex = &s_td6_ext[TD5_DRAG_RECORD_BASE + ln][e];
+                snprintf(key, sizeof key, "Entry%d.FullName", e);
+                if (td5_plat_ini_get_str(f, sec, key, "", val, sizeof val) > 0) {
+                    /* snprintf (not strncpy) NUL-terminates without tripping
+                     * -Wstringop-truncation. */
+                    snprintf(ex->full_name, sizeof(ex->full_name), "%s", val);
                 }
                 snprintf(key, sizeof key, "Entry%d.Collisions", e); ex->collisions = cfgini_get_i32(f, sec, key, 0);
                 snprintf(key, sizeof key, "Entry%d.Air", e);        ex->air_ticks  = cfgini_get_i32(f, sec, key, 0);
@@ -2914,9 +2996,14 @@ const TD5_NpcGroup *td5_save_get_td6_record_group(int td6_level)
 {
     if (!td6_records_enabled()) return NULL;
     td6_records_ensure_loaded();
-    if (td6_level < 0 || td6_level >= TD5_MAX_TD6_RECORD_LEVELS) return NULL;
-    if (s_td6_records[td6_level].header < 0)
+    if (td6_level < 0 || td6_level >= TD5_TD6_RECORD_SLOTS) return NULL;
+    if (s_td6_records[td6_level].header < 0) {
+        /* [DRAG HS 2026-09-12] Drag-length slots are genuine-runs-only — an empty
+         * table returns NULL ("NO RECORDS YET" / first run always qualifies), never
+         * fabricated placeholder names. */
+        if (td6_level >= TD5_DRAG_RECORD_BASE) return NULL;
         return td6_placeholder_group(td6_level);   /* no genuine record -> placeholders */
+    }
     return &s_td6_records[td6_level];
 }
 
@@ -2930,6 +3017,17 @@ int td5_save_td6_record_level_valid(int td6_level)
     return (td6_level >= 0 && td6_level < TD5_MAX_TD6_RECORD_LEVELS) ? 1 : 0;
 }
 
+/* [DRAG HS 2026-09-12] Shared-store record key for single-player drag LENGTH
+ * `len` (0=SHORT..3=EPIC), or -1 if out of range / records disabled. Callers
+ * route SP drag high scores through the TD6 record API (insert / get / overlay)
+ * with this key; it sits above the real level-key range so no track collides. */
+int td5_save_drag_record_level(int len)
+{
+    if (!td6_records_enabled()) return -1;
+    if (len < 0 || len >= TD5_DRAG_RECORD_LENGTHS) return -1;
+    return TD5_DRAG_RECORD_BASE + len;
+}
+
 int td5_save_td6_record_insert(int td6_level, int score_type,
                                const char *name, int32_t score,
                                int car_id, int32_t avg_speed, int32_t top_speed,
@@ -2937,7 +3035,7 @@ int td5_save_td6_record_insert(int td6_level, int score_type,
 {
     if (!td6_records_enabled()) return -1;
     td6_records_ensure_loaded();
-    if (td6_level < 0 || td6_level >= TD5_MAX_TD6_RECORD_LEVELS) return -1;
+    if (td6_level < 0 || td6_level >= TD5_TD6_RECORD_SLOTS) return -1;
     if (score == 0) return -1;                 /* DNF / no real time = no record */
 
     TD5_NpcGroup    *grp = &s_td6_records[td6_level];
@@ -3149,8 +3247,15 @@ const TD5_NpcEntryExt *td5_save_get_npc_ext(int group_index, int entry)
 
 const TD5_NpcEntryExt *td5_save_get_td6_ext(int td6_level, int entry)
 {
-    if (td6_level < 0 || td6_level >= TD5_MAX_TD6_RECORD_LEVELS) return NULL;
+    if (td6_level < 0 || td6_level >= TD5_TD6_RECORD_SLOTS) return NULL;
     if (entry < 0 || entry >= 5) return NULL;
+
+    /* [DRAG HS 2026-09-12] Drag-length slots have no mock extension: an empty
+     * table renders no rows, and a populated one uses the genuine s_td6_ext. */
+    if (td6_level >= TD5_DRAG_RECORD_BASE) {
+        if (s_td6_records[td6_level].header < 0) return NULL;
+        return &s_td6_ext[td6_level][entry];
+    }
 
     /* [TD5RE HS-MOCK] A level with no genuine record renders the PLACEHOLDER group
      * (td6_placeholder_group), which is copied out of the TD5 seed table and has

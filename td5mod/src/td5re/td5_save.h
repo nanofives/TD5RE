@@ -180,6 +180,11 @@ const TD5_NpcGroup *td5_save_get_td6_record_group(int td6_level);
  *  this up front to decide whether a track has a high-score home at all. */
 int td5_save_td6_record_level_valid(int td6_level);
 
+/** [DRAG HS] Shared-store record key for a single-player drag LENGTH `len`
+ *  (0=SHORT..3=EPIC), or -1 if out of range / high-score records are disabled.
+ *  SP drag high scores are stored via the TD6 record API using this key. */
+int td5_save_drag_record_level(int len);
+
 /** Insert a genuine record into the TD6 table for `td6_level`, keeping the 5
  *  entries sorted by `score_type` (0/1/4 = time, lower better; 2 = points,
  *  higher better). Persists to disk. Returns the inserted rank [0..4], or -1

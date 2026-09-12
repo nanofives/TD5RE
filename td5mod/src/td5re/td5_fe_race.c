@@ -10575,7 +10575,14 @@ void Screen_RaceResults(void) {
                             td5_game_mp_cup_end();
                             td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
                         }
-                    } else if (s_selected_game_type < 1) {
+                    } else if (s_selected_game_type < 1 ||
+                               (s_selected_game_type == 9 && !td5_game_drag_mp_active())) {
+                        /* [DRAG HS 2026-09-12] Single-player drag now takes the same
+                         * high-score / name-entry route as a single race (game_type
+                         * < 1). Drag was previously shunted straight to MAIN_MENU
+                         * here, so a drag win never registered a record. MP drag
+                         * keeps the MP post-race path (handled earlier at state
+                         * 0xD), so it is excluded via td5_game_drag_mp_active(). */
                         td5_frontend_set_screen(TD5_SCREEN_NAME_ENTRY);  /* 0x19 */
                     } else if (!s_results_cup_complete) {
                         td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);   /* 5 */
@@ -10673,8 +10680,18 @@ void Screen_PostRaceNameEntry(void) {
          * and the high-score table renders that (or "NO RECORDS YET"), never fake
          * names. Only single-race types reach a TD6 track (cups are TD5-only), so
          * this is gated to the non-cup branch below. 0 = normal TD5 path. */
-        s_postrace_td6_level = (s_selected_game_type < 1 || s_selected_game_type == 7)
-                               ? frontend_postrace_td6_level() : 0;
+        /* [DRAG HS 2026-09-12] Single-player drag stores its finish TIME in a
+         * dedicated length-keyed record table (the shared TD6 record store, key
+         * from td5_save_drag_record_level). It renders/inserts through the same
+         * s_postrace_td6_level path as a TD6 track. MP drag uses the MP post-race
+         * path and never reaches here. */
+        if (s_selected_game_type == 9 && !td5_game_drag_mp_active()) {
+            int dlvl = td5_save_drag_record_level(td5_game_drag_length_level());
+            s_postrace_td6_level = (dlvl >= 0) ? dlvl : 0;
+        } else {
+            s_postrace_td6_level = (s_selected_game_type < 1 || s_selected_game_type == 7)
+                                   ? frontend_postrace_td6_level() : 0;
+        }
 
         /* Compute group index for the high-score table.
          * Cup types 1-6: group = game_type + 0x13 (mirroring original case 0 at 0x413BCF).
@@ -10727,9 +10744,14 @@ void Screen_PostRaceNameEntry(void) {
              * point, LAP for circuit; the TD5 group_idx/grp is ignored. */
             const TD5_NpcGroup *grp;
             int group_type;
+            int is_sp_drag = (s_selected_game_type == 9 && !td5_game_drag_mp_active());
             if (s_postrace_td6_level > 0) {
                 const TD5_NpcGroup *td6grp = td5_save_get_td6_record_group(s_postrace_td6_level);
                 if (td6grp) group_type = td6grp->header & 3;
+                /* [DRAG HS 2026-09-12] A fresh drag table has no group yet; force
+                 * TIME (0) rather than the is_circuit fallback — the drag strip
+                 * reports "circuit" (no reverse) which would wrongly pick LAP. */
+                else if (is_sp_drag) group_type = 0;
                 else        group_type = frontend_track_is_circuit(s_selected_track) ? 1 : 0;
                 s_postrace_td6_score_type = group_type;
                 grp = NULL;                 /* never qualify against a TD5 group */
@@ -10843,7 +10865,10 @@ void Screen_PostRaceNameEntry(void) {
              * the name prompt. Applied AFTER the dev demo override on purpose: even
              * the harness must not fabricate a record for an auto-generated track,
              * because the insert would fail and leave a typed name going nowhere. */
-            if (!frontend_track_has_high_scores(s_selected_track)) {
+            /* [DRAG HS 2026-09-12] SP drag has its own dedicated length-keyed
+             * record home (not tied to s_selected_track), so it is exempt from the
+             * per-track high-score gate below. */
+            if (!is_sp_drag && !frontend_track_has_high_scores(s_selected_track)) {
                 if (qualifies)
                     TD5_LOG_I(LOG_TAG, "PostRaceNameEntry: high scores disabled for "
                               "track=%d (auto-generated / no record store) — skipping name entry",

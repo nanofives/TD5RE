@@ -379,5 +379,8 @@ int td5_game_drag_active_racers(void);
  * strip (base_ring = the original pre-repeat ring length). */
 int td5_game_drag_length_repeats(void);
 int td5_game_drag_length_finish_span(int start, int base_ring);
+/* [DRAG HS 2026-09-12] Chosen drag LENGTH level (0=SHORT 1=MEDIUM 2=LONG 3=EPIC);
+ * keys the SP post-race drag high-score table. */
+int td5_game_drag_length_level(void);
 
 #endif /* TD5_GAME_H */
