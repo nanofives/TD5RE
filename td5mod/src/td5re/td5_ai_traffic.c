@@ -1362,6 +1362,12 @@ void td5_ai_init_traffic_actors(void) {
 
 /* Per-actor smart-traffic state (indexed by actor slot). */
 int8_t   s_traffic_lane_bias[TD5_MAX_TOTAL_ACTORS];     /* situational lane offset (-1/0/+1), 1-tick latency */
+/* [BRANCH MERGE REALIGN 2026-09-12] previous-tick SPAN_RAW per traffic slot, used
+ * to detect the corridor<->main crossing. File-scope so race-init can clear the
+ * valid flags -- a stale span from a previous race must not trigger a tick-1
+ * realign. */
+static int16_t  s_prev_span_raw[TD5_MAX_TOTAL_ACTORS];
+static uint8_t  s_prev_span_valid[TD5_MAX_TOTAL_ACTORS];
 static int      s_traffic_stuck_frames[TD5_MAX_TOTAL_ACTORS];  /* AntiFreeze: consecutive recovery-frozen ticks */
 /* [#3 COLLISION-DEADLOCK ESCAPE 2026-06-19] */
 static int      s_traffic_stall_frames[TD5_MAX_TOTAL_ACTORS];  /* consecutive near-stopped ticks */
@@ -3771,6 +3777,9 @@ void td5_ai_traffic_dynamic_race_init(void)
     memset(s_trf_dyn_state, TRF_DYN_INACTIVE, sizeof(s_trf_dyn_state));
     memset(s_trf_dyn_alpha, 0, sizeof(s_trf_dyn_alpha));
     memset(s_trf_battle_hwm, 0, sizeof(s_trf_battle_hwm));   /* [TRAFFIC BATTLE HWM] */
+    /* [BRANCH MERGE REALIGN] Drop last race's per-slot SPAN_RAW history so a stale
+     * span cannot fake a corridor<->main crossing on tick 1 of the new race. */
+    memset(s_prev_span_valid, 0, sizeof(s_prev_span_valid));
     s_trf_dyn_rng      = 0x54443552u ^ ((uint32_t)g_td5.track_index * 2654435761u);
     s_trf_dyn_cooldown = 0;
     s_trf_dyn_seeded   = 1;
@@ -4495,11 +4504,9 @@ void td5_ai_update_traffic_route_plan(int slot) {
      * on the single tick the boundary is crossed. */
     if (branch_traffic_fix_enabled() && td5_ai_traffic_dynamic_active() &&
         slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
-        static int16_t s_prev_span_raw[TD5_MAX_TOTAL_ACTORS];
-        static uint8_t s_prev_valid[TD5_MAX_TOTAL_ACTORS];
         int ring = td5_track_get_ring_length();
         int cur  = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
-        if (ring > 0 && s_prev_valid[slot]) {
+        if (ring > 0 && s_prev_span_valid[slot]) {
             int prev = (int)s_prev_span_raw[slot];
             /* corridor<->main crossing = the ">= ring" side changed */
             if ((prev >= ring) != (cur >= ring)) {
@@ -4515,8 +4522,8 @@ void td5_ai_update_traffic_route_plan(int slot) {
                           slot, prev, cur, ring, (int)rs[RS_ROUTE_DIRECTION_POLARITY]);
             }
         }
-        s_prev_span_raw[slot] = (int16_t)cur;
-        s_prev_valid[slot]    = 1;
+        s_prev_span_raw[slot]   = (int16_t)cur;
+        s_prev_span_valid[slot] = 1;
     }
 
     /* --- Stage 2: Heading misalignment check ---
