@@ -2503,6 +2503,47 @@ static int battle_despawn_behind(void)
     return td5_env_int("TD5RE_BATTLE_DESPAWN_BEHIND", 50, 1, 100000);
 }
 
+/* [VERY-HIGH NEAR-PLAYER FILL 2026-09-12] The per-player cap (default ON) makes
+ * the rear despawn bound symmetric with the forward keep: a car retires only once
+ * it is min_player_dist > front_keep (~228 spans) from EVERY anchor, in BOTH
+ * directions. Measured with the near-player census probe on Moscow + Newcastle at
+ * VERY HIGH: the pool sits at the cap the whole race (on_road ~15/16) but the cars
+ * smear across ~±228 spans, so roughly HALF the budget is spent on cars already
+ * BEHIND the player (off-screen, passed) while the forward band is thin — the
+ * nearest car ahead is typically 68..110 spans away and ~65% of samples have ZERO
+ * traffic in the 40 spans ahead. That is exactly the reported "a wave of traffic,
+ * then only occasionally": the player drives through the front of the pack, and
+ * the passed cars keep their slots instead of respawning ahead.
+ *
+ * The fix retires a car promptly once it has fallen `rear_keep` spans behind the
+ * trailing HUMAN even when the per-player cap is on, so the freed slot re-spawns
+ * ahead of the field (the spawn window is always ahead of the leader) and the
+ * budget concentrates in the forward band the player actually looks at. The rear
+ * bound is off-screen (default 65 == the faithful DespawnDistance, well behind the
+ * ~128-span rear render horizon) so nothing ever fades in view. VERY HIGH only —
+ * lower tiers keep their exact behaviour. Default ON; TD5RE_TRAFFIC_NEAR_FILL=0
+ * restores byte-identical VERY-HIGH behaviour. TD5RE_TRAFFIC_REAR_KEEP overrides
+ * the rear distance (spans). */
+static int trf_near_fill_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_flag_on("TD5RE_TRAFFIC_NEAR_FILL");
+        TD5_LOG_I(LOG_TAG, "traffic_near_fill: TD5RE_TRAFFIC_NEAR_FILL=%d "
+                  "(VERY-HIGH prompt rear retire -> denser forward band)", s);
+    }
+    return s;
+}
+
+static int trf_rear_keep_spans(void)
+{
+    static int v = -1;
+    if (v < 0)
+        v = td5_env_int("TD5RE_TRAFFIC_REAR_KEEP",
+                        g_td5.ini.traffic_dyn_despawn, 1, 100000);
+    return v;
+}
+
 /* [PER-PLAYER TRAFFIC CAP 2026-07-21] Each racer (human OR AI) anchors its own
  * traffic "bubble". The on-road cap is no longer a single global number: it is
  * the per-anchor volume budget times the number of spatially SEPARATE racer
@@ -4099,6 +4140,13 @@ void td5_ai_traffic_dynamic_tick(void)
                  * passed oncoming car goes increasingly negative and this arm fires. */
                 ((td5_game_battle_mode_active() || g_td5.drag_race_enabled) &&
                  behind < -battle_despawn_behind()) ||
+                /* [VERY-HIGH NEAR-PLAYER FILL 2026-09-12] Retire a car once it has
+                 * fallen rear_keep spans behind the trailing human even with the
+                 * per-player cap on, so the freed slot re-spawns AHEAD and the
+                 * budget concentrates in the forward band (see trf_near_fill_enabled
+                 * for the census evidence). VERY HIGH only; off => byte-identical. */
+                (trf_near_fill_enabled() && trf_dyn_volume() >= 4 &&
+                 behind < -trf_rear_keep_spans()) ||
                 ahead  >  front_keep ||
                 far_from_all ||
                 (trf_perplayer_cap_enabled() &&
@@ -4311,6 +4359,11 @@ void td5_ai_traffic_dynamic_tick(void)
     if (td5_env_flag_on("TD5RE_TRAFFIC_CENSUS") &&
         (g_td5.simulation_tick_counter % (unsigned)s_census_every) == 0u) {
         int n_inact = 0, n_fin = 0, n_act = 0, n_fout = 0, n_stuck = 0, n_broken = 0;
+        /* [NEAR-PLAYER PROBE 2026-09-12] near-player perceived-density metrics */
+        static int s_near_radius = -1;
+        int p_span, near_cnt = 0, ahead_near = 0, nearest_ahd = -1;
+        int tot_ahead = 0, tot_behind = 0;   /* all live cars, not just near */
+        int ring2 = td5_track_get_ring_length();
         for (int i = g_traffic_slot_base;
              i < g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS &&
              i < TD5_MAX_TOTAL_ACTORS; i++) {
@@ -4324,13 +4377,55 @@ void td5_ai_traffic_dynamic_tick(void)
             if (s_traffic_stuck_frames[i] > 0)    n_stuck++;
             if (g_actor_broken_down[i])           n_broken++;
         }
+        /* The pool census above measures the TOTAL on-road count, which sits at the
+         * cap the whole race. That is not what the player perceives: what they SEE
+         * is the live traffic within a short window of THEIR car, and (most of all)
+         * how far the nearest car AHEAD is. Measure both, anchored on the driven
+         * player (slot 0), ring-wrap aware, branch corridors folded to their
+         * parallel main span. Pure measurement — no state is written, so this is
+         * byte-identical to the old census.
+         *   near        = live cars within +/- radius spans of the player
+         *   ahead_near  = live cars in (0 .. +radius] ahead of the player
+         *   nearest_ahd = span distance to the closest live car ahead (-1 = none) */
+        if (s_near_radius < 0)
+            s_near_radius = td5_env_int("TD5RE_TRAFFIC_NEAR_SPANS", 40, 1, 100000);
+        p_span = (int)(int16_t)ACTOR_I16(actor_ptr(0), ACTOR_SPAN_NORMALIZED);
+        for (int i = g_traffic_slot_base;
+             i < g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS &&
+             i < TD5_MAX_TOTAL_ACTORS; i++) {
+            int sp, d;
+            if (s_trf_dyn_state[i] != TRF_DYN_ACTIVE &&
+                s_trf_dyn_state[i] != TRF_DYN_FADE_IN &&
+                s_trf_dyn_state[i] != TRF_DYN_FADE_OUT)
+                continue;
+            sp = (int)(int16_t)ACTOR_I16(actor_ptr(i), ACTOR_SPAN_NORMALIZED);
+            if (ring2 > 0 && sp >= ring2) {
+                int m = td5_track_branch_to_main_span(sp);
+                if (m >= 0) sp = m;
+            }
+            d = sp - p_span;
+            if (g_td5.track_type == TD5_TRACK_CIRCUIT && ring2 > 0) {
+                int half = ring2 / 2;
+                while (d >  half) d -= ring2;
+                while (d < -half) d += ring2;
+            }
+            if (d >= -s_near_radius && d <= s_near_radius) near_cnt++;
+            if (d > 0 && d <= s_near_radius) ahead_near++;
+            if (d > 0 && (nearest_ahd < 0 || d < nearest_ahd)) nearest_ahd = d;
+            if (d > 0)      tot_ahead++;
+            else if (d < 0) tot_behind++;
+        }
         TD5_LOG_I(LOG_TAG,
                   "traffic_census: tick=%u inactive=%d fadein=%d active=%d fadeout=%d "
-                  "stuck=%d broken=%d cap=%d cooldown=%d lead_span=%d",
+                  "stuck=%d broken=%d cap=%d cooldown=%d lead_span=%d "
+                  "player_span=%d near(+-%d)=%d ahead=%d nearest_ahead=%d "
+                  "tot_ahead=%d tot_behind=%d",
                   (unsigned)g_td5.simulation_tick_counter,
                   n_inact, n_fin, n_act, n_fout, n_stuck, n_broken,
                   trf_dyn_cap(), s_trf_dyn_cooldown,
-                  ai_player_span_lead());
+                  ai_player_span_lead(),
+                  p_span, s_near_radius, near_cnt, ahead_near, nearest_ahd,
+                  tot_ahead, tot_behind);
         /* [TRAFFIC CENSUS CSV] Optional flushed-per-write CSV so a live-traffic
          * count series survives even without a clean shutdown (race.log only
          * flushes on close). TD5RE_TRAFFIC_CENSUS_CSV=<path>. */
@@ -4343,13 +4438,15 @@ void td5_ai_traffic_dynamic_tick(void)
                 s_census_csv = fopen(cp, "w");
                 if (s_census_csv)
                     fprintf(s_census_csv,
-                            "tick,on_road,active,fadein,fadeout,inactive,stuck,broken,cap,cooldown\n");
+                            "tick,on_road,active,fadein,fadeout,inactive,stuck,broken,cap,cooldown,"
+                            "player_span,near,ahead,nearest_ahead,tot_ahead,tot_behind\n");
             }
             if (s_census_csv) {
-                fprintf(s_census_csv, "%u,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                fprintf(s_census_csv, "%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                         (unsigned)g_td5.simulation_tick_counter,
                         n_fin + n_act + n_fout, n_act, n_fin, n_fout, n_inact,
-                        n_stuck, n_broken, trf_dyn_cap(), s_trf_dyn_cooldown);
+                        n_stuck, n_broken, trf_dyn_cap(), s_trf_dyn_cooldown,
+                        p_span, near_cnt, ahead_near, nearest_ahd, tot_ahead, tot_behind);
                 fflush(s_census_csv);
             }
         }

@@ -80,6 +80,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 12 (traffic)" },
+    { CL_ITEM,    "VERY HIGH traffic now packs the road AHEAD of you, not" },
+    { CL_ITEM,    "  behind. Passed cars retire promptly so fresh traffic" },
+    { CL_ITEM,    "  keeps appearing in front instead of only occasionally." },
     { CL_ITEM,    "VERY HIGH traffic stays dense the whole race. It used" },
     { CL_ITEM,    "  to thin out badly after the first wave; the road now" },
     { CL_ITEM,    "  refills quickly instead of one car at a time." },
