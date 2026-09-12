@@ -2171,6 +2171,78 @@ static float td5_render_traffic_view_mult(void)
     return m;
 }
 
+/* [CAR SHADOW] The per-view car contact-shadow loop, factored out of the actor
+ * pre-pass (gates mirror the body loop). Drawn before the bodies so each body
+ * overpaints the part of its own shadow that falls under it (no shadow-over-car),
+ * while the spread contact penumbra on the surrounding road shows. */
+static void car_shadow_pass(int view_index, int total_actors,
+                            int camera_target_slot, int camera_preset_active,
+                            int actor_cull_window)
+{
+    int shadow_drawn = 0;
+    for (int slot = 0; slot < total_actors; slot++) {
+        if (s_photobooth_active) continue;  /* booth: no shadows in the preview */
+        TD5_Actor *sa = td5_game_get_actor(slot);
+        if (!sa || !td5_render_get_vehicle_mesh(slot))
+            continue;
+        /* [PER-VIEWPORT TRAFFIC] in split-screen time trial each viewport
+         * renders ONLY its own traffic partition (owner == view_index);
+         * -1 (shared / racer slot) renders in every view as before. */
+        { int tov = td5_ai_traffic_slot_owner_vp(slot);
+          if (tov >= 0 && tov != view_index) continue; }
+        /* [dynamic-traffic] despawned traffic casts no shadow; a fading
+         * car's shadow fades with it (alpha consumed inside the shadow
+         * draw helpers via s_actor_draw_alpha). */
+        int shadow_fade = td5_ai_traffic_get_draw_alpha(slot);
+        if (shadow_fade == 0)
+            continue;
+        if (slot == camera_target_slot && camera_preset_active)
+            continue;   /* bumper/interior cam: own car (incl. shadow) suppressed */
+        /* [#14 2026-06-19] Skip INACTIVE racer slots (state==3) in ALL
+         * modes, not just drag: an unused grid slot whose mesh is still
+         * loaded was casting a shadow (and rendering a body below) as a
+         * stationary "ghost" car when the race had fewer than the max
+         * opponents. Traffic slots (>= base) keep their own fade gate. */
+        if (slot < g_traffic_slot_base &&
+            td5_game_get_slot_state(slot) == 3)
+            continue;   /* inactive racer slot (was drag-only) */
+        if (slot != camera_target_slot) {
+            TD5_Actor *owner = td5_game_get_actor(camera_target_slot);
+            if (owner) {
+                int delta = (int)sa->track_span_normalized -
+                            (int)owner->track_span_normalized;
+                int ring = td5_track_get_ring_length();
+                if (ring > 0) {
+                    int half = ring / 2;
+                    if (delta >  half) delta -= ring;
+                    if (delta < -half) delta += ring;
+                }
+                int delta_abs = delta < 0 ? -delta : delta;
+                if (delta_abs >= actor_cull_window)
+                    continue;   /* span-distance cull (mirrors body loop) */
+            }
+        }
+        /* [REPLAY SHADOW 2026-07-22] Suppress the shadow of a recorded
+         * car whose body the frustum would cull -- the trackside replay
+         * camera otherwise shows "shadows of traffic that isn't on
+         * screen". Replay-only (see replay_actor_body_in_frustum). */
+        if (g_replay_mode &&
+            !replay_actor_body_in_frustum(sa, td5_render_get_vehicle_mesh(slot)))
+            continue;
+        td5_render_set_actor_draw_alpha(shadow_fade);
+        render_vehicle_shadow_quad(sa);
+        td5_render_set_actor_draw_alpha(255);
+        shadow_drawn++;
+    }
+    {
+        static uint32_t s_shadow_prepass_log = 0;
+        if ((s_shadow_prepass_log++ % 600u) == 0u)
+            TD5_LOG_I(LOG_TAG,
+                      "car shadow pass: view=%d drew %d shadow(s)",
+                      view_index, shadow_drawn);
+    }
+}
+
 void td5_render_actors_for_view(int view_index)
 {
     /*
@@ -2787,70 +2859,10 @@ void td5_render_actors_for_view(int view_index)
          * the shadow has its own near-clip and the rasterizer clips off-screen
          * pixels, so a ground shadow for a car just past the body-frustum edge
          * is harmless (and slightly more correct). */
-        {
-            int shadow_drawn = 0;
-            for (int slot = 0; slot < total_actors; slot++) {
-                if (s_photobooth_active) continue;  /* booth: no shadows in the preview */
-                TD5_Actor *sa = td5_game_get_actor(slot);
-                if (!sa || !td5_render_get_vehicle_mesh(slot))
-                    continue;
-                /* [PER-VIEWPORT TRAFFIC] in split-screen time trial each viewport
-                 * renders ONLY its own traffic partition (owner == view_index);
-                 * -1 (shared / racer slot) renders in every view as before. */
-                { int tov = td5_ai_traffic_slot_owner_vp(slot);
-                  if (tov >= 0 && tov != view_index) continue; }
-                /* [dynamic-traffic] despawned traffic casts no shadow; a fading
-                 * car's shadow fades with it (alpha consumed inside the shadow
-                 * draw helpers via s_actor_draw_alpha). */
-                int shadow_fade = td5_ai_traffic_get_draw_alpha(slot);
-                if (shadow_fade == 0)
-                    continue;
-                if (slot == camera_target_slot && camera_preset_active)
-                    continue;   /* bumper/interior cam: own car (incl. shadow) suppressed */
-                /* [#14 2026-06-19] Skip INACTIVE racer slots (state==3) in ALL
-                 * modes, not just drag: an unused grid slot whose mesh is still
-                 * loaded was casting a shadow (and rendering a body below) as a
-                 * stationary "ghost" car when the race had fewer than the max
-                 * opponents. Traffic slots (>= base) keep their own fade gate. */
-                if (slot < g_traffic_slot_base &&
-                    td5_game_get_slot_state(slot) == 3)
-                    continue;   /* inactive racer slot (was drag-only) */
-                if (slot != camera_target_slot) {
-                    TD5_Actor *owner = td5_game_get_actor(camera_target_slot);
-                    if (owner) {
-                        int delta = (int)sa->track_span_normalized -
-                                    (int)owner->track_span_normalized;
-                        int ring = td5_track_get_ring_length();
-                        if (ring > 0) {
-                            int half = ring / 2;
-                            if (delta >  half) delta -= ring;
-                            if (delta < -half) delta += ring;
-                        }
-                        int delta_abs = delta < 0 ? -delta : delta;
-                        if (delta_abs >= actor_cull_window)
-                            continue;   /* span-distance cull (mirrors body loop) */
-                    }
-                }
-                /* [REPLAY SHADOW 2026-07-22] Suppress the shadow of a recorded
-                 * car whose body the frustum would cull -- the trackside replay
-                 * camera otherwise shows "shadows of traffic that isn't on
-                 * screen". Replay-only (see replay_actor_body_in_frustum). */
-                if (g_replay_mode &&
-                    !replay_actor_body_in_frustum(sa, td5_render_get_vehicle_mesh(slot)))
-                    continue;
-                td5_render_set_actor_draw_alpha(shadow_fade);
-                render_vehicle_shadow_quad(sa);
-                td5_render_set_actor_draw_alpha(255);
-                shadow_drawn++;
-            }
-            {
-                static uint32_t s_shadow_prepass_log = 0;
-                if ((s_shadow_prepass_log++ % 600u) == 0u)
-                    TD5_LOG_I(LOG_TAG,
-                              "shadow pre-pass: view=%d drew %d shadow(s) before bodies",
-                              view_index, shadow_drawn);
-            }
-        }
+        /* [CAR SHADOW] Contact-shadow pre-pass (before bodies, so each body
+         * overpaints its own shadow -- no shadow-over-car). */
+        car_shadow_pass(view_index, total_actors, camera_target_slot,
+                        camera_preset_active, actor_cull_window);
 
         for (int slot = 0; slot < total_actors; slot++) {
             if (s_photobooth_active && slot != 0) continue;  /* booth: player car only */

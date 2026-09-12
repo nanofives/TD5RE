@@ -90,6 +90,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  so you are never fully blocked in." },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 12 (sun & shadow)" },
+    { CL_ITEM,    "Cloudy tracks now cast a soft shadow under the car." },
+    { CL_ITEM,    "  Overcast days used to leave cars looking like they" },
+    { CL_ITEM,    "  floated; a soft contact shadow now grounds them." },
+    { CL_ITEM,    "Sunny tracks now show the sun in the sky (with a soft" },
+    { CL_ITEM,    "  glow) at every lighting quality, not just HIGH." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 09 (auto track: round 22 -- gore/median)" },
     { CL_ITEM,    "Fork medians now reach BOTH carriageways. On an" },
     { CL_ITEM,    "  uneven split the median hugged the branch side and" },
