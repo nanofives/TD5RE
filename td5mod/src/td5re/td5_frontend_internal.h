@@ -245,9 +245,14 @@ enum {
     TD6_PAT_SPLIT,       /* front-ish = primary / rear-ish = secondary */
     TD6_PAT_COUNT
 };
-/* Pattern split thresholds (normalised body-bbox / overlay coords). Shared in
- * spirit by the in-race texel bake (td5_asset.c) and the menu preview region
- * draw (td5_frontend.c) so both read as the same livery. */
+/* Pattern split thresholds (normalised body coords). Shared by the in-race texel
+ * bake (td5_asset.c, normalised to the carskin body bbox) and the menu preview
+ * region draw (td5_frontend.c) so both read as the same livery. In the preview
+ * (since 2026-09-12) the thresholds are applied along the car's fitted principal
+ * axis, not the image axes: _TWOTONE_V is the waistline position along the height
+ * (minor) axis, _STRIPE_LO/_HI + _SPLIT_U are positions along the length (major)
+ * axis. That makes the split lines follow the body in perspective on the angled
+ * view; the in-race bake keeps the same threshold semantics in texture space. */
 #define TD6_PAT_TWOTONE_V   0.50f
 #define TD6_PAT_STRIPE_LO   0.42f
 #define TD6_PAT_STRIPE_HI   0.58f
