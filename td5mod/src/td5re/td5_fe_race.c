@@ -1097,6 +1097,22 @@ static void frontend_qr_refresh_auto_btn(void) {
     s_buttons[s_qr_auto_btn].disabled = show ? 0 : 1;
 }
 
+/* [AUTO TRACK STUDIO TRACK-SELECT 2026-09-12] Same show/hide toggle for the Track
+ * Selection screen's AUTO TRACK STUDIO button. Previously that button was created
+ * ONLY when the auto slot was already the pick at screen init, so cycling ONTO the
+ * auto slot mid-screen left it absent -- it appeared only after a RACE OPTIONS
+ * round-trip re-ran trksel_build_main_buttons(). The button is now created
+ * unconditionally (index-stable, past the fixed rows) and toggled here on every
+ * track change, mirroring the Quick Race chip. hidden+disabled together so
+ * keyboard/pad focus can't land on it while off the auto slot. */
+static void frontend_trksel_refresh_auto_btn(void) {
+    int show;
+    if (s_trksel_auto_btn < 0) return;
+    show = td5_trackgen_is_auto_slot(s_selected_track);
+    s_buttons[s_trksel_auto_btn].hidden   = show ? 0 : 1;
+    s_buttons[s_trksel_auto_btn].disabled = show ? 0 : 1;
+}
+
 /* Clamp the human/AI counts so 1 <= humans <= 6 and 0 <= opponents <= 6-humans.
  * The counts render as value text to the right of the Players/Opponents buttons
  * (frontend_render_quick_race_overlay), so no button labels are touched here. */
@@ -6853,11 +6869,14 @@ static void trksel_build_main_buttons(void) {
      * AUTO-GENERATED slot is the current pick -- the generator knobs mean
      * nothing on a shipped track. Created AFTER the fixed rows and the randomize
      * chip so indices 0..5 stay stable for the handlers that test them by
-     * number. */
-    s_trksel_auto_btn = -1;
-    if (td5_trackgen_is_auto_slot(s_selected_track))
-        s_trksel_auto_btn = frontend_create_button(TR("AUTO TRACK STUDIO"),
-                                                   120, 306, 224, 32);
+     * number.
+     * [AUTO TRACK STUDIO TRACK-SELECT 2026-09-12] Create it UNCONDITIONALLY (like
+     * the Quick Race chip) and let frontend_trksel_refresh_auto_btn() show/hide it,
+     * so it appears the instant the auto slot is cycled onto -- not only after a
+     * RACE OPTIONS round-trip. */
+    s_trksel_auto_btn = frontend_create_button(TR("AUTO TRACK STUDIO"),
+                                               120, 306, 224, 32);
+    frontend_trksel_refresh_auto_btn();
 
     s_trksel_dyn_btn = -1;   /* DYNAMICS moved onto the RACE OPTIONS screen */
     /* Track-dependent row visibility (Direction hidden on forward-only tracks,
@@ -8561,6 +8580,9 @@ void Screen_TrackSelection(void) {
                  * (hide on forward-only/circuit tracks, restore on reverse-capable). */
                 frontend_update_direction_button_visibility(1, 1);
                 frontend_update_laps_button_visibility(2);
+                /* [AUTO TRACK STUDIO TRACK-SELECT 2026-09-12] Show/hide the AUTO
+                 * TRACK STUDIO button for the newly selected track. */
+                frontend_trksel_refresh_auto_btn();
                 s_inner_state = 5;
             }
 
@@ -8712,6 +8734,9 @@ void Screen_TrackSelection(void) {
                         s_track_switch_tick = 0;
                         frontend_update_direction_button_visibility(1, 1);
                         frontend_update_laps_button_visibility(2);
+                        /* [AUTO TRACK STUDIO TRACK-SELECT 2026-09-12] refresh for
+                         * the randomly picked track too. */
+                        frontend_trksel_refresh_auto_btn();
                         s_inner_state = 5;
                     } else {
                         frontend_play_sfx(10); /* nothing else to pick */

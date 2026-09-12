@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 12 (frontend)" },
+    { CL_ITEM,    "SELECT CUP now slides its buttons in like every" },
+    { CL_ITEM,    "  other menu (it used to pop in and look stuck)." },
+    { CL_ITEM,    "Track select: the AUTO TRACK STUDIO button now" },
+    { CL_ITEM,    "  shows the instant you pick the auto-generated" },
+    { CL_ITEM,    "  slot, and that slot now reads AUTO-GENERATED" },
+    { CL_ITEM,    "  TRACK as its track name." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 12 (lighting)" },
     { CL_ITEM,    "Cloudy tracks: cars now cast a soft contact shadow" },
     { CL_ITEM,    "  on the ground at HIGH lighting quality." },

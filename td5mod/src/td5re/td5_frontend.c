@@ -2046,6 +2046,15 @@ const char *frontend_get_track_name(int track_index) {
     int name_index = track_index;
     if (track_index < 0)
         return "RANDOM TRACK";
+    /* [AUTO TRACK NAME 2026-09-12] The auto-generated slot is registered under the
+     * name "AUTO TRACK STUDIO" (that string doubles as the frontend BUTTON label
+     * for the generator-knobs screen). The DISPLAYED track name should instead read
+     * "AUTO-GENERATED TRACK". Override here at the display layer only: the registry
+     * name (and its net fingerprint) is untouched, and the "AUTO TRACK STUDIO"
+     * button label — a separate literal — keeps its wording. Matches the rest of
+     * this English name table (untranslated). */
+    if (td5_trackgen_is_auto_slot(track_index))
+        return "AUTO-GENERATED TRACK";
     /* Custom tracks (slots >= 37) come from the runtime registry manifest. */
     if (track_index >= TD5_CUSTOM_TRACK_SLOT_BASE) {
         const char *custom = td5_track_registry_name_for_slot(track_index);
@@ -5923,6 +5932,16 @@ static int frontend_get_button_anim_state(int *out_mode, int *out_tick, int *out
         if (s_inner_state == 1 || s_inner_state == 7) { mode = FE_BUTTON_ANIM_IN; max_tick = 0x20; }
         else if (s_inner_state == 0x14) { mode = FE_BUTTON_ANIM_OUT; max_tick = 16; }
         break;
+    case TD5_SCREEN_SELECT_CUP:
+        /* [SELECT CUP ANIM 2026-09-12] The cup-tier chooser shares
+         * Screen_RaceTypeCategory but was PROMOTED to its own screen number (47),
+         * so frontend_effective_screen no longer maps it to RACE_TYPE_MENU and it
+         * fell out of the button-slide path — the screen popped in fully formed
+         * (no entry animation) unlike every other menu. It only runs the cup
+         * sub-menu states (slide-in 7, slide-out 0x14). */
+        if (s_inner_state == 7) { mode = FE_BUTTON_ANIM_IN; max_tick = 0x20; }
+        else if (s_inner_state == 0x14) { mode = FE_BUTTON_ANIM_OUT; max_tick = 16; }
+        break;
     case TD5_SCREEN_QUICK_RACE:
         if (s_inner_state == 3) { mode = FE_BUTTON_ANIM_IN;  max_tick = 0x27; }
         else if (s_inner_state == 6) { mode = FE_BUTTON_ANIM_OUT; max_tick = 16; }
@@ -6019,6 +6038,7 @@ static int frontend_screen_has_button_anim(void) {
     switch (frontend_effective_screen(s_current_screen)) {
     case TD5_SCREEN_MAIN_MENU:
     case TD5_SCREEN_RACE_TYPE_MENU:
+    case TD5_SCREEN_SELECT_CUP:   /* [SELECT CUP ANIM 2026-09-12] shares the race-type slide */
     case TD5_SCREEN_QUICK_RACE:
     case TD5_SCREEN_CONNECTION_BROWSER:
     case TD5_SCREEN_SESSION_PICKER:
@@ -6083,7 +6103,11 @@ static float frontend_get_button_anim_x(int button_index, float base_x) {
         offscreen_x = (button_index & 1)
                           ? (base_x + MM_OFFSCREEN_DELTA)
                           : (base_x - MM_OFFSCREEN_DELTA);
-    } else if (s_current_screen == TD5_SCREEN_RACE_TYPE_MENU) {
+    } else if (s_current_screen == TD5_SCREEN_RACE_TYPE_MENU ||
+               s_current_screen == TD5_SCREEN_SELECT_CUP) {
+        /* [SELECT CUP ANIM 2026-09-12] The cup sub-menu buttons slid all from the
+         * left when it lived inside the race-type menu (screen 6); keep that after
+         * the promotion to screen 47. */
         offscreen_x = -640.0f;
     } else {
         offscreen_x = (button_index & 1) ? 640.0f : -640.0f;
