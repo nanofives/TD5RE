@@ -98,6 +98,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  glow) at every lighting quality, not just HIGH." },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 12 (minimap)" },
+    { CL_ITEM,    "Forks on the minimap now draw as a proper Y. The" },
+    { CL_ITEM,    "  side branch used to start detached, leaving a notch" },
+    { CL_ITEM,    "  where the road looked like it shrank into one side;" },
+    { CL_ITEM,    "  both branches now connect flush at the fork and the" },
+    { CL_ITEM,    "  merge, on point-to-point and circuit tracks." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 09 (auto track: round 22 -- gore/median)" },
     { CL_ITEM,    "Fork medians now reach BOTH carriageways. On an" },
     { CL_ITEM,    "  uneven split the median hugged the branch side and" },

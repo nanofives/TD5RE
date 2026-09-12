@@ -203,6 +203,25 @@ static int hud_minimap_branch_fix_on(void)
     return s;
 }
 
+/* [2026-09-12] Minimap fork/merge connector. On a branched TD5 fork track
+ * (Moscow, Newcastle, ...) the branch road is drawn as a parallel mirror at its
+ * OWN world position (spans in [ring, total)); nothing bridged the main road at
+ * the fork span to the branch's FIRST span, nor the branch's LAST span back to
+ * the main road at the merge span. The branch therefore started/ended detached,
+ * leaving a notch where the road looked like it "shrank" into one branch. When on
+ * (default) a short connector quad is drawn from the parent fork span to the
+ * branch start (and branch end -> merge span), closing the Y for both fork
+ * directions and both ends. Set TD5RE_MINIMAP_FORK_LINK=0 for the old behaviour. */
+static int hud_minimap_fork_link_on(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = hud_knob_on("TD5RE_MINIMAP_FORK_LINK");
+        TD5_LOG_I(LOG_TAG, "minimap fork/merge connector: %s", s ? "on" : "off");
+    }
+    return s;
+}
+
 /* [#6 2026-06-15] Minimap forward look-ahead. The in-race minimap walked a fixed
  * 48-quad window (~144 spans ahead) so on sharp turns the player could see the
  * end of the drawn track. When on (default), extend the forward span window so
@@ -6357,6 +6376,197 @@ static int minimap_emit_road_quad(uint8_t *span_base, uint8_t *vert_base,
     return 1;
 }
 
+/* [2026-09-12] Read one road cross-section (left + right rail vertices) of span
+ * `span`. `use_back` picks the leading (+0x06 / col1) edge, otherwise the near
+ * (+0x04 / col0) edge — the same two edges the primary quad uses for its far and
+ * near sides. Fills the two rail vertex pointers and the span origin. Returns 0
+ * on a bad index / negative right-vertex (same guards as the quad builders). */
+static int minimap_span_edge(uint8_t *span_base, uint8_t *vert_base, int span,
+                             int use_back, int16_t **out_l, int16_t **out_r,
+                             int32_t *out_ox, int32_t *out_oz)
+{
+    if (!span_base || !vert_base) return 0;
+    if (span < 0 || span >= g_strip_span_count) return 0;
+    uint8_t *s = span_base + span * 24;
+    int      off = use_back ? 0x06 : 0x04;
+    uint16_t vi_l = *(uint16_t *)(s + off);
+    uint8_t  type = s[0];
+    uint8_t  nib  = s[3] & 0x0F;
+    int32_t  cold = use_back ? s_minimap_vtx_delta_col1[type & 0x07]
+                             : s_minimap_vtx_delta_col0[type & 0x07];
+    int32_t  vi_r = (int32_t)vi_l + (int32_t)nib + cold;
+    if (vi_r < 0) return 0;
+    *out_l  = (int16_t *)(vert_base + (uint32_t)vi_l * 6);
+    *out_r  = (int16_t *)(vert_base + (uint32_t)vi_r * 6);
+    *out_ox = *(int32_t *)(s + 0x0C);
+    *out_oz = *(int32_t *)(s + 0x14);
+    return 1;
+}
+
+/* [2026-09-12] Project one rail endpoint of `span` to minimap screen space.
+ * `use_back` picks the +0x06 (leading) vs +0x04 (near) edge; `want_right` picks
+ * the right rail (base + nibble + column-delta) vs the left rail (base vertex).
+ * Returns 0 on a bad index / negative right-vertex. */
+static int minimap_rail_point(uint8_t *span_base, uint8_t *vert_base, int span,
+                              int use_back, int want_right,
+                              float offset_x, float offset_z,
+                              float cos_h, float sin_h, float mm_cx, float mm_cy,
+                              float *out_x, float *out_y)
+{
+    int16_t *l, *r; int32_t ox, oz;
+    if (!minimap_span_edge(span_base, vert_base, span, use_back, &l, &r, &ox, &oz))
+        return 0;
+    int16_t *v = want_right ? r : l;
+    float wx = (float)((int)v[0] + ox) + offset_x;
+    float wz = (float)((int)v[2] + oz) + offset_z;
+    *out_x = mm_cx + (wx * cos_h + wz * sin_h) * s_minimap_world_scale_x;
+    *out_y = mm_cy + (wz * cos_h - wx * sin_h) * s_minimap_world_scale_y;
+    return 1;
+}
+
+/* [2026-09-12] Fill the sliver between two rails: railA runs along `side_a` of
+ * span_a (near, +0x04) .. span_a2 (leading, +0x06); railB along `side_b` of span_b
+ * .. span_b2. Used to close the thin grass slit between the parent road's inner
+ * rail and the branch's inner rail at a fork (and the symmetric merge), so the
+ * fork reads as a solid Y base instead of two nearly-touching strips. Same window
+ * + stray culling as the road quads. Returns 1 if a quad was submitted, 0/-1
+ * otherwise (culled / bad vertex). */
+static int minimap_emit_rail_gap(uint8_t *span_base, uint8_t *vert_base,
+                                 int span_a, int span_a2, int side_a_right,
+                                 int span_b, int span_b2, int side_b_right,
+                                 float offset_x, float offset_z,
+                                 float cos_h, float sin_h, float mm_cx, float mm_cy)
+{
+    float tl_x, tl_y, bl_x, bl_y, br_x, br_y, tr_x, tr_y;
+    if (!minimap_rail_point(span_base, vert_base, span_a,  0, side_a_right,
+                            offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy, &tl_x, &tl_y) ||
+        !minimap_rail_point(span_base, vert_base, span_a2, 1, side_a_right,
+                            offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy, &bl_x, &bl_y) ||
+        !minimap_rail_point(span_base, vert_base, span_b,  0, side_b_right,
+                            offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy, &tr_x, &tr_y) ||
+        !minimap_rail_point(span_base, vert_base, span_b2, 1, side_b_right,
+                            offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy, &br_x, &br_y))
+        return -1;
+
+    float mm_l = s_minimap_x, mm_t = s_minimap_y;
+    float mm_rr = s_minimap_x + s_minimap_width, mm_bb = s_minimap_y + s_minimap_height;
+    float min_x = fminf(fminf(tl_x, tr_x), fminf(bl_x, br_x));
+    float max_x = fmaxf(fmaxf(tl_x, tr_x), fmaxf(bl_x, br_x));
+    float min_y = fminf(fminf(tl_y, tr_y), fminf(bl_y, br_y));
+    float max_y = fmaxf(fmaxf(tl_y, tr_y), fmaxf(bl_y, br_y));
+    if (max_x < mm_l || min_x > mm_rr || max_y < mm_t || min_y > mm_bb) return 0;
+    if (minimap_quad_is_stray(min_x, max_x, min_y, max_y)) return 0;
+
+    TD5_SpriteQuad q;
+    hud_build_quad_warped(&q, HUD_WHITE_TEX_PAGE,
+        tl_x, tl_y, bl_x, bl_y, br_x, br_y, tr_x, tr_y,
+        0.0f, 0.0f, 0.0f, 0.0f, 0xFF9A9A9Au, HUD_DEPTH);
+    hud_submit_quad(&q);
+    return 1;
+}
+
+/* [2026-09-12] Draw the fork + merge connectors for every branch mirror row with
+ * a valid back-link (seg_branch != -1 — the parent primary's start span). For a
+ * fork whose parent primary is [fork_main .. merge_main] with a parallel branch
+ * [br_first .. br_last]:
+ *   - fork:  bridge the parent fork span to the branch's first span
+ *   - merge: bridge the branch's last span back to the parent merge span
+ * Each connector self-culls to the minimap window, so only the fork the player is
+ * near actually draws. Shared by the P2P and circuit road walks. Corridor rows
+ * (seg_branch == -1, e.g. TD6/trackgen) carry no parent link and are skipped. */
+/* Screen distance^2 between two rails at a span (used to pick the INNER rails). */
+static float minimap_rail_dist2(uint8_t *span_base, uint8_t *vert_base,
+                                int span_a, int a_right, int span_b, int b_right,
+                                float offset_x, float offset_z,
+                                float cos_h, float sin_h, float mm_cx, float mm_cy)
+{
+    float ax, ay, bx, by;
+    if (!minimap_rail_point(span_base, vert_base, span_a, 0, a_right,
+                            offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy, &ax, &ay) ||
+        !minimap_rail_point(span_base, vert_base, span_b, 0, b_right,
+                            offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy, &bx, &by))
+        return 1e30f;
+    float dx = ax - bx, dy = ay - by;
+    return dx * dx + dy * dy;
+}
+
+/* Fill the notch slit at one junction: `main_span` is the parent trunk span, and
+ * the branch's own span there is `br_span`; `dir` = +1 walks forward into the
+ * fork, -1 walks backward from the merge. Picks the two INNER rails (nearest at
+ * the junction) and fills the sliver between them for a few spans while they stay
+ * close (stops once they separate past ~1.5 road-widths — that region is a real
+ * grass crotch, not a notch). */
+static int minimap_fill_junction_slit(uint8_t *span_base, uint8_t *vert_base,
+                                      int main_span, int br_span, int dir,
+                                      float offset_x, float offset_z,
+                                      float cos_h, float sin_h, float mm_cx, float mm_cy)
+{
+    /* Choose inner rails = the (main side, branch side) pair closest at the junction. */
+    float best = 1e30f; int main_r = 0, br_r = 0;
+    for (int mr = 0; mr <= 1; mr++)
+        for (int brr = 0; brr <= 1; brr++) {
+            float d = minimap_rail_dist2(span_base, vert_base, main_span, mr, br_span, brr,
+                                         offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy);
+            if (d < best) { best = d; main_r = mr; br_r = brr; }
+        }
+    if (best > 1e29f) return 0;
+
+    /* Approx road width in screen px from the parent cross-section at the junction. */
+    float pl_x, pl_y, pr_x, pr_y;
+    if (!minimap_rail_point(span_base, vert_base, main_span, 0, 0,
+                            offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy, &pl_x, &pl_y) ||
+        !minimap_rail_point(span_base, vert_base, main_span, 0, 1,
+                            offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy, &pr_x, &pr_y))
+        return 0;
+    float rw = sqrtf((pr_x - pl_x) * (pr_x - pl_x) + (pr_y - pl_y) * (pr_y - pl_y));
+    float gap_lim2 = (rw * 1.5f) * (rw * 1.5f);
+    if (gap_lim2 < 4.0f) gap_lim2 = 4.0f;
+
+    int step = 3;
+    int max_k = 18;   /* cap the walk length (spans) */
+    int drawn = 0;
+    for (int k = 0; k < max_k; k += step) {
+        int ma = main_span + dir * k,       mb = main_span + dir * (k + step);
+        int ba = br_span   + dir * k,       bb = br_span   + dir * (k + step);
+        if (ma < 0 || mb < 0 || ba < 0 || bb < 0) break;
+        if (ma >= g_strip_span_count || mb >= g_strip_span_count ||
+            ba >= g_strip_span_count || bb >= g_strip_span_count) break;
+        /* Stop once the inner rails have separated (real crotch beyond here). */
+        float d = minimap_rail_dist2(span_base, vert_base, ma, main_r, ba, br_r,
+                                     offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy);
+        if (d > gap_lim2) break;
+        /* dir<0 walks backward, so swap near/far so the quad edges stay ordered. */
+        int a0 = (dir > 0) ? ma : mb, a1 = (dir > 0) ? mb : ma;
+        int b0 = (dir > 0) ? ba : bb, b1 = (dir > 0) ? bb : ba;
+        int r = minimap_emit_rail_gap(span_base, vert_base,
+                                      a0, a1, main_r, b0, b1, br_r,
+                                      offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy);
+        if (r == 1) drawn++;
+    }
+    return drawn;
+}
+
+static void minimap_emit_fork_connectors(uint8_t *span_base, uint8_t *vert_base,
+                                         float offset_x, float offset_z,
+                                         float cos_h, float sin_h,
+                                         float mm_cx, float mm_cy)
+{
+    if (!span_base || !vert_base) return;
+    for (int bi = s_minimap_seg_branch_start; bi < s_minimap_seg_primary_end; bi++) {
+        int br_first  = (int)s_minimap_seg_start[bi];
+        int br_last   = (int)s_minimap_seg_end[bi];
+        int fork_main = (int)s_minimap_seg_branch[bi];   /* parent primary start */
+        if (fork_main < 0 || br_last < br_first) continue;
+        int merge_main = fork_main + (br_last - br_first);
+        /* Fork end: walk forward from (fork_main, br_first). Merge end: walk
+         * backward from (merge_main, br_last). Each self-culls to the window. */
+        minimap_fill_junction_slit(span_base, vert_base, fork_main, br_first, +1,
+                                   offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy);
+        minimap_fill_junction_slit(span_base, vert_base, merge_main, br_last, -1,
+                                   offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy);
+    }
+}
+
 /* [task#11 2026-06-12] Emit a DASHED perpendicular checkpoint marker across the
  * road at `cp_span`. The original TD6 minimap shows dashed lines at each
  * checkpoint; the port previously only drew the invisible road-fill connector
@@ -6996,6 +7206,16 @@ void td5_hud_render_minimap(int actor_slot)
         }
     }
 
+    /* [2026-09-12] Close the Y at each fork/merge (P2P). The branch-quad block
+     * above draws the parallel branch at its own world position but nothing
+     * bridged the parent fork span to the branch's first span (nor branch-end back
+     * to the merge span), so the branch started/ended detached — the reported
+     * notch. minimap_emit_fork_connectors bridges both ends for every branch
+     * mirror row; each connector self-culls to the minimap window. */
+    if (!circuit && hud_minimap_fork_link_on())
+        minimap_emit_fork_connectors(span_base, vert_base,
+                                     offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy);
+
     /* [task#10 2026-06-12] TD6 branch corridors on the P2P (non-circuit) minimap.
      * London et al. are flagged is_circuit=0, so the circuit branch-row draw
      * below never runs, and the P2P branch-quad draw only fires for TD5-style
@@ -7115,6 +7335,12 @@ void td5_hud_render_minimap(int actor_slot)
                     }
                 }
             }
+            /* [2026-09-12] Close the Y at each fork/merge on the circuit path too
+             * (same as the P2P call above). */
+            if (hud_minimap_fork_link_on())
+                minimap_emit_fork_connectors(span_base, vert_base,
+                                             offset_x, offset_z, cos_h, sin_h,
+                                             mm_cx, mm_cy);
         }
         {
             static int s_mm_circuit_log = 0;
