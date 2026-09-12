@@ -470,7 +470,11 @@ typedef enum TD5_ScreenIndex {
      * TD5RE_AUTOTRACK_* generator knobs, reachable only from track-select while
      * the AUTO-GENERATED slot is the current pick. */
     TD5_SCREEN_AUTOTRACK_OPTIONS  = 52,
-    TD5_SCREEN_COUNT               = 53
+    /* [LOW-END PERF 2026-09-12] Screen_PerformanceOptions (td5_fe_menu.c) — the
+     * low-end performance toggles + LOW-END PRESET, reached from GRAPHICS OPTIONS
+     * via the "PERFORMANCE ->" nav row. */
+    TD5_SCREEN_PERFORMANCE_OPTIONS = 53,
+    TD5_SCREEN_COUNT               = 54
 } TD5_ScreenIndex;
 
 /* ========================================================================

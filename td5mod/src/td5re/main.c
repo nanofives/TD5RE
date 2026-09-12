@@ -375,6 +375,21 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("Display", "ShowFps",       g_td5.ini.show_fps);
     td5_ini_write_int("Display", "Width",         g_td5.ini.disp_width);
     td5_ini_write_int("Display", "Height",        g_td5.ini.disp_height);
+    /* [LOW-END PERF 2026-09-12] Performance options (PERFORMANCE sub-screen). */
+    td5_ini_write_int("Display", "RenderScale",     g_td5.ini.render_scale);
+    td5_ini_write_int("Display", "FoliageAA",       g_td5.ini.foliage_aa);
+    td5_ini_write_int("Display", "VFX",             g_td5.ini.vfx_enabled);
+    td5_ini_write_int("Display", "WorldBillboards", g_td5.ini.world_billboards);
+    td5_ini_write_int("Display", "CarShadows",      g_td5.ini.car_shadows);
+    /* [LOW-END PERF] DRAW DISTANCE lives in td5_save (runtime view-distance frac);
+     * persist it as [Display] ViewDistance (0..100) so the PERFORMANCE screen's
+     * choice and the pause-menu VIEW slider both survive a relaunch. */
+    {
+        int vd = (int)(td5_save_get_view_distance() * 100.0f + 0.5f);
+        if (vd < 0) vd = 0;
+        if (vd > 100) vd = 100;
+        td5_ini_write_int("Display", "ViewDistance", vd);
+    }
 
     /* Audio */
     td5_ini_write_int("Audio", "SFXVolume",    g_td5.ini.sfx_volume);
@@ -550,6 +565,12 @@ static int td5_apply_cli_overrides(const char *cmdline,
         { "WindowMode",           &g_td5.ini.window_mode },
         { "VSync",                &g_td5.ini.vsync },
         { "ShowFps",              &g_td5.ini.show_fps },
+        /* [LOW-END PERF 2026-09-12] Performance options (PERFORMANCE sub-screen) */
+        { "RenderScale",          &g_td5.ini.render_scale },
+        { "FoliageAA",            &g_td5.ini.foliage_aa },
+        { "VFX",                  &g_td5.ini.vfx_enabled },
+        { "WorldBillboards",      &g_td5.ini.world_billboards },
+        { "CarShadows",           &g_td5.ini.car_shadows },
         /* Audio */
         { "SFXVolume",            &g_td5.ini.sfx_volume },
         { "MusicVolume",          &g_td5.ini.music_volume },
@@ -986,6 +1007,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     g_td5.ini.window_mode    = td5_ini_int("Display", "WindowMode", windowed ? 1 : 0);
     g_td5.ini.vsync          = td5_ini_int("Display", "VSync", 1);
     g_td5.ini.show_fps       = td5_ini_int("Display", "ShowFps", 1);
+
+    /* [LOW-END PERF 2026-09-12] Performance-options toggles (PERFORMANCE
+     * sub-screen). Defaults reproduce current behaviour exactly. Clamped so a
+     * hand-edited INI can't wedge a gate. RenderScale is seeded into the
+     * TD5RE_RENDER_SCALE env below (before Backend_CreateDevice) so the backend
+     * sizes the swapchain to client*scale; FoliageAA seeds TD5RE_FOLIAGE_AA. */
+    g_td5.ini.render_scale     = td5_ini_int("Display", "RenderScale", 100);
+    if (g_td5.ini.render_scale != 100 && g_td5.ini.render_scale != 75 &&
+        g_td5.ini.render_scale != 50) g_td5.ini.render_scale = 100;
+    g_td5.ini.foliage_aa       = td5_ini_int("Display", "FoliageAA", 1) ? 1 : 0;
+    g_td5.ini.vfx_enabled      = td5_ini_int("Display", "VFX", 1) ? 1 : 0;
+    g_td5.ini.world_billboards = td5_ini_int("Display", "WorldBillboards", 1) ? 1 : 0;
+    g_td5.ini.car_shadows      = td5_ini_int("Display", "CarShadows", 2);
+    if (g_td5.ini.car_shadows < 0 || g_td5.ini.car_shadows > 2) g_td5.ini.car_shadows = 2;
 
     /* [PERF/FAITHFULNESS 2026-06-05] Initial track draw distance, 0..100%
      * (maps to the runtime VIEW slider frac 0..1; eff_spans = (frac*0.85+0.15)*64).
@@ -1667,6 +1702,26 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * path and keeps a single code path for mode transitions. */
     windowed = 1;
     dbglog("Step 2: Backend_CreateDevice(%d x %d, bpp=%d, windowed=%d)...", width, height, bpp, windowed);
+    /* [LOW-END PERF 2026-09-12] Seed the backend's env-read graphics knobs from the
+     * resolved INI/CLI values so the D3D12 backend picks them up at device create.
+     * Env-wins: an explicitly-set env (A/B testing) is left untouched, matching the
+     * TD5RE_* precedence everywhere else. RenderScale sizes the swapchain/RT/viewport
+     * (and the game's render dims via g_backend.target_width) to client*scale, DXGI
+     * stretches to the full window. FoliageAA picks cheaper cutout sampling when 0. */
+    {
+        /* MUST use _putenv (CRT env), NOT SetEnvironmentVariableA (Win32 env):
+         * the backend reads these via getenv(), which sees the CRT copy only — a
+         * SetEnvironmentVariableA write made after CRT init is invisible to getenv. */
+        char envbuf[40];
+        if (!getenv("TD5RE_RENDER_SCALE")) {
+            snprintf(envbuf, sizeof(envbuf), "TD5RE_RENDER_SCALE=%d", g_td5.ini.render_scale);
+            _putenv(envbuf);
+        }
+        if (!getenv("TD5RE_FOLIAGE_AA")) {
+            snprintf(envbuf, sizeof(envbuf), "TD5RE_FOLIAGE_AA=%d", g_td5.ini.foliage_aa);
+            _putenv(envbuf);
+        }
+    }
     /* Pre-set target dimensions so Backend_CreateDevice skips its own INI read */
     g_backend.target_width  = width;
     g_backend.target_height = height;
@@ -1787,13 +1842,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     /* [S01 2026-06-04] Apply the persisted VSync + WindowMode now that the swap
      * chain and platform layer exist. set_window_mode may change the render size
-     * (borderless -> desktop res), so re-read the resulting client size into the
-     * render-dim globals before the game modules initialize. */
+     * (borderless -> desktop res), so re-read the resulting size into the
+     * render-dim globals before the game modules initialize.
+     * [LOW-END PERF 2026-09-12] Read the RENDER size from g_backend.width/height
+     * (the swapchain = the render-scaled size), NOT td5_plat_get_window_size (the
+     * full window client). Under render-scale the window is larger than the render
+     * target; the game must project at the render size (DXGI upscales to the
+     * window). At scale=100 these are equal, so no behaviour change. */
     td5_plat_set_vsync(g_td5.ini.vsync);
     td5_plat_set_window_mode(g_td5.ini.window_mode);
     {
-        int aw = width, ah = height;
-        td5_plat_get_window_size(&aw, &ah);
+        int aw = (g_backend.width  > 0) ? (int)g_backend.width  : width;
+        int ah = (g_backend.height > 0) ? (int)g_backend.height : height;
         if (aw > 0 && ah > 0) {
             width  = aw;
             height = ah;

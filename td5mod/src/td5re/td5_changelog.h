@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 12 (low-end performance)" },
+    { CL_ITEM,    "New PERFORMANCE screen under GRAPHICS OPTIONS with a" },
+    { CL_ITEM,    "  LOW-END PRESET button for weak laptops / iGPUs." },
+    { CL_ITEM,    "Toggles: render scale (100/75/50%), draw distance," },
+    { CL_ITEM,    "  dynamic lights, car shadows (off/quad/conforming)," },
+    { CL_ITEM,    "  sun shadows, reflections, particles & weather," },
+    { CL_ITEM,    "  world billboards, foliage anti-aliasing." },
+    { CL_ITEM,    "Each has an INI key + --Key=N and is saved. Render" },
+    { CL_ITEM,    "  scale + foliage AA take effect on next launch." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 12 (frontend)" },
     { CL_ITEM,    "SELECT CUP now slides its buttons in like every" },
     { CL_ITEM,    "  other menu (it used to pop in and look stuck)." },

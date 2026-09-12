@@ -8037,8 +8037,12 @@ static void frame_render(void)
         if (!td5_render_photobooth_active())
             td5_render_draw_sun_disc();
 
-        /* VFX: tire tracks, particles */
-        if (!td5_render_photobooth_active()) {
+        /* VFX: tire tracks, particles.
+         * [LOW-END PERF 2026-09-12] PERFORMANCE "PARTICLES & WEATHER" toggle
+         * (g_td5.ini.vfx_enabled, [Display] VFX): 0 skips the whole per-view VFX
+         * draw block — tire tracks, rain streaks, particle pools — which is fill-
+         * heavy on an iGPU. Arcade pads stay (mode-critical). Default 1 = today. */
+        if (!td5_render_photobooth_active() && g_td5.ini.vfx_enabled) {
             td5_vfx_render_tire_tracks();
             /* Weather rain streaks — orig RenderAmbientParticleStreaks @ 0x00446560,
              * called per view in RunRaceFrame's draw phase AFTER the actors + tire
@@ -8052,8 +8056,11 @@ static void frame_render(void)
                 if (wa) td5_vfx_render_ambient_streaks(wa, g_td5.sim_tick_budget, vp);
             }
             td5_vfx_draw_particles(vp);
-            td5_render_arcade_pads();   /* [ARCADE] glowing power-up pads + hazards */
         }
+        /* [ARCADE] glowing power-up pads + hazards — gameplay-critical, drawn
+         * regardless of the VFX toggle (they mark collectibles/obstacles). */
+        if (!td5_render_photobooth_active())
+            td5_render_arcade_pads();
         td5_profile_mark("v_vfx");     /* [perf probe] per-view tire/streak/particle draws */
         td5_render_flush_translucent();
         td5_render_flush_projected_buckets();

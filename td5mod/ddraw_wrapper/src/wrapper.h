@@ -251,6 +251,7 @@ void Backend_SelectPixelShader(void); /* Choose PS based on texblend + alpha + t
 void Backend_UpdateFogCB(void);      /* Upload fog constant buffer */
 void Backend_FlushUploadsSync(void); /* Flush + WAIT texture uploads (one-shot/on-entry residency) */
 void Backend_UpdateViewportCB(float w, float h); /* Upload viewport constant buffer */
+int  Backend_RenderScalePct(void); /* [LOW-END PERF] internal render-scale % (TD5RE_RENDER_SCALE) */
 
 /* Deferred dynamic-light pass: upload `cb` (camera + light array), then draw a
  * fullscreen additive pass that samples scene depth (depth_srv), reconstructs

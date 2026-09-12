@@ -168,6 +168,7 @@ static const ScreenDesc s_screens[TD5_SCREEN_COUNT] = {
     /* [50] */ { "CUP INTERMISSION",     Screen_MpPostRace },     /* cup-between post-race menu */
     /* [51] */ { "LIGHTING",             Screen_LightingOptions },/* [RT2 P8] RT lighting per-feature options */
     /* [52] */ { "AUTO TRACK STUDIO",    Screen_AutoTrackOptions },/* [AUTOTRACK R2 item 25] generator knobs */
+    /* [53] */ { "PERFORMANCE",          Screen_PerformanceOptions },/* [LOW-END PERF 2026-09-12] low-end toggles + preset */
 };
 
 /* [SUB-SCREEN PROMOTION 2026-07-27] Map an identity screen number back to the
@@ -1588,6 +1589,7 @@ static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_LANGUAGE_OPTIONS:   return TR("LANGUAGE");
     case TD5_SCREEN_LIGHTING_OPTIONS:   return "LIGHTING OPTIONS";
     case TD5_SCREEN_AUTOTRACK_OPTIONS:  return TR("AUTO TRACK STUDIO"); /* [R2 item 25] */
+    case TD5_SCREEN_PERFORMANCE_OPTIONS: return TR("PERFORMANCE");       /* [LOW-END PERF] */
     case TD5_SCREEN_CONTROLLER_BINDING: return "CONTROLLER SETUP";
     case TD5_SCREEN_CAR_SELECTION:      return "SELECT CAR";
     case TD5_SCREEN_TRACK_SELECTION:    return "SELECT TRACK";
@@ -3673,6 +3675,7 @@ static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_LANGUAGE_OPTIONS:
         return TD5_SCREEN_OPTIONS_HUB;
     case TD5_SCREEN_LIGHTING_OPTIONS:   /* [RT2 P8] entered from GRAPHICS OPTIONS -> BACK there */
+    case TD5_SCREEN_PERFORMANCE_OPTIONS: /* [LOW-END PERF] entered from GRAPHICS OPTIONS -> BACK there */
         return TD5_SCREEN_DISPLAY_OPTIONS;
     case TD5_SCREEN_AUTOTRACK_OPTIONS:  /* [R2 item 25] track-select OR quick race */
         /* [AUTOTRACK QUICKRACE 2026-09-06] No longer track-select-only: Quick Race
@@ -5690,6 +5693,7 @@ int td5_frontend_display_loop(void) {
                      s_current_screen == TD5_SCREEN_TWO_PLAYER_OPTIONS ||
                      s_current_screen == TD5_SCREEN_LANGUAGE_OPTIONS ||
                      s_current_screen == TD5_SCREEN_LIGHTING_OPTIONS ||
+                     s_current_screen == TD5_SCREEN_PERFORMANCE_OPTIONS ||
                      s_current_screen == TD5_SCREEN_AUTOTRACK_OPTIONS ||
                      s_current_screen == TD5_SCREEN_CONTROLLER_BINDING);
                 /* [splitscreen back-confirm] In split-screen, returning to the
@@ -5965,6 +5969,7 @@ static int frontend_get_button_anim_state(int *out_mode, int *out_tick, int *out
     case TD5_SCREEN_TWO_PLAYER_OPTIONS:
     case TD5_SCREEN_LANGUAGE_OPTIONS:
     case TD5_SCREEN_LIGHTING_OPTIONS:
+    case TD5_SCREEN_PERFORMANCE_OPTIONS: /* [LOW-END PERF] same 3/8 anim states */
     case TD5_SCREEN_AUTOTRACK_OPTIONS:   /* [R2 item 25] same 3/8 anim states */
         if (s_inner_state == 3) { mode = FE_BUTTON_ANIM_IN;  max_tick = 0x27; }
         else if (s_inner_state == 8) { mode = FE_BUTTON_ANIM_OUT; max_tick = 16; }
@@ -6051,6 +6056,7 @@ static int frontend_screen_has_button_anim(void) {
     case TD5_SCREEN_TWO_PLAYER_OPTIONS:
     case TD5_SCREEN_LANGUAGE_OPTIONS:
     case TD5_SCREEN_LIGHTING_OPTIONS:
+    case TD5_SCREEN_PERFORMANCE_OPTIONS: /* [LOW-END PERF] */
     case TD5_SCREEN_AUTOTRACK_OPTIONS:   /* [R2 item 25] */
     case TD5_SCREEN_MUSIC_TEST:
     case TD5_SCREEN_CAR_SELECTION:
@@ -10389,6 +10395,9 @@ void td5_frontend_render_ui_rects(void) {
     case TD5_SCREEN_LIGHTING_OPTIONS:   /* [RT2 P8] per-row tier value text */
         frontend_render_lighting_options_overlay(sx, sy);
         break;
+    case TD5_SCREEN_PERFORMANCE_OPTIONS: /* [LOW-END PERF] per-row value text */
+        frontend_render_performance_options_overlay(sx, sy);
+        break;
     case TD5_SCREEN_AUTOTRACK_OPTIONS:  /* [R2 item 25] generator knob values */
         frontend_render_autotrack_options_overlay(sx, sy);
         break;
@@ -10734,6 +10743,14 @@ void td5_frontend_render_ui_rects(void) {
              * the classic creation!=rendering gap: the row exists and cycles on
              * L/R but silently renders no arrows. */
             for (int lo_r = 0; lo_r < 10; lo_r++) fe_draw_option_arrows(lo_r, sx, sy);
+            break;
+        case TD5_SCREEN_PERFORMANCE_OPTIONS:
+            /* [LOW-END PERF] ◄► on the selector rows only. Row 0 (LOW-END PRESET)
+             * is an Enter action and the last row is OK — neither takes arrows.
+             * Bound comes from td5_performance_opts_row_count() so it can't go
+             * stale against PO_ROWS (the creation-vs-rendering gap). */
+            { int po_r, po_n = td5_performance_opts_row_count();
+              for (po_r = 1; po_r < po_n; po_r++) fe_draw_option_arrows(po_r, sx, sy); }
             break;
         case TD5_SCREEN_AUTOTRACK_OPTIONS:
             /* [R2 item 25] ◄► on every selector row; OK (the last button) has
