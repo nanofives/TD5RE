@@ -2585,6 +2585,29 @@ static int wheel_inner_tex_enabled(void) {
     if (cached < 0) { cached = td5_env_flag_on("TD5RE_WHEEL_INNER_TEX"); }
     return cached;
 }
+/* [WHEEL CLIP FIX 2026-09-12 — item 1] Render-only wheel-arch ceiling clamp.
+ * On hard compression (or body lift) the suspension raises the RENDERED wheel:
+ * wheel_display_angles[i][1] grows toward the chassis (see the [WHEEL OVERHAUL]
+ * clamp note in td5_physics_suspension.c). The sim-side TD5RE_WHEEL_SUSP_CLAMP
+ * only bounds travel to a loose ±40 body-units, so on some cars the tyre top
+ * still rises into the wheel-arch and pokes through the bodywork. Clamp the
+ * rendered wheel-centre Y so the tyre top can never exceed a per-car arch
+ * ceiling: rest_y (the cardef wheel Y arm, +0x40+w*8+2) plus a maximum upward
+ * visual travel that scales with the wheel radius. This operates ONLY on the
+ * local wy fed to wheel_project — it never writes actor state and never feeds
+ * the sim or the golden trace, so gameplay/parity is untouched.
+ * TD5RE_WHEEL_ARCH_CLAMP=0 disables; TD5RE_WHEEL_ARCH_TRAVEL=<frac> overrides
+ * the max upward travel as a fraction of rim_radius (default 0.18). */
+static int wheel_arch_clamp_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) { cached = td5_env_flag_on("TD5RE_WHEEL_ARCH_CLAMP"); }
+    return cached;
+}
+static float wheel_arch_travel_frac(void) {
+    static float cached = -1.0f;
+    if (cached < 0.0f) { cached = td5_env_float("TD5RE_WHEEL_ARCH_TRAVEL", 0.18f, 0.0f, 2.0f); }
+    return cached;
+}
 
 /* Per-slot synthesized wheel-spin phase (BUG 3b). Advanced once per sim tick by
  * the traffic actor's longitudinal_speed so it is independent of viewport count
@@ -2816,6 +2839,19 @@ void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
         if (wx == 0.0f && wy == 0.0f && wz == 0.0f)
             continue;
 
+        /* [item 1 — arch-ceiling clamp] Render-only: stop the rendered wheel
+         * rising into the bodywork on compression / body lift. Racers only
+         * (they carry a cardef with a per-wheel rest Y); the synth traffic
+         * stance is tuned separately and never over-compresses. wy larger =
+         * wheel nearer the chassis, so cap it at rest_y + a radius-scaled max
+         * upward travel. See wheel_arch_clamp_enabled(). */
+        if (!use_synth && actor->car_definition_ptr && wheel_arch_clamp_enabled()) {
+            int16_t rest_y = *(int16_t *)((uint8_t *)actor->car_definition_ptr
+                                          + 0x40 + w * 8 + 2);
+            float ceil_y = (float)rest_y + rim_radius * wheel_arch_travel_frac();
+            if (wy > ceil_y) wy = ceil_y;
+        }
+
         float wheel_halfw = axle_halfw;
         /* [BUG 3a] Pull a traffic wheel inboard until its outer tyre face sits at
          * the model's half-width cap. Shrink the hub lateral offset first (keeps
@@ -2909,36 +2945,55 @@ void render_vehicle_wheels_unified(TD5_Actor *actor, int slot)
             }
         }
 
-        /* ---- Inboard wheel face: INWHEEL texture (BUG 6) ----
+        /* ---- Inboard wheel face: INWHEEL disc (BUG 6 / item 2) ----
          * The tyre tube was open on the inboard end, so the inside of the wheel
          * read as a texture-less hole. Cap it with the INWHEEL atlas texture
-         * (the original game's inner-wheel art, s_inwheel_*), as a disc in the
-         * wheel plane at inner_off. Same spin + steering as the outer rim so it
-         * stays locked to the wheel. Sampled from tpage5 (s_wheel_tex_page). */
+         * (the original game's inner-wheel art, s_inwheel_*).
+         *
+         * [item 2 2026-09-12] The previous cap was a flat INWHEEL *quad*: its
+         * square corners poked past the round tyre and its outline did not
+         * track the outer face. Emit a CIRCULAR triangle-fan disc instead so
+         * the inner face mirrors the outer: same wheel radius (rim_radius, so
+         * it closes the whole tube), same inner_off along the axle, the same
+         * spin odometer rotation and the same steering yaw via wheel_project.
+         * The INWHEEL rect is mapped as a disc (centre texel + rim ring), and
+         * the UV is attached to each pre-spin rim direction so the texture
+         * rotates with the wheel. Double-sided so it reads from inside and from
+         * behind. Sampled from tpage5 (s_wheel_tex_page). */
         if (wheel_inner_tex_enabled()) {
             float spin = (w < 2) ? front_spin : rear_spin;
             float sc = cosf(spin), ss = sinf(spin);
-            static const float cly[4] = {  1.0f,  1.0f, -1.0f, -1.0f };
-            static const float clz[4] = { -1.0f,  1.0f,  1.0f, -1.0f };
-            const float cu[4] = { s_inwheel_u0, s_inwheel_u1, s_inwheel_u1, s_inwheel_u0 };
-            const float cv[4] = { s_inwheel_v0, s_inwheel_v0, s_inwheel_v1, s_inwheel_v1 };
-            /* Fill the wheel disc (rim_radius), not the smaller alloy inset. */
             float in_r = rim_radius;
-            TD5_D3DVertex q[4];
-            int qok = 1;
-            for (int c = 0; c < 4 && qok; c++) {
-                float pl = cly[c] * in_r, pz = clz[c] * in_r;
-                float ly = pl * sc - pz * ss;
+            float uc = 0.5f * (s_inwheel_u0 + s_inwheel_u1);
+            float vc = 0.5f * (s_inwheel_v0 + s_inwheel_v1);
+            float uh = 0.5f * (s_inwheel_u1 - s_inwheel_u0);
+            float vh = 0.5f * (s_inwheel_v1 - s_inwheel_v0);
+            TD5_D3DVertex fv[WHEEL_SEG_HI + 2];
+            int fok = wheel_project(m, wx, wy, wz, inner_off, 0.0f, 0.0f, cs, sn,
+                                    uc, vc, 0xFFFFFFFFu, &fv[0]);   /* disc centre */
+            for (int i = 0; i <= WHEEL_SEG_HI && fok; i++) {
+                float a  = (float)i * (2.0f * (float)M_PI / (float)WHEEL_SEG_HI);
+                float ca = cosf(a), saa = sinf(a);
+                float pl = ca * in_r, pz = saa * in_r;   /* pre-spin disc point */
+                float ly = pl * sc - pz * ss;            /* rotate by spin about axle */
                 float lz = pl * ss + pz * sc;
-                qok &= wheel_project(m, wx, wy, wz, inner_off, ly, lz, cs, sn,
-                                     cu[c], cv[c], 0xFFFFFFFFu, &q[c]);
+                float u  = uc + ca * uh;                  /* UV attached to pre-spin dir */
+                float v  = vc + saa * vh;
+                fok &= wheel_project(m, wx, wy, wz, inner_off, ly, lz, cs, sn,
+                                     u, v, 0xFFFFFFFFu, &fv[1 + i]);
             }
-            if (qok) {
-                static const uint16_t qi[12] = { 0,1,2, 0,2,3,  0,2,1, 0,3,2 }; /* double-sided */
+            if (fok) {
+                uint16_t fi[WHEEL_SEG_HI * 6];
+                int fidx = 0;
+                for (int i = 0; i < WHEEL_SEG_HI; i++) {
+                    uint16_t r0 = (uint16_t)(1 + i), r1 = (uint16_t)(1 + i + 1);
+                    fi[fidx++] = 0; fi[fidx++] = r0; fi[fidx++] = r1;   /* front */
+                    fi[fidx++] = 0; fi[fidx++] = r1; fi[fidx++] = r0;   /* back  */
+                }
                 flush_immediate_internal();
                 td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
                 td5_plat_render_bind_texture(s_wheel_tex_page);
-                td5_plat_render_draw_tris(q, 4, qi, 12);
+                td5_plat_render_draw_tris(fv, WHEEL_SEG_HI + 2, fi, fidx);
             }
         }
     }
