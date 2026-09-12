@@ -214,6 +214,12 @@ typedef struct {
 static ShadowGrid s_shadow_grid[TD5_MAX_TOTAL_ACTORS];
 static int        s_shadow_white_uploaded = 0;
 
+/* [OVERCAST CONTACT SHADOW 2026-09-12] Forward decls — defined below with the
+ * other shadow knobs but referenced by the legacy quad path above them. */
+static int   shadow_contact_enabled(void);
+static float shadow_contact_spread(void);
+static float shadow_contact_alpha(void);
+
 /* Which car shadow to draw: the terrain-conforming raycast mesh (default) or the
  * original flat textured quad.
  *
@@ -430,10 +436,17 @@ static void render_vehicle_shadow_quad_legacy(const TD5_Actor *actor)
      * lies along the ground polygon. Verified against orig 0x40C120
      * (local_8c, local_80, local_68, local_5c all multiply by
      * _g_wheelSuspensionRenderScale). */
+    /* [OVERCAST CONTACT SHADOW 2026-09-12] Spread the legacy soft-blob quad past
+     * the body on OVERCAST/NIGHT (no directional sun) so a cloudy track still
+     * grounds the car; the SHADOW.png blob is already soft, so a wider quad reads
+     * as a soft contact shadow. Sun-lit tracks keep the faithful 1.25x quad. */
+    float legacy_spread = 1.0f;
+    if (shadow_contact_enabled() && td5_render_sky_sun(NULL, NULL) != TD5_SKY_SUNNY)
+        legacy_spread = shadow_contact_spread();
     for (int i = 0; i < 4; i++) {
-        corners[i][0] = cx + (corners[i][0] - cx) * SHADOW_CORNER_SCALE;
-        corners[i][1] = cy + (corners[i][1] - cy) * SHADOW_CORNER_SCALE;
-        corners[i][2] = cz + (corners[i][2] - cz) * SHADOW_CORNER_SCALE;
+        corners[i][0] = cx + (corners[i][0] - cx) * SHADOW_CORNER_SCALE * legacy_spread;
+        corners[i][1] = cy + (corners[i][1] - cy) * SHADOW_CORNER_SCALE * legacy_spread;
+        corners[i][2] = cz + (corners[i][2] - cz) * SHADOW_CORNER_SCALE * legacy_spread;
     }
 
     TD5_D3DVertex verts[4];
@@ -581,6 +594,46 @@ static float shadow_lift_slope_gain(void)
     return f;
 }
 
+/* [OVERCAST CONTACT SHADOW 2026-09-12] On tracks with no directional sun
+ * (OVERCAST / NIGHT) the car's ONLY grounding is this contact blob, and the
+ * faithful 1.25x wheel-probe footprint sits ENTIRELY inside the car body
+ * silhouette (the body is drawn AFTER the shadow and overpaints it), so a
+ * cloudy track shows no shadow at all under the car -- the reported "cloudy
+ * tracks have practically no shadow" bug (Scotland/level016 is the reference).
+ * A real overcast day still leaves a distinct SOFT ambient-occlusion shadow
+ * spreading out from directly beneath an object, so on OVERCAST/NIGHT we widen
+ * the contact footprint PAST the body outline and feather the extra spread into
+ * a soft penumbra (the dark core stays ~car-sized; only the visible rim outside
+ * the body is new). Sun-lit tracks keep the faithful footprint (they also get
+ * directional cues) unless the spread knob is forced.
+ *   TD5RE_SHADOW_CONTACT        1 = soft overcast contact (default), 0 = faithful
+ *   TD5RE_SHADOW_CONTACT_SPREAD footprint multiplier on OVERCAST/NIGHT (def 1.75)
+ *   TD5RE_SHADOW_CONTACT_ALPHA  centre alpha on OVERCAST/NIGHT, percent (def 82) */
+static int shadow_contact_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) { s = td5_env_flag_on("TD5RE_SHADOW_CONTACT"); }
+    return s;
+}
+static float shadow_contact_spread(void)
+{
+    static float f = -1.0f;
+    if (f < 0.0f) {
+        int pct = td5_env_int("TD5RE_SHADOW_CONTACT_SPREAD", 175, 100, 300);
+        f = (float)pct / 100.0f;
+    }
+    return f;
+}
+static float shadow_contact_alpha(void)
+{
+    static float f = -1.0f;
+    if (f < 0.0f) {
+        int pct = td5_env_int("TD5RE_SHADOW_CONTACT_ALPHA", 82, 0, 100);
+        f = (float)pct / 100.0f;
+    }
+    return f;
+}
+
 /* Least-squares fit of the plane Y = a*X + b*Z + c through the four wheel
  * contacts (XZ in render units, Y the contact height). Returns 1 on success; on
  * a near-degenerate system (wheels collinear — never for a real car) returns 0
@@ -645,11 +698,27 @@ static void shadow_build_grid(const TD5_Actor *actor, ShadowGrid *g)
         }
     }
 
+    /* [OVERCAST CONTACT SHADOW 2026-09-12] With no directional sun, spread the
+     * footprint past the body so a soft contact shadow is visible, and pull the
+     * alpha plateau inward by the same factor so the DARK CORE stays ~car-sized
+     * while the extra spread becomes a feathered penumbra. Sun-lit tracks keep
+     * the faithful 1.25x footprint / 0.62 plateau / 0.86 core. */
+    float contact_spread  = 1.0f;
+    float contact_plateau = SHADOW_FALLOFF_PLATEAU;
+    float contact_alpha   = SHADOW_CENTRE_ALPHA;
+    if (shadow_contact_enabled() && td5_render_sky_sun(NULL, NULL) != TD5_SKY_SUNNY) {
+        contact_spread = shadow_contact_spread();
+        if (contact_spread > 1.0f)
+            contact_plateau = SHADOW_FALLOFF_PLATEAU / contact_spread;
+        contact_alpha = shadow_contact_alpha();
+    }
+
     /* Scale the footprint outward from the centroid (body overhang past the
-     * wheels) — same footprint as the legacy SHADOW_CORNER_SCALE quad. */
+     * wheels) — same footprint as the legacy SHADOW_CORNER_SCALE quad, times the
+     * overcast contact spread. */
     for (int i = 0; i < 4; i++) {
-        corner[i][0] = cx + (corner[i][0] - cx) * SHADOW_CORNER_SCALE;
-        corner[i][1] = cz + (corner[i][1] - cz) * SHADOW_CORNER_SCALE;
+        corner[i][0] = cx + (corner[i][0] - cx) * SHADOW_CORNER_SCALE * contact_spread;
+        corner[i][1] = cz + (corner[i][1] - cz) * SHADOW_CORNER_SCALE * contact_spread;
     }
 
     /* Per-node ground Y is clamped to a band [floorY, ceilY].
@@ -795,10 +864,10 @@ static void shadow_build_grid(const TD5_Actor *actor, ShadowGrid *g)
              * shadow reads as the car's shape rather than an oval. */
             float au   = fabsf((tR - 0.5f) * 2.0f);  /* 0 centre .. 1 lateral edge      */
             float av   = fabsf((tF - 0.5f) * 2.0f);  /* 0 centre .. 1 longitudinal edge */
-            float fu   = 1.0f - shadow_smoothstep(SHADOW_FALLOFF_PLATEAU, SHADOW_FALLOFF_EDGE, au);
-            float fv   = 1.0f - shadow_smoothstep(SHADOW_FALLOFF_PLATEAU, SHADOW_FALLOFF_EDGE, av);
+            float fu   = 1.0f - shadow_smoothstep(contact_plateau, SHADOW_FALLOFF_EDGE, au);
+            float fv   = 1.0f - shadow_smoothstep(contact_plateau, SHADOW_FALLOFF_EDGE, av);
             float fall = fu * fv;
-            int ai = (int)(fall * SHADOW_CENTRE_ALPHA * 255.0f + 0.5f);
+            int ai = (int)(fall * contact_alpha * 255.0f + 0.5f);
             if (ai < 0)   ai = 0;
             if (ai > 255) ai = 255;
             g->alpha[n] = (uint8_t)ai;
@@ -3749,17 +3818,23 @@ static void sun_disc_quad(float vx, float vy, float vz, float half_px,
     (void)vz;
 }
 
-/* [RT2 P1] Sun disc + glare. SUNNY + HIGH only. Camera-facing additive glow at
- * the probed sun direction, drawn AFTER the world with a scene-depth test so
- * buildings/terrain correctly occlude it and it shows only over open sky. It
- * shares s_sky_sun_dir with the shadow pass, so disc and shadows can never
- * disagree. Note (as-built): TD5 sky panoramas rarely put the sun in a chase-cam
- * frame, so the disc is often off-frame or occluded — that is correct, not a
- * bug. Gated TD5RE_SUN_DISC (default on); TD5RE_SUN_DISC_SIZE = angular radius
- * fraction; TD5RE_SUN_DISC_DBG=1 draws it close+centred (verification aid). */
+/* [RT2 P1 / SUN DISC 2026-09-12] Sun disc + glare + soft halo. SUNNY on EVERY
+ * lighting level (the HIGH/RT-only gate was removed 2026-09-12 — the sun belongs
+ * to the sky, not to ray tracing). Camera-facing additive glow at the probed sun
+ * direction, drawn AFTER the world with a scene-depth test so buildings/terrain
+ * correctly occlude it and it shows only over open sky. Shares s_sky_sun_dir with
+ * the shadow pass, so disc and shadows can never disagree. The disc is a
+ * world-fixed direction, so it is in frame when the player faces toward the sun's
+ * bearing and off-frame when facing away (physically correct). Gated
+ * TD5RE_SUN_DISC (default on); TD5RE_SUN_DISC_SIZE = angular radius fraction;
+ * TD5RE_SUN_DISC_HALO = halo radius mult (0 = no halo); TD5RE_SUN_DISC_DBG=1
+ * draws it close+centred (verification aid). */
 void td5_render_draw_sun_disc(void)
 {
-    if (!td5_rt_active()) return;                       /* HIGH only */
+    /* [SUN DISC 2026-09-12] Draw on EVERY lighting level (was HIGH/RT-only): the
+     * sun is part of the sky, not a ray-tracing feature, so LOW/MEDIUM get it too
+     * on SUNNY tracks. Shares s_sky_sun_dir with the shadow pass, so the disc and
+     * the shadows always agree on where the sun is. */
     if (s_sky_sun_class != TD5_SKY_SUNNY || !s_sky_sun_dir_valid) return;
     static int   s_disc_on = -1, s_disc_dbg = -1;
     static float s_disc_sz = -1.0f;
@@ -3786,6 +3861,20 @@ void td5_render_draw_sun_disc(void)
     if (vz <= s_near_clip) return;                      /* sun behind camera */
     float invz = 1.0f / vz;
     vx *= invz; vy *= invz;                              /* view/z for projection */
+    {
+        static int s_disc_diag = 0;
+        if (!s_disc_diag && getenv("TD5RE_SUN_DISC_DIAG")) {
+            s_disc_diag = 1;
+            TD5_LOG_I(RENDER_LOG_TAG,
+                "[sundisc] rt=%d disc_on=%d dbg=%d dir=(%.3f,%.3f,%.3f) vz=%.1f "
+                "screen=(%.0f,%.0f) center=(%.0f,%.0f) sz=%.3f",
+                td5_rt_active(), s_disc_on, s_disc_dbg,
+                (double)dir[0], (double)dir[1], (double)dir[2], (double)vz,
+                (double)(-vx * s_focal_length + s_center_x),
+                (double)(-vy * s_focal_length + s_center_y),
+                (double)s_center_x, (double)s_center_y, (double)s_disc_sz);
+        }
+    }
 
     int R = (int)s_sky_sun_rgb[0], G = (int)s_sky_sun_rgb[1], B = (int)s_sky_sun_rgb[2];
     if (R > 255) R = 255;
@@ -3793,11 +3882,23 @@ void td5_render_draw_sun_disc(void)
     if (B > 255) B = 255;
     uint32_t core  = 0xFF000000u | ((uint32_t)R << 16) | ((uint32_t)G << 8) | (uint32_t)B;
     uint32_t glare = 0x60000000u | ((uint32_t)R << 16) | ((uint32_t)G << 8) | (uint32_t)B;
+    /* [SUN DISC 2026-09-12] Soft bloom halo: a large, very faint additive quad so
+     * the sun reads as a glowing body with atmospheric scatter, not a hard dot.
+     * TD5RE_SUN_DISC_HALO = outer halo radius multiplier (0 disables the halo). */
+    static float s_halo_mul = -1.0f;
+    if (s_halo_mul < 0.0f) {
+        const char *h = getenv("TD5RE_SUN_DISC_HALO");
+        s_halo_mul = (h && h[0]) ? (float)atof(h) : 6.0f;
+        if (s_halo_mul < 0.0f) s_halo_mul = 0.0f;
+    }
+    uint32_t halo  = 0x24000000u | ((uint32_t)R << 16) | ((uint32_t)G << 8) | (uint32_t)B;
 
     /* Angular radius -> screen pixels: half = tan(radius) * focal. s_disc_sz is
      * ~tan(radius). Independent of D (view/z projection already applied). */
     float half_px = s_disc_sz * s_focal_length;
     int glow_fx = (td5_vfx_proc_enabled() && td5_plat_fx_begin(TD5_FX_GLOW, 0.0f, 1.0f));
+    if (s_halo_mul > 0.0f)
+        sun_disc_quad(vx, vy, vz, half_px * s_halo_mul, depth, halo, glow_fx); /* soft bloom halo */
     sun_disc_quad(vx, vy, vz, half_px * 2.6f, depth, glare, glow_fx);  /* outer glare */
     sun_disc_quad(vx, vy, vz, half_px,        depth, core,  glow_fx);  /* core disc   */
     if (glow_fx) td5_plat_fx_end();

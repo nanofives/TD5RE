@@ -8033,7 +8033,7 @@ static void frame_render(void)
         /* [RT2 P1] Sun disc: after the opaque world has filled the depth buffer
          * (so buildings/terrain occlude it) and after the deferred passes (so it
          * sits over the final lit sky), before translucent VFX + HUD. No-op
-         * unless SUNNY + HIGH. */
+         * unless SUNNY. */
         if (!td5_render_photobooth_active())
             td5_render_draw_sun_disc();
 
