@@ -51,6 +51,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 12 (car paint)" },
+    { CL_ITEM,    "SELECT CAR: on the angled car preview the paint" },
+    { CL_ITEM,    "  pattern now follows the body in perspective -- the" },
+    { CL_ITEM,    "  two-tone waistline and the stripe/split lines run" },
+    { CL_ITEM,    "  along the car, not flat across the picture." },
     { CL_ITEM,    "SELECT CAR: two-tone / stripe / split paint now shows" },
     { CL_ITEM,    "  correctly on BOTH the angled and side car previews," },
     { CL_ITEM,    "  not just the side one." },

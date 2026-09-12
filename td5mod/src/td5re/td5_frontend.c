@@ -51,6 +51,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <math.h>
 
 /* ========================================================================
  * Module Tag
@@ -1619,6 +1620,116 @@ static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
 
 
 
+/* [PAINT PERSPECTIVE 2026-09-12] Per-view body principal axis, fit from the
+ * carpicpaint alpha mask at load time. Lets the menu preview cut the paint
+ * pattern along the CAR's own length/height axes instead of the flat image
+ * axes, so the angled (3/4) view's waistline / stripe / front-rear split follow
+ * the body in perspective rather than slicing the photo horizontally/vertically.
+ * All quantities are in band-normalised coords: u in [0,1] across the overlay
+ * width, v in [0,1] within this view's own V slice. eL = unit MAJOR axis (the
+ * car's length, forced to point +u = image-right), eT = (-eLy,eLx) = unit MINOR
+ * axis (the car's height, points +v = image-down). s/t are signed positions
+ * along eL/eT relative to the centroid; sMin..sMax / tMin..tMax are the body's
+ * extents along those axes (used to normalise the pattern thresholds, mirroring
+ * the in-race texel bake's body-bbox normalisation in td5_asset.c). */
+typedef struct {
+    int   valid;
+    float cu, cv;          /* body centroid (band-norm) */
+    float eLx, eLy;        /* unit major axis (car length, +u) */
+    float sMin, sMax;      /* body extent along eL (rel. centroid) */
+    float tMin, tMax;      /* body extent along eT (rel. centroid) */
+} TD6_PaintAxis;
+static TD6_PaintAxis s_paint_axis[TD6_PREVIEW_VIEWS];
+
+/* On-screen band geometry (canvas px) the overlay is drawn into by
+ * fe_draw_paint_overlay_regions: the full preview is 408x280, stacked into
+ * TD6_PREVIEW_VIEWS bands. The band is far wider than it is tall, so a fitted
+ * axis looks flatter on screen than its band-normalised angle; the flat-snap
+ * test below is judged in this on-screen space. */
+#define TD6_PAINT_PREVIEW_W       408.0
+#define TD6_PAINT_PREVIEW_BAND_H  (280.0 / (double)TD6_PREVIEW_VIEWS)
+/* Snap a near-horizontal fit back to DEAD FLAT so the straight-on SIDE view
+ * keeps its confirmed-good horizontal split (the user tested and approved the
+ * flat side view; a few-degree tilt there is a regression). Measured across the
+ * shipped cars the side-view fits land at <=8 deg on screen while every angled
+ * (3/4) view sits at >=8.7 deg, so 6 deg cleanly flattens the clearly-flat side
+ * views without ever touching an angled view's real diagonal. No env knob by
+ * design. */
+#define TD6_PAINT_FLAT_SNAP_DEG   6.0
+
+/* Fit the body silhouette's principal axis for each stacked view from the
+ * (binarised) overlay alpha. bgra is BGRA32 (byte3 = alpha). Fills s_paint_axis;
+ * a view with too few body texels or a degenerate fit is marked invalid, and the
+ * draw path falls back to the old flat screen-space split for that view. */
+static void frontend_compute_paint_axes(const unsigned char *bgra, int w, int h)
+{
+    for (int view = 0; view < TD6_PREVIEW_VIEWS; view++) {
+        s_paint_axis[view].valid = 0;
+        int ys = (int)((long)h * view       / TD6_PREVIEW_VIEWS);
+        int ye = (int)((long)h * (view + 1) / TD6_PREVIEW_VIEWS);
+        int bh = ye - ys;
+        if (bh <= 0 || w <= 0) continue;
+
+        /* Pass 1: centroid over body texels (band-normalised). */
+        double n = 0.0, su = 0.0, sv = 0.0;
+        for (int y = ys; y < ye; y++)
+            for (int x = 0; x < w; x++)
+                if (bgra[((size_t)y * w + x) * 4 + 3] > 127) {
+                    su += (double)x / (double)w;
+                    sv += (double)(y - ys) / (double)bh;
+                    n  += 1.0;
+                }
+        if (n < 16.0) continue;
+        double cu = su / n, cv = sv / n;
+
+        /* Pass 2: covariance -> major-axis angle. */
+        double Suu = 0.0, Svv = 0.0, Suv = 0.0;
+        for (int y = ys; y < ye; y++)
+            for (int x = 0; x < w; x++)
+                if (bgra[((size_t)y * w + x) * 4 + 3] > 127) {
+                    double du = (double)x / (double)w - cu;
+                    double dv = (double)(y - ys) / (double)bh - cv;
+                    Suu += du * du; Svv += dv * dv; Suv += du * dv;
+                }
+        double theta = 0.5 * atan2(2.0 * Suv, Suu - Svv);
+        double eLx = cos(theta), eLy = sin(theta);
+        if (eLx < 0.0) { eLx = -eLx; eLy = -eLy; }   /* major points +u (right) */
+        double eTx = -eLy, eTy = eLx;                 /* minor points +v (down) */
+
+        /* Flat-snap: if the fitted major axis is within TD6_PAINT_FLAT_SNAP_DEG
+         * of horizontal ON SCREEN, force it dead flat (and eT vertical) so the
+         * side view stays exactly as before. Extents (Pass 3) then refit against
+         * these snapped axes. */
+        double screen_deg = atan2(fabs(eLy) * TD6_PAINT_PREVIEW_BAND_H,
+                                  fabs(eLx) * TD6_PAINT_PREVIEW_W) * (180.0 / 3.14159265358979);
+        if (screen_deg <= TD6_PAINT_FLAT_SNAP_DEG) {
+            eLx = 1.0; eLy = 0.0; eTx = 0.0; eTy = 1.0;
+        }
+
+        /* Pass 3: body extents along the fitted axes. */
+        double sMin = 1e30, sMax = -1e30, tMin = 1e30, tMax = -1e30;
+        for (int y = ys; y < ye; y++)
+            for (int x = 0; x < w; x++)
+                if (bgra[((size_t)y * w + x) * 4 + 3] > 127) {
+                    double du = (double)x / (double)w - cu;
+                    double dv = (double)(y - ys) / (double)bh - cv;
+                    double s = du * eLx + dv * eLy;
+                    double t = du * eTx + dv * eTy;
+                    if (s < sMin) sMin = s;
+                    if (s > sMax) sMax = s;
+                    if (t < tMin) tMin = t;
+                    if (t > tMax) tMax = t;
+                }
+        if (sMax - sMin < 1e-4 || tMax - tMin < 1e-4) continue;
+
+        s_paint_axis[view].valid = 1;
+        s_paint_axis[view].cu = (float)cu;   s_paint_axis[view].cv = (float)cv;
+        s_paint_axis[view].eLx = (float)eLx; s_paint_axis[view].eLy = (float)eLy;
+        s_paint_axis[view].sMin = (float)sMin; s_paint_axis[view].sMax = (float)sMax;
+        s_paint_axis[view].tMin = (float)tMin; s_paint_axis[view].tMax = (float)tMax;
+    }
+}
+
 /* TD6 body-only paint overlay (carpicpaint0.png): grayscale body, everything
  * else transparent (alpha) — the PNG alpha is the mask. Drawn MODULATEd by the
  * paint colour OVER the gray base carpic to tint just the body.
@@ -1656,6 +1767,10 @@ int frontend_load_car_paint_overlay_surface(int car_index) {
     unsigned char *p = (unsigned char *)pixels;
     for (int i = 0; i < w * h; i++)
         if (p[i * 4 + 3] != 0) p[i * 4 + 3] = 255;
+
+    /* [PAINT PERSPECTIVE 2026-09-12] Fit each view's body principal axis from the
+     * (now binarised) mask so the pattern preview follows the car in perspective. */
+    frontend_compute_paint_axes(p, w, h);
 
     int slot = -1;
     for (int i = 0; i < FE_MAX_SURFACES; i++) if (!s_surfaces[i].in_use) { slot = i; break; }
@@ -2301,17 +2416,15 @@ static void fe_draw_surface_rect_uv(int handle, float x, float y, float w, float
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
-/* [SECONDARY PAINT 2026-06-29] Draw ONE stacked view band of the TD6 body
- * overlay into [dx,dy,dw,dh] (screen px), split by the current PATTERN between
- * the MAIN (c1) and SECONDARY (c2) colours. [va,vb] is the band's own slice of
- * the overlay's V axis (the caller passes the top view's [0,0.5] then the bottom
- * view's [0.5,1]); the pattern is applied WITHIN the band so a V split two-tones
- * the car in that view rather than dividing between the two views. U spans the
- * band's full width. Mirrors the in-race texel bake in
- * td5_asset_load_vehicle_skin_painted so menu and race agree. */
-static void fe_draw_paint_overlay_band(int handle, float dx, float dy, float dw, float dh,
-                                       float va, float vb, uint32_t c1, uint32_t c2,
-                                       int pattern) {
+/* [SECONDARY PAINT 2026-06-29] FLAT (screen-space) band split — used as the
+ * fallback when a view has no principal-axis fit (see fe_draw_paint_overlay_band).
+ * Splits [dx,dy,dw,dh] by the PATTERN along the image U/V axes. This is correct
+ * for the straight-on SIDE view but slices the ANGLED view across the photo
+ * regardless of the car's body direction, which is why the axis-aware path below
+ * supersedes it whenever a fit is available. */
+static void fe_draw_paint_overlay_band_flat(int handle, float dx, float dy, float dw, float dh,
+                                            float va, float vb, uint32_t c1, uint32_t c2,
+                                            int pattern) {
     switch (pattern) {
         case TD6_PAT_TWOTONE: {
             float vs = TD6_PAT_TWOTONE_V;
@@ -2339,12 +2452,95 @@ static void fe_draw_paint_overlay_band(int handle, float dx, float dy, float dw,
     }
 }
 
+/* [PAINT PERSPECTIVE 2026-09-12] Classify a band-normalised point (u,v within
+ * this view band) as PRIMARY (0) or SECONDARY (1) using the body's fitted
+ * principal axis. Mirrors the in-race texel bake (td5_asset_paint_pattern_t) but
+ * measured along the car's own length (eL) / height (eT) axes and normalised to
+ * the body's extent along them — so TWO-TONE = upper/lower relative to the
+ * waistline, STRIPES = a band positioned along the length, SPLIT = front/rear,
+ * in EVERY view regardless of the camera angle the photo was taken from. */
+static int fe_paint_classify(const TD6_PaintAxis *ax, float u, float v, int pattern) {
+    float du = u - ax->cu, dv = v - ax->cv;
+    float eLx = ax->eLx, eLy = ax->eLy;
+    float eTx = -eLy, eTy = eLx;
+    float s = du * eLx + dv * eLy;
+    float t = du * eTx + dv * eTy;
+    float sn = (s - ax->sMin) / (ax->sMax - ax->sMin);
+    float tn = (t - ax->tMin) / (ax->tMax - ax->tMin);
+    switch (pattern) {
+        case TD6_PAT_TWOTONE: return (tn >= TD6_PAT_TWOTONE_V) ? 1 : 0;
+        case TD6_PAT_STRIPES: return (sn >= TD6_PAT_STRIPE_LO && sn <= TD6_PAT_STRIPE_HI) ? 1 : 0;
+        case TD6_PAT_SPLIT:   return (sn >= TD6_PAT_SPLIT_U) ? 1 : 0;
+        default:              return 0;
+    }
+}
+
+/* [PAINT PERSPECTIVE 2026-09-12] Draw ONE stacked view band split along the
+ * car's fitted principal axis. The pattern boundaries are straight lines in the
+ * body's (eL,eT) frame, which appear DIAGONAL in the angled view and ~axis-
+ * aligned in the side view. We rasterise the band as a set of thin vertical
+ * columns; within each column the split boundary(ies) are affine in v, solved
+ * exactly, so the diagonal edge is smooth. Falls back to the flat screen-space
+ * split when this view has no valid fit (or for SOLID, which needs no split). */
+#define TD6_PAINT_COLS 96
+static void fe_draw_paint_overlay_band(int handle, float dx, float dy, float dw, float dh,
+                                       float va, float vb, uint32_t c1, uint32_t c2,
+                                       int pattern, int view) {
+    const TD6_PaintAxis *ax = (view >= 0 && view < TD6_PREVIEW_VIEWS &&
+                               s_paint_axis[view].valid) ? &s_paint_axis[view] : NULL;
+    if (pattern == TD6_PAT_SOLID || !ax) {
+        fe_draw_paint_overlay_band_flat(handle, dx, dy, dw, dh, va, vb, c1, c2, pattern);
+        return;
+    }
+    const float eLx = ax->eLx, eLy = ax->eLy;
+    const float eTx = -eLy, eTy = eLx;
+    const float sRange = ax->sMax - ax->sMin, tRange = ax->tMax - ax->tMin;
+    for (int i = 0; i < TD6_PAINT_COLS; i++) {
+        float u0 = (float)i / TD6_PAINT_COLS, u1 = (float)(i + 1) / TD6_PAINT_COLS;
+        float uc = (u0 + u1) * 0.5f;
+        float du = uc - ax->cu;
+        /* Along this column, s(v) and t(v) are affine: f(v) = A*v + K. */
+        float Ks = du * eLx - ax->cv * eLy, As = eLy;   /* position along length */
+        float Kt = du * eTx - ax->cv * eTy, At = eTy;   /* position along height */
+        /* Collect the pattern's boundary v-values inside (0,1) for this column. */
+        float cuts[4]; int nc = 0;
+        cuts[nc++] = 0.0f; cuts[nc++] = 1.0f;
+        #define TD6_ADD_CROSS(TARGET, A, K) do { \
+            if (fabsf(A) > 1e-6f) { float vb_ = ((TARGET) - (K)) / (A); \
+                if (vb_ > 0.0f && vb_ < 1.0f) cuts[nc++] = vb_; } } while (0)
+        if (pattern == TD6_PAT_TWOTONE) {
+            TD6_ADD_CROSS(ax->tMin + TD6_PAT_TWOTONE_V * tRange, At, Kt);
+        } else if (pattern == TD6_PAT_SPLIT) {
+            TD6_ADD_CROSS(ax->sMin + TD6_PAT_SPLIT_U * sRange, As, Ks);
+        } else { /* STRIPES: two boundaries -> a band along the length */
+            TD6_ADD_CROSS(ax->sMin + TD6_PAT_STRIPE_LO * sRange, As, Ks);
+            TD6_ADD_CROSS(ax->sMin + TD6_PAT_STRIPE_HI * sRange, As, Ks);
+        }
+        #undef TD6_ADD_CROSS
+        for (int a = 1; a < nc; a++) {   /* insertion sort (nc <= 4) */
+            float k = cuts[a]; int b = a - 1;
+            while (b >= 0 && cuts[b] > k) { cuts[b + 1] = cuts[b]; b--; }
+            cuts[b + 1] = k;
+        }
+        float xg = dx + u0 * dw, wg = dw / (float)TD6_PAINT_COLS;
+        for (int seg = 0; seg + 1 < nc; seg++) {
+            float rv0 = cuts[seg], rv1 = cuts[seg + 1];
+            if (rv1 - rv0 < 1e-5f) continue;
+            uint32_t col = fe_paint_classify(ax, uc, (rv0 + rv1) * 0.5f, pattern) ? c2 : c1;
+            fe_draw_surface_rect_uv(handle, xg, dy + rv0 * dh, wg, (rv1 - rv0) * dh,
+                                    col, u0, va + rv0 * (vb - va), u1, va + rv1 * (vb - va));
+        }
+    }
+}
+
 /* [SECONDARY PAINT 2026-06-29] Draw the TD6 body overlay surface into [dx,dy,dw,dh]
  * (screen px) split by the current PATTERN between the MAIN and SECONDARY colours.
  * The overlay photo stacks TWO body views (top = 3/4 diagonal, bottom = side), so
  * apply the pattern INDEPENDENTLY within each view band — a whole-image V split
  * would otherwise colour the entire diagonal car with c1 and the entire side car
- * with c2 (the reported "2nd colour not rendered on the diagonal preview"). */
+ * with c2 (the reported "2nd colour not rendered on the diagonal preview").
+ * [PAINT PERSPECTIVE 2026-09-12] Each band is split along that view's own fitted
+ * body axis so the angled view reads in perspective. */
 static void fe_draw_paint_overlay_regions(int handle, float dx, float dy, float dw, float dh) {
     uint32_t c1 = frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color);
     uint32_t c2 = frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color2);
@@ -2354,7 +2550,7 @@ static void fe_draw_paint_overlay_regions(int handle, float dx, float dy, float 
         float vb  = (float)(v + 1) / (float)TD6_PREVIEW_VIEWS;
         float bdy = dy + dh * va;
         float bdh = dh * (vb - va);
-        fe_draw_paint_overlay_band(handle, dx, bdy, dw, bdh, va, vb, c1, c2, pat);
+        fe_draw_paint_overlay_band(handle, dx, bdy, dw, bdh, va, vb, c1, c2, pat, v);
     }
 }
 
