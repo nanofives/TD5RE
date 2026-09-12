@@ -440,9 +440,18 @@ void frontend_init_race_schedule(void) {
              * and other humans with the AI hash -- every machine rendered
              * its own idea of the field ("client sees the same car twice,
              * host sees correctly"). */
-            for (i = 0; i < TD5_MAX_RACER_SLOTS; i++)
-                td5_asset_set_human_td6_color(
-                    i, (i < np && i < 6) ? net_cfg.td6_color[i] : -1);
+            /* [SECONDARY PAINT NET 2026-09-12] Apply the replicated secondary
+             * colour + pattern too, so remote cars render the chosen two-tone /
+             * stripe / split livery instead of a solid primary. -1 colour /
+             * 0 pattern = solid (td5_asset_set_human_td6_paint clamps). */
+            for (i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
+                if (i < np && i < 6)
+                    td5_asset_set_human_td6_paint(i, net_cfg.td6_color[i],
+                                                  net_cfg.td6_color2[i],
+                                                  net_cfg.td6_pattern[i]);
+                else
+                    td5_asset_set_human_td6_color(i, -1);
+            }
             /* [NET GAME MODES 2026-07-04] Colour each net player's results /
              * standings / podium row by their chosen body colour (falls back to
              * a distinct per-slot colour). mp_slot_color() reads

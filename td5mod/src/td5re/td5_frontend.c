@@ -2301,37 +2301,60 @@ static void fe_draw_surface_rect_uv(int handle, float x, float y, float w, float
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }
 
-/* [SECONDARY PAINT 2026-06-29] Draw the TD6 body overlay surface into [dx,dy,dw,dh]
- * (screen px) split by the current PATTERN between the MAIN and SECONDARY colours.
- * The split is in the overlay's own image space (the carpicpaint 3/4 photo, where
- * top=roof, centre=stripe, left=front read cleanly). Mirrors the in-race texel
- * bake in td5_asset_load_vehicle_skin_painted so menu and race agree. */
-static void fe_draw_paint_overlay_regions(int handle, float dx, float dy, float dw, float dh) {
-    uint32_t c1 = frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color);
-    uint32_t c2 = frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color2);
-    switch (g_td5.ini.td6_paint_pattern) {
+/* [SECONDARY PAINT 2026-06-29] Draw ONE stacked view band of the TD6 body
+ * overlay into [dx,dy,dw,dh] (screen px), split by the current PATTERN between
+ * the MAIN (c1) and SECONDARY (c2) colours. [va,vb] is the band's own slice of
+ * the overlay's V axis (the caller passes the top view's [0,0.5] then the bottom
+ * view's [0.5,1]); the pattern is applied WITHIN the band so a V split two-tones
+ * the car in that view rather than dividing between the two views. U spans the
+ * band's full width. Mirrors the in-race texel bake in
+ * td5_asset_load_vehicle_skin_painted so menu and race agree. */
+static void fe_draw_paint_overlay_band(int handle, float dx, float dy, float dw, float dh,
+                                       float va, float vb, uint32_t c1, uint32_t c2,
+                                       int pattern) {
+    switch (pattern) {
         case TD6_PAT_TWOTONE: {
             float vs = TD6_PAT_TWOTONE_V;
-            fe_draw_surface_rect_uv(handle, dx, dy,        dw, dh*vs,     c1, 0,0,  1,vs);
-            fe_draw_surface_rect_uv(handle, dx, dy+dh*vs,  dw, dh*(1-vs), c2, 0,vs, 1,1);
+            float vm = va + (vb - va) * vs;              /* split in overlay V space */
+            fe_draw_surface_rect_uv(handle, dx, dy,        dw, dh*vs,     c1, 0,va, 1,vm);
+            fe_draw_surface_rect_uv(handle, dx, dy+dh*vs,  dw, dh*(1-vs), c2, 0,vm, 1,vb);
             break;
         }
         case TD6_PAT_STRIPES: {
             float a = TD6_PAT_STRIPE_LO, b = TD6_PAT_STRIPE_HI;
-            fe_draw_surface_rect_uv(handle, dx,        dy, dw*a,     dh, c1, 0,0, a,1);
-            fe_draw_surface_rect_uv(handle, dx+dw*a,   dy, dw*(b-a), dh, c2, a,0, b,1);
-            fe_draw_surface_rect_uv(handle, dx+dw*b,   dy, dw*(1-b), dh, c1, b,0, 1,1);
+            fe_draw_surface_rect_uv(handle, dx,        dy, dw*a,     dh, c1, 0,va, a,vb);
+            fe_draw_surface_rect_uv(handle, dx+dw*a,   dy, dw*(b-a), dh, c2, a,va, b,vb);
+            fe_draw_surface_rect_uv(handle, dx+dw*b,   dy, dw*(1-b), dh, c1, b,va, 1,vb);
             break;
         }
         case TD6_PAT_SPLIT: {
             float us = TD6_PAT_SPLIT_U;
-            fe_draw_surface_rect_uv(handle, dx,        dy, dw*us,     dh, c1, 0,0,  us,1);
-            fe_draw_surface_rect_uv(handle, dx+dw*us,  dy, dw*(1-us), dh, c2, us,0, 1,1);
+            fe_draw_surface_rect_uv(handle, dx,        dy, dw*us,     dh, c1, 0,va,  us,vb);
+            fe_draw_surface_rect_uv(handle, dx+dw*us,  dy, dw*(1-us), dh, c2, us,va, 1,vb);
             break;
         }
         default: /* SOLID */
-            fe_draw_surface_rect_uv(handle, dx, dy, dw, dh, c1, 0,0,1,1);
+            fe_draw_surface_rect_uv(handle, dx, dy, dw, dh, c1, 0,va, 1,vb);
             break;
+    }
+}
+
+/* [SECONDARY PAINT 2026-06-29] Draw the TD6 body overlay surface into [dx,dy,dw,dh]
+ * (screen px) split by the current PATTERN between the MAIN and SECONDARY colours.
+ * The overlay photo stacks TWO body views (top = 3/4 diagonal, bottom = side), so
+ * apply the pattern INDEPENDENTLY within each view band — a whole-image V split
+ * would otherwise colour the entire diagonal car with c1 and the entire side car
+ * with c2 (the reported "2nd colour not rendered on the diagonal preview"). */
+static void fe_draw_paint_overlay_regions(int handle, float dx, float dy, float dw, float dh) {
+    uint32_t c1 = frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color);
+    uint32_t c2 = frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color2);
+    int pat = g_td5.ini.td6_paint_pattern;
+    for (int v = 0; v < TD6_PREVIEW_VIEWS; v++) {
+        float va  = (float)v       / (float)TD6_PREVIEW_VIEWS;
+        float vb  = (float)(v + 1) / (float)TD6_PREVIEW_VIEWS;
+        float bdy = dy + dh * va;
+        float bdh = dh * (vb - va);
+        fe_draw_paint_overlay_band(handle, dx, bdy, dw, bdh, va, vb, c1, c2, pat);
     }
 }
 
