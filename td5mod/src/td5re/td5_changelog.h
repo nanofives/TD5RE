@@ -61,6 +61,14 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  matches the tyre and spins/steers with it." },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 12 (zero-opponent races)" },
+    { CL_ITEM,    "Empty grid slots no longer leave a trace. In time trial" },
+    { CL_ITEM,    "  and any race with 0 opponents, the missing cars used to" },
+    { CL_ITEM,    "  still glow headlights at their grid spots and you could" },
+    { CL_ITEM,    "  bump an invisible car there. Those slots are now fully" },
+    { CL_ITEM,    "  inert for lights and collision." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 09 (auto track: round 22 -- gore/median)" },
     { CL_ITEM,    "Fork medians now reach BOTH carriageways. On an" },
     { CL_ITEM,    "  uneven split the median hugged the branch side and" },

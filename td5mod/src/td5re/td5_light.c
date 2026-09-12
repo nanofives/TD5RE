@@ -199,6 +199,12 @@ void td5_light_emit_vehicle_headlights(void)
     for (int slot = 0; slot < total; slot++) {
         /* Racers always; traffic only when the knob is set. */
         if (slot >= g_traffic_slot_base && !s_hl_traffic) continue;
+        /* [NO-OPPONENT SLOTS 2026-09-12] An empty grid slot (opponents=0 / time
+         * trial) has no racer — never emit a headlight pool at its (unused) grid
+         * pose. The car mesh + brake/headlight billboards already skip these
+         * slots in td5_render_mesh; this is the matching gate for the dynamic
+         * light the raster + RT lighting consume. No-op for live racers. */
+        if (td5_game_slot_is_empty_racer(slot)) continue;
         /* [AUTO LIGHTS] Per-slot verdict — split-screen players can be in
          * different lighting at once, so each car's headlights follow only
          * its OWN zone/manual state, never a sibling viewport's. */

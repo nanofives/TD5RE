@@ -11374,6 +11374,38 @@ int td5_game_get_slot_state(int slot) {
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 3;  /* disabled */
     return (int)s_slot_state[slot].state;
 }
+/* [NO-OPPONENT SLOTS 2026-09-12] Single authority for "this racer slot holds
+ * NO racer" (empty grid slot): a racer-range slot (< g_traffic_slot_base) whose
+ * lifecycle state is 3 (no player, no AI). Every per-slot subsystem that must
+ * leave an empty opponent slot inert — render (already gated), the dynamic
+ * headlight emitter (td5_light) and the V2V collision broadphase
+ * (td5_physics_collision) — routes its skip through THIS predicate instead of
+ * re-deriving `slot < base && state==3` inline, so the notion of "empty slot"
+ * has one definition.
+ *
+ * Why it is needed even though the car mesh already skips these slots:
+ * td5_physics_init_vehicle_runtime -> bind_default_vehicle_tuning binds a
+ * NON-null fallback car_definition_ptr (with a collision radius) to EVERY actor
+ * slot, empty ones included, so the `!car_definition_ptr` guards in the collision
+ * broadphase do NOT reject them — an empty opponent slot was a live collider and
+ * a live headlight emitter. Traffic/scenery slots (>= g_traffic_slot_base) are
+ * never racer-empty by this test (they carry their own parked/decoration gates)
+ * and return 0. No-op for any live racer (state != 3), so golden traces on a
+ * full field are unaffected. */
+int td5_game_slot_is_empty_racer(int slot) {
+    /* [A/B + revert knob] TD5RE_NOOPP_INERT=0 restores the pre-fix behaviour
+     * (empty slots treated as live everywhere) so the leak can be reproduced and
+     * measured against the fix in one binary. Default ON (empty slots inert).
+     * Cached: this predicate runs per-slot in the physics broadphase. */
+    static int s_inert = -1;
+    if (s_inert < 0) {
+        const char *e = getenv("TD5RE_NOOPP_INERT");
+        s_inert = (e && e[0] == '0') ? 0 : 1;
+    }
+    if (!s_inert) return 0;
+    if (slot < 0 || slot >= g_traffic_slot_base) return 0;
+    return td5_game_get_slot_state(slot) == 3;
+}
 /* [CONFIRMED @ 0x40A4C9, 0x0042B27E, 0x0042BF1A]: original ORs g_inputPlaybackActive
  * (0x466E9C) and g_replayModeFlag (0x4AAF64) at every call site. */
 int td5_game_is_replay_active(void) {

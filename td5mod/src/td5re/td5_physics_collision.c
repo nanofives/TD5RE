@@ -2748,6 +2748,7 @@ void td5_physics_resolve_vehicle_contacts(void)
         for (int rsl = 0; rsl < base; rsl++) {
             TD5_Actor *rc = (TD5_Actor *)(g_actor_table_base + (size_t)rsl * TD5_ACTOR_STRIDE);
             if (!rc->car_definition_ptr || rc->finish_time != 0) continue;
+            if (td5_game_slot_is_empty_racer(rsl)) continue;   /* [NO-OPP] empty grid slot */
             int32_t rvx = rc->linear_velocity_x, rvz = rc->linear_velocity_z;
             uint64_t rs2 = (uint64_t)((int64_t)rvx * rvx + (int64_t)rvz * rvz);
             if (rs2 > 0xFFFFFFFFull) rs2 = 0xFFFFFFFFull;
@@ -2838,6 +2839,7 @@ void td5_physics_resolve_vehicle_contacts(void)
             for (int rsl = 0; rsl < base; rsl++) {
                 TD5_Actor *rc = (TD5_Actor *)(g_actor_table_base + (size_t)rsl * TD5_ACTOR_STRIDE);
                 if (!rc->car_definition_ptr || rc->finish_time != 0) continue;
+                if (td5_game_slot_is_empty_racer(rsl)) continue;   /* [NO-OPP] empty grid slot */
                 int64_t dx = (int64_t)(FP_TRUNC(rc->world_pos.x)) - (FP_TRUNC(tr->world_pos.x));
                 int64_t dz = (int64_t)(FP_TRUNC(rc->world_pos.z)) - (FP_TRUNC(tr->world_pos.z));
                 int64_t d2 = dx * dx + dz * dz;
@@ -2855,6 +2857,7 @@ void td5_physics_resolve_vehicle_contacts(void)
     /* Reset grid chains */
     memset(s_collision_grid, COLLISION_CHAIN_END, sizeof(s_collision_grid));
 
+    int bp_members = 0;   /* [NO-OPP diag] actors actually inserted into the grid */
     for (int i = 0; i < total; ++i) {
         TD5_Actor *actor = (TD5_Actor *)(g_actor_table_base + (size_t)i * TD5_ACTOR_STRIDE);
         int32_t radius;
@@ -2862,7 +2865,13 @@ void td5_physics_resolve_vehicle_contacts(void)
         if (!actor->car_definition_ptr ||
             /* [dynamic-traffic] parked cars are intangible — keep their ghost
              * pose out of the broadphase so nobody collides with a hidden car. */
-            td5_ai_traffic_dynamic_parked(i)) {
+            td5_ai_traffic_dynamic_parked(i) ||
+            /* [NO-OPPONENT SLOTS 2026-09-12] An empty racer slot (opponents=0 /
+             * time trial) carries a NON-null fallback car_definition_ptr (bound
+             * by bind_default_vehicle_tuning for every slot), so the guard above
+             * does NOT reject it — the player was colliding with an invisible car
+             * at the unused grid pose. Keep empty slots out of the broadphase. */
+            td5_game_slot_is_empty_racer(i)) {
             memset(g_actor_aabb[i], 0, sizeof(g_actor_aabb[i]));
             continue;
         }
@@ -2882,7 +2891,16 @@ void td5_physics_resolve_vehicle_contacts(void)
         /* Chain: actor's chain byte points to previous head */
         g_actor_aabb[i][4] = s_collision_grid[bucket];
         s_collision_grid[bucket] = (uint8_t)i;
+        bp_members++;
 
+    }
+    /* [NO-OPP diag] Rate-limited broadphase-membership count. With opponents=0
+     * this is 1 (player only) once empty grid slots are excluded; TD5RE_NOOPP_INERT=0
+     * restores the pre-fix behaviour and this jumps by the number of empty slots. */
+    {
+        static uint32_t s_bp_log = 0;
+        if ((s_bp_log++ % 60u) == 0u)
+            TD5_LOG_I(LOG_TAG, "v2v broadphase members=%d of total=%d", bp_members, total);
     }
 
     /* --- Phase 2: Walk adjacent buckets for each actor --- */
@@ -2891,6 +2909,7 @@ void td5_physics_resolve_vehicle_contacts(void)
 
         if (!a->car_definition_ptr) continue;
         if (td5_ai_traffic_dynamic_parked(i)) continue;  /* [dynamic-traffic] intangible */
+        if (td5_game_slot_is_empty_racer(i)) continue;   /* [NO-OPP] empty grid slot */
 
         int32_t seg_a = a->track_span_normalized;
         if (seg_a < 0) seg_a = 0;
@@ -3004,6 +3023,7 @@ void td5_physics_resolve_vehicle_contacts(void)
             for (int i = 0; i < total; i++) {
                 TD5_Actor *a = (TD5_Actor *)(g_actor_table_base + (size_t)i * TD5_ACTOR_STRIDE);
                 if (!a->car_definition_ptr) continue;
+                if (td5_game_slot_is_empty_racer(i)) continue;   /* [NO-OPP] empty grid slot */
 
                 /* Script-controlled vehicles (crash takeovers, AI script VM)
                  * own their own position -- leave them alone, the same set the
@@ -3019,6 +3039,7 @@ void td5_physics_resolve_vehicle_contacts(void)
                 for (int j = i + 1; j < total; j++) {
                     TD5_Actor *b = (TD5_Actor *)(g_actor_table_base + (size_t)j * TD5_ACTOR_STRIDE);
                     if (!b->car_definition_ptr) continue;
+                    if (td5_game_slot_is_empty_racer(j)) continue;   /* [NO-OPP] empty grid slot */
 
                     int b_scripted = (b->vehicle_mode != 0) ||
                                      (b->wheel_contact_bitmask >= 0x0F);

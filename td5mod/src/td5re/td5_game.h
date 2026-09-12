@@ -53,6 +53,9 @@ int  td5_game_is_local_participant(int slot);
  *   0 = AI racer, 1 = active player, 2 = completed, 3 = disabled.
  * Used by the renderer to skip disabled slots in drag race. */
 int  td5_game_get_slot_state(int slot);
+/* True when racer `slot` is an EMPTY grid slot (state 3). Single authority used
+ * to keep opponent-less slots out of render/lights/physics. See td5_game.c. */
+int  td5_game_slot_is_empty_racer(int slot);
 
 /* Returns the companion_2 byte for a slot (offset +2 in the slot record).
  * Used by Screen_RaceResults to detect cup elimination (value == 2). */

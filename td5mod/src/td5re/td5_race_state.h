@@ -33,6 +33,11 @@ int  td5_game_get_total_actor_count(void);
 /* Racer slot lifecycle state (3 = inactive/empty grid slot). Also declared in
  * td5_game.h; mirrored here so read-only consumers avoid the heavy game header. */
 int  td5_game_get_slot_state(int slot);
+/* True when racer `slot` is an EMPTY grid slot (racer-range, lifecycle state 3:
+ * no player, no AI). The single authority for keeping an opponent-less slot out
+ * of every per-slot subsystem (render/lights/physics). 0 for live racers and for
+ * traffic/scenery slots. See td5_game.c. */
+int  td5_game_slot_is_empty_racer(int slot);
 int  td5_game_get_racer_count(void);
 int  td5_game_get_player_slot(int viewport);
 int  td5_game_get_view_pan(int vp);
