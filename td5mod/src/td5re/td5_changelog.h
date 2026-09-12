@@ -32,6 +32,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 12 (lighting)" },
+    { CL_ITEM,    "Cloudy tracks: cars now cast a soft contact shadow" },
+    { CL_ITEM,    "  on the ground at HIGH lighting quality." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 12 (race options + car selection)" },
     { CL_ITEM,    "OPPONENT DIFFICULTY is back on Quick Race and every" },
     { CL_ITEM,    "  race with AI opponents, single player and multi." },
