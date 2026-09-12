@@ -410,7 +410,43 @@ void td5_render_apply_shadow_pass(int vp_x, int vp_y)
                 ((float)td5_light2_shadow_strength() / 100.0f) * dom);
         }
     }
-    if (!sky_cls) return;                        /* no directional light (tunnel) */
+    /* [OVERCAST CONTACT SHADOW 2026-09-12] On tracks with no directional sun
+     * (Scotland/DefaultTrack 1 classifies sky_cls=0 — the zone table has no valid
+     * sun and the probe reads NIGHT/unresolved) the sun-shadow pass bails here and
+     * a car casts NO ground shadow at HIGH; the LOW/MEDIUM colour-buffer contact
+     * blob is discarded by the RT deferred composite. Synthesize a ZENITH sun
+     * (straight up, reconstruction frame +Y up) with a wide cone and a SHORT
+     * shadow-ray throw so the proven road-casting shadow pass (rgen_shadow) darkens
+     * the road under and around the car into a soft contact shadow — written into
+     * the RT sunvis MULT buffer, which survives the composite (unlike the colour
+     * blob). The short TMax means only occluders close overhead (the car) cast, so
+     * open road stays bright (no global dimming) and a tunnel ceiling / high bridge
+     * does not darken the whole road through this path. SUNNY and real OVERCAST
+     * (which already cast a directional soft shadow) are untouched, so those stay
+     * byte-identical. TD5RE_RT_CONTACT_SHADOW: 0=off, 1=diffuse/no-sun (default),
+     * 2=force every sky (testing). RT/HIGH only, so LOW stays byte-identical. */
+    static int   s_cs_mode = -1;
+    static float s_cs_str = -1.0f, s_cs_cone = -1.0f, s_cs_dist = -1.0f;
+    if (s_cs_mode < 0) {
+        const char *e;
+        s_cs_mode = ((e = getenv("TD5RE_RT_CONTACT_SHADOW"))   && e[0]) ? atoi(e)        : 1;
+        s_cs_str  = ((e = getenv("TD5RE_RT_CONTACT_STRENGTH")) && e[0]) ? (float)atof(e) : 0.40f;
+        s_cs_cone = ((e = getenv("TD5RE_RT_CONTACT_CONE"))     && e[0]) ? (float)atof(e) : 40.0f;
+        s_cs_dist = ((e = getenv("TD5RE_RT_CONTACT_DIST"))     && e[0]) ? (float)atof(e) : 1500.0f;
+        if (s_cs_str  < 0.0f) s_cs_str = 0.0f;
+        if (s_cs_str  > 1.0f) s_cs_str = 1.0f;
+        if (s_cs_cone < 1.0f) s_cs_cone = 1.0f;
+        if (s_cs_dist < 1.0f) s_cs_dist = 1.0f;
+        TD5_LOG_I(LOG_TAG, "light2: contact-shadow mode=%d str=%.2f cone=%.0f dist=%.0f",
+                  s_cs_mode, (double)s_cs_str, (double)s_cs_cone, (double)s_cs_dist);
+    }
+    int synth_contact = 0;
+    if (td5_rt_active() && s_cs_mode &&
+        (s_cs_mode >= 2 || !sky_cls)) {
+        sun[0] = 0.0f; sun[1] = 1.0f; sun[2] = 0.0f;   /* zenith (reconstruction +Y up) */
+        synth_contact = 1;
+    }
+    if (!sky_cls && !synth_contact) return;      /* no directional light (tunnel) */
 
     float strength = ((float)td5_light2_shadow_strength() / 100.0f) * dom;
     float cone_scale = 1.0f;                      /* params2.w: 1 = default ~0.7deg */
@@ -418,6 +454,10 @@ void td5_render_apply_shadow_pass(int vp_x, int vp_y)
         cone_scale = sun_overcast_cone();         /* wide penumbra */
         float cap = sun_overcast_strength();
         if (strength > cap) strength = cap;       /* soft, low-contrast */
+    }
+    if (synth_contact) {
+        strength   = s_cs_str;                    /* fixed modest darkening (dom-independent) */
+        cone_scale = s_cs_cone;                   /* wide soft contact penumbra */
     }
     if (strength <= 0.01f) return;
 
@@ -456,6 +496,9 @@ void td5_render_apply_shadow_pass(int vp_x, int vp_y)
         }
         shadow_dist = s_rt_shadow_dist;
     }
+    /* [OVERCAST CONTACT SHADOW] Short vertical throw: only occluders close overhead
+     * (the car) cast, so open road / tunnel ceilings / high bridges do not darken. */
+    if (synth_contact) shadow_dist = s_cs_dist;
 
     td5_plat_render_apply_shadow(cam, basis9,
                                  s_focal_length, s_center_x, s_center_y,
