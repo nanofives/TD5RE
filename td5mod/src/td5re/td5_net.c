@@ -294,7 +294,15 @@ typedef struct CarInfoMsg {          /* S31: client announces its car pick */
     int32_t     car;
     int32_t     paint;
     int32_t     td6_color;          /* [S31] chosen TD6 body RGB (-1 = none) */
+    /* [SECONDARY PAINT NET 2026-09-12, proto v2] appended; older builds are
+     * rejected at the JOIN door by the proto-version check, but keep the
+     * receiver size-tolerant (accept the v0 body, default these) for safety. */
+    int32_t     td6_color2;         /* chosen TD6 secondary RGB (-1 = solid) */
+    int32_t     td6_pattern;        /* paint pattern (0=SOLID..3=SPLIT) */
 } CarInfoMsg;
+/* Wire size of a pre-secondary-paint CarInfoMsg (through td6_color). Receivers
+ * accept >= this and default the trailing two fields. */
+#define WS2_CARINFO_MSG_V0_SIZE ((int)sizeof(CarInfoMsg) - 8)
 
 typedef struct PingMsg {
     uint32_t    magic;
@@ -331,6 +339,10 @@ static volatile LONG s_race_config_seq = 0;  /* [SEC 2026-06-15] seqlock guardin
 static int32_t s_slot_car[TD5_NET_MAX_PLAYERS]   = { -1, -1, -1, -1, -1, -1 };
 static int32_t s_slot_paint[TD5_NET_MAX_PLAYERS] = { 0 };
 static int32_t s_slot_td6_color[TD5_NET_MAX_PLAYERS] = { -1, -1, -1, -1, -1, -1 };
+/* [SECONDARY PAINT NET 2026-09-12] Per-slot TD6 secondary colour + pattern,
+ * announced alongside the primary colour (see s_slot_td6_color). */
+static int32_t s_slot_td6_color2[TD5_NET_MAX_PLAYERS] = { -1, -1, -1, -1, -1, -1 };
+static int32_t s_slot_td6_pattern[TD5_NET_MAX_PLAYERS] = { 0 };
 static WSAEVENT     s_ws2_event = WSA_INVALID_EVENT;
 static int          s_ws2_started;
 static int          s_ws2_socket_bound;
@@ -995,6 +1007,8 @@ static void handle_disconnect(uint32_t sender, const void *data, int size)
                 if (s_roster[i].active) n++;
             s_player_count = n;
             s_slot_td6_color[slot] = -1;
+            s_slot_td6_color2[slot] = -1;
+            s_slot_td6_pattern[slot] = 0;
             ws2_broadcast_roster_info();
             /* Mid-race: the lockstep barrier may be blocked waiting on this
              * client's input. Wake it -- the freed slot is no longer counted,
@@ -2140,15 +2154,23 @@ static void ws2_handle_game_control(const void *buf, int size, const SOCKADDR_IN
         break;
 
     case WS2_DISC_CAR_INFO:
-        /* S31: a client announced its car/paint pick. Host-only. */
-        if (s_is_host && size >= (int)sizeof(CarInfoMsg)) {
+        /* S31: a client announced its car/paint pick. Host-only. Accept the v0
+         * body (through td6_color) and default the secondary-paint fields, so a
+         * short packet still records the primary colour. */
+        if (s_is_host && size >= WS2_CARINFO_MSG_V0_SIZE) {
             const CarInfoMsg *cm = (const CarInfoMsg *)buf;
+            int has_secondary = (size >= (int)sizeof(CarInfoMsg));
             if (cm->slot < TD5_NET_MAX_PLAYERS) {
-                s_slot_car[cm->slot]       = cm->car;
-                s_slot_paint[cm->slot]     = cm->paint;
-                s_slot_td6_color[cm->slot] = cm->td6_color;
-                TD5_LOG_I(NET_LOG, "CAR_INFO: slot %u car=%d paint=%d color=%06X",
-                          cm->slot, cm->car, cm->paint, (unsigned)cm->td6_color);
+                s_slot_car[cm->slot]        = cm->car;
+                s_slot_paint[cm->slot]      = cm->paint;
+                s_slot_td6_color[cm->slot]  = cm->td6_color;
+                s_slot_td6_color2[cm->slot] = has_secondary ? cm->td6_color2  : -1;
+                s_slot_td6_pattern[cm->slot]= has_secondary ? cm->td6_pattern :  0;
+                TD5_LOG_I(NET_LOG,
+                          "CAR_INFO: slot %u car=%d paint=%d color=%06X color2=%06X pat=%d",
+                          cm->slot, cm->car, cm->paint, (unsigned)cm->td6_color,
+                          (unsigned)s_slot_td6_color2[cm->slot],
+                          s_slot_td6_pattern[cm->slot]);
             }
         }
         break;
@@ -3602,22 +3624,27 @@ int td5_net_enumerate_sessions(void)
 /** Record this machine's car/paint pick; clients also announce it to the
  *  host over the control channel. Called on every lobby entry (including
  *  the return from CHANGE CAR). */
-void td5_net_set_local_car(int car_index, int paint_index, int td6_color)
+void td5_net_set_local_car(int car_index, int paint_index, int td6_color,
+                           int td6_color2, int td6_pattern)
 {
     if (s_local_slot >= 0 && s_local_slot < TD5_NET_MAX_PLAYERS) {
-        s_slot_car[s_local_slot]       = car_index;
-        s_slot_paint[s_local_slot]     = paint_index;
-        s_slot_td6_color[s_local_slot] = td6_color;
+        s_slot_car[s_local_slot]        = car_index;
+        s_slot_paint[s_local_slot]      = paint_index;
+        s_slot_td6_color[s_local_slot]  = td6_color;
+        s_slot_td6_color2[s_local_slot] = td6_color2;
+        s_slot_td6_pattern[s_local_slot]= td6_pattern;
     }
     if (!s_is_host && s_ws2_socket != INVALID_SOCKET && s_local_slot >= 0) {
         CarInfoMsg msg;
         memset(&msg, 0, sizeof(msg));
-        msg.magic     = WS2_DISCOVERY_MAGIC;
-        msg.disc_type = WS2_DISC_CAR_INFO;
-        msg.slot      = (uint32_t)s_local_slot;
-        msg.car       = car_index;
-        msg.paint     = paint_index;
-        msg.td6_color = td6_color;
+        msg.magic       = WS2_DISCOVERY_MAGIC;
+        msg.disc_type   = WS2_DISC_CAR_INFO;
+        msg.slot        = (uint32_t)s_local_slot;
+        msg.car         = car_index;
+        msg.paint       = paint_index;
+        msg.td6_color   = td6_color;
+        msg.td6_color2  = td6_color2;
+        msg.td6_pattern = td6_pattern;
         sendto(s_ws2_socket, (const char *)&msg, (int)sizeof(msg), 0,
                (const struct sockaddr *)&s_ws2_host_addr,
                (int)sizeof(s_ws2_host_addr));
@@ -3630,6 +3657,22 @@ int td5_net_get_slot_td6_color(int slot)
     if (slot < 0 || slot >= TD5_NET_MAX_PLAYERS)
         return -1;
     return s_slot_td6_color[slot];
+}
+
+/** The latest announced TD6 SECONDARY colour for a slot (-1 = solid). */
+int td5_net_get_slot_td6_color2(int slot)
+{
+    if (slot < 0 || slot >= TD5_NET_MAX_PLAYERS)
+        return -1;
+    return s_slot_td6_color2[slot];
+}
+
+/** The latest announced TD6 paint PATTERN for a slot (0=SOLID..3=SPLIT). */
+int td5_net_get_slot_td6_pattern(int slot)
+{
+    if (slot < 0 || slot >= TD5_NET_MAX_PLAYERS)
+        return 0;
+    return s_slot_td6_pattern[slot];
 }
 
 /** Host: the latest announced car/paint for a slot (-1 car = none yet). */

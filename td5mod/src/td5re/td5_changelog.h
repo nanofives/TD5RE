@@ -45,6 +45,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "  slides in." },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 12 (car paint)" },
+    { CL_ITEM,    "SELECT CAR: two-tone / stripe / split paint now shows" },
+    { CL_ITEM,    "  correctly on BOTH the angled and side car previews," },
+    { CL_ITEM,    "  not just the side one." },
+    { CL_ITEM,    "Multiplayer: your second paint colour and pattern are" },
+    { CL_ITEM,    "  now sent to other players, so remote cars race in" },
+    { CL_ITEM,    "  the livery you picked." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 09 (auto track: round 22 -- gore/median)" },
     { CL_ITEM,    "Fork medians now reach BOTH carriageways. On an" },
     { CL_ITEM,    "  uneven split the median hugged the branch side and" },

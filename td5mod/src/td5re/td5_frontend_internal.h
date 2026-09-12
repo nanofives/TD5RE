@@ -253,6 +253,17 @@ enum {
 #define TD6_PAT_STRIPE_HI   0.58f
 #define TD6_PAT_SPLIT_U     0.50f
 
+/* The carpicpaint overlay photo stacks TWO body views vertically: the 3/4
+ * (diagonal) view in the top half and the side (straight-on) view in the bottom
+ * half. The transparent gap between the two silhouettes sits at v=0.48-0.50 on
+ * every ported car, so v=0.50 divides them cleanly. The menu preview must apply
+ * the pattern WITHIN each view band, else a V-based split (TWO-TONE) divides
+ * BETWEEN the two views: the whole diagonal car comes out one colour and the
+ * whole side car the other, instead of each car reading as an upper/lower
+ * two-tone (mirrors the in-race bake, which normalises to each body's own
+ * bounding box). */
+#define TD6_PREVIEW_VIEWS   2
+
 extern int s_paint_target;          /* 0 = editing MAIN colour, 1 = SECONDARY */
 const char *td6_pattern_name(int pat);
 

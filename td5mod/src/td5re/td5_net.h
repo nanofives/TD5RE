@@ -115,8 +115,12 @@ int  td5_net_get_enum_session_info(int index, int *player_count, int *max_player
  *   1 -- first versioned protocol. Adds DiscoveryMsg.proto_version and
  *        TD5_NetRaceConfig.{proto_version,track_fingerprint}. Every build
  *        before this is version 0 and is refused (it cannot parse these
- *        fields, and its TD5_NetRaceConfig is 428 bytes, not 436). */
-#define TD5_NET_PROTO_VERSION 1
+ *        fields, and its TD5_NetRaceConfig is 428 bytes, not 436).
+ *   2 -- TD6 secondary paint over the net. Adds TD5_NetRaceConfig
+ *        .{td6_color2,td6_pattern}[6] (436 -> 484) and the CarInfoMsg
+ *        .{td6_color2,td6_pattern} fields, so remote cars render the chosen
+ *        two-tone / stripe / split livery instead of a solid primary. */
+#define TD5_NET_PROTO_VERSION 2
 
 /* --- S31 network race config (2026-06-10) -------------------------------
  * Host-authoritative race parameters broadcast in the DXPSTART payload so
@@ -184,16 +188,28 @@ typedef struct TD5_NetRaceConfig {
      * not the level file CONTENT -- two peers with the same manifest but
      * differently-edited level geometry are NOT caught by this. */
     uint32_t track_fingerprint;
+    /* [SECONDARY PAINT NET 2026-09-12, proto v2] Per-slot TD6 secondary body
+     * colour + pattern, so remote cars render the chosen two-tone / stripe /
+     * split livery instead of only the primary. Purely cosmetic (the painted
+     * skin is baked identically on every peer), but replicated wholesale with
+     * the rest of the config. -1 colour / 0 pattern = solid. Appended, all
+     * int32, same wire rules as the fields above. */
+    int32_t  td6_color2[6];       /* per-slot TD6 secondary body RGB (-1 = solid) */
+    int32_t  td6_pattern[6];      /* per-slot paint pattern (0=SOLID..3=SPLIT) */
 } TD5_NetRaceConfig;
 /* WIRE CONTRACT -- host->client race setup, exchanged by whole-struct memcpy
  * of sizeof(TD5_NetRaceConfig). All-int32 layout by design (see note above),
  * so it is identical on 32- and 64-bit builds. Adding a member changes the
  * protocol; bump BOTH this number and TD5_NET_PROTO_VERSION deliberately and
- * in step with both endpoints. 428 -> 436 at proto version 1. */
-_Static_assert(sizeof(TD5_NetRaceConfig) == 436, "TD5_NetRaceConfig is a wire format -- size must not change");
+ * in step with both endpoints. 428 -> 436 at proto version 1; 436 -> 484 at
+ * proto version 2 (td6_color2[6] + td6_pattern[6]). */
+_Static_assert(sizeof(TD5_NetRaceConfig) == 484, "TD5_NetRaceConfig is a wire format -- size must not change");
 
-void td5_net_set_local_car(int car_index, int paint_index, int td6_color);
+void td5_net_set_local_car(int car_index, int paint_index, int td6_color,
+                           int td6_color2, int td6_pattern);
 int  td5_net_get_slot_td6_color(int slot);
+int  td5_net_get_slot_td6_color2(int slot);
+int  td5_net_get_slot_td6_pattern(int slot);
 int  td5_net_get_slot_car(int slot, int *car_index, int *paint_index);
 int  td5_net_get_race_config(TD5_NetRaceConfig *out);
 /* [MP RESTART RE-ROLL 2026-07-04] Overwrite just the archived rng_seed field

@@ -1457,9 +1457,13 @@ void Screen_NetworkLobby(void) {
         s_mp_net_config = 0;
 
         /* S31: (re)announce this machine's car pick to the host -- runs on
-         * every lobby entry, including the return from CHANGE CAR. */
+         * every lobby entry, including the return from CHANGE CAR.
+         * [SECONDARY PAINT NET 2026-09-12] carry the secondary colour + pattern
+         * too so remote cars render the chosen two-tone / stripe / split. */
         td5_net_set_local_car(s_selected_car, s_selected_paint,
-                              g_td5.ini.td6_paint_color);
+                              g_td5.ini.td6_paint_color,
+                              g_td5.ini.td6_paint_color2,
+                              g_td5.ini.td6_paint_pattern);
         s_car_announce_done = (td5_net_local_slot() >= 0);
 
         /* Kick check: if kicked flag set, destroy session, go to SessionLocked */
@@ -1570,7 +1574,9 @@ void Screen_NetworkLobby(void) {
          * JOIN handshake hasn't assigned our slot yet. */
         if (!s_car_announce_done && td5_net_local_slot() >= 0) {
             td5_net_set_local_car(s_selected_car, s_selected_paint,
-                                  g_td5.ini.td6_paint_color);
+                                  g_td5.ini.td6_paint_color,
+                                  g_td5.ini.td6_paint_color2,
+                                  g_td5.ini.td6_paint_pattern);
             s_car_announce_done = 1;
         }
 
@@ -2124,6 +2130,11 @@ void Screen_NetworkLobby(void) {
                      * the painter treats as no-op, so machines that never
                      * announced a colour render identically everywhere. */
                     cfg.td6_color[slot]   = (col >= 0) ? col : 0x00FFFFFF;
+                    /* [SECONDARY PAINT NET 2026-09-12] replicate the secondary
+                     * colour + pattern so remote cars get the two-tone livery
+                     * (-1 / 0 = solid, applied by td5_asset_set_human_td6_paint). */
+                    cfg.td6_color2[slot]  = td5_net_get_slot_td6_color2(slot);
+                    cfg.td6_pattern[slot] = td5_net_get_slot_td6_pattern(slot);
                     if (td5_net_get_slot_car(slot, &c, &p) && c >= 0) {
                         cfg.car_index[slot]   = c;
                         cfg.paint_index[slot] = p;
