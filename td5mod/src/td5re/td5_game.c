@@ -1162,6 +1162,14 @@ static const SSW_NavStep k_ssw_disp_opts[]  = { { TD5_SCREEN_MAIN_MENU, 4 },
                                                 { TD5_SCREEN_OPTIONS_HUB, 2 } };
 static const SSW_NavStep k_ssw_2p_opts[]    = { { TD5_SCREEN_MAIN_MENU, 4 },
                                                 { TD5_SCREEN_OPTIONS_HUB, 3 } };
+/* [LOW-END PERF 2026-09-12] PERFORMANCE sub-screen: hub row 2 = GRAPHICS OPTIONS,
+ * then Display row 7 = the "PERFORMANCE ->" nav row (rows: 0 Display Mode, 1 VSync,
+ * 2 Fogging, 3 Speed Readout, 4 Show FPS, 5 Camera Damping, 6 LIGHTING, 7 PERFORMANCE,
+ * 8 OK). Without this route --StartScreen=53 cannot land and the selftest screen
+ * walk -- the frontend's only automated regression net -- never covers the screen. */
+static const SSW_NavStep k_ssw_perf_opts[]  = { { TD5_SCREEN_MAIN_MENU, 4 },
+                                                { TD5_SCREEN_OPTIONS_HUB, 2 },
+                                                { TD5_SCREEN_DISPLAY_OPTIONS, 7 } };
 /* Race type menu: 0=Single Race (→ car selection with game_type=0). */
 static const SSW_NavStep k_ssw_car_sel[]    = { { TD5_SCREEN_MAIN_MENU, 0 },
                                                 { TD5_SCREEN_RACE_TYPE_MENU, 0 } };
@@ -1197,6 +1205,7 @@ static const SSW_NavStep *startscreen_route(int target, int *out_len)
     case TD5_SCREEN_CONTROL_OPTIONS:    SSW_ROUTE(k_ssw_ctrl_opts);
     case TD5_SCREEN_SOUND_OPTIONS:      SSW_ROUTE(k_ssw_sound_opts);
     case TD5_SCREEN_DISPLAY_OPTIONS:    SSW_ROUTE(k_ssw_disp_opts);
+    case TD5_SCREEN_PERFORMANCE_OPTIONS: SSW_ROUTE(k_ssw_perf_opts);  /* [LOW-END PERF] */
     case TD5_SCREEN_TWO_PLAYER_OPTIONS: SSW_ROUTE(k_ssw_2p_opts);
     case TD5_SCREEN_CAR_SELECTION:      SSW_ROUTE(k_ssw_car_sel);
     case TD5_SCREEN_HIGH_SCORE:         SSW_ROUTE(k_ssw_hiscore);
