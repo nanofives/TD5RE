@@ -22,6 +22,7 @@
  */
 
 #include "td5_hud.h"
+#include "td5_page_map.h"   /* HUD_WHITE_TEX_PAGE + shared D3D page layout */
 #include "td5_math_util.h"
 #include "td5_platform.h"
 #include "td5_asset.h"
@@ -639,8 +640,8 @@ static int s_pause_vui_line_count;
 
 /* Pause overlay dimmer state.
  * Must NOT be 898 (TD5_SHARED_FONT_PAGE) — that would clobber BodyText.tga
- * and cause white boxes on all frontend text after returning from a race. */
-#define HUD_WHITE_TEX_PAGE 899
+ * and cause white boxes on all frontend text after returning from a race.
+ * HUD_WHITE_TEX_PAGE now lives in td5_page_map.h (value unchanged: 899). */
 static int s_hud_white_tex_uploaded;
 
 static void hud_log_atlas_status(const char *name, const TD5_AtlasEntry *entry)

@@ -45,6 +45,7 @@
 #endif
 #include <string.h>
 #include "td5_render_internal.h"  /* PRIVATE core<->effects seam */
+#include "td5_page_map.h"         /* WHEEL_RIM_TEX_BASE / TD6_PROP_TEX_BASE + layout */
 
 /* ======== [split] per-actor effects: shadow .. wheels (moved verbatim from td5_render.c) ======== */
 /* --- Vehicle Shadow Projection (0x40C120 / 0x40BB70) ---
@@ -1027,8 +1028,8 @@ static int s_td6_pmesh_count = 0;
  * but that overlapped the ALLOY-RIM pool (WHEEL_RIM_TEX_BASE 994..1001) and the
  * envmap (990-993) -> cars showed the crate/redtape prop texture on their wheels.
  * 994-1001 rims, 984 font, 990-993 envmap, 1020 sky, 1021 fallback, cars 800-843,
- * track <=983 — so 1002-1007 is the free 6-page window for props. */
-#define TD6_PROP_TEX_BASE 1002
+ * track <=983 — so 1002-1007 is the free 6-page window for props.
+ * TD6_PROP_TEX_BASE now lives in td5_page_map.h (value unchanged: 1002). */
 #define TD6_PROP_TEX_N 5
 static const char *k_td6_prop_srcs[TD6_PROP_TEX_N] = {
     "re/assets/props/td6_bench.png",     /* 0 BENCH    */
@@ -1048,6 +1049,8 @@ static const char *k_td6_prop_srcs[TD6_PROP_TEX_N] = {
  * rendered with the red/white tape texture. Corrected to match the row above. */
 static const int k_td6_prop_texidx[8] = { -1, -1, 0, 1, 1, 2, 3, 4 };
 #define TD6_PROP_WHITE_PAGE (TD6_PROP_TEX_BASE + TD6_PROP_TEX_N)  /* dedicated 1x1 white for untextured props */
+_Static_assert(TD6_PROP_TEX_N + 1 <= TD6_PROP_TEX_COUNT,
+               "TD6 props (incl. white) exceed the range reserved in td5_page_map.h");
 static int s_td6_prop_pool_loaded = 0;
 static void td6_prop_load_pool(void)
 {
@@ -2538,8 +2541,8 @@ static void wheel_lookup_static_hed(void)
  * dedicated pages 994.. (clear of cars 800-843, frontend <=960, fonts 970-971,
  * envmap 990-993, sky 1020). Chosen for visual variety: snowflake, 5-spoke
  * star, chrome multi-spoke, complex, classic 5-spoke, dark thin, steel,
- * 5-spoke smooth. */
-#define WHEEL_RIM_TEX_BASE 994
+ * 5-spoke smooth.
+ * WHEEL_RIM_TEX_BASE now lives in td5_page_map.h (value unchanged: 994). */
 static const char *k_wheel_rim_srcs[] = {
     "re/assets/cars/sky/carhub0.png",
     "re/assets/cars/bmw/carhub0.png",
@@ -2551,6 +2554,9 @@ static const char *k_wheel_rim_srcs[] = {
     "re/assets/cars/mus/carhub0.png",
 };
 #define WHEEL_STYLE_COUNT ((int)(sizeof(k_wheel_rim_srcs) / sizeof(k_wheel_rim_srcs[0])))
+_Static_assert(sizeof(k_wheel_rim_srcs) / sizeof(k_wheel_rim_srcs[0])
+               <= WHEEL_RIM_TEX_COUNT,
+               "wheel-rim styles exceed the range reserved in td5_page_map.h");
 
 static int8_t s_wheel_style[TD5_MAX_TOTAL_ACTORS];   /* per-slot, -1 = unset */
 static int    s_wheel_style_init = 0;

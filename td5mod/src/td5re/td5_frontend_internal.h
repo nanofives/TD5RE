@@ -19,6 +19,7 @@
 
 #include "td5_types.h"
 #include "td5_credits.h"                 /* K_CREDIT_MUGSHOT_COUNT */
+#include "td5_page_map.h"                 /* FE_SURFACE_PAGE_BASE + shared D3D page layout */
 #include "../../ddraw_wrapper/src/wrapper.h"   /* Backend_* API + opaque handles, g_backend */
 
 /* Per-module public APIs (2026-07-09, A9 refactor): real headers instead of
@@ -197,7 +198,24 @@ typedef struct {
 
 /* ---- frontend surface cache ---- */
 #define FE_MAX_SURFACES    31
-#define FE_SURFACE_PAGE_BASE 900  /* texture pages 900-931 reserved for frontend */
+/* FE_SURFACE_PAGE_BASE now lives in td5_page_map.h (value unchanged: 900). */
+_Static_assert(FE_MAX_SURFACES <= FE_SURFACE_PAGE_COUNT,
+               "frontend surfaces exceed the range reserved in td5_page_map.h");
+
+/* Audit the frontend-owned shared-page block (888..983, defined above) against
+ * the centralized layout: it must sit above the static atlas, below the envmap
+ * pages, and clear of the HUD white page and the FE surface block. These lock
+ * the whole reserved zone at build time (the pause-menu facade-texture fix,
+ * 2026-09-13). */
+_Static_assert(STATIC_ATLAS_BASE + STATIC_ATLAS_PAGE_COUNT <= SHARED_PAGE_MIN,
+               "static atlas overruns the frontend shared-page block");
+_Static_assert(SHARED_PAGE_FONT < HUD_WHITE_TEX_PAGE,
+               "shared font page collides with HUD white page");
+_Static_assert(FE_SURFACE_PAGE_BASE + FE_SURFACE_PAGE_COUNT
+               <= SHARED_PAGE_CURSOR_MSDF,
+               "FE surface block collides with the MSDF/title shared pages");
+_Static_assert(SHARED_PAGE_PAUSEFONT_SDF < ENVMAP_TEXTURE_PAGE_BASE,
+               "frontend shared-page block runs into the envmap pages");
 
 typedef struct {
     int in_use;

@@ -14,6 +14,7 @@
 #define TD5_RENDER_INTERNAL_H
 
 #include "td5_math_util.h"
+#include "td5_page_map.h"   /* ENVMAP_TEXTURE_PAGE_BASE + shared D3D page layout */
 
 /* ------------------------------------------------------------------------
  * Render state vocabulary hoisted VERBATIM from td5_render.c (P1-C):
@@ -536,8 +537,10 @@ extern int s_actor_draw_alpha;
  * ------------------------------------------------------------------------ */
 #define TT_GHOST_ALPHA 130
 #define TD6_CAR_ZFIX_PULL_VIEWZ   (3.0f)   /* toward-camera, view-z units        */
-#define ENVMAP_TEXTURE_PAGE_BASE 990
+/* ENVMAP_TEXTURE_PAGE_BASE now lives in td5_page_map.h (value unchanged: 990). */
 #define ENVMAP_MAX_PAGES         4
+_Static_assert(ENVMAP_MAX_PAGES <= ENVMAP_TEXTURE_PAGE_COUNT,
+               "ENVMAP uses more pages than reserved in td5_page_map.h");
 typedef void (*PrimDispatchFn)(const TD5_PrimitiveCmdRT *cmd, TD5_MeshVertex *base_verts);
 extern const PrimDispatchFn s_dispatch_table[7];
 

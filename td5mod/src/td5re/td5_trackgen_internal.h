@@ -46,6 +46,7 @@
 #include "td5_jobs.h"          /* [S2c] parallel terrain pre-pass */
 #include "td5_track.h"         /* streamed-scenery ingest (td5_track_scenery_*) */
 #include "td5_platform.h"
+#include "td5_page_map.h"      /* TD5_PAGE_LEVEL_CEIL: the level/reserved boundary */
 #include "td5_config.h"
 #include "td5_tg_real_tex.h"   /* real TD5 texture pages (level014), opt-in */
 #include "td5_tg_real_tex_city.h"  /* extra city facades: SF/Tokyo/Moscow */
@@ -612,6 +613,18 @@ typedef char tg_rs_pages_fit[(8 <= TD5_TG_RS_PER_CLASS) ? 1 : -1];
 typedef char tg_lm_pages_fit[(TD5_TG_PREFAB_PAGES == TD5_TG_LM_PAGES) ? 1 : -1];
 
 #define TD5_TG_PAGE_COUNT     (TD5_TG_PAGE_LM_BASE + TD5_TG_LM_PAGES)
+/* LOAD-BEARING GUARD (pause-menu facade-texture fix, 2026-09-13): the auto
+ * generated track occupies D3D pages [0 .. TD5_TG_PAGE_COUNT-1]. Every port
+ * reserved range (car skins, static atlas, HUD, frontend, props) starts at
+ * TD5_PAGE_LEVEL_CEIL. If the generator ever grows past that boundary it would
+ * silently overwrite reserved art (the old static-atlas-at-700 collision that
+ * smeared a building texture across the pause menu). This assert converts that
+ * silent corruption into a BUILD FAILURE: when it trips, move the whole
+ * reserved block up in td5_page_map.h (raise TD5_PAGE_LEVEL_CEIL and the
+ * bases together) rather than shrinking the generator. */
+_Static_assert(TD5_TG_PAGE_COUNT <= TD5_PAGE_LEVEL_CEIL,
+               "auto-track page count reached the reserved D3D page zone — "
+               "raise TD5_PAGE_LEVEL_CEIL and the reserved bases in td5_page_map.h");
 #define TD5_TG_MAX_VERTICES   64000
 #define TD5_TG_MAX_SPANS      3000
 /* Down-track spans per MODELS.DAT display-list entry (entry = span >> 2).

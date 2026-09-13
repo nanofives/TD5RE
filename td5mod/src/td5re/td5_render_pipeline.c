@@ -13,6 +13,7 @@
  * ======================================================================== */
 
 #include "td5_render.h"
+#include "td5_page_map.h"   /* HUD_WHITE_TEX_PAGE (shared D3D page layout) */
 #include "td5_camera.h"
 #include "td5_platform.h"
 #include "td5_rcmd.h"   /* Phase B render-transform: per-pane CPU command recording */
@@ -1104,10 +1105,11 @@ void td5_render_recompute_frustum_for_trackside(void) {
  *   0x4300199a = 128.1f    (quad Z) */
 static float s_radial_pulse_anim;  /* orig [0x004B08C0] _g_hudRadialPulseAnimState */
 
-/* Mirror of td5_hud.c HUD_WHITE_TEX_PAGE — the 1x1 white texture page uploaded
- * during HUD init, used to render flat-color (untextured-equivalent) HUD quads
- * through the texture-modulating translucent path. */
-#define TD5_HUD_WHITE_TEX_PAGE 899
+/* The 1x1 white texture page uploaded during HUD init, used to render
+ * flat-color (untextured-equivalent) HUD quads through the texture-modulating
+ * translucent path. Aliased to the shared td5_page_map.h value so the two can
+ * never drift. */
+#define TD5_HUD_WHITE_TEX_PAGE HUD_WHITE_TEX_PAGE
 
 void td5_render_radial_pulse(float dt)
 {
