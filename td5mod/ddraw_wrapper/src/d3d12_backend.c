@@ -223,6 +223,8 @@ static D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle(ID3D12DescriptorHeap *h, UINT idx,
 static D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle(ID3D12DescriptorHeap *h, UINT idx, UINT size);
 static void d3d12_flush_uploads(void);
 static void d3d12_diag(const char *fmt, ...);
+static void d3d12_apply_render_scale(int *w, int *h);  /* [LOW-END PERF] render-scale */
+static int  s_createdev_full_w = 0, s_createdev_full_h = 0; /* [LOW-END PERF] full window client at last CreateDevice */
 static void d3d12_fullscreen_blit(BackendTexture *src);
 static int  d3d12_gbuf_debug(void);
 
@@ -2460,8 +2462,13 @@ static LRESULT CALLBACK D3D12DisplayWindowProc(HWND hwnd, UINT msg, WPARAM wp, L
      * ourselves (else FLIP_DISCARD shows black bars in a shrunk window). */
     if (msg == WM_SIZE && wp != SIZE_MINIMIZED && g_d3d12.device && g_d3d12.swapchain) {
         RECT rc;
-        if (GetClientRect(hwnd, &rc) && rc.right > 0 && rc.bottom > 0)
-            Backend_Reset((int)rc.right, (int)rc.bottom, g_backend.bpp, g_backend.windowed);
+        if (GetClientRect(hwnd, &rc) && rc.right > 0 && rc.bottom > 0) {
+            /* [LOW-END PERF] rc is the window client; shrink to the internal render
+             * size before resizing the swapchain (Backend_Reset no longer scales). */
+            int rw = (int)rc.right, rh = (int)rc.bottom;
+            d3d12_apply_render_scale(&rw, &rh);
+            Backend_Reset(rw, rh, g_backend.bpp, g_backend.windowed);
+        }
     }
     /* Per-Monitor-V2 DPI (the app opts into it): dragging the window to a monitor
      * of different DPI sends WM_DPICHANGED with a suggested rect (lParam). Apply
@@ -2518,6 +2525,44 @@ static HWND d3d12_create_display_window(int client_w, int client_h)
 
 /* ---- device lifecycle -------------------------------------------------- */
 
+/* [LOW-END PERF 2026-09-12] Internal render-scale percentage (TD5RE_RENDER_SCALE,
+ * default 100). 75/50 shrink the swapchain + every backend RT + the game's render
+ * dims (via g_backend.target_*) below the window; the flip-model swapchain's
+ * DXGI_SCALING_STRETCH upscales the smaller backbuffer to the full window on
+ * Present. Cheapest genuine iGPU lever: fewer shaded pixels everywhere, window
+ * unchanged. Read once (env fixed per process). Only 100/75/50 honoured. */
+static int d3d12_render_scale_pct(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        const char *e = getenv("TD5RE_RENDER_SCALE");
+        s = (e && e[0]) ? atoi(e) : 100;
+        if (s != 100 && s != 75 && s != 50) s = 100;
+    }
+    return s;
+}
+
+/* Public: the internal render-scale percentage, so the platform layer can size
+ * the game's render dims (g_render_width) to match the scaled swapchain. */
+int Backend_RenderScalePct(void) { return d3d12_render_scale_pct(); }
+
+/* Scale a window-client (w,h) to the internal render size. Clamped to a sane
+ * floor so a bad value can't create a degenerate swapchain. */
+static void d3d12_apply_render_scale(int *w, int *h)
+{
+    int rs = d3d12_render_scale_pct();
+    if (rs == 100 || !w || !h || *w <= 0 || *h <= 0) return;
+    {
+        int sw = (*w * rs) / 100;
+        int sh = (*h * rs) / 100;
+        if (sw < 320) sw = 320;
+        if (sh < 240) sh = 240;
+        d3d12_diag("render-scale %d%%: internal %dx%d (window client %dx%d)",
+                   rs, sw, sh, *w, *h);
+        *w = sw; *h = sh;
+    }
+}
+
 int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed)
 {
     IDXGIFactory4 *factory = NULL;
@@ -2572,7 +2617,19 @@ int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed
         }
     }
 
-    /* Debug layer + DRED under TD5RE_D3D_DEBUG. */
+    /* [LOW-END PERF 2026-09-12] Shrink the render below the window client. The
+     * window was already created at the full requested size above; from here on
+     * width/height are the INTERNAL render size, so the swapchain, depth, default
+     * viewport and g_backend.width/height all follow, while g_backend.target_*
+     * stays the FULL window client (below) — main.c reads it back as the window
+     * size, and plat_resize_native re-derives the scaled render dims from it, so
+     * the window never shrinks. DXGI (flip + STRETCH) upscales to the full window. */
+    {
+        int full_w = width, full_h = height;
+        d3d12_apply_render_scale(&width, &height);
+        s_createdev_full_w = full_w;
+        s_createdev_full_h = full_h;
+    }
     if (Backend_D3DDebugEnabled()) {
         if (SUCCEEDED(D3D12GetDebugInterface(&IID_ID3D12Debug, (void **)&g_d3d12.debug)))
             ID3D12Debug_EnableDebugLayer(g_d3d12.debug);
@@ -2705,8 +2762,14 @@ int Backend_CreateDevice(HWND hwnd, int width, int height, int bpp, int windowed
 
     /* Publish backend-agnostic state to the shared g_backend view. */
     g_backend.hwnd     = hwnd;
-    g_backend.width    = width;
+    g_backend.width    = width;    /* scaled internal render size (swapchain)   */
     g_backend.height   = height;
+    /* [LOW-END PERF] target_* is the FULL window client, NOT the scaled render
+     * size: main.c reads it back to size the window/platform (which must stay
+     * full), and plat_resize_native re-derives the scaled render dims from it via
+     * Backend_RenderScalePct(). Setting it to the scaled size shrank the window. */
+    g_backend.target_width  = (s_createdev_full_w > 0) ? s_createdev_full_w : width;
+    g_backend.target_height = (s_createdev_full_h > 0) ? s_createdev_full_h : height;
     g_backend.bpp      = bpp;
     g_backend.windowed = windowed;
     g_backend.swap_chain = (IDXGISwapChain *)g_d3d12.swapchain;  /* base pointer for HasSwapChain */
@@ -3246,6 +3309,10 @@ int Backend_Reset(int w, int h, int bpp, int windowed)
     HRESULT hr;
     (void)bpp;
     if (!g_d3d12.device || !g_d3d12.swapchain || w <= 0 || h <= 0) return 1;
+    /* [LOW-END PERF] w,h are the INTERNAL render size (already render-scaled by the
+     * caller — CreateDevice, the WM_SIZE proc, or plat_resize_native). Backend_Reset
+     * is a dumb "resize the swapchain to exactly w,h"; DXGI (flip + STRETCH)
+     * upscales the smaller backbuffer to the full window on Present. */
     if ((unsigned)w == g_backend.width && (unsigned)h == g_backend.height) return 1;  /* no change */
 
     d3d12_wait_idle();

@@ -1162,6 +1162,14 @@ static const SSW_NavStep k_ssw_disp_opts[]  = { { TD5_SCREEN_MAIN_MENU, 4 },
                                                 { TD5_SCREEN_OPTIONS_HUB, 2 } };
 static const SSW_NavStep k_ssw_2p_opts[]    = { { TD5_SCREEN_MAIN_MENU, 4 },
                                                 { TD5_SCREEN_OPTIONS_HUB, 3 } };
+/* [LOW-END PERF 2026-09-12] PERFORMANCE sub-screen: hub row 2 = GRAPHICS OPTIONS,
+ * then Display row 7 = the "PERFORMANCE ->" nav row (rows: 0 Display Mode, 1 VSync,
+ * 2 Fogging, 3 Speed Readout, 4 Show FPS, 5 Camera Damping, 6 LIGHTING, 7 PERFORMANCE,
+ * 8 OK). Without this route --StartScreen=53 cannot land and the selftest screen
+ * walk -- the frontend's only automated regression net -- never covers the screen. */
+static const SSW_NavStep k_ssw_perf_opts[]  = { { TD5_SCREEN_MAIN_MENU, 4 },
+                                                { TD5_SCREEN_OPTIONS_HUB, 2 },
+                                                { TD5_SCREEN_DISPLAY_OPTIONS, 7 } };
 /* Race type menu: 0=Single Race (→ car selection with game_type=0). */
 static const SSW_NavStep k_ssw_car_sel[]    = { { TD5_SCREEN_MAIN_MENU, 0 },
                                                 { TD5_SCREEN_RACE_TYPE_MENU, 0 } };
@@ -1197,6 +1205,7 @@ static const SSW_NavStep *startscreen_route(int target, int *out_len)
     case TD5_SCREEN_CONTROL_OPTIONS:    SSW_ROUTE(k_ssw_ctrl_opts);
     case TD5_SCREEN_SOUND_OPTIONS:      SSW_ROUTE(k_ssw_sound_opts);
     case TD5_SCREEN_DISPLAY_OPTIONS:    SSW_ROUTE(k_ssw_disp_opts);
+    case TD5_SCREEN_PERFORMANCE_OPTIONS: SSW_ROUTE(k_ssw_perf_opts);  /* [LOW-END PERF] */
     case TD5_SCREEN_TWO_PLAYER_OPTIONS: SSW_ROUTE(k_ssw_2p_opts);
     case TD5_SCREEN_CAR_SELECTION:      SSW_ROUTE(k_ssw_car_sel);
     case TD5_SCREEN_HIGH_SCORE:         SSW_ROUTE(k_ssw_hiscore);
@@ -8037,8 +8046,12 @@ static void frame_render(void)
         if (!td5_render_photobooth_active())
             td5_render_draw_sun_disc();
 
-        /* VFX: tire tracks, particles */
-        if (!td5_render_photobooth_active()) {
+        /* VFX: tire tracks, particles.
+         * [LOW-END PERF 2026-09-12] PERFORMANCE "PARTICLES & WEATHER" toggle
+         * (g_td5.ini.vfx_enabled, [Display] VFX): 0 skips the whole per-view VFX
+         * draw block — tire tracks, rain streaks, particle pools — which is fill-
+         * heavy on an iGPU. Arcade pads stay (mode-critical). Default 1 = today. */
+        if (!td5_render_photobooth_active() && g_td5.ini.vfx_enabled) {
             td5_vfx_render_tire_tracks();
             /* Weather rain streaks — orig RenderAmbientParticleStreaks @ 0x00446560,
              * called per view in RunRaceFrame's draw phase AFTER the actors + tire
@@ -8052,8 +8065,11 @@ static void frame_render(void)
                 if (wa) td5_vfx_render_ambient_streaks(wa, g_td5.sim_tick_budget, vp);
             }
             td5_vfx_draw_particles(vp);
-            td5_render_arcade_pads();   /* [ARCADE] glowing power-up pads + hazards */
         }
+        /* [ARCADE] glowing power-up pads + hazards — gameplay-critical, drawn
+         * regardless of the VFX toggle (they mark collectibles/obstacles). */
+        if (!td5_render_photobooth_active())
+            td5_render_arcade_pads();
         td5_profile_mark("v_vfx");     /* [perf probe] per-view tire/streak/particle draws */
         td5_render_flush_translucent();
         td5_render_flush_projected_buckets();

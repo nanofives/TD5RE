@@ -1253,6 +1253,14 @@ void render_vehicle_shadow_quad(const TD5_Actor *actor)
      * wheels, and works in dark / night / tunnel just as well as in bright sun.
      * TD5RE_RT_CAR_CAST=1 restores the old RT car-cast (and drops the blob under
      * RT) for A/B. */
+    /* [LOW-END PERF 2026-09-12] PERFORMANCE "CAR SHADOWS" 3-state
+     * (g_td5.ini.car_shadows, [Display] CarShadows): 0 = OFF -> draw no car
+     * shadow at all (skips the raycast grid AND the quad). 1/2 pick the cheap
+     * quad vs the conforming raycast blob; the menu keeps legacy_shadows in sync
+     * (legacy_shadows = (car_shadows==1)) so shadow_raycast_enabled() routes here
+     * without a second knob. Default 2 = conforming (today's look). */
+    if (g_td5.ini.car_shadows == 0)
+        return;
     if (td5_rt_active() && td5_rt_car_cast_shadow())
         return;
     if (shadow_raycast_enabled())

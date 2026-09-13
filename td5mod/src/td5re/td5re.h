@@ -283,6 +283,33 @@ typedef struct TD5_GlobalState {
         int  show_fps;
         int  disp_width;
         int  disp_height;
+        /* [LOW-END PERF 2026-09-12] Performance-options toggles surfaced in the
+         * new PERFORMANCE sub-screen (Screen_PerformanceOptions), each with a
+         * [Display] INI key + --Key=N CLI override + td5_ini_persist_options()
+         * write-back. Defaults reproduce today's look exactly (nothing changes
+         * until a low-end user opts in / hits the LOW-END PRESET). Each genuinely
+         * skips the work at its render gate — see the gate sites named below.
+         *   render_scale    : internal render resolution %, 100/75/50. Seeds the
+         *                     TD5RE_RENDER_SCALE env before Backend_CreateDevice;
+         *                     the backend sizes the swapchain/RT/viewport (and the
+         *                     game's render dims, via g_backend.target_width) to
+         *                     client*scale, DXGI stretches to the full window.
+         *                     Applies at device create (relaunch to change).
+         *   foliage_aa      : 1 = foliage edge AA (default). Seeds TD5RE_FOLIAGE_AA;
+         *                     0 = cheaper hard-cutout sampling (d3d12_backend.c).
+         *   vfx_enabled     : 1 = particles/tire-tracks/weather draw (default);
+         *                     0 skips the whole per-view VFX draw block (td5_game.c).
+         *   world_billboards: 1 = world billboards (trees/banners) (default);
+         *                     0 skips dispatch_billboard emission (td5_render.c).
+         *   car_shadows     : 0 = OFF (no car shadow drawn), 1 = QUAD (cheap flat
+         *                     textured quad), 2 = CONFORMING (raycast blob, default).
+         *                     Master gate in render_vehicle_shadow_quad; the 1/2
+         *                     split also drives legacy_shadows. */
+        int  render_scale;      /* 100 / 75 / 50 (%) */
+        int  foliage_aa;        /* 1 = foliage edge AA (default) */
+        int  vfx_enabled;       /* 1 = particles + weather draw (default) */
+        int  world_billboards;  /* 1 = world billboards (default) */
+        int  car_shadows;       /* 0=off 1=quad 2=conforming (default 2) */
         /* Audio */
         int  sfx_volume;
         int  music_volume;

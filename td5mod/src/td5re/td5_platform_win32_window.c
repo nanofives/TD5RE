@@ -899,7 +899,15 @@ void td5_plat_set_fullscreen(int fullscreen)
 {
     s_fullscreen = fullscreen;
     if (g_backend.swap_chain) {
-        Backend_Reset(s_window_w, s_window_h, s_window_bpp, !fullscreen);
+        /* [LOW-END PERF] s_window_w/h are the full window client; Backend_Reset
+         * takes the internal (render-scaled) size. */
+        int rs = Backend_RenderScalePct();
+        int rw = s_window_w, rh = s_window_h;
+        if (rs != 100) {
+            rw = (s_window_w * rs) / 100; if (rw < 320) rw = 320;
+            rh = (s_window_h * rs) / 100; if (rh < 240) rh = 240;
+        }
+        Backend_Reset(rw, rh, s_window_bpp, !fullscreen);
     }
 }
 
@@ -990,12 +998,31 @@ int td5_plat_enum_display_modes(TD5_DisplayMode *modes, int max_count)
  * which already resized the swap-chain buffers itself. */
 static int plat_resize_native(int width, int height, int bpp, int do_swap_reset)
 {
-    g_backend.target_width  = width;
-    g_backend.target_height = height;
+    /* [LOW-END PERF 2026-09-12] width/height arrive as the WINDOW client size. The
+     * internal render (swapchain, offscreen backbuffer, fe_scale, g_render_width)
+     * is shrunk by TD5RE_RENDER_SCALE; the swapchain's DXGI_SCALING_STRETCH
+     * upscales it to the full window. rw/rh are the scaled render size; the
+     * persisted window size (s_window_w/h below) stays FULL. rs==100 leaves every
+     * value byte-identical to the pre-scale path. */
+    int rs = Backend_RenderScalePct();
+    int rw = width, rh = height;
+    if (rs != 100 && width > 0 && height > 0) {
+        rw = (width * rs) / 100; if (rw < 320) rw = 320;
+        rh = (height * rs) / 100; if (rh < 240) rh = 240;
+    }
+
+    g_backend.target_width  = rw;
+    g_backend.target_height = rh;
 
     if (do_swap_reset && g_backend.swap_chain) {
-        int reset_w = g_backend.width  > 0 ? g_backend.width  : width;
-        int reset_h = g_backend.height > 0 ? g_backend.height : height;
+        int reset_w, reset_h;
+        if (rs != 100) {
+            /* Backend_Reset takes the internal size directly (it no longer scales). */
+            reset_w = rw; reset_h = rh;
+        } else {
+            reset_w = g_backend.width  > 0 ? g_backend.width  : width;
+            reset_h = g_backend.height > 0 ? g_backend.height : height;
+        }
         if (!Backend_Reset(reset_w, reset_h, bpp, 1)) {
             TD5_LOG_E(LOG_TAG, "plat_resize_native: Backend_Reset FAILED");
             return 0;
@@ -1007,7 +1034,7 @@ static int plat_resize_native(int width, int height, int bpp, int do_swap_reset)
      * match the swap chain. */
     if (g_backend.standalone) {
         WrapperSurface *new_bb = WrapperSurface_Create(
-            (DWORD)width, (DWORD)height, (DWORD)bpp,
+            (DWORD)rw, (DWORD)rh, (DWORD)bpp,
             DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE);
         if (new_bb) {
             WrapperSurface *old_bb = g_backend.backbuffer;
@@ -1017,19 +1044,19 @@ static int plat_resize_native(int width, int height, int bpp, int do_swap_reset)
             }
         } else {
             TD5_LOG_W(LOG_TAG, "plat_resize_native: backbuffer recreate FAILED at %dx%d",
-                      width, height);
+                      rw, rh);
         }
     }
 
     /* Frontend-scale: the 2D UI is laid out at a 640x480 virtual resolution and
-     * scaled to native; only the native side changes here. */
-    g_backend.fe_scale.native_w = width;
-    g_backend.fe_scale.native_h = height;
+     * scaled to the internal render size (which DXGI then upscales to the window). */
+    g_backend.fe_scale.native_w = rw;
+    g_backend.fe_scale.native_h = rh;
     if (g_backend.fe_scale.virtual_w > 0 && g_backend.fe_scale.virtual_h > 0 &&
-        width  > g_backend.fe_scale.virtual_w &&
-        height > g_backend.fe_scale.virtual_h) {
-        g_backend.fe_scale.scale_x = (float)width  / (float)g_backend.fe_scale.virtual_w;
-        g_backend.fe_scale.scale_y = (float)height / (float)g_backend.fe_scale.virtual_h;
+        rw > g_backend.fe_scale.virtual_w &&
+        rh > g_backend.fe_scale.virtual_h) {
+        g_backend.fe_scale.scale_x = (float)rw / (float)g_backend.fe_scale.virtual_w;
+        g_backend.fe_scale.scale_y = (float)rh / (float)g_backend.fe_scale.virtual_h;
         g_backend.fe_scale.enabled = 1;
     } else {
         g_backend.fe_scale.scale_x = 1.0f;
@@ -1037,18 +1064,21 @@ static int plat_resize_native(int width, int height, int bpp, int do_swap_reset)
         g_backend.fe_scale.enabled = 0;
     }
 
+    /* Persisted window size stays the FULL client (render-scale must not shrink
+     * the window or leak into [Display] Width/Height). */
     s_window_w   = width;
     s_window_h   = height;
     s_window_bpp = bpp;
 
     /* Sync the source-port render-dim globals (race viewport, HUD layout, VFX
-     * projection, debug overlay). */
+     * projection, debug overlay) to the INTERNAL render size so they match the
+     * scaled swapchain. */
     {
-        g_render_width    = width;
-        g_render_height   = height;
-        g_render_width_f  = (float)width;
-        g_render_height_f = (float)height;
-        td5re_set_render_dims(width, height);
+        g_render_width    = rw;
+        g_render_height   = rh;
+        g_render_width_f  = (float)rw;
+        g_render_height_f = (float)rh;
+        td5re_set_render_dims(rw, rh);
     }
     return 1;
 }

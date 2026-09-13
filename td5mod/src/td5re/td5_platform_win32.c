@@ -456,8 +456,12 @@ void td5_platform_win32_init(void *ddraw4, void *d3ddevice3, void *primary_surfa
      * loops in DisplayWindowProc). Use the backend display window directly
      * so DirectSound and DirectInput get a valid cooperative-level HWND. */
     s_hwnd = g_backend.hwnd ? g_backend.hwnd : Backend_GetDisplayWindow();
-    s_window_w   = g_backend.width;
-    s_window_h   = g_backend.height;
+    /* [LOW-END PERF] Seed the WINDOW size from target_* (the full window client),
+     * NOT g_backend.width (the internal render size, which is smaller under
+     * render-scale). Seeding from the scaled size shrank the window to the render
+     * resolution. When render-scale is 100 these are equal, so no behaviour change. */
+    s_window_w   = (g_backend.target_width  > 0) ? g_backend.target_width  : g_backend.width;
+    s_window_h   = (g_backend.target_height > 0) ? g_backend.target_height : g_backend.height;
     s_window_bpp = g_backend.bpp;
     s_fullscreen = !g_backend.windowed;
     /* Seed the chosen resolution + window mode from the boot state; main.c

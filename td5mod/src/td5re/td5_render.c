@@ -1731,6 +1731,13 @@ static void dispatch_billboard(const TD5_PrimitiveCmdRT *cmd, TD5_MeshVertex *ba
 {
     (void)base_verts;
 
+    /* [LOW-END PERF 2026-09-12] PERFORMANCE "WORLD BILLBOARDS" toggle
+     * (g_td5.ini.world_billboards, [Display] WorldBillboards): 0 skips ALL world
+     * billboard emission (trees, banners, signage) at the mesh-command dispatch —
+     * no depth-sort insert, no projected draw. These are the biggest transparent-
+     * overdraw source on dense tracks. Default 1 = today's scene unchanged. */
+    if (!g_td5.ini.world_billboards) return;
+
     int tri_count  = cmd->triangle_count;
     int quad_count = cmd->quad_count;
     int tex_page   = cmd->texture_page_id;

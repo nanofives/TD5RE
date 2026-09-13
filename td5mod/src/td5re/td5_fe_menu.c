@@ -30,6 +30,7 @@
 #include "td5_i18n.h"   /* [I18N] TR() + language switch (Screen_LanguageOptions) */
 #include "td5_rt.h"     /* [RT] LIGHTING QUALITY row: available/set_quality */
 #include "td5_light.h"  /* [GFXOPT] CAR LIGHTS row: td5_light_set_car_lights */
+#include "td5_light2.h" /* [LOW-END PERF] PERFORMANCE rows: sun-shadow/SSR/wet setters */
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -1983,6 +1984,225 @@ void Screen_LightingOptions(void) {
     }
 }
 
+/* ====================================================================
+ * [LOW-END PERF 2026-09-12] PERFORMANCE OPTIONS sub-screen.
+ *
+ * Reached from GRAPHICS OPTIONS via the "PERFORMANCE ->" nav row; BACK returns
+ * there. Row 0 is the LOW-END PRESET action (Enter sets every row to its
+ * cheapest choice); rows 1..9 are ◄► selectors; row PO_ROWS is OK.
+ *
+ * Every row is wired to a real render gate that genuinely skips work (see the
+ * per-row notes). Most apply LIVE (read g_td5.ini each frame / have a live
+ * setter); RENDER SCALE and FOLIAGE AA are read by the D3D12 backend at device
+ * create, so they take effect on the next launch (persisted immediately).
+ * Defaults reproduce today's look, so shipping this screen changes nothing until
+ * the user opts in.
+ * ==================================================================== */
+#define PO_BASE_Y 74
+#define PO_STEP_Y 36
+#define PO_ROWS   10   /* rows 0..9 (0 = LOW-END PRESET action); OK is row PO_ROWS */
+
+static const char *const k_po_labels[PO_ROWS] = {
+    "LOW-END PRESET", "RENDER SCALE", "DRAW DISTANCE", "DYNAMIC LIGHTS",
+    "CAR SHADOWS",    "SUN SHADOWS",  "REFLECTIONS",   "PARTICLES & WEATHER",
+    "WORLD BILLBOARDS", "FOLIAGE AA"
+};
+static const char *const k_po_scale[]   = { "50%", "75%", "100%" };   /* -> render_scale */
+static const char *const k_po_drawdist[] = { "LOW", "MEDIUM", "HIGH", "FULL" }; /* 25/50/75/100 */
+static const char *const k_po_offon[]   = { "OFF", "ON" };
+static const char *const k_po_carshadow[] = { "OFF", "QUAD", "CONFORMING" };
+
+/* Draw-distance percentage for each DRAW DISTANCE index (LOW..FULL). */
+static const int k_po_drawdist_pct[] = { 25, 50, 75, 100 };
+
+static const char *const *po_row_opts(int row, int *count)
+{
+    switch (row) {
+    case 1: *count = 3; return k_po_scale;      /* RENDER SCALE */
+    case 2: *count = 4; return k_po_drawdist;   /* DRAW DISTANCE */
+    case 3: *count = 2; return k_po_offon;      /* DYNAMIC LIGHTS */
+    case 4: *count = 3; return k_po_carshadow;  /* CAR SHADOWS */
+    case 5: *count = 2; return k_po_offon;      /* SUN SHADOWS */
+    case 6: *count = 2; return k_po_offon;      /* REFLECTIONS */
+    case 7: *count = 2; return k_po_offon;      /* PARTICLES & WEATHER */
+    case 8: *count = 2; return k_po_offon;      /* WORLD BILLBOARDS */
+    case 9: *count = 2; return k_po_offon;      /* FOLIAGE AA */
+    }
+    *count = 0; return NULL;                     /* row 0 = action, no options */
+}
+
+/* Map the persisted view-distance fraction (0..1) onto the nearest DRAW DISTANCE
+ * index (0=LOW .. 3=FULL). */
+static int po_drawdist_index(void)
+{
+    int pct = (int)(td5_save_get_view_distance() * 100.0f + 0.5f);
+    int best = 3, bestd = 1000, i;
+    for (i = 0; i < 4; i++) {
+        int d = pct - k_po_drawdist_pct[i]; if (d < 0) d = -d;
+        if (d < bestd) { bestd = d; best = i; }
+    }
+    return best;
+}
+
+static int po_row_index(int row)
+{
+    switch (row) {
+    case 1: return (g_td5.ini.render_scale >= 100) ? 2 : (g_td5.ini.render_scale >= 75 ? 1 : 0);
+    case 2: return po_drawdist_index();
+    case 3: return g_td5.ini.lighting_enabled ? 1 : 0;
+    case 4: return (g_td5.ini.car_shadows < 0 || g_td5.ini.car_shadows > 2) ? 2 : g_td5.ini.car_shadows;
+    case 5: return g_td5.ini.sun_shadows ? 1 : 0;
+    case 6: return g_td5.ini.reflections ? 1 : 0;
+    case 7: return g_td5.ini.vfx_enabled ? 1 : 0;
+    case 8: return g_td5.ini.world_billboards ? 1 : 0;
+    case 9: return g_td5.ini.foliage_aa ? 1 : 0;
+    }
+    return 0;
+}
+
+static void po_row_apply(int row, int delta)
+{
+    int cnt; po_row_opts(row, &cnt);
+    if (cnt <= 0) return;
+    {
+        int idx = po_row_index(row) + delta;
+        while (idx < 0) idx += cnt;
+        idx %= cnt;
+        switch (row) {
+        case 1: /* RENDER SCALE: idx 0/1/2 -> 50/75/100 (applies next launch) */
+            g_td5.ini.render_scale = (idx == 0) ? 50 : (idx == 1 ? 75 : 100);
+            break;
+        case 2: /* DRAW DISTANCE (live; persisted as [Display] ViewDistance by
+                 * td5_ini_persist_options, called right after this apply) */
+            td5_save_set_view_distance((float)k_po_drawdist_pct[idx] / 100.0f);
+            break;
+        case 3: /* DYNAMIC LIGHTS (live) */
+            g_td5.ini.lighting_enabled = idx; td5_light_set_enabled(idx);
+            break;
+        case 4: /* CAR SHADOWS: 0 off / 1 quad / 2 conforming (live). Keep
+                 * legacy_shadows in sync so shadow_raycast_enabled() picks the
+                 * quad vs blob without a second knob. */
+            g_td5.ini.car_shadows = idx;
+            g_td5.ini.legacy_shadows = (idx == 1) ? 1 : 0;
+            break;
+        case 5: /* SUN SHADOWS (live setter; full effect next race) */
+            g_td5.ini.sun_shadows = idx; td5_light2_set_sun_shadows(idx);
+            break;
+        case 6: /* REFLECTIONS / SSR (live setter; full effect next race) */
+            g_td5.ini.reflections = idx; td5_light2_set_reflections(idx);
+            break;
+        case 7: g_td5.ini.vfx_enabled = idx; break;      /* live gate */
+        case 8: g_td5.ini.world_billboards = idx; break; /* live gate */
+        case 9: g_td5.ini.foliage_aa = idx; break;       /* applies next launch */
+        }
+    }
+}
+
+/* LOW-END PRESET: set every row to its cheapest choice. Live knobs apply now;
+ * RENDER SCALE + FOLIAGE AA are picked up by the backend on the next launch. */
+static void performance_apply_low_end_preset(void)
+{
+    g_td5.ini.render_scale     = 50;
+    td5_save_set_view_distance(0.25f);
+    g_td5.ini.lighting_enabled = 0; td5_light_set_enabled(0);
+    g_td5.ini.car_shadows      = 0;
+    g_td5.ini.legacy_shadows   = 0;
+    g_td5.ini.sun_shadows      = 0; td5_light2_set_sun_shadows(0);
+    g_td5.ini.reflections      = 0; td5_light2_set_reflections(0);
+    g_td5.ini.wet_roads        = 0; td5_light2_set_wet_roads(0);
+    g_td5.ini.vfx_enabled      = 0;
+    g_td5.ini.world_billboards = 0;
+    g_td5.ini.foliage_aa       = 0;
+    TD5_LOG_I(LOG_TAG, "LOW-END PRESET applied (scale=50 viewdist=25 lights/shadows/"
+              "refl/vfx/billboards/foliageAA off)");
+}
+
+int td5_performance_opts_row_count(void) { return PO_ROWS; }
+
+static void performance_opts_create_buttons(void)
+{
+    frontend_reset_buttons();
+    for (int r = 0; r < PO_ROWS; r++)
+        frontend_create_button(k_po_labels[r], 120, PO_BASE_Y + PO_STEP_Y * r, 0x130, 0x20);
+    frontend_create_button(SNK_OkButTxt, 200, PO_BASE_Y + PO_STEP_Y * PO_ROWS, 0x60, 0x20);
+}
+
+void frontend_render_performance_options_overlay(float sx, float sy)
+{
+    if (!s_anim_complete) return;
+    /* Row 0 (LOW-END PRESET) is an action; rows 1..9 show their current value. */
+    for (int r = 1; r < PO_ROWS; r++) {
+        int cnt; const char *const *opts = po_row_opts(r, &cnt);
+        if (!opts) continue;
+        frontend_draw_value_centered(sx, sy, PO_BASE_Y + PO_STEP_Y * r + 6,
+                                     opts[po_row_index(r)], 0xFFFFFFFF);
+    }
+}
+
+void Screen_PerformanceOptions(void) {
+    switch (s_inner_state) {
+    case 0:
+        frontend_init_return_screen(TD5_SCREEN_PERFORMANCE_OPTIONS);
+        TD5_LOG_D(LOG_TAG, "PerformanceOptions: init (scale=%d viewdist=%.2f)",
+                  g_td5.ini.render_scale, td5_save_get_view_distance());
+        frontend_load_tga("Front_End/MainMenu.tga", "Front_End/FrontEnd.zip");
+        performance_opts_create_buttons();
+        s_anim_complete = 0;
+        frontend_begin_timed_animation();
+        s_inner_state = 1;
+        break;
+    case 1: case 2:
+        frontend_present_buffer();
+        s_inner_state++;
+        break;
+    case 3:
+        if (frontend_update_timed_animation(0x27, 650) >= 1.0f) {
+            s_anim_complete = 1;
+            s_inner_state = 4;
+        }
+        break;
+    case 4:
+    case 5:
+        s_inner_state++;
+        break;
+    case 6:
+        if (s_input_ready) {
+            int active_button = (s_button_index >= 0) ? s_button_index : s_selected_button;
+            int delta = frontend_option_delta();
+            if (s_button_index == 0) {
+                /* LOW-END PRESET action row: Enter applies the whole preset. */
+                performance_apply_low_end_preset();
+                td5_ini_persist_options();
+                frontend_play_sfx(2);
+                s_inner_state = 4;
+            } else if (active_button >= 1 && active_button < PO_ROWS && delta != 0) {
+                po_row_apply(active_button, delta);
+                td5_ini_persist_options();
+                frontend_play_sfx(2);
+                s_inner_state = 4;
+            } else if (s_button_index == PO_ROWS) {
+                /* OK -> persist + back to GRAPHICS OPTIONS. */
+                td5_ini_persist_options();
+                s_return_screen = TD5_SCREEN_DISPLAY_OPTIONS;
+                s_inner_state = 7;
+            }
+        }
+        break;
+    case 7:
+        frontend_begin_timed_animation();
+        s_inner_state = 8;
+        break;
+    case 8:
+        if (frontend_update_timed_animation(16, 267) >= 1.0f) {
+            s_inner_state = 9;
+        }
+        break;
+    case 9:
+        td5_frontend_set_screen((TD5_ScreenIndex)s_return_screen);
+        break;
+    }
+}
+
 void Screen_SoundOptions(void) {
     switch (s_inner_state) {
     case 0:
@@ -2138,8 +2358,10 @@ void Screen_DisplayOptions(void) {
         frontend_create_button(SNK_SpeedReadoutButTxt,  120, 217, 0x120, 0x20); /* Speed Readout */
         frontend_create_button(SNK_SpeedReadoutButTxt,  120, 257, 0x120, 0x20); /* Show FPS */
         frontend_create_button(SNK_CameraDampingButTxt, 120, 297, 0x120, 0x20); /* Camera Damping */
-        frontend_create_button(SNK_CameraDampingButTxt, 120, 337, 0x120, 0x20); /* Lighting Quality [RT] */
-        frontend_create_button(SNK_OkButTxt,            200, 377, 0x60,  0x20); /* OK (row 7) */
+        frontend_create_button(SNK_CameraDampingButTxt, 120, 337, 0x120, 0x20); /* LIGHTING OPTIONS -> (row 6 nav) */
+        /* [LOW-END PERF 2026-09-12] PERFORMANCE OPTIONS -> nav row (row 7). */
+        frontend_create_button(TR("PERFORMANCE"),       120, 377, 0x120, 0x20); /* PERFORMANCE -> (row 7 nav) */
+        frontend_create_button(SNK_OkButTxt,            200, 417, 0x60,  0x20); /* OK (row 8) */
         frontend_refresh_display_option_labels();
         s_anim_tick = 0;
         s_inner_state = 1;
@@ -2213,6 +2435,13 @@ void Screen_DisplayOptions(void) {
                 s_inner_state = 7;
                 break;
             } else if (s_button_index == 7) {
+                /* [LOW-END PERF 2026-09-12] Row 7 — PERFORMANCE OPTIONS: nav row.
+                 * Enter opens the low-end toggles + LOW-END PRESET sub-screen. */
+                td5_ini_persist_options();
+                s_return_screen = TD5_SCREEN_PERFORMANCE_OPTIONS;
+                s_inner_state = 7;
+                break;
+            } else if (s_button_index == 8) {
                 /* OK — persist every display option to td5re.ini. Resolution +
                  * window-mode/vsync already applied live; this writes them (plus
                  * fog / units / damping / lighting quality / W,H) so they survive a
