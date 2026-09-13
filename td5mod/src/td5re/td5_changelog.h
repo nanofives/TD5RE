@@ -32,6 +32,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 13 (auto-track pause menu fix)" },
+    { CL_ITEM,    "Fixed a building texture smearing across the in-race" },
+    { CL_ITEM,    "  pause menu on auto-generated tracks." },
+    { CL_ITEM,    "The UI now always draws its own art, never track art." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 12 (low-end performance)" },
     { CL_ITEM,    "New PERFORMANCE screen under GRAPHICS OPTIONS with a" },
     { CL_ITEM,    "  LOW-END PRESET button for weak laptops / iGPUs." },

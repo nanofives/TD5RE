@@ -41,6 +41,7 @@
 #include "td5_physics.h" /* for td5_physics_load_carparam */
 #include "td5_ai.h"      /* for td5_ai_set_traffic_queue */
 #include "td5_race_state.h"  /* [LAYERING 2026-07-06] read-only race queries (was td5_game.h) */
+#include "td5_page_map.h"    /* D3D texture-page layout: STATIC_ATLAS_BASE, car/traffic bases */
 
 #include <stdlib.h>
 #include <string.h>
@@ -339,8 +340,13 @@ static int s_initialized = 0;
  * ======================================================================== */
 
 #define STATIC_ATLAS_MAX   256
-#define STATIC_ATLAS_BASE  700   /* first D3D page reserved for static atlas */
+/* STATIC_ATLAS_BASE now lives in td5_page_map.h (was a local 700 literal that
+ * collided with the auto-track's level pages). */
 #define STATIC_PAGE_META_MAX 32  /* max page metadata entries */
+/* The atlas uploads exactly STATIC_PAGE_META_MAX pages (700..731-style block);
+ * keep that within the range reserved for it in td5_page_map.h. */
+_Static_assert(STATIC_PAGE_META_MAX <= STATIC_ATLAS_PAGE_COUNT,
+               "static atlas uses more pages than reserved in td5_page_map.h");
 
 typedef struct {
     char           name[44];
@@ -3229,6 +3235,33 @@ int td5_asset_load_race_texture_pages(void)
     TD5_LOG_I(LOG_TAG, "race texture pages: level=%03d loaded=%d/%u fallback=%d workers=%d decode+upload=%ums",
               level_number, loaded_count, page_count, s_fallback_texture_uploaded,
               td5_jobs_worker_count(), t_decode_ms);
+
+    /* [PAGE-MAP AUDIT] Report the highest level page actually uploaded against
+     * the reserved-range bases and flag any overlap. Two-arm proof for the
+     * pause-menu facade-texture collision fix (2026-09-13): an AUTO track fills
+     * ~721 level pages and must NOT reach TD5_PAGE_LEVEL_CEIL; a shipped track
+     * fills far fewer. The compile-time guards in td5_page_map.h /
+     * td5_trackgen_internal.h are the real net — this is the runtime witness. */
+    {
+        int max_level_page = (page_count > 0) ? (int)page_count - 1 : -1;
+        int overlap = (max_level_page >= TD5_PAGE_LEVEL_CEIL);
+        TD5_LOG_I(LOG_TAG,
+            "page-map audit: max_level_page=%d level_ceil=%d | reserved bases: "
+            "car=%d traffic=%d static_atlas=%d hud_white=%d fe=%d envmap=%d "
+            "wheel=%d td6prop=%d | %s",
+            max_level_page, TD5_PAGE_LEVEL_CEIL,
+            TD5_CAR_TEXTURE_PAGE_BASE, TD5_TRAFFIC_TEXTURE_PAGE_BASE,
+            STATIC_ATLAS_BASE, HUD_WHITE_TEX_PAGE, FE_SURFACE_PAGE_BASE,
+            ENVMAP_TEXTURE_PAGE_BASE, WHEEL_RIM_TEX_BASE, TD6_PROP_TEX_BASE,
+            overlap ? "OVERLAP: level pages reach the reserved zone!" : "OK: no overlap");
+        if (overlap) {
+            TD5_LOG_W(LOG_TAG,
+                "page-map audit: level page %d >= reserved ceiling %d — reserved "
+                "art (car/atlas/HUD) will be overwritten by track art",
+                max_level_page, TD5_PAGE_LEVEL_CEIL);
+        }
+    }
+
     return loaded_count > 0 || s_fallback_texture_uploaded;
 }
 /* ========================================================================
@@ -3914,7 +3947,7 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
      *
      * Allocation: pages 800 + slot*2 = skin, 800 + slot*2 + 1 = hub.
      * 6 slots → pages 800-811, well above any track's page_count (<600). */
-#define TD5_CAR_TEXTURE_PAGE_BASE 800
+/* TD5_CAR_TEXTURE_PAGE_BASE now lives in td5_page_map.h. */
 #define TD5_CAR_MESH_HUB_ID   8
     {
         int skin_page = TD5_CAR_TEXTURE_PAGE_BASE + slot * 2;
@@ -4100,7 +4133,7 @@ const char *td5_asset_get_car_zip_path(int car_index)
  * The traffic.zip archive holds 31 models (model0.prr..model30.prr).
  * model_index selects which one to load for this slot.
  * ======================================================================== */
-#define TD5_TRAFFIC_TEXTURE_PAGE_BASE 820
+/* TD5_TRAFFIC_TEXTURE_PAGE_BASE now lives in td5_page_map.h. */
 #define TD5_TRAFFIC_ZIP               "traffic.zip"
 /* model0..30 = original TD5 traffic cars; 31..60 = the imported REAL per-city
  * TD6 traffic cars (convert_td6_traffic.py): London 31-36, Paris 37-42,
