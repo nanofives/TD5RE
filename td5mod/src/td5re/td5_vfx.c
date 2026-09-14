@@ -680,7 +680,11 @@ void td5_vfx_init_race_particles(void) {
         /* No FADEWHT — fall back to a hard-coded white texel position */
         s_tiremark_u0 = 0.5f;  s_tiremark_v0 = 0.5f;
         s_tiremark_u1 = 1.5f;  s_tiremark_v1 = 1.5f;
-        s_tiremark_page = (float)(700 + 4);
+        /* slot 4 = SPEEDO/tpage4 page. Was a stale `700 + 4` literal that the
+         * 700->832 static-atlas move (2026-09-13) left pointing into the level
+         * zone; use the live base. Only reached when FADEWHT is absent from the
+         * atlas (the primary path above writes entry->texture_page directly). */
+        s_tiremark_page = (float)(STATIC_ATLAS_BASE + 4);
         TD5_LOG_W(LOG_TAG, "tire tracks: FADEWHT not in atlas, using fallback texel");
     }
 

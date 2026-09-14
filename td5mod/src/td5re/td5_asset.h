@@ -22,6 +22,7 @@
 
 #include "td5_types.h"
 #include "td5_hud.h"   /* for TD5_AtlasEntry */
+#include "td5_page_map.h"   /* STATIC_ATLAS_BASE / STATIC_ATLAS_PAGE_COUNT */
 #include <stdbool.h>
 
 /* ========================================================================
@@ -34,6 +35,26 @@ void td5_asset_shutdown(void);
 /* Returns 1 if static atlas slot was loaded from a real .dat file, 0 otherwise.
  * Use to guard synthetic texture generation so it only runs when the .dat is absent. */
 int  td5_asset_static_tpage_is_real(int slot);
+
+/* Convert an ABSOLUTE static-atlas D3D page number (as stored in
+ * TD5_AtlasEntry::texture_page, i.e. STATIC_ATLAS_BASE + slot) back to its
+ * 0-based slot index [0, STATIC_ATLAS_PAGE_COUNT). Returns -1 for any page
+ * outside the static-atlas range.
+ *
+ * SINGLE source of this conversion — call this instead of writing the
+ * subtraction inline. The 700->832 base move (2026-09-13) left three
+ * `page - 700` literals behind in td5_hud.c; because they were ARITHMETIC, not
+ * #defines, the td5_page_map.h _Static_assert guard could not catch them, and
+ * is_real(slot+132) went out of range and forced the HUD down its synthetic
+ * fallback -- blanking the minimap and mis-texturing the gear label. Routing
+ * every call site through this helper means a future base move updates one
+ * macro and no literal can drift. */
+static inline int td5_asset_static_page_to_slot(int page)
+{
+    int slot = page - STATIC_ATLAS_BASE;
+    if (slot < 0 || slot >= STATIC_ATLAS_PAGE_COUNT) return -1;
+    return slot;
+}
 
 /* Per-tpage transparency type (raw byte +3 of original tpage descriptor):
  *   0 = opaque, 1 = color-keyed, 2 = semi-transparent (alpha 0x80), 3 = additive

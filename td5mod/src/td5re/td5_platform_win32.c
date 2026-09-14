@@ -4308,8 +4308,9 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
 
     /* [SF FENCE MIPS 2026-08-10] Coverage-preserving mipmaps for track alpha-keyed
      * pages (fences/foliage/signs). Gate strictly: only race/track pages (index
-     * below the static-atlas base 700 — excludes HUD atlas 700+, car 800+, traffic
-     * 820+, fallback 1021), only 32bpp BGRA cutout pages, only transparency type 1
+     * below TD5_PAGE_LEVEL_CEIL, the level zone ceiling — excludes car 800+,
+     * traffic 820+, static/HUD atlas 832+, frontend 900+, fallback 1021), only
+     * 32bpp BGRA cutout pages, only transparency type 1
      * (alpha-keyed, draws at OPAQUE_LINEAR alpha_ref=1) or 2 (color-key, draws at
      * TRANSLUCENT_ANISO alpha_ref=0x80). Font/HUD/car textures are never mipped.
      * TD5RE_TRACK_MIPS=0 disables (A/B kill-switch; default ON). */
@@ -4398,7 +4399,8 @@ int td5_plat_render_upload_texture(int page_index, const void *pixels,
             const char *e = getenv("TD5RE_OPAQUE_MIPS");
             s_opaque_mips = (e && e[0] && e[0] != '0') ? 1 : 0;
         }
-        if (s_track_mips && format == 2 && page_index >= 0 && page_index < 700) {
+        if (s_track_mips && format == 2 && page_index >= 0 &&
+            page_index < TD5_PAGE_LEVEL_CEIL) {
             int t = td5_asset_get_page_transparency(page_index);
             if (t == 0)      { want_track_mips = s_opaque_mips;  mip_ref = 0x80; }
             /* [R15] ref 0x80 = what FOLIAGE_CUTOUT and WORLD_CUTOUT both test

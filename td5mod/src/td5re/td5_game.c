@@ -11093,7 +11093,8 @@ static int s_loadscreen_index = 0;
  * page 0 -- so under RT HIGH every track primitive that samples page 0 showed
  * the leftover car splash-art in the middle of the track. Mirror the FMV
  * scratch-page pattern (FMV_SCRATCH_TEXTURE_PAGE 599) and keep page 0 clean.
- * 598 is free: below the static atlas (700+), car (800+), frontend (900+) and
+ * 598 is free: below the level ceiling (800) and the car (800+), static/HUD
+ * atlas (832+), frontend (900+) and
  * sky/fallback (1020/1021) ranges, adjacent to the FMV scratch. */
 
 /* ------------------------------------------------------------------------

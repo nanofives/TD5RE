@@ -343,8 +343,9 @@ static int s_initialized = 0;
 /* STATIC_ATLAS_BASE now lives in td5_page_map.h (was a local 700 literal that
  * collided with the auto-track's level pages). */
 #define STATIC_PAGE_META_MAX 32  /* max page metadata entries */
-/* The atlas uploads exactly STATIC_PAGE_META_MAX pages (700..731-style block);
- * keep that within the range reserved for it in td5_page_map.h. */
+/* The atlas uploads exactly STATIC_PAGE_META_MAX pages (STATIC_ATLAS_BASE
+ * .. +31, i.e. 832..863); keep that within the range reserved for it in
+ * td5_page_map.h. */
 _Static_assert(STATIC_PAGE_META_MAX <= STATIC_ATLAS_PAGE_COUNT,
                "static atlas uses more pages than reserved in td5_page_map.h");
 
