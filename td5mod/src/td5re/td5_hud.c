@@ -1035,19 +1035,21 @@ void td5_hud_init_font_atlas(void)
 
     s_queued_glyph_count = 0;
 
-    /* Generate synthetic font texture for page 705 using GDI.
+    /* Generate synthetic font texture for the FONT static-atlas page (slot 5,
+     * D3D page STATIC_ATLAS_BASE+5) using GDI.
      * Only runs when tpage5.dat is absent.  When the real runtime dump
      * is available (captured via dump_tpages or ASI mod), it contains
      * SPEEDOFONT, GEARNUMBERS, FONT, etc. and should be used as-is. */
     if (font_entry->texture_page > 0 &&
-        !td5_asset_static_tpage_is_real((int)(font_entry->texture_page - 700))) {
+        !td5_asset_static_tpage_is_real(
+            td5_asset_static_page_to_slot((int)font_entry->texture_page))) {
         /* 256x256 BGRA = 256 KB; static to avoid stack overflow.
          * Atlas pages are 256x256 (confirmed by UV scale = 1/256 for both axes).
          * Pre-fill with tpage5.dat so NUMBERS/GEARNUMBERS/etc. art is preserved;
          * the GDI synthesis only overwrites the FONT columns (x >= atlas_x). */
         static uint8_t s_font_page_buf[256 * 256 * 4];
         {
-            int tpage_slot = (int)(font_entry->texture_page - 700);
+            int tpage_slot = td5_asset_static_page_to_slot((int)font_entry->texture_page);
             int loaded = 0;
 
             /* Try PNG from re/assets first */
@@ -1286,7 +1288,8 @@ void td5_hud_init_font_atlas(void)
                                        s_font_page_buf, 256, 256, 2);
     }
 
-    /* Generate synthetic speedometer dial for page 704 using GDI.
+    /* Generate synthetic speedometer dial for the SPEEDO static-atlas page
+     * (slot 4, D3D page STATIC_ATLAS_BASE+4) using GDI.
      * tpage4.dat is assembled at runtime by the original engine
      * (UploadRaceTexturePage @ 0x40B590) and has no on-disk .dat file.
      * We draw a simple circular gauge (96×96) into the 256×256 BGRA32 page
@@ -1298,7 +1301,8 @@ void td5_hud_init_font_atlas(void)
     {
         TD5_AtlasEntry *speedo_entry = td5_asset_find_atlas_entry(NULL, "SPEEDO");
         if (speedo_entry && speedo_entry->texture_page > 0 &&
-            !td5_asset_static_tpage_is_real((int)(speedo_entry->texture_page - 700))) {
+            !td5_asset_static_tpage_is_real(
+                td5_asset_static_page_to_slot((int)speedo_entry->texture_page))) {
             /* Only generate synthetic speedo dial when tpage4.dat is missing.
              * When the real dump texture exists, use it as-is. */
             static uint8_t s_speedo_page_buf[256 * 256 * 4];

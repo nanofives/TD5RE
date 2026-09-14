@@ -36,6 +36,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "Fixed a building texture smearing across the in-race" },
     { CL_ITEM,    "  pause menu on auto-generated tracks." },
     { CL_ITEM,    "The UI now always draws its own art, never track art." },
+    { CL_ITEM,    "Restored the race minimap and the gear/speed readout," },
+    { CL_ITEM,    "  which had gone blank / wrong after that UI atlas move." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 12 (low-end performance)" },
