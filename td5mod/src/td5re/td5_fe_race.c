@@ -6302,9 +6302,13 @@ void Screen_CarSelection(void) {
 
             case 5: /* Back */
                 s_drag_carselect_pass = 0;
+                /* [RUN1 2026-09-26] A cup (game types 1..6) was picked on the
+                 * SELECT CUP screen, so BACK returns there, not to RACE TYPE. */
                 s_return_screen = s_network_active
                                     ? TD5_SCREEN_NETWORK_LOBBY   /* [S31] */
-                                    : TD5_SCREEN_RACE_TYPE_MENU;
+                                    : (s_selected_game_type >= 1 && s_selected_game_type <= 6)
+                                        ? TD5_SCREEN_SELECT_CUP
+                                        : TD5_SCREEN_RACE_TYPE_MENU;
                 s_inner_state = 0x14;
                 break;
             }

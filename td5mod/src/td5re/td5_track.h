@@ -219,6 +219,10 @@ int td5_track_display_list_index(const TD5_SpanDisplayList *block);
 
 /* --- MODELS.DAT --- */
 int  td5_track_parse_models_dat(const void *data, size_t size);
+/* [RUN1 2026-09-26] Drop the parsed MODELS.DAT tables (a level with no
+ * MODELS.DAT, e.g. a streamed auto-track build, must not keep drawing the
+ * previous race's scenery). */
+void td5_track_models_clear(void);
 /* [x64 Stage 3] Convert an ON-DISK PRR mesh record into a runtime header.
  * `record` must outlive `dst`: the command/vertex/normal streams still live
  * inside it. Replaces the old in-place rebase, which was only correct while

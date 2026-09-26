@@ -3371,7 +3371,15 @@ void td5_render_actors_for_view(int view_index)
              * converter pass to strip them is the follow-up). Brake lights stay
              * racer-only (faithful — traffic never drew them). */
             int is_racer = (slot < g_traffic_slot_base);
-            if (wheel_overhaul_enabled()) {
+            /* [RUN1 2026-09-26] Photo-booth mask / pattern passes
+             * (re/tools/td6_photobooth.py sets TD5RE_PB_NO_WHEELS=1): rims come
+             * from a shared alloy pool, not the car's hub, so the booth's
+             * black-hub swap no longer blanks them and they leaked into the paint
+             * body mask. Draw no wheels in those passes. */
+            const char *pb_nw = td5_render_photobooth_active() ? getenv("TD5RE_PB_NO_WHEELS") : NULL;
+            if (pb_nw && pb_nw[0] == '1') {
+                /* no wheels */
+            } else if (wheel_overhaul_enabled()) {
                 if (is_racer || wheel_traffic_enabled())
                     render_vehicle_wheels_unified(actor, slot);
             } else if (is_racer) {

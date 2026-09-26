@@ -1932,7 +1932,15 @@ void td5_physics_update_player(TD5_Actor *actor)
         int32_t yaw_term = (int32_t)((yaw_term_q12 >> 12) / 0x28c);
         int32_t body_vlat = raw_front - yaw_term;
 
-        if (actor->surface_contact_flags != 0) {
+        /* [NEUTRAL COAST 2026-09-26] PORT CHANGE, manual gearbox only: in N the
+         * CRGT branch below writes a ZERO wheel pseudo-speed (gear==1 -> 0), so
+         * any tick the wheelspin flag is up (e.g. throttle pressed in N) the tyre
+         * model sees LOCKED driven wheels and the car brakes hard. Neutral must
+         * be a free-rolling coast, so keep the real body speeds there. Auto /
+         * AI cars keep the byte-faithful path. */
+        int neutral_coast = (actor->current_gear == 1 &&
+                             td5_physics_actor_is_manual_gearbox(actor));
+        if (actor->surface_contact_flags != 0 && !neutral_coast) {
             /* Drivetrain dispatch per UpdatePlayerVehicleDynamics @ 0x00404030:
              * sVar2=1 (RWD): CRGT(body_vlong) → long; lat=body_vlat (front-axle form)
              * sVar2=2 (FWD): CRGT(body_vlat)  → lat;  long=body_vlong
@@ -1993,6 +2001,18 @@ void td5_physics_update_player(TD5_Actor *actor)
     int32_t throttle = (int32_t)actor->encounter_steering_cmd;
     int32_t drive_torque = 0;
     int32_t wheel_drive[4] = {0, 0, 0, 0};
+
+    /* [OVER-REV DAMAGE 2026-09-26] PORT-ONLY: a human MANUAL car held on the
+     * rev limiter (throttle on, forward gear, not during the countdown) smokes
+     * and slowly loses health past a grace period (td5_damage_on_overrev). */
+    if ((int)actor->slot_index < g_traffic_slot_base &&
+        td5_physics_actor_is_manual_gearbox(actor)) {
+        int32_t redline_o = (int32_t)PHYS_S(actor, PHYS_REDLINE_RPM);
+        int at_lim = !td5_game_is_countdown_active() && !actor->brake_flag &&
+                     throttle > 0 && actor->current_gear >= 2 &&
+                     actor->engine_speed_accum > redline_o - 50;
+        td5_damage_on_overrev(actor, at_lim);
+    }
     int32_t brake_front = (int32_t)PHYS_S(actor, PHYS_BRAKE_FRONT);
     int32_t brake_rear  = (int32_t)PHYS_S(actor, PHYS_BRAKE_REAR);
 

@@ -44,6 +44,7 @@
 #include "td5_page_map.h"    /* D3D texture-page layout: STATIC_ATLAS_BASE, car/traffic bases */
 
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -2493,6 +2494,13 @@ int td5_asset_load_level(int track_index)
         if (models_data && models_sz > 0) {
             int parsed = td5_track_parse_models_dat(models_data, (size_t)models_sz);
             TD5_LOG_I(LOG_TAG, "parsed MODELS.DAT: %d meshes from %s", parsed, models_source);
+        } else {
+            /* [RUN1 2026-09-26] No MODELS.DAT (a streamed auto-track build):
+             * clear the previous race's tables so they can never draw on this
+             * strip if the scenery stream below does not take over. */
+            td5_track_models_clear();
+            TD5_LOG_I(LOG_TAG, "level %d: no MODELS.DAT -- previous scenery tables cleared",
+                      track_index);
         }
     }
 
@@ -3715,9 +3723,10 @@ const char *td5_asset_get_player_override_zip(void)
 /* [SECONDARY PAINT 2026-06-29] Pattern blend: given a body texel's position
  * NORMALISED to the body's bounding box (fx,fy in 0..1) return the blend weight
  * toward the SECONDARY colour (0 = primary, 1 = secondary). The carskin is a
- * per-car UV atlas, so these texture-space splits read as approximate two-tones
- * (front->rear maps L->R, upper->lower maps top->bottom on most cars). The menu
- * preview applies the same rule in the cleaner carpicpaint photo space. Keep
+ * per-car UV atlas; since 2026-09-26 fx/fy are the texel's MODEL-space position
+ * (fx nose 0 -> tail 1, fy roof 0 -> sill 1, td5_asset_paint_body_coords), with
+ * the old texture-bbox values only as a fallback for uncovered texels. The menu
+ * preview shows the same result through the booth-rendered carpicpat0.png. Keep
  * thresholds in sync with TD6_PAT_* in td5_frontend_internal.h. */
 static float td5_asset_paint_pattern_t(int pattern, float fx, float fy)
 {
@@ -3733,6 +3742,117 @@ static float td5_asset_paint_pattern_t(int pattern, float fx, float fy)
     }
 }
 
+/* [PAINT MODEL SPACE 2026-09-26] Per-texel MODEL-space position of the body.
+ * The pattern used to be cut in the skin's UV-atlas space (fx/fy over the
+ * texture bbox), which on the 3D car read as random patches (TWO-TONE painted
+ * bits of the hood and the front bumper; STRIPES a hood strip plus a rear band)
+ * instead of a lower body / centre band / rear half. This rasterises every body
+ * triangle of the car mesh into skin texel space and records, per texel, where
+ * it sits on the CAR: L = 0 at the nose .. 255 at the tail (model +Z is
+ * forward, see td5_game.c photobooth), H = 0 at the roof .. 255 at the sill
+ * ("down" is the side the chassis/underside command sits on). Byte 2 = 1 where a
+ * body triangle covered the texel. Returns a malloc'd sw*sh*3 map, or NULL. */
+static unsigned char *td5_asset_paint_body_coords(const TD5_MeshHeader *mesh, int sw, int sh)
+{
+    if (!mesh || !mesh->commands || !mesh->vertices || mesh->command_count <= 0 ||
+        sw <= 0 || sh <= 0)
+        return NULL;
+    const TD5_PrimitiveCmd *cmds = mesh->commands;
+    const TD5_MeshVertex *vb = mesh->vertices;
+    int total = mesh->total_vertex_count;
+
+    /* Pass 1: body bbox (model space) + mean Y of body vs underside. */
+    float zmin = 1e30f, zmax = -1e30f, ymin = 1e30f, ymax = -1e30f;
+    double body_y = 0.0, under_y = 0.0; int nb = 0, nu = 0;
+    int cursor = 0;
+    for (int c = 0; c < mesh->command_count; c++) {
+        int n = cmds[c].triangle_count * 3 + cmds[c].quad_count * 4;
+        if (cursor + n > total) break;
+        int under = (cmds[c].texture_page_id == 8);   /* hub/chassis id at load time */
+        for (int v = 0; v < n; v++) {
+            const TD5_MeshVertex *mv = &vb[cursor + v];
+            if (under) { under_y += mv->pos_y; nu++; continue; }
+            body_y += mv->pos_y; nb++;
+            if (mv->pos_z < zmin) zmin = mv->pos_z;
+            if (mv->pos_z > zmax) zmax = mv->pos_z;
+            if (mv->pos_y < ymin) ymin = mv->pos_y;
+            if (mv->pos_y > ymax) ymax = mv->pos_y;
+        }
+        cursor += n;
+    }
+    if (nb < 3 || zmax - zmin < 1.0f || ymax - ymin < 1.0f) return NULL;
+    /* Down = the side the underside sits on. Without an underside command,
+     * car meshes are Y-UP (measured on the XK-180 booth pattern map: assuming
+     * Y-down painted TWO-TONE on the roof instead of the sills). */
+    int y_down_positive = nu ? ((under_y / nu) > (body_y / nb)) : 0;
+
+    unsigned char *map = (unsigned char *)calloc((size_t)sw * (size_t)sh, 3);
+    if (!map) return NULL;
+    float invL = 1.0f / (zmax - zmin), invH = 1.0f / (ymax - ymin);
+    int covered = 0;
+
+    cursor = 0;
+    for (int c = 0; c < mesh->command_count; c++) {
+        int tris = cmds[c].triangle_count, quads = cmds[c].quad_count;
+        int n = tris * 3 + quads * 4;
+        if (cursor + n > total) break;
+        const TD5_MeshVertex *cv = vb + cursor;
+        cursor += n;
+        if (cmds[c].texture_page_id == 8) continue;   /* underside: not paint */
+        int ntri = tris + quads * 2;
+        for (int t = 0; t < ntri; t++) {
+            int i0, i1, i2;
+            if (t < tris) { i0 = t * 3; i1 = i0 + 1; i2 = i0 + 2; }
+            else {
+                int q = (t - tris) / 2, a = tris * 3 + q * 4;
+                if (((t - tris) & 1) == 0) { i0 = a; i1 = a + 1; i2 = a + 2; }
+                else                       { i0 = a; i1 = a + 2; i2 = a + 3; }
+            }
+            const TD5_MeshVertex *A = &cv[i0], *B = &cv[i1], *C = &cv[i2];
+            float ax = A->tex_u * sw, ay = A->tex_v * sh;
+            float bx = B->tex_u * sw, by = B->tex_v * sh;
+            float cx = C->tex_u * sw, cy = C->tex_v * sh;
+            float den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+            if (den > -1e-6f && den < 1e-6f) continue;
+            /* Attribute per vertex: L (nose 0 -> tail 1), H (roof 0 -> sill 1). */
+            float LA = (zmax - A->pos_z) * invL, LB = (zmax - B->pos_z) * invL, LC = (zmax - C->pos_z) * invL;
+            float HA = (A->pos_y - ymin) * invH, HB = (B->pos_y - ymin) * invH, HC = (C->pos_y - ymin) * invH;
+            if (!y_down_positive) { HA = 1.0f - HA; HB = 1.0f - HB; HC = 1.0f - HC; }
+            int x0 = (int)floorf(fminf(ax, fminf(bx, cx))) - 1, x1 = (int)ceilf(fmaxf(ax, fmaxf(bx, cx))) + 1;
+            int y0 = (int)floorf(fminf(ay, fminf(by, cy))) - 1, y1 = (int)ceilf(fmaxf(ay, fmaxf(by, cy))) + 1;
+            if (x0 < 0) x0 = 0;
+            if (y0 < 0) y0 = 0;
+            if (x1 > sw - 1) x1 = sw - 1;
+            if (y1 > sh - 1) y1 = sh - 1;
+            for (int y = y0; y <= y1; y++) {
+                for (int x = x0; x <= x1; x++) {
+                    float px = x + 0.5f, py = y + 0.5f;
+                    float w0 = ((by - cy) * (px - cx) + (cx - bx) * (py - cy)) / den;
+                    float w1 = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) / den;
+                    float w2 = 1.0f - w0 - w1;
+                    /* Small negative slack so texels on a UV edge are claimed. */
+                    if (w0 < -0.02f || w1 < -0.02f || w2 < -0.02f) continue;
+                    float L = w0 * LA + w1 * LB + w2 * LC;
+                    float H = w0 * HA + w1 * HB + w2 * HC;
+                    if (L < 0.0f) L = 0.0f;
+                    if (L > 1.0f) L = 1.0f;
+                    if (H < 0.0f) H = 0.0f;
+                    if (H > 1.0f) H = 1.0f;
+                    unsigned char *o = map + ((size_t)y * sw + x) * 3;
+                    if (!o[2]) covered++;
+                    o[0] = (unsigned char)(L * 255.0f + 0.5f);
+                    o[1] = (unsigned char)(H * 255.0f + 0.5f);
+                    o[2] = 1;
+                }
+            }
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "paint model coords: %dx%d covered=%d z=[%.0f,%.0f] y=[%.0f,%.0f] y_down=%d under=%d",
+              sw, sh, covered, zmin, zmax, ymin, ymax, y_down_positive, nu);
+    if (covered == 0) { free(map); return NULL; }
+    return map;
+}
+
 /* TD6 player paint: load the (body-grayscale + fixed-colour) carskin and the
  * carmask, multiply ONLY the masked body texels by the paint colour, and upload.
  * Glass/lights/chrome/tyres (mask=0) keep their original colour. Returns 0 on
@@ -3744,7 +3864,8 @@ static float td5_asset_paint_pattern_t(int pattern, float fx, float fy)
  * over the body's bounding box. pattern==SOLID ignores paint2 (legacy path). */
 static int td5_asset_load_vehicle_skin_painted(int page, const char *skin_path,
                                                const char *mask_path, uint32_t paint,
-                                               uint32_t paint2, int pattern)
+                                               uint32_t paint2, int pattern,
+                                               const TD5_MeshHeader *mesh, int pattern_map)
 {
     void *spix = NULL, *mpix = NULL;
     int sw = 0, sh = 0, mw = 0, mh = 0;
@@ -3763,11 +3884,15 @@ static int td5_asset_load_vehicle_skin_painted(int page, const char *skin_path,
     int tr  = (paint  >> 16) & 0xFF, tg  = (paint  >> 8) & 0xFF, tb  = paint  & 0xFF;
     int tr2 = (paint2 >> 16) & 0xFF, tg2 = (paint2 >> 8) & 0xFF, tb2 = paint2 & 0xFF;
     if (pattern < 0 || pattern > 3) pattern = 0;
+    /* [PAINT MODEL SPACE 2026-09-26] Per-texel position on the car, used for
+     * every non-SOLID pattern (and the booth's pattern map). Texels no body
+     * triangle covers fall back to the old texture-space rule. */
+    unsigned char *mc = (pattern != 0 || pattern_map) ? td5_asset_paint_body_coords(mesh, sw, sh) : NULL;
 
     /* Body bounding box (mask>127) for normalised pattern coords. Only needed
      * for non-SOLID patterns. */
     int x0 = sw, y0 = sh, x1 = -1, y1 = -1;
-    if (pattern != 0) {
+    if (pattern != 0 || pattern_map) {
         for (int y = 0; y < sh; y++)
             for (int x = 0; x < sw; x++)
                 if (m[(y * sw + x) * 4] > 127) {
@@ -3778,8 +3903,8 @@ static int td5_asset_load_vehicle_skin_painted(int page, const char *skin_path,
                 }
         if (x1 < x0 || y1 < y0) pattern = 0;   /* no body texels -> solid */
     }
-    float inv_w = (pattern != 0 && x1 > x0) ? 1.0f / (float)(x1 - x0) : 0.0f;
-    float inv_h = (pattern != 0 && y1 > y0) ? 1.0f / (float)(y1 - y0) : 0.0f;
+    float inv_w = (x1 > x0) ? 1.0f / (float)(x1 - x0) : 0.0f;
+    float inv_h = (y1 > y0) ? 1.0f / (float)(y1 - y0) : 0.0f;
 
     /* td5_asset_decode_png_rgba32 returns BGRA buffers (byte0=B, byte1=G,
      * byte2=R) to match the engine's B8G8R8A8 textures, so write tb->byte0 and
@@ -3787,12 +3912,38 @@ static int td5_asset_load_vehicle_skin_painted(int page, const char *skin_path,
     for (int y = 0; y < sh; y++) {
         for (int x = 0; x < sw; x++) {
             int i = y * sw + x;
+            if (pattern_map) {
+                /* Booth pattern map (TD5RE_PB_PATTERN_MAP): R/G/B = TWO-TONE /
+                 * STRIPES / SPLIT secondary regions on body texels, black
+                 * elsewhere, rendered through the preview camera by
+                 * re/tools/td6_photobooth.py -> carpicpat0.png. */
+                unsigned char o0 = 0, o1 = 0, o2 = 0;
+                if (m[i * 4] > 127) {
+                    float fx, fy;
+                    if (mc && mc[(size_t)i * 3 + 2]) {
+                        fx = mc[(size_t)i * 3 + 0] / 255.0f; fy = mc[(size_t)i * 3 + 1] / 255.0f;
+                    } else {
+                        fx = (float)(x - x0) * inv_w; fy = (float)(y - y0) * inv_h;
+                    }
+                    if (td5_asset_paint_pattern_t(1, fx, fy) > 0.5f) o2 = 255;   /* R */
+                    if (td5_asset_paint_pattern_t(2, fx, fy) > 0.5f) o1 = 255;   /* G */
+                    if (td5_asset_paint_pattern_t(3, fx, fy) > 0.5f) o0 = 255;   /* B */
+                }
+                s[i * 4 + 0] = o0; s[i * 4 + 1] = o1; s[i * 4 + 2] = o2; s[i * 4 + 3] = 255;
+                continue;
+            }
             if (m[i * 4] > 127) {          /* body texel (grayscale) -> lum * tint */
                 int g = s[i * 4];          /* body is R==G==B, so any byte is the luminance */
                 int cr = tr, cg = tg, cb = tb;
                 if (pattern != 0) {
-                    float fx = (float)(x - x0) * inv_w;
-                    float fy = (float)(y - y0) * inv_h;
+                    float fx, fy;
+                    if (mc && mc[(size_t)i * 3 + 2]) {
+                        fx = mc[(size_t)i * 3 + 0] / 255.0f;   /* nose 0 .. tail 1 */
+                        fy = mc[(size_t)i * 3 + 1] / 255.0f;   /* roof 0 .. sill 1 */
+                    } else {
+                        fx = (float)(x - x0) * inv_w;
+                        fy = (float)(y - y0) * inv_h;
+                    }
                     float t  = td5_asset_paint_pattern_t(pattern, fx, fy);
                     if (t > 0.5f) { cr = tr2; cg = tg2; cb = tb2; }
                 }
@@ -3805,6 +3956,7 @@ static int td5_asset_load_vehicle_skin_painted(int page, const char *skin_path,
     }
     int ok = td5_plat_render_upload_texture(page, spix, sw, sh, 2);
     stbi_image_free(spix); stbi_image_free(mpix);
+    free(mc);
     return ok;
 }
 
@@ -3969,6 +4121,14 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
                  * body. Non-TD6 cars have no carmask -> plain load with their own
                  * pre-painted carskinN. */
                 char png_mask[256];
+                /* [PAINT MODEL SPACE 2026-09-26] Booth pattern-map pass. */
+                const char *pb_pm = td5_render_photobooth_active() ? getenv("TD5RE_PB_PATTERN_MAP") : NULL;
+                if (pb_pm && pb_pm[0] == '1' && slot == 0 &&
+                    td5_asset_resolve_png_path("carmask.png", zip_path, png_mask, sizeof(png_mask))) {
+                    skin_ok = td5_asset_load_vehicle_skin_painted(skin_page, png_skin, png_mask,
+                                                                 0xFFFFFFu, 0xFFFFFFu, 0, mesh, 1);
+                    TD5_LOG_I(LOG_TAG, "vehicle slot=0: photobooth PATTERN MAP skin ok=%d", skin_ok);
+                } else
                 if (!td5_render_photobooth_active() &&
                     td5_asset_resolve_png_path("carmask.png", zip_path, png_mask, sizeof(png_mask))) {
                     uint32_t paint_rgb;
@@ -3999,7 +4159,8 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
                         (paint_pat != 0 && paint_rgb2 != paint_rgb)) {
                         skin_ok = td5_asset_load_vehicle_skin_painted(skin_page, png_skin,
                                                                      png_mask, paint_rgb,
-                                                                     paint_rgb2, paint_pat);
+                                                                     paint_rgb2, paint_pat,
+                                                                     mesh, 0);
                         if (skin_ok)
                             TD5_LOG_I(LOG_TAG,
                                       "vehicle slot=%d: TD6 body painted %06X/%06X pat=%d (mask)",

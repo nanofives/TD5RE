@@ -1797,6 +1797,9 @@ void td5_input_update_player_control(int slot)
      * the [GameOptions] AutoGearbox INI key. */
     if ((bits & 0x10000000u) == 0) {
         /* Auto mode (default) — orig ignores gear up/down keys here. */
+    } else if (td5_game_is_countdown_active()) {
+        /* [RUN1 2026-09-26] PORT CHANGE: no manual shifting during the pre-race
+         * countdown -- the car holds its starting gear until GO. */
     } else if (s_gear_debounce[slot] == 0) {
         /* Gear up (bit 0x400000) */
         if (bits & 0x400000u) {

@@ -5359,8 +5359,10 @@ void td5_hud_render_overlays(float dt)
             int32_t cos_h = (int32_t)(cos(hrad) * 4096.0);
             int32_t speed_raw = (vx * sin_h + vz * cos_h) >> 12; /* body-frame longitudinal */
             /* Original clamps negative speed to 0 [CONFIRMED @ 0x4388A0].
-             * Previous code took abs(), showing speed while reversing. */
-            if (speed_raw < 0) speed_raw = 0;
+             * [RUN1 2026-09-26] PORT CHANGE (user request): show the magnitude
+             * while reversing too, so the readout tracks reverse speed instead
+             * of sitting at 0. */
+            if (speed_raw < 0) speed_raw = -speed_raw;
             speed_raw >>= 8;
 
             /* [S01 2026-06-04] Units from the live Display-options setting
@@ -6524,7 +6526,15 @@ static int minimap_fill_junction_slit(uint8_t *span_base, uint8_t *vert_base,
                             offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy, &pr_x, &pr_y))
         return 0;
     float rw = sqrtf((pr_x - pl_x) * (pr_x - pl_x) + (pr_y - pl_y) * (pr_y - pl_y));
-    float gap_lim2 = (rw * 1.5f) * (rw * 1.5f);
+    /* [RUN1 2026-09-26] Was 1.5 road-widths: the fill kept going well into the
+     * grass crotch between the two diverging roads, so every fork/merge showed
+     * a solid TRIANGLE instead of a clean Y. Only close the true slit where the
+     * inner rails nearly coincide (TD5RE_MINIMAP_SLIT_PCT % of the road width,
+     * default 35). */
+    static int s_slit_pct = -1;
+    if (s_slit_pct < 0) s_slit_pct = td5_env_int("TD5RE_MINIMAP_SLIT_PCT", 35, 0, 300);
+    float gl = rw * (float)s_slit_pct / 100.0f;
+    float gap_lim2 = gl * gl;
     if (gap_lim2 < 4.0f) gap_lim2 = 4.0f;
 
     int step = 3;

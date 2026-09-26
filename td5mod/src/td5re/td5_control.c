@@ -544,6 +544,27 @@ static void ctrl_exec(cJSON *req, cJSON *reply)
         return;
     }
 
+    if (strcmp(cmd, "set_env") == 0) {
+        /* [RUN1 2026-09-26] DEV-only: set / clear one TD5RE_AUTOTRACK_* knob in
+         * the process environment, the same way AUTO TRACK STUDIO does
+         * (td5_fe_race.c at_setenv), so a harness can reproduce studio-driven
+         * multi-generation sessions (seed / length changes mid-process). An
+         * empty or missing "value" removes the knob. Restricted to the
+         * auto-track prefix so it cannot flip unrelated behaviour. */
+        cJSON *jn = j_args ? cJSON_GetObjectItemCaseSensitive(j_args, "name") : NULL;
+        cJSON *jv = j_args ? cJSON_GetObjectItemCaseSensitive(j_args, "value") : NULL;
+        const char *name = (jn && cJSON_IsString(jn)) ? jn->valuestring : NULL;
+        const char *val  = (jv && cJSON_IsString(jv)) ? jv->valuestring : "";
+        if (!name || strncmp(name, "TD5RE_AUTOTRACK_", 16) != 0) {
+            ctrl_err(reply, "set_env: name must start with TD5RE_AUTOTRACK_");
+        } else {
+            _putenv_s(name, val);
+            TD5_LOG_I(LOG_TAG, "control: set_env %s=%s", name, val);
+            cJSON_AddBoolToObject(reply, "ok", 1);
+        }
+        return;
+    }
+
     if (strcmp(cmd, "quit") == 0) {
         g_td5.quit_requested = 1;   /* main loop exits -> clean shutdown + log flush */
         cJSON_AddBoolToObject(reply, "ok", 1);

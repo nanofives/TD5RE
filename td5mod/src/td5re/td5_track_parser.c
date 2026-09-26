@@ -39,6 +39,11 @@
  * mesh headers and relocates internal pointers.
  * ======================================================================== */
 
+void td5_track_models_clear(void)
+{
+    free_models_dat_runtime();
+}
+
 int td5_track_parse_models_dat(const void *data, size_t size)
 {
     const uint8_t *src;

@@ -1667,6 +1667,46 @@ static int tg_slab_degenerate(const TG_NodeList *nl, int si, int is_left,
  * (tg_span_in_bridge_run returns GROUND deliberately) and tunnel spans are left
  * alone -- their page is set by their own rule. TD5RE_R23_SLOPE_GROUND=0 restores
  * the tile-on-slope output byte-for-byte. */
+/* [RUN1 2026-09-26] Wider hill test. Sampling the natural slope only AT the
+ * road node missed most hills: the road walk steers onto flat ground, so the
+ * node reads flat while the slab beside it climbs the hill; hilltops / valley
+ * floors read ~0 at their centre; and each span decided alone, so a hillside
+ * alternated grass/tile span by span. This samples the pre-conform surface
+ * across the whole skirt reach on BOTH sides (slope at each sample AND the rise
+ * between samples), over the span and its neighbours (+-2, so adjacent spans
+ * agree). TD5RE_R24_SLOPE_WIDE=0 falls back to the single-point test. */
+static int tg_slope_wide_one(const TG_NodeList *nl, int si)
+{
+    static const double k_off[] = { 0.0, 3000.0, 6000.0, 9000.0, 12000.0 };
+    const TG_Node *n = &nl->v[si];
+    double px = -n->tz, pz = n->tx;            /* unit perpendicular to the road */
+    if (px == 0.0 && pz == 0.0) { px = 1.0; pz = 0.0; }
+    for (int side = -1; side <= 1; side += 2) {
+        double h_prev = tg_world_h_base(n->x, n->z);
+        for (int k = 0; k < (int)(sizeof(k_off) / sizeof(k_off[0])); k++) {
+            double x = n->x + px * side * k_off[k], z = n->z + pz * side * k_off[k];
+            if (tg_world_slope_base(x, z) >= TG_WORLD_HILL_SLOPE) return 1;
+            if (k > 0) {
+                double h = tg_world_h_base(x, z);
+                double rise = fabs(h - h_prev) / (k_off[k] - k_off[k - 1]);
+                if (rise >= TG_WORLD_HILL_SLOPE) return 1;
+                h_prev = h;
+            }
+        }
+    }
+    return 0;
+}
+
+static int tg_slope_wide(const TG_NodeList *nl, int si)
+{
+    for (int d = -2; d <= 2; d++) {
+        int j = si + d;
+        if (j < 0 || j >= nl->count) continue;
+        if (tg_slope_wide_one(nl, j)) return 1;
+    }
+    return 0;
+}
+
 int tg_topo_surface_page_sloped(const TG_NodeList *nl, int si)
 {
     int page = tg_topo_surface_page(si);
@@ -1676,7 +1716,10 @@ int tg_topo_surface_page_sloped(const TG_NodeList *nl, int si)
     /* Counted unconditionally so the OLD-rule number (how many tile slabs sat on
      * a slope) shows in the same run the fix acts -- a lone post-fix count would
      * only say the invariant holds, not that anything was ever wrong. */
-    if (tg_world_slope_base(nl->v[si].x, nl->v[si].z) >= TG_WORLD_HILL_SLOPE) {
+    int sloped = td5_env_flag_on("TD5RE_R24_SLOPE_WIDE")
+                     ? tg_slope_wide(nl, si)
+                     : (tg_world_slope_base(nl->v[si].x, nl->v[si].z) >= TG_WORLD_HILL_SLOPE);
+    if (sloped) {
         s_r23_slope_seen++;
         if (td5_env_flag_on("TD5RE_R23_SLOPE_GROUND")) {
             s_r23_slope_grass++;
@@ -3105,11 +3148,18 @@ static int tg_tunnel_flank_page(int si)
     if (!td5_env_flag_on("TD5RE_R11_TUNNEL_FLANK")) return TD5_TG_PAGE_HILL;
     /* Walk out to the first span that is not in the bore. The massing only ever
      * runs TD5_TG_TUNNEL_MASS_SPANS from a mouth, so this is a short walk. */
-    for (d = 0; d <= TD5_TG_TUNNEL_MASS_SPANS + 1; d++) {
-        if (!tg_span_in_tunnel(si - d)) return tg_topo_surface_page(si - d);
-        if (!tg_span_in_tunnel(si + d)) return tg_topo_surface_page(si + d);
+    int pg = -1;
+    for (d = 0; d <= TD5_TG_TUNNEL_MASS_SPANS + 1 && pg < 0; d++) {
+        if (!tg_span_in_tunnel(si - d)) pg = tg_topo_surface_page(si - d);
+        else if (!tg_span_in_tunnel(si + d)) pg = tg_topo_surface_page(si + d);
     }
-    return tg_topo_surface_page(si);
+    if (pg < 0) pg = tg_topo_surface_page(si);
+    /* [RUN1 2026-09-26] The massing IS the hillside the bore is cut into, so
+     * the urban tile page never belongs on it (the reported "small mountains
+     * with tile"). TD5RE_R24_TUNNEL_MASS_GRASS=0 keeps the old page. */
+    if (pg == TD5_TG_PAGE_GROUND && td5_env_flag_on("TD5RE_R24_TUNNEL_MASS_GRASS"))
+        pg = TD5_TG_PAGE_GREEN;
+    return pg;
 }
 
 /* Group C -- tunnels: portal surrounds, mountain massing, width for branches.
