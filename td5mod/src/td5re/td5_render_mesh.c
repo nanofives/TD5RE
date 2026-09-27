@@ -656,7 +656,17 @@ void td5_render_apply_ssr_pass(int vp_x, int vp_y)
 void td5_render_lighting2_frame_begin(void)
 {
     static int s_logged = 0;
-    int on = td5_light2_active() ? 1 : 0;
+    /* [PERF 2026-09-27] The G-buffer (a second RGBA8 target written by every
+     * opaque draw + a full clear per frame) is only READ by the RT/DXR lighting
+     * stack (d3d12_priv_scene_inputs) and by the car-sun N.L brighten (gain 0 by
+     * default); the deferred light pass uses a zero placeholder. On GPUs without
+     * DXR (e.g. Intel Iris Xe) or at LIGHTING QUALITY LOW it was pure cost, so
+     * only enable it when a consumer is live. TD5RE_GBUFFER_ALWAYS=1 restores
+     * the old always-on behaviour. */
+    static int s_gb_always = -1;
+    if (s_gb_always < 0) s_gb_always = td5_env_int("TD5RE_GBUFFER_ALWAYS", 0, 0, 1);
+    int on = (td5_light2_active() &&
+              (s_gb_always || td5_rt_active() || td5_render_car_sun_gain() > 0.0f)) ? 1 : 0;
     td5_plat_render_set_gbuffer(on);
     /* [CAR SUN 2026-08-04] Publish this frame's scene sun (+Y-down, UN-flipped —
      * matches the packed COLOR1 normal) so the directional car brighten in

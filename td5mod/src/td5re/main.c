@@ -34,6 +34,7 @@
 #include "td5_jobs.h"
 #include "td5_net.h"
 #include "td5_save.h"
+#include "td5_config.h"   /* [AUTO PERF] td5_env_int */
 #include "td5_profile.h"
 #include "td5_trace.h"
 #include "td5_selftest.h"  /* in-session automated test suite (dev builds) */
@@ -354,6 +355,48 @@ void td5_ini_write_str(const char *section, const char *key, const char *value)
 {
     if (!s_ini_path[0]) return;
     WritePrivateProfileStringA(section, key, value ? value : "", s_ini_path);
+}
+
+/* [AUTO PERF 2026-09-27] One-time low-end preset for integrated Intel GPUs.
+ * On the FIRST launch ([Display] AutoPerfChecked absent/0) probe DXGI adapter 0
+ * (the one the D3D12 device is created on). If it is an Intel GPU with < 1 GB of
+ * dedicated VRAM (an iGPU; Arc discrete cards report several GB) apply the same
+ * choices as the PERFORMANCE screen's LOW-END PRESET, except RENDER SCALE 75
+ * (the whole frame incl. HUD/menus is scaled today, and 50 makes text hard to
+ * read). The flag is then written so it never runs again -- the player's own
+ * PERFORMANCE settings always win afterwards. TD5RE_AUTO_PERF=0 disables the
+ * probe; TD5RE_AUTO_PERF=2 forces the preset (testing on non-Intel hardware). */
+void td5_ini_persist_options(void);
+static void td5_auto_perf_preset(void)
+{
+    unsigned vendor = 0, device = 0, vram_mb = 0;
+    char name[128] = "";
+    int force = td5_env_int("TD5RE_AUTO_PERF", 1, 0, 2);
+    if (force == 0) return;
+    if (force != 2 && td5_ini_int("Display", "AutoPerfChecked", 0)) return;
+    if (!td5_plat_gpu_probe(&vendor, &device, &vram_mb, name, sizeof(name))) {
+        dbglog("auto perf: DXGI adapter probe failed -- leaving settings as-is");
+        return;
+    }
+    int weak = (vendor == 0x8086u && vram_mb < 1024u);
+    dbglog("auto perf: adapter0 '%s' vendor=0x%04X device=0x%04X vram=%u MB -> %s",
+              name, vendor, device, vram_mb,
+              (weak || force == 2) ? "INTEGRATED: applying low-end preset" : "no change");
+    if (weak || force == 2) {
+        g_td5.ini.render_scale     = 75;
+        td5_save_set_view_distance(0.25f);
+        g_td5.ini.lighting_enabled = 0;
+        g_td5.ini.car_shadows      = 0;
+        g_td5.ini.legacy_shadows   = 0;
+        g_td5.ini.sun_shadows      = 0;
+        g_td5.ini.reflections      = 0;
+        g_td5.ini.wet_roads        = 0;
+        g_td5.ini.vfx_enabled      = 0;
+        g_td5.ini.world_billboards = 0;
+        g_td5.ini.foliage_aa       = 0;
+        td5_ini_persist_options();
+    }
+    if (force != 2) td5_ini_write_int("Display", "AutoPerfChecked", 1);
 }
 
 void td5_ini_persist_options(void)
@@ -1702,6 +1745,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * path and keeps a single code path for mode transitions. */
     windowed = 1;
     dbglog("Step 2: Backend_CreateDevice(%d x %d, bpp=%d, windowed=%d)...", width, height, bpp, windowed);
+    /* [AUTO PERF 2026-09-27] First launch on a weak integrated GPU: apply the
+     * LOW-END preset once, before the backend reads its knobs below. */
+    td5_auto_perf_preset();
+
     /* [LOW-END PERF 2026-09-12] Seed the backend's env-read graphics knobs from the
      * resolved INI/CLI values so the D3D12 backend picks them up at device create.
      * Env-wins: an explicitly-set env (A/B testing) is left untouched, matching the

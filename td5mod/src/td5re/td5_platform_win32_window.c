@@ -125,6 +125,33 @@ volatile int s_devices_dirty = 0;
  * of hiding the cursor. Driven by the dev geometry picker (free camera only) so
  * the user can see where they are selecting. */
 static int s_os_cursor_show = 0;
+/* [AUTO PERF 2026-09-27] See td5_platform.h. */
+int td5_plat_gpu_probe(unsigned *vendor_id, unsigned *device_id,
+                       unsigned *dedicated_mb, char *name, int name_cap)
+{
+    IDXGIFactory1 *f = NULL;
+    IDXGIAdapter1 *a = NULL;
+    DXGI_ADAPTER_DESC1 d;
+    int ok = 0;
+    if (FAILED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&f)) || !f) return 0;
+    if (SUCCEEDED(IDXGIFactory1_EnumAdapters1(f, 0, &a)) && a) {
+        if (SUCCEEDED(IDXGIAdapter1_GetDesc1(a, &d))) {
+            if (vendor_id)    *vendor_id    = d.VendorId;
+            if (device_id)    *device_id    = d.DeviceId;
+            if (dedicated_mb) *dedicated_mb = (unsigned)(d.DedicatedVideoMemory / (1024u * 1024u));
+            if (name && name_cap > 0) {
+                if (!WideCharToMultiByte(CP_UTF8, 0, d.Description, -1, name, name_cap, NULL, NULL))
+                    name[0] = '\0';
+                name[name_cap - 1] = '\0';
+            }
+            ok = 1;
+        }
+        IDXGIAdapter1_Release(a);
+    }
+    IDXGIFactory1_Release(f);
+    return ok;
+}
+
 void td5_plat_set_os_cursor_visible(int visible) { s_os_cursor_show = visible ? 1 : 0; }
 
 /* [PICK] Real left-click latch: set ONLY on a WM_LBUTTONDOWN delivered to this
