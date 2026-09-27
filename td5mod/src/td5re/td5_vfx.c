@@ -129,6 +129,10 @@ typedef struct VfxParticleSlot {
  * short drift puffs to ~0.95 at birth → they rendered tiny + faint. Spare slot
  * byte (free gap between VEL_Z and POS_X). */
 #define PSLOT_LIFE0       0x1A  /* int16: lifetime at spawn */
+/* [RUN3 2026-09-26] Ticks a smoke puff keeps the car's full X/Z velocity (no
+ * drag) after spawn, so engine smoke rides with the car up past the roofline
+ * before trailing off. 0 = faithful immediate drag. Spare byte (0x1C..0x1F). */
+#define PSLOT_CARRY       0x1C  /* uint8 */
 
 /* Helper to read/write typed values from raw slot bytes */
 #define PSLOT_RD16(s,off)      (*(int16_t  *)((s)+(off)))
@@ -222,6 +226,7 @@ static void vfx_spawn_smoke_at_position(TD5_Actor *actor, float wx, float wy,
 /* Upward velocity for smoke particles. Hardpoint/tire smoke = 0x600 (default).
  * Exhaust smoke (0x429CF0) = 0x2000. Set before spawn, auto-resets after. */
 static int32_t s_smoke_vel_y = 0x600;
+static uint8_t s_smoke_carry = 0;   /* [RUN3] one-shot: PSLOT_CARRY for the next puff */
 
 /* [CAR DAMAGE 2026-06-28] Per-spawn diffuse tint for the next smoke quad. The
  * smoke sprite is greyscale art; a non-white tint MULTIPLIES it, so a grey tint
@@ -1180,8 +1185,12 @@ void td5_vfx_update_particles(int view_index) {
             int32_t vz = PSLOT_RD32(slot, PSLOT_VEL_Z);
 
             /* Arithmetic drag: vel -= vel >> 2 (SAR 2) */
-            vx -= (vx >> 2);
-            vz -= (vz >> 2);
+            if (slot[PSLOT_CARRY]) {
+                slot[PSLOT_CARRY]--;          /* [RUN3] still riding with the car */
+            } else {
+                vx -= (vx >> 2);
+                vz -= (vz >> 2);
+            }
 
             PSLOT_WR32(slot, PSLOT_VEL_X, vx);
             PSLOT_WR32(slot, PSLOT_VEL_Z, vz);
@@ -2573,6 +2582,8 @@ static void vfx_spawn_smoke_at_position(TD5_Actor *actor, float wx, float wy,
         PSLOT_WR32(slot, PSLOT_VEL_Y, s_smoke_vel_y);
         PSLOT_WR32(slot, PSLOT_VEL_Z, actor_vz);
         s_smoke_vel_y = 0x600; /* reset to default after use */
+        slot[PSLOT_CARRY] = s_smoke_carry;   /* [RUN3] */
+        s_smoke_carry = 0;
 
         /* World position (24.8 fixed) */
         PSLOT_WR32(slot, PSLOT_POS_X, (int32_t)(wx * 256.0f));
@@ -3222,6 +3233,9 @@ void td5_vfx_spawn_damage_smoke(TD5_Actor *actor, int tier) {
      * car. Forward = the rotation matrix's local +Z (m[2], m[8]); car is ~64u
      * wide / ~140u long. TD5RE_DMG_SMOKE_FWD / _LIFT tune the spot. */
     static float s_fwd = -1.0f, s_lift = -1.0f;
+    /* [RUN3] ticks the puff rides with the car before drag (TD5RE_DMG_SMOKE_CARRY). */
+    static int s_carry = -1;
+    if (s_carry < 0) s_carry = td5_env_int("TD5RE_DMG_SMOKE_CARRY", 5, 0, 60);
     if (s_fwd < 0.0f) {
         s_fwd  = td5_env_float("TD5RE_DMG_SMOKE_FWD", 42.0f, 0.0f, 200.0f);
         s_lift = td5_env_float("TD5RE_DMG_SMOKE_LIFT", 12.0f, 0.0f, 200.0f);
@@ -3236,6 +3250,7 @@ void td5_vfx_spawn_damage_smoke(TD5_Actor *actor, int tier) {
          * bonnet before the X/Z drag lets it trail behind the car. */
         s_smoke_tint  = 0xFFB4B4B4u;
         s_smoke_vel_y = 0x2200;
+        s_smoke_carry = (uint8_t)s_carry;
         vfx_spawn_smoke_at_position(actor, mid_x, mid_y, mid_z, 0, s_current_view_index);
         return;
     }
@@ -3243,9 +3258,11 @@ void td5_vfx_spawn_damage_smoke(TD5_Actor *actor, int tier) {
     /* Tiers 2 & 3: dense dark column (two puffs for density). */
     s_smoke_tint  = (tier >= 3) ? 0xFF242424u : 0xFF383838u;
     s_smoke_vel_y = 0x2600;
+    s_smoke_carry = (uint8_t)s_carry;
     vfx_spawn_smoke_at_position(actor, mid_x, mid_y, mid_z, 0, s_current_view_index);
     s_smoke_tint  = (tier >= 3) ? 0xFF242424u : 0xFF383838u;
     s_smoke_vel_y = 0x1600;
+    s_smoke_carry = (uint8_t)s_carry;
     vfx_spawn_smoke_at_position(actor, mid_x, mid_y + 8.0f, mid_z, 0, s_current_view_index);
 
     if (tier >= 3) {

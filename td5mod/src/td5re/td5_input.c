@@ -1802,9 +1802,12 @@ void td5_input_update_player_control(int slot)
      * the [GameOptions] AutoGearbox INI key. */
     if ((bits & 0x10000000u) == 0) {
         /* Auto mode (default) — orig ignores gear up/down keys here. */
-    } else if (td5_game_is_countdown_active()) {
+    } else if (td5_game_is_countdown_active() || g_td5.paused) {
         /* [RUN1 2026-09-26] PORT CHANGE: no manual shifting during the pre-race
-         * countdown -- the car holds its starting gear until GO. */
+         * countdown -- the car holds its starting gear until GO.
+         * [RUN3] td5_game_is_countdown_active() is the CAMERA fly-in flag,
+         * which can end before 3-2-1 finishes; the sim stays paused
+         * (g_td5.paused) until GO, so gate on that too. */
     } else if (s_gear_debounce[slot] == 0) {
         /* Gear up (bit 0x400000) */
         if (bits & 0x400000u) {

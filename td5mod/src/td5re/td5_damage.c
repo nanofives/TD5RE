@@ -465,15 +465,17 @@ void td5_damage_on_overrev(TD5_Actor *actor, int at_limiter) {
             TD5_LOG_I(LOG_TAG, "over-rev: slot=%d backed off after %d ticks", slot,
                       s_overrev_ticks[slot]);
         s_overrev_ticks[slot] = 0;
-        if (s_overrev_smoke[slot] > 0) s_overrev_smoke[slot]--;
-        return;
+        if (s_overrev_smoke[slot] <= 0) return;
+        s_overrev_smoke[slot]--;
+        /* [RUN3] keep draining while the engine is still smoking */
+    } else {
+        s_overrev_ticks[slot]++;
+        if (s_overrev_ticks[slot] <= grace) return;
+        if (s_overrev_ticks[slot] == grace + 1)
+            TD5_LOG_I(LOG_TAG, "over-rev: slot=%d past grace (%d ticks) -> engine smoke + drain",
+                      slot, grace);
+        s_overrev_smoke[slot] = hold;
     }
-    s_overrev_ticks[slot]++;
-    if (s_overrev_ticks[slot] <= grace) return;
-    if (s_overrev_ticks[slot] == grace + 1)
-        TD5_LOG_I(LOG_TAG, "over-rev: slot=%d past grace (%d ticks) -> engine smoke + drain",
-                  slot, grace);
-    s_overrev_smoke[slot] = hold;
 
     /* Health drain (only meaningful with the bar/wreck mechanic on). */
     if (!td5_damage_bar_enabled() || drain <= 0) return;

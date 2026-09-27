@@ -2014,7 +2014,7 @@ void td5_physics_update_player(TD5_Actor *actor)
     if ((int)actor->slot_index < g_traffic_slot_base &&
         td5_physics_actor_is_manual_gearbox(actor)) {
         int32_t redline_o = (int32_t)PHYS_S(actor, PHYS_REDLINE_RPM);
-        int at_lim = !td5_game_is_countdown_active() && !actor->brake_flag &&
+        int at_lim = !td5_game_is_countdown_active() && !g_td5.paused && !actor->brake_flag &&
                      throttle > 0 && actor->current_gear >= 2 &&
                      actor->engine_speed_accum > redline_o - 50;
         td5_damage_on_overrev(actor, at_lim);
