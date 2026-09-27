@@ -3216,21 +3216,33 @@ void td5_vfx_spawn_damage_smoke(TD5_Actor *actor, int tier) {
     memcpy(&pos_x, &actor->world_pos.x, 4);
     memcpy(&pos_y, &TD5_ACTOR_AT(ap)->world_pos.y, 4);
     memcpy(&pos_z, &TD5_ACTOR_AT(ap)->world_pos.z, 4);
-    float mid_x = (float)pos_x * FP_TO_FLOAT;
-    float mid_y = (float)pos_y * FP_TO_FLOAT + 18.0f;   /* near the roofline */
-    float mid_z = (float)pos_z * FP_TO_FLOAT;
+    /* [RUN2 2026-09-26] Emit from the ENGINE BAY (ahead of the centre along
+     * the car's forward axis, at bonnet height) instead of the body centre at
+     * roofline, which read as smoke pouring out of the side window on a moving
+     * car. Forward = the rotation matrix's local +Z (m[2], m[8]); car is ~64u
+     * wide / ~140u long. TD5RE_DMG_SMOKE_FWD / _LIFT tune the spot. */
+    static float s_fwd = -1.0f, s_lift = -1.0f;
+    if (s_fwd < 0.0f) {
+        s_fwd  = td5_env_float("TD5RE_DMG_SMOKE_FWD", 42.0f, 0.0f, 200.0f);
+        s_lift = td5_env_float("TD5RE_DMG_SMOKE_LIFT", 12.0f, 0.0f, 200.0f);
+    }
+    const float *rm = actor->rotation_matrix.m;
+    float mid_x = (float)pos_x * FP_TO_FLOAT + rm[2] * s_fwd;
+    float mid_y = (float)pos_y * FP_TO_FLOAT + s_lift;   /* bonnet height */
+    float mid_z = (float)pos_z * FP_TO_FLOAT + rm[8] * s_fwd;
 
     if (tier == 1) {
-        /* Light grey wisp, gentle rise, single puff. */
+        /* Light grey wisp. [RUN2] Brisk initial rise so the puff lifts off the
+         * bonnet before the X/Z drag lets it trail behind the car. */
         s_smoke_tint  = 0xFFB4B4B4u;
-        s_smoke_vel_y = 0x1000;
+        s_smoke_vel_y = 0x2200;
         vfx_spawn_smoke_at_position(actor, mid_x, mid_y, mid_z, 0, s_current_view_index);
         return;
     }
 
     /* Tiers 2 & 3: dense dark column (two puffs for density). */
     s_smoke_tint  = (tier >= 3) ? 0xFF242424u : 0xFF383838u;
-    s_smoke_vel_y = 0x1C00;
+    s_smoke_vel_y = 0x2600;
     vfx_spawn_smoke_at_position(actor, mid_x, mid_y, mid_z, 0, s_current_view_index);
     s_smoke_tint  = (tier >= 3) ? 0xFF242424u : 0xFF383838u;
     s_smoke_vel_y = 0x1600;

@@ -192,19 +192,19 @@ int td5_damage_deform_enabled(void) {
  * the engine: light engine smoke while it lasts and a slow health drain (floored
  * so over-revving alone never wrecks the car). Tick-based -> net-deterministic.
  * Knobs: TD5RE_OVERREV_GRACE_TICKS (90 = 3 s), TD5RE_OVERREV_DRAIN_PCT_S
- * (3 = % of max health per second), TD5RE_OVERREV_FLOOR_PCT (10 = never drains
+ * (6 = % of max health per second, RUN2: was 3), TD5RE_OVERREV_FLOOR_PCT (10 = never drains
  * below this % health), TD5RE_OVERREV_SMOKE_HOLD (45 = ticks the smoke lingers
  * after backing off). TD5RE_OVERREV_DAMAGE=0 disables the whole feature. */
 static int32_t s_overrev_ticks[TD5_MAX_TOTAL_ACTORS];
 static int32_t s_overrev_smoke[TD5_MAX_TOTAL_ACTORS];
 
 static int overrev_cfg(int *grace, int *drain_pct_s, int *floor_pct, int *hold) {
-    static int inited = 0, on = 1, g = 90, d = 3, f = 10, h = 45;
+    static int inited = 0, on = 1, g = 90, d = 6, f = 10, h = 45;
     if (!inited) {
         inited = 1;
         on = td5_env_int("TD5RE_OVERREV_DAMAGE",      1,  0, 1);
         g  = td5_env_int("TD5RE_OVERREV_GRACE_TICKS", 90, 0, 3000);
-        d  = td5_env_int("TD5RE_OVERREV_DRAIN_PCT_S", 3,  0, 100);
+        d  = td5_env_int("TD5RE_OVERREV_DRAIN_PCT_S", 6,  0, 100);
         f  = td5_env_int("TD5RE_OVERREV_FLOOR_PCT",   10, 0, 100);
         h  = td5_env_int("TD5RE_OVERREV_SMOKE_HOLD",  45, 0, 3000);
         TD5_LOG_I(LOG_TAG, "over-rev damage: %s grace=%d ticks drain=%d%%/s floor=%d%% hold=%d",

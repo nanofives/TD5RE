@@ -317,6 +317,11 @@ static void ctrl_exec(cJSON *req, cJSON *reply)
                     cJSON_AddNumberToObject(r, "lap", td5_game_get_player_lap(slot));
                     cJSON_AddNumberToObject(r, "speed_raw", a->longitudinal_speed);
                     cJSON_AddNumberToObject(r, "speed", FP_TRUNC(a->longitudinal_speed));
+                    /* [RUN2 2026-09-26] gearbox harness fields */
+                    cJSON_AddNumberToObject(r, "gear", a->current_gear);
+                    cJSON_AddNumberToObject(r, "rpm", a->engine_speed_accum);
+                    cJSON_AddNumberToObject(r, "vx", a->linear_velocity_x);
+                    cJSON_AddNumberToObject(r, "vz", a->linear_velocity_z);
                     cJSON_AddNumberToObject(r, "span", td5_game_get_slot_span(slot));
                     cJSON_AddNumberToObject(r, "heaviness", td5_game_get_slot_heaviness_q8(slot));
                     cJSON_AddNumberToObject(r, "accel", td5_game_get_slot_accel(slot));

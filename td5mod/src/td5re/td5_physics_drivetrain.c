@@ -780,8 +780,12 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
              * TD5RE_WRONGGEAR_BRAKE_PCT % (default 60) of the car's service
              * brake, clamped so it stops exactly at 0; reverse drive then takes
              * over as before. */
+            /* [RUN2 2026-09-26] NOT clamped at 0 any more: clamping stopped the
+             * car at exactly 0 and on a downhill gravity pushed it forward
+             * again, so reverse drive never engaged. The counter-force now
+             * carries the car through 0 and the normal reverse drive takes
+             * over on the next tick. */
             int32_t mag = (int32_t)(((int64_t)PHYS_S(actor, PHYS_BRAKE_FRONT) * wgp) / 100);
-            if (mag > actor->longitudinal_speed) mag = actor->longitudinal_speed;
             return -mag;
         }
     }

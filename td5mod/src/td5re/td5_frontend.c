@@ -5016,6 +5016,12 @@ static void frontend_recover_surfaces(void) {
                     unsigned char *pp = (unsigned char *)pixels;
                     for (int k = 0; k < w * h; k++)
                         if (pp[k * 4 + 3] != 0) pp[k * 4 + 3] = 255;
+                    /* [RUN2 2026-09-26] This re-upload is the PLAIN overlay, so
+                     * the 2-layer pattern atlas is gone: mark it unbuilt so the
+                     * next draw rebuilds it. Leaving s_pat_built set drew the
+                     * top half of a plain texture stretched 2x (the misplaced
+                     * paint after coming back from a race). */
+                    if (s_pat_handle == i + 1) s_pat_built = -1;
                 }
                 s_surfaces[i].width = w;
                 s_surfaces[i].height = h;

@@ -1812,7 +1812,13 @@ void td5_physics_update_player(TD5_Actor *actor)
     {
         int32_t surf_drag = phys_surface_drag(surface_center);   /* [task#15] TD6-aware */
         int32_t damp_coeff;
-        if (actor->encounter_steering_cmd < 0x20 || actor->current_gear < 2)
+        /* [RUN2 2026-09-26] PORT CHANGE, manual N: roll on the LOW driving
+         * drag. The coasting drag (~30x) made N stop the car faster than a
+         * gear did; N's own gentle slowdown is the NEUTRAL COAST drag in
+         * td5_physics_compute_drive_torque. */
+        int n_roll = (actor->current_gear == 1 &&
+                      td5_physics_actor_is_manual_gearbox(actor));
+        if (!n_roll && (actor->encounter_steering_cmd < 0x20 || actor->current_gear < 2))
             damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, PHYS_DAMP_COEFF_BASE);
         else
             damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, PHYS_DAMP_COEFF_TURN);
@@ -2231,8 +2237,13 @@ void td5_physics_update_player(TD5_Actor *actor)
          *   4. Speed limit check
          *   5. If brake || coast(-32): UESA + brake forces */
         int32_t coast_throttle = (throttle != 0) ? throttle : -32;
+        /* [RUN2 2026-09-26] Manual N: throttle must not matter, so N always
+         * takes the drive path (whose torque in N is the neutral coast drag)
+         * instead of the -32 idle brake the original applies off-throttle. */
+        int n_free = (actor->current_gear == 1 &&
+                      td5_physics_actor_is_manual_gearbox(actor));
 
-        if (!actor->brake_flag && throttle != 0) {
+        if (!actor->brake_flag && (throttle != 0 || n_free)) {
             /* Gearbox dispatch [CONFIRMED @ 0x404521]:
              * field_0x378 == 0 → manual, != 0 → automatic.
              * [#2 2026-06-15] Route through the canonical should-auto-shift

@@ -6532,7 +6532,7 @@ static int minimap_fill_junction_slit(uint8_t *span_base, uint8_t *vert_base,
      * inner rails nearly coincide (TD5RE_MINIMAP_SLIT_PCT % of the road width,
      * default 35). */
     static int s_slit_pct = -1;
-    if (s_slit_pct < 0) s_slit_pct = td5_env_int("TD5RE_MINIMAP_SLIT_PCT", 35, 0, 300);
+    if (s_slit_pct < 0) s_slit_pct = td5_env_int("TD5RE_MINIMAP_SLIT_PCT", 10, 0, 300);   /* RUN2: 35 still left a small triangle */
     float gl = rw * (float)s_slit_pct / 100.0f;
     float gap_lim2 = gl * gl;
     if (gap_lim2 < 4.0f) gap_lim2 = 4.0f;
@@ -6573,8 +6573,32 @@ static void minimap_emit_fork_connectors(uint8_t *span_base, uint8_t *vert_base,
         int fork_main = (int)s_minimap_seg_branch[bi];   /* parent primary start */
         if (fork_main < 0 || br_last < br_first) continue;
         int merge_main = fork_main + (br_last - br_first);
+        {   /* [RUN2 2026-09-26] one-shot geometry line per branch row */
+            static unsigned char s_logged[64];
+            int k = bi & 63;
+            if (!s_logged[k]) {
+                s_logged[k] = 1;
+                TD5_LOG_I(LOG_TAG, "minimap fork row %d: fork_main=%d br=[%d..%d] merge_main=%d",
+                          bi, fork_main, br_first, br_last, merge_main);
+            }
+        }
         /* Fork end: walk forward from (fork_main, br_first). Merge end: walk
          * backward from (merge_main, br_last). Each self-culls to the window. */
+        /* [RUN2 2026-09-26] Road-width lead-in / lead-out: one quad from the
+         * trunk's cross-section at the fork to the branch's first span (and
+         * the branch's last span into the trunk at the merge). This closes the
+         * start gap with ROAD, not with a crotch fill, so no triangle forms. */
+        minimap_emit_road_quad(span_base, vert_base, fork_main, br_first,
+                               offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy);
+        minimap_emit_road_quad(span_base, vert_base, br_last, merge_main,
+                               offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy);
+        /* Overlap the trunk across the fork/merge span too: the trunk quads
+         * leave a hairline seam exactly there (the thin dark line at the start
+         * of the fork). */
+        minimap_emit_road_quad(span_base, vert_base, fork_main - 1, fork_main + 1,
+                               offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy);
+        minimap_emit_road_quad(span_base, vert_base, merge_main - 1, merge_main + 1,
+                               offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy);
         minimap_fill_junction_slit(span_base, vert_base, fork_main, br_first, +1,
                                    offset_x, offset_z, cos_h, sin_h, mm_cx, mm_cy);
         minimap_fill_junction_slit(span_base, vert_base, merge_main, br_last, -1,
