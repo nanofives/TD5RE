@@ -8,12 +8,10 @@ Sync the current project's memory and session history between two Claude account
 /sync <source> <dest>
 ```
 
-`<source>` and `<dest>` are account numbers: `1`, `2`, or `3` (mapping to `~/.claude-account1`, `~/.claude-account2`, `~/.claude-account3`).
+`<source>` and `<dest>` are account numbers: `2` or `3` (mapping to `~/.claude-account2`, `~/.claude-account3`). Account 1 (Remitz) was retired on 2026-09-10 and its config dir deleted, so `1` is not a valid argument — say so instead of guessing.
 
 Examples:
 - `/sync 3 2` — pull from account3 into account2
-- `/sync 2 1` — push from account2 to account1
-- `/sync 1 3` — copy account1's project state into account3
 
 If the user gives ambiguous input (e.g. "from claude3"), ask which destination they mean.
 
