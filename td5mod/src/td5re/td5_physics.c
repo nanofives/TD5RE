@@ -1812,7 +1812,13 @@ void td5_physics_update_player(TD5_Actor *actor)
     {
         int32_t surf_drag = phys_surface_drag(surface_center);   /* [task#15] TD6-aware */
         int32_t damp_coeff;
-        if (actor->encounter_steering_cmd < 0x20 || actor->current_gear < 2)
+        /* [RUN2 2026-09-26] PORT CHANGE, manual N: roll on the LOW driving
+         * drag. The coasting drag (~30x) made N stop the car faster than a
+         * gear did; N's own gentle slowdown is the NEUTRAL COAST drag in
+         * td5_physics_compute_drive_torque. */
+        int n_roll = (actor->current_gear == 1 &&
+                      td5_physics_actor_is_manual_gearbox(actor));
+        if (!n_roll && (actor->encounter_steering_cmd < 0x20 || actor->current_gear < 2))
             damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, PHYS_DAMP_COEFF_BASE);
         else
             damp_coeff = surf_drag * 256 + (int32_t)PHYS_S(actor, PHYS_DAMP_COEFF_TURN);
@@ -1932,7 +1938,15 @@ void td5_physics_update_player(TD5_Actor *actor)
         int32_t yaw_term = (int32_t)((yaw_term_q12 >> 12) / 0x28c);
         int32_t body_vlat = raw_front - yaw_term;
 
-        if (actor->surface_contact_flags != 0) {
+        /* [NEUTRAL COAST 2026-09-26] PORT CHANGE, manual gearbox only: in N the
+         * CRGT branch below writes a ZERO wheel pseudo-speed (gear==1 -> 0), so
+         * any tick the wheelspin flag is up (e.g. throttle pressed in N) the tyre
+         * model sees LOCKED driven wheels and the car brakes hard. Neutral must
+         * be a free-rolling coast, so keep the real body speeds there. Auto /
+         * AI cars keep the byte-faithful path. */
+        int neutral_coast = (actor->current_gear == 1 &&
+                             td5_physics_actor_is_manual_gearbox(actor));
+        if (actor->surface_contact_flags != 0 && !neutral_coast) {
             /* Drivetrain dispatch per UpdatePlayerVehicleDynamics @ 0x00404030:
              * sVar2=1 (RWD): CRGT(body_vlong) → long; lat=body_vlat (front-axle form)
              * sVar2=2 (FWD): CRGT(body_vlat)  → lat;  long=body_vlong
@@ -1993,6 +2007,18 @@ void td5_physics_update_player(TD5_Actor *actor)
     int32_t throttle = (int32_t)actor->encounter_steering_cmd;
     int32_t drive_torque = 0;
     int32_t wheel_drive[4] = {0, 0, 0, 0};
+
+    /* [OVER-REV DAMAGE 2026-09-26] PORT-ONLY: a human MANUAL car held on the
+     * rev limiter (throttle on, forward gear, not during the countdown) smokes
+     * and slowly loses health past a grace period (td5_damage_on_overrev). */
+    if ((int)actor->slot_index < g_traffic_slot_base &&
+        td5_physics_actor_is_manual_gearbox(actor)) {
+        int32_t redline_o = (int32_t)PHYS_S(actor, PHYS_REDLINE_RPM);
+        int at_lim = !td5_game_is_countdown_active() && !g_td5.paused && !actor->brake_flag &&
+                     throttle > 0 && actor->current_gear >= 2 &&
+                     actor->engine_speed_accum > redline_o - 50;
+        td5_damage_on_overrev(actor, at_lim);
+    }
     int32_t brake_front = (int32_t)PHYS_S(actor, PHYS_BRAKE_FRONT);
     int32_t brake_rear  = (int32_t)PHYS_S(actor, PHYS_BRAKE_REAR);
 
@@ -2211,8 +2237,13 @@ void td5_physics_update_player(TD5_Actor *actor)
          *   4. Speed limit check
          *   5. If brake || coast(-32): UESA + brake forces */
         int32_t coast_throttle = (throttle != 0) ? throttle : -32;
+        /* [RUN2 2026-09-26] Manual N: throttle must not matter, so N always
+         * takes the drive path (whose torque in N is the neutral coast drag)
+         * instead of the -32 idle brake the original applies off-throttle. */
+        int n_free = (actor->current_gear == 1 &&
+                      td5_physics_actor_is_manual_gearbox(actor));
 
-        if (!actor->brake_flag && throttle != 0) {
+        if (!actor->brake_flag && (throttle != 0 || n_free)) {
             /* Gearbox dispatch [CONFIRMED @ 0x404521]:
              * field_0x378 == 0 → manual, != 0 → automatic.
              * [#2 2026-06-15] Route through the canonical should-auto-shift

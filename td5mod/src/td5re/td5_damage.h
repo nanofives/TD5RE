@@ -131,6 +131,11 @@ int   td5_damage_actor_knocked_out(const TD5_Actor *actor);
  * disabled or pristine. */
 int   td5_damage_smoke_tier(int slot);
 
+/* [OVER-REV DAMAGE 2026-09-26] Call once per sim tick for a human MANUAL car:
+ * at_limiter = 1 while the engine sits on the rev limiter. Past a grace period
+ * the engine smokes and slowly loses health (never below a floor). */
+void  td5_damage_on_overrev(TD5_Actor *actor, int at_limiter);
+
 /* Steering-authority multiplier for the slot (1.0 pristine -> floor when
  * wrecked). Always 1.0 when disabled. */
 float td5_damage_handling_scale(int slot);

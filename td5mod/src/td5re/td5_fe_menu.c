@@ -201,7 +201,11 @@ static void frontend_refresh_display_option_labels(void) {
     frontend_set_button_label(4, "Show FPS");
     frontend_set_button_label(5, "Camera Damping");
     frontend_set_button_label(6, "LIGHTING OPTIONS");   /* [RT2 P8] -> sub-screen */
-    frontend_set_button_label(7, "OK");
+    /* [RUN1 2026-09-26] Row 7 became the PERFORMANCE nav row on 2026-09-12 and
+     * OK moved to row 8; this refresh still stamped "OK" over row 7, so the
+     * PERFORMANCE button read "OK" and the real OK kept its placeholder. */
+    frontend_set_button_label(7, "PERFORMANCE");
+    frontend_set_button_label(8, "OK");
 }
 
 /* Load continue cup data: read + decrypt + restore game state. */

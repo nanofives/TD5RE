@@ -1732,6 +1732,59 @@ static void frontend_compute_paint_axes(const unsigned char *bgra, int w, int h)
     }
 }
 
+/* [PAINT PATTERN MAP 2026-09-26] Rendered pattern map (carpicpat0.png, from
+ * re/tools/td6_photobooth.py's pattern pass): RGB = the three patterns' SECONDARY
+ * regions (R = TWO-TONE, G = STRIPES, B = SPLIT) exactly as the in-race texel
+ * bake paints them, rendered through the same 3D camera as the preview. When a
+ * car ships one, its overlay surface is uploaded as a 2-layer atlas: top half =
+ * the whole painted body (drawn in the MAIN colour), bottom half = only the
+ * pixels the current pattern paints (drawn in the 2ND colour on top). That
+ * replaces the principal-axis approximation, which could not model perspective:
+ * on the angled view it placed the stripe over the front wheel and stair-
+ * stepped its edges. The bottom layer is re-uploaded in place when the pattern
+ * changes. Cars without the map keep the axis path below. */
+static unsigned char *s_pat_body = NULL;     /* binarised overlay, BGRA w*h */
+static unsigned char *s_pat_bits = NULL;     /* pattern map, BGRA w*h */
+static int  s_pat_w = 0, s_pat_h = 0;
+static int  s_pat_handle = 0;                /* overlay surface the map belongs to */
+static int  s_pat_page = -1;
+static int  s_pat_built = -1;                /* pattern the bottom layer holds */
+static char s_pat_archive[128];
+
+static void frontend_paint_pattern_reset(void) {
+    free(s_pat_body); s_pat_body = NULL;
+    free(s_pat_bits); s_pat_bits = NULL;
+    s_pat_w = s_pat_h = 0;
+    s_pat_handle = 0;
+    s_pat_page = -1;
+    s_pat_built = -1;
+    s_pat_archive[0] = '\0';
+}
+
+/* Upload the 2-layer atlas for `pattern`. Returns 1 on success. */
+static int frontend_paint_pattern_upload(int page, int pattern) {
+    if (!s_pat_body || !s_pat_bits || pattern <= TD6_PAT_SOLID || pattern >= TD6_PAT_COUNT)
+        return 0;
+    size_t layer = (size_t)s_pat_w * (size_t)s_pat_h * 4u;
+    unsigned char *atlas = (unsigned char *)malloc(layer * 2u);
+    if (!atlas) return 0;
+    memcpy(atlas, s_pat_body, layer);
+    memcpy(atlas + layer, s_pat_body, layer);
+    int byte = 3 - pattern;   /* BGRA: TWO-TONE->R(2), STRIPES->G(1), SPLIT->B(0) */
+    unsigned char *lo = atlas + layer;
+    int n2 = 0;
+    for (size_t i = 0; i < (size_t)s_pat_w * (size_t)s_pat_h; i++) {
+        if (s_pat_bits[i * 4 + (size_t)byte] > 127 && lo[i * 4 + 3]) n2++;
+        else lo[i * 4 + 3] = 0;
+    }
+    int ok = td5_plat_render_upload_texture(page, atlas, s_pat_w, s_pat_h * 2, 2);
+    free(atlas);
+    if (ok) s_pat_built = pattern;
+    TD5_LOG_I(LOG_TAG, "paint pattern map: page=%d pattern=%d secondary_px=%d ok=%d",
+              page, pattern, n2, ok);
+    return ok;
+}
+
 /* TD6 body-only paint overlay (carpicpaint0.png): grayscale body, everything
  * else transparent (alpha) — the PNG alpha is the mask. Drawn MODULATEd by the
  * paint colour OVER the gray base carpic to tint just the body.
@@ -1779,11 +1832,56 @@ int frontend_load_car_paint_overlay_surface(int car_index) {
     if (slot < 0) { free(pixels); return 0; }
 
     int page = FE_SURFACE_PAGE_BASE + slot;
-    if (!td5_plat_render_upload_texture(page, pixels, w, h, 2)) { free(pixels); return 0; }
+
+    /* [PAINT PATTERN MAP 2026-09-26] Rendered pattern map, if this car has one. */
+    frontend_paint_pattern_reset();
+    int atlas_h = h;
+    {
+        char pat_path[256];
+        void *bits = NULL; int bw = 0, bh = 0;
+        if (td5_asset_resolve_png_path("CarPicPat0.tga", archive, pat_path, sizeof(pat_path)) &&
+            td5_asset_load_png_to_buffer(pat_path, TD5_COLORKEY_NONE, &bits, &bw, &bh)) {
+            if (bw == w && bh == h) {
+                size_t layer = (size_t)w * (size_t)h * 4u;
+                s_pat_body = (unsigned char *)malloc(layer);
+                s_pat_bits = (unsigned char *)malloc(layer);
+                if (s_pat_body && s_pat_bits) {
+                    memcpy(s_pat_body, pixels, layer);
+                    memcpy(s_pat_bits, bits, layer);
+                    s_pat_w = w; s_pat_h = h;
+                } else {
+                    frontend_paint_pattern_reset();
+                }
+            } else {
+                TD5_LOG_W(LOG_TAG, "paint pattern map size %dx%d != overlay %dx%d, ignored",
+                          bw, bh, w, h);
+            }
+            free(bits);
+        }
+    }
+    int pat_now = g_td5.ini.td6_paint_pattern;
+    if (s_pat_body && pat_now > TD6_PAT_SOLID && pat_now < TD6_PAT_COUNT &&
+        frontend_paint_pattern_upload(page, pat_now)) {
+        atlas_h = h * 2;
+    } else if (s_pat_body) {
+        /* SOLID (or upload failure): plain overlay now, atlas built on demand. */
+        s_pat_built = -1;
+        if (!td5_plat_render_upload_texture(page, pixels, w, h, 2)) {
+            frontend_paint_pattern_reset(); free(pixels); return 0;
+        }
+    } else if (!td5_plat_render_upload_texture(page, pixels, w, h, 2)) {
+        free(pixels); return 0;
+    }
+    if (s_pat_body) {
+        s_pat_handle = slot + 1;
+        s_pat_page = page;
+        strncpy(s_pat_archive, archive, sizeof(s_pat_archive) - 1);
+        s_pat_archive[sizeof(s_pat_archive) - 1] = '\0';
+    }
     s_surfaces[slot].in_use = 1;
     s_surfaces[slot].tex_page = page;
     s_surfaces[slot].width = w;
-    s_surfaces[slot].height = h;
+    s_surfaces[slot].height = atlas_h;
     strncpy(s_surfaces[slot].source_name, "CarPicPaint0.tga", sizeof(s_surfaces[slot].source_name) - 1);
     s_surfaces[slot].source_name[sizeof(s_surfaces[slot].source_name) - 1] = '\0';
     strncpy(s_surfaces[slot].source_archive, archive, sizeof(s_surfaces[slot].source_archive) - 1);
@@ -1791,8 +1889,8 @@ int frontend_load_car_paint_overlay_surface(int car_index) {
     strncpy(s_surfaces[slot].png_path, png_path, sizeof(s_surfaces[slot].png_path) - 1);
     s_surfaces[slot].png_path[sizeof(s_surfaces[slot].png_path) - 1] = '\0';
     free(pixels);
-    TD5_LOG_I(LOG_TAG, "paint overlay loaded (alpha binarised): car=%d slot=%d page=%d %dx%d",
-              car_index, slot, page, w, h);
+    TD5_LOG_I(LOG_TAG, "paint overlay loaded (alpha binarised): car=%d slot=%d page=%d %dx%d pattern_map=%d",
+              car_index, slot, page, w, h, s_pat_body ? 1 : 0);
     return slot + 1;
 }
 
@@ -2556,6 +2654,33 @@ static void fe_draw_paint_overlay_regions(int handle, float dx, float dy, float 
     uint32_t c1 = frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color);
     uint32_t c2 = frontend_rgb_to_bgra((uint32_t)g_td5.ini.td6_paint_color2);
     int pat = g_td5.ini.td6_paint_pattern;
+    /* [PAINT PATTERN MAP 2026-09-26] Rendered map path (see s_pat_*). The handle
+     * must still be the live overlay surface the map was loaded with. */
+    int slot = handle - 1;
+    if (s_pat_body && handle == s_pat_handle && slot >= 0 && slot < FE_MAX_SURFACES &&
+        s_surfaces[slot].in_use && s_surfaces[slot].tex_page == s_pat_page &&
+        strcmp(s_surfaces[slot].source_name, "CarPicPaint0.tga") == 0 &&
+        strcmp(s_surfaces[slot].source_archive, s_pat_archive) == 0) {
+        if (pat <= TD6_PAT_SOLID || pat >= TD6_PAT_COUNT) {
+            if (s_pat_built != -1 &&
+                td5_plat_render_upload_texture(s_pat_page, s_pat_body, s_pat_w, s_pat_h, 2)) {
+                s_pat_built = -1;
+                s_surfaces[slot].height = s_pat_h;
+            }
+            if (s_pat_built == -1) {
+                fe_draw_surface_rect_uv(handle, dx, dy, dw, dh, c1, 0, 0, 1, 1);
+                return;
+            }
+        } else {
+            if (s_pat_built != pat && frontend_paint_pattern_upload(s_pat_page, pat))
+                s_surfaces[slot].height = s_pat_h * 2;
+            if (s_pat_built == pat) {
+                fe_draw_surface_rect_uv(handle, dx, dy, dw, dh, c1, 0, 0.0f, 1, 0.5f);
+                fe_draw_surface_rect_uv(handle, dx, dy, dw, dh, c2, 0, 0.5f, 1, 1.0f);
+                return;
+            }
+        }
+    }
     for (int v = 0; v < TD6_PREVIEW_VIEWS; v++) {
         float va  = (float)v       / (float)TD6_PREVIEW_VIEWS;
         float vb  = (float)(v + 1) / (float)TD6_PREVIEW_VIEWS;
@@ -3700,6 +3825,9 @@ static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
         }
         if (s_flow_context == 3) {
             return TD5_SCREEN_MAIN_MENU;
+        }
+        if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
+            return TD5_SCREEN_SELECT_CUP;   /* [RUN1 2026-09-26] cup picked on SELECT CUP */
         }
         return TD5_SCREEN_RACE_TYPE_MENU;
 
@@ -4888,6 +5016,12 @@ static void frontend_recover_surfaces(void) {
                     unsigned char *pp = (unsigned char *)pixels;
                     for (int k = 0; k < w * h; k++)
                         if (pp[k * 4 + 3] != 0) pp[k * 4 + 3] = 255;
+                    /* [RUN2 2026-09-26] This re-upload is the PLAIN overlay, so
+                     * the 2-layer pattern atlas is gone: mark it unbuilt so the
+                     * next draw rebuilds it. Leaving s_pat_built set drew the
+                     * top half of a plain texture stretched 2x (the misplaced
+                     * paint after coming back from a race). */
+                    if (s_pat_handle == i + 1) s_pat_built = -1;
                 }
                 s_surfaces[i].width = w;
                 s_surfaces[i].height = h;

@@ -722,8 +722,8 @@ static int td5_physics_engine_brake_cfg(int *ebpct, int *wgpct)
         inited = 1;
         on = td5_env_int("TD5RE_ENGINE_BRAKING", 1, 0, 1);
         eb = td5_env_int("TD5RE_ENGINE_BRAKE_PCT", 6, 0, 100);
-        wg = td5_env_int("TD5RE_WRONGGEAR_BRAKE_PCT", 6, 0, 100);
-        TD5_LOG_I(LOG_TAG, "engine braking: %s overrev=%d%%/tick wronggear=%d%%/tick (manual only)",
+        wg = td5_env_int("TD5RE_WRONGGEAR_BRAKE_PCT", 60, 0, 200);   /* % of service brake (RUN1) */
+        TD5_LOG_I(LOG_TAG, "engine braking: %s overrev=%d%%/tick wronggear=%d%% of brake (manual only)",
                   on ? "ON" : "OFF", eb, wg);
     }
     *ebpct = eb; *wgpct = wg;
@@ -742,8 +742,23 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
     uint8_t  gear_u8 = actor->current_gear;
 
     /* Neutral (gear == 1) — original CMP BL,0x1 / JZ RET_ZERO at 0x0042F03B-45.
-     * Decision (2026-08-05): N stays pure coast — no drive AND no engine brake. */
+     * Decision (2026-08-05): N stays pure coast — no drive AND no engine brake.
+     * [NEUTRAL COAST 2026-09-26] PORT CHANGE, manual only: a gentle rolling
+     * resistance so a car left in N slows down on its own (throttle does
+     * nothing in N). Constant decel = TD5RE_NEUTRAL_DRAG_PCT (default 6) % of
+     * the car's service brake, never past zero. */
     if (gear_u8 == 0x01) {
+        int ebp, wgp;
+        if (td5_physics_engine_brake_cfg(&ebp, &wgp) &&
+            td5_physics_actor_is_manual_gearbox(actor)) {
+            static int s_ndrag = -1;
+            if (s_ndrag < 0) s_ndrag = td5_env_int("TD5RE_NEUTRAL_DRAG_PCT", 6, 0, 100);
+            int32_t v = actor->longitudinal_speed;
+            int32_t mag = (int32_t)(((int64_t)PHYS_S(actor, PHYS_BRAKE_FRONT) * s_ndrag) / 100);
+            int32_t av = v < 0 ? -v : v;
+            if (mag > av) mag = av;
+            return v > 0 ? -mag : mag;
+        }
         return 0;
     }
 
@@ -759,7 +774,19 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
             && gear_u8 == 0x00
             && actor->longitudinal_speed > 0
             && td5_physics_actor_is_manual_gearbox(actor)) {
-            return -(int32_t)((int64_t)actor->longitudinal_speed * wgp / 100);
+            /* [RUN1 2026-09-26] Was 6%/tick of the forward speed: an exponential
+             * decay, violent at speed and then crawling toward 0 without ever
+             * getting there. Now a CONSTANT deceleration of
+             * TD5RE_WRONGGEAR_BRAKE_PCT % (default 60) of the car's service
+             * brake, clamped so it stops exactly at 0; reverse drive then takes
+             * over as before. */
+            /* [RUN2 2026-09-26] NOT clamped at 0 any more: clamping stopped the
+             * car at exactly 0 and on a downhill gravity pushed it forward
+             * again, so reverse drive never engaged. The counter-force now
+             * carries the car through 0 and the normal reverse drive takes
+             * over on the next tick. */
+            int32_t mag = (int32_t)(((int64_t)PHYS_S(actor, PHYS_BRAKE_FRONT) * wgp) / 100);
+            return -mag;
         }
     }
 

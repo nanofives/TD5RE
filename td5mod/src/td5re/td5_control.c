@@ -317,6 +317,11 @@ static void ctrl_exec(cJSON *req, cJSON *reply)
                     cJSON_AddNumberToObject(r, "lap", td5_game_get_player_lap(slot));
                     cJSON_AddNumberToObject(r, "speed_raw", a->longitudinal_speed);
                     cJSON_AddNumberToObject(r, "speed", FP_TRUNC(a->longitudinal_speed));
+                    /* [RUN2 2026-09-26] gearbox harness fields */
+                    cJSON_AddNumberToObject(r, "gear", a->current_gear);
+                    cJSON_AddNumberToObject(r, "rpm", a->engine_speed_accum);
+                    cJSON_AddNumberToObject(r, "vx", a->linear_velocity_x);
+                    cJSON_AddNumberToObject(r, "vz", a->linear_velocity_z);
                     cJSON_AddNumberToObject(r, "span", td5_game_get_slot_span(slot));
                     cJSON_AddNumberToObject(r, "heaviness", td5_game_get_slot_heaviness_q8(slot));
                     cJSON_AddNumberToObject(r, "accel", td5_game_get_slot_accel(slot));
@@ -541,6 +546,27 @@ static void ctrl_exec(cJSON *req, cJSON *reply)
         td5_plat_request_frame_dump(path);
         cJSON_AddBoolToObject(reply, "ok", 1);
         cJSON_AddStringToObject(reply, "path", path);
+        return;
+    }
+
+    if (strcmp(cmd, "set_env") == 0) {
+        /* [RUN1 2026-09-26] DEV-only: set / clear one TD5RE_AUTOTRACK_* knob in
+         * the process environment, the same way AUTO TRACK STUDIO does
+         * (td5_fe_race.c at_setenv), so a harness can reproduce studio-driven
+         * multi-generation sessions (seed / length changes mid-process). An
+         * empty or missing "value" removes the knob. Restricted to the
+         * auto-track prefix so it cannot flip unrelated behaviour. */
+        cJSON *jn = j_args ? cJSON_GetObjectItemCaseSensitive(j_args, "name") : NULL;
+        cJSON *jv = j_args ? cJSON_GetObjectItemCaseSensitive(j_args, "value") : NULL;
+        const char *name = (jn && cJSON_IsString(jn)) ? jn->valuestring : NULL;
+        const char *val  = (jv && cJSON_IsString(jv)) ? jv->valuestring : "";
+        if (!name || strncmp(name, "TD5RE_AUTOTRACK_", 16) != 0) {
+            ctrl_err(reply, "set_env: name must start with TD5RE_AUTOTRACK_");
+        } else {
+            _putenv_s(name, val);
+            TD5_LOG_I(LOG_TAG, "control: set_env %s=%s", name, val);
+            cJSON_AddBoolToObject(reply, "ok", 1);
+        }
         return;
     }
 

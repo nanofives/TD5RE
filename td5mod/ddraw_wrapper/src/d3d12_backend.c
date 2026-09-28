@@ -3191,7 +3191,38 @@ void Backend_DumpCrashDiag(const char *path)
 void Backend_EnforceWindowSize(void) { }
 void Backend_EnsureCompositingTextures(int w, int h) { (void)w; (void)h; }
 void Backend_ForceBlendState(int blend_idx) { (void)blend_idx; }
-int  Backend_GetCapture(unsigned char **px, int *w, int *h) { (void)px;(void)w;(void)h; return 0; }
+/* [RUN1 2026-09-26] Photo-booth frame grab (td5_game.c pb_write_frame), stubbed
+ * since the D3D12 cutover so re/tools/td6_photobooth.py produced no frames.
+ * Serves the latest per-present capture (armed by TD5RE_D3D12_CAPTURE /
+ * TD5RE_FRAMEDUMP) as BGRA, the layout the caller expects. The buffer is owned
+ * here and valid until the next call. */
+int  Backend_GetCapture(unsigned char **px, int *w, int *h)
+{
+    static unsigned char *s_get_buf;
+    static size_t s_get_cap;
+    size_t n, i;
+    if (!px || !s_cap_buf || s_cap_w == 0 || s_cap_h == 0) {
+        if (!d3d12_capture_active())
+            WRAPPER_LOG("Backend_GetCapture: set TD5RE_D3D12_CAPTURE to arm per-present capture");
+        return 0;
+    }
+    n = (size_t)s_cap_w * s_cap_h * 4;
+    if (s_get_cap < n) {
+        unsigned char *nb = (unsigned char *)realloc(s_get_buf, n);
+        if (!nb) return 0;
+        s_get_buf = nb; s_get_cap = n;
+    }
+    for (i = 0; i < n; i += 4) {   /* RGBA -> BGRA */
+        s_get_buf[i + 0] = s_cap_buf[i + 2];
+        s_get_buf[i + 1] = s_cap_buf[i + 1];
+        s_get_buf[i + 2] = s_cap_buf[i + 0];
+        s_get_buf[i + 3] = s_cap_buf[i + 3];
+    }
+    *px = s_get_buf;
+    if (w) *w = (int)s_cap_w;
+    if (h) *h = (int)s_cap_h;
+    return 1;
+}
 void Backend_MaybeTrim(void) { }
 void *Backend_PixelShaderRaw(BackendPixelShader *ps) { return ps; }
 /* The port's real render path: td5_platform_win32.c records TD5_D3DVertex (the

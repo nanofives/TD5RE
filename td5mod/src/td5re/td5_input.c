@@ -906,7 +906,12 @@ void td5_input_poll_race_session(void)
             }
             int want_manual = s_manual_gearbox
                 ? (g_td5.drag_race_enabled || td5_frontend_get_player_manual(i))
-                : g_td5.drag_race_enabled;   /* [GEARBOX INI REMOVAL 2026-08-10] AutoGearbox INI gone; menu pick authoritative, legacy env-off = auto unless drag */
+                : g_td5.drag_race_enabled;
+#ifndef TD5RE_RELEASE
+            /* [RUN2 2026-09-26] DEV harness: TD5RE_FORCE_MANUAL=1 forces the
+             * manual gearbox without the car-select menu (gearbox tests). */
+            if (td5_env_int("TD5RE_FORCE_MANUAL", 0, 0, 1)) want_manual = 1;
+#endif   /* [GEARBOX INI REMOVAL 2026-08-10] AutoGearbox INI gone; menu pick authoritative, legacy env-off = auto unless drag */
             if (want_manual)
                 s_control_bits[i] |=  0x10000000u;   /* manual (gear keys honored) */
             else
@@ -1797,6 +1802,12 @@ void td5_input_update_player_control(int slot)
      * the [GameOptions] AutoGearbox INI key. */
     if ((bits & 0x10000000u) == 0) {
         /* Auto mode (default) — orig ignores gear up/down keys here. */
+    } else if (td5_game_is_countdown_active() || g_td5.paused) {
+        /* [RUN1 2026-09-26] PORT CHANGE: no manual shifting during the pre-race
+         * countdown -- the car holds its starting gear until GO.
+         * [RUN3] td5_game_is_countdown_active() is the CAMERA fly-in flag,
+         * which can end before 3-2-1 finishes; the sim stays paused
+         * (g_td5.paused) until GO, so gate on that too. */
     } else if (s_gear_debounce[slot] == 0) {
         /* Gear up (bit 0x400000) */
         if (bits & 0x400000u) {

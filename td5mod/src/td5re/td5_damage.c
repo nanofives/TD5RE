@@ -187,6 +187,33 @@ int td5_damage_deform_enabled(void) {
 }
 
 /* Resolve a slot to its actor (NULL if out of range / unspawned). */
+/* [OVER-REV DAMAGE 2026-09-26] PORT-ONLY. Holding a MANUAL car on the rev
+ * limiter (the flashing red shift warning) for longer than a grace period hurts
+ * the engine: light engine smoke while it lasts and a slow health drain (floored
+ * so over-revving alone never wrecks the car). Tick-based -> net-deterministic.
+ * Knobs: TD5RE_OVERREV_GRACE_TICKS (90 = 3 s), TD5RE_OVERREV_DRAIN_PCT_S
+ * (6 = % of max health per second, RUN2: was 3), TD5RE_OVERREV_FLOOR_PCT (10 = never drains
+ * below this % health), TD5RE_OVERREV_SMOKE_HOLD (45 = ticks the smoke lingers
+ * after backing off). TD5RE_OVERREV_DAMAGE=0 disables the whole feature. */
+static int32_t s_overrev_ticks[TD5_MAX_TOTAL_ACTORS];
+static int32_t s_overrev_smoke[TD5_MAX_TOTAL_ACTORS];
+
+static int overrev_cfg(int *grace, int *drain_pct_s, int *floor_pct, int *hold) {
+    static int inited = 0, on = 1, g = 90, d = 6, f = 10, h = 45;
+    if (!inited) {
+        inited = 1;
+        on = td5_env_int("TD5RE_OVERREV_DAMAGE",      1,  0, 1);
+        g  = td5_env_int("TD5RE_OVERREV_GRACE_TICKS", 90, 0, 3000);
+        d  = td5_env_int("TD5RE_OVERREV_DRAIN_PCT_S", 6,  0, 100);
+        f  = td5_env_int("TD5RE_OVERREV_FLOOR_PCT",   10, 0, 100);
+        h  = td5_env_int("TD5RE_OVERREV_SMOKE_HOLD",  45, 0, 3000);
+        TD5_LOG_I(LOG_TAG, "over-rev damage: %s grace=%d ticks drain=%d%%/s floor=%d%% hold=%d",
+                  on ? "ON" : "OFF", g, d, f, h);
+    }
+    *grace = g; *drain_pct_s = d; *floor_pct = f; *hold = h;
+    return on;
+}
+
 static TD5_Actor *dmg_actor(int slot) {
     if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return NULL;
     return td5_game_get_actor(slot);
@@ -228,6 +255,8 @@ void td5_damage_reset_race(void) {
         s_last_contact_tick[i] = -1000000;   /* first contact is always a fresh event */
         s_event_peak_mag[i] = 0;
         s_ghost_remain[i] = 0;               /* [CAR BROKE DOWN] no ghost at race start */
+        s_overrev_ticks[i] = 0;              /* [OVER-REV DAMAGE] */
+        s_overrev_smoke[i] = 0;
 
         /* Init health ONLY when enabled — when off we never touch the actor
          * padding, so the faithful sim is byte-identical to the original. */
@@ -306,6 +335,8 @@ void td5_damage_repair_actor(int slot) {
         a->damage_accum  = 0;
         a->damage_magic  = TD5_DAMAGE_ACTOR_MAGIC;
     }
+    s_overrev_ticks[slot] = 0;   /* [OVER-REV DAMAGE] full repair clears the smoke */
+    s_overrev_smoke[slot] = 0;
 
     /* Reset the knockout + per-event contact bookkeeping so the first post-reset
      * contact reads as a fresh event (and the KO hook can fire again later). */
@@ -405,17 +436,58 @@ int td5_damage_slot_knocked_out(int slot) {
 }
 
 int td5_damage_smoke_tier(int slot) {
+    /* [OVER-REV DAMAGE] An over-revving engine smokes (light) regardless of the
+     * health tier, whenever damage is on. */
+    int orev = (td5_damage_enabled() && slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS &&
+                s_overrev_smoke[slot] > 0) ? 1 : 0;
     /* Damage smoke escalates with the (hidden) health meter — suppress it when
      * the bar/wreck mechanic is off so there's no health-driven smoke without a
      * visible bar. Impact dents are unaffected (handled in apply_deform). */
-    if (!td5_damage_bar_enabled()) return 0;
+    if (!td5_damage_bar_enabled()) return orev;
     float h = td5_damage_health01(slot);
     if (h < 0.0f) return 0;
     int lost = (int)((1.0f - h) * 100.0f + 0.5f);
     if (lost >= s_smoke_fire)  return 3;
     if (lost >= s_smoke_black) return 2;
     if (lost >= s_smoke_light) return 1;
-    return 0;
+    return orev;
+}
+
+void td5_damage_on_overrev(TD5_Actor *actor, int at_limiter) {
+    int grace, drain, floor_pct, hold;
+    if (!actor || !td5_damage_enabled()) return;
+    int slot = (int)actor->slot_index;
+    if (slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    if (!overrev_cfg(&grace, &drain, &floor_pct, &hold)) return;
+
+    if (!at_limiter) {
+        if (s_overrev_ticks[slot] > grace)
+            TD5_LOG_I(LOG_TAG, "over-rev: slot=%d backed off after %d ticks", slot,
+                      s_overrev_ticks[slot]);
+        s_overrev_ticks[slot] = 0;
+        if (s_overrev_smoke[slot] <= 0) return;
+        s_overrev_smoke[slot]--;
+        /* [RUN3] keep draining while the engine is still smoking */
+    } else {
+        s_overrev_ticks[slot]++;
+        if (s_overrev_ticks[slot] <= grace) return;
+        if (s_overrev_ticks[slot] == grace + 1)
+            TD5_LOG_I(LOG_TAG, "over-rev: slot=%d past grace (%d ticks) -> engine smoke + drain",
+                      slot, grace);
+        s_overrev_smoke[slot] = hold;
+    }
+
+    /* Health drain (only meaningful with the bar/wreck mechanic on). */
+    if (!td5_damage_bar_enabled() || drain <= 0) return;
+    ensure_health_init(actor);
+    int32_t per_tick = (int32_t)(((int64_t)s_max_hp * drain) / (100 * 30));
+    int32_t floor_hp = (int32_t)(((int64_t)s_max_hp * floor_pct) / 100);
+    if (per_tick < 1) per_tick = 1;
+    if (actor->damage_health > floor_hp) {
+        actor->damage_health -= per_tick;
+        if (actor->damage_health < floor_hp) actor->damage_health = floor_hp;
+        if (actor->damage_accum < 0x7FFFFFFF - per_tick) actor->damage_accum += per_tick;
+    }
 }
 
 float td5_damage_handling_scale(int slot) {

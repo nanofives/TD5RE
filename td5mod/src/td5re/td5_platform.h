@@ -72,6 +72,14 @@ int td5_plat_device_lost(void);
  * crash handler. Safe inside an access-violation handler. */
 void td5_plat_dump_gpu_crash_diag(const char *path);
 
+/* [AUTO PERF 2026-09-27] Describe DXGI adapter 0 -- the adapter the D3D12
+ * backend creates its device on (D3D12CreateDevice(NULL, ...)). Fills vendor /
+ * device ids, dedicated VRAM in MB and the adapter name (UTF-8, may be NULL).
+ * Returns 1 on success, 0 if DXGI could not be queried. Safe to call before the
+ * device exists. */
+int  td5_plat_gpu_probe(unsigned *vendor_id, unsigned *device_id,
+                        unsigned *dedicated_mb, char *name, int name_cap);
+
 /** Get current window dimensions. */
 void td5_plat_get_window_size(int *width, int *height);
 
