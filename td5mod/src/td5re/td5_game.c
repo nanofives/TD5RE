@@ -3240,9 +3240,21 @@ static void autotrack_generate_under_splash(void)
 static void init_race_level_and_assets(void)
 {
     /* ---- Step 4: Load track runtime data ---- */
-    /* [R14 GENPERF] AUTO-GENERATED: (re)build the level under the splash first. */
-    if (td5_trackgen_is_auto_slot(g_td5.track_index))
-        autotrack_generate_under_splash();
+    /* [R14 GENPERF] AUTO-GENERATED: (re)build the level under the splash first.
+     * [DRAG vs AUTO SLOT 2026-09-28] A drag race always loads the drag strip
+     * (level030, td5_asset.c level_number chokepoint) but keeps the menu's
+     * track_index, so with the AUTO-GENERATED track selected a drag race spent
+     * the full generation for a level it never loads. Skip it under the SAME
+     * condition that picks level030 (battle mode excluded there too). */
+    int drag_strip = (g_td5.game_type == TD5_GAMETYPE_DRAG_RACE || td5_game_drag_mp_active())
+                     && !td5_game_battle_mode_active();
+    if (td5_trackgen_is_auto_slot(g_td5.track_index)) {
+        if (drag_strip)
+            TD5_LOG_I(LOG_TAG, "Auto track: skipped, drag race loads the drag strip (track_index=%d)",
+                      g_td5.track_index);
+        else
+            autotrack_generate_under_splash();
+    }
     else
         s_race_reinit_is_restart = 0;
     /* NOTE: td5_asset_load_level sets g_td5.track_type from LEVELINF.DAT,

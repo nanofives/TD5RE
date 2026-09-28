@@ -1669,6 +1669,47 @@ int td5_asset_level_number(int track_index)
         return g_td5.ini.override_track_zip;
     }
 
+    /* Drag race hardcodes level030.zip [CONFIRMED @ InitializeRaceSession
+     * 0x0042ad63-0x0042ad73]: when s_selected_track < 0 the original writes
+     * MOV [0x004aaf3c], 0x1e (=30) directly, bypassing the schedule remap.
+     * Check game_type (not drag_race_enabled) — game_type is explicitly
+     * assigned in ConfigureGameTypeFlags for every race mode, so it won't
+     * leak between sessions even if a flag reset is missed.
+     *
+     * [MP DRAG TRACK FIX 2026-07-04] The MP lobby (Screen_MpModeVote ->
+     * mp_mode_config_apply_defaults) never calls ConfigureGameTypeFlags, so
+     * game_type keeps whatever value the LAST race left it at (e.g. 0 after a
+     * normal quick race). track_index for MP drag is schedule slot 19
+     * (FE_QUICKRACE_DRAG_STRIP_SCHEDULE_INDEX, td5_fe_race.c CarSelect MP),
+     * which is out of range for the 19-entry schedule table below and fell
+     * through to its "return 1" fallback — level001.zip, which happens to be
+     * schedule slot 10 (Keswick)'s zip. Hence "MP drag race launches Keswick
+     * instead of the drag strip" after playing other tracks first (whatever
+     * game_type those left behind). td5_game_drag_mp_active() is the
+     * established mp_mode_config-based check used everywhere else in the
+     * codebase for this exact SP-flag-vs-MP-mode gap (see td5_game.c
+     * td5_game_drag_mp_active callers). */
+    /* [TRAFFIC BATTLE 2026-07-23] FIX: a Traffic Battle wrongly loaded the drag
+     * strip (level030.zip) and ran as a drag race. The battle mode inherits a
+     * stale game_type==9 (DRAG_RACE) through the MP flow (which never re-runs
+     * ConfigureGameTypeFlags), and this level chokepoint keyed the drag strip off
+     * game_type alone. A Traffic Battle must run on its CHOSEN track, so exclude
+     * battle mode here — td5_game_battle_mode_active() reads the replicated
+     * mp_mode_config.mode, which the frontend sets before any level load. */
+    /* [DRAG vs TD6/CUSTOM SLOT 2026-09-28] This chokepoint must run BEFORE the
+     * TD6 and custom/auto-track slot lookups below. SP drag skips track select,
+     * so track_index keeps the last menu pick; with a TD6 track or the
+     * AUTO-GENERATED track (slot 60) selected those lookups returned first and
+     * a drag race loaded THAT level (and, for slot 60, generated it) instead of
+     * the drag strip. */
+    if ((g_td5.game_type == TD5_GAMETYPE_DRAG_RACE || td5_game_drag_mp_active())
+        && !td5_game_battle_mode_active()) {
+        TD5_LOG_I(LOG_TAG, "level_number: drag race (game_type=%d mp_drag=%d) -> level030.zip",
+                  (int)g_td5.game_type, td5_game_drag_mp_active());
+        g_active_td6_level = 0;   /* the drag strip is a native TD5 level */
+        return 30;
+    }
+
     /* [TD6 MENU REGISTRY] Schedule slots beyond the 19 native tracks map to
      * converted TD6 levels (loose re/assets/levels/levelNNN/). This is how a
      * menu-selected TD6 track resolves its level WITHOUT the OverrideTrackZip
@@ -1697,40 +1738,6 @@ int td5_asset_level_number(int track_index)
     }
 
     g_active_td6_level = 0;   /* faithful TD5 track */
-
-    /* Drag race hardcodes level030.zip [CONFIRMED @ InitializeRaceSession
-     * 0x0042ad63-0x0042ad73]: when s_selected_track < 0 the original writes
-     * MOV [0x004aaf3c], 0x1e (=30) directly, bypassing the schedule remap.
-     * Check game_type (not drag_race_enabled) — game_type is explicitly
-     * assigned in ConfigureGameTypeFlags for every race mode, so it won't
-     * leak between sessions even if a flag reset is missed.
-     *
-     * [MP DRAG TRACK FIX 2026-07-04] The MP lobby (Screen_MpModeVote ->
-     * mp_mode_config_apply_defaults) never calls ConfigureGameTypeFlags, so
-     * game_type keeps whatever value the LAST race left it at (e.g. 0 after a
-     * normal quick race). track_index for MP drag is schedule slot 19
-     * (FE_QUICKRACE_DRAG_STRIP_SCHEDULE_INDEX, td5_fe_race.c CarSelect MP),
-     * which is out of range for the 19-entry schedule table below and fell
-     * through to its "return 1" fallback — level001.zip, which happens to be
-     * schedule slot 10 (Keswick)'s zip. Hence "MP drag race launches Keswick
-     * instead of the drag strip" after playing other tracks first (whatever
-     * game_type those left behind). td5_game_drag_mp_active() is the
-     * established mp_mode_config-based check used everywhere else in the
-     * codebase for this exact SP-flag-vs-MP-mode gap (see td5_game.c
-     * td5_game_drag_mp_active callers). */
-    /* [TRAFFIC BATTLE 2026-07-23] FIX: a Traffic Battle wrongly loaded the drag
-     * strip (level030.zip) and ran as a drag race. The battle mode inherits a
-     * stale game_type==9 (DRAG_RACE) through the MP flow (which never re-runs
-     * ConfigureGameTypeFlags), and this level chokepoint keyed the drag strip off
-     * game_type alone. A Traffic Battle must run on its CHOSEN track, so exclude
-     * battle mode here — td5_game_battle_mode_active() reads the replicated
-     * mp_mode_config.mode, which the frontend sets before any level load. */
-    if ((g_td5.game_type == TD5_GAMETYPE_DRAG_RACE || td5_game_drag_mp_active())
-        && !td5_game_battle_mode_active()) {
-        TD5_LOG_I(LOG_TAG, "level_number: drag race (game_type=%d mp_drag=%d) -> level030.zip",
-                  (int)g_td5.game_type, td5_game_drag_mp_active());
-        return 30;
-    }
 
     /* Two-step lookup from the original binary:
      * Step 1: schedule slot index -> pool index via gScheduleToPoolIndex (VA 0x466894).
