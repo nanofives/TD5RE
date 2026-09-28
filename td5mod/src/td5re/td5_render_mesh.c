@@ -2228,6 +2228,38 @@ static float td5_render_traffic_view_mult(void)
  * pre-pass (gates mirror the body loop). Drawn before the bodies so each body
  * overpaints the part of its own shadow that falls under it (no shadow-over-car),
  * while the spread contact penumbra on the surrounding road shows. */
+/* Display pose of an actor for THIS render frame: world position (24.8 fixed
+ * point, as float, no chassis lift) extrapolated by linear_velocity *
+ * g_subTickFraction, plus the rotation the body is drawn with. Racers in
+ * vehicle_mode 0 get the sub-tick interpolated attitude (original 0x40C1E2:
+ * angles = display_angles + ang_vel * frac/256, order roll/yaw/pitch); other
+ * modes use the stored physics matrix. The vertical extrapolation ignores a
+ * non-physical linear_velocity_y (|vy| > 0x40000, see the countdown fix at the
+ * call site). Shared by the car mesh and the headlight emitter so anything
+ * attached to the car moves with the drawn body instead of the last sim tick. */
+void td5_render_actor_display_pose(const TD5_Actor *actor, float out_pos[3],
+                                   float out_mat[9])
+{
+    float frac = g_subTickFraction;
+    int vy_raw = actor->linear_velocity_y;
+    float vy_extrap = (vy_raw > 0x40000 || vy_raw < -0x40000)
+                          ? 0.0f : (float)vy_raw * frac;
+    out_pos[0] = (float)actor->world_pos.x + (float)actor->linear_velocity_x * frac;
+    out_pos[1] = (float)actor->world_pos.y + vy_extrap;
+    out_pos[2] = (float)actor->world_pos.z + (float)actor->linear_velocity_z * frac;
+
+    if (actor->vehicle_mode != 0) {
+        memcpy(out_mat, actor->rotation_matrix.m, 9 * sizeof(float));
+    } else {
+        short interp[3];
+        float ifrac = frac * (1.0f / 256.0f);
+        interp[0] = actor->display_angles.roll  + (short)(int)(actor->angular_velocity_roll  * ifrac + 0.5f);
+        interp[1] = actor->display_angles.yaw   + (short)(int)(actor->angular_velocity_yaw   * ifrac + 0.5f);
+        interp[2] = actor->display_angles.pitch + (short)(int)(actor->angular_velocity_pitch * ifrac + 0.5f);
+        BuildRotationMatrixFromAngles(out_mat, interp);
+    }
+}
+
 static void car_shadow_pass(int view_index, int total_actors,
                             int camera_target_slot, int camera_preset_active,
                             int actor_cull_window)
@@ -3145,8 +3177,8 @@ void td5_render_actors_for_view(int view_index)
              * traffic block in RenderRaceActorsForView (0x40BD20) skips it, so
              * we apply the offset only to racer slots [0..TD5_MAX_RACER_SLOTS).
              * [CONFIRMED @ 0x40C1C5-0x40C1D7 + 0x40BD20 absence] */
+            float disp_mat[9];
             {
-                float frac = g_subTickFraction;
                 /* [SPLIT-SCREEN COUNTDOWN UNDER-GROUND FIX 2026-07-06] Guard the
                  * per-render sub-tick Y extrapolation against a garbage
                  * linear_velocity_y. On the session's FIRST race a cold-spawn
@@ -3161,12 +3193,11 @@ void td5_render_actors_for_view(int view_index)
                  * world Y; legitimate motion is far below the bound so this is a
                  * no-op in the normal case. X/Z keep the faithful extrapolation
                  * (fast horizontal speed can legitimately approach the bound). */
-                int vy_raw = actor->linear_velocity_y;
-                float vy_extrap = (vy_raw > 0x40000 || vy_raw < -0x40000)
-                                      ? 0.0f : (float)vy_raw * frac;
-                float interp_x = (float)actor->world_pos.x + (float)actor->linear_velocity_x * frac;
-                float interp_y = (float)actor->world_pos.y + vy_extrap;
-                float interp_z = (float)actor->world_pos.z + (float)actor->linear_velocity_z * frac;
+                float ipos[3];
+                td5_render_actor_display_pose(actor, ipos, disp_mat);
+                float interp_x = ipos[0];
+                float interp_y = ipos[1];
+                float interp_z = ipos[2];
                 /* [FIX 2026-06-12 traffic-wheel gate drift] racer gate must be
                  * g_traffic_slot_base (see wheel/brake gate below) — with the
                  * 16-slot TD5_MAX_RACER_SLOTS the chassis lift was wrongly
@@ -3202,31 +3233,10 @@ void td5_render_actors_for_view(int view_index)
                 }
                 mat3x3_mul(s_camera_basis, actor->rotation_matrix.m, view_rot.m);
             } else {
-                float interp_mat[9];
-                short interp[3];
-                float ifrac = g_subTickFraction * (1.0f / 256.0f);
-                interp[0] = actor->display_angles.roll  + (short)(int)(actor->angular_velocity_roll  * ifrac + 0.5f);
-                interp[1] = actor->display_angles.yaw   + (short)(int)(actor->angular_velocity_yaw   * ifrac + 0.5f);
-                interp[2] = actor->display_angles.pitch + (short)(int)(actor->angular_velocity_pitch * ifrac + 0.5f);
-                /* [RENDERATT DIAG 2026-05-27] Does the RENDER attitude (interp,
-                 * after sub-tick extrapolation) match the PHYSICS attitude
-                 * (display_angles)? If interp diverges (esp. interp[0]=front-rear
-                 * vs disp_roll), the sub-tick interpolation is flattening the car
-                 * vs the slope. Slot 0 only, rate-limited. */
-                if (slot == 0) {
-                    static int s_ratt = 0;
-                    if ((s_ratt++ % 30) == 0) {
-                        TD5_LOG_I("physics",
-                            "RENDERATT slot0: interp[roll=%d pitch=%d] disp[roll=%d pitch=%d] "
-                            "angvel[roll=%d pitch=%d] subfrac=%.4f ifrac=%.5f",
-                            (int)interp[0], (int)interp[2],
-                            (int)actor->display_angles.roll, (int)actor->display_angles.pitch,
-                            (int)actor->angular_velocity_roll, (int)actor->angular_velocity_pitch,
-                            (double)g_subTickFraction, (double)ifrac);
-                    }
-                }
-                BuildRotationMatrixFromAngles(interp_mat, interp);
-                mat3x3_mul(s_camera_basis, interp_mat, view_rot.m);
+                /* Sub-tick interpolated attitude, built by the shared
+                 * td5_render_actor_display_pose (also feeds the headlight
+                 * emitter so the beams ride the drawn body, not the last tick). */
+                mat3x3_mul(s_camera_basis, disp_mat, view_rot.m);
             }
             td5_render_load_rotation(&view_rot);
             td5_render_load_translation(&render_pos);

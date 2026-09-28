@@ -890,6 +890,8 @@ const TD5_RaceMetrics *td5_physics_get_metrics(int slot)
  * body-frame lateral/longitudinal speed, wheel-contact mask) and integer math
  * (td5_isqrt), so the result is identical on every lockstep client and on a
  * replay. No wall-clock, RNG, or render-rate inputs. */
+#define TD5_COLL_DEBOUNCE_TICKS 15   /* 0.5 s @30 Hz between distinct collisions */
+
 void td5_physics_accumulate_metrics(void)
 {
     if (!g_actor_table_base) return;
@@ -907,12 +909,26 @@ void td5_physics_accumulate_metrics(void)
         if (!a) continue;
         TD5_RaceMetrics *m = &g_race_metrics[slot];
 
-        /* --- collisions: rising edge of "hit this tick" vs "hit last tick" ---
-         * A sustained scrape (flagged for several consecutive ticks) counts as
-         * ONE collision; a fresh impact after separating counts as another.
-         * Always processed (even after finish) so the edge state stays sane. */
-        if (m->hit_this_tick && !m->hit_prev_tick)
-            m->collisions++;
+        /* --- collisions: one count per distinct impact ---
+         * [COLL DEBOUNCE 2026-09-28] A plain rising edge over-counted: a V2V
+         * contact is pushed apart and re-touches every tick or two (side by
+         * side in a drag lane, or a car grinding along the player), and the
+         * V2V sites flag any contact with no strength floor, so one scrape read
+         * as 20+ collisions. Now a hit counts only after
+         * TD5_COLL_DEBOUNCE_TICKS (0.5 s @30 Hz) with no contact, and contact
+         * keeps re-arming the window. Counting also stops at the finish so a
+         * post-race brake grind or a car rear-ending you after the line does
+         * not inflate the results / high-score COLL column. */
+        if (m->hit_this_tick) {
+            if (m->hit_cooldown == 0 && a->finish_time == 0) {
+                m->collisions++;
+                if (slot == 0)
+                    TD5_LOG_I(LOG_TAG, "metrics: slot=0 collision #%d counted", m->collisions);
+            }
+            m->hit_cooldown = TD5_COLL_DEBOUNCE_TICKS;
+        } else if (m->hit_cooldown > 0) {
+            m->hit_cooldown--;
+        }
         m->hit_prev_tick = m->hit_this_tick;
         m->hit_this_tick = 0;
 

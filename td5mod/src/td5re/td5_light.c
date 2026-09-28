@@ -19,6 +19,7 @@
 #include "td5_platform.h"
 #include "td5_track.h"       /* td5_track_probe_height — static per-lamp floor Y */
 #include "td5_rt.h"          /* [RT2 P7] td5_rt_active() — HIGH street-lamp default */
+#include "td5_render.h"      /* td5_render_actor_display_pose — beams ride the drawn body */
 
 #define LOG_TAG "render"   /* routes to engine.log */
 
@@ -213,12 +214,19 @@ void td5_light_emit_vehicle_headlights(void)
         TD5_Actor *a = td5_game_get_actor(slot);
         if (!a) continue;
 
-        /* World centre in float world units (render_pos space = world_pos/256). */
-        float cx = (float)a->world_pos.x * (1.0f / 256.0f);
-        float cy = (float)a->world_pos.y * (1.0f / 256.0f);
-        float cz = (float)a->world_pos.z * (1.0f / 256.0f);
+        /* World centre in float world units (render_pos space = world_pos/256).
+         * [HEADLIGHT JITTER FIX 2026-09-28] Use the same sub-tick display pose
+         * the car body is drawn with. The raw world_pos/rotation_matrix only
+         * advance once per 30 Hz sim tick while the body and camera are
+         * extrapolated every frame, so the beams stood still for a tick then
+         * jumped a full tick of travel: a flicker proportional to speed. */
+        float dpos[3], dmat[9];
+        td5_render_actor_display_pose(a, dpos, dmat);
+        float cx = dpos[0] * (1.0f / 256.0f);
+        float cy = dpos[1] * (1.0f / 256.0f);
+        float cz = dpos[2] * (1.0f / 256.0f);
 
-        const float *m = a->rotation_matrix.m;
+        const float *m = dmat;
 
         /* Derive the car's forward axis from its REAR taillight hardpoint (the
          * same model-space int16[3] the brake-light renderer reads at

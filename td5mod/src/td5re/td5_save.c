@@ -3007,6 +3007,81 @@ const TD5_NpcGroup *td5_save_get_td6_record_group(int td6_level)
     return &s_td6_records[td6_level];
 }
 
+/* [HS BROWSE MERGE 2026-09-28] Display-only view of a TD6 level's table for
+ * the High Scores BROWSE screen. td5_save_get_td6_record_group returns only the
+ * genuine rows once a level has ANY real record, so a level with one run (Paris
+ * had a single row) showed that row plus four blanks, unlike every other track.
+ * This view fills the free rows with the level's placeholder rows, sorted by
+ * score, so a partly-filled table reads like the rest. The genuine store, the
+ * post-race qualification and the insert-rank highlight are untouched: this is
+ * only called by the browse overlay. s_view_src maps each shown row back to its
+ * source so td5_save_get_td6_display_ext serves the matching COLL/AIR data. */
+static TD5_NpcGroup s_td6_view;
+static int          s_td6_view_level = -1;
+static int          s_td6_view_src[5];      /* >=0 genuine row, -1-k placeholder row k, -99 empty */
+
+static int td6_score_better(int type, int32_t a, int32_t b)
+{
+    return (type < 2) ? (a < b) : (a > b);
+}
+
+const TD5_NpcGroup *td5_save_get_td6_display_group(int td6_level)
+{
+    const TD5_NpcGroup *real = td5_save_get_td6_record_group(td6_level);
+    if (!real || td6_level >= TD5_DRAG_RECORD_BASE ||
+        s_td6_records[td6_level].header < 0)
+        return real;                               /* placeholders / NULL / drag as-is */
+
+    int named = 0;
+    for (int k = 0; k < 5; k++) if (real->entries[k].name[0]) named++;
+    const TD5_NpcGroup *ph = (named < 5) ? td6_placeholder_group(td6_level) : NULL;
+    if (!ph) return real;                          /* full table or placeholders disabled */
+
+    int type = real->header & 3;
+    int ri = 0, pi = 0;
+    s_td6_view.header = real->header;
+    for (int row = 0; row < 5; row++) {
+        int have_r = (ri < 5 && real->entries[ri].name[0]);
+        int have_p = (pi < 5 && ph->entries[pi].name[0]);
+        if (have_r && (!have_p || !td6_score_better(type, ph->entries[pi].score,
+                                                     real->entries[ri].score))) {
+            s_td6_view.entries[row] = real->entries[ri];
+            s_td6_view_src[row] = ri++;
+        } else if (have_p) {
+            s_td6_view.entries[row] = ph->entries[pi];
+            s_td6_view_src[row] = -1 - pi++;
+        } else {
+            memset(&s_td6_view.entries[row], 0, sizeof(s_td6_view.entries[row]));
+            s_td6_view_src[row] = -99;
+        }
+    }
+    if (s_td6_view_level != td6_level) {
+        TD5_LOG_I(LOG_TAG, "td6 hs browse: level=%d genuine=%d -> merged with placeholders",
+                  td6_level, named);
+        s_td6_view_level = td6_level;
+    }
+    return &s_td6_view;
+}
+
+const TD5_NpcEntryExt *td5_save_get_td6_display_ext(int td6_level, int entry)
+{
+    if (entry < 0 || entry >= 5) return NULL;
+    if (s_td6_view_level != td6_level || td6_level >= TD5_DRAG_RECORD_BASE ||
+        td6_level < 0 || td6_level >= TD5_TD6_RECORD_SLOTS ||
+        s_td6_records[td6_level].header < 0)
+        return td5_save_get_td6_ext(td6_level, entry);
+    int src = s_td6_view_src[entry];
+    if (src >= 0) return td5_save_get_td6_ext(td6_level, src);
+    if (src == -99) return NULL;
+    /* Placeholder row: same deterministic mock formula as td5_save_get_td6_ext. */
+    static TD5_NpcEntryExt ex;
+    int e = -1 - src, lv = td6_level;
+    ex.full_name[0] = 0;   /* fall back to entry.name */
+    ex.collisions = 1 + e * 2 + (lv * 7 + e * 13) % 5;
+    ex.air_ticks  = 6 + (lv * 11 + e * 17) % 35;
+    return &ex;
+}
+
 /* [TD5RE HS-CAP] Is this level key storable at all? The record store is a fixed
  * s_td6_records[TD5_MAX_TD6_RECORD_LEVELS] array, so a key past its end makes
  * every insert return -1. Callers test this BEFORE routing a player into the

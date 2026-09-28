@@ -2502,6 +2502,19 @@ static HWND d3d12_create_display_window(int client_w, int client_h)
     wc.lpfnWndProc   = D3D12DisplayWindowProc;
     wc.hInstance     = GetModuleHandleA(NULL);
     wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+    /* The window is created WS_VISIBLE, so the taskbar button exists before the
+     * game's later WM_SETICON. With a NULL class icon Windows 11 shows a stale
+     * cached image (e.g. another open app's icon) and keeps it. Stamp the exe's
+     * icon resource (id 1, td5re.rc) on the class so the button is right from
+     * the first frame. LoadImage returns NULL harmlessly if the resource is absent. */
+    wc.hIcon   = (HICON)LoadImageA(wc.hInstance, MAKEINTRESOURCEA(1), IMAGE_ICON,
+                                   GetSystemMetrics(SM_CXICON),
+                                   GetSystemMetrics(SM_CYICON), 0);
+    wc.hIconSm = (HICON)LoadImageA(wc.hInstance, MAKEINTRESOURCEA(1), IMAGE_ICON,
+                                   GetSystemMetrics(SM_CXSMICON),
+                                   GetSystemMetrics(SM_CYSMICON), 0);
+    WRAPPER_LOG("D3D12 display window class icon: big=%p small=%p",
+                (void *)wc.hIcon, (void *)wc.hIconSm);
     wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     wc.lpszClassName = "TD5_D3D12_Display";
     RegisterClassExA(&wc);

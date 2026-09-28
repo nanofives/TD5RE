@@ -6132,11 +6132,16 @@ void td5_hud_render_overlays(float dt)
      * Original RunRaceFrame @ 0x42B67F gates on:
      *   g_humanPlayerCount==1 && !dead && !network && selectedGameType==0
      *   && !g_dragRaceModeEnabled
-     * [RE basis: research agent deep pass] */
+     * [RE basis: research agent deep pass]
+     * [DRAG STAR DRAW 2026-09-28] SP drag is armed by the finish path
+     * (td5_game.c, [DRAG STAR 2026-09-12]) but this draw gate still excluded
+     * drag, so the star never showed and the frozen fade left the player
+     * watching the car roll on. Mirror the arming condition here. Safe:
+     * td5_render_radial_pulse returns early until the finish arms it. */
     if (!g_split_screen_mode &&
         !g_td5.network_active &&
-        g_td5.game_type == TD5_GAMETYPE_SINGLE_RACE &&
-        !g_td5.drag_race_enabled) {
+        ((g_td5.game_type == TD5_GAMETYPE_SINGLE_RACE && !g_td5.drag_race_enabled) ||
+         (g_td5.drag_race_enabled && !td5_game_drag_mp_active()))) {
         td5_render_radial_pulse(dt);
     }
 

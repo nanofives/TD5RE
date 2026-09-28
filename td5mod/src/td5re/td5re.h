@@ -880,7 +880,8 @@ typedef struct TD5_RaceMetrics {
 
     /* --- transient per-tick edge-detect state (engine-private) --- */
     uint8_t  hit_this_tick;      /* set by collision sites during a sim tick (wall|V2V), cleared each accumulate */
-    uint8_t  hit_prev_tick;      /* previous tick's hit state, for rising-edge collision counting */
+    uint8_t  hit_prev_tick;      /* previous tick's hit state (kept for diagnostics; counting uses hit_cooldown) */
+    uint8_t  hit_cooldown;       /* ticks left before another hit counts as a NEW collision (re-armed while in contact) */
     int32_t  drift_run_ticks;    /* current consecutive-drift tick run; a drift is counted once it crosses 15 */
     uint8_t  drift_counted;      /* 1 once the current drift run has already been counted (avoid double count) */
 } TD5_RaceMetrics;
