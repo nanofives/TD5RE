@@ -33,6 +33,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 28 (drag + lights + records)" },
+    { CL_ITEM,    "Drag race always runs on the drag strip, even with" },
+    { CL_ITEM,    "  AUTO-GENERATED or a TD6 track selected (no build)." },
     { CL_ITEM,    "Drag race: winning plays the victory star again." },
     { CL_ITEM,    "Drag race: the wall past the finish stops your car" },
     { CL_ITEM,    "  before the grandstands (it used to drive through)." },
