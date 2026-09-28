@@ -141,6 +141,10 @@ const TD5_NpcEntryExt *td5_save_get_npc_ext(int group_index, int entry);
 /** Read-only extension for a TD6 record entry (level, entry 0-4). NULL if out of
  *  range or the level has no records. */
 const TD5_NpcEntryExt *td5_save_get_td6_ext(int td6_level, int entry);
+/* High Scores BROWSE only: genuine rows merged with placeholder rows when a
+ * level has fewer than 5 real records (display view; never persisted). */
+const TD5_NpcGroup    *td5_save_get_td6_display_group(int td6_level);
+const TD5_NpcEntryExt *td5_save_get_td6_display_ext(int td6_level, int entry);
 
 /** Insert one result into TD5 NPC group `group_index`, keeping the 5 entries
  *  sorted by the group's header score type (0/1/4 = time, lower better; 2 =

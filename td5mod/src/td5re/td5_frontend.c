@@ -8838,7 +8838,7 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
     if (s_postrace_td6_level > 0)
         grp = td5_save_get_td6_record_group(s_postrace_td6_level);
     else if (browse_td6_level > 0)
-        grp = td5_save_get_td6_record_group(browse_td6_level);
+        grp = td5_save_get_td6_display_group(browse_td6_level);
     else
         grp = td5_save_get_npc_group(s_score_category_index);
     int speed_kph = td5_save_get_speed_units();  /* drives the AVERAGE/TOP value conversion;
@@ -8903,7 +8903,7 @@ static void frontend_render_high_score_overlay(float sx, float sy) {
         /* Parallel extension for this row (full name + collisions + air time). */
         const TD5_NpcEntryExt *ex =
             (s_postrace_td6_level > 0) ? td5_save_get_td6_ext(s_postrace_td6_level, i) :
-            (browse_td6_level    > 0) ? td5_save_get_td6_ext(browse_td6_level, i) :
+            (browse_td6_level    > 0) ? td5_save_get_td6_display_ext(browse_td6_level, i) :
                                         td5_save_get_npc_ext(s_score_category_index, i);
         float y = HS_SF_Y(48 + i * 16);
         /* Highlight row = g_postRaceQualifyingScore (orig bolds it via SmallTextb). Browse

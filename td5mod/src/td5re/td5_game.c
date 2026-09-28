@@ -3682,6 +3682,15 @@ static void init_race_track_resources(void)
     if (s_replay_mode) {
         int world_x = td5_asset_track_pool_index(g_td5.track_index,
                                                   g_td5.reverse_direction);
+        /* [DRAG REPLAY CAMS 2026-09-28] Drag's track_index 19 falls past the
+         * schedule->pool table, so world_x came back 0, no profile bound, and
+         * the replay fell back to the chase cam + finish orbit (odd low
+         * "looking back from the car" angles). Bind the drag strip's own pool
+         * (30, same record init_race_checkpoints forces), whose table is only
+         * static trackside shots (behaviours 5/0). */
+        if (g_td5.game_type == TD5_GAMETYPE_DRAG_RACE || td5_game_drag_mp_active() ||
+            g_td5.drag_race_enabled)
+            world_x = 30;
         g_trackType = g_track_is_circuit;   /* faithful: circuit forces orbit mode */
         td5_camera_bind_trackside_profiles(world_x);
         InitializeTracksideCameraProfiles();   /* self-guards NULL -> count 0 */

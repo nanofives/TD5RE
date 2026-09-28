@@ -191,6 +191,10 @@ void td5_render_set_inspect_cam(int on, float az_deg, float el_deg, float dist, 
  * td5_render_compute_vertex_lighting(). Mirrors
  * ApplyTrackLightingForVehicleSegment @ 0x00430150. */
 void td5_render_apply_track_lighting(int slot, TD5_Actor *actor);
+/* Per-frame display pose (sub-tick extrapolated position in 24.8-as-float, no
+ * chassis lift, + the drawn rotation). Shared by the car mesh and headlights. */
+void td5_render_actor_display_pose(const TD5_Actor *actor, float out_pos[3],
+                                   float out_mat[9]);
 
 /* --- Frustum culling --- */
 int  td5_render_is_sphere_visible(float cx, float cy, float cz, float radius);

@@ -2372,7 +2372,7 @@ void td5_track_bind_boundary_sentinels(int level_number)
  * keeps rolling forward and drives through the stadium stands at the end of the road.
  * Called from td5_game.c once the finish span is known (AFTER bind ran, so this
  * override sticks). finish_span = race finish span; runoff = braking spans allowed
- * past it. The down-track wall is the HIGHER of the two drag sentinels (fwd is the
+ * past it. The down-track wall is the REVERSE sentinel (fwd is the
  * upstream back-wall behind the spawn). No-op unless a drag race is active. */
 void td5_track_set_drag_end_wall(int finish_span, int runoff)
 {
@@ -2384,14 +2384,18 @@ void td5_track_set_drag_end_wall(int finish_span, int runoff)
     wall = finish_span + (runoff > 0 ? runoff : 0);
     if (wall > cap) wall = cap;                 /* never past the strip end */
     if (wall < finish_span) wall = finish_span; /* always clear the finish line */
-    /* [CHUNK 4 fix] Drag is always driven FORWARD, and the forward boundary
-     * resolver reads s_boundary_fwd_sentinel (see td5_track.c ~1851). The old
-     * "write whichever sentinel is higher" heuristic could land the finish wall
-     * in s_boundary_rev_sentinel — which the forward resolver never consults —
-     * so on the SP SHORT layout cars rolled straight past the finish (~span 170)
-     * into dead strip. Put the down-track finish wall in the FORWARD sentinel
-     * explicitly; the rev sentinel stays the upstream back-wall. */
-    s_boundary_fwd_sentinel = wall;
+    /* [DRAG END WALL SENTINEL 2026-09-28] The DOWN-TRACK wall is the REVERSE
+     * sentinel. td5_physics.c runs BOTH boundary handlers on every racer every
+     * tick; "reverse" is the far end cap (active once chassis_span >=
+     * boundary-1, outward normal pointing back upstream), "forward" is the back
+     * wall behind the grid (active while chassis_span <= boundary+1). Vanilla's
+     * level-30 pair {104, 240} is exactly that: 104 behind the spawn at 115,
+     * 240 down the strip. The earlier [CHUNK 4 fix] wrote the finish wall into
+     * the FORWARD sentinel, which (a) deleted the back wall and (b) made the
+     * whole strip "behind" a wall whose probes read as bogus -2000+ penetrations
+     * and were rejected, while the real far cap stayed at ring-2 past the
+     * stands, so a finished car drove straight through the grandstands. */
+    s_boundary_rev_sentinel = wall;
     TD5_LOG_I(LOG_TAG,
               "drag end wall: finish=%d runoff=%d -> wall=%d (fwd=%d rev=%d ring=%d)",
               finish_span, runoff, wall,
@@ -2522,6 +2526,12 @@ static void fwd_rev_handler(TD5_Actor *actor, int reverse_mode)
         int probe_span = (int)actor->wheel_probes[i].span_index;
         if (!reverse_mode) {
             if (probe_span > boundary) continue;
+        } else if (g_td5.drag_race_enabled) {
+            /* [DRAG END WALL 2026-09-28] PORT-ONLY: a drag car can cross the
+             * one-span end cap in a single tick at top speed; the vanilla
+             * equality gate would then never see it. The strip is straight, so
+             * the cap's edge line is still the right plane past it. */
+            if (probe_span < boundary) continue;
         } else {
             if (probe_span != boundary) continue;
         }
