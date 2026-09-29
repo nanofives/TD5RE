@@ -7393,7 +7393,14 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
                     TD5_Actor *lap_actor;
                     /* s_slot_state only covers racer slots 0..5; traffic
                      * slots 6-11 are never state==3 during normal play. */
-                    if (i < TD5_MAX_RACER_SLOTS && s_slot_state[i].state == 3)
+                    /* [TRAFFIC NORM 2026-09-29] Bound the disabled-racer skip at
+                     * g_traffic_slot_base, not TD5_MAX_RACER_SLOTS (16): in a
+                     * 6-racer field slots 6..15 are TRAFFIC but their racer
+                     * s_slot_state is 3, so they were skipped and their +0x82
+                     * froze at the spawn span. Traffic then read route headings
+                     * from the wrong span, armed heading recovery and braked
+                     * into the walls (worst at forks). */
+                    if (i < g_traffic_slot_base && s_slot_state[i].state == 3)
                         continue; /* disabled */
                     lap_actor = td5_game_get_actor(i);
                     if (lap_actor) {
@@ -7591,7 +7598,9 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
                 TD5_Actor *lap_actor;
                 /* s_slot_state only covers racer slots 0..5; traffic
                  * slots 6-11 are never state==3 during normal play. */
-                if (i < TD5_MAX_RACER_SLOTS && s_slot_state[i].state == 3)
+                /* [TRAFFIC NORM 2026-09-29] See the countdown loop above: skip
+                 * only disabled RACER slots, never traffic slots 6..15. */
+                if (i < g_traffic_slot_base && s_slot_state[i].state == 3)
                     continue; /* disabled */
                 lap_actor = td5_game_get_actor(i);
                 if (lap_actor) {
