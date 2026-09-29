@@ -5026,9 +5026,10 @@ static void init_race_checkpoints(void)
                  * while others race) can't roll forward through the stadium
                  * stands. bind_boundary_sentinels already pushed the down-track
                  * wall to the strip end for longer drags; pull it back in now
-                 * that the finish is known. 24 spans of braking run-off matches
-                 * the EPIC inserted-road run-off. */
-                td5_track_set_drag_end_wall(new_finish, 24);
+                 * that the finish is known. The wall lands where the stands end:
+                 * the vanilla far cap for SHORT/MEDIUM, else finish + 30 (the
+                 * stadium extension tiles ~30 spans past the finish). */
+                td5_track_set_drag_end_wall(new_finish, 30);
             }
         } else {
             TD5_LOG_W(LOG_TAG, "Track index %d out of range, no checkpoint data", tidx);
