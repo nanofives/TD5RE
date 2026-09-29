@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 29 (traffic + cop chase)" },
+    { CL_ITEM,    "Traffic drives much cleaner: half the cars were steering" },
+    { CL_ITEM,    "  by a stale track position and braked into walls." },
+    { CL_ITEM,    "Traffic at a fork follows the road it is actually on." },
     { CL_ITEM,    "Traffic on circuits (Newcastle) no longer vanishes for" },
     { CL_ITEM,    "  the rest of the session after a drag race." },
     { CL_ITEM,    "Cop Chase no longer crashes at the start of the race." },

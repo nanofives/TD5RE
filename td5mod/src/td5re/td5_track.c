@@ -4719,6 +4719,57 @@ static uint8_t compute_boundary_bits(int span_idx, int sub_lane,
  * Resolve neighbor span index for a given crossing direction.
  * Returns the new span index (and updates sub_lane via pointer).
  */
+/* [TRAFFIC FORK TARGET 2026-09-29] PORT-ONLY. Predict where the walker will send a
+ * car that leaves span_idx in its direction of travel, using the SAME sub-lane rule
+ * resolve_neighbor applies at a fork / corridor end, so traffic steering can aim at
+ * the road the walker will actually put the car on. Returns the destination span
+ * and (via out_sub_lane) the walker's sub-lane there, or -1 when the step is a plain
+ * span+-1 (caller keeps its default target) or the fork is one of the geometric
+ * variants (reverse native circuit / topology-first left fork), which stay as they
+ * were. Pure: no logging, no state. */
+int td5_track_traffic_next_span(int span_idx, int sub_lane, int forward, int *out_sub_lane)
+{
+    const TD5_StripSpan *sp;
+    int cur_lanes, dst, dst_lanes;
+    if (!s_span_array || span_idx < 0 || span_idx >= s_span_count) return -1;
+    sp = &s_span_array[span_idx];
+    cur_lanes = span_lane_count(sp);
+    if (forward) {
+        if (sp->span_type == 8) {
+            int next_idx = span_idx + 1;
+            int rev_native = (g_td5.reverse_direction && (g_active_td6_level == 0))
+                           ^ (fork_is_left(span_idx) ? 1 : 0);
+            if (rev_native || next_idx >= s_span_count) return -1;
+            if (sub_lane < span_lane_count(&s_span_array[next_idx])) return -1;  /* main */
+            dst = (int)sp->link_next;
+        } else if (sp->span_type == 10) {
+            dst = (int)sp->link_next;
+        } else {
+            return -1;
+        }
+    } else {
+        if (sp->span_type == 11) {
+            int prev_idx = span_idx - 1;
+            if (fork_is_left(span_idx) || prev_idx < 0) return -1;
+            if (sub_lane < span_lane_count(&s_span_array[prev_idx])) return -1; /* main */
+            dst = (int)sp->link_prev;
+        } else if (sp->span_type == 9) {
+            dst = (int)sp->link_prev;
+        } else {
+            return -1;
+        }
+    }
+    if (dst < 0 || dst >= s_span_count) return -1;
+    dst_lanes = span_lane_count(&s_span_array[dst]);
+    if (out_sub_lane) {
+        int sl = sub_lane + dst_lanes - cur_lanes;
+        if (sl < 0) sl = 0;
+        if (dst_lanes > 0 && sl >= dst_lanes) sl = dst_lanes - 1;
+        *out_sub_lane = sl;
+    }
+    return dst;
+}
+
 static int resolve_neighbor(int span_idx, int *sub_lane, uint8_t crossing_bit,
                             int32_t pos_x, int32_t pos_z)
 {

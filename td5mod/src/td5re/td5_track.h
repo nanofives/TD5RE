@@ -115,6 +115,9 @@ int              td5_track_get_ring_length(void);
  * span maps to its parallel main-ring span via the segment-remap table; main
  * spans pass through unchanged. */
 int              td5_track_branch_to_main_span(int span);
+/* Walker-consistent next span at a fork / corridor end for traffic steering
+ * (-1 = plain step or geometric fork variant). See td5_track.c. */
+int              td5_track_traffic_next_span(int span_idx, int sub_lane, int forward, int *out_sub_lane);
 /* [#18] Nearest non-slow (road) lane to `lane` in `span` — keeps traffic off the
  * TD6 sidewalk/shoulder lanes. Returns `lane` if no road lane is found. */
 int              td5_track_nearest_road_lane(int span_index, int lane);

@@ -4947,8 +4947,34 @@ void td5_ai_update_traffic_route_plan(int slot) {
                 target_span = adj;
             }
 
+            /* [TRAFFIC FORK TARGET 2026-09-29] At a fork (type 8 forward / type 11
+             * oncoming) the walker sends a car in the branch-side sub-lanes down the
+             * corridor, but the target above is the next MAIN span, so the car was
+             * steered across the gore nose into the wall. At a corridor end (type 10
+             * / 9) raw+-1 is the NEXT corridor's first span or wraps to span 0.
+             * Aim at the span the walker will actually use, with its sub-lane, and
+             * hold that lane (no lane chooser) for the transition tick. */
+            int fork_target = 0, fork_sub = 0;
+            if (branch_traffic_fix_enabled() && slot >= g_traffic_slot_base) {
+                int nx = td5_track_traffic_next_span((int)span_raw,
+                             (int)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX),
+                             polarity == 0, &fork_sub);
+                if (nx >= 0) {
+                    static int16_t s_fork_logged_span[TD5_MAX_TOTAL_ACTORS];
+                    if (slot < TD5_MAX_TOTAL_ACTORS && s_fork_logged_span[slot] != span_raw) {
+                        s_fork_logged_span[slot] = span_raw;
+                        TD5_LOG_I(LOG_TAG, "traffic_fork_target: slot=%d raw=%d sub=%d pol=%d -> span=%d sub=%d",
+                                  slot, (int)span_raw, (int)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX),
+                                  (int)polarity, nx, fork_sub);
+                    }
+                    target_span = nx;
+                    fork_target = 1;
+                }
+            }
+
             /* Target sub_lane: start with current sub_lane (default path). */
-            int target_sub_lane = (int)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX);
+            int target_sub_lane = fork_target ? fork_sub
+                                              : (int)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX);
 
             /* [CONFIRMED @ 0x004361B8-0x004361D8]
              * When the remap found a branch target AND the actor is still on the
@@ -4978,7 +5004,7 @@ void td5_ai_update_traffic_route_plan(int slot) {
              * 1-span-lookahead steering and the car fishtails into the rail. Hold
              * the car's current lane there; the wall-nudge below still keeps an
              * edge lane off the rail, and branches are short so we lose nothing. */
-            if (!traffic_on_branch) {
+            if (!traffic_on_branch && !fork_target) {
                 if (td5_ai_smart_active()) {
                     /* [SmartAI] unified lane brain for traffic: score lanes by
                      * surface/occupancy/wall/change-cost (±1 step). Replaces the
@@ -5006,7 +5032,7 @@ void td5_ai_update_traffic_route_plan(int slot) {
             /* [RIGHT-BRANCH TRAFFIC FIX 2026-06-21] The held branch lane must be
              * valid for the raw-based target span (raw±1 may have a different
              * lane count than the car's current span). */
-            if (traffic_on_branch) {
+            if (traffic_on_branch || fork_target) {
                 int blc = td5_track_get_span_lane_count(target_span);
                 if (blc > 0) {
                     if (target_sub_lane < 0)    target_sub_lane = 0;
@@ -5085,9 +5111,10 @@ void td5_ai_update_traffic_route_plan(int slot) {
 
                 if ((g_ai_frame_counter % 60u) == 0u) {
                     TD5_LOG_I(LOG_TAG,
-                              "traffic_dev: slot=%d raw=%d norm=%d tspan=%d sublane=%d "
+                              "traffic_dev: slot=%d raw=%d norm=%d acc=%d tspan=%d sublane=%d "
                               "ta=0x%X hd=0x%X delta=%d L=%d R=%d",
-                              slot, (int)span_raw, (int)span_norm, target_span,
+                              slot, (int)span_raw, (int)span_norm,
+                              (int)ACTOR_I16(actor, ACTOR_SPAN_ACCUM), target_span,
                               target_sub_lane, target_angle, actor_heading, delta,
                               rs[RS_LEFT_DEVIATION], rs[RS_RIGHT_DEVIATION]);
                 }
