@@ -2202,12 +2202,17 @@ static const int32_t s_level_boundary_sentinels[40][2] = {
  * at level load. Defaults to {-1, 9999} which disables both handlers. */
 static int32_t s_boundary_fwd_sentinel = -1;
 static int32_t s_boundary_rev_sentinel = 9999;
+/* [DRAG END WALL @ STANDS 2026-09-28] The vanilla level-30 far cap (240, shifted
+ * by any inserted drag spans) captured before the forward-cap push: the span
+ * where the original stadium stands end. -1 = not a drag strip. */
+static int32_t s_drag_vanilla_far = -1;
 
 
 /* ===== SECTION: span contacts: forward/reverse resolvers ===== */
 
 void td5_track_bind_boundary_sentinels(int level_number)
 {
+    s_drag_vanilla_far = -1;   /* set below only for the drag strip */
     /* [FORK OOB 2026-08-29] Classify the track as a custom registry track
      * (autotrack / user-built) here, where the level number is known. On the
      * FORWARD custom road this arms geo_query_active(), so the geo model gets
@@ -2349,6 +2354,8 @@ void td5_track_bind_boundary_sentinels(int level_number)
     if (g_td5.drag_race_enabled) {
         int ring2 = g_td5.track_span_ring_length;
         int cap2  = (ring2 > 8) ? (ring2 - 2) : -1;
+        s_drag_vanilla_far = (s_boundary_fwd_sentinel >= s_boundary_rev_sentinel)
+                             ? s_boundary_fwd_sentinel : s_boundary_rev_sentinel;
         if (cap2 > 0) {
             if (s_boundary_fwd_sentinel >= s_boundary_rev_sentinel) {
                 if (s_boundary_fwd_sentinel < cap2) s_boundary_fwd_sentinel = cap2;
@@ -2382,6 +2389,13 @@ void td5_track_set_drag_end_wall(int finish_span, int runoff)
     ring = g_td5.track_span_ring_length;
     cap  = (ring > 4) ? (ring - 2) : finish_span;
     wall = finish_span + (runoff > 0 ? runoff : 0);
+    /* [DRAG END WALL @ STANDS 2026-09-28] Put the wall where the STANDS end,
+     * not a fixed run-off past the finish. SHORT/MEDIUM finish inside the
+     * original stadium, whose stands run to the vanilla far cap (span 240);
+     * LONG/EPIC tile the stands ~30 spans past the finish
+     * (td5_render_drag_stadium_extension, finish_z - 47000). A finish+24 wall
+     * sat well short of the stands' end on the shorter layouts. */
+    if (s_drag_vanilla_far > wall) wall = s_drag_vanilla_far;
     if (wall > cap) wall = cap;                 /* never past the strip end */
     if (wall < finish_span) wall = finish_span; /* always clear the finish line */
     /* [DRAG END WALL SENTINEL 2026-09-28] The DOWN-TRACK wall is the REVERSE
@@ -2397,8 +2411,8 @@ void td5_track_set_drag_end_wall(int finish_span, int runoff)
      * stands, so a finished car drove straight through the grandstands. */
     s_boundary_rev_sentinel = wall;
     TD5_LOG_I(LOG_TAG,
-              "drag end wall: finish=%d runoff=%d -> wall=%d (fwd=%d rev=%d ring=%d)",
-              finish_span, runoff, wall,
+              "drag end wall: finish=%d runoff=%d vanilla_far=%d -> wall=%d (fwd=%d rev=%d ring=%d)",
+              finish_span, runoff, s_drag_vanilla_far, wall,
               s_boundary_fwd_sentinel, s_boundary_rev_sentinel, ring);
 }
 
