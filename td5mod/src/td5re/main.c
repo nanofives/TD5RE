@@ -117,6 +117,11 @@ static int td5_headless_run(void)
  * parked) terminates quietly. In-game (non-shutdown) crashes are unaffected. */
 static volatile LONG s_shutting_down  = 0;
 static DWORD         s_main_thread_id = 0;
+/* [EXIT-CRASH DIAG 2026-09-29] Which Step 7 teardown step the main thread is in
+ * ("jobs", "control", "modules", "backend", "return" = WinMain returned and the
+ * CRT/loader is unloading DLLs). Written to crash.log with the faulting thread id
+ * so an exit-time system-DLL fault (RTWorkQ.DLL) can be tied to a step. */
+static const char *volatile s_main_phase = "run";
 
 /* Crash handler: logs the faulting address + stack walk before terminating. */
 static LONG WINAPI td5_crash_handler(EXCEPTION_POINTERS *ep)
@@ -203,6 +208,11 @@ static LONG WINAPI td5_crash_handler(EXCEPTION_POINTERS *ep)
                 modname, (void *)hmod, (unsigned long)((uintptr_t)addr - (uintptr_t)hmod));
         }
     }
+    pos += snprintf(crash_msg + pos, sizeof(crash_msg) - pos,
+        "  Thread: tid=%lu main_tid=%lu is_main=%d shutting_down=%ld phase=%s module=%s\n",
+        (unsigned long)GetCurrentThreadId(), (unsigned long)s_main_thread_id,
+        GetCurrentThreadId() == s_main_thread_id ? 1 : 0, (long)s_shutting_down,
+        s_main_phase, td5re_shutdown_stage());
     dbglog(crash_msg);
     td5_plat_log_flush();
     /* Also write to a dedicated crash file in the log directory */
@@ -236,8 +246,10 @@ static LONG WINAPI td5_crash_handler(EXCEPTION_POINTERS *ep)
             for (;;) SleepEx(INFINITE, FALSE);
         }
         /* Main-thread teardown fault: can't park (that would hang the exit).
-         * Shutdown is essentially complete by now — terminate quietly, no dialog. */
-        TerminateProcess(GetCurrentProcess(), 0);
+         * Shutdown is essentially complete by now — terminate quietly, no dialog.
+         * [EXIT-CRASH DIAG 2026-09-29] Keep the self-test verdict: this used to
+         * exit 0, which turned a failed suite into a pass for selftest.ps1/CI. */
+        TerminateProcess(GetCurrentProcess(), (UINT)td5_selftest_exit_code());
     }
     /* Headless: do NOT pop a modal (it would wedge the process alive holding
      * the GPU). Terminate now so the OS releases device/swap-chain/window and
@@ -2073,14 +2085,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     InterlockedExchange(&s_shutting_down, 1);
     /* Join the worker pool before any subsystem it may have touched (render,
      * assets) is torn down, so no in-flight job references freed state. */
+    s_main_phase = "jobs";
     td5_jobs_shutdown();
     /* Close the live-control socket + join its listener thread before the
      * game modules it pokes are torn down. No-op unless it was enabled. */
+    s_main_phase = "control";
     td5_control_shutdown();
+    s_main_phase = "modules";
     td5re_shutdown();
+    s_main_phase = "backend";
     Backend_Shutdown();
     timeEndPeriod(1);
+    TD5_LOG_I("main", "shutdown: orderly teardown complete, returning %d", td5_selftest_exit_code());
     td5_plat_log_flush();
+    s_main_phase = "return";
 
     /* Self-test suite verdict: 0 = passed or never ran, 1 = failures.
      * Scripts/CI gate on this (scripts/selftest.ps1). */

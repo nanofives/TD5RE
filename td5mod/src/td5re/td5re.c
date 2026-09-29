@@ -155,6 +155,10 @@ int td5re_init(void) {
     return 1;
 }
 
+static const char *volatile s_shutdown_stage = "";
+
+const char *td5re_shutdown_stage(void) { return s_shutdown_stage; }
+
 void td5re_shutdown(void) {
     /* Flush and close the race trace before modules are torn down */
     td5_trace_shutdown();
@@ -162,8 +166,10 @@ void td5re_shutdown(void) {
     /* Shutdown in reverse order */
     for (int i = g_td5re_module_count - 1; i >= 0; i--) {
         TD5_LOG_I("td5re", "Shutting down module: %s", g_td5re_modules[i].name);
+        s_shutdown_stage = g_td5re_modules[i].name;
         g_td5re_modules[i].shutdown();
     }
+    s_shutdown_stage = "done";
 }
 
 int td5re_frame(void) {

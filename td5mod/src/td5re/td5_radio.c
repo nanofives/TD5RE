@@ -437,7 +437,24 @@ void td5_radio_shutdown(void)
      * the same reason the join-timeout path does -- the process is going away. */
     if (joined && !s_aborted) {
         td5_plat_radio_close();
-        if (s_mf_started) { MFShutdown(); s_mf_started = 0; }
+        /* [RADIO EXIT MF 2026-09-29] Reproduced exit fault: RTWorkQ.DLL+0x13387 on
+         * a Media Foundation work-queue thread (not ours, not the main thread),
+         * logged right after THIS MFShutdown returned -- the final one, which
+         * drops the MF refcount to 0 and tears the work queues down. The HTTP
+         * network source behind the (already released) reader can still have
+         * async completions queued there. This is only reached at process exit
+         * (td5_sound_shutdown), so leave MF up and let ExitProcess reap the
+         * queue threads instead. TD5RE_RADIO_MF_SHUTDOWN=1 restores the call. */
+        if (s_mf_started) {
+            if (td5_env_int("TD5RE_RADIO_MF_SHUTDOWN", 0, 0, 1)) {
+                TD5_LOG_I(LOG_TAG, "radio: MFShutdown begin");
+                MFShutdown();
+                TD5_LOG_I(LOG_TAG, "radio: MFShutdown end");
+            } else {
+                TD5_LOG_I(LOG_TAG, "radio: MFShutdown skipped at exit (queued network callbacks)");
+            }
+            s_mf_started = 0;
+        }
     }
     if (s_veh) { RemoveVectoredExceptionHandler(s_veh); s_veh = NULL; }
     s_inited = 0;
