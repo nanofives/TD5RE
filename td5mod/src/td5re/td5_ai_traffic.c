@@ -908,6 +908,19 @@ void td5_ai_init_traffic_actors(void) {
         int orig_queue_span;          /* preserved for REMAP path post-call */
 
         queue_span  = td5_read_le16s(qp);
+        /* [QUEUE SENTINEL 2026-09-29] Stop at the span == -1 terminator. The
+         * original only ever filled 6 slots from a long queue, so it never
+         * reached the end; the port's TD5_MAX_TRAFFIC_SLOTS (64) and a second
+         * init call that resumes from the saved cursor ran straight past it
+         * and placed cars on garbage spans (e.g. 25142), which the next
+         * recycle then used as a strip index -> access violation (Cop Chase on
+         * Moscow with the legacy queue path). Slots left unfilled stay parked
+         * and the recycle, which already honours the sentinel, owns them. */
+        if (queue_span == -1) {
+            TD5_LOG_I(LOG_TAG, "init_traffic: queue sentinel reached at slot=%d (cap=%d), rest left parked",
+                      local_18, racer_cap);
+            break;
+        }
         queue_byte2 = qp[2];
         queue_byte3 = qp[3];
         orig_queue_span = (int)queue_span;

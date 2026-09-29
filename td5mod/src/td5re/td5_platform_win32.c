@@ -349,7 +349,12 @@ void td5_platform_win32_set_app_id(void)
             (PFN_SetCurrentProcessExplicitAppUserModelID)
             GetProcAddress(hShell, "SetCurrentProcessExplicitAppUserModelID");
         if (pSet)
-            pSet(L"TD5RE.SourcePort");
+            /* [TASKBAR ICON 2026-09-29] ".2": the taskbar caches the icon per
+             * AppUserModelID. Builds before 2026-09-28 created the window
+             * visible with no icon, so the cached entry for the old ID holds
+             * another app's image; a fresh ID gets a clean entry now that the
+             * window is born with its icon. */
+            pSet(L"TD5RE.SourcePort.2");
         /* keep shell32 loaded for the process lifetime; do not FreeLibrary */
     }
 }

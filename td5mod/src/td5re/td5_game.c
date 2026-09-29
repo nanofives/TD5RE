@@ -2483,6 +2483,37 @@ static void init_race_modes_and_seed(void)
         }
     }
 
+    /* [MODE INI RESTORE 2026-09-29] The battle / MP drag / SP drag blocks below
+     * tune the traffic spawner by writing g_td5.ini.* directly (the INI struct
+     * is also the session's live config), and nothing ever put the values back.
+     * One drag race without traffic left traffic_dynamic = 0 for the rest of
+     * the session: circuits (Newcastle) then silently lost ALL traffic
+     * (step 4a needs Dynamic+OnCircuits) and Cop Chase fell back to the legacy
+     * TRAFFIC.BUS path. Snapshot these knobs on a race no mode touched, and
+     * put them back at the start of the race after one that did. */
+    {
+        static int s_mode_ini_saved = 0, s_mode_ini_dirty = 0;
+        static int s_sv_dynamic, s_sv_period, s_sv_smin, s_sv_smax, s_sv_offset;
+        if (s_mode_ini_dirty && s_mode_ini_saved) {
+            g_td5.ini.traffic_dynamic       = s_sv_dynamic;
+            g_td5.ini.traffic_dyn_period    = s_sv_period;
+            g_td5.ini.traffic_dyn_spawn_min = s_sv_smin;
+            g_td5.ini.traffic_dyn_spawn_max = s_sv_smax;
+            g_td5.ini.start_span_offset     = s_sv_offset;
+            TD5_LOG_I(LOG_TAG, "InitRace: restored mode-tuned INI knobs (dynamic=%d period=%d spawn=%d..%d offset=%d)",
+                      s_sv_dynamic, s_sv_period, s_sv_smin, s_sv_smax, s_sv_offset);
+        } else {
+            s_sv_dynamic = g_td5.ini.traffic_dynamic;
+            s_sv_period  = g_td5.ini.traffic_dyn_period;
+            s_sv_smin    = g_td5.ini.traffic_dyn_spawn_min;
+            s_sv_smax    = g_td5.ini.traffic_dyn_spawn_max;
+            s_sv_offset  = g_td5.ini.start_span_offset;
+            s_mode_ini_saved = 1;
+        }
+        s_mode_ini_dirty = td5_game_battle_mode_active() || td5_game_drag_mp_active() ||
+                           g_td5.drag_race_enabled;
+    }
+
     /* [TRAFFIC BATTLE 2026-06-28] Battle setup (MP-selected OR synthesised SP).
      * Force a fixed-pace dynamic-traffic stream ON, cops/wanted OFF, collisions
      * ON, and a fixed traffic volume so the field is a steady supply of ram
