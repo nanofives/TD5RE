@@ -2488,7 +2488,9 @@ static LRESULT CALLBACK D3D12DisplayWindowProc(HWND hwnd, UINT msg, WPARAM wp, L
 static HWND d3d12_create_display_window(int client_w, int client_h)
 {
     WNDCLASSEXA wc;
-    DWORD style = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE;
+    /* Created HIDDEN (no WS_VISIBLE): the taskbar button must not exist before
+     * the window carries its icon, or Windows 11 keeps a stale image for it. */
+    DWORD style = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     RECT wr = { 0, 0, client_w, client_h };
     int scr_w, scr_h, x, y;
     HWND hwnd;
@@ -2502,11 +2504,10 @@ static HWND d3d12_create_display_window(int client_w, int client_h)
     wc.lpfnWndProc   = D3D12DisplayWindowProc;
     wc.hInstance     = GetModuleHandleA(NULL);
     wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
-    /* The window is created WS_VISIBLE, so the taskbar button exists before the
-     * game's later WM_SETICON. With a NULL class icon Windows 11 shows a stale
+    /* With no icon when its taskbar button appears, Windows 11 shows a stale
      * cached image (e.g. another open app's icon) and keeps it. Stamp the exe's
-     * icon resource (id 1, td5re.rc) on the class so the button is right from
-     * the first frame. LoadImage returns NULL harmlessly if the resource is absent. */
+     * icon resource (id 1, td5re.rc) on the class (and, below, on the window
+     * before its first show). LoadImage returns NULL harmlessly if absent. */
     wc.hIcon   = (HICON)LoadImageA(wc.hInstance, MAKEINTRESOURCEA(1), IMAGE_ICON,
                                    GetSystemMetrics(SM_CXICON),
                                    GetSystemMetrics(SM_CYICON), 0);
@@ -2531,7 +2532,15 @@ static HWND d3d12_create_display_window(int client_w, int client_h)
     hwnd = CreateWindowExA(0, "TD5_D3D12_Display", title, style, x, y,
                            wr.right - wr.left, wr.bottom - wr.top,
                            NULL, NULL, GetModuleHandleA(NULL), NULL);
-    if (hwnd) { ShowWindow(hwnd, SW_SHOW); UpdateWindow(hwnd); }
+    if (hwnd) {
+        /* Per-window icons BEFORE the first show, so the taskbar button is
+         * born with them (class icons alone left it showing another app's
+         * icon on the user's machine). */
+        if (wc.hIcon)   SendMessageA(hwnd, WM_SETICON, ICON_BIG,   (LPARAM)wc.hIcon);
+        if (wc.hIconSm) SendMessageA(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)wc.hIconSm);
+        ShowWindow(hwnd, SW_SHOW);
+        UpdateWindow(hwnd);
+    }
     else WRAPPER_LOG("D3D12 create_display_window FAILED");
     return hwnd;
 }

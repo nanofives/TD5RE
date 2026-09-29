@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 29 (traffic + cop chase)" },
+    { CL_ITEM,    "Traffic on circuits (Newcastle) no longer vanishes for" },
+    { CL_ITEM,    "  the rest of the session after a drag race." },
+    { CL_ITEM,    "Cop Chase no longer crashes at the start of the race." },
+    { CL_ITEM,    "Taskbar icon: second attempt at showing the TD5 icon." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 28 (drag + lights + records)" },
     { CL_ITEM,    "Drag race always runs on the drag strip, even with" },
     { CL_ITEM,    "  AUTO-GENERATED or a TD6 track selected (no build)." },
