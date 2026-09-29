@@ -118,6 +118,14 @@ int              td5_track_branch_to_main_span(int span);
 /* Walker-consistent next span at a fork / corridor end for traffic steering
  * (-1 = plain step or geometric fork variant). See td5_track.c. */
 int              td5_track_traffic_next_span(int span_idx, int sub_lane, int forward, int *out_sub_lane);
+/* Next walker-decided fork within maxscan spans + main/branch absolute lane bands. */
+int              td5_track_traffic_fork_ahead(int span_idx, int forward, int maxscan,
+                                              int *main_lo, int *main_hi, int *br_lo, int *br_hi);
+/* Lane base nibble of a span (absolute lane = base + sub-lane). */
+int              td5_track_span_lane_base(int span_idx);
+/* Move a traffic target lane off a lane that ends within `lookahead` spans. */
+int              td5_track_traffic_taper_lane(int cur_span, int target_span, int target_sub,
+                                              int forward, int lookahead);
 /* [#18] Nearest non-slow (road) lane to `lane` in `span` — keeps traffic off the
  * TD6 sidewalk/shoulder lanes. Returns `lane` if no road lane is found. */
 int              td5_track_nearest_road_lane(int span_index, int lane);

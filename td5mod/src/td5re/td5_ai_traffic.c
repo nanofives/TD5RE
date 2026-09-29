@@ -2204,9 +2204,16 @@ int td5_ai_traffic_slot_owner_vp(int slot)
  * isolation: a traffic car only interacts with its owning viewport's player, and
  * two traffic cars from DIFFERENT partitions (which sit at matching positions)
  * must not collide with each other. Returns 0 (allow) whenever per-vp is off. */
+static int trf_test_span(void);
 int td5_ai_traffic_pair_blocked(int slot_a, int slot_b)
 {
     int base, a_traf, b_traf, owner_a, owner_b, vp;
+    /* [TRAFFIC TEST ZONE 2026-09-29] DEV harness: with TD5RE_TRAFFIC_TEST_SPAN set,
+     * racers and traffic pass through each other, so a player parked at the end of
+     * a fork to watch it never blocks (or gets rammed by) the traffic under test. */
+    if (trf_test_span() >= 0 &&
+        ((slot_a >= g_traffic_slot_base) != (slot_b >= g_traffic_slot_base)))
+        return 1;
     if (!s_trf_per_vp) return 0;
     base    = g_traffic_slot_base;
     a_traf  = (slot_a >= base);
@@ -3260,8 +3267,34 @@ static void trf_dyn_effective_spawn_window(int *lo, int *hi)
 /* Place `slot` at (span, lane, polarity) on the canonical main ring.
  * Same placement chain as the faithful recycle LEFT branch
  * [CONFIRMED @ 0x004354B5-0x004356CE + shared zero block LAB_0043588D]. */
+/* [TRAFFIC FORK CHOICE 2026-09-29] Per-car fork decision: the fork span it was
+ * rolled for (-1 = none) and whether it takes the branch. Reset on every spawn. */
+static int16_t s_fork_choice_span[TD5_MAX_TOTAL_ACTORS];
+static uint8_t s_fork_choice_br[TD5_MAX_TOTAL_ACTORS];
+static int     s_fork_choice_init = 0;
+
+static int trf_branch_pct(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_int("TD5RE_TRAFFIC_BRANCH_PCT", 50, 0, 100);
+        TD5_LOG_I(LOG_TAG, "traffic_fork_choice: TD5RE_TRAFFIC_BRANCH_PCT=%d", s);
+    }
+    return s;
+}
+
+static void trf_fork_choice_reset(int slot)
+{
+    if (!s_fork_choice_init) {
+        for (int i = 0; i < TD5_MAX_TOTAL_ACTORS; i++) s_fork_choice_span[i] = -1;
+        s_fork_choice_init = 1;
+    }
+    if (slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) s_fork_choice_span[slot] = -1;
+}
+
 static void trf_dyn_place(int slot, int span, int lane, int polarity)
 {
+    trf_fork_choice_reset(slot);
     char    *a  = actor_ptr(slot);
     int32_t *rs = route_state(slot);
     uint8_t *rsb = (uint8_t *)rs;
@@ -3561,6 +3594,86 @@ static int trf_dyn_pick_branch_main_span(int ps, int win_lo, int win_hi)
  * start-clearance zone on circuits (the Scotland race-start bug).
  * Returns 1 on success. */
 
+static int trf_lookahead_mode(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_int("TD5RE_TRAFFIC_LOOKAHEAD", 2, 0, 2);
+        TD5_LOG_I(LOG_TAG, "traffic_lookahead knob: TD5RE_TRAFFIC_LOOKAHEAD=%d", s);
+    }
+    return s;
+}
+
+static int trf_merge_realign_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_int("TD5RE_TRAFFIC_MERGE_REALIGN", 0, 0, 1);
+        TD5_LOG_I(LOG_TAG, "traffic_merge_realign knob: TD5RE_TRAFFIC_MERGE_REALIGN=%d", s);
+    }
+    return s;
+}
+
+/* [TRAFFIC WALL RAY 2026-09-29] A/B knob: TD5RE_TRAFFIC_WALL_RAY=0 stops traffic
+ * from braking on the smart front-ray wall test (default on = old behaviour). */
+static int trf_wall_ray_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_flag_on("TD5RE_TRAFFIC_WALL_RAY");
+        TD5_LOG_I(LOG_TAG, "traffic_wall_ray knob: TD5RE_TRAFFIC_WALL_RAY=%d", s);
+    }
+    return s;
+}
+
+/* [TRAFFIC LANE TAPER 2026-09-29] A/B knob: TD5RE_TRAFFIC_TAPER=0 disables the
+ * lane-end lookahead (default on). */
+static int trf_taper_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_flag_on("TD5RE_TRAFFIC_TAPER");
+        TD5_LOG_I(LOG_TAG, "traffic_taper knob: TD5RE_TRAFFIC_TAPER=%d", s);
+    }
+    return s;
+}
+
+/* [TRAFFIC TEST ZONE 2026-09-29] DEV-ONLY harness. TD5RE_TRAFFIC_TEST_SPAN=N pins
+ * every dynamic spawn to main spans [N, N+TD5RE_TRAFFIC_TEST_SPREAD) (default 16)
+ * regardless of where the player is, and retires cars only when they leave
+ * [N-60, N+150] (TD5RE_TRAFFIC_TEST_BACK / _FWD). Lets a test park the player and
+ * watch traffic drive through a chosen fork over and over. -1 = off (release: off). */
+static int trf_test_span(void)
+{
+#ifndef TD5RE_RELEASE
+    static int s = -2;
+    if (s == -2) {
+        s = td5_env_int("TD5RE_TRAFFIC_TEST_SPAN", -1, -1, 30000);
+        if (s >= 0)
+            TD5_LOG_I(LOG_TAG, "traffic_test_zone: spawn span=%d spread=%d keep=[-%d,+%d]",
+                      s, td5_env_int("TD5RE_TRAFFIC_TEST_SPREAD", 16, 1, 400),
+                      td5_env_int("TD5RE_TRAFFIC_TEST_BACK", 60, 1, 2000),
+                      td5_env_int("TD5RE_TRAFFIC_TEST_FWD", 150, 1, 2000));
+    }
+    return s;
+#else
+    return -1;
+#endif
+}
+
+/* Signed ring distance of span sp from the test span (sp - N), wrapped. */
+static int trf_test_rel(int sp)
+{
+    int ring = td5_track_get_ring_length();
+    int rel = sp - trf_test_span();
+    if (ring > 0) {
+        rel %= ring;
+        if (rel >= ring / 2)  rel -= ring;
+        if (rel < -ring / 2)  rel += ring;
+    }
+    return rel;
+}
+
 static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
 {
     int ring   = td5_track_get_ring_length();
@@ -3672,6 +3785,11 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
             if (span < 0) span += ring;
         }
 
+        if (trf_test_span() >= 0) {
+            span = trf_test_span() +
+                   (int)(trf_dyn_rand() % (uint32_t)td5_env_int("TD5RE_TRAFFIC_TEST_SPREAD", 16, 1, 400));
+            if (is_circuit && ring > 0) span %= ring;
+        }
         /* [item#9 2026-06-15] Deliberate branch attempt: roughly every third
          * placement (when branch corridors are drivable + enabled), aim the spawn
          * at a main span that is KNOWN to be paralleled by a fork, so the retarget
@@ -3679,7 +3797,7 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
          * random main span to land in a (rare) fork window. The chosen main span
          * then runs through all the normal edge/clearance/proximity checks. Gated
          * on TD5RE_TRAFFIC_BRANCHES (default on). */
-        if (trf_dyn_branch_spawn_ok() && (trf_dyn_rand() % 3u) == 0u) {
+        if (trf_test_span() < 0 && trf_dyn_branch_spawn_ok() && (trf_dyn_rand() % 3u) == 0u) {
             int bm = trf_dyn_pick_branch_main_span(ps, win_lo, win_hi);
             if (bm >= 0) { span = bm; want_branch = 1; }
         }
@@ -3691,7 +3809,7 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
          * traffic placements within N spans AFTER the start line, so the
          * grid/launch stretch stays clear. Wrap-aware on circuits (the zone
          * repeats each lap). */
-        if (g_td5.ini.traffic_dyn_start_offset > 0) {
+        if (trf_test_span() < 0 && g_td5.ini.traffic_dyn_start_offset > 0) {
             int rel = span - g_td5.track_start_span_index;
             if (is_circuit && ring > 0) {
                 rel %= ring;
@@ -3707,7 +3825,7 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
          * not the nominal win_lo: at the end of a point-to-point strip a_win_lo is
          * pulled in to whatever road remains, and gating on the un-clamped win_lo
          * here would reject exactly the closer placements that clamp just enabled. */
-        if (trf_dyn_min_player_dist(span) < a_win_lo) continue;
+        if (trf_test_span() < 0 && trf_dyn_min_player_dist(span) < a_win_lo) continue;
 
         /* [proximity gate] Don't clump: skip this span if its stretch of road
          * already holds enough traffic. `span` here is the main-ring candidate
@@ -4123,6 +4241,17 @@ void td5_ai_traffic_dynamic_tick(void)
              * sit here coped with traffic stranded on "displaced/off-road" forks.
              * Branches are connected drivable roads, so branch traffic is ordinary
              * traffic handled by the general despawn (behind/ahead/far) below. */
+            if (trf_test_span() >= 0) {
+                int rel = trf_test_rel(sp);
+                if (wreck_expired ||
+                    rel < -td5_env_int("TD5RE_TRAFFIC_TEST_BACK", 60, 1, 2000) ||
+                    rel >  td5_env_int("TD5RE_TRAFFIC_TEST_FWD", 150, 1, 2000)) {
+                    s_trf_dyn_state[slot] = TRF_DYN_FADE_OUT;
+                    s_trf_wreck_age[slot] = 0;
+                    TD5_LOG_I(LOG_TAG, "traffic_test_despawn: slot=%d span=%d rel=%d wreck=%d",
+                              slot, sp, rel, wreck_expired);
+                }
+            } else
             if (!td5_ai_cop_is_chasing(slot) &&
                 (wreck_expired ||
                 /* [PER-PLAYER TRAFFIC CAP] with the feature on, the rear bound is
@@ -4612,7 +4741,15 @@ void td5_ai_update_traffic_route_plan(int slot) {
      * the recovery brake. Traffic-only; shares the existing branch-traffic knob
      * (TD5RE_BRANCH_TRAFFIC_FIX=0 restores the old behaviour for A/B). Fires only
      * on the single tick the boundary is crossed. */
-    if (branch_traffic_fix_enabled() && td5_ai_traffic_dynamic_active() &&
+    /* [MERGE REALIGN OFF 2026-09-29] The yaw snap below is now OFF by default
+     * (TD5RE_TRAFFIC_MERGE_REALIGN=1 restores it). It turned the car to the new
+     * span's tangent in ONE tick at every corridor<->main crossing: a visible
+     * abrupt turn entering a fork, and on the rejoin span (type 11, corridor-side
+     * sub-lane) it left the car ~135 deg off the main route, so it armed recovery
+     * and stalled. The stall it was added for came from the frozen
+     * span_normalized (fixed 2026-09-29) and the corridor heading reference. */
+    if (trf_merge_realign_enabled() &&
+        branch_traffic_fix_enabled() && td5_ai_traffic_dynamic_active() &&
         slot >= 0 && slot < TD5_MAX_TOTAL_ACTORS) {
         int ring = td5_track_get_ring_length();
         int cur  = (int)ACTOR_I16(actor, ACTOR_SPAN_RAW);
@@ -4694,6 +4831,18 @@ void td5_ai_update_traffic_route_plan(int slot) {
 
     /* Original 0x435F2B JLE 0x400 + 0x435F32 JGE 0xC00 implement strict bounds:
      * body fires for hdelta in (0x400, 0xC00) exclusive. */
+    /* [CORRIDOR HEADING REF 2026-09-29] On a branch corridor (span_raw >= ring)
+     * span_normalized is the PARALLEL MAIN span from the segment table, so the
+     * route byte read above is the main road's heading, which can differ from the
+     * corridor's by ~150 deg right after a fork (Newcastle 762 vs main 475:
+     * hdelta 0x6B1). A car correctly following the corridor then armed the
+     * misalignment brake every tick and stalled at the corridor entrance. Skip
+     * the arm there; a genuinely stuck branch car is still handled by the
+     * AntiFreeze / unstick path. Knob shares TD5RE_BRANCH_TRAFFIC_FIX. */
+    if (branch_traffic_fix_enabled() && slot >= g_traffic_slot_base &&
+        td5_track_get_ring_length() > 0 &&
+        (int)ACTOR_I16(actor, ACTOR_SPAN_RAW) >= td5_track_get_ring_length())
+        hdelta = 0;
     if (hdelta > 0x400 && hdelta < 0xC00) {
         /* [FAITHFUL 0x435F2B] The original arms UNCONDITIONALLY here — no
          * `recovery_stage == 0` guard (the port-only guard was removed with the
@@ -4834,7 +4983,7 @@ void td5_ai_update_traffic_route_plan(int slot) {
                 ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)cruise;
             }
             SmartSense tse; smart_sense(slot, tspan, tsc, tsk, &tse);
-            if (tse.wall_imminent) {
+            if (tse.wall_imminent && trf_wall_ray_enabled()) {
                 ACTOR_U8(actor, ACTOR_BRAKE_FLAG)       = 1;
                 ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
                 if ((g_ai_frame_counter % 90u) == 0u)
@@ -5032,6 +5181,56 @@ void td5_ai_update_traffic_route_plan(int slot) {
             /* [RIGHT-BRANCH TRAFFIC FIX 2026-06-21] The held branch lane must be
              * valid for the raw-based target span (raw±1 may have a different
              * lane count than the car's current span). */
+            /* [TRAFFIC LANE TAPER 2026-09-29] Leave a lane that ends ahead in time
+             * (see td5_track_traffic_taper_lane). */
+            if (!traffic_on_branch && !fork_target && trf_taper_enabled() &&
+                branch_traffic_fix_enabled() && slot >= g_traffic_slot_base) {
+                target_sub_lane = td5_track_traffic_taper_lane(
+                    (int)span_raw, target_span, target_sub_lane, polarity == 0, 6);
+            }
+
+            /* [TRAFFIC FORK CHOICE 2026-09-29] Traffic never decided anything at a
+             * fork: it followed whatever lane it was in, and because the road
+             * widens toward the main side before a fork (Newcastle 470-474) almost
+             * every car ended up on the main road. It also changed sides at the
+             * last moment (1-span steering lookahead), so it swerved or hit the
+             * edge entering the fork. Roll once per fork (TD5RE_TRAFFIC_BRANCH_PCT,
+             * default 50) when it comes within 12 spans, then keep the target lane
+             * inside that side's lanes as soon as they exist on the target span, so
+             * the lane change is early and gradual. The walker still decides the
+             * road by sub-lane at the fork, so steering and walker agree. */
+            if (!traffic_on_branch && !fork_target &&
+                branch_traffic_fix_enabled() && slot >= g_traffic_slot_base &&
+                slot < TD5_MAX_TOTAL_ACTORS) {
+                int mlo, mhi, blo, bhi;
+                int fs = td5_track_traffic_fork_ahead((int)span_raw, polarity == 0, 12,
+                                                      &mlo, &mhi, &blo, &bhi);
+                if (fs >= 0) {
+                    int lo, hi, tb, tn, abs_l;
+                    if (!s_fork_choice_init) trf_fork_choice_reset(-1);
+                    if (s_fork_choice_span[slot] != fs) {
+                        s_fork_choice_span[slot] = (int16_t)fs;
+                        s_fork_choice_br[slot] =
+                            ((int)(trf_dyn_rand() % 100u) < trf_branch_pct()) ? 1 : 0;
+                        TD5_LOG_I(LOG_TAG, "traffic_fork_choice: slot=%d fork=%d raw=%d pol=%d -> %s (main %d-%d, branch %d-%d)",
+                                  slot, fs, (int)span_raw, (int)polarity,
+                                  s_fork_choice_br[slot] ? "BRANCH" : "MAIN", mlo, mhi, blo, bhi);
+                    }
+                    lo = s_fork_choice_br[slot] ? blo : mlo;
+                    hi = s_fork_choice_br[slot] ? bhi : mhi;
+                    tb = td5_track_span_lane_base(target_span);
+                    tn = td5_track_get_span_lane_count(target_span);
+                    if (hi >= tb && lo <= tb + tn - 1) {       /* side reachable on target */
+                        if (lo < tb) lo = tb;
+                        if (hi > tb + tn - 1) hi = tb + tn - 1;
+                        abs_l = tb + target_sub_lane;
+                        if (abs_l < lo) abs_l = lo;
+                        if (abs_l > hi) abs_l = hi;
+                        target_sub_lane = abs_l - tb;
+                    }
+                }
+            }
+
             if (traffic_on_branch || fork_target) {
                 int blc = td5_track_get_span_lane_count(target_span);
                 if (blc > 0) {
@@ -5067,6 +5266,54 @@ void td5_ai_update_traffic_route_plan(int slot) {
                     target_span, target_sub_lane,
                     td5_track_get_span_lane_count(target_span),
                     &target_x, &target_y, &target_z);
+                /* [TRAFFIC LOOKAHEAD 2026-09-29] The aim point sat ONE span ahead, so
+                 * a lane change (one lane ~ one span wide) or the step onto a fork
+                 * corridor demanded a ~45 deg turn inside a single span: the jerky
+                 * turn-in at forks. Blend in the lane point one span further along
+                 * the walker's own path (fork / corridor end aware, absolute lane
+                 * kept across lane-base shifts). TD5RE_TRAFFIC_LOOKAHEAD: 0 = the
+                 * old 1-span aim, 1 = midpoint (1.5 spans), 2 (default) = 2 spans.
+                 * Measured on Newcastle fork B (test zone, 120 s each, 0/1/2): turn
+                 * direction flips in the fork zone 411/410/151, yaw-rate p90
+                 * 22.5/16.8/11.2 deg per 0.1 s, no extra edge contacts. */
+                if (trf_lookahead_mode() > 0 && branch_traffic_fix_enabled() &&
+                    slot >= g_traffic_slot_base) {
+                    int fwd = (polarity == 0);
+                    int fsub = target_sub_lane;
+                    int nspan = td5_track_traffic_next_span(target_span, target_sub_lane, fwd, &fsub);
+                    if (nspan < 0) {
+                        int sc = td5_track_get_span_count();
+                        nspan = target_span + (fwd ? 1 : -1);
+                        if (ring_length > 0 && target_span < ring_length) {
+                            if (nspan >= ring_length) nspan -= ring_length;
+                            if (nspan < 0) nspan += ring_length;
+                        }
+                        if (nspan < 0 || nspan >= sc) nspan = -1;
+                        if (nspan >= 0) {
+                            int fl = td5_track_get_span_lane_count(nspan);
+                            fsub = td5_track_span_lane_base(target_span) + target_sub_lane
+                                 - td5_track_span_lane_base(nspan);
+                            if (fsub < 0) fsub = 0;
+                            if (fl > 0 && fsub >= fl) fsub = fl - 1;
+                        }
+                    }
+                    if (nspan >= 0) {
+                        int fx, fy, fz;
+                        if (td5_track_get_span_lane_world(nspan, fsub, &fx, &fy, &fz)) {
+                            long gap = (long)labs((long)(fx - target_x) >> 8) +
+                                       (long)labs((long)(fz - target_z) >> 8);
+                            if (gap < 12000) {          /* sane neighbour, not a seam jump */
+                                if (trf_lookahead_mode() >= 2) {
+                                    target_x = fx; target_y = fy; target_z = fz;
+                                } else {
+                                    target_x = target_x + (fx - target_x) / 2;
+                                    target_y = target_y + (fy - target_y) / 2;
+                                    target_z = target_z + (fz - target_z) / 2;
+                                }
+                            }
+                        }
+                    }
+                }
                 /* [CONFIRMED @ 0x00436344-0x004363EF] Original re-reads
                  *   EAX = rs[RS_SLOT_INDEX] (= ref_slot)
                  *   ESI = ref_actor.world_pos_x   (offset 0x1FC, DAT_004ab304)
@@ -5109,14 +5356,19 @@ void td5_ai_update_traffic_route_plan(int slot) {
                     rs[RS_RIGHT_DEVIATION] = delta + 0xFFF;
                 }
 
-                if ((g_ai_frame_counter % 60u) == 0u) {
+                if ((g_ai_frame_counter % (trf_test_span() >= 0 ? 6u : 60u)) == 0u) {
                     TD5_LOG_I(LOG_TAG,
                               "traffic_dev: slot=%d raw=%d norm=%d acc=%d tspan=%d sublane=%d "
-                              "ta=0x%X hd=0x%X delta=%d L=%d R=%d",
+                              "ta=0x%X hd=0x%X delta=%d L=%d R=%d v=%d thr=%d brk=%d cursub=%d rec=%d",
                               slot, (int)span_raw, (int)span_norm,
                               (int)ACTOR_I16(actor, ACTOR_SPAN_ACCUM), target_span,
                               target_sub_lane, target_angle, actor_heading, delta,
-                              rs[RS_LEFT_DEVIATION], rs[RS_RIGHT_DEVIATION]);
+                              rs[RS_LEFT_DEVIATION], rs[RS_RIGHT_DEVIATION],
+                              (int)ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED),
+                              (int)ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER),
+                              (int)ACTOR_U8(actor, ACTOR_BRAKE_FLAG),
+                              (int)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX),
+                              (int)rs[RS_RECOVERY_STAGE]);
                 }
             }
         }
@@ -5127,6 +5379,10 @@ void td5_ai_update_traffic_route_plan(int slot) {
 
     /* --- Stage 7: Peer avoidance / yield --- */
     peer = td5_ai_find_nearest_route_peer(rs);
+    /* [TRAFFIC TEST ZONE 2026-09-29] The parked (ghost) test player is not an
+     * obstacle: ignore racer peers so traffic does not queue behind it. */
+    if (trf_test_span() >= 0 && peer != slot && peer < g_traffic_slot_base)
+        peer = slot;
 
     /* [S20 smart-traffic] default: no lane change this tick (cleared unless a
      * close same-lane peer triggers react_to_peer below). */

@@ -4719,6 +4719,101 @@ static uint8_t compute_boundary_bits(int span_idx, int sub_lane,
  * Resolve neighbor span index for a given crossing direction.
  * Returns the new span index (and updates sub_lane via pointer).
  */
+/* [TRAFFIC LANE TAPER 2026-09-29] PORT-ONLY. Where a lane ENDS a few spans
+ * ahead (e.g. Newcastle 513->517: the main road's lanes taper out on the left and
+ * the road continues on the corridor's lanes), traffic that stayed in its lane
+ * drove into the converging edge, the smart front ray braked it to a stop and it
+ * sat there until FORCE-reset. Return a target sub-lane on target_span that is a
+ * lane still present for `lookahead` spans ahead AND reachable from cur_span
+ * (overlapping its lanes), comparing absolute lanes (lane base nibble +
+ * sub-lane, the walker's plain-step arithmetic). The scan stops at any
+ * fork/merge/corridor-end span so it never decides a fork. If the continuing
+ * lanes do not overlap the current span (still before a merge point) the target
+ * is returned unchanged, so a car is never steered into a gore. */
+int td5_track_traffic_taper_lane(int cur_span, int target_span, int target_sub,
+                                 int forward, int lookahead)
+{
+    int k, span, lo, hi, tbase, abs_lane, clo, chi;
+    if (!s_span_array || target_span < 0 || target_span >= s_span_count ||
+        cur_span < 0 || cur_span >= s_span_count || lookahead < 1)
+        return target_sub;
+    tbase = span_height_offset(&s_span_array[target_span]);
+    lo = tbase;
+    hi = tbase + span_lane_count(&s_span_array[target_span]) - 1;
+    span = target_span;
+    for (k = 0; k < lookahead; k++) {
+        int t = s_span_array[span].span_type;
+        int b, n;
+        if (t == 8 || t == 9 || t == 10 || t == 11) break;
+        span += forward ? 1 : -1;
+        if (span < 0 || span >= s_span_count) break;
+        t = s_span_array[span].span_type;
+        if (t == 8 || t == 9 || t == 10 || t == 11) break;   /* don't look past a junction */
+        b = span_height_offset(&s_span_array[span]);
+        n = span_lane_count(&s_span_array[span]);
+        if (n < 1) break;
+        if (b > lo) lo = b;
+        if (b + n - 1 < hi) hi = b + n - 1;
+    }
+    if (lo > hi) return target_sub;
+    /* reachability: continuing lanes must overlap the lanes the car can be on now */
+    clo = span_height_offset(&s_span_array[cur_span]);
+    chi = clo + span_lane_count(&s_span_array[cur_span]) - 1;
+    if (hi < clo - 1 || lo > chi + 1) return target_sub;
+    abs_lane = tbase + target_sub;
+    if (abs_lane < lo) abs_lane = lo;
+    if (abs_lane > hi) abs_lane = hi;
+    return abs_lane - tbase;
+}
+
+/* [TRAFFIC FORK CHOICE 2026-09-29] PORT-ONLY. Look up to `maxscan` spans ahead of
+ * span_idx (in the direction of travel) for a fork the walker decides by sub-lane
+ * (type 8 forward / type 11 oncoming, standard right-side forks only). On a hit,
+ * return the fork span and the ABSOLUTE lane bands (lane base nibble + sub-lane)
+ * that lead to the main road and to the branch, using the walker's own rule
+ * (sub < lanes of the next main span -> main). Returns -1 if none. */
+int td5_track_traffic_fork_ahead(int span_idx, int forward, int maxscan,
+                                 int *main_lo, int *main_hi, int *br_lo, int *br_hi)
+{
+    int k, span = span_idx;
+    if (!s_span_array || span_idx < 0 || span_idx >= s_span_count) return -1;
+    for (k = 0; k <= maxscan; k++) {
+        const TD5_StripSpan *sp;
+        if (span < 0 || span >= s_span_count) return -1;
+        sp = &s_span_array[span];
+        if (forward && sp->span_type == 8) {
+            int rev_native = (g_td5.reverse_direction && (g_active_td6_level == 0))
+                           ^ (fork_is_left(span) ? 1 : 0);
+            int base = span_height_offset(sp), n = span_lane_count(sp), nm;
+            if (rev_native || span + 1 >= s_span_count) return -1;
+            nm = span_lane_count(&s_span_array[span + 1]);
+            if (nm < 1 || nm >= n) return -1;
+            *main_lo = base; *main_hi = base + nm - 1;
+            *br_lo = base + nm; *br_hi = base + n - 1;
+            return span;
+        }
+        if (!forward && sp->span_type == 11) {
+            int base = span_height_offset(sp), n = span_lane_count(sp), nm;
+            if (fork_is_left(span) || span - 1 < 0) return -1;
+            nm = span_lane_count(&s_span_array[span - 1]);
+            if (nm < 1 || nm >= n) return -1;
+            *main_lo = base; *main_hi = base + nm - 1;
+            *br_lo = base + nm; *br_hi = base + n - 1;
+            return span;
+        }
+        if (sp->span_type == 9 || sp->span_type == 10) return -1;   /* corridor end */
+        span += forward ? 1 : -1;
+    }
+    return -1;
+}
+
+/* Absolute lane helpers for traffic lane targeting (base nibble + sub-lane). */
+int td5_track_span_lane_base(int span_idx)
+{
+    if (!s_span_array || span_idx < 0 || span_idx >= s_span_count) return 0;
+    return span_height_offset(&s_span_array[span_idx]);
+}
+
 /* [TRAFFIC FORK TARGET 2026-09-29] PORT-ONLY. Predict where the walker will send a
  * car that leaves span_idx in its direction of travel, using the SAME sub-lane rule
  * resolve_neighbor applies at a fork / corridor end, so traffic steering can aim at

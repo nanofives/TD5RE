@@ -1478,6 +1478,26 @@ static int32_t traffic_edge_pen(int32_t a_x, int32_t a_z,
  * DAT_004631a0 outer-vertex LUT (k_outer_left_offsets matches orig dump),
  * ApplySimpleTrackSurfaceForce wiring + DecayUltimateVariantTimer wiring.
  */
+/* [TRAFFIC EDGE LOG 2026-09-29] DEV diagnostic: TD5RE_TRAFFIC_EDGE_LOG=1 logs the
+ * traffic segment-edge containment hits (sampled 1 in 15 per slot) so a stalled
+ * traffic car can be checked for being pinned by an edge push. */
+static void trf_edge_log(int slot, const TD5_Actor *actor, const char *edge,
+                         int sub, int lanes, int32_t pen, uint32_t ang)
+{
+#ifndef TD5RE_RELEASE
+    static int on = -1;
+    static uint16_t cnt[TD5_MAX_TOTAL_ACTORS];
+    if (on < 0) on = td5_env_int("TD5RE_TRAFFIC_EDGE_LOG", 0, 0, 1);
+    if (!on || slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
+    if ((cnt[slot]++ % 15u) != 0u) return;
+    TD5_LOG_I(LOG_TAG, "traffic_edge_hit: slot=%d span=%d edge=%s sub=%d lanes=%d pen=%d ang=0x%X v=%d",
+              slot, (int)actor->track_span_raw, edge, sub, lanes, (int)pen, (unsigned)ang,
+              (int)actor->longitudinal_speed);
+#else
+    (void)slot; (void)actor; (void)edge; (void)sub; (void)lanes; (void)pen; (void)ang;
+#endif
+}
+
 void process_traffic_segment_edge(TD5_Actor *actor, int slot)
 {
     TD5_StripSpan *sp = td5_track_get_span((int)actor->track_span_raw);
@@ -1538,6 +1558,7 @@ void process_traffic_segment_edge(TD5_Actor *actor, int slot)
             &edge_angle);
 
         if (pen < 0) {
+            trf_edge_log(slot, actor, "inner", sub_lane, lane_count, pen, edge_angle);
             apply_simple_track_surface_force(actor, edge_angle, pen);
             /* DecayUltimateVariantTimer [CONFIRMED @ 0x0040A440]:
              * encounter mode 4 erodes the actor's clean_driving_score by 1
@@ -1554,14 +1575,24 @@ outer_test:
     /* Outer edge test: sub_lane >= lane_count - 2  [CONFIRMED @ 0x407462]
      * [FIX 2026-05-26] Orig outer 0x4074B4-0x4074F4:
      *   A = psVar1 = vtx[DAT_004631a0[type] + left_vertex_index(+4) + lane_count]
-     *   B = psVar2 = vtx[DAT_004631a4[type](=0) + right_vertex_index(+6) + lane_count]
+     *   B = psVar2 = vtx[DAT_004631a4[type] + right_vertex_index(+6) + lane_count]
      * Prior port had LEFT/RIGHT swapped. DAT_004631a0 = k_outer_left_offsets. */
     if (sub_lane >= lane_count - 2) {
-        static const int8_t k_outer_left_offsets[12] = {
-            0, 0, -1, -1, -2, 0, -1, 0, -1, 0, -1, -2
-        };
-        int a_idx = k_outer_left_offsets[span_type] + (int)sp->left_vertex_index  + lane_count;
-        int b_idx = (int)sp->right_vertex_index + lane_count;   /* DAT_004631a4 = 0 */
+        /* [TRAFFIC EDGE LUT 2026-09-29] Same per-type rail LUT the racer wall
+         * resolver uses. [CONFIRMED @ 0x004631A0: 12 int32 (L,R) pairs, read from
+         * original/TD5_d3d.exe = (0,0)(0,0)(-1,0)(-1,0)(-2,0)(0,-1)(0,-1)(0,-2)
+         * then (0,0) x4]. The old traffic
+         * copy read the bytes contiguously ({0,0,-1,-1,-2,0,-1,0,-1,0,-1,-2} for L
+         * and a constant 0 for R), which mixes the two columns: on a lane-drop
+         * span (type 5/6/7) the right rail ran from a lane divider on the start
+         * row to a vertex of the NEXT row (another span's origin), i.e. a diagonal
+         * invisible wall across the road, and types 8/10/11 got a bogus -1/-2.
+         * Traffic hit it 2-3 spans past a fork's merge (Newcastle 515/516) and
+         * either piled up or pushed through it. */
+        static const int8_t k_outer_left_offsets[12]  = { 0, 0, -1, -1, -2,  0,  0,  0, 0, 0, 0, 0 };
+        static const int8_t k_outer_right_offsets[12] = { 0, 0,  0,  0,  0, -1, -1, -2, 0, 0, 0, 0 };
+        int a_idx = k_outer_left_offsets[span_type]  + (int)sp->left_vertex_index  + lane_count;
+        int b_idx = k_outer_right_offsets[span_type] + (int)sp->right_vertex_index + lane_count;
         TD5_StripVertex *A = td5_track_get_vertex(a_idx);
         TD5_StripVertex *B = td5_track_get_vertex(b_idx);
         if (!A || !B) return;
@@ -1582,6 +1613,7 @@ outer_test:
             &edge_angle);
 
         if (pen < 0) {
+            trf_edge_log(slot, actor, "outer", sub_lane, lane_count, pen, edge_angle);
             apply_simple_track_surface_force(actor, edge_angle, pen);
             /* DecayUltimateVariantTimer [CONFIRMED @ 0x0040A440] — same as inner-edge */
             if (g_td5.special_encounter_enabled == 4 && actor->finish_time == 0) {

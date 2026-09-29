@@ -2764,6 +2764,7 @@ void td5_physics_resolve_vehicle_contacts(void)
                 if (td5_ai_actor_is_broken_down(t)) continue;        /* already wrecked */
                 if (td5_ai_traffic_dynamic_parked(t)) continue;      /* despawned */
                 if (td5_ai_traffic_get_draw_alpha(t) == 0) continue; /* invisible */
+                if (td5_ai_traffic_pair_blocked(rsl, t)) continue; /* ghost pair (TT / per-VP / test zone) */
                 int32_t tcx = tr->world_pos.x, tcz = tr->world_pos.z;
                 int32_t tvx = tr->linear_velocity_x, tvz = tr->linear_velocity_z;
                 int32_t tyaw = tr->euler_accum.yaw;
@@ -2840,6 +2841,7 @@ void td5_physics_resolve_vehicle_contacts(void)
                 TD5_Actor *rc = (TD5_Actor *)(g_actor_table_base + (size_t)rsl * TD5_ACTOR_STRIDE);
                 if (!rc->car_definition_ptr || rc->finish_time != 0) continue;
                 if (td5_game_slot_is_empty_racer(rsl)) continue;   /* [NO-OPP] empty grid slot */
+                if (td5_ai_traffic_pair_blocked(rsl, t)) continue; /* ghost pair */
                 int64_t dx = (int64_t)(FP_TRUNC(rc->world_pos.x)) - (FP_TRUNC(tr->world_pos.x));
                 int64_t dz = (int64_t)(FP_TRUNC(rc->world_pos.z)) - (FP_TRUNC(tr->world_pos.z));
                 int64_t d2 = dx * dx + dz * dz;
@@ -3142,6 +3144,7 @@ void td5_physics_resolve_vehicle_contacts(void)
                  * in case a slot is mid-state with a transient non-zero alpha. */
                 if (td5_ai_traffic_dynamic_parked(t) ||
                     td5_ai_traffic_get_draw_alpha(t) == 0) continue;
+                if (td5_ai_traffic_pair_blocked(pslot, t)) continue; /* ghost pair (test zone) */
                 dxp = (FP_TRUNC(player->world_pos.x)) - (FP_TRUNC(tr->world_pos.x));
                 dzp = (FP_TRUNC(player->world_pos.z)) - (FP_TRUNC(tr->world_pos.z));
                 rr  = prad + (int32_t)CDEF_S(tr, CDEF_COLLISION_RADIUS);

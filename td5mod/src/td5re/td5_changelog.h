@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 29 (traffic + cop chase)" },
+    { CL_ITEM,    "Traffic no longer hits invisible walls where lanes" },
+    { CL_ITEM,    "  merge after a fork (it piled up or pushed through)." },
+    { CL_ITEM,    "Traffic now takes fork branches too, picking a side" },
+    { CL_ITEM,    "  early instead of swerving at the last moment." },
+    { CL_ITEM,    "Traffic steers smoothly (no zigzag into forks)." },
     { CL_ITEM,    "Traffic drives much cleaner: half the cars were steering" },
     { CL_ITEM,    "  by a stale track position and braked into walls." },
     { CL_ITEM,    "Traffic at a fork follows the road it is actually on." },
