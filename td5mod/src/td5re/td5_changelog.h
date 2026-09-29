@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 29 (traffic + cop chase)" },
+    { CL_ITEM,    "Traffic no longer stops dead before a bend and waits" },
+    { CL_ITEM,    "  to be reset (the wall sensor braked a stopped car)." },
+    { CL_ITEM,    "Traffic no longer bumps the curb where a lane opens." },
     { CL_ITEM,    "Traffic no longer hits invisible walls where lanes" },
     { CL_ITEM,    "  merge after a fork (it piled up or pushed through)." },
     { CL_ITEM,    "Traffic now takes fork branches too, picking a side" },

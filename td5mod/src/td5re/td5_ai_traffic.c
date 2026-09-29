@@ -3626,6 +3626,24 @@ static int trf_wall_ray_enabled(void)
     return s;
 }
 
+/* [TRAFFIC WALL RAY MIN SPEED 2026-09-29] The front-ray wall brake only fires
+ * above this longitudinal speed, the same 0x4000 gate the racers use
+ * (td5_ai.c RAY BRAIN "aimed at a wall while moving"). The rays are cast along
+ * the ROUTE span direction, not the car heading, so a car sitting before a bend
+ * sees the outer rail inside 1.1 span lengths forever: with no speed gate it
+ * braked to v=0 and stayed there until the 90-tick FORCE-reset (Newcastle fork A
+ * spawn band, span 57: 26 wall-ray hits = 26 unsticks per 120 s run).
+ * TD5RE_TRAFFIC_WALL_RAY_MINSPEED=0 restores the ungated brake. */
+static int trf_wall_ray_min_speed(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_int("TD5RE_TRAFFIC_WALL_RAY_MINSPEED", 0x4000, 0, 0x100000);
+        TD5_LOG_I(LOG_TAG, "traffic_wall_ray knob: TD5RE_TRAFFIC_WALL_RAY_MINSPEED=%d", s);
+    }
+    return s;
+}
+
 /* [TRAFFIC LANE TAPER 2026-09-29] A/B knob: TD5RE_TRAFFIC_TAPER=0 disables the
  * lane-end lookahead (default on). */
 static int trf_taper_enabled(void)
@@ -4983,7 +5001,8 @@ void td5_ai_update_traffic_route_plan(int slot) {
                 ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)cruise;
             }
             SmartSense tse; smart_sense(slot, tspan, tsc, tsk, &tse);
-            if (tse.wall_imminent && trf_wall_ray_enabled()) {
+            if (tse.wall_imminent && trf_wall_ray_enabled() &&
+                ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED) > trf_wall_ray_min_speed()) {
                 ACTOR_U8(actor, ACTOR_BRAKE_FLAG)       = 1;
                 ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
                 if ((g_ai_frame_counter % 90u) == 0u)
