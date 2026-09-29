@@ -3594,6 +3594,16 @@ static int trf_dyn_pick_branch_main_span(int ps, int win_lo, int win_hi)
  * start-clearance zone on circuits (the Scotland race-start bug).
  * Returns 1 on success. */
 
+static int trf_lookahead_mode(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_int("TD5RE_TRAFFIC_LOOKAHEAD", 2, 0, 2);
+        TD5_LOG_I(LOG_TAG, "traffic_lookahead knob: TD5RE_TRAFFIC_LOOKAHEAD=%d", s);
+    }
+    return s;
+}
+
 static int trf_merge_realign_enabled(void)
 {
     static int s = -1;
@@ -5256,6 +5266,54 @@ void td5_ai_update_traffic_route_plan(int slot) {
                     target_span, target_sub_lane,
                     td5_track_get_span_lane_count(target_span),
                     &target_x, &target_y, &target_z);
+                /* [TRAFFIC LOOKAHEAD 2026-09-29] The aim point sat ONE span ahead, so
+                 * a lane change (one lane ~ one span wide) or the step onto a fork
+                 * corridor demanded a ~45 deg turn inside a single span: the jerky
+                 * turn-in at forks. Blend in the lane point one span further along
+                 * the walker's own path (fork / corridor end aware, absolute lane
+                 * kept across lane-base shifts). TD5RE_TRAFFIC_LOOKAHEAD: 0 = the
+                 * old 1-span aim, 1 = midpoint (1.5 spans), 2 (default) = 2 spans.
+                 * Measured on Newcastle fork B (test zone, 120 s each, 0/1/2): turn
+                 * direction flips in the fork zone 411/410/151, yaw-rate p90
+                 * 22.5/16.8/11.2 deg per 0.1 s, no extra edge contacts. */
+                if (trf_lookahead_mode() > 0 && branch_traffic_fix_enabled() &&
+                    slot >= g_traffic_slot_base) {
+                    int fwd = (polarity == 0);
+                    int fsub = target_sub_lane;
+                    int nspan = td5_track_traffic_next_span(target_span, target_sub_lane, fwd, &fsub);
+                    if (nspan < 0) {
+                        int sc = td5_track_get_span_count();
+                        nspan = target_span + (fwd ? 1 : -1);
+                        if (ring_length > 0 && target_span < ring_length) {
+                            if (nspan >= ring_length) nspan -= ring_length;
+                            if (nspan < 0) nspan += ring_length;
+                        }
+                        if (nspan < 0 || nspan >= sc) nspan = -1;
+                        if (nspan >= 0) {
+                            int fl = td5_track_get_span_lane_count(nspan);
+                            fsub = td5_track_span_lane_base(target_span) + target_sub_lane
+                                 - td5_track_span_lane_base(nspan);
+                            if (fsub < 0) fsub = 0;
+                            if (fl > 0 && fsub >= fl) fsub = fl - 1;
+                        }
+                    }
+                    if (nspan >= 0) {
+                        int fx, fy, fz;
+                        if (td5_track_get_span_lane_world(nspan, fsub, &fx, &fy, &fz)) {
+                            long gap = (long)labs((long)(fx - target_x) >> 8) +
+                                       (long)labs((long)(fz - target_z) >> 8);
+                            if (gap < 12000) {          /* sane neighbour, not a seam jump */
+                                if (trf_lookahead_mode() >= 2) {
+                                    target_x = fx; target_y = fy; target_z = fz;
+                                } else {
+                                    target_x = target_x + (fx - target_x) / 2;
+                                    target_y = target_y + (fy - target_y) / 2;
+                                    target_z = target_z + (fz - target_z) / 2;
+                                }
+                            }
+                        }
+                    }
+                }
                 /* [CONFIRMED @ 0x00436344-0x004363EF] Original re-reads
                  *   EAX = rs[RS_SLOT_INDEX] (= ref_slot)
                  *   ESI = ref_actor.world_pos_x   (offset 0x1FC, DAT_004ab304)
@@ -5298,7 +5356,7 @@ void td5_ai_update_traffic_route_plan(int slot) {
                     rs[RS_RIGHT_DEVIATION] = delta + 0xFFF;
                 }
 
-                if ((g_ai_frame_counter % 60u) == 0u) {
+                if ((g_ai_frame_counter % (trf_test_span() >= 0 ? 6u : 60u)) == 0u) {
                     TD5_LOG_I(LOG_TAG,
                               "traffic_dev: slot=%d raw=%d norm=%d acc=%d tspan=%d sublane=%d "
                               "ta=0x%X hd=0x%X delta=%d L=%d R=%d v=%d thr=%d brk=%d cursub=%d rec=%d",
