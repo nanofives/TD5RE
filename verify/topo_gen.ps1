@@ -13,9 +13,17 @@
 #
 # -Race keeps the game running the race for -RaceSecs seconds before quitting
 # (for a framedump via TD5RE_FRAMEDUMP in -Extra).
+#
+# -MinGfx (DEFAULT ON) runs with RT off and minimum graphics, per Mariano's
+# standing rule: every test that is not the selftest suite goes that way, because
+# RT plus a full graphics load can lock the machine. It is a SWITCH rather than
+# unconditional because this script's own -Race + TD5RE_FRAMEDUMP path exists to
+# look at visuals, and minimum graphics would change what that captures. Pass
+# -MinGfx:$false for a deliberate graphics or RT test, and ask Mariano first.
 param([string]$Seed = "20260901", [hashtable]$Extra = @{}, [string]$Tag = "run",
       [string]$Exe = "td5re.exe", [int]$GenWait = 600, [int]$Port = 37151,
-      [switch]$Race, [int]$RaceSecs = 20, [switch]$Keep, [string]$Root = "")
+      [switch]$Race, [int]$RaceSecs = 20, [switch]$Keep, [string]$Root = "",
+      [switch]$MinGfx = $true)
 $wt = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 if ($Root -ne "") { $wt = $Root }   # probe another worktree (baseline exe) without copying the script
 
@@ -25,7 +33,17 @@ $env:TD5RE_AUTOTRACK_STREAM = "0"
 $env:TD5RE_AUTOTRACK_REUSE  = "0"
 $env:TD5RE_CONTROL_PORT     = "$Port"
 $env:TD5RE_WINDOW_TITLE     = "TD5RE topo $Tag seed $Seed"
-foreach ($k in $Extra.Keys) { Set-Item "env:$k" $Extra[$k] }
+if ($MinGfx) { $env:TD5RE_RT = "0" }   # overrides the INI; never TD5RE_AUTO_PERF=2
+foreach ($k in $Extra.Keys) { Set-Item "env:$k" $Extra[$k] }   # -Extra still wins
+
+$gfx = @()
+if ($MinGfx) {
+    $gfx = @("--Lighting=0","--Quality=0","--SunShadows=0","--Reflections=0",
+             "--WetRoads=0","--StreetLights=0","--CarLights=0","--LegacyShadows=0",
+             "--GIQuality=0","--ShadowRays=0","--ReflectionQuality=0",
+             "--CarShadows=0","--VFX=0","--WorldBillboards=0","--FoliageAA=0",
+             "--RenderScale=50")
+}
 
 $lvl = Join-Path $wt "re\assets\levels\level090"
 if ((Test-Path $lvl) -and -not $Keep) { Remove-Item $lvl -Recurse -Force }
@@ -35,7 +53,7 @@ for ($t = 0; $t -lt 20 -and (Test-Path $log); $t++) {
 }
 
 $p = Start-Process -FilePath (Join-Path $wt $Exe) `
-      -ArgumentList "--AutoRace=1","--SkipIntro=1","--Control=1","--DefaultTrack=60","--RaceTrace=1" `
+      -ArgumentList (@("--AutoRace=1","--SkipIntro=1","--Control=1","--DefaultTrack=60","--RaceTrace=1") + $gfx) `
       -WorkingDirectory $wt -PassThru
 Write-Host "pid=$($p.Id) exe=$Exe seed=$Seed tag=$Tag port=$Port"
 

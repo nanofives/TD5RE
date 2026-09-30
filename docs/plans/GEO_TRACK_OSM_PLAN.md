@@ -16,7 +16,9 @@ anywhere, and no existing path that feeds an externally supplied polyline into a
 | Route mode | **Point-to-point with draggable waypoints**, Google-Maps style |
 | Scale | 1:1 real scale |
 | Geometry outside the drivable envelope | **Exaggerate elevation 1.5x, then clamp to the cap** |
-| Multiplayer | **Single-player only for now** (avoids the lockstep determinism problem) |
+| Multiplayer | **Single-player only.** Out of scope by decision, and out of bounds by the no-networking rule (see 7 Phase 6) |
+| Networking | **NONE.** No sockets, no net tests, and `td5_net.c` / `td5_upnp.c` / `td5_fe_net.c` are not to be touched. In-game map tiles are ruled out; the browser selector is the selector |
+| Test runs | **No RT, minimum graphics** for anything that is not the selftest suite: `TD5RE_RT=0`, never `TD5RE_AUTO_PERF=2`, and the 16 graphics flags in 7 Phase 0. Watch the `td5re.ini` write-back |
 | Crossing-safe span localiser (Option B) | **In parallel with Phase 5** |
 | Buildings | **Real OSM footprints and real heights**, estimated from proxies where untagged |
 | Traffic lights | **Decoration only** (the one genuinely new emitter) |
@@ -24,7 +26,7 @@ anywhere, and no existing path that feeds an externally supplied polyline into a
 | Landmarks | **Real geometry where OSM 3D tags exist, existing prefab table as fallback** |
 | Plazas | **Full real polygon**, including internal paths, beds and interior trees |
 | Primary region | **Argentina, La Plata especially**; fixtures = Buenos Aires + La Plata |
-| DEM | **Best available locally** -- see §6, the IGN 5 m product covers Argentina |
+| DEM | **IGN MDE-Ar 30 m automated + 5 m local override** -- resolved in §6: 5 m covers La Plata/BA but is request-gated |
 
 Also required: lanes, medians, traffic lights, plazas and their grass, sidewalk
 widths, approximate road surface textures, city search, coordinate paste, map
@@ -240,6 +242,53 @@ translate-rotate plus a synthetic lead-in.
 
 **Invariant 2 is the feature's one genuine unsolved problem.**
 
+### Measured 2026-09-29: invariant 2 is far narrower than it reads
+
+`re/tools/geo_condition.py --self-test` runs six synthetic routes around La Plata
+through the real separation test. The result changed the risk assessment.
+
+The engine's test is `need = (w_a + w_b) * 0.5 + lane_width * 0.25`
+(tg_too_close, `td5_trackgen.c:1760-1772`). For a 2-lane road that is **3375
+world units = 7.85 m**. It is a *physical* non-overlap test, so at 430 units/m
+the separations that trigger it are tiny:
+
+| Situation | Centerline separation | Triggers? |
+|---|---|---|
+| Two city streets one block apart (100 m) | 43 000 units | no, by 13x |
+| Dual carriageway with a 10 m median | 4 300 units | no, marginally |
+| Route doubling back 700 m away (hairpin) | 301 000 units | **no, by 89x** |
+| Route retracing the same street (6 m) | 2 580 units | **yes** |
+| Closed loop returning to its own start | 572 units | **yes** |
+
+So the binding constraint is not "the route must be axis-monotone". It is **"the
+route must not drive down the same piece of road twice, and must not cross
+itself"**. Both are visible on a map and both are one waypoint drag to fix.
+
+Two consequences:
+
+1. **The heading budget is sufficient for safety, not necessary.** A route inside
+   +-80 degrees inherits the engine's proof outright and needs no checking at
+   all. A route outside it is not thereby unsafe -- it just has to be tested. The
+   self-test confirms this: the `grid` staircase passes with 8 spans over budget,
+   and `hairpin_wide` passes at a full 180 degrees of doubling back.
+2. **Far more real routes are usable than the invariant's wording suggests.**
+   Ordinary A-to-B city drives, detours and hairpins are fine. What fails is
+   retracing and genuine self-crossing, which is exactly the set Option B exists
+   to unlock (loops, figure-eights, flyovers).
+
+This does not retire Option A -- the conditioner is still what enforces the
+curvature floor, the uniform spacing, the lead-in frame and the cap, and it is
+what *proves* a given route is safe rather than assuming it. It does mean the
+"some real routes are unusable" cost is much smaller than the plan first
+estimated.
+
+Worth keeping in view: the curvature floor is what licenses the engine's
+adjacent-skip exemption (pairs within 16 spans are not tested, because with the
+floor holding the chord bound proves they cannot be too close). So enforcing the
+floor is not cosmetic -- it is the premise the exemption rests on, and a real
+polyline is the first thing that could violate it.
+
+
 ### Option A -- condition the route (ships first)
 
 A Python conditioner that:
@@ -290,17 +339,43 @@ All free, all licence-compatible with a credit line, all sampled the same way.
 | Layer | Source | Resolution | Licence | Notes |
 |---|---|---|---|---|
 | Roads, buildings, plazas, medians, signals, surface | **OpenStreetMap** via Overpass | vector | ODbL, credit required | rate-limited and intermittently down, so cache hard |
-| Terrain, Argentina | **IGN MDE-Ar aerophotogrammetric** | **5 m**, sub-metre vertical | free and open | from SAD flights 2011-2016 (Vexcel UltraCam Xp + dual-frequency GNSS); announced as national coverage |
-| Terrain, elsewhere | global terrain tile service | ~30 m | free | the fallback path, one code path |
+| Terrain, default path | **IGN MDE-Ar v2.1** (`proyecto = MDE 30 m`) | 30 m, ~2 m vertical | free, downloads unauthenticated | SRTM 2000 + ALOS fused, vertical datum **SRVN16**, national continental coverage. **Confirmed fetchable**: `pid=7` returns 200 + `application/octet-stream`, ~7.7 MB `.zip` per 1:100 000 sheet |
+| Terrain, precision override | **IGN MDE 5 m aerophotogrammetric** (`proyecto = MDE 5m`) | **5 m**, sub-metre vertical | free, but **request-gated** | SAD flights (Vexcel UltraCam Xp + GNSS + IMU). **Confirmed to cover La Plata and Buenos Aires** (project `0008 - 2013 - AMBA - Sector 1.1`). **Not fetchable**: `pid=3` 302-redirects to FAQ #30 regardless of referer/UA; must be requested from asesoriatecnica@ign.gob.ar |
+| Terrain, outside Argentina | global terrain tile service | ~30 m | free | one code path, same resampler |
 | Trees: position **and height** | **Meta/WRI Global Canopy Height** | **1 m** | CC-BY 4.0 | global, on AWS S3 as cloud-optimised GeoTIFF, no AWS account needed; nominally 2018-2020 |
 | Land cover (11 classes) | **ESA WorldCover** | 10 m | free, no use restriction | stated global accuracy ~75-77%; 2020 and 2021 editions |
 
-**Confirm before relying on it:** the IGN's 5 m product is announced as national,
-but its category page also describes SRTM-derived 30 m and 45 m national models,
-so the IGN clearly publishes several products. Phase 0 must check in the IGN
-download tool that the **5 m** sheet actually covers La Plata and Buenos Aires
-rather than assuming the announcement's "national" is complete for 2011-2016
-aerial coverage. The ~30 m path stays as the documented fallback either way.
+**Resolved 2026-09-29 by querying the IGN's own WFS.** The coverage layer is
+`ign:mde` on `https://wms.ign.gob.ar/geoserver/ows`, queryable by bbox, one
+feature per downloadable tile with fields `nombre`, `proyecto`, `archivo` and
+`link`. A bbox over La Plata (`-58.10,-35.05,-57.80,-34.80`) returns **16
+features: 14 at `MDE 5m` and 4 at `MDE 30 m`**, so the primary region has 5 m
+coverage and the national 30 m sheets underneath it.
+
+Two things this settled, both of which changed the plan:
+
+1. **Coverage of the 5 m product is partial, not national** -- the announcement's
+   "national" framing does not hold, so `geo_fetch.py` must *discover* coverage
+   per bbox rather than assume it. Doing that through the WFS costs one request
+   and also yields the tile names and per-tile download links.
+2. **The 5 m tiles are request-gated.** `pid=3` 302-redirects to FAQ #30
+   ("todas las solicitudes deberán ser remitidas a Asesoría Técnica del IGN")
+   with or without a browser referer and user agent, while `pid=7` (30 m)
+   returns the file. So 5 m cannot be automated.
+
+**Design that follows:** 30 m is the automated default everywhere, and 5 m is a
+**local override slot** -- `geo_fetch.py` prefers any `.img` the user has dropped
+into `re/assets/geo/_dem_override/`, and otherwise fetches 30 m. Since the
+region that matters is AMBA, one email to Asesoría Técnica covers La Plata and
+Buenos Aires permanently, after which the override slot makes those two fixtures
+5 m offline and forever. `PLACE.JSON` records which source each tile came from,
+so a terrain complaint is attributable to resolution rather than hunted in the
+emitters.
+
+The WFS query is worth keeping regardless of the gate: it is how the pipeline
+knows whether a 5 m tile *exists* for a place, which is what tells the selector
+to say "this place can be 5 m if you request the sheet" instead of silently
+serving 30 m.
 
 **Precaution to validate, not a claimed defect:** in dense urban areas, mask the
 canopy raster with WorldCover's built-up class. A vegetation-height model can
@@ -321,16 +396,192 @@ the kind of error that destroys the recognisability this feature is for.
 - OSM `surface=*` -> pick among the 9 `TD5RE_AUTOTRACK_ROAD_SET` texture sets.
 - OSM `sidewalk=*` and width tags -> `tg_city_sidewalk_w_at` per span.
 
+## 6b. Built and verified 2026-09-29 (Phase 1 tooling)
+
+`re/tools/geo_common.py`, `geo_raster.py`, `geo_fetch.py`, `geo_route.py`,
+`geo_condition.py`, `geo_audit.py`. End-to-end on real La Plata data:
+**15 audit checks pass, 1 warning, 0 failures.**
+
+    geo_fetch    --name "La Plata" --lat -34.9215 --lon -57.9545 --radius 2200
+    geo_route    --place la_plata --from A --to B --out route_raw.json
+    geo_condition --in route_raw.json --out ROUTE.JSON
+    geo_fetch    ... --frame-from ROUTE.JSON        # second pass, network cached
+    geo_audit    --place la_plata --route ROUTE.JSON
+
+Measured on a 5.20 km route across La Plata (Avenida 53, Diagonal 101,
+Diagonal 102, Avenida 19): 1492 spans, 97% axis-monotone, worst turn smoothed
+79.0 -> 30.9 deg, no self-crossing. Cache: 1651 roads, 1219 buildings, 472
+traffic signals, 188 areas (60 park + 38 grass + 24 pitch), 71.7 m of relief.
+45% of roads carry an OSM `lanes` tag; 95% of building heights are estimated,
+matching the global tagging rates in section 9.
+
+### Corrections this work forced on the plan
+
+**The IGN 30 m product cannot be the automated default.** Both IGN elevation
+products ship as ERDAS IMAGINE HFA (the file opens `EHFA_HEADER_TAG`), which
+needs GDAL, and this environment has tifffile, numpy, PIL and shapely but no
+GDAL, rasterio or pyproj. The default is therefore **Terrarium PNG terrain
+tiles** -- plain PNGs, `(R*256 + G + B/256) - 32768` metres, global, no
+dependency. Verified over La Plata: -2..61 m, median 16 m, 15.7 m/px at z13.
+The IGN 5 m path is unchanged in spirit but now explicitly a **local override
+slot** that takes a GeoTIFF or PNG, since the sheet has to be requested and
+converted once anyway.
+
+**ONE FRAME FOR THE WHOLE CACHE.** The conditioner rotates the route so its
+start tangent lands on +X and TRANSLATES it so node 0 sits at the origin
+(`td5_tg_road.c:733` requires that). The vectors and the rasters must be built
+in that same frame. The first version shared neither, and nothing raised an
+error -- `geo_audit` R8 found 896 of 1451 route nodes outside their own terrain,
+and R9 (frame equality) now exists to catch it directly. Pipeline order is
+consequently **fetch unrotated -> route -> condition (which DECIDES the frame)
+-> re-fetch with `--frame-from`**, and the second pass is free because every
+network response is cached. The raster header carries `rotation_rad` purely so
+this can be asserted.
+
+**Resample by CHORD, not arc.** The engine integrates
+`x += sin(h)*span_len; z += cos(h)*span_len` (`td5_tg_road.c:663-664`), so its
+nodes are one span apart in straight-line distance. Arc-length resampling puts
+them one span apart along the path, and at a 31.6 deg corner the chord falls 34.6
+units short -- which `geo_audit` R4 failed on. The resampler now places each next
+point where the circle of radius `span_length` about the previous one first
+crosses the polyline.
+
+**A rotation-sign bug was corrupting every orientation measurement.**
+`_rotate(pts, theta)` maps a heading phi to `phi - theta`, so carrying the start
+tangent onto +X needs `theta = h0 - pi/2`, not `pi/2 - h0`. It went unnoticed
+because the audit's lead-in check (R3) only inspects the SYNTHETIC lead-in, which
+is +X by construction, so nothing tested the body's first heading. With the sign
+corrected the same La Plata route reads **97% axis-monotone with its principal
+axis 0.9 deg off the start tangent**, where before it read 24% monotone and 83.7
+deg off. The earlier reading was entirely the artefact -- real A-to-B city routes
+are far better behaved than that suggested.
+
+**New constraint found: the AI route table's heading dead zone.** ROUTES.DAT byte
+1 is an absolute 12-bit heading, `hb = round(h12 * 256 / 4140)` clamped to 4..253
+because `byte < 4` is a junction-zone sentinel (`tg_emit_routes`,
+`td5_trackgen.c:2598-2640`; recovered as `(byte * 0x102C) >> 8` in
+`td5_ai.c:1280`). The generator never meets it -- its +-80 deg budget about +X
+keeps every heading clear. A route that wanders through **+Z** does, and those
+spans carry a heading up to **5.7 deg** wrong. The clamp avoids emitting a
+sentinel, so this is bounded angular error in AI routing and not a geometry
+failure: reported as a quality metric, not a rejection. Measured 40 spans on the
+La Plata route.
+
+**The curvature limit must be LOCAL.** Using the widest road's turn limit
+everywhere over-smooths narrow streets: 2 lanes tolerate 32.3 deg per span, 4
+lanes 16.0, 12 lanes only 5.3. Per-node widths raised the preserved worst turn
+from 20.5 to 31.6 deg on the same route, which is exactly the tight residential
+corners that make a city recognisable.
+
+## 6c. Phase 2 shipped and verified 2026-09-30
+
+`td5_geo.c/.h` plus THREE branches in `td5_tg_world.c` (`tg_w_raw`,
+`tg_world_water_y`, `tg_world_build`). Everything else untouched: `tg_world_h`,
+`_h_base`, `_slope`, `_is_water`, `_class`, the whole conform/occupancy overlay,
+and all 130 call sites.
+
+**Byte-identity proven, not asserted.** Built a pre-geo baseline exe from the
+previous commit and ran `verify/topo_gen.ps1 -Seed 20260901` against both. All
+eight generated level files are byte-identical -- STRIP.DAT, LEFT/RIGHT.TRK,
+LEVELINF.DAT, MODELS.DAT (`98E749869051ACE3`, 10271488 bytes), TEXTURES.DAT,
+MESHTAG.BIN, NETWORK.JSON. Only GENSTAMP.TXT differs, and it carries an `exe=`
+identity hash, so two different binaries must differ there; since the eight data
+files match, its `spec=` and `env=` fields necessarily agreed.
+
+`verify/topo_gen.ps1` gained `-MinGfx`, default ON (RT off + the 16
+minimum-graphics flags), per the standing run rule. A switch rather than
+unconditional because that script's own `-Race` + `TD5RE_FRAMEDUMP` path exists
+to look at visuals.
+
+### The finding that mattered: SRTM is a SURFACE model, so it reads rooftops
+
+The first geo build of La Plata came out with its grade profile PINNED at the
+absolute ceiling -- p90 0.1550, p99 and max both 0.1999 against
+`TG_ROAD_GRADE_ABSMAX` 0.20 -- and classified the terrain `flat 61% hill 36%
+mountain 1%`. For a city on the Pampa that is wrong.
+
+Measured rather than guessed: the DEM held **4.8 m steps between adjacent 3.49 m
+cells** (138% grade), 297 cells from the nearest edge, so not a clamping
+artefact. Terrarium is SRTM-derived and SRTM is a **surface** model: over a city
+it measures rooftops, not ground.
+
+Filtering at the source's native 30 m GSD barely helped (p99 0.227 -> 0.198),
+because the artefacts are whole **city blocks** -- 30 to 80 m of rooftop plateau
+-- so a 31 m window cannot touch them. Measured the trade directly:
+
+| lowpass | relief kept | p99 grade x1.5 | worst cell |
+|---|---|---|---|
+| 30 m (native) | 67.6 m | 0.297 | 0.993 |
+| 60 m | 57.4 m | 0.208 | 0.543 |
+| 120 m | 44.2 m | 0.127 | 0.273 |
+| **200 m (default)** | **33.1 m** | **0.076** | **0.153** |
+| 500 m | 24.6 m | 0.037 | 0.047 |
+
+**200 m** is the first width where the exaggerated p99 clears the default
+`TD5RE_AUTOTRACK_GRADE` cap (0.12) and the worst cell clears the absolute ceiling
+(0.20). Real relief survives because it lives at a much larger scale -- a
+mountain pass turns over 500 m to 2 km. `--dem-smooth-m` overrides it; 0 disables.
+
+After the fix, the same seed on the same place: p90 0.0602, max 0.1833, terrain
+`flat 96% hill 2%`, 0 bridges (that route crosses no real water), and 1800 open
+spans conformed with **zero cut and zero fill** -- the road follows the ground
+instead of fighting it.
+
+**This also raises the value of the IGN request.** Their 5 m product is published
+as MDE *and MDT* -- Modelo Digital de **TERRENO**, bare earth. That is not merely
+6x finer than Terrarium, it is the right KIND of model, and it needs no smoothing
+at all. The gated sheet is therefore worth more than the resolution number
+suggests.
+
 ## 7. Phases
 
 ### Phase 0 -- calibration and ground truth
-- Measure world-units-per-metre by trace; record it here.
+- Measure world-units-per-metre by trace; record it here. **This is the only step
+  in the whole plan that runs the game**, so it carries the run rules below.
 - **Confirm IGN 5 m coverage for La Plata and Buenos Aires** in the download
   tool (§6).
 - Commit both fixtures (Buenos Aires, La Plata) as cache directories so every
   later phase demos offline and the audits have real inputs.
 - Set the bbox cap from the measurement (a 6.3 km route wants roughly a 4 x 4 km
   box with margin; hard ceiling 3000 spans / ~10.5 km).
+
+#### How to run the calibration measurement (standing rules, 2026-09-29)
+
+Every test that is NOT the selftest suite -- AutoRace, framedump, `--Control`,
+zone harnesses, repros -- runs with **no RT and minimum graphics**. This
+measurement is an AutoRace plus a RaceTrace, so it is one of them. It is a
+distance/physics measurement, not a graphics one, so the rule costs nothing and
+makes the run faster.
+
+Environment: `TD5RE_RT=0` (this overrides the INI) and **never**
+`TD5RE_AUTO_PERF=2`.
+
+All 16 flags below were verified 2026-09-29 to exist as real INI keys with `--Key`
+overrides:
+
+    set TD5RE_RT=0
+    td5re.exe --AutoRace=1 --SkipIntro=1 ^
+      --Lighting=0 --Quality=0 --SunShadows=0 --Reflections=0 --WetRoads=0 ^
+      --StreetLights=0 --CarLights=0 --LegacyShadows=0 --GIQuality=0 ^
+      --ShadowRays=0 --ReflectionQuality=0 --CarShadows=0 --VFX=0 ^
+      --WorldBillboards=0 --FoliageAA=0 --RenderScale=50 ^
+      --RaceTrace=1
+
+Two hazards specific to this step:
+
+1. **`td5_ini_persist_options()` (`main.c:402`) writes these values back to the
+   `td5re.ini` beside the exe.** In the main tree that file is Mariano's real
+   configuration. **Run the worktree's own exe**, or back the INI up and restore
+   it. A run that passes through an options screen or commits race options is
+   enough to trigger the write -- it does not need anyone to change a setting on
+   purpose.
+2. Trace CSVs need `[Logging] Enabled=1`, and `RaceTrace=1` deliberately fixes
+   the RNG seed (which is what makes an A/B run comparable). Separately, a
+   non-zero `RaceTraceMaxSimTicks` **quits the game on its own**, even with
+   `RaceTrace=0` -- so set it deliberately or leave it alone.
+
+If the measurement ever needs RT or real graphics settings to mean anything, stop
+and ask Mariano rather than relaxing the rule.
 
 La Plata is a strong primary fixture and worth saying why: it is a planned city
 whose signature is a regular grid cut by diagonal avenues, with plazas placed at
@@ -486,19 +737,29 @@ Sequencing note: Phase 3 ships first and is independently demonstrable (a real
 route through procedural surroundings), so Phase 5 slipping does not block
 everything behind it.
 
-### Phase 6 -- optional: in-game map screen
-Technically unblocked. The port already has a PNG decoder
-(`td5_png_decode_fast`, `td5_asset.c:1766`) and a complete raw-Winsock HTTP/1.1
-client (`upnp_http_exchange`, `td5_upnp.c:217`; `upnp_tcp_connect`, `:165`). The
-AUTO TRACK STUDIO screen already hosts a live, debounced, background-worker route
-preview with pan and normalise (`at_preview_request` / `at_preview_tick`,
-`td5_fe_race.c:7607` / `:7645`), so a raster map underlay has an obvious home.
+### Phase 6 -- in-game map screen: RULED OUT (2026-09-29)
 
-Two real blockers, which is why it is last and optional: canonical OSM tile
-servers are HTTPS-only (the existing client is plaintext, so this needs WinHTTP
-or a permitted plaintext mirror), and the tile usage policy restricts application
-use. Neither blocks Phases 1 to 5, and the browser selector remains the only one
-that can drag a route.
+**Do not build this.** Standing instruction from Mariano, same session the
+net-loopback test was removed from the selftest: no networking work, no tests
+that open sockets, and `td5_net.c` / `td5_upnp.c` / `td5_fe_net.c` are not to be
+touched. An in-game map needs an HTTP client in the game, and the plan's earlier
+route to one was to reuse `upnp_http_exchange` from `td5_upnp.c` -- squarely
+inside that prohibition. If in-game map tiles ever come back up, ask first.
+
+The browser selector of Phase 4 is therefore not "the shipping selector for now",
+it is **the selector**. That costs nothing this plan was counting on: it is the
+only option that can drag a route anyway, and it already avoids TLS, tile caching
+and the OSM tile usage policy. The AUTO TRACK STUDIO screen
+(`at_preview_request` / `at_preview_tick`, `td5_fe_race.c:7607` / `:7645`) keeps
+drawing the conditioned route from the local cache, which needs no network.
+
+Note on Phase 1's own networking, so the boundary is explicit: `geo_fetch.py`
+makes outbound HTTPS requests from **Python**, to Overpass, AWS S3 and the IGN
+WFS. It opens no listening socket, adds no test, and changes no game code, so it
+is outside the scope of the rule -- the Windows firewall prompt comes from
+LISTENING, which is what the removed net-loopback test did. Every response is
+disk-cached, so a place is fetched once and the game itself never touches the
+network.
 
 ## 8. Route selection -- point to point with draggable waypoints
 
@@ -565,9 +826,9 @@ loop almost always self-crosses).
 
 1. **A hilly coastal third fixture** once Phase 3 lands -- neither Buenos Aires
    nor La Plata exercises bridges, tunnels or real gradient.
-2. **Multiplayer**, if ever wanted: the netplay is lockstep and needs
-   MODELS.DAT identical byte-for-byte on both peers, which a fetched cache does
-   not guarantee. Host-ships-the-cache is the only option that survives OSM data
-   changing over time.
+2. **Multiplayer: CLOSED, not open.** Already out of scope by decision, and now
+   also out of bounds: the only workable design was host-ships-the-cache over the
+   net transport, which means `td5_net.c`. Covered by the same standing
+   instruction as Phase 6. Do not revisit without asking Mariano.
 3. **Storey height** for the `building:levels` fallback -- one global constant,
    or per-country, or per land-use class?

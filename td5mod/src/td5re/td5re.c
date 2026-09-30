@@ -8,6 +8,7 @@
 #include "td5_physics.h"
 #include "td5_track.h"
 #include "td5_track_registry.h"
+#include "td5_geo.h"
 #include "td5_trackgen.h"
 #include "td5_trackgen_preview.h"
 #include "td5_trackgen_stream.h"
@@ -48,6 +49,7 @@ const TD5_Module g_td5re_modules[] = {
     { "render",   td5_render_init,   td5_render_shutdown   },
     { "track",    td5_track_init,    td5_track_shutdown    },
     { "trackreg", td5_track_registry_init, td5_track_registry_shutdown }, /* custom-track manifest: after track, before frontend */
+    { "geo",      td5_geo_init,      td5_geo_shutdown      }, /* GEO TRACK cache: BEFORE trackgen, whose tg_world_build asks whether a place is loaded */
     { "trackgen", td5_trackgen_init, td5_trackgen_shutdown }, /* AUTO-GENERATED track: after trackreg (registers into it), before frontend */
     { "tgprev",   td5_tgprev_init,   td5_tgprev_shutdown   }, /* route-preview worker: after trackgen, whose statics it serialises access to */
     { "tgstream", td5_tgstream_init, td5_tgstream_shutdown }, /* streamed-scenery worker: same generator statics, so same ordering as tgprev */

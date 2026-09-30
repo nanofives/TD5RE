@@ -7,6 +7,7 @@
  */
 #include "td5_trackgen_internal.h"
 #include "td5_tg_world.h"
+#include "td5_geo.h"      /* GEO TRACK: real-world terrain source */
 
 /* ------------------------------------------------------------------ noise -- */
 
@@ -128,6 +129,20 @@ static double tg_w_river_t(double rx, double rz)
 static double tg_w_raw(double rx, double rz)
 {
     const double R = s_w.relief;
+    /* [GEO TRACK] A real place replaces the four LARGE-SCALE octaves (continental
+     * 420000, mountain mask 260000, ridges 50000, hills 60000) with a real DEM,
+     * and KEEPS the surface-detail octave below. That wavelength is 9000 units,
+     * about 21 m, which is almost exactly where a ~30 m DEM stops having an
+     * opinion -- so real relief blends into synthetic fine texture with no seam
+     * and no loss of ground character. It matters most on flat ground: La Plata
+     * has 71.7 m of relief over 4.4 km, so 1.5x of nearly nothing is still
+     * nearly nothing, and this octave is what keeps it from reading as a
+     * billiard table. See docs/plans/GEO_TRACK_OSM_PLAN.md section 2. */
+    if (td5_geo_loaded()) {
+        const double det = tg_wn_fbm(rx, rz, 9000.0, 2, s_w.salt + 0x600u);
+        return td5_geo_height(rx, rz) + det * R * 0.01;
+    }
+    {
     const double cont  = tg_w_large(rx, rz);
     const double mm    = tg_w_smoothstep(0.05, 0.55,
                              tg_wn_fbm(rx, rz, 260000.0, 2, s_w.salt + 0x200u)
@@ -157,6 +172,7 @@ static double tg_w_raw(double rx, double rz)
         }
     }
     return h;
+    }
 }
 
 static double tg_w_river_surface_raw(double rx, double rz)
@@ -287,6 +303,16 @@ double tg_world_water_y(double x, double z)
     const double sea = tg_world_sea_y();
     double rs;
     if (!s_w.built) return sea;
+    /* [GEO TRACK] Real hydrography from WATER.R8 instead of the noise river.
+     * td5_geo_water_y returns a value far below any terrain for a dry cell, so a
+     * dry cell falls back to sea level -- which correctly still makes real
+     * ground BELOW sea level water, rather than special-casing it. */
+    if (td5_geo_loaded()) {
+        const double wy = td5_geo_water_y(x + s_w.ox, z + s_w.oz);
+        if (wy < -1e8) return sea;
+        rs = wy - s_w.h0;
+        return rs > sea ? rs : sea;
+    }
     if (tg_w_river_t(x + s_w.ox, z + s_w.oz) < 1.0) {
         rs = tg_w_river_surface_raw(x + s_w.ox, z + s_w.oz) - s_w.h0;
         return rs > sea ? rs : sea;
@@ -569,6 +595,30 @@ int tg_world_build(unsigned int seed, int target_spans)
     s_w.mtn_bias = -0.20 + 0.7 * (double)mtn_pct / 100.0;      /* -0.20..0.50 */
     s_w.river_w  = (river_pct < 15) ? 0.0 : 0.006 + 0.014 * (double)river_pct / 100.0;
     s_w.built    = 1;                       /* tg_w_raw needs the params */
+
+    /* [GEO TRACK] A real place needs NO offset search. The conditioner already
+     * rotated the route so its start tangent lands on +X and translated it so
+     * node 0 sits at the origin, and geo_fetch built the rasters in that same
+     * frame, so the origin IS the start line by construction. Sea level comes
+     * from the DEM's own datum rather than the SEA roll.
+     *
+     * The knob rolls above still run unchanged so a synthetic build with the
+     * same seed is byte-identical: they are tg_roll_hash_at hashes, not RNG
+     * draws, and s_w.relief is still read below for the detail octave. */
+    if (td5_geo_loaded()) {
+        double grid_rot = 0.0;
+        int gw = 0, gh = 0;
+        s_w.sea_abs = td5_geo_sea_y_raw();
+        s_w.ox = 0.0;
+        s_w.oz = 0.0;
+        s_w.h0 = tg_w_raw(0.0, 0.0);
+        td5_geo_grid(&gw, &gh, NULL, NULL, NULL, &grid_rot);
+        TD5_LOG_I(LOG_TAG, "trackgen: [WORLD] GEO \"%s\" seed=%u grid=%dx%d "
+                  "rot=%.6frad h0=%.0f sea=%.0f relief-knob=%.0f (detail octave "
+                  "only)", td5_geo_place_name(), seed, gw, gh, grid_rot,
+                  s_w.h0, s_w.sea_abs - s_w.h0, s_w.relief);
+        return 1;
+    }
 
     /* Start search: a deterministic spiral of offsets, 30000 units apart. */
     {
