@@ -5,6 +5,8 @@
  * live in td5_trackgen_internal.h. Element map: docs/plans/AUTOTRACK_ELEMENT_CATALOG.md.
  */
 #include "td5_trackgen_internal.h"
+#include "td5_geo.h"             /* GEO TRACK: is a real place loaded?        */
+#include "td5_geo_buildings.h"   /* GEO TRACK: real footprints and areas      */
 
 double tg_r14_keep(void)
 {
@@ -1203,10 +1205,18 @@ static int tg_store_page_raw(unsigned int gh)
  * Knob TD5RE_R15_STORE_VARY (default ON) restores the memoryless pick. */
 static int  s_r15_store_last = -1;
 
+/* [GEO PHASE 5] Defined with the real-building section below. Hooked into
+ * tg_store_page_reset because that is the ONLY per-build reset this module owns
+ * that td5_tg_pages.c calls from the single-threaded top of the build -- see
+ * the note on tg_geo_city_build_begin for why a lazy load from inside an
+ * emitter would be a race over the scenery loop's worker threads. */
+static void tg_geo_city_build_begin(void);
+
 void tg_store_page_reset(void)
 {
     s_r15_store_last = -1;
     s_r15_store_reroll = 0;
+    tg_geo_city_build_begin();     /* [GEO PHASE 5] see above */
 }
 
 static int tg_store_page(unsigned int gh)
@@ -1451,6 +1461,474 @@ static int tg_lamp_glow_from_props(const TG_Biome *b)
     return b->prop_lamp && !td5_env_flag_on("TD5RE_AUTOTRACK_LAMP_POSTS");
 }
 
+/* ==========================================================================
+ * SECTION: [GEO PHASE 5] REAL BUILDINGS AND LANDMARKS
+ *
+ * On a geo build (TD5RE_GEO_PLACE=<slug>) the city's frontage stops being a
+ * pattern and becomes DATA: every OSM footprint bound to a span is extruded to
+ * its own height and the procedural wall on that side stands down. Where OSM
+ * has nothing -- and at La Plata that is most of the route, since the cache
+ * carries 2047 footprints against 1492 spans of two-sided frontage -- the
+ * procedural filler is left exactly as it is. "Real where real exists,
+ * procedural elsewhere" is the whole design; there is no mode switch.
+ *
+ * WHY ONE MESH PER BUILDING, written with tg_write_prefab_mesh. A real
+ * footprint is an N-gon, so it needs both TRIANGLES (the roof) and QUADS (one
+ * per wall edge) in a single mesh -- tg_write_quad_mesh cannot carry the
+ * triangles and tg_emit_box_mesh cannot carry the shape. The prefab writer
+ * already does exactly this for the shipped set pieces and takes a per-command
+ * page, so the roof can sit on the roof page while the walls sit on a facade
+ * page, still as ONE mesh (which is what the entry's offset bookkeeping in
+ * tg_emit_models requires: one moff entry, one mesh).
+ *
+ * WHY A CONCAVE ROOF IS EAR-CLIPPED, not fanned: td5_geob_triangulate's own
+ * comment. An L-shaped block's centroid is outside its outline.
+ *
+ * THE ON-ROAD RULE, and why a footprint is NUDGED rather than dropped. The
+ * conditioner rotates and resamples the real drive (the plan's section 5), so
+ * the generated carriageway does not land exactly where OSM puts the street it
+ * came from. Real footprints therefore overlap the generated road often, and
+ * dropping them would delete the frontage precisely where the driver is
+ * looking. So each building is pushed OUTWARD along its side's normal by the
+ * least amount that clears the carriageway AND the pavement -- the same
+ * tg_carriageway_clear_gap every other facade asks -- capped at
+ * TD5_TG_GEO_MAX_SHIFT. Past that cap it IS dropped, and both numbers are in
+ * the census, so "how much did we move reality" is measured rather than
+ * assumed. The R7 on-road guard still runs over the result as the backstop.
+ *
+ * BYTE-IDENTITY. Every entry point here early-outs on s_geo_city, which is 0
+ * unless a place is loaded, and nothing in the section touches tg_rand /
+ * tg_frand / tg_range (the standing rule at td5_trackgen_internal.h:1290-1296).
+ * The only per-building choice, which facade page a wall wears, is a hash of
+ * the OSM way id.
+ * ========================================================================== */
+
+/* How far a real footprint may be nudged outward to clear the generated
+ * carriageway before it is dropped instead. 4500 = 3 lane widths ~= 10 m: more
+ * than the conditioner's own deviation from the real street centreline, less
+ * than a block depth, so a nudge never pushes a frontage behind its neighbour. */
+#define TD5_TG_GEO_MAX_SHIFT  4500.0
+/* Sanity ceiling on an extrusion. 60000 ~= 140 m; the tallest measured height
+ * in the La Plata cache is 75 m. A footprint tagged past this is a data error
+ * (a height in feet, a mast height on a building), and a 2 km tower beside the
+ * road is worse than a clamped one. */
+#define TD5_TG_GEO_MAX_H      60000.0
+/* Sink the base this far into the ground so uneven terrain under a big flat
+ * footprint cannot show daylight under a wall. */
+#define TD5_TG_GEO_BASE_SINK  300.0
+/* How many points a stand-down probe samples across its depth band. Three --
+ * front plane, middle, back plane -- is the fewest that cannot miss a polygon
+ * edge falling anywhere inside the band. */
+#define TD5_TG_GEO_PROBES     3
+/* Pitched-roof rise when roof:shape says sloped but no roof height is tagged.
+ * 1700 ~= 4 m, a plain domestic pitch. */
+#define TD5_TG_GEO_ROOF_RISE  1700.0
+
+/* Latched ONCE per build, in the single-threaded prologue (see
+ * tg_geo_city_build_begin). Read-only from here on, which is what makes it safe
+ * for the scenery loop -- that loop runs entries on worker threads. */
+static int  s_geo_city;      /* a place is loaded and the geo city path is live */
+static int  s_geo_bld;       /* ... and real BUILDINGS are wanted (own knob)    */
+static long s_geo_emitted, s_geo_shifted, s_geo_dropped_shift;
+static long s_geo_dropped_deg, s_geo_lm_real, s_geo_lm_fallback;
+static long s_geo_measured, s_geo_estimated, s_geo_wall_suppressed;
+static long s_geo_backrow_suppressed;
+static double s_geo_shift_max, s_geo_route_dev_max;
+
+/* Per-build entry point. Called from tg_store_page_reset, which
+ * td5_tg_pages.c runs at the top of the build -- before tg_world_build, before
+ * the centreline, and above all BEFORE any worker thread exists. That is the
+ * only single-threaded per-build hook this module owns, and the load it drives
+ * (two JSON files plus a nearest-node bind over every polygon) must not happen
+ * lazily from inside an emitter. */
+static void tg_geo_city_build_begin(void)
+{
+    s_geo_emitted = s_geo_shifted = s_geo_dropped_shift = 0;
+    s_geo_dropped_deg = s_geo_lm_real = s_geo_lm_fallback = 0;
+    s_geo_measured = s_geo_estimated = s_geo_wall_suppressed = 0;
+    s_geo_backrow_suppressed = 0;
+    s_geo_shift_max = s_geo_route_dev_max = 0.0;
+    s_geo_city = s_geo_bld = 0;
+    if (!td5_geo_loaded()) { td5_geob_sync(); return; }   /* also drops a stale place */
+    if (!td5_env_flag_on("TD5RE_GEO_CITY")) return;
+    s_geo_city = td5_geob_sync();
+    /* THREE INDEPENDENT KNOBS, deliberately. TD5RE_GEO_CITY is the master: with
+     * it off nothing in the section runs and the generator's own city is back
+     * whole, gap-based parks included. TD5RE_GEO_BUILDINGS and TD5RE_GEO_PLAZAS
+     * then switch ONE emitter each, so an A/B on either moves exactly one
+     * variable. The first cut folded buildings into the master, and the
+     * resulting "buildings off" capture also switched the plazas back on and
+     * re-armed tg_block_is_park -- two extra variables in a comparison meant to
+     * isolate one. */
+    s_geo_bld = s_geo_city && td5_env_flag_on("TD5RE_GEO_BUILDINGS");
+}
+
+/* Is the real-geometry path live for this build? Latched, so this is a pure
+ * read and safe from any scenery worker. The plaza emitter in td5_tg_streets.c
+ * reads it too, which is why it is not static. */
+int tg_geo_city_active(void) { return s_geo_city; }
+
+/* Outward distance from the centreline at span si for a world point, on side
+ * `side` (+1 left of travel). Negative means the point is on the OTHER side. */
+static double tg_geo_outward(const TG_NodeList *nl, int si, double side,
+                             double wx, double wz)
+{
+    const TG_Node *n = &nl->v[si];
+    return side * ((wx - n->x) * n->tz - (wz - n->z) * n->tx);
+}
+
+/* Is real geometry standing where the procedural city wants to put mass at
+ * (si, left)? `depth` is how far out from the road EDGE the procedural element
+ * reaches, so the frontage wall and the back rows ask about their own bands
+ * with one function.
+ *
+ * PROBE THE POINT, DO NOT GUESS FROM A CENTROID. The first cut compared the
+ * footprint's centroid lateral against its bounding radius, and that is wrong
+ * in both directions: it missed nothing but it also answered "no" for every
+ * span a big polygon covers WITHOUT being filed under, because a polygon is
+ * bound to exactly ONE span. MEASURED consequence: Plaza Mariano Moreno (183 m
+ * radius, 52 spans of frontage) is bound to span 694, so on spans 650..740 the
+ * procedural street wall still stood -- and the in-race framedump at span 704
+ * showed a wall of shopfronts with the real plaza hidden behind it. Probing the
+ * exact world point the wall would occupy, over a window of spans either side,
+ * answers the question the emitter is actually asking. */
+static int tg_geo_mass_at(const TG_NodeList *nl, int si, int left,
+                          const TG_Biome *b, double lo, double hi)
+{
+    const TG_Node *n = &nl->v[si];
+    const double side = left ? 1.0 : -1.0;
+    const double lx = n->tz * side, lz = -n->tx * side;
+    const double base = n->width * 0.5 + tg_city_sidewalk_w_at(nl, si, b);
+    double px[TD5_TG_GEO_PROBES], pz[TD5_TG_GEO_PROBES];
+    int k;
+
+    if (!s_geo_city) return 0;
+    for (k = 0; k < TD5_TG_GEO_PROBES; k++) {
+        const double d = base + lo
+                       + (hi - lo) * (double)k / (double)(TD5_TG_GEO_PROBES - 1);
+        px[k] = n->x + lx * d;
+        pz[k] = n->z + lz * d;
+    }
+    /* Each half of the probe is gated by the emitter that would replace the
+     * procedural mass, so "buildings off" leaves the wall standing in front of
+     * a real building again and "plazas off" leaves it standing on bare ground
+     * -- one variable per knob. */
+    if (s_geo_bld
+        && td5_geob_points_in_building(si, px, pz, TD5_TG_GEO_PROBES,
+                                       TD5_GEOB_WIN_B)) return 1;
+    if (!td5_env_flag_on("TD5RE_GEO_PLAZAS")) return 0;
+    return td5_geob_points_in_plaza(si, px, pz, TD5_TG_GEO_PROBES,
+                                    TD5_GEOB_WIN_A);
+}
+
+/* The FRONTAGE band: front plane to back plane of the street wall's own mass.
+ * Both ends matter -- a real polygon whose edge falls inside the BACK half of
+ * the wall still means the wall is standing in real geometry. */
+static int tg_geo_frontage_at(const TG_NodeList *nl, int si, int left,
+                              const TG_Biome *b)
+{
+    return tg_geo_mass_at(nl, si, left, b, 0.0, tg_facade_depth(b));
+}
+
+/* The BACK-ROW band: from the first receding row out past the last one, which
+ * is where tg_city_emit_backrows stacks its blocks. */
+static int tg_geo_backrow_at(const TG_NodeList *nl, int si, int left,
+                             const TG_Biome *b)
+{
+    const double d0 = tg_facade_depth(b) + TD5_TG_BACKROW_GAP;
+    return tg_geo_mass_at(nl, si, left, b, d0, d0 + 2.0 * TD5_TG_BACKROW_GAP);
+}
+
+/* Is the ring CONVEX? Used only to decide whether a derived inset is safe. */
+static int tg_geo_ring_convex(const double *x, const double *z, int n)
+{
+    int i, neg = 0, pos = 0;
+    for (i = 0; i < n; i++) {
+        const int j = (i + 1) % n, k = (i + 2) % n;
+        const double c = (x[j] - x[i]) * (z[k] - z[j])
+                       - (z[j] - z[i]) * (x[k] - x[j]);
+        if (c > 0.0) pos = 1;
+        if (c < 0.0) neg = 1;
+        if (pos && neg) return 0;
+    }
+    return 1;
+}
+
+/* Append one quad (4 vertices) to the prefab vertex arrays. */
+static void tg_geo_push_quad(float *v, unsigned int *light, int *pn,
+                             const double *xyz, double ua, double vb,
+                             unsigned int col)
+{
+    int i;
+    for (i = 0; i < 4; i++) {
+        const int o = (*pn) * 5;
+        v[o + 0] = (float)xyz[i * 3 + 0];
+        v[o + 1] = (float)xyz[i * 3 + 1];
+        v[o + 2] = (float)xyz[i * 3 + 2];
+        /* Loop order is near-bottom, far-bottom, far-top, near-top, and the
+         * facade pages are authored with v = 1 at the BASE (see
+         * tg_facade_push_grid), so v runs vb at the bottom to 0 at the top. */
+        v[o + 3] = (float)((i == 1 || i == 2) ? ua : 0.0);
+        v[o + 4] = (float)((i >= 2) ? 0.0 : vb);
+        light[*pn] = col;
+        (*pn)++;
+    }
+}
+
+/* Append one triangle (3 vertices). Roof UVs come from the footprint's own XZ
+ * extent so a big roof does not stretch one page across the whole block. */
+static void tg_geo_push_tri(float *v, unsigned int *light, int *pn,
+                            const double *xyz, double inv_tile,
+                            unsigned int col)
+{
+    int i;
+    for (i = 0; i < 3; i++) {
+        const int o = (*pn) * 5;
+        v[o + 0] = (float)xyz[i * 3 + 0];
+        v[o + 1] = (float)xyz[i * 3 + 1];
+        v[o + 2] = (float)xyz[i * 3 + 2];
+        v[o + 3] = (float)(xyz[i * 3 + 0] * inv_tile);
+        v[o + 4] = (float)(xyz[i * 3 + 2] * inv_tile);
+        light[*pn] = col;
+        (*pn)++;
+    }
+}
+
+/* A real landmark is one OSM actually describes in 3D. Those, and only those,
+ * get the landmark treatment here; a landmark with nothing but an ESTIMATED
+ * height is left to the shipped prefab table (tg_landmarks_place), which is
+ * what the plan asks for. Famous buildings are where OSM 3D tagging is well
+ * above average, so this split pays off more than the global tagging rate
+ * suggests.
+ *
+ * building:levels COUNTS as a 3D tag. The plan's wording is "height /
+ * roof:shape / building:part", and read literally that would exclude levels --
+ * but a levels tag is a mapper stating the building's vertical form, which is
+ * the property this test is actually asking about, and the plan's own section 9
+ * treats levels as a height SOURCE alongside height. At La Plata the difference
+ * is Casa Curutchet (landmark, building:levels=3): literal reading hands a Le
+ * Corbusier house to a generic prefab. */
+static int tg_geo_landmark_real(const TD5_GeoBuilding *b)
+{
+    return b->landmark
+        && (b->hsrc == TD5_GEOB_HSRC_OSM_HEIGHT
+            || b->hsrc == TD5_GEOB_HSRC_OSM_LEVELS
+            || b->roof != TD5_GEOB_ROOF_NONE
+            || b->part);
+}
+
+/* Emit ONE real footprint as one mesh. Returns 0 only on a buffer write
+ * failure; a refusal (on the road, degenerate ring, mesh table full) is a
+ * counted no-op success, matching the back-row contract. */
+static int tg_geo_emit_one(const TG_FBHook *h, const TD5_GeoBuilding *gb)
+{
+    const TG_NodeList *nl = h->nl;
+    const int si = h->si;
+    const TG_Node *n = &nl->v[si];
+    const double side = (gb->host_side > 0) ? 1.0 : -1.0;
+    const double lx = n->tz * side, lz = -n->tx * side;
+    const double floor_h = tg_facade_floor_h(h->b);
+    const double cell_w  = tg_facade_cell_w(h->b);
+    double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX];
+    int    tri[(TD5_GEOB_RING_MAX - 2) * 3];
+    float  v[(TD5_GEOB_RING_MAX * 3 + TD5_GEOB_RING_MAX * 4) * 5];
+    unsigned int light[TD5_GEOB_RING_MAX * 3 + TD5_GEOB_RING_MAX * 4];
+    unsigned short cmd[6];
+    double q[12], t3[9];
+    double shift = 0.0, need, H, by, minout, gap, rise, inv_tile;
+    double cx = 0.0, cz = 0.0;
+    int n_ring = gb->n, k, nv = 0, ntri = 0, nquad = 0, ncmd = 0;
+    int rows, wall_page, roof_page, pitched;
+
+    if (n_ring < 3 || n_ring > TD5_GEOB_RING_MAX) { s_geo_dropped_deg++; return 1; }
+    if (si + 1 >= nl->count) return 1;
+    if (*h->nmesh >= h->maxmesh) return 1;
+
+    for (k = 0; k < n_ring; k++) td5_geob_ring(gb->first, k, &rx[k], &rz[k]);
+
+    /* --- clear the carriageway and the pavement, by the least nudge that does */
+    gap = tg_carriageway_clear_gap(nl, si, side,
+                                   tg_city_sidewalk_w_at(nl, si, h->b),
+                                   TD5_TG_CARRIAGEWAY_MARGIN);
+    minout = n->width * 0.5 + gap;
+    for (k = 0; k < n_ring; k++) {
+        need = minout - tg_geo_outward(nl, si, side, rx[k], rz[k]);
+        if (need > shift) shift = need;
+    }
+    if (shift > TD5_TG_GEO_MAX_SHIFT) { s_geo_dropped_shift++; return 1; }
+    if (shift > 0.0) {
+        for (k = 0; k < n_ring; k++) { rx[k] += lx * shift; rz[k] += lz * shift; }
+        s_geo_shifted++;
+        if (shift > s_geo_shift_max) s_geo_shift_max = shift;
+    }
+    for (k = 0; k < n_ring; k++) { cx += rx[k]; cz += rz[k]; }
+    cx /= (double)n_ring; cz /= (double)n_ring;
+
+    /* --- height, floors, pages ------------------------------------------- */
+    H = gb->height;
+    if (H < floor_h) H = floor_h;
+    if (H > TD5_TG_GEO_MAX_H) H = TD5_TG_GEO_MAX_H;
+    rows = (int)(H / floor_h + 0.5);
+    if (rows < 1) rows = 1;
+    /* Ordinary buildings snap to a whole number of floors so the facade page
+     * never cuts mid-window. A REAL LANDMARK keeps its measured height instead:
+     * the whole point of extruding the real shape is that a 20 m cathedral is
+     * 20 m, not the nearest multiple of a generic storey. */
+    if (!tg_geo_landmark_real(gb)) H = (double)rows * floor_h;
+    wall_page = tg_facade_page_class(gb->id_hash, rows);
+    roof_page = TD5_TG_PAGE_R3_BLOCK + 3;      /* the house-roof page */
+
+    /* --- base Y: the WORLD's ground under the footprint, on the kerb ------ */
+    by = tg_world_h(cx, cz) + tg_city_kerb_h(h->b);
+    /* Same ceiling the procedural wall uses: a building must not float above
+     * the road when the conformed bed and the raw heightfield disagree. */
+    if (by > n->y + tg_city_kerb_h(h->b) + 400.0)
+        by = n->y + tg_city_kerb_h(h->b) + 400.0;
+    by -= TD5_TG_GEO_BASE_SINK;
+    if (gb->min_height > 0.0) by += gb->min_height;   /* building:part base */
+
+    /* --- ROOF first: the writer consumes tris before quads per command --- */
+    pitched = (gb->roof == TD5_GEOB_ROOF_PITCHED
+               || gb->roof == TD5_GEOB_ROOF_MANSARD);
+    /* Roof tile: one page every ~8 m of footprint, so a 30 m block reads as a
+     * tiled roof instead of one stretched image. */
+    inv_tile = 1.0 / 3400.0;
+    if (pitched && tg_geo_ring_convex(rx, rz, n_ring)) {
+        /* Pyramid from the eaves ring to an apex over the centroid. Only on a
+         * CONVEX ring: on a concave one the apex can sit outside the outline
+         * and the slopes would cut through the walls. */
+        rise = (double)TD5_TG_GEO_ROOF_RISE;
+        for (k = 0; k < n_ring; k++) {
+            const int j = (k + 1) % n_ring;
+            t3[0] = rx[k]; t3[1] = by + H; t3[2] = rz[k];
+            t3[3] = rx[j]; t3[4] = by + H; t3[5] = rz[j];
+            t3[6] = cx;    t3[7] = by + H + rise; t3[8] = cz;
+            tg_geo_push_tri(v, light, &nv, t3, inv_tile, 0xFFC8C8C8u);
+            ntri++;
+        }
+    } else {
+        ntri = td5_geob_triangulate(rx, rz, n_ring, tri,
+                                    (TD5_GEOB_RING_MAX - 2));
+        for (k = 0; k < ntri; k++) {
+            t3[0] = rx[tri[k*3+0]]; t3[1] = by + H; t3[2] = rz[tri[k*3+0]];
+            t3[3] = rx[tri[k*3+1]]; t3[4] = by + H; t3[5] = rz[tri[k*3+1]];
+            t3[6] = rx[tri[k*3+2]]; t3[7] = by + H; t3[8] = rz[tri[k*3+2]];
+            tg_geo_push_tri(v, light, &nv, t3, inv_tile, 0xFFC8C8C8u);
+        }
+    }
+    if (ntri > 0) {
+        cmd[ncmd * 3 + 0] = (unsigned short)roof_page;
+        cmd[ncmd * 3 + 1] = (unsigned short)ntri;
+        cmd[ncmd * 3 + 2] = 0;
+        ncmd++;
+    }
+
+    /* --- WALLS: one quad per footprint edge ------------------------------- */
+    for (k = 0; k < n_ring; k++) {
+        const int j = (k + 1) % n_ring;
+        const double elen = hypot(rx[j] - rx[k], rz[j] - rz[k]);
+        double ua;
+        if (!(elen > 1.0)) continue;        /* duplicate vertex in the source */
+        ua = elen / ((cell_w > 1.0) ? cell_w : 1500.0);
+        q[0] = rx[k]; q[1]  = by;     q[2]  = rz[k];
+        q[3] = rx[j]; q[4]  = by;     q[5]  = rz[j];
+        q[6] = rx[j]; q[7]  = by + H; q[8]  = rz[j];
+        q[9] = rx[k]; q[10] = by + H; q[11] = rz[k];
+        tg_geo_push_quad(v, light, &nv, q, ua, (double)rows, 0xFFFFFFFFu);
+        nquad++;
+    }
+    if (nquad < 3) { s_geo_dropped_deg++; return 1; }
+    cmd[ncmd * 3 + 0] = (unsigned short)wall_page;
+    cmd[ncmd * 3 + 1] = 0;
+    cmd[ncmd * 3 + 2] = (unsigned short)nquad;
+    ncmd++;
+
+    /* page_base 0: the commands above already name absolute pages, and the
+     * geometry is already in world coordinates, so origin (0,0,0) with no yaw
+     * passes it through untouched. */
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    if (!tg_write_prefab_mesh(h->blk, v, light, nv, cmd, ncmd, 0,
+                              0.0, 0.0, 0.0, 1.0, 0.0))
+        return 0;
+    tg_acct(TG_ACCT_BUILDING, si);
+    s_geo_emitted++;
+    if (gb->hsrc == TD5_GEOB_HSRC_ESTIMATED) s_geo_estimated++;
+    else                                     s_geo_measured++;
+    if (gb->landmark) {
+        if (tg_geo_landmark_real(gb)) s_geo_lm_real++;
+        else                          s_geo_lm_fallback++;
+    }
+    return 1;
+}
+
+/* Every real building bound to span si. Wired into tg_emit_fb_city (the CITY
+ * dispatcher in td5_tg_streets.c) so the meshes are marked TG_GK_CITY and the
+ * on-road guard validates them exactly as it validates a procedural facade. */
+int tg_geo_emit_buildings(const TG_FBHook *h)
+{
+    int i;
+
+    if (!s_geo_bld) return 1;
+    if (tg_span_in_bridge_run(h->si)) return 1;   /* the deck carries nothing */
+    if (tg_up_clear_span(h->si)) return 1;        /* under the overpass deck  */
+    if (h->si <= 0) return 1;                     /* the start line stays clear */
+
+    /* Assert phase 3's seam rather than assume it: the bind was done against
+     * the conditioned ROUTE, so if the centreline ever stops following it the
+     * whole city lands on the wrong spans. One compare per span, worst case
+     * reported in the census. */
+    {
+        double rx, rz;
+        if (td5_geo_route_node(h->si, &rx, &rz, NULL)) {
+            const double d = hypot(h->nl->v[h->si].x - rx,
+                                   h->nl->v[h->si].z - rz);
+            if (d > s_geo_route_dev_max) s_geo_route_dev_max = d;
+        }
+    }
+
+    for (i = td5_geob_span_building(h->si); i >= 0;
+         i = td5_geob_next_building(i)) {
+        const TD5_GeoBuilding *gb = td5_geob_building(i);
+        if (!gb) continue;
+        if (*h->nmesh >= h->maxmesh) break;
+        if (!tg_geo_emit_one(h, gb)) return 0;
+    }
+    return 1;
+}
+
+/* Read-only build fact. One line, unconditional on a geo build, so "real vs
+ * procedural" and "how far reality was nudged" are numbers in race.log. */
+void tg_geo_city_report(void)
+{
+    int nb = 0, meas = 0, est = 0, lm = 0, roofs = 0, na = 0, plaza = 0;
+    int bb = 0, bf = 0, ab = 0, af = 0, dp = 0, dpt = 0;
+
+    if (!s_geo_city) return;
+    td5_geob_census(&nb, &meas, &est, &lm, &roofs, &na, &plaza);
+    td5_geob_bind_stats(&bb, &bf, &ab, &af);
+    td5_geob_decimation(&dp, &dpt);
+    TD5_LOG_I(LOG_TAG, "[GEO BUILD] cache: %d footprint(s) (%d measured, %d "
+              "estimated, %d landmark, %d roof:shape), %d area(s) (%d "
+              "plaza/park); bound %d building(s) + %d area(s) to %d span(s), "
+              "%d + %d too far; decimated %d ring(s)/%d point(s)",
+              nb, meas, est, lm, roofs, na, plaza, bb, ab,
+              td5_geob_bound_spans(), bf, af, dp, dpt);
+    TD5_LOG_I(LOG_TAG, "[GEO BUILD] emitted %ld real building(s): %ld measured "
+              "/ %ld estimated, %ld real landmark(s) extruded, %ld landmark(s) "
+              "left to the prefab table; nudged %ld clear of the carriageway "
+              "(worst %.0f units), dropped %ld past the %.0f cap, %ld "
+              "degenerate ring(s)",
+              s_geo_emitted, s_geo_measured, s_geo_estimated, s_geo_lm_real,
+              s_geo_lm_fallback, s_geo_shifted, s_geo_shift_max,
+              s_geo_dropped_shift, TD5_TG_GEO_MAX_SHIFT, s_geo_dropped_deg);
+    TD5_LOG_I(LOG_TAG, "[GEO BUILD] procedural frontage stood down on %ld "
+              "span-side(s), back rows on %ld; worst centreline-vs-route "
+              "deviation %.1f units (0 means the road follows ROUTE.JSON "
+              "exactly, which is what the bind assumes)",
+              s_geo_wall_suppressed, s_geo_backrow_suppressed,
+              s_geo_route_dev_max);
+}
+
 /* Geometry for one side (0=right,1=left) of the wall at span si. built=0 when
  * the run/gap pattern or the branch-corridor exclusion skips this side. */
 void tg_side_geom(const TG_NodeList *nl, int si, int left,
@@ -1464,6 +1942,14 @@ void tg_side_geom(const TG_NodeList *nl, int si, int left,
 
     g->built = 0;
     if (!tg_facade_built(si, left)) return;
+    /* [GEO PHASE 5] A REAL footprint stands on this frontage, so the pattern
+     * wall stands down and tg_geo_emit_buildings puts the actual building
+     * there. Deliberately gated HERE and not in tg_facade_built: that function
+     * is the run/gap AUTHORITY, and an unbuilt side is what the side-street
+     * emitters read as a mouth -- suppressing it there would lay a carriageway
+     * across the block instead of a building. Standing the wall down leaves the
+     * run structure, the pavement and the crossings untouched. */
+    if (tg_geo_frontage_at(nl, si, left, b)) { s_geo_wall_suppressed++; return; }
     if (tg_branches_enabled() && side * (double)tg_fork_side_at(si) > 0.0 && tg_span_in_fork_clear(si)) return;
     /* [R11 BIOME item 4] Outskirts ramp -- the same gate tg_side_built asks, so
      * the wall that is not emitted here is the wall the caps and step walls
@@ -3503,6 +3989,14 @@ int tg_city_emit_backrows(const TG_FBHook *h, double sw)
         unsigned int blk, ph, gs, gl;
         int av, nrow;
         if (tg_side_blocked(h->si, sg)) continue;
+        /* [GEO PHASE 5] Real footprints already fill the depth behind this
+         * side, often several rows of them, so the procedural receding block
+         * would stand INSIDE a real building. Same "real where real exists"
+         * rule the frontage wall follows (tg_side_geom). */
+        if (tg_geo_backrow_at(h->nl, h->si, s, b)) {
+            s_geo_backrow_suppressed++;
+            continue;
+        }
         /* GATE to a street opening. A solid frontage hides whatever is behind
          * it, so a back row there only ever pokes above the front roofline --
          * the "rows behind rows" everywhere. tg_facade_built == 0 on this side is
@@ -4380,4 +4874,8 @@ void tg_r15_city_report(void)
               td5_env_flag_on("TD5RE_R15_BACKROW_STREET") ? "on" : "off",
               td5_env_flag_on("TD5RE_R15_BACKROW_OCC") ? "on" : "off",
               td5_env_flag_on("TD5RE_R15_BACKROW_CLOSE") ? "on" : "off");
+    /* [GEO PHASE 5] Real-frontage census, on the same per-build report call so
+     * a geo build's numbers land in race.log beside the procedural ones. Silent
+     * on a synthetic build. */
+    tg_geo_city_report();
 }

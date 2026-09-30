@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 30 (real-world tracks)" },
+    { CL_ITEM,    "A real-world track now stands the REAL BUILDINGS from" },
+    { CL_ITEM,    "  the map, each at its own height. Generated blocks" },
+    { CL_ITEM,    "  fill in only where the map has nothing." },
+    { CL_ITEM,    "Real PLAZAS and parks keep their true outline, with" },
+    { CL_ITEM,    "  paths, flower beds and trees laid out inside them." },
     { CL_ITEM,    "AUTO TRACK STUDIO has a LOCATION row: race the auto" },
     { CL_ITEM,    "  track along a real route picked on a map (run" },
     { CL_ITEM,    "  re/tools/geo_selector.py). It keeps the place name." },
