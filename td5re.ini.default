@@ -142,9 +142,16 @@ PersistToDisk    = 0    ; 1 = persist race replay buffer to disk (debug)
 
 [Logging]
 Enabled          = 1    ; master toggle for all log channels
-MinLevel         = 0    ; [PROFILE] WARN+ only: drops DEBUG/INFO spam so logging
-                        ; overhead doesn't contaminate the per-zone timings.
-                        ; PROFILE lines are emitted at WARN so they still pass.
+MinLevel         = 0    ; 0=DEBUG 1=INFO 2=WARN 3=ERROR. 0 keeps the full dev
+                        ; diagnostics (what /fix greps race.log for).
+                        ; [2026-09-30 W4] The old comment here claimed "WARN+
+                        ; only" next to a 0, which is DEBUG -- the opposite. It
+                        ; misled a perf measurement: DEBUG logging is NOT free.
+                        ; MEASURED (Moscow, 5 opponents, dev, ~180 windows/arm):
+                        ; MinLevel 0 -> 2 moved the mean frame 14.12 -> 12.17 ms
+                        ; (71 -> 82 fps). So set MinLevel=2 when PROFILING --
+                        ; PROFILE lines are emitted at WARN and still pass.
+                        ; RELEASE builds now default to 2 (see main.c).
 Frontend         = 1    ; silence HUD speedo spam
 Race             = 1    ; [PROFILE] silence AI/physics WARN spam (own channel)
 Engine           = 1    ; [PROFILE] REQUIRED: PROFILE lines (tag "plat") -> engine.log

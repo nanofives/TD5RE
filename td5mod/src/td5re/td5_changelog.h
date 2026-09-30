@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 30 (performance)" },
+    { CL_ITEM,    "PERFORMANCE screen redone: AUTO-SELECT picks settings" },
+    { CL_ITEM,    "  for your PC, plus quick GRAPHICS QUALITY and LIGHTING" },
+    { CL_ITEM,    "  presets (LOW / MEDIUM / HIGH / ULTRA)." },
+    { CL_ITEM,    "Every individual setting moved to PERFORMANCE > CUSTOM." },
+    { CL_ITEM,    "Option values line up in their own column again." },
+    { CL_ITEM,    "Pausing a race no longer keeps the graphics card busy" },
+    { CL_ITEM,    "  redrawing a frozen picture (quieter fans, cooler PC)." },
+    { CL_ITEM,    "Menus are capped at 60 FPS for the same reason." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 29 (traffic + cop chase)" },
     { CL_ITEM,    "Traffic no longer hits invisible walls where lanes" },
     { CL_ITEM,    "  merge after a fork (it piled up or pushed through)." },

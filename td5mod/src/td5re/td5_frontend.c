@@ -168,7 +168,8 @@ static const ScreenDesc s_screens[TD5_SCREEN_COUNT] = {
     /* [50] */ { "CUP INTERMISSION",     Screen_MpPostRace },     /* cup-between post-race menu */
     /* [51] */ { "LIGHTING",             Screen_LightingOptions },/* [RT2 P8] RT lighting per-feature options */
     /* [52] */ { "AUTO TRACK STUDIO",    Screen_AutoTrackOptions },/* [AUTOTRACK R2 item 25] generator knobs */
-    /* [53] */ { "PERFORMANCE",          Screen_PerformanceOptions },/* [LOW-END PERF 2026-09-12] low-end toggles + preset */
+    /* [53] */ { "PERFORMANCE",          Screen_PerformanceOptions },/* [PERF PRESETS 2026-09-29] auto-select + quality/lighting presets */
+    /* [54] */ { "PERFORMANCE CUSTOM",   Screen_PerformanceCustom },/* [PERF PRESETS 2026-09-29] the per-knob list (was screen 53) */
 };
 
 /* [SUB-SCREEN PROMOTION 2026-07-27] Map an identity screen number back to the
@@ -1590,6 +1591,13 @@ static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_LIGHTING_OPTIONS:   return "LIGHTING OPTIONS";
     case TD5_SCREEN_AUTOTRACK_OPTIONS:  return TR("AUTO TRACK STUDIO"); /* [R2 item 25] */
     case TD5_SCREEN_PERFORMANCE_OPTIONS: return TR("PERFORMANCE");       /* [LOW-END PERF] */
+    /* [PERF PRESETS] Just "CUSTOM", not "CUSTOM PERFORMANCE": at the title font
+     * the longer string runs off the right edge of the 640px canvas (verified by
+     * framedump 2026-09-30 -- it rendered as "CUSTOM PERFORMAN..."). "PERFORMANCE"
+     * alone already fills most of that width. The screen is only reachable from
+     * PERFORMANCE's "CUSTOM ->" row, so the short title reads correctly in
+     * context; the dev screen-ID badge still shows the full identity. */
+    case TD5_SCREEN_PERFORMANCE_CUSTOM:  return TR("CUSTOM");
     case TD5_SCREEN_CONTROLLER_BINDING: return "CONTROLLER SETUP";
     case TD5_SCREEN_CAR_SELECTION:      return "SELECT CAR";
     case TD5_SCREEN_TRACK_SELECTION:    return "SELECT TRACK";
@@ -3802,6 +3810,8 @@ static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_LIGHTING_OPTIONS:   /* [RT2 P8] entered from GRAPHICS OPTIONS -> BACK there */
     case TD5_SCREEN_PERFORMANCE_OPTIONS: /* [LOW-END PERF] entered from GRAPHICS OPTIONS -> BACK there */
         return TD5_SCREEN_DISPLAY_OPTIONS;
+    case TD5_SCREEN_PERFORMANCE_CUSTOM: /* [PERF PRESETS] entered from PERFORMANCE -> BACK there */
+        return TD5_SCREEN_PERFORMANCE_OPTIONS;
     case TD5_SCREEN_AUTOTRACK_OPTIONS:  /* [R2 item 25] track-select OR quick race */
         /* [AUTOTRACK QUICKRACE 2026-09-06] No longer track-select-only: Quick Race
          * grew its own STUDIO chip, so BACK follows whoever opened it. */
@@ -5692,9 +5702,25 @@ static uint32_t frontend_attract_idle_window_ms(void) {
     return s_win;
 }
 
+/* [PAUSE RENDER CACHE 2026-09-29] Menus animate at 60 Hz (see
+ * frontend_update_anim_pacing) and are otherwise a static redraw, so anything
+ * above 60 fps here is pure GPU burn -- the frontend was measured spinning fast
+ * enough to be the TDR trigger documented in td5_plat_present's frame-cap block.
+ * Cap it at the animation rate. TD5RE_FE_FRAME_CAP overrides (0 = uncapped). */
+static int frontend_frame_cap(void) {
+    static int s_cap = -1;
+    if (s_cap < 0) {
+        const char *e = getenv("TD5RE_FE_FRAME_CAP");
+        s_cap = (e && e[0]) ? atoi(e) : 60;
+        if (s_cap < 0) s_cap = 0;
+    }
+    return s_cap;
+}
+
 int td5_frontend_display_loop(void) {
     if (g_td5.ini.log_frontend_draw) s_fe_draw_log_frame++;
     td5_profile_begin_frame();
+    td5_plat_set_idle_frame_cap(frontend_frame_cap());
     frontend_update_anim_pacing();   /* [FPS-DECOUPLE] pace animations at 60 Hz */
     /* 0. Poll platform input so s_keyboard[] is fresh for this frame */
     {
@@ -5828,6 +5854,7 @@ int td5_frontend_display_loop(void) {
                      s_current_screen == TD5_SCREEN_LANGUAGE_OPTIONS ||
                      s_current_screen == TD5_SCREEN_LIGHTING_OPTIONS ||
                      s_current_screen == TD5_SCREEN_PERFORMANCE_OPTIONS ||
+                     s_current_screen == TD5_SCREEN_PERFORMANCE_CUSTOM ||
                      s_current_screen == TD5_SCREEN_AUTOTRACK_OPTIONS ||
                      s_current_screen == TD5_SCREEN_CONTROLLER_BINDING);
                 /* [splitscreen back-confirm] In split-screen, returning to the
@@ -6104,6 +6131,7 @@ static int frontend_get_button_anim_state(int *out_mode, int *out_tick, int *out
     case TD5_SCREEN_LANGUAGE_OPTIONS:
     case TD5_SCREEN_LIGHTING_OPTIONS:
     case TD5_SCREEN_PERFORMANCE_OPTIONS: /* [LOW-END PERF] same 3/8 anim states */
+    case TD5_SCREEN_PERFORMANCE_CUSTOM:  /* [PERF PRESETS] same 3/8 anim states */
     case TD5_SCREEN_AUTOTRACK_OPTIONS:   /* [R2 item 25] same 3/8 anim states */
         if (s_inner_state == 3) { mode = FE_BUTTON_ANIM_IN;  max_tick = 0x27; }
         else if (s_inner_state == 8) { mode = FE_BUTTON_ANIM_OUT; max_tick = 16; }
@@ -6191,6 +6219,7 @@ static int frontend_screen_has_button_anim(void) {
     case TD5_SCREEN_LANGUAGE_OPTIONS:
     case TD5_SCREEN_LIGHTING_OPTIONS:
     case TD5_SCREEN_PERFORMANCE_OPTIONS: /* [LOW-END PERF] */
+    case TD5_SCREEN_PERFORMANCE_CUSTOM:  /* [PERF PRESETS] */
     case TD5_SCREEN_AUTOTRACK_OPTIONS:   /* [R2 item 25] */
     case TD5_SCREEN_MUSIC_TEST:
     case TD5_SCREEN_CAR_SELECTION:
@@ -10529,8 +10558,11 @@ void td5_frontend_render_ui_rects(void) {
     case TD5_SCREEN_LIGHTING_OPTIONS:   /* [RT2 P8] per-row tier value text */
         frontend_render_lighting_options_overlay(sx, sy);
         break;
-    case TD5_SCREEN_PERFORMANCE_OPTIONS: /* [LOW-END PERF] per-row value text */
+    case TD5_SCREEN_PERFORMANCE_OPTIONS: /* [PERF PRESETS] preset-row value text */
         frontend_render_performance_options_overlay(sx, sy);
+        break;
+    case TD5_SCREEN_PERFORMANCE_CUSTOM: /* [PERF PRESETS] per-knob value text */
+        frontend_render_performance_custom_overlay(sx, sy);
         break;
     case TD5_SCREEN_AUTOTRACK_OPTIONS:  /* [R2 item 25] generator knob values */
         frontend_render_autotrack_options_overlay(sx, sy);
@@ -10879,11 +10911,21 @@ void td5_frontend_render_ui_rects(void) {
             for (int lo_r = 0; lo_r < 10; lo_r++) fe_draw_option_arrows(lo_r, sx, sy);
             break;
         case TD5_SCREEN_PERFORMANCE_OPTIONS:
+            /* [PERF PRESETS 2026-09-29] ◄► on the two preset selector rows only.
+             * Row 0 (AUTO-SELECT) and the CUSTOM -> nav row are Enter actions and
+             * the last row is OK — none of those takes arrows. The row ids come
+             * from the screen itself so they cannot go stale (the classic
+             * creation-vs-rendering gap). */
+            { int pp_r, pp_first = td5_performance_first_selector_row();
+              int pp_last = td5_performance_last_selector_row();
+              for (pp_r = pp_first; pp_r <= pp_last; pp_r++) fe_draw_option_arrows(pp_r, sx, sy); }
+            break;
+        case TD5_SCREEN_PERFORMANCE_CUSTOM:
             /* [LOW-END PERF] ◄► on the selector rows only. Row 0 (LOW-END PRESET)
              * is an Enter action and the last row is OK — neither takes arrows.
-             * Bound comes from td5_performance_opts_row_count() so it can't go
-             * stale against PO_ROWS (the creation-vs-rendering gap). */
-            { int po_r, po_n = td5_performance_opts_row_count();
+             * Bound comes from td5_performance_custom_row_count() so it can't go
+             * stale against PC_ROWS (the creation-vs-rendering gap). */
+            { int po_r, po_n = td5_performance_custom_row_count();
               for (po_r = 1; po_r < po_n; po_r++) fe_draw_option_arrows(po_r, sx, sy); }
             break;
         case TD5_SCREEN_AUTOTRACK_OPTIONS:

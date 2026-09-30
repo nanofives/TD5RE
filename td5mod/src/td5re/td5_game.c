@@ -684,6 +684,22 @@ static int      s_resume_countdown_state;   /* last digit pushed to the HUD */
  * shared split-screen pause panel. -1 = unknown. Only surfaced when >1 human. */
 static int      s_pause_local_slot = -1;
 static int      s_pause_menu_active;
+/* [PAUSE RENDER CACHE 2026-09-29] Frame-rate ceiling applied while the pause
+ * menu is up. The sim is frozen and the world is a cached blit, so the only
+ * thing a higher rate buys is a smoother cursor -- 30 Hz covers that while
+ * handing the GPU (and a laptop's battery) back most of the frame budget. */
+#define TD5_PAUSE_FRAME_CAP 30
+/* Master knob for the pause render cache + its frame cap. TD5RE_PAUSE_CACHE=0
+ * restores the pre-2026-09-29 behaviour exactly (full world render every paused
+ * frame, no idle cap), so the two can be A/B'd from one binary and the feature
+ * can be switched off if a driver ever mishandles the snapshot copy. */
+static int pause_render_cache_enabled(void)
+{
+    static int s_on = -1;
+    /* td5_env_flag_on defaults ON when the var is unset -- the wanted default. */
+    if (s_on < 0) s_on = td5_env_flag_on("TD5RE_PAUSE_CACHE");
+    return s_on;
+}
 static int      s_pause_menu_cursor;   /* [S31][END RACE NOW 2026-06-30][GATED 2026-07-02]
                                         * 0=VIEW 1=SOUND 2=RADIO 3=CONTINUE 4=RESTART.
                                         * Rows past 4 are conditional and computed
@@ -1170,6 +1186,14 @@ static const SSW_NavStep k_ssw_2p_opts[]    = { { TD5_SCREEN_MAIN_MENU, 4 },
 static const SSW_NavStep k_ssw_perf_opts[]  = { { TD5_SCREEN_MAIN_MENU, 4 },
                                                 { TD5_SCREEN_OPTIONS_HUB, 2 },
                                                 { TD5_SCREEN_DISPLAY_OPTIONS, 7 } };
+/* [PERF PRESETS 2026-09-29] CUSTOM PERFORMANCE is one row deeper: PERFORMANCE
+ * row 3 = the "CUSTOM ->" nav row (rows: 0 AUTO-SELECT, 1 GRAPHICS QUALITY,
+ * 2 LIGHTING, 3 CUSTOM, 4 OK). Same reason as the route above -- without it
+ * --StartScreen=54 cannot land and the selftest screen walk skips the screen. */
+static const SSW_NavStep k_ssw_perf_custom[] = { { TD5_SCREEN_MAIN_MENU, 4 },
+                                                 { TD5_SCREEN_OPTIONS_HUB, 2 },
+                                                 { TD5_SCREEN_DISPLAY_OPTIONS, 7 },
+                                                 { TD5_SCREEN_PERFORMANCE_OPTIONS, 3 } };
 /* Race type menu: 0=Single Race (→ car selection with game_type=0). */
 static const SSW_NavStep k_ssw_car_sel[]    = { { TD5_SCREEN_MAIN_MENU, 0 },
                                                 { TD5_SCREEN_RACE_TYPE_MENU, 0 } };
@@ -1206,6 +1230,7 @@ static const SSW_NavStep *startscreen_route(int target, int *out_len)
     case TD5_SCREEN_SOUND_OPTIONS:      SSW_ROUTE(k_ssw_sound_opts);
     case TD5_SCREEN_DISPLAY_OPTIONS:    SSW_ROUTE(k_ssw_disp_opts);
     case TD5_SCREEN_PERFORMANCE_OPTIONS: SSW_ROUTE(k_ssw_perf_opts);  /* [LOW-END PERF] */
+    case TD5_SCREEN_PERFORMANCE_CUSTOM: SSW_ROUTE(k_ssw_perf_custom); /* [PERF PRESETS] */
     case TD5_SCREEN_TWO_PLAYER_OPTIONS: SSW_ROUTE(k_ssw_2p_opts);
     case TD5_SCREEN_CAR_SELECTION:      SSW_ROUTE(k_ssw_car_sel);
     case TD5_SCREEN_HIGH_SCORE:         SSW_ROUTE(k_ssw_hiscore);
@@ -7749,6 +7774,63 @@ static void frame_render(void)
     /* Begin scene */
     td5_render_begin_scene();
 
+    /* [PAUSE RENDER CACHE 2026-09-29] While the pause menu is up the sim is
+     * frozen, so every paused frame re-renders a world that is pixel-identical
+     * to the one before it -- track walk, actors, RT dispatches, deferred
+     * shadow/GI/SSR passes, VFX, HUD, all to produce the same image. Instead:
+     * snapshot the first paused frame's world+HUD into a backend texture and
+     * blit it back on every later paused frame, then draw only the menu (which
+     * DOES change -- selection, sliders, confirm prompts) on top.
+     *
+     * Two knobs move together here:
+     *   - the snapshot, which removes the world cost;
+     *   - an idle frame cap, because without it the saved time just goes into
+     *     presenting MORE identical frames. 30 Hz is ample for a static menu.
+     * Both are pure presentation: the sim is already frozen, nothing below this
+     * point writes actor/physics/RNG state, so determinism is untouched.
+     *
+     * NOTE the ownership split -- this is the RENDER side only. The pause FSM
+     * itself (resume countdown, audio) lives further up in this file and is
+     * deliberately not touched here.
+     *
+     * The `goto` skips ~450 lines of world rendering without re-indenting them;
+     * the alternative (wrapping the whole viewport pipeline in an if) would
+     * reflow the entire function for a one-bit decision. */
+    int pause_cached = 0;
+    if (!s_pause_menu_active) {
+        td5_plat_scene_snapshot_invalidate();   /* resumed: the frozen frame is stale */
+        td5_plat_set_idle_frame_cap(0);
+    } else if (!pause_render_cache_enabled()) {
+        td5_plat_set_idle_frame_cap(0);         /* knob OFF: byte-identical to before */
+    } else {
+        /* The pause menu's VIEW row edits draw distance and that IS visible in
+         * the world, so a frozen snapshot would swallow the player's own slider
+         * (it used to update live). Re-render the frame the value changes on.
+         * Checked here rather than in the pause input handler so this stays
+         * entirely inside the render path -- the pause FSM is W6's file. VIEW is
+         * the only pause row with a world-visible effect; SOUND/RADIO are audio
+         * and the rest are navigation. */
+        static float s_snap_view = -1.0f;
+        float view_now = td5_save_get_view_distance();
+        if (view_now != s_snap_view) {
+            td5_plat_scene_snapshot_invalidate();
+            s_snap_view = view_now;
+        }
+        td5_plat_set_idle_frame_cap(TD5_PAUSE_FRAME_CAP);
+        pause_cached = td5_plat_scene_snapshot_blit();
+    }
+    if (pause_cached) {
+        /* The blit already reset viewport+scissor to full screen; restore the
+         * render state the HUD/menu draws below expect (the world pass normally
+         * leaves it this way after its last viewport). */
+        td5_plat_render_set_viewport(0, 0, g_td5.render_width, g_td5.render_height);
+        td5_plat_render_set_clip_rect(0, 0, g_td5.render_width, g_td5.render_height);
+        td5_render_set_race_pass(TD5_RACE_PASS_OPAQUE);
+        td5_render_set_fog(0);
+        td5_profile_mark("pause_blit");   /* [perf probe] cached-frame repaint */
+        goto pause_overlays;
+    }
+
     /* Clear backbuffer once before any viewport renders.
      * Moved out of td5_render_actors_for_view so the split-screen P2 pass
      * does not wipe P1's already-rendered half.
@@ -8212,6 +8294,19 @@ static void frame_render(void)
      * unless a controller is currently missing). Drawn on top of the HUD. */
     td5_hud_draw_disconnect_overlays();
     td5_hud_draw_net_pause_overlay();
+
+    /* [PAUSE RENDER CACHE 2026-09-29] This is the last frame before the pause
+     * menu goes up (or the first frame of a pause) -- bake the queued HUD glyphs
+     * into the image and snapshot it, so every FOLLOWING paused frame can skip
+     * everything above. Flushing here is safe: td5_hud_flush_text() drains a
+     * queue, and the pause overlay below refills it for the unconditional flush
+     * at the bottom of this function. The snapshot deliberately does NOT include
+     * the menu -- that part still redraws each frame. */
+pause_overlays:
+    if (s_pause_menu_active && !pause_cached) {
+        td5_hud_flush_text();
+        td5_plat_scene_snapshot_capture();
+    }
 
     /* [PORT 2026-06] First-race controller-tutorial overlay. update() polls for
      * a dismiss press (releasing the countdown next tick); draw() renders the
