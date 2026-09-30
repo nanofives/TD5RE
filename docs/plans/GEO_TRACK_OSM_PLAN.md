@@ -18,6 +18,7 @@ anywhere, and no existing path that feeds an externally supplied polyline into a
 | Geometry outside the drivable envelope | **Exaggerate elevation 1.5x, then clamp to the cap** |
 | Multiplayer | **Single-player only.** Out of scope by decision, and out of bounds by the no-networking rule (see 7 Phase 6) |
 | Networking | **NONE.** No sockets, no net tests, and `td5_net.c` / `td5_upnp.c` / `td5_fe_net.c` are not to be touched. In-game map tiles are ruled out; the browser selector is the selector |
+| Test runs | **No RT, minimum graphics** for anything that is not the selftest suite: `TD5RE_RT=0`, never `TD5RE_AUTO_PERF=2`, and the 16 graphics flags in 7 Phase 0. Watch the `td5re.ini` write-back |
 | Crossing-safe span localiser (Option B) | **In parallel with Phase 5** |
 | Buildings | **Real OSM footprints and real heights**, estimated from proxies where untagged |
 | Traffic lights | **Decoration only** (the one genuinely new emitter) |
@@ -475,13 +476,52 @@ corners that make a city recognisable.
 ## 7. Phases
 
 ### Phase 0 -- calibration and ground truth
-- Measure world-units-per-metre by trace; record it here.
+- Measure world-units-per-metre by trace; record it here. **This is the only step
+  in the whole plan that runs the game**, so it carries the run rules below.
 - **Confirm IGN 5 m coverage for La Plata and Buenos Aires** in the download
   tool (§6).
 - Commit both fixtures (Buenos Aires, La Plata) as cache directories so every
   later phase demos offline and the audits have real inputs.
 - Set the bbox cap from the measurement (a 6.3 km route wants roughly a 4 x 4 km
   box with margin; hard ceiling 3000 spans / ~10.5 km).
+
+#### How to run the calibration measurement (standing rules, 2026-09-29)
+
+Every test that is NOT the selftest suite -- AutoRace, framedump, `--Control`,
+zone harnesses, repros -- runs with **no RT and minimum graphics**. This
+measurement is an AutoRace plus a RaceTrace, so it is one of them. It is a
+distance/physics measurement, not a graphics one, so the rule costs nothing and
+makes the run faster.
+
+Environment: `TD5RE_RT=0` (this overrides the INI) and **never**
+`TD5RE_AUTO_PERF=2`.
+
+All 16 flags below were verified 2026-09-29 to exist as real INI keys with `--Key`
+overrides:
+
+    set TD5RE_RT=0
+    td5re.exe --AutoRace=1 --SkipIntro=1 ^
+      --Lighting=0 --Quality=0 --SunShadows=0 --Reflections=0 --WetRoads=0 ^
+      --StreetLights=0 --CarLights=0 --LegacyShadows=0 --GIQuality=0 ^
+      --ShadowRays=0 --ReflectionQuality=0 --CarShadows=0 --VFX=0 ^
+      --WorldBillboards=0 --FoliageAA=0 --RenderScale=50 ^
+      --RaceTrace=1
+
+Two hazards specific to this step:
+
+1. **`td5_ini_persist_options()` (`main.c:402`) writes these values back to the
+   `td5re.ini` beside the exe.** In the main tree that file is Mariano's real
+   configuration. **Run the worktree's own exe**, or back the INI up and restore
+   it. A run that passes through an options screen or commits race options is
+   enough to trigger the write -- it does not need anyone to change a setting on
+   purpose.
+2. Trace CSVs need `[Logging] Enabled=1`, and `RaceTrace=1` deliberately fixes
+   the RNG seed (which is what makes an A/B run comparable). Separately, a
+   non-zero `RaceTraceMaxSimTicks` **quits the game on its own**, even with
+   `RaceTrace=0` -- so set it deliberately or leave it alone.
+
+If the measurement ever needs RT or real graphics settings to mean anything, stop
+and ask Mariano rather than relaxing the rule.
 
 La Plata is a strong primary fixture and worth saying why: it is a planned city
 whose signature is a regular grid cut by diagonal avenues, with plazas placed at
