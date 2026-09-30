@@ -2750,6 +2750,21 @@ static int trf_dyn_cap(void)
         per = k_old[ov];
     } else {
         per = k_cap[v];
+        /* [W7-B DENSITY 2026-09-30] Optional VERY HIGH ceiling, DEFAULT OFF.
+         * on_road pins at the cap all race, so raising it is the obvious lever
+         * for near-player density -- and it works (cap 18 drove the "no traffic
+         * in the 40 spans ahead" rate to 0.0% opening / 0.3% whole race). It is
+         * deliberately NOT the shipped fix: the seed-band clamp below reaches
+         * 21.2% / 13.2% at the faithful cap of 16, i.e. inside the target with
+         * ZERO extra actors, and every extra traffic car costs sim + draw work
+         * on a build that already has a 24 FPS investigation open. Left as a
+         * knob so density can be traded for frame rate deliberately rather than
+         * by accident. 0 = faithful 16; pool holds TD5_MAX_TRAFFIC_SLOTS (64). */
+        if (v >= 4) {
+            int ov = td5_env_int("TD5RE_TRAFFIC_CAP_VERYHIGH", 0,
+                                 0, TD5_MAX_TRAFFIC_SLOTS);
+            if (ov > 0) per = ov;
+        }
     }
     /* [DRAG TRAFFIC DENSITY 2026-08-19] The drag strip needs a much bigger on-road
      * budget than any circuit. Census over a full drag run showed on_road pinned at
@@ -4113,6 +4128,24 @@ static void trf_dyn_seed_window(int cap, int *out_lo, int *out_hi)
         /* Hard ceiling: a car seeded beyond the forward-keep radius is retired by
          * the despawn pass on its first ticks, so never place one there. */
         far_edge = keep - 16;
+        /* [W7-B 2026-09-30] THE lever for near-player density. Seeding the wave
+         * all the way out to the keep radius spends most of it out of useful
+         * range: the forward-band probe measured 9.0 of 14.1 opening cars beyond
+         * 120 spans ahead, which is just the top half of this band. Clamping the
+         * SEED far edge concentrates the wave where the player actually drives.
+         * Note this clamps SEEDING only, never the keep radius -- traffic renders
+         * to ~205 spans at TD5RE_TRAFFIC_VIEW_DIST=1.6, so shrinking the keep
+         * radius instead would pop visible cars out; this just declines to place
+         * the opening wave where it cannot be used.
+         * Single-knob A/B (Moscow, VERY HIGH, 3 AI, 150 s, cap at the faithful
+         * 16), samples with ZERO traffic in the 40 spans ahead:
+         *     far=213 (old, = keep-16): opening 57.7%  whole race 36.0%
+         *     far=140 (this default)  : opening 21.2%  whole race 13.2%
+         * 0 = auto (keep - 16), i.e. the old behaviour. */
+        {
+            int sf = td5_env_int("TD5RE_TRAFFIC_SEED_FAR", 140, 0, 100000);
+            if (sf > 0 && far_edge > sf) far_edge = sf;
+        }
         if (far_edge < lo + 24) far_edge = lo + 24;  /* degenerate: keep a band */
         /* Widen the band to `gap` spans per car (this is the whole point — a
          * 16-car VERY HIGH wave in the legacy 100-span band is a wall, not a
@@ -4754,6 +4787,8 @@ void td5_ai_traffic_dynamic_tick(void)
         static int s_near_radius = -1;
         int p_span, near_cnt = 0, ahead_near = 0, nearest_ahd = -1;
         int tot_ahead = 0, tot_behind = 0;   /* all live cars, not just near */
+        /* [W7-B PROBE] forward 40-span band histogram + far-car tally */
+        int b0 = 0, b1 = 0, b2 = 0, b3 = 0, maxfar = 0, n_far = 0;
         int ring2 = td5_track_get_ring_length();
         for (int i = g_traffic_slot_base;
              i < g_traffic_slot_base + TD5_MAX_TRAFFIC_SLOTS &&
@@ -4805,18 +4840,37 @@ void td5_ai_traffic_dynamic_tick(void)
             if (d > 0 && (nearest_ahd < 0 || d < nearest_ahd)) nearest_ahd = d;
             if (d > 0)      tot_ahead++;
             else if (d < 0) tot_behind++;
+            /* [W7-B PROBE 2026-09-29] Forward distribution in 40-span bands, plus
+             * the largest distance-to-any-anchor among live cars. Answers the one
+             * question the aggregate cannot: when the near band is empty, are the
+             * cars parked FAR forward (so a demand-driven recycle-to-front can
+             * refill the near band at constant on_road), or are they spread thin
+             * across the whole keep zone (so only a bigger budget can help)? */
+            if (d > 0) {
+                if      (d <=  40) b0++;
+                else if (d <=  80) b1++;
+                else if (d <= 120) b2++;
+                else               b3++;
+            }
+            {
+                int mp = trf_dyn_min_player_dist(
+                             (int)(int16_t)ACTOR_I16(actor_ptr(i), ACTOR_SPAN_NORMALIZED));
+                if (mp > maxfar) maxfar = mp;
+                if (mp > trf_dyn_front_keep_floor()) n_far++;
+            }
         }
         TD5_LOG_I(LOG_TAG,
                   "traffic_census: tick=%u inactive=%d fadein=%d active=%d fadeout=%d "
                   "stuck=%d broken=%d cap=%d cooldown=%d lead_span=%d "
                   "player_span=%d near(+-%d)=%d ahead=%d nearest_ahead=%d "
-                  "tot_ahead=%d tot_behind=%d",
+                  "tot_ahead=%d tot_behind=%d fwd[0-40]=%d [40-80]=%d [80-120]=%d "
+                  "[120+]=%d maxfar=%d n_far=%d",
                   (unsigned)g_td5.simulation_tick_counter,
                   n_inact, n_fin, n_act, n_fout, n_stuck, n_broken,
                   trf_dyn_cap(), s_trf_dyn_cooldown,
                   ai_player_span_lead(),
                   p_span, s_near_radius, near_cnt, ahead_near, nearest_ahd,
-                  tot_ahead, tot_behind);
+                  tot_ahead, tot_behind, b0, b1, b2, b3, maxfar, n_far);
         /* [TRAFFIC CENSUS CSV] Optional flushed-per-write CSV so a live-traffic
          * count series survives even without a clean shutdown (race.log only
          * flushes on close). TD5RE_TRAFFIC_CENSUS_CSV=<path>. */
@@ -4830,14 +4884,18 @@ void td5_ai_traffic_dynamic_tick(void)
                 if (s_census_csv)
                     fprintf(s_census_csv,
                             "tick,on_road,active,fadein,fadeout,inactive,stuck,broken,cap,cooldown,"
-                            "player_span,near,ahead,nearest_ahead,tot_ahead,tot_behind\n");
+                            "player_span,near,ahead,nearest_ahead,tot_ahead,tot_behind,"
+                            "b0,b1,b2,b3,maxfar,n_far\n");
             }
             if (s_census_csv) {
-                fprintf(s_census_csv, "%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                fprintf(s_census_csv,
+                        "%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                        "%d,%d,%d,%d,%d,%d\n",
                         (unsigned)g_td5.simulation_tick_counter,
                         n_fin + n_act + n_fout, n_act, n_fin, n_fout, n_inact,
                         n_stuck, n_broken, trf_dyn_cap(), s_trf_dyn_cooldown,
-                        p_span, near_cnt, ahead_near, nearest_ahd, tot_ahead, tot_behind);
+                        p_span, near_cnt, ahead_near, nearest_ahd, tot_ahead, tot_behind,
+                        b0, b1, b2, b3, maxfar, n_far);
                 fflush(s_census_csv);
             }
         }
