@@ -323,6 +323,13 @@ static struct {
     double *x, *z;
     int    *lanes;
     char    source[512];
+    /* [OPTION B 2026-09-30] Grade separations planned by geo_condition.py. A
+     * fixed array rather than a malloc: a route is capped at 3000 spans and a
+     * crossing site eats ~75 of them once its ramps are counted, so the file
+     * cannot legitimately hold many, and a cap that refuses the surplus is
+     * better than a growth path nothing exercises. */
+    int          xsep_n;
+    TD5_GeoXSep  xsep[TD5_GEO_XSEP_MAX];
 } s_route;
 
 /* The engine's span length. Duplicated rather than pulling td5_trackgen.h into
@@ -342,6 +349,100 @@ static void geo_route_free(void)
     free(s_route.z);
     free(s_route.lanes);
     memset(&s_route, 0, sizeof(s_route));
+}
+
+/* [OPTION B 2026-09-30] Read the crossing plan out of a ROUTE.JSON.
+ *
+ * STRICTLY ADDITIVE, and the contract says so in td5_geo.h: a pre-Option-B file
+ * simply has no `grade_separations` key and this leaves the table empty, which
+ * every consumer reads as "this route has no grade separation" -- the behaviour
+ * before the key existed. So an old ROUTE.JSON keeps building exactly the track
+ * it built before, which is what the La Plata byte-identity gate measures.
+ *
+ * A MALFORMED entry is DROPPED, not fatal. The rest of the route is a valid
+ * track (this is the difference from the chord/origin checks above, where a bad
+ * value means the geometry itself is wrong and the engine would mis-measure it
+ * silently); a crossing plan that cannot be trusted just means the crossing
+ * stays level, and the localiser still keeps the cars apart. Every drop is
+ * logged with its reason so a stale file is visible rather than mysterious. */
+static void geo_xsep_load(const cJSON *root, const char *path, int n_nodes)
+{
+    const cJSON *arr = cJSON_GetObjectItem(root, "grade_separations");
+    int i, count, dropped = 0;
+
+    s_route.xsep_n = 0;
+    if (!arr || !cJSON_IsArray(arr)) return;
+    count = cJSON_GetArraySize(arr);
+    for (i = 0; i < count; i++) {
+        const cJSON *e = cJSON_GetArrayItem(arr, i);
+        const cJSON *ol, *oh, *ul, *uh, *rs, *cl, *bu;
+        TD5_GeoXSep x;
+        if (!e || !cJSON_IsObject(e)) { dropped++; continue; }
+        ol = cJSON_GetObjectItem(e, "over_lo");
+        oh = cJSON_GetObjectItem(e, "over_hi");
+        ul = cJSON_GetObjectItem(e, "under_lo");
+        uh = cJSON_GetObjectItem(e, "under_hi");
+        rs = cJSON_GetObjectItem(e, "ramp_spans");
+        cl = cJSON_GetObjectItem(e, "clearance_units");
+        bu = cJSON_GetObjectItem(e, "buildable");
+        if (!cJSON_IsNumber(ol) || !cJSON_IsNumber(oh) ||
+            !cJSON_IsNumber(ul) || !cJSON_IsNumber(uh)) {
+            TD5_LOG_W(LOG_TAG, "geo: route %s grade_separations[%d] lacks "
+                      "over/under span range; dropped", path, i);
+            dropped++;
+            continue;
+        }
+        /* The conditioner marks a site it could not fit ramps into; honour that
+         * rather than re-deriving it, so the tool's verdict and the build agree
+         * (the tool is what the selector shows the user). */
+        if (bu && cJSON_IsBool(bu) && !cJSON_IsTrue(bu)) {
+            TD5_LOG_I(LOG_TAG, "geo: route %s grade_separations[%d] is marked "
+                      "not buildable (no ramp room); left LEVEL", path, i);
+            continue;
+        }
+        x.over_lo  = ol->valueint;  x.over_hi  = oh->valueint;
+        x.under_lo = ul->valueint;  x.under_hi = uh->valueint;
+        x.ramp_spans = cJSON_IsNumber(rs) ? rs->valueint : 0;
+        x.clearance_units = cJSON_IsNumber(cl) ? cl->valuedouble
+                                               : TD5_GEO_XSEP_LIFT_DEFAULT;
+        if (x.over_lo < 0 || x.over_hi < x.over_lo || x.over_hi >= n_nodes ||
+            x.under_lo < 0 || x.under_hi < x.under_lo || x.under_hi >= n_nodes) {
+            TD5_LOG_W(LOG_TAG, "geo: route %s grade_separations[%d] spans "
+                      "%d..%d over %d..%d are outside 0..%d; dropped", path, i,
+                      x.over_lo, x.over_hi, x.under_lo, x.under_hi, n_nodes - 1);
+            dropped++;
+            continue;
+        }
+        /* The two legs must not be the same stretch of road: lifting a leg over
+         * ITSELF is not a grade separation, it is a broken plan, and it would
+         * put the ramp target and the ground target on the same nodes. */
+        if (x.over_lo <= x.under_hi && x.under_lo <= x.over_hi) {
+            TD5_LOG_W(LOG_TAG, "geo: route %s grade_separations[%d] legs "
+                      "%d..%d and %d..%d OVERLAP in span index; dropped", path, i,
+                      x.over_lo, x.over_hi, x.under_lo, x.under_hi);
+            dropped++;
+            continue;
+        }
+        if (x.clearance_units < 1.0) x.clearance_units = TD5_GEO_XSEP_LIFT_DEFAULT;
+        if (x.ramp_spans < 0) x.ramp_spans = 0;
+        if (s_route.xsep_n >= TD5_GEO_XSEP_MAX) {
+            TD5_LOG_W(LOG_TAG, "geo: route %s has more than %d grade "
+                      "separation(s); the rest are ignored", path,
+                      TD5_GEO_XSEP_MAX);
+            break;
+        }
+        s_route.xsep[s_route.xsep_n++] = x;
+    }
+    if (s_route.xsep_n || dropped)
+        TD5_LOG_I(LOG_TAG, "geo: route %s carries %d grade separation(s) "
+                  "(%d entry(ies) dropped)", path, s_route.xsep_n, dropped);
+    for (i = 0; i < s_route.xsep_n; i++) {
+        const TD5_GeoXSep *x = &s_route.xsep[i];
+        TD5_LOG_I(LOG_TAG, "geo:   grade sep %d: spans %d..%d OVER %d..%d, "
+                  "%.0f units of clearance, ramp hint %d span(s)", i,
+                  x->over_lo, x->over_hi, x->under_lo, x->under_hi,
+                  x->clearance_units, x->ramp_spans);
+    }
 }
 
 static int geo_route_load(const char *path)
@@ -419,6 +520,7 @@ static int geo_route_load(const char *path)
     TD5_LOG_I(LOG_TAG, "geo: route %s loaded: %d nodes (%d spans, %.2f km at "
               "the conditioner's scale)", path, n, n - 1,
               (double)(n - 1) * GEO_ROUTE_SPAN_LENGTH / 430.0 / 1000.0);
+    geo_xsep_load(root, path, n);
 
 done:
     cJSON_Delete(root);
@@ -436,6 +538,14 @@ int td5_geo_route_node(int i, double *x, double *z, int *lanes)
     if (z) *z = s_route.z[i];
     if (lanes) *lanes = s_route.lanes[i];
     return 1;
+}
+
+int td5_geo_xsep_count(void) { return s_route.n ? s_route.xsep_n : 0; }
+
+const TD5_GeoXSep *td5_geo_xsep(int i)
+{
+    if (!s_route.n || i < 0 || i >= s_route.xsep_n) return NULL;
+    return &s_route.xsep[i];
 }
 
 /* ------------------------------------------------------- place selection --- */

@@ -3923,7 +3923,11 @@ static int tg_scenery_entry(int e)
                 }
                 /* River under a bridge run. [R7 GUARD] the water is the surface a
                  * bridge deck flies over -- never scenery on the road. */
-                if (tg_span_in_bridge_run(si)) {
+                /* [OPTION B 2026-09-30] ...and tg_bridge_water_here, rather
+                 * than tg_span_in_bridge_run, because a GEO grade separation is
+                 * a dry bridge run whose river would be laid ABOVE the
+                 * carriageway it flies over. The predicate owns that rule. */
+                if (tg_bridge_water_here(nl, si)) {
                     size_t bw0 = meshes.len;
                     if (!tg_emit_bridge_water(nl, si, &meshes, moff, &nmesh)) {
                         ok = 0; break;

@@ -1029,6 +1029,34 @@ OK; `tg_strip_audit.py` 14 seams / 0 violations, all five forks sum OK. Structur
 lint OK (warnings 83 against a baseline of 84). `geo_selector.py --self-test`
 covers all three items offline, 17 checks.
 
+## 6j. Option B complete: a self-crossing route builds a flyover (item 5, 2026-09-30)
+
+`geo_condition.py --allow-crossings` now emits the crossing list into
+ROUTE.JSON (old files without it still load). The generator
+(`td5_tg_road.c`, deck geometry in `td5_tg_bridge.c`) lifts the LATER leg onto
+a deck over the earlier one, chosen deterministically by ramp room (91 spans
+against 82 on the fixture), with grade-limited ramps each side. No RNG draw.
+
+Fixture: `re/tools/geo_fixtures/figure8_*` (Gerono lemniscate, 657 spans, one
+crossing at nodes 131..135 against 562..566, 62 degrees). Build with
+`-Seed 20260902` AND `TD5RE_AUTOTRACK_SCENERY=1` (see the fixture README:
+20260901 lays the route over water, and 20260902 alone rolls SCENERY OFF).
+
+| Measure | Result |
+|---|---|
+| `[GEO XSEP] site 0 BUILT` | deck 3079 units (7.1 m) over the lower road, soffit 2599 above it, ramps 35 spans, ramp grade 0.092 |
+| deck Y vs lower Y at the crossing probe | 5667 vs 2201 (3466 apart); master exe 136 apart |
+| localiser at the probe | hint 132 -> 132, hint 564 -> 564 [HELD] |
+| drive, both legs (`verify/xspan_leg.ps1`) | 0 span jumps; slots cross 131-135 underneath and later 560-569 on the deck |
+| audits on the fixture | network RESULT OK, strip 0 violations |
+| La Plata (no crossing) | MODELS `50C8E8FC902D4BAA`, STRIP `1F41A4FD204368C7` = master |
+| synthetic seed 20260901 | MODELS `98E749869051ACE3`, STRIP `7C392E1958498B53` |
+
+`td5_track.c` is unchanged: the G4 localiser already keeps the hint once the
+two decks are thousands of units apart in Y. The two legs never share a frame
+(the renderer culls to +-64 spans, they are 430 apart), so the visual proof is
+per-leg framedumps plus the probe numbers above.
+
 ## 7. Phases
 
 ### Phase 0 -- calibration and ground truth
