@@ -1,7 +1,61 @@
 # CHAOS CO-OP — one car, many drivers (local multiplayer mode)
 
-Status: **PLAN / not implemented**. Written 2026-09-29.
-Scope: PORT-ONLY. No original-binary counterpart, so no Ghidra research is required.
+Written 2026-09-29. Scope: PORT-ONLY. No original-binary counterpart, so no
+Ghidra research is required.
+
+---
+
+## Status (2026-09-30)
+
+**Implemented on `feat/chaos-coop`**: wave 0 (contract) + wave 1 (Z1 INPUT, Z2
+FRONTEND, Z3 GAME, Z4 HUD, all four merged and verified by the master session) +
+wave 2 (Z5 INTEGRATION). The mode is code-complete and builds green. It is **not
+done** until the manual multi-pad pass in §11 happens: the rows for it are in
+`td5mod/src/td5re/pending_to_test.csv` (seven rows, all dated 2026-09-30).
+
+What exists, and where:
+
+| Piece | Where | State |
+|---|---|---|
+| Contract: enums, constants, public API | `td5_types.h`, `td5_chaos.h` | final |
+| Rules, activation, seat table, roles, rotation, HUD queries | `td5_chaos.c` | final |
+| N-seat -> 2-car input fold | `td5_chaos_fold.c` | final |
+| CHAOS TEAMS board (54), mode gate, mode-config rows, 2-car race setup | `td5_fe_chaos.c` + `td5_frontend.c` / `td5_fe_race.c` / `td5_fe_mp_setup.c` | final |
+| Poll / fold / post-process split, team-routed FFB | `td5_input.c` | final |
+| Input-slot decoupling, seat->device binding, sim-clock rotation, fake seats | `td5_game.c` | final |
+| Per-pane role strip, 3-2-1 swap countdown, SWAP flash | `td5_hud.c` | final |
+| Behaviour spec | `td5mod/src/td5re/EXPECTED_BEHAVIOR.md` -> "CHAOS CO-OP" | final |
+| Screen + mode-vote layout reference | `td5mod/src/td5re/FRONTEND_SCREEN_GUIDE.md` | final |
+| Selftest coverage | `td5_selftest.c`: `scr-chaos-teams`, `chaos-coop-4seat`, `chaos-coop-8seat` | final, NOT YET RUN |
+
+### The wire-format finding (why the config is module-owned)
+
+Found while building the wave-0 contract, 2026-09-29, and it changed the design:
+**nothing may be appended to `TD5_MpModeConfig`.** That struct is embedded in
+`TD5_NetRaceConfig`, whose size is pinned by a `_Static_assert` in `td5_net.h`
+(484 bytes, the replicated wire format), so growing it would bump the net
+protocol for a mode that is local-only by definition. The seat table therefore
+lives in `TD5_ChaosConfig`, owned by `td5_chaos.c` and committed through
+`td5_chaos_commit_config()`. `g_td5.mp_mode_config.mode` still carries the mode
+id (it already existed), and that is the only net-visible field the mode touches.
+
+### The fake-seats harness (the only automated way in)
+
+The mode needs one controller per seat, so `TD5RE_CHAOS_FAKE_SEATS=4|6|8` (dev
+builds, read at race init in `td5_game.c`) is **required**, not a convenience.
+It fabricates the seat table, binds every seat to device 0, sets
+`mp_mode_config.mode`, and collapses the race to 2 cars / 2 panes / 0 AI
+opponents. Companions: `TD5RE_CHAOS_TRIGGER=0..4`, `TD5RE_CHAOS_PERIOD=10..60`.
+Also: `TD5RE_CHAOS_HUD_PREVIEW=1` draws a synthetic role strip / countdown /
+flash cycle with the mode OFF, so one framedump catches every HUD state, and
+`--StartScreen=54` seeds a dev fake roster of 4 for board framedumps.
+
+**What the harness does NOT cover, and nothing else does either:** per-seat
+human input. Every fake seat sits on device 0 and nothing presses anything, so
+the selftest rows exercise the seat table, the roles, the rotation clock, the HUD
+and the lifecycle, not the fold under real pads. The plan's original idea of a
+control-socket `chaos_seat_bits <seat> <bits>` verb was **not built** (see §11).
+Per-seat input, swapping, rumble and the car-grid handoff are manual checks.
 
 Decisions locked 2026-09-29:
 
@@ -398,7 +452,19 @@ player count changes; unused rows are greyed and inert.
 
 Seat card contents, left to right inside the 240px row:
 
-1. 4px colour bar in the player colour (`k_mp_player_colors[]`, `td5_frontend_internal.h:299`)
+1. 4px colour bar in the seat colour. **As built:** `td5_chaos_seat_color(seat)`
+   (`td5_chaos.h`), not `k_mp_player_colors[]` directly and not the per-profile
+   accent. It carries the literal `k_mp_player_colors[0..7]` values (8 distinct
+   hues, checked), so the board looks the same as the other MP screens, but it
+   is reachable from `td5_hud.c` as well — which the frontend-internal array is
+   not. That makes the board and the in-race role strip agree by construction.
+   The accent override the other MP screens apply was dropped here: the HUD has
+   no per-SEAT accent to read (`s_mp_player_accent` is indexed by local setup
+   slot, of which this mode has two), so keeping it would have made the two
+   surfaces disagree. Defect it fixed, found by master in 8-player framedumps:
+   the strip used `hud_filler_slot_color()`, a 6-colour wheel, so seats 0 and 6
+   came out the same red — and the alternating RED/BLUE seating puts those two on
+   the SAME team, i.e. two identically coloured rows in one pane.
 2. row number `1..4`
 3. role badge, small caps
 4. player token `P3`
@@ -567,28 +633,54 @@ grid line itself does not read as a milestone.
 
 | File | Contents |
 |---|---|
-| `td5mod/src/td5re/td5_chaos.c` | seat/team table, role map, rotation timer, input fold, read-only queries |
-| `td5mod/src/td5re/td5_chaos.h` | public API (fold, tick, queries, activation) |
+| `td5mod/src/td5re/td5_chaos.c` | seat/team table, role map, rotation timer, read-only queries, seat colour |
+| `td5mod/src/td5re/td5_chaos.h` | public API (fold, tick, queries, activation, seat colour) |
+| `td5mod/src/td5re/td5_chaos_fold.c` | the pure N-seat -> 2-car input fold |
 | `td5mod/src/td5re/td5_fe_chaos.c` | `Screen_ChaosTeams` handler + `frontend_chaos_teams_render` |
+
+**As built:** the fold moved out of `td5_chaos.c` into its own
+`td5_chaos_fold.c` at wave 0, so the two parallel zones that own it (Z1 INPUT
+for the fold, Z3 GAME for the rotation) never shared a file. Four new files, not
+three.
 
 ### Modified
 
 | File | Change |
 |---|---|
-| `srcs.txt` | add the two new `.c` modules (single source of truth for all build paths) |
+| `srcs.txt` | add the **three** new `.c` modules (single source of truth for all build paths) |
 | `td5_types.h` | `TD5_MP_MODE_CHAOS_COOP = 5`, `TD5_MP_MODE_COUNT` 5→6; `TD5_SCREEN_CHAOS_TEAMS`, `TD5_SCREEN_COUNT` 54→55; new `TD5_ChaosRole` and `TD5_ChaosTrigger` enums. **Nothing is appended to `TD5_MpModeConfig`**: it is embedded in `TD5_NetRaceConfig`, whose size is pinned by a `_Static_assert` in `td5_net.h` (484 bytes, wire format). The seat table is `TD5_ChaosConfig`, owned by `td5_chaos.c` (found while building the contract, 2026-09-29) |
 | `td5_frontend.c` | screen-table row `:102`; title text `:1573`; parent screen `:3764`; button-anim state `:6060` + has-anim list `:6176`; post-button render switch `:10744` |
 | `td5_fe_race.c` | `k_mp_mode_names[]` `:3562` + `k_mp_mode_desc[]` `:3573` (both sized by `TD5_MP_MODE_COUNT`, so they fail to compile until updated — good); defaults case in `mp_mode_config_apply_defaults` `:3693`; ROTATE AT / period / laps / AI rows in `mp_cfg_build` `:4004`; vote-row disable gate `:3765`; route to `CHAOS_TEAMS` after config `:4098` |
 | `td5_fe_mp_setup.c` | `frontend_commit_pane_layout` `:110` → 2 panes; `frontend_init_race_schedule` `:144` → `num_human_players = 2`, per-team car identity at `:507-543`, seat table published to `td5_chaos` |
 | `td5_frontend_internal.h` | promote `mp_simul_player_nav`; declare the new screen handler and render fn |
-| `td5_game.c` | pad count at `:4822` (ask the mode, not `num_human_players`); race-init hook near the battle block `:2464`; per-race reset near `:2248`; `td5_chaos_tick()` in the fixed-step block `:7660`; `k_ssw_chaos_teams` route `:1138` |
-| `td5_input.c` | split `td5_input_poll_race_session` `:776` into poll / fold / post-process (section 4.5) |
-| `td5_hud.c` | per-pane role strip, swap countdown, swap flash |
-| `td5_race_state.h` | read-only queries (`td5_chaos_active`, `role_of_seat`, `swap_secs_left`, `next_milestone_label`) |
-| `td5_selftest.c` | screen-walk row `:332`; race-matrix rows `:228` |
-| `EXPECTED_BEHAVIOR.md` | "opposed steering cancels" is intended, not a bug |
+| `td5_game.c` | pad count (ask the mode, not `num_human_players`); `td5_chaos_race_begin()` at race init; `td5_chaos_tick()` in the fixed-step block; `TD5RE_CHAOS_FAKE_SEATS` at the top of `init_race_modes_and_seed`. **As built: NO `k_ssw_chaos_teams` route** — see the correction below |
+| `td5_input.c` | split `td5_input_poll_race_session` into poll / fold / post-process (section 4.5); force `want_manual = 0`; route FFB by team |
+| `td5_hud.c` | per-pane role strip, swap countdown, swap flash, `TD5RE_CHAOS_HUD_PREVIEW` |
+| `td5_race_state.h` | **As built: no chaos queries here.** Every read-only chaos query lives in `td5_chaos.h`; `td5_chaos.c` *consumes* `td5_race_state.h` (lap / span / countdown / checkpoint count) rather than exporting through it. The one addition is `td5_game_get_minimap_checkpoint_count()`, which sizes the "CP n/N" readout |
+| `td5_selftest.c` | screen-walk row `scr-chaos-teams`; race-matrix rows `chaos-coop-4seat` / `chaos-coop-8seat` (see §11) |
+| `EXPECTED_BEHAVIOR.md` | its own "CHAOS CO-OP" section: opposed inputs cancel, per-axis digital/analog encoding, brake-at-standstill reverses, shared RECOVER, forced auto gearbox, per-team milestones, circuit quarter-lap arcs, local only |
+| `FRONTEND_SCREEN_GUIDE.md` | screen 54 geometry + the six-row MP MODE VOTE column |
 | `re/assets/frontend/lang/es_AR.txt` | `TR()` strings for the new screen and role names |
-| `CHANGELOG` + `pending_to_test.csv` | per the `/fix` + `/end` convention |
+| `td5_changelog.h` + `pending_to_test.csv` | per the `/fix` + `/end` convention (the changelog is `td5_changelog.h`, not a `CHANGELOG` file) |
+
+**Line numbers removed from this table on 2026-09-30.** Every zone edited these
+files, so the wave-0 numbers were stale before the first merge landed. Use
+`codemap/functions.tsv` or grep for `CHAOS CO-OP` instead.
+
+**Correction — `--StartScreen` route (§8 and §10.4 both promised one):**
+`TD5_SCREEN_CHAOS_TEAMS` (54) deliberately has **no** `k_ssw_*` route, so it
+direct-jumps. A faithful walk would be MAIN MENU 2 -> MP LOBBY -> MP MODE VOTE
+-> MP MODE CONFIG -> 54, and step one is unreachable by injected keypresses: the
+lobby only advances on real per-device press-to-join edges, and the CHAOS row on
+MODE VOTE stays greyed below 4 joins. A partial (lobby-only) route would be
+strictly worse than none, because the walker can never see screen 54, so it
+burns its full 300-frame deadline, logs "stalled ... falling back to direct
+jump", and lands in the same state the direct jump reaches at once (entering the
+lobby clears `s_mp_flow` anyway). Returning NULL is this walker's designed way
+to say "no click route", and every other MP-setup screen (35, 36, 39, 49) does
+the same. On direct entry the board seeds a dev fake roster of 4 so the layout
+renders for a framedump. Full rationale in the comment beside the `k_ssw_*`
+tables in `td5_game.c`.
 
 ---
 
@@ -658,7 +750,7 @@ cross-zone call goes through `td5_chaos.h`, which is frozen for the wave.
 | G2 build | `build_all.bat` by absolute path; grep `BUILD OK` for dev **and** release, check both exe mtimes (the script exits 0 even on failure) | all |
 | G3 structure | lint line at the end of `build_all`: extern / td5_game.h includers / warnings all at baseline | all |
 | G4 byte identity | same pinned fixed-seed RaceTrace race on baseline exe vs merged exe; `race_trace_*.csv` must be byte-identical with the mode OFF | Z1, Z3 (both touch the shared race path) |
-| G5 selftest | `pwsh scripts/selftest.ps1 -Suite full`, window visible, 0 FAIL | all |
+| G5 selftest | `pwsh scripts/selftest.ps1 -Suite full`, window visible, 0 FAIL. **Blocked on `feat/chaos-coop` as of 2026-09-30**: the suite still runs its `net-loopback` step unconditionally, which raises the Windows firewall prompt the NO-NETWORK rule forbids. The removal is landing on master separately (`5a04e36f`), so G5 runs only once that merges in — the chaos rows were written but have never been executed | all |
 | G6 functional | Z1: fake seats + control-socket per-seat hold → each seat moves exactly its axis. Z2: `--StartScreen=54 --StartScreenDirect=1` + framedump, read the PNG. Z3: `TIME` trigger at 10 s, role step advances on the expected tick in `race.log`. Z4: framedump mid-race with a swap pending | per zone |
 
 Merge order is whatever finishes first; the gates run after each one, so a regression is
@@ -668,7 +760,18 @@ attributable to exactly one zone.
 
 | Zone | Owns | Delivers |
 |---|---|---|
-| **Z5 INTEGRATION** | `td5_selftest.c`, `td5_control.c`, `EXPECTED_BEHAVIOR.md`, `FRONTEND_SCREEN_GUIDE.md`, `td5_game.c` (**only** the `k_ssw_*` route table), changelog + `pending_to_test.csv` | selftest screen-walk row + race-matrix rows (fake seats), `--StartScreen` route, control verb if Z1/Z3 found `hold_action` insufficient, docs |
+| **Z5 INTEGRATION** | `td5_selftest.c`, `EXPECTED_BEHAVIOR.md`, `FRONTEND_SCREEN_GUIDE.md`, `td5_game.c` (**only** the `k_ssw_*` route table), `td5_chaos.{h,c}` (the seat-colour accessor only), the seat-colour lookup sites in `td5_hud.c` / `td5_fe_chaos.c`, `td5_changelog.h` + `pending_to_test.csv`, this plan, the generated `CLAUDE.md` module table | single seat-colour source (`td5_chaos_seat_color`), selftest screen-walk row + two fake-seat race rows with a rotation assertion, docs, changelog + 7 manual-test rows |
+
+**Two corrections to the wave-2 scope as written above (2026-09-30):**
+
+- `td5_control.c` was **removed** from Z5's ownership and no control verb was
+  added. The live-control transport opens a localhost UDP socket, which falls
+  under the standing NO-NETWORK rule for this machine (2026-09-30), so the
+  module was not touched. The consequence is stated plainly in §11.
+- Z5 additionally owns the **seat-colour accessor**, which was not in the
+  original wave-2 list. It came out of a defect master found in real 8-player
+  framedumps after wave 1 merged: the HUD strip and the teams board were reading
+  two different colour sources. See §6.3.
 
 Then master runs the full gate set once more, regenerates the module table
 (`pwsh scripts/gen_module_table.ps1 -Write`), and hands the user the manual 4-pad checklist.
@@ -687,9 +790,38 @@ spans on AUTO tracks.
 - **`TD5RE_CHAOS_FAKE_SEATS=N` dev knob is REQUIRED, not a nicety** (dev builds only).
   Because the mode is controllers-only (section 5), without it nobody who lacks N pads can
   reach the mode at all, and no agent or CI run can ever exercise it. It fabricates N seats
-  bound to device 0 so the mode can be entered, rotated and traced. Pair it with a
-  control-socket verb `chaos_seat_bits <seat> <bits>` so an automated test can drive one
-  seat at a time and assert the resulting car word.
+  bound to device 0 so the mode can be entered, rotated and traced.
+  **NOT BUILT (2026-09-30): the `chaos_seat_bits <seat> <bits>` control-socket verb.**
+  That transport opens a localhost UDP socket, which the standing NO-NETWORK rule for this
+  machine forbids, so `td5_control.c` was left untouched. Nothing else can drive one seat at
+  a time, so **the fold under real per-seat input has no automated coverage at all** — it is
+  a manual check with real pads, and the pending rows say so. What the automated rows below
+  do cover is the seat table, the role map, the rotation clock, the HUD and the lifecycle.
+
+- **Selftest rows (`td5_selftest.c`, added 2026-09-30):**
+  - `scr-chaos-teams` — screen-walk row for screen 54. That phase jumps screens directly,
+    so there is no lobby behind the board and `chaos_screen_init` seeds its dev fake roster;
+    the resulting WARN line is expected and does not fail the row (only ERR lines do).
+    `allow_redirect = 0`: the board must not bounce whatever the roster is.
+  - `chaos-coop-4seat` / `chaos-coop-8seat` — race rows at the two ends of the role table
+    (teams of 2: STEER + PEDALS; teams of 4: LEFT/RIGHT/THROTTLE/BRAKE), Moscow, no traffic,
+    no opponents. They set `TD5RE_CHAOS_FAKE_SEATS` plus `TD5RE_CHAOS_TRIGGER=3` (TIME) and
+    `TD5RE_CHAOS_PERIOD=10`, and clear all three afterwards along with the committed seat
+    table and `mp_mode_config.mode`, so no later row inherits the mode. TIME is chosen
+    because it is the only trigger whose firing is independent of track class and of how far
+    the cars actually drove.
+  - Judged by the shared invariant checker **plus** an explicit assertion that
+    `td5_chaos_rotation_step(t) > 0` for BOTH teams at race end. That read-only query is
+    preferred over scraping `race.log` for `[CHAOS] swap`: the counters are statics that
+    survive teardown, so it is exact and does not depend on the log sink being enabled or on
+    a text format nobody promised to keep. Without it the row would PASS on a mode that never
+    engaged, because every other chaos signal looks inert rather than wrong when it does not.
+  - They need a new `ST_DEPTH_RUN_20S` (600 sim ticks). The first swap lands at ~390 racing
+    ticks (10 s period + a 3 s countdown) and the race's own 3-2-1 runs before the chaos
+    clock starts, so `ST_DEPTH_RUN_5S` (300) would have made the assertion a false FAIL.
+  - `player_is_ai = 1` puts both car slots on AI autopilot, as every other MP row does, so
+    the cars drive and the "no progress" invariant stays clean. That is also exactly why
+    these rows say nothing about human input.
 - **Milestone test without driving:** with `TD5RE_CHAOS_FAKE_SEATS` plus the existing
   `--StartSpanOffset`, a race can be started near a checkpoint threshold to reach the
   trigger in seconds instead of minutes. Remember `--StartSpanOffset` drifts by +15..+40

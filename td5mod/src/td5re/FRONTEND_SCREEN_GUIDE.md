@@ -188,3 +188,116 @@ centred on their row.
   new-screen sites (enum + `TD5_SCREEN_COUNT`, `s_screens[]`, title, parent-of,
   is-options, 2 button-anim switches, value-overlay + arrow dispatch,
   prototypes, handler, and the GRAPHICS-OPTIONS nav row).
+
+## [CHAOS CO-OP] CHAOS TEAMS (screen 54) + the six-row MP MODE VOTE column
+
+Added 2026-09-29/30. Mode plan: `docs/plans/CHAOS_COOP_MODE_PLAN.md` §6.
+Behaviour spec: `EXPECTED_BEHAVIOR.md` → "CHAOS CO-OP".
+
+### CHAOS TEAMS — screen 54, `Screen_ChaosTeams` in `td5_fe_chaos.c`
+
+The seat/role claim board for `TD5_MP_MODE_CHAOS_COOP`. Reached from **MP MODE
+CONFIG (36)** when the locked mode is CHAOS CO-OP (`td5_fe_race.c`), and BACK
+returns there (`frontend_get_parent_screen`). On START the board is committed as
+a `TD5_ChaosConfig` via `td5_chaos_commit_config()` and the flow continues to the
+**MP car grid (49)** with exactly TWO pickers, one per team, each driven by the
+device of that team's row-0 seat.
+
+It is **self-titling**: like every screen in the MP setup chain it runs with
+`s_mp_simul` set, which suppresses the global title path, so
+`frontend_get_title_text_for_screen` deliberately has **no** case for 54 and the
+board draws its own header. Adding one would double-draw the title.
+
+Header title goes through `fe_race_draw_screen_title_fit()` (new), not the plain
+`fe_race_draw_screen_title()`: the board measures the right-aligned player-count
+badge first and hands the title whatever width is left minus
+`CT_TITLE_BADGE_GAP` (12 design px), and the helper **condenses horizontally**
+(cap height untouched, floor `FE_RACE_TITLE_MIN_HSCALE` = 0.55) to fit. A short
+fixed string alone is not enough here: title width scales with `sy` while the
+canvas scales with `sx`, so 4:3 is ~2.2x tighter than 16:9, and the es-AR header
+is a character longer again.
+
+Geometry (640x480 design px, `CT_*` constants in `td5_fe_chaos.c`). MP bands
+apply: left margin 112, right edge 628, nothing below y=460.
+
+| Element | x | y | w | h |
+|---|---|---|---|---|
+| Team panel A (RED) | 112 | 92 | 248 | 198 |
+| Team panel B (BLUE) | 380 | 92 | 248 | 198 |
+| Panel header band | +0 | +0 | 248 | 24 |
+| Seat row `k` (0-based) | +4 | 120 + 42k | 240 | 38 |
+| WAITING strip | 112 | 300 | 516 | 42 |
+| ROTATE AT selector (button 0) | 112 | 352 | 516 | 28 |
+| Hint line (small, centred) | 370 | 388 | - | - |
+| START (button 1) | 322 | 404 | 96 | 32 |
+
+Panels are drawn at a **fixed** height for all team sizes (`CT_MAX_ROWS` 4) so
+the layout does not jump with the player count. Rows past `team_size` are greyed
+(`CT_EMPTY_GREY` `0xFF6A6A6A`) and inert. Only two real buttons exist
+(`CT_BTN_ROTATE` = 0 with `is_selector = 1`, `CT_BTN_START` = 1), so the board is
+**not** a left-column menu and `FE_MENU_BTN_X` does not apply to it.
+
+Per-seat colour is `td5_chaos_seat_color(seat)` (`td5_chaos.h`), **not**
+`s_mp_player_accent` and **not** `hud_filler_slot_color`. It is the single source
+shared with the in-race role strip: 8 distinct hues carrying the literal
+`k_mp_player_colors[0..7]` values. `hud_filler_slot_color` is a 6-colour wheel
+and at 8 seats gave seats 0 and 6 the same colour, which the alternating
+RED/BLUE seating puts on the same team. See `EXPECTED_BEHAVIOR.md`.
+
+Interaction is per-device, like MP MODE VOTE and MP TEAM SELECT: every joined
+device drives its own cursor through `mp_simul_player_nav(player)`. Up/Down moves
+within a panel, Left/Right crosses to the other team, A takes an empty row /
+unlocks your own / **swaps** with another player, B returns to WAITING, and the
+host (first joined device) owns START and ESC (with a "BACK TO MODE OPTIONS?"
+confirm modal). On entry players are pre-seated alternating RED/BLUE in join
+order and all locked, so a group that does not care can press START immediately.
+
+**Verification, and its hard limit.** Control-socket `tap_key` / `inject_key` do
+**not** reach frontend menus, so this screen cannot be self-verified by the MCP
+driver. Layout: `--StartScreen=54` + `TD5RE_FRAMEDUMP=<path.png>` and read the
+PNG. Screen 54 has **no `k_ssw_*` nav route** and jumps direct, on purpose
+(`--StartScreenDirect=1` is accepted and equivalent) — the faithful walk needs 4
+to 8 real press-to-join device edges in the lobby, which `--StartScreen` cannot
+fabricate, and the CHAOS row on MODE VOTE stays greyed below 4 joins. See the
+comment beside the `k_ssw_*` tables in `td5_game.c` for why a partial route
+would be worse than none. On direct entry `chaos_screen_init` seeds a dev
+**FAKE ROSTER of 4** (dev builds only, with a "DEV: FAKE ROSTER" footer) so the
+board renders a legal 2x2 layout. Seat claiming and swapping need real pads and
+are a manual check (`pending_to_test.csv`).
+
+### MP MODE VOTE (35) — the SIX-row column
+
+`TD5_MP_MODE_COUNT` went 5 → 6 (CHAOS CO-OP), which no longer fit between the
+host banner and the Y460 floor. Final geometry, all 640x480 design px
+(`MV_*` in `td5_fe_race.c`):
+
+| Element | Value | Note |
+|---|---|---|
+| `MV_BX` / `MV_BW` | 170 / 300 | unchanged |
+| `MV_BH` | **48** (was 50) | two-line button |
+| `MV_GAP` | 64 | row pitch, unchanged |
+| `MV_Y0` | **88** (was 76, originally 96) | first row top |
+| `MV_BANNER_Y` | **48** (was 72, then 56) | host badge + "OTHERS PRESS A" |
+| banner box | 48 .. 71 | extends ~23 px below the y passed, not ~13 |
+| rows | 88, 152, 216, 280, 344, 408 | `MV_Y0 + 64k`, height 48 |
+| bottom edge | 456 | 4 px clear of the Y460 floor |
+| banner → first button | 17 px | |
+| per-voter ring band | `(64 − 48) / 2` = **8 px** each side | was 7 |
+
+Two things to keep in mind if this column is touched again. **Trim the BUTTON,
+not the PITCH**: `MV_GAP − MV_BH` is what the concentric per-voter vote rings
+live in, so shrinking `MV_BH` to 48 actually GREW the ring band from 14 to 16 px
+while buying the 10 px the sixth row needed. And the **banner is ~23 design px
+tall**, not ~13: the first attempt at `MV_BANNER_Y = 56` still overlapped the
+first button's top border, which only a 1920x1080 framedump showed.
+
+Label lines are unchanged at `+5` (mode name, `td5_vui_text_centered`) and `+29`
+(description, `mp_pos_small_centered`). A **greyed** row (CHAOS CO-OP when
+`frontend_chaos_mode_selectable()` says no) dims the name and **replaces** the
+description with the amber reason `0xFFFFC060` on that same `+29` line, drawn
+through `mp_pos_small_centered_fit()` so a long translation cannot overrun the
+300 px frame. Stacking the reason under the description at `+39` does **not**
+work: the small-text box is ~13 design px tall, so `+29` already runs to `+42`
+and the two collide and spill past the button. One line per row is all a 48-tall
+frame holds. Reason strings are kept short in English **and** es-AR for the same
+reason. A confirm attempt on the greyed row plays `frontend_play_sfx(10)`.
