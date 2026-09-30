@@ -551,6 +551,8 @@ void td5_camera_solve_tick_all(void);
 void td5_camera_apply_view(int view);
 void td5_camera_snap_poses(void);
 static void update_debug_race_camera(int view);   /* defined later */
+/* [W5 TOP-DOWN 2026-09-29] defined below, used by the tick solver above them. */
+static void UpdateTopDownCamera(uint8_t *actor, int view);
 
 /* Camera presets from original binary at 0x463098 (7 entries, 16 bytes each) */
 TD5_CameraPreset g_cameraPresets[TD5_CAMERA_PRESET_COUNT] = {
@@ -561,7 +563,12 @@ TD5_CameraPreset g_cameraPresets[TD5_CAMERA_PRESET_COUNT] = {
     { 0, 325,  1200, 240, 0, 0 },  /* preset  4: tight chase */
     { 0, 240,  1550, 110, 0, 0 },  /* preset  5: wide low */
     { 1, 0,    0,    0,   (int)0xFF380000, 0 },  /* preset  6: bumper cam */
-    { 0, 0,    0,    0,   0, 0 },  /* preset  7: unused */
+    /* [W5 TOP-DOWN 2026-09-29 — PORT-ONLY, no original counterpart] preset 7 is
+     * the GTA I/II style overhead view. mode 2 selects UpdateTopDownCamera,
+     * which ignores the orbit radius/elevation and builds its own eye from the
+     * TD5RE_TOPDOWN_* knobs; the table entry exists so the preset CYCLE and the
+     * mode bookkeeping (LoadCameraPresetForView) treat it like any other. */
+    { 2, 0,    0,    0,   0, 0 },  /* preset  7: TOP-DOWN (rotates with the car) */
     { 0, 0,    0,    0,   0, 0 },  /* preset  8: unused */
     { 0, 0,    0,    0,   0, 0 },  /* preset  9: unused */
     { 0, 400,  1600, 310, 0, 0 },  /* preset 10: fly-in level>=3 (0x401E10) */
@@ -937,6 +944,31 @@ void OrientCameraTowardTarget(int *target_pos, unsigned int yaw_offset)
  * camera state. Preset index is taken from g_raceCameraPresetId[view].
  * ======================================================================== */
 
+/* [W5 TOP-DOWN 2026-09-29] Packed per-view camera-selection byte.
+ * Layout: bits 0-4 = preset id (cycle is 8, so 5 bits is ample),
+ *         bits 5-6 = preset mode (0 chase / 1 bumper / 2 top-down).
+ * The original used 7 bits of id + 1 bit of mode; a byte written by an older
+ * build decodes here with the right id (ids never exceeded 6) and a mode of 0,
+ * i.e. it falls back to the chase camera instead of a garbage mode. */
+static unsigned char td5_camera_pack_save_byte(int view)
+{
+    int id   = g_raceCameraPresetId[view];
+    int mode = g_raceCameraPresetMode[view];
+    if (id < 0 || id >= TD5_CAMERA_PRESET_CYCLE) id = 0;
+    if (mode < 0 || mode > TD5_CAM_MODE_TOPDOWN) mode = TD5_CAM_MODE_CHASE;
+    return (unsigned char)((id & 0x1F) | ((mode & 0x3) << 5));
+}
+
+static void td5_camera_unpack_save_byte(int view, unsigned int packed)
+{
+    int id   = (int)(packed & 0x1Fu);
+    int mode = (int)((packed >> 5) & 0x3u);
+    if (id >= TD5_CAMERA_PRESET_CYCLE) id = 0;
+    if (mode > TD5_CAM_MODE_TOPDOWN)   mode = TD5_CAM_MODE_CHASE;
+    g_raceCameraPresetId[view]   = id;
+    g_raceCameraPresetMode[view] = mode;
+}
+
 void LoadCameraPresetForView(uint8_t *actor, int force_reload, int view, int save_state)
 {
     int preset_idx = g_raceCameraPresetId[view];
@@ -987,10 +1019,13 @@ void LoadCameraPresetForView(uint8_t *actor, int force_reload, int view, int sav
     td5_camera_snap_smoothing_view(view);
 
     if (save_state != 0) {
-        g_camPackedSave[0] = (unsigned char)((g_raceCameraPresetId[0] & 0x7F) |
-                                              (g_raceCameraPresetMode[0] << 7));
-        g_camPackedSave[1] = (unsigned char)((g_raceCameraPresetId[1] & 0x7F) |
-                                              (g_raceCameraPresetMode[1] << 7));
+        /* [W5 TOP-DOWN 2026-09-29] The original packed (id & 0x7F) | (mode << 7),
+         * i.e. ONE bit of mode — enough for chase/bumper only. Mode 2 (top-down)
+         * needs two, so the split moved to 5 bits of id (0-31, the cycle is 8)
+         * + 2 bits of mode. Decoded symmetrically in
+         * ResetRaceCameraSelectionState, which also clamps a legacy byte. */
+        g_camPackedSave[0] = td5_camera_pack_save_byte(0);
+        g_camPackedSave[1] = td5_camera_pack_save_byte(1);
     }
 }
 
@@ -1215,8 +1250,11 @@ static void td5_camera_snapshot_spring(uintptr_t actor, int v)
  * branch/ring-wrap walk to a far altitude blows past it. ~3072 world units. */
 #define TD5_CAM_GROUND_SANE_DY  0xC0000
 
-static int td5_camera_probe_ground_floor(uintptr_t actor, int cam_x, int cam_z,
-                                         int *out_floor_y)
+/* Raw track-surface height under (cam_x, cam_z), 24.8 FP. Returns 0 when the
+ * walk could not be trusted. [W5 2026-09-29] Split out of the floor helper so
+ * callers can apply their own sign convention explicitly. */
+static int td5_camera_probe_ground_y(uintptr_t actor, int cam_x, int cam_z,
+                                     int *out_ground_y)
 {
     TD5_TrackProbeState probe;
     int car_span = (int)(*(short *)(actor + 0x80));
@@ -1254,6 +1292,18 @@ static int td5_camera_probe_ground_floor(uintptr_t actor, int cam_x, int cam_z,
             return 0;
     }
 
+    *out_ground_y = ground_y;
+    return 1;
+}
+
+/* Legacy wrapper: the invisible-car chase floor consumes ground + offset and
+ * applies it with its own comparison. Kept byte-identical so that path is
+ * untouched by the [W5] replay sign fix above. */
+static int td5_camera_probe_ground_floor(uintptr_t actor, int cam_x, int cam_z,
+                                         int *out_floor_y)
+{
+    int ground_y;
+    if (!td5_camera_probe_ground_y(actor, cam_x, cam_z, &ground_y)) return 0;
     *out_floor_y = ground_y + TD5_CAM_GROUND_OFFSET;
     return 1;
 }
@@ -1297,10 +1347,14 @@ static int td5_camera_replay_eye_floor_clamp(uintptr_t actor, int view, int *eye
     if (!td5_camera_replay_cam_fix()) return 0;
     if (!actor || !eye) return 0;
 
+    /* [W5 2026-09-29] The Y sign here was SUSPECTED inverted and MEASURED not to
+     * be: the framedump A/B on the top-down eye (see UpdateTopDownCamera) shows
+     * +Y is UP for the camera, so `ground + clearance` really is a floor and
+     * raising the eye to it when it sits below is correct. Left unchanged. */
     int floor_y;
     if (!td5_camera_probe_ground_floor(actor, eye[0], eye[2], &floor_y))
-        return 0;                       /* untrustworthy walk — leave eye as-is */
-    if (eye[1] >= floor_y) return 0;    /* already at/above surface — no change */
+        return 0;                       /* untrustworthy walk - leave eye as-is */
+    if (eye[1] >= floor_y) return 0;    /* already at/above surface - no change */
 
     static uint32_t s_replay_floor_log_ctr;
     if ((s_replay_floor_log_ctr++ % 120u) == 0u)
@@ -2180,12 +2234,18 @@ static void cam_solve_view(int v)
     TD5_CamPose *C = &s_cam_pose_cur[v];
     int eye_lock = 1, tgt_lock = 1;
 
-    /* Fly-in spring-reset one-shot (mirrors td5_camera_update_transition_state). */
+    /* Fly-in spring-reset one-shot (mirrors td5_camera_update_transition_state).
+     * [W5 2026-09-29] TD5RE_START_PRESET (dev harness) picks which preset the
+     * race starts on instead of the hard-coded 0, so a camera view can be
+     * verified from a scripted launch without driving the CHANGE VIEW button.
+     * Unset / out of range = 0, i.e. unchanged. */
     if (!s_flyin_preset_reloaded[v] && !g_td5.paused) {
+        int start_preset = td5_env_int("TD5RE_START_PRESET", 0, 0,
+                                       TD5_CAMERA_PRESET_CYCLE - 1);
         s_flyin_preset_reloaded[v] = 1;
-        g_raceCameraPresetId[v]   = 0;
-        g_raceCameraPresetMode[v] = 0;
-        TD5_CameraPreset *p = &g_cameraPresets[0];
+        g_raceCameraPresetId[v]   = start_preset;
+        g_raceCameraPresetMode[v] = g_cameraPresets[start_preset].mode;
+        TD5_CameraPreset *p = &g_cameraPresets[start_preset];
         g_camOrbitRadiusScale[v] = (float)(int)p->orbit_radius_raw  * g_const256;
         g_camTargetHeight[v]     = (float)(int)p->height_target_raw * g_const256;
         g_camElevationAngleFP[v] = FP_SCALE((int)p->elevation_angle);
@@ -2221,6 +2281,12 @@ static void cam_solve_view(int v)
         UpdateRaceCameraTransitionState((uint8_t *)actor, v);
         td5_camera_finalize_chase_pos(actor, v);
         eye_lock = 1; tgt_lock = 1;
+    } else if (g_replay_mode && td5_camera_replay_topdown_active()) {
+        /* [W5 2026-09-29] Replay TOP-DOWN view — the CHANGE VIEW button toggles
+         * it while watching a replay (the authored cinematic profiles are the
+         * other half of that toggle). Eye follows the car, so it is car-locked. */
+        UpdateTopDownCamera((uint8_t *)actor, v);
+        eye_lock = 1; tgt_lock = 1;
     } else if (g_replay_mode && td5_camera_replay_trackside_ready()) {
         SelectTracksideCameraProfile((uint8_t *)actor, v);
         UpdateTracksideCamera((uint8_t *)actor, v);
@@ -2234,6 +2300,10 @@ static void cam_solve_view(int v)
          * look-at trackside cams (static / spline / orbit). */
         if (C->build_mode == 0)
             td5_camera_replay_eye_floor_clamp((uintptr_t)actor, v, C->eye);
+    } else if (g_raceCameraPresetMode[v] == TD5_CAM_MODE_TOPDOWN && !g_td5.paused) {
+        /* [W5 2026-09-29] preset 7 — GTA I/II overhead view, rotates with the car. */
+        UpdateTopDownCamera((uint8_t *)actor, v);
+        eye_lock = 1; tgt_lock = 1;
     } else if (g_raceCameraPresetMode[v] != 0 && !g_td5.paused) {
         UpdateVehicleRelativeCamera((uint8_t *)actor, v);   /* bumper / in-car (euler basis) */
         eye_lock = 1; tgt_lock = 1;
@@ -2951,6 +3021,105 @@ void UpdateTracksideOrbitCamera(uint8_t *actor, int is_active, int view)
 }
 
 /* ========================================================================
+ * TOP-DOWN CAMERA (preset 7 / mode 2) — PORT-ONLY, no original counterpart
+ * [W5 2026-09-29]
+ *
+ * A GTA I / GTA II style overhead view that ROTATES WITH THE CAR: the eye sits
+ * TD5RE_TOPDOWN_HEIGHT world units above the car and TD5RE_TOPDOWN_BACK units
+ * behind it in CAR space, looking at the car. Because the eye offset is taken
+ * in car space, the car's heading always points "up" the screen and the world
+ * turns around it.
+ *
+ * Deliberately built on SetCameraWorldPosition + OrientCameraTowardTarget (the
+ * same look-at path the chase/trackside cameras use) rather than
+ * BuildCameraBasisFromAngles: the look-at path already applies the coordinate
+ * flip the port's renderer expects, and the small "behind" offset keeps the
+ * view direction off the exact vertical so OrientCameraTowardTarget never takes
+ * its degenerate straight-down branch (which drops the yaw and would freeze the
+ * rotation).
+ *
+ * Sign note, MEASURED not assumed (Moscow, TD5RE_START_PRESET=7, framedump A/B
+ * on 2026-09-29): for the CAMERA eye, +Y is UP. An eye at car_y - 700*256
+ * rendered from inside the road surface; car_y + 700*256 rendered looking down
+ * on the roof. (td5_render_mesh.c carries a comment calling the world Y-down;
+ * whatever that describes, it is not the sign this eye needs, which is exactly
+ * why the A/B was run instead of trusting the comment.)
+ * ======================================================================== */
+
+static int td5_camera_topdown_height(void)   /* world units above the car */
+{
+    static int v = -1;
+    if (v < 0) v = td5_env_int("TD5RE_TOPDOWN_HEIGHT", 2200, 200, 8000);
+    return v;
+}
+
+static int td5_camera_topdown_back(void)     /* world units behind, in car space */
+{
+    static int v = -1;
+    if (v < 0) v = td5_env_int("TD5RE_TOPDOWN_BACK", 260, 0, 2000);
+    return v;
+}
+
+/* Replay-side toggle: the CHANGE VIEW button flips the replay camera between
+ * the authored cinematic trackside profiles and this top-down view. */
+static int s_replay_topdown;
+
+void td5_camera_replay_topdown_toggle(void)
+{
+    s_replay_topdown = !s_replay_topdown;
+    TD5_LOG_I(LOG_TAG, "replay top-down view %s", s_replay_topdown ? "ON" : "OFF");
+}
+
+int td5_camera_replay_topdown_active(void) { return s_replay_topdown; }
+
+static void UpdateTopDownCamera(uint8_t *actor, int view)
+{
+    int v = view;
+    int eye[3], target[3];
+    int back_fp = td5_camera_topdown_back()   * 0x100;
+    int up_fp   = td5_camera_topdown_height() * 0x100;
+
+    /* Sub-tick velocity extrapolation, exactly as the other updaters do. */
+    int vx = (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_x * g_subTickFraction + 0.5f);
+    int vy = (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_y * g_subTickFraction + 0.5f);
+    int vz = (int)((float)TD5_ACTOR_AT(actor)->linear_velocity_z * g_subTickFraction + 0.5f);
+
+    target[0] = TD5_ACTOR_AT(actor)->world_pos.x + vx;
+    target[1] = TD5_ACTOR_AT(actor)->world_pos.y + vy;
+    target[2] = TD5_ACTOR_AT(actor)->world_pos.z + vz;
+
+    /* "Behind the car" in world XZ. UpdateTracksideOrbitCamera builds its
+     * behind-the-car offset as (sin(-yaw), -cos(-yaw)) * radius; the same form
+     * is used here so both cameras agree on which way is back. */
+    {
+        int yaw = (int)TD5_ACTOR_AT(actor)->display_angles.yaw;
+        float s = SinFloat12bit((unsigned int)((-yaw) & 0xFFF));
+        float c = CosFloat12bit((unsigned int)((-yaw) & 0xFFF));
+        eye[0] = target[0] + (int)(s * (float)back_fp);
+        eye[2] = target[2] - (int)(c * (float)back_fp);
+    }
+    eye[1] = target[1] + up_fp;   /* measured: +Y is up for the camera eye */
+
+    g_camWorldPos[v][0] = eye[0];
+    g_camWorldPos[v][1] = eye[1];
+    g_camWorldPos[v][2] = eye[2];
+
+    g_depthFovFactor = 0x1000;
+    SetCameraWorldPosition(eye);
+    OrientCameraTowardTarget(target, 0);
+
+    {
+        static uint32_t s_td_log_ctr;
+        if ((s_td_log_ctr++ % 120u) == 0u)
+            TD5_LOG_D(LOG_TAG,
+                      "topdown v%d: eye=(%d,%d,%d) car=(%d,%d,%d) h=%d back=%d",
+                      v, eye[0], eye[1], eye[2],
+                      target[0], target[1], target[2],
+                      td5_camera_topdown_height(), td5_camera_topdown_back());
+    }
+}
+
+/* ========================================================================
  * 0x401C20 -- UpdateVehicleRelativeCamera
  *
  * Camera rigidly attached to vehicle with smoothed orientation.
@@ -3035,7 +3204,31 @@ void UpdateVehicleRelativeCamera(uint8_t *actor, int view)
         /* [FIX 2026-05-24 OVERSIGHT: case_1_2_basis_transform; orig 0x00401C20]
          * Orig UpdateVehicleRelativeCamera calls ConvertFloatVec3ToIntVec3
          * @ 0x0042DB40 (short-clamped), not TransformVector3ByBasis. */
-        ConvertFloatVec3ToIntVec3(g_renderBasisMatrix, &g_camOffsetVec[v][0], cam_pos);
+        /* [W5 REPLAY CAM 2026-09-29] Transform the offset through THIS ACTOR's
+         * rotation matrix (actor+0x120), not the never-updated identity
+         * g_renderBasisMatrix.
+         *
+         * Evidence: the original loads the matrix it transforms through from
+         * actor+0x120 (LoadRenderRotationMatrix @ 0x43da80, called that way in
+         * UpdateTracksideOrbitCamera @ 0x401950), and the port's OWN trackside
+         * cases 1/2 already pass `(float *)(actor + 0x120)` to this same
+         * ConvertFloatVec3ToIntVec3. `g_renderBasisMatrix` (td5_render.c:3545)
+         * is initialised to the identity and never written — td5_vfx.c
+         * documents it as stale for exactly this reason. So cases 7/8 (and the
+         * bumper preset) resolved their (0,-200,0) offset in WORLD space
+         * instead of CAR space: correct only while the car is perfectly level,
+         * and tilting the wrong way the moment it pitches or rolls.
+         *
+         * MEASURED 2026-09-29 (Moscow replay, behaviour 7, TD5RE_CAM_LOG=1):
+         * with a level car both matrices produced (0,-200,0) — identical — so
+         * this change is a NO-OP on the flat and only bites on pitch/roll.
+         * TD5RE_VRCAM_ACTOR_BASIS=0 restores the old identity behaviour. */
+        static int s_vr_actor_basis = -1;
+        if (s_vr_actor_basis < 0)
+            s_vr_actor_basis = td5_env_flag_on("TD5RE_VRCAM_ACTOR_BASIS");
+        ConvertFloatVec3ToIntVec3(s_vr_actor_basis ? (float *)(actor + 0x120)
+                                                   : g_renderBasisMatrix,
+                                  &g_camOffsetVec[v][0], cam_pos);
     }
 
     /* Scale offset and add vehicle position + velocity interpolation */
@@ -3233,14 +3426,11 @@ void UpdateRaceCameraTransitionState(uint8_t *actor, int view)
 void ResetRaceCameraSelectionState(int clear_or_restore)
 {
     if (clear_or_restore == 0) {
-        /* Restore from packed save bytes */
-        unsigned short packed = *(unsigned short *)g_camPackedSave;
-        g_raceCameraPresetId[0]   = packed & 0x7F;
-        g_raceCameraPresetMode[0] = (packed & 0xFF) >> 7;
-
-        unsigned char byte1 = g_camPackedSave[1];
-        g_raceCameraPresetId[1]   = byte1 & 0x7F;
-        g_raceCameraPresetMode[1] = (unsigned int)(byte1 >> 7);
+        /* Restore from packed save bytes. [W5 TOP-DOWN 2026-09-29] The byte now
+         * carries 5 bits of id + 2 bits of mode (mode 2 = top-down does not fit
+         * the original's single mode bit) — see td5_camera_pack_save_byte. */
+        td5_camera_unpack_save_byte(0, g_camPackedSave[0]);
+        td5_camera_unpack_save_byte(1, g_camPackedSave[1]);
     } else {
         /* Reset to defaults */
         g_raceCameraPresetId[1]   = 0;
@@ -3747,10 +3937,78 @@ void UpdateSplineTracksideCamera(uint8_t *actor, int view, int spline_type)
  *     port-side name (verify alias is OK).
  * ======================================================================== */
 
+/* [W5 REPLAY FORWARD VIEW 2026-09-29] TD5RE_REPLAY_FWD_VIEW (default 1).
+ *
+ * Four of the authored trackside behaviours put the replay camera on the WRONG
+ * side of the car, so you watch the road the car has already driven:
+ *   8  — rigid vehicle-relative cam with g_camYawOffset forced to 0x800 (180°),
+ *        i.e. the in-car view turned around to face backwards.
+ *   9  — orbit cam with the same 0x800 offset: the eye is parked IN FRONT of
+ *        the car looking back along the track.
+ *   4/5 — orbit cam whose yaw offset is stepped +8 / -8 EVERY tick, so the eye
+ *        sweeps the full circle and spends half its time in that same
+ *        in-front-looking-back hemisphere.
+ * Remap: 8 -> 7 and 9 -> 10 (the existing forward twins, offset 0), and 4/5
+ * keep their sweep but PING-PONG inside +/-TD5_REPLAY_FWD_PAN of straight
+ * behind, so the pan still moves but never crosses to the backward side.
+ * "0" restores the authored behaviours verbatim. */
+#define TD5_REPLAY_FWD_PAN  0x300   /* ~67 deg either side of straight-behind */
+
+static int td5_camera_replay_forward_view(void)
+{
+    static int v = -1;
+    if (v < 0) v = td5_env_flag_on("TD5RE_REPLAY_FWD_VIEW");
+    return v;
+}
+
+/* Per-view sweep direction for the ping-pong pan (behaviours 4/5). */
+static int s_replay_pan_dir[TD5_MAX_VIEWPORTS];
+
+/* Step the 4/5 pan and fold it into the forward hemisphere. Returns the
+ * behaviour to dispatch (always the plain orbit cam, offset already applied). */
+static int replay_forward_pan_step(int v, int btype)
+{
+    int step = (btype == 4) ? 8 : -8;
+    int yo;
+
+    if (s_replay_pan_dir[v] == 0) s_replay_pan_dir[v] = 1;
+    step *= s_replay_pan_dir[v];
+
+    /* Signed 12-bit offset in [-0x800, 0x800). */
+    yo = ((g_camYawOffset[v] + 0x800) & 0xFFF) - 0x800;
+    yo += step;
+    if (yo >  TD5_REPLAY_FWD_PAN) { yo =  TD5_REPLAY_FWD_PAN; s_replay_pan_dir[v] = -s_replay_pan_dir[v]; }
+    if (yo < -TD5_REPLAY_FWD_PAN) { yo = -TD5_REPLAY_FWD_PAN; s_replay_pan_dir[v] = -s_replay_pan_dir[v]; }
+    g_camYawOffset[v] = yo & 0xFFF;
+    return btype;   /* stays 4/5; the dispatch below skips its own increment */
+}
+
 void UpdateTracksideCamera(uint8_t *actor, int view)
 {
     int v = view;
     int btype = g_camBehaviorType[v];
+    int fwd_pan_applied = 0;
+
+    /* [W5 2026-09-29] Backward-facing replay behaviours -> their forward twins. */
+    if (g_replay_mode && td5_camera_replay_forward_view() &&
+        v >= 0 && v < TD5_MAX_VIEWPORTS) {
+        int orig_btype = btype;
+        switch (btype) {
+        case 8:  g_camYawOffset[v] = 0; btype = 7;  break;
+        case 9:  g_camYawOffset[v] = 0; btype = 10; break;
+        case 4:
+        case 5:  btype = replay_forward_pan_step(v, btype); fwd_pan_applied = 1; break;
+        default: break;
+        }
+        if (btype != orig_btype || fwd_pan_applied) {
+            static uint32_t s_fwd_log_ctr;
+            if ((s_fwd_log_ctr++ % 120u) == 0u)
+                TD5_LOG_D(LOG_TAG,
+                          "replay forward-view v%d: behavior %d(%s) -> %d(%s) yawofs=0x%X",
+                          v, orig_btype, trackside_behavior_name(orig_btype),
+                          btype, trackside_behavior_name(btype), g_camYawOffset[v]);
+        }
+    }
 
     TD5_LOG_D(LOG_TAG,
               "trackside update view %d: profile=%d behavior=%d(%s)",
@@ -3856,12 +4114,12 @@ void UpdateTracksideCamera(uint8_t *actor, int view)
         break;
 
     case 4:
-        g_camYawOffset[v] += 8;
+        if (!fwd_pan_applied) g_camYawOffset[v] += 8;   /* [W5] pan already stepped+folded */
         UpdateTracksideOrbitCamera((uint8_t *)actor, 1, v);
         break;
 
     case 5:
-        g_camYawOffset[v] -= 8;
+        if (!fwd_pan_applied) g_camYawOffset[v] -= 8;   /* [W5] pan already stepped+folded */
         UpdateTracksideOrbitCamera((uint8_t *)actor, 1, v);
         break;
 
@@ -3914,8 +4172,12 @@ int CycleRaceCameraPreset(int view, int delta)
 {
     int old = g_raceCameraPresetId[view];
     int new_val = old + delta;
-    g_raceCameraPresetId[view] = new_val % 7;
-    return new_val / 7;
+    /* [W5 TOP-DOWN 2026-09-29] The cycle length is TD5_CAMERA_PRESET_CYCLE, not
+     * the original's literal 7: preset 7 (top-down, mode 2) was appended to the
+     * table, so the in-race CHANGE VIEW button has to reach it. Everything else
+     * (store modulo, return the completed-cycle count) is unchanged. */
+    g_raceCameraPresetId[view] = new_val % TD5_CAMERA_PRESET_CYCLE;
+    return new_val / TD5_CAMERA_PRESET_CYCLE;
 }
 
 /* ========================================================================
@@ -3924,19 +4186,20 @@ int CycleRaceCameraPreset(int view, int delta)
 
 static int s_active_preset;
 
+/* [W5 2026-09-29] Mode-name fix. This switched on g_raceCameraPresetMode, which
+ * only ever holds a PRESET MODE (0 chase / 1 bumper / 2 top-down) — never 5 or
+ * 6 — so the two "bumper" arms were dead and the real bumper mode (1) reported
+ * "trackside". Now it names the three modes it can actually see. */
 static const char *camera_mode_name_for_view(int view, int has_actor)
 {
     if (!has_actor) return "debug";
-    if (g_replay_mode) return "trackside";
+    if (g_replay_mode)
+        return td5_camera_replay_topdown_active() ? "replay-topdown" : "trackside";
 
     switch (g_raceCameraPresetMode[view]) {
-    case 5:
-    case 6:
-        return "bumper";
-    case 1:
-        return "trackside";
-    default:
-        return "chase";
+    case TD5_CAM_MODE_BUMPER:  return "bumper";
+    case TD5_CAM_MODE_TOPDOWN: return "topdown";
+    default:                   return "chase";
     }
 }
 
@@ -4248,9 +4511,15 @@ void td5_camera_set_preset(int pi)
 void td5_camera_set_rear_view(int view, int active)
 {
     /* Rear view = 180° yaw offset (0x800 in 4096-unit circle).
-     * Only applied in chase mode (presetMode 0); bumper/trackside
-     * paths set their own g_camYawOffset. */
-    if (g_raceCameraPresetMode[view] == 0) {
+     *
+     * [W5 2026-09-29] Was gated on presetMode == 0 (chase only), so LOOK BACK
+     * silently did nothing in the bumper/in-car view even though
+     * UpdateVehicleRelativeCamera adds g_camYawOffset[v] to its yaw and would
+     * have honoured it. Chase (0) and bumper (1) now both take the offset.
+     * TOP-DOWN (2) deliberately does NOT: its eye is directly above the car and
+     * a 180° twist would only spin the image, not look anywhere new. */
+    if (g_raceCameraPresetMode[view] == TD5_CAM_MODE_CHASE ||
+        g_raceCameraPresetMode[view] == TD5_CAM_MODE_BUMPER) {
         g_camYawOffset[view] = active ? 0x800 : 0;
     }
 }
@@ -4424,7 +4693,9 @@ void td5_camera_update_transition_state(int p, int vi)
         /* Replay fallback (no trackside profiles): behave like the chase/bumper
          * path below so the played-back car stays on screen. */
         int mode = g_raceCameraPresetMode[v];
-        if (mode != 0 && !g_td5.paused) {
+        if (mode == TD5_CAM_MODE_TOPDOWN && !g_td5.paused) {
+            UpdateTopDownCamera((uint8_t *)actor, vi);   /* [W5] preset 7 */
+        } else if (mode != 0 && !g_td5.paused) {
             UpdateVehicleRelativeCamera((uint8_t *)actor, vi);
         }
         /* Chase (mode 0) updated per-sim-tick in td5_camera_update_chase_all(). */
@@ -4441,7 +4712,10 @@ void td5_camera_update_transition_state(int p, int vi)
          * UpdateVehicleRelativeCamera never ran and the bumper view kept the
          * (per-sim-tick) chase orientation instead of rotating with the car. */
         int mode = g_raceCameraPresetMode[v];
-        if (mode != 0 && !g_td5.paused) {
+        if (mode == TD5_CAM_MODE_TOPDOWN && !g_td5.paused) {
+            /* [W5 2026-09-29] preset 7 — port-only top-down view. */
+            UpdateTopDownCamera((uint8_t *)actor, vi);
+        } else if (mode != 0 && !g_td5.paused) {
             /* Bumper / in-car camera (orig UpdateVehicleRelativeCamera
              * @ 0x00401c20): orientation is taken straight from the car's
              * display angles (roll +0x208, yaw +0x20A, pitch +0x20C), so the

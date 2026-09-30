@@ -627,7 +627,10 @@ void render_vehicle_wheel_billboards(TD5_Actor *actor, int slot);
 void render_vehicle_wheels_unified(TD5_Actor *actor, int slot);  /* wheel overhaul */
 int  wheel_overhaul_enabled(void);
 int  wheel_traffic_enabled(void);
-void render_vehicle_brake_lights(const TD5_Actor *actor, int slot);
+/* [W5 2026-09-29] takes the body mesh so the lamps can snap to real geometry
+ * and follow damage deformation (see td5_render_effects.c). */
+void render_vehicle_brake_lights(const TD5_Actor *actor, int slot,
+                                 const TD5_MeshHeader *mesh);
 void render_vehicle_headlights(const TD5_Actor *actor, int slot);
 void render_tracked_actor_marker(const TD5_Actor *actor,
                                  const TD5_Mat3x3 *body_rot,

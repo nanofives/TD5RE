@@ -1336,7 +1336,85 @@ static void brake_light_lookup_atlas(void)
  *   (matches the no-z-test behaviour of the orig sprite quad). The +8
  *   brightness ramp + cap-at-0x80 + >>1 decay are byte-faithful (see also
  *   td5_vfx.c [CONFIRMED @ 0x401204] / @ 0x4011F5]. */
-void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
+/* ========================================================================
+ * [W5 BRAKE LIGHTS ON THE BODY 2026-09-29 — PORT-ONLY]
+ *
+ * The taillight hardpoint is an authored point (carparam +0x60/+0x68, or the
+ * TD6 :CAR_LIGHTS0/1: override). It is a bare coordinate: it does not move when
+ * the body mesh is dented, and on several cars it sits slightly off the actual
+ * lamp face, so the lamp floated next to the car instead of sitting on it.
+ *
+ * Fix, in three parts:
+ *   1. SNAP — on the first draw for a given (slot, mesh) find the mesh vertex
+ *      nearest the hardpoint and remember its INDEX. The lamp is then drawn at
+ *      real body geometry, not at a point in space. A hardpoint further than
+ *      TD5_BRAKE_SNAP_MAX from every vertex is left unsnapped (index -1) and
+ *      keeps the authored position, so a bad carparam cannot drag the lamp onto
+ *      the wrong panel.
+ *   2. DEFORM — add that vertex's per-slot damage deformation delta
+ *      (td5_damage_get_deform), the same array the body transform consumes, so
+ *      a crushed rear end carries its lamps with it.
+ *   3. SCUFF — hide the lamp once its vertex's damage scuff passes
+ *      TD5RE_BRAKE_SCUFF_HIDE percent: a smashed light stops glowing.
+ *
+ * All three are inert when CarDamage is off except the snap, which is purely
+ * geometric. TD5RE_BRAKE_SNAP=0 restores the authored-point behaviour.
+ * ======================================================================== */
+#define TD5_BRAKE_SNAP_MAX  140.0f   /* model units; hardpoint-to-vertex sanity */
+
+static const void *s_brake_snap_mesh[TD5_ACTOR_MAX_TOTAL_SLOTS];
+static int         s_brake_snap_idx[TD5_ACTOR_MAX_TOTAL_SLOTS][2];
+
+static int brake_snap_enabled(void)
+{
+    static int v = -1;
+    if (v < 0) v = td5_env_flag_on("TD5RE_BRAKE_SNAP");   /* default ON */
+    return v;
+}
+
+static float brake_scuff_hide_level(void)
+{
+    static float v = -1.0f;
+    if (v < 0.0f) v = (float)td5_env_int("TD5RE_BRAKE_SCUFF_HIDE", 70, 0, 100) / 100.0f;
+    return v;
+}
+
+/* Build (once per slot+mesh) the nearest-vertex index for both taillights. */
+static void brake_snap_build(int slot, const TD5_MeshHeader *mesh,
+                             const int16_t hp[2][3])
+{
+    s_brake_snap_mesh[slot]   = mesh;
+    s_brake_snap_idx[slot][0] = -1;
+    s_brake_snap_idx[slot][1] = -1;
+
+    if (!mesh || !mesh->vertices || mesh->total_vertex_count <= 0) return;
+
+    for (int light = 0; light < 2; light++) {
+        float hx = (float)hp[light][0];
+        float hy = (float)hp[light][1];
+        float hz = (float)hp[light][2];
+        float best = TD5_BRAKE_SNAP_MAX * TD5_BRAKE_SNAP_MAX;
+        int   best_i = -1;
+
+        for (int i = 0; i < mesh->total_vertex_count; i++) {
+            const TD5_MeshVertex *mv = &mesh->vertices[i];
+            float dx = mv->pos_x - hx;
+            float dy = mv->pos_y - hy;
+            float dz = mv->pos_z - hz;
+            float d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 < best) { best = d2; best_i = i; }
+        }
+        s_brake_snap_idx[slot][light] = best_i;
+        TD5_LOG_I(RENDER_LOG_TAG,
+                  "brake snap slot=%d light=%d hp=(%d,%d,%d) -> vtx %d (d=%.1f)",
+                  slot, light, (int)hp[light][0], (int)hp[light][1],
+                  (int)hp[light][2], best_i,
+                  (best_i >= 0) ? sqrtf(best) : -1.0f);
+    }
+}
+
+void render_vehicle_brake_lights(const TD5_Actor *actor, int slot,
+                                 const TD5_MeshHeader *mesh)
 {
     if (!actor) return;
     if (!s_braked_lookup_done) brake_light_lookup_atlas();
@@ -1383,25 +1461,51 @@ void render_vehicle_brake_lights(const TD5_Actor *actor, int slot)
         bu0 = 0.0f; bv0 = 0.0f; bu1 = 1.0f; bv1 = 1.0f;   /* canonical UVs for the shader */
     }
 
+    /* Taillight hardpoints, int16[3] model space. [S23] For ported TD6 cars
+     * the binary carparam.dat carries WRONG values at +0x60/+0x68 (it is not
+     * TD6's CAR_LIGHTS field), so the asset loader installs the authored TD6
+     * :CAR_LIGHTS0/1: positions per slot via td5_render_set_vehicle_taillights.
+     * Use those when present; otherwise read the cardef hardpoint (TD5 cars +
+     * donor-param TD6 cars aud/pro/xjr with no .scr). */
+    int16_t hp_auth[2][3];
     for (int light = 0; light < 2; light++) {
-        /* Taillight hardpoint, int16[3] model space. [S23] For ported TD6 cars
-         * the binary carparam.dat carries WRONG values at +0x60/+0x68 (it is not
-         * TD6's CAR_LIGHTS field), so the asset loader installs the authored TD6
-         * :CAR_LIGHTS0/1: positions per slot via td5_render_set_vehicle_taillights.
-         * Use those when present; otherwise read the cardef hardpoint (TD5 cars +
-         * donor-param TD6 cars aud/pro/xjr with no .scr). */
-        int16_t hp[3];
         if (g_vehicle_taillight_valid[slot]) {
-            hp[0] = g_vehicle_taillight[slot][light][0];
-            hp[1] = g_vehicle_taillight[slot][light][1];
-            hp[2] = g_vehicle_taillight[slot][light][2];
+            hp_auth[light][0] = g_vehicle_taillight[slot][light][0];
+            hp_auth[light][1] = g_vehicle_taillight[slot][light][1];
+            hp_auth[light][2] = g_vehicle_taillight[slot][light][2];
         } else {
-            memcpy(hp, (uint8_t *)car_def + 0x60 + light * 8, 6);
+            memcpy(hp_auth[light], (uint8_t *)car_def + 0x60 + light * 8, 6);
         }
+    }
 
-        float px = (float)hp[0];
-        float py = (float)hp[1];
-        float pz = (float)hp[2];
+    /* [W5] Snap to body geometry + follow damage. */
+    const float *ddx = NULL, *ddy = NULL, *ddz = NULL; int dvc = 0;
+    const float *dscuff = NULL; int svc = 0;
+    int snap_on = brake_snap_enabled() && mesh && mesh->vertices &&
+                  mesh->total_vertex_count > 0;
+    if (snap_on) {
+        if (s_brake_snap_mesh[slot] != (const void *)mesh)
+            brake_snap_build(slot, mesh, hp_auth);
+        td5_damage_get_deform(slot, mesh, &ddx, &ddy, &ddz, &dvc);
+        td5_damage_get_scuff(slot, mesh, &dscuff, &svc);
+    }
+
+    for (int light = 0; light < 2; light++) {
+        float px = (float)hp_auth[light][0];
+        float py = (float)hp_auth[light][1];
+        float pz = (float)hp_auth[light][2];
+
+        if (snap_on) {
+            int vi = s_brake_snap_idx[slot][light];
+            if (vi >= 0 && vi < mesh->total_vertex_count) {
+                const TD5_MeshVertex *mv = &mesh->vertices[vi];
+                px = mv->pos_x; py = mv->pos_y; pz = mv->pos_z;
+                if (ddx && vi < dvc) { px += ddx[vi]; py += ddy[vi]; pz += ddz[vi]; }
+                /* A smashed lamp stops glowing. */
+                if (dscuff && vi < svc && dscuff[vi] >= brake_scuff_hide_level())
+                    continue;
+            }
+        }
 
         /* Transform hardpoint center through the render matrix to view space */
         float vx = px*m[0] + py*m[1] + pz*m[2] + m[9];
