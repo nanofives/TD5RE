@@ -2294,10 +2294,35 @@ int frontend_car_is_td6(int car_index) {
     return car_index >= TD5_BASE_CAR_COUNT && car_index < TD5_CAR_COUNT;
 }
 
-/* TD6 car that may be repainted: every ported car EXCEPT the cp1-4 cop cars
- * (police liveries are fixed). Gates the colour selector + the preview tint. */
+/* A car that may be repainted with the free COLOUR PICKER (as opposed to the
+ * four fixed TD5 paint schemes). Gates the colour selector + the preview tint.
+ *   - every ported TD6 car EXCEPT the cp1-4 cop cars (police liveries fixed)
+ *   - [TD5 CAR PAINT 2026-09-29] an ORIGINAL car that has an offline paint bake
+ *     (carmask + neutral greyscale body, see td5_asset_car_paint_bake): its
+ *     primary body colour becomes free, while stripes, a second body colour,
+ *     glass, lights and badges keep the art they shipped with. Cars whose four
+ *     carskins are the same paint have no bake and stay on the paint arrows. */
 int frontend_car_paintable(int car_index) {
-    return frontend_car_is_td6(car_index) && !frontend_car_is_cop(car_index);
+    if (frontend_car_is_td6(car_index))
+        return !frontend_car_is_cop(car_index);
+    return td5_asset_car_paint_bake(car_index);
+}
+
+/* [TD5 CAR PAINT 2026-09-29] Whether the body-paint overlay should be drawn
+ * over this car's preview for colour `rgb` (0xRRGGBB).
+ *
+ * White is the "not repainted" value in the in-race bake — td5_asset_load_vehicle
+ * skips the multiply and uploads the skin as-is. For a TD6 car that is invisible
+ * (its skin IS the grey body, and grey * white = grey), but a TD5 car falls back
+ * to its FACTORY carskin, so drawing the neutral-grey overlay on white would show
+ * a grey car in the menu and its original paint in the race. Gate on the same
+ * rule both sides use. */
+int frontend_paint_overlay_visible(int car_index, uint32_t rgb) {
+    if (!frontend_car_paintable(car_index))
+        return 0;
+    if ((rgb & 0x00FFFFFFu) == 0x00FFFFFFu && td5_asset_car_paint_bake(car_index))
+        return 0;
+    return 1;
 }
 
 /* Whether a car offers ANY paint choice at all (used to grey-out the PAINT
@@ -8066,7 +8091,8 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
          * slides out as its plain (grey) carpic and no TD6 paint bleeds into the
          * TD5 transition. TD6->TD6 switches still slide out painted. */
         int show_paint = (s_color_panel_visible || s_paint_active) &&
-                         frontend_car_paintable(actual_car);
+                         frontend_paint_overlay_visible(actual_car,
+                                                        (uint32_t)g_td5.ini.td6_paint_color);
         if (s_inner_state == 11) {
             /* Old car slides out to the right (state 11, ~433ms) — animPhase 0x0B: offset = counter*0x20.
              * On the very first frame(s) of state 11 the case-11 update that loads
@@ -10835,10 +10861,12 @@ void td5_frontend_render_ui_rects(void) {
              * arrows; the original cycles slot 2's wheel/config scheme on key
              * press but never paints arrow glyphs over the stat panel.] */
             fe_draw_option_arrows(0, sx, sy);
-            /* PAINT row: TD5 cars cycle 4 paint schemes (◄► arrows); ported TD6
-             * cars pick a body COLOR instead — no arrows; the PAINT button toggles
-             * the color-swatch panel (drawn last so it overlays the preview). */
-            if (!frontend_car_is_td6(frontend_current_car_index()))
+            /* PAINT row: a car on the four fixed schemes cycles them (◄► arrows);
+             * a car on the free COLOR picker (ported TD6, or [TD5 CAR PAINT
+             * 2026-09-29] an original car with a paint bake) gets no arrows — its
+             * PAINT button toggles the color-swatch panel instead (drawn last so
+             * it overlays the preview). */
+            if (!frontend_car_paintable(frontend_current_car_index()))
                 fe_draw_option_arrows(1, sx, sy);
             frontend_render_td6_color_panel(sx, sy);
             /* [item #7] Randomize chip to the right of the Car selector. */
@@ -11267,8 +11295,12 @@ int td5_frontend_init(void) {
     s_selected_config = 0;
     s_color_panel_visible = 0;   /* TD6 color panel starts closed */
     /* s_paint_active persists across car-select entries (e.g. returning from a
-     * race) so a chosen colour stays applied; it starts 0 (neutral) only at
-     * launch and is set when the player first confirms a paint colour. */
+     * race) so a chosen colour stays applied; it is set when the player first
+     * confirms a paint colour. [TD5 CAR PAINT 2026-09-29] At launch it comes
+     * from the persisted [CarSelection] PaintActive, so a colour chosen in an
+     * earlier session shows on the preview — which is what the race already
+     * renders from the same saved colour. */
+    if (g_td5.ini.paint_active) s_paint_active = 1;
     /* [GEARBOX INI REMOVAL 2026-08-10] The transmission is now a car-select-only
        choice (no INI key). Default AUTO every time you enter the grid; the menu
        toggle is authoritative thereafter (td5_input.c). */

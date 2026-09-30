@@ -619,6 +619,7 @@ int frontend_car_has_paint(int car_index);
 int frontend_car_is_cop(int i);
 int frontend_car_is_td6(int car_index);
 int frontend_car_paintable(int car_index);
+int frontend_paint_overlay_visible(int car_index, uint32_t rgb);
 int frontend_current_car_index(void);
 int frontend_find_surface_by_source(const char *name, const char *archive);
 int frontend_load_car_paint_overlay_surface(int car_index);

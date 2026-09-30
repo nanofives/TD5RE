@@ -1729,11 +1729,16 @@ static void mp_apply_profile_car_color(int p) {
     accent = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
     if (accent == 0) return;                           /* no profile colour set */
     car = s_mp_player_car[p];
-    if (frontend_car_is_td6(car)) {
-        if (!frontend_car_paintable(car)) return;      /* TD6 cop / non-paintable */
+    /* [TD5 CAR PAINT 2026-09-29] A car on the free colour picker takes the
+     * profile accent EXACTLY — that now includes an original car with a paint
+     * bake, which used to be snapped to whichever of its four schemes was
+     * nearest. Cars without a bake keep the nearest-scheme snap. */
+    if (frontend_car_paintable(car)) {
         s_mp_player_color[p]     = (int)accent;        /* exact body tint */
         s_mp_player_color_idx[p] = mp_nearest_td6_palette_idx(accent);
-        TD5_LOG_I(LOG_TAG, "Profile car-colour: P%d car=%d TD6 exact 0x%06X", p, car, accent);
+        TD5_LOG_I(LOG_TAG, "Profile car-colour: P%d car=%d exact 0x%06X", p, car, accent);
+    } else if (frontend_car_is_td6(car)) {
+        return;                                        /* TD6 cop / non-paintable */
     } else {
         if (!frontend_car_has_paint(car)) return;      /* TD5 special / police */
         s_mp_player_paint[p] = td5_nearest_paint(car, accent);
@@ -1742,16 +1747,29 @@ static void mp_apply_profile_car_color(int p) {
     }
 }
 
-/* (Re)load a pane's carpic preview + (TD6) body-paint overlay for its current
+/* [TD5 CAR PAINT 2026-09-29] Latch "the player has chosen a colour". A ported
+ * TD6 car has always taken the INI colour unconditionally, so this changes
+ * nothing for it. An ORIGINAL car with a paint bake needs the latch: for those
+ * the INI colour on its own cannot be told apart from "never opened the picker"
+ * (it defaults to red), and the car must keep its factory paint until a colour
+ * is really chosen. Persisted by the td5_ini_persist_options() that follows,
+ * so the choice survives a relaunch. */
+static void sp_mark_paint_chosen(void) {
+    g_td5.ini.paint_active = 1;
+}
+
+/* (Re)load a pane's carpic preview + body-paint overlay for its current
  * car/paint. Loads the new handle BEFORE dropping the old one so the loader
- * can't reuse the old slot mid-swap. */
+ * can't reuse the old slot mid-swap. A car on the free colour picker (ported
+ * TD6, or [TD5 CAR PAINT 2026-09-29] an original car with a paint bake) has no
+ * scheme index: its base carpic is always 0, with the body drawn by the overlay. */
 static void mp_simul_refresh_pane(int player) {
     int n = s_num_human_players;
     int car = s_mp_player_car[player];
-    int td6 = frontend_car_is_td6(car);
-    int paint = td6 ? 0 : s_mp_player_paint[player];
+    int picker = frontend_car_is_td6(car) || frontend_car_paintable(car);
+    int paint = picker ? 0 : s_mp_player_paint[player];
     int prev_h = frontend_load_car_preview_surface(car, paint);
-    int over_h = (td6 && frontend_car_paintable(car))
+    int over_h = frontend_car_paintable(car)
                  ? frontend_load_car_paint_overlay_surface(car) : 0;
     if (n < 2) n = 2;
     if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
@@ -6199,12 +6217,14 @@ void Screen_CarSelection(void) {
                                                   * preview (no animation on hide — the
                                                   * colour already changed live). */
                     s_paint_active = 1;
+                    sp_mark_paint_chosen();
                     frontend_set_color_panel(0);
                     td5_ini_persist_options();
                     frontend_play_sfx(3);
                     active_button = -1;
                 } else if (s_button_index >= 0) { /* other button -> keep colour, close + act */
                     s_paint_active = 1;
+                    sp_mark_paint_chosen();
                     frontend_set_color_panel(0);
                     td5_ini_persist_options();
                     active_button = s_button_index;

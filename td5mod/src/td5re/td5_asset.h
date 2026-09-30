@@ -301,6 +301,13 @@ void        td5_asset_set_human_td6_color(int slot, int rgb);
  * (TD6_PAT_*). rgb2<0 or pattern==0 (SOLID) renders a single solid colour. */
 void        td5_asset_set_human_td6_paint(int slot, int rgb, int rgb2, int pattern);
 
+/* [TD5 CAR PAINT 2026-09-29] True when this ORIGINAL car ships an offline paint
+ * bake (carmask.png + carskinpaint0.png, from re/tools/bake_td5_car_paint.py),
+ * which is what makes it take the free colour picker instead of the four fixed
+ * paint schemes. False for ported TD6 cars (already paintable by their own
+ * path) and for the cars whose four skins are the same paint. Cached. */
+int         td5_asset_car_paint_bake(int car_index);
+
 /**
  * Load a traffic vehicle model (model%d.prr + skin%d.png) from traffic.zip into
  * the given actor slot (expected range 6..11). Mirrors Phase 4 of

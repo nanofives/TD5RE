@@ -567,6 +567,11 @@ typedef struct TD5_GlobalState {
         int  td6_paint_color;    /* last-selected TD6 paint color (0xRRGGBB); persisted */
         int  td6_paint_color2;   /* secondary TD6 paint color (0xRRGGBB); used by non-SOLID patterns; persisted */
         int  td6_paint_pattern;  /* TD6 paint pattern (TD6_PAT_*); 0 = SOLID; persisted */
+        /* [TD5 CAR PAINT 2026-09-29] 1 once the player has CONFIRMED a colour in
+         * the picker; persisted. An original TD5 car with a paint bake keeps its
+         * factory carskin until this is set (its colours above default to red,
+         * which is otherwise indistinguishable from a deliberate red pick). */
+        int  paint_active;
         int  default_opponents;   /* AutoRace AI-opponent count override; -1 = full grid (5) */
         int  circuit_minimap;     /* 1 = draw the in-race minimap on circuit tracks too (port enhancement; orig disabled it). 0 = faithful (no minimap on circuits) */
         int  default_players;     /* AutoRace local-human count override (N-way split test); -1 = schedule default */

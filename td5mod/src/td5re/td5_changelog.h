@@ -33,6 +33,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 29 (traffic + cop chase)" },
+    { CL_ITEM,    "26 original TD5 cars can now be painted any colour" },
+    { CL_ITEM,    "  from the picker, the way the TD6 cars already could." },
+    { CL_ITEM,    "  Only the main body colour changes: racing stripes, a" },
+    { CL_ITEM,    "  second colour, glass, lights and badges stay put." },
+    { CL_ITEM,    "  Your profile colour is applied to them by default." },
     { CL_ITEM,    "Traffic no longer hits invisible walls where lanes" },
     { CL_ITEM,    "  merge after a fork (it piled up or pushed through)." },
     { CL_ITEM,    "Traffic now takes fork branches too, picking a side" },
