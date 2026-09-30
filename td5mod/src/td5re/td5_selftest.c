@@ -294,12 +294,12 @@ static const RaceScenario k_races[] = {
      * Judged by the shared invariant checker plus the chaos rotation assertion
      * in SS_RACE_POST_MENU. */
     { .name="chaos-coop-4seat", .track=0, .car=-1, .game_type=0, .player_is_ai=1,
-      .dynamics=0, .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
-      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .chaos_seats=4, .depth=ST_DEPTH_RUN_20S },
     { .name="chaos-coop-8seat", .track=0, .car=-1, .game_type=0, .player_is_ai=1,
-      .dynamics=0, .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
-      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .chaos_seats=8, .depth=ST_DEPTH_RUN_20S },
 
     /* ---- Block 3: game overrides ---- */

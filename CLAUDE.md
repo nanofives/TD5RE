@@ -175,6 +175,7 @@ comment — regenerate after adding/splitting modules with
 | `td5_track.c` | Track geometry, segment contacts, strip data |
 | `td5_track_parser.c` | MODELS.DAT parsing (S6 module split, see REFACTOR_PLAN.md) |
 | `td5_track_registry.c` | runtime registry for custom (user-built) tracks. |
+| `td5_geo.c` | GEO TRACK: real-world terrain source for the auto-track |
 | `td5_trackgen.c` | procedural (AUTO-GENERATED) track builder: spec, RNG, centerline, elevation, strip + routes, scenery orchestration, build/regenerate entry points (PORT-ONLY) |
 | `td5_tg_world.c` | auto-track WORLD: seeded heightfield (sea, coast, rivers, mountains, flats), sparse conform/occupancy overlay, terrain classes |
 | `td5_tg_road.c` | auto-track ROAD on the WORLD: terrain-steered centerline walk, structure table (bridge/tunnel by terrain, not by hash), grade-limited terrain-following elevation, road-bed conform |
@@ -216,6 +217,7 @@ comment — regenerate after adding/splitting modules with
 | `td5_assetsrc.c` | Editable-source "pack-on-load" asset layer. |
 | `td5_carbalance.c` | tracked per-car carparam corrections (PORT-ONLY). |
 | `td5_customcar.c` | drop-in custom-car discovery (see td5_customcar.h). |
+| `td5_horns.c` | selectable car-horn catalogue (see td5_horns.h). |
 | `cJSON.c` | (vendored third-party) |
 | `td5_inflate.c` | DEFLATE decompressor bridge |
 | `td5_save.c` | Config/cup save/load with XOR encryption |
