@@ -3782,6 +3782,36 @@ static int trf_wall_ray_enabled(void)
     return s;
 }
 
+/* [TRAFFIC LANE BASE 2026-09-29] A/B knob for the lane-base-aware primary target
+ * (see the target_sub_lane site). Default on. */
+static int trf_lane_base_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_flag_on("TD5RE_TRAFFIC_LANE_BASE");
+        TD5_LOG_I(LOG_TAG, "traffic_lane_base knob: TD5RE_TRAFFIC_LANE_BASE=%d", s);
+    }
+    return s;
+}
+
+/* [TRAFFIC WALL RAY MIN SPEED 2026-09-29] The front-ray wall brake only fires
+ * above this longitudinal speed, the same 0x4000 gate the racers use
+ * (td5_ai.c RAY BRAIN "aimed at a wall while moving"). The rays are cast along
+ * the ROUTE span direction, not the car heading, so a car sitting before a bend
+ * sees the outer rail inside 1.1 span lengths forever: with no speed gate it
+ * braked to v=0 and stayed there until the 90-tick FORCE-reset (Newcastle fork A
+ * spawn band, span 57: 26 wall-ray hits = 26 unsticks per 120 s run).
+ * TD5RE_TRAFFIC_WALL_RAY_MINSPEED=0 restores the ungated brake. */
+static int trf_wall_ray_min_speed(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_int("TD5RE_TRAFFIC_WALL_RAY_MINSPEED", 0x4000, 0, 0x100000);
+        TD5_LOG_I(LOG_TAG, "traffic_wall_ray knob: TD5RE_TRAFFIC_WALL_RAY_MINSPEED=%d", s);
+    }
+    return s;
+}
+
 /* [TRAFFIC LANE TAPER 2026-09-29] A/B knob: TD5RE_TRAFFIC_TAPER=0 disables the
  * lane-end lookahead (default on). */
 static int trf_taper_enabled(void)
@@ -5290,7 +5320,8 @@ void td5_ai_update_traffic_route_plan(int slot) {
                 ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = (int16_t)cruise;
             }
             SmartSense tse; smart_sense(slot, tspan, tsc, tsk, &tse);
-            if (tse.wall_imminent && trf_wall_ray_enabled()) {
+            if (tse.wall_imminent && trf_wall_ray_enabled() &&
+                ACTOR_I32(actor, ACTOR_LONGITUDINAL_SPEED) > trf_wall_ray_min_speed()) {
                 ACTOR_U8(actor, ACTOR_BRAKE_FLAG)       = 1;
                 ACTOR_I16(actor, ACTOR_ENCOUNTER_STEER) = 0;
                 if ((g_ai_frame_counter % 90u) == 0u)
@@ -5431,6 +5462,28 @@ void td5_ai_update_traffic_route_plan(int slot) {
             /* Target sub_lane: start with current sub_lane (default path). */
             int target_sub_lane = fork_target ? fork_sub
                                               : (int)ACTOR_U8(actor, ACTOR_SUB_LANE_INDEX);
+
+            /* [TRAFFIC LANE BASE 2026-09-29] PORT-ONLY. The sub-lane index is
+             * relative to each span's lane base (byte +3 high nibble); the
+             * absolute lane is base + sub. Where a lane opens or closes on the
+             * k=0 side the base moves, and the SAME sub index on the next span is
+             * the lane beside. Moscow 3472 -> 3473 (1930 corridor end): a 368-wide
+             * k=0 sliver closes, base 11 -> 12, so 3472 lane 1 continues as 3473
+             * lane 0. Aiming at 3473 lane 1 put the target 1290 units sideways
+             * over a ~1300 span (ta ~41 deg off the road) and cars pinned
+             * themselves on the outer rail at v~0. The lookahead below already
+             * keeps the absolute lane; do the same for the primary target.
+             * TD5RE_TRAFFIC_LANE_BASE=0 restores the raw sub index. */
+            if (!fork_target && trf_lane_base_enabled() &&
+                branch_traffic_fix_enabled() && slot >= g_traffic_slot_base &&
+                target_span != (int)span_raw) {
+                int tl = td5_track_get_span_lane_count(target_span);
+                int ts = td5_track_span_lane_base((int)span_raw) + target_sub_lane
+                       - td5_track_span_lane_base(target_span);
+                if (ts < 0) ts = 0;
+                if (tl > 0 && ts >= tl) ts = tl - 1;
+                target_sub_lane = ts;
+            }
 
             /* [CONFIRMED @ 0x004361B8-0x004361D8]
              * When the remap found a branch target AND the actor is still on the

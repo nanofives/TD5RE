@@ -447,6 +447,9 @@ void Backend_NoteVerts(const void *verts, unsigned vert_count, unsigned stride);
  * frame (present) so the messages just before a driver crash are on disk. Both
  * are no-ops unless the env var is set and the OS debug layer is installed. */
 int  Backend_D3DDebugEnabled(void);
+/* 1 when the D3D12 backend runs the SM 6.0 DXIL shader set (default); the
+ * game must then hand Backend_CreatePixelShader DXIL too (g_<name>_60). */
+int Backend_ShaderDXIL(void);
 void Backend_DrainD3DDebug(const char *where);
 
 /* [crash-diag 2026-07-22] Push a PRESENT marker into the same ring just before

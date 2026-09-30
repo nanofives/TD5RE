@@ -923,6 +923,11 @@ int  td5re_init(void);
 /** Shutdown all modules in reverse order. */
 void td5re_shutdown(void);
 
+/** Name of the module td5re_shutdown() is currently tearing down ("" before it
+ *  starts, "done" after). Read by the crash filter so an exit-time fault names
+ *  the teardown step it raced. */
+const char *td5re_shutdown_stage(void);
+
 /** Run one frame of the main game loop. Returns 0 to continue, 1 to quit. */
 int  td5re_frame(void);
 

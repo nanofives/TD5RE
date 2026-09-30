@@ -25,10 +25,15 @@
 #include "d3d12_backend_priv.h"
 #include "shaders/rt_pipeline_bytes.h"   /* const unsigned char g_rt_pipeline[] */
 #include "shaders/ps_shadow_rt_bytes_50.h"  /* MULT sun-shadow composite (this TU only) */
+#include "shaders/ps_shadow_rt_bytes_60.h"
 #include "shaders/cs_shadow_atrous_bytes_50.h" /* edge-aware à-trous denoise, R32F (shadow/GI) */
+#include "shaders/cs_shadow_atrous_bytes_60.h"
 #include "shaders/cs_color_atrous_bytes_50.h"  /* edge-aware à-trous denoise, RGBA16F (light/refl) */
+#include "shaders/cs_color_atrous_bytes_60.h"
 #include "shaders/ps_light_rt_bytes_50.h"   /* additive light composite  (this TU only) */
+#include "shaders/ps_light_rt_bytes_60.h"
 #include "shaders/ps_ssr_rt_bytes_50.h"     /* reflection composite      (this TU only) */
+#include "shaders/ps_ssr_rt_bytes_60.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -508,7 +513,9 @@ static int dxr_create_state_object(void)
     sod.Type = D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE;
     sod.NumSubobjects = 5; sod.pSubobjects = so;
 
+    d3d12_pso_crumb_set("dxr_state_object", g_rt_pipeline, sizeof(g_rt_pipeline));
     hr = ID3D12Device5_CreateStateObject(g_dxr.device5, &sod, &IID_ID3D12StateObject, (void **)&g_dxr.so);
+    d3d12_pso_crumb_clear();
     if (FAILED(hr)) { dxr_log("CreateStateObject 0x%08lX", hr); return 0; }
     return 1;
 }
@@ -752,8 +759,11 @@ static int dxr_create_blit(void)
     pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_B8G8R8A8_UNORM;
     pd.DSVFormat = DXGI_FORMAT_UNKNOWN;
     pd.SampleDesc.Count = 1;
-    if (FAILED(ID3D12Device_CreateGraphicsPipelineState((ID3D12Device *)g_dxr.device5, &pd,
-            &IID_ID3D12PipelineState, (void **)&g_dxr.blit_pso))) { dxr_log("blit PSO FAILED"); return 0; }
+    d3d12_pso_crumb_set("dxr_blit_ps", pd.PS.pShaderBytecode, pd.PS.BytecodeLength);
+    hr = ID3D12Device_CreateGraphicsPipelineState((ID3D12Device *)g_dxr.device5, &pd,
+            &IID_ID3D12PipelineState, (void **)&g_dxr.blit_pso);
+    d3d12_pso_crumb_clear();
+    if (FAILED(hr)) { dxr_log("blit PSO FAILED"); return 0; }
     return 1;
 }
 
@@ -1464,7 +1474,7 @@ static int dxr_ensure_p3_srvs(void)
 
 static ID3D12PipelineState *dxr_make_composite_pso(const void *ps, SIZE_T ps_len, int additive)
 {
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd; ID3D12PipelineState *pso = NULL;
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd; ID3D12PipelineState *pso = NULL; HRESULT hr;
     const void *vs = NULL, *cps = NULL; SIZE_T vs_len = 0, cps_len = 0;
     D3D12_RENDER_TARGET_BLEND_DESC *rt;
     d3d12_priv_fullscreen_shaders(&vs, &vs_len, &cps, &cps_len);
@@ -1494,8 +1504,12 @@ static ID3D12PipelineState *dxr_make_composite_pso(const void *ps, SIZE_T ps_len
     pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_B8G8R8A8_UNORM;
     pd.DSVFormat = DXGI_FORMAT_UNKNOWN; pd.SampleDesc.Count = 1;
-    if (FAILED(ID3D12Device_CreateGraphicsPipelineState((ID3D12Device *)g_dxr.device5, &pd,
-            &IID_ID3D12PipelineState, (void **)&pso))) { dxr_log("composite PSO FAILED (add=%d)", additive); return NULL; }
+    d3d12_pso_crumb_set(additive ? "dxr_composite_add_ps" : "dxr_composite_ps",
+                        pd.PS.pShaderBytecode, pd.PS.BytecodeLength);
+    hr = ID3D12Device_CreateGraphicsPipelineState((ID3D12Device *)g_dxr.device5, &pd,
+            &IID_ID3D12PipelineState, (void **)&pso);
+    d3d12_pso_crumb_clear();
+    if (FAILED(hr)) { dxr_log("composite PSO FAILED (add=%d)", additive); return NULL; }
     return pso;
 }
 
@@ -1590,16 +1604,22 @@ static int dxr_ensure_denoise_psos(void)
     if (!g_dxr.denoise_pso) {
         ZeroMemory(&pd, sizeof(pd));
         pd.pRootSignature = g_dxr.denoise_rs;
-        pd.CS.pShaderBytecode = g_cs_shadow_atrous_50; pd.CS.BytecodeLength = sizeof(g_cs_shadow_atrous_50);
-        if (FAILED(ID3D12Device_CreateComputePipelineState((ID3D12Device *)g_dxr.device5, &pd,
-                &IID_ID3D12PipelineState, (void **)&g_dxr.denoise_pso))) { dxr_log("denoise R32 CS PSO FAILED"); return 0; }
+        pd.CS.pShaderBytecode = SH_BC(cs_shadow_atrous); pd.CS.BytecodeLength = SH_LEN(cs_shadow_atrous);
+        d3d12_pso_crumb_set("dxr_denoise_r32_cs", pd.CS.pShaderBytecode, pd.CS.BytecodeLength);
+        hr = ID3D12Device_CreateComputePipelineState((ID3D12Device *)g_dxr.device5, &pd,
+                &IID_ID3D12PipelineState, (void **)&g_dxr.denoise_pso);
+        d3d12_pso_crumb_clear();
+        if (FAILED(hr)) { dxr_log("denoise R32 CS PSO FAILED"); return 0; }
     }
     if (!g_dxr.denoise_color_pso) {   /* RGBA16F variant (light/reflection masks); best-effort */
         ZeroMemory(&pd, sizeof(pd));
         pd.pRootSignature = g_dxr.denoise_rs;
-        pd.CS.pShaderBytecode = g_cs_color_atrous_50; pd.CS.BytecodeLength = sizeof(g_cs_color_atrous_50);
-        if (FAILED(ID3D12Device_CreateComputePipelineState((ID3D12Device *)g_dxr.device5, &pd,
-                &IID_ID3D12PipelineState, (void **)&g_dxr.denoise_color_pso))) { dxr_log("denoise COLOR CS PSO FAILED"); }
+        pd.CS.pShaderBytecode = SH_BC(cs_color_atrous); pd.CS.BytecodeLength = SH_LEN(cs_color_atrous);
+        d3d12_pso_crumb_set("dxr_denoise_color_cs", pd.CS.pShaderBytecode, pd.CS.BytecodeLength);
+        hr = ID3D12Device_CreateComputePipelineState((ID3D12Device *)g_dxr.device5, &pd,
+                &IID_ID3D12PipelineState, (void **)&g_dxr.denoise_color_pso);
+        d3d12_pso_crumb_clear();
+        if (FAILED(hr)) { dxr_log("denoise COLOR CS PSO FAILED"); }
     }
     return g_dxr.denoise_pso != NULL;
 }
@@ -1679,27 +1699,27 @@ static int dxr_lighting_pass(const void *cb, UINT cb_size, int mode)
     if (!dxr_ensure_init() || !dxr_ensure_masks(e.width, e.height)) return 0;
     if (mode == 2) {
         if (!dxr_ensure_p3_srvs()) return 0;
-        if (!g_dxr.refl_pso) g_dxr.refl_pso = dxr_make_composite_pso(g_ps_ssr_rt_50, sizeof(g_ps_ssr_rt_50), 3);
+        if (!g_dxr.refl_pso) g_dxr.refl_pso = dxr_make_composite_pso(SH_BC(ps_ssr_rt), SH_LEN(ps_ssr_rt), 3);
         comp = g_dxr.refl_pso;
         { static int dbg = -1; static ID3D12PipelineState *s_rdbg;
           if (dbg < 0) { const char *ev = getenv("TD5RE_RT_REFLDBG"); dbg = (ev && ev[0] && ev[0] != '0') ? 1 : 0; }
-          if (dbg) { if (!s_rdbg) s_rdbg = dxr_make_composite_pso(g_ps_ssr_rt_50, sizeof(g_ps_ssr_rt_50), 2);
+          if (dbg) { if (!s_rdbg) s_rdbg = dxr_make_composite_pso(SH_BC(ps_ssr_rt), SH_LEN(ps_ssr_rt), 2);
                      if (s_rdbg) comp = s_rdbg; } }
     } else if (mode == 1) {
-        if (!g_dxr.light_pso)  g_dxr.light_pso  = dxr_make_composite_pso(g_ps_light_rt_50,  sizeof(g_ps_light_rt_50),  1);
+        if (!g_dxr.light_pso)  g_dxr.light_pso  = dxr_make_composite_pso(SH_BC(ps_light_rt),  SH_LEN(ps_light_rt),  1);
         comp = g_dxr.light_pso;
     } else if (mode == 3) {
         /* [P4] GI: rgen_ao writes the FINAL multiplier, composite MULT (reuse the
          * shadow composite PSO, which just multiplies rgb by the mask). */
-        if (!g_dxr.shadow_pso) g_dxr.shadow_pso = dxr_make_composite_pso(g_ps_shadow_rt_50, sizeof(g_ps_shadow_rt_50), 0);
+        if (!g_dxr.shadow_pso) g_dxr.shadow_pso = dxr_make_composite_pso(SH_BC(ps_shadow_rt), SH_LEN(ps_shadow_rt), 0);
         comp = g_dxr.shadow_pso;
     } else {
-        if (!g_dxr.shadow_pso) g_dxr.shadow_pso = dxr_make_composite_pso(g_ps_shadow_rt_50, sizeof(g_ps_shadow_rt_50), 0);
+        if (!g_dxr.shadow_pso) g_dxr.shadow_pso = dxr_make_composite_pso(SH_BC(ps_shadow_rt), SH_LEN(ps_shadow_rt), 0);
         comp = g_dxr.shadow_pso;
         /* Debug: opaque grayscale mask (TD5RE_RT_MASK) -- shadow pass only. */
         { static int dbg = -1; static ID3D12PipelineState *s_dbgpso;
           if (dbg < 0) { const char *ev = getenv("TD5RE_RT_MASK"); dbg = (ev && ev[0] && ev[0] != '0') ? 1 : 0; }
-          if (dbg) { if (!s_dbgpso) s_dbgpso = dxr_make_composite_pso(g_ps_shadow_rt_50, sizeof(g_ps_shadow_rt_50), 2);
+          if (dbg) { if (!s_dbgpso) s_dbgpso = dxr_make_composite_pso(SH_BC(ps_shadow_rt), SH_LEN(ps_shadow_rt), 2);
                      if (s_dbgpso) comp = s_dbgpso; } }
     }
     if (!comp) return 0;
@@ -1885,9 +1905,9 @@ void Backend_RTWarmupBegin(void)
      * (shadow=MULT, GI reuses shadow, light=additive, reflection=src-alpha). PSO
      * creation only needs the device + root sig + shader bytecode -- no render
      * context -- so it is safe to force here. */
-    if (!g_dxr.shadow_pso) g_dxr.shadow_pso = dxr_make_composite_pso(g_ps_shadow_rt_50, sizeof(g_ps_shadow_rt_50), 0);
-    if (!g_dxr.light_pso)  g_dxr.light_pso  = dxr_make_composite_pso(g_ps_light_rt_50,  sizeof(g_ps_light_rt_50),  1);
-    if (!g_dxr.refl_pso)   g_dxr.refl_pso   = dxr_make_composite_pso(g_ps_ssr_rt_50,    sizeof(g_ps_ssr_rt_50),    3);
+    if (!g_dxr.shadow_pso) g_dxr.shadow_pso = dxr_make_composite_pso(SH_BC(ps_shadow_rt), SH_LEN(ps_shadow_rt), 0);
+    if (!g_dxr.light_pso)  g_dxr.light_pso  = dxr_make_composite_pso(SH_BC(ps_light_rt),  SH_LEN(ps_light_rt),  1);
+    if (!g_dxr.refl_pso)   g_dxr.refl_pso   = dxr_make_composite_pso(SH_BC(ps_ssr_rt),    SH_LEN(ps_ssr_rt),    3);
     dxr_ensure_p3_srvs();       /* reflection VB/IB/GeoRecord SRVs */
     dxr_ensure_denoise_psos();  /* à-trous compute PSOs (best-effort) */
 

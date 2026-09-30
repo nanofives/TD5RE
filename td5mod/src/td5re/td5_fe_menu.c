@@ -44,6 +44,27 @@
 #include "../../ddraw_wrapper/src/shaders/ps_arrow_bytes.h"       /* g_ps_arrow bytecode */
 #include "../../ddraw_wrapper/src/shaders/ps_cursor_bytes.h"      /* g_ps_cursor bytecode */
 #include "../../ddraw_wrapper/src/shaders/ps_gauge_bytes.h"       /* g_ps_gauge bytecode */
+/* [SM5 GAME SHADERS 2026-09-29] The D3D12 backend is fed the SM 5.0 build of
+ * these shaders (g_*_50, same HLSL, compile_shaders.bat). The ps_4_0 arrays were
+ * the retired D3D11 backend's; D3D12 had to convert them DXBC->DXIL in
+ * dxilconv.dll, which crashed (+0xB20DA, main thread) on a cold shader cache --
+ * crash.log pso_in_flight named ps=13 = the ps_4_0 FX decal (FNV 887F0C15).
+ * TD5RE_SHADER_SM4=1 restores the ps_4_0 arrays for A/B. */
+#include "../../ddraw_wrapper/src/shaders/ps_msdf_bytes_50.h"
+#include "../../ddraw_wrapper/src/shaders/ps_roundrect_bytes_50.h"
+#include "../../ddraw_wrapper/src/shaders/ps_arrow_bytes_50.h"
+#include "../../ddraw_wrapper/src/shaders/ps_cursor_bytes_50.h"
+#include "../../ddraw_wrapper/src/shaders/ps_gauge_bytes_50.h"
+#include "../../ddraw_wrapper/src/shaders/ps_msdf_bytes_60.h"      /* [DXIL 2026-09-29] */
+#include "../../ddraw_wrapper/src/shaders/ps_roundrect_bytes_60.h"
+#include "../../ddraw_wrapper/src/shaders/ps_arrow_bytes_60.h"
+#include "../../ddraw_wrapper/src/shaders/ps_cursor_bytes_60.h"
+#include "../../ddraw_wrapper/src/shaders/ps_gauge_bytes_60.h"
+#include "td5_config.h"   /* td5_env_int */
+/* The backend's shader set decides: DXIL (default) needs the _60 build, since
+ * a PSO must not mix DXBC and DXIL stages. */
+#define FE_PS(n) (Backend_ShaderDXIL() ? (const void *)g_##n##_60 :                   s_fe_sm4 ? (const void *)g_##n : (const void *)g_##n##_50)
+#define FE_PS_LEN(n) (Backend_ShaderDXIL() ? sizeof(g_##n##_60) :                       s_fe_sm4 ? sizeof(g_##n) : sizeof(g_##n##_50))
 
 #define LOG_TAG "frontend"
 #include "td5_color.h"
@@ -244,6 +265,9 @@ void frontend_ensure_vui_shaders(void) {
 
     if (!g_td5.ini.vector_ui || !Backend_HasDevice()) return;
 
+    static int s_fe_sm4 = -1;
+    if (s_fe_sm4 < 0) s_fe_sm4 = td5_env_int("TD5RE_SHADER_SM4", 0, 0, 1);
+
     if (s_fe_vui_gen != g_backend.device_generation) {
         int had = (s_ps_msdf || s_ps_roundrect || s_ps_arrow || s_ps_cursor ||
                    s_ps_gauge || s_rr_cb || s_gauge_cb);
@@ -264,14 +288,14 @@ void frontend_ensure_vui_shaders(void) {
 
     /* ---- MSDF text pixel shader (shared by HUD/pause/SmallText SDF atlases) ---- */
     if (!s_ps_msdf) {
-        s_ps_msdf = Backend_CreatePixelShader(g_ps_msdf, sizeof(g_ps_msdf));
+        s_ps_msdf = Backend_CreatePixelShader(FE_PS(ps_msdf), FE_PS_LEN(ps_msdf));
         if (!s_ps_msdf)
             TD5_LOG_W(LOG_TAG, "MSDF pixel shader create failed");
     }
 
     /* ---- Procedural rounded-rect button shader + constant buffer ---- */
     if (!s_ps_roundrect) {
-        s_ps_roundrect = Backend_CreatePixelShader(g_ps_roundrect, sizeof(g_ps_roundrect));
+        s_ps_roundrect = Backend_CreatePixelShader(FE_PS(ps_roundrect), FE_PS_LEN(ps_roundrect));
         if (!s_ps_roundrect)
             TD5_LOG_W(LOG_TAG, "roundrect shader create failed");
     }
@@ -285,21 +309,21 @@ void frontend_ensure_vui_shaders(void) {
 
     /* ---- Selector ◄► arrow shader ---- */
     if (!s_ps_arrow) {
-        s_ps_arrow = Backend_CreatePixelShader(g_ps_arrow, sizeof(g_ps_arrow));
+        s_ps_arrow = Backend_CreatePixelShader(FE_PS(ps_arrow), FE_PS_LEN(ps_arrow));
         if (!s_ps_arrow)
             TD5_LOG_W(LOG_TAG, "arrow shader create failed");
     }
 
     /* ---- Mouse cursor shader ---- */
     if (!s_ps_cursor) {
-        s_ps_cursor = Backend_CreatePixelShader(g_ps_cursor, sizeof(g_ps_cursor));
+        s_ps_cursor = Backend_CreatePixelShader(FE_PS(ps_cursor), FE_PS_LEN(ps_cursor));
         if (!s_ps_cursor)
             TD5_LOG_W(LOG_TAG, "cursor shader create failed");
     }
 
     /* ---- Analog gauge dial shader + constant buffer (in-race HUD) ---- */
     if (!s_ps_gauge) {
-        s_ps_gauge = Backend_CreatePixelShader(g_ps_gauge, sizeof(g_ps_gauge));
+        s_ps_gauge = Backend_CreatePixelShader(FE_PS(ps_gauge), FE_PS_LEN(ps_gauge));
         if (!s_ps_gauge)
             TD5_LOG_W(LOG_TAG, "gauge shader create failed");
     }
