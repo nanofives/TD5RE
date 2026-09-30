@@ -186,6 +186,7 @@ comment — regenerate after adding/splitting modules with
 | `td5_tg_terrain.c` | auto-track TERRAIN + BIOMES: trees, props, road surfaces, biome table + adjacency, snow, sea, outskirts, topo authority, forest side roads, tree bands, ponds, ground chain, gantry/sign context |
 | `td5_tg_bridge.c` | auto-track BRIDGES, TUNNELS, OVERPASSES and WATER: water plane, bore vs underpass, portal, overpass, run coalesce, structural tie, median faces, measurement harness |
 | `td5_tg_furniture.c` | auto-track roadside FURNITURE: guardrails, start/finish gantry, curve direction signage |
+| `td5_tg_prefab.c` | auto-track PREFABS: shipped set-piece geometry lifted out |
 | `td5_tg_pages.c` | auto-track TEXTURES.DAT: every page emitter (procedural + real shipped pages) |
 | `td5_trackgen_preview.c` | background route-preview worker (PORT-ONLY). |
 | `td5_trackgen_stream.c` | streamed scenery worker (PORT-ONLY). |
@@ -203,6 +204,7 @@ comment — regenerate after adding/splitting modules with
 | `td5_fe_mp_setup.c` | Multiplayer setup: split layouts, car-select grid, |
 | `td5_fe_carstats.c` | Car stat bars + physics-derived MORE STATS panel |
 | `td5_fe_devscreens.c` | CHANGELOG + PENDING TO TEST dev screens |
+| `td5_fe_chaos.c` | CHAOS CO-OP frontend: the CHAOS TEAMS seat/role board |
 | `td5_font.c` | runtime TTF glyph cache (stb_truetype). See td5_font.h. |
 | `td5_i18n.c` | runtime string localization (PORT-ONLY). See td5_i18n.h. |
 | `td5_hud.c` | Race HUD, minimap, text rendering, pause menu overlay |
@@ -233,6 +235,8 @@ comment — regenerate after adding/splitting modules with
 | `td5_arcade.c` | ARCADE mode: 3x-collision launch + collectible road power-ups |
 | `td5_damage.c` | GTA4-style car damage system (PORT-ONLY) |
 | `td5_tutorial.c` | First-race controller-tutorial overlay (PORT ENHANCEMENT). |
+| `td5_chaos.c` | CHAOS CO-OP: seat table, role map, rotation (PORT-ONLY) |
+| `td5_chaos_fold.c` | CHAOS CO-OP: N-seat -> 2-car input fold (PORT-ONLY) |
 | `td5_laneassist.c` | optional steering aid (PORT-ONLY, default OFF) |
 | `td5_fmv.c` | FMV playback module (replaces EA TGQ codec) |
 | `td5_benchmark.c` | Benchmark frame-rate capture + report |

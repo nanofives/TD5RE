@@ -1193,6 +1193,31 @@ static const SSW_NavStep k_ssw_ui_guide[]   = { { TD5_SCREEN_MAIN_MENU, 7 },
 static const SSW_NavStep k_ssw_mp_guide[]   = { { TD5_SCREEN_MAIN_MENU, 7 },
                                                 { TD5_SCREEN_CHANGELOG, 2 },
                                                 { TD5_SCREEN_UI_GUIDE, 5 } };
+/* [CHAOS CO-OP 2026-09-30] TD5_SCREEN_CHAOS_TEAMS (54) has NO route, on purpose
+ * — do not "fix" this by adding one. A faithful walk would be
+ *   MAIN MENU 2 -> MP LOBBY (30) -> MP MODE VOTE (35) -> MP MODE CONFIG (36) -> 54
+ * and it is unreachable by injected keypresses at step one: the lobby only
+ * advances on a real per-device press-to-join edge (td5_plat_input_scan_join),
+ * and the CHAOS row on MODE VOTE stays greyed until 4, 6 or 8 devices have
+ * joined (frontend_chaos_mode_selectable). --StartScreen cannot fabricate pads.
+ *
+ * A partial route (just the lobby step) would be strictly WORSE than none: the
+ * walker can never see screen 54, so it burns its full 300-frame deadline, logs
+ * "stalled ... falling back to direct jump", and lands in the SAME state the
+ * direct jump reaches immediately — the lobby entry clears s_mp_flow anyway, so
+ * nothing is gained. Returning NULL is this walker's designed way to say "no
+ * click route" (see the header comment); the log then reads
+ * "StartScreen=54: direct jump (no nav route)".
+ *
+ * So the way in is the direct jump, which is what --StartScreen=54 already does
+ * on its own; --StartScreenDirect=1 is accepted and equivalent here. On direct
+ * entry the board seeds a dev FAKE ROSTER of 4 seats (chaos_screen_init in
+ * td5_fe_chaos.c, dev builds only, with a "DEV: FAKE ROSTER" footer) so the
+ * layout renders for a framedump. Seat CLAIMING is not reachable that way and
+ * must be tested by hand with real pads — see pending_to_test.csv.
+ * This matches every other MP-setup screen: 35, 36, 39 (MP TEAM SELECT) and 49
+ * have no route either, and 20/39 use the same env-fabricated-roster + direct
+ * jump pattern (TD5RE_MP_SIMUL_PREVIEW). */
 
 #define SSW_ROUTE(arr) do { *out_len = (int)(sizeof(arr)/sizeof(arr[0])); return arr; } while (0)
 static const SSW_NavStep *startscreen_route(int target, int *out_len)

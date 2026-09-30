@@ -180,14 +180,21 @@ static int chaos_team_size(void) {
 }
 
 static uint32_t chaos_player_color(int p) {
-    /* Same rule as the other MP screens: the player's CHOSEN profile accent,
-     * falling back to the built-in per-slot palette when none was picked. */
-    uint32_t rgb = 0;
-    if (p >= 0 && p < TD5_MAX_HUMAN_PLAYERS)
-        rgb = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
-    if (rgb == 0)
-        rgb = k_mp_player_colors[((p < 0) ? 0 : p) % TD5_MAX_HUMAN_PLAYERS] & 0x00FFFFFFu;
-    return rgb | 0xFF000000u;
+    /* [CHAOS CO-OP 2026-09-30] ONE seat-colour source for the board and the
+     * in-race role strip: td5_chaos_seat_color(). It carries the literal
+     * k_mp_player_colors[0..7] values, so the board still looks exactly as it
+     * did, and the HUD can now agree with it (the HUD cannot reach
+     * s_mp_player_accent — it is frontend-internal and indexed by LOCAL setup
+     * slot, of which this mode has only two, one per team car).
+     *
+     * The per-profile accent override the other MP screens apply was DROPPED
+     * here for that reason: keeping it would have made the board and the strip
+     * disagree the moment a player picked a custom colour, and there is no seam
+     * for the HUD to read a per-SEAT accent. In practice the board looks
+     * identical anyway: on entry the lobby has already seeded every accent from
+     * k_mp_player_colors (td5_fe_net.c), and the colour picker lives further
+     * down the flow in the car-select phase. */
+    return td5_chaos_seat_color(p);
 }
 
 static void chaos_small_centered(float cx_px, float y_px, const char *t,
