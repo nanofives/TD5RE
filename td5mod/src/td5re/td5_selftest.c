@@ -58,6 +58,7 @@
 #include "td5_net.h"
 #include "td5_backend_capture.h"
 #include "td5_rt.h"   /* pin the harness to LOW (RT render-only; avoids 8x-FF TDR) */
+#include "td5_chaos.h"   /* [CHAOS CO-OP] read-only rotation-step query + config reset */
 #include "td5_race_state.h"                       /* read-only actor roster + progress queries */
 #include "../../../re/include/td5_actor_struct.h" /* full TD5_Actor (world_pos, velocity, airborne) */
 
@@ -107,7 +108,15 @@ static int      s_row_count;
 typedef enum {
     ST_DEPTH_COUNTDOWN   = 0,  /* run to GAMESTATE_RACE + a short settle, then end */
     ST_DEPTH_RUN_5S      = 1,  /* run ~5 sim-seconds of racing */
-    ST_DEPTH_RUN_FINISH  = 2   /* run to the real finish / forced end-checkpoint */
+    ST_DEPTH_RUN_FINISH  = 2,  /* run to the real finish / forced end-checkpoint */
+    /* [CHAOS CO-OP 2026-09-30] ~20 sim-seconds. Added for the chaos rows, which
+     * need a race long enough to contain a whole rotation cycle: the TIME
+     * trigger fires at ST_CHAOS_PERIOD_SECS (10 s = 300 ticks) and then arms a
+     * 3 s swap countdown (TD5_CHAOS_SWAP_COUNTDOWN_TICKS = 90), so the rotation
+     * step only increments at ~390 RACING ticks — and the race's own 3-2-1 start
+     * countdown runs before the chaos clock starts. RUN_5S (300) would end the
+     * race before the first swap and the assertion below would be a false FAIL. */
+    ST_DEPTH_RUN_20S     = 3
 } StDepth;
 
 /* -1 (or -2 where -1 is meaningful) = keep the boot-time base value. */
@@ -160,7 +169,21 @@ typedef struct {
     int rt;                /* 0 = suite default (LOW), 1 = force RT HIGH for this row */
     int ff;                /* 0 = suite FF, else per-scenario fast-forward multiplier */
     int depth;             /* StDepth */
+    /* [CHAOS CO-OP 2026-09-30] 0 = off, else 4/6/8 = launch this race as CHAOS
+     * CO-OP with that many fabricated seats (TD5RE_CHAOS_FAKE_SEATS; the knob
+     * is what makes a controllers-only mode reachable without N pads). The
+     * trigger is pinned to TIME / ST_CHAOS_PERIOD_SECS so the swap does not
+     * depend on where the car got to, and the row additionally asserts that a
+     * rotation actually happened. Env knobs are set in st_apply_scenario and
+     * cleared in st_reset_scenario_fields, so later rows are untouched. */
+    int chaos_seats;
 } RaceScenario;
+
+/* [CHAOS CO-OP 2026-09-30] Pinned chaos-row knobs. TIME (3) is the only trigger
+ * whose firing is independent of track class and of how far the cars drove, so
+ * it is the deterministic one to gate on; 10 s is the shortest legal period. */
+#define ST_CHAOS_TRIGGER_TIME  "3"
+#define ST_CHAOS_PERIOD_SECS   "10"
 
 /* [NEW SUITE 2026-08-07] Deterministic breakage-detector matrix (replaces the
  * old golden/degradation matrix). Every row runs with the fixed CRT seed pinned
@@ -271,6 +294,32 @@ static const RaceScenario k_races[] = {
       .traffic=0, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
       .lane_assist=0, .auto_gearbox=1, .mp_mode=4, .mp_ai_players=8, .depth=ST_DEPTH_COUNTDOWN },
 
+    /* ---- Block 2b: CHAOS CO-OP (2026-09-30) ------------------------------------
+     * One car per TEAM, many seats per car (docs/plans/CHAOS_COOP_MODE_PLAN.md).
+     * chaos_seats fabricates the seat table via TD5RE_CHAOS_FAKE_SEATS, which
+     * also collapses the race to 2 cars / 2 panes and 0 AI opponents at race
+     * init — so mp_mode / mp_ai_players / players are deliberately NOT set here;
+     * setting them would fight that block. 4 seats = 2 teams of 2 (STEER +
+     * PEDALS), 8 seats = 2 teams of 4 (LEFT/RIGHT/THROTTLE/BRAKE), i.e. the two
+     * ends of the role table. Moscow, no traffic, no opponents.
+     *
+     * player_is_ai=1 (as in every other MP row) puts BOTH car slots on AI
+     * autopilot, so the cars actually drive and the invariant checker's
+     * "no progress" signal stays clean. That means these rows exercise the
+     * rotation / seat-table / HUD / lifecycle path, NOT human input through the
+     * fold: all fake seats are bound to device 0 and nothing presses anything.
+     * Per-seat input is a MANUAL check with real pads (pending_to_test.csv).
+     * Judged by the shared invariant checker plus the chaos rotation assertion
+     * in SS_RACE_POST_MENU. */
+    { .name="chaos-coop-4seat", .track=0, .car=-1, .game_type=0, .player_is_ai=1,
+      .dynamics=0, .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .chaos_seats=4, .depth=ST_DEPTH_RUN_20S },
+    { .name="chaos-coop-8seat", .track=0, .car=-1, .game_type=0, .player_is_ai=1,
+      .dynamics=0, .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .chaos_seats=8, .depth=ST_DEPTH_RUN_20S },
+
     /* ---- Block 3: game overrides ---- */
     { .name="ovr-span-offset-500",   .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
       .dynamics=0, .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
@@ -354,6 +403,15 @@ static const ScreenStep k_screens_full[] = {
     { "scr-cup-failed",      TD5_SCREEN_CUP_FAILED,         1, 1 },
     { "scr-cup-won",         TD5_SCREEN_CUP_WON,            1, 1 },
     { "scr-mp-lobby",        TD5_SCREEN_MP_LOBBY,           0, 0 },
+    /* [CHAOS CO-OP 2026-09-30] The seat/role board. This phase jumps screens
+     * directly (td5_frontend_set_screen), so there is no lobby behind it and
+     * s_mp_flow is 0 — chaos_screen_init then seeds its dev FAKE ROSTER of 4 and
+     * the board renders a legal 2x2 layout. That WARN line is expected and does
+     * not fail the row (only ERR lines do). allow_redirect stays 0: the board
+     * must NOT bounce, whatever the roster is. What this row covers is the
+     * screen's init/render/nav-reachability, not seat claiming — claiming needs
+     * real per-device input and is a manual check. */
+    { "scr-chaos-teams",     TD5_SCREEN_CHAOS_TEAMS,        0, 0 },
     { "scr-changelog",       TD5_SCREEN_CHANGELOG,          0, 0 },
     { "scr-pending-test",    TD5_SCREEN_PENDING_TEST,       0, 0 },
     { "scr-ui-guide",        TD5_SCREEN_UI_GUIDE,           0, 0 },
@@ -590,6 +648,22 @@ static void st_reset_scenario_fields(void)
     g_td5.ini.mp_ai_players      = 0;
     g_td5.ini.lighting_quality   = 0;   /* [CHUNK 8] back to the suite's LOW default */
     td5_rt_set_quality(0);
+    /* [CHAOS CO-OP 2026-09-30] Disarm the mode completely between rows. Three
+     * things have to go, or a chaos row would leak into every row after it:
+     *   1. the env knobs — the fake-seats block re-reads them at EVERY race init
+     *      (_putenv with an empty value, not SetEnvironmentVariableA: the knobs
+     *      are read through getenv, which sees the CRT's copy of the
+     *      environment, and only _putenv updates that one);
+     *   2. the committed seat table — td5_chaos_active() keys off a LEGAL
+     *      seat_count, so clearing the config alone already makes the mode inert;
+     *   3. mp_mode_config.mode — nothing else resets it: the AutoRace MP
+     *      override only writes it when ini.mp_mode >= 0, which is -1 here. */
+    _putenv("TD5RE_CHAOS_FAKE_SEATS=");
+    _putenv("TD5RE_CHAOS_TRIGGER=");
+    _putenv("TD5RE_CHAOS_PERIOD=");
+    td5_chaos_commit_config(NULL);
+    if (g_td5.mp_mode_config.mode == TD5_MP_MODE_CHAOS_COOP)
+        g_td5.mp_mode_config.mode = TD5_MP_MODE_RACE;
 }
 
 /* ------------------------------------------------------------------------
@@ -784,6 +858,8 @@ static int st_depth_ticks(int depth)
         return td5_env_int("TD5RE_SELFTEST_COUNTDOWN_TICKS", 120, 30, 4000);
     case ST_DEPTH_RUN_5S:
         return td5_env_int("TD5RE_SELFTEST_RUN5S_TICKS", 300, 60, 8000);
+    case ST_DEPTH_RUN_20S:   /* [CHAOS CO-OP] see the enum comment for the 600 */
+        return td5_env_int("TD5RE_SELFTEST_RUN20S_TICKS", 600, 300, 8000);
     default:
         return s_race_ticks;   /* RUN_FINISH uses natural_finish + long leash */
     }
@@ -1446,6 +1522,18 @@ static void st_apply_scenario(const RaceScenario *sc)
                                       g_td5.ini.td6_paint_pattern = 0; }
     if (sc->mp_mode           >= 0) g_td5.ini.mp_mode            = sc->mp_mode;
     if (sc->mp_ai_players     >  0) g_td5.ini.mp_ai_players      = sc->mp_ai_players;
+    /* [CHAOS CO-OP 2026-09-30] Arm the fake-seat table for a chaos row. The
+     * knobs are read with getenv at race init, so they must go through _putenv
+     * (the CRT environment), not SetEnvironmentVariableA (the Win32 block) —
+     * the two are not kept in sync. st_reset_scenario_fields ran just above and
+     * already cleared all three, so a non-chaos row needs nothing here. */
+    if (sc->chaos_seats > 0) {
+        char buf[48];
+        snprintf(buf, sizeof buf, "TD5RE_CHAOS_FAKE_SEATS=%d", sc->chaos_seats);
+        _putenv(buf);
+        _putenv("TD5RE_CHAOS_TRIGGER=" ST_CHAOS_TRIGGER_TIME);
+        _putenv("TD5RE_CHAOS_PERIOD="  ST_CHAOS_PERIOD_SECS);
+    }
     /* [CHUNK 8] RT coverage: the suite pins LOW at boot (8x-FF cold RT frames
      * TDR). An rt row forces RT HIGH -- only when the GPU actually supports it
      * -- and MUST run at a safe FF (see the rt row's .ff=1) so it doesn't trip
@@ -2138,6 +2226,41 @@ static void st_tick_races(uint32_t now)
                         status = ST_FAIL;
                         snprintf(note, sizeof(note),
                                  "natural finish did not reach results screen");
+                    }
+                }
+                /* [CHAOS CO-OP 2026-09-30] A chaos row must have ROTATED. The
+                 * whole mode hangs off the rotation firing, and every other
+                 * signal (seat table, HUD strip, role lookup) is inert-looking
+                 * rather than wrong when it does not — so without this the row
+                 * would PASS on a mode that never engaged at all.
+                 *
+                 * Read through the module's own read-only query rather than
+                 * scraping race.log for "[CHAOS] swap": the counters are plain
+                 * statics that survive the race teardown (nothing clears them
+                 * until the next td5_chaos_race_begin), so this is exact, and it
+                 * does not depend on the log sink being enabled or on a text
+                 * format nobody promised to keep. Both teams are checked: they
+                 * rotate on their OWN milestones, and under the TIME trigger
+                 * both share one race clock, so both must have swapped. */
+                if (sc->chaos_seats > 0) {
+                    int st0 = td5_chaos_rotation_step(0);
+                    int st1 = td5_chaos_rotation_step(1);
+                    if (st0 <= 0 || st1 <= 0) {
+                        status = ST_FAIL;
+                        snprintf(note, sizeof(note),
+                                 "chaos: no swap in %d ticks (steps %d/%d, "
+                                 "seats %d, TIME trigger %ss)",
+                                 row->sim_ticks, st0, st1, sc->chaos_seats,
+                                 ST_CHAOS_PERIOD_SECS);
+                    } else {
+                        /* APPEND, don't overwrite: st_inv_result's note carries
+                         * the per-row telemetry (air/spd/jmp/prog/span) that is
+                         * recorded even on PASS. Truncates safely if full. */
+                        size_t nl = strlen(note);
+                        if (nl < sizeof(note) - 1)
+                            snprintf(note + nl, sizeof(note) - nl,
+                                     " chaos=%d seats swaps %d/%d",
+                                     sc->chaos_seats, st0, st1);
                     }
                 }
                 /* [NEW SUITE] a MAIN packed row that took invariant damage
