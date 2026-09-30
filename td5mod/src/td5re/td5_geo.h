@@ -121,6 +121,49 @@ int  td5_geo_route_count(void);            /* nodes, 0 when no route */
 int  td5_geo_route_node(int i, double *x, double *z, int *lanes);
 const char *td5_geo_route_source(void);    /* path it came from, "" if none */
 
+/* ------------------------------------------------- grade separations ------
+ * [OPTION B 2026-09-30] docs/plans/GEO_TRACK_OSM_PLAN.md section 5, Option B.
+ *
+ * A real route through a city crosses ITSELF, and the crossing-safe localiser
+ * (td5_track.c, TD5RE_XSPAN) makes that survivable: it keeps the car on the leg
+ * it was already driving. What it does not do is make the crossing a road
+ * LAYOUT -- two carriageways at the same height over the same ground are still
+ * one piece of tarmac, and a car that changes lane there has legitimately
+ * arrived on the other leg. So the generator BUILDS the separation: one leg
+ * becomes a deck over the other, with grade-limited ramps, and the two decks
+ * then differ in Y by metres -- which is also the key the localiser's height
+ * test reads.
+ *
+ * WHO DECIDES WHAT. geo_condition.py decides WHICH leg goes over, because the
+ * walk sees the route one 64-span window at a time and cannot know at the first
+ * leg that a second one is coming. The decision is deterministic and draws no
+ * random number (an extra RNG draw would move the road for every existing seed
+ * -- td5_trackgen_internal.h:1290-1296). The ENGINE re-derives the ramp LENGTH,
+ * because that depends on the per-biome grade caps only it can see; the
+ * `ramp_spans` below is the conditioner's advisory minimum.
+ *
+ * BACKWARD COMPATIBILITY IS PART OF THE CONTRACT. `grade_separations` is an
+ * optional key. A ROUTE.JSON written before Option B has none, the table is
+ * then empty, and the build is bit-for-bit the pre-Option-B build of that same
+ * route. Do not make the key required, and do not change what an absent key
+ * means. */
+#define TD5_GEO_XSEP_MAX 16
+/* TD5_TG_UP_CLEAR (2600, the clearance the NETWORK underpass crossings use)
+ * plus TD5_TG_BRIDGE_UNDER (480, the deck girder's depth): the fallback when a
+ * file names a range but no clearance. */
+#define TD5_GEO_XSEP_LIFT_DEFAULT 3080.0
+
+typedef struct {
+    int    over_lo, over_hi;      /* span range that is RAISED (the deck)     */
+    int    under_lo, under_hi;    /* span range that stays at grade           */
+    int    ramp_spans;            /* conditioner's advisory ramp length       */
+    double clearance_units;       /* deck carriageway above the lower one     */
+} TD5_GeoXSep;
+
+int  td5_geo_xsep_count(void);
+/* NULL when `i` is out of range, so a caller can loop without a count. */
+const TD5_GeoXSep *td5_geo_xsep(int i);
+
 /* ------------------------------------------------------- place selection ---
  * [GEO PHASE 4 2026-09-30] The selected place is the env knob TD5RE_GEO_PLACE,
  * mirrored to re/assets/geo/SELECTED.TXT so the browser selector

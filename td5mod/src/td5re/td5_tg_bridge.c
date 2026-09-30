@@ -1651,6 +1651,40 @@ double tg_bridge_water_y(const TG_NodeList *nl, int si)
     return tg_bridge_deck_y(nl, si) - TD5_TG_BRIDGE_CHASM - 300.0;
 }
 
+/* [OPTION B 2026-09-30] May span si's bridge run lay its river plane?
+ *
+ * A DRY bridge run keeps a canyon river a fixed depth below its own deck (see
+ * the R17 note in tg_bridge_water_y: deck - CHASM - 300). That is right for an
+ * inland gorge crossing and wrong for a GEO grade separation, where what the
+ * deck flies over is another CARRIAGEWAY only TD5_TG_UP_CLEAR +
+ * TD5_TG_BRIDGE_UNDER = 3080 units below it: the plane would land 380 units
+ * ABOVE the lower road and sheet TD5_TG_BRIDGE_WATER_HALF (32000) either side
+ * of it, which is the lower leg flooded.
+ *
+ * Tested over the whole LIFT WINDOW (ramp spans included, via
+ * tg_xsep_run_span), not just the deck, because the river's level comes from
+ * the RUN's minimum deck -- one plane for the run -- so suppressing it span by
+ * span would leave the approach spans laying the same surface.
+ *
+ * A grade separation that also happens to cross real water keeps its water:
+ * tg_bridge_run_is_water is the run's own vote, and where it says wet the plane
+ * is the sea/river the deck genuinely spans, not a deck-relative invention. */
+int tg_bridge_water_here(const TG_NodeList *nl, int si)
+{
+    if (!tg_span_in_bridge_run(si)) return 0;
+    /* Over the DECK spans, never -- not even when the run's own vote says wet.
+     * What lies under a deck span of a grade separation is a CARRIAGEWAY, and
+     * the run's water level is a RUN quantity taken from wet nodes that may be
+     * dozens of spans away on the approaches. Laying that surface here is
+     * either harmless (it is buried) or the lower road under water, and the
+     * second outcome is not worth the first. A crossing that genuinely sits in
+     * a lake shows up as a gap in the water, which is a visible tell that the
+     * route wanted a waypoint drag. */
+    if (tg_xsep_span(si)) return 0;
+    if (tg_xsep_run_span(si) && !tg_bridge_run_is_water(nl, si)) return 0;
+    return 1;
+}
+
 /* The VISIBLE river surface under a bridge run -- the y the water quad is drawn
  * at, as opposed to tg_bridge_water_y's reference level.
  *
@@ -1809,6 +1843,14 @@ int tg_bridge_pier_here(const TG_NodeList *nl, int si)
 {
     const int pitch = tg_bridge_pier_pitch(tg_bridge_style(si));
     int s0, s1, crown;
+    /* [OPTION B 2026-09-30] A GRADE SEPARATION is a CLEAR SPAN. What a deck
+     * flies over here is another carriageway, not a river, and a pier drops
+     * from the deck underside to the river bed (see the item-12 note in
+     * tg_emit_bridge) -- which on this geometry is BELOW the lower road, so the
+     * pier would stand in the middle of it. Real overpasses clear-span the road
+     * beneath for exactly that reason. The ramps either side are ordinary
+     * bridge spans and keep their piers, so the deck is still carried. */
+    if (tg_xsep_span(si)) return 0;
     if (!tg_r9_bridge_tie() || !tg_span_in_bridge_run(si))
         return (si % pitch) == 0;
     tg_bridge_run_bounds(nl, si, &s0, &s1);
@@ -1843,6 +1885,10 @@ int tg_bridge_gantry_here(const TG_NodeList *nl, int si)
     const int pitch = tg_bridge_pier_pitch(style);
     int s0, s1;
     if (!tg_bridge_struct_enabled() || !tg_bridge_overhead_enabled()) return 0;
+    /* [OPTION B] A gantry stands on a PIER span, and a grade separation's deck
+     * spans have no pier (clear span, see tg_bridge_pier_here) -- so a gantry
+     * there would be a leg on nothing. */
+    if (tg_xsep_span(si)) return 0;
     if (!tg_r9_bridge_tie()) return (si % 6) == 0;
     if (style == 2) return 0;
     if (!tg_span_in_bridge_run(si)) return 0;

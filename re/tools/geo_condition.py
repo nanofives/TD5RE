@@ -74,7 +74,9 @@ from geo_common import (  # noqa: E402
     ELEVATION_EXAGGERATION,
     LocalProjection,
     TD5_TG_CURVE_SAFETY_X100_DEFAULT,
+    TD5_TG_GRID_SPAN,
     TD5_TG_LANE_WIDTH,
+    TD5_TG_MAX_GRADE_X1000_DEFAULT,
     TD5_TG_MAX_SPANS,
     TD5_TG_SPAN_LENGTH,
     TG_LEAD_IN_NODES,
@@ -101,6 +103,35 @@ HEADING_LIMIT = 1.396
 # order of magnitude of margin, so a crossing that clears it is never a close
 # call. Lower it only with a measurement in hand.
 GRADE_SEPARATION_M = 4.0
+
+# ------------------------------------------------- built grade separation ---
+# [OPTION B 2026-09-30] The numbers the GENERATOR builds a grade separation
+# with. Mirrored from the C, same contract as geo_common's MIRRORING RULE: if
+# the C moves, this tool plans a clearance the engine does not build.
+#
+# td5_trackgen_internal.h:3510 -- clear height under an underpass soffit. This
+# is the clearance the NETWORK layer's underpass crossings already use, and the
+# plan's Option B says to reuse it rather than invent a second number.
+TD5_TG_UP_CLEAR = 2600.0
+# td5_trackgen_internal.h:3701 -- the bridge deck's girder depth under the
+# carriageway. The lower road has to clear the SOFFIT, not the deck surface.
+TD5_TG_BRIDGE_UNDER = 480.0
+# So the deck's carriageway sits this far above the lower carriageway.
+XSEP_LIFT_UNITS = TD5_TG_UP_CLEAR + TD5_TG_BRIDGE_UNDER      # 3080
+# td5_tg_road.c:236 -- no structure at or below this span, so a deck may not
+# land there (the grid straight, the start line and the y[0] spawn anchor all
+# live in that window).
+XSEP_FIRST_SPAN = TD5_TG_GRID_SPAN + 25
+# td5_tg_road.c:56 -- TD5RE_TG_BRIDGE_MAX, the deck-run span cap.
+XSEP_BRIDGE_MAX_SPANS = 56
+# Ramp grade the plan is BUDGETED at, as a fraction of the spec's own cap
+# (TD5_TG_MAX_GRADE_X1000_DEFAULT / 1000 = 0.12). Half, because the ramp has to
+# share the grade budget with the terrain the ramp is climbing over: the road
+# profile's limiter caps the TOTAL grade, so a ramp planned at the full cap is
+# clipped wherever the ground itself rises, and the clearance is lost silently.
+# The engine re-derives the ramp from the caps it can actually see (it knows the
+# per-biome cap and this tool does not), so this is the advisory minimum.
+XSEP_RAMP_GRADE_FRACTION = 0.5
 
 
 # ----------------------------------------------------------------- helpers ---
@@ -463,6 +494,101 @@ def classify_crossings(groups: list[dict], nodes: list[tuple[float, float]],
     return groups
 
 
+def plan_grade_separations(groups: list[dict], n_nodes: int,
+                           span_length: float = TD5_TG_SPAN_LENGTH,
+                           max_grade: float = TD5_TG_MAX_GRADE_X1000_DEFAULT / 1000.0,
+                           lift_units: float = XSEP_LIFT_UNITS) -> list[dict]:
+    """Decide, for every LEVEL crossing site, which leg the engine raises.
+
+    [OPTION B 2026-09-30] The crossing-safe localiser makes a level crossing
+    survivable; it does not make it a road layout. Two carriageways at the same
+    height and the same XZ is still one piece of tarmac with two span indices on
+    it, and a car that drifts a lane there is on the other leg with nothing
+    physical having gone wrong. A real grade separation removes the ambiguity at
+    the source -- one leg is several metres above the other -- and it is also
+    what the localiser's HEIGHT key was built to read.
+
+    WHY THE DECISION IS MADE HERE AND NOT IN THE ENGINE. The engine walks the
+    route one chunk at a time with a 64-span revisable window (td5_tg_road.c,
+    TG_ROAD_WINDOW), so at the first leg it cannot yet see the second. Deciding
+    offline and shipping the answer in ROUTE.JSON makes the lift a KNOWN target
+    before the walk starts, which is what lets the profile ramp into it instead
+    of discovering it too late to climb.
+
+    THE RULE, and it draws no random number (the standing byte-identity rule at
+    td5_trackgen_internal.h:1290-1296 forbids one, and a layout that moved
+    between two builds of the same route would defeat the determinism gate):
+
+      1. A leg that cannot hold a ramp is not eligible. Ramp room is the span
+         distance to the first legal structure span (XSEP_FIRST_SPAN) on one
+         side and to the last node on the other, and a leg also may not ramp
+         into the OTHER leg of its own crossing -- the point is to separate
+         them, so lifting the second one too would put both in the air.
+      2. Of the eligible legs, the one with MORE ramp room goes over. That is
+         the leg whose ramps can be built at the gentlest grade, so it is the
+         one most likely to actually reach the clearance.
+      3. Ties go to the LATER leg (higher span index). Arbitrary but fixed, and
+         it is the leg a driver meets second, so the track reads as "the road
+         you drove earlier passes underneath".
+
+    `ramp_spans` is ADVISORY. The engine re-derives it against the per-biome
+    grade caps, which this tool cannot see (tg_road_cap_at); what it may not
+    re-derive is WHICH leg goes over, because that is the decision that has to
+    be stable across builds.
+    """
+    out: list[dict] = []
+    if n_nodes < 2:
+        return out
+    last = n_nodes - 1
+    budget = max_grade * XSEP_RAMP_GRADE_FRACTION * span_length
+    ramp_min = int(math.ceil(lift_units / budget)) if budget > 0.0 else 0
+    for idx, g in enumerate(groups):
+        if g.get("grade_separated"):
+            continue
+        a_lo, a_hi = int(g["a_lo"]), int(g["a_hi"])
+        b_lo, b_hi = int(g["b_lo"]), int(g["b_hi"])
+        legs = {"a": (a_lo, a_hi), "b": (b_lo, b_hi)}
+        # Ramp room per leg: the shorter of the two clear sides, with the other
+        # leg of THIS crossing treated as a boundary (rule 1).
+        room = {}
+        for key, (lo, hi) in legs.items():
+            other_lo, other_hi = legs["b" if key == "a" else "a"]
+            back_stop = XSEP_FIRST_SPAN
+            fwd_stop = last
+            if other_hi < lo:
+                back_stop = max(back_stop, other_hi + 1)
+            if other_lo > hi:
+                fwd_stop = min(fwd_stop, other_lo - 1)
+            room[key] = min(lo - back_stop, fwd_stop - hi)
+        # Rule 2, then rule 3 (b is always the later leg: find_crossings only
+        # emits pairs with node_b > node_a).
+        over = "b" if room["b"] >= room["a"] else "a"
+        under = "a" if over == "b" else "b"
+        o_lo, o_hi = legs[over]
+        u_lo, u_hi = legs[under]
+        ramp = min(ramp_min, max(0, room[over]))
+        deck = o_hi - o_lo + 1
+        ok = (room[over] > 0 and ramp > 0
+              and deck + 2 * ramp <= XSEP_BRIDGE_MAX_SPANS * 2)
+        out.append({
+            "site": idx,
+            "over_lo": o_lo, "over_hi": o_hi,
+            "under_lo": u_lo, "under_hi": u_hi,
+            "over_leg": over,
+            "ramp_spans": ramp,
+            "ramp_spans_wanted": ramp_min,
+            "ramp_room_spans": room[over],
+            "clearance_units": lift_units,
+            "clearance_m": lift_units / UNITS_PER_METRE_DERIVED,
+            "buildable": bool(ok),
+            "why": ("more ramp room" if room[over] != room[under]
+                    else "tie -> later leg"),
+        })
+        g["grade_separation_planned"] = bool(ok)
+        g["grade_separation_over"] = over
+    return out
+
+
 # ------------------------------------------------------------- the pipeline ---
 
 def heading_byte_report(pts: list[tuple[float, float]]) -> dict:
@@ -698,6 +824,12 @@ def condition_route(latlon: list[tuple[float, float]],
         sampler = height_sampler_from_raster(height_path, theta, units_per_metre)
     classify_crossings(crossings, nodes, layers_out, sampler)
     level_crossings = [g for g in crossings if not g["grade_separated"]]
+    # [OPTION B 2026-09-30] Plan the lift for the level sites, unconditionally:
+    # the plan is a fact about the route's geometry, and computing it even when
+    # the route is going to be REJECTED is what lets the selector say "this
+    # crossing can be built as a flyover" instead of only "this crossing is
+    # fatal". The engine only reads the list when the route is accepted.
+    grade_seps = plan_grade_separations(crossings, len(nodes), span_length)
 
     spans = len(nodes) - 1
     reasons: list[str] = []
@@ -747,6 +879,16 @@ def condition_route(latlon: list[tuple[float, float]],
                            "--allow-crossings: this route needs the engine's "
                            "crossing-safe localiser (TD5RE_XSPAN) to be armed"
                            % len(level_crossings))
+    if grade_seps:
+        n_built = sum(1 for p in grade_seps if p["buildable"])
+        cross_notes.append("%d of %d level site(s) get a BUILT grade separation "
+                           "(%.1f m of clearance, deck on the leg with more ramp "
+                           "room)" % (n_built, len(grade_seps),
+                                      XSEP_LIFT_UNITS / units_per_metre))
+        if n_built < len(grade_seps):
+            cross_notes.append("%d level site(s) have no room for a ramp and stay "
+                               "LEVEL: only the localiser separates them there"
+                               % (len(grade_seps) - n_built))
     if crossings and height_path is None and layers_out is None:
         cross_notes.append("no DEM and no layer tags were supplied, so no crossing "
                            "could be PROVEN grade-separated -- pass --height to "
@@ -783,6 +925,13 @@ def condition_route(latlon: list[tuple[float, float]],
         "level_crossings": len(level_crossings),
         "allow_crossings": bool(allow_crossings),
         "grade_separation_m": GRADE_SEPARATION_M,
+        # [OPTION B 2026-09-30] ADDITIVE, and it has to stay that way: td5_geo.c
+        # validates ROUTE.JSON against a contract (node 0 at the origin, chord
+        # spacing, node cap) and an older file simply has no key here, which the
+        # loader reads as "no grade separation" -- the pre-Option-B behaviour.
+        # Never make this key required.
+        "grade_separations": grade_seps,
+        "grade_separation_lift_units": XSEP_LIFT_UNITS,
         "points": [{"x": round(x, 3), "z": round(z, 3), "lanes": l}
                    for (x, z), l in zip(nodes, lanes_out)],
     }
@@ -847,6 +996,13 @@ def print_report(r: dict) -> None:
                      g["pairs"], g["worst_distance_units"], g["need_units"], how))
     else:
         print("crossings  : none")
+    for p in r.get("grade_separations", []):
+        print("grade sep  : spans %d..%d go OVER spans %d..%d (%s), ramp %d span(s) "
+              "each side of %d room, %.0f units = %.1f m of clearance -- %s"
+              % (p["over_lo"], p["over_hi"], p["under_lo"], p["under_hi"],
+                 p["why"], p["ramp_spans"], p["ramp_room_spans"],
+                 p["clearance_units"], p["clearance_m"],
+                 "BUILDABLE" if p["buildable"] else "NO ROOM, stays level"))
     print("VERDICT    : %s" % ("OK" if r["ok"] else "NOT USABLE"))
     for why in r["reasons"]:
         print("   - %s" % why)
@@ -920,8 +1076,9 @@ def _self_test() -> int:
         # change cannot quietly make crossings always-legal or always-fatal.
         ("figure8",  False, {}, "a self-crossing figure-eight is REJECTED by "
                                 "default"),
-        ("figure8",  True,  {"allow_crossings": True},
-                            "...and ACCEPTED with --allow-crossings"),
+        ("figure8",  True,  {"allow_crossings": True, "_gradesep_built": 1},
+                            "...and ACCEPTED with --allow-crossings, with ONE "
+                            "buildable grade separation planned for it"),
         # The crossing reason must DISAPPEAR here while the verdict stays
         # NOT USABLE: a retrace doubles back through 180 degrees at 6 m, which
         # fails the curvature floor no matter what the localiser can do. Pinned
@@ -931,9 +1088,10 @@ def _self_test() -> int:
                             "--allow-crossings clears the CROSSING reason for a "
                             "retrace, but its 180 deg hairpin still fails the "
                             "curvature floor, which is a separate limit"),
-        ("figure8",  True,  {"layers": "alternating"},
+        ("figure8",  True,  {"layers": "alternating", "_gradesep_built": 0},
                             "a figure-eight whose legs carry different OSM "
-                            "layers is grade-separated, so no flag is needed"),
+                            "layers is grade-separated, so no flag is needed -- "
+                            "and nothing has to be BUILT either"),
     )
     bad = 0
     for kind, want_ok, kw, why in cases:
@@ -941,6 +1099,7 @@ def _self_test() -> int:
         pts = _synth_latlon(kind)
         kw = dict(kw)
         no_reason = kw.pop("_no_reason", None)
+        want_gs = kw.pop("_gradesep_built", None)
         if kw.get("layers") == "alternating":
             # Layer 1 over the first half, layer 0 over the second: the two
             # legs of the lemniscate meet with different layers, which is how
@@ -956,6 +1115,16 @@ def _self_test() -> int:
             print("*** SELF-TEST FAILURE: no reason should mention %r, got %s"
                   % (no_reason, r["reasons"]))
             bad += 1
+        elif want_gs is not None:
+            # Pinned in BOTH directions, like the crossing verdict above: a
+            # future change must not be able to quietly plan a flyover where
+            # the legs are already separated, nor drop the plan where the
+            # engine is the only thing that can separate them.
+            got = sum(1 for p in r.get("grade_separations", []) if p["buildable"])
+            if got != want_gs:
+                print("*** SELF-TEST FAILURE: expected %d buildable grade "
+                      "separation(s), got %d" % (want_gs, got))
+                bad += 1
     print("\n%s" % ("all %d cases behaved as specified" % len(cases) if not bad
                     else "%d of %d cases WRONG" % (bad, len(cases))))
     return 1 if bad else 0

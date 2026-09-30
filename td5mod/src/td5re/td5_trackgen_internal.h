@@ -1440,6 +1440,17 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl, int secti
 enum { TG_ST_NONE = 0, TG_ST_BRIDGE, TG_ST_TUNNEL };
 int  tg_struct_kind(int si);                       /* TG_ST_* for main span si */
 void tg_struct_run_bounds(int si, int *s0, int *s1); /* contiguous same-kind run */
+/* [OPTION B 2026-09-30] GEO TRACK grade separation (td5_tg_road.c's own
+ * section header has the design). A deck span here is a BRIDGE in the structure
+ * table -- so the ~150 existing bridge consumers need no change -- but it is
+ * crossing another CARRIAGEWAY, not water, and two bridge behaviours are wrong
+ * for that: the river plane a dry run lays under its deck would flood the road
+ * below, and a pier dropped to the river bed would stand in it. Both are gated
+ * on this predicate. Always 0 on a synthetic build.
+ *   tg_xsep_span      span si is a grade separation's DECK (full lift)
+ *   tg_xsep_run_span  span si is anywhere in a lift window (ramp or deck) */
+int  tg_xsep_span(int si);
+int  tg_xsep_run_span(int si);
 double tg_road_ground_y(int i);                    /* world ground under node i */
 int    tg_road_node_wet(int i);                    /* water under node i        */
 int    tg_road_node_forced(int i);                 /* terrain-yields conform    */
@@ -3679,6 +3690,10 @@ int tg_bridge_run_is_water(const TG_NodeList *nl, int si);
 double tg_bridge_water_y(const TG_NodeList *nl, int si);
 double tg_bridge_water_surf_y(const TG_NodeList *nl, int si);
 double tg_bridge_gorge_phase(const TG_NodeList *nl, int si);
+/* [OPTION B 2026-09-30] May this bridge run lay its river plane? See the
+ * function's own note: a GEO grade separation flies over a carriageway, not
+ * water, and the deck-relative river would be laid above that carriageway. */
+int    tg_bridge_water_here(const TG_NodeList *nl, int si);
 int tg_bridge_struct_enabled(void);
 /* [R6 item 17] "All bridges have pillars every few spans and they all look the
  * same. I want more variety." Give each crossing a STYLE, keyed on the run index

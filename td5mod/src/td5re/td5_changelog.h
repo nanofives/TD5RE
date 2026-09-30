@@ -36,6 +36,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "A real-world route may now loop, cross itself or fly" },
     { CL_ITEM,    "  over itself. The car stays on the road it is on" },
     { CL_ITEM,    "  instead of snapping to the one underneath." },
+    { CL_ITEM,    "Where a route crosses itself the track now BUILDS a" },
+    { CL_ITEM,    "  flyover: one leg climbs a ramp onto a deck 7 metres" },
+    { CL_ITEM,    "  above the other, which stays at ground level. The" },
+    { CL_ITEM,    "  deck clear-spans the road beneath, so no pillar" },
+    { CL_ITEM,    "  stands in it." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 30 (real-world tracks)" },
