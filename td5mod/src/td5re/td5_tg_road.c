@@ -33,6 +33,7 @@
  */
 #include "td5_trackgen_internal.h"
 #include "td5_tg_world.h"
+#include "td5_geo.h"
 
 /* ----------------------------------------------------------- constants -- */
 
@@ -687,6 +688,98 @@ static int tg_walk_push_section(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
     return 1;
 }
 
+/* [GEO PHASE 3 2026-09-30] ROAD follows a conditioned real-world polyline.
+ *
+ * Replaces ONLY the section walk (lead-in + section loop) of
+ * tg_build_centerline, per docs/plans/GEO_TRACK_OSM_PLAN.md Phase 3. The route
+ * already carries its own lead-in (node 0 at the origin, TD5_TG_GRID_SPAN + 16
+ * nodes straight along +X) and chord spacing of exactly span_length --
+ * td5_geo's loader rejected it otherwise. Everything downstream is kept:
+ * tg_nodes_push (so the preview hook and field defaults work), a
+ * tg_road_revise every TG_GEO_CHUNK nodes (so s_rn / y / s_struct fill in
+ * windowed exactly as the walk does), tg_road_finalize_to, and the caller's
+ * tangent pass.
+ *
+ * STRUCTURES. A real route cannot steer away from terrain, so where
+ * tg_road_revise refuses a chunk (a bridge or bore over its cap) the chunk is
+ * forced to CONFORM -- the same last resort the walk uses after 20 rejected
+ * attempts -- and logged. On a real DEM those are the places a real road cuts
+ * or embanks; over the synthetic world they are simply where the noise and the
+ * route disagree.
+ *
+ * SELF-OVERLAP is not repaired here. geo_condition proved the route free of
+ * crossings against the engine's own test; tg_too_close re-checks it and the
+ * count is REPORTED, so a hand-edited or stale ROUTE.JSON is visible in the log
+ * rather than surfacing as a car placed on the wrong span.
+ *
+ * No tg_rand / tg_frand / tg_range call anywhere: the RNG stream is untouched,
+ * so the scenery that draws after the walk is still a pure function of seed. */
+#define TG_GEO_CHUNK 32
+
+static int tg_geo_walk(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
+                       int section_tally[TD5_TG_SECTION_COUNT], int skip)
+{
+    const int    n_route  = td5_geo_route_count();
+    const int    want     = spec->target_spans + 1;
+    const double lane_w   = (double)spec->lane_width;
+    const int    n        = (n_route < want) ? n_route : want;
+    int i, chunk0 = 0, forced = 0, too_close = 0, turns = 0;
+
+    for (i = 0; i < n; i++) {
+        double x, z;
+        int lanes;
+        td5_geo_route_node(i, &x, &z, &lanes);
+        if (i > skip && tg_too_close(nl, x, z, (double)lanes * lane_w, lane_w, skip))
+            too_close++;
+        if (!tg_nodes_push(nl, x, z, (double)lanes * lane_w, lanes)) return 0;
+        if (i >= 2) {
+            const TG_Node *a = &nl->v[i - 2], *b = &nl->v[i - 1], *c = &nl->v[i];
+            const double cr = fabs((b->x - a->x) * (c->z - b->z) - (b->z - a->z) * (c->x - b->x))
+                            / (spec->span_length * (double)spec->span_length);
+            if (cr > 0.02) turns++;   /* ~1.1 deg: counts as a bend for the tally */
+        }
+
+        if (nl->count - chunk0 >= TG_GEO_CHUNK || i == n - 1) {
+            int why_kind = 0, why_len = 0;
+            if (!tg_road_revise(nl, &why_kind, &why_len)) {
+                int k;
+                const int from = (chunk0 > 0) ? chunk0 - 1 : 0;
+                for (k = from; k < nl->count; k++) {
+                    if (k >= s_rn_n) tg_road_node_fill(k, &nl->v[k]);
+                    s_rn[k].force = 1;
+                }
+                s_rn_n = nl->count;
+                forced++;
+                if (!tg_road_revise(nl, &why_kind, &why_len))
+                    TD5_LOG_W(LOG_TAG, "trackgen: [GEO] spans %d..%d: forced "
+                              "conform still refused (%s would run %d spans)",
+                              from, nl->count - 1,
+                              why_kind == TG_ST_TUNNEL ? "tunnel" : "bridge", why_len);
+                else
+                    TD5_LOG_I(LOG_TAG, "trackgen: [GEO] spans %d..%d forced to "
+                              "conform (%s would run %d spans over its cap)",
+                              from, nl->count - 1,
+                              why_kind == TG_ST_TUNNEL ? "tunnel" : "bridge", why_len);
+            }
+            tg_road_finalize_to(nl->count - 1);
+            /* One tally entry per chunk, so the section census stays in the
+             * units the walk reports (sections, not nodes). */
+            section_tally[turns > TG_GEO_CHUNK / 4 ? TD5_TG_CURVE : TD5_TG_STRAIGHT]++;
+            turns = 0;
+            chunk0 = nl->count;
+        }
+    }
+
+    TD5_LOG_I(LOG_TAG, "trackgen: [GEO] road follows route %s: %d of %d nodes "
+              "(%d spans), %d chunk(s) forced to conform, %d too-close node(s)%s",
+              td5_geo_route_source(), n, n_route, n - 1, forced, too_close,
+              too_close ? " -- ROUTE SELF-OVERLAPS, re-run geo_condition" : "");
+    if (n < n_route)
+        TD5_LOG_W(LOG_TAG, "trackgen: [GEO] route truncated at %d of %d nodes by "
+                  "target_spans %d", n, n_route, spec->target_spans);
+    return nl->count >= 2;
+}
+
 int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
                         int section_tally[TD5_TG_SECTION_COUNT])
 {
@@ -729,6 +822,12 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
               (int)(acute_limit * 180.0 / TD5_TG_PI + 0.5), skip,
               spec->curve_safety_x100, steer ? "on" : "off",
               tg_bridge_max_spans(), tg_tunnel_max_spans());
+
+    if (td5_geo_route_count() >= 2) {
+        /* [GEO PHASE 3] the route replaces the whole section walk */
+        if (!tg_geo_walk(spec, nl, section_tally, skip)) return 0;
+        goto walk_done;
+    }
 
     if (!tg_nodes_push(nl, x, z, width, spec->lanes)) return 0;
     {
@@ -972,6 +1071,8 @@ int tg_build_centerline(const TD5_TrackGenSpec *spec, TG_NodeList *nl,
         if (p.sec == TD5_TG_STRAIGHT && p.radius > 0.0) section_tally[TD5_TG_CURVE]++;
         else section_tally[p.sec]++;
     }
+
+walk_done:
 
     if (lane_vary) {
         int i, lo = 99, hi = 0;

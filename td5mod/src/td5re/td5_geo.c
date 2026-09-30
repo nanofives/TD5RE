@@ -311,24 +311,159 @@ void td5_geo_unload(void)
     memset(&s_geo, 0, sizeof(s_geo));
 }
 
+/* ------------------------------------------------------------------ route --- */
+
+/* [GEO PHASE 3 2026-09-30] See td5_geo.h. Kept apart from s_geo because a route
+ * is usable with no place loaded (the offline fixture over the synthetic world),
+ * and td5_geo_unload must not throw away a route that came from
+ * TD5RE_GEO_ROUTE. */
+static struct {
+    int     n;
+    double *x, *z;
+    int    *lanes;
+    char    source[512];
+} s_route;
+
+/* The engine's span length. Duplicated rather than pulling td5_trackgen.h into
+ * this reader; the loader asserts the file agrees with it, which is the check
+ * that matters. Keep in step with TD5_TG_SPAN_LENGTH. */
+#define GEO_ROUTE_SPAN_LENGTH 1500.0
+/* Chord tolerance. geo_condition resamples by chord to 1e-6; the file rounds
+ * coordinates to 3 decimals, so anything past a unit is a broken file. */
+#define GEO_ROUTE_CHORD_TOL   1.0
+/* Hard cap: s_struct[]/s_rn[] are indexed by node with no bounds check
+ * (TD5_TG_MAX_SPANS = 3000), so an oversized route must be refused here. */
+#define GEO_ROUTE_MAX_NODES   3001
+
+static void geo_route_free(void)
+{
+    free(s_route.x);
+    free(s_route.z);
+    free(s_route.lanes);
+    memset(&s_route, 0, sizeof(s_route));
+}
+
+static int geo_route_load(const char *path)
+{
+    char *json;
+    cJSON *root, *pts, *sl;
+    int n, i, ok = 0;
+
+    geo_route_free();
+    json = geo_slurp(path);
+    if (!json) return 0;
+    root = cJSON_Parse(json);
+    free(json);
+    if (!root) {
+        TD5_LOG_E(LOG_TAG, "geo: route %s is not valid JSON", path);
+        return 0;
+    }
+
+    sl  = cJSON_GetObjectItem(root, "span_length");
+    pts = cJSON_GetObjectItem(root, "points");
+    if (sl && cJSON_IsNumber(sl) && fabs(sl->valuedouble - GEO_ROUTE_SPAN_LENGTH) > 1e-6) {
+        TD5_LOG_E(LOG_TAG, "geo: route %s was conditioned for span_length %.1f, "
+                  "the engine uses %.1f; rejected", path, sl->valuedouble,
+                  GEO_ROUTE_SPAN_LENGTH);
+        goto done;
+    }
+    if (!pts || !cJSON_IsArray(pts) || (n = cJSON_GetArraySize(pts)) < 2) {
+        TD5_LOG_E(LOG_TAG, "geo: route %s has no points[]", path);
+        goto done;
+    }
+    if (n > GEO_ROUTE_MAX_NODES) {
+        TD5_LOG_E(LOG_TAG, "geo: route %s has %d nodes, over the %d cap; rejected",
+                  path, n, GEO_ROUTE_MAX_NODES);
+        goto done;
+    }
+
+    s_route.x     = (double *)malloc((size_t)n * sizeof(double));
+    s_route.z     = (double *)malloc((size_t)n * sizeof(double));
+    s_route.lanes = (int *)malloc((size_t)n * sizeof(int));
+    if (!s_route.x || !s_route.z || !s_route.lanes) goto done;
+
+    for (i = 0; i < n; i++) {
+        const cJSON *p  = cJSON_GetArrayItem(pts, i);
+        const cJSON *px = p ? cJSON_GetObjectItem(p, "x") : NULL;
+        const cJSON *pz = p ? cJSON_GetObjectItem(p, "z") : NULL;
+        const cJSON *pl = p ? cJSON_GetObjectItem(p, "lanes") : NULL;
+        if (!px || !pz || !cJSON_IsNumber(px) || !cJSON_IsNumber(pz)) {
+            TD5_LOG_E(LOG_TAG, "geo: route %s point %d lacks x/z", path, i);
+            goto done;
+        }
+        s_route.x[i] = px->valuedouble;
+        s_route.z[i] = pz->valuedouble;
+        s_route.lanes[i] = (pl && cJSON_IsNumber(pl)) ? pl->valueint : 2;
+        if (s_route.lanes[i] < 1)  s_route.lanes[i] = 1;
+        if (s_route.lanes[i] > 12) s_route.lanes[i] = 12;
+        if (i > 0) {
+            const double c = hypot(s_route.x[i] - s_route.x[i - 1],
+                                   s_route.z[i] - s_route.z[i - 1]);
+            if (fabs(c - GEO_ROUTE_SPAN_LENGTH) > GEO_ROUTE_CHORD_TOL) {
+                TD5_LOG_E(LOG_TAG, "geo: route %s chord %d->%d is %.2f, not %.1f "
+                          "(re-run geo_condition); rejected", path, i - 1, i, c,
+                          GEO_ROUTE_SPAN_LENGTH);
+                goto done;
+            }
+        }
+    }
+    if (fabs(s_route.x[0]) > GEO_ROUTE_CHORD_TOL || fabs(s_route.z[0]) > GEO_ROUTE_CHORD_TOL) {
+        TD5_LOG_E(LOG_TAG, "geo: route %s node 0 is (%.1f,%.1f), not the origin; "
+                  "rejected", path, s_route.x[0], s_route.z[0]);
+        goto done;
+    }
+    s_route.n = n;
+    snprintf(s_route.source, sizeof(s_route.source), "%s", path);
+    ok = 1;
+    TD5_LOG_I(LOG_TAG, "geo: route %s loaded: %d nodes (%d spans, %.2f km at "
+              "the conditioner's scale)", path, n, n - 1,
+              (double)(n - 1) * GEO_ROUTE_SPAN_LENGTH / 430.0 / 1000.0);
+
+done:
+    cJSON_Delete(root);
+    if (!ok) geo_route_free();
+    return ok;
+}
+
+int td5_geo_route_count(void) { return s_route.n; }
+const char *td5_geo_route_source(void) { return s_route.n ? s_route.source : ""; }
+
+int td5_geo_route_node(int i, double *x, double *z, int *lanes)
+{
+    if (i < 0 || i >= s_route.n) return 0;
+    if (x) *x = s_route.x[i];
+    if (z) *z = s_route.z[i];
+    if (lanes) *lanes = s_route.lanes[i];
+    return 1;
+}
+
 int td5_geo_init(void)
 {
-    /* String knob, so getenv rather than td5_env_int -- the same pattern main.c
+    /* String knobs, so getenv rather than td5_env_int -- the same pattern main.c
      * uses for its own string env vars. Unset means the synthetic world and
-     * costs exactly this one lookup. */
-    const char *slug = getenv("TD5RE_GEO_PLACE");
-    if (!slug || !slug[0]) return 1;
-    if (!td5_geo_load(slug)) {
+     * costs exactly these lookups. */
+    const char *slug  = getenv("TD5RE_GEO_PLACE");
+    const char *route = getenv("TD5RE_GEO_ROUTE");
+    if (slug && slug[0] && !td5_geo_load(slug)) {
         /* Not fatal: fall through to the synthetic world rather than refusing to
          * boot. A missing or malformed cache is a content problem, and the
          * generator has a perfectly good world of its own. */
         TD5_LOG_E(LOG_TAG, "geo: TD5RE_GEO_PLACE=\"%s\" could not be loaded; "
                   "falling back to the synthetic world", slug);
     }
+    if (route && route[0]) {
+        if (!geo_route_load(route))
+            TD5_LOG_E(LOG_TAG, "geo: TD5RE_GEO_ROUTE=\"%s\" could not be loaded; "
+                      "the generator walks its own road", route);
+    } else if (s_geo.loaded) {
+        char path[512];
+        snprintf(path, sizeof(path), "re/assets/geo/%s/ROUTE.JSON", s_geo.slug);
+        geo_route_load(path);   /* optional: a place may be terrain-only */
+    }
     return 1;
 }
 
-void td5_geo_shutdown(void) { td5_geo_unload(); }
+void td5_geo_shutdown(void) { td5_geo_unload(); geo_route_free(); }
 
 int         td5_geo_loaded(void)     { return s_geo.loaded; }
 const char *td5_geo_place_name(void) { return s_geo.loaded ? s_geo.name : ""; }

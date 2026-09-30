@@ -5,6 +5,7 @@
  * live in td5_trackgen_internal.h. Element map: docs/plans/AUTOTRACK_ELEMENT_CATALOG.md.
  */
 #include "td5_trackgen_internal.h"
+#include "td5_geo.h"
 
 /* [PICK] Human name for an auto-track texture page id, for the dev geometry
  * picker's HUD/clipboard. Defined ENTIRELY in terms of the TD5_TG_PAGE_*
@@ -1418,6 +1419,22 @@ void tg_rolls_apply_spec(TD5_TrackGenSpec *spec)
         spec->elevation_amplitude = s_rolls.value[TD5_TG_ROLL_HILLS];
     if (!s_rolls.pinned[TD5_TG_ROLL_LENGTH])
         spec->target_spans = s_rolls.value[TD5_TG_ROLL_LENGTH];
+}
+
+/* [GEO PHASE 3 2026-09-30] A loaded geo route decides the track length: the
+ * road IS the route, so target_spans follows it (capped at TD5_TG_MAX_SPANS,
+ * which the loader already enforces) and the track is point-to-point. Called
+ * right after tg_rolls_apply_spec at every spec-fold site, so the build, the
+ * studio preview and the streamed span rederive all agree, and BEFORE the
+ * GENSTAMP spec hash, so a geo build never REUSEs a synthetic one. No route
+ * means no write: synthetic builds stay byte-identical. */
+void tg_geo_apply_spec(TD5_TrackGenSpec *spec)
+{
+    int n = td5_geo_route_count();
+    if (!spec || n < 2) return;
+    spec->target_spans = n - 1;
+    if (spec->target_spans > TD5_TG_MAX_SPANS) spec->target_spans = TD5_TG_MAX_SPANS;
+    spec->circuit = 0;
 }
 
 /* Build identity, not a diagnostic -- logged unconditionally and BEFORE the
@@ -4249,6 +4266,7 @@ int td5_trackgen_preview_route(const TD5_TrackGenSpec *spec,
     eff = *spec;
     tg_rolls_resolve(eff.seed);
     tg_rolls_apply_spec(&eff);
+    tg_geo_apply_spec(&eff);
     spec = &eff;
 
     /* Same preamble as build_level, minus the _mkdir. */
@@ -4339,6 +4357,7 @@ int td5_trackgen_regenerate_main_spans(unsigned int seed,
      * built from the shipped defaults while the race used the rolls. */
     tg_rolls_resolve(seed);
     tg_rolls_apply_spec(&spec);
+    tg_geo_apply_spec(&spec);
 
     memset(&nl, 0, sizeof(nl));
     memset(&spans, 0, sizeof(spans));
@@ -4587,6 +4606,7 @@ int td5_trackgen_regenerate(unsigned int seed)
      * still says what it is; it otherwise prints no inventory at all. */
     tg_rolls_resolve(seed);
     tg_rolls_apply_spec(&spec);
+    tg_geo_apply_spec(&spec);
     tg_rolls_report();
 
     /* [R14 GENPERF 2026-09-03] Identical build already on disk? Then the only

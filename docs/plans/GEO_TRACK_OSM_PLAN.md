@@ -533,6 +533,41 @@ as MDE *and MDT* -- Modelo Digital de **TERRENO**, bare earth. That is not merel
 at all. The gated sheet is therefore worth more than the resolution number
 suggests.
 
+## 6d. Phase 3 shipped and verified 2026-09-30 (offline, synthetic relief)
+
+The ROAD now follows a conditioned polyline. Built with no network: the La Plata
+place cache went with the geo-track worktree, so the test used the committed raw
+fixture conditioned offline (`re/tools/geo_fixtures/la_plata_ROUTE.json`) over
+the synthetic world.
+
+- `td5_geo` loads the route: `TD5RE_GEO_ROUTE=<ROUTE.JSON>` (no place needed), else
+  `re/assets/geo/<slug>/ROUTE.JSON` of the loaded place. It validates the contract
+  and rejects rather than half-uses: node 0 at the origin, `span_length` 1500,
+  every chord 1500 +-1, at most 3001 nodes.
+- `tg_geo_apply_spec` (after `tg_rolls_apply_spec` at all three spec-fold sites:
+  build, studio preview, streamed rederive) sets `target_spans` to the route and
+  forces point-to-point, before the GENSTAMP spec hash.
+- `tg_geo_walk` in `td5_tg_road.c` replaces only the lead-in + section loop of
+  `tg_build_centerline`: `tg_nodes_push` per node, `tg_road_revise` every 32 nodes,
+  forced conform where a structure would exceed its cap (the walk's own last
+  resort), `tg_road_finalize_to`, then the kept tangent pass. No RNG draw.
+  `tg_too_close` re-checks the route and the count is logged.
+
+Verified:
+- **Synthetic byte-identity:** seed 20260901, master exe vs this build, all 8
+  level files identical (MODELS.DAT `98E749869051ACE3`); only GENSTAMP differs (exe id).
+- **Geo build:** 1493 of 1493 nodes, 1492 spans, 0 too-close nodes, finish span
+  1292 with 200 of run-off, 6 bridges / 89 spans (3 over synthetic water), one
+  32-span chunk forced to conform (a 64-span bridge over its 56 cap).
+- **Audits:** `tg_strip_audit` 4 lane seams, 0 violations. `tg_network_audit`
+  planarity 0 crossings, 0 street points on the road, 0 mouths on structures,
+  0 structure-length violations, worst grade 0.200, 0 undecked water spans: OK.
+- **Deterministic:** two geo builds, identical level files.
+- **Race:** loads and runs, car on the grid at span 15.
+
+Open for Phase 3 with real data: re-fetch La Plata (network, ask first), then
+confirm bridges land on real water and the conformed chunk goes away.
+
 ## 7. Phases
 
 ### Phase 0 -- calibration and ground truth

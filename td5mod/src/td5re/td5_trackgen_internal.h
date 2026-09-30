@@ -1283,6 +1283,7 @@ void tg_rolls_resolve(unsigned int seed);          /* latch for this build   */
  * previous build's roll can never be mistaken for a pin. */
 void tg_rolls_unpublish(void);
 void tg_rolls_apply_spec(TD5_TrackGenSpec *spec);  /* fold into the spec     */
+void tg_geo_apply_spec(TD5_TrackGenSpec *spec);   /* [GEO PHASE 3] route decides length */
 void tg_rolls_report(void);                        /* the [R21 ROLL] block   */
 int  tg_rolls_presence_count(void);                /* [R22] presence rows    */
 int  tg_roll_value(int id);
