@@ -33,6 +33,9 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 30 (real-world tracks)" },
+    { CL_ITEM,    "Real-world tracks get traffic lights at the real" },
+    { CL_ITEM,    "  junctions, with red, amber and green lamps that" },
+    { CL_ITEM,    "  cycle. They are scenery only: nobody obeys them." },
     { CL_ITEM,    "AUTO TRACK STUDIO has a LOCATION row: race the auto" },
     { CL_ITEM,    "  track along a real route picked on a map (run" },
     { CL_ITEM,    "  re/tools/geo_selector.py). It keeps the place name." },

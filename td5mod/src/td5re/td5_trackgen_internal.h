@@ -5838,6 +5838,20 @@ extern long s_r11_sign_left;
 extern long s_r11_sign_right;
 int tg_r11_signs_enabled(void);
 int tg_emit_r11_sign(const TG_NodeList *nl, int si, int nspans, TG_Buf *blk, size_t *moff, int *nmesh, int maxmesh);
+
+/* ======================= GEO TRAFFIC LIGHTS (G3) =========================
+ * [GEO PHASE 5] Traffic-light heads at OSM highway=traffic_signals nodes near
+ * the conditioned route. Defined in td5_tg_furniture.c; rationale there and in
+ * td5_geo_signals.h. All three are INERT on a synthetic build (every path is
+ * behind td5_geo_loaded()), so MODELS.DAT stays byte-identical.
+ *
+ * _prepare decides the placements ONCE, single-threaded, in the prepass --
+ * before the per-entry emit loop forks -- so the emitter is a read-only table
+ * scan and the census cannot race. */
+void tg_geo_signals_prepare(const TG_NodeList *nl, int nspans);
+int  tg_emit_geo_signals(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *moff, int *nmesh, int maxmesh);
+void tg_geo_signals_report(int nspans);
+/* ====================================================================== */
 /* Terrain emits at most a couple of meshes per span; this is headroom, and the
  * emitter's own budget check is asserted against it below. */
 #define TG_SIDE_MAX_MESH 32

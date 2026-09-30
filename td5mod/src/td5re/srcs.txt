@@ -9,6 +9,7 @@ td5_track.c
 td5_track_parser.c
 td5_track_registry.c
 td5_geo.c
+td5_geo_signals.c
 td5_trackgen.c
 td5_tg_world.c
 td5_tg_road.c

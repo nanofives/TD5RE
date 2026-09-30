@@ -3294,6 +3294,12 @@ static int tg_scenery_begin(const TG_NodeList *nl, int nspans, int lanes)
         TG_TV(TG_T_PRE_R13FILL,  tg_r13_fill_report(nl, nspans));   /* [R13 FILL] exposed-rear sweep, opt-in */
         tg_r9_city_reset();               /* [R9 CITY] pavement/massing sweep */
         tg_r13_faces_reset();             /* [R13 FACES] run-end return census */
+        /* [GEO SIGNALS] Decide the traffic-light placements while this is
+         * still the only thread: the emitter then just scans a read-only
+         * table. Must follow the structure/street authorities above, whose
+         * predicates it consults, and precede the per-entry loop. No-op with
+         * no geo place loaded. */
+        tg_geo_signals_prepare(nl, nspans);
         TG_ZONE_END(TG_ZONE_PREPASS);
         tg_xmemo_reset(1);                /* [R14 GENPERF] tables final -> cache the crossing predicates */
         /* [S0] WARM THE CHEAP BUILD-SCOPE LAZY CACHES HERE, while this is
@@ -3915,6 +3921,21 @@ static int tg_scenery_entry(int e)
                     }
                     tg_guard_mark(sg0, meshes.len, TG_GK_PROP, si);
                 }
+                /* [GEO SIGNALS] Traffic lights, after the direction sign for
+                 * the same reason it runs last: the placements were decided in
+                 * the prepass, but the mesh BUDGET is whatever the rest of the
+                 * span left over, and a light is the piece of furniture we are
+                 * most willing to lose. TG_GK_PROP so a head that ends up over
+                 * the carriageway is dropped by the guard like any other prop.
+                 * Inert on a synthetic build. */
+                {
+                    size_t sq0 = meshes.len;
+                    if (!tg_emit_geo_signals(nl, si, &meshes, moff, &nmesh,
+                                             TG_MAX_MESHES_PER_ENTRY)) {
+                        ok = 0; break;
+                    }
+                    tg_guard_mark(sq0, meshes.len, TG_GK_PROP, si);
+                }
             }
         }
 
@@ -4063,6 +4084,9 @@ static int tg_scenery_end(TG_Buf *out)
                           "side=%ld", s_r11_signs, nspans, s_r11_sign_left,
                           s_r11_sign_right, s_r11_sign_skip_lamp,
                           s_r11_sign_skip_street, s_r11_sign_skip_side);
+            /* [GEO SIGNALS] the G3 acceptance number: signals in cache, near
+             * the route, placed, and dropped by reason. Silent on synthetic. */
+            tg_geo_signals_report(nspans);
             /* [R9 CITY] pavement uniqueness + mouth massing, over the whole
              * assembled strip. These are the round's acceptance numbers. */
             tg_r9_city_report(nl, nspans);
