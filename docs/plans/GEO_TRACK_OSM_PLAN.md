@@ -16,7 +16,8 @@ anywhere, and no existing path that feeds an externally supplied polyline into a
 | Route mode | **Point-to-point with draggable waypoints**, Google-Maps style |
 | Scale | 1:1 real scale |
 | Geometry outside the drivable envelope | **Exaggerate elevation 1.5x, then clamp to the cap** |
-| Multiplayer | **Single-player only for now** (avoids the lockstep determinism problem) |
+| Multiplayer | **Single-player only.** Out of scope by decision, and out of bounds by the no-networking rule (see 7 Phase 6) |
+| Networking | **NONE.** No sockets, no net tests, and `td5_net.c` / `td5_upnp.c` / `td5_fe_net.c` are not to be touched. In-game map tiles are ruled out; the browser selector is the selector |
 | Crossing-safe span localiser (Option B) | **In parallel with Phase 5** |
 | Buildings | **Real OSM footprints and real heights**, estimated from proxies where untagged |
 | Traffic lights | **Decoration only** (the one genuinely new emitter) |
@@ -636,19 +637,29 @@ Sequencing note: Phase 3 ships first and is independently demonstrable (a real
 route through procedural surroundings), so Phase 5 slipping does not block
 everything behind it.
 
-### Phase 6 -- optional: in-game map screen
-Technically unblocked. The port already has a PNG decoder
-(`td5_png_decode_fast`, `td5_asset.c:1766`) and a complete raw-Winsock HTTP/1.1
-client (`upnp_http_exchange`, `td5_upnp.c:217`; `upnp_tcp_connect`, `:165`). The
-AUTO TRACK STUDIO screen already hosts a live, debounced, background-worker route
-preview with pan and normalise (`at_preview_request` / `at_preview_tick`,
-`td5_fe_race.c:7607` / `:7645`), so a raster map underlay has an obvious home.
+### Phase 6 -- in-game map screen: RULED OUT (2026-09-29)
 
-Two real blockers, which is why it is last and optional: canonical OSM tile
-servers are HTTPS-only (the existing client is plaintext, so this needs WinHTTP
-or a permitted plaintext mirror), and the tile usage policy restricts application
-use. Neither blocks Phases 1 to 5, and the browser selector remains the only one
-that can drag a route.
+**Do not build this.** Standing instruction from Mariano, same session the
+net-loopback test was removed from the selftest: no networking work, no tests
+that open sockets, and `td5_net.c` / `td5_upnp.c` / `td5_fe_net.c` are not to be
+touched. An in-game map needs an HTTP client in the game, and the plan's earlier
+route to one was to reuse `upnp_http_exchange` from `td5_upnp.c` -- squarely
+inside that prohibition. If in-game map tiles ever come back up, ask first.
+
+The browser selector of Phase 4 is therefore not "the shipping selector for now",
+it is **the selector**. That costs nothing this plan was counting on: it is the
+only option that can drag a route anyway, and it already avoids TLS, tile caching
+and the OSM tile usage policy. The AUTO TRACK STUDIO screen
+(`at_preview_request` / `at_preview_tick`, `td5_fe_race.c:7607` / `:7645`) keeps
+drawing the conditioned route from the local cache, which needs no network.
+
+Note on Phase 1's own networking, so the boundary is explicit: `geo_fetch.py`
+makes outbound HTTPS requests from **Python**, to Overpass, AWS S3 and the IGN
+WFS. It opens no listening socket, adds no test, and changes no game code, so it
+is outside the scope of the rule -- the Windows firewall prompt comes from
+LISTENING, which is what the removed net-loopback test did. Every response is
+disk-cached, so a place is fetched once and the game itself never touches the
+network.
 
 ## 8. Route selection -- point to point with draggable waypoints
 
@@ -715,9 +726,9 @@ loop almost always self-crosses).
 
 1. **A hilly coastal third fixture** once Phase 3 lands -- neither Buenos Aires
    nor La Plata exercises bridges, tunnels or real gradient.
-2. **Multiplayer**, if ever wanted: the netplay is lockstep and needs
-   MODELS.DAT identical byte-for-byte on both peers, which a fetched cache does
-   not guarantee. Host-ships-the-cache is the only option that survives OSM data
-   changing over time.
+2. **Multiplayer: CLOSED, not open.** Already out of scope by decision, and now
+   also out of bounds: the only workable design was host-ships-the-cache over the
+   net transport, which means `td5_net.c`. Covered by the same standing
+   instruction as Phase 6. Do not revisit without asking Mariano.
 3. **Storey height** for the `building:levels` fallback -- one global constant,
    or per-country, or per land-use class?
