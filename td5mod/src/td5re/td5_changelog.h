@@ -32,6 +32,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 30 (real places keep their scenery)" },
+    { CL_ITEM,    "A real-world track no longer rolls its buildings," },
+    { CL_ITEM,    "  streets, bridges or coast away. About 1 seed in 8" },
+    { CL_ITEM,    "  built La Plata as a bare untextured road." },
+    { CL_BLANK,   "" },
     { CL_DATE,    "September 30 (roads that cross themselves)" },
     { CL_ITEM,    "A real-world route may now loop, cross itself or fly" },
     { CL_ITEM,    "  over itself. The car stays on the road it is on" },

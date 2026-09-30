@@ -635,9 +635,20 @@ Follow-ups done 2026-09-30 (before merge):
 
 Still open:
 - Plaza lawn texture is stretched along long strips (UVs follow the outline).
-- `TD5RE_AUTOTRACK_STREAM=0` with REUSE at its default produced one build with
-  no TEXTURES.DAT in level090.zip and no scenery; the default streamed path and
-  the harness (STREAM=0 + REUSE=0) are fine. Dev-only combination, not chased.
+- ~~`TD5RE_AUTOTRACK_STREAM=0` with REUSE at its default produced one build with
+  no TEXTURES.DAT in level090.zip and no scenery.~~ **Root-caused 2026-09-30: not
+  STREAM, not REUSE.** It was the R22 SCENERY presence roll, which is OFF on 12%
+  of seeds (`k_tgr_w_scarce`), and an OFF SCENERY deletes MODELS.DAT and
+  TEXTURES.DAT by design. The harness never saw it because it pins seed
+  20260901 (SCENERY ON). Repro: La Plata, seed 20260902, STREAM=0 -> the same
+  engine.log line; the same seed through the GENSTAMP reuse path and through
+  STREAM=0/REUSE=0 behaves identically. Fix: on a geo track (TD5RE_GEO_PLACE or
+  TD5RE_GEO_ROUTE set) the resolver holds the rows that describe the real place
+  ON (SCENERY, TERRAIN, BACKDROP, COASTLINE, BRIDGES, TUNNELS, DISTRICTS,
+  BUILDING MASS, CROSSINGS, SIDE STREETS, ROAD MARKS, INTERSECTIONS, SIDEWALKS)
+  and SNOW OFF, human pins excepted, logged as `HELD by the real place (GEO)`.
+  Seed 20260902 now builds 373 meshes; seed 20260901 is byte-identical to
+  before (MODELS `50C8E8FC902D4BAA`); synthetic seed 20260901 byte-identical.
 - Landmark prefab fallback and roof:shape only exercised on 2 buildings.
 
 ## 7. Phases

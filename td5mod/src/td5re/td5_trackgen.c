@@ -1032,6 +1032,15 @@ static int         s_rolls_valid = 0;
 
 int tg_rolls_enabled(void) { return td5_env_flag_on("TD5RE_R21_ROLL"); }
 
+/* [GEO item 11] Is a real place or route asked for? Environment only (see the
+ * geo hold in td5_trackgen_resolve_rolls for why not td5_geo_loaded). */
+static int tg_rolls_geo_requested(void)
+{
+    const char *p = getenv("TD5RE_GEO_PLACE");
+    const char *r = getenv("TD5RE_GEO_ROUTE");
+    return (p && p[0]) || (r && r[0]);
+}
+
 /* Sibling of tg_biome_hash with its OWN salt namespace and, deliberately, no
  * index term -- see the salt convention above. */
 unsigned int tg_roll_hash(unsigned int seed, unsigned int salt)
@@ -1152,6 +1161,44 @@ void td5_trackgen_resolve_rolls(unsigned int seed, TD5_TgRolls *out)
             int c = tg_roll_pick_w(tg_roll_hash(seed, e->salt), e->w, e->n);
             out->choice[i] = (unsigned char)c;
             out->value[i]  = e->vals[c];
+        }
+    }
+    /* [GEO 2026-09-30 item 11] A REAL PLACE IS NOT A PRESENCE ROLL. On a geo
+     * track the rows below describe what the place actually has -- its
+     * buildings, streets, crossings, pavements, relief, coast, bridges -- and
+     * rolling them OFF deletes real content. SCENERY is the worst case: it
+     * rolls OFF on 12% of seeds (k_tgr_w_scarce), and then tg_pages removes
+     * MODELS.DAT and TEXTURES.DAT on purpose, so the "textureless build with no
+     * scenery" reported against TD5RE_AUTOTRACK_STREAM=0 + REUSE was this roll,
+     * not the stream or the stamp (repro: La Plata, seed 20260902 -> SCENERY
+     * OFF, engine.log "TEXTURES.DAT not found or too small in level090.zip";
+     * seed 20260901 -> ON, fine under every STREAM/REUSE combination).
+     *
+     * Held ON here, inside the resolver, for the same reason the budget lives
+     * here: the studio reads this same result, so the screen and the track
+     * agree. SNOW is held OFF: an invented snowfall on a real place is the one
+     * roll that ADDS something false. A human pin still wins (pinned rows are
+     * never touched), rows that only decorate (banners, lamps, armco, back
+     * rows) keep rolling, and "geo" is read from the ENVIRONMENT, not from the
+     * loaded cache, so this stays pure and thread-safe as promised above. With
+     * neither knob set nothing below runs: synthetic builds are unchanged. */
+    if (on && tg_rolls_geo_requested()) {
+        static const struct { int id; int want; } k_geo_hold[] = {
+            { TD5_TG_ROLL_SCENERY,        1 }, { TD5_TG_ROLL_TERRAIN_HILLS,  1 },
+            { TD5_TG_ROLL_TERRAIN_FAR,    1 }, { TD5_TG_ROLL_COASTLINE,      1 },
+            { TD5_TG_ROLL_BRIDGES,        1 }, { TD5_TG_ROLL_TUNNELS,        1 },
+            { TD5_TG_ROLL_DISTRICTS,      1 }, { TD5_TG_ROLL_FACADE_MASS,    1 },
+            { TD5_TG_ROLL_CROSSINGS,      1 }, { TD5_TG_ROLL_CROSS_STREETS,  1 },
+            { TD5_TG_ROLL_CROSS_MARKINGS, 1 }, { TD5_TG_ROLL_INTERSECTIONS,  1 },
+            { TD5_TG_ROLL_SIDEWALKS,      1 }, { TD5_TG_ROLL_SNOW,           0 },
+        };
+        size_t k;
+        for (k = 0; k < sizeof(k_geo_hold) / sizeof(k_geo_hold[0]); k++) {
+            const int id = k_geo_hold[k].id, want = k_geo_hold[k].want;
+            if (out->pinned[id] || out->choice[id] == want) continue;
+            out->choice [id] = (unsigned char)want;
+            out->value  [id] = k_tg_rolls[id].vals[want];
+            out->geo_held[id] = 1;
         }
     }
     /* [R22] PRESENCE BUDGET -- the hedge that lets the presence weights above
@@ -1489,8 +1536,9 @@ void tg_rolls_report(void)
                       s_rolls.pinned[i] ? "PINNED" : unpinned,
                       s_rolls.value[i],
                       s_rolls.restored[i] ? " RESTORED by the presence budget"
+                      : s_rolls.geo_held[i] ? " HELD by the real place (GEO)"
                       : s_rolls.pinned[i] && e->knob ? " via " : "",
-                      s_rolls.restored[i] ? ""
+                      (s_rolls.restored[i] || s_rolls.geo_held[i]) ? ""
                       : s_rolls.pinned[i] && e->knob ? e->knob : "");
         }
     }

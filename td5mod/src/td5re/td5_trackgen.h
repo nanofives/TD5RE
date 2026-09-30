@@ -339,6 +339,9 @@ typedef struct {
      * otherwise indistinguishable from a row that rolled ON, and a budget that
      * cannot be observed is a budget nobody can tune. */
     unsigned char restored[TD5_TG_ROLL_COUNT];
+    /* [GEO item 11] 1 = a geo track held this row at the real-place value
+     * (ON, or OFF for SNOW) against its roll. */
+    unsigned char geo_held[TD5_TG_ROLL_COUNT];
 } TD5_TgRolls;
 
 /* PURE: touches no statics, consumes no RNG, safe on any thread. Same
