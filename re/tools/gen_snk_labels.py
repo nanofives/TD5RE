@@ -118,7 +118,7 @@ PORT_EXTRAS = [
     ("SNK_PlayerSelectButTxt",     "PLAYER"),
     ("SNK_ControllerSelectButTxt", "CONTROLLER"),
     ("SNK_RemapButTxt",            "REMAP"),
-    ("SNK_OpponentsButTxt",        "OPPONENTS"),
+    ("SNK_OpponentsButTxt",        "AI OPPONENTS"),
     ("SNK_LapsButTxt",             "LAPS"),
     ("SNK_RaceOptionsButTxt",      "RACE OPTIONS"),
     ("SNK_MultiplayerTitleTxt",    "MULTIPLAYER"),

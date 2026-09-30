@@ -80,6 +80,35 @@ void td5_plat_dump_gpu_crash_diag(const char *path);
 int  td5_plat_gpu_probe(unsigned *vendor_id, unsigned *device_id,
                         unsigned *dedicated_mb, char *name, int name_cap);
 
+/* [AUTO PERF TIERS 2026-09-29] Does adapter 0 support DXR (D3D12 raytracing
+ * tier >= 1.0)? Creates a throwaway D3D12 device to ask, so call it at most
+ * once per launch and BEFORE the real device exists. Returns 1 = DXR, 0 = no
+ * DXR or the query failed. The RT layer self-gates anyway (td5_rt_active), so a
+ * 0 here only makes the auto tier more conservative, never incorrect. */
+int  td5_plat_dxr_probe(void);
+
+/* [AUTO PERF TIERS 2026-09-29] Logical processor count (GetSystemInfo). Used by
+ * the auto-tier as a proxy for how much CPU headroom the render thread has. */
+int  td5_plat_cpu_logical_cores(void);
+
+/* [PAUSE RENDER CACHE 2026-09-29] Extra frame-rate ceiling applied by
+ * td5_plat_present on top of the existing TD5RE_FRAME_CAP. Unlike that cap this
+ * one ALSO applies when VSync is on, because its purpose is the opposite: a
+ * paused race or a static menu has nothing new to draw, so pacing it down to
+ * ~30 Hz stops the GPU burning a full frame budget on an unchanged image.
+ * 0 = no extra ceiling (the normal in-race case). */
+void td5_plat_set_idle_frame_cap(int fps);
+
+/* [PAUSE RENDER CACHE 2026-09-29] Scene freeze-frame, for the paused race.
+ * capture() copies the frame drawn so far into a private backend texture;
+ * blit() paints it back over the whole render target and returns 1 (0 = no
+ * snapshot held, caller must render the world normally); invalidate() drops it.
+ * Thin pass-through to Backend_SceneSnapshot* so td5_game.c does not have to
+ * pull in the wrapper header. */
+void td5_plat_scene_snapshot_capture(void);
+int  td5_plat_scene_snapshot_blit(void);
+void td5_plat_scene_snapshot_invalidate(void);
+
 /** Get current window dimensions. */
 void td5_plat_get_window_size(int *width, int *height);
 

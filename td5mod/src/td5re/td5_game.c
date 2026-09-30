@@ -50,7 +50,6 @@
 
 #include "td5_vfx.h"
 #include "td5_light.h"    /* [DYNAMIC LIGHTS] per-frame headlight registry */
-#include "td5_arcade.h"   /* ARCADE mode: pickup pads + power-ups */
 #include "td5_replay.h"   /* ghost-state "View Replay" recorder/poser */
 #include "td5_damage.h"   /* [CAR DAMAGE] health reset + knockout completion gate */
 #include "td5_tutorial.h" /* first-race controller-tutorial overlay */
@@ -685,6 +684,22 @@ static int      s_resume_countdown_state;   /* last digit pushed to the HUD */
  * shared split-screen pause panel. -1 = unknown. Only surfaced when >1 human. */
 static int      s_pause_local_slot = -1;
 static int      s_pause_menu_active;
+/* [PAUSE RENDER CACHE 2026-09-29] Frame-rate ceiling applied while the pause
+ * menu is up. The sim is frozen and the world is a cached blit, so the only
+ * thing a higher rate buys is a smoother cursor -- 30 Hz covers that while
+ * handing the GPU (and a laptop's battery) back most of the frame budget. */
+#define TD5_PAUSE_FRAME_CAP 30
+/* Master knob for the pause render cache + its frame cap. TD5RE_PAUSE_CACHE=0
+ * restores the pre-2026-09-29 behaviour exactly (full world render every paused
+ * frame, no idle cap), so the two can be A/B'd from one binary and the feature
+ * can be switched off if a driver ever mishandles the snapshot copy. */
+static int pause_render_cache_enabled(void)
+{
+    static int s_on = -1;
+    /* td5_env_flag_on defaults ON when the var is unset -- the wanted default. */
+    if (s_on < 0) s_on = td5_env_flag_on("TD5RE_PAUSE_CACHE");
+    return s_on;
+}
 static int      s_pause_menu_cursor;   /* [S31][END RACE NOW 2026-06-30][GATED 2026-07-02]
                                         * 0=VIEW 1=SOUND 2=RADIO 3=CONTINUE 4=RESTART.
                                         * Rows past 4 are conditional and computed
@@ -1171,6 +1186,14 @@ static const SSW_NavStep k_ssw_2p_opts[]    = { { TD5_SCREEN_MAIN_MENU, 4 },
 static const SSW_NavStep k_ssw_perf_opts[]  = { { TD5_SCREEN_MAIN_MENU, 4 },
                                                 { TD5_SCREEN_OPTIONS_HUB, 2 },
                                                 { TD5_SCREEN_DISPLAY_OPTIONS, 7 } };
+/* [PERF PRESETS 2026-09-29] CUSTOM PERFORMANCE is one row deeper: PERFORMANCE
+ * row 3 = the "CUSTOM ->" nav row (rows: 0 AUTO-SELECT, 1 GRAPHICS QUALITY,
+ * 2 LIGHTING, 3 CUSTOM, 4 OK). Same reason as the route above -- without it
+ * --StartScreen=54 cannot land and the selftest screen walk skips the screen. */
+static const SSW_NavStep k_ssw_perf_custom[] = { { TD5_SCREEN_MAIN_MENU, 4 },
+                                                 { TD5_SCREEN_OPTIONS_HUB, 2 },
+                                                 { TD5_SCREEN_DISPLAY_OPTIONS, 7 },
+                                                 { TD5_SCREEN_PERFORMANCE_OPTIONS, 3 } };
 /* Race type menu: 0=Single Race (→ car selection with game_type=0). */
 static const SSW_NavStep k_ssw_car_sel[]    = { { TD5_SCREEN_MAIN_MENU, 0 },
                                                 { TD5_SCREEN_RACE_TYPE_MENU, 0 } };
@@ -1207,6 +1230,7 @@ static const SSW_NavStep *startscreen_route(int target, int *out_len)
     case TD5_SCREEN_SOUND_OPTIONS:      SSW_ROUTE(k_ssw_sound_opts);
     case TD5_SCREEN_DISPLAY_OPTIONS:    SSW_ROUTE(k_ssw_disp_opts);
     case TD5_SCREEN_PERFORMANCE_OPTIONS: SSW_ROUTE(k_ssw_perf_opts);  /* [LOW-END PERF] */
+    case TD5_SCREEN_PERFORMANCE_CUSTOM: SSW_ROUTE(k_ssw_perf_custom); /* [PERF PRESETS] */
     case TD5_SCREEN_TWO_PLAYER_OPTIONS: SSW_ROUTE(k_ssw_2p_opts);
     case TD5_SCREEN_CAR_SELECTION:      SSW_ROUTE(k_ssw_car_sel);
     case TD5_SCREEN_HIGH_SCORE:         SSW_ROUTE(k_ssw_hiscore);
@@ -2325,20 +2349,19 @@ static void init_race_modes_and_seed(void)
                 g_td5.traffic_volume = TD5_TRAFFIC_VOLUME_COUNT - 1;
             g_td5.traffic_enabled = (g_td5.traffic_volume > 0) ? 1 : 0;
             g_td5.special_encounter_enabled = ncfg_l.cops ? 1 : 0;
-            /* [NET GAME MODES 2026-07-04] Adopt the host's DYNAMICS (ARCADE/SIM)
-             * so arcade 3x-collisions + power-up boxes (and Traffic Battle boxes)
-             * are identical on every peer. Committed to physics below at
-             * td5_physics_set_dynamics() before td5_arcade_init_race() reads it. */
-            g_td5.ini.dynamics = ncfg_l.dynamics ? 1 : 0;
             /* [RACE OPTIONS CONSOLIDATION 2026-07-21] Adopt the host's remaining
-             * RACE OPTIONS into the live in-memory config so the sim (power-up
-             * boxes, damage model, collision) matches on every peer. NOT persisted
-             * — the client's own td5re.ini must stay intact (mirrors traffic /
-             * dynamics above). td5_arcade / td5_damage read these g_td5.ini.*
-             * fields at race init; collision is applied via the physics toggle
-             * (mode-forced ramming at COP_CHASE / TRAFFIC_BATTLE below still wins).
-             * LANE ASSIST / TUTORIAL / PLAYER NAME are local-only, not replicated. */
-            g_td5.ini.powerups             = ncfg_l.powerups;
+             * RACE OPTIONS into the live in-memory config so the sim (damage
+             * model, collision) matches on every peer. NOT persisted — the
+             * client's own td5re.ini must stay intact (mirrors traffic above).
+             * td5_damage reads these g_td5.ini.* fields at race init; collision
+             * is applied via the physics toggle (mode-forced ramming at
+             * COP_CHASE / TRAFFIC_BATTLE below still wins). LANE ASSIST /
+             * TUTORIAL / PLAYER NAME are local-only, not replicated.
+             * [2026-09-29] The host's `dynamics` and `powerups` words are
+             * ignored now: DYNAMICS is gone (arcade physics is the only model)
+             * and the power-ups feature was deleted. Both stay in the wire
+             * struct so the packet layout — and TD5_NET_PROTO_VERSION — do not
+             * move. */
             g_td5.ini.car_damage_toughness = ncfg_l.car_toughness;
             g_td5.ini.car_damage_deform    = ncfg_l.car_deform;
             g_td5.ini.car_damage           = ncfg_l.car_damage ? 1 : 0;
@@ -2519,8 +2542,7 @@ static void init_race_modes_and_seed(void)
      * Force a fixed-pace dynamic-traffic stream ON, cops/wanted OFF, collisions
      * ON, and a fixed traffic volume so the field is a steady supply of ram
      * targets. The match runs to the track END (laps / finish line) — no timer
-     * (locked design decision). Works for both ARCADE and SIMULATION dynamics;
-     * the power-up boxes only appear in arcade dynamics. */
+     * (locked design decision). */
     if (td5_game_battle_mode_active()) {
         if (g_td5.mp_mode_config.battle_spawn_period <= 0) {
             int p = td5_env_int("TD5RE_BATTLE_SPAWN_PERIOD", 30, 5, 240);   /* ticks @30Hz between spawns */
@@ -2539,10 +2561,6 @@ static void init_race_modes_and_seed(void)
          * battle's own behaviour keys off td5_game_battle_mode_active() (the
          * replicated mode), so this is safe. */
         g_td5.game_type                 = TD5_GAMETYPE_SINGLE_RACE;
-        /* [TRAFFIC BATTLE 2026-07-23] Power-ups removed: no arcade item boxes /
-         * MAGNET in this mode. The ram mechanic is collision-based (set below),
-         * so disabling pickups leaves the core gameplay intact. */
-        g_td5.ini.powerups              = 0;
         g_td5.time_trial_enabled        = 0;
         g_td5.traffic_enabled           = 1;     /* traffic ON              */
         /* [TRAFFIC BATTLE 2026-06-28] NO rival racers — it is you (and any other
@@ -2597,13 +2615,17 @@ static void init_race_modes_and_seed(void)
         g_td5.wanted_mode_enabled       = 0;     /* not cop chase            */
         g_td5.special_encounter_enabled = 0;     /* cops OFF                 */
         g_td5.time_trial_enabled        = 0;
-        /* [NET GAME MODES 2026-07-04] NO rival AI (user rule). Over the net the
-         * OTHER players live in num_ai_opponents (np-1; num_human_players is
-         * forced to 1 at td5_fe_mp_setup.c:447) and the host broadcasts
-         * num_opponents=0 for drag, so only zero it for local/solo drag —
-         * zeroing it over the net would delete every other player's car. */
-        if (!g_td5.network_active)
-            g_td5.num_ai_opponents      = 0;     /* NO rival AI (user rule)  */
+        /* [MP DRAG OPPONENTS 2026-09-29] LOCAL split-screen MP drag now honours
+         * the AI OPPONENTS row: the field is humans + AI rivals + EXTRA LANES,
+         * so a 2-player lobby can fill the strip with CPU cars. This used to
+         * force num_ai_opponents to 0 ("NO rival AI"), which silently discarded
+         * the row.
+         *
+         * The NET path is deliberately untouched: over the net the OTHER players
+         * live in num_ai_opponents (np-1; num_human_players is forced to 1 at
+         * td5_fe_mp_setup.c) and the host broadcasts num_opponents=0 for drag,
+         * so that word does not mean "AI cars" there and must not be reused. Net
+         * MP drag therefore still has no AI rivals. */
         if (g_td5.mp_mode_config.drag_traffic) {
             /* Oncoming-only traffic stream (no lane changes; spawns ~50 spans
              * ahead — see trf_force_oncoming + the drag spawn-ahead in td5_ai.c). */
@@ -3876,23 +3898,6 @@ static void init_race_spawn_actors(void)
         g_td5.total_actor_count = spawn_count;
         td5_ai_bind_actor_table(s_actor_memory);
 
-        /* [DYNAMICS COMMIT FIX 2026-06-28] Re-commit the ARCADE/SIMULATION choice
-         * from the authoritative persisted value (g_td5.ini.dynamics — written by
-         * EVERY dynamics selector: Quick Race, Track Select, Game Options) right
-         * before vehicle + arcade init. ConfigureGameTypeFlags also commits it, but
-         * it runs at screen-INIT with the PRE-toggle value; only the Quick Race OK
-         * handler re-committed late. So launching from Track Select (or any path)
-         * after flipping the toggle left the dynamics flag STALE — keying the arcade
-         * power-up gate (and gravity / stat scaling) to the WRONG mode. The visible
-         * symptom: item-box power-ups still appearing in SIMULATION. Committing here
-         * makes the live mode match the user's pick on every launch path, so the
-         * arcade power-ups are truly ARCADE-exclusive (td5_arcade_init_race sets
-         * s_active = td5_physics_get_dynamics()==0). */
-        td5_physics_set_dynamics(g_td5.ini.dynamics);
-        TD5_LOG_I(LOG_TAG, "InitRace: dynamics=%s -> arcade power-ups %s",
-                  g_td5.ini.dynamics ? "SIMULATION" : "ARCADE",
-                  g_td5.ini.dynamics ? "OFF (sim-exclusive disabled)" : "available");
-
         /* Original order (0x42AFE2-0x42AFE7): vehicle + AI runtime init
          * BEFORE actor placement (step 22). */
         td5_physics_init_vehicle_runtime();
@@ -3904,11 +3909,6 @@ static void init_race_spawn_actors(void)
             TD5_Actor *a = (TD5_Actor *)(s_actor_memory + (size_t)s * TD5_ACTOR_STRIDE);
             td5_physics_compute_suspension_envelope(a, s);
         }
-
-        /* [ARCADE 2026-06-26] Place power-up pads along the track ring + clear
-         * per-slot/hazard state for this race. No-op (and clears) in SIMULATION
-         * mode; the track ring is already loaded by this point. */
-        td5_arcade_init_race();
 
         /* [DEMO FIX #3 2026-06-15] The AI module keeps its OWN slot-state table
          * (td5_ai.c g_slot_state[], separate from this file's s_slot_state[]) and
@@ -7049,9 +7049,18 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
                  * + music and unfreeze at GO (tick_resume_countdown). Net races
                  * keep their own lockstep pause sync, and a live start-countdown
                  * must not be clobbered, so both are excluded. */
+                /* [W6 item 2 2026-09-29] END RACE NOW closes the menu WITHOUT
+                 * setting any of the *_pending flags (it force-finishes in place
+                 * and lets check_race_completion fade to results), so it used to
+                 * read as a genuine resume and armed the 3-2-1 — the user saw a
+                 * countdown on a race that was already over. s_post_finish_cooldown
+                 * is non-zero from td5_game_force_finish_race() by the time we get
+                 * here, so it is the exact "the race is ending" discriminator.
+                 * Kept OUT of resume_gameplay itself: the music/SFX restore below
+                 * must still run on this path (that is W6 item 1). */
                 int resume_gameplay =
                     (!s_pause_exit_pending && !s_pause_restart_pending && !g_td5.quit_requested);
-                int arm_resume_cd = (resume_gameplay &&
+                int arm_resume_cd = (resume_gameplay && s_post_finish_cooldown == 0 &&
                                      g_td5.num_human_players > 1 && !g_td5.network_active &&
                                      s_race_countdown_state == 0 && g_cameraTransitionActive == 0);
                 if (arm_resume_cd) {
@@ -7068,7 +7077,12 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
                 } else {
                     td5_sound_set_sfx_muted(0);
                     td5_sound_set_paused(0);  /* [item 24] resume audio + restore music volume */
-                    if (resume_gameplay) {
+                    /* [W6 item 2 2026-09-29] Don't re-start the in-race music when
+                     * the menu closed because END RACE NOW force-finished the race
+                     * (s_post_finish_cooldown != 0) — the results fade is one tick
+                     * away, so the track would blip on and straight back off. The
+                     * un-mute above still runs so the menus get their audio back. */
+                    if (resume_gameplay && s_post_finish_cooldown == 0) {
                         td5_sound_cd_play(g_td5.track_index % 10 + 1);  /* same call as InitRace step 16 */
                         TD5_LOG_I(LOG_TAG, "Pause resumed -> music restarted (track=%d)",
                                   g_td5.track_index % 10 + 1);
@@ -7559,11 +7573,6 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
          * are stationary during the count-in). Cheap; runs regardless of the
          * summary-screen knob so the data is always available for A/B. */
         td5_physics_accumulate_metrics();
-
-        /* [ARCADE 2026-06-26] Power-up pickups + effect timers + hazard spinouts.
-         * Runs once per genuine race tick AFTER physics (so positions are settled),
-         * inside the deterministic sub-tick loop. No-op in SIMULATION mode. */
-        td5_arcade_tick();
         }   /* end normal-sim block (skipped when ghost-replay poses instead) */
 
         td5_game_trace_stage("post_physics", ticks_this_frame);
@@ -7781,6 +7790,63 @@ static void frame_render(void)
     /* Begin scene */
     td5_render_begin_scene();
 
+    /* [PAUSE RENDER CACHE 2026-09-29] While the pause menu is up the sim is
+     * frozen, so every paused frame re-renders a world that is pixel-identical
+     * to the one before it -- track walk, actors, RT dispatches, deferred
+     * shadow/GI/SSR passes, VFX, HUD, all to produce the same image. Instead:
+     * snapshot the first paused frame's world+HUD into a backend texture and
+     * blit it back on every later paused frame, then draw only the menu (which
+     * DOES change -- selection, sliders, confirm prompts) on top.
+     *
+     * Two knobs move together here:
+     *   - the snapshot, which removes the world cost;
+     *   - an idle frame cap, because without it the saved time just goes into
+     *     presenting MORE identical frames. 30 Hz is ample for a static menu.
+     * Both are pure presentation: the sim is already frozen, nothing below this
+     * point writes actor/physics/RNG state, so determinism is untouched.
+     *
+     * NOTE the ownership split -- this is the RENDER side only. The pause FSM
+     * itself (resume countdown, audio) lives further up in this file and is
+     * deliberately not touched here.
+     *
+     * The `goto` skips ~450 lines of world rendering without re-indenting them;
+     * the alternative (wrapping the whole viewport pipeline in an if) would
+     * reflow the entire function for a one-bit decision. */
+    int pause_cached = 0;
+    if (!s_pause_menu_active) {
+        td5_plat_scene_snapshot_invalidate();   /* resumed: the frozen frame is stale */
+        td5_plat_set_idle_frame_cap(0);
+    } else if (!pause_render_cache_enabled()) {
+        td5_plat_set_idle_frame_cap(0);         /* knob OFF: byte-identical to before */
+    } else {
+        /* The pause menu's VIEW row edits draw distance and that IS visible in
+         * the world, so a frozen snapshot would swallow the player's own slider
+         * (it used to update live). Re-render the frame the value changes on.
+         * Checked here rather than in the pause input handler so this stays
+         * entirely inside the render path -- the pause FSM is W6's file. VIEW is
+         * the only pause row with a world-visible effect; SOUND/RADIO are audio
+         * and the rest are navigation. */
+        static float s_snap_view = -1.0f;
+        float view_now = td5_save_get_view_distance();
+        if (view_now != s_snap_view) {
+            td5_plat_scene_snapshot_invalidate();
+            s_snap_view = view_now;
+        }
+        td5_plat_set_idle_frame_cap(TD5_PAUSE_FRAME_CAP);
+        pause_cached = td5_plat_scene_snapshot_blit();
+    }
+    if (pause_cached) {
+        /* The blit already reset viewport+scissor to full screen; restore the
+         * render state the HUD/menu draws below expect (the world pass normally
+         * leaves it this way after its last viewport). */
+        td5_plat_render_set_viewport(0, 0, g_td5.render_width, g_td5.render_height);
+        td5_plat_render_set_clip_rect(0, 0, g_td5.render_width, g_td5.render_height);
+        td5_render_set_race_pass(TD5_RACE_PASS_OPAQUE);
+        td5_render_set_fog(0);
+        td5_profile_mark("pause_blit");   /* [perf probe] cached-frame repaint */
+        goto pause_overlays;
+    }
+
     /* Clear backbuffer once before any viewport renders.
      * Moved out of td5_render_actors_for_view so the split-screen P2 pass
      * does not wipe P1's already-rendered half.
@@ -7973,7 +8039,6 @@ static void frame_render(void)
                     if (wa) td5_vfx_render_ambient_streaks(wa, g_td5.sim_tick_budget, vp);
                 }
                 td5_vfx_draw_particles(vp);
-                td5_render_arcade_pads();   /* [ARCADE] glowing power-up pads + hazards */
             }
             td5_render_flush_translucent();
             td5_render_flush_projected_buckets();
@@ -8144,7 +8209,7 @@ static void frame_render(void)
          * [LOW-END PERF 2026-09-12] PERFORMANCE "PARTICLES & WEATHER" toggle
          * (g_td5.ini.vfx_enabled, [Display] VFX): 0 skips the whole per-view VFX
          * draw block — tire tracks, rain streaks, particle pools — which is fill-
-         * heavy on an iGPU. Arcade pads stay (mode-critical). Default 1 = today. */
+         * heavy on an iGPU. Default 1 = today. */
         if (!td5_render_photobooth_active() && g_td5.ini.vfx_enabled) {
             td5_vfx_render_tire_tracks();
             /* Weather rain streaks — orig RenderAmbientParticleStreaks @ 0x00446560,
@@ -8160,10 +8225,6 @@ static void frame_render(void)
             }
             td5_vfx_draw_particles(vp);
         }
-        /* [ARCADE] glowing power-up pads + hazards — gameplay-critical, drawn
-         * regardless of the VFX toggle (they mark collectibles/obstacles). */
-        if (!td5_render_photobooth_active())
-            td5_render_arcade_pads();
         td5_profile_mark("v_vfx");     /* [perf probe] per-view tire/streak/particle draws */
         td5_render_flush_translucent();
         td5_render_flush_projected_buckets();
@@ -8217,10 +8278,6 @@ static void frame_render(void)
      * the MP frontend set identities and the race is split). */
     td5_hud_draw_player_id_overlays();
 
-    /* [ARCADE 2026-06-26] Per-viewport active power-up chip (label + timer bar).
-     * Self-gated: no-op unless the race is in ARCADE mode with an active effect. */
-    td5_hud_draw_arcade_chips();
-
     /* [TRAFFIC BATTLE 2026-06-28] Per-viewport "WRECKS N" tally. Self-gated:
      * no-op unless the Traffic Destruction battle mode is active. */
     td5_hud_draw_battle_wrecks();
@@ -8244,6 +8301,19 @@ static void frame_render(void)
      * unless a controller is currently missing). Drawn on top of the HUD. */
     td5_hud_draw_disconnect_overlays();
     td5_hud_draw_net_pause_overlay();
+
+    /* [PAUSE RENDER CACHE 2026-09-29] This is the last frame before the pause
+     * menu goes up (or the first frame of a pause) -- bake the queued HUD glyphs
+     * into the image and snapshot it, so every FOLLOWING paused frame can skip
+     * everything above. Flushing here is safe: td5_hud_flush_text() drains a
+     * queue, and the pause overlay below refills it for the unconditional flush
+     * at the bottom of this function. The snapshot deliberately does NOT include
+     * the menu -- that part still redraws each frame. */
+pause_overlays:
+    if (s_pause_menu_active && !pause_cached) {
+        td5_hud_flush_text();
+        td5_plat_scene_snapshot_capture();
+    }
 
     /* [PORT 2026-06] First-race controller-tutorial overlay. update() polls for
      * a dismiss press (releasing the countdown next tick); draw() renders the
@@ -8689,6 +8759,34 @@ void td5_game_release_race_resources(void) {
     /* Stop and release all race sound channels */
     td5_sound_release_race_channels();
     td5_sound_set_race_end(1);
+
+    /* [W6 item 1 2026-09-29] NO SOUND IN THE MENUS AFTER LEAVING A RACE.
+     * Leaving a race from the pause menu (END RACE NOW / QUIT TO MENU / EXIT,
+     * and the free-cam path) tears the race down while the pause suspend is
+     * still asserted: td5_plat_audio_set_muted(1) + a ducked music backend.
+     * Nothing on the way out ever lifted it, so every frontend screen after
+     * that race was silent. td5_sound_init_race_resources() clears the state
+     * for the NEXT race, which is why it looked like "only the menus lost
+     * sound" — and why the edge-triggered set_paused(0) alone is not enough:
+     * by then s_sound_paused has been reset to 0 while the platform mute is
+     * still latched. So: lift the suspend (edge), then force the platform
+     * un-mute unconditionally, then re-apply the saved music level.
+     *
+     * Ordering matters — set_paused(0) must run BEFORE set_volume, because
+     * td5_music_set_volume() only remembers the level while ducked
+     * (td5_music.c: `if (s_paused) return;`). */
+    td5_sound_set_paused(0);                        /* un-duck music + un-mute SFX (edge) */
+    td5_sound_set_sfx_muted(0);                     /* force the platform mute off (no edge) */
+    td5_sound_set_music_volume(g_td5.ini.music_volume);
+    TD5_LOG_I(LOG_TAG, "Race teardown: audio un-suspended for the frontend (music vol=%d)",
+              g_td5.ini.music_volume);
+
+    /* [W6 item 1 2026-09-29] A resume countdown armed right before the race
+     * ended would otherwise survive into the teardown and, with it, the frozen
+     * + silenced field it implies. Race init clears these too; clearing here as
+     * well means no path can carry a stale 3-2-1 out of a race. */
+    s_resume_countdown_ticks = 0;
+    s_resume_countdown_state = 0;
 
     /* Stop force feedback and reset input config */
     td5_input_ff_stop();
@@ -10068,10 +10166,11 @@ int td5_game_drag_field_size(void)
         /* MP DRAG: one lane per human player PLUS the EXTRA LANES option. Over
          * the net every player is a separate machine folded into
          * num_ai_opponents (num_human_players is forced to 1), so the human
-         * count is num_human_players + num_ai_opponents on every peer. */
-        n = (g_td5.network_active
-                 ? g_td5.num_human_players + g_td5.num_ai_opponents
-                 : g_td5.num_human_players)
+         * count is num_human_players + num_ai_opponents on every peer.
+         * [MP DRAG OPPONENTS 2026-09-29] On LOCAL split-screen the same word
+         * really is the AI rival count, so it adds lanes there too — which makes
+         * both cases the same sum. */
+        n = g_td5.num_human_players + g_td5.num_ai_opponents
             + g_td5.mp_mode_config.drag_extra_lanes;
     else
         n = g_td5.num_human_players + g_td5.num_ai_opponents;
@@ -10091,12 +10190,14 @@ int td5_game_drag_active_racers(void)
 {
     int n;
     if (td5_game_drag_mp_active())
-        /* humans only; extra lanes stay empty. Over the net the other players
-         * are folded into num_ai_opponents (num_human_players==1), so count
-         * both there to get the true racer count on every peer. */
-        n = g_td5.network_active
-                ? g_td5.num_human_players + g_td5.num_ai_opponents
-                : g_td5.num_human_players;
+        /* Humans + AI rivals; the EXTRA LANES stay empty road. Over the net the
+         * other players are folded into num_ai_opponents (num_human_players==1)
+         * and net drag has no AI, so the same sum is the true racer count on
+         * every peer. [MP DRAG OPPONENTS 2026-09-29] On LOCAL split-screen
+         * num_ai_opponents is the AI rival count from the AI OPPONENTS row, so
+         * those cars race — previously this returned humans only, which is what
+         * left the row's CPU cars off the line. */
+        n = g_td5.num_human_players + g_td5.num_ai_opponents;
     else
         n = td5_game_drag_field_size();    /* SP: a car (player/AI) per lane */
     if (n < 1) n = 1;
@@ -11767,6 +11868,31 @@ int td5_game_mp_traffic_fair(void) {
  * net) or synthesised for single-player vs AI in td5_game_init_race_session. */
 int td5_game_battle_mode_active(void) {
     return g_td5.mp_mode_config.mode == TD5_MP_MODE_TRAFFIC_BATTLE;
+}
+
+/* [TRAFFIC BATTLE 2026-06-28, moved here 2026-09-29] Score traffic destruction.
+ * A racer (humans + AI, slot < g_traffic_slot_base) that rams a TRAFFIC car
+ * (slot >= base) hard enough to cross the NPC-fatal threshold scores one WRECK.
+ * Deduped on the victim's broken-down state so each destroyed traffic car counts
+ * exactly once: the collision resolver marks the victim broken-down right after
+ * this call, so subsequent overlaps see it already broken and don't re-score; a
+ * recycled traffic slot clears the flag and can be scored afresh.
+ *
+ * Lived in td5_arcade.c until the power-ups module was deleted (2026-09-29). It
+ * was never a power-up behaviour — it gates on td5_game_battle_mode_active() —
+ * so it moved to the module that owns battle mode + the wanted-kill tally. The
+ * whole test is a pure function of replicated state (slot indices, impact_mag,
+ * broken-down flag) + the process-wide npc_fatal_mag knob, so wreck counts stay
+ * bit-identical across lockstep peers. */
+void td5_game_battle_note_ram(int aggressor, int victim, int impact_mag) {
+    if (!td5_game_battle_mode_active()) return;
+    if (aggressor < 0 || aggressor >= g_traffic_slot_base) return;  /* aggressor = racer */
+    if (victim   <  g_traffic_slot_base) return;                    /* victim = traffic  */
+    if (impact_mag < td5_physics_npc_fatal_mag()) return;           /* fatal hit only    */
+    if (td5_ai_actor_is_broken_down(victim)) return;                /* already scored    */
+    td5_game_add_wanted_kill(aggressor);
+    TD5_LOG_I(LOG_TAG, "battle: slot=%d WRECKED traffic slot=%d (impact=%d) -> wrecks=%d",
+              aggressor, victim, impact_mag, td5_game_get_wanted_kills(aggressor));
 }
 
 /* [DRAG RACE 2026-06-30] Active when the MP lobby selected the DRAG RACE mode.

@@ -309,13 +309,14 @@ static int  s_p1_paint;
 
 static int  s_track_max;               /* max track index for current mode */
 
-/* [#14 2026-06-15] Dedicated RANDOMIZE buttons placed ABOVE the selector on the
- * car- and track-selection screens. Created at the next free button index (so the
- * existing hard-coded button indices used by the action switches are untouched);
+/* [#14 2026-06-15] Dedicated RANDOMIZE button placed ABOVE the selector on the
+ * car-selection screen. Created at the next free button index (so the existing
+ * hard-coded button indices used by the action switches are untouched);
  * navigation is geometric (frontend_spatial_pick), so a higher index above the
- * selector is still reached by pressing UP. -1 = not created this entry. */
+ * selector is still reached by pressing UP. -1 = not created this entry.
+ * [W3 2026-09-29] The TRACK selector's twin was dropped: there, randomizing is
+ * the R key / pad X shortcut instead of a clickable chip. */
 static int  s_carsel_rand_btn = -1;
-static int  s_trksel_rand_btn = -1;
 /* [AUTOTRACK R2 item 25] AUTO TRACK OPTIONS button index on the track-select
  * column, or -1 when the current pick is not the auto-generated slot. */
 static int  s_trksel_auto_btn = -1;
@@ -923,15 +924,23 @@ void frontend_render_carsel_randomize_icon(float sx, float sy) {
                                  sx, sy, (s_selected_button == b));
 }
 
-void frontend_render_trksel_randomize_icon(float sx, float sy) {
-    if (!frontend_random_button_on() || !frontend_random_icon_on()) return;
+/* [W3 2026-09-29] Track selector: the randomize CHIP is gone. Randomizing is a
+ * shortcut now (keyboard R / pad X, both handled in Screen_TrackSelection state
+ * 4), so this paints the hint that advertises it instead of an icon.
+ * Placement: the OK/BACK row, right of the BACK button, below the LOCKED text
+ * at y=375 — i.e. bottom-right, next to BACK. The centre is the MEASURED
+ * midpoint of the gap it has to live in, taken off a 640x480 framedump: on this
+ * text's rows (y=406..426) the BACK button's frame ends at x=344 and the
+ * pitbull badge starts at x=522 (the badge is half black, so its disc reaches
+ * ~26 px further left than its white half suggests). Midpoint 433 -> 432, which
+ * leaves ~24 px of air on each side for the 129-px string and still clears both
+ * when a longer translation widens it. Drawn unconditionally because the
+ * shortcut itself is unconditional. NON-STATIC so td5_frontend.c can call it
+ * from its render switch. */
+void frontend_render_trksel_hints(float sx, float sy) {
     if (!s_anim_complete) return;                                 /* wait for slide-in to settle */
-    int b = s_trksel_rand_btn;
-    if (b < 0 || b >= FE_MAX_BUTTONS) return;
-    if (!s_buttons[b].active || s_buttons[b].hidden == 0) return;
-    if (s_buttons[b].disabled) return;
-    frontend_draw_randomize_icon((float)s_buttons[b].x, (float)s_buttons[b].y,
-                                 sx, sy, (s_selected_button == b));
+    fe_draw_text_centered(432.0f * sx, 400.0f * sy, TR("X / R = RANDOM"),
+                          0xFF8890A0u, sx * 0.75f, sy * 0.75f);
 }
 
 static void frontend_load_selected_car_preview(void) {
@@ -1263,18 +1272,12 @@ void Screen_QuickRaceMenu(void) {
             }
         }
 
-        /* [PHYSICS 2026-06-26] ARCADE / SIMULATION (dynamics) selector row, placed
-         * directly under Laps at row 5. Created LAST (index QR_BTN_PHYSICS=14, after
-         * the RANDOMIZE buttons at 12/13) so every hard-coded index above stays put.
-         * A normal selectable caption row like Car/Track/Direction: L/R (or A/Enter)
-         * flips the shared s_game_option_dynamics, the value column shows ARCADE /
-         * SIMULATION, and the OK handler commits it to physics + the INI. Visible in
-         * BOTH dev and release — it's a real player option, not a dev affordance.
-         * Sync the live value from the persisted INI first so the row shows the
-         * choice that's actually in effect. */
-        s_game_option_dynamics = g_td5.ini.dynamics ? 1 : 0;
+        /* [PHYSICS 2026-06-26 / RETIRED 2026-09-29] This slot used to be the
+         * ARCADE / SIMULATION (DYNAMICS) selector. DYNAMICS is gone — arcade is
+         * the only vehicle model — but the button is still CREATED, hidden and
+         * disabled, purely to keep index QR_BTN_PHYSICS=14 occupied so
+         * QR_BTN_RACEOPTS stays at 15 and every hard-coded index above holds. */
         { int bph = frontend_create_button("Physics", QR_COL_X, QR_ROW_Y(5), QR_BTN_W, 32); /* QR_BTN_PHYSICS */
-          /* [QUICK RACE DEBUG 2026-07-21] Physics moved to RACE OPTIONS -> hide inline. */
           if (bph >= 0) { s_buttons[bph].hidden = 1; s_buttons[bph].disabled = 1; }
         }
         /* [QUICK RACE DEBUG 2026-07-21] RACE OPTIONS entry (created LAST, index
@@ -1409,20 +1412,6 @@ void Screen_QuickRaceMenu(void) {
                 frontend_play_sfx(2);
             }
 
-            /* [PHYSICS 2026-06-26] Physics (ARCADE/SIMULATION) row: a 2-state toggle
-             * like Direction. L/R OR A/Enter while focused flips the shared
-             * s_game_option_dynamics (0=ARCADE, 1=SIMULATION). The OK handler commits
-             * it to physics + the INI. Mirrors the Track Selection DYNAMICS row. */
-            if (selected_button == QR_BTN_PHYSICS && s_button_count > QR_BTN_PHYSICS &&
-                !s_buttons[QR_BTN_PHYSICS].hidden &&
-                (delta != 0 || s_button_index == QR_BTN_PHYSICS)) {
-                s_game_option_dynamics ^= 1;
-                frontend_play_sfx(2);
-                TD5_LOG_I(LOG_TAG, "QuickRace PHYSICS -> %s (%d)",
-                          s_game_option_dynamics ? "SIMULATION" : "ARCADE",
-                          s_game_option_dynamics);
-            }
-
             /* [2026-06-08] AI Screens (dev/profiling): 0..min(opponents,
              * TD5_MAX_VIEWPORTS-1). Each step adds an AI car to its own pane.
              * Hidden+disabled in release (see case-0 creation). */
@@ -1520,20 +1509,11 @@ void Screen_QuickRaceMenu(void) {
                     /* [S02 (c) 2026-06-04] Persist the lap choice (re-homed from
                      * Game Options' OK, which no longer owns this setting). */
                     g_td5.ini.laps = s_game_option_laps;
-                    /* [PHYSICS 2026-06-26] Commit the ARCADE/SIMULATION choice picked
-                     * on the new Physics row. Persist to the INI (survives relaunch)
-                     * AND push it into the physics race-init flag NOW, before the
-                     * race launches — ConfigureGameTypeFlags already ran at screen
-                     * init with the pre-toggle value, so set it here deterministically
-                     * (mirrors the AutoRace commit at td5_frontend.c). */
-                    g_td5.ini.dynamics = s_game_option_dynamics;
-                    td5_physics_set_dynamics(s_game_option_dynamics);
                     td5_ini_persist_options();
                     TD5_LOG_I(LOG_TAG,
-                              "QuickRace OK: track=%d dir=%s humans=%d opponents=%d laps=%d physics=%s",
+                              "QuickRace OK: track=%d dir=%s humans=%d opponents=%d laps=%d",
                               s_selected_track, s_track_direction ? "Backwards" : "Forwards",
-                              s_num_human_players, s_num_ai_opponents, s_game_option_laps + 1,
-                              s_game_option_dynamics ? "SIMULATION" : "ARCADE");
+                              s_num_human_players, s_num_ai_opponents, s_game_option_laps + 1);
                     s_return_screen = -1; /* launch race */
                     s_inner_state = 5;
                 }
@@ -1729,11 +1709,16 @@ static void mp_apply_profile_car_color(int p) {
     accent = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
     if (accent == 0) return;                           /* no profile colour set */
     car = s_mp_player_car[p];
-    if (frontend_car_is_td6(car)) {
-        if (!frontend_car_paintable(car)) return;      /* TD6 cop / non-paintable */
+    /* [TD5 CAR PAINT 2026-09-29] A car on the free colour picker takes the
+     * profile accent EXACTLY — that now includes an original car with a paint
+     * bake, which used to be snapped to whichever of its four schemes was
+     * nearest. Cars without a bake keep the nearest-scheme snap. */
+    if (frontend_car_paintable(car)) {
         s_mp_player_color[p]     = (int)accent;        /* exact body tint */
         s_mp_player_color_idx[p] = mp_nearest_td6_palette_idx(accent);
-        TD5_LOG_I(LOG_TAG, "Profile car-colour: P%d car=%d TD6 exact 0x%06X", p, car, accent);
+        TD5_LOG_I(LOG_TAG, "Profile car-colour: P%d car=%d exact 0x%06X", p, car, accent);
+    } else if (frontend_car_is_td6(car)) {
+        return;                                        /* TD6 cop / non-paintable */
     } else {
         if (!frontend_car_has_paint(car)) return;      /* TD5 special / police */
         s_mp_player_paint[p] = td5_nearest_paint(car, accent);
@@ -1742,16 +1727,29 @@ static void mp_apply_profile_car_color(int p) {
     }
 }
 
-/* (Re)load a pane's carpic preview + (TD6) body-paint overlay for its current
+/* [TD5 CAR PAINT 2026-09-29] Latch "the player has chosen a colour". A ported
+ * TD6 car has always taken the INI colour unconditionally, so this changes
+ * nothing for it. An ORIGINAL car with a paint bake needs the latch: for those
+ * the INI colour on its own cannot be told apart from "never opened the picker"
+ * (it defaults to red), and the car must keep its factory paint until a colour
+ * is really chosen. Persisted by the td5_ini_persist_options() that follows,
+ * so the choice survives a relaunch. */
+static void sp_mark_paint_chosen(void) {
+    g_td5.ini.paint_active = 1;
+}
+
+/* (Re)load a pane's carpic preview + body-paint overlay for its current
  * car/paint. Loads the new handle BEFORE dropping the old one so the loader
- * can't reuse the old slot mid-swap. */
+ * can't reuse the old slot mid-swap. A car on the free colour picker (ported
+ * TD6, or [TD5 CAR PAINT 2026-09-29] an original car with a paint bake) has no
+ * scheme index: its base carpic is always 0, with the body drawn by the overlay. */
 static void mp_simul_refresh_pane(int player) {
     int n = s_num_human_players;
     int car = s_mp_player_car[player];
-    int td6 = frontend_car_is_td6(car);
-    int paint = td6 ? 0 : s_mp_player_paint[player];
+    int picker = frontend_car_is_td6(car) || frontend_car_paintable(car);
+    int paint = picker ? 0 : s_mp_player_paint[player];
     int prev_h = frontend_load_car_preview_surface(car, paint);
-    int over_h = (td6 && frontend_car_paintable(car))
+    int over_h = frontend_car_paintable(car)
                  ? frontend_load_car_paint_overlay_surface(car) : 0;
     if (n < 2) n = 2;
     if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
@@ -2391,9 +2389,12 @@ static void frontend_mp_simul_carsel_update(void) {
     }
 }
 
+/* [NAME 30 2026-09-29] Cap on TD5_PLAYER_NAME_MAX explicitly (not on the
+ * buffer size) so the typing limit stays the documented 30 chars even if the
+ * backing array is ever padded. */
 static void mp_setup_name_append(int p, char c) {
     int l = (int)strlen(s_mp_player_name[p]);
-    if (l < (int)sizeof(s_mp_player_name[p]) - 1) {
+    if (l < TD5_PLAYER_NAME_MAX && l < (int)sizeof(s_mp_player_name[p]) - 1) {
         s_mp_player_name[p][l] = c;
         s_mp_player_name[p][l + 1] = '\0';
     }
@@ -2430,7 +2431,15 @@ static int s_mp_prof_sel[TD5_MAX_HUMAN_PLAYERS];     /* selected list index */
  * armed so it can be re-found by name at confirm time (robust even if another
  * player's DELETE reindexes the store meanwhile). [0]=='\0' / 0 = disarmed. */
 static int  s_mp_prof_confirm_del[TD5_MAX_HUMAN_PLAYERS];
-static char s_mp_prof_confirm_name[TD5_MAX_HUMAN_PLAYERS][16];
+static char s_mp_prof_confirm_name[TD5_MAX_HUMAN_PLAYERS][TD5_PLAYER_NAME_BUF];
+/* [#delete-pick 2026-09-29] DELETE is a two-stage action: A on the DELETE
+ * action enters PICK mode (focus moves to the list, header reads "SELECT
+ * PROFILE TO DELETE", the row highlight turns red), then A on the list arms the
+ * existing confirm overlay for THAT row. Before this, A on the list was
+ * hard-wired to LOAD, and returning to the action row forced the selection back
+ * to index 0 (mp_profile_list_nav_enabled only leaves the list at sel<=0) — so
+ * DELETE could only ever target profile 0. B leaves pick mode. */
+static int  s_mp_prof_del_pick[TD5_MAX_HUMAN_PLAYERS];
 
 /* [SELECTABLE HORNS] Per-player cursor for the horn picker (pane sub-state 4).
  * The tab is the category (TD5 / TD6 / MEMES) and the selection is the row
@@ -2510,13 +2519,13 @@ static void mp_set_nav_step(int p, int dir, int profiles_on) {
  * mp_prof_set_held() upserts player p's holder (releasing the previous, which is
  * implicit since each slot stores exactly one name); the per-name query scans the
  * holders. (Replaces the old append-only s_prof_loaded_names[]/count.) */
-static char s_mp_prof_held[TD5_MAX_HUMAN_PLAYERS][16];
+static char s_mp_prof_held[TD5_MAX_HUMAN_PLAYERS][TD5_PLAYER_NAME_BUF];
 /* [profile-persist 2026-06-16] Cross-phase snapshot of the per-player profile
  * holders, kept in sync by mp_prof_set_held/mp_prof_release. frontend_mp_setup_init
  * restores from this when RE-entering setup (e.g. BACK from car-select) so a loaded
  * profile is NOT lost and the player needn't reload it; frontend_mp_flow_reset
  * clears it on a fresh race. Knob TD5RE_MP_PROFILE_PERSIST (default on). */
-static char s_mp_prof_held_saved[TD5_MAX_HUMAN_PLAYERS][16];
+static char s_mp_prof_held_saved[TD5_MAX_HUMAN_PLAYERS][TD5_PLAYER_NAME_BUF];
 static int mp_profile_persist_on(void) {
     static int v = -1;
     if (v < 0) {
@@ -2550,6 +2559,7 @@ static void frontend_mp_setup_init(void) {
     for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++) {
         s_mp_prof_confirm_del[p]     = 0;   /* [#delete-confirm] no stale prompt into a fresh setup */
         s_mp_prof_confirm_name[p][0] = '\0';
+        s_mp_prof_del_pick[p]        = 0;   /* [#delete-pick] nor a stale pick mode */
         if (mp_profile_persist_on()) {
             strncpy(s_mp_prof_held[p], s_mp_prof_held_saved[p], sizeof(s_mp_prof_held[p]) - 1);
             s_mp_prof_held[p][sizeof(s_mp_prof_held[p]) - 1] = '\0';
@@ -2823,14 +2833,21 @@ static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t no
             }
             s_mp_prof_confirm_del[p]     = 0;
             s_mp_prof_confirm_name[p][0] = '\0';
+            s_mp_prof_del_pick[p]        = 0;   /* [#delete-pick] done -> leave pick mode */
         } else if (edge & (0x20u | 0x80u)) {        /* B or X = NO, cancel */
             s_mp_prof_confirm_del[p]     = 0;
             s_mp_prof_confirm_name[p][0] = '\0';
+            /* Stay in PICK mode so a mis-aimed confirm can be re-aimed at
+             * another row without re-entering DELETE from the action row. */
             frontend_play_sfx(5);
             TD5_LOG_I(LOG_TAG, "MP profile: P%d DELETE cancelled", p);
         }
         return;   /* modal — eat the rest of this frame's panel input */
     }
+
+    /* [#delete-pick 2026-09-29] Pick mode is only meaningful with a focused
+     * list and at least one profile; drop it if the store emptied out. */
+    if (s_mp_prof_del_pick[p] && cnt <= 0) s_mp_prof_del_pick[p] = 0;
 
     if (mp_profile_list_nav_enabled()) {
         /* [#3] LEFT/RIGHT pick the action (SAVE/LOAD/DELETE) on the action row.
@@ -2855,6 +2872,7 @@ static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t no
              * scroll the selection with auto-repeat. */
             if ((edge & 4) && s_mp_prof_sel[p] <= 0) {   /* already top -> back to actions */
                 s_mp_prof_focus[p] = 0;
+                s_mp_prof_del_pick[p] = 0;   /* [#delete-pick] leaving the list ends pick mode */
                 s_mp_rep_ms[p] = 0;
                 frontend_play_sfx(2);
             } else if (mp_repeat_fire(p, bits & 0x0Cu, edge & 0x0Cu, now)) {
@@ -2867,7 +2885,10 @@ static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t no
     /* LEFT/RIGHT pick the action (SAVE/LOAD/DELETE) when focus is the action row;
      * UP/DOWN move between the action row and the list, and scroll the list. */
     if (edge & 4) {  /* UP */
-        if (s_mp_prof_focus[p] == 1) s_mp_prof_focus[p] = 0;       /* list -> actions */
+        if (s_mp_prof_focus[p] == 1) {
+            s_mp_prof_focus[p] = 0;                                /* list -> actions */
+            s_mp_prof_del_pick[p] = 0;                             /* [#delete-pick] */
+        }
         frontend_play_sfx(2);
     }
     if (edge & 8) {  /* DOWN */
@@ -2889,7 +2910,12 @@ static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t no
 
     if (edge & 0x10) {  /* A = activate */
         int act = s_mp_prof_act[p];
-        if (s_mp_prof_focus[p] == 1) act = MP_PROF_ACT_LOAD;   /* A on the list = LOAD it */
+        /* [#delete-pick 2026-09-29] A on the list means DELETE-THIS-ONE while
+         * pick mode is armed, and LOAD otherwise. The old code forced LOAD
+         * unconditionally, which is why DELETE could never reach a row past
+         * index 0 (see s_mp_prof_del_pick's comment). */
+        if (s_mp_prof_focus[p] == 1)
+            act = s_mp_prof_del_pick[p] ? MP_PROF_ACT_DELETE : MP_PROF_ACT_LOAD;
         if (act == MP_PROF_ACT_SAVE) {
             if (s_mp_player_name[p][0]) {
                 TD5_Profile pr;
@@ -2921,7 +2947,25 @@ static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t no
             } else {
                 frontend_play_sfx(10);
             }
-        } else { /* DELETE */
+        } else if (s_mp_prof_focus[p] == 0) {   /* DELETE pressed on the ACTION row */
+            /* [#delete-pick 2026-09-29] Stage 1: enter PICK mode instead of
+             * acting on whatever s_mp_prof_sel[p] happened to be. Focus moves
+             * into the list so UP/DOWN can reach ANY row — the reason the old
+             * flow was stuck on index 0 is that the only way back to the action
+             * row (to press DELETE) was UP at sel<=0, which forced the
+             * selection to 0 first. */
+            if (cnt > 0) {
+                s_mp_prof_focus[p]    = 1;
+                s_mp_prof_del_pick[p] = 1;
+                mp_prof_clamp_sel(p);
+                s_mp_rep_ms[p] = now + 320u;   /* the entering press must not also scroll */
+                frontend_play_sfx(2);
+                TD5_LOG_I(LOG_TAG, "MP profile: P%d DELETE -> pick mode (sel=%d of %d)",
+                          p, s_mp_prof_sel[p], cnt);
+            } else {
+                frontend_play_sfx(10);   /* nothing to delete */
+            }
+        } else { /* DELETE confirmed target = the row the player picked */
             /* [#delete-confirm 2026-06-27] Don't wipe the profile here — arm a
              * per-player "DELETE '<name>'? Y/N" prompt naming the SELECTED
              * profile. The modal block at the top of this handler performs the
@@ -2934,16 +2978,28 @@ static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t no
                         sizeof(s_mp_prof_confirm_name[p]) - 1);
                 s_mp_prof_confirm_name[p][sizeof(s_mp_prof_confirm_name[p]) - 1] = '\0';
                 frontend_play_sfx(2);
-                TD5_LOG_I(LOG_TAG, "MP profile: P%d DELETE '%s' -> confirm prompt", p, pr.name);
+                TD5_LOG_I(LOG_TAG, "MP profile: P%d DELETE '%s' (idx %d) -> confirm prompt",
+                          p, pr.name, s_mp_prof_sel[p]);
             } else {
                 frontend_play_sfx(10);   /* nothing selected to delete */
             }
         }
     }
-    if (edge & 0x20) {  /* B = close panel (back to NAME/COLOUR/PROFILE/OK) */
-        s_mp_setup_sub[p] = 0;
-        s_mp_rep_ms[p] = 0;
-        frontend_play_sfx(5);
+    if (edge & 0x20) {  /* B */
+        if (s_mp_prof_del_pick[p]) {
+            /* [#delete-pick 2026-09-29] B in pick mode abandons the delete and
+             * returns to the SAVE/LOAD/DELETE row — it does NOT close the panel,
+             * so a player who entered DELETE by mistake loses nothing. */
+            s_mp_prof_del_pick[p] = 0;
+            s_mp_prof_focus[p]    = 0;
+            s_mp_rep_ms[p] = 0;
+            frontend_play_sfx(5);
+            TD5_LOG_I(LOG_TAG, "MP profile: P%d DELETE pick cancelled", p);
+        } else {        /* close panel (back to NAME/COLOUR/PROFILE/OK) */
+            s_mp_setup_sub[p] = 0;
+            s_mp_rep_ms[p] = 0;
+            frontend_play_sfx(5);
+        }
     }
 }
 
@@ -3717,20 +3773,12 @@ static const char *const k_mp_mode_desc[TD5_MP_MODE_COUNT] = {
 };
 
 /* Each local player's current pick (index into TD5_MpGameMode). Player 0's pick
- * is the host highlight and the value that gets locked in. */
+ * is the host highlight and the value that gets locked in.
+ * [MODE PICK HOST-ONLY 2026-09-29] Only slot 0 is written now — the per-pad
+ * vote (and its s_mode_vote_locked "cast" flag, which drew nesting border
+ * rings) was removed, because nothing in the flow ever counted the votes: the
+ * host's pick was always the binding one. */
 static int s_mode_vote[TD5_MAX_HUMAN_PLAYERS];
-
-/* [MP MODE VOTE BORDERS 2026-06-27] Per-player "vote cast" flag:
- *   0 = still choosing  -> a live, profile-coloured nav ARROW marks the hovered
- *                          button for that player.
- *   1 = vote cast       -> the arrow is gone and a profile-coloured BORDER RING is
- *                          drawn around the chosen button (rings nest outward so
- *                          several players who pick the same mode each add a ring).
- * Non-host players press A to cast (B to retract); MOVING the cursor re-opens the
- * choice (arrow back, ring cleared). The HOST (slot 0) never sets this — the host
- * A advances the screen, so the host always keeps a live arrow and has the last
- * word on the binding pick. */
-static int s_mode_vote_locked[TD5_MAX_HUMAN_PLAYERS];
 
 /* ---- Shared MP setup-screen layout + helpers (standard frontend look) ----
  * The mode-vote / mode-config / cup-winners screens use REAL frontend buttons
@@ -3904,7 +3952,6 @@ void Screen_MpModeVote(void) {
             frontend_create_button("", MV_BX, MV_Y0 + m * MV_GAP, MV_BW, MV_BH);
         for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++) {
             s_mode_vote[p]        = TD5_MP_MODE_RACE;
-            s_mode_vote_locked[p] = 0;          /* everyone starts in "choosing" */
             s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
         }
         s_selected_button   = 0;
@@ -3967,39 +4014,27 @@ void Screen_MpModeVote(void) {
         return;
     }
 
-    /* Per-player votes — EACH local player moves only their OWN arrow via their
-     * OWN device (mp_simul_player_nav per player). Forcing the host highlight
-     * from s_mode_vote[0] below OVERRIDES the shared standard nav, so another
-     * player's pad can no longer drag the host's highlight (fixes the
-     * both-arrows-move cross-talk). */
+    /* [MODE PICK HOST-ONLY 2026-09-29] The per-pad VOTE was removed: the host
+     * (slot 0) is the only player who chooses, so only slot 0's own device
+     * drives the cursor. Every other pad is inert on this screen — previously
+     * they each carried their own arrow + a cast "vote ring" that decided
+     * nothing, which read as if the majority mattered. Nav now WRAPS (modulo)
+     * top<->bottom instead of clamping at the ends. */
     {
         int host_lock = 0, host_back = 0;
+        uint32_t bits, edge;
         (void)move; (void)hdelta; (void)confirm; (void)back;
-        for (p = 0; p < n; p++) {
-            uint32_t bits = mp_simul_player_nav(p);
-            uint32_t edge = bits & ~s_mp_pane_nav_prev[p];
-            s_mp_pane_nav_prev[p] = bits;
-            /* No per-player UP/DOWN sfx here — the shared standard nav already
-             * plays that cue once per input. MOVING the cursor re-opens this
-             * player's choice (arrow back, any cast ring cleared) so they can
-             * change their vote freely. */
-            if (edge & 4) { if (s_mode_vote[p] > 0)                  { s_mode_vote[p]--; s_mode_vote_locked[p] = 0; } }
-            if (edge & 8) { if (s_mode_vote[p] < TD5_MP_MODE_COUNT-1) { s_mode_vote[p]++; s_mode_vote_locked[p] = 0; } }
-            if (p == 0) {                       /* host: A=lock-in (advance), B=back */
-                if (edge & 0x10) host_lock = 1;
-                if (edge & 0x20) host_back = 1;
-            } else {                            /* others: A=cast vote, B=retract */
-                if ((edge & 0x10) && !s_mode_vote_locked[p]) {
-                    s_mode_vote_locked[p] = 1;  /* arrow -> border ring */
-                    frontend_play_sfx(3);       /* per-player "vote cast" cue */
-                    TD5_LOG_I(LOG_TAG, "MP mode vote: player %d cast vote mode=%d", p, s_mode_vote[p]);
-                }
-                if ((edge & 0x20) && s_mode_vote_locked[p]) {
-                    s_mode_vote_locked[p] = 0;  /* ring -> arrow (retract) */
-                    frontend_play_sfx(5);
-                }
-            }
-        }
+        for (p = 1; p < n; p++)                 /* keep edge state fresh, ignore input */
+            s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
+        bits = mp_simul_player_nav(0);
+        edge = bits & ~s_mp_pane_nav_prev[0];
+        s_mp_pane_nav_prev[0] = bits;
+        /* No UP/DOWN sfx here — the shared standard nav already plays that cue
+         * once per input. */
+        if (edge & 4) s_mode_vote[0] = (s_mode_vote[0] + TD5_MP_MODE_COUNT - 1) % TD5_MP_MODE_COUNT;
+        if (edge & 8) s_mode_vote[0] = (s_mode_vote[0] + 1) % TD5_MP_MODE_COUNT;
+        if (edge & 0x10) host_lock = 1;         /* host: A = lock-in (advance) */
+        if (edge & 0x20) host_back = 1;         /* host: B = back */
         if (s_mode_vote[0] < 0) s_mode_vote[0] = 0;
         if (s_mode_vote[0] >= TD5_MP_MODE_COUNT) s_mode_vote[0] = TD5_MP_MODE_COUNT - 1;
         s_selected_button = s_mode_vote[0];     /* host highlight = host pick */
@@ -4064,48 +4099,41 @@ void frontend_mp_mode_vote_render(float sx, float sy) {
     /* Host indicator: the gold HOST pill badge + P1 colour swatch + short label, so
      * the host marker on the game-mode selector matches the badge used on the
      * profile, screen-disposition and car selectors. Badge left; swatch and label
-     * shift right by the badge's measured width. */
+     * shift right by the badge's measured width.
+     * [2026-09-29] Badge (h=13) and swatch (h=11) are now centred on the LABEL's
+     * cap band instead of sharing its cell-top y. fe_draw_text anchors y at the
+     * 24px glyph CELL top and puts the visible caps on design rows 8..23, so the
+     * cap band's centre is y + FE_TEXT_CAP_MID (15.5) — the old badge/swatch at
+     * y=72 / y=74 sat well above that, and above each other. */
     {
-        float bw = td5_vui_host_badge((float)MV_BX, 72.0f, 13.0f, sx, sy);
+        const float label_y = 72.0f;                          /* text cell top   */
+        const float row_cy  = label_y + FE_TEXT_CAP_MID;      /* cap-band centre */
+        float bw = td5_vui_host_badge((float)MV_BX, row_cy - 6.5f, 13.0f, sx, sy);
         float sw_x = (float)MV_BX + bw + 6.0f;
-        td5_vui_quad(sw_x * sx, 74.0f * sy, 11.0f * sx, 11.0f * sy, mp_slot_color(0), -1,0,0,1,1);
-        td5_vui_text((sw_x + 17.0f) * sx, 72.0f * sy,
-                     TR("OTHERS PRESS A TO VOTE  -  P1 (HOST) DECIDES"), 0xFFC0C8D0u, sx, sy);
+        td5_vui_quad(sw_x * sx, (row_cy - 5.5f) * sy, 11.0f * sx, 11.0f * sy,
+                     mp_slot_color(0), -1,0,0,1,1);
+        td5_vui_text((sw_x + 17.0f) * sx, label_y * sy,
+                     TR("P1 (HOST) CHOOSES THE GAME MODE"), 0xFFC0C8D0u, sx, sy);
     }
 
+    (void)p; (void)n;
     for (m = 0; m < TD5_MP_MODE_COUNT; m++) {
         float byp = (float)(MV_Y0 + m * MV_GAP);
         float cx  = (float)MV_BX + MV_BW * 0.5f;
-        int   ring, stack;
         /* Two-line label, block-centred on the button (on top of the frame). */
         td5_vui_text_centered(cx * sx, (byp + 5.0f) * sy,
                               td5_tr(k_mp_mode_names[m]), 0xFFFFFFFFu, sx, sy);
         mp_pos_small_centered(cx * sx, (byp + 29.0f) * sy,
                               td5_tr(k_mp_mode_desc[m]), 0xFFB8C0CCu, sx, sy);
 
-        /* CAST votes: one profile-coloured border ring per player who has locked
-         * a vote for this mode. Rings nest outward in player order so several
-         * voters on the same mode each add a clearly-coloured frame around it. */
-        ring = 0;
-        for (p = 0; p < n; p++) {
-            if (!s_mode_vote_locked[p] || s_mode_vote[p] != m) continue;
-            mp_mode_draw_border_ring((float)MV_BX, byp, (float)MV_BW, (float)MV_BH,
-                                     MV_RING_MARGIN + (float)ring * (MV_RING_TH + MV_RING_GAP),
-                                     MV_RING_TH, mp_slot_color(p), sx, sy);
-            ring++;
-        }
-
-        /* CHOOSING cursors: a live arrow on the LEFT for each player still
-         * picking this mode (gone once they cast — the host never locks, so the
-         * host arrow always shows the host's current pick). */
-        stack = 0;
-        for (p = 0; p < n; p++) {
-            if (s_mode_vote_locked[p] || s_mode_vote[p] != m) continue;
-            td5_vui_arrow(((float)MV_BX - 18.0f - (float)stack * 15.0f) * sx,
+        /* [MODE PICK HOST-ONLY 2026-09-29] One cursor only: the host's. The
+         * per-player cast "vote rings" and the stack of non-host arrows are
+         * gone with the vote (see Screen_MpModeVote) — they suggested the other
+         * players' picks counted, and they never did. */
+        if (s_mode_vote[0] == m)
+            td5_vui_arrow(((float)MV_BX - 18.0f) * sx,
                           (byp + MV_BH * 0.5f - 8.0f) * sy,
-                          14.0f * sx, 16.0f * sy, 1, mp_slot_color(p));
-            stack++;
-        }
+                          14.0f * sx, 16.0f * sy, 1, mp_slot_color(0));
     }
 
     if (s_mode_back_confirm)
@@ -4200,9 +4228,8 @@ static int mp_cfg_build(MpCfgOpt *o) {
      * ARCADE/SIM selector (s_trksel_dyn_btn on both the regular track-select and the
      * cup track-picker) — so the control showed up twice (most obviously on the cup
      * setup). Track selection is now the single place to set physics for all MP
-     * flows. The choice still lives in the shared s_game_option_dynamics (seeded
-     * from g_td5.ini.dynamics, committed to physics by ConfigureGameTypeFlags at
-     * race launch). Side effect (intended): MP RACE has no other options, so this
+     * flows. (The DYNAMICS row itself was retired 2026-09-29 — arcade physics is
+     * the only model.) Side effect (intended): MP RACE has no other options, so this
      * now returns 0 for it and Screen_MpModeConfig skips the config screen entirely
      * (the original count==0 fast-path). */
     return n;
@@ -4778,7 +4805,7 @@ static int s_cop_role[TD5_MAX_HUMAN_PLAYERS];   /* 1 = cop, 0 = suspect */
 static int s_cop_roles_warn_frames = 0;
 
 static void mp_roleselect_row(float sx, float sy, int p, float y, const char *val) {
-    char nb[24];
+    char nb[TD5_PLAYER_NAME_BUF + 16];   /* [NAME 30] fits a 30-char name + "PLAYER N" */
     /* [CUP/COP NAMES 2026-06-25] Show the player's LOADED profile name (set on
      * profile load or name entry) instead of a hardcoded "PLAYER N". Both the
      * COP CHASE - ROLES and CHOOSE YOUR TEAM rows route through here, so this
@@ -4796,8 +4823,11 @@ static void mp_roleselect_row(float sx, float sy, int p, float y, const char *va
      * Tag its row with the same gold HOST pill badge the splitscreen selectors
      * use, in the left margin ahead of the name column, so the host is obvious on
      * these lobby screens too. */
+    /* [2026-09-29] Same cap-band centring as the mode selector: the badge lines
+     * up with the NAME text's visible caps (y + FE_TEXT_CAP_MID), not with the
+     * text's cell top. The old `y - 1.0f` put it ~10 px high. */
     if (p == 0)
-        td5_vui_host_badge(108.0f, y - 1.0f, 13.0f, sx, sy);
+        td5_vui_host_badge(108.0f, y + FE_TEXT_CAP_MID - 6.5f, 13.0f, sx, sy);
     td5_vui_text(150.0f * sx, y * sy, nb, mp_slot_color(p), sx, sy);
     td5_vui_text_centered(MP_ROW_VAL_CX * sx, y * sy, val, 0xFFFFFFFFu, sx, sy);
     td5_vui_arrow((MP_ROW_VAL_CX - 52.0f) * sx, (y - 1.0f) * sy, 12.0f * sx, 14.0f * sy, 0, 0xFF7995FFu);
@@ -5866,7 +5896,15 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                 td5_vui_quad(panx * sx, pany * sy, panw * sx, panh * sy, 0xE00C0C16u, -1, 0, 0, 1, 1);
                 td5_vui_quad(panx * sx, pany * sy, panw * sx, 2.0f * sy, rgb | 0xFF000000u, -1, 0, 0, 1, 1);
 
-                mp_pos_small_centered(cx * sx, (pany + 3.0f) * sy, TR("PROFILE"), 0xFFFFE060u, sx, sy);
+                /* [#delete-pick 2026-09-29] While a delete target is being
+                 * picked the header names the action (red) instead of the
+                 * generic gold "PROFILE", so it is obvious that A on a row
+                 * DELETES it rather than loading it. */
+                if (s_mp_prof_del_pick[p])
+                    mp_pos_small_centered(cx * sx, (pany + 3.0f) * sy,
+                                          TR("SELECT PROFILE TO DELETE"), 0xFFFF8080u, sx, sy);
+                else
+                    mp_pos_small_centered(cx * sx, (pany + 3.0f) * sy, TR("PROFILE"), 0xFFFFE060u, sx, sy);
 
                 /* action row: SAVE / LOAD / DELETE */
                 {
@@ -5878,10 +5916,16 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                     for (a = 0; a < MP_PROF_ACT_COUNT; a++) {
                         float axp = panx + seg * (float)a;
                         int on = (s_mp_prof_focus[p] == 0 && s_mp_prof_act[p] == a);
+                        /* [#delete-pick] In pick mode focus is on the LIST, so no
+                         * action would light up — keep DELETE lit in red to show
+                         * which action the list press will perform. */
+                        int arm = (s_mp_prof_del_pick[p] && a == MP_PROF_ACT_DELETE);
                         td5_vui_quad((axp + 1) * sx, ar_y * sy, (seg - 2) * sx, 13.0f * sy,
-                                     on ? 0xD0FFCC33u : 0x60303848u, -1, 0, 0, 1, 1);
+                                     arm ? 0xD0FF5050u : (on ? 0xD0FFCC33u : 0x60303848u),
+                                     -1, 0, 0, 1, 1);
                         mp_pos_small_centered((axp + seg * 0.5f) * sx, (ar_y + 2.0f) * sy,
-                                              td5_tr(acts[a]), on ? 0xFF101010u : 0xFFD0D0D0u, sx, sy);
+                                              td5_tr(acts[a]),
+                                              (on || arm) ? 0xFF101010u : 0xFFD0D0D0u, sx, sy);
                     }
                 }
 
@@ -5907,8 +5951,11 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                          * a release elsewhere ungreys it immediately. */
                         loaded = mp_prof_name_in_use_ex(pr.name, p);
                         if (sel)
+                            /* [#delete-pick] red row highlight while picking a
+                             * delete target; the normal steel-blue otherwise. */
                             td5_vui_quad((panx + 2) * sx, ry * sy, (panw - 4) * sx, 10.0f * sy,
-                                         0x90303848u, -1, 0, 0, 1, 1);
+                                         s_mp_prof_del_pick[p] ? 0xA0702028u : 0x90303848u,
+                                         -1, 0, 0, 1, 1);
                         /* name + a small swatch of the profile's accent. */
                         snprintf(buf, sizeof buf, "%s%s", pr.name, loaded ? " (IN USE)" : "");
                         fe_draw_small_text((panx + 14) * sx, ry * sy, buf,
@@ -5920,7 +5967,9 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                 }
 
                 mp_pos_small_centered(cx * sx, (pany + panh - 9.0f) * sy,
-                                      "A: DO   UP/DN: PICK   B: BACK", 0xFFB0B0B0u, sx, sy);
+                                      s_mp_prof_del_pick[p] ? "A: DELETE   UP/DN: PICK   B: CANCEL"
+                                                            : "A: DO   UP/DN: PICK   B: BACK",
+                                      s_mp_prof_del_pick[p] ? 0xFFFFB0B0u : 0xFFB0B0B0u, sx, sy);
 
                 /* [#delete-confirm 2026-06-27] "DELETE PROFILE? <name>" overlay
                  * over THIS pane while the prompt is armed: names the exact
@@ -5942,7 +5991,13 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                     td5_vui_quad((cbx + cbw - t) * sx, cby * sy, t * sx, cbh * sy, bc, -1, 0, 0, 1, 1);
                     mp_pos_small_centered(cx * sx, (cby + 8.0f) * sy, "DELETE PROFILE?",
                                           0xFFFF8080u, sx, sy);
-                    snprintf(buf, sizeof buf, "\"%s\"", s_mp_prof_confirm_name[p]);
+                    /* [NAME 30 2026-09-29] Bound the name explicitly: with the
+                     * 31-byte name field the compiler's worst case for an
+                     * unterminated row (9 x 31) no longer provably fits buf,
+                     * and -Wformat-truncation is a ratcheted warning class. */
+                    snprintf(buf, sizeof buf, "\"%.*s\"",
+                             (int)sizeof(s_mp_prof_confirm_name[p]) - 1,
+                             s_mp_prof_confirm_name[p]);
                     mp_pos_small_centered(cx * sx, (cby + 22.0f) * sy, buf, 0xFFFFFFFFu, sx, sy);
                     mp_pos_small_centered(cx * sx, (cby + 38.0f) * sy, "A = YES    B = NO",
                                           0xFFE0E0E0u, sx, sy);
@@ -6421,12 +6476,14 @@ void Screen_CarSelection(void) {
                                                   * preview (no animation on hide — the
                                                   * colour already changed live). */
                     s_paint_active = 1;
+                    sp_mark_paint_chosen();
                     frontend_set_color_panel(0);
                     td5_ini_persist_options();
                     frontend_play_sfx(3);
                     active_button = -1;
                 } else if (s_button_index >= 0) { /* other button -> keep colour, close + act */
                     s_paint_active = 1;
+                    sp_mark_paint_chosen();
                     frontend_set_color_panel(0);
                     td5_ini_persist_options();
                     active_button = s_button_index;
@@ -7067,9 +7124,11 @@ static void raceopts_open(int parent_screen, int launch_after, int back_mode) {
 }
 
 /* Build the main track-select column: TRACK / DIRECTION / LAPS / RACE OPTIONS /
- * OK / BACK (+ randomize chip). Used on screen init (case 0) and on return from
- * RACE OPTIONS. Resets the shared button set first, exactly like
- * td5_gameopts_build_page() does for its page flip. */
+ * OK / BACK. Used on screen init (case 0) and on return from RACE OPTIONS.
+ * Resets the shared button set first, exactly like td5_gameopts_build_page()
+ * does for its page flip.
+ * [W3 2026-09-29] No randomize chip any more — randomizing is the R key / pad X
+ * shortcut, advertised by the hint frontend_render_trksel_hints() draws. */
 static void trksel_build_main_buttons(void) {
     frontend_reset_buttons();
     frontend_create_button(SNK_TrackButTxt,       120,  97, 224, 32); /* 0: Track (◄►)          */
@@ -7079,23 +7138,10 @@ static void trksel_build_main_buttons(void) {
     frontend_create_button(SNK_OkButTxt,          120, 386,  96, 32); /* 4: OK                    */
     if (s_flow_context != 2)                                          /* Quick Race: no Back      */
         frontend_create_button(SNK_BackButTxt,    232, 386, 112, 32); /* 5: Back                  */
-    /* [#14] Randomize control (icon to the right of Track by default), created
-     * after the fixed rows so indices 0..5 stay stable. */
-    s_trksel_rand_btn = -1;
-    if (frontend_random_button_on()) {
-        if (frontend_random_icon_on()) {
-            s_trksel_rand_btn = frontend_create_button(NULL, 348, 99,
-                                                       FE_RAND_ICON_W, FE_RAND_ICON_H);
-            if (s_trksel_rand_btn >= 0) s_buttons[s_trksel_rand_btn].hidden = 1;
-        } else {
-            s_trksel_rand_btn = frontend_create_button(TR("Randomize"), 120, 57, 224, 32);
-        }
-    }
     /* [AUTOTRACK R2 item 25] AUTO TRACK OPTIONS, shown ONLY while the
      * AUTO-GENERATED slot is the current pick -- the generator knobs mean
-     * nothing on a shipped track. Created AFTER the fixed rows and the randomize
-     * chip so indices 0..5 stay stable for the handlers that test them by
-     * number.
+     * nothing on a shipped track. Created AFTER the fixed rows so indices 0..5
+     * stay stable for the handlers that test them by number.
      * [AUTO TRACK STUDIO TRACK-SELECT 2026-09-12] Create it UNCONDITIONALLY (like
      * the Quick Race chip) and let frontend_trksel_refresh_auto_btn() show/hide it,
      * so it appears the instant the auto slot is cycled onto -- not only after a
@@ -7128,20 +7174,32 @@ static void raceopts_commit_persist(void) {
     if (g_td5.ini.traffic > TD5_TRAFFIC_VOLUME_COUNT - 1)
         g_td5.ini.traffic = TD5_TRAFFIC_VOLUME_COUNT - 1;
     g_td5.ini.cops                 = s_game_option_cops;
-    g_td5.ini.dynamics             = s_game_option_dynamics;
-    g_td5.ini.powerups             = s_game_option_powerups;
-    g_td5.ini.car_damage_toughness = s_game_option_car_toughness;
     g_td5.ini.car_damage_deform    = s_game_option_car_deform;
     /* [RACE OPTIONS CONSOLIDATION 2026-07-21] absorbed the remaining GAME OPTIONS
-     * fields (3D collisions, the single DAMAGE toggle that drives BOTH master
-     * car-damage and the HUD bar/wreck sub-toggle, lane assist, tutorial overlay
-     * — preserving a dev "force every race" (2)). Mirrors td5_gameopts_commit. */
+     * fields (3D collisions, DAMAGE, lane assist, tutorial overlay — preserving a
+     * dev "force every race" (2)). Mirrors td5_gameopts_commit. */
     g_td5.ini.collisions           = s_game_option_collisions;
-    g_td5.ini.car_damage           = s_game_option_car_damage ? 1 : 0;
-    g_td5.ini.car_damage_bar       = s_game_option_car_damage ? 1 : 0;
+    /* [DAMAGE MERGE 2026-09-29] The one DAMAGE row (0=OFF 1=LOW 2=MEDIUM 3=HIGH)
+     * writes THREE fields: the master switch, its HUD-bar/wreck mirror, and
+     * CarToughness — which runs the other way round (0=Low toughness = takes the
+     * most damage), so level L maps to toughness 3-L. OFF also parks toughness at
+     * its own 3=Off value so either kill switch alone disables the module
+     * (td5_damage_enabled ORs them). Inverse of raceopts_damage_level_from_ini. */
+    {
+        int lvl = s_game_option_car_damage;
+        if (lvl < 0) lvl = 0;
+        if (lvl > 3) lvl = 3;
+        g_td5.ini.car_damage           = (lvl > 0) ? 1 : 0;
+        g_td5.ini.car_damage_bar       = (lvl > 0) ? 1 : 0;
+        g_td5.ini.car_damage_toughness = (lvl > 0) ? (3 - lvl) : 3;
+    }
     g_td5.ini.lane_assist          = s_game_option_laneassist ? 1 : 0;
-    /* [AI DRIVER MODEL 2026-08-17] Commit the opponent-AI mode choice. */
-    g_td5.ini.ai_model             = ((s_game_option_ai_model % 3) + 3) % 3;
+    /* [AI MODEL 2026-09-29] Commit the opponent-AI mode choice (CLASSIC/SMART).
+     * The row only ever holds 0 or 1; DRIVER (2) is INI/env-only and a value of
+     * 2 loaded from the INI is clamped to SMART when the row is seeded, so this
+     * commit can never silently demote a deliberate --AIModel=2 mid-session
+     * without the player opening RACE OPTIONS. */
+    g_td5.ini.ai_model             = (s_game_option_ai_model >= 1) ? 1 : 0;
     g_td5.ini.tutorial_overlay     = s_game_option_tutorial
         ? (g_td5.ini.tutorial_overlay >= 2 ? 2 : 1) : 0;
     /* [RACE OPTIONS CONSOLIDATION 2026-07-21] RACE OPTIONS is now the ONLY
@@ -7151,17 +7209,19 @@ static void raceopts_commit_persist(void) {
      * still copies s_race_difficulty into g_td5.difficulty_tier. */
     s_game_option_difficulty       = s_race_difficulty;
     g_td5.ini.difficulty           = s_race_difficulty;
-    td5_physics_set_dynamics(s_game_option_dynamics);
     td5_ini_persist_options();
     TD5_LOG_I(LOG_TAG,
-              "RaceOpts commit: opp=%d traffic=%d cops=%d diff=%d dyn=%d "
-              "cp=%d pu=%d tough=%d deform=%d coll=%d dmg=%d lane=%d tut=%d",
+              "RaceOpts commit: opp=%d traffic=%d cops=%d diff=%d "
+              "cp=%d dmg=%d(tough=%d) deform=%d coll=%d lane=%d tut=%d "
+              "ai_model=%d catchup=%d",
               s_num_ai_opponents, s_game_option_traffic, s_game_option_cops,
-              s_race_difficulty, s_game_option_dynamics,
-              s_game_option_checkpoint_timers, s_game_option_powerups,
-              s_game_option_car_toughness, s_game_option_car_deform,
-              s_game_option_collisions, s_game_option_car_damage,
-              s_game_option_laneassist, s_game_option_tutorial);
+              s_race_difficulty,
+              s_game_option_checkpoint_timers,
+              s_game_option_car_damage, g_td5.ini.car_damage_toughness,
+              s_game_option_car_deform,
+              s_game_option_collisions,
+              s_game_option_laneassist, s_game_option_tutorial,
+              g_td5.ini.ai_model, td5_save_get_catchup_assist());
 }
 
 /* Leave RACE OPTIONS via OK. Options are edited live (always persisted). When
@@ -7207,11 +7267,25 @@ static void raceopts_back(void) {
  * shows only the rows this mode needs. MP variant discrimination uses
  * mp_mode_config.mode (the SP menu's s_selected_game_type is not reliably stamped
  * for MP cop-chase/drag); SP uses s_selected_game_type (TD5_GameType). */
+/* [MP OPPONENTS DEFAULT 0 2026-09-29] One-shot per MP session: the AI OPPONENTS
+ * row defaults to 0 in multiplayer (human-vs-human unless rivals are asked for),
+ * while single player keeps its 5. Latched so re-opening RACE OPTIONS inside the
+ * same MP session does NOT stomp a count the player just chose; cleared whenever
+ * the ctx is single-player again, so the next MP session re-seeds. */
+static int s_mp_opponents_seeded = 0;
+
 static void raceopts_build_ctx(TD5_RaceOptsCtx *ctx) {
     int any_mp = (s_mp_simul || s_network_active);
     int is_mp  = any_mp || s_mp_flow;
     int mode   = g_td5.mp_mode_config.mode;
     memset(ctx, 0, sizeof *ctx);
+    if (!is_mp) {
+        s_mp_opponents_seeded = 0;
+    } else if (!s_mp_opponents_seeded) {
+        s_mp_opponents_seeded = 1;
+        s_num_ai_opponents    = 0;
+        TD5_LOG_I(LOG_TAG, "RaceOpts: MP session -> AI OPPONENTS seeded to 0");
+    }
     /* [SP DRAG OPPONENTS 2026-08-19] On the SP drag strip the opponent count is
      * also the lane count, so sanitize it into the drag-legal [1,7] band BEFORE
      * the row model snapshots it. Without this, a 0 carried over from a previous
@@ -8017,6 +8091,28 @@ int td5_autotrack_draw_route(float bx, float by, float bw, float bh,
         const TD5_TrackGenPreviewStats *st = &s_at_status.stats;
         int gi = (s_at_status.done && st->grid_span > 0) ? st->grid_span : 0;
         if (gi >= s_at_pts_n) gi = 0;
+        /* [W3 2026-09-29] Checkpoint ticks, drawn BEFORE the start/finish dots
+         * so a dot sitting on a checkpoint still composites on top. The spans
+         * come from the generator (st->cp_span), and a span index is a point
+         * index on the main ring, so the tangent is just the neighbouring
+         * points -- same +Z flip the route plot above applies. */
+        if (s_at_status.done) {
+            int k;
+            for (k = 0; k < st->cp_count && k < 7; k++) {
+                const int ci = st->cp_span[k];
+                int a, b;
+                if (ci <= 0 || ci >= s_at_pts_n) continue;
+                a = (ci - 2 >= 0) ? ci - 2 : 0;
+                b = (ci + 2 < s_at_pts_n) ? ci + 2 : s_at_pts_n - 1;
+                if (b <= a) continue;
+                frontend_draw_marker_tick(
+                    (cx + (s_at_pts[ci].x - ox) * scale) * sx,
+                    (cy - (s_at_pts[ci].z - oz) * scale) * sy,
+                    (s_at_pts[b].x - s_at_pts[a].x) * scale * sx,
+                    -(s_at_pts[b].z - s_at_pts[a].z) * scale * sy,
+                    sx, sy);
+            }
+        }
         frontend_draw_marker_dot((cx + (s_at_pts[gi].x - ox) * scale) * sx,
                                  (cy - (s_at_pts[gi].z - oz) * scale) * sy,
                                  sx, sy, 0);
@@ -8626,7 +8722,6 @@ void Screen_TrackSelection(void) {
         frontend_init_return_screen(TD5_SCREEN_TRACK_SELECTION);
         TD5_LOG_D(LOG_TAG, "TrackSelection: init");
         s_anim_complete = 0;
-        s_trksel_rand_btn = -1;   /* [#14] (re)assigned with the buttons below */
         s_trksel_dyn_btn  = -1;   /* [ARCADE] (re)assigned with the buttons below */
         s_trksel_prev_focus = -2; /* [R3-3] treat the first interactive frame as a focus-entry (no cycle) */
 
@@ -8688,8 +8783,8 @@ void Screen_TrackSelection(void) {
          * runtime check. Logged at state-0 init only (not per frame). */
         {
             int bi;
-            TD5_LOG_I(LOG_TAG, "TrackSel layout: count=%d dyn_btn=%d rand_btn=%d cup=%d flow=%d",
-                      s_button_count, s_trksel_dyn_btn, s_trksel_rand_btn, cup_mp, s_flow_context);
+            TD5_LOG_I(LOG_TAG, "TrackSel layout: count=%d dyn_btn=%d auto_btn=%d cup=%d flow=%d",
+                      s_button_count, s_trksel_dyn_btn, s_trksel_auto_btn, cup_mp, s_flow_context);
             for (bi = 0; bi < s_button_count; bi++)
                 TD5_LOG_I(LOG_TAG, "  btn[%d] '%s' x=%d y=%d w=%d h=%d hidden=%d active=%d",
                           bi, s_buttons[bi].label, s_buttons[bi].x, s_buttons[bi].y,
@@ -8868,19 +8963,6 @@ void Screen_TrackSelection(void) {
                     if (g_td5.ini.traffic < 0) g_td5.ini.traffic = 0;
                     if (g_td5.ini.traffic > TD5_TRAFFIC_VOLUME_COUNT - 1)
                         g_td5.ini.traffic = TD5_TRAFFIC_VOLUME_COUNT - 1;
-                    /* [ARCADE 2026-06-26] Persist the ARCADE/SIMULATION choice
-                     * picked on this screen so it survives a relaunch. */
-                    g_td5.ini.dynamics = s_game_option_dynamics;
-                    /* [DYNAMICS COMMIT FIX 2026-06-28] Push the choice into the
-                     * physics race-init flag NOW (mirrors the Quick Race OK handler
-                     * @ ~L1353). ConfigureGameTypeFlags ran at this screen's init
-                     * with the PRE-toggle value, so without this an ARCADE->SIM flip
-                     * on this screen launched with the stale mode and the arcade
-                     * item-box power-ups stayed ON in SIMULATION. A race-init backstop
-                     * in td5_game.c also re-commits g_td5.ini.dynamics, but commit
-                     * here too so get_dynamics() is correct the instant the race is
-                     * requested. */
-                    td5_physics_set_dynamics(s_game_option_dynamics);
                     td5_ini_persist_options();
                     /* [2026-06-12] Per-race AI difficulty: commit the row into
                      * the live tier read by InitializeRaceActorRuntime
@@ -8905,10 +8987,9 @@ void Screen_TrackSelection(void) {
             }
 
             /* Back (button 5 after the RACE OPTIONS consolidation: TRACK 0 /
-             * DIRECTION 1 / LAPS 2 / RACE OPTIONS 3 / OK 4 / BACK 5). Guard against
-             * the RANDOMIZE button aliasing this index in a flow with fewer buttons
-             * so pressing RANDOMIZE can't also trip Back. */
-            if (s_button_index == 5 && s_button_index != s_trksel_rand_btn) { /* Back */
+             * DIRECTION 1 / LAPS 2 / RACE OPTIONS 3 / OK 4 / BACK 5). The old
+             * "not the RANDOMIZE chip" guard went away with the chip (W3). */
+            if (s_button_index == 5) { /* Back */
                 s_return_screen = TD5_SCREEN_CAR_SELECTION;
                 s_inner_state = 6;
             }
@@ -8929,28 +9010,24 @@ void Screen_TrackSelection(void) {
             /* [#14] RANDOMIZE: pick a random track, then run the SAME change flow as
              * a manual cycle (hide preview this frame, reload + slide-in via 5->9).
              * track_max is exclusive; network caps at 0x13 like frontend_cycle_track.
-             * [#22] Also triggered by the keyboard 'R' key (edge-latched below), so
-             * randomize works without the mouse. */
+             * [W3 2026-09-29] The chip is gone: the ONLY triggers are the keyboard
+             * 'R' key and the pad's X face button. Both are unambiguous, so the old
+             * focus-agreement guard (which existed purely to stop a stray
+             * s_button_index aliasing the chip's index) is no longer needed. */
             {
-                /* 'R' (DIK 0x13) one-shot: latch the rising edge so holding R
-                 * randomizes once per press, not every frame. */
+                /* One-shot each: latch the rising edge so HOLDING the key/button
+                 * randomizes once per press, not every frame. s_fe_gamepad_nav is
+                 * a HELD level refreshed by frontend_poll_input, hence the latch.
+                 * 'R' = DIK 0x13, 0x80 = pad X (td5_plat_input_frontend_nav). */
                 static int s_trksel_r_held = 0;
+                static int s_trksel_x_held = 0;
                 int r_now  = td5_plat_input_key_pressed(0x13) ? 1 : 0;
+                int x_now  = (s_fe_gamepad_nav & 0x80u) ? 1 : 0;
                 int r_edge = (r_now && !s_trksel_r_held) ? 1 : 0;
+                int x_edge = (x_now && !s_trksel_x_held) ? 1 : 0;
                 s_trksel_r_held = r_now;
-                /* [R6a 2026-06-19] Fire ONLY on an EXPLICIT activation of the rand
-                 * button (A/Enter or a click set s_button_index == rand) or the R
-                 * key. Require the activation to AGREE with the live focus
-                 * (s_selected_button) so a stray s_button_index that aliases the
-                 * rand index (e.g. an overlapping/hidden-rect click while focus is
-                 * elsewhere, or an index collision in a flow with fewer buttons)
-                 * can't randomize on a focus-change/leave. The R key is its own
-                 * unambiguous trigger and bypasses the focus check. */
-                int btn_activated = (s_trksel_rand_btn >= 0 &&
-                                     s_button_index == s_trksel_rand_btn &&
-                                     s_selected_button == s_trksel_rand_btn);
-                int do_random = btn_activated || r_edge;
-                if (do_random) {
+                s_trksel_x_held = x_now;
+                if (r_edge || x_edge) {
                     int bound = s_track_max;   /* [2026-06-19] net incl. TD6 (s_track_max already full) */
                     if (frontend_pick_random_track(bound)) {
                         frontend_play_sfx(3);

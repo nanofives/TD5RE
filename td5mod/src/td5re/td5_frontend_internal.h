@@ -44,7 +44,7 @@ typedef struct { const char *label; int cols; int rows; } MpSplitLayout;
 typedef struct {
     int  valid;                              /* 1 once a race has snapshotted a roster */
     int  count;                              /* number of human players captured */
-    char name[TD5_MAX_HUMAN_PLAYERS][16];
+    char name[TD5_MAX_HUMAN_PLAYERS][TD5_PLAYER_NAME_BUF];
     int  accent[TD5_MAX_HUMAN_PLAYERS];      /* 0x00RRGGBB identity colour */
     int  car[TD5_MAX_HUMAN_PLAYERS];
     int  paint[TD5_MAX_HUMAN_PLAYERS];
@@ -294,7 +294,7 @@ extern int s_paint_target;          /* 0 = editing MAIN colour, 1 = SECONDARY */
 const char *td6_pattern_name(int pat);
 
 extern char s_lobby_password[32];
-extern char s_mp_player_name[TD5_MAX_HUMAN_PLAYERS][16];
+extern char s_mp_player_name[TD5_MAX_HUMAN_PLAYERS][TD5_PLAYER_NAME_BUF];
 /* [PLAYER NAME 2026-07-02] Human display name for results/standings rows: MP
  * profile name if loaded, else (slot 0) the Game Options PLAYER NAME, else
  * NULL (caller falls back to "P<n>" / "PLAYER <n>"). Impl in td5_frontend.c. */
@@ -502,6 +502,11 @@ int   fe_wrap_text_lines(const char *s, float maxw, float sx, float sy,
 #define FE_TITLE_LEFT_X  126.0f  /* design x where the first letter starts (every screen);
                                   * = main-menu button left edge (FE_CENTER_X - 0xC2 = 320-194) */
 #define SMALLFONT_TTF_CAP       9.0f
+/* [2026-09-29] fe_draw_text / td5_vui_text anchor y at the 24px glyph CELL top
+ * and place the visible caps on design rows 8..23, so a graphic that must line
+ * up with menu-font text centres on y + FE_TEXT_CAP_MID, NOT on y. (Both the
+ * TTF and bitmap paths use those rows — see fe_draw_text.) */
+#define FE_TEXT_CAP_MID         15.5f
 
 
 extern int s_active_menu_device;
@@ -626,6 +631,7 @@ int frontend_car_has_paint(int car_index);
 int frontend_car_is_cop(int i);
 int frontend_car_is_td6(int car_index);
 int frontend_car_paintable(int car_index);
+int frontend_paint_overlay_visible(int car_index, uint32_t rgb);
 int frontend_current_car_index(void);
 int frontend_find_surface_by_source(const char *name, const char *archive);
 int frontend_load_car_paint_overlay_surface(int car_index);
@@ -653,21 +659,25 @@ void Screen_AutoTrackOptions(void);   /* [AUTOTRACK R2 item 25] */
  * follow. */
 enum {
     RO_OPPONENTS = 0, RO_TRAFFIC, RO_POLICE, RO_DIFFICULTY,
-    /* [AI DRIVER MODEL 2026-08-17] Opponent-AI mode: CLASSIC / SMART / DRIVER.
-     * Edits g_td5.ini.ai_model (see td5_ai_driver.h). Sits with DIFFICULTY as
-     * the other opponent-behaviour lever. */
+    /* [AI DRIVER MODEL 2026-08-17, trimmed 2026-09-29] Opponent-AI mode:
+     * CLASSIC / SMART. Edits g_td5.ini.ai_model (see td5_ai_driver.h). Sits
+     * with DIFFICULTY as the other opponent-behaviour lever. The DRIVER model
+     * stays compiled but is INI/env-only — it is not offered on the row. */
     RO_AI_MODEL,
     /* [SP DRAG DISTANCE 2026-07-23] Drag-only DISTANCE preset (SHORT/MEDIUM/
      * LONG/EPIC), matching the MP drag DISTANCE option. Edits g_td5.ini.drag_length
      * (read by drag_length_level() for SP); MP reads mp_mode_config.drag_length. */
     RO_DISTANCE,
-    /* [CATCHUP 2026-07-21] AI rubber-band assist — MP-only, moved here from the
-     * Multiplayer Options screen so it lives with the other per-race MP options. */
+    /* [CATCHUP 2026-07-21, levelled 2026-09-29] AI rubber-band assist — MP-only,
+     * moved here from the Multiplayer Options screen so it lives with the other
+     * per-race MP options. OFF / LOW / MEDIUM / HIGH (0..3). */
     RO_CATCHUP,
-    RO_DYNAMICS,
-    RO_CHECKPOINTS, RO_POWERUPS, RO_TOUGHNESS, RO_DEFORM,
+    RO_CHECKPOINTS, RO_DEFORM,
     /* [RACE OPTIONS CONSOLIDATION 2026-07-21] absorbed from the retired GAME
      * OPTIONS screen so RACE OPTIONS is the single game-behaviour surface. */
+    /* [DAMAGE MERGE 2026-09-29] RO_DAMAGE is now the 4-state OFF/LOW/MEDIUM/HIGH
+     * row that writes BOTH CarDamage and CarToughness (the old CAR TOUGHNESS row
+     * is gone); DEFORMATION above stays its own row. */
     RO_COLLISIONS, RO_DAMAGE, RO_LANEASSIST, RO_TUTORIAL,
     /* [QUICK RACE DEBUG 2026-07-21] Quick-Race-exclusive rows (is_quick_race).
      * The first block moved off the Quick Race screen's inline buttons; PLAYER AI
@@ -705,6 +715,12 @@ typedef struct {
 } TD5_RaceOptsCtx;
 
 int  td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *ctx);
+/* [MP DRAG 2026-09-29] 1 when a row is VISIBLE but not adjustable in this mode,
+ * so build_page can mark its button `disabled` (greyed text, skipped by nav and
+ * by the value arrows). Today only DIFFICULTY on the drag strip with 0 AI
+ * opponents: the row stays on screen so the player can see the setting exists
+ * and why it does nothing, instead of the row vanishing. */
+int  td5_raceopts_row_disabled(int ro, const TD5_RaceOptsCtx *ctx);
 /* Fill `out` (capacity RO_OPT_COUNT) with the RO_* ids available for ctx, in
  * display order; returns the count. */
 int  td5_raceopts_build_rows(const TD5_RaceOptsCtx *ctx, int *out);
@@ -804,10 +820,10 @@ extern int  s_snap_car, s_snap_paint, s_snap_trans, s_snap_config;
  * "AI Screens" row (QR_BTN_SPLITSCREENS). Created LAST so the OK/Back/PlayerAI/
  * AutoThr indices above are unchanged; hidden+disabled in release. */
 #define QR_BTN_SPAN       11
-/* [PHYSICS 2026-06-26] ARCADE/SIMULATION (dynamics) row on Quick Race, between
- * Laps (row 4) and the dev rows. Created LAST (after the dev toggles + the two
- * RANDOMIZE buttons at indices 12/13) so every hard-coded index above stays put.
- * Visible in BOTH dev and release; flips the shared s_game_option_dynamics. */
+/* [PHYSICS 2026-06-26 / RETIRED 2026-09-29] Was the ARCADE/SIMULATION (DYNAMICS)
+ * row on Quick Race. DYNAMICS is gone (arcade is the only vehicle model), but the
+ * slot is still created hidden+disabled so QR_BTN_RACEOPTS stays at 15 and every
+ * hard-coded index above holds. */
 #define QR_BTN_PHYSICS    14
 /* [QUICK RACE DEBUG 2026-07-21] RACE OPTIONS button — opens the dynamic RACE
  * OPTIONS screen with the quick-race context (opponents / physics / traffic /
@@ -870,14 +886,11 @@ extern int             s_display_vsync;
 extern int             s_display_window_mode;
 extern int             s_game_option_checkpoint_timers;
 extern int             s_game_option_collisions;
-extern int             s_game_option_powerups;   /* [ITEM CHAOS 2026-07-04] 0=OFF 1=CASUAL 2=CHAOS */
 extern int             s_game_option_laneassist;
-extern int             s_game_option_ai_model;   /* [AI DRIVER MODEL] 0=CLASSIC,1=SMART,2=DRIVER */
+extern int             s_game_option_ai_model;   /* [AI MODEL 2026-09-29] 0=CLASSIC,1=SMART (DRIVER=2 is INI-only) */
 extern int             s_game_option_difficulty;
-extern int             s_game_option_dynamics;
-extern int             s_game_option_car_toughness;   /* [TOUGHNESS OFF 2026-07-04] 0=Low 1=Medium 2=High 3=Off */
 extern int             s_game_option_car_deform;      /* [DEFORM OFF 2026-07-05] 0=Low 1=Normal 2=High 3=Off */
-extern int             s_game_option_car_damage;      /* [DAMAGE 2026-07-04] single toggle: master car-damage + HUD bar/wreck */
+extern int             s_game_option_car_damage;      /* [DAMAGE MERGE 2026-09-29] 0=OFF 1=LOW 2=MEDIUM 3=HIGH (writes CarDamage + CarToughness) */
 extern int             s_game_option_tutorial;        /* [TUTORIAL 2026-06-29] controller overlay every race on/off */
 extern int             s_race_difficulty;   /* per-race AI difficulty row on Track Selection (0..2) */
 extern int             s_trksel_dyn_btn;    /* [ARCADE] ARCADE/SIM row index on Track Selection (-1=none) */
@@ -995,13 +1008,23 @@ void frontend_render_language_options_overlay(float sx, float sy);
 void Screen_LightingOptions(void);
 void frontend_render_lighting_options_overlay(float sx, float sy);
 
-/* [LOW-END PERF 2026-09-12] PERFORMANCE OPTIONS sub-screen (td5_fe_menu.c) — the
- * low-end toggles + LOW-END PRESET, reached from GRAPHICS OPTIONS. The row count
- * is exported so the arrow dispatch in td5_frontend.c can't go stale against the
- * screen's own PO_ROWS (the creation-vs-rendering gap this file has hit before). */
+/* [PERF PRESETS 2026-09-29] PERFORMANCE (td5_fe_menu.c), reached from GRAPHICS
+ * OPTIONS: AUTO-SELECT action, two ◄► preset rows (GRAPHICS QUALITY / LIGHTING),
+ * a "CUSTOM ->" nav row and OK. The selector row ids are exported so the arrow
+ * dispatch in td5_frontend.c can't go stale against the screen's own row enum
+ * (the creation-vs-rendering gap this file has hit before). */
 void Screen_PerformanceOptions(void);
 void frontend_render_performance_options_overlay(float sx, float sy);
-int  td5_performance_opts_row_count(void);
+int  td5_performance_first_selector_row(void);
+int  td5_performance_last_selector_row(void);
+
+/* [PERF PRESETS 2026-09-29] CUSTOM PERFORMANCE (td5_fe_menu.c) — the per-knob
+ * list that used to BE the PERFORMANCE screen (LOW-END PRESET + 9 selectors),
+ * now reached from PERFORMANCE's "CUSTOM ->" row. Row count exported for the
+ * same arrow-dispatch reason. */
+void Screen_PerformanceCustom(void);
+void frontend_render_performance_custom_overlay(float sx, float sy);
+int  td5_performance_custom_row_count(void);
 
 /* [AUTOTRACK R2 item 25] AUTO TRACK OPTIONS (td5_fe_race.c) — the
  * TD5RE_AUTOTRACK_* generator knobs. The row count is exported so the arrow
@@ -1020,6 +1043,10 @@ int  td5_autotrack_draw_route(float bx, float by, float bw, float bh,
  * 1 = FINISH (black/white checker). Shared with the auto-track route plot so
  * both previews mark their ends identically. */
 void frontend_draw_marker_dot(float cx, float cy, float sx, float sy, int kind);
+/* [W3 2026-09-29] White CHECKPOINT tick across a track preview: (tx,ty) is the
+ * local road tangent in SCREEN px; the bar is drawn perpendicular to it. */
+void frontend_draw_marker_tick(float cx, float cy, float tx, float ty,
+                               float sx, float sy);
 void Screen_LocalizationInit(void);
 void Screen_MainMenu(void);
 void Screen_MusicTestExtras(void);
@@ -1083,7 +1110,7 @@ void frontend_reset_text_input(void);
  * at their call sites instead of living in this header (extern-in-.c lint). */
 void frontend_draw_randomize_icon(float x, float y, float sx, float sy, int focused);          /* td5_fe_race.c */
 void frontend_render_carsel_randomize_icon(float sx, float sy);                                /* td5_fe_race.c */
-void frontend_render_trksel_randomize_icon(float sx, float sy);                                /* td5_fe_race.c */
+void frontend_render_trksel_hints(float sx, float sy);                                         /* td5_fe_race.c */
 extern int s_mp_postrace_menu_mode;    /* 0 = standard menu, 1 = cup-between menu (td5_fe_race.c) */
 float frontend_lobby_swatch_y_offset(float text_scale, float swatch_h);                        /* td5_fe_net.c */
 int   frontend_race_summary_on(void);                                                          /* td5_fe_race.c */

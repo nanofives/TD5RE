@@ -100,6 +100,16 @@
 #define TD5_MAX_VIEWPORTS           9       /* up to 9 split-screen viewports (3x3 grid) */
 #define TD5_LEGACY_RACE_SLOTS       6       /* original max racers; legacy/faithful modes keep this grid */
 
+/* [PLAYER NAME LENGTH 2026-09-29] Port-only display-name budget for the PORT's
+ * own identity plumbing (MP setup names, the TD5_Profile store, HUD pane
+ * labels). 30 usable chars + NUL; the ORIGINAL 15-char fields
+ * (TD5_NpcEntry.name below, the high-score tables) are deliberately NOT
+ * widened — those are on-disk binary layouts verified against the binary.
+ * Profiles persist as INI text (Profile<N>Name = ...), so widening the
+ * in-memory field reads every existing <=15-char profile unchanged. */
+#define TD5_PLAYER_NAME_MAX         30      /* usable chars, excl. NUL */
+#define TD5_PLAYER_NAME_BUF         (TD5_PLAYER_NAME_MAX + 1)
+
 /* Runtime racer/traffic boundary (port-only). == TD5_LEGACY_RACE_SLOTS (6) for
  * legacy <=6-racer races so traffic + the slot-9 cop encounter stay byte-faithful;
  * == TD5_TRAFFIC_SLOT_BASE for >6-racer split-screen fields (traffic/cops forced
@@ -474,7 +484,12 @@ typedef enum TD5_ScreenIndex {
      * low-end performance toggles + LOW-END PRESET, reached from GRAPHICS OPTIONS
      * via the "PERFORMANCE ->" nav row. */
     TD5_SCREEN_PERFORMANCE_OPTIONS = 53,
-    TD5_SCREEN_COUNT               = 54
+    /* [PERF PRESETS 2026-09-29] Screen_PerformanceCustom (td5_fe_menu.c) — the
+     * per-knob list that USED to be screen 53. Screen 53 is now the short
+     * preset page (AUTO-SELECT / QUALITY / LIGHTING / CUSTOM ->) and this is
+     * where its "CUSTOM ->" row lands. */
+    TD5_SCREEN_PERFORMANCE_CUSTOM  = 54,
+    TD5_SCREEN_COUNT               = 55
 } TD5_ScreenIndex;
 
 /* ========================================================================

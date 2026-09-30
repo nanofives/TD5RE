@@ -2170,6 +2170,10 @@ int tg_emit_routes(const TG_NodeList *nl, int nspans, int lateral, TG_Buf *out);
  */
 #define TD5_TG_RUNOFF_SPANS  100
 int tg_finish_span(int ring);
+/* [W3 2026-09-29] Ring span indices of this route's checkpoints (zero-padded
+ * cp_span[7]); returns the count. Shared by tg_emit_levelinf and the preview
+ * stats so the track-select ticks land on the spans the level ships. */
+int tg_checkpoint_spans(int ring, int *cp_span);
 int tg_emit_levelinf(const TD5_TrackGenSpec *spec, int nspans, TG_Buf *out);
 /* ==========================================================================
  * MODELS.DAT -- road surface mesh

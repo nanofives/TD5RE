@@ -941,9 +941,16 @@ static void mpguide_draw_profile_pane(float px, float py, float pw, float ph,
     fe_draw_quad((px + 3) * sx, (py + 3) * sy, (pw - 6) * sx, 16.0f * sy,
                  rgb | 0xD0000000u, -1, 0, 0, 1, 1);
     {
-        float badge_w = td5_vui_host_badge(px + 6.0f, py + 4.5f, 13.0f, sx, sy);
-        float name_l  = px + 6.0f + badge_w + 5.0f, name_r = px + pw - 3.0f;
-        uiguide_small_centered((name_l + name_r) * 0.5f, (py + 6.0f) * sy,
+        /* [2026-09-29] Mirrors mp_draw_pane_name_banner's CURRENT layout: the
+         * name is centred on the PANE centre for every slot (host included),
+         * with the badge overlaid at the banner's left. It used to be
+         * re-centred inside the band right of the badge. */
+        td5_vui_host_badge(px + 6.0f, py + 4.5f, 13.0f, sx, sy);
+        /* uiguide_small_centered takes SCREEN px on both axes (it forwards
+         * straight to fe_draw_small_text). The previous call passed an
+         * UNSCALED virtual x with a scaled y, so the demo name drifted left of
+         * the pane at any window scale above 1:1. */
+        uiguide_small_centered((px + pw * 0.5f) * sx, (py + 6.0f) * sy,
                                "PLAYER 1", 0xFF000000u, sx, sy);
     }
 
@@ -978,13 +985,16 @@ void frontend_mpguide_render(float sx, float sy) {
                        0xFFE3D708u, sx, sy);
     mpguide_draw_profile_pane(120.0f, 112.0f, 216.0f, 250.0f, demo_rgb, sx, sy);
 
-    /* RIGHT: what the pane is made of + the mode-vote rings + the modal. */
+    /* RIGHT: what the pane is made of + the border-ring widget + the modal. */
     fe_draw_small_text(356.0f * sx, 118.0f * sy, "PANE + ACCENT BORDER",       0xFF8890A0u, sx, sy);
     fe_draw_small_text(356.0f * sx, 132.0f * sy, "HOST BADGE + NAME BANNER",   0xFF8890A0u, sx, sy);
     fe_draw_small_text(356.0f * sx, 146.0f * sy, "NAME / COLOUR / CAR / OK",   0xFF8890A0u, sx, sy);
     fe_draw_small_text(356.0f * sx, 160.0f * sy, "(mp_simul_draw_btn widget)", 0xFF667080u, sx, sy);
 
-    fe_draw_small_text(356.0f * sx, 190.0f * sy, "MODE-VOTE RINGS:", 0xFF8890A0u, sx, sy);
+    /* [2026-09-29] Relabelled: the per-pad mode VOTE was removed (the host
+     * picks the mode outright), so these are now just the generic nesting
+     * border-ring widget, not a vote indicator. */
+    fe_draw_small_text(356.0f * sx, 190.0f * sy, "NESTING BORDER RINGS:", 0xFF8890A0u, sx, sy);
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     for (p = 0; p < TD5_MAX_HUMAN_PLAYERS && p < 6; p++) {
         uint32_t rgb = (uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu;
@@ -992,12 +1002,12 @@ void frontend_mpguide_render(float sx, float sy) {
         fe_draw_quad((360.0f + (float)p * 34.0f) * sx, 208.0f * sy,
                      22.0f * sx, 15.0f * sy, rgb | 0xFF000000u, -1, 0, 0, 1, 1);
     }
-    /* two nested rings on swatch 0 = two players voted for it */
+    /* two nested rings on swatch 0 = the widget stacked twice */
     mp_mode_draw_border_ring(360.0f, 208.0f, 22.0f, 15.0f, 3.0f, 2.0f,
                              (k_mp_player_colors[0] & 0x00FFFFFFu) | 0xFF000000u, sx, sy);
     mp_mode_draw_border_ring(360.0f, 208.0f, 22.0f, 15.0f, 6.0f, 2.0f,
                              (k_mp_player_colors[1] & 0x00FFFFFFu) | 0xFF000000u, sx, sy);
-    fe_draw_small_text(356.0f * sx, 236.0f * sy, "RINGS NEST OUTWARD PER VOTER", 0xFF667080u, sx, sy);
+    fe_draw_small_text(356.0f * sx, 236.0f * sy, "RINGS NEST OUTWARD PER SLOT", 0xFF667080u, sx, sy);
 
     fe_draw_small_text(356.0f * sx, 284.0f * sy, "SHARED CONFIRM MODAL:", 0xFF8890A0u, sx, sy);
 

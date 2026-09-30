@@ -36,7 +36,7 @@ Each car ships a 268-byte `carparam.dat`: bytes `0x00..0x8B` = **cardef** (bound
 
 Binding (`bind_default_vehicle_tuning`, line 10540): tables are **per-actor copies** (`s_default_tuning/cardef` — addressing-scheme divergence only, bytes faithful, line 259). Player slot 0 uses its own carparam; **AI racer slots get the global AI physics template** (orig DAT_00473DB0 — Wf/Wr/inertia/wheelbase/grip; sourcing those from carparam flips the bicycle-determinant sign and spins the car, lines 10548–10643). With `AIAccelFromCar=1` only top-speed (+0x74) and drive-torque (+0x68) are re-sourced from each AI car's carparam, scaled by `k_ai_tier_top_pct`/`k_ai_tier_torque_pct[difficulty_tier]` (lines 10537–10655). Traffic keeps carparam but cardef+0x88 mass is forced to 0x20 at init (line 10207).
 
-`td5_physics_init_vehicle_runtime` (line 10144, orig @0x42F140) **rewrites tuning in place at race init**, keyed off `g_difficulty_easy` — which is the **Dynamics** option, not the Easy/Normal/Hard difficulty (`td5_physics_set_dynamics`, line 10923: arcade→easy=0, simulation→easy=1; `g_difficulty_hard` has no writers, its branch is dead): gravity 1500/1900/2048 (easy/normal/hard); "Normal" (=arcade) scales `DRIVE_TORQUE_MULT *0x168>>8`, `TIRE_GRIP_COEFF *300>>8`, `SPEED_SCALE <<1`; the dead Hard branch is also ported (lines 10218–10255). Per-slot championship handicap then rescales gear ratios, top speed, damping and grip (lines 10268–10356). Surface grip/drag tables (`short[32]`, indices 16–31 = off-strip/grass) and the per-gear torque table are seeded in `td5_physics_init` (lines 725–775).
+`td5_physics_init_vehicle_runtime` (orig @0x42F140) **rewrites tuning in place at race init**. [2026-09-29] The **Dynamics** option (arcade / simulation) was REMOVED and arcade is the only vehicle model, so `g_difficulty_easy` / `td5_physics_set_dynamics` are gone: gravity is unconditionally `TD5_GRAVITY_NORMAL` (1900) and the arcade stat scaling always applies — `DRIVE_TORQUE_MULT *0x168>>8`, `TIRE_GRIP_COEFF *300>>8`, `SPEED_SCALE <<1`, plus the racer-only x1.25 torque / x1.12 grip pass (`TD5RE_ARCADE_TORQUE_PCT` / `TD5RE_ARCADE_GRIP_PCT`). `g_difficulty_hard` still has no writers, so its 2048-gravity branch stays dead-but-ported. Per-slot championship handicap then rescales gear ratios, top speed, damping and grip. Surface grip/drag tables (`short[32]`, indices 16-31 = off-strip/grass) and the per-gear torque table are seeded in `td5_physics_init`.
 
 ## Collisions
 
@@ -48,7 +48,6 @@ Binding (`bind_default_vehicle_tuning`, line 10540): tables are **per-actor copi
 
 ## Physics-relevant INI knobs (`[GameOptions]`, main.c:674–702)
 
-- `Dynamics` (default 0): 0=arcade / 1=simulation → `td5_physics_set_dynamics` → `g_difficulty_easy` → gravity + init-time stat scaling (above).
 - `Collisions` (default 1): 3D collisions toggle → `td5_physics_set_collisions`; stored **inverted** (`g_collisions_enabled==0` means ON, line 10912 + 4179); also selects attitude-clamp mode in `td5_physics_clamp_attitude` (line 8595).
 - `RearImpactResponse` (default 45, 0–100): % of angular/lift response a human keeps when hit on the rear face; 100 = byte-faithful.
 - `AntiTunnel` (default 1) / `AntiTunnelSlop` (default 40, 0–256): port-only V2V depenetration pass + allowed resting overlap.

@@ -23,7 +23,6 @@
 #include "td5_asset.h"
 #include "td5_save.h"
 #include "td5_vfx.h"
-#include "td5_arcade.h"   /* ARCADE power-up pad / hazard world billboards */
 #include "td5_damage.h"   /* [CAR DAMAGE] per-vertex deformation deltas */
 #include "td5_ai.h"
 #include "td5_light.h"    /* [DYNAMIC LIGHTS] world-space point-light registry */

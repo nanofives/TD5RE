@@ -16,7 +16,7 @@ services: asset, track, inflate, font, jobs, rcmd, config, save
    ↑
 sim: physics*, ai, camera, light, sound, vfx
    ↑
-game core: td5_game (race FSM), net, arcade, damage, trace
+game core: td5_game (race FSM), net, damage, trace
    ↑
 presentation: frontend*, fe_*, hud, selftest
 ```

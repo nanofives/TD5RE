@@ -31,8 +31,6 @@
 #include "td5_game.h"   /* td5_game_get_wanted_target_slot, td5_game_is_wanted_mode */
 #include "td5_hud.h"    /* g_wanted_msg_timer/index -- chase-event HUD banner */
 #include "td5_net.h"    /* td5_net_is_slot_active -- net-race slot gate */
-#include "td5_arcade.h" /* [2026-07-04] td5_arcade_slot_is_ghost — GHOST can't be
-                         * newly acquired as a cop-chase target */
 #include "td5_save.h"   /* td5_save_get_catchup_assist — CATCHUP level (S06) */
 #include "td5_input.h"  /* g_td5_steering_bias_max_swing — CATCHUP steering swing (S06) */
 #include "td5re.h"
@@ -2084,13 +2082,54 @@ void td5_ai_tick(void) {
  * ======================================================================== */
 
 /* Softening applied to the rubber-band modifier when catchup is ON. 256 = full
- * original strength; 176 (~0.69) tames the over-correction / yo-yo. */
+ * original strength; 176 (~0.69) tames the over-correction / yo-yo. Still used
+ * for the AHEAD (trim) half of the band. */
 #define K_CATCHUP_STRENGTH_PCT 176
+
+/* [CATCHUP LEVELS 2026-09-29] The row is OFF / LOW / MEDIUM / HIGH = 0..3 and
+ * the BEHIND (boost) half of the rubber band is now an explicit function of the
+ * gap to the nearest HUMAN AHEAD instead of the faithful uncapped delta to slot
+ * 0. Per level, the boost reaches its ceiling at K_CATCHUP_FULL_GAP_SPANS and
+ * ramps linearly below it; the ceiling is a PERCENTAGE of the per-race
+ * g_rb_behind_scale, so a mode that already zeroes the scale (time trial) still
+ * gets no boost and the band can never exceed the original's own strength.
+ * The INI/CLI override ([GameOptions]CatchupAssist / --CatchupAssist) keeps its
+ * full 0..9 range; 4..9 all resolve to the 100% ceiling. */
+#define K_CATCHUP_FULL_GAP_SPANS 200
+
+static int catchup_boost_pct_for_level(int level) {
+    switch (level) {
+    case 0:  return 0;      /* OFF */
+    case 1:  return 25;     /* LOW    */
+    case 2:  return 50;     /* MEDIUM */
+    default: return 100;    /* HIGH (and any power-user 4..9) */
+    }
+}
 
 int td5_ai_get_catchup_level(void) {
     int ini = g_td5.ini.catchup_assist;     /* -1 = use persisted; 0..9 override */
     if (ini >= 0) return ini;
-    return td5_save_get_catchup_assist();    /* persisted; default 1 */
+    return td5_save_get_catchup_assist();    /* persisted; default 1 = LOW */
+}
+
+/* Progress of the closest HUMAN ahead of `slot`, as a positive span gap, or 0
+ * when this car leads every human (nothing to catch up to). Measured on
+ * track_span_high_water so the gap matches the race standings. Pure function of
+ * replicated actor state -> lockstep-safe. */
+static int32_t catchup_gap_to_human_ahead(int slot, int racer_count) {
+    int32_t mine, best = 0;
+    int j;
+    if (!g_actor_table_base) return 0;
+    mine = (int16_t)ACTOR_I16(actor_ptr(slot), ACTOR_SPAN_HIGH_WATER);
+    for (j = 0; j < racer_count; j++) {
+        int32_t gap;
+        if (j == slot) continue;
+        if (g_slot_state[j] != 1) continue;    /* humans only (0 = AI slot) */
+        gap = (int32_t)(int16_t)ACTOR_I16(actor_ptr(j), ACTOR_SPAN_HIGH_WATER) - mine;
+        if (gap <= 0) continue;                /* that human is behind us */
+        if (best == 0 || gap < best) best = gap;   /* NEAREST human ahead */
+    }
+    return best;
 }
 
 void td5_ai_compute_rubber_band(void) {
@@ -2189,13 +2228,33 @@ void td5_ai_compute_rubber_band(void) {
             modifier = (g_rb_ahead_scale * delta) / g_rb_ahead_range;
         }
 
-        /* CATCHUP gate/soften (S06 2026-06-04). OFF -> modifier 0 so the AI runs
-         * on its plain difficulty-tier throttle (bias = 0x100, neutral). ON ->
-         * scale the swing down so catchup assists without yo-yoing the player.
-         * `/256` truncates toward zero, keeping the behind(neg)/ahead(pos)
-         * branches symmetric. */
+        /* CATCHUP gate (S06 2026-06-04, levelled 2026-09-29).
+         *
+         * OFF -> modifier 0 so the AI runs on its plain difficulty-tier throttle
+         * (bias = 0x100, neutral).
+         *
+         * ON  -> the AHEAD (trim) half keeps the softened faithful curve, but the
+         * BEHIND (boost) half is REPLACED by the level-driven ramp: max boost
+         * 25 / 50 / 100 % of g_rb_behind_scale, reached linearly at
+         * K_CATCHUP_FULL_GAP_SPANS spans of gap to the nearest HUMAN ahead. Two
+         * things change versus the faithful band: the reference is the closest
+         * human ahead rather than slot 0 unconditionally (so an AI leading every
+         * human gets NO boost, and a 4-human split-screen race paces off whoever
+         * is actually in front), and the boost is bounded instead of growing with
+         * an uncapped negative delta. A negative modifier is the boost direction
+         * (bias = 0x100 - modifier, so bias > 0x100). */
         if (catchup <= 0) {
             modifier = 0;
+        } else if (delta0 < 0) {
+            int32_t gap = catchup_gap_to_human_ahead(i, racer_count);
+            if (gap <= 0) {
+                modifier = 0;                    /* ahead of every human */
+            } else {
+                int32_t pct = catchup_boost_pct_for_level(catchup);
+                int32_t ceiling = (g_rb_behind_scale * pct) / 100;
+                if (gap > K_CATCHUP_FULL_GAP_SPANS) gap = K_CATCHUP_FULL_GAP_SPANS;
+                modifier = -((ceiling * gap) / K_CATCHUP_FULL_GAP_SPANS);
+            }
         } else {
             modifier = (modifier * K_CATCHUP_STRENGTH_PCT) / 256;
         }
@@ -5620,7 +5679,17 @@ static void td5_ai_smart_speed(int slot) {
  * the throttle bias, so behind→boost / ahead→trim, capped to a small band. */
 static int td5_ai_smart_leash_modifier(int slot, int32_t delta, int32_t *out_modifier) {
     (void)slot;
+    /* [CATCHUP LEVELS 2026-09-29] The leash follows the CATCHUP row instead of
+     * having a second, invisible strength dial. [GameOptions]SmartAILeash is now
+     * an explicit OVERRIDE: -1 (the default) = follow CATCHUP, 0..9 = pin the
+     * leash. Level 0..3 maps onto the old 0..9 scale x3, so the shipped default
+     * (CATCHUP = LOW = 1) lands on 3 — exactly the value SmartAILeash defaulted
+     * to before, i.e. no behaviour change at the default settings. */
     int s = g_td5.ini.smart_ai_leash;
+    if (s < 0) {
+        s = td5_ai_get_catchup_level() * 3;
+        if (s > 9) s = 9;
+    }
     if (s <= 0) { *out_modifier = 0; return 1; }   /* leash off → pure skill */
     int32_t range = 0x40;
     int32_t d = delta;
@@ -6578,12 +6647,6 @@ void td5_ai_update_special_encounter(void) {
                  * (state 0) so the chase is observable headlessly. */
                 if (st != 1 && !(cop_chase_ai_debug() && st == 0)) continue;
                 if (g_actor_broken_down[c]) continue;
-                /* [ARCADE GHOST 2026-07-04] A ghosting car can't be newly
-                 * acquired as a pursuit target — it phases through everything
-                 * else, so a passing cop shouldn't lock on either. An
-                 * already-running chase is untouched (this only gates
-                 * ACQUISITION, in the COP_IDLE branch above). */
-                if (td5_arcade_slot_is_ghost(c)) continue;
                 cand = actor_ptr(c);
                 /* Line of sight: a cop can't START a chase across a fork. If the
                  * player is on a branch corridor and the cop is on the main road
@@ -6653,10 +6716,10 @@ void td5_ai_update_special_encounter(void) {
                     spd  = ACTOR_I32(cd, ACTOR_LONGITUDINAL_SPEED);
                     TD5_LOG_I(LOG_TAG,
                         "cop_diag: cop=%d IDLE no-acquire racer=%d st=%d(need 1) "
-                        "broken=%d ghost=%d cop_span=%d p_span=%d gap=%d(win %d..%d) "
+                        "broken=%d cop_span=%d p_span=%d gap=%d(win %d..%d) "
                         "spd=%d(gate=%d) fwd=%d samesect=%d cooldown=%d rebust=%d",
                         k, c, st, g_actor_broken_down[c],
-                        td5_arcade_slot_is_ghost(c), c_raw, p_raw,
+                        c_raw, p_raw,
                         cgap, cop_trigger_lo(), cop_trigger_hi(),
                         spd, (int)(((int64_t)g_td5.ini.cop_min_speed *
                                     cop_trigger_speed_pct()) / 100),
@@ -6678,22 +6741,6 @@ void td5_ai_update_special_encounter(void) {
             cop_end_chase(k);
             continue;
         }
-
-        /* [ARCADE GHOST 2026-07-04] "Police should not be able to see you
-         * anymore" — a chase already in progress ENDS outright the moment the
-         * target ghosts (not just paused/held). Every cop currently pursuing
-         * this target re-evaluates its own chase here, so a target followed by
-         * several cops loses ALL of them, not just one. If GHOST wears off
-         * later, a cop has to re-acquire the target from scratch via the
-         * normal COP_IDLE acquisition gate above (which already refuses to
-         * acquire a ghosting car). */
-        if (td5_arcade_slot_is_ghost(tgt)) {
-            if (phase == COP_PULLOVER) g_encounter_active[tgt] = 0;
-            TD5_LOG_I(LOG_TAG, "cop_chase END (target ghosted): cop=%d target=%d", k, tgt);
-            cop_end_chase(k);
-            continue;
-        }
-
         {
             char *tactor   = actor_ptr(tgt);
             int   tgt_main = td5_track_branch_to_main_span((int)ACTOR_I16(tactor, ACTOR_SPAN_RAW));

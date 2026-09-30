@@ -168,7 +168,8 @@ static const ScreenDesc s_screens[TD5_SCREEN_COUNT] = {
     /* [50] */ { "CUP INTERMISSION",     Screen_MpPostRace },     /* cup-between post-race menu */
     /* [51] */ { "LIGHTING",             Screen_LightingOptions },/* [RT2 P8] RT lighting per-feature options */
     /* [52] */ { "AUTO TRACK STUDIO",    Screen_AutoTrackOptions },/* [AUTOTRACK R2 item 25] generator knobs */
-    /* [53] */ { "PERFORMANCE",          Screen_PerformanceOptions },/* [LOW-END PERF 2026-09-12] low-end toggles + preset */
+    /* [53] */ { "PERFORMANCE",          Screen_PerformanceOptions },/* [PERF PRESETS 2026-09-29] auto-select + quality/lighting presets */
+    /* [54] */ { "PERFORMANCE CUSTOM",   Screen_PerformanceCustom },/* [PERF PRESETS 2026-09-29] the per-knob list (was screen 53) */
 };
 
 /* [SUB-SCREEN PROMOTION 2026-07-27] Map an identity screen number back to the
@@ -359,7 +360,7 @@ const uint32_t k_mp_player_colors[TD5_MAX_HUMAN_PLAYERS] = {
  * the car-select uses). Keyboard players type directly (high-score style); pad
  * players get an on-screen QWERTY. Then phase 1 = the car-select grid. */
 int  s_mp_phase = 0;                                   /* 0 = setup, 1 = car select */
-char s_mp_player_name[TD5_MAX_HUMAN_PLAYERS][16];      /* chosen display name */
+char s_mp_player_name[TD5_MAX_HUMAN_PLAYERS][TD5_PLAYER_NAME_BUF]; /* chosen display name (30 chars) */
 int  s_mp_player_accent[TD5_MAX_HUMAN_PLAYERS];        /* chosen identity colour (0xRRGGBB) */
 int  s_mp_setup_sub[TD5_MAX_HUMAN_PLAYERS];            /* 0 idle, 1 name entry, 2 colour picker */
 int  s_mp_setup_btn[TD5_MAX_HUMAN_PLAYERS];            /* idle focus: 0 NAME, 1 COLOUR, 2 OK */
@@ -831,14 +832,35 @@ int             s_game_option_difficulty = 1;
  * (0..2, seeded from g_td5.difficulty_tier on entry, committed back on OK).
  * Quick Race never shows the row and keeps the Game Options global. */
 int             s_race_difficulty = 1;
-int             s_game_option_dynamics = 0;
 int             s_game_option_collisions = 1;
-int             s_game_option_powerups = 1;   /* [ITEM CHAOS 2026-07-04] 0=OFF 1=CASUAL 2=CHAOS */
-int             s_game_option_car_toughness = 1; /* [TOUGHNESS OFF 2026-07-04] 0=Low 1=Medium 2=High 3=Off */
 int             s_game_option_car_deform = 1;    /* [DEFORM OFF 2026-07-05] 0=Low 1=Normal 2=High 3=Off */
-int             s_game_option_car_damage = 1; /* [DAMAGE 2026-07-04] single toggle: master car-damage + HUD bar/wreck */
+/* [DAMAGE MERGE 2026-09-29] One 4-state DAMAGE row replaces the old ON/OFF
+ * DAMAGE toggle + the separate CAR TOUGHNESS row: 0=OFF 1=LOW 2=MEDIUM 3=HIGH,
+ * where the level is how much damage a car TAKES. On commit it writes both
+ * [Game]CarDamage (and the HUD-bar mirror) and [Game]CarToughness, which runs
+ * the other way round (0=Low toughness = most damage), so level L maps to
+ * toughness 3-L and OFF maps to toughness 3 (the module's own kill switch). */
+int             s_game_option_car_damage = 2;
 int             s_game_option_laneassist = 0; /* lane-assist steering aid on/off */
-int             s_game_option_ai_model = 2;   /* [AI DRIVER MODEL] 0=CLASSIC,1=SMART,2=DRIVER */
+/* [AI MODEL 2026-09-29] 0=CLASSIC, 1=SMART. The DRIVER model (2) is still
+ * compiled and reachable through [GameOptions]AIModel=2 / --AIModel=2 /
+ * TD5RE_AI_MODEL=2, but it is no longer offered on the RACE OPTIONS row. */
+int             s_game_option_ai_model = 1;
+
+/* [DAMAGE MERGE 2026-09-29] Seed the merged 4-state DAMAGE row from the two INI
+ * fields it writes. OFF wins if EITHER kill switch is set, matching
+ * td5_damage_enabled() (car_damage == 0 OR toughness == 3). Otherwise the level
+ * is the inverse of toughness: toughness 2 (HIGH) = LOW damage taken, 0 (LOW) =
+ * HIGH damage taken. Used by both INI->statics seed sites (AutoRace + boot), so
+ * the two cannot drift. */
+static int raceopts_damage_level_from_ini(void) {
+    int tough;
+    if (g_td5.ini.car_damage == 0 || g_td5.ini.car_damage_toughness == 3) return 0;
+    tough = g_td5.ini.car_damage_toughness;
+    if (tough < 0) tough = 0;
+    if (tough > 2) tough = 2;
+    return 3 - tough;
+}
 int             s_game_option_tutorial = 1;   /* [TUTORIAL 2026-06-29] controller overlay every race on/off */
 int             s_sound_option_sfx_mode;
 int             s_sound_option_sfx_volume = 80;
@@ -1128,10 +1150,21 @@ int s_track_switch_tick = 16; /* 0-15 = animating in, 16 = settled */
  * normalized 0..1 in the 152x224 preview, top-left origin. circuit: LEVELINF
  * DWORD[0] (1=circuit -> single start/finish dot; 0=P2P -> start+end dots that
  * swap with the Forwards/Backwards toggle). */
+/* [W3 2026-09-29] Per-checkpoint ticks. cp_u/cp_v are the checkpoint's position
+ * in the same normalized preview space as the start/end dots; cp_tu/cp_tv is the
+ * UNIT local road tangent in 152x224 IMAGE pixels (the drawer turns it 90
+ * degrees to get the tick direction, after rescaling for the on-screen panel
+ * aspect). 7 is the LEVELINF checkpoint_spans[7] ceiling; the JSON field is
+ * optional, so a marker file generated before this feature just has cp_count 0
+ * and draws no ticks. */
+#define TD5_TRACK_CP_MAX 7
 typedef struct {
     float start_u, start_v;
     float end_u, end_v;
     uint8_t circuit;
+    uint8_t cp_count;
+    float cp_u[TD5_TRACK_CP_MAX], cp_v[TD5_TRACK_CP_MAX];
+    float cp_tu[TD5_TRACK_CP_MAX], cp_tv[TD5_TRACK_CP_MAX];
 } TD5_TrackMarker;
 static TD5_TrackMarker s_track_markers[20];
 static int s_track_markers_loaded = 0; /* 0=untried, 1=loaded, -1=unavailable */
@@ -1605,6 +1638,13 @@ static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_LIGHTING_OPTIONS:   return "LIGHTING OPTIONS";
     case TD5_SCREEN_AUTOTRACK_OPTIONS:  return TR("AUTO TRACK STUDIO"); /* [R2 item 25] */
     case TD5_SCREEN_PERFORMANCE_OPTIONS: return TR("PERFORMANCE");       /* [LOW-END PERF] */
+    /* [PERF PRESETS] Just "CUSTOM", not "CUSTOM PERFORMANCE": at the title font
+     * the longer string runs off the right edge of the 640px canvas (verified by
+     * framedump 2026-09-30 -- it rendered as "CUSTOM PERFORMAN..."). "PERFORMANCE"
+     * alone already fills most of that width. The screen is only reachable from
+     * PERFORMANCE's "CUSTOM ->" row, so the short title reads correctly in
+     * context; the dev screen-ID badge still shows the full identity. */
+    case TD5_SCREEN_PERFORMANCE_CUSTOM:  return TR("CUSTOM");
     case TD5_SCREEN_CONTROLLER_BINDING: return "CONTROLLER SETUP";
     case TD5_SCREEN_CAR_SELECTION:      return "SELECT CAR";
     case TD5_SCREEN_TRACK_SELECTION:    return "SELECT TRACK";
@@ -2309,10 +2349,35 @@ int frontend_car_is_td6(int car_index) {
     return car_index >= TD5_BASE_CAR_COUNT && car_index < TD5_CAR_COUNT;
 }
 
-/* TD6 car that may be repainted: every ported car EXCEPT the cp1-4 cop cars
- * (police liveries are fixed). Gates the colour selector + the preview tint. */
+/* A car that may be repainted with the free COLOUR PICKER (as opposed to the
+ * four fixed TD5 paint schemes). Gates the colour selector + the preview tint.
+ *   - every ported TD6 car EXCEPT the cp1-4 cop cars (police liveries fixed)
+ *   - [TD5 CAR PAINT 2026-09-29] an ORIGINAL car that has an offline paint bake
+ *     (carmask + neutral greyscale body, see td5_asset_car_paint_bake): its
+ *     primary body colour becomes free, while stripes, a second body colour,
+ *     glass, lights and badges keep the art they shipped with. Cars whose four
+ *     carskins are the same paint have no bake and stay on the paint arrows. */
 int frontend_car_paintable(int car_index) {
-    return frontend_car_is_td6(car_index) && !frontend_car_is_cop(car_index);
+    if (frontend_car_is_td6(car_index))
+        return !frontend_car_is_cop(car_index);
+    return td5_asset_car_paint_bake(car_index);
+}
+
+/* [TD5 CAR PAINT 2026-09-29] Whether the body-paint overlay should be drawn
+ * over this car's preview for colour `rgb` (0xRRGGBB).
+ *
+ * White is the "not repainted" value in the in-race bake — td5_asset_load_vehicle
+ * skips the multiply and uploads the skin as-is. For a TD6 car that is invisible
+ * (its skin IS the grey body, and grey * white = grey), but a TD5 car falls back
+ * to its FACTORY carskin, so drawing the neutral-grey overlay on white would show
+ * a grey car in the menu and its original paint in the race. Gate on the same
+ * rule both sides use. */
+int frontend_paint_overlay_visible(int car_index, uint32_t rgb) {
+    if (!frontend_car_paintable(car_index))
+        return 0;
+    if ((rgb & 0x00FFFFFFu) == 0x00FFFFFFu && td5_asset_car_paint_bake(car_index))
+        return 0;
+    return 1;
 }
 
 /* Whether a car offers ANY paint choice at all (used to grey-out the PAINT
@@ -3630,22 +3695,12 @@ void td5_frontend_auto_race_setup(void) {
     s_game_option_traffic           = g_td5.ini.traffic;
     s_game_option_cops              = g_td5.ini.cops;
     s_game_option_difficulty        = g_td5.ini.difficulty;
-    s_game_option_dynamics          = g_td5.ini.dynamics;
     s_game_option_collisions        = g_td5.ini.collisions;
-    s_game_option_powerups          = g_td5.ini.powerups;
-    s_game_option_car_toughness     = g_td5.ini.car_damage_toughness;
     s_game_option_car_deform        = g_td5.ini.car_damage_deform;
-    s_game_option_car_damage        = (g_td5.ini.car_damage != 0);
+    s_game_option_car_damage        = raceopts_damage_level_from_ini();
     s_game_option_laneassist        = g_td5.ini.lane_assist;
-    s_game_option_ai_model          = g_td5.ini.ai_model;
+    s_game_option_ai_model          = (g_td5.ini.ai_model >= 1) ? 1 : 0;
     s_game_option_tutorial          = (g_td5.ini.tutorial_overlay > 0) ? 1 : 0;
-
-    /* Commit the dynamics (arcade/sim) selection into the physics race-init
-     * flag deterministically for the AutoRace path, mirroring the options-screen
-     * commit at ConfigureGameTypeFlags (td5_physics_set_dynamics @ case 0). The
-     * boot path also commits the INI value, but committing here makes the
-     * AutoRace harness independent of boot-block ordering. */
-    td5_physics_set_dynamics(s_game_option_dynamics);
 
     /* Match the Frida hook's pre-call writes.
      *   g_twoPlayerModeEnabled=0, g_returnToScreenIndex=-1
@@ -3817,6 +3872,8 @@ static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_LIGHTING_OPTIONS:   /* [RT2 P8] entered from GRAPHICS OPTIONS -> BACK there */
     case TD5_SCREEN_PERFORMANCE_OPTIONS: /* [LOW-END PERF] entered from GRAPHICS OPTIONS -> BACK there */
         return TD5_SCREEN_DISPLAY_OPTIONS;
+    case TD5_SCREEN_PERFORMANCE_CUSTOM: /* [PERF PRESETS] entered from PERFORMANCE -> BACK there */
+        return TD5_SCREEN_PERFORMANCE_OPTIONS;
     case TD5_SCREEN_AUTOTRACK_OPTIONS:  /* [R2 item 25] track-select OR quick race */
         /* [AUTOTRACK QUICKRACE 2026-09-06] No longer track-select-only: Quick Race
          * grew its own STUDIO chip, so BACK follows whoever opened it. */
@@ -5147,15 +5204,6 @@ int ConfigureGameTypeFlags(void) {
     TD5_LOG_I(LOG_TAG, "ConfigureGameTypeFlags: game_type=%d tier=%d",
               s_selected_game_type, g_td5.difficulty_tier);
 
-    /* [ARCADE 2026-06-26] Commit the ARCADE/SIMULATION dynamics choice for EVERY
-     * game type (single race, championship, multiplayer race/cup/cop-chase). It
-     * drives gravity + grip/torque scaling at physics init AND the arcade power-up
-     * system, so it must be set before td5_physics_init_vehicle_runtime regardless
-     * of mode. Previously only Single Race (case 0) committed it, so the new
-     * track-select / MP-config selectors had no effect in the other modes. The
-     * per-case commit in case 0 below is now redundant but harmless. */
-    td5_physics_set_dynamics(s_game_option_dynamics);
-
     switch (s_selected_game_type) {
     case 0: /* Single Race -- user preferences apply */
         /* [CONFIRMED @ 0x004155DE] live circuit lap count = gCircuitLapsConfigShadow + 1,
@@ -5165,19 +5213,17 @@ int ConfigureGameTypeFlags(void) {
          * multiply ... g_td5.circuit_lap_count = laps+1"). [merge-resolved 2026-06-02] */
         g_td5.circuit_lap_count = s_game_option_laps + 1;
         /* The AI first-layer template scaling in td5_ai_init_race_actor_runtime
-         * (InitializeRaceActorRuntime @ 0x00432F2F / 0x00432FB4) is now keyed on
-         * the DYNAMICS flag (gDifficultyEasy @0x004AAF84 = the arcade/sim toggle),
-         * matching the original — it no longer reads g_td5.difficulty. The user
-         * difficulty toggle routes into difficulty_tier (above), which is the path
-         * the original actually ties to user difficulty (gRaceDifficultyTier
-         * @0x00463210, read only AFTER the dynamics block @ 0x00432FFD). The
-         * g_td5.difficulty field below is retained only for save/log round-trip
-         * (td5_save.c) and no longer affects AI scaling. */
+         * (InitializeRaceActorRuntime @ 0x00432F2F / 0x00432FB4) used to be keyed
+         * on the DYNAMICS flag (gDifficultyEasy @0x004AAF84 = the arcade/sim
+         * toggle); with DYNAMICS removed (2026-09-29) it applies unconditionally.
+         * The user difficulty toggle routes into difficulty_tier (above), which
+         * is the path the original actually ties to user difficulty
+         * (gRaceDifficultyTier @0x00463210). The g_td5.difficulty field below is
+         * retained only for save/log round-trip (td5_save.c). */
         g_td5.difficulty = TD5_DIFFICULTY_NORMAL;
         g_td5.traffic_enabled = s_game_option_traffic;
         g_td5.special_encounter_enabled = s_game_option_cops;
         td5_physics_set_collisions(s_game_option_collisions);
-        td5_physics_set_dynamics(s_game_option_dynamics);
         g_td5.checkpoint_timers_enabled = s_game_option_checkpoint_timers;
         break;
 
@@ -5707,9 +5753,25 @@ static uint32_t frontend_attract_idle_window_ms(void) {
     return s_win;
 }
 
+/* [PAUSE RENDER CACHE 2026-09-29] Menus animate at 60 Hz (see
+ * frontend_update_anim_pacing) and are otherwise a static redraw, so anything
+ * above 60 fps here is pure GPU burn -- the frontend was measured spinning fast
+ * enough to be the TDR trigger documented in td5_plat_present's frame-cap block.
+ * Cap it at the animation rate. TD5RE_FE_FRAME_CAP overrides (0 = uncapped). */
+static int frontend_frame_cap(void) {
+    static int s_cap = -1;
+    if (s_cap < 0) {
+        const char *e = getenv("TD5RE_FE_FRAME_CAP");
+        s_cap = (e && e[0]) ? atoi(e) : 60;
+        if (s_cap < 0) s_cap = 0;
+    }
+    return s_cap;
+}
+
 int td5_frontend_display_loop(void) {
     if (g_td5.ini.log_frontend_draw) s_fe_draw_log_frame++;
     td5_profile_begin_frame();
+    td5_plat_set_idle_frame_cap(frontend_frame_cap());
     frontend_update_anim_pacing();   /* [FPS-DECOUPLE] pace animations at 60 Hz */
     /* 0. Poll platform input so s_keyboard[] is fresh for this frame */
     {
@@ -5843,6 +5905,7 @@ int td5_frontend_display_loop(void) {
                      s_current_screen == TD5_SCREEN_LANGUAGE_OPTIONS ||
                      s_current_screen == TD5_SCREEN_LIGHTING_OPTIONS ||
                      s_current_screen == TD5_SCREEN_PERFORMANCE_OPTIONS ||
+                     s_current_screen == TD5_SCREEN_PERFORMANCE_CUSTOM ||
                      s_current_screen == TD5_SCREEN_AUTOTRACK_OPTIONS ||
                      s_current_screen == TD5_SCREEN_CONTROLLER_BINDING);
                 /* [splitscreen back-confirm] In split-screen, returning to the
@@ -6119,6 +6182,7 @@ static int frontend_get_button_anim_state(int *out_mode, int *out_tick, int *out
     case TD5_SCREEN_LANGUAGE_OPTIONS:
     case TD5_SCREEN_LIGHTING_OPTIONS:
     case TD5_SCREEN_PERFORMANCE_OPTIONS: /* [LOW-END PERF] same 3/8 anim states */
+    case TD5_SCREEN_PERFORMANCE_CUSTOM:  /* [PERF PRESETS] same 3/8 anim states */
     case TD5_SCREEN_AUTOTRACK_OPTIONS:   /* [R2 item 25] same 3/8 anim states */
         if (s_inner_state == 3) { mode = FE_BUTTON_ANIM_IN;  max_tick = 0x27; }
         else if (s_inner_state == 8) { mode = FE_BUTTON_ANIM_OUT; max_tick = 16; }
@@ -6206,6 +6270,7 @@ static int frontend_screen_has_button_anim(void) {
     case TD5_SCREEN_LANGUAGE_OPTIONS:
     case TD5_SCREEN_LIGHTING_OPTIONS:
     case TD5_SCREEN_PERFORMANCE_OPTIONS: /* [LOW-END PERF] */
+    case TD5_SCREEN_PERFORMANCE_CUSTOM:  /* [PERF PRESETS] */
     case TD5_SCREEN_AUTOTRACK_OPTIONS:   /* [R2 item 25] */
     case TD5_SCREEN_MUSIC_TEST:
     case TD5_SCREEN_CAR_SELECTION:
@@ -6777,14 +6842,6 @@ static void frontend_render_quick_race_overlay(float sx, float sy) {
         snprintf(count, sizeof(count), "%d", s_game_option_laps + 1);
         frontend_draw_qr_value(sx, sy, QR_BTN_LAPS, count, 0xFFFFFFFF, 0);
     }
-    /* [PHYSICS 2026-06-26] Physics row value: ARCADE / SIMULATION, drawn in the
-     * value column like every other QR row (caption "Physics", flips the shared
-     * s_game_option_dynamics). Always shown — it's a real player option. */
-    if (s_button_count > QR_BTN_PHYSICS && !s_buttons[QR_BTN_PHYSICS].hidden) {
-        frontend_draw_qr_value(sx, sy, QR_BTN_PHYSICS,
-                               s_game_option_dynamics ? "SIMULATION" : "ARCADE",
-                               0xFFFFFFFF, 0);
-    }
     /* [2026-06-08] AI Screens value (dev-only; row hidden in release). */
     if (s_button_count > QR_BTN_SPLITSCREENS &&
         !s_buttons[QR_BTN_SPLITSCREENS].hidden) {
@@ -6869,6 +6926,9 @@ void fe_draw_option_arrows(int btn_idx, float sx, float sy) {
      * tracks) — the selector arrows must vanish with the button frame+label,
      * not leave an empty ◄ ► row floating where the button used to be. */
     if (!s_buttons[btn_idx].active || s_buttons[btn_idx].hidden) return;
+    /* [2026-09-29] A DISABLED row draws no arrows either: nav already skips the
+     * button, so arrows would advertise a cycle that cannot happen. */
+    if (s_buttons[btn_idx].disabled) return;
     /* [2026-06-26] Mark this row as a value selector for the shared LEFT/RIGHT nav
      * (drawing arrows == "L/R cycles my value, don't move focus off me"). Set
      * before the shader bail so the nav meaning holds even if ps_arrow is absent. */
@@ -6908,13 +6968,10 @@ const char *td5_raceopts_label(int idx) {
         case RO_TRAFFIC:     return SNK_TrafficButTxt;
         case RO_POLICE:      return SNK_CopsButTxt;        /* label: POLICE */
         case RO_DIFFICULTY:  return SNK_DifficultyButTxt;
-        case RO_AI_MODEL:    return TR("AI MODEL");        /* [AI DRIVER MODEL 2026-08-17] CLASSIC/SMART/DRIVER */
+        case RO_AI_MODEL:    return TR("AI MODEL");        /* [AI MODEL 2026-09-29] CLASSIC/SMART */
         case RO_DISTANCE:    return TR("DISTANCE");        /* [SP DRAG DISTANCE 2026-07-23] drag length preset */
         case RO_CATCHUP:     return SNK_CatchupTxt;        /* [CATCHUP 2026-07-21] MP AI rubber-band */
-        case RO_DYNAMICS:    return SNK_DynamicsButTxt;
         case RO_CHECKPOINTS: return SNK_CheckpointTimersButTxt;
-        case RO_POWERUPS:    return TR("POWER-UPS");
-        case RO_TOUGHNESS:   return TR("CAR TOUGHNESS");
         case RO_DEFORM:      return TR("DEFORMATION");
         case RO_COLLISIONS:  return SNK_3dCollisionsButTxt;
         case RO_DAMAGE:      return TR("DAMAGE");
@@ -6977,21 +7034,19 @@ void td5_raceopts_value(int idx, char *out, size_t out_sz) {
     static const char *const traffic_vol[TD5_TRAFFIC_VOLUME_COUNT] =
         { "OFF", "LOW", "MEDIUM", "HIGH", "VERY HIGH" };
     static const char *const difficulty[]  = { "EASY", "NORMAL", "HARD" };
-    /* [TOUGHNESS OFF 2026-07-04] Same 4-state array as td5_gameopts_value's
-     * toughness_lv[] — this is the ONLY damage on/off control exposed on the
-     * RACE OPTIONS screen (no separate DAMAGE row here), so OFF must fully
-     * disable damage; see td5_damage_enabled(). */
-    static const char *const toughness_lv[] = { "LOW", "MEDIUM", "HIGH", "OFF" };
     /* [DEFORM OFF 2026-07-05] Same 4-state pattern as deform_lv[] in
      * td5_gameopts_value — see td5_damage_deform_enabled(). */
     static const char *const deform_lv[] = { "LOW", "NORMAL", "HIGH", "OFF" };
-    static const char *const dynamics[]    = { "ARCADE", "SIMULATION" };
-    /* [ITEM CHAOS 2026-07-04] Power-ups are 3-state (0=OFF 1=CASUAL 2=CHAOS),
-     * same as td5_gameopts_value's powerups_lv[] and the arcade backend
-     * (td5_arcade.c). The RACE OPTIONS screen — reached from track-select in
-     * both single-player and MP split-screen setup — previously showed only a
-     * 2-state OFF/ON toggle, hiding CHAOS; mirror the full 3-state model here. */
-    static const char *const powerups_lv[] = { "OFF", "CASUAL", "CHAOS" };
+    /* [DAMAGE MERGE 2026-09-29] How much damage a car TAKES. Drives CarDamage
+     * (OFF = master off) and CarToughness (inverted: HIGH damage = LOW
+     * toughness). Replaces the old ON/OFF DAMAGE toggle + CAR TOUGHNESS row. */
+    static const char *const damage_lv[] = { "OFF", "LOW", "MEDIUM", "HIGH" };
+    /* [CATCHUP 2026-09-29] AI rubber-band strength, 0..3. The persisted store
+     * (td5_save catchup_assist) is a 0..9 int, so the levels drop straight into
+     * it with no save-format change; td5_ai_get_catchup_level() resolves the
+     * live value (INI/CLI override wins) and may legitimately report 4..9 from
+     * a power user's CatchupAssist, which the row clamps for display. */
+    static const char *const catchup_lv[] = { "OFF", "LOW", "MEDIUM", "HIGH" };
     /* [SP DRAG DISTANCE 2026-07-23] mirrors k_cfg_draglen[] in td5_fe_race.c
      * (the MP drag DISTANCE row): 0=SHORT 1=MEDIUM 2=LONG 3=EPIC. */
     static const char *const draglen_lv[] = { "SHORT", "MEDIUM", "LONG", "EPIC" };
@@ -7009,25 +7064,22 @@ void td5_raceopts_value(int idx, char *out, size_t out_sz) {
             v = traffic_vol[t]; break;
         case RO_POLICE:      v = on_off[s_game_option_cops & 1]; break;
         case RO_DIFFICULTY:  v = difficulty[((s_race_difficulty % 3) + 3) % 3]; break;
-        case RO_AI_MODEL:    /* [AI DRIVER MODEL] CLASSIC/SMART/DRIVER (untranslated technical label) */
+        case RO_AI_MODEL:    /* [AI MODEL] CLASSIC/SMART (untranslated technical label) */
             snprintf(out, out_sz, "%s",
-                     td5_ai_driver_mode_name(((s_game_option_ai_model % 3) + 3) % 3));
+                     td5_ai_driver_mode_name(s_game_option_ai_model >= 1 ? 1 : 0));
             return;
-        case RO_CATCHUP:     v = on_off[td5_save_get_catchup_assist() > 0 ? 1 : 0]; break;
-        case RO_DYNAMICS:    v = dynamics[s_game_option_dynamics & 1]; break;
+        case RO_CATCHUP:
+            t = td5_save_get_catchup_assist(); if (t < 0) t = 0; if (t > 3) t = 3;
+            v = catchup_lv[t]; break;
         case RO_CHECKPOINTS: v = on_off[s_game_option_checkpoint_timers & 1]; break;
-        case RO_POWERUPS:
-            t = s_game_option_powerups; if (t < 0) t = 0; if (t > 2) t = 2;
-            v = powerups_lv[t]; break;
-        case RO_TOUGHNESS:
-            t = s_game_option_car_toughness; if (t < 0) t = 0; if (t > 3) t = 3;
-            v = toughness_lv[t]; break;
         case RO_DEFORM:
             t = s_game_option_car_deform; if (t < 0) t = 0; if (t > 3) t = 3;
             v = deform_lv[t]; break;
         /* [RACE OPTIONS CONSOLIDATION 2026-07-21] absorbed GAME OPTIONS rows. */
         case RO_COLLISIONS:  v = on_off[s_game_option_collisions & 1]; break;
-        case RO_DAMAGE:      v = on_off[s_game_option_car_damage & 1]; break;
+        case RO_DAMAGE:
+            t = s_game_option_car_damage; if (t < 0) t = 0; if (t > 3) t = 3;
+            v = damage_lv[t]; break;
         case RO_LANEASSIST:  v = on_off[s_game_option_laneassist & 1]; break;
         case RO_TUTORIAL:    v = on_off[s_game_option_tutorial & 1]; break;
         /* [QUICK RACE DEBUG 2026-07-21] Quick-Race-exclusive rows. */
@@ -7094,26 +7146,18 @@ void td5_raceopts_cycle(int idx, int delta) {
             TD5_LOG_I(LOG_TAG, "raceopts: DISTANCE -> %d (0=SHORT 1=MEDIUM 2=LONG 3=EPIC)",
                       g_td5.ini.drag_length);
             break;
-        case RO_CATCHUP: {   /* [CATCHUP 2026-07-21] MP AI rubber-band on/off */
+        case RO_CATCHUP: {   /* [CATCHUP 2026-09-29] OFF(0) -> LOW -> MEDIUM -> HIGH(3) */
             int cur = td5_save_get_catchup_assist();
-            td5_save_set_catchup_assist(cur > 0 ? 0 : 1);
+            if (cur < 0) cur = 0;
+            if (cur > 3) cur = 3;          /* clamp a power-user 4..9 into the row */
+            cur += delta;
+            if (cur < 0) cur = 3;
+            if (cur > 3) cur = 0;
+            td5_save_set_catchup_assist(cur);
+            TD5_LOG_I(LOG_TAG, "raceopts: CATCHUP -> %d (0=OFF 1=LOW 2=MEDIUM 3=HIGH)", cur);
             break;
         }
-        case RO_DYNAMICS:    s_game_option_dynamics ^= 1; break;
         case RO_CHECKPOINTS: s_game_option_checkpoint_timers ^= 1; break;
-        case RO_POWERUPS:    /* [ITEM CHAOS] cycle 0=OFF -> 1=CASUAL -> 2=CHAOS */
-            s_game_option_powerups += delta;
-            if (s_game_option_powerups < 0) s_game_option_powerups = 2;
-            if (s_game_option_powerups > 2) s_game_option_powerups = 0;
-            TD5_LOG_I(LOG_TAG, "raceopts: POWER-UPS -> %d (0=OFF 1=CASUAL 2=CHAOS)",
-                      s_game_option_powerups);
-            break;
-        case RO_TOUGHNESS:
-            /* [TOUGHNESS OFF 2026-07-04] LOW(0) -> MEDIUM(1) -> HIGH(2) -> OFF(3). */
-            s_game_option_car_toughness += delta;
-            if (s_game_option_car_toughness < 0) s_game_option_car_toughness = 3;
-            if (s_game_option_car_toughness > 3) s_game_option_car_toughness = 0;
-            break;
         case RO_DEFORM:
             /* [DEFORM OFF 2026-07-05] LOW(0) -> NORMAL(1) -> HIGH(2) -> OFF(3). */
             s_game_option_car_deform += delta;
@@ -7121,13 +7165,18 @@ void td5_raceopts_cycle(int idx, int delta) {
             if (s_game_option_car_deform > 3) s_game_option_car_deform = 0;
             break;
         /* [RACE OPTIONS CONSOLIDATION 2026-07-21] absorbed GAME OPTIONS rows. */
-        case RO_AI_MODEL:    /* [AI DRIVER MODEL] CLASSIC(0) -> SMART(1) -> DRIVER(2) -> wrap */
+        case RO_AI_MODEL:    /* [AI MODEL 2026-09-29] CLASSIC(0) <-> SMART(1) */
             s_game_option_ai_model += delta;
-            if (s_game_option_ai_model < 0) s_game_option_ai_model = 2;
-            if (s_game_option_ai_model > 2) s_game_option_ai_model = 0;
+            if (s_game_option_ai_model < 0) s_game_option_ai_model = 1;
+            if (s_game_option_ai_model > 1) s_game_option_ai_model = 0;
             break;
         case RO_COLLISIONS:  s_game_option_collisions ^= 1; break;
-        case RO_DAMAGE:      s_game_option_car_damage ^= 1; break;
+        case RO_DAMAGE:
+            /* [DAMAGE MERGE 2026-09-29] OFF(0) -> LOW(1) -> MEDIUM(2) -> HIGH(3). */
+            s_game_option_car_damage += delta;
+            if (s_game_option_car_damage < 0) s_game_option_car_damage = 3;
+            if (s_game_option_car_damage > 3) s_game_option_car_damage = 0;
+            break;
         case RO_LANEASSIST:  s_game_option_laneassist ^= 1; break;
         case RO_TUTORIAL:    s_game_option_tutorial ^= 1; break;
         /* [QUICK RACE DEBUG 2026-07-21] Quick-Race-exclusive rows. */
@@ -7235,10 +7284,12 @@ int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
                           * [SP DRAG OPPONENTS 2026-08-19] SP drag DOES get the row:
                           * the opponent count also defines the LANE count, since
                           * td5_game_drag_field_size() sizes the SP field (and the
-                          * road widener) as 1 human + num_ai_opponents. MP drag
-                          * stays excluded — it has no AI at all (its field is the
-                          * human count + its own EXTRA LANES row on screen 36). */
-        return !((c->is_drag && c->is_mp) || c->is_cup || tb || c->is_time_trial);
+                          * road widener) as 1 human + num_ai_opponents.
+                          * [MP DRAG OPPONENTS 2026-09-29] MP drag now gets it too:
+                          * the drag field is humans + AI opponents + EXTRA LANES,
+                          * so a 2-human lobby can add AI cars to fill the strip
+                          * (td5_game.c no longer force-zeroes the AI count). */
+        return !(c->is_cup || tb || c->is_time_trial);
     case RO_TRAFFIC:     /* [SP DRAG TRAFFIC 2026-08-19] MP drag owns its traffic
                           * switch on the MP mode-config screen (36), so it stays
                           * hidden there — but SP drag had NO traffic control
@@ -7260,7 +7311,11 @@ int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
         if (c->is_cup) return 0;                     /* cup fixes difficulty per series */
         if (tb) return 0;
         if (c->is_mp && c->is_cop_chase) return 0;   /* MP cop chase */
-        if (c->is_drag) return 1;                    /* drag: always shown */
+        /* [MP DRAG 2026-09-29] Drag keeps the row on screen at 0 opponents and
+         * greys it instead (td5_raceopts_row_disabled) — a drag lobby can now
+         * set AI OPPONENTS to 0, and a row that silently disappears reads as a
+         * bug. Every other mode keeps the original hide-at-zero rule. */
+        if (c->is_drag) return 1;
         return c->opponents > 0;                     /* hidden at 0 opponents */
     case RO_DISTANCE:    /* [SP DRAG DISTANCE 2026-07-23] drag length preset. SP
                           * reads g_td5.ini.drag_length; MP drag has its own
@@ -7268,13 +7323,9 @@ int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
         return c->is_drag && !c->is_mp;
     case RO_CATCHUP:     /* [CATCHUP 2026-07-21] MP-only AI rubber-band assist */
         return c->is_mp;
-    case RO_DYNAMICS:
-        return 1;                                    /* every mode */
     case RO_CHECKPOINTS: /* checkpoint TIMERS: SP point-to-point only (off in MP,
                           * cop chase, drag — see td5_game.c ~2380) */
         return !c->is_mp && !c->is_cop_chase && !c->is_drag;
-    case RO_POWERUPS:    /* road power-ups everywhere but drag */
-        return !c->is_drag;
     case RO_AI_MODEL:    /* opponent-AI mode — only meaningful when the race
                           * actually has AI opponents. [AI MODEL OPP-GATE
                           * 2026-09-12] Hide it whenever the effective opponent
@@ -7288,7 +7339,6 @@ int td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *c) {
         if (c->is_cup) return 1;
         if (tb) return 0;
         return c->opponents > 0;
-    case RO_TOUGHNESS:
     case RO_DEFORM:
     case RO_COLLISIONS:
     case RO_DAMAGE:
@@ -7330,6 +7380,18 @@ int td5_raceopts_build_rows(const TD5_RaceOptsCtx *c, int *out) {
     return n;
 }
 
+/* [MP DRAG 2026-09-29] Rows that are shown but not adjustable in this mode. The
+ * button gets `disabled` in build_page, which the shared frontend already
+ * honours: grey caption, skipped by keyboard/pad nav and by the mouse hit-test,
+ * so the value can never be cycled while greyed. */
+int td5_raceopts_row_disabled(int ro, const TD5_RaceOptsCtx *c) {
+    /* DIFFICULTY sets how hard the AI OPPONENTS drive, so with none on the grid
+     * it has nothing to act on. Only drag keeps the row visible at 0 (every
+     * other mode hides it in row_available), so only drag can grey it. */
+    if (ro == RO_DIFFICULTY && c->is_drag && c->opponents <= 0) return 1;
+    return 0;
+}
+
 int td5_raceopts_page(void)      { return s_ro_page; }
 int td5_raceopts_pages(void)     { return s_ro_pages; }
 int td5_raceopts_row_count(void) { return s_ro_row_count; }
@@ -7364,10 +7426,15 @@ void td5_raceopts_build_page(void) {
     if (end > s_ro_total) end = s_ro_total;
     s_ro_row_count = end - start;
 
-    for (r = 0; r < s_ro_row_count; r++)
-        frontend_create_button(td5_raceopts_label(s_ro_rows[start + r]),
-                               RO_ROW_X, RO_ROW_Y0 + r * RO_ROW_STEP,
-                               RO_ROW_W, RO_ROW_H);
+    for (r = 0; r < s_ro_row_count; r++) {
+        int ro  = s_ro_rows[start + r];
+        int bid = frontend_create_button(td5_raceopts_label(ro),
+                                         RO_ROW_X, RO_ROW_Y0 + r * RO_ROW_STEP,
+                                         RO_ROW_W, RO_ROW_H);
+        /* [MP DRAG 2026-09-29] Grey a shown-but-inert row (see row_disabled). */
+        if (bid >= 0 && td5_raceopts_row_disabled(ro, &s_ro_ctx))
+            s_buttons[bid].disabled = 1;
+    }
 
     /* OK / BACK pinned at the bottom (both RO_CTL_W wide, same as PREV/NEXT). */
     s_ro_ok_btn   = frontend_create_button(SNK_OkButTxt,   RO_ROW_X, RO_OKBACK_Y, RO_CTL_W, RO_ROW_H);
@@ -8081,7 +8148,8 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
          * slides out as its plain (grey) carpic and no TD6 paint bleeds into the
          * TD5 transition. TD6->TD6 switches still slide out painted. */
         int show_paint = (s_color_panel_visible || s_paint_active) &&
-                         frontend_car_paintable(actual_car);
+                         frontend_paint_overlay_visible(actual_car,
+                                                        (uint32_t)g_td5.ini.td6_paint_color);
         if (s_inner_state == 11) {
             /* Old car slides out to the right (state 11, ~433ms) — animPhase 0x0B: offset = counter*0x20.
              * On the very first frame(s) of state 11 the case-11 update that loads
@@ -8247,6 +8315,27 @@ static int frontend_parse_track_markers_json(const char *path,
             dst[slot].end_v   = (float)frontend_json_num(el, "end_v");
             dst[slot].circuit = (uint8_t)(cJSON_IsTrue(ci) ||
                 (cJSON_IsNumber(ci) && cJSON_GetNumberValue(ci) != 0.0));
+            /* [W3 2026-09-29] Optional "checkpoints": [{u,v,tu,tv}, ...]. Absent
+             * on a marker file generated before the ticks existed, which just
+             * means no ticks -- everything else parses exactly as before. */
+            {
+                const cJSON *cps = cJSON_GetObjectItemCaseSensitive(el, "checkpoints");
+                const cJSON *cp;
+                int n = 0;
+                dst[slot].cp_count = 0;
+                if (cJSON_IsArray(cps)) {
+                    cJSON_ArrayForEach(cp, cps) {
+                        if (n >= TD5_TRACK_CP_MAX) break;
+                        if (!cJSON_IsObject(cp)) continue;
+                        dst[slot].cp_u[n]  = (float)frontend_json_num(cp, "u");
+                        dst[slot].cp_v[n]  = (float)frontend_json_num(cp, "v");
+                        dst[slot].cp_tu[n] = (float)frontend_json_num(cp, "tu");
+                        dst[slot].cp_tv[n] = (float)frontend_json_num(cp, "tv");
+                        n++;
+                    }
+                    dst[slot].cp_count = (uint8_t)n;
+                }
+            }
             placed++;
         }
     }
@@ -8308,6 +8397,38 @@ void frontend_draw_marker_dot(float cx, float cy, float sx, float sy, int kind) 
     }
 }
 
+/* [W3 2026-09-29] Draw one CHECKPOINT tick on a track preview: a short white
+ * bar laid ACROSS the road at (cx,cy), i.e. perpendicular to the local tangent
+ * (tx,ty) given in screen px. The frontend has no line primitive (everything is
+ * an axis-aligned quad), so the bar is stamped as a row of small quads stepped
+ * along the normal -- at ~1 px spacing that reads as a solid diagonal line. A
+ * wider black pass goes down first so the tick stays legible over the red
+ * centerline, matching what frontend_draw_marker_dot does with its outline. */
+void frontend_draw_marker_tick(float cx, float cy, float tx, float ty,
+                               float sx, float sy) {
+    const float scale = (sx + sy) * 0.5f;
+    float half = 5.0f * scale;         /* tick half-length, screen px */
+    float nx, ny, m;
+    int pass, i, steps;
+
+    m = (float)sqrt((double)(tx * tx + ty * ty));
+    if (m < 1e-4f) { nx = 1.0f; ny = 0.0f; }   /* no usable tangent: horizontal */
+    else           { nx = -ty / m; ny = tx / m; }
+    if (half < 4.0f) half = 4.0f;
+    steps = (int)(half * 2.0f) + 1;    /* ~1 px per stamp along the bar */
+
+    for (pass = 0; pass < 2; pass++) {
+        const float w = (pass == 0) ? (3.0f * scale) : (1.5f * scale);
+        const uint32_t col = (pass == 0) ? 0xFF000000u : 0xFFFFFFFFu;
+        const float wq = (w < 1.5f) ? 1.5f : w;
+        for (i = 0; i <= steps; i++) {
+            const float t = -half + (2.0f * half) * (float)i / (float)steps;
+            fe_draw_quad(cx + nx * t - wq * 0.5f, cy + ny * t - wq * 0.5f,
+                         wq, wq, col, -1, 0, 0, 1, 1);
+        }
+    }
+}
+
 /* [RACE OPTIONS 2026-07-04] The dedicated RACE OPTIONS screen reuses the
  * track-select backdrop (inherited via set_screen). This overlay draws each
  * visible option row's value in the right column (x=350, clear of the centred
@@ -8325,9 +8446,13 @@ static void frontend_render_race_options_overlay(float sx, float sy) {
         int opt = td5_raceopts_row_option(r);
         if (opt < 0 || !s_buttons[r].active || s_buttons[r].hidden) continue;
         td5_raceopts_value(opt, vb, sizeof vb);
-        /* [LAYOUT 2026-07-21] value text left-justified at x=348 per guideline. */
+        /* [LAYOUT 2026-07-21] value text left-justified at x=348 per guideline.
+         * [MP DRAG 2026-09-29] A disabled row's value greys out with its caption
+         * (same 0xFF888888 the button-draw paths use) so the whole row reads as
+         * inert, not just the label. */
         fe_draw_text(348.0f * sx, (float)(s_buttons[r].y + 6) * sy, vb,
-                     0xFFFFFFFFu, sx * 0.8f, sy * 0.8f);
+                     s_buttons[r].disabled ? 0xFF888888u : 0xFFFFFFFFu,
+                     sx * 0.8f, sy * 0.8f);
     }
     /* [2026-07-21] "PAGE x / y" indicator (value column, aligned with the
      * PREV/NEXT row) when the row set spans more than one page. */
@@ -8440,6 +8565,21 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
                 float eu = bwd ? m->start_u : m->end_u;
                 float ev = bwd ? m->start_v : m->end_v;
                 td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+                /* [W3 2026-09-29] Checkpoint ticks first, so the start/finish
+                 * dots still composite on top where one sits on a checkpoint.
+                 * The stored tangent is in 152x224 image px; the panel scales
+                 * those axes by pw/152 and ph/224 independently (they differ on
+                 * a non-4:3 window), so scale before taking the perpendicular. */
+                {
+                    int ci2;
+                    for (ci2 = 0; ci2 < (int)m->cp_count; ci2++) {
+                        frontend_draw_marker_tick(bx + m->cp_u[ci2] * pw,
+                                                  by + m->cp_v[ci2] * ph,
+                                                  m->cp_tu[ci2] * pw / 152.0f,
+                                                  m->cp_tv[ci2] * ph / 224.0f,
+                                                  sx, sy);
+                    }
+                }
                 if (m->circuit) {
                     /* one start/finish dot; direction is forward-only for circuits */
                     frontend_draw_marker_dot(bx + m->start_u * pw, by + m->start_v * ph,
@@ -9978,8 +10118,13 @@ float td5_vui_host_badge(float x, float y, float h, float sx, float sy) {
      * solid gold face. */
     fe_draw_roundrect(xs, ys, wpx, hs, r, r, 1.6f * sx, 1.6f * sy,
                       0xFFE8B82Eu, 0xFFFFE9A0u, 0xFF7A5200u, 0xFFD89A14u, 1.0f);
-    /* 'HOST' centred, dark-on-gold for punch. */
-    float ty = ys + (hs - SMALLFONT_TTF_CAP * sy) * 0.5f;
+    /* 'HOST' centred, dark-on-gold for punch.
+     * [2026-09-29] fe_draw_small_text takes the glyph CELL top, not the cap
+     * top: the ink runs from y+(BASELINE-CAP) to y+BASELINE. Centring on the
+     * cap height alone left the label (BASELINE-CAP) px low inside the pill,
+     * so subtract that leading to put the INK band at the chip's centre. */
+    float ty = ys + (hs - SMALLFONT_TTF_CAP * sy) * 0.5f
+                  - (SMALLFONT_TTF_BASELINE - SMALLFONT_TTF_CAP) * sy;
     fe_draw_small_text(xs + (wpx - tw) * 0.5f, ty, label, 0xFF1A1000u, sx, sy);
     return wpx / sx;   /* virtual-px width */
 }
@@ -10544,8 +10689,11 @@ void td5_frontend_render_ui_rects(void) {
     case TD5_SCREEN_LIGHTING_OPTIONS:   /* [RT2 P8] per-row tier value text */
         frontend_render_lighting_options_overlay(sx, sy);
         break;
-    case TD5_SCREEN_PERFORMANCE_OPTIONS: /* [LOW-END PERF] per-row value text */
+    case TD5_SCREEN_PERFORMANCE_OPTIONS: /* [PERF PRESETS] preset-row value text */
         frontend_render_performance_options_overlay(sx, sy);
+        break;
+    case TD5_SCREEN_PERFORMANCE_CUSTOM: /* [PERF PRESETS] per-knob value text */
+        frontend_render_performance_custom_overlay(sx, sy);
         break;
     case TD5_SCREEN_AUTOTRACK_OPTIONS:  /* [R2 item 25] generator knob values */
         frontend_render_autotrack_options_overlay(sx, sy);
@@ -10748,13 +10896,15 @@ void td5_frontend_render_ui_rects(void) {
         }
     }
 
-    /* [item #7 2026-06-15] The car-/track-select randomize chips are painted by
-     * frontend_render_carsel_randomize_icon / frontend_render_trksel_randomize_icon
-     * (extern-declared with frontend_draw_randomize_icon up by the Quick Race
-     * widgets). They are called from inside the CAR_SELECTION / TRACK_SELECTION
-     * cases below — AFTER the per-screen button loop above — so the chip composites
-     * on TOP of the button frames (original BltFast z-order). Each wrapper self-
-     * skips when the control is off / not in icon form / the handle isn't live. */
+    /* [item #7 2026-06-15] The car-select randomize chip is painted by
+     * frontend_render_carsel_randomize_icon (extern-declared with
+     * frontend_draw_randomize_icon up by the Quick Race widgets). It is called
+     * from inside the CAR_SELECTION case below — AFTER the per-screen button loop
+     * above — so the chip composites on TOP of the button frames (original
+     * BltFast z-order). The wrapper self-skips when the control is off / not in
+     * icon form / the handle isn't live.
+     * [W3 2026-09-29] TRACK_SELECTION has no chip any more; its post-button pass
+     * draws the R / pad-X randomize HINT (frontend_render_trksel_hints) instead. */
 
     /* Option arrows drawn AFTER buttons so they render on top of the button fill.
      * Original BltFast compositing placed arrows on top of the pre-baked button surface. */
@@ -10850,10 +11000,12 @@ void td5_frontend_render_ui_rects(void) {
              * arrows; the original cycles slot 2's wheel/config scheme on key
              * press but never paints arrow glyphs over the stat panel.] */
             fe_draw_option_arrows(0, sx, sy);
-            /* PAINT row: TD5 cars cycle 4 paint schemes (◄► arrows); ported TD6
-             * cars pick a body COLOR instead — no arrows; the PAINT button toggles
-             * the color-swatch panel (drawn last so it overlays the preview). */
-            if (!frontend_car_is_td6(frontend_current_car_index()))
+            /* PAINT row: a car on the four fixed schemes cycles them (◄► arrows);
+             * a car on the free COLOR picker (ported TD6, or [TD5 CAR PAINT
+             * 2026-09-29] an original car with a paint bake) gets no arrows — its
+             * PAINT button toggles the color-swatch panel instead (drawn last so
+             * it overlays the preview). */
+            if (!frontend_car_paintable(frontend_current_car_index()))
                 fe_draw_option_arrows(1, sx, sy);
             frontend_render_td6_color_panel(sx, sy);
             /* [item #7] Randomize chip to the right of the Car selector. */
@@ -10862,12 +11014,12 @@ void td5_frontend_render_ui_rects(void) {
         case TD5_SCREEN_TRACK_SELECTION:
         case TD5_SCREEN_CUP_TRACK_SELECT:
             /* [RACE OPTIONS 2026-07-04] The main column carries only Track(0) +
-             * Laps(2) selectors (self-skip hidden) plus the randomize chip; every
-             * other option-row arrow moved onto the RACE OPTIONS screen. */
+             * Laps(2) selectors (self-skip hidden); every other option-row arrow
+             * moved onto the RACE OPTIONS screen. */
             fe_draw_option_arrows(0, sx, sy);   /* Track */
             fe_draw_option_arrows(2, sx, sy);   /* Laps (self-skips on P2P) */
-            /* [item #7] Randomize chip to the right of the Track selector. */
-            frontend_render_trksel_randomize_icon(sx, sy);
+            /* [W3 2026-09-29] "X / R = RANDOM" hint, bottom-right next to BACK. */
+            frontend_render_trksel_hints(sx, sy);
             break;
         case TD5_SCREEN_RACE_OPTIONS:
             /* [CONSOLIDATION 2026-07-21] ◄► arrows for each current-page option
@@ -10894,11 +11046,21 @@ void td5_frontend_render_ui_rects(void) {
             for (int lo_r = 0; lo_r < 10; lo_r++) fe_draw_option_arrows(lo_r, sx, sy);
             break;
         case TD5_SCREEN_PERFORMANCE_OPTIONS:
+            /* [PERF PRESETS 2026-09-29] ◄► on the two preset selector rows only.
+             * Row 0 (AUTO-SELECT) and the CUSTOM -> nav row are Enter actions and
+             * the last row is OK — none of those takes arrows. The row ids come
+             * from the screen itself so they cannot go stale (the classic
+             * creation-vs-rendering gap). */
+            { int pp_r, pp_first = td5_performance_first_selector_row();
+              int pp_last = td5_performance_last_selector_row();
+              for (pp_r = pp_first; pp_r <= pp_last; pp_r++) fe_draw_option_arrows(pp_r, sx, sy); }
+            break;
+        case TD5_SCREEN_PERFORMANCE_CUSTOM:
             /* [LOW-END PERF] ◄► on the selector rows only. Row 0 (LOW-END PRESET)
              * is an Enter action and the last row is OK — neither takes arrows.
-             * Bound comes from td5_performance_opts_row_count() so it can't go
-             * stale against PO_ROWS (the creation-vs-rendering gap). */
-            { int po_r, po_n = td5_performance_opts_row_count();
+             * Bound comes from td5_performance_custom_row_count() so it can't go
+             * stale against PC_ROWS (the creation-vs-rendering gap). */
+            { int po_r, po_n = td5_performance_custom_row_count();
               for (po_r = 1; po_r < po_n; po_r++) fe_draw_option_arrows(po_r, sx, sy); }
             break;
         case TD5_SCREEN_AUTOTRACK_OPTIONS:
@@ -11282,8 +11444,12 @@ int td5_frontend_init(void) {
     s_selected_config = 0;
     s_color_panel_visible = 0;   /* TD6 color panel starts closed */
     /* s_paint_active persists across car-select entries (e.g. returning from a
-     * race) so a chosen colour stays applied; it starts 0 (neutral) only at
-     * launch and is set when the player first confirms a paint colour. */
+     * race) so a chosen colour stays applied; it is set when the player first
+     * confirms a paint colour. [TD5 CAR PAINT 2026-09-29] At launch it comes
+     * from the persisted [CarSelection] PaintActive, so a colour chosen in an
+     * earlier session shows on the preview — which is what the race already
+     * renders from the same saved colour. */
+    if (g_td5.ini.paint_active) s_paint_active = 1;
     /* [GEARBOX INI REMOVAL 2026-08-10] The transmission is now a car-select-only
        choice (no INI key). Default AUTO every time you enter the grid; the menu
        toggle is authoritative thereafter (td5_input.c). */
@@ -11333,15 +11499,11 @@ int td5_frontend_init(void) {
         s_game_option_traffic           = g_td5.ini.traffic;
         s_game_option_cops              = g_td5.ini.cops;
         s_game_option_difficulty        = g_td5.ini.difficulty;
-        s_game_option_dynamics          = g_td5.ini.dynamics;
-        td5_physics_set_dynamics(g_td5.ini.dynamics);
         s_game_option_collisions        = g_td5.ini.collisions;
-        s_game_option_powerups          = g_td5.ini.powerups;
-        s_game_option_car_toughness     = g_td5.ini.car_damage_toughness;
         s_game_option_car_deform        = g_td5.ini.car_damage_deform;
-        s_game_option_car_damage        = (g_td5.ini.car_damage != 0);
+        s_game_option_car_damage        = raceopts_damage_level_from_ini();
         s_game_option_laneassist        = g_td5.ini.lane_assist;
-        s_game_option_ai_model          = g_td5.ini.ai_model;
+        s_game_option_ai_model          = (g_td5.ini.ai_model >= 1) ? 1 : 0;
         s_game_option_tutorial          = (g_td5.ini.tutorial_overlay > 0) ? 1 : 0;
         s_selected_game_type = g_td5.ini.default_game_type;
     }

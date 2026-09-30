@@ -39,7 +39,6 @@
 #include "td5_race_state.h"
 #include "td5_fp.h"         /* FP_TRUNC — 8.8 speed display truncate */
 #include "td5_damage.h"     /* TD5_DAMAGE_ACTOR_MAGIC (gates damage field reads) */
-#include "td5_arcade.h"     /* power-up queries (read-only) */
 #include "td5_tutorial.h"   /* tutorial-overlay-active query (read-only) */
 #include "td5_ai.h"         /* traffic-cop pursuit query (read-only) */
 #include "../../../re/include/td5_actor_struct.h"   /* full TD5_Actor (position/speed/damage) */
@@ -109,7 +108,7 @@ static int      s_action_frames[TD5_MAX_RACER_SLOTS][32];
 #define CS_UNSET INT_MIN
 typedef struct {
     int track, car, game_type, laps, opponents, players;
-    int traffic, cops, dynamics, reverse, spectate, player_is_ai, auto_throttle;
+    int traffic, cops, reverse, spectate, player_is_ai, auto_throttle;
 } CtrlScenario;
 
 static int          s_pending_launch;
@@ -139,7 +138,6 @@ static void cs_from_json(CtrlScenario *s, cJSON *a)
     CS_GET(players, "players")
     CS_GET(traffic, "traffic")
     CS_GET(cops, "cops")
-    CS_GET(dynamics, "dynamics")
     CS_GET(reverse, "reverse")
     CS_GET(spectate, "spectate")
     CS_GET(player_is_ai, "player_is_ai")
@@ -161,7 +159,6 @@ static void cs_apply(const CtrlScenario *s)
     if (s->players      != CS_UNSET) g_td5.ini.default_players   = s->players;
     if (s->traffic      != CS_UNSET) g_td5.ini.traffic           = s->traffic;
     if (s->cops         != CS_UNSET) g_td5.ini.cops              = s->cops;
-    if (s->dynamics     != CS_UNSET) g_td5.ini.dynamics          = s->dynamics;
     if (s->reverse      != CS_UNSET) g_td5.ini.default_reverse   = s->reverse ? 1 : 0;
     if (s->spectate     != CS_UNSET) g_td5.ini.spectate_screens  = s->spectate;
     if (s->player_is_ai != CS_UNSET) g_td5.ini.player_is_ai      = s->player_is_ai;
@@ -199,7 +196,6 @@ static const CtrlIntParam k_params[] = {
     { "default_players",   &g_td5.ini.default_players,   -1,  6,  1 },
     { "traffic",           &g_td5.ini.traffic,            0,  4,  1 },
     { "cops",              &g_td5.ini.cops,               0,  1,  1 },
-    { "dynamics",          &g_td5.ini.dynamics,           0,  1,  1 },
     { "default_reverse",   &g_td5.ini.default_reverse,    0,  1,  1 },
     { "spectate_screens",  &g_td5.ini.spectate_screens,   0,  5,  1 },
     { "player_is_ai",      &g_td5.ini.player_is_ai,       0,  1,  1 },
@@ -270,7 +266,6 @@ static void ctrl_exec(cJSON *req, cJSON *reply)
             int racers_wanted = 1;
             int num_actors = td5_game_get_total_actor_count();
             int player_slot = td5_game_get_player_slot(0);
-            int arcade = td5_arcade_mode_active();
             cJSON *race = cJSON_CreateObject();
             cJSON *v = j_args ? cJSON_GetObjectItemCaseSensitive(j_args, "racers") : NULL;
             if (v && cJSON_IsBool(v)) racers_wanted = cJSON_IsTrue(v) ? 1 : 0;
@@ -289,7 +284,6 @@ static void ctrl_exec(cJSON *req, cJSON *reply)
             cJSON_AddBoolToObject(race, "wanted_mode",   td5_game_is_wanted_mode() ? 1 : 0);
             cJSON_AddNumberToObject(race, "cop_actor",   td5_game_get_cop_actor_index());
             cJSON_AddBoolToObject(race, "battle",        td5_game_battle_mode_active() ? 1 : 0);
-            cJSON_AddBoolToObject(race, "arcade_active", arcade ? 1 : 0);
             cJSON_AddNumberToObject(race, "victory_position", td5_game_get_victory_position());
             /* Drag-strip config (only meaningful in a drag race) so a scenario
              * can verify TD5RE_DRAG_LENGTH_LEVEL lengthens the strip WITHOUT
@@ -339,10 +333,6 @@ static void ctrl_exec(cJSON *req, cJSON *reply)
                     if (td5_game_is_wanted_mode()) {
                         cJSON_AddBoolToObject(r, "is_cop",     td5_game_cop_chase_is_cop(slot) ? 1 : 0);
                         cJSON_AddBoolToObject(r, "is_suspect", td5_game_cop_chase_is_suspect(slot) ? 1 : 0);
-                    }
-                    if (arcade) {
-                        cJSON_AddNumberToObject(r, "arcade_effect", td5_arcade_active_effect(slot));
-                        cJSON_AddNumberToObject(r, "arcade_frames", td5_arcade_active_frames(slot));
                     }
                     cJSON_AddItemToArray(arr, r);
                 }

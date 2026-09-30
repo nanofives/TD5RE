@@ -281,11 +281,22 @@ void frontend_init_race_schedule(void) {
          * through to the legacy fill (TD5_LEGACY_RACE_SLOTS - humans = 5) and the
          * OPPONENTS row the user just set was silently discarded. Scoped to drag so
          * no other pre-launch RACE OPTIONS path changes behaviour. */
+        /* [MP DRAG OPPONENTS 2026-09-29] RACE_OPTIONS is also the pre-launch step
+         * for MP DRAG (no track-select), so honour the AI OPPONENTS row there
+         * too — the row is now shown for MP drag. */
         if (s_current_screen == TD5_SCREEN_QUICK_RACE ||
             s_current_screen == TD5_SCREEN_TRACK_SELECTION ||
             (s_current_screen == TD5_SCREEN_RACE_OPTIONS && s_selected_game_type == 9) ||
+            (s_current_screen == TD5_SCREEN_RACE_OPTIONS &&
+             g_td5.mp_mode_config.mode == TD5_MP_MODE_DRAG_RACE) ||
             (s_current_screen == TD5_SCREEN_RACE_RESULTS && s_selected_game_type == 0))
             ai = s_num_ai_opponents;
+        /* [MP OPPONENTS DEFAULT 0 2026-09-29] A multiplayer launch that never
+         * passed an opponents control defaults to NO AI: multiplayer is
+         * human-vs-human unless the AI OPPONENTS row asks for rivals. Single
+         * player keeps the legacy 5-AI fill (cups override it downstream). */
+        else if (s_mp_flow || s_launching_net_race)
+            ai = 0;
         else
             ai = TD5_LEGACY_RACE_SLOTS - humans;
         if (ai < 0) ai = 0;
@@ -529,8 +540,9 @@ void frontend_init_race_schedule(void) {
             s_selected_car  = s_mp_player_car[0];
             g_td5.car_index = s_mp_player_car[0];
         }
-        /* Each human slot is painted with that player's chosen TD6 colour (no-op
-         * for TD5 cars, which have no carmask). -1 = leave the default. */
+        /* Each human slot is painted with that player's chosen colour — ported
+         * TD6 cars, and [TD5 CAR PAINT 2026-09-29] original cars that have a
+         * paint bake. No-op for a car with neither. -1 = leave the default. */
         td5_asset_set_human_td6_color(0, s_mp_player_color[0]);
         td5_hud_set_player_identity(0, s_mp_player_name[0], (uint32_t)s_mp_player_accent[0]);
         for (i = 1; i < eff_humans && i < TD5_MAX_RACER_SLOTS; i++) {
@@ -1182,7 +1194,6 @@ static int mp_carsel_two_col(float pane_w, float pane_h) {
 static void mp_simul_draw_pane_car(int p, float ax, float ay, float aw, float ah,
                                    float sx, float sy) {
     int car = s_mp_player_car[p];
-    int td6 = frontend_car_is_td6(car);
     float ar = 408.0f / 280.0f;
     float dw = aw, dh = aw / ar, dx, dy;
     if (dh > ah) { dh = ah; dw = ah * ar; }
@@ -1190,7 +1201,8 @@ static void mp_simul_draw_pane_car(int p, float ax, float ay, float aw, float ah
     dy = ay + (ah - dh) * 0.5f;
     if (s_mp_pane_preview[p] > 0)
         fe_draw_surface_rect(s_mp_pane_preview[p], dx * sx, dy * sy, dw * sx, dh * sy, 0xFFFFFFFF);
-    if (td6 && frontend_car_paintable(car) && s_mp_pane_overlay[p] > 0)
+    if (frontend_paint_overlay_visible(car, (uint32_t)s_mp_player_color[p]) &&
+        s_mp_pane_overlay[p] > 0)
         fe_draw_surface_rect(s_mp_pane_overlay[p], dx * sx, dy * sy, dw * sx, dh * sy,
                              frontend_rgb_to_bgra((uint32_t)s_mp_player_color[p]));
 }
@@ -1205,7 +1217,6 @@ static void mp_simul_draw_pane_car(int p, float ax, float ay, float aw, float ah
 static void mp_simul_draw_pane_button(int p, int which, float bx, float by,
                                       float bw, float bh, float sx, float sy) {
     int car = s_mp_player_car[p];
-    int td6 = frontend_car_is_td6(car);
     int focus = (s_mp_pane_btn[p] == which);
     uint32_t pcol = ((uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu) | 0xFF000000u;
     switch (which) {
@@ -1213,10 +1224,13 @@ static void mp_simul_draw_pane_button(int p, int which, float bx, float by,
         mp_simul_draw_btn(bx, by, bw, bh, TR("CAR"), focus, pcol, 1, NULL, -1, sx, sy);
         break;
     case MP_BTN_PAINT:
-        if (td6 && frontend_car_paintable(car))
+        /* Colour swatch for any car with the free picker (ported TD6, or an
+         * original car with a paint bake); ◄► arrows for the four fixed schemes;
+         * "-" when the car has no paint choice at all. */
+        if (frontend_car_paintable(car))
             mp_simul_draw_btn(bx, by, bw, bh, TR("PAINT"), focus, pcol, 1, NULL,
                               s_mp_player_color[p], sx, sy);
-        else if (!td6 && frontend_car_has_paint(car))
+        else if (frontend_car_has_paint(car))
             mp_simul_draw_btn(bx, by, bw, bh, TR("PAINT"), focus, pcol, 1, NULL, -1, sx, sy);
         else
             mp_simul_draw_btn(bx, by, bw, bh, TR("PAINT"), focus, pcol, 0, "-", -1, sx, sy);
@@ -1244,18 +1258,26 @@ static void mp_draw_pane_name_banner(int p, float px, float pyr, float pane_w,
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     fe_draw_quad((px + 3) * sx, (pyr + 3) * sy, (pane_w - 6) * sx, 16.0f * sy,
                  rgb | 0xD0000000u, -1, 0, 0, 1, 1);
-    if (p == 0) {
-        float badge_w = td5_vui_host_badge(px + 6.0f, pyr + 4.5f, 13.0f, sx, sy);
-        float name_l = px + 6.0f + badge_w + 5.0f;   /* reserve the badge column */
-        float name_r = px + pane_w - 3.0f;
-        mp_simul_small_centered_fit((name_l + name_r) * 0.5f * sx, (pyr + 6) * sy, buf,
-                                    0xFF000000u, sx, sy, (name_r - name_l) * sx);
-        { static int s_logged_host_badge = 0;
-          if (!s_logged_host_badge) { s_logged_host_badge = 1;
-              TD5_LOG_I(LOG_TAG, "MP setup/carsel: drew HOST badge on slot 0 (name='%s')", buf); } }
-    } else {
+    /* [BANNER CENTRING 2026-09-29] The name is ALWAYS centred on the pane
+     * centre `cx`, for every slot. Slot 0 used to be re-centred inside the
+     * band to the RIGHT of the HOST badge, so the host's name sat visibly
+     * off-centre relative to every other pane in the split. The badge is now
+     * simply overlaid at the banner's left edge; the name keeps the full pane
+     * width minus the badge column on BOTH sides as its fit budget, so a long
+     * name shrinks instead of sliding under the badge. */
+    {
+        float fit_w = pane_w - 8.0f;
+        if (p == 0) {
+            float badge_w = td5_vui_host_badge(px + 6.0f, pyr + 4.5f, 13.0f, sx, sy);
+            float reserve = badge_w + 5.0f;          /* symmetric: keep the name clear of it */
+            fit_w = pane_w - 8.0f - 2.0f * reserve;
+            if (fit_w < 24.0f) fit_w = 24.0f;
+            { static int s_logged_host_badge = 0;
+              if (!s_logged_host_badge) { s_logged_host_badge = 1;
+                  TD5_LOG_I(LOG_TAG, "MP setup/carsel: drew HOST badge on slot 0 (name='%s')", buf); } }
+        }
         mp_simul_small_centered_fit(cx * sx, (pyr + 6) * sy, buf, 0xFF000000u, sx, sy,
-                                    (pane_w - 8.0f) * sx);
+                                    fit_w * sx);
     }
 }
 

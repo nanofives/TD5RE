@@ -245,6 +245,17 @@ void Backend_RequestCapture(void);
 int  Backend_GetCapture(unsigned char **px, int *w, int *h);
 void Backend_CaptureIfRequested(void);  /* call before every Present */
 
+/* [PAUSE RENDER CACHE 2026-09-29] Freeze-frame reuse while the sim is frozen
+ * (pause menu). Capture copies the CURRENT swapchain backbuffer into a private
+ * texture; Blit paints it back over the whole RT on later frames so the caller
+ * can skip the entire world/RT/deferred render and only redraw the menu on top.
+ * Capture must be called AFTER the world+HUD of the frame you want to freeze and
+ * BEFORE the menu overlay; Blit returns 0 when no snapshot is held (caller must
+ * then render normally). Invalidate drops it (resolution change / unpause). */
+void Backend_SceneSnapshotCapture(void);
+int  Backend_SceneSnapshotBlit(void);
+void Backend_SceneSnapshotInvalidate(void);
+
 /* Render state management */
 void Backend_ApplyStateCache(void);  /* Bind D3D11 state objects from cache */
 void Backend_SelectPixelShader(void); /* Choose PS based on texblend + alpha + tex format */

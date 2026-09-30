@@ -24,6 +24,7 @@
 #include <windows.h>
 #include <dinput.h>
 #include <d3d11.h>
+#include <d3d12.h>   /* [AUTO PERF TIERS] td5_plat_dxr_probe: OPTIONS5.RaytracingTier */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -151,6 +152,54 @@ int td5_plat_gpu_probe(unsigned *vendor_id, unsigned *device_id,
     IDXGIFactory1_Release(f);
     return ok;
 }
+
+/* [AUTO PERF TIERS 2026-09-29] See td5_platform.h. Creates a throwaway D3D12
+ * device on the default adapter purely to read OPTIONS5.RaytracingTier, then
+ * releases it. Done via GetProcAddress so a machine with no d3d12.dll (or a
+ * pre-1809 OS whose CheckFeatureSupport rejects OPTIONS5) reports 0 instead of
+ * failing to start. */
+int td5_plat_dxr_probe(void)
+{
+    typedef HRESULT (WINAPI *PFN_D3D12CREATEDEVICE)(IUnknown *, D3D_FEATURE_LEVEL,
+                                                    REFIID, void **);
+    HMODULE lib;
+    PFN_D3D12CREATEDEVICE create;
+    ID3D12Device *dev = NULL;
+    D3D12_FEATURE_DATA_D3D12_OPTIONS5 o5;
+    int dxr = 0;
+
+    lib = LoadLibraryA("d3d12.dll");
+    if (!lib) return 0;
+    create = (PFN_D3D12CREATEDEVICE)(void *)GetProcAddress(lib, "D3D12CreateDevice");
+    if (create &&
+        SUCCEEDED(create(NULL, D3D_FEATURE_LEVEL_11_0, &IID_ID3D12Device, (void **)&dev)) && dev) {
+        ZeroMemory(&o5, sizeof(o5));
+        if (SUCCEEDED(ID3D12Device_CheckFeatureSupport(dev, D3D12_FEATURE_D3D12_OPTIONS5,
+                                                       &o5, sizeof(o5))))
+            dxr = (o5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_0) ? 1 : 0;
+        ID3D12Device_Release(dev);
+    }
+    FreeLibrary(lib);
+    return dxr;
+}
+
+/* [AUTO PERF TIERS 2026-09-29] See td5_platform.h. */
+int td5_plat_cpu_logical_cores(void)
+{
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return (si.dwNumberOfProcessors > 0) ? (int)si.dwNumberOfProcessors : 1;
+}
+
+/* [PAUSE RENDER CACHE 2026-09-29] See td5_platform.h. Read by the frame-cap
+ * block in td5_plat_present below. */
+static int s_idle_frame_cap = 0;
+void td5_plat_set_idle_frame_cap(int fps) { s_idle_frame_cap = (fps > 0) ? fps : 0; }
+
+/* [PAUSE RENDER CACHE 2026-09-29] See td5_platform.h. */
+void td5_plat_scene_snapshot_capture(void)    { Backend_SceneSnapshotCapture(); }
+int  td5_plat_scene_snapshot_blit(void)       { return Backend_SceneSnapshotBlit(); }
+void td5_plat_scene_snapshot_invalidate(void) { Backend_SceneSnapshotInvalidate(); }
 
 void td5_plat_set_os_cursor_visible(int visible) { s_os_cursor_show = visible ? 1 : 0; }
 
@@ -775,6 +824,7 @@ void td5_plat_present(int vsync)
         static int s_cap_fps = -1;            /* -1 = unread env */
         static uint64_t s_cap_last_us = 0;
         int eff_cap;
+        int pace_even_with_vsync = 0;
         if (s_cap_fps < 0) {
             const char *e = getenv("TD5RE_FRAME_CAP");
             s_cap_fps = (e && e[0]) ? atoi(e) : 144;
@@ -785,7 +835,18 @@ void td5_plat_present(int vsync)
             s_recover_ease_frames--;
             if (eff_cap == 0 || eff_cap > 60) eff_cap = 60;
         }
-        if (eff_cap > 0 && !(vsync && g_backend.vsync)) {
+        /* [PAUSE RENDER CACHE 2026-09-29] The idle ceiling (paused race / static
+         * menu) is the tighter of the two AND overrides the "vsync already paces
+         * it" skip below: at 60 Hz vsync a paused race still redraws 60 unchanged
+         * frames/second, which is exactly the GPU burn this is here to stop. */
+        {
+            int idle = s_idle_frame_cap;
+            if (idle > 0) {
+                if (eff_cap == 0 || idle < eff_cap) eff_cap = idle;
+                pace_even_with_vsync = 1;
+            }
+        }
+        if (eff_cap > 0 && (pace_even_with_vsync || !(vsync && g_backend.vsync))) {
             uint64_t min_dt = 1000000ULL / (uint64_t)eff_cap;
             uint64_t now = td5_plat_time_us();
             if (s_cap_last_us != 0 && now > s_cap_last_us &&

@@ -19,7 +19,6 @@
 #include "td5_input.h"    /* td5_input_ff_collision (wall/prop impact FF) */
 #include "td5_vfx.h"      /* td5_vfx_queue_prop_break (TD6 prop debris) */
 #include "td5_race_state.h"  /* [LAYERING 2026-07-06] read-only race queries (was td5_game.h) */
-#include "td5_arcade.h"   /* arcade collision mult / ghost / wrecking-ball / launch */
 #include "td5_damage.h"   /* [CAR DAMAGE] health from impacts, knockout freeze, handling penalty */
 #include "td5_laneassist.h" /* optional lane-assist steering aid (port-only, default OFF) */
 #include "td5_platform.h"
@@ -893,24 +892,6 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
         }
     }
 
-    /* [ARCADE NITRO 2026-06-27] While a racer is boosting (NITRO power-up active)
-     * scale its drive force by the arcade acceleration multiplier (default 2.5x).
-     * Applies to ANY racer slot that grabbed a NITRO box (human OR AI), so it is
-     * NOT gated on g_race_slot_state==1 like the MP block above — just on being a
-     * racer slot. ACCELERATION only: the per-car top-speed gate in the callers is
-     * untouched, so a boosting car builds speed harder but is not warped past its
-     * cap. 1.0 (no-op) outside arcade mode / when NITRO is inactive. Same
-     * biased-toward-zero signed >>8 idiom; same lockstep-deterministic basis. */
-    if (actor->slot_index >= 0 &&
-        actor->slot_index < g_traffic_slot_base &&
-        actor->slot_index < TD5_MAX_RACER_SLOTS) {
-        int32_t nmult = td5_arcade_slot_accel_q8((int)actor->slot_index);
-        if (nmult != 0x100) {
-            int64_t scaled = (int64_t)torque * (int64_t)nmult;
-            torque = (int32_t)((scaled + ((scaled >> 63) & 0xFF)) >> 8);
-        }
-    }
-
     /* [HARD CATCHUP item #13] Hard-difficulty AI catch-up: the complement of the
      * MP block above — scale an AI OPPONENT's drive force up when it is behind
      * the human player on Hard, so the field presses harder. Applies ONLY to AI
@@ -926,7 +907,14 @@ int32_t td5_physics_compute_drive_torque(TD5_Actor *actor)
         actor->slot_index < g_traffic_slot_base &&
         actor->slot_index < TD5_MAX_RACER_SLOTS &&
         g_race_slot_state[actor->slot_index] != 1) {
-        int32_t mult = td5_physics_hard_catchup_mult(actor->slot_index);
+        /* [CATCHUP LEVELS 2026-09-29] The RACE OPTIONS CATCHUP row now drives an
+         * AI-side catch-up as well, filled into the same s_mp_catchup_* arrays
+         * (AI slots, gap to the nearest human ahead). Prefer it when it is
+         * active and fall back to the Hard-difficulty assist otherwise, so the
+         * two never STACK on one car. */
+        int32_t mult = td5_physics_mp_catchup_mult(actor->slot_index);
+        if (mult == MP_CATCHUP_Q8_ONE)
+            mult = td5_physics_hard_catchup_mult(actor->slot_index);
         if (mult != MP_CATCHUP_Q8_ONE) {
             int64_t scaled = (int64_t)torque * (int64_t)mult;
             torque = (int32_t)((scaled + ((scaled >> 63) & 0xFF)) >> 8);
