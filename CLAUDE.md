@@ -176,6 +176,7 @@ comment — regenerate after adding/splitting modules with
 | `td5_track_parser.c` | MODELS.DAT parsing (S6 module split, see REFACTOR_PLAN.md) |
 | `td5_track_registry.c` | runtime registry for custom (user-built) tracks. |
 | `td5_geo.c` | GEO TRACK: real-world terrain source for the auto-track |
+| `td5_geo_roads.c` | GEO TRACK: real OSM road graph (ROADS.JSON) reader (PORT-ONLY) |
 | `td5_trackgen.c` | procedural (AUTO-GENERATED) track builder: spec, RNG, centerline, elevation, strip + routes, scenery orchestration, build/regenerate entry points (PORT-ONLY) |
 | `td5_tg_world.c` | auto-track WORLD: seeded heightfield (sea, coast, rivers, mountains, flats), sparse conform/occupancy overlay, terrain classes |
 | `td5_tg_road.c` | auto-track ROAD on the WORLD: terrain-steered centerline walk, structure table (bridge/tunnel by terrain, not by hash), grade-limited terrain-following elevation, road-bed conform |
