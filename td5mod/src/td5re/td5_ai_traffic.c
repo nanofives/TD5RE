@@ -2664,15 +2664,26 @@ static int trf_perplayer_cap_enabled(void)
  * ahead and 69% of samples with none at all -- the trailing AI keep the passed
  * cars alive, so their slots never return to the pool to re-spawn in front of a
  * HUMAN. Humans always anchor; the AI field contributes at most this many (the
- * lowest AI slots, so the choice is deterministic for lockstep), which still keeps
- * some traffic around the AI pack without every opponent claiming a bubble.
- * TD5RE_TRAFFIC_AI_ANCHORS=<n> overrides (default 1); set it to the opponent count
- * to restore the previous every-racer-anchors behaviour. */
+ * lowest AI slots, so the choice is deterministic for lockstep).
+ *
+ * DEFAULT 0 (humans only), and the reason is churn, not density. Any nonzero
+ * value is actively harmful once the field spreads: with 1 human + 1 AI anchor
+ * the two drift apart (measured span spread 498 on Moscow), which splits them
+ * into 2 clusters, doubles eff_cap 16 -> 32, and then fights the VERY-HIGH
+ * rear-keep arm -- cars placed in the far AI's bubble are immediately more than
+ * rear_keep behind the trailing HUMAN, so they are retired the moment they
+ * appear. Measured on the merged branch: 913 of 994 despawns were that rear-keep
+ * arm, a spawn/retire loop at ~6.6 cars/s that reads on screen as traffic
+ * flickering in and out. Humans-only is better on every axis at once --
+ * despawns 994 -> 73, zero-traffic-ahead 14.9% -> 12.3% (whole race), cars
+ * within 40 spans ahead 2.89 -> 3.45, on_road steady at the faithful cap of 16.
+ * TD5RE_TRAFFIC_AI_ANCHORS=<n> restores AI bubbles (the opponent count gives the
+ * old every-racer-anchors behaviour); expect the churn above if you do. */
 static int trf_ai_anchor_limit(void)
 {
     static int v = -1;
     if (v < 0) {
-        v = td5_env_int("TD5RE_TRAFFIC_AI_ANCHORS", 1, 0, TD5_MAX_RACER_SLOTS);
+        v = td5_env_int("TD5RE_TRAFFIC_AI_ANCHORS", 0, 0, TD5_MAX_RACER_SLOTS);
         TD5_LOG_I(LOG_TAG, "traffic_ai_anchors: TD5RE_TRAFFIC_AI_ANCHORS=%d "
                   "(AI racers that may anchor a traffic bubble)", v);
     }
