@@ -189,6 +189,84 @@ def _cached_get(url: str, root: str, ext: str = ".bin", data: bytes | None = Non
                        % (retries, url, last))
 
 
+# ------------------------------------------------------- bbox / way caps ---
+#
+# Plan section 9: "OSM data quality varies wildly. Rural coverage is sparse; a
+# dense centre holds ten thousand ways in a 2 km box. Needs the bbox cap, a
+# way-count cap, and a graceful 'not enough road here' path in the selector
+# rather than a failed build." Section 0 sizes the bbox: "a 6.3 km route wants
+# roughly a 4 x 4 km box with margin; hard ceiling 3000 spans / ~10.5 km".
+#
+# BBOX. fetch_place makes a square of side 2*radius. 4000 m of radius is an
+# 8 x 8 km box (64 km2), which holds the 10.5 km hard-ceiling route with room to
+# drag waypoints, and it is the largest option the page offers. The old code
+# clamped silently at 6000 m -- a 144 km2 box, four times what the plan sized,
+# arrived at with no message. Refused with a sentence now instead.
+FETCH_MIN_RADIUS_M = 500.0
+FETCH_MAX_RADIUS_M = 4000.0
+#
+# WAY COUNT. MEASURED on the La Plata cache, which is the densest real fixture
+# this ships with: 2291 drivable ways inside a 2713 m radius = 23.1 km2, i.e.
+# 99 ways/km2, for a planned city centre on a 110 m block grid. The cap is set
+# at 6000 -- 2.6x La Plata's count, and still under half of the "ten thousand
+# ways in a 2 km box" the plan names as the case to survive. A denser centre at
+# the 4 km radius ceiling (50 km2) hits it at roughly 120 ways/km2, a fifth more
+# than La Plata.
+#
+# OVER THE CAP THE FETCH IS CLIPPED, NOT REFUSED. Dropping the lowest road
+# classes first is the right trade: service alleys and living streets are
+# already the most expensive classes in geo_route's CLASS_COST (2.60 / 2.20), so
+# a racing line was never going to use them, while the arterials that make a
+# route recognisable are the cheapest and are kept to the last. The place
+# records what it lost (PLACE.JSON layers.osm.counts.clipped_from) and the
+# selector says so on screen, so a thin side-street network is attributable.
+FETCH_MAX_DRIVABLE_WAYS = 6000
+# Dropped in this order, least useful for a race first.
+FETCH_CLIP_ORDER = (
+    "service", "living_street", "track", "road", "unclassified",
+    "residential", "tertiary_link", "tertiary", "secondary_link",
+)
+
+
+def area_cap_reasons(radius_m: float) -> list[str]:
+    """Why this radius cannot be fetched, as sentences for the page. Empty = go.
+    Pure, so the selector and the self-test can both check it with no network."""
+    out = []
+    if radius_m < FETCH_MIN_RADIUS_M:
+        out.append("radius %.0f m is below the %.0f m floor: a smaller circle "
+                   "rarely holds a whole route."
+                   % (radius_m, FETCH_MIN_RADIUS_M))
+    if radius_m > FETCH_MAX_RADIUS_M:
+        out.append("radius %.0f m is over the %.0f m cap (a %.0f x %.0f km box, "
+                   "%.0f km2). The hard span ceiling is a 10.5 km route, so a "
+                   "bigger area only slows the fetch down."
+                   % (radius_m, FETCH_MAX_RADIUS_M,
+                      radius_m / 500.0, radius_m / 500.0,
+                      (2.0 * radius_m / 1000.0) ** 2))
+    return out
+
+
+def clip_roads(roads: list[dict], cap: int = FETCH_MAX_DRIVABLE_WAYS
+               ) -> tuple[list[dict], dict]:
+    """Drop the least useful road classes until the way count is under `cap`.
+
+    Returns (kept, report). Under the cap this is the identity and the report
+    is empty, so the common path costs one comparison."""
+    if len(roads) <= cap:
+        return roads, {}
+    kept = list(roads)
+    dropped: list[str] = []
+    for cls in FETCH_CLIP_ORDER:
+        if len(kept) <= cap:
+            break
+        n0 = len(kept)
+        kept = [r for r in kept if r.get("class") != cls]
+        if len(kept) != n0:
+            dropped.append("%s (%d)" % (cls, n0 - len(kept)))
+    return kept, {"clipped_from": len(roads), "cap": cap,
+                  "dropped_classes": dropped}
+
+
 # ---------------------------------------------------------------- overpass ---
 
 OVERPASS_QL = """[out:json][timeout:180];
@@ -927,8 +1005,15 @@ def fetch_place(name: str, lat: float, lon: float, radius_m: float,
 
     print("\n[3/5] vector layers -> world units")
     vec = convert_osm(osm, proj)
+    vec["roads"], clip = clip_roads(vec["roads"])
+    if clip:
+        vec["counts"]["roads"] = len(vec["roads"])
+        vec["counts"].update(clip)
+        print("  DENSE CENTRE: clipped %d drivable ways to %d (cap %d); dropped "
+              "%s" % (clip["clipped_from"], len(vec["roads"]), clip["cap"],
+                      ", ".join(clip["dropped_classes"]) or "nothing"))
     for k in sorted(vec["counts"]):
-        print("  %-20s %d" % (k, vec["counts"][k]))
+        print("  %-20s %s" % (k, vec["counts"][k]))
 
     print("\n[4/5] elevation")
     height, dem_prov = build_height_raster(proj, bbox, out, cell, dem_override,

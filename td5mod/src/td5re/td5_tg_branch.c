@@ -5,6 +5,79 @@
  * live in td5_trackgen_internal.h. Element map: docs/plans/AUTOTRACK_ELEMENT_CATALOG.md.
  */
 #include "td5_trackgen_internal.h"
+#include "td5_geo.h"            /* [GEO FORKS] is a place loaded */
+#include "td5_geo_forks.h"      /* [GEO FORKS] FORKS.JSON: confirmed forks */
+
+/* ===================== GEO FORKS (confirmed in the selector) =====================
+ * SECTION: geo forks override the synthetic fork plan
+ *
+ * On a GEO track with a FORKS.JSON, the forks are the real ones the user
+ * confirmed in the selector -- a median avenue that exists on the ground, or a
+ * comparable alternative route -- so the synthetic plan ladder and its
+ * seed-derived positions are not wanted. Rationale and the on-disk contract:
+ * td5_geo_forks.h.
+ *
+ * THE OVERRIDE IS DELIBERATELY TINY AND IN ONE PLACE PER ANSWER. Fork geometry
+ * is decided by exactly three stateless answers -- how many forks
+ * (tg_fork_count_planned), what shape and length each one is (tg_fork_plan),
+ * and where it sits (the `pos` cursor in tg_fork_place, tg_span_in_fork_run and
+ * tg_fork_window_ahead) -- and the comment at tg_fork_first_off() records what
+ * happens when those three answers disagree: the walk protects and widens one
+ * set of spans while the placement loop commits to another, every moved fork
+ * lands on a lane change, and the uniformity guard rightly rejects it. So the
+ * geo answers are injected at those same three points and nowhere else.
+ *
+ * BYTE-IDENTICAL SYNTHETIC BUILDS. tg_geo_forks_n() is the only gate, and with
+ * no geo place loaded td5_geo_forks_sync() returns 0 without opening a file. No
+ * tg_rand / tg_frand / tg_range call is added on either path, so the single RNG
+ * stream is untouched -- the standing rule at td5_trackgen_internal.h:1290-1296.
+ *
+ * TD5RE_GEO_FORKS=0 pins the synthetic fork placement on a geo track, for a
+ * single-variable A/B against a build with the confirmed forks on. */
+static int tg_geo_forks_n(void)
+{
+    if (!td5_geo_loaded()) return 0;
+    if (!td5_env_flag_on("TD5RE_GEO_FORKS")) return 0;
+    return td5_geo_forks_sync();     /* idempotent: keyed on the loaded slug */
+}
+
+/* TG_ForkKind for the shape name FORKS.JSON carries. The mapping lives here,
+ * with the enum, rather than in td5_geo_forks.c -- which is why that module
+ * hands back a name and not an int. An unknown name is already refused by the
+ * loader; treat it as an ISLAND here so this function has no failure mode. */
+static int tg_geo_fork_kind(const char *name)
+{
+    int k;
+    for (k = 0; k < TG_FORK_KIND_COUNT; k++)
+        if (strcmp(tg_fork_kind_name(k), name) == 0) return k;
+    return TG_FORK_ISLAND;
+}
+
+/* Geo fork `index`: its split span and its plan. Returns 0 when this build has
+ * no geo forks (or the index is past the table), and then every caller falls
+ * through to the synthetic ladder unchanged. */
+static int tg_geo_fork_at(int index, int *F, int *kind, int *len, double *sep)
+{
+    int gf, gl, glanes;
+    double gsep;
+    if (index < 0 || index >= tg_geo_forks_n()) return 0;
+    if (!td5_geo_forks_get(index, &gf, &gl, &gsep, &glanes)) return 0;
+    if (F)    *F    = gf;
+    if (len)  *len  = gl;
+    /* sep comes from a JSON file, so clamp it into the range every reader
+     * assumes -- tg_fork_sep_for does the same for the synthetic ladder, and
+     * below TD5_TG_BRANCH_SEP_MIN the two carriageways stop being separable at
+     * all. (The 0.15 in the log against the 0.16 in the file is the port's FP
+     * control word truncating printf, not the value: the untouched synthetic
+     * path prints TD5_TG_FORK_MAX_TURN 0.045 as "0.044" the same way.) */
+    if (sep) {
+        if (gsep < TD5_TG_BRANCH_SEP_MIN) gsep = TD5_TG_BRANCH_SEP_MIN;
+        if (gsep > 1.0) gsep = 1.0;
+        *sep = gsep;
+    }
+    if (kind) *kind = tg_geo_fork_kind(td5_geo_forks_kind(index));
+    return 1;
+}
 
 int tg_branches_enabled(void)
 {
@@ -206,12 +279,15 @@ static int tg_fork_kinds_enabled(void)
 
 int tg_fork_count_planned(void)
 {
+    const int geo = tg_geo_forks_n();      /* [GEO FORKS] */
+    if (geo > 0) return geo;
     if (!tg_fork_kinds_enabled()) return 3;
     return td5_env_int("TD5RE_AUTOTRACK_BRANCH_COUNT", 6, 0, TD5_TG_BRANCH_MAX);
 }
 
 void tg_fork_plan(int index, int *kind, int *len, double *sep)
 {
+    if (tg_geo_fork_at(index, NULL, kind, len, sep)) return;   /* [GEO FORKS] */
     if (!tg_fork_kinds_enabled()) {
         /* pre-kinds ladder: three symmetric forks, the old sep ladder */
         static const int k_lens[3] = { 8, 40, 120 };
@@ -292,7 +368,21 @@ void tg_fork_place(const TG_NodeList *nl, int ring)
             int L = (kind == TG_FORK_ISLAND) ? (kl < 3 ? 3 : kl)
                                              : (kl < min_len ? min_len : kl);
             int F = pos;
-            int R = F + 1 + L;
+            int R;
+            /* [GEO FORKS] The confirmed fork's own split span replaces the
+             * seed-derived cursor. Bounds-checked HERE and only on the geo
+             * path, because F comes from a file: the synthetic cursor is
+             * derived and cannot be stale, and leaving its path untouched is
+             * what keeps a synthetic build byte-identical. */
+            if (tg_geo_fork_at((int)i, &F, NULL, NULL, NULL) &&
+                (F < 1 || F + 1 + L >= nl->count)) {
+                TD5_LOG_W(LOG_TAG, "trackgen: [GEO FORKS] fork %u at F=%d len=%d "
+                          "runs past the %d-node ring -- dropped (stale "
+                          "FORKS.JSON, or target_spans truncated the route)",
+                          i, F, L, nl->count);
+                break;
+            }
+            R = F + 1 + L;
             const int lanes = nl->v[F].lanes;
             int main_half, br_lanes;
             int q, uniform = 1;
@@ -456,7 +546,9 @@ int tg_span_in_fork_run(int si)
         {
         int L = tg_fork_len_floored(kind, kl);
         int F = pos;
-        int R = F + 1 + L;
+        int R;
+        tg_geo_fork_at(i, &F, NULL, NULL, NULL);   /* [GEO FORKS] */
+        R = F + 1 + L;
         /* +/-2 spans of margin past the widened approach and the rejoin so the
          * road eases INTO and OUT of the fork gently rather than meeting a sharp
          * bend right where the carriageways start to split / merge. */
@@ -493,8 +585,11 @@ int tg_fork_window_ahead(int si, int within)
         tg_fork_plan(i, &kind, &kl, NULL);
         {
         const int L = tg_fork_len_floored(kind, kl);
-        const int F = pos, R = F + 1 + L;
-        const int w0 = F - TD5_TG_BRANCH_WIDEN - 2;
+        int F = pos;
+        int R, w0;
+        tg_geo_fork_at(i, &F, NULL, NULL, NULL);   /* [GEO FORKS] */
+        R  = F + 1 + L;
+        w0 = F - TD5_TG_BRANCH_WIDEN - 2;
         if (si <= w0 && w0 - si <= within) return kind;
         pos = R + gap;
         }
