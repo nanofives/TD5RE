@@ -604,6 +604,33 @@ browser, FETCH, and the LOCATION row on screen.
 Still open from the Phase 4 list: fork-candidate toggles (FORKS.JSON) and the
 per-layer vintage display.
 
+## 6f. Phase 5 shipped 2026-09-30 (real La Plata data, one authorised fetch)
+
+La Plata fetched once into the MAIN tree (`re/assets/geo/la_plata`, outside any
+worktree so it cannot be lost again), route saved through the selector in its
+own frame; `geo_audit` 15 pass / 1 warning / 0 failures. Four parallel
+workstreams, each on its own branch, merged here:
+
+| Part | What | La Plata numbers |
+|---|---|---|
+| G1 streets (`td5_geo_roads.c`, `td5_tg_network.c`) | real OSM ways become mouths/crossings/underpasses; skew cap 65 deg (synthetic 28); march stand-off scales 1/cos(skew) | 94 arms considered, 53 accepted after the biome fix (25 before); up to 51 deg diagonals |
+| G2 buildings/landmarks/plazas (`td5_geo_buildings.c`, `td5_tg_city.c`, `td5_tg_streets.c`) | real footprints extruded (measured vs estimated kept), tagged landmarks extruded, plaza polygons replace the gap park emitter on the geo path | 54 buildings (12 measured / 42 estimated), 2 landmarks, 13 plazas |
+| G3 traffic lights (`td5_geo_signals.c`, `td5_tg_furniture.c`, render hook) | head at each signal node near the route, lenses tagged 4/5/6 on the shipped glow page, colour written per frame from a wall clock; cosmetic | 566 in cache, 25 near route, 11 placed |
+| G4 Option B (`td5_track.c`, `geo_condition.py --allow-crossings`) | `TD5RE_XSPAN`: the unhinted global localiser takes the previous span as a hint on geo tracks | closed loop: 564 -> 132 snap gone; Moscow + TD6 sim identical tick by tick |
+| biome (`td5_tg_terrain.c`) | geo cells from COVER.R8 (>=35% built CITY, >=40% tree FOREST, else FIELDS) | 9 city + 1 fields; street biome drops 37 -> 1 |
+
+Gates on the merged branch: synthetic seed 20260901 byte-identical (8 files),
+network + strip audits OK on La Plata, structure lint OK (83/84).
+
+Open:
+- Plaza paths z-fight with the lawn at some angles (G2 was fixing lift order).
+- `TD5RE_AUTOTRACK_STREAM=0` with REUSE left at its default produced one build
+  with no TEXTURES.DAT in level090.zip and no scenery; the default streamed path
+  and the harness (STREAM=0 + REUSE=0) are fine. Dev-only combination, not chased.
+- After SEND TO GAME the selector re-fetches a wider radius, so re-routing the
+  same A/B can pick a different, shorter route (1492 -> 1200 spans on La Plata).
+- Landmark prefab fallback and roof:shape only exercised on 2 buildings.
+
 ## 7. Phases
 
 ### Phase 0 -- calibration and ground truth
