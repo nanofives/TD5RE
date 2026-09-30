@@ -43,6 +43,7 @@ static void td5_track_stream_selfcheck(void);
 #include "td5_light2.h"   /* [LIGHT2 P1] derive-normals gate */
 #include "td5_light.h"    /* [LIGHT2] street-lamp light registration */
 #include "td5_material.h" /* [LIGHT2] page-class cache reset at track load */
+#include "td5_geo.h"      /* [XSPAN] geo-route presence gates crossing-safe locate */
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>   /* sscanf (TD5RE_LAMP_SCAN dev diagnostic) */
@@ -1266,6 +1267,12 @@ typedef struct {
     int32_t x[4], z[4];     /* world XZ (origin + span-relative vtx); polygon
                              * loop: 0=nearL 1=nearR 2=farR 3=farL */
     int32_t cx, cz;         /* centroid */
+    int32_t cy;             /* [XSPAN 2026-09-30] centroid Y = this lane's DECK
+                             * height in world units. The whole quad soup is XZ
+                             * only, so a flyover and the road under it are the
+                             * same point to every query; this is the one field
+                             * that tells them apart. Written by geo_build from
+                             * the same four vertices as cx/cz. */
     int32_t minx, maxx, minz, maxz;  /* AABB (XZ) */
     int16_t span;
     int16_t lane;
@@ -1290,6 +1297,134 @@ static int      s_track_custom_registry = 0;
 /* Per-tick eject cap (world units): the divider/wall is solid but a deep
  * penetration (tunnel/glitch) climbs out over a few ticks instead of snapping. */
 #define GEO_PUSH_CAP 600
+
+/* ===== SECTION: crossing-safe span localisation (GEO TRACK, Option B) =====
+ *
+ * [XSPAN 2026-09-30] docs/plans/GEO_TRACK_OSM_PLAN.md section 5, Option B.
+ *
+ * THE PROBLEM. Every geometric query above is XZ-only, and every one of them
+ * answers "which span is this point on" by CONTAINMENT or by DISTANCE over a
+ * whole neighbourhood of quads. That is sound exactly while the road cannot
+ * overlap itself, which the synthetic generator guarantees by construction (its
+ * walk stays within +-80 degrees of +X, so the axis coordinate strictly
+ * increases -- td5_trackgen_internal.h:1332-1373). A real-world route drawn
+ * through a city has no such guarantee: a loop, a figure-eight or a flyover
+ * puts two stretches of road at the same XZ, and then two quads with span
+ * indices hundreds apart both contain the car. Which one wins is grid order.
+ *
+ * WHAT THIS ADDS, and it is deliberately only two things:
+ *
+ *   1. CONTINUITY. A car that was on span N this tick is on a span near N the
+ *      next tick. Candidates within XSPAN_WINDOW spans of the caller's hint are
+ *      PREFERRED over candidates outside it.
+ *   2. HEIGHT. Where the two stretches are grade-separated, the deck Ys differ
+ *      by metres while the spans differ by hundreds; GeoQuad.cy breaks the tie
+ *      the way a human would, by looking at which road the car is actually on.
+ *
+ * WHY A PREFERENCE AND NOT A FILTER. A car does legitimately jump span index
+ * without driving there -- respawn, stuck recovery, race restart, a spectate
+ * camera cut. If the window were a hard filter, the first tick after any of
+ * those would find no candidate and the car would be stranded on the span it
+ * left. So the window is the FIRST key of a lexicographic rank, not a reject:
+ * when nothing is in the window the far candidate still wins, and localisation
+ * re-seeds on that very tick. The cost of that choice is that a single bad
+ * hint is not corrected any faster than before; the benefit is that no
+ * discontinuity can ever trap a car, which is the failure that would matter.
+ *
+ * WHY PLAIN INDEX DISTANCE, NOT THE RING-WRAPPED LAP POSITION the existing
+ * hint uses. s_ring_pos answers "how far apart in the LAP", which deliberately
+ * makes a fork's two branches adjacent. Here the question is the opposite one
+ * -- "did the car plausibly DRIVE from there to here" -- and two stretches of a
+ * self-crossing route are far apart in exactly the sense that matters. Plain
+ * distance also mis-reads the start/finish seam of a circuit as far, which is
+ * harmless: a circuit does not overlap itself at the seam, so there is only one
+ * candidate there and the preference never fires.
+ *
+ * THE GATE. Auto-ON only for a GEO ROUTE track: a custom-registry level
+ * (autotrack slot, never a shipped level), driven forward, not TD6, with a
+ * conditioned route actually loaded (td5_geo_route_count() > 0). Every shipped
+ * track fails the first condition and the plain synthetic autotrack fails the
+ * last, so both keep byte-identical localisation. That last condition is not
+ * belt-and-braces: the synthetic autotrack HAS legitimate XZ overlap (branch
+ * corridors run beside the road they forked from) where a branch is hundreds of
+ * spans from the main road it parallels, and a continuity preference there
+ * would fight the fork handlers rather than help them. TD5RE_XSPAN=1 forces it
+ * on and =0 forces it off, for A/B only. */
+
+/* How far, in span indices, a car may plausibly have moved between two
+ * localisation calls. Generous: a span is TD5_TG_SPAN_LENGTH world units
+ * (~3.5 m at the geo scale), so 24 spans is ~84 m -- about 1.5 seconds at
+ * 200 km/h, far more than one tick, and still two orders of magnitude below
+ * the several-hundred-span gap a self-crossing produces. */
+#define XSPAN_WINDOW_DEFAULT 24
+
+static int      s_xspan_force  = -2;   /* -2 env unread, -1 auto, 0 off, 1 on */
+static int      s_xspan_window = -1;
+static int      s_xspan_diag   = -1;
+static uint32_t s_xspan_pref   = 0;    /* times the window preference decided   */
+static uint32_t s_xspan_revert = 0;    /* walker far-jump reverts (see below)   */
+
+/* Is the LOADED track a geo-route track? This is the auto-gate condition on
+ * its own, kept separate from xspan_enabled() so the load-time census can run
+ * (and report what the localiser does) even when TD5RE_XSPAN=0 forces the mode
+ * off -- that is what makes the A/B a single-binary comparison. A shipped
+ * track fails the first test here and so runs neither. */
+static int xspan_track_is_geo(void)
+{
+    /* Not cached: the answer depends on which track is loaded and which way
+     * round it is driven, and both change without this module being told. The
+     * reads are three statics and one counter, so per-probe cost is noise. */
+    return (s_track_custom_registry && !g_td5.reverse_direction &&
+            g_active_td6_level == 0 && td5_geo_route_count() > 0);
+}
+
+static int xspan_enabled(void)
+{
+    if (s_xspan_force == -2) {
+        const char *ov = getenv("TD5RE_XSPAN");
+        s_xspan_force = (ov && ov[0]) ? ((ov[0] != '0') ? 1 : 0) : -1;
+    }
+    if (s_xspan_force >= 0)
+        return s_xspan_force;
+    return xspan_track_is_geo();
+}
+
+static int xspan_window(void)
+{
+    if (s_xspan_window < 0) {
+        s_xspan_window = td5_env_int("TD5RE_XSPAN_WINDOW", XSPAN_WINDOW_DEFAULT,
+                                     1, 4096);
+    }
+    return s_xspan_window;
+}
+
+static int xspan_diag(void)
+{
+    if (s_xspan_diag < 0) s_xspan_diag = td5_env_flag_off("TD5RE_XSPAN_DIAG");
+    return s_xspan_diag;
+}
+
+/* |a - b| in span indices. See the header note on why this is not wrapped. */
+static int xspan_gap(int a, int b)
+{
+    int d = a - b;
+    return d < 0 ? -d : d;
+}
+
+/* Lexicographic rank of one candidate against the running best.
+ *   key0  in-window (0 better than 1)   -- continuity
+ *   key1  |deck Y - probe Y|            -- grade separation, when a Y is known
+ *   key2  span gap                      -- nearest plausible span
+ * Returns 1 when `cand` should replace `best`. `best_*` hold the incumbent;
+ * a best_key0 of -1 means "no incumbent yet". */
+static int xspan_better(int c_key0, int64_t c_key1, int c_key2,
+                        int b_key0, int64_t b_key1, int b_key2)
+{
+    if (b_key0 < 0)      return 1;
+    if (c_key0 != b_key0) return c_key0 < b_key0;
+    if (c_key1 != b_key1) return c_key1 < b_key1;
+    return c_key2 < b_key2;
+}
 
 static int geo_is_enabled(void)
 {
@@ -1466,6 +1601,7 @@ static void geo_build(void)
             if (!a || !b || !c || !d) {
                 /* degenerate slot: zero-extent quad never matches a query */
                 q->minx = q->maxx = q->minz = q->maxz = q->cx = q->cz = 0;
+                q->cy = 0;
                 deg_count++;
                 TD5_LOG_I(LOG_TAG, "geo_build: DEGENERATE quad span=%d lane=%d type=%d (null verts)",
                           i, lane, sp->span_type);
@@ -1485,6 +1621,16 @@ static void geo_build(void)
                   sx += q->x[k]; sz += q->z[k];
               }
               q->cx = (int32_t)(sx / 4); q->cz = (int32_t)(sz / 4); }
+            /* [XSPAN] Deck height, same four vertices, same frame as cx/cz.
+             * Matches the Y that InitActorTrackSegmentPlacement computes for a
+             * span centre (0x00445FBD: mean of the four vertex Ys plus the
+             * span origin), just kept in integer world units like x/z here
+             * rather than 24.8. One Y for the quad is enough for what it is
+             * for: telling two decks apart. Within a quad the surface varies
+             * by at most the grade over one span length, which is under half a
+             * metre, while a grade separation is several. */
+            q->cy = (int32_t)(((int32_t)a->y + (int32_t)b->y +
+                               (int32_t)c->y + (int32_t)d->y) / 4) + sp->origin_y;
             /* [GEO REPAIR 2026-07-01] A convex quad always contains its own
              * centroid; if it doesn't, the strip's per-type / mirrored-reverse
              * vertex order traced a self-intersecting (bowtie) loop, and the
@@ -1580,6 +1726,7 @@ static void geo_build(void)
     TD5_LOG_I(LOG_TAG, "geo locate built: quads=%d grid=%dx%d cell=%d items=%d ring=%d "
               "degenerate=%d unrepairable=%d",
               s_geo_quad_count, gnx, gnz, (int)cell, items, ring, deg_count, bad_count);
+
 }
 
 typedef struct {
@@ -1590,12 +1737,25 @@ typedef struct {
 /* Locate the nearest drivable lane quad to (px,pz) [integer world units].
  * hint_span biases ties toward continuity (so a fork's two branches, far apart
  * in span index but adjacent in lap position, resolve to the one the car is on).
- * Returns 1 with a filled GeoHit, 0 if the model is unbuilt. */
-static int geo_locate(int32_t px, int32_t pz, int hint_span, GeoHit *out)
+ * Returns 1 with a filled GeoHit, 0 if the model is unbuilt.
+ *
+ * [XSPAN 2026-09-30] `py` is the probe's world Y (integer units) and `has_y`
+ * says whether it is meaningful. Both are ignored unless xspan_enabled(), so
+ * every existing caller keeps its exact prior behaviour; see the crossing-safe
+ * section above for why the mode exists and what it changes. */
+static int geo_locate(int32_t px, int32_t pz, int32_t py, int has_y,
+                       int hint_span, GeoHit *out)
 {
     int cx, cz, ring, radius;
     int best_idx = -1; float best_score = 1e30f, hint_pos;
     int64_t near_best = -1; int32_t near_x = 0, near_z = 0; int near_idx = -1;
+    /* xspan ranking state (inside candidates), see xspan_better() */
+    const int xs = xspan_enabled();
+    const int xwin = xs ? xspan_window() : 0;
+    const int has_hint = (hint_span >= 0 && hint_span < s_span_count);
+    int b_k0 = -1, b_k2 = 0; int64_t b_k1 = 0;
+    int near_k0 = -1;                       /* xspan: in-window flag of `near` */
+    int xs_far_seen = 0;                    /* a far candidate was passed over */
 
     if (!s_geo_quads || s_geo_quad_count <= 0 || !s_geo_cell_start) return 0;
     geo_cell_of(px, pz, &cx, &cz);
@@ -1617,20 +1777,45 @@ static int geo_locate(int32_t px, int32_t pz, int hint_span, GeoHit *out)
                     int32_t nx, nz; int64_t dd;
                     if (px >= q->minx && px <= q->maxx && pz >= q->minz && pz <= q->maxz &&
                         geo_point_in_quad(q, px, pz)) {
-                        float score = 0.0f;
-                        if (hint_pos >= 0.0f && s_ring_pos) {
-                            float dpos = s_ring_pos[q->span] - hint_pos;
-                            if (ring > 0) {
-                                while (dpos >  ring * 0.5f) dpos -= ring;
-                                while (dpos < -ring * 0.5f) dpos += ring;
+                        if (xs && has_hint) {
+                            int gap = xspan_gap((int)q->span, hint_span);
+                            int k0  = (gap <= xwin) ? 0 : 1;
+                            int64_t k1 = has_y ? (int64_t)q->cy - py : 0;
+                            if (k1 < 0) k1 = -k1;
+                            if (k0) xs_far_seen = 1;
+                            if (xspan_better(k0, k1, gap, b_k0, b_k1, b_k2)) {
+                                b_k0 = k0; b_k1 = k1; b_k2 = gap; best_idx = qi;
                             }
-                            score = dpos < 0 ? -dpos : dpos;
+                        } else {
+                            float score = 0.0f;
+                            if (hint_pos >= 0.0f && s_ring_pos) {
+                                float dpos = s_ring_pos[q->span] - hint_pos;
+                                if (ring > 0) {
+                                    while (dpos >  ring * 0.5f) dpos -= ring;
+                                    while (dpos < -ring * 0.5f) dpos += ring;
+                                }
+                                score = dpos < 0 ? -dpos : dpos;
+                            }
+                            if (best_idx < 0 || score < best_score) { best_score = score; best_idx = qi; }
                         }
-                        if (best_idx < 0 || score < best_score) { best_score = score; best_idx = qi; }
                         continue;
                     }
                     dd = geo_quad_nearest(q, px, pz, &nx, &nz);
-                    if (near_best < 0 || dd < near_best) { near_best = dd; near_x = nx; near_z = nz; near_idx = qi; }
+                    if (xs && has_hint) {
+                        /* Off-road: still prefer the road the car came from, so
+                         * a push at a crossing aims at its own carriageway and
+                         * not at the one passing under it. Distance stays the
+                         * key WITHIN a preference class, so the push is always
+                         * to a genuinely nearest edge of the chosen road. */
+                        int k0 = (xspan_gap((int)q->span, hint_span) <= xwin) ? 0 : 1;
+                        if (near_k0 < 0 || k0 < near_k0 ||
+                            (k0 == near_k0 && dd < near_best)) {
+                            near_k0 = k0; near_best = dd;
+                            near_x = nx; near_z = nz; near_idx = qi;
+                        }
+                    } else if (near_best < 0 || dd < near_best) {
+                        near_best = dd; near_x = nx; near_z = nz; near_idx = qi;
+                    }
                 }
             }
         }
@@ -1639,6 +1824,14 @@ static int geo_locate(int32_t px, int32_t pz, int hint_span, GeoHit *out)
     }
 
     if (best_idx >= 0) {
+        if (xs && xs_far_seen && b_k0 == 0) {
+            s_xspan_pref++;
+            if (xspan_diag() && (s_xspan_pref <= 16u || (s_xspan_pref & 0xFFu) == 0u))
+                TD5_LOG_W(LOG_TAG, "[XSPAN] overlap at (%d,%d): hint=%d kept span=%d "
+                          "(gap=%d dy=%d) over a far candidate [n=%u]",
+                          px, pz, hint_span, (int)s_geo_quads[best_idx].span,
+                          b_k2, (int)b_k1, (unsigned)s_xspan_pref);
+        }
         out->span = s_geo_quads[best_idx].span; out->lane = s_geo_quads[best_idx].lane;
         out->inside = 1; out->pushx = out->pushz = out->pushdist = 0;
         return 1;
@@ -1651,6 +1844,118 @@ static int geo_locate(int32_t px, int32_t pz, int hint_span, GeoHit *out)
         return 1;
     }
     return 0;
+}
+
+/* Defined below, next to the off-map rescue that is its only other caller. */
+static int geo_nearest_global(int32_t px, int32_t pz, int32_t py, int has_y,
+                              int hint_span, GeoHit *out);
+
+/* [XSPAN 2026-09-30] Overlap census + localiser self-check. Split out of
+ * geo_build only because it calls geo_locate, which is declared below it. */
+static void xspan_census(void)
+{
+    const int ncell = s_geo_gnx * s_geo_gnz;
+    int c, sites = 0, lo_a = -1, hi_a = -1, lo_b = -1, hi_b = -1;
+    int rep_a = -1, rep_b = -1, rep_gap = -1, rep_strict = 0;
+    int32_t rep_x = 0, rep_z = 0, rep_ay = 0, rep_by = 0;
+    int xwin;
+
+    if (!xspan_track_is_geo()) return;   /* geo-route tracks only, mode or not */
+    if (!s_geo_quads || s_geo_quad_count <= 0 || !s_geo_cell_start || ncell <= 0)
+        return;
+    xwin = xspan_window();
+
+    /* Two quads whose AABBs intersect while their span indices are far apart
+     * is precisely the configuration the crossing-safe mode exists for, and
+     * the grid already buckets by XZ, so the sweep is one pass over each
+     * cell's own list. Reported rather than acted on: it states, at load,
+     * whether this track HAS the problem, which is what makes a clean race
+     * afterwards evidence instead of a coincidence. */
+    for (c = 0; c < ncell; c++) {
+        int p0 = s_geo_cell_start[c], p1 = s_geo_cell_start[c + 1], u, v;
+        for (u = p0; u < p1; u++) {
+            GeoQuad *A = &s_geo_quads[s_geo_cell_items[u]];
+            for (v = u + 1; v < p1; v++) {
+                GeoQuad *B = &s_geo_quads[s_geo_cell_items[v]];
+                int gap = xspan_gap((int)A->span, (int)B->span);
+                if (gap <= xwin) continue;
+                if (A->maxx < B->minx || B->maxx < A->minx ||
+                    A->maxz < B->minz || B->maxz < A->minz) continue;
+                sites++;
+                if (lo_a < 0 || A->span < lo_a) lo_a = A->span;
+                if (A->span > hi_a) hi_a = A->span;
+                if (lo_b < 0 || B->span < lo_b) lo_b = B->span;
+                if (B->span > hi_b) hi_b = B->span;
+                /* Probe point: a place that is genuinely inside BOTH lanes,
+                 * which is the only kind of point at which a localiser has to
+                 * choose. An AABB overlap alone does not give one (two quads
+                 * can share a bounding box and touch at a corner), and the
+                 * midpoint of two centroids is often inside just one -- probing
+                 * there measures nothing, because only one candidate exists.
+                 * So prefer a pair where A's centroid lies in B as well, and
+                 * fall back to the midpoint only if no pair qualifies. */
+                {
+                    int strict = geo_point_in_quad(B, A->cx, A->cz);
+                    if ((strict && !rep_strict) ||
+                        (strict == rep_strict && gap > rep_gap)) {
+                        rep_strict = strict; rep_gap = gap;
+                        rep_a = A->span; rep_b = B->span;
+                        rep_ay = A->cy; rep_by = B->cy;
+                        if (strict) {
+                            rep_x = A->cx; rep_z = A->cz;
+                        } else {
+                            rep_x = (int32_t)(((int64_t)A->cx + B->cx) / 2);
+                            rep_z = (int32_t)(((int64_t)A->cz + B->cz) / 2);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    TD5_LOG_I(LOG_TAG, "[XSPAN] crossing-safe localisation %s (window=%d spans): "
+              "%d overlapping quad pair(s) more than %d spans apart%s",
+              xspan_enabled() ? "ARMED" : "OFF (TD5RE_XSPAN=0)", xwin, sites, xwin,
+              sites ? "" : " -- this track does not cross itself");
+    if (!sites) return;
+
+    TD5_LOG_I(LOG_TAG, "[XSPAN]   overlap spans %d..%d against %d..%d",
+              lo_a, hi_a, lo_b, hi_b);
+    {
+        /* Self-check at the worst overlap: ask the localiser the same question
+         * twice, differing in the HINT alone, once as a car on each of the two
+         * roads. Answering with the hint both times is direct evidence that
+         * this track localises safely, which a clean race is not -- a race is
+         * also clean when nothing ever had to choose. */
+        GeoHit ha, hb;
+        int ga = geo_locate(rep_x, rep_z, 0, 0, rep_a, &ha) ? ha.span : -1;
+        int gb = geo_locate(rep_x, rep_z, 0, 0, rep_b, &hb) ? hb.span : -1;
+        /* "Near its own hint", not "exactly the hint": the probe point is the
+         * midpoint of two centroids and may sit one span along either road,
+         * which is a correct answer. The property under test is that the two
+         * answers track their hints instead of collapsing onto one road. */
+        int held = (ga >= 0 && gb >= 0 &&
+                    xspan_gap(ga, rep_a) <= xwin && xspan_gap(gb, rep_b) <= xwin);
+        int na = geo_nearest_global(rep_x, rep_z, rep_ay, 1, rep_a, &ha) ? ha.span : -1;
+        int nb = geo_nearest_global(rep_x, rep_z, rep_by, 1, rep_b, &hb) ? hb.span : -1;
+        int nheld = (na >= 0 && nb >= 0 &&
+                     xspan_gap(na, rep_a) <= xwin && xspan_gap(nb, rep_b) <= xwin);
+        TD5_LOG_I(LOG_TAG, "[XSPAN]   probe at (%d,%d) [%s]: deck Y %d vs %d (%d apart). "
+                  "geo_locate: hint %d -> %d, hint %d -> %d [%s]",
+                  rep_x, rep_z,
+                  rep_strict ? "inside both lanes" :
+                               "NOT inside both lanes -- probe is weak",
+                  rep_ay, rep_by,
+                  rep_ay > rep_by ? rep_ay - rep_by : rep_by - rep_ay,
+                  rep_a, ga, rep_b, gb, held ? "HELD" : "SNAPPED");
+        /* geo_nearest_global is the one that had NO hint at all before this
+         * change -- it returned the first containing quad in array order, so
+         * on an overlap it answered with the same (lower-index) span whatever
+         * the caller was driving. That is the line to read for the A/B. */
+        TD5_LOG_I(LOG_TAG, "[XSPAN]   probe nearest_global: hint %d -> %d, "
+                  "hint %d -> %d [%s]", rep_a, na, rep_b, nb,
+                  nheld ? "HELD" : "SNAPPED to one road");
+    }
 }
 
 /* If (px,pz) [integer world units] lies inside a lane quad of `span`, return
@@ -1702,8 +2007,11 @@ static void geo_resolve_walls(TD5_Actor *actor)
     for (pi = 0; pi < 4; pi++) {
         int32_t px = FP_TRUNC(probe_block[pi].x);
         int32_t pz = FP_TRUNC(probe_block[pi].z);
+        /* [XSPAN] the probe's own Y, so a wheel over a grade separation is
+         * walled by the deck it is on rather than the one below it. */
+        int32_t py = FP_TRUNC(probe_block[pi].y);
         GeoHit h; double dx, dz, mag, rad; int32_t wall_angle, pen;
-        if (!geo_locate(px, pz, hint, &h)) continue;
+        if (!geo_locate(px, pz, py, 1, hint, &h)) continue;
         if (h.inside || h.pushdist <= 0) continue;     /* on the road -> no wall */
         dx = (double)h.pushx; dz = (double)h.pushz;
         mag = sqrt(dx * dx + dz * dz);
@@ -1767,21 +2075,53 @@ static void geo_resolve_walls(TD5_Actor *actor)
  * quad for the nearest boundary point. O(quads) (~7.4k) but only runs on a genuine
  * off-map tick for a racer slot, so the cost is irrelevant. Fills GeoHit the same
  * way geo_locate does (inside=1 with a zero push when the point is on the road). */
-static int geo_nearest_global(int32_t px, int32_t pz, GeoHit *out)
+/* [XSPAN 2026-09-30] hint_span / py / has_y are ignored unless xspan_enabled().
+ * This function had NO hint at all, which on a self-crossing route makes the
+ * "inside a quad" early-out return whichever of the two overlapping spans comes
+ * first in array order -- i.e. always the lower index, never the car's. */
+static int geo_nearest_global(int32_t px, int32_t pz, int32_t py, int has_y,
+                               int hint_span, GeoHit *out)
 {
     int i, best_i = -1; int64_t best = -1; int32_t bx = 0, bz = 0;
+    const int xs = xspan_enabled();
+    const int xwin = xs ? xspan_window() : 0;
+    const int has_hint = (hint_span >= 0 && hint_span < s_span_count);
+    int in_i = -1, in_k0 = -1, in_k2 = 0; int64_t in_k1 = 0;   /* containing quads */
+    int near_k0 = -1;
     if (!s_geo_quads || s_geo_quad_count <= 0) return 0;
     for (i = 0; i < s_geo_quad_count; i++) {
         GeoQuad *q = &s_geo_quads[i];
         int32_t nx, nz; int64_t d;
         if (px >= q->minx && px <= q->maxx && pz >= q->minz && pz <= q->maxz &&
             geo_point_in_quad(q, px, pz)) {
-            out->span = q->span; out->lane = q->lane;
-            out->inside = 1; out->pushx = out->pushz = out->pushdist = 0;
-            return 1;
+            if (!(xs && has_hint)) {
+                out->span = q->span; out->lane = q->lane;
+                out->inside = 1; out->pushx = out->pushz = out->pushdist = 0;
+                return 1;
+            }
+            {   /* rank instead of returning the first hit */
+                int gap = xspan_gap((int)q->span, hint_span);
+                int k0  = (gap <= xwin) ? 0 : 1;
+                int64_t k1 = has_y ? (int64_t)q->cy - py : 0;
+                if (k1 < 0) k1 = -k1;
+                if (xspan_better(k0, k1, gap, in_k0, in_k1, in_k2)) {
+                    in_k0 = k0; in_k1 = k1; in_k2 = gap; in_i = i;
+                }
+            }
+            continue;
         }
         d = geo_quad_nearest(q, px, pz, &nx, &nz);
-        if (best < 0 || d < best) { best = d; bx = nx; bz = nz; best_i = i; }
+        if (xs && has_hint) {
+            int k0 = (xspan_gap((int)q->span, hint_span) <= xwin) ? 0 : 1;
+            if (near_k0 < 0 || k0 < near_k0 || (k0 == near_k0 && d < best)) {
+                near_k0 = k0; best = d; bx = nx; bz = nz; best_i = i;
+            }
+        } else if (best < 0 || d < best) { best = d; bx = nx; bz = nz; best_i = i; }
+    }
+    if (in_i >= 0) {
+        out->span = s_geo_quads[in_i].span; out->lane = s_geo_quads[in_i].lane;
+        out->inside = 1; out->pushx = out->pushz = out->pushdist = 0;
+        return 1;
     }
     if (best_i < 0) return 0;
     out->span = s_geo_quads[best_i].span; out->lane = s_geo_quads[best_i].lane;
@@ -1808,11 +2148,19 @@ static void geo_rescue_offmap(TD5_Actor *actor)
      * any other reason (e.g. on-grid but >8 cells clear of any road). */
     off_grid = (cx <  s_geo_gx0 || cx >= s_geo_gx0 + (int64_t)s_geo_gnx * s_geo_gcell ||
                 cz <  s_geo_gz0 || cz >= s_geo_gz0 + (int64_t)s_geo_gnz * s_geo_gcell);
-    if (s_use_global && off_grid) {
-        located = geo_nearest_global(cx, cz, &h); used_global = 1;
-    } else {
-        located = geo_locate(cx, cz, (int)actor->track_span_raw, &h);
-        if (!located && s_use_global) { located = geo_nearest_global(cx, cz, &h); used_global = 1; }
+    {   /* [XSPAN] hint + chassis Y on both paths: a car that left the road at a
+         * crossing must be pulled back to the carriageway it left, not to the
+         * one that happens to pass under that point. */
+        int32_t cy = FP_TRUNC(actor->world_pos.y);
+        int hint = (int)actor->track_span_raw;
+        if (s_use_global && off_grid) {
+            located = geo_nearest_global(cx, cz, cy, 1, hint, &h); used_global = 1;
+        } else {
+            located = geo_locate(cx, cz, cy, 1, hint, &h);
+            if (!located && s_use_global) {
+                located = geo_nearest_global(cx, cz, cy, 1, hint, &h); used_global = 1;
+            }
+        }
     }
 
     if (s_r_diag && actor->slot_index == 0 && (off_grid || used_global || (located && !h.inside)))
@@ -2226,6 +2574,11 @@ void td5_track_bind_boundary_sentinels(int level_number)
      * reverse case). Rebuild each load so track B never inherits track A's model. */
     if (geo_query_active()) geo_build();
     else if (geo_active() && !s_geo_quads) geo_build();
+    /* [XSPAN 2026-09-30] Census the freshly built quad soup for self-overlap.
+     * Here rather than inside geo_build because it calls geo_locate, which is
+     * declared after it; and here rather than at load_strip because this is
+     * where the track is classified custom-registry. No-op off a geo route. */
+    xspan_census();
 
     /* [TD6 SEAM-TELEPORT ROOT FIX — track-scoped, OverrideTrackZip-gated]
      * s_level_boundary_sentinels is keyed by NATIVE TD5 level number and holds
@@ -5915,6 +6268,27 @@ void td5_track_update_actor_position(TD5_Actor *actor)
                 int ot = s_span_array[old_span].span_type;
                 if (ot != 8 && ot != 9 && ot != 10 && ot != 11)
                     memcpy(track_state, saved, 16);   /* revert the spurious flip */
+            }
+        }
+        /* [XSPAN 2026-09-30] Same guard, generalised to a self-crossing MAIN
+         * ring, where the branch-vs-main ring test above cannot fire because
+         * both spans are below `ring`. The walker steps at most one span per
+         * call and a plain interior span has no link that can jump, so on a
+         * geo route this is expected to be INERT -- it is a backstop with a
+         * counter, not a mechanism, and the counter is what says whether the
+         * expectation held. Junction spans are exempt for the same reason as
+         * above: 8/9/10/11 jump legitimately. */
+        if (xspan_enabled() && old_span >= 0 && old_span < s_span_count) {
+            int new_span = (int)track_state[0];
+            int ot = s_span_array[old_span].span_type;
+            if (ot != 8 && ot != 9 && ot != 10 && ot != 11 &&
+                xspan_gap(new_span, old_span) > xspan_window()) {
+                s_xspan_revert++;
+                if (s_xspan_revert <= 8u || (s_xspan_revert & 0xFFu) == 0u)
+                    TD5_LOG_W(LOG_TAG, "[XSPAN] walker far jump %d -> %d on type-%d "
+                              "span REVERTED [n=%u]", old_span, new_span, ot,
+                              (unsigned)s_xspan_revert);
+                memcpy(track_state, saved, 16);
             }
         }
     }

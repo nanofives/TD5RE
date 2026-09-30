@@ -32,6 +32,12 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 30 (roads that cross themselves)" },
+    { CL_ITEM,    "A real-world route may now loop, cross itself or fly" },
+    { CL_ITEM,    "  over itself. The car stays on the road it is on" },
+    { CL_ITEM,    "  instead of snapping to the one underneath." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 30 (real-world tracks)" },
     { CL_ITEM,    "AUTO TRACK STUDIO has a LOCATION row: race the auto" },
     { CL_ITEM,    "  track along a real route picked on a map (run" },
