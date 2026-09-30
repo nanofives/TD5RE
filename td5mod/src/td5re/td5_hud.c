@@ -47,6 +47,7 @@
 #include "td5_i18n.h"       /* [I18N] TR() runtime string translation */
 #include "td5_pending.h"    /* dev/QA pending-test list for the in-race overlay */
 #include "td5_config.h"     /* shared TD5RE_* env-knob accessors */
+#include "td5_chaos.h"      /* [CHAOS CO-OP] per-pane role strip + swap countdown */
 
 #include <stdlib.h>
 #include <string.h>
@@ -331,6 +332,37 @@ static int hud_speedo_spacing_on(void)
         TD5_LOG_I(LOG_TAG, "speedo digit tighten: %s", s ? "on" : "off");
     }
     return s;
+}
+
+#ifndef TD5RE_RELEASE
+/* [CHAOS CO-OP 2026-09-29] Dev-only LAYOUT PREVIEW for the per-pane role strip.
+ * TD5RE_CHAOS_HUD_PREVIEW=1 draws the strip, the 3/2/1 swap countdown and the
+ * SWAP! flash from SYNTHETIC values (a team of 4 per pane, a cycling countdown)
+ * even when the mode is off, so the layout can be framedumped in an ordinary
+ * race. Default off; compiled out of RELEASE. */
+static int chaos_hud_preview_on(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_flag_off("TD5RE_CHAOS_HUD_PREVIEW");
+        if (s)
+            TD5_LOG_I(LOG_TAG, "[CHAOS CO-OP] HUD preview ON (TD5RE_CHAOS_HUD_PREVIEW=1): "
+                               "synthetic 4-seat role strip, cycling swap countdown + flash");
+    }
+    return s;
+}
+#endif
+
+/* [CHAOS CO-OP 2026-09-29] 1 while the role strip owns the bottom edge of the
+ * team panes — the mode is running, or the dev layout preview is on. Every
+ * chaos-specific branch in this file hangs off this one query, so a normal race
+ * takes exactly its old path. */
+static int chaos_hud_strip_on(void)
+{
+#ifndef TD5RE_RELEASE
+    if (chaos_hud_preview_on()) return 1;
+#endif
+    return td5_chaos_active();
 }
 
 /* Pause-overlay scale: the pause panel is screen-centred (not per-view), so it
@@ -1838,6 +1870,13 @@ void td5_hud_draw_player_id_overlays(void)
         td5_vui_quad(L, B - bt, w, bt, accent, -1, 0, 0, 0, 0);
         td5_vui_quad(L, T, bt, h, accent, -1, 0, 0, 0, 0);
         td5_vui_quad(R - bt, T, bt, h, accent, -1, 0, 0, 0, 0);
+
+        /* [CHAOS CO-OP 2026-09-29] In CHAOS CO-OP a pane is a TEAM, not a
+         * player, and the role strip already names every seat driving it — and
+         * the strip sits exactly where this plate does. Keep the coloured frame
+         * (it still identifies the pane) and drop just the plate on the two team
+         * panes. Inert outside the mode / the layout preview. */
+        if (chaos_hud_strip_on() && slot < TD5_CHAOS_TEAMS) continue;
 
         /* Name plate flush along the BOTTOM edge of the pane, sized to fit the
          * text. fe_draw_text anchors its `y` at the glyph CELL TOP, and the
@@ -5024,6 +5063,299 @@ void td5_hud_draw_pending_overlay(void) {
     td5_hud_flush_text();
 }
 
+/* ===== SECTION: CHAOS CO-OP per-pane role strip [CHAOS CO-OP 2026-09-29] =====
+ *
+ * CHAOS CO-OP puts several humans on ONE car: team t drives racer slot t and
+ * pane t, and each seat of that team holds a single control axis whose role
+ * rotates at track milestones (docs/plans/CHAOS_COOP_MODE_PLAN.md section 6.5).
+ * The strip along the bottom of each team pane is what tells a player which axis
+ * is theirs right now:
+ *
+ *   P1 LEFT   P4 RIGHT   P7 THROTTLE   P3 BRAKE          SWAP AT CP 3/5
+ *
+ * Entries follow the team's CURRENT ROW ORDER (the row carries the role, not the
+ * player); the player number takes that player's identity colour, the role name
+ * is white, and the right-hand readout is whatever td5_chaos_next_milestone_label
+ * reports. While a swap countdown runs the strip pulses and the pane centre gets
+ * a big 3/2/1 in the race-start countdown's look (its look only — the digit comes
+ * from the swap timer, not from g_cameraTransitionActive). For 1.5 s after the
+ * swap the strip enlarges and a SWAP! banner sits at the pane centre.
+ *
+ * Placement: the strip is fenced between the minimap (bottom-left) and the speedo
+ * cluster (bottom-right) using the same anchors those two use, and it shrinks its
+ * own text to fit that gap — so it clears both at 1x2 and 2x1 split sizes. The
+ * per-pane name plate is suppressed for team panes (see
+ * td5_hud_draw_player_id_overlays) because it occupies the same band.
+ * ============================================================================ */
+
+/* A team holds at most half the seats. */
+#define CHAOS_HUD_MAX_ROWS (TD5_CHAOS_MAX_SEATS / TD5_CHAOS_TEAMS)
+
+typedef struct ChaosStripRow {
+    int         player;   /* 1-based label number: seat 2 -> "P3"        */
+    uint32_t    color;    /* that player's identity colour               */
+    const char *role;     /* translated role name ("LEFT", "PEDALS", ...) */
+} ChaosStripRow;
+
+typedef struct ChaosStripState {
+    ChaosStripRow rows[CHAOS_HUD_MAX_ROWS];
+    int           row_count;
+    int           swap_ticks;    /* >0 while the swap countdown runs */
+    int           flash_ticks;   /* >0 during the post-swap flash    */
+    char          label[40];     /* right-hand readout, "" when none */
+} ChaosStripState;
+
+/* Collect everything one team pane draws this frame. Returns 0 (nothing to
+ * draw) when the mode is off and the preview knob is not set. */
+static int chaos_hud_build_state(int team, ChaosStripState *st)
+{
+    int seats, size, row, seat;
+
+    memset(st, 0, sizeof *st);
+    if (team < 0 || team >= TD5_CHAOS_TEAMS) return 0;
+
+#ifndef TD5RE_RELEASE
+    if (!td5_chaos_active() && chaos_hud_preview_on()) {
+        /* Synthetic team of 4 on a 4.5 s cycle (3 s of countdown, 1.5 s of
+         * flash), the two teams half a cycle apart so ONE framedump catches both
+         * states at once. Render clock: preview only, no sim state touched. */
+        uint32_t ms = (uint32_t)((td5_plat_time_ms() + (uint32_t)team * 2250u) % 4500u);
+        for (row = 0; row < CHAOS_HUD_MAX_ROWS; row++) {
+            int p = team * CHAOS_HUD_MAX_ROWS + row;
+            st->rows[row].player = p + 1;
+            st->rows[row].color  = hud_filler_slot_color(p);
+            st->rows[row].role   = td5_tr(td5_chaos_role_name(
+                                      td5_chaos_role_for_row(CHAOS_HUD_MAX_ROWS, row)));
+        }
+        st->row_count = CHAOS_HUD_MAX_ROWS;
+        if (ms < 3000u)
+            st->swap_ticks  = TD5_CHAOS_SWAP_COUNTDOWN_TICKS -
+                              (int)(ms * TD5_CHAOS_SWAP_COUNTDOWN_TICKS / 3000u);
+        else
+            st->flash_ticks = TD5_CHAOS_SWAP_FLASH_TICKS -
+                              (int)((ms - 3000u) * TD5_CHAOS_SWAP_FLASH_TICKS / 1500u);
+        snprintf(st->label, sizeof st->label, "%s CP 3/5", td5_tr("SWAP AT"));
+        return 1;
+    }
+#endif
+
+    if (!td5_chaos_active()) return 0;
+    seats = td5_chaos_seat_count();
+    size  = td5_chaos_team_size();
+    if (size < 1 || size > CHAOS_HUD_MAX_ROWS) return 0;
+
+    /* Row order, not seat order: row 0 is whoever currently sits in row 0. */
+    for (row = 0; row < size; row++) {
+        for (seat = 0; seat < seats; seat++) {
+            if (td5_chaos_team_of_seat(seat) != team) continue;
+            if (td5_chaos_row_of_seat(seat)  != row)  continue;
+            st->rows[st->row_count].player = seat + 1;
+            st->rows[st->row_count].color  = hud_filler_slot_color(seat);
+            st->rows[st->row_count].role   =
+                td5_tr(td5_chaos_role_name(td5_chaos_role_of_seat(seat)));
+            st->row_count++;
+            break;
+        }
+    }
+    if (st->row_count <= 0) return 0;
+
+    st->swap_ticks  = td5_chaos_swap_ticks_left(team);
+    st->flash_ticks = td5_chaos_swap_flash_ticks(team);
+    {
+        /* The module writes the bare milestone ("CP 3/5", "LAP 2", "0:12"); the
+         * "SWAP AT" wording is the HUD's, so it stays translatable here. */
+        char raw[24];
+        if (td5_chaos_next_milestone_label(team, raw, (int)sizeof raw) > 0 && raw[0])
+            snprintf(st->label, sizeof st->label, "%s %s", td5_tr("SWAP AT"), raw);
+    }
+    return 1;
+}
+
+/* Big centred swap digit in the race-start countdown's LOOK: native HUD TTF
+ * first (same helper + same COUNTDOWN_DIGIT_SCALE cap as the start countdown),
+ * NUMBERS atlas cell as the fallback. */
+static void chaos_hud_draw_big_digit(int digit, float cx, float cy, float sx, float sy)
+{
+    const float SCALE = 2.2f;   /* == COUNTDOWN_DIGIT_SCALE in the start countdown */
+    if (digit < 0 || digit > 9) return;
+    if (hud_countdown_ttf_on() &&
+        hud_draw_centered_ttf_char((char)('0' + digit), cx, cy,
+                                   sy * 24.0f * SCALE, 0xFFFFE070u))
+        return;
+    if (s_numbers_atlas) {
+        int col = digit % 5, row = digit / 5;
+        float u0 = (float)(col * 16 + s_numbers_atlas->atlas_x) + 0.5f;
+        float v0 = (float)(row * 24 + s_numbers_atlas->atlas_y) + 0.5f;
+        float dw = sx * 16.0f * SCALE;
+        float dh = sy * 24.0f * SCALE;
+        TD5_SpriteQuad q;
+        hud_build_quad(&q, 0, s_numbers_atlas->texture_page,
+                       cx - dw * 0.5f, cy - dh * 0.5f,
+                       cx + dw * 0.5f, cy + dh * 0.5f,
+                       u0, v0, u0 + 15.0f, v0 + 23.0f, 0xFFFFFFFFu, HUD_DEPTH);
+        hud_submit_quad(&q);
+    }
+}
+
+/* Bitmap fallback (VectorUI/TTF not loaded): one centred line per pane, plus a
+ * centred digit / SWAP! word. Same information, no per-entry colour — the text
+ * queue is single-colour by construction. */
+static void chaos_hud_draw_pane_bitmap(const TD5_HudViewLayout *vl,
+                                       const ChaosStripState *st)
+{
+    char line[160];
+    int  i, n = 0;
+
+    line[0] = '\0';
+    for (i = 0; i < st->row_count; i++)
+        n += snprintf(line + n, (n < (int)sizeof line) ? sizeof line - (size_t)n : 0,
+                      "%sP%d %s", i ? "   " : "", st->rows[i].player, st->rows[i].role);
+    if (st->label[0])
+        snprintf(line + n, (n < (int)sizeof line) ? sizeof line - (size_t)n : 0,
+                 "   %s", st->label);
+
+    td5_hud_queue_text(0, (int)vl->center_x, (int)(vl->vp_int_bottom - 20.0f), 1,
+                       "%s", line);
+    if (st->swap_ticks > 0) {
+        int digit = (st->swap_ticks + 29) / 30;
+        if (digit > 3) digit = 3;
+        if (digit >= 1)
+            td5_hud_queue_text(0, (int)vl->center_x, (int)vl->center_y, 1, "%d", digit);
+    } else if (st->flash_ticks > 0) {
+        td5_hud_queue_text(0, (int)vl->center_x, (int)vl->center_y, 1,
+                           "%s", td5_tr("SWAP!"));
+    }
+    td5_hud_flush_text();
+}
+
+/* Lay out and draw one team pane's strip. */
+static void chaos_hud_draw_pane(int v, const ChaosStripState *st)
+{
+    const TD5_HudViewLayout *vl = &s_view_layout[v];
+    float L = vl->vp_int_left, R = vl->vp_int_right, B = vl->vp_int_bottom;
+    float w = R - L;
+    float sx, sy, ssx, inner_l, inner_r, avail, ts, gap, need, frame;
+    float band_h, band_b, band_t, x, ny;
+    int   i, pulse;
+    char  pbuf[8];
+    uint32_t band_col, label_col;
+
+    if (w < 2.0f) return;
+    sx  = vl->scale_x;
+    sy  = vl->scale_y;
+    ssx = sx * 1.15f;                       /* the speedo cluster's +15% scale */
+
+    /* Fence the strip between the two bottom-corner widgets, using THEIR anchors:
+     * the minimap spans vp_left + sx*8 .. + sx*115 (hud_set_minimap_for_view), the
+     * speedo dial starts at vp_right - ssx*(96+16) (td5_hud_init_layout). */
+    inner_l = L + sx * (8.0f + 115.0f + 6.0f);
+    inner_r = R - ssx * 112.0f - sx * 6.0f;
+    avail   = inner_r - inner_l;
+    if (avail < 60.0f) return;              /* pane too small for a readable strip */
+
+    if (!td5_hudfont_ready()) {             /* TTF-first, bitmap fallback */
+        chaos_hud_draw_pane_bitmap(vl, st);
+        return;
+    }
+
+    /* Same sizing treatment as the other per-pane text (name plate, WRECKS). */
+    ts = (w / 640.0f) * 0.80f;
+    if (hud_dpi_scale_on()) ts *= hud_size_mul();
+    if (ts > 1.30f) ts = 1.30f;
+    if (ts < 0.35f) ts = 0.35f;
+    /* Enlarged role entries during the post-swap flash (plan 6.5). */
+    if (st->flash_ticks > 0) ts *= 1.35f;
+    gap = 14.0f * ts;
+
+    /* Shrink to the fenced width so neither the flash nor a long readout can
+     * push an entry under the speedo. */
+    need = 0.0f;
+    for (i = 0; i < st->row_count; i++) {
+        snprintf(pbuf, sizeof pbuf, "P%d", st->rows[i].player);
+        need += td5_vui_text_width(pbuf, ts) + 5.0f * ts
+              + td5_vui_text_width(st->rows[i].role, ts) + gap;
+    }
+    if (st->label[0]) need += td5_vui_text_width(st->label, ts);
+    if (need > avail && need > 1.0f) {
+        float k = avail / need;
+        ts  *= k;
+        gap *= k;
+        if (ts < 0.20f) return;             /* would be unreadable anyway */
+    }
+
+    /* Tuck the band inside the pane's identity frame when one is drawn. */
+    frame = 0.0f;
+    if (s_hud_id_active && s_view_count >= 2) {
+        frame = 3.0f * (w / 640.0f);
+        if (frame < 2.0f) frame = 2.0f;
+        if (frame > 5.0f) frame = 5.0f;
+    }
+    band_h = 25.0f * ts;                    /* 15*ts cap band + 5*ts padding each side */
+    band_b = B - frame - 2.0f * sy;
+    band_t = band_b - band_h;
+
+    /* ~3 Hz pulse while the countdown runs — render clock, display only (the
+     * same trick td5_hud_draw_brokedown_prompt uses for its CONTINUE line). */
+    pulse     = (st->swap_ticks > 0) && ((((int)(td5_plat_time_ms() / 160)) & 1) == 0);
+    band_col  = pulse ? 0xC0384050u : 0xA0101018u;
+    label_col = pulse ? 0xFFFFE070u : 0xFFC8C8C8u;
+
+    td5_vui_quad(inner_l - 6.0f * ts, band_t,
+                 avail + 12.0f * ts, band_h, band_col, -1, 0, 0, 0, 0);
+
+    /* fe_draw_text anchors `y` at the glyph CELL TOP and the caps occupy cell
+     * rows 8..23, so the cap band centres 15.5*ts below it (name-plate rule). */
+    ny = (band_t + band_b) * 0.5f - 15.5f * ts;
+    x  = inner_l;
+    for (i = 0; i < st->row_count; i++) {
+        snprintf(pbuf, sizeof pbuf, "P%d", st->rows[i].player);
+        td5_vui_text(x, ny, pbuf, st->rows[i].color, ts, ts);
+        x += td5_vui_text_width(pbuf, ts) + 5.0f * ts;
+        td5_vui_text(x, ny, st->rows[i].role, 0xFFFFFFFFu, ts, ts);
+        x += td5_vui_text_width(st->rows[i].role, ts) + gap;
+    }
+    if (st->label[0]) {
+        float lx = inner_r - td5_vui_text_width(st->label, ts);
+        if (lx < x) lx = x;                 /* never sit on the last entry */
+        td5_vui_text(lx, ny, st->label, label_col, ts, ts);
+    }
+
+    if (st->swap_ticks > 0) {
+        int digit = (st->swap_ticks + 29) / 30;   /* 90..61 -> 3, 60..31 -> 2, 30..1 -> 1 */
+        if (digit > 3) digit = 3;
+        if (digit >= 1)
+            chaos_hud_draw_big_digit(digit, vl->center_x, vl->center_y, sx, sy);
+    } else if (st->flash_ticks > 0) {
+        float bs = ts * 2.0f;
+        td5_vui_text_centered(vl->center_x, vl->center_y - 15.5f * bs,
+                              td5_tr("SWAP!"), 0xFFFFE070u, bs, bs);
+    }
+}
+
+/* Draw the CHAOS CO-OP role strips. Called from the tail of
+ * td5_hud_render_overlays, in the restored full-screen pass (the same context
+ * the damage bars and the BROKE DOWN prompt draw in). No-op unless the mode is
+ * running or the dev layout preview is on. */
+static void hud_draw_chaos_role_strips(void)
+{
+    int views, v;
+
+    if (!chaos_hud_strip_on()) return;
+    if (g_demo_mode != 0 && hud_demo_hud_on()) return;   /* demo shows the caption only */
+
+    views = s_view_count;
+    if (views < 1) views = 1;
+    if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
+
+    for (v = 0; v < views; v++) {
+        ChaosStripState st;
+        int team = g_actor_slot_map[v];     /* team t drives racer slot t and pane t */
+        if (team < 0 || team >= TD5_CHAOS_TEAMS) continue;
+        if (!chaos_hud_build_state(team, &st)) continue;
+        chaos_hud_draw_pane(v, &st);
+    }
+}
+
 void td5_hud_render_overlays(float dt)
 {
     /* dt is normalized 30 Hz frame time from td5_game.c. */
@@ -6144,6 +6476,14 @@ void td5_hud_render_overlays(float dt)
          (g_td5.drag_race_enabled && !td5_game_drag_mp_active()))) {
         td5_render_radial_pulse(dt);
     }
+
+    /* [CHAOS CO-OP 2026-09-29] Per-pane role strip + swap countdown / flash.
+     * Drawn here, at the tail of the full-screen overlay pass, because the mode
+     * has no call site of its own in td5_game.c's overlay list; the projection
+     * and clip rect are already back to full-screen (restored above), which is
+     * what the strip's absolute pane coordinates need. Self-gated: no draw calls
+     * at all unless CHAOS CO-OP is running (or the dev preview knob is set). */
+    hud_draw_chaos_role_strips();
 
     /* Split-screen divider bars [PORT: N-way grid] */
     hud_draw_split_dividers();
