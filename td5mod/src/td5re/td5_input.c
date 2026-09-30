@@ -572,6 +572,80 @@ void td5_input_set_action_bindings(int player, const uint32_t *codes, int count)
     td5_plat_input_set_action_bindings(player, codes, count);
 }
 
+/* [CHAOS CO-OP 2026-09-29] The per-slot half of td5_input_apply_device_selection,
+ * lifted out VERBATIM (same statements, same order) so a caller that knows the
+ * device it wants can get the binding rows pushed too. `source` must already be
+ * clamped to a real device; `bind` is the controller binding table (NULL ok) —
+ * both are parameters rather than re-fetched here so the loop below keeps its
+ * single td5_plat_input_enumerate_devices() /
+ * td5_save_get_controller_bindings_mutable() call, exactly as before. */
+static void input_apply_device_slot(int slot, int source, const uint32_t *bind)
+{
+    const int p = slot;
+    const int src = source;
+
+    td5_input_set_input_source(p, src);   /* creates/releases the device */
+    if (src > 0 && bind) {
+        int32_t row[9];
+        for (int i = 0; i < 9; i++) row[i] = (int32_t)bind[p * 9 + i];
+        td5_input_set_joystick_bindings(p, row, 9);
+    }
+    /* Push the per-action bindings (button/axis/trigger). These FOLLOW THE
+     * DEVICE, not the player slot: a controller configured under ANY
+     * Control-Options player applies whenever that physical device drives a
+     * race slot. (Otherwise configuring "PLAYER 2"'s joystick and then
+     * driving slot 0 with it would fall back to the default mapping — the
+     * bug being fixed.) Find the configured owner of this slot's device:
+     * prefer a player whose persisted device == src AND has bindings, else
+     * any player on that device, else this slot's own row.
+     * [PORT ENHANCEMENT 2026-06] */
+    if (src > 0) {
+        const uint32_t *ab = td5_save_get_action_bindings_mutable();
+        if (ab) {
+            int owner = -1, q, i;
+            for (q = 0; q < TD5_MAX_HUMAN_PLAYERS; q++) {
+                if ((int)td5_save_get_player_device_index(q) != src) continue;
+                const uint32_t *row = ab + (size_t)q * TD5_JSBIND_ACTIONS;
+                int any = 0;
+                for (i = 0; i < TD5_JSBIND_ACTIONS; i++) if (row[i]) { any = 1; break; }
+                if (any) { owner = q; break; }   /* configured owner wins */
+                if (owner < 0) owner = q;        /* else first claimant of the device */
+            }
+            if (owner < 0) owner = p;            /* fallback: this slot's own row */
+            {
+                const uint32_t *row = ab + (size_t)owner * TD5_JSBIND_ACTIONS;
+                int any = 0;
+                for (i = 0; i < TD5_JSBIND_ACTIONS; i++) if (row[i]) { any = 1; break; }
+                if (any) {
+                    td5_input_set_action_bindings(p, row, TD5_JSBIND_ACTIONS);
+                    TD5_LOG_I(LOG_TAG, "Device selection: slot=%d device=%d uses bindings from player %d",
+                              p, src, owner + 1);
+                }
+            }
+        }
+    }
+    TD5_LOG_I(LOG_TAG, "Device selection: player=%d source=%d (%s)",
+              p, src, (src == 0) ? "keyboard" : "joystick");
+}
+
+/* [CHAOS CO-OP 2026-09-29] Public entry point for the above: re-point ONE slot
+ * at an explicitly chosen device and push the binding rows that follow it.
+ * Needed because a chaos SEAT is bound to its own device after
+ * td5_input_apply_device_selection() has already pushed the binding rows the
+ * SLOT's persisted owner implies — a bare td5_input_set_input_source() swaps
+ * the device but leaves those stale rows in place, so the seat would read
+ * another device's button map. Enumerates (idempotent) to clamp a bogus index
+ * back to the keyboard, exactly as the resolve loop below does. */
+void td5_input_apply_device_for_slot(int slot, int source)
+{
+    int dev_count;
+    if (slot < 0 || slot >= TD5_MAX_HUMAN_PLAYERS) return;
+    dev_count = td5_plat_input_enumerate_devices();
+    if (source < 0 || source >= dev_count) source = 0;
+    input_apply_device_slot(slot, source,
+                            td5_save_get_controller_bindings_mutable());
+}
+
 /* Resolve and apply each player's input device + bindings at race start.
  * Source precedence: INI override (Player1Joystick/Player2Joystick, >0 = a
  * 1-based enumerated joystick index) wins for players 1/2; otherwise the
@@ -603,48 +677,10 @@ void td5_input_apply_device_selection(void)
          * carries a non-zero placeholder at +0x20/+0x21). */
         if (src < 0 || src >= dev_count) src = 0;
 
-        td5_input_set_input_source(p, src);   /* creates/releases the device */
-        if (src > 0 && bind) {
-            int32_t row[9];
-            for (int i = 0; i < 9; i++) row[i] = (int32_t)bind[p * 9 + i];
-            td5_input_set_joystick_bindings(p, row, 9);
-        }
-        /* Push the per-action bindings (button/axis/trigger). These FOLLOW THE
-         * DEVICE, not the player slot: a controller configured under ANY
-         * Control-Options player applies whenever that physical device drives a
-         * race slot. (Otherwise configuring "PLAYER 2"'s joystick and then
-         * driving slot 0 with it would fall back to the default mapping — the
-         * bug being fixed.) Find the configured owner of this slot's device:
-         * prefer a player whose persisted device == src AND has bindings, else
-         * any player on that device, else this slot's own row.
-         * [PORT ENHANCEMENT 2026-06] */
-        if (src > 0) {
-            const uint32_t *ab = td5_save_get_action_bindings_mutable();
-            if (ab) {
-                int owner = -1, q, i;
-                for (q = 0; q < TD5_MAX_HUMAN_PLAYERS; q++) {
-                    if ((int)td5_save_get_player_device_index(q) != src) continue;
-                    const uint32_t *row = ab + (size_t)q * TD5_JSBIND_ACTIONS;
-                    int any = 0;
-                    for (i = 0; i < TD5_JSBIND_ACTIONS; i++) if (row[i]) { any = 1; break; }
-                    if (any) { owner = q; break; }   /* configured owner wins */
-                    if (owner < 0) owner = q;        /* else first claimant of the device */
-                }
-                if (owner < 0) owner = p;            /* fallback: this slot's own row */
-                {
-                    const uint32_t *row = ab + (size_t)owner * TD5_JSBIND_ACTIONS;
-                    int any = 0;
-                    for (i = 0; i < TD5_JSBIND_ACTIONS; i++) if (row[i]) { any = 1; break; }
-                    if (any) {
-                        td5_input_set_action_bindings(p, row, TD5_JSBIND_ACTIONS);
-                        TD5_LOG_I(LOG_TAG, "Device selection: slot=%d device=%d uses bindings from player %d",
-                                  p, src, owner + 1);
-                    }
-                }
-            }
-        }
-        TD5_LOG_I(LOG_TAG, "Device selection: player=%d source=%d (%s)",
-                  p, src, (src == 0) ? "keyboard" : "joystick");
+        /* [CHAOS CO-OP 2026-09-29] Body lifted into input_apply_device_slot()
+         * verbatim — same statements, same order, same per-loop values of
+         * `bind` and the resolved `src`. */
+        input_apply_device_slot(p, src, bind);
     }
 }
 void td5_input_set_playback_active(int v)       { s_playback_active = v; }

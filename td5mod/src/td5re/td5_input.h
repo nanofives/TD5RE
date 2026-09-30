@@ -320,6 +320,15 @@ void td5_input_set_action_bindings(int player, const uint32_t *codes, int count)
 /** Resolve+apply both players' input devices (INI override or Config.td5) and
  *  push joystick bindings. Call at race start before force-feedback init. */
 void td5_input_apply_device_selection(void);
+/** [CHAOS CO-OP 2026-09-29] The per-slot half of td5_input_apply_device_selection
+ *  for an EXPLICITLY chosen source (0 = keyboard, >=1 = 1-based joystick enum
+ *  index), clamped to keyboard when out of range. Binds the device AND pushes
+ *  the 9-slot + per-action binding rows that follow THAT DEVICE, so a caller
+ *  that re-points a slot at a different device after
+ *  td5_input_apply_device_selection() does not leave the slot reading the
+ *  previous owner's bindings. Use this instead of a bare
+ *  td5_input_set_input_source() whenever the device is being changed. */
+void td5_input_apply_device_for_slot(int slot, int source);
 void td5_input_set_playback_active(int v);
 int  td5_input_is_playback_active(void);
 int  td5_input_replay_exit_requested(void);  /* [item 18] one-shot: controller Back/Start pressed during replay */
