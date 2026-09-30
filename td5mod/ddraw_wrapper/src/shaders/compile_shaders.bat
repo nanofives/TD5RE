@@ -142,4 +142,26 @@ REM log/d3d12_init.log as "DXR: tier=").
 if errorlevel 1 (echo FAILED: rt_pipeline ^(dxil lib_6_5^) && exit /b 1)
 echo   rt_pipeline (DXIL lib_6_5) OK
 
+REM ===========================================================================
+REM [DXIL 2026-09-29] SM 6.0 DXIL builds of every raster/compute shader above
+REM (g_<name>_60 in <name>_bytes_60.h), compiled by the same dxc as the RT
+REM library (signed via the SDK's dxil.dll). The D3D12 backend feeds these by
+REM default so the runtime never has to convert SM5.0 DXBC -> DXIL in
+REM dxilconv.dll, which faulted (+0xB20DA) on a cold shader cache: 8 of 54 cold
+REM runs, on byte-exact shaders. TD5RE_SHADER_DXIL=0 selects the _50 DXBC set.
+REM ===========================================================================
+for %%S in (vs_pretransformed vs_fullscreen) do (
+    %DXC% -nologo -O3 -T vs_6_0 -E main -Fh %%S_bytes_60.h -Vn g_%%S_60 %%S.hlsl
+    if errorlevel 1 (echo FAILED: %%S ^(dxil^) && exit /b 1)
+)
+for %%S in (ps_modulate ps_modulate_alpha ps_modulate_g ps_modulate_alpha_g ps_modulate_shadowed ps_modulate_alpha_shadowed ps_decal ps_luminance_alpha ps_composite ps_light ps_shadow ps_ssr ps_shadow_rt ps_light_rt ps_ssr_rt ps_msdf ps_roundrect ps_arrow ps_cursor ps_gauge ps_fx_smoke ps_fx_rain ps_fx_decal ps_fx_glow) do (
+    %DXC% -nologo -O3 -T ps_6_0 -E main -Fh %%S_bytes_60.h -Vn g_%%S_60 %%S.hlsl
+    if errorlevel 1 (echo FAILED: %%S ^(dxil^) && exit /b 1)
+)
+for %%S in (cs_shadow_atrous cs_color_atrous) do (
+    %DXC% -nologo -O3 -T cs_6_0 -E main -Fh %%S_bytes_60.h -Vn g_%%S_60 %%S.hlsl
+    if errorlevel 1 (echo FAILED: %%S ^(dxil^) && exit /b 1)
+)
+echo   SM6.0 DXIL variants OK
+
 echo All shaders compiled successfully.

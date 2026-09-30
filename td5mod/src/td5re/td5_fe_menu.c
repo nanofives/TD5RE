@@ -55,9 +55,16 @@
 #include "../../ddraw_wrapper/src/shaders/ps_arrow_bytes_50.h"
 #include "../../ddraw_wrapper/src/shaders/ps_cursor_bytes_50.h"
 #include "../../ddraw_wrapper/src/shaders/ps_gauge_bytes_50.h"
+#include "../../ddraw_wrapper/src/shaders/ps_msdf_bytes_60.h"      /* [DXIL 2026-09-29] */
+#include "../../ddraw_wrapper/src/shaders/ps_roundrect_bytes_60.h"
+#include "../../ddraw_wrapper/src/shaders/ps_arrow_bytes_60.h"
+#include "../../ddraw_wrapper/src/shaders/ps_cursor_bytes_60.h"
+#include "../../ddraw_wrapper/src/shaders/ps_gauge_bytes_60.h"
 #include "td5_config.h"   /* td5_env_int */
-#define FE_PS(n) (s_fe_sm4 ? (const void *)g_##n : (const void *)g_##n##_50)
-#define FE_PS_LEN(n) (s_fe_sm4 ? sizeof(g_##n) : sizeof(g_##n##_50))
+/* The backend's shader set decides: DXIL (default) needs the _60 build, since
+ * a PSO must not mix DXBC and DXIL stages. */
+#define FE_PS(n) (Backend_ShaderDXIL() ? (const void *)g_##n##_60 :                   s_fe_sm4 ? (const void *)g_##n : (const void *)g_##n##_50)
+#define FE_PS_LEN(n) (Backend_ShaderDXIL() ? sizeof(g_##n##_60) :                       s_fe_sm4 ? sizeof(g_##n) : sizeof(g_##n##_50))
 
 #define LOG_TAG "frontend"
 #include "td5_color.h"

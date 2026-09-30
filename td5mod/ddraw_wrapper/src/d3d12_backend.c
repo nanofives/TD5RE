@@ -67,19 +67,33 @@ static D3D12State g_d3d12;
  * ======================================================================== */
 
 #include "shaders/vs_pretransformed_bytes_50.h"
+#include "shaders/vs_pretransformed_bytes_60.h"
 #include "shaders/vs_fullscreen_bytes_50.h"
+#include "shaders/vs_fullscreen_bytes_60.h"
 #include "shaders/ps_modulate_bytes_50.h"
+#include "shaders/ps_modulate_bytes_60.h"
 #include "shaders/ps_modulate_alpha_bytes_50.h"
+#include "shaders/ps_modulate_alpha_bytes_60.h"
 #include "shaders/ps_decal_bytes_50.h"
+#include "shaders/ps_decal_bytes_60.h"
 #include "shaders/ps_luminance_alpha_bytes_50.h"
+#include "shaders/ps_luminance_alpha_bytes_60.h"
 #include "shaders/ps_modulate_g_bytes_50.h"
+#include "shaders/ps_modulate_g_bytes_60.h"
 #include "shaders/ps_modulate_alpha_g_bytes_50.h"
+#include "shaders/ps_modulate_alpha_g_bytes_60.h"
 #include "shaders/ps_modulate_shadowed_bytes_50.h"        /* [RT2-P3] receive sun shadow */
+#include "shaders/ps_modulate_shadowed_bytes_60.h"
 #include "shaders/ps_modulate_alpha_shadowed_bytes_50.h"
+#include "shaders/ps_modulate_alpha_shadowed_bytes_60.h"
 #include "shaders/ps_composite_bytes_50.h"     /* present-time fullscreen blit */
+#include "shaders/ps_composite_bytes_60.h"
 #include "shaders/ps_shadow_bytes_50.h"        /* screen-space sun-shadow pass  */
+#include "shaders/ps_shadow_bytes_60.h"
 #include "shaders/ps_light_bytes_50.h"         /* deferred dynamic-light pass   */
+#include "shaders/ps_light_bytes_60.h"
 #include "shaders/ps_ssr_bytes_50.h"           /* screen-space reflections pass */
+#include "shaders/ps_ssr_bytes_60.h"
 
 #ifndef TD5_VERTEX_STRIDE
 #define TD5_VERTEX_STRIDE 32   /* XYZRHW: float4 pos + BGRA diffuse + BGRA specular + float2 uv */
@@ -338,6 +352,18 @@ static D3D12_CPU_DESCRIPTOR_HANDLE d3d12_rtv_handle(UINT i)
 
 /* CPU-agnostic forensics/env used by this file (the D3D11 versions live in the
  * filtered-out d3d11_backend files, so the d3d12 lib needs its own). */
+int d3d12_shader_dxil(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("TD5RE_SHADER_DXIL");
+        cached = (e && e[0] == '0') ? 0 : 1;
+        WRAPPER_LOG("D3D12 shader set: %s (TD5RE_SHADER_DXIL)", cached ? "SM6.0 DXIL" : "SM5.0 DXBC");
+    }
+    return cached;
+}
+int Backend_ShaderDXIL(void) { return d3d12_shader_dxil(); }
+
 int Backend_D3DDebugEnabled(void)
 {
     static int cached = -1;
@@ -1214,8 +1240,8 @@ static ID3D12PipelineState *d3d12_get_pso(int vs_idx, int ps_id, int blend, int 
     for (i = 0; i < s_pso_count; i++) if (s_pso_cache[i].key == key) return s_pso_cache[i].pso;
     if (s_pso_count >= D3D12_PSO_CACHE_MAX) { WRAPPER_LOG("D3D12 PSO cache full"); return NULL; }
 
-    vbc = (vs_idx == 1) ? (const void *)g_vs_fullscreen_50 : (const void *)g_vs_pretransformed_50;
-    vlen= (vs_idx == 1) ? sizeof(g_vs_fullscreen_50) : sizeof(g_vs_pretransformed_50);
+    vbc = (vs_idx == 1) ? SH_BC(vs_fullscreen) : SH_BC(vs_pretransformed);
+    vlen= (vs_idx == 1) ? SH_LEN(vs_fullscreen) : SH_LEN(vs_pretransformed);
     d3d12_resolve_ps(ps_id, &pbc, &plen);
 
     ZeroMemory(&pd, sizeof(pd));
@@ -1571,7 +1597,7 @@ static ID3D12PipelineState *d3d12_get_pass_pso(const void *ps, SIZE_T ps_len, in
     if (s_pass_pso_count >= (int)(sizeof(s_pass_pso)/sizeof(s_pass_pso[0]))) return NULL;
     ZeroMemory(&pd, sizeof(pd));
     pd.pRootSignature = s_pass_root_sig;
-    pd.VS.pShaderBytecode = g_vs_fullscreen_50; pd.VS.BytecodeLength = sizeof(g_vs_fullscreen_50);
+    pd.VS.pShaderBytecode = SH_BC(vs_fullscreen); pd.VS.BytecodeLength = SH_LEN(vs_fullscreen);
     pd.PS.pShaderBytecode = ps; pd.PS.BytecodeLength = ps_len;
     d3d12_fill_blend(blend, &pd.BlendState);
     d3d12_fill_ds(DS_Z_OFF_WRITE_OFF, &pd.DepthStencilState);
@@ -2396,14 +2422,14 @@ static int d3d12_render_core_init(int width, int height)
     ID3D12GraphicsCommandList_Close(s_copy_list);
 
     /* Builtin PS bytecode table. */
-    s_builtin_ps[PS_MODULATE].bc        = g_ps_modulate_50;        s_builtin_ps[PS_MODULATE].len        = sizeof(g_ps_modulate_50);
-    s_builtin_ps[PS_MODULATE_ALPHA].bc  = g_ps_modulate_alpha_50;  s_builtin_ps[PS_MODULATE_ALPHA].len  = sizeof(g_ps_modulate_alpha_50);
-    s_builtin_ps[PS_DECAL].bc           = g_ps_decal_50;           s_builtin_ps[PS_DECAL].len           = sizeof(g_ps_decal_50);
-    s_builtin_ps[PS_LUMINANCE_ALPHA].bc = g_ps_luminance_alpha_50; s_builtin_ps[PS_LUMINANCE_ALPHA].len = sizeof(g_ps_luminance_alpha_50);
-    s_builtin_ps[PS_MODULATE_G].bc      = g_ps_modulate_g_50;      s_builtin_ps[PS_MODULATE_G].len      = sizeof(g_ps_modulate_g_50);
-    s_builtin_ps[PS_MODULATE_ALPHA_G].bc= g_ps_modulate_alpha_g_50;s_builtin_ps[PS_MODULATE_ALPHA_G].len= sizeof(g_ps_modulate_alpha_g_50);
-    s_builtin_ps[PS_MODULATE_SHADOWED].bc       = g_ps_modulate_shadowed_50;       s_builtin_ps[PS_MODULATE_SHADOWED].len       = sizeof(g_ps_modulate_shadowed_50);
-    s_builtin_ps[PS_MODULATE_ALPHA_SHADOWED].bc = g_ps_modulate_alpha_shadowed_50; s_builtin_ps[PS_MODULATE_ALPHA_SHADOWED].len = sizeof(g_ps_modulate_alpha_shadowed_50);
+    s_builtin_ps[PS_MODULATE].bc        = SH_BC(ps_modulate);        s_builtin_ps[PS_MODULATE].len        = SH_LEN(ps_modulate);
+    s_builtin_ps[PS_MODULATE_ALPHA].bc  = SH_BC(ps_modulate_alpha);  s_builtin_ps[PS_MODULATE_ALPHA].len  = SH_LEN(ps_modulate_alpha);
+    s_builtin_ps[PS_DECAL].bc           = SH_BC(ps_decal);           s_builtin_ps[PS_DECAL].len           = SH_LEN(ps_decal);
+    s_builtin_ps[PS_LUMINANCE_ALPHA].bc = SH_BC(ps_luminance_alpha); s_builtin_ps[PS_LUMINANCE_ALPHA].len = SH_LEN(ps_luminance_alpha);
+    s_builtin_ps[PS_MODULATE_G].bc      = SH_BC(ps_modulate_g);      s_builtin_ps[PS_MODULATE_G].len      = SH_LEN(ps_modulate_g);
+    s_builtin_ps[PS_MODULATE_ALPHA_G].bc= SH_BC(ps_modulate_alpha_g);s_builtin_ps[PS_MODULATE_ALPHA_G].len= SH_LEN(ps_modulate_alpha_g);
+    s_builtin_ps[PS_MODULATE_SHADOWED].bc       = SH_BC(ps_modulate_shadowed);       s_builtin_ps[PS_MODULATE_SHADOWED].len       = SH_LEN(ps_modulate_shadowed);
+    s_builtin_ps[PS_MODULATE_ALPHA_SHADOWED].bc = SH_BC(ps_modulate_alpha_shadowed); s_builtin_ps[PS_MODULATE_ALPHA_SHADOWED].len = SH_LEN(ps_modulate_alpha_shadowed);
 
     /* Persistent viewport (b0 VS) + fog (b0 PS) const buffers. */
     s_viewport_cb = d3d12_cb_create(sizeof(ViewportCB));
@@ -2436,8 +2462,8 @@ static int d3d12_render_core_init(int width, int height)
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pd;
         ZeroMemory(&pd, sizeof(pd));
         pd.pRootSignature = s_root_sig;
-        pd.VS.pShaderBytecode = g_vs_fullscreen_50; pd.VS.BytecodeLength = sizeof(g_vs_fullscreen_50);
-        pd.PS.pShaderBytecode = g_ps_composite_50;  pd.PS.BytecodeLength = sizeof(g_ps_composite_50);
+        pd.VS.pShaderBytecode = SH_BC(vs_fullscreen); pd.VS.BytecodeLength = SH_LEN(vs_fullscreen);
+        pd.PS.pShaderBytecode = SH_BC(ps_composite);  pd.PS.BytecodeLength = SH_LEN(ps_composite);
         d3d12_fill_blend(BLEND_OPAQUE, &pd.BlendState);
         d3d12_fill_ds(DS_Z_OFF_WRITE_OFF, &pd.DepthStencilState);
         d3d12_fill_raster(0, &pd.RasterizerState);
@@ -2977,10 +3003,10 @@ D3D12_GPU_VIRTUAL_ADDRESS d3d12_priv_ring_cb(const void *data, UINT size) { retu
 void d3d12_priv_fullscreen_shaders(const void **vs, SIZE_T *vs_len,
                                    const void **ps, SIZE_T *ps_len)
 {
-    if (vs)     *vs     = g_vs_fullscreen_50;
-    if (vs_len) *vs_len = sizeof(g_vs_fullscreen_50);
-    if (ps)     *ps     = g_ps_composite_50;
-    if (ps_len) *ps_len = sizeof(g_ps_composite_50);
+    if (vs)     *vs     = SH_BC(vs_fullscreen);
+    if (vs_len) *vs_len = SH_LEN(vs_fullscreen);
+    if (ps)     *ps     = SH_BC(ps_composite);
+    if (ps_len) *ps_len = SH_LEN(ps_composite);
 }
 
 /* [P2b] Expose depth + gbuffer to the DXR module + transition them for a DXR
@@ -3088,7 +3114,7 @@ void Backend_ApplyLightPass(const LightCB *cb)
     if (!cb) return;
     if (s_rt_mode && d3d12_dxr_light_pass(cb)) return;   /* RT occlusion composite */
     srvs[0] = s_depth_srv_slot;
-    d3d12_fullscreen_pass(g_ps_light_50, sizeof(g_ps_light_50), BLEND_ONE_ONE,
+    d3d12_fullscreen_pass(SH_BC(ps_light), SH_LEN(ps_light), BLEND_ONE_ONE,
                           cb, sizeof(LightCB), srvs, 1);
 }
 /* Screen-space reflections: copy the current scene color to s_scene_copy, then
@@ -3124,7 +3150,7 @@ void Backend_ApplySSRPass(const SSRCB *cb)
     srvs[0] = s_depth_srv_slot;
     srvs[1] = s_black_tex ? s_black_tex->srv_slot : s_depth_srv_slot;
     srvs[2] = s_scene_copy->srv_slot;
-    d3d12_fullscreen_pass(g_ps_ssr_50, sizeof(g_ps_ssr_50), BLEND_SRCALPHA_INVSRC,
+    d3d12_fullscreen_pass(SH_BC(ps_ssr), SH_LEN(ps_ssr), BLEND_SRCALPHA_INVSRC,
                           cb, sizeof(SSRCB), srvs, 3);
 }
 /* Screen-space ray-marched sun shadow: multiplicative fullscreen pass that
@@ -3138,7 +3164,7 @@ void Backend_ApplyShadowPass(const ShadowCB *cb)
     if (!cb) return;
     if (s_rt_mode && d3d12_dxr_shadow_pass(cb)) return;   /* RT sun-shadow composite */
     srvs[0] = s_depth_srv_slot;
-    d3d12_fullscreen_pass(g_ps_shadow_50, sizeof(g_ps_shadow_50), BLEND_MULT,
+    d3d12_fullscreen_pass(SH_BC(ps_shadow), SH_LEN(ps_shadow), BLEND_MULT,
                           cb, sizeof(ShadowCB), srvs, 1);
 }
 

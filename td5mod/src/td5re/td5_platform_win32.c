@@ -53,6 +53,10 @@
 #include "../../ddraw_wrapper/src/shaders/ps_fx_rain_bytes_50.h"   /* g_ps_fx_rain_50  */
 #include "../../ddraw_wrapper/src/shaders/ps_fx_decal_bytes_50.h"  /* g_ps_fx_decal_50 */
 #include "../../ddraw_wrapper/src/shaders/ps_fx_glow_bytes_50.h"   /* g_ps_fx_glow_50  */
+#include "../../ddraw_wrapper/src/shaders/ps_fx_smoke_bytes_60.h"  /* [DXIL 2026-09-29] g_ps_fx_*_60 */
+#include "../../ddraw_wrapper/src/shaders/ps_fx_rain_bytes_60.h"
+#include "../../ddraw_wrapper/src/shaders/ps_fx_decal_bytes_60.h"
+#include "../../ddraw_wrapper/src/shaders/ps_fx_glow_bytes_60.h"
 
 #define LOG_TAG "platform"
 #include "td5_color.h"
@@ -3375,15 +3379,16 @@ static BackendPixelShader *fx_ensure_shader(TD5_FxShader which)
     SIZE_T      size = 0;
     const char *name = "?";
     int sm4 = td5_env_int("TD5RE_SHADER_SM4", 0, 0, 1);   /* A/B: 1 = retired ps_4_0 arrays */
+    int dxil = Backend_ShaderDXIL();   /* DXIL backend set -> the _60 build (no DXBC/DXIL mix in a PSO) */
     switch (which) {
-    case TD5_FX_SMOKE: code = sm4 ? g_ps_fx_smoke : g_ps_fx_smoke_50;
-                       size = sm4 ? sizeof(g_ps_fx_smoke) : sizeof(g_ps_fx_smoke_50); name = "smoke"; break;
-    case TD5_FX_RAIN:  code = sm4 ? g_ps_fx_rain : g_ps_fx_rain_50;
-                       size = sm4 ? sizeof(g_ps_fx_rain) : sizeof(g_ps_fx_rain_50);   name = "rain";  break;
-    case TD5_FX_DECAL: code = sm4 ? g_ps_fx_decal : g_ps_fx_decal_50;
-                       size = sm4 ? sizeof(g_ps_fx_decal) : sizeof(g_ps_fx_decal_50); name = "decal"; break;
-    case TD5_FX_GLOW:  code = sm4 ? g_ps_fx_glow : g_ps_fx_glow_50;
-                       size = sm4 ? sizeof(g_ps_fx_glow) : sizeof(g_ps_fx_glow_50);   name = "glow";  break;
+    case TD5_FX_SMOKE: code = dxil ? g_ps_fx_smoke_60 : sm4 ? g_ps_fx_smoke : g_ps_fx_smoke_50;
+                       size = dxil ? sizeof(g_ps_fx_smoke_60) : sm4 ? sizeof(g_ps_fx_smoke) : sizeof(g_ps_fx_smoke_50); name = "smoke"; break;
+    case TD5_FX_RAIN:  code = dxil ? g_ps_fx_rain_60 : sm4 ? g_ps_fx_rain : g_ps_fx_rain_50;
+                       size = dxil ? sizeof(g_ps_fx_rain_60) : sm4 ? sizeof(g_ps_fx_rain) : sizeof(g_ps_fx_rain_50);   name = "rain";  break;
+    case TD5_FX_DECAL: code = dxil ? g_ps_fx_decal_60 : sm4 ? g_ps_fx_decal : g_ps_fx_decal_50;
+                       size = dxil ? sizeof(g_ps_fx_decal_60) : sm4 ? sizeof(g_ps_fx_decal) : sizeof(g_ps_fx_decal_50); name = "decal"; break;
+    case TD5_FX_GLOW:  code = dxil ? g_ps_fx_glow_60 : sm4 ? g_ps_fx_glow : g_ps_fx_glow_50;
+                       size = dxil ? sizeof(g_ps_fx_glow_60) : sm4 ? sizeof(g_ps_fx_glow) : sizeof(g_ps_fx_glow_50);   name = "glow";  break;
     default: return NULL;
     }
 
@@ -3403,7 +3408,7 @@ static BackendPixelShader *fx_ensure_shader(TD5_FxShader which)
         }
     }
 
-    TD5_LOG_I(LOG_TAG, "procedural FX shader '%s' ready (texture-free, %s)", name, sm4 ? "ps_4_0" : "ps_5_0");
+    TD5_LOG_I(LOG_TAG, "procedural FX shader '%s' ready (texture-free, %s)", name, dxil ? "ps_6_0" : sm4 ? "ps_4_0" : "ps_5_0");
     return s_fx_ps[i];
 }
 
