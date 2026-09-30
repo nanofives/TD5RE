@@ -5,6 +5,7 @@
  * live in td5_trackgen_internal.h. Element map: docs/plans/AUTOTRACK_ELEMENT_CATALOG.md.
  */
 #include "td5_trackgen_internal.h"
+#include "td5_geo.h"
 
 const TG_TreePage k_tree_pages[TD5_TG_TREE_VARIANTS] = {
     { 4200, 5600, TG_TREE_DECID,   0 },  /* 0  L017 p266  deciduous         */
@@ -707,6 +708,55 @@ static void tg_biome_layout_pass(unsigned int seed, int snow)
     s_biome_laid_out = 1;
 }
 
+/* [GEO PHASE 5 2026-09-30] On a geo track the biome of each cell comes from
+ * the REAL land cover beside the route, not from the seeded succession. The
+ * seeded layout put sidewalk-less FIELDS/FOREST cells along what is really a
+ * city street, and tg_facade_built only consults the real mouths where there is
+ * a sidewalk -- 37 of 94 real side streets were dropped for exactly that.
+ *
+ * Per cell, COVER.R8 is sampled on both sides of every route node, a little
+ * past the kerb (4000) and one block back (9000 units ~ 21 m): >= 35% BUILT is
+ * CITY, else >= 40% TREE is FOREST, else FIELDS. Those three are ordinary
+ * neighbours in the adjacency table, so no transition the emitters do not
+ * already handle can appear. Cells past the route's end keep the seeded
+ * layout. No RNG draw; synthetic builds never reach this (the geo test). */
+static void tg_biome_geo_override(void)
+{
+    static const double k_off[4] = { 4000.0, 9000.0, -4000.0, -9000.0 };
+    const int n = td5_geo_route_count();
+    int cell, city = 0, forest = 0, fields = 0;
+
+    for (cell = 0; cell < TD5_TG_BIOME_CELLS; cell++) {
+        const int a = cell * TD5_TG_BIOME_RUN;
+        int i, built = 0, tree = 0, tot = 0;
+        if (a + 1 >= n) break;
+        for (i = a; i < a + TD5_TG_BIOME_RUN && i + 1 < n; i += 3) {
+            double x0, z0, x1, z1, tx, tz, len;
+            int k, l;
+            td5_geo_route_node(i, &x0, &z0, &l);
+            td5_geo_route_node(i + 1, &x1, &z1, &l);
+            tx = x1 - x0; tz = z1 - z0;
+            len = sqrt(tx * tx + tz * tz);
+            if (len < 1e-6) continue;
+            tx /= len; tz /= len;
+            for (k = 0; k < 4; k++) {
+                const int c = td5_geo_cover(x0 + tz * k_off[k], z0 - tx * k_off[k]);
+                if (c == TD5_GEO_COVER_NONE) continue;
+                tot++;
+                if (c == TD5_GEO_COVER_BUILT) built++;
+                else if (c == TD5_GEO_COVER_TREE) tree++;
+            }
+        }
+        if (tot == 0) continue;               /* no data: keep the seeded cell */
+        if (built * 100 >= tot * 35)      { s_biome_cell[cell] = 0; city++;   }   /* CITY   */
+        else if (tree * 100 >= tot * 40)  { s_biome_cell[cell] = 2; forest++; }   /* FOREST */
+        else                              { s_biome_cell[cell] = 1; fields++; }   /* FIELDS */
+    }
+    TD5_LOG_I(LOG_TAG, "trackgen: [GEO] biome from real land cover: %d city, "
+              "%d forest, %d fields cell(s) (%d-span cells)", city, forest,
+              fields, TD5_TG_BIOME_RUN);
+}
+
 /* Set by tg_biome_layout so the build log and the element inventory can state
  * plainly whether the snow-coherent path was taken. */
 int s_biome_snow_seed = 0;
@@ -724,6 +774,10 @@ void tg_biome_layout(unsigned int seed, int nspans_hint)
 
     s_biome_snow_seed = 0;
     tg_biome_layout_pass(seed, 0);
+    if (td5_geo_loaded() && td5_geo_route_count() >= 2) {
+        tg_biome_geo_override();   /* [GEO PHASE 5] real cover wins, no snow pass */
+        return;
+    }
 
     if (!td5_env_flag_on("TD5RE_R8_BIOME_SNOW")) return;
 

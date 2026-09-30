@@ -5,6 +5,7 @@
  * live in td5_trackgen_internal.h. Element map: docs/plans/AUTOTRACK_ELEMENT_CATALOG.md.
  */
 #include "td5_trackgen_internal.h"
+#include "td5_geo.h"
 
 /* [PICK] Human name for an auto-track texture page id, for the dev geometry
  * picker's HUD/clipboard. Defined ENTIRELY in terms of the TD5_TG_PAGE_*
@@ -1418,6 +1419,41 @@ void tg_rolls_apply_spec(TD5_TrackGenSpec *spec)
         spec->elevation_amplitude = s_rolls.value[TD5_TG_ROLL_HILLS];
     if (!s_rolls.pinned[TD5_TG_ROLL_LENGTH])
         spec->target_spans = s_rolls.value[TD5_TG_ROLL_LENGTH];
+}
+
+/* [GEO PHASE 3 2026-09-30] A loaded geo route decides the track length: the
+ * road IS the route, so target_spans follows it (capped at TD5_TG_MAX_SPANS,
+ * which the loader already enforces) and the track is point-to-point. Called
+ * right after tg_rolls_apply_spec at every spec-fold site, so the build, the
+ * studio preview and the streamed span rederive all agree, and BEFORE the
+ * GENSTAMP spec hash, so a geo build never REUSEs a synthetic one. No route
+ * means no write: synthetic builds stay byte-identical. */
+void tg_geo_apply_spec(TD5_TrackGenSpec *spec)
+{
+    int n;
+    /* [GEO PHASE 4] Make the loaded place + route match TD5RE_GEO_PLACE first,
+     * so a LOCATION change in the studio takes effect on this very build. */
+    td5_geo_sync();
+    n = td5_geo_route_count();
+    if (!spec || n < 2) return;
+    spec->target_spans = n - 1;
+    if (spec->target_spans > TD5_TG_MAX_SPANS) spec->target_spans = TD5_TG_MAX_SPANS;
+    spec->circuit = 0;
+}
+
+/* [GEO PHASE 4 2026-09-30] The name the track registers under: the real
+ * place, upper-cased like every shipped track name, when a geo route drives the
+ * road; the studio's own name otherwise. */
+static const char *tg_geo_track_name(void)
+{
+    static char buf[64];
+    const char *nm = td5_geo_place_name();
+    size_t i;
+    if (td5_geo_route_count() < 2 || !nm[0]) return TD5_TG_TRACK_NAME;
+    for (i = 0; nm[i] && i + 1 < sizeof(buf); i++)
+        buf[i] = (char)((nm[i] >= 'a' && nm[i] <= 'z') ? nm[i] - 32 : nm[i]);
+    buf[i] = '\0';
+    return buf;
 }
 
 /* Build identity, not a diagnostic -- logged unconditionally and BEFORE the
@@ -3258,6 +3294,12 @@ static int tg_scenery_begin(const TG_NodeList *nl, int nspans, int lanes)
         TG_TV(TG_T_PRE_R13FILL,  tg_r13_fill_report(nl, nspans));   /* [R13 FILL] exposed-rear sweep, opt-in */
         tg_r9_city_reset();               /* [R9 CITY] pavement/massing sweep */
         tg_r13_faces_reset();             /* [R13 FACES] run-end return census */
+        /* [GEO SIGNALS] Decide the traffic-light placements while this is
+         * still the only thread: the emitter then just scans a read-only
+         * table. Must follow the structure/street authorities above, whose
+         * predicates it consults, and precede the per-entry loop. No-op with
+         * no geo place loaded. */
+        tg_geo_signals_prepare(nl, nspans);
         TG_ZONE_END(TG_ZONE_PREPASS);
         tg_xmemo_reset(1);                /* [R14 GENPERF] tables final -> cache the crossing predicates */
         /* [S0] WARM THE CHEAP BUILD-SCOPE LAZY CACHES HERE, while this is
@@ -3879,6 +3921,21 @@ static int tg_scenery_entry(int e)
                     }
                     tg_guard_mark(sg0, meshes.len, TG_GK_PROP, si);
                 }
+                /* [GEO SIGNALS] Traffic lights, after the direction sign for
+                 * the same reason it runs last: the placements were decided in
+                 * the prepass, but the mesh BUDGET is whatever the rest of the
+                 * span left over, and a light is the piece of furniture we are
+                 * most willing to lose. TG_GK_PROP so a head that ends up over
+                 * the carriageway is dropped by the guard like any other prop.
+                 * Inert on a synthetic build. */
+                {
+                    size_t sq0 = meshes.len;
+                    if (!tg_emit_geo_signals(nl, si, &meshes, moff, &nmesh,
+                                             TG_MAX_MESHES_PER_ENTRY)) {
+                        ok = 0; break;
+                    }
+                    tg_guard_mark(sq0, meshes.len, TG_GK_PROP, si);
+                }
             }
         }
 
@@ -4027,6 +4084,9 @@ static int tg_scenery_end(TG_Buf *out)
                           "side=%ld", s_r11_signs, nspans, s_r11_sign_left,
                           s_r11_sign_right, s_r11_sign_skip_lamp,
                           s_r11_sign_skip_street, s_r11_sign_skip_side);
+            /* [GEO SIGNALS] the G3 acceptance number: signals in cache, near
+             * the route, placed, and dropped by reason. Silent on synthetic. */
+            tg_geo_signals_report(nspans);
             /* [R9 CITY] pavement uniqueness + mouth massing, over the whole
              * assembled strip. These are the round's acceptance numbers. */
             tg_r9_city_report(nl, nspans);
@@ -4249,6 +4309,7 @@ int td5_trackgen_preview_route(const TD5_TrackGenSpec *spec,
     eff = *spec;
     tg_rolls_resolve(eff.seed);
     tg_rolls_apply_spec(&eff);
+    tg_geo_apply_spec(&eff);
     spec = &eff;
 
     /* Same preamble as build_level, minus the _mkdir. */
@@ -4339,6 +4400,7 @@ int td5_trackgen_regenerate_main_spans(unsigned int seed,
      * built from the shipped defaults while the race used the rolls. */
     tg_rolls_resolve(seed);
     tg_rolls_apply_spec(&spec);
+    tg_geo_apply_spec(&spec);
 
     memset(&nl, 0, sizeof(nl));
     memset(&spans, 0, sizeof(spans));
@@ -4416,7 +4478,7 @@ int td5_trackgen_init(void)
     TD5_TrackGenSpec spec;
     td5_trackgen_default_spec(&spec);
     td5_trackgen_apply_config(&spec);
-    td5_track_registry_set_auto(TD5_TG_SLOT, TD5_TG_LEVEL_NUM, TD5_TG_TRACK_NAME,
+    td5_track_registry_set_auto(TD5_TG_SLOT, TD5_TG_LEVEL_NUM, tg_geo_track_name(),
                                spec.circuit, TD5_TG_GRID_SPAN, 0);
     TD5_LOG_I(LOG_TAG, "trackgen: " TD5_TG_TRACK_NAME " registered (slot %d, level %d); "
               "built on race entry", TD5_TG_SLOT, TD5_TG_LEVEL_NUM);
@@ -4587,6 +4649,7 @@ int td5_trackgen_regenerate(unsigned int seed)
      * still says what it is; it otherwise prints no inventory at all. */
     tg_rolls_resolve(seed);
     tg_rolls_apply_spec(&spec);
+    tg_geo_apply_spec(&spec);
     tg_rolls_report();
 
     /* [R14 GENPERF 2026-09-03] Identical build already on disk? Then the only
@@ -4611,7 +4674,7 @@ int td5_trackgen_regenerate(unsigned int seed)
             s_ring_len  = have.ring;
             s_tg_progress = 100;
             td5_track_registry_set_auto(TD5_TG_SLOT, TD5_TG_LEVEL_NUM,
-                                       TD5_TG_TRACK_NAME, have.circuit,
+                                       tg_geo_track_name(), have.circuit,
                                        TD5_TG_GRID_SPAN, have.finish);
             TD5_LOG_W(LOG_TAG, "trackgen: REUSED the on-disk build for seed %u "
                       "(%d spans, ring %d, finish %d) -- generation skipped",
@@ -4655,7 +4718,7 @@ int td5_trackgen_regenerate(unsigned int seed)
         if (finish <= 0)   /* ring too short for a placed finish: last-resort */
             finish = (spans > 8) ? spans - 4 : spans - 1;
         td5_track_registry_set_auto(TD5_TG_SLOT, TD5_TG_LEVEL_NUM,
-                                   TD5_TG_TRACK_NAME, spec.circuit,
+                                   tg_geo_track_name(), spec.circuit,
                                    TD5_TG_GRID_SPAN, finish);
         TD5_LOG_I(LOG_TAG, "trackgen: registry finish span=%d (main ring=%d, full "
                   "strip=%d; old spans-4 would be %d)", finish, ring, spans,

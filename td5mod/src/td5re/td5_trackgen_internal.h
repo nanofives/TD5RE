@@ -1283,6 +1283,7 @@ void tg_rolls_resolve(unsigned int seed);          /* latch for this build   */
  * previous build's roll can never be mistaken for a pin. */
 void tg_rolls_unpublish(void);
 void tg_rolls_apply_spec(TD5_TrackGenSpec *spec);  /* fold into the spec     */
+void tg_geo_apply_spec(TD5_TrackGenSpec *spec);   /* [GEO PHASE 3] route decides length */
 void tg_rolls_report(void);                        /* the [R21 ROLL] block   */
 int  tg_rolls_presence_count(void);                /* [R22] presence rows    */
 int  tg_roll_value(int id);
@@ -5837,6 +5838,20 @@ extern long s_r11_sign_left;
 extern long s_r11_sign_right;
 int tg_r11_signs_enabled(void);
 int tg_emit_r11_sign(const TG_NodeList *nl, int si, int nspans, TG_Buf *blk, size_t *moff, int *nmesh, int maxmesh);
+
+/* ======================= GEO TRAFFIC LIGHTS (G3) =========================
+ * [GEO PHASE 5] Traffic-light heads at OSM highway=traffic_signals nodes near
+ * the conditioned route. Defined in td5_tg_furniture.c; rationale there and in
+ * td5_geo_signals.h. All three are INERT on a synthetic build (every path is
+ * behind td5_geo_loaded()), so MODELS.DAT stays byte-identical.
+ *
+ * _prepare decides the placements ONCE, single-threaded, in the prepass --
+ * before the per-entry emit loop forks -- so the emitter is a read-only table
+ * scan and the census cannot race. */
+void tg_geo_signals_prepare(const TG_NodeList *nl, int nspans);
+int  tg_emit_geo_signals(const TG_NodeList *nl, int si, TG_Buf *blk, size_t *moff, int *nmesh, int maxmesh);
+void tg_geo_signals_report(int nspans);
+/* ====================================================================== */
 /* Terrain emits at most a couple of meshes per span; this is headroom, and the
  * emitter's own budget check is asserted against it below. */
 #define TG_SIDE_MAX_MESH 32
@@ -6040,6 +6055,23 @@ typedef struct {
 } TG_Stamp;
 int td5_trackgen_level_number(void);
 unsigned int td5_trackgen_last_seed(void);
+
+/* ===================== [GEO PHASE 5] REAL BUILDINGS AND PLAZAS =============
+ * Appended as its own block, at the end, so the four parallel phase-5
+ * workstreams do not collide in the middle of this header.
+ *
+ * Both emitters live in the modules that own the geometry they replace --
+ * frontage in td5_tg_city.c, plazas in td5_tg_streets.c -- and are wired into
+ * the dispatchers in td5_tg_streets.c, so their meshes are marked and validated
+ * by the on-road guard exactly like the procedural scenery they stand in for.
+ * Everything else about the feature (the cache reader, the per-span bind, the
+ * polygon geometry) is behind td5_geo_buildings.h. Both are a no-op success
+ * unless TD5RE_GEO_PLACE names a loadable place. */
+int  tg_geo_emit_buildings(const TG_FBHook *h);   /* td5_tg_city.c    */
+void tg_geo_city_report(void);                    /* td5_tg_city.c    */
+int  tg_geo_city_active(void);                    /* td5_tg_city.c    */
+int  tg_geo_emit_plaza(const TG_FBHook *h);       /* td5_tg_streets.c */
+void tg_geo_plaza_report(void);                   /* td5_tg_streets.c */
 
 #endif /* TD5_TRACKGEN_INTERNAL_H */
 

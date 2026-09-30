@@ -101,6 +101,50 @@ void   td5_geo_grid(int *out_w, int *out_h, double *out_cell,
                     double *out_origin_x, double *out_origin_z,
                     double *out_rotation_rad);
 
+/* ---------------------------------------------------------------- route ---
+ * [GEO PHASE 3 2026-09-30] The conditioned centerline geo_condition.py writes
+ * (ROUTE.JSON: points[] of {x, z, lanes}, node 0 at the origin, a straight
+ * +X lead-in, chord spacing of exactly span_length). When one is loaded,
+ * tg_build_centerline pushes these nodes instead of walking sections, and the
+ * track length follows the route.
+ *
+ * SOURCE, in order: TD5RE_GEO_ROUTE=<path to a ROUTE.JSON> (works with no place
+ * loaded, over the synthetic world -- the offline fixture path), else
+ * re/assets/geo/<slug>/ROUTE.JSON of the loaded place. Neither present means
+ * no route and the generator walks as before, byte-identical.
+ *
+ * The loader VALIDATES the contract rather than trusting it: node 0 at the
+ * origin, span_length matching TD5_TG_SPAN_LENGTH, and every chord within
+ * tolerance of it. A route that fails is dropped with an error, never half
+ * used -- uneven spacing is silently mis-measured by the engine, not rejected. */
+int  td5_geo_route_count(void);            /* nodes, 0 when no route */
+int  td5_geo_route_node(int i, double *x, double *z, int *lanes);
+const char *td5_geo_route_source(void);    /* path it came from, "" if none */
+
+/* ------------------------------------------------------- place selection ---
+ * [GEO PHASE 4 2026-09-30] The selected place is the env knob TD5RE_GEO_PLACE,
+ * mirrored to re/assets/geo/SELECTED.TXT so the browser selector
+ * (re/tools/geo_selector.py) and the studio's LOCATION row agree across
+ * launches: at init, an unset knob is filled from the file.
+ *
+ * td5_geo_sync() makes the loaded place + route match the knob. The generator
+ * calls it before folding the spec (build, studio preview, streamed rederive),
+ * so a LOCATION change takes effect on the next build with no restart.
+ * TD5RE_GEO_ROUTE, when set, still overrides the place's own ROUTE.JSON. */
+void td5_geo_sync(void);
+void td5_geo_select(const char *slug);   /* "" = synthetic; writes SELECTED.TXT */
+
+/* Places under re/assets/geo/ that carry a ROUTE.JSON (a place without a route
+ * cannot be raced yet). Rescanned on td5_geo_places_rescan(); index order is
+ * directory order, stable between rescans with no disk change. */
+int         td5_geo_places_rescan(void);
+int         td5_geo_places_count(void);
+const char *td5_geo_places_slug(int i);
+const char *td5_geo_places_name(int i);  /* PLACE.JSON name, else the slug */
+
+/* Attribution every geo track must show (ODbL). */
+#define TD5_GEO_CREDIT "MAP DATA (C) OPENSTREETMAP CONTRIBUTORS"
+
 /* Vertical exaggeration applied to real relief, per the plan's section 3:
  * scale the real gradient, THEN let the road profile's own grade cap clip it.
  * At the default TD5RE_AUTOTRACK_GRADE (0.12) a real 8% slope becomes 12% and

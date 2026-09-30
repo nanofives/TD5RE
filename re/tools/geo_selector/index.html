@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TD5 Geo Track</title>
+<!-- GEO TRACK Phase 4 selector. Served by re/tools/geo_selector.py on
+     127.0.0.1; every /api call goes to that local server. The browser itself
+     fetches the map tiles (OSM) and the place search (Nominatim). -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Russo+One&family=Roboto+Condensed:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #07090f;
+  --panel: #0e1424;
+  --panel-2: #152038;
+  --edge: #2b3d66;
+  --text: #e8ecf5;
+  --muted: #8899aa;
+  --red: #e0241b;
+  --gold: #f2c230;
+  --ok: #3fd46b;
+  --bad: #ff4d3d;
+  --route: #ff2a1a;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text);
+  font-family: "Roboto Condensed", Arial, sans-serif; }
+header { height: 56px; display: flex; align-items: center; gap: 14px; padding: 0 16px;
+  background: linear-gradient(180deg, #1a2440 0%, #0b1020 100%);
+  border-bottom: 2px solid var(--red); }
+.logo { font-family: "Russo One", sans-serif; font-style: italic; font-size: 22px;
+  letter-spacing: 1px; white-space: nowrap; }
+.logo b { color: var(--red); }
+.search { flex: 1; display: flex; gap: 8px; max-width: 640px; }
+input, select, button { font-family: inherit; font-size: 14px; color: var(--text);
+  background: var(--panel-2); border: 1px solid var(--edge); border-radius: 3px;
+  padding: 7px 9px; }
+input { flex: 1; min-width: 0; }
+button { cursor: pointer; font-family: "Russo One", sans-serif; letter-spacing: .5px;
+  text-transform: uppercase; background: linear-gradient(180deg, #2b3d66, #17213a); }
+button:hover { border-color: var(--gold); }
+button.go { background: linear-gradient(180deg, #e0241b, #8c120c); border-color: #ff5a4a; }
+button:disabled { opacity: .4; cursor: default; }
+main { display: flex; height: calc(100% - 56px); }
+#map { flex: 1; }
+aside { width: 340px; overflow-y: auto; background: var(--panel);
+  border-left: 1px solid var(--edge); padding: 12px; }
+h2 { font-family: "Russo One", sans-serif; font-style: italic; font-size: 15px;
+  letter-spacing: 1px; margin: 16px 0 8px; color: var(--gold); text-transform: uppercase; }
+h2:first-child { margin-top: 0; }
+.place { display: flex; justify-content: space-between; align-items: center;
+  padding: 7px 9px; margin-bottom: 4px; background: var(--panel-2);
+  border: 1px solid transparent; border-radius: 3px; cursor: pointer; }
+.place.active { border-color: var(--red); }
+.place small { color: var(--muted); }
+.tag { font-size: 11px; padding: 1px 6px; border-radius: 2px; background: #22304f; }
+.tag.game { background: var(--red); }
+.row { display: flex; gap: 6px; margin-bottom: 6px; }
+.help { color: var(--muted); font-size: 13px; line-height: 1.4; }
+.verdict { font-family: "Russo One", sans-serif; font-size: 18px; margin: 6px 0; }
+.verdict.ok { color: var(--ok); } .verdict.bad { color: var(--bad); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+td { padding: 3px 0; } td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+ul { padding-left: 18px; margin: 6px 0; font-size: 13px; }
+li.bad { color: var(--bad); } li.warn { color: var(--gold); }
+.bar { height: 6px; background: #22304f; border-radius: 3px; overflow: hidden; margin: 2px 0 8px; }
+.bar > i { display: block; height: 100%; background: var(--ok); }
+.status { position: absolute; z-index: 1000; left: 50%; top: 70px; transform: translateX(-50%);
+  background: rgba(14,20,36,.95); border: 1px solid var(--gold); padding: 8px 14px;
+  border-radius: 3px; font-size: 14px; display: none; }
+.wp-icon { width: 18px; height: 18px; border-radius: 50%; border: 2px solid #fff;
+  background: var(--gold); box-shadow: 0 0 0 2px #000; font: 11px "Russo One";
+  color: #000; display: flex; align-items: center; justify-content: center; }
+.wp-icon.a { background: var(--ok); } .wp-icon.b { background: var(--red); color: #fff; }
+.leaflet-container { background: #0b0f1a; }
+@media (max-width: 760px) {
+  main { flex-direction: column; } aside { width: 100%; height: 45%; }
+  .logo span { display: none; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"><b>TD5</b> GEO TRACK <span>SELECTOR</span></div>
+  <form class="search" id="searchForm">
+    <input id="q" placeholder="City, place, 'lat, lon', OSM or Google Maps link">
+    <button class="go" type="submit">Go</button>
+  </form>
+</header>
+<main>
+  <div id="map"></div>
+  <aside>
+    <h2>Places on disk</h2>
+    <div id="places" class="help">Loading</div>
+
+    <h2>Fetch this area</h2>
+    <div class="row">
+      <input id="fetchName" placeholder="Name, e.g. La Plata">
+      <select id="fetchRadius" title="radius">
+        <option value="1500">1.5 km</option>
+        <option value="2200" selected>2.2 km</option>
+        <option value="3000">3 km</option>
+        <option value="4000">4 km</option>
+      </select>
+    </div>
+    <button id="fetchBtn" style="width:100%">Fetch map centre</button>
+    <p class="help">Downloads roads, buildings and terrain for a circle around
+      the map centre (OpenStreetMap + terrain tiles). Cached, so it runs once
+      per place.</p>
+
+    <h2>Route</h2>
+    <p class="help" id="routeHelp">Pick a place above, then click the map for
+      <b>A</b> and <b>B</b>. Click the red line to add a waypoint, drag any
+      marker to re-route, right-click a waypoint to remove it.</p>
+    <div class="row">
+      <button id="resetBtn" style="flex:1">Reset</button>
+      <button id="reverseBtn" style="flex:1">Swap A/B</button>
+    </div>
+    <div id="result"></div>
+    <button id="sendBtn" class="go" style="width:100%;margin-top:8px" disabled>Send to game</button>
+    <p class="help">In game: AUTO TRACK STUDIO, TERRAIN, <b>LOCATION</b>.</p>
+  </aside>
+</main>
+<div class="status" id="status"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+"use strict";
+const map = L.map("map", { zoomControl: true }).setView([-34.92, -57.95], 13);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19,
+  attribution: "&copy; <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a> contributors"
+}).addTo(map);
+
+let state = { places: [], selected: "" };
+let active = null;           // slug being edited
+let waypoints = [];          // [[lat, lon], ...]
+let markers = [];
+let routeLine = null, bboxRect = null, crossLayer = L.layerGroup().addTo(map);
+let lastRoute = null, routing = 0;
+
+const $ = id => document.getElementById(id);
+function status(msg, ms) {
+  const s = $("status"); s.textContent = msg; s.style.display = msg ? "block" : "none";
+  if (ms) setTimeout(() => { if (s.textContent === msg) s.style.display = "none"; }, ms);
+}
+async function api(method, path, body) {
+  const r = await fetch(path, { method, headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined });
+  return r.json();
+}
+
+/* ---------- search: coordinates and links first, then Nominatim ---------- */
+function parseCoords(s) {
+  s = s.trim();
+  let m = s.match(/^(-?\d+(?:\.\d+)?)\s*[,; ]\s*(-?\d+(?:\.\d+)?)$/);
+  if (m) return [+m[1], +m[2]];
+  m = s.match(/#map=\d+\/(-?\d+\.\d+)\/(-?\d+\.\d+)/);            // OSM permalink
+  if (m) return [+m[1], +m[2]];
+  m = s.match(/[?&]mlat=(-?\d+\.\d+).*[?&]mlon=(-?\d+\.\d+)/);
+  if (m) return [+m[1], +m[2]];
+  m = s.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/);                   // Google place pin
+  if (m) return [+m[1], +m[2]];
+  m = s.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);                        // Google viewport
+  if (m) return [+m[1], +m[2]];
+  m = s.match(/[?&](?:q|ll|query)=(-?\d+\.\d+),\s*(-?\d+\.\d+)/);
+  if (m) return [+m[1], +m[2]];
+  return null;
+}
+$("searchForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const q = $("q").value;
+  const c = parseCoords(q);
+  if (c) { map.setView(c, 15); return; }
+  if (!q.trim()) return;
+  status("Searching");
+  try {
+    const r = await fetch("https://nominatim.openstreetmap.org/search?format=json&limit=1&q="
+                          + encodeURIComponent(q));
+    const j = await r.json();
+    if (!j.length) { status("Nothing found", 2500); return; }
+    map.setView([+j[0].lat, +j[0].lon], 14);
+    if (!$("fetchName").value) $("fetchName").value = j[0].display_name.split(",")[0];
+    status("");
+  } catch (err) { status("Search failed: " + err, 4000); }
+});
+
+/* ---------- places ---------- */
+async function refreshState() {
+  state = await api("GET", "/api/state");
+  const box = $("places");
+  if (!state.places.length) { box.textContent = "None yet. Fetch an area below."; return; }
+  box.innerHTML = "";
+  for (const p of state.places) {
+    const d = document.createElement("div");
+    d.className = "place" + (p.slug === active ? " active" : "");
+    d.innerHTML = "<div>" + p.name + "<br><small>" + (p.radius_m / 1000).toFixed(1)
+      + " km radius" + (p.route ? ", route " + (+p.route.length_km).toFixed(2) + " km" : "")
+      + "</small></div>" + (p.slug === state.selected ? "<span class='tag game'>IN GAME</span>"
+      : p.has_route ? "<span class='tag'>ROUTE</span>" : "");
+    d.onclick = () => openPlace(p);
+    box.appendChild(d);
+  }
+}
+function openPlace(p) {
+  active = p.slug;
+  if (bboxRect) map.removeLayer(bboxRect);
+  const b = p.bbox;
+  if (b) {
+    bboxRect = L.rectangle([[b.south, b.west], [b.north, b.east]],
+      { color: "#f2c230", weight: 1, fill: false, dashArray: "6 6" }).addTo(map);
+    map.fitBounds(bboxRect.getBounds());
+  } else if (p.centre) map.setView([p.centre.lat, p.centre.lon], 14);
+  setWaypoints(p.route && p.route.waypoints ? p.route.waypoints : []);
+  refreshState();
+}
+
+$("fetchBtn").onclick = async () => {
+  const name = $("fetchName").value.trim();
+  if (!name) { status("Name the place first", 2500); return; }
+  const c = map.getCenter();
+  $("fetchBtn").disabled = true;
+  status("Fetching " + name + " (first time can take a minute)");
+  const r = await api("POST", "/api/fetch",
+    { name, lat: c.lat, lon: c.lng, radius: +$("fetchRadius").value });
+  $("fetchBtn").disabled = false;
+  if (!r.ok) { status("Fetch failed: " + (r.reasons || []).join("; "), 6000); return; }
+  status("Fetched " + r.name, 2500);
+  await refreshState();
+  const p = state.places.find(x => x.slug === r.slug);
+  if (p) openPlace(p);
+};
+
+/* ---------- waypoints and routing ---------- */
+function icon(i, n) {
+  const cls = i === 0 ? "a" : i === n - 1 ? "b" : "";
+  const txt = i === 0 ? "A" : i === n - 1 ? "B" : "";
+  return L.divIcon({ className: "", html: "<div class='wp-icon " + cls + "'>" + txt + "</div>",
+                     iconSize: [18, 18], iconAnchor: [9, 9] });
+}
+function setWaypoints(w) {
+  waypoints = w.map(p => [p[0], p[1]]);
+  for (const m of markers) map.removeLayer(m);
+  markers = waypoints.map((p, i) => {
+    const m = L.marker(p, { draggable: true, icon: icon(i, waypoints.length) }).addTo(map);
+    m.on("dragend", () => { const ll = m.getLatLng(); waypoints[i] = [ll.lat, ll.lng]; reroute(); });
+    m.on("contextmenu", () => {
+      if (waypoints.length <= 2) return;
+      waypoints.splice(i, 1); setWaypoints(waypoints); reroute();
+    });
+    return m;
+  });
+  if (waypoints.length >= 2) reroute(); else clearRoute();
+}
+function clearRoute() {
+  if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
+  crossLayer.clearLayers(); lastRoute = null; $("result").innerHTML = ""; $("sendBtn").disabled = true;
+}
+map.on("click", e => {
+  if (!active) { status("Pick or fetch a place first", 2500); return; }
+  if (waypoints.length >= 2) return;           // add more by clicking the line
+  waypoints.push([e.latlng.lat, e.latlng.lng]);
+  setWaypoints(waypoints);
+});
+function legOf(idx) {
+  // Which leg a polyline vertex belongs to: waypoints snap to their nearest
+  // vertex, and those vertex indices split the polyline into legs.
+  const pl = lastRoute.polyline, snaps = waypoints.map(w => {
+    let best = 0, bd = Infinity;
+    pl.forEach((p, k) => { const d = (p[0]-w[0])**2 + (p[1]-w[1])**2; if (d < bd) { bd = d; best = k; } });
+    return best;
+  });
+  for (let k = 0; k < snaps.length - 1; k++) if (idx <= snaps[k + 1]) return k;
+  return snaps.length - 2;
+}
+async function reroute() {
+  if (!active || waypoints.length < 2) return;
+  const my = ++routing;
+  status("Routing");
+  const r = await api("POST", "/api/route", { place: active, waypoints });
+  if (my !== routing) return;                   // a newer drag superseded this
+  status("");
+  lastRoute = r;
+  if (routeLine) map.removeLayer(routeLine);
+  crossLayer.clearLayers();
+  if (r.polyline && r.polyline.length) {
+    routeLine = L.polyline(r.polyline, { color: "#ff2a1a", weight: 5, opacity: .9 }).addTo(map);
+    routeLine.on("click", e => {
+      L.DomEvent.stopPropagation(e);
+      let best = 0, bd = Infinity;
+      r.polyline.forEach((p, k) => { const d = (p[0]-e.latlng.lat)**2 + (p[1]-e.latlng.lng)**2; if (d < bd) { bd = d; best = k; } });
+      waypoints.splice(legOf(best) + 1, 0, [e.latlng.lat, e.latlng.lng]);
+      setWaypoints(waypoints);
+    });
+  }
+  for (const c of r.crossings || []) {
+    L.circleMarker([c.lat, c.lon], { radius: 12, color: "#ff4d3d", weight: 3, fillOpacity: .25 })
+      .bindTooltip("Route overlaps itself here (" + c.span_gap + " spans apart). Drag a waypoint away.")
+      .addTo(crossLayer);
+  }
+  renderResult(r);
+}
+function renderResult(r) {
+  const pct = r.spans ? Math.min(100, 100 * r.spans / r.span_cap) : 0;
+  let h = "<div class='verdict " + (r.ok ? "ok'>READY TO RACE" : "bad'>NOT USABLE YET") + "</div>";
+  if (r.spans) {
+    h += "<table><tr><td>Length</td><td>" + (+r.length_km).toFixed(2) + " km</td></tr>"
+      + "<tr><td>Spans</td><td>" + r.spans + " / " + r.span_cap + "</td></tr></table>"
+      + "<div class='bar'><i style='width:" + pct + "%;background:" + (pct > 100 ? "#ff4d3d" : "") + "'></i></div>"
+      + "<table><tr><td>Worst turn</td><td>" + (r.worst_turn_deg != null ? (+r.worst_turn_deg).toFixed(1) + "&deg;" : "-") + "</td></tr>"
+      + "<tr><td>Straight-ahead share</td><td>" + (r.monotone_pct != null ? r.monotone_pct + "%" : "-") + "</td></tr>"
+      + "<tr><td>Driven</td><td>" + (r.direction || "-") + "</td></tr></table>";
+  }
+  if ((r.reasons || []).length) h += "<ul>" + r.reasons.map(x => "<li class='bad'>" + x + "</li>").join("") + "</ul>";
+  if ((r.warnings || []).length) h += "<ul>" + r.warnings.map(x => "<li class='warn'>" + x + "</li>").join("") + "</ul>";
+  if ((r.street_names || []).length)
+    h += "<p class='help'>" + r.street_names.slice(0, 10).join(" &rarr; ")
+      + (r.street_names.length > 10 ? " (+" + (r.street_names.length - 10) + ")" : "") + "</p>";
+  $("result").innerHTML = h;
+  $("sendBtn").disabled = !r.ok;
+}
+$("resetBtn").onclick = () => setWaypoints([]);
+$("reverseBtn").onclick = () => { if (waypoints.length >= 2) setWaypoints(waypoints.slice().reverse()); };
+$("sendBtn").onclick = async () => {
+  $("sendBtn").disabled = true;
+  status("Saving route and rebuilding terrain in its frame");
+  const r = await api("POST", "/api/save", { place: active, waypoints });
+  if (!r.ok) { status("Save failed: " + (r.reasons || []).join("; "), 6000); $("sendBtn").disabled = false; return; }
+  status("Sent to game: " + r.spans + " spans. Pick it under LOCATION.", 5000);
+  $("sendBtn").disabled = false;
+  refreshState();
+};
+
+refreshState();
+</script>
+</body>
+</html>

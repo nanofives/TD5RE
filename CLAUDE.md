@@ -176,6 +176,9 @@ comment — regenerate after adding/splitting modules with
 | `td5_track_parser.c` | MODELS.DAT parsing (S6 module split, see REFACTOR_PLAN.md) |
 | `td5_track_registry.c` | runtime registry for custom (user-built) tracks. |
 | `td5_geo.c` | GEO TRACK: real-world terrain source for the auto-track |
+| `td5_geo_roads.c` | GEO TRACK: real OSM road graph (ROADS.JSON) reader (PORT-ONLY) |
+| `td5_geo_buildings.c` | GEO TRACK: real OSM building footprints and area |
+| `td5_geo_signals.c` | GEO TRACK: traffic-signal nodes + the lamp cycle |
 | `td5_trackgen.c` | procedural (AUTO-GENERATED) track builder: spec, RNG, centerline, elevation, strip + routes, scenery orchestration, build/regenerate entry points (PORT-ONLY) |
 | `td5_tg_world.c` | auto-track WORLD: seeded heightfield (sea, coast, rivers, mountains, flats), sparse conform/occupancy overlay, terrain classes |
 | `td5_tg_road.c` | auto-track ROAD on the WORLD: terrain-steered centerline walk, structure table (bridge/tunnel by terrain, not by hash), grade-limited terrain-following elevation, road-bed conform |
@@ -186,7 +189,7 @@ comment — regenerate after adding/splitting modules with
 | `td5_tg_streets.c` | auto-track SIDE STREETS: direction, occupancy, intersections, parks + houses, real intersections, infill, measurement sweeps |
 | `td5_tg_terrain.c` | auto-track TERRAIN + BIOMES: trees, props, road surfaces, biome table + adjacency, snow, sea, outskirts, topo authority, forest side roads, tree bands, ponds, ground chain, gantry/sign context |
 | `td5_tg_bridge.c` | auto-track BRIDGES, TUNNELS, OVERPASSES and WATER: water plane, bore vs underpass, portal, overpass, run coalesce, structural tie, median faces, measurement harness |
-| `td5_tg_furniture.c` | auto-track roadside FURNITURE: guardrails, start/finish gantry, curve direction signage |
+| `td5_tg_furniture.c` | auto-track roadside FURNITURE: guardrails, start/finish gantry, curve direction signage, geo traffic lights |
 | `td5_tg_prefab.c` | auto-track PREFABS: shipped set-piece geometry lifted out |
 | `td5_tg_pages.c` | auto-track TEXTURES.DAT: every page emitter (procedural + real shipped pages) |
 | `td5_trackgen_preview.c` | background route-preview worker (PORT-ONLY). |

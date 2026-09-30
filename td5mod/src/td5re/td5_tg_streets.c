@@ -5,6 +5,8 @@
  * live in td5_trackgen_internal.h. Element map: docs/plans/AUTOTRACK_ELEMENT_CATALOG.md.
  */
 #include "td5_trackgen_internal.h"
+#include "td5_geo.h"             /* GEO TRACK: land cover for plaza planting  */
+#include "td5_geo_buildings.h"   /* GEO TRACK: real area polygons             */
 
 /* [R8 CROSS item 1] The reveal row has to know how deep the street it reveals
  * actually runs, so it can stand BEYOND it instead of across it. Both live
@@ -588,10 +590,26 @@ static int tg_city_emit_crossstreet(const TG_FBHook *h, double sw)
  * former park gap is laid as a normal through street (carriageway + crossing +
  * lined frontages) by the existing emitters, and no lawn or hedge is emitted.
  * TD5RE_AUTOTRACK_PARKS=1 restores the green squares for an A/B. */
+/* [GEO PHASE 5] Per-build plaza counters and the one predicate the emitters
+ * ABOVE this point need. Declared here, used by tg_r16_emit_outskirt_park, and
+ * defined with the real-plaza section further down. */
+static long s_geop_areas, s_geop_lawn_tri, s_geop_paths, s_geop_beds;
+static long s_geop_hedges, s_geop_trees, s_geop_clamped, s_geop_small;
+static long s_geop_straddle, s_geop_r16_stood_down, s_geop_nopath;
+static int  tg_geo_area_here(const TG_NodeList *nl, int si, int left);
+
 int tg_block_is_park(int si, int left)
 {
     unsigned int block, phase, gs, gl, h;
     int av;
+    /* [GEO PHASE 5] On a geo build the gap-based park is REPLACED, not reused:
+     * tg_geo_emit_plaza lays the real AREAS.JSON polygon with its own outline,
+     * paths, beds and trees. Returning 0 here retires the whole hash-keyed
+     * green-square mechanism on the geo path -- which also means a gap that
+     * would have been a park is laid as an ordinary through street by the
+     * existing emitters, exactly as it is with parks switched off. The
+     * SYNTHETIC path below is untouched. */
+    if (tg_geo_city_active()) return 0;
     if (!td5_env_int("TD5RE_AUTOTRACK_PARKS", 0, 0, 1)) return 0;
     tg_facade_block(si, left, &block, &phase, &gs, &gl, &av);
     if (av) return 0;
@@ -1311,6 +1329,13 @@ static int tg_r16_emit_outskirt_park(const TG_FBHook *h)
         if (!tg_facade_built(h->si, s)) continue;
         if (!tg_town_ramp_open(h->si, s)) continue;
         if (tg_side_blocked(h->si, sg)) continue;
+        /* [GEO PHASE 5] Not on top of a REAL plaza. This dressing lays its own
+         * lawn + hedge on the freed footprint, and the geo emitter has already
+         * laid the mapped square's own outline there. */
+        if (tg_geo_area_here(h->nl, h->si, s)) {
+            s_geop_r16_stood_down++;
+            continue;
+        }
         tg_city_edge_frame(h->nl, h->si, sg, e);
 
         /* Lawn, pavement back edge -> wall line, sinking with the skirt. */
@@ -1376,11 +1401,529 @@ static int tg_r16_emit_outskirt_park(const TG_FBHook *h)
     return 1;
 }
 
+/* ==========================================================================
+ * SECTION: [GEO PHASE 5] REAL PLAZAS FROM AREAS.JSON
+ *
+ * The plan (section 7 phase 5, and the risk note in section 9) singles this out
+ * as "the one place fidelity was bought with a rewrite". The gap-based park
+ * emitter above lays a lawn from the kerb out to a computed reach across a
+ * hash-chosen frontage gap -- a green rectangle whose only relation to a real
+ * square is that both are green. On the geo path it is REPLACED: the real
+ * polygon from AREAS.JSON is laid with its own outline. tg_block_is_park
+ * returns 0 whenever tg_geo_city_active(), so the two mechanisms never both
+ * run, and the synthetic path is byte-identical.
+ *
+ * La Plata is the proof case the plan asked for. MEASURED on the shipped route:
+ * 46 real areas lie within 140 m of it, including Plaza Mariano Moreno (59 ring
+ * points, 8 m off the route), Plaza Islas Malvinas, Plaza General San Martin,
+ * Plaza Almirante Brown and Parque Juan Vucetich.
+ *
+ * WHAT IS REAL AND WHAT IS DERIVED -- stated plainly, because the difference
+ * matters when a screenshot looks wrong:
+ *
+ *   REAL     the OUTLINE (the ring, vertex for vertex), the plaza's kind
+ *            (leisure=park / landuse=grass / leisure=pitch / playground), its
+ *            name, and the land cover the trees are gated on (COVER.R8, which
+ *            geo_fetch paints from OSM landuse).
+ *   DERIVED  the internal PATHS, the BEDS and the tree POSITIONS. The plan
+ *            wanted paths and beds from OSM and interior trees from the 1 m
+ *            canopy raster; neither is in the cache. geo_fetch counts 865
+ *            highway_nondrivable ways but stores only the drivable graph in
+ *            ROADS.JSON, the canopy layer is still "NOT YET WIRED" in
+ *            PLACE.JSON, and re-fetching needs the network, which this
+ *            workstream does not have. So the paths are laid radially from the
+ *            outline's own corners to its centroid and the trees on a fixed
+ *            lattice inside it. For La Plata's designed squares that is close
+ *            to the real layout -- they genuinely do have corner-to-centre
+ *            diagonals -- but it is a DERIVATION from real data, not measured
+ *            data, and nothing here should be read as "OSM says the path is
+ *            here". Wiring the footway layer is a geo_fetch change.
+ *
+ * NO RANDOM DRAWS: the lattice, the path count and the tree species are
+ * functions of the ring and the OSM way id (td5_trackgen_internal.h:1290-1296).
+ * ========================================================================== */
+
+#define TD5_TG_GEOP_PATH_W     1300.0   /* 3 m footpath                       */
+#define TD5_TG_GEOP_PATHS_MAX  8        /* radial paths per plaza             */
+#define TD5_TG_GEOP_TREE_STEP  5160.0   /* 12 m planting lattice              */
+#define TD5_TG_GEOP_TREES_MAX  8        /* per plaza, per the mesh budget     */
+#define TD5_TG_GEOP_MIN_R      3000.0   /* under ~7 m across it is a verge    */
+/* Clear air between the plaza edge and a tree trunk / the boundary hedge, so
+ * neither leans over the pavement the plaza stops at. */
+#define TD5_TG_GEOP_EDGE_CLR   1500.0
+
+/* Does a real plaza cover the slot the R16 outskirt dressing wants to dress at
+ * (si, side)? Same probe-the-point rule the frontage stand-down in
+ * td5_tg_city.c uses, and for the same reason: a plaza is bound to ONE span but
+ * covers many, so asking only about `si`'s own chain answers "no" across most
+ * of a real square. The R16 dressing lays its lawn between the pavement back
+ * edge and the retracted wall line, so that is where this probes. */
+static int tg_geo_area_here(const TG_NodeList *nl, int si, int left)
+{
+    const TG_Biome *b;
+    double lx, lz, d, base, px[3], pz[3];
+    int k;
+
+    if (!tg_geo_city_active() || !nl || si < 0 || si >= nl->count) return 0;
+    if (!td5_env_flag_on("TD5RE_GEO_PLAZAS")) return 0;   /* one knob, one change */
+    b = &k_biomes[tg_scenery_biome_index(si)];
+    lx = nl->v[si].tz * (left ? 1.0 : -1.0);
+    lz = -nl->v[si].tx * (left ? 1.0 : -1.0);
+    base = nl->v[si].width * 0.5 + tg_city_sidewalk_w_at(nl, si, b);
+    for (k = 0; k < 3; k++) {
+        d = base + tg_facade_depth(b) * 0.5 * (double)k;
+        px[k] = nl->v[si].x + lx * d;
+        pz[k] = nl->v[si].z + lz * d;
+    }
+    return td5_geob_points_in_plaza(si, px, pz, 3, TD5_GEOB_WIN_A);
+}
+
+/* Outward distance from the centreline at span si, on side `side`. */
+static double tg_geop_out(const TG_NodeList *nl, int si, double side,
+                          double wx, double wz)
+{
+    const TG_Node *n = &nl->v[si];
+    return side * ((wx - n->x) * n->tz - (wz - n->z) * n->tx);
+}
+
+/* Ground for a plaza surface point: the world's own height, lifted clear of the
+ * ground skirt exactly as the procedural lawn is, and capped just above the
+ * road node so a plaza can never end up lying over the carriageway.
+ *
+ * `tier` separates the three FLAT surfaces the plaza stacks on one piece of
+ * ground. They must not share a Y: the first cut laid the lawn and the paths at
+ * the same height and the paving z-fought the grass out of existence in the
+ * top-down capture. Lawn 0, paving 1, planting 2, a few units apart -- far less
+ * than the kerb, so nothing reads as a step. */
+#define TD5_TG_GEOP_TIER 12.0
+static double tg_geop_ground_t(const TG_NodeList *nl, int si,
+                               double x, double z, int tier)
+{
+    double y = tg_world_h(x, z) + TD5_TG_VERGE_LIFT
+             + TD5_TG_GEOP_TIER * (double)tier;
+    const double cap = nl->v[si].y + 400.0;
+    if (y > cap) y = cap;
+    return y;
+}
+static double tg_geop_ground(const TG_NodeList *nl, int si, double x, double z)
+{
+    return tg_geop_ground_t(nl, si, x, z, 0);
+}
+
+/* PROJECT the ring onto the clear side of the carriageway+pavement line rather
+ * than nudging the whole polygon outward.
+ *
+ * WHY PROJECT AND NOT SHIFT. A real plaza's outline IS the kerb line, so its
+ * road-side edge legitimately touches the road -- and the conditioner's rotate/
+ * resample means the generated kerb sits a few metres off where OSM has it.
+ * Shifting the whole polygon (which is what a building gets) would slide a
+ * 100 m square sideways; clipping triangle by triangle would leave a ragged
+ * edge. Moving only the vertices that intrude, straight outward onto the
+ * clearance line, keeps the ring closed AND makes the plaza's road-side edge
+ * follow the pavement -- which is what it looks like in reality.
+ *
+ * A ring the ROAD RUNS THROUGH (vertices well onto the far side) is counted:
+ * every intruding vertex still collapses onto the near kerb, so the plaza
+ * becomes the one-sided half the driver can see. */
+static void tg_geop_project(const TG_NodeList *nl, int si, double side,
+                            double minout, double *rx, double *rz, int n)
+{
+    const TG_Node *nd = &nl->v[si];
+    const double lx = nd->tz * side, lz = -nd->tx * side;
+    int k, moved = 0, straddled = 0;
+    for (k = 0; k < n; k++) {
+        const double o = tg_geop_out(nl, si, side, rx[k], rz[k]);
+        if (o >= minout) continue;
+        if (o < -minout) straddled = 1;
+        rx[k] += lx * (minout - o);
+        rz[k] += lz * (minout - o);
+        moved = 1;
+    }
+    if (moved) s_geop_clamped++;
+    if (straddled) s_geop_straddle++;
+}
+
+/* Lawn: the real outline, ear-clipped, following the ground per vertex. */
+static int tg_geop_emit_lawn(const TG_FBHook *h, const double *rx,
+                             const double *rz, int n, int page, double inv_tile)
+{
+    int tri[(TD5_GEOB_RING_MAX - 2) * 3];
+    float v[(TD5_GEOB_RING_MAX - 2) * 3 * 5];
+    unsigned int light[(TD5_GEOB_RING_MAX - 2) * 3];
+    unsigned short cmd[3];
+    int ntri, k, i, nv = 0;
+
+    ntri = td5_geob_triangulate(rx, rz, n, tri, TD5_GEOB_RING_MAX - 2);
+    if (ntri <= 0) return 1;
+    if (*h->nmesh >= h->maxmesh) return 1;
+    for (k = 0; k < ntri; k++) {
+        for (i = 0; i < 3; i++) {
+            const int p = tri[k * 3 + i];
+            const int o = nv * 5;
+            v[o + 0] = (float)rx[p];
+            v[o + 1] = (float)tg_geop_ground(h->nl, h->si, rx[p], rz[p]);
+            v[o + 2] = (float)rz[p];
+            v[o + 3] = (float)(rx[p] * inv_tile);
+            v[o + 4] = (float)(rz[p] * inv_tile);
+            light[nv] = 0xFFFFFFFFu;
+            nv++;
+        }
+    }
+    cmd[0] = (unsigned short)page;
+    cmd[1] = (unsigned short)ntri;
+    cmd[2] = 0;
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    if (!tg_write_prefab_mesh(h->blk, v, light, nv, cmd, 1, 0,
+                              0.0, 0.0, 0.0, 1.0, 0.0))
+        return 0;
+    tg_acct(TG_ACCT_PARK, h->si);
+    s_geop_lawn_tri += ntri;
+    return 1;
+}
+
+/* Paths + central pad + the bed ring between them, all in one mesh (two
+ * commands: paving, then planting). DERIVED geometry -- see the section note.
+ * Path k runs from the pad to ring vertex `pick[k]`; the caller chose the picks
+ * so they are spread evenly around the outline. */
+static int tg_geop_emit_paths(const TG_FBHook *h, const double *rx,
+                              const double *rz, const int *pick, int npath,
+                              double cx, double cz, double pad_r)
+{
+    float v[(TD5_TG_GEOP_PATHS_MAX * 3 + TD5_TG_GEOP_PATHS_MAX * 2 * 4) * 5];
+    unsigned int light[TD5_TG_GEOP_PATHS_MAX * 3 + TD5_TG_GEOP_PATHS_MAX * 2 * 4];
+    unsigned short cmd[6];
+    double dx[TD5_TG_GEOP_PATHS_MAX], dz[TD5_TG_GEOP_PATHS_MAX];
+    double len[TD5_TG_GEOP_PATHS_MAX];
+    int k, i, nv = 0, ntri = 0, nq = 0, nbed = 0;
+    const double hw = TD5_TG_GEOP_PATH_W * 0.5;
+    const double cy = tg_geop_ground_t(h->nl, h->si, cx, cz, 1);
+
+    if (npath < 3) return 1;
+    if (*h->nmesh >= h->maxmesh) return 1;
+    for (k = 0; k < npath; k++) {
+        dx[k] = rx[pick[k]] - cx;
+        dz[k] = rz[pick[k]] - cz;
+        len[k] = hypot(dx[k], dz[k]);
+        if (!(len[k] > pad_r + TD5_TG_GEOP_PATH_W)) return 1;   /* too small */
+        dx[k] /= len[k]; dz[k] /= len[k];
+    }
+
+    /* Pad: a fan of triangles over the path directions, so the centre is a
+     * paved circle-ish plaza rather than a hole where the paths meet. */
+    for (k = 0; k < npath; k++) {
+        const int j = (k + 1) % npath;
+        const double ax = cx + dx[k] * pad_r, az = cz + dz[k] * pad_r;
+        const double bx = cx + dx[j] * pad_r, bz = cz + dz[j] * pad_r;
+        const double px[3] = { cx, ax, bx };
+        const double pz[3] = { cz, az, bz };
+        for (i = 0; i < 3; i++) {
+            const int o = nv * 5;
+            v[o + 0] = (float)px[i];
+            v[o + 1] = (float)tg_geop_ground_t(h->nl, h->si, px[i], pz[i], 1);
+            v[o + 2] = (float)pz[i];
+            v[o + 3] = (float)(px[i] / (double)TD5_TG_SPAN_LENGTH);
+            v[o + 4] = (float)(pz[i] / (double)TD5_TG_SPAN_LENGTH);
+            light[nv] = 0xFFFFFFFFu;
+            nv++;
+        }
+        ntri++;
+    }
+    /* Radial paths, pad edge to just inside the outline. */
+    for (k = 0; k < npath; k++) {
+        const double r0 = pad_r, r1 = len[k] - TD5_TG_GEOP_EDGE_CLR;
+        const double ux = -dz[k], uz = dx[k];
+        double px[4], pz[4];
+        if (!(r1 > r0)) continue;
+        px[0] = cx + dx[k]*r0 - ux*hw; pz[0] = cz + dz[k]*r0 - uz*hw;
+        px[1] = cx + dx[k]*r1 - ux*hw; pz[1] = cz + dz[k]*r1 - uz*hw;
+        px[2] = cx + dx[k]*r1 + ux*hw; pz[2] = cz + dz[k]*r1 + uz*hw;
+        px[3] = cx + dx[k]*r0 + ux*hw; pz[3] = cz + dz[k]*r0 + uz*hw;
+        for (i = 0; i < 4; i++) {
+            const int o = nv * 5;
+            v[o + 0] = (float)px[i];
+            v[o + 1] = (float)tg_geop_ground_t(h->nl, h->si, px[i], pz[i], 1);
+            v[o + 2] = (float)pz[i];
+            v[o + 3] = (float)((i == 1 || i == 2) ? (r1 - r0) / TD5_TG_GEOP_PATH_W : 0.0);
+            v[o + 4] = (float)((i >= 2) ? 1.0 : 0.0);
+            light[nv] = 0xFFFFFFFFu;
+            nv++;
+        }
+        nq++;
+        s_geop_paths++;
+    }
+    cmd[0] = (unsigned short)TD5_TG_PAGE_SIDEWALK;
+    cmd[1] = (unsigned short)ntri;
+    cmd[2] = (unsigned short)nq;
+
+    /* Beds: one planted quad in each wedge between two adjacent paths, at a
+     * fixed fraction of the wedge's reach, so the plaza reads as paving,
+     * planting, then open lawn out to its edge. */
+    for (k = 0; k < npath; k++) {
+        const int j = (k + 1) % npath;
+        const double ra = pad_r + (len[k] - pad_r) * 0.30;
+        const double rb = pad_r + (len[k] - pad_r) * 0.55;
+        double px[4], pz[4];
+        px[0] = cx + dx[k]*ra; pz[0] = cz + dz[k]*ra;
+        px[1] = cx + dx[k]*rb; pz[1] = cz + dz[k]*rb;
+        px[2] = cx + dx[j]*rb; pz[2] = cz + dz[j]*rb;
+        px[3] = cx + dx[j]*ra; pz[3] = cz + dz[j]*ra;
+        for (i = 0; i < 4; i++) {
+            const int o = nv * 5;
+            v[o + 0] = (float)px[i];
+            v[o + 1] = (float)tg_geop_ground_t(h->nl, h->si, px[i], pz[i], 2);
+            v[o + 2] = (float)pz[i];
+            v[o + 3] = (float)((i == 1 || i == 2) ? 1.0 : 0.0);
+            v[o + 4] = (float)((i >= 2) ? 1.0 : 0.0);
+            light[nv] = 0xFFFFFFFFu;
+            nv++;
+        }
+        nbed++;
+        s_geop_beds++;
+    }
+    cmd[3] = (unsigned short)TD5_TG_PAGE_GREEN;
+    cmd[4] = 0;
+    cmd[5] = (unsigned short)nbed;
+
+    (void)cy;
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    if (!tg_write_prefab_mesh(h->blk, v, light, nv, cmd, nbed > 0 ? 2 : 1, 0,
+                              0.0, 0.0, 0.0, 1.0, 0.0))
+        return 0;
+    tg_acct(TG_ACCT_PARK, h->si);
+    return 1;
+}
+
+/* Boundary hedge, on the outline edges that do NOT face the road. A real square
+ * is walled in by planting on three sides and open to the street on the fourth;
+ * hedging the road-side edge too would put a green wall across the view in, the
+ * exact complaint the R5 CROSS item 4 note above records. */
+static int tg_geop_emit_hedge(const TG_FBHook *h, const double *rx,
+                              const double *rz, int n, double side,
+                              double minout)
+{
+    double px[TD5_GEOB_RING_MAX * 4], py[TD5_GEOB_RING_MAX * 4];
+    double pz[TD5_GEOB_RING_MAX * 4], uu[TD5_GEOB_RING_MAX * 4];
+    double vv[TD5_GEOB_RING_MAX * 4];
+    int seg_page = TD5_TG_PAGE_R3_BLOCK + 1, seg_nq, k, nn = 0;
+    const double open = minout + TD5_TG_GEOP_EDGE_CLR * 4.0;
+
+    if (*h->nmesh >= h->maxmesh) return 1;
+    for (k = 0; k < n; k++) {
+        const int j = (k + 1) % n;
+        const double mx = (rx[k] + rx[j]) * 0.5, mz = (rz[k] + rz[j]) * 0.5;
+        double q[12], t[8];
+        if (tg_geop_out(h->nl, h->si, side, mx, mz) < open) continue;
+        if (nn + 4 > TD5_GEOB_RING_MAX * 4) break;
+        {
+            const double y0 = tg_geop_ground(h->nl, h->si, rx[k], rz[k]);
+            const double y1 = tg_geop_ground(h->nl, h->si, rx[j], rz[j]);
+            q[0] = rx[k]; q[1]  = y0;                 q[2]  = rz[k];
+            q[3] = rx[j]; q[4]  = y1;                 q[5]  = rz[j];
+            q[6] = rx[j]; q[7]  = y1 + TD5_TG_HEDGE_H; q[8]  = rz[j];
+            q[9] = rx[k]; q[10] = y0 + TD5_TG_HEDGE_H; q[11] = rz[k];
+        }
+        t[0] = 0.0; t[1] = 1.0; t[2] = 1.0; t[3] = 1.0;
+        t[4] = 1.0; t[5] = 0.0; t[6] = 0.0; t[7] = 0.0;
+        tg_city_push_quad(px, py, pz, uu, vv, &nn, q, t);
+        s_geop_hedges++;
+    }
+    if (nn <= 0) return 1;
+    seg_nq = nn / 4;
+    tg_acct(TG_ACCT_PARK, h->si);
+    h->moff[(*h->nmesh)++] = h->blk->len;
+    return tg_write_quad_mesh(h->blk, px, py, pz, uu, vv, nn,
+                              &seg_page, &seg_nq, 1);
+}
+
+/* Interior trees on a fixed lattice inside the outline. The lattice is anchored
+ * to world coordinates (floor(x / step) * step), not to the ring, so the same
+ * plaza always gets the same trees and two plazas that touch do not double-plant
+ * their shared strip. Gated on COVER.R8 for GRASS and PITCH -- geo_fetch paints
+ * that raster from OSM landuse -- and planted unconditionally inside a PARK or
+ * a PLAYGROUND, which is what those tags mean. */
+static int tg_geop_emit_trees(const TG_FBHook *h, const double *rx,
+                              const double *rz, int n, const TD5_GeoArea *a,
+                              double side, double minout, const int *pick,
+                              int npath, double cx, double cz)
+{
+    double x0 = rx[0], x1 = rx[0], z0 = rz[0], z1 = rz[0];
+    const int tv = (int)(a->id_hash % (unsigned)TD5_TG_TREE_VARIANTS);
+    const TG_TreePage *tp = &k_tree_pages[tv];
+    const double tw = (double)tp->w, th = (double)tp->h;
+    const int always = (a->kind == TD5_GEOA_KIND_PARK
+                        || a->kind == TD5_GEOA_KIND_PLAY);
+    double gx, gz;
+    int k, planted = 0;
+
+    for (k = 1; k < n; k++) {
+        if (rx[k] < x0) x0 = rx[k];
+        if (rx[k] > x1) x1 = rx[k];
+        if (rz[k] < z0) z0 = rz[k];
+        if (rz[k] > z1) z1 = rz[k];
+    }
+    x0 = floor(x0 / TD5_TG_GEOP_TREE_STEP) * TD5_TG_GEOP_TREE_STEP;
+    z0 = floor(z0 / TD5_TG_GEOP_TREE_STEP) * TD5_TG_GEOP_TREE_STEP;
+
+    for (gz = z0; gz <= z1 && planted < TD5_TG_GEOP_TREES_MAX;
+         gz += TD5_TG_GEOP_TREE_STEP) {
+        for (gx = x0; gx <= x1 && planted < TD5_TG_GEOP_TREES_MAX;
+             gx += TD5_TG_GEOP_TREE_STEP) {
+            int j, clear = 1;
+            if (*h->nmesh >= h->maxmesh) return 1;
+            if (!td5_geob_point_in_ring(rx, rz, n, gx, gz)) continue;
+            if (tg_geop_out(h->nl, h->si, side, gx, gz)
+                < minout + TD5_TG_GEOP_EDGE_CLR) continue;
+            if (!always && td5_geo_cover(gx, gz) != TD5_GEO_COVER_TREE) continue;
+            /* Never standing on a path: measure to the path AXIS, which is what
+             * the quad was laid along. */
+            for (j = 0; j < npath && clear; j++) {
+                const double ax = rx[pick[j]] - cx, az = rz[pick[j]] - cz;
+                const double l = hypot(ax, az);
+                double t, px2, pz2;
+                if (!(l > 1.0)) continue;
+                t = ((gx - cx) * ax + (gz - cz) * az) / (l * l);
+                if (t < 0.0) t = 0.0;
+                if (t > 1.0) t = 1.0;
+                px2 = cx + ax * t; pz2 = cz + az * t;
+                if (hypot(gx - px2, gz - pz2) < TD5_TG_GEOP_PATH_W + tw * 0.5)
+                    clear = 0;
+            }
+            if (!clear) continue;
+            h->moff[(*h->nmesh)++] = h->blk->len;
+            if (!tg_emit_billboard_mesh(h->blk, gx,
+                                        tg_geop_ground(h->nl, h->si, gx, gz),
+                                        gz, tw * 0.5, th, tg_tree_slot(tv), 1))
+                return 0;
+            tg_acct(TG_ACCT_TREE, h->si);
+            planted++;
+            s_geop_trees++;
+        }
+    }
+    return 1;
+}
+
+/* One real area, laid as a plaza. */
+static int tg_geop_emit_one(const TG_FBHook *h, const TD5_GeoArea *a)
+{
+    double rx[TD5_GEOB_RING_MAX], rz[TD5_GEOB_RING_MAX];
+    int pick[TD5_TG_GEOP_PATHS_MAX];
+    const double side = (a->host_side > 0) ? 1.0 : -1.0;
+    double minout, cx = 0.0, cz = 0.0, pad_r, inv_tile;
+    const int n = a->n;
+    int k, npath, page;
+
+    if (n < 3 || n > TD5_GEOB_RING_MAX) return 1;
+    if (a->radius < TD5_TG_GEOP_MIN_R) { s_geop_small++; return 1; }
+    for (k = 0; k < n; k++) td5_geob_ring(a->first, k, &rx[k], &rz[k]);
+
+    minout = h->nl->v[h->si].width * 0.5
+           + tg_carriageway_clear_gap(h->nl, h->si, side,
+                 tg_city_sidewalk_w_at(h->nl, h->si, h->b),
+                 TD5_TG_CARRIAGEWAY_MARGIN);
+    tg_geop_project(h->nl, h->si, side, minout, rx, rz, n);
+    for (k = 0; k < n; k++) { cx += rx[k]; cz += rz[k]; }
+    cx /= (double)n; cz /= (double)n;
+
+    /* Every plaza kind lawns the same way: the surface is grass and the kind
+     * only decides whether trees are planted unconditionally. */
+    page = TD5_TG_PAGE_R3_BLOCK + 0;
+    /* One lawn page every ~8 m, so a 100 m square is a tiled surface instead of
+     * one stretched image. */
+    inv_tile = 1.0 / 3400.0;
+    if (!tg_geop_emit_lawn(h, rx, rz, n, page, inv_tile)) return 0;
+
+    /* Evenly spread path targets around the ring; a triangle or quad plaza gets
+     * one per corner, a 48-point outline gets 8. */
+    npath = (n < TD5_TG_GEOP_PATHS_MAX) ? n : TD5_TG_GEOP_PATHS_MAX;
+    for (k = 0; k < npath; k++) pick[k] = (k * n) / npath;
+    pad_r = a->radius * 0.18;
+    if (pad_r < TD5_TG_GEOP_PATH_W) pad_r = TD5_TG_GEOP_PATH_W;
+    /* NO DERIVED PATHS in a plaza too thin to hold them. The projection above
+     * moved the RING clear of the road, but the pad and the paths are built
+     * around the CENTROID, which is the ring's average and can still sit over
+     * the carriageway when the mapped area is a narrow strip along the street.
+     * MEASURED before this gate: the on-road guard rejected one 88-vertex paths
+     * mesh at span 1451. Every ring vertex is at least `minout` out and
+     * outwardness is linear in position, so once the centre clears
+     * minout + pad_r + a path half-width, the pad, every path and every bed
+     * between them clear it too -- no second test needed. */
+    if (tg_geop_out(h->nl, h->si, side, cx, cz)
+        >= minout + pad_r + TD5_TG_GEOP_PATH_W) {
+        if (!tg_geop_emit_paths(h, rx, rz, pick, npath, cx, cz, pad_r)) return 0;
+    } else {
+        s_geop_nopath++;
+    }
+    if (!tg_geop_emit_hedge(h, rx, rz, n, side, minout)) return 0;
+    if (!tg_geop_emit_trees(h, rx, rz, n, a, side, minout, pick, npath, cx, cz))
+        return 0;
+    s_geop_areas++;
+    return 1;
+}
+
+int tg_geo_emit_plaza(const TG_FBHook *h)
+{
+    int i;
+
+    if (!tg_geo_city_active()) return 1;
+    if (!td5_env_flag_on("TD5RE_GEO_PLAZAS")) return 1;
+    if (h->si <= 0) return 1;
+    if (tg_span_in_bridge_run(h->si)) return 1;
+    if (tg_up_clear_span(h->si)) return 1;
+
+    for (i = td5_geob_span_area(h->si); i >= 0; i = td5_geob_next_area(i)) {
+        const TD5_GeoArea *a = td5_geob_area(i);
+        if (!a) continue;
+        if (!td5_geob_area_is_plaza(a)) continue;
+        if (*h->nmesh + 4 >= h->maxmesh) break;
+        if (!tg_geop_emit_one(h, a)) return 0;
+    }
+    return 1;
+}
+
+void tg_geo_plaza_report(void)
+{
+    if (!tg_geo_city_active()) return;
+    TD5_LOG_I(LOG_TAG, "[GEO PLAZA] %ld real area(s) laid: %ld lawn triangle(s) "
+              "from the OSM outline, %ld derived path(s), %ld bed(s), %ld "
+              "boundary hedge quad(s), %ld interior tree(s)",
+              s_geop_areas, s_geop_lawn_tri, s_geop_paths, s_geop_beds,
+              s_geop_hedges, s_geop_trees);
+    TD5_LOG_I(LOG_TAG, "[GEO PLAZA] %ld outline(s) projected clear of the "
+              "carriageway+pavement, %ld of those straddled the road, %ld "
+              "skipped as smaller than %.0f units across, %ld too thin for "
+              "a derived path layout (lawn + hedge + trees only); R16 outskirt "
+              "dressing stood down on %ld span-side(s); gap-based parks are "
+              "OFF on the geo path (tg_block_is_park)",
+              s_geop_clamped, s_geop_straddle, s_geop_small,
+              TD5_TG_GEOP_MIN_R, s_geop_nopath, s_geop_r16_stood_down);
+    /* First span each bound plaza is attached to, so a capture
+     * (StartSpanOffset) can be aimed at one without guessing. */
+    {
+        int si, last = -1, n = td5_geo_route_count() - 1;
+        for (si = 1; si < n; si++) {
+            int i = td5_geob_span_area(si);
+            for (; i >= 0; i = td5_geob_next_area(i)) {
+                const TD5_GeoArea *a = td5_geob_area(i);
+                if (!a || !td5_geob_area_is_plaza(a) || i == last) continue;
+                TD5_LOG_I(LOG_TAG, "[GEO PLAZA]   area %d first at span %d", i, si);
+                last = i;
+                break;
+            }
+        }
+    }
+}
+
 /* Group BLOCK dispatcher (feedback R3 items 3-6). Wired into the scenery loop
  * next to tg_emit_fb_city; keeps all BLOCK-area emitters out of another area's
  * dispatcher. */
 int tg_emit_fb_block(const TG_FBHook *h)
 {
+    /* [GEO PHASE 5] The real plaza runs BEFORE the city-paved gate, and is the
+     * only emitter in this dispatcher that does. A mapped square is a fact
+     * about the place, not about the biome the generator painted over it, so an
+     * out-of-town span that OSM says is Paseo del Bosque still gets its park.
+     * A no-op on a synthetic build. */
+    if (!tg_geo_emit_plaza(h)) return 0;
     if (!tg_city_span_paved(h)) return 1;      /* only where the city is */
     if (!tg_block_emit_intersection(h)) return 0;
     if (!tg_block_emit_park(h)) return 0;
@@ -2933,6 +3476,12 @@ void tg_r9_city_reset(void)
     memset(s_r9_arm, 0, sizeof s_r9_arm);
     for (i = 0; i < TD5_TG_MAX_SPANS; i++)
         for (s = 0; s < 2; s++) s_r9_massing[i][s] = 1e30f;
+    /* [GEO PHASE 5] Plaza census, per BUILD for the same reason as the rest of
+     * this function: a second build in one session must report its own
+     * numbers. This is the reset tg_scenery_begin calls in THIS module. */
+    s_geop_areas = s_geop_lawn_tri = s_geop_paths = s_geop_beds = 0;
+    s_geop_hedges = s_geop_trees = s_geop_clamped = s_geop_small = 0;
+    s_geop_straddle = s_geop_r16_stood_down = s_geop_nopath = 0;
 }
 
 /* Merge [lo,hi] into span si / side s's band set, joining bands that touch. */
@@ -3396,6 +3945,15 @@ int tg_emit_fb_city(const TG_FBHook *h)
     if (paved && !tg_up_clear_span(h->si)) {
         if (!TG_TI(TG_T_CITY_FORKBACK, tg_city_emit_forkback(h))) return 0;
     }
+    /* [GEO PHASE 5] REAL OSM footprints bound to this span, extruded to their
+     * own heights. LAST in the CITY dispatcher on purpose: the procedural
+     * frontage and back rows above have already stood down wherever a real
+     * building stands (tg_side_geom / tg_city_emit_backrows read the same
+     * predicate), so the real masses go in after the pavement, kerb and
+     * crossings they stand behind. NOT gated on `paved`: a real footprint is a
+     * fact about the place, not about the biome the generator painted there, so
+     * an out-of-town stretch that OSM says is built-up gets its buildings. */
+    if (!tg_geo_emit_buildings(h)) return 0;
     return 1;
 }
 
@@ -3528,4 +4086,7 @@ void tg_r15_streets_report(void)
               "TD5RE_R15_XWIDE_MEDIAN=%s)", TD5_TG_R15_MEDIAN_MIN,
               s_r15_medians,
               td5_env_flag_on("TD5RE_R15_XWIDE_MEDIAN") ? "on" : "off");
+    /* [GEO PHASE 5] Plaza census on the same per-build report call; silent on a
+     * synthetic build. */
+    tg_geo_plaza_report();
 }

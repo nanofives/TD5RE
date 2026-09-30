@@ -1,10 +1,12 @@
 /**
- * td5_tg_furniture.c -- auto-track roadside FURNITURE: guardrails, start/finish gantry, curve direction signage
+ * td5_tg_furniture.c -- auto-track roadside FURNITURE: guardrails, start/finish gantry, curve direction signage, geo traffic lights
  *
  * Split from the td5_trackgen.c monolith (2026-09-06); shared declarations
  * live in td5_trackgen_internal.h. Element map: docs/plans/AUTOTRACK_ELEMENT_CATALOG.md.
  */
 #include "td5_trackgen_internal.h"
+#include "td5_geo.h"            /* [GEO G3] traffic lights: is a place loaded */
+#include "td5_geo_signals.h"    /* [GEO G3] SIGNALS.JSON nodes + the lamp tag */
 
 /* [R8 G1 "different guardrails"] Which page the roadside barrier wears.
  *
@@ -1052,4 +1054,322 @@ int tg_emit_r11_sign(const TG_NodeList *nl, int si, int nspans,
                   side_i < 0 ? "LEFT" : "RIGHT", si + TD5_TG_R11_SIGN_LEAD,
                   gap, base_y, b->name);
     return 1;
+}
+
+/* ==========================================================================
+ * SECTION: geo traffic lights
+ *
+ * [GEO PHASE 5 / G3] A traffic-light head at every OSM highway=traffic_signals
+ * node that lies near the conditioned route. The one genuinely NEW emitter of
+ * the geo plan (docs/plans/GEO_TRACK_OSM_PLAN.md, "Phase 5"): mesh plus
+ * emissive at highway=traffic_signals, cycling visually, OBEYED BY NOBODY.
+ *
+ * Cosmetic is a hard property here, not a caveat. No AI, physics, track or
+ * race-state code can observe the lamp state -- the cycle lives entirely in
+ * td5_geo_signals.c behind a wall clock, and the only consumer is a colour
+ * write in the renderer's billboard branch. A RaceTrace CSV of any track is
+ * identical with and without this emitter.
+ *
+ * SYNTHETIC BUILDS ARE UNTOUCHED. Everything below is behind
+ * td5_geo_loaded(), which is 0 unless TD5RE_GEO_PLACE names a place, and no
+ * path here calls tg_rand/tg_frand/tg_range (the standing rule at
+ * td5_trackgen_internal.h:1290-1296). A no-geo build clears the table in the
+ * prepass and the emitter returns on its first line.
+ *
+ * WHERE THE HEAD GOES. An OSM signal node is the INTERSECTION, so its own
+ * coordinate usually sits on the carriageway and can never be the placement.
+ * The node picks the SPAN and the SIDE (from the sign of its lateral offset
+ * against that span's tangent); the distance out from the centreline comes
+ * from tg_carriageway_clear_gap, exactly as the direction sign's does, so the
+ * pole lands on the kerb line the rest of the furniture already respects. The
+ * on-road guard (TG_GK_PROP at the call site) is the backstop.
+ *
+ * WHICH WAY IT FACES. The lamps are offset to the head's REARWARD face -- the
+ * -tangent side -- because that is the face a car driving the route in the
+ * route's own direction is looking at as it arrives. SIGNALS.JSON carries a
+ * `direction` field for a per-node approach bearing, but every La Plata entry
+ * is null (566 of 566), so the span tangent is both the better signal and the
+ * only one that exists. See td5_geo_signals.h.
+ * ======================================================================= */
+
+/* Dimensions in TD5_TG_INFRA_M, the generator's own metre (411 units), NOT the
+ * geo frame's 430 units/m. The 4.6% difference is below the resolvable, and
+ * matching the neighbouring furniture matters more than matching the survey:
+ * a light standing next to a direction sign must read as the same scale. */
+#define TD5_TG_SIG_POLE_H    (3.00 * TD5_TG_INFRA_M)
+#define TD5_TG_SIG_POLE_W    (0.11 * TD5_TG_INFRA_M)
+#define TD5_TG_SIG_HEAD_H    (0.95 * TD5_TG_INFRA_M)
+#define TD5_TG_SIG_HEAD_W    (0.34 * TD5_TG_INFRA_M)
+#define TD5_TG_SIG_HEAD_D    (0.30 * TD5_TG_INFRA_M)
+#define TD5_TG_SIG_HEAD_OV   (0.06 * TD5_TG_INFRA_M)  /* head laps the pole top */
+#define TD5_TG_SIG_LAMP_R    (0.13 * TD5_TG_INFRA_M)  /* lens radius            */
+#define TD5_TG_SIG_LAMP_DY   (0.29 * TD5_TG_INFRA_M)  /* lens pitch, top->down  */
+
+/* Same verge the direction sign asks for, so the two never disagree about
+ * where the kerb line is. Asked about the FOOTPRINT'S INNER EDGE and the half
+ * width added back -- the R11 correction, see tg_emit_r11_sign. */
+#define TD5_TG_SIG_GAP       TD5_TG_R11_SIGN_GAP
+
+/* How close to a route node a signal must be to be OURS. 30 m at the geo
+ * frame's 430 units/m. Measured on la_plata: 14 nodes within 5 m, 24 within
+ * 20 m, 25 within 30 m, then it flattens to 28 by 50 m and 40 by 100 m -- the
+ * knee is real, so the threshold sits after it and picks up the intersections
+ * the route actually drives through without reaching across a block. */
+#define TD5_TG_SIG_NEAR_MAX  (30.0 * 430.0)
+
+/* Two signal nodes of the same junction (one per approach) must not stack two
+ * poles on one kerb. One head per side per this many spans. */
+#define TD5_TG_SIG_SPAN_SEP  3
+
+#define TD5_TG_SIG_MESHES    5    /* pole + head + 3 lamps */
+
+typedef struct {
+    int    si;      /* route span the head stands on            */
+    double side;    /* +1 left of travel, -1 right              */
+    double gap;     /* clearance past the carriageway half-width */
+    double base_y;  /* footing                                  */
+} TG_SignalPlace;
+
+static TG_SignalPlace *s_sigp;
+static int  s_sigp_n;
+
+/* Census, all filled in the SINGLE-THREADED prepass. The per-entry emit loop
+ * runs on several threads (td5_trackgen.c:116), so a tally incremented from
+ * the emitter would race; the only counter that cannot be decided up front is
+ * the mesh-budget drop, and that one carries the same caveat the existing
+ * furniture counters do. */
+static long s_sig_in_cache;    /* nodes in SIGNALS.JSON                      */
+static long s_sig_placed;      /* accepted, i.e. rows in s_sigp              */
+static long s_sig_drop_far;    /* no route node within TD5_TG_SIG_NEAR_MAX   */
+static long s_sig_drop_grid;   /* inside the start grid                      */
+static long s_sig_drop_struct; /* bridge run / tunnel bore / under an overpass */
+static long s_sig_drop_side;   /* fork corridor occupies that side           */
+static long s_sig_drop_street; /* mouth of a side street, nothing to stand on */
+static long s_sig_drop_dup;    /* another head already on this span+side     */
+static long s_sig_drop_budget; /* entry ran out of mesh slots (approximate)  */
+
+/* Lateral offset of (wx,wz) from span si's centreline, signed: positive is the
+ * +1 side. Same cross product every placement in the generator uses, so "side"
+ * means the same thing here as it does to tg_side_blocked and the guard. */
+static double tg_sig_lateral(const TG_NodeList *nl, int si,
+                             double wx, double wz)
+{
+    const TG_Node *n = &nl->v[si];
+    return (wx - n->x) * n->tz - (wz - n->z) * n->tx;
+}
+
+/* Decide, once per build and before any thread starts, which SIGNALS.JSON
+ * nodes become heads and where. Clears to empty for a synthetic build. */
+void tg_geo_signals_prepare(const TG_NodeList *nl, int nspans)
+{
+    int n, i;
+
+    free(s_sigp);
+    s_sigp = NULL;
+    s_sigp_n = 0;
+    s_sig_in_cache = s_sig_placed = 0;
+    s_sig_drop_far = s_sig_drop_grid = s_sig_drop_struct = 0;
+    s_sig_drop_side = s_sig_drop_street = s_sig_drop_dup = 0;
+    s_sig_drop_budget = 0;
+
+    if (!td5_geo_loaded())                     return;  /* byte-identical */
+    if (!nl || nl->count < 2)                  return;
+    if (!td5_env_flag_on("TD5RE_GEO_SIGNALS")) return;
+
+    n = td5_geo_signals_sync();
+    s_sig_in_cache = n;
+    if (n <= 0) return;
+
+    s_sigp = (TG_SignalPlace *)malloc((size_t)n * sizeof(TG_SignalPlace));
+    if (!s_sigp) return;
+
+    for (i = 0; i < n; i++) {
+        double x, z, lat, gap, sw, side, base_y;
+        const TG_Node *nd;
+        const TG_Biome *b;
+        int si, j, dup = 0;
+
+        if (!td5_geo_signals_get(i, &x, &z)) continue;
+
+        si = tg_guard_nearest_node(nl, 0, nl->count - 1, x, z);
+        if (si < 0 || si + 1 >= nl->count) { s_sig_drop_far++; continue; }
+
+        nd = &nl->v[si];
+        {
+            const double dx = x - nd->x, dz = z - nd->z;
+            if (dx * dx + dz * dz >
+                TD5_TG_SIG_NEAR_MAX * TD5_TG_SIG_NEAR_MAX) {
+                s_sig_drop_far++;
+                continue;
+            }
+        }
+        /* The route's lead-in is synthetic straight road prepended by the
+         * conditioner, not geography, so nothing out there corresponds to a
+         * real junction -- and the grid must stay clear regardless. */
+        if (si <= TD5_TG_GRID_SPAN)  { s_sig_drop_grid++;   continue; }
+        if (si >= nspans)            { s_sig_drop_far++;    continue; }
+        if (tg_span_in_bridge_run(si) || tg_span_in_tunnel(si) ||
+            tg_up_clear_span(si))    { s_sig_drop_struct++; continue; }
+
+        lat  = tg_sig_lateral(nl, si, x, z);
+        /* A node dead on the centreline gives no preference; the left kerb is
+         * as correct as the right one, so take it rather than drop the head. */
+        side = (lat >= 0.0) ? 1.0 : -1.0;
+
+        if (tg_side_blocked(si, side)) { s_sig_drop_side++; continue; }
+
+        gap = tg_carriageway_clear_gap(nl, si, side,
+                                       TD5_TG_SIG_GAP - TD5_TG_SIG_HEAD_W * 0.5,
+                                       TD5_TG_CARRIAGEWAY_MARGIN)
+              + TD5_TG_SIG_HEAD_W * 0.5;
+
+        if (tg_xstreet_occupies(nl, si, side,
+                                gap - TD5_TG_SIG_HEAD_W * 0.5)) {
+            s_sig_drop_street++;
+            continue;
+        }
+
+        for (j = 0; j < s_sigp_n; j++) {
+            if (s_sigp[j].side == side &&
+                abs(s_sigp[j].si - si) < TD5_TG_SIG_SPAN_SEP) { dup = 1; break; }
+        }
+        if (dup) { s_sig_drop_dup++; continue; }
+
+        b  = &k_biomes[tg_scenery_biome_index(si)];
+        sw = tg_city_sidewalk_w_at(nl, si, b);
+        /* Paved: stand on the kerb. Unpaved: the skirt drops away from the
+         * road, so road height would hang the pole in the air -- the R7 FLORA
+         * rule the direction sign follows too. */
+        if (sw > 0.0) base_y = nd->y + tg_city_kerb_h(b);
+        else          base_y = nd->y - tg_infra_ground_dy(nl, si, side,
+                                                          gap, 0.0);
+
+        s_sigp[s_sigp_n].si     = si;
+        s_sigp[s_sigp_n].side   = side;
+        s_sigp[s_sigp_n].gap    = gap;
+        s_sigp[s_sigp_n].base_y = base_y;
+        s_sigp_n++;
+    }
+    s_sig_placed = s_sigp_n;
+}
+
+/* Emit every head the prepass assigned to span si. Appends 0 or a multiple of
+ * TD5_TG_SIG_MESHES meshes and records each offset. Returns 0 only on a buffer
+ * failure -- a budget or gate refusal is 1 with nothing written, the whole-file
+ * convention. */
+int tg_emit_geo_signals(const TG_NodeList *nl, int si,
+                        TG_Buf *blk, size_t *moff, int *nmesh, int maxmesh)
+{
+    int k;
+
+    if (s_sigp_n <= 0) return 1;            /* synthetic, or no signals */
+    if (si + 1 >= nl->count) return 1;
+
+    for (k = 0; k < s_sigp_n; k++) {
+        const TG_SignalPlace *p = &s_sigp[k];
+        const TG_Node *n = &nl->v[si];
+        double lx, lz, cx, cz, head_y, face_x, face_z, off;
+        int lamp;
+
+        if (p->si != si) continue;
+        if (*nmesh + TD5_TG_SIG_MESHES > maxmesh) { s_sig_drop_budget++; break; }
+
+        lx = n->tz * p->side;
+        lz = -n->tx * p->side;
+        cx = n->x + lx * (n->width * 0.5 + p->gap);
+        cz = n->z + lz * (n->width * 0.5 + p->gap);
+
+        /* POLE. A box rather than the direction sign's crossed quads: this one
+         * is 11 cm and carries a head at the top, so the silhouette has to hold
+         * up from the side as well as head-on. */
+        moff[(*nmesh)++] = blk->len;
+        if (!tg_emit_box_mesh(blk, cx, p->base_y + TD5_TG_SIG_POLE_H * 0.5, cz,
+                              TD5_TG_SIG_POLE_W * 0.5,
+                              TD5_TG_SIG_POLE_H * 0.5,
+                              TD5_TG_SIG_POLE_W * 0.5,
+                              n->tx, n->tz, TD5_TG_PAGE_R11_SIGN_POST,
+                              TD5_TG_SIG_POLE_W, 0xFF606064u))
+            return 0;
+
+        /* HEAD. Same page as the post, darkened hard by the vertex colour so
+         * the housing reads as the black-grey box a lens sits in rather than as
+         * a second length of galvanised pole. */
+        head_y = p->base_y + TD5_TG_SIG_POLE_H - TD5_TG_SIG_HEAD_OV
+                 + TD5_TG_SIG_HEAD_H * 0.5;
+        moff[(*nmesh)++] = blk->len;
+        if (!tg_emit_box_mesh(blk, cx, head_y, cz,
+                              TD5_TG_SIG_HEAD_W * 0.5,
+                              TD5_TG_SIG_HEAD_H * 0.5,
+                              TD5_TG_SIG_HEAD_D * 0.5,
+                              n->tx, n->tz, TD5_TG_PAGE_R11_SIGN_POST,
+                              TD5_TG_SIG_HEAD_W, 0xFF242428u))
+            return 0;
+
+        /* LAMPS. Three additive camera-facing billboards on the shipped glow
+         * page (level001 p378, the radial gradient the streetlamps use), tagged
+         * TD5_MESH_TAG_SIGNAL_LAMP + phase. The page is WHITE here on purpose:
+         * the renderer writes red / amber / green into the vertex diffuse from
+         * the live phase, so one page serves all three lenses and TEXTURES.DAT
+         * gains nothing -- which is what keeps the synthetic page file
+         * byte-identical. See td5_geo_signals.h.
+         *
+         * Pushed onto the head's REARWARD face (-tangent), the face a car
+         * driving the route arrives looking at. */
+        off = TD5_TG_SIG_HEAD_D * 0.5 + TD5_TG_SIG_LAMP_R * 0.35;
+        face_x = cx - n->tx * off;
+        face_z = cz - n->tz * off;
+        for (lamp = 0; lamp < TD5_GEO_SIGNAL_PHASES; lamp++) {
+            const double ly = head_y + (1.0 - (double)lamp) * TD5_TG_SIG_LAMP_DY;
+            moff[(*nmesh)++] = blk->len;
+            if (!tg_emit_billboard_mesh(blk, face_x, ly - TD5_TG_SIG_LAMP_R,
+                                        face_z, TD5_TG_SIG_LAMP_R,
+                                        TD5_TG_SIG_LAMP_R * 2.0,
+                                        tg_prop_slot(PP_LAMP),
+                                        TD5_MESH_TAG_SIGNAL_LAMP + lamp))
+                return 0;
+        }
+    }
+    return 1;
+}
+
+/* The round's acceptance number. A count of ZERO is the failure mode this
+ * exists to make loud -- the R11 SIGNS lesson: a new roadside emitter that is
+ * gated wrong produces nothing while every other number in the log looks
+ * healthy. The drop counters say WHICH gate refused. */
+void tg_geo_signals_report(int nspans)
+{
+    if (!td5_geo_loaded()) return;           /* nothing to say on synthetic */
+    if (!td5_env_flag_on("TD5RE_GEO_SIGNALS")) {
+        TD5_LOG_I(LOG_TAG, "[GEO SIGNALS] DISABLED (TD5RE_GEO_SIGNALS=0)");
+        return;
+    }
+    if (!s_sig_in_cache) {
+        TD5_LOG_I(LOG_TAG, "[GEO SIGNALS] place %s carries no SIGNALS.JSON "
+                  "nodes -- nothing to place", td5_geo_place_slug());
+        return;
+    }
+    if (!s_sig_placed)
+        TD5_LOG_W(LOG_TAG, "[GEO SIGNALS] %ld node(s) in cache but NONE placed "
+                  "over %d spans -- a gate is refusing every candidate "
+                  "(far=%ld grid=%ld struct=%ld side=%ld street=%ld dup=%ld)",
+                  s_sig_in_cache, nspans, s_sig_drop_far, s_sig_drop_grid,
+                  s_sig_drop_struct, s_sig_drop_side, s_sig_drop_street,
+                  s_sig_drop_dup);
+    else
+        TD5_LOG_I(LOG_TAG, "[GEO SIGNALS] cache=%ld near-route=%ld placed=%ld "
+                  "over %d spans | dropped: far=%ld grid=%ld struct=%ld "
+                  "side=%ld street=%ld dup=%ld budget=%ld | src=%s",
+                  s_sig_in_cache, s_sig_in_cache - s_sig_drop_far,
+                  s_sig_placed, nspans, s_sig_drop_far, s_sig_drop_grid,
+                  s_sig_drop_struct, s_sig_drop_side, s_sig_drop_street,
+                  s_sig_drop_dup, s_sig_drop_budget,
+                  td5_geo_signals_source());
+    /* Where each head stands, so a capture (StartSpanOffset) can be aimed at
+     * one without guessing. */
+    {
+        int i;
+        for (i = 0; i < s_sigp_n; i++)
+            TD5_LOG_I(LOG_TAG, "[GEO SIGNALS]   head %d: span %d %s side",
+                      i, s_sigp[i].si, s_sigp[i].side > 0.0 ? "left" : "right");
+    }
 }

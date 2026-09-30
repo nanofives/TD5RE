@@ -43,6 +43,7 @@
 #define LOG_TAG "frontend"
 #include "td5_color.h"
 #include "td5_frontend_internal.h"
+#include "td5_geo.h"
 
 /* [CUP TRACK SELECT 2026-06-25] knob helper — defined just before
  * Screen_TrackSelection but used earlier in Screen_CarSelection. */
@@ -7636,7 +7637,9 @@ static const char *const k_at_sect_n[AT_SECT_COUNT] = {
 
 /* Row kinds. SEED is the one free-text field; everything else cycles a fixed
  * list of values. */
-typedef enum { AT_KIND_OPTION = 0, AT_KIND_SEED } AT_Kind;
+/* [GEO PHASE 4] AT_KIND_PLACE: a string knob (TD5RE_GEO_PLACE) cycled over the
+ * places td5_geo found on disk, with SYNTHETIC at index 0. */
+typedef enum { AT_KIND_OPTION = 0, AT_KIND_SEED, AT_KIND_PLACE } AT_Kind;
 
 /* A row is a label, an env knob, and the discrete values it cycles through.
  * Values are the literal integers written to the knob, so the option list and
@@ -7774,6 +7777,10 @@ static const AT_Row k_at_rows[] = {
     { AT_SECT_ROUTE, AT_KIND_OPTION, "BRANCHES",     "TD5RE_AUTOTRACK_BRANCHES",    k_at_off_on_v, k_at_off_on_n, 2, 1    },
     { AT_SECT_ROUTE, AT_KIND_OPTION, "RUN-OFF",      "TD5RE_AUTOTRACK_RUNOFF",      k_at_runoff_v, k_at_runoff_n, 5, 100  },
     /* -------------------------------------------------------- TERRAIN --- */
+    /* [GEO PHASE 4] Which world the track is built in: the seeded synthetic one,
+     * or a real place picked in re/tools/geo_selector.py. Only places that carry
+     * a ROUTE.JSON are listed. */
+    { AT_SECT_TERRAIN, AT_KIND_PLACE, "LOCATION",    "TD5RE_GEO_PLACE",               NULL,          NULL,          0, 0     },
     { AT_SECT_TERRAIN, AT_KIND_OPTION, "HILLS",       "TD5RE_AUTOTRACK_ELEVATION",     k_at_elev_v,   k_at_elev_n,   5, 6000  },
     { AT_SECT_TERRAIN, AT_KIND_OPTION, "TERRAIN",     "TD5RE_AUTOTRACK_TERRAIN_HILLS", k_at_off_on_v, k_at_off_on_n, 2, 1     },
     { AT_SECT_TERRAIN, AT_KIND_OPTION, "BACKDROP",    "TD5RE_AUTOTRACK_TERRAIN_FAR",   k_at_off_on_v, k_at_off_on_n, 2, 1     },
@@ -7859,7 +7866,7 @@ static int at_roll_id_for(int row)
     const AT_Row *r = &k_at_rows[row];
     int id;
 
-    if (r->kind == AT_KIND_SEED) return -1;
+    if (r->kind == AT_KIND_SEED || r->kind == AT_KIND_PLACE) return -1;
     if (!r->knob) return (row == AT_ROW_TWIST) ? TD5_TG_ROLL_TWIST : -1;
     for (id = 0; id < TD5_TG_ROLL_COUNT; id++) {
         const char *k = td5_trackgen_roll_knob(id);
@@ -7873,6 +7880,7 @@ static int at_roll_id_for(int row)
 static int at_row_n(int row)
 {
     const AT_Row *r = &k_at_rows[row];
+    if (r->kind == AT_KIND_PLACE) return 1 + td5_geo_places_count();
     return (at_roll_id_for(row) >= 0) ? r->n + 1 : r->n;
 }
 
@@ -7923,6 +7931,13 @@ static int at_row_index(int row)
     int cur, i, best;
 
     if (r->kind == AT_KIND_SEED) return 0;   /* not an option list */
+    if (r->kind == AT_KIND_PLACE) {
+        const char *slug = getenv(r->knob);
+        if (!slug || !slug[0]) return 0;
+        for (i = 0; i < td5_geo_places_count(); i++)
+            if (!strcmp(td5_geo_places_slug(i), slug)) return i + 1;
+        return 0;   /* a place with no ROUTE.JSON reads as SYNTHETIC */
+    }
 
     /* A value the GENERATOR published for its own roll is not a player's pin.
      * Without this test the rolled value would read back as a concrete setting
@@ -7964,6 +7979,13 @@ static void at_row_apply(int row, int delta)
 
     if (r->kind == AT_KIND_SEED) return;   /* edited, not cycled */
     if (n <= 0) return;
+    if (r->kind == AT_KIND_PLACE) {
+        idx = at_row_index(row) + delta;
+        while (idx < 0) idx += n;
+        idx %= n;
+        td5_geo_select(idx == 0 ? "" : td5_geo_places_slug(idx - 1));
+        return;
+    }
 
     idx = at_row_index(row) + delta;
     while (idx < 0) idx += n;
@@ -8319,6 +8341,11 @@ static void at_draw_preview(float sx, float sy)
         return;
     }
 
+    /* [GEO PHASE 4] ODbL: a real place must carry the OSM credit wherever its
+     * track is shown. Above the read-out so it never collides with it. */
+    if (getenv("TD5RE_GEO_PLACE") && getenv("TD5RE_GEO_PLACE")[0])
+        fe_draw_small_text(bx, by - 14 * sy, TD5_GEO_CREDIT, 0xFF8899AA, sx, sy);
+
     /* Read-out under the panel. */
     if (s_at_status.done && s_at_status.ok) {
         const TD5_TrackGenPreviewStats *st = &s_at_status.stats;
@@ -8402,6 +8429,14 @@ void frontend_render_autotrack_options_overlay(float sx, float sy)
                 else
                     snprintf(buf, sizeof(buf), "%u", (unsigned int)td5_env_int(
                                  "TD5RE_AUTOTRACK_SEED", 0, 0, 0x7FFFFFFF));
+            } else if (k_at_rows[row].kind == AT_KIND_PLACE) {
+                /* Real place names run long; the value column fits ~16
+                 * characters before the preview panel. */
+                const char *nm = idx ? td5_geo_places_name(idx - 1) : "SYNTHETIC";
+                int c;
+                for (c = 0; nm[c] && c < 16; c++)
+                    buf[c] = (char)((nm[c] >= 0x61 && nm[c] <= 0x7A) ? nm[c] - 32 : nm[c]);
+                buf[c] = 0;
             } else if (rolled) {
                 const int id = at_roll_id_for(row);
                 snprintf(buf, sizeof(buf), "~%s",
@@ -8634,6 +8669,7 @@ void Screen_AutoTrackOptions(void) {
     switch (s_inner_state) {
     case 0:
         frontend_init_return_screen(TD5_SCREEN_AUTOTRACK_OPTIONS);
+        td5_geo_places_rescan();   /* [GEO PHASE 4] pick up places fetched while running */
         /* [R21] Self-checks that used to be claimed in a comment and never
          * actually run. AT_ROW_TWIST is a RAW INDEX into k_at_rows, so it goes
          * stale the moment a row before TWISTINESS is added or removed -- which

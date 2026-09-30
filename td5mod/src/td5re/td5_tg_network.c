@@ -25,9 +25,19 @@
  * tg_block_arm_skew / tg_r12_fcross_at read that table, so the ~90 junction
  * consumers keep their signatures and can no longer disagree with each
  * other about where a street is.
+ *
+ * [GEO PHASE 5 2026-09-30] On a geo build the candidates come from the REAL
+ * OSM roads of the place cache instead of the facade rhythm: the network
+ * ACCEPTS streets that already exist rather than PLANTING them where the
+ * raster has room. See the "GEO: REAL STREETS" section below. Everything
+ * downstream -- the mouth table, the paint, the audit -- is unchanged, so the
+ * two candidate sources are interchangeable and a synthetic build never
+ * reaches a line of it.
  */
 #include "td5_trackgen_internal.h"
 #include "td5_tg_world.h"
+#include "td5_geo.h"
+#include "td5_geo_roads.h"
 
 #define TG_NET_MAX_EDGES 2048
 #define TG_NET_MAX_NODES 4096
@@ -519,6 +529,561 @@ static void tg_net_underpasses(const TG_NodeList *nl, int nspans)
     }
 }
 
+/* ==================================================================== *
+ * SECTION: GEO REAL STREETS                                            *
+ * ==================================================================== *
+ *
+ * [GEO PHASE 5 2026-09-30] The same network, sourced from the real world.
+ *
+ * The synthetic generators above PROPOSE openings (the facade rhythm, the R12
+ * period) and validate them on the occupancy raster. On a geo build the
+ * openings already exist: ROADS.JSON holds the real OSM ways in the route's own
+ * frame, so the job inverts to ACCEPTING what is there -- which means the
+ * rules the synthetic path could simply obey now have to be tested and, where
+ * reality breaks them, the street must be DROPPED AND COUNTED rather than
+ * silently bent into shape.
+ *
+ * WHAT A REAL ROAD BECOMES
+ *   crossing the route      two mouths at the same span run, one per side
+ *                           (which is what the emitter already draws as a
+ *                           crossroads -- tg_city_emit_crossstreet loops both
+ *                           sides and the quads plus the gap between them make
+ *                           the junction)
+ *   ending at the route     one mouth, the side it arrives from (a T)
+ *   grade separated         an UNDERPASS edge: painted, registered, no mouth
+ *                           and no frontage, exactly like tg_net_underpasses
+ *   running ALONG the route  nothing: it IS the road we are driving on
+ *
+ * NON-90-DEGREE MOUTHS ARE FIRST CLASS, not an edge case. La Plata is a
+ * 45-degree diagonal grid, so the synthetic TD5_TG_DIAG_MAX_DEG ceiling of 28
+ * would refuse the streets that make the place recognisable. The geo cap is
+ * TD5RE_GEO_NET_SKEW_MAX_DEG (default 65) measured from the outward normal, and
+ * it does double duty: a bearing within 25 degrees of the road's own tangent is
+ * not a side street, it is the route, so one knob rejects both a fold-back and
+ * the route's own carriageway.
+ *
+ * WHY THE ARM IS STRAIGHT. The mouth table carries (skew, reach) -- a single
+ * bearing -- because that is what the ~90 junction consumers draw: one skewed
+ * quad per span of the run. So the registered edge is the STRAIGHT arm along
+ * the real road's bearing at the junction, and its length is the distance the
+ * real road stays inside that arm (tg_geo_straight_run). This is not a
+ * compromise at this scale: TD5_TG_R8_XSTREET_MAX caps a reach at 21 000 units
+ * = 49 m, and a real city street is straight over 49 m. Registering the real
+ * polyline instead would put geometry in NETWORK.JSON that nothing draws, and
+ * tg_network_audit.py would rightly fail on it.
+ *
+ * ORDER IS THE TIE-BREAK, AND IT IS DETERMINISTIC. Two real streets can want
+ * the same (span, side) -- the span grid is 3.49 m and a city block is not.
+ * Arms are sorted by (highway class, lanes, road index, span, side), all read
+ * from the file, so the winner is a property of the data and two geo builds
+ * produce identical level files. No tg_rand/tg_frand/tg_range is drawn here
+ * (the standing rule at td5_trackgen_internal.h:1290-1296).
+ *
+ * PLANARITY IS STILL BY CONSTRUCTION. Every accepted arm is painted into the
+ * occupancy raster before the next is marched, so tg_net_march stops the next
+ * one short (why == 2, a T-junction) instead of letting the two cross. That is
+ * the same mechanism the synthetic path relies on, unchanged.
+ */
+
+#define TG_GEO_SAMPLE        3000.0  /* step along a real road, world units  */
+#define TG_GEO_COARSE        16      /* stride of the nearest-node first pass */
+#define TG_GEO_MAX_ARMS      4096
+#define TG_GEO_MAX_HITS      32      /* junctions one way may make            */
+#define TG_GEO_SPAN_JUMP     4       /* span continuity across a crossing     */
+#define TG_GEO_MOUTH_SPANS   12      /* widest frontage run a real road gets  */
+#define TG_GEO_AVENUE_LANES  4       /* lanes at which a street is an avenue  */
+#define TG_GEO_SKEW_MAX_DEG  65      /* default TD5RE_GEO_NET_SKEW_MAX_DEG    */
+#define TG_GEO_MARCH_COS_MIN 0.35    /* floor on cos(skew) for the own-paint
+                                      * stand-off, so a steep diagonal is not
+                                      * killed by the main road's own paint  */
+#define TG_GEO_ALONG_NUM     6       /* a way is the route when 6/10 of its   */
+#define TG_GEO_ALONG_DEN     10      /* samples run along it                  */
+
+typedef struct {
+    int    si, left, lanes, road, klass;
+    double skew, want;
+} TG_GeoArm;
+
+typedef struct {
+    int    si;
+    double x, z;            /* the junction, on the route centre line        */
+    double dx, dz;          /* unit along the real road at the junction      */
+    int    kfwd, sfwd;      /* vertex + index step for the +(dx,dz) arm      */
+    int    kbwd, sbwd;      /* ... for the -(dx,dz) arm; kbwd < 0 = no arm   */
+} TG_GeoHit;
+
+static TG_GeoArm s_garm[TG_GEO_MAX_ARMS];
+static int       s_gna;
+static double    s_gcd[TD5_TG_MAX_SPANS / TG_GEO_COARSE + 2];
+
+static struct {
+    long ways, inbox, route, cand, street, avenue, cont, under;
+    long d_grid, d_struct, d_biome, d_park, d_corridor, d_skew,
+         d_short, d_taken, d_fold, d_full, d_under;
+    long why_road, why_street, why_water;
+} s_gs;
+
+/* Nearest main-route node to (x,z). Coarse stride first, then a full refine
+ * around EVERY coarse sample that could still hold the answer: moving
+ * TG_GEO_COARSE nodes changes the distance to a fixed point by at most
+ * COARSE * span_length, so that slack makes the refine exhaustive. Refining
+ * only around the coarse best would be wrong on a real route, which is not
+ * axis-monotone and can fold back within a few hundred metres of itself -- the
+ * wrong lobe would put a street's mouth on the far span. */
+static int tg_geo_nearest(const TG_NodeList *nl, int nspans, double x, double z)
+{
+    const double slack = (double)TG_GEO_COARSE * (double)TD5_TG_SPAN_LENGTH;
+    double cmin = 1e300, bd = 1e300;
+    int i, c = 0, best = -1;
+
+    for (i = 0; i <= nspans; i += TG_GEO_COARSE, c++) {
+        const double dx = x - nl->v[i].x, dz = z - nl->v[i].z;
+        s_gcd[c] = sqrt(dx * dx + dz * dz);
+        if (s_gcd[c] < cmin) cmin = s_gcd[c];
+    }
+    c = 0;
+    for (i = 0; i <= nspans; i += TG_GEO_COARSE, c++) {
+        int j, lo, hi;
+        if (s_gcd[c] > cmin + slack) continue;
+        lo = i - TG_GEO_COARSE; if (lo < 0) lo = 0;
+        hi = i + TG_GEO_COARSE; if (hi > nspans) hi = nspans;
+        for (j = lo; j <= hi; j++) {
+            const double dx = x - nl->v[j].x, dz = z - nl->v[j].z;
+            const double d = dx * dx + dz * dz;
+            if (d < bd) { bd = d; best = j; }
+        }
+    }
+    return best;
+}
+
+/* Signed lateral (positive = LEFT of travel, the sign tg_city_edge_frame takes
+ * as sg > 0) and along-track offset of (x,z) in node `ni`'s frame. Same
+ * expression as the country-loop rejoin test above, so the two cannot disagree
+ * about which side a point is on. */
+static void tg_geo_lat(const TG_NodeList *nl, int ni, double x, double z,
+                       double *lat, double *along)
+{
+    const TG_Node *n = &nl->v[ni];
+    *lat   = (x - n->x) * n->tz - (z - n->z) * n->tx;
+    *along = (x - n->x) * n->tx + (z - n->z) * n->tz;
+}
+
+/* Rotation from unit (ux,uz) to unit (ax,az), in the sense tg_block_rot2
+ * applies (ox = ux*cos - uz*sin, oz = ux*sin + uz*cos), so feeding the result
+ * back through it reproduces (ax,az) exactly. */
+static double tg_geo_skew_of(double ux, double uz, double ax, double az)
+{
+    return atan2(ux * az - uz * ax, ux * ax + uz * az);
+}
+
+/* Junctions between one real way and the route. Returns the count, or -1 when
+ * the way IS the route (see TG_GEO_ALONG_*): those must produce nothing, and
+ * reporting them as skew rejections would bury the real census under the
+ * handful of ways the conditioner routed along. */
+static int tg_geo_road_hits(const TG_NodeList *nl, int nspans,
+                            const TD5_GeoRoad *rd, TG_GeoHit *out, int maxout)
+{
+    const double sin_lim = sin((double)TG_GEO_SKEW_MAX_DEG * TD5_TG_PI / 180.0);
+    int k, nout = 0, first = 1, pni = -1;
+    long nsamp = 0, nalong = 0;
+    double plat = 0.0;
+
+    for (k = 0; k + 1 < rd->count; k++) {
+        double ax, az, bx, bz, len, ux, uz, t;
+        if (!td5_geo_roads_point(rd, k, &ax, &az)) break;
+        if (!td5_geo_roads_point(rd, k + 1, &bx, &bz)) break;
+        len = sqrt((bx - ax) * (bx - ax) + (bz - az) * (bz - az));
+        if (len < 1.0) continue;
+        ux = (bx - ax) / len; uz = (bz - az) / len;
+        for (t = 0.0; ; t += TG_GEO_SAMPLE) {
+            double sx, sz, lat, along;
+            int ni;
+            if (t > len) t = len;
+            sx = ax + ux * t; sz = az + uz * t;
+            ni = tg_geo_nearest(nl, nspans, sx, sz);
+            if (ni >= 0) {
+                const TG_Node *n = &nl->v[ni];
+                /* |sin| between the way and the route tangent: both unit, so
+                 * the cross product IS the sine. */
+                const double sn = fabs(ux * n->tz - uz * n->tx);
+                tg_geo_lat(nl, ni, sx, sz, &lat, &along);
+                nsamp++;
+                if (sn < sin_lim
+                    && fabs(lat) < n->width * 0.5 + rd->width * 0.5 + 1500.0)
+                    nalong++;
+                if (!first && pni >= 0 && sn >= sin_lim
+                    && (ni - pni) <= TG_GEO_SPAN_JUMP
+                    && (pni - ni) <= TG_GEO_SPAN_JUMP
+                    && ((plat < 0.0) != (lat < 0.0))
+                    && nout < maxout) {
+                    /* Where the sign flipped, interpolated on |lat| so the
+                     * junction lands on the centre line rather than on
+                     * whichever sample happened to be nearer it. */
+                    const double f = fabs(plat) / (fabs(plat) + fabs(lat) + 1e-9);
+                    const double t0 = t - TG_GEO_SAMPLE;
+                    const double tj = (t0 < 0.0 ? 0.0 : t0)
+                                    + f * (t - (t0 < 0.0 ? 0.0 : t0));
+                    TG_GeoHit *h = &out[nout++];
+                    h->x = ax + ux * tj; h->z = az + uz * tj;
+                    h->dx = ux; h->dz = uz;
+                    h->kfwd = k + 1; h->sfwd =  1;
+                    h->kbwd = k;     h->sbwd = -1;
+                    h->si = tg_geo_nearest(nl, nspans, h->x, h->z);
+                    if (h->si < 0) nout--;
+                }
+                pni = ni; plat = lat; first = 0;
+            }
+            if (t >= len) break;
+        }
+    }
+
+    /* A way the conditioner routed along is the main carriageway itself. */
+    if (nsamp > 0 && nalong * TG_GEO_ALONG_DEN >= nsamp * TG_GEO_ALONG_NUM)
+        return -1;
+
+    /* Both ends: a way that STOPS at the route is a T, one arm only. Tested
+     * against the carriageway the engine actually has there (the same
+     * authority the R8 clamp and the on-road guard use) plus one span of
+     * slack, because the OSM node sits where the two centre lines meet and the
+     * route was resampled by chord. */
+    for (k = 0; k < 2 && nout < maxout; k++) {
+        const int m  = k ? rd->count - 1 : 0;
+        const int m2 = k ? rd->count - 2 : 1;
+        double ex, ez, nx, nz, len, lat, along;
+        int ni;
+        if (!td5_geo_roads_point(rd, m, &ex, &ez)) continue;
+        if (!td5_geo_roads_point(rd, m2, &nx, &nz)) continue;
+        ni = tg_geo_nearest(nl, nspans, ex, ez);
+        if (ni < 0) continue;
+        tg_geo_lat(nl, ni, ex, ez, &lat, &along);
+        if (fabs(lat) > tg_carriageway_reach(nl, ni, lat >= 0.0 ? 1.0 : -1.0)
+                        + (double)TD5_TG_SPAN_LENGTH) continue;
+        if (fabs(along) > (double)TD5_TG_SPAN_LENGTH) continue;
+        len = sqrt((nx - ex) * (nx - ex) + (nz - ez) * (nz - ez));
+        if (len < 1.0) continue;
+        {
+            TG_GeoHit *h = &out[nout++];
+            h->x = ex; h->z = ez;
+            h->dx = (nx - ex) / len; h->dz = (nz - ez) / len;
+            h->kfwd = m2; h->sfwd = k ? -1 : 1;
+            h->kbwd = -1; h->sbwd = 0;
+            h->si = ni;
+        }
+    }
+    return nout;
+}
+
+/* How far the real way stays inside the STRAIGHT arm the mouth table can
+ * express. Walks the way's own vertices from `k0` in index direction `step`,
+ * measuring each against the ray from the junction along (dx,dz), and stops at
+ * the first vertex more than half the street width off it -- that is the point
+ * where the drawn quad and the real road would part company. */
+static double tg_geo_straight_run(const TD5_GeoRoad *rd, int k0, int step,
+                                  double jx, double jz, double dx, double dz)
+{
+    const double halfw = rd->width * 0.5;
+    double run = 0.0;
+    int k;
+    if (step == 0) return 0.0;
+    for (k = k0; k >= 0 && k < rd->count; k += step) {
+        double x, z, along, off;
+        if (!td5_geo_roads_point(rd, k, &x, &z)) break;
+        along = (x - jx) * dx + (z - jz) * dz;
+        off   = fabs((x - jx) * dz - (z - jz) * dx);
+        if (along <= run) continue;               /* behind, or no progress */
+        if (off > halfw) break;                   /* the real road bent away */
+        run = along;
+    }
+    return run;
+}
+
+static int tg_geo_arm_cmp(const void *pa, const void *pb)
+{
+    const TG_GeoArm *a = (const TG_GeoArm *)pa, *b = (const TG_GeoArm *)pb;
+    if (a->klass != b->klass) return b->klass - a->klass;   /* bigger first */
+    if (a->lanes != b->lanes) return b->lanes - a->lanes;
+    if (a->road  != b->road)  return a->road  - b->road;
+    if (a->si    != b->si)    return a->si    - b->si;
+    return a->left - b->left;
+}
+
+/* One arm of one junction: the side it leaves on, its bearing, and the straight
+ * run the real road offers. Pushed as a candidate; nothing is validated
+ * against the raster yet, because the order arms are PLACED in decides which of
+ * two contenders survives. */
+static void tg_geo_arm_push(const TG_NodeList *nl, const TG_GeoHit *h,
+                            const TD5_GeoRoad *rd, int ridx,
+                            double dx, double dz, int k0, int step,
+                            double skewmax)
+{
+    double e[10], skew, run, kerb;
+    int left;
+    const TG_Biome *b;
+
+    /* Which kerb: the outward normal of the LEFT side, dotted with the arm. */
+    tg_city_edge_frame(nl, h->si, 1.0, e);
+    left = (dx * e[6] + dz * e[7]) > 0.0;
+    if (!left) tg_city_edge_frame(nl, h->si, -1.0, e);
+
+    skew = tg_geo_skew_of(e[6], e[7], dx, dz);
+    s_gs.cand++;
+    if (fabs(skew) > skewmax) { s_gs.d_skew++; return; }
+
+    /* The run is measured from the JUNCTION (so `off` is the true offset from
+     * the real road's bearing) and then shortened to start at the kerb, which
+     * is where the drawn quad starts. */
+    run  = tg_geo_straight_run(rd, k0, step, h->x, h->z, dx, dz);
+    kerb = (e[0] - h->x) * dx + (e[2] - h->z) * dz;
+    if (kerb < 0.0) kerb = 0.0;
+    run -= kerb;
+    if (run < TD5_TG_R8_CLAMP_MIN) { s_gs.d_short++; return; }
+
+    b = &k_biomes[tg_scenery_biome_index(h->si)];
+    {
+        const double cap = tg_city_crossst_reach(b, tg_city_sidewalk_w(b));
+        if (run > cap) run = cap;
+    }
+    if (s_gna >= TG_GEO_MAX_ARMS) { s_gs.d_full++; return; }
+    {
+        TG_GeoArm *a = &s_garm[s_gna++];
+        a->si = h->si; a->left = left; a->lanes = rd->lanes;
+        a->road = ridx; a->klass = rd->klass;
+        a->skew = skew; a->want = run;
+    }
+}
+
+/* Every hard invariant a real street has to clear before it may be marched.
+ * Each failure is COUNTED, never silent -- that is the whole point of sourcing
+ * candidates from data nobody conditioned for this engine. */
+static int tg_geo_span_run_ok(const TG_NodeList *nl, int nspans,
+                              int si, int left, int run, int *lo_out, int *hi_out)
+{
+    const double sg = left ? 1.0 : -1.0;
+    const int lo = si - (run - 1) / 2, hi = lo + run - 1;
+    int s;
+
+    /* Off the ends, or on the start grid. Spans below TD5_TG_FACADE_START_RUN
+     * are FORCED built by tg_facade_built, so a mouth there would be claimed by
+     * tg_xstreet_here and then never emitted -- the two authorities must agree. */
+    if (lo < 1 || hi >= nspans || hi + 1 >= nl->count) return (s_gs.d_grid++, 0);
+    if (lo < TD5_TG_FACADE_START_RUN
+        && td5_env_flag_on("TD5RE_AUTOTRACK_START_CITY")) return (s_gs.d_grid++, 0);
+
+    for (s = lo; s <= hi; s++) {
+        if (tg_span_in_bridge_run(s) || tg_span_in_tunnel(s))
+            return (s_gs.d_struct++, 0);
+        if (td5_env_flag_on("TD5RE_AUTOTRACK_XBRIDGE_GATE")
+            && tg_span_near_bridge(s, TD5_TG_XBRIDGE_CLEAR))
+            return (s_gs.d_struct++, 0);
+        /* An unpaved biome has no sidewalk, and tg_facade_built only consults
+         * the mouth table where one exists. */
+        if (!(tg_city_sidewalk_w(&k_biomes[tg_scenery_biome_index(s)]) > 0.0))
+            return (s_gs.d_biome++, 0);
+        if (tg_block_is_park(s, left))          return (s_gs.d_park++, 0);
+        if (tg_side_corridor_here(nl, s, sg))   return (s_gs.d_corridor++, 0);
+        /* Inside the carriageway is what a second mouth on one (span,side)
+         * amounts to: the table is single-valued and the emitters would draw
+         * two overlapping quads out of one kerb. */
+        if (s_mouth[s][left ? 0 : 1].edge >= 0) return (s_gs.d_taken++, 0);
+    }
+    *lo_out = lo; *hi_out = hi;
+    return 1;
+}
+
+/* Real grade-separated crossings: a way tagged bridge / tunnel / layer != 0
+ * passes OVER or UNDER the route, so it gets no mouth and no frontage, exactly
+ * like the synthetic tg_net_underpasses. Registered FIRST for the same reason
+ * that pass runs first -- the streets must stop at a crossing, not the other
+ * way round. */
+static void tg_net_geo_underpasses(const TG_NodeList *nl, int nspans)
+{
+    static TG_GeoHit hits[TG_GEO_MAX_HITS];
+    const int nr = td5_geo_roads_count();
+    int r;
+
+    for (r = 0; r < nr; r++) {
+        const TD5_GeoRoad *rd = td5_geo_roads_get(r);
+        int nh, i;
+        if (!rd || (!rd->bridge && !rd->tunnel && rd->layer == 0)) continue;
+        nh = tg_geo_road_hits(nl, nspans, rd, hits, TG_GEO_MAX_HITS);
+        if (nh <= 0) continue;
+        for (i = 0; i < nh; i++) {
+            const int si = hits[i].si;
+            double l[10], rr[10];
+            int a, b, blocked = 0, k;
+            TG_NetEdge *ed;
+            if (si <= 0 || si >= nspans || si + 1 >= nl->count) continue;
+            if (hits[i].kbwd < 0) continue;      /* a T cannot be a crossing */
+            tg_city_edge_frame(nl, si,  1.0, l);
+            tg_city_edge_frame(nl, si, -1.0, rr);
+            /* Both arms must be clear of every street already painted, or the
+             * deck would cross one and planarity would fail in the audit. */
+            for (k = 1; k <= 4 && !blocked; k++) {
+                const double d = 3000.0 * (double)k;
+                if (tg_world_occ_near(l[0] + l[6] * d, l[2] + l[7] * d,
+                                      TD5_TG_LANE_WIDTH, TG_WO_STREET)
+                    || tg_world_occ_near(rr[0] + rr[6] * d, rr[2] + rr[7] * d,
+                                         TD5_TG_LANE_WIDTH, TG_WO_STREET))
+                    blocked = 1;
+            }
+            if (blocked) { s_gs.d_under++; continue; }
+            a = tg_net_node(l[0] + l[6] * 12000.0, l[2] + l[7] * 12000.0,
+                            nl->v[si].y, 2, -1);
+            b = tg_net_node(rr[0] + rr[6] * 12000.0, rr[2] + rr[7] * 12000.0,
+                            nl->v[si].y, 2, -1);
+            ed = tg_net_edge_new(a, b, TG_NE_UNDERPASS,
+                                 (double)rd->lanes * (double)TD5_TG_LANE_WIDTH);
+            if (!ed) return;
+            ed->mouth_si = si;
+            tg_world_occ_seg(l[0] + l[6] * 2500.0, l[2] + l[7] * 2500.0,
+                             s_nodes[a].x, s_nodes[a].z, ed->width * 0.5, TG_WO_STREET);
+            tg_world_occ_seg(rr[0] + rr[6] * 2500.0, rr[2] + rr[7] * 2500.0,
+                             s_nodes[b].x, s_nodes[b].z, ed->width * 0.5, TG_WO_STREET);
+            s_gs.under++;
+        }
+    }
+}
+
+/* The real city streets. Collect every arm the OSM graph offers, order them so
+ * the winner of a contested (span, side) is a property of the data, then place
+ * them one at a time -- marching and painting each before the next is marched,
+ * which is what keeps the network planar. */
+static void tg_net_geo_streets(const TG_NodeList *nl, int nspans)
+{
+    static TG_GeoHit hits[TG_GEO_MAX_HITS];
+    const double skewmax = (double)td5_env_int("TD5RE_GEO_NET_SKEW_MAX_DEG",
+                                               TG_GEO_SKEW_MAX_DEG, 10, 85)
+                         * TD5_TG_PI / 180.0;
+    const int nr = td5_geo_roads_count();
+    int r, i;
+    double rminx, rminz, rmaxx, rmaxz;
+
+    if (!td5_env_flag_on("TD5RE_AUTOTRACK_CROSS_STREETS")) {
+        TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO] TD5RE_AUTOTRACK_CROSS_STREETS=0: "
+                  "no real streets accepted");
+        return;
+    }
+
+    /* Route bbox, so a way on the far side of town costs one compare. */
+    rminx = rmaxx = nl->v[0].x; rminz = rmaxz = nl->v[0].z;
+    for (i = 1; i <= nspans; i++) {
+        if (nl->v[i].x < rminx) rminx = nl->v[i].x;
+        if (nl->v[i].x > rmaxx) rmaxx = nl->v[i].x;
+        if (nl->v[i].z < rminz) rminz = nl->v[i].z;
+        if (nl->v[i].z > rmaxz) rmaxz = nl->v[i].z;
+    }
+
+    s_gna = 0;
+    for (r = 0; r < nr; r++) {
+        const TD5_GeoRoad *rd = td5_geo_roads_get(r);
+        int nh, h;
+        if (!rd) continue;
+        s_gs.ways++;
+        if (rd->maxx < rminx - TD5_TG_R8_LAT_MAX || rd->minx > rmaxx + TD5_TG_R8_LAT_MAX
+            || rd->maxz < rminz - TD5_TG_R8_LAT_MAX || rd->minz > rmaxz + TD5_TG_R8_LAT_MAX)
+            continue;
+        s_gs.inbox++;
+        /* Grade-separated ways were registered as decks above; they are not
+         * side streets and must not also claim a mouth. */
+        if (rd->bridge || rd->tunnel || rd->layer != 0) continue;
+        nh = tg_geo_road_hits(nl, nspans, rd, hits, TG_GEO_MAX_HITS);
+        if (nh < 0) { s_gs.route++; continue; }
+        for (h = 0; h < nh; h++) {
+            const TG_GeoHit *q = &hits[h];
+            if (q->si <= 0 || q->si >= nspans || q->si + 1 >= nl->count) continue;
+            tg_geo_arm_push(nl, q, rd, r,  q->dx,  q->dz, q->kfwd, q->sfwd, skewmax);
+            if (q->kbwd >= 0)
+                tg_geo_arm_push(nl, q, rd, r, -q->dx, -q->dz, q->kbwd, q->sbwd, skewmax);
+        }
+    }
+
+    if (s_gna > 1) qsort(s_garm, (size_t)s_gna, sizeof(s_garm[0]), tg_geo_arm_cmp);
+
+    for (i = 0; i < s_gna; i++) {
+        const TG_GeoArm *a = &s_garm[i];
+        const double sg = a->left ? 1.0 : -1.0;
+        int run = a->lanes, lo = 0, hi = 0, why, na, nb, kind;
+        double e[10], ox, oz, reach, from, width, pre;
+        TG_NetEdge *ed;
+
+        if (run < 1) run = 1;
+        if (run > TG_GEO_MOUTH_SPANS) run = TG_GEO_MOUTH_SPANS;
+        if (!tg_geo_span_run_ok(nl, nspans, a->si, a->left, run, &lo, &hi)) continue;
+
+        width = (double)(hi - lo + 1) * (double)TD5_TG_LANE_WIDTH;
+        tg_city_edge_frame(nl, a->si, sg, e);
+        {
+            const double cs = cos(a->skew), sn = sin(a->skew);
+            ox = e[6] * cs - e[7] * sn;
+            oz = e[6] * sn + e[7] * cs;
+            /* The main road's own paint is half-width + 600 wide, so the ray
+             * has to be let out past it before the carriageway test may fire.
+             * A skewed ray covers less lateral ground per unit of length, so
+             * the stand-off grows as 1/cos -- without this a 45-degree
+             * diagonal is rejected by the road it leaves. */
+            from = TD5_TG_R8_CLAMP_MIN
+                 / (cs < TG_GEO_MARCH_COS_MIN ? TG_GEO_MARCH_COS_MIN : cs);
+        }
+        reach = tg_net_march(e[0], e[2], ox, oz, a->want, width * 0.5, from, &why);
+        if (why == 1) s_gs.why_road++;
+        if (why == 2) s_gs.why_street++;
+        if (why == 3) s_gs.why_water++;
+        pre   = reach;
+        reach = tg_r13_fold_cap(nl, a->si, sg, a->skew, reach, "TD5RE_R13_FOLD_STREET");
+        if (reach < TD5_TG_R8_CLAMP_MIN) {
+            if (reach < pre) s_gs.d_fold++; else s_gs.d_short++;
+            continue;
+        }
+
+        kind = tg_turn_open(a->si, a->left) ? TG_NE_CONTINUATION
+             : ((run >= TG_GEO_AVENUE_LANES || a->klass >= TD5_GEO_RC_PRIMARY)
+                ? TG_NE_AVENUE : TG_NE_STREET);
+        na = tg_net_node(e[0], e[2], e[1], 0, a->si);
+        nb = tg_net_node(e[0] + ox * reach, e[2] + oz * reach,
+                         tg_world_h(e[0] + ox * reach, e[2] + oz * reach),
+                         why == 2 ? 1 : 2, -1);
+        ed = tg_net_edge_new(na, nb, kind, width);
+        if (!ed) { s_gs.d_full++; return; }
+        ed->mouth_si = a->si; ed->mouth_left = a->left;
+        ed->mouth_lo = lo;    ed->mouth_hi   = hi;
+        ed->skew = a->skew;   ed->reach      = reach;
+        tg_net_paint_edge(ed, TG_WO_STREET);
+        tg_net_set_mouth(lo, hi, a->left, (int)(ed - s_edges), a->skew, reach);
+        if (kind == TG_NE_AVENUE)            s_gs.avenue++;
+        else if (kind == TG_NE_CONTINUATION) s_gs.cont++;
+        else                                 s_gs.street++;
+    }
+}
+
+/* Is this build sourcing its streets from real OSM roads? A route alone is not
+ * enough: TD5RE_GEO_ROUTE can drive a conditioned polyline over the SYNTHETIC
+ * world with no place cache behind it (td5_geo.h), and there is no road graph to
+ * accept in that case. */
+static int tg_net_geo_active(void)
+{
+    if (!td5_geo_loaded() || td5_geo_route_count() < 2) return 0;
+    if (td5_env_flag_off("TD5RE_GEO_NET_SYNTH_ONLY")) return 0;
+    return td5_geo_roads_sync(td5_geo_place_slug());
+}
+
+static void tg_net_geo_census(void)
+{
+    TD5_LOG_I(LOG_TAG, "trackgen: [NET/GEO] %s: real street census -- "
+              "%ld way(s), %ld near the route, %ld are the route itself; "
+              "%ld junction arm(s) considered, %ld accepted "
+              "(street %ld avenue %ld continuation %ld), %ld real deck(s); "
+              "dropped: skew %ld short %ld fold %ld taken %ld struct %ld "
+              "grid %ld biome %ld park %ld corridor %ld deck-blocked %ld "
+              "table-full %ld; march stops: road %ld street %ld water/steep %ld",
+              td5_geo_place_slug(), s_gs.ways, s_gs.inbox, s_gs.route,
+              s_gs.cand, s_gs.street + s_gs.avenue + s_gs.cont,
+              s_gs.street, s_gs.avenue, s_gs.cont, s_gs.under,
+              s_gs.d_skew, s_gs.d_short, s_gs.d_fold, s_gs.d_taken,
+              s_gs.d_struct, s_gs.d_grid, s_gs.d_biome, s_gs.d_park,
+              s_gs.d_corridor, s_gs.d_under, s_gs.d_full,
+              s_gs.why_road, s_gs.why_street, s_gs.why_water);
+}
+
 /* -------------------------------------------------------------- build -- */
 
 void tg_network_reset(void)
@@ -526,6 +1091,8 @@ void tg_network_reset(void)
     int s;
     s_nn = s_ne = 0; s_net_built = 0; s_net_nspans = 0;
     s_stat_cand = s_stat_short = s_stat_tjunc = s_stat_water = s_stat_road = 0;
+    s_gna = 0;
+    memset(&s_gs, 0, sizeof(s_gs));
     for (s = 0; s < TD5_TG_MAX_SPANS + 8; s++) {
         s_mouth[s][0].edge = s_mouth[s][1].edge = -1;
         s_mouth[s][0].skew = s_mouth[s][1].skew = 0.0f;
@@ -576,9 +1143,24 @@ void tg_network_build(const TG_NodeList *nl, int nspans_main)
     /* Underpass crossings FIRST: they are placed by their own period and
      * the streets must stop at them, not the other way round. */
     tg_net_underpasses(nl, nspans_main);
-    tg_net_city_streets(nl, nspans_main);
-    tg_net_back_streets();
-    tg_net_country(nl, nspans_main);
+    if (tg_net_geo_active()) {
+        /* [GEO PHASE 5] Real streets REPLACE the planted ones. The synthetic
+         * generators that remain would each invent tarmac the place does not
+         * have -- a forest lane on the R12 period, a back street closing a
+         * block the real grid already closes -- so they are opt-in
+         * (TD5RE_GEO_NET_SYNTH=1) rather than additive. */
+        tg_net_geo_underpasses(nl, nspans_main);
+        tg_net_geo_streets(nl, nspans_main);
+        if (td5_env_flag_off("TD5RE_GEO_NET_SYNTH")) {
+            tg_net_back_streets();
+            tg_net_country(nl, nspans_main);
+        }
+        tg_net_geo_census();
+    } else {
+        tg_net_city_streets(nl, nspans_main);
+        tg_net_back_streets();
+        tg_net_country(nl, nspans_main);
+    }
     s_net_built = 1;
     /* the conforms above moved ground: the shore table must see the result */
     tg_road_shore_rebuild(nl);

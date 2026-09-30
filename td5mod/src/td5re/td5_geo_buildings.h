@@ -1,0 +1,216 @@
+/**
+ * td5_geo_buildings.h -- GEO TRACK: real OSM building footprints and area
+ *                        polygons for the auto-track (PORT-ONLY).
+ *                        See docs/plans/GEO_TRACK_OSM_PLAN.md section 7 phase 5.
+ *
+ * Reads the two VECTOR files of the place cache re/tools/geo_fetch.py writes:
+ *
+ *   re/assets/geo/<slug>/BUILDINGS.JSON  footprint rings in world units, plus
+ *                                        height_m and WHICH TAG it came from
+ *                                        (osm_height / osm_levels / estimated),
+ *                                        roof_shape, building:part, landmark
+ *   re/assets/geo/<slug>/AREAS.JSON      plaza / park / pitch / grass polygons
+ *
+ * WHY A SEPARATE MODULE, not more of td5_geo.c. td5_geo.c is the RASTER +
+ * ROUTE reader that phases 2 and 3 shipped, and four phase-5 workstreams run in
+ * parallel over the same tree. Keeping the vector readers here means the
+ * building/plaza work touches no file another workstream owns, exactly as
+ * _archive/GEO_PHASE5_COMMON.md requires.
+ *
+ * BYTE-IDENTITY. Nothing here is reachable unless a place is loaded
+ * (td5_geo_loaded()), so a synthetic build never calls it. It draws from NO
+ * random stream -- the standing rule at td5_trackgen_internal.h:1290-1296 is
+ * that one extra tg_rand call moves the road for every existing seed -- and
+ * where a per-building choice is needed (which facade page a wall wears) it is
+ * a hash of the OSM way id, which is a pure function of the data.
+ *
+ * FRAME. Ring coordinates are raw signed world units in the SAME frame as
+ * TG_Node, because geo_fetch builds the vectors in the frame the conditioner
+ * chose for ROUTE.JSON. Heights arrive in METRES and are converted here with
+ * the cache's own projection.units_per_metre, so no caller does unit maths.
+ *
+ * HOST BINDING. A footprint is emitted by the span it stands beside, so every
+ * polygon is bound once -- AT LOAD TIME -- to its nearest node of the
+ * CONDITIONED ROUTE (td5_geo_route_node), with a side and a lateral distance.
+ * Two reasons it is the route and not TG_Node:
+ *
+ *  - On the geo path the conditioned route IS the centreline: phase 3 stubbed
+ *    the section loop of tg_build_centerline to walk ROUTE.JSON, so node i sits
+ *    at route point i. The emitter asserts that rather than assuming it, and
+ *    logs the worst deviation it finds.
+ *  - Binding at load time is SINGLE-THREADED. The scenery loop is not -- a
+ *    streamed build runs entries in a worker (td5_trackgen_stream.c) -- so a
+ *    lazy first-call bind inside an emitter would be a race over a table that
+ *    has to allocate. Nothing here allocates once a place is loaded.
+ */
+#ifndef TD5_GEO_BUILDINGS_H
+#define TD5_GEO_BUILDINGS_H
+
+/* Where a building's height came from. The plan's section 9 requires every
+ * building's provenance to be recoverable, so a bad skyline can be attributed
+ * to the estimator instead of hunted in the emitter. */
+#define TD5_GEOB_HSRC_ESTIMATED  0   /* geo_fetch's area/class estimator */
+#define TD5_GEOB_HSRC_OSM_LEVELS 1   /* building:levels x storey height  */
+#define TD5_GEOB_HSRC_OSM_HEIGHT 2   /* a real height=* tag, measured    */
+
+/* roof:shape, collapsed to the three silhouettes the emitter can build. */
+#define TD5_GEOB_ROOF_NONE    0      /* untagged -- emit no roof mass */
+#define TD5_GEOB_ROOF_FLAT    1
+#define TD5_GEOB_ROOF_PITCHED 2      /* gabled / hipped / pyramidal / round */
+#define TD5_GEOB_ROOF_MANSARD 3
+
+/* AREAS.JSON `kind`, collapsed to what the plaza emitter distinguishes. */
+#define TD5_GEOA_KIND_OTHER   0
+#define TD5_GEOA_KIND_PARK    1      /* leisure=park, village_green, common */
+#define TD5_GEOA_KIND_GRASS   2      /* landuse=grass */
+#define TD5_GEOA_KIND_PITCH   3      /* leisure=pitch -- a flat playing field */
+#define TD5_GEOA_KIND_PLAY    4      /* leisure=playground */
+#define TD5_GEOA_KIND_FOREST  5
+
+/* Ring points kept per polygon. OSM rings run to 182 points here (the La Plata
+ * cathedral); past this the ring is DECIMATED, never truncated, so the
+ * silhouette survives and only its detail is lost. */
+#define TD5_GEOB_RING_MAX 48
+
+typedef struct {
+    int    first, n;          /* [first, first+n) in the shared point pool */
+    double cx, cz;            /* centroid, world units                     */
+    double radius;            /* max vertex distance from the centroid     */
+    double height;            /* world units, ready to extrude             */
+    double min_height;        /* world units, 0 when the tag is absent     */
+    double area_m2;           /* as OSM measures it, for the census        */
+    unsigned int id_hash;     /* stable hash of the way id (page picks)    */
+    int    host_span;         /* nearest centreline node, -1 unbound       */
+    int    host_side;         /* +1 left of travel, -1 right, 0 unbound    */
+    double host_lat;          /* |lateral| from the centreline, world units */
+    unsigned char hsrc;       /* TD5_GEOB_HSRC_*                           */
+    unsigned char roof;       /* TD5_GEOB_ROOF_*                           */
+    unsigned char landmark;   /* OSM says this is a named landmark         */
+    unsigned char part;       /* building:part -- a 3D-modelled sub-volume */
+} TD5_GeoBuilding;
+
+typedef struct {
+    int    first, n;
+    double cx, cz;
+    double radius;
+    unsigned int id_hash;
+    int    host_span;
+    int    host_side;
+    double host_lat;
+    unsigned char kind;       /* TD5_GEOA_KIND_* */
+    unsigned char named;
+} TD5_GeoArea;
+
+/* ------------------------------------------------------------- lifecycle --- */
+
+/* Load the vectors for whatever place td5_geo.c currently has loaded, or drop
+ * them when it has none. Cheap and idempotent: a no-op once the slug matches.
+ * Returns 1 when polygons are available afterwards. */
+int  td5_geob_sync(void);
+void td5_geob_unload(void);
+int  td5_geob_loaded(void);
+
+/* ---------------------------------------------------------------- access --- */
+
+int  td5_geob_building_count(void);
+int  td5_geob_area_count(void);
+const TD5_GeoBuilding *td5_geob_building(int i);
+const TD5_GeoArea     *td5_geob_area(int i);
+
+/* Which AREAS.JSON kinds become a plaza. FOREST and the landuse classes that
+ * describe a whole residential or retail BLOCK are not squares and get nothing
+ * -- laying a lawn over a mapped residential block would carpet the city.
+ * Lives here rather than in the emitter because both the emitter and the
+ * procedural stand-down gates must agree on it. */
+int  td5_geob_area_is_plaza(const TD5_GeoArea *a);
+
+/* Does ANY of `np` world points land inside a real polygon bound within `win`
+ * spans of `span`? THE stand-down test: the procedural frontage / back row
+ * hands over the points its own mass would occupy instead of guessing from a
+ * centroid and a radius.
+ *
+ * A POINT SET rather than one point, because a procedural element occupies a
+ * BAND of depth, not a plane, and the caller must be able to ask "would my mass
+ * intersect real geometry anywhere across it" in ONE window walk. MEASURED
+ * consequence of asking about a single mid-depth point: Plaza Mariano Moreno's
+ * outline is 8.4 m off the route centreline while the street wall's mass runs
+ * 4.3 to 11.3 m, so a probe at 7.8 m missed the plaza by 60 cm and the wall
+ * stayed standing in front of it in the in-race framedump.
+ *
+ * The window exists because a polygon is bound to ONE span but occupies many:
+ * that same plaza has a 183 m radius, 52 spans of frontage either side of the
+ * span it is filed under. TD5_GEOB_WIN_A is sized for that; TD5_GEOB_WIN_B for
+ * the largest footprint in the cache (31000 m2). */
+#define TD5_GEOB_WIN_B 24
+#define TD5_GEOB_WIN_A 72
+int  td5_geob_points_in_building(int span, const double *px, const double *pz,
+                                 int np, int win);
+int  td5_geob_points_in_plaza(int span, const double *px, const double *pz,
+                              int np, int win);
+
+/* One ring vertex. `first` comes from the record; k is 0..n-1. The ring is
+ * OPEN (the closing repeat of the source file is dropped) and wound
+ * counter-clockwise in the world's XZ plane. */
+void td5_geob_ring(int first, int k, double *x, double *z);
+
+/* ------------------------------------------------------------- host bind --- */
+
+/* How far off the route a polygon may stand and still be bound to a span, in
+ * WORLD UNITS measured to the nearest ring vertex.
+ *
+ * Buildings 100 m: the frontage band is only 14 m (TD5_TG_GEO_FRONT_BAND), so
+ * everything between the two is a real BACK-ROW mass standing where the
+ * procedural receding block would otherwise be -- which is the better trade,
+ * and it doubles the real content on the La Plata route (MEASURED: 23
+ * footprints within 40 m, 54 within 100 m, and 1924 of the 2047 are more than
+ * 500 m away, so widening further buys nothing).
+ *
+ * Areas 60 m: a designed plaza is a whole city block and its far edge is still
+ * part of the square the driver sees. */
+#define TD5_GEOB_BIND_MAX_B 43000.0
+#define TD5_GEOB_BIND_MAX_A 25800.0
+
+/* Per-span iteration over the bound polygons: `span` then `next` until -1.
+ * Buildings and areas keep separate chains, each in ascending record order so
+ * the emitted mesh sequence is a pure function of the cache file. A span with
+ * nothing returns -1 immediately. */
+int  td5_geob_span_building(int span);
+int  td5_geob_next_building(int i);
+int  td5_geob_span_area(int span);
+int  td5_geob_next_area(int i);
+
+/* How many spans the chains cover (the route's node count), and how many
+ * polygons fell outside TD5_GEOB_BIND_MAX_* and are therefore never emitted. */
+int  td5_geob_bound_spans(void);
+void td5_geob_bind_stats(int *buildings_bound, int *buildings_far,
+                         int *areas_bound, int *areas_far);
+
+/* ------------------------------------------------------------- geometry ---- */
+
+/* Fan-free triangulation of an arbitrary simple polygon by ear clipping, so a
+ * CONCAVE footprint (an L-shaped block, the cathedral's 182-point outline)
+ * gets a roof that stays inside its own walls -- a centroid fan does not.
+ * Writes `ntri` index triples into tri[] and returns ntri, or 0 when the ring
+ * is degenerate. Indices are 0..n-1 into the ring. */
+int  td5_geob_triangulate(const double *x, const double *z, int n,
+                          int *tri, int maxtri);
+
+/* Signed area of a ring in world units squared; positive when CCW. */
+double td5_geob_ring_area(const double *x, const double *z, int n);
+
+/* Is (px,pz) inside the ring? Crossing-number test, boundary unspecified. */
+int  td5_geob_point_in_ring(const double *x, const double *z, int n,
+                            double px, double pz);
+
+/* ---------------------------------------------------------------- census --- */
+
+/* Counts for the build log, so "measured vs estimated" is a number rather than
+ * a claim. Any pointer may be NULL. */
+void td5_geob_census(int *buildings, int *measured, int *estimated,
+                     int *landmarks, int *roofs, int *areas, int *plazas);
+
+/* How many ring points the loader decimated away, and how many polygons it
+ * had to decimate at all -- the honest cost of TD5_GEOB_RING_MAX. */
+void td5_geob_decimation(int *polys, int *points_dropped);
+
+#endif /* TD5_GEO_BUILDINGS_H */

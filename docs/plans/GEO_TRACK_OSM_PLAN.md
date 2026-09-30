@@ -533,6 +533,113 @@ as MDE *and MDT* -- Modelo Digital de **TERRENO**, bare earth. That is not merel
 at all. The gated sheet is therefore worth more than the resolution number
 suggests.
 
+## 6d. Phase 3 shipped and verified 2026-09-30 (offline, synthetic relief)
+
+The ROAD now follows a conditioned polyline. Built with no network: the La Plata
+place cache went with the geo-track worktree, so the test used the committed raw
+fixture conditioned offline (`re/tools/geo_fixtures/la_plata_ROUTE.json`) over
+the synthetic world.
+
+- `td5_geo` loads the route: `TD5RE_GEO_ROUTE=<ROUTE.JSON>` (no place needed), else
+  `re/assets/geo/<slug>/ROUTE.JSON` of the loaded place. It validates the contract
+  and rejects rather than half-uses: node 0 at the origin, `span_length` 1500,
+  every chord 1500 +-1, at most 3001 nodes.
+- `tg_geo_apply_spec` (after `tg_rolls_apply_spec` at all three spec-fold sites:
+  build, studio preview, streamed rederive) sets `target_spans` to the route and
+  forces point-to-point, before the GENSTAMP spec hash.
+- `tg_geo_walk` in `td5_tg_road.c` replaces only the lead-in + section loop of
+  `tg_build_centerline`: `tg_nodes_push` per node, `tg_road_revise` every 32 nodes,
+  forced conform where a structure would exceed its cap (the walk's own last
+  resort), `tg_road_finalize_to`, then the kept tangent pass. No RNG draw.
+  `tg_too_close` re-checks the route and the count is logged.
+
+Verified:
+- **Synthetic byte-identity:** seed 20260901, master exe vs this build, all 8
+  level files identical (MODELS.DAT `98E749869051ACE3`); only GENSTAMP differs (exe id).
+- **Geo build:** 1493 of 1493 nodes, 1492 spans, 0 too-close nodes, finish span
+  1292 with 200 of run-off, 6 bridges / 89 spans (3 over synthetic water), one
+  32-span chunk forced to conform (a 64-span bridge over its 56 cap).
+- **Audits:** `tg_strip_audit` 4 lane seams, 0 violations. `tg_network_audit`
+  planarity 0 crossings, 0 street points on the road, 0 mouths on structures,
+  0 structure-length violations, worst grade 0.200, 0 undecked water spans: OK.
+- **Deterministic:** two geo builds, identical level files.
+- **Race:** loads and runs, car on the grid at span 15.
+
+Open for Phase 3 with real data: re-fetch La Plata (network, ask first), then
+confirm bridges land on real water and the conformed chunk goes away.
+
+## 6e. Phase 4 shipped 2026-09-30 (selector + game side)
+
+**Selector.** `python re/tools/geo_selector.py` from the repo root, then open
+`http://127.0.0.1:8765/`. Stdlib HTTP server bound to 127.0.0.1 only, serving
+`re/tools/geo_selector/index.html` (Leaflet over OSM tiles, TD5 skin). Search a
+city (Nominatim, from the browser) or paste `lat, lon`, an OSM permalink or a
+Google Maps link; FETCH MAP CENTRE runs `geo_fetch` for a circle (1.5 to 4 km);
+click A and B; click the line to add a waypoint, drag markers to re-route,
+right-click to remove. Every change routes + conditions and shows the verdict,
+spans against the 3000 cap, worst turn, straight-ahead share, street names, and
+a red marker on every self-overlap. SEND TO GAME writes ROUTE_RAW.JSON +
+ROUTE.JSON, rebuilds the rasters in the route's frame and writes SELECTED.TXT.
+
+Frame fix found on the way: `geo_fetch --frame-from` takes the route's rotation
+and offset but keeps the PLACE centre as the projection origin, while the
+conditioner's origin is the ROUTE centroid. The selector passes the route's
+origin explicitly (radius widened to still cover the original area). The CLI
+recipe in 6b has the same trap when `--lat/--lon` differ from the route centroid.
+
+**Game.** `re/assets/geo/SELECTED.TXT` fills an unset `TD5RE_GEO_PLACE` at boot;
+`td5_geo_sync()` (inside `tg_geo_apply_spec`, so at every spec fold) loads or
+drops the place and its ROUTE.JSON to match the knob, so no restart is needed.
+AUTO TRACK STUDIO > TERRAIN > **LOCATION** cycles SYNTHETIC plus every place
+with a ROUTE.JSON and writes SELECTED.TXT. The track registers under the real
+place name, and the studio preview shows the OSM credit while a place is set.
+
+Verified offline: `geo_selector.py --self-test` (synthetic grid place: state,
+route + condition, retrace flagged with 2 markers, save, 404); synthetic build
+still byte-identical to master; a flat test place selected only through
+SELECTED.TXT built the full 1492-span route, 0 forced conforms, registered as
+the place name. Not verified here (needs network or a person): the page in a
+browser, FETCH, and the LOCATION row on screen.
+
+Still open from the Phase 4 list: fork-candidate toggles (FORKS.JSON) and the
+per-layer vintage display.
+
+## 6f. Phase 5 shipped 2026-09-30 (real La Plata data, one authorised fetch)
+
+La Plata fetched once into the MAIN tree (`re/assets/geo/la_plata`, outside any
+worktree so it cannot be lost again), route saved through the selector in its
+own frame; `geo_audit` 15 pass / 1 warning / 0 failures. Four parallel
+workstreams, each on its own branch, merged here:
+
+| Part | What | La Plata numbers |
+|---|---|---|
+| G1 streets (`td5_geo_roads.c`, `td5_tg_network.c`) | real OSM ways become mouths/crossings/underpasses; skew cap 65 deg (synthetic 28); march stand-off scales 1/cos(skew) | 94 arms considered, 53 accepted after the biome fix (25 before); up to 51 deg diagonals |
+| G2 buildings/landmarks/plazas (`td5_geo_buildings.c`, `td5_tg_city.c`, `td5_tg_streets.c`) | real footprints extruded (measured vs estimated kept), tagged landmarks extruded, plaza polygons replace the gap park emitter on the geo path | 54 buildings (12 measured / 42 estimated), 2 landmarks, 13 plazas |
+| G3 traffic lights (`td5_geo_signals.c`, `td5_tg_furniture.c`, render hook) | head at each signal node near the route, lenses tagged 4/5/6 on the shipped glow page, colour written per frame from a wall clock; cosmetic | 566 in cache, 25 near route, 11 placed |
+| G4 Option B (`td5_track.c`, `geo_condition.py --allow-crossings`) | `TD5RE_XSPAN`: the unhinted global localiser takes the previous span as a hint on geo tracks | closed loop: 564 -> 132 snap gone; Moscow + TD6 sim identical tick by tick |
+| biome (`td5_tg_terrain.c`) | geo cells from COVER.R8 (>=35% built CITY, >=40% tree FOREST, else FIELDS) | 9 city + 1 fields; street biome drops 37 -> 1 |
+
+Gates on the merged branch: synthetic seed 20260901 byte-identical (8 files),
+network + strip audits OK on La Plata, structure lint OK (83/84).
+
+Follow-ups done 2026-09-30 (before merge):
+- Traffic lights verified in race: heads beside the kerb at spans 696/702, the
+  lit lens went green -> red within 4 s. Placement spans are now logged
+  (`[GEO SIGNALS]   head N: span S side`).
+- Plaza paths: G2's three Y tiers hold; a full-resolution frame of the plaza at
+  span ~399 shows clean lawn/path edges, no flicker. Plaza first spans are now
+  logged (`[GEO PLAZA]   area N first at span S`).
+- Selector: the first SEND TO GAME pins the routing area in PLACE.JSON
+  (`route_graph_bbox`), so re-routing a saved A/B over the wider re-fetch gives
+  the same route (La Plata 1492 spans before and after; was 1200).
+
+Still open:
+- Plaza lawn texture is stretched along long strips (UVs follow the outline).
+- `TD5RE_AUTOTRACK_STREAM=0` with REUSE at its default produced one build with
+  no TEXTURES.DAT in level090.zip and no scenery; the default streamed path and
+  the harness (STREAM=0 + REUSE=0) are fine. Dev-only combination, not chased.
+- Landmark prefab fallback and roof:shape only exercised on 2 buildings.
+
 ## 7. Phases
 
 ### Phase 0 -- calibration and ground truth
