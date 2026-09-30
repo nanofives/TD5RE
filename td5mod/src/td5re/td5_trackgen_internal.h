@@ -6042,5 +6042,22 @@ typedef struct {
 int td5_trackgen_level_number(void);
 unsigned int td5_trackgen_last_seed(void);
 
+/* ===================== [GEO PHASE 5] REAL BUILDINGS AND PLAZAS =============
+ * Appended as its own block, at the end, so the four parallel phase-5
+ * workstreams do not collide in the middle of this header.
+ *
+ * Both emitters live in the modules that own the geometry they replace --
+ * frontage in td5_tg_city.c, plazas in td5_tg_streets.c -- and are wired into
+ * the dispatchers in td5_tg_streets.c, so their meshes are marked and validated
+ * by the on-road guard exactly like the procedural scenery they stand in for.
+ * Everything else about the feature (the cache reader, the per-span bind, the
+ * polygon geometry) is behind td5_geo_buildings.h. Both are a no-op success
+ * unless TD5RE_GEO_PLACE names a loadable place. */
+int  tg_geo_emit_buildings(const TG_FBHook *h);   /* td5_tg_city.c    */
+void tg_geo_city_report(void);                    /* td5_tg_city.c    */
+int  tg_geo_city_active(void);                    /* td5_tg_city.c    */
+int  tg_geo_emit_plaza(const TG_FBHook *h);       /* td5_tg_streets.c */
+void tg_geo_plaza_report(void);                   /* td5_tg_streets.c */
+
 #endif /* TD5_TRACKGEN_INTERNAL_H */
 
