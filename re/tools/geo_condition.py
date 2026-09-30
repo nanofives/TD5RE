@@ -35,6 +35,30 @@ WHAT THIS DOES, in order:
 It never silently repairs a crossing. A crossing is a fact about the route the
 user drew, and hiding it would trade a visible map marker for an invisible
 in-game failure.
+
+CROSSINGS ARE NO LONGER UNCONDITIONALLY FATAL (2026-09-30, plan section 5
+Option B). The engine's span walker now has a crossing-safe localiser -- it
+prefers candidates near the span the car was already on, and uses the deck
+height to tell a flyover from the road beneath it (td5_track.c, the "crossing-
+safe span localisation" section, auto-armed for geo-route tracks). Three
+outcomes now, and the tool still REPORTS every crossing in all three:
+
+  * GRADE-SEPARATED -- accepted on its own merits, no flag needed. Either the
+    two legs carry different OSM `layer` values (how OSM actually encodes a
+    flyover) or the DEM puts them GRADE_SEPARATION_M apart vertically. A car
+    cannot be on both, so nothing is ambiguous to begin with.
+  * LEVEL, with --allow-crossings -- accepted because the caller is asserting
+    the crossing-safe localiser is on. This is the loops and figure-eights
+    case, and it is the one that needs the engine change to be real.
+  * LEVEL, without the flag -- still NOT USABLE, unchanged.
+
+WHAT THE DEM CAN AND CANNOT SEE. HEIGHT.R16 is TERRAIN, not road deck. A real
+bridge sits above the terrain, and the DEM under both legs is then the same, so
+the DEM detects only the case where the ground itself separates the two legs (a
+cutting under a ridge). The authoritative signal for a built flyover is the OSM
+`layer` tag; geo_route.py does not carry it yet, so `layers` is plumbed here
+ready for it and is None in practice today. Read a "not grade separated"
+verdict as "could not prove separation", never as "proven level".
 """
 from __future__ import annotations
 
@@ -67,6 +91,16 @@ from geo_common import (  # noqa: E402
 # We cannot enforce it on a real route, but we MEASURE against it: a route that
 # stays inside it inherits the proof outright and cannot self-cross at all.
 HEADING_LIMIT = 1.396
+
+# Vertical clearance, in metres, at which two legs of a crossing stop being
+# ambiguous. Set from what the ENGINE needs, not from a highway standard: the
+# crossing-safe localiser compares |deck Y - probe Y| between the two candidate
+# quads, so the separation only has to exceed the spread a single car's probes
+# see on one deck (ride height plus body roll plus one span of grade, well
+# under a metre). 4 m is the usual real road-over-road clearance and leaves an
+# order of magnitude of margin, so a crossing that clears it is never a close
+# call. Lower it only with a measurement in hand.
+GRADE_SEPARATION_M = 4.0
 
 
 # ----------------------------------------------------------------- helpers ---
@@ -353,6 +387,82 @@ def merge_crossings(cr: list[dict], span_tol: int = 8) -> list[dict]:
     return groups
 
 
+# --------------------------------------------------- grade separation ---
+
+def height_sampler_from_raster(path: str, rotation_rad: float | None = None,
+                               units_per_metre: float = UNITS_PER_METRE_DERIVED):
+    """(x, z) -> terrain metres, from a HEIGHT.R16 written by geo_fetch.
+
+    Returns None if the file cannot be used, so the caller degrades to "could
+    not prove separation" instead of guessing. numpy is imported here and not
+    at module scope: the self-test and the plain conditioning path must keep
+    working on a bare Python, and only this optional check needs it.
+
+    The rotation check is not a formality. The raster carries the frame it was
+    built in exactly because a silent frame mismatch once put 896 of 1451 route
+    nodes outside their own terrain with nothing raising an error (geo_raster's
+    own header note). Sampling a DEM from a different frame here would produce
+    a confident, wrong grade-separation verdict, so a mismatch refuses.
+    """
+    try:
+        from geo_raster import Raster                      # noqa: PLC0415
+    except Exception as e:                                 # numpy missing, etc.
+        print("height: cannot load geo_raster (%s)" % e)
+        return None
+    try:
+        r = Raster.read(path)
+    except Exception as e:
+        print("height: cannot read %s (%s)" % (path, e))
+        return None
+    if rotation_rad is not None and abs(_wrap(r.rotation_rad - rotation_rad)) > 1e-6:
+        print("height: %s is in frame %.6f rad but this route is %.6f rad -- "
+              "refusing to sample a DEM from a different frame"
+              % (path, r.rotation_rad, rotation_rad))
+        return None
+    h, w = r.data.shape
+
+    def sample(x: float, z: float):
+        ix = int(round((x - r.origin_x) / r.cell))
+        iz = int(round((z - r.origin_z) / r.cell))
+        if ix < 0 or iz < 0 or ix >= w or iz >= h:
+            return None
+        if int(r.data[iz, ix]) == r.nodata_raw:
+            return None
+        return r.value(ix, iz) / units_per_metre       # world units -> metres
+
+    return sample
+
+
+def classify_crossings(groups: list[dict], nodes: list[tuple[float, float]],
+                       layers: list[int] | None = None,
+                       height_sampler=None,
+                       clearance_m: float = GRADE_SEPARATION_M) -> list[dict]:
+    """Mark each crossing site grade-separated or not, in place, and return it.
+
+    Judged at the CLOSEST pair of the site (`worst_pair`), because that is the
+    pair the engine's separation test would fail on: if the tightest point of
+    the overlap is cleanly separated, every looser point in the same site is
+    too.
+    """
+    for g in groups:
+        a, b = g["worst_pair"]
+        g["layer_a"] = g["layer_b"] = None
+        g["layer_separated"] = False
+        g["dem_delta_m"] = None
+        g["dem_separated"] = False
+        if layers and a < len(layers) and b < len(layers):
+            g["layer_a"], g["layer_b"] = int(layers[a]), int(layers[b])
+            g["layer_separated"] = g["layer_a"] != g["layer_b"]
+        if height_sampler is not None:
+            ha = height_sampler(*nodes[a])
+            hb = height_sampler(*nodes[b])
+            if ha is not None and hb is not None:
+                g["dem_delta_m"] = abs(ha - hb)
+                g["dem_separated"] = g["dem_delta_m"] >= clearance_m
+        g["grade_separated"] = bool(g["layer_separated"] or g["dem_separated"])
+    return groups
+
+
 # ------------------------------------------------------------- the pipeline ---
 
 def heading_byte_report(pts: list[tuple[float, float]]) -> dict:
@@ -424,12 +534,21 @@ def condition_route(latlon: list[tuple[float, float]],
                     curve_safety_x100: int = TD5_TG_CURVE_SAFETY_X100_DEFAULT,
                     span_length: float = TD5_TG_SPAN_LENGTH,
                     lane_width: float = TD5_TG_LANE_WIDTH,
-                    allow_reverse: bool = True) -> dict:
+                    allow_reverse: bool = True,
+                    allow_crossings: bool = False,
+                    layers: list[int] | None = None,
+                    height_path: str | None = None) -> dict:
     """Raw (lat, lon) route -> a TD5-legal centerline plus a verdict.
 
     Returns a dict that is both the ROUTE.JSON payload and the report the
     selector renders. `ok` is False when the route cannot be used as drawn; the
     reasons are enumerated so the UI can point at each one.
+
+    `allow_crossings` asserts the engine's crossing-safe localiser is armed, so
+    a LEVEL self-crossing stops being fatal. `layers` (OSM `layer` per input
+    point) and `height_path` (a HEIGHT.R16 for this place, in THIS route's
+    frame) let a crossing prove its own grade separation and be accepted with
+    no flag at all. See the module docstring for what each can and cannot see.
     """
     if len(latlon) < 2:
         return {"ok": False, "reasons": ["route has fewer than 2 points"]}
@@ -445,7 +564,12 @@ def condition_route(latlon: list[tuple[float, float]],
         lane_list_src = list(lanes)
         if len(lane_list_src) != len(latlon):
             return {"ok": False, "reasons": ["lanes length != route length"]}
-    width_max = max(lane_list_src) * lane_width
+    if layers is None:
+        layer_list_src = None
+    else:
+        layer_list_src = [int(v) for v in layers]
+        if len(layer_list_src) != len(latlon):
+            return {"ok": False, "reasons": ["layers length != route length"]}
 
     # -- 1. orientation ---------------------------------------------------
     # The lead-in is a fixed straight along +X (td5_tg_road.c:733-741), so the
@@ -480,6 +604,8 @@ def condition_route(latlon: list[tuple[float, float]],
     proj.set_rotation(theta)
     if direction == "reversed":
         lane_list_src = list(reversed(lane_list_src))
+        if layer_list_src is not None:
+            layer_list_src = list(reversed(layer_list_src))
 
     pca_deg = math.degrees(_wrap(_principal_axis(pts) - math.pi / 2.0))
 
@@ -532,6 +658,20 @@ def condition_route(latlon: list[tuple[float, float]],
                  + [_lane_at(i, len(body)) for i in range(len(body))])
     widths = [n * lane_width for n in lanes_out]
 
+    # Same index mapping for the OSM layer, so a crossing can be judged at the
+    # node indices the crossing report uses. The lead-in inherits the route's
+    # first layer: it is synthetic ground-level road, and a crossing can never
+    # land on it anyway (it is straight and the body starts at its end).
+    if layer_list_src is None:
+        layers_out = None
+    else:
+        def _layer_at(i: int, n: int) -> int:
+            t = 0.0 if n <= 1 else i / float(n - 1)
+            k = min(int(t * (len(layer_list_src) - 1) + 0.5), len(layer_list_src) - 1)
+            return int(layer_list_src[k])
+        layers_out = ([layer_list_src[0]] * len(lead)
+                      + [_layer_at(i, len(body)) for i in range(len(body))])
+
     # Final verification against the widths actually stored, which is the same
     # test geo_audit R5 runs. Reported rather than silently re-smoothed: a turn
     # that survives here is a fact about the route, not a solver failure.
@@ -551,6 +691,13 @@ def condition_route(latlon: list[tuple[float, float]],
     # -- 5. crossings + cap ----------------------------------------------
     skip = adjacent_skip(lane_width, span_length, curve_safety_x100)
     crossings = merge_crossings(find_crossings(nodes, widths, lane_width, skip))
+    sampler = None
+    if height_path and crossings:
+        # Only opened when there is something to judge, and asserted against
+        # THIS route's frame -- see height_sampler_from_raster.
+        sampler = height_sampler_from_raster(height_path, theta, units_per_metre)
+    classify_crossings(crossings, nodes, layers_out, sampler)
+    level_crossings = [g for g in crossings if not g["grade_separated"]]
 
     spans = len(nodes) - 1
     reasons: list[str] = []
@@ -565,9 +712,12 @@ def condition_route(latlon: list[tuple[float, float]],
     if spans < TG_LEAD_IN_NODES + 100 + 50:
         reasons.append("route is %d spans, too short to hold a grid, a race and "
                        "a run-off" % spans)
-    if crossings:
-        reasons.append("%d self-crossing site(s): the span walker would snap to "
-                       "the wrong span" % len(crossings))
+    if level_crossings and not allow_crossings:
+        reasons.append("%d LEVEL self-crossing site(s): without the crossing-safe "
+                       "localiser the span walker snaps to the wrong span. Re-run "
+                       "with --allow-crossings if it is armed (it is, by default, "
+                       "for geo-route tracks), or drag a waypoint to resolve them"
+                       % len(level_crossings))
     if not curv["converged"]:
         reasons.append("curvature smoothing did not converge (worst turn %.1f "
                        "deg vs limit %.1f)"
@@ -583,6 +733,25 @@ def condition_route(latlon: list[tuple[float, float]],
                            heading["worst_heading_error_deg"]))
     else:
         reasons_note = None
+
+    # Reported in every outcome, including the accepted ones: an accepted
+    # crossing is still a place the track does something unusual, and the
+    # selector should mark it rather than quietly drop it.
+    cross_notes: list[str] = []
+    n_sep = len(crossings) - len(level_crossings)
+    if n_sep:
+        cross_notes.append("%d self-crossing site(s) are GRADE-SEPARATED and need "
+                           "no flag" % n_sep)
+    if level_crossings and allow_crossings:
+        cross_notes.append("%d LEVEL self-crossing site(s) ACCEPTED on "
+                           "--allow-crossings: this route needs the engine's "
+                           "crossing-safe localiser (TD5RE_XSPAN) to be armed"
+                           % len(level_crossings))
+    if crossings and height_path is None and layers_out is None:
+        cross_notes.append("no DEM and no layer tags were supplied, so no crossing "
+                           "could be PROVEN grade-separated -- pass --height to "
+                           "check against the terrain")
+
     return {
         "ok": not reasons,
         "reasons": reasons,
@@ -609,8 +778,11 @@ def condition_route(latlon: list[tuple[float, float]],
         "principal_axis_dev_deg": pca_deg,
         "curvature": curv,
         "heading_bytes": heading,
-        "warnings": [w for w in (reasons_note,) if w],
+        "warnings": [w for w in (reasons_note,) if w] + cross_notes,
         "crossings": crossings,
+        "level_crossings": len(level_crossings),
+        "allow_crossings": bool(allow_crossings),
+        "grade_separation_m": GRADE_SEPARATION_M,
         "points": [{"x": round(x, 3), "z": round(z, 3), "lanes": l}
                    for (x, z), l in zip(nodes, lanes_out)],
     }
@@ -654,12 +826,25 @@ def print_report(r: dict) -> None:
     print("final      : max dev %.1f deg, %.0f%% monotone"
           % (f["max_dev_deg"], 100.0 * f["monotone_frac"]))
     if r["crossings"]:
-        print("crossings  : %d site(s)" % len(r["crossings"]))
+        n_lvl = r.get("level_crossings", len(r["crossings"]))
+        print("crossings  : %d site(s), %d grade-separated, %d level"
+              % (len(r["crossings"]), len(r["crossings"]) - n_lvl, n_lvl))
         for g in r["crossings"][:10]:
+            if g.get("grade_separated"):
+                if g.get("layer_separated"):
+                    how = "GRADE-SEPARATED (osm layer %s vs %s)" % (g["layer_a"],
+                                                                    g["layer_b"])
+                else:
+                    how = "GRADE-SEPARATED (%.1f m of terrain)" % g["dem_delta_m"]
+            elif g.get("dem_delta_m") is not None:
+                how = "level (only %.1f m apart, needs %.1f)" % (
+                    g["dem_delta_m"], r.get("grade_separation_m", GRADE_SEPARATION_M))
+            else:
+                how = "level (separation not checked)"
             print("   nodes %d..%d vs %d..%d : %d pairs, closest %.0f units "
-                  "(needs %.0f)"
+                  "(needs %.0f) -- %s"
                   % (g["a_lo"], g["a_hi"], g["b_lo"], g["b_hi"],
-                     g["pairs"], g["worst_distance_units"], g["need_units"]))
+                     g["pairs"], g["worst_distance_units"], g["need_units"], how))
     else:
         print("crossings  : none")
     print("VERDICT    : %s" % ("OK" if r["ok"] else "NOT USABLE"))
@@ -703,6 +888,18 @@ def _synth_latlon(kind: str, n: int = 900) -> list[tuple[float, float]]:
         elif kind == "loop":                    # closed loop: must be caught
             a = t * 2.0 * math.pi
             e, nn = 1400.0 * math.sin(a), 1400.0 * (1.0 - math.cos(a))
+        elif kind == "figure8":
+            # Gerono lemniscate e = A sin(u), n = B sin(u) cos(u), traversed
+            # u in [-0.5, pi+0.5] so it passes through the origin at BOTH u=0
+            # and u=pi, with tangents (A,B) and (-A,B) -- one genuine
+            # transversal self-crossing at a 62 degree angle -- and does NOT
+            # close, so the `loop` case's end-meets-start overlap is not what
+            # is being tested here. This is the Option B fixture: the route a
+            # city loop or a flyover produces, legal only with the crossing-
+            # safe localiser.
+            u = -0.5 + t * (math.pi + 1.0)
+            e = 600.0 * math.sin(u)
+            nn = 360.0 * math.sin(u) * math.cos(u)
         else:
             raise SystemExit("unknown synthetic route %r" % kind)
         out.append((lat0 + nn * mlat, lon0 + e * mlon))
@@ -711,22 +908,53 @@ def _synth_latlon(kind: str, n: int = 900) -> list[tuple[float, float]]:
 
 def _self_test() -> int:
     cases = (
-        ("straight", True,  "a straight drive must pass"),
-        ("gentle",   True,  "a wide sweep must pass"),
-        ("grid",     True,  "a city staircase must pass"),
-        ("hairpin_wide", True,  "doubling back 700 m away is LEGAL: no overlap "
-                                "at TD5 scale"),
-        ("retrace",  False, "retracing the SAME street must be REJECTED"),
-        ("loop",     False, "a closed loop must be REJECTED"),
+        ("straight", True,  {}, "a straight drive must pass"),
+        ("gentle",   True,  {}, "a wide sweep must pass"),
+        ("grid",     True,  {}, "a city staircase must pass"),
+        ("hairpin_wide", True, {}, "doubling back 700 m away is LEGAL: no overlap "
+                                   "at TD5 scale"),
+        ("retrace",  False, {}, "retracing the SAME street must be REJECTED"),
+        ("loop",     False, {}, "a closed loop must be REJECTED"),
+        # --- Option B: the crossing-safe localiser changes the verdict, and
+        # ONLY when it is asserted. Both directions are pinned so a future
+        # change cannot quietly make crossings always-legal or always-fatal.
+        ("figure8",  False, {}, "a self-crossing figure-eight is REJECTED by "
+                                "default"),
+        ("figure8",  True,  {"allow_crossings": True},
+                            "...and ACCEPTED with --allow-crossings"),
+        # The crossing reason must DISAPPEAR here while the verdict stays
+        # NOT USABLE: a retrace doubles back through 180 degrees at 6 m, which
+        # fails the curvature floor no matter what the localiser can do. Pinned
+        # this way round so --allow-crossings can never be mistaken for a
+        # blanket override of the other gates.
+        ("retrace",  False, {"allow_crossings": True, "_no_reason": "self-crossing"},
+                            "--allow-crossings clears the CROSSING reason for a "
+                            "retrace, but its 180 deg hairpin still fails the "
+                            "curvature floor, which is a separate limit"),
+        ("figure8",  True,  {"layers": "alternating"},
+                            "a figure-eight whose legs carry different OSM "
+                            "layers is grade-separated, so no flag is needed"),
     )
     bad = 0
-    for kind, want_ok, why in cases:
+    for kind, want_ok, kw, why in cases:
         print("\n=== %s -- %s" % (kind, why))
-        r = condition_route(_synth_latlon(kind), lanes=2)
+        pts = _synth_latlon(kind)
+        kw = dict(kw)
+        no_reason = kw.pop("_no_reason", None)
+        if kw.get("layers") == "alternating":
+            # Layer 1 over the first half, layer 0 over the second: the two
+            # legs of the lemniscate meet with different layers, which is how
+            # OSM records a flyover.
+            kw["layers"] = [1 if i < len(pts) // 2 else 0 for i in range(len(pts))]
+        r = condition_route(pts, lanes=2, **kw)
         print_report(r)
         if bool(r["ok"]) != want_ok:
             print("*** SELF-TEST FAILURE: expected ok=%s, got ok=%s"
                   % (want_ok, r["ok"]))
+            bad += 1
+        elif no_reason and any(no_reason in why for why in r.get("reasons", [])):
+            print("*** SELF-TEST FAILURE: no reason should mention %r, got %s"
+                  % (no_reason, r["reasons"]))
             bad += 1
     print("\n%s" % ("all %d cases behaved as specified" % len(cases) if not bad
                     else "%d of %d cases WRONG" % (bad, len(cases))))
@@ -746,24 +974,44 @@ def main(argv=None) -> int:
                     default=TD5_TG_CURVE_SAFETY_X100_DEFAULT)
     ap.add_argument("--no-reverse", action="store_true",
                     help="do not consider driving the route the other way")
+    ap.add_argument("--allow-crossings", action="store_true",
+                    help="accept LEVEL self-crossings (loops, figure-eights). "
+                         "They are still reported. Only sound when the engine's "
+                         "crossing-safe localiser is armed, which it is by "
+                         "default for geo-route tracks (TD5RE_XSPAN)")
+    ap.add_argument("--height",
+                    help="HEIGHT.R16 for this place, to prove a crossing is "
+                         "grade-separated by the terrain (needs numpy)")
+    ap.add_argument("--synth", help="condition a built-in synthetic route "
+                                    "instead of --in (e.g. figure8, loop, grid)")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args(argv)
 
-    if a.self_test or not a.inp:
+    if a.self_test or (not a.inp and not a.synth):
         return _self_test()
 
-    raw = json.load(open(a.inp, encoding="utf-8"))
-    if isinstance(raw, dict):
-        pts = [(p["lat"], p["lon"]) for p in raw["points"]]
-        lanes = [int(p.get("lanes", a.lanes)) for p in raw["points"]]
-    else:
-        pts = [(float(p[0]), float(p[1])) for p in raw]
+    layers = None
+    if a.synth:
+        pts = _synth_latlon(a.synth)
         lanes = a.lanes
+    else:
+        raw = json.load(open(a.inp, encoding="utf-8"))
+        if isinstance(raw, dict):
+            pts = [(p["lat"], p["lon"]) for p in raw["points"]]
+            lanes = [int(p.get("lanes", a.lanes)) for p in raw["points"]]
+            if any("layer" in p for p in raw["points"]):
+                layers = [int(p.get("layer", 0)) for p in raw["points"]]
+        else:
+            pts = [(float(p[0]), float(p[1])) for p in raw]
+            lanes = a.lanes
 
     r = condition_route(pts, lanes=lanes,
                         units_per_metre=a.units_per_metre,
                         curve_safety_x100=a.curve_safety,
-                        allow_reverse=not a.no_reverse)
+                        allow_reverse=not a.no_reverse,
+                        allow_crossings=a.allow_crossings,
+                        layers=layers,
+                        height_path=a.height)
     print_report(r)
     if a.raw_out:
         write_json(a.raw_out, {"points": [{"lat": la, "lon": lo}
