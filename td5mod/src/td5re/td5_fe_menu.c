@@ -625,8 +625,12 @@ int td5_frontend_init_resources(void) {
     /* Load frontend fonts (from Language.dll string table) */
     /* (Real implementation loads SNK_* string exports) */
 
-    /* Initialize music volume from saved settings (routed through the music seam). */
-    td5_sound_set_music_volume(80);
+    /* Initialize music volume from saved settings (routed through the music seam).
+     * [W6 item 1 2026-09-29] This said "from saved settings" but passed a hard 80,
+     * so the frontend overrode whatever the player had configured (including 0).
+     * Read the real value; it is loaded from td5re.ini / the save before this
+     * runs and is the same field the pause SOUND row writes back. */
+    td5_sound_set_music_volume(g_td5.ini.music_volume);
     td5_sound_load_frontend_sfx();
 
     /* Car lock table: g_savedCarLockTable (original binary).

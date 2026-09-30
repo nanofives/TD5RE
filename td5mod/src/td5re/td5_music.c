@@ -105,6 +105,14 @@ void td5_music_play(int track)
     s_paused = 0;
     TD5_LOG_I(LOG_TAG, "music play track=%d backend='%s'", track, s_backend->name);
     if (s_backend->play) s_backend->play(s_backend->user, track);
+    /* [W6 item 1 2026-09-29] Clearing s_paused above is not enough on a backend
+     * whose pause is implemented as "duck to volume 0" (the set_volume fallback
+     * in td5_music_set_paused): the output level is still 0, so the new track
+     * plays SILENTLY. Re-assert the remembered level after the play so a track
+     * started while ducked is audible. s_last_volume < 0 means "never set" —
+     * leave the backend alone in that case. */
+    if (s_last_volume >= 0 && s_backend->set_volume)
+        s_backend->set_volume(s_backend->user, s_last_volume);
 }
 
 void td5_music_stop(void)

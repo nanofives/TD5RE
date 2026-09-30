@@ -131,6 +131,14 @@ static int     s_drag_target_lane[TD5_MAX_RACER_SLOTS];
 static uint8_t s_drag_prev_left[TD5_MAX_RACER_SLOTS];
 static uint8_t s_drag_prev_right[TD5_MAX_RACER_SLOTS];
 
+/* [W6 item 4 2026-09-29] Analog-stick thresholds for the drag lane-change tap,
+ * in raw axis units out of TD5_INPUT_JS_AXIS_CENTER (0xFA = 250 = full lock).
+ * ON = 25% deflection (the requested trigger point), OFF = 15% so the trigger
+ * is a Schmitt and a stick resting on the boundary can't chatter lane taps.
+ * Comfortably clear of the default TD5RE_STEER_DEADZONE (20 raw = 8%). */
+#define TD5_DRAG_STICK_ON   ((TD5_INPUT_JS_AXIS_CENTER * 25) / 100)   /* 62 */
+#define TD5_DRAG_STICK_OFF  ((TD5_INPUT_JS_AXIS_CENTER * 15) / 100)   /* 37 */
+
 /* [DRAG + LANE ASSIST] The lane the player has chosen via L/R taps (the lane the
  * aggressive lane-assist should steer toward). -1 = not yet set. */
 int td5_input_drag_target_lane(int slot)
@@ -2085,8 +2093,34 @@ void td5_input_update_player_control(int slot)
                 if (td5_env_flag_on("TD5RE_DRAG_AUTOSTEER")) {
                     int field    = td5_game_drag_field_size();
                     int cur_lane = (int)*(int8_t *)(a + 0x8C);    /* derived sub_lane */
-                    int l_now    = (bits & TD5_INPUT_STEER_LEFT)  ? 1 : 0;
-                    int r_now    = (bits & TD5_INPUT_STEER_RIGHT) ? 1 : 0;
+                    /* [W6 item 4 2026-09-29] STICK STEERING IN DRAG MP.
+                     * This block read TD5_INPUT_STEER_LEFT (0x01) / _RIGHT (0x02)
+                     * straight out of `bits` — but on an analog device those two
+                     * bits are NOT buttons: when TD5_INPUT_ANALOG_X_FLAG is set,
+                     * bits 0..8 carry the packed X axis (td5_platform_win32.c
+                     * `jbits |= (ax_x & 0x1FF) | TD5_INPUT_ANALOG_X_FLAG`). With a
+                     * centred stick ax_x == TD5_INPUT_JS_AXIS_CENTER == 0xFA ==
+                     * 0b0_1111_1010, so bit 1 (_RIGHT) reads as permanently HELD
+                     * and bit 0 (_LEFT) as released — the axis low bits flicker as
+                     * the stick moves, which is the reported "steering broken /
+                     * inverted" on a pad. Decode the axis instead, and keep the
+                     * digital path byte-identical for keyboard/d-pad users.
+                     * Sign: the platform packs ax_x = CENTRE + (left-right)*..., so
+                     * raw_x > 0 is LEFT — the same convention analog Path B above
+                     * uses. Schmitt trigger (ON 25% / OFF 15% of half-range) so a
+                     * stick parked just past the line can't machine-gun lane taps;
+                     * the existing s_drag_prev_* latches double as its state. */
+                    int l_now, r_now;
+                    if (bits & TD5_INPUT_ANALOG_X_FLAG) {
+                        int raw_x = (int)(bits & 0x1FF) - TD5_INPUT_JS_AXIS_CENTER;
+                        l_now = ( raw_x >= (s_drag_prev_left[slot]
+                                            ? TD5_DRAG_STICK_OFF : TD5_DRAG_STICK_ON)) ? 1 : 0;
+                        r_now = (-raw_x >= (s_drag_prev_right[slot]
+                                            ? TD5_DRAG_STICK_OFF : TD5_DRAG_STICK_ON)) ? 1 : 0;
+                    } else {
+                        l_now = (bits & TD5_INPUT_STEER_LEFT)  ? 1 : 0;
+                        r_now = (bits & TD5_INPUT_STEER_RIGHT) ? 1 : 0;
+                    }
                     int l_edge   = (l_now && !s_drag_prev_left[slot])  ? 1 : 0;
                     int r_edge   = (r_now && !s_drag_prev_right[slot]) ? 1 : 0;
                     s_drag_prev_left[slot]  = (uint8_t)l_now;
