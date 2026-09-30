@@ -2420,11 +2420,11 @@ static int cfgini_write_progress(void)
     cfgini_add(&w, "Count = %d\r\n", s_profile_count);
     for (int i = 0; i < s_profile_count; i++) {
         const TD5_Profile *pr = &s_profiles[i];
-        char nm[17];
-        memcpy(nm, pr->name, 16);
-        nm[16] = '\0';
+        char nm[TD5_PLAYER_NAME_BUF + 1];
+        memcpy(nm, pr->name, TD5_PLAYER_NAME_BUF);
+        nm[TD5_PLAYER_NAME_BUF] = '\0';
         /* Defensively strip any control byte so it cannot break the INI. */
-        for (int c = 0; c < 16; c++) {
+        for (int c = 0; c < TD5_PLAYER_NAME_BUF; c++) {
             if ((unsigned char)nm[c] < 0x20) { nm[c] = '\0'; break; }
         }
         cfgini_add(&w, "Profile%dName = %s\r\n", i, nm);
@@ -2645,7 +2645,7 @@ static void profiles_read(void)
         if (td5_plat_ini_get_str(f, "Profiles", key, "", val, sizeof val) <= 0)
             continue;                       /* skip nameless / missing slots */
         size_t nlen = strlen(val);
-        if (nlen > 15) nlen = 15;           /* name field is 16B incl NUL */
+        if (nlen > TD5_PLAYER_NAME_MAX) nlen = TD5_PLAYER_NAME_MAX;   /* field is BUF incl NUL */
         if (nlen == 0) continue;
         memset(pr->name, 0, sizeof pr->name);
         memcpy(pr->name, val, nlen);
@@ -2777,25 +2777,25 @@ int td5_save_profile_save(const TD5_Profile *p)
     profiles_ensure_loaded();
     if (!p) return -1;
 
-    /* Trim the incoming name to a clean 16B field (NUL-padded, no control
+    /* Trim the incoming name to a clean NAME_BUF field (NUL-padded, no control
      * bytes); reject empties -- the name is the upsert key. */
-    char name[16];
+    char name[TD5_PLAYER_NAME_BUF];
     memset(name, 0, sizeof name);
     {
         int j = 0;
-        for (int i = 0; i < 16 && p->name[i]; i++) {
+        for (int i = 0; i < TD5_PLAYER_NAME_MAX && p->name[i]; i++) {
             if ((unsigned char)p->name[i] < 0x20) break;
             name[j++] = p->name[i];
         }
     }
     if (name[0] == '\0') return -1;
 
-    /* UPSERT by name (case-insensitive). Both fields are exactly 16 bytes;
-     * _strnicmp with n=16 reads no further even when a full-length name has no
-     * NUL terminator. */
+    /* UPSERT by name (case-insensitive). Both fields are exactly NAME_BUF
+     * bytes; _strnicmp with n=NAME_BUF reads no further even when a
+     * full-length name has no NUL terminator. */
     int slot = -1;
     for (int i = 0; i < s_profile_count; i++) {
-        if (_strnicmp(s_profiles[i].name, name, 16) == 0) { slot = i; break; }
+        if (_strnicmp(s_profiles[i].name, name, TD5_PLAYER_NAME_BUF) == 0) { slot = i; break; }
     }
     if (slot < 0) {
         if (s_profile_count >= TD5_MAX_PROFILES) return -1;   /* store full */
@@ -2803,7 +2803,7 @@ int td5_save_profile_save(const TD5_Profile *p)
     }
 
     s_profiles[slot] = *p;
-    memcpy(s_profiles[slot].name, name, 16);   /* store the cleaned name */
+    memcpy(s_profiles[slot].name, name, TD5_PLAYER_NAME_BUF);   /* store the cleaned name */
 
     if (profiles_enabled())
         cfgini_write_progress();               /* persist whole progress file */

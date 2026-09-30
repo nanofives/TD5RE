@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 29 (multiplayer menus)" },
+    { CL_ITEM,    "Profile DELETE now asks which profile to delete, so" },
+    { CL_ITEM,    "  any profile can be removed (not just the first one)." },
+    { CL_ITEM,    "SELECT GAME MODE: the host simply picks the mode; the" },
+    { CL_ITEM,    "  pointless per-pad vote is gone and the list wraps." },
+    { CL_ITEM,    "Player names can be up to 30 characters (was 15)." },
+    { CL_ITEM,    "Split-screen pane names are centred for every player," },
+    { CL_ITEM,    "  including the host, and the HOST badge lines up." },
+    { CL_ITEM,    "Split-screen pause says PAUSED BY <name>, not PLAYER N." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 29 (traffic + cop chase)" },
     { CL_ITEM,    "Traffic no longer hits invisible walls where lanes" },
     { CL_ITEM,    "  merge after a fork (it piled up or pushed through)." },

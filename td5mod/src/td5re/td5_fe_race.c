@@ -2391,9 +2391,12 @@ static void frontend_mp_simul_carsel_update(void) {
     }
 }
 
+/* [NAME 30 2026-09-29] Cap on TD5_PLAYER_NAME_MAX explicitly (not on the
+ * buffer size) so the typing limit stays the documented 30 chars even if the
+ * backing array is ever padded. */
 static void mp_setup_name_append(int p, char c) {
     int l = (int)strlen(s_mp_player_name[p]);
-    if (l < (int)sizeof(s_mp_player_name[p]) - 1) {
+    if (l < TD5_PLAYER_NAME_MAX && l < (int)sizeof(s_mp_player_name[p]) - 1) {
         s_mp_player_name[p][l] = c;
         s_mp_player_name[p][l + 1] = '\0';
     }
@@ -2430,7 +2433,15 @@ static int s_mp_prof_sel[TD5_MAX_HUMAN_PLAYERS];     /* selected list index */
  * armed so it can be re-found by name at confirm time (robust even if another
  * player's DELETE reindexes the store meanwhile). [0]=='\0' / 0 = disarmed. */
 static int  s_mp_prof_confirm_del[TD5_MAX_HUMAN_PLAYERS];
-static char s_mp_prof_confirm_name[TD5_MAX_HUMAN_PLAYERS][16];
+static char s_mp_prof_confirm_name[TD5_MAX_HUMAN_PLAYERS][TD5_PLAYER_NAME_BUF];
+/* [#delete-pick 2026-09-29] DELETE is a two-stage action: A on the DELETE
+ * action enters PICK mode (focus moves to the list, header reads "SELECT
+ * PROFILE TO DELETE", the row highlight turns red), then A on the list arms the
+ * existing confirm overlay for THAT row. Before this, A on the list was
+ * hard-wired to LOAD, and returning to the action row forced the selection back
+ * to index 0 (mp_profile_list_nav_enabled only leaves the list at sel<=0) — so
+ * DELETE could only ever target profile 0. B leaves pick mode. */
+static int  s_mp_prof_del_pick[TD5_MAX_HUMAN_PLAYERS];
 
 /* [#3 2026-06-15] PROFILE sits BETWEEN COLOUR and OK (order NAME, COLOUR, PROFILE,
  * OK) — both in the up/down NAV sequence and in the on-screen button stack. The
@@ -2474,13 +2485,13 @@ static void mp_set_nav_step(int p, int dir, int profiles_on) {
  * mp_prof_set_held() upserts player p's holder (releasing the previous, which is
  * implicit since each slot stores exactly one name); the per-name query scans the
  * holders. (Replaces the old append-only s_prof_loaded_names[]/count.) */
-static char s_mp_prof_held[TD5_MAX_HUMAN_PLAYERS][16];
+static char s_mp_prof_held[TD5_MAX_HUMAN_PLAYERS][TD5_PLAYER_NAME_BUF];
 /* [profile-persist 2026-06-16] Cross-phase snapshot of the per-player profile
  * holders, kept in sync by mp_prof_set_held/mp_prof_release. frontend_mp_setup_init
  * restores from this when RE-entering setup (e.g. BACK from car-select) so a loaded
  * profile is NOT lost and the player needn't reload it; frontend_mp_flow_reset
  * clears it on a fresh race. Knob TD5RE_MP_PROFILE_PERSIST (default on). */
-static char s_mp_prof_held_saved[TD5_MAX_HUMAN_PLAYERS][16];
+static char s_mp_prof_held_saved[TD5_MAX_HUMAN_PLAYERS][TD5_PLAYER_NAME_BUF];
 static int mp_profile_persist_on(void) {
     static int v = -1;
     if (v < 0) {
@@ -2514,6 +2525,7 @@ static void frontend_mp_setup_init(void) {
     for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++) {
         s_mp_prof_confirm_del[p]     = 0;   /* [#delete-confirm] no stale prompt into a fresh setup */
         s_mp_prof_confirm_name[p][0] = '\0';
+        s_mp_prof_del_pick[p]        = 0;   /* [#delete-pick] nor a stale pick mode */
         if (mp_profile_persist_on()) {
             strncpy(s_mp_prof_held[p], s_mp_prof_held_saved[p], sizeof(s_mp_prof_held[p]) - 1);
             s_mp_prof_held[p][sizeof(s_mp_prof_held[p]) - 1] = '\0';
@@ -2699,14 +2711,21 @@ static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t no
             }
             s_mp_prof_confirm_del[p]     = 0;
             s_mp_prof_confirm_name[p][0] = '\0';
+            s_mp_prof_del_pick[p]        = 0;   /* [#delete-pick] done -> leave pick mode */
         } else if (edge & (0x20u | 0x80u)) {        /* B or X = NO, cancel */
             s_mp_prof_confirm_del[p]     = 0;
             s_mp_prof_confirm_name[p][0] = '\0';
+            /* Stay in PICK mode so a mis-aimed confirm can be re-aimed at
+             * another row without re-entering DELETE from the action row. */
             frontend_play_sfx(5);
             TD5_LOG_I(LOG_TAG, "MP profile: P%d DELETE cancelled", p);
         }
         return;   /* modal — eat the rest of this frame's panel input */
     }
+
+    /* [#delete-pick 2026-09-29] Pick mode is only meaningful with a focused
+     * list and at least one profile; drop it if the store emptied out. */
+    if (s_mp_prof_del_pick[p] && cnt <= 0) s_mp_prof_del_pick[p] = 0;
 
     if (mp_profile_list_nav_enabled()) {
         /* [#3] LEFT/RIGHT pick the action (SAVE/LOAD/DELETE) on the action row.
@@ -2731,6 +2750,7 @@ static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t no
              * scroll the selection with auto-repeat. */
             if ((edge & 4) && s_mp_prof_sel[p] <= 0) {   /* already top -> back to actions */
                 s_mp_prof_focus[p] = 0;
+                s_mp_prof_del_pick[p] = 0;   /* [#delete-pick] leaving the list ends pick mode */
                 s_mp_rep_ms[p] = 0;
                 frontend_play_sfx(2);
             } else if (mp_repeat_fire(p, bits & 0x0Cu, edge & 0x0Cu, now)) {
@@ -2743,7 +2763,10 @@ static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t no
     /* LEFT/RIGHT pick the action (SAVE/LOAD/DELETE) when focus is the action row;
      * UP/DOWN move between the action row and the list, and scroll the list. */
     if (edge & 4) {  /* UP */
-        if (s_mp_prof_focus[p] == 1) s_mp_prof_focus[p] = 0;       /* list -> actions */
+        if (s_mp_prof_focus[p] == 1) {
+            s_mp_prof_focus[p] = 0;                                /* list -> actions */
+            s_mp_prof_del_pick[p] = 0;                             /* [#delete-pick] */
+        }
         frontend_play_sfx(2);
     }
     if (edge & 8) {  /* DOWN */
@@ -2765,7 +2788,12 @@ static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t no
 
     if (edge & 0x10) {  /* A = activate */
         int act = s_mp_prof_act[p];
-        if (s_mp_prof_focus[p] == 1) act = MP_PROF_ACT_LOAD;   /* A on the list = LOAD it */
+        /* [#delete-pick 2026-09-29] A on the list means DELETE-THIS-ONE while
+         * pick mode is armed, and LOAD otherwise. The old code forced LOAD
+         * unconditionally, which is why DELETE could never reach a row past
+         * index 0 (see s_mp_prof_del_pick's comment). */
+        if (s_mp_prof_focus[p] == 1)
+            act = s_mp_prof_del_pick[p] ? MP_PROF_ACT_DELETE : MP_PROF_ACT_LOAD;
         if (act == MP_PROF_ACT_SAVE) {
             if (s_mp_player_name[p][0]) {
                 TD5_Profile pr;
@@ -2797,7 +2825,25 @@ static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t no
             } else {
                 frontend_play_sfx(10);
             }
-        } else { /* DELETE */
+        } else if (s_mp_prof_focus[p] == 0) {   /* DELETE pressed on the ACTION row */
+            /* [#delete-pick 2026-09-29] Stage 1: enter PICK mode instead of
+             * acting on whatever s_mp_prof_sel[p] happened to be. Focus moves
+             * into the list so UP/DOWN can reach ANY row — the reason the old
+             * flow was stuck on index 0 is that the only way back to the action
+             * row (to press DELETE) was UP at sel<=0, which forced the
+             * selection to 0 first. */
+            if (cnt > 0) {
+                s_mp_prof_focus[p]    = 1;
+                s_mp_prof_del_pick[p] = 1;
+                mp_prof_clamp_sel(p);
+                s_mp_rep_ms[p] = now + 320u;   /* the entering press must not also scroll */
+                frontend_play_sfx(2);
+                TD5_LOG_I(LOG_TAG, "MP profile: P%d DELETE -> pick mode (sel=%d of %d)",
+                          p, s_mp_prof_sel[p], cnt);
+            } else {
+                frontend_play_sfx(10);   /* nothing to delete */
+            }
+        } else { /* DELETE confirmed target = the row the player picked */
             /* [#delete-confirm 2026-06-27] Don't wipe the profile here — arm a
              * per-player "DELETE '<name>'? Y/N" prompt naming the SELECTED
              * profile. The modal block at the top of this handler performs the
@@ -2810,16 +2856,28 @@ static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t no
                         sizeof(s_mp_prof_confirm_name[p]) - 1);
                 s_mp_prof_confirm_name[p][sizeof(s_mp_prof_confirm_name[p]) - 1] = '\0';
                 frontend_play_sfx(2);
-                TD5_LOG_I(LOG_TAG, "MP profile: P%d DELETE '%s' -> confirm prompt", p, pr.name);
+                TD5_LOG_I(LOG_TAG, "MP profile: P%d DELETE '%s' (idx %d) -> confirm prompt",
+                          p, pr.name, s_mp_prof_sel[p]);
             } else {
                 frontend_play_sfx(10);   /* nothing selected to delete */
             }
         }
     }
-    if (edge & 0x20) {  /* B = close panel (back to NAME/COLOUR/PROFILE/OK) */
-        s_mp_setup_sub[p] = 0;
-        s_mp_rep_ms[p] = 0;
-        frontend_play_sfx(5);
+    if (edge & 0x20) {  /* B */
+        if (s_mp_prof_del_pick[p]) {
+            /* [#delete-pick 2026-09-29] B in pick mode abandons the delete and
+             * returns to the SAVE/LOAD/DELETE row — it does NOT close the panel,
+             * so a player who entered DELETE by mistake loses nothing. */
+            s_mp_prof_del_pick[p] = 0;
+            s_mp_prof_focus[p]    = 0;
+            s_mp_rep_ms[p] = 0;
+            frontend_play_sfx(5);
+            TD5_LOG_I(LOG_TAG, "MP profile: P%d DELETE pick cancelled", p);
+        } else {        /* close panel (back to NAME/COLOUR/PROFILE/OK) */
+            s_mp_setup_sub[p] = 0;
+            s_mp_rep_ms[p] = 0;
+            frontend_play_sfx(5);
+        }
     }
 }
 
@@ -3579,20 +3637,12 @@ static const char *const k_mp_mode_desc[TD5_MP_MODE_COUNT] = {
 };
 
 /* Each local player's current pick (index into TD5_MpGameMode). Player 0's pick
- * is the host highlight and the value that gets locked in. */
+ * is the host highlight and the value that gets locked in.
+ * [MODE PICK HOST-ONLY 2026-09-29] Only slot 0 is written now — the per-pad
+ * vote (and its s_mode_vote_locked "cast" flag, which drew nesting border
+ * rings) was removed, because nothing in the flow ever counted the votes: the
+ * host's pick was always the binding one. */
 static int s_mode_vote[TD5_MAX_HUMAN_PLAYERS];
-
-/* [MP MODE VOTE BORDERS 2026-06-27] Per-player "vote cast" flag:
- *   0 = still choosing  -> a live, profile-coloured nav ARROW marks the hovered
- *                          button for that player.
- *   1 = vote cast       -> the arrow is gone and a profile-coloured BORDER RING is
- *                          drawn around the chosen button (rings nest outward so
- *                          several players who pick the same mode each add a ring).
- * Non-host players press A to cast (B to retract); MOVING the cursor re-opens the
- * choice (arrow back, ring cleared). The HOST (slot 0) never sets this — the host
- * A advances the screen, so the host always keeps a live arrow and has the last
- * word on the binding pick. */
-static int s_mode_vote_locked[TD5_MAX_HUMAN_PLAYERS];
 
 /* ---- Shared MP setup-screen layout + helpers (standard frontend look) ----
  * The mode-vote / mode-config / cup-winners screens use REAL frontend buttons
@@ -3766,7 +3816,6 @@ void Screen_MpModeVote(void) {
             frontend_create_button("", MV_BX, MV_Y0 + m * MV_GAP, MV_BW, MV_BH);
         for (p = 0; p < TD5_MAX_HUMAN_PLAYERS; p++) {
             s_mode_vote[p]        = TD5_MP_MODE_RACE;
-            s_mode_vote_locked[p] = 0;          /* everyone starts in "choosing" */
             s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
         }
         s_selected_button   = 0;
@@ -3829,39 +3878,27 @@ void Screen_MpModeVote(void) {
         return;
     }
 
-    /* Per-player votes — EACH local player moves only their OWN arrow via their
-     * OWN device (mp_simul_player_nav per player). Forcing the host highlight
-     * from s_mode_vote[0] below OVERRIDES the shared standard nav, so another
-     * player's pad can no longer drag the host's highlight (fixes the
-     * both-arrows-move cross-talk). */
+    /* [MODE PICK HOST-ONLY 2026-09-29] The per-pad VOTE was removed: the host
+     * (slot 0) is the only player who chooses, so only slot 0's own device
+     * drives the cursor. Every other pad is inert on this screen — previously
+     * they each carried their own arrow + a cast "vote ring" that decided
+     * nothing, which read as if the majority mattered. Nav now WRAPS (modulo)
+     * top<->bottom instead of clamping at the ends. */
     {
         int host_lock = 0, host_back = 0;
+        uint32_t bits, edge;
         (void)move; (void)hdelta; (void)confirm; (void)back;
-        for (p = 0; p < n; p++) {
-            uint32_t bits = mp_simul_player_nav(p);
-            uint32_t edge = bits & ~s_mp_pane_nav_prev[p];
-            s_mp_pane_nav_prev[p] = bits;
-            /* No per-player UP/DOWN sfx here — the shared standard nav already
-             * plays that cue once per input. MOVING the cursor re-opens this
-             * player's choice (arrow back, any cast ring cleared) so they can
-             * change their vote freely. */
-            if (edge & 4) { if (s_mode_vote[p] > 0)                  { s_mode_vote[p]--; s_mode_vote_locked[p] = 0; } }
-            if (edge & 8) { if (s_mode_vote[p] < TD5_MP_MODE_COUNT-1) { s_mode_vote[p]++; s_mode_vote_locked[p] = 0; } }
-            if (p == 0) {                       /* host: A=lock-in (advance), B=back */
-                if (edge & 0x10) host_lock = 1;
-                if (edge & 0x20) host_back = 1;
-            } else {                            /* others: A=cast vote, B=retract */
-                if ((edge & 0x10) && !s_mode_vote_locked[p]) {
-                    s_mode_vote_locked[p] = 1;  /* arrow -> border ring */
-                    frontend_play_sfx(3);       /* per-player "vote cast" cue */
-                    TD5_LOG_I(LOG_TAG, "MP mode vote: player %d cast vote mode=%d", p, s_mode_vote[p]);
-                }
-                if ((edge & 0x20) && s_mode_vote_locked[p]) {
-                    s_mode_vote_locked[p] = 0;  /* ring -> arrow (retract) */
-                    frontend_play_sfx(5);
-                }
-            }
-        }
+        for (p = 1; p < n; p++)                 /* keep edge state fresh, ignore input */
+            s_mp_pane_nav_prev[p] = mp_simul_player_nav(p);
+        bits = mp_simul_player_nav(0);
+        edge = bits & ~s_mp_pane_nav_prev[0];
+        s_mp_pane_nav_prev[0] = bits;
+        /* No UP/DOWN sfx here — the shared standard nav already plays that cue
+         * once per input. */
+        if (edge & 4) s_mode_vote[0] = (s_mode_vote[0] + TD5_MP_MODE_COUNT - 1) % TD5_MP_MODE_COUNT;
+        if (edge & 8) s_mode_vote[0] = (s_mode_vote[0] + 1) % TD5_MP_MODE_COUNT;
+        if (edge & 0x10) host_lock = 1;         /* host: A = lock-in (advance) */
+        if (edge & 0x20) host_back = 1;         /* host: B = back */
         if (s_mode_vote[0] < 0) s_mode_vote[0] = 0;
         if (s_mode_vote[0] >= TD5_MP_MODE_COUNT) s_mode_vote[0] = TD5_MP_MODE_COUNT - 1;
         s_selected_button = s_mode_vote[0];     /* host highlight = host pick */
@@ -3926,48 +3963,41 @@ void frontend_mp_mode_vote_render(float sx, float sy) {
     /* Host indicator: the gold HOST pill badge + P1 colour swatch + short label, so
      * the host marker on the game-mode selector matches the badge used on the
      * profile, screen-disposition and car selectors. Badge left; swatch and label
-     * shift right by the badge's measured width. */
+     * shift right by the badge's measured width.
+     * [2026-09-29] Badge (h=13) and swatch (h=11) are now centred on the LABEL's
+     * cap band instead of sharing its cell-top y. fe_draw_text anchors y at the
+     * 24px glyph CELL top and puts the visible caps on design rows 8..23, so the
+     * cap band's centre is y + FE_TEXT_CAP_MID (15.5) — the old badge/swatch at
+     * y=72 / y=74 sat well above that, and above each other. */
     {
-        float bw = td5_vui_host_badge((float)MV_BX, 72.0f, 13.0f, sx, sy);
+        const float label_y = 72.0f;                          /* text cell top   */
+        const float row_cy  = label_y + FE_TEXT_CAP_MID;      /* cap-band centre */
+        float bw = td5_vui_host_badge((float)MV_BX, row_cy - 6.5f, 13.0f, sx, sy);
         float sw_x = (float)MV_BX + bw + 6.0f;
-        td5_vui_quad(sw_x * sx, 74.0f * sy, 11.0f * sx, 11.0f * sy, mp_slot_color(0), -1,0,0,1,1);
-        td5_vui_text((sw_x + 17.0f) * sx, 72.0f * sy,
-                     TR("OTHERS PRESS A TO VOTE  -  P1 (HOST) DECIDES"), 0xFFC0C8D0u, sx, sy);
+        td5_vui_quad(sw_x * sx, (row_cy - 5.5f) * sy, 11.0f * sx, 11.0f * sy,
+                     mp_slot_color(0), -1,0,0,1,1);
+        td5_vui_text((sw_x + 17.0f) * sx, label_y * sy,
+                     TR("P1 (HOST) CHOOSES THE GAME MODE"), 0xFFC0C8D0u, sx, sy);
     }
 
+    (void)p; (void)n;
     for (m = 0; m < TD5_MP_MODE_COUNT; m++) {
         float byp = (float)(MV_Y0 + m * MV_GAP);
         float cx  = (float)MV_BX + MV_BW * 0.5f;
-        int   ring, stack;
         /* Two-line label, block-centred on the button (on top of the frame). */
         td5_vui_text_centered(cx * sx, (byp + 5.0f) * sy,
                               td5_tr(k_mp_mode_names[m]), 0xFFFFFFFFu, sx, sy);
         mp_pos_small_centered(cx * sx, (byp + 29.0f) * sy,
                               td5_tr(k_mp_mode_desc[m]), 0xFFB8C0CCu, sx, sy);
 
-        /* CAST votes: one profile-coloured border ring per player who has locked
-         * a vote for this mode. Rings nest outward in player order so several
-         * voters on the same mode each add a clearly-coloured frame around it. */
-        ring = 0;
-        for (p = 0; p < n; p++) {
-            if (!s_mode_vote_locked[p] || s_mode_vote[p] != m) continue;
-            mp_mode_draw_border_ring((float)MV_BX, byp, (float)MV_BW, (float)MV_BH,
-                                     MV_RING_MARGIN + (float)ring * (MV_RING_TH + MV_RING_GAP),
-                                     MV_RING_TH, mp_slot_color(p), sx, sy);
-            ring++;
-        }
-
-        /* CHOOSING cursors: a live arrow on the LEFT for each player still
-         * picking this mode (gone once they cast — the host never locks, so the
-         * host arrow always shows the host's current pick). */
-        stack = 0;
-        for (p = 0; p < n; p++) {
-            if (s_mode_vote_locked[p] || s_mode_vote[p] != m) continue;
-            td5_vui_arrow(((float)MV_BX - 18.0f - (float)stack * 15.0f) * sx,
+        /* [MODE PICK HOST-ONLY 2026-09-29] One cursor only: the host's. The
+         * per-player cast "vote rings" and the stack of non-host arrows are
+         * gone with the vote (see Screen_MpModeVote) — they suggested the other
+         * players' picks counted, and they never did. */
+        if (s_mode_vote[0] == m)
+            td5_vui_arrow(((float)MV_BX - 18.0f) * sx,
                           (byp + MV_BH * 0.5f - 8.0f) * sy,
-                          14.0f * sx, 16.0f * sy, 1, mp_slot_color(p));
-            stack++;
-        }
+                          14.0f * sx, 16.0f * sy, 1, mp_slot_color(0));
     }
 
     if (s_mode_back_confirm)
@@ -4640,7 +4670,7 @@ static int s_cop_role[TD5_MAX_HUMAN_PLAYERS];   /* 1 = cop, 0 = suspect */
 static int s_cop_roles_warn_frames = 0;
 
 static void mp_roleselect_row(float sx, float sy, int p, float y, const char *val) {
-    char nb[24];
+    char nb[TD5_PLAYER_NAME_BUF + 16];   /* [NAME 30] fits a 30-char name + "PLAYER N" */
     /* [CUP/COP NAMES 2026-06-25] Show the player's LOADED profile name (set on
      * profile load or name entry) instead of a hardcoded "PLAYER N". Both the
      * COP CHASE - ROLES and CHOOSE YOUR TEAM rows route through here, so this
@@ -4658,8 +4688,11 @@ static void mp_roleselect_row(float sx, float sy, int p, float y, const char *va
      * Tag its row with the same gold HOST pill badge the splitscreen selectors
      * use, in the left margin ahead of the name column, so the host is obvious on
      * these lobby screens too. */
+    /* [2026-09-29] Same cap-band centring as the mode selector: the badge lines
+     * up with the NAME text's visible caps (y + FE_TEXT_CAP_MID), not with the
+     * text's cell top. The old `y - 1.0f` put it ~10 px high. */
     if (p == 0)
-        td5_vui_host_badge(108.0f, y - 1.0f, 13.0f, sx, sy);
+        td5_vui_host_badge(108.0f, y + FE_TEXT_CAP_MID - 6.5f, 13.0f, sx, sy);
     td5_vui_text(150.0f * sx, y * sy, nb, mp_slot_color(p), sx, sy);
     td5_vui_text_centered(MP_ROW_VAL_CX * sx, y * sy, val, 0xFFFFFFFFu, sx, sy);
     td5_vui_arrow((MP_ROW_VAL_CX - 52.0f) * sx, (y - 1.0f) * sy, 12.0f * sx, 14.0f * sy, 0, 0xFF7995FFu);
@@ -5644,7 +5677,15 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                 td5_vui_quad(panx * sx, pany * sy, panw * sx, panh * sy, 0xE00C0C16u, -1, 0, 0, 1, 1);
                 td5_vui_quad(panx * sx, pany * sy, panw * sx, 2.0f * sy, rgb | 0xFF000000u, -1, 0, 0, 1, 1);
 
-                mp_pos_small_centered(cx * sx, (pany + 3.0f) * sy, TR("PROFILE"), 0xFFFFE060u, sx, sy);
+                /* [#delete-pick 2026-09-29] While a delete target is being
+                 * picked the header names the action (red) instead of the
+                 * generic gold "PROFILE", so it is obvious that A on a row
+                 * DELETES it rather than loading it. */
+                if (s_mp_prof_del_pick[p])
+                    mp_pos_small_centered(cx * sx, (pany + 3.0f) * sy,
+                                          TR("SELECT PROFILE TO DELETE"), 0xFFFF8080u, sx, sy);
+                else
+                    mp_pos_small_centered(cx * sx, (pany + 3.0f) * sy, TR("PROFILE"), 0xFFFFE060u, sx, sy);
 
                 /* action row: SAVE / LOAD / DELETE */
                 {
@@ -5656,10 +5697,16 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                     for (a = 0; a < MP_PROF_ACT_COUNT; a++) {
                         float axp = panx + seg * (float)a;
                         int on = (s_mp_prof_focus[p] == 0 && s_mp_prof_act[p] == a);
+                        /* [#delete-pick] In pick mode focus is on the LIST, so no
+                         * action would light up — keep DELETE lit in red to show
+                         * which action the list press will perform. */
+                        int arm = (s_mp_prof_del_pick[p] && a == MP_PROF_ACT_DELETE);
                         td5_vui_quad((axp + 1) * sx, ar_y * sy, (seg - 2) * sx, 13.0f * sy,
-                                     on ? 0xD0FFCC33u : 0x60303848u, -1, 0, 0, 1, 1);
+                                     arm ? 0xD0FF5050u : (on ? 0xD0FFCC33u : 0x60303848u),
+                                     -1, 0, 0, 1, 1);
                         mp_pos_small_centered((axp + seg * 0.5f) * sx, (ar_y + 2.0f) * sy,
-                                              td5_tr(acts[a]), on ? 0xFF101010u : 0xFFD0D0D0u, sx, sy);
+                                              td5_tr(acts[a]),
+                                              (on || arm) ? 0xFF101010u : 0xFFD0D0D0u, sx, sy);
                     }
                 }
 
@@ -5685,8 +5732,11 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                          * a release elsewhere ungreys it immediately. */
                         loaded = mp_prof_name_in_use_ex(pr.name, p);
                         if (sel)
+                            /* [#delete-pick] red row highlight while picking a
+                             * delete target; the normal steel-blue otherwise. */
                             td5_vui_quad((panx + 2) * sx, ry * sy, (panw - 4) * sx, 10.0f * sy,
-                                         0x90303848u, -1, 0, 0, 1, 1);
+                                         s_mp_prof_del_pick[p] ? 0xA0702028u : 0x90303848u,
+                                         -1, 0, 0, 1, 1);
                         /* name + a small swatch of the profile's accent. */
                         snprintf(buf, sizeof buf, "%s%s", pr.name, loaded ? " (IN USE)" : "");
                         fe_draw_small_text((panx + 14) * sx, ry * sy, buf,
@@ -5698,7 +5748,9 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                 }
 
                 mp_pos_small_centered(cx * sx, (pany + panh - 9.0f) * sy,
-                                      "A: DO   UP/DN: PICK   B: BACK", 0xFFB0B0B0u, sx, sy);
+                                      s_mp_prof_del_pick[p] ? "A: DELETE   UP/DN: PICK   B: CANCEL"
+                                                            : "A: DO   UP/DN: PICK   B: BACK",
+                                      s_mp_prof_del_pick[p] ? 0xFFFFB0B0u : 0xFFB0B0B0u, sx, sy);
 
                 /* [#delete-confirm 2026-06-27] "DELETE PROFILE? <name>" overlay
                  * over THIS pane while the prompt is armed: names the exact
@@ -5720,7 +5772,13 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                     td5_vui_quad((cbx + cbw - t) * sx, cby * sy, t * sx, cbh * sy, bc, -1, 0, 0, 1, 1);
                     mp_pos_small_centered(cx * sx, (cby + 8.0f) * sy, "DELETE PROFILE?",
                                           0xFFFF8080u, sx, sy);
-                    snprintf(buf, sizeof buf, "\"%s\"", s_mp_prof_confirm_name[p]);
+                    /* [NAME 30 2026-09-29] Bound the name explicitly: with the
+                     * 31-byte name field the compiler's worst case for an
+                     * unterminated row (9 x 31) no longer provably fits buf,
+                     * and -Wformat-truncation is a ratcheted warning class. */
+                    snprintf(buf, sizeof buf, "\"%.*s\"",
+                             (int)sizeof(s_mp_prof_confirm_name[p]) - 1,
+                             s_mp_prof_confirm_name[p]);
                     mp_pos_small_centered(cx * sx, (cby + 22.0f) * sy, buf, 0xFFFFFFFFu, sx, sy);
                     mp_pos_small_centered(cx * sx, (cby + 38.0f) * sy, "A = YES    B = NO",
                                           0xFFE0E0E0u, sx, sy);

@@ -43,7 +43,7 @@ typedef struct { const char *label; int cols; int rows; } MpSplitLayout;
 typedef struct {
     int  valid;                              /* 1 once a race has snapshotted a roster */
     int  count;                              /* number of human players captured */
-    char name[TD5_MAX_HUMAN_PLAYERS][16];
+    char name[TD5_MAX_HUMAN_PLAYERS][TD5_PLAYER_NAME_BUF];
     int  accent[TD5_MAX_HUMAN_PLAYERS];      /* 0x00RRGGBB identity colour */
     int  car[TD5_MAX_HUMAN_PLAYERS];
     int  paint[TD5_MAX_HUMAN_PLAYERS];
@@ -291,7 +291,7 @@ extern int s_paint_target;          /* 0 = editing MAIN colour, 1 = SECONDARY */
 const char *td6_pattern_name(int pat);
 
 extern char s_lobby_password[32];
-extern char s_mp_player_name[TD5_MAX_HUMAN_PLAYERS][16];
+extern char s_mp_player_name[TD5_MAX_HUMAN_PLAYERS][TD5_PLAYER_NAME_BUF];
 /* [PLAYER NAME 2026-07-02] Human display name for results/standings rows: MP
  * profile name if loaded, else (slot 0) the Game Options PLAYER NAME, else
  * NULL (caller falls back to "P<n>" / "PLAYER <n>"). Impl in td5_frontend.c. */
@@ -499,6 +499,11 @@ int   fe_wrap_text_lines(const char *s, float maxw, float sx, float sy,
 #define FE_TITLE_LEFT_X  126.0f  /* design x where the first letter starts (every screen);
                                   * = main-menu button left edge (FE_CENTER_X - 0xC2 = 320-194) */
 #define SMALLFONT_TTF_CAP       9.0f
+/* [2026-09-29] fe_draw_text / td5_vui_text anchor y at the 24px glyph CELL top
+ * and place the visible caps on design rows 8..23, so a graphic that must line
+ * up with menu-font text centres on y + FE_TEXT_CAP_MID, NOT on y. (Both the
+ * TTF and bitmap paths use those rows — see fe_draw_text.) */
+#define FE_TEXT_CAP_MID         15.5f
 
 
 extern int s_active_menu_device;

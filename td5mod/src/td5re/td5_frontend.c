@@ -350,7 +350,7 @@ const uint32_t k_mp_player_colors[TD5_MAX_HUMAN_PLAYERS] = {
  * the car-select uses). Keyboard players type directly (high-score style); pad
  * players get an on-screen QWERTY. Then phase 1 = the car-select grid. */
 int  s_mp_phase = 0;                                   /* 0 = setup, 1 = car select */
-char s_mp_player_name[TD5_MAX_HUMAN_PLAYERS][16];      /* chosen display name */
+char s_mp_player_name[TD5_MAX_HUMAN_PLAYERS][TD5_PLAYER_NAME_BUF]; /* chosen display name (30 chars) */
 int  s_mp_player_accent[TD5_MAX_HUMAN_PLAYERS];        /* chosen identity colour (0xRRGGBB) */
 int  s_mp_setup_sub[TD5_MAX_HUMAN_PLAYERS];            /* 0 idle, 1 name entry, 2 colour picker */
 int  s_mp_setup_btn[TD5_MAX_HUMAN_PLAYERS];            /* idle focus: 0 NAME, 1 COLOUR, 2 OK */
@@ -9963,8 +9963,13 @@ float td5_vui_host_badge(float x, float y, float h, float sx, float sy) {
      * solid gold face. */
     fe_draw_roundrect(xs, ys, wpx, hs, r, r, 1.6f * sx, 1.6f * sy,
                       0xFFE8B82Eu, 0xFFFFE9A0u, 0xFF7A5200u, 0xFFD89A14u, 1.0f);
-    /* 'HOST' centred, dark-on-gold for punch. */
-    float ty = ys + (hs - SMALLFONT_TTF_CAP * sy) * 0.5f;
+    /* 'HOST' centred, dark-on-gold for punch.
+     * [2026-09-29] fe_draw_small_text takes the glyph CELL top, not the cap
+     * top: the ink runs from y+(BASELINE-CAP) to y+BASELINE. Centring on the
+     * cap height alone left the label (BASELINE-CAP) px low inside the pill,
+     * so subtract that leading to put the INK band at the chip's centre. */
+    float ty = ys + (hs - SMALLFONT_TTF_CAP * sy) * 0.5f
+                  - (SMALLFONT_TTF_BASELINE - SMALLFONT_TTF_CAP) * sy;
     fe_draw_small_text(xs + (wpx - tw) * 0.5f, ty, label, 0xFF1A1000u, sx, sy);
     return wpx / sx;   /* virtual-px width */
 }
