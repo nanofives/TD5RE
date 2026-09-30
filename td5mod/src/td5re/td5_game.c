@@ -7017,9 +7017,18 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
                  * + music and unfreeze at GO (tick_resume_countdown). Net races
                  * keep their own lockstep pause sync, and a live start-countdown
                  * must not be clobbered, so both are excluded. */
+                /* [W6 item 2 2026-09-29] END RACE NOW closes the menu WITHOUT
+                 * setting any of the *_pending flags (it force-finishes in place
+                 * and lets check_race_completion fade to results), so it used to
+                 * read as a genuine resume and armed the 3-2-1 — the user saw a
+                 * countdown on a race that was already over. s_post_finish_cooldown
+                 * is non-zero from td5_game_force_finish_race() by the time we get
+                 * here, so it is the exact "the race is ending" discriminator.
+                 * Kept OUT of resume_gameplay itself: the music/SFX restore below
+                 * must still run on this path (that is W6 item 1). */
                 int resume_gameplay =
                     (!s_pause_exit_pending && !s_pause_restart_pending && !g_td5.quit_requested);
-                int arm_resume_cd = (resume_gameplay &&
+                int arm_resume_cd = (resume_gameplay && s_post_finish_cooldown == 0 &&
                                      g_td5.num_human_players > 1 && !g_td5.network_active &&
                                      s_race_countdown_state == 0 && g_cameraTransitionActive == 0);
                 if (arm_resume_cd) {
@@ -7036,7 +7045,12 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
                 } else {
                     td5_sound_set_sfx_muted(0);
                     td5_sound_set_paused(0);  /* [item 24] resume audio + restore music volume */
-                    if (resume_gameplay) {
+                    /* [W6 item 2 2026-09-29] Don't re-start the in-race music when
+                     * the menu closed because END RACE NOW force-finished the race
+                     * (s_post_finish_cooldown != 0) — the results fade is one tick
+                     * away, so the track would blip on and straight back off. The
+                     * un-mute above still runs so the menus get their audio back. */
+                    if (resume_gameplay && s_post_finish_cooldown == 0) {
                         td5_sound_cd_play(g_td5.track_index % 10 + 1);  /* same call as InitRace step 16 */
                         TD5_LOG_I(LOG_TAG, "Pause resumed -> music restarted (track=%d)",
                                   g_td5.track_index % 10 + 1);
@@ -8657,6 +8671,34 @@ void td5_game_release_race_resources(void) {
     /* Stop and release all race sound channels */
     td5_sound_release_race_channels();
     td5_sound_set_race_end(1);
+
+    /* [W6 item 1 2026-09-29] NO SOUND IN THE MENUS AFTER LEAVING A RACE.
+     * Leaving a race from the pause menu (END RACE NOW / QUIT TO MENU / EXIT,
+     * and the free-cam path) tears the race down while the pause suspend is
+     * still asserted: td5_plat_audio_set_muted(1) + a ducked music backend.
+     * Nothing on the way out ever lifted it, so every frontend screen after
+     * that race was silent. td5_sound_init_race_resources() clears the state
+     * for the NEXT race, which is why it looked like "only the menus lost
+     * sound" — and why the edge-triggered set_paused(0) alone is not enough:
+     * by then s_sound_paused has been reset to 0 while the platform mute is
+     * still latched. So: lift the suspend (edge), then force the platform
+     * un-mute unconditionally, then re-apply the saved music level.
+     *
+     * Ordering matters — set_paused(0) must run BEFORE set_volume, because
+     * td5_music_set_volume() only remembers the level while ducked
+     * (td5_music.c: `if (s_paused) return;`). */
+    td5_sound_set_paused(0);                        /* un-duck music + un-mute SFX (edge) */
+    td5_sound_set_sfx_muted(0);                     /* force the platform mute off (no edge) */
+    td5_sound_set_music_volume(g_td5.ini.music_volume);
+    TD5_LOG_I(LOG_TAG, "Race teardown: audio un-suspended for the frontend (music vol=%d)",
+              g_td5.ini.music_volume);
+
+    /* [W6 item 1 2026-09-29] A resume countdown armed right before the race
+     * ended would otherwise survive into the teardown and, with it, the frozen
+     * + silenced field it implies. Race init clears these too; clearing here as
+     * well means no path can carry a stale 3-2-1 out of a race. */
+    s_resume_countdown_ticks = 0;
+    s_resume_countdown_state = 0;
 
     /* Stop force feedback and reset input config */
     td5_input_ff_stop();

@@ -104,6 +104,12 @@ static void  actor_collision_box(const TD5_Actor *act,
 #define WRECK_PUSH_TICKS       45      /* ~1.5s of free slide after a ram */
 #define WRECK_PUSH_MIN_IMPACT  0x400   /* min V2V impact_mag that counts as a real shove */
 
+/* [W6 item 3 2026-09-29] Minimum V2V impact_mag that fires a controller rumble.
+ * Deliberately the SAME gate the car-to-car crash SFX uses further down
+ * (impact_mag >= 0x3201), so a hit you HEAR is a hit you FEEL, and two cars
+ * merely leaning on each other in a pack never buzz the pads. */
+#define V2V_FF_MIN_IMPACT      0x3201
+
 /* V2V inertia constant = 500,000 (DAT_00463204) */
 #define V2V_INERTIA_K       500000
 
@@ -1925,6 +1931,37 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         }
         int32_t hit_pos[3] = { A->world_pos.x, A->world_pos.y, A->world_pos.z };
         td5_sound_play_at_position(hit_slot, 0x1000, hit_pitch, hit_pos, hit_variants);
+    }
+
+    /* [W6 item 3 2026-09-29] CAR-TO-CAR force feedback — BOTH pads.
+     * Wall hits (above in this file) and prop hits (td5_physics.c) already fed
+     * td5_input_ff_collision, but the V2V impulse path never did: when two local
+     * players crashed into each other NEITHER controller rumbled. The FF layer
+     * has taken an (actor_a_slot, actor_b_slot) pair since it was ported, and it
+     * arms a decaying pulse on each — so one call with both slots covers the
+     * human-vs-human case (both pads) and the human-vs-AI case (the AI slot's
+     * pulse state is inert: td5_input_ff_update_jolt only walks human players).
+     * Gated on at least one HUMAN racer so AI-vs-AI and traffic shunts don't
+     * churn the pulse table every tick.
+     *
+     * OUTPUT-ONLY — td5_input_ff_collision writes nothing but FF pulse state
+     * (s_ff_pulse_mag / s_ff_side_mag / collision_active), so this cannot
+     * perturb the simulation or a golden trace.
+     *
+     * impact_mag is already in the same 0..100000 raw domain the wall path
+     * passes (the FF layer divides by TD5_INPUT_FF_COLLISION_DIV and caps);
+     * clamp it so a freak impulse can't overflow that contract. Contact side
+     * follows hitA's model-frame convention (lat = +1 right / -1 left), with the
+     * front/rear code 0x01 when the hit is not a side branch. */
+    if (impact_mag >= V2V_FF_MIN_IMPACT &&
+        (v2v_slot_is_human((int)A->slot_index) || v2v_slot_is_human((int)B->slot_index))) {
+        int32_t ff_mag = impact_mag;
+        if (ff_mag > 100000) ff_mag = 100000;
+        int contact_side = !is_side_branch ? 0x01           /* front/rear */
+                         : (cx_A > 0)      ? 0x40           /* struck on A's right */
+                         : (cx_A < 0)      ? 0x10           /* struck on A's left  */
+                                           : 0x01;          /* dead-centre fallback */
+        td5_input_ff_collision(contact_side, (int)A->slot_index, (int)B->slot_index, ff_mag);
     }
 
     /* Wanted mode (cop chase): player<->cop collision awards damage score.

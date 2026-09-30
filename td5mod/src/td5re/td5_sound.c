@@ -1937,8 +1937,24 @@ void td5_sound_update_audio_mix(void)
                         slot_play(slot_offset + 0x15, 1, siren_vol, pan, siren_pitch);
                     }
                 } else {
+                    /* [W6 item 5 2026-09-29] Modify the slots the branch above
+                     * actually PLAYS — 0x14 (Siren3) + 0x15 (Siren5), P2 dups
+                     * 0x40/0x41 via slot_offset. The +1-shifted pair 0x15/0x16
+                     * is byte-faithful to the original
+                     * [CONFIRMED @ 0x00440b00 — re/ghidra_export/functions/
+                     *  0x00440b00_UpdateVehicleAudioMix.c:452-457 plays
+                     *  local_20+0x14 / +0x15 but modifies local_20+0x15 / +0x16],
+                     * i.e. the shipped game had the same off-by-one. Consequence:
+                     * Siren3 on 0x14 never received a volume/pan/doppler update
+                     * after its first frame (stuck at the level it started at, no
+                     * distance falloff, no doppler), while 0x16 (ScrapeX) got the
+                     * siren's parameters scribbled onto it every frame. This is a
+                     * DELIBERATE divergence from the original — the same class of
+                     * +1 slot bug already fixed on the horn (2026-08-20) and on
+                     * the siren STOP path (0x14/0x15, see the [S11] note above,
+                     * which this now matches). */
+                    slot_modify(slot_offset + 0x14, siren_vol, pan, siren_pitch);
                     slot_modify(slot_offset + 0x15, siren_vol, pan, siren_pitch);
-                    slot_modify(slot_offset + 0x16, siren_vol, pan, siren_pitch);
                 }
 
                 if (pass == 0) s_tracked_veh_active = 2;

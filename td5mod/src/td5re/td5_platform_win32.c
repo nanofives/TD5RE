@@ -2804,10 +2804,43 @@ static void td5_wgi_shutdown(void)
     TD5_LOG_I(LOG_TAG, "FF WGI: subsystem released (process exit)");
 }
 
+/* [W6 item 3 2026-09-29] Global force-feedback OUTPUT gain, percent.
+ * Applied at the two places a magnitude leaves the engine for a device:
+ * td5_xinput_scale() (every WGI gamepad motor word — collision pulses AND the
+ * redline/drift rumble) and the DirectInput effect path in
+ * td5_plat_ff_constant() below. Default 125 = the requested "25% stronger".
+ * Output-only: nothing here feeds the simulation, so the gain cannot change a
+ * race outcome or a golden trace. Set TD5RE_FF_GAIN=100 for the old strength.
+ * Clamped [0,400]; 0 silences FF entirely. Read once (getenv on every FF write
+ * would be a per-frame syscall). */
+static int td5_ff_gain_pct(void)
+{
+    static int s_gain = -1;
+    if (s_gain < 0) {
+        s_gain = td5_env_int("TD5RE_FF_GAIN", 125, 0, 400);
+        TD5_LOG_I(LOG_TAG, "FF output gain: %d%% (TD5RE_FF_GAIN)", s_gain);
+    }
+    return s_gain;
+}
+
+/* Scale a magnitude by the FF gain, preserving sign (callers downstream use the
+ * sign to pick a DI effect DIRECTION) and clamping to the device nominal max. */
+static int td5_ff_apply_gain(int magnitude)
+{
+    int gain = td5_ff_gain_pct();
+    long m;
+    if (gain == 100) return magnitude;               /* exact passthrough */
+    m = ((long)magnitude * gain) / 100L;
+    if (m >  DI_FFNOMINALMAX) m =  DI_FFNOMINALMAX;
+    if (m < -DI_FFNOMINALMAX) m = -DI_FFNOMINALMAX;
+    return (int)m;
+}
+
 /* Map a DI effect magnitude (0..DI_FFNOMINALMAX) to a motor word (0..65535). */
 static WORD td5_xinput_scale(int magnitude)
 {
     long m;
+    magnitude = td5_ff_apply_gain(magnitude);
     if (magnitude < 0) magnitude = -magnitude;
     if (magnitude > DI_FFNOMINALMAX) magnitude = DI_FFNOMINALMAX;
     m = ((long)magnitude * 65535L) / DI_FFNOMINALMAX;
@@ -3128,6 +3161,11 @@ void td5_plat_ff_constant(int device_slot, int slot, int magnitude)
     if (!s_ff[device_slot].effects[slot]) {
         return;
     }
+    /* [W6 item 3 2026-09-29] DirectInput FF wheel path. Applied HERE and not at
+     * the top of the function so the gain lands exactly once: the XInput branch
+     * above already went through td5_xinput_scale(), which applies it itself.
+     * Sign is preserved because the DIRECTION locals below are derived from it. */
+    magnitude = td5_ff_apply_gain(magnitude);
 
     if (slot == 3) {
         DIPERIODIC periodic;

@@ -32,6 +32,17 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 29 (audio, force feedback, drag steering)" },
+    { CL_ITEM,    "Menus have sound again after you leave a race (the" },
+    { CL_ITEM,    "  pause mute used to stay on all the way to the menu)." },
+    { CL_ITEM,    "END RACE NOW ends the race at once, with no 3-2-1." },
+    { CL_ITEM,    "Force feedback is 25% stronger on wheels and pads." },
+    { CL_ITEM,    "Crashing into another car now shakes BOTH players'" },
+    { CL_ITEM,    "  controllers (car-to-car hits gave no rumble at all)." },
+    { CL_ITEM,    "Drag race: lane changes work on an analog stick." },
+    { CL_ITEM,    "Police siren fades with distance and doppler again." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 29 (traffic + cop chase)" },
     { CL_ITEM,    "Traffic no longer hits invisible walls where lanes" },
     { CL_ITEM,    "  merge after a fork (it piled up or pushed through)." },
