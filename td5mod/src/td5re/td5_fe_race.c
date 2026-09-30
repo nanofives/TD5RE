@@ -222,7 +222,8 @@ static int frontend_write_cup_data(void);
 static void frontend_delete_cup_data(void);
 static void frontend_quickrace_cycle_track(int delta);
 static void frontend_quickrace_clamp_counts(void);
-static uint32_t mp_simul_player_nav(int player);
+/* [CHAOS CO-OP 2026-09-29] promoted to td5_frontend_internal.h (td5_fe_chaos.c
+ * reuses it for the CHAOS TEAMS per-device cursors). */
 static void mp_simul_drop_handle(int *cache, int player, int n);
 static void mp_simul_refresh_pane(int player);
 static void mp_simul_free_all_panes(int n);
@@ -241,7 +242,8 @@ void frontend_mp_mode_config_render(float sx, float sy);
 static void frontend_mp_setup_init(void);
 static void frontend_mp_setup_update(void);
 static void frontend_mp_position_enter(void);   /* [#8] advance phase 0 -> position picker */
-static int  frontend_mp_setup_disconnect_check(int n); /* [disconnect-modal] freeze on lost pad */
+/* frontend_mp_setup_disconnect_check: declared in td5_frontend_internal.h
+ * [CHAOS CO-OP 2026-09-29] (the CHAOS TEAMS board runs the same lost-pad freeze). */
 static int frontend_track_is_circuit(int track_slot);
 static void frontend_update_laps_button_visibility(int laps_btn_idx);
 static void frontend_update_direction_button_visibility(int dir_btn_idx, int manage_label);
@@ -1570,13 +1572,20 @@ void Screen_QuickRaceMenu(void) {
  * 1 LEFT 2 RIGHT 4 UP 8 DOWN 0x10 A/confirm 0x20 B/back). Joystick players poll
  * their own device through the shared scan handle; the keyboard player (device 0)
  * reads arrows + Enter/Esc directly. */
-static uint32_t mp_simul_player_nav(int player) {
+uint32_t mp_simul_player_nav(int player) {
     int dev = s_mp_join_device[player];
     uint32_t b = 0;
     /* [MP AI TEST PLAYERS 2026-06-25] Simulated AI slots have no device (sentinel
      * -1) — return no input. Without this guard their dev<0 falls through to the
      * keyboard reads below, so the human's keyboard would drive EVERY AI pane. */
     if (s_mp_slot_is_ai[player]) return 0;
+    /* [CHAOS CO-OP 2026-09-29] Once the CHAOS TEAMS board is committed the flow
+     * runs on TWO panes (one per team car) while the JOIN map still holds 4/6/8
+     * seats, so pane p must read the device of team p's ROW-0 seat instead of
+     * join slot p. Re-mapping here (rather than rewriting s_mp_join_device)
+     * keeps the full roster intact for a step back to the board / lobby. */
+    if (player >= 0 && player < TD5_CHAOS_TEAMS && frontend_chaos_pending())
+        dev = frontend_chaos_pane_device(player);
     if (dev > 0) return td5_plat_input_device_nav(dev);
     if (td5_plat_input_key_pressed(0xCB)) b |= 1;     /* Left          */
     if (td5_plat_input_key_pressed(0xCD)) b |= 2;     /* Right         */
@@ -2204,6 +2213,10 @@ static void mp_simul_carsel_back(int n) {
      * re-arms. s_mp_simul stays SET (no frontend_mp_flow_reset on re-entry). */
     mp_simul_free_all_panes(n);
     td5_plat_input_flush_nav();
+    /* [CHAOS CO-OP 2026-09-29] Stepping back out of the car grid un-does the
+     * committed seat table, so the prior stages see the FULL local roster again
+     * (the board itself is re-entered from MP MODE CONFIG). */
+    frontend_chaos_clear_pending();
     for (q = 0; q < TD5_MAX_HUMAN_PLAYERS; q++) {
         s_mp_player_ready[q]  = 0;
         s_mp_pane_nav_prev[q] = mp_simul_player_nav(q);
@@ -3605,12 +3618,21 @@ static int s_mode_vote_locked[TD5_MAX_HUMAN_PLAYERS];
 #define MV_BX   170      /* mode-button x      */
 #define MV_BW   300      /* mode-button width  */
 #define MV_BH   50       /* mode-button height (two lines) */
-#define MV_Y0   96       /* [MP TIME TRIAL removal 2026-07-04] Restored to 96 (was
+#define MV_Y0   76       /* [MP TIME TRIAL removal 2026-07-04] Restored to 96 (was
                           * lowered to 70 for DRAG RACE 2026-06-30 to fit SIX modes).
                           * TIME TRIAL's removal brings the list back to FIVE modes,
                           * so the extra headroom is no longer needed — and at 70 the
                           * first button overlapped the "OTHERS PRESS A / HOST" banner
-                          * drawn at y=72-85. Bottom button reaches 96 + 4*64 + 50 = 402. */
+                          * drawn at y=72-85. Bottom button reaches 96 + 4*64 + 50 = 402.
+                          * [CHAOS CO-OP 2026-09-29] SIX modes again (CHAOS CO-OP), so
+                          * the bottom button at MV_Y0=96 would reach 96 + 5*64 + 50 =
+                          * 466 — past the Y460 content floor. Rather than squeezing
+                          * MV_GAP (which is what keeps the per-voter border rings
+                          * clear) the whole column moves UP to 76 and the host banner
+                          * moves with it (MV_BANNER_Y), so the first button still
+                          * clears it: rows 76..396, bottom 446. */
+#define MV_BANNER_Y 56   /* [CHAOS CO-OP 2026-09-29] host badge + "OTHERS PRESS A" row
+                          * (was 72; the title's cap ends near y=41, so 56 is clear). */
 #define MV_GAP  64       /* [2026-06-29] row pitch (was 78). Keeps the per-voter
                           * border rings clear (14px gap between 50px buttons). */
 /* [MP MODE VOTE BORDERS 2026-06-27] Concentric per-voter border-ring geometry,
@@ -3630,10 +3652,9 @@ static int      s_mode_back_confirm = 0;   /* 1 = "LEAVE TO LOBBY?" modal up */
 static uint32_t s_mode_host_prev    = 0;   /* host pad/keyboard edge tracker */
 static int      s_cfg_btn_count     = -1;  /* option count the mode-config buttons were built for */
 
-/* fe_race_draw_screen_title is defined lower in this file; forward-declare so
- * the MP render fns above it can draw the standard top-left screen title. */
-static void fe_race_draw_screen_title(const char *text, float left_x, float top_y,
-                                      uint32_t color, float sx, float sy);
+/* fe_race_draw_screen_title is defined lower in this file; its prototype lives in
+ * td5_frontend_internal.h ([CHAOS CO-OP 2026-09-29] it was promoted so the CHAOS
+ * TEAMS board in td5_fe_chaos.c draws THE standard MP-flow title, not a copy). */
 
 /* A standard player-slot colour (opaque). */
 static uint32_t mp_slot_color(int slot) {
@@ -3694,6 +3715,10 @@ static void mp_host_input(int *move, int *hdelta, int *confirm, int *back) {
 void mp_mode_config_apply_defaults(int mode) {
     TD5_MpModeConfig *c = &g_td5.mp_mode_config;
     c->mode = mode;
+    /* [CHAOS CO-OP 2026-09-29] Locking ANY mode invalidates a seat table that was
+     * committed earlier in this session (the board is re-entered from scratch),
+     * so drop the pending-chaos-race state before seeding the new defaults. */
+    frontend_chaos_clear_pending();
     switch (mode) {
     case TD5_MP_MODE_CUP:
         c->cup_race_count    = 3;
@@ -3749,6 +3774,16 @@ void mp_mode_config_apply_defaults(int mode) {
                               ? g_td5.ini.drag_length : 1;
         c->drag_extra_lanes = 0;
         break;
+    case TD5_MP_MODE_CHAOS_COOP:
+        /* [CHAOS CO-OP 2026-09-29] The seat table is NOT part of TD5_MpModeConfig
+         * (that struct is the net wire format); the rotation trigger / period /
+         * AI field size live in the frontend draft owned by td5_fe_chaos.c and are
+         * committed with the board. Defaults: no AI opponents (the mode is a duel),
+         * rotate at every CHECKPOINT, 25 s period for the TIME trigger. The lap
+         * count is deliberately untouched — every MP mode inherits it from the
+         * track-selection screen, which already carries the LAPS selector. */
+        frontend_chaos_apply_defaults();
+        break;
     default:                                    /* TD5_MP_MODE_RACE: no extra opts */
         break;
     }
@@ -3775,6 +3810,9 @@ void Screen_MpModeVote(void) {
         s_mode_host_prev    = mp_simul_player_nav(0);
         s_anim_complete     = 1;
         s_inner_state       = 1;
+        /* [CHAOS CO-OP 2026-09-29] Coming back here un-does a committed seat
+         * table, restoring the full local human count for the gate below. */
+        frontend_chaos_clear_pending();
         if (s_mp_net_config &&                 /* net: focus the current pick */
             g_td5.mp_mode_config.mode >= 0 &&
             g_td5.mp_mode_config.mode < TD5_MP_MODE_COUNT) {
@@ -3792,8 +3830,17 @@ void Screen_MpModeVote(void) {
      * every client at race start (td5_fe_net.c builds cfg.mode_config from
      * g_td5.mp_mode_config). The delicate local voting path below is skipped. */
     if (s_mp_net_config) {
+        /* [CHAOS CO-OP 2026-09-29] The mode list is SHARED with the net flow, and
+         * CHAOS CO-OP is local-only (plan section 9: its seat table never enters
+         * TD5_NetRaceConfig, so a replicated mode 5 would desync every peer).
+         * Disable the row: the standard nav skips disabled buttons and
+         * frontend_button_is_actionable() refuses their confirm, so mode 5 can
+         * never be locked, let alone replicated. */
+        s_buttons[TD5_MP_MODE_CHAOS_COOP].disabled = 1;
         if (s_selected_button < 0) s_selected_button = 0;
         if (s_selected_button >= TD5_MP_MODE_COUNT) s_selected_button = TD5_MP_MODE_COUNT - 1;
+        if (s_selected_button == TD5_MP_MODE_CHAOS_COOP)   /* stale focus from a local pass */
+            s_selected_button = TD5_MP_MODE_CHAOS_COOP - 1;
         s_mode_vote[0] = s_selected_button;             /* highlight = host pick */
         if (frontend_check_escape()) {                  /* B -> back to net lobby */
             frontend_play_sfx(5);
@@ -3801,7 +3848,8 @@ void Screen_MpModeVote(void) {
             td5_frontend_set_screen(TD5_SCREEN_NETWORK_LOBBY);
             return;
         }
-        if (s_input_ready && s_button_index >= 0 && s_button_index < TD5_MP_MODE_COUNT) {
+        if (s_input_ready && s_button_index >= 0 && s_button_index < TD5_MP_MODE_COUNT &&
+            s_button_index != TD5_MP_MODE_CHAOS_COOP) {
             s_mode_vote[0]    = s_button_index;
             s_selected_button = s_button_index;
             mp_mode_config_apply_defaults(s_button_index);
@@ -3837,6 +3885,13 @@ void Screen_MpModeVote(void) {
      * both-arrows-move cross-talk). */
     {
         int host_lock = 0, host_back = 0;
+        /* [CHAOS CO-OP 2026-09-29] Live validation gate (plan section 6.2): the
+         * CHAOS CO-OP row greys out unless the LOCAL joined count is 4/6/8 with
+         * no AI test players. The joined count is live, so the row un-greys the
+         * moment a 5th player becomes a 6th. Re-applied every frame because
+         * frontend_create_button clears `disabled` on (re)creation. */
+        int chaos_ok = frontend_chaos_mode_selectable(NULL);
+        s_buttons[TD5_MP_MODE_CHAOS_COOP].disabled = chaos_ok ? 0 : 1;
         (void)move; (void)hdelta; (void)confirm; (void)back;
         for (p = 0; p < n; p++) {
             uint32_t bits = mp_simul_player_nav(p);
@@ -3853,9 +3908,13 @@ void Screen_MpModeVote(void) {
                 if (edge & 0x20) host_back = 1;
             } else {                            /* others: A=cast vote, B=retract */
                 if ((edge & 0x10) && !s_mode_vote_locked[p]) {
-                    s_mode_vote_locked[p] = 1;  /* arrow -> border ring */
-                    frontend_play_sfx(3);       /* per-player "vote cast" cue */
-                    TD5_LOG_I(LOG_TAG, "MP mode vote: player %d cast vote mode=%d", p, s_mode_vote[p]);
+                    if (s_mode_vote[p] == TD5_MP_MODE_CHAOS_COOP && !chaos_ok) {
+                        frontend_play_sfx(10);  /* [CHAOS CO-OP] disabled row */
+                    } else {
+                        s_mode_vote_locked[p] = 1;  /* arrow -> border ring */
+                        frontend_play_sfx(3);       /* per-player "vote cast" cue */
+                        TD5_LOG_I(LOG_TAG, "MP mode vote: player %d cast vote mode=%d", p, s_mode_vote[p]);
+                    }
                 }
                 if ((edge & 0x20) && s_mode_vote_locked[p]) {
                     s_mode_vote_locked[p] = 0;  /* ring -> arrow (retract) */
@@ -3880,6 +3939,16 @@ void Screen_MpModeVote(void) {
             s_mode_vote[0] = s_button_index; s_selected_button = s_button_index; host_lock = 1;
         }
         if (frontend_check_escape()) host_back = 1;
+
+        /* [CHAOS CO-OP 2026-09-29] Reject a lock on the greyed row with the
+         * error cue instead of advancing into an unusable mode. */
+        if (host_lock && s_mode_vote[0] == TD5_MP_MODE_CHAOS_COOP && !chaos_ok) {
+            const char *why = NULL;
+            frontend_chaos_mode_selectable(&why);
+            frontend_play_sfx(10);
+            TD5_LOG_I(LOG_TAG, "MP mode vote: CHAOS CO-OP rejected (%s)", why ? why : "?");
+            host_lock = 0;
+        }
 
         if (host_lock) {
             mp_mode_config_apply_defaults(s_mode_vote[0]);
@@ -3929,10 +3998,10 @@ void frontend_mp_mode_vote_render(float sx, float sy) {
      * profile, screen-disposition and car selectors. Badge left; swatch and label
      * shift right by the badge's measured width. */
     {
-        float bw = td5_vui_host_badge((float)MV_BX, 72.0f, 13.0f, sx, sy);
+        float bw = td5_vui_host_badge((float)MV_BX, (float)MV_BANNER_Y, 13.0f, sx, sy);
         float sw_x = (float)MV_BX + bw + 6.0f;
-        td5_vui_quad(sw_x * sx, 74.0f * sy, 11.0f * sx, 11.0f * sy, mp_slot_color(0), -1,0,0,1,1);
-        td5_vui_text((sw_x + 17.0f) * sx, 72.0f * sy,
+        td5_vui_quad(sw_x * sx, (float)(MV_BANNER_Y + 2) * sy, 11.0f * sx, 11.0f * sy, mp_slot_color(0), -1,0,0,1,1);
+        td5_vui_text((sw_x + 17.0f) * sx, (float)MV_BANNER_Y * sy,
                      TR("OTHERS PRESS A TO VOTE  -  P1 (HOST) DECIDES"), 0xFFC0C8D0u, sx, sy);
     }
 
@@ -3940,11 +4009,20 @@ void frontend_mp_mode_vote_render(float sx, float sy) {
         float byp = (float)(MV_Y0 + m * MV_GAP);
         float cx  = (float)MV_BX + MV_BW * 0.5f;
         int   ring, stack;
-        /* Two-line label, block-centred on the button (on top of the frame). */
+        /* Two-line label, block-centred on the button (on top of the frame).
+         * [CHAOS CO-OP 2026-09-29] A greyed row dims both lines and prints the
+         * REASON under the description so the player knows what to change. */
+        const char *reason = NULL;
+        int greyed = (m == TD5_MP_MODE_CHAOS_COOP) && !frontend_chaos_mode_selectable(&reason);
         td5_vui_text_centered(cx * sx, (byp + 5.0f) * sy,
-                              td5_tr(k_mp_mode_names[m]), 0xFFFFFFFFu, sx, sy);
+                              td5_tr(k_mp_mode_names[m]),
+                              greyed ? 0xFF8A8A8Au : 0xFFFFFFFFu, sx, sy);
         mp_pos_small_centered(cx * sx, (byp + 29.0f) * sy,
-                              td5_tr(k_mp_mode_desc[m]), 0xFFB8C0CCu, sx, sy);
+                              td5_tr(k_mp_mode_desc[m]),
+                              greyed ? 0xFF6A6A6Au : 0xFFB8C0CCu, sx, sy);
+        if (greyed && reason)
+            mp_pos_small_centered(cx * sx, (byp + 39.0f) * sy, reason,
+                                  0xFFFFC060u, sx, sy);
 
         /* CAST votes: one profile-coloured border ring per player who has locked
          * a vote for this mode. Rings nest outward in player order so several
@@ -4053,6 +4131,18 @@ static int mp_cfg_build(MpCfgOpt *o) {
         o[n].label="TRAFFIC";          o[n].val=&c->drag_traffic;     o[n].min=0; o[n].max=1; o[n].step=1; o[n].enum_labels=k_cfg_offon;  o[n].enum_count=2; n++;
         o[n].label="DISTANCE";         o[n].val=&c->drag_length;      o[n].min=0; o[n].max=3; o[n].step=1; o[n].enum_labels=k_cfg_draglen; o[n].enum_count=4; n++;
         o[n].label="EXTRA LANES";      o[n].val=&c->drag_extra_lanes; o[n].min=0; o[n].max=6; o[n].step=1; o[n].enum_labels=NULL;         o[n].enum_count=0; n++;
+        break;
+    case TD5_MP_MODE_CHAOS_COOP:
+        /* [CHAOS CO-OP 2026-09-29] Rows edit the frontend DRAFT owned by
+         * td5_fe_chaos.c (see the note in mp_mode_config_apply_defaults), so the
+         * values are int32_t* into that module, not into TD5_MpModeConfig.
+         * PERIOD only exists for the TIME trigger — the dynamic row count is
+         * already handled (the CUP "TEAMS" toggle does the same thing). LAPS is
+         * NOT here: the track-selection screen owns it for every MP mode. */
+        o[n].label="ROTATE AT";        o[n].val=frontend_chaos_draft_trigger();      o[n].min=0;  o[n].max=TD5_CHAOS_TRIGGER_COUNT-1; o[n].step=1; o[n].enum_labels=frontend_chaos_trigger_names(); o[n].enum_count=TD5_CHAOS_TRIGGER_COUNT; n++;
+        if (*frontend_chaos_draft_trigger() == TD5_CHAOS_TRIGGER_TIME)
+        { o[n].label="PERIOD";         o[n].val=frontend_chaos_draft_period();       o[n].min=10; o[n].max=60; o[n].step=5; o[n].enum_labels=NULL; o[n].enum_count=0; n++; }
+        o[n].label="AI OPPONENTS";     o[n].val=frontend_chaos_draft_ai_opponents(); o[n].min=0;  o[n].max=4;  o[n].step=1; o[n].enum_labels=NULL; o[n].enum_count=0; n++;
         break;
     default: /* TD5_MP_MODE_RACE — no extra options */
         break;
@@ -4239,6 +4329,12 @@ void Screen_MpModeConfig(void) {
         } else if (c->mode == TD5_MP_MODE_CUP && c->cup_team_mode) {
             TD5_LOG_I(LOG_TAG, "MP mode config: cup teams -> team select");
             td5_frontend_set_screen(TD5_SCREEN_MP_TEAM_SELECT);
+        } else if (c->mode == TD5_MP_MODE_CHAOS_COOP) {
+            /* [CHAOS CO-OP 2026-09-29] The seat/role board sits between the mode
+             * options and the car grid: it commits the TD5_ChaosConfig and then
+             * routes to car select with exactly two pickers (one per team). */
+            TD5_LOG_I(LOG_TAG, "MP mode config: chaos co-op -> teams board");
+            td5_frontend_set_screen(TD5_SCREEN_CHAOS_TEAMS);
         } else {
             TD5_LOG_I(LOG_TAG, "MP mode config: confirmed mode=%d -> car select", c->mode);
             td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
@@ -5174,8 +5270,8 @@ static float mp_pos_pulse(uint32_t now, float lo, float hi) {
 #define FE_RACE_TITLE_CAP_PX 24.0f    /* design cap height (px at 480-tall reference) */
 #define FE_RACE_TITLE_LEFT_X 126.0f   /* design x where the first letter starts (= td5_frontend FE_TITLE_LEFT_X) */
 #define FE_RACE_TITLE_TRACK  (-1.5f)  /* extra letter tracking (design px; negative = tighter) */
-static void fe_race_draw_screen_title(const char *text, float left_x, float top_y,
-                                      uint32_t color, float sx, float sy) {
+void fe_race_draw_screen_title(const char *text, float left_x, float top_y,
+                               uint32_t color, float sx, float sy) {
     if (!text || !td5_titlefont_ready()) return;
     const float cap_px   = FE_RACE_TITLE_CAP_PX * sy;
     const float baseline = top_y + cap_px;                /* cap tops land near top_y */
@@ -5380,7 +5476,7 @@ static int s_mp_disc_sim = 0;          /* F9 dev toggle: simulate all joystick p
 static int s_mp_disc_sim_prev_f9 = 0;
 #endif
 
-static int frontend_mp_setup_disconnect_check(int n) {
+int frontend_mp_setup_disconnect_check(int n) {
     uint32_t mask = 0;
     int p;
     if (n < 1) n = 1;
