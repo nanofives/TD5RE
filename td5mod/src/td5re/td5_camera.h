@@ -126,7 +126,18 @@ typedef struct TD5_CameraPreset {
     int32_t  extra_param_2;
 } TD5_CameraPreset;
 
-#define TD5_CAMERA_PRESET_COUNT  14  /* 0-6: normal, 7-9: unused, 10-13: countdown fly-in */
+#define TD5_CAMERA_PRESET_COUNT  14  /* 0-7: normal, 8-9: unused, 10-13: countdown fly-in */
+
+/* How many presets the in-race CHANGE VIEW button cycles through. The original
+ * cycled 7 (0-6, chase 0-5 + bumper 6); TD5RE appends preset 7 = TOP-DOWN
+ * (mode 2), so the cycle is 8. [W5 2026-09-29, PORT-ONLY] */
+#define TD5_CAMERA_PRESET_CYCLE  8
+
+/* Preset MODE values (TD5_CameraPreset.mode / g_raceCameraPresetMode[view]).
+ * 0/1 are original; 2 is the port-only top-down view. */
+#define TD5_CAM_MODE_CHASE    0
+#define TD5_CAM_MODE_BUMPER   1
+#define TD5_CAM_MODE_TOPDOWN  2
 
 /* ========================================================================
  * Trackside camera profile (16 bytes per entry, terminated by -1)
@@ -207,6 +218,11 @@ void UpdateSplineTracksideCamera(uint8_t *actor, int view, int spline_type);
  *  @return  the wrap count (preset / 7)
  */
 int CycleRaceCameraPreset(int view, int delta);
+
+/* [W5 2026-09-29] Replay TOP-DOWN view: the CHANGE VIEW button toggles between
+ * the authored cinematic trackside profiles and an overhead view of the car. */
+void td5_camera_replay_topdown_toggle(void);
+int  td5_camera_replay_topdown_active(void);
 
 /* ========================================================================
  * Camera transform pipeline

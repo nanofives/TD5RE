@@ -2532,6 +2532,98 @@ static void hud_scale_text_pos(float *x, float *y, int centered, float scale)
     else          *x = vl->vp_int_left  + dl * scale;  /* nearer left edge  */
 }
 
+/* ========================================================================
+ * [W5 POSITION POP 2026-09-29 — PORT-ONLY] Race-position gain animation.
+ *
+ * Per pane, remember the race position last drawn. When it IMPROVES (a smaller
+ * ordinal) start a short "pop": the POSITION label scales up and eases back to
+ * normal. Driven off g_td5.simulation_tick_counter (30 Hz) rather than the
+ * render frame, so the pop lasts the same wall-clock time at 30 or 180 fps.
+ *
+ * Knobs: TD5RE_HUD_POS_POP     1 = on (default), 0 = off
+ *        TD5RE_HUD_POS_POP_PCT peak size in percent over normal (default 70)
+ *        TD5RE_HUD_POS_POP_TICKS animation length in sim ticks (default 20)
+ * ======================================================================== */
+static uint8_t  s_pos_pop_prev[MAX_HUD_VIEWS];
+static uint8_t  s_pos_pop_seen[MAX_HUD_VIEWS];
+static uint32_t s_pos_pop_start[MAX_HUD_VIEWS];
+
+static int hud_position_pop_on(void)
+{
+    static int v = -1;
+    if (v < 0) v = td5_env_flag_on("TD5RE_HUD_POS_POP");   /* default ON */
+    return v;
+}
+
+static int hud_position_pop_pct(void)
+{
+    static int v = -1;
+    if (v < 0) v = td5_env_int("TD5RE_HUD_POS_POP_PCT", 70, 0, 300);
+    return v;
+}
+
+static int hud_position_pop_ticks(void)
+{
+    static int v = -1;
+    if (v < 0) v = td5_env_int("TD5RE_HUD_POS_POP_TICKS", 20, 1, 120);
+    return v;
+}
+
+static void td5_hud_reset_position_pop(void)
+{
+    memset(s_pos_pop_prev,  0, sizeof(s_pos_pop_prev));
+    memset(s_pos_pop_seen,  0, sizeof(s_pos_pop_seen));
+    memset(s_pos_pop_start, 0, sizeof(s_pos_pop_start));
+}
+
+/* Returns the size multiplier to draw pane `view`'s POSITION label at this
+ * frame (1.0 = normal). Also latches the position change. */
+static float hud_position_pop_scale(int view, int pos)
+{
+    if (view < 0 || view >= MAX_HUD_VIEWS) return 1.0f;
+    if (!hud_position_pop_on()) return 1.0f;
+
+    uint32_t now = (uint32_t)g_td5.simulation_tick_counter;
+
+    if (!s_pos_pop_seen[view]) {
+        /* First sight of this pane: latch, never animate (a race start would
+         * otherwise pop every pane that is not last). */
+        s_pos_pop_seen[view] = 1;
+        s_pos_pop_prev[view] = (uint8_t)pos;
+        return 1.0f;
+    }
+
+    if ((uint8_t)pos != s_pos_pop_prev[view]) {
+        int gained = (pos < (int)s_pos_pop_prev[view]);
+        s_pos_pop_prev[view] = (uint8_t)pos;
+        if (gained) {
+            s_pos_pop_start[view] = now ? now : 1u;
+            TD5_LOG_I(LOG_TAG, "position pop: view=%d gained -> P%d", view, pos + 1);
+        }
+    }
+
+#ifndef TD5RE_RELEASE
+    /* QA harness: TD5RE_HUD_POS_POP_TEST=1 retriggers the pop as soon as it
+     * settles, so the animation can be framedumped without having to catch a
+     * real overtake. Dev builds only; never affects a shipped race. */
+    if (s_pos_pop_start[view] == 0u &&
+        td5_env_int("TD5RE_HUD_POS_POP_TEST", 0, 0, 1))
+        s_pos_pop_start[view] = now ? now : 1u;
+#endif
+
+    if (s_pos_pop_start[view] == 0u) return 1.0f;
+
+    uint32_t dur = (uint32_t)hud_position_pop_ticks();
+    uint32_t age = now - s_pos_pop_start[view];
+    if (age >= dur) { s_pos_pop_start[view] = 0u; return 1.0f; }
+
+    /* Ease: full size instantly, then decay back over the window (a half sine
+     * would peak late and read as a wobble; the snap-then-settle reads as a
+     * "punch"). t goes 1 -> 0. */
+    float t = 1.0f - ((float)age / (float)dur);
+    return 1.0f + ((float)hud_position_pop_pct() / 100.0f) * t * t;
+}
+
 /* [COP-CHASE HUD 2026-06-21] Tunables for the cop-chase HUD polish:
  *   TD5RE_COPCHASE_HUD_SCALE = ARRESTS/POINTS readout size, percent (default 135).
  *   TD5RE_COPCHASE_VECTOR    = 1 (default) draws the suspect chase indicator as
@@ -3031,6 +3123,8 @@ void td5_hud_init_overlay_resources(int race_mode, int string_table_offset)
 
 void td5_hud_init_layout(void)
 {
+    td5_hud_reset_position_pop();   /* [W5] per-race position-pop state */
+
     /* Load numbers atlas (used by metric display) */
     s_numbers_atlas = td5_asset_find_atlas_entry(NULL, "numbers");
     hud_log_atlas_status("numbers", s_numbers_atlas);
@@ -3070,15 +3164,37 @@ void td5_hud_init_layout(void)
      * per-pane scale (min of the pane's width/height fraction) keeps HUD
      * element aspect inside each pane; the grid is uniform, so pane 0's
      * fractions hold for every pane. (Single view: full target, sfrac=1.) */
+    /* [W5 PER-PANE HUD SCALE 2026-09-29] Fit the 640x480 HUD design directly
+     * into the PANE, i.e. min(pane_w / 640, pane_h / 480), instead of taking the
+     * whole-window fit and then multiplying by the pane's area fraction.
+     *
+     * The old form was `min(W/640, H/480) * min(pane_w/W, pane_h/H)`, which
+     * takes the limiting axis of the WINDOW and the limiting axis of the PANE
+     * independently. When those are different axes it under-scales: on 1920x1080
+     * with a LEFT|RIGHT 2-player split (pane 960x1080) it gave 2.25 * 0.5 =
+     * 1.125 where the pane can carry min(1.5, 2.25) = 1.5, so the speedo and
+     * minimap were a third smaller than the pane allowed. On a TOP/BOTTOM split
+     * (the 2-player default) and on 2x2 both forms agree exactly, so those
+     * layouts are unchanged. Single view is identical to before by definition.
+     * Element POSITIONS still come from the per-view vp_* bounds below. */
     {
         int px, py, pw, ph;
         td5_game_get_pane_rect(views, 0, g_td5.render_width, g_td5.render_height,
                                &px, &py, &pw, &ph);
-        float fx = (float)pw / g_render_width_f;
-        float fy = (float)ph / g_render_height_f;
-        float sfrac = (fx < fy) ? fx : fy;   /* uniform fit, aspect-correct */
-        s_scale_x *= sfrac;
-        s_scale_y *= sfrac;
+        float fx = (float)pw * (1.0f / 640.0f);
+        float fy = (float)ph * (1.0f / 480.0f);
+        float pane_scale = (fx < fy) ? fx : fy;   /* uniform fit inside the pane */
+        s_scale_x = pane_scale;
+        s_scale_y = pane_scale;
+        TD5_LOG_I(LOG_TAG,
+                  "hud layout: views=%d pane=%dx%d scale=%.3f (was %.3f)",
+                  views, pw, ph, pane_scale,
+                  ((g_render_width_f * (1.0f / 640.0f) < g_render_height_f * (1.0f / 480.0f))
+                       ? g_render_width_f * (1.0f / 640.0f)
+                       : g_render_height_f * (1.0f / 480.0f)) *
+                      (((float)pw / g_render_width_f < (float)ph / g_render_height_f)
+                           ? (float)pw / g_render_width_f
+                           : (float)ph / g_render_height_f));
     }
     for (int v = 0; v < views; v++) {
         int px, py, pw, ph;
@@ -5128,17 +5244,42 @@ void td5_hud_render_overlays(float dt)
         /* --- Bit 0: Race position label --- */
         if (flags & TD5_HUD_POSITION_LABEL) {
             uint8_t pos = actor_race_position(actor_slot);
-            int px = (int)(vl->vp_int_left + 8.0f);
-            int py = (int)(vl->vp_int_top + 8.0f);
+            char pos_txt[16];
+            float px = vl->vp_int_left + 8.0f;
+            float py = vl->vp_int_top + 8.0f;
+
             if (pos < 6) {
-                td5_hud_queue_text(0, px, py, 0, "%s", s_hud_string_table[pos]);
+                snprintf(pos_txt, sizeof(pos_txt), "%s", s_hud_string_table[pos]);
             } else {
                 /* [PORT: N-way] The SNK position table only has 1ST..6TH; for a
                  * >6-racer field generate the ordinal (positions 7..16 are all
                  * "TH"). Without this, 7th+ read the next table entries
                  * ("WRONG WAY", "PIT STOP", ...). */
-                td5_hud_queue_text(0, px, py, 0, "%dTH", (int)pos + 1);
+                snprintf(pos_txt, sizeof(pos_txt), "%dTH", (int)pos + 1);
             }
+
+            /* [W5 POSITION POP 2026-09-29] When this pane's car GAINS a place,
+             * punch the label up and let it settle back. Per-pane state, keyed
+             * on the sim tick (not the frame) so the animation lasts the same
+             * wall time at any frame rate, and the growth is CENTRED on the
+             * label instead of pushing it out of the pane corner. Losing a
+             * place is deliberately silent. */
+            float pop = hud_position_pop_scale(v, (int)pos);
+            if (pop > 1.0f) {
+                /* hud_scale_text_pos re-anchors a left/top-aligned label as
+                 * (corner + offset * scale), so the offset has to be
+                 * pre-divided by the pop and shifted by half the label's growth
+                 * to keep the glyph block centred on where it normally sits.
+                 * Nominal unscaled cell: ~10 px per glyph, ~14 px tall. */
+                float nom_w = (float)strlen(pos_txt) * 10.0f;
+                float nom_h = 14.0f;
+                float dx = (8.0f + nom_w * 0.5f * (1.0f - pop)) / pop;
+                float dy = (8.0f + nom_h * 0.5f * (1.0f - pop)) / pop;
+                px = vl->vp_int_left + dx;
+                py = vl->vp_int_top  + dy;
+                s_hud_next_text_scale = pop;
+            }
+            td5_hud_queue_text(0, (int)px, (int)py, 0, "%s", pos_txt);
         }
 
         /* --- Bit 7: Total timer "%s %d" / cop-chase POINTS --- */

@@ -925,6 +925,19 @@ void td5_input_poll_race_session(void)
         if ((s_control_bits[i] & TD5_INPUT_STEER_LEFT /*reuse check*/) != 0) {
             /* actual camera check below */
         }
+        /* [W5 REPLAY TOP-DOWN 2026-09-29] While WATCHING a replay the camera
+         * button had no function at all (the gate below excludes replay). It
+         * now toggles the port-only overhead replay view, so the authored
+         * cinematic profiles are no longer the only thing you can watch. */
+        if (((s_control_bits[i] & 0x1000000u) != 0) &&
+            (s_camera_cooldown[i] == 0) &&
+            s_replay_mode_flag &&
+            (!s_escape_fade_active))
+        {
+            td5_camera_replay_topdown_toggle();
+            s_camera_cooldown[i] = TD5_INPUT_CAMERA_COOLDOWN;
+        }
+
         if (((s_control_bits[i] & 0x1000000u) != 0) &&
             (s_camera_cooldown[i] == 0) &&
             (!s_replay_mode_flag) &&

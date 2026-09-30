@@ -2911,7 +2911,11 @@ void td5_render_actors_for_view(int view_index)
          * is g_raceCameraPresetMode[view] != 0. Consumed by the per-actor skip at
          * the top of the loop below (and the smoke sub-gate further down). */
         int camera_target_slot   = td5_game_get_player_slot(view_index);
-        int camera_preset_active = (g_raceCameraPresetMode[view_index & 1] != 0);
+        /* [W5 TOP-DOWN 2026-09-29] Only the BUMPER/in-car mode (1) hides the
+         * view's own car. Mode 2 (top-down) looks AT the car from above, so the
+         * `!= 0` test would have made the player's car invisible in it. */
+        int camera_preset_active =
+            (g_raceCameraPresetMode[view_index & 1] == TD5_CAM_MODE_BUMPER);
 
         /* === Vehicle shadow PRE-PASS (FIX 2026-06-02 inter-actor overlay) ===
          * Draw EVERY visible actor's ground shadow BEFORE any car body is drawn
@@ -3406,7 +3410,7 @@ void td5_render_actors_for_view(int view_index)
                 render_vehicle_wheel_billboards(actor, slot);
             }
             if (is_racer)
-                render_vehicle_brake_lights(actor, slot);
+                render_vehicle_brake_lights(actor, slot, mesh);
             /* [DYNAMIC LIGHTS] visible front headlamp glow (racers). */
             if (is_racer)
                 render_vehicle_headlights(actor, slot);
