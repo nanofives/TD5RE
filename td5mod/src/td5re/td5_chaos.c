@@ -47,6 +47,31 @@ TD5_ChaosRole td5_chaos_role_for_row(int team_size, int row) {
     }
 }
 
+/* THE seat colour, shared by the CHAOS TEAMS board and the in-race role strip.
+ *
+ * [CHAOS CO-OP 2026-09-30] The values are COPIED, literal for literal, from
+ * k_mp_player_colors[0..7] in td5_frontend.c (declared in the frontend-internal
+ * header td5_frontend_internal.h, which td5_hud.c must not include — hence the
+ * copy rather than a reference). That table has 9 entries and its first 8 are
+ * already all distinct, so nothing had to be invented here; seats 0..7 are
+ * exactly P1..P8's identity colours, which is what makes the teams screen and
+ * the HUD agree. If k_mp_player_colors ever changes, change this to match.
+ *
+ * Deliberately NOT the profile accent (s_mp_player_accent): that array is
+ * frontend-internal and is only indexed by LOCAL setup slot, of which the mode
+ * has two (one per team car), so the HUD has no way to read a per-SEAT accent.
+ * One fixed table on both sides beats an override only one side can see. */
+uint32_t td5_chaos_seat_color(int seat) {
+    static const uint32_t k_seat_colors[TD5_CHAOS_MAX_SEATS] = {
+        0xFFFF4040u, /* seat 0 / P1 red     */ 0xFF4080FFu, /* seat 1 / P2 blue    */
+        0xFF40D040u, /* seat 2 / P3 green   */ 0xFFFFD030u, /* seat 3 / P4 yellow  */
+        0xFFFF8020u, /* seat 4 / P5 orange  */ 0xFFE060E0u, /* seat 5 / P6 magenta */
+        0xFF40D0D0u, /* seat 6 / P7 cyan    */ 0xFFF0F0F0u, /* seat 7 / P8 white   */
+    };
+    int i = ((seat % TD5_CHAOS_MAX_SEATS) + TD5_CHAOS_MAX_SEATS) % TD5_CHAOS_MAX_SEATS;
+    return k_seat_colors[i];
+}
+
 const char *td5_chaos_role_name(TD5_ChaosRole role) {
     switch (role) {
     case TD5_CHAOS_ROLE_STEER:    return "STEER";

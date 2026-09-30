@@ -5123,7 +5123,7 @@ static int chaos_hud_build_state(int team, ChaosStripState *st)
         for (row = 0; row < CHAOS_HUD_MAX_ROWS; row++) {
             int p = team * CHAOS_HUD_MAX_ROWS + row;
             st->rows[row].player = p + 1;
-            st->rows[row].color  = hud_filler_slot_color(p);
+            st->rows[row].color  = td5_chaos_seat_color(p);
             st->rows[row].role   = td5_tr(td5_chaos_role_name(
                                       td5_chaos_role_for_row(CHAOS_HUD_MAX_ROWS, row)));
         }
@@ -5150,7 +5150,13 @@ static int chaos_hud_build_state(int team, ChaosStripState *st)
             if (td5_chaos_team_of_seat(seat) != team) continue;
             if (td5_chaos_row_of_seat(seat)  != row)  continue;
             st->rows[st->row_count].player = seat + 1;
-            st->rows[st->row_count].color  = hud_filler_slot_color(seat);
+            /* [CHAOS CO-OP 2026-09-30] td5_chaos_seat_color, NOT the 6-wide
+             * hud_filler_slot_color wheel: at 8 seats that wheel repeated, and
+             * seats 0 and 6 (the collision) are on the SAME team under the
+             * board's alternating seating, so one pane drew two identically
+             * coloured rows. This is also the exact table the CHAOS TEAMS
+             * board uses, so a seat keeps its colour from board to race. */
+            st->rows[st->row_count].color  = td5_chaos_seat_color(seat);
             st->rows[st->row_count].role   =
                 td5_tr(td5_chaos_role_name(td5_chaos_role_of_seat(seat)));
             st->row_count++;

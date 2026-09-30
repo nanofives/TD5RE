@@ -71,6 +71,18 @@ TD5_ChaosRole td5_chaos_role_for_row(int team_size, int row);
 /* Short upper-case display name ("LEFT", "PEDALS", ...). Never NULL. */
 const char *td5_chaos_role_name(TD5_ChaosRole role);
 
+/* THE seat colour. Opaque 0xAARRGGBB, one DISTINCT hue per seat 0..7, so the
+ * CHAOS TEAMS board and the in-race role strip label the same player with the
+ * same colour. Pure: no activation gate, no race state — safe from the frontend
+ * before a race and from the HUD preview harness. `seat` is wrapped modulo
+ * TD5_CHAOS_MAX_SEATS, so it never returns a black/garbage colour.
+ *
+ * Use this instead of a per-slot wheel: hud_filler_slot_color() spreads only 6
+ * hues, so at 8 seats it gave seats 0 and 6 the same colour — and with the
+ * board's alternating RED/BLUE seating those two are on the SAME team, i.e. two
+ * identically-coloured rows in one pane (found in 8-player framedumps). */
+uint32_t td5_chaos_seat_color(int seat);
+
 /* ---- Activation / seat table -------------------------------------------- */
 
 /* 1 while CHAOS CO-OP is selected and usable: g_td5.mp_mode_config.mode ==
