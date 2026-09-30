@@ -2158,6 +2158,19 @@ static int      s_trf_battle_hwm[TD5_MAX_RACER_SLOTS];
  * live wreck, so a fresh car never inherits a stale age. */
 static int16_t  s_trf_wreck_age[TD5_MAX_TOTAL_ACTORS];
 
+/* [W7 CORRIDOR-EXIT DIAG 2026-09-29] Previous tick's span_normalized (+0x82) per
+ * traffic slot, plus a per-slot flag saying "this car was inside a branch corridor
+ * last tick" (span_raw > ring). Pure measurement, written only by the despawn pass,
+ * read only by the diagnostic below -- no sim state depends on it. It exists to
+ * answer ONE question with a log line instead of a guess: when a traffic car leaves
+ * a fork corridor and rejoins the main road, does its normalized span WARP (because
+ * +0x84 span_accumulated still holds the raw corridor index, so the wrap normalizer
+ * produces acc % ring instead of the car's real position)? A warp is what pushes
+ * min_player_dist past front_keep and fades a healthy car out right at the merge.
+ * -1 = no sample yet. */
+static int16_t  s_trf_prev_span_norm[TD5_MAX_TOTAL_ACTORS];
+static uint8_t  s_trf_prev_in_corr[TD5_MAX_TOTAL_ACTORS];
+
 /* ---- [PER-VIEWPORT TRAFFIC 2026-06-22] ----------------------------------------
  * Split-screen TIME TRIAL (removed 2026-07-04): each viewport got its OWN traffic
  * partition (a disjoint sub-range of the traffic slots), spawned with an IDENTICAL
@@ -2555,6 +2568,65 @@ static int trf_near_fill_enabled(void)
     return s;
 }
 
+/* [W7 FORK-EXIT DESPAWN FIX 2026-09-29] Gate for the corridor span-accumulator
+ * fold in trf_dyn_place (see the long note there). Default ON;
+ * TD5RE_TRAFFIC_CORRIDOR_ACCUM=0 restores the pre-fix placement byte-for-byte. */
+static int trf_corridor_accum_fix_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_flag_on("TD5RE_TRAFFIC_CORRIDOR_ACCUM");
+        TD5_LOG_I(LOG_TAG, "traffic_corridor_accum: TD5RE_TRAFFIC_CORRIDOR_ACCUM=%d "
+                  "(fold branch-corridor placements into the main-span accumulator)", s);
+    }
+    return s;
+}
+
+/* [W7 VERY-HIGH OPENING FIX 2026-09-29] The race-init wave used to be seeded into
+ * a fixed 100-span clump starting at SpawnStartOffset+8 past the START LINE. With
+ * the shipped SpawnStartOffset=200 and VERY HIGH's cap of 16 that puts the ENTIRE
+ * budget at spans 208..308 from the grid: past the ~128-span actor render cull, so
+ * invisible, and past front_keep (229) so most of it is retired as far_from_all on
+ * the first ticks and re-placed just as far away. on_road then sits AT the cap, the
+ * spawn gate (`on_road < cap`) never opens, and nothing can be placed in the band
+ * the player is actually driving through until they physically reach the clump.
+ * Measured on Moscow (VERY HIGH, 3 AI, first 30 s): on_road 12.0/16 but ZERO cars
+ * in the 40 spans ahead in 95.8% of census samples, nearest car ahead 196 spans.
+ * That is the reported "one wave, then the frequency collapses in the first spans".
+ *
+ * Two knobs make the seed a STREAM instead of a clump:
+ *   TD5RE_TRAFFIC_SEED_STREAM  (default on; 0 = the old fixed +8..+108 band)
+ *   TD5RE_TRAFFIC_SEED_GAP     (spans of road to allow per seeded car, default 12)
+ * plus a reduced start clearance that applies ONLY to the seeding pass, so the
+ * stream can begin inside the player's view instead of beyond it. The launch
+ * stretch still stays clear -- the seed clearance floor is the smaller of the INI
+ * value and TD5RE_TRAFFIC_SEED_CLEAR (default 16 spans). LIVE spawns are never
+ * affected: the reduced clearance applies only while s_trf_seed_pass is set. */
+static int trf_seed_stream_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) s = td5_env_flag_on("TD5RE_TRAFFIC_SEED_STREAM");
+    return s;
+}
+
+/* Start-line clearance used while the race-init seeding pass is running. */
+static int s_trf_seed_pass;
+
+static int trf_dyn_start_clear_spans(void)
+{
+    int c = g_td5.ini.traffic_dyn_start_offset;
+    if (s_trf_seed_pass && trf_seed_stream_enabled()) {
+        /* 16 spans + the band's own +8 puts the first seeded car ~24 spans past
+         * the start line: clear of the grid at lights-out, but inside the
+         * 40-span band the player is looking at, which a 40-span clearance was
+         * not (measured: nearest car ahead 63 spans, still zero in the near
+         * window for 90% of the opening). */
+        int sc = td5_env_int("TD5RE_TRAFFIC_SEED_CLEAR", 16, 0, 100000);
+        if (c > sc) c = sc;
+    }
+    return c;
+}
+
 static int trf_rear_keep_spans(void)
 {
     static int v = -1;
@@ -2583,12 +2655,39 @@ static int trf_perplayer_cap_enabled(void)
 /* Number of racer anchors that each get a bubble. Feature ON: every active racer
  * (humans first, then AI opponents — they occupy the low, contiguous racer
  * slots). Feature OFF: humans only (legacy). Clamped to the racer region. */
+/* [W7 VERY-HIGH DILUTION FIX 2026-09-29] Cap how many AI racers may act as traffic
+ * anchors. Every anchor both opens a cluster budget (trf_dyn_cap) and holds cars
+ * alive inside its bubble (trf_dyn_min_player_dist). Counting all five AI as full
+ * anchors spends the VERY-HIGH budget on cars nobody is looking at: measured on
+ * Moscow (VERY HIGH, 3 AI, 150 s) the pool ran at eff_cap 32 yet the census read
+ * 4 cars ahead of the player against 16 behind, mean 0.97 cars in the 40 spans
+ * ahead and 69% of samples with none at all -- the trailing AI keep the passed
+ * cars alive, so their slots never return to the pool to re-spawn in front of a
+ * HUMAN. Humans always anchor; the AI field contributes at most this many (the
+ * lowest AI slots, so the choice is deterministic for lockstep), which still keeps
+ * some traffic around the AI pack without every opponent claiming a bubble.
+ * TD5RE_TRAFFIC_AI_ANCHORS=<n> overrides (default 1); set it to the opponent count
+ * to restore the previous every-racer-anchors behaviour. */
+static int trf_ai_anchor_limit(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        v = td5_env_int("TD5RE_TRAFFIC_AI_ANCHORS", 1, 0, TD5_MAX_RACER_SLOTS);
+        TD5_LOG_I(LOG_TAG, "traffic_ai_anchors: TD5RE_TRAFFIC_AI_ANCHORS=%d "
+                  "(AI racers that may anchor a traffic bubble)", v);
+    }
+    return v;
+}
+
 static int trf_anchor_count(void)
 {
     int n;
-    if (trf_perplayer_cap_enabled())
-        n = g_td5.num_human_players + g_td5.num_ai_opponents;
-    else
+    if (trf_perplayer_cap_enabled()) {
+        int ai = g_td5.num_ai_opponents;
+        int lim = trf_ai_anchor_limit();
+        if (ai > lim) ai = lim;
+        n = g_td5.num_human_players + ai;
+    } else
         n = g_td5.num_human_players;
     if (n < 1) n = 1;
     if (n > g_traffic_slot_base) n = g_traffic_slot_base;
@@ -3316,6 +3415,45 @@ static void trf_dyn_place(int slot, int span, int lane, int polarity)
     td5_ai_seed_actor_track_progress_offset(slot);
     td5_track_normalize_actor_wrap((TD5_Actor *)a);
 
+    /* [W7 FORK-EXIT DESPAWN FIX 2026-09-29] A car placed on a BRANCH CORRIDOR
+     * vanishes a second or two after it merges back onto the main road. Measured
+     * on Moscow (ring 2789, VERY HIGH, 150 s): 226/226 corridor placements left the
+     * span ACCUMULATOR pointing at the corridor index, and the cars that survived
+     * to the merge warped 636 spans in one tick and were faded out:
+     *   traffic_span_warp: prev=953 now=317 jump=636 raw=954 acc=3106 ring=2789
+     *
+     * Mechanism. td5_track_init_actor_segment_placement (byte-faithful @0x00445F10)
+     * seeds +0x84 (span_accumulated) AND +0x86 (span_high_water) from +0x80, so a
+     * corridor placement writes the RAW corridor index (3106) into both. While the
+     * car is inside the corridor this is invisible: td5_track_normalize_actor_wrap
+     * takes its branch arm and publishes +0x82 = branch_to_main(+0x80) every tick,
+     * a sane main-road span. The instant the walker steps the car back onto the
+     * main ring (+0x80 <= ring) that arm stops applying and the faithful modulo
+     * arm takes over: +0x82 = +0x84 % ring = 3106 % 2789 = 317. min_player_dist
+     * then reads hundreds of spans and the despawn pass retires a perfectly
+     * healthy car in the player's mirror.
+     *
+     * Fix: at placement time, fold the corridor index to its parallel MAIN span in
+     * the accumulator too, so the two agree from the first tick and the merge is
+     * continuous. td5_track_resolve_actor_segment_boundary (0x00443FF0, the
+     * original's own recycle-path resolver) does exactly that for +0x82/+0x84 --
+     * same jump-table scan and same `raw + (anchor - low)` arithmetic that
+     * branch_to_main uses to publish +0x82 each tick, so the two bases match by
+     * construction. It does NOT touch +0x86, which init placement also left on the
+     * corridor index, so mirror it here (traffic's high-water only feeds race-order
+     * sorting, but leaving it 300+ spans off is the same latent inconsistency).
+     * Main-road placements are untouched -- the resolver's `raw <= ring` arm would
+     * write the same values init placement already wrote, and we skip it anyway.
+     * TD5RE_TRAFFIC_CORRIDOR_ACCUM=0 restores the old behaviour for A/B. */
+    {
+        int ring = td5_track_get_ring_length();
+        if (ring > 0 && span > ring && trf_corridor_accum_fix_enabled() &&
+            &td5_track_resolve_actor_segment_boundary != NULL) {
+            td5_track_resolve_actor_segment_boundary((TD5_Actor *)a);
+            ACTOR_I16(a, ACTOR_SPAN_HIGH_WATER) = ACTOR_I16(a, ACTOR_SPAN_ACCUM);
+        }
+    }
+
     /* Shared post-placement state zero (mirrors recycle LAB_0043588D). */
     ACTOR_I32(a, ACTOR_LONGITUDINAL_SPEED) = 0;
     ACTOR_I32(a, ACTOR_STEERING_CMD)       = 0;
@@ -3357,6 +3495,9 @@ static void trf_dyn_place(int slot, int span, int lane, int polarity)
          * set, so clearing the flag here makes any stale slide-window inert too.) */
         g_actor_broken_down[slot]  = 0;
         g_actor_broken_ticks[slot] = 0;
+        /* [W7 DIAG] fresh car -> no previous-tick span sample (0 = none). */
+        s_trf_prev_span_norm[slot] = 0;
+        s_trf_prev_in_corr[slot]   = 0;
     }
 }
 
@@ -3809,14 +3950,20 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
          * traffic placements within N spans AFTER the start line, so the
          * grid/launch stretch stays clear. Wrap-aware on circuits (the zone
          * repeats each lap). */
-        if (trf_test_span() < 0 && g_td5.ini.traffic_dyn_start_offset > 0) {
-            int rel = span - g_td5.track_start_span_index;
-            if (is_circuit && ring > 0) {
-                rel %= ring;
-                if (rel < 0) rel += ring;
+        /* [W7] The seeding pass uses a reduced clearance (trf_dyn_start_clear_spans)
+         * so the opening stream can start inside the player's view; live spawns are
+         * unchanged and still honour the full INI clearance. */
+        {
+            int clear = trf_dyn_start_clear_spans();
+            if (trf_test_span() < 0 && clear > 0) {
+                int rel = span - g_td5.track_start_span_index;
+                if (is_circuit && ring > 0) {
+                    rel %= ring;
+                    if (rel < 0) rel += ring;
+                }
+                if (rel >= 0 && rel < clear)
+                    continue;
             }
-            if (rel >= 0 && rel < g_td5.ini.traffic_dyn_start_offset)
-                continue;
         }
 
         /* The window must hold against EVERY local player, not just the one
@@ -3923,14 +4070,62 @@ static int trf_dyn_spawn_in_window(int slot, int anchor, int win_lo, int win_hi)
         }
 
         trf_dyn_place(slot, span, lane, polarity);
-        TD5_LOG_I(LOG_TAG,
-                  "traffic_dyn_spawn: slot=%d span=%d (main=%d) lane=%d/%d oncoming=%d "
-                  "cross=%d player_dist=%d attempt=%d",
-                  slot, span, main_span, lane, lane_count, polarity,
-                  (cross_pol == 1), trf_dyn_min_player_dist(span), attempt);
+        {
+            char *pa = actor_ptr(slot);
+            TD5_LOG_I(LOG_TAG,
+                      "traffic_dyn_spawn: slot=%d span=%d (main=%d) lane=%d/%d oncoming=%d "
+                      "cross=%d player_dist=%d attempt=%d | raw=%d norm=%d acc=%d hw=%d ring=%d",
+                      slot, span, main_span, lane, lane_count, polarity,
+                      (cross_pol == 1), trf_dyn_min_player_dist(span), attempt,
+                      (int)(int16_t)ACTOR_I16(pa, ACTOR_SPAN_RAW),
+                      (int)(int16_t)ACTOR_I16(pa, ACTOR_SPAN_NORMALIZED),
+                      (int)(int16_t)ACTOR_I16(pa, ACTOR_SPAN_ACCUM),
+                      (int)(int16_t)ACTOR_I16(pa, ACTOR_SPAN_HIGH_WATER),
+                      ring);
+        }
         return 1;
     }
     return 0;
+}
+
+/* [W7 VERY-HIGH OPENING FIX 2026-09-29] Band, measured forward from the START
+ * LINE, that the race-init wave is scattered across. Legacy band is the fixed
+ * [clear+8, clear+108]. With the stream fix on:
+ *   - the FAR edge is pulled inside the forward-keep radius (front_keep - 16), so
+ *     no seeded car is born already outside the keep-zone and instantly retired;
+ *   - the NEAR edge is pulled back until the band affords `gap` spans per car, so
+ *     a big cap spreads into a continuous stream instead of stacking into one
+ *     clump, bounded below by the (reduced) seeding clearance.
+ * Nothing here moves for Low/Medium on a track whose clearance already leaves the
+ * legacy band inside the keep radius. */
+static void trf_dyn_seed_window(int cap, int *out_lo, int *out_hi)
+{
+    int clear = trf_dyn_start_clear_spans();
+    int lo = clear + 8;
+    int hi = lo + 100;
+    if (trf_seed_stream_enabled()) {
+        /* NB: `far` is a legacy Win32 macro (windef.h) — never name a local that. */
+        int eff_hi = 0, keep, floor_keep, far_edge, gap, need;
+        trf_dyn_effective_spawn_window(NULL, &eff_hi);
+        keep = g_td5.ini.traffic_dyn_despawn + eff_hi;
+        floor_keep = trf_dyn_front_keep_floor();
+        if (keep < floor_keep) keep = floor_keep;
+        /* Hard ceiling: a car seeded beyond the forward-keep radius is retired by
+         * the despawn pass on its first ticks, so never place one there. */
+        far_edge = keep - 16;
+        if (far_edge < lo + 24) far_edge = lo + 24;  /* degenerate: keep a band */
+        /* Widen the band to `gap` spans per car (this is the whole point — a
+         * 16-car VERY HIGH wave in the legacy 100-span band is a wall, not a
+         * stream), then clamp to the keep radius. Note this GROWS hi as well as
+         * shrinking it; only shrinking left the band at its legacy 100 spans. */
+        gap  = td5_env_int("TD5RE_TRAFFIC_SEED_GAP", 12, 1, 4000);
+        need = (cap > 0 ? cap : 1) * gap;
+        if (hi - lo < need) hi = lo + need;
+        if (hi > far_edge) hi = far_edge;
+        if (hi < lo + 24) hi = lo + 24;
+    }
+    if (out_lo) *out_lo = lo;
+    if (out_hi) *out_hi = hi;
 }
 
 /* Race-start seeding: scatter up to `cap` cars around the players (no fade —
@@ -4007,6 +4202,7 @@ void td5_ai_traffic_dynamic_race_init(void)
     }
 
     cap = trf_dyn_cap();
+    s_trf_seed_pass = 1;   /* [W7] reduced start clearance for the seeding pass only */
     if (s_trf_per_vp) {
         /* [PER-VIEWPORT TRAFFIC] Seed each partition identically: same start-line
          * anchor + identical-seed RNG, scoped to its own viewport's player, so every
@@ -4021,10 +4217,11 @@ void td5_ai_traffic_dynamic_race_init(void)
             s_trf_dyn_rng         = s_trf_dyn_rng_vp[vp];
             s_trf_spawn_partition = vp;   /* density gate counts only this partition */
             for (int slot = p_lo; slot < p_hi; slot++) {
-                int seed_lo = g_td5.ini.traffic_dyn_start_offset + 8;
+                int seed_lo, seed_hi;
+                trf_dyn_seed_window(vp_cap, &seed_lo, &seed_hi);
                 if (vp_placed < vp_cap &&
                     trf_dyn_spawn_in_window(slot, g_td5.track_start_span_index,
-                                            seed_lo, seed_lo + 100)) {
+                                            seed_lo, seed_hi)) {
                     s_trf_dyn_state[slot] = TRF_DYN_ACTIVE;
                     s_trf_dyn_alpha[slot] = 255;
                     vp_placed++;
@@ -4044,10 +4241,11 @@ void td5_ai_traffic_dynamic_race_init(void)
          * init time — live actor spans all read 0 here), scattered across a
          * 100-span stretch just past the start-clearance zone, so the road is
          * already populated where the field will first encounter traffic. */
-        int seed_lo = g_td5.ini.traffic_dyn_start_offset + 8;
+        int seed_lo, seed_hi;
+        trf_dyn_seed_window(cap, &seed_lo, &seed_hi);
         if (placed < cap &&
             trf_dyn_spawn_in_window(slot, g_td5.track_start_span_index,
-                                    seed_lo, seed_lo + 100)) {
+                                    seed_lo, seed_hi)) {
             s_trf_dyn_state[slot] = TRF_DYN_ACTIVE;
             s_trf_dyn_alpha[slot] = 255;
             placed++;
@@ -4058,6 +4256,18 @@ void td5_ai_traffic_dynamic_race_init(void)
             s_trf_dyn_alpha[slot] = 0;
         }
     }
+    {
+        /* [W7] Report the band the wave was actually strung across, so a thin
+         * opening can be read off the log instead of inferred. */
+        int sw_lo, sw_hi, sw_clear = trf_dyn_start_clear_spans();
+        trf_dyn_seed_window(cap, &sw_lo, &sw_hi);
+        TD5_LOG_I(LOG_TAG,
+                  "traffic_seed_window: stream=%d band=[%d..%d] (%d spans) cap=%d "
+                  "seed_clear=%d ini_clear=%d",
+                  trf_seed_stream_enabled(), sw_lo, sw_hi, sw_hi - sw_lo, cap,
+                  sw_clear, g_td5.ini.traffic_dyn_start_offset);
+    }
+    s_trf_seed_pass = 0;   /* [W7] live spawns honour the full INI clearance again */
     TD5_LOG_I(LOG_TAG,
               "traffic_dyn_init: seeded %d/%d cars (volume=%d cap=%d oncoming=%d%% "
               "oncoming_left=%d window=[%d..%d] despawn=%d fade=%d period=%d speed=%d%% "
@@ -4144,6 +4354,40 @@ void td5_ai_traffic_dynamic_tick(void)
              * human stay alive for them to encounter), or if it somehow ends
              * up far past the race leader. AI racers never retire traffic. */
             sp = (int)(int16_t)ACTOR_I16(a, ACTOR_SPAN_NORMALIZED);
+            /* [W7 CORRIDOR-EXIT DIAG 2026-09-29] Measurement only: flag a
+             * discontinuity in the normalized span. A car walking the road moves at
+             * most a span or two per tick, so a jump of more than WARP spans means
+             * +0x82 was RECOMPUTED from a different basis, not driven to. Reported
+             * with the three span fields so the basis is visible:
+             *   raw = +0x80 current strip span (> ring => inside a branch corridor)
+             *   acc = +0x84 accumulated span (the wrap normalizer's dividend)
+             *   hw  = +0x86 high-water span
+             * prev_corr=1 says the car was in a corridor on the previous tick, i.e.
+             * this is the merge back onto the main road. */
+            {
+                int wsp   = td5_env_int("TD5RE_TRAFFIC_WARP_SPANS", 32, 1, 30000);
+                int praw  = (int)(int16_t)ACTOR_I16(a, ACTOR_SPAN_RAW);
+                int pacc  = (int)(int16_t)ACTOR_I16(a, ACTOR_SPAN_ACCUM);
+                int phw   = (int)(int16_t)ACTOR_I16(a, ACTOR_SPAN_HIGH_WATER);
+                int pring = td5_track_get_ring_length();
+                int prev  = (int)s_trf_prev_span_norm[slot];
+                int in_corr = (pring > 0 && praw > pring) ? 1 : 0;
+                if (prev != 0) {
+                    int d = sp - prev;
+                    if (d < 0) d = -d;
+                    if (pring > 0 && d > pring / 2) d = pring - d;   /* ring wrap */
+                    if (d > wsp)
+                        TD5_LOG_I(LOG_TAG,
+                                  "traffic_span_warp: slot=%d prev=%d now=%d jump=%d "
+                                  "raw=%d acc=%d hw=%d ring=%d prev_corr=%d in_corr=%d "
+                                  "min_player=%d",
+                                  slot, prev, sp, d, praw, pacc, phw, pring,
+                                  (int)s_trf_prev_in_corr[slot], in_corr,
+                                  trf_dyn_min_player_dist(sp));
+                }
+                s_trf_prev_span_norm[slot] = (int16_t)sp;
+                s_trf_prev_in_corr[slot]   = (uint8_t)in_corr;
+            }
             /* [TRAFFIC-BATTLE WRECK DESPAWN 2026-07-20] Age a wrecked traffic car
              * and retire it once past the threshold, regardless of distance — this
              * is what frees battle slots so fresh traffic keeps coming. A car that
@@ -4308,9 +4552,14 @@ void td5_ai_traffic_dynamic_tick(void)
                 s_trf_dyn_state[slot] = TRF_DYN_FADE_OUT;
                 s_trf_wreck_age[slot] = 0;
                 TD5_LOG_I(LOG_TAG,
-                          "traffic_dyn_despawn: slot=%d behind_trail=%d ahead_lead=%d "
+                          "traffic_dyn_despawn: slot=%d sp=%d raw=%d acc=%d hw=%d "
+                          "behind_trail=%d ahead_lead=%d "
                           "min_player=%d front_keep=%d far_from_all=%d wreck_expired=%d recovery=%d stuck=%d (fading out)",
-                          slot, behind, ahead, trf_dyn_min_player_dist(sp),
+                          slot, sp,
+                          (int)(int16_t)ACTOR_I16(a, ACTOR_SPAN_RAW),
+                          (int)(int16_t)ACTOR_I16(a, ACTOR_SPAN_ACCUM),
+                          (int)(int16_t)ACTOR_I16(a, ACTOR_SPAN_HIGH_WATER),
+                          behind, ahead, trf_dyn_min_player_dist(sp),
                           front_keep, far_from_all, wreck_expired, g_traffic_recovery_stage[slot],
                           s_traffic_stuck_frames[slot]);
             }

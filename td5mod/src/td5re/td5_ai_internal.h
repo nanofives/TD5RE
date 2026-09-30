@@ -97,6 +97,7 @@ enum {
 #define ACTOR_SPAN_RAW            offsetof(TD5_Actor, track_span_raw)          /* 0x080 */
 #define ACTOR_SPAN_NORMALIZED     offsetof(TD5_Actor, track_span_normalized)   /* 0x082 */
 #define ACTOR_SPAN_ACCUM          offsetof(TD5_Actor, track_span_accumulated)  /* 0x084 */
+#define ACTOR_SPAN_HIGH_WATER     offsetof(TD5_Actor, track_span_high_water)   /* 0x086 */
 #define ACTOR_SUB_LANE_INDEX      offsetof(TD5_Actor, track_sub_lane_index)    /* 0x08C */
 #define ACTOR_CAR_DEF_PTR         offsetof(TD5_Actor, car_definition_ptr)      /* 0x1B8 */
 #define ACTOR_YAW_ACCUM          (offsetof(TD5_Actor, euler_accum) + 4)        /* 0x1F4 */

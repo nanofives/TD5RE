@@ -33,6 +33,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 29 (traffic + cop chase)" },
+    { CL_ITEM,    "Traffic no longer vanishes just after leaving a fork" },
+    { CL_ITEM,    "  branch and merging back onto the main road." },
+    { CL_ITEM,    "VERY HIGH traffic is now busy from the first corners:" },
+    { CL_ITEM,    "  the opening cars are strung out along the road ahead" },
+    { CL_ITEM,    "  instead of parked in one distant pack." },
+    { CL_ITEM,    "Traffic stays around you instead of drifting off with" },
+    { CL_ITEM,    "  the AI pack you have already left behind." },
     { CL_ITEM,    "Traffic no longer hits invisible walls where lanes" },
     { CL_ITEM,    "  merge after a fork (it piled up or pushed through)." },
     { CL_ITEM,    "Traffic now takes fork branches too, picking a side" },
