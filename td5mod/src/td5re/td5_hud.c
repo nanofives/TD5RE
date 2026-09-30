@@ -27,7 +27,6 @@
 #include "td5_platform.h"
 #include "td5_asset.h"
 #include "td5_render.h"
-#include "td5_arcade.h"   /* ARCADE per-viewport power-up chip */
 #include "td5_damage.h"   /* [CAR DAMAGE] player HUD health bar */
 #include "td5_input.h"    /* [CAR BROKE DOWN] recovery-key label per input source */
 #include "td5_laneassist.h" /* lane-assist per-viewport indicator */
@@ -1883,109 +1882,11 @@ void td5_hud_draw_player_id_overlays(void)
     hud_draw_mp_car_labels();
 }
 
-/* ========================================================================
- * [ARCADE 2026-06-26] Per-viewport power-up chip: when the player driving a
- * pane has an active power-up effect, draw a small labelled chip (top-left of
- * the pane) with a shrinking timer bar. Works in single-view and split-screen.
- * No-op outside ARCADE mode. SOURCE-PORT FEATURE.
- * ======================================================================== */
-/* Fallback "full duration" for the timer bar, used only if the live per-slot
- * max from td5_arcade_active_max_frames() is unavailable. Kept in step with the
- * actual durations in td5_arcade.c apply_pickup so the bar never depicts just
- * the last few seconds (the old bug: these were stale at 30/120/150). */
 /* [DMG BAR TOP-CENTRE 2026-07-02] Extra Y offset every top-centre HUD element
- * (checkpoint countdown, WRECKS/ARRESTS/POINTS, power-up chip) applies while
+ * (checkpoint countdown, WRECKS/ARRESTS/POINTS) applies while
  * the player damage bar occupies the pane's top-centre slot. 0 when the bar is
  * disabled. Defined next to hud_draw_player_damage_bar. */
 static float hud_top_center_shift_y(int view_index);
-
-static int arcade_effect_nominal_frames(int effect)
-{
-    switch (effect) {
-    case TD5_PU_NITRO:  return 180;   /* master's +20% duration values */
-    case TD5_PU_GHOST:  return 288;
-    case TD5_PU_INDESTRUCTIBLE: return 360;   /* [RENAMED 2026-07-04, was TD5_PU_WRECK] */
-    case TD5_PU_HAZARD: return 20;
-    /* [ARCADE EXPANSION 2026-06-28] new kinds (nominal = their apply_pickup default) */
-    case TD5_PU_FREEZE: return 300;   /* [REWORKED 2026-07-04] holder-buff window */
-    case TD5_PU_MAGNET: return 240;
-    case TD5_PU_REPAIR: return 30;
-    default:            return 60;
-    }
-}
-
-void td5_hud_draw_arcade_chips(void)
-{
-    if (!td5_arcade_mode_active()) return;
-    int views = s_view_count;
-    if (views < 1) views = 1;
-    if (views > MAX_HUD_VIEWS) views = MAX_HUD_VIEWS;
-
-    for (int v = 0; v < views; v++) {
-        int slot = g_actor_slot_map[v];
-        if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) continue;
-        int effect = td5_arcade_active_effect(slot);
-        if (effect == TD5_PU_NONE) continue;
-
-        const TD5_HudViewLayout *vl = &s_view_layout[v];
-        float L = vl->vp_int_left,  T = vl->vp_int_top;
-        float R = vl->vp_int_right, Bb = vl->vp_int_bottom;
-        float w = R - L, h = Bb - T;
-        if (w < 2.0f || h < 2.0f) continue;
-
-        const char *label; uint32_t col;
-        switch (effect) {
-        case TD5_PU_NITRO:  label = TR("NITRO");  col = 0xFF20E0FFu; break;
-        case TD5_PU_GHOST:  label = TR("GHOST");  col = 0xFFFFFFFFu; break;
-        case TD5_PU_INDESTRUCTIBLE: label = TR("INDESTRUCTIBLE"); col = 0xFFFF3020u; break;
-        case TD5_PU_HAZARD: label = TR("HAZARD"); col = 0xFFFFB000u; break;
-        /* [ARCADE EXPANSION 2026-06-28] new kinds */
-        case TD5_PU_FREEZE: label = TR("FREEZE"); col = 0xFF80FFF0u; break;
-        case TD5_PU_MAGNET: label = TR("MAGNET"); col = 0xFFFF40C0u; break;
-        case TD5_PU_REPAIR: label = TR("REPAIR"); col = 0xFF40FF60u; break;
-        default: continue;
-        }
-
-        float ts = (w / 640.0f) * 0.9f;
-        if (hud_dpi_scale_on()) ts *= hud_size_mul();
-        if (ts > 1.4f)  ts = 1.4f;
-        if (ts < 0.40f) ts = 0.40f;
-
-        float tw      = td5_vui_text_width(label, ts);
-        float pad     = 6.0f * ts;
-        float chip_w  = tw + 2.0f * pad;
-        float bar_h   = 4.0f * ts;
-        float chip_h  = 15.0f * ts + 2.0f * (5.0f * ts) + bar_h;
-        /* [2026-06-26] Centre the effect chip horizontally and sit it just below
-         * the top-centre checkpoint countdown (per user) instead of the pane's
-         * top-left corner. [DMG BAR TOP-CENTRE 2026-07-02] shifted with the rest
-         * of the top-centre stack when the damage bar claims the top slot. */
-        float cx      = vl->center_x - chip_w * 0.5f;
-        float cy      = T + h * 0.14f + hud_top_center_shift_y(v);
-
-        /* chip background (dark, semi-transparent) */
-        td5_vui_quad(cx, cy, chip_w, chip_h, 0xC0101010u, -1, 0, 0, 0, 0);
-        /* coloured accent strip along the top */
-        td5_vui_quad(cx, cy, chip_w, 3.0f * ts, col, -1, 0, 0, 0, 0);
-        /* label, vertically centred above the timer bar */
-        float text_area_h = chip_h - bar_h;
-        float ny = cy + text_area_h * 0.5f - 15.5f * ts;
-        td5_vui_text_centered(cx + chip_w * 0.5f, ny, label, col, ts, ts);
-        /* shrinking timer bar along the bottom */
-        int frames = td5_arcade_active_frames(slot);
-        /* Use the effect's REAL starting duration as the 100% reference so the
-         * bar shows the whole timer. Falls back to the nominal table only if the
-         * live value is unavailable. (Old bug: the bar divided by a stale
-         * hardcoded nominal that was far smaller than the real duration, so it
-         * sat pinned at full and only shrank over the last second or so.) */
-        int maxf   = td5_arcade_active_max_frames(slot);
-        if (maxf <= 0) maxf = arcade_effect_nominal_frames(effect);
-        float frac = (maxf > 0) ? (float)frames / (float)maxf : 0.0f;
-        if (frac < 0.0f) frac = 0.0f;
-        if (frac > 1.0f) frac = 1.0f;
-        td5_vui_quad(cx, cy + chip_h - bar_h, chip_w * frac, bar_h, col, -1, 0, 0, 0, 0);
-    }
-}
 
 /* ========================================================================
  * [TRAFFIC BATTLE 2026-06-28] Live "WRECKS N" indicator per viewport. Battle

@@ -44,7 +44,6 @@
 #include "td5_input.h"    /* td5_input_ff_collision (wall/prop impact FF) */
 #include "td5_vfx.h"      /* td5_vfx_queue_prop_break (TD6 prop debris) */
 #include "td5_game.h"     /* td5_game_get_total_actor_count, td5_game_is_wanted_mode */
-#include "td5_arcade.h"   /* arcade collision mult / ghost / wrecking-ball / launch */
 #include "td5_damage.h"   /* [CAR DAMAGE] health from impacts, knockout freeze, handling penalty */
 #include "td5_laneassist.h" /* optional lane-assist steering aid (port-only, default OFF) */
 #include "td5_platform.h"
@@ -222,8 +221,6 @@ static int td5_copchase_arrest_freeze_enabled(void) {
     }
     return cached;
 }
-static int32_t s_dynamics_mode = 0;          /* 0=arcade, 1=simulation (0x42F7B0) */
-static int32_t g_difficulty_easy = 0;
 int32_t g_difficulty_hard = 0;
 int32_t g_race_slot_state[TD5_MAX_RACER_SLOTS]; /* 1=human, 0=AI per slot */
 
@@ -440,15 +437,6 @@ int32_t phys_top_speed_rating(TD5_Actor *actor) {
         int32_t ts_q8 = td5_physics_mp_catchup_ts_mult(slot);
         if (ts_q8 != MP_CATCHUP_Q8_ONE)
             rating = (int32_t)(FP_TRUNC(((int64_t)rating * (int64_t)ts_q8)));
-    }
-    /* [ARCADE NITRO 2026-07-04] Raise the cap (default +50%) while NITRO is
-     * active so the boosted drive torque can actually be exploited instead of
-     * hitting the same faithful cap sooner. Inert (100%) outside arcade mode or
-     * when NITRO isn't active on this slot. */
-    {
-        int pct = td5_arcade_slot_topspeed_pct(slot);
-        if (pct != 100)
-            rating = (int32_t)(((int64_t)rating * pct) / 100);
     }
     return rating;
 }
@@ -4275,10 +4263,12 @@ void td5_physics_init_vehicle_runtime(void)
 {
     int total;
 
-    /* Set gravity based on difficulty */
-    if (g_difficulty_easy)
-        g_gravity_constant = TD5_GRAVITY_EASY;
-    else if (g_difficulty_hard)
+    /* Set gravity based on difficulty.
+     * [RACE OPTIONS 2026-09-29] The DYNAMICS row (ARCADE / SIMULATION) is gone:
+     * arcade is the only vehicle model now, so the SIMULATION arm that picked
+     * TD5_GRAVITY_EASY (1500) went with it. Arcade gravity is TD5_GRAVITY_NORMAL
+     * (1900), which is also what the original shipped for the normal tier. */
+    if (g_difficulty_hard)
         g_gravity_constant = TD5_GRAVITY_HARD;
     else
         g_gravity_constant = TD5_GRAVITY_NORMAL;
@@ -4376,15 +4366,10 @@ void td5_physics_init_vehicle_runtime(void)
                     int32_t ss = (int32_t)PHYS_S(actor, PHYS_SPEED_SCALE);
                     write_i16((uint8_t *)phys, PHYS_SPEED_SCALE, (int16_t)(ss << 2));
                 } else {
-                    /* [ARCADE/SIM CONSOLIDATION 2026-06-26] BOTH dynamics modes
-                     * now apply this arcade stat scaling (torque/grip/speed). The
-                     * only base difference between the modes is GRAVITY (selected
-                     * above: SIMULATION=easy=1500, ARCADE=normal=1900). This makes
-                     * SIMULATION the requested "sim gravity + arcade grip/torque/
-                     * speed-scale" mix; ARCADE is the same base plus the extra
-                     * exaggeration below + 3x collisions + power-ups. Previously
-                     * this branch was gated `!g_difficulty_easy` (arcade only) so
-                     * SIMULATION got raw carparam values — that path is retired. */
+                    /* [ARCADE/SIM CONSOLIDATION 2026-06-26, DYNAMICS REMOVED
+                     * 2026-09-29] Arcade stat scaling (torque/grip/speed) is the
+                     * only vehicle model now — the DYNAMICS row and its
+                     * SIMULATION arm are gone, so this runs unconditionally. */
                     /* 0x68: drive_torque_mult *= 0x168/256. NOTE: 0x168 = 360, so
                      * this is ×1.40625 (a BOOST). The prior inline comment said
                      * "(0.5625x)" — that was wrong; the value/behaviour is a boost. */
@@ -4398,12 +4383,14 @@ void td5_physics_init_vehicle_runtime(void)
                     write_i16((uint8_t *)phys, PHYS_SPEED_SCALE, (int16_t)(ss << 1));
 
                     /* [ARCADE wild] Extra exaggeration on RACER slots only (skip
-                     * traffic) when in ARCADE mode: a further grip/torque bump so
-                     * arcade handling feels punchier. Modest defaults keep the car
-                     * drivable — the headline arcade chaos is the 3x collisions +
-                     * power-ups, not raw stat inflation. Knob-tunable; reads the
-                     * already-scaled value so the percentages compound on top. */
-                    if (!g_difficulty_easy && slot < g_traffic_slot_base) {
+                     * traffic): a further grip/torque bump so handling feels
+                     * punchier. Modest defaults keep the car drivable.
+                     * Knob-tunable; reads the already-scaled value so the
+                     * percentages compound on top. [2026-09-29] Was gated on
+                     * ARCADE dynamics; with DYNAMICS removed these x1.25 torque
+                     * / x1.12 grip multipliers are the shipped tuning for every
+                     * race. */
+                    if (slot < g_traffic_slot_base) {
                         const char *te = getenv("TD5RE_ARCADE_TORQUE_PCT");
                         const char *ge = getenv("TD5RE_ARCADE_GRIP_PCT");
                         int tpct = te ? atoi(te) : 125;
@@ -5140,29 +5127,6 @@ void td5_physics_rebuild_pose(TD5_Actor *actor)
 {
     if (!actor) return;
     update_vehicle_pose_from_physics(actor);
-}
-
-void td5_physics_set_dynamics(int mode)
-{
-    s_dynamics_mode = (mode != 0) ? 1 : 0;
-    /* Commit to the race-init flag consumed by td5_physics_init_vehicle_runtime
-     * (0x42F140) for gravity + per-car stat scaling. This is the faithful analog
-     * of the original's `gDifficultyEasy = gDynamicsConfigShadow` at the frontend
-     * transitions (0x004155F2 / 0x0041DC82). The dynamics shadow @0x00466014 is
-     * copied verbatim into gDifficultyEasy @0x004AAF84. Mapping (CONFIRMED):
-     *   mode 0 = ARCADE     -> Easy=0 -> gravity 1900 (0x76C) + car-stat boosts
-     *   mode 1 = SIMULATION -> Easy=1 -> gravity 1500 (0x5DC) + stock stats
-     * gDifficultyHard @0x004AAF80 has NO writers in the original, so the port's
-     * g_difficulty_hard stays 0 (its HARD branch is dead, matching the orig). */
-    g_difficulty_easy = s_dynamics_mode;
-    TD5_LOG_I(LOG_TAG, "Dynamics mode set to %s (%d) -> g_difficulty_easy=%d",
-              s_dynamics_mode ? "simulation" : "arcade", s_dynamics_mode,
-              g_difficulty_easy);
-}
-
-int td5_physics_get_dynamics(void)
-{
-    return s_dynamics_mode;
 }
 
 void td5_physics_set_paused(int paused)

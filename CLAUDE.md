@@ -143,7 +143,7 @@ small file instead of a fan-out over ~145k LOC:
 | Vehicle physics, collisions, suspension | `td5_physics*.c` (V2V/V2W: `_collision`; PORT-ONLY tuning: `_assists`) |
 | AI drivers, rubber-band, traffic | `td5_ai.c` (SECTION anchors: smart_*, trf_dyn_*, traffic lifecycle) |
 | Track geometry, span contacts, position walker | `td5_track.c` (SECTION anchors: contact resolvers, walker) |
-| Game modes (cop chase, arcade, drag, battle, cup) | `td5_game.c` mode config + `td5_arcade.c`/`td5_damage.c`; read-only queries: `td5_race_state.h` |
+| Game modes (cop chase, drag, battle, cup) | `td5_game.c` mode config + `td5_damage.c`; read-only queries: `td5_race_state.h` |
 | Netplay, lockstep, desync | `td5_net.c` + `td5_msvc_rand.c` (determinism); restart/seed: `td5_game.c` pause path |
 | Texture/blend/z render states, foliage AA | `ddraw_wrapper/src/d3d12_backend.c` (state cache; `Backend_IsFoliageAA`) |
 | Mesh draw, culling, banners, billboards | `td5_render*.c` |
@@ -186,6 +186,7 @@ comment — regenerate after adding/splitting modules with
 | `td5_tg_terrain.c` | auto-track TERRAIN + BIOMES: trees, props, road surfaces, biome table + adjacency, snow, sea, outskirts, topo authority, forest side roads, tree bands, ponds, ground chain, gantry/sign context |
 | `td5_tg_bridge.c` | auto-track BRIDGES, TUNNELS, OVERPASSES and WATER: water plane, bore vs underpass, portal, overpass, run coalesce, structural tie, median faces, measurement harness |
 | `td5_tg_furniture.c` | auto-track roadside FURNITURE: guardrails, start/finish gantry, curve direction signage |
+| `td5_tg_prefab.c` | auto-track PREFABS: shipped set-piece geometry lifted out |
 | `td5_tg_pages.c` | auto-track TEXTURES.DAT: every page emitter (procedural + real shipped pages) |
 | `td5_trackgen_preview.c` | background route-preview worker (PORT-ONLY). |
 | `td5_trackgen_stream.c` | streamed scenery worker (PORT-ONLY). |
@@ -230,7 +231,6 @@ comment — regenerate after adding/splitting modules with
 | `td5_light2.c` | Lighting rework v2 (P0 infrastructure) |
 | `td5_material.c` | Material identity table (lighting rework P0 / RT2-P5) |
 | `td5_rt.c` | game-side ray-traced lighting layer (LIGHTING QUALITY: HIGH). |
-| `td5_arcade.c` | ARCADE mode: 3x-collision launch + collectible road power-ups |
 | `td5_damage.c` | GTA4-style car damage system (PORT-ONLY) |
 | `td5_tutorial.c` | First-race controller-tutorial overlay (PORT ENHANCEMENT). |
 | `td5_laneassist.c` | optional steering aid (PORT-ONLY, default OFF) |

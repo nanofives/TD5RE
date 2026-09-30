@@ -49,7 +49,6 @@
 
 #include "td5_vfx.h"
 #include "td5_light.h"    /* [DYNAMIC LIGHTS] per-frame headlight registry */
-#include "td5_arcade.h"   /* ARCADE mode: pickup pads + power-ups */
 #include "td5_replay.h"   /* ghost-state "View Replay" recorder/poser */
 #include "td5_damage.h"   /* [CAR DAMAGE] health reset + knockout completion gate */
 #include "td5_tutorial.h" /* first-race controller-tutorial overlay */
@@ -2324,20 +2323,19 @@ static void init_race_modes_and_seed(void)
                 g_td5.traffic_volume = TD5_TRAFFIC_VOLUME_COUNT - 1;
             g_td5.traffic_enabled = (g_td5.traffic_volume > 0) ? 1 : 0;
             g_td5.special_encounter_enabled = ncfg_l.cops ? 1 : 0;
-            /* [NET GAME MODES 2026-07-04] Adopt the host's DYNAMICS (ARCADE/SIM)
-             * so arcade 3x-collisions + power-up boxes (and Traffic Battle boxes)
-             * are identical on every peer. Committed to physics below at
-             * td5_physics_set_dynamics() before td5_arcade_init_race() reads it. */
-            g_td5.ini.dynamics = ncfg_l.dynamics ? 1 : 0;
             /* [RACE OPTIONS CONSOLIDATION 2026-07-21] Adopt the host's remaining
-             * RACE OPTIONS into the live in-memory config so the sim (power-up
-             * boxes, damage model, collision) matches on every peer. NOT persisted
-             * — the client's own td5re.ini must stay intact (mirrors traffic /
-             * dynamics above). td5_arcade / td5_damage read these g_td5.ini.*
-             * fields at race init; collision is applied via the physics toggle
-             * (mode-forced ramming at COP_CHASE / TRAFFIC_BATTLE below still wins).
-             * LANE ASSIST / TUTORIAL / PLAYER NAME are local-only, not replicated. */
-            g_td5.ini.powerups             = ncfg_l.powerups;
+             * RACE OPTIONS into the live in-memory config so the sim (damage
+             * model, collision) matches on every peer. NOT persisted — the
+             * client's own td5re.ini must stay intact (mirrors traffic above).
+             * td5_damage reads these g_td5.ini.* fields at race init; collision
+             * is applied via the physics toggle (mode-forced ramming at
+             * COP_CHASE / TRAFFIC_BATTLE below still wins). LANE ASSIST /
+             * TUTORIAL / PLAYER NAME are local-only, not replicated.
+             * [2026-09-29] The host's `dynamics` and `powerups` words are
+             * ignored now: DYNAMICS is gone (arcade physics is the only model)
+             * and the power-ups feature was deleted. Both stay in the wire
+             * struct so the packet layout — and TD5_NET_PROTO_VERSION — do not
+             * move. */
             g_td5.ini.car_damage_toughness = ncfg_l.car_toughness;
             g_td5.ini.car_damage_deform    = ncfg_l.car_deform;
             g_td5.ini.car_damage           = ncfg_l.car_damage ? 1 : 0;
@@ -2518,8 +2516,7 @@ static void init_race_modes_and_seed(void)
      * Force a fixed-pace dynamic-traffic stream ON, cops/wanted OFF, collisions
      * ON, and a fixed traffic volume so the field is a steady supply of ram
      * targets. The match runs to the track END (laps / finish line) — no timer
-     * (locked design decision). Works for both ARCADE and SIMULATION dynamics;
-     * the power-up boxes only appear in arcade dynamics. */
+     * (locked design decision). */
     if (td5_game_battle_mode_active()) {
         if (g_td5.mp_mode_config.battle_spawn_period <= 0) {
             int p = td5_env_int("TD5RE_BATTLE_SPAWN_PERIOD", 30, 5, 240);   /* ticks @30Hz between spawns */
@@ -2538,10 +2535,6 @@ static void init_race_modes_and_seed(void)
          * battle's own behaviour keys off td5_game_battle_mode_active() (the
          * replicated mode), so this is safe. */
         g_td5.game_type                 = TD5_GAMETYPE_SINGLE_RACE;
-        /* [TRAFFIC BATTLE 2026-07-23] Power-ups removed: no arcade item boxes /
-         * MAGNET in this mode. The ram mechanic is collision-based (set below),
-         * so disabling pickups leaves the core gameplay intact. */
-        g_td5.ini.powerups              = 0;
         g_td5.time_trial_enabled        = 0;
         g_td5.traffic_enabled           = 1;     /* traffic ON              */
         /* [TRAFFIC BATTLE 2026-06-28] NO rival racers — it is you (and any other
@@ -2596,13 +2589,17 @@ static void init_race_modes_and_seed(void)
         g_td5.wanted_mode_enabled       = 0;     /* not cop chase            */
         g_td5.special_encounter_enabled = 0;     /* cops OFF                 */
         g_td5.time_trial_enabled        = 0;
-        /* [NET GAME MODES 2026-07-04] NO rival AI (user rule). Over the net the
-         * OTHER players live in num_ai_opponents (np-1; num_human_players is
-         * forced to 1 at td5_fe_mp_setup.c:447) and the host broadcasts
-         * num_opponents=0 for drag, so only zero it for local/solo drag —
-         * zeroing it over the net would delete every other player's car. */
-        if (!g_td5.network_active)
-            g_td5.num_ai_opponents      = 0;     /* NO rival AI (user rule)  */
+        /* [MP DRAG OPPONENTS 2026-09-29] LOCAL split-screen MP drag now honours
+         * the AI OPPONENTS row: the field is humans + AI rivals + EXTRA LANES,
+         * so a 2-player lobby can fill the strip with CPU cars. This used to
+         * force num_ai_opponents to 0 ("NO rival AI"), which silently discarded
+         * the row.
+         *
+         * The NET path is deliberately untouched: over the net the OTHER players
+         * live in num_ai_opponents (np-1; num_human_players is forced to 1 at
+         * td5_fe_mp_setup.c) and the host broadcasts num_opponents=0 for drag,
+         * so that word does not mean "AI cars" there and must not be reused. Net
+         * MP drag therefore still has no AI rivals. */
         if (g_td5.mp_mode_config.drag_traffic) {
             /* Oncoming-only traffic stream (no lane changes; spawns ~50 spans
              * ahead — see trf_force_oncoming + the drag spawn-ahead in td5_ai.c). */
@@ -3844,23 +3841,6 @@ static void init_race_spawn_actors(void)
         g_td5.total_actor_count = spawn_count;
         td5_ai_bind_actor_table(s_actor_memory);
 
-        /* [DYNAMICS COMMIT FIX 2026-06-28] Re-commit the ARCADE/SIMULATION choice
-         * from the authoritative persisted value (g_td5.ini.dynamics — written by
-         * EVERY dynamics selector: Quick Race, Track Select, Game Options) right
-         * before vehicle + arcade init. ConfigureGameTypeFlags also commits it, but
-         * it runs at screen-INIT with the PRE-toggle value; only the Quick Race OK
-         * handler re-committed late. So launching from Track Select (or any path)
-         * after flipping the toggle left the dynamics flag STALE — keying the arcade
-         * power-up gate (and gravity / stat scaling) to the WRONG mode. The visible
-         * symptom: item-box power-ups still appearing in SIMULATION. Committing here
-         * makes the live mode match the user's pick on every launch path, so the
-         * arcade power-ups are truly ARCADE-exclusive (td5_arcade_init_race sets
-         * s_active = td5_physics_get_dynamics()==0). */
-        td5_physics_set_dynamics(g_td5.ini.dynamics);
-        TD5_LOG_I(LOG_TAG, "InitRace: dynamics=%s -> arcade power-ups %s",
-                  g_td5.ini.dynamics ? "SIMULATION" : "ARCADE",
-                  g_td5.ini.dynamics ? "OFF (sim-exclusive disabled)" : "available");
-
         /* Original order (0x42AFE2-0x42AFE7): vehicle + AI runtime init
          * BEFORE actor placement (step 22). */
         td5_physics_init_vehicle_runtime();
@@ -3872,11 +3852,6 @@ static void init_race_spawn_actors(void)
             TD5_Actor *a = (TD5_Actor *)(s_actor_memory + (size_t)s * TD5_ACTOR_STRIDE);
             td5_physics_compute_suspension_envelope(a, s);
         }
-
-        /* [ARCADE 2026-06-26] Place power-up pads along the track ring + clear
-         * per-slot/hazard state for this race. No-op (and clears) in SIMULATION
-         * mode; the track ring is already loaded by this point. */
-        td5_arcade_init_race();
 
         /* [DEMO FIX #3 2026-06-15] The AI module keeps its OWN slot-state table
          * (td5_ai.c g_slot_state[], separate from this file's s_slot_state[]) and
@@ -7527,11 +7502,6 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
          * are stationary during the count-in). Cheap; runs regardless of the
          * summary-screen knob so the data is always available for A/B. */
         td5_physics_accumulate_metrics();
-
-        /* [ARCADE 2026-06-26] Power-up pickups + effect timers + hazard spinouts.
-         * Runs once per genuine race tick AFTER physics (so positions are settled),
-         * inside the deterministic sub-tick loop. No-op in SIMULATION mode. */
-        td5_arcade_tick();
         }   /* end normal-sim block (skipped when ghost-replay poses instead) */
 
         td5_game_trace_stage("post_physics", ticks_this_frame);
@@ -7941,7 +7911,6 @@ static void frame_render(void)
                     if (wa) td5_vfx_render_ambient_streaks(wa, g_td5.sim_tick_budget, vp);
                 }
                 td5_vfx_draw_particles(vp);
-                td5_render_arcade_pads();   /* [ARCADE] glowing power-up pads + hazards */
             }
             td5_render_flush_translucent();
             td5_render_flush_projected_buckets();
@@ -8112,7 +8081,7 @@ static void frame_render(void)
          * [LOW-END PERF 2026-09-12] PERFORMANCE "PARTICLES & WEATHER" toggle
          * (g_td5.ini.vfx_enabled, [Display] VFX): 0 skips the whole per-view VFX
          * draw block — tire tracks, rain streaks, particle pools — which is fill-
-         * heavy on an iGPU. Arcade pads stay (mode-critical). Default 1 = today. */
+         * heavy on an iGPU. Default 1 = today. */
         if (!td5_render_photobooth_active() && g_td5.ini.vfx_enabled) {
             td5_vfx_render_tire_tracks();
             /* Weather rain streaks — orig RenderAmbientParticleStreaks @ 0x00446560,
@@ -8128,10 +8097,6 @@ static void frame_render(void)
             }
             td5_vfx_draw_particles(vp);
         }
-        /* [ARCADE] glowing power-up pads + hazards — gameplay-critical, drawn
-         * regardless of the VFX toggle (they mark collectibles/obstacles). */
-        if (!td5_render_photobooth_active())
-            td5_render_arcade_pads();
         td5_profile_mark("v_vfx");     /* [perf probe] per-view tire/streak/particle draws */
         td5_render_flush_translucent();
         td5_render_flush_projected_buckets();
@@ -8184,10 +8149,6 @@ static void frame_render(void)
      * player's accent colour + a name plate under the car. Self-gated (only when
      * the MP frontend set identities and the race is split). */
     td5_hud_draw_player_id_overlays();
-
-    /* [ARCADE 2026-06-26] Per-viewport active power-up chip (label + timer bar).
-     * Self-gated: no-op unless the race is in ARCADE mode with an active effect. */
-    td5_hud_draw_arcade_chips();
 
     /* [TRAFFIC BATTLE 2026-06-28] Per-viewport "WRECKS N" tally. Self-gated:
      * no-op unless the Traffic Destruction battle mode is active. */
@@ -10036,10 +9997,11 @@ int td5_game_drag_field_size(void)
         /* MP DRAG: one lane per human player PLUS the EXTRA LANES option. Over
          * the net every player is a separate machine folded into
          * num_ai_opponents (num_human_players is forced to 1), so the human
-         * count is num_human_players + num_ai_opponents on every peer. */
-        n = (g_td5.network_active
-                 ? g_td5.num_human_players + g_td5.num_ai_opponents
-                 : g_td5.num_human_players)
+         * count is num_human_players + num_ai_opponents on every peer.
+         * [MP DRAG OPPONENTS 2026-09-29] On LOCAL split-screen the same word
+         * really is the AI rival count, so it adds lanes there too — which makes
+         * both cases the same sum. */
+        n = g_td5.num_human_players + g_td5.num_ai_opponents
             + g_td5.mp_mode_config.drag_extra_lanes;
     else
         n = g_td5.num_human_players + g_td5.num_ai_opponents;
@@ -10059,12 +10021,14 @@ int td5_game_drag_active_racers(void)
 {
     int n;
     if (td5_game_drag_mp_active())
-        /* humans only; extra lanes stay empty. Over the net the other players
-         * are folded into num_ai_opponents (num_human_players==1), so count
-         * both there to get the true racer count on every peer. */
-        n = g_td5.network_active
-                ? g_td5.num_human_players + g_td5.num_ai_opponents
-                : g_td5.num_human_players;
+        /* Humans + AI rivals; the EXTRA LANES stay empty road. Over the net the
+         * other players are folded into num_ai_opponents (num_human_players==1)
+         * and net drag has no AI, so the same sum is the true racer count on
+         * every peer. [MP DRAG OPPONENTS 2026-09-29] On LOCAL split-screen
+         * num_ai_opponents is the AI rival count from the AI OPPONENTS row, so
+         * those cars race — previously this returned humans only, which is what
+         * left the row's CPU cars off the line. */
+        n = g_td5.num_human_players + g_td5.num_ai_opponents;
     else
         n = td5_game_drag_field_size();    /* SP: a car (player/AI) per lane */
     if (n < 1) n = 1;
@@ -11735,6 +11699,31 @@ int td5_game_mp_traffic_fair(void) {
  * net) or synthesised for single-player vs AI in td5_game_init_race_session. */
 int td5_game_battle_mode_active(void) {
     return g_td5.mp_mode_config.mode == TD5_MP_MODE_TRAFFIC_BATTLE;
+}
+
+/* [TRAFFIC BATTLE 2026-06-28, moved here 2026-09-29] Score traffic destruction.
+ * A racer (humans + AI, slot < g_traffic_slot_base) that rams a TRAFFIC car
+ * (slot >= base) hard enough to cross the NPC-fatal threshold scores one WRECK.
+ * Deduped on the victim's broken-down state so each destroyed traffic car counts
+ * exactly once: the collision resolver marks the victim broken-down right after
+ * this call, so subsequent overlaps see it already broken and don't re-score; a
+ * recycled traffic slot clears the flag and can be scored afresh.
+ *
+ * Lived in td5_arcade.c until the power-ups module was deleted (2026-09-29). It
+ * was never a power-up behaviour — it gates on td5_game_battle_mode_active() —
+ * so it moved to the module that owns battle mode + the wanted-kill tally. The
+ * whole test is a pure function of replicated state (slot indices, impact_mag,
+ * broken-down flag) + the process-wide npc_fatal_mag knob, so wreck counts stay
+ * bit-identical across lockstep peers. */
+void td5_game_battle_note_ram(int aggressor, int victim, int impact_mag) {
+    if (!td5_game_battle_mode_active()) return;
+    if (aggressor < 0 || aggressor >= g_traffic_slot_base) return;  /* aggressor = racer */
+    if (victim   <  g_traffic_slot_base) return;                    /* victim = traffic  */
+    if (impact_mag < td5_physics_npc_fatal_mag()) return;           /* fatal hit only    */
+    if (td5_ai_actor_is_broken_down(victim)) return;                /* already scored    */
+    td5_game_add_wanted_kill(aggressor);
+    TD5_LOG_I(LOG_TAG, "battle: slot=%d WRECKED traffic slot=%d (impact=%d) -> wrecks=%d",
+              aggressor, victim, impact_mag, td5_game_get_wanted_kills(aggressor));
 }
 
 /* [DRAG RACE 2026-06-30] Active when the MP lobby selected the DRAG RACE mode.

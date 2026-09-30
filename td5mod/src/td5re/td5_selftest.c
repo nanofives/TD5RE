@@ -115,7 +115,6 @@ typedef struct {
     int track;            /* frontend track index (TD6 conversions live at 26+) */
     int car;              /* -1 = base */
     int reverse;          /* -1 = base, 0/1 */
-    int dynamics;         /* -1 = base, 0 = arcade, 1 = simulation */
     int traffic, cops;    /* -1 = base */
     int laps;             /* -1 = base */
     int opponents;        /* -2 = base (-1 itself means "full grid") */
@@ -146,7 +145,6 @@ typedef struct {
     int game_type;         /* -1 base, else TD5_GameType (0 single race, 9 drag) */
     int difficulty;        /* -1 base, 0 easy / 1 hard */
     int checkpoint_timers; /* -1 base, 0 off / 1 on */
-    int powerups;          /* -1 base, 0 off / 1 casual / 2 chaos */
     int car_damage;        /* -1 base, 0 off / 1 on */
     int lane_assist;       /* -1 base, 0 off / 1 on */
     int auto_gearbox;      /* -1 base, 1 automatic / 0 manual */
@@ -182,28 +180,28 @@ typedef struct {
 static const RaceScenario k_races[] = {
     /* ---- Block 1: SP race-option covering array (game_type single race) ---- */
     { .name="race-r1-baseline-min",  .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
-      .dynamics=0, .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
-      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .depth=ST_DEPTH_RUN_5S },
     { .name="race-r2-stress-max",    .track=5,  .car=-1, .game_type=0, .player_is_ai=1,
-      .reverse=1, .dynamics=1, .traffic=4, .opponents=9, .difficulty=1,
-      .checkpoint_timers=1, .powerups=2, .car_damage=1, .lane_assist=0,
+      .reverse=1, .traffic=4, .opponents=9, .difficulty=1,
+      .checkpoint_timers=1, .car_damage=1, .lane_assist=0,
       .auto_gearbox=0, .depth=ST_DEPTH_RUN_5S },
     { .name="race-r3-td6-recolour",  .track=32, .car=-1, .game_type=0, .player_is_ai=1,
-      .reverse=1, .dynamics=1, .traffic=0, .opponents=5, .difficulty=1,
-      .checkpoint_timers=1, .powerups=0, .car_damage=1, .lane_assist=0,
+      .reverse=1, .traffic=0, .opponents=5, .difficulty=1,
+      .checkpoint_timers=1, .car_damage=1, .lane_assist=0,
       .auto_gearbox=1, .td6_color=0xE01010, .depth=ST_DEPTH_COUNTDOWN },
     { .name="race-r4-td6-circuit",   .track=26, .car=-1, .game_type=0, .player_is_ai=1,
-      .dynamics=0, .traffic=4, .opponents=5, .difficulty=0, .checkpoint_timers=0,
-      .powerups=2, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .traffic=4, .opponents=5, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .depth=ST_DEPTH_RUN_5S },
     { .name="race-r5-paint-variant", .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
-      .dynamics=0, .traffic=0, .opponents=9, .difficulty=1, .checkpoint_timers=1,
-      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .traffic=0, .opponents=9, .difficulty=1, .checkpoint_timers=1,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .paint=1, .depth=ST_DEPTH_COUNTDOWN },
     { .name="race-r6-circuit-mix",   .track=5,  .car=-1, .game_type=0, .player_is_ai=1,
-      .reverse=1, .dynamics=1, .traffic=4, .opponents=1, .difficulty=0,
-      .checkpoint_timers=0, .powerups=2, .car_damage=1, .lane_assist=0,
+      .reverse=1, .traffic=4, .opponents=1, .difficulty=0,
+      .checkpoint_timers=0, .car_damage=1, .lane_assist=0,
       .auto_gearbox=1, .depth=ST_DEPTH_COUNTDOWN },
     /* Lane assist is a HUMAN steering aid — meaningless on an AI car and it
      * fights a reversed line. So this row is the ONLY human-driven one
@@ -211,12 +209,12 @@ static const RaceScenario k_races[] = {
      * steering, forwards, long enough to actually steer (RUN_5S). Still fully
      * deterministic under the pinned seed. */
     { .name="race-r7-lane-assist",   .track=1,  .car=-1, .game_type=0, .player_is_ai=0,
-      .dynamics=1, .traffic=0, .opponents=5, .difficulty=1, .checkpoint_timers=1,
-      .powerups=0, .car_damage=0, .lane_assist=1, .auto_gearbox=0,
+      .traffic=0, .opponents=5, .difficulty=1, .checkpoint_timers=1,
+      .car_damage=0, .lane_assist=1, .auto_gearbox=0,
       .depth=ST_DEPTH_RUN_5S },
     { .name="race-r8-drag",          .track=19, .car=-1, .game_type=9, .player_is_ai=1,
-      .dynamics=0, .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
-      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=0,
       .depth=ST_DEPTH_RUN_5S },
 
     /* ---- Block 2: MP-mode split-screen (1 human + N AI panes, N=1/4/8 -> 2/5/9
@@ -224,82 +222,67 @@ static const RaceScenario k_races[] = {
      * panes. Mostly COUNTDOWN (confirm N-pane split + roster + mode setup spawn
      * sane, no crash); the mode-mechanic rows run RUN_5S. TD5_MpGameMode:
      * RACE=0 CUP=1 TRAFFIC_BATTLE=2 COP_CHASE=3 DRAG_RACE=4. ---- */
-    { .name="mp-race-2p",   .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .dynamics=0,
-      .traffic=0, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+    { .name="mp-race-2p",   .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .traffic=0, .difficulty=0, .checkpoint_timers=0, .car_damage=0,
       .lane_assist=0, .auto_gearbox=1, .mp_mode=0, .mp_ai_players=1, .depth=ST_DEPTH_COUNTDOWN },
-    { .name="mp-race-5p",   .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .dynamics=0,
-      .traffic=0, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+    { .name="mp-race-5p",   .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .traffic=0, .difficulty=0, .checkpoint_timers=0, .car_damage=0,
       .lane_assist=0, .auto_gearbox=1, .mp_mode=0, .mp_ai_players=4, .depth=ST_DEPTH_COUNTDOWN },
-    { .name="mp-race-9p",   .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .dynamics=0,
-      .traffic=0, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+    { .name="mp-race-9p",   .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .traffic=0, .difficulty=0, .checkpoint_timers=0, .car_damage=0,
       .lane_assist=0, .auto_gearbox=1, .mp_mode=0, .mp_ai_players=8, .depth=ST_DEPTH_COUNTDOWN },
-    { .name="mp-cup-2p",    .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .dynamics=0,
-      .traffic=0, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+    { .name="mp-cup-2p",    .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .traffic=0, .difficulty=0, .checkpoint_timers=0, .car_damage=0,
       .lane_assist=0, .auto_gearbox=1, .mp_mode=1, .mp_ai_players=1, .depth=ST_DEPTH_COUNTDOWN },
-    { .name="mp-cup-5p",    .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .dynamics=0,
-      .traffic=0, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+    { .name="mp-cup-5p",    .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .traffic=0, .difficulty=0, .checkpoint_timers=0, .car_damage=0,
       .lane_assist=0, .auto_gearbox=1, .mp_mode=1, .mp_ai_players=4, .depth=ST_DEPTH_COUNTDOWN },
-    { .name="mp-cup-9p",    .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .dynamics=0,
-      .traffic=0, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+    { .name="mp-cup-9p",    .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .traffic=0, .difficulty=0, .checkpoint_timers=0, .car_damage=0,
       .lane_assist=0, .auto_gearbox=1, .mp_mode=1, .mp_ai_players=8, .depth=ST_DEPTH_COUNTDOWN },
-    { .name="mp-battle-2p", .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .dynamics=0,
-      .traffic=2, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+    { .name="mp-battle-2p", .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .traffic=2, .difficulty=0, .checkpoint_timers=0, .car_damage=0,
       .lane_assist=0, .auto_gearbox=1, .mp_mode=2, .mp_ai_players=1, .depth=ST_DEPTH_COUNTDOWN },
-    { .name="mp-battle-5p", .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .dynamics=0,
-      .traffic=2, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+    { .name="mp-battle-5p", .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .traffic=2, .difficulty=0, .checkpoint_timers=0, .car_damage=0,
       .lane_assist=0, .auto_gearbox=1, .mp_mode=2, .mp_ai_players=4, .depth=ST_DEPTH_COUNTDOWN },
-    { .name="mp-battle-9p", .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .dynamics=0,
-      .traffic=2, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+    { .name="mp-battle-9p", .track=0,  .car=-1, .game_type=0, .player_is_ai=1, .traffic=2, .difficulty=0, .checkpoint_timers=0, .car_damage=0,
       .lane_assist=0, .auto_gearbox=1, .mp_mode=2, .mp_ai_players=8, .depth=ST_DEPTH_RUN_5S },
-    { .name="mp-cop-2p",    .track=0,  .car=-1, .game_type=8, .player_is_ai=1, .dynamics=0,
-      .traffic=1, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+    { .name="mp-cop-2p",    .track=0,  .car=-1, .game_type=8, .player_is_ai=1, .traffic=1, .difficulty=0, .checkpoint_timers=0, .car_damage=0,
       .lane_assist=0, .auto_gearbox=1, .mp_mode=3, .mp_ai_players=1, .depth=ST_DEPTH_COUNTDOWN },
-    { .name="mp-cop-5p",    .track=0,  .car=-1, .game_type=8, .player_is_ai=1, .dynamics=0,
-      .traffic=1, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+    { .name="mp-cop-5p",    .track=0,  .car=-1, .game_type=8, .player_is_ai=1, .traffic=1, .difficulty=0, .checkpoint_timers=0, .car_damage=0,
       .lane_assist=0, .auto_gearbox=1, .mp_mode=3, .mp_ai_players=4, .depth=ST_DEPTH_RUN_5S },
-    { .name="mp-cop-9p",    .track=0,  .car=-1, .game_type=8, .player_is_ai=1, .dynamics=0,
-      .traffic=1, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+    { .name="mp-cop-9p",    .track=0,  .car=-1, .game_type=8, .player_is_ai=1, .traffic=1, .difficulty=0, .checkpoint_timers=0, .car_damage=0,
       .lane_assist=0, .auto_gearbox=1, .mp_mode=3, .mp_ai_players=8, .depth=ST_DEPTH_COUNTDOWN },
-    { .name="mp-drag-2p",   .track=19, .car=-1, .game_type=9, .player_is_ai=1, .dynamics=0,
-      .traffic=0, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+    { .name="mp-drag-2p",   .track=19, .car=-1, .game_type=9, .player_is_ai=1, .traffic=0, .difficulty=0, .checkpoint_timers=0, .car_damage=0,
       .lane_assist=0, .auto_gearbox=1, .mp_mode=4, .mp_ai_players=1, .depth=ST_DEPTH_COUNTDOWN },
-    { .name="mp-drag-5p",   .track=19, .car=-1, .game_type=9, .player_is_ai=1, .dynamics=0,
-      .traffic=0, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+    { .name="mp-drag-5p",   .track=19, .car=-1, .game_type=9, .player_is_ai=1, .traffic=0, .difficulty=0, .checkpoint_timers=0, .car_damage=0,
       .lane_assist=0, .auto_gearbox=1, .mp_mode=4, .mp_ai_players=4, .depth=ST_DEPTH_COUNTDOWN },
-    { .name="mp-drag-9p",   .track=19, .car=-1, .game_type=9, .player_is_ai=1, .dynamics=0,
-      .traffic=0, .difficulty=0, .checkpoint_timers=0, .powerups=0, .car_damage=0,
+    { .name="mp-drag-9p",   .track=19, .car=-1, .game_type=9, .player_is_ai=1, .traffic=0, .difficulty=0, .checkpoint_timers=0, .car_damage=0,
       .lane_assist=0, .auto_gearbox=1, .mp_mode=4, .mp_ai_players=8, .depth=ST_DEPTH_COUNTDOWN },
 
     /* ---- Block 3: game overrides ---- */
     { .name="ovr-span-offset-500",   .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
-      .dynamics=0, .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
-      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .span_offset=500, .depth=ST_DEPTH_COUNTDOWN },
     { .name="ovr-span-offset-1000",  .track=32, .car=-1, .game_type=0, .player_is_ai=1,
-      .dynamics=0, .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
-      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .span_offset=1000, .depth=ST_DEPTH_COUNTDOWN },
     /* Speed sweep — physics is fixed-timestep, so 1x/2x/4x must all pass the
      * same invariants; a difference means fast-forward perturbs the sim. */
     { .name="ovr-speed-1x",          .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
-      .dynamics=0, .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
-      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .ff=1, .depth=ST_DEPTH_RUN_5S },
     { .name="ovr-speed-2x",          .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
-      .dynamics=0, .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
-      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .ff=2, .depth=ST_DEPTH_RUN_5S },
     { .name="ovr-speed-4x",          .track=0,  .car=-1, .game_type=0, .player_is_ai=1,
-      .dynamics=0, .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
-      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .ff=4, .depth=ST_DEPTH_RUN_5S },
     /* Edinburgh ("Scotland"): no opponents/traffic, run to the first checkpoint
      * and confirm the race actually ENDS + the results screen renders. Forced
      * finish at checkpoint 1 (end_checkpoint) so we don't depend on a full-lap
      * natural finish firing under AutoRace. Runs LAST. */
     { .name="ovr-edinburgh-finish",  .track=1,  .car=-1, .game_type=0, .player_is_ai=1,
-      .dynamics=0, .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=1,
-      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=1,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .natural_finish=1, .end_checkpoint=1, .depth=ST_DEPTH_RUN_FINISH },
 
     /* [CHUNK 8] RT coverage: force RT HIGH (only if the GPU supports DXR) on the
@@ -308,8 +291,8 @@ static const RaceScenario k_races[] = {
      * exact reason the rest of the suite is pinned LOW. Runs LAST so any RT
      * device instability can't bleed into the other rows. */
     { .name="rt-sydney",             .track=2,  .car=-1, .game_type=0, .player_is_ai=1,
-      .dynamics=0, .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
-      .powerups=0, .car_damage=0, .lane_assist=0, .auto_gearbox=1,
+      .traffic=0, .opponents=1, .difficulty=0, .checkpoint_timers=0,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1,
       .rt=1, .ff=1, .depth=ST_DEPTH_RUN_5S },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
@@ -406,7 +389,7 @@ static uint32_t  s_last_frame_ms;
 
 /* base (boot-time) copies of every INI field a scenario may touch */
 static struct {
-    int car, game_type, dynamics, traffic, cops, laps;
+    int car, game_type, traffic, cops, laps;
     int opponents, players, spectate, player_is_ai, auto_throttle;
     float fast_forward;
 } s_base;
@@ -568,7 +551,6 @@ static void st_reset_scenario_fields(void)
     g_td5.ini.default_car       = s_base.car;
     g_td5.ini.default_game_type = s_base.game_type;
     g_td5.ini.default_reverse   = 0;
-    g_td5.ini.dynamics          = s_base.dynamics;
     g_td5.ini.traffic           = s_base.traffic;
     g_td5.ini.cops              = s_base.cops;
     g_td5.ini.laps              = s_base.laps;
@@ -832,11 +814,9 @@ static void st_enqueue_isolation(const RaceScenario *bad)
     #define ISO_AXIS(field, label) do { \
         if (bad->field != base.field) { v = base; v.field = bad->field; \
             st_iso_push(&v, bad->name, label); } } while (0)
-    ISO_AXIS(dynamics,          "dyn");
     ISO_AXIS(traffic,           "traffic");
     ISO_AXIS(difficulty,        "diff");
     ISO_AXIS(checkpoint_timers, "timers");
-    ISO_AXIS(powerups,          "pups");
     ISO_AXIS(car_damage,        "dmg");
     ISO_AXIS(lane_assist,       "lane");
     ISO_AXIS(auto_gearbox,      "gbx");
@@ -1407,7 +1387,6 @@ static void st_apply_scenario(const RaceScenario *sc)
     g_td5.ini.default_track   = sc->track;
     g_td5.ini.default_reverse = (sc->reverse > 0) ? 1 : 0;
     if (sc->car        >= 0) g_td5.ini.default_car       = sc->car;
-    if (sc->dynamics   >= 0) g_td5.ini.dynamics          = sc->dynamics;
     if (sc->traffic    >= 0) g_td5.ini.traffic           = sc->traffic;
     /* [NEW SUITE] cops + laps are NOT applied per row: rows omit them (=0),
      * which would otherwise force police OFF / 0 laps. Police is a suite
@@ -1433,7 +1412,6 @@ static void st_apply_scenario(const RaceScenario *sc)
     if (sc->game_type         >= 0) g_td5.ini.default_game_type = sc->game_type;
     if (sc->difficulty        >= 0) g_td5.ini.difficulty        = sc->difficulty;
     if (sc->checkpoint_timers >= 0) g_td5.ini.checkpoint_timers = sc->checkpoint_timers;
-    if (sc->powerups          >= 0) g_td5.ini.powerups          = sc->powerups;
     if (sc->car_damage        >= 0) g_td5.ini.car_damage        = sc->car_damage;
     if (sc->lane_assist       >= 0) g_td5.ini.lane_assist       = sc->lane_assist;
     if (sc->auto_gearbox      >= 0) td5_frontend_set_default_manual(sc->auto_gearbox ? 0 : 1);
@@ -1768,7 +1746,7 @@ void td5_selftest_boot(void)
     /* [NEW SUITE 2026-08-07] Suite CONSTANTS — pinned once here, never per row:
      * police ON, 3D-collisions ON, car toughness OFF (3), deformation HIGH (2).
      * Captured into s_base below so st_reset_scenario_fields keeps them. Damage
-     * on/off, lane assist, difficulty, timers, powerups, gearbox vary per row. */
+     * on/off, lane assist, difficulty, timers, gearbox vary per row. */
     g_td5.ini.cops                 = 1;
     g_td5.ini.collisions           = 1;
     g_td5.ini.car_damage_toughness = 3;
@@ -1789,7 +1767,6 @@ void td5_selftest_boot(void)
     /* Base snapshot for scenario resets. */
     s_base.car           = g_td5.ini.default_car;
     s_base.game_type     = g_td5.ini.default_game_type;
-    s_base.dynamics      = g_td5.ini.dynamics;
     s_base.traffic       = g_td5.ini.traffic;
     s_base.cops          = g_td5.ini.cops;
     s_base.laps          = g_td5.ini.laps;

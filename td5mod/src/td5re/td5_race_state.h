@@ -56,6 +56,12 @@ int  td5_game_get_cop_actor_index(void);
 int  td5_game_mp_traffic_fair(void);
 int  td5_game_battle_mode_active(void);
 int  td5_game_drag_mp_active(void);
+/* [2026-09-29] Traffic Battle wreck-scoring hook, called from the V2V collision
+ * resolver. The ONE write-side entry in this otherwise read-only seam: it used
+ * to live in td5_arcade.h (deleted with the power-ups module) and the collision
+ * module must not gain a td5_game.h include (structure ratchet). Self-gates on
+ * battle mode, so it is a no-op in every other game mode. */
+void td5_game_battle_note_ram(int aggressor, int victim, int impact_mag);
 
 /* --- Per-slot car / progress readouts (read-only) ----------------------- */
 int     td5_game_get_slot_span(int slot);         /* live folded track span (progress) */

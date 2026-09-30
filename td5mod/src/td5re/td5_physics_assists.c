@@ -27,7 +27,6 @@
 #include "td5_sound.h"    /* td5_sound_play_at_position (Tier 2 recovery SFX) */
 #include "td5_input.h"    /* manual-recovery edge, FF signal consumers */
 #include "td5_race_state.h"  /* [LAYERING 2026-07-06] read-only race queries (was td5_game.h) */
-#include "td5_arcade.h"
 #include "td5_damage.h"
 #include "td5_camera.h"   /* td5_camera_reset_yaw_offset (post-repair cam un-spin) */
 #include "td5_net.h"      /* td5_net_is_active (earned manual bonus is SP-only) */
@@ -352,6 +351,81 @@ static void td5_physics_mp_catchup_config(void)
  *     The ts cut needs TD5RE_MP_CATCHUP_EASE on; off => ts stays 1.0.
  *
  * Everything is integer Q8; no float, no rounding surprises across clients. */
+
+/* ========================================================================
+ * [CATCHUP LEVELS 2026-09-29] AI-side catch-up, driven by the RACE OPTIONS
+ * CATCHUP row (OFF / LOW / MEDIUM / HIGH).
+ *
+ * The AI rubber band in td5_ai_compute_rubber_band only moves the AI's ROUTE
+ * THROTTLE BIAS, which cannot lift a car past its own top-speed cap — so on a
+ * long straight a dropped AI could never actually close. This fills the same
+ * per-slot Q8 arrays the human MP assist uses, for AI slots, from the gap to
+ * the NEAREST HUMAN AHEAD (track_span_high_water, the field the standings use).
+ * The ramp matches the AI band: linear to the level's ceiling at
+ * AI_CATCHUP_FULL_GAP_SPANS spans, ceiling = 25 / 50 / 100 % of the existing MP
+ * boost caps, so an assisted AI can never exceed what a trailing HUMAN already
+ * gets from the same mechanic.
+ *
+ * Writes AI slots ONLY; humans are filled by the pass below. Pure function of
+ * replicated actor state + the replicated catchup level -> lockstep-safe.
+ * ======================================================================== */
+#define AI_CATCHUP_FULL_GAP_SPANS 200
+
+static int ai_catchup_boost_pct(int level) {
+    switch (level) {
+    case 0:  return 0;      /* OFF */
+    case 1:  return 25;     /* LOW    */
+    case 2:  return 50;     /* MEDIUM */
+    default: return 100;    /* HIGH (and any power-user CatchupAssist 4..9) */
+    }
+}
+
+static void ai_catchup_fill_slots(void)
+{
+    int slot, j, total, racer_cap, pct;
+    int level = td5_ai_get_catchup_level();
+
+    pct = ai_catchup_boost_pct(level);
+    if (pct <= 0) return;
+    if (!g_actor_table_base) return;
+
+    total = td5_game_get_total_actor_count();
+    if (total <= 0) return;
+    racer_cap = (total < g_traffic_slot_base) ? total : g_traffic_slot_base;
+    if (racer_cap > TD5_MAX_RACER_SLOTS) racer_cap = TD5_MAX_RACER_SLOTS;
+
+    for (slot = 0; slot < racer_cap; slot++) {
+        TD5_Actor *a;
+        int32_t my_prog, gap = 0, accel, ts;
+
+        if (g_race_slot_state[slot] == 1) continue;   /* AI slots only */
+
+        a = (TD5_Actor *)(g_actor_table_base + (size_t)slot * TD5_ACTOR_STRIDE);
+        my_prog = (int32_t)a->track_span_high_water;
+
+        /* Nearest HUMAN ahead. No human ahead -> no assist for this car. */
+        for (j = 0; j < racer_cap; j++) {
+            TD5_Actor *o;
+            int32_t g;
+            if (j == slot) continue;
+            if (g_race_slot_state[j] != 1) continue;
+            o = (TD5_Actor *)(g_actor_table_base + (size_t)j * TD5_ACTOR_STRIDE);
+            g = (int32_t)o->track_span_high_water - my_prog;
+            if (g <= 0) continue;
+            if (gap == 0 || g < gap) gap = g;
+        }
+        if (gap <= 0) continue;
+        if (gap > AI_CATCHUP_FULL_GAP_SPANS) gap = AI_CATCHUP_FULL_GAP_SPANS;
+
+        accel = (MP_CATCHUP_MAX_ACCEL_BOOST_Q8 * pct * gap)
+                / (100 * AI_CATCHUP_FULL_GAP_SPANS);
+        ts    = (MP_CATCHUP_MAX_TS_BOOST_Q8 * pct * gap)
+                / (100 * AI_CATCHUP_FULL_GAP_SPANS);
+        s_mp_catchup_mult[slot]    = MP_CATCHUP_Q8_ONE + accel;
+        s_mp_catchup_ts_mult[slot] = MP_CATCHUP_Q8_ONE + ts;
+    }
+}
+
 void td5_physics_update_mp_catchup(void)
 {
     static int s_mp_catchup_log_tick = 0;   /* ~1 Hz log gate (rate-limit) */
@@ -364,6 +438,12 @@ void td5_physics_update_mp_catchup(void)
         s_mp_catchup_mult[slot]    = MP_CATCHUP_Q8_ONE;
         s_mp_catchup_ts_mult[slot] = MP_CATCHUP_Q8_ONE;
     }
+
+    /* [CATCHUP LEVELS 2026-09-29] AI-side half, driven by the RACE OPTIONS
+     * CATCHUP row rather than the TD5RE_MP_CATCHUP env knob. Runs BEFORE the
+     * human guards below (which early-return in single-player) and only writes
+     * AI slots, so the two halves cannot clobber each other. */
+    ai_catchup_fill_slots();
 
     if (!s_mp_catchup_cfg || s_mp_catchup_strength <= 0)
         return;
@@ -1870,7 +1950,7 @@ int32_t npc_fatal_mag(void) {
     return v;
 }
 /* [TRAFFIC BATTLE 2026-06-28] Public accessor so the battle scoring hook
- * (td5_arcade_note_ram) shares the single npc-fatal-impact threshold with the
+ * (td5_game_battle_note_ram) shares the single npc-fatal-impact threshold with the
  * V2V heavy-hit gate (no constant duplication / drift). */
 int32_t td5_physics_npc_fatal_mag(void) { return npc_fatal_mag(); }
 /* [TRAFFIC BATTLE 2026-06-28] Sensitivity of the SPEED-based wreck trigger
@@ -2541,6 +2621,12 @@ static int recovery_gentle_enabled(void)
 int recovery_gentle_for_actor(const TD5_Actor *actor)
 {
     if (!recovery_gentle_enabled()) return 0;
+    /* [3D COLLISIONS 2026-09-29] The gentle coast is now what the 3D COLLISIONS
+     * row buys you when it is OFF. With the row ON (the default) EVERY car —
+     * humans included — takes the original 60-tick tumble + ResetVehicleActorState,
+     * which is the whole point of the option. g_collisions_enabled is INVERTED
+     * (0 = collisions on, non-zero = off), so "off" is the non-zero case. */
+    if (g_collisions_enabled == 0) return 0;
     if (!actor) return 0;
     if (actor->slot_index >= g_traffic_slot_base) return 0;
     if (actor->slot_index >= TD5_MAX_RACER_SLOTS)  return 0;
@@ -2554,6 +2640,9 @@ int recovery_gentle_for_actor(const TD5_Actor *actor)
 int td5_physics_recovery_shake_suppressed(int slot)
 {
     if (!recovery_gentle_enabled()) return 0;
+    /* Same gate as recovery_gentle_for_actor: with 3D COLLISIONS ON the tumble
+     * is the faithful one and keeps its shake. */
+    if (g_collisions_enabled == 0) return 0;
     if (!g_actor_table_base) return 0;
     if (slot < 0 || slot >= g_traffic_slot_base || slot >= TD5_MAX_RACER_SLOTS) return 0;
     if (g_race_slot_state[slot] != 1) return 0;

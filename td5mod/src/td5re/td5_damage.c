@@ -317,7 +317,7 @@ int td5_damage_ghost_alpha(int slot) {
  * [2026-07-04] The manual stuck-recovery path (td5_physics_recover_player) now
  * calls td5_damage_repair_actor_pct (partial repair) instead of this function —
  * a full free heal on every R/SELECT press was too generous. This full-repair
- * entrypoint remains the arcade REPAIR power-up's action (td5_arcade.c), where
+ * entrypoint was the arcade REPAIR power-up (module deleted 2026-09-29), where
  * a complete repair is the intended reward.
  *
  * WHY this is required: the original ResetVehicleActorState (0x00405D70) had no

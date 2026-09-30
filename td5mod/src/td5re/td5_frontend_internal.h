@@ -646,21 +646,25 @@ void Screen_AutoTrackOptions(void);   /* [AUTOTRACK R2 item 25] */
  * follow. */
 enum {
     RO_OPPONENTS = 0, RO_TRAFFIC, RO_POLICE, RO_DIFFICULTY,
-    /* [AI DRIVER MODEL 2026-08-17] Opponent-AI mode: CLASSIC / SMART / DRIVER.
-     * Edits g_td5.ini.ai_model (see td5_ai_driver.h). Sits with DIFFICULTY as
-     * the other opponent-behaviour lever. */
+    /* [AI DRIVER MODEL 2026-08-17, trimmed 2026-09-29] Opponent-AI mode:
+     * CLASSIC / SMART. Edits g_td5.ini.ai_model (see td5_ai_driver.h). Sits
+     * with DIFFICULTY as the other opponent-behaviour lever. The DRIVER model
+     * stays compiled but is INI/env-only — it is not offered on the row. */
     RO_AI_MODEL,
     /* [SP DRAG DISTANCE 2026-07-23] Drag-only DISTANCE preset (SHORT/MEDIUM/
      * LONG/EPIC), matching the MP drag DISTANCE option. Edits g_td5.ini.drag_length
      * (read by drag_length_level() for SP); MP reads mp_mode_config.drag_length. */
     RO_DISTANCE,
-    /* [CATCHUP 2026-07-21] AI rubber-band assist — MP-only, moved here from the
-     * Multiplayer Options screen so it lives with the other per-race MP options. */
+    /* [CATCHUP 2026-07-21, levelled 2026-09-29] AI rubber-band assist — MP-only,
+     * moved here from the Multiplayer Options screen so it lives with the other
+     * per-race MP options. OFF / LOW / MEDIUM / HIGH (0..3). */
     RO_CATCHUP,
-    RO_DYNAMICS,
-    RO_CHECKPOINTS, RO_POWERUPS, RO_TOUGHNESS, RO_DEFORM,
+    RO_CHECKPOINTS, RO_DEFORM,
     /* [RACE OPTIONS CONSOLIDATION 2026-07-21] absorbed from the retired GAME
      * OPTIONS screen so RACE OPTIONS is the single game-behaviour surface. */
+    /* [DAMAGE MERGE 2026-09-29] RO_DAMAGE is now the 4-state OFF/LOW/MEDIUM/HIGH
+     * row that writes BOTH CarDamage and CarToughness (the old CAR TOUGHNESS row
+     * is gone); DEFORMATION above stays its own row. */
     RO_COLLISIONS, RO_DAMAGE, RO_LANEASSIST, RO_TUTORIAL,
     /* [QUICK RACE DEBUG 2026-07-21] Quick-Race-exclusive rows (is_quick_race).
      * The first block moved off the Quick Race screen's inline buttons; PLAYER AI
@@ -698,6 +702,12 @@ typedef struct {
 } TD5_RaceOptsCtx;
 
 int  td5_raceopts_row_available(int ro, const TD5_RaceOptsCtx *ctx);
+/* [MP DRAG 2026-09-29] 1 when a row is VISIBLE but not adjustable in this mode,
+ * so build_page can mark its button `disabled` (greyed text, skipped by nav and
+ * by the value arrows). Today only DIFFICULTY on the drag strip with 0 AI
+ * opponents: the row stays on screen so the player can see the setting exists
+ * and why it does nothing, instead of the row vanishing. */
+int  td5_raceopts_row_disabled(int ro, const TD5_RaceOptsCtx *ctx);
 /* Fill `out` (capacity RO_OPT_COUNT) with the RO_* ids available for ctx, in
  * display order; returns the count. */
 int  td5_raceopts_build_rows(const TD5_RaceOptsCtx *ctx, int *out);
@@ -794,10 +804,10 @@ extern int  s_snap_car, s_snap_paint, s_snap_trans, s_snap_config;
  * "AI Screens" row (QR_BTN_SPLITSCREENS). Created LAST so the OK/Back/PlayerAI/
  * AutoThr indices above are unchanged; hidden+disabled in release. */
 #define QR_BTN_SPAN       11
-/* [PHYSICS 2026-06-26] ARCADE/SIMULATION (dynamics) row on Quick Race, between
- * Laps (row 4) and the dev rows. Created LAST (after the dev toggles + the two
- * RANDOMIZE buttons at indices 12/13) so every hard-coded index above stays put.
- * Visible in BOTH dev and release; flips the shared s_game_option_dynamics. */
+/* [PHYSICS 2026-06-26 / RETIRED 2026-09-29] Was the ARCADE/SIMULATION (DYNAMICS)
+ * row on Quick Race. DYNAMICS is gone (arcade is the only vehicle model), but the
+ * slot is still created hidden+disabled so QR_BTN_RACEOPTS stays at 15 and every
+ * hard-coded index above holds. */
 #define QR_BTN_PHYSICS    14
 /* [QUICK RACE DEBUG 2026-07-21] RACE OPTIONS button — opens the dynamic RACE
  * OPTIONS screen with the quick-race context (opponents / physics / traffic /
@@ -860,14 +870,11 @@ extern int             s_display_vsync;
 extern int             s_display_window_mode;
 extern int             s_game_option_checkpoint_timers;
 extern int             s_game_option_collisions;
-extern int             s_game_option_powerups;   /* [ITEM CHAOS 2026-07-04] 0=OFF 1=CASUAL 2=CHAOS */
 extern int             s_game_option_laneassist;
-extern int             s_game_option_ai_model;   /* [AI DRIVER MODEL] 0=CLASSIC,1=SMART,2=DRIVER */
+extern int             s_game_option_ai_model;   /* [AI MODEL 2026-09-29] 0=CLASSIC,1=SMART (DRIVER=2 is INI-only) */
 extern int             s_game_option_difficulty;
-extern int             s_game_option_dynamics;
-extern int             s_game_option_car_toughness;   /* [TOUGHNESS OFF 2026-07-04] 0=Low 1=Medium 2=High 3=Off */
 extern int             s_game_option_car_deform;      /* [DEFORM OFF 2026-07-05] 0=Low 1=Normal 2=High 3=Off */
-extern int             s_game_option_car_damage;      /* [DAMAGE 2026-07-04] single toggle: master car-damage + HUD bar/wreck */
+extern int             s_game_option_car_damage;      /* [DAMAGE MERGE 2026-09-29] 0=OFF 1=LOW 2=MEDIUM 3=HIGH (writes CarDamage + CarToughness) */
 extern int             s_game_option_tutorial;        /* [TUTORIAL 2026-06-29] controller overlay every race on/off */
 extern int             s_race_difficulty;   /* per-race AI difficulty row on Track Selection (0..2) */
 extern int             s_trksel_dyn_btn;    /* [ARCADE] ARCADE/SIM row index on Track Selection (-1=none) */

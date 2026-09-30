@@ -29,7 +29,6 @@
 #include "td5_asset.h"
 #include "td5_save.h"
 #include "td5_vfx.h"
-#include "td5_arcade.h"   /* ARCADE power-up pad / hazard world billboards */
 #include "td5_damage.h"   /* [CAR DAMAGE] per-vertex deformation deltas */
 #include "td5_replay.h"   /* [REPLAY SMOKE] recorded wreck/damage-smoke state */
 #include "td5_ai.h"
@@ -3042,46 +3041,6 @@ void td5_render_actors_for_view(int view_index)
                     continue;
             }
 
-            /* [ARCADE] An active power-up makes the CAR itself read the effect:
-             * GHOST renders the car translucent (the same look as a time-trial
-             * ghost opponent — you pass through it); NITRO/INDESTRUCTIBLE/HAZARD
-             * make the car SILHOUETTE glow in the effect colour (applied via the
-             * effect tint around the body draw below). Holder-effect glow is
-             * racer slots only (only racers can hold power-ups). [FREEZE REWORK
-             * 2026-07-04] The freeze-VICTIM glow below is independent of that and
-             * applies to ANY slot (racer or traffic — "whatever you crash"), and
-             * takes priority since a debuff is more urgent to notice than a buff. */
-            uint32_t arc_tint = 0;
-            if (td5_arcade_mode_active() && td5_arcade_slot_is_freeze_victim(slot)) {
-                float pu = 0.5f + 0.5f * sinf((float)td5_plat_time_ms() * 0.02f + (float)slot);
-                uint32_t inten = (uint32_t)(165.0f + 90.0f * pu);   /* 165..255 — strong */
-                if (inten > 255u) inten = 255u;
-                arc_tint = (inten << 24) | 0x40C0FFu;   /* icy blue — slowed by FREEZE */
-            } else if (td5_arcade_mode_active() && slot >= 0 && slot < g_traffic_slot_base) {
-                int eff = td5_arcade_active_effect(slot);
-                if (eff == TD5_PU_GHOST) {
-                    actor_fade = (actor_fade * TT_GHOST_ALPHA) / 255;
-                    if (actor_fade < 1) actor_fade = 1;
-                } else if (eff != TD5_PU_NONE) {
-                    uint32_t kc;
-                    switch (eff) {
-                    case TD5_PU_NITRO:          kc = 0x20E0FFu; break;   /* cyan  */
-                    case TD5_PU_INDESTRUCTIBLE: kc = 0xFF3020u; break;   /* red   */
-                    case TD5_PU_HAZARD:         kc = 0xFFB000u; break;   /* amber */
-                    default:                    kc = 0xFFFFFFu; break;
-                    }
-                    float pu = 0.5f + 0.5f * sinf((float)td5_plat_time_ms() * 0.008f + (float)slot);
-                    uint32_t inten = (uint32_t)(165.0f + 90.0f * pu);   /* 165..255 — strong */
-                    if (inten > 255u) inten = 255u;
-                    arc_tint = (inten << 24) | kc;
-
-                    /* [ARCADE NITRO 2026-07-04] Trailing glow-orb speed
-                     * effect behind the car while NITRO is active. */
-                    if (eff == TD5_PU_NITRO)
-                        td5_render_arcade_nitro_trail(actor);
-                }
-            }
-
             /* [#R13 ghostdiag 2026-06-19] Pin which slots actually render (the
              * "traffic ghosts" the user still sees with few opponents). The
              * state==3 gate above already drops inactive racers, so anything that
@@ -3308,7 +3267,6 @@ void td5_render_actors_for_view(int view_index)
              * immediate batch on every change, so faded triangles can never be
              * batched with another actor's. The trailing reset also flushes
              * this car's tail vertices while the fade is still active. */
-            td5_render_set_actor_effect_tint(arc_tint);   /* [ARCADE] silhouette glow */
             td5_render_set_actor_draw_alpha(actor_fade);
             /* [task#21] TD6 car body z-fight fix: depth snap + toward-camera pull
              * for the duration of THIS body's draw, so coplanar interior/shell
@@ -3332,7 +3290,6 @@ void td5_render_actors_for_view(int view_index)
             if (car_sun) td5_plat_render_set_car_sun(0.0f);
             if (td6_zfix) s_td6_car_zbias = 0.0f;
             td5_render_set_actor_draw_alpha(255);
-            td5_render_set_actor_effect_tint(0);          /* [ARCADE] clear silhouette glow */
 
             /* [S23 2026-06-05] UNIFIED vehicle reflection — TD5 cars now match
              * TD6 cars. The chrome/env-map "mode 2" overlay was a PORT-ONLY

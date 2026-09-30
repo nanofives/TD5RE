@@ -464,9 +464,10 @@ typedef struct TD5_GlobalState {
          *                             contact) [default],
          *                         2 = aggressive (block + lean on rivals).
          *   smart_ai_leash      : gentle symmetric catch-up leash strength,
-         *                         0 = none .. 9 = strong (default 3). Independent
-         *                         of the faithful CatchupAssist; only active when
-         *                         smart_ai = 1.
+         *                         0 = none .. 9 = strong. -1 (default) FOLLOWS
+         *                         the RACE OPTIONS CATCHUP row (level 0..3 ->
+         *                         0/3/6/9, so CATCHUP=LOW reproduces the old
+         *                         hardcoded 3). Only active when smart_ai = 1.
          *   smart_ai_rays       : ray-sensing decision brain (default 1 = on).
          *                         When on (and smart_ai = 1) the opponents/traffic
          *                         sense walls + cars with a forward ray fan and

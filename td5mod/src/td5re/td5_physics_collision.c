@@ -22,7 +22,6 @@
 #include "td5_input.h"    /* td5_input_ff_collision (wall/prop impact FF) */
 #include "td5_vfx.h"      /* td5_vfx_queue_prop_break (TD6 prop debris) */
 #include "td5_race_state.h"  /* [LAYERING 2026-07-06] read-only race queries (was td5_game.h) */
-#include "td5_arcade.h"   /* arcade collision mult / ghost / wrecking-ball / launch */
 #include "td5_damage.h"   /* [CAR DAMAGE] health from impacts, knockout freeze, handling penalty */
 #include "td5_laneassist.h" /* optional lane-assist steering aid (port-only, default OFF) */
 #include "td5_platform.h"
@@ -174,17 +173,6 @@ void td5_physics_wall_response(TD5_Actor *actor, int32_t wall_angle,
                                int32_t penetration, int side,
                                int32_t probe_x_fp8, int32_t probe_z_fp8)
 {
-    /* [ARCADE INDESTRUCTIBLE 2026-07-04] Reverted (user correction): wall
-     * collisions are NOT special-cased for INDESTRUCTIBLE — a wall hit
-     * displaces and damages the car exactly like it would for anyone else.
-     * The immunity (no self-displacement, no self-damage) is scoped to V2V
-     * collisions ONLY (traffic + other racers): the wrecking-ball A_wreck/
-     * B_wreck restore below already keeps the indestructible car on its
-     * pre-impact trajectory while the OTHER car still gets the full boosted
-     * launch, and td5_damage_on_impact is skipped for the wrecking side only
-     * in that same V2V path. See td5_arcade_slot_is_wrecking call sites in
-     * this file for the actual (V2V-only) immunity. */
-
     /* [#10] A deep wall clip arms the chase-cam zoom for this racer. penetration
      * is negative when the probe is outside the rail; the more negative, the
      * deeper the clip. Racer slots only (traffic has no camera). Knob
@@ -1436,13 +1424,6 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     if (!penetrator->car_definition_ptr || !target->car_definition_ptr) return;
     (void)corner_idx;
 
-    /* [ARCADE] A GHOSTing racer is intangible — skip the whole V2V interaction so
-     * either party passes cleanly through the other. No-op outside arcade mode. */
-    if (td5_arcade_slot_is_ghost((int)penetrator->slot_index) ||
-        td5_arcade_slot_is_ghost((int)target->slot_index)) {
-        return;
-    }
-
     /* [TRAFFIC BATTLE] Drive straight through wrecked traffic. */
     if (battle_wreck_intangible(penetrator, target)) return;
 
@@ -1469,24 +1450,11 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     int32_t saved_omega_A = A->angular_velocity_yaw;
     int32_t saved_omega_B = B->angular_velocity_yaw;
 
-    /* [ARCADE wrecking ball] If a party is a WRECKING BALL it is immune: it plows
-     * through unaffected while the OTHER car takes the (3x, low-gate) launch. We
-     * snapshot its full pre-collision motion+pose here and restore it at function
-     * exit, so the symmetric solver below stays byte-faithful for the victim. */
-    const int A_wreck = td5_arcade_slot_is_wrecking((int)A->slot_index);
-    const int B_wreck = td5_arcade_slot_is_wrecking((int)B->slot_index);
-    const int32_t Awx = A->world_pos.x, Awz = A->world_pos.z;
-    const int32_t Avx = A->linear_velocity_x, Avy = A->linear_velocity_y, Avz = A->linear_velocity_z;
-    const int32_t Aroll = A->angular_velocity_roll, Apitch = A->angular_velocity_pitch;
-    const int32_t Aeyaw = A->euler_accum.yaw;
-    const int32_t Bwx = B->world_pos.x, Bwz = B->world_pos.z;
-    const int32_t Bvx = B->linear_velocity_x, Bvy = B->linear_velocity_y, Bvz = B->linear_velocity_z;
-    const int32_t Broll = B->angular_velocity_roll, Bpitch = B->angular_velocity_pitch;
-    const int32_t Beyaw = B->euler_accum.yaw;
-
-    /* Arcade collision multiplier in 24.8 (0x100 == 1.0 outside arcade, so the
-     * impulse math below is byte-identical to the faithful path when off). */
-    const int arc_coll_q8 = td5_arcade_collision_mult_q8();
+    /* Pre-collision horizontal speeds, kept for the Traffic Battle ram-impact
+     * score (battle_speed_impact below reads the closing speed, not the
+     * post-impulse one). */
+    const int32_t Avx = A->linear_velocity_x, Avz = A->linear_velocity_z;
+    const int32_t Bvx = B->linear_velocity_x, Bvz = B->linear_velocity_z;
 
     /* Mass from cardef+0x88 (int16). [CONFIRMED @ 0x00407BE7, 0x00407BFE,
      * 0x00407DA0, 0x00407DB4]: original ApplyVehicleCollisionImpulse loads
@@ -1665,12 +1633,6 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
          * signed round-to-zero divide by 0x1000. */
         int64_t impulse_raw = (NUM_CONST / denom) * rel_vel;
         impulse = v2v_sar12_rz_64(impulse_raw);
-        /* [ARCADE] Boosted horizontal knockback (default 1.4x, was 3x). Positive
-         * multiply preserves sign, so the XOR rejection below is unchanged.
-         * NOTE: impact_mag is derived from this impulse, so the multiplier also
-         * scales the heavy-crash scatter/lift and how readily the heavy gate
-         * trips — kept modest now so routine rams don't go airborne. */
-        impulse = (int32_t)(FP_TRUNC(((int64_t)impulse * arc_coll_q8)));
 
         /* [CONFIRMED @ 0x4079C0 side branch]: XOR sign rejection. */
         if (((cx_B - cx_A) ^ impulse) < 0) {
@@ -1727,8 +1689,6 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         /* [CONFIRMED @ 0x00407E68-7A]: same round-to-zero idiom as SIDE branch. */
         int64_t impulse_raw = (NUM_CONST / denom) * rel_vel;
         impulse = v2v_sar12_rz_64(impulse_raw);
-        /* [ARCADE] Boosted horizontal knockback (default 1.4x; see SIDE note). */
-        impulse = (int32_t)(FP_TRUNC(((int64_t)impulse * arc_coll_q8)));
 
         if (((cz_B - cz_A) ^ impulse) < 0) {
             rejected = 1;
@@ -1770,7 +1730,7 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
          * down + a small pop so the wreck reads), then fall through to the normal
          * separating return. The broken-down car then goes translucent +
          * intangible (pass-through) like every other battle wreck. Deduped: once
-         * the victim is broken-down, td5_arcade_note_ram skips it and the pair is
+         * the victim is broken-down, td5_game_battle_note_ram skips it and the pair is
          * intangible next tick. */
         int32_t si = battle_speed_impact(A, B, Avx, Avz, Bvx, Bvz,
                                          (int64_t)mass_A + mass_B);
@@ -1781,7 +1741,7 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             int victim     = a_is_racer ? sb : sa;
             TD5_Actor *vic = a_is_racer ? B : A;
             if (!td5_ai_actor_is_broken_down(victim)) {
-                td5_arcade_note_ram(aggressor, victim, si);   /* score (before break) */
+                td5_game_battle_note_ram(aggressor, victim, si);   /* score (before break) */
                 td5_ai_mark_actor_broken_down(victim);        /* total it */
                 int32_t lift = si / 20;                       /* modest pop */
                 if (lift > 120000) lift = 120000;
@@ -1858,15 +1818,8 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         hitB.lat = (cx_B > 0) - (cx_B < 0);
         hitB.fwd = (cz_B > 0) - (cz_B < 0);
         hitB.is_side = (cx_B < 0 ? -cx_B : cx_B) > (cz_B < 0 ? -cz_B : cz_B);
-        /* [ARCADE INDESTRUCTIBLE 2026-07-04] An indestructible holder takes no
-         * damage from its own rams (the OTHER car still does) — this ran
-         * unconditionally before, so a WRECK/INDESTRUCTIBLE car still accrued
-         * health loss + dents on every hit even though its motion was restored
-         * untouched further down in this function. */
-        if (!td5_arcade_slot_is_wrecking((int)A->slot_index))
-            td5_damage_on_impact(A, impact_mag, &hitA);
-        if (!td5_arcade_slot_is_wrecking((int)B->slot_index))
-            td5_damage_on_impact(B, impact_mag, &hitB);
+        td5_damage_on_impact(A, impact_mag, &hitA);
+        td5_damage_on_impact(B, impact_mag, &hitB);
     }
 
     /* [TRAFFIC BATTLE 2026-06-28] SPEED-based wreck trigger. impact_mag above is
@@ -2020,37 +1973,19 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
     int32_t cop_gate = cop_break_mag();
     int a_tough_cop = a_is_cop && impact_mag <= cop_gate;
     int b_tough_cop = b_is_cop && impact_mag <= cop_gate;
-    /* [ARCADE] Lower the heavy-impact gate so ordinary crashes launch cars into
-     * the air (faithful gate is 90000 racer / npc_fatal_mag for NPC pairs). */
-    if (td5_arcade_launch_active()) {
-        int ag = td5_arcade_launch_gate();
-        if (ag < heavy_gate) heavy_gate = ag;
-    }
-    /* [ARCADE] Boosted vertical launch: smaller divisor + higher clamp than the
-     * faithful impact_mag/6 (200000-clamped). 1.0/no-change values outside arcade.
-     * [2026-06-26] Arcade clamp lowered 800000 -> 160000 across two tuning
-     * passes (each halving the mega-launch ceiling on huge hits); pairs with
-     * the launch-divisor bump (3 -> 16) in td5_arcade_launch_div(). Net
-     * airborne launch is ~5x lower than the original arcade feel. */
-    const int     arc_launch_div   = td5_arcade_launch_active() ? td5_arcade_launch_div() : 6;
-    const int32_t arc_launch_clamp = td5_arcade_launch_active() ? 160000 : 200000;
+    /* [RACE OPTIONS 2026-09-29] Vertical launch is the FAITHFUL impact_mag/6
+     * (200000-clamped) for everyone. The arcade levers that used to soften it
+     * (lowered heavy gate, /16 divisor, 160000 clamp, 35% angular scatter) went
+     * away with the power-ups module: 3D COLLISIONS ON now means the original
+     * tumble for every car, and OFF routes human racers to the gentle recovery
+     * coast instead (see recovery_gentle_for_actor). */
+    const int     arc_launch_div   = 6;
+    const int32_t arc_launch_clamp = 200000;
     if (impact_mag > heavy_gate && g_collisions_enabled == 0) {
         int32_t scatter = impact_mag / 4;
         if (scatter < 0x7FFF) scatter = 0x7FFF;   /* FLOOR (orig 0x4082A2-C9) */
         int32_t kick_ry = scatter / 2;            /* roll & yaw delta magnitude */
         int32_t kick_p  = scatter;                /* pitch delta magnitude      */
-        /* [ARCADE 2026-06-26] Tame the angular crash-scatter so a hard hit
-         * shoves/spins a car instead of flipping it nose-over into the air.
-         * The faithful pitch kick (up to 0x7FFF) is what launches rammed cars;
-         * scaling it down keeps crashes dramatic but playable. Vertical lift
-         * (div/clamp) and horizontal impulse are separate levers. Applied at
-         * the source so BOTH A and B scale, and A's rear_retain composes on
-         * top. Knob TD5RE_ARCADE_SCATTER_PCT (default 35). */
-        if (td5_arcade_launch_active()) {
-            int sp = td5_arcade_scatter_pct();
-            kick_ry = v2v_scale_pct(kick_ry, sp);
-            kick_p  = v2v_scale_pct(kick_p,  sp);
-        }
         /* [N-way coverage 2026-06-04] The racer/traffic split was hardcoded
          * `< 6`, the ORIGINAL racer count. With the N-way expansion a human
          * racer can sit in slots 6..15, so `< 6` wrongly routed it into the
@@ -2136,12 +2071,12 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
             int plain_b = (sb >= g_traffic_slot_base) &&
                           !td5_ai_actor_is_pursued(sb) && !td5_ai_cop_is_chasing(sb);
             /* [TRAFFIC BATTLE 2026-06-28] Score the wreck BEFORE marking the
-             * victim broken-down, so td5_arcade_note_ram can dedup on the
+             * victim broken-down, so td5_game_battle_note_ram can dedup on the
              * not-yet-broken victim (each destroyed traffic car counts once).
              * Both directions; note_ram self-gates which side is a racer-vs-
              * traffic fatal hit. No-op outside battle mode. */
-            td5_arcade_note_ram(sa, sb, impact_mag);   /* A rammed B */
-            td5_arcade_note_ram(sb, sa, impact_mag);   /* B rammed A */
+            td5_game_battle_note_ram(sa, sb, impact_mag);   /* A rammed B */
+            td5_game_battle_note_ram(sb, sa, impact_mag);   /* B rammed A */
             /* [POLICE 2026-06-24] A tough cop (hit below cop_gate) is NOT totalled
              * — only a deliberate hard ram past 2.5x the traffic floor wrecks it.
              * [TRAFFIC BATTLE 2026-06-28] In battle mode plain traffic is always
@@ -2170,27 +2105,6 @@ static void apply_collision_response(TD5_Actor *penetrator, TD5_Actor *target,
         if (B->slot_index >= g_traffic_slot_base) traffic_clamp_above_ground(B);
     }
 
-    /* [ARCADE wrecking ball] Restore the immune wrecker(s) to their pre-collision
-     * motion+pose so they plow straight through, while the victim keeps the full
-     * (3x, low-gate) launch computed above. If BOTH are wrecking they both pass
-     * through each other untouched. */
-    if (A_wreck) {
-        A->world_pos.x = Awx; A->world_pos.z = Awz;
-        A->linear_velocity_x = Avx; A->linear_velocity_y = Avy; A->linear_velocity_z = Avz;
-        A->angular_velocity_roll = Aroll; A->angular_velocity_yaw = saved_omega_A;
-        A->angular_velocity_pitch = Apitch; A->euler_accum.yaw = Aeyaw;
-        update_vehicle_pose_from_physics(A);
-        td5_arcade_note_ram((int)A->slot_index, (int)B->slot_index, impact_mag);
-    }
-    if (B_wreck) {
-        B->world_pos.x = Bwx; B->world_pos.z = Bwz;
-        B->linear_velocity_x = Bvx; B->linear_velocity_y = Bvy; B->linear_velocity_z = Bvz;
-        B->angular_velocity_roll = Broll; B->angular_velocity_yaw = saved_omega_B;
-        B->angular_velocity_pitch = Bpitch; B->euler_accum.yaw = Beyaw;
-        update_vehicle_pose_from_physics(B);
-        td5_arcade_note_ram((int)B->slot_index, (int)A->slot_index, impact_mag);
-    }
-
     /* pool14_v2v pilot trace: capture post-state at function exit.
      * Original returns int impact_mag at 0x004084A2 RET. */
 }
@@ -2206,12 +2120,6 @@ static void collision_detect_simple(TD5_Actor *a, TD5_Actor *b)
 {
     if (!a || !b) return;
     if (!a->car_definition_ptr || !b->car_definition_ptr) return;
-
-    /* [ARCADE] A GHOSTing racer passes through everything — this sphere path is
-     * the player-vs-TRAFFIC resolver (and the scripted-pair path) and has no
-     * other ghost gate, so a ghost would still bump traffic without this. */
-    if (td5_arcade_slot_is_ghost((int)a->slot_index) ||
-        td5_arcade_slot_is_ghost((int)b->slot_index)) return;
 
     /* [TRAFFIC BATTLE] Wrecked traffic is intangible here too — this crashed-car
      * sphere resolver was a second path that still bumped wrecks (the user's
@@ -2280,26 +2188,12 @@ static void collision_detect_simple(TD5_Actor *a, TD5_Actor *b)
         delta_y = 0;
     }
 
-    /* [ARCADE INDESTRUCTIBLE 2026-07-04] The wrecking side keeps its OWN speed
-     * untouched by this routine contact (no self speed-displacement) while the
-     * OTHER side still gets pushed — the same "stay on your line, everything
-     * you hit gets displaced" contract the heavy V2V wrecking-ball restore
-     * already gives, extended to this lighter sphere-overlap resolver (the
-     * far more common path for everyday player-vs-traffic brushing, which the
-     * heavy path's A_wreck/B_wreck restore never covered). */
-    int a_wreck = td5_arcade_slot_is_wrecking((int)a->slot_index);
-    int b_wreck = td5_arcade_slot_is_wrecking((int)b->slot_index);
-
-    if (!a_wreck) {
-        a->linear_velocity_x += delta_x;
-        a->linear_velocity_y += delta_y;
-        a->linear_velocity_z += delta_z;
-    }
-    if (!b_wreck) {
-        b->linear_velocity_x -= delta_x;
-        b->linear_velocity_y -= delta_y;
-        b->linear_velocity_z -= delta_z;
-    }
+    a->linear_velocity_x += delta_x;
+    a->linear_velocity_y += delta_y;
+    a->linear_velocity_z += delta_z;
+    b->linear_velocity_x -= delta_x;
+    b->linear_velocity_y -= delta_y;
+    b->linear_velocity_z -= delta_z;
 
     /* [#10 telemetry] A closing sphere overlap that produced a separation
      * impulse is a real car-to-car contact — flag both actors for this tick. */
@@ -2590,11 +2484,6 @@ static int32_t v2v_depenetrate_pair(TD5_Actor *a, TD5_Actor *b)
     OBB_CornerData corners[8];
     memset(corners, 0, sizeof(corners));
 
-    /* [ARCADE] GHOSTing racer is intangible — don't depenetrate it out of a car
-     * or traffic vehicle it's passing through. */
-    if (a && b && (td5_arcade_slot_is_ghost((int)a->slot_index) ||
-                   td5_arcade_slot_is_ghost((int)b->slot_index))) return 0;
-
     /* [TRAFFIC BATTLE] Don't push the player back out of a wrecked traffic car —
      * wrecks are intangible in battle so you slide clean through them. */
     if (battle_wreck_intangible(a, b)) return 0;
@@ -2817,7 +2706,7 @@ void td5_physics_resolve_vehicle_contacts(void)
                     if (cxx * cxx + czz * czz <= lat * lat) hit = 1;
                 }
                 if (!hit) continue;
-                td5_arcade_note_ram(rsl, t, cap);                    /* score (before break) */
+                td5_game_battle_note_ram(rsl, t, cap);                    /* score (before break) */
                 td5_ai_mark_actor_broken_down(t);                    /* total it */
                 if (tr->linear_velocity_y < lift0) tr->linear_velocity_y = lift0;
                 TD5_LOG_I(LOG_TAG, "battle_wreck_sweep: racer=%d traffic=%d -> WRECK (swept OBB)", rsl, t);
@@ -2848,7 +2737,7 @@ void td5_physics_resolve_vehicle_contacts(void)
                 if (near_r < 0 || d2 < nbest) { near_r = rsl; nbest = d2; }
             }
             if (near_r < 0) continue;
-            td5_arcade_note_ram(near_r, t, cap);
+            td5_game_battle_note_ram(near_r, t, cap);
             td5_ai_mark_actor_broken_down(t);
             TD5_LOG_I(LOG_TAG, "battle_wreck_air: traffic=%d vy=%d -> WRECK (airborne, credit racer=%d)",
                       t, tr->linear_velocity_y, near_r);
