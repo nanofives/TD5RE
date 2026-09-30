@@ -927,15 +927,19 @@ void frontend_render_carsel_randomize_icon(float sx, float sy) {
 /* [W3 2026-09-29] Track selector: the randomize CHIP is gone. Randomizing is a
  * shortcut now (keyboard R / pad X, both handled in Screen_TrackSelection state
  * 4), so this paints the hint that advertises it instead of an icon.
- * Placement: the OK/BACK row (y=386..418), right of the BACK button (ends
- * x=344), below the LOCKED text at y=375 — i.e. bottom-right, next to BACK.
- * Centered at 470 rather than the preview column's own 492 so a longer
- * translation still clears the pitbull logo that sits from x~540. Drawn
- * unconditionally because the shortcut itself is unconditional. NON-STATIC so
- * td5_frontend.c can call it from its render switch. */
+ * Placement: the OK/BACK row, right of the BACK button, below the LOCKED text
+ * at y=375 — i.e. bottom-right, next to BACK. The centre is the MEASURED
+ * midpoint of the gap it has to live in, taken off a 640x480 framedump: on this
+ * text's rows (y=406..426) the BACK button's frame ends at x=344 and the
+ * pitbull badge starts at x=522 (the badge is half black, so its disc reaches
+ * ~26 px further left than its white half suggests). Midpoint 433 -> 432, which
+ * leaves ~24 px of air on each side for the 129-px string and still clears both
+ * when a longer translation widens it. Drawn unconditionally because the
+ * shortcut itself is unconditional. NON-STATIC so td5_frontend.c can call it
+ * from its render switch. */
 void frontend_render_trksel_hints(float sx, float sy) {
     if (!s_anim_complete) return;                                 /* wait for slide-in to settle */
-    fe_draw_text_centered(470.0f * sx, 400.0f * sy, TR("X / R = RANDOM"),
+    fe_draw_text_centered(432.0f * sx, 400.0f * sy, TR("X / R = RANDOM"),
                           0xFF8890A0u, sx * 0.75f, sy * 0.75f);
 }
 
