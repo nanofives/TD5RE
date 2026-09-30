@@ -53,11 +53,23 @@
 #define TD5_GEOB_HSRC_OSM_LEVELS 1   /* building:levels x storey height  */
 #define TD5_GEOB_HSRC_OSM_HEIGHT 2   /* a real height=* tag, measured    */
 
-/* roof:shape, collapsed to the three silhouettes the emitter can build. */
-#define TD5_GEOB_ROOF_NONE    0      /* untagged -- emit no roof mass */
-#define TD5_GEOB_ROOF_FLAT    1
-#define TD5_GEOB_ROOF_PITCHED 2      /* gabled / hipped / pyramidal / round */
-#define TD5_GEOB_ROOF_MANSARD 3
+/* roof:shape, collapsed to the silhouettes the emitter can build.
+ *
+ * WIDENED 2026-09-30. The first cut folded gabled, hipped, pyramidal, round,
+ * skillion and dome into ONE class and built a centroid pyramid for all of
+ * them, which is a tent on every rectangular house and a tent on every shed.
+ * The emitter now builds a RIDGE (td5_tg_city.c tg_geo_roof_ridge), and a
+ * ridge of length 0 IS the pyramid, so the four cases below are one code path
+ * with different ridge endpoints -- no new geometry kind, just a parameter.
+ * Anything OSM tags that is not in this list still lands on APEX, which is
+ * the safe silhouette for a dome, an onion or a cone. */
+#define TD5_GEOB_ROOF_NONE     0     /* untagged -- emit a flat cap only    */
+#define TD5_GEOB_ROOF_FLAT     1
+#define TD5_GEOB_ROOF_APEX     2     /* pyramidal / dome / onion / round    */
+#define TD5_GEOB_ROOF_MANSARD  3     /* mansard / gambrel -- truncated      */
+#define TD5_GEOB_ROOF_GABLED   4     /* gabled / half-hipped -- full ridge  */
+#define TD5_GEOB_ROOF_HIPPED   5     /* hipped -- ridge inset at both ends  */
+#define TD5_GEOB_ROOF_SKILLION 6     /* one slope, high edge at the far end */
 
 /* AREAS.JSON `kind`, collapsed to what the plaza emitter distinguishes. */
 #define TD5_GEOA_KIND_OTHER   0
@@ -76,8 +88,9 @@ typedef struct {
     int    first, n;          /* [first, first+n) in the shared point pool */
     double cx, cz;            /* centroid, world units                     */
     double radius;            /* max vertex distance from the centroid     */
-    double height;            /* world units, ready to extrude             */
-    double min_height;        /* world units, 0 when the tag is absent     */
+    double height;            /* world units, TOP of the mass above ground */
+    double min_height;        /* world units, BASE of the mass, 0 = ground */
+    double roof_height;       /* world units, 0 when roof:height is absent */
     double area_m2;           /* as OSM measures it, for the census        */
     unsigned int id_hash;     /* stable hash of the way id (page picks)    */
     int    host_span;         /* nearest centreline node, -1 unbound       */
@@ -201,6 +214,21 @@ double td5_geob_ring_area(const double *x, const double *z, int n);
 /* Is (px,pz) inside the ring? Crossing-number test, boundary unspecified. */
 int  td5_geob_point_in_ring(const double *x, const double *z, int n,
                             double px, double pz);
+
+/* Is the ring SIMPLE -- no two non-adjacent edges crossing, and enough area to
+ * be a building at all?
+ *
+ * The emitters assume a simple polygon everywhere: the ear clipper, the
+ * point-in-ring stand-down probe and the roof ridge all return nonsense on a
+ * bowtie, and a zero-area ring extrudes as a sheet with no inside. OSM does
+ * contain both (a mis-drawn way, a footprint traced as a line). MEASURED on
+ * the land_* fixture before this existed: the self-intersecting case emitted a
+ * mesh with two roof faces wound against each other and the collinear case a
+ * wall sheet with no roof.
+ *
+ * O(n^2) over at most TD5_GEOB_RING_MAX edges, run once per building at emit
+ * time, which is nothing beside the ear clip that follows it. */
+int  td5_geob_ring_simple(const double *x, const double *z, int n);
 
 /* ---------------------------------------------------------------- census --- */
 

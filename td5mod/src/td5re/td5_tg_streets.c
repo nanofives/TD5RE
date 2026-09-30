@@ -1452,6 +1452,39 @@ static int tg_r16_emit_outskirt_park(const TG_FBHook *h)
  * neither leans over the pavement the plaza stops at. */
 #define TD5_TG_GEOP_EDGE_CLR   1500.0
 
+/* ONE TEXEL DENSITY FOR THE WHOLE PLAZA, and it is the generator's own.
+ *
+ * The synthetic park lawn (tg_block_emit_park above) writes u over
+ * reach/TD5_TG_SPAN_LENGTH and v over si..si+1, i.e. ONE repeat per span
+ * length in BOTH directions -- its comment calls that "isotropic UV so it
+ * tiles the same on curves". Everything the real plaza lays is pinned to the
+ * same number, so a mapped square and a procedural park a block apart carry
+ * grass at the same scale.
+ *
+ * MEASURED before this (re/tools/geo_fixtures/land_models_probe.py over the La
+ * Plata geo MODELS.DAT, plaza at span 701 -- see the results subsection in
+ * docs/plans/GEO_TRACK_OSM_PLAN.md):
+ *
+ *   page 65 lawn    27 faces  3400 units/repeat   stretch 1.00 (isotropic,
+ *                                                 but 2.3x coarser than the park)
+ *   page  2 beds     8 faces  12336..58912        stretch 3.13 p50, 4.7 worst
+ *   page 66 hedge   23 faces    520..40219        stretch 13.46 p50, 78.0 worst
+ *
+ * The lawn was never the stretched surface -- it was already planar in world
+ * XZ. The two that FOLLOWED THE OUTLINE were the boundary hedge (u 0..1 per
+ * ring edge, so a 94 m edge got one repeat) and the beds (u,v 0..1 across a
+ * whole wedge). Both are now parametrised by world length, so a face's texel
+ * density no longer depends on how long the polygon's edge happens to be.
+ *
+ * TD5RE_GEO_PLAZA_TILE=0 puts the OLD UVs back on ALL THREE -- 3400 on the
+ * lawn, 0..1 across a bed wedge, 0..1 along a hedge edge -- so the
+ * before/after is one variable on one exe rather than two builds of two
+ * source trees. Default ON. The paving pad and the radial paths are NOT under
+ * the knob: they measured 1.01 anisotropic at 1496 units/repeat before and
+ * after, so there was nothing to change and nothing to revert. */
+#define TD5_TG_GEOP_TILE       ((double)TD5_TG_SPAN_LENGTH)
+#define TD5_TG_GEOP_TILED()    td5_env_flag_on("TD5RE_GEO_PLAZA_TILE")
+
 /* Does a real plaza cover the slot the R16 outskirt dressing wants to dress at
  * (si, side)? Same probe-the-point rule the frontage stand-down in
  * td5_tg_city.c uses, and for the same reason: a plaza is bound to ONE span but
@@ -1594,6 +1627,7 @@ static int tg_geop_emit_paths(const TG_FBHook *h, const double *rx,
     unsigned short cmd[6];
     double dx[TD5_TG_GEOP_PATHS_MAX], dz[TD5_TG_GEOP_PATHS_MAX];
     double len[TD5_TG_GEOP_PATHS_MAX];
+    const int tiled = TD5_TG_GEOP_TILED();
     int k, i, nv = 0, ntri = 0, nq = 0, nbed = 0;
     const double hw = TD5_TG_GEOP_PATH_W * 0.5;
     const double cy = tg_geop_ground_t(h->nl, h->si, cx, cz, 1);
@@ -1621,8 +1655,8 @@ static int tg_geop_emit_paths(const TG_FBHook *h, const double *rx,
             v[o + 0] = (float)px[i];
             v[o + 1] = (float)tg_geop_ground_t(h->nl, h->si, px[i], pz[i], 1);
             v[o + 2] = (float)pz[i];
-            v[o + 3] = (float)(px[i] / (double)TD5_TG_SPAN_LENGTH);
-            v[o + 4] = (float)(pz[i] / (double)TD5_TG_SPAN_LENGTH);
+            v[o + 3] = (float)(px[i] / TD5_TG_GEOP_TILE);
+            v[o + 4] = (float)(pz[i] / TD5_TG_GEOP_TILE);
             light[nv] = 0xFFFFFFFFu;
             nv++;
         }
@@ -1657,7 +1691,14 @@ static int tg_geop_emit_paths(const TG_FBHook *h, const double *rx,
 
     /* Beds: one planted quad in each wedge between two adjacent paths, at a
      * fixed fraction of the wedge's reach, so the plaza reads as paving,
-     * planting, then open lawn out to its edge. */
+     * planting, then open lawn out to its edge.
+     *
+     * UVs are PLANAR IN WORLD XZ at the lawn's density, not 0..1 across the
+     * wedge: a wedge of a 183 m plaza is tens of metres of planting and a
+     * single repeat stretched across it read as a smear (MEASURED 12336 to
+     * 58912 units/repeat, 3.1x anisotropic). Planar also makes a bed continue
+     * the lawn it sits on instead of restarting the pattern at every bed
+     * edge. */
     for (k = 0; k < npath; k++) {
         const int j = (k + 1) % npath;
         const double ra = pad_r + (len[k] - pad_r) * 0.30;
@@ -1672,8 +1713,10 @@ static int tg_geop_emit_paths(const TG_FBHook *h, const double *rx,
             v[o + 0] = (float)px[i];
             v[o + 1] = (float)tg_geop_ground_t(h->nl, h->si, px[i], pz[i], 2);
             v[o + 2] = (float)pz[i];
-            v[o + 3] = (float)((i == 1 || i == 2) ? 1.0 : 0.0);
-            v[o + 4] = (float)((i >= 2) ? 1.0 : 0.0);
+            v[o + 3] = (float)(tiled ? px[i] / TD5_TG_GEOP_TILE
+                                     : ((i == 1 || i == 2) ? 1.0 : 0.0));
+            v[o + 4] = (float)(tiled ? pz[i] / TD5_TG_GEOP_TILE
+                                     : ((i >= 2) ? 1.0 : 0.0));
             light[nv] = 0xFFFFFFFFu;
             nv++;
         }
@@ -1706,6 +1749,7 @@ static int tg_geop_emit_hedge(const TG_FBHook *h, const double *rx,
     double vv[TD5_GEOB_RING_MAX * 4];
     int seg_page = TD5_TG_PAGE_R3_BLOCK + 1, seg_nq, k, nn = 0;
     const double open = minout + TD5_TG_GEOP_EDGE_CLR * 4.0;
+    double u_e;
 
     if (*h->nmesh >= h->maxmesh) return 1;
     for (k = 0; k < n; k++) {
@@ -1722,8 +1766,18 @@ static int tg_geop_emit_hedge(const TG_FBHook *h, const double *rx,
             q[6] = rx[j]; q[7]  = y1 + TD5_TG_HEDGE_H; q[8]  = rz[j];
             q[9] = rx[k]; q[10] = y0 + TD5_TG_HEDGE_H; q[11] = rz[k];
         }
-        t[0] = 0.0; t[1] = 1.0; t[2] = 1.0; t[3] = 1.0;
-        t[4] = 1.0; t[5] = 0.0; t[6] = 0.0; t[7] = 0.0;
+        /* u by the EDGE'S OWN LENGTH, not 0..1. A procedural park hedge quad
+         * is exactly one span long, so its 0..1 is 1500 units a repeat; a real
+         * outline edge is whatever OSM drew, and Plaza Mariano Moreno has 94 m
+         * ones -- MEASURED 40219 units/repeat, 78x anisotropic, the worst face
+         * in the whole plaza. Dividing by TD5_TG_GEOP_TILE hands every edge the
+         * procedural hedge's density whatever its length. v stays 0..1 over
+         * TD5_TG_HEDGE_H for the same reason: that IS the procedural hedge's
+         * vertical mapping, and the two must read alike. */
+        u_e = TD5_TG_GEOP_TILED()
+            ? hypot(rx[j] - rx[k], rz[j] - rz[k]) / TD5_TG_GEOP_TILE : 1.0;
+        t[0] = 0.0; t[1] = 1.0; t[2] = u_e; t[3] = 1.0;
+        t[4] = u_e; t[5] = 0.0; t[6] = 0.0; t[7] = 0.0;
         tg_city_push_quad(px, py, pz, uu, vv, &nn, q, t);
         s_geop_hedges++;
     }
@@ -1827,9 +1881,11 @@ static int tg_geop_emit_one(const TG_FBHook *h, const TD5_GeoArea *a)
     /* Every plaza kind lawns the same way: the surface is grass and the kind
      * only decides whether trees are planted unconditionally. */
     page = TD5_TG_PAGE_R3_BLOCK + 0;
-    /* One lawn page every ~8 m, so a 100 m square is a tiled surface instead of
-     * one stretched image. */
-    inv_tile = 1.0 / 3400.0;
+    /* Planar in world XZ at the park lawn's own density (TD5_TG_GEOP_TILE), so
+     * a 100 m square is a tiled surface instead of one stretched image AND it
+     * tiles at the same scale as a procedural park a block away. Was 3400 --
+     * isotropic already, but 2.3x coarser than the generator's grass. */
+    inv_tile = TD5_TG_GEOP_TILED() ? (1.0 / TD5_TG_GEOP_TILE) : (1.0 / 3400.0);
     if (!tg_geop_emit_lawn(h, rx, rz, n, page, inv_tile)) return 0;
 
     /* Evenly spread path targets around the ring; a triangle or quad plaza gets

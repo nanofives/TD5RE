@@ -88,6 +88,76 @@ const char *tg_prefab_name(int pf)
     return k_tg_prefabs[pf].name;
 }
 
+/* [GEO PHASE 5] The BIGGEST set piece that fits inside a given footprint,
+ * with `salt` deciding between equally good candidates.
+ *
+ * WHY "FITS INSIDE" IS THE RULE. The geo landmark fallback stamps one of
+ * these on a real OSM footprint that has already been nudged clear of the
+ * carriageway (td5_tg_city.c tg_geo_emit_one). If the piece stays inside that
+ * footprint it inherits the clearance for free, and the question "can the
+ * fallback land on the road" is answered by construction rather than by a
+ * second standoff calculation that could disagree with the first.
+ *
+ * Biggest-that-fits, because a 9 m set piece rattling around inside a 40 m
+ * civic block reads as a model on a car park. `salt` is a hash of the OSM way
+ * id at the call site, so two similar footprints do not both get lm00 -- and
+ * it is a hash, not a draw, so the standing no-RNG rule holds.
+ *
+ * Returns -1 when nothing fits, which is an ordinary answer: the caller then
+ * extrudes the real footprint as it always did. */
+int tg_prefab_fit(double fx_max, double fz_max, unsigned int salt)
+{
+    int i, best = -1, nfit = 0, pick;
+    double best_area = 0.0;
+
+    if (!(fx_max > 0.0) || !(fz_max > 0.0)) return -1;
+    for (i = 0; i < TD5_TG_PREFAB_N; i++) {
+        const double fx = k_tg_prefabs[i].fx, fz = k_tg_prefabs[i].fz;
+        if (!(fx > 0.0) || !(fz > 0.0)) continue;
+        if (fx > fx_max || fz > fz_max) continue;
+        if (fx * fz > best_area) best_area = fx * fz;
+        nfit++;
+    }
+    if (nfit == 0 || !(best_area > 0.0)) return -1;
+    /* Everything within 25% of the best area is "as good"; the salt chooses
+     * among them so the same civic block does not always draw the same piece. */
+    nfit = 0;
+    for (i = 0; i < TD5_TG_PREFAB_N; i++) {
+        const double a = (double)k_tg_prefabs[i].fx * k_tg_prefabs[i].fz;
+        if (k_tg_prefabs[i].fx > fx_max || k_tg_prefabs[i].fz > fz_max) continue;
+        if (a >= best_area * 0.75) nfit++;
+    }
+    pick = (int)(salt % (unsigned)(nfit > 0 ? nfit : 1));
+    for (i = 0; i < TD5_TG_PREFAB_N; i++) {
+        const double a = (double)k_tg_prefabs[i].fx * k_tg_prefabs[i].fz;
+        if (k_tg_prefabs[i].fx > fx_max || k_tg_prefabs[i].fz > fz_max) continue;
+        if (a < best_area * 0.75) continue;
+        best = i;
+        if (pick-- <= 0) break;
+    }
+    return best;
+}
+
+/* Write ONE set piece straight into a live scenery buffer, no DECIDE phase.
+ *
+ * The two-phase table above exists because tg_landmarks_place runs before any
+ * mesh buffer does; the geo fallback runs INSIDE the scenery loop with a buffer
+ * already in hand, and its site comes from a footprint rather than from a
+ * standoff, so it has nothing to defer. The caller owns moff/nmesh/guard
+ * bookkeeping exactly as it does for a footprint it extrudes itself. */
+int tg_prefab_write_at(TG_Buf *blk, int pf, double ox, double oy, double oz,
+                       double ca, double sa)
+{
+    const TG_PrefabDef *d;
+    if (!blk || pf < 0 || pf >= TD5_TG_PREFAB_N) return 1;
+    d = &k_tg_prefabs[pf];
+    if (!tg_write_prefab_mesh(blk, d->v, d->l, d->nv, d->c, d->ncmd,
+                              TD5_TG_PAGE_LM_BASE, ox, oy, oz, ca, sa))
+        return 0;
+    s_pf_emitted++;
+    return 1;
+}
+
 /* Drain every placement recorded for span si into this entry's mesh buffer.
  * Mirrors the surrounding loop's contract: record the offset in moff BEFORE
  * appending, keep moff ascending, and guard-mark the byte range just written. */
