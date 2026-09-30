@@ -33,6 +33,8 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 29 (traffic + cop chase)" },
+    { CL_ITEM,    "Traffic keeps its lane where a lane closes, instead" },
+    { CL_ITEM,    "  of stopping against the wall (Moscow)." },
     { CL_ITEM,    "Traffic no longer stops dead before a bend and waits" },
     { CL_ITEM,    "  to be reset (the wall sensor braked a stopped car)." },
     { CL_ITEM,    "Traffic no longer bumps the curb where a lane opens." },

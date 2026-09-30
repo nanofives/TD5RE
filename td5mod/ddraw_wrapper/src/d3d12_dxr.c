@@ -508,7 +508,9 @@ static int dxr_create_state_object(void)
     sod.Type = D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE;
     sod.NumSubobjects = 5; sod.pSubobjects = so;
 
+    d3d12_pso_crumb_set("dxr_state_object", g_rt_pipeline, sizeof(g_rt_pipeline));
     hr = ID3D12Device5_CreateStateObject(g_dxr.device5, &sod, &IID_ID3D12StateObject, (void **)&g_dxr.so);
+    d3d12_pso_crumb_clear();
     if (FAILED(hr)) { dxr_log("CreateStateObject 0x%08lX", hr); return 0; }
     return 1;
 }
@@ -752,8 +754,11 @@ static int dxr_create_blit(void)
     pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_B8G8R8A8_UNORM;
     pd.DSVFormat = DXGI_FORMAT_UNKNOWN;
     pd.SampleDesc.Count = 1;
-    if (FAILED(ID3D12Device_CreateGraphicsPipelineState((ID3D12Device *)g_dxr.device5, &pd,
-            &IID_ID3D12PipelineState, (void **)&g_dxr.blit_pso))) { dxr_log("blit PSO FAILED"); return 0; }
+    d3d12_pso_crumb_set("dxr_blit_ps", pd.PS.pShaderBytecode, pd.PS.BytecodeLength);
+    hr = ID3D12Device_CreateGraphicsPipelineState((ID3D12Device *)g_dxr.device5, &pd,
+            &IID_ID3D12PipelineState, (void **)&g_dxr.blit_pso);
+    d3d12_pso_crumb_clear();
+    if (FAILED(hr)) { dxr_log("blit PSO FAILED"); return 0; }
     return 1;
 }
 
@@ -1464,7 +1469,7 @@ static int dxr_ensure_p3_srvs(void)
 
 static ID3D12PipelineState *dxr_make_composite_pso(const void *ps, SIZE_T ps_len, int additive)
 {
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd; ID3D12PipelineState *pso = NULL;
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd; ID3D12PipelineState *pso = NULL; HRESULT hr;
     const void *vs = NULL, *cps = NULL; SIZE_T vs_len = 0, cps_len = 0;
     D3D12_RENDER_TARGET_BLEND_DESC *rt;
     d3d12_priv_fullscreen_shaders(&vs, &vs_len, &cps, &cps_len);
@@ -1494,8 +1499,12 @@ static ID3D12PipelineState *dxr_make_composite_pso(const void *ps, SIZE_T ps_len
     pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_B8G8R8A8_UNORM;
     pd.DSVFormat = DXGI_FORMAT_UNKNOWN; pd.SampleDesc.Count = 1;
-    if (FAILED(ID3D12Device_CreateGraphicsPipelineState((ID3D12Device *)g_dxr.device5, &pd,
-            &IID_ID3D12PipelineState, (void **)&pso))) { dxr_log("composite PSO FAILED (add=%d)", additive); return NULL; }
+    d3d12_pso_crumb_set(additive ? "dxr_composite_add_ps" : "dxr_composite_ps",
+                        pd.PS.pShaderBytecode, pd.PS.BytecodeLength);
+    hr = ID3D12Device_CreateGraphicsPipelineState((ID3D12Device *)g_dxr.device5, &pd,
+            &IID_ID3D12PipelineState, (void **)&pso);
+    d3d12_pso_crumb_clear();
+    if (FAILED(hr)) { dxr_log("composite PSO FAILED (add=%d)", additive); return NULL; }
     return pso;
 }
 
@@ -1591,15 +1600,21 @@ static int dxr_ensure_denoise_psos(void)
         ZeroMemory(&pd, sizeof(pd));
         pd.pRootSignature = g_dxr.denoise_rs;
         pd.CS.pShaderBytecode = g_cs_shadow_atrous_50; pd.CS.BytecodeLength = sizeof(g_cs_shadow_atrous_50);
-        if (FAILED(ID3D12Device_CreateComputePipelineState((ID3D12Device *)g_dxr.device5, &pd,
-                &IID_ID3D12PipelineState, (void **)&g_dxr.denoise_pso))) { dxr_log("denoise R32 CS PSO FAILED"); return 0; }
+        d3d12_pso_crumb_set("dxr_denoise_r32_cs", pd.CS.pShaderBytecode, pd.CS.BytecodeLength);
+        hr = ID3D12Device_CreateComputePipelineState((ID3D12Device *)g_dxr.device5, &pd,
+                &IID_ID3D12PipelineState, (void **)&g_dxr.denoise_pso);
+        d3d12_pso_crumb_clear();
+        if (FAILED(hr)) { dxr_log("denoise R32 CS PSO FAILED"); return 0; }
     }
     if (!g_dxr.denoise_color_pso) {   /* RGBA16F variant (light/reflection masks); best-effort */
         ZeroMemory(&pd, sizeof(pd));
         pd.pRootSignature = g_dxr.denoise_rs;
         pd.CS.pShaderBytecode = g_cs_color_atrous_50; pd.CS.BytecodeLength = sizeof(g_cs_color_atrous_50);
-        if (FAILED(ID3D12Device_CreateComputePipelineState((ID3D12Device *)g_dxr.device5, &pd,
-                &IID_ID3D12PipelineState, (void **)&g_dxr.denoise_color_pso))) { dxr_log("denoise COLOR CS PSO FAILED"); }
+        d3d12_pso_crumb_set("dxr_denoise_color_cs", pd.CS.pShaderBytecode, pd.CS.BytecodeLength);
+        hr = ID3D12Device_CreateComputePipelineState((ID3D12Device *)g_dxr.device5, &pd,
+                &IID_ID3D12PipelineState, (void **)&g_dxr.denoise_color_pso);
+        d3d12_pso_crumb_clear();
+        if (FAILED(hr)) { dxr_log("denoise COLOR CS PSO FAILED"); }
     }
     return g_dxr.denoise_pso != NULL;
 }

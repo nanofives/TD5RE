@@ -38,6 +38,7 @@
 #include "td5_profile.h"
 #include "td5_trace.h"
 #include "td5_selftest.h"  /* in-session automated test suite (dev builds) */
+#include "td5_radio.h"     /* td5_radio_worker_detached (exit path) */
 #include "td5_control.h"   /* live-control MCP transport (dev builds) */
 #include "td5_asset.h"
 #include "td5_assetsrc.h"
@@ -2097,6 +2098,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     Backend_Shutdown();
     timeEndPeriod(1);
     TD5_LOG_I("main", "shutdown: orderly teardown complete, returning %d", td5_selftest_exit_code());
+    /* [EXIT-CRASH DIAG 2026-09-29] A radio worker still blocked inside Media
+     * Foundation (join timeout) makes the CRT/loader DLL unload fault
+     * (ntdll+0x1CCD1, reproduced 1 of 1 such exits). Everything is torn down
+     * and flushed by now, so end the process here instead of returning. */
+    if (td5_radio_worker_detached()) {
+        TD5_LOG_W("main", "shutdown: radio worker still inside Media Foundation -> TerminateProcess(%d)",
+                  td5_selftest_exit_code());
+        td5_plat_log_flush();
+        TerminateProcess(GetCurrentProcess(), (UINT)td5_selftest_exit_code());
+    }
     td5_plat_log_flush();
     s_main_phase = "return";
 

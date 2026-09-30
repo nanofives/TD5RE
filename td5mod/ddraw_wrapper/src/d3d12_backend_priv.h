@@ -105,4 +105,10 @@ void  d3d12_dxr_register_texture(unsigned index, ID3D12Resource *res, DXGI_FORMA
  * raw-pointer dedup then refuses to repair the slot when the address is reused). */
 void  d3d12_dxr_unregister_texture(ID3D12Resource *res);
 
+/* [PSO CRASH CRUMB 2026-09-29] Record the pipeline being built (site + shader
+ * bytecode size/hash) so an SEH crash inside the runtime's DXBC->DXIL converter
+ * (dxilconv.dll) is attributed in crash.log (pso_in_flight). Clear afterwards. */
+void  d3d12_pso_crumb_set(const char *site, const void *bc, SIZE_T len);
+void  d3d12_pso_crumb_clear(void);
+
 #endif /* D3D12_BACKEND_PRIV_H */

@@ -169,6 +169,45 @@ static BackendPixelShader s_builtin_ps[PS_COUNT];
 static BackendPixelShader *s_custom_ps[D3D12_CUSTOM_PS_MAX];
 static int                 s_custom_ps_count;
 
+/* [PSO CRASH CRUMB 2026-09-29] PSOs are built lazily from SM5.0 DXBC, which the
+ * runtime converts to DXIL in dxilconv.dll on a shader-cache MISS (first run of
+ * a new exe path/build). A dxilconv.dll null-deref (+0xB20DA, main thread,
+ * selftest step race-r4-td6-circuit, first run per new build) left no clue
+ * which PSO it was building. This records it; Backend_DumpCrashDiag prints it
+ * (empty = no PSO creation was in flight). Written only at PSO creation. */
+static char s_pso_crumb[160];
+
+/* Shared with d3d12_dxr.c (its blit/composite/denoise PSOs + RT state object). */
+void d3d12_pso_crumb_set(const char *site, const void *bc, SIZE_T len)
+{
+    UINT32 h = 2166136261u;
+    SIZE_T i;
+    const unsigned char *b = (const unsigned char *)bc;
+    for (i = 0; b && i < len; i++) { h ^= b[i]; h *= 16777619u; }
+    snprintf(s_pso_crumb, sizeof(s_pso_crumb), "%s len=%u fnv=%08X ptr=%p",
+             site, (unsigned)len, (unsigned)h, bc);
+}
+void d3d12_pso_crumb_clear(void) { s_pso_crumb[0] = '\0'; }
+
+static HRESULT d3d12_create_pso(const char *site, int ps_id, int blend, int ds, int gbuf,
+                                const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pd,
+                                ID3D12PipelineState **out)
+{
+    HRESULT hr;
+    UINT32 h = 2166136261u;
+    SIZE_T i;
+    const unsigned char *b = (const unsigned char *)pd->PS.pShaderBytecode;
+    for (i = 0; b && i < pd->PS.BytecodeLength; i++) { h ^= b[i]; h *= 16777619u; }
+    snprintf(s_pso_crumb, sizeof(s_pso_crumb),
+             "%s ps=%d blend=%d ds=%d gbuf=%d vs_len=%u ps_len=%u ps_fnv=%08X ps_ptr=%p npso=%d ncustom=%d",
+             site, ps_id, blend, ds, gbuf, (unsigned)pd->VS.BytecodeLength,
+             (unsigned)pd->PS.BytecodeLength, (unsigned)h, pd->PS.pShaderBytecode,
+             s_pso_count, s_custom_ps_count);
+    hr = ID3D12Device_CreateGraphicsPipelineState(g_d3d12.device, pd, &IID_ID3D12PipelineState, (void **)out);
+    s_pso_crumb[0] = '\0';
+    return hr;
+}
+
 /* Persistent viewport + fog constant buffers (b0 VS / b0 PS). */
 static BackendConstBuffer *s_viewport_cb;
 static BackendConstBuffer *s_fog_cb;
@@ -1197,7 +1236,7 @@ static ID3D12PipelineState *d3d12_get_pso(int vs_idx, int ps_id, int blend, int 
     pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
     pd.SampleDesc.Count = 1;
 
-    hr = ID3D12Device_CreateGraphicsPipelineState(g_d3d12.device, &pd, &IID_ID3D12PipelineState, (void **)&pso);
+    hr = d3d12_create_pso("draw", ps_id, blend, ds, gbuf, &pd, &pso);
     if (FAILED(hr) || !pso) { WRAPPER_LOG("D3D12 CreateGraphicsPipelineState (ps=%d blend=%d ds=%d gbuf=%d) 0x%08lX", ps_id, blend, ds, gbuf, hr); return NULL; }
     s_pso_cache[s_pso_count].key = key;
     s_pso_cache[s_pso_count].pso = pso;
@@ -1543,8 +1582,7 @@ static ID3D12PipelineState *d3d12_get_pass_pso(const void *ps, SIZE_T ps_len, in
     pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_B8G8R8A8_UNORM;
     pd.DSVFormat = DXGI_FORMAT_UNKNOWN;   /* color-only, no depth bound */
     pd.SampleDesc.Count = 1;
-    if (FAILED(ID3D12Device_CreateGraphicsPipelineState(g_d3d12.device, &pd,
-            &IID_ID3D12PipelineState, (void **)&pso))) {
+    if (FAILED(d3d12_create_pso("pass", -1, blend, -1, 0, &pd, &pso))) {
         d3d12_diag("pass PSO create FAILED (blend=%d)", blend);
         return NULL;
     }
@@ -2408,8 +2446,7 @@ static int d3d12_render_core_init(int width, int height)
         pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_B8G8R8A8_UNORM;
         pd.DSVFormat = DXGI_FORMAT_D32_FLOAT; pd.SampleDesc.Count = 1;
-        if (FAILED(ID3D12Device_CreateGraphicsPipelineState(g_d3d12.device, &pd,
-                &IID_ID3D12PipelineState, (void **)&s_fsquad_pso))) {
+        if (FAILED(d3d12_create_pso("fsquad", -1, -1, -1, 0, &pd, &s_fsquad_pso))) {
             WRAPPER_LOG("D3D12 fsquad PSO create FAILED");
             return 0;
         }
@@ -3202,11 +3239,12 @@ void Backend_DumpCrashDiag(const char *path)
         "  device=%p queue=%p swapchain=%p\n"
         "  device_generation=%u device_removed=%d present_count=%lu\n"
         "  cur_tex=%p windowed=%d rt=%dx%d frame_index=%u\n"
-        "  diag_context=\"%s\"\n",
+        "  diag_context=\"%s\"\n"
+        "  pso_in_flight=\"%s\"\n",
         (void *)g_d3d12.device, (void *)g_d3d12.queue, (void *)g_d3d12.swapchain,
         g_backend.device_generation, g_backend.device_removed, g_backend.present_count,
         (void *)s_cur_tex, g_backend.windowed, g_backend.width, g_backend.height,
-        g_d3d12.frame_index, g_backend.diag_context);
+        g_d3d12.frame_index, g_backend.diag_context, s_pso_crumb);
     d3d12_write_draw_ring(f, "SEH crash");
     fflush(f); fclose(f);
 }
@@ -3351,7 +3389,20 @@ int Backend_RecreateDevice(void)
     return 1;
 }
 void Backend_ReleaseConstBuffer(BackendConstBuffer *cb) { if (cb) { if (cb->res) ID3D12Resource_Release(cb->res); free(cb); } }
-void Backend_ReleasePixelShader(BackendPixelShader *ps) { if (ps) { free((void *)ps->bc); free(ps); } }
+/* [CUSTOM PS UAF 2026-09-29] Drop the registry slot too: d3d12_resolve_ps reads
+ * s_custom_ps[id - PS_COUNT]->bc when a PSO for that id is first built, so a
+ * released shader left a dangling pointer there (released on every device-
+ * generation change by fx_ensure_shader / frontend_ensure_vui_shaders). A NULL
+ * slot resolves to PS_MODULATE instead of freed bytecode. */
+void Backend_ReleasePixelShader(BackendPixelShader *ps)
+{
+    int ci;
+    if (!ps) return;
+    ci = ps->id - PS_COUNT;
+    if (ci >= 0 && ci < s_custom_ps_count && s_custom_ps[ci] == ps) s_custom_ps[ci] = NULL;
+    free((void *)ps->bc);
+    free(ps);
+}
 void Backend_RequestCapture(void) { }
 /* Resize the swapchain + depth + viewport to a new client size. FLIP_DISCARD
  * REQUIRES ResizeBuffers on window resize (unlike the old D3D11 non-flip chain
