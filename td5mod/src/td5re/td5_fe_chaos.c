@@ -78,6 +78,9 @@
  * or on one of the two real buttons below it (s_selected_button). */
 #define CT_TITLE_GOLD    0xFFE3D708u
 #define CT_EMPTY_GREY    0xFF6A6A6Au
+/* [CHAOS CO-OP 2026-09-29] Clear space (design px) the condensed header title
+ * must leave between its last glyph and the player-count badge. */
+#define CT_TITLE_BADGE_GAP 12.0f
 
 /* ========================================================================
  * SECTION: frontend-side DRAFT config (edited on MP MODE CONFIG)
@@ -269,15 +272,15 @@ static int chaos_joined_count(void) {
 int frontend_chaos_mode_selectable(const char **why) {
     int n = chaos_joined_count();
     if (s_network_active || s_mp_net_config) {
-        if (why) *why = TR("LOCAL PLAY ONLY - NOT AVAILABLE OVER THE NETWORK");
+        if (why) *why = TR("LOCAL PLAY ONLY - NO NETWORK");
         return 0;
     }
     if (frontend_mp_ai_player_count() > 0) {
-        if (why) *why = TR("EVERY SEAT NEEDS A REAL CONTROLLER - REMOVE THE AI PLAYERS");
+        if (why) *why = TR("NO AI PLAYERS - EVERY SEAT NEEDS A PAD");
         return 0;
     }
     if (!td5_chaos_count_is_legal(n)) {
-        if (why) *why = TR("NEEDS EXACTLY 4, 6 OR 8 LOCAL PLAYERS");
+        if (why) *why = TR("NEEDS 4, 6 OR 8 LOCAL PLAYERS");
         return 0;
     }
     if (why) *why = NULL;
@@ -684,15 +687,23 @@ void frontend_chaos_teams_render(float sx, float sy) {
 
     if (ts <= 0) return;
 
-    fe_race_draw_screen_title(TR("CHAOS CO-OP - TEAMS AND ROLES"),
-                              FE_TITLE_LEFT_X * sx, 17.0f * sy, CT_TITLE_GOLD, sx, sy);
-
-    /* player-count badge, right aligned against the MP right edge */
+    /* Header band: player-count badge hard right against the MP right edge, then
+     * the title condensed to END 12 design px before it. The badge is measured
+     * first because it is the thing that must stay fully visible; the title takes
+     * whatever is left. Sizing it any other way is not safe — the title's width
+     * scales with sy while the canvas scales with sx, so a header that clears at
+     * 16:9 still runs off the badge at 4:3, and the es-AR string is longer again.
+     * (The first cut, "CHAOS CO-OP - TEAMS AND ROLES" with no fit, ran clean off
+     * the right edge of a 1920x1080 framedump.) */
     snprintf(buf, sizeof buf, TR("%d PLAYERS"), n);
     {
-        float gsx = (sx < sy) ? sx : sy;
-        fe_draw_small_text((FE_MP_RIGHT_EDGE * sx) - fe_measure_small_text(buf) * gsx,
-                           22.0f * sy, buf, 0xFFB8C0CCu, sx, sy);
+        float badge_w = fe_measure_small_text(buf) * fe_glyph_sx(sx, sy);
+        float badge_x = FE_MP_RIGHT_EDGE * sx - badge_w;
+        float title_x = FE_TITLE_LEFT_X * sx;
+        float title_w = badge_x - CT_TITLE_BADGE_GAP * sx - title_x;
+        fe_race_draw_screen_title_fit(TR("CHAOS CO-OP TEAMS"), title_x, 17.0f * sy,
+                                      CT_TITLE_GOLD, sx, sy, title_w);
+        fe_draw_small_text(badge_x, 22.0f * sy, buf, 0xFFB8C0CCu, sx, sy);
     }
 
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);

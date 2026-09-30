@@ -1117,6 +1117,12 @@ int   mp_profiles_enabled(void);                                                
 uint32_t mp_simul_player_nav(int player);   /* 1 L 2 R 4 U 8 D 0x10 A 0x20 B */
 void fe_race_draw_screen_title(const char *text, float left_x, float top_y,
                                uint32_t color, float sx, float sy);
+/* As above, condensed so the laid-out title never exceeds max_w_px SCREEN px
+ * (<= 0 disables the cap). For headers that share their band with something
+ * right-aligned: title width scales with sy, the canvas with sx, so a header
+ * that clears at 16:9 can still collide at 4:3 — and translations are longer. */
+void fe_race_draw_screen_title_fit(const char *text, float left_x, float top_y,
+                                   uint32_t color, float sx, float sy, float max_w_px);
 int  frontend_mp_setup_disconnect_check(int n);   /* 1 = frozen on a lost pad */
 
 /* @GENERATED-SYMBOLS@ */

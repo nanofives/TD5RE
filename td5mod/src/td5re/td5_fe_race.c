@@ -130,6 +130,21 @@ static void mp_pos_small_centered(float cx_px, float y_px, const char *t,
     fe_draw_small_text(cx_px - fe_measure_small_text(t) * 0.5f * gsx, y_px, t, col, sx, sy);
 }
 
+/* [CHAOS CO-OP 2026-09-29] As above, condensed so it never exceeds max_w_px
+ * SCREEN px. Same shrink floor as fe_fit_text_scale. Used for the mode-vote
+ * disabled-row reason line, whose Spanish wording is longer than the button. */
+static void mp_pos_small_centered_fit(float cx_px, float y_px, const char *t,
+                                      uint32_t col, float sx, float sy, float max_w_px) {
+    float dw = fe_measure_small_text(t);           /* design px */
+    float s  = 1.0f;
+    if (max_w_px > 0.0f && dw * fe_glyph_sx(sx, sy) > max_w_px) {
+        s = max_w_px / (dw * fe_glyph_sx(sx, sy));
+        if (s < 0.55f) s = 0.55f;
+    }
+    fe_draw_small_text(cx_px - dw * 0.5f * fe_glyph_sx(sx * s, sy * s), y_px, t,
+                       col, sx * s, sy * s);
+}
+
 /* [#3 2026-06-16] MP per-player panel MAX-WIDTH cap. With few players the split
  * layout makes each pane very wide (2 players -> cols=2 -> 320 px each; the
  * "CHOOSE YOUR SCREEN" cells span 280 px). Cap each pane at the width it would
@@ -3617,8 +3632,17 @@ static int s_mode_vote_locked[TD5_MAX_HUMAN_PLAYERS];
  * drawn in the POST-button render pass so it composites on top of the frames. */
 #define MV_BX   170      /* mode-button x      */
 #define MV_BW   300      /* mode-button width  */
-#define MV_BH   50       /* mode-button height (two lines) */
-#define MV_Y0   76       /* [MP TIME TRIAL removal 2026-07-04] Restored to 96 (was
+#define MV_BH   48       /* mode-button height (two lines).
+                          * [CHAOS CO-OP 2026-09-29] 50 -> 48. With SIX modes the
+                          * column has to fit under the host banner AND above the
+                          * Y460 floor. Trimming the BUTTON by 2 (rather than the
+                          * PITCH) buys the 10 px needed while GROWING the ring
+                          * band: MV_GAP - MV_BH is now 16 (8 px clear each side)
+                          * against 14 (7 px) before, so the per-voter border
+                          * rings have MORE room, not less. The two label lines
+                          * (name +5, description +29) are unchanged; the only
+                          * loss is 2 px of bottom padding inside the frame. */
+#define MV_Y0   88       /* [MP TIME TRIAL removal 2026-07-04] Restored to 96 (was
                           * lowered to 70 for DRAG RACE 2026-06-30 to fit SIX modes).
                           * TIME TRIAL's removal brings the list back to FIVE modes,
                           * so the extra headroom is no longer needed — and at 70 the
@@ -3626,13 +3650,21 @@ static int s_mode_vote_locked[TD5_MAX_HUMAN_PLAYERS];
                           * drawn at y=72-85. Bottom button reaches 96 + 4*64 + 50 = 402.
                           * [CHAOS CO-OP 2026-09-29] SIX modes again (CHAOS CO-OP), so
                           * the bottom button at MV_Y0=96 would reach 96 + 5*64 + 50 =
-                          * 466 — past the Y460 content floor. Rather than squeezing
-                          * MV_GAP (which is what keeps the per-voter border rings
-                          * clear) the whole column moves UP to 76 and the host banner
-                          * moves with it (MV_BANNER_Y), so the first button still
-                          * clears it: rows 76..396, bottom 446. */
-#define MV_BANNER_Y 56   /* [CHAOS CO-OP 2026-09-29] host badge + "OTHERS PRESS A" row
-                          * (was 72; the title's cap ends near y=41, so 56 is clear). */
+                          * 466 — past the Y460 content floor. First attempt moved the
+                          * column to 76 with MV_BH=50; a framedump showed the banner
+                          * text (which extends ~23 px below the y it is passed, not
+                          * ~13) overlapping the first button's top border. Final
+                          * geometry, all in 640x480 design px:
+                          *   banner  48 .. 71   (MV_BANNER_Y + 23)
+                          *   row k   88 + 64k, height 48   -> 88, 152, 216, 280, 344, 408
+                          *   bottom  408 + 48 = 456          (<= 460 floor, 4 px spare)
+                          *   gap banner -> first button: 88 - 71 = 17 px
+                          *   ring band: (64 - 48) / 2 = 8 px each side (was 7). */
+#define MV_BANNER_Y 48   /* [CHAOS CO-OP 2026-09-29] host badge + "OTHERS PRESS A" row.
+                          * Was 72 for five modes, then 56 (still overlapping the first
+                          * button). The title's cap ends near y=41 and the banner box
+                          * runs MV_BANNER_Y..+23, so 48 clears the title by 7 px and
+                          * the first button (top 88) by 17 px. */
 #define MV_GAP  64       /* [2026-06-29] row pitch (was 78). Keeps the per-voter
                           * border rings clear (14px gap between 50px buttons). */
 /* [MP MODE VOTE BORDERS 2026-06-27] Concentric per-voter border-ring geometry,
@@ -4010,19 +4042,24 @@ void frontend_mp_mode_vote_render(float sx, float sy) {
         float cx  = (float)MV_BX + MV_BW * 0.5f;
         int   ring, stack;
         /* Two-line label, block-centred on the button (on top of the frame).
-         * [CHAOS CO-OP 2026-09-29] A greyed row dims both lines and prints the
-         * REASON under the description so the player knows what to change. */
+         * [CHAOS CO-OP 2026-09-29] A greyed row dims the name and REPLACES the
+         * description with the amber reason on the SAME second line. The first
+         * attempt stacked the reason under the description at +39: the small-text
+         * box is ~13 design px tall, so +29 already runs to +42 and the two
+         * collided (and the reason spilled past the button's bottom edge). One
+         * line per row is the only thing that fits inside a 48-tall frame. */
         const char *reason = NULL;
         int greyed = (m == TD5_MP_MODE_CHAOS_COOP) && !frontend_chaos_mode_selectable(&reason);
         td5_vui_text_centered(cx * sx, (byp + 5.0f) * sy,
                               td5_tr(k_mp_mode_names[m]),
                               greyed ? 0xFF8A8A8Au : 0xFFFFFFFFu, sx, sy);
-        mp_pos_small_centered(cx * sx, (byp + 29.0f) * sy,
-                              td5_tr(k_mp_mode_desc[m]),
-                              greyed ? 0xFF6A6A6Au : 0xFFB8C0CCu, sx, sy);
         if (greyed && reason)
-            mp_pos_small_centered(cx * sx, (byp + 39.0f) * sy, reason,
-                                  0xFFFFC060u, sx, sy);
+            mp_pos_small_centered_fit(cx * sx, (byp + 29.0f) * sy, reason,
+                                      0xFFFFC060u, sx, sy, (MV_BW - 16.0f) * sx);
+        else
+            mp_pos_small_centered(cx * sx, (byp + 29.0f) * sy,
+                                  td5_tr(k_mp_mode_desc[m]),
+                                  greyed ? 0xFF6A6A6Au : 0xFFB8C0CCu, sx, sy);
 
         /* CAST votes: one profile-coloured border ring per player who has locked
          * a vote for this mode. Rings nest outward in player order so several
@@ -5270,12 +5307,17 @@ static float mp_pos_pulse(uint32_t now, float lo, float hi) {
 #define FE_RACE_TITLE_CAP_PX 24.0f    /* design cap height (px at 480-tall reference) */
 #define FE_RACE_TITLE_LEFT_X 126.0f   /* design x where the first letter starts (= td5_frontend FE_TITLE_LEFT_X) */
 #define FE_RACE_TITLE_TRACK  (-1.5f)  /* extra letter tracking (design px; negative = tighter) */
-void fe_race_draw_screen_title(const char *text, float left_x, float top_y,
-                               uint32_t color, float sx, float sy) {
-    if (!text || !td5_titlefont_ready()) return;
+/* [CHAOS CO-OP 2026-09-29] Condense floor for the _fit variant below; matches
+ * fe_fit_text_scale's floor, under which condensed text stops being legible. */
+#define FE_RACE_TITLE_MIN_HSCALE 0.55f
+
+/* Shared body. `hscale` is the already-resolved horizontal condense factor;
+ * the cap height is NEVER touched, so a condensed title still lines up with
+ * every other screen's header band. */
+static void fe_race_title_draw_at(const char *text, float left_x, float top_y,
+                                  uint32_t color, float sy, float hscale) {
     const float cap_px   = FE_RACE_TITLE_CAP_PX * sy;
     const float baseline = top_y + cap_px;                /* cap tops land near top_y */
-    const float hscale   = (sx < sy) ? (sx / sy) : 1.0f;  /* condense like fe_draw_text on narrow windows */
     const float trkn     = FE_RACE_TITLE_TRACK * sy * hscale;
     float pen = left_x;
     int i;
@@ -5294,6 +5336,46 @@ void fe_race_draw_screen_title(const char *text, float left_x, float top_y,
         }
         pen += g.advance * hscale + trkn;
     }
+}
+
+/* [CHAOS CO-OP 2026-09-29] Laid-out title width in SCREEN px (no trailing
+ * tracking). Linear in hscale, so the _fit shrink below is exact in one pass. */
+static float fe_race_title_width(const char *text, float sy, float hscale) {
+    const float cap_px = FE_RACE_TITLE_CAP_PX * sy;
+    const float trkn   = FE_RACE_TITLE_TRACK * sy * hscale;
+    float w = 0.0f;
+    int i;
+    for (i = 0; text[i]; i++) {
+        td5_glyph g; td5_titlefont_get(TD5_TOUPPER(text[i]), cap_px, &g);
+        w += g.advance * hscale + trkn;
+    }
+    return (w > 0.0f) ? w - trkn : 0.0f;
+}
+
+void fe_race_draw_screen_title(const char *text, float left_x, float top_y,
+                               uint32_t color, float sx, float sy) {
+    if (!text || !td5_titlefont_ready()) return;
+    fe_race_title_draw_at(text, left_x, top_y, color, sy,
+                          (sx < sy) ? (sx / sy) : 1.0f);   /* condense like fe_draw_text on narrow windows */
+}
+
+/* [CHAOS CO-OP 2026-09-29] As above, but never wider than `max_w_px` SCREEN px.
+ * Needed where something else owns the right end of the header band (the CHAOS
+ * TEAMS player-count badge): the title's width scales with sy while the canvas
+ * scales with sx, so a header that clears at 16:9 can still run off the badge at
+ * 4:3 — and a translated header is longer again. Callers pass the measured gap
+ * so the guarantee holds at any resolution and in any language. */
+void fe_race_draw_screen_title_fit(const char *text, float left_x, float top_y,
+                                   uint32_t color, float sx, float sy, float max_w_px) {
+    float hscale, w;
+    if (!text || !td5_titlefont_ready()) return;
+    hscale = (sx < sy) ? (sx / sy) : 1.0f;
+    w = fe_race_title_width(text, sy, hscale);
+    if (max_w_px > 0.0f && w > max_w_px) {
+        hscale *= max_w_px / w;
+        if (hscale < FE_RACE_TITLE_MIN_HSCALE) hscale = FE_RACE_TITLE_MIN_HSCALE;
+    }
+    fe_race_title_draw_at(text, left_x, top_y, color, sy, hscale);
 }
 
 /* [#6] Replacement renderer for the "CHOOSE YOUR SCREEN" position picker.
