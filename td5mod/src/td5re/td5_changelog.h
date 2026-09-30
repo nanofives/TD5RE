@@ -33,6 +33,10 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 30 (real-world tracks)" },
+    { CL_ITEM,    "On a real-world track the side streets are the REAL" },
+    { CL_ITEM,    "  ones: every crossing and turn-off comes from the" },
+    { CL_ITEM,    "  city's own street map, at its own angle. La Plata's" },
+    { CL_ITEM,    "  diagonals now cross the road at 45 degrees." },
     { CL_ITEM,    "AUTO TRACK STUDIO has a LOCATION row: race the auto" },
     { CL_ITEM,    "  track along a real route picked on a map (run" },
     { CL_ITEM,    "  re/tools/geo_selector.py). It keeps the place name." },
