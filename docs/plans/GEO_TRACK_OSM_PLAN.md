@@ -884,6 +884,157 @@ dropped on these numbers: a slower car cuts the same apex and pins harder.
 Shipped tracks: Moscow and TD6 run the unchanged path (the gate needs the auto
 slot and a geo route) and were A/B'd tick by tick against the master exe.
 
+## 6g. Phase 4 finished 2026-09-30 (fork candidates, layer vintage, caps)
+
+The three selector items left open at the end of 6e/6f. All offline: no fetch,
+no browser, no network.
+
+### Fork candidates (the Phase 4 item that had real engine work in it)
+
+`re/tools/geo_forks.py` detects two shapes along the chosen route. A **median
+avenue** is a pair of one-way OSM ways carrying the same name, running
+anti-parallel 4 to 45 m apart, covering at least 50% of a run of at least
+120 m; coverage is a **union over every same-name way**, which is the detail
+that matters -- per-way was tried first and scored a 1055 m divided stretch of
+Calle 54 at 0.18, because OSM splits its opposing carriageway into ten ways.
+The union scores it 0.76. A **comparable alternative route** is found by banning
+a leg's own edges and re-routing; it is capped at a quarter of the route and
+1200 m, because the uncapped re-route of the La Plata leg returns a 5482 m path
+against the 5124 m chosen -- comparable by every other test, and useless as a
+fork, since its span range covers the whole track.
+
+Measured union coverage per run on the reference La Plata route, which is where
+the 0.50 threshold comes from:
+
+| run | length | cover | verdict |
+|---|---|---|---|
+| Diagonal 101, Diagonal 102, Calle 6 | 8-116 m | 0.00 | undivided, correct |
+| Calle 54 (20-28) | 327 m | 0.44 | opposing carriageway mapped for part only |
+| Avenida 53 (44-54) | 568 m | 0.55 | divided |
+| plaza ring | 102 m | 0.62 | under the 120 m floor anyway |
+| Avenida 52 | 358 m | 0.70 | divided |
+| Calle 54 (66-98) | 1055 m | 0.76 | divided |
+| Avenida 53 (32-37) | 416 m | 0.83 | divided |
+| Avenida 53 (102-109) | 683 m | 1.00 | divided |
+
+0.50 sits in the 0.44 -> 0.55 gap, so five real divided avenues are taken and
+the one partially-mapped stretch is refused.
+
+**The lane contract is the part that is easy to get wrong.** The engine refuses
+a fork whose span at F carries fewer than `tg_fork_kind_min_lanes(kind)` lanes
+(4 for an ISLAND) and refuses it again unless the lane count is uniform across
+`F-TD5_TG_BRANCH_WIDEN-2 .. R+2` (`td5_tg_branch.c:301`, `:314`). A real median
+arrives as two one-way ways of 2 lanes each, so the route's own count is 2 and
+every fork would be skipped with "2 lanes, needs 4". Confirming a fork therefore
+**widens the route to lanes(A)+lanes(B) over the fork window and re-conditions**,
+feeding the wider lanes into `condition_route`'s own `lanes` argument rather than
+patching the result -- the curvature floor is `radius >= (width/2)*curve_safety`,
+so the wider road has the tighter limit and enforcing it afterwards would store
+geometry smoothed for the narrow road. Visible consequence, and the page says
+so: toggling a fork moves the span count (1492 -> 1479 on La Plata).
+
+Two index mappings are kept apart deliberately. The span range is read by
+**arclength** (where the avenue is on the ground); the lane window is written
+through `condition_route`'s own **index-fraction** mapping (`_lane_at`), which
+is what decides which stored node gets which lane count. They disagree whenever
+the raw vertices are unevenly spaced, so the achieved range is read BACK off the
+conditioned lanes array (`_fit_fork`) instead of assumed.
+
+**A defect the strip audit caught, worth recording.** Widening straight from 2
+to 4 lanes puts a two-lane step at each end of the window. The emitter types
+that as "add/drop BOTH sides" (span types 4 and 7) and the generator's own
+invariant is that a both-sides change also moves the lane BASE nibble by one.
+The synthetic walk does that bookkeeping; `tg_geo_walk` has no lane management
+at all and leaves every span on `TD5_TG_HEIGHT_NIBBLE`. First build:
+`lane-change seams on ring: 8 violations: 6`, every two-lane seam BAD and every
+one-lane seam fine. The profile is now ramped one lane per seam
+(`_ramp_one_lane_per_seam`), which types each seam as a right-side add/drop
+(types 2 and 5) and leaves the base alone: 14 seams, 0 violations. The cost is
+that the approach to an avenue gains a lane about a dozen spans early, which is
+roughly the flare a real avenue has.
+
+Game side: `td5_geo_forks.c/.h` loads FORKS.JSON and validates it (ascending,
+disjoint, past the grid, inside the ring, known kind); `td5_tg_branch.c` injects
+the geo answers at the **three** points that decide fork geometry and nowhere
+else -- `tg_fork_count_planned`, `tg_fork_plan`, and the `pos` cursor read by
+`tg_fork_place` / `tg_span_in_fork_run` / `tg_fork_window_ahead`. That is the
+set the comment at `tg_fork_first_off()` records as having to agree.
+`TD5RE_GEO_FORKS=0` pins the synthetic placement for an A/B.
+
+La Plata result, five confirmed medians, ring 1479 + 984 corridor spans:
+
+| fork | F | len | R | split | carriageway separation |
+|---|---|---|---|---|---|
+| Avenida 53 | 177 | 228 | 406 | 4 -> 2+2 | 7.0 m at the ends, 9.7 m mid |
+| Calle 54 | 419 | 300 | 720 | 5 -> 2+3 | 12.1 m mid |
+| Avenida 53 | 733 | 180 | 914 | 4 -> 2+2 | 9.7 m mid |
+| Avenida 53 | 1011 | 143 | 1155 | 4 -> 2+2 | 9.7 m mid |
+| Avenida 52 | 1313 | 131 | 1445 | 4 -> 2+2 | 9.7 m mid |
+
+Measured off STRIP.DAT rather than eyeballed: the two carriageways meet at the
+split and the rejoin and bow apart in the middle, which is the ISLAND shape. The
+generator's median is slimmer than the real gap (OSM measures 12.3 to 33.2 m),
+because the ISLAND `sep` is 0.16 and the bow is capped.
+
+Driven with AutoRace from span 150 for 260 s (`--PlayerIsAI=1`, RT off, minimum
+graphics, RaceTrace on): **0 span-localiser jumps over 3599 ticks**, and forks
+0-3 fully traversed (230/230, 302/302, 182/182, 145/145 spans). 1166 of 3599
+ticks were spent on a corridor span, i.e. the car really drives the second
+carriageway. Airborne inside the fork windows measured 13.2% against 8.4%
+outside, which looked like the fork geometry until the `TD5RE_GEO_FORKS=0` A/B
+was run on the same route and the same widths: **13.8% inside with the forks
+off**, slightly worse. It is La Plata's real grade at those spans and the AI's
+pace, not the forks.
+
+Two things to know about the result:
+- **Fork 4 is built but never raced.** The finish lands at span 1279 of the 1479
+  ring (200 spans of run-off past the line), so 1313-1445 sits in the run-off.
+  The placement rule bounds against the RING, not the finish. Left as is: the
+  avenue is genuinely on the route the user drew, and refusing it would drop
+  real data for a generator-chosen finish position.
+- Confirming all five puts 66% of the track on a divided avenue and adds 984
+  corridor spans. That is what La Plata is; it is also a much bigger build, so
+  the toggles matter.
+
+### Per-layer source and vintage
+
+`layer_rows()` flattens PLACE.JSON `layers` into four rows (roads/buildings,
+elevation, land cover, tree canopy) with source, vintage, licence and a count,
+and the page renders them in the TD5 skin. `wired` is false only when the source
+string SAYS it is not, so the page never claims a layer is live because a key
+happened to exist: canopy shows **NOT WIRED** on La Plata, which is the truth,
+and is why the plaza trees are procedural. A place with no `layers` block at all
+reports four NOT WIRED rows rather than an empty panel.
+
+### "Not enough road here", and the caps
+
+Every refusal is a sentence in the page before anything downstream has to cope,
+and `ok: false` leaves SEND TO GAME disabled. Thresholds measured on the two
+fixtures (la_plata: 2291 ways cached, 1650 inside the pinned routing bbox, 4907
+graph nodes, one component; the self-test grid: 26 ways, 338 nodes):
+
+| check | threshold | why there |
+|---|---|---|
+| too few ways / nodes | 8 ways, 40 nodes | clears the smaller fixture by 3x and 8x; still refuses an ocean tile or a one-street hamlet |
+| fragmented graph | largest component < 35% | both fixtures are a single component (1.00) |
+| click off the road | 250 m | more than one La Plata block (110 m), so a click in a plaza still finds the street round it |
+| bbox | radius 500 to 4000 m | 4 km is an 8 x 8 km box (64 km2), which holds the 10.5 km hard-ceiling route; the old code clamped silently at 6000 m, a 144 km2 box, four times what section 0 sized |
+| way count | 6000 drivable ways | 2.6x La Plata's 99 ways/km2; over it the fetch is CLIPPED (service and living-street first, arterials last) and PLACE.JSON records `clipped_from` |
+
+The bbox cap **refuses** rather than clamping: the old `min(radius, 6000)` gave
+the user a different number from the one they picked with no way to know.
+
+### Gates
+
+Synthetic seed 20260901 byte-identical: MODELS.DAT `98E749869051ACE3`,
+STRIP.DAT `7C392E1958498B53` (all 8 files match; note `SELECTED.TXT` has to be
+cleared first, or it fills an unset `TD5RE_GEO_PLACE` and the "synthetic" run is
+not synthetic). Two geo builds identical (MODELS `194E0D5EF2F7F276`, STRIP
+`6FC7BAFC4A53AD79`, NETWORK `797FE96EF89E89E7`). `tg_network_audit.py` RESULT
+OK; `tg_strip_audit.py` 14 seams / 0 violations, all five forks sum OK. Structure
+lint OK (warnings 83 against a baseline of 84). `geo_selector.py --self-test`
+covers all three items offline, 17 checks.
+
 ## 7. Phases
 
 ### Phase 0 -- calibration and ground truth

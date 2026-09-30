@@ -109,10 +109,16 @@ class RoadGraph:
                 bd, best = d, i
         return best
 
-    def path(self, a: int, b: int) -> list[int] | None:
+    def path(self, a: int, b: int,
+             banned: set[tuple[int, int]] | None = None) -> list[int] | None:
         """A* on straight-line distance, which is admissible because every edge
         cost is at least its length (the cheapest multiplier is 0.80, so the
-        heuristic is scaled by that to stay a lower bound)."""
+        heuristic is scaled by that to stay a lower bound).
+
+        `banned` is a set of (min_node, max_node) UNDIRECTED edge keys to treat
+        as absent. geo_forks uses it to ask "is there another way round?" by
+        banning the chosen path's own edges: the answer cannot be the chosen
+        path, and anything it does return is drivable by construction."""
         if a == b:
             return [a]
         h_scale = min(CLASS_COST.values())
@@ -138,6 +144,8 @@ class RoadGraph:
                 return out
             du = dist[u]
             for v, w, _ri in self.adj[u]:
+                if banned and (min(u, v), max(u, v)) in banned:
+                    continue
                 nd = du + w
                 if nd < dist.get(v, float("inf")):
                     dist[v] = nd
@@ -191,7 +199,13 @@ class RoadGraph:
                 names.append(nm)
         return {"ok": True, "points": pts, "lanes": lanes,
                 "length_units": length, "street_names": names,
-                "legs": [len(x) for x in legs]}
+                "legs": [len(x) for x in legs],
+                # For geo_forks: the OSM way carrying each vertex, the graph
+                # node sequence, and the per-leg node lists (so a leg's own
+                # edges can be banned and the router asked again).
+                "road_ids": road_ids,
+                "nodes": seq,
+                "leg_nodes": legs}
 
 
 def load_place(slug: str, root: str = CACHE_ROOT) -> tuple[dict, RoadGraph, LocalProjection]:

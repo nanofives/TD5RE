@@ -67,6 +67,22 @@ ul { padding-left: 18px; margin: 6px 0; font-size: 13px; }
 li.bad { color: var(--bad); } li.warn { color: var(--gold); }
 .bar { height: 6px; background: #22304f; border-radius: 3px; overflow: hidden; margin: 2px 0 8px; }
 .bar > i { display: block; height: 100%; background: var(--ok); }
+/* per-layer source + vintage (plan section 9: a surprise has to be explainable) */
+.layer { padding: 5px 0; border-top: 1px solid #1c2740; font-size: 12px; line-height: 1.35; }
+.layer:first-child { border-top: 0; }
+.layer b { color: var(--text); font-weight: 700; }
+.layer .meta { color: var(--muted); }
+.layer .vint { color: var(--gold); }
+.layer.off b, .layer.off .meta { color: #6b7688; }
+.layer .nw { color: var(--bad); font-size: 11px; letter-spacing: .5px; }
+/* fork candidates */
+.fork { display: flex; gap: 8px; align-items: flex-start; padding: 6px 7px; margin-bottom: 4px;
+  background: var(--panel-2); border: 1px solid transparent; border-radius: 3px; font-size: 12px; }
+.fork.on { border-color: var(--gold); }
+.fork.dead { opacity: .55; }
+.fork input { flex: none; margin: 2px 0 0; accent-color: var(--gold); }
+.fork .meta { color: var(--muted); }
+.fork .kind { color: var(--gold); font-family: "Russo One", sans-serif; font-size: 11px; }
 .status { position: absolute; z-index: 1000; left: 50%; top: 70px; transform: translateX(-50%);
   background: rgba(14,20,36,.95); border: 1px solid var(--gold); padding: 8px 14px;
   border-radius: 3px; font-size: 14px; display: none; }
@@ -119,8 +135,23 @@ li.bad { color: var(--bad); } li.warn { color: var(--gold); }
       <button id="reverseBtn" style="flex:1">Swap A/B</button>
     </div>
     <div id="result"></div>
+
+    <h2 id="forksHead" style="display:none">Forks on this route</h2>
+    <p class="help" id="forksHelp" style="display:none">Median avenues and
+      comparable alternative routes found along the line. Turning one on makes
+      the road as wide as both carriageways, so the span count moves. Confirmed
+      forks are stored in <b>FORKS.JSON</b> and the generator builds them
+      instead of its own.</p>
+    <div id="forks"></div>
+    <div class="row" id="forksRow" style="display:none">
+      <button id="forksBtn" style="flex:1">Save forks</button>
+    </div>
+
     <button id="sendBtn" class="go" style="width:100%;margin-top:8px" disabled>Send to game</button>
     <p class="help">In game: AUTO TRACK STUDIO, TERRAIN, <b>LOCATION</b>.</p>
+
+    <h2 id="layersHead" style="display:none">Data sources</h2>
+    <div id="layers"></div>
   </aside>
 </main>
 <div class="status" id="status"></div>
@@ -140,6 +171,10 @@ let waypoints = [];          // [[lat, lon], ...]
 let markers = [];
 let routeLine = null, bboxRect = null, crossLayer = L.layerGroup().addTo(map);
 let lastRoute = null, routing = 0;
+let forkCands = [];                    // detected for the current A/B
+let forkOn = new Set();                // ids the user has confirmed
+let forkLayer = L.layerGroup().addTo(map);
+let forkSeq = 0;                       // same supersede guard as routing
 
 const $ = id => document.getElementById(id);
 function status(msg, ms) {
@@ -204,8 +239,37 @@ async function refreshState() {
     box.appendChild(d);
   }
 }
+/* ---------- per-layer source and vintage (plan section 9) ----------
+   Every layer is listed even when it is NOT wired, in those words: a missing
+   canopy raster is WHY the plaza trees are procedural, and someone picking a
+   place should be able to read that off the page instead of wondering. */
+function renderLayers(p) {
+  const rows = (p && p.layers) || [];
+  $("layersHead").style.display = rows.length ? "" : "none";
+  if (!rows.length) { $("layers").innerHTML = ""; return; }
+  let h = "";
+  for (const r of rows) {
+    h += "<div class='layer" + (r.wired ? "" : " off") + "'><b>" + esc(r.label) + "</b>"
+       + (r.wired ? "" : " <span class='nw'>NOT WIRED</span>")
+       + "<br><span class='meta'>" + esc(r.source) + "</span>"
+       + (r.vintage ? "<br><span class='vint'>vintage: " + esc(r.vintage) + "</span>" : "")
+       + (r.detail ? "<br><span class='meta'>" + esc(r.detail) + "</span>" : "")
+       + (r.licence ? "<br><span class='meta'>" + esc(r.licence) + "</span>" : "")
+       + "</div>";
+  }
+  const attr = (p.attribution || []);
+  if (attr.length) h += "<p class='help'>" + attr.map(esc).join("<br>") + "</p>";
+  $("layers").innerHTML = h;
+}
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>]/g,
+    c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+}
+
 function openPlace(p) {
   active = p.slug;
+  forkOn = new Set(((p.forks_saved) || []).map(f => f.id));
+  renderLayers(p);
   if (bboxRect) map.removeLayer(bboxRect);
   const b = p.bbox;
   if (b) {
@@ -257,6 +321,7 @@ function setWaypoints(w) {
 function clearRoute() {
   if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
   crossLayer.clearLayers(); lastRoute = null; $("result").innerHTML = ""; $("sendBtn").disabled = true;
+  forkCands = []; forkLayer.clearLayers(); renderForks();
 }
 map.on("click", e => {
   if (!active) { status("Pick or fetch a place first", 2500); return; }
@@ -279,7 +344,8 @@ async function reroute() {
   if (!active || waypoints.length < 2) return;
   const my = ++routing;
   status("Routing");
-  const r = await api("POST", "/api/route", { place: active, waypoints });
+  const r = await api("POST", "/api/route",
+                      { place: active, waypoints, forks: [...forkOn] });
   if (my !== routing) return;                   // a newer drag superseded this
   status("");
   lastRoute = r;
@@ -301,7 +367,74 @@ async function reroute() {
       .addTo(crossLayer);
   }
   renderResult(r);
+  refreshForks(my);
 }
+
+/* ---------- fork candidates ----------
+   Detection runs on the CHOSEN route, so it is re-asked after every re-route.
+   Toggling one re-conditions (a median avenue is genuinely twice as wide, so
+   the curvature floor and the span count both move) -- which is why a toggle
+   calls reroute() rather than just repainting. */
+async function refreshForks(seq) {
+  const my = ++forkSeq;
+  const r = await api("POST", "/api/forks", { place: active, waypoints });
+  if (my !== forkSeq || (seq !== undefined && seq !== routing)) return;
+  forkCands = (r.ok && r.candidates) ? r.candidates : [];
+  // Drop confirmations that no longer correspond to anything on this route.
+  for (const id of [...forkOn])
+    if (!forkCands.some(c => c.id === id)) forkOn.delete(id);
+  renderForks();
+}
+function renderForks() {
+  const has = forkCands.length > 0;
+  $("forksHead").style.display = has ? "" : "none";
+  $("forksRow").style.display = has ? "" : "none";
+  const placed = new Map(((lastRoute && lastRoute.forks) || []).map(f => [f.id, f]));
+  const dead = ((lastRoute && lastRoute.fork_reasons) || []);
+  if (!has) {
+    $("forks").innerHTML = "";
+    forkLayer.clearLayers();
+    return;
+  }
+  let h = "";
+  for (const c of forkCands) {
+    const on = forkOn.has(c.id);
+    const got = placed.get(c.id);
+    h += "<label class='fork" + (on ? " on" : "") + (on && !got ? " dead" : "") + "'>"
+       + "<input type='checkbox' data-id='" + esc(c.id) + "'" + (on ? " checked" : "") + ">"
+       + "<span><span class='kind'>" + esc(c.kind) + "</span> " + esc(c.name)
+       + "<br><span class='meta'>" + esc(c.detail) + "</span>"
+       + "<br><span class='meta'>route spans " + c.span_from + "-" + c.span_to
+       + ", " + c.lanes + " lanes"
+       + (got ? "; placed at F=" + got.F + " len=" + got.len : "")
+       + "</span></span></label>";
+  }
+  if (dead.length)
+    h += "<ul>" + dead.map(x => "<li class='warn'>" + esc(x) + "</li>").join("") + "</ul>";
+  $("forks").innerHTML = h;
+  for (const el of $("forks").querySelectorAll("input[type=checkbox]"))
+    el.onchange = () => {
+      if (el.checked) forkOn.add(el.dataset.id); else forkOn.delete(el.dataset.id);
+      renderForks();
+      reroute();                     // the road width changed: re-condition
+    };
+  drawForks();
+}
+function drawForks() {
+  forkLayer.clearLayers();
+  for (const c of forkCands) {
+    const on = forkOn.has(c.id);
+    if (c.latlon && c.latlon.length > 1)
+      L.polyline(c.latlon, { color: on ? "#f2c230" : "#5b6c90",
+                             weight: on ? 8 : 5, opacity: on ? .85 : .5 })
+        .bindTooltip(c.kind + " " + c.name + " -- " + c.detail)
+        .addTo(forkLayer);
+    if (on && c.latlon_alt && c.latlon_alt.length > 1)
+      L.polyline(c.latlon_alt, { color: "#f2c230", weight: 3, opacity: .8,
+                                 dashArray: "5 5" }).addTo(forkLayer);
+  }
+}
+
 function renderResult(r) {
   const pct = r.spans ? Math.min(100, 100 * r.spans / r.span_cap) : 0;
   let h = "<div class='verdict " + (r.ok ? "ok'>READY TO RACE" : "bad'>NOT USABLE YET") + "</div>";
@@ -311,10 +444,19 @@ function renderResult(r) {
       + "<div class='bar'><i style='width:" + pct + "%;background:" + (pct > 100 ? "#ff4d3d" : "") + "'></i></div>"
       + "<table><tr><td>Worst turn</td><td>" + (r.worst_turn_deg != null ? (+r.worst_turn_deg).toFixed(1) + "&deg;" : "-") + "</td></tr>"
       + "<tr><td>Straight-ahead share</td><td>" + (r.monotone_pct != null ? r.monotone_pct + "%" : "-") + "</td></tr>"
-      + "<tr><td>Driven</td><td>" + (r.direction || "-") + "</td></tr></table>";
+      + "<tr><td>Driven</td><td>" + (r.direction || "-") + "</td></tr>"
+      + ((r.forks || []).length
+          ? "<tr><td>Forks</td><td>" + r.forks.length + " (+"
+            + (r.fork_corridor_spans || 0) + " spans)</td></tr>" : "")
+      + "</table>";
   }
-  if ((r.reasons || []).length) h += "<ul>" + r.reasons.map(x => "<li class='bad'>" + x + "</li>").join("") + "</ul>";
-  if ((r.warnings || []).length) h += "<ul>" + r.warnings.map(x => "<li class='warn'>" + x + "</li>").join("") + "</ul>";
+  if ((r.reasons || []).length) h += "<ul>" + r.reasons.map(x => "<li class='bad'>" + esc(x) + "</li>").join("") + "</ul>";
+  if ((r.warnings || []).length) h += "<ul>" + r.warnings.map(x => "<li class='warn'>" + esc(x) + "</li>").join("") + "</ul>";
+  if (r.graph)
+    h += "<p class='help'>" + r.graph.ways + " drivable way(s), "
+       + r.graph.nodes + " junction point(s)"
+       + (r.graph.components > 1 ? ", " + r.graph.components + " pieces" : ", one piece")
+       + "</p>";
   if ((r.street_names || []).length)
     h += "<p class='help'>" + r.street_names.slice(0, 10).join(" &rarr; ")
       + (r.street_names.length > 10 ? " (+" + (r.street_names.length - 10) + ")" : "") + "</p>";
@@ -326,10 +468,23 @@ $("reverseBtn").onclick = () => { if (waypoints.length >= 2) setWaypoints(waypoi
 $("sendBtn").onclick = async () => {
   $("sendBtn").disabled = true;
   status("Saving route and rebuilding terrain in its frame");
-  const r = await api("POST", "/api/save", { place: active, waypoints });
+  const r = await api("POST", "/api/save",
+                      { place: active, waypoints, forks: [...forkOn] });
   if (!r.ok) { status("Save failed: " + (r.reasons || []).join("; "), 6000); $("sendBtn").disabled = false; return; }
-  status("Sent to game: " + r.spans + " spans. Pick it under LOCATION.", 5000);
+  status("Sent to game: " + r.spans + " spans"
+         + ((r.forks || []).length ? ", " + r.forks.length + " fork(s)" : "")
+         + ". Pick it under LOCATION.", 5000);
   $("sendBtn").disabled = false;
+  refreshState();
+};
+$("forksBtn").onclick = async () => {
+  $("forksBtn").disabled = true;
+  const r = await api("POST", "/api/saveforks",
+                      { place: active, waypoints, forks: [...forkOn] });
+  $("forksBtn").disabled = false;
+  status(r.ok ? "Saved " + (r.forks || []).length + " fork(s)."
+              : "Could not save forks: " + (r.reasons || []).join("; "),
+         r.ok ? 3000 : 7000);
   refreshState();
 };
 

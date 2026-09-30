@@ -12,6 +12,7 @@ td5_geo.c
 td5_geo_roads.c
 td5_geo_buildings.c
 td5_geo_signals.c
+td5_geo_forks.c
 td5_trackgen.c
 td5_tg_world.c
 td5_tg_road.c
