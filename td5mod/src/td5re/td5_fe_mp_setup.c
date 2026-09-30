@@ -1255,18 +1255,26 @@ static void mp_draw_pane_name_banner(int p, float px, float pyr, float pane_w,
     td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
     fe_draw_quad((px + 3) * sx, (pyr + 3) * sy, (pane_w - 6) * sx, 16.0f * sy,
                  rgb | 0xD0000000u, -1, 0, 0, 1, 1);
-    if (p == 0) {
-        float badge_w = td5_vui_host_badge(px + 6.0f, pyr + 4.5f, 13.0f, sx, sy);
-        float name_l = px + 6.0f + badge_w + 5.0f;   /* reserve the badge column */
-        float name_r = px + pane_w - 3.0f;
-        mp_simul_small_centered_fit((name_l + name_r) * 0.5f * sx, (pyr + 6) * sy, buf,
-                                    0xFF000000u, sx, sy, (name_r - name_l) * sx);
-        { static int s_logged_host_badge = 0;
-          if (!s_logged_host_badge) { s_logged_host_badge = 1;
-              TD5_LOG_I(LOG_TAG, "MP setup/carsel: drew HOST badge on slot 0 (name='%s')", buf); } }
-    } else {
+    /* [BANNER CENTRING 2026-09-29] The name is ALWAYS centred on the pane
+     * centre `cx`, for every slot. Slot 0 used to be re-centred inside the
+     * band to the RIGHT of the HOST badge, so the host's name sat visibly
+     * off-centre relative to every other pane in the split. The badge is now
+     * simply overlaid at the banner's left edge; the name keeps the full pane
+     * width minus the badge column on BOTH sides as its fit budget, so a long
+     * name shrinks instead of sliding under the badge. */
+    {
+        float fit_w = pane_w - 8.0f;
+        if (p == 0) {
+            float badge_w = td5_vui_host_badge(px + 6.0f, pyr + 4.5f, 13.0f, sx, sy);
+            float reserve = badge_w + 5.0f;          /* symmetric: keep the name clear of it */
+            fit_w = pane_w - 8.0f - 2.0f * reserve;
+            if (fit_w < 24.0f) fit_w = 24.0f;
+            { static int s_logged_host_badge = 0;
+              if (!s_logged_host_badge) { s_logged_host_badge = 1;
+                  TD5_LOG_I(LOG_TAG, "MP setup/carsel: drew HOST badge on slot 0 (name='%s')", buf); } }
+        }
         mp_simul_small_centered_fit(cx * sx, (pyr + 6) * sy, buf, 0xFF000000u, sx, sy,
-                                    (pane_w - 8.0f) * sx);
+                                    fit_w * sx);
     }
 }
 

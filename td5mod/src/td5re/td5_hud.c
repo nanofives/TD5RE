@@ -493,7 +493,7 @@ static TD5_HudViewLayout s_view_layout[MAX_HUD_VIEWS];
  * a coloured frame around each viewport + a name indicator under the car, so
  * everyone can see who is driving which pane. Set by the multiplayer frontend
  * at race start; cleared for single-player races. */
-static char     s_hud_id_name[TD5_MAX_RACER_SLOTS][16];
+static char     s_hud_id_name[TD5_MAX_RACER_SLOTS][TD5_PLAYER_NAME_BUF];
 static uint32_t s_hud_id_accent[TD5_MAX_RACER_SLOTS];
 static int      s_hud_id_active;
 
@@ -2186,13 +2186,30 @@ void td5_hud_draw_pause_paused_by(void)
     hud_screen_center(&cx, &cy);
     float ps = hud_pause_scale();
 
-    char buf[32];
-    snprintf(buf, sizeof buf, "PLAYER %d PAUSED", slot + 1);
+    /* [PAUSED BY NAME 2026-09-29] Name the pauser by their loaded PROFILE name
+     * (the MP frontend pushes it into s_hud_id_name via
+     * td5_hud_set_player_identity) instead of the generic slot number, so the
+     * label reads "PAUSED BY MARIANO". A slot with no identity set (AI-filled
+     * pane, identity cleared for SP) falls back to "PLAYER N". */
+    char buf[TD5_PLAYER_NAME_BUF + 24];
+    if (slot < TD5_MAX_RACER_SLOTS && s_hud_id_name[slot][0])
+        snprintf(buf, sizeof buf, "PAUSED BY %s", s_hud_id_name[slot]);
+    else
+        snprintf(buf, sizeof buf, "PAUSED BY PLAYER %d", slot + 1);
 
     /* The BLACKBOX panel spans roughly y=[-56..56]*ps around cy (see
      * td5_hud_init_pause_menu); sit the label a little above its top edge. */
     float y  = cy - 74.0f * ps;
     float ts = 0.8f * ps;
+    /* Long profile names must not overrun the panel: shrink to fit the same
+     * width band the panel occupies (112*2 design px), like the net overlay. */
+    {
+        float maxw = 224.0f * ps;
+        for (int guard = 0; guard < 10; guard++) {
+            if (td5_vui_text_width(buf, ts) <= maxw) break;
+            ts *= 0.88f;
+        }
+    }
     td5_vui_text_centered(cx, y, buf, 0xFF66FF66u, ts, ts);   /* green, matches PLAYER labels */
 }
 

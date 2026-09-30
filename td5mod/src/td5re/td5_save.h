@@ -331,7 +331,11 @@ void     td5_save_set_player_device_index(int player, uint32_t idx);
  * ======================================================================== */
 
 typedef struct TD5_Profile {
-    char name[16];     /* player display name */
+    /* [NAME 30 2026-09-29] Widened 16 -> TD5_PLAYER_NAME_BUF (31). The store
+     * persists as INI TEXT (Profile<N>Name = ...), so every profile written by
+     * an older build (<=15 chars) still loads verbatim — and a >15-char name
+     * written now is simply ignored-as-truncated by an older build. */
+    char name[TD5_PLAYER_NAME_BUF];   /* player display name */
     int  accent;       /* MP accent/identity colour index */
     int  car;          /* last selected car index */
     int  paint;        /* car paint/variant index */
