@@ -2668,6 +2668,36 @@ int tg_finish_span(int ring)
 }
 
 /* ------------------------------------------------------ LEVELINF.DAT ----- */
+/* [W3 2026-09-29] Where this route's checkpoints go, in ring span indices.
+ * Split out of tg_emit_levelinf so the PREVIEW stats publish exactly the spans
+ * the level will ship (the track-select preview draws a tick on each), instead
+ * of a second copy of the formula drifting out of sync. Pure computation: the
+ * accounting + logging stay with the emitter. Fills cp_span[7] (zero-padded)
+ * and returns the count. */
+int tg_checkpoint_spans(int ring, int *cp_span)
+{
+    const int finish = tg_finish_span(ring);
+    int cp_count = 4, i;
+
+    for (i = 0; i < 7; i++) cp_span[i] = 0;
+    if (ring < 200) cp_count = 2;
+    if (finish > 0) {
+        /* Evenly spaced from the grid to the finish, LAST one exactly on the
+         * finish span -- that crossing is what ends the race. */
+        const int span0 = TD5_TG_GRID_SPAN;
+        for (i = 0; i < cp_count; i++)
+            cp_span[i] = span0 + (int)((long)(finish - span0) * (i + 1)
+                                       / cp_count);
+    } else {
+        /* Ring too short for a grid + race + run-off: fall back to the old
+         * proportional placement rather than shipping a track that cannot be
+         * finished. */
+        for (i = 0; i < cp_count; i++)
+            cp_span[i] = (int)((long)ring * (i + 1) / (cp_count + 1));
+    }
+    return cp_count;
+}
+
 /* 100 bytes. The level loader reads DWORD[0] (1 = circuit, else
  * point-to-point) and keeps the rest as opaque environment config. */
 int tg_emit_levelinf(const TD5_TrackGenSpec *spec, int nspans,
@@ -2678,29 +2708,17 @@ int tg_emit_levelinf(const TD5_TrackGenSpec *spec, int nspans,
      * corridors. s_ring_len is set by tg_emit_strip, which always runs first. */
     const int ring = (s_ring_len > 0) ? s_ring_len : nspans;
     const int finish = tg_finish_span(ring);
-    int cp_count = 4, i;
     int cp_span[7];
+    int cp_count = tg_checkpoint_spans(ring, cp_span);
+    int i;
 
-    for (i = 0; i < 7; i++) cp_span[i] = 0;
-    if (ring < 200) cp_count = 2;
     if (finish > 0) {
-        /* Evenly spaced from the grid to the finish, LAST one exactly on the
-         * finish span -- that crossing is what ends the race. */
-        const int span0 = TD5_TG_GRID_SPAN;
-        for (i = 0; i < cp_count; i++) {
-            cp_span[i] = span0 + (int)((long)(finish - span0) * (i + 1)
-                                       / cp_count);
+        for (i = 0; i < cp_count; i++)
             tg_acct(TG_ACCT_CHECKPOINT, cp_span[i]);
-        }
         TD5_LOG_I(LOG_TAG, "trackgen: finish span %d of ring %d (%d spans of "
                   "run-off past the line), %d checkpoints",
                   finish, ring, ring - finish, cp_count);
     } else {
-        /* Ring too short for a grid + race + run-off: fall back to the old
-         * proportional placement rather than shipping a track that cannot be
-         * finished. */
-        for (i = 0; i < cp_count; i++)
-            cp_span[i] = (int)((long)ring * (i + 1) / (cp_count + 1));
         TD5_LOG_W(LOG_TAG, "trackgen: ring %d too short to place a finish with "
                   "run-off; using proportional checkpoints", ring);
     }
@@ -4268,6 +4286,11 @@ int td5_trackgen_preview_route(const TD5_TrackGenSpec *spec,
          * so no caller can reproduce it from ring_len and the RUN-OFF knob. */
         out_stats->grid_span   = TD5_TG_GRID_SPAN;
         out_stats->finish_span = tg_finish_span(s_ring_len);
+        /* [W3 2026-09-29] Same ring the emitter uses (s_ring_len, falling back
+         * to nspans before tg_emit_strip has set it), so the preview's ticks are
+         * the level's real checkpoints and not a re-derivation. */
+        out_stats->cp_count = tg_checkpoint_spans(
+            (s_ring_len > 0) ? s_ring_len : nspans, out_stats->cp_span);
         out_stats->fork_count = s_fork_count;
         out_stats->cancelled  = s_preview_cancelled;
         for (s = 0; s < TD5_TG_SECTION_COUNT; s++)

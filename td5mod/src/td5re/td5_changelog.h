@@ -32,6 +32,13 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 29 (track select)" },
+    { CL_ITEM,    "SELECT TRACK: the randomize button is gone. Press R or" },
+    { CL_ITEM,    "  the pad's X to pick a random track (hint bottom right)." },
+    { CL_ITEM,    "Track previews now mark every checkpoint with a white" },
+    { CL_ITEM,    "  tick across the road, auto-generated tracks included." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 29 (traffic + cop chase)" },
     { CL_ITEM,    "Traffic no longer hits invisible walls where lanes" },
     { CL_ITEM,    "  merge after a fork (it piled up or pushed through)." },
