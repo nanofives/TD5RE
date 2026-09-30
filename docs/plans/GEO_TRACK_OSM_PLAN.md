@@ -635,10 +635,54 @@ Follow-ups done 2026-09-30 (before merge):
 
 Still open:
 - Plaza lawn texture is stretched along long strips (UVs follow the outline).
-- `TD5RE_AUTOTRACK_STREAM=0` with REUSE at its default produced one build with
-  no TEXTURES.DAT in level090.zip and no scenery; the default streamed path and
-  the harness (STREAM=0 + REUSE=0) are fine. Dev-only combination, not chased.
+- ~~`TD5RE_AUTOTRACK_STREAM=0` with REUSE at its default produced one build with
+  no TEXTURES.DAT in level090.zip and no scenery.~~ **Root-caused 2026-09-30: not
+  STREAM, not REUSE.** It was the R22 SCENERY presence roll, which is OFF on 12%
+  of seeds (`k_tgr_w_scarce`), and an OFF SCENERY deletes MODELS.DAT and
+  TEXTURES.DAT by design. The harness never saw it because it pins seed
+  20260901 (SCENERY ON). Repro: La Plata, seed 20260902, STREAM=0 -> the same
+  engine.log line; the same seed through the GENSTAMP reuse path and through
+  STREAM=0/REUSE=0 behaves identically. Fix: on a geo track (TD5RE_GEO_PLACE or
+  TD5RE_GEO_ROUTE set) the resolver holds the rows that describe the real place
+  ON (SCENERY, TERRAIN, BACKDROP, COASTLINE, BRIDGES, TUNNELS, DISTRICTS,
+  BUILDING MASS, CROSSINGS, SIDE STREETS, ROAD MARKS, INTERSECTIONS, SIDEWALKS)
+  and SNOW OFF, human pins excepted, logged as `HELD by the real place (GEO)`.
+  Seed 20260902 now builds 373 meshes; seed 20260901 is byte-identical to
+  before (MODELS `50C8E8FC902D4BAA`); synthetic seed 20260901 byte-identical.
 - Landmark prefab fallback and roof:shape only exercised on 2 buildings.
+
+## 6g. La Plata driven end to end (item 10, 2026-09-30)
+
+Automated: `verify/xspan_run.ps1 -Route re/assets/geo/la_plata/ROUTE.JSON
+-Extra @{TD5RE_GEO_PLACE='la_plata'}`, 5 AI racers, RaceTrace on every slot,
+300-420 s. The engine side is clean: all 5 cars finish (span 1292), span_raw
+continuous on every slot (0 tick-to-tick jumps over 3 spans), no respawn, no
+OOB rescue, no all-wheels-off run longer than 15 ticks.
+
+What it found was the AI, not the track. 1367 wall-contact ticks before the
+line, 86% at three corners (410, 970, 1473), each the SECOND corner of an S.
+Traced per tick: the SMART racing line clamps at `SMART_RAY_MARGIN` = 6% of
+the road WIDTH from the rail, the car sat at u=0.14 on a 2-lane street where
+its half-width is ~0.14, and it pinned against the inside kerb with full lock
+for 1-13 s while the cars behind piled in. The strip itself was checked for a
+folded inner edge at those spans (inner-edge advance never below 683 of 1500
+units): it does not fold.
+
+Fix (`td5_ai.c`, SECTION "GEO corner edge"): on the auto-track slot with a geo
+route the final lateral clamp keeps `TD5RE_AI_GEO_EDGE` = 900 track units off
+each rail. Same seed, same route:
+
+| Variant | Wall ticks before finish | Mean finish tick |
+|---|---|---|
+| master | 1367 | 5824 |
+| edge 900 (shipped) | 238 | 4648 |
+| braking-distance governor only (rejected) | 3466 | 7608 |
+| DRIVER model, for reference | 797 | 5152 |
+
+The braking governor (corner speed `C*sqrt(R)`, measured decel) was built and
+dropped on these numbers: a slower car cuts the same apex and pins harder.
+Shipped tracks: Moscow and TD6 run the unchanged path (the gate needs the auto
+slot and a geo route) and were A/B'd tick by tick against the master exe.
 
 ## 7. Phases
 
