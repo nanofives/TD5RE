@@ -1404,6 +1404,51 @@ static int32_t traffic_edge_pen(int32_t a_x, int32_t a_z,
     return pen;
 }
 
+/* [TRAFFIC EDGE SEGMENT 2026-09-29] PORT-ONLY. The edge test above treats the
+ * rail as an INFINITE line (faithful to 0x00407390). On a span whose rail is
+ * diagonal -- the inner rail of a lane-add span (type 2-4) where the new lane
+ * opens on the k=0 side, e.g. Newcastle 471/472 flaring ~45 deg -- the line's
+ * extension BEHIND the span's start row cuts into the lane that continues
+ * straight, so a car in that lane (sub=1) is "past the wall" while ~200 units
+ * clear of the real curb (measured: slot 12 at the 471 start row, dist 319 to
+ * the line vs half-width 359, perpendicular foot 476 units behind the row).
+ * Only push when the perpendicular foot lies on the A..B segment; off the
+ * segment the neighbouring span's rail is the real boundary.
+ * TD5RE_TRAFFIC_EDGE_SEGMENT=0 restores the infinite-line test. */
+static int trf_edge_segment_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_flag_on("TD5RE_TRAFFIC_EDGE_SEGMENT");
+        TD5_LOG_I(LOG_TAG, "traffic_edge knob: TD5RE_TRAFFIC_EDGE_SEGMENT=%d", s);
+    }
+    return s;
+}
+
+/* [TRAFFIC EDGE BOTH 2026-09-29] The original 0x00407390 runs the outer test
+ * after an inner hit in the same tick (no return between them); the port
+ * returned early. TD5RE_TRAFFIC_EDGE_BOTH=0 restores the early return. */
+static int trf_edge_both_enabled(void)
+{
+    static int s = -1;
+    if (s < 0) {
+        s = td5_env_flag_on("TD5RE_TRAFFIC_EDGE_BOTH");
+        TD5_LOG_I(LOG_TAG, "traffic_edge knob: TD5RE_TRAFFIC_EDGE_BOTH=%d", s);
+    }
+    return s;
+}
+
+/* 1 when the foot of the perpendicular from the car (rel = car - A) onto the
+ * rail A->B falls within the segment. */
+static int traffic_edge_foot_on_segment(int32_t a_x, int32_t a_z,
+                                        int32_t b_x, int32_t b_z,
+                                        int32_t rel_x, int32_t rel_z)
+{
+    int64_t ex = (int64_t)b_x - a_x, ez = (int64_t)b_z - a_z;
+    int64_t t  = (int64_t)rel_x * ex + (int64_t)rel_z * ez;
+    return t >= 0 && t <= ex * ex + ez * ez;
+}
+
 /* ProcessActorSegmentTransition — port of 0x00407390.
  *
  * Tests the inner (sub_lane < 2) and outer (sub_lane >= lane_count-2) edges
@@ -1411,78 +1456,35 @@ static int32_t traffic_edge_pen(int32_t a_x, int32_t a_z,
  * [CONFIRMED @ 0x00407390: called from UpdateTrafficActorMotion 0x443ED0]
  *
  * The car_definition_ptr carries:
- *   *(int16_t*)(car_def + 0x08) = half-length equivalent  [CONFIRMED @ 0x407424]
- *   *(int16_t*)(car_def + 0x0C) = half-width equivalent   [CONFIRMED @ 0x407420]
+ *   *(int16_t*)(car_def + 0x08) = cos(hd) term  [CONFIRMED @ 0x407424] (runtime 359)
+ *   *(int16_t*)(car_def + 0x0C) = sin(hd) term  [CONFIRMED @ 0x407420] (runtime 718)
  *
- * [L4 — Frida-pending] Multiple algorithmic divergences vs orig
- * 0x00407390. Documented here per L5 promotion audit 2026-05-18.
- * Resolution unblocks on Frida-traced traffic-wall contact comparison
- * (see todo_traffic_route_advance_lane_count_byte_2026-05-18.md for the
- * unblock criterion). NOT ARCH-DIVERGENCE — these are genuine math gaps:
- *
- *   1) DOT-PRODUCT SEMANTIC MISMATCH (the dominant divergence)
- *      Orig builds the *rotated outward normal* of edge A→B via
- *      `local_8 = (B.z - A.z, 0, A.x - B.x)` and normalizes it to length
- *      4096 via ConvertFloatVec4ToShortAngles @ 0x0042CDB0 (FPU
- *      x²+y²+z²→FSQRT→4096/len→FMUL→ftol). It then computes
- *      `pen = ((world - origin - A) . local_8) - car_size_proj` — a
- *      *signed perpendicular distance* (geometric cross-product component
- *      of (rel) and the unit edge direction).
- *
- *      Port computes `tan = (cos(atan2(tdz,tdx)), sin(atan2(tdz,tdx)))`
- *      and dots `(rel . tan)` — a *parallel projection along the edge*,
- *      NOT the perpendicular distance. These give different signs in
- *      general; only the angle passed to ApplySimpleTrackSurfaceForce
- *      remains the same.
- *
- *   2) REFERENCE-POINT MISMATCH
- *      Orig dots from psVar1 (the edge endpoint), port dots from the span
- *      origin. The car-size projection subtraction is identical but the
- *      pre-subtraction term is offset by `-psVar1`.
- *
- *   3) VERTEX-PAIR SWAP (OUTER TEST)
- *      Orig outer-test uses `psVar1 = vertex(strip[+0x04] + DAT_004631a0
- *      + nibble) = left_vertex_index+offset+nibble`, port uses
- *      `right_vertex_index+offset+outer_sub`. The port comment at line 5254
- *      claims "strip[+0x04] = right_vertex_index" but td5_types.h:383-384
- *      assigns strip[+0x04] = left_vertex_index. The swap is internally
- *      inconsistent and likely contributes a sign flip on outer-edge tests.
- *
- *   4) (PARTIAL CLOSE) lane_count byte source (+0x03 not +0x01) — fixed
- *      2026-05-18 commit ef0e862. Outer_sub mapping (= lane_count not
- *      lane_count-1) — fixed same commit. These two are no longer
- *      divergent.
- *
- * Why this still ships:
- *
- *   The traffic-bias-clamp slot gate shipped 2026-05-17 (commit 79023df F1)
- *   bounds the pre-loop to slots 0..5 (TD5_MAX_RACER_SLOTS), preventing
- *   traffic from cascading into the racer steering pipeline. The
- *   remaining edge-test errors fire only at traffic-wall contact ticks
- *   which are rare enough that no current Wave3 scenario isolates this
- *   path. San Francisco scenario (slot 6+ traffic, see
- *   reference_san_francisco_ai_completion_2026-05-16.md) is the closest
- *   isolated test bed but no traffic-wall contacts have been Frida-traced
- *   yet.
- *
- * Unblock criterion (per todo): Frida hook at orig 0x004073D8 + port
- * traffic_edge_pen entrypoint capturing (slot, span, sub_lane, type, A.x,
- * A.z, B.x, B.z, rel.x, rel.z, pen_orig, pen_port) at the first
- * traffic-wall contact tick. If `sign(pen_orig) == sign(pen_port)`
- * across all sampled ticks the divergence is benign and these notes
- * upgrade to ARCH-DIVERGENCE; otherwise file as a fix-required regression.
- *
- * NOTE: confirmed byte-faithful for: lane_count byte source (+0x03,
- * fixed 2026-05-18), outer_sub mapping (= lane_count, fixed 2026-05-18),
- * inner/outer trigger conditions (sub_lane < 2 / sub_lane >= lane_count-2),
- * DAT_004631a0 outer-vertex LUT (k_outer_left_offsets matches orig dump),
- * ApplySimpleTrackSurfaceForce wiring + DecayUltimateVariantTimer wiring.
+ * [2026-09-29 audit, supersedes the 2026-05-18 L4 note] Matches the original
+ * [CONFIRMED @ 0x00407390, re/ghidra_export]: perpendicular distance from edge
+ * endpoint A (psVar1) to the rotated, 4096-normalized edge normal, minus
+ * sin(hd)*(+0x0C) + cos(hd)*(+0x08); inner rail = vtx[+6] -> vtx[+4] with no
+ * LUT (gate sub<2); outer rail uses the DAT_004631a0 LUT (gate sub>=lanes-2).
+ * The old "parallel projection / reference point / vertex swap" divergences were
+ * fixed 2026-05-26. Labels: at runtime +0x0C is the LARGER half-extent (718 on
+ * Newcastle traffic) and +0x08 the smaller (359), so +0x08 behaves as the
+ * half-WIDTH (hd=0 -> width across the rail) despite the variable names.
+ * Remaining port differences:
+ *   - no UpdateTrafficVehiclePose call after the push (orig 0x0040738A path);
+ *   - PORT-ONLY segment clamp + both-edge order, see the two knobs above.
  */
 /* [TRAFFIC EDGE LOG 2026-09-29] DEV diagnostic: TD5RE_TRAFFIC_EDGE_LOG=1 logs the
  * traffic segment-edge containment hits (sampled 1 in 15 per slot) so a stalled
  * traffic car can be checked for being pinned by an edge push. */
+/* [TRAFFIC EDGE DIAG 2026-09-29] geometry fields: edge endpoints A/B (span-local),
+ * car position relative to A, perpendicular distance to the edge line before the
+ * car-extent subtraction (dist = proj/4096, world units, + = inside), the extent
+ * that was subtracted (ext = extent/4096), folded heading delta hd, the car half
+ * dims, and the span type. Counted by tools/traffic_zone/forkzone.py. */
 static void trf_edge_log(int slot, const TD5_Actor *actor, const char *edge,
-                         int sub, int lanes, int32_t pen, uint32_t ang)
+                         int sub, int lanes, int32_t pen, uint32_t ang,
+                         int type, int32_t ax, int32_t az, int32_t bx, int32_t bz,
+                         int32_t rx, int32_t rz, int32_t ext, uint32_t hd,
+                         int hw, int hl)
 {
 #ifndef TD5RE_RELEASE
     static int on = -1;
@@ -1490,11 +1492,15 @@ static void trf_edge_log(int slot, const TD5_Actor *actor, const char *edge,
     if (on < 0) on = td5_env_int("TD5RE_TRAFFIC_EDGE_LOG", 0, 0, 1);
     if (!on || slot < 0 || slot >= TD5_MAX_TOTAL_ACTORS) return;
     if ((cnt[slot]++ % 15u) != 0u) return;
-    TD5_LOG_I(LOG_TAG, "traffic_edge_hit: slot=%d span=%d edge=%s sub=%d lanes=%d pen=%d ang=0x%X v=%d",
+    TD5_LOG_I(LOG_TAG, "traffic_edge_hit: slot=%d span=%d edge=%s sub=%d lanes=%d pen=%d ang=0x%X v=%d "
+              "type=%d A=(%d,%d) B=(%d,%d) rel=(%d,%d) dist=%d ext=%d hd=%u hw=%d hl=%d",
               slot, (int)actor->track_span_raw, edge, sub, lanes, (int)pen, (unsigned)ang,
-              (int)actor->longitudinal_speed);
+              (int)actor->longitudinal_speed, type, (int)ax, (int)az, (int)bx, (int)bz,
+              (int)rx, (int)rz, (int)((pen + ext) / 4096), (int)(ext / 4096), (unsigned)hd, hw, hl);
 #else
     (void)slot; (void)actor; (void)edge; (void)sub; (void)lanes; (void)pen; (void)ang;
+    (void)type; (void)ax; (void)az; (void)bx; (void)bz; (void)rx; (void)rz; (void)ext;
+    (void)hd; (void)hw; (void)hl;
 #endif
 }
 
@@ -1557,8 +1563,15 @@ void process_traffic_segment_edge(TD5_Actor *actor, int slot)
             cos_hd, sin_hd,
             &edge_angle);
 
-        if (pen < 0) {
-            trf_edge_log(slot, actor, "inner", sub_lane, lane_count, pen, edge_angle);
+        if (pen < 0 && trf_edge_segment_enabled() &&
+            !traffic_edge_foot_on_segment(A->x, A->z, B->x, B->z, arel_x, arel_z)) {
+            trf_edge_log(slot, actor, "inner_offseg", sub_lane, lane_count, pen, edge_angle,
+                         span_type, A->x, A->z, B->x, B->z, arel_x, arel_z,
+                         sin_hd * car_half_w + cos_hd * car_half_l, hd, car_half_w, car_half_l);
+        } else if (pen < 0) {
+            trf_edge_log(slot, actor, "inner", sub_lane, lane_count, pen, edge_angle,
+                         span_type, A->x, A->z, B->x, B->z, arel_x, arel_z,
+                         sin_hd * car_half_w + cos_hd * car_half_l, hd, car_half_w, car_half_l);
             apply_simple_track_surface_force(actor, edge_angle, pen);
             /* DecayUltimateVariantTimer [CONFIRMED @ 0x0040A440]:
              * encounter mode 4 erodes the actor's clean_driving_score by 1
@@ -1567,7 +1580,7 @@ void process_traffic_segment_edge(TD5_Actor *actor, int slot)
                 if (actor->clean_driving_score > 0) actor->clean_driving_score -= 1;
                 if (actor->clean_driving_score < 0) actor->clean_driving_score  = 0;
             }
-            return;
+            if (!trf_edge_both_enabled()) return;
         }
     }
 
@@ -1612,8 +1625,15 @@ outer_test:
             cos_hd, sin_hd,
             &edge_angle);
 
-        if (pen < 0) {
-            trf_edge_log(slot, actor, "outer", sub_lane, lane_count, pen, edge_angle);
+        if (pen < 0 && trf_edge_segment_enabled() &&
+            !traffic_edge_foot_on_segment(A->x, A->z, B->x, B->z, arel_x, arel_z)) {
+            trf_edge_log(slot, actor, "outer_offseg", sub_lane, lane_count, pen, edge_angle,
+                         span_type, A->x, A->z, B->x, B->z, arel_x, arel_z,
+                         sin_hd * car_half_w + cos_hd * car_half_l, hd, car_half_w, car_half_l);
+        } else if (pen < 0) {
+            trf_edge_log(slot, actor, "outer", sub_lane, lane_count, pen, edge_angle,
+                         span_type, A->x, A->z, B->x, B->z, arel_x, arel_z,
+                         sin_hd * car_half_w + cos_hd * car_half_l, hd, car_half_w, car_half_l);
             apply_simple_track_surface_force(actor, edge_angle, pen);
             /* DecayUltimateVariantTimer [CONFIRMED @ 0x0040A440] — same as inner-edge */
             if (g_td5.special_encounter_enabled == 4 && actor->finish_time == 0) {

@@ -211,7 +211,9 @@ static int fmv_init_media_foundation(void)
 
 static void fmv_shutdown_media_foundation(void)
 {
+    TD5_LOG_I("fmv", "fmv: MFShutdown begin");
     MFShutdown();
+    TD5_LOG_I("fmv", "fmv: MFShutdown end");
 
     if (s_fmv.com_initialized) {
         CoUninitialize();
