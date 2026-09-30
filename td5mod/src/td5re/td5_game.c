@@ -4903,17 +4903,18 @@ static void init_race_race_systems(void)
      * td5_input_set_input_source() itself, so any seat binding written earlier
      * is clobbered. Running it first also does the useful half of the job (it
      * enumerates the devices and pushes each slot's saved joystick + per-action
-     * binding rows); this pass then overrides only the device index. The setter
-     * creates/releases the DirectInput device for the slot, so every seat's
-     * device is actually acquired. Seats on the SAME physical device (the
-     * TD5RE_CHAOS_FAKE_SEATS case, all on keyboard) are fine: source 0 just
-     * releases that slot's joystick. */
+     * binding rows); this pass then re-points each seat at its own device with
+     * td5_input_apply_device_for_slot(), which binds the device AND pushes the
+     * binding rows that follow THAT device (a bare td5_input_set_input_source()
+     * swapped the device but left the slot's previous owner's binding rows).
+     * Seats on the SAME physical device (the TD5RE_CHAOS_FAKE_SEATS case, all on
+     * keyboard) are fine: source 0 just releases that slot's joystick. */
     {
         int seats = td5_chaos_seat_count(), s;
         for (s = 0; s < seats && s < TD5_MAX_HUMAN_PLAYERS; s++) {
             int dev = td5_chaos_device_of_seat(s);
             if (dev < 0) continue;
-            td5_input_set_input_source(s, dev);
+            td5_input_apply_device_for_slot(s, dev);
             TD5_LOG_I(LOG_TAG, "[CHAOS] seat=%d team=%d -> input slot %d device=%d",
                       s, td5_chaos_team_of_seat(s), s, dev);
         }
