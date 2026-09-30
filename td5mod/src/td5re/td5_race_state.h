@@ -78,6 +78,11 @@ int32_t td5_game_get_result_top_speed(int slot); /* top speed raw units */
 int32_t td5_game_get_result_avg_speed(int slot); /* average speed raw units */
 int     td5_game_get_victory_position(void);
 int     td5_game_is_countdown_active(void);
+/* [CHAOS CO-OP 2026-09-29] Checkpoint records on the active track (0 on a
+ * circuit, <=5 elsewhere; synthesized from banner meshes on migrated TD6
+ * tracks). td5_chaos.c sizes the "CP n/N" HUD readout with it. Also declared
+ * in td5_game.h; signature identical. */
+int     td5_game_get_minimap_checkpoint_count(void);
 
 /* --- Drag-strip configuration (read-only) ------------------------------- */
 int  td5_game_drag_field_size(void);
