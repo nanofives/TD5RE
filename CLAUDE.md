@@ -179,6 +179,7 @@ comment — regenerate after adding/splitting modules with
 | `td5_geo_roads.c` | GEO TRACK: real OSM road graph (ROADS.JSON) reader (PORT-ONLY) |
 | `td5_geo_buildings.c` | GEO TRACK: real OSM building footprints and area |
 | `td5_geo_signals.c` | GEO TRACK: traffic-signal nodes + the lamp cycle |
+| `td5_geo_forks.c` | GEO TRACK: CONFIRMED FORKS for a real place (PORT-ONLY). |
 | `td5_trackgen.c` | procedural (AUTO-GENERATED) track builder: spec, RNG, centerline, elevation, strip + routes, scenery orchestration, build/regenerate entry points (PORT-ONLY) |
 | `td5_tg_world.c` | auto-track WORLD: seeded heightfield (sea, coast, rivers, mountains, flats), sparse conform/occupancy overlay, terrain classes |
 | `td5_tg_road.c` | auto-track ROAD on the WORLD: terrain-steered centerline walk, structure table (bridge/tunnel by terrain, not by hash), grade-limited terrain-following elevation, road-bed conform |
