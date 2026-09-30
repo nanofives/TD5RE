@@ -489,7 +489,10 @@ typedef enum TD5_ScreenIndex {
      * preset page (AUTO-SELECT / QUALITY / LIGHTING / CUSTOM ->) and this is
      * where its "CUSTOM ->" row lands. */
     TD5_SCREEN_PERFORMANCE_CUSTOM  = 54,
-    TD5_SCREEN_COUNT               = 55
+    /* [CHAOS CO-OP 2026-09-29] Screen_ChaosTeams (td5_fe_chaos.c) — seat/role
+     * claim board for TD5_MP_MODE_CHAOS_COOP, after MP MODE CONFIG. */
+    TD5_SCREEN_CHAOS_TEAMS         = 55,
+    TD5_SCREEN_COUNT               = 56
 } TD5_ScreenIndex;
 
 /* ========================================================================
@@ -520,8 +523,41 @@ typedef enum TD5_MpGameMode {
      * TRAFFIC on/off, DISTANCE preset (SHORT/MEDIUM/LONG/EPIC), EXTRA LANES on top
      * of the per-player lanes. Win = race to the finish (standard placement). */
     TD5_MP_MODE_DRAG_RACE      = 4,
-    TD5_MP_MODE_COUNT          = 5
+    /* [CHAOS CO-OP 2026-09-29] One car per team, many drivers: 4/6/8 LOCAL
+     * humans split into 2 teams; every human holds ONE control axis of their
+     * team's car and the roles rotate inside the team on track milestones.
+     * Local only (never offered while network_active). PORT-ONLY.
+     * Plan: docs/plans/CHAOS_COOP_MODE_PLAN.md; module td5_chaos.c. */
+    TD5_MP_MODE_CHAOS_COOP     = 5,
+    TD5_MP_MODE_COUNT          = 6
 } TD5_MpGameMode;
+
+/* [CHAOS CO-OP 2026-09-29] Seat/role vocabulary (td5_chaos.h owns the logic).
+ * A SEAT is one human + one controller. Team t (0 = RED, 1 = BLUE) drives racer
+ * slot t. A role is a property of the ROW a seat occupies in its team; rotation
+ * shifts every seat down one row (row team_size-1 wraps to row 0). */
+#define TD5_CHAOS_MAX_SEATS 8
+#define TD5_CHAOS_TEAMS     2
+
+typedef enum TD5_ChaosRole {
+    TD5_CHAOS_ROLE_NONE     = 0,
+    TD5_CHAOS_ROLE_STEER    = 1,  /* both steering directions (team of 2)      */
+    TD5_CHAOS_ROLE_LEFT     = 2,  /* left half of the steering axis only        */
+    TD5_CHAOS_ROLE_RIGHT    = 3,  /* right half of the steering axis only       */
+    TD5_CHAOS_ROLE_PEDALS   = 4,  /* throttle + brake + handbrake (teams of 2-3)*/
+    TD5_CHAOS_ROLE_THROTTLE = 5,  /* throttle half of the pedal axis only       */
+    TD5_CHAOS_ROLE_BRAKE    = 6   /* brake half of the pedal axis + handbrake   */
+} TD5_ChaosRole;
+
+/* What arms a role rotation (then a 3 s countdown runs before the swap). */
+typedef enum TD5_ChaosTrigger {
+    TD5_CHAOS_TRIGGER_CHECKPOINT = 0, /* P2P: real checkpoint; circuit: quarter lap */
+    TD5_CHAOS_TRIGGER_HALF_LAP   = 1, /* P2P: every other checkpoint; circuit: half lap */
+    TD5_CHAOS_TRIGGER_LAP        = 2, /* circuit lap crossing                       */
+    TD5_CHAOS_TRIGGER_TIME       = 3, /* every chaos_period_secs (only one valid on drag) */
+    TD5_CHAOS_TRIGGER_OFF        = 4,
+    TD5_CHAOS_TRIGGER_COUNT      = 5
+} TD5_ChaosTrigger;
 
 /** Traffic-battle win condition (battle_win_condition). */
 typedef enum TD5_BattleWinCondition {
@@ -644,6 +680,10 @@ typedef struct TD5_MpModeConfig {
      * the player, making it harder to ram). Replicated host->clients for
      * lockstep. Appended at the END for a stable wire layout. */
     int32_t battle_evasive;
+    /* [CHAOS CO-OP 2026-09-29] NOTE: the chaos seat table deliberately does NOT
+     * live here. This struct is embedded in TD5_NetRaceConfig, a fixed-size wire
+     * format (_Static_assert in td5_net.h), and CHAOS CO-OP is local-only, so its
+     * config is TD5_ChaosConfig, owned by td5_chaos.c (td5_chaos_commit_config). */
 } TD5_MpModeConfig;
 
 /* ========================================================================

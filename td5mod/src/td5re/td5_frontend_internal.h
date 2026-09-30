@@ -102,6 +102,33 @@ void Screen_CupWinners(void);    /* final cup standings / podium                
 void Screen_MpCopRoles(void);    /* cop chase: each player picks cop / suspect    */
 void Screen_MpTeamSelect(void);  /* cup teams: each player picks their team       */
 
+/* ---- [CHAOS CO-OP 2026-09-29] CHAOS TEAMS board (td5_fe_chaos.c) ----
+ * Seat/role claim board for TD5_MP_MODE_CHAOS_COOP, entered from MP MODE
+ * CONFIG and leaving to the MP car grid with exactly TWO pickers (one per
+ * team). Plan: docs/plans/CHAOS_COOP_MODE_PLAN.md sections 6.2-6.4. */
+void Screen_ChaosTeams(void);
+void frontend_chaos_teams_render(float sx, float sy);
+/* 1 when CHAOS CO-OP may be picked with the CURRENT lobby roster (4/6/8 local
+ * humans, no AI test players, not a network session). `why` (may be NULL) gets
+ * a short reason line when the answer is 0. Shared with the MP MODE VOTE gate. */
+int  frontend_chaos_mode_selectable(const char **why);
+/* Frontend-side DRAFT of the chaos config, edited by the MP MODE CONFIG rows
+ * (mp_cfg_build points MpCfgOpt.val at these) and committed on the board. */
+int32_t *frontend_chaos_draft_trigger(void);        /* TD5_ChaosTrigger      */
+int32_t *frontend_chaos_draft_period(void);         /* TIME trigger, 10..60  */
+int32_t *frontend_chaos_draft_ai_opponents(void);   /* 0..4                  */
+void frontend_chaos_apply_defaults(void);           /* mp_mode_config_apply_defaults */
+const char *frontend_chaos_trigger_name(int trigger);
+const char *const *frontend_chaos_trigger_names(void);   /* TD5_CHAOS_TRIGGER_COUNT entries */
+/* 1 once the board committed a seat table and the race being set up is chaos:
+ * the MP setup path collapses it to 2 cars / 2 panes and the car grid's two
+ * pickers read frontend_chaos_pane_device(). Cleared by
+ * frontend_chaos_clear_pending() on any step back toward the board. */
+int  frontend_chaos_pending(void);
+int  frontend_chaos_pane_device(int pane);          /* input source for pane 0/1 */
+int  frontend_chaos_ai_opponents(void);             /* committed AI field size   */
+void frontend_chaos_clear_pending(void);
+
 /* ---- CHANGELOG (2026-06-25) / PENDING TO TEST (2026-06-25) ----
  * Screen_Changelog / Screen_PendingTest declared in td5_fe_devscreens.h. */
 
@@ -1120,6 +1147,20 @@ int   frontend_qr_random_button_on(void);                                       
 void  frontend_qr_roll_selector(int which);                                                    /* td5_frontend.c */
 int   frontend_mp_player_pane_cell(int p);                                                     /* td5_fe_race.c */
 int   mp_profiles_enabled(void);                                                               /* td5_fe_race.c */
+
+/* [CHAOS CO-OP 2026-09-29] Promoted from td5_fe_race.c statics so td5_fe_chaos.c
+ * reuses THE routine instead of duplicating it (per-device nav, the MP-flow
+ * screen title, and the lost-pad freeze every MP setup screen runs). */
+uint32_t mp_simul_player_nav(int player);   /* 1 L 2 R 4 U 8 D 0x10 A 0x20 B */
+void fe_race_draw_screen_title(const char *text, float left_x, float top_y,
+                               uint32_t color, float sx, float sy);
+/* As above, condensed so the laid-out title never exceeds max_w_px SCREEN px
+ * (<= 0 disables the cap). For headers that share their band with something
+ * right-aligned: title width scales with sy, the canvas with sx, so a header
+ * that clears at 16:9 can still collide at 4:3 — and translations are longer. */
+void fe_race_draw_screen_title_fit(const char *text, float left_x, float top_y,
+                                   uint32_t color, float sx, float sy, float max_w_px);
+int  frontend_mp_setup_disconnect_check(int n);   /* 1 = frozen on a lost pad */
 
 /* @GENERATED-SYMBOLS@ */
 

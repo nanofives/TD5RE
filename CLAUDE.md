@@ -204,6 +204,7 @@ comment — regenerate after adding/splitting modules with
 | `td5_fe_mp_setup.c` | Multiplayer setup: split layouts, car-select grid, |
 | `td5_fe_carstats.c` | Car stat bars + physics-derived MORE STATS panel |
 | `td5_fe_devscreens.c` | CHANGELOG + PENDING TO TEST dev screens |
+| `td5_fe_chaos.c` | CHAOS CO-OP frontend: the CHAOS TEAMS seat/role board |
 | `td5_font.c` | runtime TTF glyph cache (stb_truetype). See td5_font.h. |
 | `td5_i18n.c` | runtime string localization (PORT-ONLY). See td5_i18n.h. |
 | `td5_hud.c` | Race HUD, minimap, text rendering, pause menu overlay |
@@ -233,6 +234,8 @@ comment — regenerate after adding/splitting modules with
 | `td5_rt.c` | game-side ray-traced lighting layer (LIGHTING QUALITY: HIGH). |
 | `td5_damage.c` | GTA4-style car damage system (PORT-ONLY) |
 | `td5_tutorial.c` | First-race controller-tutorial overlay (PORT ENHANCEMENT). |
+| `td5_chaos.c` | CHAOS CO-OP: seat table, role map, rotation (PORT-ONLY) |
+| `td5_chaos_fold.c` | CHAOS CO-OP: N-seat -> 2-car input fold (PORT-ONLY) |
 | `td5_laneassist.c` | optional steering aid (PORT-ONLY, default OFF) |
 | `td5_fmv.c` | FMV playback module (replaces EA TGQ codec) |
 | `td5_benchmark.c` | Benchmark frame-rate capture + report |

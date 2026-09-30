@@ -170,6 +170,7 @@ static const ScreenDesc s_screens[TD5_SCREEN_COUNT] = {
     /* [52] */ { "AUTO TRACK STUDIO",    Screen_AutoTrackOptions },/* [AUTOTRACK R2 item 25] generator knobs */
     /* [53] */ { "PERFORMANCE",          Screen_PerformanceOptions },/* [PERF PRESETS 2026-09-29] auto-select + quality/lighting presets */
     /* [54] */ { "PERFORMANCE CUSTOM",   Screen_PerformanceCustom },/* [PERF PRESETS 2026-09-29] the per-knob list (was screen 53) */
+    /* [55] */ { "CHAOS TEAMS",           Screen_ChaosTeams },      /* [CHAOS CO-OP 2026-09-29] seat/role board */
 };
 
 /* [SUB-SCREEN PROMOTION 2026-07-27] Map an identity screen number back to the
@@ -1671,6 +1672,11 @@ static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
     case TD5_SCREEN_LAN_MENU:
     case TD5_SCREEN_DIRECT_CONNECT:
     case TD5_SCREEN_NET_NICKNAME:       return "NET PLAY";
+    /* [CHAOS CO-OP 2026-09-29] TD5_SCREEN_CHAOS_TEAMS deliberately has NO entry:
+     * like every other screen in the MP setup chain (MP MODE VOTE / CONFIG / COP
+     * ROLES / TEAM SELECT) it runs while s_mp_simul is set, which suppresses the
+     * global title path below — so the board draws its own header with
+     * fe_race_draw_screen_title(). Adding a case here would double-draw it. */
     default: return NULL;
     }
 }
@@ -3884,6 +3890,11 @@ static TD5_ScreenIndex frontend_get_parent_screen(TD5_ScreenIndex screen) {
 
     case TD5_SCREEN_MUSIC_TEST:
         return TD5_SCREEN_SOUND_OPTIONS;
+
+    /* [CHAOS CO-OP 2026-09-29] The seat/role board sits between the per-mode
+     * options and the car grid, so BACK returns to MP MODE CONFIG. */
+    case TD5_SCREEN_CHAOS_TEAMS:
+        return TD5_SCREEN_MP_MODE_CONFIG;
 
     case TD5_SCREEN_CAR_SELECTION:
         if (s_network_active || s_previous_screen == TD5_SCREEN_NETWORK_LOBBY) {
@@ -10977,6 +10988,13 @@ void td5_frontend_render_ui_rects(void) {
             { extern void frontend_mp_team_select_render(float sx, float sy);
               frontend_mp_team_select_render(sx, sy);
               frontend_mp_setup_disconnect_render(sx, sy); }
+            break;
+        case TD5_SCREEN_CHAOS_TEAMS:
+            /* [CHAOS CO-OP 2026-09-29] Seat cards / cursors / selector value all
+             * sit ON the button frames, so the whole board draws POST-button.
+             * (Prototype in td5_frontend_internal.h — no extern-in-.c.) */
+            frontend_chaos_teams_render(sx, sy);
+            frontend_mp_setup_disconnect_render(sx, sy);
             break;
         case TD5_SCREEN_TWO_PLAYER_OPTIONS:
             /* [PORT ENHANCEMENT 2026-06] Multiplayer Options ◄►: PLAYERS always,

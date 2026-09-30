@@ -53,6 +53,7 @@
 #include "td5_replay.h"   /* ghost-state "View Replay" recorder/poser */
 #include "td5_damage.h"   /* [CAR DAMAGE] health reset + knockout completion gate */
 #include "td5_tutorial.h" /* first-race controller-tutorial overlay */
+#include "td5_chaos.h"    /* [CHAOS CO-OP] seat table, role rotation, input slots */
 #include "td5_trace.h"
 #include "td5_profile.h"
 #include "td5_benchmark.h"
@@ -1189,7 +1190,7 @@ static const SSW_NavStep k_ssw_perf_opts[]  = { { TD5_SCREEN_MAIN_MENU, 4 },
 /* [PERF PRESETS 2026-09-29] CUSTOM PERFORMANCE is one row deeper: PERFORMANCE
  * row 3 = the "CUSTOM ->" nav row (rows: 0 AUTO-SELECT, 1 GRAPHICS QUALITY,
  * 2 LIGHTING, 3 CUSTOM, 4 OK). Same reason as the route above -- without it
- * --StartScreen=54 cannot land and the selftest screen walk skips the screen. */
+ * --StartScreen=55 cannot land and the selftest screen walk skips the screen. */
 static const SSW_NavStep k_ssw_perf_custom[] = { { TD5_SCREEN_MAIN_MENU, 4 },
                                                  { TD5_SCREEN_OPTIONS_HUB, 2 },
                                                  { TD5_SCREEN_DISPLAY_OPTIONS, 7 },
@@ -1216,6 +1217,31 @@ static const SSW_NavStep k_ssw_ui_guide[]   = { { TD5_SCREEN_MAIN_MENU, 7 },
 static const SSW_NavStep k_ssw_mp_guide[]   = { { TD5_SCREEN_MAIN_MENU, 7 },
                                                 { TD5_SCREEN_CHANGELOG, 2 },
                                                 { TD5_SCREEN_UI_GUIDE, 5 } };
+/* [CHAOS CO-OP 2026-09-30] TD5_SCREEN_CHAOS_TEAMS (55) has NO route, on purpose
+ * — do not "fix" this by adding one. A faithful walk would be
+ *   MAIN MENU 2 -> MP LOBBY (30) -> MP MODE VOTE (35) -> MP MODE CONFIG (36) -> 54
+ * and it is unreachable by injected keypresses at step one: the lobby only
+ * advances on a real per-device press-to-join edge (td5_plat_input_scan_join),
+ * and the CHAOS row on MODE VOTE stays greyed until 4, 6 or 8 devices have
+ * joined (frontend_chaos_mode_selectable). --StartScreen cannot fabricate pads.
+ *
+ * A partial route (just the lobby step) would be strictly WORSE than none: the
+ * walker can never see screen 55, so it burns its full 300-frame deadline, logs
+ * "stalled ... falling back to direct jump", and lands in the SAME state the
+ * direct jump reaches immediately — the lobby entry clears s_mp_flow anyway, so
+ * nothing is gained. Returning NULL is this walker's designed way to say "no
+ * click route" (see the header comment); the log then reads
+ * "StartScreen=55: direct jump (no nav route)".
+ *
+ * So the way in is the direct jump, which is what --StartScreen=55 already does
+ * on its own; --StartScreenDirect=1 is accepted and equivalent here. On direct
+ * entry the board seeds a dev FAKE ROSTER of 4 seats (chaos_screen_init in
+ * td5_fe_chaos.c, dev builds only, with a "DEV: FAKE ROSTER" footer) so the
+ * layout renders for a framedump. Seat CLAIMING is not reachable that way and
+ * must be tested by hand with real pads — see pending_to_test.csv.
+ * This matches every other MP-setup screen: 35, 36, 39 (MP TEAM SELECT) and 49
+ * have no route either, and 20/39 use the same env-fabricated-roster + direct
+ * jump pattern (TD5RE_MP_SIMUL_PREVIEW). */
 
 #define SSW_ROUTE(arr) do { *out_len = (int)(sizeof(arr)/sizeof(arr[0])); return arr; } while (0)
 static const SSW_NavStep *startscreen_route(int target, int *out_len)
@@ -2265,6 +2291,52 @@ static void init_race_modes_and_seed(void)
 {
     CK("ck0_start");
     TD5_LOG_I(LOG_TAG, "InitializeRaceSession: begin");
+
+#ifndef TD5RE_RELEASE
+    /* [CHAOS CO-OP 2026-09-29] TD5RE_CHAOS_FAKE_SEATS=4|6|8 fabricates a seat
+     * table so the mode can be entered, rotated and traced with --AutoRace=1 and
+     * no frontend. The mode is controllers-only by design (plan section 5), so
+     * without this knob nobody who lacks N pads — and no automated run — can
+     * reach it at all. Every fake seat is bound to device 0 (keyboard): the
+     * input fold still runs, and the rotation/HUD/milestone path is what this
+     * exercises. Companions: TD5RE_CHAOS_TRIGGER=0..4 (CHECKPOINT/HALF_LAP/LAP/
+     * TIME/OFF) and TD5RE_CHAOS_PERIOD=10..60 for the TIME trigger.
+     *
+     * Runs at the very top of race init so that everything downstream — the slot
+     * states (step 3), the actor spawn field, the input slot count (step 15) and
+     * the viewport layout (step 17) — sees a 2-car / 2-pane split-screen race.
+     * Compiled out of RELEASE. */
+    {
+        int fake_seats = td5_env_int("TD5RE_CHAOS_FAKE_SEATS", 0, 0, TD5_CHAOS_MAX_SEATS);
+        if (td5_chaos_count_is_legal(fake_seats) && !g_td5.network_active) {
+            TD5_ChaosConfig fc;
+            int s;
+            memset(&fc, 0, sizeof(fc));
+            fc.trigger     = td5_env_int("TD5RE_CHAOS_TRIGGER", TD5_CHAOS_TRIGGER_CHECKPOINT,
+                                         0, TD5_CHAOS_TRIGGER_COUNT - 1);
+            fc.period_secs = td5_env_int("TD5RE_CHAOS_PERIOD", 25, 10, 60);
+            fc.seat_count  = fake_seats;
+            for (s = 0; s < fake_seats; s++) {
+                fc.team_of_seat[s]   = s & 1;          /* alternating RED/BLUE */
+                fc.row_of_seat[s]    = s / 2;          /* rows in order per team */
+                fc.device_of_seat[s] = 0;              /* keyboard */
+            }
+            td5_chaos_commit_config(&fc);
+            g_td5.mp_mode_config.mode = TD5_MP_MODE_CHAOS_COOP;
+            g_td5.num_human_players   = 2;             /* two cars, two panes */
+            g_td5.split_screen_mode   = 1;
+            g_td5.num_ai_opponents    = 0;             /* the mode is a duel (plan 9) */
+            TD5_LOG_I(LOG_TAG,
+                      "[CHAOS] FAKE SEATS engaged: seats=%d trigger=%d period=%ds "
+                      "(all on device 0; num_human_players=2, split=1, ai=0)",
+                      fake_seats, (int)fc.trigger, (int)fc.period_secs);
+        } else if (fake_seats > 0) {
+            TD5_LOG_W(LOG_TAG,
+                      "[CHAOS] TD5RE_CHAOS_FAKE_SEATS=%d ignored (need 4/6/8, local only)",
+                      fake_seats);
+        }
+    }
+#endif
 
     /* [TRAFFIC BATTLE checkpoints] Clear the deadline-chaser before any mode
      * setup; the battle block below re-arms it when the CHECKPOINTS win
@@ -4845,25 +4917,65 @@ static void init_race_race_systems(void)
         }
     }
 
+    /* [CHAOS CO-OP 2026-09-29] Per-race rotation reset. Deliberately NOT next
+     * to the other per-race resets at the top of init_race_modes_and_seed:
+     * g_td5.track_type is only derived from the level at step 4, and the
+     * milestone selector (circuit arcs vs point-to-point checkpoints) is a
+     * function of it. Here the mode config, the track class and the racer field
+     * are all final, and the race has not started yet. Inert when the mode is
+     * not selected. */
+    td5_chaos_race_begin();
+
     /* ---- Step 15: Configure force feedback + input mapping ---- */
     loadscreen_phase(13, "Initializing controllers");
     /* [PORT ENHANCEMENT] N-way split: one input slot per local human. Players
      * 2..N-1 default to joystick index = player (the per-player device picker
      * is a deferred frontend step). Players 0-1 keep their configured devices. */
     {
-        int humans = (g_td5.split_screen_mode > 0) ? g_td5.num_human_players : 1;
+        /* [CHAOS CO-OP 2026-09-29] The mode DECOUPLES input slots from cars:
+         * g_td5.num_human_players stays 2 (two cars, two panes) while the poll
+         * must cover one slot per SEAT, so ask the mode for the slot count.
+         * Everything else about split-screen is unchanged. */
+        int chaos_slots = td5_chaos_input_slot_count();
+        int humans = chaos_slots > 0
+                     ? chaos_slots
+                     : ((g_td5.split_screen_mode > 0) ? g_td5.num_human_players : 1);
         if (humans < 1) humans = 1;
         if (humans > TD5_MAX_HUMAN_PLAYERS) humans = TD5_MAX_HUMAN_PLAYERS;
         td5_input_set_active_players(humans);
-        for (int p = 2; p < humans; p++) {
-            if (td5_input_get_input_source(p) == 0)
-                td5_input_set_input_source(p, p);  /* default: joystick #p */
+        if (chaos_slots <= 0) {
+            for (int p = 2; p < humans; p++) {
+                if (td5_input_get_input_source(p) == 0)
+                    td5_input_set_input_source(p, p);  /* default: joystick #p */
+            }
         }
     }
     /* Resolve each player's input device (keyboard / joystick 1 / joystick 2)
      * from the INI override or Config.td5 and create the DirectInput devices +
      * push joystick bindings, BEFORE FF init (which binds slot 0's device). */
     td5_input_apply_device_selection();
+    /* [CHAOS CO-OP 2026-09-29] Bind seat -> device AFTER the call above, never
+     * before: td5_input_apply_device_selection() RE-RESOLVES every slot in
+     * 0..active_players-1 from the INI override / Config.td5 and calls
+     * td5_input_set_input_source() itself, so any seat binding written earlier
+     * is clobbered. Running it first also does the useful half of the job (it
+     * enumerates the devices and pushes each slot's saved joystick + per-action
+     * binding rows); this pass then re-points each seat at its own device with
+     * td5_input_apply_device_for_slot(), which binds the device AND pushes the
+     * binding rows that follow THAT device (a bare td5_input_set_input_source()
+     * swapped the device but left the slot's previous owner's binding rows).
+     * Seats on the SAME physical device (the TD5RE_CHAOS_FAKE_SEATS case, all on
+     * keyboard) are fine: source 0 just releases that slot's joystick. */
+    {
+        int seats = td5_chaos_seat_count(), s;
+        for (s = 0; s < seats && s < TD5_MAX_HUMAN_PLAYERS; s++) {
+            int dev = td5_chaos_device_of_seat(s);
+            if (dev < 0) continue;
+            td5_input_apply_device_for_slot(s, dev);
+            TD5_LOG_I(LOG_TAG, "[CHAOS] seat=%d team=%d -> input slot %d device=%d",
+                      s, td5_chaos_team_of_seat(s), s, dev);
+        }
+    }
     td5_input_ff_init();
     td5_input_reset_accumulators();
     td5_input_reset_buffers();
@@ -7711,6 +7823,12 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
              * on the same fixed-tick cadence (lockstep-safe). No-op until a racer
              * finishes / outside battle mode. */
             battle_finish_timer_tick();
+            /* [CHAOS CO-OP 2026-09-29] Poll each team's milestone and run the
+             * swap countdown on the SAME fixed 30 Hz cadence, for the same
+             * reason: the checkpoint-crossing site lives under
+             * advance_pending_finish_state, which runs per RENDERED frame.
+             * No-op outside CHAOS CO-OP. */
+            td5_chaos_tick();
         }
 
         /* --- Consume one tick --- */
