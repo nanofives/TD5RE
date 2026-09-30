@@ -124,6 +124,13 @@ typedef struct {
      * ring too short to hold a grid, a race and a run-off). */
     int grid_span;                       /* start line                         */
     int finish_span;                     /* finish line, or -1                 */
+    /* [W3 2026-09-29] The CHECKPOINT spans this route will ship in its LEVELINF,
+     * in the same span index space as the published points, so the preview can
+     * mark them. Published for the same reason grid/finish are: the placement
+     * depends on tg_finish_span (hence on the fork + structure tables), so no
+     * caller can reproduce it from ring_len. cp_count 0 = none placed. */
+    int cp_count;                        /* checkpoints placed (0..7)          */
+    int cp_span[7];                      /* their ring span indices            */
     int fork_count;
     int tally[TD5_TG_SECTION_COUNT];     /* sections actually placed */
     int min_y, max_y;                    /* elevation range, world units */

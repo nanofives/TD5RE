@@ -152,15 +152,55 @@ def parse_strip(data: bytes) -> Strip:
     return Strip(span_count_main=span_count, total_spans=total, spans=spans, verts=verts)
 
 
+def _s16(v: int) -> int:
+    """strip.json stores the two 16-bit link fields in their RAW unsigned form
+    (a -1 sentinel appears as 65535), while parse_strip unpacks them signed via
+    "<h". Normalize so both loaders agree."""
+    return v - 65536 if v > 32767 else v
+
+
+def parse_strip_json(doc: dict) -> Strip:
+    """Build a Strip from the editable strip.json (td5_assetsrc.c's source form
+    for STRIP.DAT: `header` = the 5 u32s, `spans` = the same 11-field records
+    parse_strip unpacks, `vertices` = int16 triples). The .dat files were retired
+    from re/assets/levels, so this is the live path."""
+    hdr = doc.get("header")
+    if isinstance(hdr, dict):          # tolerate the annotated {"value": [...]} form
+        hdr = hdr.get("value")
+    rows = doc.get("spans")
+    vrows = doc.get("vertices")
+    if not (isinstance(hdr, list) and len(hdr) == 5 and rows and vrows):
+        raise ValueError("strip.json: missing header/spans/vertices")
+    span_count = int(hdr[1])
+    spans = []
+    for i, r in enumerate(rows):
+        if len(r) != 11:
+            raise ValueError(f"strip.json: span {i} has {len(r)} fields, expected 11")
+        st, _attr, _b2, _pk, lvi, rvi, fwd, bwd, ox, oy, oz = (int(x) for x in r)
+        spans.append(Span(i, st, lvi, rvi, _s16(fwd), _s16(bwd), ox, oy, oz))
+    verts = [tuple(_s16(int(c)) for c in v) for v in vrows]
+    return Strip(span_count_main=span_count, total_spans=len(spans),
+                 spans=spans, verts=verts)
+
+
 def load_strip(path: str) -> Strip:
-    """Accept a level dir, a raw strip.dat, or a level zip."""
+    """Accept a level dir, a raw strip.dat / strip.json, or a level zip."""
     if os.path.isdir(path):
         for cand in ("strip.dat", "STRIP.DAT"):
             p = os.path.join(path, cand)
             if os.path.isfile(p):
                 with open(p, "rb") as f:
                     return parse_strip(f.read())
-        raise FileNotFoundError(f"no strip.dat in {path}")
+        # .dat retired -> the editable JSON source is the live form.
+        for cand in ("strip.json", "STRIP.JSON"):
+            p = os.path.join(path, cand)
+            if os.path.isfile(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    return parse_strip_json(json.load(f))
+        raise FileNotFoundError(f"no strip.dat / strip.json in {path}")
+    if path.lower().endswith(".json"):
+        with open(path, "r", encoding="utf-8") as f:
+            return parse_strip_json(json.load(f))
     if path.lower().endswith(".zip"):
         with zipfile.ZipFile(path) as z:
             names = {n.lower(): n for n in z.namelist()}
@@ -351,6 +391,79 @@ def _bake_transparent(rgb_img, color):
     return Image.fromarray(rgba, "RGBA")
 
 
+def preview_projection(strip: Strip, w=PREVIEW_W, h=PREVIEW_H, ss=4, margin=6,
+                       auto_orient=True, rotate=0, orient=None):
+    """The projection half of render_preview, shared so anything that needs a
+    span's position in the FINAL image uses EXACTLY the transform the PNG was
+    drawn with.
+
+    Returns (centers, segs, proj, uv, rot):
+      centers  world-plane span centers (after any `orient` dihedral transform)
+      segs     (main_segs, branch_segs, stitch_segs) from build_topology
+      proj     the supersampled world -> pixel Projector
+      uv       span index -> normalized (u,v) in the final image, top-left origin
+      rot      the normalized rotate in [0,360)
+    """
+    centers, main_segs, branch_segs, stitch_segs = build_topology(strip)
+    if orient is not None:
+        tf = DIHEDRAL[orient % 8]
+        centers = [tf(c) for c in centers]
+        auto_orient = False
+        rotate = 0
+    used = {i for seg in (main_segs + branch_segs + stitch_segs) for i in seg}
+    pts = [centers[i] for i in used] or centers
+    proj = Projector(pts, w * ss, h * ss, margin * ss, auto_orient)
+    ssw, ssh = float(w * ss), float(h * ss)
+    rot = rotate % 360
+
+    def uv(idx):
+        if idx < 0 or idx >= len(centers):
+            idx = 0
+        px, py = proj(centers[idx])
+        u, v = px / ssw, py / ssh
+        # The final image is rotated AFTER projection, so rotate the normalized
+        # coordinate the same way (90/270 also squeeze back to w x h, which this
+        # normalized form already accounts for).
+        if rot == 90:
+            u, v = 1.0 - v, u
+        elif rot == 180:
+            u, v = 1.0 - u, 1.0 - v
+        elif rot == 270:
+            u, v = v, 1.0 - u
+        return (min(1.0, max(0.0, u)), min(1.0, max(0.0, v)))
+
+    return centers, (main_segs, branch_segs, stitch_segs), proj, uv, rot
+
+
+def checkpoint_marks(uv, n_main, cp_spans, w=PREVIEW_W, h=PREVIEW_H, window=3):
+    """[(u, v, tu, tv)] for each checkpoint span that lies on the main ring.
+
+    (tu,tv) is the UNIT local tangent in preview-IMAGE PIXEL space (not in
+    normalized uv, which is anisotropic because the preview is 152x224). The
+    frontend turns it 90 degrees to get the tick direction, after rescaling for
+    the on-screen panel aspect. A checkpoint always sits on the race line, so a
+    span outside [1, n_main) is dropped rather than guessed at."""
+    out = []
+    for sp in cp_spans:
+        sp = int(sp)
+        if sp <= 0 or sp >= n_main:
+            continue
+        a = max(0, sp - window)
+        b = min(n_main - 1, sp + window)
+        if b <= a:
+            continue
+        u, v = uv(sp)
+        u0, v0 = uv(a)
+        u1, v1 = uv(b)
+        du = (u1 - u0) * w
+        dv = (v1 - v0) * h
+        m = math.hypot(du, dv)
+        if m < 1e-6:          # degenerate neighbourhood: no usable tangent
+            continue
+        out.append((u, v, du / m, dv / m))
+    return out
+
+
 def render_preview(strip: Strip, w=PREVIEW_W, h=PREVIEW_H, ss=4,
                    color=RED, bg=BLACK, margin=6, auto_orient=True,
                    line_px=1.8, rotate=0, orient=None, return_markers=False,
@@ -361,15 +474,9 @@ def render_preview(strip: Strip, w=PREVIEW_W, h=PREVIEW_H, ss=4,
     `orient` (0..7), if given, applies one of the 8 DIHEDRAL world-plane
     orientations before fitting (and disables auto_orient/rotate) -- used by the
     match-original search."""
-    centers, main_segs, branch_segs, stitch_segs = build_topology(strip)
-    if orient is not None:
-        tf = DIHEDRAL[orient % 8]
-        centers = [tf(c) for c in centers]
-        auto_orient = False
-        rotate = 0
-    used = {i for seg in (main_segs + branch_segs + stitch_segs) for i in seg}
-    pts = [centers[i] for i in used] or centers
-    proj = Projector(pts, w * ss, h * ss, margin * ss, auto_orient)
+    centers, segs, proj, uv, rotate = preview_projection(
+        strip, w, h, ss, margin, auto_orient, rotate, orient)
+    main_segs, branch_segs, stitch_segs = segs
 
     img = Image.new("RGB", (w * ss, h * ss), bg)
     d = ImageDraw.Draw(img)
@@ -408,26 +515,8 @@ def render_preview(strip: Strip, w=PREVIEW_W, h=PREVIEW_H, ss=4,
     # Normalized (u,v) of the track start (span 0) and end (last main span) in
     # the FINAL image (top-left origin, 0..1). Same projection as the drawn
     # preview, so the frontend can overlay start/finish dots that line up.
-    ssw, ssh = float(w * ss), float(h * ss)
-
-    def _nrm(idx):
-        if idx < 0 or idx >= len(centers):
-            idx = 0
-        px, py = proj(centers[idx])
-        return (px / ssw, py / ssh)
-
-    def _rot(uv):
-        u, v = uv
-        if rotate == 90:
-            u, v = 1.0 - v, u
-        elif rotate == 180:
-            u, v = 1.0 - u, 1.0 - v
-        elif rotate == 270:
-            u, v = v, 1.0 - u
-        return (min(1.0, max(0.0, u)), min(1.0, max(0.0, v)))
-
-    start_uv = _rot(_nrm(start_idx))
-    end_uv = _rot(_nrm(strip.span_count_main - 1))
+    start_uv = uv(start_idx)
+    end_uv = uv(strip.span_count_main - 1)
     return out, (start_uv, end_uv)
 
 
@@ -532,9 +621,53 @@ def best_match_orientation(strip, orig_img, w=PREVIEW_W, h=PREVIEW_H):
     return best, best_o, best_s, best_mk
 
 
+def load_levelinf_json(ldir):
+    """The editable LEVELINF source (levelinf.json) as a plain {field: value}
+    dict. Each field is stored annotated ({"value": ..., "offset": ...}), so
+    unwrap it. Returns None when the file is absent."""
+    p = os.path.join(ldir, "levelinf.json")
+    if not os.path.isfile(p):
+        return None
+    with open(p, "r", encoding="utf-8") as f:
+        doc = json.load(f)
+    out = {}
+    for k, v in doc.items():
+        if k.startswith("_"):
+            continue
+        out[k] = v.get("value") if isinstance(v, dict) else v
+    return out
+
+
+def level_checkpoint_spans(ldir):
+    """The track's checkpoint span indices, from LEVELINF checkpoint_count +
+    checkpoint_spans[7] (0x08 / 0x0C, both confirmed live fields). The array is
+    zero-padded beyond the count, so trailing zeros are dropped. Returns [] when
+    the level has no checkpoints or no levelinf."""
+    inf = load_levelinf_json(ldir)
+    if inf is None:
+        p = os.path.join(ldir, "levelinf.dat")
+        if not os.path.isfile(p):
+            return []
+        with open(p, "rb") as f:
+            d = f.read(0x28)
+        if len(d) < 0x28:
+            return []
+        n = struct.unpack_from("<I", d, 0x08)[0]
+        spans = list(struct.unpack_from("<7I", d, 0x0C))
+    else:
+        n = int(inf.get("checkpoint_count") or 0)
+        spans = list(inf.get("checkpoint_spans") or [])
+    if n <= 0:
+        return []
+    return [int(s) for s in spans[:min(n, 7)] if int(s) > 0]
+
+
 def level_circuit_flag(ldir):
     """Authoritative circuit flag from LEVELINF.DAT DWORD[0] (==1 circuit, ==0
     P2P; confirmed @ 0x42AE6B). Returns True/False, or None if unavailable."""
+    inf = load_levelinf_json(ldir)
+    if inf is not None and inf.get("track_type") is not None:
+        return int(inf["track_type"]) == 1
     p = os.path.join(ldir, "levelinf.dat")
     if not os.path.isfile(p):
         for alt in ("LEVELINF.DAT", "Levelinf.dat"):
@@ -564,17 +697,22 @@ def is_circuit(strip):
 
 
 def markers_to_entries(markers, index_key, index_base, name_map, count):
-    """markers: {index: ((su,sv),(eu,ev),circuit)} keyed by absolute index
-    (pool for TD5, tga for TD6). Produce the JSON entry list for indices in
-    [index_base, index_base+count) that actually have data (zero/placeholder
-    slots are omitted)."""
+    """markers: {index: ((su,sv),(eu,ev),circuit[,checkpoints])} keyed by
+    absolute index (pool for TD5, tga for TD6). Produce the JSON entry list for
+    indices in [index_base, index_base+count) that actually have data
+    (zero/placeholder slots are omitted). `checkpoints`, when present, is the
+    checkpoint_marks() list and is emitted as the optional "checkpoints" array."""
     entries = []
     for i in range(count):
         key = index_base + i
         m = markers.get(key)
         if not m:
             continue
-        (su, sv), (eu, ev), circ = m
+        if len(m) == 4:
+            (su, sv), (eu, ev), circ, cps = m
+        else:
+            (su, sv), (eu, ev), circ = m
+            cps = None
         e = {index_key: key}
         nm = name_map.get(key) if name_map else None
         if nm:
@@ -584,6 +722,12 @@ def markers_to_entries(markers, index_key, index_base, name_map, count):
         e["end_u"] = round(float(eu), 6)
         e["end_v"] = round(float(ev), 6)
         e["circuit"] = 1 if circ else 0
+        if cps:
+            e["checkpoints"] = [
+                {"u": round(u, 6), "v": round(v, 6),
+                 "tu": round(tu, 6), "tv": round(tv, 6)}
+                for (u, v, tu, tv) in cps
+            ]
         entries.append(e)
     return entries
 
@@ -656,10 +800,17 @@ def cmd_render_all(args):
             print(f"  trak{pool:04d}: no level mapping, skipped")
             continue
         ldir = os.path.join(levels_dir, f"level{lvl:03d}")
-        sp_path = os.path.join(ldir, "strip.dat")
-        if not os.path.isfile(sp_path):
-            print(f"  trak{pool:04d} ({name}): missing {sp_path}, skipped")
+        if not any(os.path.isfile(os.path.join(ldir, c))
+                   for c in ("strip.dat", "strip.json")):
+            print(f"  trak{pool:04d} ({name}): no strip.dat / strip.json in "
+                  f"{ldir}, skipped")
             continue
+        if args.match and not os.path.isdir(os.path.join(tracks_dir, "_orig_backup")):
+            sys.exit("REFUSING: --match needs tracks/_orig_backup (the 1999 art) "
+                     "to pick each track's orientation, and it is not there. "
+                     "Re-rendering without it would orient the previews "
+                     "differently from the ones on disk and move every marker. "
+                     "Pass --no-match only if you intend that.")
         try:
             strip = load_strip(ldir)
             out = os.path.join(tracks_dir, f"trak{pool:04d}.png")
@@ -674,11 +825,20 @@ def cmd_render_all(args):
                 with Image.open(orig_path) as orig:
                     img, o, s, mk = best_match_orientation(strip, orig)
                 tag = f"  match=orient{o} iou={s:.2f}"
+                proj_kw = dict(orient=o)
             else:
                 img, mk = render_preview(strip, auto_orient=not args.no_auto_orient,
                                          rotate=args.rotate, return_markers=True)
+                proj_kw = dict(auto_orient=not args.no_auto_orient,
+                               rotate=args.rotate)
             img.save(out)
-            markers[pool] = (mk[0], mk[1], circ)
+            # [W3 2026-09-29] Checkpoint ticks alongside the start/finish dots,
+            # from the SAME projection this preview was just drawn with, so a
+            # re-render never silently drops them from the marker file.
+            _c, _s2, _p, uv, _r = preview_projection(strip, **proj_kw)
+            cps = checkpoint_marks(uv, strip.span_count_main,
+                                   level_checkpoint_spans(ldir))
+            markers[pool] = (mk[0], mk[1], circ, cps)
             print(f"  trak{pool:04d} <- level{lvl:03d} {name:14s} "
                   f"({strip.span_count_main} main + {nb} branch){tag}"
                   f"  {'circuit' if circ else 'P2P'}")
@@ -740,7 +900,14 @@ def cmd_render_td6(args):
                                  rotate=args.rotate, return_markers=True, start_idx=si)
         out = os.path.join(tracks_dir, f"trak{tga:04d}.png")
         img.save(out)
-        markers[tga] = (mk[0], mk[1], circuit)
+        # [W3 2026-09-29] Same projection -> checkpoint ticks. TD6 levelinf
+        # carries checkpoint_count 0, so the spans come from the mirror of
+        # td5_asset_td6_checkpoint_spans (circuits legitimately have none).
+        _c, _s2, _p, uv, _r = preview_projection(
+            strip, auto_orient=not args.no_auto_orient, rotate=args.rotate)
+        cps = checkpoint_marks(uv, strip.span_count_main,
+                               TD6_CHECKPOINT_SPANS.get(lvl, []))
+        markers[tga] = (mk[0], mk[1], circuit, cps)
         print(f"  trak{tga:04d} <- level{lvl:03d} {name:16s} start_span={si} "
               f"({strip.span_count_main} main)  {'circuit' if circuit else 'P2P'}")
     n = max((t - TD6_PREVIEW_BASE for t in markers), default=-1) + 1
@@ -749,6 +916,126 @@ def cmd_render_td6(args):
     entries = markers_to_entries(markers, "tga", TD6_PREVIEW_BASE, td6_names, n)
     write_markers_json(path, entries)
     print(f"wrote TD6 start/finish markers ({len(entries)} entries) -> {path}")
+
+
+# Mirror of td5_asset.c td5_asset_td6_checkpoint_spans (keyed by CONVERTED TD5
+# level number). The migrated TD6 levelinf carries checkpoint_count = 0, so the
+# spans only exist in that table -- keep the two in sync by hand. The 6 TD6
+# circuits are lap-based and have no checkpoints.
+TD6_CHECKPOINT_SPANS = {
+     8: [641, 1113, 1685, 2211],        # PARIS
+     9: [600, 1008, 1619, 1998],        # NEW YORK
+    10: [51, 505, 1056, 1500, 1838],    # ROME
+    11: [540, 832, 1196, 1567],         # HONG KONG
+    12: [515, 906, 1289, 1692],         # LONDON
+}
+
+# How far the recovered start/end u,v may drift from the stored values before we
+# refuse to attach ticks. The JSON rounds to 6 decimals, so an exact match lands
+# around 1e-6; 1e-3 is generous and still far below "wrong orientation" (those
+# residuals are 0.5+, see the orientation table).
+ORIENT_MATCH_TOL = 1e-3
+
+
+def recover_uv_mapper(strip, entry, start_idx):
+    """Find the projection that produced an EXISTING trak_markers entry.
+
+    The previews are already on disk and correct; we only want to add ticks to
+    them. Rather than assume which orientation flags the entry was rendered with
+    (they differ between the TD5 `--match` search and the TD6 auto-orient path,
+    and the _orig_backup that drove `--match` is long gone), reproduce the stored
+    start/end u,v with every candidate projection and keep the best. Returns
+    (uv, residual) -- residual is the L1 error over the four stored values, so
+    the caller can refuse anything that did not actually match."""
+    want = (float(entry.get("start_u", 0.0)), float(entry.get("start_v", 0.0)),
+            float(entry.get("end_u", 0.0)), float(entry.get("end_v", 0.0)))
+    end_idx = strip.span_count_main - 1
+    cands = [dict(orient=o) for o in range(8)]
+    for r in (0, 90, 180, 270):
+        cands.append(dict(orient=None, auto_orient=True, rotate=r))
+        cands.append(dict(orient=None, auto_orient=False, rotate=r))
+    best_uv, best_d = None, float("inf")
+    for kw in cands:
+        _c, _s, _p, uv, _r = preview_projection(
+            strip, auto_orient=kw.get("auto_orient", True),
+            rotate=kw.get("rotate", 0), orient=kw.get("orient"))
+        su, sv = uv(start_idx)
+        eu, ev = uv(end_idx)
+        d = (abs(su - want[0]) + abs(sv - want[1]) +
+             abs(eu - want[2]) + abs(ev - want[3]))
+        if d < best_d:
+            best_uv, best_d = uv, d
+    return best_uv, best_d
+
+
+def cmd_checkpoints(args):
+    """Add per-checkpoint tick marks to the EXISTING trak_markers*.json, in place.
+
+    Deliberately does NOT re-render any PNG and does NOT recompute start/end
+    dots or circuit flags: those are shipped art + shipped data and must not move.
+    For each entry the orientation is RECOVERED from its own stored start/end u,v
+    (see recover_uv_mapper), so a tick lands on the same red line the PNG draws.
+    An entry whose orientation cannot be reproduced is reported and left alone."""
+    tracks_dir = os.path.join(args.assets, "tracks")
+    levels_dir = os.path.join(args.assets, "levels")
+    td6_by_tga = {tga: (lvl, ss) for (lvl, tga, ss, _c, _n) in TD6_TRACKS}
+
+    for fname, index_key in (("trak_markers.json", "pool"),
+                             ("trak_markers_td6.json", "tga")):
+        path = os.path.join(tracks_dir, fname)
+        if not os.path.isfile(path):
+            print(f"skip (absent): {path}")
+            continue
+        with open(path, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+        total_cp = 0
+        for e in doc.get("markers", []):
+            key = int(e[index_key])
+            if index_key == "pool":
+                lvl, start_idx = POOL_TO_LEVEL.get(key), 0
+                cp_src = None
+            else:
+                lvl, start_idx = td6_by_tga.get(key, (None, 0))
+                cp_src = TD6_CHECKPOINT_SPANS.get(lvl, [])
+            name = e.get("name", str(key))
+            if lvl is None:
+                print(f"  {index_key} {key} ({name}): no level mapping, skipped")
+                continue
+            ldir = os.path.join(levels_dir, f"level{lvl:03d}")
+            try:
+                strip = load_strip(ldir)
+            except Exception as ex:
+                print(f"  {index_key} {key} ({name}): ERROR {ex}")
+                continue
+            spans = cp_src if cp_src is not None else level_checkpoint_spans(ldir)
+            if not spans:
+                e.pop("checkpoints", None)
+                print(f"  {index_key} {key:3d} {name:16s} no checkpoints")
+                continue
+            uv, resid = recover_uv_mapper(strip, e, start_idx)
+            if resid > ORIENT_MATCH_TOL:
+                print(f"  {index_key} {key:3d} {name:16s} ORIENTATION NOT "
+                      f"RECOVERED (residual {resid:.4f}) -- left unchanged")
+                continue
+            marks = checkpoint_marks(uv, strip.span_count_main, spans)
+            e["checkpoints"] = [
+                {"u": round(u, 6), "v": round(v, 6),
+                 "tu": round(tu, 6), "tv": round(tv, 6)}
+                for (u, v, tu, tv) in marks
+            ]
+            total_cp += len(marks)
+            print(f"  {index_key} {key:3d} {name:16s} {len(marks)} ticks "
+                  f"from spans {spans} (resid {resid:.2e})")
+        cp_note = ("'checkpoints' holds each checkpoint's u,v plus the unit "
+                   "local tangent tu,tv in 152x224 image pixels; the frontend "
+                   "draws a white tick perpendicular to it.")
+        note = doc.get("_note", "")
+        if cp_note not in note:                     # re-runnable: append once
+            doc["_note"] = (note + " " + cp_note) if note else cp_note
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(doc, f, indent=2)
+            f.write("\n")
+        print(f"wrote {total_cp} checkpoint ticks -> {path}")
 
 
 def cmd_dat2json(args):
@@ -822,6 +1109,13 @@ def main():
                     help="rotate finished image (deg cw)")
     rt.add_argument("--no-auto-orient", action="store_true")
     rt.set_defaults(func=cmd_render_td6)
+
+    cp = sub.add_parser("checkpoints",
+                        help="add checkpoint ticks to the existing "
+                             "trak_markers*.json (no PNG re-render)")
+    cp.add_argument("--assets", default="re/assets",
+                    help="assets root (default re/assets)")
+    cp.set_defaults(func=cmd_checkpoints)
 
     d2j = sub.add_parser("dat2json",
                          help="convert legacy trak_markers*.dat (TMK1) to JSON")

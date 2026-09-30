@@ -1134,10 +1134,21 @@ int s_track_switch_tick = 16; /* 0-15 = animating in, 16 = settled */
  * normalized 0..1 in the 152x224 preview, top-left origin. circuit: LEVELINF
  * DWORD[0] (1=circuit -> single start/finish dot; 0=P2P -> start+end dots that
  * swap with the Forwards/Backwards toggle). */
+/* [W3 2026-09-29] Per-checkpoint ticks. cp_u/cp_v are the checkpoint's position
+ * in the same normalized preview space as the start/end dots; cp_tu/cp_tv is the
+ * UNIT local road tangent in 152x224 IMAGE pixels (the drawer turns it 90
+ * degrees to get the tick direction, after rescaling for the on-screen panel
+ * aspect). 7 is the LEVELINF checkpoint_spans[7] ceiling; the JSON field is
+ * optional, so a marker file generated before this feature just has cp_count 0
+ * and draws no ticks. */
+#define TD5_TRACK_CP_MAX 7
 typedef struct {
     float start_u, start_v;
     float end_u, end_v;
     uint8_t circuit;
+    uint8_t cp_count;
+    float cp_u[TD5_TRACK_CP_MAX], cp_v[TD5_TRACK_CP_MAX];
+    float cp_tu[TD5_TRACK_CP_MAX], cp_tv[TD5_TRACK_CP_MAX];
 } TD5_TrackMarker;
 static TD5_TrackMarker s_track_markers[20];
 static int s_track_markers_loaded = 0; /* 0=untried, 1=loaded, -1=unavailable */
@@ -8234,6 +8245,27 @@ static int frontend_parse_track_markers_json(const char *path,
             dst[slot].end_v   = (float)frontend_json_num(el, "end_v");
             dst[slot].circuit = (uint8_t)(cJSON_IsTrue(ci) ||
                 (cJSON_IsNumber(ci) && cJSON_GetNumberValue(ci) != 0.0));
+            /* [W3 2026-09-29] Optional "checkpoints": [{u,v,tu,tv}, ...]. Absent
+             * on a marker file generated before the ticks existed, which just
+             * means no ticks -- everything else parses exactly as before. */
+            {
+                const cJSON *cps = cJSON_GetObjectItemCaseSensitive(el, "checkpoints");
+                const cJSON *cp;
+                int n = 0;
+                dst[slot].cp_count = 0;
+                if (cJSON_IsArray(cps)) {
+                    cJSON_ArrayForEach(cp, cps) {
+                        if (n >= TD5_TRACK_CP_MAX) break;
+                        if (!cJSON_IsObject(cp)) continue;
+                        dst[slot].cp_u[n]  = (float)frontend_json_num(cp, "u");
+                        dst[slot].cp_v[n]  = (float)frontend_json_num(cp, "v");
+                        dst[slot].cp_tu[n] = (float)frontend_json_num(cp, "tu");
+                        dst[slot].cp_tv[n] = (float)frontend_json_num(cp, "tv");
+                        n++;
+                    }
+                    dst[slot].cp_count = (uint8_t)n;
+                }
+            }
             placed++;
         }
     }
@@ -8292,6 +8324,38 @@ void frontend_draw_marker_dot(float cx, float cy, float sx, float sy, int kind) 
         fe_draw_quad(cx,     cy - r, h, h, 0xFF000000, -1, 0, 0, 1, 1);
         fe_draw_quad(cx - r, cy,     h, h, 0xFF000000, -1, 0, 0, 1, 1);
         fe_draw_quad(cx,     cy,     h, h, 0xFFFFFFFF, -1, 0, 0, 1, 1);
+    }
+}
+
+/* [W3 2026-09-29] Draw one CHECKPOINT tick on a track preview: a short white
+ * bar laid ACROSS the road at (cx,cy), i.e. perpendicular to the local tangent
+ * (tx,ty) given in screen px. The frontend has no line primitive (everything is
+ * an axis-aligned quad), so the bar is stamped as a row of small quads stepped
+ * along the normal -- at ~1 px spacing that reads as a solid diagonal line. A
+ * wider black pass goes down first so the tick stays legible over the red
+ * centerline, matching what frontend_draw_marker_dot does with its outline. */
+void frontend_draw_marker_tick(float cx, float cy, float tx, float ty,
+                               float sx, float sy) {
+    const float scale = (sx + sy) * 0.5f;
+    float half = 5.0f * scale;         /* tick half-length, screen px */
+    float nx, ny, m;
+    int pass, i, steps;
+
+    m = (float)sqrt((double)(tx * tx + ty * ty));
+    if (m < 1e-4f) { nx = 1.0f; ny = 0.0f; }   /* no usable tangent: horizontal */
+    else           { nx = -ty / m; ny = tx / m; }
+    if (half < 4.0f) half = 4.0f;
+    steps = (int)(half * 2.0f) + 1;    /* ~1 px per stamp along the bar */
+
+    for (pass = 0; pass < 2; pass++) {
+        const float w = (pass == 0) ? (3.0f * scale) : (1.5f * scale);
+        const uint32_t col = (pass == 0) ? 0xFF000000u : 0xFFFFFFFFu;
+        const float wq = (w < 1.5f) ? 1.5f : w;
+        for (i = 0; i <= steps; i++) {
+            const float t = -half + (2.0f * half) * (float)i / (float)steps;
+            fe_draw_quad(cx + nx * t - wq * 0.5f, cy + ny * t - wq * 0.5f,
+                         wq, wq, col, -1, 0, 0, 1, 1);
+        }
     }
 }
 
@@ -8431,6 +8495,21 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
                 float eu = bwd ? m->start_u : m->end_u;
                 float ev = bwd ? m->start_v : m->end_v;
                 td5_plat_render_set_preset(TD5_PRESET_TRANSLUCENT_LINEAR);
+                /* [W3 2026-09-29] Checkpoint ticks first, so the start/finish
+                 * dots still composite on top where one sits on a checkpoint.
+                 * The stored tangent is in 152x224 image px; the panel scales
+                 * those axes by pw/152 and ph/224 independently (they differ on
+                 * a non-4:3 window), so scale before taking the perpendicular. */
+                {
+                    int ci2;
+                    for (ci2 = 0; ci2 < (int)m->cp_count; ci2++) {
+                        frontend_draw_marker_tick(bx + m->cp_u[ci2] * pw,
+                                                  by + m->cp_v[ci2] * ph,
+                                                  m->cp_tu[ci2] * pw / 152.0f,
+                                                  m->cp_tv[ci2] * ph / 224.0f,
+                                                  sx, sy);
+                    }
+                }
                 if (m->circuit) {
                     /* one start/finish dot; direction is forward-only for circuits */
                     frontend_draw_marker_dot(bx + m->start_u * pw, by + m->start_v * ph,
@@ -10744,13 +10823,15 @@ void td5_frontend_render_ui_rects(void) {
         }
     }
 
-    /* [item #7 2026-06-15] The car-/track-select randomize chips are painted by
-     * frontend_render_carsel_randomize_icon / frontend_render_trksel_randomize_icon
-     * (extern-declared with frontend_draw_randomize_icon up by the Quick Race
-     * widgets). They are called from inside the CAR_SELECTION / TRACK_SELECTION
-     * cases below — AFTER the per-screen button loop above — so the chip composites
-     * on TOP of the button frames (original BltFast z-order). Each wrapper self-
-     * skips when the control is off / not in icon form / the handle isn't live. */
+    /* [item #7 2026-06-15] The car-select randomize chip is painted by
+     * frontend_render_carsel_randomize_icon (extern-declared with
+     * frontend_draw_randomize_icon up by the Quick Race widgets). It is called
+     * from inside the CAR_SELECTION case below — AFTER the per-screen button loop
+     * above — so the chip composites on TOP of the button frames (original
+     * BltFast z-order). The wrapper self-skips when the control is off / not in
+     * icon form / the handle isn't live.
+     * [W3 2026-09-29] TRACK_SELECTION has no chip any more; its post-button pass
+     * draws the R / pad-X randomize HINT (frontend_render_trksel_hints) instead. */
 
     /* Option arrows drawn AFTER buttons so they render on top of the button fill.
      * Original BltFast compositing placed arrows on top of the pre-baked button surface. */
@@ -10858,12 +10939,12 @@ void td5_frontend_render_ui_rects(void) {
         case TD5_SCREEN_TRACK_SELECTION:
         case TD5_SCREEN_CUP_TRACK_SELECT:
             /* [RACE OPTIONS 2026-07-04] The main column carries only Track(0) +
-             * Laps(2) selectors (self-skip hidden) plus the randomize chip; every
-             * other option-row arrow moved onto the RACE OPTIONS screen. */
+             * Laps(2) selectors (self-skip hidden); every other option-row arrow
+             * moved onto the RACE OPTIONS screen. */
             fe_draw_option_arrows(0, sx, sy);   /* Track */
             fe_draw_option_arrows(2, sx, sy);   /* Laps (self-skips on P2P) */
-            /* [item #7] Randomize chip to the right of the Track selector. */
-            frontend_render_trksel_randomize_icon(sx, sy);
+            /* [W3 2026-09-29] "X / R = RANDOM" hint, bottom-right next to BACK. */
+            frontend_render_trksel_hints(sx, sy);
             break;
         case TD5_SCREEN_RACE_OPTIONS:
             /* [CONSOLIDATION 2026-07-21] ◄► arrows for each current-page option

@@ -1022,6 +1022,10 @@ int  td5_autotrack_draw_route(float bx, float by, float bw, float bh,
  * 1 = FINISH (black/white checker). Shared with the auto-track route plot so
  * both previews mark their ends identically. */
 void frontend_draw_marker_dot(float cx, float cy, float sx, float sy, int kind);
+/* [W3 2026-09-29] White CHECKPOINT tick across a track preview: (tx,ty) is the
+ * local road tangent in SCREEN px; the bar is drawn perpendicular to it. */
+void frontend_draw_marker_tick(float cx, float cy, float tx, float ty,
+                               float sx, float sy);
 void Screen_LocalizationInit(void);
 void Screen_MainMenu(void);
 void Screen_MusicTestExtras(void);
@@ -1085,7 +1089,7 @@ void frontend_reset_text_input(void);
  * at their call sites instead of living in this header (extern-in-.c lint). */
 void frontend_draw_randomize_icon(float x, float y, float sx, float sy, int focused);          /* td5_fe_race.c */
 void frontend_render_carsel_randomize_icon(float sx, float sy);                                /* td5_fe_race.c */
-void frontend_render_trksel_randomize_icon(float sx, float sy);                                /* td5_fe_race.c */
+void frontend_render_trksel_hints(float sx, float sy);                                         /* td5_fe_race.c */
 extern int s_mp_postrace_menu_mode;    /* 0 = standard menu, 1 = cup-between menu (td5_fe_race.c) */
 float frontend_lobby_swatch_y_offset(float text_scale, float swatch_h);                        /* td5_fe_net.c */
 int   frontend_race_summary_on(void);                                                          /* td5_fe_race.c */

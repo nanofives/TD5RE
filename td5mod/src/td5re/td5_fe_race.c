@@ -309,13 +309,14 @@ static int  s_p1_paint;
 
 static int  s_track_max;               /* max track index for current mode */
 
-/* [#14 2026-06-15] Dedicated RANDOMIZE buttons placed ABOVE the selector on the
- * car- and track-selection screens. Created at the next free button index (so the
- * existing hard-coded button indices used by the action switches are untouched);
+/* [#14 2026-06-15] Dedicated RANDOMIZE button placed ABOVE the selector on the
+ * car-selection screen. Created at the next free button index (so the existing
+ * hard-coded button indices used by the action switches are untouched);
  * navigation is geometric (frontend_spatial_pick), so a higher index above the
- * selector is still reached by pressing UP. -1 = not created this entry. */
+ * selector is still reached by pressing UP. -1 = not created this entry.
+ * [W3 2026-09-29] The TRACK selector's twin was dropped: there, randomizing is
+ * the R key / pad X shortcut instead of a clickable chip. */
 static int  s_carsel_rand_btn = -1;
-static int  s_trksel_rand_btn = -1;
 /* [AUTOTRACK R2 item 25] AUTO TRACK OPTIONS button index on the track-select
  * column, or -1 when the current pick is not the auto-generated slot. */
 static int  s_trksel_auto_btn = -1;
@@ -923,15 +924,19 @@ void frontend_render_carsel_randomize_icon(float sx, float sy) {
                                  sx, sy, (s_selected_button == b));
 }
 
-void frontend_render_trksel_randomize_icon(float sx, float sy) {
-    if (!frontend_random_button_on() || !frontend_random_icon_on()) return;
+/* [W3 2026-09-29] Track selector: the randomize CHIP is gone. Randomizing is a
+ * shortcut now (keyboard R / pad X, both handled in Screen_TrackSelection state
+ * 4), so this paints the hint that advertises it instead of an icon.
+ * Placement: the OK/BACK row (y=386..418), right of the BACK button (ends
+ * x=344), below the LOCKED text at y=375 — i.e. bottom-right, next to BACK.
+ * Centered at 470 rather than the preview column's own 492 so a longer
+ * translation still clears the pitbull logo that sits from x~540. Drawn
+ * unconditionally because the shortcut itself is unconditional. NON-STATIC so
+ * td5_frontend.c can call it from its render switch. */
+void frontend_render_trksel_hints(float sx, float sy) {
     if (!s_anim_complete) return;                                 /* wait for slide-in to settle */
-    int b = s_trksel_rand_btn;
-    if (b < 0 || b >= FE_MAX_BUTTONS) return;
-    if (!s_buttons[b].active || s_buttons[b].hidden == 0) return;
-    if (s_buttons[b].disabled) return;
-    frontend_draw_randomize_icon((float)s_buttons[b].x, (float)s_buttons[b].y,
-                                 sx, sy, (s_selected_button == b));
+    fe_draw_text_centered(470.0f * sx, 400.0f * sy, TR("X / R = RANDOM"),
+                          0xFF8890A0u, sx * 0.75f, sy * 0.75f);
 }
 
 static void frontend_load_selected_car_preview(void) {
@@ -6873,9 +6878,11 @@ static void raceopts_open(int parent_screen, int launch_after, int back_mode) {
 }
 
 /* Build the main track-select column: TRACK / DIRECTION / LAPS / RACE OPTIONS /
- * OK / BACK (+ randomize chip). Used on screen init (case 0) and on return from
- * RACE OPTIONS. Resets the shared button set first, exactly like
- * td5_gameopts_build_page() does for its page flip. */
+ * OK / BACK. Used on screen init (case 0) and on return from RACE OPTIONS.
+ * Resets the shared button set first, exactly like td5_gameopts_build_page()
+ * does for its page flip.
+ * [W3 2026-09-29] No randomize chip any more — randomizing is the R key / pad X
+ * shortcut, advertised by the hint frontend_render_trksel_hints() draws. */
 static void trksel_build_main_buttons(void) {
     frontend_reset_buttons();
     frontend_create_button(SNK_TrackButTxt,       120,  97, 224, 32); /* 0: Track (◄►)          */
@@ -6885,23 +6892,10 @@ static void trksel_build_main_buttons(void) {
     frontend_create_button(SNK_OkButTxt,          120, 386,  96, 32); /* 4: OK                    */
     if (s_flow_context != 2)                                          /* Quick Race: no Back      */
         frontend_create_button(SNK_BackButTxt,    232, 386, 112, 32); /* 5: Back                  */
-    /* [#14] Randomize control (icon to the right of Track by default), created
-     * after the fixed rows so indices 0..5 stay stable. */
-    s_trksel_rand_btn = -1;
-    if (frontend_random_button_on()) {
-        if (frontend_random_icon_on()) {
-            s_trksel_rand_btn = frontend_create_button(NULL, 348, 99,
-                                                       FE_RAND_ICON_W, FE_RAND_ICON_H);
-            if (s_trksel_rand_btn >= 0) s_buttons[s_trksel_rand_btn].hidden = 1;
-        } else {
-            s_trksel_rand_btn = frontend_create_button(TR("Randomize"), 120, 57, 224, 32);
-        }
-    }
     /* [AUTOTRACK R2 item 25] AUTO TRACK OPTIONS, shown ONLY while the
      * AUTO-GENERATED slot is the current pick -- the generator knobs mean
-     * nothing on a shipped track. Created AFTER the fixed rows and the randomize
-     * chip so indices 0..5 stay stable for the handlers that test them by
-     * number.
+     * nothing on a shipped track. Created AFTER the fixed rows so indices 0..5
+     * stay stable for the handlers that test them by number.
      * [AUTO TRACK STUDIO TRACK-SELECT 2026-09-12] Create it UNCONDITIONALLY (like
      * the Quick Race chip) and let frontend_trksel_refresh_auto_btn() show/hide it,
      * so it appears the instant the auto slot is cycled onto -- not only after a
@@ -7851,6 +7845,28 @@ int td5_autotrack_draw_route(float bx, float by, float bw, float bh,
         const TD5_TrackGenPreviewStats *st = &s_at_status.stats;
         int gi = (s_at_status.done && st->grid_span > 0) ? st->grid_span : 0;
         if (gi >= s_at_pts_n) gi = 0;
+        /* [W3 2026-09-29] Checkpoint ticks, drawn BEFORE the start/finish dots
+         * so a dot sitting on a checkpoint still composites on top. The spans
+         * come from the generator (st->cp_span), and a span index is a point
+         * index on the main ring, so the tangent is just the neighbouring
+         * points -- same +Z flip the route plot above applies. */
+        if (s_at_status.done) {
+            int k;
+            for (k = 0; k < st->cp_count && k < 7; k++) {
+                const int ci = st->cp_span[k];
+                int a, b;
+                if (ci <= 0 || ci >= s_at_pts_n) continue;
+                a = (ci - 2 >= 0) ? ci - 2 : 0;
+                b = (ci + 2 < s_at_pts_n) ? ci + 2 : s_at_pts_n - 1;
+                if (b <= a) continue;
+                frontend_draw_marker_tick(
+                    (cx + (s_at_pts[ci].x - ox) * scale) * sx,
+                    (cy - (s_at_pts[ci].z - oz) * scale) * sy,
+                    (s_at_pts[b].x - s_at_pts[a].x) * scale * sx,
+                    -(s_at_pts[b].z - s_at_pts[a].z) * scale * sy,
+                    sx, sy);
+            }
+        }
         frontend_draw_marker_dot((cx + (s_at_pts[gi].x - ox) * scale) * sx,
                                  (cy - (s_at_pts[gi].z - oz) * scale) * sy,
                                  sx, sy, 0);
@@ -8460,7 +8476,6 @@ void Screen_TrackSelection(void) {
         frontend_init_return_screen(TD5_SCREEN_TRACK_SELECTION);
         TD5_LOG_D(LOG_TAG, "TrackSelection: init");
         s_anim_complete = 0;
-        s_trksel_rand_btn = -1;   /* [#14] (re)assigned with the buttons below */
         s_trksel_dyn_btn  = -1;   /* [ARCADE] (re)assigned with the buttons below */
         s_trksel_prev_focus = -2; /* [R3-3] treat the first interactive frame as a focus-entry (no cycle) */
 
@@ -8522,8 +8537,8 @@ void Screen_TrackSelection(void) {
          * runtime check. Logged at state-0 init only (not per frame). */
         {
             int bi;
-            TD5_LOG_I(LOG_TAG, "TrackSel layout: count=%d dyn_btn=%d rand_btn=%d cup=%d flow=%d",
-                      s_button_count, s_trksel_dyn_btn, s_trksel_rand_btn, cup_mp, s_flow_context);
+            TD5_LOG_I(LOG_TAG, "TrackSel layout: count=%d dyn_btn=%d auto_btn=%d cup=%d flow=%d",
+                      s_button_count, s_trksel_dyn_btn, s_trksel_auto_btn, cup_mp, s_flow_context);
             for (bi = 0; bi < s_button_count; bi++)
                 TD5_LOG_I(LOG_TAG, "  btn[%d] '%s' x=%d y=%d w=%d h=%d hidden=%d active=%d",
                           bi, s_buttons[bi].label, s_buttons[bi].x, s_buttons[bi].y,
@@ -8726,10 +8741,9 @@ void Screen_TrackSelection(void) {
             }
 
             /* Back (button 5 after the RACE OPTIONS consolidation: TRACK 0 /
-             * DIRECTION 1 / LAPS 2 / RACE OPTIONS 3 / OK 4 / BACK 5). Guard against
-             * the RANDOMIZE button aliasing this index in a flow with fewer buttons
-             * so pressing RANDOMIZE can't also trip Back. */
-            if (s_button_index == 5 && s_button_index != s_trksel_rand_btn) { /* Back */
+             * DIRECTION 1 / LAPS 2 / RACE OPTIONS 3 / OK 4 / BACK 5). The old
+             * "not the RANDOMIZE chip" guard went away with the chip (W3). */
+            if (s_button_index == 5) { /* Back */
                 s_return_screen = TD5_SCREEN_CAR_SELECTION;
                 s_inner_state = 6;
             }
@@ -8750,28 +8764,24 @@ void Screen_TrackSelection(void) {
             /* [#14] RANDOMIZE: pick a random track, then run the SAME change flow as
              * a manual cycle (hide preview this frame, reload + slide-in via 5->9).
              * track_max is exclusive; network caps at 0x13 like frontend_cycle_track.
-             * [#22] Also triggered by the keyboard 'R' key (edge-latched below), so
-             * randomize works without the mouse. */
+             * [W3 2026-09-29] The chip is gone: the ONLY triggers are the keyboard
+             * 'R' key and the pad's X face button. Both are unambiguous, so the old
+             * focus-agreement guard (which existed purely to stop a stray
+             * s_button_index aliasing the chip's index) is no longer needed. */
             {
-                /* 'R' (DIK 0x13) one-shot: latch the rising edge so holding R
-                 * randomizes once per press, not every frame. */
+                /* One-shot each: latch the rising edge so HOLDING the key/button
+                 * randomizes once per press, not every frame. s_fe_gamepad_nav is
+                 * a HELD level refreshed by frontend_poll_input, hence the latch.
+                 * 'R' = DIK 0x13, 0x80 = pad X (td5_plat_input_frontend_nav). */
                 static int s_trksel_r_held = 0;
+                static int s_trksel_x_held = 0;
                 int r_now  = td5_plat_input_key_pressed(0x13) ? 1 : 0;
+                int x_now  = (s_fe_gamepad_nav & 0x80u) ? 1 : 0;
                 int r_edge = (r_now && !s_trksel_r_held) ? 1 : 0;
+                int x_edge = (x_now && !s_trksel_x_held) ? 1 : 0;
                 s_trksel_r_held = r_now;
-                /* [R6a 2026-06-19] Fire ONLY on an EXPLICIT activation of the rand
-                 * button (A/Enter or a click set s_button_index == rand) or the R
-                 * key. Require the activation to AGREE with the live focus
-                 * (s_selected_button) so a stray s_button_index that aliases the
-                 * rand index (e.g. an overlapping/hidden-rect click while focus is
-                 * elsewhere, or an index collision in a flow with fewer buttons)
-                 * can't randomize on a focus-change/leave. The R key is its own
-                 * unambiguous trigger and bypasses the focus check. */
-                int btn_activated = (s_trksel_rand_btn >= 0 &&
-                                     s_button_index == s_trksel_rand_btn &&
-                                     s_selected_button == s_trksel_rand_btn);
-                int do_random = btn_activated || r_edge;
-                if (do_random) {
+                s_trksel_x_held = x_now;
+                if (r_edge || x_edge) {
                     int bound = s_track_max;   /* [2026-06-19] net incl. TD6 (s_track_max already full) */
                     if (frontend_pick_random_track(bound)) {
                         frontend_play_sfx(3);

@@ -56,6 +56,11 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_ITEM,    "Split-screen pane names are centred for every player," },
     { CL_ITEM,    "  including the host, and the HOST badge lines up." },
     { CL_ITEM,    "Split-screen pause says PAUSED BY <name>, not PLAYER N." },
+    { CL_DATE,    "September 29 (track select)" },
+    { CL_ITEM,    "SELECT TRACK: the randomize button is gone. Press R or" },
+    { CL_ITEM,    "  the pad's X to pick a random track (hint bottom right)." },
+    { CL_ITEM,    "Track previews now mark every checkpoint with a white" },
+    { CL_ITEM,    "  tick across the road, auto-generated tracks included." },
     { CL_BLANK,   "" },
 
     { CL_DATE,    "September 29 (traffic + cop chase)" },
