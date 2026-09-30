@@ -2432,6 +2432,36 @@ static int s_mp_prof_sel[TD5_MAX_HUMAN_PLAYERS];     /* selected list index */
 static int  s_mp_prof_confirm_del[TD5_MAX_HUMAN_PLAYERS];
 static char s_mp_prof_confirm_name[TD5_MAX_HUMAN_PLAYERS][16];
 
+/* [SELECTABLE HORNS] Per-player cursor for the horn picker (pane sub-state 4).
+ * The tab is the category (TD5 / TD6 / MEMES) and the selection is the row
+ * inside it; the selection resets to the top on a tab change so the cursor can
+ * never sit past the end of a shorter tab. */
+static int s_mp_horn_tab[TD5_MAX_HUMAN_PLAYERS];
+static int s_mp_horn_sel[TD5_MAX_HUMAN_PLAYERS];
+
+/* Clamp the per-player horn cursor into [0, count) of its current tab. */
+static void mp_horn_clamp(int p) {
+    int cnt;
+    if (s_mp_horn_tab[p] < 0) s_mp_horn_tab[p] = 0;
+    if (s_mp_horn_tab[p] >= TD5_HORN_CAT_COUNT) s_mp_horn_tab[p] = TD5_HORN_CAT_COUNT - 1;
+    cnt = td5_horns_count((TD5_HornCat)s_mp_horn_tab[p]);
+    if (cnt <= 0) { s_mp_horn_sel[p] = 0; return; }
+    if (s_mp_horn_sel[p] < 0)    s_mp_horn_sel[p] = 0;
+    if (s_mp_horn_sel[p] >= cnt) s_mp_horn_sel[p] = cnt - 1;
+}
+
+/* Park the picker cursor on the player's current choice, so reopening the
+ * picker shows what they already have rather than jumping back to the top. */
+static void mp_horn_cursor_to_current(int p) {
+    TD5_HornCat cat = TD5_HORN_CAT_TD5;
+    int idx = 0;
+    if (td5_horns_find(s_mp_player_horn[p], &cat, &idx) != NULL) {
+        s_mp_horn_tab[p] = (int)cat;
+        s_mp_horn_sel[p] = idx;
+    }
+    mp_horn_clamp(p);
+}
+
 /* [#3 2026-06-15] PROFILE sits BETWEEN COLOUR and OK (order NAME, COLOUR, PROFILE,
  * OK) — both in the up/down NAV sequence and in the on-screen button stack. The
  * shared header enum is fixed (NAME=0, COLOUR=1, OK=2) and MP_SET_PROFILE=3 keeps
@@ -2443,12 +2473,18 @@ static char s_mp_prof_confirm_name[TD5_MAX_HUMAN_PLAYERS][16];
 /* [LANE ASSIST 2026-06-28] AUTO/MANUAL (TRANS) + LANE ASSIST sit between PROFILE
  * and OK, so the profile-setup screen owns the per-player transmission + steering-
  * aid choices (they used to live on the car-select pane). */
-static const int k_mp_set_order_prof[6] = { MP_SET_NAME, MP_SET_COLOUR, MP_SET_PROFILE,
-                                            MP_SET_TRANS, MP_SET_LANEASSIST, MP_SET_OK };
+/* [SELECTABLE HORNS] HORN joins the band between LANE ASSIST and OK, and ONLY
+ * with profiles on. Not because the horn needs the profile store, but because
+ * the picker overlay is drawn by frontend_mp_setup_profile_render, which
+ * returns early when profiles are off -- offering a row there that cannot open
+ * its screen would be a dead end. TD5RE_PROFILES defaults on. */
+static const int k_mp_set_order_prof[7] = { MP_SET_NAME, MP_SET_COLOUR, MP_SET_PROFILE,
+                                            MP_SET_TRANS, MP_SET_LANEASSIST, MP_SET_HORN,
+                                            MP_SET_OK };
 static const int k_mp_set_order_noprof[5] = { MP_SET_NAME, MP_SET_COLOUR,
                                               MP_SET_TRANS, MP_SET_LANEASSIST, MP_SET_OK };
 static const int *mp_set_nav_order(int profiles_on, int *count) {
-    if (profiles_on) { *count = 6; return k_mp_set_order_prof; }
+    if (profiles_on) { *count = 7; return k_mp_set_order_prof; }
     *count = 5; return k_mp_set_order_noprof;
 }
 /* Visible-slot index (0-based, top-to-bottom) of a button id in the current order;
@@ -2612,6 +2648,7 @@ static void mp_prof_fill_from_player(int p, TD5_Profile *out) {
     out->paint  = s_mp_player_paint[p];
     out->color  = s_mp_player_color[p];
     out->trans  = s_mp_player_trans[p];
+    strncpy(out->horn, s_mp_player_horn[p], sizeof(out->horn) - 1);
 }
 
 /* Apply a loaded profile to a player's live identity (name + accent + car). */
@@ -2622,6 +2659,19 @@ static void mp_prof_apply_to_player(int p, const TD5_Profile *pr) {
     s_mp_player_color[p]  = pr->color;
     s_mp_player_paint[p]  = pr->paint;
     s_mp_player_trans[p]  = pr->trans;
+    /* [SELECTABLE HORNS] A saved id whose sound no longer exists (a deleted
+     * meme file, or a profile written on another machine) resolves to NULL and
+     * is dropped here rather than carried around as a dangling choice. */
+    if (td5_horns_find(pr->horn, NULL, NULL) != NULL) {
+        /* The id came back from the catalogue, so it already fits the field;
+         * copy the measured length rather than a padded strncpy. */
+        size_t hl = strlen(pr->horn);
+        if (hl > sizeof(s_mp_player_horn[p]) - 1) hl = sizeof(s_mp_player_horn[p]) - 1;
+        memcpy(s_mp_player_horn[p], pr->horn, hl);
+        s_mp_player_horn[p][hl] = '\0';
+    } else {
+        s_mp_player_horn[p][0] = '\0';
+    }
     if (pr->car >= 0 && pr->car < TD5_CAR_COUNT) s_mp_player_car[p] = pr->car;
     /* [PROFILE CAR COLOUR 2026-06-30] A loaded profile's saved body colour/paint
      * is an explicit pick — keep it (suppress the accent auto-default). A profile
@@ -2669,6 +2719,80 @@ static int mp_profile_list_nav_enabled(void) {
 
 /* Handle one player's input while the profile panel (sub==3) is open. Returns
  * nothing; sets s_mp_setup_sub[p]=0 to close. */
+/* [SELECTABLE HORNS] Horn-picker panel input (pane sub-state 4).
+ *
+ * LEFT/RIGHT switch tab, UP/DOWN scroll the tab's list (auto-repeat), A commits
+ * the highlighted horn AND previews it, X clears back to the car's own horn,
+ * B closes.
+ *
+ * ANTI-SPAM: navigating never plays a horn, only the nav ping. A sample is
+ * heard solely on a commit, and td5_sound_preview_horn rate-limits those. That
+ * ordering is what makes hold-to-scroll harmless -- auto-repeat fires on the
+ * list cursor, which has no sound attached to it.
+ */
+static void mp_horn_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t now) {
+    int cnt;
+
+    mp_horn_clamp(p);
+    cnt = td5_horns_count((TD5_HornCat)s_mp_horn_tab[p]);
+
+    /* Tab switch. Selection restarts at the top: tabs have different lengths, and
+     * carrying a row index across them would land somewhere arbitrary. */
+    if (edge & 1) {
+        s_mp_horn_tab[p] = (s_mp_horn_tab[p] + TD5_HORN_CAT_COUNT - 1) % TD5_HORN_CAT_COUNT;
+        s_mp_horn_sel[p] = 0;
+        s_mp_rep_ms[p]   = 0;
+        frontend_play_sfx(2);
+        return;
+    }
+    if (edge & 2) {
+        s_mp_horn_tab[p] = (s_mp_horn_tab[p] + 1) % TD5_HORN_CAT_COUNT;
+        s_mp_horn_sel[p] = 0;
+        s_mp_rep_ms[p]   = 0;
+        frontend_play_sfx(2);
+        return;
+    }
+
+    /* List scroll, same auto-repeat helper the profile list uses. */
+    if (cnt > 0 && mp_repeat_fire(p, bits & 0x0Cu, edge & 0x0Cu, now)) {
+        if (bits & 4) s_mp_horn_sel[p]--;
+        if (bits & 8) s_mp_horn_sel[p]++;
+        mp_horn_clamp(p);
+        frontend_play_sfx(2);
+    }
+
+    if (edge & 0x80) {          /* X = clear back to the car's own horn */
+        s_mp_player_horn[p][0] = '\0';
+        td5_sound_stop_horn_preview();
+        frontend_play_sfx(3);
+        TD5_LOG_I(LOG_TAG, "MP horn: P%d cleared (car default)", p);
+        return;
+    }
+
+    if (edge & 0x10) {          /* A = commit + preview */
+        const TD5_HornEntry *h = td5_horns_get((TD5_HornCat)s_mp_horn_tab[p], s_mp_horn_sel[p]);
+        if (!h) { frontend_play_sfx(10); return; }
+        {
+            size_t hl = strlen(h->id);
+            if (hl > sizeof(s_mp_player_horn[p]) - 1) hl = sizeof(s_mp_player_horn[p]) - 1;
+            memcpy(s_mp_player_horn[p], h->id, hl);
+            s_mp_player_horn[p][hl] = '\0';
+        }
+        /* The pick is committed whether or not the sample is audible: a preview
+         * swallowed by the rate limiter must not silently drop the choice. */
+        if (!td5_sound_preview_horn(h->wav, h->zip)) frontend_play_sfx(3);
+        TD5_LOG_I(LOG_TAG, "MP horn: P%d picked '%s' (%s)", p, h->id, h->label);
+        return;
+    }
+
+    if (edge & 0x20) {          /* B = close */
+        s_mp_setup_sub[p] = 0;
+        s_mp_rep_ms[p]    = 0;
+        td5_sound_stop_horn_preview();
+        frontend_play_sfx(5);
+    }
+}
+
 static void mp_prof_panel_input(int p, uint32_t bits, uint32_t edge, uint32_t now) {
     int cnt = td5_save_profile_count();
     mp_prof_clamp_sel(p);
@@ -3003,6 +3127,12 @@ static void frontend_mp_setup_update(void) {
             continue;
         }
 
+        if (s_mp_setup_sub[p] == 4) {            /* [SELECTABLE HORNS] horn picker */
+            mp_horn_panel_input(p, bits, edge, now);
+            all_ready = 0;
+            continue;
+        }
+
         if (s_mp_player_ready[p]) {
             if (edge & 0x10) { s_mp_player_ready[p] = 0; s_mp_simul_ready_ms = 0; frontend_play_sfx(5); }
             if (edge & 0x20) want_back = 1;
@@ -3043,6 +3173,12 @@ static void frontend_mp_setup_update(void) {
                 { s_mp_player_trans[p] = !s_mp_player_trans[p]; frontend_play_sfx(3); }
             else if (s_mp_setup_btn[p] == MP_SET_LANEASSIST)
                 { s_mp_player_laneassist[p] = !s_mp_player_laneassist[p]; frontend_play_sfx(3); }
+            else if (s_mp_setup_btn[p] == MP_SET_HORN) {
+                s_mp_setup_sub[p] = 4;              /* open the horn picker */
+                s_mp_rep_ms[p]    = 0;
+                mp_horn_cursor_to_current(p);
+                frontend_play_sfx(3);
+            }
             else { s_mp_player_ready[p] = 1; frontend_play_sfx(3); }   /* OK */
         }
         if (edge & 0x20) want_back = 1;
@@ -3055,7 +3191,9 @@ static void frontend_mp_setup_update(void) {
         int handled = 0;
         for (p = 0; p < n; p++)
             if (s_mp_join_device[p] == 0 &&
-                (s_mp_setup_sub[p] == 1 || s_mp_setup_sub[p] == 3)) {
+                (s_mp_setup_sub[p] == 1 || s_mp_setup_sub[p] == 3 ||
+                 s_mp_setup_sub[p] == 4)) {
+                if (s_mp_setup_sub[p] == 4) td5_sound_stop_horn_preview();
                 s_mp_setup_sub[p] = 0; s_mp_rep_ms[p] = 0; handled = 1;
             }
         if (!handled) want_back = 1;
@@ -5601,7 +5739,11 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
                 float ay  = py + 22.0f;
                 float bsy = ay + 4.0f;
                 float room = (py + pane_h - 12.0f) - bsy;
-                float bh = room / 6.0f - 3.0f;       /* 6 slots: NAME/COLOUR/PROFILE/TRANS/ASSIST/OK */
+                /* [SELECTABLE HORNS] 7 slots now: NAME/COLOUR/PROFILE/TRANS/
+                 * ASSIST/HORN/OK. This divisor MUST equal the `slots` count in
+                 * frontend_mp_setup_render's band or the PROFILE chip drifts off
+                 * the row it is supposed to sit on. */
+                float bh = room / 7.0f - 3.0f;
                 float bx = px + 8.0f, bw = pane_w - 16.0f;
                 float yy;
                 int focus = (s_mp_setup_btn[p] == MP_SET_PROFILE);
@@ -5634,6 +5776,86 @@ void frontend_mp_setup_profile_render(float sx, float sy) {
             }
 
             /* (b) open profile panel. */
+            /* [SELECTABLE HORNS] (a2) three-tab horn picker. Same panel frame,
+             * header and list geometry as the PROFILE panel below, so the two
+             * overlays read as the same widget with different contents. The
+             * tab strip reuses the action-row look (highlighted segment). */
+            if (sub == 4) {
+                static const char *const k_horn_tabs[TD5_HORN_CAT_COUNT] = {
+                    "TD5", "TD6", "MEMES"
+                };
+                float panx = px + 6.0f, pany = py + 22.0f;
+                float panw = pane_w - 12.0f, panh = pane_h - 28.0f;
+                int tab = s_mp_horn_tab[p];
+                int cnt, i, max_rows, start, list_top;
+
+                if (tab < 0 || tab >= TD5_HORN_CAT_COUNT) tab = 0;
+                cnt = td5_horns_count((TD5_HornCat)tab);
+
+                td5_vui_quad(panx * sx, pany * sy, panw * sx, panh * sy, 0xE00C0C16u, -1, 0, 0, 1, 1);
+                td5_vui_quad(panx * sx, pany * sy, panw * sx, 2.0f * sy, rgb | 0xFF000000u, -1, 0, 0, 1, 1);
+                mp_pos_small_centered(cx * sx, (pany + 3.0f) * sy, TR("HORN"), 0xFFFFE060u, sx, sy);
+
+                /* tab strip: TD5 / TD6 / MEMES */
+                {
+                    float ar_y = pany + 16.0f;
+                    float seg  = panw / (float)TD5_HORN_CAT_COUNT;
+                    int a;
+                    for (a = 0; a < TD5_HORN_CAT_COUNT; a++) {
+                        float axp = panx + seg * (float)a;
+                        int on = (tab == a);
+                        td5_vui_quad((axp + 1) * sx, ar_y * sy, (seg - 2) * sx, 13.0f * sy,
+                                     on ? 0xD0FFCC33u : 0x60303848u, -1, 0, 0, 1, 1);
+                        mp_pos_small_centered((axp + seg * 0.5f) * sx, (ar_y + 2.0f) * sy,
+                                              td5_tr(k_horn_tabs[a]),
+                                              on ? 0xFF101010u : 0xFFD0D0D0u, sx, sy);
+                    }
+                }
+
+                list_top = (int)(pany + 33.0f);
+                max_rows = (int)((panh - 33.0f - 10.0f) / 11.0f);
+                if (max_rows < 1) max_rows = 1;
+
+                if (cnt <= 0) {
+                    /* An empty MEMES tab is the normal first-run state, so say
+                     * where the files go instead of just "none". */
+                    mp_pos_small_centered(cx * sx, (float)list_top * sy,
+                                          (tab == TD5_HORN_CAT_MEME)
+                                              ? TR("DROP .WAV IN horns/memes")
+                                              : TR("NONE"),
+                                          0xFF909090u, sx, sy);
+                } else {
+                    start = 0;
+                    if (s_mp_horn_sel[p] >= max_rows) start = s_mp_horn_sel[p] - max_rows + 1;
+                    for (i = 0; i < max_rows && (start + i) < cnt; i++) {
+                        const TD5_HornEntry *h = td5_horns_get((TD5_HornCat)tab, start + i);
+                        float ry = (float)list_top + (float)i * 11.0f;
+                        int on  = ((start + i) == s_mp_horn_sel[p]);
+                        int cur = (h && strcmp(h->id, s_mp_player_horn[p]) == 0);
+                        char row[48];
+                        if (!h) continue;
+                        if (on) {
+                            td5_vui_quad((panx + 2.0f) * sx, (ry - 1.0f) * sy,
+                                         (panw - 4.0f) * sx, 11.0f * sy,
+                                         0x80FFCC33u, -1, 0, 0, 1, 1);
+                        }
+                        /* Leading mark on the player's CURRENT horn, so the
+                         * committed choice stays visible while the cursor is
+                         * somewhere else in the list. */
+                        /* Catalogue labels are English keys; meme labels come
+                         * from user filenames and simply pass through. */
+                        snprintf(row, sizeof row, "%s%s", cur ? "* " : "  ",
+                                 td5_tr(h->label));
+                        mp_pos_small_centered(cx * sx, ry * sy, row,
+                                              on ? 0xFF101010u : (cur ? 0xFFFFE060u : 0xFFD0D0D0u),
+                                              sx, sy);
+                    }
+                }
+
+                mp_pos_small_centered(cx * sx, (pany + panh - 10.0f) * sy,
+                                      TR("A=PICK  X=DEFAULT  B=BACK"), 0xFFFFE060u, sx, sy);
+            }
+
             if (sub == 3) {
                 float panx = px + 6.0f, pany = py + 22.0f;
                 float panw = pane_w - 12.0f, panh = pane_h - 28.0f;

@@ -623,6 +623,10 @@ int td5_sound_init_race_resources(void)
     memset(s_tracked_audio_state, 0, sizeof(s_tracked_audio_state));
     memset(s_horn_state, 0, sizeof(s_horn_state));
     memset(s_reverb_flag, 0, sizeof(s_reverb_flag));
+    /* [SELECTABLE HORNS] The frontend preview borrows a vehicle horn slot, so
+     * cut it here: a race with fewer than 6 cars never reloads that slot, and
+     * the preview buffer would otherwise survive into the race. */
+    td5_sound_stop_horn_preview();
     memset(s_listener_pos, 0, sizeof(s_listener_pos));
     memset(s_listener_prev_pos, 0, sizeof(s_listener_prev_pos));
     memset(s_listener_vel, 0, sizeof(s_listener_vel));
@@ -1262,6 +1266,138 @@ void td5_sound_play_horn(int actor_index)
     s_horn_state[voice * 2 + 1] = 1;  /* viewport pass 1 */
     TD5_LOG_I(LOG_TAG, "horn honk: racer=%d voice=%d (Horn.wav slot=%d)",
               actor_index, voice, voice * 3 + 2);
+}
+
+/* ========================================================================
+ * [SELECTABLE HORNS — PORT ENHANCEMENT] Per-player horn override + preview
+ * ======================================================================== */
+
+/**
+ * td5_sound_override_horn.
+ *
+ * Replace ONLY the horn slot of an already-loaded vehicle bank, so a racer can
+ * sound a horn that its car archive does not ship (see td5_horns.h). Mirrors
+ * the load td5_sound_load_vehicle_bank does for "Horn.wav" at the same slot and
+ * with the same flags (one-shot, 2 duplicates), so everything downstream --
+ * the mixer's distance attenuation, the honk state machine, the voice pool --
+ * is untouched and cannot tell the difference.
+ *
+ * Call AFTER the bank load for that vehicle, never before: the bank load would
+ * overwrite the override with the car's own horn.
+ */
+int td5_sound_override_horn(int vehicle_index, const char *wav, const char *zip)
+{
+    int slot;
+    int buf;
+
+    if (vehicle_index < 0 || vehicle_index >= TD5_SOUND_MAX_RACE_VEHICLES) return 0;
+    if (!wav || !wav[0] || !zip || !zip[0]) return 0;
+
+    slot = vehicle_index * TD5_SOUND_CHANNELS_PER_VEHICLE + 2;
+
+    /* Release the car's own horn buffer first. The loader overwrites the slot's
+     * buffer id without freeing it, so skipping this would strand one audio
+     * buffer per overridden racer per race. */
+    slot_stop(slot);
+    {
+        int old = s_slot_to_buffer[slot];
+        if (old >= 0) {
+            td5_plat_audio_free(old);
+            s_slot_to_buffer[slot] = -1;
+            if (slot + TD5_SOUND_DUP_OFFSET < TD5_SOUND_TOTAL_SLOTS)
+                s_slot_to_buffer[slot + TD5_SOUND_DUP_OFFSET] = -1;
+        }
+    }
+
+    buf = sound_load_wav_from_zip(wav, zip, slot, 0, 2);
+    if (buf < 0) {
+        /* The car's own horn was already released above, so the slot is empty
+         * and this racer would honk silently. Returning 0 tells the caller to
+         * reload the car's bank horn; it is the one that still has the path. */
+        TD5_LOG_W(LOG_TAG, "horn override failed: veh=%d wav=%s zip=%s (slot now empty)",
+                  vehicle_index, wav, zip);
+        return 0;
+    }
+
+    TD5_LOG_I(LOG_TAG, "horn override: veh=%d slot=%d wav=%s zip=%s",
+              vehicle_index, slot, wav, zip);
+    return 1;
+}
+
+/* Frontend horn preview.
+ *
+ * The picker lives in the multiplayer setup screens, where no race vehicle bank
+ * is loaded, so the preview borrows a vehicle horn slot instead of claiming a
+ * 45th slot the platform layer does not have. This is the same trick the
+ * frontend SFX table already plays with slots 1..10. Anything the preview
+ * leaves behind is overwritten by td5_sound_load_vehicle_bank when a race
+ * starts, and td5_sound_stop_horn_preview() is the explicit cleanup.
+ */
+#define TD5_SOUND_HORN_PREVIEW_SLOT (5 * TD5_SOUND_CHANNELS_PER_VEHICLE + 2) /* 17 */
+
+static int      s_horn_preview_buf   = -1;
+static uint32_t s_horn_preview_until = 0;
+static int      s_horn_preview_armed = 0;
+
+/* TD5RE_HORN_PREVIEW_MS (default 1000): minimum gap between two previews. 0
+ * disables the limiter, which is how an A/B run tells "the limiter swallowed
+ * it" apart from "the sound failed to load". */
+static int horn_preview_window_ms(void)
+{
+    static int s_ms = -1;
+    if (s_ms < 0) s_ms = td5_env_int("TD5RE_HORN_PREVIEW_MS", 1000, 0, 10000);
+    return s_ms;
+}
+
+void td5_sound_stop_horn_preview(void)
+{
+    if (!s_horn_preview_armed) return;
+    slot_stop(TD5_SOUND_HORN_PREVIEW_SLOT);
+    if (s_horn_preview_buf >= 0) {
+        td5_plat_audio_free(s_horn_preview_buf);
+        s_horn_preview_buf = -1;
+    }
+    s_slot_to_buffer[TD5_SOUND_HORN_PREVIEW_SLOT] = -1;
+    if (TD5_SOUND_HORN_PREVIEW_SLOT + TD5_SOUND_DUP_OFFSET < TD5_SOUND_TOTAL_SLOTS)
+        s_slot_to_buffer[TD5_SOUND_HORN_PREVIEW_SLOT + TD5_SOUND_DUP_OFFSET] = -1;
+    s_horn_preview_armed = 0;
+}
+
+int td5_sound_preview_horn(const char *wav, const char *zip)
+{
+    uint32_t now;
+    int      window;
+    int      buf;
+
+    if (!wav || !wav[0] || !zip || !zip[0]) return 0;
+
+    now    = td5_plat_time_ms();
+    window = horn_preview_window_ms();
+
+    /* Rate limit. Signed difference so the comparison survives the 32-bit
+     * millisecond wrap (~49 days) instead of locking the preview out. */
+    if (window > 0 && s_horn_preview_armed &&
+        (int32_t)(now - s_horn_preview_until) < 0) {
+        return 0;
+    }
+
+    /* One preview at a time: cut and release the previous sample before the
+     * next one loads, so two horns can never overlap on the shared slot. */
+    td5_sound_stop_horn_preview();
+
+    buf = sound_load_wav_from_zip(wav, zip, TD5_SOUND_HORN_PREVIEW_SLOT, 0, 0);
+    if (buf < 0) {
+        TD5_LOG_W(LOG_TAG, "horn preview load failed: wav=%s zip=%s", wav, zip);
+        return 0;
+    }
+
+    s_horn_preview_buf   = buf;
+    s_horn_preview_armed = 1;
+    s_horn_preview_until = now + (uint32_t)window;
+    slot_play(TD5_SOUND_HORN_PREVIEW_SLOT, 0, 0x7F, 0, TD5_SOUND_FREQ_22050);
+    TD5_LOG_I(LOG_TAG, "horn preview: wav=%s zip=%s slot=%d window=%dms",
+              wav, zip, TD5_SOUND_HORN_PREVIEW_SLOT, window);
+    return 1;
 }
 
 /* ========================================================================

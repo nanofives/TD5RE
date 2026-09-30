@@ -118,4 +118,10 @@ int  frontend_mp_human_count(void);
 void frontend_mp_ai_players_reset(void);
 #endif
 
+/* [SELECTABLE HORNS] Horn catalogue id chosen by local player `player`, or ""
+ * when they never picked one (= use the car's own horn). Exposed so the race
+ * setup in td5_game.c can apply the choice without reaching into the
+ * frontend's internal per-player arrays. Never returns NULL. */
+const char *td5_frontend_player_horn(int player);
+
 #endif /* TD5_FRONTEND_H */

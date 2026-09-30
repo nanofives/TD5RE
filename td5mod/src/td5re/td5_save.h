@@ -337,6 +337,11 @@ typedef struct TD5_Profile {
     int  paint;        /* car paint/variant index */
     int  color;        /* car colour index (if distinct from paint) */
     int  trans;        /* transmission/auto pref (0/1) */
+    /* [SELECTABLE HORNS] catalogue id of the chosen horn (see td5_horns.h), or
+     * "" for "use whatever horn the car ships". An id, not an index, so adding
+     * or reordering catalogue entries cannot repoint a saved choice at a
+     * different sound; an id that no longer resolves degrades to "". */
+    char horn[32];
 } TD5_Profile;
 #define TD5_MAX_PROFILES 16
 

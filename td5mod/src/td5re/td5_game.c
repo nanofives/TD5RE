@@ -39,6 +39,7 @@
 #include "td5_camera.h"
 #include "td5_pick.h"   /* dev free-cam geometry picker */
 #include "td5_frontend.h"
+#include "td5_horns.h"   /* [SELECTABLE HORNS] per-player horn catalogue */
 #include "td5_laneassist.h"   /* seed each human's lane-assist enable at race start */
 #include "td5_hud.h"
 #include "td5re.h"
@@ -3517,6 +3518,37 @@ static void init_race_level_and_assets(void)
                                   "engine voice pool full at %d; remaining "
                                   "racers get voices by proximity",
                                   td5_sound_voice_pool_size());
+                    }
+                }
+
+                /* [SELECTABLE HORNS] Swap in this local player's chosen horn,
+                 * replacing the "Horn.wav" the bank load just put in slot
+                 * i*3+2. Must run AFTER the bank load or it would be undone.
+                 *
+                 * Racer slot i is local player i for i < num_human_players:
+                 * the MP setup commits player p's picks to racer slot p. That
+                 * is the SLOT mapping, not the pane->camera mapping, which is
+                 * a separate table -- do not substitute one for the other.
+                 * The log line below names both so a wrong-horn report can be
+                 * traced without a rebuild. */
+                if (is_human && i < g_td5.num_human_players) {
+                    const char *horn_id = td5_frontend_player_horn(i);
+                    const TD5_HornEntry *h = td5_horns_find(horn_id, NULL, NULL);
+                    if (h) {
+                        if (td5_sound_override_horn(i, h->wav, h->zip)) {
+                            TD5_LOG_I(LOG_TAG,
+                                      "horn: racer slot=%d player=%d id=%s (%s)",
+                                      i, i, h->id, h->label);
+                        } else {
+                            /* The override released the car's horn before it
+                             * failed, so put the car's own back rather than
+                             * leave this racer with a silent horn. */
+                            td5_sound_override_horn(i, "Horn.wav", car_zip);
+                            TD5_LOG_W(LOG_TAG,
+                                      "horn: racer slot=%d player=%d id=%s failed, "
+                                      "restored car horn from %s",
+                                      i, i, h->id, car_zip);
+                        }
                     }
                 }
             }

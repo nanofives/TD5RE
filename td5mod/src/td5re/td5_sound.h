@@ -108,6 +108,22 @@ int  td5_sound_cop_siren_is_on(int slot);  /* query ONE cop's siren state (arres
  * (previously dead) horn-playback block. Call on a horn-key press edge from a
  * non-cop car. actor_index is the race-vehicle slot 0..5. */
 void td5_sound_play_horn(int actor_index);
+/* [SELECTABLE HORNS — PORT ENHANCEMENT] Swap just the horn slot of a vehicle
+ * bank so a racer sounds a horn its car archive does not ship (see td5_horns.h).
+ * `vehicle_index` is the race-vehicle slot 0..5; `wav`/`zip` are an asset entry
+ * name and its companion archive path. MUST be called after the bank load for
+ * that vehicle. Returns 1 when the override took, 0 when it was rejected or the
+ * sound failed to load (the racer then keeps its car's own horn). */
+int  td5_sound_override_horn(int vehicle_index, const char *wav, const char *zip);
+/* Play a horn sample in the frontend, for the horn picker. Rate-limited to one
+ * sample per TD5RE_HORN_PREVIEW_MS (default 1000) and cut to a single shared
+ * slot, so two previews can neither overlap nor be spammed. Returns 1 if the
+ * sample started, 0 if it was swallowed by the limiter or failed to load --
+ * callers still commit the selection either way. */
+int  td5_sound_preview_horn(const char *wav, const char *zip);
+/* Cut any in-flight preview and release its buffer. Call when leaving the
+ * picker, changing screen, or starting a race. Safe to call when idle. */
+void td5_sound_stop_horn_preview(void);
 void td5_sound_update_audio_mix(void);
 /* Engine voice pool (PORT-ONLY). The mixer owns only
  * TD5_SOUND_MAX_RACE_VEHICLES * TD5_SOUND_CHANNELS_PER_VEHICLE slots before the

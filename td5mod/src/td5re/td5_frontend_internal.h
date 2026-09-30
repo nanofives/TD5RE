@@ -26,6 +26,7 @@
  * these modules' declarations living scattered through this shared header. */
 #include "td5_fe_carstats.h"
 #include "td5_fe_devscreens.h"
+#include "td5_horns.h"                    /* TD5_HORN_ID_MAX + horn catalogue */
 
 typedef struct { int width; int height; } BgGalImg;
 typedef struct { const char *label; int cols; int rows; } MpSplitLayout;
@@ -50,6 +51,8 @@ typedef struct {
     int  color[TD5_MAX_HUMAN_PLAYERS];       /* TD6 body colour (0xRRGGBB, -1 = none) */
     int  trans[TD5_MAX_HUMAN_PLAYERS];       /* 0 = Automatic, 1 = Manual */
     int  laneassist[TD5_MAX_HUMAN_PLAYERS];  /* 0 = off, 1 = lane assist on */
+    char horn[TD5_MAX_HUMAN_PLAYERS][TD5_HORN_ID_MAX]; /* [SELECTABLE HORNS] catalogue id,
+                                              * "" = the car's own horn */
     int  device[TD5_MAX_HUMAN_PLAYERS];      /* [per-device 2026-06-21] enumerated input
                                               * device (s_mp_join_device) that occupied this
                                               * slot, so a profile is restored to whatever
@@ -559,6 +562,10 @@ extern int      s_mp_pane_spec_car[TD5_MAX_HUMAN_PLAYERS];
 extern int      s_mp_pane_substate[TD5_MAX_HUMAN_PLAYERS];
 extern int      s_mp_player_trans[TD5_MAX_HUMAN_PLAYERS];
 extern int      s_mp_player_laneassist[TD5_MAX_HUMAN_PLAYERS];
+/* [SELECTABLE HORNS] Chosen horn catalogue id per local player, "" = the car's
+ * own horn. Mirrored into the profile store and the MP session like the other
+ * per-player picks. */
+extern char     s_mp_player_horn[TD5_MAX_HUMAN_PLAYERS][TD5_HORN_ID_MAX];
 extern int     s_score_insert_pos;
 extern int     s_score_insert_mask;  /* [TD5RE HS-MP] bitmask of ALL rows this run inserted */
 extern int  s_car_preview_next_surface;
@@ -758,6 +765,9 @@ enum { MP_SET_NAME = 0, MP_SET_COLOUR, MP_SET_OK, MP_SET_COUNT };
  * PROFILE and OK; defined here so both td5_fe_race.c and td5_frontend.c (render) see them. */
 #define MP_SET_TRANS      4
 #define MP_SET_LANEASSIST 5
+/* [SELECTABLE HORNS] HORN sits between LANE ASSIST and OK. Opening it swaps the
+ * pane into sub-state 4, the three-tab horn picker (see td5_horns.h). */
+#define MP_SET_HORN       6
 /* Shared per-player pane-button drawer (defined in td5_frontend.c). Exposed so the
  * PROFILE button drawn from td5_fe_race.c uses the IDENTICAL frame/label rendering
  * as its NAME/COLOUR/AUTO-MANUAL/ASSIST/OK siblings (was a drifting replica). */

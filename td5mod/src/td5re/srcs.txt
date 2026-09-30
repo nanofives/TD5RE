@@ -48,6 +48,7 @@ td5_asset.c
 td5_assetsrc.c
 td5_carbalance.c
 td5_customcar.c
+td5_horns.c
 deps/cjson/cJSON.c
 td5_inflate.c
 td5_save.c

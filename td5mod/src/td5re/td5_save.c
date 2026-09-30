@@ -2433,6 +2433,18 @@ static int cfgini_write_progress(void)
         cfgini_add(&w, "Profile%dPaint = %d\r\n", i, pr->paint);
         cfgini_add(&w, "Profile%dColor = %d\r\n", i, pr->color);
         cfgini_add(&w, "Profile%dTrans = %d\r\n", i, pr->trans);
+        /* [SELECTABLE HORNS] Same control-byte guard as the name above: the id
+         * is built from a user-supplied filename for meme horns, so it reaches
+         * this writer untrusted. Absent/empty means "the car's own horn". */
+        {
+            char hn[32];
+            memcpy(hn, pr->horn, sizeof(hn) - 1);
+            hn[sizeof(hn) - 1] = '\0';
+            for (int c = 0; c < (int)sizeof(hn) - 1; c++) {
+                if ((unsigned char)hn[c] < 0x20) { hn[c] = '\0'; break; }
+            }
+            cfgini_add(&w, "Profile%dHorn = %s\r\n", i, hn);
+        }
     }
     cfgini_add(&w, "\r\n");
 
@@ -2654,6 +2666,15 @@ static void profiles_read(void)
         snprintf(key, sizeof key, "Profile%dPaint", i);  pr->paint  = cfgini_get_i32(f, "Profiles", key, 0);
         snprintf(key, sizeof key, "Profile%dColor", i);  pr->color  = cfgini_get_i32(f, "Profiles", key, 0);
         snprintf(key, sizeof key, "Profile%dTrans", i);  pr->trans  = cfgini_get_i32(f, "Profiles", key, 0);
+        /* [SELECTABLE HORNS] Absent key -> "" -> the car's own horn, which is
+         * what every profile written before this field existed will read as. */
+        snprintf(key, sizeof key, "Profile%dHorn", i);
+        memset(pr->horn, 0, sizeof pr->horn);
+        if (td5_plat_ini_get_str(f, "Profiles", key, "", val, sizeof val) > 0) {
+            size_t hlen = strlen(val);
+            if (hlen > sizeof(pr->horn) - 1) hlen = sizeof(pr->horn) - 1;
+            memcpy(pr->horn, val, hlen);
+        }
         out++;
     }
     s_profile_count = out;

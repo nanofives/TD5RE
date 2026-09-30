@@ -32,6 +32,15 @@ static const TD5_ChangelogLine k_changelog_lines[] = {
     { CL_SECTION, "LAST 7 DAYS" },
     { CL_BLANK,   "" },
 
+    { CL_DATE,    "September 30 (horns)" },
+    { CL_ITEM,    "Each local player now picks their own horn in the" },
+    { CL_ITEM,    "  multiplayer profile panel: tabs for Test Drive 5" },
+    { CL_ITEM,    "  horns, Test Drive 6 horns and your own memes." },
+    { CL_ITEM,    "Drop .wav files in horns/memes to add your own." },
+    { CL_ITEM,    "The pick is saved with the profile and cannot be" },
+    { CL_ITEM,    "  spammed: it only sounds on confirm, once a second." },
+    { CL_BLANK,   "" },
+
     { CL_DATE,    "September 29 (traffic + cop chase)" },
     { CL_ITEM,    "No more crash on the first race after an update" },
     { CL_ITEM,    "  (shaders are now prebuilt for DirectX 12)." },

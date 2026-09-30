@@ -1967,7 +1967,11 @@ void frontend_mp_setup_render(float sx, float sy) {
              * (NAME, COLOUR, PROFILE, AUTO/MANUAL, ASSIST, OK) or 5 without (PROFILE
              * absent). PROFILE (slot 2) is drawn by frontend_mp_setup_profile_render;
              * its slot math (room/6) must match this band. */
-            int slots = pon ? 6 : 5;
+            /* [SELECTABLE HORNS] Band grew to 7 rows with profiles on (HORN sits
+             * between ASSIST and OK). bh is clamped to a 12px floor below, so on
+             * the smallest panes (3x3) the stack can outgrow its room -- that is
+             * the layout to check when adding another row. */
+            int slots = pon ? 7 : 5;
             int trans_slot = pon ? 3 : 2;           /* TRANS row index in the band */
             float bx = px + 8.0f, bw = pane_w - 16.0f;
             float bsy = ay + 4.0f;
@@ -1989,6 +1993,17 @@ void frontend_mp_setup_render(float sx, float sy) {
             yy += bh + 3.0f;
             mp_simul_draw_btn(bx, yy, bw, bh, s_mp_player_laneassist[p] ? TR("ASSIST ON") : TR("ASSIST OFF"),
                               focus == MP_SET_LANEASSIST, pcol, 0, NULL, -1, sx, sy);
+            /* [SELECTABLE HORNS] HORN only exists with profiles on -- its picker
+             * overlay lives in frontend_mp_setup_profile_render, which is gated
+             * on the same knob. Value column shows the chosen horn's label, or
+             * DEFAULT when the player has not picked one (= the car's own horn). */
+            if (pon) {
+                yy += bh + 3.0f;
+                mp_simul_draw_btn(bx, yy, bw, bh, TR("HORN"), focus == MP_SET_HORN, pcol, 0,
+                                  td5_tr(td5_horns_label_for(s_mp_player_horn[p],
+                                                             TR("DEFAULT"))),
+                                  -1, sx, sy);
+            }
             yy = bsy + (float)(slots - 1) * (bh + 3.0f);
             mp_simul_draw_btn(bx, yy, bw, bh, "OK", focus == MP_SET_OK, pcol, 0, NULL, -1, sx, sy);
         }

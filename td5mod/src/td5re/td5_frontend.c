@@ -332,6 +332,15 @@ int      s_mp_pane_overlay[TD5_MAX_HUMAN_PLAYERS];  /* cached TD6 body-paint ove
 int      s_mp_pane_btn[TD5_MAX_HUMAN_PLAYERS];      /* focused button per pane (MP_BTN_*) */
 int      s_mp_player_trans[TD5_MAX_HUMAN_PLAYERS];  /* 0 = Automatic, 1 = Manual */
 int      s_mp_player_laneassist[TD5_MAX_HUMAN_PLAYERS]; /* 0 = off, 1 = lane assist on */
+/* [SELECTABLE HORNS] Chosen horn catalogue id per local player; "" means the
+ * player never picked one, so the car's own horn is used (see td5_horns.h). */
+char     s_mp_player_horn[TD5_MAX_HUMAN_PLAYERS][TD5_HORN_ID_MAX];
+
+const char *td5_frontend_player_horn(int player)
+{
+    if (player < 0 || player >= TD5_MAX_HUMAN_PLAYERS) return "";
+    return s_mp_player_horn[player];
+}
 int      s_mp_pane_substate[TD5_MAX_HUMAN_PLAYERS]; /* 0 = car select, 1 = stats spec sheet */
 int      s_mp_host_menu_open = 0;   /* [HOST CAR OPTIONS] host-only set-all-cars modal up */
 int      s_mp_host_menu_sel  = 0;   /* [HOST CAR OPTIONS] highlighted MP_HOST_OPT_* */
@@ -529,6 +538,8 @@ void mp_session_save_player(int p) {
     s_mp_session.color[p]  = s_mp_player_color[p];
     s_mp_session.trans[p]  = s_mp_player_trans[p];
     s_mp_session.laneassist[p] = s_mp_player_laneassist[p];
+    memcpy(s_mp_session.horn[p], s_mp_player_horn[p], sizeof(s_mp_session.horn[p]));
+    s_mp_session.horn[p][sizeof(s_mp_session.horn[p]) - 1] = '\0';
     s_mp_session.device[p] = s_mp_join_device[p];   /* [per-device] key for restore */
 }
 
@@ -559,6 +570,8 @@ void mp_session_restore_player(int p) {
     s_mp_player_color[p]  = s_mp_session.color[p];
     s_mp_player_trans[p]  = s_mp_session.trans[p];
     s_mp_player_laneassist[p] = s_mp_session.laneassist[p];
+    memcpy(s_mp_player_horn[p], s_mp_session.horn[p], sizeof(s_mp_player_horn[p]));
+    s_mp_player_horn[p][sizeof(s_mp_player_horn[p]) - 1] = '\0';
 }
 
 /* [per-device 2026-06-21] Restore the stored profile for whatever device player
@@ -585,6 +598,8 @@ int mp_session_restore_player_for_device(int p) {
     s_mp_player_color[p]  = s_mp_session.color[k];
     s_mp_player_trans[p]  = s_mp_session.trans[k];
     s_mp_player_laneassist[p] = s_mp_session.laneassist[k];
+    memcpy(s_mp_player_horn[p], s_mp_session.horn[k], sizeof(s_mp_player_horn[p]));
+    s_mp_player_horn[p][sizeof(s_mp_player_horn[p]) - 1] = '\0';
     return 1;
 }
 
