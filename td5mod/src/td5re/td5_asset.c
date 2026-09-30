@@ -3872,7 +3872,8 @@ static unsigned char *td5_asset_paint_body_coords(const TD5_MeshHeader *mesh, in
 static int td5_asset_load_vehicle_skin_painted(int page, const char *skin_path,
                                                const char *mask_path, uint32_t paint,
                                                uint32_t paint2, int pattern,
-                                               const TD5_MeshHeader *mesh, int pattern_map)
+                                               const TD5_MeshHeader *mesh, int pattern_map,
+                                               const char *matmask_path)
 {
     void *spix = NULL, *mpix = NULL;
     int sw = 0, sh = 0, mw = 0, mh = 0;
@@ -3961,6 +3962,20 @@ static int td5_asset_load_vehicle_skin_painted(int page, const char *skin_path,
             s[i * 4 + 3] = 255;            /* keep opaque (mask alpha unused on GPU) */
         }
     }
+    /* [CAR REFL] Optional per-texel material id in the alpha channel — same
+     * contract as td5_asset_load_vehicle_skin_matid, applied AFTER the paint
+     * loop (which writes alpha 255 everywhere). Absent path = unchanged. */
+    if (matmask_path && !pattern_map) {
+        void *mm = NULL; int mmw = 0, mmh = 0;
+        if (td5_asset_decode_png_rgba32(matmask_path, &mm, &mmw, &mmh)) {
+            if (mmw == sw && mmh == sh) {
+                const unsigned char *mp = (const unsigned char *)mm;
+                for (int i = 0; i < sw * sh; i++)
+                    s[i * 4 + 3] = mp[i * 4 + 0];
+            }
+            stbi_image_free(mm);
+        }
+    }
     int ok = td5_plat_render_upload_texture(page, spix, sw, sh, 2);
     stbi_image_free(spix); stbi_image_free(mpix);
     free(mc);
@@ -3988,6 +4003,55 @@ static uint32_t td5_asset_pick_ai_td6_color(int car_index, int slot, int variant
     return k_ai_td6_palette[h % (unsigned)n];
 }
 
+/* Roster car index -> its archive path (built-in table, drop-in custom car at
+ * 76+, or the numeric fallback). Slot-specific overrides (the TD6 player-car
+ * test hook) stay with the caller. Returns the custom-car path, or NULL, so the
+ * caller can log it. */
+static const char *td5_asset_car_archive_path(int car_index, char *out, size_t out_size)
+{
+    const int builtin = (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0]));
+    const char *custom = (car_index >= builtin) ? td5_customcar_zip_path(car_index - builtin) : NULL;
+    if (car_index >= 0 && car_index < builtin)
+        snprintf(out, out_size, "%s", s_car_zip_paths[car_index]);
+    else if (custom)
+        snprintf(out, out_size, "%s", custom);
+    else
+        snprintf(out, out_size, "cars/car%02d.zip", car_index);
+    return custom;
+}
+
+/* [TD5 CAR PAINT 2026-09-29] True when this car ships an OFFLINE PAINT BAKE:
+ * a carmask.png (which texels are the primary body) plus a carskinpaint0.png
+ * (the same skin with that body neutralised to greyscale), both produced by
+ * re/tools/bake_td5_car_paint.py from the four pre-painted carskins. Those two
+ * together are what let an original TD5 car take the free colour picker the
+ * ported TD6 cars use: multiply the masked body by the chosen colour and every
+ * other texel — glass, lights, stripes, badges, a second body colour — keeps
+ * the art it shipped with.
+ *
+ * A ported TD6 car ships carmask.png but no carskinpaint0.png (its body is
+ * already grey), so it answers 0 here and keeps its own existing path.
+ *
+ * Cached: this is called from frontend draw code every frame. */
+int td5_asset_car_paint_bake(int car_index)
+{
+    #define TD5_PAINT_BAKE_CACHE 128
+    static signed char cache[TD5_PAINT_BAKE_CACHE];   /* 0 unknown, 1 yes, -1 no */
+    char zip_path[256], tmp[256];
+    int result;
+    if (car_index < 0)
+        return 0;
+    if (car_index < TD5_PAINT_BAKE_CACHE && cache[car_index])
+        return cache[car_index] > 0;
+    td5_asset_car_archive_path(car_index, zip_path, sizeof(zip_path));
+    result = td5_asset_resolve_png_path("carmask.png", zip_path, tmp, sizeof(tmp)) &&
+             td5_asset_resolve_png_path("carskinpaint0.tga", zip_path, tmp, sizeof(tmp));
+    if (car_index < TD5_PAINT_BAKE_CACHE)
+        cache[car_index] = result ? 1 : -1;
+    return result;
+    #undef TD5_PAINT_BAKE_CACHE
+}
+
 int td5_asset_load_vehicle(int car_index, int slot, int paint)
 {
     char zip_path[256];
@@ -4003,20 +4067,11 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
         /* TD6-car test hook: force the player into a ported TD6 archive. */
         snprintf(zip_path, sizeof(zip_path), "cars/%s.zip", s_player_car_override);
         TD5_LOG_I(LOG_TAG, "vehicle slot=0: TD6 player override -> %s", zip_path);
-    } else if (car_index >= 0 &&
-               car_index < (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0]))) {
-        snprintf(zip_path, sizeof(zip_path), "%s", s_car_zip_paths[car_index]);
-    } else if (car_index >= (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0])) &&
-               td5_customcar_zip_path(car_index -
-                   (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0])))) {
-        /* Drop-in custom car (re/assets/cars/custom_<name>/) at roster slot 76+. */
-        const char *cz = td5_customcar_zip_path(car_index -
-                   (int)(sizeof(s_car_zip_paths) / sizeof(s_car_zip_paths[0])));
-        snprintf(zip_path, sizeof(zip_path), "%s", cz);
-        TD5_LOG_I(LOG_TAG, "vehicle slot=%d: custom car index=%d -> %s",
-                  slot, car_index, cz);
     } else {
-        snprintf(zip_path, sizeof(zip_path), "cars/car%02d.zip", car_index);
+        const char *custom = td5_asset_car_archive_path(car_index, zip_path, sizeof(zip_path));
+        if (custom)
+            TD5_LOG_I(LOG_TAG, "vehicle slot=%d: custom car index=%d -> %s",
+                      slot, car_index, custom);
     }
 
     /* --- Load himodel.dat ------------------------------------------------ */
@@ -4128,12 +4183,22 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
                  * body. Non-TD6 cars have no carmask -> plain load with their own
                  * pre-painted carskinN. */
                 char png_mask[256];
+                /* [TD5 CAR PAINT 2026-09-29] An original TD5 car has no grey
+                 * body to tint — it ships four FINISHED paints. When the offline
+                 * baker produced one (carskinpaint0.png = the same skin with the
+                 * primary body neutralised to greyscale), paint THAT instead of
+                 * the pre-painted carskinN, and the very same mask multiply used
+                 * for TD6 cars applies. See td5_asset_car_paint_bake(). */
+                char png_neutral[256];
+                int  has_bake = td5_asset_resolve_png_path("carskinpaint0.tga", zip_path,
+                                                           png_neutral, sizeof(png_neutral));
+                const char *paint_src = has_bake ? png_neutral : png_skin;
                 /* [PAINT MODEL SPACE 2026-09-26] Booth pattern-map pass. */
                 const char *pb_pm = td5_render_photobooth_active() ? getenv("TD5RE_PB_PATTERN_MAP") : NULL;
                 if (pb_pm && pb_pm[0] == '1' && slot == 0 &&
                     td5_asset_resolve_png_path("carmask.png", zip_path, png_mask, sizeof(png_mask))) {
-                    skin_ok = td5_asset_load_vehicle_skin_painted(skin_page, png_skin, png_mask,
-                                                                 0xFFFFFFu, 0xFFFFFFu, 0, mesh, 1);
+                    skin_ok = td5_asset_load_vehicle_skin_painted(skin_page, paint_src, png_mask,
+                                                                 0xFFFFFFu, 0xFFFFFFu, 0, mesh, 1, NULL);
                     TD5_LOG_I(LOG_TAG, "vehicle slot=0: photobooth PATTERN MAP skin ok=%d", skin_ok);
                 } else
                 if (!td5_render_photobooth_active() &&
@@ -4153,10 +4218,25 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
                             paint_rgb2 = (uint32_t)s_human_td6_color2[slot] & 0x00FFFFFFu;
                             paint_pat  = s_human_td6_pattern[slot];
                         }
-                    } else if (slot == 0) {
+                    } else if (slot == 0 && (!has_bake || g_td5.ini.paint_active)) {
                         paint_rgb  = (uint32_t)g_td5.ini.td6_paint_color  & 0x00FFFFFFu;
                         paint_rgb2 = (uint32_t)g_td5.ini.td6_paint_color2 & 0x00FFFFFFu;
                         paint_pat  = g_td5.ini.td6_paint_pattern;
+                    } else if (has_bake) {
+                        /* A TD5 car with a bake repaints ONLY on a colour the
+                         * player actually chose: an explicit per-slot override
+                         * (multiplayer pane / profile accent), or slot 0 once
+                         * [CarSelection] PaintActive is set. Two reasons not to
+                         * fall through to the branches above:
+                         *   - the INI colour defaults to RED, not "unpainted",
+                         *     so slot 0 would repaint every such car before the
+                         *     player has touched the picker (hence PaintActive);
+                         *   - the hashed AI palette exists because every TD6
+                         *     carskin is the same grey art, which is not true
+                         *     here — it would throw away the four factory paints
+                         *     the game already picks between for opponents.
+                         * White = keep the factory carskin (see the gate below). */
+                        paint_rgb = 0x00FFFFFFu;
                     } else {
                         paint_rgb = td5_asset_pick_ai_td6_color(car_index, slot, paint);
                     }
@@ -4164,14 +4244,25 @@ int td5_asset_load_vehicle(int car_index, int slot, int paint)
                      * OR a non-SOLID pattern with a distinct secondary. */
                     if (paint_rgb != 0x00FFFFFFu ||
                         (paint_pat != 0 && paint_rgb2 != paint_rgb)) {
-                        skin_ok = td5_asset_load_vehicle_skin_painted(skin_page, png_skin,
+                        /* [CAR REFL] Painted TD5 cars keep their per-texel
+                         * material ids (mirror glass, matte lights); without
+                         * this the paint path would flatten the skin alpha and
+                         * a repainted car would reflect differently from the
+                         * same car unpainted. */
+                        char png_matmask[256];
+                        const char *matmask =
+                            (has_bake && td5_asset_resolve_png_path("carmatmask0.png", zip_path,
+                                                                    png_matmask, sizeof(png_matmask)))
+                            ? png_matmask : NULL;
+                        skin_ok = td5_asset_load_vehicle_skin_painted(skin_page, paint_src,
                                                                      png_mask, paint_rgb,
                                                                      paint_rgb2, paint_pat,
-                                                                     mesh, 0);
+                                                                     mesh, 0, matmask);
                         if (skin_ok)
                             TD5_LOG_I(LOG_TAG,
-                                      "vehicle slot=%d: TD6 body painted %06X/%06X pat=%d (mask)",
-                                      slot, paint_rgb, paint_rgb2, paint_pat);
+                                      "vehicle slot=%d: %s body painted %06X/%06X pat=%d (mask)",
+                                      slot, has_bake ? "TD5" : "TD6",
+                                      paint_rgb, paint_rgb2, paint_pat);
                     }
                 }
                 if (!skin_ok) {

@@ -515,6 +515,7 @@ void td5_ini_persist_options(void)
     td5_ini_write_int("CarSelection", "TD6PaintColor",   g_td5.ini.td6_paint_color);
     td5_ini_write_int("CarSelection", "TD6PaintColor2",  g_td5.ini.td6_paint_color2);
     td5_ini_write_int("CarSelection", "TD6PaintPattern", g_td5.ini.td6_paint_pattern);
+    td5_ini_write_int("CarSelection", "PaintActive",     g_td5.ini.paint_active);
 
     td5_plat_log(TD5_LOG_INFO, "main",
                  "td5re.ini options persisted (in-game change write-back): "
@@ -1421,6 +1422,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* 4 patterns: SOLID/TWO-TONE/STRIPES/SPLIT (TD6_PAT_* in td5_frontend_internal.h). */
     if (g_td5.ini.td6_paint_pattern < 0 || g_td5.ini.td6_paint_pattern > 3)
         g_td5.ini.td6_paint_pattern = 0;
+    /* [TD5 CAR PAINT 2026-09-29] Has the player ever confirmed a colour? */
+    g_td5.ini.paint_active =
+        td5_ini_int("CarSelection", "PaintActive", 0) ? 1 : 0;
 
     /* Photo-booth: [Game] PhotoBoothCar=<code> boots the race with that car as
      * the player and renders ONLY the (grayscale) car over a chroma background,

@@ -540,8 +540,9 @@ void frontend_init_race_schedule(void) {
             s_selected_car  = s_mp_player_car[0];
             g_td5.car_index = s_mp_player_car[0];
         }
-        /* Each human slot is painted with that player's chosen TD6 colour (no-op
-         * for TD5 cars, which have no carmask). -1 = leave the default. */
+        /* Each human slot is painted with that player's chosen colour — ported
+         * TD6 cars, and [TD5 CAR PAINT 2026-09-29] original cars that have a
+         * paint bake. No-op for a car with neither. -1 = leave the default. */
         td5_asset_set_human_td6_color(0, s_mp_player_color[0]);
         td5_hud_set_player_identity(0, s_mp_player_name[0], (uint32_t)s_mp_player_accent[0]);
         for (i = 1; i < eff_humans && i < TD5_MAX_RACER_SLOTS; i++) {
@@ -1193,7 +1194,6 @@ static int mp_carsel_two_col(float pane_w, float pane_h) {
 static void mp_simul_draw_pane_car(int p, float ax, float ay, float aw, float ah,
                                    float sx, float sy) {
     int car = s_mp_player_car[p];
-    int td6 = frontend_car_is_td6(car);
     float ar = 408.0f / 280.0f;
     float dw = aw, dh = aw / ar, dx, dy;
     if (dh > ah) { dh = ah; dw = ah * ar; }
@@ -1201,7 +1201,8 @@ static void mp_simul_draw_pane_car(int p, float ax, float ay, float aw, float ah
     dy = ay + (ah - dh) * 0.5f;
     if (s_mp_pane_preview[p] > 0)
         fe_draw_surface_rect(s_mp_pane_preview[p], dx * sx, dy * sy, dw * sx, dh * sy, 0xFFFFFFFF);
-    if (td6 && frontend_car_paintable(car) && s_mp_pane_overlay[p] > 0)
+    if (frontend_paint_overlay_visible(car, (uint32_t)s_mp_player_color[p]) &&
+        s_mp_pane_overlay[p] > 0)
         fe_draw_surface_rect(s_mp_pane_overlay[p], dx * sx, dy * sy, dw * sx, dh * sy,
                              frontend_rgb_to_bgra((uint32_t)s_mp_player_color[p]));
 }
@@ -1216,7 +1217,6 @@ static void mp_simul_draw_pane_car(int p, float ax, float ay, float aw, float ah
 static void mp_simul_draw_pane_button(int p, int which, float bx, float by,
                                       float bw, float bh, float sx, float sy) {
     int car = s_mp_player_car[p];
-    int td6 = frontend_car_is_td6(car);
     int focus = (s_mp_pane_btn[p] == which);
     uint32_t pcol = ((uint32_t)s_mp_player_accent[p] & 0x00FFFFFFu) | 0xFF000000u;
     switch (which) {
@@ -1224,10 +1224,13 @@ static void mp_simul_draw_pane_button(int p, int which, float bx, float by,
         mp_simul_draw_btn(bx, by, bw, bh, TR("CAR"), focus, pcol, 1, NULL, -1, sx, sy);
         break;
     case MP_BTN_PAINT:
-        if (td6 && frontend_car_paintable(car))
+        /* Colour swatch for any car with the free picker (ported TD6, or an
+         * original car with a paint bake); ◄► arrows for the four fixed schemes;
+         * "-" when the car has no paint choice at all. */
+        if (frontend_car_paintable(car))
             mp_simul_draw_btn(bx, by, bw, bh, TR("PAINT"), focus, pcol, 1, NULL,
                               s_mp_player_color[p], sx, sy);
-        else if (!td6 && frontend_car_has_paint(car))
+        else if (frontend_car_has_paint(car))
             mp_simul_draw_btn(bx, by, bw, bh, TR("PAINT"), focus, pcol, 1, NULL, -1, sx, sy);
         else
             mp_simul_draw_btn(bx, by, bw, bh, TR("PAINT"), focus, pcol, 0, "-", -1, sx, sy);
