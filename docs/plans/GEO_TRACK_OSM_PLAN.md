@@ -633,28 +633,22 @@ Follow-ups done 2026-09-30 (before merge):
   (`route_graph_bbox`), so re-routing a saved A/B over the wider re-fetch gives
   the same route (La Plata 1492 spans before and after; was 1200).
 
-Still open:
-- Plaza lawn texture is stretched along long strips (UVs follow the outline).
-- ~~`TD5RE_AUTOTRACK_STREAM=0` with REUSE at its default produced one build with
-  no TEXTURES.DAT in level090.zip and no scenery.~~ **Root-caused 2026-09-30: not
-  STREAM, not REUSE.** It was the R22 SCENERY presence roll, which is OFF on 12%
-  of seeds (`k_tgr_w_scarce`), and an OFF SCENERY deletes MODELS.DAT and
-  TEXTURES.DAT by design. The harness never saw it because it pins seed
-  20260901 (SCENERY ON). Repro: La Plata, seed 20260902, STREAM=0 -> the same
-  engine.log line; the same seed through the GENSTAMP reuse path and through
-  STREAM=0/REUSE=0 behaves identically. Fix: on a geo track (TD5RE_GEO_PLACE or
-  TD5RE_GEO_ROUTE set) the resolver holds the rows that describe the real place
-  ON (SCENERY, TERRAIN, BACKDROP, COASTLINE, BRIDGES, TUNNELS, DISTRICTS,
-  BUILDING MASS, CROSSINGS, SIDE STREETS, ROAD MARKS, INTERSECTIONS, SIDEWALKS)
-  and SNOW OFF, human pins excepted, logged as `HELD by the real place (GEO)`.
-  Seed 20260902 now builds 373 meshes; seed 20260901 is byte-identical to
-  before (MODELS `50C8E8FC902D4BAA`); synthetic seed 20260901 byte-identical.
-- Landmark prefab fallback and roof:shape only exercised on 2 buildings.
+Still open at the 6f merge, all closed 2026-09-30:
+- Plaza lawn texture stretched along long strips: closed in 6g (the hedge and
+  beds were what stretched, not the lawn).
+- Landmark prefab fallback and roof:shape only exercised on 2 buildings:
+  closed in 6g (20-building fixture, six defects fixed).
 - `TD5RE_AUTOTRACK_STREAM=0` with REUSE at its default produced one build with
-  no TEXTURES.DAT in level090.zip and no scenery; the default streamed path and
-  the harness (STREAM=0 + REUSE=0) are fine. Dev-only combination, not chased.
-
-(Plaza UV stretch and the landmark coverage were closed in 6g below.)
+  no TEXTURES.DAT in level090.zip and no scenery. **Not STREAM, not REUSE.** It
+  was the R22 SCENERY presence roll, OFF on 12% of seeds (`k_tgr_w_scarce`),
+  and an OFF SCENERY deletes MODELS.DAT and TEXTURES.DAT by design. The harness
+  never saw it because it pins seed 20260901 (SCENERY ON). Repro: La Plata,
+  seed 20260902. Fix: on a geo track (TD5RE_GEO_PLACE or TD5RE_GEO_ROUTE set)
+  the resolver holds the rows that describe the real place ON (SCENERY,
+  TERRAIN, BACKDROP, COASTLINE, BRIDGES, TUNNELS, DISTRICTS, BUILDING MASS,
+  CROSSINGS, SIDE STREETS, ROAD MARKS, INTERSECTIONS, SIDEWALKS) and SNOW OFF,
+  human pins excepted, logged as `HELD by the real place (GEO)`. Seed 20260902
+  now builds 373 meshes; seed 20260901 and synthetic builds byte-identical.
 
 ## 6g. Plaza texel density and landmark coverage, closed 2026-09-30
 
@@ -851,7 +845,7 @@ Two changes, because the data is in two places:
 | on-road guard | 2 city rejects at spans 339 and 571, unchanged; 0 geo meshes rejected |
 | structure lint | OK (warnings 83 against a baseline of 84) |
 
-## 6g. La Plata driven end to end (item 10, 2026-09-30)
+## 6h. La Plata driven end to end (item 10, 2026-09-30)
 
 Automated: `verify/xspan_run.ps1 -Route re/assets/geo/la_plata/ROUTE.JSON
 -Extra @{TD5RE_GEO_PLACE='la_plata'}`, 5 AI racers, RaceTrace on every slot,
@@ -884,7 +878,7 @@ dropped on these numbers: a slower car cuts the same apex and pins harder.
 Shipped tracks: Moscow and TD6 run the unchanged path (the gate needs the auto
 slot and a geo route) and were A/B'd tick by tick against the master exe.
 
-## 6g. Phase 4 finished 2026-09-30 (fork candidates, layer vintage, caps)
+## 6i. Phase 4 finished 2026-09-30 (fork candidates, layer vintage, caps)
 
 The three selector items left open at the end of 6e/6f. All offline: no fetch,
 no browser, no network.
